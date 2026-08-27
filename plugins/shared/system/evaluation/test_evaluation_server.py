@@ -292,10 +292,9 @@ class TestHttpHandleSingleAndErrors:
         assert status == 404
         assert body["error"] == "not found"
 
-    def test_on_load_and_registry_resource(self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """on_load 钩子 + 指标注册表资源暴露（manifest 声明面）。"""
+    def test_metric_registry_resource(self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """指标注册表资源暴露（内置四类型键面）。"""
         srv = _load_server_module(monkeypatch, metrics_root)
-        assert asyncio.run(srv._on_load({})) is None
         reg = srv._metric_registry_resource()
         assert {"file_check", "bash_check", "semantic_check", "human_review"} == set(reg["metrics"])
 

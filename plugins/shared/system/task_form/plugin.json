@@ -13,7 +13,35 @@
     "lifecycle_hooks": [
       "on_load"
     ],
-    "services": []
+    "services": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for task form (declaration + agents/projects options)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    ]
   },
   "permissions": {},
   "config_files": [

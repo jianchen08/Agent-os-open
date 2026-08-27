@@ -5,7 +5,8 @@
 1. GET /ext/task_form/form 返回 config/task_form.yaml 声明的字段（前端 fieldsUri 消费）
 2. GET /ext/task_form/options/agents 返回 {value:config_id,label:name}（含嵌套子目录）
 3. GET /ext/task_form/options/projects 返回登记行选项（共享 project_registry）
-4. 登记簿不可用时降级空列表（读面不崩）
+4. 登记簿真空（可读、无项目）→ 空列表且无提示；登记簿故障（模块缺失/实例化
+   失败）→ 空列表 + warning 提示字段（故障与真空可区分）
 5. 未匹配 path → 404
 
 唯一外部依赖是临时 config 目录（AGENTOS_PROJECT_ROOT 指向），不接真实内核/服务。
@@ -131,12 +132,50 @@ async def test_projects_options_from_registry(form_project: dict[str, Any]) -> N
 
 
 async def test_projects_options_empty_registry(form_project: dict[str, Any]) -> None:
-    """登记簿为空/不可用 → 降级空列表，不抛错。"""
+    """登记簿可读但真空 → 空列表且无提示字段（真空 ≠ 故障）。"""
     mod = _load_module()
     res = await mod.http_handle(path="/ext/task_form/options/projects", method="GET", query={})
     d = _resp_data(res)
     assert d["status"] == 200
     assert d["payload"]["data"] == []
+    assert "warning" not in d["payload"]
+
+
+async def test_projects_options_module_missing_warns(
+    form_project: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """project_registry 模块不可用 → 空列表 + warning 提示字段（故障不伪装成无项目）。"""
+    mod = _load_module()
+    monkeypatch.setitem(sys.modules, "project_registry", None)
+    res = await mod.http_handle(path="/ext/task_form/options/projects", method="GET", query={})
+    d = _resp_data(res)
+    assert d["status"] == 200
+    assert d["payload"]["data"] == []
+    warning = d["payload"].get("warning")
+    assert isinstance(warning, str)
+    assert "project_registry" in warning
+
+
+async def test_projects_options_registry_init_failure_warns(
+    form_project: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """登记簿实例化失败 → 同样落 warning 提示字段（与真空区分）。"""
+    mod = _load_module()
+
+    import project_registry as pr_mod
+
+    class BoomRegistry:
+        def __init__(self) -> None:
+            raise RuntimeError("registry backend down")
+
+    monkeypatch.setattr(pr_mod, "ProjectRegistry", BoomRegistry)
+    res = await mod.http_handle(path="/ext/task_form/options/projects", method="GET", query={})
+    d = _resp_data(res)
+    assert d["status"] == 200
+    assert d["payload"]["data"] == []
+    warning = d["payload"].get("warning")
+    assert isinstance(warning, str)
+    assert "project_registry" in warning
 
 
 async def test_unknown_path_404(form_project: dict[str, Any]) -> None:

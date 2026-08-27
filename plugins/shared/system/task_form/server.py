@@ -17,8 +17,6 @@ ToolExecutionResult{success,data}，data 为 HttpHandleResponse{status,headers,b
 
 from __future__ import annotations
 
-import base64
-import json
 import os
 import sys
 from pathlib import Path
@@ -30,11 +28,18 @@ from agentos_plugin_sdk import AgentOSPlugin
 
 plugin = AgentOSPlugin("task_form")
 
-# 共享层（project_registry）入 sys.path。
+# 共享层（http_json / project_registry）入 sys.path。
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 _SHARED_DIR = os.path.join(_PROJECT_ROOT, "plugins", "shared")
 if os.path.isdir(_SHARED_DIR):
     sys.path.insert(0, _SHARED_DIR)
+
+# http.handle 响应封装走公共实现（plugins/shared/http_json.py），调用点零改名。
+# noqa: E402 —— 共享层自举后才能导入。
+from http_json import (  # noqa: E402
+    json_response as _json_response,
+    ok as _ok,
+)
 
 # 表单声明 / 执行 Agent 配置根：与 manifest config_files.task_form.path 一致。
 _FORM_REL = os.path.join("config", "task_form.yaml")
@@ -55,28 +60,6 @@ def _project_root() -> str:
             break
         cur = parent
     return os.getcwd()
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """把任意 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
-    return {"success": True, "data": data}
-
-
-def _error(message: str, status: int = 503) -> dict[str, Any]:
-    """错误响应：{success:false, error, data}。data 携带 HTTP 状态给前端。"""
-    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
 
 
 def _load_form_fields() -> list[dict[str, Any]]:
@@ -118,23 +101,25 @@ def _agent_options() -> list[dict[str, Any]]:
     return out
 
 
-async def _project_options() -> list[dict[str, Any]]:
-    """共享 project_registry 登记行 → [{value:id, label:title}]。
+async def _project_options() -> tuple[list[dict[str, Any]], str | None]:
+    """共享 project_registry 登记行 → (选项列表, 降级原因)。
 
-    登记簿不可用/无项目返回空列表（读面降级不崩）。
+    登记簿可用（含真空——确实无项目）：(列表, None)；
+    登记簿故障（模块缺失/实例化失败）：([], 原因)——故障不伪装成"无项目"，
+    http_handle 在响应体补 warning 字段供前端提示；读面不崩。
     """
     try:
         from project_registry import ProjectRegistry  # noqa: PLC0415
-    except Exception:
-        return []
+    except Exception as exc:
+        return [], f"project_registry 模块不可用: {exc}"
     try:
         registry = ProjectRegistry()
-    except Exception:
-        return []
+    except Exception as exc:
+        return [], f"project_registry 初始化失败: {exc}"
     return [
         {"value": str(p.id), "label": str(p.title or p.id)}
         for p in registry.list()
-    ]
+    ], None
 
 
 @plugin.tool(
@@ -175,9 +160,14 @@ async def http_handle(
     if path == "/ext/task_form/options/agents" and method == "GET":
         return _ok(_json_response({"data": _agent_options()}))
 
-    # GET /ext/task_form/options/projects —— 项目选项（登记行，全局不过滤会话）
+    # GET /ext/task_form/options/projects —— 项目选项（登记行，全局不过滤会话）；
+    # 登记簿故障时 data 为空列表 + warning 提示字段（故障与真空可区分）
     if path == "/ext/task_form/options/projects" and method == "GET":
-        return _ok(_json_response({"data": await _project_options()}))
+        options, degrade_reason = await _project_options()
+        payload: dict[str, Any] = {"data": options}
+        if degrade_reason:
+            payload["warning"] = degrade_reason
+        return _ok(_json_response(payload))
 
     # 未匹配的 path
     return _ok(_json_response({"error": "not found", "path": path}, 404))

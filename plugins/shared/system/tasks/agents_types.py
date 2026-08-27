@@ -1,7 +1,4 @@
-"""AgentLevel 枚举——从 agents/types.py 扁平化复制。
-
-迁移适配：原 from agents.types import AgentLevel → from agents_types import AgentLevel
-"""
+"""AgentLevel 枚举——tasks 域自持的 agent 层级定义（主任务/子任务/原子任务）。"""
 from __future__ import annotations
 
 from enum import Enum

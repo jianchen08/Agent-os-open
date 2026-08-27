@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Task Service MCP 服务端——纯接口适配层。
 
-老代码从 0.1 src/tasks/ 原封不动复制到本目录（平铺），
-本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
-
-[来源: docs/working/module_migration_plan.md §4.1]
+tasks 域逻辑承载于 service.py（组合 _task_crud/_task_state/_task_cleanup
+混入）与 http_api（/ext/task_service/** HTTP 面）；本文件只做接口适配，
+把两者经 MCP SDK 暴露为工具与 http.handle 端点。
 """
 from __future__ import annotations
 

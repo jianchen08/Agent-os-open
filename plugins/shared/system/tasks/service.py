@@ -65,14 +65,13 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
         new_status: str,
     ) -> None:
         """通知所有注册的回调函数任务状态已变更，并通过 WebSocket 推送事件。"""
-        # DEBT: 原 src.core.logging.LogContext.bind 不可用（插件环境无 src/）。ceiling: 日志上下文不携带 task_id。upgrade: 当日志系统迁移完成后恢复绑定。
         logger.debug("state change: %s -> %s | task=%s", old_status, new_status, task_id[:12] if task_id else "")
 
         for cb in self._state_callbacks:
             try:
                 await cb(task_id, old_status, new_status)
             except Exception as exc:
-                logger.debug("state callback 执行失败: %s", exc)
+                logger.warning("state callback 执行失败（不影响状态转换主流程）: %s", exc)
 
         # 非阻塞推送 task_status_changed WebSocket 事件
         self._push_status_change_ws(task_id, old_status, new_status)

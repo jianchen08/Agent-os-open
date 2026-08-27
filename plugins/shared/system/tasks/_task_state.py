@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,30 @@ if TYPE_CHECKING:
     from task_types import TaskModel
 
 logger = logging.getLogger(__name__)
+
+# pipeline.registry 句柄缺失的进程级告警闩（warn-once，防每任务刷屏）。
+_ENGINE_REGISTRY_WARNED = False
+
+
+def _import_engine_registry() -> Callable[[], Any] | None:
+    """导入引擎注册表句柄工厂（pipeline.registry，外部注入模块，本仓无实现源）。
+
+    sidecar 形态下句柄常缺（0.2 引擎注册表由内核 Rust PipelineStateRegistry
+    承载）：首次缺失以 warning 留痕一次，之后静默返回 None；唤醒/遥测属软
+    功能，不因缺句柄阻断任务状态主流程。运行期调用失败由调用方按原级别处理。
+    """
+    global _ENGINE_REGISTRY_WARNED
+    try:
+        from pipeline.registry import get_engine_registry  # noqa: PLC0415
+    except ImportError as exc:
+        if not _ENGINE_REGISTRY_WARNED:
+            _ENGINE_REGISTRY_WARNED = True
+            logger.warning(
+                "[TaskService] pipeline.registry 引擎句柄不可用（引擎唤醒/上下文遥测停用）: %s",
+                exc,
+            )
+        return None
+    return get_engine_registry
 
 
 class _TaskStateMixin:
@@ -192,25 +217,25 @@ class _TaskStateMixin:
 
         await self._emit_state_change(task_id, old_status, "running")
 
-        # 唤醒挂起的管道引擎
-        try:
-            from pipeline.registry import get_engine_registry  # noqa: PLC0415
-
-            entries = get_engine_registry().find_by_tag("task_id", task_id)
-            for entry in entries:
-                if entry.engine is not None and entry.engine.is_suspended:
-                    entry.engine.wake()
-                    logger.info(
-                        "TaskService: 唤醒挂起引擎 task_id=%s pipeline=%s",
-                        task_id,
-                        entry.pipeline_id[:12],
-                    )
-        except Exception as exc:
-            logger.debug(
-                "TaskService: 唤醒引擎失败（非致命）task_id=%s: %s",
-                task_id,
-                exc,
-            )
+        # 唤醒挂起的管道引擎（句柄缺失已在 _import_engine_registry 告警一次）
+        registry_get = _import_engine_registry()
+        if registry_get is not None:
+            try:
+                entries = registry_get().find_by_tag("task_id", task_id)
+                for entry in entries:
+                    if entry.engine is not None and entry.engine.is_suspended:
+                        entry.engine.wake()
+                        logger.info(
+                            "TaskService: 唤醒挂起引擎 task_id=%s pipeline=%s",
+                            task_id,
+                            entry.pipeline_id[:12],
+                        )
+            except Exception as exc:
+                logger.debug(
+                    "TaskService: 唤醒引擎失败（非致命）task_id=%s: %s",
+                    task_id,
+                    exc,
+                )
 
         return task
 
@@ -504,8 +529,8 @@ class _TaskStateMixin:
             manager = await get_isolation_manager()
             await manager.destroy_if_workspace_idle(task_id)
         except Exception as e:
-            logger.debug(
-                "TaskService: 终态销毁容器检查失败（非致命）| task=%s, error=%s",
+            logger.warning(
+                "TaskService: 终态销毁容器检查失败（非致命，不影响任务终态）| task=%s, error=%s",
                 task_id,
                 e,
             )
@@ -563,16 +588,19 @@ class _TaskStateMixin:
         if not pipeline_run_id:
             return
 
-        try:
-            from pipeline.registry import get_engine_registry  # noqa: PLC0415
+        registry_get = _import_engine_registry()
+        if registry_get is None:
+            return
 
-            _reg = get_engine_registry()
+        try:
+            _reg = registry_get()
             _entry = _reg.get(pipeline_run_id)
             if not _entry or not _entry.engine:
                 return
 
+            # 引擎为外部句柄（鸭子契约）：只读其公开快照字段 current_state。
             _engine = _entry.engine
-            _state = getattr(_engine, "_current_state", None)
+            _state = getattr(_engine, "current_state", None)
             if not _state:
                 return
 

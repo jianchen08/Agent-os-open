@@ -9,9 +9,7 @@
   "capabilities": {
     "tools": [],
     "route_signals": [],
-    "lifecycle_hooks": [
-      "on_load"
-    ],
+    "lifecycle_hooks": [],
     "services": [
       {
         "name": "evaluation.run",
@@ -73,6 +71,33 @@
             "eval_id"
           ],
           "type": "object"
+        }
+      },
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/evaluation_service/metrics (evaluation metrics registry)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
+          }
         }
       }
     ]

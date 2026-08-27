@@ -646,6 +646,31 @@ class TestRecoverReset:
 
 class TestContextUsageInjection:
     @pytest.mark.asyncio
+    async def test_registry_missing_warns_at_least_once(
+        self,
+        svc: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """pipeline.registry 句柄缺失：遥测静默跳过，但 warning 至少留痕一次（不吞成 debug）。"""
+        import logging
+
+        import _task_state as task_state_mod
+
+        # 进程级告警闩复位（warn-once 语义的测试装配步骤，与断言无关）
+        task_state_mod._ENGINE_REGISTRY_WARNED = False
+        monkeypatch.delitem(sys.modules, "pipeline", raising=False)
+        monkeypatch.delitem(sys.modules, "pipeline.registry", raising=False)
+
+        task = await svc.create_task(title="ctx-miss")
+        await svc.bind_pipeline_run(task.id, "pipe-ctx-miss")
+        with caplog.at_level(logging.WARNING):
+            await svc.complete_evaluation(task.id, passed=True)
+
+        assert any("pipeline.registry" in r.getMessage() for r in caplog.records)
+        assert "context_usage" not in (svc.get_task(task.id).metadata or {})
+
+    @pytest.mark.asyncio
     async def test_inject_context_usage(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         task = await svc.create_task(title="ctx")
         await svc.bind_pipeline_run(task.id, "pipe-ctx-1")
@@ -658,7 +683,7 @@ class TestContextUsageInjection:
                 }.get(key, default)
 
         class FakeEngine:
-            _current_state = FakeState()
+            current_state = FakeState()
 
         class FakeEntry:
             engine = FakeEngine()
@@ -720,7 +745,7 @@ class TestContextUsageInjection:
         await svc.bind_pipeline_run(task.id, "pipe-ctx-5")
 
         class FakeEngine:
-            _current_state = None
+            current_state = None
 
         class FakeEntry:
             engine = FakeEngine()
@@ -745,7 +770,7 @@ class TestContextUsageInjection:
                 return {"context_window": 0, "llm_usage": {"input_tokens": 10}}.get(key, default)
 
         class FakeEngine:
-            _current_state = FakeState()
+            current_state = FakeState()
 
         class FakeEntry:
             engine = FakeEngine()
@@ -772,7 +797,7 @@ class TestContextUsageInjection:
                 return {"context_window": 100, "llm_usage": {"input_tokens": 50}}.get(key, default)
 
         class FakeEngine:
-            _current_state = FakeState()
+            current_state = FakeState()
 
         class FakeEntry:
             engine = FakeEngine()

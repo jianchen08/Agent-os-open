@@ -358,12 +358,6 @@ async def http_handle(
     return _ok(_json_response({"error": "not found", "path": path}, 404))
 
 
-@plugin.on_load
-async def _on_load(params: dict[str, Any]) -> None:
-    """Initialize evaluation service on load."""
-    pass
-
-
 # 资源暴露（函数式调用——SDK register_resource 签名要求 handler 必填）
 def _metric_registry_resource() -> dict[str, Any]:
     """Expose registered metric types as MCP resource."""

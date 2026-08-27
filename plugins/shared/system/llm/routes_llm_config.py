@@ -40,6 +40,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Anthropic 公共 API 契约默认值（provider 未配置 api_base 时的回落基址 +
+# 模型列表请求头版本号；与 anthropic 官方 SDK 默认一致，非本服务可调参数）。
+_ANTHROPIC_DEFAULT_API_BASE = "https://api.anthropic.com"
+_ANTHROPIC_API_VERSION = "2023-06-01"
+
 
 class ConfigAPIError(Exception):
     """LLM 配置域业务异常，携带 HTTP 状态码与 detail（server.py 捕获转 HTTP 响应）。"""
@@ -578,12 +583,12 @@ def get_remote_models(provider_id: str) -> dict[str, Any]:
 
     try:
         if ptype == "anthropic":
-            base = api_base or "https://api.anthropic.com"
+            base = api_base or _ANTHROPIC_DEFAULT_API_BASE
             if not base.endswith("/v1"):
                 base += "/v1"
             resp = httpx.get(
                 f"{base}/models",
-                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+                headers={"x-api-key": api_key, "anthropic-version": _ANTHROPIC_API_VERSION},
                 timeout=8.0,
             )
         else:

@@ -61,6 +61,33 @@
           ],
           "type": "object"
         }
+      },
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/agent_manager/** (agent config management)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
+          }
+        }
       }
     ]
   },

@@ -8,11 +8,7 @@ backend_rules §3.1「捕获具体异常而非 Exception」。
 from __future__ import annotations
 
 
-class LLMResourceError(Exception):
-    """LLM 资源类错误的基类。"""
-
-
-class KeyPoolExhaustedError(LLMResourceError):
+class KeyPoolExhaustedError(Exception):
     """所有 key 不可用且等待超时。
 
     携带诊断信息（不可用 key 列表），让调用方和日志能定位是哪些 key

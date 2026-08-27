@@ -66,7 +66,7 @@
             },
             "status": {
               "type": "string",
-              "description": "running（派发）/completed（本地降级）"
+              "description": "running（派发）/degraded（本地降级）"
             },
             "mode": {
               "type": "string",
@@ -119,7 +119,7 @@
             },
             "status": {
               "type": "string",
-              "description": "running/completed/failed"
+              "description": "running/completed/degraded/failed"
             },
             "mode": {
               "type": "string",
@@ -163,6 +163,35 @@
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load"
+    ],
+    "services": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/review_service/** (reviews domain 9 endpoints)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
+          }
+        }
+      }
     ]
   },
   "permissions": {},

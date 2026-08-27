@@ -245,10 +245,10 @@ class TestTriggerReviewDispatch:
         assert report["pipeline_id"] == "pipe_review_gen_1"
 
     async def test_trigger_review_degrades_without_chat(self, mod: Any) -> None:
-        """chat capability 缺席 → 维持 local_degrade 兜底（不崩）。"""
+        """chat capability 缺席 → local_degrade 兜底 status=degraded（不假 completed 误导轮询方）。"""
         mod.plugin._capabilities.pop("chat", None)
         r = await mod.trigger_review(task_id="task-1", summary="s")
-        assert r["status"] == "completed"
+        assert r["status"] == "degraded"
         assert r["mode"] == "local_degrade"
 
     async def test_trigger_review_skips_registration_without_task(self, mod: Any) -> None:
@@ -259,9 +259,10 @@ class TestTriggerReviewDispatch:
         assert len(calls) == 1  # 仅创建调用，无登记调用
 
     async def test_trigger_review_degrades_on_dispatch_error(self, mod: Any) -> None:
-        """派发失败（内核错误）→ local_degrade 兜底（不崩）。"""
+        """派发失败（内核错误）→ local_degrade 兜底 status=degraded（与能力缺席同契约）。"""
         _inject_chat_capability(mod, error=RuntimeError("kernel down"))
         r = await mod.trigger_review(task_id="task-1", summary="s")
+        assert r["status"] == "degraded"
         assert r["mode"] == "local_degrade"
 
 

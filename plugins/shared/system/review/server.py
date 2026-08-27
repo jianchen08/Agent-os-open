@@ -180,7 +180,7 @@ def _local_degrade_report(
         "recommendations": [
             "Re-run review when pipeline-executor capability is available for LLM analysis"
         ],
-        "status": "completed",
+        "status": "degraded",
         "mode": "local_degrade",
         "created_at": time.time(),
     }
@@ -215,7 +215,7 @@ async def trigger_review(
     Returns:
         review_id + status:
         - running (pipeline): 复盘管道已派发
-        - completed (local_degrade): 降级产出基础报告
+        - degraded (local_degrade): 降级产出基础报告（不报 completed，防轮询方误判）
     """
     review_id = f"review_{uuid.uuid4().hex[:8]}"
     artifacts = artifacts or []
@@ -316,7 +316,7 @@ async def trigger_review(
     _reports[review_id] = report
     return {
         "review_id": review_id,
-        "status": "completed",
+        "status": "degraded",
         "mode": "local_degrade",
         "lessons_count": len(report["lessons"]),
     }
