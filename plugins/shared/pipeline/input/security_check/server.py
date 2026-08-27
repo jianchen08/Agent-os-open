@@ -118,9 +118,10 @@ def _switch_options() -> list[dict[str, str]]:
 
 def _mode_warning(mode: str) -> str:
     warnings = {
-        "auto": "自动模式将尽量不打扰：常规工具自动放行，仅危险/未授权操作弹审批。",
-        "bypass": "旁路模式将跳过所有审批（仅保留路径遍历与敏感目录底线检查），"
-        "危险命令可能自动执行。仅在信任环境使用！",
+        "auto": "自动模式：未命中安全规则的操作直接执行；命中 block 级规则自动拒绝（不询问），"
+        "needs_approval 级才弹审批。",
+        "bypass": "旁路模式：跳过全部规则匹配与审批，危险命令可能不经确认直接执行；"
+        "仅保留路径遍历、敏感目录、nul 重定向三条内置底线。请仅在信任环境使用！",
     }
     return warnings.get(mode, "")
 

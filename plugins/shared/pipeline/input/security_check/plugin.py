@@ -75,20 +75,22 @@ _PROJECT_ROOT = os.path.dirname(  # noqa: PTH120
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # noqa: PTH100,PTH120
 )
 
-# ── 权限模式（对齐 ZCode/Claude Code/Codex 语义；模式 = 处置档位配置）──
-# 模式决定"危险工具未命中 allow 白名单/记忆指纹"时的处置：
-# - default      : 逐次确认（弹审批，现状语义）
-# - accept_edits : 文件读写类自动放行，命令类仍确认
-# - auto         : 尽量自动——block 规则自动拒绝；仅 needs_approval 规则/未授权
-#                  操作弹审批（"大部分不打扰，只有危险/未授权才打扰"）
-# - plan         : 只读——写类操作自动拒绝（不打扰）；读类放行
-# - bypass       : 跳过规则匹配与审批（保留路径遍历/敏感目录内置底线）
+# ── 权限模式（对齐 ZCode/Claude Code/Codex 的处置档位语义）──
+# 黑名单制：只作用于非隔离会话中"未被 allow 白名单/命令指纹放行的危险工具"，
+# 参数未命中安全规则关键词的操作任何档位都直接执行，各档差异只在"命中后的处置"。
+# 三条内置底线（路径遍历/敏感系统目录/nul 重定向）任何模式都强制执行；
+# 隔离任务的容器内操作不进审批链（isolation_guard 判 task_isolated 后整体放行）。
+# - default      : 命中 block/needs_approval 规则都逐次弹审批
+# - accept_edits : file_read/file_write 一律放行；其余工具命中规则仍弹审批
+# - auto         : block 规则自动拒绝不打扰；needs_approval 规则才弹审批
+# - plan         : file_write/bash_execute 一律软拒；其余工具同 default
+# - bypass       : 跳过规则匹配与审批（保留三条内置底线）
 PERMISSION_MODES: dict[str, str] = {
-    "default": "危险操作逐次确认",
-    "accept_edits": "文件读写自动放行，命令类仍确认",
-    "auto": "尽量自动：仅危险/未授权操作确认",
-    "plan": "只读：写类操作自动拒绝（不打扰）",
-    "bypass": "旁路：跳过审批（保留底线检查）",
+    "default": "命中安全规则的操作逐次确认",
+    "accept_edits": "文件读写自动放行，其余命中规则才确认",
+    "auto": "block 规则自动拒，needs_approval 才弹窗",
+    "plan": "file_write/bash_execute 一律拒绝",
+    "bypass": "跳过规则匹配与审批，保留内置底线",
 }
 
 # 权限模式表：key = pipeline_id（每管道独立，同会话不同管道标签互不影响，

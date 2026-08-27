@@ -75,35 +75,35 @@
               "default": "default",
               "options": [
                 {
-                  "label": "默认（逐次确认）",
+                  "label": "默认（命中规则才确认）",
                   "value": "default",
-                  "description": "危险操作逐次确认"
+                  "description": "仅当参数命中安全规则关键词（rm -rf、curl、pip install 等）时逐次弹窗确认；未命中的操作直接执行"
                 },
                 {
                   "label": "接受编辑（文件自动）",
                   "value": "accept_edits",
-                  "description": "文件读写自动放行，命令类仍确认"
+                  "description": "文件读写工具一律自动放行；命令类等其它工具仅在命中安全规则时弹窗确认"
                 },
                 {
-                  "label": "自动（尽量不打扰）",
+                  "label": "自动（block 不打扰）",
                   "value": "auto",
-                  "description": "仅危险/未授权操作确认"
+                  "description": "命中 block 级规则自动拒绝、不再询问；needs_approval 级才弹窗；未命中规则的操作直接执行"
                 },
                 {
-                  "label": "只读（拒绝写操作）",
+                  "label": "只读（拒写类工具）",
                   "value": "plan",
-                  "description": "写类操作自动拒绝"
+                  "description": "file_write 与 bash_execute 一律拒绝执行；读类与未命中规则的其它操作照常"
                 },
                 {
                   "label": "旁路（跳过审批）",
                   "value": "bypass",
-                  "description": "跳过审批，保留底线检查"
+                  "description": "不做规则匹配、不弹审批，危险命令可能直接执行；仅保留路径遍历、敏感目录、nul 重定向三条内置底线"
                 }
               ]
             }
           ],
           "endpoint": "/ext/pipeline_security_check/permission_mode",
-          "description": "切换当前管道标签的权限模式（输入框工具栏，与思考强度并排）；auto/bypass 高风险模式需在审批窗中确认"
+          "description": "切换当前管道标签的权限模式。模式只影响非隔离会话：隔离任务的容器内操作从不弹审批；未命中安全规则的操作任何档位都直接执行。auto/bypass 属高风险档，切换需在审批窗二次确认"
         }
       }
     ]
