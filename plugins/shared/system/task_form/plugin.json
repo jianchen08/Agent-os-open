@@ -10,9 +10,7 @@
   "capabilities": {
     "tools": [],
     "route_signals": [],
-    "lifecycle_hooks": [
-      "on_load"
-    ],
+    "lifecycle_hooks": [],
     "services": [
       {
         "name": "http.handle",

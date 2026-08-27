@@ -173,11 +173,5 @@ async def http_handle(
     return _ok(_json_response({"error": "not found", "path": path}, 404))
 
 
-@plugin.on_load
-async def _on_load(params: dict[str, Any]) -> None:
-    """Initialize task form service on load."""
-    pass
-
-
 if __name__ == "__main__":
     plugin.run()
