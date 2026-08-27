@@ -1,7 +1,7 @@
 {
   "id": "agentos-builtin-tools",
   "name": "Builtin Tools",
-  "description": "10 个高频内置工具（文件读写/shell/搜索/目录/Web 操作）MCP 封装",
+  "description": "8 个高频内置工具（文件读写/代码文件搜索/目录与文件管理）MCP 封装",
   "version": "1.0.0",
   "plugin_type": "tool",
   "language": "python",
