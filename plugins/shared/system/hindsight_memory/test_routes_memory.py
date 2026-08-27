@@ -61,6 +61,26 @@ def _backend_with(search_results: list[dict[str, Any]], delete_result: bool = Tr
     return backend
 
 
+def _backend_documents(docs: list[dict[str, Any]], delete_result: bool = True) -> MagicMock:
+    """documents 通路替身：get_documents 返回文档条目（original_text 形态）。"""
+    backend = MagicMock()
+    backend.get_documents = AsyncMock(return_value=docs)
+    backend.delete = AsyncMock(return_value=delete_result)
+    return backend
+
+
+def _doc(id_: str, text: str, mtype: str = "semantic", tags: list[str] | None = None, created_at: str = "") -> dict[str, Any]:
+    """构造 sidecar documents 面条目（retain 注入 type:* 服务端标签）。"""
+    server_tags = [f"type:{mtype}"] + list(tags or [])
+    return {
+        "id": id_,
+        "original_text": text,
+        "tags": server_tags,
+        "document_metadata": {"memory_type": mtype},
+        "created_at": created_at,
+    }
+
+
 def _m(id_: str, content: str = "c", mtype: str = "semantic", score: float = 1.0, **meta: Any) -> dict[str, Any]:
     """构造后端统一形态记忆条目。"""
     return {"id": id_, "content": content, "score": score, "memory_type": mtype, "metadata": meta}
@@ -85,27 +105,27 @@ class TestListMemories:
         assert result == {"items": [], "total": 0}
 
     def test_list_passes_params_and_shapes(self, mod: Any) -> None:
-        """参数透传 + 响应形态 {items:[...], total}。"""
-        backend = _backend_with([
-            _m("m1", "hello", "episode", 0.9, tags=["t1"], created_at="2026-08-21T00:00:00Z"),
-            _m("m2", "world", "episode", 0.8),
+        """documents 通路参数透传 + 响应形态 {items:[...], total}（前端契约）。"""
+        backend = _backend_documents([
+            _doc("m1", "hello", "episode", tags=["t1"], created_at="2026-08-21T00:00:00Z"),
+            _doc("m2", "world", "episode"),
         ])
         mod.set_memory_backend(backend)
 
         result = _run(mod.list_memories(memory_type="episode", limit=10, offset=0))
 
-        backend.search.assert_awaited_once()
-        kwargs = backend.search.call_args.kwargs
-        assert kwargs["memory_type"] == "episode"
-        assert kwargs["top_k"] == 10
+        backend.get_documents.assert_awaited_once()
+        kwargs = backend.get_documents.call_args.kwargs
         assert kwargs["user_id"] == "default"
+        assert kwargs["limit"] == 10
+        assert kwargs["tags_match"] == "any_strict"
+        assert kwargs["tags"] == ["type:episode"]
         assert result["total"] == 2
         item = result["items"][0]
         assert item["id"] == "m1"
         assert item["content"] == "hello"
         assert item["memory_type"] == "episode"
         assert item["tags"] == ["t1"]
-        assert item["score"] == 0.9
         assert item["created_at"] == "2026-08-21T00:00:00Z"
 
     def test_list_rejects_bad_pagination(self, mod: Any) -> None:
@@ -162,8 +182,8 @@ class TestSearchMemories:
 
 class TestEpisodes:
     def test_list_episodes_shape(self, mod: Any) -> None:
-        backend = _backend_with([
-            _m("e1", "intent text", "episode", tags=["a"], created_at="t0"),
+        backend = _backend_documents([
+            _doc("e1", "intent text", "episode", tags=["a"], created_at="t0"),
         ])
         mod.set_memory_backend(backend)
         result = _run(mod.list_episodes(page=2, page_size=10))
@@ -173,7 +193,8 @@ class TestEpisodes:
         assert result["items"][0]["intent_text"] == "intent text"
         assert result["items"][0]["tags"] == ["a"]
         assert result["items"][0]["created_at"] == "t0"
-        assert backend.search.call_args.kwargs["memory_type"] == "episode"
+        assert backend.get_documents.call_args.kwargs["tags"] == ["type:episode"]
+        assert backend.get_documents.call_args.kwargs["limit"] == 10
 
     def test_get_episode_found(self, mod: Any) -> None:
         backend = _backend_with([_m("e1", "intent", "episode")])
@@ -203,7 +224,7 @@ class TestEpisodes:
 
 class TestSemanticConsolidateStats:
     def test_list_semantic_shape(self, mod: Any) -> None:
-        backend = _backend_with([_m("s1", "semcontent", "semantic", created_at="t0")])
+        backend = _backend_documents([_doc("s1", "semcontent", "semantic", created_at="t0")])
         mod.set_memory_backend(backend)
         result = _run(mod.list_semantic())
         item = result["items"][0]
@@ -214,10 +235,12 @@ class TestSemanticConsolidateStats:
             "extra_data": {},
             "created_at": "t0",
         }
+        assert backend.get_documents.call_args.kwargs["tags"] == ["type:semantic"]
 
     def test_consolidate_without_reflect_is_stub(self, mod: Any) -> None:
         """后端无 reflect → 空操作（consolidated_count=0）。"""
         backend = _backend_with([])
+        del backend.reflect  # MagicMock 自动属性与"无 reflect 能力"意图相悖，显式移除
         mod.set_memory_backend(backend)
         result = _run(mod.consolidate_memory())
         assert result["success"] is True
@@ -230,20 +253,57 @@ class TestSemanticConsolidateStats:
         result = _run(mod.consolidate_memory())
         assert result["consolidated_count"] == 7
 
-    def test_consolidate_reflect_error_degrades_to_zero(self, mod: Any) -> None:
+    def test_consolidate_reflect_error_fail_closed(self, mod: Any) -> None:
+        """reflect 执行异常 → success:false + error（失败不得伪装成功）。"""
         backend = MagicMock()
         backend.reflect = AsyncMock(side_effect=RuntimeError("boom"))
         mod.set_memory_backend(backend)
         result = _run(mod.consolidate_memory())
+        assert result["success"] is False
         assert result["consolidated_count"] == 0
+        assert "boom" in result["error"]
+        assert result["message"] != "记忆整合完成"
+
+    def test_consolidate_unexpected_return_type_fail_closed(self, mod: Any) -> None:
+        """reflect 返回非 int/dict（端口契约违约）→ success:false + error。
+
+        性质断言：任何 reflect 非预期行为下响应都不允许出现
+        success=true 的假成功形态。
+        """
+        backend = MagicMock()
+        backend.reflect = AsyncMock(return_value="garbage")
+        mod.set_memory_backend(backend)
+        result = _run(mod.consolidate_memory())
+        assert result["success"] is False
+        assert result["consolidated_count"] == 0
+        assert result["message"] != "记忆整合完成"
+        assert "garbage" not in str(result.get("success"))
+
+    def test_consolidate_returns_int_count(self, mod: Any) -> None:
+        """reflect 返回裸 int → success:true 且计数透传。"""
+        backend = MagicMock()
+        backend.reflect = AsyncMock(return_value=4)
+        mod.set_memory_backend(backend)
+        result = _run(mod.consolidate_memory())
+        assert result["success"] is True
+        assert result["consolidated_count"] == 4
 
     def test_stats_counts_by_type(self, mod: Any) -> None:
-        async def _search(query: str, user_id: str, top_k: int, memory_type: str | None) -> list[dict[str, Any]]:
-            counts = {"episode": [{"id": "a"}], "semantic": [{"id": "b"}, {"id": "c"}]}
-            return counts.get(memory_type or "", [])
+        """统计按 type:* 标签分面取数计数。"""
+        episodes = [_doc("a", "x", "episode")]
+        semantic = [_doc("b", "y", "semantic"), _doc("c", "z", "semantic")]
+
+        async def _get_documents(
+            user_id: str, tags: list[str] | None, tags_match: str, limit: int
+        ) -> list[dict[str, Any]]:
+            if tags == ["type:episode"]:
+                return list(episodes)
+            if tags == ["type:semantic"]:
+                return list(semantic)
+            return []
 
         backend = MagicMock()
-        backend.search = AsyncMock(side_effect=_search)
+        backend.get_documents = AsyncMock(side_effect=_get_documents)
         mod.set_memory_backend(backend)
         result = _run(mod.get_memory_stats())
         assert result == {

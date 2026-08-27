@@ -815,9 +815,9 @@ def test_http_memory_episodes_dispatch():
     srv = _load_module()
 
     backend = MagicMock()
-    backend.search = AsyncMock(return_value=[
-        {"id": "e1", "content": "intent", "score": 1.0, "memory_type": "episode",
-         "metadata": {"tags": ["t"], "created_at": "t0"}},
+    backend.get_documents = AsyncMock(return_value=[
+        {"id": "e1", "original_text": "intent", "tags": ["type:episode", "t"],
+         "document_metadata": {"memory_type": "episode"}, "created_at": "t0"},
     ])
     srv._memory_backend = backend
     srv._memory_backend_attempted = True
@@ -828,7 +828,8 @@ def test_http_memory_episodes_dispatch():
         assert payload["total"] == 1
         assert payload["items"][0]["id"] == "e1"
         assert payload["items"][0]["intent_text"] == "intent"
-        backend.search.assert_awaited_once()
+        assert payload["items"][0]["tags"] == ["t"]
+        backend.get_documents.assert_awaited_once()
     finally:
         srv._memory_backend = None
         srv._memory_backend_attempted = False

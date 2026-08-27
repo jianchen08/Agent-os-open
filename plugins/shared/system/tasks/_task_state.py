@@ -627,6 +627,7 @@ class _TaskStateMixin:
 
         task.status = TaskStatus.COMPLETED
         task.completed_at = datetime.now(UTC)
+        self._storage.save(task)
         logger.info(
             "[TaskService] 任务已从 failed 恢复为 completed | task_id=%s",
             task_id,

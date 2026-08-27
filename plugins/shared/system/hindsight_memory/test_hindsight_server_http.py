@@ -249,6 +249,17 @@ def _mem_item(id_: str, mtype: str = "semantic", **meta: Any) -> dict[str, Any]:
     return {"id": id_, "content": f"content-{id_}", "score": 1.0, "memory_type": mtype, "metadata": meta}
 
 
+def _doc_item(id_: str, mtype: str = "semantic", tags: list[str] | None = None) -> dict[str, Any]:
+    """sidecar documents 面条目（retain 注入的 type:* 服务端标签形态）。"""
+    return {
+        "id": id_,
+        "original_text": f"content-{id_}",
+        "tags": [f"type:{mtype}"] + list(tags or []),
+        "document_metadata": {"memory_type": mtype},
+        "created_at": "t0",
+    }
+
+
 class TestMemoryDomainDispatch:
     def test_non_memory_path_404(self, srv: Any) -> None:
         out = _run(srv._handle_memory_domain(
@@ -260,7 +271,7 @@ class TestMemoryDomainDispatch:
 
     def test_list_route_params(self, srv: Any, routes: Any) -> None:
         backend = MagicMock()
-        backend.search = AsyncMock(return_value=[_mem_item("m1", "episode", tags=["t"], created_at="t0")])
+        backend.get_documents = AsyncMock(return_value=[_doc_item("m1", "episode", tags=["t"])])
         _inject_backend(srv, backend)
 
         out = _run(srv._handle_memory_domain(
@@ -270,13 +281,13 @@ class TestMemoryDomainDispatch:
         payload = json.loads(base64.b64decode(out["data"]["body"]).decode("utf-8"))
         assert payload["total"] == 1
         assert payload["items"][0]["id"] == "m1"
-        assert backend.search.call_args.kwargs["memory_type"] == "episode"
-        assert backend.search.call_args.kwargs["top_k"] == 5
+        assert backend.get_documents.call_args.kwargs["tags"] == ["type:episode"]
+        assert backend.get_documents.call_args.kwargs["limit"] == 5
 
     def test_list_route_invalid_int_defaults(self, srv: Any) -> None:
         """limit/offset 非数字 → 回落默认值（20/0），不 500。"""
         backend = MagicMock()
-        backend.search = AsyncMock(return_value=[])
+        backend.get_documents = AsyncMock(return_value=[])
         _inject_backend(srv, backend)
 
         out = _run(srv._handle_memory_domain(
@@ -284,7 +295,7 @@ class TestMemoryDomainDispatch:
             {"limit": "abc", "offset": "xyz"},
         ))
         assert out["data"]["status"] == 200
-        assert backend.search.call_args.kwargs["top_k"] == 20
+        assert backend.get_documents.call_args.kwargs["limit"] == 20
 
     def test_search_get_route(self, srv: Any) -> None:
         backend = MagicMock()
@@ -314,6 +325,7 @@ class TestMemoryDomainDispatch:
 
     def test_episodes_routes(self, srv: Any) -> None:
         backend = MagicMock()
+        backend.get_documents = AsyncMock(return_value=[_doc_item("e1", "episode", tags=["a"])])
         backend.search = AsyncMock(return_value=[_mem_item("e1", "episode", tags=["a"])])
         _inject_backend(srv, backend)
 
@@ -324,6 +336,7 @@ class TestMemoryDomainDispatch:
         payload = json.loads(base64.b64decode(out["data"]["body"]).decode("utf-8"))
         assert payload["page"] == 2
         assert payload["items"][0]["id"] == "e1"
+        assert backend.get_documents.call_args.kwargs["tags"] == ["type:episode"]
 
         out = _run(srv._handle_memory_domain(
             "/ext/hindsight_memory_service/memory/episodes/e1", "GET", "", {}
@@ -333,7 +346,8 @@ class TestMemoryDomainDispatch:
 
     def test_semantic_and_consolidate_routes(self, srv: Any) -> None:
         backend = MagicMock()
-        backend.search = AsyncMock(return_value=[_mem_item("sem1")])
+        backend.get_documents = AsyncMock(return_value=[_doc_item("sem1")])
+        del backend.reflect  # 无 reflect 能力的后端 → 整合走空操作 stub
         _inject_backend(srv, backend)
 
         out = _run(srv._handle_memory_domain(
@@ -350,11 +364,11 @@ class TestMemoryDomainDispatch:
         assert payload["consolidated_count"] == 0
 
     def test_stats_route_counts_by_type(self, srv: Any) -> None:
-        async def _search(**kwargs: Any) -> list[dict[str, Any]]:
-            return [{"id": "x"}] if kwargs.get("memory_type") == "episode" else [{"id": "y"}, {"id": "z"}]
+        async def _get_documents(**kwargs: Any) -> list[dict[str, Any]]:
+            return [_doc_item("x")] if kwargs.get("tags") == ["type:episode"] else [_doc_item("y"), _doc_item("z")]
 
         backend = MagicMock()
-        backend.search = AsyncMock(side_effect=_search)
+        backend.get_documents = AsyncMock(side_effect=_get_documents)
         _inject_backend(srv, backend)
 
         out = _run(srv._handle_memory_domain(

@@ -24,9 +24,11 @@ logger = logging.getLogger(__name__)
 # 由 server.py http.handle 懒构建注入，测试直接赋值。
 _memory_backend: Any | None = None
 
-# 统计/单条查询的检索上限（后端 search top_k 语义）
-_STATS_TOP_K = 1000
+# 单条查询走 search 时的检索上限（后端 search top_k 语义）
 _FETCH_TOP_K = 1000
+# 列表面（documents 通路）单次取回上限＝sidecar hindsight.get_documents 工具
+# limit 的 schema maximum；列表无相关性排序语义，超出部分属分页范畴不做假分页
+_LISTING_LIMIT_CAP = 100
 
 # 后端缺省 user_id（分发时不传 _user → Depends 缺省 → "default"）
 _DEFAULT_USER_ID = "default"
@@ -76,6 +78,54 @@ def _memory_to_response(m: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _type_tag_filter(memory_type: str | None) -> list[str] | None:
+    """把 memory_type 过滤转换为服务端 type:* 标签过滤（retain 落库时注入）。"""
+    if not memory_type:
+        return None
+    return [f"type:{memory_type}"]
+
+
+def _document_to_memory(doc: dict[str, Any]) -> dict[str, Any]:
+    """把 documents 通路条目映射为统一记忆形态 {id, content, score, memory_type, tags, created_at}。
+
+    - content ← original_text（documents 面保有原文；recall 返回的是抽取后事实）；
+    - score 恒 0——列举无相关性排序语义，不伪造评分；
+    - memory_type 取自服务端 type:* 标签（retain 注入），缺失回落
+      document_metadata.memory_type；
+    - tags 剔除内部 type:* 前缀，避免实现细节外泄到前端。
+    """
+    raw_tags = [str(t) for t in (doc.get("tags") or []) if t]
+    resolved_type = next((t[len("type:"):] for t in raw_tags if t.startswith("type:")), "")
+    if not resolved_type:
+        meta = doc.get("document_metadata") or {}
+        resolved_type = str(meta.get("memory_type", "") or "")
+    return {
+        "id": str(doc.get("id", "")),
+        "content": doc.get("original_text", ""),
+        "score": 0.0,
+        "memory_type": resolved_type,
+        "tags": [t for t in raw_tags if not t.startswith("type:")],
+        "created_at": doc.get("created_at", ""),
+    }
+
+
+async def _list_bank_documents(
+    backend: Any, memory_type: str | None, limit: int
+) -> list[dict[str, Any]]:
+    """经 documents/list 通路取回 bank 文档（列表/统计的既定数据面）。
+
+    recall 是带 query 的检索 API（空 query 服务端必拒），列表面必须走本通路，
+    否则链路断裂。能力失败（RuntimeError）诚实上抛由 http.handle 转 500。
+    """
+    docs = await backend.get_documents(
+        user_id=_resolve_user_id(),
+        tags=_type_tag_filter(memory_type),
+        tags_match="any_strict",
+        limit=limit,
+    )
+    return [d for d in docs or [] if isinstance(d, dict)]
+
+
 async def list_memories(
     memory_type: str | None = None,
     limit: int = 20,
@@ -83,7 +133,7 @@ async def list_memories(
 ) -> dict[str, Any]:
     """获取记忆条目列表。
 
-    支持按记忆类型筛选，分页返回（后端无 offset 语义，top_k 截断）。
+    支持按记忆类型筛选，经 documents/list 通路返回（后端无 offset 语义）。
 
     Args:
         memory_type: 按类型筛选 (episode/semantic/procedural)
@@ -100,13 +150,8 @@ async def list_memories(
     backend = _get_memory_backend()
     if backend is None:
         return {"items": [], "total": 0}
-    results = await backend.search(
-        query="",
-        user_id=_resolve_user_id(),
-        top_k=limit,
-        memory_type=memory_type,
-    )
-    items = [_memory_to_response(m) for m in results]
+    docs = await _list_bank_documents(backend, memory_type, limit)
+    items = [_document_to_memory(d) for d in docs]
     return {"items": items, "total": len(items)}
 
 
@@ -156,24 +201,19 @@ async def search_memories(
 
 
 async def list_episodes(page: int = 1, page_size: int = 20) -> dict[str, Any]:
-    """获取情景记忆列表。"""
+    """获取情景记忆列表（documents/list 通路，按 type:episode 服务端过滤）。"""
     backend = _get_memory_backend()
     if backend is None:
         return {"items": [], "total": 0, "page": page, "page_size": page_size}
-    results = await backend.search(
-        query="",
-        user_id=_resolve_user_id(),
-        top_k=page_size,
-        memory_type="episode",
-    )
+    docs = await _list_bank_documents(backend, "episode", page_size)
     items = [
         {
             "id": m["id"],
-            "intent_text": m.get("content", ""),
-            "tags": (m.get("metadata") or {}).get("tags", []),
-            "created_at": (m.get("metadata") or {}).get("created_at", ""),
+            "intent_text": m["content"],
+            "tags": m["tags"],
+            "created_at": m["created_at"],
         }
-        for m in results
+        for m in (_document_to_memory(d) for d in docs)
     ]
     return {"items": items, "total": len(items), "page": page, "page_size": page_size}
 
@@ -206,25 +246,20 @@ async def get_episode(episode_id: str) -> dict[str, Any]:
 
 
 async def list_semantic() -> dict[str, Any]:
-    """获取语义记忆列表。"""
+    """获取语义记忆列表（documents/list 通路，按 type:semantic 服务端过滤）。"""
     backend = _get_memory_backend()
     if backend is None:
         return {"items": [], "total": 0}
-    results = await backend.search(
-        query="",
-        user_id=_resolve_user_id(),
-        top_k=100,
-        memory_type="semantic",
-    )
+    docs = await _list_bank_documents(backend, "semantic", _LISTING_LIMIT_CAP)
     items = [
         {
             "id": m["id"],
-            "content": m.get("content", ""),
+            "content": m["content"],
             "source_type": "memory_backend",
             "extra_data": {},
-            "created_at": (m.get("metadata") or {}).get("created_at", ""),
+            "created_at": m["created_at"],
         }
-        for m in results
+        for m in (_document_to_memory(d) for d in docs)
     ]
     return {"items": items, "total": len(items)}
 
@@ -238,23 +273,37 @@ async def consolidate_memory() -> dict[str, Any]:
     """触发记忆整合操作。
 
     后端若提供 reflect 方法则调用并返回整合条数；否则保持空操作 stub。
+    整合失败（reflect 抛错/返回非契约类型）fail-closed：success=false +
+    error 说明，失败不伪装成功（前端按 success 布尔消费，响应键面不变）。
     """
     backend = _get_memory_backend()
     consolidated = 0
     if backend is not None and hasattr(backend, "reflect"):
         try:
             result = await backend.reflect()
-            if isinstance(result, dict):
-                consolidated = int(result.get("consolidated_count", result.get("count", 0)) or 0)
-            elif isinstance(result, int):
-                consolidated = result
-        except Exception as e:  # noqa: BLE001
-            logger.warning("记忆整合失败（降级为 0）: %s", e)
+        except Exception as e:  # noqa: BLE001 — 失败转为错误信封上抛展示面
+            return {
+                "success": False,
+                "message": f"记忆整合失败: {e}",
+                "error": str(e),
+                "consolidated_count": 0,
+            }
+        if isinstance(result, dict):
+            consolidated = int(result.get("consolidated_count", result.get("count", 0)) or 0)
+        elif isinstance(result, int):
+            consolidated = result
+        else:
+            return {
+                "success": False,
+                "message": f"记忆整合失败: reflect 返回非预期类型 {type(result).__name__}",
+                "error": f"reflect 返回非预期类型: {type(result).__name__}",
+                "consolidated_count": 0,
+            }
     return {"success": True, "message": "记忆整合完成", "consolidated_count": consolidated}
 
 
 async def get_memory_stats() -> dict[str, Any]:
-    """获取记忆统计信息（按类型聚合后端检索计数）。"""
+    """获取记忆统计信息（documents/list 通路按 type 标签聚合计数）。"""
     backend = _get_memory_backend()
     if backend is None:
         return {
@@ -263,15 +312,12 @@ async def get_memory_stats() -> dict[str, Any]:
             "total_count": 0,
             "last_updated": "",
         }
-    user_id = _resolve_user_id()
-    episodes = await backend.search(
-        query="", user_id=user_id, top_k=_STATS_TOP_K, memory_type="episode"
+    episode_count = len(
+        await _list_bank_documents(backend, "episode", _LISTING_LIMIT_CAP)
     )
-    semantic = await backend.search(
-        query="", user_id=user_id, top_k=_STATS_TOP_K, memory_type="semantic"
+    semantic_count = len(
+        await _list_bank_documents(backend, "semantic", _LISTING_LIMIT_CAP)
     )
-    episode_count = len(episodes)
-    semantic_count = len(semantic)
     return {
         "episode_count": episode_count,
         "knowledge_count": semantic_count,

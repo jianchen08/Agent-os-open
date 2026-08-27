@@ -598,6 +598,35 @@ class TestRecoverReset:
     async def test_recover_missing_task_silent(self, svc: Any) -> None:
         assert await svc.recover_to_completed("missing") is None
 
+    def test_recover_to_completed_persists_to_disk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """恢复为 completed 必须落盘：新 storage 实例重读同一目录可见。
+
+        语义上等价于进程重启后任务不得复活为 failed（对照 complete_task /
+        reset_to_pending 均持久化）。task_evaluate 放行恢复路径的下游消费者。
+        """
+        import asyncio
+
+        from service import TaskService
+
+        data_dir = str(tmp_path / "tasks")
+        first = TaskService(data_dir=data_dir)
+        task = asyncio.run(first.create_task(title="rec-disk"))
+        asyncio.run(first.start_task(task.id))
+        asyncio.run(first.fail_task(task.id, reason="误判"))
+
+        reloaded = TaskService(data_dir=data_dir)
+        assert reloaded.get_task(task.id).status.value == "failed"
+
+        asyncio.run(first.recover_to_completed(task.id, result={"ok": True}))
+
+        after = TaskService(data_dir=data_dir)
+        fetched = after.get_task(task.id)
+        assert fetched.status.value == "completed"
+        assert fetched.result == {"ok": True}
+        assert fetched.completed_at is not None
+
     @pytest.mark.asyncio
     async def test_reset_to_pending_clears_started_at(self, svc: Any) -> None:
         from task_types import TaskStatus
