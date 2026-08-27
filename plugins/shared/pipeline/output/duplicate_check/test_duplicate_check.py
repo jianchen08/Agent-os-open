@@ -176,7 +176,7 @@ class TestRepetitiveOutput:
 
 
 class TestExemptionGates:
-    """豁免门（合并自 output_repetition_guard）：ENDED / core_type / evaluation_result。"""
+    """豁免门：ENDED / core_type / evaluation_result。"""
 
     def test_ended_state_skips_all_detection(self) -> None:
         """管道已结束（ENDED=True）→ 不判定，不写任何计数。"""

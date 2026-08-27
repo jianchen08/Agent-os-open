@@ -14,7 +14,7 @@
     4. static_vars        <- agent_config 或 state 读取（记忆/知识检索的唯一 opt-in 入口）
 
 注意：memory.retrieved / knowledge.context 不再无条件拼入 system_message —— 这两个 state
-仅供其他插件（如 error_check）使用；记忆/知识要进提示词，必须由 static_vars 显式声明
+仅供其他插件使用；记忆/知识要进提示词，必须由 static_vars 显式声明
 retrieval/tags（走 _retrieve_by_tags）。压缩层（L1/L2）作为 compression_messages
 独立消息输出，不合并到 system_message。
 
@@ -370,7 +370,7 @@ class PromptBuildPlugin(IInputPlugin):
                 parts.append(static_vars_text)
 
         # 记忆/知识不再无条件追加到 system_message：memory.retrieved / knowledge.context
-        # 仅作为 state 供其他插件（如 error_check）使用；要进提示词必须由 static_vars
+        # 仅作为 state 供其他插件使用；要进提示词必须由 static_vars
         # 声明 retrieval/tags 显式 opt-in（走 _retrieve_by_tags）。
 
         return "\n\n".join(parts)

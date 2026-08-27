@@ -7,8 +7,6 @@
 
 M6d 阶段：从旧代码 agents/decision/strategies/iteration/ 中的
 duplicate_call 和 repetitive_output 合并迁移。
-2026-08-27：合并 output_repetition_guard 的三个豁免门（ENDED 跳过 /
-仅 llm_call 轮次判定 / evaluation_result JSON 豁免），该插件随之删除。
 
 策略说明：
     - 第一级（count < max）：注入软提示，工具调用仍执行
@@ -122,7 +120,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
         """执行重复检查逻辑。
 
-        豁免门（合并自 output_repetition_guard，2026-08-27）：
+        豁免门：
         - 管道已结束（ENDED）不判定——post-end 阶段不应判重复；
         - 仅 llm_call 轮次判定输出重复——工具结果文本不是 LLM 输出，误判会
           在 tool 消息后追加提示打断 assistant(tool_calls)→tool 序列；
@@ -363,7 +361,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
     def _inject_warning(self, ctx: PluginContext, message: str) -> None:
         """注入强警告（第二级拦截时使用）。
 
-        安全合并策略（参照 llm_error_recovery 范本）：不追加独立的 system
+        安全合并策略：不追加独立的 system
         消息，而是合并进末尾消息的 content，避免打断 assistant(tool_calls)
         → tool 消息序列导致引擎中断。
 
@@ -420,7 +418,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
     def _merge_into_messages(self, ctx: PluginContext, content: str) -> None:
         """把提醒内容安全地合并进 messages，不打断 assistant(tool_calls)→tool 序列。
 
-        合并规则（参照 llm_error_recovery 范本）：
+        合并规则：
         - 末尾为 tool 或 assistant 消息 → 合并进其 content（保持序列完整）
         - 末尾为 system 消息 → 合并进其 content
         - messages 为空或末尾为 user → 追加 role=user（无 tool_calls 配对问题）

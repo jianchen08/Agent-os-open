@@ -39,7 +39,7 @@ class ToolCacheWriter(IOutputPlugin):
     - max_size: 最大缓存条目数（默认 100）
     - exclude_tools: 不缓存的工具名列表（默认含 bash_execute 等有副作用的工具）
 
-    优先级：25（在 tool_progress priority=30 之前，尽早写缓存）
+    优先级：25（尽早写缓存）
     缓存写入异常不阻塞管道。
     """
 

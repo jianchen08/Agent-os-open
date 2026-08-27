@@ -4,7 +4,7 @@
 多个插件的 server.py / plugin.py / models.py 同名。当 pytest 在同一会话里收集多个
 插件的测试时，先加载的插件会把 ``plugin`` 缓存到 sys.modules，后一个插件的
 ``from plugin import ...`` 会命中缓存拿到错误模块
-（ImportError: cannot import name 'StuckDetector' from 'plugin' (.../tool_progress/plugin.py)）。
+（ImportError: cannot import name 'StuckDetector' from 'plugin' (.../llm_core/plugin.py)）。
 
 策略：tests/plugins/conftest.py 的 pytest_runtest_setup 在每个测试执行前，
 根据该测试所在目录的 conftest 声明的源目录（``_PLUGIN_SOURCE_DIRS``），

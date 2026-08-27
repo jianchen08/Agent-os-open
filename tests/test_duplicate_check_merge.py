@@ -1,7 +1,7 @@
 """duplicate_check 消息注入契约 — 不打断 assistant(tool_calls)→tool 序列。
 
 _inject_hint / _inject_warning 不追加独立 system 消息，而是合并进末尾
-消息 content（参照 llm_error_recovery 范本）：合并进末尾 tool/assistant
+消息 content：合并进末尾 tool/assistant
 content，assistant(tool_calls)→tool 序列保持完整。
 """
 

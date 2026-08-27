@@ -50,7 +50,7 @@ class ConversationModeDetector(IOutputPlugin):
 
     @property
     def priority(self) -> int:
-        """插件执行优先级，在 pending_tools(6) 之前执行。"""
+        """插件执行优先级。"""
         return 5
 
     @property
