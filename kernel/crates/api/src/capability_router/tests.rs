@@ -1946,3 +1946,126 @@ async fn transient_missing_params_rejected() {
         .await;
     assert!(r5.is_err(), "空 pipeline_id 必须报错");
 }
+
+// ── 流式拦截点：chunk 累积 + 节流 + stream_end 清键（ADR 2026-08-27 §2.4）──
+// 拦截点写进程级全局寄存器（tenant = current_or_default("default")）——
+// 测试用唯一 pipeline id 隔离 + 末尾 clear_pipeline 防跨测试残留。
+
+const STREAM_PIPE: &str = "pipe_stream_intercept_1";
+
+async fn emit_stream_event(
+    router: &KernelCapabilityRouter,
+    event: &str,
+    pipeline_id: &str,
+    message_id: &str,
+    content: &str,
+) {
+    let mut payload = json!({
+        "thread_id": "thread-1",
+        "pipeline_id": pipeline_id,
+        "message_id": message_id,
+    });
+    if !content.is_empty() {
+        payload["content"] = json!(content);
+    }
+    router
+        .handle("event-bus", "emit", json!({
+            "_plugin_id": "my_streamer",
+            "event": event,
+            "payload": payload,
+        }))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stream_chunk_accumulates_throttled_to_register() {
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = router_with_session(received.clone());
+    let mid = "p_acc_001";
+    let pipe = "pipe_stream_intercept_acc";
+    // 节流窗内（不足 N 个）：寄存器无 chunk 键
+    for i in 0..(agentos_engine::transient::CHUNK_FLUSH_EVERY - 1) {
+        emit_stream_event(&router, "stream_chunk", pipe, mid, &format!("c{i}")).await;
+    }
+    let reg = agentos_engine::global_registry();
+    assert!(
+        reg.get("default", pipe, &format!("chunk:{mid}")).is_none(),
+        "节流窗内不得落寄存器"
+    );
+    // 第 N 个 chunk：达计数阈值 → 落 A 区（text_len = 2×N，每个 chunk 2 字符）
+    emit_stream_event(
+        &router,
+        "stream_chunk",
+        pipe,
+        mid,
+        "xx",
+    ).await;
+    let snap = reg.get("default", pipe, &format!("chunk:{mid}")).unwrap();
+    assert_eq!(
+        snap["text_len"],
+        json!((agentos_engine::transient::CHUNK_FLUSH_EVERY as usize) * 2),
+        "chunk 累积快照 text_len = 增量拼接总长"
+    );
+    // WS 侧照常推送（一次 IPC 两个动作：推 WS + 累积）
+    assert!(!received.lock().unwrap().is_empty());
+    reg.clear_pipeline("default", pipe);
+}
+
+#[tokio::test]
+async fn stream_end_clears_chunk_key() {
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = router_with_session(received.clone());
+    let mid = "p_acc_002";
+    let pipe = "pipe_stream_intercept_end";
+    for _ in 0..agentos_engine::transient::CHUNK_FLUSH_EVERY {
+        emit_stream_event(&router, "stream_chunk", pipe, mid, "a").await;
+    }
+    let reg = agentos_engine::global_registry();
+    assert!(reg.get("default", pipe, &format!("chunk:{mid}")).is_some());
+    // stream_end：最终形态已落 message_slots，chunk 中间态清键
+    emit_stream_event(&router, "stream_end", pipe, mid, "").await;
+    assert!(
+        reg.get("default", pipe, &format!("chunk:{mid}")).is_none(),
+        "stream_end 必须清 chunk 键"
+    );
+    reg.clear_pipeline("default", pipe);
+}
+
+#[tokio::test]
+async fn thinking_chunk_accumulates_reasoning_snapshot() {
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = router_with_session(received.clone());
+    let mid = "p_acc_003";
+    let pipe = "pipe_stream_intercept_thinking";
+    // thinking_chunk 的 content 增量进 reasoning 快照
+    for _ in 0..agentos_engine::transient::CHUNK_FLUSH_EVERY {
+        emit_stream_event(&router, "thinking_chunk", pipe, mid, "想").await;
+    }
+    let reg = agentos_engine::global_registry();
+    let snap = reg.get("default", pipe, &format!("chunk:{mid}")).unwrap();
+    assert_eq!(snap["text_len"], json!(0), "thinking 不进 text");
+    assert_eq!(
+        snap["reasoning_len"],
+        json!((agentos_engine::transient::CHUNK_FLUSH_EVERY as usize) * 3),
+        "thinking 增量按 reasoning_len 累积（UTF-8 字节长）"
+    );
+    reg.clear_pipeline("default", pipe);
+}
+
+#[tokio::test]
+async fn stream_interception_skips_without_session() {
+    // session 未接线：拦截点不执行（emit 成功路径只存在于 session 分支内），
+    // 寄存器零写入——热路径零开销语义。
+    let router = router_plain();
+    let mid = "p_acc_004";
+    let pipe = "pipe_stream_intercept_nosess";
+    for _ in 0..agentos_engine::transient::CHUNK_FLUSH_EVERY {
+        emit_stream_event(&router, "stream_chunk", pipe, mid, "a").await;
+    }
+    let reg = agentos_engine::global_registry();
+    assert!(
+        reg.get("default", pipe, &format!("chunk:{mid}")).is_none(),
+        "无 session 时不得累积（该分支不属拦截路径）"
+    );
+}

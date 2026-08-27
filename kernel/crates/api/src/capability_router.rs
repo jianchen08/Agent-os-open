@@ -868,6 +868,12 @@ impl KernelCapabilityRouter {
                     data["content"] = serde_json::Value::String(content.to_string());
                 }
                 let delivered = session.emit_event(thread_id, event_name, data).await;
+                // 流式拦截点顺带累积（一次 IPC 两个动作：推 WS + 写寄存器）。
+                // chunk 累积（ADR 2026-08-27 §2.4）+ 钩子分发挂桩（P1 不实现
+                // 钩子协议面，装载表恒空短路，零开销；协议面归管道步骤服务化
+                // 提案 §3.6，留注引用）。注意：热路径查表优先于分配，勿在此
+                // 追加大对象构造。
+                self.accumulate_stream_interception(event_name, payload, &thread_id, &message_id);
                 return Some(Ok(json!({
                     "status": if delivered { "emitted" } else { "dropped" },
                     "event": event_name,
@@ -889,6 +895,73 @@ impl KernelCapabilityRouter {
         }
         // session 未接线：引擎照常执行，无前端播报（视为 emitted）
         Some(Ok(json!({"status": "emitted", "event": event_name})))
+    }
+
+    /// 流式拦截点：chunk 累积 + 钩子分发挂桩（ADR 2026-08-27 §2.4）。
+    ///
+    /// 在 try_route_stream_family 的 emit 成功路径旁调用（信封校验已通过）：
+    /// - `stream_chunk`/`thinking_chunk`：`accumulate_chunk` 节流累积
+    ///   （每 N 个 chunk 或 500ms 一次写寄存器，计数与落盘都在寄存器模块内部）；
+    /// - `stream_end`/`stream_error`：最终形态已落 message_slots，清 chunk 键；
+    /// - 钩子分发挂桩：P1 不实现钩子协议面（装载表编译归管道步骤服务化提案
+    ///   §3.6，compiler.rs hooks 解析为另一步），此处只保留发射点语义——
+    ///   先查钩子装载表、空集直接短路。装载表恒空 → 零开销返回。
+    ///
+    /// [来源: docs/working/插件中间态统一管理方案_20260827.md §2.4/§3.6]
+    /// [来源: docs/decisions/2026-08-27-transient-state-register.md 决策3]
+    fn accumulate_stream_interception(
+        &self,
+        event_name: &str,
+        payload: &Value,
+        thread_id: &str,
+        message_id: &str,
+    ) {
+        let pipeline_id = payload
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if pipeline_id.is_empty() {
+            return;
+        }
+        // 钩子装载表查询（挂桩）：恒空集，短路返回——热路径零开销。
+        // 钩子协议面（配置 schema/装载表编译/最小作用域装载）归管道步骤
+        // 服务化提案 §3.6，本方案步骤 3 只保证挂点存在。
+        if !hook_dispatch_stub(pipeline_id, thread_id, event_name).is_empty() {
+            // 装载表非空时按 B 区登记的 message→step 归属过滤作用域后派发
+            // （B 区登记由引擎 execute_step 派发时写入）；P1 恒空，此分支
+            // 为协议面就绪后的落点预留。
+            let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+            let _step_id =
+                agentos_engine::global_registry().resolve_step_of(&tenant_id, pipeline_id, message_id);
+        }
+        match event_name {
+            "stream_chunk" | "thinking_chunk" => {
+                let content = payload
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                // thinking_chunk 的增量也走 content 字段（契约同构），
+                // 统一累积进 thinking 快照
+                let (text, thinking) = if event_name == "thinking_chunk" {
+                    ("", content)
+                } else {
+                    (content, "")
+                };
+                let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+                agentos_engine::global_registry().accumulate_chunk(
+                    &tenant_id,
+                    pipeline_id,
+                    message_id,
+                    text,
+                    thinking,
+                );
+            }
+            "stream_end" | "stream_error" => {
+                let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+                agentos_engine::global_registry().clear_chunk(&tenant_id, pipeline_id, message_id);
+            }
+            _ => {}
+        }
     }
 
     /// 工具事件族（tool_start/tool_result/tool_multimedia_result）：tool_core
@@ -1638,9 +1711,18 @@ impl KernelCapabilityRouter {
     }
 }
 
+/// 钩子装载表查询挂桩（ADR 2026-08-27 决策7 / 方案 §2.4 协作点）。
+///
+/// P1 不实现钩子协议面（配置 schema/装载表编译/最小作用域装载归管道步骤
+/// 服务化提案 §3.6，compiler.rs hooks 解析为另一步），恒返回空集——流式
+/// 热路径上的钩子零开销由"先查表再分发"保证，空集直接短路。
+/// 返回：命中当前 (pipeline, thread, event) 作用域的钩子 id 列表（空 = 无钩子）。
+fn hook_dispatch_stub(_pipeline_id: &str, _thread_id: &str, _event_name: &str) -> Vec<String> {
+    Vec::new()
+}
+
 /// 从 params 对象构造 MessageQueryOpts（before_sequence/after_sequence/limit）。
-fn parse_message_query_opts(params: &Value) -> MessageQueryOpts {
-    MessageQueryOpts {
+fn parse_message_query_opts(params: &Value) -> MessageQueryOpts {    MessageQueryOpts {
         before_sequence: params
             .get("before_sequence")
             .and_then(|v| v.as_u64())

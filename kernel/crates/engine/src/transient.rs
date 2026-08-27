@@ -26,13 +26,20 @@
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use parking_lot::RwLock;
-use serde_json::Value;
+use parking_lot::{Mutex, RwLock};
+use serde_json::{json, Value};
 
 /// A 区 LRU 上限（键数/进程）。超限逐出 `updated_at` 最老键。
 pub const MAX_KEYS_PER_PROCESS: usize = 1000;
+
+/// chunk 累积节流（方案 §2.4）：每 N 个 chunk 或距上次落盘 ≥ 本间隔才真正写
+/// 寄存器一次（写入频率 ~2-5 次/秒，防长流式高频 upsert）。
+pub const CHUNK_FLUSH_EVERY: u64 = 10;
+
+/// chunk 累积节流时间窗（毫秒）。
+pub const CHUNK_FLUSH_INTERVAL_MS: u64 = 500;
 
 /// 全局单例：进程级唯一 TransientStateRegistry。
 ///
@@ -63,6 +70,18 @@ pub struct MessageBinding {
     pub step_id: String,
 }
 
+/// chunk 累积节流档（方案 §2.4）：每 (tenant,pipeline,message) 一档，跨 chunk
+/// 持有增量拼接缓冲，达 [`CHUNK_FLUSH_EVERY`] 个或距上次落盘
+/// ≥ [`CHUNK_FLUSH_INTERVAL_MS`] 时把**累计快照**写进 A 区一次。
+struct ChunkAccumulator {
+    count: u64,
+    last_flush: Instant,
+    /// text/reasoning 增量拼接缓冲（复用 llm_service `_PartialAccumulator`
+    /// 快照语义的轻量版：只拼 text/thinking，不拼 tool_call 参数增量）。
+    text: String,
+    thinking: String,
+}
+
 /// 键值区（A 区）整体：per-(tenant,pipeline) → per-key。
 type KeyedStore = HashMap<(String, String), PipelineKeyMap>;
 /// 上下文登记区（B 区）整体：per-(tenant,pipeline) → (message_id → step_id)。
@@ -72,10 +91,14 @@ type BindingStore = HashMap<(String, String), HashMap<String, MessageBinding>>;
 ///
 /// 进程级单例（`global_registry()`），两区共用 `(tenant_id, pipeline_id)` 键
 /// 与 `clear_pipeline` 生命周期；A 区另有 LRU 上限逐出。
+/// chunk 累积节流计数（每 (tenant,pipeline,message) 一档）与两区同锁无关，
+/// 独立短锁互不影响读写热路径。
 #[derive(Clone)]
 pub struct TransientStateRegistry {
     keys: std::sync::Arc<RwLock<KeyedStore>>,
     bindings: std::sync::Arc<RwLock<BindingStore>>,
+    /// chunk 累积节流档：(tenant,pipeline,message_id) → 累积缓冲（短锁独立）。
+    chunk_accum: std::sync::Arc<Mutex<HashMap<(String, String, String), ChunkAccumulator>>>,
 }
 
 impl TransientStateRegistry {
@@ -84,6 +107,7 @@ impl TransientStateRegistry {
         Self {
             keys: std::sync::Arc::new(RwLock::new(HashMap::new())),
             bindings: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            chunk_accum: std::sync::Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -195,19 +219,135 @@ impl TransientStateRegistry {
             .map(|b| b.step_id.clone())
     }
 
+    // ── chunk 累积（方案 §2.4：拦截点顺带累积，一次 IPC 两个动作）────────
+
+    /// 累积一个流式 chunk 增量。返回 true = 本次真正写入了 A 区（节流判定通过）。
+    ///
+    /// 每 N 个 chunk 或距上次落盘 ≥ 500ms 才写一次（节流语义在寄存器模块内部，
+    /// 调用方零感知）。`content` 累加到 text 快照，`thinking` 累加到
+    /// reasoning 快照（thinking_chunk 事件带 thinking 字段时走这里）。
+    /// 快照结构（方案 §2.4）：`{ text_len, blocks_摘要 }`——text_len = 累计
+    /// 文本长度（轻量恢复占位）；reasoning_len 同理；不携带全文（节流粒度
+    /// 快照，逐字重建需另立事件订阅能力）。
+    pub fn accumulate_chunk(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        message_id: &str,
+        content: &str,
+        thinking: &str,
+    ) -> bool {
+        self.accumulate_chunk_at(tenant_id, pipeline_id, message_id, content, thinking, Instant::now())
+    }
+
+    /// `accumulate_chunk` 的时钟注入变体（fake clock：测试用可调 now 断言
+    /// 时序不变量，禁止零延迟 sleep；生产只走 [`Self::accumulate_chunk`]）。
+    fn accumulate_chunk_at(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        message_id: &str,
+        content: &str,
+        thinking: &str,
+        now: Instant,
+    ) -> bool {
+        let mut acc = self.chunk_accum.lock();
+        let key = (
+            tenant_id.to_string(),
+            pipeline_id.to_string(),
+            message_id.to_string(),
+        );
+        let entry = acc.entry(key).or_insert_with(|| ChunkAccumulator {
+            count: 0,
+            last_flush: now,
+            text: String::new(),
+            thinking: String::new(),
+        });
+        entry.count += 1;
+        if !content.is_empty() {
+            entry.text.push_str(content);
+        }
+        if !thinking.is_empty() {
+            entry.thinking.push_str(thinking);
+        }
+        let due = entry.count >= CHUNK_FLUSH_EVERY
+            || now.duration_since(entry.last_flush)
+                >= Duration::from_millis(CHUNK_FLUSH_INTERVAL_MS);
+        if !due {
+            return false;
+        }
+        // 落 A 区：chunk:<message_id> 键（键空间与 message_slots 主键隔离）。
+        // 快照在 chunk 锁内构造、计数与时间戳就地复位，锁外写 A 区——
+        // 与 clear_pipeline（keys → chunk_accum 顺序）锁序相反，绝不跨锁嵌套。
+        let snapshot = json!({
+            "text_len": entry.text.len(),
+            "reasoning_len": entry.thinking.len(),
+            "blocks": [{
+                "type": "text",
+                "content": entry.text,
+            }],
+        });
+        entry.count = 0;
+        entry.last_flush = now;
+        drop(acc);
+        self.set(tenant_id, pipeline_id, &format!("chunk:{message_id}"), snapshot);
+        true
+    }
+
+    /// 丢弃一条 chunk 累积（stream_end/stream_error 到达：最终形态已落
+    /// message_slots，chunk 中间态使命完成）。顺带清 A 区 chunk 键。
+    pub fn clear_chunk(&self, tenant_id: &str, pipeline_id: &str, message_id: &str) {
+        let key = (
+            tenant_id.to_string(),
+            pipeline_id.to_string(),
+            message_id.to_string(),
+        );
+        self.chunk_accum.lock().remove(&key);
+        self.clear(tenant_id, pipeline_id, &format!("chunk:{message_id}"));
+    }
+
+    /// 取该 message 的 chunk 累积快照（中断合并落库的数据源；None = 无累积）。
+    pub fn take_chunk_snapshot(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        message_id: &str,
+    ) -> Option<Value> {
+        let key = (
+            tenant_id.to_string(),
+            pipeline_id.to_string(),
+            message_id.to_string(),
+        );
+        self.chunk_accum.lock().get(&key).map(|e| {
+            json!({
+                "text_len": e.text.len(),
+                "reasoning_len": e.thinking.len(),
+                "blocks": [{
+                    "type": "text",
+                    "content": e.text,
+                }],
+            })
+        })
+    }
+
     // ── 两区共用生命周期 ──────────────────────────────────────
 
     /// 清一个管道的两区全部条目（管道/会话删除、run 收尾兜底时调用）。
+    /// chunk 累积节流档同清（管道级中间态整体作废）。
     pub fn clear_pipeline(&self, tenant_id: &str, pipeline_id: &str) {
         let pipe_key = (tenant_id.to_string(), pipeline_id.to_string());
         self.keys.write().remove(&pipe_key);
         self.bindings.write().remove(&pipe_key);
+        self.chunk_accum
+            .lock()
+            .retain(|(t, p, _), _| t != tenant_id || p != pipeline_id);
     }
 
     /// 清全部两区条目（跨租户；全量执行数据清理时使用）。
     pub fn clear_all(&self) {
         self.keys.write().clear();
         self.bindings.write().clear();
+        self.chunk_accum.lock().clear();
     }
 }
 
@@ -342,5 +482,103 @@ mod tests {
         reg.clear_all();
         assert!(reg.get("tenant_a", "pipe_1", "chunk:mc_a").is_none());
         assert!(reg.resolve_step_of("tenant_b", "pipe_2", "m1").is_none());
+    }
+
+    // ── chunk 累积 + 节流（方案 §2.4）──────────────────────────
+
+    #[test]
+    fn chunk_accumulate_throttles_until_count_threshold() {
+        let reg = TransientStateRegistry::new();
+        // 前 CHUNK_FLUSH_EVERY-1 个 chunk：节流不落 A 区（无 chunk: 键）
+        for i in 0..(CHUNK_FLUSH_EVERY - 1) {
+            let wrote = reg.accumulate_chunk(TENANT, "pipe_1", "m1", &format!("c{i}"), "");
+            assert!(!wrote, "节流窗内不得落 A 区");
+        }
+        assert!(reg.get(TENANT, "pipe_1", "chunk:m1").is_none());
+        // 第 N 个 chunk：达计数阈值落 A 区一次
+        let wrote = reg.accumulate_chunk(TENANT, "pipe_1", "m1", "c9", "");
+        assert!(wrote, "达计数阈值必须落 A 区");
+        let snap = reg.get(TENANT, "pipe_1", "chunk:m1").unwrap();
+        assert_eq!(snap["text_len"], json!((CHUNK_FLUSH_EVERY as usize) * 2));
+        // 下一轮重新计数：单 chunk 不落
+        assert!(!reg.accumulate_chunk(TENANT, "pipe_1", "m1", "x", ""));
+        assert!(reg.get(TENANT, "pipe_1", "chunk:m1").is_some());
+    }
+
+    #[test]
+    fn chunk_accumulate_throttles_until_time_threshold() {
+        let reg = TransientStateRegistry::new();
+        let t0 = Instant::now();
+        // 未达计数阈值且未超时间窗 → 不落
+        assert!(!reg.accumulate_chunk_at(TENANT, "pipe_1", "m1", "a", "", t0));
+        // 未达计数阈值但距上次落盘超过时间窗 → 落 A 区（fake clock 注入）
+        let wrote = reg.accumulate_chunk_at(
+            TENANT,
+            "pipe_1",
+            "m1",
+            "b",
+            "",
+            t0 + Duration::from_millis(CHUNK_FLUSH_INTERVAL_MS + 1),
+        );
+        assert!(wrote, "超时间窗必须落 A 区");
+        let snap = reg.get(TENANT, "pipe_1", "chunk:m1").unwrap();
+        assert_eq!(snap["text_len"], json!(2), "text 增量拼接");
+        // 落盘后计数复位：紧接着的同刻 chunk 不再落
+        assert!(!reg.accumulate_chunk_at(TENANT, "pipe_1", "m1", "c", "", t0));
+    }
+
+    #[test]
+    fn chunk_accumulate_thinking_separate() {
+        let reg = TransientStateRegistry::new();
+        // thinking 增量单独累加（thinking_chunk 事件）
+        for i in 0..CHUNK_FLUSH_EVERY {
+            reg.accumulate_chunk(TENANT, "pipe_1", "m1", "", &format!("t{i}"));
+        }
+        let snap = reg.get(TENANT, "pipe_1", "chunk:m1").unwrap();
+        assert_eq!(snap["text_len"], json!(0), "无 text 增量");
+        assert_eq!(
+            snap["reasoning_len"],
+            json!((CHUNK_FLUSH_EVERY as usize) * 2),
+            "thinking 增量按 reasoning_len 累积"
+        );
+    }
+
+    #[test]
+    fn chunk_clear_removes_accumulator_and_key() {
+        let reg = TransientStateRegistry::new();
+        for _ in 0..CHUNK_FLUSH_EVERY {
+            reg.accumulate_chunk(TENANT, "pipe_1", "m1", "x", "");
+        }
+        assert!(reg.get(TENANT, "pipe_1", "chunk:m1").is_some());
+        reg.clear_chunk(TENANT, "pipe_1", "m1");
+        assert!(reg.get(TENANT, "pipe_1", "chunk:m1").is_none());
+        // 清除后重新累积从零开始（第 N 个才落）
+        assert!(!reg.accumulate_chunk(TENANT, "pipe_1", "m1", "a", ""));
+    }
+
+    #[test]
+    fn chunk_snapshot_take_for_stop_merge() {
+        let reg = TransientStateRegistry::new();
+        assert!(reg.take_chunk_snapshot(TENANT, "pipe_1", "m1").is_none());
+        reg.accumulate_chunk(TENANT, "pipe_1", "m1", "半截", "想");
+        let snap = reg.take_chunk_snapshot(TENANT, "pipe_1", "m1").unwrap();
+        assert!(snap["blocks"][0]["content"].as_str().unwrap().contains("半截"));
+        assert_eq!(snap["reasoning_len"], json!(3));
+    }
+
+    #[test]
+    fn chunk_accumulator_isolated_per_pipeline_and_tenant() {
+        let reg = TransientStateRegistry::new();
+        reg.accumulate_chunk(TENANT, "pipe_1", "m1", "aaa", "");
+        reg.accumulate_chunk("tenant_b", "pipe_1", "m1", "bb", "");
+        for _ in 0..CHUNK_FLUSH_EVERY {
+            reg.accumulate_chunk(TENANT, "pipe_1", "m1", "c", "");
+        }
+        // 管道/租户间计数独立：tenant_b 的档仍在节流窗内
+        assert!(!reg.accumulate_chunk("tenant_b", "pipe_1", "m1", "x", ""));
+        // clear_pipeline 只清本管道（含节流档）
+        reg.clear_pipeline(TENANT, "pipe_1");
+        assert!(reg.get(TENANT, "pipe_1", "chunk:m1").is_none());
+        assert!(!reg.accumulate_chunk(TENANT, "pipe_1", "m1", "a", ""), "节流档已随管道清除");
     }
 }
