@@ -47,6 +47,8 @@ class TestFileWriteWorkspaceConstraint:
         )
         assert result.success is True
         assert target.read_text(encoding="utf-8") == "hello"
+        # file 字段 = 写盘后的绝对路径（卡片打开坐标契约）
+        assert Path(result.output["file"]) == target.resolve()
 
     async def test_write_relative_path_resolved_in_workspace(self, tmp_path: Path) -> None:
         """相对路径以 workspace 为基准解析，落在根内则通过。"""
@@ -58,6 +60,7 @@ class TestFileWriteWorkspaceConstraint:
         )
         assert result.success is True
         assert (ws / "rel.txt").read_text(encoding="utf-8") == "ok"
+        assert Path(result.output["file"]) == (ws / "rel.txt").resolve()
 
     async def test_write_traversal_escape_rejected(self, tmp_path: Path) -> None:
         """相对路径含 .. 逃逸出 workspace 被拒。"""
@@ -76,6 +79,23 @@ class TestFileWriteWorkspaceConstraint:
         result = await file_write(path=str(target), action="write", content="x")
         assert result.success is True
         assert target.exists()
+        # 无注入时 file 字段仍绝对化（以 sidecar cwd 为锚），卡片才打得开
+        assert Path(result.output["file"]) == target.resolve()
+
+    async def test_write_relative_path_without_injection_file_absolute(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """未注入 workspace 且 agent 传相对路径（主会话常见）：file 字段绝对化。
+
+        工具进程 cwd = 插件目录，相对路径以 cwd 解析——输出绝对化后前端
+        fileOpener 直读才对得上（相对路径在项目根/_local 下不存在）。
+        """
+        monkeypatch.chdir(tmp_path)
+        result = await file_write(path="rel.txt", action="write", content="ok")
+        assert result.success is True
+        assert (tmp_path / "rel.txt").read_text(encoding="utf-8") == "ok"
+        assert Path(result.output["file"]) == (tmp_path / "rel.txt").resolve()
+        assert Path(result.output["file"]).is_absolute()
 
 
 class TestMoveFileWorkspaceConstraint:
@@ -187,15 +207,24 @@ class TestFileReadReturnsResolvedPath:
         assert resolved.is_absolute()
         assert resolved == ws / "doc.txt"
 
-    async def test_without_injection_path_passthrough(self, tmp_path: Path) -> None:
-        """未注入 workspace/project_root（L1 主会话）：路径原样回传（前端按项目根解析）。"""
+    async def test_without_injection_path_absolute_normalized(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """未注入 workspace/project_root（L1 主会话）：file 字段仍为绝对路径。
+
+        相对路径以 sidecar cwd（工具进程工作目录）为锚 resolve——前端工具卡片
+        按 file 字段直读宿主文件系统，原样回传 agent 视角相对路径将打不开
+        （_local 项目根下不存在该文件）。
+        """
         target = tmp_path / "free.txt"
         target.write_text("x\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
 
-        result = await file_read(path=str(target))
+        result = await file_read(path="free.txt")
 
         assert result.success is True
-        assert result.output["file"] == str(target)
+        assert Path(result.output["file"]) == target.resolve()
+        assert Path(result.output["file"]).is_absolute()
 
     async def test_absolute_outside_path_readable_and_normalized(self, tmp_path: Path) -> None:
         """根外绝对路径读取放行（只读兼容），file 回传 resolve 归一后的宿主路径。"""

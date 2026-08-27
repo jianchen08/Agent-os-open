@@ -117,10 +117,11 @@ async def file_read(
     """读取文件内容。
 
     支持行范围读取和尾部读取。workspace 外路径允许读取但记录 warning（B5）。
-    注入 workspace/project_root 时读取与返回的 file 字段均用重映射+锚定后的
-    宿主侧绝对路径（容器挂载路径 /workspace/* → 宿主工作空间、相对路径 →
-    根锚定；对齐 file_write 消费 _check_workspace_path 返回值的模式）——前端
-    工具卡片按 file 字段直读宿主文件系统，原样回传 agent 视角路径将打不开。
+    返回的 file 字段恒为宿主侧绝对路径（容器挂载路径 /workspace/* → 宿主
+    工作空间、相对路径 → 根锚定；未注入 workspace/project_root 时以 sidecar
+    cwd 解析绝对化——对齐 file_write 消费 _check_workspace_path 返回值的
+    模式）——前端工具卡片按 file 字段直读宿主文件系统，原样回传 agent 视角
+    相对路径将打不开（_local 根解析不到 sidecar cwd 下的文件）。
     """
     # 工作空间约束（读路径：放行但记录，保持只读向后兼容）
     _, _, resolved = _check_workspace_path(path, workspace, project_root, operation="read")
@@ -159,7 +160,7 @@ async def file_read(
 
     return ToolResult.success_result(
         {
-            "file": path,
+            "file": str(file_path.resolve()),
             "lines": len(selected),
             "size": size,
             "content": "\n".join(selected),
@@ -196,6 +197,7 @@ FILE_WRITE_SCHEMA: dict[str, Any] = {
 FILE_WRITE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "file": {"type": "string", "description": "写盘后的宿主绝对路径（前端卡片打开用）"},
         "added": {"type": "integer"},
         "removed": {"type": "integer"},
         "backup": {"type": ["string", "null"]},
@@ -238,7 +240,14 @@ async def file_write(
             await asyncio.to_thread(file_path.write_text, content, "utf-8")
             added = content.count("\n") + 1 if content else 0
             return ToolResult.success_result(
-                {"added": added, "removed": 0, "backup": backup, "old_content": existing, "new_content": content},
+                {
+                    "file": str(file_path.resolve()),
+                    "added": added,
+                    "removed": 0,
+                    "backup": backup,
+                    "old_content": existing,
+                    "new_content": content,
+                },
             )
 
         if action == "append":
@@ -247,6 +256,7 @@ async def file_write(
             file_path.write_text(existing + content, "utf-8")
             return ToolResult.success_result(
                 {
+                    "file": str(file_path.resolve()),
                     "added": content.count("\n") + 1 if content else 0,
                     "removed": 0,
                     "backup": backup,
@@ -271,7 +281,14 @@ async def file_write(
             new_content = existing.replace(old_str, replacement)
             file_path.write_text(new_content, "utf-8")
             return ToolResult.success_result(
-                {"added": 0, "removed": 0, "backup": backup, "old_content": existing, "new_content": new_content},
+                {
+                    "file": str(file_path.resolve()),
+                    "added": 0,
+                    "removed": 0,
+                    "backup": backup,
+                    "old_content": existing,
+                    "new_content": new_content,
+                },
                 replacements=count_replace,
             )
 
@@ -286,6 +303,7 @@ async def file_write(
             file_path.write_text("\n".join(lines), "utf-8")
             return ToolResult.success_result(
                 {
+                    "file": str(file_path.resolve()),
                     "added": content.count("\n") + 1 if content else 0,
                     "removed": 0,
                     "backup": backup,
@@ -307,6 +325,7 @@ async def file_write(
             file_path.write_text("\n".join(lines), "utf-8")
             return ToolResult.success_result(
                 {
+                    "file": str(file_path.resolve()),
                     "added": 0,
                     "removed": end - start_line + 1,
                     "backup": backup,

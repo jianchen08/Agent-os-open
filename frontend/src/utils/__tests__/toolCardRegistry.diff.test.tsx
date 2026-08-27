@@ -24,7 +24,7 @@ import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 const FILE_WRITE_DECL: ChatCardDeclaration = {
   icon: 'edit',
   title: '写入 {{args.path | basename | default:file_write}}',
-  filePathSource: 'args.path',
+  filePathSource: 'output.file || result.file',
   diffStat: {
     addedSource: 'output.added || result.added',
     removedSource: 'output.removed || result.removed',

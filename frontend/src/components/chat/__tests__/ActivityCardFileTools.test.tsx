@@ -95,7 +95,7 @@ describe('文件工具卡片功能: file_read 打开文件链路（点击 → fi
     renderToolCard(
       makeToolCall({
         tool_args: { path: 'src/main.py' },
-        resultData: { file: 'src/main.py', lines: 2, size: 20, content: 'print(1)\nprint(2)' },
+        resultData: { file: '/app/src/main.py', lines: 2, size: 20, content: 'print(1)\nprint(2)' },
         containerTaskId: 'task-7',
       }),
     )
@@ -103,13 +103,13 @@ describe('文件工具卡片功能: file_read 打开文件链路（点击 → fi
     // read 卡正文渲染（ReadBlock 行文本可见）
     expect(screen.getByText('print(1)')).toBeInTheDocument()
 
-    // 点击"打开文件"按钮 → 真实 fileOpener 走通
-    fireEvent.click(screen.getByRole('button', { name: '打开文件 src/main.py' }))
+    // 点击"打开文件"按钮 → 真实 fileOpener 走通（file 为插件输出的宿主绝对路径）
+    fireEvent.click(screen.getByRole('button', { name: '打开文件 /app/src/main.py' }))
 
     await waitFor(() => {
-      expect(getFileEditorData('file-local-src_main.py')?.content).toBe('print(1)\nprint(2)')
+      expect(getFileEditorData('file-local-_app_src_main.py')?.content).toBe('print(1)\nprint(2)')
     })
-    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('task-7'), { params: { path: 'src/main.py' } })
+    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('task-7'), { params: { path: '/app/src/main.py' } })
 
     const tabs = useLayoutModeStore.getState().workspaceTabs
     expect(tabs).toHaveLength(1)
@@ -125,20 +125,20 @@ describe('文件工具卡片功能: file_read 打开文件链路（点击 → fi
     const { container } = renderToolCard(
       makeToolCall({
         tool_args: { path: 'lib/util.ts' },
-        resultData: { file: 'lib/util.ts', lines: 1, size: 1, content: 'x' },
+        resultData: { file: '/app/lib/util.ts', lines: 1, size: 1, content: 'x' },
       }),
     )
 
     // 标题是可点击文件名（title 属性提示打开行为）
-    const titleEl = container.querySelector('[title="点击打开文件: lib/util.ts"]')
+    const titleEl = container.querySelector('[title="点击打开文件: /app/lib/util.ts"]')
     expect(titleEl).toBeInTheDocument()
     fireEvent.click(titleEl!)
 
     await waitFor(() => {
-      expect(getFileEditorData('file-local-lib_util.ts')).toBeDefined()
+      expect(getFileEditorData('file-local-_app_lib_util.ts')).toBeDefined()
     })
-    // 无 containerTaskId 时走 _local（项目根）
-    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('_local'), { params: { path: 'lib/util.ts' } })
+    // 无 containerTaskId 时走 _local（项目根）；绝对路径由后端直读
+    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('_local'), { params: { path: '/app/lib/util.ts' } })
   })
 })
 
@@ -159,6 +159,7 @@ describe('文件工具卡片功能: file_write diff 渲染 + 完整文件切换�
 
   /** search_replace 编辑已有文件的后端真实输出（fs_tools.file_write，扁平 result_data） */
   const editedOutput = {
+    file: '/app/a.txt',
     added: 1,
     removed: 1,
     backup: null,
@@ -260,13 +261,14 @@ describe('文件工具卡片功能: file_write diff 渲染 + 完整文件切换�
       }),
     )
 
-    // actions 区的"打开文件"按钮（与头部按钮 aria-label 不同名）
+    // actions 区的"打开文件"按钮（与头部按钮 aria-label 不同名）；
+    // 打开路径 = 输出 file 字段（写盘后绝对路径），而非 args.path 原始参数
     fireEvent.click(screen.getByRole('button', { name: '打开文件', exact: true }))
 
     await waitFor(() => {
-      expect(getFileEditorData('file-local-a.txt')?.content).toContain('hello Rust')
+      expect(getFileEditorData('file-local-_app_a.txt')?.content).toContain('hello Rust')
     })
-    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('task-9'), { params: { path: 'a.txt' } })
+    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('task-9'), { params: { path: '/app/a.txt' } })
     expect(useLayoutModeStore.getState().workspaceTabs).toHaveLength(1)
   })
 })
