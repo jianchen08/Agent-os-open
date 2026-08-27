@@ -240,8 +240,9 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             return PluginResult()
 
         source_path = ws_spec.get("source_path") or ""
-        # 模式未指定 → 默认 worktree（不是 plain）。
-        mode = ws_spec.get("mode") or "worktree"
+        # 模式未指定 → 默认 plain（直接操作目标目录）；worktree 是显式选择
+        # （需先填写工作空间，前端表单联动锁定）。
+        mode = ws_spec.get("mode") or "plain"
         # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id
         # （点号键）。缺 task 上下文 = 主会话纯解析。
         task_id = state.get("task.id") or ""

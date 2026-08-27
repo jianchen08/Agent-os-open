@@ -276,31 +276,11 @@
   "contributes": {
     "thread_fields": [
       {
-        "name": "workspace",
-        "type": "string",
-        "label": "工作空间",
-        "description": "主会话工作目录（项目路径），留空则按默认目录自动生成。该插件域（工作空间服务）贡献的会话级工作空间设置，随线程创建写入 thread metadata → execution_context。"
-      },
-      {
-        "name": "workspaceMode",
-        "type": "select",
-        "label": "工作空间拓扑",
-        "options": [
-          {
-            "label": "worktree（隔离副本，默认）",
-            "value": "worktree"
-          },
-          {
-            "label": "plain（直接操作目标目录）",
-            "value": "plain"
-          }
-        ],
-        "description": "会话工作空间的拓扑形态（worktree/plain），与隔离模式相互独立。未填工作空间时同样生效（自动生成的空间按此拓扑创建），随线程创建写入 thread metadata → execution_context.workspace.mode。"
-      },
-      {
         "name": "isolationMode",
         "type": "select",
         "label": "隔离模式",
+        "x_metadata_key": "isolation_mode",
+        "x_execution_path": "isolation.level",
         "options": [
           {
             "label": "非隔离",
@@ -311,7 +291,7 @@
             "value": "isolated"
           }
         ],
-        "description": "主会话执行环境隔离（容器/宿主），与工作空间拓扑解耦。不依赖工作空间填写——未填时按默认目录自动生成后同样生效，随线程创建写入 thread metadata → execution_context。"
+        "description": "主会话执行环境隔离（容器/宿主），与工作空间拓扑解耦。不依赖工作空间填写——未填时按默认目录自动生成后同样生效，随线程创建写入 thread metadata → execution_context."
       }
     ],
     "pages": [

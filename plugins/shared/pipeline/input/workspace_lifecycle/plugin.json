@@ -23,5 +23,39 @@
   ],
   "granted_capabilities": [
     "pipeline-state"
-  ]
+  ],
+  "contributes": {
+    "thread_fields": [
+      {
+        "name": "workspace",
+        "type": "string",
+        "label": "工作空间",
+        "x_metadata_key": "workspace",
+        "x_execution_path": "workspace.source_path",
+        "description": "主会话工作目录（项目路径），留空则使用自动生成的默认目录（拓扑固定 plain）。本插件域（工作空间生命周期）贡献的会话级工作空间设置，随线程创建写入 thread metadata → execution_context.workspace.source_path。"
+      },
+      {
+        "name": "workspaceMode",
+        "type": "select",
+        "label": "工作空间拓扑",
+        "x_metadata_key": "workspace_mode",
+        "x_execution_path": "workspace.mode",
+        "options": [
+          {
+            "label": "plain（直接操作目标目录，默认）",
+            "value": "plain"
+          },
+          {
+            "label": "worktree（隔离副本，需先填写工作空间）",
+            "value": "worktree"
+          }
+        ],
+        "description": "会话工作空间的拓扑形态，与隔离模式相互独立。默认 plain 直接操作目标目录；仅在工作空间已填写时可选择 worktree（在项目上建隔离副本），随线程创建写入 thread metadata → execution_context.workspace.mode。",
+        "x_guard": {
+          "requires": "workspace",
+          "on_empty": "plain"
+        }
+      }
+    ]
+  }
 }
