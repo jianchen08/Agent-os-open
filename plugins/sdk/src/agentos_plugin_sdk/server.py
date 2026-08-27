@@ -40,12 +40,19 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.exceptions import MCPError
 from mcp_types.jsonrpc import INVALID_PARAMS
 
+from agentos_plugin_sdk.step_dispatch import dispatch_pipe_hook_registry
 from agentos_plugin_sdk.types import LifecycleEvent, ResourceDef, ToolDef
 
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "agentos-plugin-sdk"
 SERVER_VERSION = "0.2.0"
+
+# 约定字段——内核在 execute 调用的 config 中注入，SDK 据此分发（提案 §3.4/§3.6）：
+# - _step_method：具名步骤调用（str = manifest capabilities.steps 的步骤 name）
+# - _pipe_hook：管道钩子调用（{"event": <str>, "payload": {...}}）
+_STEP_METHOD_KEY = "_step_method"
+_PIPE_HOOK_KEY = "_pipe_hook"
 
 
 def _augment_description(description: str, output_schema: dict[str, Any] | None) -> str:
@@ -255,12 +262,16 @@ class McpServer:
         lifecycle_handlers: dict[str, Any],
         on_initialize: Any | None = None,
         kernel_channel: KernelChannel | None = None,
+        steps: dict[str, Any] | None = None,
+        pipe_hooks: dict[str, list[Any]] | None = None,
     ) -> None:
         self._tools = tools
         self._resources = resources
         self._lifecycle_handlers = lifecycle_handlers
         self._on_initialize = on_initialize
         self._kernel_channel = kernel_channel
+        self._steps: dict[str, Any] = steps or {}
+        self._pipe_hooks: dict[str, list[Any]] = pipe_hooks or {}
         self._sdk = self._build_sdk_server()
 
     # ── 官方 SDK 装配 ────────────────────────────────────
@@ -340,9 +351,18 @@ class McpServer:
         return await self._handle_tools_call({"name": params.name, "arguments": dict(params.arguments or {})})
 
     async def _handle_tools_call(self, params: dict[str, Any]) -> types.CallToolResult:
-        """分发 tools/call 到已注册 handler（保留旧分发语义，供单测直调）。"""
+        """分发 tools/call 到已注册 handler（保留旧分发语义，供单测直调）。
+
+        约定字段优先（提案 §3.4/§3.6，与 ``tool_call_json`` 同构先例的第二次
+        应用）：config 携带 ``_step_method``/``_pipe_hook`` 时，本次调用是
+        具名步骤/管道钩子，直接按注册表分发，不落入工具表。
+        """
         name = params.get("name", "")
         arguments = dict(params.get("arguments") or {})
+
+        convention = await self._dispatch_convention(arguments)
+        if convention is not None:
+            return convention
 
         td = self._tools.get(name)
         if td is None:
@@ -398,6 +418,73 @@ class McpServer:
             content=[types.TextContent(type="text", text=json.dumps(result, default=str))],
             is_error=False,
         )
+
+    # ── 约定字段分发（步骤服务化，提案 §3.4/§3.6）─────────
+
+    async def _dispatch_convention(self, arguments: dict[str, Any]) -> types.CallToolResult | None:
+        """按 config 中的约定字段分发具名步骤/管道钩子；无约定字段返回 None。
+
+        内核把调用意图注入 ``arguments["config"]``：
+        - ``_step_method``：具名步骤调用。命中已注册 handler → 以
+          state/config 原样调用；未命中 → 抛 StepNotFoundError（fail-closed，
+          文案含步骤名与已注册清单），绝不静默退回默认 execute。
+        - ``_pipe_hook``：管道钩子调用，分发到该事件的注册 handler 列表，
+          收集非空返回。
+        - 均未注入：返回 None，调用方走原默认工具分发路径（存量插件零感知）。
+        """
+        config = arguments.get("config")
+        if not isinstance(config, dict):
+            return None
+
+        step_name = config.get(_STEP_METHOD_KEY)
+        if isinstance(step_name, str):
+            return await self._dispatch_step(step_name, arguments)
+
+        hook_spec = config.get(_PIPE_HOOK_KEY)
+        if isinstance(hook_spec, dict):
+            return await self._dispatch_hook(hook_spec, arguments)
+
+        return None
+
+    async def _dispatch_step(self, step_name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+        """具名步骤分发：命中注册表直接调用；未注册抛 StepNotFoundError。"""
+        from agentos_plugin_sdk.exceptions.step import StepNotFoundError
+
+        handler = self._steps.get(step_name)
+        if handler is None:
+            raise StepNotFoundError(step_name, declared_steps=sorted(self._steps))
+        result = handler(arguments.get("state"), arguments.get("config"))
+        if asyncio.iscoroutine(result):
+            result = await result
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps(result, default=str))],
+            is_error=False,
+        )
+
+    async def _dispatch_hook(self, hook_spec: dict[str, Any], arguments: dict[str, Any]) -> types.CallToolResult:
+        """管道钩子分发：``_pipe_hook = {"event": <str>, "payload": {...}}``。
+
+        payload 优先取约定字段（内核经 config 注入），缺省回退到 execute 的
+        ``arguments`` 直传负载（与约定字段注入点无关的旧式调用形态）。
+        """
+        event = hook_spec.get("event")
+        payload = hook_spec.get("payload")
+        if isinstance(payload, dict):
+            results = await self.dispatch_pipe_hook(str(event), payload)
+        else:
+            results = await self.dispatch_pipe_hook(str(event), dict(arguments))
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps(results, default=str))],
+            is_error=False,
+        )
+
+    async def dispatch_pipe_hook(self, event: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """公开分发入口：顺序 await 该事件的全部钩子 handler，收集非空返回。
+
+        结构化否决指令（``{"decision": "terminate", "reason": ...}``）与普通
+        观察结果同列返回，多决策并存由内核裁决；无注册者返回空列表。
+        """
+        return await dispatch_pipe_hook_registry(self._pipe_hooks, event, payload)
 
     async def _on_list_resources(self, ctx: Any, params: Any) -> types.ListResourcesResult:
         """resources/list——返回已注册资源。"""

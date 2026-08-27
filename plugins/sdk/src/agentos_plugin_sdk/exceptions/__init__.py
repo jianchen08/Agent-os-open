@@ -88,6 +88,7 @@ from agentos_plugin_sdk.exceptions.llm import (
     RateLimitError,
 )
 from agentos_plugin_sdk.exceptions.reasoning import ReasoningRequiredError
+from agentos_plugin_sdk.exceptions.step import StepException, StepNotFoundError
 from agentos_plugin_sdk.exceptions.tool import (
     ApprovalRequiredError,
     MCPConfigError,
@@ -170,6 +171,9 @@ __all__ = [
     "QuotaExhaustedException",
     # DI 异常
     "DIException",
+    # Step 异常
+    "StepException",
+    "StepNotFoundError",
     "ServiceNotFoundError",
     "ServiceAlreadyRegisteredError",
     "CircularDependencyError",

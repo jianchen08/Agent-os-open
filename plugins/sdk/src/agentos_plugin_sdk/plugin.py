@@ -1,6 +1,16 @@
 """AgentOSPlugin 基类。
 
-提供工具注册、资源注册、生命周期钩子、能力句柄获取和 MCP 服务端启动。
+提供工具注册、步骤服务注册、管道钩子注册、资源注册、生命周期钩子、能力
+句柄获取和 MCP 服务端启动。
+
+- 步骤服务：``@plugin.step(name)`` 注册管道具名步骤（与 plugin.json 的
+  ``capabilities.steps`` 对齐）；内核以 ``config["_step_method"]`` 明示调用
+  时，SDK 分发到对应 handler，未注册即拒绝（fail-closed）。未注入该键的
+  存量调用走原默认 execute 路径，插件零感知。
+- 管道钩子：``@plugin.pipe_hook(event)`` 注册管道级观察者；内核以
+  ``config["_pipe_hook"]`` 经同一 execute 通道同步调用，handler 返回 dict
+  （可含结构化否决指令 ``{"decision": "terminate", "reason": ...}``）。
+  见 docs/working/管道步骤服务化与能力本位提案_20260827.md §3.4/§3.6。
 
 [来源: docs/tasks/task_08_python_sdk.md AC-07-1/AC-07-3/AC-07-5]
 """
@@ -39,6 +49,10 @@ class AgentOSPlugin:
         self._lifecycle_handlers: dict[str, Callable[..., Any]] = {}
         self._capabilities: dict[str, CapabilityHandle] = {}
         self._injected_config: dict[str, Any] = {}
+        # 管道步骤服务注册表：name → handler（name 与 manifest capabilities.steps 一致）
+        self.steps: dict[str, Callable[..., Any]] = {}
+        # 管道钩子注册表：event → handler 列表（同一事件多 handler 顺序调用）
+        self.pipe_hooks: dict[str, list[Callable[..., Any]]] = {}
         # sidecar→内核反向调用通道（与 McpServer 共享，复用 stdin 多路复用）
         self._kernel_channel: KernelChannel | None = None
 
@@ -121,7 +135,64 @@ class AgentOSPlugin:
             mime_type=mime_type,
         )
 
-    # ── 生命周期钩子 ──────────────────────────────────────
+    # ── 步骤服务注册（管道服务化，提案 §3.4）──────────────
+
+    def step(self, name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """装饰器——注册管道具名步骤 handler。
+
+        name 必须与 plugin.json 的 ``capabilities.steps`` 里声明的步骤名一致
+        （内核按 manifest 具名调用，声明与实现错位属 manifest 错误）。
+
+        Usage:
+            @plugin.step("task.remind")
+            async def remind(state: dict, config: dict | None = None) -> dict:
+                return {"state_updates": {...}}
+
+        与 execute 相同的返回契约（state updates dict 等）；handler 收到
+        state/config 原样透传（``config["_step_method"]`` 保留，供 handler
+        内省）。
+        """
+
+        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+            self.steps[name] = func
+            return func
+
+        return decorator
+
+    def pipe_hook(self, event: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """装饰器——注册管道钩子观察者 handler。
+
+        同一事件可注册多个 handler，分发时按注册顺序 await 调用。
+
+        Usage:
+            @plugin.pipe_hook("stream_chunk")
+            async def on_chunk(payload: dict) -> dict | None:
+                if payload.get("bad"):
+                    return {"decision": "terminate", "reason": "..."}
+                return None
+
+        Returns:
+            handler 返回 dict（非空返回收集进分发结果，可含结构化否决指令
+            ``{"decision": "terminate", "reason": <str>}``）；返回 None 表示
+            观察但不产生输出。
+        """
+
+        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+            self.pipe_hooks.setdefault(event, []).append(func)
+            return func
+
+        return decorator
+
+    def get_declared_steps(self) -> list[str]:
+        """返回已注册的步骤名清单（排序稳定）。
+
+        用于 manifest 一致性自检：与 plugin.json ``capabilities.steps`` 声明
+        核对（SDK 不持有 manifest 文件路径时，手工核对即可——内核按 manifest
+        具名调用，声明与注册错位会在调用时以 StepNotFoundError fail-closed）。
+        """
+        return sorted(self.steps)
+
+    # ── 资源注册 ──────────────────────────────────────────
 
     def on_lifecycle(self, event: str, handler: Callable[..., Any]) -> None:
         """注册生命周期钩子。
@@ -314,5 +385,7 @@ class AgentOSPlugin:
             lifecycle_handlers=self._lifecycle_handlers,
             on_initialize=self._on_initialize,
             kernel_channel=self._kernel_channel,
+            steps=self.steps,
+            pipe_hooks=self.pipe_hooks,
         )
         asyncio.run(server.run())

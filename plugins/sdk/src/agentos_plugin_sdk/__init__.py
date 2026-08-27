@@ -17,6 +17,7 @@ from agentos_plugin_sdk.capability import (
 )
 from agentos_plugin_sdk.cohost import CohostServer
 from agentos_plugin_sdk.enum_utils import safe_enum_value
+from agentos_plugin_sdk.exceptions.step import StepException, StepNotFoundError
 from agentos_plugin_sdk.logging import (
     ContextFilter,
     JsonFormatter,
@@ -35,6 +36,7 @@ from agentos_plugin_sdk.results import (
 )
 from agentos_plugin_sdk.server import McpServer
 from agentos_plugin_sdk.settings import Settings, get_settings
+from agentos_plugin_sdk.step_dispatch import dispatch_pipe_hook_registry
 from agentos_plugin_sdk.tool import collect_tools, tool
 from agentos_plugin_sdk.tool_types import (
     InjectedArg,
@@ -84,6 +86,8 @@ __all__ = [
     "ResourceDef",
     "STANDARD_CAPABILITIES",
     "Settings",
+    "StepException",
+    "StepNotFoundError",
     "StructuredFormatter",
     "Tool",
     "ToolCategory",
@@ -99,6 +103,7 @@ __all__ = [
     "collect_tools",
     "create_failure_result",
     "create_success_result",
+    "dispatch_pipe_hook_registry",
     "get_logger",
     "get_settings",
     "register_builtin_tool",
