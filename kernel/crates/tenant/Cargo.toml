@@ -8,10 +8,4 @@ description = "Lingxi AgentOS 0.2 tenant context — task_local propagation and 
 
 [dependencies]
 tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-async-trait.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-uuid.workspace = true
 agentos-core.workspace = true
