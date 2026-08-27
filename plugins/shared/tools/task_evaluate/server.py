@@ -27,14 +27,14 @@ plugin = AgentOSPlugin("task_evaluate_tool")
 
 @plugin.on_load
 async def _on_load(_params: dict[str, Any]) -> None:
-    """sidecar 启动：注入 state 读写面 + 评估执行器（GAP-1 统一 + 批次B）。
+    """sidecar 启动：注入 state 读写面 + 评估执行器。
 
     读：评估输入从 state 读（pipeline-state.list）。
     写：评估终态（task.status/task.ended_at）经 pipeline-state.update 落
-    state 单一真值——2026-08-24 职责边界裁定：任务状态由任务域插件裁决，
-    内核只管管道运行域（run 终态只广播事件，不再回写 task.status）。
+    state 单一真值——任务状态由任务域插件裁决，内核只管管道运行域
+    （run 终态只广播事件，不再回写 task.status）。
     执行器：PipelineEvaluationExecutor（0.2 生产版——tool 型本地跑，agent 型
-    派评估子管道继承任务工作区，R2）。能力句柄懒解析（协程内 get_capability），
+    派评估子管道继承任务工作区）。能力句柄懒解析（协程内 get_capability），
     on_load 早于 capability 注入完成也能在真正派发时拿到。
     """
     import tool as tool_mod  # noqa: PLC0415

@@ -319,8 +319,6 @@ class TestTaskSubmitCoreSubmit:
         task = _make_task()
         task_service, _ = self._patch_submit_deps(mod, monkeypatch, task)
         # provider.get 全部返回 None（helper 默认），模拟 worker/执行器不可用
-        # （_init_workspace 补丁已删：该链路随 task_service 写路径时代退役，
-        #  见 task_submit/tool.py "ws_meta 链路"注释）
 
         tool = mod.TaskSubmitTool()
         result = await tool.execute(

@@ -46,8 +46,8 @@ logger = logging.getLogger(__name__)
 # 如 {"pipeline_id": ..., "task.status": ..., "task.goal": ...}）。None = 未注入
 # （读面回退 task_service YAML 只读镜像）。
 # 写：``(pipeline_id, fields) -> None``（async，经 pipeline-state.update 落
-# state 单一真值——2026-08-24 职责边界裁定：任务状态由任务域插件裁决写入，
-# 内核不再回写 task.status）。None = 未注入（写面降级：仅 YAML 镜像）。
+# state 单一真值——任务状态由任务域插件裁决写入，内核不回写 task.status）。
+# None = 未注入（写面降级：仅 YAML 镜像）。
 _state_reader: Any = None
 _state_writer: Any = None
 
@@ -74,7 +74,7 @@ def _get_state_writer() -> Any:
     return _state_writer
 
 
-# ── 批次B（2026-08-24）：默认评估执行器（server.py on_load 装配）──
+# ── 默认评估执行器（server.py on_load 装配）──
 # PipelineEvaluationExecutor（_executor.py）：tool 型本地跑，agent 型派评估
 # 子管道继承任务工作区。构造参数 ``executor=...`` 显式注入优先（测试），缺省
 # 回退本注入点；两处皆无 → EVAL_ENGINE_UNAVAILABLE（文档化降级，不静默空转）。
@@ -95,9 +95,9 @@ def _now_iso() -> str:
 async def _write_task_state(task_id: str, fields: dict[str, Any]) -> None:
     """把任务域字段写入管道 state 单一真值（GAP-1：task.id == pipeline_id）。
 
-    2026-08-24 职责边界裁定：任务状态由任务域插件裁决写入（pipeline-state
-    update capability），内核不再回写 task.status。写面未注入（None）时静默
-    降级——YAML 镜像仍由 task_service 维护，state 保持出生值 pending。
+    任务状态由任务域插件裁决写入（pipeline-state update capability），内核
+    不再回写 task.status。写面未注入（None）时静默降级——YAML 镜像仍由
+    task_service 维护，state 保持出生值 pending。
     """
     writer = _get_state_writer()
     if writer is None:
@@ -294,8 +294,8 @@ class TaskEvaluateTool(BuiltinTool):
         action = inputs.get("action", "auto_complete")
         task_id = inputs.get("task_id")
 
-        # 短 id 入参解析（2026-08-22 用户要求：LLM 工具面 id 短化）——LLM 回传的
-        # task_id 可能是 12 位短 id，经 state 聚合前缀唯一解析回全 id。
+        # 短 id 入参解析：LLM 工具面 id 短化——LLM 回传的 task_id 可能是
+        # 12 位短 id，经 state 聚合前缀唯一解析回全 id。
         task_id = await self._resolve_task_id(task_id)
         if isinstance(task_id, str) and task_id.startswith("AMBIGUOUS:"):
             return create_failure_result(
@@ -315,9 +315,9 @@ class TaskEvaluateTool(BuiltinTool):
         task_service = self._get_task_service()
 
         if not task_id:
-            # 零推断（2026-08-22 用户裁决）：task_id 缺失即注入链断裂
-            # （state 未取到 run 的 task_id，未变成工具参数注入），候选任务再多也不猜——
-            # 猜测活跃任务会把 A 任务的评估写到 B 任务上，且掩盖断裂本身。
+            # 零推断：task_id 缺失即注入链断裂（state 未取到 run 的 task_id，
+            # 未变成工具参数注入），候选任务再多也不猜——猜测活跃任务会把
+            # A 任务的评估写到 B 任务上，且掩盖断裂本身。
             return create_failure_result(
                 error="系统错误：task_id 未注入，请联系管理员",
                 error_code="INJECTION_ERROR",
@@ -1312,7 +1312,7 @@ class TaskEvaluateTool(BuiltinTool):
                     p[key] = val
             params[metric_id] = p
 
-        # Resolve {tool_id} template from workspace files（2026-08-22 裁决：
+        # Resolve {tool_id} template from workspace files（
         # 唯一候选可用，0/多候选拒绝——绝不"取第一个文件"猜测被评估工具，
         # 猜测会把评估打到错误对象，错误放行或错误失败）
         tool_id_candidates = self._resolve_tool_id_candidates(workspace_abs)

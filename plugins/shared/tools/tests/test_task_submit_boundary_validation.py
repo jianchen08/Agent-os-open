@@ -107,7 +107,7 @@ async def _run(mod: Any, inputs: dict) -> Any:
         mod._chat_sender = None
 
 
-# ── 参数退役守卫（2026-08-24 阶段 2）─────────────────────────
+# ── 参数退役守卫 ─────────────────────────────────────
 
 
 class TestRetiredParams:

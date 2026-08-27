@@ -50,8 +50,8 @@ async def _on_load(_params: dict[str, Any]) -> None:
 
     tool_mod.set_state_reader(_read_state_rows)
 
-    # P4 收敛（2026-08-20）：agent_registry 查询接 agent_manager 插件的
-    # agent.get 服务（tool-executor 显式 plugin_id 跨插件通道）。
+    # agent_registry 查询接 agent_manager 插件的 agent.get 服务
+    # （tool-executor 显式 plugin_id 跨插件通道）。
     # 结果信封：{"success": bool, "data": {"found": bool, "config": dict}}；
     # 服务不可用/未启用 → 异常或 success=false → lookup 返回 None → 磁盘回退。
     async def _agent_lookup(agent_id: str) -> dict[str, Any] | None:

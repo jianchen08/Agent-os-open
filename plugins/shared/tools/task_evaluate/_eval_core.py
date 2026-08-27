@@ -3,7 +3,7 @@
 0.1 的 ``evaluation.types`` / ``evaluation.executor``（归档于
 reference/0.1_src/evaluation/，src/ 已删）在 0.2 未迁移为可平铺导入模块——
 执行面由本目录 ``_executor.py`` 的 ``PipelineEvaluationExecutor`` 真实承载
-（2026-08-24 批次B：tool 型本地执行 + agent 型派评估子管道继承任务工作区）；
+（tool 型本地执行 + agent 型派评估子管道继承任务工作区）；
 evaluation_service 插件保留指标注册表/HTTP 读面（执行面已收编，不再双头）。
 本模块就地重建 task_evaluate 工具所需的最小类型面（仿 media/_media_core.py
 的「0.2 自包含 + 类型面 + 注入 duck-typing」模式）：

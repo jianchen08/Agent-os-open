@@ -20,8 +20,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# ── 0.2 架构导入：task_submit 是独立插件目录（tools.builtin 包已废弃）──
-# 动态加载 tool.py 为唯一模块名，避免与其它插件目录的 tool.py 冲突。
+# ── task_submit 是独立插件目录，动态 import 其 tool.py ──
+# tool.py 加载为唯一模块名，避免与其它插件目录的 tool.py 冲突。
 _TASK_SUBMIT_DIR = Path(__file__).resolve().parent.parent / "task_submit"
 _TASKS_DIR = Path(__file__).resolve().parent.parent.parent / "system" / "tasks"
 for _d in (str(_TASK_SUBMIT_DIR), str(_TASKS_DIR)):
@@ -115,7 +115,7 @@ def _patch_infrastructure():
             "_check_dependencies_exist",
             return_value=[],
         ),
-        # 0.2 服务提供者：patch 模块级 _get_service_provider（infrastructure 包已废弃）
+        # patch 模块级服务提供者获取点 _get_service_provider
         patch.object(_tool_mod, "_get_service_provider", return_value=mock_service_provider),
         # 屏蔽 ws 广播副作用
         patch.dict(

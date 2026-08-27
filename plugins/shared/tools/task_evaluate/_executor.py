@@ -1,12 +1,10 @@
-"""评估执行器（0.2 生产版，批次B 2026-08-24）。
-
-替代 _eval_core.EvaluationExecutor 的 RuntimeError 占位：真实执行评估。
+"""评估执行器（0.2 生产版）：按指标类型真实执行评估。
 
 - **tool 型指标**（evaluator_type=tool，如 file_check）：本地执行——按指标
   input_schema 语义（exists/not_empty/contains/is_directory），相对路径以
   任务 workspace 为根解析（_get_input_params 已注入 workspace）。
 - **agent 型指标**（evaluator_type=agent，如 semantic_check）：经 chat
-  capability 派发**评估子管道**（evaluator_agent）——R2 裁定：出生 state 带
+  capability 派发**评估子管道**（evaluator_agent）——出生 state 带
   被评估任务的 workspace/ws_meta（workspace_lifecycle 幂等跳过 → 评估者在
   被评估任务的工作区里跑，执行环境一致）；lineage 有父（挂被评估任务下）；
   plugin_configs.task_reminder.evaluation_mode=true（评估者模式：催

@@ -445,7 +445,7 @@ class TestInstalledDshPlugins:
         # D.6 槽位拆分：声明即注册，无类型豁免字段
         assert "llm_tools" not in manifest
         # 正式贡献面：renderers + 适配器元信息 + pages（皮肤中心页面）+ themes
-        # （client_styles 已随 43fcbcb4d 弯路清理退役——皮肤 CSS 走 merged.css 端点）
+        # （皮肤 CSS 走 merged.css 端点，manifest 无 client_styles 贡献位）
         assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter", "pages", "themes"}
         # 配置入口：DSH 插件装载管理（config/dsh_adapter.yaml）
         assert manifest["config_files"] == [

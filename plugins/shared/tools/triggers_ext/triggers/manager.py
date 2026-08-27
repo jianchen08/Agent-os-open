@@ -1020,8 +1020,8 @@ class TriggerManager:
         子任务自动通知（GAP-1）：任务事件携带 ``parent_pipeline_id`` 时，
         向父管道注入一条完成/失败通知——等效"任务系统提交后自动注册触发器"，
         注册逻辑收敛在统一触发服务，任务系统零触发代码。
-        自动父通知与显式触发器**并存不去重**（2026-08-20 裁定，推翻旧互斥
-        定案）：显式触发器消息是用户自定义内容，系统通知是 task_submit
+        自动父通知与显式触发器**并存不去重**：显式触发器消息是用户自定义
+        内容，系统通知是 task_submit
         承诺的父管道恢复锚点——语义不等价，任何显式触发器都无权顶替
         系统通知（实测：LLM 自设 task_completed 测试触发器命中后，父管道
         只收到测试消息，永远等不到完成通知）。
@@ -1110,7 +1110,7 @@ class TriggerManager:
         # 子任务提交者（task_submit 写入子任务初始 state 的 task.submitted_by，
         # 内核 task_completed/task_failed 事件随 parent_pipeline_id 一并带出）。
         # chat.send_message 硬校验 user_id 非空（tenant 反查）——传空串会被内核
-        # 拒绝（-32603 缺少 user_id，2026-08-17 子任务结果回传断点）。
+        # 拒绝（-32603 缺少 user_id）。
         user_id = str(event_data.get("user_id") or "")
 
         if event_name == "task_completed":

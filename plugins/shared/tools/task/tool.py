@@ -191,8 +191,7 @@ class TaskTool(BuiltinTool):
         必须组装完整 TaskModel（缺省字段吃 dataclass 默认值），不得用只带
         部分属性的 SimpleNamespace——消费面（get 详情 _calc_elapsed_seconds
         的 started_at / 列表 priority 列 / L2 过滤 parent_pipeline_id）按
-        TaskModel 全形状访问，残缺对象会让 state 桥接下所有 get 必崩
-        （2026-08-23 真机：'types.SimpleNamespace' object has no attribute）。
+        TaskModel 全形状访问，残缺对象会让 state 桥接下所有 get 必崩。
         """
         rows = await self._read_state_rows()
         if rows is None:
@@ -528,7 +527,7 @@ class TaskTool(BuiltinTool):
 
         task_ids = inputs.get("task_ids")
 
-        # ── 短 id 入参解析（2026-08-22 用户要求：LLM 工具面 id 短化）──
+        # ── 短 id 入参解析（LLM 工具面 id 短化契约）──
         # LLM 回传的 task_id / task_ids / parent_task_id 可能是短 id（12 位前缀），
         # 统一经 state 聚合前缀唯一解析回全 id（精确命中原样；多命中歧义报错；
         # 无命中原样让既有"任务不存在"路径处理）。解析在 action 分派前收口。
@@ -1385,9 +1384,9 @@ class TaskTool(BuiltinTool):
     async def _delete_task(self, inputs: dict[str, Any], parent_agent_level: int) -> ToolExecutionResult:
         """删除任务，根据任务类型执行不同策略。
 
-        GAP-1 统一（2026-08-24 修复）：0.2 任务 = 管道（state 单一真值，无
-        YAML 记录）——YAML 存储查不到时回退 state 聚合判定存在性，删除 =
-        调内核 pipeline-executor.delete_pipeline 清管道全部执行数据。
+        0.2 任务 = 管道（state 单一真值，无 YAML 记录）——YAML 存储查不到时
+        回退 state 聚合判定存在性，
+        删除 = 调内核 pipeline-executor.delete_pipeline 清管道全部执行数据。
         """
 
         try:
@@ -1570,8 +1569,8 @@ class TaskTool(BuiltinTool):
             service = self._get_task_service()
             pre_task = service.get_task(task_id)
             if pre_task is None:
-                # GAP-1 统一（2026-08-22）：state 任务（task.* 行 / task.owned 容器）
-                # 不在 YAML 存储——预检加 state 兜底，否则批量操作绕过权限收口
+                # state 任务（task.* 行 / task.owned 容器）不在 YAML 存储——
+                # 预检加 state 兜底，否则批量操作绕过权限收口
                 pre_task = await self._get_task_from_state(task_id)
             if pre_task is not None:
                 pre_ok, pre_err = self._check_permission(pre_task, parent_agent_level, file_inputs)
