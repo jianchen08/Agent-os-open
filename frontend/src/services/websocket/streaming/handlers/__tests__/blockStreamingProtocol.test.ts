@@ -95,7 +95,7 @@ describe('LLM 流式 8 事件协议组装', () => {
     }))
   }
 
-  it('完整序列：思考块 → 正文块 → 工具块，按块索引组装出 thinking/text/tool_call', async () => {
+  it('完整序列：思考块 → 正文块 → 工具块，thinking/text 由块组装、tool_call 不建卡（契约事件建卡）', async () => {
     // 思考块（块索引 0）
     h.handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'reasoning' }))
     h.handleReasoningDelta(makeEvent('reasoning_delta', { index: 0, text: '让我想想' }))
@@ -107,18 +107,21 @@ describe('LLM 流式 8 事件协议组装', () => {
     h.handleTextDelta(makeEvent('text_delta', { index: 1, text: '第二段' }))
     h.handleBlockEnd(makeEvent('block_end', { index: 1, block: { block_type: 'text' } }))
 
-    // 工具块（块索引 2）：arguments 增量按块累积，id/name 随增量到达
+    // 工具块（块索引 2）：块协议不建卡——工具卡面由契约事件 tool_start/tool_result
+    // 创建（三源建卡会导致同一工具两张卡，见 blockHandler 注释）
     h.handleBlockStart(makeEvent('block_start', { index: 2, block_type: 'tool_call' }))
     h.handleToolCallDelta(makeEvent('tool_call_delta', { index: 2, id: 'call-1' }))
     h.handleToolCallDelta(makeEvent('tool_call_delta', { index: 2, name: 'search' }))
     h.handleToolCallDelta(makeEvent('tool_call_delta', { index: 2, arguments_delta: '{"q":' }))
     h.handleToolCallDelta(makeEvent('tool_call_delta', { index: 2, arguments_delta: '"天气"}' }))
     h.handleBlockEnd(makeEvent('block_end', { index: 2, block: { block_type: 'tool_call' } }))
+    // 契约事件建立工具卡（单卡）
+    h.handleToolStart(makeEvent('tool_start', { call_id: 'call-1', tool_name: 'search', args: { q: '天气' } }))
 
     const parts = snapshotParts()
     console.log('[完整序列] parts:', JSON.stringify(parts, null, 2))
 
-    // 类型序列 = 块打开顺序（渲染顺序）
+    // 类型序列：块组装 thinking/text + 契约事件建 tool_call（块打开顺序保持）
     expect(parts.map((p: any) => p.type)).toEqual(['thinking', 'text', 'tool_call'])
 
     // 思考区：内容完整、done
@@ -129,34 +132,40 @@ describe('LLM 流式 8 事件协议组装', () => {
     expect(parts[1].content).toBe('第一段第二段')
     expect(parts[1].state).toBe('done')
 
-    // 工具卡片：callId/name 由 delta 累积，args 由 arguments_delta JSON 解析
+    // 工具卡唯一：callId 来自契约事件
+    expect(parts.filter((p: any) => p.type === 'tool_call').length).toBe(1)
     expect(parts[2].callId).toBe('call-1')
     expect(parts[2].name).toBe('search')
     expect(parts[2].args).toEqual({ q: '天气' })
-    expect(parts[2].state).toBe('done')
   })
 
-  it('tool_call_delta 缺 id 时用块索引兜底 callId；缺 name 时保持空', async () => {
+  it('tool_call_delta 不建卡（无论有无 id）：工具卡面唯一来源 = tool_start/tool_result', async () => {
     h.handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'tool_call' }))
     h.handleToolCallDelta(makeEvent('tool_call_delta', { index: 0, arguments_delta: '{"a":1}' }))
     h.handleBlockEnd(makeEvent('block_end', { index: 0, block: { block_type: 'tool_call' } }))
 
     const parts = snapshotParts()
-    const tool = parts.find((p: any) => p.type === 'tool_call')
-    expect(tool).toBeDefined()
-    expect(tool.callId).toBe('tool-0')
-    expect(tool.args).toEqual({ a: 1 })
+    expect(parts.find((p: any) => p.type === 'tool_call')).toBeUndefined()
+    // 契约事件到达后出现唯一一张卡
+    h.handleToolStart(makeEvent('tool_start', { call_id: 'call-a1', tool_name: 'f', args: { a: 1 } }))
+    const toolParts = snapshotParts().filter((p: any) => p.type === 'tool_call')
+    expect(toolParts.length).toBe(1)
+    expect(toolParts[0].callId).toBe('call-a1')
+    expect(toolParts[0].args).toEqual({ a: 1 })
   })
 
-  it('工具 arguments 非法 JSON：block_end 保留原始串（不崩、可观测）', async () => {
+  it('工具 arguments 非法 JSON：块侧不消费（不崩）；卡面 args 以契约事件为准', async () => {
     h.handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'tool_call' }))
     h.handleToolCallDelta(makeEvent('tool_call_delta', { index: 0, id: 'tc-x', name: 'f', arguments_delta: '{oops' }))
     h.handleBlockEnd(makeEvent('block_end', { index: 0, block: { block_type: 'tool_call' } }))
+    // 契约事件带完整 args
+    h.handleToolStart(makeEvent('tool_start', { call_id: 'tc-x', tool_name: 'f', args: { a: 1 } }))
 
     const parts = snapshotParts()
     const tool = parts.find((p: any) => p.type === 'tool_call')
-    expect(tool.args).toEqual({ raw: '{oops' })
-    expect(tool.state).toBe('done')
+    expect(tool).toBeDefined()
+    expect(tool.args).toEqual({ a: 1 })
+    expect(tool.state).toBe('calling')
   })
 
   it('usage 事件落入 usage store（input/output tokens）', () => {
@@ -193,10 +202,12 @@ describe('LLM 流式 8 事件协议组装', () => {
     expect(textParts[1].content).toBe('新内容')
   })
 
-  it('工具块未闭合（block_end 丢失）→ stream_end 收尾时按 fail-closed 标记 error', async () => {
+  it('工具块未闭合（block_end 丢失）→ 不建卡；卡面由 stream_end 权威快照合并（成功后 state=done）', async () => {
     h.handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'tool_call' }))
     h.handleToolCallDelta(makeEvent('tool_call_delta', { index: 0, id: 'tc-u', name: 'f', arguments_delta: '{}' }))
-    // 不发 block_end，直接 stream_end（内核收尾裁决）
+    // 不发 block_end，直接 stream_end（内核收尾裁决）——块侧从未建卡
+    expect(snapshotParts().find((p: any) => p.type === 'tool_call')).toBeUndefined()
+
     h.handleStreamEnd(makeEvent('stream_end', {
       full_content: '', final_sequence: 3,
       parts: [{ type: 'tool_call', callId: 'tc-u', name: 'f', args: {}, state: 'done', sequence: 2 }],
@@ -205,8 +216,6 @@ describe('LLM 流式 8 事件协议组装', () => {
     const parts = snapshotParts()
     const tool = parts.find((p: any) => p.type === 'tool_call')
     expect(tool).toBeDefined()
-    // 未闭合的工具块 = 未完成调用，按 store 既有 abort 语义标记 error（fail-closed，
-    // 与 tool_result 未达的旧路径一致；结果由对账/重试补回）
-    expect(tool.state).toBe('error')
+    expect(tool.state).toBe('done')
   })
 })

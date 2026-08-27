@@ -11,9 +11,9 @@
  * - 块索引 (index) 是同一消息内块的全局递增序号（text/reasoning/tool-call 共享）。
  * - text/reasoning 块：delta 按块索引缓冲，RAF 批处理追加到对应 part（part 按
  *   块索引精确路由；渲染顺序 = part 追加顺序 = 块打开顺序）。
- * - tool-call 块：arguments_delta 为原始 JSON 字符串增量按块索引累积，id/name
- *   在 delta 首次携带时落 part；block_end 时解析完整 JSON 为 args（渲染卡片
- *   参数区）。不渲染原始 JSON 增量。
+ * - tool-call 块：增量事件无消费面——工具卡面由契约事件 tool_start/tool_result
+ *   创建与更新（call_id/args/result/containerTaskId 完整信封），块协议不建卡
+ *   （三源建卡导致同一工具出现两张卡，见 handleToolCallDelta 注释）。
  * - block_end 闭合块：text/reasoning → state=done；tool-call → state=done（带
  *   解析后的 args）。闭合前先 flush 该消息缓冲，保证末尾 delta 不丢。
  * - finish 结束流：flush 残留缓冲 + 清理块状态（stream_end 仍由内核收尾裁决
@@ -113,30 +113,6 @@ function isRelevantOrDrop(pipelineId: string): boolean {
     return false
   }
   return true
-}
-
-/** 定位指定类型块的 part：text/reasoning 找最后一个同类型 part；
- * tool-call 按 callId（或块索引兜底 tool-<index>）精确匹配。 */
-function findBlockPartIndex(
-  pipelineId: string,
-  messageId: string,
-  blockIndex: number,
-  blockType: 'text' | 'reasoning' | 'tool_call',
-  callId?: string,
-): number {
-  const msgs = pipelineStore.getState().getMessages(pipelineId)
-  const msg = msgs.find((m: any) => m.id === messageId)
-  const parts: any[] = msg?.parts || []
-  if (blockType === 'tool_call') {
-    return parts.findIndex(
-      (pp: any) => pp.type === 'tool_call' && (pp.callId === callId || pp.callId === `tool-${blockIndex}`),
-    )
-  }
-  const partType = partTypeOf(blockType)
-  for (let i = parts.length - 1; i >= 0; i--) {
-    if (parts[i].type === partType) return i
-  }
-  return -1
 }
 
 /** 定位同类型且仍 streaming 的最后一个 part（delta 先于 block_start 的乱序兜底） */
@@ -323,7 +299,15 @@ export function handleReasoningDelta(eventData: any) {
   bufferTextDelta(eventData, pipelineId, messageId, blockIndex, 'reasoning', text)
 }
 
-/** 处理工具调用增量事件：按块索引累积 id/name/arguments_delta，首 delta 建 tool_call part */
+/** 处理工具调用增量事件。
+ *
+ * 不建 tool_call part：工具卡面的唯一创建方是契约事件 tool_start/tool_result
+ * （携带 call_id/args/result/containerTaskId 完整信封）。块协议侧 tool_call 块
+ * 曾是第三个创建源——首个 delta 未带 id 时按兜底名 `tool-<index>` 建卡、
+ * tool_start 再按 call_id 建卡，同一工具出现两张卡（末端增量还被 new_message
+ * 合并当作「基底缺失」补到气泡底部）。增量消费无落点（工具参数以
+ * tool_start.args 为准），仅 debug 留痕供排查协议形态。
+ */
 export function handleToolCallDelta(eventData: any) {
   const p = eventPayload(eventData)
   const pipelineId = resolvePipelineId(eventData)
@@ -334,44 +318,13 @@ export function handleToolCallDelta(eventData: any) {
 
   const st = getBlockState(pipelineId, messageId)
   if (st.closedBlocks.has(blockIndex)) return
-  ensurePlaceholder(eventData, pipelineId, messageId, 'TOOL_CALL_DELTA')
-
-  let tb = st.toolBlocks.get(blockIndex)
-  if (!tb) {
-    tb = { id: undefined, name: undefined, argumentsChunks: [], partIndex: -1 }
-    st.toolBlocks.set(blockIndex, tb)
+  if (!st.toolBlocks.has(blockIndex)) {
+    st.toolBlocks.set(blockIndex, { id: undefined, name: undefined, argumentsChunks: [], partIndex: -1 })
   }
-  if (p.id) tb.id = String(p.id)
-  if (p.name) tb.name = String(p.name)
-  const argDelta = p.arguments_delta ?? p.arguments
-  if (argDelta !== undefined && argDelta !== null) {
-    tb.argumentsChunks.push(String(argDelta))
-  }
-
-  const callId = tb.id || `tool-${blockIndex}`
-  if (tb.partIndex < 0) {
-    const existing = findBlockPartIndex(pipelineId, messageId, blockIndex, 'tool_call', callId)
-    if (existing >= 0) {
-      tb.partIndex = existing
-    } else {
-      pipelineStore.getState().appendPart(pipelineId, messageId, {
-        type: 'tool_call',
-        callId,
-        name: tb.name || '',
-        args: {},
-        state: 'calling',
-      })
-      tb.partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
-    }
-  }
-  if (tb.partIndex >= 0) {
-    const updates: Record<string, unknown> = {}
-    if (tb.id) updates.callId = tb.id
-    if (tb.name) updates.name = tb.name
-    if (Object.keys(updates).length > 0) {
-      pipelineStore.getState().updatePart(pipelineId, messageId, tb.partIndex, updates as any)
-    }
-  }
+  _debugLogger.debug(
+    '[TOOL_CALL_DELTA] 块协议工具增量无消费面（工具卡由 tool_start/tool_result 建）: index=%s',
+    blockIndex,
+  )
 }
 
 /** 处理块闭合事件：flush 缓冲 → 闭合对应 part（tool-call 解析 args） */
@@ -391,27 +344,11 @@ export function handleBlockEnd(eventData: any) {
   const blockType = String(block.block_type || '')
 
   if (blockType === 'tool_call') {
-    // 先 flush 该消息残留正文 delta（tool 块闭合是 part 结构边界点），再落结果
+    // 该块无消费面（工具卡由 tool_start/tool_result 契约事件建与更新，
+    // 见 handleToolCallDelta 注释）：只 flush 残留正文 delta（tool 块闭合是
+    // part 结构边界点）+ 清除累积态。
     flushPendingForMessage(messageId)
-    const tb = st.toolBlocks.get(blockIndex)
     st.toolBlocks.delete(blockIndex)
-    if (tb && tb.partIndex >= 0) {
-      const raw = tb.argumentsChunks.join('')
-      let args: Record<string, unknown> = {}
-      if (raw) {
-        try {
-          const parsed = JSON.parse(raw)
-          args = parsed && typeof parsed === 'object' ? parsed : {}
-        } catch {
-          _debugLogger.warn('[Block] tool arguments JSON parse failed, keep raw: index=%s', blockIndex)
-          args = { raw }
-        }
-      }
-      const updates: Record<string, unknown> = { state: 'done', args }
-      if (tb.id) updates.callId = tb.id
-      if (tb.name) updates.name = tb.name
-      pipelineStore.getState().updatePart(pipelineId, messageId, tb.partIndex, updates as any)
-    }
     return
   }
 

@@ -175,4 +175,52 @@ describe('逐轮模型顺序对等（后端 seq 序 vs 前端渲染序）', () =
     expect(m1.status).toBe('completed')
     expect(m1.sequence).toBe(1)
   })
+
+  it('回归锚：同一工具调用只出一张卡（8事件块 + tool_start/tool_result + new_message 三源收敛）', async () => {
+    // 真机时序实测形状：text → 工具块 delta（首个 delta 不带 id，id 只在 block_end
+    // 载荷里）→ tool_start（契约事件带 call_id）→ tool_result → new_message（携带
+    // 该轮 toolCalls 权威形态）→ stream_end。之前出现「两张工具卡、一张在气泡底部」：
+    // block 协议用兜底名 tool-<index> 建卡、tool_start 再按 call_id 建卡，new_message
+    // 合并时又把后者当"基底缺失增量"补到尾部。断言：同一 callId 恰 1 张卡，
+    // 顺序为 [text, tool_call]（工具卡在该轮流内位置，不得出现尾部重复卡）。
+    const CALL_X = 'call_r1_tooldup01'
+    handlers.handleStreamStart(ev('stream_start', { pipeline_id: PIPELINE_ID, message_id: MSG1, _threadId: THREAD_ID }))
+    handlers.handleTextDelta(ev('text_delta', { pipeline_id: PIPELINE_ID, message_id: MSG1, index: 0, text: '先用工具' }))
+    await flush()
+    handlers.handleBlockStart(ev('block_start', { pipeline_id: PIPELINE_ID, message_id: MSG1, index: 1, block_type: 'tool_call' }))
+    // 首个 delta 无 id（真机 provider 形状：id 在 block_end 载荷）
+    handlers.handleToolCallDelta(ev('tool_call_delta', { pipeline_id: PIPELINE_ID, message_id: MSG1, index: 1, arguments_delta: '{"path":"' }))
+    handlers.handleBlockEnd(ev('block_end', {
+      pipeline_id: PIPELINE_ID, message_id: MSG1, index: 1,
+      block: { block_type: 'tool_call', id: CALL_X, name: 'file_read', arguments: '{"path":"/tmp/x"}' },
+    }))
+    handlers.handleToolStart(ev('tool_start', {
+      pipeline_id: PIPELINE_ID, message_id: MSG1, _threadId: THREAD_ID,
+      call_id: CALL_X, tool_name: 'file_read', args: { path: '/tmp/x' },
+    }))
+    handlers.handleToolResult(ev('tool_result', {
+      pipeline_id: PIPELINE_ID, message_id: MSG1, _threadId: THREAD_ID,
+      call_id: CALL_X, tool_name: 'file_read', result: '文件已写入', success: true,
+    }))
+    handlers.handleNewMessage(ev('new_message', {
+      pipeline_id: PIPELINE_ID, message_id: MSG1, _threadId: THREAD_ID,
+      data: {
+        pipeline_id: PIPELINE_ID, message_id: MSG1, sequence: 1,
+        message: {
+          id: MSG1, role: 'assistant', content: '先用工具', sequence: 1,
+          status: 'completed', thread_id: THREAD_ID,
+          toolCalls: [{ id: CALL_X, name: 'file_read', arguments: '{"path":"/tmp/x"}' }],
+        },
+      },
+    }))
+    handlers.handleStreamEnd(ev('stream_end', { pipeline_id: PIPELINE_ID, message_id: MSG1, _threadId: THREAD_ID, data: { final_sequence: 1 } }))
+
+    const msgs = pipelineStore.getState().getMessages(PIPELINE_ID)
+    const m1 = msgs.find((m: any) => m.id === MSG1)!
+    const toolParts = (m1.parts || []).filter((p: any) => p.type === 'tool_call')
+    expect(toolParts.length).toBe(1)
+    expect(toolParts[0]?.callId).toBe(CALL_X)
+    expect(toolParts[0]?.result).toBe('文件已写入')
+    expect((m1.parts || []).map((p: any) => p.type)).toEqual(['text', 'tool_call'])
+  })
 })

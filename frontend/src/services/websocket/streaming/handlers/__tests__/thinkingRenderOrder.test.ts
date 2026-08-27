@@ -66,6 +66,7 @@ describe('思考过程渲染顺序：流式 reasoning + text 的 part 顺序', (
   let handleBlockEnd: typeof import('@/services/websocket/streaming/handlers').handleBlockEnd
   let handleReasoningDelta: typeof import('@/services/websocket/streaming/handlers').handleReasoningDelta
   let handleToolCallDelta: typeof import('@/services/websocket/streaming/handlers').handleToolCallDelta
+  let handleToolStart: typeof import('@/services/websocket/streaming/handlers').handleToolStart
 
   beforeEach(async () => {
     vi.resetModules()
@@ -91,6 +92,7 @@ describe('思考过程渲染顺序：流式 reasoning + text 的 part 顺序', (
     handleBlockEnd = handlerMod.handleBlockEnd
     handleReasoningDelta = handlerMod.handleReasoningDelta
     handleToolCallDelta = handlerMod.handleToolCallDelta
+    handleToolStart = handlerMod.handleToolStart
   })
 
   /** 取最终消息的 parts 类型序列（按数组顺序=渲染顺序） */
@@ -151,6 +153,8 @@ describe('思考过程渲染顺序：流式 reasoning + text 的 part 顺序', (
     handleBlockStart(makeEvent('block_start', { index: 1, block_type: 'tool_call' }))
     handleToolCallDelta(makeEvent('tool_call_delta', { index: 1, id: 'tc-1', name: 'search', arguments_delta: '{}' }))
     handleBlockEnd(makeEvent('block_end', { index: 1, block: { block_type: 'tool_call', id: 'tc-1', name: 'search', arguments: '{}' } }))
+    // 工具卡面由契约事件建立（块协议不建卡，三源建卡会重复）
+    handleToolStart(makeEvent('tool_start', { call_id: 'tc-1', tool_name: 'search', args: {} }))
 
     // 第二轮：思考块(2) → 正文块(3)
     handleBlockStart(makeEvent('block_start', { index: 2, block_type: 'reasoning' }))
