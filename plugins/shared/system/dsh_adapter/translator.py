@@ -470,8 +470,11 @@ def load_plugin_config() -> dict[str, Any]:
     return plugins if isinstance(plugins, dict) else {}
 
 
-def _plugin_enabled(name: str, config: dict[str, Any]) -> bool:
-    """按配置判定包是否启用：未列出默认启用；``{enabled: bool}`` 或裸 bool 均认。"""
+def plugin_enabled(name: str, config: dict[str, Any]) -> bool:
+    """按配置判定包是否启用：未列出默认启用；``{enabled: bool}`` 或裸 bool 均认。
+
+    公共判定面：本插件 server（外层工具包装载区）与 translator 共用。
+    """
     entry = config.get(name)
     if isinstance(entry, dict):
         return bool(entry.get("enabled", True))
@@ -489,11 +492,11 @@ def load_installed_plugins() -> dict[str, Any]:
     """
     packages = discover_dsh_plugins()
     config = load_plugin_config()
-    enabled = [p for p in packages if _plugin_enabled(p.name, config)]
+    enabled = [p for p in packages if plugin_enabled(p.name, config)]
     out: dict[str, Any] = translate_packages(enabled)
     out["base_dir"] = str(Path(__file__).parent / "dsh_plugins")
     out["count"] = len(enabled)
-    out["disabled"] = [p.name for p in packages if not _plugin_enabled(p.name, config)]
+    out["disabled"] = [p.name for p in packages if not plugin_enabled(p.name, config)]
     return out
 
 
@@ -629,17 +632,26 @@ _FG_RE = re.compile(r"(?<![-\w])color:\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))\s*;"
 _ROOT_BGIMG_RE = re.compile(r"background-image:\s*(.+);")
 
 
-def _hex_to_hsl(hexc: str) -> str:
-    """'#RRGGBB' → 'H S% L%'（shadcn 变量格式，无 hsl() 包裹）。非 hex 原样返回。"""
-    m3 = re.fullmatch(r"#([0-9a-fA-F]{3})", hexc.strip())
-    m6 = re.fullmatch(r"#([0-9a-fA-F]{6})", hexc.strip())
+def _hex_to_rgb(hexc: str) -> tuple[int, int, int] | None:
+    """'#RGB'/'#RRGGBB' → 0~255 三元组；其余形态返回 None。"""
+    s = hexc.strip()
+    m3 = re.fullmatch(r"#([0-9a-fA-F]{3})", s)
+    m6 = re.fullmatch(r"#([0-9a-fA-F]{6})", s)
     if m3:
         h = "".join(c * 2 for c in m3.group(1))
     elif m6:
         h = m6.group(1)
     else:
+        return None
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _hex_to_hsl(hexc: str) -> str:
+    """'#RRGGBB' → 'H S% L%'（shadcn 变量格式，无 hsl() 包裹）。非 hex 原样返回。"""
+    rgb = _hex_to_rgb(hexc)
+    if rgb is None:
         return hexc.strip()
-    r, g, b = (int(h[i : i + 2], 16) / 255 for i in (0, 2, 4))
+    r, g, b = (c / 255 for c in rgb)
     mx, mn = max(r, g, b), min(r, g, b)
     l = (mx + mn) / 2
     if mx == mn:
@@ -657,20 +669,14 @@ def _hex_to_hsl(hexc: str) -> str:
 
 
 def _luminance(hexc: str) -> float:
-    """'#RRGGBB' → 相对亮度 0~1（WCAG 公式）；非 hex 返回 0（按暗处理）。"""
-    m3 = re.fullmatch(r"#([0-9a-fA-F]{3})", hexc.strip())
-    m6 = re.fullmatch(r"#([0-9a-fA-F]{6})", hexc.strip())
-    if m3:
-        h = "".join(c * 2 for c in m3.group(1))
-    elif m6:
-        h = m6.group(1)
-    else:
+    """'#RGB'/'#RRGGBB' → 相对亮度 0~1（WCAG 公式）；非 hex 返回 0（按暗处理）。
+
+    WCAG 核心算式单一来源在 ``_wcag_luminance``（对比度面共用），本函数只负责 hex 解析。
+    """
+    rgb = _hex_to_rgb(hexc)
+    if rgb is None:
         return 0.0
-    chan = []
-    for i in (0, 2, 4):
-        c = int(h[i : i + 2], 16) / 255
-        chan.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
-    return 0.2126 * chan[0] + 0.7152 * chan[1] + 0.0722 * chan[2]
+    return _wcag_luminance(rgb)
 
 
 def skin_base_of(canvas: str) -> str:

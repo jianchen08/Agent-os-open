@@ -473,15 +473,15 @@ class TestPluginConfigFilter:
         assert load_plugin_config() == {}
 
     def test_plugin_enabled_rules(self, monkeypatch):
-        from translator import _plugin_enabled  # noqa: PLC0415
+        from translator import plugin_enabled  # noqa: PLC0415
 
         config = {"off": {"enabled": False}, "on": {"enabled": True}, "bare-off": False}
         # 未列出 = 默认启用；{enabled:false} / 裸 false = 禁用
-        assert _plugin_enabled("unlisted", config) is True
-        assert _plugin_enabled("off", config) is False
-        assert _plugin_enabled("on", config) is True
-        assert _plugin_enabled("bare-off", config) is False
-        assert _plugin_enabled("missing", {}) is True
+        assert plugin_enabled("unlisted", config) is True
+        assert plugin_enabled("off", config) is False
+        assert plugin_enabled("on", config) is True
+        assert plugin_enabled("bare-off", config) is False
+        assert plugin_enabled("missing", {}) is True
 
     def test_load_installed_plugins_filters_disabled(self, monkeypatch):
         import translator as translator_mod  # noqa: PLC0415

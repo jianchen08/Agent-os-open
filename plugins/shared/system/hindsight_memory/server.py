@@ -120,9 +120,11 @@ def _chunk_text(text: str, chunk_size: int = _CHUNK_SIZE) -> list[str]:
     Returns:
         文本块列表（空文本返回 []）
     """
-    if not text:
-        return []
-    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    # 算式单一来源在 knowledge_base._chunk_text（模块名仓内唯一，裸名导入无抢占面；
+    # 懒导入避免装载环——knowledge_base 不反向依赖本模块）
+    import knowledge_base as kb  # noqa: PLC0415
+
+    return kb._chunk_text(text, chunk_size)
 
 
 # ═══════════════════════════════════════════════════════════

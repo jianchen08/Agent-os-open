@@ -16,8 +16,12 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -25,11 +29,14 @@ from typing import Any
 
 from bridge import get_bridge as _get_bridge, shutdown_bridge
 from translator import (
+    SKIN_ASSET_EXTS,
+    SKIN_CENTER_SKINS_DIR,
     discover_dsh_plugins,
+    list_available_skins,
     load_installed_plugins,
     load_plugin_config,
+    plugin_enabled,
     translate_package,
-    _plugin_enabled,
 )
 
 from agentos_plugin_sdk import AgentOSPlugin
@@ -98,7 +105,7 @@ def ensure_extra_tools_layout() -> str | None:
     for pkg in discover_dsh_plugins():
         if not (pkg / "lib" / "index.js").is_file():
             continue
-        if not _plugin_enabled(pkg.name, config):
+        if not plugin_enabled(pkg.name, config):
             continue
         _sync_extra_package(_EXTRA_TOOLS_DIR / pkg.name, pkg)
         keep.add(pkg.name)
@@ -279,17 +286,6 @@ async def _on_dsh_adapter_unload(params: dict) -> None:  # noqa: ARG001
 # 圆角/阴影/动效/鼠标样式等以 CSS 形式生效）、hooks.mjs（DSH 原机制动态
 # 效果）与背景图资产。前端经 /ext/{pluginId}{path} 拉取（带 Bearer，仅
 # Enabled 插件可挂路由；dispatcher 契约：body base64 原样回写）。
-
-import base64  # noqa: E402
-import hashlib  # noqa: E402
-import json  # noqa: E402
-import re  # noqa: E402
-
-from translator import (  # noqa: E402
-    SKIN_ASSET_EXTS,
-    SKIN_CENTER_SKINS_DIR,
-    list_available_skins,
-)
 
 # 皮肤全量 CSS 按择注入路由：插件 CSS 注入通道 + 主题路由——
 # 选到哪个皮肤注入哪个；皮肤 CSS 原样搬：圆角/阴影/动效/鼠标

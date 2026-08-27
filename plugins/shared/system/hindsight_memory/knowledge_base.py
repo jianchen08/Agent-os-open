@@ -175,7 +175,7 @@ def _item_public(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _chunk_text(text: str, chunk_size: int = _KB_CHUNK_SIZE) -> list[str]:
-    """按字符数朴素滑窗切块（与 server.py _chunk_text 同款）。"""
+    """按字符数朴素滑窗切块——本插件切块算式的单一实现（server 模块转发到此）。"""
     if not text:
         return []
     return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]

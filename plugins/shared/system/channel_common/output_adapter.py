@@ -1,9 +1,10 @@
 """输出适配器基类模块（channel_common 渠道共享包）。
 
-单一事实源（channel_{cli,dingtalk,feishu,qq,wecom} 各渠道共用一份全集版）。
-消费方经 server.py 把本目录 sys.path.**append** 注入（绝不 insert(0)——模块名
-抢占事故纪律，见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三）。
-防复发守卫：scripts/check_channel_copy_guard.py 禁止本模块名重回 channel_* 目录。
+单一事实源：各渠道共用一份全集版，各渠道插件目录不得再放同名 output_adapter.py
+（scripts/check_channel_copy_guard.py 守卫复制回潮）。
+路径注入契约：本目录由各渠道 server.py 以 sys.path.append 引入、绝不 insert(0)——
+本目录模块名是通用名，insert(0) 会遮蔽其他目录的同名模块，
+谁在前谁生效。完整背景见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三。
 
 定义所有输出适配器的抽象接口，负责将管道最终 state
 或流式 chunk 转换为外部系统可识别的响应格式。
