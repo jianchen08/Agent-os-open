@@ -2,7 +2,7 @@
 """scene 插件（场景管理）单元测试。
 
 覆盖（对齐插件目录 plugins/shared/system/scene/）：
-1. ScenePersistence —— JSON 文件持久化：读写/删除/批量保存/损坏数据降级
+1. ScenePersistence —— JSON 文件持久化：读写/删除/批量保存/损坏数据上抛（fail-closed）
 2. SceneManager —— 创建（含模板）/切换/删除/更新/查询/活跃场景恢复
 3. templates —— get_template / list_templates
 
@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 else:
     ScenePersistence = _MODS["scene.persistence"].ScenePersistence
     SceneManager = _MODS["scene.manager"].SceneManager
+SceneStorageError = _MODS["scene.persistence"].SceneStorageError
 get_template = _MODS["scene.templates"].get_template
 list_templates = _MODS["scene.templates"].list_templates
 
@@ -117,13 +118,34 @@ class TestScenePersistence:
         p = _make_persistence(tmp_path)
         assert p.load_scenes() == []
 
-    def test_empty_and_corrupt_file_degrades(self, tmp_path: Path) -> None:
-        """空文件 / 非法 JSON → 空列表，不抛异常。"""
+    def test_empty_file_loads_empty(self, tmp_path: Path) -> None:
+        """空内容文件是合法空库：空串与纯空白 → 空列表，不抛异常。"""
         p = _make_persistence(tmp_path)
         p.scenes_file.write_text("", encoding="utf-8")
         assert p.load_scenes() == []
-        p.scenes_file.write_text("{not json", encoding="utf-8")
+        p.scenes_file.write_text("  \n\t ", encoding="utf-8")
         assert p.load_scenes() == []
+
+    @pytest.mark.parametrize(
+        ("corrupt_content",),
+        [
+            ('{not json',),
+            ('{"scenes": {"a": ',),
+        ],
+        ids=["non-json-text", "truncated-json"],
+    )
+    def test_corrupt_json_raises(self, tmp_path: Path, corrupt_content: str) -> None:
+        """非法 JSON → 读失败上抛 SceneStorageError（fail-closed）。
+
+        损坏不得降级成空库（save_scene 读改写落盘会把损坏当空库清空全部
+        场景数据）；load 为纯读操作，抛错后文件内容保持原样。
+        """
+        p = _make_persistence(tmp_path)
+        p.scenes_file.write_text(corrupt_content, encoding="utf-8")
+        with pytest.raises(SceneStorageError):
+            p.load_scenes()
+        # 性质断言：读失败不落盘、不改写源文件
+        assert p.scenes_file.read_text(encoding="utf-8") == corrupt_content
 
     def test_invalid_scene_entry_skipped(self, tmp_path: Path) -> None:
         """单条场景数据损坏 → 跳过该条，其余正常加载。"""
