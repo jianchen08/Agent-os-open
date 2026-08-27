@@ -92,14 +92,14 @@ class TestServer:
         assert "web_operate" in mod.plugin._tools
         assert mod.plugin._tools["web_operate"].name == "web_operate"
 
-    def test_src_root_path_injected(self, monkeypatch) -> None:
-        """src/ 存在时（0.1 兼容路径）注入 _SRC_ROOT 到 sys.path。"""
+    def test_no_legacy_src_path_injection(self) -> None:
+        """server.py 不注入已退役的 0.1 src/ 目录，插件装载无 sys.path 残留副作用。"""
         import os
 
         src_root = os.path.abspath(os.path.join(_PLUGIN_DIR, "..", "..", "..", "..", "src"))
-        monkeypatch.setattr(os.path, "isdir", lambda p: p == src_root)
-        _load_server()
-        assert src_root in sys.path
+        mod = _load_server()
+        assert src_root not in sys.path
+        assert "web_operate" in mod.plugin._tools
 
     def test_web_operate_success(self, monkeypatch) -> None:
         mod = _load_server()

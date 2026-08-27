@@ -4,10 +4,6 @@
 1. 注册统一日志系统
 2. 通过 pytest hook 自动收集失败测试的日志和 bug 定位信息
 3. 生成结构化测试报告
-
-0.2 架构说明：src/ 已删除（迁移到 plugins/ 与 kernel/）。原"条件化 src/
-路径注入"与"src/ 不存在时跳过 0.1 遗留测试"的机制随死测试清理一并移除
-（依赖 src/ 的 0.1 遗留测试已删除，见 docs/test_cleanup_0.2.md）。
 """
 
 import logging
@@ -19,13 +15,9 @@ import pytest
 
 from tests import _stdlib_guard
 
-# 注意："suites" 已从 collect_ignore 移除，使 pytest tests/channels/ tests/suites/ 能正确收集集成测试。
-# 0.2 清理：原 collect_ignore 中的 test_cross_domain_discovery / test_directory_generator /
-# test_memory_metrics / test_pgvector_store 均依赖 0.1 memory.* 死模块，已删除（见
-# docs/test_cleanup_0.2.md）。
-# manual/：需手动环境（kernel + LLM key）的脚本，不进默认收集，避免污染 `pytest tests/`。
-#   含原 tests/e2e/test_compression_real_llm、tests/test_litellm_direct、tests/suites/llm/test_keypool_adapter
-#   （均为无断言或命中真实外部 API 的手动脚本，已移入）。
+# 仅忽略 manual/：需手动环境（kernel + LLM key）的脚本，不进默认收集，避免污染 `pytest tests/`。
+#   tests/channels/ 与 tests/suites/ 等集成测试正常收集；manual/ 内为无断言或命中真实
+#   外部 API 的手动脚本（test_compression_real_llm、test_litellm_direct、test_keypool_adapter）。
 collect_ignore: list[str] = ["manual"]
 
 # ── 报告输出目录 ──────────────────────────────────────────

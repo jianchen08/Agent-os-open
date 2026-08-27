@@ -508,8 +508,6 @@ class TestInjectTriggerMessage:
 
     def test_check_loop_sync_drives_injector(self) -> None:
         """后台检查循环：到期触发器经注入器投递消息。"""
-        import time
-
         fired = threading.Event()
         received: list[str] = []
 
@@ -563,8 +561,6 @@ class TestInjectTriggerMessage:
 class TestSetupTool:
     @pytest.fixture
     def tool(self) -> Any:
-        import triggers.manager as manager_mod
-
         mod = _load_tool()
         fresh = TriggerManager()
         # 每次测试用全新 manager（monkeypatch get_trigger_manager 返回它）

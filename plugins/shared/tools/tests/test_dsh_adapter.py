@@ -27,7 +27,6 @@ sys.path.insert(0, str(PLUGIN_DIR))
 from bridge import DshRuntimeBridge  # noqa: E402
 from translator import (  # noqa: E402
     DSH_SOURCE_COMMIT,
-    describe_available_skins,
     skins_to_plugin_themes,
     DSH_SOURCE_VERSION,
     discover_dsh_plugins,
@@ -36,7 +35,6 @@ from translator import (  # noqa: E402
     load_installed_plugins,
     load_plugin_config,
     map_dsh_slot,
-    resolve_skin_background,
     to_lingxi_tool_entry,
     translate_hooks_config,
     translate_package,
@@ -840,8 +838,6 @@ class TestSkinPositionRoutingDelivery:
         """全部皮肤 hooks 转译后仍为合法 JS（node --check 冒烟；无 node 跳过）。"""
         import shutil  # noqa: PLC0415
         import subprocess  # noqa: PLC0415
-
-        import server  # noqa: PLC0415
 
         node = shutil.which("node")
         if node is None:

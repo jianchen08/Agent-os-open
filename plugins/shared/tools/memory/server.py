@@ -19,12 +19,6 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-# 将 0.1 源码目录加入 sys.path（过渡期兼容；0.2 下 src/ 已删除，此段为空操作）
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
-_SRC_ROOT = os.path.join(_PROJECT_ROOT, 'src')
-if os.path.isdir(_SRC_ROOT):
-    sys.path.insert(0, _SRC_ROOT)
-
 # hindsight_memory 插件目录（memory_backend.py 所在处）加入 sys.path，
 # 供 get_memory_backend 工厂导入。
 _HINDSIGHT_MEMORY_DIR = os.path.abspath(

@@ -4,15 +4,13 @@
 测试覆盖：
 1. plugin.json 格式正确
 2. server.py 可导入（create_plugin 返回 AgentOSPlugin 实例）
-3. TOOL_REGISTRY 包含全部 11 个工具
+3. TOOL_REGISTRY 声明现役 2 工具（yaml_validate / read_execution_detail）
 4. 各工具函数可被调用并返回正确结构
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
