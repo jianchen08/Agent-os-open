@@ -939,8 +939,11 @@ impl KernelCapabilityRouter {
             // （B 区登记由引擎 execute_step 派发时写入）；P1 恒空，此分支
             // 为协议面就绪后的落点预留。
             let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-            let _step_id =
-                agentos_engine::global_registry().resolve_step_of(&tenant_id, pipeline_id, message_id);
+            let _step_id = agentos_engine::global_registry().resolve_step_of(
+                &tenant_id,
+                pipeline_id,
+                message_id,
+            );
         }
         match event_name {
             "stream_chunk" | "thinking_chunk" => {
@@ -1734,7 +1737,8 @@ fn hook_dispatch_stub(_pipeline_id: &str, _thread_id: &str, _event_name: &str) -
 }
 
 /// 从 params 对象构造 MessageQueryOpts（before_sequence/after_sequence/limit）。
-fn parse_message_query_opts(params: &Value) -> MessageQueryOpts {    MessageQueryOpts {
+fn parse_message_query_opts(params: &Value) -> MessageQueryOpts {
+    MessageQueryOpts {
         before_sequence: params
             .get("before_sequence")
             .and_then(|v| v.as_u64())

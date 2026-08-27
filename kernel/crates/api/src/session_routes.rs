@@ -669,14 +669,12 @@ pub async fn list_session_messages_handler(
         .map(|(key, value, _updated_at)| json!({ "key": key, "value": value }))
         .collect();
 
-    Ok(Json(
-        json!({
-            "messages": messages,
-            "total": total,
-            "has_more": has_more,
-            "transient_states": transient_states,
-        }),
-    ))
+    Ok(Json(json!({
+        "messages": messages,
+        "total": total,
+        "has_more": has_more,
+        "transient_states": transient_states,
+    })))
 }
 
 /// 历史消息查询失败 → ApiError（K3：不得转成 200 空数组，否则前端无法区分
@@ -1252,16 +1250,10 @@ mod transient_states_query_tests {
         // 存活中间态带出（key/value 对，供前端重建流式占位）
         let states = body["transient_states"].as_array().unwrap();
         assert_eq!(states.len(), 2);
-        let keys: Vec<&str> = states
-            .iter()
-            .filter_map(|s| s["key"].as_str())
-            .collect();
+        let keys: Vec<&str> = states.iter().filter_map(|s| s["key"].as_str()).collect();
         assert!(keys.contains(&"chunk:a_abc"));
         assert!(keys.contains(&"progress:1"));
-        let chunk = states
-            .iter()
-            .find(|s| s["key"] == "chunk:a_abc")
-            .unwrap();
+        let chunk = states.iter().find(|s| s["key"] == "chunk:a_abc").unwrap();
         assert_eq!(chunk["value"]["text_len"], json!(12));
         reg.clear_pipeline("default", pipe);
     }

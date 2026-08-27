@@ -1895,19 +1895,12 @@ async fn transient_list_enumerates_pipeline_states() {
         .await
         .unwrap();
     let rows = router
-        .handle(
-            "transient",
-            "list",
-            json!({"pipeline_id": "pipe_t3"}),
-        )
+        .handle("transient", "list", json!({"pipeline_id": "pipe_t3"}))
         .await
         .unwrap();
     let states = rows["transient_states"].as_array().unwrap();
     assert_eq!(states.len(), 2);
-    let keys: Vec<&str> = states
-        .iter()
-        .filter_map(|r| r["key"].as_str())
-        .collect();
+    let keys: Vec<&str> = states.iter().filter_map(|r| r["key"].as_str()).collect();
     assert!(keys.contains(&"chunk:mc_a"));
     assert!(keys.contains(&"progress:1"));
     // 未写过的管道返回空数组（而非错误）
@@ -1922,9 +1915,7 @@ async fn transient_list_enumerates_pipeline_states() {
 async fn transient_missing_params_rejected() {
     let router = router_plain();
     // 缺 pipeline_id / key / value 各档
-    let r1 = router
-        .handle("transient", "set", json!({"key": "k"}))
-        .await;
+    let r1 = router.handle("transient", "set", json!({"key": "k"})).await;
     assert!(r1.is_err(), "缺 pipeline_id 必须报错");
     let r2 = router
         .handle("transient", "get", json!({"pipeline_id": "p"}))
@@ -1967,11 +1958,15 @@ async fn emit_stream_event(
         payload["content"] = json!(content);
     }
     router
-        .handle("event-bus", "emit", json!({
-            "_plugin_id": "my_streamer",
-            "event": event,
-            "payload": payload,
-        }))
+        .handle(
+            "event-bus",
+            "emit",
+            json!({
+                "_plugin_id": "my_streamer",
+                "event": event,
+                "payload": payload,
+            }),
+        )
         .await
         .unwrap();
 }
@@ -1992,13 +1987,7 @@ async fn stream_chunk_accumulates_throttled_to_register() {
         "节流窗内不得落寄存器"
     );
     // 第 N 个 chunk：达计数阈值 → 落 A 区（text_len = 2×N，每个 chunk 2 字符）
-    emit_stream_event(
-        &router,
-        "stream_chunk",
-        pipe,
-        mid,
-        "xx",
-    ).await;
+    emit_stream_event(&router, "stream_chunk", pipe, mid, "xx").await;
     let snap = reg.get("default", pipe, &format!("chunk:{mid}")).unwrap();
     assert_eq!(
         snap["text_len"],

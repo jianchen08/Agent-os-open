@@ -143,9 +143,7 @@ impl PipelineFile {
     /// 循环体 id 收集，step 级 hooks 按 `"<body id>:<step id>"` 复合键收集，
     /// 供编译期 [`agentos_engine::compiler::compile_step_hooks`] 消费。
     #[allow(clippy::wrong_self_convention)] // 消费型转换（File 结构一次性归一到内部类型）
-    fn to_internal_with_hooks(
-        self,
-    ) -> Result<(PipelineConfig, PipelineHooks), PipelineLoadError> {
+    fn to_internal_with_hooks(self) -> Result<(PipelineConfig, PipelineHooks), PipelineLoadError> {
         let body_ids: HashSet<String> = self.loop_bodies.iter().map(|b| b.id.clone()).collect();
         let mut loop_bodies = Vec::with_capacity(self.loop_bodies.len());
         let mut body_hooks = Vec::new();
@@ -1128,7 +1126,9 @@ loop_bodies:
             .find(|s| s.id == "core")
             .expect("core step");
         assert!(
-            core.steps.iter().any(|s| s.name() == "{{state.core_plugin}}"),
+            core.steps
+                .iter()
+                .any(|s| s.name() == "{{state.core_plugin}}"),
             "core 步骤应保留动态 core_plugin 项"
         );
         // steps 库可加载
