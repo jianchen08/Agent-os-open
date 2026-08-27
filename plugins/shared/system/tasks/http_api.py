@@ -1505,62 +1505,84 @@ async def get_ac_result(
 
 
 # ════════════════════════════════════════════════════════════
-# projects 域 handler（projects = 容器任务）
+# projects 域 handler（project = 文件夹 + 登记行）
 # ════════════════════════════════════════════════════════════
 #
-# 语义：项目容器就是任务系统的容器任务。
-# - 创建 project = 创建容器任务（task_scope=container，含 workspace 关联元数据）
-# - list/get/pause/resume/auto-execute/delete = 容器任务生命周期操作
-# - project_id 即 container_task_id（task.id），workspace 插件按此索引工作空间
+# 语义（ADR 2026-08-27-project-folder-registration）：项目是真实文件夹 +
+# tasks 插件登记行（id ↔ path），不是任务实体——无 task_id/状态机/管道。
+# 子任务挂靠键 = state 行 ``task.parent_project_id`` / 镜像行
+# ``metadata.project_id``（两处同值，task_submit 双写）。
 
-_PROJECT_STATUS_MAP: dict[str, str] = {
-    "pending": "planning",
-    "running": "running",
-    "evaluating": "running",
-    "stopped": "suspended",
-    "completed": "completed",
-    "failed": "failed",
-    "timeout": "failed",
-}
+from service_access import get_project_registry  # noqa: E402
 
 
-def _is_container_task(task: Any) -> bool:
-    """是否为项目容器任务（task_scope=container 且未被软删除）。"""
-    meta = task.metadata or {}
-    return meta.get("task_scope") == "container" and not meta.get("soft_deleted")
+def _get_project_registry() -> Any:
+    """取项目登记簿；不可用时抛 503 APIError（读写面 fail-honest）。"""
+    registry = get_project_registry()
+    if registry is None:
+        raise APIError(
+            status_code=503,
+            error_code="API_TIME_2005",
+            message="ProjectRegistry 不可用，无法访问项目数据",
+        )
+    return registry
 
 
-def _task_to_project(task: Any, tasks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """容器任务 TaskModel → 前端 Project 形状（frontend/src/types/task.ts 对齐）。"""
+def _project_status_out(status: str) -> str:
+    """登记行 status → 前端 Project.status（running/suspended）。"""
+    return "suspended" if status == "paused" else "running"
 
-    meta = task.metadata or {}
+
+def _project_to_dict(project: Any, tasks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """登记行 → 前端 Project 形状（frontend/src/types 对齐）。"""
     return {
-        "id": task.id,
-        "userId": str(meta.get("user_id", "") or ""),
-        "sessionId": meta.get("session_id") or None,
-        "goal": task.title or "",
-        "status": _PROJECT_STATUS_MAP.get(str(safe_enum_value(task.status)), "planning"),
-        "autoExecute": bool(meta.get("auto_execute", False)),
-        "currentTaskIndex": int(meta.get("current_task_index", 0) or 0),
-        "tasks": tasks if tasks is not None else (meta.get("tasks", []) or []),
+        "id": project.id,
+        "userId": project.submitted_by or "",
+        "sessionId": project.session_id or None,
+        "goal": project.title or "",
+        "status": _project_status_out(str(project.status)),
+        "autoExecute": bool(project.auto_execute),
+        "currentTaskIndex": 0,
+        "tasks": tasks if tasks is not None else [],
         "timestamps": {
-            "createdAt": task.created_at or "",
-            "updatedAt": task.updated_at or "",
+            "createdAt": project.created_at or "",
+            "updatedAt": project.updated_at or "",
         },
-        "metadata": meta,
+        "metadata": {
+            "path": project.path,
+            "source": "project",
+        },
     }
 
 
-def _get_project_or_404(task_service: Any, project_id: str) -> Any:
-    """取项目容器任务，不存在/非容器/已软删除 → 404。"""
-    task = task_service.get_task(project_id)
-    if task is None or not _is_container_task(task):
+def _get_project_or_404(registry: Any, project_id: str) -> Any:
+    project = registry.get(project_id)
+    if project is None:
         raise APIError(
             status_code=404,
             error_code="API_NOTF_2004",
             message="项目不存在或已被删除",
         )
-    return task
+    return project
+
+
+async def _project_child_pids(project_id: str) -> list[str]:
+    """项目名下子任务管道 id（state 行 task.parent_project_id 匹配）。"""
+    try:
+        handle = _capability("pipeline-state")
+        rows = await handle.call("list", {})
+    except Exception as exc:  # noqa: BLE001 — 读面降级返回空，不阻断登记操作
+        logger.warning("[projects] 名下子任务读取失败 | project_id=%s | err=%s", project_id, exc)
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [
+        str(row.get("pipeline_id") or "")
+        for row in rows
+        if isinstance(row, dict)
+        and str(row.get("task.parent_project_id") or "") == project_id
+        and str(row.get("pipeline_id") or "")
+    ]
 
 
 async def list_projects(
@@ -1571,45 +1593,34 @@ async def list_projects(
     session_id: str | None = None,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """获取项目列表（= 容器任务列表，task_scope=container）。"""
-
-    task_service = _get_task_service()
-
-    if task_service is None:
-        return {"items": [], "total": 0, "limit": limit, "offset": offset}
+    """获取项目列表（登记行；session_id 过滤创建会话）。"""
+    registry = _get_project_registry()
 
     # page 兼容（前端传 page+limit）；offset 显式给定时优先
     if offset == 0 and page is not None and page > 1:
         offset = (page - 1) * limit
 
-    try:
-        tasks = await task_service.list_all(limit=1000, session_id=session_id or None)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[projects] list_all 失败，返回空 | error=%s", exc)
-        return {"items": [], "total": 0, "limit": limit, "offset": offset}
+    projects = registry.list()
+    if session_id:
+        projects = [p for p in projects if p.session_id == session_id]
 
-    projects = [_task_to_project(t) for t in tasks if _is_container_task(t)]
-
+    out = [_project_to_dict(p) for p in projects]
     if status:
-        projects = [p for p in projects if p.get("status") == status]
+        out = [p for p in out if p.get("status") == status]
 
-    total = len(projects)
-    page_items = projects[offset:offset + limit]
-
-    return {"items": page_items, "total": total, "limit": limit, "offset": offset}
+    total = len(out)
+    return {"items": out[offset:offset + limit], "total": total, "limit": limit, "offset": offset}
 
 
 async def create_project(
     body: dict[str, Any] | None = None,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """创建项目 = 创建容器任务（task_scope=container）+ workspace 关联。
+    """创建项目 = 建文件夹（显式路径优先，缺省 {ws_base}/projects/<slug>）+ 登记。
 
-    副作用可观测：响应 project.metadata 携带 ws_meta（workspace 关联声明），
-    日志落项目/容器任务 ID、goal、session、用户与 workspace 模式。
-    workspace 实体由 workspace 插件按 container_task_id 惰性物化
-    （GET /workspaces/{container_task_id} 不存在则自动创建）。
+    非 git 文件夹会 git init（子任务 worktree 前提）；git init 失败创建整体失败。
     """
+    from projects import ProjectModel, ensure_project_folder  # noqa: PLC0415
 
     body = dict(body or {})
     goal = str(body.get("goal") or body.get("title") or "").strip()
@@ -1619,93 +1630,66 @@ async def create_project(
             error_code="MISSING_GOAL",
             message="创建项目必须指定 goal",
         )
+    registry = _get_project_registry()
 
-    task_service = _get_task_service()
-
-    if task_service is None:
+    explicit_path = str(body.get("path") or body.get("workspace") or "").strip()
+    try:
+        folder = ensure_project_folder(goal, explicit_path)
+    except (ValueError, RuntimeError) as exc:
         raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法创建项目",
-        )
+            status_code=400,
+            error_code="PROJECT_FOLDER_FAILED",
+            message=str(exc),
+        ) from exc
 
-    session_id = str(body.get("session_id") or "")
-    auto_execute = bool(body.get("auto_execute", False))
-    user_id = str(_current_user(_user).get("sub", ""))
-
-    # workspace 关联声明（workspace 插件按 container_task_id 索引惰性物化）
-    ws_mode = str(body.get("workspace_mode") or "worktree")
-    if ws_mode not in ("worktree", "plain"):
-        ws_mode = "worktree"
-    explicit_ws = str(body.get("workspace") or "")
-
-    extra_meta = body.get("metadata")
-    metadata: dict[str, Any] = {
-        "task_scope": "container",
-        "session_id": session_id,
-        "user_id": user_id,
-        "auto_execute": auto_execute,
-        "source": "project",
-        "acceptance_criteria": {},
-        "ws_meta": {
-            "mode": ws_mode,
-            "path": explicit_ws,
-            "explicit": bool(explicit_ws),
-        },
-    }
-    if isinstance(extra_meta, dict):
-        for k, v in extra_meta.items():
-            if k not in metadata and isinstance(k, str):
-                metadata[k] = v
-
-    task = await task_service.create_task(
+    project = ProjectModel(
+        path=folder,
         title=goal,
-        description=str(body.get("description") or ""),
-        metadata=metadata,
+        auto_execute=bool(body.get("auto_execute", False)),
+        submitted_by=str(_current_user(_user).get("sub", "") or ""),
+        session_id=str(body.get("session_id") or ""),
     )
+    registry.save(project)
 
     logger.info(
-        "[projects] 创建项目 = 容器任务 | project_id(container_task_id)=%s | goal=%s | "
-        "session=%s | user=%s | ws_mode=%s | auto_execute=%s",
-        task.id,
+        "[projects] 创建项目 | project_id=%s | goal=%s | path=%s | user=%s",
+        project.id,
         goal,
-        session_id or "-",
-        user_id or "-",
-        ws_mode,
-        auto_execute,
+        folder,
+        project.submitted_by or "-",
     )
-
-    return {"project": _task_to_project(task)}
+    return {"project": _project_to_dict(project)}
 
 
 async def get_project(
     project_id: str,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """获取项目详情（含其下子任务摘要列表）。"""
+    """获取项目详情（含名下子任务摘要列表）。"""
+    registry = _get_project_registry()
+    project = _get_project_or_404(registry, project_id)
 
-    task_service = _get_task_service()
+    tasks_summary: list[dict[str, Any]] = []
+    try:
+        handle = _capability("pipeline-state")
+        rows = await handle.call("list", {})
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("task.parent_project_id") or "") != project_id:
+                    continue
+                tasks_summary.append(
+                    {
+                        "id": str(row.get("pipeline_id") or ""),
+                        "title": str(row.get("task.goal") or row.get("pipeline_id") or ""),
+                        "status": str(row.get("task.status") or "pending"),
+                    }
+                )
+    except Exception as exc:  # noqa: BLE001 — 子任务摘要读取降级为空
+        logger.warning("[projects] 子任务摘要读取失败 | project_id=%s | err=%s", project_id, exc)
 
-    if task_service is None:
-        raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法读取项目",
-        )
-
-    task = _get_project_or_404(task_service, project_id)
-
-    subtasks = task_service.list_subtasks(project_id)
-    tasks_summary = [
-        {
-            "id": st.id,
-            "title": st.title,
-            "status": safe_enum_value(st.status),
-        }
-        for st in subtasks
-    ]
-
-    return {"project": _task_to_project(task, tasks=tasks_summary)}
+    return {"project": _project_to_dict(project, tasks=tasks_summary)}
 
 
 async def toggle_auto_execute(
@@ -1713,159 +1697,102 @@ async def toggle_auto_execute(
     body: dict[str, Any] | None = None,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """切换项目自动执行开关（持久化 metadata.auto_execute）。
+    """切换项目自动执行开关（登记行持久化）。enabled 缺省翻转现值。"""
+    registry = _get_project_registry()
+    project = _get_project_or_404(registry, project_id)
 
-    enabled 缺省时翻转现值；前端显式传 enabled。
-    """
-
-    task_service = _get_task_service()
-
-    if task_service is None:
-        raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法切换自动执行",
-        )
-
-    task = _get_project_or_404(task_service, project_id)
-
-    current = bool((task.metadata or {}).get("auto_execute", False))
     if body and "enabled" in body:
         enabled = bool(body.get("enabled"))
     else:
-        enabled = not current
+        enabled = not project.auto_execute
+    project.auto_execute = enabled
+    registry.save(project)
 
-    meta = dict(task.metadata or {})
-    meta["auto_execute"] = enabled
-    updated = task_service.update_task_fields_sync(project_id, metadata=meta)
-
-    logger.info(
-        "[projects] 切换自动执行 | project_id=%s | %s → %s",
-        project_id,
-        current,
-        enabled,
-    )
-
-    return {"project": _task_to_project(updated if updated is not None else task)}
+    logger.info("[projects] 切换自动执行 | project_id=%s | %s", project_id, enabled)
+    return {"project": _project_to_dict(project)}
 
 
 async def pause_project(
     project_id: str,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """暂停项目 = 容器任务生命周期暂停（尽力挂起任务管道 + 落服务状态机 STOPPED）。"""
+    """暂停项目 = 登记行 status=paused + 尽力挂起名下子任务管道。"""
+    registry = _get_project_registry()
+    project = _get_project_or_404(registry, project_id)
 
-    task_service = _get_task_service()
+    suspended = 0
+    for pid in await _project_child_pids(project_id):
+        if await _suspend_task_pipeline(pid):
+            suspended += 1
 
-    if task_service is None:
-        raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法暂停项目",
-        )
-
-    task = _get_project_or_404(task_service, project_id)
-
-    # GAP-1：尽力挂起任务管道（容器可能无 run，失败不阻断状态机落盘）
-    pipeline_suspended = await _suspend_task_pipeline(project_id)
-
-    current = str(safe_enum_value(task.status))
-    if current != "stopped":
-        try:
-            await task_service.pause_task(project_id)
-        except Exception as exc:  # noqa: BLE001 — 状态机拒绝（如已终态）不阻断响应
-            logger.warning(
-                "[projects] pause_task 状态机拒绝 | project_id=%s | current=%s | err=%s",
-                project_id,
-                current,
-                exc,
-            )
-
-    refreshed = task_service.get_task(project_id) or task
+    project.status = "paused"
+    registry.save(project)
 
     logger.info(
-        "[projects] 项目已暂停 | project_id=%s | pipeline_suspended=%s | status=%s",
+        "[projects] 项目已暂停 | project_id=%s | suspended_children=%s",
         project_id,
-        pipeline_suspended,
-        safe_enum_value(refreshed.status),
+        suspended,
     )
-
-    return {"project": _task_to_project(refreshed)}
+    return {"project": _project_to_dict(project)}
 
 
 async def resume_project(
     project_id: str,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """恢复项目 = 容器任务生命周期恢复（服务状态机 running + 尽力恢复任务管道）。"""
+    """恢复项目 = 登记行 status=active + 尽力恢复名下子任务管道。"""
+    registry = _get_project_registry()
+    project = _get_project_or_404(registry, project_id)
 
-    task_service = _get_task_service()
+    resumed = 0
+    for pid in await _project_child_pids(project_id):
+        if await _resume_task_pipeline(pid):
+            resumed += 1
 
-    if task_service is None:
-        raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法恢复项目",
-        )
-
-    task = _get_project_or_404(task_service, project_id)
-
-    current = str(safe_enum_value(task.status))
-    if current == "stopped":
-        try:
-            await task_service.resume_task(project_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[projects] resume_task 状态机拒绝 | project_id=%s | err=%s",
-                project_id,
-                exc,
-            )
-
-    pipeline_resumed = await _resume_task_pipeline(project_id)
-
-    refreshed = task_service.get_task(project_id) or task
+    project.status = "active"
+    registry.save(project)
 
     logger.info(
-        "[projects] 项目已恢复 | project_id=%s | pipeline_resumed=%s | status=%s",
+        "[projects] 项目已恢复 | project_id=%s | resumed_children=%s",
         project_id,
-        pipeline_resumed,
-        safe_enum_value(refreshed.status),
+        resumed,
     )
-
-    return {"project": _task_to_project(refreshed)}
+    return {"project": _project_to_dict(project)}
 
 
 async def delete_project(
     project_id: str,
+    query: dict[str, str] | None = None,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """删除项目 = 容器任务软删除（保留数据，服务级级联清理子任务）。"""
+    """删除项目 = 级联挂起名下子任务 + 删登记行；delete_files=true 时删文件夹。
 
-    task_service = _get_task_service()
+    文件夹删除带路径安全校验（盘符根/仓库根/工作空间基目录拒删）。
+    """
+    from projects import remove_project_folder  # noqa: PLC0415
 
-    if task_service is None:
-        raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法删除项目",
-        )
+    registry = _get_project_registry()
+    project = _get_project_or_404(registry, project_id)
 
-    deleted = await task_service.delete_task(project_id)
+    suspended = 0
+    for pid in await _project_child_pids(project_id):
+        if await _suspend_task_pipeline(pid):
+            suspended += 1
 
-    if not deleted:
-        raise APIError(
-            status_code=404,
-            error_code="API_NOTF_2004",
-            message="项目不存在或已被删除",
-        )
+    registry.delete(project_id)
+
+    folder_removed = False
+    if query and str(query.get("delete_files") or "").lower() in ("1", "true", "yes"):
+        folder_removed = remove_project_folder(project.path)
 
     logger.info(
-        "[projects] 删除项目（容器任务）| project_id=%s | user=%s",
+        "[projects] 删除项目 | project_id=%s | suspended_children=%s | folder_removed=%s | user=%s",
         project_id,
+        suspended,
+        folder_removed,
         _current_user(_user).get("username", "system"),
     )
-
-    return {"message": "项目已删除", "id": project_id}
+    return {"message": "项目已删除", "id": project_id, "folder_removed": folder_removed}
 
 
 # ════════════════════════════════════════════════════════════
@@ -1950,7 +1877,7 @@ async def handle_http(
                 if method == "GET":
                     return _ok(_json_response(await get_project(pid, caller)))
                 if method == "DELETE":
-                    return _ok(_json_response(await delete_project(pid, caller)))
+                    return _ok(_json_response(await delete_project(pid, q, caller)))
             elif sub.startswith("/") and "/" in sub[1:]:
                 pid, action = sub[1:].split("/", 1)
                 if action == "auto-execute" and method == "POST":

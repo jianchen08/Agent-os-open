@@ -45,7 +45,12 @@ async def _on_load(params: dict[str, Any]) -> None:
     # 传 None，由 TaskStorage 解析剩余两级：TASKS_STORAGE_DIR env → 多租户
     # 根 data/{tenant}/tasks（storage.py __init__ 契约）。
     _service = TaskService(data_dir=config.get("data_dir"))
-    logger.info("TaskService initialized")
+    # 容器任务实体遗留数据清除（幂等；project = 文件夹+登记 模型落地后，
+    # 容器任务行/挂靠引用/container_* 隔离副本不再有写入方，此处只清不改）。
+    from projects import purge_legacy_container_data  # noqa: PLC0415
+
+    purge_stats = purge_legacy_container_data(_service.storage)
+    logger.info("TaskService initialized | legacy_purge=%s", purge_stats)
 
 
 @plugin.on_unload

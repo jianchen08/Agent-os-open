@@ -66,6 +66,7 @@ def _isolate_tasks_plugin_modules():
         "enum_utils",
         "workspace",
         "service_access",
+        "projects",
         "_task_cleanup",
         "_task_crud",
         "_task_state",
@@ -658,16 +659,31 @@ class TestPhaseAndAceEndpoints:
 
 
 # ═══════════════════════════════════════════════════════════
-# 5. projects 域（接真 = 容器任务生命周期）
+# 5. projects 域（project = 文件夹 + 登记行，非任务实体）
 # ═══════════════════════════════════════════════════════════
 
+
+@pytest.fixture
+def registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
+    """临时目录 ProjectRegistry + 注入 http_api（避免触碰真实数据目录）。"""
+    import projects as projects_mod
+
+    reg = projects_mod.ProjectRegistry(data_dir=tmp_path / "tasks")
+    import http_api
+
+    monkeypatch.setattr(http_api, "get_project_registry", lambda: reg)
+    return reg
+
+
 class TestProjectsLifecycle:
-    async def test_create_project_creates_container_task(
-            self, monkeypatch: pytest.MonkeyPatch, service: Any, hub: _FakeCapabilityHub) -> None:
+    async def test_create_project_folder_and_registration(
+            self, monkeypatch: pytest.MonkeyPatch, service: Any, hub: _FakeCapabilityHub,
+            registry: Any, tmp_path: Path) -> None:
         headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        folder = tmp_path / "proj"
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects", "POST",
-                           body={"goal": "长期目标", "session_id": "sess-1",
-                                 "auto_execute": True},
+                           body={"goal": "长期目标", "path": str(folder),
+                                 "session_id": "sess-1", "auto_execute": True},
                            headers=headers)
         assert resp["status"] == 200
         proj = resp["payload"]["project"]
@@ -675,128 +691,179 @@ class TestProjectsLifecycle:
         assert proj["userId"] == "u-1"
         assert proj["sessionId"] == "sess-1"
         assert proj["autoExecute"] is True
-        assert proj["status"] == "running"  # 容器任务创建即自动启动
+        assert proj["status"] == "running"
         assert proj["timestamps"]["createdAt"]
-        # 容器任务本体可查（project_id = container_task_id）
-        task = service.get_task(proj["id"])
-        assert task is not None
-        assert (task.metadata or {}).get("task_scope") == "container"
-        # workspace 关联元数据可观测
-        ws_meta = (task.metadata or {}).get("ws_meta", {})
-        assert ws_meta.get("mode") == "worktree"
+        # 文件夹真实建成 + git 初始化（子任务 worktree 前提）
+        assert folder.is_dir()
+        assert (folder / ".git").exists()
+        # 登记行持久化，path 回显
+        assert registry.get(proj["id"]).path == str(folder)
+        assert proj["metadata"]["path"] == str(folder)
+        # 非任务实体：TaskService 无此行
+        assert service.get_task(proj["id"]) is None
+
+    async def test_create_project_rejects_non_git_nonempty_folder(
+            self, monkeypatch: pytest.MonkeyPatch, service: Any, hub: _FakeCapabilityHub,
+            registry: Any, tmp_path: Path) -> None:
+        folder = tmp_path / "occupied"
+        folder.mkdir()
+        (folder / "keep.txt").write_text("x", encoding="utf-8")
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects", "POST",
+                           body={"goal": "目标", "path": str(folder)})
+        assert resp["status"] == 400
+        assert "非空且不是 git 仓库" in resp["payload"]["detail"]
+        # 登记未落（创建原子性）
+        assert registry.list() == []
 
     async def test_create_project_requires_goal(self, monkeypatch: pytest.MonkeyPatch,
-                                                service: Any, hub: _FakeCapabilityHub) -> None:
+                                                service: Any, hub: _FakeCapabilityHub,
+                                                registry: Any) -> None:
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects", "POST", body={})
         assert resp["status"] == 400
         assert "必须指定 goal" in resp["payload"]["detail"]
 
     async def test_list_projects(self, monkeypatch: pytest.MonkeyPatch,
-                                 service: Any, hub: _FakeCapabilityHub) -> None:
-        await _seed_container(service, title="项目A", user_id="u-1")
-        await _seed_container(service, title="项目B", user_id="u-1", auto_execute=True)
-        await service.create_task(title="非项目")
+                                 service: Any, hub: _FakeCapabilityHub, registry: Any) -> None:
+        import projects as projects_mod
+
+        registry.save(projects_mod.ProjectModel(title="项目A", submitted_by="u-1"))
+        registry.save(projects_mod.ProjectModel(title="项目B", auto_execute=True))
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects",
                            query={"limit": "20"})
         assert resp["status"] == 200
         assert resp["payload"]["total"] == 2
         assert resp["payload"]["limit"] == 20
-        items = resp["payload"]["items"]
-        assert {p["goal"] for p in items} == {"项目A", "项目B"}
+        assert {p["goal"] for p in resp["payload"]["items"]} == {"项目A", "项目B"}
 
     async def test_list_projects_status_filter(self, monkeypatch: pytest.MonkeyPatch,
-                                               service: Any, hub: _FakeCapabilityHub) -> None:
-        c = await _seed_container(service, title="暂停的")
-        await service.pause_task(c.id)  # running → stopped
-        await _seed_container(service, title="运行中")
+                                               service: Any, hub: _FakeCapabilityHub,
+                                               registry: Any) -> None:
+        import projects as projects_mod
+
+        registry.save(projects_mod.ProjectModel(title="暂停的", status="paused"))
+        registry.save(projects_mod.ProjectModel(title="运行中"))
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects",
                            query={"status": "suspended"})
         assert resp["payload"]["total"] == 1
         assert resp["payload"]["items"][0]["goal"] == "暂停的"
 
     async def test_get_project_with_subtasks(self, monkeypatch: pytest.MonkeyPatch,
-                                             service: Any, hub: _FakeCapabilityHub) -> None:
-        c = await _seed_container(service, title="项目C")
-        child = await service.create_task(title="子任务", parent_task_id=c.id)
-        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{c.id}")
+                                             service: Any, hub: _FakeCapabilityHub,
+                                             registry: Any) -> None:
+        import projects as projects_mod
+
+        p = registry.save(projects_mod.ProjectModel(title="项目C"))
+        hub._responses["pipeline-state"] = {
+            "list": [
+                {"pipeline_id": "child-1", "task.parent_project_id": p.id,
+                 "task.goal": "子任务", "task.status": "running"},
+                {"pipeline_id": "other", "task.parent_project_id": "别家"},
+            ]
+        }
+        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{p.id}")
         assert resp["status"] == 200
         proj = resp["payload"]["project"]
-        assert proj["id"] == c.id
-        assert [t["id"] for t in proj["tasks"]] == [child.id]
+        assert proj["id"] == p.id
+        assert [t["id"] for t in proj["tasks"]] == ["child-1"]
+        assert proj["tasks"][0]["title"] == "子任务"
 
-    async def test_get_project_rejects_non_container(self, monkeypatch: pytest.MonkeyPatch,
-                                                     service: Any, hub: _FakeCapabilityHub) -> None:
-        t = await service.create_task(title="普通任务")
-        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{t.id}")
+    async def test_get_project_missing_404(self, monkeypatch: pytest.MonkeyPatch,
+                                           service: Any, hub: _FakeCapabilityHub,
+                                           registry: Any) -> None:
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects/no-such")
         assert resp["status"] == 404
 
-    async def test_pause_resume_project(self, monkeypatch: pytest.MonkeyPatch,
-                                        service: Any, hub: _FakeCapabilityHub) -> None:
+    async def test_pause_resume_project_suspends_children(
+            self, monkeypatch: pytest.MonkeyPatch, service: Any, hub: _FakeCapabilityHub,
+            registry: Any) -> None:
+        import projects as projects_mod
+
+        p = registry.save(projects_mod.ProjectModel(title="项目D"))
+        hub._responses["pipeline-state"] = {
+            "list": [{"pipeline_id": "child-1", "task.parent_project_id": p.id}],
+        }
         hub._responses["pipeline-executor"] = {
             "suspend_pipeline": {"run_id": "r-1"},
             "resume_pipeline": {"run_id": "r-2"},
         }
-        c = await _seed_container(service, title="项目D")
-        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{c.id}/pause",
+        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{p.id}/pause",
                            "POST")
         assert resp["status"] == 200
         assert resp["payload"]["project"]["status"] == "suspended"
-        # 容器任务记录同步落 STOPPED
-        assert str(service.get_task(c.id).status.value) == "stopped"
+        # 名下子任务管道被挂起（可观测副作用）
+        susp_calls = [(m, pr) for m, pr in hub.handles["pipeline-executor"].calls
+                      if m == "suspend_pipeline"]
+        assert [pr["pipeline_id"] for _, pr in susp_calls] == ["child-1"]
+        assert registry.get(p.id).status == "paused"
 
-        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{c.id}/resume",
+        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{p.id}/resume",
                            "POST")
         assert resp["status"] == 200
         assert resp["payload"]["project"]["status"] == "running"
-        assert str(service.get_task(c.id).status.value) == "running"
+        res_calls = [(m, pr) for m, pr in hub.handles["pipeline-executor"].calls
+                     if m == "resume_pipeline"]
+        assert [pr["pipeline_id"] for _, pr in res_calls] == ["child-1"]
+        assert registry.get(p.id).status == "active"
 
     async def test_pause_project_missing_404(self, monkeypatch: pytest.MonkeyPatch,
-                                             service: Any, hub: _FakeCapabilityHub) -> None:
+                                             service: Any, hub: _FakeCapabilityHub,
+                                             registry: Any) -> None:
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects/no-such/pause",
                            "POST")
         assert resp["status"] == 404
 
     async def test_toggle_auto_execute(self, monkeypatch: pytest.MonkeyPatch,
-                                       service: Any, hub: _FakeCapabilityHub) -> None:
-        c = await _seed_container(service, title="项目E")  # auto_execute 默认 False
+                                       service: Any, hub: _FakeCapabilityHub, registry: Any) -> None:
+        import projects as projects_mod
+
+        p = registry.save(projects_mod.ProjectModel(title="项目E"))  # auto_execute 默认 False
         resp = await _http(monkeypatch, service, hub,
-                           f"/ext/task_service/projects/{c.id}/auto-execute", "POST",
+                           f"/ext/task_service/projects/{p.id}/auto-execute", "POST",
                            body={"enabled": True})
         assert resp["status"] == 200
         assert resp["payload"]["project"]["autoExecute"] is True
-        assert (service.get_task(c.id).metadata or {}).get("auto_execute") is True
+        assert registry.get(p.id).auto_execute is True
         # 缺省 enabled → 翻转现值
         resp = await _http(monkeypatch, service, hub,
-                           f"/ext/task_service/projects/{c.id}/auto-execute", "POST", body={})
+                           f"/ext/task_service/projects/{p.id}/auto-execute", "POST", body={})
         assert resp["payload"]["project"]["autoExecute"] is False
 
-    async def test_delete_project_soft_delete(self, monkeypatch: pytest.MonkeyPatch,
-                                              service: Any, hub: _FakeCapabilityHub) -> None:
-        c = await _seed_container(service, title="项目F")
-        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{c.id}",
-                           "DELETE")
-        assert resp["status"] == 200
-        assert resp["payload"]["id"] == c.id
-        # 容器任务软删除：记录保留 + soft_deleted 标记，列表不再出现
-        task = service.get_task(c.id)
-        assert task is not None
-        assert (task.metadata or {}).get("soft_deleted") is True
-        resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects")
-        assert resp["payload"]["total"] == 0
-        # 软删除幂等（与 tasks 域 delete_task 容器语义一致）：重删仍 200，记录保留
-        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{c.id}", "DELETE")
-        assert resp["status"] == 200
-        assert resp["payload"]["id"] == c.id
+    async def test_delete_project_removes_registration_only(
+            self, monkeypatch: pytest.MonkeyPatch, service: Any, hub: _FakeCapabilityHub,
+            registry: Any, tmp_path: Path) -> None:
+        headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        folder = tmp_path / "delproj"
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects", "POST",
+                           body={"goal": "待删项目", "path": str(folder)}, headers=headers)
+        pid = resp["payload"]["project"]["id"]
 
-    async def test_project_created_via_dispatch_is_container(
-            self, monkeypatch: pytest.MonkeyPatch, service: Any, hub: _FakeCapabilityHub) -> None:
-        """端到端：dispatch 创建 → /containers 可见（容器任务体系打通）。"""
-        await _http(monkeypatch, service, hub, "/ext/task_service/projects", "POST",
-                    body={"goal": "端到端项目", "session_id": "sess-9"})
-        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/containers",
-                           query={"session_id": "sess-9"})
-        assert len(resp["payload"]) == 1
-        assert resp["payload"][0]["title"] == "端到端项目"
+        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{pid}",
+                           "DELETE", headers=headers)
+        assert resp["status"] == 200
+        assert resp["payload"]["id"] == pid
+        assert resp["payload"]["folder_removed"] is False
+        assert registry.get(pid) is None
+        assert folder.is_dir()  # 未显式 delete_files 时文件夹保留
+        # 重删 404（登记已删）
+        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{pid}",
+                           "DELETE", headers=headers)
+        assert resp["status"] == 404
+
+    async def test_delete_project_with_files(
+            self, monkeypatch: pytest.MonkeyPatch, service: Any, hub: _FakeCapabilityHub,
+            registry: Any, tmp_path: Path) -> None:
+        headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        folder = tmp_path / "delfiles"
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects", "POST",
+                           body={"goal": "连文件夹删", "path": str(folder)}, headers=headers)
+        pid = resp["payload"]["project"]["id"]
+
+        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/projects/{pid}",
+                           "DELETE", query={"delete_files": "true"}, headers=headers)
+        assert resp["status"] == 200
+        assert resp["payload"]["folder_removed"] is True
+        assert not folder.exists()
+        assert registry.get(pid) is None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1070,6 +1137,7 @@ class TestEdgeAndDegradedBranches:
 
         monkeypatch.setattr(http_api, "_get_task_service", lambda: None)
         monkeypatch.setattr(http_api, "_capability", hub.get)
+        monkeypatch.setattr(http_api, "get_project_registry", lambda: None)
 
         # 读面空降级（200 空）
         r = await http_api.handle_http("/ext/task_service/tasks", "GET", "", {}, None)
@@ -1078,10 +1146,8 @@ class TestEdgeAndDegradedBranches:
         assert json.loads(base64.b64decode(r["data"]["body"])) == {"items": [], "total": 0}
         r = await http_api.handle_http("/ext/task_service/tasks/containers", "GET", "", {}, None)
         assert json.loads(base64.b64decode(r["data"]["body"])) == []
-        r = await http_api.handle_http("/ext/task_service/projects", "GET", "", {}, None)
-        assert json.loads(base64.b64decode(r["data"]["body"]))["items"] == []
 
-        # 写面 503
+        # tasks 域写面 503
         r = await http_api.handle_http("/ext/task_service/tasks", "POST",
                                        json.dumps({"title": "x", "agent_id": "main"}), {}, None)
         assert r["data"]["status"] == 503
@@ -1092,6 +1158,10 @@ class TestEdgeAndDegradedBranches:
         r = await http_api.handle_http("/ext/task_service/tasks/x", "DELETE", "", {}, None)
         assert r["data"]["status"] == 503
         r = await http_api.handle_http("/ext/task_service/tasks/x/cancel", "POST", "", {}, None)
+        assert r["data"]["status"] == 503
+
+        # projects 域：登记簿不可用 → 读写面均 503（fail-honest，不空降级）
+        r = await http_api.handle_http("/ext/task_service/projects", "GET", "", {}, None)
         assert r["data"]["status"] == 503
         r = await http_api.handle_http("/ext/task_service/projects", "POST",
                                        json.dumps({"goal": "g"}), {}, None)
@@ -1147,8 +1217,11 @@ class TestEdgeAndDegradedBranches:
     # ── projects 边界 ──
 
     async def test_list_projects_bad_limit_fallback(self, monkeypatch: pytest.MonkeyPatch,
-                                                    service: Any, hub: _FakeCapabilityHub) -> None:
-        await _seed_container(service, title="A")
+                                                    service: Any, hub: _FakeCapabilityHub,
+                                                    registry: Any) -> None:
+        import projects as projects_mod
+
+        registry.save(projects_mod.ProjectModel(title="A"))
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects",
                            query={"limit": "abc"})
         assert resp["status"] == 200
@@ -1156,74 +1229,33 @@ class TestEdgeAndDegradedBranches:
         assert resp["payload"]["total"] == 1
 
     async def test_list_projects_page_offset(self, monkeypatch: pytest.MonkeyPatch,
-                                             service: Any, hub: _FakeCapabilityHub) -> None:
-        await _seed_container(service, title="P1")
-        await _seed_container(service, title="P2")
+                                             service: Any, hub: _FakeCapabilityHub,
+                                             registry: Any) -> None:
+        import projects as projects_mod
+
+        registry.save(projects_mod.ProjectModel(title="P1", created_at="2026-01-01T00:00:00"))
+        registry.save(projects_mod.ProjectModel(title="P2", created_at="2026-02-01T00:00:00"))
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects",
                            query={"page": "2", "limit": "1"})
         assert resp["payload"]["total"] == 2
         assert len(resp["payload"]["items"]) == 1
 
-    async def test_list_projects_service_failure_empty(self, monkeypatch: pytest.MonkeyPatch,
-                                                       hub: _FakeCapabilityHub) -> None:
-        resp = await _http(monkeypatch, _CrashService(), hub, "/ext/task_service/projects")
-        assert resp["status"] == 200
-        assert resp["payload"]["items"] == []
-
-    async def test_create_project_ws_mode_fallback_and_meta(
-            self, monkeypatch: pytest.MonkeyPatch, service: Any, hub: _FakeCapabilityHub) -> None:
-        resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects", "POST",
-                           body={"goal": "模式回退", "session_id": "s",
-                                 "workspace_mode": "bogus", "workspace": "D:\\ws",
-                                 "metadata": {"custom": 7}})
-        assert resp["status"] == 200
-        proj = resp["payload"]["project"]
-        task = service.get_task(proj["id"])
-        assert (task.metadata or {}).get("ws_meta", {}).get("mode") == "worktree"
-        assert (task.metadata or {}).get("custom") == 7
-
     async def test_get_project_missing_404(self, monkeypatch: pytest.MonkeyPatch,
-                                           service: Any, hub: _FakeCapabilityHub) -> None:
+                                           service: Any, hub: _FakeCapabilityHub,
+                                           registry: Any) -> None:
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects/no-such")
         assert resp["status"] == 404
 
     async def test_toggle_auto_execute_missing_404(self, monkeypatch: pytest.MonkeyPatch,
-                                                   service: Any, hub: _FakeCapabilityHub) -> None:
+                                                   service: Any, hub: _FakeCapabilityHub,
+                                                   registry: Any) -> None:
         resp = await _http(monkeypatch, service, hub,
                            "/ext/task_service/projects/no-such/auto-execute", "POST", body={})
         assert resp["status"] == 404
 
-    async def test_pause_project_state_machine_reject(self, monkeypatch: pytest.MonkeyPatch,
-                                                      service: Any, hub: _FakeCapabilityHub) -> None:
-        hub._responses["pipeline-executor"] = {"suspend_pipeline": {"run_id": "r-1"}}
-        c = await _seed_container(service, title="状态机拒绝")
-
-        async def _boom(task_id: str, paused_by: str = "user") -> None:
-            raise RuntimeError("state machine refused")
-
-        monkeypatch.setattr(service, "pause_task", _boom)
-        resp = await _http(monkeypatch, service, hub,
-                           f"/ext/task_service/projects/{c.id}/pause", "POST")
-        assert resp["status"] == 200
-        assert resp["payload"]["project"]["id"] == c.id
-
-    async def test_resume_project_state_machine_reject(self, monkeypatch: pytest.MonkeyPatch,
-                                                       service: Any, hub: _FakeCapabilityHub) -> None:
-        hub._responses["pipeline-executor"] = {"resume_pipeline": {"run_id": "r-2"}}
-        c = await _seed_container(service, title="恢复拒绝")
-        await service.pause_task(c.id)  # → stopped，resume 走状态机
-
-        async def _boom(task_id: str) -> Any:
-            raise RuntimeError("state machine refused")
-
-        monkeypatch.setattr(service, "resume_task", _boom)
-        resp = await _http(monkeypatch, service, hub,
-                           f"/ext/task_service/projects/{c.id}/resume", "POST")
-        assert resp["status"] == 200
-        assert resp["payload"]["project"]["id"] == c.id
-
     async def test_delete_project_missing_404(self, monkeypatch: pytest.MonkeyPatch,
-                                              service: Any, hub: _FakeCapabilityHub) -> None:
+                                              service: Any, hub: _FakeCapabilityHub,
+                                              registry: Any) -> None:
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/projects/no-such",
                            "DELETE")
         assert resp["status"] == 404

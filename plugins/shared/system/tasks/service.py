@@ -44,6 +44,11 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
 
             self._storage = TaskStorage(data_dir=data_dir)
 
+    @property
+    def storage(self) -> Any:
+        """存储层只读访问（容器遗留清除等维护入口）。"""
+        return self._storage
+
     def register_state_callback(self, callback: StateChangeCallback) -> None:
         """注册任务状态变更回调函数。"""
         self._state_callbacks.append(callback)

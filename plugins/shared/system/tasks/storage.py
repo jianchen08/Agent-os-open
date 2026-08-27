@@ -325,6 +325,10 @@ class TaskStorage:
         """
         return [t for t in self._tasks.values() if t.parent_task_id == parent_id]
 
+    def list_all(self) -> list[TaskModel]:
+        """列出全部任务（容器任务遗留清除等全量扫描入口）。"""
+        return list(self._tasks.values())
+
     def delete(self, task_id: str) -> bool:
         """删除任务。
 
