@@ -73,6 +73,23 @@ interface ThreadCreateResponse {
   active_pipeline_id?: string | null
 }
 
+/**
+ * 存活中间态条目（ADR 2026-08-27 §2.6 前端刷新恢复）：消息读取接口带出
+ * 寄存器中未落库的流式中间态快照。键 = `<type>:<message_id>`（如
+ * `chunk:mc_xxx`）；接口返回它 = 该消息尚未落库（流式进行中）。
+ * value 形状对齐内核 chunk 累积快照（transient.rs accumulate_chunk）：
+ * text_len/reasoning_len 为累计长度，blocks 为节流粒度摘要（当前只含
+ * text 块；reasoning 内容不携带，仅长度）。
+ */
+export interface TransientStateEntry {
+  key: string
+  value: {
+    text_len?: number
+    reasoning_len?: number
+    blocks?: Array<{ type?: string; content?: string }>
+  }
+}
+
 /** 后端消息响应类型（DB 加载与 new_message 流式事件共用——冷热路径同构的输入契约） */
 export interface BackendMessageResponse {
   id: string
@@ -572,7 +589,13 @@ export async function getMessages(
     after_sequence?: number
   },
   options: RetryOptions = {},
-): Promise<{ messages: Message[]; total: number; has_more: boolean }> {
+): Promise<{
+  messages: Message[]
+  total: number
+  has_more: boolean
+  /** 存活中间态（ADR 2026-08-27 §2.6）：寄存器未落库的流式快照，供刷新后重建占位。 */
+  transient_states?: TransientStateEntry[]
+}> {
   validateSessionId(sessionId)
 
   return requestWithRetry(async () => {
@@ -623,6 +646,11 @@ export async function getMessages(
       messages: mapped,
       total: payload.total ?? rawMessages.length,
       has_more: payload.has_more,
+      // 存活中间态透传（纯增字段向后兼容：旧后端/无中间态时缺省 undefined，
+      // 消费方按无中间态处理，行为与现状一致）
+      ...(Array.isArray(payload.transient_states)
+        ? { transient_states: payload.transient_states as TransientStateEntry[] }
+        : {}),
     }
   }, options)
 }

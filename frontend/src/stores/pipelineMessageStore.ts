@@ -3,6 +3,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { getMessages as apiGetMessages } from '@/services/api/session'
+import type { TransientStateEntry } from '@/services/api/session'
 import { loggers } from '@/utils/logger'
 import { indexedDbStorage } from '@/utils/indexedDbStorage'
 import { useContextKeys } from '@/stores/contextKeysStore'
@@ -456,6 +457,47 @@ function calculateBottomCursor(finalMessages: Message[], existingCursor: number 
     ? finalMessages.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0)
     : 0
   return Math.max(apiBottomCursor, existingCursor ?? 0)
+}
+
+/**
+ * 从存活中间态快照重建流式占位消息（ADR 2026-08-27 §2.6 前端刷新恢复）。
+ *
+ * 形状与 ensureStreamingPlaceholder（services/websocket/streaming/handlers/utils.ts）
+ * 产出的流式占位同构：id=message_id、role='assistant'、status='streaming'、
+ * content=快照 text 块拼接、无 parts、sequence 挂空（权威值由 stream_end
+ * final_sequence / new_message 对账纠正）、_lastUpdated 打新鲜戳。后续 chunk
+ * 到达时 blockHandler 按 id 命中占位续写（findStreamingPartIndex/appendPart），
+ * new_message 合并（preferServer）以 server 权威为基底、本地 content 只作
+ * 兜底——前缀文本不会重复。
+ *
+ * 快照只携带 text 块内容（transient.rs accumulate_chunk：reasoning 仅长度不
+ * 携带文本），故 thinking 不重建——思考区由后续 reasoning_delta 重新累积，
+ * 与流式占位（无 thinking）同构。非 chunk: 前缀的中间态键（progress 等）不
+ * 属于消息占位，返回 null 跳过。
+ */
+function buildTransientPlaceholder(
+  entry: TransientStateEntry,
+  sessionId: string,
+): Message | null {
+  const CHUNK_PREFIX = 'chunk:'
+  if (!entry?.key?.startsWith(CHUNK_PREFIX)) return null
+  const messageId = entry.key.slice(CHUNK_PREFIX.length)
+  if (!messageId) return null
+  const blocks = Array.isArray(entry.value?.blocks) ? entry.value.blocks : []
+  const content = blocks
+    .filter((b) => b?.type === 'text' && typeof b.content === 'string')
+    .map((b) => b.content as string)
+    .join('')
+  return {
+    id: messageId,
+    sessionId,
+    role: 'assistant',
+    content,
+    timestamp: new Date().toISOString(),
+    parentId: null,
+    status: 'streaming',
+    _lastUpdated: Date.now(),
+  } as Message
 }
 
 
@@ -1114,6 +1156,27 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           // 首次冷启动：从 API 响应读取 has_more，避免首次返回 <50 条时被错误地标记为无更多历史消息
           const hasMoreOlder = apiResult.has_more
           get().initFromAPI(pipelineId, mainMessages, hasMoreOlder)
+          // 存活中间态重建流式占位（ADR 2026-08-27 §2.6 前端刷新恢复）：F5 后
+          // 从后端内存寄存器恢复未落库的流式中间态（接口返回它 = 该消息尚未
+          // 落库、流式进行中）。initFromAPI 权威替换后追加——占位走 addMessage
+          // （单一消息数组协议），不推进 bottomCursor（与 ensureStreamingPlaceholder
+          // 同规则；权威 seq 由 stream_end final_sequence / new_message 对账纠正）。
+          const transientStates = apiResult.transient_states
+          if (transientStates && transientStates.length > 0) {
+            // 幂等双检：API 原始列表已含同 id 权威消息（落库完成，含空白过滤
+            // 后不在 store 的边界）→ 跳过；本地已存在（WS 先到/INFLIGHT 保留）
+            // → 跳过，绝不覆盖权威版或双插。
+            const apiIds = new Set(mainMessages.map((m) => m.id))
+            const existingIds = new Set(
+              (get().getMessages(pipelineId) || []).map((m) => m.id),
+            )
+            for (const entry of transientStates) {
+              const placeholder = buildTransientPlaceholder(entry, threadId)
+              if (!placeholder) continue
+              if (apiIds.has(placeholder.id) || existingIds.has(placeholder.id)) continue
+              get().addMessage(pipelineId, placeholder)
+            }
+          }
         }
       } catch (err: any) {
         const status = err?.response?.status ?? err?.status
