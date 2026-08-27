@@ -504,7 +504,18 @@ def _serve_merged_skin_css(path: str, headers: dict[str, str] | None = None) -> 
     if path.endswith(_SKIN_HOOKS_SUFFIX):
         hook_file = skin_dir / "hooks.mjs"
         if not hook_file.is_file():
-            return {"status": 404, "headers": {}, "body": "", "body_encoding": "utf-8"}
+            # 纯 CSS 皮肤（summer-liquid-glass/mint/deep-current 等）无 hooks.mjs
+            # 是常态：回 200 空文本（前端契约「无 hooks.mjs 跳过动态层」），
+            # 404 会被前端 API 拦截器当错误上报——正常切皮肤不应产生错误。
+            return {
+                "status": 200,
+                "headers": {
+                    "content-type": "text/javascript; charset=utf-8",
+                    "cache-control": "no-cache",
+                },
+                "body": "",
+                "body_encoding": "utf-8",
+            }
         try:
             text = hook_file.read_text(encoding="utf-8", errors="replace")
         except OSError as e:

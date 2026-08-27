@@ -855,6 +855,14 @@ class TestSkinPositionRoutingDelivery:
         assert self._serve("/ext/dsh_adapter/styles/skin/no-such-skin/merged.css")["status"] == 404
         assert self._serve("/ext/dsh_adapter/styles/skin/../skin-center/hooks.mjs")["status"] == 404
 
+    def test_missing_hooks_empty_200(self):
+        """纯 CSS 皮肤（无 hooks.mjs）是常态：回 200 空文本供前端跳过动态层——
+        404 会被前端 API 拦截器当错误上报，正常切皮肤不应产生错误。"""
+        for skin in ("summer-liquid-glass", "mint", "deep-current"):
+            resp = self._serve(f"/ext/dsh_adapter/styles/skin/{skin}/hooks.mjs")
+            assert resp["status"] == 200
+            assert resp["body"] == ""
+
 
 class TestSkinPluginThemes:
     """皮肤 → contributes.themes 声明（形态路由终态：插件主题通道原生渲染）。"""

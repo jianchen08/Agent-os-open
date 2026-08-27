@@ -15,31 +15,34 @@
  * 11. 主管道 → main-{sessionId} 主标签 switchToTab
  * 12. 子管道 → registerPipeline + openSubAgentTab + loadTabMessages
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { useNotificationStore } from '@/stores/notificationStore'
 
-const { mockPipelineStore, mockTabStore, mockSessionListStore, mockSessionStore } = vi.hoisted(() => ({
-  mockPipelineStore: {
-    pipelineSessionMap: {},
-    pipelines: {},
-    registerPipeline: vi.fn(),
-  },
-  mockTabStore: {
-    tabs: [],
-    activeTabId: null,
-    pipelineTabMap: {},
-    saveCurrentTabs: vi.fn(),
-    initSessionTabs: vi.fn(),
-    switchToTab: vi.fn(),
-    openSubAgentTab: vi.fn(),
-    loadTabMessages: vi.fn().mockResolvedValue(undefined),
-  },
-  mockSessionListStore: {
-    setActiveSession: vi.fn().mockResolvedValue(undefined),
-  },
-  mockSessionStore: {
-    activeSessionId: null,
-  },
-}))
+const { mockPipelineStore, mockTabStore, mockSessionListStore, mockSessionStore } = vi.hoisted(
+  () => ({
+    mockPipelineStore: {
+      pipelineSessionMap: {},
+      pipelines: {},
+      registerPipeline: vi.fn(),
+    },
+    mockTabStore: {
+      tabs: [],
+      activeTabId: null,
+      pipelineTabMap: {},
+      saveCurrentTabs: vi.fn(),
+      initSessionTabs: vi.fn(),
+      switchToTab: vi.fn(),
+      openSubAgentTab: vi.fn(),
+      loadTabMessages: vi.fn().mockResolvedValue(undefined),
+    },
+    mockSessionListStore: {
+      setActiveSession: vi.fn().mockResolvedValue(undefined),
+    },
+    mockSessionStore: {
+      activeSessionId: null,
+    },
+  }),
+)
 
 vi.mock('@/stores/pipelineMessageStore', () => ({
   usePipelineMessageStore: { getState: () => mockPipelineStore },
@@ -86,6 +89,11 @@ function resetAll() {
   mockSessions = []
   fetchedSessions = []
   mockEnsureThrows = false
+  useNotificationStore.setState({
+    notifications: [],
+    isPanelOpen: false,
+    activeBlockingNotification: null,
+  })
   mockPipelineStore.pipelineSessionMap = {}
   mockPipelineStore.pipelines = {}
   mockPipelineStore.registerPipeline.mockClear()
@@ -166,13 +174,17 @@ describe('findPipelineLocation - 管道归属查找', () => {
 describe('navigateToPipeline - 全局导航', () => {
   beforeEach(resetAll)
 
-  it('无活跃会话 → console.error 并返回 false', async () => {
+  it('无活跃会话 → 上报通知（当前没有活跃会话，normal 不弹面板）并返回 false', async () => {
     mockSessionStore.activeSessionId = null
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const ok = await navigateToPipeline('pipe-x')
     expect(ok).toBe(false)
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('无活跃会话'), 'pipe-x')
-    errSpy.mockRestore()
+    const { notifications, isPanelOpen } = useNotificationStore.getState()
+    expect(isPanelOpen).toBe(false)
+    expect(
+      notifications.some(
+        (n) => n.message.includes('无法跳转到管道 pipe-x') && n.message.includes('没有活跃会话'),
+      ),
+    ).toBe(true)
   })
 
   it('当前活跃 Tab 的 pipelineRunId 已是目标管道 → 快速返回 true（不查不切）', async () => {
@@ -185,16 +197,19 @@ describe('navigateToPipeline - 全局导航', () => {
     expect(mockTabStore.switchToTab).not.toHaveBeenCalled()
   })
 
-  it('找不到管道归属 → 拒绝降级到当前会话，返回 false', async () => {
+  it('找不到管道归属 → 上报通知（含原因与 pipelineId，高优先级自动弹面板）并返回 false', async () => {
     mockSessionStore.activeSessionId = SESSION_A
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const ok = await navigateToPipeline('pipe-nowhere')
     expect(ok).toBe(false)
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining('找不到管道归属'),
-      'pipe-nowhere',
-    )
-    errSpy.mockRestore()
+    const { notifications, isPanelOpen } = useNotificationStore.getState()
+    expect(isPanelOpen).toBe(true)
+    expect(
+      notifications.some(
+        (n) =>
+          n.message.includes('无法跳转到管道 pipe-nowhere') &&
+          n.message.includes('所有会话中都找不到该管道'),
+      ),
+    ).toBe(true)
   })
 
   it('管道在其他会话 → 切换会话（saveCurrentTabs + setActiveSession + initSessionTabs）后切到已有标签', async () => {
@@ -214,21 +229,18 @@ describe('navigateToPipeline - 全局导航', () => {
     expect(mockTabStore.switchToTab).toHaveBeenCalledWith('tab-b')
   })
 
-  it('目标会话在列表中已不存在（数据不一致）→ 中止返回 false', async () => {
+  it('目标会话在列表中已不存在（数据不一致）→ 上报通知并中止返回 false', async () => {
     mockSessionStore.activeSessionId = SESSION_A
     // pipelineSessionMap 指向 SESSION_B，但 readSessions 里没有该会话
     mockPipelineStore.pipelineSessionMap = { 'pipe-ghost': SESSION_B }
     mockSessions = [{ id: SESSION_A, pipelineIds: [] }]
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const ok = await navigateToPipeline('pipe-ghost')
     expect(ok).toBe(false)
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining('目标会话已不存在'),
-      SESSION_B,
-      'pipe-ghost',
-    )
+    const { notifications } = useNotificationStore.getState()
+    expect(
+      notifications.some((n) => n.message.includes('pipe-ghost') && n.message.includes('已不存在')),
+    ).toBe(true)
     expect(mockTabStore.switchToTab).not.toHaveBeenCalled()
-    errSpy.mockRestore()
   })
 
   it('主管道（mainPipelineIdOf 命中）→ 切到 main-{sessionId} 主标签', async () => {
@@ -243,27 +255,27 @@ describe('navigateToPipeline - 全局导航', () => {
     expect(mockTabStore.openSubAgentTab).not.toHaveBeenCalled()
   })
 
-  it('主管道判定命中但主标签缺失（数据不一致 bug）→ 报错返回 false', async () => {
+  it('主管道判定命中但主标签缺失（数据不一致 bug）→ 上报通知并返回 false', async () => {
     mockSessionStore.activeSessionId = SESSION_A
     mockSessions = [{ id: SESSION_A, pipelineIds: [MAIN_PIPE_A] }]
     mockTabStore.tabs = [] // 主标签缺失
 
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const ok = await navigateToPipeline(MAIN_PIPE_A)
     expect(ok).toBe(false)
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining('主标签缺失'),
-      expect.stringContaining(SESSION_A),
-      MAIN_PIPE_A,
-      expect.any(Array),
-    )
-    errSpy.mockRestore()
+    const { notifications } = useNotificationStore.getState()
+    expect(
+      notifications.some(
+        (n) => n.message.includes(MAIN_PIPE_A) && n.message.includes('主标签缺失'),
+      ),
+    ).toBe(true)
   })
 
   it('子管道：未注册 → registerPipeline + openSubAgentTab + loadTabMessages，返回 true', async () => {
     mockSessionStore.activeSessionId = SESSION_A
     // 会话有两个管道：权威 activePipelineId 是主管道，pipe-sub-1 是子管道
-    mockSessions = [{ id: SESSION_A, pipelineIds: ['pipe-main', 'pipe-sub-1'], activePipelineId: 'pipe-main' }]
+    mockSessions = [
+      { id: SESSION_A, pipelineIds: ['pipe-main', 'pipe-sub-1'], activePipelineId: 'pipe-main' },
+    ]
     mockTabStore.tabs = []
 
     const ok = await navigateToPipeline('pipe-sub-1', {
@@ -274,7 +286,12 @@ describe('navigateToPipeline - 全局导航', () => {
     })
     expect(ok).toBe(true)
     expect(mockPipelineStore.registerPipeline).toHaveBeenCalledWith(
-      expect.objectContaining({ pipelineId: 'pipe-sub-1', sessionId: SESSION_A, level: 3, agentName: '子Agent' }),
+      expect.objectContaining({
+        pipelineId: 'pipe-sub-1',
+        sessionId: SESSION_A,
+        level: 3,
+        agentName: '子Agent',
+      }),
     )
     expect(mockTabStore.openSubAgentTab).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -290,7 +307,9 @@ describe('navigateToPipeline - 全局导航', () => {
 
   it('子管道已注册（pipelines 含该管道）→ 不重复 registerPipeline，仅开标签', async () => {
     mockSessionStore.activeSessionId = SESSION_A
-    mockSessions = [{ id: SESSION_A, pipelineIds: ['pipe-main', 'pipe-sub-2'], activePipelineId: 'pipe-main' }]
+    mockSessions = [
+      { id: SESSION_A, pipelineIds: ['pipe-main', 'pipe-sub-2'], activePipelineId: 'pipe-main' },
+    ]
     mockPipelineStore.pipelines = { 'pipe-sub-2': { id: 'pipe-sub-2' } }
     mockTabStore.tabs = []
 
@@ -302,7 +321,9 @@ describe('navigateToPipeline - 全局导航', () => {
 
   it('navigateToPipeline 缺省参数：agentName 默认子任务、agentLevel 2、status running', async () => {
     mockSessionStore.activeSessionId = SESSION_A
-    mockSessions = [{ id: SESSION_A, pipelineIds: ['pipe-main', 'pipe-sub-3'], activePipelineId: 'pipe-main' }]
+    mockSessions = [
+      { id: SESSION_A, pipelineIds: ['pipe-main', 'pipe-sub-3'], activePipelineId: 'pipe-main' },
+    ]
     mockTabStore.tabs = []
 
     await navigateToPipeline('pipe-sub-3')

@@ -7,7 +7,6 @@
  * - 默认弹通知中心，显式 showToast: false 时保持静默（重试进度/401 静默等既有调用点）
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-
 const { addNotificationMock } = vi.hoisted(() => ({
   addNotificationMock: vi.fn(),
 }))
@@ -20,12 +19,7 @@ vi.mock('../../stores/notificationStore', () => ({
 }))
 
 // 重新导入模块（mock 提升生效）
-import {
-  reportError,
-  captureException,
-  ErrorType,
-  ErrorSeverity,
-} from '../errorReporting'
+import { reportError, captureException, ErrorType, ErrorSeverity } from '../errorReporting'
 import * as errorReportingModule from '../errorReporting'
 
 describe('reportError 单签名通知中心提示', () => {
@@ -71,8 +65,22 @@ describe('reportError 单签名通知中心提示', () => {
     expect(n.autoDismissMs).toBe(6000)
   })
 
+  it('priority 显式覆盖：非服务端硬失败也可 high（自动弹出面板）', () => {
+    reportError('无法跳转到管道 pipe-1：所有会话中都找不到该管道', {
+      type: ErrorType.VALIDATION,
+      severity: ErrorSeverity.WARNING,
+      priority: 'high',
+    })
+    const n = addNotificationMock.mock.calls[0][0]
+    expect(n.priority).toBe('high')
+  })
+
   it('context.source 显式传入来源标签（统一错误模型）', () => {
-    reportError('工具执行失败', { type: ErrorType.SERVER, severity: ErrorSeverity.ERROR, source: 'plugin' })
+    reportError('工具执行失败', {
+      type: ErrorType.SERVER,
+      severity: ErrorSeverity.ERROR,
+      source: 'plugin',
+    })
     const n = addNotificationMock.mock.calls[0][0]
     expect(n.errorSource).toBe('plugin')
   })

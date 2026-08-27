@@ -9,6 +9,7 @@
 
 import { useNotificationStore } from '../stores/notificationStore'
 import type { ErrorSource } from '../types/api'
+import type { NotificationPriority } from '../types/notification'
 
 /** 上报上下文：定位信息（component/action/code/source 等）+ 控制位（showToast） */
 export interface ErrorContext {
@@ -27,6 +28,8 @@ export interface ErrorContext {
 export interface ReportOptions extends ErrorContext {
   type?: ErrorType
   severity?: ErrorSeverity
+  /** 通知优先级覆盖：缺省 SERVER→high、其余→normal；high/critical 会自动弹出面板 */
+  priority?: NotificationPriority
 }
 
 /**
@@ -116,7 +119,7 @@ class ErrorReportingService {
       useNotificationStore.getState().addNotification({
         title: isServerError ? '服务请求失败' : '操作失败',
         message,
-        priority: isServerError ? 'high' : 'normal',
+        priority: options?.priority ?? (isServerError ? 'high' : 'normal'),
         category: 'error',
         isBlocking: false,
         // 统一错误信封来源（config/error_codes.json）：通知中心渲染来源标签，

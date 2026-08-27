@@ -1,10 +1,11 @@
 /** 全局管道导航服务 在所有会话的所有管道中查找并跳转到目标管道。 */
 
-import { usePipelineMessageStore, type PipelineMeta } from '@/stores/pipelineMessageStore'
-import { useAgentTabStore } from '@/stores/agentTabStore'
-import { useSessionStore } from '@/stores/sessionStore'
 import { readSessions, ensureSessionsLoaded } from '@/hooks/queries/useSessionsQuery'
+import { reportError, ErrorType, ErrorSeverity } from '@/services/errorReporting'
+import { useAgentTabStore } from '@/stores/agentTabStore'
+import { usePipelineMessageStore, type PipelineMeta } from '@/stores/pipelineMessageStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { mainPipelineIdOf } from '@/utils/mappers'
 import type { AgentTab } from '@/types/task'
 
@@ -24,9 +25,9 @@ export async function findPipelineLocation(pipelineId: string): Promise<Pipeline
   const tabStore = useAgentTabStore.getState()
   // 统一查找 tabId：先查 pipelineTabMap，再查 tab.pipelineRunId
   const resolveTabId = () =>
-    tabStore.pipelineTabMap[pipelineId]
-    || tabStore.tabs.find((t) => t.pipelineRunId === pipelineId)?.id
-    || null
+    tabStore.pipelineTabMap[pipelineId] ||
+    tabStore.tabs.find((t) => t.pipelineRunId === pipelineId)?.id ||
+    null
 
   // 第二级（提前执行）：遍历所有会话的 pipelineIds（后端权威数据）
   const sessions = readSessions()
@@ -93,7 +94,15 @@ export async function navigateToPipeline(
 
   const currentSid = useSessionStore.getState().activeSessionId
   if (!currentSid) {
-    console.error('[navigateToPipeline] 无活跃会话，无法导航到管道', pipelineId)
+    reportError(`无法跳转到管道 ${pipelineId}：当前没有活跃会话`, {
+      type: ErrorType.VALIDATION,
+      severity: ErrorSeverity.WARNING,
+      code: 'NAVIGATE_FAILED',
+      source: 'frontend',
+      component: 'pipelineNavigator',
+      action: 'navigateToPipeline',
+      pipelineId,
+    })
     return false
   }
 
@@ -106,7 +115,19 @@ export async function navigateToPipeline(
 
   const location = await findPipelineLocation(pipelineId)
   if (!location) {
-    console.error('[navigateToPipeline] 找不到管道归属，拒绝降级到当前会话: pipelineId=%s', pipelineId)
+    reportError(
+      `无法跳转到管道 ${pipelineId}：所有会话中都找不到该管道（会话列表可能已过期，请刷新后重试）`,
+      {
+        type: ErrorType.VALIDATION,
+        severity: ErrorSeverity.WARNING,
+        priority: 'high',
+        code: 'NAVIGATE_FAILED',
+        source: 'frontend',
+        component: 'pipelineNavigator',
+        action: 'navigateToPipeline',
+        pipelineId,
+      },
+    )
     return false
   }
   const targetSessionId = location.sessionId
@@ -114,7 +135,7 @@ export async function navigateToPipeline(
   // 如果在其他会话，先切换会话
   if (targetSessionId !== currentSid) {
     const sessions = readSessions()
-    const sessionExists = sessions.some(s => s.id === targetSessionId)
+    const sessionExists = sessions.some((s) => s.id === targetSessionId)
     if (sessionExists) {
       useAgentTabStore.getState().saveCurrentTabs()
       await useSessionListStore.getState().setActiveSession(targetSessionId)
@@ -122,7 +143,19 @@ export async function navigateToPipeline(
     }
     // session 不存在时中止（数据不一致，拒绝在当前会话创建幽灵标签）
     if (!sessionExists) {
-      console.error('[navigateToPipeline] 目标会话已不存在: sessionId=%s pipelineId=%s', targetSessionId, pipelineId)
+      reportError(
+        `无法跳转到管道 ${pipelineId}：其所属会话 ${targetSessionId} 已不存在（数据不一致）`,
+        {
+          type: ErrorType.VALIDATION,
+          severity: ErrorSeverity.WARNING,
+          priority: 'high',
+          code: 'NAVIGATE_FAILED',
+          source: 'frontend',
+          component: 'pipelineNavigator',
+          action: 'navigateToPipeline',
+          pipelineId,
+        },
+      )
       return false
     }
   }
@@ -140,23 +173,32 @@ export async function navigateToPipeline(
   // 主管道特判：会话主标签（main-${sessionId}）不建子标签——主标签是会话创建时
   // 固定存在的不变量（initSessionTabs 保证），走到缺失分支即数据不一致 bug，
   // 显式报错暴露，不做静默兜底（静默激活会掩盖根因）。
-  const targetSession = readSessions().find(
-    (s) => s.id === targetSessionId,
-  )
+  const targetSession = readSessions().find((s) => s.id === targetSessionId)
   // 主管道判定（权威 activePipelineId 解析，不按 [0] 位置猜测）
-  const isMainPipeline =
-    !!targetSession && mainPipelineIdOf(targetSession) === pipelineId
+  const isMainPipeline = !!targetSession && mainPipelineIdOf(targetSession) === pipelineId
   if (isMainPipeline) {
     const mainTab = currentTabStore.tabs.find((t) => t.id === `main-${targetSessionId}`)
     if (mainTab) {
       currentTabStore.switchToTab(mainTab.id)
       return true
     }
-    console.error(
-      '[navigateToPipeline] 主标签缺失（数据不一致 bug）: sessionId=%s pipelineId=%s tabs=%o',
-      targetSessionId,
-      pipelineId,
-      currentTabStore.tabs.map((t) => ({ id: t.id, level: t.agentLevel, pid: t.pipelineRunId })),
+    reportError(
+      `无法跳转到管道 ${pipelineId}：会话 ${targetSessionId} 的主标签缺失（数据不一致）`,
+      {
+        type: ErrorType.VALIDATION,
+        severity: ErrorSeverity.WARNING,
+        priority: 'high',
+        code: 'NAVIGATE_FAILED',
+        source: 'frontend',
+        component: 'pipelineNavigator',
+        action: 'navigateToPipeline',
+        pipelineId,
+        tabs: currentTabStore.tabs.map((t) => ({
+          id: t.id,
+          level: t.agentLevel,
+          pid: t.pipelineRunId,
+        })),
+      },
     )
     return false
   }
