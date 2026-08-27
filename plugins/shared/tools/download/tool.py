@@ -259,8 +259,9 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
         if not allowed:
             return create_failure_result(f"保存路径不在允许范围内: {reason}")
 
-        # ── 创建保存目录 ──
-        save_dir = Path(save_path)
+        # ── 创建保存目录（相对路径以注入 workspace 锚定；check_path_allowed
+        # 已保证 workspace 就绪，resolve_path 不会落到 sidecar cwd）──
+        save_dir = self.resolve_path(save_path)
         try:
             save_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:

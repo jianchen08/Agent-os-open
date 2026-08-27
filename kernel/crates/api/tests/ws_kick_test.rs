@@ -50,7 +50,7 @@ impl PipelineDispatcher for NoopDispatcher {
     ) -> Result<(), String> {
         Ok(())
     }
-    async fn dispatch_stop(&self, _thread_id: &str) -> Result<(), String> {
+    async fn dispatch_stop(&self, _thread_id: &str, _pipeline_id: &str) -> Result<(), String> {
         Ok(())
     }
 }

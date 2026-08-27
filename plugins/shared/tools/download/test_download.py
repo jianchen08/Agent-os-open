@@ -102,7 +102,7 @@ class TestPureHelpers:
 class TestExecuteValidation:
     def test_missing_url(self, tmp_path: Path) -> None:
         tool = DownloadTool()
-        r = _run(tool.execute({"save_path": str(tmp_path)}))
+        r = _run(tool.execute({"save_path": str(tmp_path), "workspace": str(tmp_path)}))
         assert not r.success and "url" in r.error
 
     def test_missing_save_path(self) -> None:
@@ -113,19 +113,19 @@ class TestExecuteValidation:
     def test_ssrf_rejects_private_ip(self, tmp_path: Path) -> None:
         """内网地址（127.0.0.1）→ SSRF 拦截（无 allow_ssrf_skip 时不可旁路）。"""
         tool = DownloadTool()
-        r = _run(tool.execute({"url": "http://127.0.0.1:8080/x.txt", "save_path": str(tmp_path)}))
+        r = _run(tool.execute({"url": "http://127.0.0.1:8080/x.txt", "save_path": str(tmp_path), "workspace": str(tmp_path)}))
         assert not r.success and "SSRF" in r.error or "安全校验" in r.error
 
     def test_ssrf_rejects_bad_protocol(self, tmp_path: Path) -> None:
         tool = DownloadTool()
-        r = _run(tool.execute({"url": "ftp://example.com/x.txt", "save_path": str(tmp_path)}))
+        r = _run(tool.execute({"url": "ftp://example.com/x.txt", "save_path": str(tmp_path), "workspace": str(tmp_path)}))
         assert not r.success and "协议" in r.error
 
     def test_allow_domains_whitelist(self, tmp_path: Path) -> None:
         tool = DownloadTool()
         r = _run(
             tool.execute(
-                {"url": "http://example.com/x.txt", "save_path": str(tmp_path), "allow_domains": ["github.com"]}
+                {"url": "http://example.com/x.txt", "save_path": str(tmp_path), "workspace": str(tmp_path), "allow_domains": ["github.com"]}
             )
         )
         assert not r.success and "白名单" in r.error
@@ -135,7 +135,7 @@ class TestExecuteValidation:
         blocker = tmp_path / "blocker"
         blocker.write_text("x", encoding="utf-8")
         tool = DownloadTool(allow_ssrf_skip=True)
-        r = _run(tool.execute({"url": "http://127.0.0.1:1/a.txt", "save_path": str(blocker / "sub")}))
+        r = _run(tool.execute({"url": "http://127.0.0.1:1/a.txt", "save_path": str(blocker / "sub"), "workspace": str(blocker / "sub")}))
         assert not r.success and "创建保存目录失败" in r.error
 
     def test_hash_mismatch(self, tmp_path: Path) -> None:
@@ -152,7 +152,7 @@ class TestExecuteValidation:
             tool.execute(
                 {
                     "url": "http://127.0.0.1:1/out.bin",
-                    "save_path": str(tmp_path),
+                    "save_path": str(tmp_path), "workspace": str(tmp_path),
                     "expected_hash": "0" * 64,
                 }
             )
@@ -173,7 +173,7 @@ class TestExecuteValidation:
             tool.execute(
                 {
                     "url": "http://127.0.0.1:1/out.bin",
-                    "save_path": str(tmp_path),
+                    "save_path": str(tmp_path), "workspace": str(tmp_path),
                     "expected_hash": real_hash,
                 }
             )
@@ -192,7 +192,7 @@ class TestExecuteValidation:
             raise RuntimeError("network unreachable")
 
         tool._download = fake_download  # type: ignore[method-assign]
-        r = _run(tool.execute({"url": "http://127.0.0.1:1/a.txt", "save_path": str(tmp_path)}))
+        r = _run(tool.execute({"url": "http://127.0.0.1:1/a.txt", "save_path": str(tmp_path), "workspace": str(tmp_path)}))
         assert not r.success and "network unreachable" in r.error
 
 
@@ -595,7 +595,7 @@ class TestLocalServerIntegration:
         with _LocalServer(tmp_path, {"data.txt": payload}) as server:
             tool = DownloadTool(allow_ssrf_skip=True)  # 受信本地测试服务器
             save_dir = tmp_path / "out"
-            r = _run(tool.execute({"url": server.url("data.txt"), "save_path": str(save_dir)}))
+            r = _run(tool.execute({"url": server.url("data.txt"), "save_path": str(save_dir), "workspace": str(save_dir)}))
         assert r.success
         assert (save_dir / "data.txt").read_bytes() == payload
         assert r.output["size"] == len(payload)
@@ -610,7 +610,7 @@ class TestLocalServerIntegration:
                 tool.execute(
                     {
                         "url": server.url("big.bin"),
-                        "save_path": str(save_dir),
+                        "save_path": str(save_dir), "workspace": str(save_dir),
                         "max_size": 100,
                         "max_retries": 1,
                     }
@@ -626,7 +626,7 @@ class TestLocalServerIntegration:
             save_dir = tmp_path / "out"
             save_dir.mkdir()
             (save_dir / "f.bin.tmp").write_bytes(b"z" * 512)  # 部分下载
-            r = _run(tool.execute({"url": server.url("f.bin"), "save_path": str(save_dir)}))
+            r = _run(tool.execute({"url": server.url("f.bin"), "save_path": str(save_dir), "workspace": str(save_dir)}))
         assert r.success
         assert r.metadata["resumed"] is True
         assert (save_dir / "f.bin").stat().st_size == len(payload)
@@ -662,7 +662,7 @@ class TestPathPolicyFailClosed:
         """校验层不可用时请求被拒（不再静默放行），原因进入失败信封。"""
         self._disable_policy_layer(monkeypatch)
         tool = DownloadTool()
-        r = _run(tool.execute({"url": "https://example.com/file.zip", "save_path": str(tmp_path / "out")}))
+        r = _run(tool.execute({"url": "https://example.com/file.zip", "save_path": str(tmp_path / "out"), "workspace": str(tmp_path / "out")}))
         assert not r.success
         assert "拒绝" in r.error
         assert "权限" in r.error
@@ -672,6 +672,6 @@ class TestPathPolicyFailClosed:
         self._disable_policy_layer(monkeypatch)
         save_dir = tmp_path / "never_created"
         tool = DownloadTool()
-        r = _run(tool.execute({"url": "https://example.com/file.zip", "save_path": str(save_dir)}))
+        r = _run(tool.execute({"url": "https://example.com/file.zip", "save_path": str(save_dir), "workspace": str(save_dir)}))
         assert not r.success
         assert not save_dir.exists(), "fail-closed 拒绝不得创建目录"

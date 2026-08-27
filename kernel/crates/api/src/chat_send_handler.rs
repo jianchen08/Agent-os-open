@@ -797,7 +797,7 @@ mod tests {
             Ok(())
         }
 
-        async fn dispatch_stop(&self, _thread_id: &str) -> Result<(), String> {
+        async fn dispatch_stop(&self, _thread_id: &str, _pipeline_id: &str) -> Result<(), String> {
             Ok(())
         }
     }
@@ -1433,7 +1433,7 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
-        async fn dispatch_stop(&self, _thread_id: &str) -> Result<(), String> {
+        async fn dispatch_stop(&self, _thread_id: &str, _pipeline_id: &str) -> Result<(), String> {
             Ok(())
         }
     }
@@ -1698,7 +1698,7 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
-        async fn dispatch_stop(&self, _t: &str) -> Result<(), String> {
+        async fn dispatch_stop(&self, _t: &str, _p: &str) -> Result<(), String> {
             Ok(())
         }
     }

@@ -4,11 +4,13 @@
 核心业务逻辑从 0.1 src/tools/builtin/ 迁移，外层用 SDK 封装为 MCP 工具。
 
 工作空间约束（punch B5，参考 download/tool.py 的 project_root 前缀校验）：
-- file_write / move_file / delete_file：workspace/project_root 上下文可用时，
-  禁止根外绝对路径（写/删/移越界被拒，防 LLM 越出工作空间破坏宿主文件）。
-- file_read：workspace 外允许（兼容读取系统配置等场景），但记录 warning。
-- 上下文未注入（workspace/project_root 均缺省）时不约束（0.1 兼容路径），
-  记 debug 留痕。workspace/project_root 为运行时注入参数（不出现在 LLM schema）。
+- 全部路径参数以 workspace/project_root 为锚：相对路径以根解析，绝对路径
+  越界拒绝（file_read 越界读放行但记录 warning）。
+- **fail-closed**：workspace/project_root 均未注入时一律报错，不做 sidecar
+  cwd 兜底——否则相对路径会落到插件目录，把宿主仓库当工作区读写。
+  workspace/project_root 为运行时注入参数（param_inject 注入，
+  不出现在 LLM schema；工具函数签名必须声明，否则 SDK 分发层按签名
+  过滤会把注入值静默丢弃）。
 
 [来源: src/tools/builtin/{file_read,file_write,list_directory,create_directory,copy_file,move_file,delete_file}/tool.py]
 """
@@ -37,7 +39,7 @@ def _check_workspace_path(
     project_root: str | None,
     operation: str,
 ) -> tuple[bool, str, str | None]:
-    """project_root 前缀校验（写/删/移越界拒绝；读放行但记录）。
+    """project_root 前缀校验（fail-closed：无注入上下文一律拒绝）。
 
     Args:
         path: 待校验路径（绝对或相对；相对路径以根为基准解析）
@@ -47,14 +49,16 @@ def _check_workspace_path(
 
     Returns:
         (是否允许, 拒绝原因, 校验用绝对路径)
-        第三个值仅在注入了 workspace/project_root 时非 None——写/删/移应
-        以该路径执行，保证"校验的路径 = 实际操作的路径"（相对路径以根锚定）。
+        未注入 workspace/project_root 时返回拒绝——相对路径无处锚定，落回
+        sidecar cwd 会把插件目录/宿主仓库当工作区读写。
     """
     root_str = project_root or workspace
     if not root_str:
-        # 未注入工作空间上下文：不约束（0.1 兼容），留痕便于排查越界调用
-        logger.debug("[fs_tools] 无 workspace/project_root 上下文，跳过 %s 校验: %s", operation, path)
-        return True, "", None
+        return (
+            False,
+            f"workspace/project_root 未注入，无法锚定路径（相对路径禁止以进程 cwd 解析）：{path}",
+            None,
+        )
 
     root = Path(root_str).resolve()
     # 容器挂载点翻译：bash 在容器内以 /workspace 为工作目录（isolation_guard
@@ -117,14 +121,15 @@ async def file_read(
     """读取文件内容。
 
     支持行范围读取和尾部读取。workspace 外路径允许读取但记录 warning（B5）。
+    未注入 workspace/project_root 时直接报错（fail-closed，无 cwd 兜底）。
     返回的 file 字段恒为宿主侧绝对路径（容器挂载路径 /workspace/* → 宿主
-    工作空间、相对路径 → 根锚定；未注入 workspace/project_root 时以 sidecar
-    cwd 解析绝对化——对齐 file_write 消费 _check_workspace_path 返回值的
-    模式）——前端工具卡片按 file 字段直读宿主文件系统，原样回传 agent 视角
-    相对路径将打不开（_local 根解析不到 sidecar cwd 下的文件）。
+    工作空间、相对路径 → 根锚定）——前端工具卡片按 file 字段直读宿主
+    文件系统，原样回传 agent 视角相对路径将打不开（_local 根解析不到）。
     """
-    # 工作空间约束（读路径：放行但记录，保持只读向后兼容）
-    _, _, resolved = _check_workspace_path(path, workspace, project_root, operation="read")
+    # 工作空间约束（读路径：根外放行但记录；无注入上下文一律拒绝）
+    allowed, reason, resolved = _check_workspace_path(path, workspace, project_root, operation="read")
+    if not allowed:
+        return ToolResult.failure_result(reason)
     if resolved is not None:
         path = resolved
 
@@ -385,9 +390,14 @@ async def list_directory(
     path: str,
     include_hidden: bool = False,
     pattern: str | None = None,
+    workspace: str | None = None,
+    project_root: str | None = None,
 ) -> ToolResult:
-    """列出目录的直接子项。"""
-    dir_path = Path(path)
+    """列出目录的直接子项（相对路径以注入根锚定；无注入报错）。"""
+    allowed, reason, resolved = _check_workspace_path(path, workspace, project_root, operation="read")
+    if not allowed:
+        return ToolResult.failure_result(reason)
+    dir_path = Path(resolved) if resolved is not None else Path(path)
     if not dir_path.exists():
         return ToolResult.failure_result(f"Directory not found: {path}")
     if not dir_path.is_dir():
@@ -430,15 +440,20 @@ CREATE_DIRECTORY_SCHEMA: dict[str, Any] = {
 async def create_directory(
     path: str,
     parents: bool = True,
+    workspace: str | None = None,
+    project_root: str | None = None,
 ) -> ToolResult:
-    """创建目录（幂等：目录已存在直接返回成功）。"""
-    dir_path = Path(path)
+    """创建目录（幂等：目录已存在直接返回成功；相对路径以注入根锚定）。"""
+    allowed, reason, resolved = _check_workspace_path(path, workspace, project_root, operation="write")
+    if not allowed:
+        return ToolResult.failure_result(reason)
+    dir_path = Path(resolved) if resolved is not None else Path(path)
     try:
         await asyncio.to_thread(dir_path.mkdir, parents=parents, exist_ok=True)
     except OSError as e:
         return ToolResult.failure_result(f"Create error: {e}")
 
-    return ToolResult.success_result({"path": str(dir_path.absolute())})
+    return ToolResult.success_result({"path": str(dir_path.resolve())})
 
 
 # ═════════════════════════════════════════════════════════════
@@ -466,20 +481,34 @@ async def copy_file(
     destination: str | None = None,
     copies: list[dict[str, str]] | None = None,
     overwrite: bool = False,
+    workspace: str | None = None,
+    project_root: str | None = None,
 ) -> ToolResult:
-    """复制文件或目录。"""
+    """复制文件或目录。源与目标均以注入根锚定（无注入报错）。"""
     if copies:
         results: list[dict[str, Any]] = []
         for item in copies:
-            r = await copy_file(item["source"], item["destination"], overwrite=overwrite)
+            r = await copy_file(
+                item["source"], item["destination"],
+                overwrite=overwrite, workspace=workspace, project_root=project_root,
+            )
             results.append({"source": item["source"], "destination": item["destination"], "success": r.success})
         return ToolResult.success_result({"results": results})
 
     if not source or not destination:
         return ToolResult.failure_result("source and destination are required (or use copies)")
 
-    src = Path(source)
-    dst = Path(destination)
+    for field, value, op in (("source", source, "move"), ("destination", destination, "write")):
+        allowed, reason, resolved = _check_workspace_path(value, workspace, project_root, operation=op)
+        if not allowed:
+            return ToolResult.failure_result(reason)
+
+    def _anchor(value: str, op: str) -> str:
+        _, _, resolved = _check_workspace_path(value, workspace, project_root, operation=op)
+        return resolved if resolved is not None else value
+
+    src = Path(_anchor(source, "move"))
+    dst = Path(_anchor(destination, "write"))
     if not src.exists():
         return ToolResult.failure_result(f"Source not found: {source}")
     if dst.exists() and not overwrite:

@@ -737,6 +737,7 @@ impl SqliteStore {
                     "suspended" => RunStatus::Suspended,
                     "completed" => RunStatus::Completed,
                     "failed" => RunStatus::Failed,
+                    "cancelled" => RunStatus::Cancelled,
                     _ => RunStatus::Running,
                 },
                 started_at: row.get(2)?,
@@ -2245,6 +2246,7 @@ impl StorageBackend for SqliteStore {
                         "suspended" => RunStatus::Suspended,
                         "completed" => RunStatus::Completed,
                         "failed" => RunStatus::Failed,
+                        "cancelled" => RunStatus::Cancelled,
                         _ => RunStatus::Running,
                     },
                     tenant_id: row.get(3)?,
@@ -2304,6 +2306,7 @@ impl StorageBackend for SqliteStore {
                     "suspended" => RunStatus::Suspended,
                     "completed" => RunStatus::Completed,
                     "failed" => RunStatus::Failed,
+                    "cancelled" => RunStatus::Cancelled,
                     _ => RunStatus::Running,
                 },
                 tenant_id: row.get(3)?,
@@ -2405,12 +2408,16 @@ impl StorageBackend for SqliteStore {
             RunStatus::Suspended => "suspended",
             RunStatus::Completed => "completed",
             RunStatus::Failed => "failed",
+            RunStatus::Cancelled => "cancelled",
         };
         let now = chrono::Utc::now().to_rfc3339();
 
         match (current_branch, current_seq) {
             (Some(branch), Some(seq)) => {
-                let ended = if status == RunStatus::Completed || status == RunStatus::Failed {
+                let ended = if matches!(
+                    status,
+                    RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+                ) {
                     Some(now.as_str())
                 } else {
                     None
@@ -2421,7 +2428,10 @@ impl StorageBackend for SqliteStore {
                 )?;
             }
             (None, None) => {
-                let ended = if status == RunStatus::Completed || status == RunStatus::Failed {
+                let ended = if matches!(
+                    status,
+                    RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+                ) {
                     Some(now.as_str())
                 } else {
                     None

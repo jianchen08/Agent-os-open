@@ -5,7 +5,9 @@
 - 治理批次清理 _workspace 重复注解（no-redef）后，四个分支行进入
   diff-coverage 度量面；bash/workspace_aware.py 副本已随单一真值源
   下沉删除，公共实现 = SDK ``agentos_plugin_sdk.workspace_aware``。
-- 契约：显式 workspace > project_root > base_path > cwd 四级回退。
+- 契约：显式 workspace > project_root 二级注入；均缺省时**不设** _workspace
+  （fail-closed，消费方 getattr 判空拒绝）——base_path/cwd 兜底已退役
+  （兜底会把插件目录或宿主仓库当工作区，历史目录飘移 bug 根因）。
 """
 
 from __future__ import annotations
@@ -38,12 +40,8 @@ class TestInitWorkspaceBranches:
         t._init_workspace({"project_root": str(tmp_path)})
         assert t._workspace == tmp_path
 
-    def test_base_path_fallback(self) -> None:
+    def test_no_injection_leaves_workspace_unset(self) -> None:
         t = _Tool(base_path=Path("C:/some/base"))
         t._init_workspace({})
-        assert t._workspace == Path("C:/some/base")
-
-    def test_cwd_last_resort(self) -> None:
-        t = _Tool()
-        t._init_workspace({})
-        assert t._workspace == Path.cwd()
+        assert getattr(t, "_workspace", None) is None
+        assert getattr(t, "_project_root", None) is None

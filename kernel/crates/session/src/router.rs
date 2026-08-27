@@ -83,7 +83,11 @@ pub trait PipelineDispatcher: Send + Sync {
     ) -> Result<(), String>;
 
     /// 取消指定 thread 的生成。
-    async fn dispatch_stop(&self, thread_id: &str) -> Result<(), String>;
+    ///
+    /// pipeline_id 是停止目标管道（一切管道相关操作必须携带管道 ID）：
+    /// 前端正在查看的管道（含子任务管道）即停止目标；空串 = 旧客户端，
+    /// 由实现侧回退 thread 主管道。
+    async fn dispatch_stop(&self, thread_id: &str, pipeline_id: &str) -> Result<(), String>;
 
     /// 重新生成/回退/编辑重发（批次 D 原语）。
     ///
@@ -264,7 +268,10 @@ impl InboundRouter {
             Some(t) if !t.is_empty() => t.to_string(),
             _ => return RouteOutcome::Error("stop_generation 缺少 thread_id".into()),
         };
-        match self.dispatcher.dispatch_stop(&thread_id).await {
+        let pipeline_id = field_or_data(msg, "pipeline_id")
+            .unwrap_or_default()
+            .to_string();
+        match self.dispatcher.dispatch_stop(&thread_id, &pipeline_id).await {
             Ok(()) => RouteOutcome::Handled,
             Err(e) => RouteOutcome::Error(e),
         }
@@ -377,7 +384,7 @@ mod user_input_ec_tests {
             Ok(())
         }
 
-        async fn dispatch_stop(&self, _thread_id: &str) -> Result<(), String> {
+        async fn dispatch_stop(&self, _thread_id: &str, _pipeline_id: &str) -> Result<(), String> {
             Ok(())
         }
     }

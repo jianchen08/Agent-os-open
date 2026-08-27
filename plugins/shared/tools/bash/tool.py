@@ -487,6 +487,13 @@ class BashTool(WorkspaceAwareMixin):
 
         timeout = min(inputs.get("timeout", self.timeout), self.MAX_TIMEOUT)
         wd = self.get_working_dir(inputs)
+        # fail-closed：非容器模式必须注入 workspace/working_dir——缺省时进程会
+        # 落在 sidecar cwd（插件目录），把宿主仓库当执行工作区。
+        if not container_id and wd is None:
+            return create_failure_result(
+                error="workspace/working_dir 未注入，拒绝在未锚定目录执行命令",
+                error_code="WORKSPACE_NOT_INJECTED",
+            )
         working_dir = str(wd) if wd else None
         owner = self._owner_from_inputs(inputs)
 

@@ -950,12 +950,13 @@ impl PipelineDispatcher for EngineDispatcher {
         }
     }
 
-    async fn dispatch_stop(&self, thread_id: &str) -> Result<(), String> {
+    async fn dispatch_stop(&self, thread_id: &str, pipeline_id: &str) -> Result<(), String> {
         // 停止 = 复用 suspend_pipeline 的落库路径（方案 §四.1，批次 C）：
-        // 把该管道最新 Running run 置 Suspended —— 这是传输信号，不是终态。
+        // 把目标管道最新 Running run 置 Suspended —— 这是传输信号，不是终态。
         // llm_core 流式期间轮询到 suspended 后自行中断、落半截消息（status:
-        // interrupted）+ 置 ended=true，引擎既有 ended 边界检查让 run 优雅收尾
-        // （persist_run_end 覆写为 Completed）。无 Running run（run 已完成才点
+        // interrupted）+ 置 ended=true + router.stop_reason=user_requested，
+        // 引擎既有 ended 边界检查让 run 优雅收尾（persist_run_end 落
+        // Cancelled，不再覆写为 Completed）。无 Running run（run 已完成才点
         // 停止）时幂等空转，行为同现状。
         let Some(store) = self.state.store.as_ref() else {
             return Ok(());
@@ -972,11 +973,17 @@ impl PipelineDispatcher for EngineDispatcher {
             Some(uid) => agentos_http::auth::resolve_tenant_id_by_user(Some(store), &uid).await,
             None => "default".to_string(),
         };
-        // pipeline_id 复用 resolve 路径（thread 的真实主管道；stop 消息不带 pipeline_id）。
-        let pipeline_id =
-            resolve_pipeline_id_for_thread(Some(store), thread_id, "", &tenant_id).await;
+        // 停止目标 = 前端正在查看的管道（一切管道相关操作必须携带管道 ID）。
+        // 子任务管道挂自己的 thread（非会话 thread 成员），thread 成员校验会把它
+        // 改写回主管道（历史 bug：点停止永远停不住子任务管道）——此处前端值
+        // 非空即直采，仅空串（旧客户端）回退 thread 主管道。
+        let target_pipeline = if pipeline_id.is_empty() {
+            resolve_pipeline_id_for_thread(Some(store), thread_id, "", &tenant_id).await
+        } else {
+            pipeline_id.to_string()
+        };
         let runs = store
-            .list_runs_by_pipeline(&pipeline_id, &tenant_id)
+            .list_runs_by_pipeline(&target_pipeline, &tenant_id)
             .await
             .map_err(|e| format!("stop_generation 查询 run 失败: {e}"))?;
         let target = runs
@@ -994,13 +1001,14 @@ impl PipelineDispatcher for EngineDispatcher {
                 .map_err(|e| format!("stop_generation 置 suspended 失败: {e}"))?;
             info!(
                 thread = thread_id,
+                pipeline = %target_pipeline,
                 run_id = %run.run_id,
                 "stop_generation 已落地：run 置 suspended（信号，终态由引擎收尾）"
             );
         } else {
             debug!(
                 thread = thread_id,
-                pipeline = %pipeline_id,
+                pipeline = %target_pipeline,
                 "stop_generation 无 running run（幂等空转）"
             );
         }
@@ -1557,7 +1565,15 @@ mod tests {
     }
 
     async fn stop_running(store: Arc<dyn StorageBackend>, thread_id: &str) -> Result<(), String> {
-        stop_state(store).dispatch_stop(thread_id).await
+        stop_state(store).dispatch_stop(thread_id, "").await
+    }
+
+    async fn stop_pipeline(
+        store: Arc<dyn StorageBackend>,
+        thread_id: &str,
+        pipeline_id: &str,
+    ) -> Result<(), String> {
+        stop_state(store).dispatch_stop(thread_id, pipeline_id).await
     }
 
     #[tokio::test]
@@ -1605,6 +1621,39 @@ mod tests {
             run.status,
             RunStatus::Completed,
             "已完成 run 不被 stop 改写"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_stop_with_frontend_pipeline_id_targets_that_pipeline() {
+        // 前端携带 pipeline_id（正在查看的子任务管道）→ 停该管道的 run，
+        // 不得因「不属于 thread 成员」被改写回主管道（历史 bug：点停止
+        // 永远停不住子任务管道）。
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+            as Arc<dyn StorageBackend>;
+        // 主管道 p-main 有 running run；子任务管道 p-sub 也有 running run。
+        store.create_run("run-main", "cfg", "default").await.unwrap();
+        store.set_run_pipeline("run-main", "p-main").await.unwrap();
+        store.create_run("run-sub", "cfg", "default").await.unwrap();
+        store.set_run_pipeline("run-sub", "p-sub").await.unwrap();
+        store
+            .create_session(&session_record(Some("p-main")))
+            .await
+            .unwrap();
+
+        stop_pipeline(store.clone(), "T1", "p-sub").await.unwrap();
+
+        let main = store.get_run("run-main").await.unwrap();
+        let sub = store.get_run("run-sub").await.unwrap();
+        assert_eq!(
+            sub.status,
+            RunStatus::Suspended,
+            "前端指定的子任务管道 run 被停止"
+        );
+        assert_eq!(
+            main.status,
+            RunStatus::Running,
+            "主管道 run 不受影响（停止目标跟随前端管道 ID）"
         );
     }
 

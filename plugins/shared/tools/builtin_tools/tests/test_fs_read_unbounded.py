@@ -32,7 +32,7 @@ def test_large_file_no_longer_rejected(tmp_path):
     big.write_text(line * 20_000, encoding="utf-8")
     assert big.stat().st_size > 2 * 1024 * 1024
 
-    result = asyncio.run(file_read(str(big)))
+    result = asyncio.run(file_read(str(big), workspace=str(tmp_path)))
     assert result.success, f"大文件不得拒绝: {result.error}"
     # 写入以 \n 收尾（split+join 既有语义原样保留），长度对上即证明全文读回
     assert result.output["content"].endswith("\n"), "读到文件末尾"
@@ -52,7 +52,7 @@ def test_full_content_returned(tmp_path):
     """常规读取返回完整内容（UTF-8 多字节字符不损坏）。"""
     f = tmp_path / "note.txt"
     f.write_text("第一行\nsecond line 🙂\n", encoding="utf-8")
-    result = asyncio.run(file_read(str(f)))
+    result = asyncio.run(file_read(str(f), workspace=str(tmp_path)))
     assert result.success
     # split+join 的既有语义：末尾 \n 产生空串元素 → content 以 \n 收尾（无损往返）
     assert result.output["content"] == "第一行\nsecond line 🙂\n"
@@ -62,7 +62,7 @@ def test_tail_param_still_works(tmp_path):
     """tail= 显式窗口查询保留（用户指定的读取范围，非静默截断）。"""
     f = tmp_path / "lines.txt"
     f.write_text("\n".join(f"row-{i}" for i in range(100)), encoding="utf-8")
-    result = asyncio.run(file_read(str(f), tail=5))
+    result = asyncio.run(file_read(str(f), tail=5, workspace=str(tmp_path)))
     assert result.success
     assert result.output["content"].splitlines()[0] == "row-95"
     assert result.output["lines"] == 5

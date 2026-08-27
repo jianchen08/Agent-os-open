@@ -135,13 +135,11 @@ class StopCheckPlugin(IOutputPlugin):
                 iteration,
                 self._max_iterations,
             )
-            return {
-                "router.stop_reason": "max_iterations",
-                "__route_signal__": RouteSignal(
-                    route_type="end",
-                    reason=f"Max iterations reached: {iteration}",
-                ),
-            }
+            return self._task_failure_stop(
+                ctx,
+                stop_reason="max_iterations",
+                reason=f"Max iterations reached: {iteration}",
+            )
 
         # 4. 执行超时检测（-1 表示无限制）
         if self._max_duration != -1 and elapsed > self._max_duration:
@@ -151,13 +149,11 @@ class StopCheckPlugin(IOutputPlugin):
                 elapsed,
                 self._max_duration,
             )
-            return {
-                "router.stop_reason": "timeout",
-                "__route_signal__": RouteSignal(
-                    route_type="end",
-                    reason=f"Execution timeout: {elapsed:.1f}s",
-                ),
-            }
+            return self._task_failure_stop(
+                ctx,
+                stop_reason="timeout",
+                reason=f"Execution timeout: {elapsed:.1f}s",
+            )
 
         # 5. task_evaluate 工具结果检测
         eval_stop = self._check_task_evaluate_result(ctx)
@@ -178,6 +174,21 @@ class StopCheckPlugin(IOutputPlugin):
                 }
 
         return {"router.stop_reason": ""}
+
+    def _task_failure_stop(self, ctx: PluginContext, stop_reason: str, reason: str) -> dict[str, Any]:
+        """超线（迭代上限/超时）终止：任务管道同时落 task.status=failed。
+
+        任务完成唯一判据是 task_evaluate 评估通过；跑到检测线仍未通过评估
+        = 失败（用户裁定）。仅任务管道（state 带 task.id）写任务状态——
+        聊天主管道无 task 上下文，写 task.* 会制造幽灵任务标记。
+        """
+        updates: dict[str, Any] = {
+            "router.stop_reason": stop_reason,
+            "__route_signal__": RouteSignal(route_type="end", reason=reason),
+        }
+        if ctx.state.get("task.id"):
+            updates["task.status"] = "failed"
+        return updates
 
     def _check_task_evaluate_result(self, ctx: PluginContext) -> dict[str, Any] | None:
         """检查 task_evaluate 工具执行结果是否表明任务已完成或失败。

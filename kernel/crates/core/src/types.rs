@@ -464,6 +464,8 @@ pub enum RunStatus {
     Completed,
     /// 已失败
     Failed,
+    /// 已取消（用户主动停止；非完成非失败，任务语义上未到达终态）
+    Cancelled,
 }
 
 /// runs 表记录——运行实例元数据。

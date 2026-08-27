@@ -1225,18 +1225,25 @@ impl PipelineExecutor {
         }
 
         // update_run_status 要求 current_branch 和 current_seq 同时 Some 或同时 None。
-        // 标记完成只需更新 status + ended_at，用 (None, None) 不更新 branch/seq。
+        // 终态按结束方式裁决，不把用户停止/挂起覆写为 Completed：
+        // - state.suspended=true → Wait 挂起（等待外部事件），保持 Suspended；
+        // - router.stop_reason=user_requested → 用户主动停止，落 Cancelled；
+        // - 其余 → 正常结束，Completed。
+        let final_status = if truthy_flag(final_state, "suspended") {
+            agentos_core::types::RunStatus::Suspended
+        } else if final_state.get("router.stop_reason").and_then(|v| v.as_str())
+            == Some("user_requested")
+        {
+            agentos_core::types::RunStatus::Cancelled
+        } else {
+            agentos_core::types::RunStatus::Completed
+        };
         if let Err(e) = self
             .store
-            .update_run_status(
-                &self.run_id,
-                agentos_core::types::RunStatus::Completed,
-                None,
-                None,
-            )
+            .update_run_status(&self.run_id, final_status.clone(), None, None)
             .await
         {
-            warn!(run_id = %self.run_id, error = %e, "update_run_status(Completed) 失败");
+            warn!(run_id = %self.run_id, error = %e, "update_run_status({final_status:?}) 失败");
             self.metrics.inc_persist_failure();
         }
     }

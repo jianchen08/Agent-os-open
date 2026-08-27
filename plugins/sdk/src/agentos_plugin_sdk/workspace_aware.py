@@ -29,8 +29,10 @@ class WorkspaceAwareMixin:
     def _init_workspace(self, inputs: dict[str, Any]) -> None:
         """从输入参数初始化工作空间和项目根路径。
 
-        优先使用 inputs 中显式传入的 workspace / project_root，
-        缺省时分别回退到当前工作目录和自动推断。
+        只消费 inputs 中显式传入的 workspace / project_root；均缺省时
+        **不设** `_workspace`（消费方以 `getattr(self, "_workspace", None)`
+        判空并 fail-closed）——禁止回退进程 cwd / 插件 base_path：
+        相对路径落回 sidecar cwd 会把插件目录或宿主仓库当工作区读写。
 
         Args:
             inputs: 工具执行时接收的输入参数字典。
@@ -39,16 +41,10 @@ class WorkspaceAwareMixin:
             self._workspace: Path = Path(inputs["workspace"])
         elif inputs.get("project_root"):
             self._workspace = Path(inputs["project_root"])
-        else:
-            base_path: Path | None = getattr(self, "base_path", None)
-            if base_path:
-                self._workspace = base_path
-            else:
-                self._workspace = Path.cwd()
 
         if inputs.get("project_root"):
             self._project_root: Path = Path(inputs["project_root"])
-        else:
+        elif getattr(self, "_workspace", None) is not None:
             self._project_root = self._infer_project_root(self._workspace)
 
     def resolve_path(self, path_str: str) -> Path:  # noqa: PLR0911

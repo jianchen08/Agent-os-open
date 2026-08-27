@@ -44,14 +44,25 @@ async def enhanced_search(
     context_lines: int = 2,
     max_results: int = 100,
     max_depth: int = 20,
+    workspace: str | None = None,
+    project_root: str | None = None,
 ) -> ToolResult:
-    """搜索文件内容或文件名。"""
+    """搜索文件内容或文件名（相对路径以注入根锚定；无注入报错）。"""
     import fnmatch
 
     flags = 0 if case_sensitive else re.IGNORECASE
     pattern = re.compile(query if use_regex else re.escape(query), flags)
 
-    search_path = Path(path)
+    root_str = project_root or workspace
+    if not root_str:
+        return ToolResult.failure_result(
+            f"workspace/project_root 未注入，无法锚定搜索路径（相对路径禁止以进程 cwd 解析）：{path}"
+        )
+    root = Path(root_str).resolve()
+    if path == "/workspace" or path.startswith("/workspace/"):
+        path = str(root) + path[len("/workspace"):]
+    target = Path(path)
+    search_path = target.resolve() if target.is_absolute() else (root / target).resolve()
     if not search_path.exists():
         return ToolResult.failure_result(f"Path not found: {path}")
 

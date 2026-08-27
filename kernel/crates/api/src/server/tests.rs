@@ -1773,6 +1773,7 @@ fn test_derive_run_terminal_events_completed_with_task_fields() {
         "task.id": "t9",
         "task.goal": "喝水提醒",
         "task.submitted_by": "admin",
+        "task.status": "completed",
         "lineage.parent_pipeline_id": "parent_p1",
     });
     let evs = derive_run_terminal_events(&st, false);
@@ -1849,6 +1850,68 @@ fn test_derive_run_terminal_events_task_prefix_is_dotted() {
     assert_eq!(names, vec!["run.completed"]);
 }
 
+#[test]
+fn test_derive_run_terminal_events_no_task_completed_without_evaluation() {
+    // 完成唯一判据 = task_evaluate 评估通过（task.status=completed）。
+    // 任务管道 run 正常结束但评估未通过（pending/pending_evaluation）：
+    // 只发 run.completed，不派生 task_completed（杜绝假完成通知上级）。
+    for status in ["pending", "running", "pending_evaluation", ""] {
+        let st = json!({
+            "pipeline_id": "p6",
+            "task.id": "t6",
+            "task.status": status,
+        });
+        let names: Vec<&str> = derive_run_terminal_events(&st, false)
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["run.completed"],
+            "task.status={status:?} 不得派生 task_completed"
+        );
+    }
+}
+
+#[test]
+fn test_derive_run_terminal_events_task_failed_on_evaluated_failure() {
+    // 评估裁决失败（task.status=failed，run 正常结束）→ task_failed 照常通知上级
+    let st = json!({
+        "pipeline_id": "p7",
+        "task.id": "t7",
+        "task.status": "failed",
+        "lineage.parent_pipeline_id": "parent_p7",
+        "task.submitted_by": "admin",
+    });
+    let evs = derive_run_terminal_events(&st, false);
+    let names: Vec<&str> = evs.iter().map(|(n, _)| *n).collect();
+    assert_eq!(names, vec!["run.completed", "task_failed"]);
+    let (_, tags) = &evs[1];
+    let pp = tags
+        .iter()
+        .find(|(k, _)| *k == "parent_pipeline_id")
+        .map(|(_, v)| v.as_str().unwrap_or(""))
+        .unwrap_or("");
+    assert_eq!(pp, "parent_p7");
+}
+
+#[test]
+fn test_derive_run_terminal_events_user_cancelled() {
+    // 用户主动停止（router.stop_reason=user_requested）→ run.cancelled，
+    // 无任务域派生：停止不是任务终态，不通知上级。
+    let st = json!({
+        "pipeline_id": "p8",
+        "task.id": "t8",
+        "task.status": "running",
+        "router.stop_reason": "user_requested",
+    });
+    let names: Vec<&str> = derive_run_terminal_events(&st, false)
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(names, vec!["run.cancelled"]);
+}
+
 #[tokio::test]
 async fn test_process_via_engine_emits_run_terminal_domain_events() {
     // wiring：真实引擎跑一轮 → 声明 domain_event hook 的启用插件收到
@@ -1900,7 +1963,7 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
     let tenant = TenantContext::new("tenant_gap2_emit", "thread_gap2_emit");
     // 注：lineage.* 是保留字（引擎出生写入），overlay 不可携带；真实路径经
     // chat.send_message 的 lineage 参数写入 state，纯函数测试已覆盖 parent 标签透传。
-    let overlay = json!({"task.id": "t77", "task.goal": "写周报"});
+    let overlay = json!({"task.id": "t77", "task.goal": "写周报", "task.status": "completed"});
     let r = agentos_tenant::scope(
         tenant,
         process_via_engine(
@@ -2003,6 +2066,43 @@ async fn test_engine_run_failure_marks_run_failed() {
         })
         .unwrap();
     assert_eq!(status, "failed", "run 应标记 failed（B2 防御网）");
+}
+
+/// 用户停止收尾：state 带 router.stop_reason=user_requested（llm_core 中断路径
+/// 写入）→ persist_run_end 落 run=cancelled，不再覆写为 Completed。
+#[tokio::test]
+async fn test_engine_user_stop_marks_run_cancelled() {
+    let (state, _invoker, _store, sqlite) = make_engine_state();
+    let tenant = TenantContext::new("tenant_cancel", "thread_cancel");
+    let overlay = json!({"router.stop_reason": "user_requested"});
+    let r = agentos_tenant::scope(
+        tenant,
+        process_via_engine(
+            &state,
+            "正常输入但被用户停止",
+            "agentos",
+            "pipe_cancel_evt",
+            "thread_cancel",
+            "o1",
+            "",
+            "",
+            None,
+            Some(&overlay),
+            "",
+        ),
+    )
+    .await;
+    assert!(!r.failed, "用户停止不是引擎失败");
+    let status: String = sqlite
+        .with_conn(|c| {
+            c.query_row(
+                "SELECT status FROM runs WHERE pipeline_id = 'pipe_cancel_evt'                      ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(status, "cancelled", "用户停止的 run 落 cancelled");
 }
 
 /// 中断签名：user 消息已落槽（上一次尝试被重启截断）且无 assistant 跟随

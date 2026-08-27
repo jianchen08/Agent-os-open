@@ -150,3 +150,33 @@ class TestTaskStatusQueryChannel:
             if r.levelname == "WARNING" and "stop_check" in r.name
         ]
         assert warnings, "任务状态查询失败必须以 warning 级别留下可见痕迹"
+
+
+class TestLimitHitMarksTaskFailed:
+    """超线（迭代上限/超时）= 任务失败（完成唯一判据是 task_evaluate 评估通过）。"""
+
+    def test_max_iterations_marks_task_failed_for_task_pipeline(self) -> None:
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 99, "max_iterations": 3, "task.id": "t1"}
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.route_signal is not None
+        assert res.state_updates.get("router.stop_reason") == "max_iterations"
+        assert res.state_updates.get("task.status") == "failed"
+
+    def test_timeout_marks_task_failed_for_task_pipeline(self) -> None:
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 1, "timeout_seconds": 0, "task.id": "t1"}
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("router.stop_reason") == "timeout"
+        assert res.state_updates.get("task.status") == "failed"
+
+    def test_max_iterations_chat_pipeline_gets_no_task_status(self) -> None:
+        """无 task 上下文的聊天管道超线终止：不写 task.*（防幽灵任务标记）。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "chat", "iteration": 99, "max_iterations": 3, "task.id": ""}
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("router.stop_reason") == "max_iterations"
+        assert "task.status" not in res.state_updates

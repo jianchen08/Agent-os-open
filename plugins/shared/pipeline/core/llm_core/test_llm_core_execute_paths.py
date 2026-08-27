@@ -74,7 +74,9 @@ class _FakeCaller:
         self._exc = exc
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def __call__(self, method: str, params: dict[str, Any]) -> Any:
+    async def __call__(
+        self, method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> Any:
         self.calls.append((method, params))
         if self._exc is not None:
             raise self._exc
@@ -529,3 +531,21 @@ async def test_call_llm_tool_schemas_empty_not_carried() -> None:
     )
     assert "tools" not in caller.calls[0][1]["args"]
     assert caller.calls[0][1]["args"]["model"] == "deepseek-v3"
+
+
+async def test_interrupted_persists_user_requested_stop_signal() -> None:
+    """中断（用户停止）落库：ended=true + router.stop_reason=user_requested。
+
+    引擎收尾 persist_run_end 据 stop_reason 落 run=cancelled（不再覆写为
+    Completed）；普通 error 中断不带停止信号。
+    """
+    plugin = _make_plugin(_FakeCaller())
+    partial: dict[str, Any] = {"text": "半截", "thinking_text": None, "tool_calls": [], "usage": {}}
+
+    cancelled = plugin._build_partial_failure_result(partial, status="interrupted", error_info=None)
+    assert cancelled["ended"] is True
+    assert cancelled["router.stop_reason"] == "user_requested"
+
+    errored = plugin._build_partial_failure_result(partial, status="error", error_info=None)
+    assert "ended" not in errored
+    assert "router.stop_reason" not in errored

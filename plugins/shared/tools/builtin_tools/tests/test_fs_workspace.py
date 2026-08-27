@@ -15,7 +15,16 @@ from pathlib import Path
 
 import pytest
 
-from agentos_builtin_tools.fs_tools import delete_file, file_read, file_write, move_file
+from agentos_builtin_tools.fs_tools import (
+    copy_file,
+    create_directory,
+    delete_file,
+    file_read,
+    file_write,
+    list_directory,
+    move_file,
+)
+from agentos_builtin_tools.search_tool import enhanced_search
 
 pytestmark = pytest.mark.unit
 
@@ -73,29 +82,25 @@ class TestFileWriteWorkspaceConstraint:
         assert result.success is False
         assert not (tmp_path / "escape.txt").exists()
 
-    async def test_write_without_workspace_context_compat(self, tmp_path: Path) -> None:
-        """未注入 workspace/project_root：不约束（0.1 兼容），写入成功。"""
+    async def test_write_without_workspace_context_rejected(self, tmp_path: Path) -> None:
+        """未注入 workspace/project_root：fail-closed 拒绝（无 cwd 兜底）。"""
         target = tmp_path / "free.txt"
         result = await file_write(path=str(target), action="write", content="x")
-        assert result.success is True
-        assert target.exists()
-        # 无注入时 file 字段仍绝对化（以 sidecar cwd 为锚），卡片才打得开
-        assert Path(result.output["file"]) == target.resolve()
+        assert result.success is False
+        assert "未注入" in result.error
+        assert not target.exists()
 
-    async def test_write_relative_path_without_injection_file_absolute(
+    async def test_write_relative_path_without_injection_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """未注入 workspace 且 agent 传相对路径（主会话常见）：file 字段绝对化。
+        """未注入 workspace 且传相对路径：拒绝——相对路径禁止以进程 cwd 解析。
 
-        工具进程 cwd = 插件目录，相对路径以 cwd 解析——输出绝对化后前端
-        fileOpener 直读才对得上（相对路径在项目根/_local 下不存在）。
+        （历史 bug：sidecar cwd = 插件目录，相对路径在插件树里创建文件。）
         """
         monkeypatch.chdir(tmp_path)
         result = await file_write(path="rel.txt", action="write", content="ok")
-        assert result.success is True
-        assert (tmp_path / "rel.txt").read_text(encoding="utf-8") == "ok"
-        assert Path(result.output["file"]) == (tmp_path / "rel.txt").resolve()
-        assert Path(result.output["file"]).is_absolute()
+        assert result.success is False
+        assert not (tmp_path / "rel.txt").exists()
 
 
 class TestMoveFileWorkspaceConstraint:
@@ -207,24 +212,18 @@ class TestFileReadReturnsResolvedPath:
         assert resolved.is_absolute()
         assert resolved == ws / "doc.txt"
 
-    async def test_without_injection_path_absolute_normalized(
+    async def test_without_injection_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """未注入 workspace/project_root（L1 主会话）：file 字段仍为绝对路径。
-
-        相对路径以 sidecar cwd（工具进程工作目录）为锚 resolve——前端工具卡片
-        按 file 字段直读宿主文件系统，原样回传 agent 视角相对路径将打不开
-        （_local 项目根下不存在该文件）。
-        """
+        """未注入 workspace/project_root：fail-closed 拒绝（无 cwd 兜底）。"""
         target = tmp_path / "free.txt"
         target.write_text("x\n", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
 
         result = await file_read(path="free.txt")
 
-        assert result.success is True
-        assert Path(result.output["file"]) == target.resolve()
-        assert Path(result.output["file"]).is_absolute()
+        assert result.success is False
+        assert "未注入" in result.error
 
     async def test_absolute_outside_path_readable_and_normalized(self, tmp_path: Path) -> None:
         """根外绝对路径读取放行（只读兼容），file 回传 resolve 归一后的宿主路径。"""
@@ -264,3 +263,92 @@ class TestFileReadWorkspaceLogging:
 
         result = await file_read(path=str(target), workspace=str(ws))
         assert result.success is True
+
+class TestPathToolsWorkspaceAnchoring:
+    """list_directory / create_directory / copy_file / enhanced_search 锚定契约。
+
+    历史 bug：这些工具签名不声明 workspace/project_root，SDK 分发层按签名
+    过滤把注入值静默丢弃，相对路径以 sidecar cwd 解析——agent 在插件目录里
+    浏览/创建目录（目录飘移）。现签名声明注入参数 + 无注入 fail-closed。
+    """
+
+    async def test_create_directory_relative_anchored_to_workspace(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        result = await create_directory("docs/working", workspace=str(ws))
+
+        assert result.success is True
+        # 性质：落盘路径必须落在 workspace 内（不得逃逸到 cwd/插件目录）
+        created = Path(result.output["path"])
+        assert created.is_absolute()
+        assert created.relative_to(ws.resolve()) == Path("docs") / "working"
+        assert (ws / "docs" / "working").is_dir()
+
+    async def test_create_directory_container_mount_remapped(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        result = await create_directory("/workspace/out", workspace=str(ws))
+
+        assert result.success is True
+        assert (ws / "out").is_dir()
+
+    async def test_create_directory_without_injection_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        result = await create_directory("docs/working")
+        assert result.success is False
+        assert "未注入" in result.error
+        assert not (tmp_path / "docs").exists()
+
+    async def test_list_directory_relative_anchored(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "a.txt").write_text("x", encoding="utf-8")
+
+        result = await list_directory(".", workspace=str(ws))
+
+        assert result.success is True
+        names = {item["name"] for item in result.output["items"]}
+        assert names == {"a.txt"}
+
+    async def test_list_directory_without_injection_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+        result = await list_directory(".")
+        assert result.success is False
+        assert "未注入" in result.error
+
+    async def test_copy_file_anchored_both_ends(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "src.txt").write_text("data", encoding="utf-8")
+
+        result = await copy_file("src.txt", "dst.txt", workspace=str(ws))
+
+        assert result.success is True
+        assert (ws / "dst.txt").read_text(encoding="utf-8") == "data"
+
+    async def test_copy_file_without_injection_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "src.txt").write_text("data", encoding="utf-8")
+        result = await copy_file("src.txt", "dst.txt")
+        assert result.success is False
+        assert "未注入" in result.error
+        assert not (tmp_path / "dst.txt").exists()
+
+    async def test_enhanced_search_relative_anchored(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "code.py").write_text("def needle(): pass" + chr(10), encoding="utf-8")
+
+        result = await enhanced_search("needle", path=".", workspace=str(ws))
+
+        assert result.success is True
+        assert len(result.output["results"]) == 1
+        assert Path(result.output["results"][0]["file_path"]) == ws / "code.py"
+
+    async def test_enhanced_search_without_injection_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = await enhanced_search("x", path=".")
+        assert result.success is False
+        assert "未注入" in result.error

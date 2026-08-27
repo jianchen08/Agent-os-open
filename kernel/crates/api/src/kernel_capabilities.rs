@@ -874,7 +874,7 @@ mod tests {
             ) -> Result<(), String> {
                 Ok(())
             }
-            async fn dispatch_stop(&self, _t: &str) -> Result<(), String> {
+            async fn dispatch_stop(&self, _t: &str, _p: &str) -> Result<(), String> {
                 Ok(())
             }
         }

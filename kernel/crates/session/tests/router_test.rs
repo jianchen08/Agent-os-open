@@ -19,7 +19,7 @@ type RegenerateRecord = (String, String, String, Option<String>);
 struct MockDispatcher {
     user_inputs: Arc<Mutex<Vec<UserInputRecord>>>,
     interactions: Arc<Mutex<Vec<(String, String)>>>, // (thread_id, request_id)
-    stops: Arc<Mutex<Vec<String>>>,                  // thread_id
+    stops: Arc<Mutex<Vec<(String, String)>>>,        // (thread_id, pipeline_id)
     regenerates: Arc<Mutex<Vec<RegenerateRecord>>>,
 }
 
@@ -60,8 +60,11 @@ impl PipelineDispatcher for MockDispatcher {
             .push((thread_id.into(), request_id.into()));
         Ok(())
     }
-    async fn dispatch_stop(&self, thread_id: &str) -> Result<(), String> {
-        self.stops.lock().unwrap().push(thread_id.into());
+    async fn dispatch_stop(&self, thread_id: &str, pipeline_id: &str) -> Result<(), String> {
+        self.stops
+            .lock()
+            .unwrap()
+            .push((thread_id.into(), pipeline_id.into()));
         Ok(())
     }
     async fn dispatch_regenerate(
@@ -233,7 +236,25 @@ async fn stop_generation_routed_to_dispatcher() {
     assert_eq!(outcome, RouteOutcome::Handled);
     let stops = dispatcher.stops.lock().unwrap();
     assert_eq!(stops.len(), 1);
-    assert_eq!(stops[0], "thread-1");
+    assert_eq!(stops[0], ("thread-1".to_string(), String::new()));
+}
+
+#[tokio::test]
+async fn stop_generation_routes_pipeline_id() {
+    // 前端携带 pipeline_id（正在查看的管道，含子任务管道）→ 透传给 dispatcher
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "stop_generation",
+        "thread_id": "thread-1",
+        "pipeline_id": "p-subtask",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let stops = dispatcher.stops.lock().unwrap();
+    assert_eq!(
+        stops[0],
+        ("thread-1".to_string(), "p-subtask".to_string())
+    );
 }
 
 // ── regenerate 路由（批次 D）：重新生成/回退/编辑重发 ──
@@ -320,7 +341,7 @@ async fn regenerate_default_noop_dispatcher_is_handled() {
         ) -> Result<(), String> {
             Ok(())
         }
-        async fn dispatch_stop(&self, _: &str) -> Result<(), String> {
+        async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())
         }
         // dispatch_regenerate 用 trait 默认实现（no-op）
@@ -364,7 +385,7 @@ async fn regenerate_dispatcher_failure_returns_error() {
         ) -> Result<(), String> {
             Ok(())
         }
-        async fn dispatch_stop(&self, _: &str) -> Result<(), String> {
+        async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())
         }
         async fn dispatch_regenerate(
@@ -453,7 +474,7 @@ async fn dispatcher_failure_returns_error() {
         ) -> Result<(), String> {
             Ok(())
         }
-        async fn dispatch_stop(&self, _: &str) -> Result<(), String> {
+        async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())
         }
     }

@@ -82,13 +82,13 @@ class TestFileRead:
     async def test_read_text_file(self, tmp_path: Path) -> None:
         f = tmp_path / "test.txt"
         f.write_text("hello\nworld\n")
-        result = await file_read(str(f))
+        result = await file_read(str(f), workspace=str(tmp_path))
         assert result.success
         assert "hello" in result.output["content"]
 
     @pytest.mark.asyncio
-    async def test_read_nonexistent(self) -> None:
-        result = await file_read("/nonexistent/path/xyz.txt")
+    async def test_read_nonexistent(self, tmp_path: Path) -> None:
+        result = await file_read("/nonexistent/path/xyz.txt", workspace=str(tmp_path))
         assert not result.success
         assert "not found" in result.error.lower()
 
@@ -96,7 +96,7 @@ class TestFileRead:
     async def test_read_with_line_range(self, tmp_path: Path) -> None:
         f = tmp_path / "lines.txt"
         f.write_text("L1\nL2\nL3\nL4\nL5\n")
-        result = await file_read(str(f), start_line=2, end_line=4)
+        result = await file_read(str(f), start_line=2, end_line=4, workspace=str(tmp_path))
         assert result.success
         assert "L2" in result.output["content"]
         assert "L4" in result.output["content"]
@@ -106,7 +106,7 @@ class TestFileRead:
     async def test_read_tail(self, tmp_path: Path) -> None:
         f = tmp_path / "tail.txt"
         f.write_text("A\nB\nC\nD\n")
-        result = await file_read(str(f), tail=2)
+        result = await file_read(str(f), tail=2, workspace=str(tmp_path))
         assert result.success
         content = result.output["content"]
         assert "C" in content and "D" in content
@@ -117,7 +117,7 @@ class TestFileWrite:
     @pytest.mark.asyncio
     async def test_write_new_file(self, tmp_path: Path) -> None:
         f = tmp_path / "new.txt"
-        result = await file_write(str(f), action="write", content="hello")
+        result = await file_write(str(f), action="write", content="hello", workspace=str(tmp_path))
         assert result.success
         assert f.read_text() == "hello"
 
@@ -125,7 +125,7 @@ class TestFileWrite:
     async def test_append(self, tmp_path: Path) -> None:
         f = tmp_path / "append.txt"
         f.write_text("line1\n")
-        result = await file_write(str(f), action="append", content="line2\n", create_backup=False)
+        result = await file_write(str(f), action="append", content="line2\n", create_backup=False, workspace=str(tmp_path))
         assert result.success
         assert f.read_text() == "line1\nline2\n"
 
@@ -134,7 +134,8 @@ class TestFileWrite:
         f = tmp_path / "replace.txt"
         f.write_text("hello world\nfoo bar")
         result = await file_write(
-            str(f), action="search_replace", old_str="world", new_str="Rust", create_backup=False
+            str(f), action="search_replace", old_str="world", new_str="Rust", create_backup=False,
+            workspace=str(tmp_path),
         )
         assert result.success
         assert "Rust" in f.read_text()
@@ -143,7 +144,7 @@ class TestFileWrite:
     async def test_insert_line(self, tmp_path: Path) -> None:
         f = tmp_path / "insert.txt"
         f.write_text("A\nC\n")
-        result = await file_write(str(f), action="insert", content="B", line=1, create_backup=False)
+        result = await file_write(str(f), action="insert", content="B", line=1, create_backup=False, workspace=str(tmp_path))
         assert result.success
         lines = f.read_text().split("\n")
         assert lines[1] == "B"
@@ -152,7 +153,7 @@ class TestFileWrite:
     async def test_delete_lines(self, tmp_path: Path) -> None:
         f = tmp_path / "del.txt"
         f.write_text("L1\nL2\nL3\n")
-        result = await file_write(str(f), action="delete_lines", start_line=2, end_line=2, create_backup=False)
+        result = await file_write(str(f), action="delete_lines", start_line=2, end_line=2, create_backup=False, workspace=str(tmp_path))
         assert result.success
         assert "L2" not in f.read_text()
 
@@ -167,7 +168,7 @@ class TestFileWriteDiffOutput:
     @pytest.mark.asyncio
     async def test_write_new_file_diff_output(self, tmp_path: Path) -> None:
         f = tmp_path / "new.txt"
-        result = await file_write(str(f), action="write", content="hello")
+        result = await file_write(str(f), action="write", content="hello", workspace=str(tmp_path))
         assert result.success
         assert result.output["old_content"] == ""
         assert result.output["new_content"] == "hello"
@@ -176,7 +177,7 @@ class TestFileWriteDiffOutput:
     async def test_overwrite_diff_output(self, tmp_path: Path) -> None:
         f = tmp_path / "exist.txt"
         f.write_text("old text")
-        result = await file_write(str(f), action="write", content="new text", create_backup=False)
+        result = await file_write(str(f), action="write", content="new text", create_backup=False, workspace=str(tmp_path))
         assert result.success
         assert result.output["old_content"] == "old text"
         assert result.output["new_content"] == "new text"
@@ -185,7 +186,7 @@ class TestFileWriteDiffOutput:
     async def test_append_diff_output(self, tmp_path: Path) -> None:
         f = tmp_path / "append.txt"
         f.write_text("line1\n")
-        result = await file_write(str(f), action="append", content="line2\n", create_backup=False)
+        result = await file_write(str(f), action="append", content="line2\n", create_backup=False, workspace=str(tmp_path))
         assert result.success
         assert result.output["old_content"] == "line1\n"
         assert result.output["new_content"] == "line1\nline2\n"
@@ -195,7 +196,8 @@ class TestFileWriteDiffOutput:
         f = tmp_path / "replace.txt"
         f.write_text("hello world")
         result = await file_write(
-            str(f), action="search_replace", old_str="world", new_str="Rust", create_backup=False
+            str(f), action="search_replace", old_str="world", new_str="Rust", create_backup=False,
+            workspace=str(tmp_path),
         )
         assert result.success
         assert result.output["old_content"] == "hello world"
@@ -205,7 +207,7 @@ class TestFileWriteDiffOutput:
     async def test_insert_diff_output(self, tmp_path: Path) -> None:
         f = tmp_path / "insert.txt"
         f.write_text("A\nC")
-        result = await file_write(str(f), action="insert", content="B", line=1, create_backup=False)
+        result = await file_write(str(f), action="insert", content="B", line=1, create_backup=False, workspace=str(tmp_path))
         assert result.success
         assert result.output["old_content"] == "A\nC"
         assert result.output["new_content"] == "A\nB\nC"
@@ -214,7 +216,7 @@ class TestFileWriteDiffOutput:
     async def test_delete_lines_diff_output(self, tmp_path: Path) -> None:
         f = tmp_path / "del.txt"
         f.write_text("L1\nL2\nL3")
-        result = await file_write(str(f), action="delete_lines", start_line=2, end_line=2, create_backup=False)
+        result = await file_write(str(f), action="delete_lines", start_line=2, end_line=2, create_backup=False, workspace=str(tmp_path))
         assert result.success
         assert result.output["old_content"] == "L1\nL2\nL3"
         assert result.output["new_content"] == "L1\nL3"
@@ -232,7 +234,7 @@ class TestListDirectory:
     async def test_list_files(self, tmp_path: Path) -> None:
         (tmp_path / "a.txt").write_text("x")
         (tmp_path / "b.py").write_text("y")
-        result = await list_directory(str(tmp_path))
+        result = await list_directory(str(tmp_path), workspace=str(tmp_path))
         assert result.success
         names = [i["name"] for i in result.output["items"]]
         assert "a.txt" in names
@@ -242,7 +244,7 @@ class TestListDirectory:
     async def test_list_hidden_excluded(self, tmp_path: Path) -> None:
         (tmp_path / ".hidden").write_text("x")
         (tmp_path / "visible.txt").write_text("y")
-        result = await list_directory(str(tmp_path), include_hidden=False)
+        result = await list_directory(str(tmp_path), include_hidden=False, workspace=str(tmp_path))
         names = [i["name"] for i in result.output["items"]]
         assert ".hidden" not in names
         assert "visible.txt" in names
@@ -251,14 +253,14 @@ class TestListDirectory:
     async def test_list_pattern_filter(self, tmp_path: Path) -> None:
         (tmp_path / "a.py").write_text("x")
         (tmp_path / "b.txt").write_text("y")
-        result = await list_directory(str(tmp_path), pattern="*.py")
+        result = await list_directory(str(tmp_path), pattern="*.py", workspace=str(tmp_path))
         names = [i["name"] for i in result.output["items"]]
         assert "a.py" in names
         assert "b.txt" not in names
 
     @pytest.mark.asyncio
-    async def test_list_nonexistent(self) -> None:
-        result = await list_directory("/nonexistent_dir_xyz")
+    async def test_list_nonexistent(self, tmp_path: Path) -> None:
+        result = await list_directory("/nonexistent_dir_xyz", workspace=str(tmp_path))
         assert not result.success
 
 
@@ -266,14 +268,14 @@ class TestCreateDirectory:
     @pytest.mark.asyncio
     async def test_create_simple(self, tmp_path: Path) -> None:
         d = tmp_path / "newdir"
-        result = await create_directory(str(d))
+        result = await create_directory(str(d), workspace=str(tmp_path))
         assert result.success
         assert d.is_dir()
 
     @pytest.mark.asyncio
     async def test_create_nested(self, tmp_path: Path) -> None:
         d = tmp_path / "a" / "b" / "c"
-        result = await create_directory(str(d), parents=True)
+        result = await create_directory(str(d), parents=True, workspace=str(tmp_path))
         assert result.success
         assert d.is_dir()
 
@@ -281,7 +283,7 @@ class TestCreateDirectory:
     async def test_create_exist_ok(self, tmp_path: Path) -> None:
         d = tmp_path / "exists"
         d.mkdir()
-        result = await create_directory(str(d))
+        result = await create_directory(str(d), workspace=str(tmp_path))
         assert result.success
 
 
@@ -291,13 +293,13 @@ class TestCopyFile:
         src = tmp_path / "src.txt"
         src.write_text("content")
         dst = tmp_path / "dst.txt"
-        result = await copy_file(str(src), str(dst))
+        result = await copy_file(str(src), str(dst), workspace=str(tmp_path))
         assert result.success
         assert dst.read_text() == "content"
 
     @pytest.mark.asyncio
     async def test_copy_nonexistent(self, tmp_path: Path) -> None:
-        result = await copy_file(str(tmp_path / "nope.txt"), str(tmp_path / "dst.txt"))
+        result = await copy_file(str(tmp_path / "nope.txt"), str(tmp_path / "dst.txt"), workspace=str(tmp_path))
         assert not result.success
 
     @pytest.mark.asyncio
@@ -306,7 +308,7 @@ class TestCopyFile:
         src.write_text("new")
         dst = tmp_path / "d.txt"
         dst.write_text("old")
-        result = await copy_file(str(src), str(dst), overwrite=False)
+        result = await copy_file(str(src), str(dst), overwrite=False, workspace=str(tmp_path))
         assert not result.success
 
 
@@ -316,14 +318,14 @@ class TestMoveFile:
         src = tmp_path / "m.txt"
         src.write_text("data")
         dst = tmp_path / "moved.txt"
-        result = await move_file(str(src), str(dst))
+        result = await move_file(str(src), str(dst), workspace=str(tmp_path))
         assert result.success
         assert not src.exists()
         assert dst.read_text() == "data"
 
     @pytest.mark.asyncio
     async def test_move_nonexistent(self, tmp_path: Path) -> None:
-        result = await move_file(str(tmp_path / "nope"), str(tmp_path / "dst"))
+        result = await move_file(str(tmp_path / "nope"), str(tmp_path / "dst"), workspace=str(tmp_path))
         assert not result.success
 
 
@@ -332,13 +334,13 @@ class TestDeleteFile:
     async def test_delete_file(self, tmp_path: Path) -> None:
         f = tmp_path / "del.txt"
         f.write_text("x")
-        result = await delete_file(str(f))
+        result = await delete_file(str(f), workspace=str(tmp_path))
         assert result.success
         assert not f.exists()
 
     @pytest.mark.asyncio
     async def test_delete_nonexistent(self, tmp_path: Path) -> None:
-        result = await delete_file(str(tmp_path / "nope.txt"))
+        result = await delete_file(str(tmp_path / "nope.txt"), workspace=str(tmp_path))
         assert not result.success
 
     @pytest.mark.asyncio
@@ -346,7 +348,7 @@ class TestDeleteFile:
         d = tmp_path / "deldir"
         d.mkdir()
         (d / "inner.txt").write_text("x")
-        result = await delete_file(str(d), recursive=True)
+        result = await delete_file(str(d), recursive=True, workspace=str(tmp_path))
         assert result.success
         assert not d.exists()
 
@@ -355,7 +357,7 @@ class TestDeleteFile:
         d = tmp_path / "nonempty"
         d.mkdir()
         (d / "inner.txt").write_text("x")
-        result = await delete_file(str(d), recursive=False)
+        result = await delete_file(str(d), recursive=False, workspace=str(tmp_path))
         assert not result.success
 
 
@@ -363,7 +365,7 @@ class TestEnhancedSearch:
     @pytest.mark.asyncio
     async def test_search_content(self, tmp_path: Path) -> None:
         (tmp_path / "a.py").write_text("def hello():\n    pass\n")
-        result = await enhanced_search("hello", path=str(tmp_path))
+        result = await enhanced_search("hello", path=str(tmp_path), workspace=str(tmp_path))
         assert result.success
         # count 在 metadata（ToolResult 设计：output=数据载荷, metadata=附加信息）
         assert result.metadata["count"] >= 1
@@ -372,7 +374,7 @@ class TestEnhancedSearch:
     @pytest.mark.asyncio
     async def test_search_filename(self, tmp_path: Path) -> None:
         (tmp_path / "test_find.py").write_text("x")
-        result = await enhanced_search("test_find", path=str(tmp_path), search_type="filename")
+        result = await enhanced_search("test_find", path=str(tmp_path), search_type="filename", workspace=str(tmp_path))
         assert result.success
         assert result.metadata["count"] >= 1
         assert len(result.output["results"]) >= 1
@@ -381,13 +383,13 @@ class TestEnhancedSearch:
     async def test_search_pattern_filter(self, tmp_path: Path) -> None:
         (tmp_path / "a.py").write_text("target")
         (tmp_path / "b.txt").write_text("target")
-        result = await enhanced_search("target", path=str(tmp_path), file_pattern="*.py")
+        result = await enhanced_search("target", path=str(tmp_path), file_pattern="*.py", workspace=str(tmp_path))
         assert result.success
         assert all(r["file_path"].endswith(".py") for r in result.output["results"])
 
     @pytest.mark.asyncio
-    async def test_search_nonexistent_path(self) -> None:
-        result = await enhanced_search("x", path="/nonexistent_search_path")
+    async def test_search_nonexistent_path(self, tmp_path: Path) -> None:
+        result = await enhanced_search("x", path="/nonexistent_search_path", workspace=str(tmp_path))
         assert not result.success
 
     @pytest.mark.asyncio
@@ -400,7 +402,7 @@ class TestEnhancedSearch:
         target = tmp_path / "single.py"
         target.write_text("def findme():\n    return 'hit'\n")
 
-        result = await enhanced_search("findme", path=str(target))
+        result = await enhanced_search("findme", path=str(target), workspace=str(tmp_path))
         assert result.success
         matches = result.output["results"]
         assert len(matches) == 1
@@ -413,7 +415,7 @@ class TestEnhancedSearch:
         target = tmp_path / "needle.py"
         target.write_text("x")
 
-        result = await enhanced_search("needle", path=str(target), search_type="filename")
+        result = await enhanced_search("needle", path=str(target), search_type="filename", workspace=str(tmp_path))
         assert result.success
         assert len(result.output["results"]) == 1
         assert result.output["results"][0]["file_path"] == str(target)
@@ -437,7 +439,7 @@ class TestEnhancedSearch:
         server = McpServer(plugin._tools, plugin._resources, plugin._lifecycle_handlers)
         call_result = await server._handle_tools_call({
             "name": "file_read",
-            "arguments": {"path": str(f), "start_line": "2", "end_line": "4"},
+            "arguments": {"path": str(f), "start_line": "2", "end_line": "4", "workspace": str(tmp_path)},
         })
         assert call_result.is_error is False
         content = json.loads(call_result.content[0].text)
@@ -493,7 +495,7 @@ class TestMcpServerWrapper:
         f.write_text("mcp_content")
         call_result = await server._handle_tools_call({
             "name": "file_read",
-            "arguments": {"path": str(f)},
+            "arguments": {"path": str(f), "workspace": str(tmp_path)},
         })
         assert call_result.is_error is False
         import json

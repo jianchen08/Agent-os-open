@@ -859,11 +859,17 @@ async fn process_via_engine_inner(
 /// - `failed=true` → `run.failed`（state 带 `task.*` 字段时追加 `task_failed`）
 /// - `suspended` 标志（RouteNext::Wait 落档）→ `run.suspended`（等待人工交互，
 ///   无任务派生——收口把关是 child_task_guard 的结构性职责）
-/// - 否则 → `run.completed`（state 带 `task.*` 字段时追加 `task_completed`）
+/// - `router.stop_reason=user_requested` → `run.cancelled`（用户主动停止，
+///   无任务派生——停止不是任务终态，不通知上级）
+/// - 否则 → `run.completed`（state 带 `task.*` 字段**且 task.status=completed**
+///   时才追加 `task_completed`）
 ///
 /// 任务派生判据：state 存在 `task.` 前缀键（task = pipeline 单一真值，
 /// 任务管道的 state 出生即带 task.* 字段；`task.owned.*` 是父管道登记子任务的
 /// 扁平键，不算任务管道自身标记——仅登记过子任务的聊天管道不得派生任务事件）。
+/// **完成唯一判据 = task_evaluate 评估通过落 `task.status=completed`**——评估
+/// 未通过（pending/pending_evaluation/running）时任务管道 run 结束只发
+/// `run.completed`，不派生 task_completed（杜绝"跑完就假完成通知上级"）。
 /// 事件经 [`broadcast_domain_event`] 双通道投递：观察总线 + 点对点推给声明
 /// domain_event hook 的订阅插件（triggers_ext → evaluate_event——EVENT 触发器
 /// 的输入源）。
@@ -887,6 +893,8 @@ fn derive_run_terminal_events(
     let thread_id = v("session_id");
     let has_task = has_task_marker(final_state);
     let task_id = v("task.id");
+    // 评估裁决的任务终态（task_evaluate 经 pipeline-state 落 task.status）
+    let task_status = v("task.status").as_str().unwrap_or("").to_string();
     // 子任务通知锚点：lineage.parent_pipeline_id 扁平键（有父形式出生写入）
     let parent_pipeline_id = v("lineage.parent_pipeline_id");
     // 子任务完成通知注入 chat.send_message 需要 user_id：task_submit 创建子任务
@@ -923,10 +931,29 @@ fn derive_run_terminal_events(
         events.push(("run.suspended", run_tags));
         return events;
     }
+    let user_cancelled =
+        final_state.get("router.stop_reason").and_then(|s| s.as_str()) == Some("user_requested");
+    if user_cancelled {
+        events.push(("run.cancelled", run_tags));
+        return events;
+    }
     events.push(("run.completed", run_tags));
-    if has_task {
+    if has_task && task_status == "completed" {
         events.push((
             "task_completed",
+            vec![
+                ("pipeline_id", pipeline_id),
+                ("thread_id", thread_id),
+                ("task_id", task_id),
+                ("parent_pipeline_id", parent_pipeline_id),
+                ("user_id", task_user_id),
+            ],
+        ));
+    } else if has_task && task_status == "failed" {
+        // 评估裁决失败（task_evaluate 落 failed / stop_check 超线落 failed）：
+        // run 本身正常结束，任务域终态 = 失败，照常通知上级。
+        events.push((
+            "task_failed",
             vec![
                 ("pipeline_id", pipeline_id),
                 ("thread_id", thread_id),
