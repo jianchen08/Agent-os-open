@@ -24,12 +24,12 @@
               "enum": [
                 "agent"
               ],
-              "description": "目标类型，固定为 agent。non_container 必填，container 不需要"
+              "description": "目标类型，固定为 agent（必填）"
             },
             "target_id": {
               "type": "string",
               "minLength": 1,
-              "description": "目标 Agent ID。non_container 必填，container 不需要。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索"
+              "description": "目标 Agent ID（必填）。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索"
             },
             "goal_title": {
               "type": "string",
@@ -67,23 +67,19 @@
                 "required": []
               }
             },
-            "task_scope": {
+            "project_id": {
               "type": "string",
-              "enum": [
-                "non_container",
-                "container"
-              ],
-              "default": "non_container",
-              "description": "任务范围：non_container（非容器任务，实际执行的任务，必须指定 target_type 和 target_id）。container 仅限 L1 Agent 使用（用于组织复杂长期任务的子任务链），L2 Agent 禁止使用 container"
+              "pattern": "^[0-9a-f]{12}$",
+              "description": "挂靠项目 ID（可选）。指定后任务在项目文件夹下执行（默认 worktree 从项目仓库分叉）；缺省为独立任务。项目经 projects 域 API 创建（= 真实文件夹 + 登记）"
             },
             "parent_task_id": {
               "type": "string",
               "pattern": "^[0-9a-f]{12}$",
-              "description": "父任务 ID（task=pipeline 统一后即引擎管道身份，12 位 hex）。为容器任务创建子任务时需要指定此参数，将子任务关联到对应的容器。"
+              "description": "父任务 ID（task=pipeline 统一后即引擎管道身份，12 位 hex）。创建任务链子任务时指定此参数关联父任务（复盘/分层链）。"
             },
             "workspace": {
               "type": "string",
-              "description": "目标项目路径。指定任务需要操作（读取或修改）的项目目录。**重要**：当任务需要对某个特定文件夹进行读取或修改时，必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。可用范围（按任务类型）：普通任务可填；容器任务可填（作为容器空间的源项目，系统复制到隔离空间操作，不设置则创建空容器空间）；容器直接子任务**不可填**——工作空间继承容器，显式指定会被拒绝。工作空间拓扑由 workspace_mode 决定（worktree=在目标项目上建隔离副本；plain=直接操作目标目录）；执行环境隔离由 isolation_level 决定，两者独立。"
+              "description": "目标项目路径。指定任务需要操作（读取或修改）的项目目录。**重要**：当任务需要对某个特定文件夹进行读取或修改时，必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。可用范围（按任务类型）：根任务可填；普通子任务不可填（继承父任务）。工作空间拓扑由 workspace_mode 决定（worktree=在目标项目上建隔离副本；plain=直接操作目标目录）；执行环境隔离由 isolation_level 决定，两者独立。"
             },
             "workspace_mode": {
               "type": "string",
@@ -91,7 +87,7 @@
                 "worktree",
                 "plain"
               ],
-              "description": "工作空间拓扑（普通任务可选，默认 worktree）。worktree：在目标项目上创建 git worktree 隔离操作，不影响原项目（默认）。plain：直接在目标目录工作，不建 worktree、不切分支。与 isolation_level（执行环境容器/宿主）相互独立。容器任务与容器直接子任务**不可选**（容器不直接执行；子任务继承容器空间）。"
+              "description": "工作空间拓扑（根任务可选，默认 worktree）。worktree：在目标项目上创建 git worktree 隔离操作，不影响原项目（默认）。plain：直接在目标目录工作，不建 worktree、不切分支。与 isolation_level（执行环境容器/宿主）相互独立。普通子任务不可选（继承父任务空间）。"
             },
             "isolation_level": {
               "type": "string",
@@ -99,7 +95,7 @@
                 "non_isolated",
                 "isolated"
               ],
-              "description": "执行环境隔离级别（普通任务可选，默认使用系统配置）。non_isolated：非隔离，直接在宿主环境执行。isolated：隔离，在容器执行环境中工作。只决定执行环境，不决定工作空间拓扑（拓扑由 workspace_mode 决定）。容器任务与容器直接子任务**不可选**（容器不直接执行；子任务继承容器）。"
+              "description": "执行环境隔离级别（根任务可选，默认使用系统配置）。non_isolated：非隔离，直接在宿主环境执行。isolated：隔离，在容器执行环境中工作。只决定执行环境，不决定工作空间拓扑（拓扑由 workspace_mode 决定）。普通子任务不可选（继承父任务）。"
             },
             "inherit_from": {
               "type": "string",
@@ -130,62 +126,9 @@
           },
           "required": [
             "goal_title",
-            "goal_description"
-          ],
-          "allOf": [
-            {
-              "if": {
-                "not": {
-                  "required": [
-                    "task_scope"
-                  ],
-                  "properties": {
-                    "task_scope": {
-                      "const": "container"
-                    }
-                  }
-                }
-              },
-              "then": {
-                "required": [
-                  "target_type",
-                  "target_id"
-                ]
-              }
-            },
-            {
-              "if": {
-                "required": [
-                  "task_scope"
-                ],
-                "properties": {
-                  "task_scope": {
-                    "const": "container"
-                  }
-                }
-              },
-              "then": {
-                "not": {
-                  "anyOf": [
-                    {
-                      "required": [
-                        "target_type"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "target_id"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "parent_task_id"
-                      ]
-                    }
-                  ]
-                }
-              }
-            }
+            "goal_description",
+            "target_type",
+            "target_id"
           ]
         },
         "output_schema": {
@@ -223,9 +166,9 @@
               "type": "string",
               "description": "管道未创建降级"
             },
-            "task_scope": {
+            "project_id": {
               "type": "string",
-              "description": "容器任务恒 container"
+              "description": "挂靠项目 id（未挂项目为空）"
             }
           }
         }

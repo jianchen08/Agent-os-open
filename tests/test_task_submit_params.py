@@ -1,16 +1,15 @@
 # @feature: FP-MIGR 任务提交参数解耦 | @ci: python-coverage
 """task_submit 参数可用性矩阵测试。
 
-验证（worktree 选择与隔离分离，agent 直接选，按任务类型限定范围）：
-1. 容器任务：workspace_mode / isolation_level 拒绝（CONTAINER_PARAM_FORBIDDEN）
-2. 容器直接子任务：workspace_mode / isolation_level 可自选（worktree 与执行环境）；
-   workspace 可显式指定但 worktree 源空间必须与容器一致（否则
-   CONTAINER_CHILD_WORKSPACE_MISMATCH）；inherit workspace 同规则
+验证（project = 文件夹+登记，ADR 2026-08-27）：
+1. 项目挂靠：L1 显式 project_id → workspace 解析为项目文件夹（explicit worktree
+   源）+ state 带 task.parent_project_id；登记缺失/文件夹缺失/显式 workspace
+   冲突均 fail-honest 拒绝
+2. L2/L3：显式 project_id 越权拒绝；不传时系统沿父链继承（父 state 行
+   task.parent_project_id 单跳）；无归属链保持独立
 3. 普通子任务：workspace / workspace_mode / isolation_level 继承父任务，
    显式填写拒绝（SUBTASK_INHERITS_PARAMS），除非 inherit 管道继承
 4. 普通根任务：三者均可填
-
-[来源: 任务提交参数解耦设计（worktree 与隔离拆分）]
 """
 
 from __future__ import annotations
@@ -185,139 +184,124 @@ def tmp_proj():
     shutil.rmtree(d, ignore_errors=True)
 
 
-# ── 容器任务 ───────────────────────────────────────────────────
+# ── 项目挂靠（project_id：L1 显式 / L2L3 父链继承）─────────────
+
+
+@pytest.fixture
+def project_registry_env(tool_module, monkeypatch, tmp_path):
+    """临时项目登记（隔离真实登记目录）+ state reader 注入。
+
+    返回 (登记 id→path 映射 dict 可变引用, captured rows 设置器)。
+    """
+    _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
+    if str(_SHARED_DIR) not in sys.path:
+        sys.path.insert(0, str(_SHARED_DIR))
+    import project_registry as pr
+
+    folder = tmp_path / "proj_folder"
+    folder.mkdir()
+    paths = {"proj00112233": str(folder)}
+    monkeypatch.setattr(pr, "load_project_paths", lambda: dict(paths))
+
+    rows: list[dict] = []
+
+    async def fake_reader():
+        return list(rows)
+
+    tool_module._get_state_reader = lambda: fake_reader
+    return paths, rows
 
 
 @pytest.mark.asyncio
-async def test_container_forbids_workspace_mode_and_isolation(tool_module):
-    """容器任务：workspace_mode / isolation_level 拒绝（容器不直接执行）。"""
-    tool, captured = make_tool(tool_module, FakeTaskService())
-
-    for param, value in (("workspace_mode", "worktree"), ("isolation_level", "isolated")):
-        inputs = base_inputs(task_scope="container", parent_agent_level=1, **{param: value})
-        result = await tool.execute(inputs)
-        assert not result.success, f"容器任务应拒绝 {param}"
-        assert result.error_code == "CONTAINER_PARAM_FORBIDDEN", result.error
-
-
-@pytest.mark.asyncio
-async def test_container_allows_workspace_source(tool_module, tmp_proj):
-    """容器任务：workspace 可填（作为容器空间源项目），登记到提交者管道 state。"""
-    tool, captured = make_tool(tool_module, FakeTaskService())
-
-    inputs = base_inputs(
-        task_scope="container",
-        parent_agent_level=1,
-        workspace=tmp_proj,
-        pipeline_id="owner-pipe-1",
-    )
-    result = await tool.execute(inputs)
-    assert result.success, result.error
-    # 容器任务不建管道：唯一调用是 no_dispatch 登记（写提交者管道 state）
-    assert len(captured["calls"]) == 1, "容器任务不得创建执行管道"
-    reg = captured["calls"][0]
-    assert reg["no_dispatch"] is True
-    assert reg["pipeline_id"] == "owner-pipe-1"
-    assert reg["state"]["task.owned." + result.output["task_id"] + ".scope"] == "container"
-    assert reg["state"]["task.owned." + result.output["task_id"] + ".workspace"] == tmp_proj
-    assert result.output["task_scope"] == "container"
-    assert result.output["status"] == "active"
-
-
-# ── 容器直接子任务 ─────────────────────────────────────────────
-
-
-def container_child_service(tmp_proj, extra_tasks=None):
-    """父=容器任务（带 ws_meta），可选额外任务（inherit 源）。"""
-    tasks = {
-        "container_p": FakeTask("container_p", {"task_scope": "container", "submitted_by_level": 1, "ws_meta": ws_meta(tmp_proj)})
-    }
-    if extra_tasks:
-        tasks.update(extra_tasks)
-    return FakeTaskService(tasks)
-
-
-@pytest.mark.asyncio
-async def test_container_child_can_choose_mode_and_isolation(tool_module, tmp_proj):
-    """容器直接子任务：workspace_mode / isolation_level 可自选（worktree 与执行环境）。"""
-    service = container_child_service(tmp_proj)
+async def test_l1_project_task_anchors_to_project_folder(tool_module, tmp_path, project_registry_env):
+    """L1 挂项目：workspace 解析为项目文件夹（explicit worktree 源），state 带挂靠键。"""
+    paths, _rows = project_registry_env
+    service = FakeTaskService()
     tool, captured = make_tool(tool_module, service)
 
-    inputs = base_inputs(
-        task_id="container_p",
-        workspace_mode="worktree",
-        isolation_level="isolated",
-    )
+    inputs = base_inputs(parent_agent_level=1, project_id="proj00112233")
     result = await tool.execute(inputs)
     assert result.success, result.error
     ec = captured["params"]["execution_context"]
+    # 挂项目 = 显式 workspace（项目文件夹）+ 默认 worktree（从项目仓库分叉）
+    assert ec["workspace"]["source_path"] == paths["proj00112233"]
     assert ec["workspace"]["mode"] == "worktree"
-    assert ec["isolation"]["level"] == "isolated"
-    # 不填 workspace → 空值由父链在执行管道解析（explicit=False 交下游继承）
-    assert ec["workspace"]["source_path"] == ""
-    assert ec["workspace"]["explicit"] is False
+    assert ec["workspace"]["explicit"] is True
+    state = captured["params"]["state"]
+    assert state["task.parent_project_id"] == "proj00112233"
 
 
 @pytest.mark.asyncio
-async def test_container_child_workspace_setting_rejected(tool_module, tmp_proj):
-    """容器直接子任务：workspace 不可设置（工作空间继承容器），显式指定一律拒绝。"""
-    service = container_child_service(tmp_proj)
+async def test_project_id_not_in_registry_rejected(tool_module, project_registry_env):
+    """project_id 不在登记中（项目已删除）→ PROJECT_NOT_FOUND fail-honest。"""
+    service = FakeTaskService()
     tool, _ = make_tool(tool_module, service)
 
-    # 即使路径与容器源空间一致，也不允许设置（继承即可，无需指定）
-    inputs = base_inputs(task_id="container_p", workspace=tmp_proj)
+    inputs = base_inputs(parent_agent_level=1, project_id="ffffffffffff")
     result = await tool.execute(inputs)
     assert not result.success
-    assert result.error_code == "CONTAINER_CHILD_PARAM_FORBIDDEN", result.error
+    assert result.error_code == "PROJECT_NOT_FOUND", result.error
 
 
 @pytest.mark.asyncio
-async def test_container_child_inherit_workspace_source_check(tool_module, tmp_proj):
-    """容器直接子任务 inherit workspace：源空间与容器一致 → 放行；不一致 → 拒绝。"""
-    # 一致：源任务 ws_meta.project_root == 容器源空间
-    same_src = FakeTask("old_same", {"task_scope": "non_container", "ws_meta": ws_meta(tmp_proj)})
-    service = container_child_service(tmp_proj, {"old_same": same_src})
-    tool, captured = make_tool(tool_module, service)
-
-    inputs = base_inputs(task_id="container_p", inherit_from="old_same", inherit_mode="workspace")
-    result = await tool.execute(inputs)
-    assert result.success, result.error
-
-    # 不一致：源任务源空间指向别处
-    other = FakeTask("old_other", {"task_scope": "non_container", "ws_meta": ws_meta(str(_REPO_ROOT / "elsewhere"))})
-    service2 = container_child_service(tmp_proj, {"old_other": other})
-    tool2, _ = make_tool(tool_module, service2)
-
-    inputs = base_inputs(task_id="container_p", inherit_from="old_other", inherit_mode="workspace")
-    result = await tool2.execute(inputs)
-    assert not result.success
-    assert result.error_code == "CONTAINER_CHILD_WORKSPACE_MISMATCH", result.error
-
-
-@pytest.mark.asyncio
-async def test_container_child_inherit_pipe_allowed(tool_module, tmp_proj):
-    """容器直接子任务：inherit pipe（对话历史）与空间无关，放行。"""
-    service = container_child_service(tmp_proj)
+async def test_project_workspace_conflict_rejected(tool_module, tmp_path, project_registry_env):
+    """挂项目 + 显式给了不同 workspace 路径 → 语义冲突拒绝。"""
+    other = tmp_path / "other_ws"
+    other.mkdir()
+    service = FakeTaskService()
     tool, _ = make_tool(tool_module, service)
 
-    inputs = base_inputs(task_id="container_p", inherit_from="old_task", inherit_mode="pipe")
+    inputs = base_inputs(parent_agent_level=1, project_id="proj00112233", workspace=str(other))
     result = await tool.execute(inputs)
-    assert result.success, f"inherit pipe 应放行: {result.error}"
+    assert not result.success
+    assert result.error_code == "PROJECT_WS_CONFLICT", result.error
 
 
 @pytest.mark.asyncio
-async def test_container_child_without_params_submits_inherited(tool_module, tmp_proj):
-    """容器直接子任务不带空间/隔离字段：正常提交，空间继承交执行管道父链解析。"""
-    service = container_child_service(tmp_proj)
-    tool, captured = make_tool(tool_module, service)
+async def test_l2_explicit_project_id_rejected(tool_module, project_registry_env):
+    """L2 显式指定 project_id → 越权拒绝（归属由系统沿父链继承）。"""
+    service = FakeTaskService()
+    tool, _ = make_tool(tool_module, service)
 
-    inputs = base_inputs(task_id="container_p")
+    inputs = base_inputs(parent_agent_level=2, project_id="proj00112233", task_id="parent-task-1")
+    result = await tool.execute(inputs)
+    assert not result.success
+    assert result.error_code == "L2_CANNOT_SPECIFY_PROJECT_ID", result.error
+
+
+@pytest.mark.asyncio
+async def test_l2_child_inherits_project_from_parent_state(tool_module, tmp_path, project_registry_env):
+    """L2 子任务：不传 project_id，系统读父任务 state 行 task.parent_project_id 继承写入。"""
+    paths, rows = project_registry_env
+    rows.append({"pipeline_id": "parent-task-1", "task.parent_project_id": "proj00112233"})
+    print("DBG_BEFORE_MAKETOOL:", id(tool_module), tool_module._get_state_reader)
+    service = FakeTaskService()
+    tool, captured = make_tool(tool_module, service)
+    print("DBG_AFTER_MAKETOOL:", tool_module._get_state_reader())
+
+    inputs = base_inputs(parent_agent_level=2, task_id="parent-task-1")
     result = await tool.execute(inputs)
     assert result.success, result.error
+    state = captured["params"]["state"]
+    assert state["task.parent_project_id"] == "proj00112233"
+    # 继承注入的 workspace（项目文件夹）不算显式指定——子任务闸门放行
     ec = captured["params"]["execution_context"]
-    # 不显式指定 → 空源路径 + explicit=False（继承语义由 workspace_lifecycle 按父链解析）
-    assert ec["workspace"]["source_path"] == ""
-    assert ec["workspace"]["explicit"] is False
+    assert ec["workspace"]["source_path"] == paths["proj00112233"]
+
+
+@pytest.mark.asyncio
+async def test_l2_child_without_project_ancestry_stays_independent(tool_module, project_registry_env):
+    """父任务无项目归属 → 子任务也不挂项目（独立链不凭空长出 project_id）。"""
+    _paths, rows = project_registry_env
+    rows.append({"pipeline_id": "parent-task-1"})
+    service = FakeTaskService()
+    tool, captured = make_tool(tool_module, service)
+
+    inputs = base_inputs(parent_agent_level=2, task_id="parent-task-1")
+    result = await tool.execute(inputs)
+    assert result.success, result.error
+    state = captured["params"]["state"]
+    assert "task.parent_project_id" not in state
 
 
 # ── 普通子任务（继承父任务，除非管道继承）─────────────────────
@@ -420,7 +404,6 @@ async def test_ordinary_root_task_accepts_all_three(tool_module, tmp_proj):
     assert ec["isolation"]["level"] == "isolated"
     # 任务域字段出生即入 state（GAP-1：task=pipeline，YAML metadata 写路径退役）
     state = captured["params"]["state"]
-    assert state["task.scope"] == "non_container"
     assert state["task.goal"] == "测试任务"
 
 
@@ -473,7 +456,6 @@ async def test_ordinary_task_registers_owned_to_owner_pipeline(tool_module):
     full_pid = "a1b2c3d4e5f6"
     assert result.output["pipeline_id"] == full_pid
     assert reg["state"][f"task.owned.{full_pid}.title"] == "测试任务"
-    assert reg["state"][f"task.owned.{full_pid}.scope"] == "non_container"
     assert reg["state"][f"task.owned.{full_pid}.status"] == "running"
 
 
