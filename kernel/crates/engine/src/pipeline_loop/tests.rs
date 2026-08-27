@@ -2,6 +2,9 @@
 
 use super::*;
 use crate::compiler::compile_pipeline;
+use agentos_core::traits::{
+    HostType, ManifestCapabilities, PluginManifest, PluginType, StepCapability, ToolCapability,
+};
 use agentos_core::types::{LoopBody, PipelineConfig, PipelineStep, Route, StepItem, StepLibrary};
 use async_trait::async_trait;
 use serde_json::json;
@@ -2030,4 +2033,176 @@ fn step_binding_guard_nested_override_restores_outer() {
     drop(outer);
     assert!(reg.resolve_step_of("tenant_test", pipe, "m1").is_none(), "外层守卫收尾清除绑定");
     reg.clear_pipeline("tenant_test", pipe);
+}
+
+// ── 步骤服务接线（服务化提案 §3.2/§3.4：编译期 method 携带 → 运行期 _step_method）──
+
+/// 测试 manifest（单入口纯步骤插件形状：无 tools/services/steps，隐式默认注册）。
+fn test_manifest(id: &str) -> PluginManifest {
+    PluginManifest {
+        id: id.to_string(),
+        name: format!("Test {id}"),
+        description: None,
+        version: "1.0.0".to_string(),
+        plugin_type: PluginType::Pipeline,
+        pipeline_role: None,
+        language: "python".to_string(),
+        host_type: HostType::Sidecar,
+        host_group: None,
+        entry: "server.py".to_string(),
+        capabilities: Default::default(),
+        requires_services: vec![],
+        permissions: Default::default(),
+        priority: 100,
+        mcp: None,
+        lifecycle: None,
+        native: None,
+        granted_capabilities: vec![],
+        requires_content: None,
+        invoke_entry: None,
+        config_files: vec![],
+        http_endpoints: vec![],
+        ui_schema: None,
+        contributes: None,
+        enabled: None,
+        activation: None,
+        provides: None,
+        persistent_fields: vec![],
+    }
+}
+
+/// 工具能力（复合体形状构造用）。
+fn tool_cap(name: &str) -> ToolCapability {
+    ToolCapability {
+        name: name.to_string(),
+        description: None,
+        input_schema: None,
+        output_schema: None,
+        category: None,
+        ui: None,
+        render: None,
+        smoke: None,
+    }
+}
+
+/// 具名步骤服务端到端：编译产物携带 method（步骤名）→ 运行期 config 含
+/// `_step_method`（SDK 侧按名分发）→ state_updates 正常 merge。
+#[tokio::test]
+async fn named_step_service_reaches_plugin_via_step_method_config() {
+    let fixture = Fixture::build(&["task_service"]);
+    fixture.invoker.set_result(
+        "task_service",
+        PluginResult {
+            state_updates: updates(&[("injected", json!(true))]),
+            ..Default::default()
+        },
+    );
+    // 复合体显式声明 steps：task.inject_params 是注册步骤名（非插件 id）
+    let composite = {
+        let mut m = test_manifest("task_service");
+        m.capabilities = ManifestCapabilities {
+            steps: vec![StepCapability {
+                name: "task.inject_params".into(),
+                description: None,
+                input_schema: None,
+            }],
+            tools: vec![tool_cap("task_submit")],
+            ..Default::default()
+        };
+        m
+    };
+    let index =
+        crate::compiler::build_step_service_index(&[composite]).expect("index build ok");
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s", "task.inject_params")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let compiled = crate::compiler::compile_pipeline_with_hooks(
+        &config,
+        &StepLibrary::default(),
+        &fixture.executor.plugin_ids,
+        Some(&index),
+        &[],
+        &[],
+    )
+    .expect("具名步骤服务命中编译通过");
+    let final_state = fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    // 编译产物 method 携带 + 运行期 config 注入 _step_method（无 inputs → 仅约定键）
+    assert_eq!(
+        fixture.invoker.captured_configs("task_service"),
+        vec![json!({ "_step_method": "task.inject_params" })],
+        "具名步骤服务调用 config 必须携带 _step_method"
+    );
+    assert_eq!(
+        final_state["injected"], json!(true),
+        "具名步骤 state_updates 正常 merge"
+    );
+}
+
+/// 复合体直引（插件 id 未在 capabilities.steps 声明）→ 编译期报错（fail-closed，
+/// 强制自白条款）；错误文案含插件 id 与修复指引。
+#[tokio::test]
+async fn composite_direct_reference_fails_compilation() {
+    let fixture = Fixture::build(&["task_service"]);
+    let composite = {
+        let mut m = test_manifest("task_service");
+        m.capabilities = ManifestCapabilities {
+            tools: vec![tool_cap("task_submit")],
+            ..Default::default()
+        };
+        m
+    };
+    let index =
+        crate::compiler::build_step_service_index(&[composite]).expect("index build ok");
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s", "task_service")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let err = crate::compiler::compile_pipeline_with_hooks(
+        &config,
+        &StepLibrary::default(),
+        &fixture.executor.plugin_ids,
+        Some(&index),
+        &[],
+        &[],
+    )
+    .expect_err("复合体直引必须编译期报错");
+    assert!(err.message.contains("task_service"), "err: {err}");
+    assert!(err.message.contains("capabilities.steps"), "err: {err}");
+}
+
+/// 隐式直引（单入口插件，method None = 默认 execute 入口）：config 不带
+/// `_step_method` 键——SDK 侧走现行 execute 路径（现状零改动）。
+#[tokio::test]
+async fn implicit_direct_reference_config_has_no_step_method_key() {
+    let fixture = Fixture::build(&["a"]);
+    let config = gated_body(vec![StepItem::Bare("a".into())]);
+    fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    let captured = fixture.invoker.captured_configs("a");
+    assert_eq!(captured.len(), 1, "隐式直引应恰好调用一次");
+    assert!(
+        captured[0].get("_step_method").is_none(),
+        "隐式直引不得携带 _step_method，实际: {}",
+        captured[0]
+    );
 }

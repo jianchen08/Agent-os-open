@@ -10,7 +10,12 @@
 //!    [`CompiledItem::Plugin`]（③ 已注册步骤服务 / ④ 插件名直引）/
 //!    [`CompiledItem::Composite`]（管道/库 step，运行时查统一步骤池递归）/
 //!    [`CompiledItem::Dynamic`]（`{{state.xxx}}` 模板名，运行时渲染后查池/插件——
-//!    显式保留的动态点）；未知引用在加载期报错。
+//!    显式保留的动态点）；未知引用在加载期报错。传入 [`StepServiceIndex`] 时
+//!    （[`compile_pipeline_with_hooks`] 的 `index` 参数），③ 级命中携带解析结果
+//!    `method`（SDK 侧按 `_step_method` 约定字段分发，提案 §3.4）；复合体
+//!    隐式诉求（插件 id 存在但索引未注册）→ 编译期报错（fail-closed 强制自白，
+//!    提案 §3.3）；未传索引（legacy 入口 [`compile_pipeline`]）→ 现状插件名
+//!    直引（method None = 默认 execute 入口）。
 //! 3. **步骤服务索引**：聚合全部启用插件 manifests 的 `capabilities.steps`（显式）
 //!    与单入口插件隐式默认注册（服务化提案 §3.3），名字全局查重；复合体
 //!    （tools/services/steps）隐式关闭——管道按插件 id 直引 → 编译错误（强制自白）。
@@ -342,9 +347,14 @@ pub struct CompiledStep {
 /// 编译后的列表项：引用已在加载期解析为三类之一。
 #[derive(Debug, Clone)]
 pub enum CompiledItem {
-    /// 静态命中插件（三级命中③）。
+    /// 静态命中插件（三级命中③/四级命中④）。
     Plugin {
         plugin_id: String,
+        /// 步骤服务解析结果（服务化提案 §3.2/§3.4）：`Some(步骤名)` = ③ 级命中
+        /// 已注册步骤服务（运行期经 ctx 约定字段 `_step_method` 透传，SDK 侧
+        /// 分发到对应注册函数）；`None` = ④ 级插件名直引（默认 execute 入口，
+        /// legacy 语法糖，method None 不带键）。
+        method: Option<String>,
         when: Option<Expr>,
         /// per-plugin inputs（经 config 通道传给插件，不 merge 进 state、不落 trace）。
         inputs: HashMap<String, serde_json::Value>,
@@ -391,6 +401,7 @@ pub fn compile_pipeline(
 ) -> Result<CompiledPipeline, CompileError> {
     let compiler = Compiler {
         plugin_ids,
+        index: None,
         steps: Vec::new(),
         step_index: HashMap::new(),
         pool_ids: HashSet::new(),
@@ -398,26 +409,57 @@ pub fn compile_pipeline(
     compiler.compile(config, step_library)
 }
 
-/// 编译管道 + hooks 装载表（服务化提案 §3.6 编译期装载表）。
+/// 编译管道 + hooks 装载表 + 步骤服务接线（服务化提案 §3.6/§3.2 接线入口）。
 ///
-/// 在 [`compile_pipeline`] 基础上附加 hooks 编译：`body_hooks` / `step_hooks`
-/// 为各作用域已反序列化的 hooks 声明（api 层 yaml 结构归一后传入，键为
-/// 循环体 id / `"<body id>:<step id>"` 复合键）。未声明 hooks 时传空切片，
+/// 在 [`compile_pipeline`] 基础上附加 hooks 编译与四级命中：`body_hooks` /
+/// `step_hooks` 为各作用域已反序列化的 hooks 声明（api 层 yaml 结构归一后传入，
+/// 键为循环体 id / `"<body id>:<step id>"` 复合键）。未声明 hooks 时传空切片，
 /// 产物 `step_hooks` 为空 Vec（发射点零开销短路）。
+///
+/// `index` = 步骤服务索引（[`build_step_service_index`] 聚合全部启用插件
+/// manifests 构建）。`Some`：③ 级命中（[`StepServiceIndex::resolve`]）→
+/// `CompiledItem::Plugin { method: Some(步骤名) }`（SDK 侧按 `_step_method`
+/// 分发）；插件 id 存在但 resolve 落空且非组合/库 → **编译期报错**（复合体
+/// 隐式诉求 fail-closed，文案含步骤名/插件 id/修复指引）；都不命中 → 现状
+/// error! 宽容语义保留（对齐既有第③级 miss 行为，见 [`Compiler::compile_step`]）。
+/// `None`：legacy 入口语义——插件名直引零改动（method None = 默认 execute）。
 pub fn compile_pipeline_with_hooks(
     config: &PipelineConfig,
     step_library: &StepLibrary,
     plugin_ids: &HashSet<String>,
+    index: Option<&StepServiceIndex>,
     body_hooks: &[(String, Vec<HookFile>)],
     step_hooks: &[(String, Vec<HookFile>)],
 ) -> Result<CompiledPipeline, CompileError> {
-    let mut compiled = compile_pipeline(config, step_library, plugin_ids)?;
+    let mut compiled = compile_pipeline_with_index(config, step_library, plugin_ids, index)?;
     compiled.step_hooks = compile_step_hooks(body_hooks, step_hooks, plugin_ids)?;
     Ok(compiled)
 }
 
+/// 编译管道 + 步骤服务接线（无 hooks 的接线形态，供既有 `with_hooks` 内部复用）。
+fn compile_pipeline_with_index(
+    config: &PipelineConfig,
+    step_library: &StepLibrary,
+    plugin_ids: &HashSet<String>,
+    index: Option<&StepServiceIndex>,
+) -> Result<CompiledPipeline, CompileError> {
+    let compiler = Compiler {
+        plugin_ids,
+        index,
+        steps: Vec::new(),
+        step_index: HashMap::new(),
+        pool_ids: HashSet::new(),
+    };
+    compiler.compile(config, step_library)
+}
+
 struct Compiler<'a> {
     plugin_ids: &'a HashSet<String>,
+    /// 步骤服务索引（服务化提案 §3.2 第③级命中的数据层）。None = legacy 入口
+    /// （[`compile_pipeline`]），插件名直引零改动；Some = 接线入口
+    /// （[`compile_pipeline_with_hooks`]），③ 级命中携带 method、复合体隐式
+    /// 诉求 fail-closed。
+    index: Option<&'a StepServiceIndex>,
     steps: Vec<CompiledStep>,
     step_index: HashMap<String, usize>,
     /// 统一步骤池 id 集（Composite 判定用，owned 避免借用冲突）。
@@ -569,9 +611,36 @@ impl Compiler<'_> {
                     step_id: item.name().to_string(),
                     when: item_when,
                 });
+            } else if let Some(r) = self.index.and_then(|index| index.resolve(item.name())) {
+                // ③ 级命中：已注册步骤服务（服务化提案 §3.2）——step 名 → 静态
+                // 绑定 {plugin_id, method}。含单入口插件的隐式默认注册（name=插件
+                // id，method None = 默认 execute 入口）与显式注册（method Some）。
+                items.push(CompiledItem::Plugin {
+                    plugin_id: r.plugin_id.clone(),
+                    method: r.method.clone(),
+                    when: item_when,
+                    inputs: item.inputs(),
+                });
             } else if self.plugin_ids.contains(item.name()) {
+                // ④ 级插件名直引（legacy 语法糖）：索引存在时落到此处即 resolve
+                // 落空——单入口纯步骤插件恒被隐式注册（resolve 必命中），故落空
+                // 必为复合体（tools/services/steps 多能力）→ 编译期报错
+                // （fail-closed 强制自白，提案 §3.3）；无索引（legacy 入口）保持
+                // 现状零改动（method None = 默认 execute）。
+                if self.index.is_some() {
+                    return Err(CompileError {
+                        location: item_location,
+                        message: format!(
+                            "步骤 '{}' 引用的插件 '{}' 为复合体（声明了 capabilities.tools/services/steps），\
+                             未在其 capabilities.steps 中显式声明该步骤名——复合体须显式声明 \
+                             capabilities.steps（含本步骤名）才能被管道步骤引用，禁止隐式默认",
+                            step.id, item.name()
+                        ),
+                    });
+                }
                 items.push(CompiledItem::Plugin {
                     plugin_id: item.name().to_string(),
+                    method: None,
                     when: item_when,
                     inputs: item.inputs(),
                 });
@@ -993,10 +1062,12 @@ mod tests {
         match &compiled.bodies[0].steps[0].items[0] {
             CompiledItem::Plugin {
                 plugin_id,
+                method,
                 when,
                 inputs,
             } => {
                 assert_eq!(plugin_id, "alpha");
+                assert!(method.is_none(), "legacy 入口不携带 method");
                 assert!(when.is_none());
                 assert_eq!(inputs.get("k"), Some(&serde_json::json!("v")));
             }
@@ -1526,5 +1597,148 @@ mod tests {
                 .hooks_for(&HookScope::Body("main".into()), "stream_chunk")
                 .is_empty()
         );
+    }
+
+    // ── 四级命中接线（服务化提案 §3.2/§3.4：index 注入 → method 携带）──
+
+    /// 带索引编译：具名步骤服务命中 → CompiledItem::Plugin 携带 method（步骤名）。
+    #[test]
+    fn indexed_compile_named_step_carries_method() {
+        // 复合体显式声明 steps：step 名 ≠ 插件 id，③ 级命中静态绑定到插件 + method
+        let composite = with_caps(
+            manifest("task_service"),
+            ManifestCapabilities {
+                steps: vec![StepCapability {
+                    name: "task.inject_params".into(),
+                    description: None,
+                    input_schema: None,
+                }],
+                tools: vec![agentos_core::traits::ToolCapability {
+                    name: "task_submit".into(),
+                    description: None,
+                    input_schema: None,
+                    output_schema: None,
+                    category: None,
+                    ui: None,
+                    render: None,
+                    smoke: None,
+                }],
+                ..Default::default()
+            },
+        );
+        let index = build_step_service_index(&[composite]).expect("ok");
+        let config = single_body(
+            "p",
+            vec![make_step("s", vec![StepItem::Bare("task.inject_params".into())])],
+        );
+        let compiled = compile_pipeline_with_hooks(
+            &config,
+            &StepLibrary::default(),
+            &plugins(&["task_service"]),
+            Some(&index),
+            &[],
+            &[],
+        )
+        .expect("具名步骤服务命中编译通过");
+        match &compiled.bodies[0].steps[0].items[0] {
+            CompiledItem::Plugin {
+                plugin_id,
+                method,
+                when,
+                ..
+            } => {
+                assert_eq!(plugin_id, "task_service");
+                assert_eq!(method.as_deref(), Some("task.inject_params"));
+                assert!(when.is_none());
+            }
+            other => panic!("expected Plugin, got {other:?}"),
+        }
+    }
+
+    /// 带索引编译：单入口插件隐式默认注册（name=插件 id，method None）→
+    /// ④ 级直引零报错、不携带 _step_method（默认 execute 入口）。
+    #[test]
+    fn indexed_compile_implicit_single_entry_plugin_no_method() {
+        let index = build_step_service_index(&[manifest("alpha")]).expect("ok");
+        let config = single_body(
+            "p",
+            vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
+        );
+        let compiled = compile_pipeline_with_hooks(
+            &config,
+            &StepLibrary::default(),
+            &plugins(&["alpha"]),
+            Some(&index),
+            &[],
+            &[],
+        )
+        .expect("隐式单入口直引通过");
+        match &compiled.bodies[0].steps[0].items[0] {
+            CompiledItem::Plugin {
+                plugin_id, method, ..
+            } => {
+                assert_eq!(plugin_id, "alpha");
+                assert_eq!(method, &None, "隐式默认入口不携带 method");
+            }
+            other => panic!("expected Plugin, got {other:?}"),
+        }
+    }
+
+    /// 带索引编译：复合体插件 id 直引（resolve 落空）→ 编译期报错（fail-closed
+    /// 强制自白），文案含步骤名/插件 id/修复指引。
+    #[test]
+    fn indexed_compile_composite_direct_reference_fails_closed() {
+        let composite = with_caps(
+            manifest("task_service"),
+            tools_caps(vec![agentos_core::traits::ToolCapability {
+                name: "task_submit".into(),
+                description: None,
+                input_schema: None,
+                output_schema: None,
+                category: None,
+                ui: None,
+                render: None,
+                smoke: None,
+            }]),
+        );
+        let index = build_step_service_index(&[composite]).expect("复合体不阻断索引构建");
+        let config = single_body(
+            "p",
+            vec![make_step("s", vec![StepItem::Bare("task_service".into())])],
+        );
+        let err = compile_pipeline_with_hooks(
+            &config,
+            &StepLibrary::default(),
+            &plugins(&["task_service"]),
+            Some(&index),
+            &[],
+            &[],
+        )
+        .expect_err("复合体直引必须编译期报错");
+        assert!(err.message.contains("task_service"), "err: {err}");
+        assert!(err.message.contains("capabilities.steps"), "err: {err}");
+        assert!(err.message.contains("复合体"), "err: {err}");
+    }
+
+    /// legacy 入口（无索引）：插件名直引零改动——复合体也不报错（未接线，
+    /// 语义与既有第③级 miss 宽容一致），method 恒 None。
+    #[test]
+    fn legacy_compile_without_index_is_unchanged() {
+        // 复合体 manifest 只用于构建索引；legacy 路径不传索引 → 无 fail-closed
+        let config = single_body(
+            "p",
+            vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
+        );
+        let compiled =
+            compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
+        match &compiled.bodies[0].steps[0].items[0] {
+            CompiledItem::Plugin {
+                plugin_id, method, ..
+            } => {
+                assert_eq!(plugin_id, "alpha");
+                assert_eq!(method, &None, "legacy 直引恒 None");
+            }
+            other => panic!("expected Plugin, got {other:?}"),
+        }
     }
 }

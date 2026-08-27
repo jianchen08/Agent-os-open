@@ -760,11 +760,18 @@ impl PipelineExecutor {
                         .await;
                 }
                 // 静态命中插件（per-plugin inputs 经 config 通道传给插件，
-                // 不 merge 进 state、不落 trace）
+                // 不 merge 进 state、不落 trace；具名步骤服务经 _step_method
+                // 约定字段透传，SDK 侧按名分发）
                 CompiledItem::Plugin {
-                    plugin_id, inputs, ..
+                    plugin_id,
+                    method,
+                    inputs,
+                    ..
                 } => {
-                    if self.invoke_item_plugin(plugin_id, inputs, state).await {
+                    if self
+                        .invoke_item_plugin(plugin_id, method.as_deref(), inputs, state)
+                        .await
+                    {
                         break; // skip_remaining
                     }
                 }
@@ -776,9 +783,9 @@ impl PipelineExecutor {
                         self.execute_step(&target, state, compiled, ignore_ended)
                             .await;
                     } else if self.lookup_plugin(&resolved) {
-                        // 动态点无静态 inputs（模板运行时才定），传空
+                        // 动态点无静态 inputs/method（模板运行时才定），传空
                         if self
-                            .invoke_item_plugin(&resolved, &HashMap::new(), state)
+                            .invoke_item_plugin(&resolved, None, &HashMap::new(), state)
                             .await
                         {
                             break;
@@ -801,6 +808,10 @@ impl PipelineExecutor {
     /// `inputs`：per-plugin 输入（经 config 通道传给插件，不进 state、不落 trace；
     /// 空 = 等价旧行为）。
     ///
+    /// `method`：具名步骤服务（服务化提案 §3.4 传输通道）——`Some(步骤名)` 时
+    /// config 携带约定字段 `_step_method`（invoker::shared::with_step_method），
+    /// SDK 侧分发到对应注册函数；`None` = 默认 execute 入口（现状零改动）。
+    ///
     /// 错误可见性：插件失败（result.error / invoker Err）除 warn 外，追加到
     /// state 的 `_plugin_errors` 键（`[{plugin_id, code, message}]` 数组）——
     /// run 结束由 api 层提取为 EngineOutcome.plugin_errors，WS 路径发射
@@ -809,10 +820,14 @@ impl PipelineExecutor {
     async fn invoke_item_plugin(
         &self,
         plugin_id: &str,
+        method: Option<&str>,
         inputs: &HashMap<String, serde_json::Value>,
         state: &mut serde_json::Value,
     ) -> bool {
-        match self.invoke_plugin(plugin_id, inputs, state.clone()).await {
+        match self
+            .invoke_plugin(plugin_id, method, inputs, state.clone())
+            .await
+        {
             Ok(result) => {
                 if result.error.is_none() {
                     // merge state_updates（轨迹在 step 级统一落，不钻插件）
@@ -853,9 +868,13 @@ impl PipelineExecutor {
     /// `inputs` 走既有 config 通道：非空时填 `config = {"inputs": <inputs>}`
     /// （sidecar 路径 invoker.rs 原样转发 ctx.config，插件在 execute 收 `config`）；
     /// 空时保持空对象 = 旧行为零变化。不进 state → 不产生 step diff/trace。
+    ///
+    /// `method`：具名步骤服务时 config 注入约定字段 `_step_method`（与 inputs
+    /// 同对象共存，SDK 侧按名分发；None = 默认 execute 入口零改动）。
     async fn invoke_plugin(
         &self,
         plugin_id: &str,
+        method: Option<&str>,
         inputs: &HashMap<String, serde_json::Value>,
         state: serde_json::Value,
     ) -> Result<PluginResult, PluginError> {
@@ -866,11 +885,14 @@ impl PipelineExecutor {
             self.run_id.clone(),
             self.branch_id.clone(),
         );
-        let config = if inputs.is_empty() {
+        let mut config = if inputs.is_empty() {
             serde_json::Value::Object(Default::default())
         } else {
             serde_json::json!({ "inputs": inputs })
         };
+        if let Some(name) = method {
+            config = agentos_invoker::shared::with_step_method(config, name);
+        }
         let ctx = PluginContext::new(
             state,
             config,
