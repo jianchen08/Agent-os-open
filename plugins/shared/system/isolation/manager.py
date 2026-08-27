@@ -72,18 +72,28 @@ def _create_providers_from_config(
     # Docker 提供者
     docker_config = providers_config.get("docker", providers_config.get("cua", {}))
     if docker_config.get("enabled", True):
-        # 自适应 profile 优先于配置文件的 limits（profile 非 None 时覆盖）
+        # 配额来源优先级：yaml 显式 limits > hardware_profile 自适应 > 默认 512m。
+        # 显式配置优先：写了就是用户明确指定（自适应是低配机保护兜底）；
+        # AO_CONTAINER_* 环境变量在 hardware_profile 内层应用（优先级最高）。
         cfg_limits = docker_config.get("limits", {})
-        if profile:
-            memory_limit = profile.get("container_memory", cfg_limits.get("memory", "512m"))
-            cpu_limit = profile.get("container_cpus", cfg_limits.get("cpus", "1.0"))
-            memory_swap = profile.get("memory_swap", memory_limit)
-            pids_limit = profile.get("pids_limit", 100)
-        else:
+        if cfg_limits:
             memory_limit = cfg_limits.get("memory", "512m")
             cpu_limit = cfg_limits.get("cpus", "1.0")
             memory_swap = cfg_limits.get("memory_swap", memory_limit)
             pids_limit = cfg_limits.get("pids_limit", 100)
+            quota_source = "config-file(explicit)"
+        elif profile:
+            memory_limit = profile.get("container_memory", "512m")
+            cpu_limit = profile.get("container_cpus", "1.0")
+            memory_swap = profile.get("memory_swap", memory_limit)
+            pids_limit = profile.get("pids_limit", 100)
+            quota_source = "hardware-adaptive"
+        else:
+            memory_limit = "512m"
+            cpu_limit = "1.0"
+            memory_swap = memory_limit
+            pids_limit = 100
+            quota_source = "default"
 
         providers[IsolationLevel.CONTAINER] = DockerProvider(
             config={
@@ -112,7 +122,7 @@ def _create_providers_from_config(
             cpu_limit,
             memory_swap,
             pids_limit,
-            "hardware-adaptive" if profile else "config-file",
+            quota_source,
         )
 
     return providers

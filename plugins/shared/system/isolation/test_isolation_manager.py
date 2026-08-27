@@ -1152,8 +1152,8 @@ class TestProviderConfig:
         )
         assert IsolationLevel.CONTAINER in providers
 
-    def test_create_providers_profile_overrides_limits(self) -> None:
-        """hardware profile 优先于配置文件 limits。"""
+    def test_create_providers_explicit_limits_override_profile(self) -> None:
+        """yaml 显式 limits 优先于 hardware profile（显式配置 > 自适应）。"""
         mod = _load_manager()
         profile = {
             "container_memory": "256m",
@@ -1166,15 +1166,33 @@ class TestProviderConfig:
             profile=profile,
         )
         docker = providers[IsolationLevel.CONTAINER]
+        assert docker._config["memory_limit"] == "1g"
+        assert docker._config["cpu_limit"] == "2.0"
+        assert docker._config["pids_limit"] == 100  # 显式未给 pids 用默认
+
+    def test_create_providers_profile_used_when_no_limits(self) -> None:
+        """无显式 limits 时回落到 hardware profile 自适应配额。"""
+        mod = _load_manager()
+        profile = {
+            "container_memory": "256m",
+            "container_cpus": "0.5",
+            "memory_swap": "256m",
+            "pids_limit": 64,
+        }
+        providers = mod._create_providers_from_config(
+            {"host": {"enabled": False}, "docker": {}},
+            profile=profile,
+        )
+        docker = providers[IsolationLevel.CONTAINER]
         assert docker._config["memory_limit"] == "256m"
         assert docker._config["cpu_limit"] == "0.5"
         assert docker._config["pids_limit"] == 64
 
     def test_create_providers_profile_partial_keeps_defaults(self) -> None:
-        """profile 只给部分键时其余用配置/默认值。"""
+        """无显式 limits 且 profile 只给部分键时其余用默认值。"""
         mod = _load_manager()
         providers = mod._create_providers_from_config(
-            {"host": {"enabled": False}, "docker": {"limits": {"memory": "1g"}}},
+            {"host": {"enabled": False}, "docker": {}},
             profile={"container_memory": "384m"},
         )
         docker = providers[IsolationLevel.CONTAINER]
