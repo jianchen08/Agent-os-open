@@ -2,11 +2,11 @@
 """任务表单服务端——自持表单声明 + 取数端点（不塞 channel_api）。
 
 - GET /ext/task_form/form?session_id=   表单字段声明（config/task_form.yaml），
-  容器选项 datasourceUri 内嵌 session_id（前端 fieldsUri 直接消费，字段声明唯一在配置文件）。
+  前端 fieldsUri 直接消费，字段声明唯一在配置文件。
 - GET /ext/task_form/options/agents     执行 Agent 选项 {value:config_id,label:name}
   （读 config/agents/**/*.yaml）。
-- GET /ext/task_form/options/containers 容器任务选项 {value:id,label:title}
-  （task_service.list_all 过滤 task_scope=container，session_id 可空=全部会话）。
+- GET /ext/task_form/options/projects   项目选项 {value:id,label:title}
+  （共享 project_registry 登记行，project = 文件夹+登记）。
 
 [设计取向] 任务工具（task_submit）只声明 LLM 工具、无服务面；新建任务的表单字段
 与动态取数由本服务插件自持（插件自持服务对象），channel_api 零追加。
@@ -30,13 +30,11 @@ from agentos_plugin_sdk import AgentOSPlugin
 
 plugin = AgentOSPlugin("task_form")
 
-# tasks 包（get_task_service）与其依赖目录入 sys.path——与 channel_api 同款限定导入。
+# 共享层（project_registry）入 sys.path。
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-_SYSTEM_DIR = os.path.join(_PROJECT_ROOT, "plugins", "shared", "system")
-_TASKS_DIR = os.path.join(_PROJECT_ROOT, "plugins", "shared", "system", "tasks")
-for _d in (_SYSTEM_DIR, _TASKS_DIR):
-    if os.path.isdir(_d):
-        sys.path.insert(0, _d)
+_SHARED_DIR = os.path.join(_PROJECT_ROOT, "plugins", "shared")
+if os.path.isdir(_SHARED_DIR):
+    sys.path.insert(0, _SHARED_DIR)
 
 # 表单声明 / 执行 Agent 配置根：与 manifest config_files.task_form.path 一致。
 _FORM_REL = os.path.join("config", "task_form.yaml")
@@ -120,33 +118,23 @@ def _agent_options() -> list[dict[str, Any]]:
     return out
 
 
-async def _container_options(session_id: str) -> list[dict[str, Any]]:
-    """task_service.list_all 过滤 task_scope=container → [{value:id, label:title}]。
+async def _project_options() -> list[dict[str, Any]]:
+    """共享 project_registry 登记行 → [{value:id, label:title}]。
 
-    服务不可用/无容器返回空列表（读面降级不崩）。
+    登记簿不可用/无项目返回空列表（读面降级不崩）。
     """
     try:
-        from tasks.service_access import get_task_service  # noqa: PLC0415
+        from project_registry import ProjectRegistry  # noqa: PLC0415
     except Exception:
-        return []
-    service = get_task_service()
-    if service is None:
         return []
     try:
-        tasks = await service.list_all(limit=1000, session_id=session_id or None)
+        registry = ProjectRegistry()
     except Exception:
         return []
-    out: list[dict[str, Any]] = []
-    for tm in tasks:
-        meta = getattr(tm, "metadata", None) or {}
-        if meta.get("task_scope") == "container":
-            out.append(
-                {
-                    "value": str(getattr(tm, "id", "")),
-                    "label": str(getattr(tm, "title", "") or getattr(tm, "id", "")),
-                }
-            )
-    return out
+    return [
+        {"value": str(p.id), "label": str(p.title or p.id)}
+        for p in registry.list()
+    ]
 
 
 @plugin.tool(
@@ -162,7 +150,7 @@ async def _container_options(session_id: str) -> list[dict[str, Any]]:
             "query": {"type": "object"},
         },
     },
-    description="HTTP endpoint handler for task form (declaration + agents/containers options)",
+    description="HTTP endpoint handler for task form (declaration + agents/projects options)",
 )
 async def http_handle(
     path: str = "",
@@ -178,25 +166,18 @@ async def http_handle(
     """
     q = query or {}
 
-    # GET /ext/task_form/form —— 表单字段声明（前端 fieldsUri；session_id 内嵌容器选项）
+    # GET /ext/task_form/form —— 表单字段声明（前端 fieldsUri）
     if path == "/ext/task_form/form" and method == "GET":
         fields = _load_form_fields()
-        session_id = q.get("session_id", "")
-        if session_id:
-            for f in fields:
-                uri = f.get("datasourceUri")
-                if isinstance(uri, str) and "containers" in uri:
-                    sep = "&" if "?" in uri else "?"
-                    f["datasourceUri"] = f"{uri}{sep}session_id={session_id}"
         return _ok(_json_response({"fields": fields, "id": "task_create", "title": "新建任务"}))
 
     # GET /ext/task_form/options/agents —— 执行 Agent 选项
     if path == "/ext/task_form/options/agents" and method == "GET":
         return _ok(_json_response({"data": _agent_options()}))
 
-    # GET /ext/task_form/options/containers —— 容器任务选项
-    if path == "/ext/task_form/options/containers" and method == "GET":
-        return _ok(_json_response({"data": await _container_options(q.get("session_id", ""))}))
+    # GET /ext/task_form/options/projects —— 项目选项（登记行，全局不过滤会话）
+    if path == "/ext/task_form/options/projects" and method == "GET":
+        return _ok(_json_response({"data": await _project_options()}))
 
     # 未匹配的 path
     return _ok(_json_response({"error": "not found", "path": path}, 404))

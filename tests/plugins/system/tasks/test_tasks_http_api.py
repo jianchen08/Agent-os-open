@@ -550,28 +550,40 @@ class TestTasksEndpoints:
 
     async def test_create_root_task_validation(self, monkeypatch: pytest.MonkeyPatch,
                                                service: Any, hub: _FakeCapabilityHub) -> None:
-        # 非容器缺 target_id → 400；非法 scope → 400；父容器不存在 → 400
+        # 缺 target_id → 400
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/root", "POST",
-                           body={"title": "根", "thread_id": "th-1",
-                                 "task_scope": "non_container", "target_id": ""})
+                           body={"title": "根", "thread_id": "th-1", "target_id": ""})
         assert resp["status"] == 400
-        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/root", "POST",
-                           body={"title": "根", "thread_id": "th-1", "task_scope": "bogus"})
-        assert resp["status"] == 400
-        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/root", "POST",
-                           body={"title": "根", "thread_id": "th-1", "task_scope": "container",
-                                 "parent_task_id": "no-such"})
-        assert resp["status"] == 400
-        assert "父任务不存在" in resp["payload"]["detail"]
+        assert "执行 Agent" in resp["payload"]["detail"]
 
-    async def test_create_root_task_container_ok(self, monkeypatch: pytest.MonkeyPatch,
-                                                 service: Any, hub: _FakeCapabilityHub) -> None:
+    async def test_create_root_task_with_project(self, monkeypatch: pytest.MonkeyPatch,
+                                                 service: Any, hub: _FakeCapabilityHub,
+                                                 registry: Any, tmp_path: Path) -> None:
+        import project_registry as projects_mod
+
+        folder = tmp_path / "proj"
+        folder.mkdir()
+        p = registry.save(projects_mod.ProjectModel(title="挂靠项目", path=str(folder)))
         hub._responses["chat"] = {"send_message": {"pipeline_id": "p-root-1"}}
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/root", "POST",
-                           body={"title": "容器根", "thread_id": "th-1",
-                                 "task_scope": "container"})
+                           body={"title": "项目任务", "thread_id": "th-1",
+                                 "project_id": p.id, "target_id": "main"})
         assert resp["status"] == 200
         assert resp["payload"]["id"] == "p-root-1"
+        # state 带挂靠键；execution_context workspace 解析为项目文件夹
+        params = hub.handles["chat"].calls[0][1]
+        assert params["state"]["task.parent_project_id"] == p.id
+        assert params["execution_context"]["workspace"]["source_path"] == str(folder)
+        assert params["execution_context"]["workspace"]["explicit"] is True
+
+    async def test_create_root_task_project_not_found_404(self, monkeypatch: pytest.MonkeyPatch,
+                                                          service: Any, hub: _FakeCapabilityHub,
+                                                          registry: Any) -> None:
+        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/root", "POST",
+                           body={"title": "根", "thread_id": "th-1",
+                                 "project_id": "ffffffffffff", "target_id": "main"})
+        assert resp["status"] == 404
+        assert "不存在" in resp["payload"]["detail"]
 
     async def test_list_container_tasks(self, monkeypatch: pytest.MonkeyPatch,
                                         service: Any, hub: _FakeCapabilityHub) -> None:
@@ -665,10 +677,18 @@ class TestPhaseAndAceEndpoints:
 
 @pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
-    """临时目录 ProjectRegistry + 注入 http_api（避免触碰真实数据目录）。"""
+    """临时目录 ProjectRegistry + 注入 http_api（避免触碰真实数据目录）。
+
+    同时 patch 共享层 load_project_paths（create_root_task 的登记解析通道）。
+    """
     import project_registry as projects_mod
 
     reg = projects_mod.ProjectRegistry(data_dir=tmp_path / "tasks")
+    monkeypatch.setattr(
+        projects_mod,
+        "load_project_paths",
+        lambda: {p.id: p.path for p in reg.list()},
+    )
     import http_api
 
     monkeypatch.setattr(http_api, "get_project_registry", lambda: reg)
@@ -1085,13 +1105,13 @@ class TestEdgeAndDegradedBranches:
                                               service: Any, hub: _FakeCapabilityHub) -> None:
         hub._responses["chat"] = {"send_message": {}}
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/root", "POST",
-                           body={"title": "根", "thread_id": "th-1", "task_scope": "container"})
+                           body={"title": "根", "thread_id": "th-1", "target_id": "main"})
         assert resp["status"] == 500
 
     async def test_create_root_workspace_unsafe_400(self, monkeypatch: pytest.MonkeyPatch,
                                                     service: Any, hub: _FakeCapabilityHub) -> None:
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/root", "POST",
-                           body={"title": "根", "thread_id": "th-1", "task_scope": "container",
+                           body={"title": "根", "thread_id": "th-1", "target_id": "main",
                                  "workspace": "C:\\"})
         assert resp["status"] == 400
         assert "磁盘根目录" in resp["payload"]["detail"]
@@ -1102,19 +1122,9 @@ class TestEdgeAndDegradedBranches:
         safe = str(Path(tempfile.mkdtemp(prefix="tasks_ws_")))
         resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/root", "POST",
                            body={"title": "带空间", "thread_id": "th-1",
-                                 "task_scope": "container", "workspace": safe})
+                                 "target_id": "main", "workspace": safe})
         assert resp["status"] == 200
         assert resp["payload"]["id"] == "p-ws-1"
-
-    async def test_create_root_parent_not_container_400(self, monkeypatch: pytest.MonkeyPatch,
-                                                        service: Any, hub: _FakeCapabilityHub) -> None:
-        t = await service.create_task(title="非容器父")
-        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/root", "POST",
-                           body={"title": "子", "thread_id": "th-1",
-                                 "task_scope": "non_container", "target_id": "main",
-                                 "parent_task_id": t.id})
-        assert resp["status"] == 400
-        assert "必须是容器" in resp["payload"]["detail"]
 
     async def test_submit_event_parent_lineage_branch(self, monkeypatch: pytest.MonkeyPatch,
                                                       service: Any, hub: _FakeCapabilityHub) -> None:
@@ -1354,7 +1364,7 @@ class TestCoverageRemainingBranches:
         t = await http_api.create_task({"title": "直调", "agent_id": "main"}, {})
         assert t.id == "p-d1"
         r = await http_api.create_root_task(
-            {"title": "直调根", "thread_id": "th", "task_scope": "container"}, {},
+            {"title": "直调根", "thread_id": "th", "target_id": "main"}, {},
         )
         assert r.id == "p-d1"
         hub._responses["pipeline-state"] = {
@@ -1363,16 +1373,6 @@ class TestCoverageRemainingBranches:
         u = await http_api.update_task("p-9", {"title": "ignored"}, {})
         assert u.id == "p-9"
         assert u.title == "G"
-
-    async def test_create_root_with_container_parent(self, monkeypatch: pytest.MonkeyPatch,
-                                                     service: Any, hub: _FakeCapabilityHub) -> None:
-        hub._responses["chat"] = {"send_message": {"pipeline_id": "p-child-9"}}
-        parent = await _seed_container(service, title="父容器")
-        resp = await _http(monkeypatch, service, hub, "/ext/task_service/tasks/root", "POST",
-                           body={"title": "容器子", "thread_id": "th-1",
-                                 "task_scope": "container", "parent_task_id": parent.id})
-        assert resp["status"] == 200
-        assert resp["payload"]["id"] == "p-child-9"
 
     async def test_cancel_task_agent_level_value(self, monkeypatch: pytest.MonkeyPatch,
                                                  service: Any, hub: _FakeCapabilityHub) -> None:

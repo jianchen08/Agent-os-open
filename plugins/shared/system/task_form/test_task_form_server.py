@@ -3,9 +3,9 @@
 
 验证内容：
 1. GET /ext/task_form/form 返回 config/task_form.yaml 声明的字段（前端 fieldsUri 消费）
-2. 传 session_id 时容器选项 datasourceUri 内嵌 session（值驱动取数的前置）
-3. GET /ext/task_form/options/agents 返回 {value:config_id,label:name}（含嵌套子目录）
-4. GET /ext/task_form/options/containers 服务不可用时降级空列表（读面不崩）
+2. GET /ext/task_form/options/agents 返回 {value:config_id,label:name}（含嵌套子目录）
+3. GET /ext/task_form/options/projects 返回登记行选项（共享 project_registry）
+4. 登记簿不可用时降级空列表（读面不崩）
 5. 未匹配 path → 404
 
 唯一外部依赖是临时 config 目录（AGENTOS_PROJECT_ROOT 指向），不接真实内核/服务。
@@ -57,8 +57,8 @@ form:
   title: 新建任务
   fields:
     - { name: title, type: input, label: 标题, required: true }
-    - { name: target_id, type: select, label: 执行 Agent, datasourceUri: /ext/task_form/options/agents, dependsOn: [task_scope] }
-    - { name: parent_task_id, type: select, label: 父容器, datasourceUri: /ext/task_form/options/containers }
+    - { name: target_id, type: select, label: 执行 Agent, datasourceUri: /ext/task_form/options/agents }
+    - { name: project_id, type: select, label: 挂靠项目, datasourceUri: /ext/task_form/options/projects }
     - { name: workspace, type: input, label: 工作空间 }
 """,
         encoding="utf-8",
@@ -72,6 +72,8 @@ form:
         encoding="utf-8",
     )
     monkeypatch.setenv("AGENTOS_PROJECT_ROOT", str(tmp_path))
+    # 登记簿落在临时 tasks 数据根（隔离真实登记目录）
+    monkeypatch.setenv("TASKS_STORAGE_DIR", str(tmp_path / "tasks_data"))
     return {"root": tmp_path, "config": config_dir}
 
 
@@ -89,27 +91,12 @@ async def test_form_returns_declared_fields(form_project: dict[str, Any]) -> Non
     d = _resp_data(res)
     assert d["status"] == 200
     names = [f["name"] for f in d["payload"]["fields"]]
-    assert names == ["title", "target_id", "parent_task_id", "workspace"]
+    assert names == ["title", "target_id", "project_id", "workspace"]
     # datasourceUri 随字段声明带出（前端据此自内核取数）
     target = next(f for f in d["payload"]["fields"] if f["name"] == "target_id")
     assert target["datasourceUri"] == "/ext/task_form/options/agents"
-    assert target["dependsOn"] == ["task_scope"]
-    # 未传 session → 容器 datasourceUri 原样
-    parent = next(f for f in d["payload"]["fields"] if f["name"] == "parent_task_id")
-    assert parent["datasourceUri"] == "/ext/task_form/options/containers"
-
-
-async def test_form_embeds_session_into_container_datasource(form_project: dict[str, Any]) -> None:
-    mod = _load_module()
-    res = await mod.http_handle(
-        path="/ext/task_form/form", method="GET", query={"session_id": "sess_abc"}
-    )
-    d = _resp_data(res)
-    parent = next(f for f in d["payload"]["fields"] if f["name"] == "parent_task_id")
-    assert parent["datasourceUri"] == "/ext/task_form/options/containers?session_id=sess_abc"
-    # 其它字段不受影响
-    target = next(f for f in d["payload"]["fields"] if f["name"] == "target_id")
-    assert "session_id" not in target["datasourceUri"]
+    project = next(f for f in d["payload"]["fields"] if f["name"] == "project_id")
+    assert project["datasourceUri"] == "/ext/task_form/options/projects"
 
 
 async def test_agents_options_shape(form_project: dict[str, Any]) -> None:
@@ -126,15 +113,30 @@ async def test_agents_options_shape(form_project: dict[str, Any]) -> None:
     assert labels == sorted(labels)
 
 
-async def test_containers_options_degrades_gracefully(form_project: dict[str, Any]) -> None:
-    # 测试环境无 task_service 服务 → 降级可空列表，不抛错
+async def test_projects_options_from_registry(form_project: dict[str, Any]) -> None:
+    """项目选项 = 共享登记行（{value:id,label:title}）。"""
     mod = _load_module()
-    res = await mod.http_handle(
-        path="/ext/task_form/options/containers", method="GET", query={"session_id": "sess_abc"}
-    )
+    from project_registry import ProjectModel, ProjectRegistry
+
+    registry = ProjectRegistry(data_dir=form_project["root"] / "tasks_data")
+    registry.save(ProjectModel(title="项目甲", path="D:/x/a"))
+
+    res = await mod.http_handle(path="/ext/task_form/options/projects", method="GET", query={})
     d = _resp_data(res)
     assert d["status"] == 200
-    assert isinstance(d["payload"]["data"], list)
+    data = d["payload"]["data"]
+    assert len(data) == 1
+    assert data[0]["label"] == "项目甲"
+    assert data[0]["value"]  # 登记 id（12hex）
+
+
+async def test_projects_options_empty_registry(form_project: dict[str, Any]) -> None:
+    """登记簿为空/不可用 → 降级空列表，不抛错。"""
+    mod = _load_module()
+    res = await mod.http_handle(path="/ext/task_form/options/projects", method="GET", query={})
+    d = _resp_data(res)
+    assert d["status"] == 200
+    assert d["payload"]["data"] == []
 
 
 async def test_unknown_path_404(form_project: dict[str, Any]) -> None:

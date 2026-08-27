@@ -3,11 +3,11 @@
  *
  * 字段声明后移：表单字段由 task_form 服务插件在 config/task_form.yaml 声明、
  * 经 fieldsUri=task_form 插件 form 拉取渲染（FormWidget datasource 模式自取）；
- * 动态选项（父容器/执行 Agent）由字段声明的 datasourceUri 指向内核数据源端点，
- * 前端按填写的值自行去内核取对应数据（dependsOn 值变化自动重拉）。
+ * 动态选项（挂靠项目/执行 Agent）由字段声明的 datasourceUri 指向内核数据源端点，
+ * 前端按填写的值自行去内核取对应数据。
  *
- * 本组件只保留提交语义（createRootTask 派发矩阵：父容器→子任务 non_container、
- * 容器任务无 agent/拓扑/隔离——对齐 task_submit 参数矩阵派生）。
+ * 本组件只保留提交语义（createRootTask：project_id 可选挂靠，任务必选执行 Agent
+ * ——对齐 task_submit 参数矩阵）。
  */
 import { useMemo } from 'react'
 import { TASK_FORM_ENDPOINTS } from '@/services/api/endpoints.generated'
@@ -26,12 +26,8 @@ export function CreateTaskFormModal({
   sessionId: string
   onCreated: () => void
 }) {
-  /** 字段声明来自 task_form 服务（表单配置的唯一真相源）；session 内嵌以限定容器选项 */
-  const fieldsUri = useMemo(
-    () =>
-      `${TASK_FORM_ENDPOINTS.task_form_get}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`,
-    [sessionId],
-  )
+  /** 字段声明来自 task_form 服务（表单配置的唯一真相源） */
+  const fieldsUri = useMemo(() => TASK_FORM_ENDPOINTS.task_form_get, [])
 
   return (
     <FormWidget
@@ -42,18 +38,8 @@ export function CreateTaskFormModal({
       submitLabel="创建"
       onSubmit={async (values: Record<string, unknown>) => {
         if (!sessionId) throw new Error('缺少会话上下文')
-        // 参数矩阵派生（对齐 task_submit / 原 CreateTaskModal 联动）：
-        // 父容器 → 子任务 non_container + workspace 继承；容器任务无 agent/拓扑/隔离
-        const parent = String(values.parent_task_id ?? '').trim()
-        const isChild = parent !== ''
-        const scope: 'container' | 'non_container' = isChild
-          ? 'non_container'
-          : values.task_scope === 'container'
-            ? 'container'
-            : 'non_container'
-        const isContainer = scope === 'container'
         const targetId = String(values.target_id ?? '').trim()
-        if (!isContainer && !targetId) throw new Error('非容器任务必须选择执行 Agent')
+        if (!targetId) throw new Error('必须选择执行 Agent')
         const workspaceMode =
           values.workspace_mode === 'plain' || values.workspace_mode === 'worktree'
             ? values.workspace_mode
@@ -62,18 +48,18 @@ export function CreateTaskFormModal({
           values.isolation_level === 'isolated' || values.isolation_level === 'non_isolated'
             ? values.isolation_level
             : ''
+        const projectId = String(values.project_id ?? '').trim()
         await createRootTask({
           title: String(values.title ?? '').trim(),
           description: String(values.description ?? '').trim(),
-          task_scope: scope,
-          target_id: scope === 'non_container' ? targetId : '',
+          project_id: projectId || undefined,
+          target_id: targetId,
           workspace: String(values.workspace ?? '').trim(),
-          workspace_mode: isContainer ? '' : workspaceMode,
-          isolation_level: isContainer ? '' : isolationLevel,
+          workspace_mode: workspaceMode,
+          isolation_level: isolationLevel,
           thread_id: sessionId,
-          parent_task_id: parent || undefined,
         })
-        toast.success(isChild ? '子任务已创建，工作空间继承父容器' : isContainer ? '工作空间已创建' : '任务已创建并开始执行')
+        toast.success(projectId ? '任务已创建并挂靠项目，开始执行' : '任务已创建并开始执行')
         onCreated()
       }}
     />

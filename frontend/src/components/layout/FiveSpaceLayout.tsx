@@ -283,9 +283,6 @@ export function FiveSpaceLayout({
     const pipelineRunId = (node.pipeline_run_id as string) ?? undefined
     if (!taskId || !pipelineRunId) return
 
-    const taskScope = (node.task_scope as string) ?? 'non_container'
-    if (taskScope === 'container') return
-
     const agentLevelStr = (node.agent_level as string) ?? ''
     let agentLevel: 1 | 2 | 3 = 2
     if (agentLevelStr) {

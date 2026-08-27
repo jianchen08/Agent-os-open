@@ -31,7 +31,8 @@ import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
 import { invalidateLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
 import { usePipelineRunsQuery, usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
 import { useSessionsQuery, readSessions, ensureSessionsLoaded } from '@/hooks/queries/useSessionsQuery'
-import { pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
+import { useQuery } from '@tanstack/react-query'
+import { fetchProjects, pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
@@ -147,6 +148,13 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
   const { data: allTasks = [], error: tasksError } = useAllTasksQuery()
   /** 会话列表（按 thread_id 取会话标题） */
   const { data: sessions = [] } = useSessionsQuery()
+  /** 项目登记行（project = 文件夹+登记：树的项目分组节点数据源） */
+  const { data: projectsData } = useQuery({
+    queryKey: ['projects', 'registry'],
+    queryFn: () => fetchProjects({ limit: 100 }),
+    staleTime: 30_000,
+  })
+  const projects = useMemo(() => projectsData?.items ?? [], [projectsData])
 
   /** 管道条目派生：注册表快照 + 任务列表（含管道 ID 的任务）合并，按开始时间倒序 */
   const pipelineEntries: PipelineViewEntry[] = useMemo(() => {
@@ -366,15 +374,16 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     const entryByKey = new Map(filteredPipelineEntries.map((e) => [e.key, e]))
     // 任务索引（id → task；全量任务）
     const taskById = new Map(allTasks.map((t) => [String(t.id ?? ''), t]))
-    // 任务父子映射：taskId → parentTaskId（父容器任务 = metadata.parent_project_id，
-    // 容器任务 = task.owned 声明、非管道——子任务据此挂到父任务条目行下）
+    // 任务父子映射：taskId → parentTaskId（任务链父 = parent_task_id）；
+    // 项目挂靠 = metadata.parent_project_id（登记 id）——树里挂项目分组节点下
     const parentTaskOf = new Map<string, string>()
+    const projectOfTask = new Map<string, string>()
     for (const t of allTasks) {
       const pid = String(t.parent_task_id ?? t.parentTaskId ?? '')
       if (pid) parentTaskOf.set(String(t.id), pid)
       const meta = t.metadata as Record<string, unknown> | undefined
       const proj = String(meta?.parent_project_id ?? '')
-      if (proj) parentTaskOf.set(String(t.id), proj)
+      if (proj) projectOfTask.set(String(t.id), proj)
     }
     // 会话主管道：threadId 组内 session.pipelineIds[0]（缺省取最早 started_at）
     const threadTop = new Map<string, string>()
@@ -401,6 +410,28 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       const list = childrenMap.get(parentKey) ?? []
       list.push(node)
       childrenMap.set(parentKey, list)
+    }
+    // 项目分组节点（登记行合成；无任务挂靠的项目也显示为空分组）
+    const projectNodeKeys = new Map<string, string>() // projectId → node key
+    for (const p of projects) {
+      const pid = String(p.id)
+      const key = `project-${pid}`
+      projectNodeKeys.set(pid, key)
+      const node: PipelineTreeNode = {
+        key,
+        entry: {
+          key,
+          runId: key,
+          status: 'running',
+          startedAt: String(p.timestamps?.createdAt ?? ''),
+          kind: 'project',
+          name: String(p.goal ?? p.id),
+        },
+        depth: 0,
+        children: [],
+      }
+      nodeByKey.set(key, node)
+      roots.push(node)
     }
     // 任务 id → 其条目行 key（一对一绑定的条目行即任务行；子任务据此直挂）
     const taskEntryKeyOf = new Map<string, string>()
@@ -436,6 +467,12 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     //    （子任务管道出生即 lineage.parent_pipeline_id = 提交者管道 id）→ 会话
     //    主管道 → 顶层
     for (const [taskId, node] of taskRowNodes) {
+      // 项目挂靠优先：登记命中的任务挂项目分组节点（项目不是管道，不能当 lineage 父）
+      const projId = projectOfTask.get(taskId)
+      if (projId && projectNodeKeys.has(projId)) {
+        pushChild(projectNodeKeys.get(projId)!, node)
+        continue
+      }
       const parentTaskId = parentTaskOf.get(taskId)
       if (parentTaskId) {
         const parentEntryKey = taskEntryKeyOf.get(parentTaskId)
@@ -477,7 +514,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         children: build(n.children, depth + 1),
       }))
     return build(roots, 0)
-  }, [filteredPipelineEntries, allTasks, sessions])
+  }, [filteredPipelineEntries, allTasks, sessions, projects])
 
   /** 展开/折叠树子级（行首 chevron / 任务节点行点击） */
   const toggleTreeNode = useCallback((key: string) => {
@@ -1040,10 +1077,12 @@ function EntryRow({
           className={`shrink-0 rounded px-1 py-0 text-[10px] font-medium ${
             entry.kind === 'task'
               ? 'bg-status-warning/15 text-status-warning'
-              : 'bg-primary/10 text-primary/80'
+              : entry.kind === 'project'
+                ? 'bg-status-success/15 text-status-success'
+                : 'bg-primary/10 text-primary/80'
           }`}
         >
-          {entry.kind === 'task' ? '任务' : '会话'}
+          {entry.kind === 'task' ? '任务' : entry.kind === 'project' ? '项目' : '会话'}
         </span>
         {orphan && (
           <span className="shrink-0 rounded bg-muted px-1 py-0 text-[10px] text-muted-foreground">
@@ -1324,10 +1363,12 @@ function PipelineTable({
                       className={`rounded px-1 py-0 text-[10px] font-medium ${
                         entry.kind === 'task'
                           ? 'bg-status-warning/15 text-status-warning'
-                          : 'bg-primary/10 text-primary/80'
+                          : entry.kind === 'project'
+                            ? 'bg-status-success/15 text-status-success'
+                            : 'bg-primary/10 text-primary/80'
                       }`}
                     >
-                      {entry.kind === 'task' ? '任务' : '会话'}
+                      {entry.kind === 'task' ? '任务' : entry.kind === 'project' ? '项目' : '会话'}
                     </span>
                   </td>
                   <td className="max-w-[160px] truncate px-3 py-1.5 text-xs">

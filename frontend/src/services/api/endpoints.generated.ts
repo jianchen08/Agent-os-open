@@ -242,7 +242,7 @@
   export const TASK_FORM_ENDPOINTS = {
     'task_form_get': '/ext/task_form/form',
     'task_form_agents': '/ext/task_form/options/agents',
-    'task_form_containers': '/ext/task_form/options/containers',
+    'task_form_projects': '/ext/task_form/options/projects',
   } as const
 
   /** task_service（Task Service）：plugin.json 声明 28 端点 */

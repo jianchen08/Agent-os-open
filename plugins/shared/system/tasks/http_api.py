@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import sys
 import time
 from typing import Any
@@ -57,13 +58,12 @@ class TaskRootCreate(BaseModel):
 
     title: str
     description: str = ""
-    task_scope: str = "non_container"  # "container" | "non_container"
-    target_id: str = ""  # 非容器必填（执行 agent）；容器为空
+    project_id: str = ""  # 挂靠项目 id（登记行；空 = 独立任务）
+    target_id: str = ""  # 执行 agent（必填）
     workspace: str = ""
     isolation_level: str = ""  # plain/worktree/shared
     inherit: dict[str, Any] | None = None
     thread_id: str  # 复用当前会话 → 作 session_id
-    parent_task_id: str | None = None  # 父容器任务 ID；有值则挂为子任务
 
 
 class TaskUpdate(BaseModel):
@@ -412,6 +412,7 @@ async def _submit_task_event(
     task_id: str = "",
     agent_id: str = "",
     thread_id: str = "",
+    parent_project_id: str = "",
 ) -> str:
     """GAP-1 统一：经 chat.send_message 驱动任务执行管道，返回 pipeline_id（= task.id）。
 
@@ -492,6 +493,10 @@ async def _submit_task_event(
         }
         if execution_context:
             params["execution_context"] = execution_context
+        # 挂靠项目（项目非管道）：任务管道 state 带 parent_project_id——
+        # 前端任务树据此把任务挂到项目节点下。
+        if parent_project_id:
+            params["state"]["task.parent_project_id"] = parent_project_id
 
         resp = await chat.call("send_message", params)
         pipeline_id = str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
@@ -843,13 +848,10 @@ async def create_root_task(
     body: TaskRootCreate | dict[str, Any],
     _user: dict[str, Any] | None = None,
 ) -> TaskResponse:
-    """用户手动创建根任务。
+    """用户手动创建根任务（project_id 可选挂靠项目 = 文件夹+登记）。
 
     等价于 L1 主 agent 调 task_submit 提交根任务，为 L2+ 子 agent 提供合法的
-    任务上下文。container / non_container 都走现有下游逻辑。
-
-    [改造] 已删除 ``store.get_session(thread_id)`` 旧 0.1 主管道读取块——
-    active_pipeline_id 恒为空串（根任务出生即 root，lineage 由引擎落 root）。
+    任务上下文。
     """
     # SDK HTTP 端点把 body 作 dict 透传——兼容两种形状
     if isinstance(body, dict):
@@ -865,23 +867,36 @@ async def create_root_task(
         )
 
     # ── 校验 ──
-    if body.task_scope not in ("container", "non_container"):
-        raise APIError(
-            status_code=400,
-            error_code="INVALID_TASK_SCOPE",
-            message=f"task_scope 必须为 container 或 non_container，收到: {body.task_scope}",
-        )
-
-    # 非容器必须有执行 agent；容器是工作空间集合，无执行 target
-    if body.task_scope != "container" and not body.target_id:
+    if not body.target_id:
         raise APIError(
             status_code=400,
             error_code="MISSING_TARGET_AGENT",
-            message="非容器根任务必须指定执行 Agent（target_id），容器任务除外",
+            message="根任务必须指定执行 Agent（target_id）",
         )
 
+    # ── 项目挂靠解析（对齐 task_submit：登记存在 + workspace=项目文件夹）──
+    project_id = str(body.project_id or "").strip()
+    workspace = body.workspace
+    if project_id:
+        from project_registry import load_project_paths  # noqa: PLC0415
+
+        project_path = str(load_project_paths().get(project_id) or "")
+        if not project_path:
+            raise APIError(
+                status_code=404,
+                error_code="PROJECT_NOT_FOUND",
+                message=f"项目 {project_id} 不存在（登记中无此 id）",
+            )
+        if not os.path.isdir(project_path):
+            raise APIError(
+                status_code=400,
+                error_code="PROJECT_FOLDER_MISSING",
+                message=f"项目文件夹不存在: {project_path}",
+            )
+        workspace = project_path
+
     # workspace 路径安全校验（复用 task_submit 同款）
-    if body.workspace:
+    if workspace:
         import importlib.util  # noqa: PLC0415
         from pathlib import Path  # noqa: PLC0415
 
@@ -897,7 +912,7 @@ async def create_root_task(
         sys.modules["task_submit_tool_ws_check"] = _ws_mod
         _ws_spec.loader.exec_module(_ws_mod)
 
-        ws_error = _ws_mod._validate_workspace_path(body.workspace)
+        ws_error = _ws_mod._validate_workspace_path(workspace)
 
         if ws_error:
             raise APIError(
@@ -906,45 +921,24 @@ async def create_root_task(
                 message=ws_error,
             )
 
-    # ── 父容器校验（挂子任务时）：父任务必须存在且为 container ──
-    parent_task_id = body.parent_task_id or None
-
-    if parent_task_id:
-        _parent = task_service.get_task(parent_task_id)
-
-        if _parent is None:
-            raise APIError(
-                status_code=400,
-                error_code="PARENT_TASK_NOT_FOUND",
-                message=f"父任务不存在: {parent_task_id}",
-            )
-
-        _parent_scope = (_parent.metadata or {}).get("task_scope", "non_container")
-
-        if _parent_scope != "container":
-            raise APIError(
-                status_code=400,
-                error_code="PARENT_NOT_CONTAINER",
-                message=f"父任务必须是容器（container）任务，当前 scope: {_parent_scope}",
-            )
-
     # ── 复用当前会话 ──
     thread_id = body.thread_id
     active_pipeline_id = ""
 
     # ── 构造 metadata（字段集对齐 task_submit._build_metadata） ──
     metadata: dict[str, Any] = {
-        "task_scope": body.task_scope,
         "target_id": body.target_id,
         "session_id": thread_id,
         "submitted_by_level": 1,  # 用户层 = L1
         "acceptance_criteria": {},  # 默认空，_build_full_task_input 会自动跳过评估段
-        "workspace": body.workspace,
+        "workspace": workspace,
         "isolation_level": body.isolation_level,
         "user_id": _current_user(_user).get("sub", ""),
         "inherit": body.inherit or {},
         "source": "user_manual",  # 审计标记：区分用户直接发起
     }
+    if project_id:
+        metadata["project_id"] = project_id
 
     # GAP-1 统一（state 单一真值）：任务即管道——直接经 chat.send_message 创建
     # 执行管道（引擎生成 pipeline_id = task_id），YAML 无写路径。
@@ -955,9 +949,9 @@ async def create_root_task(
     execution_context = {
         "isolation": {"level": body.isolation_level or "non_isolated"},
         "workspace": {
-            "mode": _ws_mode,
-            "source_path": "",
-            "explicit": bool(body.workspace),
+            "mode": "worktree",
+            "source_path": workspace,
+            "explicit": bool(workspace),
         },
     }
     task_id = await _submit_task_event(
@@ -967,10 +961,11 @@ async def create_root_task(
         dependencies=list(metadata.get("dependencies") or []),
         parent_pipeline_id=active_pipeline_id or "",
         user_id=_current_user(_user).get("sub", ""),
-        scope=body.task_scope,
+        scope="non_container",
         execution_context=execution_context,
         agent_id=body.target_id,
         thread_id=thread_id,
+        parent_project_id=project_id,
     )
     if not task_id:
         raise APIError(
@@ -980,10 +975,10 @@ async def create_root_task(
         )
 
     logger.info(
-        "[create_root_task] 用户 %s 手动创建根任务 | task_id=%s | scope=%s | thread=%s",
+        "[create_root_task] 用户 %s 手动创建根任务 | task_id=%s | project_id=%s | thread=%s",
         _current_user(_user).get("username", "system"),
         task_id,
-        body.task_scope,
+        project_id or "-",
         thread_id,
     )
 

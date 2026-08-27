@@ -32,7 +32,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
-      "description": "任务表单字段声明（前端新建任务 modal 的 fieldsUri；session_id 内嵌容器选项 dataSource）"
+      "description": "任务表单字段声明（前端新建任务 modal 的 fieldsUri）"
     },
     {
       "route_id": "task_form_agents",
@@ -45,14 +45,14 @@
       "description": "执行 Agent 选项 {value:config_id,label:name}（读 config/agents/**/*.yaml）"
     },
     {
-      "route_id": "task_form_containers",
+      "route_id": "task_form_projects",
       "method": "GET",
-      "path": "/ext/task_form/options/containers",
+      "path": "/ext/task_form/options/projects",
       "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
-      "description": "容器任务选项 {value:id,label:title}（task_service 过滤 task_scope=container）"
+      "description": "项目选项 {value:id,label:title}（共享 project_registry 登记行）"
     }
   ]
 }

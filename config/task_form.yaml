@@ -1,8 +1,8 @@
 # 新建任务表单声明（task_form 服务插件消费，config_files.task_form.path 唯一真相源）。
 #
 # 前端 "新建任务" 模态框经 fieldsUri=/ext/task_form/form 拉此声明渲染（FormWidget），
-# 字段的 datasourceUri 指示内核数据源（前端按填写的值自行去内核取对应选项）；
-# dependsOn 声明值变化时重新取数。提交语义仍在前端（createRootTask 派发矩阵）。
+# 字段的 datasourceUri 指示内核数据源（前端按填写的值自行去内核取对应选项）。
+# 提交语义在前端（createRootTask 派发）。
 form:
   id: task_create
   title: 新建任务
@@ -16,29 +16,20 @@ form:
       type: textarea
       label: 描述（可选）
       placeholder: 任务详细描述...
-    - name: parent_task_id
+    - name: project_id
       type: select
-      label: 父容器（可选，选则挂为子任务，工作空间继承）
-      datasourceUri: /ext/task_form/options/containers
-      description: 工作空间继承父容器；session 由 /ext/task_form/form 内嵌
-    - name: task_scope
-      type: select
-      label: 任务类型
-      default: non_container
-      options:
-        - { label: 非容器（直接执行）, value: non_container }
-        - { label: 容器（工作空间集合）, value: container }
-      description: 选了父容器则为非容器子任务
+      label: 挂靠项目（可选，任务在项目文件夹下执行，默认 worktree 分叉）
+      datasourceUri: /ext/task_form/options/projects
+      description: 缺省为独立任务
     - name: target_id
       type: select
-      label: 执行 Agent（非容器必填）
+      label: 执行 Agent（必填）
       datasourceUri: /ext/task_form/options/agents
-      dependsOn: [task_scope]
-      description: 容器任务不直接执行，无需选择
+      description: 任务由该 Agent 配置执行
     - name: workspace
       type: input
       label: 工作空间（可选）
-      placeholder: 留空使用默认工作空间...
+      placeholder: 留空使用默认工作空间；挂靠项目时恒为项目文件夹
     - name: workspace_mode
       type: select
       label: 工作空间拓扑
@@ -46,7 +37,6 @@ form:
         - { label: 默认（worktree）, value: "" }
         - { label: worktree（隔离副本，不影响原项目）, value: worktree }
         - { label: plain（直接操作目标目录）, value: plain }
-      description: 容器任务恒为隔离复制，此选项不生效
     - name: isolation_level
       type: select
       label: 隔离模式

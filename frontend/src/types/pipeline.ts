@@ -45,8 +45,8 @@ export interface PipelineViewEntry {
   startedAt: string
   /** 结束时间（ISO8601，未结束为 undefined） */
   endedAt?: string
-  /** 类型：任务管道 / 会话管道 */
-  kind: 'task' | 'session'
+  /** 类型：任务管道 / 会话管道 / 项目分组节点（登记行合成，无管道本体） */
+  kind: 'task' | 'session' | 'project'
   /** 展示名称（任务标题 / 会话标题 / 短 ID 兜底） */
   name: string
   /** 执行者 Agent 名称（可空） */
