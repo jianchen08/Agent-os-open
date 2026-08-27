@@ -222,6 +222,8 @@ class TestEvaluationModeToolOnly:
         assert result.route_signal.route_type == "next_llm"
         assert result.state_updates["evaluate_reminder_count"] == 1
         assert result.state_updates["eval_tool_only_count"] == 0
+        # 强制提醒注入：置位续跑标志（autonomous.yaml post 路由据此回 LLM）
+        assert result.state_updates["_has_new_llm_input"] is True
         appended = result.state_updates["messages"][-1]
         assert appended["role"] == "system"
         assert "evaluation_result" in appended["content"]
@@ -272,6 +274,8 @@ class TestEvaluationJsonDetection:
         result = asyncio.run(plugin.execute(_ctx(_base_task_state(raw_result="还没评估完")))
         )
         assert result.state_updates.get("evaluate_reminder_count") == 1
+        # 提醒注入：置位续跑标志（autonomous.yaml post 路由据此回 LLM 而非 end）
+        assert result.state_updates["_has_new_llm_input"] is True
 
 
 class TestTaskEvaluateEvidence:
@@ -293,7 +297,8 @@ class TestTaskEvaluateEvidence:
         msgs = self._messages_with_eval('{"success": true, "data": {}}')
         result = asyncio.run(TaskReminder().execute(_ctx(_base_task_state(messages=msgs)))
         )
-        assert result.state_updates == {}
+        # 评估证据放行：清除续跑标志（防残留标志把纯文本轮误路由回 LLM）
+        assert result.state_updates == {"_has_new_llm_input": False}
         assert result.route_signal is None
 
     def test_failed_evaluate_still_reminds(self) -> None:
@@ -342,6 +347,8 @@ class TestMaxRemindersExhausted:
         assert result.route_signal is not None
         assert result.route_signal.route_type == "end"
         assert result.state_updates["task.status"] == "pending_evaluation"
+        # 提醒耗尽：清除续跑标志（防残留标志把纯文本轮误路由回 LLM）
+        assert result.state_updates["_has_new_llm_input"] is False
 
     def test_exhausted_with_detected_result_ends_cleanly(self) -> None:
         import asyncio
@@ -359,6 +366,8 @@ class TestMaxRemindersExhausted:
         assert result.route_signal is not None
         assert result.route_signal.route_type == "end"
         assert "task.status" not in result.state_updates
+        # 提醒耗尽：清除续跑标志（防残留标志把纯文本轮误路由回 LLM）
+        assert result.state_updates["_has_new_llm_input"] is False
 
 
 class TestReminderBuilding:

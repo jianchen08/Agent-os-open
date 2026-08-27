@@ -117,3 +117,37 @@ def test_chain_without_context_build_yields_empty_system(tmp_path, monkeypatch):
     # state 里（内核 load_agent_into_state 注入）也不消费。若此断言失败，
     # 说明回退键被恢复——接线缺口会被掩盖，应改回去并保证管道接线。
     assert msg["content"] == ""
+
+
+# ── 评估闸门续跑路由（2026-08-27 断链修复）──
+
+
+def _post_routes() -> list[dict]:
+    """解析 autonomous.yaml main 循环体 post 组合节点的 next 路由列表。"""
+    cfg = yaml.safe_load(_AUTONOMOUS_YAML.read_text(encoding="utf-8"))
+    bodies = cfg["loop_bodies"]
+    main = next(b for b in bodies if b["id"] == "main")
+    post = next(s for s in main["steps"] if isinstance(s, dict) and s.get("id") == "post")
+    return post["next"]
+
+
+def test_post_routes_continue_after_reminder_injection():
+    """post 路由含 _has_new_llm_input 续跑分支，且先于兜底 end。
+
+    2026-08-27 断链：task_reminder 注入评估提醒后，纯文本轮（无工具调用、
+    core_type=llm_call）命中兜底 end，LLM 看不到提醒、任务未评估即 completed
+    并通知上级。修复：提醒轮（_has_new_llm_input=true）必须 loop 回 LLM。
+    """
+    routes = _post_routes()
+    assert any(
+        r.get("when") == "_has_new_llm_input == true" and r.get("then") == "loop"
+        for r in routes
+    ), "post 路由必须含 _has_new_llm_input == true → loop 续跑分支"
+    # 续跑分支必须排在兜底 end 之前（apply_routes 按序首中即停）
+    end_idx = next(i for i, r in enumerate(routes) if r.get("then") == "end")
+    reminder_idx = next(
+        i for i, r in enumerate(routes) if r.get("when") == "_has_new_llm_input == true"
+    )
+    assert reminder_idx < end_idx, (
+        "续跑分支必须先于兜底 end，否则提醒轮仍会被 end 吞掉"
+    )

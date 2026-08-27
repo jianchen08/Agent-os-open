@@ -22,6 +22,8 @@ struct MockInvoker {
     results: Mutex<HashMap<String, PluginResult>>,
     calls: Mutex<HashMap<String, usize>>,
     configs: Mutex<Vec<(String, serde_json::Value)>>,
+    /// 预设 invoker 级 Err（模拟 sidecar 不可达等 invoker 自身报错）。
+    errs: Mutex<HashMap<String, PluginError>>,
 }
 
 impl MockInvoker {
@@ -30,6 +32,7 @@ impl MockInvoker {
             results: Mutex::new(HashMap::new()),
             calls: Mutex::new(HashMap::new()),
             configs: Mutex::new(Vec::new()),
+            errs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -38,6 +41,13 @@ impl MockInvoker {
             .lock()
             .unwrap()
             .insert(plugin_id.to_string(), result);
+    }
+
+    fn set_err(&self, plugin_id: &str, err: PluginError) {
+        self.errs
+            .lock()
+            .unwrap()
+            .insert(plugin_id.to_string(), err);
     }
 
     fn call_count(&self, plugin_id: &str) -> usize {
@@ -75,6 +85,10 @@ impl PluginInvoker for MockInvoker {
             .lock()
             .unwrap()
             .push((plugin_id.to_string(), ctx.config.clone()));
+        // invoker 级 Err 优先（模拟 sidecar 不可达）
+        if let Some(e) = self.errs.lock().unwrap().get(plugin_id).cloned() {
+            return Err(e);
+        }
         // 返回预设结果（缺失则返回空成功）
         let result = self
             .results
@@ -722,6 +736,49 @@ fn make_executor(invoker: Arc<dyn PluginInvoker>, plugin_ids: &[&str]) -> Pipeli
     )
 }
 
+/// 按调用次数依次返回预设 state_updates 的 invoker（超出后返回空）。
+/// 用于模拟插件跨轮行为序列（如 task_reminder 提醒注入 → 评估放行）。
+struct SequenceInvoker {
+    counter: Arc<AtomicUsize>,
+    results: Vec<HashMap<String, serde_json::Value>>,
+}
+
+#[async_trait]
+impl PluginInvoker for SequenceInvoker {
+    async fn invoke_pipeline_plugin(
+        &self,
+        _plugin_id: &str,
+        _ctx: &PluginContext,
+    ) -> Result<PluginResult, PluginError> {
+        let n = self.counter.fetch_add(1, Ordering::SeqCst);
+        let updates = self
+            .results
+            .get(n)
+            .cloned()
+            .unwrap_or_default();
+        Ok(PluginResult {
+            state_updates: updates,
+            ..Default::default()
+        })
+    }
+    async fn invoke_tool(
+        &self,
+        _p: &str,
+        _t: &str,
+        _i: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, PluginError> {
+        Ok(ToolExecutionResult::success(serde_json::Value::Null))
+    }
+    async fn send_lifecycle_hook(
+        &self,
+        _p: &str,
+        _h: agentos_core::traits::LifecycleHook,
+        _c: &agentos_core::traits::HookContext,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
 // ── 测试用例 ──────────────────────────────────────────────
 
 #[tokio::test]
@@ -1178,6 +1235,81 @@ async fn test_plugin_error_continues() {
     // good 仍被调用
     assert_eq!(fixture.invoker.call_count("good"), 1);
     assert_eq!(state["ok"], json!(true));
+    // 插件错误收集到 _plugin_errors（引擎内部键，api 层提取为 plugin_errors）
+    let errs = state["_plugin_errors"].as_array().expect("_plugin_errors 应为数组");
+    assert_eq!(errs.len(), 1);
+    assert_eq!(errs[0]["plugin_id"], json!("bad"));
+    assert_eq!(errs[0]["code"], json!("PLUGIN_EXEC_FAILED"));
+    assert_eq!(errs[0]["message"], json!("boom"));
+}
+
+#[tokio::test]
+async fn test_plugin_error_continues_with_code() {
+    // 插件返回带 code 的 error → 收集保留 code（前端通知按 code 渲染）
+    let fixture = Fixture::build(&["bad"]);
+    fixture.invoker.set_result(
+        "bad",
+        PluginResult {
+            error: Some(PluginError {
+                message: "sidecar crashed".into(),
+                code: Some("PLUGIN_CRASHED".into()),
+                source: Some("plugin".into()),
+            }),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig {
+        name: "err_code".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s1", "bad")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    let errs = state["_plugin_errors"].as_array().expect("_plugin_errors 应为数组");
+    assert_eq!(errs.len(), 1);
+    assert_eq!(errs[0]["plugin_id"], json!("bad"));
+    assert_eq!(errs[0]["code"], json!("PLUGIN_CRASHED"));
+    assert_eq!(errs[0]["message"], json!("sidecar crashed"));
+}
+
+#[tokio::test]
+async fn test_invoker_error_collected() {
+    // invoker 自身报错（如 sidecar 不可达）→ 同样收集到 _plugin_errors
+    let fixture = Fixture::build(&["bad"]);
+    fixture.invoker.set_err(
+        "bad",
+        PluginError {
+            message: "sidecar unreachable".into(),
+            code: Some("MCP_CALL_FAILED".into()),
+            source: None,
+        },
+    );
+    let config = PipelineConfig {
+        name: "inv_err".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s1", "bad")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    let errs = state["_plugin_errors"].as_array().expect("_plugin_errors 应为数组");
+    assert_eq!(errs.len(), 1);
+    assert_eq!(errs[0]["plugin_id"], json!("bad"));
+    assert_eq!(errs[0]["code"], json!("MCP_CALL_FAILED"));
+    assert_eq!(errs[0]["message"], json!("sidecar unreachable"));
 }
 
 #[tokio::test]
@@ -1702,4 +1834,129 @@ async fn set_run_pipeline_failure_counts_persist_failure_and_run_continues() {
         "set_run_pipeline 失败必须计入 persist_failure（原 let _ 静默），实际 {}",
         snap.persist_failures
     );
+}
+
+// ── task_reminder 续跑标志路由（评估闸门断链修复）──
+
+/// 构造 post 组合节点路由：与 config/pipelines/autonomous.yaml 的 post.next
+/// 同构——工具调用轮 loop、工具执行后回 LLM、_has_new_llm_input 续跑、
+/// 其余 end。
+fn post_routed_body(steps: Vec<StepItem>) -> PipelineConfig {
+    let config = PipelineConfig {
+        name: "post_route".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "post".into(),
+                when: None,
+                steps,
+                context: HashMap::new(),
+                routes: vec![
+                    Route {
+                        when: "raw_tool_calls != [] and raw_tool_calls != None".into(),
+                        then: agentos_core::types::RouteAction {
+                            next: RouteNext::Loop,
+                            set: updates(&[
+                                ("core_type", json!("tool_execute")),
+                                ("core_plugin", json!("pipeline_tool_core")),
+                            ]),
+                        },
+                    },
+                    Route {
+                        when: "core_type == 'tool_execute'".into(),
+                        then: agentos_core::types::RouteAction {
+                            next: RouteNext::Loop,
+                            set: updates(&[
+                                ("core_type", json!("llm_call")),
+                                ("core_plugin", json!("pipeline_llm_core")),
+                            ]),
+                        },
+                    },
+                    Route {
+                        when: "_has_new_llm_input == true".into(),
+                        then: agentos_core::types::RouteAction {
+                            next: RouteNext::Loop,
+                            set: updates(&[
+                                ("core_type", json!("llm_call")),
+                                ("core_plugin", json!("pipeline_llm_core")),
+                            ]),
+                        },
+                    },
+                    Route {
+                        when: "True".into(),
+                        then: agentos_core::types::RouteAction {
+                            next: RouteNext::End,
+                            set: HashMap::new(),
+                        },
+                    },
+                ],
+                loop_config: None,
+            }],
+            while_cond: Some("True".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    config
+}
+
+#[tokio::test]
+async fn reminder_flag_routes_loop_instead_of_end() {
+    // 纯文本轮（无工具调用、core_type=llm_call）但 _has_new_llm_input=true
+    // （task_reminder 刚注入评估提醒）→ 路由必须 loop 回 LLM，不得命中兜底 end。
+    // 回归：修复前该轮命中兜底 end，提醒被吞、任务未评估即 completed。
+    // 序列模拟真实 task_reminder：第 1 轮注入提醒置位标志，第 2 轮评估证据
+    // 放行清除标志（恒置位会无限循环——真实插件不会这样）。
+    let counter = Arc::new(AtomicUsize::new(0));
+    let invoker = Arc::new(SequenceInvoker {
+        counter: counter.clone(),
+        results: vec![
+            // 第 1 轮：task_reminder 注入提醒
+            updates(&[
+                ("evaluate_reminder_count", json!(1)),
+                ("_has_new_llm_input", json!(true)),
+            ]),
+            // 第 2 轮：评估证据放行，清除标志
+            updates(&[("_has_new_llm_input", json!(false))]),
+        ],
+    });
+    let executor = make_executor(invoker.clone() as Arc<dyn PluginInvoker>, &["reminder"]);
+    let config = post_routed_body(vec!["reminder".into()]);
+    let state = executor
+        .run_compiled(
+            &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                .expect("compile should succeed"),
+            json!({ "core_type": "llm_call", "raw_tool_calls": [] }),
+        )
+        .await
+        .unwrap();
+    // 提醒轮后继续循环（插件被再次调用），评估放行后才正常 end
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
+    assert_eq!(state["ended"], json!(true));
+    assert_eq!(state["core_type"], json!("llm_call"));
+}
+
+#[tokio::test]
+async fn reminder_flag_cleared_ends_normally() {
+    // 评估证据放行后 _has_new_llm_input=false（task_reminder 清除标志）→
+    // 纯文本轮命中兜底 end，不无限循环。
+    let fixture = Fixture::build(&["reminder"]);
+    fixture.invoker.set_result(
+        "reminder",
+        PluginResult {
+            state_updates: updates(&[("_has_new_llm_input", json!(false))]),
+            ..Default::default()
+        },
+    );
+    let config = post_routed_body(vec!["reminder".into()]);
+    let state = fixture
+        .run(
+            &config,
+            &StepLibrary::default(),
+            json!({ "core_type": "llm_call", "raw_tool_calls": [] }),
+        )
+        .await;
+    assert_eq!(fixture.invoker.call_count("reminder"), 1);
+    assert_eq!(state["ended"], json!(true));
 }

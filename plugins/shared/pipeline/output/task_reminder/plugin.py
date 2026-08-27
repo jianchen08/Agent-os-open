@@ -206,7 +206,9 @@ class TaskReminder(IOutputPlugin):
                 iteration,
                 task_id,
             )
-            return OutputResult()
+            # 清除续跑标志：评估证据已就位，本轮应正常结束（防残留标志
+            # 把后续纯文本轮误路由回 LLM 造成死循环）
+            return OutputResult(state_updates={"_has_new_llm_input": False})
 
         if state.get("conversation_mode"):
             logger.info(
@@ -244,6 +246,9 @@ class TaskReminder(IOutputPlugin):
                     reminder_count,
                     self._max_reminders,
                 )
+            # 清除续跑标志：提醒已耗尽，本轮必须结束（防残留标志把
+            # 后续纯文本轮误路由回 LLM 造成死循环）
+            state_updates["_has_new_llm_input"] = False
             return OutputResult(
                 state_updates=state_updates,
                 route_signal=RouteSignal(
