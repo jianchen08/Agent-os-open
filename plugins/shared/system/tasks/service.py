@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any
 
 from _task_cleanup import _TaskCleanupMixin
@@ -16,12 +15,6 @@ from _task_state import _TaskStateMixin
 logger = logging.getLogger(__name__)
 
 StateChangeCallback = Callable[[str, str, str], Awaitable[None]]
-
-
-def _default_data_dir() -> str:
-    """推断任务 YAML 数据目录。"""
-    # src/tasks/service.py → src/tasks/ → src/ → project_root/
-    return str(Path(__file__).resolve().parent.parent.parent / "data" / "tasks")
 
 
 class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
@@ -34,6 +27,12 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
         event_bus: Any | None = None,
         data_dir: str | None = None,
     ) -> None:
+        """初始化任务服务。
+
+        data_dir 仅作显式覆盖（存储优先级第 1 级）；传 None 时不得在本层
+        自设默认值，由 TaskStorage 解析剩余两级：
+        TASKS_STORAGE_DIR env → 多租户根 data/{tenant}/tasks。
+        """
         self.task_id = task_id
         self._event_bus = event_bus
         self._state_callbacks: list[StateChangeCallback] = []
@@ -43,8 +42,7 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
         if task_id is None:
             from storage import TaskStorage  # noqa: PLC0415
 
-            _dir = data_dir or _default_data_dir()
-            self._storage = TaskStorage(data_dir=_dir)
+            self._storage = TaskStorage(data_dir=data_dir)
 
     def register_state_callback(self, callback: StateChangeCallback) -> None:
         """注册任务状态变更回调函数。"""

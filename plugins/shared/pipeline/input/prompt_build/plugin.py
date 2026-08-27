@@ -72,6 +72,15 @@ def set_memory_backend(backend: Any | None) -> None:
 # 占位符正则：匹配 {{xxx}} 或 {{xxx:yyy}} 格式
 PLACEHOLDER_PATTERN = re.compile(r"\{\{(.+?)\}\}")
 
+# 压缩块加载 / 动态变量构建的看门狗超时。到点 fail-visible：注入带
+# "[上下文降级]" 前缀的显式标记继续（LLM 与用户可感知本轮丢失了压缩
+# 历史/动态快照），禁止静默以空数据继续——静默空列表与"无压缩历史"
+# 同值，丢失不可感知。
+COMPRESSION_LOAD_TIMEOUT_S = 60.0
+DYNAMIC_VARS_BUILD_TIMEOUT_S = 30.0
+
+DEGRADE_MARKER_PREFIX = "[上下文降级]"
+
 
 # 语言指令映射 — 根据语言代码生成对应的思考和回复指令
 LANGUAGE_INSTRUCTIONS: dict[str, str] = {
@@ -318,14 +327,24 @@ class PromptBuildPlugin(IInputPlugin):
             try:
                 compression_msgs = await asyncio.wait_for(
                     self._load_compression_messages(ctx),
-                    timeout=60.0,
+                    timeout=COMPRESSION_LOAD_TIMEOUT_S,
                 )
             except asyncio.TimeoutError:
+                # fail-visible：注入降级标记继续，缺失可感知（静默空列表
+                # 与"无压缩历史"同值，LLM 无法察觉本轮丢了全部压缩块）。
                 logger.error(
-                    "[%s] load_compression_messages 超时(60s)！压缩块加载卡死，用空列表继续",
+                    "[%s] load_compression_messages 超时(%.0fs)！注入上下文降级标记继续",
                     self.name,
+                    COMPRESSION_LOAD_TIMEOUT_S,
                 )
-                compression_msgs = []
+                compression_msgs = [{
+                    "role": "system",
+                    "content": (
+                        f"{DEGRADE_MARKER_PREFIX} 压缩历史加载超时"
+                        f"（{COMPRESSION_LOAD_TIMEOUT_S:.0f}s），"
+                        "本轮缺失全部压缩历史（L2 摘要/L1/关键词层）。"
+                    ),
+                }]
             logger.debug(
                 "[%s] step=load_compression_messages END | elapsed=%.3fs count=%d",
                 self.name,
@@ -340,14 +359,23 @@ class PromptBuildPlugin(IInputPlugin):
         try:
             dynamic_vars_msg = await asyncio.wait_for(
                 self._build_dynamic_vars(ctx),
-                timeout=30.0,
+                timeout=DYNAMIC_VARS_BUILD_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
+            # fail-visible：动态变量丢失以标记消息呈现，不静默置空。
             logger.error(
-                "[%s] build_dynamic_vars 超时(30s)！动态变量构建卡死，用空继续",
+                "[%s] build_dynamic_vars 超时(%.0fs)！注入上下文降级标记继续",
                 self.name,
+                DYNAMIC_VARS_BUILD_TIMEOUT_S,
             )
-            dynamic_vars_msg = ""
+            dynamic_vars_msg = {
+                "role": "user",
+                "content": (
+                    f"{DEGRADE_MARKER_PREFIX} 动态变量构建超时"
+                    f"（{DYNAMIC_VARS_BUILD_TIMEOUT_S:.0f}s），"
+                    "本轮缺失动态状态快照。"
+                ),
+            }
         logger.debug(
             "[%s] step=build_dynamic_vars END | elapsed=%.3fs empty=%s",
             self.name,

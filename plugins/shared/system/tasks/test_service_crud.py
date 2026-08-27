@@ -419,6 +419,35 @@ class TestStorage:
         assert st._data_dir == tmp_path / "data-root" / "t-tenant" / "tasks"
         assert st._data_dir.exists()
 
+    @pytest.mark.asyncio
+    async def test_facade_none_data_dir_resolves_via_storage_priority(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """门面模式 data_dir=None 时落盘位置随 TASKS_STORAGE_DIR 生效（三级优先级第 2 级）。
+
+        服务层不得自设第三默认值拦截 None——否则生产上 env 覆盖与多租户根
+        全部失效。以落盘文件位置为判据（行为级，不探私有属性）。
+        """
+        from service import TaskService
+
+        monkeypatch.setenv("TASKS_STORAGE_DIR", str(tmp_path / "env-tasks"))
+        svc = TaskService()
+        task = await svc.create_task(title="env落盘")
+        persisted = list((tmp_path / "env-tasks").rglob(f"{task.id}.yaml"))
+        assert persisted, f"任务 YAML 未落在 TASKS_STORAGE_DIR 下: {task.id}"
+
+    @pytest.mark.asyncio
+    async def test_facade_explicit_data_dir_beats_env(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """显式 data_dir 仍为最高优先级：设置 env 后显式目录不变。"""
+        from service import TaskService
+
+        monkeypatch.setenv("TASKS_STORAGE_DIR", str(tmp_path / "must-not-be-used"))
+        explicit = tmp_path / "explicit-tasks"
+        svc = TaskService(data_dir=str(explicit))
+        task = await svc.create_task(title="显式覆盖")
+        assert (explicit / f"tree_{task.id}" / f"{task.id}.yaml").exists()
+        assert not (tmp_path / "must-not-be-used").exists()
+
     def test_enum_representer_dumps_raw_enum(self, tmp_path: Path) -> None:
         """metadata 内嵌裸 Enum 经 representer 序列化为原始值。"""
         from enum import Enum

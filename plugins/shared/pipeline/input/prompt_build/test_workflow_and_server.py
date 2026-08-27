@@ -139,14 +139,18 @@ class TestExecuteWorkflow:
         assert "compression_messages" not in updates
         assert "prompt.dynamic_vars" not in updates
 
-    def test_do_work_compression_timeout_degrades(self, monkeypatch) -> None:
-        """压缩加载超时(60s) → 空列表继续，不崩溃。"""
+    def test_do_work_compression_timeout_injects_degrade_marker(self, monkeypatch) -> None:
+        """压缩加载超时(60s) → 注入带 [上下文降级] 前缀的标记消息，丢失可感知。
+
+        契约：超时降级行为必须与"无压缩历史"（合法空列表）可区分——
+        静默以 [] 继续会让 LLM 在不知情下丢掉全部压缩块。
+        """
         import warnings
 
         real_wait_for = asyncio.wait_for
 
         def fake_wait_for(awaitable: Any, timeout: float) -> Any:
-            if timeout == 60.0:
+            if timeout == _mod.COMPRESSION_LOAD_TIMEOUT_S:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)  # 协程对象未 await 属测试预期
                     awaitable.close()
@@ -157,16 +161,26 @@ class TestExecuteWorkflow:
         plugin = make_plugin()
         ctx = make_ctx({"context.system_prompt": "P"})
         updates = _run(plugin._do_work(ctx))
-        assert updates["compression_messages"] == []  # 降级：空列表继续
+        msgs = updates["compression_messages"]
+        assert len(msgs) == 1, "超时后 compression_messages 不得为空列表（须可感知）"
+        assert msgs[0]["content"].startswith("[上下文降级]")
+        assert "压缩历史" in msgs[0]["content"]
 
-    def test_do_work_dynamic_vars_timeout_degrades(self, monkeypatch) -> None:
-        """动态变量构建超时(30s) → 不产出 prompt.dynamic_vars。"""
+    def test_do_work_no_backend_stays_empty_without_marker(self) -> None:
+        """对照：合法无压缩历史（未注入后端）→ 空列表且不带降级标记。"""
+        plugin = make_plugin()
+        ctx = make_ctx({"context.system_prompt": "P", "pipeline_id": ""})
+        updates = _run(plugin._do_work(ctx))
+        assert updates["compression_messages"] == []
+
+    def test_do_work_dynamic_vars_timeout_injects_degrade_marker(self, monkeypatch) -> None:
+        """动态变量构建超时(30s) → 注入 [上下文降级] 标记，不静默缺席。"""
         import warnings
 
         real_wait_for = asyncio.wait_for
 
         def fake_wait_for(awaitable: Any, timeout: float) -> Any:
-            if timeout == 30.0:
+            if timeout == _mod.DYNAMIC_VARS_BUILD_TIMEOUT_S:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
                     awaitable.close()
@@ -176,6 +190,17 @@ class TestExecuteWorkflow:
         monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
         plugin = make_plugin({"dynamic_vars": [{"type": "session", "name": "会话"}]})
         ctx = make_ctx({"context.session_id": "s-2"})
+        updates = _run(plugin._do_work(ctx))
+        msg = updates["prompt.dynamic_vars"]
+        assert isinstance(msg, dict)
+        assert msg["role"] == "user"
+        assert "[上下文降级]" in msg["content"]
+        assert "超时" in msg["content"]
+
+    def test_do_work_dynamic_vars_normal_flow_untouched(self) -> None:
+        """对照：正常构建（零兜底，无声明 → 不产出）不受降级标记影响。"""
+        plugin = make_plugin()
+        ctx = make_ctx({"context.system_prompt": "P"})
         updates = _run(plugin._do_work(ctx))
         assert "prompt.dynamic_vars" not in updates
 

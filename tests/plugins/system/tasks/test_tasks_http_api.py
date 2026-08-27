@@ -471,14 +471,41 @@ class TestTasksEndpoints:
                            "POST")
         assert resp["status"] == 400
 
-    async def test_evaluate_task_engine_degraded(self, monkeypatch: pytest.MonkeyPatch,
-                                                 service: Any, hub: _FakeCapabilityHub) -> None:
-        t = await service.create_task(title="评")
-        resp = await _http(monkeypatch, service, hub, f"/ext/task_service/tasks/{t.id}/evaluate",
-                           "POST", body={})
-        assert resp["status"] == 200
-        assert resp["payload"]["summary"] == "评估引擎不可用"
-        assert resp["payload"]["results"] == []
+    @pytest.mark.parametrize(
+        "task_exists",
+        [True, False],
+        ids=["existing-task", "missing-task"],
+    )
+    async def test_evaluate_endpoint_retired_410(self, monkeypatch: pytest.MonkeyPatch,
+                                                 service: Any, hub: _FakeCapabilityHub,
+                                                 task_exists: bool) -> None:
+        """评估端点退役契约：任何 POST /tasks/{id}/evaluate 恒 410 并指引 task_evaluate 工具。
+
+        0.2 评估闸门已插件化（task_evaluate 工具承载），HTTP 面不再提供评估，
+        也不允许"引擎不可用"式降级假成功；任务存在与否不改变 410 响应。
+        """
+        if task_exists:
+            tid = (await service.create_task(title="评")).id
+        else:
+            tid = "no-such-task"
+        resp = await _http(monkeypatch, service, hub,
+                           f"/ext/task_service/tasks/{tid}/evaluate", "POST", body={})
+        assert resp["status"] == 410
+        assert "task_evaluate" in resp["payload"]["detail"]
+
+    async def test_evaluate_with_metric_ids_still_410_no_fake_payload(
+            self, monkeypatch: pytest.MonkeyPatch,
+            service: Any, hub: _FakeCapabilityHub) -> None:
+        """带指标体的评估请求同样 410，且响应不再携带伪造的评估结果字段。"""
+        t = await service.create_task(title="带指标")
+        resp = await _http(monkeypatch, service, hub,
+                           f"/ext/task_service/tasks/{t.id}/evaluate", "POST",
+                           body={"metric_ids": ["m1"]})
+        assert resp["status"] == 410
+        # 防降级假成功回归：旧死分支会返回 overall_passed/summary/results 信封
+        assert "overall_passed" not in resp["payload"]
+        assert "summary" not in resp["payload"]
+        assert "results" not in resp["payload"]
 
     async def test_pause_resume_task(self, monkeypatch: pytest.MonkeyPatch,
                                      service: Any, hub: _FakeCapabilityHub) -> None:
@@ -952,20 +979,12 @@ class TestEdgeAndDegradedBranches:
                            "/ext/task_service/tasks/no-such/submit", "POST")
         assert resp["status"] == 404
 
-    async def test_evaluate_task_missing_404(self, monkeypatch: pytest.MonkeyPatch,
+    async def test_evaluate_wrong_method_404(self, monkeypatch: pytest.MonkeyPatch,
                                              service: Any, hub: _FakeCapabilityHub) -> None:
+        """只有 POST /{task_id}/evaluate 映射为退役 410；其余方法仍走通用 no-route 404。"""
         resp = await _http(monkeypatch, service, hub,
-                           "/ext/task_service/tasks/no-such/evaluate", "POST", body={})
+                           "/ext/task_service/tasks/no-such/evaluate", "GET")
         assert resp["status"] == 404
-
-    async def test_evaluate_task_body_metric_ids(self, monkeypatch: pytest.MonkeyPatch,
-                                                 service: Any, hub: _FakeCapabilityHub) -> None:
-        t = await service.create_task(title="带指标")
-        resp = await _http(monkeypatch, service, hub,
-                           f"/ext/task_service/tasks/{t.id}/evaluate", "POST",
-                           body={"metric_ids": ["m1"]})
-        assert resp["status"] == 200
-        assert resp["payload"]["overall_passed"] is False
 
     # ── 创建/提交失败路径 ──
 
@@ -1322,17 +1341,6 @@ class TestCoverageRemainingBranches:
                                  "task_scope": "container", "parent_task_id": parent.id})
         assert resp["status"] == 200
         assert resp["payload"]["id"] == "p-child-9"
-
-    async def test_evaluate_task_dict_body(self, monkeypatch: pytest.MonkeyPatch,
-                                           service: Any, hub: _FakeCapabilityHub) -> None:
-        import http_api
-
-        _install(monkeypatch, service, hub)
-        t = await service.create_task(title="直评")
-        # evaluate_task 为同步 handler（源实现同款）
-        out = http_api.evaluate_task(t.id, {"metric_ids": ["m1"]}, {})
-        assert out.overall_passed is False
-        assert out.summary == "评估引擎不可用"
 
     async def test_cancel_task_agent_level_value(self, monkeypatch: pytest.MonkeyPatch,
                                                  service: Any, hub: _FakeCapabilityHub) -> None:

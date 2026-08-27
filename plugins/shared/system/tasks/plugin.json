@@ -294,7 +294,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 2,
-      "description": "tasks 域：评估任务（评估引擎未接，保持降级响应）"
+      "description": "tasks 域：评估任务（已退役，恒 410；评估走 task_evaluate 工具）"
     },
     {
       "route_id": "task_pause",

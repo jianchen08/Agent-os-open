@@ -116,22 +116,6 @@ class TaskSubmitResponse(BaseModel):
     message: str
 
 
-class TaskEvaluateRequest(BaseModel):
-    """任务评估请求模型。"""
-
-    metric_ids: list[str] = Field(default_factory=list)
-    input_params: dict[str, dict[str, Any]] = Field(default_factory=dict)
-
-
-class TaskEvaluateResponse(BaseModel):
-    """任务评估响应模型。"""
-
-    task_id: str
-    overall_passed: bool
-    summary: str
-    results: list[dict[str, Any]] = Field(default_factory=list)
-
-
 # ════════════════════════════════════════════════════════════
 # 业务异常与请求校验（channel_api/deps.py 子集搬入）
 # ════════════════════════════════════════════════════════════
@@ -555,20 +539,6 @@ async def _submit_task_event(
     except Exception as exc:  # noqa: BLE001
         logger.warning("_submit_task_event: 派发失败 | title=%s | error=%s", title, exc)
         return ""
-
-
-def _get_agent_registry() -> Any:
-    """惰性获取 Agent 注册表（0.2 无该包，ImportError 降级 None）。"""
-
-    try:
-        from agents.registry import AgentRegistry  # noqa: PLC0415
-
-        if AgentRegistry.has_instance():
-            return AgentRegistry.get_instance()
-    except ImportError:
-        pass
-
-    return None
 
 
 # ════════════════════════════════════════════════════════════
@@ -1284,102 +1254,6 @@ async def submit_task(
         status="queued" if not submitted else "pending",
         message="任务已提交到执行队列",
     )
-
-
-def evaluate_task(
-    task_id: str,
-    body: TaskEvaluateRequest | dict[str, Any] | None = None,
-    _user: dict[str, Any] | None = None,
-) -> TaskEvaluateResponse:
-    """对指定任务执行评估。
-
-    0.2 evaluation 插件无 loader 面，保持"评估引擎未连接"降级语义。
-    """
-
-    task = None
-
-    task_service = _get_task_service()
-
-    if task_service is not None:
-        tm = task_service.get_task(task_id)
-
-        if tm is not None:
-            task = _task_model_to_dict(tm)
-
-    if task is None:
-        raise APIError(
-            status_code=404,
-            error_code="API_NOTF_2004",
-            message="任务不存在或已被删除",
-        )
-
-    metric_ids: list[str] = []
-
-    if body:
-        if isinstance(body, dict):
-            metric_ids = list(body.get("metric_ids") or [])
-        else:
-            metric_ids = body.metric_ids
-
-    # 尝试使用评估引擎
-    try:
-        from evaluation.loader import MetricLoader  # noqa: PLC0415
-
-        loader = MetricLoader()
-
-        loader.load_all()
-
-        # 如果未指定指标，尝试从关联 Agent 获取推荐指标
-        if not metric_ids:
-            agent_id = task.get("agent_id")
-
-            if agent_id:
-                reg = _get_agent_registry()
-
-                if reg:
-                    agent_cfg = reg.get(agent_id)
-
-                    if agent_cfg:
-                        metric_ids = [m.metric_id for m in agent_cfg.recommended_metrics]
-
-        # 如果仍无指标，加载所有
-        if not metric_ids:
-            metric_ids = loader.list_metrics()
-
-        results: list[dict[str, Any]] = []
-
-        for mid in metric_ids:
-            metric_def = loader.get(mid)
-
-            if metric_def is None:
-                continue
-
-            results.append(
-                {
-                    "metric_id": mid,
-                    "name": metric_def.name,
-                    "status": "skipped",
-                    "message": "评估引擎未连接（API 模式下暂不支持自动执行）",
-                    "passed": None,
-                }
-            )
-
-        return TaskEvaluateResponse(
-            task_id=task_id,
-            overall_passed=False,
-            summary=f"共 {len(results)} 个指标待评估（需连接评估引擎）",
-            results=results,
-        )
-
-    except Exception as exc:
-        logger.warning("评估引擎加载失败: %s", exc)
-
-        return TaskEvaluateResponse(
-            task_id=task_id,
-            overall_passed=False,
-            summary="评估引擎不可用",
-            results=[],
-        )
 
 
 async def pause_task(
@@ -2146,9 +2020,17 @@ async def handle_http(
                     if action == "submit" and method == "POST":
                         return _ok(_json_response(_pydantic_to_dict(await submit_task(tid, caller))))
                     if action == "evaluate" and method == "POST":
-                        body = _decode_body(raw_body)
-                        req = TaskEvaluateRequest(**body) if body else None
-                        return _ok(_json_response(_pydantic_to_dict(evaluate_task(tid, req, caller))))
+                        # 0.2 评估闸门已插件化：评估由 task_evaluate 工具承载
+                        # （plugins/shared/tools/task_evaluate），本端点退役恒 410，
+                        # 明确报错替代旧"评估引擎不可用"降级假成功。
+                        raise APIError(
+                            status_code=410,
+                            error_code="API_GONE_2006",
+                            message=(
+                                f"任务 {tid} 的 HTTP 评估端点已下线"
+                                "（0.2 评估已插件化）：请改用 task_evaluate 工具执行评估"
+                            ),
+                        )
                     if action == "pause" and method == "POST":
                         return _ok(_json_response(await pause_task(tid, caller)))
                     if action == "resume" and method == "POST":

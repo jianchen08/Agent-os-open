@@ -41,11 +41,11 @@ async def _on_load(params: dict[str, Any]) -> None:
     """Initialize task service on load."""
     global _service
     config = plugin.get_config()
-    data_dir = config.get("data_dir") or os.path.join(
-        os.path.dirname(__file__), "data", "tasks"
-    )
-    _service = TaskService(data_dir=data_dir)
-    logger.info("TaskService initialized, data_dir=%s", data_dir)
+    # data_dir 仅在插件配置显式给出时覆盖（存储优先级第 1 级）；未配置时
+    # 传 None，由 TaskStorage 解析剩余两级：TASKS_STORAGE_DIR env → 多租户
+    # 根 data/{tenant}/tasks（storage.py __init__ 契约）。
+    _service = TaskService(data_dir=config.get("data_dir"))
+    logger.info("TaskService initialized")
 
 
 @plugin.on_unload
