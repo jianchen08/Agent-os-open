@@ -76,6 +76,22 @@ def _ensure_plugin_paths():
             sys.modules[n] = m
 
 
+@pytest.fixture(autouse=True)
+def _isolated_task_service(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """TaskService 数据落盘隔离：无参构造的 TaskService 经 storage.py 落到
+    TASKS_STORAGE_DIR → 临时目录，不写真实 data/{tenant}/tasks/（此前
+    resume_ipc_test 等任务 YAML 污染仓库数据目录，且清理不到）。
+
+    service_access 单例在用例间会缓存首个实例（进程内懒加载），必须先重置；
+    env 变量在 storage.__init__ 解析时读取，monkeypatch 自动还原。"""
+    monkeypatch.setenv("TASKS_STORAGE_DIR", str(tmp_path / "tasks"))
+    from service_access import reset_singletons  # noqa: PLC0415
+
+    reset_singletons()
+    yield
+    reset_singletons()
+
+
 def test_get_task_service_returns_0_2_service_without_infrastructure() -> None:
     """0.2 TaskService 可经 service_access 获取，且不依赖 0.1 infrastructure 包。"""
     tool = TaskTool()
