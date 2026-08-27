@@ -1,7 +1,7 @@
 //! engine crate 自采 A 类指标——调度层（监控设计 §三 通道1 + §补引擎调度层）。
 //!
 //! 引擎是调度器，它知道**编排视角**：pipeline 执行次数/耗时、step 命中、
-//! branch 回滚、LLM/工具调用次数/耗时（invoke 前后差）、迭代轮数。
+//! LLM/工具调用次数/耗时（invoke 前后差）、迭代轮数。
 //!
 //! 业务细节（token/cost/error）由执行插件走 record_metric 上报（B 类），不在本处。
 //!
@@ -18,8 +18,6 @@ pub struct EngineMetrics {
     pub pipeline_exec_micros: AtomicU64,
     /// step 命中累计次数（counter）。
     pub step_hits_total: AtomicU64,
-    /// branch 回滚累计次数（counter）。
-    pub branch_rollback_total: AtomicU64,
     /// LLM 调用累计次数（counter，调度层视角 = invoke llm_core 次数）。
     pub llm_calls_total: AtomicU64,
     /// LLM 调用累计耗时（微秒，counter）。
@@ -52,10 +50,6 @@ impl EngineMetrics {
         self.step_hits_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn inc_branch_rollback(&self) {
-        self.branch_rollback_total.fetch_add(1, Ordering::Relaxed);
-    }
-
     /// 记录一次 LLM 调用（调度层视角，elapsed = invoke 前后差）。
     pub fn inc_llm_call(&self, elapsed_micros: u64) {
         self.llm_calls_total.fetch_add(1, Ordering::Relaxed);
@@ -85,7 +79,6 @@ impl EngineMetrics {
             pipeline_exec_total: self.pipeline_exec_total.load(Ordering::Relaxed),
             pipeline_exec_micros: self.pipeline_exec_micros.load(Ordering::Relaxed),
             step_hits_total: self.step_hits_total.load(Ordering::Relaxed),
-            branch_rollback_total: self.branch_rollback_total.load(Ordering::Relaxed),
             llm_calls_total: self.llm_calls_total.load(Ordering::Relaxed),
             llm_calls_micros: self.llm_calls_micros.load(Ordering::Relaxed),
             tool_calls_total: self.tool_calls_total.load(Ordering::Relaxed),
@@ -102,7 +95,6 @@ pub struct EngineMetricsSnapshot {
     pub pipeline_exec_total: u64,
     pub pipeline_exec_micros: u64,
     pub step_hits_total: u64,
-    pub branch_rollback_total: u64,
     pub llm_calls_total: u64,
     pub llm_calls_micros: u64,
     pub tool_calls_total: u64,
@@ -122,7 +114,6 @@ mod tests {
         m.inc_pipeline_exec(500);
         m.inc_step_hit();
         m.inc_step_hit();
-        m.inc_branch_rollback();
         m.inc_llm_call(200);
         m.inc_tool_call(50);
         m.inc_iterations(3);
@@ -130,7 +121,6 @@ mod tests {
         assert_eq!(s.pipeline_exec_total, 2);
         assert_eq!(s.pipeline_exec_micros, 1500);
         assert_eq!(s.step_hits_total, 2);
-        assert_eq!(s.branch_rollback_total, 1);
         assert_eq!(s.llm_calls_total, 1);
         assert_eq!(s.llm_calls_micros, 200);
         assert_eq!(s.tool_calls_total, 1);

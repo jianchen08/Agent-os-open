@@ -5,10 +5,8 @@
 //!
 //! ## 模块组织
 //!
-//! - [`traits`]: 插件抽象接口——PipelinePlugin（含 Input/Core/Output 子 trait）、
-//!   PluginInvoker（透明分发 in_process / sidecar）、CapabilityRegistry、
-//!   PluginLoader、StorageBackend（ADR ③④）、
-//!   AdrEngine（ADR ①）
+//! - [`traits`]: 插件抽象接口——PluginInvoker（透明分发 in_process / sidecar）、
+//!   CapabilityRegistry、PluginLoader、StorageBackend（ADR ③④）
 //! - [`types`]: 共享数据结构——RouteSignal（4 种）、PluginContext（含
 //!   ContentLoader ADR ⑦）、PluginResult、PluginError、TenantContext、
 //!   SQLite 四表模型（ADR ④）、多分支模型（ADR ⑤）
@@ -26,7 +24,6 @@
 //! - PluginType 新增 Composite 组合插件类型（ADR ⑥）
 //! - 所有插件均支持 InProcess + Sidecar 双路径（ADR ⑧）
 //! - 新增 StorageBackend trait——SQLite 四表存储抽象（ADR ③④）
-//! - 新增 AdrEngine trait——极简调度器 + 状态账本（ADR ①）
 //! - PluginContext 新增 ContentLoader 实现内容懒加载（ADR ⑦）
 //! - PluginManifest 新增 requires_content 字段（ADR ⑦）
 //!

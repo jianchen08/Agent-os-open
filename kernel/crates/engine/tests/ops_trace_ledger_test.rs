@@ -18,7 +18,7 @@
 //! - delete（msg=null）的实录 message_id 为 null 或缺失（与 set 实录可区分）；
 //! - 实录指纹与 message_slots 表侧 message_id 同源（同一内容锚）；
 //! - 标量字段的 step diff 仍在 trace（与实录共存于同一 patch_data）；
-//! - `get_step_traces_by_thread` 读回的轨迹内容与 branch 读一致。
+//! - `get_step_traces_by_thread` 读回的轨迹内容与 traces 表侧直读一致。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -60,6 +60,14 @@ fn all_traces(store: &SqliteStore) -> Vec<(String, String)> {
             rows.collect::<Result<Vec<_>, _>>()
         })
         .expect("读 traces 应成功")
+}
+
+/// 读全部 traces 的 patch_data（解析为 Value），按写入序。
+fn all_patch_data(store: &SqliteStore) -> Vec<Value> {
+    all_traces(store)
+        .into_iter()
+        .filter_map(|(_, data)| serde_json::from_str(&data).ok())
+        .collect()
 }
 
 /// 从 traces 里抽出含 messages 实录（`messages._ops` 数组）的 patch_data。
@@ -476,18 +484,17 @@ async fn step_trace_keeps_scalar_diff_besides_messages_ledger() {
     )
     .await;
 
-    let traces = store.get_traces("main", 0, u32::MAX).unwrap();
-    assert!(!traces.is_empty(), "管道跑完应有 step 轨迹");
+    let patches = all_patch_data(&store);
+    assert!(!patches.is_empty(), "管道跑完应有 step 轨迹");
 
     // 标量 diff 仍在：turn_count 出现在某条 trace 的 patch_data 里
-    let entry = traces
+    let entry = patches
         .iter()
-        .find(|t| t.patch_data.get("turn_count").and_then(|v| v.as_u64()) == Some(7))
+        .find(|p| p.get("turn_count").and_then(|v| v.as_u64()) == Some(7))
         .expect("标量字段的 step diff 应仍在 trace");
 
     // 同一条目里应有 messages 实录（不再被 REDUNDANT_KEYS 整个过滤掉）
     let ops = entry
-        .patch_data
         .pointer("/messages/_ops")
         .and_then(|v| v.as_array())
         .expect("同一 trace 条目应含 messages 实录（标量 diff 与实录共存）");
@@ -499,7 +506,7 @@ async fn step_trace_keeps_scalar_diff_besides_messages_ledger() {
     assert_eq!(seqs, vec![0, 1]);
 
     // 实录无全文（raw_result 已过滤 + 指纹化，正文标记词不出现）
-    let raw = serde_json::to_string(&entry.patch_data).unwrap();
+    let raw = serde_json::to_string(entry).unwrap();
     assert!(
         !raw.contains("FULLTEXT_MARKER_d_用户问") && !raw.contains("FULLTEXT_MARKER_d_助手答"),
         "实录条目不得含消息全文：{}",
@@ -507,7 +514,7 @@ async fn step_trace_keeps_scalar_diff_besides_messages_ledger() {
     );
 }
 
-/// `get_step_traces_by_thread`（trait 方法）读回的实录内容与 branch 读一致。
+/// `get_step_traces_by_thread`（trait 方法）读回的实录内容与 traces 表侧一致。
 #[tokio::test]
 async fn get_step_traces_by_thread_reads_back_ledger_content() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
@@ -558,8 +565,23 @@ async fn get_step_traces_by_thread_reads_back_ledger_content() {
         Ok(())
     });
 
-    let via_branch = store.get_traces("main", 0, u32::MAX).unwrap();
-    assert!(!via_branch.is_empty(), "branch 侧应能读到 step 轨迹");
+    // 表侧基线：with_conn 直读 traces 表（trace_id → patch_data Value）
+    let table_rows: HashMap<String, Value> = store
+        .with_conn(|c| -> Result<HashMap<String, Value>, rusqlite::Error> {
+            let mut stmt = c.prepare("SELECT trace_id, patch_data FROM traces")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            rows.map(|r| {
+                r.map(|(id, data)| {
+                    let v: Value =
+                        serde_json::from_str(&data).expect("表侧 patch_data 应为合法 JSON");
+                    (id, v)
+                })
+            })
+            .collect()
+        })
+        .unwrap();
+    assert!(!table_rows.is_empty(), "表侧应能读到 step 轨迹");
 
     let via_thread = backend
         .get_step_traces_by_thread("th_ledger_e", "default")
@@ -570,13 +592,13 @@ async fn get_step_traces_by_thread_reads_back_ledger_content() {
         "thread 侧应能发现该管道的 step 轨迹"
     );
 
-    // branch 读到的每条轨迹都能按 trace_id 在 thread 读回中找到，patch_data 一致
-    for t in &via_branch {
-        let twin = via_thread.iter().find(|x| x.trace_id == t.trace_id);
-        let twin = twin.expect("step 轨迹应可经 get_step_traces_by_thread 读回");
+    // thread 读到的每条轨迹都能按 trace_id 在表中找到，patch_data 一致
+    for t in &via_thread {
+        let twin = table_rows.get(&t.trace_id);
+        let twin = twin.expect("step 轨迹应可在 traces 表读回");
         assert_eq!(
-            twin.patch_data, t.patch_data,
-            "thread 读回的 patch_data 应与 branch 读一致（trace_id={}）",
+            twin, &t.patch_data,
+            "thread 读回的 patch_data 应与表侧一致（trace_id={}）",
             t.trace_id
         );
     }

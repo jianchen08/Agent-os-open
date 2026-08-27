@@ -255,9 +255,8 @@ impl Compiler<'_> {
         }
         // pool_ids：Composite 判定用（owned key 集）
         self.pool_ids = pool.iter().map(|(id, _)| (*id).to_string()).collect();
-        let pool_map = pool_index_map(&pool);
         for (i, (id, step)) in pool.iter().enumerate() {
-            compiled[i] = self.compile_step(id, step, &pool_map)?;
+            compiled[i] = self.compile_step(id, step)?;
         }
         // 登记 index（与 compiled 同步）
         for (i, (id, _)) in pool.iter().enumerate() {
@@ -268,7 +267,7 @@ impl Compiler<'_> {
         // ── 第四遍：编译各循环体 ──
         let mut bodies = Vec::with_capacity(config.loop_bodies.len());
         for body in &config.loop_bodies {
-            bodies.push(self.compile_body(body, &pool_map)?);
+            bodies.push(self.compile_body(body)?);
         }
 
         // ── 第五遍：转移目标校验 ──
@@ -312,13 +311,7 @@ impl Compiler<'_> {
     }
 
     /// 编译单个 step（pool 内任意 step，含库 step）。
-    fn compile_step(
-        &self,
-        id: &str,
-        step: &PipelineStep,
-        pool: &HashMap<&str, usize>,
-    ) -> Result<CompiledStep, CompileError> {
-        let _ = pool; // 命中判定统一走 self.pool_ids
+    fn compile_step(&self, id: &str, step: &PipelineStep) -> Result<CompiledStep, CompileError> {
         let location = format!("step '{id}'");
         let when = compile_when(step.when.as_deref(), &location)?;
         let mut items = Vec::with_capacity(step.steps.len());
@@ -363,11 +356,7 @@ impl Compiler<'_> {
     }
 
     /// 编译循环体。
-    fn compile_body(
-        &self,
-        body: &LoopBody,
-        pool_map: &HashMap<&str, usize>,
-    ) -> Result<CompiledBody, CompileError> {
+    fn compile_body(&self, body: &LoopBody) -> Result<CompiledBody, CompileError> {
         let location = format!("循环体 '{}'", body.id);
         // while 条件不能走 compile_when 的 True→None 归一：while 语义里
         // None = 未声明循环（单次执行），恒真循环必须保留字面量使 looping 成立。
@@ -395,7 +384,7 @@ impl Compiler<'_> {
         let mut step_index = HashMap::new();
         for step in &body.steps {
             step_index.insert(step.id.clone(), steps.len());
-            steps.push(self.compile_step(&step.id, step, pool_map)?);
+            steps.push(self.compile_step(&step.id, step)?);
         }
         let exit_routes = compile_routes(&body.exit_routes, &location)?;
         Ok(CompiledBody {
@@ -408,14 +397,6 @@ impl Compiler<'_> {
             run_on_error: body.run_on_error,
         })
     }
-}
-
-/// 把 pool（&str → usize）转成编译用映射（CompiledStep 编译期间需要 id → index）。
-fn pool_index_map<'p>(pool: &'p [(&str, &PipelineStep)]) -> HashMap<&'p str, usize> {
-    pool.iter()
-        .enumerate()
-        .map(|(i, (id, _))| (*id, i))
-        .collect()
 }
 
 /// 模板名判定：含 `{{` 的引用是运行时动态点（如 `{{state.core_plugin}}`）。

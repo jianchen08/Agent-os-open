@@ -34,8 +34,8 @@ use std::sync::Arc;
 
 use agentos_core::traits::{MessageQueryOpts, SessionListFilter, StorageBackend};
 use agentos_core::types::{
-    BlobRecord, Branch, MessageRecord, PatchType, PendingInputRecord, PendingInputSource,
-    PipelineRunInfo, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry, UserRecord,
+    Branch, MessageRecord, PatchType, PendingInputRecord, PendingInputSource, PipelineRunInfo,
+    RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry, UserRecord,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -2085,55 +2085,6 @@ impl SqliteStore {
             last_login_at: row.get(7)?,
         })
     }
-    pub fn get_traces(
-        &self,
-        branch_id: &str,
-        from_seq: u32,
-        to_seq: u32,
-    ) -> Result<Vec<TraceEntry>, StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at FROM traces WHERE branch_id = ?1 AND seq_in_branch >= ?2 AND seq_in_branch <= ?3 AND tenant_id = ?4 ORDER BY seq_in_branch ASC",
-            )?;
-
-        let traces = stmt.query_map(
-            rusqlite::params![branch_id, from_seq, to_seq, tenant_id],
-            |row| {
-                let patch_type_str: String = row.get(5)?;
-                let patch_data_str: String = row.get(6)?;
-                Ok(TraceEntry {
-                    trace_id: row.get(0)?,
-                    run_id: row.get(1)?,
-                    branch_id: row.get(2)?,
-                    seq_in_branch: row.get(3)?,
-                    plugin_id: row.get(4)?,
-                    patch_type: match patch_type_str.as_str() {
-                        "state_update" => PatchType::StateUpdate,
-                        "route_signal" => PatchType::RouteSignal,
-                        "error" => PatchType::Error,
-                        "lifecycle" => PatchType::Lifecycle,
-                        "rollback" => PatchType::Rollback,
-                        _ => PatchType::StateUpdate,
-                    },
-                    patch_data: serde_json::from_str(&patch_data_str).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })?,
-                    created_at: row.get(7)?,
-                })
-            },
-        )?;
-
-        traces
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::from)
-    }
 
     /// 查询某会话下的 step 级轨迹（冷启动统一回放用）。
     ///
@@ -2252,65 +2203,6 @@ impl SqliteStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
-    }
-
-    /// 获取当前分支最大 seq_in_branch。
-    pub fn get_current_seq(&self, run_id: &str) -> Result<u32, StorageError> {
-        let conn = self.conn.lock();
-        let row: rusqlite::Result<i64> = conn.query_row(
-            "SELECT current_seq FROM runs WHERE run_id = ?1",
-            rusqlite::params![run_id],
-            |row| row.get(0),
-        );
-        match row {
-            Ok(seq) => Ok(seq as u32),
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                Err(StorageError::NotFound(format!("run not found: {}", run_id)))
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// 获取当前分支 ID。
-    pub fn get_current_branch(&self, run_id: &str) -> Result<String, StorageError> {
-        let conn = self.conn.lock();
-        let row: rusqlite::Result<String> = conn.query_row(
-            "SELECT current_branch FROM runs WHERE run_id = ?1",
-            rusqlite::params![run_id],
-            |row| row.get(0),
-        );
-        match row {
-            Ok(branch) => Ok(branch),
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                Err(StorageError::NotFound(format!("run not found: {}", run_id)))
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// 获取所有 blob 记录（用于测试）。
-    pub fn get_blob_record(&self, blob_id: &str) -> Result<BlobRecord, StorageError> {
-        let conn = self.conn.lock();
-        let row = conn.query_row(
-            "SELECT blob_id, mime_type, size_bytes, created_at FROM blobs WHERE blob_id = ?1",
-            rusqlite::params![blob_id],
-            |row| {
-                Ok(BlobRecord {
-                    blob_id: row.get(0)?,
-                    mime_type: row.get(1)?,
-                    size_bytes: row.get::<_, i64>(2)? as u64,
-                    created_at: row.get(3)?,
-                })
-            },
-        );
-        match row {
-            Ok(r) => Ok(r),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Err(StorageError::NotFound(format!(
-                "blob not found: {}",
-                blob_id
-            ))),
-            Err(e) => Err(e.into()),
-        }
     }
 
     /// 在锁内执行任意 SQLite 操作（统一数据接口 `/api/v1/db/*` 专用）。
@@ -3345,9 +3237,18 @@ mod tests {
         let data = b"Hello, World!";
         let blob_id = store.store_blob(data, "text/plain").unwrap();
 
-        let record = store.get_blob_record(&blob_id).unwrap();
-        assert_eq!(record.mime_type, "text/plain");
-        assert_eq!(record.size_bytes, 13);
+        // 元数据经 with_conn 直读 blobs 表验证
+        let (mime_type, size_bytes): (String, i64) = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT mime_type, size_bytes FROM blobs WHERE blob_id = ?1",
+                    rusqlite::params![blob_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(mime_type, "text/plain");
+        assert_eq!(size_bytes, data.len() as i64);
 
         let loaded = store.get_blob(&blob_id).await.unwrap();
         assert_eq!(loaded, data);
@@ -3644,13 +3545,16 @@ mod tests {
             .await
             .unwrap();
         assert!(sub_msgs.is_empty(), "子管道 messages 应清空");
-        let traces_left = store.get_traces("main", 0, 999).unwrap();
-        assert!(
-            traces_left
-                .iter()
-                .all(|t| t.run_id != "run_main" && t.run_id != "run_sub"),
-            "traces 应清空"
-        );
+        // 轨迹残留经 with_conn 直读 traces 表验证
+        let residual: Vec<String> = store
+            .with_conn(|c| {
+                let mut stmt =
+                    c.prepare("SELECT run_id FROM traces WHERE run_id IN ('run_main', 'run_sub')")?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect()
+            })
+            .unwrap();
+        assert!(residual.is_empty(), "traces 应清空");
 
         // thread_2 数据应保留
         assert!(
@@ -3731,12 +3635,23 @@ mod tests {
             store.append_trace(entry).await.unwrap();
         }
 
-        // 正向重放 seq 0..2
-        let traces = store.get_traces("main", 0, 2).unwrap();
-        assert_eq!(traces.len(), 3);
-        assert_eq!(traces[0].plugin_id, "plugin_0");
-        assert_eq!(traces[2].plugin_id, "plugin_2");
-        assert_eq!(traces[1].patch_data["key"], "value_1");
+        // 落库行经 with_conn 直读验证（按 seq 升序）
+        let rows: Vec<(String, String)> = store
+            .with_conn(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT plugin_id, patch_data FROM traces WHERE branch_id = 'main' \
+                     AND seq_in_branch >= 0 AND seq_in_branch <= 2 ORDER BY seq_in_branch ASC",
+                )?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                rows.collect()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0, "plugin_0");
+        assert_eq!(rows[2].0, "plugin_2");
+        let patch_1: serde_json::Value = serde_json::from_str(&rows[1].1).unwrap();
+        assert_eq!(patch_1["key"], "value_1");
     }
 
     #[tokio::test]
@@ -3752,21 +3667,6 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         store.create_branch(branch).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_get_current_seq_and_branch() {
-        let store = SqliteStore::open_memory().unwrap();
-        store.create_run("run_7", "hash", "default").unwrap();
-
-        assert_eq!(store.get_current_seq("run_7").unwrap(), 0);
-        assert_eq!(store.get_current_branch("run_7").unwrap(), "main");
-
-        store
-            .update_run_status("run_7", RunStatus::Running, Some("main"), Some(3))
-            .await
-            .unwrap();
-        assert_eq!(store.get_current_seq("run_7").unwrap(), 3);
     }
 
     /// P0-5 关键验收：跨租户隔离。
@@ -3958,7 +3858,6 @@ mod tests {
                 pid,
                 &pending_input("in_3", pid, "第三条", "2026-08-26T03:00:00Z"),
             )
-            
             .unwrap();
         store
             .enqueue_pending_input(
@@ -3966,7 +3865,6 @@ mod tests {
                 pid,
                 &pending_input("in_1", pid, "第一条", "2026-08-26T01:00:00Z"),
             )
-            
             .unwrap();
         store
             .enqueue_pending_input(
@@ -3974,12 +3872,15 @@ mod tests {
                 pid,
                 &pending_input("in_2", pid, "第二条", "2026-08-26T02:00:00Z"),
             )
-            
             .unwrap();
 
         let listed = store.list_pending_inputs("default", pid).unwrap();
         let ids: Vec<&str> = listed.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["in_1", "in_2", "in_3"], "FIFO 序 = created_at 升序");
+        assert_eq!(
+            ids,
+            vec!["in_1", "in_2", "in_3"],
+            "FIFO 序 = created_at 升序"
+        );
         assert_eq!(listed[0].content, "第一条");
         assert_eq!(listed[0].source, PendingInputSource::User);
         assert_eq!(
@@ -4006,7 +3907,6 @@ mod tests {
         assert!(
             store
                 .pop_pending_input("default", "pipe_empty")
-                
                 .unwrap()
                 .is_none(),
             "空队列 pop 返回 None"
@@ -4017,12 +3917,10 @@ mod tests {
                 "pipe_a",
                 &pending_input("a1", "pipe_a", "A", "2026-08-26T01:00:00Z"),
             )
-            
             .unwrap();
         assert!(
             store
                 .pop_pending_input("other_tenant", "pipe_a")
-                
                 .unwrap()
                 .is_none(),
             "跨租户不可见"
@@ -4030,7 +3928,6 @@ mod tests {
         assert!(
             store
                 .pop_pending_input("default", "pipe_b")
-                
                 .unwrap()
                 .is_none(),
             "跨管道不可见"
@@ -4044,10 +3941,7 @@ mod tests {
         let pid = "pipe_pending_idem";
         let rec = pending_input("dup1", pid, "原始", "2026-08-26T01:00:00Z");
         store.enqueue_pending_input("default", pid, &rec).unwrap();
-        store
-            .enqueue_pending_input("default", pid, &rec)
-            
-            .unwrap();
+        store.enqueue_pending_input("default", pid, &rec).unwrap();
         let listed = store.list_pending_inputs("default", pid).unwrap();
         assert_eq!(listed.len(), 1, "同 id 重复入队不产生重复条目");
     }
@@ -4063,7 +3957,6 @@ mod tests {
                 pid,
                 &pending_input("m1", pid, "旧内容", "2026-08-26T01:00:00Z"),
             )
-            
             .unwrap();
         store
             .enqueue_pending_input(
@@ -4071,14 +3964,12 @@ mod tests {
                 pid,
                 &pending_input("m2", pid, "另一条", "2026-08-26T02:00:00Z"),
             )
-            
             .unwrap();
 
         // 修改
         assert!(
             store
                 .update_pending_input_content("default", pid, "m1", "新内容")
-                
                 .unwrap(),
             "存在的条目更新返回 true"
         );
@@ -4088,24 +3979,17 @@ mod tests {
         assert!(
             !store
                 .update_pending_input_content("default", pid, "ghost", "x")
-                
                 .unwrap(),
             "不存在条目 update 返回 false"
         );
 
         // 删除
         assert!(
-            store
-                .delete_pending_input("default", pid, "m2")
-                
-                .unwrap(),
+            store.delete_pending_input("default", pid, "m2").unwrap(),
             "删除存在条目返回 true"
         );
         assert!(
-            !store
-                .delete_pending_input("default", pid, "m2")
-                
-                .unwrap(),
+            !store.delete_pending_input("default", pid, "m2").unwrap(),
             "删除不存在条目返回 false"
         );
 
@@ -4116,7 +4000,10 @@ mod tests {
             "清空返回删除条数"
         );
         assert!(
-            store.list_pending_inputs("default", pid).unwrap().is_empty(),
+            store
+                .list_pending_inputs("default", pid)
+                .unwrap()
+                .is_empty(),
             "清空后队列空"
         );
     }

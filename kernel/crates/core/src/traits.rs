@@ -13,9 +13,7 @@
 //! - PluginType 新增 Composite 组合插件类型（ADR ⑥）
 //! - 所有插件均支持 InProcess + Sidecar 双路径（ADR ⑧）
 //! - 新增 StorageBackend trait——SQLite 四表存储抽象（ADR ③④）
-//! - 新增 AdrEngine trait——极简调度器 + 状态账本（ADR ①）
 
-use std::any::Any;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -27,29 +25,7 @@ use crate::types::{
     ToolExecutionResult, ToolSource, TraceEntry, UserRecord,
 };
 
-// ── 1. 插件基础 Trait ───────────────────────────────────────────
-
-/// 插件元信息——所有插件（管道/工具/系统/组合）共有的标识与描述。
-///
-/// 对应 Manifest V2.0 的核心字段，内核在加载时从 manifest 中提取。
-pub trait PluginMeta: Send + Sync {
-    /// 插件唯一标识符（对应 manifest.id）
-    fn id(&self) -> &str;
-
-    /// 插件人类可读名称（对应 manifest.name）
-    fn name(&self) -> &str;
-
-    /// 插件版本（对应 manifest.version）
-    fn version(&self) -> &str;
-
-    /// 插件类型（对应 manifest.type）
-    fn plugin_type(&self) -> PluginType;
-
-    /// 插件执行优先级，数值越小越先执行（对应 manifest.priority）
-    fn priority(&self) -> u32 {
-        100
-    }
-}
+// ── 1. 插件类型 ────────────────────────────────────────────────
 
 /// 插件类型枚举。
 ///
@@ -79,59 +55,12 @@ pub enum PipelineRole {
     Output,
 }
 
-// ── 2. 管道插件 Trait ───────────────────────────────────────────
-
-/// 管道插件统一接口。
-///
-/// **ADR ⑧ 更新**：所有插件（含工具插件、系统插件）均支持 InProcess（Rust 原生）
-/// 和 Sidecar（MCP 边车）两种执行路径，由开发者根据性能需求自行选择，
-/// 不因插件类型限制可选路径。
-///
-/// **混合方案**（[来源: docs/0.2_rust_plugin_solution.md §3.2]）：
-/// - 高频管道插件用 Rust 原生实现（热路径零 IPC 开销）
-/// - 低频管道插件可用 MCP 边车（通过 PluginInvoker 透明分发）
-/// - 两种路径对管道引擎透明——统一返回 `PluginResult`
-///
-/// **ADR ② 约束**：插件无状态不持久化——trait 签名是 `&self`（不可变引用），
-/// 插件不持有可变状态，不直接操作引擎存储。`PluginResult.state_updates` 是 Patch
-/// 而非直接写存储，引擎收到后决定是否应用。
-///
-/// 对应 0.1 的 `pipeline/plugin.py IPlugin`。
-#[async_trait]
-pub trait PipelinePlugin: PluginMeta + Any {
-    /// 执行插件逻辑。
-    ///
-    /// # Arguments
-    /// * `ctx` - 插件执行上下文，包含管道状态、配置、租户信息和内容懒加载句柄
-    ///
-    /// # Returns
-    /// 插件执行结果（状态更新 Patch + 可能的路由信号）
-    async fn execute(&self, ctx: &PluginContext) -> Result<PluginResult, PluginError>;
-
-    /// 本插件可能产出的路由信号类型列表（仅 Output 角色有效）。
-    ///
-    /// 用于路由表配置校验，内核据此验证路由表引用的信号是否被某插件声明。
-    fn route_signals(&self) -> Vec<RouteType> {
-        Vec::new()
-    }
-
-    /// 生命周期钩子：插件加载时调用。
-    async fn on_load(&self) -> Result<(), PluginError> {
-        Ok(())
-    }
-
-    /// 生命周期钩子：插件卸载时调用。
-    async fn on_unload(&self) -> Result<(), PluginError> {
-        Ok(())
-    }
-}
-
 // ── 3. PluginInvoker（插件调用器） ──────────────────────────────
 
 /// 插件调用器：按 host_type 透明分发调用。
 ///
 /// 核心设计（[来源: docs/0.2_rust_plugin_solution.md §3.2]）：
-/// - `in_process`：直接调用 `dyn PipelinePlugin` 的 execute 方法（零 IPC 开销）
+/// - `in_process`：直接调用 `agentos_native_sdk::PipelinePlugin` 的 execute 方法（零 IPC 开销）
 /// - `sidecar`：通过 rmcp 客户端走 MCP 协议调用（进程隔离）
 /// - 两种路径对管道引擎透明——统一返回 `PluginResult`
 ///
@@ -142,7 +71,7 @@ pub trait PluginInvoker: Send + Sync {
     /// 调用管道插件执行。
     ///
     /// 内核根据插件的 `host_type` 字段选择调用路径：
-    /// - InProcess: 直接 dyn PipelinePlugin::execute
+    /// - InProcess: 直接调 agentos_native_sdk::PipelinePlugin::execute
     /// - Sidecar: rmcp tools/call("execute", {state, config})
     async fn invoke_pipeline_plugin(
         &self,
@@ -1606,8 +1535,7 @@ mod tests {
             "language": "python", "host_type": "sidecar", "entry": "python s.py",
             "capabilities": {}, "host_group": "light"
         });
-        let m2: PluginManifest =
-            serde_json::from_value(light).expect("host_group=light 应可解析");
+        let m2: PluginManifest = serde_json::from_value(light).expect("host_group=light 应可解析");
         assert_eq!(m2.host_group.as_deref(), Some("light"));
 
         // 序列化往返：None 字段不输出
