@@ -15,6 +15,17 @@ use agentos_core::types::PendingInputSource;
 use async_trait::async_trait;
 use serde_json::Value;
 
+/// 顶层与 data 信封两处取字符串字段：顶层优先、data 信封兜底
+/// （WS 消息 body 统一收进 data 信封是目标契约，现状前端部分字段仍放顶层）。
+/// 任意一处存在但非字符串 → 视为缺失（as_str 过滤），与各调用点原提取链一致。
+fn field_or_data<'a>(msg: &'a Value, key: &str) -> Option<&'a str> {
+    msg.get(key).and_then(|v| v.as_str()).or_else(|| {
+        msg.get("data")
+            .and_then(|d| d.get(key))
+            .and_then(|v| v.as_str())
+    })
+}
+
 /// 管道分发器——session crate 通过此 trait 把入站消息交给引擎层（api crate 实现）。
 ///
 /// 解耦设计：router 不直接依赖 engine，便于测试用 mock 验证路由正确性。
@@ -173,40 +184,17 @@ impl InboundRouter {
             .to_string();
         // pipeline_id：前端消息路由键，兼容顶层和 data.content 两种位置
         // （与 content 同理）。引擎回推流式事件时用它定位前端占位气泡。
-        let pipeline_id = msg
-            .get("pipeline_id")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                msg.get("data")
-                    .and_then(|d| d.get("pipeline_id"))
-                    .and_then(|v| v.as_str())
-            })
-            .unwrap_or("")
-            .to_string();
+        let pipeline_id = field_or_data(msg, "pipeline_id").unwrap_or("").to_string();
         // thinking_strength：思考强度（off/low/medium/high），顶层优先、
         // data 信封兜底（与 pipeline_id 同法）。缺失为空串 = 引擎不覆盖参数。
-        let thinking_strength = msg
-            .get("thinking_strength")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                msg.get("data")
-                    .and_then(|d| d.get("thinking_strength"))
-                    .and_then(|v| v.as_str())
-            })
+        let thinking_strength = field_or_data(msg, "thinking_strength")
             .unwrap_or("")
             .to_string();
         // client_message_id：前端幂等键（ADR 2026-08-21 消息幂等契约）。
         // 随 user 消息 metadata 落库并在 GET messages 回显，前端据此把乐观
         // 消息与权威记录对账去重。顶层优先、data 信封兜底（与 pipeline_id
         // 同法）。缺失为空串 = 无幂等键（触发器注入/旧客户端路径）。
-        let client_message_id = msg
-            .get("client_message_id")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                msg.get("data")
-                    .and_then(|d| d.get("client_message_id"))
-                    .and_then(|v| v.as_str())
-            })
+        let client_message_id = field_or_data(msg, "client_message_id")
             .unwrap_or("")
             .to_string();
         match self
@@ -282,23 +270,14 @@ impl InboundRouter {
             Some(t) if !t.is_empty() => t.to_string(),
             _ => return RouteOutcome::Error("regenerate 缺少 thread_id".into()),
         };
-        let from_data = |k: &str| {
-            msg.get(k)
-                .and_then(|v| v.as_str())
-                .or_else(|| {
-                    msg.get("data")
-                        .and_then(|d| d.get(k))
-                        .and_then(|v| v.as_str())
-                })
-                .map(|s| s.to_string())
-        };
-        let pipeline_id = from_data("pipeline_id").unwrap_or_default();
-        let user_message_id = from_data("user_message_id").unwrap_or_default();
-        let new_content = msg.get("new_content").and_then(|v| v.as_str()).or_else(|| {
-            msg.get("data")
-                .and_then(|d| d.get("new_content"))
-                .and_then(|v| v.as_str())
-        });
+        let pipeline_id = field_or_data(msg, "pipeline_id")
+            .unwrap_or_default()
+            .to_string();
+        let user_message_id = field_or_data(msg, "user_message_id")
+            .unwrap_or_default()
+            .to_string();
+        // 缺失 = None（重新生成最后一条）；存在但非字符串同样按缺失处理（原提取链同此语义）
+        let new_content = field_or_data(msg, "new_content");
         match self
             .dispatcher
             .dispatch_regenerate(

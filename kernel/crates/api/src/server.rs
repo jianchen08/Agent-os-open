@@ -814,7 +814,7 @@ async fn process_via_engine_inner(
     .await;
 
     // 2/2b. agent 配置加载 + 工具 schema 注入。
-    stage_inject_agent_and_tools(state, &mut initial_state, agent_id, &project_root);
+    stage_inject_agent_and_tools(state, &mut initial_state);
 
     // 3. 构造 PipelineExecutor 并执行；失败（含 run 标记 Failed 的兜底）直接
     //    以失败 outcome 出口。
@@ -1370,12 +1370,7 @@ async fn stage_recover_history(
 /// sidecar 的 context_build 插件（按 state.agent_id 读
 /// AGENTOS_CONFIG_ROOT/agents/**）。工具 schema 注入留在内核——ToolRegistry
 /// 在内核，这是工具面契约（按 agent tool_ids 过滤下发）而非 agent 配置。
-fn stage_inject_agent_and_tools(
-    state: &AppState,
-    initial_state: &mut serde_json::Value,
-    _agent_id: &str,
-    _project_root: &std::path::Path,
-) {
+fn stage_inject_agent_and_tools(state: &AppState, initial_state: &mut serde_json::Value) {
     // 2b. 注入工具 schema 到 state（0.2 sidecar 架构适配）。
     // 0.1 单进程时 tool_schema 插件经 ctx.get_service("tool_registry") 直接访问内核
     // ToolRegistry；0.2 sidecar 是独立进程拿不到该 service。改为内核侧在管道启动前

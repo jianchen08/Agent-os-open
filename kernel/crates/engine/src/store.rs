@@ -1586,39 +1586,7 @@ impl SqliteStore {
             .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
 
         // 1. 收集该会话全部 pipeline_id：映射表 + sessions.pipeline_ids 兜底（防主管道未写映射）。
-        let mut pipeline_ids: Vec<String> = Vec::new();
-        {
-            let mut stmt = tx.prepare(
-                "SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![thread_id, tenant_id], |row| {
-                row.get::<_, String>(0)
-            })?;
-            for r in rows {
-                let pid = r?;
-                if !pipeline_ids.contains(&pid) {
-                    pipeline_ids.push(pid);
-                }
-            }
-        }
-        // 兜底：从 sessions.pipeline_ids (JSON) 补全主管道 id
-        let session_row: Option<(Option<String>,)> = tx
-            .query_row(
-                "SELECT pipeline_ids FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
-                rusqlite::params![thread_id, tenant_id],
-                |row| Ok((row.get::<_, Option<String>>(0)?,)),
-            )
-            .optional()?;
-        if let Some((Some(json),)) = session_row {
-            let list = serde_json::from_str::<Vec<String>>(&json).map_err(|e| {
-                StorageError::Serialization(format!("session {thread_id} pipeline_ids: {e}"))
-            })?;
-            for pid in list {
-                if !pid.is_empty() && !pipeline_ids.contains(&pid) {
-                    pipeline_ids.push(pid);
-                }
-            }
-        }
+        let pipeline_ids = pipeline_ids_for_thread(&tx, thread_id, tenant_id)?;
 
         if pipeline_ids.is_empty() {
             // 无任何管道（纯标签会话）：直接删 sessions 行
@@ -1632,34 +1600,7 @@ impl SqliteStore {
         }
 
         // 3. 收集这些 pipeline_id 产生的 run_id（traces/branches/summaries/runs 按 run_id 删）
-        let run_ids: Vec<String> = {
-            let placeholders = (0..pipeline_ids.len())
-                .map(|i| format!("?{}", i + 1))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "SELECT DISTINCT run_id FROM message_slots WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?"
-            );
-            let mut stmt = tx.prepare(&sql)?;
-            let mut params: Vec<&dyn rusqlite::ToSql> = pipeline_ids
-                .iter()
-                .map(|p| p as &dyn rusqlite::ToSql)
-                .collect();
-            params.push(&tenant_id);
-            let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, Option<String>>(0))?;
-            let mut out = Vec::new();
-            for r in rows {
-                // message_slots.run_id 可 NULL（流式占位消息等）：
-                // 用 Option 读取跳过 NULL，避免 Invalid column type Null 抛错
-                // 导致整个删除事务回滚。
-                if let Some(rid) = r? {
-                    if !out.contains(&rid) {
-                        out.push(rid);
-                    }
-                }
-            }
-            out
-        };
+        let run_ids: Vec<String> = run_ids_of_pipelines(&tx, &pipeline_ids, tenant_id)?;
 
         if !run_ids.is_empty() {
             Self::delete_in_clause(
@@ -1723,24 +1664,8 @@ impl SqliteStore {
             .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
 
         // 1. 收集该管道产生的 run_id（traces/branches/runs 按 run_id 删）
-        let run_ids: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT DISTINCT run_id FROM message_slots WHERE pipeline_id = ?1 AND tenant_id = ?2",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![pipeline_id, tenant_id], |row| {
-                row.get::<_, Option<String>>(0)
-            })?;
-            let mut out = Vec::new();
-            for r in rows {
-                // message_slots.run_id 可 NULL（流式占位消息等）：跳过 NULL 防抛错
-                if let Some(rid) = r? {
-                    if !out.contains(&rid) {
-                        out.push(rid);
-                    }
-                }
-            }
-            out
-        };
+        let run_ids: Vec<String> =
+            run_ids_of_pipelines(&tx, &[pipeline_id.to_string()], tenant_id)?;
 
         if !run_ids.is_empty() {
             Self::delete_in_clause(
@@ -2099,69 +2024,13 @@ impl SqliteStore {
     ) -> Result<Vec<TraceEntry>, StorageError> {
         let conn = self.conn.lock();
         // pipeline_id 集合：映射表 + sessions.pipeline_ids 兜底
-        let mut pipeline_ids: Vec<String> = Vec::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![thread_id, tenant_id], |row| {
-                row.get::<_, String>(0)
-            })?;
-            for r in rows {
-                let pid = r?;
-                if !pipeline_ids.contains(&pid) {
-                    pipeline_ids.push(pid);
-                }
-            }
-        }
-        let session_row: Option<(Option<String>,)> = conn
-            .query_row(
-                "SELECT pipeline_ids FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
-                rusqlite::params![thread_id, tenant_id],
-                |row| Ok((row.get::<_, Option<String>>(0)?,)),
-            )
-            .optional()?;
-        if let Some((Some(json),)) = session_row {
-            let list = serde_json::from_str::<Vec<String>>(&json).map_err(|e| {
-                StorageError::Serialization(format!("session {thread_id} pipeline_ids: {e}"))
-            })?;
-            for pid in list {
-                if !pid.is_empty() && !pipeline_ids.contains(&pid) {
-                    pipeline_ids.push(pid);
-                }
-            }
-        }
+        let pipeline_ids = pipeline_ids_for_thread(&conn, thread_id, tenant_id)?;
         if pipeline_ids.is_empty() {
             return Ok(vec![]);
         }
 
         // run_id 集合（经 messages.pipeline_id 反查）
-        let placeholders = (0..pipeline_ids.len())
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(", ");
-        let run_sql = format!(
-            "SELECT DISTINCT run_id FROM message_slots WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?"
-        );
-        let run_ids: Vec<String> = {
-            let mut stmt = conn.prepare(&run_sql)?;
-            let mut params: Vec<&dyn rusqlite::ToSql> = pipeline_ids
-                .iter()
-                .map(|p| p as &dyn rusqlite::ToSql)
-                .collect();
-            params.push(&tenant_id);
-            let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, Option<String>>(0))?;
-            let mut out = Vec::new();
-            for r in rows {
-                // run_id 可 NULL（同 delete_session_inner 的收集）：跳过 NULL 防抛错
-                if let Some(rid) = r? {
-                    if !out.contains(&rid) {
-                        out.push(rid);
-                    }
-                }
-            }
-            out
-        };
+        let run_ids: Vec<String> = run_ids_of_pipelines(&conn, &pipeline_ids, tenant_id)?;
         if run_ids.is_empty() {
             return Ok(vec![]);
         }
@@ -2216,10 +2085,106 @@ impl SqliteStore {
         let conn = self.conn.lock();
         f(&conn)
     }
+
+    /// spawn_blocking 统一包装：参数先转为 owned 再随闭包移入阻塞线程池，
+    /// 同步 `_inner` 方法在池内拿 `&SqliteStore` 执行。
+    ///
+    /// SqliteStore 用同步 rusqlite，trait 面 async 包装必须走线程池避免阻塞
+    /// async runtime；join 失败（阻塞任务 panic / 被取消）统一经 [`join_err`]
+    /// 映射为 [`StorageError`]。闭包内的同名词方法解析遵循固有方法优先。
+    async fn blocking<F, T>(&self, f: F) -> Result<T, StorageError>
+    where
+        F: FnOnce(&Self) -> Result<T, StorageError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || f(&this))
+            .await
+            .map_err(join_err)?
+    }
+}
+
+/// 按 thread 收集会话关联的 pipeline_id 去重集合：`pipeline_sessions` 映射表
+/// 为主，`sessions.pipeline_ids`（JSON 文本）兜底补全——防映射表未落行时漏掉
+/// 主管道。读路径/删除路径共用。
+fn pipeline_ids_for_thread(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    tenant_id: &str,
+) -> Result<Vec<String>, StorageError> {
+    let mut pipeline_ids: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT pipeline_id FROM pipeline_sessions WHERE thread_id = ?1 AND tenant_id = ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![thread_id, tenant_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        for r in rows {
+            let pid = r?;
+            if !pipeline_ids.contains(&pid) {
+                pipeline_ids.push(pid);
+            }
+        }
+    }
+    // 兜底：从 sessions.pipeline_ids (JSON) 补全主管道 id
+    let session_row: Option<(Option<String>,)> = conn
+        .query_row(
+            "SELECT pipeline_ids FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
+            rusqlite::params![thread_id, tenant_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?,)),
+        )
+        .optional()?;
+    if let Some((Some(json),)) = session_row {
+        let list = serde_json::from_str::<Vec<String>>(&json).map_err(|e| {
+            StorageError::Serialization(format!("session {thread_id} pipeline_ids: {e}"))
+        })?;
+        for pid in list {
+            if !pid.is_empty() && !pipeline_ids.contains(&pid) {
+                pipeline_ids.push(pid);
+            }
+        }
+    }
+    Ok(pipeline_ids)
+}
+
+/// 经 message_slots 按 pipeline 集合反查产生过的 run_id 去重集合，跳过 NULL。
+///
+/// `message_slots.run_id` 可为 NULL（流式占位消息等）：用 Option 读取跳过，
+/// 避免 Invalid column type Null 抛错导致整个删除事务回滚。
+/// 调用方需保证 `pipeline_ids` 非空（空 IN 列表非法；现有调用点均先空集早退）。
+fn run_ids_of_pipelines(
+    conn: &rusqlite::Connection,
+    pipeline_ids: &[String],
+    tenant_id: &str,
+) -> Result<Vec<String>, StorageError> {
+    let placeholders = (0..pipeline_ids.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT DISTINCT run_id FROM message_slots WHERE pipeline_id IN ({placeholders}) AND tenant_id = ?"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut params: Vec<&dyn rusqlite::ToSql> = pipeline_ids
+        .iter()
+        .map(|p| p as &dyn rusqlite::ToSql)
+        .collect();
+    params.push(&tenant_id);
+    let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, Option<String>>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        if let Some(rid) = r? {
+            if !out.contains(&rid) {
+                out.push(rid);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// spawn_blocking join 失败（阻塞任务 panic / 被取消）→ [`StorageError`] 的统一转换。
-/// 下方 trait async 包装（spawn_blocking 转发固有同步方法）共用。
+/// [`SqliteStore::blocking`]（spawn_blocking 转发固有同步方法）共用。
 fn join_err(e: tokio::task::JoinError) -> StorageError {
     StorageError::Database(format!("join error: {e}"))
 }
@@ -2447,22 +2412,18 @@ impl StorageBackend for SqliteStore {
         tenant_id: &str,
     ) -> Result<(), StorageError> {
         // 在阻塞任务里执行，避免阻塞 async runtime（SqliteStore 用同步 rusqlite）
-        let this = self.clone();
         let run_id = run_id.to_string();
         let config_hash = config_hash.to_string();
         let tenant_id = tenant_id.to_string();
-        tokio::task::spawn_blocking(move || this.create_run(&run_id, &config_hash, &tenant_id))
+        self.blocking(move |this| this.create_run(&run_id, &config_hash, &tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn store_blob(&self, data: &[u8], mime_type: &str) -> Result<String, StorageError> {
-        let this = self.clone();
         let data = data.to_vec();
         let mime_type = mime_type.to_string();
-        tokio::task::spawn_blocking(move || this.store_blob(&data, &mime_type))
+        self.blocking(move |this| this.store_blob(&data, &mime_type))
             .await
-            .map_err(join_err)?
     }
 
     // ── 域10：分层持久化投影（trait async 包装，spawn_blocking + task_local tenant）──
@@ -2473,15 +2434,11 @@ impl StorageBackend for SqliteStore {
         tenant_id: &str,
         ops: &[serde_json::Value],
     ) -> Result<(), StorageError> {
-        let this = self.clone();
         let pipeline_id = pipeline_id.to_string();
         let tenant_id = tenant_id.to_string();
         let ops = ops.to_vec();
-        tokio::task::spawn_blocking(move || {
-            this.apply_messages_ops_to_table(&pipeline_id, &tenant_id, &ops)
-        })
-        .await
-        .map_err(join_err)?
+        self.blocking(move |this| this.apply_messages_ops_to_table(&pipeline_id, &tenant_id, &ops))
+            .await
     }
 
     async fn upsert_state_field(
@@ -2491,16 +2448,12 @@ impl StorageBackend for SqliteStore {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), StorageError> {
-        let this = self.clone();
         let pipeline_id = pipeline_id.to_string();
         let tenant_id = tenant_id.to_string();
         let key = key.to_string();
         let value = value.clone();
-        tokio::task::spawn_blocking(move || {
-            this.upsert_state_field(&pipeline_id, &tenant_id, &key, &value)
-        })
-        .await
-        .map_err(join_err)?
+        self.blocking(move |this| this.upsert_state_field(&pipeline_id, &tenant_id, &key, &value))
+            .await
     }
 
     async fn load_pipeline_state(
@@ -2508,12 +2461,10 @@ impl StorageBackend for SqliteStore {
         pipeline_id: &str,
         tenant_id: &str,
     ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
-        let this = self.clone();
         let pipeline_id = pipeline_id.to_string();
         let tenant_id = tenant_id.to_string();
-        tokio::task::spawn_blocking(move || this.load_pipeline_state(&pipeline_id, &tenant_id))
+        self.blocking(move |this| this.load_pipeline_state(&pipeline_id, &tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn save_checkpoint(
@@ -2523,15 +2474,11 @@ impl StorageBackend for SqliteStore {
         step_no: i64,
         state: &serde_json::Value,
     ) -> Result<(), StorageError> {
-        let this = self.clone();
         let pipeline_id = pipeline_id.to_string();
         let tenant_id = tenant_id.to_string();
         let state = state.clone();
-        tokio::task::spawn_blocking(move || {
-            this.save_checkpoint(&pipeline_id, &tenant_id, step_no, &state)
-        })
-        .await
-        .map_err(join_err)?
+        self.blocking(move |this| this.save_checkpoint(&pipeline_id, &tenant_id, step_no, &state))
+            .await
     }
 
     async fn load_latest_checkpoint(
@@ -2539,23 +2486,19 @@ impl StorageBackend for SqliteStore {
         pipeline_id: &str,
         tenant_id: &str,
     ) -> Result<Option<(i64, serde_json::Value)>, StorageError> {
-        let this = self.clone();
         let pipeline_id = pipeline_id.to_string();
         let tenant_id = tenant_id.to_string();
-        tokio::task::spawn_blocking(move || this.load_latest_checkpoint(&pipeline_id, &tenant_id))
+        self.blocking(move |this| this.load_latest_checkpoint(&pipeline_id, &tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn list_state_pipeline_ids(
         &self,
         tenant_id: &str,
     ) -> Result<Vec<(String, String)>, StorageError> {
-        let this = self.clone();
         let tenant_id = tenant_id.to_string();
-        tokio::task::spawn_blocking(move || this.list_state_pipeline_ids(&tenant_id))
+        self.blocking(move |this| this.list_state_pipeline_ids(&tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn load_message_history(
@@ -2563,12 +2506,10 @@ impl StorageBackend for SqliteStore {
         pipeline_id: &str,
         tenant_id: &str,
     ) -> Result<Vec<serde_json::Value>, StorageError> {
-        let this = self.clone();
         let pipeline_id = pipeline_id.to_string();
         let tenant_id = tenant_id.to_string();
-        tokio::task::spawn_blocking(move || this.load_message_history(&pipeline_id, &tenant_id))
+        self.blocking(move |this| this.load_message_history(&pipeline_id, &tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     // ── 域11：pending 输入队列（ADR-2026-08-26）──────────────────────
@@ -2579,15 +2520,11 @@ impl StorageBackend for SqliteStore {
         pipeline_id: &str,
         input: &PendingInputRecord,
     ) -> Result<(), StorageError> {
-        let this = self.clone();
         let tenant_id = tenant_id.to_string();
         let pipeline_id = pipeline_id.to_string();
         let input = input.clone();
-        tokio::task::spawn_blocking(move || {
-            this.enqueue_pending_input(&tenant_id, &pipeline_id, &input)
-        })
-        .await
-        .map_err(join_err)?
+        self.blocking(move |this| this.enqueue_pending_input(&tenant_id, &pipeline_id, &input))
+            .await
     }
 
     async fn pop_pending_input(
@@ -2595,12 +2532,10 @@ impl StorageBackend for SqliteStore {
         tenant_id: &str,
         pipeline_id: &str,
     ) -> Result<Option<PendingInputRecord>, StorageError> {
-        let this = self.clone();
         let tenant_id = tenant_id.to_string();
         let pipeline_id = pipeline_id.to_string();
-        tokio::task::spawn_blocking(move || this.pop_pending_input(&tenant_id, &pipeline_id))
+        self.blocking(move |this| this.pop_pending_input(&tenant_id, &pipeline_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn list_pending_inputs(
@@ -2608,12 +2543,10 @@ impl StorageBackend for SqliteStore {
         tenant_id: &str,
         pipeline_id: &str,
     ) -> Result<Vec<PendingInputRecord>, StorageError> {
-        let this = self.clone();
         let tenant_id = tenant_id.to_string();
         let pipeline_id = pipeline_id.to_string();
-        tokio::task::spawn_blocking(move || this.list_pending_inputs(&tenant_id, &pipeline_id))
+        self.blocking(move |this| this.list_pending_inputs(&tenant_id, &pipeline_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn update_pending_input_content(
@@ -2623,16 +2556,14 @@ impl StorageBackend for SqliteStore {
         input_id: &str,
         new_content: &str,
     ) -> Result<bool, StorageError> {
-        let this = self.clone();
         let tenant_id = tenant_id.to_string();
         let pipeline_id = pipeline_id.to_string();
         let input_id = input_id.to_string();
         let new_content = new_content.to_string();
-        tokio::task::spawn_blocking(move || {
+        self.blocking(move |this| {
             this.update_pending_input_content(&tenant_id, &pipeline_id, &input_id, &new_content)
         })
         .await
-        .map_err(join_err)?
     }
 
     async fn delete_pending_input(
@@ -2641,15 +2572,11 @@ impl StorageBackend for SqliteStore {
         pipeline_id: &str,
         input_id: &str,
     ) -> Result<bool, StorageError> {
-        let this = self.clone();
         let tenant_id = tenant_id.to_string();
         let pipeline_id = pipeline_id.to_string();
         let input_id = input_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            this.delete_pending_input(&tenant_id, &pipeline_id, &input_id)
-        })
-        .await
-        .map_err(join_err)?
+        self.blocking(move |this| this.delete_pending_input(&tenant_id, &pipeline_id, &input_id))
+            .await
     }
 
     async fn clear_pending_inputs(
@@ -2657,32 +2584,26 @@ impl StorageBackend for SqliteStore {
         tenant_id: &str,
         pipeline_id: &str,
     ) -> Result<usize, StorageError> {
-        let this = self.clone();
         let tenant_id = tenant_id.to_string();
         let pipeline_id = pipeline_id.to_string();
-        tokio::task::spawn_blocking(move || this.clear_pending_inputs(&tenant_id, &pipeline_id))
+        self.blocking(move |this| this.clear_pending_inputs(&tenant_id, &pipeline_id))
             .await
-            .map_err(join_err)?
     }
 
     // ── 域2：session 标签夹 CRUD（对齐 0.1 SessionModel）──────────────
     // 注意：tenant_id 必须在 spawn_blocking 之前解析——tokio::task_local 不跨 spawn_blocking。
     async fn create_session(&self, session: &SessionRecord) -> Result<(), StorageError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
         let session = session.clone();
-        tokio::task::spawn_blocking(move || this.upsert_session_inner(&session, &tenant_id))
+        self.blocking(move |this| this.upsert_session_inner(&session, &tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn get_session(&self, thread_id: &str) -> Result<Option<SessionRecord>, StorageError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
         let thread_id = thread_id.to_string();
-        tokio::task::spawn_blocking(move || this.get_session_inner(&thread_id, &tenant_id))
+        self.blocking(move |this| this.get_session_inner(&thread_id, &tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn list_sessions(
@@ -2690,37 +2611,29 @@ impl StorageBackend for SqliteStore {
         filter: SessionListFilter,
     ) -> Result<Vec<SessionRecord>, StorageError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || this.list_sessions_inner(&filter, &tenant_id))
+        self.blocking(move |this| this.list_sessions_inner(&filter, &tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn update_session(&self, session: &SessionRecord) -> Result<(), StorageError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
         let session = session.clone();
-        tokio::task::spawn_blocking(move || this.upsert_session_inner(&session, &tenant_id))
+        self.blocking(move |this| this.upsert_session_inner(&session, &tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn delete_session(&self, thread_id: &str) -> Result<(), StorageError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
         let thread_id = thread_id.to_string();
-        tokio::task::spawn_blocking(move || this.delete_session_inner(&thread_id, &tenant_id))
+        self.blocking(move |this| this.delete_session_inner(&thread_id, &tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn delete_pipeline(&self, pipeline_id: &str) -> Result<(), StorageError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let this = self.clone();
         let pipeline_id = pipeline_id.to_string();
-        tokio::task::spawn_blocking(move || this.delete_pipeline_inner(&pipeline_id, &tenant_id))
+        self.blocking(move |this| this.delete_pipeline_inner(&pipeline_id, &tenant_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn link_pipeline_session(
@@ -2729,15 +2642,13 @@ impl StorageBackend for SqliteStore {
         thread_id: &str,
         tenant_id: &str,
     ) -> Result<(), StorageError> {
-        let this = self.clone();
         let pipeline_id = pipeline_id.to_string();
         let thread_id = thread_id.to_string();
         let tenant_id = tenant_id.to_string();
-        tokio::task::spawn_blocking(move || {
+        self.blocking(move |this| {
             this.link_pipeline_session_inner(&pipeline_id, &thread_id, &tenant_id)
         })
         .await
-        .map_err(join_err)?
     }
 
     async fn list_pipeline_ids_by_thread(
@@ -2745,25 +2656,19 @@ impl StorageBackend for SqliteStore {
         thread_id: &str,
         tenant_id: &str,
     ) -> Result<Vec<String>, StorageError> {
-        let this = self.clone();
         let thread_id = thread_id.to_string();
         let tenant_id = tenant_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            this.list_pipeline_ids_by_thread_inner(&thread_id, &tenant_id)
-        })
-        .await
-        .map_err(join_err)?
+        self.blocking(move |this| this.list_pipeline_ids_by_thread_inner(&thread_id, &tenant_id))
+            .await
     }
 
     async fn get_thread_id_by_pipeline(
         &self,
         pipeline_id: &str,
     ) -> Result<Option<String>, StorageError> {
-        let this = self.clone();
         let pipeline_id = pipeline_id.to_string();
-        tokio::task::spawn_blocking(move || this.get_thread_id_by_pipeline_inner(&pipeline_id))
+        self.blocking(move |this| this.get_thread_id_by_pipeline_inner(&pipeline_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn get_step_traces_by_thread(
@@ -2771,14 +2676,10 @@ impl StorageBackend for SqliteStore {
         thread_id: &str,
         tenant_id: &str,
     ) -> Result<Vec<TraceEntry>, StorageError> {
-        let this = self.clone();
         let thread_id = thread_id.to_string();
         let tenant_id = tenant_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            this.get_step_traces_by_thread_inner(&thread_id, &tenant_id)
-        })
-        .await
-        .map_err(join_err)?
+        self.blocking(move |this| this.get_step_traces_by_thread_inner(&thread_id, &tenant_id))
+            .await
     }
 
     // ── 域6：users async wrapper（0.5.0 最小持久化地基）──────────────
@@ -2786,20 +2687,16 @@ impl StorageBackend for SqliteStore {
     // get_user_by_id 按 tenant 隔离（与消息/会话一致，task_local 在 spawn_blocking 前解析）。
 
     async fn create_user(&self, user: &UserRecord) -> Result<(), StorageError> {
-        let this = self.clone();
         let user = user.clone();
-        tokio::task::spawn_blocking(move || this.create_user_inner(&user))
+        self.blocking(move |this| this.create_user_inner(&user))
             .await
-            .map_err(join_err)?
     }
 
     async fn get_user_by_id(&self, user_id: &str) -> Result<Option<UserRecord>, StorageError> {
         // 跨租户查询（token 解析场景，user_id 是全局主键），不依赖 task_local tenant
-        let this = self.clone();
         let user_id = user_id.to_string();
-        tokio::task::spawn_blocking(move || this.get_user_by_id_inner(&user_id))
+        self.blocking(move |this| this.get_user_by_id_inner(&user_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn get_user_by_username(
@@ -2807,34 +2704,25 @@ impl StorageBackend for SqliteStore {
         username: &str,
     ) -> Result<Option<UserRecord>, StorageError> {
         // 跨租户查询（登录时还没有租户上下文），不解析 task_local tenant
-        let this = self.clone();
         let username = username.to_string();
-        tokio::task::spawn_blocking(move || this.get_user_by_username_inner(&username))
+        self.blocking(move |this| this.get_user_by_username_inner(&username))
             .await
-            .map_err(join_err)?
     }
 
     async fn list_users(&self) -> Result<Vec<UserRecord>, StorageError> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || this.list_users_inner())
-            .await
-            .map_err(join_err)?
+        self.blocking(move |this| this.list_users_inner()).await
     }
 
     async fn update_last_login(&self, user_id: &str) -> Result<(), StorageError> {
-        let this = self.clone();
         let user_id = user_id.to_string();
-        tokio::task::spawn_blocking(move || this.update_last_login_inner(&user_id))
+        self.blocking(move |this| this.update_last_login_inner(&user_id))
             .await
-            .map_err(join_err)?
     }
 
     async fn delete_user(&self, user_id: &str) -> Result<bool, StorageError> {
-        let this = self.clone();
         let user_id = user_id.to_string();
-        tokio::task::spawn_blocking(move || this.delete_user_inner(&user_id))
+        self.blocking(move |this| this.delete_user_inner(&user_id))
             .await
-            .map_err(join_err)?
     }
 }
 
@@ -2941,6 +2829,92 @@ mod tests {
         assert_eq!(count("SELECT COUNT(*) FROM message_slots"), 0, "消息应删除");
         assert_eq!(count("SELECT COUNT(*) FROM runs"), 0, "runs 应删除");
         assert_eq!(count("SELECT COUNT(*) FROM traces"), 0, "traces 应删除");
+    }
+
+    /// 回归测试：delete_session 在映射表无行时，经 sessions.pipeline_ids（JSON）
+    /// 兜底收集照样级联清理；其他会话的管道数据不受波及。
+    ///
+    /// 正常输入（JSON 内两个管道 id）、边界（无 run_id 的占位消息行）与
+    /// 隔离对照（第三管道归其他会话）三组断言共同锁定收集范围语义。
+    #[tokio::test]
+    async fn test_delete_session_collects_pipeline_ids_from_json_fallback() {
+        let store = SqliteStore::open_memory().unwrap();
+        let tid = "thread-json-fallback";
+        let now = chrono::Utc::now().to_rfc3339();
+
+        {
+            let conn = store.conn.lock();
+            // 会话行只带 pipeline_ids JSON，不写 pipeline_sessions 映射行（兜底唯一入口）
+            conn.execute(
+                "INSERT INTO sessions (thread_id, title, current_state, tenant_id, created_at, updated_at, pipeline_ids) \
+                 VALUES (?1, ?2, 'active', 'default', ?3, ?3, ?4)",
+                rusqlite::params![tid, "json-fallback", now, r#"["p-aaa","p-bbb"]"#],
+            )
+            .unwrap();
+            // 兜底收集到的管道：有 run 的消息 → 应被级联删除
+            conn.execute(
+                "INSERT INTO message_slots (tenant_id, pipeline_id, seq, message_id, run_id, created_at) \
+                 VALUES ('default', 'p-aaa', 1, 'm1', 'run-json-1', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runs (run_id, config_hash, status, tenant_id, created_at, current_branch) \
+                 VALUES ('run-json-1', 'h', 'completed', 'default', ?1, 'main')",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            // 无 run_id 的流式占位行：跳过，不得抛错回滚
+            conn.execute(
+                "INSERT INTO message_slots (tenant_id, pipeline_id, seq, message_id, run_id, created_at) \
+                 VALUES ('default', 'p-bbb', 1, 'm2-null', NULL, ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            // 隔离对照：属于其他会话的管道，一个字节都不能少
+            conn.execute(
+                "INSERT INTO message_slots (tenant_id, pipeline_id, seq, message_id, run_id, created_at) \
+                 VALUES ('default', 'p-other', 1, 'm3', 'run-json-keep', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runs (run_id, config_hash, status, tenant_id, created_at, current_branch) \
+                 VALUES ('run-json-keep', 'h', 'running', 'default', ?1, 'main')",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        }
+
+        store.delete_session(tid).await.unwrap();
+
+        let conn = store.conn.lock();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM sessions"),
+            0,
+            "目标会话应删除（库中仅此一个会话）"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM runs WHERE run_id = 'run-json-1'"),
+            0,
+            "兜底收集的管道之 run 应级联删除"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM message_slots"),
+            1,
+            "应只剩隔离对照消息"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM message_slots WHERE message_id = 'm3'"),
+            1,
+            "其他会话的消息不应误删"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM runs WHERE run_id = 'run-json-keep'"),
+            1,
+            "其他会话的 run 不应误删"
+        );
     }
 
     /// 回归测试：损坏的 SQLite 文件不应导致 kernel 启动崩溃（issue: kernel 启动后 /health 不响应）。

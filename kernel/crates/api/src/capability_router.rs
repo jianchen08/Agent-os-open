@@ -773,37 +773,20 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 // 请求——插件只发一次 event-bus，内核单点分流。
                 if event_name == "approval.created" {
                     if let Some(broadcaster) = &self.domain_broadcaster {
+                        // tag 提取同 derive_run_terminal_events 的 v() 法：字段缺失以 Null 占位。
+                        let tag = |k: &'static str| {
+                            (
+                                k,
+                                payload.get(k).cloned().unwrap_or(serde_json::Value::Null),
+                            )
+                        };
                         broadcaster(
                             "approval.created",
                             vec![
-                                (
-                                    "request_id",
-                                    payload
-                                        .get("request_id")
-                                        .cloned()
-                                        .unwrap_or(serde_json::Value::Null),
-                                ),
-                                (
-                                    "run_id",
-                                    payload
-                                        .get("run_id")
-                                        .cloned()
-                                        .unwrap_or(serde_json::Value::Null),
-                                ),
-                                (
-                                    "pipeline_id",
-                                    payload
-                                        .get("pipeline_id")
-                                        .cloned()
-                                        .unwrap_or(serde_json::Value::Null),
-                                ),
-                                (
-                                    "thread_id",
-                                    payload
-                                        .get("thread_id")
-                                        .cloned()
-                                        .unwrap_or(serde_json::Value::Null),
-                                ),
+                                tag("request_id"),
+                                tag("run_id"),
+                                tag("pipeline_id"),
+                                tag("thread_id"),
                             ],
                         );
                     }
