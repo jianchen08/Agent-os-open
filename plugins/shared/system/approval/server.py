@@ -522,6 +522,148 @@ def _decode_body(raw_body: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+_INTERACTION_PREFIX = "/ext/approval_service/interaction"
+
+
+def _interaction_not_found(path: str) -> dict[str, Any]:
+    """404 响应信封（对齐源 routes_missing.interaction_router 的 {"detail":...} 口径外错误形态）。"""
+    return _ok(_json_response({"error": "not found", "path": path}, 404))
+
+
+async def _route_submit_response(
+    service: Any,
+    raw_body: str,
+) -> dict[str, Any]:
+    """POST /response：提交交互响应。
+
+    body.response.* 嵌套或扁平两种形态均落 request_id 判定；服务未注入降级
+    ``{"success": False}``。
+    """
+    body = _decode_body(raw_body)
+    if not body or "request_id" not in body:
+        return _ok(_json_response({"detail": "缺少 request_id"}, 400))
+    if service is None:
+        return _ok(_json_response({"success": False}))
+    result = await service.respond(body["request_id"], body)
+    return _ok(_json_response({"success": result}))
+
+
+async def _route_list_pending(service: Any) -> dict[str, Any]:
+    """GET /pending：待处理请求列表；服务未注入降级空列表。"""
+    if service is None:
+        return _ok(_json_response({"items": [], "total": 0}))
+    requests = await service.get_pending_requests()
+    return _ok(_json_response({"items": requests, "total": len(requests)}))
+
+
+def _match_request_route(sub: str) -> tuple[str, str] | None:
+    """/{request_id} 系列路由解析：返回 (rid, action)；非该系列返回 None。
+
+    action 取值："detail"（GET /{rid}）或 approve/deny/cancel/viewed
+    （POST /{rid}/{action}）；method 归属校验由执行器负责。
+    """
+    if not (sub.startswith("/") and len(sub) > 1):
+        return None
+    rest = sub[1:]
+    if "/" not in rest:
+        return rest, "detail"
+    rid, action = rest.split("/", 1)
+    return rid, action
+
+
+async def _dispatch_request_action(
+    service: Any,
+    rid: str,
+    action: str,
+    method: str,
+    raw_body: str,
+) -> dict[str, Any] | None:
+    """执行 /{request_id} 系列端点；路由命中但方法不符或动作未知返回 None（调用方统一 404）。"""
+    if action == "detail":
+        # GET /{rid}：交互请求详情；不存在与服务未注入同形 404
+        if method != "GET":
+            return None
+        if service is None:
+            return _ok(_json_response({"detail": "交互请求不存在"}, 404))
+        record = await service.get_request(rid)
+        if not record:
+            return _ok(_json_response({"detail": "交互请求不存在"}, 404))
+        return _ok(_json_response(record))
+
+    if action in ("approve", "deny") and method == "POST":
+        if service is None:
+            return _ok(_json_response({
+                "success": False,
+                "request_id": rid,
+                "status": "approved" if action == "approve" else "denied",
+            }))
+        body = _decode_body(raw_body)
+        result = await service.submit_response(
+            request_id=rid,
+            response_type="approved" if action == "approve" else "denied",
+            selected_option="approve" if action == "approve" else "reject",
+            feedback=body.get("feedback") if body else None,
+        )
+        return _ok(_json_response({
+            "success": result,
+            "request_id": rid,
+            "status": "approved" if action == "approve" else "denied",
+        }))
+
+    if action == "cancel" and method == "POST":
+        if service is None:
+            return _ok(_json_response({
+                "success": False,
+                "request_id": rid,
+                "status": "cancelled",
+            }))
+        body = _decode_body(raw_body)
+        result = await service.cancel_request(
+            request_id=rid,
+            reason=body.get("reason") if body else None,
+        )
+        return _ok(_json_response({
+            "success": result,
+            "request_id": rid,
+            "status": "cancelled",
+        }))
+
+    if action == "viewed" and method == "POST":
+        # viewed 不消费 body（标记已读无参数）
+        if service is None:
+            return _ok(_json_response({
+                "success": False,
+                "request_id": rid,
+                "viewed": True,
+            }))
+        result = await service.mark_as_viewed(rid)
+        return _ok(_json_response({
+            "success": result,
+            "request_id": rid,
+            "viewed": True,
+        }))
+
+    return None
+
+
+async def _route_interaction_subroute(
+    service: Any,
+    sub: str,
+    method: str,
+    raw_body: str,
+) -> dict[str, Any] | None:
+    """按 sub 路径依次匹配 interaction 域 7 条路由；无一命中返回 None（调用方统一 404）。"""
+    if sub == "/response" and method == "POST":
+        return await _route_submit_response(service, raw_body)
+    if sub == "/pending" and method == "GET":
+        return await _route_list_pending(service)
+    request_match = _match_request_route(sub)
+    if request_match is not None:
+        rid, action = request_match
+        return await _dispatch_request_action(service, rid, action, method, raw_body)
+    return None
+
+
 @plugin.tool(
     name="http.handle",
     schema={
@@ -552,101 +694,17 @@ async def http_handle(
     """
     del plugin_id, headers, query
 
-    prefix = "/ext/approval_service/interaction"
-    if not path.startswith(prefix):
-        return _ok(_json_response({"error": "not found", "path": path}, 404))
-    sub = path[len(prefix):]
+    if not path.startswith(_INTERACTION_PREFIX):
+        return _interaction_not_found(path)
+    sub = path[len(_INTERACTION_PREFIX):]
     service = _get_human_interaction_service()
 
-    def _empty_pending() -> dict[str, Any]:
-        return _ok(_json_response({"items": [], "total": 0}))
-
     try:
-        # POST /response：提交交互响应（body.response.* 嵌套或扁平两种形态）
-        if sub == "/response" and method == "POST":
-            body = _decode_body(raw_body)
-            if not body or "request_id" not in body:
-                return _ok(_json_response({"detail": "缺少 request_id"}, 400))
-            if service is None:
-                return _ok(_json_response({"success": False}))
-            result = await service.respond(body["request_id"], body)
-            return _ok(_json_response({"success": result}))
-
-        # GET /pending：待处理请求列表
-        if sub == "/pending" and method == "GET":
-            if service is None:
-                return _empty_pending()
-            requests = await service.get_pending_requests()
-            return _ok(_json_response({"items": requests, "total": len(requests)}))
-
-        # /{request_id} 系列
-        if sub.startswith("/") and len(sub) > 1:
-            rest = sub[1:]
-            if "/" not in rest:
-                rid = rest
-                if method == "GET":
-                    if service is None:
-                        return _ok(_json_response({"detail": "交互请求不存在"}, 404))
-                    record = await service.get_request(rid)
-                    if not record:
-                        return _ok(_json_response({"detail": "交互请求不存在"}, 404))
-                    return _ok(_json_response(record))
-            else:
-                rid, action = rest.split("/", 1)
-                if action in ("approve", "deny") and method == "POST":
-                    if service is None:
-                        success = False
-                    else:
-                        body = _decode_body(raw_body)
-                        if action == "approve":
-                            result = await service.submit_response(
-                                request_id=rid,
-                                response_type="approved",
-                                selected_option="approve",
-                                feedback=body.get("feedback") if body else None,
-                            )
-                        else:
-                            result = await service.submit_response(
-                                request_id=rid,
-                                response_type="denied",
-                                selected_option="reject",
-                                feedback=body.get("feedback") if body else None,
-                            )
-                        success = result
-                    return _ok(_json_response({
-                        "success": success,
-                        "request_id": rid,
-                        "status": "approved" if action == "approve" else "denied",
-                    }))
-                if action == "cancel" and method == "POST":
-                    if service is None:
-                        success = False
-                    else:
-                        body = _decode_body(raw_body)
-                        result = await service.cancel_request(
-                            request_id=rid,
-                            reason=body.get("reason") if body else None,
-                        )
-                        success = result
-                    return _ok(_json_response({
-                        "success": success,
-                        "request_id": rid,
-                        "status": "cancelled",
-                    }))
-                if action == "viewed" and method == "POST":
-                    if service is None:
-                        success = False
-                    else:
-                        result = await service.mark_as_viewed(rid)
-                        success = result
-                    return _ok(_json_response({
-                        "success": success,
-                        "request_id": rid,
-                        "viewed": True,
-                    }))
-
+        routed = await _route_interaction_subroute(service, sub, method, raw_body)
+        if routed is not None:
+            return routed
         logger.warning("http.handle: no route for sub=%s method=%s", sub, method)
-        return _ok(_json_response({"error": "not found", "path": path}, 404))
+        return _interaction_not_found(path)
     except ValueError as exc:
         return _ok(_json_response({"error": str(exc)}, 400))
     except Exception as exc:  # noqa: BLE001 —— 工具代理/服务异常统一 500

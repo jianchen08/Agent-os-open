@@ -532,6 +532,51 @@ class LLMResponse:
     finish_reason: str | None = None
 
 
+@dataclass
+class _StreamState:
+    """单次流式调用的跨方法共享状态。
+
+    ``_call_streaming`` 按职责拆分为多个私有辅助方法后，原闭包/局部可变状态统一由本
+    dataclass 持有并在方法间传递（对象属性原地修改），各方法无需 ``nonlocal`` 即可
+    读写同一份状态——行为与拆分前的闭包实现完全等价。
+
+    Attributes:
+        result_parts: 正文文本片段（按 chunk 顺序累积）。
+        thinking_parts: 思考内容片段（reasoning_content / ``<think/>`` 标签内容）。
+        tool_calls_map: 流式 tool_calls 增量按 index 合并的映射。
+        stream_usage: 最后一次收到的流式 usage（通常在末尾 chunk）。
+        stream_repetition: 是否因 ``on_chunk`` 返回 ``"stop"``（重复检测）而截断。
+        thinking_truncated: 思考内容是否因超过 ``max_thinking_chars`` 被截断。
+        finish_reason: 结束原因观察值（由接收端点诊断捕获）。
+        on_chunk: 流式 chunk 回调（只读配置）。
+        max_thinking_chars: 思考内容截断阈值（只读配置）。
+        stream_start: 流式消费起始 monotonic 时间（速度统计用）。
+        last_chunk_monotonic: 上个 chunk 到达的 monotonic 时间（心跳量化静默用）。
+        chunks_received: 累计收到的 chunk 数（心跳/超时日志用）。
+        recv_seq: 接收端点诊断序号（tool_calls chunk 到达次数）。
+        recv_tc_count: 累计收到含 tool_calls 的 chunk 数。
+        in_think_tag: 流式 ``<think/>`` 标签状态机当前是否处于开标签内。
+    """
+
+    result_parts: list[str] = field(default_factory=list)
+    thinking_parts: list[str] = field(default_factory=list)
+    tool_calls_map: dict[int, dict[str, Any]] = field(default_factory=dict)
+    stream_usage: dict[str, Any] | None = None
+    stream_repetition: bool = False
+    thinking_truncated: bool = False
+    finish_reason: str | None = None
+    # 只读配置
+    on_chunk: Callable[[dict[str, Any]], Any] | None = None
+    max_thinking_chars: int = 180000
+    # 计时 / 诊断计数
+    stream_start: float = 0.0
+    last_chunk_monotonic: float = 0.0
+    chunks_received: int = 0
+    recv_seq: int = 0
+    recv_tc_count: int = 0
+    in_think_tag: bool = False
+
+
 # ---------------------------------------------------------------------------
 # 抽象接口
 # ---------------------------------------------------------------------------
@@ -784,7 +829,7 @@ class _BaseLiteLLMAdapter:
             finish_reason=getattr(choice, "finish_reason", None),
         )
 
-    async def _call_streaming(  # noqa: PLR0915
+    async def _call_streaming(
         self,
         model: str,
         messages: list[dict[str, Any]],
@@ -793,16 +838,33 @@ class _BaseLiteLLMAdapter:
         on_chunk: Callable[[dict[str, Any]], Any] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        """流式调用 LLM。"""
+        """流式调用 LLM。
+
+        阶段序列：
+        1. 参数准备：剥出流式专属参数，构造 litellm 调用参数；
+        2. 建连+首 chunk（_establish_first_chunk）：首字节超时统一覆盖
+           "建连→等响应头→首字节"全过程；
+        3. 消费流（_consume_stream）：inter-chunk 静默超时 + 心跳探针 +
+           独立线程硬超时兜底，finally 里限时清理全部资源；
+        4. 汇总累积状态构造响应。
+
+        Args:
+            model: LiteLLM 格式的模型标识字符串
+            messages: 对话消息列表
+            tools: 工具 Schema 列表（可选）
+            on_chunk: 流式 chunk 回调（可选）；回调返回 "stop" 可截断输出
+            **kwargs: 其余参数透传 litellm；流式专属键 first_chunk_timeout /
+                inter_chunk_timeout / max_thinking_chars 在此剥出，不进入请求参数
+        """
         # 流式超时：首个 chunk 检测连接是否建立，后续 chunk 防止连接僵死。
         # 必须在构造 call_kwargs 之前 pop 出来，否则会被 **kwargs 塞进
         # litellm 请求参数（litellm 不识别这两个 key）。
         first_chunk_timeout = float(kwargs.pop("first_chunk_timeout", 180))
         # inter-chunk 静默超时：连续 N 秒收不到任何 chunk 即判定上游/传输静默，
-        # 抛 litellm.Timeout 中断死等。每个 chunk 到达即重置计时器（见下方主循环
-        # asyncio.wait_for），故活跃推理（reasoning 持续吐 chunk）永不触发，只有
-        # 真正静默（连接挂起/上游冻结）才在 N 秒后掐断。生产由插件传入 stream_idle_timeout
-        # 覆盖；此处默认 600s 为直连/测试调用兜底。
+        # 抛 litellm.Timeout 中断死等。每个 chunk 到达即重置计时器（见主循环），
+        # 故活跃推理（reasoning 持续吐 chunk）永不触发，只有真正静默（连接挂起/
+        # 上游冻结）才在 N 秒后掐断。生产由插件传入 stream_idle_timeout 覆盖；
+        # 此处默认 600s 为直连/测试调用兜底。
         inter_chunk_timeout = float(kwargs.pop("inter_chunk_timeout", 600))
 
         call_kwargs: dict[str, Any] = {
@@ -815,74 +877,46 @@ class _BaseLiteLLMAdapter:
         if tools:
             call_kwargs["tools"] = tools
 
-        # timeout 传 180（first_chunk_timeout）：KeyPool 路径在 _direct_call_with_slot
-        # 会覆盖为 first_chunk_timeout 本身——httpx 层超时在线程池线程内生效，
-        # 事件循环冻结也能到点抛异常（生产 17:05:34 卡死 36 分钟的根因是 3600s
-        # HTTP 超时太长 + asyncio 层超时随事件循环冻结失效）。
+        # timeout 取 first_chunk_timeout：KeyPool 路径在 _direct_call_with_slot 会
+        # 覆盖为 first_chunk_timeout 本身——httpx 层超时在线程池线程内生效，事件
+        # 循环冻结也能到点抛异常（httpx 层长超时 + asyncio 层超时随事件循环冻结
+        # 失效的组合是引擎级挂死的根因，见 KeyPoolAdapter 同类注释）。
         call_kwargs["timeout"] = first_chunk_timeout
 
-        # 首字节超时统一覆盖"建连→等响应头→首字节"全过程：把 first_chunk_timeout 的
-        # wait_for 同时包住 _do_completion 和首 chunk 读取。
-        # 上游"半死连接"（TCP 建连成功、请求已发出，但上游既不回数据也不断开）会让
-        # _do_completion 卡在 litellm.acompletion 的建连/等响应头阶段——既不是 429，
-        # 也不是连接错误，若 wait_for 仅包首个 __anext__() 则因 _do_completion 尚未
-        # 返回而无法启动，请求会静默挂死直到 1 小时的 httpx timeout。
+        response, first_chunk = await self._establish_first_chunk(
+            model, call_kwargs, first_chunk_timeout,
+        )
 
-        async def _open_and_first_chunk() -> tuple[Any, Any]:
-            """建连并读取首个 chunk，供外层 wait_for 统一限时。
+        state = _StreamState(
+            on_chunk=on_chunk,
+            max_thinking_chars=int(kwargs.pop("max_thinking_chars", 180000)),
+            stream_start=_time.monotonic(),
+        )
+        state.last_chunk_monotonic = state.stream_start
+        await self._consume_stream(response, first_chunk, state, model, inter_chunk_timeout)
+        return self._build_streaming_response(state)
 
-            首个 chunk 读取若抛异常（含 wait_for 超时注入的 CancelledError），
-            必须关闭 stream——既为释放 HTTP 连接，也为触发 _bind_release_to_stream
-            绑定的 slot.release()，避免并发许可泄漏（建连超时是高频场景）。
-            """
-            _t0 = _time.monotonic()
-            logger.info(
-                "[%s] _open_and_first_chunk: 进入，准备调 _do_completion model=%s t0=%.3f",
-                type(self).__name__, model, _t0,
-            )
-            resp = await self._do_completion(**call_kwargs, drop_params=True)
-            _t1 = _time.monotonic()
-            logger.info(
-                "[%s] _open_and_first_chunk: _do_completion 返回(%.3fs)，准备读首 chunk model=%s",
-                type(self).__name__, _t1 - _t0, model,
-            )
-            try:
-                first = await resp.__aiter__().__anext__()
-            except BaseException as _first_exc:
-                _t2 = _time.monotonic()
-                logger.warning(
-                    "[%s] _open_and_first_chunk: 首chunk异常(%.3fs后) model=%s exc=%s",
-                    type(self).__name__, _t2 - _t1, model, type(_first_exc).__name__,
-                )
-                # 超时/异常/取消：关闭流，触发绑定的 release。aclose 自身的任何
-                # 异常（含 CancelledError）都不应掩盖/替换原始异常，故全量抑制。
-                # ★ 不能裸 await aclose()：半死 SSL socket 会让 aclose 永久
-                # 阻塞，把原始异常（超时/取消）吞在 await 里，外层 wait_for 等不到
-                # 协程退出就永远不返回 → 引擎死锁。用 _await_with_escape 限时：
-                # 正常 aclose 毫秒级完成（同步契约，测试可立即观测关闭）；半死
-                # socket 到点即放弃，原始异常照常 raise 透传，残留协程后台回收。
-                aclose = getattr(resp, "aclose", None)
-                if aclose is not None:
-                    try:
-                        await _await_with_escape(
-                            aclose(),
-                            _ACLOSE_TIMEOUT_SECONDS,
-                            what="first-chunk aclose",
-                        )
-                    except BaseException:
-                        pass
-                raise
-            _t3 = _time.monotonic()
-            logger.info(
-                "[%s] _open_and_first_chunk: 首chunk到达(%.3fs后) model=%s",
-                type(self).__name__, _t3 - _t1, model,
-            )
-            return resp, first
+    async def _establish_first_chunk(
+        self,
+        model: str,
+        call_kwargs: dict[str, Any],
+        first_chunk_timeout: float,
+    ) -> tuple[Any, Any]:
+        """建连并读取首个 chunk，统一受首字节超时保护。
 
-        first_chunk: Any = None
+        首字节超时必须同时包住 _do_completion 和首 chunk 读取：上游"半死连接"
+        （TCP 建连成功、请求已发出，但上游既不回数据也不断开）会让 _do_completion
+        卡在 litellm.acompletion 的建连/等响应头阶段——既不是 429，也不是连接错误，
+        若 wait_for 仅包首个 __anext__() 则因 _do_completion 尚未返回而无法启动，
+        请求会静默挂死直到 httpx 层超时。
+
+        Raises:
+            litellm.Timeout: 首字节超时；或建连成功但零 chunk（过早 EOF，
+                按首 token 失败处理——此时底层流已在 _open_and_first_chunk 内关闭）。
+        """
         try:
-            response, first_chunk = await _await_with_escape(
-                _open_and_first_chunk(),
+            return await _await_with_escape(
+                self._open_and_first_chunk(model, call_kwargs),
                 first_chunk_timeout,
                 what=f"first chunk (incl. connect) model={model}",
             )
@@ -912,326 +946,118 @@ class _BaseLiteLLMAdapter:
                 llm_provider="zai",
             )
 
-        result_parts: list[str] = []
-        thinking_parts: list[str] = []
-        tool_calls_map: dict[int, dict[str, Any]] = {}
-        stream_usage: dict[str, Any] | None = None
-        _stream_start: float = _time.monotonic()
-        # inter-chunk 静默追踪：每个 chunk 到达即更新 _last_chunk_monotonic，
-        # 心跳据此量化"距上个 chunk 多久"，是区分"上游不发"与"接收端卡死"的关键。
-        _last_chunk_monotonic: float = _stream_start
-        _chunks_received: int = 0
-        # litellm CustomStreamWrapper 的底层流对象（openai/zai 路径即 httpx.Response）。
-        # 心跳日志读其 is_closed 作为半死 TCP 的廉价（不可靠但便宜）附加信号。
-        _completion_stream: Any = getattr(response, "completion_stream", None)
-        # 心跳探针任务句柄（首 chunk 后启动，finally 中取消）。
-        _heartbeat_task: asyncio.Task[None] | None = None
-        # 独立线程硬超时句柄（首 chunk 后 arm，finally 中 disarm）。
-        # asyncio 心跳/inter_chunk wait_for 在 loop 被 socket 阻塞冻住时全部
-        # 失效（实测：僵死管道零 HEARTBEAT 日志）。watchdog 用 threading 线程
-        # 倒计时，到点强制 stream.aclose() 打破死锁，是 loop 冻住也能生效的兜底。
-        _hard_timeout: StreamHardTimeout | None = None
+    async def _open_and_first_chunk(
+        self,
+        model: str,
+        call_kwargs: dict[str, Any],
+    ) -> tuple[Any, Any]:
+        """建连并读取首个 chunk，供外层 wait_for 统一限时。
 
-        stream_repetition = False
-        thinking_truncated = False
-        _max_thinking_chars = int(kwargs.pop("max_thinking_chars", 180000))
-        # 接收端点诊断：统计 tool_calls 字段从 API 到达次数，定位丢失环节
-        _recv_seq = 0
-        _recv_tc_count = 0
-        _finish_reason: str | None = None
-
-        # 流式 <think/> 标签状态机。MiniMax 等模型的思考内容通过 <think/> 标签
-        # 包裹在 delta.content 中返回（而非 delta.reasoning_content），且标签会
-        # 跨多个 chunk 切分。状态机通过 "<think" / "</think" 字符串查找跟踪开/闭状态，
-        # 确保 thinking 内容正确路由到 thinking 通道、正文路由到 text 通道。
-        _in_think_tag: bool = False
-
-        aiter = response.__aiter__()
+        首个 chunk 读取若抛异常（含 wait_for 超时注入的 CancelledError），
+        必须关闭 stream——既为释放 HTTP 连接，也为触发 _bind_release_to_stream
+        绑定的 slot.release()，避免并发许可泄漏（建连超时是高频场景）。
+        """
+        _t0 = _time.monotonic()
+        logger.info(
+            "[%s] _open_and_first_chunk: 进入，准备调 _do_completion model=%s t0=%.3f",
+            type(self).__name__, model, _t0,
+        )
+        resp = await self._do_completion(**call_kwargs, drop_params=True)
+        _t1 = _time.monotonic()
+        logger.info(
+            "[%s] _open_and_first_chunk: _do_completion 返回(%.3fs)，准备读首 chunk model=%s",
+            type(self).__name__, _t1 - _t0, model,
+        )
         try:
-            # 首个 chunk 已在 _open_and_first_chunk 内读取（含建连阶段的超时保护，
-            # 见上方首字节超时统一覆盖的说明）。此处直接处理它。
-            chunk = first_chunk
-
-            # 边收边处理，保持真正的流式
-            # _process_chunk 内联处理每个 chunk
-            async def _process_chunk(chunk: Any) -> bool:  # noqa: PLR0911,PLR0912,PLR0915
-                """处理单个 chunk，返回是否应该 break。"""
-                nonlocal stream_repetition, _in_think_tag, stream_usage, thinking_truncated
-                # 流式诊断：只写文件，不显示在 CLI
-                _chunk_idx = len(result_parts) + len(thinking_parts)
-                if _chunk_idx <= 1 or _chunk_idx % 200 == 0:
-                    _sync_diag_handlers()
-                    if _diag_logger.handlers:
-                        _delta = getattr(
-                            getattr(chunk, "choices", [None])[0],
-                            "delta",
-                            None,
-                        )
-                        _tc = getattr(_delta, "tool_calls", None)
-                        _usage = getattr(chunk, "usage", None)
-                        if _chunk_idx <= 1 or _tc or _usage:
-                            _rc = getattr(_delta, "reasoning_content", None)
-                            _ct = getattr(_delta, "content", None)
-                            _diag_logger.debug(
-                                "[%s] chunk #%d: content=%s reasoning=%s tc=%s usage=%s",
-                                type(self).__name__,
-                                _chunk_idx,
-                                repr((_ct or "")[:40]),
-                                repr((_rc or "")[:40]) if _rc else "-",
-                                "Y" if _tc else "-",
-                                "Y" if _usage else "-",
-                            )
-                # 收集流式 usage（通常在最后一个 chunk）
-                if hasattr(chunk, "usage") and chunk.usage:
-                    _prompt_details = getattr(chunk.usage, "prompt_tokens_details", None)
-                    stream_usage = {
-                        "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
-                        "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
-                        "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
-                        "cached_tokens": getattr(_prompt_details, "cached_tokens", 0) or 0,
-                    }
-
-                if not chunk.choices:
-                    return False
-
-                delta = chunk.choices[0].delta
-
-                # LiteLLM 统一推理内容映射到 delta.reasoning_content
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning:
-                    thinking_parts.append(reasoning)
-                    _stream_logger.debug(
-                        "[STREAM][THINKING] #%d +%d chars",
-                        len(thinking_parts),
-                        len(reasoning),
+            first = await resp.__aiter__().__anext__()
+        except BaseException as _first_exc:
+            _t2 = _time.monotonic()
+            logger.warning(
+                "[%s] _open_and_first_chunk: 首chunk异常(%.3fs后) model=%s exc=%s",
+                type(self).__name__, _t2 - _t1, model, type(_first_exc).__name__,
+            )
+            # 超时/异常/取消：关闭流，触发绑定的 release。aclose 自身的任何
+            # 异常（含 CancelledError）都不应掩盖/替换原始异常，故全量抑制。
+            # ★ 不能裸 await aclose()：半死 SSL socket 会让 aclose 永久
+            # 阻塞，把原始异常（超时/取消）吞在 await 里，外层 wait_for 等不到
+            # 协程退出就永远不返回 → 引擎死锁。用 _await_with_escape 限时：
+            # 正常 aclose 毫秒级完成（同步契约，测试可立即观测关闭）；半死
+            # socket 到点即放弃，原始异常照常 raise 透传，残留协程后台回收。
+            aclose = getattr(resp, "aclose", None)
+            if aclose is not None:
+                try:
+                    await _await_with_escape(
+                        aclose(),
+                        _ACLOSE_TIMEOUT_SECONDS,
+                        what="first-chunk aclose",
                     )
-                    if on_chunk:
-                        on_chunk({"type": "thinking", "content": reasoning})
-                    # 思考内容过长 → 截断
-                    thinking_len = sum(len(p) for p in thinking_parts)
-                    if _max_thinking_chars > 0 and thinking_len > _max_thinking_chars:
-                        logger.warning(
-                            "[%s] 思考内容过长(%d>%d chars)，截断",
-                            type(self).__name__,
-                            thinking_len,
-                            _max_thinking_chars,
-                        )
-                        thinking_truncated = True
-                        return True
+                except BaseException:
+                    pass
+            raise
+        _t3 = _time.monotonic()
+        logger.info(
+            "[%s] _open_and_first_chunk: 首chunk到达(%.3fs后) model=%s",
+            type(self).__name__, _t3 - _t1, model,
+        )
+        return resp, first
 
-                # 文本内容：流式 <think/> 状态机处理（MiniMax 等模型）
-                if delta.content:
-                    content = delta.content
+    async def _consume_stream(
+        self,
+        response: Any,
+        first_chunk: Any,
+        state: _StreamState,
+        model: str,
+        inter_chunk_timeout: float,
+    ) -> None:
+        """消费流：处理首 chunk → 启动心跳/硬超时 → 按 inter-chunk 超时循环消费。
 
-                    if _in_think_tag:
-                        # 标签内：检查闭合标签
-                        if "</think" in content:
-                            close_idx = content.index("</think")
-                            _think_part = content[:close_idx]
-                            if _think_part:
-                                thinking_parts.append(_think_part)
-                                if on_chunk:
-                                    on_chunk({"type": "thinking", "content": _think_part})
-                            _after_close = content[close_idx:]
-                            _gt = _after_close.find(">")
-                            _rest = _after_close[_gt + 1 :] if _gt >= 0 else ""
-                            _in_think_tag = False
-                            if _rest.strip():
-                                result_parts.append(_rest)
-                                if on_chunk:
-                                    signal = on_chunk({"type": "text", "content": _rest})
-                                    if signal == "stop":
-                                        stream_repetition = True
-                                        return True
-                        else:
-                            thinking_parts.append(content)
-                            _stream_logger.debug(
-                                "[STREAM][THINKING] #%d +%d chars",
-                                len(thinking_parts),
-                                len(content),
-                            )
-                            if on_chunk:
-                                on_chunk({"type": "thinking", "content": content})
-                            thinking_len = sum(len(p) for p in thinking_parts)
-                            if _max_thinking_chars > 0 and thinking_len > _max_thinking_chars:
-                                logger.warning(
-                                    "[%s] 思考内容过长 (%d>%d chars)，截断",
-                                    type(self).__name__,
-                                    thinking_len,
-                                    _max_thinking_chars,
-                                )
-                                thinking_truncated = True
-                                return True
-                    # 标签外：检查开标签
-                    elif "<think" in content:
-                        _open_idx = content.index("<think")
-                        _before = content[:_open_idx]
-                        if _before:
-                            result_parts.append(_before)
-                            if on_chunk:
-                                on_chunk({"type": "text", "content": _before})
-                        _after_open = content[_open_idx:]
-                        _gt = _after_open.find(">")
-                        _inner = _after_open[_gt + 1 :] if _gt >= 0 else ""
-                        _in_think_tag = True
-                        if "</think" in _inner:
-                            _ci = _inner.index("</think")
-                            _tp = _inner[:_ci]
-                            if _tp:
-                                thinking_parts.append(_tp)
-                                if on_chunk:
-                                    on_chunk({"type": "thinking", "content": _tp})
-                            _ac = _inner[_ci:]
-                            _g2 = _ac.find(">")
-                            _rs = _ac[_g2 + 1 :] if _g2 >= 0 else ""
-                            _in_think_tag = False
-                            if _rs.strip():
-                                result_parts.append(_rs)
-                                if on_chunk:
-                                    signal = on_chunk({"type": "text", "content": _rs})
-                                    if signal == "stop":
-                                        stream_repetition = True
-                                        return True
-                        elif _inner:
-                            thinking_parts.append(_inner)
-                            _stream_logger.debug(
-                                "[STREAM][THINKING] #%d +%d chars",
-                                len(thinking_parts),
-                                len(_inner),
-                            )
-                            if on_chunk:
-                                on_chunk({"type": "thinking", "content": _inner})
-                    else:
-                        if on_chunk and thinking_parts:
-                            on_chunk({"type": "thinking_end", "content": ""})
-                        result_parts.append(content)
-                        _stream_logger.debug(
-                            "[STREAM][TEXT] #%d +%d chars: %s",
-                            len(result_parts),
-                            len(content),
-                            repr(content[:80]),
-                        )
-                        if on_chunk:
-                            signal = on_chunk({"type": "text", "content": content})
-                            if signal == "stop":
-                                stream_repetition = True
-                                logger.warning(
-                                    "[%s] 收到 stop 信号，截断流式输出",
-                                    type(self).__name__,
-                                )
-                                return True
+        首 chunk 已在 _establish_first_chunk 内读取（含建连阶段超时保护），此处直接
+        处理它。随后启动两个守护：
+        - 心跳探针（_stream_heartbeat）：流静默时持续打 idle 时长 + stream_closed，
+          证明接收协程存活（排除接收端死锁），量化上游/传输静默时长；
+        - 独立线程硬超时（StreamHardTimeout）：asyncio 心跳/wait_for 共享同一
+          event loop，一旦底层 socket 阻塞冻住事件循环会全部失效；硬超时用
+          threading 线程倒计时，到点强制 aclose，loop 冻住也能打破死锁。语义为
+          "chunk 间隔超时"：每收到一个 chunk 即 reset() 重计时，避免误杀总时长
+          长但 chunk 间隔始终健康的流。
 
-                # 工具调用（流式增量）
-                if delta.tool_calls:
-                    # thinking→tool_calls 过渡：发送 thinking_end 确保思考完整关闭后再输出工具卡片
-                    if on_chunk and thinking_parts:
-                        on_chunk({"type": "thinking_end", "content": ""})
-                    for tc in delta.tool_calls:
-                        idx = tc.index if hasattr(tc, "index") else 0
-                        if idx not in tool_calls_map:
-                            tool_calls_map[idx] = {
-                                "id": (getattr(tc, "id", None) or f"tc_{idx}_{id(tool_calls_map)}"),
-                                "name": "",
-                                "arguments": "",
-                            }
-                            _stream_logger.debug(
-                                "[STREAM][TOOL_CALL] #%d new: id=%s",
-                                idx,
-                                tool_calls_map[idx]["id"],
-                            )
-                        if tc.function:
-                            if tc.function.name:
-                                tool_calls_map[idx]["name"] += tc.function.name
-                                _stream_logger.debug(
-                                    "[STREAM][TOOL_CALL] #%d name=%s",
-                                    idx,
-                                    tool_calls_map[idx]["name"],
-                                )
-                            if tc.function.arguments:
-                                tool_calls_map[idx]["arguments"] += tc.function.arguments
-                                _arg_len = len(tool_calls_map[idx]["arguments"])
-                                _stream_logger.debug(
-                                    "[STREAM][TOOL_CALL] #%d args +%d → %d chars: %s",
-                                    idx,
-                                    len(tc.function.arguments),
-                                    _arg_len,
-                                    repr(tc.function.arguments[:100]),
-                                )
-
-                    if on_chunk:
-                        on_chunk(
-                            {
-                                "type": "tool_call",
-                                "tool_calls": delta.tool_calls,
-                            }
-                        )
-                return False
-
-            # 处理首个 chunk
-            await _process_chunk(chunk)
-            _last_chunk_monotonic = _time.monotonic()
-            _chunks_received += 1
-            # 启动心跳探针：流静默时持续打 idle 时长 + stream_closed，
-            # 证明接收协程存活（排除接收端死锁），并量化上游/传输静默时长。
-            # 沿用 process_manager._watchdog_loop 的 create_task + CancelledError 退出范式。
-            _heartbeat_task = asyncio.create_task(
+        finally 收尾（任何退出路径都执行）：取消心跳、disarm 硬超时、限时 aclose
+        底层连接。Windows 半死 SSL socket 会让 httpx aclose 永久阻塞导致本 finally
+        不返回（引擎级挂死），故 aclose 用 _await_with_escape 限时：到点放弃关闭，
+        残留 socket（CLOSE_WAIT）交由 GC/OS 回收。KeyPoolAdapter 路径下 aclose 已被
+        _aclose_with_release 包过一层 wait_for，这里再包一层无害（外层到点会 cancel
+        内层）；LiteLLMAdapter 路径下 aclose 是原始的，本层是其唯一保护。
+        """
+        heartbeat_task: asyncio.Task[None] | None = None
+        hard_timeout: StreamHardTimeout | None = None
+        try:
+            await self._process_chunk(first_chunk, state)
+            state.last_chunk_monotonic = _time.monotonic()
+            state.chunks_received += 1
+            # 启动心跳探针：沿用 process_manager._watchdog_loop 的
+            # create_task + CancelledError 退出范式。
+            heartbeat_task = asyncio.create_task(
                 self._stream_heartbeat(
                     model,
                     inter_chunk_timeout,
-                    lambda: _time.monotonic() - _last_chunk_monotonic,
-                    lambda: _chunks_received,
-                    _completion_stream,
+                    lambda: _time.monotonic() - state.last_chunk_monotonic,
+                    lambda: state.chunks_received,
+                    getattr(response, "completion_stream", None),
                 )
             )
-            # 独立线程硬超时兜底：上述 asyncio 心跳/inter_chunk wait_for 共享同一
-            # event loop，一旦底层 socket 阻塞冻住事件循环，全部失效（僵死管道零
-            # HEARTBEAT 即铁证）。硬超时到点强制 aclose，loop 冻住也能打破死锁。
-            # 语义为"chunk 间隔超时"：每收到一个 chunk 调 reset() 重新计时，
-            # 避免误杀总时长长但 chunk 间隔始终健康的流（issue: 长流式响应总时长
-            # 超过 inter_chunk_timeout 时被误关）。
-            _hard_timeout = StreamHardTimeout(
+            hard_timeout = StreamHardTimeout(
                 response,
                 asyncio.get_running_loop(),
                 inter_chunk_timeout,
             )
-            _hard_timeout.arm()
-            # 接收端点诊断（首个 chunk）
-            _recv_seq += 1
-            try:
-                _rc0 = chunk.choices[0] if chunk.choices else None
-                if _rc0 is not None:
-                    _d0 = getattr(_rc0, "delta", None)
-                    _fr0 = getattr(_rc0, "finish_reason", None)
-                    _tc0 = getattr(_d0, "tool_calls", None) if _d0 else None
-                    if _tc0:
-                        _recv_tc_count += 1
-                        _tc_summary0 = []
-                        for _tci in _tc0:
-                            _fn0 = getattr(_tci, "function", None)
-                            _tc_name0 = getattr(_fn0, "name", "?") if _fn0 else "?"
-                            _tc_args0 = getattr(_fn0, "arguments", "") if _fn0 else ""
-                            _tc_summary0.append(f"{_tc_name0}(args={len(_tc_args0)}c)")
-                        _stream_logger.debug(
-                            "[STREAM][RECV] #%d tool_calls 到达(首chunk, %d个): %s",
-                            _recv_seq,
-                            len(_tc0),
-                            ", ".join(_tc_summary0),
-                        )
-                    if _fr0:
-                        _finish_reason = _fr0
-                        _stream_logger.debug(
-                            "[STREAM][RECV] #%d finish=%s (首chunk, 累计tc=%d)",
-                            _recv_seq,
-                            _fr0,
-                            _recv_tc_count,
-                        )
-            except Exception:
-                pass
-
-            # 后续 chunk：逐次超时，每个 chunk 到达即重置计时器。
-            # 活跃推理 chunk 间隔远小于 timeout 故不误触发；仅真正静默（死连接）累计满 timeout。
+            hard_timeout.arm()
+            # 接收端点诊断：首个 chunk 无论是否携带 tool_calls 都观察 finish_reason
+            self._diag_recv_chunk(first_chunk, state, first=True)
+            # 后续 chunk：逐次超时，每个 chunk 到达即重置计时器。活跃推理 chunk
+            # 间隔远小于 timeout 故不误触发；仅真正静默（死连接）累计满 timeout。
             # 用 _await_with_escape：即使底层 __anext__ 吞掉取消挂死（半死连接），
             # 也能到点抛错透传，而不是被 asyncio.wait_for「等协程退出」卡死。
+            aiter = response.__aiter__()
             while True:
                 try:
                     chunk = await _await_with_escape(
@@ -1242,12 +1068,12 @@ class _BaseLiteLLMAdapter:
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError:
-                    _idle = _time.monotonic() - _last_chunk_monotonic
+                    _idle = _time.monotonic() - state.last_chunk_monotonic
                     logger.warning(
                         "[%s] STREAM TIMEOUT: inter-chunk 静默超时 (%.0fs) 距上个 chunk #%d 已静默 %.0fs model=%s",
                         type(self).__name__,
                         inter_chunk_timeout,
-                        _chunks_received,
+                        state.chunks_received,
                         _idle,
                         model,
                     )
@@ -1255,67 +1081,30 @@ class _BaseLiteLLMAdapter:
                         message=(
                             "Stream inter-chunk timeout:"
                             f" no data for {_idle:.0f}s"
-                            f" (last chunk #{_chunks_received}, timeout={inter_chunk_timeout:.0f}s)"
+                            f" (last chunk #{state.chunks_received}, timeout={inter_chunk_timeout:.0f}s)"
                         ),
                         model=model,
                         llm_provider="zai",
                     )
-                _last_chunk_monotonic = _time.monotonic()
-                _chunks_received += 1
+                state.last_chunk_monotonic = _time.monotonic()
+                state.chunks_received += 1
                 # chunk 健康到达：重置硬超时倒计时（chunk 间隔语义，避免误杀长流）
-                if _hard_timeout is not None:
-                    _hard_timeout.reset()
-                if await _process_chunk(chunk):
+                if hard_timeout is not None:
+                    hard_timeout.reset()
+                if await self._process_chunk(chunk, state):
                     break
-                # ── 接收端点诊断：每个 chunk 检查 delta.tool_calls 是否到达 ──
-                _recv_seq += 1
-                try:
-                    _rc = chunk.choices[0] if chunk.choices else None
-                    if _rc is not None:
-                        _d = getattr(_rc, "delta", None)
-                        _fr = getattr(_rc, "finish_reason", None)
-                        _tc = getattr(_d, "tool_calls", None) if _d else None
-                        if _tc:
-                            _recv_tc_count += 1
-                            # 打印完整 tool_call 内容（name + arguments 长度 + 预览）
-                            _tc_summary = []
-                            for _tci in _tc:
-                                _fn = getattr(_tci, "function", None)
-                                _tc_name = getattr(_fn, "name", "?") if _fn else "?"
-                                _tc_args = getattr(_fn, "arguments", "") if _fn else ""
-                                _tc_summary.append(f"{_tc_name}(args={len(_tc_args)}c)")
-                            _stream_logger.debug(
-                                "[STREAM][RECV] #%d tool_calls 到达(%d个): %s",
-                                _recv_seq,
-                                len(_tc),
-                                ", ".join(_tc_summary),
-                            )
-                            _finish_reason = _fr
-                            _stream_logger.debug(
-                                "[STREAM][RECV] #%d finish=%s (累计tc=%d)",
-                                _recv_seq,
-                                _fr,
-                                _recv_tc_count,
-                            )
-                except Exception:
-                    pass
+                # ── 接收端点诊断：本 chunk 的 delta.tool_calls / finish_reason 到达情况 ──
+                self._diag_recv_chunk(chunk, state, first=False)
         finally:
             # 取消心跳探针任务（避免任务泄漏：超时/异常/正常结束都要清理）
-            if _heartbeat_task is not None and not _heartbeat_task.done():
-                _heartbeat_task.cancel()
+            if heartbeat_task is not None and not heartbeat_task.done():
+                heartbeat_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await _heartbeat_task
+                    await heartbeat_task
             # 取消独立线程硬超时（正常结束时不触发强制关闭，幂等）
-            if _hard_timeout is not None:
-                _hard_timeout.disarm()
-            # 确保超时或异常时关闭 async iterator，释放 HTTP 连接。
-            # 超时兜底：Windows 半死 SSL socket 会让 httpx aclose 永久阻塞，
-            # 导致本 finally 不返回 → _run_loop 永久卡死。超时后放弃关闭，协程得以返回，
-            # 残留 socket（CLOSE_WAIT）交由 GC/OS 回收。KeyPoolAdapter 路径下 aclose
-            # 已被 _aclose_with_release 包过一层 wait_for，这里再包一层无害（外层到点
-            # 会 cancel 内层）；LiteLLMAdapter 路径下 aclose 是原始的，本层是其唯一保护。
-            # ★ 用 _await_with_escape：即使 aclose 吞掉取消挂死，也能到点返回（此处
-            # 不抛错，仅记录日志），避免 finally 卡死引擎。
+            if hard_timeout is not None:
+                hard_timeout.disarm()
+            # 确保超时或异常时关闭 async iterator，释放 HTTP 连接（限时防挂死）
             if hasattr(response, "aclose"):
                 try:
                     await _await_with_escape(
@@ -1333,32 +1122,320 @@ class _BaseLiteLLMAdapter:
                 except Exception:
                     logger.debug("[%s] response.aclose finally 异常（已忽略）", type(self).__name__)
 
-        result_text = "".join(result_parts) if result_parts else None
-        thinking_text = "".join(thinking_parts) if thinking_parts else None
-        tool_calls = self._normalize_tool_calls(tool_calls_map)
+    async def _process_chunk(self, chunk: Any, state: _StreamState) -> bool:
+        """处理单个 chunk（按载荷类型路由），返回是否应中断消费循环。
+
+        先做限频诊断与 usage 核算（与载荷类型无关的公共步骤），再依次分发：
+        reasoning_content → 正文/<think/> 状态机 → 工具调用增量。任一载荷要求
+        截断（thinking 超限、消费方 stop 信号）即返回 True，跳过本 chunk 的剩余
+        载荷与后续所有 chunk。
+        """
+        self._log_chunk_flow_diag(chunk, state)
+        self._collect_stream_usage(chunk, state)
+
+        if not chunk.choices:
+            return False
+
+        delta = chunk.choices[0].delta
+
+        # LiteLLM 统一推理内容映射到 delta.reasoning_content
+        reasoning = getattr(delta, "reasoning_content", None)
+        if reasoning and self._append_thinking(reasoning, state, verbose=True, enforce_limit=True):
+            return True
+
+        # 文本内容：流式 <think/> 状态机处理（MiniMax 等模型）
+        if delta.content and self._handle_delta_content(delta.content, state):
+            return True
+
+        if delta.tool_calls:
+            self._accumulate_tool_call_deltas(delta.tool_calls, state)
+        return False
+
+    def _log_chunk_flow_diag(self, chunk: Any, state: _StreamState) -> None:
+        """限频落盘诊断：前 2 个及每第 200 个 chunk 记录关键字段摘要（debug）。"""
+        chunk_idx = len(state.result_parts) + len(state.thinking_parts)
+        if chunk_idx <= 1 or chunk_idx % 200 == 0:
+            _sync_diag_handlers()
+            if _diag_logger.handlers:
+                delta = getattr(
+                    getattr(chunk, "choices", [None])[0],
+                    "delta",
+                    None,
+                )
+                has_tc = getattr(delta, "tool_calls", None)
+                has_usage = getattr(chunk, "usage", None)
+                if chunk_idx <= 1 or has_tc or has_usage:
+                    content = getattr(delta, "content", None)
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    _diag_logger.debug(
+                        "[%s] chunk #%d: content=%s reasoning=%s tc=%s usage=%s",
+                        type(self).__name__,
+                        chunk_idx,
+                        repr((content or "")[:40]),
+                        repr((reasoning or "")[:40]) if reasoning else "-",
+                        "Y" if has_tc else "-",
+                        "Y" if has_usage else "-",
+                    )
+
+    def _collect_stream_usage(self, chunk: Any, state: _StreamState) -> None:
+        """收集流式 usage（通常出现在最后一个 chunk），记入 state.stream_usage。"""
+        if hasattr(chunk, "usage") and chunk.usage:
+            _prompt_details = getattr(chunk.usage, "prompt_tokens_details", None)
+            state.stream_usage = {
+                "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
+                "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
+                "cached_tokens": getattr(_prompt_details, "cached_tokens", 0) or 0,
+            }
+
+    def _append_thinking(
+        self,
+        text: str,
+        state: _StreamState,
+        *,
+        verbose: bool,
+        enforce_limit: bool,
+    ) -> bool:
+        """追加思考片段并发 thinking 事件；enforce_limit 时检查截断阈值。
+
+        返回是否因思考内容超过 max_thinking_chars 而应中断流（仅 enforce_limit
+        时可能为 True）。verbose 控制是否打 THINKING 计数 debug 日志（完整段打，
+        标签切片片段不打，与拆分前各调用点行为一致）。
+        """
+        state.thinking_parts.append(text)
+        if verbose:
+            _stream_logger.debug(
+                "[STREAM][THINKING] #%d +%d chars",
+                len(state.thinking_parts),
+                len(text),
+            )
+        if state.on_chunk:
+            state.on_chunk({"type": "thinking", "content": text})
+        if not enforce_limit:
+            return False
+        thinking_len = sum(len(p) for p in state.thinking_parts)
+        if state.max_thinking_chars > 0 and thinking_len > state.max_thinking_chars:
+            logger.warning(
+                "[%s] 思考内容过长(%d>%d chars)，截断",
+                type(self).__name__,
+                thinking_len,
+                state.max_thinking_chars,
+            )
+            state.thinking_truncated = True
+            return True
+        return False
+
+    def _emit_text(self, text: str, state: _StreamState) -> bool:
+        """追加正文片段并发 text 事件；返回消费方是否要求停止（"stop" 信号）。"""
+        state.result_parts.append(text)
+        if not state.on_chunk:
+            return False
+        return state.on_chunk({"type": "text", "content": text}) == "stop"
+
+    def _strip_think_close(self, seg: str, state: _StreamState) -> str:
+        """处理确定含 ``</think`` 的文本段：闭合标记前的部分计入 thinking 通道。
+
+        返回闭标签 ``>`` 之后剩余的正文片段（可能为空串/空白，由调用方决定是否
+        发正文事件）。``in_think_tag`` 标志由调用方维护。开标签与闭标签同 chunk
+        到达、跨 chunk 切分两种路径共用本方法。
+        """
+        close_idx = seg.index("</think")
+        head = seg[:close_idx]
+        if head:
+            self._append_thinking(head, state, verbose=False, enforce_limit=False)
+        tail = seg[close_idx:]
+        gt = tail.find(">")
+        return tail[gt + 1 :] if gt >= 0 else ""
+
+    def _handle_delta_content(self, content: str, state: _StreamState) -> bool:
+        """按流式 ``<think/>`` 标签状态机路由 delta.content，返回是否应中断流。
+
+        MiniMax 等模型的思考内容以 ``<think/>`` 标签包裹在 delta.content 中返回，
+        且标签会跨多个 chunk 切分。状态机通过 "<think" / "</think" 字符串查找跟踪
+        开/闭状态，确保 thinking 内容路由 thinking 通道、正文路由 text 通道。
+
+        中断条件（现状契约，仅两处）：thinking 内容超过 max_thinking_chars；
+        正文路径消费方返回 "stop"。开标签前的前缀片段只发事件不检查停止信号；
+        标签切片出的 thinking 片段不做截断检查——均沿用拆分前实现。
+        """
+        if state.in_think_tag:
+            # 标签内：检查闭合标签
+            if "</think" in content:
+                rest = self._strip_think_close(content, state)
+                state.in_think_tag = False
+                if rest.strip() and self._emit_text(rest, state):
+                    state.stream_repetition = True
+                    return True
+            else:
+                return self._append_thinking(content, state, verbose=True, enforce_limit=True)
+        elif "<think" in content:
+            # 标签外：检查开标签
+            open_idx = content.index("<think")
+            before = content[:open_idx]
+            if before:
+                # 现状契约：开标签前的前缀发 text 事件但不检查停止信号
+                self._emit_text(before, state)
+            after_open = content[open_idx:]
+            gt = after_open.find(">")
+            inner = after_open[gt + 1 :] if gt >= 0 else ""
+            state.in_think_tag = True
+            if "</think" in inner:
+                rest = self._strip_think_close(inner, state)
+                state.in_think_tag = False
+                if rest.strip() and self._emit_text(rest, state):
+                    state.stream_repetition = True
+                    return True
+            elif inner:
+                self._append_thinking(inner, state, verbose=True, enforce_limit=False)
+        else:
+            # 纯正文：先收口已开的思考段再发正文事件
+            if state.on_chunk and state.thinking_parts:
+                state.on_chunk({"type": "thinking_end", "content": ""})
+            state.result_parts.append(content)
+            _stream_logger.debug(
+                "[STREAM][TEXT] #%d +%d chars: %s",
+                len(state.result_parts),
+                len(content),
+                repr(content[:80]),
+            )
+            if state.on_chunk and state.on_chunk({"type": "text", "content": content}) == "stop":
+                state.stream_repetition = True
+                logger.warning(
+                    "[%s] 收到 stop 信号，截断流式输出",
+                    type(self).__name__,
+                )
+                return True
+        return False
+
+    def _accumulate_tool_call_deltas(self, tool_calls: Any, state: _StreamState) -> None:
+        """合并流式工具调用增量（同 index 的 id/name/arguments 逐段拼接）并发事件。"""
+        # thinking→tool_calls 过渡：发送 thinking_end 确保思考完整关闭后再输出工具卡片
+        if state.on_chunk and state.thinking_parts:
+            state.on_chunk({"type": "thinking_end", "content": ""})
+        for tc in tool_calls:
+            idx = tc.index if hasattr(tc, "index") else 0
+            if idx not in state.tool_calls_map:
+                state.tool_calls_map[idx] = {
+                    "id": (getattr(tc, "id", None) or f"tc_{idx}_{id(state.tool_calls_map)}"),
+                    "name": "",
+                    "arguments": "",
+                }
+                _stream_logger.debug(
+                    "[STREAM][TOOL_CALL] #%d new: id=%s",
+                    idx,
+                    state.tool_calls_map[idx]["id"],
+                )
+            if tc.function:
+                if tc.function.name:
+                    state.tool_calls_map[idx]["name"] += tc.function.name
+                    _stream_logger.debug(
+                        "[STREAM][TOOL_CALL] #%d name=%s",
+                        idx,
+                        state.tool_calls_map[idx]["name"],
+                    )
+                if tc.function.arguments:
+                    state.tool_calls_map[idx]["arguments"] += tc.function.arguments
+                    _arg_len = len(state.tool_calls_map[idx]["arguments"])
+                    _stream_logger.debug(
+                        "[STREAM][TOOL_CALL] #%d args +%d → %d chars: %s",
+                        idx,
+                        len(tc.function.arguments),
+                        _arg_len,
+                        repr(tc.function.arguments[:100]),
+                    )
+
+        if state.on_chunk:
+            state.on_chunk(
+                {
+                    "type": "tool_call",
+                    "tool_calls": tool_calls,
+                }
+            )
+
+    def _diag_recv_chunk(self, chunk: Any, state: _StreamState, *, first: bool) -> None:
+        """接收端点诊断：观察 tool_calls 与 finish_reason 是否到达接收侧。
+
+        只做 debug 日志与计数，尽力而为（结构异常整体吞掉）。不对称是现状契约
+        （勿顺手"修复"）：首 chunk 无论是否携带 tool_calls 都更新 finish_reason
+        观察值；后续 chunk 仅在同 chunk 携带 tool_calls 时才更新。
+        """
+        state.recv_seq += 1
+        try:
+            choice = chunk.choices[0] if chunk.choices else None
+            if choice is not None:
+                delta = getattr(choice, "delta", None)
+                finish = getattr(choice, "finish_reason", None)
+                tcs = getattr(delta, "tool_calls", None) if delta else None
+                if tcs:
+                    state.recv_tc_count += 1
+                    summary = []
+                    for tc in tcs:
+                        fn = getattr(tc, "function", None)
+                        name = getattr(fn, "name", "?") if fn else "?"
+                        args = getattr(fn, "arguments", "") if fn else ""
+                        summary.append(f"{name}(args={len(args)}c)")
+                    if first:
+                        _stream_logger.debug(
+                            "[STREAM][RECV] #%d tool_calls 到达(首chunk, %d个): %s",
+                            state.recv_seq,
+                            len(tcs),
+                            ", ".join(summary),
+                        )
+                    else:
+                        _stream_logger.debug(
+                            "[STREAM][RECV] #%d tool_calls 到达(%d个): %s",
+                            state.recv_seq,
+                            len(tcs),
+                            ", ".join(summary),
+                        )
+                if first:
+                    if finish:
+                        state.finish_reason = finish
+                        _stream_logger.debug(
+                            "[STREAM][RECV] #%d finish=%s (首chunk, 累计tc=%d)",
+                            state.recv_seq,
+                            finish,
+                            state.recv_tc_count,
+                        )
+                elif tcs:
+                    state.finish_reason = finish
+                    _stream_logger.debug(
+                        "[STREAM][RECV] #%d finish=%s (累计tc=%d)",
+                        state.recv_seq,
+                        finish,
+                        state.recv_tc_count,
+                    )
+        except Exception:
+            pass
+
+    def _build_streaming_response(self, state: _StreamState) -> LLMResponse:
+        """拼接累积片段、核算速度统计，构造最终 LLMResponse。"""
+        result_text = "".join(state.result_parts) if state.result_parts else None
+        thinking_text = "".join(state.thinking_parts) if state.thinking_parts else None
+        tool_calls = self._normalize_tool_calls(state.tool_calls_map)
 
         # 流式接收完成：记录速度统计
-        _stream_elapsed = _time.monotonic() - _stream_start
-        _comp_tokens = (stream_usage or {}).get("completion_tokens", 0)
-        _speed = (_comp_tokens / _stream_elapsed) if _stream_elapsed > 0 and _comp_tokens else 0
+        elapsed = _time.monotonic() - state.stream_start
+        comp_tokens = (state.stream_usage or {}).get("completion_tokens", 0)
+        speed = (comp_tokens / elapsed) if elapsed > 0 and comp_tokens else 0
         _stream_logger.debug(
             "[STREAM][DONE] finish=%s text=%d chars thinking=%d chars "
             "chunks=%d tool_calls=%d "
             "tokens=%d elapsed=%.2fs speed=%.1f tok/s",
-            _finish_reason,
+            state.finish_reason,
             len(result_text or ""),
             len(thinking_text or ""),
-            len(result_parts) + len(thinking_parts),
+            len(state.result_parts) + len(state.thinking_parts),
             len(tool_calls),
-            _comp_tokens,
-            _stream_elapsed,
-            _speed,
+            comp_tokens,
+            elapsed,
+            speed,
         )
         # 接收端点汇总：API 端实际送达的 tool_calls chunk 数 vs 最终解析数
         _stream_logger.debug(
             "[STREAM][STATS] recv_chunks=%d recv_tc=%d parsed_tc=%d",
-            _recv_seq,
-            _recv_tc_count,
+            state.recv_seq,
+            state.recv_tc_count,
             len(tool_calls),
         )
 
@@ -1366,11 +1443,12 @@ class _BaseLiteLLMAdapter:
             text=result_text,
             tool_calls=tool_calls,
             thinking_text=thinking_text,
-            usage=stream_usage,
-            stream_repetition=stream_repetition,
-            thinking_truncated=thinking_truncated,
-            finish_reason=_finish_reason,
+            usage=state.stream_usage,
+            stream_repetition=state.stream_repetition,
+            thinking_truncated=state.thinking_truncated,
+            finish_reason=state.finish_reason,
         )
+
 
     async def _stream_heartbeat(
         self,

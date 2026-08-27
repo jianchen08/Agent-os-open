@@ -1029,6 +1029,159 @@ def _extract_skin_colors(css: str) -> tuple[str, str]:
     return canvas, text
 
 
+def _read_css_file(path: Path) -> str:
+    """读取皮肤 CSS 文本；文件缺失/IO 失败返回空串（单皮肤残缺不阻断其它皮肤）。"""
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _build_ds_token_variables(
+    canvas: str,
+    text: str,
+    panel: str,
+    accent: str,
+) -> dict[str, str]:
+    """皮肤四色 → --ds-* 基础令牌（气泡与对话框颜色跟皮肤一样）。
+
+    派生面用 color-mix 相对画布/文本计算；缺哪个源色则跳过对应令牌组，
+    留给前端基准主题兜底。
+    """
+    variables: dict[str, str] = {}
+    if canvas:
+        variables["--ds-bg-canvas"] = canvas
+        variables["--ds-bg-elevated"] = f"color-mix(in srgb, {canvas} 82%, white)"
+    if panel:
+        variables["--ds-bg-panel"] = panel
+    if accent:
+        variables["--ds-accent-primary"] = accent
+        variables["--ds-accent-ai"] = accent
+        variables["--ds-bg-hover"] = f"color-mix(in srgb, {accent} 12%, transparent)"
+    if text and canvas:
+        variables["--ds-text-primary"] = text
+        variables["--ds-text-secondary"] = f"color-mix(in srgb, {text} 78%, {canvas})"
+        variables["--ds-text-muted"] = f"color-mix(in srgb, {text} 55%, {canvas})"
+        variables["--ds-border-subtle"] = f"color-mix(in srgb, {text} 16%, transparent)"
+    return variables
+
+
+def _build_shadcn_bridge(
+    variables: dict[str, str],
+    canvas: str,
+    text: str,
+    accent: str,
+    sidebar_bg: str | None,
+    main_bg: str,
+) -> None:
+    """shadcn 桥发射（原地写 variables）：必须 H S% L% 纯串 + 对比度强制。
+
+    文本令牌对画布与侧栏合成面达 WCAG 4.5（字体与背景无差别的根因 = 基准主题
+    残留令牌混在皮肤面上；强制后任何面色下都保证可读）。
+    """
+    canvas_rgb = _parse_css_color(canvas) if canvas else None
+    text_rgb = _parse_css_color(text) if text else None
+    accent_rgb = _parse_css_color(accent) if accent else None
+    if canvas_rgb is None or text_rgb is None:
+        return
+    canvas_solid = (canvas_rgb[0], canvas_rgb[1], canvas_rgb[2])
+    sidebar_rgba = _parse_css_color(sidebar_bg) if sidebar_bg and sidebar_bg != "transparent" else None
+    sidebar_solid = (
+        _composite_rgba(sidebar_rgba, canvas_solid)
+        if sidebar_rgba is not None else canvas_solid
+    )
+    # 桥表面一律画布族（muted/secondary/popover/card 派生自画布，
+    # 前景只对画布强制 ≥4.5）——侧栏面是原生 fill（常为中间调合成，
+    # 无单色可达 4.5），由 --region-sidebar-fg 区域变量单独服务，
+    # 桥令牌不与之混用（中间混合面 = 双面皆输）
+    fg_hex = _enforce_contrast(text_rgb[:3], [canvas_solid])
+    canvas_shift = _mix_rgb(canvas_solid, (255, 255, 255) if _wcag_luminance(canvas_solid) < 0.5 else (0, 0, 0), 0.08)
+    # muted/secondary 前景对画布与派生面（8% 偏移）双面强制
+    sec_hex = _enforce_contrast(_mix_rgb(text_rgb[:3], canvas_solid, 0.20), [canvas_solid, canvas_shift])
+    mut_hex = _enforce_contrast(_mix_rgb(text_rgb[:3], canvas_solid, 0.42), [canvas_solid, canvas_shift])
+    border_hex = _enforce_contrast(_mix_rgb(text_rgb[:3], canvas_solid, 0.16), [canvas_solid], min_ratio=1.5)
+    variables["--background"] = _hex_to_hsl(canvas)
+    variables["--foreground"] = _hex_to_hsl(fg_hex)
+    variables["--card"] = _hex_to_hsl(canvas)
+    variables["--muted"] = _hex_to_hsl(_rgb_to_hex(canvas_shift))
+    variables["--muted-foreground"] = _hex_to_hsl(mut_hex)
+    variables["--secondary"] = _hex_to_hsl(_rgb_to_hex(canvas_shift))
+    variables["--secondary-foreground"] = _hex_to_hsl(sec_hex)
+    variables["--popover"] = _hex_to_hsl(canvas)
+    variables["--popover-foreground"] = _hex_to_hsl(fg_hex)
+    variables["--border"] = _hex_to_hsl(border_hex)
+    variables["--input"] = _hex_to_hsl(border_hex)
+    # 区域前景：侧栏面与画布亮度对立时（xp 亮侧栏/黑画布、cyber-night
+    # 亮侧栏/黑画布等）全局文本无法两全——按侧栏面单独强制一档前景，
+    # index.css 经 .theme-sidebar-area 作用域重绑定 --muted-foreground
+    # 等变量（CSS 变量继承重算，无需改任何组件）
+    if sidebar_solid != canvas_solid:
+        sb_fg = _enforce_contrast(text_rgb[:3], [sidebar_solid])
+        sb_muted = _enforce_contrast(_mix_rgb(text_rgb[:3], sidebar_solid, 0.30), [sidebar_solid])
+        variables["--region-sidebar-fg"] = sb_fg
+        variables["--region-sidebar-muted-fg"] = sb_muted
+    # 区域前景（对话主区）：聊天区+工作区同面同值（用户三裁：
+    # 所有文字/图标的颜色按所在区域背景翻转）——对话面 = conversation
+    # 表面规则或透出的画布；当前 16 皮均为透明（与全局一致，不发射，
+    # 回退全局），未来皮肤画了对话面则两区按该面单独强制
+    main_rgba = _parse_css_color(main_bg) if main_bg and main_bg != "transparent" else None
+    main_solid = _composite_rgba(main_rgba, canvas_solid) if main_rgba is not None else canvas_solid
+    if main_solid != canvas_solid:
+        ch_fg = _enforce_contrast(text_rgb[:3], [main_solid])
+        ch_muted = _enforce_contrast(_mix_rgb(text_rgb[:3], main_solid, 0.30), [main_solid])
+        variables["--region-chat-fg"] = ch_fg
+        variables["--region-chat-muted-fg"] = ch_muted
+        variables["--region-workspace-fg"] = ch_fg
+        variables["--region-workspace-muted-fg"] = ch_muted
+    if accent_rgb is not None:
+        accent_solid = (accent_rgb[0], accent_rgb[1], accent_rgb[2])
+        accent_fg_seed = (255, 255, 255) if _wcag_luminance(accent_solid) < 0.6 else (0, 0, 0)
+        accent_fg_hex = _enforce_contrast(accent_fg_seed, [accent_solid])
+        variables["--primary"] = _hex_to_hsl(accent)
+        variables["--primary-foreground"] = _hex_to_hsl(accent_fg_hex)
+        variables["--accent"] = _hex_to_hsl(accent)
+        variables["--accent-foreground"] = _hex_to_hsl(accent_fg_hex)
+        variables["--ring"] = _hex_to_hsl(accent)
+
+
+def _build_theme_entry(skin: dict[str, Any], base: str, variables: dict[str, str]) -> dict[str, Any]:
+    """装配单皮肤 PluginTheme 条目：标识字段 + 变量 + 立绘背景图层。
+
+    立绘取 base 对应态（皮肤自选基准优先于系统偏好），scrim 首个 rgba 作 overlay。
+    """
+    entry: dict[str, Any] = {
+        "id": f"dsh-skin-{skin['id']}",
+        "name": skin.get("name") or skin["id"],
+        "description": f"{skin.get('tagline') or skin['id']}（DSH 皮肤 · dsh_adapter）",
+        "base": base,
+        # 平台皮肤运行时声明：声明 skin 字段
+        # 即激活按择注入（merged.css/hooks.mjs/资产三端点按标准路径递送）
+        "skin": str(skin["id"]),
+    }
+    if variables:
+        entry["variables"] = variables
+    bg = skin.get("background_media") or {}
+    media = bg.get(base) or bg.get("dark") or bg.get("light")
+    if media:
+        scrim = str(media.get("scrim", ""))
+        m = re.search(r"rgba?\([^)]+\)", scrim)
+        overlay = m.group(0) if m else ("rgba(255,255,255,0.45)" if base == "light" else "rgba(0,0,0,0.35)")
+        entry["backgrounds"] = {
+            "image": {
+                "enabled": True,
+                "url": media["asset_url"],
+                "position": "center",
+                "size": "cover",
+                "attachment": "fixed",
+                "overlay": overlay,
+                "overlayOpacity": 1,
+            }
+        }
+    return entry
+
+
 def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str, Any]]:
     """DSH 皮肤 → 灵汐 PluginTheme 声明（contributes.themes 条目）。
 
@@ -1060,47 +1213,21 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
         panel = c.get("panel", "")
         accent = c.get("accent", "")
         base = skin.get("base", "dark")
+        skin_id = str(skin["id"])
+        skins_root = Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR
+        skin_dir = skins_root / skin_id
 
-        skin_css = SKIN_CENTER_SKINS_DIR / str(skin["id"]) / "skin.css"
-        if base_dir is not None:
-            skin_css = Path(base_dir) / str(skin["id"]) / "skin.css"
-        css = ""
-        if skin_css.is_file():
-            try:
-                css = skin_css.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                css = ""
-
-        variables: dict[str, str] = {}
-
-        # 气泡/输入面令牌：气泡与对话框颜色跟皮肤一样。
-        # 原生气泡规则在 patches.css（skin.css 只有配色令牌）——两文件同目录
-        # 同加载；令牌按基准态发射（内联 var() 静态面，昼夜覆盖归皮肤 CSS）
-        patches_path = (Path(base_dir) if base_dir is not None else SKIN_CENTER_SKINS_DIR) / str(skin["id"]) / "patches.css"
-        patches_css = ""
-        if patches_path.is_file():
-            try:
-                patches_css = patches_path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                patches_css = ""
+        css = _read_css_file(skin_dir / "skin.css")
+        # 气泡/输入面令牌提取自 patches.css：原生气泡规则在 patches.css
+        # （skin.css 只有配色令牌）——两文件同目录同加载；令牌按基准态发射
+        # （内联 var() 静态面，昼夜覆盖归皮肤 CSS）
+        patches_css = _read_css_file(skin_dir / "patches.css")
         bubble_extracts: dict[str, str] = {}
         if patches_css:
             bubble_extracts = _extract_bubble_tokens(patches_css, dark=(base == "dark"))
 
-        if canvas:
-            variables["--ds-bg-canvas"] = canvas
-            variables["--ds-bg-elevated"] = f"color-mix(in srgb, {canvas} 82%, white)"
-        if panel:
-            variables["--ds-bg-panel"] = panel
-        if accent:
-            variables["--ds-accent-primary"] = accent
-            variables["--ds-accent-ai"] = accent
-            variables["--ds-bg-hover"] = f"color-mix(in srgb, {accent} 12%, transparent)"
-        if text and canvas:
-            variables["--ds-text-primary"] = text
-            variables["--ds-text-secondary"] = f"color-mix(in srgb, {text} 78%, {canvas})"
-            variables["--ds-text-muted"] = f"color-mix(in srgb, {text} 55%, {canvas})"
-            variables["--ds-border-subtle"] = f"color-mix(in srgb, {text} 16%, transparent)"
+        variables: dict[str, str] = {}
+        variables.update(_build_ds_token_variables(canvas, text, panel, accent))
 
         # 区域背景关系（原生语义发射）：侧栏取原生 fill；对话主区取一个值
         # （conversation 表面规则或页面背景透明），同时喂给聊天区与工作区
@@ -1115,74 +1242,13 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
         # 用户气泡 + AI 平铺；角色扮演类主题可声明 bubble 恢复气泡
         variables["--bubble-ai-mode"] = "flat"
 
-        # shadcn 桥（必须 H S% L% 纯串）+ 对比度强制：文本令牌对画布与
-        # 侧栏合成面达 WCAG 4.5（字体与背景无差别的根因 = 基准主题残留
-        # 令牌混在皮肤面上；强制后任何面色下都保证可读）
-        canvas_rgb = _parse_css_color(canvas) if canvas else None
-        text_rgb = _parse_css_color(text) if text else None
-        accent_rgb = _parse_css_color(accent) if accent else None
-        if canvas_rgb is not None and text_rgb is not None:
-            canvas_solid = (canvas_rgb[0], canvas_rgb[1], canvas_rgb[2])
-            sidebar_rgba = _parse_css_color(sidebar_bg) if sidebar_bg and sidebar_bg != "transparent" else None
-            sidebar_solid = (
-                _composite_rgba(sidebar_rgba, canvas_solid)
-                if sidebar_rgba is not None else canvas_solid
-            )
-            # 桥表面一律画布族（muted/secondary/popover/card 派生自画布，
-            # 前景只对画布强制 ≥4.5）——侧栏面是原生 fill（常为中间调合成，
-            # 无单色可达 4.5），由 --region-sidebar-fg 区域变量单独服务，
-            # 桥令牌不与之混用（中间混合面 = 双面皆输）
-            fg_hex = _enforce_contrast(text_rgb[:3], [canvas_solid])
-            canvas_shift = _mix_rgb(canvas_solid, (255, 255, 255) if _wcag_luminance(canvas_solid) < 0.5 else (0, 0, 0), 0.08)
-            # muted/secondary 前景对画布与派生面（8% 偏移）双面强制
-            sec_hex = _enforce_contrast(_mix_rgb(text_rgb[:3], canvas_solid, 0.20), [canvas_solid, canvas_shift])
-            mut_hex = _enforce_contrast(_mix_rgb(text_rgb[:3], canvas_solid, 0.42), [canvas_solid, canvas_shift])
-            border_hex = _enforce_contrast(_mix_rgb(text_rgb[:3], canvas_solid, 0.16), [canvas_solid], min_ratio=1.5)
-            variables["--background"] = _hex_to_hsl(canvas)
-            variables["--foreground"] = _hex_to_hsl(fg_hex)
-            variables["--card"] = _hex_to_hsl(canvas)
-            variables["--muted"] = _hex_to_hsl(_rgb_to_hex(canvas_shift))
-            variables["--muted-foreground"] = _hex_to_hsl(mut_hex)
-            variables["--secondary"] = _hex_to_hsl(_rgb_to_hex(canvas_shift))
-            variables["--secondary-foreground"] = _hex_to_hsl(sec_hex)
-            variables["--popover"] = _hex_to_hsl(canvas)
-            variables["--popover-foreground"] = _hex_to_hsl(fg_hex)
-            variables["--border"] = _hex_to_hsl(border_hex)
-            variables["--input"] = _hex_to_hsl(border_hex)
-            # 区域前景：侧栏面与画布亮度对立时（xp 亮侧栏/黑画布、cyber-night
-            # 亮侧栏/黑画布等）全局文本无法两全——按侧栏面单独强制一档前景，
-            # index.css 经 .theme-sidebar-area 作用域重绑定 --muted-foreground
-            # 等变量（CSS 变量继承重算，无需改任何组件）
-            if sidebar_solid != canvas_solid:
-                sb_fg = _enforce_contrast(text_rgb[:3], [sidebar_solid])
-                sb_muted = _enforce_contrast(_mix_rgb(text_rgb[:3], sidebar_solid, 0.30), [sidebar_solid])
-                variables["--region-sidebar-fg"] = sb_fg
-                variables["--region-sidebar-muted-fg"] = sb_muted
-            # 区域前景（对话主区）：聊天区+工作区同面同值（用户三裁：
-            # 所有文字/图标的颜色按所在区域背景翻转）——对话面 = conversation
-            # 表面规则或透出的画布；当前 16 皮均为透明（与全局一致，不发射，
-            # 回退全局），未来皮肤画了对话面则两区按该面单独强制
-            main_rgba = _parse_css_color(main_bg) if main_bg and main_bg != "transparent" else None
-            main_solid = _composite_rgba(main_rgba, canvas_solid) if main_rgba is not None else canvas_solid
-            if main_solid != canvas_solid:
-                ch_fg = _enforce_contrast(text_rgb[:3], [main_solid])
-                ch_muted = _enforce_contrast(_mix_rgb(text_rgb[:3], main_solid, 0.30), [main_solid])
-                variables["--region-chat-fg"] = ch_fg
-                variables["--region-chat-muted-fg"] = ch_muted
-                variables["--region-workspace-fg"] = ch_fg
-                variables["--region-workspace-muted-fg"] = ch_muted
-            if accent_rgb is not None:
-                accent_solid = (accent_rgb[0], accent_rgb[1], accent_rgb[2])
-                accent_fg_seed = (255, 255, 255) if _wcag_luminance(accent_solid) < 0.6 else (0, 0, 0)
-                accent_fg_hex = _enforce_contrast(accent_fg_seed, [accent_solid])
-                variables["--primary"] = _hex_to_hsl(accent)
-                variables["--primary-foreground"] = _hex_to_hsl(accent_fg_hex)
-                variables["--accent"] = _hex_to_hsl(accent)
-                variables["--accent-foreground"] = _hex_to_hsl(accent_fg_hex)
-                variables["--ring"] = _hex_to_hsl(accent)
+        _build_shadcn_bridge(variables, canvas, text, accent, sidebar_bg, main_bg)
 
         # 气泡令牌成对定稿（底色+配对文字，跟皮收口）——见
         # _resolve_bubble_variables；置于 shadcn 桥之后（画布实色已解析）
+        canvas_rgb = _parse_css_color(canvas) if canvas else None
+        text_rgb = _parse_css_color(text) if text else None
+        accent_rgb = _parse_css_color(accent) if accent else None
         variables.update(
             _resolve_bubble_variables(
                 bubble_extracts, css, dark=(base == "dark"),
@@ -1199,38 +1265,9 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
 
         # 皮肤字体 → --font-ui（主题管线原生消费 main.tsx fontFamily）
         if css:
-            m = _DSW_FONT_RE.search(css)
-            if m:
-                variables["--font-ui"] = m.group(1).strip()
+            font_match = _DSW_FONT_RE.search(css)
+            if font_match:
+                variables["--font-ui"] = font_match.group(1).strip()
 
-        entry: dict[str, Any] = {
-            "id": f"dsh-skin-{skin['id']}",
-            "name": skin.get("name") or skin["id"],
-            "description": f"{skin.get('tagline') or skin['id']}（DSH 皮肤 · dsh_adapter）",
-            "base": base,
-            # 平台皮肤运行时声明：声明 skin 字段
-            # 即激活按择注入（merged.css/hooks.mjs/资产三端点按标准路径递送）
-            "skin": str(skin["id"]),
-        }
-        if variables:
-            entry["variables"] = variables
-        # 立绘 → 原生背景图层（取 base 对应态：皮肤自选基准优先于系统偏好）
-        bg = skin.get("background_media") or {}
-        media = bg.get(base) or bg.get("dark") or bg.get("light")
-        if media:
-            scrim = str(media.get("scrim", ""))
-            m = re.search(r"rgba?\([^)]+\)", scrim)
-            overlay = m.group(0) if m else ("rgba(255,255,255,0.45)" if base == "light" else "rgba(0,0,0,0.35)")
-            entry["backgrounds"] = {
-                "image": {
-                    "enabled": True,
-                    "url": media["asset_url"],
-                    "position": "center",
-                    "size": "cover",
-                    "attachment": "fixed",
-                    "overlay": overlay,
-                    "overlayOpacity": 1,
-                }
-            }
-        themes.append(entry)
+        themes.append(_build_theme_entry(skin, base, variables))
     return themes

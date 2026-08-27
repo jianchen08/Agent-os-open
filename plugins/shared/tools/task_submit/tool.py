@@ -321,6 +321,175 @@ def _normalize_description(value: Any) -> str:
     return str(value)
 
 
+# 任务提交工具的 OpenAI Function Calling schema 字面量（纯声明数据，
+# 与 get_tool_definition 拆离便于 review/diff 与外部对账）。
+_TASK_SUBMIT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "target_type": {
+            "type": "string",
+            "enum": ["agent"],
+            "description": "目标类型，固定为 agent（必填）",
+        },
+        "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "目标 Agent ID（必填）。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索",
+        },
+        "goal_title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "任务标题（必填），简短明确",
+        },
+        "goal_description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": (
+                "任务描述（必填，1-2000 字符）。只写目标和背景，"
+                "禁止写执行步骤/工具选择/流程顺序；引用文件只写路径（如 docs/report.md），"
+                "让下级 Agent 自行读取，不要复制文件内容。"
+            ),
+        },
+        "acceptance_criteria": {
+            "type": "object",
+            "description": (
+                "验收标准字典（可选，但推荐填写）。key 为评估指标 ID，value 为配置对象。"
+                "评估指标 ID 必须从下列内置指标中选取，按验证强度递增："
+                "\n- file_check：文件检查（工具自动，验证文件存在性/非空/内容匹配）"
+                "\n- bash_check：命令检查（工具自动，通过命令退出码判定结果）"
+                "\n- semantic_check：语义检查（agent 自动，验证意图覆盖/匹配/幻觉等语义层面）"
+                "\n- human_review：人工审核（人类执行，验证需要人工审批/复核的主观或不可逆判断）"
+                "\n选用规则：用户要求'人类评估/人工审核/人工确认'时必须用 human_review，"
+                "不得用 semantic_check 替代；semantic_check 是 agent 自动语义判断，不涉及人类。"
+                "指标 ID 必须精确匹配，禁止自创或用 value 子字段名（如 pass_threshold）充当 key。"
+            ),
+            "additionalProperties": {
+                "type": "object",
+                "description": "评估指标配置对象",
+                "properties": {
+                    "input_params": {
+                        "type": "object",
+                        "description": (
+                            "传递给评估工具的参数。不同指标所需参数不同："
+                            'file_check 需要 {"path": "src/main.py"}；'
+                            'bash_check 需要 {"command": "pytest tests/"}；'
+                            'semantic_check 需要 {"criteria": "评估要求描述"}；'
+                            'human_review 需要 {"title": "审核标题", "mode": "choice"}。'
+                        ),
+                    },
+                    "expected_output": {
+                        "type": "object",
+                        "description": "预期输出，用于验证评估结果（可选）",
+                    },
+                    "pass_threshold": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "任务级别的通过阈值（0-100），优先级高于指标默认阈值",
+                    },
+                },
+                "required": [],
+            },
+        },
+        "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{12}$",
+            "description": (
+                "挂靠项目 ID（可选）。指定后任务在项目文件夹下执行"
+                "（默认 worktree 从项目仓库分叉）；缺省为独立任务。"
+                "项目经 projects 域 API 创建（= 真实文件夹 + 登记）"
+            ),
+        },
+        "parent_task_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{12}$",
+            "description": (
+                "父任务 ID（task=pipeline 统一后即引擎管道身份，12 位 hex）。"
+                "创建任务链子任务时指定此参数关联父任务（复盘/分层链）。"
+            ),
+        },
+        "workspace": {
+            "type": "string",
+            "description": (
+                "目标项目路径。指定任务需要操作（读取或修改）的项目目录。"
+                "**重要**：当任务需要对某个特定文件夹进行读取或修改时，"
+                "必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。"
+                "可用范围（按任务类型）：根任务可填；普通子任务不可填（继承父任务）。"
+                "工作空间拓扑由 workspace_mode 决定（worktree=在目标项目上建隔离副本；"
+                "plain=直接操作目标目录）；执行环境隔离由 isolation_level 决定，两者独立。"
+            ),
+        },
+        "workspace_mode": {
+            "type": "string",
+            "enum": ["worktree", "plain"],
+            "description": (
+                "工作空间拓扑（根任务可选，默认 worktree）。"
+                "worktree：在目标项目上创建 git worktree 隔离操作，不影响原项目（默认）。"
+                "plain：直接在目标目录工作，不建 worktree、不切分支。"
+                "与 isolation_level（执行环境容器/宿主）相互独立。"
+                "普通子任务不可选（继承父任务空间）。"
+            ),
+        },
+        "isolation_level": {
+            "type": "string",
+            "enum": ["non_isolated", "isolated"],
+            "description": (
+                "执行环境隔离级别（根任务可选，默认使用系统配置）。"
+                "non_isolated：非隔离，直接在宿主环境执行。"
+                "isolated：隔离，在容器执行环境中工作。"
+                "只决定执行环境，不决定工作空间拓扑（拓扑由 workspace_mode 决定）。"
+                "普通子任务不可选（继承父任务）。"
+            ),
+        },
+        "inherit_from": {
+            "type": "string",
+            "description": "源任务 ID（被继承的任务）。设置后需同时指定 inherit_mode",
+        },
+        "inherit_mode": {
+            "description": (
+                "继承模式（需配合 inherit_from 使用）：\n"
+                '- "pipe"：继承对话管道（消息历史），适合改了目标但保留上下文\n'
+                '- "workspace"：继承工作空间（文件目录），适合换方案但保留文件\n'
+                '- ["pipe","workspace"]：同时继承对话与文件（最常见延续场景）'
+            ),
+            "oneOf": [
+                {
+                    "type": "string",
+                    "enum": ["pipe", "workspace"],
+                },
+                {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["pipe", "workspace"],
+                    },
+                },
+            ],
+        },
+    },
+    "required": ["goal_title", "goal_description", "target_type", "target_id"],
+}
+
+
+def _parse_inherit_modes(inp: dict[str, Any]) -> set[str]:
+    """解析 inherit_mode / inherit.mode 为集合（扁平字段与旧式嵌套对象同口径）。"""
+    mode = inp.get("inherit_mode") or (
+        inp.get("inherit", {}).get("mode") if isinstance(inp.get("inherit"), dict) else None
+    )
+    if isinstance(mode, str):
+        return {mode}
+    return set(mode) if isinstance(mode, (list, tuple)) else set()
+
+
+def _inherit_from_id_of(inp: dict[str, Any]) -> str:
+    """提取继承源任务 ID（扁平 inherit_from 与旧式 inherit.from 同口径）。"""
+    cfg = inp.get("inherit")
+    if isinstance(cfg, dict):
+        return cfg.get("from", "") or ""
+    return inp.get("inherit_from") or ""
+
+
 class TaskSubmitTool(BuiltinTool):
     """任务提交工具。"""
 
@@ -341,157 +510,11 @@ class TaskSubmitTool(BuiltinTool):
 
     @staticmethod
     def get_tool_definition() -> Tool:
-        """获取工具定义（标准 OpenAI Function Calling 格式）"""
+        """获取工具定义（标准 OpenAI Function Calling 格式）；schema 见模块级 _TASK_SUBMIT_INPUT_SCHEMA。"""
         return Tool(
             name="task_submit",
-            description="""任务提交工具。将任务提交给指定的 Agent 执行，配置验收标准确保结果可验证。""".strip(),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "target_type": {
-                        "type": "string",
-                        "enum": ["agent"],
-                        "description": "目标类型，固定为 agent（必填）",
-                    },
-                    "target_id": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "目标 Agent ID（必填）。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索",
-                    },
-                    "goal_title": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "任务标题（必填），简短明确",
-                    },
-                    "goal_description": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 2000,
-                        "description": (
-                            "任务描述（必填，1-2000 字符）。只写目标和背景，"
-                            "禁止写执行步骤/工具选择/流程顺序；引用文件只写路径（如 docs/report.md），"
-                            "让下级 Agent 自行读取，不要复制文件内容。"
-                        ),
-                    },
-                    "acceptance_criteria": {
-                        "type": "object",
-                        "description": (
-                            "验收标准字典（可选，但推荐填写）。key 为评估指标 ID，value 为配置对象。"
-                            "评估指标 ID 必须从下列内置指标中选取，按验证强度递增："
-                            "\n- file_check：文件检查（工具自动，验证文件存在性/非空/内容匹配）"
-                            "\n- bash_check：命令检查（工具自动，通过命令退出码判定结果）"
-                            "\n- semantic_check：语义检查（agent 自动，验证意图覆盖/匹配/幻觉等语义层面）"
-                            "\n- human_review：人工审核（人类执行，验证需要人工审批/复核的主观或不可逆判断）"
-                            "\n选用规则：用户要求'人类评估/人工审核/人工确认'时必须用 human_review，"
-                            "不得用 semantic_check 替代；semantic_check 是 agent 自动语义判断，不涉及人类。"
-                            "指标 ID 必须精确匹配，禁止自创或用 value 子字段名（如 pass_threshold）充当 key。"
-                        ),
-                        "additionalProperties": {
-                            "type": "object",
-                            "description": "评估指标配置对象",
-                            "properties": {
-                                "input_params": {
-                                    "type": "object",
-                                    "description": (
-                                        "传递给评估工具的参数。不同指标所需参数不同："
-                                        'file_check 需要 {"path": "src/main.py"}；'
-                                        'bash_check 需要 {"command": "pytest tests/"}；'
-                                        'semantic_check 需要 {"criteria": "评估要求描述"}；'
-                                        'human_review 需要 {"title": "审核标题", "mode": "choice"}。'
-                                    ),
-                                },
-                                "expected_output": {
-                                    "type": "object",
-                                    "description": "预期输出，用于验证评估结果（可选）",
-                                },
-                                "pass_threshold": {
-                                    "type": "number",
-                                    "minimum": 0,
-                                    "maximum": 100,
-                                    "description": "任务级别的通过阈值（0-100），优先级高于指标默认阈值",
-                                },
-                            },
-                            "required": [],
-                        },
-                    },
-                    "project_id": {
-                        "type": "string",
-                        "pattern": "^[0-9a-f]{12}$",
-                        "description": (
-                            "挂靠项目 ID（可选）。指定后任务在项目文件夹下执行"
-                            "（默认 worktree 从项目仓库分叉）；缺省为独立任务。"
-                            "项目经 projects 域 API 创建（= 真实文件夹 + 登记）"
-                        ),
-                    },
-                    "parent_task_id": {
-                        "type": "string",
-                        "pattern": "^[0-9a-f]{12}$",
-                        "description": (
-                            "父任务 ID（task=pipeline 统一后即引擎管道身份，12 位 hex）。"
-                            "创建任务链子任务时指定此参数关联父任务（复盘/分层链）。"
-                        ),
-                    },
-                    "workspace": {
-                        "type": "string",
-                        "description": (
-                            "目标项目路径。指定任务需要操作（读取或修改）的项目目录。"
-                            "**重要**：当任务需要对某个特定文件夹进行读取或修改时，"
-                            "必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。"
-                            "可用范围（按任务类型）：根任务可填；普通子任务不可填（继承父任务）。"
-                            "工作空间拓扑由 workspace_mode 决定（worktree=在目标项目上建隔离副本；"
-                            "plain=直接操作目标目录）；执行环境隔离由 isolation_level 决定，两者独立。"
-                        ),
-                    },
-                    "workspace_mode": {
-                        "type": "string",
-                        "enum": ["worktree", "plain"],
-                        "description": (
-                            "工作空间拓扑（根任务可选，默认 worktree）。"
-                            "worktree：在目标项目上创建 git worktree 隔离操作，不影响原项目（默认）。"
-                            "plain：直接在目标目录工作，不建 worktree、不切分支。"
-                            "与 isolation_level（执行环境容器/宿主）相互独立。"
-                            "普通子任务不可选（继承父任务空间）。"
-                        ),
-                    },
-                    "isolation_level": {
-                        "type": "string",
-                        "enum": ["non_isolated", "isolated"],
-                        "description": (
-                            "执行环境隔离级别（根任务可选，默认使用系统配置）。"
-                            "non_isolated：非隔离，直接在宿主环境执行。"
-                            "isolated：隔离，在容器执行环境中工作。"
-                            "只决定执行环境，不决定工作空间拓扑（拓扑由 workspace_mode 决定）。"
-                            "普通子任务不可选（继承父任务）。"
-                        ),
-                    },
-                    "inherit_from": {
-                        "type": "string",
-                        "description": "源任务 ID（被继承的任务）。设置后需同时指定 inherit_mode",
-                    },
-                    "inherit_mode": {
-                        "description": (
-                            "继承模式（需配合 inherit_from 使用）：\n"
-                            '- "pipe"：继承对话管道（消息历史），适合改了目标但保留上下文\n'
-                            '- "workspace"：继承工作空间（文件目录），适合换方案但保留文件\n'
-                            '- ["pipe","workspace"]：同时继承对话与文件（最常见延续场景）'
-                        ),
-                        "oneOf": [
-                            {
-                                "type": "string",
-                                "enum": ["pipe", "workspace"],
-                            },
-                            {
-                                "type": "array",
-                                "items": {
-                                    "type": "string",
-                                    "enum": ["pipe", "workspace"],
-                                },
-                            },
-                        ],
-                    },
-                },
-                "required": ["goal_title", "goal_description", "target_type", "target_id"],
-            },
+            description="任务提交工具。将任务提交给指定的 Agent 执行，配置验收标准确保结果可验证。",
+            input_schema=_TASK_SUBMIT_INPUT_SCHEMA,
             source=ToolSource.CODE,
             category=ToolCategory.TASK,
             level=ToolLevel.L1_L2_ONLY,
@@ -524,13 +547,13 @@ class TaskSubmitTool(BuiltinTool):
             },
         )
 
-    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:  # noqa: PLR0911,PLR0912,PLR0915
-        """执行任务提交。"""
-        import time as _time  # noqa: PLC0415
+    @staticmethod
+    def _parse_goal_input(inputs: dict[str, Any]) -> dict[str, Any] | None:
+        """goal 字段解析（schema 已平铺为 goal_title/goal_description）。
 
-        _t0 = _time.monotonic()
-        # ── goal 字段解析（schema 已平铺为 goal_title/goal_description） ──
-        # 优先读扁平字段；同时兼容旧的 goal 对象（历史调用方/未刷新 schema 的 LLM）。
+        优先读扁平字段；同时兼容旧的 goal 对象（历史调用方/未刷新 schema 的 LLM）
+        以及 goal 作为纯文本标题的容错包装。异常形态归一为 None 并告警。
+        """
         goal = inputs.get("goal")
         if goal is None and (inputs.get("goal_title") is not None):
             # 平铺后的标准入口：把扁平字段重组为下游统一使用的 {title, description}
@@ -558,65 +581,52 @@ class TaskSubmitTool(BuiltinTool):
                 str(goal)[:200] if goal else "None",
             )
             goal = None
-        parent_agent_level = inputs.get("parent_agent_level")
+        return goal
 
-        # ── 0.5 短 id 入参解析（2026-08-22 用户要求：LLM 工具面 id 短化）──
-        # LLM 回传的 parent_task_id / task_id 可能是 12 位短 id，经 state 聚合
-        # 前缀唯一解析回全 id（容器 project id 生成即短，天然命中）。
-        await self._resolve_short_input_ids(inputs)
+    def _gate_base_submission(
+        self,
+        inputs: dict[str, Any],
+        goal: dict[str, Any] | None,
+        parent_agent_level: Any,
+    ) -> tuple[dict[str, Any], str, ToolExecutionResult | None]:
+        """基础字段与归属闸门：标题/描述必填 → parent_task_id 归属 → 描述长度上限。
 
-        logger.info(
-            "[TaskSubmit] 开始执行 | project_id=%s | parent_agent_level=%s",
-            inputs.get("project_id") or "-",
-            parent_agent_level,
-        )
-
-        # ── 0. 注入参数校验 ──
-        if parent_agent_level is None:
-            logger.error("[TaskSubmit] 注入参数缺失 | parent_agent_level 未注入")
-            return create_failure_result(
-                error="系统错误：parent_agent_level 未注入，无法确定调用者层级",
-                error_code="MISSING_INJECTED_PARAM",
-            )
-
+        返回 (验证通过的 goal, 规范化后的 description, 失败结果)；失败结果非 None
+        时调用方短路返回，此时前两个值无意义（恒为空占位）。
+        """
         # ── 1. 基础参数验证 ──
         if not goal or not goal.get("title"):
             logger.error("[TaskSubmit] 参数验证失败 | goal 为空")
-            return create_failure_result(
+            return {}, "", create_failure_result(
                 error="必须提供 goal（含 title 字段）",
                 error_code="MISSING_GOAL",
             )
 
-        # ── 1.2 任务描述非空（2026-08-24）──
-        # 派发给下级 Agent 的任务只有标题没有描述 = 下级无目标上下文，
-        # 标题承载不了执行语义，一律拒绝。
+        # ── 1.2 任务描述非空：派发给下级 Agent 的任务只有标题没有描述 =
+        # 下级无目标上下文，标题承载不了执行语义，一律拒绝。
         # （priority/max_retries 参数已退役——执行层零消费者，见 ADR
         # 2026-08-24-task-submit-param-diet；显式传入按未知参数忽略。）
-        if not _normalize_description(goal.get("description", "")).strip():
+        description = _normalize_description(goal.get("description", ""))
+        if not description.strip():
             logger.warning("[TaskSubmit] goal.description 缺失或空白 | title=%s", goal.get("title"))
-            return create_failure_result(
+            return {}, "", create_failure_result(
                 error="必须提供任务描述（goal_description，1-2000 字符）",
                 error_code="MISSING_DESCRIPTION",
             )
 
-        target_type = inputs.get("target_type")
-        target_id = inputs.get("target_id")
-        description = _normalize_description(goal.get("description", ""))
-        acceptance_criteria = inputs.get("acceptance_criteria", {})
         parent_task_id = inputs.get("parent_task_id")
-
         # P0-3 纵深防御：校验 parent_task_id 归属，防 L2/L3 伪造他人父任务越权挂载
         # （继承他人管道/工作空间/上下文）。合法链：父任务必须由更高层级提交。
-        _own_ok, _own_err = self._check_parent_ownership(parent_agent_level, parent_task_id)
-        if not _own_ok:
+        own_ok, own_err = self._check_parent_ownership(parent_agent_level, parent_task_id)
+        if not own_ok:
             logger.warning(
                 "[TaskSubmit] parent_task_id 归属校验失败 | parent=%s | L%d | reason=%s",
                 parent_task_id,
                 parent_agent_level,
-                _own_err,
+                own_err,
             )
-            return create_failure_result(
-                error=_own_err or "parent_task_id 归属校验失败",
+            return {}, "", create_failure_result(
+                error=own_err or "parent_task_id 归属校验失败",
                 error_code="INSUFFICIENT_PERMISSION",
             )
 
@@ -629,22 +639,33 @@ class TaskSubmitTool(BuiltinTool):
         )
 
         # ── 描述长度硬限制（防止超大消息体打爆 LLM API） ──
-        _MAX_DESC_LEN = 2000  # noqa: N806
-        if len(description) > _MAX_DESC_LEN:
+        max_desc_len = 2000
+        if len(description) > max_desc_len:
             logger.warning(
                 "[TaskSubmit] 描述超长拒绝 | len=%d | max=%d | preview=%.100s",
                 len(description),
-                _MAX_DESC_LEN,
+                max_desc_len,
                 description[:100],
             )
-            return create_failure_result(
+            return {}, "", create_failure_result(
                 error=(
-                    f"任务描述过长（{len(description)}字符，上限{_MAX_DESC_LEN}字符）。"
+                    f"任务描述过长（{len(description)}字符，上限{max_desc_len}字符）。"
                     "请精简描述，只写目标和文件路径，让下级 Agent 自行 file_read 文件内容。"
                 ),
                 error_code="DESCRIPTION_TOO_LONG",
             )
+        return goal, description, None
 
+    @staticmethod
+    def _normalize_acceptance_criteria(
+        acceptance_criteria: Any,
+    ) -> tuple[dict[str, Any], ToolExecutionResult | None]:
+        """验收标准归一化：类型重置 + 指标 ID 合法性校验。
+
+        全部 key 无效 → 拒绝提交并引导 LLM 使用正确指标 ID；
+        部分无效 → 剔除无效项后继续（降级，不阻断）。
+        返回 (归一化后的 criteria, 失败结果)。
+        """
         if not isinstance(acceptance_criteria, dict):
             logger.warning(
                 "[TaskSubmit] acceptance_criteria 类型异常: %s，重置为空 dict",
@@ -666,12 +687,10 @@ class TaskSubmitTool(BuiltinTool):
         # ── 评估指标 ID 合法性校验 ──
         # 防止 LLM 把 pass_threshold / $text 等 value 子字段误填为 acceptance_criteria
         # 的 key（即 metric_id），导致评估期 METRIC_NOT_FOUND 反复重试直至失败。
-        # 全部无效 → 拒绝提交并引导 LLM 使用正确指标 ID；
-        # 部分无效 → 剔除无效项后继续（降级，不阻断）。
         original_keys = list(acceptance_criteria.keys())
         if original_keys:
-            acceptance_criteria, invalid_ids = _validate_metric_ids(acceptance_criteria)
-            if invalid_ids and not acceptance_criteria:
+            normalized, invalid_ids = _validate_metric_ids(acceptance_criteria)
+            if invalid_ids and not normalized:
                 valid_ids = _get_valid_metric_ids() or set()
                 valid_list = ", ".join(sorted(valid_ids)) if valid_ids else "(指标加载失败)"
                 logger.warning(
@@ -679,7 +698,7 @@ class TaskSubmitTool(BuiltinTool):
                     invalid_ids,
                     sorted(valid_ids),
                 )
-                return create_failure_result(
+                return {}, create_failure_result(
                     error=(
                         f"acceptance_criteria 的 key（评估指标 ID）全部无效: "
                         f"{invalid_ids}。这些 key 必须是真实存在的评估指标 ID，"
@@ -693,9 +712,20 @@ class TaskSubmitTool(BuiltinTool):
                 logger.warning(
                     "[TaskSubmit] 剔除 acceptance_criteria 中的无效 metric_id | invalid=%s | kept=%s",
                     invalid_ids,
-                    list(acceptance_criteria.keys()),
+                    list(normalized.keys()),
                 )
+            return normalized, None
+        return acceptance_criteria, None
 
+    @staticmethod
+    def _apply_parent_task_injection(
+        parent_agent_level: Any,
+        parent_task_id: str | None,
+        inputs: dict[str, Any],
+    ) -> tuple[str | None, ToolExecutionResult | None]:
+        """L2/L3 层级闸门 + 注入回退：显式指定 parent_task_id 一律拦截；
+        未指定时回退管道注入的 task_id 作为父任务。
+        返回 (生效的 parent_task_id, 失败结果)。"""
         # ── L2/L3 层级校验：禁止显式指定 parent_task_id ──
         if parent_agent_level >= 2 and parent_task_id is not None:
             logger.warning(
@@ -703,7 +733,7 @@ class TaskSubmitTool(BuiltinTool):
                 parent_agent_level,
                 parent_task_id,
             )
-            return create_failure_result(
+            return None, create_failure_result(
                 error=f"L{parent_agent_level} Agent 不能显式指定 parent_task_id（系统自动注入当前任务 ID）",
                 error_code="L2_CANNOT_SPECIFY_PARENT_TASK_ID",
             )
@@ -715,14 +745,25 @@ class TaskSubmitTool(BuiltinTool):
                 "[TaskSubmit] 自动注入 parent_task_id=%s (来自管道所属任务)",
                 parent_task_id,
             )
+        return parent_task_id, None
 
-        # ── 项目挂靠解析（project_id）：L1 显式指定；L2/L3 沿父链由系统继承 ──
-        # 项目 = 文件夹 + 登记（ADR 2026-08-27）：挂靠键 task.parent_project_id
-        # 由 task_submit 唯一写入（state 行），每级子任务继承同值——深层任务
-        # 仍归属项目（任务树分组/制品聚合按单跳键覆盖全深度）。
-        # agent 原始 workspace 入参先留底：项目解析可能注入 workspace（项目
-        # 文件夹），子任务闸门只认原始入参，系统注入值不算显式指定。
-        _explicit_ws_raw = str(inputs.get("workspace") or "")
+    async def _resolve_project_binding(
+        self,
+        inputs: dict[str, Any],
+        parent_task_id: str | None,
+        parent_agent_level: int,
+        explicit_workspace_raw: str,
+    ) -> tuple[str, ToolExecutionResult | None]:
+        """项目挂靠解析（project_id）：L1 显式指定；L2/L3 沿父链由系统继承。
+
+        项目 = 文件夹 + 登记（ADR 2026-08-27）：挂靠键 task.parent_project_id
+        由 task_submit 唯一写入（state 行），每级子任务继承同值——深层任务
+        仍归属项目（任务树分组/制品聚合按单跳键覆盖全深度）。
+
+        校验序：L2/L3 显式指定拒绝 → 登记存在性 → 文件夹存在性 → 与 agent
+        显式 workspace 冲突拒绝；全部通过后把 inputs["workspace"] 覆写为项目文件夹。
+        返回 (project_id（空串 = 不挂靠）, 失败结果)。
+        """
         project_id = str(inputs.get("project_id") or "")
         if project_id and parent_agent_level >= 2:
             # 防伪造：L2/L3 的项目归属由系统继承，显式指定一律拒绝
@@ -731,7 +772,7 @@ class TaskSubmitTool(BuiltinTool):
                 parent_agent_level,
                 project_id,
             )
-            return create_failure_result(
+            return "", create_failure_result(
                 error=(
                     f"L{parent_agent_level} Agent 不能显式指定 project_id——"
                     "子任务的项目归属由系统沿父链自动继承，直接提交子任务即可。"
@@ -746,349 +787,366 @@ class TaskSubmitTool(BuiltinTool):
                     parent_task_id,
                     project_id,
                 )
-        _project_path = ""
         if project_id:
             # 共享层自举（plugins/shared/ —— project_registry 所在）
-            _shared_root = str(Path(__file__).resolve().parents[2])
-            if _shared_root not in sys.path:
-                sys.path.insert(0, _shared_root)
+            shared_root = str(Path(__file__).resolve().parents[2])
+            if shared_root not in sys.path:
+                sys.path.insert(0, shared_root)
             from project_registry import load_project_paths  # noqa: PLC0415
 
-            _project_path = str(load_project_paths().get(project_id) or "")
-            if not _project_path:
+            project_path = str(load_project_paths().get(project_id) or "")
+            if not project_path:
                 logger.error(
                     "[TaskSubmit] project_id 不在登记中（可能已删除）| project_id=%s",
                     project_id,
                 )
-                return create_failure_result(
+                return "", create_failure_result(
                     error=f"项目 {project_id} 不存在（登记中无此 id，可能已被删除）",
                     error_code="PROJECT_NOT_FOUND",
                 )
-            if not os.path.isdir(_project_path):
-                return create_failure_result(
-                    error=f"项目文件夹不存在: {_project_path}（项目可能已被删除，请检查项目登记）",
+            if not os.path.isdir(project_path):
+                return "", create_failure_result(
+                    error=f"项目文件夹不存在: {project_path}（项目可能已被删除，请检查项目登记）",
                     error_code="PROJECT_FOLDER_MISSING",
                 )
             # 挂项目任务的 workspace 恒为项目文件夹（worktree 从它分叉）；
             # 显式给了不同路径 = 语义冲突，拒绝而非二选一猜测。
-            if _explicit_ws_raw:
-                _norm = os.path.normpath
-                _a = _norm(_explicit_ws_raw)
-                _b = _norm(_project_path)
-                _same = _a.lower() == _b.lower() if os.name == "nt" else _a == _b
-                if not _same:
-                    return create_failure_result(
+            if explicit_workspace_raw:
+                norm = os.path.normpath
+                path_a = norm(explicit_workspace_raw)
+                path_b = norm(project_path)
+                same = path_a.lower() == path_b.lower() if os.name == "nt" else path_a == path_b
+                if not same:
+                    return "", create_failure_result(
                         error=(
-                            f"挂靠项目（{project_id}）的任务工作空间恒为项目文件夹 {_project_path}，"
-                            f"不能另指定 workspace={_explicit_ws_raw}。请去掉 workspace 参数重新提交。"
+                            f"挂靠项目（{project_id}）的任务工作空间恒为项目文件夹 {project_path}，"
+                            f"不能另指定 workspace={explicit_workspace_raw}。请去掉 workspace 参数重新提交。"
                         ),
                         error_code="PROJECT_WS_CONFLICT",
                     )
-            inputs["workspace"] = _project_path
+            inputs["workspace"] = project_path
+        return project_id, None
 
-        def _parse_inherit_modes(inp: dict[str, Any]) -> set[str]:
-            """解析 inherit_mode / inherit.mode 为集合（两分支共用口径）。"""
-            mode = inp.get("inherit_mode") or (
-                inp.get("inherit", {}).get("mode") if isinstance(inp.get("inherit"), dict) else None
-            )
-            if isinstance(mode, str):
-                return {mode}
-            return set(mode) if isinstance(mode, (list, tuple)) else set()
+    def _gate_subtask_param_inheritance(
+        self,
+        inputs: dict[str, Any],
+        parent_task_id: str | None,
+        explicit_workspace_raw: str,
+    ) -> ToolExecutionResult | None:
+        """子任务参数闸门：普通子任务只允许 inherit pipe；其余一律继承父任务。
 
-        def _inherit_from_id_of(inp: dict[str, Any]) -> str:
-            """提取继承源任务 ID（扁平 inherit_from 与旧式 inherit.from 同口径）。"""
-            cfg = inp.get("inherit")
-            if isinstance(cfg, dict):
-                return cfg.get("from", "") or ""
-            return inp.get("inherit_from") or ""
-
-        _inherit_modes = _parse_inherit_modes(inputs)
-
-        # ── 子任务参数闸门：只允许 inherit pipe；其余一律继承父任务 ──
-        # param_inject 已对 task_submit 跳过 workspace/isolation_level 注入，
-        # 此处 inputs 中的值即为 agent 显式选择，按任务类型强制校验。
-        if parent_task_id:
+        param_inject 已对 task_submit 跳过 workspace/isolation_level 注入，
+        此处 inputs 中的值即为 agent 显式选择，按任务类型强制校验。
+        workspace 用 agent 原始入参判定（项目解析注入的值不算显式指定）。
+        """
+        if not parent_task_id:
+            return None
+        inherit_source = _inherit_from_id_of(inputs)
+        if inherit_source and "workspace" in _parse_inherit_modes(inputs):
             # inherit workspace：普通子任务只能继承管道，工作空间继承被拒绝
-            if _inherit_from_id_of(inputs) and "workspace" in _inherit_modes:
+            logger.warning(
+                "[TaskSubmit] 普通子任务 inherit workspace 被拒绝（只能继承管道）| "
+                "parent_task_id=%s | inherit_from=%s",
+                parent_task_id,
+                inherit_source,
+            )
+            return create_failure_result(
+                error=(
+                    "普通子任务只能继承管道（inherit_mode=['pipe']，对话历史），"
+                    "工作空间一律继承父任务，不能继承其它任务的工作空间。"
+                ),
+                error_code="SUBTASK_INHERITS_PARAMS",
+            )
+        if explicit_workspace_raw:
+            logger.warning(
+                "[TaskSubmit] 普通子任务显式指定 workspace 被拒绝（继承父任务）| "
+                "parent_task_id=%s | value=%s",
+                parent_task_id,
+                explicit_workspace_raw,
+            )
+            return create_failure_result(
+                error=(
+                    "普通子任务继承父任务的工作空间与隔离配置，不能指定 workspace。"
+                    "如需继承对话历史，请使用 inherit_from + inherit_mode=['pipe']。"
+                ),
+                error_code="SUBTASK_INHERITS_PARAMS",
+            )
+        for param in ("workspace_mode", "isolation_level"):
+            if inputs.get(param):
                 logger.warning(
-                    "[TaskSubmit] 普通子任务 inherit workspace 被拒绝（只能继承管道）| "
-                    "parent_task_id=%s | inherit_from=%s",
+                    "[TaskSubmit] 普通子任务显式指定 %s 被拒绝（继承父任务）| parent_task_id=%s | value=%s",
+                    param,
                     parent_task_id,
-                    _inherit_from_id_of(inputs),
+                    inputs.get(param),
                 )
                 return create_failure_result(
                     error=(
-                        "普通子任务只能继承管道（inherit_mode=['pipe']，对话历史），"
-                        "工作空间一律继承父任务，不能继承其它任务的工作空间。"
-                    ),
-                    error_code="SUBTASK_INHERITS_PARAMS",
-                )
-            # workspace 用 agent 原始入参判定（项目继承注入的值不算显式指定）
-            if _explicit_ws_raw:
-                logger.warning(
-                    "[TaskSubmit] 普通子任务显式指定 workspace 被拒绝（继承父任务）| "
-                    "parent_task_id=%s | value=%s",
-                    parent_task_id,
-                    _explicit_ws_raw,
-                )
-                return create_failure_result(
-                    error=(
-                        "普通子任务继承父任务的工作空间与隔离配置，不能指定 workspace。"
+                        f"普通子任务继承父任务的工作空间与隔离配置，不能指定 {param}。"
                         "如需继承对话历史，请使用 inherit_from + inherit_mode=['pipe']。"
                     ),
                     error_code="SUBTASK_INHERITS_PARAMS",
                 )
-            for _p in ("workspace_mode", "isolation_level"):
-                if inputs.get(_p):
-                    logger.warning(
-                        "[TaskSubmit] 普通子任务显式指定 %s 被拒绝（继承父任务）| parent_task_id=%s | value=%s",
-                        _p,
-                        parent_task_id,
-                        inputs.get(_p),
-                    )
-                    return create_failure_result(
-                        error=(
-                            f"普通子任务继承父任务的工作空间与隔离配置，不能指定 {_p}。"
-                            "如需继承对话历史，请使用 inherit_from + inherit_mode=['pipe']。"
-                        ),
-                        error_code="SUBTASK_INHERITS_PARAMS",
-                    )
+        return None
 
-        # ── L2/L3 层级校验：自动注入后仍无 parent_task_id → 拒绝创建根任务 ──
-        if parent_agent_level >= 2 and parent_task_id is None:
-            # L2 调 task_submit 时 parent_task_id 理应自动注入（来自 state["task_id"]）。
-            # 此处触发说明注入链断裂。诊断字段定位断裂点：
-            # - injected_task_id 空 → param_inject 没注入或 state["task_id"] 为空
-            # - inputs 无 task_id 键 → param_inject 完全没处理此调用
-            # - task_id 键存在但为空 → state["task_id"] 在引擎 state 中缺失
-            _diag_keys = [
-                k
-                for k in inputs
-                if k
-                in (
-                    "task_id",
-                    "parent_task_id",
-                    "session_id",
-                    "pipeline_id",
-                    "parent_agent_level",
-                    "workspace",
-                )
-            ]
-            logger.error(
-                "[TaskSubmit][DIAG] L%d 无可注入 parent_task_id，注入链断裂诊断 | "
-                "injected_task_id=%r | inputs_has_task_id=%s | "
-                "inputs[task_id]=%r | diag_keys=%s | all_input_keys=%s",
-                parent_agent_level,
-                injected_task_id,
-                "task_id" in inputs,
-                inputs.get("task_id"),
-                _diag_keys,
-                sorted(inputs.keys()),
+    def _reject_subroot_without_parent(
+        self,
+        parent_agent_level: Any,
+        parent_task_id: str | None,
+        injected_task_id: Any,
+        inputs: dict[str, Any],
+    ) -> ToolExecutionResult | None:
+        """L2/L3 层级校验：自动注入后仍无 parent_task_id → 拒绝创建根任务。
+
+        触发即说明注入链断裂，诊断字段用于定位断裂点：
+        - injected_task_id 空 → param_inject 没注入或 state["task_id"] 为空
+        - inputs 无 task_id 键 → param_inject 完全没处理此调用
+        - task_id 键存在但为空 → state["task_id"] 在引擎 state 中缺失
+        """
+        if not (parent_agent_level >= 2 and parent_task_id is None):
+            return None
+        diag_keys = [
+            k
+            for k in inputs
+            if k
+            in (
+                "task_id",
+                "parent_task_id",
+                "session_id",
+                "pipeline_id",
+                "parent_agent_level",
+                "workspace",
             )
-            logger.warning(
-                "[TaskSubmit] L%d Agent 无可注入的 parent_task_id，拒绝创建根任务",
-                parent_agent_level,
-            )
-            return create_failure_result(
-                error=f"L{parent_agent_level} Agent 必须在任务上下文中提交子任务，无法创建根任务",
-                error_code="L2_REQUIRES_PARENT_TASK",
-            )
+        ]
+        logger.error(
+            "[TaskSubmit][DIAG] L%d 无可注入 parent_task_id，注入链断裂诊断 | "
+            "injected_task_id=%r | inputs_has_task_id=%s | "
+            "inputs[task_id]=%r | diag_keys=%s | all_input_keys=%s",
+            parent_agent_level,
+            injected_task_id,
+            "task_id" in inputs,
+            inputs.get("task_id"),
+            diag_keys,
+            sorted(inputs.keys()),
+        )
+        logger.warning(
+            "[TaskSubmit] L%d Agent 无可注入的 parent_task_id，拒绝创建根任务",
+            parent_agent_level,
+        )
+        return create_failure_result(
+            error=f"L{parent_agent_level} Agent 必须在任务上下文中提交子任务，无法创建根任务",
+            error_code="L2_REQUIRES_PARENT_TASK",
+        )
 
-        workspace = inputs.get("workspace", "")
+    async def _resolve_resource_inheritance(
+        self,
+        inputs: dict[str, Any],
+        workspace: str,
+    ) -> tuple[str, ToolExecutionResult | None]:
+        """inherit 资源解析统一入口（pipe / workspace / inherit_workspace_from）。
 
-        # pipe 继承的源任务 pipeline_run_id（仅 pipe 模式设置）
-        _inherit_pipe_pipeline_id = ""
-
-        # ── inherit 参数解析（优先于 inherit_workspace_from） ──
-        # inherit 是新的资源继承统一入口，支持 pipe 和 workspace 两种模式。
-        # mode 既可传单个字符串（"pipe"/"workspace"），也可传列表（如
-        # ["pipe", "workspace"]）同时继承对话管道和工作空间；两种模式相互独立，
-        # 可任意组合。
-        # 当 inherit 和 inherit_workspace_from 同时存在时，inherit 优先。
-        # schema 已平铺为 inherit_from/inherit_mode，这里把扁平字段重组为 inherit 对象，
-        # 供 _build_metadata 及管道引擎按既有契约读取（旧式 inherit 对象仍兼容）。
-        _inherit_config = inputs.get("inherit")
-        if not isinstance(_inherit_config, dict) and (
+        - schema 已平铺为 inherit_from/inherit_mode，这里把扁平字段重组为 inherit
+          对象，供 _build_metadata 及管道引擎按既有契约读取（旧式 inherit 对象仍兼容）；
+        - mode 可传单字符串或列表（如 ["pipe","workspace"]），两种模式相互独立可组合；
+        - pipe：查源任务的 pipeline_run_id（日志观测，管道身份由引擎生成）；
+        - workspace：等价于 inherit_workspace_from，直接复用旧任务的 ws_meta.path，
+          不复制、不初始化；源不存在/跨容器/git 身份失效则报错让 agent 重提。
+        当 inherit 和 inherit_workspace_from 同时存在时，inherit 优先。
+        返回 (最终 workspace, 失败结果)。
+        """
+        inherit_config = inputs.get("inherit")
+        if not isinstance(inherit_config, dict) and (
             inputs.get("inherit_from") is not None or inputs.get("inherit_mode") is not None
         ):
-            _inherit_config = {
+            inherit_config = {
                 "from": inputs.get("inherit_from", ""),
                 "mode": inputs.get("inherit_mode", ""),
             }
-            inputs["inherit"] = _inherit_config
-        if _inherit_config and isinstance(_inherit_config, dict):
-            _inherit_from_id = _inherit_config.get("from", "")
-            _inherit_mode = _inherit_config.get("mode", "")
+            inputs["inherit"] = inherit_config
+        if isinstance(inherit_config, dict):
+            inherit_from_id = inherit_config.get("from", "")
+            inherit_mode = inherit_config.get("mode", "")
             # 规范化 mode 为集合：兼容 str / list / tuple
-            if isinstance(_inherit_mode, str):
-                _mode_set = {_inherit_mode}
-            elif isinstance(_inherit_mode, (list, tuple)):
-                _mode_set = set(_inherit_mode)
+            if isinstance(inherit_mode, str):
+                mode_set = {inherit_mode}
+            elif isinstance(inherit_mode, (list, tuple)):
+                mode_set = set(inherit_mode)
             else:
-                _mode_set = set()
-            if not _inherit_from_id or not _mode_set:
-                return create_failure_result(
+                mode_set = set()
+            if not inherit_from_id or not mode_set:
+                return workspace, create_failure_result(
                     error="inherit 参数必须包含 from（源任务 ID）和 mode（pipe/workspace）",
                     error_code="INVALID_INHERIT_PARAMS",
                 )
             # 校验：每个 mode 值必须合法
-            _invalid_modes = _mode_set - {"pipe", "workspace"}
-            if _invalid_modes:
-                return create_failure_result(
-                    error=(f"inherit.mode 不合法: '{sorted(_invalid_modes)}'，仅支持 pipe/workspace"),
+            invalid_modes = mode_set - {"pipe", "workspace"}
+            if invalid_modes:
+                return workspace, create_failure_result(
+                    error=(f"inherit.mode 不合法: '{sorted(invalid_modes)}'，仅支持 pipe/workspace"),
                     error_code="INVALID_INHERIT_MODE",
                 )
             # pipe 与 workspace 相互独立，可同时生效
-            if "pipe" in _mode_set:
-                _inherit_pipe_pipeline_id = ""
-                _pipe_task_service = self._get_task_service()
-                if _pipe_task_service:
-                    try:
-                        _source_task = _pipe_task_service.get_task(_inherit_from_id)
-                        if _source_task and _source_task.pipeline_run_id:
-                            _inherit_pipe_pipeline_id = _source_task.pipeline_run_id
-                            logger.info(
-                                "[TaskSubmit] inherit pipe | from=%s | source_pipeline=%s",
-                                _inherit_from_id,
-                                _inherit_pipe_pipeline_id[:12],
-                            )
-                        else:
-                            logger.warning(
-                                "[TaskSubmit] inherit pipe | from=%s | 源任务无 pipeline_run_id，对话历史为空",
-                                _inherit_from_id,
-                            )
-                    except Exception as _pipe_err:
-                        logger.warning(
-                            "[TaskSubmit] inherit pipe 查找源任务失败: %s",
-                            _pipe_err,
-                        )
-                else:
-                    logger.warning(
-                        "[TaskSubmit] inherit pipe | task_service 不可用，无法查找源任务 %s",
-                        _inherit_from_id,
-                    )
-            if "workspace" in _mode_set:
+            if "pipe" in mode_set:
+                await self._lookup_source_pipeline_run(inherit_from_id)
+            if "workspace" in mode_set:
                 # workspace 模式等价于 inherit_workspace_from，复用现有逻辑
-                inputs["inherit_workspace_from"] = _inherit_from_id
+                inputs["inherit_workspace_from"] = inherit_from_id
                 logger.info(
                     "[TaskSubmit] inherit workspace | from=%s (覆盖 inherit_workspace_from)",
-                    _inherit_from_id,
+                    inherit_from_id,
                 )
 
         # ── inherit_workspace_from 解析 ──
-        # 直接复用旧任务的 ws_meta.path，不复制、不初始化。
-        # 旧工作空间不存在则报错返回，让 agent 重新提交。
         inherit_from = inputs.get("inherit_workspace_from")
-        _inherit_resolved = False
-        old_ws_meta = None
-        # inherit_workspace_from 显式指定时，覆盖 param_inject 注入的 workspace
-        if inherit_from:
-            task_service = self._get_task_service()
-            if not task_service:
-                return create_failure_result(
+        if not inherit_from:
+            return workspace, None
+        task_service = self._get_task_service()
+        if not task_service:
+            return workspace, create_failure_result(
+                error=(
+                    f"无法查找任务 {inherit_from}：任务服务不可用。"
+                    "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
+                ),
+            )
+        try:
+            old_ws_path, ws_fail = self._extract_inherited_workspace(inherit_from, task_service)
+            if ws_fail is not None:
+                return workspace, ws_fail
+            # 继承成功时回写 inputs，确保 _build_metadata 存储到任务元数据
+            workspace = old_ws_path or ""
+            inputs["workspace"] = workspace
+            logger.info(
+                "[TaskSubmit] inherit_workspace_from: task_id=%s, ws_path=%s",
+                inherit_from,
+                old_ws_path,
+            )
+        except Exception as resolve_err:
+            logger.warning(
+                "[TaskSubmit] inherit_workspace_from 解析失败: %s",
+                resolve_err,
+            )
+            return workspace, create_failure_result(
+                error=f"继承工作空间时出错: {resolve_err}。请去掉 inherit_workspace_from 参数重新提交。",
+            )
+        return workspace, None
+
+    async def _lookup_source_pipeline_run(self, inherit_from_id: str) -> str:
+        """查询 pipe 继源源任务的 pipeline_run_id（日志观测用途）。
+
+        服务不可用 / 源任务缺失 / 查询异常均降级为 warning 日志，不阻断提交。
+        """
+        task_service = self._get_task_service()
+        if not task_service:
+            logger.warning(
+                "[TaskSubmit] inherit pipe | task_service 不可用，无法查找源任务 %s",
+                inherit_from_id,
+            )
+            return ""
+        try:
+            source_task = task_service.get_task(inherit_from_id)
+            if source_task and source_task.pipeline_run_id:
+                source_pipeline_id = source_task.pipeline_run_id
+                logger.info(
+                    "[TaskSubmit] inherit pipe | from=%s | source_pipeline=%s",
+                    inherit_from_id,
+                    source_pipeline_id[:12],
+                )
+                return source_pipeline_id
+            logger.warning(
+                "[TaskSubmit] inherit pipe | from=%s | 源任务无 pipeline_run_id，对话历史为空",
+                inherit_from_id,
+            )
+            return ""
+        except Exception as pipe_err:
+            logger.warning(
+                "[TaskSubmit] inherit pipe 查找源任务失败: %s",
+                pipe_err,
+            )
+            return ""
+
+    def _extract_inherited_workspace(
+        self,
+        inherit_from: str,
+        task_service: Any,
+    ) -> tuple[str | None, ToolExecutionResult | None]:
+        """校验被继承任务的 ws_meta 并取出旧工作空间路径（复用旧路径，不复制不初始化）。
+
+        校验序：源任务存在且有元数据 → ws_meta 形态 → 同容器归属 → 目录存在 →
+        worktree 模式 git 身份有效。任一步失败返回失败信封，引导 agent 去掉
+        inherit_workspace_from 后重新提交。
+        返回 (旧工作空间路径, 失败结果)；路径有效性由调用方按目录语义使用。
+        """
+        old_task = task_service.get_task(inherit_from)
+        if not old_task or not old_task.metadata:
+            return None, create_failure_result(
+                error=(
+                    f"任务 {inherit_from} 不存在或无元数据。"
+                    "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
+                ),
+            )
+        old_ws_meta = old_task.metadata.get("ws_meta")
+        if not isinstance(old_ws_meta, dict):
+            return None, create_failure_result(
+                error=(
+                    f"任务 {inherit_from} 没有工作空间信息。"
+                    "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
+                ),
+            )
+        # 同容器才能 inherit，避免产出落到错误容器。
+        source_root = old_ws_meta.get("project_root", "") or old_ws_meta.get("path", "")
+        current_container = Path(__file__).resolve().parents[4]
+        if source_root:
+            try:
+                Path(source_root).resolve().relative_to(current_container)
+            except ValueError:
+                return None, create_failure_result(
                     error=(
-                        f"无法查找任务 {inherit_from}：任务服务不可用。"
-                        "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
+                        f"任务 {inherit_from} 属于其它容器({source_root})，"
+                        f"不能跨容器继承工作空间。"
+                        f"请去掉 inherit_workspace_from 参数重新提交。"
                     ),
                 )
-            try:
-                old_task = task_service.get_task(inherit_from)
-                if not old_task or not old_task.metadata:
-                    return create_failure_result(
-                        error=(
-                            f"任务 {inherit_from} 不存在或无元数据。"
-                            "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
-                        ),
-                    )
-                old_ws_meta = old_task.metadata.get("ws_meta")
-                if not isinstance(old_ws_meta, dict):
-                    return create_failure_result(
-                        error=(
-                            f"任务 {inherit_from} 没有工作空间信息。"
-                            "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
-                        ),
-                    )
-                # 同容器才能 inherit，避免产出落到错误容器。
-                _source_root = old_ws_meta.get("project_root", "") or old_ws_meta.get("path", "")
-                _current_container = Path(__file__).resolve().parents[4]
-                if _source_root:
-                    try:
-                        Path(_source_root).resolve().relative_to(_current_container)
-                    except ValueError:
-                        return create_failure_result(
-                            error=(
-                                f"任务 {inherit_from} 属于其它容器({_source_root})，"
-                                f"不能跨容器继承工作空间。"
-                                f"请去掉 inherit_workspace_from 参数重新提交。"
-                            ),
-                        )
-                old_ws_path = old_ws_meta.get("path", "")
-                if not old_ws_path or not Path(old_ws_path).exists():
-                    return create_failure_result(
-                        error=(
-                            f"任务 {inherit_from} 的工作空间已不存在: {old_ws_path or '(空)'}。"
-                            "无法继承，请去掉 inherit_workspace_from 参数重新提交，"
-                            "使用空工作空间开始。"
-                        ),
-                    )
-                # worktree 模式下源 .git 失效则不继承（后续合并找不到 branch），
-                # 报错让 agent 自行决定是否捞取已有产物。
-                if old_ws_meta.get("mode") == "worktree":
-                    if not (Path(old_ws_path) / ".git").exists():
-                        return create_failure_result(
-                            error=(
-                                f"任务 {inherit_from} 的工作空间: git 身份已失效,"
-                                f"目录里产物可能仍在可手动读取或者处理: {old_ws_path}。"
-                                f"请去掉 inherit_workspace_from 参数重新提交。"
-                            ),
-                        )
-                workspace = old_ws_path
-                _inherit_resolved = True
-                logger.info(
-                    "[TaskSubmit] inherit_workspace_from: task_id=%s, ws_path=%s",
-                    inherit_from,
-                    old_ws_path,
+        old_ws_path = old_ws_meta.get("path", "")
+        if not old_ws_path or not Path(old_ws_path).exists():
+            return None, create_failure_result(
+                error=(
+                    f"任务 {inherit_from} 的工作空间已不存在: {old_ws_path or '(空)'}。"
+                    "无法继承，请去掉 inherit_workspace_from 参数重新提交，"
+                    "使用空工作空间开始。"
+                ),
+            )
+        # worktree 模式下源 .git 失效则不继承（后续合并找不到 branch），
+        # 报错让 agent 自行决定是否捞取已有产物。
+        if old_ws_meta.get("mode") == "worktree":
+            if not (Path(old_ws_path) / ".git").exists():
+                return None, create_failure_result(
+                    error=(
+                        f"任务 {inherit_from} 的工作空间: git 身份已失效,"
+                        f"目录里产物可能仍在可手动读取或者处理: {old_ws_path}。"
+                        f"请去掉 inherit_workspace_from 参数重新提交。"
+                    ),
                 )
-            except Exception as e:
-                logger.warning(
-                    "[TaskSubmit] inherit_workspace_from 解析失败: %s",
-                    e,
-                )
-                return create_failure_result(
-                    error=f"继承工作空间时出错: {e}。请去掉 inherit_workspace_from 参数重新提交。",
-                )
-        # 继承成功时回写 inputs，确保 _build_metadata 存储到任务元数据
-        if _inherit_resolved:
-            inputs["workspace"] = workspace
+        return old_ws_path, None
 
-        # ── 目标空间安全检查 ──
-        if workspace:
-            ws_error = _validate_workspace_path(workspace)
-            if ws_error:
-                return create_failure_result(
-                    error=ws_error,
-                    error_code="UNSAFE_WORKSPACE",
-                )
+    async def _gate_target_and_dependencies(
+        self,
+        target_type: Any,
+        target_id: Any,
+        parent_agent_level: Any,
+        parent_task_id: str | None,
+        dependencies: list[Any],
+    ) -> tuple[list[Any], ToolExecutionResult | None]:
+        """目标与依赖闸门：target 必填 → 目标 Agent 存在性/级别 → parent 权限复核 → 依赖存在性。
 
-        logger.info(
-            "[TaskSubmit] 任务提交 | target_type=%s | target_id=%s",
-            target_type,
-            target_id,
-        )
-        logger.debug(
-            "[TaskSubmit] 任务详情 | title=%s | metric_count=%d",
-            goal.get("title", "N/A"),
-            len(acceptance_criteria),
-        )
-
+        返回 (dependencies, 失败结果)。
+        """
         # ── 2. 必填参数验证 ──
         if not target_type:
-            return create_failure_result(
+            return dependencies, create_failure_result(
                 error="目标类型不能为空",
                 error_code="MISSING_TARGET_TYPE",
             )
         if not target_id:
-            return create_failure_result(
+            return dependencies, create_failure_result(
                 error="目标 ID 不能为空",
                 error_code="MISSING_TARGET_ID",
             )
@@ -1106,7 +1164,7 @@ class TaskSubmitTool(BuiltinTool):
                     parent_agent_level,
                     err_msg,
                 )
-                return create_failure_result(error=err_msg, error_code=err_code)
+                return dependencies, create_failure_result(error=err_msg, error_code=err_code)
             logger.info(
                 "[TaskSubmit] 目标 Agent 校验通过 | target_id=%s | parent_level=L%d",
                 target_id,
@@ -1115,22 +1173,129 @@ class TaskSubmitTool(BuiltinTool):
 
         # ── 3. 权限验证 ──
         if not await self._validate_parent_task_id(parent_agent_level, parent_task_id):
-            return create_failure_result(
+            return dependencies, create_failure_result(
                 error="L2 Agent 不能显式指定 parent_task_id（系统会自动注入当前任务 ID）",
                 error_code="L2_CANNOT_SPECIFY_PARENT_TASK_ID",
             )
 
         # ── 4. 依赖任务验证 ──
-        dependencies = inputs.get("dependencies", [])
         if dependencies:
             missing_ids = await self._check_dependencies_exist(dependencies)
             if missing_ids:
                 logger.error("[TaskSubmit] 依赖验证失败 | 不存在的任务: %s", missing_ids)
-                return create_failure_result(
+                return dependencies, create_failure_result(
                     error=f"依赖任务不存在: {missing_ids}",
                     error_code="DEPENDENCY_NOT_FOUND",
                 )
             logger.info("[TaskSubmit] 依赖验证通过 | dependencies=%s", dependencies)
+        return dependencies, None
+
+    async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+        """执行任务提交：参数解析与闸门 → 项目/继承/工作空间解析 → 目标与依赖校验 → 派发。
+
+        各阶段拆为同名职责的私有方法（_parse_goal_input / _gate_* / _resolve_* /
+        _normalize_acceptance_criteria）；任一阶段返回失败信封即短路返回，
+        本方法只保留阶段序列与派发编排。
+        """
+        parent_agent_level = inputs.get("parent_agent_level")
+
+        # ── 0.5 短 id 入参解析：LLM 回传的 parent_task_id / task_id 可能是 12 位
+        # 短 id，经 state 聚合前缀唯一解析回全 id（容器 project id 生成即短，天然命中）。
+        await self._resolve_short_input_ids(inputs)
+
+        logger.info(
+            "[TaskSubmit] 开始执行 | project_id=%s | parent_agent_level=%s",
+            inputs.get("project_id") or "-",
+            parent_agent_level,
+        )
+
+        # ── 0. 注入参数校验 ──
+        if parent_agent_level is None:
+            logger.error("[TaskSubmit] 注入参数缺失 | parent_agent_level 未注入")
+            return create_failure_result(
+                error="系统错误：parent_agent_level 未注入，无法确定调用者层级",
+                error_code="MISSING_INJECTED_PARAM",
+            )
+
+        # ── 1. goal 解析 + 基础字段/归属/长度闸门 ──
+        parsed_goal = self._parse_goal_input(inputs)
+        goal, description, base_fail = self._gate_base_submission(inputs, parsed_goal, parent_agent_level)
+        if base_fail is not None:
+            return base_fail
+
+        acceptance_criteria, acc_fail = self._normalize_acceptance_criteria(
+            inputs.get("acceptance_criteria", {})
+        )
+        if acc_fail is not None:
+            return acc_fail
+
+        parent_task_id, parent_fail = self._apply_parent_task_injection(
+            parent_agent_level, inputs.get("parent_task_id"), inputs
+        )
+        if parent_fail is not None:
+            return parent_fail
+
+        # agent 原始 workspace 入参先留底：项目解析可能注入 workspace（项目文件夹），
+        # 子任务闸门只认原始入参，系统注入值不算显式指定。
+        explicit_workspace_raw = str(inputs.get("workspace") or "")
+        project_id, project_fail = await self._resolve_project_binding(
+            inputs,
+            parent_task_id,
+            parent_agent_level,
+            explicit_workspace_raw,
+        )
+        if project_fail is not None:
+            return project_fail
+
+        subtask_gate_fail = self._gate_subtask_param_inheritance(
+            inputs, parent_task_id, explicit_workspace_raw
+        )
+        if subtask_gate_fail is not None:
+            return subtask_gate_fail
+
+        injected_task_id = inputs.get("task_id")
+        root_gate_fail = self._reject_subroot_without_parent(
+            parent_agent_level, parent_task_id, injected_task_id, inputs
+        )
+        if root_gate_fail is not None:
+            return root_gate_fail
+
+        workspace = inputs.get("workspace", "")
+        workspace, inherit_fail = await self._resolve_resource_inheritance(inputs, workspace)
+        if inherit_fail is not None:
+            return inherit_fail
+
+        # ── 目标空间安全检查 ──
+        if workspace:
+            ws_error = _validate_workspace_path(workspace)
+            if ws_error:
+                return create_failure_result(
+                    error=ws_error,
+                    error_code="UNSAFE_WORKSPACE",
+                )
+
+        # 显式 Any：与拆分前一致——入参不在此处强转，类型闸门在 _gate_target_and_dependencies
+        target_type: Any = inputs.get("target_type")
+        target_id: Any = inputs.get("target_id")
+        logger.info(
+            "[TaskSubmit] 任务提交 | target_type=%s | target_id=%s",
+            target_type,
+            target_id,
+        )
+        logger.debug(
+            "[TaskSubmit] 任务详情 | title=%s | metric_count=%d",
+            goal.get("title", "N/A"),
+            len(acceptance_criteria),
+        )
+        dependencies, gate_fail = await self._gate_target_and_dependencies(
+            target_type,
+            target_id,
+            parent_agent_level,
+            parent_task_id,
+            inputs.get("dependencies", []),
+        )
+        if gate_fail is not None:
+            return gate_fail
 
         # ── 5. GAP-1 统一（state 单一真值）：任务即管道，直接经 chat.send_message
         #    创建执行管道（引擎生成 pipeline_id = task.id）——不再创建 YAML 任务
@@ -1196,6 +1361,7 @@ class TaskSubmitTool(BuiltinTool):
                 "project_id": project_id,
             },
         )
+
 
     async def _dispatch_task_pipeline(  # noqa: PLR0913
         self,
