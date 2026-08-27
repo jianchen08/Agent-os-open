@@ -479,7 +479,9 @@ export function StepNode({
         open={pickerOpen}
         onOpenChange={setPickerOpen}
         catalog={catalog}
-        excludeIds={refs}
+        excludeIds={refs
+          .map((entry) => normalizeStepRef(entry)?.name)
+          .filter((name): name is string => name !== undefined)}
         onPick={(ref) => ops.insert(stepsPath, refs.length, ref)}
       />
     </div>
