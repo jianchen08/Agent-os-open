@@ -926,6 +926,14 @@ impl KernelCapabilityRouter {
         // 钩子装载表查询（挂桩）：恒空集，短路返回——热路径零开销。
         // 钩子协议面（配置 schema/装载表编译/最小作用域装载）归管道步骤
         // 服务化提案 §3.6，本方案步骤 3 只保证挂点存在。
+        //
+        // 2026-08-27 后注：**同步边界事件**（step_start/step_end）已由引擎侧
+        // 落地——pipeline_loop.rs execute_step_impl 进入/收尾经 compiled.step_hooks
+        // 查表直派（step 级 + body 级两档，_pipe_hook 约定字段，terminate 决策
+        // 置 ended）。本拦截点对应的是**跨层流事件**（stream_chunk 等）发射面，
+        // 跨层流接线 P1 明确不做（提案 §3.6 诚实边界：step 归属需
+        // message→step 绑定链，待 transient-register 消息上下文登记补齐），
+        // 保持挂桩不动——此分支为流事件协议面就绪后的落点预留。
         if !hook_dispatch_stub(pipeline_id, thread_id, event_name).is_empty() {
             // 装载表非空时按 B 区登记的 message→step 归属过滤作用域后派发
             // （B 区登记由引擎 execute_step 派发时写入）；P1 恒空，此分支
@@ -1713,9 +1721,13 @@ impl KernelCapabilityRouter {
 
 /// 钩子装载表查询挂桩（ADR 2026-08-27 决策7 / 方案 §2.4 协作点）。
 ///
-/// P1 不实现钩子协议面（配置 schema/装载表编译/最小作用域装载归管道步骤
-/// 服务化提案 §3.6，compiler.rs hooks 解析为另一步），恒返回空集——流式
+/// 本挂桩对应**跨层流事件**（stream_chunk 等）发射面，P1 明确不做跨层流
+/// 接线（管道步骤服务化提案 §3.6 诚实边界：step 归属需 message→step 绑定
+/// 链，待 transient-register 消息上下文登记补齐），恒返回空集——流式
 /// 热路径上的钩子零开销由"先查表再分发"保证，空集直接短路。
+/// **同步边界事件**（step_start/step_end）已由引擎侧落地
+/// （pipeline_loop.rs execute_step_impl 边界分发，step 级 + body 级两档），
+/// 不经本挂桩。
 /// 返回：命中当前 (pipeline, thread, event) 作用域的钩子 id 列表（空 = 无钩子）。
 fn hook_dispatch_stub(_pipeline_id: &str, _thread_id: &str, _event_name: &str) -> Vec<String> {
     Vec::new()

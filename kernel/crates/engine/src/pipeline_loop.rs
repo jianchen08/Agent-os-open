@@ -36,7 +36,9 @@ use agentos_core::types::{
     ContentLoader, EngineError, PluginContext, PluginError, PluginResult, RouteNext, TenantContext,
 };
 
-use crate::compiler::{CompiledBody, CompiledItem, CompiledPipeline, CompiledRoute, CompiledStep};
+use crate::compiler::{
+    CompiledBody, CompiledItem, CompiledPipeline, CompiledRoute, CompiledStep, HookScope,
+};
 use crate::condition::eval_expr;
 use crate::template::{render_template, render_value};
 
@@ -336,7 +338,7 @@ impl PipelineExecutor {
                 // （每执行一个配置 step +1，达 interval_steps 落档），此处不再按轮计数。
                 let assistant_before = count_role(state, "assistant");
                 let (round_index, round_id, round_start) = self.round_start_event(state).await;
-                self.execute_steps(&body.steps, state, compiled, ignore_ended)
+                self.execute_steps(&body.steps, &body.id, state, compiled, ignore_ended)
                     .await?;
                 self.round_end_event(state, round_index, round_id, &round_start, assistant_before)
                     .await;
@@ -351,7 +353,7 @@ impl PipelineExecutor {
             // 单次执行（前处理/后处理体）：同样构成一轮（消息事件语义与循环迭代一致）
             let assistant_before = count_role(state, "assistant");
             let (round_index, round_id, round_start) = self.round_start_event(state).await;
-            self.execute_steps(&body.steps, state, compiled, ignore_ended)
+            self.execute_steps(&body.steps, &body.id, state, compiled, ignore_ended)
                 .await?;
             self.round_end_event(state, round_index, round_id, &round_start, assistant_before)
                 .await;
@@ -455,6 +457,7 @@ impl PipelineExecutor {
     async fn execute_steps(
         &self,
         steps: &[CompiledStep],
+        body_id: &str,
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
@@ -478,7 +481,9 @@ impl PipelineExecutor {
                     continue;
                 }
             }
-            let routed = self.execute_step(step, state, compiled, ignore_ended).await;
+            let routed = self
+                .execute_step(step, body_id, state, compiled, ignore_ended)
+                .await;
             // G10：step 级 Step 跳转（真跳转）——目标下标在本循环体内查找
             if let Some(RouteNext::Step(id)) = routed {
                 if let Some(j) = steps.iter().position(|s| s.id == id) {
@@ -513,22 +518,27 @@ impl PipelineExecutor {
     /// 返回 step 级路由命中的 `RouteNext`（G10：`Step` 真跳转由 `execute_steps`
     /// 消费；`Phase` 已在 apply_routes 写 `state.next_phase`，循环体结束时消费）。
     ///
+    /// `body_id`：宿主循环体 id——step 级 hooks 的复合作用域键 `"<body>:<step>"`
+    /// 分发定位用（服务化提案 §3.6 声明位置即作用域）。
+    ///
     /// 由于 `execute_step` 与 `execute_step_inner` 相互递归调用（Composite 项会
     /// 递归执行），Rust async fn 无法直接表达无限大小的 future，
     /// 这里用 `Box::pin` 引入间接层（boxed future）打破无限大小。
     fn execute_step<'a>(
         &'a self,
         step: &'a CompiledStep,
+        body_id: &'a str,
         state: &'a mut serde_json::Value,
         compiled: &'a CompiledPipeline,
         ignore_ended: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<RouteNext>> + Send + 'a>> {
-        Box::pin(self.execute_step_impl(step, state, compiled, ignore_ended))
+        Box::pin(self.execute_step_impl(step, body_id, state, compiled, ignore_ended))
     }
 
     async fn execute_step_impl(
         &self,
         step: &CompiledStep,
+        body_id: &str,
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
@@ -543,6 +553,16 @@ impl PipelineExecutor {
         // B 区登记挂点（ADR 2026-08-27 §2.2）：step 进入时登记 message→step
         // 归属（流式窗口 = 本 step invoke 期间），守卫在 step 收尾自动清除。
         let _binding = self.bind_step_message(state, &step.id);
+
+        // hooks 同步边界分发（服务化提案 §3.6 同步边界事件）：step 进入时
+        // 分发 "step_start"（step 级 + body 级两档作用域查表直派，fire-and-forget）。
+        self.dispatch_boundary_hooks(
+            compiled,
+            state,
+            &HookScope::Step(format!("{body_id}:{}", step.id)),
+            "step_start",
+        )
+        .await;
 
         // 1. context 注入：渲染 step.context 模板（模板原文保留，动态点），merge 进 state
         let rendered = render_value(
@@ -573,7 +593,7 @@ impl PipelineExecutor {
                     if max_iters > 0 && i > max_iters {
                         break;
                     }
-                    self.execute_step_inner(step, state, compiled, ignore_ended)
+                    self.execute_step_inner(step, body_id, state, compiled, ignore_ended)
                         .await;
                     // 循环体里也应用路由（及时结束/挂起）
                     if !step.routes.is_empty() {
@@ -589,12 +609,21 @@ impl PipelineExecutor {
                 // 循环 step 执行完，落 step 级轨迹后返回（循环内路由不参与跳转）
                 self.persist_step_trace(&step.id, &compiled.checkpoint, &state_before, state)
                     .await;
+                // hooks 同步边界分发（收尾）：step_end 两档作用域（与下方非循环
+                // 分支同一收尾路径，循环 step 不缺席）
+                self.dispatch_boundary_hooks(
+                    compiled,
+                    state,
+                    &HookScope::Step(format!("{body_id}:{}", step.id)),
+                    "step_end",
+                )
+                .await;
                 return None;
             }
         }
 
         // 3. 非循环：直接执行
-        self.execute_step_inner(step, state, compiled, ignore_ended)
+        self.execute_step_inner(step, body_id, state, compiled, ignore_ended)
             .await;
 
         // 4. 路由处理：返回命中结果（Step 跳转由 execute_steps 消费）
@@ -607,7 +636,122 @@ impl PipelineExecutor {
         // 5. 落 step 级轨迹（非循环分支）
         self.persist_step_trace(&step.id, &compiled.checkpoint, &state_before, state)
             .await;
+
+        // hooks 同步边界分发（收尾）：step 结束时分发 "step_end"；钩子返回
+        // `{"decision":"terminate"}` → 置 ended=true（与引擎既有 ended 语义
+        // 对齐：当前循环体立即终止，后续循环体/收尾体照常推进）。
+        self.dispatch_boundary_hooks(
+            compiled,
+            state,
+            &HookScope::Step(format!("{body_id}:{}", step.id)),
+            "step_end",
+        )
+        .await;
         routed
+    }
+
+    /// hooks 同步边界分发（服务化提案 §3.6 同步边界事件）。
+    ///
+    /// 声明位置即作用域：step 边界事件（`step_start`/`step_end`）同时查
+    /// step 级（复合键 `"<body>:<step>"`）与 body 级（`Body(body_id)`）两档
+    /// 装载表，命中即 fire-and-forget 分发——经 invoker 对目标插件发起
+    /// execute 调用，config 注入约定字段 `_pipe_hook = {"event", "payload"}`，
+    /// payload 含 step_id/event/时间戳最小上下文。
+    ///
+    /// 返回值收集：任一钩子返回 `{"decision": "terminate"}` → 置 `ended=true`
+    /// （与引擎既有 ended 语义对齐：当前循环体立即终止，后续循环体/收尾体
+    /// 照常推进——对齐 transient-register ADR §二.7 结构化否决指令模型，钩子
+    /// 只决策不路由）+ `tracing::warn` 留痕。分发失败仅 warn 不阻断（
+    /// fire-and-forget 语义：决策窗扩展点不得让主流程翻车）。
+    ///
+    /// 空表短路：无任何命中（step_hooks 空或作用域不匹配）直接返回——
+    /// 无钩子配置的主干零开销（§3.6 空集短路）。
+    async fn dispatch_boundary_hooks(
+        &self,
+        compiled: &CompiledPipeline,
+        state: &mut serde_json::Value,
+        step_scope: &HookScope,
+        event: &str,
+    ) {
+        let mut hit = compiled.hooks_for(step_scope, event);
+        if let HookScope::Step(step_key) = step_scope {
+            // body 级作用域：step 执行期间的同步边界事件同发 body 级钩子
+            // （body_id = 复合键 `"<body>:<step>"` 的前段）
+            if let Some((body_id, _)) = step_key.split_once(':') {
+                hit.extend(compiled.hooks_for(&HookScope::Body(body_id.to_string()), event));
+            }
+        }
+        if hit.is_empty() {
+            return; // 空集短路：无钩子配置的主干零开销
+        }
+        // 收集 step_id/pipeline_id 最小上下文（payload 字段）
+        let step_id = match step_scope {
+            HookScope::Step(key) => key.clone(),
+            HookScope::Body(id) => id.clone(),
+        };
+        let pipeline_id = state_str(state, "pipeline_id");
+        let content_loader = ContentLoader::new(
+            Arc::clone(&self.store),
+            self.run_id.clone(),
+            self.branch_id.clone(),
+        );
+        let mut terminated = false;
+        for entry in hit {
+            let payload = serde_json::json!({
+                "step_id": step_id,
+                "event": event,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "pipeline_id": pipeline_id,
+            });
+            let config = serde_json::json!({ "_pipe_hook": { "event": event, "payload": payload } });
+            let hook_ctx = PluginContext::new(
+                state.clone(),
+                config,
+                self.default_tenant.clone(),
+                uuid::Uuid::nil(),
+                content_loader.clone(),
+            );
+            match self
+                .invoker
+                .invoke_pipeline_plugin(&entry.plugin_id, &hook_ctx)
+                .await
+            {
+                Ok(result) => {
+                    if result.error.is_none() {
+                        // 结构化否决指令（transient-register ADR §二.7）：钩子只
+                        // 决策不路由——返回 `{"decision":"terminate", ...}` →
+                        // 引擎置 ended=true（SDK 契约：state_updates 平铺键）
+                        if result
+                            .state_updates
+                            .get("decision")
+                            .and_then(|v| v.as_str())
+                            == Some("terminate")
+                        {
+                            terminated = true;
+                        }
+                    } else {
+                        warn!(
+                            plugin = %entry.plugin_id,
+                            event = %event,
+                            error = ?result.error,
+                            "hook dispatch plugin error (fire-and-forget, continue)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        plugin = %entry.plugin_id,
+                        event = %event,
+                        error = %e,
+                        "hook dispatch failed (fire-and-forget, continue)"
+                    );
+                }
+            }
+        }
+        if terminated {
+            warn!(event = %event, step = %step_id, "hook decision terminate——置 ended=true 终止当前循环体");
+            set_key(state, "ended", serde_json::Value::Bool(true));
+        }
     }
 
     /// 落 step 级轨迹：对比 step 执行前后的 state，把变更的顶层 key 聚合为一条
@@ -719,9 +863,11 @@ impl PipelineExecutor {
     ///
     /// 运行时只做：项级 when AST 求值（零解析）→ 按类别分派。composite 查统一步骤池
     /// 递归执行；动态模板项渲染后走同样的池/插件查找（显式保留的动态点）。
+    /// `body_id` 透传给递归 composite（hook 复合作用域键 `"<body>:<step>"` 定位）。
     async fn execute_step_inner(
         &self,
         step: &CompiledStep,
+        body_id: &str,
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
@@ -756,7 +902,7 @@ impl PipelineExecutor {
                             continue;
                         }
                     };
-                    self.execute_step(&target, state, compiled, ignore_ended)
+                    self.execute_step(&target, body_id, state, compiled, ignore_ended)
                         .await;
                 }
                 // 静态命中插件（per-plugin inputs 经 config 通道传给插件，
@@ -780,7 +926,7 @@ impl PipelineExecutor {
                     let resolved = render_template(template, state, &self.project_root);
                     if let Some(target) = compiled.find_step(&resolved) {
                         let target = target.clone();
-                        self.execute_step(&target, state, compiled, ignore_ended)
+                        self.execute_step(&target, body_id, state, compiled, ignore_ended)
                             .await;
                     } else if self.lookup_plugin(&resolved) {
                         // 动态点无静态 inputs/method（模板运行时才定），传空

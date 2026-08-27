@@ -1,7 +1,7 @@
 // 由 pipeline_loop.rs 的主 #[cfg(test)] 测试块体平移而来（保留私有项访问）。
 
 use super::*;
-use crate::compiler::compile_pipeline;
+use crate::compiler::{compile_pipeline, HookFile};
 use agentos_core::traits::{
     HostType, ManifestCapabilities, PluginManifest, PluginType, StepCapability, ToolCapability,
 };
@@ -2205,4 +2205,229 @@ async fn implicit_direct_reference_config_has_no_step_method_key() {
         "隐式直引不得携带 _step_method，实际: {}",
         captured[0]
     );
+}
+
+// ── hooks 同步边界分发（服务化提案 §3.6：step 级/body 级两档 + terminate）──
+
+/// 构造带 hooks 的已编译管道（step_hooks 键 = "body:step" 复合键）。
+fn compiled_with_hooks(
+    fixture: &Fixture,
+    config: &PipelineConfig,
+    body_hooks: &[(String, Vec<HookFile>)],
+    step_hooks: &[(String, Vec<HookFile>)],
+) -> crate::compiler::CompiledPipeline {
+    crate::compiler::compile_pipeline_with_hooks(
+        config,
+        &StepLibrary::default(),
+        &fixture.executor.plugin_ids,
+        None,
+        body_hooks,
+        step_hooks,
+    )
+    .expect("compile with hooks ok")
+}
+
+fn step_hook_file(on: &str, run: &str) -> HookFile {
+    HookFile {
+        on: on.to_string(),
+        run: run.to_string(),
+    }
+}
+
+/// step 级钩子：该 step 执行时 step_start/step_end 各分发一次（payload 带
+/// 步骤复合键与事件名），且只在本 step 触发。
+#[tokio::test]
+async fn step_level_hook_receives_start_and_end_once() {
+    let fixture = Fixture::build(&["a", "watcher"]);
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s1", "a")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let compiled = compiled_with_hooks(
+        &fixture,
+        &config,
+        &[],
+        &[(
+            "main:s1".to_string(),
+            vec![
+                step_hook_file("step_start", "watcher.on_step"),
+                step_hook_file("step_end", "watcher.on_step"),
+            ],
+        )],
+    );
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    let configs = fixture.invoker.captured_configs("watcher");
+    assert_eq!(configs.len(), 2, "step 级钩子恰好分发两次");
+    let events: Vec<&str> = configs
+        .iter()
+        .filter_map(|c| c.get("_pipe_hook").and_then(|h| h.get("event")).and_then(|e| e.as_str()))
+        .collect();
+    assert_eq!(events, vec!["step_start", "step_end"], "start/end 各一次");
+    // payload 携带步骤复合键与事件名（最小上下文）
+    let payload = &configs[0]["_pipe_hook"]["payload"];
+    assert_eq!(payload["step_id"], json!("main:s1"));
+    assert_eq!(payload["event"], json!("step_start"));
+    assert!(payload.get("timestamp").is_some(), "payload 含时间戳");
+}
+
+/// body 级钩子：body 内每个 step 的边界都收到分发（payload.step_id 逐 step 不同）。
+#[tokio::test]
+async fn body_level_hook_fires_for_every_step_in_body() {
+    let fixture = Fixture::build(&["a", "b", "watcher"]);
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s1", "a"), atomic_step("s2", "b")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let compiled = compiled_with_hooks(
+        &fixture,
+        &config,
+        &[("main".to_string(), vec![step_hook_file("step_start", "watcher.on_step")])],
+        &[],
+    );
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    let configs = fixture.invoker.captured_configs("watcher");
+    assert_eq!(configs.len(), 2, "body 内两个 step 各收到一次");
+    let step_ids: Vec<&str> = configs
+        .iter()
+        .filter_map(|c| c["_pipe_hook"]["payload"]["step_id"].as_str())
+        .collect();
+    assert_eq!(step_ids, vec!["main:s1", "main:s2"], "payload 定位到具体 step");
+}
+
+/// terminate 决策：钩子返回 {"decision":"terminate"} → 引擎置 ended=true，
+/// 当前循环体后续 step 不再执行。
+#[tokio::test]
+async fn hook_terminate_decision_ends_loop_body() {
+    let fixture = Fixture::build(&["a", "b", "watcher"]);
+    fixture.invoker.set_result(
+        "watcher",
+        PluginResult {
+            state_updates: updates(&[("decision", json!("terminate"))]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s1", "a"), atomic_step("s2", "b")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let compiled = compiled_with_hooks(
+        &fixture,
+        &config,
+        &[],
+        &[(
+            "main:s1".to_string(),
+            vec![step_hook_file("step_end", "watcher.on_step")],
+        )],
+    );
+    let final_state = fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    assert_eq!(final_state["ended"], json!(true), "terminate → ended=true");
+    assert_eq!(fixture.invoker.call_count("a"), 1, "s1 执行");
+    assert_eq!(fixture.invoker.call_count("b"), 0, "s2 被 terminate 截断");
+}
+
+/// 分发异常（invoker 错误）不影响主流程：仅 warn，主 step 照常执行、run 成功。
+#[tokio::test]
+async fn hook_dispatch_failure_does_not_block_main_flow() {
+    let fixture = Fixture::build(&["a", "watcher"]);
+    fixture.invoker.set_err(
+        "watcher",
+        PluginError {
+            message: "hook sidecar unreachable".into(),
+            code: Some("MCP_CALL_FAILED".into()),
+            source: Some("test".into()),
+        },
+    );
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s1", "a")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let compiled = compiled_with_hooks(
+        &fixture,
+        &config,
+        &[],
+        &[(
+            "main:s1".to_string(),
+            vec![step_hook_file("step_end", "watcher.on_step")],
+        )],
+    );
+    let final_state = fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run 不因钩子分发失败翻车");
+    assert_eq!(fixture.invoker.call_count("a"), 1, "主 step 照常执行");
+    assert_eq!(
+        final_state.get("ended"),
+        Some(&json!(false)),
+        "分发失败不得误置 ended（run 开头默认种子 false，终止决策才会置 true）"
+    );
+}
+
+/// 空表零分发：未声明任何钩子的管道，边界分发点零调用。
+#[tokio::test]
+async fn no_hooks_yields_zero_dispatch() {
+    let fixture = Fixture::build(&["a", "watcher"]);
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s1", "a")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    };
+    let compiled = compiled_with_hooks(&fixture, &config, &[], &[]);
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    assert_eq!(
+        fixture.invoker.call_count("watcher"),
+        0,
+        "空 hooks 表零分发（空集短路零开销）"
+    );
+    assert_eq!(fixture.invoker.call_count("a"), 1, "主流程不受影响");
 }
