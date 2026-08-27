@@ -776,9 +776,8 @@ pub struct Branch {
 
 // ── ADR ①：引擎结果类型 ──────────────────────────────────────
 
-/// 挂起句柄（旧引擎 AdrEngine::suspend 返回；审批闭环 resume 协议沿用）。
+/// 挂起句柄（审批闭环 resume 协议的恢复凭据：保存分支状态，等待外部事件恢复执行）。
 ///
-/// 保存当前分支状态，等待外部事件恢复执行。
 /// [来源: docs/working/adr_engine_design.md §3.3]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuspendHandle {

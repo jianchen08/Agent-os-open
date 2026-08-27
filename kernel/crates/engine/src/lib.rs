@@ -8,7 +8,7 @@
 //! ## 模块组织
 //!
 //! - `pipeline_loop`: PipelineExecutor——统一管道执行器（生产路径）
-//! - `store`: SQLite 存储实现——runs/messages/traces/blobs DDL + CRUD
+//! - `store`: SQLite 存储实现——runs/message_slots/blobs/traces/sessions 等 DDL + CRUD
 //! - `template`: 配置模板插值器——解析 `{{state.xxx}}` / `{{path:xxx}}` 表达式
 //!
 //! [来源: docs/0.2_rust_plugin_solution.md §3.6]

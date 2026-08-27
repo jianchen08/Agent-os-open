@@ -1731,12 +1731,12 @@ impl PluginInvokerImpl {
             return Ok((command, args));
         }
 
-        // fail-closed：Python sidecar 必须有 venv（单轨，plain 回退已删）。
+        // fail-closed：Python sidecar 必须有 venv（uv 单轨，无 plain 回退轨）。
         let dir = self.loader.get_plugin_dir(&manifest.id).ok_or_else(|| {
             PluginError {
                 message: format!(
                     "插件 {} 是 Python sidecar（entry 首词为 PATH 裸 python），但 loader 无法定位其插件目录——\
-                     无法解析 venv 解释器（uv 单轨契约：pyproject.toml + .venv 双标志；plain PATH python 轨已于 2026-08-19 批 D 删除）",
+                     无法解析 venv 解释器（uv 单轨契约：pyproject.toml + .venv 双标志；仅支持 venv 解释器，无 PATH python 回退）",
                     manifest.id
                 ),
                 code: Some("PLUGIN_DIR_NOT_FOUND".to_string()),
@@ -1748,7 +1748,7 @@ impl PluginInvokerImpl {
             return Err(PluginError {
                 message: format!(
                     "插件 {} 缺 pyproject.toml——uv 单轨契约（pyproject.toml + .venv 双标志）不满足，\
-                     Python sidecar 不再回退 PATH 裸 python（批 D 翻转，2026-08-19）。\
+                     Python sidecar 不回退 PATH 裸 python。\
                      修复：为插件补 pyproject.toml（模板见 scripts/migrate_plugins_to_uv.py），\
                      依赖清单参照 docs/working/uv依赖人工确认清单_20260819.md（插件目录 {}）",
                     manifest.id,
@@ -1761,7 +1761,7 @@ impl PluginInvokerImpl {
         let interpreter = find_venv_interpreter(plugin_path).ok_or_else(|| PluginError {
             message: format!(
                 "插件 {} 的 .venv 解释器缺失（探测 .venv/Scripts/python.exe 与 .venv/bin/python 均不存在）——\
-                 Python sidecar 不再回退 PATH 裸 python（批 D 翻转，2026-08-19）。\
+                 Python sidecar 不回退 PATH 裸 python。\
                  修复：在插件目录 {} 下 `uv venv --python 3.12 && uv pip install -e <repo>/plugins/sdk + 确认清单依赖`，\
                  或 `uv sync --project <插件目录>`（重建口径见 docs/working/插件uv运行时迁移方案_20260819.md）",
                 manifest.id,

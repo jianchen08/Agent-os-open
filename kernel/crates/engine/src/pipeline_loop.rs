@@ -814,11 +814,12 @@ impl PipelineExecutor {
 
     // ── 持久化（ADR ②③：引擎独占落库，插件只返回 Patch）──────────
 
-    /// 创建运行实例（runs 表）并落用户消息（messages 表）。
+    /// 创建运行实例并登记 run 坐标：runs 表建行、run→pipeline 归属、
+    /// pipeline↔session 映射，以及首轮 user_input 轨迹。
     ///
-    /// 在 run() 开头调用一次。user 消息从 initial_state["message"] 取
-    /// （server.rs:242 注入的当前用户输入）。完整内容存 blobs 表，
-    /// messages 表存摘要 preview + blob_id 指针（ADR ⑦ 懒加载）。
+    /// 在 run() 开头调用一次。用户消息全文由派发层在 run 前经 message_slots
+    /// append op 落库（引擎不单独写 messages 表）；state 各键由
+    /// server.rs 的 stage_build_initial_state 注入。
     async fn persist_run_start(&self, state: &mut serde_json::Value, config_hash: &str) {
         // config_hash = 编译期对 PipelineConfig 的确定性指纹
         // （compiler::pipeline_config_hash：serde_json 规范化 + SHA-256 前 16 hex），
@@ -854,8 +855,9 @@ impl PipelineExecutor {
             }
         }
 
-        // pipeline_id 从 state 读（server.rs:261 注入，前端创建会话时生成、每轮回传）。
-        // 它是消息层查询主键（对齐 0.1 pipeline_run_id），适配"通过 state 通路执行持久化"。
+        // pipeline_id 从 state 读（stage_build_initial_state 注入，前端创建会话
+        // 时生成、每轮回传）。它是消息层查询主键（对齐 0.1 pipeline_run_id），
+        // 适配"通过 state 通路执行持久化"。
         let pipeline_id = state
             .get("pipeline_id")
             .and_then(|v| v.as_str())
@@ -863,7 +865,7 @@ impl PipelineExecutor {
 
         // 写入 pipeline↔session 映射（每次管道开跑时记录，含子任务管道）。
         // 删除会话时据此按 thread_id 找到全部 pipeline_id 级联清理。
-        // session_id 即 thread_id（server.rs:474 注入）；两者任一为空则跳过（幂等）。
+        // session_id 即 thread_id（stage_build_initial_state 注入）；两者任一为空则跳过（幂等）。
         let session_id = state
             .get("session_id")
             .and_then(|v| v.as_str())

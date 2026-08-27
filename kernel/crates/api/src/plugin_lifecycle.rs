@@ -33,13 +33,12 @@ pub fn register_plugin_capabilities(
     {
         for tool_cap in &manifest.capabilities.tools {
             let category = tool_cap.category.clone().unwrap_or(ToolCategory::System);
-            // K9 + 强制规则（2026-08-23 升级）：input_schema 缺失时的行为按宿主分档——
+            // K9 + 强制规则：input_schema 缺失时的行为按宿主分档——
             //   - external MCP 工具（entry="mcp:external"）：**拒注册**。此类工具
             //     的 manifest 声明是 LLM 工具面 input_schema 的唯一真值源（G2 只
             //     比对、不回填握手 schema），缺声明 = 注册出 {} = LLM 收到零参数
-            //     工具 → 调用必因缺参被服务端校验拒绝（2026-08-23 真机：omnisearch
-            //     universal_search 缺 mode 100% 失败、调研 agent 空转 45 万 token）。
-            //     拒注册直接暴露问题，不给"盲调工具"留后门。
+            //     工具，调用必因缺参被服务端校验拒绝；拒注册直接暴露问题，
+            //     不给"盲调工具"留后门。
             //   - 内置/sidecar 自研（http.handle、*.status 哨兵、widget_demo 演示
             //     工具）：零参合法（HTTP 处理器/无参状态查询），维持 {} 补注册，
             //     仅 warn（K9 既有行为）。
@@ -425,9 +424,8 @@ mod external_mcp_schema_gate_tests {
     #[test]
     fn external_mcp_tool_without_input_schema_rejected() {
         // external MCP 工具缺 input_schema → 拒注册。manifest 声明是 LLM 工具面
-        // input_schema 的唯一真值源（G2 只比对不回填），缺声明 = 注册出 {} =
-        // LLM 收到零参数工具 → 调用必因缺参被服务端校验拒绝（2026-08-23 真机：
-        // omnisearch universal_search 缺 mode 100% 失败、调研 agent 空转 45 万 token）。
+        // input_schema 的唯一真值源（G2 只比对不回填），缺声明即零参数工具、
+        // 调用必因缺参被服务端校验拒绝。
         let m = manifest_with("mcp:external", None);
         let registry = Arc::new(CapabilityRegistryImpl::new());
         let scopes = agentos_plugin_loader::PluginScopeRegistry::new();

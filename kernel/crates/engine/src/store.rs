@@ -1474,8 +1474,8 @@ impl SqliteStore {
         let checkpoint_id = format!("cp_{}_{}", pipeline_id, step_no);
         // 瘦身副本：剥离 messages + 易变 per-run 键，写 ckpt_max_seq 水位（原 state 不动）。
         // 易变键（GAP-3）：message/input/message_id/suspended 等属于"本轮运行"，
-        // 不是管道累计状态——残留会在冷恢复时覆盖下一轮的新输入，导致重启后
-        // 旧 user 消息被重放消费（e2e 重复 run/陈旧回复的病根）。
+        // 不是管道累计状态——若残留，冷恢复时会覆盖下一轮的新输入，重启后
+        // 旧 user 消息被重放消费。
         let mut slim = state.clone();
         if let Some(obj) = slim.as_object_mut() {
             let max_seq = obj
@@ -2482,7 +2482,7 @@ impl StorageBackend for SqliteStore {
         Ok(())
     }
 
-    // 以下三个 trait 方法直接转发到固有 impl（store.rs:150/176/198），
+    // 以下 trait 方法直接转发到固有 impl 的同名方法，
     // 让持 Arc<dyn StorageBackend> 的 PipelineExecutor 能调到写方法。
     async fn create_run(
         &self,

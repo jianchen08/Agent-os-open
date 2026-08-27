@@ -195,10 +195,9 @@ async fn run_socket_loop(
 
     // 断线重连（last_sequence > 0）：连接建立即按 watermark 重放该 user 全部
     // 线程的缓冲事件。不能依赖 B3（首条带 thread_id 的入站消息触发）——前端
-    // 重连后不重发 active_thread_changed、心跳 thread_id 为空，B3 触发饥饿，
-    // 断连期间落缓冲的 new_message 永远等不到重放（2026-08-23 真机复现：
-    // 回复落库但前端不显示，刷新才出现）。floor 之后的事件经当前连接实时
-    // 送达，重放只发 (last_sequence, floor] 防重复。
+    // 重连后不重发 active_thread_changed、心跳 thread_id 为空，B3 会触发饥饿，
+    // 断连期间落缓冲的 new_message 永远等不到重放。floor 之后的事件经当前
+    // 连接实时送达，重放只发 (last_sequence, floor] 防重复。
     let replayed_for_task = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if let Some(ls) = last_sequence.filter(|&l| l > 0) {
         let floor = session.current_sequence().await;
@@ -215,11 +214,10 @@ async fn run_socket_loop(
     let mut send_task = tokio::spawn(async move {
         while let Some(text) = out_rx.recv().await {
             if text.is_empty() {
-                // 踢旧关闭（WsSink::shutdown 发出空串哨兵）：先发带 CLOSE_CODE_KICKED
-                // 状态码的 Close 帧再退出——前端 GlobalWebSocket 对 4000 判"被新连接替换"
-                // 跳过重连，双客户端互踢风暴（每 ~4.5s 断连、消息发送全断）的断根点。
-                // 旧实现只发空 Close（浏览器 onclose=1005），前端按普通掉线 4s 退避重连
-                // → A/B 各自重连互踢 → 无限循环。
+                // 踢旧关闭（WsSink::shutdown 发出空串哨兵）：必须发带
+                // CLOSE_CODE_KICKED 状态码的 Close 帧而非普通空 Close——前端
+                // GlobalWebSocket 对 4000 判"被新连接替换"跳过重连；若按普通
+                // 掉线处理，A/B 双客户端会各自退避重连互踢，形成循环。
                 let _ = sender
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: agentos_session::auth::CLOSE_CODE_KICKED,
@@ -905,9 +903,9 @@ impl PipelineDispatcher for EngineDispatcher {
         if let Some(db) = self.state.db.as_ref() {
             match db.find_suspended_run_by_request_id(request_id) {
                 Ok(Some(run)) => {
-                    // 0.2 收尾：旧引擎已清理，resume 即 runs 表状态簿记
-                    // （新引擎执行流由 state.suspended 插件机制控制，此处恢复
-                    // 状态供查询/复盘语义，与 capability pipeline-executor.resume 一致）。
+                    // resume 即 runs 表状态簿记：恢复 Running 状态供查询/复盘
+                    // 语义（新引擎执行流由 state.suspended 插件机制控制，与
+                    // capability pipeline-executor.resume 一致）。
                     match db
                         .update_run_status(
                             &run.run_id,

@@ -1242,7 +1242,7 @@ pub trait StorageBackend: Send + Sync {
     ) -> Result<(), StorageError>;
 
     /// 存储不可变原始数据到 blobs 表（内容寻址去重，blob_id = SHA256）。
-    /// 返回 blob_id 供 messages 表引用。
+    /// 返回 blob_id 供 message_slots 行引用。
     async fn store_blob(&self, data: &[u8], mime_type: &str) -> Result<String, StorageError>;
 
     // ── 域10：分层持久化投影（messages 增量对齐 + 标量快照 + checkpoint）────

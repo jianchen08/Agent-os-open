@@ -88,7 +88,8 @@ impl NativePluginLoader {
     fn load_inner(path: &Path) -> Result<NativePlugin, PluginError> {
         // SAFETY: `path` 由 loader 校验为插件目录下的 cdylib（plugin.json host_type=native 指定）。
         // dlopen 会执行库的构造段——这是动态插件加载的固有契约；Library 句柄存入
-        // NativePlugin._lib 随插件生命周期持有，drop 时 dlclose，不会提前卸载。
+        // NativePlugin._lib 随插件生命周期 ManuallyDrop 持有，**永不 dlclose**（见
+        // 模块头契约），因此加载后库在进程内始终有效，句柄逸出不产生悬垂。
         let lib = unsafe { Library::new(path) }.map_err(|e| PluginError {
             message: format!("native plugin load failed ({}): {}", path.display(), e),
             code: Some("NATIVE_LOAD_FAILED".to_string()),

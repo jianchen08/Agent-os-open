@@ -719,7 +719,7 @@ pub fn resolve_requires_services(manifests: &[PluginManifest]) -> Result<(), Ser
 /// `load_and_compile` 的"坏配置拒绝启动"语义一致。
 ///
 /// `requires_services` 引用不存在提供者的条目不进图（[`resolve_requires_services`]
-/// 负责 fail-closed 拒绝；此处只排相对顺序）。无依赖时退化为字典序（与旧实现一致）。
+/// 负责 fail-closed 拒绝；此处只排相对顺序）。无依赖时退化为字典序。
 pub fn sort_manifests_topologically(
     manifests: &[PluginManifest],
 ) -> Result<Vec<PluginManifest>, ServiceDepError> {
@@ -837,9 +837,7 @@ pub fn output_schema_error(decl: &serde_json::Value) -> Option<String> {
 /// **"服务声明了但没注册"**（fail-closed）。G2 另外查"已声明 vs 实际暴露"，
 /// 这里查"公告 vs 已声明"，两层合起来才保证公告的服务真能调。
 ///
-/// 真实语料（2026-08-18）：human_interaction_tool 公告 create_conversation 但
-/// 无 `interaction.create_conversation` 工具（历史遗留死公告，无消费者）——
-/// 本检查抓出后从 provides.methods 移除。
+/// 返回的未回铺方法条目由注册闸硬上报（drift + 工具面拒绝），不进服务面。
 pub fn provides_methods_unbacked(m: &agentos_core::traits::PluginManifest) -> Vec<String> {
     let Some(provides) = &m.provides else {
         return Vec::new();
