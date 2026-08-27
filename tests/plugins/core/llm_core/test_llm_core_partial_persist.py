@@ -51,7 +51,9 @@ class _FakeCaller:
         self._result = result
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def __call__(self, method: str, params: dict[str, Any]) -> Any:
+    async def __call__(
+        self, method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> Any:
         self.calls.append((method, params))
         # tool-executor.invoke 信封（内核 ToolExecutionResult 序列化形态）
         return {"success": True, "data": self._result}

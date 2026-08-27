@@ -44,22 +44,26 @@ logger = logging.getLogger(__name__)
 # llm_core 的 LLM 调用经内核 tool-executor 能力跨进程调 llm.complete_stream
 # （与 approval/hindsight 经 capability 的既有用法同构）。server.py 在 on_load
 # 注入本函数；测试注入伪实现。未注入时调用抛明确错误（接线 bug 早暴露）。
-CapabilityCaller = Callable[[str, dict[str, Any]], Any]
+# LLM 调用耗时可达 llm.yaml call_timeout（默认 600s），第三参 timeout 必须显式
+# 传大值——SDK 默认 CAPABILITY_CALL_TIMEOUT_S=30s 面向短调用，不传会先于 LLM
+# 完成被掐断（与 human-interaction 同款长等待语义）。
+CapabilityCaller = Callable[[str, dict[str, Any], float | None], Any]
 
 _capability_caller: CapabilityCaller | None = None
 
 
 def set_capability_caller(caller: CapabilityCaller | None) -> None:
-    """注入能力调用句柄（async fn `(method, params) -> Any`）。
+    """注入能力调用句柄（async fn `(method, params, timeout) -> Any`）。
 
     server.py 在 on_load 时调用：
-    ``set_capability_caller(lambda m, p: plugin.get_capability("tool-executor").call(m, p))``
+    ``set_capability_caller(lambda m, p, t=None: plugin.get_capability("tool-executor").call(m, p, t))``
     LLM 调用（llm.complete_stream）据此经内核 tool-executor 转发到 llm_service。
 
     Args:
         caller: 能力调用 async 函数（method 传 capability 短名——SDK 句柄
             ``get_capability("tool-executor").call`` 内部组装
-            ``<capability>.<method>`` 全名，传全名会双重前缀）；传 None 清空
+            ``<capability>.<method>`` 全名，传全名会双重前缀；timeout 透传
+            SDK ``CapabilityHandle.call``，长等待语义必须传大值）；传 None 清空
     """
     global _capability_caller
     _capability_caller = caller
@@ -294,6 +298,19 @@ class LLMCore(ICorePlugin):
         from _config_models import get_model_config_loader  # noqa: PLC0415
 
         return get_model_config_loader().get_llm_core_config(model_id)
+
+    def _capability_timeout(self) -> float:
+        """反向能力调用的等待上限：模型 call_timeout + 余量。
+
+        SDK 默认 CAPABILITY_CALL_TIMEOUT_S=30s 会先于长 LLM 调用完成掐断请求
+        （llm.complete_stream 耗时可到 llm.yaml call_timeout）。+60s 余量让
+        llm_service 的结构化错误信封先于 SDK 超时返回（错误是值，不丢语义）。
+        模型不在 llm.yaml 时用 loader 内部默认 300s 口径（与 get_llm_core_config
+        的 defaults 兜底一致）。
+        """
+        conf = self._get_llm_core_config(self._model)
+        call_timeout = float(conf["call_timeout"]) if conf else 300.0
+        return call_timeout + 60.0
 
     def _resolve_tier(self, tier: str) -> str:
         """tier → model_id（defaults.tiers 解析）。"""
@@ -538,10 +555,10 @@ class LLMCore(ICorePlugin):
         ``raw_error`` 为 None——半截返回是正常落库（非错误轮次），错误信息
         经 ``llm_error_info`` 随消息 blob 持久化。
 
-        中断（interrupted）：置 ``ended=true``——引擎既有 ended 边界检查让
-        run 优雅收尾（post 链跳过、exit 体照跑、persist_run_end 正常），
-        dispatch_stop 已把 run 置 suspended 的信号由 persist_run_end 覆写为
-        Completed + 消息带 interrupted 状态（方案 §四.1）。
+        中断（interrupted）：置 ``ended=true`` + ``router.stop_reason=user_requested``
+        ——引擎既有 ended 边界检查让 run 优雅收尾（post 链跳过、exit 体照跑、
+        persist_run_end 正常），persist_run_end 据 stop_reason 落
+        Cancelled（不覆写为 Completed）+ 消息带 interrupted 状态（方案 §四.1）。
 
         Args:
             partial: llm_service 返回的半截内容快照
@@ -641,6 +658,8 @@ class LLMCore(ICorePlugin):
         }
         if is_interrupted:
             result[StateKeys.ENDED] = True
+            # 用户停止信号：引擎收尾据此落 run=Cancelled（不覆写为 Completed）
+            result["router.stop_reason"] = "user_requested"
         return result
 
     # 多模态引用→二进制的解析上限（与 preprocessor max_file_size 默认对齐，20MB）
@@ -1005,7 +1024,7 @@ class LLMCore(ICorePlugin):
                 "message_id": ctx.state.get("message_id", "") or "",
             },
         }
-        envelope = await caller("invoke", params)
+        envelope = await caller("invoke", params, self._capability_timeout())
         # tool-executor.invoke 返回 {success, data, error} 信封（内核 ToolResult
         # 序列化）：success=false（工具未注册/执行失败）是错误不是空响应，
         # fail-closed 抛出携带 error——否则盲取字段把失败伪装成"text 空的成功"。

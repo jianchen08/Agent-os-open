@@ -56,7 +56,9 @@ class _FakeToolExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def call(self, method: str, params: dict[str, Any]) -> Any:
+    async def call(
+        self, method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> Any:
         self.calls.append((method, params))
         # tool-executor.invoke 信封（内核 ToolExecutionResult 序列化形态）
         return {"success": True, "data": {"status": "ok"}}

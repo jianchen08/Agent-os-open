@@ -67,7 +67,9 @@ async def _on_load(params: dict) -> None:
     from plugin import set_capability_caller  # noqa: PLC0415
 
     set_capability_caller(
-        lambda method, params_: plugin.get_capability("tool-executor").call(method, params_)
+        lambda method, params_, timeout=None: plugin.get_capability(
+            "tool-executor"
+        ).call(method, params_, timeout)
     )
     get_instance()  # 预热：注入配置 shim + 构建 LLMCore（保持原 on_load 构造时机）
 

@@ -41,7 +41,9 @@ class _FakeCaller:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def __call__(self, method: str, params: dict[str, Any]) -> Any:
+    async def __call__(
+        self, method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> Any:
         self.calls.append(params)
         return {
             "success": True,

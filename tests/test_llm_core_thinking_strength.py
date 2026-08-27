@@ -23,9 +23,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core"
 _LLM_CORE_DIR = _CORE_DIR / "llm_core"
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
+_SYSTEM_LLM_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "llm"
 # 去重插入到 [0]：车道共跑时其他插件目录（如 channel_feishu）可能残留于
 # sys.path 前部，幂等跳过会让 plugin.py 的 `from adapter import` 命中他插件。
-for _d in (_LLM_CORE_DIR, _CORE_DIR, _SHARED_DIR):
+for _d in (_LLM_CORE_DIR, _CORE_DIR, _SHARED_DIR, _SYSTEM_LLM_DIR):
     if str(_d) in sys.path:
         sys.path.remove(str(_d))
     sys.path.insert(0, str(_d))
@@ -109,7 +110,9 @@ class _CapturingCaller:
         self.captured_args: dict[str, Any] = {}
         self.captured_method: str | None = None
 
-    async def __call__(self, method: str, params: dict[str, Any]) -> Any:
+    async def __call__(
+        self, method: str, params: dict[str, Any], timeout: float | None = None
+    ) -> Any:
         self.captured_method = method
         self.captured_args = dict(params["args"])
         # tool-executor.invoke 信封（内核 ToolExecutionResult 序列化形态）
