@@ -1359,6 +1359,47 @@ fn lookup_env_var(var: &str, overlay: &HashMap<String, String>) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// python 可执行名（Windows 为 python，其余为 python3）。
+    fn python_exe() -> &'static str {
+        #[cfg(windows)]
+        {
+            "python"
+        }
+        #[cfg(not(windows))]
+        {
+            "python3"
+        }
+    }
+
+    /// python 是否可用（不可用时跳过，避免 CI 无 python 环境失败）。
+    fn python_available() -> bool {
+        std::process::Command::new(python_exe())
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// 从回显替身的 stdout 读一行（回显进程把写入 stdin 的行原样回显）。
+    ///
+    /// 实现：spawn_echo_stdio 的消费任务把读到的每一行存入共享 capture，
+    /// 本函数轮询 capture 直到出现新行（响应行由 handle_incoming_request
+    /// 写入 stdin 后回显进程立即回显）。
+    async fn read_echo_line(capture: &Arc<std::sync::Mutex<Vec<String>>>) -> String {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(line) = capture.lock().unwrap().pop() {
+                return line;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "等待 cat 回显超时"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 
     #[test]
     fn test_new_stdio_client() {
@@ -1917,5 +1958,629 @@ mod tests {
             .auth
             .expect("auth present");
         assert_eq!(auth.required, Some(false));
+    }
+
+    // ── 反向调用路由（handle_incoming_request / handle_incoming_notification）──
+
+    /// 测试用 router：记录调用并返回可配置结果。
+    struct RecordingRouter {
+        calls: Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
+        result: Value,
+        fail: bool,
+    }
+
+    impl RecordingRouter {
+        fn new(result: Value) -> Self {
+            Self {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                result,
+                fail: false,
+            }
+        }
+        fn failing() -> Self {
+            Self {
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                result: Value::Null,
+                fail: true,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CapabilityRouter for RecordingRouter {
+        async fn handle(
+            &self,
+            capability: &str,
+            method: &str,
+            params: Value,
+        ) -> Result<Value, McpError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((capability.to_string(), method.to_string(), params));
+            if self.fail {
+                Err(McpError::Protocol {
+                    message: "boom".to_string(),
+                })
+            } else {
+                Ok(self.result.clone())
+            }
+        }
+        fn known_namespaces(&self) -> Vec<String> {
+            vec!["pipeline-executor".to_string(), "event-bus".to_string()]
+        }
+    }
+
+    /// 用 python 作为 stdin 回显替身（`-u` 无缓冲）：写入的 JSON-RPC response 行
+    /// 会原样出现在其 stdout 上，测试据此断言回写内容。
+    /// 返回 (stdin, 捕获的 stdout 行队列, child)——child 必须由调用方持有，
+    /// 否则 kill_on_drop 会在函数返回时立即杀掉回显进程。
+    async fn spawn_echo_stdio() -> (
+        Arc<Mutex<tokio::process::ChildStdin>>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::process::Child,
+    ) {
+        let script = "import sys\nfor line in sys.stdin:\n    sys.stdout.write(line)\n    sys.stdout.flush()";
+        let mut child = tokio::process::Command::new(python_exe())
+            .args(["-u", "-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+        let stdout = child.stdout.take().unwrap();
+        let capture: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap2 = capture.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        cap2
+                            .lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&buf).trim().to_string());
+                    }
+                }
+            }
+        });
+        (stdin, capture, child)
+    }
+
+    #[tokio::test]
+    async fn test_incoming_request_routes_and_echoes_id() {
+        let router = Arc::new(RecordingRouter::new(json!({"ok": true})));
+        let (stdin, capture, _child) = spawn_echo_stdio().await;
+
+        // 字符串 id 反向调用 → 路由成功，回写 result（id 原样回显）
+        let msg = json!({"jsonrpc": "2.0", "id": "req-1", "method": "pipeline-executor.resume", "params": {"x": 1}});
+        handle_incoming_request(
+            "pipeline-executor.resume",
+            &msg,
+            &msg["id"],
+            "req-1",
+            &Some(router.clone()),
+            &stdin,
+        )
+        .await;
+        let line = read_echo_line(&capture).await;
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["id"], "req-1");
+        assert_eq!(resp["result"]["ok"], true);
+        assert_eq!(router.calls.lock().unwrap().len(), 1);
+
+        // 数值 id 反向调用 → id 按原类型回显（JSON-RPC 2.0 要求 response.id === request.id）
+        let msg2 = json!({"jsonrpc": "2.0", "id": 7, "method": "event-bus.emit", "params": {"e": "tick"}});
+        handle_incoming_request(
+            "event-bus.emit",
+            &msg2,
+            &msg2["id"],
+            "7",
+            &Some(router.clone()),
+            &stdin,
+        )
+        .await;
+        let line2 = read_echo_line(&capture).await;
+        let resp2: Value = serde_json::from_str(&line2).unwrap();
+        assert_eq!(resp2["id"], 7, "数值 id 必须按原类型回显");
+        assert_eq!(router.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_incoming_request_non_object_result_wrapped() {
+        // 非 object 结果（数组/标量）必须包 {"__raw__": value}——官方 SDK 的
+        // result 契约是 object，裸数组会让对端 pydantic 校验失败。
+        let router = Arc::new(RecordingRouter::new(json!([1, 2, 3])));
+        let (stdin, capture, _child) = spawn_echo_stdio().await;
+
+        let msg = json!({"jsonrpc": "2.0", "id": "r2", "method": "pipeline-executor.resume"});
+        handle_incoming_request(
+            "pipeline-executor.resume",
+            &msg,
+            &msg["id"],
+            "r2",
+            &Some(router.clone()),
+            &stdin,
+        )
+        .await;
+        let line = read_echo_line(&capture).await;
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["result"]["__raw__"], json!([1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn test_incoming_request_error_and_no_router() {
+        // router 处理失败 → -32603 错误响应
+        let router = Arc::new(RecordingRouter::failing());
+        let (stdin, capture, _child) = spawn_echo_stdio().await;
+        let msg = json!({"jsonrpc": "2.0", "id": "r3", "method": "pipeline-executor.resume"});
+        handle_incoming_request(
+            "pipeline-executor.resume",
+            &msg,
+            &msg["id"],
+            "r3",
+            &Some(router.clone()),
+            &stdin,
+        )
+        .await;
+        let line = read_echo_line(&capture).await;
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["error"]["code"], -32603);
+
+        // router 为 None → known_namespaces 为空 → 解析失败走 method not found 分支
+        let (stdin2, capture2, _child2) = spawn_echo_stdio().await;
+        let msg2 = json!({"jsonrpc": "2.0", "id": "r4", "method": "pipeline-executor.resume"});
+        handle_incoming_request(
+            "pipeline-executor.resume",
+            &msg2,
+            &msg2["id"],
+            "r4",
+            &None,
+            &stdin2,
+        )
+        .await;
+        let line2 = read_echo_line(&capture2).await;
+        let resp2: Value = serde_json::from_str(&line2).unwrap();
+        assert_eq!(resp2["error"]["code"], -32601);
+        assert!(resp2["error"]["message"].as_str().unwrap().contains("method not found"));
+    }
+
+    #[tokio::test]
+    async fn test_incoming_request_unknown_method_rejected() {
+        // 非 capability method（MCP 标准方法 / 未知 namespace）→ -32601 method not found
+        let router = Arc::new(RecordingRouter::new(json!({})));
+        let (stdin, capture, _child) = spawn_echo_stdio().await;
+        let msg = json!({"jsonrpc": "2.0", "id": "r5", "method": "tools/list"});
+        handle_incoming_request(
+            "tools/list",
+            &msg,
+            &msg["id"],
+            "r5",
+            &Some(router.clone()),
+            &stdin,
+        )
+        .await;
+        let line = read_echo_line(&capture).await;
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["error"]["code"], -32601);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("method not found"));
+        assert!(router.calls.lock().unwrap().is_empty(), "未知 method 不应路由");
+    }
+
+    #[tokio::test]
+    async fn test_incoming_notification_routes_and_ignores_result() {
+        let router = Arc::new(RecordingRouter::new(json!({"ignored": true})));
+        handle_incoming_notification(
+            "event-bus.emit",
+            json!({"e": "chunk"}),
+            &Some(router.clone()),
+        )
+        .await;
+        let calls = router.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "event-bus");
+        assert_eq!(calls[0].1, "emit");
+        assert_eq!(calls[0].2["e"], "chunk");
+    }
+
+    #[tokio::test]
+    async fn test_incoming_notification_unknown_and_no_router() {
+        // 未知 method → 丢弃（不 panic、不路由）
+        let router = Arc::new(RecordingRouter::new(json!({})));
+        handle_incoming_notification("notifications/initialized", Value::Null, &Some(router.clone()))
+            .await;
+        assert!(router.calls.lock().unwrap().is_empty());
+
+        // router 为 None → 静默丢弃
+        handle_incoming_notification("event-bus.emit", Value::Null, &None).await;
+    }
+
+    #[tokio::test]
+    async fn test_incoming_notification_handler_error_swallowed() {
+        // notification 处理失败只记日志，不 panic（fire-and-forget 语义）
+        let router = Arc::new(RecordingRouter::failing());
+        handle_incoming_notification("event-bus.emit", Value::Null, &Some(router.clone())).await;
+        assert_eq!(router.calls.lock().unwrap().len(), 1);
+    }
+
+    // ── stdio send_request / send_notification 错误路径 ────────────────
+
+    #[tokio::test]
+    async fn test_send_request_not_connected_returns_error() {
+        let client = McpClient::new_stdio("cat", vec![]);
+        let err = client.send_request("tools/list", None).await.unwrap_err();
+        assert!(matches!(err, McpError::ConnectionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_send_notification_not_connected_returns_error() {
+        let client = McpClient::new_stdio("cat", vec![]);
+        let err = client.send_notification("notifications/initialized", None).await.unwrap_err();
+        assert!(matches!(err, McpError::ConnectionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_send_request_http_without_connect_returns_error() {
+        // HTTP transport 但未 connect（http_client 未构建）→ 明确报错
+        let client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), None);
+        let err = client.send_request("tools/list", None).await.unwrap_err();
+        assert!(matches!(err, McpError::ConnectionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_send_notification_http_without_connect_returns_error() {
+        let client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), None);
+        let err = client
+            .send_notification("notifications/initialized", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, McpError::ConnectionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_send_request_timeout_when_no_response() {
+        if !python_available() {
+            return;
+        }
+        // sidecar 读一行后静默（不回响应）→ 短超时后返回 Timeout（不阻塞到默认 300s）
+        let script = "import sys; sys.stdin.readline(); import time; time.sleep(30)";
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        );
+        client = client.with_request_timeout(Duration::from_millis(200));
+        client.connect().await.unwrap();
+        let err = client.send_request("tools/list", None).await.unwrap_err();
+        assert!(matches!(err, McpError::Timeout { .. }));
+        client.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_request_sidecar_error_response() {
+        if !python_available() {
+            return;
+        }
+        // sidecar 返回 JSON-RPC error → 映射为 Protocol 错误（回显请求 id 才能配对）
+        let script = "import sys, json; req=json.loads(sys.stdin.readline()); print(json.dumps({'jsonrpc':'2.0','id':req['id'],'error':{'code':-32000,'message':'sidecar boom'}}), flush=True)";
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        );
+        client.connect().await.unwrap();
+        let err = client.send_request("tools/list", None).await.unwrap_err();
+        assert!(matches!(err, McpError::Protocol { .. }));
+        assert!(err.to_string().contains("sidecar boom"));
+        client.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_request_sidecar_result_without_id_ignored() {
+        if !python_available() {
+            return;
+        }
+        // sidecar 输出无 id 的 JSON（非 response/request/notification）→ 忽略；
+        // 随后 sidecar 退出 → EOF 清空 pending → 请求快速失败（channel closed），
+        // 不 panic、不误配对、不阻塞到超时
+        let script = "import sys; sys.stdin.readline(); print('{\"unrelated\": true}', flush=True)";
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        );
+        client = client.with_request_timeout(Duration::from_millis(300));
+        client.connect().await.unwrap();
+        let err = client.send_request("tools/list", None).await.unwrap_err();
+        assert!(
+            matches!(err, McpError::Protocol { .. }),
+            "EOF 清空 pending 应快速失败: {err}"
+        );
+        client.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_initialize_sets_initialized_flag() {
+        if !python_available() {
+            return;
+        }
+        // initialize 成功 → initialized 置 true；失败（sidecar 崩溃）→ 保持 false
+        // sidecar 回显请求 id 并消费 initialized 通知后退出
+        let script = "import sys, json; req=json.loads(sys.stdin.readline()); print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':{'ok':True}}), flush=True); sys.stdin.readline()";
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        );
+        client.connect().await.unwrap();
+        let result = client.initialize(&json!({"k": "v"})).await;
+        assert!(result.is_ok());
+        assert!(*client.initialized.lock().await, "initialize 后应置 initialized");
+
+        // 崩溃 sidecar：initialize 快速失败，initialized 保持 false
+        let script2 = "import sys; sys.stdin.readline(); sys.exit(1)";
+        let mut client2 = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), script2.to_string()],
+        );
+        client2.connect().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let result2 = client2.initialize(&json!({})).await;
+        assert!(result2.is_err());
+        assert!(!*client2.initialized.lock().await, "失败不应置 initialized");
+    }
+
+    #[tokio::test]
+    async fn test_http_post_error_branches() {
+        // 未 connect → 明确报错
+        let client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), None);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: "1".to_string(),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+        let err = client.http_post("http://127.0.0.1:1", &request).await.unwrap_err();
+        assert!(matches!(err, McpError::ConnectionFailed { .. }));
+
+        // 连接拒绝 → Transport 错误
+        let mut client2 = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), None);
+        client2.connect().await.unwrap();
+        let err2 = client2.http_post("http://127.0.0.1:1", &request).await.unwrap_err();
+        assert!(matches!(err2, McpError::Transport { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_http_post_sse_and_error_response() {
+        // SSE content-type → 明确报错（流式暂不支持）
+        let (url, _) = spawn_raw_http_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: x\n\n",
+        )
+        .await;
+        let mut client = McpClient::new_http(url.clone(), HashMap::new(), None);
+        client.connect().await.unwrap();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: "1".to_string(),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+        let err = client.http_post(&url, &request).await.unwrap_err();
+        assert!(matches!(err, McpError::Protocol { .. }));
+        assert!(err.to_string().contains("SSE"));
+
+        // JSON-RPC error 响应 → Protocol 错误（带 code/message）
+        let (url2, _) = spawn_raw_http_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
+        )
+        .await;
+        let mut client2 = McpClient::new_http(url2.clone(), HashMap::new(), None);
+        client2.connect().await.unwrap();
+        let err2 = client2.http_post(&url2, &request).await.unwrap_err();
+        assert!(matches!(err2, McpError::Protocol { .. }));
+        assert!(err2.to_string().contains("-32601"));
+
+        // 非 2xx 状态 → Protocol 错误（带状态码与响应体片段）
+        let (url3, _) = spawn_raw_http_server(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\r\n{\"error\":\"boom\"}",
+        )
+        .await;
+        let mut client3 = McpClient::new_http(url3.clone(), HashMap::new(), None);
+        client3.connect().await.unwrap();
+        let err3 = client3.http_post(&url3, &request).await.unwrap_err();
+        assert!(matches!(err3, McpError::Protocol { .. }));
+        assert!(err3.to_string().contains("500"));
+    }
+
+    /// 启动一个返回固定原始 HTTP 响应的 mock server。
+    async fn spawn_raw_http_server(raw_response: &'static str) -> (String, ()) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock.write_all(raw_response.as_bytes()).await;
+        });
+        (url, ())
+    }
+
+    #[tokio::test]
+    async fn test_http_send_notification_roundtrip() {
+        // HTTP notification：fire-and-forget POST，忽略响应体
+        let (url, captured) = spawn_mock_mcp_server(json!({"ok": true})).await;
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+        client
+            .send_notification("notifications/initialized", Some(json!({"a": 1})))
+            .await
+            .unwrap();
+
+        let raw = captured.lock().unwrap().clone().unwrap();
+        let raw_s = String::from_utf8_lossy(&raw);
+        assert!(
+            raw_s.contains("notifications/initialized"),
+            "notification method 应出现在请求体: {raw_s}"
+        );
+        assert!(
+            raw_s.contains("\"a\":1"),
+            "notification params 应出现在请求体: {raw_s}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_send_request_roundtrip_with_error_result() {
+        // 响应含 error 字段 → send_request 返回 Protocol 错误
+        let (url, _) = spawn_raw_http_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"nope\"}}",
+        )
+        .await;
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+        let err = client.send_request("tools/list", None).await.unwrap_err();
+        assert!(matches!(err, McpError::Protocol { .. }));
+        assert!(err.to_string().contains("nope"));
+    }
+
+    #[tokio::test]
+    async fn test_http_send_request_result_missing() {
+        // 响应无 result 也无 error → Protocol 错误
+        let (url, _) = spawn_raw_http_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1}",
+        )
+        .await;
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+        let err = client.send_request("tools/list", None).await.unwrap_err();
+        assert!(matches!(err, McpError::Protocol { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_http_connect_rejects_private_net() {
+        // 出网守卫：私网 URL 在 connect 时即拒绝（fail-closed）
+        let mut client = McpClient::new_http("http://192.168.1.5:8080/mcp", HashMap::new(), None);
+        let err = client.connect().await.unwrap_err();
+        assert!(matches!(err, McpError::ConnectionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_http_connect_invalid_header_skipped() {
+        // 非法 header 名/值 → 跳过并告警，connect 仍成功
+        let (url, _) = spawn_mock_mcp_server(json!({"ok": true})).await;
+        let mut headers = HashMap::new();
+        headers.insert("bad header name".to_string(), "v".to_string());
+        headers.insert("x-ok".to_string(), "1".to_string());
+        let mut client = McpClient::new_http(url, headers, None);
+        client.connect().await.unwrap();
+        let result = client.send_request("tools/list", None).await.unwrap();
+        assert_eq!(result["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn test_http_connect_invalid_auth_header_name() {
+        // ApiKey 且 header_name 非法 → connect 报错
+        let auth = agentos_core::traits::EndpointAuth {
+            auth_type: AuthType::ApiKey,
+            header_name: "bad header name".to_string(),
+            value: "secret".to_string(),
+            required: None,
+        };
+        let mut client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), Some(auth));
+        let err = client.connect().await.unwrap_err();
+        assert!(matches!(err, McpError::ConnectionFailed { .. }));
+    }
+
+    #[test]
+    fn test_builder_methods() {
+        // with_working_dir / with_extra_env / with_plugin_id / with_request_timeout
+        let client = McpClient::new_stdio("python3", vec![])
+            .with_working_dir("/tmp/plugin_dir")
+            .with_extra_env(vec![("PYTHONPATH".to_string(), "/shared".to_string())])
+            .with_plugin_id("my-plugin")
+            .with_request_timeout(Duration::from_secs(7));
+        assert_eq!(
+            client.working_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/plugin_dir"))
+        );
+        assert_eq!(
+            client.extra_env,
+            vec![("PYTHONPATH".to_string(), "/shared".to_string())]
+        );
+        assert_eq!(client.plugin_id.as_deref(), Some("my-plugin"));
+        assert_eq!(client.request_timeout, Duration::from_secs(7));
+    }
+
+    #[tokio::test]
+    async fn test_pid_and_kill_when_not_connected() {
+        let client = McpClient::new_stdio("cat", vec![]);
+        assert!(client.pid().await.is_none(), "未连接时 pid 应为 None");
+
+        let mut client2 = McpClient::new_stdio("cat", vec![]);
+        client2.kill().await.unwrap();
+        assert!(!client2.is_alive().await);
+    }
+
+    #[tokio::test]
+    async fn test_http_post_parse_error() {
+        // 200 但响应体不是合法 JSON-RPC → Protocol 错误
+        let (url, _) = spawn_raw_http_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\nnot-json",
+        )
+        .await;
+        let mut client = McpClient::new_http(url.clone(), HashMap::new(), None);
+        client.connect().await.unwrap();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: "1".to_string(),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+        let err = client.http_post(&url, &request).await.unwrap_err();
+        assert!(matches!(err, McpError::Protocol { .. }));
+    }
+
+    #[test]
+    fn test_resolve_env_placeholders_unclosed_and_empty() {
+        // 未闭合占位 → 原样保留不报错
+        assert_eq!(resolve_env_placeholders("a${UNCLOSED").unwrap(), "a${UNCLOSED");
+        // 空占位 ${} → 变量名为空 → 未设置报错
+        assert!(resolve_env_placeholders("${}").is_err());
+        // 空串输入
+        assert_eq!(resolve_env_placeholders("").unwrap(), "");
+    }
+
+    #[test]
+    fn test_resolve_env_placeholders_with_overlay_empty_var() {
+        // overlay 提供空串 + ":-" 默认值 → 空串触发默认值（shell ":-" 语义）
+        let overlay = HashMap::from([("MCP_EMPTY_OVL".to_string(), String::new())]);
+        assert_eq!(
+            resolve_env_placeholders_with("${MCP_EMPTY_OVL:-fb}", &overlay).unwrap(),
+            "fb"
+        );
+        // overlay 提供空串 + "-" 默认值 → 保留空串
+        assert_eq!(
+            resolve_env_placeholders_with("${MCP_EMPTY_OVL-fb}", &overlay).unwrap(),
+            ""
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_windows_command_passthrough() {
+        // 已带扩展名/路径分隔符 → 原样返回
+        assert_eq!(resolve_windows_command("npx.cmd"), "npx.cmd");
+        assert_eq!(resolve_windows_command("C:\\tools\\npx"), "C:\\tools\\npx");
+        assert_eq!(resolve_windows_command("tools/npx"), "tools/npx");
+        // 无扩展名且 PATH 中不存在 → 原样返回（让 spawn 报真实错误）
+        assert_eq!(
+            resolve_windows_command("definitely_not_a_real_cmd_xyz"),
+            "definitely_not_a_real_cmd_xyz"
+        );
     }
 }

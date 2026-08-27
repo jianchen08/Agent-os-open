@@ -1087,4 +1087,263 @@ mod tests {
         assert!(map.contains_key("good"), "合法文件应正常加载");
         // bad 文件被跳过，不出现或值为空（不连累 good）
     }
+
+    // ════════════════════════════════════════════════════════════════
+    // 补充：determine_config_type 全分支 / 失败路径 / 审计裁剪 / 监听事件
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_determine_config_type_all_branches() {
+        for (path, expected) in [
+            ("/c/agents/x.yaml", "agent"),
+            ("/c/pipelines/x.yaml", "pipeline"),
+            ("/c/tools/x.yaml", "tool"),
+            ("/c/models/x.yaml", "model"),
+            ("/c/templates/x.yaml", "template"),
+            ("/c/triggers/x.yaml", "trigger"),
+            ("/c/evaluation_metrics/x.yaml", "evaluation_metric"),
+            ("/c/evaluation/x.yaml", "evaluation"),
+            ("/c/isolation/x.yaml", "isolation"),
+            ("/c/modules/x.yaml", "module"),
+            ("/c/system/x.yaml", "system"),
+            ("/c/rules/x.yaml", "rules"),
+            // 大小写不敏感
+            ("/c/Agents/x.yaml", "agent"),
+            ("/c/PIPELINES/x.yaml", "pipeline"),
+            // 无匹配 → unknown
+            ("/c/random/x.yaml", "unknown"),
+            ("", "unknown"),
+        ] {
+            assert_eq!(
+                ConfigCenter::determine_config_type(path),
+                expected,
+                "路径 {path} 分类错误"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reload_missing_file_and_io_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let center = ConfigCenter::new(temp.path());
+
+        // 文件不存在 → (false, false, Some)
+        let (ok, rolled_back, err) = center.reload("nonexistent.yaml");
+        assert!(!ok);
+        assert!(!rolled_back);
+        assert!(err.is_some());
+
+        // 目录路径 → read_to_string IO 错误 → handle_load_failure（无旧缓存）
+        let dir = temp.path().join("subdir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ok2, rolled_back2, err2) = center.reload(&dir.to_string_lossy());
+        assert!(!ok2);
+        assert!(!rolled_back2);
+        assert!(err2.is_some());
+        // 失败也记审计
+        let log = center.get_audit_log(10);
+        assert_eq!(log.len(), 1);
+        assert!(!log[0].success);
+    }
+
+    #[test]
+    fn test_store_invalid_yaml_returns_err_but_file_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        let res = cc.store("bad.yaml", "k: [unclosed\n");
+        assert!(res.is_err(), "非法 YAML 应返回 Err");
+        // 写入发生在解析之前：文件已落盘（现状契约）
+        assert!(temp.path().join("bad.yaml").exists());
+    }
+
+    #[test]
+    fn test_store_and_load_absolute_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        let abs = temp.path().join("abs.yaml");
+        cc.store(&abs.to_string_lossy(), "a: 1\n").unwrap();
+        assert!(abs.exists());
+
+        let v = cc.load(&abs.to_string_lossy()).unwrap();
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn test_load_missing_relative_and_absolute() {
+        let temp = tempfile::tempdir().unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        let err = cc.load("nope.yaml").unwrap_err();
+        assert!(matches!(err, ConfigError::NotFound { .. }));
+
+        let abs = temp.path().join("nope2.yaml");
+        let err2 = cc.load(&abs.to_string_lossy()).unwrap_err();
+        assert!(matches!(err2, ConfigError::NotFound { .. }));
+    }
+
+    #[test]
+    fn test_get_none_on_missing_and_parse_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        assert!(cc.get("missing.yaml").is_none());
+
+        std::fs::write(temp.path().join("bad.yaml"), "k: [unclosed\n").unwrap();
+        assert!(cc.get("bad.yaml").is_none(), "非法 YAML 应返回 None");
+    }
+
+    #[test]
+    fn test_audit_log_trim_and_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let cc = ConfigCenter::new(temp.path());
+
+        for i in 0..510 {
+            cc.write_audit(AuditEntry {
+                file_path: format!("f{i}"),
+                event_type: ConfigEventType::ManualReload,
+                config_type: "x".to_string(),
+                success: true,
+                rolled_back: false,
+                error: None,
+                timestamp: String::new(),
+                content_hash: String::new(),
+            });
+        }
+        let log = cc.get_audit_log(1000);
+        assert_eq!(log.len(), 500, "审计日志应裁剪到 500 条");
+        assert_eq!(log[0].file_path, "f509", "最新在前");
+        assert_eq!(log[499].file_path, "f10");
+
+        let limited = cc.get_audit_log(3);
+        assert_eq!(limited.len(), 3);
+        assert_eq!(limited[0].file_path, "f509");
+    }
+
+    #[test]
+    fn test_load_dir_absolute_and_empty_subdir() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.yaml"), "x: 1\n").unwrap();
+        std::fs::create_dir_all(temp.path().join("empty")).unwrap();
+
+        let cc = ConfigCenter::new(temp.path());
+        let map = cc.load_dir(&temp.path().to_string_lossy()).unwrap();
+        assert_eq!(map["a"]["x"], 1);
+        assert!(!map.contains_key("empty"), "空子目录不应出现在结果里");
+    }
+
+    /// 轮询等待条件成立（notify 事件异步到达）。
+    fn wait_until(cond: impl Fn() -> bool, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if cond() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("wait_until 超时");
+    }
+
+    #[test]
+    fn test_start_watching_filters_and_events() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("agents")).unwrap();
+        let center = ConfigCenter::new(temp.path());
+        let _watcher = center.start_watching().expect("start_watching 应成功");
+
+        // 非 yaml / 隐藏 / 临时 / 无扩展名文件 → 不产生审计
+        std::fs::write(temp.path().join("note.txt"), "x").unwrap();
+        std::fs::write(temp.path().join(".hidden.yaml"), "a: 1").unwrap();
+        std::fs::write(temp.path().join("~tmp.yaml"), "a: 1").unwrap();
+        std::fs::write(temp.path().join("noext"), "a: 1").unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        assert_eq!(
+            center.get_audit_log(10).len(),
+            0,
+            "非 yaml/隐藏/临时文件不应产生审计"
+        );
+
+        // 合法 yaml 写入 → 成功审计（config_type 按目录判定）
+        std::fs::write(temp.path().join("agents/hello.yaml"), "k: v\n").unwrap();
+        wait_until(|| center.get_audit_log(10).len() >= 1, Duration::from_secs(5));
+        let log = center.get_audit_log(10);
+        assert!(log[0].success);
+        assert_eq!(log[0].config_type, "agent");
+
+        // 内容未变 → 哈希去重，不新增审计
+        std::thread::sleep(Duration::from_millis(600));
+        std::fs::write(temp.path().join("agents/hello.yaml"), "k: v\n").unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+        assert_eq!(center.get_audit_log(10).len(), 1, "内容未变应去重");
+
+        // 非法 yaml → 失败审计（无旧缓存 → rolled_back=false）
+        std::thread::sleep(Duration::from_millis(600));
+        std::fs::write(temp.path().join("agents/bad.yaml"), "k: [unclosed\n").unwrap();
+        wait_until(
+            || center.get_audit_log(10).iter().any(|e| !e.success),
+            Duration::from_secs(5),
+        );
+        let log = center.get_audit_log(10);
+        assert!(!log[0].success);
+        assert!(!log[0].rolled_back);
+
+        // 删除 → Deleted 审计
+        std::thread::sleep(Duration::from_millis(600));
+        std::fs::remove_file(temp.path().join("agents/hello.yaml")).unwrap();
+        wait_until(
+            || {
+                center
+                    .get_audit_log(10)
+                    .iter()
+                    .any(|e| e.event_type == ConfigEventType::Deleted)
+            },
+            Duration::from_secs(5),
+        );
+    }
+
+    #[test]
+    fn test_start_watching_modified_event_and_rollback() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("agents")).unwrap();
+        let center = ConfigCenter::new(temp.path());
+        let _watcher = center.start_watching().expect("start_watching 应成功");
+
+        // 先经 reload 建立缓存（旧配置在册）→ 再写非法 YAML → 事件回调走
+        // rolled_back=true 分支（保留旧配置 + 失败审计）
+        let file = temp.path().join("agents/roll.yaml");
+        std::fs::write(&file, "k: v\n").unwrap();
+        let (ok, _, _) = center.reload(&file.to_string_lossy());
+        assert!(ok);
+        wait_until(
+            || center.get_audit_log(10).len() >= 1,
+            Duration::from_secs(5),
+        );
+
+        std::thread::sleep(Duration::from_millis(600));
+        std::fs::write(&file, "k: [unclosed\n").unwrap();
+        wait_until(
+            || center.get_audit_log(10).iter().any(|e| !e.success),
+            Duration::from_secs(5),
+        );
+        let log = center.get_audit_log(10);
+        assert!(!log[0].success);
+        assert!(log[0].rolled_back, "有旧缓存时应 rolled_back=true");
+        // 旧配置保留
+        let cached = center.get(&file.to_string_lossy());
+        assert_eq!(cached.unwrap()["k"], "v");
+
+        // 修改既有文件（内容变化）→ Modified 事件（非 Created）
+        std::thread::sleep(Duration::from_millis(600));
+        std::fs::write(&file, "k: v2\n").unwrap();
+        wait_until(
+            || {
+                center
+                    .get_audit_log(10)
+                    .iter()
+                    .any(|e| e.event_type == ConfigEventType::Modified && e.success)
+            },
+            Duration::from_secs(5),
+        );
+    }
 }

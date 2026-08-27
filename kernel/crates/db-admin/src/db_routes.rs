@@ -1019,4 +1019,663 @@ mod tests {
             SqlValue::Text("[1,2]".into())
         );
     }
+
+    // ─── 补充：行查询/单行/CRUD/SQL 执行器全分支 ────────────────────────
+
+    /// 建一张带租户列与 BLOB 列的测试表。
+    fn setup_notes(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                content TEXT,
+                score REAL,
+                data BLOB,
+                tenant_id TEXT NOT NULL DEFAULT 'default'
+            );",
+        )
+        .unwrap();
+    }
+
+    fn insert_note(conn: &Connection, id: &str, content: &str, score: f64, tenant: &str) {
+        conn.execute(
+            "INSERT INTO notes (id, content, score, tenant_id) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![id, content, score, tenant],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn get_table_columns_parses_meta() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE t_meta (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        score REAL
+                    );",
+                )
+                .unwrap();
+                let cols = get_table_columns(conn, "t_meta").unwrap();
+                assert_eq!(cols.len(), 3);
+                let id = &cols[0];
+                assert!(id.pk);
+                assert_eq!(id.pk_order, 1);
+                assert!(!id.notnull);
+                assert_eq!(id.type_name, "INTEGER");
+                let name = &cols[1];
+                assert!(!name.pk);
+                assert!(name.notnull);
+                assert_eq!(name.type_name, "TEXT");
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn query_rows_limit_clamp_and_offset() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                for i in 0..3 {
+                    insert_note(conn, &format!("n{i}"), &format!("c{i}"), i as f64, "default");
+                }
+                // limit 超上限 → 钳到 500；offset 负数 → 0
+                let out = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        limit: Some(1000),
+                        offset: Some(-5),
+                        ..Default::default()
+                    },
+                    "default",
+                )
+                .unwrap();
+                assert_eq!(out["limit"], 500);
+                assert_eq!(out["offset"], 0);
+                assert_eq!(out["total"], 3);
+                assert_eq!(out["rows"].as_array().unwrap().len(), 3);
+                // limit 0 → 钳到 1；offset 生效
+                let out2 = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        limit: Some(0),
+                        offset: Some(1),
+                        ..Default::default()
+                    },
+                    "default",
+                )
+                .unwrap();
+                assert_eq!(out2["limit"], 1);
+                assert_eq!(out2["rows"].as_array().unwrap().len(), 1);
+                assert_eq!(out2["rows"][0]["id"], "n1");
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn query_rows_excludes_blob_columns() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                conn.execute(
+                    "INSERT INTO notes (id, content, score, data, tenant_id) VALUES ('b1', 'c', 1.0, X'0102', 'default')",
+                    [],
+                )
+                .unwrap();
+                let out = query_rows_inner(conn, "notes", &ListParams::default(), "default").unwrap();
+                let row = &out["rows"][0];
+                assert!(row.get("data").is_none(), "BLOB 列不应返回: {row}");
+                assert_eq!(row["content"], "c");
+                assert_eq!(out["total"], 1);
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn query_rows_all_blob_table_rejected() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute_batch("CREATE TABLE t_allblob (a BLOB, b BLOB)").unwrap();
+                let err =
+                    query_rows_inner(conn, "t_allblob", &ListParams::default(), "default")
+                        .unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn query_rows_filter_errors() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                // 格式错误（不足 3 段）
+                let err = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        filter: vec!["content:eq".to_string()],
+                        ..Default::default()
+                    },
+                    "default",
+                )
+                .unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 未知操作符
+                let err = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        filter: vec!["content:xx:1".to_string()],
+                        ..Default::default()
+                    },
+                    "default",
+                )
+                .unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 未知列
+                let err = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        filter: vec!["nope:eq:1".to_string()],
+                        ..Default::default()
+                    },
+                    "default",
+                )
+                .unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn query_rows_filter_ops_and_tenant_isolation() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                insert_note(conn, "n0", "hello world", 1.0, "t1");
+                insert_note(conn, "n1", "hi", 5.0, "t1");
+                insert_note(conn, "n2", "other", 2.0, "t2");
+                // 租户隔离：t1 只见 t1 行
+                let out = query_rows_inner(conn, "notes", &ListParams::default(), "t1").unwrap();
+                assert_eq!(out["total"], 2, "租户隔离应过滤: {out}");
+                // gt
+                let out = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        filter: vec!["score:gt:2".to_string()],
+                        ..Default::default()
+                    },
+                    "t1",
+                )
+                .unwrap();
+                assert_eq!(out["total"], 1);
+                assert_eq!(out["rows"][0]["id"], "n1");
+                // contains（LIKE %v%）
+                let out = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        filter: vec!["content:contains:hello".to_string()],
+                        ..Default::default()
+                    },
+                    "t1",
+                )
+                .unwrap();
+                assert_eq!(out["total"], 1);
+                assert_eq!(out["rows"][0]["id"], "n0");
+                // lt + ne 多条件 AND
+                let out = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        filter: vec!["score:lt:2".to_string(), "content:ne:hi".to_string()],
+                        ..Default::default()
+                    },
+                    "t1",
+                )
+                .unwrap();
+                assert_eq!(out["total"], 1);
+                assert_eq!(out["rows"][0]["id"], "n0");
+                // eq
+                let out = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        filter: vec!["score:eq:5".to_string()],
+                        ..Default::default()
+                    },
+                    "t1",
+                )
+                .unwrap();
+                assert_eq!(out["total"], 1);
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn query_rows_sort_variants() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                insert_note(conn, "a", "x", 1.0, "default");
+                insert_note(conn, "b", "y", 3.0, "default");
+                insert_note(conn, "c", "z", 2.0, "default");
+                // 默认主键 asc
+                let out = query_rows_inner(conn, "notes", &ListParams::default(), "default").unwrap();
+                let ids: Vec<&str> = out["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["id"].as_str().unwrap())
+                    .collect();
+                assert_eq!(ids, vec!["a", "b", "c"]);
+                // sort=score:desc
+                let out = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        sort: Some("score:desc".to_string()),
+                        ..Default::default()
+                    },
+                    "default",
+                )
+                .unwrap();
+                let ids: Vec<&str> = out["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["id"].as_str().unwrap())
+                    .collect();
+                assert_eq!(ids, vec!["b", "c", "a"]);
+                // sort 缺方向 → 默认 asc
+                let out = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        sort: Some("score".to_string()),
+                        ..Default::default()
+                    },
+                    "default",
+                )
+                .unwrap();
+                assert_eq!(out["rows"][0]["id"], "a");
+                // 非法方向 → 400
+                let err = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        sort: Some("score:sideways".to_string()),
+                        ..Default::default()
+                    },
+                    "default",
+                )
+                .unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 未知排序列 → 400
+                let err = query_rows_inner(
+                    conn,
+                    "notes",
+                    &ListParams {
+                        sort: Some("nope:asc".to_string()),
+                        ..Default::default()
+                    },
+                    "default",
+                )
+                .unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn query_rows_no_pk_and_missing_table() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                // 无主键表：默认无 ORDER BY，仍可查询
+                conn.execute_batch("CREATE TABLE t_nopk (a TEXT, b TEXT)").unwrap();
+                conn.execute("INSERT INTO t_nopk (a, b) VALUES ('x', '1')", [])
+                    .unwrap();
+                conn.execute("INSERT INTO t_nopk (a, b) VALUES ('y', '2')", [])
+                    .unwrap();
+                let out = query_rows_inner(conn, "t_nopk", &ListParams::default(), "default").unwrap();
+                assert_eq!(out["total"], 2);
+                // 表不存在 → 404
+                let err = query_rows_inner(conn, "no_such_table", &ListParams::default(), "default")
+                    .unwrap_err();
+                assert!(matches!(err, ApiError::NotFound { .. }));
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn get_row_variants() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                insert_note(conn, "g1", "hello", 1.0, "t1");
+                // 正常单行
+                let row = get_row_inner(conn, "notes", "g1", "t1").unwrap();
+                assert_eq!(row["content"], "hello");
+                // 租户隔离：错误租户 → 404
+                let err = get_row_inner(conn, "notes", "g1", "t2").unwrap_err();
+                assert!(matches!(err, ApiError::NotFound { .. }));
+                // 不存在 → 404
+                let err = get_row_inner(conn, "notes", "nope", "t1").unwrap_err();
+                assert!(matches!(err, ApiError::NotFound { .. }));
+                // 无主键表 → 400
+                conn.execute_batch("CREATE TABLE t_nopk2 (a TEXT)").unwrap();
+                let err = get_row_inner(conn, "t_nopk2", "x", "default").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 全 BLOB 表（含 BLOB 主键）→ 400
+                conn.execute_batch("CREATE TABLE t_blobpk (id BLOB PRIMARY KEY, data BLOB)")
+                    .unwrap();
+                let err = get_row_inner(conn, "t_blobpk", "x", "default").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn composite_pk_roundtrip() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute_batch("CREATE TABLE t_comp (a TEXT, b TEXT, v TEXT, PRIMARY KEY (a, b))")
+                    .unwrap();
+                let out = insert_row_inner(conn, "t_comp", &json!({"a": "x", "b": "y", "v": "1"}), "default").unwrap();
+                assert_eq!(out["row_id"], "x,y");
+                // 带空格的主键值 trim 后匹配
+                let row = get_row_inner(conn, "t_comp", "x, y", "default").unwrap();
+                assert_eq!(row["v"], "1");
+                // 主键数量不匹配 → 400
+                let err = get_row_inner(conn, "t_comp", "x", "default").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 更新
+                let out = update_row_inner(conn, "t_comp", "x,y", &json!({"v": "2"}), "default").unwrap();
+                assert_eq!(out["row"]["v"], "2");
+                // 删除
+                let out = delete_row_inner(conn, "t_comp", "x,y", "default").unwrap();
+                assert_eq!(out["deleted"], true);
+                // 再删 → 404
+                let err = delete_row_inner(conn, "t_comp", "x,y", "default").unwrap_err();
+                assert!(matches!(err, ApiError::NotFound { .. }));
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn insert_row_error_branches() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                // row 非对象 → 400
+                let err = insert_row_inner(conn, "notes", &json!([1, 2]), "default").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 未知列 → 400
+                let err = insert_row_inner(conn, "notes", &json!({"nope": 1}), "default").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // BLOB 列写入 → 400
+                let err = insert_row_inner(conn, "notes", &json!({"id": "b1", "data": "x"}), "default").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 表不存在 → 404
+                let err = insert_row_inner(conn, "no_such", &json!({"a": 1}), "default").unwrap_err();
+                assert!(matches!(err, ApiError::NotFound { .. }));
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn insert_row_pk_variants() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute_batch("CREATE TABLE t_num (id INTEGER PRIMARY KEY, v TEXT)").unwrap();
+                // 数值主键 → row_id 为十进制字符串
+                let out = insert_row_inner(conn, "t_num", &json!({"id": 42, "v": "x"}), "default").unwrap();
+                assert_eq!(out["row_id"], "42");
+                assert_eq!(out["row"]["v"], "x");
+                // 主键缺失 → last_insert_rowid（显式 id 42 已消耗 rowid，下一个为 43）
+                let out = insert_row_inner(conn, "t_num", &json!({"v": "y"}), "default").unwrap();
+                assert_eq!(out["row_id"], "43");
+                assert_eq!(out["row"]["v"], "y");
+                // 空对象 → DEFAULT VALUES 分支
+                let out = insert_row_inner(conn, "t_num", &json!({}), "default").unwrap();
+                assert_eq!(out["row_id"], "44");
+                assert!(out["row"]["v"].is_null());
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn insert_row_tenant_id_client_value_passthrough() {
+        // 现状契约：客户端 row 自带 tenant_id 时按客户端值写入（注入被跳过）。
+        // 注：与模块文档"忽略客户端传入"的表述不一致——见报告。
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                let out = insert_row_inner(
+                    conn,
+                    "notes",
+                    &json!({"id": "x1", "content": "c", "tenant_id": "client-tenant"}),
+                    "token-tenant",
+                )
+                .unwrap();
+                assert_eq!(out["row"]["tenant_id"], "client-tenant");
+                // 客户端未提供 → token 注入
+                let out = insert_row_inner(
+                    conn,
+                    "notes",
+                    &json!({"id": "x2", "content": "c"}),
+                    "token-tenant",
+                )
+                .unwrap();
+                assert_eq!(out["row"]["tenant_id"], "token-tenant");
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn update_row_error_branches() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                insert_note(conn, "u1", "old", 1.0, "t1");
+                // 无主键表 → 400
+                conn.execute_batch("CREATE TABLE t_nopk3 (a TEXT)").unwrap();
+                let err = update_row_inner(conn, "t_nopk3", "x", &json!({"a": "y"}), "default").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 主键数量不匹配 → 400
+                let err = update_row_inner(conn, "notes", "a,b", &json!({"content": "x"}), "t1").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // updates 非对象 → 400
+                let err = update_row_inner(conn, "notes", "u1", &json!([1]), "t1").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // updates 空 → 400
+                let err = update_row_inner(conn, "notes", "u1", &json!({}), "t1").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 未知列 → 400
+                let err = update_row_inner(conn, "notes", "u1", &json!({"nope": 1}), "t1").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // BLOB 列 → 400
+                let err = update_row_inner(conn, "notes", "u1", &json!({"data": "x"}), "t1").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // tenant_id 修改 → 400
+                let err = update_row_inner(conn, "notes", "u1", &json!({"tenant_id": "evil"}), "t1").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 不存在 → 404
+                let err = update_row_inner(conn, "notes", "nope", &json!({"content": "x"}), "t1").unwrap_err();
+                assert!(matches!(err, ApiError::NotFound { .. }));
+                // 租户隔离：错误租户 → 404（affected 0）
+                let err = update_row_inner(conn, "notes", "u1", &json!({"content": "x"}), "t2").unwrap_err();
+                assert!(matches!(err, ApiError::NotFound { .. }));
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn delete_row_error_branches() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                insert_note(conn, "d1", "x", 1.0, "t1");
+                // 无主键表 → 400
+                conn.execute_batch("CREATE TABLE t_nopk4 (a TEXT)").unwrap();
+                let err = delete_row_inner(conn, "t_nopk4", "x", "default").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 主键数量不匹配 → 400
+                let err = delete_row_inner(conn, "notes", "a,b", "t1").unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 不存在 → 404
+                let err = delete_row_inner(conn, "notes", "nope", "t1").unwrap_err();
+                assert!(matches!(err, ApiError::NotFound { .. }));
+                // 租户隔离：错误租户 → 404
+                let err = delete_row_inner(conn, "notes", "d1", "t2").unwrap_err();
+                assert!(matches!(err, ApiError::NotFound { .. }));
+                // 正常删除
+                let out = delete_row_inner(conn, "notes", "d1", "t1").unwrap();
+                assert_eq!(out["deleted"], true);
+                assert_eq!(out["row_id"], "d1");
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn insert_row_no_pk_table_echoes_payload() {
+        // 无主键表：row_id 为 null，full_row 回显负载（无回查路径）
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute_batch("CREATE TABLE t_nopk5 (a TEXT, b TEXT)").unwrap();
+                let out = insert_row_inner(conn, "t_nopk5", &json!({"a": "x", "b": "y"}), "default").unwrap();
+                assert!(out["row_id"].is_null());
+                assert_eq!(out["row"]["a"], "x");
+                assert_eq!(out["row"]["b"], "y");
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn row_to_json_blob_via_untyped_column() {
+        // 无类型声明列（SQLite 动态类型）存 BLOB → row_to_json 返回 null
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute_batch("CREATE TABLE t_dyn (id TEXT PRIMARY KEY, payload)").unwrap();
+                conn.execute(
+                    "INSERT INTO t_dyn (id, payload) VALUES ('d1', X'0102')",
+                    [],
+                )
+                .unwrap();
+                let out = query_rows_inner(conn, "t_dyn", &ListParams::default(), "default").unwrap();
+                assert!(out["rows"][0]["payload"].is_null(), "BLOB 值应返回 null: {out}");
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn serde_json_to_sql_float_and_bool() {
+        use rusqlite::types::Value as SqlValue;
+
+        fn norm(v: &dyn rusqlite::ToSql) -> SqlValue {
+            match v.to_sql().unwrap() {
+                rusqlite::types::ToSqlOutput::Borrowed(r) => SqlValue::from(r),
+                rusqlite::types::ToSqlOutput::Owned(v) => v,
+                _ => SqlValue::Null,
+            }
+        }
+        assert_eq!(
+            norm(serde_json_to_sql(&json!(1.5)).as_ref()),
+            SqlValue::Real(1.5)
+        );
+        assert_eq!(
+            norm(serde_json_to_sql(&json!(false)).as_ref()),
+            SqlValue::Integer(0)
+        );
+        assert_eq!(
+            norm(serde_json_to_sql(&json!({"k": 1})).as_ref()),
+            SqlValue::Text("{\"k\":1}".into())
+        );
+    }
+
+    #[test]
+    fn execute_sql_read_and_write() {
+        let store = agentos_engine::SqliteStore::open_memory().unwrap();
+        store
+            .with_conn(|conn| {
+                setup_notes(conn);
+                insert_note(conn, "e1", "hello", 1.5, "default");
+                // 空 sql → 400
+                let err = execute_sql_inner(conn, "  ", true).unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 多语句 → 400
+                let err = execute_sql_inner(conn, "SELECT 1; SELECT 2", true).unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 无效 SQL → 400
+                let err = execute_sql_inner(conn, "SELECT * FROM no_such", true).unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 读：columns + rows（BLOB 列 → null）
+                let out = execute_sql_inner(conn, "SELECT id, content, data FROM notes", true).unwrap();
+                assert_eq!(out["columns"], json!(["id", "content", "data"]));
+                assert_eq!(out["rows"][0][0], "e1");
+                assert_eq!(out["rows"][0][1], "hello");
+                assert!(out["rows"][0][2].is_null(), "BLOB 应返回 null");
+                assert_eq!(out["rows_affected"], 0);
+                // 写：rows_affected
+                let out = execute_sql_inner(
+                    conn,
+                    "INSERT INTO notes (id, content, tenant_id) VALUES ('e2', 'x', 'default')",
+                    true,
+                )
+                .unwrap();
+                assert_eq!(out["rows_affected"], 1);
+                // 写无 confirm → 400
+                let err = execute_sql_inner(
+                    conn,
+                    "INSERT INTO notes (id, content, tenant_id) VALUES ('e3', 'x', 'default')",
+                    false,
+                )
+                .unwrap_err();
+                assert!(matches!(err, ApiError::BadRequest { .. }));
+                // 危险语句 → 403
+                let err = execute_sql_inner(conn, "DROP TABLE notes", true).unwrap_err();
+                assert!(matches!(err, ApiError::Forbidden { .. }));
+                Ok::<(), String>(())
+            })
+            .unwrap();
+    }
 }
