@@ -15,11 +15,13 @@
  *      无需手写任何锚点逻辑。
  */
 
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Loader2 } from '@/assets/icons'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { cn } from '@/lib/utils'
 import { mergeConsecutiveAssistantMessages } from '@/services/api/session'
 import { MessageItem } from './MessageItem'
 import type { MessageListProps } from './types'
+import type { Message } from '@/types/models'
 
 /**
  * 每个 Tab 的滚动位置缓存
@@ -71,6 +73,8 @@ export const MessageList = ({
   onEdit,
   onRegenerate,
   onRollbackTo,
+  jumpTarget,
+  onJumpConsumed,
 }: ExtendedMessageListProps) => {
   /**
    * 渲染用消息：合并连续 assistant 为一个气泡（工具调用链显示为一条消息）。
@@ -88,7 +92,7 @@ export const MessageList = ({
     const absorbedToolCallIds = new Set<string>()
     for (const m of merged) {
       if (m.role === 'assistant' && m.parts) {
-        for (const p of m.parts as any[]) {
+        for (const p of m.parts) {
           if (p.type === 'tool_call' && p.callId) {
             absorbedToolCallIds.add(p.callId)
           }
@@ -104,6 +108,16 @@ export const MessageList = ({
       return false
     })
   }, [messages])
+
+  /**
+   * 待定位消息的渲染项 id（displayMessages 合并后组内首条即定位锚）。
+   * 定位键是 sequence：消息 id 在合并/重建中不稳定，sequence 是管道内权威序号。
+   */
+  const jumpMessageId = useMemo(() => {
+    if (!jumpTarget) return undefined
+    const target = displayMessages.find((m) => m.sequence === jumpTarget.sequence)
+    return target?.id
+  }, [jumpTarget, displayMessages])
 
   const scrollRef = useRef<HTMLDivElement>(null)
   /** 是否在底部附近（距底部 150px 内） */
@@ -142,15 +156,21 @@ export const MessageList = ({
    * 此时读 DOM 拿到的是垃圾值 0；改读此 ref 拿到用户最后的真实位置。
    */
   const lastScrollTopRef = useRef(0)
+  /** 定位跳转高亮中的消息 id（CSS 过渡淡出，无定时清除） */
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null)
 
   /** 渲染单个消息项（index 基于 displayMessages） */
   const renderItem = useCallback(
-    (message: any, index: number, total: number) => {
+    (message: Message, index: number, total: number) => {
       const isLast = index === total - 1
+      const isHighlighted = message.id === highlightedMessageId
       return (
         <div
-          className="group"
-          style={{ marginBottom: index < total - 1 ? 'var(--layout-chatpanel-message-gap, 20px)' : 0 }}
+          className={cn('group', isHighlighted && 'message-jump-highlight')}
+          data-msg-id={message.id}
+          style={{
+            marginBottom: index < total - 1 ? 'var(--layout-chatpanel-message-gap, 20px)' : 0,
+          }}
           key={`${message.id}-${message.sequence ?? index}`}
         >
           <MessageItem
@@ -167,7 +187,16 @@ export const MessageList = ({
         </div>
       )
     },
-    [isGenerating, modelName, searchQuery, taskId, onEdit, onRegenerate, onRollbackTo],
+    [
+      isGenerating,
+      modelName,
+      searchQuery,
+      taskId,
+      onEdit,
+      onRegenerate,
+      onRollbackTo,
+      highlightedMessageId,
+    ],
   )
 
   /** 把滚动位置钉到最底部 */
@@ -179,6 +208,39 @@ export const MessageList = ({
       lastScrollTopRef.current = el.scrollHeight
     }
   }, [])
+
+  /**
+   * 定位跳转消息：滚动到目标消息并短暂高亮。
+   *
+   * 触发条件（缺一不可）：
+   * - 有 jumpTarget（Sidebar 消息命中点击写入 uiStore）；
+   * - 目标 sequence 已在当前已加载消息中（未加载 → 由上层 hasMore 翻页拉取后再次进入本 effect）；
+   * - 当前管道非跟随底部（定位时停止钉底，避免流式/内容变化把视图拉回）。
+   *
+   * 滚动经 requestAnimationFrame 排队：首次定位的 RAF 钉底先执行，本定位后执行，
+   * 避免被钉底覆盖。定位后置 userScrolled，1.2s 轮询钉底随即停止。
+   */
+  useEffect(() => {
+    if (!jumpTarget || !jumpMessageId) return
+    // 停止跟随底部：定位是用户意图，后续内容变化不得把视图拉回底部
+    isFollowingBottom.current = false
+    userScrolled.current = true
+    const el = scrollRef.current
+    if (!el) return
+    const anchor = el.querySelector<HTMLElement>(`[data-msg-id="${jumpMessageId}"]`)
+    if (!anchor) return
+    const targetTop = Math.max(0, anchor.offsetTop - el.clientHeight / 2)
+    requestAnimationFrame(() => {
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = targetTop
+        lastScrollTopRef.current = targetTop
+      }
+    })
+    // 高亮标记：CSS 过渡淡出，不需要 JS 定时移除
+    setHighlightedMessageId(jumpMessageId)
+    // 消费完成：一次性跳转目标已定位，清除避免 Tab 来回切换重复定位
+    onJumpConsumed?.()
+  }, [jumpTarget, jumpMessageId, onJumpConsumed])
 
   /**
    * 滚动事件处理
@@ -264,7 +326,7 @@ export const MessageList = ({
         return
       }
       pinToBottom()
-      if (ticks >= 24) window.clearInterval(intervalId)  // 1.2s 后停止
+      if (ticks >= 24) window.clearInterval(intervalId) // 1.2s 后停止
     }, 50)
   }, [messages.length, tabId, pinToBottom])
 
@@ -276,7 +338,9 @@ export const MessageList = ({
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    const markUserScroll = () => { userScrolled.current = true }
+    const markUserScroll = () => {
+      userScrolled.current = true
+    }
     el.addEventListener('wheel', markUserScroll, { passive: true })
     el.addEventListener('touchstart', markUserScroll, { passive: true })
     return () => {
@@ -319,7 +383,11 @@ export const MessageList = ({
    * 用户上滑（isFollowingBottom=false）时不强行拉回。
    */
   useEffect(() => {
-    if (initialScrollDone.current && messages.length > lastMessageCount.current && isFollowingBottom.current) {
+    if (
+      initialScrollDone.current &&
+      messages.length > lastMessageCount.current &&
+      isFollowingBottom.current
+    ) {
       requestAnimationFrame(pinToBottom)
     }
     lastMessageCount.current = messages.length

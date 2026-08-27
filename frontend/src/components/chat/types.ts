@@ -119,6 +119,10 @@ export interface MessageListProps {
   onRegenerate?: () => void
   /** 回退回调（user 消息「回退」确认后触发，参数为目标 user 消息 ID） */
   onRollbackTo?: (userMessageId: string) => void
+  /** 待定位消息（sequence 定位键；渲染层消费后调用 onJumpConsumed 清除） */
+  jumpTarget?: { sequence: number }
+  /** 定位消费完成回调（MessageList 定位成功后清除 uiStore.messageJump） */
+  onJumpConsumed?: () => void
 }
 
 /**

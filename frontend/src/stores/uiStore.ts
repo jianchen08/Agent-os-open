@@ -12,10 +12,7 @@ import type { ApprovalRequest } from '@/types/models'
 /**
  * 从 localStorage 读取初始折叠状态，读取失败时回退为默认值
  */
-function loadCollapsedState(
-  getter: () => boolean | null,
-  fallback: boolean,
-): boolean {
+function loadCollapsedState(getter: () => boolean | null, fallback: boolean): boolean {
   try {
     const stored = getter()
     return stored !== null ? stored : fallback
@@ -53,6 +50,14 @@ interface UIState {
   sidebarRatio: number | null
   /** 消息搜索关键词（Sidebar 与 ChatContainer 共享） */
   messageSearchQuery: string
+  /** 待定位消息（Sidebar 消息命中点击 → MessageList 定位消费；一次性，目标管道激活时消费） */
+  messageJump: MessageJumpTarget | null
+}
+
+/** 消息跳转目标：pipelineId 用于匹配激活管道（未激活不消费），sequence 是消息定位键 */
+export interface MessageJumpTarget {
+  pipelineId: string
+  sequence: number
 }
 
 interface UIActions {
@@ -78,6 +83,8 @@ interface UIActions {
   setSidebarRatio: (ratio: number | null) => void
   /** 设置消息搜索关键词 */
   setMessageSearchQuery: (query: string) => void
+  /** 设置待定位消息目标（Sidebar 消息命中点击写入，MessageList 定位后消费清除） */
+  setMessageJump: (target: MessageJumpTarget | null) => void
 }
 
 /**
@@ -100,6 +107,7 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
     }
   })(),
   messageSearchQuery: '',
+  messageJump: null,
 
   /**
    * 切换侧边栏折叠状态
@@ -189,5 +197,8 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   },
   setMessageSearchQuery: (query: string) => {
     set({ messageSearchQuery: query })
+  },
+  setMessageJump: (target: MessageJumpTarget | null) => {
+    set({ messageJump: target })
   },
 }))

@@ -20,7 +20,15 @@ import type { Message } from '@/types/models'
 
 // Mock MessageItem（避免深入渲染依赖）
 vi.mock('../MessageItem', () => ({
-  MessageItem: ({ message, isLast, isGenerating }: { message: Message; isLast: boolean; isGenerating: boolean }) => (
+  MessageItem: ({
+    message,
+    isLast,
+    isGenerating,
+  }: {
+    message: Message
+    isLast: boolean
+    isGenerating: boolean
+  }) => (
     <div data-testid={`message-item-${message.id}`}>
       <span>{message.content}</span>
       {isGenerating && isLast && <span data-testid="generating-indicator">生成中</span>}
@@ -50,7 +58,9 @@ function makeMessage(overrides: Partial<Message> = {}): Message {
  */
 function mockScrollMetrics(el: HTMLElement, scrollHeight: number, clientHeight = 200) {
   // 保留已有 scrollTop：更新 scrollHeight 时不应重置滚动位置
-  const prevTop = (Object.getOwnPropertyDescriptor(el, 'scrollTop')?.get as (() => number) | undefined)?.()
+  const prevTop = (
+    Object.getOwnPropertyDescriptor(el, 'scrollTop')?.get as (() => number) | undefined
+  )?.()
   let currentScrollTop = prevTop ?? 0
   Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => scrollHeight })
   Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => clientHeight })
@@ -84,16 +94,41 @@ beforeEach(() => {
     return 0
   })
   // MessageList 首次加载用 ResizeObserver 持续校正钉底，jsdom 不提供，需 polyfill
-  vi.stubGlobal('ResizeObserver', class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  })
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  )
 })
 
 afterEach(() => {
   vi.unstubAllGlobals()
 })
+
+/**
+ * 可手动触发回调的 ResizeObserver mock
+ *
+ * jsdom 不实现 ResizeObserver，beforeEach stub 的是空实现（验证不了"内容变化
+ * 触发钉底"）。需要手动触发回调的场景用它模拟内容容器尺寸变化。
+ */
+function makeTriggerableResizeObserver() {
+  const ref: { cb: (() => void) | null } = { cb: null }
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      constructor(cb: () => void) {
+        ref.cb = cb
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  )
+  return ref
+}
 
 describe('MessageList', () => {
   const defaultProps: ExtendedMessageListProps = {
@@ -150,31 +185,62 @@ describe('MessageList', () => {
       const messages = [
         makeMessage({ id: 'u1', role: 'user', content: '查天气', sequence: 1 }),
         makeMessage({
-          id: 'a1', role: 'assistant', content: '', sequence: 2,
+          id: 'a1',
+          role: 'assistant',
+          content: '',
+          sequence: 2,
           parts: [
-            { type: 'tool_call', callId: 'tc-1', name: 'get_weather', args: {}, state: 'done', sequence: 0 },
+            {
+              type: 'tool_call',
+              callId: 'tc-1',
+              name: 'get_weather',
+              args: {},
+              state: 'done',
+              sequence: 0,
+            },
           ] as any,
         }),
         makeMessage({
-          id: 't1', role: 'tool', content: '北京晴', sequence: 3,
-          toolCallId: 'tc-1', toolName: 'get_weather', toolResult: '北京晴',
+          id: 't1',
+          role: 'tool',
+          content: '北京晴',
+          sequence: 3,
+          toolCallId: 'tc-1',
+          toolName: 'get_weather',
+          toolResult: '北京晴',
         }),
         makeMessage({
-          id: 'a2', role: 'assistant', content: '今天晴，查明天？', sequence: 4,
+          id: 'a2',
+          role: 'assistant',
+          content: '今天晴，查明天？',
+          sequence: 4,
           parts: [
             { type: 'text', content: '今天晴，查明天？', state: 'done', sequence: 0 },
-            { type: 'tool_call', callId: 'tc-2', name: 'get_weather', args: {}, state: 'done', sequence: 1 },
+            {
+              type: 'tool_call',
+              callId: 'tc-2',
+              name: 'get_weather',
+              args: {},
+              state: 'done',
+              sequence: 1,
+            },
           ] as any,
         }),
         makeMessage({
-          id: 't2', role: 'tool', content: '明天多云', sequence: 5,
-          toolCallId: 'tc-2', toolName: 'get_weather', toolResult: '明天多云',
+          id: 't2',
+          role: 'tool',
+          content: '明天多云',
+          sequence: 5,
+          toolCallId: 'tc-2',
+          toolName: 'get_weather',
+          toolResult: '明天多云',
         }),
         makeMessage({
-          id: 'a3', role: 'assistant', content: '明天多云，带外套', sequence: 6,
-          parts: [
-            { type: 'text', content: '明天多云，带外套', state: 'done', sequence: 0 },
-          ] as any,
+          id: 'a3',
+          role: 'assistant',
+          content: '明天多云，带外套',
+          sequence: 6,
+          parts: [{ type: 'text', content: '明天多云，带外套', state: 'done', sequence: 0 }] as any,
         }),
       ]
       render(<MessageList {...defaultProps} messages={messages} />)
@@ -195,10 +261,7 @@ describe('MessageList', () => {
     })
 
     it('最后一条消息 isLast 为 true', () => {
-      const messages = [
-        makeMessage({ id: 'msg-1' }),
-        makeMessage({ id: 'msg-2' }),
-      ]
+      const messages = [makeMessage({ id: 'msg-1' }), makeMessage({ id: 'msg-2' })]
       render(<MessageList {...defaultProps} messages={messages} isGenerating={true} />)
 
       // 最后一条消息应有生成指示器
@@ -208,20 +271,20 @@ describe('MessageList', () => {
 
   describe('isGenerating 状态', () => {
     it('isGenerating=true 且最后一条是 user 消息时显示思考中', () => {
-      const messages = [
-        makeMessage({ id: 'msg-1', role: 'user', content: '你好' }),
-      ]
-      const { container } = render(<MessageList {...defaultProps} messages={messages} isGenerating={true} />)
+      const messages = [makeMessage({ id: 'msg-1', role: 'user', content: '你好' })]
+      const { container } = render(
+        <MessageList {...defaultProps} messages={messages} isGenerating={true} />,
+      )
 
       // displayMessages 渲染 1 条 user 消息；最后一条 role='user' 且 isGenerating → 显示"思考中"
       expect(container.textContent).toContain('思考中')
     })
 
     it('isGenerating=false 时不显示思考中', () => {
-      const messages = [
-        makeMessage({ id: 'msg-1', role: 'user', content: '你好' }),
-      ]
-      const { container } = render(<MessageList {...defaultProps} messages={messages} isGenerating={false} />)
+      const messages = [makeMessage({ id: 'msg-1', role: 'user', content: '你好' })]
+      const { container } = render(
+        <MessageList {...defaultProps} messages={messages} isGenerating={false} />,
+      )
 
       expect(container.textContent).not.toContain('思考中')
     })
@@ -330,10 +393,7 @@ describe('MessageList', () => {
       expect(listEl.scrollTop).toBe(1000)
 
       // 追加新消息（底部）
-      const appended = [
-        ...initialMessages,
-        makeMessage({ id: 'msg-2', sequence: 2 }),
-      ]
+      const appended = [...initialMessages, makeMessage({ id: 'msg-2', sequence: 2 })]
       mockScrollMetrics(listEl, 1200)
       rerender(<MessageList {...defaultProps} messages={appended} tabId="append" />)
       flushRaf()
@@ -348,17 +408,6 @@ describe('MessageList', () => {
      * jsdom 不实现 ResizeObserver，beforeEach stub 的是空实现（验证不了"内容变化
      * 触发钉底"）。这两个测试需要手动触发回调，模拟内容容器尺寸变化。
      */
-    function makeTriggerableResizeObserver() {
-      const ref: { cb: (() => void) | null } = { cb: null }
-      vi.stubGlobal('ResizeObserver', class {
-        constructor(cb: () => void) { ref.cb = cb }
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      })
-      return ref
-    }
-
     it('initFromAPI 重建（条数减少、内容变高）后，内容变化触发钉底回到底部', () => {
       // 复现 fix_20260629_enter_stuck_in_middle：进入页面 persist 钉底后，initFromAPI
       // 异步重建合并气泡使条数减少，原逻辑因"条数未增加"不钉底 → 停在中间。
@@ -418,6 +467,108 @@ describe('MessageList', () => {
 
       // 不被拉回底部，停留在用户的滚动位置
       expect(listEl.scrollTop).toBe(300)
+    })
+  })
+
+  describe('消息定位跳转（jumpTarget）', () => {
+    afterEach(() => {
+      cleanup()
+    })
+
+    it('jumpTarget 命中已加载消息：滚动到目标（居中）、高亮并消费清除', () => {
+      // 交替 role 避免连续 assistant 被合并成一条
+      const messages = [
+        makeMessage({ id: 'msg-1', sequence: 1, role: 'user' }),
+        makeMessage({ id: 'msg-2', sequence: 2, role: 'assistant' }),
+        makeMessage({ id: 'msg-3', sequence: 3, role: 'user' }),
+      ]
+      const onJumpConsumed = vi.fn()
+      // 首轮无 jumpTarget 渲染（等布局就绪后 mock offsetTop 再注入 jumpTarget，
+      // 避免 effect 在 jsdom 零布局下读到 offsetTop=0 提前消费）
+      const { container, rerender } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="jump-hit" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      // jsdom 无布局，锚点 offsetTop 恒 0——手工给定，验证居中计算
+      const anchor = listEl.querySelector('[data-msg-id="msg-2"]') as HTMLElement
+      Object.defineProperty(anchor, 'offsetTop', { configurable: true, value: 800 })
+
+      rerender(
+        <MessageList
+          {...defaultProps}
+          messages={messages}
+          tabId="jump-hit"
+          jumpTarget={{ sequence: 2 }}
+          onJumpConsumed={onJumpConsumed}
+        />,
+      )
+      flushRaf()
+
+      // 首次定位钉底 RAF 先执行、跳转定位 RAF 后执行 → 最终停在目标（clientHeight=200 → 800-100）
+      expect(listEl.scrollTop).toBe(700)
+      expect(onJumpConsumed).toHaveBeenCalledTimes(1)
+      // 目标消息被高亮标记
+      expect(anchor.className).toContain('message-jump-highlight')
+    })
+
+    it('jumpTarget 未命中已加载消息：不滚动、不消费（留待翻页拉取后重试）', () => {
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1, role: 'user' })]
+      const onJumpConsumed = vi.fn()
+      const { container } = render(
+        <MessageList
+          {...defaultProps}
+          messages={messages}
+          tabId="jump-miss"
+          jumpTarget={{ sequence: 99 }}
+          onJumpConsumed={onJumpConsumed}
+        />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+
+      expect(onJumpConsumed).not.toHaveBeenCalled()
+      // 不滚动（保持首次钉底位置）
+      expect(listEl.scrollTop).toBe(1000)
+    })
+
+    it('定位后内容变化不钉底（停止跟随），用户停在目标位置', () => {
+      const ro = makeTriggerableResizeObserver()
+
+      const messages = [
+        makeMessage({ id: 'msg-1', sequence: 1, role: 'user' }),
+        makeMessage({ id: 'msg-2', sequence: 2, role: 'assistant' }),
+      ]
+      // 首轮无 jumpTarget 渲染，mock offsetTop 后再注入跳转目标
+      const { container, rerender } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="jump-stay" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      const anchor = listEl.querySelector('[data-msg-id="msg-2"]') as HTMLElement
+      Object.defineProperty(anchor, 'offsetTop', { configurable: true, value: 800 })
+
+      rerender(
+        <MessageList
+          {...defaultProps}
+          messages={messages}
+          tabId="jump-stay"
+          jumpTarget={{ sequence: 2 }}
+          onJumpConsumed={() => {}}
+        />,
+      )
+      flushRaf()
+      expect(listEl.scrollTop).toBe(700)
+
+      // 内容变高（新消息追加）触发 contentResize observer
+      const grown = [...messages, makeMessage({ id: 'msg-3', sequence: 3, role: 'user' })]
+      rerender(<MessageList {...defaultProps} messages={grown} tabId="jump-stay" />)
+      mockScrollMetrics(listEl, 1200)
+      ro.cb?.()
+
+      // 定位已置 isFollowingBottom=false，内容变化不把视图拉回底部
+      expect(listEl.scrollTop).toBe(700)
     })
   })
 })

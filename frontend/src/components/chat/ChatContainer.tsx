@@ -106,6 +106,9 @@ export const ChatContainer = ({
 }: ChatContainerProps) => {
   /** 搜索状态（从 uiStore 共享，Sidebar 中输入） */
   const searchQuery = useUIStore((s) => s.messageSearchQuery)
+  /** 待定位消息（Sidebar 消息命中点击写入；仅当目标管道正是当前激活管道时消费） */
+  const messageJump = useUIStore((s) => s.messageJump)
+  const setMessageJump = useUIStore((s) => s.setMessageJump)
 
   /** 从 agentTabStore 获取 Tab 状态 */
   const tabs = useAgentTabStore((s) => s.tabs)
@@ -218,6 +221,16 @@ export const ChatContainer = ({
   const currentTabPipelineId = activeTab?.pipelineRunId || ''
   const effectiveIsGenerating = usePipelineMessageStore(
     (s) => (currentTabPipelineId ? (s.streamingState[currentTabPipelineId]?.isStreaming ?? false) : false),
+  )
+
+  /**
+   * 待定位消息 → MessageList 消费目标：仅当跳转目标管道正是当前激活管道时透传。
+   * 目标未命中当前管道（跨会话/子管道跳转的中间态）不透传，等 Tab/管道切换到位后
+   * 本 memo 重新求值再消费——jumpTarget 常驻 uiStore 直到被消费。
+   */
+  const effectiveJumpTarget = useMemo(
+    () => (messageJump && messageJump.pipelineId === currentTabPipelineId ? messageJump : undefined),
+    [messageJump, currentTabPipelineId],
   )
 
 
@@ -380,6 +393,8 @@ export const ChatContainer = ({
         onEdit={onEdit}
         onRegenerate={onRegenerate}
         onRollbackTo={onRollbackTo}
+        jumpTarget={effectiveJumpTarget}
+        onJumpConsumed={() => setMessageJump(null)}
       />
 
       {/* 活跃投票面板 */}

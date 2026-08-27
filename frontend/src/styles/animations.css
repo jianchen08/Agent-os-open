@@ -9,7 +9,8 @@
 
 /* 呼吸灯动画 - 状态指示器用 */
 @keyframes breathe {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
     filter: drop-shadow(0 0 2px currentColor);
   }
@@ -19,12 +20,32 @@
   }
 }
 
+/**
+ * 消息定位跳转高亮（侧边栏搜索消息命中 → MessageList 定位后短暂闪烁）
+ * 一次性动画：动画结束即回原位，无需 JS 定时移除类名。
+ */
+.message-jump-highlight {
+  animation: message-jump-flash 2s ease-out 1;
+}
+
+@keyframes message-jump-flash {
+  0%,
+  100% {
+    background-color: transparent;
+  }
+  20%,
+  60% {
+    background-color: hsl(var(--primary) / 0.12);
+  }
+}
+
 .animate-pulse-subtle {
   animation: pulse-subtle 2.5s ease-in-out infinite;
 }
 
 @keyframes pulse-subtle {
-  0%, 100% {
+  0%,
+  100% {
     border-color: hsl(var(--primary) / 0.3);
     box-shadow: 0 0 0 0 hsl(var(--primary) / 0);
   }

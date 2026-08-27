@@ -15,15 +15,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import {
-  Bell,
-  ChatIcon,
-  ChatActiveIcon,
-  Loader2,
-  Plus,
-  User,
-  X,
-} from '@/assets/icons'
+import { Bell, ChatIcon, ChatActiveIcon, Loader2, Plus, User, X } from '@/assets/icons'
 import { LoginModal } from '@/components/auth/LoginModal'
 import { NotificationCenter } from '@/components/chat/NotificationCenter'
 import { PluginStatusItems } from '@/components/layout/StatusItems'
@@ -39,28 +31,46 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
 import { cn } from '@/lib/utils'
 import { searchGlobal, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
 import { reportError } from '@/services/errorReporting'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { evaluateWhen } from '@/services/schema/whenExpression'
-import {
-  openWorkspacePanel,
-  openWorkspacePanelByPath,
-} from '@/services/workspacePanelOpener'
-import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
+import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
+import { mainPipelineIdOf } from '@/utils/mappers'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import type { Session } from '@/types'
 
 /** fixed sessions + plugin container id */
 type SidebarView = 'sessions' | string
 
+/**
+ * 消息搜索命中的管道 → 归属会话解析。
+ *
+ * 搜索结果的 session_id 是管道 ID（monitoring 插件 search 域回传 pipeline_id，
+ * 12hex 短 id），而会话列表 id 是 thread_id（thread-xxx）——两者不同值。
+ * 归属判定：主管道（activePipelineId 权威）命中直接归该会话；否则线性扫描
+ * 全部会话的 pipelineIds（含子管道）找包含该管道的会话；均未命中（旧数据
+ * thread_id==pipeline_id 同值）时兜底按会话 id 本身匹配。无归属返回 null
+ * （调用方放弃跳转，避免误切到无关会话）。
+ */
+function resolveSessionByPipeline(pipelineId: string, sessions: Session[]): Session | null {
+  if (!pipelineId) return null
+  for (const s of sessions) {
+    if (mainPipelineIdOf(s) === pipelineId) return s
+  }
+  for (const s of sessions) {
+    if (s.pipelineIds?.includes(pipelineId)) return s
+  }
+  return sessions.find((s) => s.id === pipelineId) ?? null
+}
 
 interface SidebarProps {
   /** 是否为移动端 */
@@ -114,7 +124,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   useEffect(() => {
     const id = window.setInterval(() => {
       // 侧栏入口 = workspace 空间 + activity-bar 栏位（旧 viewsContainers 归一化产物）
-      const n = contributionRegistry.getPagesBySpace('workspace').filter((p) => p.slot === 'activity-bar').length
+      const n = contributionRegistry
+        .getPagesBySpace('workspace')
+        .filter((p) => p.slot === 'activity-bar').length
       setContribTick((prev) => (prev === n ? prev : n))
     }, 1500)
     return () => window.clearInterval(id)
@@ -122,14 +134,18 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const user = useAuthStore((s) => s.user)
   const pluginContainers = useMemo(() => {
     void contribTick
-    return contributionRegistry
-      .getPagesBySpace('workspace')
-      .filter((p) => p.slot === 'activity-bar')
-      // when 条件（ADR §3.4）：声明了 when 的插件页面按 context keys 求值，
-      // 不满足则不在侧边栏显示（如调试中心仅管理员可见：user.role == 'admin'）
-      .filter((p) => (p.when ? evaluateWhen(p.when, { 'user.role': user?.role ?? 'guest' }) : true))
-      .slice()
-      .sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
+    return (
+      contributionRegistry
+        .getPagesBySpace('workspace')
+        .filter((p) => p.slot === 'activity-bar')
+        // when 条件（ADR §3.4）：声明了 when 的插件页面按 context keys 求值，
+        // 不满足则不在侧边栏显示（如调试中心仅管理员可见：user.role == 'admin'）
+        .filter((p) =>
+          p.when ? evaluateWhen(p.when, { 'user.role': user?.role ?? 'guest' }) : true,
+        )
+        .slice()
+        .sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
+    )
   }, [contribTick, user])
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const logout = useAuthStore((s) => s.logout)
@@ -152,6 +168,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const updateSessionAgent = useSessionListStore((state) => state.updateSessionAgent)
   const sidebarCollapsed = useUIStore((state) => state.sidebarCollapsed)
   const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed)
+  const setMessageJump = useUIStore((state) => state.setMessageJump)
   // P5：通知唯一入口——底栏 Bell 绑定 notificationStore（与 NotificationCenter 同一 store）
   const toggleNotificationPanel = useNotificationStore((s) => s.togglePanel)
   const notificationUnreadCount = useNotificationStore(
@@ -218,6 +235,38 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       await setActiveSession(sessionId)
     },
     [setActiveSession],
+  )
+
+  /**
+   * 处理消息搜索结果点击：解析管道归属会话 → 切会话/子 Tab → 记录定位目标。
+   *
+   * 定位目标写入 uiStore（pipelineId + sequence），由 ChatContainer 在目标管道
+   * 激活后透传给 MessageList 滚动定位并消费清除——跨会话/子管道切换的中间态
+   * 不会丢失跳转意图，也不会误定位到错误管道。
+   */
+  const handleMessageHitClick = useCallback(
+    async (hit: MessageSearchHit) => {
+      const session = resolveSessionByPipeline(hit.session_id, sessions)
+      if (!session) return
+      // sequence 缺失（旧数据/异常行）时无定位键，仅切会话不定位
+      if (typeof hit.sequence === 'number') {
+        setMessageJump({ pipelineId: hit.session_id, sequence: hit.sequence })
+      }
+      const tabStore = useAgentTabStore.getState()
+      const isSameSession = useSessionStore.getState().activeSessionId === session.id
+      if (!isSameSession) {
+        await handleSessionClick(session.id)
+      }
+      // 命中子管道且存在对应 Tab → 切到该 Tab（同一会话内直接切；跨会话在
+      // initSessionTabs 恢复 Tab 后切）。Tab 不存在（历史子管道从未在客户端
+      // 建档）时停留在主 Tab，跳转目标等管道激活后消费。
+      const tabId = tabStore.getTabIdByPipeline(hit.session_id)
+      if (tabId && tabId !== tabStore.activeTabId) {
+        tabStore.switchToTab(tabId)
+      }
+      if (isMobile) setSidebarCollapsed(true)
+    },
+    [sessions, handleSessionClick, setMessageJump, isMobile, setSidebarCollapsed],
   )
 
   /**
@@ -335,9 +384,10 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   /**
    * 获取正在编辑的会话
    */
-  const editingSession = modal?.mode === 'edit' && modal.sessionId
-    ? sessions.find((s) => s.id === modal.sessionId) || null
-    : null
+  const editingSession =
+    modal?.mode === 'edit' && modal.sessionId
+      ? sessions.find((s) => s.id === modal.sessionId) || null
+      : null
 
   /**
    * 处理移动端关闭侧边栏
@@ -360,7 +410,6 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     },
     [handleSessionClick, isMobile, setSidebarCollapsed],
   )
-
 
   const handlePluginClick = useCallback(
     (entry: PageDeclaration) => {
@@ -400,7 +449,6 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     setActiveView('sessions')
   }, [])
 
-
   return (
     <>
       {/* 移动端遮罩层 */}
@@ -426,7 +474,15 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         )}
         style={
           sidebarCollapsed && !isMobile
-            ? { width: 0, minWidth: 0, maxWidth: 0, flexShrink: 0, overflow: 'hidden', border: 'none', padding: 0 }
+            ? {
+                width: 0,
+                minWidth: 0,
+                maxWidth: 0,
+                flexShrink: 0,
+                overflow: 'hidden',
+                border: 'none',
+                padding: 0,
+              }
             : isMobile
               ? {
                   width: `${SIDEBAR_STYLES.width.mobile}px`,
@@ -441,13 +497,13 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   maxWidth: '100%',
                   minHeight: 0,
                   flexShrink: 0,
-                  backgroundColor: 'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))',
+                  backgroundColor:
+                    'var(--region-sidebar-bg, var(--ds-bg-panel, var(--sidebar-bg, hsl(var(--card)))))',
                 }
         }
       >
         {/* ---- 折叠状态：图标菜单栏（48px，VS Code 感，非双侧栏） ---- */}
         {sidebarCollapsed && !isMobile ? (
-          
           <div className="flex h-full flex-col items-center py-3" data-testid="sidebar-rail">
             <button
               type="button"
@@ -462,8 +518,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 activeView === 'sessions'
                   ? {
                       background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
-                      boxShadow:
-                        'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
+                      boxShadow: 'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
                     }
                   : undefined
               }
@@ -506,7 +561,10 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               )
             })}
             {/* 折叠态底部：仅用户 / 主题 / 通知（与展开态一致） */}
-            <div className="mt-auto flex flex-col items-center gap-2 pb-1" data-testid="sidebar-rail-footer">
+            <div
+              className="mt-auto flex flex-col items-center gap-2 pb-1"
+              data-testid="sidebar-rail-footer"
+            >
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
@@ -517,14 +575,24 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                         ? 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]'
                         : 'text-primary hover:bg-[var(--hover-overlay)]',
                     )}
-                    title={isAuthenticated ? `${(user as { username?: string; email?: string } | null)?.username || '用户'} · 点击展开` : '点击登录'}
+                    title={
+                      isAuthenticated
+                        ? `${(user as { username?: string; email?: string } | null)?.username || '用户'} · 点击展开`
+                        : '点击登录'
+                    }
                     aria-label="账号菜单"
                     data-testid="sidebar-rail-user"
                   >
                     <User className="h-4 w-4" />
                   </button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent side="right" align="center" sideOffset={6} className="w-48" data-testid="sidebar-rail-user-menu">
+                <DropdownMenuContent
+                  side="right"
+                  align="center"
+                  sideOffset={6}
+                  className="w-48"
+                  data-testid="sidebar-rail-user-menu"
+                >
                   <DropdownMenuLabel className="text-[11px]">
                     {isAuthenticated
                       ? (user as { username?: string } | null)?.username || '已登录'
@@ -532,18 +600,29 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   </DropdownMenuLabel>
                   <DropdownMenuSeparator />
                   {!isAuthenticated && (
-                    <DropdownMenuItem onClick={() => setLoginModalOpen(true)}>登录</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setLoginModalOpen(true)}>
+                      登录
+                    </DropdownMenuItem>
                   )}
                   {isAuthenticated && (
                     <>
-                      <DropdownMenuItem onClick={() => setLoginModalOpen(true)}>切换账号</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => { logout() }} className="text-destructive focus:text-destructive">
+                      <DropdownMenuItem onClick={() => setLoginModalOpen(true)}>
+                        切换账号
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() => {
+                          logout()
+                        }}
+                        className="text-destructive focus:text-destructive"
+                      >
                         退出登录
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                     </>
                   )}
-                  <DropdownMenuItem onClick={() => openWorkspacePanelByPath('/settings')}>设置</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => openWorkspacePanelByPath('/settings')}>
+                    设置
+                  </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => navigate('/monitoring')}>监控</DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() => openWorkspacePanelByPath('/tasks')}
@@ -557,261 +636,285 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               <button
                 type="button"
                 onClick={toggleNotificationPanel}
-                className="text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)] relative flex h-9 w-9 items-center justify-center rounded-lg"
+                className="text-muted-foreground hover:text-foreground relative flex h-9 w-9 items-center justify-center rounded-lg hover:bg-[var(--hover-overlay)]"
                 title="通知"
                 aria-label={`通知${notificationUnreadCount > 0 ? ` (${notificationUnreadCount} 条未读)` : ''}`}
                 data-testid="sidebar-rail-notification"
               >
                 <Bell className="h-4 w-4" />
                 {notificationUnreadCount > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-error px-0.5 text-[9px] font-bold text-status-error-foreground">
+                  <span className="bg-status-error text-status-error-foreground absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-0.5 text-[9px] font-bold">
                     {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
                   </span>
                 )}
               </button>
             </div>
           </div>
-
         ) : (
           /* ---- 展开状态：WorkBuddy 风格纵向导航 + 会话列表 ---- */
           <>
-            
             <div className="flex h-full min-h-0 flex-1 flex-col" data-testid="sidebar-main">
-            <div className="flex flex-col gap-0.5 px-2 pt-3 pb-2" data-testid="sidebar-nav">
-              <button
-                type="button"
-                onClick={handleOpenNewSessionModal}
-                className="hover:bg-[var(--hover-overlay)] text-foreground mb-1 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium transition-colors"
-                data-testid="new-session-button"
-              >
-                <span
-                  className="flex h-6 w-6 items-center justify-center rounded-md"
-                  style={{ background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))' }}
-                >
-                  <Plus className="h-3.5 w-3.5 text-[var(--ds-accent-primary,#22D3EE)]" />
-                </span>
-                新建会话
-              </button>
-
-              {/* plugin contributed pages — workspace/activity-bar（vscode-like） */}
-              {pluginContainers.map((entry) => {
-                const selected = activeView === entry.id
-                return (
-                  <button
-                    key={entry.id}
-                    type="button"
-                    onClick={() => handlePluginClick(entry)}
-                    className={cn(
-                      'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors',
-                      selected
-                        ? 'text-foreground'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
-                    )}
-                    style={
-                      selected
-                        ? {
-                            background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
-                            boxShadow:
-                              'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.35))',
-                          }
-                        : undefined
-                    }
-                    data-testid={`sidebar-menu-plugin-${entry.id}`}
-                    title={entry.title || entry.id}
-                  >
-                    <span className="flex h-4 w-4 shrink-0 items-center justify-center text-[13px] opacity-90">
-                      {entry.icon || '◆'}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate">{entry.title || entry.id}</span>
-                  </button>
-                )
-              })}
-            </div>
-
-            <div className="border-border mx-2 mb-1 border-t" />
-
-<div className="text-muted-foreground flex items-center justify-between px-3 py-1.5 text-[11px]">
-              <span className="font-medium tracking-wide">
-                会话{filteredSessions.length ? `(${filteredSessions.length})` : ''}
-              </span>
-              {isMobile && (
+              <div className="flex flex-col gap-0.5 px-2 pt-3 pb-2" data-testid="sidebar-nav">
                 <button
                   type="button"
-                  onClick={handleCloseSidebar}
-                  className="hover:text-foreground"
-                  aria-label="关闭侧边栏"
-                  data-testid="close-sidebar-button"
+                  onClick={handleOpenNewSessionModal}
+                  className="text-foreground mb-1 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] font-medium transition-colors hover:bg-[var(--hover-overlay)]"
+                  data-testid="new-session-button"
                 >
-                  <X className="h-3.5 w-3.5" />
+                  <span
+                    className="flex h-6 w-6 items-center justify-center rounded-md"
+                    style={{ background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))' }}
+                  >
+                    <Plus className="h-3.5 w-3.5 text-[var(--ds-accent-primary,#22D3EE)]" />
+                  </span>
+                  新建会话
                 </button>
-              )}
-            </div>
 
-            {/* 搜索框区域（统一搜索：会话名 + 消息内容） */}
-            <div
-              className={cn('border-border/50 overflow-hidden border-b', SIDEBAR_STYLES.padding)}
-              data-testid="sidebar-search-section"
-            >
-              <SessionSearch
-                value={searchKeyword}
-                onSearchChange={setSearchKeyword}
-                resultCount={filteredSessions.length}
-                totalCount={sessions.length}
-                isSearching={isSearching}
-                className="sidebar-search"
-                inputClassName={SIDEBAR_STYLES.searchHeight}
-              />
-              {/* 消息搜索结果（有关键词时展示） */}
-              {searchKeyword.trim() && searchResults.messages.length > 0 && (
-                <div className="mt-1 space-y-0.5" data-testid="sidebar-message-results">
-                  {searchResults.messages.slice(0, 8).map((hit) => (
+                {/* plugin contributed pages — workspace/activity-bar（vscode-like） */}
+                {pluginContainers.map((entry) => {
+                  const selected = activeView === entry.id
+                  return (
                     <button
-                      key={`${hit.session_id}-${hit.id}`}
+                      key={entry.id}
                       type="button"
-                      onClick={() => handleSessionClick(hit.session_id)}
-                      className="text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)] block w-full truncate rounded px-2 py-1 text-left text-[11px] transition-colors"
-                      title={hit.content}
+                      onClick={() => handlePluginClick(entry)}
+                      className={cn(
+                        'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors',
+                        selected
+                          ? 'text-foreground'
+                          : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
+                      )}
+                      style={
+                        selected
+                          ? {
+                              background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
+                              boxShadow:
+                                'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.35))',
+                            }
+                          : undefined
+                      }
+                      data-testid={`sidebar-menu-plugin-${entry.id}`}
+                      title={entry.title || entry.id}
                     >
-                      {hit.content}
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center text-[13px] opacity-90">
+                        {entry.icon || '◆'}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">{entry.title || entry.id}</span>
                     </button>
-                  ))}
-                </div>
-              )}
-              {searchError && (
-                <p className="text-muted-foreground mt-1 px-1 text-[10px]">
-                  搜索暂不可用，已展示全部会话
-                </p>
-              )}
-            </div>
+                  )
+                })}
+              </div>
 
-            {/* 会话列表 - Requirements: 9.3, 9.4 */}
-            <div className="scrollbar-thin min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
-              {isLoading ? (
-                <div
-                  className={cn(
-                    'flex flex-col items-center text-center',
-                    SIDEBAR_STYLES.padding,
-                    'py-6',
-                  )}
-                >
-                  <Loader2 className="text-muted-foreground mb-2 h-6 w-6 animate-spin" />
-                  <p className="text-muted-foreground text-sm">加载中...</p>
-                </div>
-              ) : filteredSessions.length === 0 ? (
-                <div
-                  className={cn(
-                    'flex flex-col items-center text-center',
-                    SIDEBAR_STYLES.padding,
-                    'py-6',
-                  )}
-                >
-                  <p className="text-muted-foreground text-sm">
-                    {searchKeyword ? '未找到匹配的会话' : '暂无会话'}
-                  </p>
-                </div>
-              ) : (
-                <SessionList
-                  sessions={filteredSessions}
-                  activeSessionId={activeSessionId}
-                  deletingSessionIds={deletingSessionIds}
-                  onSessionClick={handleSessionClickMobile}
-                  onDeleteSession={deleteSession}
-                  onEditSession={handleEditSession}
-                  onCopySession={handleCopySession}
-                  onStarSession={handleStarSession}
-                  onPinSession={handlePinSession}
-                  onResetMessages={handleResetMessages}
-                  className="px-2"
-                  itemHeight={SIDEBAR_STYLES.itemHeight}
-                />
-              )}
-            </div>
+              <div className="border-border mx-2 mb-1 border-t" />
 
-            {/* 底栏：紧凑单行，不占大空白 */}
-            {/* 插件状态项条带（dock/status 贡献，原 StatusBar 迁移；无项不渲染） */}
-            <PluginStatusItems />
-            <div
-              className="border-border mt-auto flex h-9 shrink-0 items-center gap-0.5 border-t px-1.5"
-              data-testid="sidebar-footer"
-            >
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
+              <div className="text-muted-foreground flex items-center justify-between px-3 py-1.5 text-[11px]">
+                <span className="font-medium tracking-wide">
+                  会话{filteredSessions.length ? `(${filteredSessions.length})` : ''}
+                </span>
+                {isMobile && (
                   <button
                     type="button"
-                    className="text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)] flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors outline-none data-[state=open]:bg-[var(--hover-overlay)]"
-                    title={isAuthenticated ? `${(user as { username?: string } | null)?.username || '用户'} · 点击展开` : '点击登录'}
-                    aria-label="账号菜单"
-                    data-testid="sidebar-user-area"
+                    onClick={handleCloseSidebar}
+                    className="hover:text-foreground"
+                    aria-label="关闭侧边栏"
+                    data-testid="close-sidebar-button"
                   >
-                    <User className="h-3.5 w-3.5 shrink-0 opacity-80" />
-                    <span className="truncate text-[11px] leading-none">
-                      {(user as { username?: string; email?: string } | null)?.username ||
-                        (user as { username?: string; email?: string } | null)?.email ||
-                        '未登录'}
-                    </span>
-                    {!isAuthenticated && (
-                      <span className="text-primary ml-auto shrink-0 text-[10px] font-medium">登录</span>
-                    )}
+                    <X className="h-3.5 w-3.5" />
                   </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent side="top" align="start" sideOffset={6} className="w-48" data-testid="sidebar-user-menu">
-                  <DropdownMenuLabel className="text-[11px]">
-                    {isAuthenticated
-                      ? (user as { username?: string } | null)?.username || '已登录'
-                      : '未登录'}
-                  </DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  {!isAuthenticated && (
-                    <DropdownMenuItem onClick={() => setLoginModalOpen(true)} data-testid="sidebar-user-menu-login">
-                      登录
-                    </DropdownMenuItem>
-                  )}
-                  {isAuthenticated && (
-                    <>
-                      <DropdownMenuItem onClick={() => setLoginModalOpen(true)} data-testid="sidebar-user-menu-switch">
-                        切换账号
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={() => { logout() }}
-                        className="text-destructive focus:text-destructive"
-                        data-testid="sidebar-user-menu-logout"
-                      >
-                        退出登录
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                    </>
-                  )}
-                  <DropdownMenuItem onClick={() => openWorkspacePanelByPath('/settings')} data-testid="sidebar-user-menu-settings">
-                    设置
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => navigate('/monitoring')} data-testid="sidebar-user-menu-monitoring">
-                    监控
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={() => openWorkspacePanelByPath('/tasks')}
-                    data-testid="sidebar-user-menu-tasks-2"
-                  >
-                    任务管理
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <ThemeButton compact />
-              <button
-                type="button"
-                onClick={toggleNotificationPanel}
-                className="text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)] relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
-                title="通知"
-                aria-label={`通知${notificationUnreadCount > 0 ? ` (${notificationUnreadCount} 条未读)` : ''}`}
-                data-testid="sidebar-notification"
-              >
-                <Bell className="h-3.5 w-3.5" />
-                {notificationUnreadCount > 0 && (
-                  <span className="absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-error px-0.5 text-[9px] font-bold text-status-error-foreground">
-                    {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
-                  </span>
                 )}
-              </button>
-            </div>
+              </div>
+
+              {/* 搜索框区域（统一搜索：会话名 + 消息内容） */}
+              <div
+                className={cn('border-border/50 overflow-hidden border-b', SIDEBAR_STYLES.padding)}
+                data-testid="sidebar-search-section"
+              >
+                <SessionSearch
+                  value={searchKeyword}
+                  onSearchChange={setSearchKeyword}
+                  resultCount={filteredSessions.length}
+                  totalCount={sessions.length}
+                  isSearching={isSearching}
+                  className="sidebar-search"
+                  inputClassName={SIDEBAR_STYLES.searchHeight}
+                />
+                {/* 消息搜索结果（有关键词时展示） */}
+                {searchKeyword.trim() && searchResults.messages.length > 0 && (
+                  <div className="mt-1 space-y-0.5" data-testid="sidebar-message-results">
+                    {searchResults.messages.slice(0, 8).map((hit) => (
+                      <button
+                        key={`${hit.session_id}-${hit.id}`}
+                        type="button"
+                        onClick={() => handleMessageHitClick(hit)}
+                        className="text-muted-foreground hover:text-foreground block w-full truncate rounded px-2 py-1 text-left text-[11px] transition-colors hover:bg-[var(--hover-overlay)]"
+                        title={hit.content}
+                      >
+                        {hit.content}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {searchError && (
+                  <p className="text-muted-foreground mt-1 px-1 text-[10px]">
+                    搜索暂不可用，已展示全部会话
+                  </p>
+                )}
+              </div>
+
+              {/* 会话列表 - Requirements: 9.3, 9.4 */}
+              <div className="min-h-0 flex-1 scrollbar-thin overflow-x-hidden overflow-y-auto">
+                {isLoading ? (
+                  <div
+                    className={cn(
+                      'flex flex-col items-center text-center',
+                      SIDEBAR_STYLES.padding,
+                      'py-6',
+                    )}
+                  >
+                    <Loader2 className="text-muted-foreground mb-2 h-6 w-6 animate-spin" />
+                    <p className="text-muted-foreground text-sm">加载中...</p>
+                  </div>
+                ) : filteredSessions.length === 0 ? (
+                  <div
+                    className={cn(
+                      'flex flex-col items-center text-center',
+                      SIDEBAR_STYLES.padding,
+                      'py-6',
+                    )}
+                  >
+                    <p className="text-muted-foreground text-sm">
+                      {searchKeyword ? '未找到匹配的会话' : '暂无会话'}
+                    </p>
+                  </div>
+                ) : (
+                  <SessionList
+                    sessions={filteredSessions}
+                    activeSessionId={activeSessionId}
+                    deletingSessionIds={deletingSessionIds}
+                    onSessionClick={handleSessionClickMobile}
+                    onDeleteSession={deleteSession}
+                    onEditSession={handleEditSession}
+                    onCopySession={handleCopySession}
+                    onStarSession={handleStarSession}
+                    onPinSession={handlePinSession}
+                    onResetMessages={handleResetMessages}
+                    className="px-2"
+                    itemHeight={SIDEBAR_STYLES.itemHeight}
+                  />
+                )}
+              </div>
+
+              {/* 底栏：紧凑单行，不占大空白 */}
+              {/* 插件状态项条带（dock/status 贡献，原 StatusBar 迁移；无项不渲染） */}
+              <PluginStatusItems />
+              <div
+                className="border-border mt-auto flex h-9 shrink-0 items-center gap-0.5 border-t px-1.5"
+                data-testid="sidebar-footer"
+              >
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      className="text-muted-foreground hover:text-foreground flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors outline-none hover:bg-[var(--hover-overlay)] data-[state=open]:bg-[var(--hover-overlay)]"
+                      title={
+                        isAuthenticated
+                          ? `${(user as { username?: string } | null)?.username || '用户'} · 点击展开`
+                          : '点击登录'
+                      }
+                      aria-label="账号菜单"
+                      data-testid="sidebar-user-area"
+                    >
+                      <User className="h-3.5 w-3.5 shrink-0 opacity-80" />
+                      <span className="truncate text-[11px] leading-none">
+                        {(user as { username?: string; email?: string } | null)?.username ||
+                          (user as { username?: string; email?: string } | null)?.email ||
+                          '未登录'}
+                      </span>
+                      {!isAuthenticated && (
+                        <span className="text-primary ml-auto shrink-0 text-[10px] font-medium">
+                          登录
+                        </span>
+                      )}
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    side="top"
+                    align="start"
+                    sideOffset={6}
+                    className="w-48"
+                    data-testid="sidebar-user-menu"
+                  >
+                    <DropdownMenuLabel className="text-[11px]">
+                      {isAuthenticated
+                        ? (user as { username?: string } | null)?.username || '已登录'
+                        : '未登录'}
+                    </DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    {!isAuthenticated && (
+                      <DropdownMenuItem
+                        onClick={() => setLoginModalOpen(true)}
+                        data-testid="sidebar-user-menu-login"
+                      >
+                        登录
+                      </DropdownMenuItem>
+                    )}
+                    {isAuthenticated && (
+                      <>
+                        <DropdownMenuItem
+                          onClick={() => setLoginModalOpen(true)}
+                          data-testid="sidebar-user-menu-switch"
+                        >
+                          切换账号
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => {
+                            logout()
+                          }}
+                          className="text-destructive focus:text-destructive"
+                          data-testid="sidebar-user-menu-logout"
+                        >
+                          退出登录
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                      </>
+                    )}
+                    <DropdownMenuItem
+                      onClick={() => openWorkspacePanelByPath('/settings')}
+                      data-testid="sidebar-user-menu-settings"
+                    >
+                      设置
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => navigate('/monitoring')}
+                      data-testid="sidebar-user-menu-monitoring"
+                    >
+                      监控
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => openWorkspacePanelByPath('/tasks')}
+                      data-testid="sidebar-user-menu-tasks-2"
+                    >
+                      任务管理
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <ThemeButton compact />
+                <button
+                  type="button"
+                  onClick={toggleNotificationPanel}
+                  className="text-muted-foreground hover:text-foreground relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-[var(--hover-overlay)]"
+                  title="通知"
+                  aria-label={`通知${notificationUnreadCount > 0 ? ` (${notificationUnreadCount} 条未读)` : ''}`}
+                  data-testid="sidebar-notification"
+                >
+                  <Bell className="h-3.5 w-3.5" />
+                  {notificationUnreadCount > 0 && (
+                    <span className="bg-status-error text-status-error-foreground absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-0.5 text-[9px] font-bold">
+                      {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
+                    </span>
+                  )}
+                </button>
+              </div>
             </div>
           </>
         )}
