@@ -2,7 +2,7 @@
 """child_task_guard 子任务活跃判定 TDD 测试（GAP-1 统一：读 state 聚合）。
 
 主路径：活跃子任务 = state 聚合行中 lineage.parent_pipeline_id == 当前管道
-且 task.status ∈ {pending, running, evaluating, scheduled}——不再依赖
+且 task.status ∈ {pending, running, evaluating}（与 TaskStatus 枚举对齐）——不再依赖
 task_service（YAML 只读镜像）；读面未注入时回退旧路径。
 """
 

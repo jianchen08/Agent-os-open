@@ -150,7 +150,7 @@ class EnvironmentLifecyclePlugin(IInputPlugin):
         if not state.get("environment_basis"):
             return PluginResult()
         # 0.2 统一：任务身份 = pipeline_id，引擎注入 state 的扁平键是 task.id
-        task_id = state.get("task_id") or state.get("task.id") or ""
+        task_id = state.get("task.id") or ""
         if not task_id:
             # 主会话（无任务）：容器由会话生命周期管理，此处不销毁
             return PluginResult(state_updates={"environment_released": True})

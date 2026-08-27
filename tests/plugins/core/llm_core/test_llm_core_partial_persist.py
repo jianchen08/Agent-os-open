@@ -268,7 +268,7 @@ async def test_interrupted_passthrough_run_id_only_for_chat() -> None:
 
     caller2 = _FakeCaller(_partial_response(status="interrupted"))
     await _make_plugin(caller2).execute(
-        _make_ctx({**_base_state(), "run_id": "run-abc", "task_id": "task-1"})
+        _make_ctx({**_base_state(), "run_id": "run-abc", "task.id": "task-1"})
     )
     assert "run_id" not in caller2.calls[0][1]["args"]
 

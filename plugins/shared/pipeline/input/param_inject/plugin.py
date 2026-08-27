@@ -204,24 +204,18 @@ class ParamInjectPlugin(IInputPlugin):
             # L2_REQUIRES_PARENT_TASK。注入参数是系统权威值，
             # 只要 args 中没有有效值就注入。
             if not args.get("task_id"):
-                # 0.2 统一后任务身份权威键是 task.id（点号键，内核
-                # chat_send_handler 创建管道时注入）；task_id 是 0.1 遗留键
-                # （任务管道 state 无此键，只读它会恒空导致 task_evaluate 等
-                # 报「task_id 未注入」）。task.id 优先（引擎注入不可伪造），
-                # task_id 兜底 0.1 存量会话。
-                task_id = (
-                    ctx.state.get("task.id", "")
-                    or ctx.state.get(StateKeys.TASK_ID, "")
-                )
+                # 任务身份权威键是 task.id（点号键，内核 chat_send_handler
+                # 创建管道时注入，值 = pipeline_id，引擎注入不可伪造）。
+                task_id = ctx.state.get(StateKeys.TASK_ID, "")
                 if task_id:
                     args["task_id"] = task_id
                 else:
-                    # 诊断：state 中无 task_id，说明引擎 state 未携带本任务 ID。
+                    # 诊断：state 中无任务身份，说明引擎 state 未携带本任务 ID。
                     # task_submit/task_evaluate 等依赖该注入的工具将无法确定父任务。
                     _tool_name = injected_tc.get("name", "?")
                     if _tool_name in ("task_submit", "task_evaluate", "task_manage"):
                         logger.warning(
-                            "[param_inject] task_id 注入失败 | tool=%s | state[TASK_ID]=%r | pipeline_id=%s",
+                            "[param_inject] task_id 注入失败 | tool=%s | state[task.id]=%r | pipeline_id=%s",
                             _tool_name,
                             ctx.state.get(StateKeys.TASK_ID),
                             ctx.state.get(StateKeys.PIPELINE_ID, "")[:12],

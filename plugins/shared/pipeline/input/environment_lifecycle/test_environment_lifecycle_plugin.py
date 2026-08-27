@@ -12,7 +12,7 @@
 8. exit：无 environment_basis → 零产出
 9. exit：有基线但无 task_id（主会话）→ environment_released=True，不销毁
 10. exit：manager 不可用 → environment_released=False
-11. exit：销毁成功 → environment_released=True，task_id 透传（task_id / task.id 双键）
+11. exit：销毁成功 → environment_released=True，任务身份取自 state[task.id]
 12. exit：销毁抛异常 → 留痕不阻断，environment_released=False
 13. main 循环体 → 零产出
 
@@ -287,7 +287,7 @@ def test_exit_destroys_environment_on_task_id() -> None:
     state = {
         "current_phase": "exit",
         "environment_basis": {"level": "isolated", "resolved": True},
-        "task_id": "task-42",
+        "task.id": "task-42",
     }
     updates = _updates(_run(plugin.execute(_make_ctx(state))))
     assert updates == {"environment_released": True}
@@ -327,7 +327,7 @@ def test_exit_manager_unavailable_marks_not_released() -> None:
         state = {
             "current_phase": "exit",
             "environment_basis": {"level": "isolated", "resolved": True},
-            "task_id": "task-9",
+            "task.id": "task-9",
         }
         updates = _updates(_run(plugin.execute(_make_ctx(state))))
         assert updates == {"environment_released": False}
@@ -357,7 +357,7 @@ def test_exit_destroy_failure_keeps_mark_not_released() -> None:
     state = {
         "current_phase": "exit",
         "environment_basis": {"level": "isolated", "resolved": True},
-        "task_id": "task-1",
+        "task.id": "task-1",
     }
     updates = _updates(_run(plugin.execute(_make_ctx(state))))
     assert updates == {"environment_released": False}

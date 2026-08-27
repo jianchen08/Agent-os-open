@@ -240,18 +240,23 @@ class TestExecuteFlow:
 
 
 class TestActiveChildrenMainPath:
-    def test_scheduled_and_evaluating_count_as_active(self) -> None:
-        """scheduled/evaluating 也是活跃状态（性质断言：活跃状态集合超集）。"""
+    def test_pending_and_evaluating_count_as_active(self) -> None:
+        """pending/evaluating 也是活跃状态（性质断言：活跃状态集合超集）。
+
+        活跃集合与 TaskStatus 枚举对齐（pending/running/evaluating）——枚举
+        无 scheduled，终态 completed/failed 不计入。
+        """
         rows = [
-            {"pipeline_id": "c_sched", "task.status": "scheduled", "lineage.parent_pipeline_id": "p"},
+            {"pipeline_id": "c_pend", "task.status": "pending", "lineage.parent_pipeline_id": "p"},
             {"pipeline_id": "c_eval", "task.status": "evaluating", "lineage.parent_pipeline_id": "p"},
+            {"pipeline_id": "c_done", "task.status": "completed", "lineage.parent_pipeline_id": "p"},
         ]
         guard = ChildTaskGuard(config={})
         _set_state_reader(lambda: rows)
         try:
             has_active, ids = _run(guard._get_active_children("p", None, _make_ctx(state={})))
             assert has_active is True
-            assert set(ids) == {"c_sched", "c_eval"}
+            assert set(ids) == {"c_pend", "c_eval"}
         finally:
             _clear_state_reader()
 
@@ -326,7 +331,7 @@ class TestActiveChildrenTaskIdBranch:
         svc = _TaskService(
             subtasks=[
                 _Task("c1", "running"),
-                _Task("c2", "scheduled"),
+                _Task("c2", "pending"),
             ]
         )
         guard = ChildTaskGuard(config={})

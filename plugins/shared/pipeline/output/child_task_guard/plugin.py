@@ -88,7 +88,7 @@ class ChildTaskGuard(IOutputPlugin):
         # （0.1 task_executor 写、0.2 起孤儿无写者）——任务终态 = run 终态，
         # 收口由 task_completed 域事件 + 活跃子任务 state 判定覆盖。
 
-        task_id = state.get("task_id")
+        task_id = state.get("task.id")
         pipeline_id = state.get("pipeline_id", "")
         has_active, active_ids = await self._get_active_children(pipeline_id, task_id, ctx)
 
@@ -152,7 +152,8 @@ class ChildTaskGuard(IOutputPlugin):
         Returns:
             (has_active, active_child_ids) 元组
         """
-        active_statuses = {"pending", "running", "evaluating", "scheduled"}
+        # 活跃态与 TaskStatus 枚举对齐（pending/running/evaluating）
+        active_statuses = {"pending", "running", "evaluating"}
         seen_ids: set[str] = set()
 
         # GAP-1 统一：主路径读 state 聚合（task = pipeline，lineage 即父链）——
@@ -182,15 +183,15 @@ class ChildTaskGuard(IOutputPlugin):
                     except Exception as exc:
                         logger.warning("ChildTaskGuard: list_by_status query failed: %s", exc)
 
-        if task_id:
-            try:
-                subtasks = task_service.list_subtasks(task_id)
-                for st in subtasks:
-                    status = safe_enum_value(st.status)
-                    if status in active_statuses:
-                        seen_ids.add(st.id)
-            except Exception as exc:
-                logger.warning("ChildTaskGuard: list_subtasks failed: %s", exc)
+                if task_id:
+                    try:
+                        subtasks = task_service.list_subtasks(task_id)
+                        for st in subtasks:
+                            status = safe_enum_value(st.status)
+                            if status in active_statuses:
+                                seen_ids.add(st.id)
+                    except Exception as exc:
+                        logger.warning("ChildTaskGuard: list_subtasks failed: %s", exc)
 
         if seen_ids:
             return True, list(seen_ids)

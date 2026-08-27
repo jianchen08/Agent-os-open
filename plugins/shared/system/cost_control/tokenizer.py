@@ -43,6 +43,18 @@ class TokenCounter:
             # 如果指定的 encoding 不存在，使用默认的
             self.encoding = tiktoken.encoding_for_model("gpt-4")
 
+    def _encoding_for_model(self, model: str) -> str | None:
+        """按最长前缀优先匹配模型编码。
+
+        字典序迭代会让短前缀先命中（"gpt-4o" 被 "gpt-4" 拦截，
+        o200k_base 永不生效），须按前缀长度降序匹配；"default" 是
+        兜底键非模型前缀，不参与匹配。
+        """
+        for prefix in sorted(self.MODEL_ENCODINGS, key=len, reverse=True):
+            if prefix != "default" and model.startswith(prefix):
+                return self.MODEL_ENCODINGS[prefix]
+        return None
+
     def count_text(self, text: str, model: str = "gpt-4") -> int:
         """
         计算文本的 Token 数量（兼容旧接口）
@@ -58,13 +70,7 @@ class TokenCounter:
             return 0
 
         try:
-            # 查找匹配的编码
-            encoding_name = self.MODEL_ENCODINGS.get("default")
-            for prefix, enc in self.MODEL_ENCODINGS.items():
-                if model.startswith(prefix):
-                    encoding_name = enc
-                    break
-
+            encoding_name = self._encoding_for_model(model) or self.MODEL_ENCODINGS["default"]
             encoding = tiktoken.get_encoding(cast(str, encoding_name))
             tokens = encoding.encode(text)
             return len(tokens)
@@ -102,12 +108,8 @@ class TokenCounter:
         Returns:
             总 Token 数量
         """
-        # 查找匹配的编码
-        encoding_name = None
-        for prefix, enc in self.MODEL_ENCODINGS.items():
-            if model.startswith(prefix):
-                encoding_name = enc
-                break
+        # 查找匹配的编码（最长前缀优先，见 _encoding_for_model）
+        encoding_name = self._encoding_for_model(model)
 
         if encoding_name is None:
             raise ValueError(f"不支持的模型名称: {model}，支持的模型前缀: {list(self.MODEL_ENCODINGS.keys())}")

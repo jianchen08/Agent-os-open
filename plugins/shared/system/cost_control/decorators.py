@@ -83,7 +83,7 @@ def budget_check(
                 result = await func(*args, **kwargs)
             except BaseException:
                 await budget_manager.release_reservation(
-                    user_id=user_id, task_id=task_id, session_id=session_id
+                    task_id=task_id, session_id=session_id
                 )
                 raise
 
@@ -152,7 +152,6 @@ class BudgetContext:
         # F-CC-1：异常退出时释放预留（幂等；正常路径 record 已兑付，no-op）
         if exc_type is not None:
             await self._budget_manager.release_reservation(
-                user_id=self.user_id,
                 task_id=self.task_id,
                 session_id=self.session_id,
             )

@@ -409,7 +409,8 @@ class TaskReminder(IOutputPlugin):
 
     def _build_reminder(self, state: dict[str, Any], count: int) -> str:
         """根据任务模式构建提醒内容。"""
-        task_id = state.get("task_id", "")
+        # task.id 由内核创建管道时注入（值 = pipeline_id），无下划线 task_id 键
+        task_id = state.get("task.id", "")
 
         if self._is_evaluation_mode(state):
             return self._build_evaluator_reminder(state, task_id, count)

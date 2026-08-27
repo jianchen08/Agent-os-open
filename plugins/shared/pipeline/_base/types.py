@@ -28,7 +28,9 @@ class StateKeys:
     CORE_TYPE = "core_type"
     ENDED = "ended"
     SESSION_ID = "session_id"
-    TASK_ID = "task_id"
+    # 任务身份权威键：内核 chat_send_handler 创建管道时注入（值 = pipeline_id）；
+    # 任务域键统一点号命名空间（task.*），无下划线 task_id 键。
+    TASK_ID = "task.id"
     AGENT_LEVEL = "agent_level"
     RAW_RESULT = "raw_result"
     RAW_ERROR = "raw_error"

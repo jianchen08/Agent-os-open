@@ -62,7 +62,7 @@ def test_forged_underscore_keys_stripped() -> None:
                 "name": "bash_execute",
                 "args": {
                     "command": "ls",
-                    "_isolation_provider": "docker",  # 曾可跳过 bash 危险命令黑名单
+                    "_isolation_provider": "docker",  # 伪造内部键不得影响危险命令黑名单判定
                     "_container_id": "forged-container",
                     "_owner": "forged-owner",
                 },

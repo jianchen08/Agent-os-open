@@ -276,7 +276,7 @@ class StopCheckPlugin(IOutputPlugin):
         if iteration % 3 != 0:
             return ""
 
-        task_id = ctx.state.get("task_id", "")
+        task_id = ctx.state.get(StateKeys.TASK_ID, "")
         if not task_id:
             return ""
 

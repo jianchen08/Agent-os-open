@@ -975,10 +975,7 @@ impl PluginWatcher {
     /// 注入 L1 启用集合共享句柄：热发现注册的新插件即时并入（语义对齐
     /// `PUT /plugins/{id}/enabled` 的集合更新），thread_fields / domain_event
     /// 面随热发现生效，无需 re-enable 或重启。
-    pub fn with_enabled_ids(
-        mut self,
-        enabled: Arc<tokio::sync::RwLock<HashSet<String>>>,
-    ) -> Self {
+    pub fn with_enabled_ids(mut self, enabled: Arc<tokio::sync::RwLock<HashSet<String>>>) -> Self {
         self.enabled_ids = Some(enabled);
         self
     }

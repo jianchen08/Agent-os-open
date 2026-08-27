@@ -50,12 +50,12 @@ class TestCountText:
         text = "hello world 你好世界"
         assert counter.count_text(text, "gpt-4") == len(_CL.encode(text))
 
-    def test_model_prefix_shadowing_gpt4o_uses_cl100k(self) -> None:
-        # 现实行为：前缀循环先命中 "gpt-4"（"gpt-4o".startswith("gpt-4")），
-        # gpt-4o 实际按 cl100k 计数（dict 顺序遮蔽 o200k_base 映射）
+    def test_gpt4o_longest_prefix_wins(self) -> None:
+        # 最长前缀优先：gpt-4o 命中 "gpt-4o"（o200k_base）而非被短前缀
+        # "gpt-4"（cl100k_base）遮蔽——两编码对该文本计数确实可区分
         counter = TokenCounter()
         text = "😀 emoji 中文测试"
-        assert counter.count_text(text, "gpt-4o") == len(_CL.encode(text))
+        assert counter.count_text(text, "gpt-4o") == len(_O2.encode(text))
         assert len(_O2.encode(text)) != len(_CL.encode(text))  # 两者确实可区分
 
     def test_instance_encoding_used_by_count_tokens(self) -> None:

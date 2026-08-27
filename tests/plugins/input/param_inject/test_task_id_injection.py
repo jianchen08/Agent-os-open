@@ -2,15 +2,14 @@
 """param_inject 的 task_id 注入测试（0.2 键名统一回归）。
 
 背景：0.2 统一后（task = pipeline）任务身份在 state 的权威键是 `task.id`
-（点号键，内核 chat_send_handler 创建管道时注入）；顶层 `task_id` 是 0.1
-遗留键。param_inject 曾只读 `task_id`，任务管道里 task_evaluate/task_submit/
-task_manage 恒拿不到任务身份（「系统错误：task_id 未注入」）。
+（点号键，内核 chat_send_handler 创建管道时注入，值 = pipeline_id）。
+param_inject 曾只读 0.1 下划线键 `task_id`，任务管道里 task_evaluate/
+task_submit/task_manage 恒拿不到任务身份（「系统错误：task_id 未注入」）。
 
 钉死语义：
-1. state 有 `task.id`（0.2 权威键）→ 注入 task_id
-2. state 有 `task_id`（0.1 遗留键）→ 照常注入（兼容不回归）
-3. 两键皆空（主会话）→ 不注入，args 不新增 task_id
-4. LLM 夹带的伪造 task_id 被服务端权威值覆盖（先剥后注入同款安全边界）
+1. state 有 `task.id` → 注入 task_id
+2. 无任务身份（主会话）→ 不注入，args 不新增 task_id
+3. LLM 夹带的伪造 task_id 被服务端权威值覆盖（先剥后注入同款安全边界）
 """
 
 from __future__ import annotations
@@ -53,7 +52,7 @@ def _args_of(calls: list[dict]) -> dict:
 
 
 def test_task_id_injected_from_task_dot_id_key() -> None:
-    """0.2 权威键 task.id 存在时注入 task_id（task_evaluate 等任务工具依赖）。"""
+    """权威键 task.id 存在时注入 task_id（task_evaluate 等任务工具依赖）。"""
     calls = _run(
         [{"name": "task_evaluate", "args": {"action": "auto_complete"}}],
         {"task.id": "abc123", "pipeline_id": "abc123"},
@@ -62,28 +61,8 @@ def test_task_id_injected_from_task_dot_id_key() -> None:
     assert args["task_id"] == "abc123"
 
 
-def test_task_id_injected_from_legacy_task_id_key() -> None:
-    """0.1 遗留键 task_id 存在时照常注入（兼容不回归）。"""
-    calls = _run(
-        [{"name": "task_evaluate", "args": {"action": "auto_complete"}}],
-        {"task_id": "legacy456"},
-    )
-    args = _args_of(calls)
-    assert args["task_id"] == "legacy456"
-
-
-def test_task_dot_id_preferred_over_legacy_key() -> None:
-    """两键同时存在时 0.2 权威键 task.id 优先（身份权威统一）。"""
-    calls = _run(
-        [{"name": "task_evaluate", "args": {"action": "auto_complete"}}],
-        {"task_id": "legacy456", "task.id": "abc123"},
-    )
-    args = _args_of(calls)
-    assert args["task_id"] == "abc123"
-
-
 def test_no_task_keys_leaves_args_untouched() -> None:
-    """主会话（两键皆空）不注入，args 不新增 task_id。"""
+    """主会话（无任务身份）不注入，args 不新增 task_id。"""
     calls = _run([{"name": "task_evaluate", "args": {"action": "auto_complete"}}])
     args = _args_of(calls)
     assert "task_id" not in args

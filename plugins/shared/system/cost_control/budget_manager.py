@@ -321,20 +321,23 @@ class BudgetManager:
 
     async def release_reservation(
         self,
-        user_id: str | None = None,
         task_id: str | None = None,
         session_id: str | None = None,
     ) -> None:
         """释放预留（调用失败时防幽灵占用）。幂等。
 
-        注意：按作用域整体释放（非按调用者）——同作用域并发下释放窗口内可能
-        多放行一个 check，但 record 硬上限兜底，不突破预算。
+        按作用域整体释放（非按调用者）。全局预留计数器同步扣减——否则反复
+        失败的调用会把全局配额「幽灵占满」，正常请求被误拒。同一调用在
+        task/session 两作用域登记同一数额：两作用域同时释放时按较大值扣一次
+        （跨调用混合下可能少量多放行一个 check，record 硬上限兜底，不突破预算）。
         """
         async with self._lock:
-            if task_id:
-                self._task_reserved.pop(task_id, None)
-            if session_id:
-                self._session_reserved.pop(session_id, None)
+            task_released = self._task_reserved.pop(task_id, 0) if task_id else 0
+            session_released = self._session_reserved.pop(session_id, 0) if session_id else 0
+            released = max(task_released, session_released)
+            if released:
+                self._global_daily_reserved = max(0, self._global_daily_reserved - released)
+                self._global_monthly_reserved = max(0, self._global_monthly_reserved - released)
 
     async def _check_and_reset_periods(self) -> None:
         """检查并重置周期统计"""

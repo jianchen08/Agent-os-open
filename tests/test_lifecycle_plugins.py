@@ -109,7 +109,7 @@ async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypa
     项目根直接当 workspace（任务会在项目根上直接读写）。
 
     2026-08-24 收口：基目录解析统一走 get_workspace_base_dir()（配置驱动）——
-    真身配置可把基目录配到项目外（本仓现配 D:/myproject），断言只依赖解析
+    真身配置可把基目录配到项目内相对目录或项目外绝对路径，断言只依赖解析
     函数，测试内确定性覆盖其返回值。
     """
     import tests._isolation_path  # noqa: F401  （system/isolation 目录入 sys.path）
@@ -124,7 +124,7 @@ async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypa
         plugins["ctx_factory"](
             {
                 "current_phase": "init",
-                "task_id": "task_degrade_1",
+                "task.id": "task_degrade_1",
                 "execution_context": {
                     "workspace": {"source_path": "", "mode": "worktree"}
                 },
