@@ -83,13 +83,11 @@ _PROJECT_ROOT = os.path.dirname(  # noqa: PTH120
 # - default      : 命中 block/needs_approval 规则都逐次弹审批
 # - accept_edits : file_read/file_write 一律放行；其余工具命中规则仍弹审批
 # - auto         : block 规则自动拒绝不打扰；needs_approval 规则才弹审批
-# - plan         : file_write/bash_execute 一律软拒；其余工具同 default
 # - bypass       : 跳过规则匹配与审批（保留三条内置底线）
 PERMISSION_MODES: dict[str, str] = {
     "default": "命中安全规则的操作逐次确认",
     "accept_edits": "文件读写自动放行，其余命中规则才确认",
     "auto": "block 规则自动拒，needs_approval 才弹窗",
-    "plan": "file_write/bash_execute 一律拒绝",
     "bypass": "跳过规则匹配与审批，保留内置底线",
 }
 
@@ -99,9 +97,8 @@ PERMISSION_MODES: dict[str, str] = {
 _PERMISSION_MODES: dict[str, str] = {}
 _PERMISSION_MODES_FILE = os.path.join(_PROJECT_ROOT, "data", "permission_modes.json")
 
-# accept_edits 放行的文件类工具；plan 拒绝的写类工具
+# accept_edits 放行的文件类工具
 _FILE_TOOLS: frozenset[str] = frozenset({"file_read", "file_write"})
-_WRITE_TOOLS: frozenset[str] = frozenset({"file_write", "bash_execute"})
 
 # 只读工具白名单：只读操作默认不拦截（不判危险、不弹审批、不进审批链），
 # 第一道内置底线（路径遍历/敏感系统目录）仍生效；写类/命令类工具不在此列。
@@ -516,8 +513,6 @@ class SecurityCheckPlugin(IInputPlugin):
             )
             if isinstance(mode_decision, dict):
                 return mode_decision
-            if mode_decision == "block_plan_write":
-                return self._soft_block(ctx, tool_name, f"plan（只读）模式拒绝写操作: {tool_name}")
             # "pass"：本工具放行，继续下一工具
         return None
 
@@ -533,15 +528,14 @@ class SecurityCheckPlugin(IInputPlugin):
         """按权限模式处置未命中白名单/记忆指纹的危险工具。
 
         模式决定"未命中规则"的档位：default=确认、accept_edits=文件放行、
-        auto=尽量自动、plan=写类拒绝读类放行、bypass=跳过审批。
-        default / auto(ask) / accept_edits(命令类) / plan(命令类) 且**未命中任何规则**
+        auto=尽量自动、bypass=跳过审批。
+        default / auto(ask) / accept_edits(命令类) 且**未命中任何规则**
         → 参数安全，直接放行。命中 needs_approval/block 规则的参数（rm -rf 等关键词）
         已在 _match_rules 返回对应 action，只有 action 为空（未命中）才走到放行分支；
         规则缺失/为空（安全闸门失效风险）→ 兜底弹审批（安全优先）。
 
         Returns:
-            "pass"（放行）；"block_plan_write"（plan 模式写类软拦截）；
-            或处置完成的决策字典（auto 自动拒绝 / 弹审批）。
+            "pass"（放行）；或处置完成的决策字典（auto 自动拒绝 / 弹审批）。
         """
         mode = self._resolve_permission_mode(ctx)
 
@@ -560,23 +554,6 @@ class SecurityCheckPlugin(IInputPlugin):
                 tool_name,
             )
             return "pass"
-
-        if mode == "plan":
-            if tool_name in _WRITE_TOOLS:
-                logger.info(
-                    "[%s] plan（只读）模式拒绝写类 | tool=%s",
-                    self.name,
-                    tool_name,
-                )
-                return "block_plan_write"
-            # 读类危险操作（如 file_read 敏感路径）在只读模式下放行（读不破坏）
-            if tool_name in _FILE_TOOLS:
-                logger.info(
-                    "[%s] plan 模式读类放行 | tool=%s",
-                    self.name,
-                    tool_name,
-                )
-                return "pass"
 
         if mode == "auto" and action == "block":
             logger.info(

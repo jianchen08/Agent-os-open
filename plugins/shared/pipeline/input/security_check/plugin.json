@@ -90,11 +90,6 @@
                   "description": "命中 block 级规则自动拒绝、不再询问；needs_approval 级才弹窗；未命中规则的操作直接执行"
                 },
                 {
-                  "label": "只读（拒写类工具）",
-                  "value": "plan",
-                  "description": "file_write 与 bash_execute 一律拒绝执行；读类与未命中规则的其它操作照常"
-                },
-                {
                   "label": "旁路（跳过审批）",
                   "value": "bypass",
                   "description": "不做规则匹配、不弹审批，危险命令可能直接执行；仅保留路径遍历、敏感目录、nul 重定向三条内置底线"

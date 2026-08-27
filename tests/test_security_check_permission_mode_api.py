@@ -74,12 +74,6 @@ class TestLowRiskSwitch:
         fake.call.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_plan直接生效(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _mock_hi(monkeypatch, "cancel")
-        resp = await server_mod.http_handle(**_make_http_post("p1", "plan"))
-        assert _decode(resp) == {"switched": True, "mode": "plan"}
-
-    @pytest.mark.asyncio
     async def test_相同模式幂等(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sc_mod._PERMISSION_MODES["s1"] = "default"
         _mock_hi(monkeypatch, "cancel")
@@ -158,12 +152,12 @@ class TestValidationAndQuery:
     @pytest.mark.asyncio
     async def test_GET查询当前模式(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _mock_hi(monkeypatch, "confirm")
-        sc_mod._PERMISSION_MODES["p1"] = "plan"
+        sc_mod._PERMISSION_MODES["p1"] = "auto"
         resp = await server_mod.http_handle(
             **{"path": "/ext/pipeline_security_check/permission_mode", "method": "GET", "plugin_id": "pipeline_security_check", "raw_body": "", "query": {"pipeline_id": "p1"}}
         )
         result = _decode(resp)
-        assert result["mode"] == "plan"
+        assert result["mode"] == "auto"
         assert "valid_modes" in result
 
     @pytest.mark.asyncio

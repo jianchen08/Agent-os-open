@@ -1,11 +1,10 @@
 # @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """security_check 权限模式分流测试（GAP 权限模式体系）。
 
-覆盖 5 种模式的处置档位（未命中 allow 白名单/记忆指纹时）：
+覆盖 4 种模式的处置档位（未命中 allow 白名单/记忆指纹时）：
 - default      : 弹审批（现状语义）
 - accept_edits : 文件类放行；命令类仍弹审批
 - auto         : block 规则自动拒绝（不弹审批）；needs_approval/未授权弹审批
-- plan         : 写类自动拒绝（不弹审批）；读类放行
 - bypass       : 跳过审批放行
 
 会话级模式（_PERMISSION_MODES 表）优先于插件配置默认值。
@@ -178,36 +177,6 @@ class TestAutoMode:
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
         assert len(svc.requests) >= 1
         assert result.state_updates["security.decision"]["allowed"] is True
-
-
-class TestPlanMode:
-    @pytest.mark.asyncio
-    async def test_写类自动拒绝不弹审批(self) -> None:
-        svc = _mock_approval()
-        p = _make_plugin()
-        _set_pipeline_mode("p1", "plan")
-        result = await p.execute(_ctx(_tool_state("file_write", {"path": "/etc/hosts", "content": "x"})))
-        assert len(svc.requests) == 0
-        assert "tool_results" in result.state_updates
-
-    @pytest.mark.asyncio
-    async def test_bash命令自动拒绝不弹审批(self) -> None:
-        svc = _mock_approval()
-        p = _make_plugin()
-        _set_pipeline_mode("p1", "plan")
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
-        assert len(svc.requests) == 0
-        assert "tool_results" in result.state_updates
-
-    @pytest.mark.asyncio
-    async def test_读类放行(self) -> None:
-        svc = _mock_approval()
-        p = _make_plugin()
-        _set_pipeline_mode("p1", "plan")
-        result = await p.execute(_ctx(_tool_state("file_read", {"path": "/etc/passwd"})))
-        assert result.state_updates["security.decision"]["allowed"] is True
-        assert "tool_results" not in result.state_updates
-        assert len(svc.requests) == 0
 
 
 class TestBypassMode:
