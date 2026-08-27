@@ -547,6 +547,7 @@ pub async fn list_session_messages_handler(
     // 多租户：get_messages_by_pipeline 按 task_local tenant 过滤，需在请求租户 scope 内执行。
     // scope 缺失时（task_local 未设 → current_or_default("default")），永远只读 default 租户。
     let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &id).await;
+    let tenant_id = tenant_ctx.tenant_id.clone();
     let store_clone = store.clone();
     let target_pid_for_scope = target_pid.clone();
     let records = match agentos_tenant::scope(tenant_ctx, async move {
@@ -649,8 +650,24 @@ pub async fn list_session_messages_handler(
     let total = messages.len();
     // has_more：若带 limit 且返回条数等于 limit，则可能还有更多
     let has_more = q.limit.map(|lim| total >= lim).unwrap_or(false);
+
+    // 存活中间态（ADR 2026-08-27 §2.6 前端刷新恢复）：F5 后从后端内存寄存器
+    // 恢复流式中间态（重建占位气泡）。纯增字段向后兼容；寄存器无该管道
+    // 条目时为空数组（不改变既有响应形状）。租户 = 请求解析租户（与
+    // get_messages_by_pipeline 同源）。
+    let transient_states: Vec<Value> = agentos_engine::global_registry()
+        .list(&tenant_id, &target_pid)
+        .into_iter()
+        .map(|(key, value, _updated_at)| json!({ "key": key, "value": value }))
+        .collect();
+
     Ok(Json(
-        json!({ "messages": messages, "total": total, "has_more": has_more }),
+        json!({
+            "messages": messages,
+            "total": total,
+            "has_more": has_more,
+            "transient_states": transient_states,
+        }),
     ))
 }
 
@@ -1187,5 +1204,81 @@ mod sessions_list_tests {
                 ApiError::ServiceUnavailable { .. }
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod transient_states_query_tests {
+    //! ADR 2026-08-27 §2.6：消息读取接口带出存活中间态（前端 F5 刷新恢复）。
+    //! 纯增字段向后兼容：寄存器无该管道条目时为空数组，不改变既有响应形状。
+
+    use super::*;
+
+    #[tokio::test]
+    async fn messages_response_carries_live_transient_states() {
+        let store = std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        state.db = Some(store.clone());
+        let reg = agentos_engine::global_registry();
+        let pipe = "pipe_transient_msg";
+        reg.set("default", pipe, "chunk:a_abc", json!({"text_len": 12}));
+        reg.set("default", pipe, "progress:1", json!({"pct": 40}));
+
+        let resp = list_session_messages_handler(
+            State(state),
+            HeaderMap::new(),
+            Path(pipe.to_string()),
+            Query(MessageListQuery {
+                pipeline_run_id: Some(pipe.to_string()),
+                before_sequence: None,
+                after_sequence: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let body = resp.0;
+        assert_eq!(body["total"], json!(0), "无历史消息");
+        assert_eq!(body["has_more"], json!(false));
+        // 存活中间态带出（key/value 对，供前端重建流式占位）
+        let states = body["transient_states"].as_array().unwrap();
+        assert_eq!(states.len(), 2);
+        let keys: Vec<&str> = states
+            .iter()
+            .filter_map(|s| s["key"].as_str())
+            .collect();
+        assert!(keys.contains(&"chunk:a_abc"));
+        assert!(keys.contains(&"progress:1"));
+        let chunk = states
+            .iter()
+            .find(|s| s["key"] == "chunk:a_abc")
+            .unwrap();
+        assert_eq!(chunk["value"]["text_len"], json!(12));
+        reg.clear_pipeline("default", pipe);
+    }
+
+    #[tokio::test]
+    async fn messages_response_empty_transient_when_none() {
+        let store = std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        state.db = Some(store.clone());
+        // 未写任何中间态的管道 → 空数组（纯增字段向后兼容）
+        let resp = list_session_messages_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("pipe_empty_transient".to_string()),
+            Query(MessageListQuery {
+                pipeline_run_id: Some("pipe_empty_transient".to_string()),
+                before_sequence: None,
+                after_sequence: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let states = resp.0["transient_states"].as_array().unwrap();
+        assert!(states.is_empty(), "无中间态时为空数组而非缺字段");
     }
 }

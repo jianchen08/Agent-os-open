@@ -1951,8 +1951,6 @@ async fn transient_missing_params_rejected() {
 // 拦截点写进程级全局寄存器（tenant = current_or_default("default")）——
 // 测试用唯一 pipeline id 隔离 + 末尾 clear_pipeline 防跨测试残留。
 
-const STREAM_PIPE: &str = "pipe_stream_intercept_1";
-
 async fn emit_stream_event(
     router: &KernelCapabilityRouter,
     event: &str,
