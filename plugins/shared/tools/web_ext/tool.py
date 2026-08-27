@@ -2,7 +2,8 @@
 Web 操作工具
 
 HTTP GET/POST 与网页正文抓取（trafilatura 抽取），支持域名黑白名单、
-默认请求头与代理；SSRF 校验见 _check_url_security（原语来自共享层 url_security）。
+默认请求头与代理；SSRF 校验见 _check_url_security（原语来自 SDK
+agentos_plugin_sdk.url_security）。
 """
 
 import logging
@@ -11,7 +12,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from url_security import is_private_ip, resolve_hostname_ips
 
 from agentos_plugin_sdk import (
     BuiltinTool,
@@ -23,6 +23,7 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
 )
+from agentos_plugin_sdk.url_security import is_private_ip, resolve_hostname_ips
 
 logger = logging.getLogger(__name__)
 

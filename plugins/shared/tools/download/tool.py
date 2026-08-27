@@ -3,8 +3,8 @@
 基于 httpx 封装，支持多连接分段下载、断点续传、自动重试、安全限制。
 
 - 顶层依赖 ``agentos_plugin_sdk``（Tool / ToolResult / BuiltinTool / 枚举 / 结果工厂）。
-- SSRF 防护原语（is_private_ip / resolve_hostname_ips / validate_url）位于共享层
-  ``url_security``，本模块不维护内网网段表。
+- SSRF 防护原语（is_private_ip / resolve_hostname_ips / validate_url）在 SDK
+  ``agentos_plugin_sdk.url_security``，本模块不维护内网网段表。
 - save_path 经 ``WorkspaceAwareMixin.check_path_allowed(operation="write")`` 约束，
   isolation 插件不可用时降级放行（与 web_ext 一致）。
 
@@ -30,7 +30,8 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
-from url_security import validate_url
+
+# 插件本地扩展版 Mixin（SDK 公共基座 + check_path_allowed 权限校验层）
 from workspace_aware import WorkspaceAwareMixin
 
 from agentos_plugin_sdk import (
@@ -44,6 +45,7 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
 )
+from agentos_plugin_sdk.url_security import validate_url
 
 logger = logging.getLogger(__name__)
 

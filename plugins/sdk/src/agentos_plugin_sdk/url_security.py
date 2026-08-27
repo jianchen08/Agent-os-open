@@ -1,7 +1,7 @@
-"""URL 安全公共 helper（0.2 工具共享层）。
+"""URL 安全公共 helper（SSRF 防护原语，SDK 单一真值源）。
 
-download 与 web_ext 共用的 SSRF 防护原语集中在本层，
-避免两处各自维护内网网段表与 DNS 校验逻辑漂移。
+download / web_ext 等工具插件共用的 SSRF 防护原语集中于此，
+避免各处各自维护内网网段表与 DNS 校验逻辑漂移。
 
 暴露接口：
 - is_private_ip(ip_str) -> bool：RFC1918 / loopback / link-local / IPv6 内网段判定
@@ -9,7 +9,7 @@ download 与 web_ext 共用的 SSRF 防护原语集中在本层，
 - validate_url(url, allow_domains) -> tuple[bool, str]：协议白名单 + 可选域名白名单
   + DNS 解析 + 内网 IP 比对（SSRF 防护）
 
-本模块自包含（仅标准库），可被任何工具以平铺模块方式导入。
+本模块自包含（仅标准库）。
 """
 
 from __future__ import annotations

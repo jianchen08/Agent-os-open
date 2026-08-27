@@ -27,7 +27,6 @@ _AMBIGUOUS_MODULES = {
     "input_handler",
     "log_compressor",
     "result_types",
-    "workspace_aware",
 }
 
 

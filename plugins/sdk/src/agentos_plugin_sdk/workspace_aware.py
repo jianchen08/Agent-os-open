@@ -1,9 +1,14 @@
-"""
-工作空间感知 Mixin（0.2 自包含版）
+"""工作空间感知 Mixin（公共基座，SDK 单一真值源）。
 
-提供路径解析、项目根推断、工作目录获取等通用能力。
-仅保留 0.2 sidecar 需要的路径/工作目录处理，不依赖 0.1 src 树
-（0.1 的权限策略软依赖 isolation.* 已移除——0.2 下权限由内核层治理）。
+路径解析、项目根推断、工作目录获取等通用能力的唯一实现，
+各工具插件继承此 Mixin 即可获得一致的 workspace 处理行为。
+插件特有的扩展（如 download 的路径权限校验层）继承本类追加，
+不在本文件掺入对具体插件策略模块的依赖。
+
+从 __future__ import annotations 后纯类型自包含（仅标准库）。
+
+暴露接口：
+- WorkspaceAwareMixin：统一 workspace 消费的 Mixin 类
 """
 
 from __future__ import annotations
@@ -34,10 +39,12 @@ class WorkspaceAwareMixin:
             self._workspace: Path = Path(inputs["workspace"])
         elif inputs.get("project_root"):
             self._workspace = Path(inputs["project_root"])
-        elif getattr(self, "base_path", None):
-            self._workspace = self.base_path
         else:
-            self._workspace = Path.cwd()
+            base_path: Path | None = getattr(self, "base_path", None)
+            if base_path:
+                self._workspace = base_path
+            else:
+                self._workspace = Path.cwd()
 
         if inputs.get("project_root"):
             self._project_root: Path = Path(inputs["project_root"])

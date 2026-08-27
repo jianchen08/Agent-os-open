@@ -1,7 +1,8 @@
 # @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """workspace_aware 插件（工作空间感知 Mixin）单元测试。
 
-覆盖（对齐 plugins/shared/tools/download/workspace_aware.py——tools 根版本已随自包含约定删除）：
+覆盖（对齐 plugins/shared/tools/download/workspace_aware.py——SDK 公共基座
+agentos_plugin_sdk.workspace_aware 之上叠加 download 路径权限校验扩展层）：
 1. _init_workspace：workspace / project_root / base_path / cwd 四种来源
 2. resolve_path：绝对路径 / Git Bash 风格 / 前缀去重 / 后缀去重
 3. _format_output_path / get_working_dir / _infer_project_root

@@ -1,5 +1,5 @@
 # @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
-"""url_security 共享层 SSRF 防护测试（punch B2）。
+"""url_security SSRF 防护测试（punch B2；单一真值源 = SDK agentos_plugin_sdk.url_security）。
 
 覆盖：
 - 网段表新增 0.0.0.0/8 与 100.64.0.0/10（CGNAT）
@@ -13,7 +13,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-from url_security import is_private_ip  # noqa: E402
+from agentos_plugin_sdk.url_security import is_private_ip  # noqa: E402
 
 
 class TestIsPrivateIpHardened:

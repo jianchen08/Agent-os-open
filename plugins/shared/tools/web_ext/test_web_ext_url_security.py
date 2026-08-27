@@ -1,7 +1,7 @@
 # @feature: FP-0.2.二 内部模块 manifest | @vision: V3 可嵌入 | @ci: python-coverage
-"""web_ext url_security 共享层 SSRF 原语测试。
+"""web_ext url_security SSRF 原语测试（单一真值源 = SDK agentos_plugin_sdk.url_security）。
 
-覆盖 plugins/shared/tools/web_ext/url_security.py：
+覆盖：
 1. is_private_ip：IPv4 内网各网段 / 公网 / IPv6 内网 / IPv4-mapped IPv6 归一 /
    无法解析视为不安全
 2. resolve_hostname_ips：成功多结果 / DNS 失败
@@ -15,34 +15,15 @@ is_private_ip 为纯函数走真实实现。
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parent
-if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
+import agentos_plugin_sdk.url_security as _url_security_mod  # noqa: E402
 
-
-def _load_module() -> Any:
-    """动态加载 url_security.py（唯一模块名，避免与 download 副本互踩）。"""
-    mod_name = "web_ext_url_security_test"
-    if mod_name in sys.modules:
-        del sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "url_security.py")
-    assert spec is not None and spec.loader is not None, "Cannot load url_security.py"
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_MOD = _load_module()
+_MOD = _url_security_mod
 is_private_ip = _MOD.is_private_ip
 resolve_hostname_ips = _MOD.resolve_hostname_ips
 validate_url = _MOD.validate_url

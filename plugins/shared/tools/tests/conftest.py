@@ -3,8 +3,10 @@
 
 本目录全部测试共享的装配（仿 tests/test_migration.py 的 sys.path 模式集中化，
 及 builtin_tools/tests/conftest.py 的 conftest 形态）：
-- 仓库 SDK 源码目录 plugins/sdk/src（agentos_plugin_sdk）
-- 工具共享层 plugins/shared/tools（url_security.py / workspace_aware.py 平铺模块）
+- 仓库 SDK 源码目录 plugins/sdk/src（agentos_plugin_sdk——url_security /
+  workspace_aware 等共享单一真值源所在）
+- 工具共享层 plugins/shared/tools（download/web_ext 等插件目录的父目录，
+  供 ``web_ext.tool`` 等 PEP-420 命名空间导入）
 - 各插件目录 download / web_ext / media（与 server.py 的 flat 导入语义一致）
 
 工具模块加载用 importlib（唯一模块名），避免同一 pytest 进程内

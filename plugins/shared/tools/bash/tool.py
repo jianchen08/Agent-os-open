@@ -41,7 +41,8 @@ from result_types import (
     create_failure_result,
     create_success_result,
 )
-from workspace_aware import WorkspaceAwareMixin
+
+from agentos_plugin_sdk.workspace_aware import WorkspaceAwareMixin
 
 # POSIX 信号编号 → 名称映射。进程在 Linux 容器内运行，退出码遵循 POSIX
 # 128+n 语义，但本工具的宿主可能是 Windows——Windows 的 signal.Signals 枚举

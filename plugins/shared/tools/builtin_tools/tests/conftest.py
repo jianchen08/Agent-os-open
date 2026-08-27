@@ -20,8 +20,8 @@ _SRC = os.path.join(
 if os.path.isdir(_SRC) and _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-# 工具共享层根目录（url_security / workspace_aware 平铺模块）——
-# 与 server.py 的注入保持一致，使包内平铺导入在测试下同样可解析。
+# 工具共享层根目录（plugins/shared/tools/）——供 test_web_tool_ssrf 的
+# ``from web_ext.tool import WebTool`` 这类 PEP-420 命名空间导入解析。
 _TOOLS_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
