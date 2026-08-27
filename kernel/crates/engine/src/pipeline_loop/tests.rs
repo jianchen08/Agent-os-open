@@ -1927,3 +1927,107 @@ async fn fallback_end_when_condition_never_matches() {
     assert_eq!(fixture.invoker.call_count("p"), 1);
     assert_eq!(state["ended"], json!(true));
 }
+
+// ── transient 生命周期接线（ADR 2026-08-27 §2.2 生命周期第二/三清 + §2.4 B 区）──
+// 引擎侧方法（clear_transient_for_ops/bind_step_message）写进程级
+// global_registry 单例（生产路径）；测试用唯一管道 id + 末尾 clear_pipeline
+// 防跨测试残留；租户取 Fixture 默认 tenant_test。
+
+#[test]
+fn clear_transient_for_ops_clears_chunk_and_binding() {
+    let reg = crate::transient::global_registry();
+    let pipe = "pipe_clear_ops";
+    reg.set("tenant_test", pipe, "chunk:mid_stream", json!({"text_len": 3}));
+    reg.set("tenant_test", pipe, "chunk:mid_plugin", json!({"text_len": 5}));
+    reg.set("tenant_test", pipe, "progress:1", json!({"pct": 10}));
+    reg.register_message_binding("tenant_test", pipe, "mid_stream", "core");
+    reg.register_message_binding("tenant_test", pipe, "mid_plugin", "core");
+
+    let executor = Fixture::build(&["a"]).executor;
+    let state = json!({
+        "pipeline_id": pipe,
+        "message_id": "mid_stream",
+        "messages": [],
+    });
+    let ops = vec![
+        // 无 msg.id 的 op（A1 注入路径：message_id 在 state 顶层）
+        json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "x"}}),
+        // 插件路径：消息自带 id（p_ 命名空间）
+        json!({"op": "set", "seq": 2, "msg": {"role": "assistant", "content": "y", "id": "mid_plugin"}}),
+        // 未知 op 形态（无 id 可提）不 panic
+        json!({"op": "bogus"}),
+    ];
+    executor.clear_transient_for_ops(&state, &ops, "tenant_test");
+
+    // state["message_id"] 对应键 + 消息自带 id 对应键均清
+    assert!(reg.get("tenant_test", pipe, "chunk:mid_stream").is_none());
+    assert!(reg.get("tenant_test", pipe, "chunk:mid_plugin").is_none());
+    // B 区同清
+    assert!(reg.resolve_step_of("tenant_test", pipe, "mid_stream").is_none());
+    assert!(reg.resolve_step_of("tenant_test", pipe, "mid_plugin").is_none());
+    // 非消息键不受影响（progress 中间态存活）
+    assert!(reg.get("tenant_test", pipe, "progress:1").is_some());
+    reg.clear_pipeline("tenant_test", pipe);
+}
+
+#[test]
+fn clear_transient_for_ops_skips_without_pipeline_id() {
+    let reg = crate::transient::global_registry();
+    let pipe = "pipe_skip_ops";
+    reg.set("tenant_test", pipe, "chunk:mid", json!({"text_len": 3}));
+    let executor = Fixture::build(&["a"]).executor;
+    // state 无 pipeline_id（首轮未注入场景）→ 零操作，不误清其他管道
+    executor.clear_transient_for_ops(&json!({"message_id": "mid"}), &[], "tenant_test");
+    assert!(reg.get("tenant_test", pipe, "chunk:mid").is_some());
+    reg.clear_pipeline("tenant_test", pipe);
+}
+
+#[test]
+fn bind_step_message_registers_and_guard_clears_on_drop() {
+    let reg = crate::transient::global_registry();
+    let pipe = "pipe_bind_guard";
+    let executor = Fixture::build(&["a"]).executor;
+    let state = json!({"pipeline_id": pipe, "message_id": "m1"});
+    {
+        let _guard = executor.bind_step_message(&state, "core").expect("应登记");
+        assert_eq!(
+            reg.resolve_step_of("tenant_test", pipe, "m1").as_deref(),
+            Some("core")
+        );
+        // 守卫在作用域内持活：绑定保留
+    }
+    // Drop：绑定清除
+    assert!(reg.resolve_step_of("tenant_test", pipe, "m1").is_none());
+    reg.clear_pipeline("tenant_test", pipe);
+}
+
+#[test]
+fn bind_step_message_none_when_identifiers_missing() {
+    let executor = Fixture::build(&["a"]).executor;
+    assert!(executor.bind_step_message(&json!({}), "core").is_none(), "无 id 零操作");
+    assert!(
+        executor
+            .bind_step_message(&json!({"pipeline_id": "p"}), "core")
+            .is_none(),
+        "缺 message_id 零操作"
+    );
+}
+
+#[test]
+fn step_binding_guard_nested_override_restores_outer() {
+    let reg = crate::transient::global_registry();
+    let pipe = "pipe_bind_nested";
+    let executor = Fixture::build(&["a"]).executor;
+    let state = json!({"pipeline_id": pipe, "message_id": "m1"});
+    let outer = executor.bind_step_message(&state, "outer").unwrap();
+    // 嵌套 step 覆盖登记（composite 递归：内层 step 流式窗口接管归属）
+    let inner = executor.bind_step_message(&state, "inner").unwrap();
+    assert_eq!(reg.resolve_step_of("tenant_test", pipe, "m1").as_deref(), Some("inner"));
+    // 内层守卫收尾：归属恢复为外层 step（流式窗口关闭，执行权回到外层剩余项）
+    drop(inner);
+    assert_eq!(reg.resolve_step_of("tenant_test", pipe, "m1").as_deref(), Some("outer"), "内层守卫收尾须恢复外层绑定");
+    // 外层守卫收尾：首次登记（无 prev）→ 直接清除
+    drop(outer);
+    assert!(reg.resolve_step_of("tenant_test", pipe, "m1").is_none(), "外层守卫收尾清除绑定");
+    reg.clear_pipeline("tenant_test", pipe);
+}

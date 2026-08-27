@@ -460,6 +460,10 @@ impl PipelineExecutor {
         // 清空本 step 的 messages 实录缓冲（step 边界，防跨 step 泄漏）
         self.ops_ledger.lock().clear();
 
+        // B 区登记挂点（ADR 2026-08-27 §2.2）：step 进入时登记 message→step
+        // 归属（流式窗口 = 本 step invoke 期间），守卫在 step 收尾自动清除。
+        let _binding = self.bind_step_message(state, &step.id);
+
         // 1. context 注入：渲染 step.context 模板（模板原文保留，动态点），merge 进 state
         let rendered = render_value(
             &serde_json::to_value(&step.context)
@@ -931,6 +935,11 @@ impl PipelineExecutor {
                 warn!(pipeline_id = %pipeline_id, error = %e, "收尾 save_checkpoint 失败（继续执行）");
                 self.metrics.inc_persist_failure();
             }
+            // run 收尾整管道兜底清理（ADR 2026-08-27 §2.2 生命周期）：
+            // 中断/异常路径若在插件侧直接收尾（半截组装发生在 llm_core sidecar，
+            // 引擎无插点），merge 清键可能漏掉未落库的 chunk 中间态与 B 区
+            // 绑定——run 结束无条件清整管道两区，防内存残留跨轮存活。
+            crate::transient::global_registry().clear_pipeline(&tenant_id, pipeline_id);
         }
 
         // update_run_status 要求 current_branch 和 current_seq 同时 Some 或同时 None。
@@ -989,6 +998,10 @@ impl PipelineExecutor {
                             if !ledger.is_empty() {
                                 self.ops_ledger.lock().extend(ledger);
                             }
+                            // 落库自动清（ADR 2026-08-27 §2.2 生命周期第二清）：
+                            // 消息最终形态已落 message_slots，同 message_id 的
+                            // chunk 中间态 + B 区绑定使命完成。
+                            self.clear_transient_for_ops(state, &ops_owned, &tenant_id);
                         }
                         Err(e) => {
                             warn!(error = %e, "apply_messages_op_update 失败（继续）");
@@ -1002,6 +1015,91 @@ impl PipelineExecutor {
             }
             set_key(state, k, v.clone());
         }
+    }
+
+    /// 落库自动清（ADR 2026-08-27 §2.2 生命周期）：消息最终形态已落
+    /// message_slots 后，按同 message_id 清 chunk 中间态（A 区）与运行上下文
+    /// 绑定（B 区）——所有终局（completed/interrupted/error）必经
+    /// `merge_and_project`，中断路径零额外改动。
+    ///
+    /// message_id 双源取：`state["message_id"]`（A1 注入的流式占位 a_ id，
+    /// `inject_run_message_id` 的注入源，本轮助手消息的权威 id）+ op 消息
+    /// 自带的 `id` 字段（插件路径 p_ id）——覆盖两条发射路径防漏清。
+    /// 指纹 message_id（mc_）不参与：chunk 键命名空间是流式占位 id，
+    /// 与内容指纹无关。
+    fn clear_transient_for_ops(
+        &self,
+        state: &serde_json::Value,
+        ops: &[serde_json::Value],
+        tenant_id: &str,
+    ) {
+        let pipeline_id = state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if pipeline_id.is_empty() {
+            return;
+        }
+        let reg = crate::transient::global_registry();
+        if let Some(mid) = state.get("message_id").and_then(|v| v.as_str()) {
+            if !mid.is_empty() {
+                reg.clear(tenant_id, pipeline_id, &format!("chunk:{mid}"));
+                reg.clear_message_binding(tenant_id, pipeline_id, mid);
+            }
+        }
+        for op in ops {
+            let mid = op
+                .get("msg")
+                .and_then(|m| m.get("id"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            if let Some(mid) = mid {
+                reg.clear(tenant_id, pipeline_id, &format!("chunk:{mid}"));
+                reg.clear_message_binding(tenant_id, pipeline_id, mid);
+            }
+        }
+    }
+
+    /// B 区运行上下文登记挂点（ADR 2026-08-27 §2.2 / 方案 §2.4）：step 进入时
+    /// 把当前活跃 message（`state["message_id"]`，A1 流式占位 id）登记到
+    /// message→step 归属表，供 api 层流式拦截点按 message 反查 step（钩子
+    /// 最小作用域装载，管道步骤服务化提案 §3.6 条款④）。
+    ///
+    /// 返回 Drop 守卫：step 收尾（含 loop 早退路径）自动清除绑定——流式窗口
+    /// （invoke 期间 chunk 发射）内绑定即当前活跃 step，窗口外不残留。
+    /// state 缺 pipeline_id/message_id（测试/未注入）时返回 None 零操作。
+    fn bind_step_message(
+        &self,
+        state: &serde_json::Value,
+        step_id: &str,
+    ) -> Option<StepBindingGuard> {
+        let pipeline_id = state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let message_id = state
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if pipeline_id.is_empty() || message_id.is_empty() {
+            return None;
+        }
+        let tenant_id = self.default_tenant.tenant_id.clone();
+        let prev_step = crate::transient::global_registry()
+            .resolve_step_of(&tenant_id, pipeline_id, message_id);
+        crate::transient::global_registry().register_message_binding(
+            &tenant_id,
+            pipeline_id,
+            message_id,
+            step_id,
+        );
+        Some(StepBindingGuard {
+            tenant_id,
+            pipeline_id: pipeline_id.to_string(),
+            message_id: message_id.to_string(),
+            step_id: step_id.to_string(),
+            prev_step,
+        })
     }
 
     /// 每个配置 step 完成后推进一步：自增步数计数器，达 interval 则落档。
@@ -1047,6 +1145,43 @@ impl PipelineExecutor {
 }
 
 // ── 路由处理 ──────────────────────────────────────────────────
+
+/// B 区绑定守卫：Drop 时恢复/清除 message→step 归属（[`PipelineExecutor::bind_step_message`]
+/// 返回，step 收尾自动触发——含 loop 早退路径）。
+///
+/// 嵌套恢复：登记前先读既有绑定存为 prev——composite 递归内层 step 收尾时
+/// 把归属**恢复为外层 step**（内层流式窗口关闭，执行权回到外层剩余项）；
+/// 无 prev（首次登记）时直接清除。比较清除兜底：绑定已被外层守卫清掉
+/// （resolve 为 None）时零操作。
+pub struct StepBindingGuard {
+    tenant_id: String,
+    pipeline_id: String,
+    message_id: String,
+    step_id: String,
+    prev_step: Option<String>,
+}
+
+impl Drop for StepBindingGuard {
+    fn drop(&mut self) {
+        let reg = crate::transient::global_registry();
+        if reg
+            .resolve_step_of(&self.tenant_id, &self.pipeline_id, &self.message_id)
+            .as_deref()
+            != Some(self.step_id.as_str())
+        {
+            return; // 归属已变（外层已清/他处覆盖），不动
+        }
+        match &self.prev_step {
+            Some(prev) => reg.register_message_binding(
+                &self.tenant_id,
+                &self.pipeline_id,
+                &self.message_id,
+                prev,
+            ),
+            None => reg.clear_message_binding(&self.tenant_id, &self.pipeline_id, &self.message_id),
+        }
+    }
+}
 
 /// 应用转移分支：按 YAML 顺序匹配第一个 `when` 为真的分支，执行其 `then`。
 ///
