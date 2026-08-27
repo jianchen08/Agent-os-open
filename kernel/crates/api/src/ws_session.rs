@@ -493,6 +493,11 @@ impl EngineDispatcher {
         // 前端对 null final_sequence 有显式守卫（挂空等待对账纠正），伪造序号反而
         // 会污染排序与断线补漏游标。
         let seq = assistant_authoritative_seq(outcome.final_assistant.as_ref());
+        // 插件错误可见性：本轮管道执行中插件失败（引擎 warn+继续的假成功）在
+        // new_message 前逐个发射 plugin_error 事件——非终止信号，前端只弹通知
+        // 不标记消息失败（消息本身正常收尾）。
+        emit_plugin_error_events(session, &exec_thread, &rec.route_id, &message_id, &outcome)
+            .await;
         emit_new_message_event(
             session,
             &exec_thread,
@@ -580,6 +585,54 @@ async fn emit_stream_error_event(
             }),
         )
         .await;
+}
+
+/// 插件错误可见性出口：本轮管道执行中插件失败（引擎 warn+继续的假成功）逐个
+/// 发射 `plugin_error` 事件。非终止信号——消息本身正常收尾（new_message/
+/// stream_end 照常），前端只弹通知中心（errorSource=plugin），不标记消息失败。
+/// 统一错误信封（code/message/source/retryable，单一真值源 config/error_codes.json）；
+/// code 缺省 PLUGIN_EXEC_FAILED，retryable=false（插件失败重跑同轮无意义）。
+async fn emit_plugin_error_events(
+    session: &SessionCoordinator,
+    thread_id: &str,
+    route_id: &str,
+    message_id: &str,
+    outcome: &crate::server::EngineOutcome,
+) {
+    for err in &outcome.plugin_errors {
+        let plugin_id = err
+            .get("plugin_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let code = err
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("PLUGIN_EXEC_FAILED");
+        let message = err
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("插件执行失败");
+        let _ = session
+            .emit_event(
+                thread_id,
+                "plugin_error",
+                serde_json::json!({
+                    "pipeline_id": route_id,
+                    "message_id": message_id,
+                    "_threadId": thread_id,
+                    "plugin_id": plugin_id,
+                    "error": {
+                        "code": code,
+                        "message": message,
+                        "source": "plugin",
+                        "retryable": false,
+                        "details": null,
+                        "request_id": null,
+                    },
+                }),
+            )
+            .await;
+    }
 }
 
 /// 成功出口主体：new_message 携带本轮最终 assistant 消息的完整持久形态

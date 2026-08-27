@@ -986,8 +986,8 @@ mod tests {
             .expect("streaming 契约必须存在");
         assert_eq!(
             streaming.capabilities.len(),
-            10,
-            "streaming 事件数漂移（stream_start/chunk/end + thinking_*3 + tool_*2 + new_message + stream_error）"
+            11,
+            "streaming 事件数漂移（stream_start/chunk/end + thinking_*3 + tool_*2 + new_message + stream_error + plugin_error）"
         );
         // 四命名空间条目（真值源 x-message-id-namespaces）
         let owners: Vec<&str> = streaming

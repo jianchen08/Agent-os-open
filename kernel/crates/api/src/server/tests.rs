@@ -3068,6 +3068,7 @@ async fn test_outcome_waiter_bridge_remove_semantics() {
             final_user: None,
             failed: false,
             degraded: false,
+            plugin_errors: Vec::new(),
         }
     }
     let (tx, mut rx) = tokio::sync::oneshot::channel();

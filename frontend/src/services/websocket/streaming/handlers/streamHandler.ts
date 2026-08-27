@@ -194,8 +194,7 @@ export function handleStreamEnd(eventData: any) {
 }
 
 /** 处理流式错误事件 */
-export function handleStreamError(eventData: any) {
-  // 先刷写缓冲区，确保错误前的内容不丢失
+export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确保错误前的内容不丢失
   flushStreamChunkBuffer()
 
   const pipelineId = resolvePipelineId(eventData)
@@ -276,5 +275,53 @@ export function handleStreamError(eventData: any) {
       typeof errorMsg === 'object' && errorMsg !== null && typeof errorMsg.source === 'string'
         ? errorMsg.source
         : undefined,
+  })
+}
+
+/** 处理插件执行错误事件（非终止信号）
+ *
+ * 引擎 warn+继续的插件失败（result.error / invoker Err）经 plugin_error 事件
+ * 送达——消息本身正常收尾（new_message/stream_end 照常），此处只弹通知中心
+ * （errorSource=plugin），不标记消息失败、不终止管道。统一错误信封
+ * （config/error_codes.json）：code 缺省 PLUGIN_EXEC_FAILED，retryable=false。
+ */
+export function handlePluginError(eventData: any) {
+  const pipelineId = resolvePipelineId(eventData)
+  if (!pipelineId) {
+    _debugLogger.warn(
+      '[PLUGIN_ERROR] pipeline_id 缺失，跳过通知: _threadId=%s',
+      extractThreadId(eventData)?.slice(0, 12) || 'null',
+    )
+    return
+  }
+
+  const errorMsg = eventData?.data?.error || eventData?.error
+  const errorText =
+    typeof errorMsg === 'string'
+      ? errorMsg
+      : typeof errorMsg?.message === 'string'
+        ? errorMsg.message
+        : '插件执行失败'
+  const code =
+    typeof errorMsg === 'object' && errorMsg !== null && typeof errorMsg.code === 'string'
+      ? errorMsg.code
+      : 'PLUGIN_EXEC_FAILED'
+  const pluginId = eventData?.data?.plugin_id || eventData?.plugin_id
+
+  _debugLogger.warn(
+    '[PLUGIN_ERROR] pipelineId=%s plugin=%s code=%s msg=%s',
+    pipelineId.slice(0, 12),
+    pluginId || 'unknown',
+    code,
+    errorText,
+  )
+
+  useNotificationStore.getState().addNotification({
+    title: '插件执行失败',
+    message: pluginId ? `插件 ${pluginId} 执行失败：${errorText}` : `插件执行失败：${errorText}`,
+    priority: 'normal',
+    category: 'error',
+    isBlocking: false,
+    errorSource: 'plugin',
   })
 }

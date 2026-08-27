@@ -132,6 +132,8 @@ export const WS_SERVER_EVENTS = {
   STREAM_END: 'stream_end',
   /** 流式输出错误（LLM 调用失败等） */
   STREAM_ERROR: 'stream_error',
+  /** 插件执行错误（非终止信号：引擎 warn+继续的插件失败，只弹通知不标记消息失败） */
+  PLUGIN_ERROR: 'plugin_error',
   /** 工具调用开始（管道流式事件） */
   TOOL_START: 'tool_start',
   /** 工具调用结果（管道流式事件） */

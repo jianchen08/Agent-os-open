@@ -848,6 +848,7 @@ pub async fn pending_inputs_delete_handler(
                 final_user: None,
                 failed: true,
                 degraded: false,
+                plugin_errors: Vec::new(),
             },
         );
     }
@@ -899,6 +900,7 @@ pub async fn pending_inputs_clear_handler(
                 final_user: None,
                 failed: true,
                 degraded: false,
+                plugin_errors: Vec::new(),
             },
         );
     }

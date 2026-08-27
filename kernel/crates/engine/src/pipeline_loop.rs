@@ -176,6 +176,11 @@ impl PipelineExecutor {
         if !key_present(&state, "ended") {
             set_key(&mut state, "ended", serde_json::Value::Bool(false));
         }
+        // 清空上一轮残留的插件错误收集（registry 热路径跨轮复用 state——
+        // 不清理会让上一轮的 _plugin_errors 被本轮 stage_finalize 重复提取）。
+        if key_present(&state, "_plugin_errors") {
+            set_key(&mut state, "_plugin_errors", serde_json::json!([]));
+        }
 
         // ADR ②③：引擎独占落库。run 开始时建 runs 记录 + 落 user 消息。
         // 失败只 warn 不阻断执行（持久化不应让管道跑不通）。
@@ -711,6 +716,12 @@ impl PipelineExecutor {
     ///
     /// `inputs`：per-plugin 输入（经 config 通道传给插件，不进 state、不落 trace；
     /// 空 = 等价旧行为）。
+    ///
+    /// 错误可见性：插件失败（result.error / invoker Err）除 warn 外，追加到
+    /// state 的 `_plugin_errors` 键（`[{plugin_id, code, message}]` 数组）——
+    /// run 结束由 api 层提取为 EngineOutcome.plugin_errors，WS 路径发射
+    /// plugin_error 事件弹前端通知（引擎 warn+继续的假成功不再完全静默）。
+    /// 下划线前缀键不参与插件 state_updates 合并（merge 只写插件声明的键）。
     async fn invoke_item_plugin(
         &self,
         plugin_id: &str,
@@ -731,6 +742,7 @@ impl PipelineExecutor {
                         error = ?result.error,
                         "plugin returned error, continuing (error_policy unified, ADR 2026-08-18)"
                     );
+                    record_plugin_error(state, plugin_id, result.error.as_ref().unwrap());
                     false
                 }
             }
@@ -741,6 +753,7 @@ impl PipelineExecutor {
                     error = %e,
                     "plugin invoker error, continuing"
                 );
+                record_plugin_error(state, plugin_id, &e);
                 false
             }
         }
@@ -1096,6 +1109,25 @@ fn set_key(state: &mut serde_json::Value, key: &str, value: serde_json::Value) {
     }
 }
 
+/// 追加一条插件错误到 state 的 `_plugin_errors` 数组（引擎内部键，插件
+/// state_updates 不会写它；api 层 run 结束后提取为 EngineOutcome.plugin_errors）。
+fn record_plugin_error(state: &mut serde_json::Value, plugin_id: &str, err: &PluginError) {
+    let entry = serde_json::json!({
+        "plugin_id": plugin_id,
+        "code": err.code.clone().unwrap_or_else(|| "PLUGIN_EXEC_FAILED".to_string()),
+        "message": err.message,
+    });
+    let arr = state
+        .get_mut("_plugin_errors")
+        .and_then(|v| v.as_array_mut());
+    match arr {
+        Some(arr) => arr.push(entry),
+        None => {
+            set_key(state, "_plugin_errors", serde_json::json!([entry]));
+        }
+    }
+}
+
 /// 读取 state[key] 的布尔值（缺失/非 bool 返回 false）。
 fn truthy_flag(state: &serde_json::Value, key: &str) -> bool {
     state
@@ -1123,6 +1155,9 @@ fn state_diff(before: &serde_json::Value, after: &serde_json::Value) -> serde_js
     for (k, v_after) in after_obj {
         if k == "messages" {
             continue; // 轨迹由 ops_ledger 实录提供，diff 不推断
+        }
+        if k == "_plugin_errors" {
+            continue; // 引擎内部键（插件错误收集），不进 trace——回放重建时由 run 开头清空重建
         }
         let changed = match before_obj.and_then(|b| b.get(k)) {
             Some(v_before) => v_before != v_after,

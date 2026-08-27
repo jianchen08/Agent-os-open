@@ -477,6 +477,68 @@
       "output_schema": {
         "type": "object"
       }
+    },
+    {
+      "method": "plugin_error",
+      "description": "插件执行错误（非终止信号）。引擎 warn+继续的插件失败（result.error / invoker Err）在 new_message 前逐个发射——消息本身正常收尾，前端只弹通知中心（errorSource=plugin），不标记消息失败。error 为统一错误信封（单一真值源 config/error_codes.json），code 缺省 PLUGIN_EXEC_FAILED，retryable=false。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "message_id",
+          "thread_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "plugin_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "失败的插件 id（通知定位用）"
+          },
+          "error": {
+            "type": "object",
+            "description": "统一错误信封（单一真值源 config/error_codes.json）：{code, message, source, retryable, details, request_id}。source 恒为 plugin",
+            "required": ["code", "message", "source", "retryable"],
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "type": "string",
+                "enum": ["kernel", "plugin", "llm", "infra", "frontend"]
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "details": {},
+              "request_id": {}
+            }
+          },
+          "persist": {
+            "type": "boolean"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
     }
   ]
 }

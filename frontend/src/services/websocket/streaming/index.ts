@@ -8,6 +8,7 @@ import {
   handleBlockStart,
   handleFinish,
   handleNewMessage,
+  handlePluginError,
   handleReasoningDelta,
   handleStreamEnd,
   handleStreamError,
@@ -74,6 +75,7 @@ export function initStreamingEvents(): void {
   _handlers[WS_SERVER_EVENTS.FINISH] = _logWrap(WS_SERVER_EVENTS.FINISH, handleFinish)
   _handlers[WS_SERVER_EVENTS.STREAM_END] = _logWrap(WS_SERVER_EVENTS.STREAM_END, handleStreamEnd)
   _handlers[WS_SERVER_EVENTS.STREAM_ERROR] = _logWrap(WS_SERVER_EVENTS.STREAM_ERROR, handleStreamError)
+  _handlers[WS_SERVER_EVENTS.PLUGIN_ERROR] = _logWrap(WS_SERVER_EVENTS.PLUGIN_ERROR, handlePluginError)
   _handlers[WS_SERVER_EVENTS.NEW_MESSAGE] = _logWrap(WS_SERVER_EVENTS.NEW_MESSAGE, handleNewMessage)
   _handlers[WS_SERVER_EVENTS.TOOL_START] = _logWrap(WS_SERVER_EVENTS.TOOL_START, handleToolStart)
   _handlers[WS_SERVER_EVENTS.TOOL_RESULT] = _logWrap(WS_SERVER_EVENTS.TOOL_RESULT, handleToolResult)

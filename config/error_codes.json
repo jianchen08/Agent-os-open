@@ -95,6 +95,14 @@
       "description": "capability_router tool-executor.invoke 未注册工具"
     },
     {
+      "code": "PLUGIN_EXEC_FAILED",
+      "http_status": 200,
+      "source": "plugin",
+      "retryable": false,
+      "message": "插件执行失败",
+      "description": "引擎 invoke_item_plugin 插件失败（result.error / invoker Err）的缺省码——plugin_error 事件（引擎 warn+继续的假成功显式化）"
+    },
+    {
       "code": "ENGINE_RUN_FAILED",
       "http_status": 200,
       "source": "kernel",
