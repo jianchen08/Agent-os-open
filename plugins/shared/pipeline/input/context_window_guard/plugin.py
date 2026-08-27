@@ -1,22 +1,16 @@
-"""上下文窗口守卫 Input 插件（Step 4 重建版）。
+"""上下文窗口守卫 Input 插件。
 
 在每次 LLM 调用前检查上下文大小，超阈值时执行预算驱动的分层压缩。
 
-本插件 Step 4 重建要点（相对 0.1 的变化）：
-- 压缩算法（CompressionConfig + ContextCompressor）从
-  memory/context_compressor.py 内联到本文件，消除对 0.2 中不存在的
-  `memory` 模块的导入依赖（修复老版 _get_memory_service 第 629 行的 import
-  在 try/except 之外的 bug，以及 _resolve_trigger_ratio 对
-  memory.context_compressor 的硬导入）。
-- LLM 调用经 `_capability_caller` 调 memory.compress 工具（LLMClient 直连
-  HTTP 路径已退役——零生产消费者，LLM 面收敛由 llm_service 承接）。测试
-  环境直接注入 llm_call_fn。
-- 存储后端由 ctx.get_service("chunk_service") 改为模块级
-  `_memory_backend: IMemoryBackend`（Hindsight/capability），通过
-  `set_memory_backend()` 注入。L1/L2/STATE_SNAPSHOT 块以
-  memory_type="chunk" 写入，memory_items 以 memory_type="semantic" 写入。
+职责与接线（现状契约）：
+- 压缩算法（CompressionConfig + ContextCompressor）内联于本文件；
+  压缩 LLM 经 ``_capability_caller`` 调 memory.compress 工具，测试环境
+  直接注入 llm_call_fn。
+- 存储后端为模块级注入的 ``_memory_backend: IMemoryBackend``
+  （server.py on_load 注入）；L1/L2/STATE_SNAPSHOT 块以 memory_type="chunk"
+  写入，memory_items 以 memory_type="semantic" 写入。
 
-压缩优化（docs/tasks/task_compression_optimization.md，0.2 P2）：
+压缩优化机制：
 - 任务 1 语义标记：消息内部字段 _context_form 声明语义形态
   （instructions/notice/recall/relay/snapshot，见 CONTEXT_FORM_* 词汇表），
   压缩时渲染为 [form] 标签前缀供压缩 LLM 差异化摘要；llm_core 发送前清理。
@@ -47,7 +41,7 @@ LLMCallFn = Callable[[str | list[dict[str, Any]]], Awaitable[str]]
 # 能力调用函数类型：(method, params) -> Any（用于调 memory.compress 等工具）
 CapabilityCaller = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
-# 压缩摘要注入提示（与 0.1 保持一致）
+# 压缩摘要注入提示
 _COMPRESSION_NOTICE = (
     "[系统提示] 由于对话历史过长，较早的上下文已被记忆系统分层压缩。"
     "压缩摘要包含在上方消息中，请基于压缩摘要和当前剩余上下文继续完成任务。"
@@ -137,7 +131,7 @@ def _make_minimal_ctx(
 
 
 # ═══════════════════════════════════════════════════════════
-# 压缩配置（从 0.1 memory/context_compressor.py 移植）
+# 压缩预算配置（读 config/system/context_window_config.yaml，失败回退默认的单一实现）
 # ═══════════════════════════════════════════════════════════
 
 @dataclass
@@ -169,7 +163,7 @@ class CompressionConfig:
         """从 config/system/context_window_config.yaml 加载预算配置。
 
         通过 ConfigCenter 读取（统一缓存 + 热重载），路径由 ConfigCenter 解析。
-        读取失败时回退到代码默认（与 0.1 行为一致）。
+        读取失败时回退到代码默认。
 
         Args:
             context_window: 当前模型上下文窗口大小
@@ -224,7 +218,7 @@ class CompressionConfig:
 
 
 # ═══════════════════════════════════════════════════════════
-# 压缩器（从 0.1 memory/context_compressor.py 移植）
+# 分层压缩器
 # ═══════════════════════════════════════════════════════════
 
 
@@ -240,7 +234,7 @@ class ContextCompressor:
     同模型时复用 provider 前缀 cache；任何模型时压缩 LLM 读到完整连贯消息流。
     带 _context_form 的消息渲染 [form] 语义标签（任务 1 叠加生效）。
 
-    设计原则（与 0.1 一致）：
+    设计原则：
     - 纯函数设计，无状态管理
     - 输入输出都是字符串/字典
     - 不直接操作数据库（落库由 CompressionService 负责）
@@ -258,7 +252,7 @@ class ContextCompressor:
     # 上一次执行请求的真前缀（同模型时可复用 provider 的 warm prefix cache），
     # 末尾指令是唯一新增输入。
     # 产出结构不变：仍要求 L1/L2/keywords/state_snapshot/memory_items 五段 JSON
-    # （字段定义从 0.1 COMPRESS_PROMPT 原样移植，精心调校，勿改）。
+    # （五段字段名是解析器按段提取的解析契约，精心调校，勿改）。
     # 旧 {messages}/{state_snapshot}/{recent_process_blocks} 占位符已删——
     # 这些内容已在 fork 消息流里（压缩块/快照在 compression_messages 段，
     # 过程在 messages 段），模板不再重复拼。
@@ -471,7 +465,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         Raises:
             RuntimeError: LLM 调用过程异常时
         """
-        # 空消息：返回空结果字典（不调 LLM），与 0.1 行为一致
+        # 空消息：返回空结果字典（不调 LLM）
         if not messages:
             return {
                 "l1": "",
@@ -790,11 +784,11 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
 class CompressionService:
     """压缩服务：在 ContextCompressor 之上叠加预算切分、多轮、落库。
 
-    0.1 MemoryContextService 的精简版：去掉 router_factory / llm_core 适配，
+    面向管道的最小记忆服务：只做本插件的块写入/查询。
     LLM 调用统一走注入的 llm_call_fn（由模块级 _capability_caller 构建）；
     存储统一走注入的 IMemoryBackend（模块级 _memory_backend）。
 
-    落库映射（与 0.1 chunk_service + memory_service 对齐）：
+    落库映射：
     - L1 / L2 / STATE_SNAPSHOT → backend.add(memory_type="chunk", ...)
     - memory_items → backend.add(memory_type="semantic", ...)
     """
@@ -1140,7 +1134,7 @@ class CompressionService:
     ) -> None:
         """把压缩结果落到 IMemoryBackend。
 
-        映射（与 0.1 chunk_service + memory_service 对齐）：
+        映射：
         - L1 块：backend.add(memory_type="chunk", content=l1, tags=["L1", ...])
         - L2 块：backend.add(memory_type="chunk", content=l2, tags=["L2", ...])
         - STATE_SNAPSHOT：backend.add(memory_type="chunk", content=ss_json,

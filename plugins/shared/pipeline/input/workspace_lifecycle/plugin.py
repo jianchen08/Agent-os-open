@@ -6,7 +6,8 @@
 
 - **init（bootstrap）**：消费 `state.execution_context.workspace`
   （`{source_path, mode}`，由 task_submit / 会话创建参数解析注入）。有任务
-  上下文（state.task_id）时调 `on_task_start` 真实创建空间（worktree/plain）；
+  上下文（state["task.id"]，== pipeline_id 的任务身份权威键）时调
+  `on_task_start` 真实创建空间（worktree/plain）；
   主会话（无任务）直接解析 source_path 写 state。结果写入
   `state.workspace` / `project_root` / `ws_meta`。幂等：state 已有 workspace
   则跳过。服务不可用时降级为纯解析（不阻断管道）。
@@ -45,7 +46,7 @@ def _ensure_isolation_path() -> None:
             sys.path.insert(0, _p)
 
 
-# ── GAP-1 统一：state 聚合读取器（server.py on_load 注入，pipeline-state capability）──
+# ── state 聚合读取器（server.py on_load 注入，pipeline-state capability）──
 _state_reader: Any = None
 # 最近一次聚合行快照（async 上下文刷新，sync 消费端只读缓存——
 # 消费链 task_tree.get_task 是同步库接口，直接调用 async reader 会产生
@@ -76,12 +77,11 @@ async def refresh_state_rows() -> None:
 
 
 class _ExecutionContextTaskTree:
-    """task_tree 接口的 state 直读实现（GAP-1 统一：task = pipeline）。
+    """task_tree 接口的 state 直读实现（任务 = 管道 state 单一真值）。
 
     服务内部 `_start_subtask` 依赖 `task_tree.get_task(task_id)` 返回带
-    `parent_task_id` / `metadata` 的对象——统一后不再伪造（0.1 的
-    task_tree.get_task 仿真已退役），改为读管道 state 聚合行
-    （lineage.parent_pipeline_id = 父链）：
+    `parent_task_id` / `metadata` 的对象；本实现直接读管道 state 聚合行
+    （lineage.parent_pipeline_id = 父链），不仿真库对象：
 
     - `get_task(当前任务)` → `parent_task_id`（state 顶层扁平键
       `lineage.parent_pipeline_id`，引擎出生写入）；
@@ -249,9 +249,9 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         # 用 source_path（task 创建时带的项目根）作为 base_path 修正。
         manager = self._get_manager(base_path_hint=source_path)
         if not source_path and task_id:
-            # 0.1 执行语义兜底（task_executor._resolve_task_workspace）：无显式
-            # workspace 的任务在「工作空间根/{task_id}」下创建目录——默认隔离
-            # 执行的工作空间（容器挂载与 bash 执行均以此为锚）。
+            # 默认工作空间语义：无显式 workspace 声明的任务在
+            # 「工作空间根/{task_id}」下创建目录——默认隔离执行的工作空间
+            # （容器挂载与 bash 执行均以此为锚）。
             try:
                 _ensure_isolation_path()
                 from isolation.workspace import (  # noqa: PLC0415

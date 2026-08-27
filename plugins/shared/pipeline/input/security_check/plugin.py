@@ -346,6 +346,9 @@ class SecurityCheckPlugin(IInputPlugin):
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """执行安全检查逻辑。
 
+        本方法只做编排；两道检查分别委托 ``_run_base_safety_scan`` /
+        ``_authorize_non_isolated_tools``，各自可独立理解。
+
         隔离即放行，裸操作才审批：
         1. 基础安全检查（路径遍历 / 敏感系统目录黑名单）→ 任何模式都必须执行，
            这是防注入、防触碰 OS 核心目录的底线，隔离不能绕过
@@ -379,13 +382,39 @@ class SecurityCheckPlugin(IInputPlugin):
         if not tool_calls:
             return {"security.decision": {"allowed": True, "reason": "no tool calls to check"}}
 
-        # 判断执行模式
-        execution_contexts = ctx.state.get("execution_contexts", [])
+        blocked = self._run_base_safety_scan(ctx, tool_calls)
+        if blocked is not None:
+            return blocked
 
-        # ── 第一道：基础安全检查（路径遍历 + 敏感系统目录黑名单 + nul 重定向）──
-        # 任何模式都必须执行，这是防注入、防触碰 OS 核心目录的底线。
-        # host 模式不再做工作目录越界检查（不管路径）。
-        # 违规时软拦截——反馈给 LLM 让它改正，不杀引擎。
+        # ── 第二道：按模式分流 ──
+
+        # 隔离任务即放行：isolation_level 是隔离唯一真相源，隔离任务（isolated/None/空）
+        # 的所有工具一律放行，不弹审批——无论工具走 docker 还是 host。
+        execution_contexts = ctx.state.get("execution_contexts", [])
+        if self._is_isolated(execution_contexts):
+            logger.info("[%s] 隔离任务，基础检查通过，放行", self.name)
+            return {"security.decision": {"allowed": True, "reason": "isolated task, base checks passed"}}
+
+        decision = await self._authorize_non_isolated_tools(ctx, tool_calls)
+        if decision is not None:
+            return decision
+
+        return {"security.decision": {"allowed": True, "reason": "all checks passed"}}
+
+    def _run_base_safety_scan(
+        self,
+        ctx: PluginContext,
+        tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """第一道：基础安全检查（路径遍历 + 敏感系统目录黑名单 + nul 重定向）。
+
+        任何模式都必须执行，这是防注入、防触碰 OS 核心目录的底线，隔离不能绕过。
+        host 模式不做工作目录越界检查（不管路径）。违规时软拦截——反馈给 LLM
+        让它改正，不杀引擎。
+
+        Returns:
+            违规时的软拦截决策字典；全部通过返回 None。
+        """
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
@@ -426,16 +455,18 @@ class SecurityCheckPlugin(IInputPlugin):
                     tool_name,
                     f"CMD 风格重定向被拦截: {nul_reason}（Git Bash 下请用 2>/dev/null）",
                 )
+        return None
 
-        # ── 第二道：按模式分流 ──
+    async def _authorize_non_isolated_tools(
+        self,
+        ctx: PluginContext,
+        tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """非隔离任务的逐工具授权：只读白名单 → 危险判定 → 规则/指纹/权限模式。
 
-        # 隔离任务即放行：isolation_level 是隔离唯一真相源，隔离任务（isolated/None/空）
-        # 的所有工具一律放行，不弹审批——无论工具走 docker 还是 host。
-        if self._is_isolated(execution_contexts):
-            logger.info("[%s] 隔离任务，基础检查通过，放行", self.name)
-            return {"security.decision": {"allowed": True, "reason": "isolated task, base checks passed"}}
-
-        # 非隔离任务：逐个检查工具调用的参数
+        Returns:
+            需要处置（软拦截/弹审批）时的决策字典；全部放行返回 None。
+        """
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
@@ -474,79 +505,106 @@ class SecurityCheckPlugin(IInputPlugin):
                 )
                 continue
 
-            # 未命中 allow 白名单/记忆指纹 → 按权限模式分流处置。
-            # 模式决定"未命中规则"的档位：default=确认、accept_edits=文件放行、
-            # auto=尽量自动、plan=写类拒绝、bypass=跳过审批。
-            mode = self._resolve_permission_mode(ctx)
+            mode_decision = await self._dispatch_by_permission_mode(
+                ctx,
+                tool_name=tool_name,
+                action=action,
+                rule_name=rule_name,
+                signature=signature,
+            )
+            if isinstance(mode_decision, dict):
+                return mode_decision
+            if mode_decision == "block_plan_write":
+                return self._soft_block(ctx, tool_name, f"plan（只读）模式拒绝写操作: {tool_name}")
+            # "pass"：本工具放行，继续下一工具
+        return None
 
-            if mode == "bypass":
+    async def _dispatch_by_permission_mode(
+        self,
+        ctx: PluginContext,
+        *,
+        tool_name: str,
+        action: str,
+        rule_name: str | None,
+        signature: str | None,
+    ) -> str | dict[str, Any]:
+        """按权限模式处置未命中白名单/记忆指纹的危险工具。
+
+        模式决定"未命中规则"的档位：default=确认、accept_edits=文件放行、
+        auto=尽量自动、plan=写类拒绝读类放行、bypass=跳过审批。
+        default / auto(ask) / accept_edits(命令类) / plan(命令类) 且**未命中任何规则**
+        → 参数安全，直接放行。命中 needs_approval/block 规则的参数（rm -rf 等关键词）
+        已在 _match_rules 返回对应 action，只有 action 为空（未命中）才走到放行分支；
+        规则缺失/为空（安全闸门失效风险）→ 兜底弹审批（安全优先）。
+
+        Returns:
+            "pass"（放行）；"block_plan_write"（plan 模式写类软拦截）；
+            或处置完成的决策字典（auto 自动拒绝 / 弹审批）。
+        """
+        mode = self._resolve_permission_mode(ctx)
+
+        if mode == "bypass":
+            logger.info(
+                "[%s] bypass 模式放行 | tool=%s",
+                self.name,
+                tool_name,
+            )
+            return "pass"
+
+        if mode == "accept_edits" and tool_name in _FILE_TOOLS:
+            logger.info(
+                "[%s] accept_edits 模式文件类放行 | tool=%s",
+                self.name,
+                tool_name,
+            )
+            return "pass"
+
+        if mode == "plan":
+            if tool_name in _WRITE_TOOLS:
                 logger.info(
-                    "[%s] bypass 模式放行 | tool=%s",
+                    "[%s] plan（只读）模式拒绝写类 | tool=%s",
                     self.name,
                     tool_name,
                 )
-                continue
-
-            if mode == "accept_edits" and tool_name in _FILE_TOOLS:
+                return "block_plan_write"
+            # 读类危险操作（如 file_read 敏感路径）在只读模式下放行（读不破坏）
+            if tool_name in _FILE_TOOLS:
                 logger.info(
-                    "[%s] accept_edits 模式文件类放行 | tool=%s",
+                    "[%s] plan 模式读类放行 | tool=%s",
                     self.name,
                     tool_name,
                 )
-                continue
+                return "pass"
 
-            if mode == "plan":
-                if tool_name in _WRITE_TOOLS:
-                    logger.info(
-                        "[%s] plan（只读）模式拒绝写类 | tool=%s",
-                        self.name,
-                        tool_name,
-                    )
-                    return self._soft_block(ctx, tool_name, f"plan（只读）模式拒绝写操作: {tool_name}")
-                # 读类危险操作（如 file_read 敏感路径）在只读模式下放行（读不破坏）
-                if tool_name in _FILE_TOOLS:
-                    logger.info(
-                        "[%s] plan 模式读类放行 | tool=%s",
-                        self.name,
-                        tool_name,
-                    )
-                    continue
-
-            if mode == "auto" and action == "block":
-                logger.info(
-                    "[%s] auto 模式自动拒绝（block 规则）| tool=%s | rule=%s",
-                    self.name,
-                    tool_name,
-                    rule_name,
-                )
-                return self._soft_block(ctx, tool_name, f"安全规则自动拒绝: {rule_name or 'block'}")
-
-            # default / auto(ask) / accept_edits(命令类) / plan(命令类) 且**未命中任何规则**
-            # → 参数安全，直接放行。命中 needs_approval/block 规则的参数（rm -rf 等关键词）
-            # 已在 _match_rules 返回对应 action，只有 action 为空（未命中）才走到这里。
-            # 规则缺失/为空（安全闸门失效风险）→ 兜底弹审批（安全优先）。
-            if not rule_name:
-                logger.info(
-                    "[%s] 黑名单规则未命中，放行 | tool=%s",
-                    self.name,
-                    tool_name,
-                )
-                continue
-            reason = "参数命中安全规则: " + rule_name
-            logger.warning(
-                "[%s] 危险工具参数命中规则，弹审批 | tool=%s | rule=%s",
+        if mode == "auto" and action == "block":
+            logger.info(
+                "[%s] auto 模式自动拒绝（block 规则）| tool=%s | rule=%s",
                 self.name,
                 tool_name,
                 rule_name,
             )
-            return await self._await_approval(
-                ctx,
-                tool_name,
-                reason,
-                signature=signature,
-            )
+            return self._soft_block(ctx, tool_name, f"安全规则自动拒绝: {rule_name or 'block'}")
 
-        return {"security.decision": {"allowed": True, "reason": "all checks passed"}}
+        if not rule_name:
+            logger.info(
+                "[%s] 黑名单规则未命中，放行 | tool=%s",
+                self.name,
+                tool_name,
+            )
+            return "pass"
+        reason = "参数命中安全规则: " + rule_name
+        logger.warning(
+            "[%s] 危险工具参数命中规则，弹审批 | tool=%s | rule=%s",
+            self.name,
+            tool_name,
+            rule_name,
+        )
+        return await self._await_approval(
+            ctx,
+            tool_name,
+            reason,
+            signature=signature,
+        )
 
     def _resolve_permission_mode(self, ctx: PluginContext) -> str:
         """解析当前调用的权限模式。

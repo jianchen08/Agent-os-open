@@ -5,10 +5,8 @@
 2. 迭代上限/超时检测（stop_check_strategy）
 3. 任务被删除/取消（task_status）
 
-合并收益：高内聚（共享 should_stop/iteration_count 状态字段）+ 低维护成本。
-
-M6d 阶段：从旧代码 agents/decision/strategies/iteration/ 中的
-stop_requested、stop_check_strategy、task_status 合并迁移。
+三个关注点共享 should_stop / iteration_count 等状态字段，
+统一在输出阶段一次判定并按优先级短路。
 
 State 命名空间：
     - router.stop_reason : 本插件写入的停止原因
@@ -27,11 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class StopCheckPlugin(IOutputPlugin):
-    """停止检查 Output 插件。
-
-    合并了旧代码中 stop_requested、stop_check_strategy、task_status
-    三个策略的停止判断逻辑。三者共享 should_stop/iteration_count 状态，
-    合并后统一管理"停止"关注点的状态读取和判断。
+    """停止检查 Output 插件——用户停止 / 迭代上限 / 超时 / 评估终态 / 任务终态。
 
     检查维度（按优先级）：
     1. 用户请求停止 → should_stop == True

@@ -198,11 +198,9 @@ class ParamInjectPlugin(IInputPlugin):
             if self._inject_timestamp and "timestamp" not in args:
                 args["timestamp"] = datetime.now(UTC).isoformat()
 
-            # 注入 task_id
-            # （task_id=null/""）时仍判定为「已存在」而跳过注入，
-            # 导致 L2 task_submit 拿不到 parent_task_id，报
-            # L2_REQUIRES_PARENT_TASK。注入参数是系统权威值，
-            # 只要 args 中没有有效值就注入。
+            # 注入 task_id：注入参数是系统权威值，args 中任何空值占位
+            # （None/""）都不算"已存在"——只要没有有效值就必须注入，否则
+            # 下游 task_submit/task_evaluate 拿不到父任务身份无法定位任务。
             if not args.get("task_id"):
                 # 任务身份权威键是 task.id（点号键，内核 chat_send_handler
                 # 创建管道时注入，值 = pipeline_id，引擎注入不可伪造）。

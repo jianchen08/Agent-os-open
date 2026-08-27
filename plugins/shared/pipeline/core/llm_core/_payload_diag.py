@@ -5,7 +5,7 @@ litellm，每次 LLM 调用把原始 HTTP body（可能含明文 ``api_key`` / `
 且必然含完整 prompt）落盘到仓库内 ``logs/payload_diag/``，并用 ``except Exception: pass``
 空吞错——既泄露敏感信息，又污染仓库目录、产生大量未跟踪 JSON。
 
-本模块把诊断相关的纯函数从 adapter 中拆出（不依赖 litellm，便于单测）：
+诊断纯函数归属地（不依赖 litellm，便于单测）：
 
 - 默认关闭：仅当环境变量 ``AGENTOS_PAYLOAD_DIAG=1`` 时才可能写诊断文件；
 - 脱敏：写入前对 ``api_key`` / ``api-key`` / ``apikey`` / ``authorization`` /

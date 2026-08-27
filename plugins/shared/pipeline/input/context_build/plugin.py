@@ -1,11 +1,9 @@
-"""上下文构建 Input 插件 — 从旧代码 agents/context.py 迁移。
+"""上下文构建 Input 插件 — agent 配置加载与上下文装配的唯一归口。
 
-负责在管道循环的输入阶段构建上下文信息，
-将 agent 配置、层级信息、会话元数据等写入 state，
+负责在管道循环的输入阶段构建上下文信息：按 state.agent_id 加载
+agent yaml（自持配置，内核只留 tool_ids 窄接口），将提示词骨架、
+agent 名称/层级、会话元数据等写入 state，
 供后续插件（prompt_build、knowledge_inject 等）和 Core 读取。
-
-M6a 阶段：从 AgentContext 的依赖注入模式迁移为插件模式，
-核心逻辑是组装管道执行所需的上下文字段到 state 中。
 
 State 命名空间：
     - context.* : 本插件写入的上下文字段
@@ -26,15 +24,11 @@ logger = logging.getLogger(__name__)
 class ContextBuildPlugin(IInputPlugin):
     """上下文构建 Input 插件。
 
-    从旧代码 AgentContext 迁移而来。将 agent 配置、层级信息、
-    会话元数据等组装为管道执行所需的上下文字段，写入 state。
+    将 agent 配置（yaml 解析结果）、层级信息、会话元数据等组装为
+    管道执行所需的上下文字段写入 state；本插件只构建"上下文数据"，
+    不管理服务实例（服务经 PluginContext.get_service 获取）。
 
-    旧代码中 AgentContext 是一个大的依赖注入容器，包含协调器、
-    服务、配置等。迁移后，本插件只负责构建"上下文数据"本身，
-    不负责管理服务实例（服务通过 PluginContext.get_service 获取）。
-
-    优先级：10（准备级，先于其他 Input 插件执行）
-    最小上下文也能跑。
+    优先级：10（准备级，先于其他 Input 插件执行）；最小上下文也能跑。
 
     Attributes:
         _config: 插件配置字典

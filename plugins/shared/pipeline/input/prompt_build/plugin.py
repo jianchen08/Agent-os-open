@@ -1,4 +1,4 @@
-"""提示词构建 Input 插件 — 从旧代码 agents/prompt_builder.py 迁移。
+"""提示词构建 Input 插件。
 
 负责在管道循环的输入阶段组装 SystemMessage 及相关消息。
 
@@ -13,20 +13,18 @@
     3. tools_description  <- state["prompt.tool_descriptions"]（仅当开关开启时拼入）
     4. static_vars        <- agent_config 或 state 读取（记忆/知识检索的唯一 opt-in 入口）
 
-注意：memory.retrieved / knowledge.context 不再无条件拼入 system_message —— 这两个 state
+注意：memory.retrieved / knowledge.context 不无条件拼入 system_message —— 这两个 state
 仅供其他插件使用；记忆/知识要进提示词，必须由 static_vars 显式声明
 retrieval/tags（走 _retrieve_by_tags）。压缩层（L1/L2）作为 compression_messages
 独立消息输出，不合并到 system_message。
 
-Step 6 重建要点（相对 0.1 的变化）：
-- 压缩块/状态快照的存储来源由 ctx.get_service("chunk_service") 改为模块级
-  `_memory_backend: IMemoryBackend`（Hindsight/Kernel），通过 set_memory_backend()
-  注入——与 context_window_guard Step 4 的模式一致。L1/L2/STATE_SNAPSHOT 块以
+基础设施接线（与兄弟插件共享同一形态）：
+- 压缩块/状态快照存储走模块级 ``_memory_backend: IMemoryBackend``，
+  server.py on_load 注入 set_memory_backend()。L1/L2/STATE_SNAPSHOT 块以
   memory_type="chunk" 落库，metadata.tags 含 pipeline:{id} / L1|L2 / seq:{start}-{end}。
-- 压缩预算配置复用兄弟插件 context_window_guard 内联的 CompressionConfig
+- 压缩预算配置复用 context_window_guard 内联的 CompressionConfig
   （单一实现：读 config/system/context_window_config.yaml，失败回退默认）。
-- {{retrieval:...}} 占位符的向量检索由 ctx.get_service("retriever") 改为
-  _memory_backend.search。
+- {{retrieval:...}} 占位符的向量检索走 _memory_backend.search。
 """
 
 from __future__ import annotations

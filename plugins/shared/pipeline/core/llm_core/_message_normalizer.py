@@ -526,14 +526,19 @@ def reset_pairing_cache(
     _pairing_validated_len.pop(f"{provider}:{name}:{pipeline_id}", None)
 
 
-def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
+def normalize_messages_for_provider(  # noqa: PLR0912
     messages: list[dict[str, Any]],
     *,
     provider: str,
     name: str,
     pipeline_id: str = "",
 ) -> list[dict[str, Any]]:
-    """针对特定 LLM 提供商的消息格式修正。"""
+    """针对特定 LLM 提供商的消息格式修正。
+
+    通用段（所有 provider）：tool_calls 结构/ id 标准化 → 配对完整性校验。
+    MiniMax 专有段：标准转换（Phase 1）→ 重定位（Phase 2）→ 终极安全网
+    （Phase 3），三阶段各自可独立理解，行为顺序不可交换。
+    """
     # 通用修正：确保 tool_calls 是 OpenAI API 格式
     _normalize_tool_calls_in_messages(messages)
 
@@ -551,13 +556,39 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
     if provider != "minimax":
         return messages
 
-    # MiniMax 专有修正（tool_calls/tool 配对已由 _validate_tool_call_pairing 统一处理）
+    converted, converted_count = _minimax_phase_standardize(messages, name)
+    result, relocated_count = _minimax_phase_relocate(converted)
+    _minimax_final_system_guard(result, name)
 
+    if converted_count:
+        logger.info(
+            "[%s] MiniMax: 将 %d 条非首位 system 消息转换为 user",
+            name,
+            converted_count,
+        )
+    if relocated_count:
+        logger.info(
+            "[%s] MiniMax: 重定位 %d 条 assistant(tool_calls) 与 tool 之间的非法消息",
+            name,
+            relocated_count,
+        )
+    return result
+
+
+def _minimax_phase_standardize(
+    messages: list[dict[str, Any]],
+    name: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """MiniMax Phase 1 标准转换（非首位 system→user、name 剥离、tool 内容清理）。
+
+    MiniMax 要求所有 user 消息的 name 字段一致，因此统一不设置 name；
+    tool 内容去掉 NUL 并截断到 8000；assistant 的 tool_call arguments 必须
+    是合法 JSON 字符串，非法则尝试修复、失败重置 "{}"（MiniMax 返回格式不稳定）。
+
+    Returns:
+        (转换后的消息列表, 被转换的非首位 system 条数)。
+    """
     converted_count = 0
-    relocated_count = 0
-
-    # Phase 1: 标准转换（非首位 system→user, tool 内容清理）
-    # MiniMax 要求所有 user 消息的 name 字段一致，因此统一不设置 name
     converted: list[dict[str, Any]] = []
     for idx, msg in enumerate(messages):
         if msg.get("role") == "system" and idx > 0:
@@ -624,11 +655,23 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
                                 args_val[:500],
                             )
                             fn["arguments"] = "{}"
+    return converted, converted_count
 
-    # Phase 2: 重定位 assistant(tool_calls) 和 tool 之间的非法消息
-    # 通过 tool_call_id 匹配来正确分组：Phase B 的增量扫描可能遗漏不完整的
-    # assistant(tool_calls)，导致后续 assistant 的 tool results 被错误分配给
-    # 前面的不完整 assistant。
+
+def _minimax_phase_relocate(
+    converted: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """MiniMax Phase 2 重定位 assistant(tool_calls) 与 tool 之间的非法插入消息。
+
+    通过 tool_call_id 匹配正确分组：增量扫描（Phase B）可能遗漏不完整的
+    assistant(tool_calls)，导致后续 assistant 的 tool results 被错误分配给
+    前面的不完整 assistant。非法插入者改写为 user（清除不兼容字段）后
+    归位于对应 tool 组之后。
+
+    Returns:
+        (重定位后的消息列表, 被移动的消息条数)。
+    """
+    relocated_count = 0
     result: list[dict[str, Any]] = []
     i = 0
     while i < len(converted):
@@ -692,28 +735,24 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
                 continue
         i += 1
 
-    if converted_count:
-        logger.info(
-            "[%s] MiniMax: 将 %d 条非首位 system 消息转换为 user",
-            name,
-            converted_count,
-        )
-    if relocated_count:
-        logger.info(
-            "[%s] MiniMax: 重定位 %d 条 assistant(tool_calls) 与 tool 之间的非法消息",
-            name,
-            relocated_count,
-        )
+    return result, relocated_count
 
-    # Phase 5: 终极安全网 — 确保所有非首位 system 消息都已转换
-    # 根因：StreamRepetitionGuard、ThinkingTruncationGuard 等管道组件
-    # 会注入 system 消息，Phase 1-4 的复杂重定位在极端边界可能遗漏。
-    # 此阶段做最终扫描，确保 MiniMax 永远不会收到非法 system 消息。
+
+def _minimax_final_system_guard(result: list[dict[str, Any]], name: str) -> int:
+    """终极安全网：确保除首位外没有任何 system 消息到达 MiniMax。
+
+    管道组件（评估闸门提醒注入等）会插入 system 消息，前序阶段的复杂
+    重排在极端边界可能遗漏，此阶段做最终线性扫描兜底——这是发送前的
+    最后一道角色约束。
+
+    Returns:
+        就地修正的消息条数。
+    """
     final_fix_count = 0
     for _i, _m in enumerate(result):
         if _i > 0 and _m.get("role") == "system":
             logger.warning(
-                "[%s] MiniMax Phase 5 安全网: 非首位 system→user idx=%d, content=%s",
+                "[%s] MiniMax 安全网: 非首位 system→user idx=%d, content=%s",
                 name,
                 _i,
                 str(_m.get("content", ""))[:200],
@@ -721,11 +760,4 @@ def normalize_messages_for_provider(  # noqa: PLR0912,PLR0915
             _m["role"] = "user"
             _m.pop("name", None)
             final_fix_count += 1
-    if final_fix_count:
-        logger.warning(
-            "[%s] MiniMax Phase 5 安全网修复了 %d 条遗漏的 system 消息",
-            name,
-            final_fix_count,
-        )
-
-    return result
+    return final_fix_count

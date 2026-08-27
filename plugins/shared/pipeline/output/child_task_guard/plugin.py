@@ -21,7 +21,7 @@ from pipeline.types import ACTIVE_TASK_STATUSES, RouteSignal
 
 logger = logging.getLogger(__name__)
 
-# ── GAP-1 统一：state 聚合读取器（server.py on_load 注入，pipeline-state capability）──
+# ── state 聚合读取器（server.py on_load 注入，pipeline-state capability）──
 # 约定签名：``() -> list[dict]``（sync 或 async，管道 state 聚合行，行为扁平点号键
 # 如 {"pipeline_id": ..., "task.status": ..., "lineage.parent_pipeline_id": ...}）。
 # None = 未注入（读面降级为旧 task_service 回退）。
@@ -83,10 +83,6 @@ class ChildTaskGuard(IOutputPlugin):
         iteration = state.get("iteration", -1)
 
         core_type = state.get("core_type", "")
-
-        # GAP-1 统一：评估完成收口不再依赖 task_evaluation_completed 标志
-        # （0.1 task_executor 写、0.2 起孤儿无写者）——任务终态 = run 终态，
-        # 收口由 task_completed 域事件 + 活跃子任务 state 判定覆盖。
 
         task_id = state.get("task.id")
         pipeline_id = state.get("pipeline_id", "")
@@ -156,7 +152,7 @@ class ChildTaskGuard(IOutputPlugin):
         active_statuses = ACTIVE_TASK_STATUSES
         seen_ids: set[str] = set()
 
-        # GAP-1 统一：主路径读 state 聚合（task = pipeline，lineage 即父链）——
+        # 主路径读 state 聚合（task = pipeline，lineage 即父链）——
         # 活跃子任务 = lineage.parent_pipeline_id == 当前管道 且 task.status 活跃。
         # 读面可用时不再依赖 task_service（YAML 只读镜像）。
         state_rows = await self._read_state_rows()

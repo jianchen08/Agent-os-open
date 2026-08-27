@@ -31,7 +31,7 @@ def get_instance() -> WorkspaceLifecyclePlugin:
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
-    # GAP-1 统一：注入 state 聚合读取器（task_tree 直读实现的数据源）
+    # 注入 state 聚合读取器（task_tree 直读实现的数据源）
     try:
         import plugin as plugin_mod  # noqa: PLC0415
 

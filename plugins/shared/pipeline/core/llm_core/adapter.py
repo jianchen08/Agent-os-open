@@ -21,7 +21,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import litellm
 
-# 诊断与审计基础设施（自本模块拆出，logger 名保持 "adapter.*"，见 _diagnostics.py）。
+# 诊断与审计基础设施：诊断面归属 _diagnostics.py，logger 名恒为 "adapter.*"。
 from _diagnostics import (
     _diag_logger,
     _log_prompt_body,
@@ -31,7 +31,7 @@ from _diagnostics import (
     stream_recv_chunk_diag,
 )
 
-# 提供者适配插件注册表（3a：MiniMax 角色修正 / DeepSeek extra_body 透传 /
+# 提供者适配插件注册表（MiniMax 角色修正 / DeepSeek extra_body 透传 /
 # <think/> 提取均按模型名分发到 llm_provider_* 插件，llm_core 不绑定提供者）。
 from _provider_registry import apply_pre_send, extract_thinking_from_content
 
@@ -265,7 +265,7 @@ class _StreamState:
 
     ``_call_streaming`` 按职责拆分为多个私有辅助方法后，原闭包/局部可变状态统一由本
     dataclass 持有并在方法间传递（对象属性原地修改），使各方法无需 ``nonlocal`` 即可
-    读写同一份状态——行为与拆分前单体实现的闭包完全等价。
+    读写同一份状态。
 
     Attributes:
         result_parts: 正文文本片段（按 chunk 顺序累积）。
@@ -330,7 +330,7 @@ class _BaseLiteLLMAdapter:
         """执行 LLM 调用，支持非流式和流式两种模式。"""
         # 提供者适配（可选插件，按模型名分发）：MiniMax 消息角色安全修正 +
         # openai/ 前缀中转端点的 reasoning_effort/thinking 透传（extra_body）。
-        # 与拆分前的内联实现等价，未命中任何规则时行为不变（内置 LiteLLM 直调）。
+        # 未命中任何规则时行为不变（内置 LiteLLM 直调）。
         messages = apply_pre_send(model, messages, kwargs)
 
         # provider 适配：按 provider 规则裁剪/转换消息（如 DeepSeek 采样保留 rc）
@@ -472,7 +472,7 @@ class _BaseLiteLLMAdapter:
         编排：构造参数 → 建连读首 chunk（首字节超时统一覆盖建连→响应头→首字节）
         → 消费流（inter-chunk 静默超时 + 心跳/硬超时兜底 + usage/chunk 处理）
         → 收尾汇总返回 ``LLMResponse``。各阶段委托给私有辅助方法，跨方法状态经
-        ``_StreamState`` 传递，行为与拆分前单体实现完全等价。
+        ``_StreamState`` 传递。
 
         流式超时语义：
         - ``first_chunk_timeout``：首个 chunk 检测连接是否建立（建连/响应头/首字节全程）。
@@ -507,10 +507,10 @@ class _BaseLiteLLMAdapter:
     ) -> tuple[dict[str, Any], float, float, int]:
         """构造流式调用参数并解析超时配置。
 
-        与原内联逻辑严格等价：``first_chunk_timeout`` / ``inter_chunk_timeout`` 必须在
+        超时参数的 pop 时序约束：``first_chunk_timeout`` / ``inter_chunk_timeout`` 必须在
         构造 ``call_kwargs`` 之前 pop（否则随 ``**kwargs`` 塞进 litellm 请求参数，litellm
         不识别）；``max_thinking_chars`` 在构造之后 pop（已随 ``**kwargs`` 进入 call_kwargs，
-        由 ``_do_completion(..., drop_params=True)`` 丢弃，与原实现一致）。
+        由 ``_do_completion(..., drop_params=True)`` 丢弃）。
 
         Returns:
             ``(call_kwargs, first_chunk_timeout, inter_chunk_timeout, max_thinking_chars)``。
@@ -535,8 +535,8 @@ class _BaseLiteLLMAdapter:
         # 到点抛异常（生产 17:05:34 卡死 36 分钟的根因是 3600s HTTP 超时太长 + asyncio
         # 层超时随事件循环冻结失效）。
         call_kwargs["timeout"] = first_chunk_timeout
-        # 与原实现一致：max_thinking_chars 在 call_kwargs 构造后 pop（已随 **kwargs 进入
-        # call_kwargs，由 drop_params=True 丢弃），仅本地用于思考截断判断。
+        # max_thinking_chars 已随 **kwargs 进入 call_kwargs（drop_params=True 会丢弃），
+        # 此处仅本地读取用于思考截断判断。
         max_thinking_chars = int(kwargs.pop("max_thinking_chars", 180000))
         return call_kwargs, first_chunk_timeout, inter_chunk_timeout, max_thinking_chars
 
@@ -659,7 +659,7 @@ class _BaseLiteLLMAdapter:
         ``state.in_think_tag`` 跟踪 ``<think`` / ``</think`` 开闭，确保跨 chunk 切分的
         标签也能正确把思考内容路由到 thinking 通道、正文路由到 text 通道。
         MiniMax 等模型的思考内容以 ``<think/>`` 包裹在 ``delta.content`` 中返回（而非
-        ``delta.reasoning_content``）。与原 ``_process_chunk`` 内联段严格等价。
+        ``delta.reasoning_content``）。
         """
         on_chunk = state.on_chunk
         if state.in_think_tag:
@@ -765,8 +765,7 @@ class _BaseLiteLLMAdapter:
         """处理单个 chunk，返回是否应该 break（中断主循环）。
 
         含流式诊断日志、usage 核算、``reasoning_content`` / ``<think/>`` / tool_calls 路由。
-        与原 ``_call_streaming`` 内联的 ``_process_chunk`` 严格等价，状态经 ``state``
-        传递（无闭包 / nonlocal）。
+        状态经 ``state`` 传递（无闭包 / nonlocal）。
         """
         on_chunk = state.on_chunk
         # 流式诊断：只写文件，不显示在 CLI
@@ -880,7 +879,7 @@ class _BaseLiteLLMAdapter:
         重置计时器（活跃推理不误触发，仅真正静默累计满 timeout 才掐断）。
 
         finally 收尾：取消心跳、disarm 硬超时、aclose 底层流（带超时逃逸，防半死 socket
-        卡死引擎）。与原 ``_call_streaming`` 主循环 + finally 严格等价。
+        卡死引擎）。
         """
         # litellm CustomStreamWrapper 的底层流对象（openai/zai 路径即 httpx.Response）。
         # 心跳日志读其 is_closed 作为半死 TCP 的廉价（不可靠但便宜）附加信号。
@@ -1016,10 +1015,8 @@ class _BaseLiteLLMAdapter:
                     logger.debug("[%s] response.aclose finally 异常（已忽略）", type(self).__name__)
 
     def _build_streaming_response(self, state: _StreamState) -> LLMResponse:
-        """汇总流式累积状态，记录速度/接收统计，构造并返回 ``LLMResponse``。
-
-        与原 ``_call_streaming`` 收尾段（文本拼接 + usage/速度统计 + 接收端点汇总 +
-        ``LLMResponse`` 构造）严格等价。
+        """汇总流式累积状态（文本拼接 + usage/速度统计 + 接收端点汇总），
+        构造并返回 ``LLMResponse``。
         """
         result_text = "".join(state.result_parts) if state.result_parts else None
         thinking_text = "".join(state.thinking_parts) if state.thinking_parts else None

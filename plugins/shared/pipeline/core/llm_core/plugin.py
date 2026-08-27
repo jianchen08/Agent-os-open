@@ -285,7 +285,7 @@ class LLMCore(ICorePlugin):
         )
 
     def _get_llm_core_config(self, model_id: str) -> dict[str, Any] | None:
-        """通过 sidecar 注入的 config 桥取模型配置（与 0.1 对齐）。
+        """通过 sidecar 注入的 config 桥取模型配置。
 
         从 ``_config_models.get_model_config_loader()`` 拿 loader，调
         ``get_llm_core_config``。模型未配置时 loader 返回 None（合法降级）；
@@ -324,11 +324,8 @@ class LLMCore(ICorePlugin):
         Raises:
             Exception: LLM 调用失败时抛出异常
         """
-        # 动态模型选择（0.2 适配）：每次 execute 从 state 读 model_id/model_tier，
-        # 从注入的 llm.yaml 解析完整配置并更新 self。0.1 由 plugin_resolver 在
-        # 管道启动前一次性覆盖 llm_call 实例；0.2 sidecar 无 plugin_resolver，
-        # 改为 execute 时动态解析（支持多 agent/多模型切换）。
-        # 优先级：state.model_id > state.model_tier(→ defaults.tiers) > defaults.chat
+        # 动态模型解析：每次 execute 从 state 读 model_id/model_tier 并按
+        # llm.yaml 整体切换实例配置（优先级与失败语义见 _apply_model_from_state）。
         self._apply_model_from_state(ctx.state)
 
         messages = self._build_messages(ctx.state)
@@ -473,8 +470,6 @@ class LLMCore(ICorePlugin):
             # 工具调用错误后重置消息配对缓存，确保下次全量扫描
             exc_msg = str(exc)
             if "tool_call" in exc_msg.lower() or "tool call" in exc_msg.lower():
-                # 同目录平铺 import（与本文件 line 27 一致）。原 ``plugins.core...``
-                # 路径不存在（plugins.core 包未定义），ImportError 会顶替原始异常上抛。
                 from _message_normalizer import reset_pairing_cache  # noqa: PLC0415
 
                 # 精确重置当前管道的缓存（pipeline_id 维度隔离后必须带 ID）

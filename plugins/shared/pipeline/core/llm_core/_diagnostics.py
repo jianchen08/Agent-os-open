@@ -1,10 +1,10 @@
-"""adapter 诊断与审计基础设施（自 adapter.py 拆出，task_kernel_cleanup_and_split 3b）。
+"""adapter 诊断与审计基础设施（adapter.py 的诊断面归属地）。
 
 包含：
 - payload 诊断（prefix-cache hash + 脱敏落盘）：`_log_final_payload` /
   `_install_payload_diag_hook`（模块级安装，环境开关 `AGENTOS_PAYLOAD_DIAG=1`）
 - 流式/诊断 logger：`_diag_logger` / `_stream_logger`（logger 名保持 `adapter.*`，
-  与拆分前完全一致——测试与生产日志过滤依赖这些名字）
+  恒为 "adapter.*"——测试 monkeypatch 与生产日志过滤依赖这些名字）
 - prompt 审计（`AGENTOS_LOG_PROMPT_BODY=1` 开启）：`_log_prompt_body` /
   `_sync_prompt_handlers` / `_redact_prompt` 等
 
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # 安全约束（P0-2 修复）：默认**关闭**，仅当 AGENTOS_PAYLOAD_DIAG=1 时才安装钩子；
 # 开启后落盘走 _payload_diag.dump_payload_diag（系统 tempfile + 敏感字段脱敏），
 # 不再把含 api_key/Authorization 的原始 body 写进仓库 logs/payload_diag。
-# logger 名保持 "llm.adapter._payload_diag"（与拆分前一致）。
+# logger 名恒为 "llm.adapter._payload_diag"（消费方按名过滤）。
 _DIAG_PAYLOAD_LOGGER = logging.getLogger("llm.adapter._payload_diag")
 
 
@@ -154,8 +154,8 @@ def _install_payload_diag_hook() -> None:
 _install_payload_diag_hook()
 # === 缓存诊断结束 ===
 
-# 流式/诊断 logger：logger 名保持拆分前的 "adapter.*"（测试 monkeypatch 与生产
-# 日志过滤依赖这些名字，不能随 __name__ 变成 "_diagnostics"）。
+# 流式/诊断 logger：logger 名恒为 "adapter.*"（测试 monkeypatch 与生产日志过滤
+# 依赖这些名字，不能随 __name__ 变成 "_diagnostics"）。
 _diag_logger = logging.getLogger("adapter._diag")
 _diag_logger.propagate = False
 _stream_logger = logging.getLogger("adapter._stream")
