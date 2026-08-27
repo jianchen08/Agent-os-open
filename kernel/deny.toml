@@ -26,8 +26,8 @@ git-fetch-with-cli = true
 # 注：serde_yaml 0.9.34+deprecated 的弃用标记无对应 RUSTSEC 公告（advisory-db
 # 无该条目，RUSTSEC-2018-0005 已由 0.9.34 修复），故无需 ignore——迁移跟踪
 # 见报告 §二 #2 三步走（serde_yaml2/yaml-peg 评估，避开 serde_yml/
-# serde_yaml_ng）；tokio-tungstenite/tungstenite 双版本无公告报警，由
-# [bans] multiple-versions = "warn" 覆盖，随报告 §六 批次 A 第 2 条升级后收紧。
+# serde_yaml_ng）；tokio-tungstenite/tungstenite 已收敛单版本 0.29
+# （2026-08-27 批次 A 第 2 条完成，见 [bans] multiple-versions 收紧）。
 ignore = [
     # idna 0.5.0（经 url 2.5.2 → reqwest 传递）：Punycode 标签掩码漏洞。
     # 修复需 url ≥2.5.4（idna ≥1.0.3），属 reqwest 依赖面升级，随依赖
@@ -57,9 +57,12 @@ allow = [
 ]
 
 [bans]
-# 多版本 = warn：tokio-tungstenite 0.24/0.29 等双版本是生态常态（报告 §一），
-# 随报告 §六 批次 A 第 2 条（tokio-tungstenite 0.24→0.29 对齐，api crate 占用
-# 中延后）清理后收紧为 deny——升级完成后回看本表。
+# 多版本 = warn：报告 §六 批次 A 第 2 条（tokio-tungstenite 0.24→0.29 对齐）
+# 已随 2026-08-27 完成——api dev-dep 升 0.29、lock 收敛单版本（0.24 版
+# 全部移除，cargo tree -d 不再含 tungstenite 双版本）。剩余多版本
+# （getrandom/hashbrown/bitflags/windows-*/thiserror 等）均为无关的生态
+# 常态传递依赖（各依赖方锁定版本不同，非本仓可收敛），维持 warn 放行；
+# 若未来针对其中某 crate 做对齐清理，届时再单独收紧。
 multiple-versions = "warn"
 
 [sources]
