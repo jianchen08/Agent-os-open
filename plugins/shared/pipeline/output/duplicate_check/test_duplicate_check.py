@@ -174,6 +174,54 @@ class TestRepetitiveOutput:
         state.update(_execute(plugin, state).state_updates)
         assert state["router.repetitive_count"] == 0
 
+
+class TestExemptionGates:
+    """豁免门（合并自 output_repetition_guard）：ENDED / core_type / evaluation_result。"""
+
+    def test_ended_state_skips_all_detection(self) -> None:
+        """管道已结束（ENDED=True）→ 不判定，不写任何计数。"""
+        plugin = DuplicateCheckPlugin()
+        state: dict[str, Any] = {
+            "ended": True,
+            "raw_tool_calls": [{"name": "file_read", "arguments": {"path": "/a"}}],
+            "raw_result": "same",
+            "messages": [],
+        }
+        result = _execute(plugin, state)
+        assert result.state_updates == {}
+        assert result.route_signal is None
+
+    def test_tool_execute_core_type_skips_output_detection(self) -> None:
+        """core_type=tool_execute → 工具结果文本不参与输出重复判定。"""
+        plugin = DuplicateCheckPlugin()
+        state: dict[str, Any] = {
+            "core_type": "tool_execute",
+            "raw_result": "tool output text",
+            "messages": [],
+        }
+        result = _execute(plugin, state)
+        assert result.state_updates == {}
+        assert result.route_signal is None
+
+    def test_evaluation_result_json_exempt_from_repetition(self) -> None:
+        """含 evaluation_result + passed 的 JSON 输出不判重复（只更新哈希不计数）。"""
+        plugin = DuplicateCheckPlugin()
+        payload = '{"evaluation_result": {"passed": true, "score": 0.9}}'
+        state: dict[str, Any] = {"raw_result": payload, "messages": []}
+        state.update(_execute(plugin, state).state_updates)
+        state.update(_execute(plugin, state).state_updates)
+        assert state["router.repetitive_count"] == 0
+        assert state["router.last_response"]  # 哈希仍更新，供后续非豁免输出比对
+
+    def test_evaluation_result_without_passed_still_detected(self) -> None:
+        """evaluation_result 但无 passed 键 → 不豁免，正常重复判定。"""
+        plugin = DuplicateCheckPlugin()
+        payload = '{"evaluation_result": {"score": 0.9}}'
+        state: dict[str, Any] = {"raw_result": payload, "messages": []}
+        state.update(_execute(plugin, state).state_updates)
+        state.update(_execute(plugin, state).state_updates)
+        assert state["router.repetitive_count"] == 1
+
     @pytest.mark.parametrize(
         ("t1", "t2", "expected"),
         [

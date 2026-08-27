@@ -99,13 +99,13 @@ def _load_memory_read() -> Any:
 def _load_llm_core() -> Any:
     """加载 llm_core plugin 模块（spec 加载避免裸名 'plugin' 跨文件冲突）。
 
-    llm_core/plugin.py 平铺 import 四个本目录模块（adapter/_message_normalizer/
-    _stream_repeat_monitor/uploads_path），全车道共跑时这些裸名可能被其他插件
+    llm_core/plugin.py 平铺 import 本目录模块（adapter/_message_normalizer/
+    uploads_path），全车道共跑时这些裸名可能被其他插件
     目录的同名模块（7 个 adapter.py 等）占据 sys.modules 或 sys.path 优先位。
     加载窗口内 pin 住：逐出裸名缓存 + llm_core 目录压 sys.path[0]，执行完
     还原现场，保证解析到本目录实现且不污染其他测试。
     """
-    bare_names = ("adapter", "_message_normalizer", "_stream_repeat_monitor", "uploads_path")
+    bare_names = ("adapter", "_message_normalizer", "uploads_path")
     saved = {n: sys.modules.get(n) for n in bare_names}
     for n in bare_names:
         sys.modules.pop(n, None)

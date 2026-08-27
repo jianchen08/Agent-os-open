@@ -7,6 +7,8 @@
 
 M6d 阶段：从旧代码 agents/decision/strategies/iteration/ 中的
 duplicate_call 和 repetitive_output 合并迁移。
+2026-08-27：合并 output_repetition_guard 的三个豁免门（ENDED 跳过 /
+仅 llm_call 轮次判定 / evaluation_result JSON 豁免），该插件随之删除。
 
 策略说明：
     - 第一级（count < max）：注入软提示，工具调用仍执行
@@ -120,12 +122,29 @@ class DuplicateCheckPlugin(IOutputPlugin):
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
         """执行重复检查逻辑。
 
+        豁免门（合并自 output_repetition_guard，2026-08-27）：
+        - 管道已结束（ENDED）不判定——post-end 阶段不应判重复；
+        - 仅 llm_call 轮次判定输出重复——工具结果文本不是 LLM 输出，误判会
+          在 tool 消息后追加提示打断 assistant(tool_calls)→tool 序列；
+        - 含评估结论 JSON 的输出不判重复（即使文本相似）。
+
         Args:
             ctx: 插件执行上下文
 
         Returns:
             重复检查结果字典
         """
+        # 管道已结束时跳过：post-end 阶段不应判定重复
+        if ctx.state.get(StateKeys.ENDED, False):
+            return {}
+
+        # 仅在 llm_call 阶段判定输出重复：工具结果不是 LLM 输出，不参与重复判定。
+        # 若在 tool_execute 阶段触发，工具结果文本会被误判为"输出重复"，
+        # 并在 tool 消息后追加提示，打断 assistant(tool_calls)→tool 序列。
+        core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
+        if core_type != "llm_call":
+            return {}
+
         updates: dict[str, Any] = {}
 
         # 1. 工具调用重复检查
@@ -498,6 +517,15 @@ class DuplicateCheckPlugin(IOutputPlugin):
         raw_result = ctx.state.get(StateKeys.RAW_RESULT)
         if raw_result is None:
             return {}
+
+        # 包含评估结论 JSON 的输出不应被判定为重复（即使文本相似）
+        raw_text = str(raw_result)
+        if "evaluation_result" in raw_text and '"passed"' in raw_text:
+            return {
+                "router.last_response": hashlib.md5(raw_text[:500].encode()).hexdigest()[:8],
+                "router.last_response_text": raw_text[:500],
+                "router.repetitive_count": 0,
+            }
 
         # 生成当前输出签名（取前 500 字符）
         current_text = str(raw_result)[:500]
