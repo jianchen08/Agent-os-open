@@ -257,6 +257,53 @@ function buildInitialTabs(
   return { tabs: [mainTab], activeTabId: mainTab.id }
 }
 
+/**
+ * 激活即重绑：主 Tab（agentLevel===1）的 pipelineRunId/agentId 以 session 权威
+ * 主管道为准，在每次激活主 Tab 时矫正残留值（如子任务/其他会话的管道 id）。
+ * 残留绑定会让会话轮次事件落进不显示的桶（视图按 Tab 绑定取消息桶）、发送侧
+ * 把残留 id 发给内核（触发「pipeline_id 不属于该 thread」告警）——重绑不只在
+ * localStorage 恢复时做，每次激活都做。子 Tab 不参与重绑（子任务/管道查看走
+ * sub-tab，不污染主 Tab）。
+ *
+ * 权威主管道缺失（会话无 active_pipeline_id / 会话缓存未就绪）时保持原绑定
+ * 不动——缺数据不是改绑依据。返回是否发生了改绑；改绑同时按权威主管道激活
+ * 管道（视图消息列表按 store.activePipelineId 取桶，须与 Tab 绑定一致），
+ * 桶为空时补拉历史（与 closeTab 回落主 Tab 同款兜底）。
+ */
+function rebindMainTabToSession(mainTabId: string): boolean {
+  const { currentSessionId, tabs, pipelineTabMap } = useAgentTabStore.getState()
+  if (!currentSessionId) return false
+  const mainTab = tabs.find((t) => t.id === mainTabId)
+  if (!mainTab || mainTab.agentLevel !== 1) return false
+
+  const mainPipelineId = getMainPipelineId(currentSessionId)
+  if (!mainPipelineId) return false
+  const mainAgentId = getMainAgentId(currentSessionId)
+  if (mainTab.pipelineRunId === mainPipelineId && mainTab.agentId === mainAgentId) return false
+
+  const stalePid = mainTab.pipelineRunId
+  const nextPipelineTabMap = { ...pipelineTabMap }
+  // 残留值对主 Tab 的映射摘除（该管道若属子任务，其映射应由对应子 Tab 持有）
+  if (stalePid && nextPipelineTabMap[stalePid] === mainTab.id) {
+    delete nextPipelineTabMap[stalePid]
+  }
+  nextPipelineTabMap[mainPipelineId] = mainTab.id
+
+  useAgentTabStore.setState({
+    tabs: tabs.map((t) =>
+      t.id === mainTabId ? { ...t, pipelineRunId: mainPipelineId, agentId: mainAgentId } : t,
+    ),
+    pipelineTabMap: nextPipelineTabMap,
+  })
+
+  const pipelineStore = usePipelineMessageStore.getState()
+  pipelineStore.activatePipeline(mainPipelineId)
+  if (!pipelineStore.messagesByPipeline[mainPipelineId]?.length) {
+    void pipelineStore.loadPipelineMessages(mainPipelineId, { threadId: currentSessionId })
+  }
+  return true
+}
+
 /** Agent Tab Store */
 export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   tabs: [],
@@ -266,7 +313,8 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   currentSessionId: null,
   pipelineTabMap: {},
 
-  /** 初始化/切换会话标签（从 localStorage 恢复） 核心规则：activeTab.pipelineRunId 是加载管道的唯一依据。 */
+  /** 初始化/切换会话标签（从 localStorage 恢复） 核心规则：activeTab.pipelineRunId 是加载管道的唯一依据；
+   *  主 Tab 绑定以 session 权威主管道为准——恢复分支与后续每次激活（switchToTab/setActiveTab/closeTab 回落）都重绑。 */
   initSessionTabs: (sessionId) => {
     const saved = loadTabsFromStorage(sessionId)
     const mainPipelineId = getMainPipelineId(sessionId)
@@ -396,6 +444,12 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
   /** 设置活跃 Tab（子 Tab 时自动从后端加载消息） */
   setActiveTab: (tabId) => {
+    // 激活即重绑：主 Tab 先以 session 权威主管道矫正残留绑定（与 switchToTab 同一不变量）
+    const targetTab = get().tabs.find((t) => t.id === tabId)
+    if (targetTab?.agentLevel === 1) {
+      rebindMainTabToSession(tabId)
+    }
+
     set({
       activeTabId: tabId,
     })
@@ -545,14 +599,18 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     if (currentSessionId) {
       const mainTab = tabs.find((t) => t.agentLevel === 1)
       if (mainTab && activeTabId === mainTab.id) {
-        const pipelineStore = usePipelineMessageStore.getState()
-        const mainPipelineId = getMainPipelineId(currentSessionId)
-        if (mainPipelineId) {
-          pipelineStore.activatePipeline(mainPipelineId)
-          // 统一加载入口：仅当本地无消息时拉历史（mode='auto'，未初始化走全量）。
-          // 不 await，保持 fire-and-forget 行为。
-          if (!pipelineStore.messagesByPipeline[mainPipelineId]?.length) {
-            void pipelineStore.loadPipelineMessages(mainPipelineId, { threadId: currentSessionId })
+        // 激活即重绑：回落主 Tab 先矫正残留绑定（改绑时内部已按权威主管道
+        // 激活 + 空桶补拉）；绑定本就正确时保持原激活语义（重置未读 + 补拉）。
+        if (!rebindMainTabToSession(mainTab.id)) {
+          const pipelineStore = usePipelineMessageStore.getState()
+          const mainPipelineId = getMainPipelineId(currentSessionId)
+          if (mainPipelineId) {
+            pipelineStore.activatePipeline(mainPipelineId)
+            // 统一加载入口：仅当本地无消息时拉历史（mode='auto'，未初始化走全量）。
+            // 不 await，保持 fire-and-forget 行为。
+            if (!pipelineStore.messagesByPipeline[mainPipelineId]?.length) {
+              void pipelineStore.loadPipelineMessages(mainPipelineId, { threadId: currentSessionId })
+            }
           }
         }
       }
@@ -569,10 +627,18 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       return
     }
 
+    // 激活即重绑：主 Tab 先以 session 权威主管道矫正残留绑定（含重复激活同一
+    // 主 Tab 的场景——从子任务/管道视图返回主聊天的冻结恢复不依赖整页刷新）。
+    // 重绑内部已按权威主管道激活管道，此后早退也保持视图与绑定一致。
+    if (tab.agentLevel === 1) {
+      rebindMainTabToSession(tabId)
+    }
+
     if (prevActiveTabId === tabId) return
 
     const pipelineStore = usePipelineMessageStore.getState()
-    const effectivePipelineId = tab.pipelineRunId
+    // 重绑可能已更新主 Tab 绑定，取最新 Tab 值激活
+    const effectivePipelineId = get().tabs.find((t) => t.id === tabId)?.pipelineRunId
     if (!effectivePipelineId) {
       console.error('[switchToTab] Tab 数据损坏：pipelineRunId 为空，中止切换: tabId=%s', tabId)
       return  // 中止切换，避免用错误 pipelineId 路由
