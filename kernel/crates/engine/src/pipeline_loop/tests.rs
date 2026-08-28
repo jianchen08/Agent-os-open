@@ -1876,8 +1876,7 @@ fn routed_loop_body(steps: Vec<StepItem>) -> PipelineConfig {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
-    };
-    config
+    }
 }
 
 #[tokio::test]

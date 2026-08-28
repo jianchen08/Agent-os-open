@@ -1086,7 +1086,7 @@ class TestEdgeAndDegradedBranches:
         )
         assert pid == "p-child-1"
         params = hub.handles["chat"].calls[0][1]
-        assert params["lineage"]["parent_pipeline_id"] == "p-container"
+        assert params["state"]["lineage.parent_pipeline_id"] == "p-container"
 
     # ── 服务不可用（task_service None）──
 

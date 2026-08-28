@@ -16,7 +16,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
 _TASKS_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system', 'tasks')
 _SYSTEM_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system')
-for _d in (_TASKS_DIR, _SYSTEM_DIR):
+# 跨插件共享契约模块（state_fields.py 等）位于 plugins/shared/ 根。
+_SHARED_ROOT = os.path.join(_PROJECT_ROOT, 'plugins', 'shared')
+for _d in (_TASKS_DIR, _SYSTEM_DIR, _SHARED_ROOT):
     if os.path.isdir(_d):
         sys.path.insert(0, _d)
 

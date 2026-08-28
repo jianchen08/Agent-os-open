@@ -131,11 +131,9 @@ class TestTaskPipelineDispatch:
         assert p["state"]["task.status"] == "pending"
         # task.id 不在调用方 state（引擎注入）
         assert "task.id" not in p["state"]
-        # 血缘：有父形式
-        assert p["lineage"] == {
-            "parent_pipeline_id": "pipe_parent_9",
-            "origin_session_id": "pipe_parent_9",
-        }
+        # 血缘：有父形式（state 扁平键出生即入，非顶层 lineage 字典）
+        assert p["state"]["lineage.parent_pipeline_id"] == "pipe_parent_9"
+        assert p["state"]["lineage.origin_session_id"] == "pipe_parent_9"
         assert "喝水提醒" in p["message"]
         assert p["user_id"] == "user-1"
         assert p.get("background") is True
@@ -168,10 +166,10 @@ class TestTaskPipelineDispatch:
         finally:
             mod._chat_sender = None
         assert r.success
-        assert sender.calls[0]["lineage"] == {
-            "root": True,
-            "origin": {"kind": "plugin", "source": "task_submit"},
-        }
+        p = sender.calls[0]
+        assert p["state"]["lineage.root"] is True
+        assert p["state"]["lineage.origin.kind"] == "plugin"
+        assert p["state"]["lineage.origin.source"] == "task_submit"
 
     async def test_submit_passes_execution_context(self, mod: Any) -> None:
         sender = _FakeSender()

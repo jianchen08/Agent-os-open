@@ -238,7 +238,8 @@ class TestAgentMetricPipeline:
         p = sent[0]
         assert p["create"] is True and p["background"] is True
         assert p["agent_id"] == "evaluator_agent"
-        assert p["lineage"] == {"parent_pipeline_id": "taskP1", "origin_session_id": "sessRoot1"}
+        assert p["state"]["lineage.parent_pipeline_id"] == "taskP1"
+        assert p["state"]["lineage.origin_session_id"] == "sessRoot1"
         st = p["state"]
         # R2：出生即带被评估任务工作区坐标（幂等跳过 workspace_lifecycle）
         assert st["workspace"] == str(ws)

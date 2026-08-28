@@ -464,6 +464,12 @@ pub struct PluginManifest {
     /// messages 是系统字段（引擎固定投影），不在此列。空 = 该插件无累计字段需持久化。
     #[serde(default)]
     pub persistent_fields: Vec<String>,
+    /// state 出口声明：插件声明允许经 state 摘要出口（GET /pipelines/state 与
+    /// pipeline-state.list）的 state 字段；支持 `前缀.*` 通配（如 `task.owned.*`）。
+    /// 内核结构基线键（pipeline_id/session_id 等引擎/出生契约自有键）不在此列，
+    /// 由内核基线出口。未声明且不在基线 = 不出口（默认拒绝）。空 = 无出口字段。
+    #[serde(default)]
+    pub export_fields: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfig>,
     /// 生命周期策略（空闲卸载阈值等）。`None` = 内核默认。插件可声明
@@ -1638,5 +1644,262 @@ mod tests {
         // 无 steps 时不输出 steps 键（旧清单兼容输出）
         let s = serde_json::to_string(&m).unwrap();
         assert!(!s.contains("\"steps\""), "空 steps 不应序列化输出: {s}");
+    }
+
+    // ── trait 默认实现契约（具体实现覆盖后无人单调默认版，此处锁默认语义）──
+
+    use crate::types::{PendingInputRecord, PendingInputSource};
+
+    struct BareInvoker;
+
+    #[async_trait::async_trait]
+    impl PluginInvoker for BareInvoker {
+        async fn invoke_pipeline_plugin(
+            &self,
+            _plugin_id: &str,
+            _ctx: &PluginContext,
+        ) -> Result<PluginResult, PluginError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn invoke_tool(
+            &self,
+            _plugin_id: &str,
+            _tool_name: &str,
+            _inputs: &serde_json::Value,
+        ) -> Result<ToolExecutionResult, PluginError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            _hook: LifecycleHook,
+            _context: &HookContext,
+        ) -> Result<(), PluginError> {
+            unreachable!("默认面测试不调用")
+        }
+    }
+
+    #[tokio::test]
+    async fn invoker_default_methods_contract() {
+        let inv = BareInvoker;
+        // force_unload 默认 Ok；discover 默认空；list_plugin_tools 默认不支持；
+        // shutdown_all / kill_sidecar_if_any 默认 no-op（调用即覆盖，无 panic 即契约）。
+        assert!(inv.force_unload("p").await.is_ok());
+        assert!(inv.discover_new_plugins().await.unwrap().is_empty());
+        assert!(inv.list_plugin_tools("p").await.is_err());
+        inv.shutdown_all().await;
+        inv.kill_sidecar_if_any("p").await;
+    }
+
+    struct BareStore;
+
+    #[async_trait::async_trait]
+    impl StorageBackend for BareStore {
+        async fn get_run(&self, _run_id: &str) -> Result<RunRecord, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _opts: MessageQueryOpts,
+        ) -> Result<Vec<MessageRecord>, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn get_blob(&self, _blob_id: &str) -> Result<Vec<u8>, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn append_trace(&self, _entry: TraceEntry) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn create_branch(&self, _branch: Branch) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn update_run_status(
+            &self,
+            _run_id: &str,
+            _status: RunStatus,
+            _current_branch: Option<&str>,
+            _current_seq: Option<u32>,
+        ) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn create_run(
+            &self,
+            _run_id: &str,
+            _config_hash: &str,
+            _tenant_id: &str,
+        ) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn create_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn get_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Option<SessionRecord>, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn list_sessions(
+            &self,
+            _filter: SessionListFilter,
+        ) -> Result<Vec<SessionRecord>, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn update_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn delete_session(&self, _thread_id: &str) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn link_pipeline_session(
+            &self,
+            _pipeline_id: &str,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<TraceEntry>, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn create_user(&self, _user: &UserRecord) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn get_user_by_id(
+            &self,
+            _user_id: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn get_user_by_username(
+            &self,
+            _username: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn list_users(&self) -> Result<Vec<UserRecord>, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn update_last_login(&self, _user_id: &str) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn delete_user(&self, _user_id: &str) -> Result<bool, StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+    }
+
+    fn bare_pending_input() -> PendingInputRecord {
+        PendingInputRecord {
+            id: "i".into(),
+            pipeline_id: "p".into(),
+            tenant_id: "t".into(),
+            user_id: "u".into(),
+            content: "c".into(),
+            thread: "th".into(),
+            source: PendingInputSource::System,
+            agent_id: "a".into(),
+            route_id: "r".into(),
+            thinking_strength: "off".into(),
+            client_message_id: String::new(),
+            execution_context: None,
+            state_overlay: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_default_methods_contract() {
+        let s = BareStore;
+        // run/pipeline 投影族默认：Ok / 空集
+        assert!(s.set_run_pipeline("r", "p").await.is_ok());
+        assert!(
+            s.list_runs_by_pipeline("p", "t")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(s.list_pipelines("t", None, 10).await.unwrap().is_empty());
+        assert!(s.delete_pipeline("p").await.is_ok());
+        // state 投影族默认：no-op / 空 map / None
+        assert!(
+            s.apply_messages_ops_to_table("p", "t", &[])
+                .await
+                .is_ok()
+        );
+        assert!(
+            s.upsert_state_field("p", "t", "k", &serde_json::json!(1))
+                .await
+                .is_ok()
+        );
+        assert!(
+            s.load_pipeline_state("p", "t")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            s.save_checkpoint("p", "t", 1, &serde_json::json!({}))
+                .await
+                .is_ok()
+        );
+        assert!(
+            s.load_latest_checkpoint("p", "t")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.list_state_pipeline_ids("t")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            s.load_message_history("p", "t")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // pending 队列族默认：no-op / None / 空 / false / 0
+        let rec = bare_pending_input();
+        assert!(s.enqueue_pending_input("t", "p", &rec).await.is_ok());
+        assert!(
+            s.pop_pending_input("t", "p")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.list_pending_inputs("t", "p")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !s.update_pending_input_content("t", "p", "i", "x")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !s.delete_pending_input("t", "p", "i")
+                .await
+                .unwrap()
+        );
+        assert_eq!(s.clear_pending_inputs("t", "p").await.unwrap(), 0);
     }
 }
