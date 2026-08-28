@@ -684,6 +684,7 @@ impl agentos_core::traits::PluginInvoker for CaptureInvoker {
             data: json!({"output": "ok"}),
             error: None,
             duration_ms: Some(1),
+            metadata: None,
         })
     }
     async fn send_lifecycle_hook(

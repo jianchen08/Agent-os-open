@@ -1906,6 +1906,7 @@ mod tool_failure_alert_tests {
                 data: json!({}),
                 error: Some("mode Field required (pydantic validation)".into()),
                 duration_ms: Some(1),
+                metadata: None,
             })
         }
     }

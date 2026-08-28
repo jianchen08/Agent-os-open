@@ -390,7 +390,13 @@ fn normalize_mcp_tool_result(
             } else {
                 inner.clone()
             };
-            Ok(ToolExecutionResult::success(data))
+            Ok(ToolExecutionResult {
+                success: true,
+                data,
+                error: None,
+                duration_ms: None,
+                metadata: inner.get("metadata").cloned(),
+            })
         } else {
             let err_msg = inner
                 .get("error")
@@ -426,6 +432,7 @@ fn normalize_native_tool_output(inner: &Value) -> ToolExecutionResult {
             let mut result =
                 ToolExecutionResult::success(inner.get("data").cloned().unwrap_or(Value::Null));
             result.duration_ms = inner.get("duration_ms").and_then(|v| v.as_u64());
+            result.metadata = inner.get("metadata").cloned();
             result
         }
         Some(false) => {

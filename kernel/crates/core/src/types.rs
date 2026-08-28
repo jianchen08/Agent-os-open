@@ -368,6 +368,11 @@ pub struct ToolExecutionResult {
     /// 执行耗时（毫秒）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// 工具自报扩展元数据（SDK ToolExecutionResult.metadata 顶层透传；
+    /// task_failed / result=completed 等副作用信号的载体，tool_core 侧效
+    /// 派生消费）。字段只增不删：缺省 None 兼容既有信封与构造点。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl ToolExecutionResult {
@@ -377,6 +382,7 @@ impl ToolExecutionResult {
             data,
             error: None,
             duration_ms: None,
+            metadata: None,
         }
     }
 
@@ -386,6 +392,7 @@ impl ToolExecutionResult {
             data: serde_json::Value::Null,
             error: Some(error.into()),
             duration_ms: None,
+            metadata: None,
         }
     }
 }

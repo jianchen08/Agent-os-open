@@ -204,7 +204,11 @@ fn parse_tool_executor_response(tool_name: &str, resp: Value, duration_ms: f64) 
     let success = resp.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
     if success {
         let data = resp.get("data").cloned().unwrap_or(Value::Null);
-        ToolResult::succeeded(tool_name, data, duration_ms)
+        let mut result = ToolResult::succeeded(tool_name, data, duration_ms);
+        // 信封顶层 metadata（task_failed / result=completed 等副作用信号）
+        // 由内核 ToolExecutionResult.metadata 透传，collect_side_effects 消费。
+        result.metadata = resp.get("metadata").cloned();
+        result
     } else {
         let error = resp
             .get("error")
@@ -448,6 +452,28 @@ fn emit_tool_event(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_collect_side_effects_evaluation_completed_via_envelope_metadata() {
+        // 内核信封顶层 metadata（result=completed）→ task_evaluation_completed
+        // 投影键写入 state_updates（task_reminder 三信号②的证据源）。
+        let state = json!({});
+        let result = parse_tool_executor_response(
+            "task_evaluate",
+            json!({
+                "success": true,
+                "data": {"overall_passed": true, "task_id": "t1"},
+                "metadata": {"action": "auto_complete", "result": "completed"},
+            }),
+            1.0,
+        );
+        let mut updates = HashMap::new();
+        collect_side_effects(&state, &[result], &mut updates);
+        assert_eq!(
+            updates.get("task_evaluation_completed"),
+            Some(&Value::Bool(true))
+        );
+    }
+
     use super::*;
 
     /// 捕获 host 调用的最小 mock（记录最后一次 call_capability 参数）。
