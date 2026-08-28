@@ -775,6 +775,7 @@ async fn process_via_engine_inner(
     // 1/1a/1a2/1a3. 初始 state 构造（含会话级/任务级 execution_context 注入 +
     // 自由 state overlay）。
     let initial_state = stage_build_initial_state(
+        state,
         &store,
         message,
         agent_id,
@@ -926,6 +927,28 @@ fn echo_fallback(missing: &str, message: &str) -> EngineOutcome {
     }
 }
 
+/// 按 `a.b.c` 点号路径把值写入嵌套对象（中间节点非对象时覆盖为对象）。
+/// 声明驱动 execution_context 组装的路径写入器（路径来自插件
+/// thread_fields 的 x_execution_path 声明，内核不预知键面）。
+fn set_execution_context_path(
+    ec: &mut serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    value: serde_json::Value,
+) {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut cur = ec;
+    for part in &parts[..parts.len() - 1] {
+        let entry = cur
+            .entry(part.to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !entry.is_object() {
+            *entry = serde_json::Value::Object(serde_json::Map::new());
+        }
+        cur = entry.as_object_mut().expect("中间节点已确保为对象");
+    }
+    cur.insert(parts[parts.len() - 1].to_string(), value);
+}
+
 /// 阶段 1/1a/1a2/1a3：构造初始 state（含会话级/任务级 execution_context 注入 +
 /// 自由 state overlay 合并）。
 ///
@@ -934,6 +957,7 @@ fn echo_fallback(missing: &str, message: &str) -> EngineOutcome {
 // 技术债（同上）：多参阶段函数，收尾时统一收敛参数结构体。
 #[allow(clippy::too_many_arguments)]
 async fn stage_build_initial_state(
+    state: &AppState,
     store: &Arc<dyn StorageBackend>,
     message: &str,
     agent_id: &str,
@@ -977,45 +1001,50 @@ async fn stage_build_initial_state(
         "thinking_strength": thinking_strength,
     });
 
-    // 1a. 会话级 execution_context 注入：thread metadata 的 workspace /
-    // workspace_mode / isolation_mode（会话创建时由前端写入 metadata）组装为
-    // 结构化 execution_context，随 initial_state 进入管道——init 体的
-    // workspace_lifecycle / environment_lifecycle 插件据此执行（工作空间解析 +
-    // 环境基线），checkpoint 自动持久化。
+    // 1a. 会话级 execution_context 注入（声明驱动，ADR 2026-08-28）：遍历启用
+    // 插件 contributes.thread_fields 的 x_metadata_key → x_execution_path 声明，
+    // 把 thread metadata（会话创建时由前端按声明写入）的值按声明路径写入
+    // execution_context。内核不认识 workspace/isolation 等具体键（归属
+    // workspace_lifecycle / isolation 插件），缺省值同样归插件执行期兜底
+    // （workspace_lifecycle：mode 未指定 → plain）——与前端表单组装
+    // （SessionEditModal 按 x_execution_path 组装消息级上下文）同构。
     //
-    // 拓扑/隔离不依赖 workspace 填写：未填 source_path 时插件按默认目录自动
-    // 生成，mode/level 仍然生效（拓扑默认 worktree，对齐 task_submit）。
-    //
-    // 任务级 execution_context（task_submit 提交的 workspace_mode/isolation_level）
-    // 经任务管道执行入口透传（chat.send_message params），优先级高于此会话级来源；
-    // 两者结构一致：{"workspace": {source_path, mode}, "isolation": {level}}。
+    // 任务级 execution_context（task_submit 提交）经消息级参数透传，整体覆盖
+    // 会话级来源（1a2），优先级不变。
     match store.get_session(thread_id).await {
         Ok(Some(sess)) => {
             if let Some(meta) = sess.metadata {
+                let enabled = state.enabled_plugin_ids.read().await.clone();
                 let mut ec = serde_json::Map::new();
-                let ws_path = meta
-                    .get("workspace")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty());
-                let ws_mode = meta
-                    .get("workspace_mode")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("worktree");
-                if ws_path.is_some() || meta.get("workspace_mode").is_some() {
-                    let mut ws_obj = serde_json::Map::new();
-                    if let Some(p) = ws_path {
-                        ws_obj.insert("source_path".to_string(), serde_json::json!(p));
+                for manifest in state.manifests.read().await.iter() {
+                    if !enabled.contains(&manifest.id) {
+                        continue;
                     }
-                    ws_obj.insert("mode".to_string(), serde_json::json!(ws_mode));
-                    ec.insert("workspace".to_string(), serde_json::Value::Object(ws_obj));
-                }
-                if let Some(iso) = meta
-                    .get("isolation_mode")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                {
-                    ec.insert("isolation".to_string(), serde_json::json!({"level": iso}));
+                    let Some(fields) = manifest
+                        .contributes
+                        .as_ref()
+                        .and_then(|c| c.get("thread_fields"))
+                        .and_then(|v| v.as_array())
+                    else {
+                        continue;
+                    };
+                    for field in fields {
+                        let (Some(meta_key), Some(path)) = (
+                            field.get("x_metadata_key").and_then(|v| v.as_str()),
+                            field.get("x_execution_path").and_then(|v| v.as_str()),
+                        ) else {
+                            continue;
+                        };
+                        // 只搬运非空字符串值（空值 = 未设置，默认语义归插件）
+                        let Some(val) = meta
+                            .get(meta_key)
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                        else {
+                            continue;
+                        };
+                        set_execution_context_path(&mut ec, path, serde_json::json!(val));
+                    }
                 }
                 if !ec.is_empty() {
                     if let Some(obj) = initial_state.as_object_mut() {
