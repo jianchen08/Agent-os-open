@@ -69,28 +69,11 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string",
-              "description": "视频内容描述，用于指导视频生成（必填）"
+              "type": "string"
             },
             "duration": {
-              "type": "number",
-              "description": "视频时长（秒），默认由 Provider 决定"
-            },
-            "fps": {
               "type": "integer",
-              "description": "帧率（fps），默认由 Provider 决定"
-            },
-            "resolution": {
-              "type": "string",
-              "description": "视频分辨率（如 '1920x1080'），默认由 Provider 决定"
-            },
-            "style": {
-              "type": "string",
-              "description": "视频风格（如 'realistic', 'anime', 'cartoon'），默认由 Provider 决定"
-            },
-            "provider": {
-              "type": "string",
-              "description": "指定使用的视频生成 Provider（不填则自动选择）"
+              "default": 5
             }
           },
           "required": [
@@ -109,27 +92,13 @@
           "type": "object",
           "properties": {
             "text": {
-              "type": "string",
-              "description": "要合成的文本内容"
+              "type": "string"
             },
             "voice": {
-              "type": "string",
-              "description": "语音名称（如 alloy, echo, fable 等）",
-              "default": "alloy"
-            },
-            "format": {
-              "type": "string",
-              "description": "输出音频格式（mp3, wav, ogg）",
-              "default": "mp3",
-              "enum": [
-                "mp3",
-                "wav",
-                "ogg"
-              ]
+              "type": "string"
             },
             "speed": {
               "type": "number",
-              "description": "语速倍率（0.5 ~ 2.0）",
               "default": 1.0
             }
           },
