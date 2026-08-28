@@ -226,3 +226,18 @@ def test_handle_registration_clear_failure_does_not_break_emit():
     )
     assert emitted == 1
     assert len(state_cap.updates) == 0
+
+
+def test_handle_root_task_terminal_writes_no_registration():
+    # 根任务（无 lineage.parent_pipeline_id）终态：派生事件但无挂号可清
+    root_row = _task_row("completed")
+    root_row["lineage.parent_pipeline_id"] = ""
+    state_cap = _RecordingStateCap([root_row])
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed", {"pipeline_id": "pipe_t1"}, state_cap, bus
+        )
+    )
+    assert emitted == 1
+    assert state_cap.updates == []

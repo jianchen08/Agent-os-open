@@ -146,6 +146,60 @@ class TestStreakAccounting:
         assert result.state_updates.get("tool_fail_gate_injected") is False
 
 
+class TestToolResultsShapeContract:
+    """tool_results 形态契约：跨边界 JSON 字符串还原 + 非法形态不误判。
+
+    state 结构化字段跨引擎内存 → 持久层 TEXT → 消费端边界（state_fields 同款
+    契约意识）：JSON 字符串形态必须还原后判定；损坏 JSON/非列表形态不得静默
+    当成"全部失败"去推动闸门。
+    """
+
+    def test_json_string_failed_results_are_restored_and_counted(self) -> None:
+        """JSON 数组字符串（DB TEXT 形态）→ 还原为失败列表参与计数。"""
+        import asyncio
+        import json as _json
+
+        result = asyncio.run(
+            TaskReminder().execute(
+                _ctx(
+                    _tool_call_state(
+                        tool_results=_json.dumps(_failed_results())
+                    )
+                )
+            )
+        )
+        assert result.state_updates.get("tool_fail_streak") == 1
+
+    def test_corrupted_json_string_is_not_treated_as_all_failed(self) -> None:
+        """损坏 JSON 字符串 → 不构成失败证据（信号①现状零输出）。"""
+        import asyncio
+
+        result = asyncio.run(
+            TaskReminder().execute(
+                _ctx(_tool_call_state(tool_results='{"broken'))
+            )
+        )
+        assert result.state_updates == {}
+        assert result.route_signal is None
+
+    @pytest.mark.parametrize(
+        "bad_shape",
+        [123, {"success": False}, None],
+        ids=["int", "dict", "null"],
+    )
+    def test_non_list_shapes_are_not_failure_evidence(self, bad_shape: Any) -> None:
+        """非列表形态（含缺失）→ 不构成失败证据（参数化：3 组区分度输入）。"""
+        import asyncio
+
+        result = asyncio.run(
+            TaskReminder().execute(
+                _ctx(_tool_call_state(tool_results=bad_shape))
+            )
+        )
+        assert result.state_updates == {}
+        assert result.route_signal is None
+
+
 class TestForcedClosureRound:
     """达阈值：注入一次"工具不可用，直接文本总结"强制收束轮。"""
 
