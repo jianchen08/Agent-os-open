@@ -69,12 +69,14 @@ class TestStreamHardTimeout:
         assert "on_fire" in fired
 
     def test_reset_postpones_deadline(self) -> None:
-        wd, fired = _make_watchdog(0.08)
+        # 裕度须扛满载调度抖动：deadline 0.5s、观察点 reset+0.1s，
+        # 断言失败需 sleep 超调 >0.4s（Windows 满载典型超调 ≤0.1s 量级）。
+        wd, fired = _make_watchdog(0.5)
         wd.arm()
         try:
-            time.sleep(0.04)
-            wd.reset()  # 新 deadline = now + 0.08
-            time.sleep(0.04)  # 距 reset 0.04 < 0.08，不应触发
+            time.sleep(0.1)
+            wd.reset()  # 新 deadline = now + 0.5
+            time.sleep(0.1)  # 距 reset 0.1 < 0.5，不应触发
             assert fired == []
         finally:
             wd.disarm()

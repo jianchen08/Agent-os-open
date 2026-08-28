@@ -192,7 +192,7 @@ class StreamHardTimeout:
 
             asyncio.run_coroutine_threadsafe(_safe_aclose(), self._loop)
             logger.warning(
-                "[StreamHardTimeout] 已强制关闭 stream（硬超时 %.0fs 触发）",
+                "[StreamHardTimeout] 已强制关闭 stream（硬超时 %.2fs 触发）",
                 self._timeout,
             )
         except Exception:  # noqa: BLE001
