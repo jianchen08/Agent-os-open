@@ -80,16 +80,22 @@ class TestSignalOneToolCallsRouteToTools:
     """信号①：本轮有工具调用 → 路由工具执行，不评判（现状保留）。"""
 
     @pytest.mark.parametrize(
-        "tool_results",
+        ("tool_results", "expect_streak"),
         [
-            [],
-            [{"tool_name": "bash", "success": False, "error": "boom"}],
-            [{"tool_name": "bash", "success": True, "data": {}}],
+            ([], None),
+            ([{"tool_name": "bash", "success": False, "error": "boom"}], 1),
+            ([{"tool_name": "bash", "success": True, "data": {}}], None),
         ],
         ids=["no-results", "failed-results", "ok-results"],
     )
-    def test_tool_call_round_never_judged(self, tool_results: list) -> None:
-        """有工具调用的轮次无论上一轮工具成败都不评判（参数化：3 组区分度输入）。"""
+    def test_tool_call_round_routes_to_tools(
+        self, tool_results: list, expect_streak: int | None
+    ) -> None:
+        """有工具调用的轮次路由工具执行、不评判不催提醒（参数化：3 组区分度）。
+
+        上一轮全失败时闸门仅做连续失败计数（bookkeeping），不改变路由、
+        不注入提醒——"路由工具执行" 的信号①现状在阈值内保持。
+        """
         import asyncio
 
         reminder = TaskReminder()
@@ -99,8 +105,13 @@ class TestSignalOneToolCallsRouteToTools:
             tool_results=tool_results,
         )
         result = asyncio.run(reminder.execute(_ctx(state)))
-        assert result.state_updates == {}
-        assert result.route_signal is None
+        assert result.route_signal is None, "阈值内信号①路由不变"
+        assert "messages" not in result.state_updates, "信号①轮不注入提醒"
+        assert "evaluate_reminder_count" not in result.state_updates
+        if expect_streak is None:
+            assert result.state_updates == {}
+        else:
+            assert result.state_updates.get("tool_fail_streak") == expect_streak
 
 
 class TestSignalTwoCompletionEvidence:

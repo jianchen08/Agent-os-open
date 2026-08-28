@@ -21,10 +21,17 @@ class TaskReminder(IOutputPlugin):
     # 评估模式下连续仅工具调用的提醒阈值
     _EVAL_TOOL_ONLY_THRESHOLD = 6
 
+    # 收束闸门：连续工具全失败的强制收束阈值（tool_fail_streak_limit 可配置）
+    _TOOL_FAIL_STREAK_KEY = "tool_fail_streak"
+    _TOOL_FAIL_GATE_FLAG_KEY = "tool_fail_gate_injected"
+
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self._config = config or {}
         self._max_reminders: int = self._config.get("max_reminders", 10)
         self._evaluation_mode: bool = self._config.get("evaluation_mode", False)
+        self._tool_fail_streak_limit: int = int(
+            self._config.get("tool_fail_streak_limit", 3)
+        )
 
     @property
     def name(self) -> str:
@@ -95,14 +102,12 @@ class TaskReminder(IOutputPlugin):
         if eval_counted is not None:
             return eval_counted
 
-        # ── 信号①：本轮有工具调用 → 路由工具执行，不评判 ──
-        if has_tool_calls:
-            logger.debug(
-                "TaskReminder[iter=%s]: skip, has tool calls (len=%d)",
-                iteration,
-                len(raw_tool_calls),
-            )
-            return OutputResult()
+        # ── 收束闸门 + 信号①：本轮有工具调用 → 闸门计数/裁决；阈值内路由
+        # 工具执行，不评判（现状保留）。评估模式仅工具轮已在上面的计数分支
+        # 返回（自有阈值机制，闸门不与其抢裁决）。──
+        gated = self._tool_failure_gate(state, iteration=iteration, has_tool_calls=has_tool_calls)
+        if gated is not None:
+            return gated
 
         if not has_text:
             logger.debug(
@@ -294,6 +299,144 @@ class TaskReminder(IOutputPlugin):
             )
             return OutputResult()
         return None
+
+    @staticmethod
+    def _tool_results_all_failed(state: dict[str, Any]) -> bool:
+        """上一轮工具结果（tool_core 写入 state 的结构化数组，非渲染文本）
+        非空且全部失败。跨边界 JSON 字符串形态还原后判定（state_fields 同款
+        契约意识：序列化形态漂移不得静默当成"无失败"）。"""
+        results: Any = state.get("tool_results")
+        if isinstance(results, str):
+            try:
+                results = json.loads(results)
+            except (json.JSONDecodeError, TypeError):
+                return False
+        if not isinstance(results, list):
+            return False
+        entries = [r for r in results if isinstance(r, dict)]
+        return bool(entries) and all(not r.get("success") for r in entries)
+
+    def _tool_failure_gate(
+        self,
+        state: dict[str, Any],
+        *,
+        iteration: Any,
+        has_tool_calls: bool,
+    ) -> OutputResult | None:
+        """收束闸门：连续工具全失败的强制收束（ADR 2026-08-28 三信号判据配套）。
+
+        唤醒轮死循环兜底：LLM 反复调用不可用工具每轮必败时，连续 N 轮
+        （默认 3，``tool_fail_streak_limit`` 可配置）工具结果全为失败 → 注入
+        一次"工具不可用，直接文本总结"强制收束轮；该轮 LLM 仍以工具调用作答
+        （无文本收束）→ end（任务管道改写 failed 前复查信号②）。
+
+        计数与裁决只在「本轮有工具调用」的信号①轮次上进行（成败看上一轮
+        state.tool_results 结构化结果，不解析渲染文本）；任一工具成功即视为
+        episode 结束，计数与注入标志复位。阈值内保持信号①现状：路由工具执行，
+        不评判。非工具调用轮返回 None（纯文本轮与闸门互不干扰）。
+        """
+        if not has_tool_calls:
+            return None
+        all_failed = self._tool_results_all_failed(state)
+        streak_prev = int(state.get(self._TOOL_FAIL_STREAK_KEY, 0) or 0)
+        injected = bool(state.get(self._TOOL_FAIL_GATE_FLAG_KEY))
+        if not all_failed:
+            # 任一工具成功（或运行首个工具调用轮）→ episode 结束复位
+            if streak_prev or injected:
+                return OutputResult(
+                    state_updates={
+                        self._TOOL_FAIL_STREAK_KEY: 0,
+                        self._TOOL_FAIL_GATE_FLAG_KEY: False,
+                    }
+                )
+            return OutputResult()
+        if injected:
+            return self._tool_fail_forced_end_result(state, iteration=iteration)
+        streak = streak_prev + 1
+        if streak >= self._tool_fail_streak_limit:
+            return self._inject_tool_fail_closure_result(state, iteration=iteration)
+        logger.debug(
+            "TaskReminder[iter=%s]: tool fail streak=%d/%d",
+            iteration,
+            streak,
+            self._tool_fail_streak_limit,
+        )
+        return OutputResult(state_updates={self._TOOL_FAIL_STREAK_KEY: streak})
+
+    def _inject_tool_fail_closure_result(
+        self,
+        state: dict[str, Any],
+        *,
+        iteration: Any,
+    ) -> OutputResult:
+        """注入一次"工具不可用，直接文本总结"强制收束轮并触发 next_llm。
+
+        清空本轮 raw_tool_calls：post 路由表工具调用分支优先于 _has_new_llm_input，
+        不清空会被派去执行（必败）工具而非回 LLM 收束。
+        """
+        reminder_message = (
+            "【系统收束提醒】工具已连续多轮执行失败（工具当前不可用）。"
+            "请立即停止调用任何工具，直接以纯文本输出你对当前进展的总结与结论。"
+        )
+        messages = list(state.get("messages", []))
+        messages.append({"role": "system", "content": reminder_message})
+        logger.warning(
+            "TaskReminder[iter=%s]: tools failing repeatedly, forcing text closure round",
+            iteration,
+        )
+        return OutputResult(
+            state_updates={
+                "messages": messages,
+                self._TOOL_FAIL_GATE_FLAG_KEY: True,
+                self._TOOL_FAIL_STREAK_KEY: 0,
+                "raw_tool_calls": [],
+                "_has_new_llm_input": True,
+            },
+            route_signal=RouteSignal(
+                route_type="next_llm",
+                reason="task_reminder: tools failing repeatedly, forcing text closure round",
+            ),
+        )
+
+    def _tool_fail_forced_end_result(
+        self,
+        state: dict[str, Any],
+        *,
+        iteration: Any,
+    ) -> OutputResult:
+        """强制收束轮后仍调用工具（无文本收束）→ end 收束兜底。
+
+        任务管道（state 有 task.id）改写 task.status=failed 前复查完成证据
+        （信号②），已完成态不可覆盖；会话管道只收束不落任务终态。
+        """
+        state_updates: dict[str, Any] = {
+            "_has_new_llm_input": False,
+            "raw_tool_calls": [],
+        }
+        if self._has_completion_evidence(state):
+            if str(state.get("task.status") or "") != "completed":
+                state_updates["task.status"] = "completed"
+                state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
+            logger.warning(
+                "TaskReminder[iter=%s]: no text closure after forced round, "
+                "completion evidence present -> end (completed preserved)",
+                iteration,
+            )
+        else:
+            if state.get("task.id"):
+                state_updates["task.status"] = "failed"
+                state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
+            logger.warning(
+                "TaskReminder[iter=%s]: no text closure after forced round -> end",
+                iteration,
+            )
+        return OutputResult(
+            state_updates=state_updates,
+            route_signal=RouteSignal(
+                route_type="end",
+                reason="task_reminder: no text closure after forced round, ending",
+            ),
+        )
 
     @staticmethod
     def _task_completed_in_state(state: dict[str, Any]) -> bool:
@@ -633,11 +776,14 @@ class TaskReminder(IOutputPlugin):
         """从 Agent 配置覆盖运行时参数（每次 execute 复位后应用）。
 
         同 sidecar 实例被多个 agent 管道连续复用：先回构造默认值再应用本管道
-        state / plugin_configs 注入的 max_reminders / evaluation_mode——前一
-        agent 的配置不得残留到下一 agent。
+        state / plugin_configs 注入的 max_reminders / evaluation_mode /
+        tool_fail_streak_limit——前一 agent 的配置不得残留到下一 agent。
         """
         self._max_reminders = self._config.get("max_reminders", 10)
         self._evaluation_mode = self._config.get("evaluation_mode", False)
+        self._tool_fail_streak_limit = int(
+            self._config.get("tool_fail_streak_limit", 3)
+        )
 
         agent_max_reminders = ctx.state.get("max_reminders")
         if agent_max_reminders is not None and agent_max_reminders > 0:
@@ -647,6 +793,9 @@ class TaskReminder(IOutputPlugin):
         task_reminder_config = plugin_configs.get("task_reminder", {})
         if "evaluation_mode" in task_reminder_config:
             self._evaluation_mode = task_reminder_config["evaluation_mode"]
+        limit_override = task_reminder_config.get("tool_fail_streak_limit")
+        if isinstance(limit_override, int) and limit_override > 0:
+            self._tool_fail_streak_limit = limit_override
 
     def _build_evaluator_reminder(
         self,
