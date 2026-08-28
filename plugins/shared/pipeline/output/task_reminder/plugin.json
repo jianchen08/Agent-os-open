@@ -15,6 +15,12 @@
       "on_unload"
     ]
   },
+  "persistent_fields": [
+    "task.status",
+    "evaluate_reminder_count",
+    "eval_tool_only_count",
+    "evaluation.detected_result"
+  ],
   "permissions": {},
   "priority": 50,
   "host_group": "light"

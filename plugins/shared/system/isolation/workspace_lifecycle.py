@@ -88,11 +88,19 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         """子任务启动：共享父工作空间。
 
         拓扑由 workspace_mode 显式声明决定（与隔离解耦）：
-        - 显式 plain → 直接共享宿主目录（挂项目任务的 workspace 已解析为项目文件夹）
-        - 未声明 / 其他 → 共享父任务工作空间（父链 ws_meta 为权威，
+        - 显式 plain（_has_explicit_workspace 标记，agent/调用方指定）→
+          直接共享宿主目录（挂项目任务的 workspace 已解析为项目文件夹）；
+        - 缺省 plain（无显式标记，bootstrap 对 mode="" 的默认值）→ 走父链
+          共享父任务工作空间——缺省值不是"显式选择"，短路会跳过父链查询，
+          子任务落独立目录（用户实测：子任务目录 ≠ 父任务目录）；
+        - worktree / 未声明 → 共享父任务工作空间（父链 ws_meta 为权威，
           入参 workspace 仅作父链缺失时的兜底）
         """
-        if task_data.get("workspace_mode", "") == "plain" and workspace:
+        if (
+            task_data.get("_has_explicit_workspace")
+            and task_data.get("workspace_mode", "") == "plain"
+            and workspace
+        ):
             meta = {"mode": "shared", "path": workspace}
             self._ws_meta_store[task_id] = meta
             logger.debug(

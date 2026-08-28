@@ -309,3 +309,91 @@ class TestWorktreeTask:
             _assert_task_output(result["state"], expect_mode="worktree")
         finally:
             _cleanup_workspace_records(task_id, source_repo=source_repo)
+
+
+class TestSubtaskWorkspaceSharing:
+    """子任务工作空间共享：L1 派发子任务 → 子任务共享父任务工作区。
+
+    （2026-08-28 用户实测发现：子任务工作区 ≠ 父任务工作区。根因两层——
+    workspace_lifecycle 硬编码 is_root=True + _start_subtask 把缺省 plain
+    当显式选择短路父链。修复后子任务 ws_meta 指向父任务工作区。）
+    """
+
+    def test_subtask_shares_parent_workspace(
+        self, auth_token, cleanup_sessions, kernel_url, tmp_path
+    ):
+        """单输入（父任务创建）→ L1 自主派发子任务 → 断言子任务共享父工作区。"""
+        token = auth_token
+        session = create_session(token, title="e2e-subtask-sharing")
+        cleanup_sessions(session["thread_id"])
+
+        # ── 单输入：创建父任务，引导 L1 调 task_submit 派发子任务 ──
+        status, body, _ = http_post_json_auth(
+            f"{kernel_url}/ext/task_service/tasks",
+            {
+                "title": "e2e 子任务共享验证（父）",
+                "description": (
+                    "请调用 task_submit 工具派发一个子任务：标题=子任务共享验证，"
+                    "描述=请用 bash_execute 执行 echo shared-ok，目标 agent=general_agent。"
+                    "派发后汇报子任务 ID。"
+                ),
+                "agent_id": "agentos",
+            },
+            token=token,
+            timeout=15,
+        )
+        assert status == 200, f"创建父任务应 200，实际 {status}: {body}"
+        parent_id = str(body.get("id") or body.get("task_id") or "")
+        assert parent_id, f"父任务应返回 id，实际 {body}"
+
+        # ── 观察：轮询等子任务管道出生（lineage.parent_pipeline_id = 父）──
+        deadline = time.time() + 300
+        sub_id: str | None = None
+        while time.time() < deadline:
+            st, sb, _ = http_get_with_auth(
+                f"{kernel_url}/api/v1/pipelines/state", token=token, timeout=10,
+            )
+            if st == 200:
+                for row in sb.get("items") or []:
+                    s = row.get("state") or {}
+                    if str(s.get("lineage.parent_pipeline_id") or "") == parent_id:
+                        sub_id = row.get("pipeline_id")
+                        break
+            if sub_id:
+                break
+            time.sleep(5)
+        assert sub_id, f"子任务应在 300s 内出生（lineage 指向父 {parent_id}）"
+
+        # ── 观察：子任务 ws_meta 指向父工作区（共享语义）──
+        deadline = time.time() + 90
+        sub_ws: dict = {}
+        parent_ws = ""
+        while time.time() < deadline:
+            st, sb, _ = http_get_with_auth(
+                f"{kernel_url}/api/v1/pipelines/state", token=token, timeout=10,
+            )
+            if st == 200:
+                for row in sb.get("items") or []:
+                    s = row.get("state") or {}
+                    if row.get("pipeline_id") == sub_id and s.get("ws_meta"):
+                        wm = s.get("ws_meta")
+                        if isinstance(wm, str):
+                            try:
+                                wm = json.loads(wm)
+                            except json.JSONDecodeError:
+                                wm = {}
+                        sub_ws = wm or {}
+                    if row.get("pipeline_id") == parent_id and s.get("workspace"):
+                        parent_ws = str(s.get("workspace"))
+                if sub_ws.get("path") and parent_ws:
+                    break
+            time.sleep(3)
+
+        assert sub_ws.get("path"), f"子任务 ws_meta 应有 path，实际 {sub_ws}"
+        assert str(sub_ws.get("mode")) == "shared", (
+            f"子任务 ws_meta.mode 应为 shared（共享父工作区），实际 {sub_ws}"
+        )
+        assert parent_ws, f"父任务 workspace 应为空？实际 {parent_ws!r}"
+        assert str(sub_ws.get("path")) == parent_ws, (
+            f"子任务工作区应共享父任务工作区：子 {sub_ws.get('path')} vs 父 {parent_ws}"
+        )

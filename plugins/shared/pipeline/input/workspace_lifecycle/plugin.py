@@ -25,6 +25,7 @@ State 命名空间：
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 from pathlib import Path
@@ -128,7 +129,21 @@ class _ExecutionContextTaskTree:
         # return——此处 row 必非 None，assert 仅供类型收窄。
         assert row is not None
         parent_id = str(row.get("lineage.parent_pipeline_id") or "")
-        return SimpleNamespace(id=task_id, parent_task_id=parent_id or None, metadata={})
+        # metadata["ws_meta"]：服务端 restore_ws_meta 从 task.metadata 恢复父
+        # 链工作空间坐标——聚合行直接带扁平 ws_meta（state 单一真值，YAML 只读
+        # 镜像无 metadata 可读），跨进程父子任务据此共享工作空间。聚合行值是
+        # JSON 字符串，服务端按 dict 消费，须还原成 dict。
+        _ws_meta = row.get("ws_meta")
+        if isinstance(_ws_meta, str):
+            try:
+                _ws_meta = json.loads(_ws_meta)
+            except (ValueError, TypeError):
+                _ws_meta = None
+        return SimpleNamespace(
+            id=task_id,
+            parent_task_id=parent_id or None,
+            metadata={"ws_meta": _ws_meta},
+        )
 
     def save_task(self, task: Any) -> Any:
         """持久化 no-op（ws_meta 由 state 承载——YAML 只读镜像，统一后不写）。"""
@@ -348,8 +363,12 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             # 任务管道：调工作空间服务真实创建（对齐 task_executor 契约：
             # on_task_start(task_id, workspace, task_data) 分发 root/subtask）。
             # task_data 字段形态与 task_submit → task_data 一致。
+            # is_root 由 lineage 推导：有父管道（lineage.parent_pipeline_id 非空）
+            # 即子任务——共享父工作空间（服务 _start_subtask 按父链 ws_meta 解析），
+            # 无父（根任务/独立任务）才按声明拓扑建独立工作区。
+            _parent_id = str(state.get("lineage.parent_pipeline_id") or "")
             task_data = {
-                "is_root": True,
+                "is_root": not _parent_id,
                 "workspace_mode": mode,
                 "isolation_mode": (ec.get("isolation") or {}).get("level", ""),
                 "_has_explicit_workspace": bool(ws_spec.get("explicit")),

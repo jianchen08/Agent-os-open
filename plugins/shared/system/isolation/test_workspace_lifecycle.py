@@ -115,7 +115,7 @@ class TestSubtask:
         host_ws = tmp_path / "host_ws"
         host_ws.mkdir()
         m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
-        meta = m._start_subtask("sub1", str(host_ws), {"workspace_mode": "plain"})
+        meta = m._start_subtask("sub1", str(host_ws), {"workspace_mode": "plain", "_has_explicit_workspace": True})
         assert meta["mode"] == "shared"
         assert meta["path"] == str(host_ws)
 
