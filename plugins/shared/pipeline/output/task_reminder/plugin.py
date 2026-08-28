@@ -37,16 +37,22 @@ class TaskReminder(IOutputPlugin):
     async def execute(self, ctx: PluginContext) -> OutputResult:  # noqa: PLR0911
         """执行任务评估提醒检测。
 
-        短路判定级联（顺序即优先级）：
-        1. 任务状态推进：pending → running（幂等）
-        2. 适用面门槛：llm_call 轮 + 引擎注入的 ``task.id`` + 非 L1 调度层
-        3. 活跃子任务存在 → 不催（纯文本是等待/协调行为）
-        4. 评估模式连续无文本 → 达阈值强制提醒，未达阈值只计数
-        5. 有文本 → evaluation_result JSON 检测收束 / task_evaluate 成功证据放行
-        6. 会话模式跳过 → 提醒耗尽走 pending_evaluation 裁决 → 注入续跑提醒
+        收束判据 = 三信号按序短路（ADR 2026-08-28-task-closure-three-signal-gate），
+        全部读 state / 对话结构，不解析渲染文本形态：
+        1. 本轮有工具调用 → 路由工具执行，不评判；
+        2. ``state.task.status == completed``（经 pipeline-state 写面写入的）→
+           当轮收束 end——评估成功落库的当轮即收束，提醒根本不注入，
+           "完成被覆盖为 failed" 在该路径不可达；
+        3. 存在未回子任务挂号键 → 本轮收束等待唤醒通知，不催评估；
+        4. 三信号皆否（纯文本 + 未完成 + 无挂号）→ 注入提醒；耗尽裁决改写
+           终态前必须复查信号②，已完成态不可覆盖。
 
-        步骤 2 各门槛仅数行且为同一职责（"本轮该不该由本插件裁决"），拆出检查
-        函数只会制造跳转噪音；步骤 4/5/6 为各自可独立理解的行为段，拆为私有方法。
+        前置门槛（不属三信号）：pending→running 推进（幂等）/ llm_call 轮 /
+        L1 调度层永不触发 / ``task.id`` 存在性（state 单一真值，缺失即会话
+        管道）/ 活跃子任务（纯文本是等待/协调行为）/ 评估模式连续无文本计数。
+
+        ``_has_successful_task_evaluate``（messages JSON 文本检测）降为次级
+        证据保留——真实路径 LLM 面被 result_format 渲染化，文本形态不作主证据。
         """
         self._apply_runtime_config(ctx)
         state = ctx.state
@@ -65,40 +71,14 @@ class TaskReminder(IOutputPlugin):
             )
             return OutputResult()
 
-        # task.id 由引擎在管道出生时注入（== pipeline_id，见 chat_send_handler
-        # "调用方预传的 task.id 一律覆盖为引擎 id"）；缺失即会话管道，跳过。
-        task_id = state.get("task.id")
-        if not task_id:
-            logger.debug(
-                "TaskReminder[iter=%s]: skip, no task_id in state",
-                iteration,
-            )
-            return OutputResult()
-
-        # ── 规则 3：L1 调度层永不触发 ──
+        # ── L1 调度层永不触发 ──
         # L1（灵汐）的纯文本输出是正常的调度/沟通汇报，不代表"忘了提交评估"。
         # 层级单一真值：顶层 agent_level（context_build 以实际 Agent 层级
         # 无条件覆盖，见 context_build/plugin.py）。reminder 只对叶子执行者有意义。
         if state.get("agent_level", "") == "L1":
             logger.debug(
-                "TaskReminder[iter=%s][task=%s]: skip, L1 调度层不触发 reminder",
+                "TaskReminder[iter=%s]: skip, L1 调度层不触发 reminder",
                 iteration,
-                task_id,
-            )
-            return OutputResult()
-
-        # ── 任务存在性：state 单一真值 ──
-        # state 有 task.id 键即视为任务存在——不查跨进程 task_service（多 sidecar
-        # 下进程内单例可能读不到其他进程刚创建的任务，误判而提前 end）。
-
-        # ── 规则 4：有活跃下级任务时不触发（提前到最前面）──
-        # 任务有活跃子任务说明在等子任务完成，当前任务的纯文本输出
-        # 是正常的等待/协调行为，不该被催提交评估。
-        if await self._has_active_children(task_id, ctx):
-            logger.info(
-                "TaskReminder[iter=%s][task=%s]: skip, has active child tasks",
-                iteration,
-                task_id,
             )
             return OutputResult()
 
@@ -110,23 +90,48 @@ class TaskReminder(IOutputPlugin):
             has_text = self._last_assistant_has_text(state)
 
         eval_counted = self._eval_no_text_tracking(
-            state, iteration=iteration, task_id=task_id, has_text=has_text,
+            state, iteration=iteration, has_text=has_text,
         )
         if eval_counted is not None:
             return eval_counted
 
+        # ── 信号①：本轮有工具调用 → 路由工具执行，不评判 ──
         if has_tool_calls:
             logger.debug(
-                "TaskReminder[iter=%s][task=%s]: skip, has tool calls (len=%d)",
+                "TaskReminder[iter=%s]: skip, has tool calls (len=%d)",
                 iteration,
-                task_id,
                 len(raw_tool_calls),
             )
             return OutputResult()
 
         if not has_text:
             logger.debug(
-                "TaskReminder[iter=%s][task=%s]: skip, raw_result is empty",
+                "TaskReminder[iter=%s]: skip, raw_result is empty",
+                iteration,
+            )
+            return OutputResult()
+
+        # task.id 由引擎在管道出生时注入（== pipeline_id）；缺失即会话管道，
+        # 跳过。state 有 task.id 键即视为任务存在——不查跨进程 task_service
+        # （多 sidecar 下进程内单例可能读不到其他进程刚创建的任务）。
+        task_id = state.get("task.id")
+        if not task_id:
+            logger.debug(
+                "TaskReminder[iter=%s]: skip, no task_id in state",
+                iteration,
+            )
+            return OutputResult()
+
+        # ── 信号②：state 完成证据 → 当轮收束，提醒不注入 ──
+        if self._task_completed_in_state(state):
+            return self._completed_round_result(
+                state, iteration=iteration, task_id=task_id,
+            )
+
+        # ── 活跃子任务：纯文本是等待/协调行为，不催提交评估 ──
+        if await self._has_active_children(task_id, ctx):
+            logger.info(
+                "TaskReminder[iter=%s][task=%s]: skip, has active child tasks",
                 iteration,
                 task_id,
             )
@@ -168,7 +173,6 @@ class TaskReminder(IOutputPlugin):
         state: dict[str, Any],
         *,
         iteration: Any,
-        task_id: str,
         has_text: bool,
     ) -> OutputResult | None:
         """评估模式连续无文本追踪（仅工具调用/空输出场景）。
@@ -179,6 +183,7 @@ class TaskReminder(IOutputPlugin):
         if not (self._is_evaluation_mode(state) and not has_text):
             return None
 
+        task_id = str(state.get("task.id") or "-")
         tool_only_count = state.get("eval_tool_only_count", 0) + 1
         if tool_only_count < self._EVAL_TOOL_ONLY_THRESHOLD:
             logger.debug(
@@ -245,7 +250,7 @@ class TaskReminder(IOutputPlugin):
         iteration: Any,
         task_id: str,
     ) -> OutputResult | None:
-        """有文本输出时的两个收束闸门：evaluation JSON 检测 / 成功评估证据放行。
+        """有文本输出时的次级收束面：evaluation JSON 检测 / 次级证据放行 / 会话模式。
 
         Returns:
             收束结果（end 或清标志放行）；都不命中返回 None 继续。
@@ -269,9 +274,10 @@ class TaskReminder(IOutputPlugin):
                     ),
                 )
 
-        # 评估闸门放行：已成功调用 task_evaluate 即放行结束；未评估则继续
-        # 走提醒，文案要求先提交评估。成功后清除续跑标志（防残留标志把后续
-        # 纯文本轮误路由回 LLM 造成死循环）。
+        # 次级证据放行（降级保留，ADR 2026-08-28 证据契约）：messages role=tool
+        # JSON 文本检测——真实路径 LLM 面被 result_format 渲染化，仅作主证据
+        # （信号② state 证据）缺席时的补充放行；成功后清除续跑标志（防残留
+        # 标志把后续纯文本轮误路由回 LLM 造成死循环）。
         if self._has_successful_task_evaluate(state.get("messages", [])):
             logger.info(
                 "TaskReminder[iter=%s][task=%s]: task_evaluate success detected, allowing end",
@@ -289,6 +295,61 @@ class TaskReminder(IOutputPlugin):
             return OutputResult()
         return None
 
+    @staticmethod
+    def _task_completed_in_state(state: dict[str, Any]) -> bool:
+        """信号②：评估成功经任务域写面落库的完成证据（ADR 2026-08-28 三信号②）。
+
+        两个同通路证据源，任一在场即完成：
+        - ``task.status == "completed"``：task_evaluate 评估通过经 pipeline-state
+          写面落库的终态；
+        - ``task_evaluation_completed``：tool_core 从 task_evaluate 结构化工具
+          结果（success 且 metadata.result=completed）派生的 state 键——写面
+          mid-run 落注册表/DB，在飞 state 当轮不可见，该键是同一裁决的当轮
+          可观察投影。
+        """
+        if str(state.get("task.status") or "") == "completed":
+            return True
+        return bool(state.get("task_evaluation_completed"))
+
+    @classmethod
+    def _has_completion_evidence(cls, state: dict[str, Any]) -> bool:
+        """完成证据全集：信号② state 证据 ∪ evaluation.detected_result（评估
+        模式 JSON 检测产物）。耗尽裁决改写终态前的复查面——任一在场不得写
+        failed（已完成态不可覆盖，ADR 2026-08-28）。"""
+        if cls._task_completed_in_state(state):
+            return True
+        return bool(state.get("evaluation.detected_result"))
+
+    def _completed_round_result(
+        self,
+        state: dict[str, Any],
+        *,
+        iteration: Any,
+        task_id: str,
+    ) -> OutputResult:
+        """信号②当轮收束：评估成功已证实任务完成，本轮直接 end，提醒不注入。
+
+        task.status 尚为出生/执行值时补落 completed（写面 mid-run 写注册表，
+        在飞 state 当轮不可见；本放行检测点是补落的任务域写点，与耗尽裁决写
+        failed 同一通路对称）。已落终态时补落幂等（不重复写）。
+        """
+        state_updates: dict[str, Any] = {"_has_new_llm_input": False}
+        if str(state.get("task.status") or "") != "completed":
+            state_updates["task.status"] = "completed"
+            state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
+        logger.info(
+            "TaskReminder[iter=%s][task=%s]: state completion evidence, closing round (end)",
+            iteration,
+            task_id,
+        )
+        return OutputResult(
+            state_updates=state_updates,
+            route_signal=RouteSignal(
+                route_type="end",
+                reason="task_reminder: state completion evidence, closing round",
+            ),
+        )
+
     def _reminder_exhausted_result(
         self,
         state: dict[str, Any],
@@ -299,15 +360,14 @@ class TaskReminder(IOutputPlugin):
     ) -> OutputResult:
         """提醒耗尽（评估闸门的插件裁决，内核只落库不判定）。
 
-        无任何评估证据 → task.status 标 failed（评估提醒耗尽 = agent 未完成
-        评估义务 = 任务失败；task_failed 事件携带 parent_pipeline_id 经
-        triggers_ext 通知上级，用户语义 2026-08-28）；有评估证据（评估模式
-        JSON 检测产物）→ 保持现状交评估流程收尾。两者都结束本轮并发 end。
+        复查完成证据（信号② state 证据 ∪ evaluation.detected_result）：任一
+        在场 → 保持现状交评估流程收尾，终态不可覆盖为 failed；无任何证据 →
+        task.status 标 failed（评估提醒耗尽 = agent 未完成评估义务 = 任务失败；
+        task_failed 事件携带 parent_pipeline_id 经 triggers_ext 通知上级）。
+        两者都结束本轮并发 end。
         """
         state_updates: dict[str, Any] = {}
-        # 本方法仅在主级联的成功证据闸门未放行时可达（无成功的 task_evaluate），
-        # 唯一剩余证据源 = evaluation.detected_result（评估模式 JSON 检测产物）。
-        if not state.get("evaluation.detected_result"):
+        if not self._has_completion_evidence(state):
             state_updates["task.status"] = "failed"
             state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
             logger.warning(
