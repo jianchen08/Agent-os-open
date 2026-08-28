@@ -3,8 +3,7 @@
 
 验证：
 1. _start_root_task：workspace_mode=plain → 直接操作目录（mode=plain），不建 worktree
-2. _start_subtask：workspace_mode=plain → 共享宿主目录（mode=shared）
-3. init_container_workspace：容器空间恒复制（不依赖任何隔离字段）
+2. _start_subtask：workspace_mode=plain → 共享宿主目录（mode=shared，共享目标=传入 workspace）
 
 [来源: 任务提交参数解耦设计（worktree 与隔离拆分）]
 """
@@ -75,18 +74,6 @@ def test_root_task_plain_mode_uses_directory_directly(manager_cls):
     assert meta["path"] == "/tmp/proj_x"
 
 
-def test_root_task_plain_mode_uses_container_ws_when_present(manager_cls):
-    """plain 拓扑下优先使用容器工作空间（容器存在时）。"""
-    manager = make_manager(manager_cls, container_ws="/tmp/container_abc")
-    meta = manager._start_root_task(
-        "task_plain2",
-        "/tmp/proj_x",
-        {"workspace_mode": "plain"},
-    )
-    assert meta["mode"] == "plain"
-    assert meta["path"] == "/tmp/container_abc"
-
-
 def test_root_task_default_mode_is_worktree(manager_cls):
     """缺省 workspace_mode → 走 worktree 分支（不进 plain 直接返回）。"""
     manager = make_manager(manager_cls, container_ws="/tmp/container_abc")
@@ -117,24 +104,7 @@ def test_subtask_plain_mode_shares_host_dir(manager_cls):
         {"workspace_mode": "plain"},
     )
     assert meta["mode"] == "shared"
-    assert meta["path"] == "/tmp/container_abc"
-
-
-def test_init_container_workspace_always_copies(manager_cls):
-    """容器空间恒复制：无隔离字段也走复制路径（不依赖 isolation_mode 分支）。"""
-    manager = make_manager(manager_cls, container_ws=None)
-    manager._get_workspace_root = lambda: Path("/tmp/ws_root")
-    manager._copy_project_to_container = lambda path, src: 0
-    manager._git_init_and_initial_commit = lambda *a, **k: True
-    manager._ensure_dir_and_git = lambda *a, **k: None
-
-    meta = manager.init_container_workspace(
-        "container_1",
-        "/tmp/src_proj",
-        {},  # 无任何隔离字段 → 不应影响恒复制语义
-    )
-    assert meta["mode"] == "project_root"
-    assert Path(meta["path"]) == Path("/tmp/ws_root") / "container_container_1"
+    assert meta["path"] == "/tmp/whatever"
 
 
 # ── 拓扑缺省：显式 workspace → worktree；无显式 → plain（工作区根/{task_id}）──

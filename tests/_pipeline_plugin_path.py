@@ -47,6 +47,15 @@ def add_plugin_dir(category: str, name: str) -> None:
     # 其他插件测试（如 tasks/suites）收集时已把各自的 service.py 驻留进
     # sys.modules，本插件 plugin.py 的 `from service import` 需重解析到
     # 本目录（含 service.py 的插件：security_check 等）。
-    for m in ("plugin", "tool", "types", "models", "service", "storage", "policy",
+    # 例外 "types"：与 stdlib 同名——无差别逐出后，目标目录无 types.py 时
+    # 重解析沿 sys.path 命中 plugins/shared/pipeline/types.py（顶层相对导入
+    # 必炸的劫持源）。目标目录自带平铺 types.py 才逐出重解析，否则钉死
+    # stdlib 本体（tests/_stdlib_guard 防线）。
+    for m in ("plugin", "tool", "models", "service", "storage", "policy",
               "sensitive_paths", "interfaces", "isolation_level", "workspace"):
         sys.modules.pop(m, None)
+    if (Path(d) / "types.py").is_file():
+        sys.modules.pop("types", None)
+    else:
+        from tests._stdlib_guard import ensure_stdlib_module
+        ensure_stdlib_module("types")

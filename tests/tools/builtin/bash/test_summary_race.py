@@ -100,7 +100,7 @@ async def test_execute_fast_command_no_summary_error(tmp_path):
     tool = BashTool()
     tool.process_manager = ProcessManager(log_dir=tmp_path / "logs" / "bash")
 
-    result = await tool.execute({"command": "echo alive", "timeout": 10})
+    result = await tool.execute({"command": "echo alive", "timeout": 10, "workspace": str(tmp_path)})
 
     assert result.success, f"快命令不应失败（竞态清理不应触发 SUMMARY_ERROR），实际: {result.error}"
     assert result.output["status"] == "completed"
@@ -114,7 +114,7 @@ async def test_execute_fast_command_correct_exit_code(tmp_path):
     tool.process_manager = ProcessManager(log_dir=tmp_path / "logs" / "bash")
 
     # false 命令瞬间退出码 1
-    result = await tool.execute({"command": "false", "timeout": 10})
+    result = await tool.execute({"command": "false", "timeout": 10, "workspace": str(tmp_path)})
 
     # exit_code=1 应走 COMMAND_FAILED 失败路径，不是 SUMMARY_ERROR
     assert not result.success
@@ -130,6 +130,6 @@ async def test_execute_multiple_fast_commands_no_race(tmp_path):
     tool.process_manager = ProcessManager(log_dir=tmp_path / "logs" / "bash")
 
     for i in range(5):
-        result = await tool.execute({"command": f"echo line{i}", "timeout": 10})
+        result = await tool.execute({"command": f"echo line{i}", "timeout": 10, "workspace": str(tmp_path)})
         assert result.success, f"第 {i} 次执行失败: {result.error}"
         assert f"line{i}" in result.output["output"]

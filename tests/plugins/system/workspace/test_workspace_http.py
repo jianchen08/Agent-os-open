@@ -209,7 +209,7 @@ class TestWorkspaceDetail:
         assert body == {"items": [], "total": 0}
 
     def test_get_workspace_artifacts_aggregates(self, server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """有工作空间：聚合容器任务 + 子任务制品（子链来自 state 聚合行）。"""
+        """有工作空间：聚合容器任务 + 子任务制品（子链挂靠键 = task.parent_project_id）。"""
         _decode_http(_call(server, path="/ext/workspace_service/workspaces/root", method="GET"))
         ws_mod = sys.modules["workspace_service"]
         svc = ws_mod.get_workspace_service()
@@ -217,7 +217,7 @@ class TestWorkspaceDetail:
         async def read_rows() -> list[dict[str, Any]]:
             return [
                 {"pipeline_id": "root"},
-                {"pipeline_id": "child-1", "lineage.parent_pipeline_id": "root"},
+                {"pipeline_id": "child-1", "task.parent_project_id": "root"},
             ]
 
         monkeypatch.setattr(svc, "_read_state_rows", read_rows, raising=False)

@@ -94,13 +94,11 @@ class TestDeleteTaskCascadePipeline:
 
     @pytest.mark.asyncio
     async def test_delete_container_task_cascades_child_pipelines(self) -> None:
-        """容器任务软删除时应级联清理子任务的管道文件。"""
+        """删除父任务时级联清理子任务管道文件并删子任务记录（硬删口径）。"""
         svc = _make_service()
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container"},
-        )
+        parent = await svc.create_task(title="父任务")
         child = await svc.create_task(
-            title="子任务", parent_task_id=container.id,
+            title="子任务", parent_task_id=parent.id,
         )
         await svc.start_task(child.id)
         await svc.bind_pipeline_run(child.id, "child-pipe-001")
@@ -114,13 +112,11 @@ class TestDeleteTaskCascadePipeline:
         with patch.object(
             svc, "_cleanup_pipeline_file", side_effect=_track_cleanup,
         ):
-            result = await svc.delete_task(container.id)
+            result = await svc.delete_task(parent.id)
 
         assert result is True
-        # 容器任务被软删除（保留记录）
-        fetched = svc.get_task(container.id)
-        assert fetched is not None
-        assert fetched.metadata.get("soft_deleted") is True
+        # 父任务记录硬删除（容器软删分支已随容器语义退役）
+        assert svc.get_task(parent.id) is None
         # 子任务管道文件被级联清理
         assert "child-pipe-001" in cleaned_pipelines
         # 子任务记录被硬删除

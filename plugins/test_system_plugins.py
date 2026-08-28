@@ -273,7 +273,9 @@ class TestReviewPlugin:
             summary="Completed data analysis",
             metrics={"accuracy": 0.95},
         )
-        assert result["status"] == "completed"
+        # chat 能力缺席 → 本地降级（不产空 lessons 假成功），见 server 降级契约
+        assert result["status"] == "degraded"
+        assert result["mode"] == "local_degrade"
         assert "review_id" in result
 
     def test_trigger_review_with_low_metrics(self) -> None:
@@ -284,7 +286,7 @@ class TestReviewPlugin:
             summary="Failed task",
             metrics={"accuracy": 0.3},
         )
-        assert result["status"] == "completed"
+        assert result["status"] == "degraded"
         assert result["lessons_count"] >= 1
 
     def test_get_report(self) -> None:

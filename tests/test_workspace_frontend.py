@@ -159,9 +159,9 @@ class TestWorkspacesApi:
         assert "export async function getWorkspace" in content, "缺少 getWorkspace 函数"
 
     def test_has_get_file_tree_function(self):
-        """应包含 getFileTree 函数。"""
+        """应包含 getWorkspaceFileTree 函数（前端 API 命名规范化）。"""
         content = _read_ts_file("services/api/workspaces.ts")
-        assert "export async function getFileTree" in content, "缺少 getFileTree 函数"
+        assert "export async function getWorkspaceFileTree" in content, "缺少 getWorkspaceFileTree 函数"
 
     def test_has_create_entry_function(self):
         """应包含 createEntry 函数。"""

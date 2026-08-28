@@ -90,9 +90,20 @@ def bash_server_module():
 
 
 @pytest.fixture(scope="module")
-def bash_handler(bash_server_module):
-    """server.py 注册的 MCP 工具 handler（进程内直调，等价一次 MCP 调用）。"""
-    return bash_server_module.plugin._tools["bash_execute"].handler
+def bash_handler(bash_server_module, tmp_path_factory):
+    """工具 handler 包装：默认注入 workspace。
+
+    bash_execute 已 fail-closed 锚定（缺 workspace 拒执行）；进程内直调
+    无内核注入链，须显式给锚定目录才等价一次真实 MCP 调用。
+    """
+    ws = str(tmp_path_factory.mktemp("bash_ws"))
+    handler = bash_server_module.plugin._tools["bash_execute"].handler
+
+    async def _call(**kwargs):
+        kwargs.setdefault("workspace", ws)
+        return await handler(**kwargs)
+
+    return _call
 
 
 def _call(handler, **kwargs):
@@ -427,7 +438,7 @@ def sidecar_proc():
 
 
 @_NEEDS_BASH
-def test_subprocess_e2e_lifecycle(sidecar_proc):
+def test_subprocess_e2e_lifecycle(sidecar_proc, tmp_path):
     """真实调用方式：MCP call #1 execute → #2 input → #3 continue → #4 terminate。
 
     原 bug 双验证：
@@ -437,8 +448,9 @@ def test_subprocess_e2e_lifecycle(sidecar_proc):
     client = sidecar_proc
 
     # call #1: execute 长任务（等待 stdin 输入）
+    ws = str(tmp_path / "ws")
     r = client.call_tool(2, {"action": "execute", "command": "echo READY; read line; echo GOT:$line",
-                             "timeout": 3, "_owner": "sess-1"})
+                             "timeout": 3, "_owner": "sess-1", "workspace": ws})
     assert r["status"] == "running", r
     pid = r["pid"]
 
@@ -457,10 +469,11 @@ def test_subprocess_e2e_lifecycle(sidecar_proc):
 
 
 @_NEEDS_BASH
-def test_subprocess_e2e_cross_session_rejected(sidecar_proc):
+def test_subprocess_e2e_cross_session_rejected(sidecar_proc, tmp_path):
     """真实调用方式下跨会话 terminate 被拒（PROCESS_FORBIDDEN）。"""
     client = sidecar_proc
-    r = client.call_tool(6, {"action": "execute", "command": "sleep 30", "timeout": 2, "_owner": "sess-A"})
+    r = client.call_tool(6, {"action": "execute", "command": "sleep 30", "timeout": 2, "_owner": "sess-A",
+                             "workspace": str(tmp_path / "ws")})
     assert r["status"] == "running", r
     pid = r["pid"]
     try:

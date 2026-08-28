@@ -76,15 +76,17 @@ class TestInitWorkspace:
         tool._init_workspace({"project_root": str(tmp_path / "proj")})
         assert tool._workspace == tmp_path / "proj"  # type: ignore[comparison-overlap]
 
-    def test_workspace_from_base_path(self, tmp_path: Path) -> None:
+    def test_workspace_base_path_not_consumed(self, tmp_path: Path) -> None:
+        """缺省输入不回退插件 base_path（fail-closed：_workspace 保持未设）。"""
         tool = _Tool(base_path=str(tmp_path / "base"))
         tool._init_workspace({})
-        assert tool._workspace == tmp_path / "base"  # type: ignore[comparison-overlap]
+        assert getattr(tool, "_workspace", None) is None
 
-    def test_workspace_defaults_to_cwd(self) -> None:
+    def test_workspace_no_cwd_fallback(self) -> None:
+        """缺省输入不回退进程 cwd（fail-closed：_workspace 保持未设）。"""
         tool = _Tool()
         tool._init_workspace({})
-        assert tool._workspace == Path.cwd()  # type: ignore[comparison-overlap]
+        assert getattr(tool, "_workspace", None) is None
 
     def test_project_root_respects_input(self, tmp_path: Path) -> None:
         tool = _Tool()

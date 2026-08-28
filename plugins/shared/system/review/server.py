@@ -48,8 +48,12 @@ if _HINDSIGHT_MEMORY_DIR not in sys.path:
 _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
-# 审批域（状态机 + 媒体审阅在本插件包内）：server.py 运行目录即插件目录，
-# 平铺导入（与 workspace_service 同款惯例）。
+# 审批域（状态机 + 媒体审阅在本插件包内）：平铺导入（与 workspace_service
+# 同款惯例）。sidecar 以插件目录为 cwd 天然可解析；进程内装载（测试直载
+# server.py）无此 cwd，须自举本目录。
+_PLUGIN_DIR = os.path.abspath(os.path.dirname(__file__))
+if _PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_DIR)
 import media_review_service  # noqa: E402
 from http_json import (  # noqa: E402
     decode_body as _decode_body,
@@ -186,20 +190,6 @@ def _local_degrade_report(
     }
 
 
-@plugin.tool(
-    name="trigger_review",
-    schema={
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string"},
-            "summary": {"type": "string"},
-            "artifacts": {"type": "array", "items": {"type": "string"}, "default": []},
-            "metrics": {"type": "object", "default": {}},
-        },
-        "required": ["task_id", "summary"],
-    },
-    description="Trigger a review for a completed task and generate experience report",
-)
 def _build_review_pipeline_params(
     review_id: str, task_id: str, summary: str, artifacts: list[str], metrics: dict[str, Any]
 ) -> dict[str, Any]:
@@ -220,9 +210,12 @@ def _build_review_pipeline_params(
             "review.summary": summary,
             "review.artifacts": artifacts,
             "review.metrics": metrics,
+            # 血缘扁平键：根形式（系统组件，诚实声明复盘来源——不伪造父/默认
+            # session）；血缘方案本插件自持，内核零知识
+            "lineage.root": True,
+            "lineage.origin.kind": "plugin",
+            "lineage.origin.source": "review",
         },
-        # 血缘：根形式（系统组件，诚实声明复盘来源——不伪造父/默认 session）
-        "lineage": {"root": True, "origin": {"kind": "plugin", "source": "review"}},
     }
 
 
@@ -306,6 +299,20 @@ async def _dispatch_review_pipeline(
     }
 
 
+@plugin.tool(
+    name="trigger_review",
+    schema={
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+            "summary": {"type": "string"},
+            "artifacts": {"type": "array", "items": {"type": "string"}, "default": []},
+            "metrics": {"type": "object", "default": {}},
+        },
+        "required": ["task_id", "summary"],
+    },
+    description="Trigger a review for a completed task and generate experience report",
+)
 async def trigger_review(
     task_id: str,
     summary: str,
