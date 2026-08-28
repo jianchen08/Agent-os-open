@@ -468,8 +468,17 @@ async def _submit_task_event(
             },
             "lineage": lineage,
         }
-        if execution_context:
-            params["execution_context"] = execution_context
+        # execution_context 缺省对齐 task_submit._build_execution_context：
+        # 无显式 workspace → mode 空（workspace_lifecycle 落「工作空间根/
+        # {task_id}」默认 plain 拓扑）、isolation 默认 isolated。缺声明会让
+        # workspace_lifecycle 跳过工作区创建（无 execution_context 即跳过），
+        # bash/file 工具因 workspace 空锚被隔离拦截（container_create_failed）。
+        if not execution_context:
+            execution_context = {
+                "workspace": {"source_path": "", "mode": "", "explicit": False},
+                "isolation": {"level": "isolated"},
+            }
+        params["execution_context"] = execution_context
         # 挂靠项目（项目非管道）：任务管道 state 带 parent_project_id——
         # 前端任务树据此把任务挂到项目节点下。
         if parent_project_id:
