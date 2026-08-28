@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from enum_utils import safe_enum_value
@@ -298,18 +299,20 @@ class TaskReminder(IOutputPlugin):
     ) -> OutputResult:
         """提醒耗尽（评估闸门的插件裁决，内核只落库不判定）。
 
-        无任何评估证据 → task.status 标 pending_evaluation（不落 completed，
-        task_completed 通知照发携带该状态，上级可催评估/重派）；有证据 → 内核
-        补默认 completed。两者都结束本轮并发 end。
+        无任何评估证据 → task.status 标 failed（评估提醒耗尽 = agent 未完成
+        评估义务 = 任务失败；task_failed 事件携带 parent_pipeline_id 经
+        triggers_ext 通知上级，用户语义 2026-08-28）；有评估证据（评估模式
+        JSON 检测产物）→ 保持现状交评估流程收尾。两者都结束本轮并发 end。
         """
         state_updates: dict[str, Any] = {}
         # 本方法仅在主级联的成功证据闸门未放行时可达（无成功的 task_evaluate），
         # 唯一剩余证据源 = evaluation.detected_result（评估模式 JSON 检测产物）。
         if not state.get("evaluation.detected_result"):
-            state_updates["task.status"] = "pending_evaluation"
+            state_updates["task.status"] = "failed"
+            state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
             logger.warning(
                 "TaskReminder[iter=%s][task=%s]: max_reminders reached without evaluation, "
-                "task.status -> pending_evaluation",
+                "task.status -> failed",
                 iteration,
                 task_id,
             )
@@ -399,7 +402,22 @@ class TaskReminder(IOutputPlugin):
             except (json.JSONDecodeError, TypeError):
                 # 散文/损坏 JSON 不构成证据（子串命中是误判来源）
                 continue
-            if isinstance(parsed, dict) and parsed.get("success") is True:
+            if not isinstance(parsed, dict):
+                continue
+            # 两种成功形态（对齐 SDK ToolExecutionResult.to_dict 序列化契约）：
+            # - 全量形态：顶层 success=true；
+            # - slim 形态（LLM 面默认序列化）：成功时**省略 success 键**只留
+            #   output/metadata，失败时才写 success=false——即「无 success 键
+            #   且无 error」即成功证据。只认 success===true 会导致评估成功
+            #   却永远识别不到（无限提醒循环，实测管道 b8b92a56ad72）。
+            success_val = parsed.get("success")
+            if success_val is False:
+                continue
+            if success_val is True:
+                return True
+            # slim 形态：无 success 键且无 error（SDK to_dict(slim=True) 成功时
+            # 省略 success，失败时才写 success=false）
+            if "success" not in parsed and "error" not in parsed:
                 return True
         return False
 

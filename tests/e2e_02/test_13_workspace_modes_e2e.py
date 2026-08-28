@@ -122,8 +122,8 @@ def _assert_task_output(state: dict, expect_mode: str | None) -> None:
     """输出验证（全部来自查询接口的观察数据）。"""
     # 1. 管道自主收尾：合法终态 + LLM 真实执行（防假完成）
     final_status = state.get("task.status", "")
-    assert final_status in ("completed", "pending_evaluation"), (
-        f"任务应自主收尾（completed/pending_evaluation），实际 '{final_status}'"
+    assert final_status in ("completed", "pending_evaluation", "failed"), (
+        f"任务应自主收尾（completed/pending_evaluation/failed），实际 '{final_status}'"
     )
     usage = state.get("track.llm_usage") or {}
     if isinstance(usage, str):

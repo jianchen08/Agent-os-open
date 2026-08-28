@@ -19,6 +19,7 @@
 
 import asyncio
 import contextlib
+import json
 import logging
 import types
 from datetime import UTC, datetime
@@ -531,6 +532,10 @@ class TaskEvaluateTool(BuiltinTool):
         task: Any,
     ) -> ToolExecutionResult:
         """自动完成评估（评估任务提交时声明的所有指标）。"""
+        # 指标来源兜底：task.metadata（YAML 镜像通路）在 0.2 任务=管道架构下
+        # 常为空（任务无 YAML 记录），指标实际在管道 state 的
+        # task.acceptance_criteria——从 state 聚合行补齐（含 JSON 字符串还原）。
+        await self._ensure_criteria_from_state(task)
         logger.warning(
             "[TRACE-EVAL] _auto_complete ENTRY | task=%s | metric_ids=%s",
             task.id,
@@ -1062,6 +1067,40 @@ class TaskEvaluateTool(BuiltinTool):
             logger.warning("[TaskEvaluate] state 聚合读取失败: %s", exc)
             return None
 
+    async def _ensure_criteria_from_state(self, task: Any) -> None:
+        """验收标准兜底：task.metadata 无 acceptance_criteria 时从 state 聚合行补齐。
+
+        0.2 任务=管道架构下指标落在管道 state（task.acceptance_criteria），
+        YAML 镜像通路的 task.metadata 常为空——不兜底会导致评估误判
+        "未声明任何评估指标"而直接标记完成（实测管道 b8b92a56ad72）。
+        聚合行值可能是 JSON 字符串（DB 投影原样存储），还原成 dict。
+        """
+        if not getattr(task, "id", None):
+            return
+        if task.metadata and task.metadata.get("acceptance_criteria"):
+            return
+        try:
+            rows = await self._read_state_rows()
+        except Exception:  # noqa: BLE001 — 兜底失败按无指标继续（既有降级路径）
+            return
+        if not rows:
+            return
+        row = next(
+            (r for r in rows if str(r.get("pipeline_id") or "") == str(task.id)),
+            None,
+        )
+        if row is None:
+            return
+        ac = row.get("task.acceptance_criteria")
+        if isinstance(ac, str):
+            try:
+                ac = json.loads(ac)
+            except (ValueError, TypeError):
+                ac = None
+        if isinstance(ac, dict) and ac:
+            task.metadata = dict(task.metadata or {})
+            task.metadata["acceptance_criteria"] = ac
+
     async def _get_task_from_state(self, task_id: str) -> Any:
         """从 state 聚合行组装轻量任务对象（GAP-1 统一：task = pipeline）。
 
@@ -1085,6 +1124,12 @@ class TaskEvaluateTool(BuiltinTool):
             status = TaskStatus.PENDING
         metadata: dict[str, Any] = {}
         ac = row.get("task.acceptance_criteria")
+        if isinstance(ac, str):
+            # 聚合行值可能是 JSON 字符串（DB 投影原样存储），还原成 dict
+            try:
+                ac = json.loads(ac)
+            except (ValueError, TypeError):
+                ac = None
         if isinstance(ac, dict):
             metadata["acceptance_criteria"] = ac
         eval_res = row.get("task.evaluation")

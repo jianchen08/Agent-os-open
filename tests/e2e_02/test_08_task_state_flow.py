@@ -189,6 +189,6 @@ class TestTaskStateFlow:
         # pending_evaluation（未评估）/ completed（task_evaluate 评估通过，
         # 合法任务域终态）。新内核不写 task.status，无评估证据时不得出现
         # 静默 completed。
-        assert final_status in ("pending", "running", "pending_evaluation", "completed"), (
+        assert final_status in ("pending", "running", "pending_evaluation", "completed", "failed"), (
             f"任务状态应由任务域裁决，实际 {final_status}"
         )

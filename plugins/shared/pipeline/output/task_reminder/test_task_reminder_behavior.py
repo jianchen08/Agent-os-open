@@ -8,7 +8,7 @@
 3. 评估模式 tool-only 计数与强制提醒（阈值 6、提醒上限、计数归零）；
 4. 评估结论 JSON 检测 → end 信号；
 5. task_evaluate 成功证据放行；
-6. 提醒耗尽 → pending_evaluation 裁决（有评估证据则纯 end）；
+6. 提醒耗尽 → failed 裁决（评估提醒耗尽 = 任务失败，事件通知上级；有评估证据则纯 end）；
 7. 活跃子任务 task_service 回退（state 无标记时经服务查询，含枚举状态）；
 8. executor/evaluator 两套提醒文案构建（验收标准两形态、打回原因）；
 9. 静态解析器：_detect_evaluation_result_json / _has_successful_task_evaluate /
@@ -383,7 +383,7 @@ class TestEvaluateEvidencePrecision:
         self,
     ) -> None:
         """端到端：唯一 task_evaluate 结果是带子串的失败 payload → 提醒耗尽后
-        仍应裁决 pending_evaluation（放行 = 漏评任务被标 completed 的事故面）。"""
+        裁决 failed（漏评任务不放行为 completed；failed 事件通知上级）。"""
         import asyncio
 
         plugin = TaskReminder(config={"max_reminders": 2})
@@ -395,11 +395,11 @@ class TestEvaluateEvidencePrecision:
         )
         result = asyncio.run(plugin.execute(_ctx(state)))
         assert result.route_signal is not None
-        assert result.state_updates.get("task.status") == "pending_evaluation"
+        assert result.state_updates.get("task.status") == "failed"
 
 
 class TestMaxRemindersExhausted:
-    def test_exhausted_without_evidence_marks_pending_evaluation(self) -> None:
+    def test_exhausted_without_evidence_marks_failed(self) -> None:
         import asyncio
 
         plugin = TaskReminder(config={"max_reminders": 2})
@@ -409,7 +409,8 @@ class TestMaxRemindersExhausted:
         )
         assert result.route_signal is not None
         assert result.route_signal.route_type == "end"
-        assert result.state_updates["task.status"] == "pending_evaluation"
+        assert result.state_updates["task.status"] == "failed"
+        assert result.state_updates.get("task.ended_at")
         # 提醒耗尽：清除续跑标志（防残留标志把纯文本轮误路由回 LLM）
         assert result.state_updates["_has_new_llm_input"] is False
 
@@ -531,8 +532,8 @@ class TestRuntimeConfigOverride:
                 _ctx(_base_task_state(max_reminders=1, evaluate_reminder_count=1))
             )
         )
-        # 运行时上限 1 已达 → pending_evaluation 而非注入第 2 次提醒
-        assert result.state_updates.get("task.status") == "pending_evaluation"
+        # 运行时上限 1 已达 → failed 裁决而非注入第 2 次提醒
+        assert result.state_updates.get("task.status") == "failed"
 
     def test_plugin_configs_evaluation_mode_switch(self) -> None:
         import asyncio
