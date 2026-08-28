@@ -258,14 +258,11 @@ class ParamInjectPlugin(IInputPlugin):
                 if isolation_level:
                     args["isolation_level"] = isolation_level
 
-                # 注入 project_root：state 权威值优先（任务管道 = 工作空间）；
-                # 缺省回退内核自解析的项目根（与 {{project_root}} 模板替换同源）
-                # ——主会话管道可能未跑 init 体（state 无 project_root），
-                # 文件工具的锚点不能因此缺失（缺注入时工具侧 fail-closed 拒绝）。
+                # 注入 project_root：state 权威值（任务管道 = 工作空间，
+                # 主会话 = 配置的工作空间根，均由 workspace_lifecycle 写入）。
+                # 不做仓库根回退——state 缺锚点时文件工具 fail-closed 报错，
+                # 不得把项目源码树变成 agent 读写面。
                 project_root = ctx.state.get("project_root", "")
-                if not project_root:
-                    _pr = _resolve_project_root()
-                    project_root = str(_pr) if _pr is not None else ""
                 if project_root:
                     args["project_root"] = project_root
 

@@ -83,26 +83,28 @@ def test_explicit_task_id_preserved_for_task_manage() -> None:
     assert args["task_id"] == "target789"
 
 
-def test_project_root_backfilled_from_kernel_resolution_when_state_lacks_it() -> None:
-    """state 无 project_root（主会话未跑 init 体）→ 注入内核自解析的项目根。
+def test_project_root_not_injected_when_state_lacks_it() -> None:
+    """state 无 project_root → 不注入（仓库根不得隐式成为读写锚点）。
 
-    文件工具锚点 fail-closed 后，无 project_root 注入 = 全部路径操作被拒；
-    主会话 skills/... 等仓库根相对路径必须仍有锚点。项目根与
-    {{project_root}} 模板替换同源（_resolve_project_root，config/src 标记法）。
+    主会话锚点由 workspace_lifecycle 写入 state（工作空间根）；缺锚点时
+    文件工具 fail-closed 报错——比静默继承项目源码树安全。
     """
-    from pathlib import Path
-
     calls = _run(
         [{"name": "file_read", "args": {"path": "skills/x/SKILL.md"}}],
         {"task.id": "", "pipeline_id": "p1"},
     )
     args = _args_of(calls)
-    pr = args.get("project_root", "")
-    assert pr, "state 缺 project_root 时必须回退内核自解析值注入"
-    root = Path(pr)
-    assert root.is_absolute()
-    assert (root / "config").is_dir(), "解析值必须是仓库根"
+    assert "project_root" not in args
 
+
+def test_project_root_state_value_injected() -> None:
+    """state 权威值（任务管道 = 工作空间 / 主会话 = 工作空间根）照常注入。"""
+    calls = _run(
+        [{"name": "file_read", "args": {"path": "doc.md"}}],
+        {"project_root": "D:/ws/task1", "workspace": "D:/ws/task1"},
+    )
+    args = _args_of(calls)
+    assert args.get("project_root") == "D:/ws/task1"
 
 def test_project_root_state_value_wins_over_backfill() -> None:
     """state 权威值优先：任务管道 project_root=工作空间，不被仓库根覆盖。"""

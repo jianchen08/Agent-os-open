@@ -111,13 +111,10 @@ def test_task_submit_explicit_choice_not_overwritten() -> None:
 
 
 def test_no_state_value_leaves_args_untouched() -> None:
-    """state 无 workspace 时不注入 workspace；project_root 回退内核自解析值。
-
-    project_root 回退注入是主会话文件工具锚点的来源（工具侧 fail-closed，
-    无注入即拒绝），与 {{project_root}} 模板替换同源；workspace 仅任务管道有。
-    """
+    """state 无 workspace/project_root 时不新增键（锚点缺失由工具侧
+    fail-closed 报错，仓库根不得隐式继承为 agent 读写锚点）。"""
     calls = _run([{"name": "file_read", "args": {"path": "a.txt"}}])
     args = _args_of(calls)
     assert "workspace" not in args
-    assert args.get("project_root"), "project_root 回退内核自解析值注入"
+    assert "project_root" not in args
 

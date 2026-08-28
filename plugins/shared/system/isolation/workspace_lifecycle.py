@@ -73,6 +73,17 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         self._persist_ws_meta(task_id)
         return meta
 
+    def on_session_start(self, workspace: str) -> None:
+        """主会话（无任务身份）工作区就绪：确保目录存在并同步 skills 快照。
+
+        主会话工作区 = 配置的工作空间根（workspace.root，任务工作区的父目录），
+        仓库根不得作为会话工作区（agent 读写面不得触及项目源码树）。
+        skills 同源同机制：文件工具与提示词引用的 skills/... 相对路径在此
+        目录内解析（与任务管道 _copy_skills_to_workspace 同一复制例程）。
+        """
+        Path(workspace).mkdir(parents=True, exist_ok=True)
+        self._copy_skills_to_workspace(workspace)
+
     def _start_subtask(self, task_id: str, workspace: str, task_data: dict) -> dict:
         """子任务启动：共享父工作空间。
 

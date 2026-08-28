@@ -90,36 +90,91 @@ async def test_workspace_init_idempotent(plugins):
 
 
 @pytest.mark.asyncio
-async def test_workspace_init_main_session_injects_project_root(plugins):
-    """init：主会话（无 task.id、无显式工作区）注入项目根锚点。
+async def test_workspace_init_main_session_gets_workspace_root(plugins, monkeypatch, tmp_path):
+    """init：主会话（无 task.id、无显式工作区）工作区 = 配置的工作空间根。
 
-    agent 配置引用的 skills/... 等相对路径以仓库根为基准——project_root 入
-    state 后经 param_inject 到达文件工具与 prompt_build。历史缺陷：主会话
-    state 无 project_root，相对路径以 sidecar cwd 解析报 File not found，
-    前端按仓库根解析同一路径却能打开。
+    仓库根不得作为会话工作区（agent 读写面不得触及项目源码树）；skills
+    快照由 manager.on_session_start 同步到工作区根，skills/... 相对路径
+    在工作区内解析（与任务管道同一复制例程）。
     """
+    import tests._isolation_path  # noqa: F401  （system/isolation 目录入 sys.path）
+    import isolation.workspace as ws_mod
+
+    monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: tmp_path)
+
     result = await plugins["ws"].execute(plugins["ctx_factory"]({"current_phase": "init"}))
     updates = result.state_updates
-    assert "project_root" in updates, "主会话必须注入项目根锚点"
-    root = Path(updates["project_root"])
-    # 性质：解析结果必须是含 config/isolation 的真实仓库根（find_project_root 契约）
-    assert root.is_absolute()
-    assert (root / "config" / "isolation").is_dir()
+    assert updates["workspace"] == str(tmp_path)
+    assert updates["project_root"] == str(tmp_path)
+    assert updates["ws_meta"]["mode"] == "plain"
 
 
-@pytest.mark.asyncio
+async def test_workspace_init_main_session_syncs_skills_via_manager(
+    plugins, monkeypatch, tmp_path,
+) -> None:
+    """init：manager 可用时 skills 同步到会话工作区根（复制源 = 项目根 skills/）。"""
+    import shutil
+
+    import tests._isolation_path  # noqa: F401
+    import isolation.workspace as ws_mod
+    from isolation.workspace_lifecycle import WorkspaceLifecycleManager
+
+    monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: tmp_path)
+    repo_skills = tmp_path / "_repo" / "skills"
+    (repo_skills / "skill-demo").mkdir(parents=True)
+    (repo_skills / "skill-demo" / "SKILL.md").write_text("demo", encoding="utf-8")
+    manager = WorkspaceLifecycleManager(
+        resource_merge=None,
+        config={},
+        task_tree=None,
+        ws_meta_store={},
+        base_path=str(tmp_path / "_repo"),
+    )
+    monkeypatch.setattr(
+        type(plugins["ws"]), "_get_manager", lambda self, base_path_hint=None: manager
+    )
+
+    result = await plugins["ws"].execute(plugins["ctx_factory"]({"current_phase": "init"}))
+    assert result.state_updates["workspace"] == str(tmp_path)
+    # 删值实验对照：manager 同步把源技能带进会话工作区
+    synced = tmp_path / "skills" / "skill-demo" / "SKILL.md"
+    assert synced.read_text(encoding="utf-8") == "demo"
+    # 增量幂等：改源后重跑不同步已存在技能（已有技能保持原样）
+    (repo_skills / "skill-demo" / "SKILL.md").write_text("changed", encoding="utf-8")
+    await plugins["ws"].execute(
+        plugins["ctx_factory"]({"current_phase": "init", "workspace": str(tmp_path)})
+    )
+    assert synced.read_text(encoding="utf-8") == "demo"
+    assert shutil
+
+
+async def test_workspace_init_main_session_degrades_without_manager(plugins, monkeypatch, tmp_path):
+    """init：manager 不可用时降级为纯解析（工作区三件套仍写入，无 skills 同步）。"""
+    import tests._isolation_path  # noqa: F401
+    import isolation.workspace as ws_mod
+
+    monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        type(plugins["ws"]), "_get_manager", lambda self, base_path_hint=None: None
+    )
+
+    result = await plugins["ws"].execute(plugins["ctx_factory"]({"current_phase": "init"}))
+    updates = result.state_updates
+    assert updates["workspace"] == str(tmp_path)
+    assert not (tmp_path / "skills").exists()
+
+
 async def test_workspace_init_main_session_project_root_idempotent(plugins):
-    """init：主会话 state 已有 project_root 时不重复注入。"""
+    """init：主会话 state 已有 workspace 时不重复解析（顶部幂等短路）。"""
     result = await plugins["ws"].execute(
-        plugins["ctx_factory"]({"current_phase": "init", "project_root": "D:/already/set"})
+        plugins["ctx_factory"]({"current_phase": "init", "workspace": "D:/already/set"})
     )
     assert result.state_updates == {}
 
 
-@pytest.mark.asyncio
 async def test_workspace_init_task_without_ws_declaration_unchanged(plugins):
     """init：有 task.id 但无 workspace 声明 → 走既有默认工作区创建
-    （workspace 三件套），不得回落成主会话的仓库根锚点。"""
+    （workspace 三件套），不得回落成主会话工作区根。"""
     result = await plugins["ws"].execute(
         plugins["ctx_factory"](
             {
@@ -130,11 +185,10 @@ async def test_workspace_init_task_without_ws_declaration_unchanged(plugins):
         )
     )
     updates = result.state_updates
-    assert "workspace" in updates, "任务管道必须创建任务工作区（非仅仓库根锚点）"
-    assert "ws_meta" in updates
+    assert "workspace" in updates, "任务管道必须创建任务工作区"
+    assert updates.get("workspace") != "" 
 
 
-@pytest.mark.asyncio
 async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypatch, tmp_path):
     """init 降级（服务不可用）：无显式 workspace 时 ws_meta 不得标 worktree。
 

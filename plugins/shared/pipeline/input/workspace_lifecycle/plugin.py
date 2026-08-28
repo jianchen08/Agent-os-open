@@ -233,31 +233,46 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         ec = state.get("execution_context")
         ws_spec = ec.get("workspace") if isinstance(ec, dict) else None
 
-        # ── 主会话（无任务身份、无显式工作区）项目根锚点 ──
-        # 主会话没有任务工作区（workspace 语义留给任务管道），但 agent 配置
-        # 引用的 skills/... 等相对路径以仓库根为基准：project_root 注入 state
-        # 后经 param_inject 到达文件工具（file_read/enhanced_search 锚定）与
-        # prompt_build（config/rules 项目文件注入）。历史缺陷：主会话 state
-        # 无 project_root，相对路径以 sidecar cwd 解析报 File not found——
-        # 而前端按仓库根解析同一相对路径能打开（「agent 读不到、前端点得开」）。
+        # ── 主会话（无任务身份、无显式工作区）工作区 ──
+        # 工作区 = 配置的工作空间根（get_workspace_base_dir，任务工作区的父
+        # 目录），skills 快照同步到该目录——agent 配置引用的 skills/... 相对
+        # 路径在会话工作区内解析。仓库根不得作为会话工作区（agent 读写面
+        # 不得触及项目源码树）；缺锚点时文件工具按 fail-closed 报错。
         _explicit_source = ws_spec.get("source_path") or "" if isinstance(ws_spec, dict) else ""
-        if not state.get("task.id") and not _explicit_source and not state.get("project_root"):
+        if not state.get("task.id") and not _explicit_source:
             try:
                 _ensure_isolation_path()
-                from isolation.workspace import find_project_root  # noqa: PLC0415
+                from isolation.workspace import get_workspace_base_dir  # noqa: PLC0415
 
-                _repo_root = str(find_project_root())
+                _ws_root = str(get_workspace_base_dir())
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[WorkspaceLifecycle] 主会话项目根解析失败，文件工具将无锚点 | error=%s",
+                    "[WorkspaceLifecycle] 主会话工作区根解析失败，本会话文件工具无锚点 | error=%s",
                     exc,
                 )
                 return PluginResult()
+            # skills 源 = 项目根 skills/（manager 的 base_path 决定复制源），
+            # 目标 = 会话工作区根；服务不可用时降级为纯解析（目录由根解析侧建）。
+            manager = self._get_manager(base_path_hint=None)
+            if manager is not None:
+                try:
+                    await ctx_await(manager.on_session_start, _ws_root)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[WorkspaceLifecycle] 主会话 skills 同步失败（工作区仍生效）| error=%s",
+                        exc,
+                    )
             logger.info(
-                "[WorkspaceLifecycle] init 主会话注入项目根锚点 | project_root=%s",
-                _repo_root,
+                "[WorkspaceLifecycle] init 主会话工作区 | path=%s",
+                _ws_root,
             )
-            return PluginResult(state_updates={"project_root": _repo_root})
+            return PluginResult(
+                state_updates={
+                    "workspace": _ws_root,
+                    "project_root": _ws_root,
+                    "ws_meta": {"mode": "plain", "path": _ws_root, "project_root": _ws_root},
+                }
+            )
 
         if not isinstance(ec, dict):
             logger.debug("[WorkspaceLifecycle] 无 execution_context，跳过工作空间创建")
