@@ -14,9 +14,9 @@
 //!   经 dispatch → process_via_engine 的 execution_context 合并点（1a2）之后并入；
 //!   保留字（message/pipeline_id 等）受保护，命中即协议错误。
 //! - 创建分支（`create: true` 或 `pipeline_id` 为空）：引擎生成新 pipeline_id
-//!   并在响应返回（`{"status":"created","pipeline_id":...}`）；必须声明 `lineage`
-//!   （有父/根二选一，见 [`parse_lineage`]），lineage 由引擎展开为扁平键写入
-//!   state，作为出生即固化的保护字段。
+//!   并在响应返回（`{"status":"created","pipeline_id":...}`）。任务域出生键
+//!   （血缘 `lineage.*`/`task.id`）由调用方经 `state` overlay 透传、输入阶段
+//!   插件（context_build）投影写入，内核对血缘方案零知识。
 //!
 //! sidecar 光有展示通道（event-bus.emit 往前端推事件）不能唤醒 agent 跑一轮，
 //! 还需注入通道——本 handler 即该通道：经
@@ -28,7 +28,7 @@ use std::sync::Arc;
 use agentos_core::traits::StorageBackend;
 use agentos_core::types::PendingInputSource;
 use async_trait::async_trait;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use agentos_mcp::{CapabilityHandler, McpError};
 use agentos_session::router::PipelineDispatcher;
@@ -50,14 +50,7 @@ pub(crate) const HANDLED_PARAM_NAMES: &[&str] = &[
     "execution_context",
     "agent_id",
     "state",
-    "lineage",
 ];
-
-/// lineage 根形式 `origin.kind` 合法枚举（GAP-1 补定案：根是诚实声明，来源用
-/// 类型描述符表达——channel | external_service | plugin | system）。
-/// 契约文件 lineage.origin.kind.enum 的代码侧锚点（机械闸强制一致）。
-pub(crate) const LINEAGE_ORIGIN_KINDS: &[&str] =
-    &["channel", "external_service", "plugin", "system"];
 
 /// `chat` namespace handler：sidecar → 投递消息到会话并跑管道。
 ///
@@ -124,8 +117,7 @@ impl CapabilityHandler for ChatSendHandler {
 /// `send_message` 顶层解析结果包（字段与 [`HANDLED_PARAM_NAMES`] 一一对应）。
 ///
 /// 字符串/对象字段借用调用方 `params`（零拷贝）；`overlay` 是经
-/// [`validate_state_overlay`] 校验的 state 注入副本——创建分支会就地向其
-/// 合并 lineage 展开键与引擎身份键（task.id），出生固化后随派发透传。
+/// [`validate_state_overlay`] 校验的 state 注入副本，出生固化后随派发透传。
 struct SendParams<'a> {
     message: &'a str,
     user_id: &'a str,
@@ -137,8 +129,6 @@ struct SendParams<'a> {
     ownership_thread: Option<&'a str>,
     execution_context: Option<&'a Value>,
     agent_id: String,
-    /// 原样引用：空值过滤由消费分支语义决定（创建必填、注入禁带）。
-    lineage: Option<&'a Value>,
     overlay: Option<Value>,
 }
 
@@ -150,8 +140,7 @@ impl ChatSendHandler {
     /// - **创建分支**（`create: true` 或 `pipeline_id` 为空）：引擎生成新 pipeline_id
     ///   （uuid v4 simple，与 sessions 的 active_pipeline_id 同格式）并以该 id 走
     ///   既有 dispatch——resolve 链路对陌生 id 落回退分支 ③ 原样穿透到引擎
-    ///   `get_or_init` 新 state。创建**必须**声明 `lineage`（二选一，杜绝孤儿），
-    ///   且不接受调用方传入 id（三次定案：堵 id 冒占）。
+    ///   `get_or_init` 新 state。不接受调用方传入 id（三次定案：堵 id 冒占）。
     ///
     /// 可选 `state` 对象：自由注入 initial_state 顶层扁平键（任务域用 `task.*`
     /// 点号键，与 track.total_tokens 同款约定），经 dispatch → process_via_engine
@@ -326,21 +315,20 @@ impl ChatSendHandler {
             ownership_thread,
             execution_context,
             agent_id,
-            lineage: params.get("lineage"),
             overlay,
         })
     }
 
     /// 阶段二：创建/注入双分支的派发坐标解析，返回 `(pipeline_id, thread_id, created)`。
     ///
-    /// - **创建分支**（`create:true` 或缺 pipeline_id）：不接受调用方传入 id；
-    ///   lineage 必填并展开为扁平保护键、task.id 强制注入引擎 id——两者就地
-    ///   并入 `p.overlay`（出生固化）。id 由引擎生成（uuid v4 simple 前 12 位
-    ///   hex，与 sessions 的 active_pipeline_id 同格式）；thread 取归属会话
-    ///   声明，缺省以新 id 兼作派发坐标（resolve 链路对陌生 id 落回退分支 ③
-    ///   原样穿透到引擎 get_or_init 新 state）。
-    /// - **注入分支**（显式 pipeline_id 且非 create）：禁带 lineage（出生写入
-    ///   的保护字段，防覆写），经黑盒反查真实 thread，pipeline_id 保持原值。
+    /// - **创建分支**（`create:true` 或缺 pipeline_id）：不接受调用方传入 id。
+    ///   id 由引擎生成（uuid v4 simple 前 12 位 hex，与 sessions 的
+    ///   active_pipeline_id 同格式）；thread 取归属会话声明，缺省以新 id 兼作
+    ///   派发坐标（resolve 链路对陌生 id 落回退分支 ③ 原样穿透到引擎
+    ///   get_or_init 新 state）。任务域出生键（lineage.*/task.id）由调用方经
+    ///   `state` overlay 透传、输入阶段插件（context_build）投影，内核零知识。
+    /// - **注入分支**（显式 pipeline_id 且非 create）：经黑盒反查真实 thread，
+    ///   pipeline_id 保持原值。
     async fn resolve_send_targets(
         &self,
         p: &mut SendParams<'_>,
@@ -355,32 +343,10 @@ impl ChatSendHandler {
                     ),
                 });
             }
-            // 血缘二选一强制（补定案：出生结构性写入，非可选元数据）。
-            let lineage = p
-                .lineage
-                .filter(|v| !v.is_null())
-                .ok_or_else(|| McpError::Protocol {
-                    message: "chat.send_message 创建新管道必须声明 lineage\
-                              （有父/根二选一，杜绝孤儿管道）"
-                        .to_string(),
-                })?;
-            let lineage_keys = parse_lineage(lineage)?;
-            let overlay_obj = p.overlay.get_or_insert_with(|| Value::Object(Map::new()));
-            if let Some(obj) = overlay_obj.as_object_mut() {
-                for (k, v) in lineage_keys {
-                    obj.insert(k, v);
-                }
-            }
             // 三次定案：pipeline_id 由引擎生成（身份权威统一），uuid v4 simple
             // 取前 12 位 hex（与 0.1 uuid4().hex[:12]、插件侧短 id 截断同长，
             // 前端展示 slice(0,12) 原样透出）。
             let pipeline_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
-            // GAP-1 统一（task = pipeline）：task.id 即管道 id——调用方派发时
-            // 尚不知道引擎身份，此处引擎强制注入（与 lineage 同级保护字段），
-            // 调用方预传的 task.id 一律覆盖为引擎 id（堵身份冒占）。
-            if let Some(obj) = overlay_obj.as_object_mut() {
-                obj.insert("task.id".to_string(), Value::String(pipeline_id.clone()));
-            }
             // 新管道坐标：归属会话有声明则落真实 thread（任务管道随归属会话路由/
             // 级联，前端 runs 快照据此定位归属）；缺省以引擎新 id 兼作派发坐标。
             let thread_id = p
@@ -390,14 +356,6 @@ impl ChatSendHandler {
             Ok((pipeline_id, thread_id, true))
         } else if let Some(pid) = p.supplied_pipeline_id {
             // ── 注入分支 ──
-            // lineage 是引擎出生写入的保护字段，注入已有管道不得携带（防覆写）。
-            if p.lineage.filter(|v| !v.is_null()).is_some() {
-                return Err(McpError::Protocol {
-                    message: "chat.send_message 注入已有管道不可携带 lineage\
-                              （血缘仅在创建时声明，创建后不可覆写）"
-                        .to_string(),
-                });
-            }
             // 坐标解析（接口内部黑盒）：pipeline_id → 所属会话真实 thread。
             // thread 是派生物，对外契约不含该参数；解析失败 = 孤儿/伪造 id。
             let thread_id = self.resolve_inject_thread(pid).await?;
@@ -439,8 +397,8 @@ impl ChatSendHandler {
                 "chat.send_message 创建分支 pipeline↔thread 映射落库失败（引擎路径将补写）"
             );
         }
-        // 出生字段持久化：overlay 全量逐键 upsert（幂等），覆盖 lineage.* +
-        // task.* 等非插件域保护键。
+        // 出生字段持久化：overlay 全量逐键 upsert（幂等）——调用方经 state
+        // 透传的出生键（task.*/lineage.*）创建即落表，冷读归属链有基线。
         if let Some(overlay_obj) = p.overlay.as_ref().and_then(|o| o.as_object()) {
             for (k, v) in overlay_obj {
                 if let Err(e) = store
@@ -605,11 +563,11 @@ impl ChatSendHandler {
 /// 校验并提取 `state` 注入（可选对象 → 透传 overlay）。
 ///
 /// 键约定：顶层扁平点号键（任务域 `task.*`，与 track.total_tokens 同款——
-/// STATE_SUMMARY_KEYS 匹配的就是这种顶层扁平键）。保留字与 `lineage.*` 保护
+/// STATE_SUMMARY_KEYS 匹配的就是这种顶层扁平键）。引擎系统保留字受保护
 /// 前缀命中即 [`McpError::Protocol`]。清单单一真值源在
 /// [`crate::kernel_capabilities`]（契约文件锚定，本处为直连路径的防线）。
 fn validate_state_overlay(state: Option<&Value>) -> Result<Option<Value>, McpError> {
-    use crate::kernel_capabilities::{FORBIDDEN_STATE_KEY_PREFIXES, RESERVED_STATE_KEYS};
+    use crate::kernel_capabilities::RESERVED_STATE_KEYS;
 
     let Some(state) = state.filter(|v| !v.is_null()) else {
         return Ok(None);
@@ -626,17 +584,6 @@ fn validate_state_overlay(state: Option<&Value>) -> Result<Option<Value>, McpErr
                 message: "chat.send_message state 键不得为空串".to_string(),
             });
         }
-        if FORBIDDEN_STATE_KEY_PREFIXES
-            .iter()
-            .any(|p| key.starts_with(p))
-        {
-            return Err(McpError::Protocol {
-                message: format!(
-                    "chat.send_message state 键 {key} 受保护：lineage 为引擎出生写入字段，\
-                     不可经 state 注入"
-                ),
-            });
-        }
         if RESERVED_STATE_KEYS.contains(&key.as_str()) {
             return Err(McpError::Protocol {
                 message: format!(
@@ -649,88 +596,12 @@ fn validate_state_overlay(state: Option<&Value>) -> Result<Option<Value>, McpErr
     Ok(Some(state.clone()))
 }
 
-/// 校验血缘参数（二选一强制）并展开为引擎写入的扁平 state 键。
-///
-/// - **有父形式**：`{"parent_pipeline_id": "...", "origin_session_id": "..."}`
-///   （直接创建者管道 + 根人类会话锚点——向上最近的会话，跨级不变）。
-/// - **根形式**：`{"root": true, "origin": {"kind": "...", "source": "..."}}`，
-///   `kind` 枚举 [`LINEAGE_ORIGIN_KINDS`]；外部通道为外部用户建了会话的（钉钉/
-///   飞书模式）该会话即锚点，走有父形式。
-///
-/// 不伪造默认父/默认 session（假父会在任务树聚合里成为幽灵节点）。两种形式
-/// 同时出现或均缺失 → [`McpError::Protocol`]。
-fn parse_lineage(lineage: &Value) -> Result<Map<String, Value>, McpError> {
-    let bad = |msg: String| -> Result<Map<String, Value>, McpError> {
-        Err(McpError::Protocol {
-            message: format!("chat.send_message lineage 不合法: {msg}"),
-        })
-    };
-    let Some(lin) = lineage.as_object() else {
-        return bad("必须为对象（有父/根二选一）".to_string());
-    };
-    let parent_pid = lin
-        .get("parent_pipeline_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-    let root = lin.get("root").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    if parent_pid.is_some() && root {
-        return bad("有父形式与根形式二选一，不可同时出现".to_string());
-    }
-    if let Some(pid) = parent_pid {
-        let Some(sess) = lin
-            .get("origin_session_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        else {
-            return bad("有父形式必须同时提供非空 origin_session_id（根人类会话锚点）".to_string());
-        };
-        let mut m = Map::new();
-        m.insert("lineage.parent_pipeline_id".to_string(), json!(pid));
-        m.insert("lineage.origin_session_id".to_string(), json!(sess));
-        return Ok(m);
-    }
-    if root {
-        let Some(origin) = lin.get("origin").and_then(|v| v.as_object()) else {
-            return bad("根形式必须提供 origin 对象 {kind, source}".to_string());
-        };
-        let Some(kind) = origin
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        else {
-            return bad("根形式 origin.kind 必填".to_string());
-        };
-        if !LINEAGE_ORIGIN_KINDS.contains(&kind) {
-            return bad(format!(
-                "根形式 origin.kind 必须为 {LINEAGE_ORIGIN_KINDS:?} 之一，实际 {kind}"
-            ));
-        }
-        let Some(source) = origin
-            .get("source")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        else {
-            return bad("根形式 origin.source 必填（非空来源描述）".to_string());
-        };
-        let mut m = Map::new();
-        m.insert("lineage.root".to_string(), json!(true));
-        m.insert("lineage.origin.kind".to_string(), json!(kind));
-        m.insert("lineage.origin.source".to_string(), json!(source));
-        return Ok(m);
-    }
-    bad(
-        "缺少有效血缘：有父形式（parent_pipeline_id + origin_session_id）或根形式\
-         （root:true + origin）二选一"
-            .to_string(),
-    )
-}
 
 #[cfg(test)]
 mod tests {
     //! GAP-1 阶段 1：chat.send_message 管道创建契约单测。
-    //! 覆盖：创建分支 id 生成与响应、血缘二选一校验（含非法/缺失）、保留字拒绝、
-    //! state overlay 透传与 lineage 引擎写入。
+    //! 覆盖：创建分支 id 生成与响应、保留字拒绝、state overlay（含血缘扁平键）
+    //! 透传与出生落表——lineage 方案由调用方插件自持，内核零知识。
 
     use super::*;
     use serde_json::json;
@@ -866,7 +737,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inject_passes_state_overlay_without_lineage() {
+    async fn inject_passes_state_overlay() {
         let (h, d) = handler();
         let res = h
             .handle(
@@ -887,14 +758,6 @@ mod tests {
             .expect("state overlay 应透传到派发层");
         assert_eq!(overlay["task.status"], "running");
         assert_eq!(overlay["task.progress"], 30);
-        assert!(
-            overlay
-                .as_object()
-                .unwrap()
-                .keys()
-                .all(|k| !k.starts_with("lineage")),
-            "注入分支 overlay 不应携带 lineage 键"
-        );
     }
 
     // ── 注入分支坐标解析 ──────────────────────────────────────
@@ -1005,9 +868,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_branch_persists_birth_overlay_to_state_table() {
-        // 任务归属链语义：出生字段（lineage.* + task.*）创建即落
-        // pipeline_state 表——引擎 persistent_fields 投影只覆盖插件声明键，
-        // 任务域键不属于任何插件；不落库则 registry 内存丢失后（重启）冷读
+        // 任务归属链语义：出生字段（lineage.*/task.* 扁平键）创建即落
+        // pipeline_state 表——不落库则 registry 内存丢失后（重启）冷读
         // 无基线，任务面板归属链整行缺失。未知 user 回退 default 租户。
         let d = RecordingDispatcher::shared();
         let store: Arc<dyn StorageBackend> =
@@ -1021,8 +883,10 @@ mod tests {
                     "background": true,
                     "message": "执行任务「调研」。",
                     "user_id": "user_birth_persist",
-                    "state": {"task.goal": "调研", "task.status": "pending", "task.parent_project_id": "proj0011"},
-                    "lineage": {"parent_pipeline_id": "pipe_parent", "origin_session_id": "th_1"},
+                    "state": {"task.goal": "调研", "task.status": "pending",
+                              "task.parent_project_id": "proj0011",
+                              "lineage.parent_pipeline_id": "pipe_parent",
+                              "lineage.origin_session_id": "th_1"},
                 }),
             )
             .await
@@ -1036,7 +900,6 @@ mod tests {
         assert_eq!(get("task.goal"), "调研");
         assert_eq!(get("task.status"), "pending");
         assert_eq!(get("task.parent_project_id"), "proj0011");
-        assert_eq!(get("task.id"), pid.as_str());
         assert_eq!(get("lineage.parent_pipeline_id"), "pipe_parent");
         assert_eq!(get("lineage.origin_session_id"), "th_1");
     }
@@ -1051,11 +914,9 @@ mod tests {
                     "create": true,
                     "message": "执行任务",
                     "user_id": "u1",
-                    "lineage": {
-                        "parent_pipeline_id": "pipe_parent",
-                        "origin_session_id": "sess_root"
-                    },
-                    "state": {"task.goal": "喝水提醒", "task.status": "pending"}
+                    "state": {"task.goal": "喝水提醒", "task.status": "pending",
+                              "lineage.parent_pipeline_id": "pipe_parent",
+                              "lineage.origin_session_id": "sess_root"}
                 }),
             )
             .await
@@ -1069,14 +930,12 @@ mod tests {
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].0, pid);
         assert_eq!(c[0].3, pid);
-        // overlay：task.* 自由键 + lineage 扁平键（引擎写入）
-        let overlay = c[0].6.clone().expect("创建分支 overlay 必含 lineage");
+        // overlay：task.* 自由键 + lineage 扁平键（调用方经 state 透传）
+        let overlay = c[0].6.clone().expect("state overlay 应透传");
         assert_eq!(overlay["task.goal"], "喝水提醒");
         assert_eq!(overlay["task.status"], "pending");
         assert_eq!(overlay["lineage.parent_pipeline_id"], "pipe_parent");
         assert_eq!(overlay["lineage.origin_session_id"], "sess_root");
-        // task.id 由引擎注入 == 响应 pipeline_id（身份权威统一）
-        assert_eq!(overlay["task.id"], pid);
     }
 
     #[tokio::test]
@@ -1095,7 +954,6 @@ mod tests {
                     "message": "执行任务",
                     "user_id": "u1",
                     "thread_id": "thread-user-1",
-                    "lineage": {"root": true, "origin": {"kind": "channel", "source": "task_service"}},
                     "state": {"task.goal": "g"}
                 }),
             )
@@ -1117,7 +975,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_without_flag_when_pipeline_id_absent() {
-        // pipeline_id 缺省即隐式创建（"或 pipeline_id 为空"），根形式血缘
+        // pipeline_id 缺省即隐式创建（"或 pipeline_id 为空"）；血缘扁平键随
+        // state 透传（根形式声明由调用方插件构造，内核不解释）
         let (h, d) = handler();
         let res = h
             .handle(
@@ -1125,9 +984,10 @@ mod tests {
                 json!({
                     "message": "m",
                     "user_id": "u1",
-                    "lineage": {
-                        "root": true,
-                        "origin": {"kind": "channel", "source": "dingtalk"}
+                    "state": {
+                        "lineage.root": true,
+                        "lineage.origin.kind": "channel",
+                        "lineage.origin.source": "dingtalk"
                     }
                 }),
             )
@@ -1150,13 +1010,7 @@ mod tests {
             let res = h
                 .handle(
                     "send_message",
-                    json!({
-                        "create": true, "message": "m", "user_id": "u1",
-                        "lineage": {
-                            "root": true,
-                            "origin": {"kind": "system", "source": "kernel"}
-                        }
-                    }),
+                    json!({"create": true, "message": "m", "user_id": "u1"}),
                 )
                 .await
                 .unwrap();
@@ -1172,80 +1026,6 @@ mod tests {
         );
     }
 
-    // ── 血缘二选一强制 ───────────────────────────────────────────
-
-    #[tokio::test]
-    async fn create_without_lineage_rejected() {
-        let (h, d) = handler();
-        expect_protocol_error(
-            &h,
-            &d,
-            json!({"create": true, "message": "m", "user_id": "u1"}),
-            "缺 lineage",
-        )
-        .await;
-        expect_protocol_error(
-            &h,
-            &d,
-            json!({"create": true, "message": "m", "user_id": "u1", "lineage": null}),
-            "lineage 显式 null 视为缺失",
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn create_rejects_invalid_lineage_forms() {
-        let (h, d) = handler();
-        let cases = vec![
-            (json!({}), "空对象：两种形式都不满足"),
-            (
-                json!({"parent_pipeline_id": "p1"}),
-                "有父形式缺 origin_session_id",
-            ),
-            (
-                json!({"origin_session_id": "s1"}),
-                "有父形式缺 parent_pipeline_id",
-            ),
-            (
-                json!({"parent_pipeline_id": "", "origin_session_id": "s1"}),
-                "parent_pipeline_id 为空串",
-            ),
-            (json!({"root": false}), "root=false 且无父形式"),
-            (json!({"root": true}), "根形式缺 origin"),
-            (
-                json!({"root": true, "origin": {}}),
-                "根形式 origin 缺 kind/source",
-            ),
-            (
-                json!({"root": true, "origin": {"kind": "channel"}}),
-                "根形式 origin 缺 source",
-            ),
-            (
-                json!({"root": true, "origin": {"kind": "human", "source": "x"}}),
-                "kind 不在枚举",
-            ),
-            (
-                json!({"root": true, "origin": {"kind": "channel", "source": ""}}),
-                "source 为空串",
-            ),
-            (
-                json!({
-                    "root": true,
-                    "origin": {"kind": "channel", "source": "x"},
-                    "parent_pipeline_id": "p1",
-                    "origin_session_id": "s1"
-                }),
-                "两种形式同时出现",
-            ),
-            (json!("not-an-object"), "lineage 非对象"),
-        ];
-        for (lin, why) in cases {
-            let mut params = json!({"create": true, "message": "m", "user_id": "u1"});
-            params["lineage"] = lin;
-            expect_protocol_error(&h, &d, params, why).await;
-        }
-    }
-
     #[tokio::test]
     async fn create_rejects_caller_supplied_pipeline_id() {
         // 三次定案：创建路径不接受调用方传入 id（堵 id 冒占）
@@ -1255,26 +1035,9 @@ mod tests {
             &d,
             json!({
                 "create": true, "pipeline_id": "pipe_mine",
-                "message": "m", "user_id": "u1",
-                "lineage": {"root": true, "origin": {"kind": "plugin", "source": "task_submit"}}
+                "message": "m", "user_id": "u1"
             }),
             "create 与显式 pipeline_id 互斥",
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn inject_with_lineage_rejected() {
-        // lineage 是出生写入的保护字段：注入已有管道不得携带（防覆写）
-        let (h, d) = handler();
-        expect_protocol_error(
-            &h,
-            &d,
-            json!({
-                "pipeline_id": "pipe_1", "message": "m", "user_id": "u1",
-                "lineage": {"root": true, "origin": {"kind": "plugin", "source": "x"}}
-            }),
-            "注入分支携带 lineage 应拒绝",
         )
         .await;
     }
@@ -1294,7 +1057,6 @@ mod tests {
             "user_id",
             "run_id",
             "execution_context",
-            "lineage",
             "message_id",
         ] {
             let mut state = serde_json::Map::new();
@@ -1306,19 +1068,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn state_lineage_prefixed_keys_rejected() {
+    async fn state_lineage_prefixed_keys_accepted() {
+        // 血缘方案归插件自持后，lineage.* 扁平键经 state 透传放行（内核不解释）
         let (h, d) = handler();
-        for key in [
-            "lineage.root",
-            "lineage.parent_pipeline_id",
-            "lineage.origin.kind",
-        ] {
-            let mut state = serde_json::Map::new();
-            state.insert(key.to_string(), json!(true));
-            let mut params = json!({"pipeline_id": "pipe_1", "message": "m", "user_id": "u1"});
-            params["state"] = Value::Object(state);
-            expect_protocol_error(&h, &d, params, &format!("保护前缀 {key}")).await;
-        }
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "pipeline_id": "pipe_1", "message": "m", "user_id": "u1",
+                    "state": {"lineage.root": true,
+                              "lineage.parent_pipeline_id": "pipe_parent",
+                              "lineage.origin.kind": "plugin"}
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "dispatched");
+        let overlay = calls(&d)[0].6.clone().expect("lineage.* 应透传");
+        assert_eq!(overlay["lineage.root"], true);
+        assert_eq!(overlay["lineage.parent_pipeline_id"], "pipe_parent");
     }
 
     #[tokio::test]
@@ -1349,10 +1117,7 @@ mod tests {
         expect_protocol_error(
             &h,
             &d,
-            json!({
-                "create": true, "user_id": "u1",
-                "lineage": {"root": true, "origin": {"kind": "system", "source": "kernel"}}
-            }),
+            json!({"create": true, "user_id": "u1"}),
             "缺 message",
         )
         .await;
@@ -1378,8 +1143,7 @@ mod tests {
                 json!({
                     "create": true, "message": "m", "user_id": "u1",
                     "execution_context": ec,
-                    "state": {"task.id": "t9"},
-                    "lineage": {"parent_pipeline_id": "p", "origin_session_id": "s"}
+                    "state": {"task.id": "t9"}
                 }),
             )
             .await
@@ -1390,8 +1154,8 @@ mod tests {
             c[0].5,
             Some(json!({"workspace": {"mode": "worktree"}, "isolation": {"level": "plain"}}))
         );
-        // task.id 由引擎注入（调用方预传的 t9 被覆盖为引擎 id）
-        assert_eq!(c[0].6.as_ref().unwrap()["task.id"], res["pipeline_id"]);
+        // task.id 调用方预传值原样透传（内核零解释）
+        assert_eq!(c[0].6.as_ref().unwrap()["task.id"], "t9");
     }
 
     // ── GAP-1：background 参数（任务派发不阻塞等待任务完成） ──────────
@@ -1454,7 +1218,6 @@ mod tests {
                 json!({
                     "create": true, "message": "m", "user_id": "u1",
                     "background": true,
-                    "lineage": {"parent_pipeline_id": "p", "origin_session_id": "s"},
                     "state": {"task.id": "t1"}
                 }),
             ),
@@ -1477,7 +1240,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(dispatched, "background 派发应最终执行");
-        assert_eq!(d.calls.lock().unwrap()[0]["task.id"], res["pipeline_id"]);
+        assert_eq!(d.calls.lock().unwrap()[0]["task.id"], "t1", "任务域键透传");
     }
 
     #[tokio::test]
@@ -1515,25 +1278,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_overrides_caller_supplied_task_id() {
-        // task.id 是引擎保护字段（同 lineage）：调用方预传的身份被引擎 id 覆盖
+    async fn create_passes_caller_supplied_task_id_through() {
+        // 内核对任务域键零知识：task.id 原样透传；身份权威（task.id == 引擎
+        // pipeline_id）由输入阶段插件 context_build 落实（插件侧测试覆盖）
         let (h, d) = handler();
         let res = h
             .handle(
                 "send_message",
                 json!({
                     "create": true, "message": "m", "user_id": "u1",
-                    "lineage": {"root": true, "origin": {"kind": "plugin", "source": "task_submit"}},
                     "state": {"task.id": "fake_id_999", "task.goal": "g"}
                 }),
             )
             .await
             .unwrap();
-        let pid = res["pipeline_id"].as_str().unwrap();
+        assert_eq!(res["status"], "created");
         assert_eq!(
             calls(&d)[0].6.as_ref().unwrap()["task.id"],
-            pid,
-            "引擎 id 覆盖调用方预传"
+            "fake_id_999",
+            "内核不解释任务域键，原样透传"
         );
     }
 

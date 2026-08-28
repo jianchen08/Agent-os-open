@@ -227,5 +227,8 @@
       "max_concurrency": 4,
       "description": "在 IDE 中打开任务工作空间目录（无连接器时回退系统文件管理器——原 POST /ext/channel_api/workspaces/{id}/open 语义）"
     }
+  ],
+  "export_fields": [
+    "task.parent_project_id"
   ]
 }

@@ -6,8 +6,63 @@ use serde_json::json;
 
 fn router_with_metrics() -> (KernelCapabilityRouter, MetricsAggregator) {
     let agg = MetricsAggregator::new();
-    let r = KernelCapabilityRouter::with_metrics(agg.clone());
+    // pipeline-state.list 摘要测试预接任务域出口声明（声明收集本身在
+    // routes::state_summary_tests 覆盖；此处聚焦 list 行为）。
+    let r = KernelCapabilityRouter::with_metrics(agg.clone())
+        .with_export_fields_lookup(Arc::new(|| {
+            crate::capability_router::ExportFields::from_manifests(&[test_task_export_manifest()])
+        }));
     (r, agg)
+}
+
+/// 任务域出口声明的测试 manifest（task.*/lineage.*/task.owned.*/workspace 等）。
+fn test_task_export_manifest() -> agentos_core::traits::PluginManifest {
+    agentos_core::traits::PluginManifest {
+        id: "task_service".to_string(),
+        name: "task_service".to_string(),
+        description: None,
+        version: "1.0.0".to_string(),
+        plugin_type: agentos_core::traits::PluginType::System,
+        pipeline_role: None,
+        language: "python".to_string(),
+        host_type: agentos_core::traits::HostType::Sidecar,
+        host_group: None,
+        entry: "python server.py".to_string(),
+        capabilities: Default::default(),
+        requires_services: vec![],
+        permissions: Default::default(),
+        priority: 100,
+        mcp: None,
+        lifecycle: None,
+        native: None,
+        granted_capabilities: vec![],
+        requires_content: None,
+        invoke_entry: None,
+        config_files: vec![],
+        http_endpoints: vec![],
+        ui_schema: None,
+        contributes: None,
+        enabled: None,
+        activation: None,
+        persistent_fields: vec![],
+        export_fields: [
+            "task.goal",
+            "task.status",
+            "task.id",
+            "task.ended_at",
+            "task.submitted_by",
+            "task.owned.*",
+            "lineage.parent_pipeline_id",
+            "lineage.origin_session_id",
+            "lineage.root",
+            "workspace",
+            "ws_meta",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        provides: None,
+    }
 }
 
 #[tokio::test]
@@ -987,7 +1042,11 @@ async fn test_tool_executor_missing_invoker_returns_protocol_error() {
 fn router_with_store() -> KernelCapabilityRouter {
     let store: Arc<dyn StorageBackend> =
         Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
-    KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store)
+    KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store)
+        .with_export_fields_lookup(Arc::new(|| {
+            crate::capability_router::ExportFields::from_manifests(&[test_task_export_manifest()])
+        }))
 } // ── GAP-2：pipeline-state 域（CONDITION 触发器的求值上下文源） ──────
 
 #[tokio::test]

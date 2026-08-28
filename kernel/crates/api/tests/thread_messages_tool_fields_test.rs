@@ -89,6 +89,7 @@ async fn app_with_deps() -> (
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        export_fields: vec![],
         provides: None,
     };
 

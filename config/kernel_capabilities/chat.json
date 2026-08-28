@@ -51,7 +51,7 @@
           },
           "state": {
             "type": "object",
-            "description": "自由注入 initial_state 顶层扁平键（任务域用 task.* 点号键）。保留字与 lineage.* 保护前缀命中即协议错误",
+            "description": "自由注入 initial_state 顶层扁平键（任务域 task.* 与血缘 lineage.* 点号键，方案由调用方插件自持）。引擎系统保留字命中即协议错误",
             "propertyNames": {
               "not": {
                 "enum": [
@@ -64,51 +64,16 @@
                   "user_id",
                   "run_id",
                   "execution_context",
-                  "lineage",
                   "message_id"
                 ]
-              },
-              "x-forbidden-prefixes": ["lineage."]
-            }
-          },
-          "lineage": {
-            "type": "object",
-            "description": "创建分支血缘（有父/根二选一，杜绝孤儿管道）；注入分支不可携带（防覆写出生字段）",
-            "properties": {
-              "parent_pipeline_id": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{12}$",
-                "description": "直接创建者管道（有父形式必填）"
-              },
-              "origin_session_id": {
-                "type": "string",
-                "minLength": 1,
-                "description": "根人类会话锚点（有父形式必填，向上最近的会话）"
-              },
-              "root": {
-                "type": "boolean",
-                "description": "根形式声明（true 时必须提供 origin）"
-              },
-              "origin": {
-                "type": "object",
-                "description": "根形式来源声明",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "enum": ["channel", "external_service", "plugin", "system"],
-                    "description": "来源类型描述符"
-                  },
-                  "source": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "非空来源描述（如 task_submit / review / dingtalk）"
-                  }
-                }
               }
             }
           }
         },
-        "required": ["message", "user_id"],
+        "required": [
+          "message",
+          "user_id"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
@@ -116,7 +81,10 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["created", "dispatched"],
+            "enum": [
+              "created",
+              "dispatched"
+            ],
             "description": "created = 创建分支已派发；dispatched = 注入分支已派发"
           },
           "pipeline_id": {
@@ -125,7 +93,10 @@
             "description": "管道身份（创建分支为引擎新生成 id；注入分支为原值）"
           }
         },
-        "required": ["status", "pipeline_id"]
+        "required": [
+          "status",
+          "pipeline_id"
+        ]
       }
     }
   ]

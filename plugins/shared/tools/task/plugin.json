@@ -233,5 +233,9 @@
     "chat",
     "pipeline-state",
     "pipeline-executor"
+  ],
+  "export_fields": [
+    "task.owned.*",
+    "task.submitted_by"
   ]
 }

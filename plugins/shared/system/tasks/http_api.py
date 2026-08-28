@@ -432,16 +432,18 @@ async def _submit_task_event(
             return task_id
 
         # ── 创建模式 ──
+        # 血缘扁平键（方案本插件自持）：有父/根二选一
         if parent_pipeline_id:
-            lineage: dict[str, Any] = {
-                "parent_pipeline_id": parent_pipeline_id,
+            lineage_keys: dict[str, Any] = {
+                "lineage.parent_pipeline_id": parent_pipeline_id,
                 # 归属会话优先（任务创建时的真实会话），无会话调用维持父管道引用
-                "origin_session_id": thread_id or parent_pipeline_id,
+                "lineage.origin_session_id": thread_id or parent_pipeline_id,
             }
         else:
-            lineage = {
-                "root": True,
-                "origin": {"kind": "channel", "source": "task_service"},
+            lineage_keys = {
+                "lineage.root": True,
+                "lineage.origin.kind": "channel",
+                "lineage.origin.source": "task_service",
             }
 
         kickoff = f"执行任务「{title}」。"
@@ -467,8 +469,8 @@ async def _submit_task_event(
                 "task.dependencies": dependencies or [],
                 "task.scope": scope,
                 "task.submitted_by": user_id or "",
+                **lineage_keys,
             },
-            "lineage": lineage,
         }
         # execution_context 缺省对齐 task_submit._build_execution_context：
         # 无显式 workspace → mode 空（workspace_lifecycle 落「工作空间根/

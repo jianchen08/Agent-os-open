@@ -2067,6 +2067,7 @@ fn test_manifest(id: &str) -> PluginManifest {
         activation: None,
         provides: None,
         persistent_fields: vec![],
+        export_fields: vec![],
     }
 }
 

@@ -47,6 +47,7 @@ fn manifest(plugin_id: &str, plugin_type: PluginType, host_type: HostType) -> Pl
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        export_fields: vec![],
         provides: None,
     }
 }

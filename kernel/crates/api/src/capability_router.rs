@@ -78,7 +78,15 @@ pub struct KernelCapabilityRouter {
     /// 连续 N 次失败"这个信号汇总成一条可操作的告警，避免空转无人察觉。
     tool_failure_tracker:
         Option<std::sync::Arc<dyn crate::tools::ToolFailureTracker + Send + Sync>>,
+    /// state 出口声明查询闭包（manifest export_fields 并集，见 routes::ExportFields）。
+    /// None = 无插件声明（仅内核基线出口，兼容旧装配/测试）。
+    export_fields_lookup: Option<ExportFieldsLookupFn>,
 }
+
+/// state 出口声明查询闭包：() → 当前 manifest 集合的 export_fields 并集。
+pub type ExportFieldsLookupFn = Arc<dyn Fn() -> ExportFields + Send + Sync>;
+
+pub use crate::routes::ExportFields;
 
 /// 域事件广播闭包：(event_name, tags) → 点对点投递给声明 domain_event 的
 /// 启用插件（组件版 broadcast_domain_event_from；观察总线由调用方决定）。
@@ -122,6 +130,7 @@ impl KernelCapabilityRouter {
             capability_contracts: None,
             streaming_declaration_lookup: None,
             tool_failure_tracker: None,
+            export_fields_lookup: None,
         }
     }
 
@@ -160,6 +169,13 @@ impl KernelCapabilityRouter {
         tracker: std::sync::Arc<dyn crate::tools::ToolFailureTracker + Send + Sync>,
     ) -> Self {
         self.tool_failure_tracker = Some(tracker);
+        self
+    }
+
+    /// 注入 state 出口声明查询器（pipeline-state.list 摘要与 HTTP
+    /// /pipelines/state 同源：manifest export_fields 并集，热重载同步可见）。
+    pub fn with_export_fields_lookup(mut self, lookup: ExportFieldsLookupFn) -> Self {
+        self.export_fields_lookup = Some(lookup);
         self
     }
 
@@ -739,7 +755,9 @@ impl KernelCapabilityRouter {
         plugin_id: Option<&str>,
     ) -> Option<Value> {
         let contracts = self.capability_contracts.as_ref()?;
-        crate::kernel_capabilities::find_spec(contracts, "streaming", event_name)?;
+        if crate::kernel_capabilities::find_spec(contracts, "streaming", event_name).is_none() {
+            return None;
+        }
         // 声明闸（ADR 2026-08-22）：插件须声明 capabilities.streaming 才能发射
         // 流式事件；未声明即拒（fail-closed）。引擎管道家族（llm_core/tool_core）
         // 是内核 LLM 路径的器官，豁免——它们携带内核签发的 a_ id，命名空间执法见下。
@@ -871,7 +889,7 @@ impl KernelCapabilityRouter {
                 // 钩子协议面，装载表恒空短路，零开销；协议面归管道步骤服务化
                 // 提案 §3.6，留注引用）。注意：热路径查表优先于分配，勿在此
                 // 追加大对象构造。
-                self.accumulate_stream_interception(event_name, payload, thread_id, message_id);
+                self.accumulate_stream_interception(event_name, payload, &thread_id, &message_id);
                 return Some(Ok(json!({
                     "status": if delivered { "emitted" } else { "dropped" },
                     "event": event_name,
@@ -1506,6 +1524,11 @@ impl KernelCapabilityRouter {
     /// 兜底；messages 全文不出口。CONDITION 求值上下文数据源（GAP-2）。
     async fn handle_pipeline_state_list(&self) -> Result<Value, McpError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        let export = self
+            .export_fields_lookup
+            .as_ref()
+            .map(|f| f())
+            .unwrap_or_default();
         let registry = agentos_session::pipeline_state_registry::global_registry();
         let mut rows: Vec<Value> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1519,7 +1542,7 @@ impl KernelCapabilityRouter {
             seen.insert(listing.pipeline_id.clone());
             let mut row = {
                 let e = entry.read();
-                crate::routes::summarize_state(&e.state)
+                crate::routes::summarize_state(&e.state, &export)
             };
             if let Some(obj) = row.as_object_mut() {
                 obj.insert("pipeline_id".to_string(), json!(listing.pipeline_id));
@@ -1556,7 +1579,7 @@ impl KernelCapabilityRouter {
                 else {
                     continue; // checkpoint 与表行双空的真孤儿不出口（表行可独立兜底）
                 };
-                let mut row = crate::routes::summarize_state(&merged);
+                let mut row = crate::routes::summarize_state(&merged, &export);
                 if let Some(obj) = row.as_object_mut() {
                     obj.insert("pipeline_id".to_string(), json!(pid));
                     obj.insert("thread_id".to_string(), json!(th));

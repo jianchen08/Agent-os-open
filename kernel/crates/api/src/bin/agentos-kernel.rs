@@ -795,6 +795,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
+    // state 出口声明查询闭包（ADR 2026-08-28 声明化出口）：pipeline-state.list
+    // 摘要与 GET /pipelines/state 同源收集 manifest export_fields 并集。
+    // 锁被占用（热重载写中）时按无声明降级——仅内核基线出口，不阻塞读面。
+    let export_fields_lookup: agentos_api::capability_router::ExportFieldsLookupFn = {
+        let manifests_for_export = manifests_shared.clone();
+        Arc::new(move || {
+            let Ok(guard) = manifests_for_export.try_read() else {
+                return agentos_api::routes::ExportFields::default();
+            };
+            agentos_api::routes::ExportFields::from_manifests(guard.iter())
+        })
+    };
+
     let mut router_builder = KernelCapabilityRouter::with_metrics(metrics_aggregator.clone())
         .with_invoker(invoker.clone())
         .with_registry(registry.clone())
@@ -805,6 +818,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_dynamic_tool_registrar(dynamic_registrar.clone())
         .with_domain_broadcaster(domain_broadcaster)
         .with_streaming_declaration_lookup(streaming_declaration_lookup)
+        .with_export_fields_lookup(export_fields_lookup)
         .with_capability_contracts(capability_contracts.clone());
     // AGENTOS_GRANTS_STRICT=1：未声明 granted_capabilities 的插件反向调用一律
     // 拒绝（fail-closed）。启动期读取——开关随进程生效，不随插件热发现翻转。

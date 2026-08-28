@@ -44,6 +44,7 @@ fn manifest_with_ui(
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        export_fields: vec![],
         provides: None,
     }
 }

@@ -976,14 +976,13 @@ async fn emit_pending_inputs_changed_endpoint(
         )
         .await;
 }
-///
-/// GAP-1（task = pipeline）：任务域 `task.*`（任务树展示）与 `lineage.*`
-/// （父子分组/溯源——任务树按 parent 分组聚合、根形式天然不进树的出口依赖）
-/// 以扁平点号键出口，风格与 `track.total_tokens` 一致。
-const STATE_SUMMARY_KEYS: &[&str] = &[
-    "agent_id",
-    "agent_type",
-    "config_id",
+/// 内核运行域结构基线：内核写或引擎写的自有键（执行坐标/引擎循环/引擎输出
+/// 投影），随摘要直接出口。插件域字段（task.*/track.*/evaluation.*/workspace
+/// 等）不在此列——由写入方插件经 manifest `export_fields` 声明出口（见
+/// [`ExportFields`]），未声明 = 不出口（默认拒绝）。agent_id 亦不在基线：
+/// agent 是管道插件的服务者（执行上下文键仅作派发路由坐标），行级 agent_id
+/// 由 registry listing 注入，state 出口随消费需要由插件声明。
+const STATE_BASELINE_KEYS: &[&str] = &[
     "current_phase",
     "ended",
     "status",
@@ -992,72 +991,62 @@ const STATE_SUMMARY_KEYS: &[&str] = &[
     "pipeline_id",
     "max_iterations",
     "ckpt_max_seq",
-    "track.total_tokens",
-    "track.execution_stats",
-    "track.llm_usage",
-    "cost_control.total_tokens",
-    "cost_control.usage_percent",
-    "termination_advisor.status",
-    "router.stop_reason",
-    "stuck_detected",
     "suspended",
     "metadata",
-    "display_name",
-    "name",
-    "tags",
     "input",
     "raw_result",
     "raw_error",
-    // GAP-1 阶段 1：任务域字段（管道 state 是任务单一真值，聚合是任务树数据源）
-    "task.goal",
-    "task.status",
-    "task.id",
-    "task.ended_at",
-    // 任务域补充：提交人/项目挂靠是任务行元数据（任务树挂项目节点依据）；
-    // workspace/ws_meta 是 workspace_lifecycle init 写入的工作空间坐标
-    // （任务面板"打开工作空间"按钮的数据源），均为小标量/小对象，安全出口。
-    "task.submitted_by",
-    "task.parent_project_id",
-    // task.priority/task.max_retries 不再出口：执行层零消费者——无调度队列
-    // 按优先级排序，三套真实重试机制均读各自插件配置，见
-    // ADR 2026-08-24-task-submit-param-diet。
-    "workspace",
-    "ws_meta",
-    // GAP-1 阶段 1：血缘字段（出生写入，任务树分组与溯源的出口依赖）
-    "lineage.parent_pipeline_id",
-    "lineage.origin_session_id",
-    "lineage.root",
-    // 评估域登记/结论：评估子管道出生登记
-    // evaluation.of_task/metric_id（面板识别 + 执行器回收锚点）；task_reminder
-    // 评估模式写入 evaluation.detected_result。pipeline-state.list 能力与
-    // GET /pipelines/state 同数据源共用本白名单——不出口则评估执行器永远
-    // 轮询不到评估结论（ADR 2026-08-24-eval-pipeline-state-keys）。
-    "evaluation.of_task",
-    "evaluation.metric_id",
-    "evaluation.detected_result",
 ];
 
-/// 动态键前缀白名单（与 [`STATE_SUMMARY_KEYS`] 精确键并列出口）。
-///
-/// `task.owned.<pipeline_id>.<field>`：提交者管道自持的任务登记（容器任务
-/// 声明 + 普通任务回执），键中含动态管道 id 无法精确枚举——按前缀整段
-/// 出口（title/status/scope/created_at/submitted_by/workspace 小标量）。
-/// 任务面板 `_collect_owned_tasks` 据此聚合，缺失则登记任务整行不可见
-/// （task.owned.* 落库在表、聚合行被白名单剥掉）。
-const STATE_SUMMARY_KEY_PREFIXES: &[&str] = &["task.owned."];
+/// 插件出口声明（各 manifest `export_fields` 的并集）：精确键 + `前缀.*`
+/// 通配前缀。两个消费面（GET /pipelines/state 与 pipeline-state.list 能力）
+/// 共用——插件新增出口字段改自己的 plugin.json，内核零改动；热重载刷新
+/// manifest 集合后下一请求即生效。
+#[derive(Default, Clone)]
+pub struct ExportFields {
+    exact: std::collections::HashSet<String>,
+    prefixes: Vec<String>,
+}
 
-/// 从一份管道 state 提取摘要（白名单字段 + messages 条数）。
-pub(crate) fn summarize_state(state: &serde_json::Value) -> serde_json::Value {
+impl ExportFields {
+    /// 从 manifest 集合收集 export_fields 声明并集。
+    pub fn from_manifests<'a>(
+        manifests: impl IntoIterator<Item = &'a agentos_core::traits::PluginManifest>,
+    ) -> Self {
+        let mut out = Self::default();
+        for m in manifests {
+            for f in &m.export_fields {
+                if let Some(prefix) = f.strip_suffix(".*") {
+                    out.prefixes.push(prefix.to_string());
+                } else {
+                    out.exact.insert(f.clone());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// 从一份管道 state 提取摘要（内核基线 + 插件声明出口 + messages 条数）。
+pub(crate) fn summarize_state(
+    state: &serde_json::Value,
+    export: &ExportFields,
+) -> serde_json::Value {
     let mut out = serde_json::Map::new();
     if let Some(obj) = state.as_object() {
-        for k in STATE_SUMMARY_KEYS {
+        for k in STATE_BASELINE_KEYS {
             if let Some(v) = obj.get(*k) {
                 out.insert(k.to_string(), v.clone());
             }
         }
-        // 动态前缀键（task.owned.<id>.<field>）整段出口
+        for k in &export.exact {
+            if let Some(v) = obj.get(k.as_str()) {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        // 动态前缀键（如 task.owned.<id>.<field>）整段出口
         for (k, v) in obj {
-            if STATE_SUMMARY_KEY_PREFIXES.iter().any(|p| k.starts_with(p)) {
+            if export.prefixes.iter().any(|p| k.starts_with(p.as_str())) {
                 out.insert(k.clone(), v.clone());
             }
         }
@@ -1138,6 +1127,9 @@ pub async fn pipelines_state_handler(
     let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
     let tenant_id = tenant_ctx.tenant_id;
 
+    // 出口声明按当前 manifest 集合实时收集（热重载刷新后下一请求即生效）
+    let export = ExportFields::from_manifests(state.manifests.read().await.iter());
+
     // 1) 内存热数据：registry 全部条目（锁内取 state 快照提摘要）
     let registry = agentos_session::pipeline_state_registry::global_registry();
     let mut items: Vec<serde_json::Value> = Vec::new();
@@ -1152,7 +1144,7 @@ pub async fn pipelines_state_handler(
         seen.insert(listing.pipeline_id.clone());
         let summary = {
             let e = entry.read();
-            summarize_state(&e.state)
+            summarize_state(&e.state, &export)
         };
         items.push(json!({
             "pipeline_id": listing.pipeline_id,
@@ -1193,7 +1185,7 @@ pub async fn pipelines_state_handler(
             let store: std::sync::Arc<dyn agentos_core::traits::StorageBackend> =
                 state.db.as_ref().expect("db checked above").clone();
             let summary = match cold_state_row(&store, &pid, &tenant_id).await {
-                Some(st) => summarize_state(&st),
+                Some(st) => summarize_state(&st, &export),
                 None => continue, // 无 checkpoint 的孤儿 run 不出口
             };
             items.push(json!({
@@ -2340,14 +2332,58 @@ mod tdd4_config_center_tests {
 
 #[cfg(test)]
 mod state_summary_tests {
-    //! GAP-1 阶段 1：任务域/血缘字段出得来——STATE_SUMMARY_KEYS 白名单扩展。
-    //! task = pipeline 后，/api/v1/pipelines/state 聚合是任务树数据源，
-    //! task.*（任务字段）与 lineage.*（父子分组/溯源）必须出口，不被 summarize 裁掉。
+    //! 声明化出口（ADR 2026-08-28）：内核运行域基线 + manifest `export_fields`
+    //! 声明并集。插件域字段（task.*/lineage.*/workspace/evaluation.* 等）经写入方
+    //! 插件声明出口；未声明 = 不出口（默认拒绝），基线键恒出口。
 
     use super::*;
 
+    /// 构造带指定 export_fields 声明的测试 manifest。
+    fn export_manifest(fields: &[&str]) -> PluginManifest {
+        PluginManifest {
+            id: "test_plugin".to_string(),
+            name: "test_plugin".to_string(),
+            description: None,
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::System,
+            pipeline_role: None,
+            language: "python".to_string(),
+            host_type: agentos_core::traits::HostType::Sidecar,
+            host_group: None,
+            entry: "python server.py".to_string(),
+            capabilities: agentos_core::traits::ManifestCapabilities::default(),
+            requires_services: vec![],
+            permissions: Default::default(),
+            priority: 100,
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            granted_capabilities: vec![],
+            requires_content: None,
+            invoke_entry: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            persistent_fields: vec![],
+            export_fields: fields.iter().map(|s| s.to_string()).collect(),
+            provides: None,
+        }
+    }
+
     #[test]
-    fn test_summarize_state_exports_task_and_lineage_fields() {
+    fn test_summarize_exports_declared_task_and_lineage_fields() {
+        // 任务域/血缘键由写入方插件声明后出口（原内核白名单语义迁入声明）
+        let export = ExportFields::from_manifests(&[export_manifest(&[
+            "task.goal",
+            "task.status",
+            "task.id",
+            "lineage.parent_pipeline_id",
+            "lineage.origin_session_id",
+            "lineage.root",
+        ])]);
         let state = json!({
             "pipeline_id": "p1",
             "task.goal": "喝水提醒",
@@ -2358,7 +2394,8 @@ mod state_summary_tests {
             "lineage.root": true,
             "messages": [{"role": "user"}, {"role": "assistant"}],
         });
-        let s = summarize_state(&state);
+        let s = summarize_state(&state, &export);
+        assert_eq!(s["pipeline_id"], "p1", "基线键恒出口");
         assert_eq!(s["task.goal"], "喝水提醒");
         assert_eq!(s["task.status"], "running");
         assert_eq!(s["task.id"], "t1");
@@ -2371,11 +2408,37 @@ mod state_summary_tests {
     }
 
     #[test]
-    fn test_summarize_state_exports_task_owned_prefix_and_workspace() {
-        // task.owned.<id>.<field>（提交者管道自持的
-        // 任务登记，键含动态管道 id）按前缀整段出口；workspace/ws_meta/
-        // task.parent_project_id 等任务行元数据出口（任务树挂项目节点 +
-        // 打开工作空间按钮数据源）。
+    fn test_summarize_default_denies_undeclared_plugin_fields() {
+        // 默认拒绝性质：无任何声明（ExportFields::default）时插件域字段一律裁掉，
+        // 基线键不受影响——插件声明是出口的唯一扩权通道。
+        let export = ExportFields::default();
+        let s = summarize_state(
+            &json!({
+                "pipeline_id": "p2",
+                "status": "running",
+                "task.goal": "g",
+                "lineage.root": true,
+                "workspace": "D:/ws",
+            }),
+            &export,
+        );
+        assert_eq!(s["pipeline_id"], "p2");
+        assert_eq!(s["status"], "running");
+        for k in ["task.goal", "lineage.root", "workspace", "task.owned.x.title"] {
+            assert!(s.get(k).is_none(), "未声明键 {k} 不应出口");
+        }
+    }
+
+    #[test]
+    fn test_summarize_exports_task_owned_prefix_and_workspace() {
+        // task.owned.<id>.<field>（提交者管道自持的任务登记，键含动态管道 id）
+        // 经 `task.owned.*` 前缀声明整段出口；workspace/ws_meta 精确键声明出口。
+        let export = ExportFields::from_manifests(&[export_manifest(&[
+            "task.owned.*",
+            "task.submitted_by",
+            "workspace",
+            "ws_meta",
+        ])]);
         let state = json!({
             "pipeline_id": "p3",
             "task.owned.ae7b430f.title": "AI行业近月发展调研",
@@ -2385,20 +2448,28 @@ mod state_summary_tests {
             "ws_meta": {"path": "D:/ws/copy_1", "mode": "worktree"},
             "messages": [{"role": "user"}],
         });
-        let s = summarize_state(&state);
+        let s = summarize_state(&state, &export);
         assert_eq!(s["task.owned.ae7b430f.title"], "AI行业近月发展调研");
         assert_eq!(s["task.owned.ae7b430f.status"], "running");
         assert_eq!(s["task.submitted_by"], "u1");
         assert_eq!(s["workspace"], "D:/ws/copy_1");
         assert_eq!(s["ws_meta"]["mode"], "worktree");
-        // 杂键仍裁掉（白名单语义不变，防越权大字段出口）
+        // 杂键仍裁掉（默认拒绝语义不变，防越权大字段出口）
         assert!(s.get("secret_field").is_none());
     }
 
     #[test]
-    fn test_summarize_state_omits_absent_task_and_lineage_fields() {
+    fn test_summarize_omits_absent_declared_fields() {
         // 反向性质：无任务域字段的普通会话管道，摘要不得伪造 task.*/lineage.* 键
-        let s = summarize_state(&json!({"pipeline_id": "p2", "status": "running"}));
+        let export = ExportFields::from_manifests(&[export_manifest(&[
+            "task.goal",
+            "task.status",
+            "task.id",
+            "lineage.parent_pipeline_id",
+            "lineage.origin_session_id",
+            "lineage.root",
+        ])]);
+        let s = summarize_state(&json!({"pipeline_id": "p2", "status": "running"}), &export);
         assert_eq!(s["pipeline_id"], "p2");
         assert_eq!(s["status"], "running");
         for k in [
@@ -2414,10 +2485,14 @@ mod state_summary_tests {
     }
 
     #[test]
-    fn test_summarize_state_exports_evaluation_fields() {
-        // 评估子管道登记键（of_task/metric_id）与评估模式
-        // 结论（detected_result）出口——pipeline-state.list 同数据源，评估
-        // 执行器据此轮询回收评估结论。
+    fn test_summarize_exports_evaluation_fields() {
+        // 评估域键声明出口——pipeline-state.list 同数据源，评估执行器据此轮询
+        // 回收评估结论（ADR 2026-08-24-eval-pipeline-state-keys 语义由声明承载）。
+        let export = ExportFields::from_manifests(&[export_manifest(&[
+            "evaluation.of_task",
+            "evaluation.metric_id",
+            "evaluation.detected_result",
+        ])]);
         let state = json!({
             "pipeline_id": "evalPipe",
             "evaluation.of_task": "taskPipe1",
@@ -2425,48 +2500,77 @@ mod state_summary_tests {
             "evaluation.detected_result": {"passed": true, "score": 88, "feedback": "结构完整"},
             "secret_field": "must-not-leak",
         });
-        let s = summarize_state(&state);
+        let s = summarize_state(&state, &export);
         assert_eq!(s["evaluation.of_task"], "taskPipe1");
         assert_eq!(s["evaluation.metric_id"], "semantic_check");
         assert_eq!(s["evaluation.detected_result"]["passed"], true);
         assert_eq!(s["evaluation.detected_result"]["score"], 88);
-        // 白名单语义不变：杂键仍裁掉
         assert!(s.get("secret_field").is_none());
     }
 
     #[test]
-    fn test_summarize_state_cuts_retired_task_submit_params() {
-        // 参数退役守卫：task.priority/task.max_retries 已随
-        // task_submit 参数瘦身移除（执行层零消费者，ADR
-        // 2026-08-24-task-submit-param-diet）——精确键出口已删，白名单
-        // 应裁剪；将来重开须先接真实消费者再回填白名单与写入方。
-        let s = summarize_state(&json!({
-            "pipeline_id": "p6",
-            "task.priority": "high",
-            "task.max_retries": 2,
-            "task.goal": "g",
-        }));
+    fn test_summarize_union_across_manifests() {
+        // 并集语义：多个 manifest 各自声明，取并集出口。
+        let export = ExportFields::from_manifests(&[
+            export_manifest(&["task.goal"]),
+            export_manifest(&["llm_model"]),
+        ]);
+        let s = summarize_state(
+            &json!({"pipeline_id": "p7", "task.goal": "g", "llm_model": "k2"}),
+            &export,
+        );
+        assert_eq!(s["task.goal"], "g");
+        assert_eq!(s["llm_model"], "k2");
+    }
+
+    #[test]
+    fn test_summarize_cuts_retired_task_submit_params() {
+        // 参数退役守卫：task.priority/task.max_retries 已随 task_submit 参数瘦身
+        // 移除（执行层零消费者，ADR 2026-08-24-task-submit-param-diet）——退役后
+        // 无插件声明，即使任务域其他键已声明也不出口。
+        let export = ExportFields::from_manifests(&[export_manifest(&["task.goal"])]);
+        let s = summarize_state(
+            &json!({
+                "pipeline_id": "p6",
+                "task.priority": "high",
+                "task.max_retries": 2,
+                "task.goal": "g",
+            }),
+            &export,
+        );
         assert!(s.get("task.priority").is_none(), "退役参数不应出口");
         assert!(s.get("task.max_retries").is_none(), "退役参数不应出口");
         assert_eq!(s["task.goal"], "g");
     }
 
     #[test]
-    fn test_summarize_state_still_cuts_non_whitelisted_fields() {
-        // 白名单机制本身不变：新增键不放开白名单外字段
-        let s = summarize_state(&json!({
-            "pipeline_id": "p3",
-            "secret_blob": "x",
-            "task.goal": "g"
-        }));
-        assert!(s.get("secret_blob").is_none(), "白名单外字段仍裁剪");
+    fn test_summarize_still_cuts_non_whitelisted_fields() {
+        // 默认拒绝机制本身不变：声明之外的新键不出口
+        let export = ExportFields::from_manifests(&[export_manifest(&[
+            "task.goal",
+            "task.ended_at",
+        ])]);
+        let s = summarize_state(
+            &json!({
+                "pipeline_id": "p3",
+                "secret_blob": "x",
+                "task.goal": "g"
+            }),
+            &export,
+        );
+        assert!(s.get("secret_blob").is_none(), "未声明字段仍裁剪");
         assert_eq!(s["task.goal"], "g");
-        // raw_result（最终输出）与 input 对称出口——复盘报告提取/任务树展示依赖
-        let s2 = summarize_state(&json!({"pipeline_id": "p4", "raw_result": "复盘结论：x"}));
+        // raw_result（最终输出）属内核运行域基线，恒出口——复盘报告提取/任务树展示依赖
+        let s2 = summarize_state(
+            &json!({"pipeline_id": "p4", "raw_result": "复盘结论：x"}),
+            &ExportFields::default(),
+        );
         assert_eq!(s2["raw_result"], "复盘结论：x");
-        // 终态回写的 task.ended_at 出口（任务树展示完成时间）
-        let s3 =
-            summarize_state(&json!({"pipeline_id": "p5", "task.ended_at": "2026-08-16T09:00:00Z"}));
+        // 终态回写的 task.ended_at 经声明出口（任务树展示完成时间）
+        let s3 = summarize_state(
+            &json!({"pipeline_id": "p5", "task.ended_at": "2026-08-16T09:00:00Z"}),
+            &export,
+        );
         assert_eq!(s3["task.ended_at"], "2026-08-16T09:00:00Z");
     }
 }

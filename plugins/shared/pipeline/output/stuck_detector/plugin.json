@@ -17,5 +17,8 @@
   },
   "permissions": {},
   "priority": 50,
-  "host_group": "light"
+  "host_group": "light",
+  "export_fields": [
+    "stuck_detected"
+  ]
 }

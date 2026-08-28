@@ -532,6 +532,7 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        export_fields: vec![],
         provides: None,
     };
     let bad = PluginManifest {
@@ -563,6 +564,7 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        export_fields: vec![],
         provides: None,
     };
 

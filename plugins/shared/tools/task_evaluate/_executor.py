@@ -201,11 +201,10 @@ class PipelineEvaluationExecutor:
             "message": kickoff,
             "user_id": "task_system",
             "agent_id": _EVALUATOR_AGENT_ID,
-            "lineage": {
-                "parent_pipeline_id": task_id,
-                "origin_session_id": origin_session,
-            },
             "state": {
+                # 血缘扁平键（有父形式）：父 = 被评估任务管道
+                "lineage.parent_pipeline_id": task_id,
+                "lineage.origin_session_id": origin_session,
                 # R2 核心：出生即带被评估任务的工作区坐标（非保留字，注入合法；
                 # workspace_lifecycle 见 state.workspace 已有幂等跳过 → 同目录跑）
                 "workspace": str(ws_meta["path"]),

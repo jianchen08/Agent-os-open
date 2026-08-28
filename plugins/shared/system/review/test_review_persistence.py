@@ -225,8 +225,10 @@ class TestTriggerReviewDispatch:
         p = calls[0]
         assert p["create"] is True
         assert p["background"] is True
-        # 血缘：根形式（系统组件，诚实声明复盘来源——不伪造父）
-        assert p["lineage"] == {"root": True, "origin": {"kind": "plugin", "source": "review"}}
+        # 血缘扁平键：根形式（系统组件，诚实声明复盘来源——不伪造父）
+        assert p["state"]["lineage.root"] is True
+        assert p["state"]["lineage.origin.kind"] == "plugin"
+        assert p["state"]["lineage.origin.source"] == "review"
         # 登记调用：复盘管道 id 写回被复盘任务管道（管道树数据链）
         reg = calls[1]
         assert reg["pipeline_id"] == "task-9"

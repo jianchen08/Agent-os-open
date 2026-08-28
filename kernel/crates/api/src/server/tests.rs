@@ -1948,6 +1948,7 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
             config_files: vec![],
             ui_schema: None,
             persistent_fields: vec![],
+            export_fields: vec![],
             http_endpoints: vec![],
             contributes: Default::default(),
             enabled: Some(true),

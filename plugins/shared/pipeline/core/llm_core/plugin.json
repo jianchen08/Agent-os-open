@@ -144,7 +144,23 @@
             }
           ]
         }
+      },
+      {
+        "id": "context_usage",
+        "type": "context_usage",
+        "space": "chat-input",
+        "props": {
+          "datasourceUri": "/api/v1/pipelines/state",
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 15
+          }
+        }
       }
     ]
-  }
+  },
+  "export_fields": [
+    "llm_model",
+    "router.stop_reason"
+  ]
 }

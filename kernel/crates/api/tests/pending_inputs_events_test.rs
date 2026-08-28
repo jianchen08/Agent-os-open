@@ -69,6 +69,7 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        export_fields: vec![],
         provides: None,
     }
 }

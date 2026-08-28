@@ -84,6 +84,7 @@ async fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        export_fields: vec![],
         provides: None,
     };
 

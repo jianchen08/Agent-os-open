@@ -299,6 +299,7 @@ mod tests {
             activation: None,
             provides,
             persistent_fields: vec![],
+            export_fields: vec![],
         }
     }
 

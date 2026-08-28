@@ -73,8 +73,8 @@ def set_agent_registry_lookup(lookup: Any) -> None:
 # ── GAP-1：chat.send_message 派发器（server.py on_load 注入）──
 #
 # 任务执行驱动：提交成功后经内核 chat capability 的 send_message（create 分支，
-# 引擎生成 pipeline_id）创建任务执行管道——state 出生即带 task.* 字段、lineage
-# 有父/根二选一、execution_context 透传。sidecar 进程内模块级注入（能力句柄
+# 引擎生成 pipeline_id）创建任务执行管道——state 出生即带 task.*/lineage.* 扁平
+# 键（血缘方案本插件自持）、execution_context 透传。sidecar 进程内模块级注入（能力句柄
 # 懒解析在协程内完成）；未注入（capability 缺席/测试）时提交仍落库但话术诚实
 # （不声称"异步执行中"），结果携带 warning。
 _chat_sender: Any = None
@@ -84,7 +84,7 @@ def set_chat_sender(sender: Any) -> None:
     """注入 chat.send_message 派发器（server.py on_load 调用）。
 
     约定签名：``async sender(params: dict) -> dict``，params 即
-    chat.send_message 的入参（create/message/user_id/state/lineage/
+    chat.send_message 的入参（create/message/user_id/state/
     execution_context/background）；成功返回含 ``pipeline_id`` 的响应，
     失败抛异常（由调用方记录并降级为 warning 话术）。
     """
@@ -1487,9 +1487,9 @@ class TaskSubmitTool(BuiltinTool):
         - ``state``：任务域字段出生即入（task.goal/status/description/
           acceptance_criteria/dependencies——扁平点号键，STATE_SUMMARY_KEYS
           出口）；task.status 终态由内核 run 终态回写（completed/failed/suspended）；
-        - ``lineage``：有父形式（parent = 调用方管道，origin_session 同管道——
-          主会话 thread_id 与 pipeline_id 同值）/ 根形式（无调用方管道时诚实声明
-          plugin 来源，不伪造默认父）二选一；
+        - ``state`` 的血缘扁平键：有父形式（lineage.parent_pipeline_id = 调用方
+          管道，lineage.origin_session_id 同管道）/ 根形式（lineage.root + 来源
+          声明，无调用方管道时诚实声明 plugin 来源，不伪造默认父）二选一；
         - ``execution_context``：workspace/isolation（本地组装，供执行管道
           init 体 workspace_lifecycle 消费——空间初始化不再在提交期做）；
         - ``background: true``：不阻塞工具调用等待任务完成（派发即返回 id）。
@@ -1514,14 +1514,15 @@ class TaskSubmitTool(BuiltinTool):
                 or inputs.get("thread_id")
                 or parent_pipeline_id
             )
-            lineage: dict[str, Any] = {
-                "parent_pipeline_id": parent_pipeline_id,
-                "origin_session_id": origin_session,
+            lineage_keys: dict[str, Any] = {
+                "lineage.parent_pipeline_id": parent_pipeline_id,
+                "lineage.origin_session_id": origin_session,
             }
         else:
-            lineage = {
-                "root": True,
-                "origin": {"kind": "plugin", "source": "task_submit"},
+            lineage_keys = {
+                "lineage.root": True,
+                "lineage.origin.kind": "plugin",
+                "lineage.origin.source": "task_submit",
             }
 
         kickoff = f"执行任务「{title}」。"
@@ -1545,8 +1546,8 @@ class TaskSubmitTool(BuiltinTool):
                 "task.acceptance_criteria": acceptance_criteria or {},
                 "task.dependencies": dependencies or [],
                 "task.submitted_by": inputs.get("user_id", ""),
+                **lineage_keys,
             },
-            "lineage": lineage,
             "background": True,
         }
         # 挂靠项目（项目非管道）：任务管道 state 带 parent_project_id——

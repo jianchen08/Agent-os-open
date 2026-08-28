@@ -186,6 +186,11 @@ class ContextBuildPlugin(IInputPlugin):
         _tool_ids = agent_cfg.get("tool_ids")
         if isinstance(_tool_ids, list) and _tool_ids:
             updates["tool_ids"] = _tool_ids
+        # 任务域出生投影（ADR 2026-08-28 声明化）：血缘扁平键存在 = 任务管道
+        # （聊天管道无血缘键，不写 task.*）——task.id 即引擎管道 id，调用方预传
+        # 值一律覆盖（身份权威在引擎 id，此处统一收口）。
+        if any(str(k).startswith("lineage.") for k in ctx.state):
+            updates["task.id"] = str(ctx.state.get("pipeline_id", "") or "")
         # dynamic_vars 随 agent 配置装载：agent yaml 的
         # dynamic_vars.items → context.dynamic_vars，prompt_build 据此走配置
         # 驱动路径（配置声明的 {{timestamp}}/{{path:}} 依赖此装载）。

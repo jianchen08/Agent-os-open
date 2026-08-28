@@ -1141,6 +1141,7 @@ mod tests {
             activation: None,
             provides: None,
             persistent_fields: vec![],
+            export_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -1179,6 +1180,7 @@ mod tests {
             activation: None,
             provides: None,
             persistent_fields: vec![],
+            export_fields: vec![],
         };
         manifest.capabilities.steps = vec![StepCapability {
             name: "  ".to_string(),
@@ -1230,6 +1232,7 @@ mod tests {
             activation: None,
             provides: None,
             persistent_fields: vec![],
+            export_fields: vec![],
         };
         manifest.capabilities.steps = vec![
             StepCapability {
@@ -1290,6 +1293,7 @@ mod tests {
             activation: None,
             provides: None,
             persistent_fields: vec![],
+            export_fields: vec![],
         };
         manifest.capabilities.steps = vec![
             StepCapability {
@@ -1371,6 +1375,7 @@ mod tests {
             activation: None,
             provides: None,
             persistent_fields: vec![],
+            export_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_err());
     }
@@ -1408,6 +1413,7 @@ mod tests {
             activation: None,
             provides: None,
             persistent_fields: vec![],
+            export_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
     }
@@ -1574,6 +1580,7 @@ mod tests {
             activation: None,
             provides: None,
             persistent_fields: vec![],
+            export_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
         assert_eq!(manifest.requires_content, Some(2));

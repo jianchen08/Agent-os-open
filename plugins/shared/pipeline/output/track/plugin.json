@@ -22,5 +22,10 @@
     "track.total_tokens",
     "track.llm_usage",
     "track.execution_stats"
+  ],
+  "export_fields": [
+    "track.total_tokens",
+    "track.execution_stats",
+    "track.llm_usage"
   ]
 }

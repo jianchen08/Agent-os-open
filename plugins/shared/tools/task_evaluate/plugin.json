@@ -117,5 +117,10 @@
     "pipeline-state",
     "tenant-context",
     "chat"
+  ],
+  "export_fields": [
+    "evaluation.of_task",
+    "evaluation.metric_id",
+    "evaluation.detected_result"
   ]
 }

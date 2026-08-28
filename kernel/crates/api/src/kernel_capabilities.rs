@@ -48,13 +48,8 @@ pub(crate) const RESERVED_STATE_KEYS: &[&str] = &[
     "user_id",
     "run_id",
     "execution_context",
-    "lineage",
     "message_id",
 ];
-
-/// state 键保护前缀（lineage 为引擎出生写入字段，注入不可覆写）。
-/// 与契约文件 `state.propertyNames.x-forbidden-prefixes` 的一致性由同一机械闸强制。
-pub(crate) const FORBIDDEN_STATE_KEY_PREFIXES: &[&str] = &["lineage."];
 
 /// 一个 namespace 的内核能力契约（对应 config/kernel_capabilities/ 下一个文件）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -665,7 +660,6 @@ mod tests {
                 "create": true, "background": true,
                 "message": "m", "user_id": "u1", "agent_id": "review_agent",
                 "state": {"task.goal": "g", "task.status": "pending"},
-                "lineage": {"root": true, "origin": {"kind": "plugin", "source": "task_submit"}},
                 "execution_context": {"workspace": {"mode": "worktree"}}
             }),
         )
@@ -720,20 +714,8 @@ mod tests {
                 "message 空串（minLength）",
             ),
             (
-                json!({"message": "m", "user_id": "u1", "lineage": {"root": true, "origin": {"kind": "human", "source": "x"}}}),
-                "origin.kind 不在枚举",
-            ),
-            (
-                json!({"message": "m", "user_id": "u1", "lineage": {"parent_pipeline_id": "pipe_parent", "origin_session_id": "s"}}),
-                "parent_pipeline_id 形态错",
-            ),
-            (
                 json!({"pipeline_id": "a1b2c3d4e5f6", "message": "m", "user_id": "u1", "state": {"pipeline_id": "evil"}}),
                 "state 保留字",
-            ),
-            (
-                json!({"pipeline_id": "a1b2c3d4e5f6", "message": "m", "user_id": "u1", "state": {"lineage.root": true}}),
-                "state 保护前缀",
             ),
             (
                 json!({"message": "m", "user_id": "u1", "thread_id": "no-prefix", "create": true}),
@@ -799,35 +781,6 @@ mod tests {
             .collect();
         let code: std::collections::BTreeSet<&str> = RESERVED_STATE_KEYS.iter().copied().collect();
         assert_eq!(reserved, code, "保留字清单配置↔代码漂移");
-
-        // 保护前缀：x-forbidden-prefixes == 代码侧 FORBIDDEN_STATE_KEY_PREFIXES
-        let prefixes: Vec<&str> = spec.input_schema["properties"]["state"]["propertyNames"]
-            ["x-forbidden-prefixes"]
-            .as_array()
-            .expect("x-forbidden-prefixes 必须声明")
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
-        assert_eq!(
-            prefixes,
-            FORBIDDEN_STATE_KEY_PREFIXES.to_vec(),
-            "保护前缀配置↔代码漂移"
-        );
-
-        // 血缘 origin.kind 枚举 == 代码侧 LINEAGE_ORIGIN_KINDS
-        let kinds: std::collections::BTreeSet<&str> = spec.input_schema["properties"]["lineage"]
-            ["properties"]["origin"]["properties"]["kind"]["enum"]
-            .as_array()
-            .expect("lineage.origin.kind.enum 必须声明")
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
-        let code_kinds: std::collections::BTreeSet<&str> =
-            crate::chat_send_handler::LINEAGE_ORIGIN_KINDS
-                .iter()
-                .copied()
-                .collect();
-        assert_eq!(kinds, code_kinds, "origin.kind 枚举配置↔代码漂移");
 
         // 形态核心：pipeline_id 的 12hex pattern 必须声明（本方案的立身之本）
         assert_eq!(
@@ -896,8 +849,7 @@ mod tests {
         let created = h
             .handle(
                 "send_message",
-                json!({"create": true, "message": "m", "user_id": "u1",
-                       "lineage": {"root": true, "origin": {"kind": "system", "source": "gate"}}}),
+                json!({"create": true, "message": "m", "user_id": "u1"}),
             )
             .await
             .unwrap();

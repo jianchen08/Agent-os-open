@@ -518,10 +518,10 @@ class TestOwnershipSessionFlow:
         assert pid2 == "pid-1"
         # 子任务创建调用（最后一次 create 调用；前面还有根任务创建调用）
         create_call = next(c for c in reversed(calls) if c.get("create") is True)
-        lineage = create_call["lineage"]
-        assert lineage["parent_pipeline_id"] == "pipe-parent"
+        state = create_call["state"]
+        assert state["lineage.parent_pipeline_id"] == "pipe-parent"
         # origin_session_id 用真实会话（不再错填父管道 id）
-        assert lineage["origin_session_id"] == "thread-s1"
+        assert state["lineage.origin_session_id"] == "thread-s1"
 
     async def test_submit_task_event_registers_child_to_parent_state(
         self, monkeypatch: pytest.MonkeyPatch

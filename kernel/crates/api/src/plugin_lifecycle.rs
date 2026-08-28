@@ -322,6 +322,7 @@ mod domain_event_tests {
             enabled: None,
             activation: None,
             persistent_fields: vec![],
+            export_fields: vec![],
             provides: None,
         }
     }
@@ -417,6 +418,7 @@ mod external_mcp_schema_gate_tests {
             enabled: None,
             activation: None,
             persistent_fields: vec![],
+            export_fields: vec![],
             provides: None,
         }
     }

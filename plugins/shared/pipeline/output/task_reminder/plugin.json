@@ -23,5 +23,10 @@
   ],
   "permissions": {},
   "priority": 50,
-  "host_group": "light"
+  "host_group": "light",
+  "export_fields": [
+    "evaluation.detected_result",
+    "task.status",
+    "task.ended_at"
+  ]
 }

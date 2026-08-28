@@ -16,5 +16,19 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "export_fields": [
+    "task.id",
+    "lineage.parent_pipeline_id",
+    "lineage.origin_session_id",
+    "lineage.root",
+    "lineage.origin.kind",
+    "lineage.origin.source",
+    "display_name",
+    "name",
+    "tags"
+  ],
+  "persistent_fields": [
+    "task.id"
+  ]
 }

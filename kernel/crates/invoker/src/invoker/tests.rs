@@ -120,6 +120,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         activation: None,
         provides: None,
         persistent_fields: vec![],
+        export_fields: vec![],
     }
 }
 
@@ -160,6 +161,7 @@ fn make_inprocess_manifest(id: &str) -> PluginManifest {
         activation: None,
         provides: None,
         persistent_fields: vec![],
+        export_fields: vec![],
     }
 }
 
@@ -541,6 +543,7 @@ async fn test_lifecycle_hook_composite_skipped() {
         activation: None,
         provides: None,
         persistent_fields: vec![],
+        export_fields: vec![],
     };
     loader.add_manifest(manifest);
 
@@ -1168,6 +1171,7 @@ fn make_pipeline_sidecar_manifest(id: &str, invoke_entry: Option<&str>) -> Plugi
         provides: None,
         invoke_entry: invoke_entry.map(str::to_string),
         persistent_fields: vec![],
+        export_fields: vec![],
     }
 }
 
