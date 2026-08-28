@@ -21,50 +21,42 @@
           "properties": {
             "url": {
               "type": "string",
-              "description": "下载地址（http/https），必填"
+              "description": "下载地址（http/https）"
             },
             "save_path": {
               "type": "string",
-              "description": "保存目录路径（必填），文件名自动从 URL 或响应头获取"
+              "description": "保存目录路径"
             },
             "filename": {
-              "type": "string",
-              "description": "指定文件名（可选，默认自动检测）"
+              "type": "string"
             },
             "max_connections": {
               "type": "integer",
-              "description": "最大分段/连接数，默认 8",
               "default": 8
             },
             "max_retries": {
               "type": "integer",
-              "description": "最大重试次数，默认 5",
               "default": 5
             },
             "timeout": {
               "type": "integer",
-              "description": "超时秒数，默认 300",
               "default": 300
             },
             "max_size": {
               "type": "integer",
-              "description": "文件大小上限（字节），默认 1GB，设为 0 表示不限制",
               "default": 1073741824
             },
             "proxy": {
-              "type": "string",
-              "description": "代理地址（可选，如 http://127.0.0.1:7890）"
+              "type": "string"
             },
             "allow_domains": {
               "type": "array",
               "items": {
                 "type": "string"
-              },
-              "description": "域名白名单（可选，如 ['github.com', 'pypi.org']）"
+              }
             },
             "expected_hash": {
-              "type": "string",
-              "description": "期望的 SHA256 哈希值（可选，下载后校验）"
+              "type": "string"
             }
           },
           "required": [
