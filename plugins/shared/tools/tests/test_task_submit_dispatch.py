@@ -387,3 +387,46 @@ class TestDispatchInstructionRichness:
         assert "隔离副本" in msg
         assert "相对路径" in msg
         assert "进度跟踪工作法" in msg
+
+
+class TestPendingSubtaskRegistration:
+    """子任务挂号键（ADR 2026-08-28-task-closure-three-signal-gate 信号③）。
+
+    task_submit 登记分支在提交者管道 state 写 ``task.subtasks_pending.<task_id>``
+    （值 = 提交时间戳）：父管道收束判据据此感知「已提交子任务等待回执」；
+    子任务终态事件经 task_service 写 null 清除。
+    """
+
+    async def test_registration_writes_pending_subtask_key(self, mod: Any) -> None:
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(_base_inputs())
+        finally:
+            mod._chat_sender = None
+        assert r.success, r.error
+
+        reg = sender.calls[1]
+        assert reg["no_dispatch"] is True
+        child_id = "pipe_engine_gen_1"
+        value = reg["state"][f"task.subtasks_pending.{child_id}"]
+        assert isinstance(value, str) and value, "挂号值 = 提交时间戳（非空标量）"
+        # 与 task.owned 登记键同批发往提交者管道（一次 no_dispatch 写面）
+        assert f"task.owned.{child_id}.status" in reg["state"]
+
+    async def test_root_dispatch_without_parent_writes_no_registration(
+        self, mod: Any
+    ) -> None:
+        """无调用方管道（根任务）→ 无登记分支，自然无挂号键可写。"""
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        inputs = _base_inputs()
+        inputs.pop("pipeline_id")
+        try:
+            r = await tool.execute(inputs)
+        finally:
+            mod._chat_sender = None
+        assert r.success, r.error
+        assert len(sender.calls) == 1, "根任务只派发，无登记分支"

@@ -13,6 +13,12 @@ from pipeline.types import ACTIVE_TASK_STATUSES, RouteSignal
 
 logger = logging.getLogger(__name__)
 
+# 子任务挂号键前缀（信号③）：task_submit 成功时经 chat.send_message no_dispatch
+# 向提交者管道写 ``task.subtasks_pending.<task_id>``（值 = 提交时间戳，扁平键
+# 标量值无跨边界 JSON 还原问题）；子任务终态事件经 task_service 写 null 清除
+# （pipeline-state.update 无键删除语义，null 即已回执）。
+_PENDING_SUBTASK_PREFIX = "task.subtasks_pending."
+
 
 class TaskReminder(IOutputPlugin):
     """任务评估提醒 Output 插件。"""
@@ -141,6 +147,12 @@ class TaskReminder(IOutputPlugin):
                 task_id,
             )
             return OutputResult()
+
+        # ── 信号③：存在未回子任务挂号 → 本轮收束等待唤醒通知，不催评估 ──
+        if self._has_pending_subtask_registration(state):
+            return self._pending_subtask_wait_result(
+                iteration=iteration, task_id=task_id,
+            )
 
         gated = self._resolve_text_output_gates(
             state, iteration=iteration, task_id=task_id,
@@ -435,6 +447,39 @@ class TaskReminder(IOutputPlugin):
             route_signal=RouteSignal(
                 route_type="end",
                 reason="task_reminder: no text closure after forced round, ending",
+            ),
+        )
+
+    @staticmethod
+    def _has_pending_subtask_registration(state: dict[str, Any]) -> bool:
+        """信号③：存在未回子任务挂号（ADR 2026-08-28 三信号③）。
+
+        任一 ``task.subtasks_pending.<task_id>`` 键真值即存在未回子任务；
+        终态清除写 null（假值）不构成挂号。
+        """
+        for key, value in state.items():
+            if str(key).startswith(_PENDING_SUBTASK_PREFIX) and value:
+                return True
+        return False
+
+    def _pending_subtask_wait_result(
+        self,
+        *,
+        iteration: Any,
+        task_id: str,
+    ) -> OutputResult:
+        """信号③当轮收束：本轮 end，等待子任务终态唤醒通知，不催评估。"""
+        logger.info(
+            "TaskReminder[iter=%s][task=%s]: pending subtask registration, "
+            "closing round to wait for wake-up",
+            iteration,
+            task_id,
+        )
+        return OutputResult(
+            state_updates={"_has_new_llm_input": False},
+            route_signal=RouteSignal(
+                route_type="end",
+                reason="task_reminder: pending subtask registration, waiting for wake-up",
             ),
         )
 

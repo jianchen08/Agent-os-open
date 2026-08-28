@@ -1600,6 +1600,12 @@ class TaskSubmitTool(BuiltinTool):
                             f"task.owned.{pipeline_id}.status": "running",
                             f"task.owned.{pipeline_id}.created_at": _now_iso(),
                             f"task.owned.{pipeline_id}.submitted_by": inputs.get("user_id", ""),
+                            # 子任务挂号（ADR 2026-08-28-task-closure-three-signal-gate
+                            # 信号③）：提交者管道持「已提交待回执」键，task_reminder
+                            # 据此收束等待唤醒通知；子任务终态事件经 task_service 写
+                            # null 清除（pipeline-state.update 无键删除语义，null 即
+                            # 已回执；task.* 前缀满足该写面的任务域键约束）。
+                            f"task.subtasks_pending.{pipeline_id}": _now_iso(),
                         },
                     }
                 )

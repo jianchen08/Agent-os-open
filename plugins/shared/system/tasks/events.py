@@ -78,15 +78,33 @@ def derive_task_terminal_events(
     return []
 
 
+def pending_registration_clear_fields(tags: dict[str, Any]) -> dict[str, Any] | None:
+    """子任务终态 → 父管道挂号键清除字段（纯函数，可单测）。
+
+    挂号键 = task_submit 写入提交者管道 state 的 ``task.subtasks_pending.<task_id>``
+    （值 = 提交时间戳，消费方 task_reminder 信号③按真值判定）。终态清除写
+    null——pipeline-state.update 无键删除语义，null 即已回执；task.* 前缀满足
+    该写面的任务域键约束。无父锚点（根任务）或无任务 id → None（不写）。
+    """
+    task_id = str(tags.get("task_id") or "")
+    parent = str(tags.get("parent_pipeline_id") or "")
+    if not task_id or not parent:
+        return None
+    return {f"task.subtasks_pending.{task_id}": None}
+
+
 async def handle_run_terminal_event(
     event_name: str, params: dict[str, Any], state_capability: Any, bus_capability: Any
 ) -> int:
     """入口：查 state 摘要 → 派生 → 经 event-bus.emit_domain 发回域总线。
 
+    派生出的任务终态事件同时清除父管道的子任务挂号键（信号③闭环：父管道
+    收束等待 → 子任务终态唤醒 + 挂号解除）；清除失败仅告警，不破坏事件派生。
+
     Args:
         event_name: run.completed / run.failed。
         params: 域事件标签（取 pipeline_id 定位管道）。
-        state_capability: pipeline-state 能力句柄（list 取摘要行）。
+        state_capability: pipeline-state 能力句柄（list 取摘要行 / update 清挂号）。
         bus_capability: event-bus 能力句柄（call emit_domain）。
 
     Returns:
@@ -115,4 +133,26 @@ async def handle_run_terminal_event(
             )
         except Exception:  # noqa: BLE001
             logger.exception("[task_service] emit_domain 失败 | event=%s", name)
+        clear_fields = pending_registration_clear_fields(tags)
+        if clear_fields is None:
+            continue
+        try:
+            await state_capability.call(
+                "update",
+                {
+                    "pipeline_id": str(tags.get("parent_pipeline_id") or ""),
+                    "fields": clear_fields,
+                },
+            )
+            logger.info(
+                "[task_service] 父管道子任务挂号已清除 | parent=%s | fields=%s",
+                tags.get("parent_pipeline_id"),
+                clear_fields,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[task_service] 父管道挂号键清除失败（不影响事件派生）| parent=%s | fields=%s",
+                tags.get("parent_pipeline_id"),
+                clear_fields,
+            )
     return emitted

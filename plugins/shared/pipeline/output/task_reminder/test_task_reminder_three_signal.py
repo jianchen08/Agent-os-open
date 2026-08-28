@@ -224,6 +224,97 @@ class TestExhaustionNeverOverwritesCompletion:
         assert _is_iso_datetime(result.state_updates.get("task.ended_at"))
 
 
+class TestSignalThreePendingSubtaskRegistration:
+    """信号③：存在未回子任务挂号键 → 本轮收束等待唤醒，不催评估。
+
+    挂号键 = task_submit 写入提交者管道的 ``task.subtasks_pending.<task_id>``
+    （值 = 提交时间戳）；子任务终态事件经 task_service 写 null 清除。
+    """
+
+    def test_pending_registration_key_ends_round_waiting(self) -> None:
+        import asyncio
+
+        reminder = TaskReminder()
+        result = asyncio.run(
+            reminder.execute(
+                _ctx(
+                    _base_task_state(
+                        raw_result="已提交子任务，等待完成回执。",
+                        **{"task.subtasks_pending.task-child-1": "2026-08-28T10:00:00+00:00"},
+                    )
+                )
+            )
+        )
+        assert result.route_signal is not None
+        assert result.route_signal.route_type == "end"
+        # 收束轮零提醒注入（不催评估）
+        assert "messages" not in result.state_updates
+        assert "evaluate_reminder_count" not in result.state_updates
+        assert result.state_updates.get("_has_new_llm_input") is False
+
+    def test_cleared_registration_null_value_does_not_wait(self) -> None:
+        """子任务已回执（键写 null 清除）→ 视为无挂号，照常进入提醒级联。"""
+        import asyncio
+
+        reminder = TaskReminder(config={"max_reminders": 3})
+        result = asyncio.run(
+            reminder.execute(
+                _ctx(
+                    _base_task_state(
+                        **{"task.subtasks_pending.task-child-1": None}
+                    )
+                )
+            )
+        )
+        assert result.state_updates.get("evaluate_reminder_count") == 1
+
+    def test_mixed_keys_any_truthy_registration_waits(self) -> None:
+        """性质：多笔挂号中任一未回（真值）即等待；全部回执（null）才继续。"""
+        import asyncio
+
+        reminder = TaskReminder()
+
+        mixed = _base_task_state(
+            **{
+                "task.subtasks_pending.task-child-1": None,
+                "task.subtasks_pending.task-child-2": "2026-08-28T10:30:00+00:00",
+            }
+        )
+        waiting = asyncio.run(reminder.execute(_ctx(mixed)))
+        assert waiting.route_signal is not None
+        assert waiting.route_signal.route_type == "end"
+
+        all_cleared = _base_task_state(
+            **{
+                "task.subtasks_pending.task-child-1": None,
+                "task.subtasks_pending.task-child-2": None,
+            }
+        )
+        reminded = asyncio.run(
+            TaskReminder(config={"max_reminders": 3}).execute(_ctx(all_cleared))
+        )
+        assert reminded.state_updates.get("evaluate_reminder_count") == 1
+
+    def test_signal_two_short_circuits_before_registration_wait(self) -> None:
+        """按序短路：②完成证据与③挂号同场时②先收束（补落 completed）。"""
+        import asyncio
+
+        reminder = TaskReminder()
+        result = asyncio.run(
+            reminder.execute(
+                _ctx(
+                    _base_task_state(
+                        task_evaluation_completed=True,
+                        **{"task.subtasks_pending.task-child-1": "2026-08-28T10:00:00+00:00"},
+                    )
+                )
+            )
+        )
+        assert result.route_signal is not None
+        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("task.status") == "completed"
+
+
 class TestSecondaryEvidenceDemotedButKept:
     """messages JSON 文本检测降为次级证据保留（文本形态契约脆弱，ADR 被否项①）。"""
 

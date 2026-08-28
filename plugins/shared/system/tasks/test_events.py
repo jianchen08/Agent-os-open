@@ -139,3 +139,90 @@ def test_handle_bus_failure_does_not_raise():
         )
     )
     assert emitted == 0, "发射失败计 0（异常已留日志）"
+
+
+# ── 子任务挂号键清除（ADR 2026-08-28-task-closure-three-signal-gate 信号③）──
+
+
+class _RecordingStateCap(_FakeStateCap):
+    """记录 update 调用的 state 能力 fake（list 沿用基类）。"""
+
+    def __init__(self, rows):
+        super().__init__(rows)
+        self.updates: list[dict] = []
+
+    async def call(self, method, params):
+        if method == "update":
+            self.updates.append(params)
+            return {"status": "updated"}
+        return await super().call(method, params)
+
+
+class _BrokenUpdateStateCap(_RecordingStateCap):
+    """update 恒失败（写面故障注入）。"""
+
+    async def call(self, method, params):
+        if method == "update":
+            raise RuntimeError("state write down")
+        return await super().call(method, params)
+
+
+def test_pending_clear_fields_from_terminal_tags():
+    tags = {"task_id": "pipe_t1", "parent_pipeline_id": "pipe_parent"}
+    assert events.pending_registration_clear_fields(tags) == {
+        "task.subtasks_pending.pipe_t1": None
+    }
+
+
+def test_pending_clear_fields_requires_parent_and_task():
+    # 无父锚点（根任务）/无任务 id → 不产生清除写
+    for tags in [
+        {"task_id": "t1", "parent_pipeline_id": ""},
+        {"task_id": "", "parent_pipeline_id": "p"},
+        {},
+    ]:
+        assert events.pending_registration_clear_fields(tags) is None
+
+
+def test_handle_terminal_event_clears_parent_registration():
+    rows = [_task_row("completed")]
+    state_cap = _RecordingStateCap(rows)
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed", {"pipeline_id": "pipe_t1"}, state_cap, bus
+        )
+    )
+    assert emitted == 1
+    assert state_cap.updates == [
+        {
+            "pipeline_id": "pipe_parent",
+            "fields": {"task.subtasks_pending.pipe_t1": None},
+        }
+    ]
+
+
+def test_handle_no_derivation_no_registration_write():
+    # 评估未通过不派生（无终态事件）→ 挂号键不动（父继续等待）
+    state_cap = _RecordingStateCap([_task_row("running")])
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed", {"pipeline_id": "pipe_t1"}, state_cap, bus
+        )
+    )
+    assert emitted == 0
+    assert state_cap.updates == []
+
+
+def test_handle_registration_clear_failure_does_not_break_emit():
+    # 清除写失败只留告警，不破坏事件派生主流程
+    state_cap = _BrokenUpdateStateCap([_task_row("completed")])
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed", {"pipeline_id": "pipe_t1"}, state_cap, bus
+        )
+    )
+    assert emitted == 1
+    assert len(state_cap.updates) == 0
