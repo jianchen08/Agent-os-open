@@ -305,6 +305,22 @@ class TestDispatchInstructionRichness:
         assert mod._build_evaluation_criteria_prompt({}) == ""
         assert mod._build_evaluation_criteria_prompt({"ghost_metric": {}}) == ""
 
+    def test_metric_detail_fail_open_when_metrics_unreadable(
+        self, mod: Any, monkeypatch: Any
+    ) -> None:
+        """指标定义文件不可读 → 详情空串 + 合法指标集合 fail-open（None）。
+
+        校验路径（_get_valid_metric_ids 返回 None）由边界校验用例消费：
+        无合法集合可查时跳过 key 校验，不阻断提交。
+        """
+        monkeypatch.setattr(
+            mod,
+            "_metrics_config_path",
+            lambda: Path("Z:/nonexistent/evaluation_metrics.yaml"),
+        )
+        assert mod._build_evaluation_criteria_prompt({"file_check": {}}) == ""
+        assert mod._get_valid_metric_ids() is None
+
     def test_kickoff_workspace_guidance_explicit_worktree(self, mod: Any) -> None:
         """显式 workspace + worktree：隔离副本提示 + 相对路径规则。"""
         msg = mod._build_workspace_guidance(
