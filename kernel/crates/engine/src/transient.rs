@@ -87,6 +87,8 @@ type KeyedStore = HashMap<(String, String), PipelineKeyMap>;
 /// 上下文登记区（B 区）整体：per-(tenant,pipeline) → (message_id → step_id)。
 type BindingStore = HashMap<(String, String), HashMap<String, MessageBinding>>;
 
+type ChunkAccumTable = HashMap<(String, String, String), ChunkAccumulator>;
+
 /// 两区内存寄存器。
 ///
 /// 进程级单例（`global_registry()`），两区共用 `(tenant_id, pipeline_id)` 键
@@ -98,7 +100,7 @@ pub struct TransientStateRegistry {
     keys: std::sync::Arc<RwLock<KeyedStore>>,
     bindings: std::sync::Arc<RwLock<BindingStore>>,
     /// chunk 累积节流档：(tenant,pipeline,message_id) → 累积缓冲（短锁独立）。
-    chunk_accum: std::sync::Arc<Mutex<HashMap<(String, String, String), ChunkAccumulator>>>,
+    chunk_accum: std::sync::Arc<Mutex<ChunkAccumTable>>,
 }
 
 impl TransientStateRegistry {
