@@ -274,3 +274,102 @@ class TestTaskPipelineDispatch:
         assert r.success is False
         assert r.error_code == "DISPATCH_FAILED"
         assert "kernel down" in (r.error or "")
+
+
+class TestDispatchInstructionRichness:
+    """派发指令完整性（0.1 _build_full_task_input 移植）：评估指标详情、
+    工作空间模式提示、路径使用规则、待办工作法必须进入下级指令。
+
+    评估指标详情依赖真实 evaluation_metrics.yaml（与 task_evaluate 同源），
+    断言取真实指标名与定义中的 description 前缀，不做任何 mock。
+    """
+
+    def test_kickoff_includes_evaluation_criteria_detail(self, mod: Any) -> None:
+        """验收标准展开为指标详情（真实 yaml 定义），非原始 dict 直贴。"""
+        msg = mod._build_evaluation_criteria_prompt(
+            {
+                "file_check": {"input_params": {"path": "docs/report.md", "check": "exists"}},
+                "semantic_check": {"input_params": {"criteria": "覆盖全部需求"}},
+            }
+        )
+        assert mod._EVALUATION_PROMPT_HEADER in msg
+        assert "file_check" in msg
+        assert "semantic_check" in msg
+        # 0.2 yaml 定义中的说明注入（与 task_evaluate 同源）
+        assert "文件" in msg
+        # 评估参数序列化注入
+        assert '"path": "docs/report.md"' in msg
+
+    def test_kickoff_metric_detail_fail_open_empty(self, mod: Any) -> None:
+        """无验收标准 / 定义加载失败 → 空串（fail-open，不阻断提交）。"""
+        assert mod._build_evaluation_criteria_prompt({}) == ""
+        assert mod._build_evaluation_criteria_prompt({"ghost_metric": {}}) == ""
+
+    def test_kickoff_workspace_guidance_explicit_worktree(self, mod: Any) -> None:
+        """显式 workspace + worktree：隔离副本提示 + 相对路径规则。"""
+        msg = mod._build_workspace_guidance(
+            {"workspace": {"source_path": "D:/proj/demo", "mode": "worktree", "explicit": True}}
+        )
+        assert "隔离副本" in msg
+        assert "自动合并回目标项目" in msg
+        assert "相对路径" in msg
+        assert "file_write(path=\"docs/report.md\")" in msg
+
+    def test_kickoff_workspace_guidance_explicit_plain(self, mod: Any) -> None:
+        """显式 workspace + plain：直接操作目标目录，无合并语义。"""
+        msg = mod._build_workspace_guidance(
+            {"workspace": {"source_path": "D:/proj/demo", "mode": "plain", "explicit": True}}
+        )
+        assert "直接在目标目录中执行任务" in msg
+        assert "合并" not in msg
+
+    def test_kickoff_workspace_guidance_default(self, mod: Any) -> None:
+        """无显式 workspace：默认隔离目录提示。"""
+        msg = mod._build_workspace_guidance(
+            {"workspace": {"source_path": "", "mode": "", "explicit": False}}
+        )
+        assert "隔离工作目录" in msg
+        assert "相对路径" in msg
+
+    def test_kickoff_workspace_guidance_missing_spec_empty(self, mod: Any) -> None:
+        """execution_context 无 workspace 声明 → 空串（不注入误导性提示）。"""
+        assert mod._build_workspace_guidance({}) == ""
+
+    def test_kickoff_includes_task_progress_method(self, mod: Any) -> None:
+        """待办工作法注入（0.1 同职移植）。"""
+        msg = mod._build_task_progress_method()
+        assert "进度跟踪工作法" in msg
+        assert "- [ ]" in msg
+        assert "task_evaluate" in msg
+
+    async def test_dispatch_message_contains_all_guidance(self, mod: Any) -> None:
+        """端到端：派发消息带评估详情/工作空间提示/路径规则/待办工作法。"""
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(
+                _base_inputs(
+                    goal={
+                        "title": "写报告",
+                        "description": "基于调研数据撰写报告 docs/report.md",
+                    },
+                    acceptance_criteria={
+                        "file_check": {"input_params": {"path": "docs/report.md", "check": "exists"}}
+                    },
+                    workspace="D:/proj/demo",
+                    workspace_mode="worktree",
+                )
+            )
+        finally:
+            mod._chat_sender = None
+        assert r.success, r.error
+        msg = sender.calls[0]["message"]
+        assert "执行任务「写报告」" in msg
+        assert "任务描述：基于调研数据撰写报告 docs/report.md" in msg
+        assert "验收标准：" in msg
+        # 增强段：评估详情 + 工作空间 + 路径规则 + 待办工作法
+        assert mod._EVALUATION_PROMPT_HEADER in msg
+        assert "隔离副本" in msg
+        assert "相对路径" in msg
+        assert "进度跟踪工作法" in msg

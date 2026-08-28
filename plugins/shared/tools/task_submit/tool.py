@@ -1,8 +1,9 @@
 """任务提交工具"""
 
+import inspect
+import json
 import logging
 import os
-import inspect
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -200,6 +201,34 @@ for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
     _DANGEROUS_DIRS.add(os.path.normpath(_d).lower())
 
 
+def _metrics_config_path() -> Path:
+    """评估指标配置路径（容器根 config/evaluation/evaluation_metrics.yaml）。
+
+    与 task_evaluate 同款读取；指标定义的唯一加载点（提交期校验与
+    派发指令详情展开共用）。
+    """
+    return Path(__file__).resolve().parents[4] / "config" / "evaluation" / "evaluation_metrics.yaml"
+
+
+def _load_metric_definitions() -> dict[str, dict[str, Any]]:
+    """加载指标定义表（name → 定义）；缺文件/坏格式 → 空表（fail-open）。"""
+    try:
+        import yaml  # noqa: PLC0415
+
+        data = yaml.safe_load(_metrics_config_path().read_text(encoding="utf-8")) or {}
+        return {
+            str(m["name"]): m
+            for m in data.get("metrics", []) or []
+            if isinstance(m, dict) and m.get("name")
+        }
+    except Exception as exc:
+        logger.warning(
+            "[TaskSubmit] 评估指标定义加载失败: %s",
+            exc,
+        )
+        return {}
+
+
 def _get_valid_metric_ids() -> set[str] | None:
     """获取所有合法的评估指标 ID 集合。
 
@@ -213,24 +242,9 @@ def _get_valid_metric_ids() -> set[str] | None:
         合法指标 ID 集合；加载失败时返回 None，表示跳过校验（fail-open，
         不阻断正常提交）。
     """
-    try:
-        import yaml  # noqa: PLC0415
-
-        project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
-        yaml_path = project_root / "config" / "evaluation" / "evaluation_metrics.yaml"
-        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-        metrics = data.get("metrics", []) if isinstance(data, dict) else []
-        valid = {
-            m["name"] for m in metrics if isinstance(m, dict) and m.get("name")
-        }
-        # 空集合视作加载失败（fail-open，不阻断正常提交）
-        return valid or None
-    except Exception as exc:
-        logger.warning(
-            "[TaskSubmit] 评估指标加载失败，跳过 metric_id 校验: %s",
-            exc,
-        )
-        return None
+    valid = set(_load_metric_definitions().keys())
+    # 空集合视作加载失败（fail-open，不阻断正常提交）
+    return valid or None
 
 
 def _validate_metric_ids(
@@ -319,6 +333,97 @@ def _normalize_description(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return "\n".join(str(item) for item in value)
     return str(value)
+
+
+# ── 派发指令构建（0.1 _build_full_task_input 的 0.2 移植）──
+#
+# 0.1 在 task_worker 侧把描述/验收标准/工作空间提示/路径规则/待办工作法
+# 拼成完整输入注入下级。0.2 提交即派发（chat.send_message create 分支），
+# 该职责落到 task_submit 派发消息。逐段对照：
+# - 描述：0.1「\n\n详细描述：」→ 0.2 派发消息「\n任务描述：」（保留现形）；
+# - 重试纠正信息：0.1 metadata.retry_message → 0.2 由 task_manage continue
+#   注入消息承载（无重复构建）；
+# - 评估指标详情 / 工作空间模式提示 / 路径使用规则 / 进度跟踪工作法：
+#   0.2 此前缺失，本次按 0.2 yaml/拓扑口径移植。
+
+_EVALUATION_PROMPT_HEADER = "评估指标详情（你的产出将被以下标准评估）："
+
+
+def _build_evaluation_criteria_prompt(acceptance_criteria: dict[str, Any]) -> str:
+    """按指标定义展开验收标准为可读的评估说明文本（0.1 同职移植）。
+
+    0.2 指标定义（evaluation_metrics.yaml）字段与 0.1 MetricLoader 模型不同：
+    只有 name/description/evaluator_type/input_schema，没有 expect/is_red_line
+    等判定字段——按 0.2 字段展开（说明 + 评估参数），判定逻辑归 task_evaluate。
+
+    Returns:
+        格式化后的评估指标说明文本；无验收标准/定义缺失/加载失败 → 空串。
+    """
+    if not acceptance_criteria or not isinstance(acceptance_criteria, dict):
+        return ""
+    definitions = _load_metric_definitions()
+    if not definitions:
+        return ""
+
+    parts: list[str] = []
+    for metric_id, config in acceptance_criteria.items():
+        definition = definitions.get(metric_id)
+        if not definition:
+            continue
+        lines: list[str] = []
+        lines.append(f"- {metric_id}：{definition.get('description') or '(无说明)'}")
+        if config and isinstance(config, dict):
+            input_params = config.get("input_params")
+            if input_params:
+                lines.append(f"  评估参数：{json.dumps(input_params, ensure_ascii=False)}")
+        parts.append("\n".join(lines))
+    if not parts:
+        return ""
+    return f"\n\n{_EVALUATION_PROMPT_HEADER}\n\n" + "\n".join(parts)
+
+
+def _build_workspace_guidance(ec: dict[str, Any]) -> str:
+    """按 execution_context 工作空间声明生成场景提示与路径规则（0.1 同职移植）。
+
+    - 显式 workspace：worktree=源项目隔离副本（改完自动合并回源）/ plain=直接
+      操作目标目录；0.1 的 shared 态（父任务空间）在 0.2 由子任务继承表达，
+      不单独提示；
+    - 无显式 workspace：任务在默认隔离目录执行（工作空间根/{task_id}）。
+    系统自动管理路径，下级只用相对路径。
+    """
+    ws_spec = ec.get("workspace") if isinstance(ec, dict) else None
+    if not isinstance(ws_spec, dict):
+        return ""
+    mode = ws_spec.get("mode") or "plain"
+    if ws_spec.get("explicit"):
+        scene = (
+            "你在目标项目的隔离副本中执行任务。使用相对路径，修改不影响原始项目；"
+            "可运行 pytest/mypy/lint。评估通过后系统自动合并回目标项目"
+            if mode == "worktree"
+            else "你直接在目标目录中执行任务。使用相对路径。"
+        )
+    else:
+        scene = "你在任务专属的隔离工作目录中执行任务。使用相对路径。"
+    return (
+        f"\n\n工作空间模式提示：{scene}"
+        "\n\n路径使用规则（重要）："
+        "\n- 所有文件操作使用相对路径即可，系统会自动锚定到工作目录"
+        '\n- 示例：file_write(path="docs/report.md")'
+    )
+
+
+def _build_task_progress_method() -> str:
+    """待办工作法提示（0.1 同职移植）：把执行过程展开成可见待办清单推进。"""
+    return (
+        "\n\n进度跟踪工作法（把你的执行过程展开成可见的待办，方便跟进）："
+        "\n1. 把你 system_prompt 执行流程的每一步，按顺序展开成 `- [ ]` 待办清单"
+        "\n2. 按该顺序推进，每完成一步标记 `- [x] ✅`"
+        "\n3. 全部完成后调用 task_evaluate 提交评估"
+        "\n说明：本条只规定「用待办清单推进」这一形式。任务描述里的具体要求"
+        "（如约束、产出路径、评估标准）是你的硬指标，"
+        "system_prompt 里的专业流程（如先加载技能、TDD 循环）是你的必经步骤，"
+        "二者都不得因本待办工作法而跳过或简化。"
+    )
 
 
 # 任务提交工具的 OpenAI Function Calling schema 字面量（纯声明数据，
@@ -1424,6 +1529,10 @@ class TaskSubmitTool(BuiltinTool):
             kickoff += f"\n任务描述：{description}"
         if acceptance_criteria:
             kickoff += f"\n验收标准：{acceptance_criteria}"
+        execution_context = self._build_execution_context(inputs)
+        kickoff += _build_evaluation_criteria_prompt(acceptance_criteria)
+        kickoff += _build_workspace_guidance(execution_context)
+        kickoff += _build_task_progress_method()
 
         params: dict[str, Any] = {
             "create": True,
@@ -1449,7 +1558,6 @@ class TaskSubmitTool(BuiltinTool):
         # （人格/tool_ids）——内核 chat_send_handler 创建分支消费。缺失回退主 agent。
         if agent_id:
             params["agent_id"] = agent_id
-        execution_context = self._build_execution_context(inputs)
         if execution_context:
             params["execution_context"] = execution_context
 
