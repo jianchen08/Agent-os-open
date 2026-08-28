@@ -29,6 +29,7 @@ _PLUGIN_PATHS = tuple(
         _HERE,
         _PROJECT_ROOT / "plugins" / "shared" / "system" / "tasks",
         _PROJECT_ROOT / "plugins" / "shared" / "system",
+        _PROJECT_ROOT / "plugins" / "shared",
     )
 )
 for _d in _PLUGIN_PATHS:

@@ -29,6 +29,8 @@ import sys
 import time
 from typing import Any
 
+import state_fields  # noqa: PLC0415 — plugins/shared 平铺模块（裸名导入先例 tenant_data）
+
 from enum_utils import safe_enum_value
 from pydantic import BaseModel, Field
 from service_access import get_task_service
@@ -662,8 +664,9 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
                     # 任务树据此把子任务挂到容器节点下）
                     "parent_project_id": str(row.get("task.parent_project_id") or "") or None,
                     # 工作空间坐标（任务面板"打开工作空间"按钮数据源；
-                    # workspace_lifecycle init 写入 + persistent_fields 落表）
-                    "ws_meta": row.get("ws_meta") or None,
+                    # workspace_lifecycle init 写入 + persistent_fields 落表）。
+                    # as_dict 兼容跨边界 JSON 字符串形态（state_fields 契约）。
+                    "ws_meta": state_fields.as_dict(row.get("ws_meta"), field="ws_meta"),
                     "workspace": str(row.get("workspace") or "") or None,
                 },
                 "created_at": str(row.get("task.created_at") or ""),

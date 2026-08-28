@@ -19,12 +19,12 @@
 
 import asyncio
 import contextlib
-import json
 import logging
 import types
 from datetime import UTC, datetime
 from typing import Any
 
+import state_fields
 from _eval_core import sanitize_eval_paths
 from task_types import TaskStatus
 
@@ -1091,13 +1091,8 @@ class TaskEvaluateTool(BuiltinTool):
         )
         if row is None:
             return
-        ac = row.get("task.acceptance_criteria")
-        if isinstance(ac, str):
-            try:
-                ac = json.loads(ac)
-            except (ValueError, TypeError):
-                ac = None
-        if isinstance(ac, dict) and ac:
+        ac = state_fields.as_dict(row.get("task.acceptance_criteria"), field="task.acceptance_criteria")
+        if ac:
             task.metadata = dict(task.metadata or {})
             task.metadata["acceptance_criteria"] = ac
 
@@ -1123,14 +1118,8 @@ class TaskEvaluateTool(BuiltinTool):
         except (ValueError, AttributeError):
             status = TaskStatus.PENDING
         metadata: dict[str, Any] = {}
-        ac = row.get("task.acceptance_criteria")
-        if isinstance(ac, str):
-            # 聚合行值可能是 JSON 字符串（DB 投影原样存储），还原成 dict
-            try:
-                ac = json.loads(ac)
-            except (ValueError, TypeError):
-                ac = None
-        if isinstance(ac, dict):
+        ac = state_fields.as_dict(row.get("task.acceptance_criteria"), field="task.acceptance_criteria")
+        if ac:
             metadata["acceptance_criteria"] = ac
         eval_res = row.get("task.evaluation")
         if isinstance(eval_res, dict):

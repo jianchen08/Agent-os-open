@@ -32,6 +32,8 @@ from agentos_plugin_sdk import (
 if TYPE_CHECKING:
     from service import TaskService
 
+import state_fields  # noqa: PLC0415 — plugins/shared 平铺模块
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,8 +84,11 @@ def _append_workspace_meta(metadata: dict[str, Any], row: dict[str, Any]) -> Non
     """把聚合行的 workspace / ws_meta 原样并入任务元数据（原地追加，缺省跳过）。"""
     if row.get("workspace"):
         metadata["workspace"] = str(row["workspace"])
-    if isinstance(row.get("ws_meta"), dict):
-        metadata["ws_meta"] = row["ws_meta"]
+    # as_dict 兼容跨边界 JSON 字符串形态（state_fields 契约）——只 isinstance(dict)
+    # 会让字符串形态静默丢失（前端"打开工作空间"按钮失效）。
+    ws_meta = state_fields.as_dict(row.get("ws_meta"), field="ws_meta")
+    if ws_meta:
+        metadata["ws_meta"] = ws_meta
 
 
 def _is_task_pipeline_row(row: dict[str, Any]) -> bool:

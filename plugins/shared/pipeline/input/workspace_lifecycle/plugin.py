@@ -9,7 +9,8 @@
   上下文（state["task.id"]，== pipeline_id 的任务身份权威键）时调
   `on_task_start` 真实创建空间（worktree/plain）；
   主会话（无任务）直接解析 source_path 写 state。结果写入
-  `state.workspace` / `project_root` / `ws_meta`。幂等：state 已有 workspace
+  `state.workspace` / `ws_meta`（project_root 不由本插件写——其语义是
+  实际项目目录，不是工作区路径）。幂等：state 已有 workspace
   则跳过。服务不可用时降级为纯解析（不阻断管道）。
 - **exit（finalize）**：有任务且 ws_meta.mode=worktree 时调
   `merge_worktree_before_complete` 合并回源空间；否则 no-op。失败留痕不阻断。
@@ -18,20 +19,20 @@
 environment_lifecycle / isolation_guard 决策。
 
 State 命名空间：
-    - workspace / project_root / ws_meta：init 阶段写入
+    - workspace / ws_meta：init 阶段写入
     - workspace_finalized：exit 阶段写入
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import state_fields
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)
@@ -131,14 +132,9 @@ class _ExecutionContextTaskTree:
         parent_id = str(row.get("lineage.parent_pipeline_id") or "")
         # metadata["ws_meta"]：服务端 restore_ws_meta 从 task.metadata 恢复父
         # 链工作空间坐标——聚合行直接带扁平 ws_meta（state 单一真值，YAML 只读
-        # 镜像无 metadata 可读），跨进程父子任务据此共享工作空间。聚合行值是
-        # JSON 字符串，服务端按 dict 消费，须还原成 dict。
-        _ws_meta = row.get("ws_meta")
-        if isinstance(_ws_meta, str):
-            try:
-                _ws_meta = json.loads(_ws_meta)
-            except (ValueError, TypeError):
-                _ws_meta = None
+        # 镜像无 metadata 可读），跨进程父子任务据此共享工作空间。
+        # as_dict 兼容跨边界 JSON 字符串形态（契约见 state_fields 模块 docstring）。
+        _ws_meta = state_fields.as_dict(row.get("ws_meta"), field="ws_meta")
         return SimpleNamespace(
             id=task_id,
             parent_task_id=parent_id or None,
@@ -244,7 +240,7 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             for k in (
                 "task_id", "task.id", "pipeline_id",
                 "execution_context", "execution_context.workspace",
-                "workspace", "project_root",
+                "workspace",
             )
             if state.get(k) is not None
         }
@@ -297,14 +293,16 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                 _session_key,
                 _ws_root,
             )
+            # project_root 不写：它语义 = 实际项目目录（提示词 {{project_root}}
+            # 与配置注入基准），工作区路径由 workspace 键独立承载（param_inject
+            # 工具锚点只认 workspace）；主会话 state 留空该键，防会话目录
+            # 伪装成项目目录污染下游（fs 锚点/提示词语义）。
             return PluginResult(
                 state_updates={
                     "workspace": _ws_root,
-                    "project_root": _ws_root,
                     "ws_meta": {
                         "mode": "plain",
                         "path": _ws_root,
-                        "project_root": _ws_root,
                         "session_id": _session_key,
                     },
                 }
@@ -379,7 +377,6 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                 if isinstance(ws_meta, dict) and ws_meta.get("path"):
                     updates = {
                         "workspace": ws_meta["path"],
-                        "project_root": ws_meta.get("project_root") or ws_meta["path"],
                         "ws_meta": ws_meta,
                     }
                     logger.info(
@@ -422,13 +419,13 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                         _exc,
                     )
             _effective_mode = "plain"
+        # project_root 不写（语义 = 实际项目目录，见主会话分支注释）：
+        # 任务工作区路径由 workspace/ws_meta.path 独立承载。
         updates = {
             "workspace": _effective_path,
-            "project_root": _effective_path,
             "ws_meta": {
                 "mode": _effective_mode,
                 "path": _effective_path,
-                "project_root": _effective_path,
             },
         }
         logger.info(
@@ -447,7 +444,7 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         其余（plain/主会话）no-op。失败留痕不阻断（收尾类操作不得让 run 翻车）。
         """
         state = ctx.state
-        ws_meta = state.get("ws_meta") if isinstance(state.get("ws_meta"), dict) else {}
+        ws_meta = state_fields.optional_dict(state.get("ws_meta"), field="ws_meta")
         if ws_meta.get("mode") != "worktree":
             return PluginResult()
         task_id = state.get("task.id") or ""

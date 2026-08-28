@@ -22,8 +22,9 @@ _HERE = Path(__file__).resolve().parent
 _PROJECT_ROOT = _HERE.parent.parent.parent.parent
 _TASKS_DIR = _PROJECT_ROOT / "plugins" / "shared" / "system" / "tasks"
 _SYSTEM_DIR = _PROJECT_ROOT / "plugins" / "shared" / "system"
+_SHARED_ROOT = _PROJECT_ROOT / "plugins" / "shared"
 # 与 server.py 自身 sys.path 注入一致（tasks 平铺目录 + system/）。
-for _d in (str(_HERE), str(_TASKS_DIR), str(_SYSTEM_DIR)):
+for _d in (str(_HERE), str(_TASKS_DIR), str(_SYSTEM_DIR), str(_SHARED_ROOT)):
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
