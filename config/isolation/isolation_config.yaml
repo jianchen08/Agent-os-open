@@ -2,6 +2,9 @@ workspace:
   # 工作空间基目录（所有 worktree/container/plain 工作区的父目录）。
   # 相对路径相对项目根解析（隔离插件 get_workspace_base_dir 的代码缺省即
   # ".ai_workspaces"）；绝对路径原样使用。禁止把开发者本机绝对路径入库。
+  # ⚠ root 指到仓库内其他位置时必须同步补 .gitignore（当前 ignore 只覆盖
+  # ".ai_workspaces/"）——工作区被 git 追踪会把所有 agent 执行区拉进版本库。
+  # 主会话工作区 = {本根}/sessions/{session_id}（workspace_lifecycle 写入）。
   root: .ai_workspaces
   nesting_mode: shared
   large_file_threshold_mb: 50
