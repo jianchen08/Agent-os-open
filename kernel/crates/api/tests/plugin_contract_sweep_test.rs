@@ -262,9 +262,12 @@ fn all_plugin_contracts_are_executor_consumable() {
     // 剩余未补 = 死工具（media/download 等，等接线裁决后再补）。
     // 挂账债收口：schema 按各工具成功分支返回形状 AUTHOR（多态分支只锁共有键，
     // 条件键声明不强锁），fail-closed 校验见 tool_core output_validate。
+    // tools_output 棘轮重定（2026-08-27 清理批2）：output_repetition_guard/
+    // tool_call_guard/stream_repeat_monitor 三件合并进 duplicate_check，
+    // 重复检测工具面收敛 → 31→30。
     assert!(
-        tools_output >= 31,
-        "带 output_schema 的工具数退化: {tools_output} < 31（批5 活工具补齐基线）"
+        tools_output >= 30,
+        "带 output_schema 的工具数退化: {tools_output} < 30（批5 基线 + 清理批2 重定）"
     );
 
     eprintln!(

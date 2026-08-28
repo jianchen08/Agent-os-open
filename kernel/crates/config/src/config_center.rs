@@ -1267,7 +1267,7 @@ mod tests {
         // 合法 yaml 写入 → 成功审计（config_type 按目录判定）
         std::fs::write(temp.path().join("agents/hello.yaml"), "k: v\n").unwrap();
         wait_until(
-            || center.get_audit_log(10).len() >= 1,
+            || !center.get_audit_log(10).is_empty(),
             Duration::from_secs(5),
         );
         let log = center.get_audit_log(10);
@@ -1319,7 +1319,7 @@ mod tests {
         let (ok, _, _) = center.reload(&file.to_string_lossy());
         assert!(ok);
         wait_until(
-            || center.get_audit_log(10).len() >= 1,
+            || !center.get_audit_log(10).is_empty(),
             Duration::from_secs(5),
         );
 
