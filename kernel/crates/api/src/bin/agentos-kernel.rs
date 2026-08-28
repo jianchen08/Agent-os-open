@@ -766,7 +766,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let enabled_for_domain = enabled_plugin_ids.clone();
         let manifests_for_domain = manifests_shared.clone();
         Arc::new(
-            move |event_name: &str, tags: Vec<(&str, serde_json::Value)>| {
+            move |event_name: &str, tags: Vec<(String, serde_json::Value)>| {
                 let inv = inv_for_domain.clone();
                 let enabled = enabled_for_domain.clone();
                 let manifests = manifests_for_domain.clone();

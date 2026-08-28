@@ -1,0 +1,141 @@
+"""task_service 任务域事件派生测试（ADR 2026-08-28 事件下沉）。
+
+断行为不断实现：derive 纯函数断 输入 state 行 → 派生事件与标签；
+handle 断 能力调用 → emit_domain 载荷。覆盖评估未通过不派生、
+task.owned 登记键不误判、bus 失败不中断等契约。
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import events
+
+
+def _task_row(status: str = "completed", **extra) -> dict:
+    row = {
+        "pipeline_id": "pipe_t1",
+        "thread_id": "thread-1",
+        "task.id": "pipe_t1",
+        "task.goal": "写周报",
+        "task.status": status,
+        "lineage.parent_pipeline_id": "pipe_parent",
+        "task.submitted_by": "admin",
+    }
+    row.update(extra)
+    return row
+
+
+def _names(result):
+    return [name for name, _ in result]
+
+
+def test_completed_status_derives_task_completed_with_tags():
+    (name, tags) = events.derive_task_terminal_events("run.completed", _task_row())[0]
+    assert name == "task_completed"
+    assert tags["pipeline_id"] == "pipe_t1"
+    assert tags["task_id"] == "pipe_t1"
+    # 子任务通知锚点：parent/user_id 从血缘/提交人扁平键带出
+    assert tags["parent_pipeline_id"] == "pipe_parent"
+    assert tags["user_id"] == "admin"
+
+
+def test_unevaluated_statuses_derive_nothing():
+    # 完成唯一判据 = 评估通过：pending/pending_evaluation/running/缺失 一律不派生
+    for status in ["pending", "running", "pending_evaluation", ""]:
+        out = events.derive_task_terminal_events("run.completed", _task_row(status))
+        assert out == [], f"task.status={status!r} 不得派生"
+
+
+def test_failed_run_derives_task_failed_regardless_of_status():
+    for status in ["running", "completed", "pending"]:
+        out = events.derive_task_terminal_events("run.failed", _task_row(status))
+        assert _names(out) == ["task_failed"]
+
+
+def test_run_suspended_and_other_events_never_derive():
+    # 挂起不是任务终态；非 run.* 终态事件一律不派生
+    for ev in ["run.suspended", "run.cancelled", "run.started", "session.created"]:
+        assert events.derive_task_terminal_events(ev, _task_row()) == []
+
+
+def test_owned_only_state_is_not_a_task_pipeline():
+    # 幽灵任务防护：仅登记过子任务的聊天主管道（只有 task.owned.*）不得派生
+    row = {"pipeline_id": "chat_main", "task.owned.child1.title": "子任务"}
+    assert events.derive_task_terminal_events("run.completed", row) == []
+    # 反向性质：真任务行（混有 owned 登记键）仍派生
+    mixed = _task_row()
+    mixed["task.owned.child1.title"] = "子任务"
+    assert _names(events.derive_task_terminal_events("run.completed", mixed)) == [
+        "task_completed"
+    ]
+
+
+def test_non_dict_row_and_non_task_row_derive_nothing():
+    assert events.derive_task_terminal_events("run.completed", None) == []
+    assert events.derive_task_terminal_events("run.completed", {"pipeline_id": "p"}) == []
+
+
+class _FakeStateCap:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def call(self, method, params):
+        assert method == "list"
+        return self._rows
+
+
+class _FakeBusCap:
+    def __init__(self, fail_on=None):
+        self.calls = []
+        self._fail_on = fail_on or set()
+
+    async def call(self, method, params):
+        self.calls.append((method, params))
+        if params.get("event") in self._fail_on:
+            raise RuntimeError("bus down")
+        return {"status": "emitted"}
+
+
+def test_handle_emits_derived_events_via_bus():
+    rows = [_task_row("completed"), {"pipeline_id": "other"}]
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed", {"pipeline_id": "pipe_t1"}, _FakeStateCap(rows), bus
+        )
+    )
+    assert emitted == 1
+    assert bus.calls[0][0] == "emit_domain"
+    assert bus.calls[0][1]["event"] == "task_completed"
+    assert bus.calls[0][1]["tags"]["task_id"] == "pipe_t1"
+
+
+def test_handle_row_not_found_or_missing_pipeline_emits_nothing():
+    bus = _FakeBusCap()
+    assert (
+        asyncio.run(
+            events.handle_run_terminal_event(
+                "run.completed", {"pipeline_id": "ghost"}, _FakeStateCap([_task_row()]), bus
+            )
+        )
+        == 0
+    )
+    assert (
+        asyncio.run(
+            events.handle_run_terminal_event("run.completed", {}, _FakeStateCap([]), bus)
+        )
+        == 0
+    )
+    assert bus.calls == []
+
+
+def test_handle_bus_failure_does_not_raise():
+    rows = [_task_row("failed")]
+    bus = _FakeBusCap(fail_on={"task_failed"})
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.failed", {"pipeline_id": "pipe_t1"}, _FakeStateCap(rows), bus
+        )
+    )
+    assert emitted == 0, "发射失败计 0（异常已留日志）"

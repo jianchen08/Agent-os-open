@@ -1040,9 +1040,12 @@ impl PipelineDispatcher for EngineDispatcher {
             &self.state,
             "session.active_changed",
             vec![
-                ("session_id", serde_json::json!(thread_id)),
-                ("pipeline_id", serde_json::json!(route_id.as_str())),
-                ("user_id", serde_json::json!(user_id)),
+                ("session_id".to_string(), serde_json::json!(thread_id)),
+                (
+                    "pipeline_id".to_string(),
+                    serde_json::json!(route_id.as_str()),
+                ),
+                ("user_id".to_string(), serde_json::json!(user_id)),
             ],
         )
         .await;

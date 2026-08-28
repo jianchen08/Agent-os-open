@@ -11,7 +11,8 @@
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load",
-      "on_unload"
+      "on_unload",
+      "domain_event"
     ],
     "services": [
       {
@@ -220,7 +221,8 @@
   "granted_capabilities": [
     "chat",
     "pipeline-state",
-    "pipeline-executor"
+    "pipeline-executor",
+    "event-bus"
   ],
   "http_endpoints": [
     {

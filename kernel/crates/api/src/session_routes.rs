@@ -291,8 +291,8 @@ pub async fn create_session_handler(
         &state,
         "session.created",
         vec![
-            ("session_id", json!(thread_id.as_str())),
-            ("pipeline_id", json!(pipeline_id.as_str())),
+            ("session_id".to_string(), json!(thread_id.as_str())),
+            ("pipeline_id".to_string(), json!(pipeline_id.as_str())),
         ],
     )
     .await;
@@ -497,7 +497,7 @@ pub async fn delete_session_handler(
     crate::plugin_lifecycle::broadcast_domain_event(
         &state,
         "session.deleted",
-        vec![("session_id", json!(id.as_str()))],
+        vec![("session_id".to_string(), json!(id.as_str()))],
     )
     .await;
 

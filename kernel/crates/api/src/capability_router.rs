@@ -91,8 +91,7 @@ pub use crate::routes::ExportFields;
 /// 域事件广播闭包：(event_name, tags) → 点对点投递给声明 domain_event 的
 /// 启用插件（组件版 broadcast_domain_event_from；观察总线由调用方决定）。
 /// tags 键为静态字符串（调用处全部为字面量）。
-pub type DomainBroadcaster =
-    Arc<dyn Fn(&str, Vec<(&'static str, serde_json::Value)>) + Send + Sync>;
+pub type DomainBroadcaster = Arc<dyn Fn(&str, Vec<(String, serde_json::Value)>) + Send + Sync>;
 
 /// 流式声明查询闭包：(plugin_id) → 该插件的 capabilities.streaming 声明
 /// （None = 未声明 → 网关拒绝其流式事件）。
@@ -337,6 +336,10 @@ impl CapabilityRouter for KernelCapabilityRouter {
             // sidecar（如 llm_core）每生成一个 chunk 就 notify 一次 event-bus.emit，
             // 内核收到后调 session.emit_event 把 chunk 推到前端 WS。 ──
             ("event-bus", "emit") => self.handle_event_bus_emit(params).await,
+            // 域事件发射（ADR 2026-08-28 事件下沉底座）：插件向域事件总线发
+            // 事件（观察总线 + domain_event 订阅插件点对点）。G6 信封闸（granted
+            // 含 "event-bus"）由 handle() 单点覆盖。
+            ("event-bus", "emit_domain") => self.handle_event_bus_emit_domain(params).await,
 
             // ── frontend.emit：插件 → 内核 → 前端一次性事件出口（ADR §3.5）。
             // 承载低频观测/进度事件（cost_update/tool_progress/termination_status）；
@@ -744,6 +747,42 @@ impl KernelCapabilityRouter {
         self.forward_unmatched_event(event_name, &payload).await
     }
 
+    /// event-bus.emit_domain：插件向域事件总线发事件。投递双腿：观察总线 +
+    /// 声明 domain_event hook 的启用插件点对点（broadcast_domain_event_from）。
+    /// 域事件本就不达前端 WS（前端走 stream_* 协议与 event-bus.emit），此处
+    /// 不做 WS 单播。domain_broadcaster 未装配 = 显式错误（fail-closed，
+    /// 测试装配点须显式声明无广播）。
+    async fn handle_event_bus_emit_domain(&self, params: Value) -> Result<Value, McpError> {
+        let event_name = params
+            .get("event")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if event_name.is_empty() {
+            return Err(McpError::Protocol {
+                message: "event-bus.emit_domain 缺 event 参数".to_string(),
+            });
+        }
+        let empty = serde_json::Map::new();
+        let tags_obj = params
+            .get("tags")
+            .and_then(|v| v.as_object())
+            .unwrap_or(&empty);
+        let tags: Vec<(String, Value)> = tags_obj
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        match &self.domain_broadcaster {
+            Some(broadcast) => broadcast(&event_name, tags),
+            None => {
+                return Err(McpError::Protocol {
+                    message: "event-bus.emit_domain 不可用：domain_broadcaster 未装配".to_string(),
+                })
+            }
+        }
+        Ok(json!({"status": "emitted", "event": event_name}))
+    }
+
     /// 流式契约网关（ADR 2026-08-22，streaming.json 单一真值源）：契约事件统一
     /// 执法——schema + message_id 命名空间 + thread_id 投递键。fail-closed：
     /// 非法即丢弃 + 告警（返回 Some(dropped)——插件发射侧拿到 dropped 状态而非
@@ -1105,7 +1144,7 @@ impl KernelCapabilityRouter {
                 // tag 提取同 derive_run_terminal_events 的 v() 法：字段缺失以 Null 占位。
                 let tag = |k: &'static str| {
                     (
-                        k,
+                        k.to_string(),
                         payload.get(k).cloned().unwrap_or(serde_json::Value::Null),
                     )
                 };

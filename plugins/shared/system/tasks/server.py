@@ -26,6 +26,8 @@ from task_types import TaskStatus  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
+import events as task_events  # noqa: E402,PLC0415
+
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("task_service")
 
@@ -37,6 +39,25 @@ def _get_service() -> TaskService:
     if _service is None:
         raise RuntimeError("TaskService not initialized. Was on_load called?")
     return _service
+
+
+@plugin.on_domain_event
+async def _on_domain_event(params: dict) -> None:
+    """任务域事件派生入口：订阅 run 终态，派生 task_completed/task_failed。
+
+    判定与发射语义见 events.py（ADR 2026-08-28 事件下沉——任务域裁决词汇
+    归本插件，内核只发 run.*）。
+    """
+    event_name = str(params.get("event") or "")
+    if event_name not in ("run.completed", "run.failed"):
+        return
+    try:
+        state_cap = plugin.get_capability("pipeline-state")
+        bus_cap = plugin.get_capability("event-bus")
+    except (KeyError, AttributeError):
+        logger.warning("[task_service] 能力句柄缺席，跳过任务域事件派生")
+        return
+    await task_events.handle_run_terminal_event(event_name, params, state_cap, bus_cap)
 
 
 @plugin.on_load

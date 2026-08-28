@@ -852,71 +852,34 @@ async fn process_via_engine_inner(
 
 /// GAP-2：从 run 终态 state 派生域事件（run.* 终态 + 任务域派生）。
 ///
-/// - `failed=true` → `run.failed`（state 带 `task.*` 字段时追加 `task_failed`）
-/// - `suspended` 标志（RouteNext::Wait 落档）→ `run.suspended`（等待人工交互，
-///   无任务派生——收口把关是 child_task_guard 的结构性职责）
-/// - `router.stop_reason=user_requested` → `run.cancelled`（用户主动停止，
-///   无任务派生——停止不是任务终态，不通知上级）
-/// - 否则 → `run.completed`（state 带 `task.*` 字段**且 task.status=completed**
-///   时才追加 `task_completed`）
+/// run 终态域事件派生（内核运行域）：仅运行生命周期事件——
+/// - `failed=true` → `run.failed`
+/// - `suspended` 标志（RouteNext::Wait 落档）→ `run.suspended`
+/// - `router.stop_reason=user_requested` → `run.cancelled`（用户主动停止）
+/// - 否则 → `run.completed`
 ///
-/// 任务派生判据：state 存在 `task.` 前缀键（task = pipeline 单一真值，
-/// 任务管道的 state 出生即带 task.* 字段；`task.owned.*` 是父管道登记子任务的
-/// 扁平键，不算任务管道自身标记——仅登记过子任务的聊天管道不得派生任务事件）。
-/// **完成唯一判据 = task_evaluate 评估通过落 `task.status=completed`**——评估
-/// 未通过（pending/pending_evaluation/running）时任务管道 run 结束只发
-/// `run.completed`，不派生 task_completed（杜绝"跑完就假完成通知上级"）。
-/// 事件经 [`broadcast_domain_event`] 双通道投递：观察总线 + 点对点推给声明
-/// domain_event hook 的订阅插件（triggers_ext → evaluate_event——EVENT 触发器
-/// 的输入源）。
-///
-/// 子任务通知（GAP-1）：task_completed/task_failed 事件额外携带
-/// `parent_pipeline_id` 标签（state 的 `lineage.parent_pipeline_id` 扁平键，
-/// 无父/根形式时为空串）——triggers_ext 据此把子任务完成通知注入父管道，
-/// 兑现 task_submit "子任务完成后自动通知上级"的承诺（等效自动注册的触发器，
-/// 注册逻辑收敛在统一触发服务，任务系统零触发代码）。
+/// 任务域事件（task_completed/task_failed）由 task_service 插件订阅本组
+/// run.* 事件后按任务域语义派生（ADR 2026-08-28 事件下沉：裁决词汇
+/// task.status 值与 task.* 键面归插件，内核零知识）。
 fn derive_run_terminal_events(
     final_state: &serde_json::Value,
     failed: bool,
-) -> Vec<(&'static str, Vec<(&'static str, serde_json::Value)>)> {
-    let v = |k: &str| {
-        final_state
-            .get(k)
-            .cloned()
-            .unwrap_or(serde_json::Value::Null)
-    };
-    let pipeline_id = v("pipeline_id");
-    let thread_id = v("session_id");
-    let has_task = has_task_marker(final_state);
-    let task_id = v("task.id");
-    // 评估裁决的任务终态（task_evaluate 经 pipeline-state 落 task.status）
-    let task_status = v("task.status").as_str().unwrap_or("").to_string();
-    // 子任务通知锚点：lineage.parent_pipeline_id 扁平键（有父形式出生写入）
-    let parent_pipeline_id = v("lineage.parent_pipeline_id");
-    // 子任务完成通知注入 chat.send_message 需要 user_id：task_submit 创建子任务
-    // 时把提交者写进初始 state（task.submitted_by），随 final_state 带出给
-    // triggers_ext 注入器——否则注入器传空串被内核拒绝（-32603 缺少 user_id）。
-    let task_user_id = v("task.submitted_by");
-
-    let mut events: Vec<(&'static str, Vec<(&'static str, serde_json::Value)>)> = Vec::new();
+) -> Vec<(&'static str, Vec<(String, serde_json::Value)>)> {
+    let pipeline_id = final_state
+        .get("pipeline_id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let thread_id = final_state
+        .get("session_id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let run_tags = vec![
-        ("pipeline_id", pipeline_id.clone()),
-        ("thread_id", thread_id.clone()),
+        ("pipeline_id".to_string(), pipeline_id),
+        ("thread_id".to_string(), thread_id),
     ];
+    let mut events: Vec<(&'static str, Vec<(String, serde_json::Value)>)> = Vec::new();
     if failed {
         events.push(("run.failed", run_tags));
-        if has_task {
-            events.push((
-                "task_failed",
-                vec![
-                    ("pipeline_id", pipeline_id),
-                    ("thread_id", thread_id),
-                    ("task_id", task_id),
-                    ("parent_pipeline_id", parent_pipeline_id),
-                    ("user_id", task_user_id),
-                ],
-            ));
-        }
         return events;
     }
     let suspended = final_state
@@ -936,31 +899,6 @@ fn derive_run_terminal_events(
         return events;
     }
     events.push(("run.completed", run_tags));
-    if has_task && task_status == "completed" {
-        events.push((
-            "task_completed",
-            vec![
-                ("pipeline_id", pipeline_id),
-                ("thread_id", thread_id),
-                ("task_id", task_id),
-                ("parent_pipeline_id", parent_pipeline_id),
-                ("user_id", task_user_id),
-            ],
-        ));
-    } else if has_task && task_status == "failed" {
-        // 评估裁决失败（task_evaluate 落 failed / stop_check 超线落 failed）：
-        // run 本身正常结束，任务域终态 = 失败，照常通知上级。
-        events.push((
-            "task_failed",
-            vec![
-                ("pipeline_id", pipeline_id),
-                ("thread_id", thread_id),
-                ("task_id", task_id),
-                ("parent_pipeline_id", parent_pipeline_id),
-                ("user_id", task_user_id),
-            ],
-        ));
-    }
     events
 }
 
@@ -973,23 +911,6 @@ async fn emit_run_terminal_domain_events(
     for (name, tags) in derive_run_terminal_events(terminal_state, failed) {
         crate::plugin_lifecycle::broadcast_domain_event(state, name, tags).await;
     }
-}
-
-/// 判定一份 state 是否属于任务管道（task = pipeline state 单一真值）。
-///
-/// 口径与插件侧聚合 `_list_tasks_from_state` 第一趟一致：含 `task.` 前缀键
-/// 且**不含** `task.owned.` 前缀键。`task.owned.*` 是父管道登记子任务的扁平键
-/// （任务声明在子管道自己的 `task.*` 上），仅登记过子任务的聊天主管道不得被
-/// 误判为任务管道——否则 run 终态会被回写 `task.status`/`task.ended_at`，
-/// 在任务聚合出口变成无标题无 task.id 的幽灵任务行。
-fn has_task_marker(state: &serde_json::Value) -> bool {
-    state
-        .as_object()
-        .map(|o| {
-            o.keys()
-                .any(|k| k.starts_with("task.") && !k.starts_with("task.owned."))
-        })
-        .unwrap_or(false)
 }
 
 /// 前置依赖缺失时的 echo 降级应答（invoker/store/project_root 任一缺席）。
@@ -1520,16 +1441,16 @@ async fn stage_execute(
         state,
         "run.started",
         vec![
-            ("run_id", serde_json::json!(run_id)),
+            ("run_id".to_string(), serde_json::json!(run_id)),
             (
-                "pipeline_id",
+                "pipeline_id".to_string(),
                 initial_state
                     .get("pipeline_id")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null),
             ),
             (
-                "thread_id",
+                "thread_id".to_string(),
                 initial_state
                     .get("session_id")
                     .cloned()

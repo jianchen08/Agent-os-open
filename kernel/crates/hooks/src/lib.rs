@@ -76,11 +76,11 @@ pub fn global() -> Option<std::sync::Arc<HookEventBus>> {
 
 /// 构造域事件（hook = [`LifecycleHook::DomainEvent`]）：
 /// 事件名放 `ctx["event"]`，附任意标签（session_id/pipeline_id/user_id 等）。
-pub fn domain_event(name: &str, tags: Vec<(&str, serde_json::Value)>) -> LifecycleEvent {
+pub fn domain_event(name: &str, tags: Vec<(String, serde_json::Value)>) -> LifecycleEvent {
     let mut ctx = HookContext::new();
     ctx.set("event", serde_json::json!(name));
     for (key, value) in tags {
-        ctx.set(key, value);
+        ctx.set(key.as_str(), value);
     }
     LifecycleEvent {
         hook: LifecycleHook::DomainEvent,

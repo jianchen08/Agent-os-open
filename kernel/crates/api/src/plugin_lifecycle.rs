@@ -167,7 +167,7 @@ pub fn reenable_plugin_capabilities(
 pub async fn broadcast_domain_event(
     state: &crate::routes::AppState,
     name: &str,
-    tags: Vec<(&str, serde_json::Value)>,
+    tags: Vec<(String, serde_json::Value)>,
 ) {
     let Some(invoker) = state.invoker.clone() else {
         return;
@@ -185,7 +185,7 @@ pub async fn broadcast_domain_event_from(
     enabled: &tokio::sync::RwLock<std::collections::HashSet<String>>,
     manifests: &tokio::sync::RwLock<Vec<agentos_core::traits::PluginManifest>>,
     name: &str,
-    tags: Vec<(&str, serde_json::Value)>,
+    tags: Vec<(String, serde_json::Value)>,
 ) {
     if let Some(bus) = agentos_hooks::global() {
         bus.emit(agentos_hooks::domain_event(name, tags.clone()));
@@ -206,7 +206,7 @@ pub async fn broadcast_domain_event_from(
         let mut ctx = agentos_core::traits::HookContext::new();
         ctx.set("event", serde_json::json!(name));
         for (key, value) in tags.clone() {
-            ctx.set(key, value);
+            ctx.set(key.as_str(), value);
         }
         let plugin_id = manifest.id.clone();
         let event_name = name.to_string();
@@ -348,7 +348,10 @@ mod domain_event_tests {
         broadcast_domain_event(
             &state,
             "session.created",
-            vec![("session_id", json!("t1")), ("pipeline_id", json!("pipe1"))],
+            vec![
+                ("session_id".to_string(), json!("t1")),
+                ("pipeline_id".to_string(), json!("pipe1")),
+            ],
         )
         .await;
 

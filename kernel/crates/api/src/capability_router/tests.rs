@@ -8,10 +8,9 @@ fn router_with_metrics() -> (KernelCapabilityRouter, MetricsAggregator) {
     let agg = MetricsAggregator::new();
     // pipeline-state.list 摘要测试预接任务域出口声明（声明收集本身在
     // routes::state_summary_tests 覆盖；此处聚焦 list 行为）。
-    let r = KernelCapabilityRouter::with_metrics(agg.clone())
-        .with_export_fields_lookup(Arc::new(|| {
-            crate::capability_router::ExportFields::from_manifests(&[test_task_export_manifest()])
-        }));
+    let r = KernelCapabilityRouter::with_metrics(agg.clone()).with_export_fields_lookup(Arc::new(
+        || crate::capability_router::ExportFields::from_manifests(&[test_task_export_manifest()]),
+    ));
     (r, agg)
 }
 

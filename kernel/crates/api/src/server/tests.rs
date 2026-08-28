@@ -1763,44 +1763,40 @@ async fn test_process_via_engine_state_overlay_reaches_plugin_context() {
 }
 
 // ── GAP-2：run 终态域事件（EVENT 触发器的输入源） ─────────────────────
-// 契约：run 结束（completed/suspended/failed）时内核广播 run.* 域事件；
-// state 带 task.* 字段时派生任务域事件（task_completed/task_failed）。
+// 契约（ADR 2026-08-28 事件下沉后）：内核只派生运行域 run.* 事件；任务域
+// task_completed/task_failed 由 task_service 插件订阅 run.* 后按任务域语义
+// 派生（插件侧测试覆盖），内核对 task.*/task.status 词汇零知识。
 
 #[test]
-fn test_derive_run_terminal_events_completed_with_task_fields() {
-    let st = json!({
-        "pipeline_id": "p1",
-        "thread_id": "th1",
-        "task.id": "t9",
-        "task.goal": "喝水提醒",
-        "task.submitted_by": "admin",
-        "task.status": "completed",
-        "lineage.parent_pipeline_id": "parent_p1",
-    });
+fn test_derive_run_terminal_events_completed() {
+    let st = json!({"pipeline_id": "p1", "session_id": "th1"});
     let evs = derive_run_terminal_events(&st, false);
     let names: Vec<&str> = evs.iter().map(|(n, _)| *n).collect();
-    assert_eq!(names, vec!["run.completed", "task_completed"]);
-    // 标签携带溯源字段
-    let (_, tags) = &evs[1];
+    assert_eq!(names, vec!["run.completed"]);
+    // 标签携带运行坐标
+    let (_, tags) = &evs[0];
     let tag = |k: &str| {
         tags.iter()
-            .find(|(tk, _)| *tk == k)
+            .find(|(tk, _)| tk.as_str() == k)
             .map(|(_, v)| v.clone())
             .unwrap_or(serde_json::Value::Null)
     };
     assert_eq!(tag("pipeline_id"), json!("p1"));
-    assert_eq!(tag("task_id"), json!("t9"));
-    // 子任务通知锚点：parent_pipeline_id 从 state 的 lineage 扁平键带出
-    assert_eq!(tag("parent_pipeline_id"), json!("parent_p1"));
-    // 子任务完成通知注入 chat.send_message 需要 user_id（task_submit 创建时
-    // 写入 task.submitted_by）——事件必须带出，否则触发器注入器传空串被内核
-    // 拒绝（-32603 缺少 user_id）
-    assert_eq!(tag("user_id"), json!("admin"));
+    assert_eq!(tag("thread_id"), json!("th1"));
+    // 任务域字段在 state 也不派生任务事件（派生归 task_service 插件）
+    let with_task = json!({
+        "pipeline_id": "p1", "task.id": "t9", "task.status": "completed",
+        "lineage.parent_pipeline_id": "parent_p1",
+    });
+    let names2: Vec<&str> = derive_run_terminal_events(&with_task, false)
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(names2, vec!["run.completed"], "内核不得派生 task_completed");
 }
 
 #[test]
 fn test_derive_run_terminal_events_plain_and_suspended() {
-    // 无 task.* 字段的普通会话管道：只发 run.*，不派生任务事件
     let plain = json!({"pipeline_id": "p2", "thread_id": "th2"});
     let names: Vec<&str> = derive_run_terminal_events(&plain, false)
         .iter()
@@ -1809,7 +1805,7 @@ fn test_derive_run_terminal_events_plain_and_suspended() {
     assert_eq!(names, vec!["run.completed"]);
 
     // 挂起（RouteNext::Wait 落的 suspended 标志）：run.suspended
-    let suspended = json!({"pipeline_id": "p3", "suspended": true, "task.id": "t3"});
+    let suspended = json!({"pipeline_id": "p3", "suspended": true});
     let names2: Vec<&str> = derive_run_terminal_events(&suspended, false)
         .iter()
         .map(|(n, _)| *n)
@@ -1818,92 +1814,20 @@ fn test_derive_run_terminal_events_plain_and_suspended() {
 }
 
 #[test]
-fn test_derive_run_terminal_events_failed_with_task_fields() {
-    let st = json!({
-        "pipeline_id": "p4",
-        "task.id": "t4",
-        "task.goal": "g",
-        "lineage.parent_pipeline_id": "parent_p4",
-    });
-    let evs = derive_run_terminal_events(&st, true)
-        .iter()
-        .map(|(n, tags)| {
-            let pp = tags
-                .iter()
-                .find(|(k, _)| *k == "parent_pipeline_id")
-                .map(|(_, v)| v.as_str().unwrap_or(""))
-                .unwrap_or("");
-            (n.to_string(), pp.to_string())
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(evs[0], ("run.failed".to_string(), "".to_string()));
-    assert_eq!(evs[1], ("task_failed".to_string(), "parent_p4".to_string()));
-}
-
-#[test]
-fn test_derive_run_terminal_events_task_prefix_is_dotted() {
-    // 前缀必须精确为 "task."：taskx/execution_context.task_id 不得误派生
-    let st = json!({"pipeline_id": "p5", "taskx": 1, "task_meta": "y"});
-    let names: Vec<&str> = derive_run_terminal_events(&st, false)
+fn test_derive_run_terminal_events_failed() {
+    let st = json!({"pipeline_id": "p4"});
+    let names: Vec<&str> = derive_run_terminal_events(&st, true)
         .iter()
         .map(|(n, _)| *n)
         .collect();
-    assert_eq!(names, vec!["run.completed"]);
-}
-
-#[test]
-fn test_derive_run_terminal_events_no_task_completed_without_evaluation() {
-    // 完成唯一判据 = task_evaluate 评估通过（task.status=completed）。
-    // 任务管道 run 正常结束但评估未通过（pending/pending_evaluation）：
-    // 只发 run.completed，不派生 task_completed（杜绝假完成通知上级）。
-    for status in ["pending", "running", "pending_evaluation", ""] {
-        let st = json!({
-            "pipeline_id": "p6",
-            "task.id": "t6",
-            "task.status": status,
-        });
-        let names: Vec<&str> = derive_run_terminal_events(&st, false)
-            .iter()
-            .map(|(n, _)| *n)
-            .collect();
-        assert_eq!(
-            names,
-            vec!["run.completed"],
-            "task.status={status:?} 不得派生 task_completed"
-        );
-    }
-}
-
-#[test]
-fn test_derive_run_terminal_events_task_failed_on_evaluated_failure() {
-    // 评估裁决失败（task.status=failed，run 正常结束）→ task_failed 照常通知上级
-    let st = json!({
-        "pipeline_id": "p7",
-        "task.id": "t7",
-        "task.status": "failed",
-        "lineage.parent_pipeline_id": "parent_p7",
-        "task.submitted_by": "admin",
-    });
-    let evs = derive_run_terminal_events(&st, false);
-    let names: Vec<&str> = evs.iter().map(|(n, _)| *n).collect();
-    assert_eq!(names, vec!["run.completed", "task_failed"]);
-    let (_, tags) = &evs[1];
-    let pp = tags
-        .iter()
-        .find(|(k, _)| *k == "parent_pipeline_id")
-        .map(|(_, v)| v.as_str().unwrap_or(""))
-        .unwrap_or("");
-    assert_eq!(pp, "parent_p7");
+    assert_eq!(names, vec!["run.failed"]);
 }
 
 #[test]
 fn test_derive_run_terminal_events_user_cancelled() {
-    // 用户主动停止（router.stop_reason=user_requested）→ run.cancelled，
-    // 无任务域派生：停止不是任务终态，不通知上级。
+    // 用户主动停止（router.stop_reason=user_requested）→ run.cancelled
     let st = json!({
         "pipeline_id": "p8",
-        "task.id": "t8",
-        "task.status": "running",
         "router.stop_reason": "user_requested",
     });
     let names: Vec<&str> = derive_run_terminal_events(&st, false)
@@ -1916,7 +1840,7 @@ fn test_derive_run_terminal_events_user_cancelled() {
 #[tokio::test]
 async fn test_process_via_engine_emits_run_terminal_domain_events() {
     // wiring：真实引擎跑一轮 → 声明 domain_event hook 的启用插件收到
-    // run.completed + task_completed（state overlay 带 task.* 字段时）
+    // run.completed（任务域事件派生已下沉 task_service 插件，内核只发 run.*）
     let (state, invoker, _store, _sqlite) = make_engine_state();
     // 订阅方插件：manifest 声明 DomainEvent hook 且启用
     {
@@ -1963,9 +1887,12 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
         .insert("trigger_sub".to_string());
 
     let tenant = TenantContext::new("tenant_gap2_emit", "thread_gap2_emit");
-    // 注：lineage.* 是保留字（引擎出生写入），overlay 不可携带；真实路径经
-    // chat.send_message 的 lineage 参数写入 state，纯函数测试已覆盖 parent 标签透传。
-    let overlay = json!({"task.id": "t77", "task.goal": "写周报", "task.status": "completed"});
+    // lineage.*/task.* 经 state overlay 透传（血缘方案归调用方插件自持），
+    // 内核对任务域键零解释——不因 state 带 task.* 而多发任务域事件。
+    let overlay = json!({
+        "task.id": "t77", "task.goal": "写周报", "task.status": "completed",
+        "lineage.parent_pipeline_id": "pipe_parent_gap2",
+    });
     let r = agentos_tenant::scope(
         tenant,
         process_via_engine(
@@ -1989,7 +1916,10 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
     let mut hooks = Vec::new();
     for _ in 0..50 {
         hooks = invoker.hooks.lock().unwrap().clone();
-        if hooks.len() >= 2 {
+        if hooks
+            .iter()
+            .any(|(_, _, ctx)| ctx["event"] == json!("run.completed"))
+        {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2006,20 +1936,8 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
         "应广播 run.completed，实际 {events:?}"
     );
     assert!(
-        events.contains(&"task_completed".to_string()),
-        "state 带 task.* 应派生 task_completed，实际 {events:?}"
-    );
-    // task 事件携带任务标签
-    let task_evt = hooks
-        .iter()
-        .find(|(_, _, ctx)| ctx["event"] == json!("task_completed"))
-        .expect("task_completed 钩子");
-    assert_eq!(task_evt.2["task_id"], json!("t77"));
-    assert_eq!(task_evt.2["pipeline_id"], json!("pipe_gap2_emit"));
-    // parent_pipeline_id 标签存在（无 lineage 时为空串——不缺失键）
-    assert!(
-        task_evt.2.get("parent_pipeline_id").is_some(),
-        "task_completed 应携带 parent_pipeline_id 键（无父时为空串）"
+        !events.iter().any(|e| e.starts_with("task_")),
+        "内核不得派生任务域事件（归 task_service 插件），实际 {events:?}"
     );
 }
 
@@ -2443,36 +2361,6 @@ async fn test_run_terminal_skips_writeback_for_owned_only_pipeline() {
     assert!(
         !fields.contains_key("task.ended_at"),
         "owned-only 管道不得落库 task.ended_at，实际 {fields:?}"
-    );
-}
-
-#[test]
-fn test_has_task_marker_owned_prefix_excluded() {
-    // 幽灵任务行根因单元级判定：`task.owned.*` 是父管道登记
-    // 子任务的扁平键，不算任务管道自身标记——仅登记过子任务的聊天管道
-    // 不得误判为任务管道（口径与插件侧 `_list_tasks_from_state` 第一趟一致）。
-    let owned_only = json!({
-        "task.owned.child_pipe_1.title": "调研",
-        "task.owned.child_pipe_1.status": "running",
-    });
-    assert!(!has_task_marker(&owned_only), "owned-only 不得判为任务管道");
-
-    // 真任务管道（自身 task.* 声明）仍判定为任务管道——防回归
-    let real_task = json!({
-        "task.id": "t1",
-        "task.goal": "真任务",
-        "task.owned.child_pipe_1.status": "running", // 父管道也可同时持有登记
-    });
-    assert!(has_task_marker(&real_task), "自身 task.* 仍应判为任务管道");
-
-    // 无任何 task. 前缀 → 非任务管道；精确前缀 "task."：taskx 不误判
-    assert!(
-        !has_task_marker(&json!({"pipeline_id": "p1"})),
-        "无 task.* 判非任务"
-    );
-    assert!(
-        !has_task_marker(&json!({"taskx": 1})),
-        "taskx 不得误判（前缀必须精确 task.）"
     );
 }
 
