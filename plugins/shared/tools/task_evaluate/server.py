@@ -97,6 +97,13 @@ async def task_evaluate(**kwargs: dict[str, Any]) -> dict[str, Any]:
 
     tool = TaskEvaluateTool()
     result = await tool.execute(kwargs)
+    # 返回完整 ToolExecutionResult 信封（success/output/metadata）：metadata
+    # 携带 result=completed / task_failed 等副作用信号，是内核 tool_core
+    # 任务级副作用派生（task_evaluation_completed / has_task_failed）的
+    # 唯一载体——剥成裸 output 会静默丢失评估证据（信封由内核归一层消费，
+    # LLM 面仍只见 output）。
+    if hasattr(result, "to_dict") and callable(result.to_dict):
+        return result.to_dict()
     if result.success:
         return result.output
     return {"error": result.error}

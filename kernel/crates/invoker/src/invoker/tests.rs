@@ -1063,6 +1063,35 @@ fn test_normalize_mcp_result_error_and_plain_data_shapes() {
 }
 
 #[test]
+fn test_normalize_mcp_result_metadata_passthrough() {
+    // ②-a 真 ToolExecutionResult 信封：顶层 metadata 透传（task_evaluation_completed
+    // / task_failed 等副作用信号的唯一载体，tool_core 侧效派生消费）。
+    let ok = normalize_mcp_tool_result(
+        json!({
+            "success": true,
+            "data": {"overall_passed": true, "task_id": "t1"},
+            "metadata": {"action": "auto_complete", "result": "completed"},
+        }),
+        "task_evaluate",
+    )
+    .unwrap();
+    assert!(ok.success);
+    assert_eq!(ok.metadata.as_ref().unwrap()["result"], "completed");
+
+    // ②-b：output 信封顶层 metadata 同样保留
+    let ok2 = normalize_mcp_tool_result(
+        json!({"success": true, "output": {"rows": 3}, "metadata": {"task_failed": true}}),
+        "t1",
+    )
+    .unwrap();
+    assert_eq!(ok2.metadata.as_ref().unwrap()["task_failed"], true);
+
+    // ③ 纯业务数据无 metadata → None（不伪造）
+    let plain = normalize_mcp_tool_result(json!({"result": [1, 2]}), "t1").unwrap();
+    assert!(plain.metadata.is_none());
+}
+
+#[test]
 fn test_normalize_mcp_result_non_boolean_success_is_parse_error() {
     // K7：success 键存在但非 bool（字符串/整数状态码等信封漂移）→ PARSE_ERROR，
     // 不得 unwrap_or(true) 把失败包装成成功污染下游 state。

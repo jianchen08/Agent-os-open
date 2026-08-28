@@ -402,7 +402,13 @@ fn normalize_mcp_tool_result(
                 .get("error")
                 .and_then(|v| v.as_str())
                 .unwrap_or("tool execution failed");
-            Ok(ToolExecutionResult::failure(err_msg))
+            Ok(ToolExecutionResult {
+                success: false,
+                data: Value::Null,
+                error: Some(err_msg.to_string()),
+                duration_ms: None,
+                metadata: inner.get("metadata").cloned(),
+            })
         }
     } else if let Some(err) = inner.get("error").and_then(|v| v.as_str()) {
         // ① MCP isError=true 或工具自身返回 {"error": "..."} 且无 success 字段
