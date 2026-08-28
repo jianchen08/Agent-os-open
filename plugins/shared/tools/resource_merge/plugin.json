@@ -31,31 +31,25 @@
                 "git_log",
                 "git_merge_abort",
                 "cleanup"
-              ],
-              "description": "操作类型：prepare(创建 worktree 分支作为工作空间)、merge(合并工作空间变更到目标目录)、rollback(恢复工作空间到初始状态)、git_status(查看git状态)、git_commit(提交变更)、git_diff(查看变更详情)、git_log(查看提交历史)、git_merge_abort(中止当前的 git merge 操作)、cleanup(移除 worktree 和分支)"
+              ]
             },
             "workspace": {
-              "type": "string",
-              "description": "workspace 目录路径（绝对路径或相对于项目根目录的路径）"
+              "type": "string"
             },
             "target_files": {
               "type": "array",
               "items": {
                 "type": "string"
-              },
-              "description": "目标文件路径列表，用于 prepare（复制到workspace）和 merge（确定合并范围）操作"
+              }
             },
             "target_dir": {
-              "type": "string",
-              "description": "目标目录路径，用于 merge 操作，workspace 中的文件将合并到此目录"
+              "type": "string"
             },
             "message": {
-              "type": "string",
-              "description": "commit 消息，用于 git_commit 操作"
+              "type": "string"
             },
             "checkpoint_id": {
-              "type": "string",
-              "description": "指定回滚到的 commit hash，用于 rollback 操作。不指定则回滚到上一个 commit"
+              "type": "string"
             },
             "merge_strategy": {
               "type": "string",
@@ -64,8 +58,7 @@
                 "git_merge",
                 "git_merge_no_ff"
               ],
-              "default": "copy",
-              "description": "合并策略 — copy(文件复制)、git_merge(快进合并)、git_merge_no_ff(非快进合并)"
+              "default": "copy"
             }
           },
           "required": [
