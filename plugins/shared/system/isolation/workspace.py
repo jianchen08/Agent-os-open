@@ -201,6 +201,53 @@ def find_project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def ensure_workspace_git_ignored(base: Path) -> bool:
+    """确保工作空间基目录不被所在仓库的 git 追踪（.git/info/exclude 本地排除）。
+
+    工作空间根是配置项（workspace.root）——.gitignore 的静态条目只在特定
+    配置值下成立，根改配到仓库内其他位置即失效。exclude 不入库、不产生
+    diff，且 git 还原（reset/checkout/clean）不触碰 .git 内部，对受管还原
+    环境是可靠的本地防线。
+
+    base 在项目根之外（或项目根无 .git）→ 无 git 追踪面，直接放行；
+    base 即项目根本身 → 排除等于瘫痪 git，拒绝并告警。
+    幂等：exclude 已含该条目时不重复写。
+
+    Returns:
+        True = 无追踪面或已确保排除；False = 排除未落地（含病态配置）。
+    """
+    project_root = find_project_root()
+    try:
+        rel = base.resolve().relative_to(project_root.resolve())
+    except ValueError:
+        return True
+    if rel == Path():
+        logger.warning(
+            "[workspace] 工作空间基目录即项目根，git 排除被拒绝（排除整个仓库等于瘫痪 git）: %s",
+            base,
+        )
+        return False
+    git_dir = project_root / ".git"
+    if not git_dir.is_dir():
+        return True
+    pattern = f"/{rel.as_posix()}/"
+    exclude = git_dir / "info" / "exclude"
+    try:
+        existing = exclude.read_text("utf-8", errors="replace") if exclude.exists() else ""
+        if any(line.strip() == pattern for line in existing.splitlines()):
+            return True
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a", encoding="utf-8") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(f"# agentos workspace root (auto-managed, do not commit workspace here)\n{pattern}\n")
+        logger.info("[workspace] 工作空间基目录已写入 git 本地排除 | %s", exclude)
+        return True
+    except OSError as exc:
+        logger.warning("[workspace] git 本地排除写入失败（工作区可能被 git 追踪）| error=%s", exc)
+        return False
+
+
 def get_workspace_base_dir() -> Path:
     """统一解析工作空间基目录（配置驱动，返回绝对路径）。
 
@@ -212,6 +259,8 @@ def get_workspace_base_dir() -> Path:
 
     服务层（_workspace_git_ops._get_workspace_root）与插件降级路径
     （workspace_lifecycle/plugin.py）统一走本函数，杜绝各自硬编码推导。
+    每次解析附带 git 本地排除保障：基目录是配置项，静态 .gitignore 只在
+    特定配置值下成立，exclude 随解析出的实际根动态落地。
     """
     config = _load_isolation_config()
     raw = config.get("workspace", {}).get("root") or _DEFAULT_WORKSPACE_ROOT
@@ -219,8 +268,14 @@ def get_workspace_base_dir() -> Path:
     if not raw_str:
         raw_str = _DEFAULT_WORKSPACE_ROOT
     if _WIN_ABS_PATH.match(raw_str) or Path(raw_str).is_absolute():
-        return Path(os.path.normpath(raw_str))
-    return Path(os.path.normpath(str(find_project_root() / raw_str)))
+        base = Path(os.path.normpath(raw_str))
+    else:
+        base = Path(os.path.normpath(str(find_project_root() / raw_str)))
+    try:
+        ensure_workspace_git_ignored(base)
+    except Exception:  # noqa: BLE001
+        logger.warning("[workspace] git 本地排除保障异常（继续返回基目录）", exc_info=True)
+    return base
 
 
 def _is_absolute_path(path_str: str) -> bool:
