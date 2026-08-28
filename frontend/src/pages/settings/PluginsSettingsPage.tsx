@@ -29,6 +29,7 @@ import {
   X,
   type LucideIcon,
 } from '@/assets/icons'
+import { parseContractStatus, type PluginContractStatus } from '@/components/debug/ContractStatusPanel'
 import { PageShell } from '@/components/shared/PageShell'
 import { toast } from '@/components/ui/sonner'
 import apiClient from '@/services/api/client'
@@ -138,7 +139,16 @@ export function PluginsSettingsPage() {
       } catch {
         tools = []
       }
-      return { plugins: res.data, capabilities: tools }
+      // 契约状态面（ADR 2026-08-28：插件行内"已净化/工具被剔除"标示的数据源；
+      // 读失败不阻断插件列表——标示降级为不显示）
+      let contract: PluginContractStatus[] = []
+      try {
+        const cs = await apiClient.get<unknown>('/api/v1/plugins/contract-status')
+        contract = parseContractStatus(cs.data)
+      } catch {
+        contract = []
+      }
+      return { plugins: res.data, capabilities: tools, contract }
     },
     staleTime: 60_000,
   })
@@ -224,6 +234,9 @@ export function PluginsSettingsPage() {
       })
     : []
   const capabilities = pluginsQuery.data?.capabilities ?? []
+  const contractMap = new Map(
+    (pluginsQuery.data?.contract ?? []).map((c) => [c.plugin_id, c]),
+  )
 
   const filterTabs: Array<{ id: typeof filter; label: string }> = [
     { id: 'all', label: `全部 ${plugins.length}` },
@@ -335,6 +348,7 @@ export function PluginsSettingsPage() {
             )}
             {filtered.map((plugin) => {
               const theme = typeTheme(plugin.config_type)
+              const gate = contractMap.get(plugin.plugin_id)?.gates
               return (
                 <div
                   key={plugin.plugin_id}
@@ -394,6 +408,21 @@ export function PluginsSettingsPage() {
                         <div className="bg-status-error/10 text-status-error mt-1.5 flex items-start gap-1 rounded p-2 text-xs">
                           <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
                           <span className="line-clamp-2">{plugin.error}</span>
+                        </div>
+                      )}
+                      {/* G2 净化标示（ADR 2026-08-28：插件行内可见，只进日志视同未发现） */}
+                      {gate?.g2_consistency === 'sanitized' && (
+                        <div
+                          className="bg-status-error/10 text-status-error mt-1.5 flex items-start gap-1 rounded p-2 text-xs"
+                          data-testid={`plugin-sanitized-${plugin.plugin_id}`}
+                        >
+                          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                          <span className="line-clamp-2">
+                            已净化/工具被剔除：
+                            {gate.sanitized
+                              ? `剔除 ${(gate.sanitized.rejected_tools ?? []).join('、') || '（见契约页）'}（工具 ${gate.sanitized.tools_before ?? '?'}→${gate.sanitized.tools_after ?? '?'}）`
+                              : (gate.last_error ?? 'G2 复核判定声明与实现不一致')}
+                          </span>
                         </div>
                       )}
                     </div>

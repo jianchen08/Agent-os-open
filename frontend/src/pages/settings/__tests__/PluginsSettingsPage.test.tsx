@@ -88,10 +88,11 @@ vi.mock('@/components/ui/sonner', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }))
 
-function setupApi() {
+function setupApi(contract: unknown = { plugins: [] }) {
   mockGet.mockImplementation(async (url: string) => {
     if (url === '/api/v1/plugins') return { data: mockPlugins }
     if (url === '/api/v1/schema') return { data: { tools: mockTools } }
+    if (url === '/api/v1/plugins/contract-status') return { data: contract }
     throw new Error(`unexpected url: ${url}`)
   })
 }
@@ -260,5 +261,62 @@ describe('PluginsSettingsPage · 视图分段（tab 过滤）', () => {
     fireEvent.click(screen.getByRole('button', { name: 'System' }))
     typeSearch('bash')
     expect(screen.getByText('没有匹配的插件')).toBeInTheDocument()
+  })
+})
+
+describe('PluginsSettingsPage · G2 净化标示（ADR 2026-08-28）', () => {
+  it('sanitized 插件行内标示"已净化/工具被剔除"及被剔除工具与原因', async () => {
+    setupApi({
+      plugins: [
+        {
+          plugin_id: 'bash_tool',
+          enabled: true,
+          gates: {
+            g2_consistency: 'sanitized',
+            rejected_tools: ['bash_execute'],
+            last_error: '声明与实现不一致，剔除工具（需修改插件）: bash_execute',
+            sanitized: {
+              rejected_tools: ['bash_execute'],
+              tools_before: 1,
+              tools_after: 0,
+              reason: 'G2 声明↔实现一致性复核失败，剔除工具后按净化 manifest 重注册',
+              sanitized_ts: 1756339200000,
+            },
+          },
+        },
+      ],
+    })
+    renderPage()
+    await waitFor(() => {
+      expect(screen.getByTestId('plugin-sanitized-bash_tool')).toBeInTheDocument()
+    })
+    const badge = screen.getByTestId('plugin-sanitized-bash_tool')
+    expect(badge).toHaveTextContent('已净化/工具被剔除')
+    expect(badge).toHaveTextContent('bash_execute')
+    expect(badge).toHaveTextContent('1→0')
+  })
+
+  it('契约状态正常的插件不显示净化标示', async () => {
+    setupApi({
+      plugins: [{ plugin_id: 'monitoring_service', gates: { g2_consistency: 'ok' } }],
+    })
+    renderPage()
+    await waitFor(() => {
+      expect(screen.getByText('Monitoring Service')).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('plugin-sanitized-monitoring_service')).not.toBeInTheDocument()
+  })
+
+  it('契约状态端点不可用 → 列表照常渲染（标示降级为不显示）', async () => {
+    mockGet.mockImplementation(async (url: string) => {
+      if (url === '/api/v1/plugins') return { data: mockPlugins }
+      if (url === '/api/v1/schema') return { data: { tools: mockTools } }
+      throw new Error('contract-status 404')
+    })
+    renderPage()
+    await waitFor(() => {
+      expect(screen.getByText('Monitoring Service')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('已净化/工具被剔除')).not.toBeInTheDocument()
   })
 })
