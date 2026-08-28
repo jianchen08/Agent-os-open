@@ -102,9 +102,11 @@ class TestTaskStateFlow:
         assert task_id, f"创建任务应返回 id，实际 {body}"
 
         # 出生即落 pipeline_state 表（chat_send_handler 创建分支），聚合可见；
-        # background 派发异步落库，短轮询等待出生行出口（<30s，内核负载高时放宽）
+        # background 派发异步落库，轮询等待出生行出口。窗口取与执行用例同量级
+        # （120s）：clear-all teardown 的服务端异步清理可能残留到下一批用例
+        # 开头（多文件合跑时把首个任务刚落的出生行清掉），短窗口会确定性误报。
         row = None
-        deadline = time.time() + 30
+        deadline = time.time() + RUNNING_WAIT_SECONDS
         while time.time() < deadline and row is None:
             state_status, state_body, _ = http_get_with_auth(
                 f"{state_url}", token=token, timeout=10
@@ -165,15 +167,28 @@ class TestTaskStateFlow:
             time.sleep(5)
 
         assert final_row is not None, "任务管道应出现在 state 聚合（出生即落库）"
-        # 状态推进：出生 pending → 执行 running（task_reminder 首轮推进）
-        assert "running" in seen_statuses or final_row.get("state", {}).get("task.status") == "running", (
-            f"任务应推进到 running，实际状态序列 {seen_statuses}，最终 {final_row.get('state', {})}"
+        # 执行证据（时序无关、稳定持久化）：track.llm_usage 非零——观测 running
+        # 属时序敏感（任务可在轮询间隔内直达终态）；raw_result 的持久化随结束
+        # 路径浮动不作依据。终态合法性由下方职责边界断言裁决。
+        final_status = final_row.get("state", {}).get("task.status", "")
+        usage = final_row.get("state", {}).get("track.llm_usage") or {}
+        if isinstance(usage, str):
+            import json as _json
+
+            try:
+                usage = _json.loads(usage)
+            except _json.JSONDecodeError:
+                usage = {}
+        total_tokens = int(usage.get("total_tokens") or 0)
+        assert seen_statuses, f"任务管道应有状态流转，实际空，最终 {final_row.get('state', {})}"
+        assert total_tokens > 0, (
+            f"track.llm_usage.total_tokens 应 > 0（LLM 真实执行），实际 {usage}，"
+            f"状态序列 {seen_statuses}，终态 {final_status}"
         )
         # 职责边界核心断言：任务状态只能由任务域裁决——pending/running/
         # pending_evaluation（未评估）/ completed（task_evaluate 评估通过，
         # 合法任务域终态）。新内核不写 task.status，无评估证据时不得出现
         # 静默 completed。
-        final_status = final_row.get("state", {}).get("task.status", "")
         assert final_status in ("pending", "running", "pending_evaluation", "completed"), (
             f"任务状态应由任务域裁决，实际 {final_status}"
         )

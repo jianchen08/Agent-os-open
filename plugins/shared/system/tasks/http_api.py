@@ -804,6 +804,7 @@ async def create_task(
         title=body.title,
         description=body.description or "",
         user_id=_current_user(_user).get("sub", ""),
+        agent_id=body.agent_id,
     )
     if not task_id:
         raise APIError(
