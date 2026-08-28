@@ -891,26 +891,29 @@ impl PipelineDispatcher for EngineDispatcher {
             &serde_json::Value::Null
         };
         let mut respond_failed = false;
-        if let Some(invoker) = self.state.invoker.clone() {
-            let inputs = serde_json::json!({
-                "request_id": request_id,
-                "response_type": inner.get("response_type").and_then(|v| v.as_str()).unwrap_or("answered"),
-                "selected_option": inner.get("selected_option").and_then(|v| v.as_str()),
-                "answers": inner.get("answers"),
-                "feedback": inner.get("feedback").and_then(|v| v.as_str()),
-            });
-            if let Err(e) = invoker
-                .invoke_tool("human_interaction_tool", "interaction.respond", &inputs)
-                .await
-            {
-                warn!(request_id = request_id, error = %e.message, "interaction.respond 调用失败");
+        // (A) 路径按服务角色路由：namespace "human-interaction" 的 provides
+        // 声明派生提供者与工具名（McpBridge），内核零硬编码。
+        let inputs = serde_json::json!({
+            "request_id": request_id,
+            "response_type": inner.get("response_type").and_then(|v| v.as_str()).unwrap_or("answered"),
+            "selected_option": inner.get("selected_option").and_then(|v| v.as_str()),
+            "answers": inner.get("answers"),
+            "feedback": inner.get("feedback").and_then(|v| v.as_str()),
+        });
+        match self.state.capability_handlers.as_ref() {
+            Some(registry) => {
+                if let Err(e) = registry.route("human-interaction", "respond", inputs).await {
+                    warn!(request_id = request_id, error = %e, "interaction.respond 调用失败");
+                    respond_failed = true;
+                }
+            }
+            None => {
+                warn!(
+                    request_id = request_id,
+                    "capability registry 未注入，跳过 interaction.respond"
+                );
                 respond_failed = true;
             }
-        } else {
-            warn!(
-                request_id = request_id,
-                "invoker 未注入，跳过 interaction.respond"
-            );
         }
 
         if let Some(db) = self.state.db.as_ref() {

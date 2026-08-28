@@ -1833,9 +1833,10 @@ async fn chat_handler(
 
 /// 人类交互响应端点——前端用户操作（选择选项/拒绝/取消）经此提交。
 ///
-/// 内核转发到交互插件（human_interaction_tool）的 interaction.respond 工具，
-/// 唤醒正在 wait_for_choice 阻塞的请求。这构成 choice/conversation 模式的
-/// 响应回路：前端 → 内核 REST → invoker.invoke_tool → 交互插件 service.submit_response。
+/// 交互应答转发（服务角色解析，ADR 2026-08-28）：经 capability_handlers 按
+/// namespace "human-interaction" 路由到 responds 声明方（McpBridge 从 provides
+/// 声明派生 plugin_id + tool_prefix），唤醒 wait_for_choice 阻塞中的请求。
+/// 内核不点名插件 id/工具名——换交互插件或改工具名内核零改动。
 async fn interaction_response_handler(
     State(state): State<AppState>,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -1850,13 +1851,12 @@ async fn interaction_response_handler(
         ));
     }
 
-    let Some(invoker) = state.invoker.clone() else {
+    let Some(registry) = state.capability_handlers.as_ref() else {
         return Ok(axum::Json(
-            serde_json::json!({"success": false, "error": "invoker not available"}),
+            serde_json::json!({"success": false, "error": "capability registry not available"}),
         ));
     };
 
-    // 转发到交互插件的 interaction.respond 工具
     let inputs = serde_json::json!({
         "request_id": request_id,
         "response_type": body.get("response_type").and_then(|v| v.as_str()).unwrap_or("answered"),
@@ -1865,20 +1865,16 @@ async fn interaction_response_handler(
         "feedback": body.get("feedback").and_then(|v| v.as_str()),
     });
 
-    match invoker
-        .invoke_tool("human_interaction_tool", "interaction.respond", &inputs)
-        .await
-    {
-        Ok(result) => Ok(axum::Json(serde_json::json!({
-            "success": result.success,
+    match registry.route("human-interaction", "respond", inputs).await {
+        Ok(data) => Ok(axum::Json(serde_json::json!({
+            "success": true,
             "request_id": request_id,
-            "data": result.data,
-            "error": result.error,
+            "data": data,
         }))),
         Err(e) => Ok(axum::Json(serde_json::json!({
             "success": false,
             "request_id": request_id,
-            "error": e.message,
+            "error": e.to_string(),
         }))),
     }
 }

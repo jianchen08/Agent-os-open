@@ -126,6 +126,11 @@ pub struct AppState {
     /// 只读端点 `GET /api/v1/plugins/contract-status` 消费；未接线 = 空账本
     /// （端点照常返回 manifest 派生的 not_covered 缺省）。
     pub contract_states: Arc<crate::contract::ContractLedger>,
+    /// 能力命名空间注册表（provides 声明驱动装配）：内核按**服务角色**
+    /// （namespace）调用插件服务的出口——如交互应答 route("human-interaction",
+    /// "respond")，内核不点名插件 id/工具名（ADR 2026-08-28 服务角色解析）。
+    /// None = 未装配（兼容旧装配/测试，调用点显式降级报错）。
+    pub capability_handlers: Option<Arc<agentos_mcp::CapabilityHandlerRegistry>>,
     /// 内核能力契约（config/kernel_capabilities/*.json）——schema 聚合透出用。
     /// None = 未装配（契约目录缺失或测试装配；入口校验由 router 侧独立持有）。
     pub kernel_capability_contracts:
@@ -158,6 +163,7 @@ impl AppState {
             plugin_scopes: Arc::new(PluginScopeRegistry::new()),
             widget_bindings: None,
             contract_states: Arc::new(crate::contract::ContractLedger::new()),
+            capability_handlers: None,
             kernel_capability_contracts: None,
         }
     }
@@ -267,6 +273,15 @@ impl AppState {
         contract_states: Arc<crate::contract::ContractLedger>,
     ) -> Self {
         self.contract_states = contract_states;
+        self
+    }
+
+    /// 注入能力命名空间注册表（服务角色解析出口，见字段 doc）。
+    pub fn with_capability_handlers(
+        mut self,
+        registry: Arc<agentos_mcp::CapabilityHandlerRegistry>,
+    ) -> Self {
+        self.capability_handlers = Some(registry);
         self
     }
 

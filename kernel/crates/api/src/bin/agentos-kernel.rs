@@ -948,7 +948,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store_dyn,
         project_root,
         enabled_snapshot,
-    );
+    )
+    .with_capability_handlers(handler_registry.clone());
     // 共享 manifests 副本（域事件广播闭包与 watcher 热发现读同一份）。
     state.manifests = manifests_shared.clone();
     // task_01：注入统一数据接口专用 SqliteStore 句柄（/api/v1/db/* 用，表驱动动态枚举）。
