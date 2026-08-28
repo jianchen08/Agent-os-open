@@ -246,9 +246,13 @@ fn all_plugin_contracts_are_executor_consumable() {
         tools_pattern >= 2,
         "带形态 pattern 的工具数退化: {tools_pattern} < 2（基线 trigger_setup/task_submit）"
     );
+    // services 棘轮重定（2026-08-27 scan 批 O-A）：7 个 @plugin.tool 插件
+    // （channel_* / gateway / monitoring）的 manifest 条目从 services 整体
+    // 搬迁到 capabilities.tools（工具本不该占 services 声明面），先期 88→
+    // 搬迁前实测 94，搬迁后 74；工具面 ratchet（tools_props/tools_output）只增。
     assert!(
-        services_input >= 88,
-        "带契约服务数退化: {services_input} < 88"
+        services_input >= 74,
+        "带契约服务数退化: {services_input} < 74"
     );
     // output_schema 棘轮：2026-08-25 批5 白名单活工具全量补齐——builtin 文件
     // 四件 + lsp 四件 + memory/human_interaction/resource_merge/task_submit/

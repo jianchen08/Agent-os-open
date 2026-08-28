@@ -1237,9 +1237,7 @@ impl SqliteStore {
         row_id: &str,
         field: &str,
     ) -> Option<serde_json::Value> {
-        let Some(s) = raw else {
-            return None;
-        };
+        let s = raw?;
         match serde_json::from_str(s) {
             Ok(v) => Some(v),
             Err(e) => {
