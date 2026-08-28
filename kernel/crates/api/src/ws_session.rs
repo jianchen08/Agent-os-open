@@ -503,6 +503,7 @@ fn assistant_authoritative_seq(final_assistant: Option<&serde_json::Value>) -> s
 /// - stream_start 逐轮发射（各自 `a_` message_id），8 事件增量/工具事件按本轮 id 寻址；
 /// - new_message 携带**该轮** assistant 完整持久形态（非"最后一条"）——前端占位
 ///   与 DB message_slots 逐轮记录同键同序，流式期间渲染与刷新重放一致。
+///
 /// [来源: docs/working/chat_stream_order_diagnosis_20260827.md]
 pub(crate) struct SessionRoundEvents {
     session: Arc<SessionCoordinator>,

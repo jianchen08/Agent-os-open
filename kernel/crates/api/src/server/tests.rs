@@ -702,7 +702,7 @@ fn mk_manifest_json(id: &str) -> agentos_core::traits::PluginManifest {
 /// live_plugin_ids 反映 manifests store 的运行期变化（watcher 热发现合并后立即可见）。
 #[tokio::test]
 async fn live_plugin_ids_reflects_manifests_store() {
-    let mut state = AppState::new();
+    let state = AppState::new();
     assert!(live_plugin_ids(&state).await.is_empty());
     state
         .manifests

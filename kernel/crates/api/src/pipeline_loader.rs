@@ -206,6 +206,14 @@ struct LoopBodyFile {
     hooks: Vec<agentos_engine::compiler::HookFile>,
 }
 
+/// 循环体文件归一产物：内部循环体 + body 级 hooks + step 级 hooks
+/// （`(step id, 声明列表)`）。
+type InternalLoopBody = (
+    LoopBody,
+    Vec<agentos_engine::compiler::HookFile>,
+    Vec<(String, Vec<agentos_engine::compiler::HookFile>)>,
+);
+
 #[allow(clippy::wrong_self_convention)] // 消费型转换
 impl LoopBodyFile {
     /// 归一为内部 [`LoopBody`] + body 级 hooks + step 级 hooks
@@ -214,14 +222,7 @@ impl LoopBodyFile {
     fn to_internal_with_hooks(
         self,
         body_ids: &HashSet<String>,
-    ) -> Result<
-        (
-            LoopBody,
-            Vec<agentos_engine::compiler::HookFile>,
-            Vec<(String, Vec<agentos_engine::compiler::HookFile>)>,
-        ),
-        PipelineLoadError,
-    > {
+    ) -> Result<InternalLoopBody, PipelineLoadError> {
         // step 级转移的 Step 目标判定需要本 body 的 step id 全集
         let local_step_ids: HashSet<String> = self.steps.iter().map(|s| s.id.clone()).collect();
         let location = format!("循环体 '{}'", self.id);

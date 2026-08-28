@@ -739,9 +739,7 @@ impl KernelCapabilityRouter {
         plugin_id: Option<&str>,
     ) -> Option<Value> {
         let contracts = self.capability_contracts.as_ref()?;
-        if crate::kernel_capabilities::find_spec(contracts, "streaming", event_name).is_none() {
-            return None;
-        }
+        crate::kernel_capabilities::find_spec(contracts, "streaming", event_name)?;
         // 声明闸（ADR 2026-08-22）：插件须声明 capabilities.streaming 才能发射
         // 流式事件；未声明即拒（fail-closed）。引擎管道家族（llm_core/tool_core）
         // 是内核 LLM 路径的器官，豁免——它们携带内核签发的 a_ id，命名空间执法见下。
@@ -873,7 +871,7 @@ impl KernelCapabilityRouter {
                 // 钩子协议面，装载表恒空短路，零开销；协议面归管道步骤服务化
                 // 提案 §3.6，留注引用）。注意：热路径查表优先于分配，勿在此
                 // 追加大对象构造。
-                self.accumulate_stream_interception(event_name, payload, &thread_id, &message_id);
+                self.accumulate_stream_interception(event_name, payload, thread_id, message_id);
                 return Some(Ok(json!({
                     "status": if delivered { "emitted" } else { "dropped" },
                     "event": event_name,
