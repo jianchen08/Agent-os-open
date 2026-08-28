@@ -1625,6 +1625,34 @@ pub async fn system_restart_handler(
     }))
 }
 
+/// 读磁盘 plugin.json 并与注册表 manifest 做工具集/schema 差异比对
+/// （ADR 2026-08-28 决策3，[`crate::contract::registry_disk_diffs`] 纯函数消费）。
+/// 返回（`Some(diffs)` = 已检出（空 vec = 一致），`None` = 磁盘不可读）+
+/// 不可读原因。磁盘不可读不是"一致"——不可静默当绿。
+fn read_disk_manifest_diffs(
+    state: &AppState,
+    m: &PluginManifest,
+) -> (Option<Vec<crate::contract::RegistryDiskDiff>>, Option<String>) {
+    let Some(root) = state.plugin_dirs.get(&m.id) else {
+        return (
+            None,
+            Some("无插件目录映射（plugin_dirs 未登记），无法读取磁盘 manifest".to_string()),
+        );
+    };
+    let raw = match std::fs::read_to_string(root.join("plugin.json")) {
+        Ok(r) => r,
+        Err(e) => return (None, Some(format!("磁盘 plugin.json 读取失败: {e}"))),
+    };
+    let disk: PluginManifest = match serde_json::from_str(&raw) {
+        Ok(d) => d,
+        Err(e) => return (None, Some(format!("磁盘 plugin.json 解析失败: {e}"))),
+    };
+    (
+        Some(crate::contract::registry_disk_diffs(m, &disk)),
+        None,
+    )
+}
+
 /// POST /api/v1/plugins/validate-all — G2 双写一致性全量巡检。
 ///
 /// 对照每个 tool 插件的 manifest 声明（`capabilities.tools`）与 sidecar 实际上报
@@ -1635,24 +1663,55 @@ pub async fn system_restart_handler(
 /// 校验失败（spawn 失败 / host 不支持）不阻断，插件标记 `error` 并继续。
 /// 结果报告 + **写闸2·观测账本**（`state.contract_states`，处置=安装路径的
 /// plugin_watcher 拒绝注册已做；此处为人工巡检的收口，见契约闸门方案 Phase2）。
+/// 另做注册表 manifest ↔ 磁盘 manifest 一致性检出（ADR 2026-08-28 决策3）：
+/// 差异为独立 `consistency_reports` 报告项 + 账本留痕。
 pub async fn validate_all_plugins_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> axum::Json<serde_json::Value> {
     let Some(invoker) = state.invoker.clone() else {
         return axum::Json(json!({
             "checked": 0, "clean": 0, "drifted": 0, "errors": 1,
+            "registry_disk_mismatches": 0,
             "message": "invoker 未接线（validate-all 不可用）",
             "reports": [],
+            "consistency_reports": [],
         }));
     };
     let enabled_ids = state.enabled_plugin_ids.read().await.clone();
     let ledger = state.contract_states.clone();
     let mut reports: Vec<serde_json::Value> = Vec::new();
+    let mut consistency_reports: Vec<serde_json::Value> = Vec::new();
     let mut clean = 0usize;
     let mut drifted = 0usize;
     let mut errors = 0usize;
+    let mut registry_disk_mismatches = 0usize;
     for m in state.manifests.read().await.iter() {
         let enabled = enabled_ids.contains(&m.id);
+        // ADR 决策3：注册表 manifest ↔ 磁盘 manifest 一致性检出——净化/热改
+        // 导致的注册表静默降级机检，差异为独立报告项 + 账本留痕。
+        let (disk_diffs, disk_unreadable) = read_disk_manifest_diffs(&state, m);
+        match (&disk_diffs, &disk_unreadable) {
+            (Some(diffs), _) if diffs.is_empty() => {
+                ledger.record_registry_disk_diffs(&m.id, Vec::new());
+            }
+            (Some(diffs), _) => {
+                registry_disk_mismatches += 1;
+                ledger.record_registry_disk_diffs(&m.id, diffs.clone());
+                consistency_reports.push(json!({
+                    "plugin_id": m.id,
+                    "status": "registry_disk_mismatch",
+                    "diffs": diffs,
+                }));
+            }
+            (None, Some(reason)) => {
+                consistency_reports.push(json!({
+                    "plugin_id": m.id,
+                    "status": "disk_manifest_unreadable",
+                    "reason": reason,
+                }));
+            }
+            (None, None) => {}
+        }
         if m.capabilities.tools.is_empty() {
             // 非 tool 插件无工具可对照：登记 not_covered 缺省（诚实标未覆盖）
             ledger.upsert(crate::contract::PluginContractState::not_covered(
@@ -1758,7 +1817,9 @@ pub async fn validate_all_plugins_handler(
         "clean": clean,
         "drifted": drifted,
         "errors": errors,
+        "registry_disk_mismatches": registry_disk_mismatches,
         "reports": reports,
+        "consistency_reports": consistency_reports,
     }))
 }
 
@@ -2037,26 +2098,34 @@ async fn reenable_hot_path(
         Some(m) => {
             let mut manifest_for_register = m.clone();
             let mut g2_outcome: Option<crate::plugin_watcher::G2VerifyOutcome> = None;
-            if let Some(invoker) = &state.invoker {
-                let outcome =
-                    crate::plugin_watcher::g2_verify_and_sanitize(invoker.as_ref(), m.clone())
-                        .await;
-                g2_outcome = Some(outcome.clone());
-                if outcome.drift {
-                    tracing::warn!(
-                        target: "plugin-enablement",
-                        plugin = %plugin_id,
-                        rejected = ?outcome.rejected_tools,
-                        spawn_failed = outcome.spawn_failed,
-                        "注册闸 G2：启用复核判定声明与实现不一致，按净化后能力注册（需修改插件）"
-                    );
-                    manifest_for_register = outcome.manifest;
-                } else if outcome.spawn_failed {
-                    tracing::warn!(
-                        target: "plugin-enablement",
-                        plugin = %plugin_id,
-                        "注册闸 G2：启用复核观测失败——按声明注册，账本标记校验未完成（待复验）"
-                    );
+            // G2 适用闸（与 boot g2_applicable 同判）：无 tools+services 的 manifest
+            // 无可验面——不跑复核。净化后 0 工具 manifest 的"复核通过"是假绿，会经
+            // 复验清除口销毁 drift/sanitized 证据；此处不写 g2 结果，账本 upsert 走
+            // not_covered 弱信号（既有证据粘滞保留，ADR 2026-08-28 决策1）。
+            if !m.capabilities.tools.is_empty() || !m.capabilities.services.is_empty() {
+                if let Some(invoker) = &state.invoker {
+                    let outcome = crate::plugin_watcher::g2_verify_and_sanitize(
+                        invoker.as_ref(),
+                        m.clone(),
+                    )
+                    .await;
+                    g2_outcome = Some(outcome.clone());
+                    if outcome.drift {
+                        tracing::warn!(
+                            target: "plugin-enablement",
+                            plugin = %plugin_id,
+                            rejected = ?outcome.rejected_tools,
+                            spawn_failed = outcome.spawn_failed,
+                            "注册闸 G2：启用复核判定声明与实现不一致，按净化后能力注册（需修改插件）"
+                        );
+                        manifest_for_register = outcome.manifest;
+                    } else if outcome.spawn_failed {
+                        tracing::warn!(
+                            target: "plugin-enablement",
+                            plugin = %plugin_id,
+                            "注册闸 G2：启用复核观测失败——按声明注册，账本标记校验未完成（待复验）"
+                        );
+                    }
                 }
             }
             // 闸2·观测：启用复核结果收口（无 invoker = not_covered 缺省）
