@@ -114,6 +114,7 @@ fn test_empty_http_endpoints_omitted_in_serialization() {
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        export_fields: vec![],
         provides: None,
     };
 

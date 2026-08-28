@@ -123,6 +123,7 @@ fn test_empty_config_files_omitted_in_serialization() {
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        export_fields: vec![],
         provides: None,
     };
 
