@@ -46,6 +46,17 @@ def _ensure_isolation_path() -> None:
             sys.path.insert(0, _p)
 
 
+def _session_workspace_key(state: dict[str, Any]) -> str:
+    """主会话工作区目录键：session_id（thread 权威键）优先，pipeline_id 兜底。
+
+    只保留目录名安全字符（字母数字-_）；清洗后为空（异常形态）回退
+    "default"——同基目录下所有会话工作区共用一层隔离目录，不会外溢。
+    """
+    raw = str(state.get("session_id") or state.get("pipeline_id") or "")
+    cleaned = "".join(c for c in raw if c.isalnum() or c in "-_")
+    return cleaned or "default"
+
+
 # ── state 聚合读取器（server.py on_load 注入，pipeline-state capability）──
 _state_reader: Any = None
 # 最近一次聚合行快照（async 上下文刷新，sync 消费端只读缓存——
@@ -234,25 +245,29 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         ws_spec = ec.get("workspace") if isinstance(ec, dict) else None
 
         # ── 主会话（无任务身份、无显式工作区）工作区 ──
-        # 工作区 = 配置的工作空间根（get_workspace_base_dir，任务工作区的父
-        # 目录），skills 快照同步到该目录——agent 配置引用的 skills/... 相对
-        # 路径在会话工作区内解析。仓库根不得作为会话工作区（agent 读写面
-        # 不得触及项目源码树）；缺锚点时文件工具按 fail-closed 报错。
+        # 工作区 = 「配置的工作空间根/sessions/{session_id}」——每会话独立
+        # 目录（与任务管道 {task_id} 同构）：会话间隔离、不与任务目录互踩、
+        # 仍在被 .gitignore 的基目录下（不新增 git 面）；跨 run 稳定（键 =
+        # session_id，会话内文件可续用）。skills 快照同步到该目录，agent
+        # 配置引用的 skills/... 相对路径在会话工作区内解析。仓库根不得作为
+        # 会话工作区（agent 读写面不得触及项目源码树）；缺锚点时文件工具
+        # 按 fail-closed 报错。
         _explicit_source = ws_spec.get("source_path") or "" if isinstance(ws_spec, dict) else ""
         if not state.get("task.id") and not _explicit_source:
             try:
                 _ensure_isolation_path()
                 from isolation.workspace import get_workspace_base_dir  # noqa: PLC0415
 
-                _ws_root = str(get_workspace_base_dir())
+                _session_key = _session_workspace_key(state)
+                _ws_root = str(Path(get_workspace_base_dir()) / "sessions" / _session_key)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[WorkspaceLifecycle] 主会话工作区根解析失败，本会话文件工具无锚点 | error=%s",
+                    "[WorkspaceLifecycle] 主会话工作区解析失败，本会话文件工具无锚点 | error=%s",
                     exc,
                 )
                 return PluginResult()
             # skills 源 = 项目根 skills/（manager 的 base_path 决定复制源），
-            # 目标 = 会话工作区根；服务不可用时降级为纯解析（目录由根解析侧建）。
+            # 目标 = 会话工作区；服务不可用时降级为纯解析（目录由根解析侧建）。
             manager = self._get_manager(base_path_hint=None)
             if manager is not None:
                 try:
@@ -263,14 +278,20 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                         exc,
                     )
             logger.info(
-                "[WorkspaceLifecycle] init 主会话工作区 | path=%s",
+                "[WorkspaceLifecycle] init 主会话工作区 | session=%s | path=%s",
+                _session_key,
                 _ws_root,
             )
             return PluginResult(
                 state_updates={
                     "workspace": _ws_root,
                     "project_root": _ws_root,
-                    "ws_meta": {"mode": "plain", "path": _ws_root, "project_root": _ws_root},
+                    "ws_meta": {
+                        "mode": "plain",
+                        "path": _ws_root,
+                        "project_root": _ws_root,
+                        "session_id": _session_key,
+                    },
                 }
             )
 

@@ -102,11 +102,37 @@ async def test_workspace_init_main_session_gets_workspace_root(plugins, monkeypa
 
     monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: tmp_path)
 
-    result = await plugins["ws"].execute(plugins["ctx_factory"]({"current_phase": "init"}))
+    result = await plugins["ws"].execute(
+        plugins["ctx_factory"]({"current_phase": "init", "session_id": "thread-abc123"})
+    )
     updates = result.state_updates
-    assert updates["workspace"] == str(tmp_path)
-    assert updates["project_root"] == str(tmp_path)
+    expected = str(tmp_path / "sessions" / "thread-abc123")
+    assert updates["workspace"] == expected
+    assert updates["project_root"] == expected
     assert updates["ws_meta"]["mode"] == "plain"
+    assert updates["ws_meta"]["session_id"] == "thread-abc123"
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_main_session_key_fallback_and_sanitized(plugins, monkeypatch, tmp_path):
+    """会话键：session_id 缺省回退 pipeline_id；不安全字符清洗；全空回退 default。"""
+    import tests._isolation_path  # noqa: F401
+    import isolation.workspace as ws_mod
+
+    monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: tmp_path)
+
+    r1 = await plugins["ws"].execute(
+        plugins["ctx_factory"]({"current_phase": "init", "pipeline_id": "pipe-xyz"})
+    )
+    assert r1.state_updates["workspace"] == str(tmp_path / "sessions" / "pipe-xyz")
+
+    r2 = await plugins["ws"].execute(
+        plugins["ctx_factory"]({"current_phase": "init", "session_id": "../escape"})
+    )
+    assert r2.state_updates["workspace"] == str(tmp_path / "sessions" / "escape")
+
+    r3 = await plugins["ws"].execute(plugins["ctx_factory"]({"current_phase": "init"}))
+    assert r3.state_updates["workspace"] == str(tmp_path / "sessions" / "default")
 
 
 async def test_workspace_init_main_session_syncs_skills_via_manager(
@@ -134,15 +160,20 @@ async def test_workspace_init_main_session_syncs_skills_via_manager(
         type(plugins["ws"]), "_get_manager", lambda self, base_path_hint=None: manager
     )
 
-    result = await plugins["ws"].execute(plugins["ctx_factory"]({"current_phase": "init"}))
-    assert result.state_updates["workspace"] == str(tmp_path)
+    result = await plugins["ws"].execute(
+        plugins["ctx_factory"]({"current_phase": "init", "session_id": "thread-abc"})
+    )
+    ws_dir = tmp_path / "sessions" / "thread-abc"
+    assert result.state_updates["workspace"] == str(ws_dir)
     # 删值实验对照：manager 同步把源技能带进会话工作区
-    synced = tmp_path / "skills" / "skill-demo" / "SKILL.md"
+    synced = ws_dir / "skills" / "skill-demo" / "SKILL.md"
     assert synced.read_text(encoding="utf-8") == "demo"
     # 增量幂等：改源后重跑不同步已存在技能（已有技能保持原样）
     (repo_skills / "skill-demo" / "SKILL.md").write_text("changed", encoding="utf-8")
     await plugins["ws"].execute(
-        plugins["ctx_factory"]({"current_phase": "init", "workspace": str(tmp_path)})
+        plugins["ctx_factory"](
+            {"current_phase": "init", "session_id": "thread-abc", "workspace": str(ws_dir)}
+        )
     )
     assert synced.read_text(encoding="utf-8") == "demo"
     assert shutil
@@ -158,10 +189,13 @@ async def test_workspace_init_main_session_degrades_without_manager(plugins, mon
         type(plugins["ws"]), "_get_manager", lambda self, base_path_hint=None: None
     )
 
-    result = await plugins["ws"].execute(plugins["ctx_factory"]({"current_phase": "init"}))
+    result = await plugins["ws"].execute(
+        plugins["ctx_factory"]({"current_phase": "init", "session_id": "thread-abc"})
+    )
     updates = result.state_updates
-    assert updates["workspace"] == str(tmp_path)
-    assert not (tmp_path / "skills").exists()
+    ws_dir = tmp_path / "sessions" / "thread-abc"
+    assert updates["workspace"] == str(ws_dir)
+    assert not (ws_dir / "skills").exists()
 
 
 async def test_workspace_init_main_session_project_root_idempotent(plugins):
