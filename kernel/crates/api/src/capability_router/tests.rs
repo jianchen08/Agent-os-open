@@ -1038,6 +1038,57 @@ async fn test_tool_executor_missing_invoker_returns_protocol_error() {
 // ── M2：service-registry capability（用真实内存 SqliteStore 验证端到端）──
 
 /// 构造一个注入了内存 store 的路由器。
+// ── event-bus.emit_domain（ADR 2026-08-28 事件下沉底座） ──────────────
+
+#[tokio::test]
+async fn emit_domain_broadcasts_to_domain_broadcaster() {
+    let got: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(String, serde_json::Value)>)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = got.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_domain_broadcaster(Arc::new(move |name: &str, tags: Vec<(String, serde_json::Value)>| {
+            sink.lock().unwrap().push((name.to_string(), tags));
+        }));
+    let res = router
+        .handle(
+            "event-bus",
+            "emit_domain",
+            json!({"event": "task_completed",
+                   "tags": {"pipeline_id": "p1", "task_id": "t1", "user_id": "u1"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res["status"], "emitted");
+    let captured = got.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].0, "task_completed");
+    let tag = |k: &str| {
+        captured[0]
+            .1
+            .iter()
+            .find(|(tk, _)| tk == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(serde_json::Value::Null)
+    };
+    assert_eq!(tag("pipeline_id"), json!("p1"));
+    assert_eq!(tag("task_id"), json!("t1"));
+}
+
+#[tokio::test]
+async fn emit_domain_without_broadcaster_fails_closed_and_missing_event_rejected() {
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
+    let err = router
+        .handle("event-bus", "emit_domain", json!({"event": "x"}))
+        .await
+        .expect_err("broadcaster 未装配须显式失败");
+    assert!(err.to_string().contains("domain_broadcaster"), "{err}");
+    let err = router
+        .handle("event-bus", "emit_domain", json!({"tags": {}}))
+        .await
+        .expect_err("缺 event 须拒绝");
+    assert!(err.to_string().contains("event"), "{err}");
+}
+
 fn router_with_store() -> KernelCapabilityRouter {
     let store: Arc<dyn StorageBackend> =
         Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
