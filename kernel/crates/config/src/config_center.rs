@@ -1266,7 +1266,10 @@ mod tests {
 
         // 合法 yaml 写入 → 成功审计（config_type 按目录判定）
         std::fs::write(temp.path().join("agents/hello.yaml"), "k: v\n").unwrap();
-        wait_until(|| center.get_audit_log(10).len() >= 1, Duration::from_secs(5));
+        wait_until(
+            || center.get_audit_log(10).len() >= 1,
+            Duration::from_secs(5),
+        );
         let log = center.get_audit_log(10);
         assert!(log[0].success);
         assert_eq!(log[0].config_type, "agent");

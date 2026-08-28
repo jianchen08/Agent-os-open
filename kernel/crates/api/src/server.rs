@@ -927,8 +927,10 @@ fn derive_run_terminal_events(
         events.push(("run.suspended", run_tags));
         return events;
     }
-    let user_cancelled =
-        final_state.get("router.stop_reason").and_then(|s| s.as_str()) == Some("user_requested");
+    let user_cancelled = final_state
+        .get("router.stop_reason")
+        .and_then(|s| s.as_str())
+        == Some("user_requested");
     if user_cancelled {
         events.push(("run.cancelled", run_tags));
         return events;
@@ -1890,8 +1892,8 @@ async fn chat_handler(
     // 消费任务 panic（rx 关闭）时给出明确错误而非挂死等待。
     let outcome = rx.await.unwrap_or_else(|_| EngineOutcome {
         content: "[engine task terminated unexpectedly]".to_string(),
-            final_assistant: None,
-            failed: true,
+        final_assistant: None,
+        failed: true,
         degraded: false,
         plugin_errors: Vec::new(),
     });

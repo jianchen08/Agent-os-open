@@ -271,7 +271,11 @@ impl InboundRouter {
         let pipeline_id = field_or_data(msg, "pipeline_id")
             .unwrap_or_default()
             .to_string();
-        match self.dispatcher.dispatch_stop(&thread_id, &pipeline_id).await {
+        match self
+            .dispatcher
+            .dispatch_stop(&thread_id, &pipeline_id)
+            .await
+        {
             Ok(()) => RouteOutcome::Handled,
             Err(e) => RouteOutcome::Error(e),
         }

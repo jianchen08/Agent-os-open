@@ -1185,7 +1185,9 @@ mod tests {
             description: None,
             input_schema: None,
         }];
-        let err = loader.validate_manifest(&manifest).expect_err("空 step name 必须拒绝");
+        let err = loader
+            .validate_manifest(&manifest)
+            .expect_err("空 step name 必须拒绝");
         let msg = format!("{err}");
         assert!(
             msg.contains("steps_bad"),
@@ -1241,7 +1243,9 @@ mod tests {
                 input_schema: None,
             },
         ];
-        let err = loader.validate_manifest(&manifest).expect_err("重复 step name 必须拒绝");
+        let err = loader
+            .validate_manifest(&manifest)
+            .expect_err("重复 step name 必须拒绝");
         let msg = format!("{err}");
         assert!(
             msg.contains("steps_dup"),

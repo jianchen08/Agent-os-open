@@ -251,10 +251,7 @@ async fn stop_generation_routes_pipeline_id() {
     let outcome = router.route(&msg, "user-A").await;
     assert_eq!(outcome, RouteOutcome::Handled);
     let stops = dispatcher.stops.lock().unwrap();
-    assert_eq!(
-        stops[0],
-        ("thread-1".to_string(), "p-subtask".to_string())
-    );
+    assert_eq!(stops[0], ("thread-1".to_string(), "p-subtask".to_string()));
 }
 
 // ── regenerate 路由（批次 D）：重新生成/回退/编辑重发 ──

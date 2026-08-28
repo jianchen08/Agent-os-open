@@ -1393,10 +1393,7 @@ mod tests {
             if let Some(line) = capture.lock().unwrap().pop() {
                 return line;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "等待 cat 回显超时"
-            );
+            assert!(tokio::time::Instant::now() < deadline, "等待 cat 回显超时");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -2043,8 +2040,7 @@ mod tests {
                 match reader.read_until(b'\n', &mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
-                        cap2
-                            .lock()
+                        cap2.lock()
                             .unwrap()
                             .push(String::from_utf8_lossy(&buf).trim().to_string());
                     }
@@ -2077,7 +2073,8 @@ mod tests {
         assert_eq!(router.calls.lock().unwrap().len(), 1);
 
         // 数值 id 反向调用 → id 按原类型回显（JSON-RPC 2.0 要求 response.id === request.id）
-        let msg2 = json!({"jsonrpc": "2.0", "id": 7, "method": "event-bus.emit", "params": {"e": "tick"}});
+        let msg2 =
+            json!({"jsonrpc": "2.0", "id": 7, "method": "event-bus.emit", "params": {"e": "tick"}});
         handle_incoming_request(
             "event-bus.emit",
             &msg2,
@@ -2149,7 +2146,10 @@ mod tests {
         let line2 = read_echo_line(&capture2).await;
         let resp2: Value = serde_json::from_str(&line2).unwrap();
         assert_eq!(resp2["error"]["code"], -32601);
-        assert!(resp2["error"]["message"].as_str().unwrap().contains("method not found"));
+        assert!(resp2["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("method not found"));
     }
 
     #[tokio::test]
@@ -2170,8 +2170,14 @@ mod tests {
         let line = read_echo_line(&capture).await;
         let resp: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(resp["error"]["code"], -32601);
-        assert!(resp["error"]["message"].as_str().unwrap().contains("method not found"));
-        assert!(router.calls.lock().unwrap().is_empty(), "未知 method 不应路由");
+        assert!(resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("method not found"));
+        assert!(
+            router.calls.lock().unwrap().is_empty(),
+            "未知 method 不应路由"
+        );
     }
 
     #[tokio::test]
@@ -2194,8 +2200,12 @@ mod tests {
     async fn test_incoming_notification_unknown_and_no_router() {
         // 未知 method → 丢弃（不 panic、不路由）
         let router = Arc::new(RecordingRouter::new(json!({})));
-        handle_incoming_notification("notifications/initialized", Value::Null, &Some(router.clone()))
-            .await;
+        handle_incoming_notification(
+            "notifications/initialized",
+            Value::Null,
+            &Some(router.clone()),
+        )
+        .await;
         assert!(router.calls.lock().unwrap().is_empty());
 
         // router 为 None → 静默丢弃
@@ -2222,7 +2232,10 @@ mod tests {
     #[tokio::test]
     async fn test_send_notification_not_connected_returns_error() {
         let client = McpClient::new_stdio("cat", vec![]);
-        let err = client.send_notification("notifications/initialized", None).await.unwrap_err();
+        let err = client
+            .send_notification("notifications/initialized", None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, McpError::ConnectionFailed { .. }));
     }
 
@@ -2318,7 +2331,10 @@ mod tests {
         client.connect().await.unwrap();
         let result = client.initialize(&json!({"k": "v"})).await;
         assert!(result.is_ok());
-        assert!(*client.initialized.lock().await, "initialize 后应置 initialized");
+        assert!(
+            *client.initialized.lock().await,
+            "initialize 后应置 initialized"
+        );
 
         // 崩溃 sidecar：initialize 快速失败，initialized 保持 false
         let script2 = "import sys; sys.stdin.readline(); sys.exit(1)";
@@ -2343,13 +2359,19 @@ mod tests {
             method: "tools/list".to_string(),
             params: None,
         };
-        let err = client.http_post("http://127.0.0.1:1", &request).await.unwrap_err();
+        let err = client
+            .http_post("http://127.0.0.1:1", &request)
+            .await
+            .unwrap_err();
         assert!(matches!(err, McpError::ConnectionFailed { .. }));
 
         // 连接拒绝 → Transport 错误
         let mut client2 = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), None);
         client2.connect().await.unwrap();
-        let err2 = client2.http_post("http://127.0.0.1:1", &request).await.unwrap_err();
+        let err2 = client2
+            .http_post("http://127.0.0.1:1", &request)
+            .await
+            .unwrap_err();
         assert!(matches!(err2, McpError::Transport { .. }));
     }
 
@@ -2548,7 +2570,10 @@ mod tests {
     #[test]
     fn test_resolve_env_placeholders_unclosed_and_empty() {
         // 未闭合占位 → 原样保留不报错
-        assert_eq!(resolve_env_placeholders("a${UNCLOSED").unwrap(), "a${UNCLOSED");
+        assert_eq!(
+            resolve_env_placeholders("a${UNCLOSED").unwrap(),
+            "a${UNCLOSED"
+        );
         // 空占位 ${} → 变量名为空 → 未设置报错
         assert!(resolve_env_placeholders("${}").is_err());
         // 空串输入

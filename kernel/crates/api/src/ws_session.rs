@@ -1573,7 +1573,9 @@ mod tests {
         thread_id: &str,
         pipeline_id: &str,
     ) -> Result<(), String> {
-        stop_state(store).dispatch_stop(thread_id, pipeline_id).await
+        stop_state(store)
+            .dispatch_stop(thread_id, pipeline_id)
+            .await
     }
 
     #[tokio::test]
@@ -1632,7 +1634,10 @@ mod tests {
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
             as Arc<dyn StorageBackend>;
         // 主管道 p-main 有 running run；子任务管道 p-sub 也有 running run。
-        store.create_run("run-main", "cfg", "default").await.unwrap();
+        store
+            .create_run("run-main", "cfg", "default")
+            .await
+            .unwrap();
         store.set_run_pipeline("run-main", "p-main").await.unwrap();
         store.create_run("run-sub", "cfg", "default").await.unwrap();
         store.set_run_pipeline("run-sub", "p-sub").await.unwrap();

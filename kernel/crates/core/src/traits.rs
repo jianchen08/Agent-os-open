@@ -1594,10 +1594,14 @@ mod tests {
                 ]
             }
         });
-        let m: PluginManifest = serde_json::from_value(json).expect("带 steps 的 manifest 应可解析");
+        let m: PluginManifest =
+            serde_json::from_value(json).expect("带 steps 的 manifest 应可解析");
         assert_eq!(m.capabilities.steps.len(), 2);
         assert_eq!(m.capabilities.steps[0].name, "task.inject_params");
-        assert_eq!(m.capabilities.steps[0].description.as_deref(), Some("注入任务参数"));
+        assert_eq!(
+            m.capabilities.steps[0].description.as_deref(),
+            Some("注入任务参数")
+        );
         assert!(m.capabilities.steps[0].input_schema.is_some());
         assert_eq!(m.capabilities.steps[1].name, "task.remind");
         assert_eq!(m.capabilities.steps[1].input_schema, None);
