@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 配置管理 API 服务测试（LLM 配置域）
  *

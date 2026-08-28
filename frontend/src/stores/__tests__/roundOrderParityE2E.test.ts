@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 聊天消息顺序对等（CI 门禁）：一轮 = 一条消息（DSH 形态）的事件流 → store
  * 最终顺序必须与后端 message_slots 的 seq 升序完全一致（后端顺序不变式）。

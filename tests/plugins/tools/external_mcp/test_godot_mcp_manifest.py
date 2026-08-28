@@ -1,3 +1,4 @@
+# @feature: FP-0.2.一 插件协议 | @ci: python-coverage
 # @feature: scan批B 安全三修复 | @vision: V2 可观测 | @ci: python-coverage
 """godot_mcp 外部 MCP 插件 manifest 契约测试（scan批B #3）。
 

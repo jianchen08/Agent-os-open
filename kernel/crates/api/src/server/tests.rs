@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @ci: rust-test
 // 由 server.rs 的主 #[cfg(test)] 测试块体平移而来（保留私有项访问）。
 
 #[cfg(test)]
@@ -2892,7 +2893,10 @@ fn stage_finalize_extracts_final_assistant() {
         ],
     });
     let out = stage_finalize(&final_state, "tenant-1", "pipe-1", "thread-1", "agent-1");
-    let a = out.final_assistant.clone().expect("必须提取到本轮 assistant 消息");
+    let a = out
+        .final_assistant
+        .clone()
+        .expect("必须提取到本轮 assistant 消息");
     assert_eq!(a["content"], "本轮回复");
     assert_eq!(a["seq"], 4, "权威 seq 必须来自引擎分配（非数组猜测）");
     // 无消息历史 → None（回退路径不炸）

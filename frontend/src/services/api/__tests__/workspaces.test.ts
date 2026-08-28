@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 工作空间 API 服务测试
  *

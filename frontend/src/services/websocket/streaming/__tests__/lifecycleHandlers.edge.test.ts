@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * lifecycleHandlers 未覆盖分支补充测试
  *

@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @ci: rust-test
 //! boot sidecar 预热：把管道引用插件的宿主冷启动提前到启动后台窗口。
 //!
 //! 症状背景：sidecar 按调用懒 spawn，管道链（prepare/core/post 共 ~30 个

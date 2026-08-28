@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * logger 统一日志服务测试
  *

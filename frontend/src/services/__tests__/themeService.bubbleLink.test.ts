@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 // @feature: 气泡内链接可读性 | @ci: frontend-baseline
 /**
  * --bubble-link 发射测试：用户气泡面常为页面主色或其反转，markdown 链接

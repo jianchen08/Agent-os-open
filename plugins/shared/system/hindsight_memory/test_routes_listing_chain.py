@@ -1,3 +1,4 @@
+# @feature: FP-0.2.六 记忆检索 | @ci: python-coverage
 # @feature: memory 域路由 documents 通路 | @ci: python-coverage
 """memory 列表/统计端点真实链路测试（空查询链路断裂的回归判据）。
 

@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
 # @feature: 插件 http.handle 面样板收口 | @ci: python-coverage
 """http_json 公共模块契约测试 — 内核 HttpHandleResponse / ToolExecutionResult 样板。
 

@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * useWidgetEvents 全局 widget_event 订阅 hook 测试
  *

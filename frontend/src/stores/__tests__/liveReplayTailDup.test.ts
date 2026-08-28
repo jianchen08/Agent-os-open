@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 真机事件流重放（live_replay）：把校验抓取的完整 WS 事件序列（capture_live_events）
  * 依次喂给真实 streaming handlers → store，检查用户复现的「气泡尾部整段重复

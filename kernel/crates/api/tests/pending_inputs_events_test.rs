@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 管道引擎 | @ci: rust-test
 //! pending 输入队列补测（ADR-2026-08-26 diff-cov 缺口）
 //!
 //! 覆盖三块 lib 单测未触及的分支：

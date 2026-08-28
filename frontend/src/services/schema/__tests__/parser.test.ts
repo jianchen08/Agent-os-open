@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * schema/parser 单测：数据源引用解析（parseDataSourceRef / resolveDataSource）
  */

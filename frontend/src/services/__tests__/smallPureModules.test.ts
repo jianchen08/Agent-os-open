@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 文件编辑器配置 / 布局解析器 / 认证回调注册 测试
  *

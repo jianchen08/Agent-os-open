@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 任务管理 API 补充测试（tasks.ts 未覆盖函数）
  *

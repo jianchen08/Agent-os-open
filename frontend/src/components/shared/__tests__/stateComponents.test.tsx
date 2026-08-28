@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 轻量展示组件测试：EmptyState / ErrorState / Pagination
  *

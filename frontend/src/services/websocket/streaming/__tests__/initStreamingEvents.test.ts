@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * initStreamingEvents / destroyStreamingEvents / reinitStreamingEvents 测试
  *

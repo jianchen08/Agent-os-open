@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * Sidebar 消息搜索命中点击跳转测试
  *

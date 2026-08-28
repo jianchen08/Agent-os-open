@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 会话插件表单值持久层测试（快照 v2：values + executionContext 成品区）
  *

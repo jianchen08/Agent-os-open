@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
 # @ci: python-coverage
 """human_interaction file_paths 接线测试（交互面板文件展示链路）。
 

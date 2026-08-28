@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * votingStore 单测：投票会话创建/投票/关闭/取消/展开/查询
  */

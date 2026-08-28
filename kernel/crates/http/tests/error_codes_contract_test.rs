@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @ci: rust-test
 //! 机械闸：`config/error_codes.json`（单一真值源）↔ `ApiError` 代码副本锁一致。
 //!
 //! 仿 kernel_capabilities 机械闸模式（读真实仓库文件断言，不读代码副本）：
@@ -5,9 +6,9 @@
 //! - 信封序列化形状（code/message/source/retryable/details/request_id）与 json 语义一致；
 //! - Internal 原文透传不脱敏（用户裁定）。
 
+use agentos_http::error::ApiError;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use agentos_http::error::ApiError;
 use serde_json::Value;
 
 /// 仓库 config/error_codes.json 的绝对路径（CARGO_MANIFEST_DIR 相对，同 kernel_capabilities 模式）。
@@ -40,25 +41,78 @@ fn code_entry<'a>(doc: &'a Value, code: &str) -> &'a Value {
 /// 9 个 ApiError 变体 → (code, source, retryable) 的代码侧真值。
 fn api_error_truth() -> Vec<(ApiError, &'static str, &'static str, bool)> {
     vec![
-        (ApiError::BadRequest { message: "m".into() }, "BAD_REQUEST", "kernel", false),
-        (ApiError::Unauthorized { message: "m".into() }, "UNAUTHORIZED", "kernel", false),
-        (ApiError::Forbidden { message: "m".into() }, "FORBIDDEN", "kernel", false),
-        (ApiError::NotFound { message: "m".into() }, "RESOURCE_NOT_FOUND", "kernel", false),
-        (ApiError::Conflict { message: "m".into() }, "CONFLICT", "kernel", false),
         (
-            ApiError::UnprocessableEntity { message: "m".into() },
+            ApiError::BadRequest {
+                message: "m".into(),
+            },
+            "BAD_REQUEST",
+            "kernel",
+            false,
+        ),
+        (
+            ApiError::Unauthorized {
+                message: "m".into(),
+            },
+            "UNAUTHORIZED",
+            "kernel",
+            false,
+        ),
+        (
+            ApiError::Forbidden {
+                message: "m".into(),
+            },
+            "FORBIDDEN",
+            "kernel",
+            false,
+        ),
+        (
+            ApiError::NotFound {
+                message: "m".into(),
+            },
+            "RESOURCE_NOT_FOUND",
+            "kernel",
+            false,
+        ),
+        (
+            ApiError::Conflict {
+                message: "m".into(),
+            },
+            "CONFLICT",
+            "kernel",
+            false,
+        ),
+        (
+            ApiError::UnprocessableEntity {
+                message: "m".into(),
+            },
             "UNPROCESSABLE_ENTITY",
             "kernel",
             false,
         ),
-        (ApiError::Internal { message: "m".into() }, "INTERNAL_ERROR", "kernel", true),
         (
-            ApiError::ServiceUnavailable { message: "m".into() },
+            ApiError::Internal {
+                message: "m".into(),
+            },
+            "INTERNAL_ERROR",
+            "kernel",
+            true,
+        ),
+        (
+            ApiError::ServiceUnavailable {
+                message: "m".into(),
+            },
             "SERVICE_UNAVAILABLE",
             "kernel",
             true,
         ),
-        (ApiError::WebSocket { message: "m".into() }, "WEBSOCKET_ERROR", "kernel", false),
+        (
+            ApiError::WebSocket {
+                message: "m".into(),
+            },
+            "WEBSOCKET_ERROR",
+            "kernel",
+            false,
+        ),
     ]
 }
 
@@ -141,10 +195,12 @@ async fn error_envelope_shape_and_internal_passthrough() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["error"]["code"], "INTERNAL_ERROR", "code 应为稳定机器码");
     assert_eq!(
-        json["error"]["message"],
-        "io error: 磁盘写入失败 (path: /tmp/x)",
+        json["error"]["code"], "INTERNAL_ERROR",
+        "code 应为稳定机器码"
+    );
+    assert_eq!(
+        json["error"]["message"], "io error: 磁盘写入失败 (path: /tmp/x)",
         "Internal 原文透传不脱敏"
     );
     assert_eq!(json["error"]["source"], "kernel");

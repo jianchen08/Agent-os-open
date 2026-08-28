@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 小型 API 服务测试（ASR / 全局搜索 / Payload 诊断 / 评估指标）
  *

@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
 # @feature: 主题气泡与皮肤协调 | @ci: python-coverage
 """dsh_adapter 气泡令牌翻译测试——皮肤下聊天气泡跟皮不脱节、文字恒可读。
 

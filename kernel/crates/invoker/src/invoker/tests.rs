@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @ci: rust-test
 // 由 invoker.rs 的主 #[cfg(test)] 测试块体平移而来（保留私有项访问）。
 
 use super::*;

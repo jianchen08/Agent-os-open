@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * useModelCapabilities 单测：多模态能力获取、缓存、输入能力计算
  */

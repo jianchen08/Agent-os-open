@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 真实数据回归：多轮工具循环（真实 DB 消息，16:24 用户运行 eadf8db3e117，
  * 13 轮 assistant+tool 交替）的渲染合并产物——「工具卡在轮内位置、尾部

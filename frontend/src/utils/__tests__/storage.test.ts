@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * 本地存储工具测试（storage 单例 + uiStorage 便捷封装）
  *

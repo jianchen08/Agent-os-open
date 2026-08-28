@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /** @feature 统一错误模型 | @ci: frontend-test */
 /**
  * handlePluginError 插件执行错误通知（2026-08-27）

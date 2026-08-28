@@ -1,3 +1,4 @@
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * useModelContextInfo 单测：模型 context_window 查询与有效性判定
  */
