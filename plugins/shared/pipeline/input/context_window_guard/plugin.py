@@ -19,8 +19,18 @@
   + 末尾追加 COMPACTION_INSTRUCTION（user 角色）。同模型时复用前缀 cache，
   任何模型时压缩 LLM 读到完整连贯消息流。产物结构不变（五段 JSON）。
 
+压缩块消息化（ADR 2026-08-28-compression-block-pointer-indirection）：
+- 压缩 = 对 message 序列的一次原地编辑：被压批次头部原位变为压缩块消息
+  （过程块 + 快照块，普通 system 消息形态），中段槽位删除留 gap，后段不动；
+- 每条块消息自带 metadata.compression_ref 引用元数据（指向记忆库落库锚点，
+  供回溯/展开/审计；LLM 输入只消费块消息自身的摘要内容）；块消息随消息
+  序列经引擎 messages ops 与普通消息同机制持久化（message_slots/blobs 账本），
+  读路径零额外操作；
+- 存储放置默认记忆库（tags/pipeline:{id} 落库契约保留）；写库失败 → 块内容
+  降级为仅内联摘要、引用留空并 warning，流程不阻塞（fail-open）。
+
 State 命名空间:
-    - messages : 压缩后替换的消息列表
+    - messages : 压缩后替换的消息列表（含原位插入的压缩块消息）
 """
 
 from __future__ import annotations
@@ -42,6 +52,13 @@ LLMCallFn = Callable[[str | list[dict[str, Any]]], Awaitable[str]]
 # 压缩 LLM 调用耗时可达 llm.yaml call_timeout，第三参 timeout 必须显式传大值——
 # SDK 默认 CAPABILITY_CALL_TIMEOUT_S=30s 面向短调用，不传会先于压缩完成被掐断。
 CapabilityCaller = Callable[[str, dict[str, Any], float | None], Awaitable[Any]]
+
+
+def _now_iso() -> str:
+    """当前时刻 ISO8601（UTC，带时区）——压缩块引用元数据的落块时间。"""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    return datetime.now(UTC).isoformat()
 
 # 压缩摘要注入提示
 _COMPRESSION_NOTICE = (
@@ -437,17 +454,19 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         self,
         messages: list[dict[str, Any]],
         system_message: dict[str, Any] | str | None = None,
-        compression_messages: list[dict[str, Any]] | None = None,
+        prior_blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """fork 消息队列压缩：L1 + L2 + keywords + state_snapshot + memory_items。
 
-        对标 DSH summarizer：不再拼 COMPRESS_PROMPT 字符串，改为 fork 执行时的
+        对标 DSH summarizer：不拼 COMPRESS_PROMPT 字符串，改为 fork 执行时的
         消息队列并在末尾追加压缩指令——
 
-        fork = [执行时 system] + compression_messages（此前压缩块/快照，原样）
+        fork = [执行时 system] + prior_blocks（既有压缩块消息，原样）
              + 待压缩消息（原样 role/content，不压成 【用户 N】）
              + [user: COMPACTION_INSTRUCTION]
 
+        压缩块消息排在 message 序列里（ADR 2026-08-28 压缩块消息化），由调用方
+        从序列中拣出传入——压缩 LLM 据此"只合并更新，不复述已覆盖内容"。
         同模型时前缀与执行请求一致（cache 复用）；任何模型时压缩 LLM 读到
         完整连贯消息流（理解质量）。带 _context_form 的消息渲染 [form] 标签前缀
         （任务 1 语义标记叠加生效），内部字段（seq/tool_result/_context_form）
@@ -457,8 +476,8 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
             messages: 待压缩消息列表
             system_message: 执行时系统消息（dict 含 role/content，或纯字符串）；
                 None 时 fork 不带 system 前缀
-            compression_messages: 执行时装配的压缩块消息（prompt_build 产出，
-                含 _context_form 标记）；None/空时跳过
+            prior_blocks: 序列中既有的压缩块消息（metadata 含 compression_ref）；
+                None/空时跳过
 
         Returns:
             压缩结果字典；空消息返回空结果字典（含空键）；
@@ -478,7 +497,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
                 "memory_items": {},
             }
 
-        fork_messages = self._build_fork_messages(messages, system_message, compression_messages)
+        fork_messages = self._build_fork_messages(messages, system_message, prior_blocks)
 
         try:
             response = await self._call_llm(fork_messages)
@@ -705,18 +724,19 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         self,
         messages: list[dict[str, Any]],
         system_message: dict[str, Any] | str | None = None,
-        compression_messages: list[dict[str, Any]] | None = None,
+        prior_blocks: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """构造 fork 消息队列（对齐执行时装配顺序 + 末尾压缩指令）。
 
-        顺序：[执行时 system] + compression_messages + 待压缩消息 + [user 指令]。
-        system 与 compression_messages 复现执行请求前缀（同模型 cache 复用）；
-        末尾指令是唯一新增输入（DSH summarizer 方案）。
+        顺序：[执行时 system] + prior_blocks（既有压缩块消息，原样）+
+        待压缩消息 + [user 指令]。
+        system 与块前缀复现执行请求前缀（同模型 cache 复用）；末尾指令是
+        唯一新增输入（DSH summarizer 方案）。
 
         Args:
             messages: 待压缩消息（原样进 fork，不 _format_messages 压扁）
             system_message: 执行时系统消息（dict 或 str；None 跳过）
-            compression_messages: 压缩块消息（prompt_build 产出；None/空跳过）
+            prior_blocks: 序列中既有的压缩块消息（None/空跳过）
 
         Returns:
             fork 消息列表
@@ -729,9 +749,9 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         elif isinstance(system_message, str) and system_message.strip():
             fork.append({"role": "system", "content": system_message})
 
-        for cm in compression_messages or []:
-            if isinstance(cm, dict) and cm.get("content"):
-                fork.append(self._render_fork_message(cm))
+        for pb in prior_blocks or []:
+            if isinstance(pb, dict) and pb.get("content"):
+                fork.append(self._render_fork_message(pb))
 
         for m in messages:
             if isinstance(m, dict):
@@ -807,7 +827,8 @@ class CompressionService:
         """初始化压缩服务。
 
         Args:
-            backend: IMemoryBackend 实例（或 duck-type）；None 时压缩结果不入库
+            backend: IMemoryBackend 实例（或 duck-type）；None 时压缩块不入库
+                （块消息仍以内联摘要进入序列，引用留空）
             llm_call_fn: LLM 调用函数；None 时压缩无法执行（compress_messages 早退）
             config: 压缩配置；None 用默认 CompressionConfig
         """
@@ -823,6 +844,9 @@ class CompressionService:
         self._config: dict[str, Any] = {"context_window": 128000}
         # 最近一次 compress_messages 累计的被删消息 seq 列表（供插件 emit set(seq,null) ops）
         self._last_deleted_seqs: list[int] = []
+        # 最近一次 compress_messages 产出的压缩块消息（自带 seq；供插件 emit
+        # set(seq, 块消息) ops——块消息原位占用被压批次的头部槽位）
+        self._last_block_msgs: list[dict[str, Any]] = []
 
     def set_llm_call_fn(self, llm_call_fn: LLMCallFn) -> None:
         """延迟注入 LLM 调用函数。
@@ -865,7 +889,6 @@ class CompressionService:
         trigger_ratio: float = 0.55,
         llm_call_fn: LLMCallFn | None = None,
         system_message: dict[str, Any] | str | None = None,
-        compression_messages: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]] | None:
         """预算驱动的完整压缩流程。
 
@@ -873,7 +896,8 @@ class CompressionService:
         压旧消息 → 落库 → 检查总 tokens；仍超阈值则再压一轮。
 
         Args:
-            messages: 完整消息列表
+            messages: 完整消息列表（含既有压缩块消息——fork 时作为消息流
+                一部分原样呈现给压缩 LLM）
             context_window: 主模型上下文窗口（预算切分用）
             trigger_ratio: 触发压缩比例
             llm_call_fn: 本次调用覆盖的 LLM 调用函数（async (messages) -> str），
@@ -881,12 +905,10 @@ class CompressionService:
                 不传则沿用构造/上次注入的函数
             system_message: 执行时系统消息（fork 前缀用，cache 复现）；
                 由插件从 ctx.state["system_message"] 传入
-            compression_messages: 执行时装配的压缩块消息（fork 前缀用，
-                含 state_snapshot / 此前 L1/L2 块）；由插件从
-                ctx.state["compression_messages"] 传入
 
         Returns:
-            压缩后的消息列表；无需压缩/失败/无 LLM 函数返回 None
+            压缩后的消息列表（含原位插入的压缩块消息）；
+            无需压缩/失败/无 LLM 函数返回 None
         """
         if llm_call_fn is not None:
             self.set_llm_call_fn(llm_call_fn)
@@ -896,7 +918,6 @@ class CompressionService:
                 context_window,
                 trigger_ratio,
                 system_message,
-                compression_messages,
             )
         except Exception as exc:
             logger.error(
@@ -912,16 +933,17 @@ class CompressionService:
         context_window: int,
         trigger_ratio: float,
         system_message: dict[str, Any] | str | None = None,
-        compression_messages: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]] | None:
         """compress_messages 的实际实现。
 
-        多轮压缩中累计的"被删消息 seq 列表"写入 self._last_deleted_seqs，
-        供外层（插件 execute）据此生成 set(seq, null) ops。返回值仍为压缩后
-        消息列表（或 None），保持 compress_messages 向后兼容。
+        多轮压缩中累计的"被删消息 seq 列表"与"压缩块消息"写入
+        self._last_deleted_seqs / self._last_block_msgs，供外层（插件 execute）
+        据此生成 set(seq, null) / set(seq, 块) ops。返回值仍为压缩后消息列表
+        （或 None），保持 compress_messages 向后兼容。
         """
-        # 重置上一轮累计的被删 seq（每轮调用独立；注解见 __init__）
+        # 重置上一轮累计（每轮调用独立；注解见 __init__）
         self._last_deleted_seqs = []
+        self._last_block_msgs = []
 
         if not self._llm_call_fn:
             logger.warning("[CompressionService] 跳过压缩：未提供 LLM 调用函数")
@@ -940,7 +962,6 @@ class CompressionService:
                 context_window,
                 budgets,
                 system_message,
-                compression_messages,
             )
             if round_result is None:
                 break
@@ -970,26 +991,26 @@ class CompressionService:
         context_window: int,
         budgets: dict[str, int],
         system_message: dict[str, Any] | str | None = None,
-        compression_messages: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[int]] | None:
         """执行一轮预算驱动的压缩。
 
-        三路分离：pure_system / 旧压缩块（## 历史对话压缩摘要 / _COMPRESSION_NOTICE）/
-        其他消息；只压最后一个压缩块之后的新消息；组装为
-        pure_system + recent。
+        三路分离：pure_system（含既有压缩块消息，原样保留）/ 旧压缩块
+        （## 历史对话压缩摘要 / _COMPRESSION_NOTICE 遗留格式）/ 其他消息；
+        只压最后一个压缩块之后的新消息。
+
+        被压批次原位编辑（ADR 2026-08-28 压缩块消息化）：批次头部槽位变为
+        过程块消息，次槽变为快照块消息（批次仅 1 条时快照引用并入过程块），
+        其余被压槽位删除留 gap，recent 段不动。
 
         Args:
             messages: 当前消息列表
             context_window: 主模型窗口（recent 预算切分）
             budgets: 各层 token 预算
             system_message: 执行时系统消息（fork 前缀）
-            compression_messages: 执行时压缩块消息（fork 前缀）
 
         Returns:
-            (pure_system + recent 组成的消息列表, 被删消息的 seq 列表)；
-            无需压缩或全部批次落库失败返回 None。被删消息 = 落库成功的
-            批次 + 遗留 old_blocks，外层据此生成 set(seq, null) ops；
-            落库失败的批次原消息保留（fail-closed）。
+            (压缩后消息列表含块消息, 留 gap 的被删 seq 列表)；无需压缩或
+            全部批次压缩失败返回 None。
         """
         pure_system_msgs: list[dict[str, Any]] = []
         old_blocks: list[dict[str, Any]] = []
@@ -1029,17 +1050,23 @@ class CompressionService:
         if not old_msgs:
             return None
 
+        # 序列中既有的压缩块消息（pure_system 一部分）：进 fork 前缀，
+        # 压缩 LLM 据此"只合并更新，不复述已覆盖内容"（COMPACTION_INSTRUCTION 契约）
+        prior_blocks = [
+            m
+            for m in pure_system_msgs
+            if isinstance(m.get("metadata"), dict) and "compression_ref" in m["metadata"]
+        ]
+
         # 分批压缩（按压缩模型窗口的 0.5 切片，防止单批超压缩模型上下文）
         old_tokens = sum(self._estimate_msg_tokens(m) for m in old_msgs)
         batch_ratio = 0.5
         batch_budget = int(context_window * batch_ratio)
         num_batches = max(1, -(-old_tokens // batch_budget))  # 向上取整
 
-        any_success = False
-        # 摘要已成功落库的批次。落库失败的批次绝不入删除列表：
-        # save 失败意味着本批摘要未进 memory backend，此时删原消息
-        # = "摘要未落库 + 原消息已删"，知识不可恢复丢失（fail-closed）。
-        saved_msgs: list[dict[str, Any]] = []
+        any_compressed = False
+        block_msgs: list[dict[str, Any]] = []
+        compressed_slot_seqs: list[int] = []
 
         for batch_idx in range(num_batches):
             start = batch_idx * len(old_msgs) // num_batches
@@ -1051,54 +1078,148 @@ class CompressionService:
             comp_result = await self._build_compression_content(
                 batch,
                 system_message,
-                compression_messages,
+                prior_blocks,
             )
             if not comp_result:
                 logger.warning("[CompressionService] 第 %d 批压缩失败", batch_idx + 1)
                 continue
 
-            try:
-                await self.save_compression_result(
-                    old_msgs=batch,
-                    comp_result=comp_result,
-                    pipeline_id=self._pipeline_id,
-                    session_id=self._session_id,
-                    context_window=context_window,
-                )
-            except Exception as exc:
-                logger.error(
-                    "[CompressionService] 第 %d 批压缩块保存失败，本批 %d 条原消息保留不删除: %s",
-                    batch_idx + 1,
-                    len(batch),
-                    exc,
-                )
-                continue
+            # 落记忆库（默认存储放置）；写失败由 save 层逐工件降级
+            # （引用留空 + warning），块消息以内联摘要照常产出（fail-open）
+            refs = await self.save_compression_result(
+                old_msgs=batch,
+                comp_result=comp_result,
+                pipeline_id=self._pipeline_id,
+                session_id=self._session_id,
+                context_window=context_window,
+            )
 
-            saved_msgs.extend(batch)
-            any_success = True
+            batch_blocks = self._build_batch_blocks(batch, comp_result, refs)
+            block_msgs.extend(batch_blocks)
+            compressed_slot_seqs.extend(
+                m["seq"] for m in batch if isinstance(m.get("seq"), int)
+            )
+            any_compressed = True
 
-        if not any_success:
+        if not any_compressed:
             return None
 
-        # 被删消息 seq 列表：仅摘要落库成功的批次 + 遗留 old_blocks
-        # （旧摘要 system，新摘要生成后由调用方置换）。
+        # 留 gap 的被删 seq = 被压批次槽位 - 块消息占用的槽位；遗留 old_blocks
+        # （旧格式摘要 system 消息）一并删除。
+        occupied = {
+            m["seq"] for m in block_msgs if isinstance(m.get("seq"), int)
+        }
         deleted_seqs: list[int] = [
-            m["seq"] for m in (saved_msgs + old_blocks) if isinstance(m.get("seq"), int)
+            seq for seq in compressed_slot_seqs if seq not in occupied
         ]
-        return pure_system_msgs + recent_msgs, deleted_seqs
+        deleted_seqs.extend(
+            m["seq"] for m in old_blocks if isinstance(m.get("seq"), int)
+        )
+        self._last_block_msgs.extend(block_msgs)
+
+        assembled = sorted(
+            pure_system_msgs + recent_msgs + block_msgs,
+            key=lambda m: m["seq"] if isinstance(m.get("seq"), int) else float("inf"),
+        )
+        return assembled, deleted_seqs
+
+    def _build_batch_blocks(
+        self,
+        batch: list[dict[str, Any]],
+        comp_result: dict[str, Any],
+        refs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """把一批压缩产物构建为原位插入的块消息（过程块 + 快照块）。
+
+        块消息是普通 system 消息：LLM 输入只消费其内联摘要内容；引用元数据
+        （metadata.compression_ref）指向记忆库落库锚点，供回溯/展开/审计。
+
+        Args:
+            batch: 本批被压缩的原消息（自带 seq，升序）
+            comp_result: compress_all 产出的 5 部分字典
+            refs: save_compression_result 返回的落库引用清单
+
+        Returns:
+            块消息列表（seq 已按原位槽位赋值）；空批次返回 []
+        """
+        seqs = [m["seq"] for m in batch if isinstance(m.get("seq"), int)]
+        if not seqs:
+            return []
+        seq_start = min(seqs)
+        seq_end = max(seqs)
+
+        import json  # noqa: PLC0415
+
+        process_refs = [r for r in refs if r["level"] in ("L1", "L2")]
+        snapshot_refs = [r for r in refs if r["level"] == "state_snapshot"]
+
+        blocks: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "name": "compressed",
+                "seq": seq_start,
+                "content": (
+                    f'<compressed seq="{seq_start}-{seq_end}" level="L1">\n'
+                    f"## 过程摘要\n{comp_result.get('l1', '')}\n</compressed>"
+                ),
+                # 语义标记（内部字段）：记忆库摘要内容；llm_core 发送前清理
+                "_context_form": CONTEXT_FORM_RECALL,
+                "metadata": {
+                    "compression_ref": {
+                        "kind": "process",
+                        "seq_range": [seq_start, seq_end],
+                        "stored_at": _now_iso(),
+                        "memory_ids": process_refs,
+                    }
+                },
+            }
+        ]
+
+        state_snapshot = comp_result.get("state_snapshot")
+        if state_snapshot:
+            snapshot_block = {
+                "role": "system",
+                "name": "state_snapshot",
+                "seq": seq_start,
+                "content": (
+                    "<current_state>\n"
+                    + json.dumps(state_snapshot, ensure_ascii=False, indent=2)
+                    + "\n</current_state>"
+                ),
+                "_context_form": CONTEXT_FORM_SNAPSHOT,
+                "metadata": {
+                    "compression_ref": {
+                        "kind": "state_snapshot",
+                        "seq_range": [seq_start, seq_end],
+                        "stored_at": _now_iso(),
+                        "memory_ids": snapshot_refs,
+                    }
+                },
+            }
+            if len(seqs) >= 2:
+                # 批次次槽留给快照块（原位，不占新槽）；单条批次无空闲槽，
+                # 快照引用并入过程块（落库锚点不丢）
+                snapshot_block["seq"] = seq_start + 1
+                blocks.append(snapshot_block)
+            else:
+                blocks[0]["metadata"]["compression_ref"]["memory_ids"] = (
+                    process_refs + snapshot_refs
+                )
+        return blocks
 
     async def _build_compression_content(
         self,
         old_msgs: list[dict[str, Any]],
         system_message: dict[str, Any] | str | None = None,
-        compression_messages: list[dict[str, Any]] | None = None,
+        prior_blocks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """调 compress_all 压一批旧消息，返回 5 部分结果字典。
 
         Args:
             old_msgs: 待压缩的旧消息批次
             system_message: 执行时系统消息（fork 前缀）
-            compression_messages: 执行时压缩块消息（fork 前缀，含 state_snapshot）
+            prior_blocks: 序列中既有的压缩块消息（fork 前缀，压缩 LLM 据此
+                只合并更新不复述）
 
         Returns:
             {l1, l2, keywords, state_snapshot, memory_items} 或 None
@@ -1112,7 +1233,7 @@ class CompressionService:
             result = await self._compressor.compress_all(
                 old_msgs,
                 system_message=system_message,
-                compression_messages=compression_messages,
+                prior_blocks=prior_blocks,
             )
         except Exception as exc:
             logger.warning("[CompressionService] 压缩失败: %s", exc)
@@ -1127,17 +1248,17 @@ class CompressionService:
 
         return result
 
-    async def save_compression_result(  # noqa: PLR0912, PLR0915
+    async def save_compression_result(
         self,
         old_msgs: list[dict[str, Any]],
         comp_result: dict[str, Any],
         pipeline_id: str,
         session_id: str,
         context_window: int,
-    ) -> None:
-        """把压缩结果落到 IMemoryBackend。
+    ) -> list[dict[str, str]]:
+        """把压缩结果落到 IMemoryBackend，返回成功工件的引用清单。
 
-        映射：
+        映射（tags/pipeline:{id} 落库契约保留不动）：
         - L1 块：backend.add(memory_type="chunk", content=l1, tags=["L1", ...])
         - L2 块：backend.add(memory_type="chunk", content=l2, tags=["L2", ...])
         - STATE_SNAPSHOT：backend.add(memory_type="chunk", content=ss_json,
@@ -1145,15 +1266,26 @@ class CompressionService:
         - memory_items：backend.add(memory_type="semantic", content=value,
           tags=[规范化字段名])
 
+        存储放置默认记忆库（可检索）；写库失败逐工件降级——该工件引用留空
+        并 warning，块消息以内联摘要照常产出，流程不阻塞（fail-open，
+        ADR 2026-08-28-compression-block-pointer-indirection）。
+
         Args:
             old_msgs: 本批被压缩的旧消息（用于算 sequence 范围）
             comp_result: compress_all 产出的 5 部分字典
             pipeline_id: 管道运行 ID
             session_id: 会话 ID
             context_window: 当前模型上下文窗口
+
+        Returns:
+            成功落库工件的引用清单 [{"level": "L1"|"L2"|"state_snapshot",
+            "id": <memory id>}, ...]（按落库顺序）；写失败的工件不出现在
+            清单中。
         """
-        if not self._backend:
-            return
+        refs: list[dict[str, str]] = []
+        backend = self._backend
+        if backend is None:
+            return refs
 
         import json  # noqa: PLC0415
 
@@ -1172,51 +1304,66 @@ class CompressionService:
 
         user_id = self._user_id or session_id or pipeline_id or "default"
 
+        async def _add_ref(level: str, content: str, memory_type: str, tags: list[str]) -> None:
+            try:
+                memory_id = await backend.add(
+                    user_id=user_id,
+                    content=content,
+                    memory_type=memory_type,
+                    tags=tags,
+                    source="compression",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[CompressionService] %s 落库失败（引用留空，块内联摘要不受影响）: %s",
+                    level,
+                    exc,
+                )
+                return
+            refs.append({"level": level, "id": memory_id})
+
         # L1 块
         if l1_content:
-            await self._backend.add(
-                user_id=user_id,
-                content=l1_content,
-                memory_type="chunk",
-                tags=[
+            await _add_ref(
+                "L1",
+                l1_content,
+                "chunk",
+                [
                     "L1",
                     f"pipeline:{pipeline_id}",
                     f"seq:{sequence_start}-{sequence_end}",
                     f"ctx:{context_window}",
                 ],
-                source="compression",
             )
 
         # L2 块
         if l2_content:
-            await self._backend.add(
-                user_id=user_id,
-                content=l2_content,
-                memory_type="chunk",
-                tags=[
+            await _add_ref(
+                "L2",
+                l2_content,
+                "chunk",
+                [
                     "L2",
                     f"pipeline:{pipeline_id}",
                     f"seq:{sequence_start}-{sequence_end}",
                 ],
-                source="compression",
             )
 
-        # STATE_SNAPSHOT（覆盖语义由调用方按 tag 删除旧值，这里只追加最新）
+        # STATE_SNAPSHOT（最新快照追加落库，引用随快照块进入序列）
         if state_snapshot:
             ss_content = json.dumps(state_snapshot, ensure_ascii=False, indent=2)
-            await self._backend.add(
-                user_id=user_id,
-                content=ss_content,
-                memory_type="chunk",
-                tags=[
+            await _add_ref(
+                "state_snapshot",
+                ss_content,
+                "chunk",
+                [
                     "STATE_SNAPSHOT",
                     f"pipeline:{pipeline_id}",
                     f"seq_end:{sequence_end}",
                 ],
-                source="compression",
             )
 
-        # memory_items → semantic
+        # memory_items → semantic（长期记忆，不属于块引用面）
         if memory_items and isinstance(memory_items, dict):
             tag_map = {
                 "user_profile_updates": "user_profile",
@@ -1225,13 +1372,22 @@ class CompressionService:
             }
             for key, value in memory_items.items():
                 if value and value != "null":
-                    await self._backend.add(
-                        user_id=user_id,
-                        content=str(value),
-                        memory_type="semantic",
-                        tags=[tag_map.get(key, key)],
-                        source="compression",
-                    )
+                    try:
+                        await backend.add(
+                            user_id=user_id,
+                            content=str(value),
+                            memory_type="semantic",
+                            tags=[tag_map.get(key, key)],
+                            source="compression",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[CompressionService] memory_items.%s 落库失败（跳过）: %s",
+                            key,
+                            exc,
+                        )
+
+        return refs
 
     @staticmethod
     def _find_split_by_budget(
@@ -1800,15 +1956,14 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # 调用压缩
         logger.info("[%s] 开始调用 compress_messages ...", self.name)
         try:
-            # fork 上下文：执行时 system + 压缩块消息（prompt_build 上一轮产出，
-            # 本轮 prompt_build 尚未执行——内容不变，一轮时差可忽略）。
-            # 传入后压缩调用复现执行请求前缀（同模型 cache 复用 + 理解质量）。
+            # fork 上下文：执行时 system + 消息流（含既有压缩块消息——它们
+            # 排在序列里，随 messages 原样进入 fork）。压缩调用复现执行请求
+            # 前缀（同模型 cache 复用 + 理解质量）。
             compressed = await service.compress_messages(
                 messages=messages,
                 context_window=context_window,
                 trigger_ratio=self._trigger_ratio,
                 system_message=ctx.state.get("system_message"),
-                compression_messages=ctx.state.get("compression_messages") or [],
             )
         except Exception as exc:
             logger.error(
@@ -1825,12 +1980,19 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 skip_remaining=True,
             )
 
-        if compressed and len(compressed) < len(messages):
+        # 成功判据 = 估算 token 收缩（压缩块消息原位替换被压消息后，条数可能
+        # 不减——如单条超大消息被替换为一条块消息——token 收缩才是压缩的
+        # 可观察不变量）。
+        original_tokens = sum(self._estimate_msg_tokens(m) for m in messages)
+        compressed_tokens = sum(self._estimate_msg_tokens(m) for m in compressed or [])
+        if compressed and compressed_tokens < original_tokens:
             logger.info(
-                "[%s] 压缩完成: %d -> %d 条消息",
+                "[%s] 压缩完成: %d -> %d 条消息, ~%d -> ~%d tokens",
                 self.name,
                 len(messages),
                 len(compressed),
+                original_tokens,
+                compressed_tokens,
             )
             # 压缩只搬运消息不格式化，会原样保留历史段里的 raw 格式 tool_calls，
             # 写回 state 前强制标准化为 OpenAI API 格式，否则上游报"工具类型不能为空"。
@@ -1842,12 +2004,24 @@ class ContextWindowGuardPlugin(IInputPlugin):
 
             # 构造增量 ops（零兼容：不再回写全量数组）
             ops: list[dict[str, Any]] = list(delete_ops)
-            # 压缩删除：被压掉的 old_msgs + 遗留 old_blocks 按其 seq set(seq, null)
+            # 压缩块消息：原位占用被压批次头部槽位 set(seq, 块消息)
+            block_msgs = getattr(service, "_last_block_msgs", None)
+            if not isinstance(block_msgs, list):
+                block_msgs = []
+            block_seqs = {
+                m["seq"] for m in block_msgs if isinstance(m, dict) and isinstance(m.get("seq"), int)
+            }
+            for m in block_msgs:
+                if isinstance(m, dict) and isinstance(m.get("seq"), int):
+                    ops.append({"op": "set", "seq": m["seq"], "msg": m})
+            # 压缩删除：未被块占用的被压槽位 + 遗留 old_blocks 按其 seq set(seq, null)
             deleted_seqs = getattr(service, "_last_deleted_seqs", None)
             if not isinstance(deleted_seqs, list):
                 # 回退：按 before/after 的 seq 差集计算（多轮压缩同样成立）
                 deleted_seqs = self._deleted_seq_list(messages, compressed)
             for seq in deleted_seqs:
+                if isinstance(seq, int) and seq in block_seqs:
+                    continue
                 ops.append({"op": "set", "seq": seq, "msg": None})
             # 幸存但被 standardize 改写的消息 set(seq, 新内容)
             for idx in changed_indices:
@@ -1863,14 +2037,17 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 }
             )
 
-        # 压缩返回 None（失败）或未减少消息数 → 终止管线
+        # 压缩返回 None（失败）或未收缩 token → 终止管线
         logger.error(
-            "[%s] 上下文压缩失败: estimated=%d 超过 trigger=%d 但压缩未能减少消息 (compressed=%s, original=%d)",
+            "[%s] 上下文压缩失败: estimated=%d 超过 trigger=%d 但压缩未能收缩上下文 "
+            "(compressed=%s, original=%d, tokens ~%d -> ~%d)",
             self.name,
             estimated_tokens,
             trigger_tokens,
             f"{len(compressed)}条" if compressed else "None",
             len(messages),
+            original_tokens,
+            compressed_tokens,
         )
         ctx.state[StateKeys.ENDED] = True
         return PluginResult(

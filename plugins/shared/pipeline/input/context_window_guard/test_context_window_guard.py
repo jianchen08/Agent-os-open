@@ -707,8 +707,14 @@ def _round_messages() -> list[dict[str, Any]]:
     ]
 
 
-class TestSaveFailureKeepsMessages:
-    def _service(self, mod: Any, backend: _FlakyBackend) -> Any:
+class TestSaveFailureFailOpen:
+    """写库失败逐工件降级（ADR 2026-08-28 压缩块消息化 fail-open 语义）：
+
+    块消息以内联摘要照常进入序列（摘要知识随块消息持久化，不再依赖
+    落库背书），失败工件的引用留空并 warning，流程不阻塞。
+    """
+
+    def _service(self, mod: Any, backend: Any) -> Any:
         async def fake_llm(payload: list) -> str:
             return _valid_compress_json()
 
@@ -716,7 +722,7 @@ class TestSaveFailureKeepsMessages:
         svc.setup(pipeline_id="pipe-sf", session_id="sess-sf")
         return svc
 
-    def _run_round(self, mod: Any, backend: _FlakyBackend) -> Any:
+    def _run_round(self, mod: Any, backend: Any) -> Any:
         svc = self._service(mod, backend)
         return mod.CompressionService._do_compress_round(
             svc,
@@ -725,38 +731,68 @@ class TestSaveFailureKeepsMessages:
             {"recent": 300},
         )
 
-    def test_all_saves_fail_deletes_nothing(self) -> None:
-        """全部批次落库失败 → 整轮返回 None，不产生任何删除。"""
-        result = _run(self._run_round(_load_plugin_module(), _FlakyBackend(set(range(1, 100)))))
-        assert result is None, "摘要未落库时不得返回删除列表"
+    def test_all_saves_fail_blocks_still_inline(self, caplog: Any) -> None:
+        """全部批次落库失败 → 块消息照常产出（仅内联摘要、引用留空），
+        被压区间照常替换（fail-open 不阻塞）。"""
+        mod = _load_plugin_module()
+        result = _run(self._run_round(mod, _FlakyBackend(set(range(1, 100)))))
+        assert result is not None, "写库失败不得阻塞压缩流程"
+        compressed, deleted = result
+        by_seq = {m["seq"]: m for m in compressed if isinstance(m.get("seq"), int)}
+        process_blocks = [
+            m
+            for m in compressed
+            if m.get("metadata", {}).get("compression_ref", {}).get("kind") == "process"
+        ]
+        assert process_blocks, "写库失败仍应产出块消息"
+        for block in process_blocks:
+            assert block["content"], "内联摘要不得为空"
+            assert block["metadata"]["compression_ref"]["memory_ids"] == []
+        # 被压区间照常替换（b0 单条批次占 seq 1；b1 占 seq 2,3——两批槽位全被块占用，无留 gap）
+        assert deleted == []
+        assert "落库失败" in caplog.text
 
-    def test_partial_save_failure_keeps_failed_batch(self) -> None:
-        """首个保存调用失败（b0 整批失败）、b1 成功：
+    def test_partial_save_failure_keeps_successful_refs(self) -> None:
+        """b0 全部工件（5 次调用）写库失败、b1 全部成功：
 
-        - 删除列表只含 b1 覆盖的 seq；
-        - 失败批次的原消息按原文保留在返回消息里。
+        - b0 块消息引用留空、b1 块消息引用指向成功落库工件；
+        - 两批的被压区间照常替换（成功批次的覆盖范围可从落库 tags 还原）。
         """
-        backend = _FlakyBackend({1})
+        backend = _FlakyBackend({1, 2, 3, 4, 5})
         mod = _load_plugin_module()
         result = _run(self._run_round(mod, backend))
         assert result is not None, "任一批次成功即应产出压缩结果"
-        _, deleted = result
+        compressed, _deleted = result
 
-        # 上游用 deleted_seqs emit set(seq,null)；未删的 seq 在引擎存储中
-        # 原样留存——这就是失败批次"原消息保留"的可观察出口。
         saved = _saved_seqs_from_backend(backend)
         assert saved == {2, 3}, f"成功批次的覆盖范围应可从落库 tags 还原: {saved}"
-        assert sorted(deleted) == [2, 3], (
-            f"删除列表必须只含落库成功的批次，实际: {deleted}"
-        )
-        # fail-closed 性质：删除集合 ⊆ 成功摘要覆盖集合（无摘要背书的 seq 不得被删）
-        assert set(deleted) <= saved
-        assert 1 not in deleted, "落库失败的批次（seq=1）不得进入删除列表"
+
+        process_blocks = [
+            m
+            for m in compressed
+            if m.get("metadata", {}).get("compression_ref", {}).get("kind") == "process"
+        ]
+        assert len(process_blocks) == 2
+        refs_by_seq = {
+            m["seq"]: m["metadata"]["compression_ref"]["memory_ids"] for m in process_blocks
+        }
+        assert refs_by_seq[1] == [], "落库失败批次的块引用应留空"
+        assert refs_by_seq[2], "落库成功批次的块应携带引用"
 
     def test_all_saves_succeed_baseline(self) -> None:
-        """对照基线：全部落库成功 → 全部 old seq 进入删除列表。"""
+        """对照基线：全部落库成功 → 所有块携带引用。"""
         backend = _FlakyBackend(set())
-        result = _run(self._run_round(_load_plugin_module(), backend))
+        mod = _load_plugin_module()
+        result = _run(self._run_round(mod, backend))
         assert result is not None
-        _, deleted = result
-        assert sorted(deleted) == [1, 2, 3]
+        compressed, _deleted = result
+        process_blocks = [
+            m
+            for m in compressed
+            if m.get("metadata", {}).get("compression_ref", {}).get("kind") == "process"
+        ]
+        assert len(process_blocks) == 2
+        for block in process_blocks:
+            assert block["metadata"]["compression_ref"]["memory_ids"], (
+                "全部落库成功时块必须携带引用"
+            )

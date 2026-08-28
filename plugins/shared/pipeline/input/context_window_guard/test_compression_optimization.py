@@ -382,8 +382,9 @@ class TestForkCompressionCall:
     """compress_all 改为 fork 消息队列 + 末尾追加压缩指令。"""
 
     def test_compress_all_sends_message_list(self) -> None:
-        """压缩调用收到消息列表（非字符串）；fork = [system] + compression_messages
-        + 待压缩消息（原样 role/content）+ [user 压缩指令]。"""
+        """压缩调用收到消息列表（非字符串）；fork = [system] + 待压缩消息
+        （含既有压缩块消息——它们排在消息序列里，原样 role/content）+
+        [user 压缩指令]。"""
         mod = _load_cwg()
         captured: list[Any] = []
 
@@ -393,22 +394,20 @@ class TestForkCompressionCall:
 
         compressor = mod.ContextCompressor(llm_call_fn=fake_llm)
         messages = [
-            {"role": "user", "content": "请帮我做 X", "seq": 1},
-            {"role": "assistant", "content": "好的，开始", "seq": 2},
-        ]
-        compression_messages = [
             {
                 "role": "system",
                 "name": "compressed",
                 "content": "<compressed>L2 三元组</compressed>",
                 "_context_form": "recall",
-            }
+                "seq": 1,
+            },
+            {"role": "user", "content": "请帮我做 X", "seq": 2},
+            {"role": "assistant", "content": "好的，开始", "seq": 3},
         ]
         result = _run(
             compressor.compress_all(
                 messages,
                 system_message={"role": "system", "content": "执行时系统提示"},
-                compression_messages=compression_messages,
             )
         )
 
@@ -420,8 +419,9 @@ class TestForkCompressionCall:
         # fork[0]：执行时 system（原样）
         assert fork[0]["role"] == "system"
         assert fork[0]["content"] == "执行时系统提示"
-        # fork[1]：compression_messages 在待压缩消息之前（对齐执行时装配顺序）
+        # fork[1]：既有压缩块消息在消息流原位（渲染 [recall] 语义标签前缀）
         assert "<compressed>L2 三元组</compressed>" in fork[1]["content"]
+        assert fork[1]["content"].startswith("[recall] ")
         # fork[2:4]：待压缩消息原样 role/content（不压成 【用户 N】），seq 已剥离
         assert fork[2] == {"role": "user", "content": "请帮我做 X"}
         assert fork[3] == {"role": "assistant", "content": "好的，开始"}
@@ -583,17 +583,20 @@ class TestCompressionServiceForkThreading:
         service = mod.CompressionService(backend=backend, llm_call_fn=fake_llm, config=config)
         service.setup(pipeline_id="pipe-1", session_id="s-1", user_id="u-1")
 
+        # 既有快照块消息排在消息序列头部（压缩块消息化：随 messages 进入 fork 前缀）
         messages = [
-            {"role": "user", "content": "A" * 400, "seq": 1},
-            {"role": "assistant", "content": "B" * 400, "seq": 2},
-        ]
-        compression_messages = [
             {
                 "role": "system",
                 "name": "state_snapshot",
                 "content": "<current_state>已有状态</current_state>",
                 "_context_form": "snapshot",
-            }
+                "seq": 1,
+                "metadata": {
+                    "compression_ref": {"kind": "state_snapshot", "memory_ids": []}
+                },
+            },
+            {"role": "user", "content": "A" * 400, "seq": 2},
+            {"role": "assistant", "content": "B" * 400, "seq": 3},
         ]
         result = _run(
             service.compress_messages(
@@ -601,7 +604,6 @@ class TestCompressionServiceForkThreading:
                 context_window=1000,
                 trigger_ratio=0.99,
                 system_message={"role": "system", "content": "执行时系统提示"},
-                compression_messages=compression_messages,
             )
         )
 
@@ -609,7 +611,7 @@ class TestCompressionServiceForkThreading:
         assert captured, "应产生压缩 LLM 调用"
         fork = captured[0]
         assert isinstance(fork, list)
-        # system + compression_messages 前缀进入 fork
+        # system + 既有压缩块消息前缀进入 fork
         assert fork[0]["role"] == "system"
         assert fork[0]["content"] == "执行时系统提示"
         assert "<current_state>已有状态</current_state>" in fork[1]["content"]
