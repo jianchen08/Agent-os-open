@@ -417,7 +417,10 @@ class HindsightBackend(IMemoryBackend):
         """把 hindsight recall 原始结果映射为统一形态。
 
         原始条目可能含 id/content/score/metadata.memory_type；映射后统一为
-        {id, content, score, memory_type, metadata}。
+        {id, content, score, memory_type, metadata, tags}。tags 优先取条目
+        顶层 tags（hindsight 0.9.x RecallResult 原生字段）；缺失时回退解析
+        metadata["tags"] JSON 串（retain 侧 list 序列化为 str 落库）——调用方
+        （prompt_build 压缩块过滤等）按 list 消费，JSON 串直透必被拒。
         """
         if isinstance(result, dict) and "results" in result:
             items = result.get("results") or []
@@ -429,7 +432,18 @@ class HindsightBackend(IMemoryBackend):
         for item in items:
             if not isinstance(item, dict):
                 continue
-            meta = item.get("metadata") or {}
+            meta = dict(item.get("metadata") or {})
+            tags = item.get("tags")
+            if not isinstance(tags, list):
+                raw = meta.get("tags")
+                parsed: Any = raw
+                if isinstance(raw, str):
+                    try:
+                        parsed = json.loads(raw)
+                    except (ValueError, TypeError):
+                        parsed = None
+                tags = parsed if isinstance(parsed, list) else []
+            meta["tags"] = [str(t) for t in tags if t]
             mapped.append(
                 {
                     "id": str(item.get("id", "")),
@@ -439,6 +453,7 @@ class HindsightBackend(IMemoryBackend):
                     or item.get("memory_type")
                     or "semantic",
                     "metadata": meta,
+                    "tags": meta["tags"],
                 }
             )
         return mapped

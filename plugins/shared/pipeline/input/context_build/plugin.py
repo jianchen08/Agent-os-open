@@ -194,6 +194,25 @@ class ContextBuildPlugin(IInputPlugin):
             _items = _dv.get("items")
             if isinstance(_items, list) and _items:
                 updates["context.dynamic_vars"] = _items
+        # static_vars 随 agent 配置装载：agent yaml 的 static_vars.items →
+        # context.static_vars，prompt_build 以占位符式解析后拼在 system 内容
+        # 之后（Agent 匹配决策/工具索引/{{path:用户档案}} 等）。
+        _sv = agent_cfg.get("static_vars")
+        if isinstance(_sv, dict) and _sv.get("enabled", True):
+            _sv_items = _sv.get("items")
+            if isinstance(_sv_items, list) and _sv_items:
+                updates["context.static_vars"] = _sv_items
+        # 约束随 agent 配置装载（注入式，不走 state 通用键）：yaml
+        # hard_constraints/soft_constraints 直接渲染为约束文本块注入
+        # system 内容尾部——无 state["constraints"] 中转（该键无人写入，
+        # 走中转会重蹈"配置写了但 agent 看不见"断链）。
+        _hard = agent_cfg.get("hard_constraints")
+        _soft = agent_cfg.get("soft_constraints")
+        if isinstance(_hard, list) and _hard or isinstance(_soft, list) and _soft:
+            lines = [f"- [必须] {c}" for c in _hard if isinstance(c, str)] if isinstance(_hard, list) else []
+            lines += [f"- [建议] {c}" for c in _soft if isinstance(c, str)] if isinstance(_soft, list) else []
+            if lines:
+                updates["context.constraints_text"] = "\n".join(lines)
         # 运行时参数随 agent 配置装载（与 tool_ids 同装配点）：yaml 声明值
         # 注入顶层 state 键，stop_check（max_iterations/timeout_seconds）、
         # task_reminder（max_reminders）、llm_core（model_tier）读 state 消费；

@@ -193,7 +193,7 @@ async def test_resolve_single_var_timestamp_with_suffix(plugin):
                "format": "%Y-%m-%d %H:%M:%S"}
     with _freeze_now(plugin):
         content = await plugin._resolve_single_var_content(
-            ctx, var_def, "", {"hard": [], "soft": []},
+            ctx, var_def, "",
         )
     assert content == "2026-07-02 11:24:00 (UTC+8, Asia/Shanghai)"
 

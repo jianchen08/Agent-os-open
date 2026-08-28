@@ -157,7 +157,7 @@ class PromptBuildPlugin(IInputPlugin):
         """解析占位符内容，返回 (类型名, 参数字典)。
 
         支持的格式：
-          - 无参数：{{rules}}、{{session}}、{{timestamp}}
+          - 无参数：{{session}}、{{timestamp}}、{{workspace}}、{{project_root}}
           - 带参数：{{timestamp:%Y-%m-%d}}、{{path:文件路径}}、{{content:文本}}
           - 键值对：{{retrieval:tags=a,b|top_k=5}}、{{vector:path:x|top_k=3}} 等
 
@@ -167,7 +167,7 @@ class PromptBuildPlugin(IInputPlugin):
         Returns:
             (类型名, 参数字典) 二元组
         """
-        if content in ("rules", "session", "workspace", "project_root"):
+        if content in ("session", "workspace", "project_root"):
             return content, {}
         if content == "timestamp":
             return "timestamp", {}
@@ -318,10 +318,10 @@ class PromptBuildPlugin(IInputPlugin):
         return updates
 
     async def _build_system_content(self, ctx: PluginContext) -> str:
-        """按 layer_order 顺序组装系统消息内容。
+        """按组装顺序构建系统消息内容。
 
         顺序：system_prompt -> language -> tools_description -> static_vars
-        不含 recent_messages 和 dynamic_vars。
+        -> constraints。不含 recent_messages 和 dynamic_vars。
         压缩层（L2/L1）通过 compression_messages 独立消息输出。
 
         记忆/知识不再自动拼入：memory.retrieved / knowledge.context 不在此追加，
@@ -367,6 +367,12 @@ class PromptBuildPlugin(IInputPlugin):
             if static_vars_text:
                 parts.append(static_vars_text)
 
+        # 4. 约束注入（注入式：context_build 从 agent yaml 渲染的约束文本块，
+        #    拼在 system 内容尾部；无 state["constraints"] 中转）
+        constraints_text = ctx.state.get("context.constraints_text", "")
+        if constraints_text:
+            parts.append(f"## 约束\n{constraints_text}")
+
         # 记忆/知识不再无条件追加到 system_message：memory.retrieved / knowledge.context
         # 仅作为 state 供其他插件使用；要进提示词必须由 static_vars
         # 声明 retrieval/tags 显式 opt-in（走 _retrieve_by_tags）。
@@ -410,7 +416,6 @@ class PromptBuildPlugin(IInputPlugin):
         ctx: PluginContext,
         var_def: dict,
         session_id: str,
-        constraints: dict,
     ) -> str:
         """解析单个变量的内容，供 _load_static_vars 和占位符替换共用。
 
@@ -420,7 +425,6 @@ class PromptBuildPlugin(IInputPlugin):
             ctx: 插件执行上下文
             var_def: 变量定义字典，包含 type/name/mode/output_format 等
             session_id: 当前会话 ID
-            constraints: 约束条件字典（含 hard/soft 列表）
 
         Returns:
             解析后的内容字符串，或空字符串
@@ -443,18 +447,9 @@ class PromptBuildPlugin(IInputPlugin):
                         result_parts.append(resolved)
                 content = "\n".join(result_parts)
 
-        if var_type == "rules":
-            rules_parts = []
-            for c in constraints.get("hard", []):
-                rules_parts.append(f"- [必须] {c}")
-            for c in constraints.get("soft", []):
-                rules_parts.append(f"- [建议] {c}")
-            content = "\n".join(rules_parts)
-
         elif var_type == "path":
-            # path 类型：文件注入 → 注入项目文件（base=project_root）
-            # 绝对路径直接使用；相对路径基于 project_root 解析
-            # 若无 project_root 则跳过（防止误注入容器自身文件）
+            # path 类型：文件注入（base=系统项目根，见 _resolve_target_path）
+            # 绝对路径直接使用；相对路径基于系统项目根解析
             file_path = var_def.get("path", "")
             target = self._resolve_target_path(ctx, file_path)
             if target is not None and target.is_file():
@@ -470,7 +465,7 @@ class PromptBuildPlugin(IInputPlugin):
                         e,
                     )
             elif target is not None and target.is_dir():
-                # 目录 → 遍历读取（base=project_root）
+                # 目录 → 遍历读取
                 dir_content = await self._read_dir_entries(target, var_def.get("extensions"))
                 if dir_content:
                     content = f'<files dir="{file_path}">\n{dir_content}\n</files>'
@@ -480,11 +475,11 @@ class PromptBuildPlugin(IInputPlugin):
                 log_missing = logger.warning if file_path.strip() else logger.debug
                 log_missing(
                     "[%s] path 类型变量解析失败（文件/目录不存在），知识注入落空"
-                    " | name=%s | path=%s | project_root=%s",
+                    " | name=%s | path=%s | system_root=%s",
                     self.name,
                     var_name,
                     file_path,
-                    bool(ctx.state.get("project_root") or (ctx._services or {}).get("project_root")),
+                    self._system_root(),
                 )
 
         elif var_type in ("reference", "content", ""):
@@ -573,16 +568,43 @@ class PromptBuildPlugin(IInputPlugin):
             parts.append(f"--- {entry.name} ---\n{text}")
         return "\n\n".join(parts)
 
+    def _system_root(self) -> Path | None:
+        """定位 Agent OS 系统项目根（配置/规则文件所在的仓库根）。
+
+        AGENTOS_CONFIG_ROOT（内核启动发布，指向 <项目根>/config）优先，
+        其父目录即项目根；未发布时回退自本文件向上找含 config/ + plugins/
+        的祖先目录（与 spill_store._infer_project_root 同标记法）。sidecar
+        cwd 是插件目录，禁止以 cwd 推导。
+
+        注意：这是"系统根"，不是 agent 工作空间——state.project_root /
+        state.workspace 是任务/会话工作区（工具读写面），与配置注入
+        （{{path:config/...}}）的基准是两回事，二者不得混用。
+
+        Returns:
+            项目根 Path；两路推导均失败返回 None。
+        """
+        import os  # noqa: PLC0415
+
+        env_root = os.environ.get("AGENTOS_CONFIG_ROOT", "")
+        if env_root:
+            p = Path(env_root)
+            if p.is_dir():
+                return p.parent
+        for ancestor in Path(__file__).resolve().parents:
+            if (ancestor / "config").is_dir() and (ancestor / "plugins").is_dir():
+                return ancestor
+        return None
+
     def _resolve_target_path(self, ctx: PluginContext, rel_path: str) -> Path | None:
         """把相对路径解析为最终目标 Path。
 
-        互斥选择逻辑（不是先后也不是回退）：
-            - 文件：用 project_root 解析（项目文件注入）
-            - 文件夹：用 workspace 解析（state["workspace"] = ws_meta.path）
-            - 找不到就跳过
+        相对路径统一以系统项目根（_system_root）解析——配置声明的注入路径
+        （config/...、docs/...、skills/...）都相对系统仓库根，不随任务/会话
+        工作空间漂移。绝对路径原样使用。解析后不存在 → None（由调用方
+        warning 留痕）。
 
         Args:
-            ctx: 插件执行上下文
+            ctx: 插件执行上下文（保留参数兼容签名；解析不依赖 state 路径键）
             rel_path: 相对或绝对路径
 
         Returns:
@@ -594,26 +616,10 @@ class PromptBuildPlugin(IInputPlugin):
         if p.is_absolute():
             return p
 
-        project_root = ctx.state.get("project_root", "")
-        if not project_root:
-            project_root = (ctx._services or {}).get("project_root", "")
-
-        # 文件夹 base：state["workspace"]（engine.run(workspace=ws_meta.path) 注入）
-        ws_path = ctx.state.get("workspace", "")
-
-        # 文件：用 project_root 解析
-        if project_root:
-            target = Path(project_root) / rel_path
-            if target.is_file():
-                return target
-
-        # 文件夹：用 ws_meta.path / workspace 解析（互斥，无回退到 project_root）
-        if ws_path:
-            target = Path(ws_path) / rel_path
-            if target.is_dir():
-                return target
-
-        return None
+        root = self._system_root()
+        if root is None:
+            return None
+        return root / rel_path
 
     async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:  # noqa: PLR0912
         """解析单个 {{占位符}} 并返回替换内容。
@@ -629,17 +635,11 @@ class PromptBuildPlugin(IInputPlugin):
         """
         var_type, params = self._parse_placeholder(placeholder_content)
 
-        if var_type == "rules":
-            var_def = {"type": "rules", "name": "rules"}
-        elif var_type == "workspace":
-            ws = ctx.state.get("workspace", "")
-            if not ws:
-                ws = (ctx._services or {}).get("project_root", "")
-            return str(ws) if ws else ""
-        elif var_type == "project_root":
-            pr = ctx.state.get("project_root", "")
-            if not pr:
-                pr = (ctx._services or {}).get("project_root", "")
+        if var_type in ("workspace", "project_root"):
+            # {{workspace}} / {{project_root}} = 实际项目目录（系统根，配置注入
+            # 基准与 _resolve_target_path 同源）。state.workspace / state.project_root
+            # 是任务/会话工作区（工具读写面），提示词语义要的是前者。
+            pr = self._system_root()
             return str(pr) if pr else ""
         elif var_type == "path":
             var_def = {"type": "path", "name": "path", "path": params["path"]}
@@ -687,8 +687,7 @@ class PromptBuildPlugin(IInputPlugin):
             return ""
 
         session_id = ctx.state.get("context.session_id", "")
-        constraints = ctx.state.get("constraints", {})
-        return await self._resolve_single_var_content(ctx, var_def, session_id, constraints)
+        return await self._resolve_single_var_content(ctx, var_def, session_id)
 
     async def _resolve_placeholders(self, ctx: PluginContext, text: str) -> str:
         """替换文本中的所有 {{占位符}} 为实际内容。
@@ -806,10 +805,9 @@ class PromptBuildPlugin(IInputPlugin):
 
         parts: list[str] = []
         session_id = ctx.state.get("context.session_id", "")
-        constraints = ctx.state.get("constraints", {})
 
         for item in static_vars_def:
-            # 字符串形式：占位符语法，如 "{{rules}}" 或 "{{path:config/rules/xxx.md}}"
+            # 字符串形式：占位符语法，如 "{{path:config/rules/xxx.md}}"
             if isinstance(item, str):
                 content = await self._resolve_placeholders(ctx, item)
                 if content:
@@ -833,7 +831,7 @@ class PromptBuildPlugin(IInputPlugin):
                 var_name,
                 var_def.get("type", ""),
             )
-            content = await self._resolve_single_var_content(ctx, var_def, session_id, constraints)
+            content = await self._resolve_single_var_content(ctx, var_def, session_id)
             logger.debug(
                 "[%s] static_var END | name=%s | elapsed=%.3fs len=%d",
                 self.name,
@@ -1028,11 +1026,17 @@ class PromptBuildPlugin(IInputPlugin):
             return messages
 
         try:
+            # 按具体 id 精确取：落库 tags 含 pipeline:{id}（context_window_guard
+            # save_compression_result 契约），走 hindsight 服务端 tags 过滤；
+            # hindsight recall 拒绝空 query，query 给管道 id 作语义弱匹配占位
+            # （命中面由 tags 精确过滤决定）。
             results = await _memory_backend.search(
-                query="",
+                query=f"pipeline:{pipeline_run_id}",
                 user_id=ctx.state.get("user_id", "") or pipeline_run_id,
                 top_k=100,
                 memory_type="chunk",
+                tags=[f"pipeline:{pipeline_run_id}"],
+                tags_match="any",
             )
         except Exception as e:
             logger.warning("[%s] 读取压缩块失败 | error=%s", self.name, e)
@@ -1270,11 +1274,15 @@ class PromptBuildPlugin(IInputPlugin):
             return []
         tag_prefix = f"pipeline:{pipeline_run_id}"
         try:
+            # 按具体 id 精确取（同 _load_compression_messages：tags 服务端过滤
+            # + 非空 query 占位——hindsight recall 拒绝空 query）。
             results = await _memory_backend.search(
-                query="",
+                query=f"pipeline:{pipeline_run_id}",
                 user_id=ctx.state.get("user_id", "") or pipeline_run_id,
                 top_k=100,
                 memory_type="chunk",
+                tags=[f"pipeline:{pipeline_run_id}"],
+                tags_match="any",
             )
             for item in results or []:
                 if not isinstance(item, dict):

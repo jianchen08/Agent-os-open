@@ -1560,7 +1560,8 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if not pipeline_id or not _memory_backend:
             return -1
 
-        # 从 backend 检索该 pipeline 的 chunk 类记忆
+        # 从 backend 检索该 pipeline 的 chunk 类记忆（tags 服务端精确过滤
+        # 同 prompt_build 检索口径；query 非空为 hindsight recall 硬性要求）
         user_id = ctx.state.get("user_id", "") or pipeline_id
         try:
             results = await _memory_backend.search(
@@ -1568,6 +1569,8 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 user_id=user_id,
                 top_k=20,
                 memory_type="chunk",
+                tags=[f"pipeline:{pipeline_id}"],
+                tags_match="any",
             )
         except Exception as e:
             logger.warning(

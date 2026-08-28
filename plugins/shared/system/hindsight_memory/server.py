@@ -320,11 +320,16 @@ async def hindsight_recall(
     try:
         bank = _resolve_bank_id(bank_id)
         kwargs: dict[str, Any] = {"bank_id": bank, "query": query}
+        # memory_type（type: 前缀）与调用方 tags 合并后一次投给服务端——
+        # 覆盖式赋值会在同传时丢掉 memory_type 过滤（pipeline chunk 检索
+        # 同时带 memory_type=chunk + tags=[pipeline:{id}] 的场景）。
+        merged_tags: list[str] = []
         if memory_type:
-            kwargs["tags"] = [f"type:{memory_type}"]
-            kwargs["tags_match"] = "any"
+            merged_tags.append(f"type:{memory_type}")
         if tags:
-            kwargs["tags"] = list(tags)
+            merged_tags.extend(tags)
+        if merged_tags:
+            kwargs["tags"] = merged_tags
             kwargs["tags_match"] = tags_match or "any"
 
         result = await _client.arecall(**kwargs)

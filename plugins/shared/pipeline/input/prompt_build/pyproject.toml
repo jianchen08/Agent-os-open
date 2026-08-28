@@ -5,6 +5,9 @@ description = "Lingxi AgentOS 0.2 plugin — pipeline_prompt_build（uv 单轨�
 requires-python = ">=3.11"
 dependencies = [
     "agentos-plugin-sdk>=0.2.0",
+    # Windows 上 ZoneInfo 依赖 tzdata 包（宿主 Python 自带、venv 不带）；
+    # 缺失时时间注入回退 UTC（agent 看到的"当前时间"比本地早 8 小时）。
+    "tzdata>=2024.1",
 ]
 
 # 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：

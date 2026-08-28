@@ -67,9 +67,11 @@ async def test_workspace_init_resolves_from_execution_context(plugins):
     )
     updates = result.state_updates
     assert updates["workspace"] == "D:/proj/x"
-    assert updates["project_root"] == "D:/proj/x"
     assert updates["ws_meta"]["mode"] == "plain"
     assert updates["ws_meta"]["path"] == "D:/proj/x"
+    # project_root 语义 = 实际项目目录，工作区路径不再伪装写它（工作区由
+    # workspace/ws_meta.path 独立承载，param_inject 工具锚点只认 workspace）
+    assert "project_root" not in updates
 
 
 @pytest.mark.asyncio
@@ -108,9 +110,10 @@ async def test_workspace_init_main_session_gets_workspace_root(plugins, monkeypa
     updates = result.state_updates
     expected = str(tmp_path / "sessions" / "thread-abc123")
     assert updates["workspace"] == expected
-    assert updates["project_root"] == expected
     assert updates["ws_meta"]["mode"] == "plain"
     assert updates["ws_meta"]["session_id"] == "thread-abc123"
+    # 主会话不写 project_root（语义 = 实际项目目录，防会话目录伪装成项目目录）
+    assert "project_root" not in updates
 
 
 @pytest.mark.asyncio

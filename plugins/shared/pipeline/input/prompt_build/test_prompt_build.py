@@ -101,8 +101,19 @@ class FakeBackend:
         user_id: str = "",
         top_k: int = 5,
         memory_type: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: str = "any",
     ) -> list[dict[str, Any]]:
-        self.search_calls.append({"query": query, "user_id": user_id, "top_k": top_k, "memory_type": memory_type})
+        self.search_calls.append(
+            {
+                "query": query,
+                "user_id": user_id,
+                "top_k": top_k,
+                "memory_type": memory_type,
+                "tags": tags,
+                "tags_match": tags_match,
+            }
+        )
         return list(self.search_returns)
 
 
@@ -383,7 +394,7 @@ class TestKnowledgeAndSnapshotObservability:
             "inject_type": "full",
         }
         with caplog.at_level(logging.WARNING):
-            out = _run(plugin._resolve_single_var_content(ctx, var_def, "sess-1", {}))
+            out = _run(plugin._resolve_single_var_content(ctx, var_def, "sess-1"))
         assert out == "", "降级语义保持（空知识）"
         assert any("memory_service 未注册" in r.getMessage() for r in caplog.records)
 

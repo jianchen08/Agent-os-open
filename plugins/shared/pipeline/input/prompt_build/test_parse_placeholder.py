@@ -66,7 +66,6 @@ class TestParsePlaceholder:
     def test_parse_simple_names(self) -> None:
         """简单保留名返回 (名称, 空参数字典)，不进入参数解析分支。"""
         plugin = make_plugin()
-        assert plugin._parse_placeholder("rules") == ("rules", {})
         assert plugin._parse_placeholder("session") == ("session", {})
         assert plugin._parse_placeholder("workspace") == ("workspace", {})
         assert plugin._parse_placeholder("project_root") == ("project_root", {})
@@ -112,12 +111,15 @@ class TestParsePlaceholder:
 
 
 class TestResolvePlaceholderDispatch:
-    def test_path_placeholder_file_inject(self) -> None:
-        """{{path:plugin.py}} → 走 path 分支 → 文件内容注入。"""
+    def test_path_placeholder_file_inject(self, tmp_path, monkeypatch) -> None:
+        """{{path:doc.py}} → 走 path 分支 → 按系统项目根解析文件内容注入。"""
+        (tmp_path / "config").mkdir()
+        (tmp_path / "doc.py").write_text("ROOT_DOC = 1\n", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path / "config"))
         plugin = make_plugin()
-        ctx = make_ctx({"project_root": str(_THIS_DIR)})
-        out = _run(plugin._resolve_placeholder(ctx, "path:plugin.py"))
-        assert out.startswith("<plugin>") and out.endswith("</plugin>")
+        ctx = make_ctx({})
+        out = _run(plugin._resolve_placeholder(ctx, "path:doc.py"))
+        assert out.startswith("<doc>") and out.endswith("</doc>")
 
     def test_timestamp_placeholder_with_format(self) -> None:
         """{{timestamp:%Y}} → timestamp 分支带 format 参数，产出带时区后缀。"""
@@ -128,42 +130,26 @@ class TestResolvePlaceholderDispatch:
         out = _run(plugin._resolve_placeholder(ctx, "timestamp:%Y"))
         assert re.fullmatch(r"\d{4} \(UTC[+-]\d+([:.]\d+)?, [^)]+\)", out)
 
-    def test_workspace_placeholder_from_state(self) -> None:
-        """{{workspace}} → state["workspace"] 原样返回。"""
+    def test_workspace_placeholder_returns_system_root(self) -> None:
+        """{{workspace}} = 实际项目目录（系统根），不读 state["workspace"]。"""
         plugin = make_plugin()
         ctx = make_ctx({"workspace": "/ws/1"})
-        assert _run(plugin._resolve_placeholder(ctx, "workspace")) == "/ws/1"
+        out = _run(plugin._resolve_placeholder(ctx, "workspace"))
+        assert Path(out).is_absolute() and (Path(out) / "config").is_dir()
 
-    def test_workspace_placeholder_from_services(self) -> None:
-        """state 无 workspace 时回退 _services.project_root（真实服务注册表）。"""
-        plugin = make_plugin()
-        ctx = PluginContext(state={}, _services={"project_root": "/proj"})
-        assert _run(plugin._resolve_placeholder(ctx, "workspace")) == "/proj"
-
-    def test_workspace_placeholder_empty(self) -> None:
-        """workspace 与 services 都无 → 空串。"""
-        plugin = make_plugin()
-        ctx = make_ctx({})
-        assert _run(plugin._resolve_placeholder(ctx, "workspace")) == ""
-
-    def test_project_root_placeholder_from_state(self) -> None:
-        """{{project_root}} → state["project_root"] 原样返回。"""
+    def test_project_root_placeholder_returns_system_root(self) -> None:
+        """{{project_root}} = 实际项目目录（系统根），不受 state 工作区影响。"""
         plugin = make_plugin()
         ctx = make_ctx({"project_root": "/proj"})
-        assert _run(plugin._resolve_placeholder(ctx, "project_root")) == "/proj"
+        out = _run(plugin._resolve_placeholder(ctx, "project_root"))
+        assert Path(out).is_absolute() and (Path(out) / "config").is_dir()
 
-    def test_project_root_placeholder_from_services(self) -> None:
-        """state 缺 project_root 时回落 _services。"""
-        plugin = make_plugin()
-        ctx = PluginContext(state={}, _services={"project_root": "/proj2"})
-        assert _run(plugin._resolve_placeholder(ctx, "project_root")) == "/proj2"
-
-    def test_rules_placeholder_content(self) -> None:
-        """{{rules}} → 约束 hard/soft 渲染为必须/建议列表。"""
+    def test_rules_placeholder_retired(self) -> None:
+        """{{rules}} 已退役：约束改注入式（context.constraints_text），占位符按未识别降级空串。"""
         plugin = make_plugin()
         ctx = make_ctx({"constraints": {"hard": ["h1"], "soft": ["s1"]}})
         out = _run(plugin._resolve_placeholder(ctx, "rules"))
-        assert out == "- [必须] h1\n- [建议] s1"
+        assert out == ""
 
     def test_content_placeholder(self) -> None:
         """{{content:正文}} → 直接注入正文。"""
@@ -189,17 +175,20 @@ class TestResolvePlaceholderDispatch:
         ctx = make_ctx({})
         assert _run(plugin._resolve_placeholder(ctx, "retrieval:tags=a")) == ""
 
-    def test_vector_placeholder_file_inject(self) -> None:
-        """{{vector:path=plugin.py|top_k=1}}（等号形式）→ path 文件注入成功。
+    def test_vector_placeholder_file_inject(self, tmp_path, monkeypatch) -> None:
+        """{{vector:path=doc.py|top_k=1}}（等号形式）→ path 文件注入成功。
 
         [现状]：vector 占位符的路径参数实际用 ``path=<路径>`` 等号形式；
         docstring 里的 ``{{vector:path:x|top_k=3}}`` 冒号形式会把 ``path:x``
         整体当成键名（path 参数为空），解析结果为注入失败——按现状断言。
         """
+        (tmp_path / "config").mkdir()
+        (tmp_path / "doc.py").write_text("ROOT_DOC = 1\n", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path / "config"))
         plugin = make_plugin()
-        ctx = make_ctx({"project_root": str(_THIS_DIR)})
-        out = _run(plugin._resolve_placeholder(ctx, "vector:path=plugin.py|top_k=1"))
-        assert "def " in out  # 文件内容注入成功
+        ctx = make_ctx({})
+        out = _run(plugin._resolve_placeholder(ctx, "vector:path=doc.py|top_k=1"))
+        assert "ROOT_DOC" in out  # 文件内容注入成功
         # 冒号形式（docstring 写法）按现状行为解析为空键
         t, params = plugin._parse_placeholder("vector:path:plugin.py|top_k=1")
         assert t == "vector"

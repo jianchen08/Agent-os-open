@@ -76,7 +76,7 @@ class _Backend:
     def __init__(self, results: list[Any]) -> None:
         self.results = results
 
-    async def search(self, query: str = "", user_id: str = "", top_k: int = 5, memory_type: str | None = None) -> list[Any]:
+    async def search(self, query: str = "", user_id: str = "", top_k: int = 5, memory_type: str | None = None, tags: list[str] | None = None, tags_match: str = "any") -> list[Any]:
         return list(self.results)
 
 

@@ -188,7 +188,7 @@ class TestResolveSingleVar:
         plugin = make_plugin()
         ctx = make_ctx({"context.session_id": "s-3"})
         var_def = {"type": "placeholder", "name": "{{session}} 和 {{session}}"}
-        out = _run(plugin._resolve_single_var_content(ctx, var_def, "s-3", {}))
+        out = _run(plugin._resolve_single_var_content(ctx, var_def, "s-3"))
         assert out == "s-3\ns-3"  # 逐条解析后 join("\n")，原始分隔符不保留
 
     def test_placeholder_type_without_braces(self) -> None:
@@ -196,37 +196,41 @@ class TestResolveSingleVar:
         plugin = make_plugin()
         ctx = make_ctx({})
         var_def = {"type": "placeholder", "name": "无占位符文本"}
-        assert _run(plugin._resolve_single_var_content(ctx, var_def, "", {})) == ""
+        assert _run(plugin._resolve_single_var_content(ctx, var_def, "")) == ""
 
     def test_path_file_absolute(self) -> None:
         """path 类型绝对路径文件注入。"""
         plugin = make_plugin()
         ctx = make_ctx({})
         var_def = {"type": "path", "name": "p", "path": str(Path(_THIS_DIR) / "plugin.py")}
-        out = _run(plugin._resolve_single_var_content(ctx, var_def, "", {}))
+        out = _run(plugin._resolve_single_var_content(ctx, var_def, ""))
         assert out.startswith("<plugin>") and out.endswith("</plugin>")
 
-    def test_path_file_relative_project_root(self, caplog) -> None:
-        """path 类型相对路径经 project_root 解析，且存在时不产生落空告警。"""
+    def test_path_file_relative_system_root(self, caplog, tmp_path, monkeypatch) -> None:
+        """path 类型相对路径经系统项目根解析（AGENTOS_CONFIG_ROOT=<根>/config 基准），存在时不产生落空告警。"""
         import logging
 
+        (tmp_path / "config").mkdir()
+        (tmp_path / "plugin.py").write_text("# root file", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path / "config"))
         plugin = make_plugin()
-        ctx = make_ctx({"project_root": str(_THIS_DIR)})
+        ctx = make_ctx({})
         var_def = {"type": "path", "name": "p", "path": "plugin.py"}
         with caplog.at_level(logging.WARNING):
-            out = _run(plugin._resolve_single_var_content(ctx, var_def, "", {}))
-        assert "<plugin>" in out
+            out = _run(plugin._resolve_single_var_content(ctx, var_def, ""))
+        assert "<plugin>" in out and "# root file" in out
         assert not any("知识注入落空" in r.getMessage() for r in caplog.records)
 
-    def test_path_missing_file_warns(self, caplog) -> None:
+    def test_path_missing_file_warns(self, caplog, monkeypatch, tmp_path) -> None:
         """path 类型找不到文件/目录 → 空串 + warning 留痕。"""
         import logging
 
+        (tmp_path / "config").mkdir()
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path / "config"))
         plugin = make_plugin()
-        ctx = make_ctx({"project_root": str(_THIS_DIR)})
         var_def = {"type": "path", "name": "p", "path": "definitely-missing-xyz.md"}
         with caplog.at_level(logging.WARNING):
-            out = _run(plugin._resolve_single_var_content(ctx, var_def, "", {}))
+            out = _run(plugin._resolve_single_var_content(make_ctx({}), var_def, ""))
         assert out == ""
         assert any("definitely-missing-xyz.md" in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
 
@@ -234,30 +238,34 @@ class TestResolveSingleVar:
         """path 类型文件读取失败 → warning 留痕 + 空串。"""
         import logging
 
-        plugin = make_plugin()
+        (tmp_path / "config").mkdir()
         (tmp_path / "doc.md").write_text("内容", encoding="utf-8")
 
         def boom_read_text(self: Any, *a: Any, **k: Any) -> str:
             raise PermissionError("denied")
 
         monkeypatch.setattr(Path, "read_text", boom_read_text)  # 文件系统故障（外部依赖）
-        ctx = make_ctx({"project_root": str(tmp_path)})
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path / "config"))
+        plugin = make_plugin()
+        ctx = make_ctx({})
         var_def = {"type": "path", "name": "p", "path": "doc.md"}
         with caplog.at_level(logging.WARNING):
-            out = _run(plugin._resolve_single_var_content(ctx, var_def, "", {}))
+            out = _run(plugin._resolve_single_var_content(ctx, var_def, ""))
         assert out == ""
         assert any("读取静态变量文件失败" in r.getMessage() for r in caplog.records)
 
-    def test_path_dir_inject(self, tmp_path) -> None:
+    def test_path_dir_inject(self, tmp_path, monkeypatch) -> None:
         """path 类型目录 → 遍历顶层文件并包裹 <files dir=...>。"""
         plugin = make_plugin()
+        (tmp_path / "config").mkdir()
         (tmp_path / "a.md").write_text("AAA", encoding="utf-8")
         (tmp_path / "b.txt").write_text("BBB", encoding="utf-8")
         (tmp_path / "sub").mkdir()
         (tmp_path / "sub" / "c.md").write_text("CCC", encoding="utf-8")
-        ctx = make_ctx({"workspace": str(tmp_path)})
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path / "config"))
+        ctx = make_ctx({})
         var_def = {"type": "path", "name": "d", "path": "."}
-        out = _run(plugin._resolve_single_var_content(ctx, var_def, "", {}))
+        out = _run(plugin._resolve_single_var_content(ctx, var_def, ""))
         assert out.startswith('<files dir=".">')
         assert "--- a.md ---" in out and "AAA" in out
         assert "--- b.txt ---" in out  # 无扩展名过滤 → 全部顶层文件
@@ -267,16 +275,16 @@ class TestResolveSingleVar:
         """reference/content/空 type 走 content/value 字段。"""
         plugin = make_plugin()
         ctx = make_ctx({})
-        assert _run(plugin._resolve_single_var_content(ctx, {"type": "reference", "content": "R"}, "", {})) == "R"
-        assert _run(plugin._resolve_single_var_content(ctx, {"type": "content", "value": "V"}, "", {})) == "V"
-        assert _run(plugin._resolve_single_var_content(ctx, {"type": "", "content": "E"}, "", {})) == "E"
+        assert _run(plugin._resolve_single_var_content(ctx, {"type": "reference", "content": "R"}, "")) == "R"
+        assert _run(plugin._resolve_single_var_content(ctx, {"type": "content", "value": "V"}, "")) == "V"
+        assert _run(plugin._resolve_single_var_content(ctx, {"type": "", "content": "E"}, "")) == "E"
 
     def test_reference_tags_retrieval(self) -> None:
         """reference 无 content 但有 tags → 走知识检索。"""
         plugin = make_plugin()
         ctx = make_ctx({}, services={"memory_service": FakeMemoryService([_Req("KB 片段")])})
         var_def = {"type": "reference", "tags": ["a"]}
-        out = _run(plugin._resolve_single_var_content(ctx, var_def, "", {}))
+        out = _run(plugin._resolve_single_var_content(ctx, var_def, ""))
         assert out == "KB 片段"
 
     def test_vector_mode_with_backend(self) -> None:
@@ -294,7 +302,7 @@ class TestResolveSingleVar:
         try:
             out = _run(
                 plugin._resolve_single_var_content(
-                    ctx, {"type": "reference", "content": "原内容", "mode": "vector"}, "", {}
+                    ctx, {"type": "reference", "content": "原内容", "mode": "vector"}, ""
                 )
             )
         finally:
@@ -307,7 +315,7 @@ class TestResolveSingleVar:
         ctx = make_ctx({"user_id": "u-2"})
 
         class FakeBackend:
-            async def search(self, query: str = "", user_id: str = "", top_k: int = 5, memory_type: str | None = None) -> list[dict[str, str]]:
+            async def search(self, query: str = "", user_id: str = "", top_k: int = 5, memory_type: str | None = None, tags: list[str] | None = None, tags_match: str = "any") -> list[dict[str, str]]:
                 return [{"content": "补充知识"}]
 
         old = _mod._memory_backend
@@ -315,7 +323,7 @@ class TestResolveSingleVar:
         try:
             out = _run(
                 plugin._resolve_single_var_content(
-                    ctx, {"type": "reference", "content": "原文", "mode": "hybrid"}, "", {}
+                    ctx, {"type": "reference", "content": "原文", "mode": "hybrid"}, ""
                 )
             )
         finally:
@@ -329,7 +337,7 @@ class TestResolveSingleVar:
         old = _mod._memory_backend
         _mod._memory_backend = None
         try:
-            out = _run(plugin._resolve_single_var_content(ctx, {"type": "reference", "content": "C", "mode": "vector"}, "", {}))
+            out = _run(plugin._resolve_single_var_content(ctx, {"type": "reference", "content": "C", "mode": "vector"}, ""))
         finally:
             _mod._memory_backend = old
         assert out == "C"
@@ -340,7 +348,7 @@ class TestResolveSingleVar:
         ctx = make_ctx({})
         out = _run(
             plugin._resolve_single_var_content(
-                ctx, {"type": "content", "content": "长文本", "output_format": "summary"}, "", {}
+                ctx, {"type": "content", "content": "长文本", "output_format": "summary"}, ""
             )
         )
         assert out == "[摘要] 长文本"
@@ -395,7 +403,7 @@ class _Backend:
     def __init__(self, results: list[Any]) -> None:
         self.results = results
 
-    async def search(self, query: str = "", user_id: str = "", top_k: int = 5, memory_type: str | None = None) -> list[Any]:
+    async def search(self, query: str = "", user_id: str = "", top_k: int = 5, memory_type: str | None = None, tags: list[str] | None = None, tags_match: str = "any") -> list[Any]:
         return list(self.results)
 
 
