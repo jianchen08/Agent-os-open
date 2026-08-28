@@ -675,9 +675,6 @@ fn empty_compiled() -> Arc<agentos_engine::compiler::CompiledPipeline> {
 /// - `final_assistant`：本轮最终 assistant 消息的完整持久形态（含
 ///   `tool_calls`/`reasoning_content`/`seq`），WS 路径 new_message 携带它，
 ///   前端用与 DB 加载相同的 mapper 生成 parts——流式事件与 DB 冷热同构；
-/// - `final_user`：本轮 user 消息的完整持久形态（含 `seq`/`metadata`，
-///   record_id=compute_message_id 指纹，与表侧一致），WS 路径 new_message 携带
-///   它做乐观 user 认领回传（ADR 2026-08-22 双字段范式）；
 /// - `failed`：executor.run 返回 Err（WS 路径据此推 stream_error 收尾）。
 /// - `plugin_errors`：本轮管道执行中插件失败（result.error / invoker Err）的
 ///   收集（引擎 warn+继续的假成功显式化）——WS 路径发射 plugin_error 事件
@@ -685,7 +682,6 @@ fn empty_compiled() -> Arc<agentos_engine::compiler::CompiledPipeline> {
 pub(crate) struct EngineOutcome {
     pub content: String,
     pub final_assistant: Option<serde_json::Value>,
-    pub final_user: Option<serde_json::Value>,
     pub failed: bool,
     /// 降级应答标记（前置依赖缺失 echo_fallback）：调用方据此与正常回复区分，
     /// 不再把降级应答当成功处理（2026-08-26 统一错误模型：假成功显式化）。
@@ -1001,7 +997,6 @@ fn echo_fallback(missing: &str, message: &str) -> EngineOutcome {
     EngineOutcome {
         content: format!("[echo-fallback: {missing}] {message}"),
         final_assistant: None,
-        final_user: None,
         failed: false,
         degraded: true,
         plugin_errors: Vec::new(),
@@ -1560,7 +1555,6 @@ async fn stage_execute(
             Err(EngineOutcome {
                 content: format!("[engine-run-failed] {message}"),
                 final_assistant: None,
-                final_user: None,
                 failed: true,
                 degraded: false,
                 plugin_errors: Vec::new(),
@@ -1608,23 +1602,9 @@ fn stage_finalize(
                 .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
                 .cloned()
         });
-    // A2：本轮 user 消息（完整持久形态，含引擎分配的 seq + metadata.client_message_id）。
-    // record_id 由 compute_message_id 对整条消息（剔除 seq/_ 内部字段）取指纹，
-    // 与表侧 write_slot_to_table_locked 落库 id 一致——认领回传的权威 id/seq
-    // 即 DB 真值，前端据此补 recordId + 排序键。
-    let final_user = final_state
-        .get("messages")
-        .and_then(|v| v.as_array())
-        .and_then(|msgs| {
-            msgs.iter()
-                .rev()
-                .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("user"))
-                .cloned()
-        });
     EngineOutcome {
         content,
         final_assistant,
-        final_user,
         failed: false,
         degraded: false,
         // 插件错误收集（引擎 `_plugin_errors` 键；下划线前缀键不参与插件
@@ -1910,9 +1890,8 @@ async fn chat_handler(
     // 消费任务 panic（rx 关闭）时给出明确错误而非挂死等待。
     let outcome = rx.await.unwrap_or_else(|_| EngineOutcome {
         content: "[engine task terminated unexpectedly]".to_string(),
-        final_assistant: None,
-        final_user: None,
-        failed: true,
+            final_assistant: None,
+            failed: true,
         degraded: false,
         plugin_errors: Vec::new(),
     });

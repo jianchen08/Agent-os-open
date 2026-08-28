@@ -845,7 +845,6 @@ pub async fn pending_inputs_delete_handler(
             crate::server::EngineOutcome {
                 content: format!("pending-inputs 条目 {input_id} 已在排队中被删除"),
                 final_assistant: None,
-                final_user: None,
                 failed: true,
                 degraded: false,
                 plugin_errors: Vec::new(),
@@ -897,7 +896,6 @@ pub async fn pending_inputs_clear_handler(
             crate::server::EngineOutcome {
                 content: format!("pending-inputs 队列已清空（{pipeline_id}）"),
                 final_assistant: None,
-                final_user: None,
                 failed: true,
                 degraded: false,
                 plugin_errors: Vec::new(),

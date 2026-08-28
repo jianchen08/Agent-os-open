@@ -2879,46 +2879,24 @@ async fn test_stage_recover_history_skip_user_append() {
     );
 }
 
-/// A2：stage_finalize 提取本轮 user 消息（含引擎分配的 seq + metadata.cmid），
-/// WS 路径 new_message 认领回传的权威 id/seq 即 DB 真值。
+/// stage_finalize 提取本轮最终 assistant 消息（完整持久形态，含引擎分配的 seq），
+/// WS 路径 new_message 携带它（冷热同构）；无消息历史 → None（回退路径不炸）。
 #[test]
-fn stage_finalize_extracts_this_round_user_record() {
+fn stage_finalize_extracts_final_assistant() {
     let final_state = json!({
         "raw_result": "hi",
         "messages": [
-            {"role": "user", "content": "旧一轮", "seq": 1},
-            {"role": "assistant", "content": "旧回复", "seq": 2},
             {"role": "user", "content": "本轮提问", "seq": 3,
              "metadata": {"client_message_id": "cmid-0198"}},
             {"role": "assistant", "content": "本轮回复", "seq": 4},
         ],
     });
     let out = stage_finalize(&final_state, "tenant-1", "pipe-1", "thread-1", "agent-1");
-    let u = out.final_user.clone().expect("必须提取到本轮 user 消息");
-    assert_eq!(u["content"], "本轮提问");
-    assert_eq!(u["seq"], 3, "权威 seq 必须来自引擎分配（非数组猜测）");
-    assert_eq!(u["metadata"]["client_message_id"], "cmid-0198");
-    assert_eq!(
-        u["role"], "user",
-        "提取的是 user 消息（尾随 assistant 不得误吞）"
-    );
-    // record_id 指纹与表侧落库一致（compute_message_id 规范化剔除 seq/_ 字段）
-    let canonical = json!({
-        "role": "user", "content": "本轮提问",
-        "metadata": {"client_message_id": "cmid-0198"},
-    });
-    assert_eq!(
-        agentos_core::ids::compute_message_id(&u),
-        agentos_core::ids::compute_message_id(&canonical),
-        "指纹必须对 seq/_ 字段免疫（与表侧 record_id 一致）"
-    );
-    assert!(
-        out.final_user.unwrap().get("id").is_none(),
-        "指纹 id 由 ws_session 计算"
-    );
+    let a = out.final_assistant.clone().expect("必须提取到本轮 assistant 消息");
+    assert_eq!(a["content"], "本轮回复");
+    assert_eq!(a["seq"], 4, "权威 seq 必须来自引擎分配（非数组猜测）");
     // 无消息历史 → None（回退路径不炸）
     let empty = stage_finalize(&json!({"raw_result": "x"}), "t", "p", "t", "a");
-    assert!(empty.final_user.is_none());
     assert!(empty.final_assistant.is_none());
 }
 
@@ -3143,7 +3121,6 @@ async fn test_outcome_waiter_bridge_remove_semantics() {
         crate::server::EngineOutcome {
             content: content.to_string(),
             final_assistant: None,
-            final_user: None,
             failed: false,
             degraded: false,
             plugin_errors: Vec::new(),

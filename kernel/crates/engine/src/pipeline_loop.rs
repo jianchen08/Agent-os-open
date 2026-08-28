@@ -363,7 +363,6 @@ impl PipelineExecutor {
                         self.round_start_event(state).await
                     }
                 } else {
-                    open_round = None;
                     self.round_start_event(state).await
                 };
                 self.execute_steps(&body.steps, &body.id, state, compiled, ignore_ended)
