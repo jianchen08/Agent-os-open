@@ -108,6 +108,15 @@ class TaskReminder(IOutputPlugin):
         if eval_counted is not None:
             return eval_counted
 
+        # ── 信号②：state 完成证据 → 当轮收束（置于工具轮路由之前）。
+        # 评估成功的那一轮本身就是工具轮：若被信号①路由回 LLM，证据轮永不
+        # 裁决 → LLM 反复重调 task_evaluate 的无限循环。task.id 缺失（会话
+        # 管道）不可能有该证据，天然跳过。──
+        if self._task_completed_in_state(state):
+            return self._completed_round_result(
+                state, iteration=iteration, task_id=state.get("task.id"),
+            )
+
         # ── 收束闸门 + 信号①：本轮有工具调用 → 闸门计数/裁决；阈值内路由
         # 工具执行，不评判（现状保留）。评估模式仅工具轮已在上面的计数分支
         # 返回（自有阈值机制，闸门不与其抢裁决）。──
@@ -132,12 +141,6 @@ class TaskReminder(IOutputPlugin):
                 iteration,
             )
             return OutputResult()
-
-        # ── 信号②：state 完成证据 → 当轮收束，提醒不注入 ──
-        if self._task_completed_in_state(state):
-            return self._completed_round_result(
-                state, iteration=iteration, task_id=task_id,
-            )
 
         # ── 活跃子任务：纯文本是等待/协调行为，不催提交评估 ──
         if await self._has_active_children(task_id, ctx):
