@@ -4,8 +4,12 @@
 
 产出：
     - state["system_message"]: 一条 SystemMessage（不含历史消息和动态变量）
-    - state["compression_messages"]: 压缩层独立消息列表（L1/L2）
     - state["prompt.dynamic_vars"]: 动态变量消息 dict（LLMCore 直接追加在历史消息之后）
+
+压缩块不再由本插件装配（ADR 2026-08-28-compression-block-pointer-indirection）：
+压缩块是排在 message 序列里的普通消息，由 context_window_guard 压缩时原位
+写入并随序列持久化，llm_core 从 history 直接拼装——本插件读路径零记忆库
+操作（hindsight.recall/search 对压缩块自取已退役）。
 
 构建顺序（_build_system_content）：
     1. system_prompt      <- state["context.system_prompt"]（占位符 {{xxx}} 在此替换）
@@ -15,16 +19,11 @@
 
 注意：memory.retrieved / knowledge.context 不无条件拼入 system_message —— 这两个 state
 仅供其他插件使用；记忆/知识要进提示词，必须由 static_vars 显式声明
-retrieval/tags（走 _retrieve_by_tags）。压缩层（L1/L2）作为 compression_messages
-独立消息输出，不合并到 system_message。
+retrieval/tags（走 _retrieve_by_tags）。
 
 基础设施接线（与兄弟插件共享同一形态）：
-- 压缩块/状态快照存储走模块级 ``_memory_backend: IMemoryBackend``，
-  server.py on_load 注入 set_memory_backend()。L1/L2/STATE_SNAPSHOT 块以
-  memory_type="chunk" 落库，metadata.tags 含 pipeline:{id} / L1|L2 / seq:{start}-{end}。
-- 压缩预算配置复用 context_window_guard 内联的 CompressionConfig
-  （单一实现：读 config/system/context_window_config.yaml，失败回退默认）。
-- {{retrieval:...}} 占位符的向量检索走 _memory_backend.search。
+- 模块级 ``_memory_backend: IMemoryBackend`` 由 server.py on_load 注入，
+  供 {{vector:path}}/{{hybrid:...}} 等变量模式的语义检索使用（_memory_backend.search）。
 """
 
 from __future__ import annotations
@@ -48,7 +47,8 @@ logger = logging.getLogger(__name__)
 # 模块级依赖注入（由 server.py 的 on_load 注入，测试直接赋值）
 # ═══════════════════════════════════════════════════════════
 
-# 长期记忆后端（IMemoryBackend，Hindsight/Kernel 统一形态）；None 时压缩块无法加载
+# 长期记忆后端（IMemoryBackend，Hindsight/Kernel 统一形态）；供变量模式
+# （vector/hybrid）语义检索使用
 _memory_backend: Any | None = None
 
 
@@ -68,11 +68,9 @@ def set_memory_backend(backend: Any | None) -> None:
 # 占位符正则：匹配 {{xxx}} 或 {{xxx:yyy}} 格式
 PLACEHOLDER_PATTERN = re.compile(r"\{\{(.+?)\}\}")
 
-# 压缩块加载 / 动态变量构建的看门狗超时。到点 fail-visible：注入带
-# "[上下文降级]" 前缀的显式标记继续（LLM 与用户可感知本轮丢失了压缩
-# 历史/动态快照），禁止静默以空数据继续——静默空列表与"无压缩历史"
-# 同值，丢失不可感知。
-COMPRESSION_LOAD_TIMEOUT_S = 60.0
+# 动态变量构建的看门狗超时。到点 fail-visible：注入带
+# "[上下文降级]" 前缀的显式标记继续（LLM 与用户可感知本轮丢失了动态
+# 快照），禁止静默以空数据继续。
 DYNAMIC_VARS_BUILD_TIMEOUT_S = 30.0
 
 DEGRADE_MARKER_PREFIX = "[上下文降级]"
@@ -89,29 +87,6 @@ LANGUAGE_INSTRUCTIONS: dict[str, str] = {
     "de": "Denken und antworten Sie auf Deutsch, alle Ausgaben müssen auf Deutsch sein",
     "es": "Piense y responda en español, toda la salida debe estar en español",
 }
-
-
-# ═══════════════════════════════════════════════════════════
-# 压缩预算配置（单一实现：复用 context_window_guard 的 CompressionConfig）
-# ═══════════════════════════════════════════════════════════
-
-
-def _compression_config(context_window: int) -> Any:
-    """构建压缩预算配置（context_window_guard 为宿主的单一实现）。
-
-    字段、yaml 键与回退语义均以 guard 内联的 CompressionConfig 为准
-    （读 config/system/context_window_config.yaml，读取失败回退代码默认），
-    本插件不再维护本地副本。
-
-    Args:
-        context_window: 当前模型上下文窗口大小
-
-    Returns:
-        带 get_budgets()/get_trigger_threshold() 的配置对象
-    """
-    from context_window_guard.plugin import CompressionConfig  # noqa: PLC0415
-
-    return CompressionConfig.from_yaml_config(context_window)
 
 
 class PromptBuildPlugin(IInputPlugin):
@@ -134,7 +109,6 @@ class PromptBuildPlugin(IInputPlugin):
             config: 插件配置字典，支持以下键：
                 - include_tools_description_in_prompt: 是否将工具描述拼入 SystemMessage（默认 False）
                 - include_static_vars: 是否包含静态变量（默认 True）
-                - include_compressed_layers: 是否包含压缩层（默认 True）
                 - placeholder_max_depth: 占位符递归解析最大深度（默认 5）
                   用于支持 {{path:partial.md}} 中嵌套 {{timestamp}} 这种组合。
                   0 表示关闭递归（单趟扁平替换，行为与旧版一致）。
@@ -214,7 +188,7 @@ class PromptBuildPlugin(IInputPlugin):
         """执行提示词构建逻辑。
 
         Returns:
-            要写入 state 的字段字典，含 system_message、compression_messages、dynamic_vars
+            要写入 state 的字段字典，含 system_message、dynamic_vars
         """
         from datetime import datetime as _dt  # noqa: PLC0415
 
@@ -236,38 +210,10 @@ class PromptBuildPlugin(IInputPlugin):
         # 产出 SystemMessage（纯 prompt，永不变化）
         updates["system_message"] = {"role": "system", "content": system_content}
 
-        # 加载压缩块和状态快照为独立消息
-        if self._config.get("include_compressed_layers", True):
-            _s = _dt.now()
-            logger.debug("[%s] step=load_compression_messages BEGIN", self.name)
-            try:
-                compression_msgs = await asyncio.wait_for(
-                    self._load_compression_messages(ctx),
-                    timeout=COMPRESSION_LOAD_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                # fail-visible：注入降级标记继续，缺失可感知（静默空列表
-                # 与"无压缩历史"同值，LLM 无法察觉本轮丢了全部压缩块）。
-                logger.error(
-                    "[%s] load_compression_messages 超时(%.0fs)！注入上下文降级标记继续",
-                    self.name,
-                    COMPRESSION_LOAD_TIMEOUT_S,
-                )
-                compression_msgs = [{
-                    "role": "system",
-                    "content": (
-                        f"{DEGRADE_MARKER_PREFIX} 压缩历史加载超时"
-                        f"（{COMPRESSION_LOAD_TIMEOUT_S:.0f}s），"
-                        "本轮缺失全部压缩历史（L2 摘要/L1/关键词层）。"
-                    ),
-                }]
-            logger.debug(
-                "[%s] step=load_compression_messages END | elapsed=%.3fs count=%d",
-                self.name,
-                (_dt.now() - _s).total_seconds(),
-                len(compression_msgs),
-            )
-            updates["compression_messages"] = compression_msgs
+        # 压缩块不经此处装配：它们是 message 序列里的普通消息
+        # （context_window_guard 原位写入并随序列持久化），llm_core 从
+        # history 直接拼装——读路径零记忆库操作
+        # （ADR 2026-08-28-compression-block-pointer-indirection）。
 
         # 单独产出动态变量消息（由 LLMCore 直接追加在历史消息之后）
         _s = _dt.now()
@@ -308,10 +254,9 @@ class PromptBuildPlugin(IInputPlugin):
         )
 
         logger.debug(
-            "[%s] SystemMessage built | content_len=%d | compression_msgs=%d | dynamic_vars=%s",
+            "[%s] SystemMessage built | content_len=%d | dynamic_vars=%s",
             self.name,
             len(system_content),
-            len(updates.get("compression_messages", [])),
             bool(dynamic_vars_msg),
         )
 
@@ -322,7 +267,7 @@ class PromptBuildPlugin(IInputPlugin):
 
         顺序：system_prompt -> language -> tools_description -> static_vars
         -> constraints。不含 recent_messages 和 dynamic_vars。
-        压缩层（L2/L1）通过 compression_messages 独立消息输出。
+        压缩块是 message 序列里的普通消息（guard 原位写入），不经本插件装配。
 
         记忆/知识不再自动拼入：memory.retrieved / knowledge.context 不在此追加，
         注入提示词只能由 static_vars 声明 retrieval/tags opt-in（_retrieve_by_tags）。
@@ -1004,321 +949,6 @@ class PromptBuildPlugin(IInputPlugin):
         if isinstance(value, bool):
             return "true" if value else "false"
         return str(value)
-
-    async def _load_compression_messages(  # noqa: PLR0912,PLR0915
-        self,
-        ctx: PluginContext,
-    ) -> list[dict[str, Any]]:
-        """加载压缩块和状态快照为独立消息列表。
-
-        每个块一条消息（XML 包裹），组装顺序：L2(老→新) → L1(老→新) → state_snapshot。
-        预算不足时从 L1 → L2 降级，L2 也不够则丢弃。
-
-        Returns:
-            独立消息列表
-        """
-        messages: list[dict[str, Any]] = []
-
-        from pipeline.types import StateKeys  # noqa: PLC0415
-
-        pipeline_run_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
-        if not pipeline_run_id or _memory_backend is None:
-            return messages
-
-        try:
-            # 按具体 id 精确取：落库 tags 含 pipeline:{id}（context_window_guard
-            # save_compression_result 契约），走 hindsight 服务端 tags 过滤；
-            # hindsight recall 拒绝空 query，query 给管道 id 作语义弱匹配占位
-            # （命中面由 tags 精确过滤决定）。
-            results = await _memory_backend.search(
-                query=f"pipeline:{pipeline_run_id}",
-                user_id=ctx.state.get("user_id", "") or pipeline_run_id,
-                top_k=100,
-                memory_type="chunk",
-                tags=[f"pipeline:{pipeline_run_id}"],
-                tags_match="any",
-            )
-        except Exception as e:
-            logger.warning("[%s] 读取压缩块失败 | error=%s", self.name, e)
-            return messages
-
-        # 过滤出本管道的 L1/L2 压缩块（metadata.tags 含 pipeline:{id} 标签）
-        chunks = self._filter_pipeline_chunks(results, pipeline_run_id)
-        if not chunks:
-            # 没有压缩块，只加载状态快照
-            state_msgs = await self._load_state_snapshot_message(ctx, pipeline_run_id)
-            messages.extend(state_msgs)
-            return messages
-
-        # ── 预算计算 ──
-        context_window = ctx.state.get("context_window", 128000)
-        config = _compression_config(context_window)
-        budgets = config.get_budgets()
-        trigger_tokens = config.get_trigger_threshold()
-
-        sys_msg = ctx.state.get("system_message", {})
-        sys_tokens = self._estimate_tokens_for_budget(
-            sys_msg.get("content", "") if isinstance(sys_msg, dict) else str(sys_msg),
-        )
-        msgs = ctx.state.get("messages", [])
-        msg_tokens = sum(
-            self._estimate_tokens_for_budget(
-                m.get("content", "") if isinstance(m, dict) else str(m),
-            )
-            for m in msgs
-        )
-        used_tokens = sys_tokens + msg_tokens
-        available = max(0, trigger_tokens - used_tokens)
-        comp_total_ratio = config.l1_ratio + config.l2_ratio
-        l1_budget = min(budgets["L1"], int(available * config.l1_ratio / comp_total_ratio))
-        l2_budget = min(budgets["L2"], available - l1_budget)
-
-        logger.debug(
-            "[%s] 预算: window=%d trigger=%d 已用=%d(sys=%d+msg=%d) 可用=%d → L1=%d L2=%d",
-            self.name,
-            context_window,
-            trigger_tokens,
-            used_tokens,
-            sys_tokens,
-            msg_tokens,
-            available,
-            l1_budget,
-            l2_budget,
-        )
-
-        if available <= 0:
-            logger.info("[%s] 无可用预算，跳过压缩块加载", self.name)
-            return messages
-
-        # ── 去重 ──
-        high_water = float("inf")
-        deduped: list = []
-        for chunk in chunks:  # _filter_pipeline_chunks 已按 seq_end 降序
-            if chunk["seq_start"] >= high_water:
-                continue
-            deduped.append(chunk)
-            high_water = chunk["seq_start"]
-
-        # ── 预算分配：新→老，L1→L2 ──
-        # 用 sequence_end 排序：自增整数，语义绝对可靠，不受跨进程/容器时钟漂移影响
-        sorted_chunks = sorted(deduped, key=lambda c: c["seq_end"], reverse=True)
-        l1_used = 0
-        l2_used = 0
-        l1_blocks: list = []
-        l2_blocks: list = []
-
-        for chunk in sorted_chunks:
-            l1_content = chunk["l1_content"] or ""
-            l2_content = chunk["l2_content"] or ""
-            seq = chunk["seq"]
-
-            l1_tokens = self._estimate_tokens_for_budget(l1_content) if l1_content else 0
-            l2_tokens = self._estimate_tokens_for_budget(l2_content) if l2_content else 0
-
-            if l1_budget > 0 and l1_used + l1_tokens <= l1_budget and l1_content:
-                l1_blocks.append((seq, l1_content))
-                l1_used += l1_tokens
-            elif l2_budget > 0 and l2_used + l2_tokens <= l2_budget and l2_content:
-                l2_blocks.append((seq, l2_content))
-                l2_used += l2_tokens
-            # else: L1/L2 都放不下或内容为空，丢弃该块
-
-        # ── 组装消息：L2(老→新) → L1(老→新) ──
-        l2_blocks.reverse()
-        l1_blocks.reverse()
-
-        for seq, content in l2_blocks:
-            messages.append(
-                {
-                    "role": "system",
-                    "name": "compressed",
-                    "content": f'<compressed seq="{seq}" level="L2">\n## 三元组摘要\n{content}\n</compressed>',
-                    # 语义标记（内部字段）：记忆库检索内容；llm_core 发送前清理
-                    "_context_form": "recall",
-                }
-            )
-
-        for seq, content in l1_blocks:
-            messages.append(
-                {
-                    "role": "system",
-                    "name": "compressed",
-                    "content": f'<compressed seq="{seq}" level="L1">\n## 过程摘要\n{content}\n</compressed>',
-                    # 语义标记（内部字段）：记忆库检索内容；llm_core 发送前清理
-                    "_context_form": "recall",
-                }
-            )
-
-        # ── 状态快照 ──
-        state_msgs = await self._load_state_snapshot_message(ctx, pipeline_run_id)
-        messages.extend(state_msgs)
-
-        logger.debug(
-            "[%s] 压缩消息: L1=%d块 L2=%d块 state_snapshot=%s",
-            self.name,
-            len(l1_blocks),
-            len(l2_blocks),
-            "有" if state_msgs else "无",
-        )
-        return messages
-
-    @staticmethod
-    def _filter_pipeline_chunks(
-        results: list[Any],
-        pipeline_run_id: str,
-    ) -> list[dict[str, Any]]:
-        """从 backend 检索结果中过滤出本管道的压缩块并合并 L1/L2。
-
-        压缩块以 memory_type="chunk" 落库（见 context_window_guard 的
-        CompressionService.save_compression_result），metadata.tags 含
-        pipeline:{id} / L1|L2 / seq:{start}-{end}。L1 与 L2 是两条独立记录，
-        按 seq 范围合并为 {seq, seq_start, seq_end, l1_content, l2_content}。
-
-        Args:
-            results: backend.search 返回的统一形态列表
-            pipeline_run_id: 管道运行 ID
-
-        Returns:
-            合并后的压缩块列表（按 seq_end 降序）；无匹配块返回 []
-        """
-        tag_prefix = f"pipeline:{pipeline_run_id}"
-        merged: dict[tuple[int, int], dict[str, Any]] = {}
-        for item in results or []:
-            if not isinstance(item, dict):
-                continue
-            meta = item.get("metadata") or {}
-            tags = meta.get("tags") if isinstance(meta, dict) else []
-            if not isinstance(tags, list):
-                continue
-            tags = [t for t in tags if isinstance(t, str)]
-            if tag_prefix not in tags:
-                continue
-            if "L1" not in tags and "L2" not in tags:
-                continue
-            seq_start, seq_end = PromptBuildPlugin._parse_seq_from_tags(tags)
-            if seq_end <= 0:
-                continue
-            key = (seq_start, seq_end)
-            entry = merged.setdefault(
-                key,
-                {
-                    "seq": f"{seq_start}-{seq_end}",
-                    "seq_start": seq_start,
-                    "seq_end": seq_end,
-                    "l1_content": "",
-                    "l2_content": "",
-                },
-            )
-            content = item.get("content", "")
-            if "L1" in tags:
-                entry["l1_content"] = content or entry["l1_content"]
-            else:
-                entry["l2_content"] = content or entry["l2_content"]
-        return sorted(merged.values(), key=lambda c: c["seq_end"], reverse=True)
-
-    @staticmethod
-    def _parse_seq_from_tags(tags: list[Any]) -> tuple[int, int]:
-        """从 tags 中解析 ``seq:start-end`` 标签。
-
-        与 context_window_guard 的解析契约一致（落库时由
-        CompressionService.save_compression_result 写入 ``seq:{start}-{end}``）。
-
-        Args:
-            tags: 落库时打的标签列表
-
-        Returns:
-            (sequence_start, sequence_end)，解析不到时返回 (0, 0)
-        """
-        seq_start = 0
-        seq_end = 0
-        for t in tags:
-            if not isinstance(t, str):
-                continue
-            if t.startswith("seq:"):
-                # 形如 "seq:5-12"
-                rest = t[4:]
-                if "-" in rest:
-                    parts = rest.split("-", 1)
-                    try:
-                        seq_start = int(parts[0])
-                        seq_end = int(parts[1])
-                    except ValueError:
-                        pass
-                else:
-                    try:
-                        seq_start = int(rest)
-                        seq_end = seq_start
-                    except ValueError:
-                        pass
-        return seq_start, seq_end
-
-    async def _load_state_snapshot_message(
-        self,
-        ctx: PluginContext,
-        pipeline_run_id: str,
-    ) -> list[dict[str, Any]]:
-        """加载状态快照为一条独立消息。
-
-        STATE_SNAPSHOT 块以 memory_type="chunk" 落库，metadata.tags 含
-        STATE_SNAPSHOT / pipeline:{id}；与压缩块同源（模块级 _memory_backend）。
-        返回最新一条匹配快照（backend 结果按相关性排序，取首个）。
-
-        Args:
-            ctx: 插件执行上下文
-            pipeline_run_id: 管道运行 ID
-
-        Returns:
-            状态快照消息列表（最多一条）
-        """
-        if not pipeline_run_id or _memory_backend is None:
-            return []
-        tag_prefix = f"pipeline:{pipeline_run_id}"
-        try:
-            # 按具体 id 精确取（同 _load_compression_messages：tags 服务端过滤
-            # + 非空 query 占位——hindsight recall 拒绝空 query）。
-            results = await _memory_backend.search(
-                query=f"pipeline:{pipeline_run_id}",
-                user_id=ctx.state.get("user_id", "") or pipeline_run_id,
-                top_k=100,
-                memory_type="chunk",
-                tags=[f"pipeline:{pipeline_run_id}"],
-                tags_match="any",
-            )
-            for item in results or []:
-                if not isinstance(item, dict):
-                    continue
-                meta = item.get("metadata") or {}
-                tags = meta.get("tags") if isinstance(meta, dict) else []
-                if not isinstance(tags, list):
-                    continue
-                tags = [t for t in tags if isinstance(t, str)]
-                if "STATE_SNAPSHOT" in tags and tag_prefix in tags:
-                    content = item.get("content", "")
-                    if content:
-                        return [
-                            {
-                                "role": "system",
-                                "name": "state_snapshot",
-                                "content": f"<current_state>\n{content}\n</current_state>",
-                                # 语义标记（内部字段）：状态快照；llm_core 发送前清理
-                                "_context_form": "snapshot",
-                            }
-                        ]
-        except Exception as e:
-            # 压缩恢复后对话静默丢失 <current_state> 快照必须可见
-            logger.warning(
-                "[%s] 状态快照检索失败，本轮缺少 <current_state> | error=%s",
-                self.name,
-                e,
-            )
-        return []
-
-    @staticmethod
-    def _estimate_tokens_for_budget(text: str) -> int:
-        """估算文本 token 数（用于预算计算）。"""
-        if not text:
-            return 0
-        return max(1, len(text) // 2)
 
     async def _build_dynamic_vars(self, ctx: PluginContext) -> dict[str, str] | None:  # noqa: PLR0912,PLR0915
         """构建动态变量消息。

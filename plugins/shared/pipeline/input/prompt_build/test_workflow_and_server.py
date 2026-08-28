@@ -1,13 +1,13 @@
 # @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
-"""prompt_build 主流程（execute/_do_work）、系统内容组装、压缩配置成功路径、
+"""prompt_build 主流程（execute/_do_work）、系统内容组装、
 目录遍历、嵌套路由与 MCP server.py 适配层的行为测试。
 
 覆盖既有测试未触达的行为面：
-    - execute/_do_work 全链路（含压缩消息、动态变量、超时降级）
+    - execute/_do_work 全链路（动态变量、超时降级；压缩块经序列持久化，
+      本插件读路径零压缩装配——ADR 2026-08-28 compression-block-pointer-indirection）
     - _build_system_content：语言指令（已知/未知）、tools 开关、static_vars 开关、占位符
     - _read_dir_entries：非目录、OSError、扩展名过滤、超大文件跳过、读取失败、空目录
     - _resolve_target_path：空路径
-    - _compression_config：单一实现直连 guard（yaml 读取成功/回退默认）
     - _resolve_placeholders 占位符解析超时降级
     - _resolve_routed_var：无 route_key、嵌套 path/retrieval/content dict、路径缺失、None 值规范化
     - server.py：工具注册、execute 工具、on_load/on_unload 生命周期
@@ -35,9 +35,6 @@ if _THIS_DIR not in sys.path:
 _SHARED_DIR = str(Path(__file__).resolve().parents[3])  # plugins/shared/
 if _SHARED_DIR not in sys.path:
     sys.path.insert(0, _SHARED_DIR)
-_INPUT_DIR = str(Path(__file__).resolve().parents[1])  # plugins/shared/pipeline/input/
-if _INPUT_DIR not in sys.path:
-    sys.path.insert(0, _INPUT_DIR)  # 供 _compression_config 导入 context_window_guard
 
 from pipeline.plugin import PluginContext, PluginResult  # noqa: E402
 
@@ -70,20 +67,6 @@ def _run(coro: Any) -> Any:
         loop.close()
 
 
-class _Backend:
-    """记录调用并返回固定结果的伪 IMemoryBackend。"""
-
-    def __init__(self, results: list[Any]) -> None:
-        self.results = results
-
-    async def search(self, query: str = "", user_id: str = "", top_k: int = 5, memory_type: str | None = None, tags: list[str] | None = None, tags_match: str = "any") -> list[Any]:
-        return list(self.results)
-
-
-def _chunk(content: str, tags: list[str]) -> dict[str, Any]:
-    return {"id": "id-x", "content": content, "metadata": {"tags": tags}}
-
-
 # ═══════════════════════════════════════════════════════════
 # 插件配置接口
 # ═══════════════════════════════════════════════════════════
@@ -109,69 +92,31 @@ class TestPluginConfig:
 
 class TestExecuteWorkflow:
     def test_execute_full_flow(self) -> None:
-        """execute 产出 system_message + compression_messages + dynamic_vars。"""
+        """execute 产出 system_message + dynamic_vars（压缩块经序列持久化，
+        不在本插件装配面——ADR 2026-08-28 compression-block-pointer-indirection）。"""
         plugin = make_plugin({"dynamic_vars": [{"type": "session", "name": "会话"}]})
-        backend = _chunk("L1 摘要", ["L1", "pipeline:p-1", "seq:1-5"])
-        _mod._memory_backend = _Backend([backend])
-        try:
-            ctx = make_ctx(
-                {
-                    "pipeline_id": "p-1",
-                    "context.system_prompt": "你是助手",
-                    "context.session_id": "s-1",
-                }
-            )
-            result = _run(plugin.execute(ctx))
-        finally:
-            _mod._memory_backend = None
+        ctx = make_ctx(
+            {
+                "pipeline_id": "p-1",
+                "context.system_prompt": "你是助手",
+                "context.session_id": "s-1",
+            }
+        )
+        result = _run(plugin.execute(ctx))
         assert isinstance(result, PluginResult)
         updates = result.state_updates
         assert updates["system_message"] == {"role": "system", "content": "你是助手"}
-        assert any('level="L1"' in m["content"] for m in updates["compression_messages"])
+        assert "compression_messages" not in updates
         assert "- 会话: s-1" in updates["prompt.dynamic_vars"]["content"]
 
-    def test_do_work_without_compression_layer(self) -> None:
-        """include_compressed_layers=False → 不产出 compression_messages。"""
-        plugin = make_plugin({"include_compressed_layers": False})
-        ctx = make_ctx({"context.system_prompt": "P"})
+    def test_do_work_never_produces_compression_messages(self) -> None:
+        """任何配置下都不产出 compression_messages（读路径零压缩装配）。"""
+        plugin = make_plugin({"include_compressed_layers": True})
+        ctx = make_ctx({"context.system_prompt": "P", "pipeline_id": "p-1"})
         updates = _run(plugin._do_work(ctx))
         assert updates["system_message"]["content"] == "P"
         assert "compression_messages" not in updates
         assert "prompt.dynamic_vars" not in updates
-
-    def test_do_work_compression_timeout_injects_degrade_marker(self, monkeypatch) -> None:
-        """压缩加载超时(60s) → 注入带 [上下文降级] 前缀的标记消息，丢失可感知。
-
-        契约：超时降级行为必须与"无压缩历史"（合法空列表）可区分——
-        静默以 [] 继续会让 LLM 在不知情下丢掉全部压缩块。
-        """
-        import warnings
-
-        real_wait_for = asyncio.wait_for
-
-        def fake_wait_for(awaitable: Any, timeout: float) -> Any:
-            if timeout == _mod.COMPRESSION_LOAD_TIMEOUT_S:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", RuntimeWarning)  # 协程对象未 await 属测试预期
-                    awaitable.close()
-                raise asyncio.TimeoutError("compression stuck")
-            return real_wait_for(awaitable, timeout)
-
-        monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
-        plugin = make_plugin()
-        ctx = make_ctx({"context.system_prompt": "P"})
-        updates = _run(plugin._do_work(ctx))
-        msgs = updates["compression_messages"]
-        assert len(msgs) == 1, "超时后 compression_messages 不得为空列表（须可感知）"
-        assert msgs[0]["content"].startswith("[上下文降级]")
-        assert "压缩历史" in msgs[0]["content"]
-
-    def test_do_work_no_backend_stays_empty_without_marker(self) -> None:
-        """对照：合法无压缩历史（未注入后端）→ 空列表且不带降级标记。"""
-        plugin = make_plugin()
-        ctx = make_ctx({"context.system_prompt": "P", "pipeline_id": ""})
-        updates = _run(plugin._do_work(ctx))
-        assert updates["compression_messages"] == []
 
     def test_do_work_dynamic_vars_timeout_injects_degrade_marker(self, monkeypatch) -> None:
         """动态变量构建超时(30s) → 注入 [上下文降级] 标记，不静默缺席。"""
@@ -341,69 +286,6 @@ class TestResolveTargetPath:
         ctx = make_ctx({})
         assert plugin._resolve_target_path(ctx, "") is None
         assert plugin._resolve_target_path(ctx, "   ") is None
-
-
-# ═══════════════════════════════════════════════════════════
-# 压缩预算配置成功路径
-# ═══════════════════════════════════════════════════════════
-
-
-class TestCompressionConfigSuccess:
-    def test_from_yaml_config_reads_values(self, monkeypatch) -> None:
-        """config_center 可读时按 yaml 值填充。"""
-        fake_cc = types.ModuleType("config.config_center")
-        fake_cc.get_config_center = lambda: type("CC", (), {
-            "get": lambda self, _p: {
-                "compress_trigger_ratio": 0.6,
-                "budgets": {"l1": 0.2, "l2": 0.07, "recent": 0.3},
-            }
-        })()
-        monkeypatch.setitem(sys.modules, "config.config_center", fake_cc)
-        cfg = _mod._compression_config(1000)
-        assert (cfg.compress_trigger_ratio, cfg.l1_ratio, cfg.l2_ratio, cfg.recent_ratio) == (0.6, 0.2, 0.07, 0.3)
-
-    def test_from_yaml_config_empty_data_defaults(self, monkeypatch) -> None:
-        """yaml 数据为空 dict → 全部代码默认值。"""
-        fake_cc = types.ModuleType("config.config_center")
-        fake_cc.get_config_center = lambda: type("CC", (), {"get": lambda self, _p: None})()
-        monkeypatch.setitem(sys.modules, "config.config_center", fake_cc)
-        cfg = _mod._compression_config(8000)
-        assert cfg.compress_trigger_ratio == 0.55
-        budgets = cfg.get_budgets()
-        assert budgets["recent"] == int(8000 * 0.18)
-        assert budgets["L1"] == int(8000 * 0.1)
-        assert budgets["L2"] == int(8000 * 0.05)
-
-    def test_trigger_threshold_and_budget_scale(self) -> None:
-        """触发阈值与预算随 context_window 线性增长（性质断言）。"""
-        from context_window_guard.plugin import CompressionConfig
-
-        small = CompressionConfig(context_window=1000)
-        large = CompressionConfig(context_window=2000)
-        assert large.get_trigger_threshold() == 2 * small.get_trigger_threshold()
-        assert large.get_budgets()["L1"] == 2 * small.get_budgets()["L1"]
-        assert small.get_trigger_threshold() == int(1000 * 0.55)
-
-    def test_compression_config_reuses_guard(self, monkeypatch) -> None:
-        """_compression_config 单一实现：直接复用 context_window_guard 的 CompressionConfig。"""
-        fake_cc = types.ModuleType("config.config_center")
-        fake_cc.get_config_center = lambda: type("CC", (), {"get": lambda self, _p: None})()
-        monkeypatch.setitem(sys.modules, "config.config_center", fake_cc)
-        cfg = _mod._compression_config(64000)
-        assert type(cfg).__module__ == "context_window_guard.plugin"
-        assert cfg.get_budgets()["L1"] == int(64000 * 0.1)
-
-    def test_compression_config_failure_falls_back_to_defaults(self, caplog, monkeypatch) -> None:
-        """配置中心不可达 → 回退代码默认并 warning 留痕，不抛异常。"""
-        import logging
-
-        monkeypatch.setitem(sys.modules, "config.config_center", None)  # 模拟配置中心不可达
-        with caplog.at_level(logging.WARNING):
-            cfg = _mod._compression_config(64000)
-        assert cfg.context_window == 64000
-        assert cfg.get_trigger_threshold() == int(64000 * 0.55), "回退代码默认阈值"
-        msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any("压缩预算配置读取失败" in m for m in msgs)
 
 
 # ═══════════════════════════════════════════════════════════

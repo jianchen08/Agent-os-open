@@ -1,18 +1,16 @@
 # @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
-"""prompt_build plugin TDD 测试（Step 6 重建）。
+"""prompt_build plugin 行为测试。
 
-验证内容（与任务规格 5 个用例对齐）：
-1. test_load_compression_without_backend_empty —— 无后端 → 压缩消息为 []
-2. test_load_compression_filters_by_pipeline —— mock 后端返回含/不含 pipeline 标签的块 →
-   只包含本管道块
-3. test_load_compression_builds_messages —— 有 L1 块 → 消息含 `<compressed seq=` 格式
-4. test_state_snapshot_message —— STATE_SNAPSHOT 块 → `<current_state>` 消息
-5. test_local_config_parser —— 本地压缩配置读取 yaml，返回预算
+覆盖面：
+1. 读路径零记忆库操作 —— 压缩块是 message 序列里的普通消息（guard 原位写入），
+   本插件不再按 pipeline 回源 recall/search（ADR 2026-08-28
+   compression-block-pointer-indirection；hindsight.recall/search 自取退役）；
+2. routed 条件注入（按 state 键值路由）
+3. 未识别占位符可观测（warning 留痕）
+4. 知识注入服务缺失可观测（warning 留痕）
 
-测试不依赖真实记忆后端/真实 LLM——通过 FakeBackend 注入模块级 _memory_backend，
-与 context_window_guard 的 set_memory_backend 模式保持一致。
-
-[来源: docs/tasks Step 6 记忆插件接入 IMemoryBackend]
+测试不依赖真实记忆后端——通过 FakeBackend 注入模块级 _memory_backend
+（vector/hybrid 变量模式仍消费该 backend）。
 """
 
 from __future__ import annotations
@@ -35,10 +33,6 @@ if str(_PLUGIN_DIR) not in sys.path:
 _SHARED_DIR = str(_PLUGIN_DIR.parents[2])  # plugins/shared/
 if _SHARED_DIR not in sys.path:
     sys.path.insert(0, _SHARED_DIR)
-
-_INPUT_DIR = str(_PLUGIN_DIR.parents[0])  # plugins/shared/pipeline/input/
-if _INPUT_DIR not in sys.path:
-    sys.path.insert(0, _INPUT_DIR)  # 供 _compression_config 导入 context_window_guard
 
 from pipeline.plugin import PluginContext  # noqa: E402
 
@@ -73,21 +67,6 @@ def _make_ctx(state: dict[str, Any] | None = None) -> PluginContext:
     return PluginContext(state=dict(state or {}))
 
 
-def _chunk(
-    mem_id: str,
-    content: str,
-    tags: list[str],
-) -> dict[str, Any]:
-    """构造一条统一形态的后端 chunk 结果。"""
-    return {
-        "id": mem_id,
-        "content": content,
-        "score": 1.0,
-        "memory_type": "chunk",
-        "metadata": {"tags": tags},
-    }
-
-
 class FakeBackend:
     """记录 search 调用的伪 IMemoryBackend（duck-typed，无需继承 ABC）。"""
 
@@ -118,129 +97,53 @@ class FakeBackend:
 
 
 # ═══════════════════════════════════════════════════════════
-# 1. 无后端 → 空
+# 1. 读路径零记忆库操作（search 自取退役）
 # ═══════════════════════════════════════════════════════════
 
 
-class TestLoadCompressionWithoutBackend:
-    def test_load_compression_without_backend_empty(self) -> None:
-        """未注入 _memory_backend → 压缩消息为 []，不崩溃。"""
+class TestNoCompressionSelfFetch:
+    """压缩块读路径零操作：无论有无 pipeline_id / backend，构建消息时
+    对 memory backend 零调用（ADR 2026-08-28 compression-block-pointer-
+    indirection：块消息随序列持久化，llm_core 从 history 直接拼装）。"""
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            {"pipeline_id": "pipe-1", "user_id": "u-1"},
+            {"pipeline_id": "", "user_id": ""},
+        ],
+        ids=["with-pipeline", "without-pipeline"],
+    )
+    def test_execute_never_calls_backend(self, state: dict[str, Any]) -> None:
+        """execute 产出 system_message，不产出 compression_messages，
+        且全程未发生任何后端 search 调用（空块也不查）。"""
+        mod = _load_plugin_module()
+        backend = FakeBackend()
+        mod.set_memory_backend(backend)
+        plugin = mod.PromptBuildPlugin()
+        ctx = _make_ctx(state)
+
+        updates = _run(plugin._do_work(ctx))
+
+        assert "compression_messages" not in updates, "压缩块不再经本插件装配"
+        assert "system_message" in updates
+        assert backend.search_calls == [], "读路径必须零后端调用"
+
+    def test_no_backend_at_all_still_builds(self) -> None:
+        """未注入 backend → 构建照常完成（无压缩装配路径可走）。"""
         mod = _load_plugin_module()
         mod._memory_backend = None
         plugin = mod.PromptBuildPlugin()
         ctx = _make_ctx({"pipeline_id": "pipe-1", "user_id": "u-1"})
 
-        messages = _run(plugin._load_compression_messages(ctx))
+        updates = _run(plugin._do_work(ctx))
 
-        assert messages == []
-
-
-# ═══════════════════════════════════════════════════════════
-# 2. 按 pipeline 标签过滤
-# ═══════════════════════════════════════════════════════════
-
-
-class TestLoadCompressionFiltersByPipeline:
-    def test_load_compression_filters_by_pipeline(self) -> None:
-        """只包含 metadata.tags 中 pipeline:pipe-1 的块，其他管道块被过滤。"""
-        mod = _load_plugin_module()
-        backend = FakeBackend(
-            results=[
-                _chunk("c1", "本管道摘要A", ["L1", "pipeline:pipe-1", "seq:1-5"]),
-                _chunk("c2", "其他管道摘要B", ["L1", "pipeline:other-9", "seq:1-5"]),
-            ]
-        )
-        mod.set_memory_backend(backend)
-        plugin = mod.PromptBuildPlugin()
-        ctx = _make_ctx({"pipeline_id": "pipe-1", "user_id": "u-1"})
-
-        messages = _run(plugin._load_compression_messages(ctx))
-
-        joined = "\n".join(m.get("content", "") for m in messages)
-        assert "本管道摘要A" in joined
-        assert "其他管道摘要B" not in joined
+        assert "system_message" in updates
+        assert "compression_messages" not in updates
 
 
 # ═══════════════════════════════════════════════════════════
-# 3. L1 块组装为 <compressed seq= 消息
-# ═══════════════════════════════════════════════════════════
-
-
-class TestLoadCompressionBuildsMessages:
-    def test_load_compression_builds_messages(self) -> None:
-        """有 L1 块 → 消息含 `<compressed seq="1-5" level="L1">` 格式。"""
-        mod = _load_plugin_module()
-        backend = FakeBackend(
-            results=[
-                _chunk("c1", "L1摘要内容", ["L1", "pipeline:pipe-1", "seq:1-5"]),
-            ]
-        )
-        mod.set_memory_backend(backend)
-        plugin = mod.PromptBuildPlugin()
-        ctx = _make_ctx({"pipeline_id": "pipe-1", "user_id": "u-1"})
-
-        messages = _run(plugin._load_compression_messages(ctx))
-
-        assert messages, "应产出压缩消息"
-        contents = "\n".join(m.get("content", "") for m in messages)
-        assert '<compressed seq="1-5" level="L1">' in contents
-        assert "L1摘要内容" in contents
-
-
-# ═══════════════════════════════════════════════════════════
-# 4. STATE_SNAPSHOT → <current_state> 消息
-# ═══════════════════════════════════════════════════════════
-
-
-class TestStateSnapshotMessage:
-    def test_state_snapshot_message(self) -> None:
-        """STATE_SNAPSHOT 块 → 产出 `<current_state>` 包裹的消息。"""
-        mod = _load_plugin_module()
-        backend = FakeBackend(
-            results=[
-                _chunk(
-                    "s1",
-                    '{"current_state": "进行中"}',
-                    ["STATE_SNAPSHOT", "pipeline:pipe-1"],
-                ),
-            ]
-        )
-        mod.set_memory_backend(backend)
-        plugin = mod.PromptBuildPlugin()
-        ctx = _make_ctx({"pipeline_id": "pipe-1", "user_id": "u-1"})
-
-        messages = _run(plugin._load_state_snapshot_message(ctx, "pipe-1"))
-
-        assert messages, "应产出状态快照消息"
-        assert "<current_state>" in messages[0]["content"]
-        assert "进行中" in messages[0]["content"]
-        assert messages[0]["name"] == "state_snapshot"
-
-
-# ═══════════════════════════════════════════════════════════
-# 5. 本地压缩配置解析
-# ═══════════════════════════════════════════════════════════
-
-
-class TestLocalConfigParser:
-    def test_local_config_parser(self) -> None:
-        """压缩预算配置读取 yaml（读不到时回退默认），返回有效预算（单一实现直连 guard）。"""
-        mod = _load_plugin_module()
-        sys.modules.pop("memory.context_compressor", None)
-
-        cfg = mod._compression_config(128000)
-        budgets = cfg.get_budgets()
-
-        assert budgets["recent"] == int(128000 * 0.18), "recent 预算应为 23040"
-        assert budgets["L1"] == int(128000 * 0.1), "L1 预算应为 12800"
-        assert budgets["L2"] == int(128000 * 0.05), "L2 预算应为 6400"
-        assert cfg.get_trigger_threshold() == int(128000 * 0.55), "触发阈值应为 70400"
-        # 不应导入 memory.context_compressor（0.2 中不存在）
-        assert "memory.context_compressor" not in sys.modules
-
-
-# ═══════════════════════════════════════════════════════════
-# 6. routed 条件注入（按 state 键值路由，2026-08-15 增强）
+# 2. routed 条件注入（按 state 键值路由，2026-08-15 增强）
 # ═══════════════════════════════════════════════════════════
 
 
@@ -353,32 +256,11 @@ class TestUnknownPlaceholderWarns:
 
 
 # ═══════════════════════════════════════════════════════════
-# 压缩预算配置回退可观测（兜底反模式审查 P12，2026-08-20）
+# 知识注入静默落空可观测（兜底反模式审查 P16，2026-08-20）
 # ═══════════════════════════════════════════════════════════
 
 
-class TestCompressionConfigFallbackWarns:
-    """P12：预算配置读取失败回退代码默认必须 warning 留痕（path + 异常）。"""
-
-    def test_from_yaml_config_failure_warns(self, caplog, monkeypatch) -> None:
-        import logging
-
-        mod = _load_plugin_module()
-        monkeypatch.setitem(sys.modules, "config.config_center", None)  # 模拟配置中心不可达
-        with caplog.at_level(logging.WARNING):
-            cfg = mod._compression_config(64000)
-        assert cfg.context_window == 64000, "回退代码默认（行为保持）"
-        msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any("压缩预算配置读取失败" in m for m in msgs)
-        assert any("context_window_config.yaml" in m for m in msgs), "留痕需带配置路径"
-
-
-# ═══════════════════════════════════════════════════════════
-# 知识注入/状态快照静默落空可观测（兜底反模式审查 P16/P17，2026-08-20）
-# ═══════════════════════════════════════════════════════════
-
-
-class TestKnowledgeAndSnapshotObservability:
+class TestKnowledgeObservability:
     def test_memory_service_missing_warns(self, caplog) -> None:
         """P16：static_vars 声明知识注入但 memory_service 未注册 → warning。"""
         import logging
@@ -397,21 +279,3 @@ class TestKnowledgeAndSnapshotObservability:
             out = _run(plugin._resolve_single_var_content(ctx, var_def, "sess-1"))
         assert out == "", "降级语义保持（空知识）"
         assert any("memory_service 未注册" in r.getMessage() for r in caplog.records)
-
-    def test_state_snapshot_retrieval_failure_warns(self, caplog, monkeypatch) -> None:
-        """P17：快照检索异常 → 空消息 + warning（不再静默 pass）。"""
-        import logging
-
-        mod = _load_plugin_module()
-        plugin = mod.PromptBuildPlugin(config={})
-
-        class BoomBackend:
-            async def search(self, **kwargs):
-                raise RuntimeError("snapshot backend down")
-
-        monkeypatch.setattr(mod, "_memory_backend", BoomBackend())
-        ctx = _make_ctx({"user_id": "u1"})
-        with caplog.at_level(logging.WARNING):
-            msgs = _run(plugin._load_state_snapshot_message(ctx, "pipe-1"))
-        assert msgs == [], "降级语义保持（缺 <current_state>）"
-        assert any("状态快照检索失败" in r.getMessage() for r in caplog.records)

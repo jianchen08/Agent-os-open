@@ -86,11 +86,6 @@ def _load_cwg() -> Any:
     return _load_module("cwg_compress_opt_test", ("input", "context_window_guard", "plugin.py"))
 
 
-def _load_prompt_build() -> Any:
-    """加载 prompt_build plugin 模块。"""
-    return _load_module("pb_compress_opt_test", ("input", "prompt_build", "plugin.py"))
-
-
 def _load_memory_read() -> Any:
     """加载 memory_read plugin 模块。"""
     return _load_module("mr_compress_opt_test", ("input", "memory_read", "plugin.py"))
@@ -255,59 +250,6 @@ class TestFormatMessagesSemanticLabels:
         assert "【助手" in text
         assert "[recall]" not in text
         assert "[instructions]" not in text
-
-
-class TestCompressionMessagesContextForm:
-    """prompt_build 产出的 compression_messages 打 _context_form 内部字段。"""
-
-    def test_l1_l2_blocks_tagged_recall(self) -> None:
-        """L1/L2 压缩块消息携带 _context_form="recall"（记忆库检索内容）。"""
-        mod = _load_prompt_build()
-        backend = FakeBackend(
-            results=[
-                _chunk("c1", "L1摘要内容", ["L1", "pipeline:pipe-1", "seq:1-5"]),
-                _chunk("c2", "L2三元组", ["L2", "pipeline:pipe-1", "seq:1-5"]),
-            ]
-        )
-        mod.set_memory_backend(backend)
-        plugin = mod.PromptBuildPlugin()
-        ctx = mod.PluginContext(
-            state={"pipeline_id": "pipe-1", "user_id": "u-1", "context_window": 128000}
-        )
-
-        messages = _run(plugin._load_compression_messages(ctx))
-
-        assert messages, "应产出压缩消息"
-        tagged = [m for m in messages if m.get("_context_form") == "recall"]
-        assert tagged, "L1/L2 压缩块应打 _context_form='recall'"
-        # 消息本体结构不变（role/name/content 原样）
-        for m in messages:
-            assert m.get("role") == "system"
-            assert "content" in m
-
-    def test_state_snapshot_message_tagged_snapshot(self) -> None:
-        """状态快照消息携带 _context_form="snapshot"。"""
-        mod = _load_prompt_build()
-        backend = FakeBackend(
-            results=[
-                _chunk("s1", '{"current_state": "进行中"}', ["STATE_SNAPSHOT", "pipeline:pipe-1"]),
-            ]
-        )
-        mod.set_memory_backend(backend)
-        plugin = mod.PromptBuildPlugin()
-
-        messages = _run(plugin._load_state_snapshot_message(plugin_ctx(mod), "pipe-1"))
-
-        assert messages, "应产出状态快照消息"
-        assert messages[0].get("_context_form") == "snapshot"
-        # 本体结构不变
-        assert messages[0]["name"] == "state_snapshot"
-        assert "<current_state>" in messages[0]["content"]
-
-
-def plugin_ctx(mod: Any, state: dict[str, Any] | None = None) -> Any:
-    """构造最小 PluginContext（prompt_build / memory_read 共用）。"""
-    return mod.PluginContext(state=dict(state or {}))
 
 
 class TestLLMCoreStripsContextForm:
