@@ -543,7 +543,7 @@ class TestCapabilityFallbackFlattens:
 
         captured: dict[str, Any] = {}
 
-        async def _caller(method: str, params: dict) -> Any:
+        async def _caller(method: str, params: dict, timeout: float | None = None) -> Any:
             captured.update(params)
             return {"success": True, "data": {"text": "回退摘要", "finish_reason": "stop"}}
 

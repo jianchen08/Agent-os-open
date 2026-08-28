@@ -38,8 +38,10 @@ logger = logging.getLogger(__name__)
 
 # LLM 调用函数类型：接收 fork 消息列表（或兼容旧路径的 prompt 字符串），返回响应字符串
 LLMCallFn = Callable[[str | list[dict[str, Any]]], Awaitable[str]]
-# 能力调用函数类型：(method, params) -> Any（用于调 memory.compress 等工具）
-CapabilityCaller = Callable[[str, dict[str, Any]], Awaitable[Any]]
+# 能力调用函数类型：(method, params, timeout) -> Any（用于调 memory.compress 等工具）。
+# 压缩 LLM 调用耗时可达 llm.yaml call_timeout，第三参 timeout 必须显式传大值——
+# SDK 默认 CAPABILITY_CALL_TIMEOUT_S=30s 面向短调用，不传会先于压缩完成被掐断。
+CapabilityCaller = Callable[[str, dict[str, Any], float | None], Awaitable[Any]]
 
 # 压缩摘要注入提示
 _COMPRESSION_NOTICE = (
@@ -94,10 +96,11 @@ def set_memory_backend(backend: Any | None) -> None:
 
 
 def set_capability_caller(caller: CapabilityCaller | None) -> None:
-    """注入能力调用句柄（async fn `(method, params) -> Any`）。
+    """注入能力调用句柄（async fn `(method, params, timeout) -> Any`）。
 
-    server.py 在 on_load 时调用：
-    ``set_capability_caller(lambda m, p: plugin.get_capability("tool-executor").call(m, p))``
+    server.py 在 on_load 时调用（wiring.make_capability_caller 构造，timeout
+    透传 SDK CapabilityHandle.call）：
+    ``set_capability_caller(lambda m, p, t=None: plugin.get_capability("tool-executor").call(m, p, t))``
     压缩执行时据此构建 memory.compress 的 LLM 调用函数。
 
     Args:
@@ -2227,6 +2230,29 @@ def _resolve_compress_model(ctx: PluginContext) -> str:
     return resolved or ""
 
 
+def _compress_capability_timeout(model_id: str) -> float:
+    """压缩 LLM 反向调用的等待上限：压缩模型 call_timeout + 余量。
+
+    SDK 默认 CAPABILITY_CALL_TIMEOUT_S=30s 会先于压缩完成掐断请求（压缩是
+    LLM 级耗时，上界即 llm.yaml call_timeout）。+60s 余量让 llm_service 的
+    结构化错误信封先于 SDK 超时返回（错误是值，不丢语义）。
+
+    model_id 为空时按 defaults.chat 指向模型取值（与 _resolve_compress_model
+    的运行语义对齐——空串即 llm_service 按默认 chat 兜底）。_config_models
+    不可达（llm.yaml 未注入，本插件既有降级语义）或模型无配置时，用 loader
+    内部默认 300s 口径（与 get_llm_core_config 的 defaults 兜底一致）。
+    """
+    try:
+        from _config_models import get_model_config_loader  # noqa: PLC0415
+    except ImportError:
+        return 360.0
+    loader = get_model_config_loader()
+    eff_model = model_id or loader.get_default_chat_model()
+    conf = loader.get_llm_core_config(eff_model) if eff_model else None
+    call_timeout = float(conf["call_timeout"]) if conf else 300.0
+    return call_timeout + 60.0
+
+
 def _build_compress_llm_call_fn(caller: CapabilityCaller, model_id: str = "") -> LLMCallFn:
     """构建压缩用的 LLM 调用函数。
 
@@ -2240,7 +2266,7 @@ def _build_compress_llm_call_fn(caller: CapabilityCaller, model_id: str = "") ->
     空串时 llm_service 按默认 chat 兜底。
 
     Args:
-        caller: 能力调用 async 函数 (method, params) -> Any
+        caller: 能力调用 async 函数 (method, params, timeout) -> Any
         model_id: 压缩用模型 id（空 = llm_service 默认 chat）
 
     Returns:
@@ -2248,6 +2274,8 @@ def _build_compress_llm_call_fn(caller: CapabilityCaller, model_id: str = "") ->
         llm.complete_stream 调用失败时抛 RuntimeError 并携带原因
         （禁止把调用错误伪装成空响应——上游会把空串诊断为"LLM 空响应"）
     """
+    timeout = _compress_capability_timeout(model_id)
+
     async def _call(payload: str | list[dict[str, Any]]) -> str:
         # llm.complete_stream 收消息数组；字符串形态包成单条 user 消息
         if isinstance(payload, list):
@@ -2260,7 +2288,7 @@ def _build_compress_llm_call_fn(caller: CapabilityCaller, model_id: str = "") ->
             "args": {"model": model_id, "messages": messages, "max_tokens": 8000},
         }
         try:
-            result = await caller("tool-executor.invoke", params)
+            result = await caller("tool-executor.invoke", params, timeout)
         except Exception as e:
             raise RuntimeError(f"[compress_llm_call] llm.complete_stream 调用失败: {e}") from e
         if not isinstance(result, dict):

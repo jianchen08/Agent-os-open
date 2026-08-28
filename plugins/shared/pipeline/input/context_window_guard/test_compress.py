@@ -95,7 +95,7 @@ class TestCompressCallerFailure:
     def test_compress_caller_exception_raises(self, mod: Any, src_exc: Exception, case_id: str) -> None:
         """capability_caller 抛异常 → RuntimeError 上抛并携带原因（不伪装空响应）。"""
 
-        async def _raising_caller(method: str, params: dict) -> Any:
+        async def _raising_caller(method: str, params: dict, timeout: float | None = None) -> Any:
             raise src_exc
 
         fn = mod._build_compress_llm_call_fn(_raising_caller)
@@ -107,7 +107,7 @@ class TestCompressCallerFailure:
     def test_envelope_success_false_raises(self, mod: Any) -> None:
         """tool-executor 信封 success=false（服务未注册/执行失败）→ 上抛，不伪装空响应。"""
 
-        async def _caller(method: str, params: dict) -> Any:
+        async def _caller(method: str, params: dict, timeout: float | None = None) -> Any:
             return {"success": False, "error": "llm_service not registered"}
 
         fn = mod._build_compress_llm_call_fn(_caller)
@@ -119,7 +119,7 @@ class TestCompressCallerFailure:
     def test_partial_interrupted_raises(self, mod: Any) -> None:
         """流中断（partial 非 None）→ 上抛（半截内容不可作压缩摘要）。"""
 
-        async def _caller(method: str, params: dict) -> Any:
+        async def _caller(method: str, params: dict, timeout: float | None = None) -> Any:
             return {
                 "success": True,
                 "data": {"status": "interrupted", "partial": {"text": "half"}},
@@ -164,7 +164,7 @@ class TestCompressHappyPath:
         """capability_caller 正常时返回其 text 文本。"""
         mod.set_capability_caller(None)
 
-        async def _caller(method: str, params: dict) -> Any:
+        async def _caller(method: str, params: dict, timeout: float | None = None) -> Any:
             assert method == "tool-executor.invoke"
             assert params["tool_name"] == "llm.complete_stream"
             assert params["plugin_id"] == "llm_service"
@@ -181,7 +181,7 @@ class TestCompressHappyPath:
 
         captured: dict[str, Any] = {}
 
-        async def _caller(method: str, params: dict) -> Any:
+        async def _caller(method: str, params: dict, timeout: float | None = None) -> Any:
             captured.update(params)
             return {"success": True, "data": {"text": "摘要", "finish_reason": "stop"}}
 
@@ -199,7 +199,7 @@ class TestCompressHappyPath:
         """model_id 参数透传给 llm.complete_stream（空串兜底默认 chat）。"""
         mod.set_capability_caller(None)
 
-        async def _caller(method: str, params: dict) -> Any:
+        async def _caller(method: str, params: dict, timeout: float | None = None) -> Any:
             assert params["args"]["model"] == "deepseek-v4"
             return {"success": True, "data": {"text": "ok", "finish_reason": "stop"}}
 

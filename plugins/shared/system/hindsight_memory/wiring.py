@@ -60,9 +60,11 @@ def _bind_caller(handle: Any, cap_name: str) -> Any:
     """
     prefix = f"{cap_name}."
 
-    async def _call(method: str, params: dict[str, Any]) -> Any:
+    async def _call(method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
         stripped = method[len(prefix):] if method.startswith(prefix) else method
-        return await handle.call(stripped, params)
+        # timeout 透传 SDK CapabilityHandle.call（None = SDK 默认 30s；长等待
+        # 语义的调用方须显式传大值，见 llm_core/context_window_guard 同款契约）
+        return await handle.call(stripped, params, timeout)
 
     return _call
 

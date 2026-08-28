@@ -92,7 +92,7 @@ class TestBindCaller:
         result = await caller("tool-executor.invoke", {"tool_name": "hindsight.retain"})
 
         assert result == {"ok": 1}
-        handle.call.assert_awaited_once_with("invoke", {"tool_name": "hindsight.retain"})
+        handle.call.assert_awaited_once_with("invoke", {"tool_name": "hindsight.retain"}, None)
 
     async def test_passes_non_prefixed_method_unchanged(self, mod: Any) -> None:
         """非本能力前缀的 method 原样透传（不做错误的前缀剥离）。"""
@@ -103,7 +103,7 @@ class TestBindCaller:
         result = await caller("memory.create", {"x": 1})
 
         assert result == {"ok": 1}
-        handle.call.assert_awaited_once_with("memory.create", {"x": 1})
+        handle.call.assert_awaited_once_with("memory.create", {"x": 1}, None)
 
     async def test_return_value_flows_through(self, mod: Any) -> None:
         """caller 的返回值原样返回（调用方取业务 dict）。"""
@@ -133,7 +133,7 @@ class TestMakeCapabilityCaller:
         assert caller is not None
         result = await caller("tool-executor.invoke", {"tool_name": "hindsight.recall"})
         assert result == {"results": []}
-        handle.call.assert_awaited_once_with("invoke", {"tool_name": "hindsight.recall"})
+        handle.call.assert_awaited_once_with("invoke", {"tool_name": "hindsight.recall"}, None)
 
     def test_missing_capability_returns_none_and_warns(self, mod: Any, caplog: pytest.LogCaptureFixture) -> None:
         """能力未注入（KeyError）→ None + 告警日志（插件降级不崩溃）。"""
@@ -165,7 +165,7 @@ class TestBuildMemoryBackend:
         handle.call.assert_awaited_once_with("invoke", {
             "tool_name": "hindsight.recall", "plugin_id": "hindsight_memory_service",
             "args": {"bank_id": "u", "query": "q", "top_k": 5},
-        })
+        }, None)
 
     def test_missing_capability_returns_none(self, mod: Any) -> None:
         """能力未注入 → None（build 不抛）。"""
