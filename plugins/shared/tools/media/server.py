@@ -145,7 +145,7 @@ async def music_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
 
 @plugin.tool(
     name="video_generate",
-    schema={"type": "object", "properties": {"prompt": {"type": "string"}, "duration": {"type": "integer", "default": 5}}, "required": ["prompt"]},
+    schema={"type": "object", "properties": {"prompt": {"type": "string", "description": "视频内容描述，用于指导视频生成（必填）"}, "duration": {"type": "number", "description": "视频时长（秒），默认由 Provider 决定"}, "fps": {"type": "integer", "description": "帧率（fps），默认由 Provider 决定"}, "resolution": {"type": "string", "description": "视频分辨率（如 '1920x1080'），默认由 Provider 决定"}, "style": {"type": "string", "description": "视频风格（如 'realistic', 'anime', 'cartoon'），默认由 Provider 决定"}, "provider": {"type": "string", "description": "指定使用的视频生成 Provider（不填则自动选择）"}}, "required": ["prompt"]},
     description="视频生成",
 )
 async def video_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -154,7 +154,7 @@ async def video_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
 
 @plugin.tool(
     name="tts_generate",
-    schema={"type": "object", "properties": {"text": {"type": "string"}, "voice": {"type": "string"}, "speed": {"type": "number", "default": 1.0}}, "required": ["text"]},
+    schema={"type": "object", "properties": {"text": {"type": "string", "description": "要合成的文本内容"}, "voice": {"type": "string", "description": "语音名称（如 alloy, echo, fable 等）", "default": "alloy"}, "format": {"type": "string", "description": "输出音频格式（mp3, wav, ogg）", "default": "mp3", "enum": ["mp3", "wav", "ogg"]}, "speed": {"type": "number", "description": "语速倍率（0.5 ~ 2.0）", "default": 1.0}}, "required": ["text"]},
     description="文本转语音",
 )
 async def tts_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
