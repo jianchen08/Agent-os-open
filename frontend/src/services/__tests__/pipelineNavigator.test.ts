@@ -188,14 +188,34 @@ describe('navigateToPipeline - 全局导航', () => {
     ).toBe(true)
   })
 
-  it('当前活跃 Tab 的 pipelineRunId 已是目标管道 → 快速返回 true（不查不切）', async () => {
+  it('当前活跃 Tab 的 pipelineRunId 已是目标管道且管道确属当前会话 → 快速返回 true（不切）', async () => {
     mockSessionStore.activeSessionId = SESSION_A
+    mockSessions = [{ id: SESSION_A, pipelineIds: ['pipe-me'] }]
     mockTabStore.tabs = [{ id: 'tab-act', pipelineRunId: 'pipe-me' }]
     mockTabStore.activeTabId = 'tab-act'
 
     const ok = await navigateToPipeline('pipe-me')
     expect(ok).toBe(true)
     expect(mockTabStore.switchToTab).not.toHaveBeenCalled()
+  })
+
+  it('残留绑定恰等：活跃 Tab 绑定等于目标管道但管道归属他会话 → 不误判已就位，切到真实归属', async () => {
+    mockSessionStore.activeSessionId = SESSION_A
+    // 目标管道权威归属 SESSION_B；当前活跃 Tab 持残留绑定 'pipe-b'（恰与目标相等）
+    mockPipelineStore.pipelineSessionMap = { 'pipe-b': SESSION_B }
+    mockSessions = [
+      { id: SESSION_A, pipelineIds: [] },
+      { id: SESSION_B, pipelineIds: ['pipe-b'] },
+    ]
+    mockTabStore.tabs = [{ id: 'tab-a', pipelineRunId: 'pipe-b' }]
+    mockTabStore.activeTabId = 'tab-a'
+
+    const ok = await navigateToPipeline('pipe-b')
+    // 不得因绑定相等提前返回：归属他会话须继续正常导航（切会话 → 切已有标签）
+    expect(ok).toBe(true)
+    expect(mockSessionListStore.setActiveSession).toHaveBeenCalledWith(SESSION_B)
+    expect(mockTabStore.initSessionTabs).toHaveBeenCalledWith(SESSION_B)
+    expect(mockTabStore.switchToTab).toHaveBeenCalledWith('tab-a')
   })
 
   it('找不到管道归属 → 上报通知（含原因与 pipelineId，高优先级自动弹面板）并返回 false', async () => {

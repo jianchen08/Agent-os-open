@@ -106,14 +106,21 @@ export async function navigateToPipeline(
     return false
   }
 
-  // 快速检查：当前标签的 pipelineRunId 已经是目标管道，直接返回
+  // 管道归属解析（快速检查与后续导航共用一次查找）。残留绑定恰与目标管道
+  // 相等时（Tab 持其他会话的管道 id），仅凭绑定相等判"已就位"是误判——视图
+  // 仍停在当前会话，真实归属会话未被访问：归属确属他会话则不提前返回，继续
+  // 正常导航流程（含跨会话切换）；归属未知（缓存与重查均未命中）保持信任
+  // Tab 绑定的原语义。
+  const location = await findPipelineLocation(pipelineId)
   const tabStore = useAgentTabStore.getState()
   const activeTab = tabStore.tabs.find((t) => t.id === tabStore.activeTabId)
-  if (activeTab?.pipelineRunId === pipelineId) {
+  if (
+    activeTab?.pipelineRunId === pipelineId &&
+    (!location || location.sessionId === currentSid)
+  ) {
     return true
   }
 
-  const location = await findPipelineLocation(pipelineId)
   if (!location) {
     reportError(
       `无法跳转到管道 ${pipelineId}：所有会话中都找不到该管道（会话列表可能已过期，请刷新后重试）`,
