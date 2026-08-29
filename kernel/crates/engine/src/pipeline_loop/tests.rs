@@ -127,6 +127,8 @@ struct NullStorage {
     traces: Mutex<usize>,
     /// true 时 set_run_pipeline 返回 Err（persist_run_start 持久化故障注入）。
     fail_set_run_pipeline: std::sync::atomic::AtomicBool,
+    /// 收到的 update_run_status 终态序列（终态映射表测试读取）。
+    run_statuses: Mutex<Vec<RunStatus>>,
 }
 
 impl Default for NullStorage {
@@ -135,6 +137,7 @@ impl Default for NullStorage {
             checkpoints: Mutex::new(Vec::new()),
             traces: Mutex::new(0),
             fail_set_run_pipeline: std::sync::atomic::AtomicBool::new(false),
+            run_statuses: Mutex::new(Vec::new()),
         }
     }
 }
@@ -152,6 +155,11 @@ impl NullStorage {
     /// 收到的 append_trace 次数（项级 when 跳过 / 无产出 step 不落 trace 测试用）。
     fn trace_count(&self) -> usize {
         *self.traces.lock().unwrap()
+    }
+
+    /// 收到的 run 终态（update_run_status 调用序）。
+    fn recorded_run_statuses(&self) -> Vec<RunStatus> {
+        self.run_statuses.lock().unwrap().clone()
     }
 }
 
@@ -211,10 +219,11 @@ impl StorageBackend for NullStorage {
     async fn update_run_status(
         &self,
         _run_id: &str,
-        _status: RunStatus,
+        status: RunStatus,
         _branch: Option<&str>,
         _seq: Option<u32>,
     ) -> Result<(), agentos_core::types::StorageError> {
+        self.run_statuses.lock().unwrap().push(status);
         Ok(())
     }
     async fn create_run(
@@ -2463,4 +2472,141 @@ async fn no_hooks_yields_zero_dispatch() {
         "空 hooks 表零分发（空集短路零开销）"
     );
     assert_eq!(fixture.invoker.call_count("a"), 1, "主流程不受影响");
+}
+
+// ── 控制状态键契约（ADR 2026-08-30）：should_stop 折算 / run_started_at / 终态映射 ──
+
+/// 单步恒真循环配置（每轮调用一次 plugin）。
+fn always_loop_body(plugin: &str) -> PipelineConfig {
+    PipelineConfig {
+        name: "ctrl".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s1", plugin)],
+            while_cond: Some("True".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn should_stop_breaks_loop_and_normalizes_ended() {
+    // 插件只写 state：should_stop=true 在轮边界折算为 ended——循环终止、
+    // 终态收束走既有 ended 语义。写方未带署名时按未署名兜底映射。
+    let fixture = Fixture::build(&["a"]);
+    fixture.invoker.set_result(
+        "a",
+        PluginResult {
+            state_updates: updates(&[("should_stop", json!(true))]),
+            ..Default::default()
+        },
+    );
+    let config = always_loop_body("a");
+    let final_state = fixture.run(&config, &StepLibrary::default(), json!({})).await;
+    assert_eq!(
+        fixture.invoker.call_count("a"),
+        1,
+        "should_stop 当轮折算终止，第 2 轮不再进入"
+    );
+    assert_eq!(final_state["ended"], json!(true), "折算为 ended 落 state");
+    assert_eq!(
+        fixture.store.recorded_run_statuses(),
+        vec![RunStatus::Completed],
+        "未署名的终止请求按缺省映射兜底"
+    );
+}
+
+#[tokio::test]
+async fn stop_reason_signature_maps_run_status() {
+    // 终态映射表：谁写终止谁署名（router.stop_reason），引擎只查表——
+    // 预算超线署名 budget_exhausted 落 Failed，不再被 user_requested 误标。
+    let cases: Vec<(&str, RunStatus)> = vec![
+        ("budget_exhausted", RunStatus::Failed),
+        ("elapsed_cap", RunStatus::Failed),
+        ("timeout", RunStatus::Failed),
+        ("task_failed", RunStatus::Failed),
+        ("user_requested", RunStatus::Cancelled),
+        ("task_cancelled", RunStatus::Cancelled),
+        ("task_completed", RunStatus::Completed),
+    ];
+    for (reason, expected) in cases {
+        let fixture = Fixture::build(&["a"]);
+        fixture.invoker.set_result(
+            "a",
+            PluginResult {
+                state_updates: updates(&[
+                    ("should_stop", json!(true)),
+                    ("router.stop_reason", json!(reason)),
+                ]),
+                ..Default::default()
+            },
+        );
+        let config = always_loop_body("a");
+        fixture.run(&config, &StepLibrary::default(), json!({})).await;
+        assert_eq!(
+            fixture.store.recorded_run_statuses(),
+            vec![expected.clone()],
+            "stop_reason={reason} 应映射 {expected:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn suspended_still_skips_exit_body_and_maps_suspended() {
+    // 挂起优先于折算：suspended=true 时整个 run 停止推进、不跑收尾体，
+    // 终态落 Suspended（等待恢复）。
+    let fixture = Fixture::build(&["a", "exit"]);
+    fixture.invoker.set_result(
+        "a",
+        PluginResult {
+            state_updates: updates(&[
+                ("should_stop", json!(true)),
+                ("suspended", json!(true)),
+                ("router.stop_reason", json!("budget_exhausted")),
+            ]),
+            ..Default::default()
+        },
+    );
+    let mut config = always_loop_body("a");
+    config.loop_bodies.push(LoopBody {
+        id: "exit".into(),
+        steps: vec![atomic_step("exit_finalize", "exit")],
+        while_cond: None,
+        exit_routes: vec![],
+        run_on_error: true,
+    });
+    let final_state = fixture.run(&config, &StepLibrary::default(), json!({})).await;
+    assert_eq!(
+        fixture.invoker.call_count("exit"),
+        0,
+        "挂起不跑收尾体（环境保持供恢复）"
+    );
+    assert_eq!(
+        fixture.store.recorded_run_statuses(),
+        vec![RunStatus::Suspended]
+    );
+    assert_eq!(final_state["should_stop"], json!(true));
+}
+
+#[tokio::test]
+async fn run_started_at_written_per_run() {
+    // 耗时锚点：run 初始化写 run_started_at（RFC3339），二次 run 覆盖——
+    // track 插件的 elapsed 由此计算，不再继承宿主进程 uptime。
+    let fixture = Fixture::build(&["a"]);
+    fixture.invoker.set_result(
+        "a",
+        PluginResult {
+            state_updates: updates(&[("ended", json!(true))]),
+            ..Default::default()
+        },
+    );
+    let config = always_loop_body("a");
+    let first = fixture.run(&config, &StepLibrary::default(), json!({})).await;
+    let second = fixture.run(&config, &StepLibrary::default(), json!({})).await;
+    for state in [&first, &second] {
+        let raw = state["run_started_at"].as_str().expect("run_started_at 存在");
+        chrono::DateTime::parse_from_rfc3339(raw).expect("RFC3339 可解析");
+    }
 }

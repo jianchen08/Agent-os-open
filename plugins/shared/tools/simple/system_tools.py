@@ -328,7 +328,7 @@ def _render_skeleton(
         # 提取复盘关键字段(路由/token/错误/状态)
         key_fields: dict[str, Any] = {}
         for k in (
-            "core_type", "execution_status", "raw_error",
+            "core_type", "raw_error",
             "router.stop_reason", "router.last_tool_call",
             "llm_usage", "track.total_tokens",
             "stuck_detected", "stuck_reason",
