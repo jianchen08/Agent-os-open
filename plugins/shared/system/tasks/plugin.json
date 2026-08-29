@@ -509,6 +509,9 @@
     "task.ended_at",
     "task.submitted_by",
     "task.parent_project_id",
-    "task.owned.*"
+    "task.owned.*",
+    "task.acceptance_criteria",
+    "task.description",
+    "task.dependencies"
   ]
 }
