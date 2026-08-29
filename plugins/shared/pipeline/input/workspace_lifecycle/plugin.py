@@ -270,6 +270,7 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                 "[WorkspaceLifecycle] workspace 已就位，跳过创建 | workspace=%s",
                 state["workspace"],
             )
+            await self._mirror_inherited_ws_meta(state)
             return PluginResult()
 
         ec = state.get("execution_context")
@@ -478,6 +479,57 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             source_path,
         )
         return PluginResult(state_updates=updates)
+
+    async def _mirror_inherited_ws_meta(self, state: Any) -> None:
+        """workspace 已就位（继承/恢复）而跳过创建时，补写 task.ws_meta 即时镜像。
+
+        镜像仅在服务创建路径落笔（on_task_start 成功后）；继承型子任务的
+        workspace 由出生契约预置，幂等短路绕过该路径——运行中的 task_evaluate
+        合并门控读 task.ws_meta / ws_meta（引擎出口键，run 末才落库）/
+        task.metadata（0.1 退役通路）三路皆空，按 fail-closed 判"ws_meta
+        读取失败"误伤评估。镜像内容与 _start_subtask 继承分支同形
+        （mode=shared：子任务不拥有合并，父任务完成门控负责其 worktree）；
+        出生契约无坐标（根任务恢复等）不虚构 plain——虚构会让真实 worktree
+        任务跳过合并、产物静默丢失，维持门控 fail-closed。
+        """
+        task_id = str(state.get("task.id") or "")
+        if not task_id:
+            return
+        if state.get("task.ws_meta") or state.get("ws_meta"):
+            return
+        inherited = state_fields.optional_dict(
+            state.get("lineage.parent_ws_meta"),
+            field="lineage.parent_ws_meta",
+        )
+        inherited_path = str(inherited.get("path") or "")
+        if not inherited_path:
+            logger.warning(
+                "[WorkspaceLifecycle] workspace 已就位但出生契约无父链坐标，"
+                "task.ws_meta 镜像不补写（门控将按 ws_meta 读取失败处理）| task=%s",
+                task_id,
+            )
+            return
+        mirror = {
+            "mode": "shared",
+            "path": inherited_path,
+            "parent_workspace": str(state.get("workspace") or ""),
+            "project_root": str(inherited.get("project_root") or ""),
+        }
+        writer = _task_state_writer
+        if writer is None:
+            logger.warning(
+                "[WorkspaceLifecycle] task_state_writer 未绑定，task.ws_meta 镜像补写跳过 | task=%s",
+                task_id,
+            )
+            return
+        try:
+            await writer(task_id, {"task.ws_meta": mirror})
+        except Exception as exc:
+            logger.error(
+                "[WorkspaceLifecycle] task.ws_meta 镜像补写失败 | task=%s | error=%s",
+                task_id,
+                exc,
+            )
 
     # ── exit：合并/清理（服务自持，真实执行）──────────────────
 

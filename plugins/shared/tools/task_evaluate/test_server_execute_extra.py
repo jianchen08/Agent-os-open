@@ -715,7 +715,7 @@ class TestEdgeBranches:
     async def test_merge_fail_complete_evaluation_exception(self, mod: Any, service: Any, monkeypatch: Any) -> None:
         """合并失败标记 failed 时 complete_evaluation(passed=False) 异常 → 降级返回。"""
         task = await _new_task(service)
-        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="merge boom")
+        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="worktree 合并失败: merge boom")
         monkeypatch.setattr(service, "complete_evaluation", AsyncMock(side_effect=RuntimeError("storage down")))
         monkeypatch.setattr(service, "complete_evaluation", AsyncMock(side_effect=RuntimeError("storage down")))
         out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))

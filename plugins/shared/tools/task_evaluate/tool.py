@@ -836,12 +836,14 @@ class TaskEvaluateTool(BuiltinTool):
                 logger.error("[TaskEvaluate] 恢复失败状态为完成失败: %s", e)
         else:
             # worktree 合并门控（0.1 判定）：worktree 模式 completed 前先合并，
-            # 合并成功才变更状态，合并失败则标记为 failed。合并是同步 git 子进程
+            # 合并成功才变更状态，失败则标记为 failed。合并是同步 git 子进程
             # 串（可阻塞数分钟），门控内部丢线程池执行，不冻主事件循环。
+            # merge_error 自描述分类（ws_meta 读取失败 / worktree 合并失败），
+            # 此处按原文透传，不得再套统一前缀。
             merge_error = await self._try_merge_before_complete(task)
             if merge_error:
                 logger.error(
-                    "[TaskEvaluate] worktree 合并失败，任务标记为 failed: task_id=%s, error=%s",
+                    "[TaskEvaluate] 完成前工作区门控失败，任务标记为 failed: task_id=%s, error=%s",
                     task.id,
                     merge_error,
                 )
@@ -849,7 +851,7 @@ class TaskEvaluateTool(BuiltinTool):
                     eval_data = self._build_result_data(eval_result)
                     eval_data["overall_passed"] = False
                     eval_data["merge_failure"] = merge_error
-                    eval_data["summary"] = f"评估指标已通过，但 worktree 合并失败: {merge_error}"
+                    eval_data["summary"] = f"评估指标已通过，但完成前工作区门控失败: {merge_error}"
                     await task_service.complete_evaluation(task.id, passed=False, result=eval_data)
                     await _write_task_state(
                         task.id,
@@ -858,7 +860,7 @@ class TaskEvaluateTool(BuiltinTool):
                 except Exception as e:
                     logger.error("[TaskEvaluate] complete_evaluation(passed=False) 失败: %s", e)
                 return create_failure_result(
-                    error=f"worktree 合并失败: {merge_error}",
+                    error=merge_error,
                     metadata={"task_failed": True},
                 )
             try:
@@ -891,11 +893,12 @@ class TaskEvaluateTool(BuiltinTool):
         合并 git 机制经 worktree_merge 共享模块原样执行（同步 git 子进程串，
         asyncio.to_thread 丢线程池——不冻主事件循环，合并锁跨线程有效）。
         0.1 的跨进程 ServiceProvider 获取不复存在，也无"服务不可用跳过"分支：
-        ws_meta 读不到 = 合并失败（worktree 产出不能静默丢失）。
+        ws_meta 读不到 = 门控失败（worktree 产物不能静默丢失）。
 
         Returns:
             None 表示合并成功或不需要合并（plain/shared 模式），
-            str 表示合并失败原因，调用方应据此标记任务 failed。
+            str 表示门控失败原因（自描述分类：ws_meta 读取失败 / worktree
+            合并失败），调用方按原文透传并据此标记任务 failed。
         """
         ws_meta = await self._read_task_ws_meta(task)
         return await asyncio.to_thread(

@@ -300,6 +300,170 @@ async def test_workspace_init_task_mirror_failure_not_blocking(plugins, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_workspace_skip_branch_mirrors_inherited_ws_meta(plugins, monkeypatch):
+    """init 幂等短路（workspace 已就位）也必须补写 task.ws_meta 镜像。
+
+    继承型子任务 workspace 由出生契约预置，短路绕过服务创建路径的镜像块；
+    缺镜像时 task_evaluate 合并门控运行中三路读空，fail-closed 误杀评估。
+    镜像内容与 _start_subtask 继承分支同形（mode=shared，不透传父模式）。
+    """
+    ws_mod = plugins["ws_mod"]
+    ws = plugins["ws"]
+
+    writes: list[tuple[str, dict[str, Any]]] = []
+
+    async def _writer(pid: str, fields: dict) -> None:
+        writes.append((pid, fields))
+
+    monkeypatch.setattr(ws_mod, "_task_state_writer", _writer)
+    try:
+        result = await ws.execute(
+            plugins["ctx_factory"](
+                {
+                    "current_phase": "init",
+                    "task.id": "task_skip_1",
+                    "workspace": "D:/ws/sessions/thread-a",
+                    "lineage.parent_ws_meta": {
+                        "mode": "plain",
+                        "path": "D:/ws/sessions/thread-a",
+                        "session_id": "thread-a",
+                    },
+                }
+            )
+        )
+    finally:
+        ws_mod._task_state_writer = None
+    assert result.error is None
+    assert result.state_updates == {}, "幂等短路不产生 state_updates"
+    assert writes == [
+        (
+            "task_skip_1",
+            {
+                "task.ws_meta": {
+                    "mode": "shared",
+                    "path": "D:/ws/sessions/thread-a",
+                    "parent_workspace": "D:/ws/sessions/thread-a",
+                    "project_root": "",
+                }
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state_extra",
+    [
+        {},  # 主会话：无 task 身份，不镜像
+        {"task.id": "task_skip_2"},  # 出生契约无父链坐标：不虚构 plain
+    ],
+)
+async def test_workspace_skip_branch_without_coordinates_no_mirror(plugins, monkeypatch, state_extra):
+    """无 task 身份或无出生契约坐标 → 不补写镜像（虚构 plain 会误放行真 worktree）。"""
+    ws_mod = plugins["ws_mod"]
+    ws = plugins["ws"]
+
+    writes: list[tuple[str, dict[str, Any]]] = []
+
+    async def _writer(pid: str, fields: dict) -> None:
+        writes.append((pid, fields))
+
+    monkeypatch.setattr(ws_mod, "_task_state_writer", _writer)
+    try:
+        result = await ws.execute(
+            plugins["ctx_factory"](
+                {"current_phase": "init", "workspace": "D:/ws/x", **state_extra}
+            )
+        )
+    finally:
+        ws_mod._task_state_writer = None
+    assert result.error is None
+    assert result.state_updates == {}
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_skip_branch_mirror_idempotent_when_present(plugins, monkeypatch):
+    """state 已有 task.ws_meta/ws_meta（恢复场景）→ 不重复补写。"""
+    ws_mod = plugins["ws_mod"]
+    ws = plugins["ws"]
+
+    writes: list[tuple[str, dict[str, Any]]] = []
+
+    async def _writer(pid: str, fields: dict) -> None:
+        writes.append((pid, fields))
+
+    monkeypatch.setattr(ws_mod, "_task_state_writer", _writer)
+    try:
+        result = await ws.execute(
+            plugins["ctx_factory"](
+                {
+                    "current_phase": "init",
+                    "task.id": "task_skip_3",
+                    "workspace": "D:/ws/y",
+                    "task.ws_meta": {"mode": "worktree", "path": "D:/wt"},
+                }
+            )
+        )
+    finally:
+        ws_mod._task_state_writer = None
+    assert result.error is None
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_skip_branch_mirror_failure_not_blocking(plugins, monkeypatch, caplog):
+    """短路分支镜像写失败 → ERROR 留痕不阻断（跳过创建本身已成功）。"""
+    ws_mod = plugins["ws_mod"]
+    ws = plugins["ws"]
+
+    async def _boom(pid: str, fields: dict) -> None:
+        raise RuntimeError("写面故障")
+
+    monkeypatch.setattr(ws_mod, "_task_state_writer", _boom)
+    try:
+        with caplog.at_level("ERROR"):
+            result = await ws.execute(
+                plugins["ctx_factory"](
+                    {
+                        "current_phase": "init",
+                        "task.id": "task_skip_4",
+                        "workspace": "D:/ws/z",
+                        "lineage.parent_ws_meta": {"mode": "plain", "path": "D:/ws/z"},
+                    }
+                )
+            )
+    finally:
+        ws_mod._task_state_writer = None
+    assert result.error is None
+    assert result.state_updates == {}
+    assert "task.ws_meta 镜像补写失败" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_workspace_skip_branch_mirror_writer_unbound(plugins, monkeypatch, caplog):
+    """task_state_writer 未绑定（sidecar 裸插件进程）→ WARNING 留痕，不崩不落键。"""
+    ws_mod = plugins["ws_mod"]
+    ws = plugins["ws"]
+
+    monkeypatch.setattr(ws_mod, "_task_state_writer", None)
+    with caplog.at_level("WARNING"):
+        result = await ws.execute(
+            plugins["ctx_factory"](
+                {
+                    "current_phase": "init",
+                    "task.id": "task_skip_5",
+                    "workspace": "D:/ws/w",
+                    "lineage.parent_ws_meta": {"mode": "plain", "path": "D:/ws/w"},
+                }
+            )
+        )
+    assert result.error is None
+    assert result.state_updates == {}
+    assert "镜像补写跳过" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_workspace_init_task_service_down_errors_without_fallback(plugins, monkeypatch, tmp_path):
     """init（任务管道 + 服务不可用）→ 显式报错，无降级、不落占位目录。
 

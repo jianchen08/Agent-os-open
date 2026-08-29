@@ -198,12 +198,14 @@ class WorktreeMerger:
 
         Returns:
             None 表示合并成功或不需要合并（plain/shared 模式），
-            str 表示合并失败原因，调用方应据此标记任务 failed。
+            str 表示门控失败原因（自描述分类：ws_meta 读取失败 / 元数据残缺 /
+            worktree 合并失败），调用方按原文透传并据此标记任务 failed。
         """
         if not ws_meta or not isinstance(ws_meta, dict):
-            # 无法确定 ws_meta，但任务确实跑过隔离逻辑 → 视为致命错误而非静默跳过。
-            # 静默返回 None 会让 worktree 产出永远丢失（既往故障根因）。
-            return f"无法获取任务 {task_id} 的 ws_meta，worktree 合并被跳过"
+            # ws_meta 读不到 → fail-closed：静默放行会让 worktree 产物静默丢失。
+            # 报错分类 = 元数据读取失败，与 git 合并失败严格区分（此时还没走到
+            # 合并步骤，不存在"合并失败"）。
+            return f"任务 {task_id} 的 ws_meta 读取失败，工作区模式无法判定"
 
         mode = ws_meta.get("mode", "")
         if mode != "worktree":
@@ -228,7 +230,7 @@ class WorktreeMerger:
         error_parts = [result.get("error", "unknown")]
         if result.get("verify_error"):
             error_parts.append(f"验证详情: {result['verify_error']}")
-        return ", ".join(error_parts)
+        return f"worktree 合并失败: {', '.join(error_parts)}"
 
     def on_eval_passed(self, task_id: str, workspace: str, ws_meta: dict) -> dict:
         """评估通过后的 worktree 合并（并发安全：按 project_root 粒度加锁）。

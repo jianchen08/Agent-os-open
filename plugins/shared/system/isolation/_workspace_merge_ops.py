@@ -151,9 +151,10 @@ class _MergeOpsMixin:
             ws_meta = self._ws_meta_store.get(task_id)
 
         if not ws_meta or not isinstance(ws_meta, dict):
-            # 无法确定 ws_meta，但任务确实跑过隔离逻辑 → 视为致命错误而非静默跳过。
-            # 静默返回 None 会让 worktree 产出永远丢失（既往故障根因）。
-            return f"无法获取任务 {task_id} 的 ws_meta，worktree 合并被跳过"
+            # ws_meta 读不到 → fail-closed：静默放行会让 worktree 产物静默丢失。
+            # 报错分类 = 元数据读取失败，与 git 合并失败严格区分（此时还没走到
+            # 合并步骤，不存在"合并失败"）。
+            return f"任务 {task_id} 的 ws_meta 读取失败，工作区模式无法判定"
 
         mode = ws_meta.get("mode", "")
         if mode != "worktree":
@@ -178,7 +179,7 @@ class _MergeOpsMixin:
         error_parts = [result.get("error", "unknown")]
         if result.get("verify_error"):
             error_parts.append(f"验证详情: {result['verify_error']}")
-        return ", ".join(error_parts)
+        return f"worktree 合并失败: {', '.join(error_parts)}"
 
     def _cleanup_worktree(
         self,

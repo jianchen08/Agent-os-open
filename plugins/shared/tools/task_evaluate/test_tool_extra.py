@@ -330,7 +330,9 @@ class TestMergeGateAndCompletionPaths:
     @pytest.mark.asyncio
     async def test_merge_failure_marks_task_failed(self, mod: Any, service: Any, monkeypatch: Any) -> None:
         task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"]})
-        tool, state_writer = _inject_tool(mod, monkeypatch, service, merge_result="git merge conflict")
+        tool, state_writer = _inject_tool(
+            mod, monkeypatch, service, merge_result="worktree 合并失败: git merge conflict"
+        )
         out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
         assert out.success is False
         assert "worktree 合并失败" in out.error
@@ -343,7 +345,7 @@ class TestMergeGateAndCompletionPaths:
     @pytest.mark.asyncio
     async def test_merge_failure_writer_raise_not_blocking(self, mod: Any, service: Any, monkeypatch: Any) -> None:
         task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"]})
-        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="merge fail")
+        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="worktree 合并失败: merge fail")
         monkeypatch.setattr(
             mod,
             "_state_writer",

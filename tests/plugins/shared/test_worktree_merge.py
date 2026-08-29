@@ -92,6 +92,26 @@ class TestEntryDispatch:
         err = WorktreeMerger().merge_worktree_before_complete("t1", {"mode": "worktree", "path": ""})
         assert isinstance(err, str) and "ws_meta.path 为空" in err
 
+    def test_metadata_read_failure_not_labeled_as_merge_failure(self) -> None:
+        """ws_meta 读取失败 ≠ worktree 合并失败：还没走到合并步骤，文案不得误标。"""
+        err = worktree_merge.merge_worktree_before_complete("t1", None)
+        assert "ws_meta 读取失败" in err
+        assert "worktree 合并失败" not in err
+
+    def test_merge_failure_labeled_with_merge_prefix(self, monkeypatch: Any) -> None:
+        """git 机制真报错 → 报错带 worktree 合并失败 分类前缀，与读取失败可区分。"""
+        m = WorktreeMerger()
+        monkeypatch.setattr(
+            m,
+            "on_eval_passed",
+            lambda task_id, workspace, ws_meta: {"success": False, "error": "boom"},
+        )
+        err = m.merge_worktree_before_complete(
+            "t1", {"mode": "worktree", "path": "D:/w", "project_root": "D:/s"}
+        )
+        assert isinstance(err, str)
+        assert err.startswith("worktree 合并失败") and "boom" in err
+
 
 # ── 真实 git 仓：合并/验证/清理主链路 ───────────────────────
 

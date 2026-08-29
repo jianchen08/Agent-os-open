@@ -24,7 +24,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -851,6 +851,7 @@ class TestCleanupHelpers:
         _cleanup_mod().set_cleanup_capabilities(executor, None)
         await svc._cancel_pipeline("t-2")
         executor.assert_awaited_once()
+        assert executor.await_args is not None
         call_params = executor.await_args.args[0]
         assert call_params["method"] == "suspend_pipeline"
         assert call_params["params"]["pipeline_id"] == "t-2"
@@ -875,6 +876,7 @@ class TestCleanupHelpers:
         executor = AsyncMock(return_value={"deleted": ["pipeline_state"]})
         _cleanup_mod().set_cleanup_capabilities(executor, None)
         assert await svc._cleanup_pipeline_file("pipe-1") is True
+        assert executor.await_args is not None
         call_params = executor.await_args.args[0]
         assert call_params["method"] == "delete_pipeline"
         assert call_params["params"]["pipeline_id"] == "pipe-1"
@@ -1074,7 +1076,7 @@ class TestCleanupHelpers:
             async def notify(self, method: str, params: dict) -> None:
                 raise RuntimeError("channel down")
 
-        _cleanup_mod().set_cleanup_capabilities(None, FrontendEmitter(BoomHandle()))
+        _cleanup_mod().set_cleanup_capabilities(None, FrontendEmitter(cast(Any, BoomHandle())))
         result = await svc.hard_delete_task(task.id)
         assert result["deleted"] is True  # 通知失败不阻断删除
 
