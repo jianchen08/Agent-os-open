@@ -1635,9 +1635,15 @@ class TaskSubmitTool(BuiltinTool):
                 user_id=inputs.get("user_id") or "task_system",
                 agent_id=agent_id,
                 execution_context=execution_context,
-                # 会话归属锚点：面板 HTTP 传输层透传用户会话（thread-），
-                # LLM 管道路径无此注入键 → 空串省略（管道保持独立，行为不变）。
-                thread_id=str(inputs.get("thread_id") or ""),
+                # 会话归属锚点：thread_id = 面板 HTTP 透传的用户会话；LLM 路径
+                # 取 param_inject 注入的 session_id（调用方管道 state 的会话坐标
+                # ——主聊天管道即根人类会话，子任务绑定正确后沿链逐级传递）。
+                # 出生登记据此落真会话映射（非自环）：用户向子管道发消息才会话
+                # 成员校验放行、一对一进子管道；两键皆缺（无会话根任务）保持
+                # 独立自环（task_birth 缺省语义）。
+                thread_id=str(
+                    inputs.get("thread_id") or inputs.get("session_id") or ""
+                ),
             )
         except TaskBirthError as exc:
             logger.error(

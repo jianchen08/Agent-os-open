@@ -357,6 +357,50 @@ async def test_ordinary_subtask_without_params_submits(tool_module):
 
 
 @pytest.mark.asyncio
+async def test_llm_path_subtask_birth_binds_thread_to_session_anchor(tool_module):
+    """LLM 路径子任务：出生登记 thread_id 取注入 session_id（会话锚点）。
+
+    pipeline_sessions 落真会话映射（非自环）——用户向子管道发消息时内核
+    按会话成员校验放行，消息一对一进子管道；自环绑定会被内核判"不属于
+    该 thread"而回落主管道（写错桶）。
+    """
+    service = ordinary_child_service()
+    tool, captured = make_tool(tool_module, service)
+
+    inputs = base_inputs(task_id="parent_p", session_id="thread-user-1")
+    result = await tool.execute(inputs)
+    assert result.success, result.error
+    # captured["params"] = 出生登记调用（统一出生协议①）
+    assert captured["params"]["thread_id"] == "thread-user-1"
+
+
+@pytest.mark.asyncio
+async def test_panel_thread_id_takes_precedence_over_injected_session(tool_module):
+    """thread_id 显式在场（面板透传）优先于注入 session_id。"""
+    service = ordinary_child_service()
+    tool, captured = make_tool(tool_module, service)
+
+    inputs = base_inputs(
+        task_id="parent_p", session_id="thread-injected", thread_id="thread-panel"
+    )
+    result = await tool.execute(inputs)
+    assert result.success, result.error
+    assert captured["params"]["thread_id"] == "thread-panel"
+
+
+@pytest.mark.asyncio
+async def test_subtask_without_session_anchor_keeps_independent_birth(tool_module):
+    """两键皆缺（无会话根任务）：thread_id 省略——出生保持独立自环。"""
+    service = ordinary_child_service()
+    tool, captured = make_tool(tool_module, service)
+
+    inputs = base_inputs(task_id="parent_p")
+    result = await tool.execute(inputs)
+    assert result.success, result.error
+    assert "thread_id" not in captured["params"]
+
+
+@pytest.mark.asyncio
 async def test_ordinary_subtask_inherit_workspace_rejected(tool_module, tmp_proj):
     """普通子任务：inherit workspace 拒绝（只能继承管道）。"""
     old = FakeTask("old_task", {"task_scope": "non_container", "ws_meta": ws_meta(tmp_proj)})
