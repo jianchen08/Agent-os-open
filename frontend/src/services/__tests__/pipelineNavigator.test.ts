@@ -6,7 +6,7 @@
  * 1. 内存缓存命中（pipelineSessionMap）
  * 2. 缓存与权威会话列表不一致 → 修正缓存（registerPipeline）
  * 3. 会话列表权威命中（readSessions）
- * 4. 缓存与会话列表都未命中 → ensureSessionsLoaded 兜底重查
+ * 4. 缓存与会话列表都未命中 → forceReloadSessions 强制重拉兜底（绕过陈旧缓存）
  * 5. 兜底重查仍无 → null / false
  * 6. 无活跃会话 → false
  * 7. 当前 Tab 已是目标管道 → 快速返回 true
@@ -61,15 +61,16 @@ vi.mock('@/stores/sessionListStore', () => ({
   useSessionListStore: { getState: () => mockSessionListStore },
 }))
 
-// readSessions 由 mock 控制；ensureSessionsLoaded 模拟"拉取后写入缓存"：
+// readSessions 由 mock 控制；forceReloadSessions 模拟"强制重拉并写回缓存"：
 // 首次调用时把 fetchedSessions 灌入 mockSessions（即 query cache），
-// 之后的 readSessions 就能读到——与真实 ensureSessionsLoaded 语义一致。
+// 之后的 readSessions 就能读到——与真实 forceReloadSessions 语义一致
+// （导航兜底必须绕过缓存，见 pipelineNavigator 第三级注释）。
 let mockSessions: any[] = []
 let fetchedSessions: any[] = []
 let mockEnsureThrows = false
 vi.mock('@/hooks/queries/useSessionsQuery', () => ({
   readSessions: () => mockSessions,
-  ensureSessionsLoaded: async () => {
+  forceReloadSessions: async () => {
     if (mockEnsureThrows) throw new Error('fetch failed')
     mockSessions = fetchedSessions // 拉取成功 → 回填缓存
     return mockSessions
@@ -143,7 +144,7 @@ describe('findPipelineLocation - 管道归属查找', () => {
     expect(mockPipelineStore.registerPipeline).not.toHaveBeenCalled()
   })
 
-  it('缓存与会话列表都未命中 → ensureSessionsLoaded 兜底重查后命中（tabId=null）', async () => {
+  it('缓存与会话列表都未命中 → forceReloadSessions 强制重拉后命中（tabId=null）', async () => {
     mockSessions = [] // 第一级/第二级都查不到
     fetchedSessions = [{ id: SESSION_B, pipelineIds: ['pipe-far'] }] // 拉取后回填
 
@@ -158,7 +159,7 @@ describe('findPipelineLocation - 管道归属查找', () => {
     expect(loc).toBeNull()
   })
 
-  it('ensureSessionsLoaded 抛错 → 不向上抛（捕获 console.error）并返回 null', async () => {
+  it('forceReloadSessions 抛错 → 不向上抛（捕获 console.error）并返回 null', async () => {
     mockSessions = []
     mockEnsureThrows = true
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})

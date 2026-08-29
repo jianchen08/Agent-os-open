@@ -41,6 +41,19 @@ export async function ensureSessionsLoaded(): Promise<Session[]> {
   return sessions ?? []
 }
 
+/** 强制重拉会话列表（无视缓存新鲜度，结果回写缓存）。
+ *  供"必须新鲜"的判定路径用：管道出生不触发会话列表失效（无事件源），
+ *  缓存可能任意陈旧——管道跳转兜底查归属必须绕过缓存，否则任务运行期
+ *  用缓存重查等于没查（必报"找不到该管道"）。 */
+export async function forceReloadSessions(): Promise<Session[]> {
+  const sessions = await queryClient.fetchQuery({
+    queryKey: queryKeys.sessions,
+    queryFn: () => getSessions(),
+    staleTime: 0,
+  })
+  return sessions ?? []
+}
+
 /** 非组件环境读当前缓存的会话列表（无缓存返回空数组，调用方无需空值分支） */
 export function readSessions(): Session[] {
   return queryClient.getQueryData<Session[]>(queryKeys.sessions) ?? []

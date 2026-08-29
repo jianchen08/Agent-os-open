@@ -11,6 +11,7 @@ import {
   invalidatePipelineRuns,
   invalidatePipelineStates,
 } from '@/hooks/queries/usePipelineRunsQuery'
+import { invalidateSessions } from '@/hooks/queries/useSessionsQuery'
 import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import * as tokenLifecycle from '@/services/auth/tokenLifecycle'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
@@ -38,6 +39,9 @@ export function useRealtimeEvents(): void {
       // 会拿旧缓存，必须失效后由订阅重拉。
       invalidatePipelineRuns()
       invalidatePipelineStates()
+      // 断线期间可能有管道出生（任务提交/子任务派发）——会话列表无出生事件源，
+      // 唯有在此失效重拉，否则 pipelineIds 陈旧导致任务管道跳转报"找不到"。
+      invalidateSessions()
       // 防抖：1 秒内不重复调用 fetchMessages
       const now = Date.now()
       if (now - lastFetchTimeRef.current < 1000) {

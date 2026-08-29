@@ -38,6 +38,7 @@ describe('useSessionsQuery', () => {
   let readSessions: typeof import('../useSessionsQuery')['readSessions']
   let updateSessionsCache: typeof import('../useSessionsQuery')['updateSessionsCache']
   let ensureSessionsLoaded: typeof import('../useSessionsQuery')['ensureSessionsLoaded']
+  let forceReloadSessions: typeof import('../useSessionsQuery')['forceReloadSessions']
   let queryClient: typeof import('@/services/query/queryClient')['queryClient']
   let queryKeys: typeof import('@/services/query/queryKeys')['queryKeys']
 
@@ -50,7 +51,7 @@ describe('useSessionsQuery', () => {
     mockGetSessions.mockReset()
     ;({ queryClient } = await import('@/services/query/queryClient'))
     queryClient.clear()
-    ;({ useSessionsQuery, readSessions, updateSessionsCache, ensureSessionsLoaded } =
+    ;({ useSessionsQuery, readSessions, updateSessionsCache, ensureSessionsLoaded, forceReloadSessions } =
       await import('../useSessionsQuery'))
     ;({ queryKeys } = await import('@/services/query/queryKeys'))
   })
@@ -96,5 +97,20 @@ describe('useSessionsQuery', () => {
     const again = await ensureSessionsLoaded()
     expect(again.map((s) => s.id)).toEqual(['s2'])
     expect(mockGetSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it('forceReloadSessions：无视缓存新鲜度强制网络拉取并回写缓存', async () => {
+    // 先落一份仍在 staleTime 保护窗内的缓存
+    mockGetSessions.mockResolvedValue([makeSession('s1', '旧数据')])
+    await ensureSessionsLoaded()
+    expect(mockGetSessions).toHaveBeenCalledTimes(1)
+
+    // forceReload：缓存新鲜也必须真实发请求（管道出生无失效事件源，缓存可能
+    // 任意陈旧——跳转兜底必须绕过缓存），拉取结果回写缓存
+    mockGetSessions.mockResolvedValue([makeSession('s1', '旧数据'), makeSession('s2', '新会话')])
+    const fresh = await forceReloadSessions()
+    expect(mockGetSessions).toHaveBeenCalledTimes(2)
+    expect(fresh.map((s) => s.id)).toEqual(['s1', 's2'])
+    expect(readSessions().map((s) => s.id)).toEqual(['s1', 's2'])
   })
 })

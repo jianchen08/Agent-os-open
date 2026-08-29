@@ -1,6 +1,6 @@
 /** 全局管道导航服务 在所有会话的所有管道中查找并跳转到目标管道。 */
 
-import { readSessions, ensureSessionsLoaded } from '@/hooks/queries/useSessionsQuery'
+import { readSessions, forceReloadSessions } from '@/hooks/queries/useSessionsQuery'
 import { reportError, ErrorType, ErrorSeverity } from '@/services/errorReporting'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { usePipelineMessageStore, type PipelineMeta } from '@/stores/pipelineMessageStore'
@@ -64,10 +64,11 @@ export async function findPipelineLocation(pipelineId: string): Promise<Pipeline
     return { sessionId: authoritativeSessionId, pipelineId, tabId: resolveTabId() }
   }
 
-  // 第三级：重新拉取会话列表后再查找（兜底）
+  // 第三级：强制重拉会话列表后再查找（兜底）。必须绕过缓存——管道出生不触发
+  // 会话列表失效（invalidateSessions 无事件源），缓存可能任意陈旧；拿缓存重查
+  // 等于没查，任务运行期点开必报"找不到该管道"（直到某次后台重拉才自愈）。
   try {
-    await ensureSessionsLoaded()
-    const refreshedSessions = readSessions()
+    const refreshedSessions = await forceReloadSessions()
     for (const session of refreshedSessions) {
       if (session.pipelineIds && session.pipelineIds.includes(pipelineId)) {
         return { sessionId: session.id, pipelineId, tabId: null }
