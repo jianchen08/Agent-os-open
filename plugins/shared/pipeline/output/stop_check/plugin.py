@@ -14,12 +14,29 @@ State 命名空间：
 
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import RouteSignal, StateKeys
+
+# state 聚合读取器（server.py on_load 经 pipeline-state capability 注入）：
+# 任务实时状态的唯一可靠来源——外部终态写入（task_evaluate 经
+# pipeline-state.update 写 task.status）对运行中循环的内存态不可见，
+# 停止检测必须走聚合读面（用户裁定：任务终态当轮停止，不允许空转）。
+_state_reader: Any = None
+
+
+def set_state_reader(reader: Any) -> None:
+    """注入 state 聚合读取器（约定 () -> list[dict] | None，sync/async 均可）。"""
+    global _state_reader  # noqa: PLW0603
+    _state_reader = reader
+
+
+def _get_state_reader() -> Any:
+    return _state_reader
 
 logger = logging.getLogger(__name__)
 
@@ -162,10 +179,17 @@ class StopCheckPlugin(IOutputPlugin):
 
         # 6. 任务状态检测（state 缓存 + TaskService 实际查询）
         if self._check_task_status:
-            task_status = self._check_task_terminal_status(ctx)
+            task_status = await self._check_task_terminal_status(ctx)
             if task_status:
                 logger.info("[%s] Task terminal status detected: %s", self.name, task_status)
+                # 终态收束三键一次写全（state_updates 带内平铺键，SDK 契约）：
+                # - ended=true：引擎循环在本轮末立即 break（任务终态当轮停止，
+                #   不允许空转——用户裁定）
+                # - task.status：任务域终态落循环态（与外部写入对账）
+                # - router.stop_reason：收束原因（task_failed/task_completed）
                 return {
+                    "ended": True,
+                    "task.status": task_status,
                     "router.stop_reason": f"task_{task_status}",
                     "__route_signal__": RouteSignal(
                         route_type="end",
@@ -235,19 +259,22 @@ class StopCheckPlugin(IOutputPlugin):
                 }
         return None
 
-    _TERMINAL_STATUSES = frozenset({"canceled", "deleted", "completed", "failed"})
+    # cancelled/canceled 双拼写并存：任务域写 cancelled，历史记录存在 canceled
+    _TERMINAL_STATUSES = frozenset({"canceled", "cancelled", "deleted", "completed", "failed"})
 
-    def _check_task_terminal_status(self, ctx: PluginContext) -> str:
+    def set_state_reader(self, reader: Any) -> None:
+        """注入 state 聚合读取器（server.py on_load 经单例调用）。"""
+        set_state_reader(reader)
+
+    async def _check_task_terminal_status(self, ctx: PluginContext) -> str:
         """检查任务是否已到达终态（取消/删除/完成/失败）。
 
         两个检测路径：
-        1. 从 state["task_status"] 读取（由外部插件注入的缓存值）
-        2. 从 TaskService 查询任务的实际状态（兜底，防止 state 未被更新）
-
-        终态检测范围包含 completed/failed（不止 canceled/deleted），并从 TaskService
-        查询任务实际状态兜底，确保无论 state 是否被更新都能检测到终态，避免管道在任务
-        完成后仍持续循环执行（state["task_status"] 可能从未被任何插件更新，
-        task_event_receiver 只修改 user_input）。
+        1. ctx.state 缓存键 task_status / task.status（进程内可见的写入）
+        2. state 聚合行 task.status 实时读（0.2 单一真值——外部终态写入
+           （task_evaluate 经 pipeline-state.update）对运行中循环的内存态
+           不可见，聚合是唯一实时来源；用户裁定：任务到达终态当轮停止，
+           不允许空转）
 
         Args:
             ctx: 插件执行上下文
@@ -255,25 +282,24 @@ class StopCheckPlugin(IOutputPlugin):
         Returns:
             任务终态字符串，空字符串表示正常运行
         """
-        cached_status = ctx.state.get("task_status", "")
-        if cached_status in self._TERMINAL_STATUSES:
-            return cached_status
+        for key in ("task_status", "task.status"):
+            cached_status = ctx.state.get(key, "")
+            if cached_status in self._TERMINAL_STATUSES:
+                return cached_status
 
-        actual_status = self._check_task_actual_status(ctx)
+        actual_status = await self._check_task_actual_status(ctx)
         if actual_status:
             return actual_status
 
         return ""
 
-    def _check_task_actual_status(self, ctx: PluginContext) -> str:
-        """从 TaskService 查询任务的实际状态。
+    async def _check_task_actual_status(self, ctx: PluginContext) -> str:
+        """从 state 聚合读任务实时状态（0.2 单一真值；每轮查，无节流）。
 
-        当 state["task_status"] 未被更新时，通过查询 task_service 获取
-        任务的真实状态。为避免频繁数据库访问，每 3 次迭代查询一次。
-
-        服务获取：优先 ctx 公共服务面注册的 task_service；未注册（sidecar
-        布局无跨进程任务服务）时回退进程内 tasks.service_access 单例。
-        查询失败记 warning（与正常运行轮次区分可见），本轮按未终态继续。
+        外部终态写入（task_evaluate 经 pipeline-state.update 写 task.status）
+        对运行中管道的循环内存态不可见，聚合读面是唯一可靠的实时来源——
+        任务到达终态必须当轮停止（用户裁定：成功/失败都立即结束，不允许
+        空转）。桥未就绪/读取失败按未终态继续（与既有降级语义一致）。
 
         Args:
             ctx: 插件执行上下文
@@ -281,23 +307,21 @@ class StopCheckPlugin(IOutputPlugin):
         Returns:
             任务终态字符串，空字符串表示正常运行或查询失败
         """
-        iteration = ctx.state.get(StateKeys.ITERATION, 0)
-        if iteration % 3 != 0:
-            return ""
-
         task_id = ctx.state.get(StateKeys.TASK_ID, "")
         if not task_id:
             return ""
 
-        task_service = self._get_task_service(ctx)
-        if task_service is None:
+        reader = _get_state_reader()
+        if reader is None:
             return ""
 
         try:
-            task = task_service.get_task(task_id)
+            rows = reader()
+            if inspect.isawaitable(rows):
+                rows = await rows
         except Exception as exc:
             logger.warning(
-                "[%s] TaskService 状态查询失败，本轮按未终态继续 | task=%s | %s: %s",
+                "[%s] state 聚合读取失败，本轮按未终态继续 | task=%s | %s: %s",
                 self.name,
                 task_id,
                 type(exc).__name__,
@@ -305,43 +329,36 @@ class StopCheckPlugin(IOutputPlugin):
             )
             return ""
 
-        if task is None:
+        if not isinstance(rows, list):
             return ""
 
-        status = task.status
-        if hasattr(status, "value"):
-            status = status.value
-        status = str(status)
+        row = next(
+            (
+                r
+                for r in rows
+                if isinstance(r, dict)
+                and (
+                    str(r.get("task.id") or "") == task_id
+                    or str(r.get("pipeline_id") or "") == task_id
+                )
+            ),
+            None,
+        )
+        if row is None:
+            return ""
+
+        status = str(row.get("task.status") or "")
 
         if status in self._TERMINAL_STATUSES:
             logger.info(
-                "[%s] Task actual status is terminal: %s (task=%s, detected via task_service query, iter=%d)",
+                "[%s] Task actual status is terminal: %s (task=%s, detected via state aggregation)",
                 self.name,
                 status,
                 task_id,
-                iteration,
             )
             return status
 
         return ""
-
-    def _get_task_service(self, ctx: PluginContext) -> Any | None:
-        """获取 TaskService 实例（公共服务面优先，进程内单例兜底）。
-
-        Returns:
-            服务实例；两侧均不可用时 None（查询通道缺失，跳过本轮实际状态检查）
-        """
-        try:
-            return ctx.get_service("task_service")
-        except KeyError:
-            pass
-        # sidecar 无注册服务：回退公共 service_access 单例；
-        # 单例初始化失败返回 None（service_access 自身已记日志），不抛。
-        try:
-            from tasks.service_access import get_task_service  # noqa: PLC0415
-        except ImportError:
-            return None
-        return get_task_service()
 
     def _apply_runtime_config(self, ctx: PluginContext) -> None:
         """从 Agent 配置覆盖运行时参数（每次 execute 复位后应用）。

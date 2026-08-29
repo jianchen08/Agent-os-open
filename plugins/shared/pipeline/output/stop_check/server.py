@@ -35,7 +35,19 @@ def get_instance() -> StopCheckPlugin:
 @plugin.on_load
 async def _on_load(params: dict) -> None:
     """Initialize stop_check plugin."""
-    get_instance()  # 启动时预热，保持原 on_load 构造时机
+    instance = get_instance()  # 启动时预热，保持原 on_load 构造时机
+
+    # 注入 state 聚合读取器（pipeline-state capability）：任务实时终态检测
+    # 的数据源——外部终态写入（task_evaluate）对运行中循环内存态不可见，
+    # 聚合是唯一实时来源（用户裁定：任务终态当轮停止）
+    async def _read_state_rows():
+        handle = plugin.get_capability("pipeline-state")
+        resp = await handle.call("list", {})
+        return resp if isinstance(resp, list) else None
+
+    # 经单例注入：共宿 sidecar 进程内裸名 plugin 模块可能被同进程其它插件
+    # 的同名模块占位（平铺导入冲突），不能按模块名导入
+    instance.set_state_reader(_read_state_rows)
 
 
 @plugin.on_unload

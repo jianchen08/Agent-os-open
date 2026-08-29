@@ -105,51 +105,69 @@ class TestRuntimeConfigResetPerAgent:
 
 
 class TestTaskStatusQueryChannel:
-    def test_terminal_status_via_service_access_fallback_ends(self, monkeypatch: Any) -> None:
-        """context 未注册 task_service 时经进程内 service_access 单例兜底查询；
-        查到终态（completed）→ 管道应收到 end 信号而不是静默放过。"""
-        import types as _types
+    """任务实时终态检测：state 聚合读面（0.2 单一真值，无 YAML 兜底）。"""
 
-        def fake_get_task_service() -> Any:
-            return SimpleNamespace(get_task=lambda _tid: SimpleNamespace(status="completed"))
+    def test_terminal_status_via_state_aggregation_ends(self, monkeypatch: Any) -> None:
+        """聚合行 task.status=completed → 管道收到 end 信号而不是静默放过。
 
-        # 以模块桩替代真实 system/tasks（无 __init__ 的目录包在本车道共跑时
-        # 常被裸名 tasks 模块污染）；生产代码按 sys.modules 缓存命中导入。
-        fake_pkg = _types.ModuleType("tasks")
-        fake_sa = _types.ModuleType("tasks.service_access")
-        fake_sa.get_task_service = fake_get_task_service  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "tasks", fake_pkg)
-        monkeypatch.setitem(sys.modules, "tasks.service_access", fake_sa)
-
+        外部终态写入（task_evaluate 经 pipeline-state.update）对运行中循环
+        内存态不可见——聚合读面是唯一实时来源（用户裁定：任务终态当轮停止）。"""
         mod = _load_plugin_module()
+
+        async def fake_reader():
+            return [
+                {"pipeline_id": "p", "task.id": "p", "task.status": "completed"},
+            ]
+
+        monkeypatch.setattr(mod, "_state_reader", fake_reader)
         plugin = mod.StopCheckPlugin(config={})
-        state = {"pipeline_id": "p", "iteration": 6, "task.id": "t-1"}
+        state = {"pipeline_id": "p", "iteration": 6, "task.id": "p"}
         res = _run(plugin.execute(_ctx(state)))
-        assert res.route_signal is not None, "兜底通道查到 completed 终态应收束管道"
+        assert res.route_signal is not None, "聚合读到 completed 终态应收束管道"
         assert res.route_signal.route_type == "end"
 
-    def test_query_failure_warns_and_passes(self, caplog: pytest.LogCaptureFixture) -> None:
-        """注册的服务查询抛错 → 记 warning（与正常轮次区分可见），本轮不放行也不崩。"""
+    def test_failed_status_ends_and_running_passes(self, monkeypatch: Any) -> None:
+        """failed 同样当轮收束；running 非终态不拦截。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 6, "task.id": "p"}
 
-        def _boom(_tid: str) -> Any:
-            raise RuntimeError("db down")
+        async def failed_reader():
+            return [{"pipeline_id": "p", "task.id": "p", "task.status": "failed"}]
 
-        svc = SimpleNamespace(get_task=_boom)
+        monkeypatch.setattr(mod, "_state_reader", failed_reader)
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.route_signal is not None and res.route_signal.route_type == "end"
+
+        async def running_reader():
+            return [{"pipeline_id": "p", "task.id": "p", "task.status": "running"}]
+
+        monkeypatch.setattr(mod, "_state_reader", running_reader)
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.route_signal is None, "running 非终态，不应收束"
+
+    def test_state_read_failure_warns_and_passes(
+        self, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """聚合读取抛错 → 记 warning（与正常轮次区分可见），本轮不放行也不崩。"""
         mod = _load_plugin_module()
         plugin = mod.StopCheckPlugin(config={})
         state = {"pipeline_id": "p", "iteration": 6, "task.id": "t-1"}
 
-        with caplog.at_level("WARNING"):
-            res = _run(
-                plugin.execute(_ctx(state, services={"task_service": svc})),
-            )
+        async def _boom():
+            raise RuntimeError("state bridge down")
 
-        assert res.route_signal is None, "查询失败不应伪造终态信号"
+        monkeypatch.setattr(mod, "_state_reader", _boom)
+
+        with caplog.at_level("WARNING"):
+            res = _run(plugin.execute(_ctx(state)))
+
+        assert res.route_signal is None, "读取失败不应伪造终态信号"
         warnings = [
             r for r in caplog.records
             if r.levelname == "WARNING" and "stop_check" in r.name
         ]
-        assert warnings, "任务状态查询失败必须以 warning 级别留下可见痕迹"
+        assert warnings, "任务状态读取失败必须以 warning 级别留下可见痕迹"
 
 
 class TestLimitHitMarksTaskFailed:

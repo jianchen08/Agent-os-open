@@ -108,6 +108,12 @@ loop_bodies:
           - pipeline_sensitive_checker  # 敏感数据脱敏（扫描 tool_results 中的 API Key/Token/密码并替换；Rust native 实现，须在 result_format 之前——格式化后内容进 messages 不再经此）
           - pipeline_result_format
         next:                   # 出口转移（统一 DSL：when/then/缺省顺序推进）
+          # 任务终态当轮收束（用户裁定 2026-08-29：任务成功/失败/取消立即结束，
+          # 禁止空转）——task_evaluate 或外部写入 task.status 终态后本轮即 end
+          # （exit 循环体 run_on_error=true 仍执行收尾）。会话主管道无 task.status
+          # 键，条件恒假不受影响；重跑派发时注入分支把 task.status 复位 running。
+          - when: "task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled'"
+            then: end
           # 对话模式已激活 + 无工具调用（AI 纯文本回复）→ 挂起管道等待用户下一条
           # 消息（set suspended=true 挂起——DSL 不支持 then: wait，挂起由
           # state.suspended 表达；suspended 属 per-run 键，下轮派发自动复位）

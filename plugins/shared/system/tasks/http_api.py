@@ -391,6 +391,9 @@ async def _submit_task_event(
         "message": kickoff,
         "user_id": user_id or "task_system",
         "background": True,
+        # 重跑复位任务状态：failed → running（DSL 任务终态收束条件据此放行
+        # 重跑轮次；任务重新进入执行态语义）
+        "state": {"task.status": "running"},
     }
     resp = await chat.call("send_message", params)
     got = str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""

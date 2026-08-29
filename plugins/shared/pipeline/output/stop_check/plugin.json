@@ -20,5 +20,8 @@
   "host_group": "light",
   "export_fields": [
     "router.stop_reason"
+  ],
+  "granted_capabilities": [
+    "pipeline-state"
   ]
 }
