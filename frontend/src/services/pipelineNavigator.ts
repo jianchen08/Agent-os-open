@@ -9,6 +9,12 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { mainPipelineIdOf } from '@/utils/mappers'
 import type { AgentTab } from '@/types/task'
 
+/** 归属会话提示（血缘 origin）是否可用：提示会话必须仍在会话列表里 */
+function resolveFallbackSession(fallbackSessionId: string | undefined): string | null {
+  if (!fallbackSessionId) return null
+  return readSessions().some((s) => s.id === fallbackSessionId) ? fallbackSessionId : null
+}
+
 /** 查找结果 */
 export interface PipelineLocation {
   /** 管道所属会话 ID */
@@ -89,9 +95,15 @@ export async function navigateToPipeline(
     agentLevel?: 1 | 2 | 3
     taskId?: string
     status?: string
+    /** 归属会话提示（血缘 lineage.origin_session_id）：自环子任务管道
+     *  （pipeline_sessions 落 thread=自身 id）不在任何会话 pipelineIds 里，
+     *  三级查找必然落空，内存缓存还可能是事件到达时按当时活跃会话误挂的错值。
+     *  调用方经血缘解析出真实归属会话后传入；提示会话在列表中时优先于一切推断。 */
+    fallbackSessionId?: string
   },
 ): Promise<boolean> {
-  const { agentName = '子任务', agentLevel = 2, taskId, status = 'running' } = options || {}
+  const { agentName = '子任务', agentLevel = 2, taskId, status = 'running', fallbackSessionId } =
+    options || {}
 
   const currentSid = useSessionStore.getState().activeSessionId
   if (!currentSid) {
@@ -107,12 +119,16 @@ export async function navigateToPipeline(
     return false
   }
 
-  // 管道归属解析（快速检查与后续导航共用一次查找）。残留绑定恰与目标管道
-  // 相等时（Tab 持其他会话的管道 id），仅凭绑定相等判"已就位"是误判——视图
-  // 仍停在当前会话，真实归属会话未被访问：归属确属他会话则不提前返回，继续
-  // 正常导航流程（含跨会话切换）；归属未知（缓存与重查均未命中）保持信任
+  // 管道归属解析（快速检查与后续导航共用一次查找）。血缘提示可用时优先——
+  // 自环管道按会话查找必落空，误挂缓存还会把导航引向错误会话。残留绑定恰与
+  // 目标管道相等时（Tab 持其他会话的管道 id），仅凭绑定相等判"已就位"是误判
+  // ——视图仍停在当前会话，真实归属会话未被访问：归属确属他会话则不提前返回，
+  // 继续正常导航流程（含跨会话切换）；归属未知（缓存与重查均未命中）保持信任
   // Tab 绑定的原语义。
-  const location = await findPipelineLocation(pipelineId)
+  const hintedSessionId = resolveFallbackSession(fallbackSessionId)
+  const location = hintedSessionId
+    ? { sessionId: hintedSessionId, pipelineId, tabId: null }
+    : await findPipelineLocation(pipelineId)
   const tabStore = useAgentTabStore.getState()
   const activeTab = tabStore.tabs.find((t) => t.id === tabStore.activeTabId)
   if (

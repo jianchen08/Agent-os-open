@@ -15,6 +15,8 @@
  * 10. 已有标签匹配 pipelineRunId → switchToTab
  * 11. 主管道 → main-{sessionId} 主标签 switchToTab
  * 12. 子管道 → registerPipeline + openSubAgentTab + loadTabMessages
+ * 13. 血缘归属提示 fallbackSessionId：自环子任务管道切提示会话开子标签
+ *     （提示优先于推断；提示无效回退正常查找；提示=当前会话快速返回）
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -355,5 +357,72 @@ describe('navigateToPipeline - 全局导航', () => {
     expect(mockTabStore.openSubAgentTab).toHaveBeenCalledWith(
       expect.objectContaining({ agentId: 'pipe-sub-3', agentLevel: 2 }),
     )
+  })
+
+  // ── 血缘归属提示（自环子任务管道：thread=自身 id，不在任何会话 pipelineIds）──
+
+  it('血缘归属提示：自环管道三级查找必落空 → 切到提示会话并在该会话开子标签', async () => {
+    mockSessionStore.activeSessionId = SESSION_A
+    // 根会话在 SESSION_B（持主管道 pipe-root）；子管道自环，哪里都查不到
+    mockSessions = [{ id: SESSION_B, pipelineIds: ['pipe-root'], activePipelineId: 'pipe-root' }]
+    mockTabStore.tabs = []
+
+    const ok = await navigateToPipeline('pipe-self-loop', {
+      fallbackSessionId: SESSION_B,
+      agentName: '子任务',
+    })
+    expect(ok).toBe(true)
+    expect(mockSessionListStore.setActiveSession).toHaveBeenCalledWith(SESSION_B)
+    expect(mockTabStore.initSessionTabs).toHaveBeenCalledWith(SESSION_B)
+    expect(mockPipelineStore.registerPipeline).toHaveBeenCalledWith(
+      expect.objectContaining({ pipelineId: 'pipe-self-loop', sessionId: SESSION_B }),
+    )
+    expect(mockTabStore.openSubAgentTab).toHaveBeenCalledWith(
+      expect.objectContaining({ pipelineId: 'pipe-self-loop', setActive: true }),
+    )
+    expect(mockTabStore.loadTabMessages).toHaveBeenCalledWith('sub-pipe-self-loop', 'pipe-self-loop')
+  })
+
+  it('血缘提示优先于误挂缓存：缓存把自环管道挂到当前会话 → 仍切到提示会话', async () => {
+    mockSessionStore.activeSessionId = SESSION_A
+    mockSessions = [{ id: SESSION_B, pipelineIds: ['pipe-root'], activePipelineId: 'pipe-root' }]
+    // 事件到达时按当时活跃会话误挂的缓存值——不得把导航引向当前会话
+    mockPipelineStore.pipelineSessionMap = { 'pipe-self': SESSION_A }
+    mockTabStore.tabs = []
+
+    const ok = await navigateToPipeline('pipe-self', { fallbackSessionId: SESSION_B })
+    expect(ok).toBe(true)
+    expect(mockSessionListStore.setActiveSession).toHaveBeenCalledWith(SESSION_B)
+    expect(mockTabStore.openSubAgentTab).toHaveBeenCalledWith(
+      expect.objectContaining({ pipelineId: 'pipe-self' }),
+    )
+  })
+
+  it('血缘提示的会话不在会话列表 → 提示无效，回退正常查找并按无归属报错', async () => {
+    mockSessionStore.activeSessionId = SESSION_A
+    mockSessions = [{ id: SESSION_A, pipelineIds: [] }]
+    fetchedSessions = [] // 兜底重拉也查不到
+
+    const ok = await navigateToPipeline('pipe-ghost-sub', { fallbackSessionId: SESSION_B })
+    expect(ok).toBe(false)
+    const { notifications } = useNotificationStore.getState()
+    expect(
+      notifications.some(
+        (n) => n.message.includes('pipe-ghost-sub') && n.message.includes('所有会话中都找不到该管道'),
+      ),
+    ).toBe(true)
+    expect(mockTabStore.openSubAgentTab).not.toHaveBeenCalled()
+  })
+
+  it('血缘提示即当前会话且活跃 Tab 已绑定目标管道 → 快速返回 true（不重复开标签）', async () => {
+    mockSessionStore.activeSessionId = SESSION_A
+    mockSessions = [{ id: SESSION_A, pipelineIds: ['pipe-root'], activePipelineId: 'pipe-root' }]
+    mockTabStore.tabs = [{ id: 'tab-a', pipelineRunId: 'pipe-self' }]
+    mockTabStore.activeTabId = 'tab-a'
+
+    const ok = await navigateToPipeline('pipe-self', { fallbackSessionId: SESSION_A })
+    expect(ok).toBe(true)
+    expect(mockTabStore.openSubAgentTab).not.toHaveBeenCalled()
+    expect(mockSessionListStore.setActiveSession).not.toHaveBeenCalled()
   })
 })

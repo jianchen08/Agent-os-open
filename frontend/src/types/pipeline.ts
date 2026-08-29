@@ -39,6 +39,10 @@ export interface PipelineViewEntry {
   runId: string
   /** 归属会话 ID */
   threadId?: string
+  /** 血缘根会话（state lineage.origin_session_id）：子任务管道出生落
+   *  pipeline_sessions 自环映射（thread=自身 id，sessions 表无行），
+   *  真实归属的用户会话由该键承载 */
+  originSessionId?: string
   /** 运行状态 */
   status: PipelineStatus
   /** 开始时间（ISO8601） */

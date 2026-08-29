@@ -230,6 +230,8 @@ describe('PipelineManagerWidget', () => {
     seed.mockUseAllTasksQuery.mockReturnValue({ data: seed.FAKE_ALL_TASKS })
     seed.mockUsePipelineRunsQuery.mockReturnValue({ data: seed.FAKE_RUNS })
     seed.mockUsePipelineStatesQuery.mockReturnValue({ data: seed.FAKE_STATES })
+    // 导航 mock 跨用例清历史清实现（需返回值的用例自行 mockResolvedValue）
+    vi.mocked(navigateToPipeline).mockReset()
   })
 
   it('未知状态任务保留且显示原始状态', async () => {
@@ -459,5 +461,75 @@ describe('PipelineManagerWidget', () => {
     // 未走导航链路，也未把有归属管道当孤儿建子标签
     expect(navigateToPipeline).not.toHaveBeenCalled()
     expect(useAgentTabStore.getState().tabs.slice(tabsBefore)).toHaveLength(0)
+  })
+
+  it('自环子任务管道：threadId 不在会话列表 → 按血缘会话跳转，不当孤儿在当前会话开标签', async () => {
+    vi.mocked(navigateToPipeline).mockResolvedValue(true)
+    // 会话列表只有根会话 th-root；子管道自环（thread_id=自身 id），
+    // state 带血缘根会话 lineage.origin_session_id=th-root
+    seed.mockReadSessions.mockReturnValue([{ id: 'th-root', title: '根会话' }])
+    seed.mockUsePipelineRunsQuery.mockReturnValue({
+      data: {
+        subRun: {
+          pipeline_id: 'selfLoopPipe',
+          run_id: 'run-self',
+          thread_id: 'selfLoopPipe',
+          status: 'running',
+          started_at: '2026-08-29T00:00:00Z',
+        },
+      },
+    })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({
+      data: {
+        selfLoopPipe: {
+          pipeline_id: 'selfLoopPipe',
+          thread_id: 'selfLoopPipe',
+          source: 'memory',
+          state: { 'lineage.origin_session_id': 'th-root', 'task.status': 'running' },
+        },
+      },
+    })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+
+    const tabsBefore = useAgentTabStore.getState().tabs.length
+    renderWithProviders(<PipelineManagerWidget />)
+    fireEvent.click((await screen.findAllByText('会话 selfLoop'))[0])
+
+    // 血缘会话作归属提示传给导航器（不在当前会话落孤儿标签的正确前提）
+    await waitFor(() => {
+      expect(navigateToPipeline).toHaveBeenCalledWith(
+        'selfLoopPipe',
+        expect.objectContaining({ fallbackSessionId: 'th-root' }),
+      )
+    })
+    expect(useAgentTabStore.getState().tabs.slice(tabsBefore)).toHaveLength(0)
+  })
+
+  it('无血缘的自环条目维持孤儿行为：当前会话直接开子标签', async () => {
+    // 旧数据（无 lineage.origin_session_id）不可跳转——孤儿分支保持原语义
+    seed.mockReadSessions.mockReturnValue([{ id: 'th-root', title: '根会话' }])
+    seed.mockUsePipelineRunsQuery.mockReturnValue({
+      data: {
+        subRun: {
+          pipeline_id: 'legacyPipe',
+          run_id: 'run-legacy',
+          thread_id: 'legacyPipe',
+          status: 'running',
+          started_at: '2026-08-29T00:00:00Z',
+        },
+      },
+    })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+
+    renderWithProviders(<PipelineManagerWidget />)
+    fireEvent.click((await screen.findAllByText('会话 legacyPi'))[0])
+
+    await waitFor(() => {
+      expect(useAgentTabStore.getState().tabs.some((t) => t.pipelineRunId === 'legacyPipe')).toBe(
+        true,
+      )
+    })
+    expect(navigateToPipeline).not.toHaveBeenCalled()
   })
 })

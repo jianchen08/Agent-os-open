@@ -49,6 +49,9 @@ export interface PipelineStateSummary {
   'task.id'?: string
   'task.ended_at'?: string
   'lineage.parent_pipeline_id'?: string
+  // 血缘根会话（task_submit 出生写面）：自环子任务管道（thread=自身 id）的
+  // 真实归属用户会话，任务管理面板跨会话跳转的定位锚点
+  'lineage.origin_session_id'?: string
   // 工作区坐标（workspace_lifecycle init 写入；R3 裁定：所有管道类型的工作区
   // 关联底座——path=worktree 副本或 plain 目录，project_root 是源根不用于关联）
   workspace?: string

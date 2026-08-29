@@ -192,6 +192,9 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         pipelineId: run.pipeline_id,
         runId: run.run_id,
         threadId: run.thread_id,
+        // 血缘根会话（自环子任务管道的 thread_id=自身 id 不在会话列表，
+        // 真实归属用户会话由血缘键承载）
+        originSessionId: st?.state['lineage.origin_session_id'],
         status: run.status,
         startedAt: run.started_at,
         endedAt: run.ended_at,
@@ -257,6 +260,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         pipelineId: pid,
         runId: pid,
         threadId: String(task.threadId ?? task.thread_id ?? '') || undefined,
+        originSessionId: st?.state['lineage.origin_session_id'],
         status: mapped,
         startedAt,
         endedAt: completedAt,
@@ -302,6 +306,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         pipelineId: st.pipeline_id,
         runId: st.pipeline_id,
         threadId: st.thread_id,
+        originSessionId: s['lineage.origin_session_id'],
         status: mapped,
         startedAt: new Date(0).toISOString(),
         kind: 'session',
@@ -560,15 +565,31 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         return
       }
     }
-    const hasSession =
-      !!entry.threadId
-      && readSessions().some((s) => s.id === entry.threadId)
-    if (hasSession && entry.threadId) {
+    // 归属会话解析：threadId 命中会话列表为第一真值。子任务管道出生落
+    // pipeline_sessions 自环映射（thread=自身 id，sessions 表无行）——runs API
+    // 联结出的 thread_id 不会命中会话列表，真实归属会话经血缘
+    // origin_session_id 兜底（出生写面真值，指向根用户会话）。
+    const sessionsNow = readSessions()
+    let owningSessionId: string | undefined
+    let ownsViaLineage = false
+    if (entry.threadId && sessionsNow.some((s) => s.id === entry.threadId)) {
+      owningSessionId = entry.threadId
+    } else if (
+      entry.originSessionId
+      && sessionsNow.some((s) => s.id === entry.originSessionId)
+    ) {
+      owningSessionId = entry.originSessionId
+      ownsViaLineage = true
+    }
+    if (owningSessionId) {
       const ok = await navigateToPipeline(pipelineId, {
         agentName: entry.name,
         agentLevel: 2,
         taskId: entry.taskId,
         status: entry.status,
+        // 自环子任务管道在任何会话 pipelineIds 里都查不到——血缘会话作定位
+        // 提示传入，导航器切到归属会话开子标签（不在当前会话落孤儿标签）
+        fallbackSessionId: ownsViaLineage ? owningSessionId : undefined,
       }).catch((e) => {
         console.error('[PipelineManager] 管道导航失败', e)
         return false
@@ -578,7 +599,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         // （setActiveSession 会激活主管道标签并加载消息，等价于"打开对应会话标签"）
         await useSessionListStore
           .getState()
-          .setActiveSession(entry.threadId)
+          .setActiveSession(owningSessionId)
           .catch((e) => {
             console.error('[PipelineManager] 切换会话失败', e)
             useNotificationStore.getState().addNotification({
