@@ -24,6 +24,13 @@ from agentos_plugin_sdk import (
     safe_enum_value,
 )
 
+# 共享层统一出生协议（plugins/shared/task_birth.py，与 tasks http_api 同源实现，
+# 出生写面单一真值）。无条件前置（模块仅导入一次，重复项无害——tests/plugins
+# shared conftest 同款做法），保证测试/生产任一进程形态下该行都被执行。
+_SHARED_ROOT = str(Path(__file__).resolve().parents[2])
+sys.path.insert(0, _SHARED_ROOT)
+from task_birth import TaskBirthError, birth_task_pipeline  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 # ── 服务提供者解析 ──
@@ -72,11 +79,13 @@ def set_agent_registry_lookup(lookup: Any) -> None:
 
 # ── GAP-1：chat.send_message 派发器（server.py on_load 注入）──
 #
-# 任务执行驱动：提交成功后经内核 chat capability 的 send_message（create 分支，
-# 引擎生成 pipeline_id）创建任务执行管道——state 出生即带 task.*/lineage.* 扁平
-# 键（血缘方案本插件自持）、execution_context 透传。sidecar 进程内模块级注入（能力句柄
-# 懒解析在协程内完成）；未注入（capability 缺席/测试）时提交仍落库但话术诚实
-# （不声称"异步执行中"），结果携带 warning。
+# 任务执行驱动：提交成功后经内核 chat capability 的 send_message 创建任务执行
+# 管道——出生走 plugins/shared/task_birth.py 统一协议（与 tasks http_api 共用）：
+# 出生登记（create+no_dispatch，引擎生成 pipeline_id、pipeline_sessions 落映射）
+# → 身份登记（task.id=管道 id 先于任何管道步骤）→ 执行派发（kickoff+execution_context
+# background 启动）。state 出生即带 task.*/lineage.* 扁平键。sidecar 进程内模块级
+# 注入（能力句柄懒解析在协程内完成）；未注入（capability 缺席/测试）时提交仍落库
+# 但话术诚实（不声称"异步执行中"），结果携带 warning。
 _chat_sender: Any = None
 
 
@@ -1478,25 +1487,26 @@ class TaskSubmitTool(BuiltinTool):
         agent_id: str = "",
         parent_project_id: str = "",
     ) -> dict[str, Any]:
-        """GAP-1 统一：经 chat.send_message 创建任务执行管道（引擎生成 id = task.id）。
+        """GAP-1 统一：经统一出生协议创建任务执行管道（引擎生成 id = task.id）。
 
-        契约（与内核 chat_send_handler 创建分支对齐）：
-        - ``create: true`` + 不传 pipeline_id——引擎生成并在响应返回（三次定案：
-          堵 id 冒占）；**task.id 由引擎注入 state**（身份权威统一，调用方
-          派发时还不知道 id），task = pipeline，无独立 YAML 记录；
-        - ``state``：任务域字段出生即入（task.goal/status/description/
-          acceptance_criteria/dependencies——扁平点号键，STATE_SUMMARY_KEYS
-          出口）；task.status 终态由内核 run 终态回写（completed/failed/suspended）；
-        - ``state`` 的血缘扁平键：有父形式（lineage.parent_pipeline_id = 调用方
-          管道，lineage.origin_session_id 同管道）/ 根形式（lineage.root + 来源
-          声明，无调用方管道时诚实声明 plugin 来源，不伪造默认父）二选一；
-        - ``execution_context``：workspace/isolation（本地组装，供执行管道
-          init 体 workspace_lifecycle 消费——空间初始化不再在提交期做）；
-        - ``background: true``：不阻塞工具调用等待任务完成（派发即返回 id）。
+        契约（plugins/shared/task_birth.py 三段式，与内核 chat_send_handler 对齐）：
+        - 出生登记（create + no_dispatch）：引擎生成 pipeline_id 并在响应返回
+          （三次定案：堵 id 冒占），内核创建分支落 pipeline_sessions 映射
+          （子任务唤醒注入的反查锚点）；task = pipeline，无独立 YAML 记录；
+        - 身份登记：task.id = 管道 id 在任何管道步骤执行前写入出生 state——
+          init 体 workspace_lifecycle 的工作区共享决策以该键为任务判据；
+        - 执行派发（注入 + background）：kickoff + execution_context 启动；
+          不阻塞工具调用等待任务完成（派发即返回 id）。
+        - ``birth_state``：任务域字段出生即入（task.goal/status/description/
+          acceptance_criteria/dependencies/task.submitted_by——扁平点号键）；
+          血缘扁平键有父形式（lineage.parent_pipeline_id = 调用方管道，
+          lineage.origin_session_id 同管道）/ 根形式（lineage.root + 来源
+          声明）二选一；task.status 终态由内核 run 终态回写。
 
         Returns:
-            ``{"pipeline_id": ...}`` 派发成功（即 task.id）；``{"warning": ...}``
-            派发器缺席/失败（无 YAML 记录可清理——管道未创建即无任务）。
+            ``{"pipeline_id": ...}`` 出生成功（即 task.id）；``{"warning": ...}``
+            派发器缺席/出生失败（execute 据此出 DISPATCH_FAILED 失败信封，
+            无 YAML 记录可清理——管道未出生即无任务）。
         """
         sender = _get_chat_sender()
         if sender is None:
@@ -1535,57 +1545,52 @@ class TaskSubmitTool(BuiltinTool):
         kickoff += _build_workspace_guidance(execution_context)
         kickoff += _build_task_progress_method()
 
-        params: dict[str, Any] = {
-            "create": True,
-            "message": kickoff,
-            "user_id": inputs.get("user_id") or "task_system",
-            "state": {
-                "task.goal": title,
-                "task.status": "pending",
-                "task.description": description or "",
-                "task.acceptance_criteria": acceptance_criteria or {},
-                "task.dependencies": dependencies or [],
-                "task.submitted_by": inputs.get("user_id", ""),
-                **lineage_keys,
-            },
-            "background": True,
+        # 出生 state 一次写全（2026-08-28 用户裁定：任务提交时就把任务相关的
+        # 放到 state 里面）：task.* 域键 + 血缘扁平键（有父/根二选一）；
+        # task.id 由统一出生协议在引擎生成 id 后、任何管道步骤执行前补齐。
+        birth_state: dict[str, Any] = {
+            "task.goal": title,
+            "task.status": "pending",
+            "task.description": description or "",
+            "task.acceptance_criteria": acceptance_criteria or {},
+            "task.dependencies": dependencies or [],
+            "task.submitted_by": inputs.get("user_id", ""),
+            **lineage_keys,
         }
         # 挂靠项目（项目非管道）：任务管道 state 带 parent_project_id——
         # 前端任务树据此挂项目节点下；lineage 有父形式仍指向提交者管道
         # （项目不是管道，不能当 lineage 父）。
         if parent_project_id:
-            params["state"]["task.parent_project_id"] = parent_project_id
-        # 目标 agent 传导：target_type=agent 时执行管道按该 agent 配置跑
-        # （人格/tool_ids）——内核 chat_send_handler 创建分支消费。缺失回退主 agent。
-        if agent_id:
-            params["agent_id"] = agent_id
-        if execution_context:
-            params["execution_context"] = execution_context
+            birth_state["task.parent_project_id"] = parent_project_id
 
+        # 共享层统一出生协议（模块级已导入 task_birth）——与 tasks http_api
+        # 同一实现，出生写面单一真值。
         try:
-            resp = await sender(params)
-        except Exception as exc:
+            pipeline_id = await birth_task_pipeline(
+                sender,
+                title=title,
+                birth_state=birth_state,
+                kickoff=kickoff,
+                user_id=inputs.get("user_id") or "task_system",
+                agent_id=agent_id,
+                execution_context=execution_context,
+            )
+        except TaskBirthError as exc:
             logger.error(
-                "[TaskSubmit] 任务管道派发失败 | title=%s | err=%s",
+                "[TaskSubmit] 任务管道出生失败 | title=%s | err=%s",
                 title,
                 exc,
                 exc_info=True,
             )
-            return {"warning": f"chat.send_message 派发失败：{exc}"}
-
-        pipeline_id = ""
-        if isinstance(resp, dict):
-            pipeline_id = str(resp.get("pipeline_id") or "")
-        if not pipeline_id:
-            return {"warning": f"派发响应缺少 pipeline_id：{resp!r}"}
+            return {"warning": str(exc)}
         logger.info(
             "[TaskSubmit] 任务执行管道已创建 | task_id=%s | title=%s",
             pipeline_id,
             title,
         )
         # 语义统一：任务 id 写"自己的管道"（提交者管道）state——
-        # task.owned.<id> 自持（本管道插件也能读它处理它）；执行管道 state 收
-        # task.assigned（收到上级的任务 id，引擎注入 task.id 即管道身份）。
+        # task.owned.<id> 自持（本管道插件也能读它处理它）；执行管道的
+        # task.id 身份已由统一出生协议写全（= 管道 id）。
         # 写入通道：chat.send_message 注入分支 + no_dispatch（只写 state 不派发）。
         if parent_pipeline_id:
             try:

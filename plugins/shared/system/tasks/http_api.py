@@ -44,6 +44,7 @@ from http_json import (  # noqa: E402
     json_response as _json_response,
     ok as _ok,
 )
+from task_birth import TaskBirthError, birth_task_pipeline  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -393,147 +394,143 @@ async def _submit_task_event(
     thread_id: str = "",
     parent_project_id: str = "",
 ) -> str:
-    """GAP-1 统一：经 chat.send_message 驱动任务执行管道，返回 pipeline_id（= task.id）。
+    """驱动任务执行管道，返回 pipeline_id（= task.id）。
 
-    双模式（与内核 chat_send_handler 契约对齐）：
-    - 创建模式（task_id 空）：create 分支，引擎生成 pipeline_id；state 出生
-      即带 task.* 字段、lineage 有父/根二选一、background 派发不阻塞请求。
-      YAML 无写路径——返回的 id 即任务身份。
+    双模式：
+    - 创建模式（task_id 空）：经 plugins/shared/task_birth.py 统一出生协议
+      （与 task_submit 同一实现，出生写面单一真值）——出生登记（create +
+      no_dispatch，引擎生成 pipeline_id、内核创建分支落 pipeline_sessions
+      映射）→ 身份登记（task.id = 管道 id 先于任何管道步骤）→ 执行派发
+      （kickoff + execution_context，background 不阻塞请求）。YAML 无写路径
+      ——返回的 id 即任务身份。出生失败抛 TaskBirthError（不降级不吞异常）。
     - 注入模式（task_id 非空）：重跑已有任务（UI submit/resume = task_manage
       retry 映射），以 task_id 作 pipeline_id 走注入分支，background 立即返回。
     """
     try:
         chat = _capability("chat")
+    except KeyError as exc:
+        raise TaskBirthError(f"chat capability 未注入: {exc}") from exc
 
-        if task_id:
-            # ── 注入模式：重跑已有任务管道（retry/resume）──
-            kickoff = f"重新执行任务「{title}」（任务 ID: {task_id}）。"
-            if description:
-                kickoff += f"\n任务描述：{description}"
-            params: dict[str, Any] = {
-                "pipeline_id": task_id,
-                "message": kickoff,
-                "user_id": user_id or "task_system",
-                "background": True,
-            }
-            resp = await chat.call("send_message", params)
-            got = str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
-            if not got:
-                logger.warning(
-                    "_submit_task_event: 注入派发缺少 pipeline_id | task_id=%s | resp=%s",
-                    task_id,
-                    resp,
-                )
-                return ""
-            logger.info(
-                "_submit_task_event: 任务管道已重跑 | task_id=%s",
-                task_id,
-            )
-            return task_id
+    async def _send(params: dict[str, Any]) -> dict[str, Any]:
+        return await chat.call("send_message", params)
 
-        # ── 创建模式 ──
-        # 血缘扁平键（方案本插件自持）：有父/根二选一
-        if parent_pipeline_id:
-            lineage_keys: dict[str, Any] = {
-                "lineage.parent_pipeline_id": parent_pipeline_id,
-                # 归属会话优先（任务创建时的真实会话），无会话调用维持父管道引用
-                "lineage.origin_session_id": thread_id or parent_pipeline_id,
-            }
-        else:
-            lineage_keys = {
-                "lineage.root": True,
-                "lineage.origin.kind": "channel",
-                "lineage.origin.source": "task_service",
-            }
-
-        kickoff = f"执行任务「{title}」。"
+    if task_id:
+        # ── 注入模式：重跑已有任务管道（retry/resume）──
+        kickoff = f"重新执行任务「{title}」（任务 ID: {task_id}）。"
         if description:
             kickoff += f"\n任务描述：{description}"
-
-        params = {
-            "create": True,
-            "background": True,
+        params: dict[str, Any] = {
+            "pipeline_id": task_id,
             "message": kickoff,
             "user_id": user_id or "task_system",
-            # 归属会话：手动创建任务透传用户会话，内核创建分支
-            # 以真实会话 link pipeline_sessions（runs 快照/前端导航据此归属）；
-            # 缺省（LLM 派发无会话上下文）不传，管道保持独立。
-            **({"thread_id": thread_id} if thread_id else {}),
-            # 目标执行 agent 传导（默认为主 agent）
-            **({"agent_id": agent_id} if agent_id else {}),
-            "state": {
-                "task.goal": title,
-                "task.status": "pending",
-                "task.description": description or "",
-                "task.acceptance_criteria": acceptance_criteria or {},
-                "task.dependencies": dependencies or [],
-                "task.scope": scope,
-                "task.submitted_by": user_id or "",
-                **lineage_keys,
-            },
+            "background": True,
         }
-        # execution_context 缺省对齐 task_submit._build_execution_context：
-        # 无显式 workspace → mode 空（workspace_lifecycle 落「工作空间根/
-        # {task_id}」默认 plain 拓扑）、isolation 默认 isolated。缺声明会让
-        # workspace_lifecycle 跳过工作区创建（无 execution_context 即跳过），
-        # bash/file 工具因 workspace 空锚被隔离拦截（container_create_failed）。
-        if not execution_context:
-            execution_context = {
-                "workspace": {"source_path": "", "mode": "", "explicit": False},
-                "isolation": {"level": "isolated"},
-            }
-        params["execution_context"] = execution_context
-        # 挂靠项目（项目非管道）：任务管道 state 带 parent_project_id——
-        # 前端任务树据此把任务挂到项目节点下。
-        if parent_project_id:
-            params["state"]["task.parent_project_id"] = parent_project_id
-
         resp = await chat.call("send_message", params)
-        pipeline_id = str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
-        if not pipeline_id:
+        got = str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
+        if not got:
             logger.warning(
-                "_submit_task_event: 创建派发缺少 pipeline_id | title=%s | resp=%s",
-                title,
+                "_submit_task_event: 注入派发缺少 pipeline_id | task_id=%s | resp=%s",
+                task_id,
                 resp,
             )
             return ""
         logger.info(
-            "_submit_task_event: 任务执行管道已创建 | task_id=%s | title=%s",
-            pipeline_id,
-            title,
+            "_submit_task_event: 任务管道已重跑 | task_id=%s",
+            task_id,
         )
-        # 触发方登记（任务树数据链）：父管道提交的子任务，把新管道 id 记回
-        # 父管道 state（task.owned.<id>.*，与 task_submit 同款契约）——前端
-        # 任务树据此把子任务挂到主管道下；根任务（无父）无需登记。
-        if parent_pipeline_id:
-            try:
-                await chat.call(
-                    "send_message",
-                    {
-                        "pipeline_id": parent_pipeline_id,
-                        "message": f"登记任务「{title}」（{pipeline_id}）。",
-                        "user_id": user_id or "task_system",
-                        "no_dispatch": True,
-                        "state": {
-                            f"task.owned.{pipeline_id}.title": title,
-                            f"task.owned.{pipeline_id}.status": "pending",
-                            f"task.owned.{pipeline_id}.scope": scope,
-                            f"task.owned.{pipeline_id}.created_at": _now_iso(),
-                            f"task.owned.{pipeline_id}.submitted_by": user_id or "",
-                        },
-                    },
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[tasks http] 任务登记到提交者管道失败（不影响执行）| task=%s | err=%s",
-                    pipeline_id,
-                    exc,
-                )
-        return pipeline_id
+        return task_id
 
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("_submit_task_event: 派发失败 | title=%s | error=%s", title, exc)
-        return ""
+    # ── 创建模式：统一出生协议 ──
+    # 血缘扁平键（方案本插件自持）：有父/根二选一
+    if parent_pipeline_id:
+        lineage_keys: dict[str, Any] = {
+            "lineage.parent_pipeline_id": parent_pipeline_id,
+            # 归属会话优先（任务创建时的真实会话），无会话调用维持父管道引用
+            "lineage.origin_session_id": thread_id or parent_pipeline_id,
+        }
+    else:
+        lineage_keys = {
+            "lineage.root": True,
+            "lineage.origin.kind": "channel",
+            "lineage.origin.source": "task_service",
+        }
+
+    kickoff = f"执行任务「{title}」。"
+    if description:
+        kickoff += f"\n任务描述：{description}"
+
+    # 出生 state 一次写全（2026-08-28 用户裁定：任务提交时就把任务相关的
+    # 放到 state 里面）；task.id 由统一出生协议在引擎生成 id 后、任何管道
+    # 步骤执行前补齐。
+    birth_state: dict[str, Any] = {
+        "task.goal": title,
+        "task.status": "pending",
+        "task.description": description or "",
+        "task.acceptance_criteria": acceptance_criteria or {},
+        "task.dependencies": dependencies or [],
+        "task.scope": scope,
+        "task.submitted_by": user_id or "",
+        **lineage_keys,
+    }
+
+    # execution_context 缺省对齐 task_submit._build_execution_context：
+    # 无显式 workspace → mode 空（workspace_lifecycle 落「工作空间根/
+    # {task_id}」默认 plain 拓扑）、isolation 默认 isolated。缺声明会让
+    # workspace_lifecycle 跳过工作区创建（无 execution_context 即跳过），
+    # bash/file 工具因 workspace 空锚被隔离拦截（container_create_failed）。
+    if not execution_context:
+        execution_context = {
+            "workspace": {"source_path": "", "mode": "", "explicit": False},
+            "isolation": {"level": "isolated"},
+        }
+    # 挂靠项目（项目非管道）：任务管道 state 带 parent_project_id——
+    # 前端任务树据此把任务挂到项目节点下。
+    if parent_project_id:
+        birth_state["task.parent_project_id"] = parent_project_id
+
+    pipeline_id = await birth_task_pipeline(
+        _send,
+        title=title,
+        birth_state=birth_state,
+        kickoff=kickoff,
+        user_id=user_id or "task_system",
+        agent_id=agent_id,
+        execution_context=execution_context,
+        thread_id=thread_id,
+    )
+    logger.info(
+        "_submit_task_event: 任务执行管道已出生 | task_id=%s | title=%s",
+        pipeline_id,
+        title,
+    )
+    # 触发方登记（任务树数据链）：父管道提交的子任务，把新管道 id 记回
+    # 父管道 state（task.owned.<id>.*，与 task_submit 同款契约）——前端
+    # 任务树据此把子任务挂到主管道下；根任务（无父）无需登记。
+    if parent_pipeline_id:
+        try:
+            await chat.call(
+                "send_message",
+                {
+                    "pipeline_id": parent_pipeline_id,
+                    "message": f"登记任务「{title}」（{pipeline_id}）。",
+                    "user_id": user_id or "task_system",
+                    "no_dispatch": True,
+                    "state": {
+                        f"task.owned.{pipeline_id}.title": title,
+                        f"task.owned.{pipeline_id}.status": "pending",
+                        f"task.owned.{pipeline_id}.scope": scope,
+                        f"task.owned.{pipeline_id}.created_at": _now_iso(),
+                        f"task.owned.{pipeline_id}.submitted_by": user_id or "",
+                    },
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "[tasks http] 任务登记到提交者管道失败（不影响执行）| task=%s | err=%s",
+                pipeline_id,
+                exc,
+            )
+    return pipeline_id
 
 
 # ════════════════════════════════════════════════════════════
@@ -616,8 +613,8 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
     两类任务（语义区分）：
     - **task.owned.\<id\>.\***：提交者管道自持的任务（容器任务等"只登记不执行"，
       无下级管道——project id 只登记在提交者管道 state，本管道插件也能读它处理它）；
-    - **task.\* 行**：执行管道收到的任务（task.id 引擎注入 + task.assigned 上级
-      派发），普通任务（执行）创建新管道后在此。
+    - **task.\* 行**：执行管道收到的任务（task.id = 管道 id，统一出生协议写入
+      + task.assigned 上级派发），普通任务（执行）创建新管道后在此。
 
     字段映射对齐 _task_to_response 的消费键（id/title/status/thread_id/
     pipeline_run_id/parent_task_id/metadata）。None = 桥未就绪/无任务行
@@ -812,20 +809,21 @@ async def create_task(
             message="创建任务必须指定执行 Agent（agent_id），禁止静默降级到默认 Agent",
         )
 
-    # GAP-1 统一（state 单一真值）：任务即管道——直接经 chat.send_message 创建
-    # 执行管道（引擎生成 pipeline_id = task_id），YAML 无写路径。
-    task_id = await _submit_task_event(
-        title=body.title,
-        description=body.description or "",
-        user_id=_current_user(_user).get("sub", ""),
-        agent_id=body.agent_id,
-    )
-    if not task_id:
+    # GAP-1 统一（state 单一真值）：任务即管道——经统一出生协议创建执行管道
+    # （引擎生成 pipeline_id = task_id），YAML 无写路径。
+    try:
+        task_id = await _submit_task_event(
+            title=body.title,
+            description=body.description or "",
+            user_id=_current_user(_user).get("sub", ""),
+            agent_id=body.agent_id,
+        )
+    except TaskBirthError as exc:
         raise APIError(
             status_code=500,
             error_code="TASK_CREATE_FAILED",
-            message="任务执行管道创建失败",
-        )
+            message=f"任务执行管道创建失败: {exc}",
+        ) from exc
 
     logger.info("用户 %s 创建任务: %s", _current_user(_user).get("username", "system"), task_id)
 
@@ -942,25 +940,26 @@ async def create_root_task(
             "explicit": bool(workspace),
         },
     }
-    task_id = await _submit_task_event(
-        title=body.title,
-        description=body.description or "",
-        acceptance_criteria=metadata.get("acceptance_criteria") or {},
-        dependencies=list(metadata.get("dependencies") or []),
-        parent_pipeline_id=active_pipeline_id or "",
-        user_id=_current_user(_user).get("sub", ""),
-        scope="non_container",
-        execution_context=execution_context,
-        agent_id=body.target_id,
-        thread_id=thread_id,
-        parent_project_id=project_id,
-    )
-    if not task_id:
+    try:
+        task_id = await _submit_task_event(
+            title=body.title,
+            description=body.description or "",
+            acceptance_criteria=metadata.get("acceptance_criteria") or {},
+            dependencies=list(metadata.get("dependencies") or []),
+            parent_pipeline_id=active_pipeline_id or "",
+            user_id=_current_user(_user).get("sub", ""),
+            scope="non_container",
+            execution_context=execution_context,
+            agent_id=body.target_id,
+            thread_id=thread_id,
+            parent_project_id=project_id,
+        )
+    except TaskBirthError as exc:
         raise APIError(
             status_code=500,
             error_code="TASK_CREATE_FAILED",
-            message="根任务执行管道创建失败",
-        )
+            message=f"根任务执行管道创建失败: {exc}",
+        ) from exc
 
     logger.info(
         "[create_root_task] 用户 %s 手动创建根任务 | task_id=%s | project_id=%s | thread=%s",

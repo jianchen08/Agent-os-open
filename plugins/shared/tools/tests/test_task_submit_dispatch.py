@@ -4,13 +4,14 @@
 0.2 收尾时 pipeline-executor.start_run 占位能力移除后，task_submit 提交即落库、
 **无人派发执行**——任务永远 pending（e2e 缺口 GAP-1）。统一定案后本文件覆盖：
 
-1. 提交直接经 ``chat.send_message``（create 分支，引擎生成 pipeline_id）创建
-   执行管道，**不再调用 task_service.create_task**——YAML 存储无写路径；
-2. task.id = 引擎返回的 pipeline_id（身份权威统一），state 出生即带 task.*
-   字段（task.id 由引擎注入）、lineage 有父/根二选一、execution_context 透传；
+1. 提交经统一出生协议（plugins/shared/task_birth.py）创建执行管道，
+   **不再调用 task_service.create_task**——YAML 存储无写路径；
+2. 三段式：出生登记（create+no_dispatch，引擎生成 pipeline_id）→ 身份登记
+   （task.id = 引擎管道 id，先于任何管道步骤执行）→ 执行派发（kickoff +
+   execution_context 透传、background）；state 出生即带 task.*/lineage.* 字段；
 3. 依赖校验读 state 聚合（pipeline-state.list capability）而非 YAML；
 4. 不再 start_task/bind_pipeline_run（任务状态由内核 run 终态回写 state）；
-5. 派发器不可用/失败 → 话术诚实（不声称执行中），结果携带明确 warning。
+5. 派发器不可用/出生失败 → 话术诚实（不声称执行中），结果携带明确 warning。
 
 装配：conftest.py 注入 sdk / tools 共享层；task_submit 平铺目录与
 system/tasks 同 test_task_submit_migration.py 的 sys.path 装配。
@@ -107,7 +108,8 @@ class TestTaskPipelineDispatch:
 
     async def test_submit_creates_pipeline_without_task_service(self, mod: Any) -> None:
         """核心契约：不再调用 task_service.create_task——YAML 无写路径；
-        task.id = 引擎返回的 pipeline_id（身份权威统一）。"""
+        统一出生协议三段式：出生登记（create+no_dispatch）→ 身份登记
+        （task.id = 引擎管道 id）→ 执行派发；task.owned 登记回提交者管道。"""
         sender = _FakeSender()
         mod.set_chat_sender(sender)
         tool = _make_tool(mod)
@@ -119,27 +121,38 @@ class TestTaskPipelineDispatch:
             mod._chat_sender = None
         assert r.success, r.error
 
-        # 语义统一（2026-08-22 定案）：有父管道时两次 chat.send_message——
-        # ① create 分支建执行管道；② no_dispatch 登记分支把新任务以
-        # task.owned.<id>.* 写回提交者管道 state（自持）。
-        assert len(sender.calls) == 2
-        p = sender.calls[0]
-        assert p["create"] is True
-        assert "pipeline_id" not in p
-        # state 出生即入
-        assert p["state"]["task.goal"] == "喝水提醒"
-        assert p["state"]["task.status"] == "pending"
-        # task.id 不在调用方 state（引擎注入）
-        assert "task.id" not in p["state"]
+        # 统一出生协议（plugins/shared/task_birth.py）：四次 chat.send_message——
+        # ① 出生登记（create + no_dispatch 只登记不派发）；② 身份登记
+        # （task.id = 引擎管道 id，先于执行）；③ 执行派发（kickoff+background）；
+        # ④ no_dispatch 登记分支把新任务以 task.owned.<id>.* 写回提交者管道。
+        assert len(sender.calls) == 4
+        birth, identity, dispatch, reg = sender.calls
+        # ① 出生登记：create + no_dispatch，出生 state 一次写全
+        assert birth["create"] is True
+        assert birth["no_dispatch"] is True
+        assert "pipeline_id" not in birth
+        assert birth["state"]["task.goal"] == "喝水提醒"
+        assert birth["state"]["task.status"] == "pending"
+        # 出生登记不派发：kickoff 不在此段
+        assert "background" not in birth
         # 血缘：有父形式（state 扁平键出生即入，非顶层 lineage 字典）
-        assert p["state"]["lineage.parent_pipeline_id"] == "pipe_parent_9"
-        assert p["state"]["lineage.origin_session_id"] == "pipe_parent_9"
-        assert "喝水提醒" in p["message"]
-        assert p["user_id"] == "user-1"
-        assert p.get("background") is True
+        assert birth["state"]["lineage.parent_pipeline_id"] == "pipe_parent_9"
+        assert birth["state"]["lineage.origin_session_id"] == "pipe_parent_9"
+        assert birth["user_id"] == "user-1"
 
-        # 登记分支：只写提交者管道 state，不派发
-        reg = sender.calls[1]
+        # ② 身份登记：task.id = 引擎返回的 pipeline_id（身份权威统一），
+        #    任何管道步骤执行前写入（init 体 workspace_lifecycle 的任务判据）
+        assert identity["pipeline_id"] == "pipe_engine_gen_1"
+        assert identity["no_dispatch"] is True
+        assert identity["state"] == {"task.id": "pipe_engine_gen_1"}
+
+        # ③ 执行派发：kickoff 指令 + background
+        assert dispatch["pipeline_id"] == "pipe_engine_gen_1"
+        assert "喝水提醒" in dispatch["message"]
+        assert dispatch["user_id"] == "user-1"
+        assert dispatch.get("background") is True
+
+        # ④ 登记分支：只写提交者管道 state，不派发
         assert reg["pipeline_id"] == "pipe_parent_9"
         assert reg["no_dispatch"] is True
         assert reg["state"][f"task.owned.pipe_engine_gen_1.status"] == "running"
@@ -182,7 +195,7 @@ class TestTaskPipelineDispatch:
         finally:
             mod._chat_sender = None
         assert r.success
-        ec = sender.calls[0]["execution_context"]
+        ec = sender.calls[2]["execution_context"]
         assert ec["workspace"]["source_path"] == "D:/proj/demo"
         assert ec["workspace"]["mode"] == "worktree"
         assert ec["isolation"]["level"] == "isolated"
@@ -378,7 +391,7 @@ class TestDispatchInstructionRichness:
         finally:
             mod._chat_sender = None
         assert r.success, r.error
-        msg = sender.calls[0]["message"]
+        msg = sender.calls[2]["message"]
         assert "执行任务「写报告」" in msg
         assert "任务描述：基于调研数据撰写报告 docs/report.md" in msg
         assert "验收标准：" in msg
@@ -407,7 +420,7 @@ class TestPendingSubtaskRegistration:
             mod._chat_sender = None
         assert r.success, r.error
 
-        reg = sender.calls[1]
+        reg = sender.calls[3]
         assert reg["no_dispatch"] is True
         child_id = "pipe_engine_gen_1"
         value = reg["state"][f"task.subtasks_pending.{child_id}"]
@@ -429,4 +442,4 @@ class TestPendingSubtaskRegistration:
         finally:
             mod._chat_sender = None
         assert r.success, r.error
-        assert len(sender.calls) == 1, "根任务只派发，无登记分支"
+        assert len(sender.calls) == 3, "根任务只有出生三段，无登记分支"

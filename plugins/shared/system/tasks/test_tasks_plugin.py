@@ -525,8 +525,8 @@ class TestOwnershipSessionFlow:
 
     async def test_submit_task_event_registers_child_to_parent_state(
         self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """创建模式有父管道时，新管道 id 以 task.owned.<id>.* 登记回父管道 state。"""
+    ):
+        """创建模式有父管道时：统一出生协议三段 + task.owned.<id>.* 登记回父管道。"""
         import http_api
 
         calls: list[dict] = []
@@ -545,9 +545,16 @@ class TestOwnershipSessionFlow:
             parent_pipeline_id="parent-pipe",
         )
         assert pid == "child-pipe"
-        assert len(calls) == 2
-        create_call, register_call = calls
-        assert create_call["create"] is True
+        # 统一出生协议（task_birth）：出生登记 → 身份登记 → 执行派发，再加登记
+        assert len(calls) == 4
+        birth, identity, dispatch, register_call = calls
+        assert birth["create"] is True
+        assert birth["no_dispatch"] is True
+        assert birth["state"]["lineage.parent_pipeline_id"] == "parent-pipe"
+        assert identity["pipeline_id"] == "child-pipe"
+        assert identity["state"] == {"task.id": "child-pipe"}
+        assert dispatch["pipeline_id"] == "child-pipe"
+        assert dispatch["background"] is True
         assert register_call["pipeline_id"] == "parent-pipe"
         assert register_call["no_dispatch"] is True
         owned = {
@@ -559,7 +566,7 @@ class TestOwnershipSessionFlow:
         assert owned["scope"] == "non_container"
 
     async def test_submit_task_event_root_skips_registration(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """根任务（无父管道）只创建不登记。"""
+        """根任务（无父管道）只有出生三段，不登记。"""
         import http_api
 
         calls: list[dict] = []
@@ -573,19 +580,12 @@ class TestOwnershipSessionFlow:
 
         pid = await http_api._submit_task_event(title="根任务", user_id="u1")
         assert pid == "root-pipe"
-        assert len(calls) == 1  # 无登记调用
+        assert len(calls) == 3  # 出生三段（登记/身份/派发），无登记调用
+        assert calls[0]["create"] is True
+        assert calls[1]["state"] == {"task.id": "root-pipe"}
+        assert calls[2]["background"] is True
 
     async def test_submit_task_event_without_thread_keeps_old_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import http_api
-
-        captured: dict = {}
-
-        class FakeChat:
-            async def call(self, name: str, params: dict) -> dict:
-                captured["params"] = params
-                return {"pipeline_id": "pid-2"}
-
-    async def test_submit_task_event_without_thread_keeps_old_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-redef]
         import http_api
 
         captured: dict = {}
@@ -599,6 +599,158 @@ class TestOwnershipSessionFlow:
 
         await http_api._submit_task_event(title="任务", user_id="u1")
         assert "thread_id" not in captured["params"]
+
+    async def test_submit_task_event_inject_mode_reruns_existing_pipeline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """注入模式（task_id 非空）：以 task_id 作 pipeline_id 走注入分支。"""
+        import http_api
+
+        calls: list[dict] = []
+
+        class FakeChat:
+            async def call(self, name: str, params: dict) -> dict:
+                calls.append(params)
+                return {"pipeline_id": params.get("pipeline_id", "")}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeChat())
+
+        pid = await http_api._submit_task_event(title="任务", task_id="pipe-9")
+        assert pid == "pipe-9"
+        assert len(calls) == 1
+        assert calls[0]["pipeline_id"] == "pipe-9"
+        assert calls[0]["background"] is True
+        assert "create" not in calls[0]
+
+    async def test_submit_task_event_inject_mode_missing_pipeline_id_returns_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import http_api
+
+        class FakeChat:
+            async def call(self, name: str, params: dict) -> dict:
+                return {"status": "dispatched"}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeChat())
+
+        assert await http_api._submit_task_event(title="任务", task_id="pipe-9") == ""
+
+    async def test_submit_task_event_capability_missing_raises_birth_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """chat capability 未注入 → TaskBirthError（不降级不吞异常）。"""
+        import http_api
+        from task_birth import TaskBirthError
+
+        def _missing(name: str):
+            raise KeyError(name)
+
+        monkeypatch.setattr(http_api, "_capability", _missing)
+        with pytest.raises(TaskBirthError, match="chat capability 未注入"):
+            await http_api._submit_task_event(title="任务", user_id="u1")
+
+    async def test_submit_task_event_child_parent_project_id_in_birth_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """挂靠项目：出生 state 带 task.parent_project_id（前端任务树挂项目节点）。"""
+        import http_api
+
+        calls: list[dict] = []
+
+        class FakeChat:
+            async def call(self, name: str, params: dict) -> dict:
+                calls.append(params)
+                if params.get("create"):
+                    return {"pipeline_id": "child-pipe"}
+                return {"pipeline_id": params.get("pipeline_id", "")}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeChat())
+
+        await http_api._submit_task_event(
+            title="子任务",
+            user_id="u1",
+            parent_pipeline_id="parent-pipe",
+            parent_project_id="proj00112233",
+        )
+        birth = calls[0]
+        assert birth["state"]["task.parent_project_id"] == "proj00112233"
+
+    async def test_submit_task_event_registration_failure_does_not_break_birth(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """父管道登记失败仅告警：子任务已出生且派发（账本写面非出生记录）。"""
+        import http_api
+
+        class FakeChat:
+            async def call(self, name: str, params: dict) -> dict:
+                state = params.get("state") or {}
+                if any(k.startswith("task.owned.") for k in state):
+                    raise RuntimeError("parent gone")
+                if params.get("create"):
+                    return {"pipeline_id": "child-pipe"}
+                return {"pipeline_id": params.get("pipeline_id", "")}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeChat())
+
+        pid = await http_api._submit_task_event(
+            title="子任务",
+            user_id="u1",
+            parent_pipeline_id="parent-pipe",
+        )
+        assert pid == "child-pipe", "登记失败不影响出生结果"
+
+    async def test_create_task_birth_failure_translates_to_api_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """出生失败不降级（用户裁定）：TaskBirthError → APIError 500 且携带内核原因。"""
+        import http_api
+
+        class _BoomChat:
+            async def call(self, name: str, params: dict) -> dict:
+                if params.get("create"):
+                    raise RuntimeError("kernel down")
+                return {"status": "recorded", "pipeline_id": ""}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: _BoomChat())
+        monkeypatch.setattr(http_api, "_get_task_service", lambda: object())
+
+        from http_api import APIError, create_task
+
+        with pytest.raises(APIError) as ei:
+            await create_task({"title": "T", "agent_id": "general_agent"})
+        assert ei.value.status_code == 500
+        assert ei.value.error_code == "TASK_CREATE_FAILED"
+        assert "kernel down" in ei.value.message
+
+    async def test_create_root_task_birth_failure_translates_to_api_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """根任务出生失败同样显式报错（携带内核原因，不静默）。"""
+        import http_api
+
+        class _BoomChat:
+            async def call(self, name: str, params: dict) -> dict:
+                if params.get("create"):
+                    raise RuntimeError("kernel down")
+                return {"status": "recorded", "pipeline_id": ""}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: _BoomChat())
+        monkeypatch.setattr(http_api, "_get_task_service", lambda: object())
+
+        from http_api import APIError, create_root_task
+
+        with pytest.raises(APIError) as ei:
+            await create_root_task(
+                {
+                    "title": "T",
+                    "description": "D",
+                    "target_id": "general_agent",
+                    "thread_id": "thread-1",
+                }
+            )
+        assert ei.value.status_code == 500
+        assert ei.value.error_code == "TASK_CREATE_FAILED"
+        assert "kernel down" in ei.value.message
 
     def test_capability_takes_handle_from_main_plugin(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """_capability 从 __main__.plugin 取句柄（sidecar 启动实例）。

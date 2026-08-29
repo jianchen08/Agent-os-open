@@ -60,16 +60,18 @@ def mod() -> Any:
 
 
 class _FakeSender:
-    """记录 chat.send_message 参数的派发器 fake。"""
+    """记录 chat.send_message 参数的派发器 fake（统一出生协议三段式响应）。"""
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
     async def __call__(self, params: dict) -> dict:
         self.calls.append(params)
+        if params.get("create"):
+            return {"status": "created", "pipeline_id": "a1b2c3d4e5f6"}
         if params.get("no_dispatch"):
             return {"status": "recorded", "pipeline_id": params.get("pipeline_id", "")}
-        return {"status": "created", "pipeline_id": "a1b2c3d4e5f6"}
+        return {"status": "dispatched", "pipeline_id": params.get("pipeline_id", "")}
 
 
 def _base_inputs(**over: Any) -> dict:
@@ -184,5 +186,5 @@ class TestGoalContentValidation:
         """正常入参（标题+描述）不受影响——完整链路回归。"""
         r, sender = await _run(mod, _base_inputs())
         assert r.success, r.error
-        assert len(sender.calls) == 2  # 创建执行管道 + no_dispatch 登记
+        assert len(sender.calls) == 4  # 出生三段（登记/身份/派发）+ no_dispatch 登记
         assert sender.calls[0]["state"]["task.goal"] == "喝水提醒"

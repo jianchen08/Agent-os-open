@@ -138,13 +138,18 @@ def make_tool(tool_module, service: FakeTaskService):
 
     async def fake_sender(params: dict) -> dict:
         captured["calls"].append(params)
-        if params.get("no_dispatch"):
-            # 登记调用：只写 state 不派发（容器任务/任务登记）
-            return {"status": "recorded", "pipeline_id": params.get("pipeline_id", "")}
-        if "params" not in captured:
+        if params.get("create"):
+            # 出生登记（统一出生协议①）：create + no_dispatch，引擎生成管道
+            # id；state 断言面（captured["params"] 保留出生调用）
             captured["params"] = params
-        # 模拟引擎创建分支响应（uuid v4 simple 前 12 位 hex，形态见 chat 契约）
-        return {"status": "created", "pipeline_id": "a1b2c3d4e5f6"}
+            return {"status": "created", "pipeline_id": "a1b2c3d4e5f6"}
+        if params.get("no_dispatch"):
+            # 身份登记/任务登记调用：只写 state 不派发
+            return {"status": "recorded", "pipeline_id": params.get("pipeline_id", "")}
+        # 执行派发（统一出生协议③）：execution_context 断言面
+        captured["dispatch"] = params
+        # 模拟注入分支响应（background 派发立即返回）
+        return {"status": "dispatched", "pipeline_id": params.get("pipeline_id", "")}
 
     tool_module.set_chat_sender(fake_sender)
     return tool, captured
@@ -222,7 +227,7 @@ async def test_l1_project_task_anchors_to_project_folder(tool_module, tmp_path, 
     inputs = base_inputs(parent_agent_level=1, project_id="proj00112233")
     result = await tool.execute(inputs)
     assert result.success, result.error
-    ec = captured["params"]["execution_context"]
+    ec = captured["dispatch"]["execution_context"]
     # 挂项目 = 显式 workspace（项目文件夹）+ 默认 worktree（从项目仓库分叉）
     assert ec["workspace"]["source_path"] == paths["proj00112233"]
     assert ec["workspace"]["mode"] == "worktree"
@@ -285,7 +290,7 @@ async def test_l2_child_inherits_project_from_parent_state(tool_module, tmp_path
     state = captured["params"]["state"]
     assert state["task.parent_project_id"] == "proj00112233"
     # 继承注入的 workspace（项目文件夹）不算显式指定——子任务闸门放行
-    ec = captured["params"]["execution_context"]
+    ec = captured["dispatch"]["execution_context"]
     assert ec["workspace"]["source_path"] == paths["proj00112233"]
 
 
@@ -342,7 +347,7 @@ async def test_ordinary_subtask_without_params_submits(tool_module):
     inputs = base_inputs(task_id="parent_p")
     result = await tool.execute(inputs)
     assert result.success, result.error
-    ec = captured["params"]["execution_context"]
+    ec = captured["dispatch"]["execution_context"]
     assert ec["workspace"]["source_path"] == ""
     assert ec["workspace"]["explicit"] is False
     # 普通任务默认隔离执行（0.1 coordinator.default_level 对齐）
@@ -397,7 +402,7 @@ async def test_ordinary_root_task_accepts_all_three(tool_module, tmp_proj):
     )
     result = await tool.execute(inputs)
     assert result.success, result.error
-    ec = captured["params"]["execution_context"]
+    ec = captured["dispatch"]["execution_context"]
     assert ec["workspace"]["source_path"] == tmp_proj
     assert ec["workspace"]["mode"] == "worktree"
     assert ec["workspace"]["explicit"] is True
@@ -417,7 +422,7 @@ async def test_ordinary_root_task_without_workspace_leaves_mode_empty(tool_modul
 
     result = await tool.execute(base_inputs(parent_agent_level=1))
     assert result.success, result.error
-    ec = captured["params"]["execution_context"]
+    ec = captured["dispatch"]["execution_context"]
     assert ec["workspace"]["explicit"] is False
     assert ec["workspace"]["source_path"] == ""
     assert ec["workspace"]["mode"] == ""
@@ -431,7 +436,7 @@ async def test_workspace_mode_without_source_passthrough(tool_module):
 
     result = await tool.execute(base_inputs(parent_agent_level=1, workspace_mode="worktree"))
     assert result.success, result.error
-    ec = captured["params"]["execution_context"]
+    ec = captured["dispatch"]["execution_context"]
     assert ec["workspace"]["mode"] == "worktree"
     assert ec["workspace"]["explicit"] is False
     assert ec["workspace"]["source_path"] == ""
@@ -451,18 +456,18 @@ async def test_ordinary_root_task_plain_mode(tool_module, tmp_proj):
     )
     result = await tool.execute(inputs)
     assert result.success, result.error
-    ec = captured["params"]["execution_context"]
+    ec = captured["dispatch"]["execution_context"]
     assert ec["workspace"]["mode"] == "plain"
     assert ec["isolation"]["level"] == "non_isolated"
 
 
 @pytest.mark.asyncio
 async def test_ordinary_task_registers_owned_to_owner_pipeline(tool_module):
-    """普通任务（有提交者管道）：创建执行管道后，任务 id 登记到提交者管道 state。
+    """普通任务（有提交者管道）：出生执行管道后，任务 id 登记到提交者管道 state。
 
     语义（2026-08-22 定案）：任务 id 统一写"自己的管道"（提交者管道）state——
-    task.owned.<id> 自持（本管道插件也能读它处理它）；执行管道 state 收
-    task.assigned（收到上级的任务 id，引擎注入 task.id 即管道身份）。
+    task.owned.<id> 自持（本管道插件也能读它处理它）；执行管道的 task.id 身份
+    已由统一出生协议写全（= 管道 id）。
     """
     service = FakeTaskService()
     tool, captured = make_tool(tool_module, service)
@@ -475,11 +480,13 @@ async def test_ordinary_task_registers_owned_to_owner_pipeline(tool_module):
     )
     result = await tool.execute(inputs)
     assert result.success, result.error
-    # 两次调用：① 创建执行管道 ② no_dispatch 登记到提交者管道
-    assert len(captured["calls"]) == 2, captured["calls"]
+    # 四次调用：出生三段（①出生登记 ②身份登记 ③执行派发）+ ④no_dispatch
+    # 登记到提交者管道
+    assert len(captured["calls"]) == 4, captured["calls"]
     create_call = captured["calls"][0]
     assert create_call.get("create") is True
-    reg = captured["calls"][1]
+    assert captured["calls"][1]["state"] == {"task.id": "a1b2c3d4e5f6"}
+    reg = captured["calls"][3]
     assert reg["no_dispatch"] is True
     assert reg["pipeline_id"] == "owner-pipe-1"
     # state 键用全 id（引擎生成即 12 位短 id）；LLM 面返回同值（不再截断）
