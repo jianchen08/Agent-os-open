@@ -213,7 +213,9 @@ def project_registry_env(tool_module, monkeypatch, tmp_path):
     async def fake_reader():
         return list(rows)
 
-    tool_module._get_state_reader = lambda: fake_reader
+    # 规范 monkeypatch（自动还原）：替换读取源而非整个 getter 函数，
+    # 防止泄漏到同文件后续用例（顺序耦合）。
+    monkeypatch.setattr(tool_module, "_state_reader", fake_reader)
     return paths, rows
 
 
@@ -532,3 +534,100 @@ async def test_schema_exposes_workspace_mode(tool_module):
     assert restrictions["workspace"]["max_visible_level"] == 3
     assert restrictions["workspace_mode"]["max_visible_level"] == 3
     assert restrictions["isolation_level"]["max_visible_level"] == 3
+
+
+# ─────────────────── 评估指标必填 input_params 提交期校验 ───────────────────
+
+
+def test_metric_missing_required_params_rejected(tool_module):
+    """file_check 缺 path（input_params 整体缺失）→ 提交期拒绝 INVALID_METRIC_PARAMS。
+
+    缺必填参数的任务在评估期每轮失败且 LLM 无法自修（参数烙在出生 state），
+    必须在提交期拦住——这是「评估器 path 参数缺失死循环」的根源修复。
+    """
+    normalized, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria(
+        {"file_check": {}}
+    )
+    assert fail is not None
+    assert not fail.success
+    assert fail.error_code == "INVALID_METRIC_PARAMS"
+    assert "path" in fail.error
+    assert "input_params" in fail.error
+
+
+def test_metric_required_params_present_passes(tool_module):
+    """必填参数齐备 → 原样放行（不补全不覆盖，只认大模型输入）。"""
+    normalized, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria(
+        {"file_check": {"input_params": {"path": "result.txt", "check": "exists"}}}
+    )
+    assert fail is None
+    assert normalized["file_check"]["input_params"]["path"] == "result.txt"
+
+
+def test_metric_required_params_data_driven_across_metrics(tool_module):
+    """校验纯数据驱动（读指标定义 input_schema.required）：semantic_check 同样拦截。"""
+    normalized, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria(
+        {"semantic_check": {"input_params": {"check": "intent"}}}
+    )
+    assert fail is not None
+    assert fail.error_code == "INVALID_METRIC_PARAMS"
+    assert "output" in fail.error
+
+
+def test_metric_params_validation_skips_without_definitions(tool_module, monkeypatch):
+    """指标定义加载失败（fail-open）→ 不拦截（与指标 ID 校验同款降级语义）。"""
+    monkeypatch.setattr(tool_module, "_load_metric_definitions", lambda: {})
+    normalized, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria(
+        {"file_check": {}}
+    )
+    assert fail is None
+    assert normalized == {"file_check": {}}
+
+
+# ─────────────────── inherit 源解析（state 单一真值） ───────────────────
+
+
+def test_inherit_source_missing_rejected(tool_module, monkeypatch):
+    """state 聚合无源任务 → 失败信封（不再读 YAML 存量，0.2 任务可被解析）。"""
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    import asyncio
+
+    tool = tool_module.TaskSubmitTool()
+    path, fail = asyncio.run(tool._extract_inherited_workspace("ffffffffffff"))
+    assert path is None
+    assert fail is not None
+    assert "不存在或无元数据" in fail.error
+
+
+def test_inherit_source_state_row_serves_ws_meta(tool_module, monkeypatch):
+    """源任务 state 行带 ws_meta（JSON 字符串形态）→ 取出路径；plain 模式无 git 校验。
+
+    路径取容器内真实目录（仓库根）——跨容器守卫按真实容器根判定。
+    """
+    import asyncio
+    import json as _json
+
+    rows = [
+        {
+            "pipeline_id": "srcfull123456",
+            "task.id": "srcfull123456",
+            "ws_meta": _json.dumps({"path": str(_REPO_ROOT), "mode": "plain"}),
+        }
+    ]
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    tool = tool_module.TaskSubmitTool()
+    path, fail = asyncio.run(tool._extract_inherited_workspace("srcfull123456"))
+    assert fail is None
+    assert path == str(_REPO_ROOT)
+
+
+def test_inherit_state_bridge_down_fail_honest(tool_module, monkeypatch):
+    """桥未就绪（None）→ 显式失败信封（不静默当任务不存在）。"""
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: None)
+    import asyncio
+
+    tool = tool_module.TaskSubmitTool()
+    path, fail = asyncio.run(tool._extract_inherited_workspace("ffffffffffff"))
+    assert path is None
+    assert fail is not None
+    assert "state 聚合不可用" in fail.error

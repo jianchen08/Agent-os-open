@@ -995,12 +995,12 @@ class LLMCore(ICorePlugin):
                 "（server.py on_load 应调用 set_capability_caller）"
             )
 
-        # run_id 取消轮询锚：会话轮次（state.run_id 由内核注入 initial_state）
-        # 透传给 llm_service 启用取消轮询；任务管道（task_id 非空）不传——
-        # 任务域暂停走任务既有机制（pause_guard/suspend_pipeline），不被
-        # 聊天停止误伤。
+        # run_id 取消感知锚：内核注入的 state.run_id 透传给 llm_service 启用
+        # 停止感知——契约全管道同一份（主会话/任务/子任务管道无域别，差别只在
+        # state 内容），用户停止（dispatch_stop → run Suspended）对所有管道
+        # 同等生效：流式协作中断 → partial 落库 → run 终态 Cancelled。
         run_id = ctx.state.get("run_id", "") or ""
-        if run_id and not ctx.state.get(StateKeys.TASK_ID):
+        if run_id:
             kwargs["run_id"] = run_id
 
         # 调用 llm.complete_stream：流式事件经 llm_service 内部 event-bus

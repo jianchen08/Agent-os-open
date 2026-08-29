@@ -549,3 +549,31 @@ async def test_interrupted_persists_user_requested_stop_signal() -> None:
     errored = plugin._build_partial_failure_result(partial, status="error", error_info=None)
     assert "ended" not in errored
     assert "router.stop_reason" not in errored
+
+
+# ─────────────────── run_id 透传（停止感知契约全管道统一） ───────────────────
+
+
+async def test_run_id_passthrough_for_task_pipeline(monkeypatch: Any) -> None:
+    """run_id 透传全管道同一契约：任务管道（task_id 非空）同样传——
+    用户停止（dispatch_stop → run Suspended）对所有管道同等生效，
+    无域别门控（差别只在 state 内容）。"""
+    caller = _FakeCaller({"success": True, "data": _ok_response()})
+    plugin = _make_plugin(caller)
+    state = {
+        **_base_state(),
+        "run_id": "run-abc123def456",
+        "task_id": "task-abc123def456",
+    }
+    await plugin.execute(_make_ctx(state))
+    _, params = caller.calls[0]
+    assert params["args"]["run_id"] == "run-abc123def456"
+
+
+async def test_run_id_absent_when_state_lacks_it() -> None:
+    """state 无 run_id → 不传（感知锚缺省关闭，行为不变）。"""
+    caller = _FakeCaller({"success": True, "data": _ok_response()})
+    plugin = _make_plugin(caller)
+    await plugin.execute(_make_ctx(_base_state()))
+    _, params = caller.calls[0]
+    assert "run_id" not in params["args"]

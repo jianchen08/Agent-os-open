@@ -30,6 +30,7 @@ from agentos_plugin_sdk import (
 _SHARED_ROOT = str(Path(__file__).resolve().parents[2])
 sys.path.insert(0, _SHARED_ROOT)
 from task_birth import TaskBirthError, birth_task_pipeline  # noqa: E402
+import state_fields  # noqa: E402 — plugins/shared 平铺模块（ws_meta 还原）
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +288,48 @@ def _validate_metric_ids(
         else:
             invalid.append(key)
     return filtered, invalid
+
+
+def _validate_required_metric_params(
+    acceptance_criteria: dict[str, Any],
+) -> ToolExecutionResult | None:
+    """校验各指标的必填 input_params（数据源 = 指标定义 input_schema.required）。
+
+    缺必填参数返回失败信封（INVALID_METRIC_PARAMS，逐指标列出缺失字段），
+    全部齐备返回 None。校验纯数据驱动——新增/修改指标定义自动生效。
+    """
+    definitions = _load_metric_definitions()
+    if not definitions:
+        return None
+    problems: list[str] = []
+    for metric_id, config in acceptance_criteria.items():
+        schema = (definitions.get(metric_id) or {}).get("input_schema") or {}
+        required = schema.get("required") or []
+        if not required:
+            continue
+        params = config.get("input_params") if isinstance(config, dict) else None
+        params = params if isinstance(params, dict) else {}
+        missing = [field for field in required if params.get(field) in (None, "")]
+        if missing:
+            problems.append(f"{metric_id} 缺必填参数 {missing}")
+    if not problems:
+        return None
+    logger.warning(
+        "[TaskSubmit] acceptance_criteria 必填 input_params 缺失，拒绝提交 | problems=%s",
+        problems,
+    )
+    return create_failure_result(
+        error=(
+            "acceptance_criteria 的评估指标缺少必填 input_params："
+            + "；".join(problems)
+            + "。缺失字段会在评估期每轮失败且无法自愈，"
+            "请在对应指标的 input_params 中补齐后重新提交"
+            "（如 file_check 需要 {\"path\": \"产出文件相对路径\"}，"
+            "bash_check 需要 {\"command\": \"检查命令\"}，"
+            "semantic_check 需要 {\"criteria\": \"评估要求描述\"}）。"
+        ),
+        error_code="INVALID_METRIC_PARAMS",
+    )
 
 
 def _validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
@@ -828,6 +871,15 @@ class TaskSubmitTool(BuiltinTool):
                     invalid_ids,
                     list(normalized.keys()),
                 )
+
+            # ── 必填 input_params 校验（评估器 schema 契约）──
+            # 指标定义的 input_schema.required 是评估器侧硬性入参（如 file_check
+            # 必须带 path）。缺必填参数的任务在评估期必然每轮失败且 LLM 无法
+            # 自修（参数烙在出生 state 里），必须提交期拒绝并明示缺什么。
+            param_fail = _validate_required_metric_params(normalized)
+            if param_fail is not None:
+                return {}, param_fail
+
             return normalized, None
         return acceptance_criteria, None
 
@@ -1109,96 +1161,98 @@ class TaskSubmitTool(BuiltinTool):
                     inherit_from_id,
                 )
 
-        # ── inherit_workspace_from 解析 ──
+        # ── inherit_workspace_from 解析（state 单一真值，无 YAML 兜底）──
         inherit_from = inputs.get("inherit_workspace_from")
         if not inherit_from:
             return workspace, None
-        task_service = self._get_task_service()
-        if not task_service:
-            return workspace, create_failure_result(
-                error=(
-                    f"无法查找任务 {inherit_from}：任务服务不可用。"
-                    "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
-                ),
-            )
-        try:
-            old_ws_path, ws_fail = self._extract_inherited_workspace(inherit_from, task_service)
-            if ws_fail is not None:
-                return workspace, ws_fail
-            # 继承成功时回写 inputs，确保 _build_metadata 存储到任务元数据
-            workspace = old_ws_path or ""
-            inputs["workspace"] = workspace
-            logger.info(
-                "[TaskSubmit] inherit_workspace_from: task_id=%s, ws_path=%s",
-                inherit_from,
-                old_ws_path,
-            )
-        except Exception as resolve_err:
-            logger.warning(
-                "[TaskSubmit] inherit_workspace_from 解析失败: %s",
-                resolve_err,
-            )
-            return workspace, create_failure_result(
-                error=f"继承工作空间时出错: {resolve_err}。请去掉 inherit_workspace_from 参数重新提交。",
-            )
+        old_ws_path, ws_fail = await self._extract_inherited_workspace(str(inherit_from))
+        if ws_fail is not None:
+            return workspace, ws_fail
+        # 继承成功时回写 inputs，确保下游（execution_context/出生 state）取到
+        workspace = old_ws_path or ""
+        inputs["workspace"] = workspace
+        logger.info(
+            "[TaskSubmit] inherit_workspace_from: task_id=%s, ws_path=%s",
+            inherit_from,
+            old_ws_path,
+        )
         return workspace, None
 
     async def _lookup_source_pipeline_run(self, inherit_from_id: str) -> str:
-        """查询 pipe 继源源任务的 pipeline_run_id（日志观测用途）。
+        """查询 pipe 继源源任务的管道 id（日志观测用途；state 单一真值）。
 
-        服务不可用 / 源任务缺失 / 查询异常均降级为 warning 日志，不阻断提交。
+        桥未就绪 / 源任务缺失 / 查询异常均降级为 warning 日志，不阻断提交。
         """
-        task_service = self._get_task_service()
-        if not task_service:
+        rows = await self._read_state_rows()
+        if rows is None:
             logger.warning(
-                "[TaskSubmit] inherit pipe | task_service 不可用，无法查找源任务 %s",
+                "[TaskSubmit] inherit pipe | state 聚合不可用，无法查找源任务 %s",
                 inherit_from_id,
             )
             return ""
-        try:
-            source_task = task_service.get_task(inherit_from_id)
-            if source_task and source_task.pipeline_run_id:
-                source_pipeline_id = source_task.pipeline_run_id
-                logger.info(
-                    "[TaskSubmit] inherit pipe | from=%s | source_pipeline=%s",
-                    inherit_from_id,
-                    source_pipeline_id[:12],
-                )
-                return source_pipeline_id
+        row = next(
+            (
+                r
+                for r in rows
+                if str(r.get("task.id") or "") == inherit_from_id
+                or str(r.get("pipeline_id") or "") == inherit_from_id
+            ),
+            None,
+        )
+        if row is None:
             logger.warning(
-                "[TaskSubmit] inherit pipe | from=%s | 源任务无 pipeline_run_id，对话历史为空",
+                "[TaskSubmit] inherit pipe | from=%s | state 聚合无源任务，对话历史为空",
                 inherit_from_id,
             )
             return ""
-        except Exception as pipe_err:
-            logger.warning(
-                "[TaskSubmit] inherit pipe 查找源任务失败: %s",
-                pipe_err,
-            )
-            return ""
+        source_pipeline_id = str(row.get("pipeline_id") or "")
+        logger.info(
+            "[TaskSubmit] inherit pipe | from=%s | source_pipeline=%s",
+            inherit_from_id,
+            source_pipeline_id[:12],
+        )
+        return source_pipeline_id
 
-    def _extract_inherited_workspace(
+    async def _extract_inherited_workspace(
         self,
         inherit_from: str,
-        task_service: Any,
     ) -> tuple[str | None, ToolExecutionResult | None]:
-        """校验被继承任务的 ws_meta 并取出旧工作空间路径（复用旧路径，不复制不初始化）。
+        """从源任务 state 行取出工作空间路径（复用旧路径，不复制不初始化）。
 
-        校验序：源任务存在且有元数据 → ws_meta 形态 → 同容器归属 → 目录存在 →
-        worktree 模式 git 身份有效。任一步失败返回失败信封，引导 agent 去掉
-        inherit_workspace_from 后重新提交。
+        state 单一真值（0.2 任务无 YAML 记录）：ws_meta 由执行管道
+        workspace_lifecycle init 写入、经 persistent_fields 落表，as_dict 兼容
+        跨边界 JSON 字符串形态。校验序：桥可用 → 源任务行命中 → ws_meta 形态
+        → 同容器归属 → 目录存在 → worktree 模式 git 身份有效。任一步失败返回
+        失败信封，引导 agent 去掉 inherit_workspace_from 后重新提交。
         返回 (旧工作空间路径, 失败结果)；路径有效性由调用方按目录语义使用。
         """
-        old_task = task_service.get_task(inherit_from)
-        if not old_task or not old_task.metadata:
+        rows = await self._read_state_rows()
+        if rows is None:
+            return None, create_failure_result(
+                error=(
+                    f"无法查找任务 {inherit_from}：state 聚合不可用。"
+                    "请稍后重试，或去掉 inherit_workspace_from 参数重新提交，"
+                    "使用空工作空间。"
+                ),
+            )
+        row = next(
+            (
+                r
+                for r in rows
+                if str(r.get("task.id") or "") == inherit_from
+                or str(r.get("pipeline_id") or "") == inherit_from
+            ),
+            None,
+        )
+        if row is None:
             return None, create_failure_result(
                 error=(
                     f"任务 {inherit_from} 不存在或无元数据。"
                     "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
                 ),
             )
-        old_ws_meta = old_task.metadata.get("ws_meta")
-        if not isinstance(old_ws_meta, dict):
+        old_ws_meta = state_fields.as_dict(row.get("ws_meta"), field="ws_meta")
+        if not isinstance(old_ws_meta, dict) or not old_ws_meta:
             return None, create_failure_result(
                 error=(
                     f"任务 {inherit_from} 没有工作空间信息。"
