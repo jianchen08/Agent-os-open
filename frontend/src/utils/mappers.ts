@@ -106,3 +106,22 @@ export function mainPipelineIdOf(session: {
   }
   return undefined
 }
+
+/**
+ * 发送目标管道解析（一对一）：目标 = 发送所在标签的管道，主标签=主管道、
+ * 子标签=子管道，原样透传不做改写（SendMessageParams 契约：后端按此值路由）。
+ * 串桶防线：目标必须属于该会话——成员集 = 标签管道映射键（pipelineTabMap，
+ * 随会话切换整体换血，含主+子管道）∪ 会话快照 pipelineIds（覆盖标签映射
+ * 未建的窗口）。目标缺失或不属于该会话 → undefined：调用方 fail-closed
+ * 终止发送，绝不改发主管道（子管道视图发送落主管道 = 写错桶，与内核
+ * resolve_pipeline_id_for_thread 同一裁定）。
+ */
+export function resolveSendTarget(
+  tabPipelineId: string | undefined,
+  session: { pipelineIds?: string[] } | undefined,
+  pipelineTabMap: Record<string, string>,
+): string | undefined {
+  if (!tabPipelineId) return undefined
+  const memberIds = new Set([...Object.keys(pipelineTabMap), ...(session?.pipelineIds ?? [])])
+  return memberIds.has(tabPipelineId) ? tabPipelineId : undefined
+}

@@ -30,7 +30,7 @@ import { useSessionListStore } from './stores/sessionListStore'
 import { useSessionStore } from './stores/sessionStore'
 import { useUIStore } from './stores/uiStore'
 import { appendAttachmentRefs } from './utils/attachmentRefs'
-import { mainPipelineIdOf } from './utils/mappers'
+import { resolveSendTarget } from './utils/mappers'
 import { generateUUID } from './utils/uuid'
 import type { SendMessageParams } from './components/chat/types'
 import type { ReactNode } from 'react'
@@ -269,7 +269,7 @@ function HomePage(): ReactNode {
     }
   }, [createSession, handleSelectSession])
 
-  /** 发送消息 1. 将用户消息添加到本地状态（主 Tab 写入 sessionStore，子 Tab 写入 agentTabStore） */
+  /** 发送消息：目标 = 所在标签管道（主/子一对一，成员校验不过 fail-closed），乐观消息与流式态写 pipelineMessageStore 对应管道桶 */
   const handleSendMessage = useCallback(
     async (params: SendMessageParams) => {
       const { activeSessionId: sid } = useSessionStore.getState()
@@ -291,29 +291,33 @@ function HomePage(): ReactNode {
 
       const pipelineStore = usePipelineMessageStore.getState()
 
-      // 管道 ID 是会话的唯一路由键。本函数以会话权威值解析目标管道：
-      // activePipelineId 优先（不按 pipelineIds[0] 位置猜测——排序不保证主管道在
-      // 前时会发进错误管道）；缺失且恰一个管道才取唯一元素；解析失败即终止发送
-      // （fail-closed，不落 params 猜测值）。闭包 params.pipelineId 不作依据——
-      // 新建/切换会话后渲染时序可能使其滞后于当前 Tab。
-      const sessionForPid = sessions.find((s) => s.id === sid)
-      const targetPipelineId = sessionForPid ? mainPipelineIdOf(sessionForPid) : undefined
+      // 管道路由（一对一）：目标 = 发送所在标签的管道 params.pipelineId
+      // （主标签=主管道，子标签=子管道），原样透传不做主管道改写。会话串桶
+      // 由成员校验拦截：目标不属于当前会话（标签管道映射 ∪ 会话快照
+      // pipelineIds，两源都按 sid 划界）即状态滞后/脏值，fail-closed 终止
+      // 发送并显式通知，绝不静默改发主管道（子管道视图发送落主管道 = 写错
+      // 桶，与内核 resolve_pipeline_id_for_thread 同一裁定）。
+      const targetPipelineId = resolveSendTarget(
+        params.pipelineId,
+        session,
+        useAgentTabStore.getState().pipelineTabMap,
+      )
       if (!targetPipelineId) {
         console.warn(
-          '[handleSendMessage] 主管道解析失败（无 activePipelineId 且管道数≠1），终止发送: sid=%s',
-          sid,
-        )
-        return
-      }
-      // 校验：params.pipelineId 与会话真实主管道不一致时，说明前端 tab 状态滞后，
-      // 记录告警（用真实值发送，避免串桶）。
-      if (params.pipelineId && params.pipelineId !== targetPipelineId) {
-        console.warn(
-          '[handleSendMessage] pipelineId 不一致，用会话真实值: sid=%s param=%s real=%s',
+          '[handleSendMessage] 目标管道不属于当前会话，终止发送: sid=%s pid=%s',
           sid.slice(0, 12),
-          params.pipelineId.slice(0, 12),
-          targetPipelineId.slice(0, 12),
+          params.pipelineId?.slice(0, 12) ?? '(empty)',
         )
+        useNotificationStore.getState().addNotification({
+          title: '发送已终止',
+          message: '消息目标管道不属于当前会话，为防串桶已阻止发送，请刷新页面后重试',
+          priority: 'high',
+          category: 'error',
+          isBlocking: false,
+          autoDismissMs: 8000,
+          sourceLabel: '前端',
+        })
+        return
       }
 
       const userMessageId = generateUUID()
