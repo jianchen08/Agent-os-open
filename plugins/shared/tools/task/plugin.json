@@ -232,7 +232,8 @@
   "granted_capabilities": [
     "chat",
     "pipeline-state",
-    "pipeline-executor"
+    "pipeline-executor",
+    "service-registry"
   ],
   "export_fields": [
     "task.owned.*",

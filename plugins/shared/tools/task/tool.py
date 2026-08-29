@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -104,10 +105,12 @@ def _is_task_pipeline_row(row: dict[str, Any]) -> bool:
 # ── GAP-1 统一：能力注入点（server.py on_load）──
 # chat_sender：chat.send_message（注入/重试驱动）；state_reader：pipeline-state.list
 # （任务状态/子链读面）；pipeline_executor：pipeline-executor（stop→suspend_pipeline /
-# resume→resume_pipeline）。
+# resume→resume_pipeline）；traces_reader：service-registry traces.list（执行活动
+# 读面，recent_activities/latest 数据源）。
 _chat_sender: Any = None
 _state_reader: Any = None
 _pipeline_executor: Any = None
+_traces_reader: Any = None
 
 
 def set_chat_sender(sender: Any) -> None:
@@ -118,6 +121,11 @@ def set_chat_sender(sender: Any) -> None:
 def set_state_reader(reader: Any) -> None:
     global _state_reader  # noqa: PLW0603
     _state_reader = reader
+
+
+def set_traces_reader(reader: Any) -> None:
+    global _traces_reader  # noqa: PLW0603
+    _traces_reader = reader
 
 
 def set_pipeline_executor(executor: Any) -> None:
@@ -138,13 +146,137 @@ class TaskTool(BuiltinTool):
 
         self._task_service: TaskService | None = None
 
-    def _get_execution_record_storage(self):
-        """获取全局 ExecutionRecordStorage 实例。
+    async def _load_activity_entries(self, pipeline_id: str) -> list[dict]:
+        """traces.list 读面 → 执行活动条目（时间正序）。
 
-        0.2 sidecar 无 execution_record_storage 服务（0.1 infrastructure 层已废弃），
-        返回 None 优雅降级——调用方已有 `if not storage: return None` 守卫，
-        活动摘要显示 "-"。
+        执行活动唯一数据源是内核 traces 表（0.1 ExecutionRecordStorage 已随
+        infrastructure 层退役）。条目形态：{iteration, action, action_type,
+        summary, at}。
+        - core 步骤：_executed_tool_calls × tool_results 按序配对 → tool 条目
+          （summary 取 tool_result 的 metadata.message，缺则参数摘要）；无工具
+          调用的轮次 → 一条 thinking 条目（用 llm_usage 概括）。
+        - post 步骤：router.last_response_text → ai 条目（LLM 回复摘要）。
+        reader 未注入或无管道 id → []；查询失败 → warning 降级空列表（活动是
+        详情的附属字段，不阻断任务主数据返回）。
         """
+
+        if not pipeline_id or _traces_reader is None:
+            return []
+
+        try:
+            traces = _traces_reader(pipeline_id)
+
+            if asyncio.iscoroutine(traces):
+                traces = await traces
+        except Exception as exc:
+            logger.warning(
+                "[TaskTool] 执行活动读取失败（降级为空）| pipeline=%s err=%s",
+                pipeline_id,
+                exc,
+            )
+            return []
+
+        if not isinstance(traces, list):
+            logger.warning(
+                "[TaskTool] traces.list 返回非列表形态 | type=%s", type(traces).__name__
+            )
+            return []
+
+        entries: list[dict] = []
+        iteration = 0
+
+        for trace in traces:
+            if not isinstance(trace, dict):
+                continue
+
+            plugin_id = str(trace.get("plugin_id") or "")
+            created_at = trace.get("created_at") or ""
+
+            try:
+                raw = trace.get("patch_data")
+                data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            except (TypeError, ValueError):
+                data = {}
+
+            if not isinstance(data, dict):
+                continue
+
+            if plugin_id == "core":
+                iteration += 1
+                calls = data.get("_executed_tool_calls") or []
+                results = data.get("tool_results") or []
+
+                for i, call in enumerate(calls):
+                    if not isinstance(call, dict):
+                        continue
+
+                    entries.append(
+                        {
+                            "iteration": iteration,
+                            "action": str(call.get("name") or "tool"),
+                            "action_type": "tool",
+                            "summary": self._tool_activity_summary(
+                                results[i] if i < len(results) else None, call
+                            ),
+                            "at": created_at,
+                        }
+                    )
+
+                if not calls:
+                    usage = data.get("llm_usage") or {}
+
+                    entries.append(
+                        {
+                            "iteration": iteration,
+                            "action": "thinking",
+                            "action_type": "ai",
+                            "summary": (
+                                f"LLM 轮次（输入 {usage.get('input_tokens', '-')} / "
+                                f"输出 {usage.get('output_tokens', '-')} tokens）"
+                                if usage
+                                else "LLM 轮次"
+                            ),
+                            "at": created_at,
+                        }
+                    )
+
+            elif plugin_id == "post":
+                text = str(data.get("router.last_response_text") or "")
+
+                if text:
+                    entries.append(
+                        {
+                            "iteration": iteration,
+                            "action": "thinking",
+                            "action_type": "ai",
+                            "summary": text[:100],
+                            "at": created_at,
+                        }
+                    )
+
+        return entries
+
+    @staticmethod
+    def _tool_activity_summary(result: Any, call: dict) -> str:
+        """单条工具活动的摘要：结果 message 优先，缺则参数摘要。"""
+
+        if isinstance(result, dict):
+            meta = result.get("metadata")
+
+            if isinstance(meta, dict) and meta.get("message"):
+                return str(meta["message"])[:100]
+
+            data = result.get("data")
+
+            if data:
+                return json.dumps(data, ensure_ascii=False, default=str)[:100]
+
+        args = call.get("args") or call.get("arguments")
+
+        if args:
+            return json.dumps(args, ensure_ascii=False, default=str)[:100]
+
+        return ""
 
     @staticmethod
     def _calc_elapsed_seconds(task: TaskModel) -> float | None:
@@ -185,52 +317,34 @@ class TaskTool(BuiltinTool):
 
         return f"{hours}h{remain_minutes}m"
 
-    def _get_latest_activity(self, task: TaskModel) -> dict | None:
+    async def _get_latest_activity(self, task: TaskModel) -> dict | None:
         """获取任务的最新一条执行活动摘要。"""
 
-        storage = self._get_execution_record_storage()
+        entries = await self._load_activity_entries(task.pipeline_run_id or "")
 
-        if not storage or not task.pipeline_run_id:
+        if not entries:
             return None
 
-        records = storage.list_by_pipeline(task.pipeline_run_id)[0]
-
-        if not records:
-            return None
-
-        latest = records[-1]
+        latest = entries[-1]
 
         return {
-            "iteration": latest.iteration,
-            "action": latest.name or latest.type,
-            "summary": (latest.content or "")[:100],
-            "at": latest.created_at,
+            "iteration": latest["iteration"],
+            "action": latest["action"],
+            "summary": latest["summary"][:100],
+            "at": latest["at"],
         }
 
-    def _get_recent_activities(self, task: TaskModel, limit: int = 5) -> list[dict]:
-        """获取任务最近 N 条执行活动摘要。"""
+    async def _get_recent_activities(
+        self, task: TaskModel, limit: int = 5
+    ) -> list[dict]:
+        """获取任务最近 N 条执行活动摘要（最新在前）。"""
 
-        storage = self._get_execution_record_storage()
-
-        if not storage or not task.pipeline_run_id:
+        if limit <= 0:
             return []
 
-        records = storage.list_by_pipeline(task.pipeline_run_id)[0]
+        entries = await self._load_activity_entries(task.pipeline_run_id or "")
 
-        recent = records[-limit:] if len(records) > limit else records
-
-        recent.reverse()
-
-        return [
-            {
-                "iteration": r.iteration,
-                "action": r.name or ("thinking" if r.type == "ai" else r.type),
-                "action_type": r.type,
-                "summary": (r.content or "")[:100],
-                "at": r.created_at,
-            }
-            for r in recent
-        ]
+        return list(reversed(entries[-limit:]))
 
     async def _read_state_rows(self) -> list[dict[str, Any]] | None:
         """读管道 state 聚合行（pipeline-state.list）。
@@ -704,8 +818,12 @@ class TaskTool(BuiltinTool):
 
         return await service.list_all(limit=10_000, reverse=True)
 
-    def _task_to_dict(
-        self, task: TaskModel, include_details: bool = False, include_agent_calls: bool = False
+    async def _task_to_dict(
+        self,
+        task: TaskModel,
+        include_details: bool = False,
+        include_agent_calls: bool = False,
+        activity_limit: int = 5,
     ) -> dict[str, Any]:
         """将 TaskModel 转换为工具返回的字典格式。"""
 
@@ -768,9 +886,9 @@ class TaskTool(BuiltinTool):
         if include_details or include_agent_calls:
             result["elapsed_seconds"] = self._calc_elapsed_seconds(task)
 
-            activities = self._get_recent_activities(task)
+            activities = await self._get_recent_activities(task, limit=activity_limit)
 
-            if include_agent_calls and not include_details:
+            if include_agent_calls:
                 activities = [a for a in activities if a.get("action_type") == "tool"]
 
             result["recent_activities"] = activities
@@ -814,10 +932,16 @@ class TaskTool(BuiltinTool):
                     error_code="INSUFFICIENT_PERMISSION",
                 )
 
-            task_dict = self._task_to_dict(
+            # 详情模式 limit 语义 = 活动条数上限（列表模式的 limit 是行数上限，
+            # 两模式各自取值）；未传用默认 5
+            raw_limit = inputs.get("limit")
+            activity_limit = int(raw_limit) if raw_limit else 5
+
+            task_dict = await self._task_to_dict(
                 task,
                 include_details=inputs.get("include_details", False),
                 include_agent_calls=inputs.get("include_agent_calls", False),
+                activity_limit=activity_limit,
             )
 
             task_dict["hint"] = "任务正在后台执行中，请勿频繁调用此工具查看状态，任务完成后会自动更新。"
@@ -853,9 +977,14 @@ class TaskTool(BuiltinTool):
             if limit and len(filtered) > limit:
                 filtered = filtered[:limit]
 
+            rows = []
+
+            for t in filtered:
+                rows.append(await self._task_list_row(t))
+
             return create_success_result(
                 data={
-                    "d": [self._task_list_row(t) for t in filtered],
+                    "d": rows,
                     # task_id 短化在 _task_list_row 内完成：LLM 展示/回传用短 id，
                     # 入口前缀解析恢复全 id
                     "hint": "任务正在后台执行中，请勿频繁调用此工具查看状态，任务完成后会自动更新。",
@@ -931,9 +1060,9 @@ class TaskTool(BuiltinTool):
             filtered.append(task)
         return filtered
 
-    def _task_list_row(self, task: TaskModel) -> list[Any]:
+    async def _task_list_row(self, task: TaskModel) -> list[Any]:
         """单任务 → 7 列简表行（短id/标题/状态/优先级/目标/最近动作/耗时）。"""
-        activity = self._get_latest_activity(task)
+        activity = await self._get_latest_activity(task)
 
         priority = (
             task.priority.value if hasattr(task.priority, "value") else task.priority

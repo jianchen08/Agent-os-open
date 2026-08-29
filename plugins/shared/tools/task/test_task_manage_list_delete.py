@@ -6,13 +6,14 @@ get 详情（含 evaluation_summary/elapsed/activities 组装）、
 delete 双路径（YAML 任务 / state 任务删管道）、耗时/活动摘要辅助函数。
 
 真实依赖：TaskService（tmp 数据目录）+ 真实 TaskStorage；仅 mock 跨进程
-capability（pipeline-executor / state 聚合 / 0.1 execution_record_storage
-sidecar 存储——本 0.2 架构该服务已废弃返回 None，测试用假存储直连覆盖组装面）。
+capability（pipeline-executor / state 聚合 / service-registry traces.list
+——执行活动数据源在内核 traces 表，测试用假 traces reader 直连覆盖组装面）。
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import sys
 from pathlib import Path
@@ -78,10 +79,12 @@ def _capabilities():
     prev_chat = _task_mod._chat_sender
     prev_state = _task_mod._state_reader
     prev_exec = _task_mod._pipeline_executor
+    prev_traces = _task_mod._traces_reader
     yield
     _task_mod._chat_sender = prev_chat
     _task_mod._state_reader = prev_state
     _task_mod._pipeline_executor = prev_exec
+    _task_mod._traces_reader = prev_traces
 
 
 @pytest.fixture()
@@ -338,67 +341,117 @@ async def test_get_detail_exception_returns_get_failed(tool: TaskTool) -> None:
     assert "read broken" in (result.error or "")
 
 
-# ─────────────────────────── 活动摘要（fake sidecar 存储） ───────────────────────────
+# ─────────────────────────── 活动摘要（fake traces reader） ───────────────────────────
 
 
-class _FakeRecord:
-    def __init__(self, iteration: int, name: str, rtype: str, content: str) -> None:
-        self.iteration = iteration
-        self.name = name
-        self.type = rtype
-        self.content = content
-        self.created_at = f"2026-08-25T10:00:{iteration:02d}"
+def _trace(plugin_id: str, patch: dict[str, Any], at: str) -> dict[str, Any]:
+    """内核 traces.list 返回形状（TraceEntry serde JSON；patch_data 为 JSON 字符串）。"""
+    return {
+        "trace_id": f"t_{plugin_id}_{at}",
+        "run_id": "run-uuid",
+        "branch_id": "main",
+        "seq_in_branch": 0,
+        "plugin_id": plugin_id,
+        "patch_type": "state_update",
+        "patch_data": json.dumps(patch, ensure_ascii=False),
+        "tenant_id": "default",
+        "created_at": at,
+    }
 
 
-class _FakeStorage:
-    def __init__(self, records: list[Any]) -> None:
-        self._records = records
+def _core_trace(at: str, *, tool_calls: list[dict] | None = None, results: list[dict] | None = None) -> dict[str, Any]:
+    patch: dict[str, Any] = {"messages": {"_ops": []}}
+    if tool_calls is not None:
+        patch["_executed_tool_calls"] = tool_calls
+        patch["tool_results"] = results or []
+    else:
+        patch["llm_usage"] = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+    return _trace("core", patch, at)
 
-    def list_by_pipeline(self, pipeline_id: str) -> list[list[Any]]:
-        return [self._records]
+
+def _post_trace(at: str, text: str) -> dict[str, Any]:
+    return _trace("post", {"router.last_response_text": text}, at)
+
+
+def _set_traces(tool: TaskTool, traces: list[dict[str, Any]] | None) -> None:
+    if traces is None:
+        _task_mod.set_traces_reader(None)
+    else:
+        _task_mod.set_traces_reader(AsyncMock(return_value=traces))
 
 
 async def test_latest_and_recent_activities_assembly(tool: TaskTool) -> None:
-    """活动摘要：latest 取末条；recent 限长反转、ai+无name→thinking 映射、摘要截 100。"""
-    records = [
-        _FakeRecord(i, f"act{i}", "ai" if i % 2 else "tool", "x" * 120) for i in range(6)
+    """活动组装：core 工具/思考条目 + post 回复条目；倒序、限长、摘要来源。"""
+    traces = [
+        _core_trace("2026-08-29T10:00:01"),  # 第1轮：无工具 → thinking（llm_usage 概括）
+        _core_trace(  # 第2轮：2 个工具，结果带 metadata.message
+            "2026-08-29T10:00:02",
+            tool_calls=[{"name": "bash", "args": {"command": "ls"}}, {"name": "file_read", "args": {"path": "a"}}],
+            results=[{"metadata": {"message": "执行成功"}}, {"data": {"lines": 3}}],
+        ),
+        _core_trace(  # 第3轮：1 个工具，结果无 metadata → data 摘要
+            "2026-08-29T10:00:03",
+            tool_calls=[{"name": "task_evaluate", "args": {"summary": "x" * 120}}],
+            results=[],
+        ),
+        _post_trace("2026-08-29T10:00:04", "y" * 120),  # LLM 回复摘要截 100
     ]
-    # 无 name 的 ai 记录 → action 回退 "thinking"（覆盖三元取型分支）
-    records.append(_FakeRecord(6, "", "ai", "x" * 120))
-    fake = _FakeStorage(records)
-    tool._get_execution_record_storage = lambda: fake  # type: ignore[method-assign]
+    _set_traces(tool, traces)
     task = _set_model()
-    latest = tool._get_latest_activity(task)
+
+    recent = await tool._get_recent_activities(task, limit=10)
+    assert len(recent) == 5, f"1 思考 + 2 工具 + 1 工具 + 1 回复 = 5，实得 {len(recent)}"
+    assert [a["iteration"] for a in recent] == [3, 3, 2, 2, 1], "倒序（最新在前）；post 收尾归属当前轮次"
+    assert recent[-1]["action"] == "thinking"
+    assert recent[-1]["action_type"] == "ai"
+    assert "输入 100" in recent[-1]["summary"], "无工具轮次用 llm_usage 概括"
+
+    by_action = {a["action"]: a for a in recent if a["action_type"] == "tool"}
+    assert set(by_action) == {"bash", "file_read", "task_evaluate"}
+    assert by_action["bash"]["summary"] == "执行成功", "摘要优先取 tool_result 的 metadata.message"
+    assert by_action["file_read"]["summary"] == '{"lines": 3}', "无 message 时参数/结果摘要兜底"
+    assert len(by_action["task_evaluate"]["summary"]) == 100, "摘要截 100"
+
+    latest = await tool._get_latest_activity(task)
     assert latest is not None
-    assert latest["iteration"] == 6
-    assert latest["action"] == "ai", "latest 用 name or type 回退（无 thinking 映射）"
-    assert len(latest["summary"]) == 100
-    assert latest["at"] == "2026-08-25T10:00:06"
+    assert latest["action"] == "thinking", "latest 取时间末条（post 回复）"
+    assert latest["at"] == "2026-08-29T10:00:04"
 
-    recent = tool._get_recent_activities(task, limit=5)
-    assert len(recent) == 5
-    assert recent[0]["iteration"] == 6, "recent 倒序（最新在前）"
-    assert recent[-1]["iteration"] == 2
-    assert any(r["action_type"] == "ai" and r["action"] == "thinking" for r in recent)
-    assert any(r["action_type"] == "tool" and r["action"] == "act2" for r in recent)
+    narrow = await tool._get_recent_activities(task, limit=2)
+    assert len(narrow) == 2
+    assert narrow[0]["at"] == "2026-08-29T10:00:04", "截断保留最新"
 
-    wide = tool._get_recent_activities(task, limit=10)
-    assert len(wide) == 7, "记录数 ≤ limit 时不截断"
+    assert await tool._get_recent_activities(task, limit=0) == [], "limit≤0 → 空（防 [-0:] 全量）"
 
 
-async def test_activities_without_storage_or_pipeline(tool: TaskTool) -> None:
-    """存储缺失 / 无 pipeline_run_id → 摘要 None / 空列表（优雅降级）。"""
-    assert tool._get_latest_activity(_set_model()) is None
-    assert tool._get_recent_activities(_set_model()) == []
+async def test_activities_without_reader_or_pipeline(tool: TaskTool) -> None:
+    """reader 未注入 / 无 pipeline_run_id → 摘要 None / 空列表（优雅降级）。"""
+    _set_traces(tool, None)
+    assert await tool._get_latest_activity(_set_model()) is None
+    assert await tool._get_recent_activities(_set_model()) == []
     bare = _set_model(pipeline_run_id=None)
-    assert tool._get_latest_activity(bare) is None
-    assert tool._get_recent_activities(bare) == []
+    assert await tool._get_latest_activity(bare) is None
+    assert await tool._get_recent_activities(bare) == []
+
+
+async def test_activities_reader_failure_degrades(tool: TaskTool) -> None:
+    """traces 读取失败 → warning 降级空列表，不阻断任务主数据。"""
+    _task_mod.set_traces_reader(AsyncMock(side_effect=RuntimeError("kernel down")))
+    assert await tool._get_recent_activities(_set_model()) == []
+    assert await tool._get_latest_activity(_set_model()) is None
 
 
 async def test_get_detail_include_agent_calls_filters(tool: TaskTool, svc: Any) -> None:
-    """include_agent_calls → 仅 tool 类型活动（自动启用详情）。"""
-    records = [_FakeRecord(1, "toolcall", "tool", "run"), _FakeRecord(2, "思考", "ai", "think")]
-    tool._get_execution_record_storage = lambda: _FakeStorage(records)  # type: ignore[method-assign]
+    """include_agent_calls → 仅 tool 类型活动（与 include_details 同传时也过滤）。"""
+    traces = [
+        _core_trace(
+            "2026-08-29T10:00:01",
+            tool_calls=[{"name": "toolcall", "args": {}}],
+            results=[{"metadata": {"message": "run"}}],
+        ),
+        _post_trace("2026-08-29T10:00:02", "think"),
+    ]
+    _set_traces(tool, traces)
     task = await svc.create_task(title="调用过滤")
     await svc.bind_pipeline_run(task.id, "pipe-run")
     _set_reader(tool, None)
@@ -409,6 +462,41 @@ async def test_get_detail_include_agent_calls_filters(tool: TaskTool, svc: Any) 
     acts = result.output["recent_activities"]
     assert len(acts) == 1
     assert acts[0]["action_type"] == "tool"
+
+    result2 = await tool.execute(
+        {
+            "action": "get",
+            "task_id": task.id,
+            "include_details": True,
+            "include_agent_calls": True,
+            "parent_agent_level": 1,
+        }
+    )
+    assert result2.success, result2.error
+    acts2 = result2.output["recent_activities"]
+    assert len(acts2) == 1
+    assert acts2[0]["action_type"] == "tool", "agent_calls 恒过滤，不被 include_details 抵消"
+
+
+async def test_get_detail_limit_wiring(tool: TaskTool, svc: Any) -> None:
+    """详情模式 limit = 活动条数上限；未传默认 5。"""
+    traces = [_core_trace(f"2026-08-29T10:00:0{i}") for i in range(1, 8)]  # 7 条 thinking
+    _set_traces(tool, traces)
+    task = await svc.create_task(title="limit 接线")
+    await svc.bind_pipeline_run(task.id, "pipe-run")
+    _set_reader(tool, None)
+
+    result = await tool.execute(
+        {"action": "get", "task_id": task.id, "include_details": True, "limit": 2, "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    assert len(result.output["recent_activities"]) == 2, "limit 接线到活动条数"
+
+    result_default = await tool.execute(
+        {"action": "get", "task_id": task.id, "include_details": True, "parent_agent_level": 1}
+    )
+    assert result_default.success, result_default.error
+    assert len(result_default.output["recent_activities"]) == 5, "未传 limit 默认 5"
 
 
 # ─────────────────────────── 耗时与展示格式 ───────────────────────────
@@ -876,9 +964,10 @@ async def test_get_list_from_state_with_ws_meta(tool: TaskTool) -> None:
 
 
 async def test_latest_activity_empty_records(tool: TaskTool) -> None:
-    """存储有行但记录为空列表 → latest 返回 None。"""
-    tool._get_execution_record_storage = lambda: _FakeStorage([])  # type: ignore[method-assign]
-    assert tool._get_latest_activity(_set_model()) is None
+    """reader 正常返回但 traces 为空 → latest 返回 None。"""
+    _set_traces(tool, [])
+    assert await tool._get_latest_activity(_set_model()) is None
+    assert await tool._get_recent_activities(_set_model()) == []
 
 
 async def test_continue_generic_exception_wrapped(tool: TaskTool) -> None:

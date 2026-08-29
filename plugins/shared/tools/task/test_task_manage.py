@@ -113,12 +113,6 @@ def test_get_task_service_returns_0_2_service_without_infrastructure() -> None:
         assert hasattr(svc, method), f"0.2 TaskService 缺少 {method}"
 
 
-def test_execution_record_storage_degrades_to_none() -> None:
-    """0.2 sidecar 无 execution_record_storage → None（活动摘要优雅降级为 '-'）。"""
-    tool = TaskTool()
-    assert tool._get_execution_record_storage() is None
-
-
 @pytest.mark.asyncio
 async def test_continue_resume_restores_status() -> None:
     """恢复执行仅改任务状态（0.2 收尾：start_run 占位已随旧引擎移除，

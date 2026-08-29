@@ -43,9 +43,17 @@ async def _on_load(_params: dict[str, Any]) -> None:
         handle = plugin.get_capability("pipeline-executor")
         return await handle.call(params["method"], params["params"])
 
+    async def _list_traces(pipeline_id: str) -> list[dict[str, Any]]:
+        # service-registry 约定：handle.call("<域>.<op>")。任务管道无 sessions 行，
+        # 其 thread_id 恒等于自身 pipeline_id，故以 pipeline_id 作 thread_id 查。
+        handle = plugin.get_capability("service-registry")
+        rows = await handle.call("traces.list", {"thread_id": pipeline_id})
+        return rows if isinstance(rows, list) else []
+
     tool_mod.set_chat_sender(_chat)
     tool_mod.set_state_reader(_read_state_rows)
     tool_mod.set_pipeline_executor(_exec)
+    tool_mod.set_traces_reader(_list_traces)
 
 
 
