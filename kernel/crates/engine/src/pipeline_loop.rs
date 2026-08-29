@@ -144,7 +144,10 @@ impl PipelineExecutor {
     /// 注入轮次观察点（聊天路径：api 层桥接为 stream_start/new_message/stream_end）。
     ///
     /// 不调用为零开销（引擎不感知事件协议，仅回调）。
-    pub fn with_round_events(mut self, round_events: Arc<dyn crate::round_events::RoundEvents>) -> Self {
+    pub fn with_round_events(
+        mut self,
+        round_events: Arc<dyn crate::round_events::RoundEvents>,
+    ) -> Self {
         self.round_events = Some(round_events);
         self
     }
@@ -350,7 +353,8 @@ impl PipelineExecutor {
                 // 工具迭代沿用打开轮（tool 事件挂 LLM 轮消息）；LLM/其它迭代
                 // 一律新开轮——先续后判会让下一次 LLM 迭代误沿上一轮的 id
                 // （工具卡重复建到 LLM 轮消息的根因，2026-08-27 真机复现）。
-                let next_is_tool = state_str(state, "core_plugin").as_deref() == Some("pipeline_tool_core");
+                let next_is_tool =
+                    state_str(state, "core_plugin").as_deref() == Some("pipeline_tool_core");
                 let (round_index, round_id, round_start) = if next_is_tool {
                     if let Some((ri, rid, rs)) = open_round.take() {
                         if let Some(obj) = state.as_object_mut() {
@@ -371,8 +375,14 @@ impl PipelineExecutor {
                     // 本轮（LLM 回合）产出 assistant → 发终态事件（new_message/stream_end）。
                     // 回合保持「打开」直到下一个 LLM 迭代（随后的工具迭代仍沿用本轮
                     // message_id——工具事件挂本轮消息，与 new_message.toolCalls 同卡位）。
-                    self.round_end_event(state, round_index, round_id.clone(), &round_start, assistant_before)
-                        .await;
+                    self.round_end_event(
+                        state,
+                        round_index,
+                        round_id.clone(),
+                        &round_start,
+                        assistant_before,
+                    )
+                    .await;
                 }
                 open_round = Some((round_index, round_id, round_start));
                 if truthy_flag(state, "suspended") {
@@ -736,7 +746,8 @@ impl PipelineExecutor {
                 "timestamp": chrono::Utc::now().to_rfc3339(),
                 "pipeline_id": pipeline_id,
             });
-            let config = serde_json::json!({ "_pipe_hook": { "event": event, "payload": payload } });
+            let config =
+                serde_json::json!({ "_pipe_hook": { "event": event, "payload": payload } });
             let hook_ctx = PluginContext::new(
                 state.clone(),
                 config,
@@ -1230,7 +1241,9 @@ impl PipelineExecutor {
         // - 其余 → 正常结束，Completed。
         let final_status = if truthy_flag(final_state, "suspended") {
             agentos_core::types::RunStatus::Suspended
-        } else if final_state.get("router.stop_reason").and_then(|v| v.as_str())
+        } else if final_state
+            .get("router.stop_reason")
+            .and_then(|v| v.as_str())
             == Some("user_requested")
         {
             agentos_core::types::RunStatus::Cancelled
@@ -1373,8 +1386,11 @@ impl PipelineExecutor {
             return None;
         }
         let tenant_id = self.default_tenant.tenant_id.clone();
-        let prev_step = crate::transient::global_registry()
-            .resolve_step_of(&tenant_id, pipeline_id, message_id);
+        let prev_step = crate::transient::global_registry().resolve_step_of(
+            &tenant_id,
+            pipeline_id,
+            message_id,
+        );
         crate::transient::global_registry().register_message_binding(
             &tenant_id,
             pipeline_id,

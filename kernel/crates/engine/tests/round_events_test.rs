@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    LoopBody, PipelineConfig, PipelineStep, PluginContext, PluginError,
-    PluginResult, Route, RouteAction, RouteNext, StepItem, ToolExecutionResult,
+    LoopBody, PipelineConfig, PipelineStep, PluginContext, PluginError, PluginResult, Route,
+    RouteAction, RouteNext, StepItem, ToolExecutionResult,
 };
 use agentos_engine::compiler::compile_pipeline;
 use agentos_engine::{PipelineExecutor, RoundEnd, RoundEvents, RoundStart, SqliteStore};
@@ -233,13 +233,20 @@ fn two_round_config() -> PipelineConfig {
     }
 }
 
-fn make_executor(invoker: Arc<RoundInvoker>, store: Arc<SqliteStore>, recorder: Arc<Recorder>) -> PipelineExecutor {
+fn make_executor(
+    invoker: Arc<RoundInvoker>,
+    store: Arc<SqliteStore>,
+    recorder: Arc<Recorder>,
+) -> PipelineExecutor {
     let store_dyn: Arc<dyn StorageBackend> = store;
     PipelineExecutor::new(
         invoker as Arc<dyn PluginInvoker>,
         Path::new(".").to_path_buf(),
         agentos_core::types::TenantContext::new("tenant_test", "session_test"),
-        vec!["pipeline_llm_core".to_string(), "pipeline_tool_core".to_string()],
+        vec![
+            "pipeline_llm_core".to_string(),
+            "pipeline_tool_core".to_string(),
+        ],
         store_dyn,
         "run_round_events",
         "main",
@@ -273,14 +280,25 @@ async fn test_round_events_fire_per_iteration() {
         executor.plugin_ids(),
     )
     .expect("compile ok");
-    let final_state = executor.run_compiled(&compiled, initial_state()).await.expect("run ok");
+    let final_state = executor
+        .run_compiled(&compiled, initial_state())
+        .await
+        .expect("run ok");
 
     let starts = recorder.starts();
     let ends = recorder.ends();
     assert_eq!(starts.len(), 2, "两轮循环应发两次 round_start");
     assert_eq!(ends.len(), 2, "两轮循环应发两次 round_end");
     // 顺序严格 start → end → start → end（发射顺序 = 轮次顺序）
-    assert!(matches!(&recorder.events.lock().unwrap()[..], [Event::Start(_), Event::End(_), Event::Start(_), Event::End(_)]));
+    assert!(matches!(
+        &recorder.events.lock().unwrap()[..],
+        [
+            Event::Start(_),
+            Event::End(_),
+            Event::Start(_),
+            Event::End(_)
+        ]
+    ));
     // 每轮独立 message_id（a_ 前缀、互不相同）
     assert_ne!(starts[0].message_id, starts[1].message_id);
     assert!(starts[0].message_id.starts_with("a_"));
@@ -290,11 +308,17 @@ async fn test_round_events_fire_per_iteration() {
     assert_eq!(ends[1].message_id, starts[1].message_id);
     // 首轮 end 携带本轮 assistant（含 tool_calls 字段），次轮为纯文本
     let round1 = ends[0].assistant.as_ref().expect("round1 assistant");
-    assert_eq!(round1.get("content").and_then(|v| v.as_str()), Some("第一步回复"));
+    assert_eq!(
+        round1.get("content").and_then(|v| v.as_str()),
+        Some("第一步回复")
+    );
     assert!(round1.get("tool_calls").is_some());
     // 第二轮回复不应再携带首轮工具调用
     let round2 = ends[1].assistant.as_ref().expect("round2 assistant");
-    assert_eq!(round2.get("content").and_then(|v| v.as_str()), Some("第二步回复"));
+    assert_eq!(
+        round2.get("content").and_then(|v| v.as_str()),
+        Some("第二步回复")
+    );
     assert!(round2.get("tool_calls").is_none());
     // 引擎每轮都附 user 消息（供 api 桥接在首个有产出的轮次做认领回传）
     assert!(ends[0].user_message.is_some());
@@ -356,29 +380,38 @@ async fn test_tool_iteration_reuses_open_round() {
                     if count == 1 {
                         Ok(PluginResult {
                             state_updates: HashMap::from([
-                                ("messages".to_string(), json!({
-                                    "_ops": [{
-                                        "op": "set",
-                                        "msg": {
-                                            "role": "assistant",
-                                            "content": "第一轮回复",
-                                            "tool_calls": [
-                                                { "id": "call_alt_1", "name": "file_read", "arguments": "{}" }
-                                            ],
-                                        },
-                                    }]
-                                })),
+                                (
+                                    "messages".to_string(),
+                                    json!({
+                                        "_ops": [{
+                                            "op": "set",
+                                            "msg": {
+                                                "role": "assistant",
+                                                "content": "第一轮回复",
+                                                "tool_calls": [
+                                                    { "id": "call_alt_1", "name": "file_read", "arguments": "{}" }
+                                                ],
+                                            },
+                                        }]
+                                    }),
+                                ),
                                 ("raw_result".to_string(), json!("第一轮回复")),
-                                ("raw_tool_calls".to_string(), json!([{ "type": "function", "id": "call_alt_1", "name": "file_read", "arguments": "{}" }])),
+                                (
+                                    "raw_tool_calls".to_string(),
+                                    json!([{ "type": "function", "id": "call_alt_1", "name": "file_read", "arguments": "{}" }]),
+                                ),
                             ]),
                             ..Default::default()
                         })
                     } else {
                         Ok(PluginResult {
                             state_updates: HashMap::from([
-                                ("messages".to_string(), json!({
-                                    "_ops": [{ "op": "set", "msg": { "role": "assistant", "content": "第二轮回复" } }]
-                                })),
+                                (
+                                    "messages".to_string(),
+                                    json!({
+                                        "_ops": [{ "op": "set", "msg": { "role": "assistant", "content": "第二轮回复" } }]
+                                    }),
+                                ),
                                 ("raw_result".to_string(), json!("第二轮回复")),
                                 ("raw_tool_calls".to_string(), json!([])),
                             ]),
@@ -388,9 +421,12 @@ async fn test_tool_iteration_reuses_open_round() {
                 }
                 "pipeline_tool_core" => Ok(PluginResult {
                     state_updates: HashMap::from([
-                        ("messages".to_string(), json!({
-                            "_ops": [{ "op": "set", "msg": { "role": "tool", "content": "工具结果", "tool_call_id": "call_alt_1" } }]
-                        })),
+                        (
+                            "messages".to_string(),
+                            json!({
+                                "_ops": [{ "op": "set", "msg": { "role": "tool", "content": "工具结果", "tool_call_id": "call_alt_1" } }]
+                            }),
+                        ),
                         ("raw_result".to_string(), json!("工具结果")),
                         ("raw_tool_calls".to_string(), json!([])),
                     ]),
@@ -424,7 +460,10 @@ async fn test_tool_iteration_reuses_open_round() {
         invoker2 as Arc<dyn PluginInvoker>,
         Path::new(".").to_path_buf(),
         agentos_core::types::TenantContext::new("tenant_test", "session_test"),
-        vec!["pipeline_llm_core".to_string(), "pipeline_tool_core".to_string()],
+        vec![
+            "pipeline_llm_core".to_string(),
+            "pipeline_tool_core".to_string(),
+        ],
         store_dyn,
         "run_alt_rounds",
         "main",
@@ -445,19 +484,29 @@ async fn test_tool_iteration_reuses_open_round() {
                         when: "raw_tool_calls != [] and raw_tool_calls != None".into(),
                         then: RouteAction {
                             next: RouteNext::Loop,
-                            set: HashMap::from([("core_plugin".to_string(), json!("pipeline_tool_core"))]),
+                            set: HashMap::from([(
+                                "core_plugin".to_string(),
+                                json!("pipeline_tool_core"),
+                            )]),
                         },
                     },
                     Route {
-                        when: "raw_tool_calls == [] and core_plugin == \"pipeline_tool_core\"".into(),
+                        when: "raw_tool_calls == [] and core_plugin == \"pipeline_tool_core\""
+                            .into(),
                         then: RouteAction {
                             next: RouteNext::Loop,
-                            set: HashMap::from([("core_plugin".to_string(), json!("pipeline_llm_core"))]),
+                            set: HashMap::from([(
+                                "core_plugin".to_string(),
+                                json!("pipeline_llm_core"),
+                            )]),
                         },
                     },
                     Route {
                         when: "True".into(),
-                        then: RouteAction { next: RouteNext::End, set: HashMap::new() },
+                        then: RouteAction {
+                            next: RouteNext::End,
+                            set: HashMap::new(),
+                        },
                     },
                 ],
                 loop_config: None,
@@ -468,7 +517,8 @@ async fn test_tool_iteration_reuses_open_round() {
         }],
         checkpoint: agentos_core::types::CheckpointConfig::default(),
     };
-    let compiled = compile_pipeline(&config, &Default::default(), executor.plugin_ids()).expect("compile ok");
+    let compiled =
+        compile_pipeline(&config, &Default::default(), executor.plugin_ids()).expect("compile ok");
 
     let final_state = executor
         .run_compiled(
@@ -495,9 +545,19 @@ async fn test_tool_iteration_reuses_open_round() {
     assert_eq!(starts[1].message_id, ends[1].message_id);
     assert_ne!(starts[0].message_id, starts[1].message_id);
     // 第 1 轮 assistant = 带工具的回复，第 2 轮 = 纯文本终条
-    assert!(ends[0].assistant.as_ref().unwrap().get("tool_calls").is_some());
+    assert!(ends[0]
+        .assistant
+        .as_ref()
+        .unwrap()
+        .get("tool_calls")
+        .is_some());
     assert_eq!(
-        ends[1].assistant.as_ref().unwrap().get("content").and_then(|v| v.as_str()),
+        ends[1]
+            .assistant
+            .as_ref()
+            .unwrap()
+            .get("content")
+            .and_then(|v| v.as_str()),
         Some("第二轮回复")
     );
     // 最终 state 的 message_id = 第 2 轮 id（工具迭代沿用打开轮 id，未覆盖）
@@ -518,14 +578,21 @@ async fn test_round_record_id_matches_event_id_and_table_order() {
     let _tmp = tempfile::tempdir().unwrap();
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let recorder = Arc::new(Recorder::new());
-    let executor = make_executor(Arc::new(RoundInvoker::new()), store.clone(), recorder.clone());
+    let executor = make_executor(
+        Arc::new(RoundInvoker::new()),
+        store.clone(),
+        recorder.clone(),
+    );
     let compiled = compile_pipeline(
         &two_round_config(),
         &Default::default(),
         executor.plugin_ids(),
     )
     .expect("compile ok");
-    executor.run_compiled(&compiled, initial_state()).await.expect("run ok");
+    executor
+        .run_compiled(&compiled, initial_state())
+        .await
+        .expect("run ok");
 
     let starts = recorder.starts();
     let rows = store
@@ -547,5 +614,8 @@ async fn test_round_record_id_matches_event_id_and_table_order() {
         .filter(|r| r.role == "assistant")
         .map(|r| r.message_id.as_str())
         .collect();
-    assert_eq!(assistant_ids, vec![starts[0].message_id.as_str(), starts[1].message_id.as_str()]);
+    assert_eq!(
+        assistant_ids,
+        vec![starts[0].message_id.as_str(), starts[1].message_id.as_str()]
+    );
 }

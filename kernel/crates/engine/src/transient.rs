@@ -122,14 +122,24 @@ impl TransientStateRegistry {
             .entry((tenant_id.to_string(), pipeline_id.to_string()))
             .or_default();
         let now = Instant::now();
-        pipe.insert(key.to_string(), TransientEntry { value, updated_at: now });
+        pipe.insert(
+            key.to_string(),
+            TransientEntry {
+                value,
+                updated_at: now,
+            },
+        );
         if pipe.len() > MAX_KEYS_PER_PROCESS {
             // 逐出 updated_at 最老的键（同刻并列时取最先遍历到的，保证确定性）
-            if let Some(oldest_key) = pipe.iter().min_by_key(|(_, e)| e.updated_at).map(|(k, _)| k.clone())
+            if let Some(oldest_key) = pipe
+                .iter()
+                .min_by_key(|(_, e)| e.updated_at)
+                .map(|(k, _)| k.clone())
             {
                 pipe.remove(&oldest_key);
             }
-        }    }
+        }
+    }
 
     /// 读一个中间态键。
     pub fn get(&self, tenant_id: &str, pipeline_id: &str, key: &str) -> Option<Value> {
@@ -141,11 +151,7 @@ impl TransientStateRegistry {
     }
 
     /// 枚举一个管道的全部存活键（key/value/updated_at），前端刷新恢复用。
-    pub fn list(
-        &self,
-        tenant_id: &str,
-        pipeline_id: &str,
-    ) -> Vec<(String, Value, Instant)> {
+    pub fn list(&self, tenant_id: &str, pipeline_id: &str) -> Vec<(String, Value, Instant)> {
         self.keys
             .read()
             .get(&(tenant_id.to_string(), pipeline_id.to_string()))
@@ -185,16 +191,16 @@ impl TransientStateRegistry {
             .write()
             .entry((tenant_id.to_string(), pipeline_id.to_string()))
             .or_default()
-            .insert(message_id.to_string(), MessageBinding { step_id: step_id.to_string() });
+            .insert(
+                message_id.to_string(),
+                MessageBinding {
+                    step_id: step_id.to_string(),
+                },
+            );
     }
 
     /// 清除一条 message 绑定（step 收尾时调用）。
-    pub fn clear_message_binding(
-        &self,
-        tenant_id: &str,
-        pipeline_id: &str,
-        message_id: &str,
-    ) {
+    pub fn clear_message_binding(&self, tenant_id: &str, pipeline_id: &str, message_id: &str) {
         let mut bindings = self.bindings.write();
         let pipe_key = (tenant_id.to_string(), pipeline_id.to_string());
         let mut empty = false;
@@ -239,7 +245,14 @@ impl TransientStateRegistry {
         content: &str,
         thinking: &str,
     ) -> bool {
-        self.accumulate_chunk_at(tenant_id, pipeline_id, message_id, content, thinking, Instant::now())
+        self.accumulate_chunk_at(
+            tenant_id,
+            pipeline_id,
+            message_id,
+            content,
+            thinking,
+            Instant::now(),
+        )
     }
 
     /// `accumulate_chunk` 的时钟注入变体（fake clock：测试用可调 now 断言
@@ -292,7 +305,12 @@ impl TransientStateRegistry {
         entry.count = 0;
         entry.last_flush = now;
         drop(acc);
-        self.set(tenant_id, pipeline_id, &format!("chunk:{message_id}"), snapshot);
+        self.set(
+            tenant_id,
+            pipeline_id,
+            &format!("chunk:{message_id}"),
+            snapshot,
+        );
         true
     }
 
@@ -564,7 +582,10 @@ mod tests {
         assert!(reg.take_chunk_snapshot(TENANT, "pipe_1", "m1").is_none());
         reg.accumulate_chunk(TENANT, "pipe_1", "m1", "半截", "想");
         let snap = reg.take_chunk_snapshot(TENANT, "pipe_1", "m1").unwrap();
-        assert!(snap["blocks"][0]["content"].as_str().unwrap().contains("半截"));
+        assert!(snap["blocks"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("半截"));
         assert_eq!(snap["reasoning_len"], json!(3));
     }
 
@@ -581,6 +602,9 @@ mod tests {
         // clear_pipeline 只清本管道（含节流档）
         reg.clear_pipeline(TENANT, "pipe_1");
         assert!(reg.get(TENANT, "pipe_1", "chunk:m1").is_none());
-        assert!(!reg.accumulate_chunk(TENANT, "pipe_1", "m1", "a", ""), "节流档已随管道清除");
+        assert!(
+            !reg.accumulate_chunk(TENANT, "pipe_1", "m1", "a", ""),
+            "节流档已随管道清除"
+        );
     }
 }

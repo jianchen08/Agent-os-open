@@ -47,10 +47,7 @@ impl MockInvoker {
     }
 
     fn set_err(&self, plugin_id: &str, err: PluginError) {
-        self.errs
-            .lock()
-            .unwrap()
-            .insert(plugin_id.to_string(), err);
+        self.errs.lock().unwrap().insert(plugin_id.to_string(), err);
     }
 
     fn call_count(&self, plugin_id: &str) -> usize {
@@ -754,11 +751,7 @@ impl PluginInvoker for SequenceInvoker {
         _ctx: &PluginContext,
     ) -> Result<PluginResult, PluginError> {
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
-        let updates = self
-            .results
-            .get(n)
-            .cloned()
-            .unwrap_or_default();
+        let updates = self.results.get(n).cloned().unwrap_or_default();
         Ok(PluginResult {
             state_updates: updates,
             ..Default::default()
@@ -1239,7 +1232,9 @@ async fn test_plugin_error_continues() {
     assert_eq!(fixture.invoker.call_count("good"), 1);
     assert_eq!(state["ok"], json!(true));
     // 插件错误收集到 _plugin_errors（引擎内部键，api 层提取为 plugin_errors）
-    let errs = state["_plugin_errors"].as_array().expect("_plugin_errors 应为数组");
+    let errs = state["_plugin_errors"]
+        .as_array()
+        .expect("_plugin_errors 应为数组");
     assert_eq!(errs.len(), 1);
     assert_eq!(errs[0]["plugin_id"], json!("bad"));
     assert_eq!(errs[0]["code"], json!("PLUGIN_EXEC_FAILED"));
@@ -1275,7 +1270,9 @@ async fn test_plugin_error_continues_with_code() {
     let state = fixture
         .run(&config, &StepLibrary::default(), json!({}))
         .await;
-    let errs = state["_plugin_errors"].as_array().expect("_plugin_errors 应为数组");
+    let errs = state["_plugin_errors"]
+        .as_array()
+        .expect("_plugin_errors 应为数组");
     assert_eq!(errs.len(), 1);
     assert_eq!(errs[0]["plugin_id"], json!("bad"));
     assert_eq!(errs[0]["code"], json!("PLUGIN_CRASHED"));
@@ -1308,7 +1305,9 @@ async fn test_invoker_error_collected() {
     let state = fixture
         .run(&config, &StepLibrary::default(), json!({}))
         .await;
-    let errs = state["_plugin_errors"].as_array().expect("_plugin_errors 应为数组");
+    let errs = state["_plugin_errors"]
+        .as_array()
+        .expect("_plugin_errors 应为数组");
     assert_eq!(errs.len(), 1);
     assert_eq!(errs[0]["plugin_id"], json!("bad"));
     assert_eq!(errs[0]["code"], json!("MCP_CALL_FAILED"));
@@ -1876,7 +1875,8 @@ fn routed_loop_body(steps: Vec<StepItem>) -> PipelineConfig {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
-    }
+    };
+    config
 }
 
 #[tokio::test]
@@ -1920,11 +1920,7 @@ async fn fallback_end_when_condition_never_matches() {
     );
     let config = routed_loop_body(vec!["p".into()]);
     let state = fixture
-        .run(
-            &config,
-            &StepLibrary::default(),
-            json!({}),
-        )
+        .run(&config, &StepLibrary::default(), json!({}))
         .await;
     assert_eq!(fixture.invoker.call_count("p"), 1);
     assert_eq!(state["ended"], json!(true));
@@ -1939,8 +1935,18 @@ async fn fallback_end_when_condition_never_matches() {
 fn clear_transient_for_ops_clears_chunk_and_binding() {
     let reg = crate::transient::global_registry();
     let pipe = "pipe_clear_ops";
-    reg.set("tenant_test", pipe, "chunk:mid_stream", json!({"text_len": 3}));
-    reg.set("tenant_test", pipe, "chunk:mid_plugin", json!({"text_len": 5}));
+    reg.set(
+        "tenant_test",
+        pipe,
+        "chunk:mid_stream",
+        json!({"text_len": 3}),
+    );
+    reg.set(
+        "tenant_test",
+        pipe,
+        "chunk:mid_plugin",
+        json!({"text_len": 5}),
+    );
     reg.set("tenant_test", pipe, "progress:1", json!({"pct": 10}));
     reg.register_message_binding("tenant_test", pipe, "mid_stream", "core");
     reg.register_message_binding("tenant_test", pipe, "mid_plugin", "core");
@@ -1965,8 +1971,12 @@ fn clear_transient_for_ops_clears_chunk_and_binding() {
     assert!(reg.get("tenant_test", pipe, "chunk:mid_stream").is_none());
     assert!(reg.get("tenant_test", pipe, "chunk:mid_plugin").is_none());
     // B 区同清
-    assert!(reg.resolve_step_of("tenant_test", pipe, "mid_stream").is_none());
-    assert!(reg.resolve_step_of("tenant_test", pipe, "mid_plugin").is_none());
+    assert!(reg
+        .resolve_step_of("tenant_test", pipe, "mid_stream")
+        .is_none());
+    assert!(reg
+        .resolve_step_of("tenant_test", pipe, "mid_plugin")
+        .is_none());
     // 非消息键不受影响（progress 中间态存活）
     assert!(reg.get("tenant_test", pipe, "progress:1").is_some());
     reg.clear_pipeline("tenant_test", pipe);
@@ -2006,7 +2016,10 @@ fn bind_step_message_registers_and_guard_clears_on_drop() {
 #[test]
 fn bind_step_message_none_when_identifiers_missing() {
     let executor = Fixture::build(&["a"]).executor;
-    assert!(executor.bind_step_message(&json!({}), "core").is_none(), "无 id 零操作");
+    assert!(
+        executor.bind_step_message(&json!({}), "core").is_none(),
+        "无 id 零操作"
+    );
     assert!(
         executor
             .bind_step_message(&json!({"pipeline_id": "p"}), "core")
@@ -2024,13 +2037,23 @@ fn step_binding_guard_nested_override_restores_outer() {
     let outer = executor.bind_step_message(&state, "outer").unwrap();
     // 嵌套 step 覆盖登记（composite 递归：内层 step 流式窗口接管归属）
     let inner = executor.bind_step_message(&state, "inner").unwrap();
-    assert_eq!(reg.resolve_step_of("tenant_test", pipe, "m1").as_deref(), Some("inner"));
+    assert_eq!(
+        reg.resolve_step_of("tenant_test", pipe, "m1").as_deref(),
+        Some("inner")
+    );
     // 内层守卫收尾：归属恢复为外层 step（流式窗口关闭，执行权回到外层剩余项）
     drop(inner);
-    assert_eq!(reg.resolve_step_of("tenant_test", pipe, "m1").as_deref(), Some("outer"), "内层守卫收尾须恢复外层绑定");
+    assert_eq!(
+        reg.resolve_step_of("tenant_test", pipe, "m1").as_deref(),
+        Some("outer"),
+        "内层守卫收尾须恢复外层绑定"
+    );
     // 外层守卫收尾：首次登记（无 prev）→ 直接清除
     drop(outer);
-    assert!(reg.resolve_step_of("tenant_test", pipe, "m1").is_none(), "外层守卫收尾清除绑定");
+    assert!(
+        reg.resolve_step_of("tenant_test", pipe, "m1").is_none(),
+        "外层守卫收尾清除绑定"
+    );
     reg.clear_pipeline("tenant_test", pipe);
 }
 
@@ -2111,8 +2134,7 @@ async fn named_step_service_reaches_plugin_via_step_method_config() {
         };
         m
     };
-    let index =
-        crate::compiler::build_step_service_index(&[composite]).expect("index build ok");
+    let index = crate::compiler::build_step_service_index(&[composite]).expect("index build ok");
     let config = PipelineConfig {
         name: "p".into(),
         loop_bodies: vec![LoopBody {
@@ -2145,7 +2167,8 @@ async fn named_step_service_reaches_plugin_via_step_method_config() {
         "具名步骤服务调用 config 必须携带 _step_method"
     );
     assert_eq!(
-        final_state["injected"], json!(true),
+        final_state["injected"],
+        json!(true),
         "具名步骤 state_updates 正常 merge"
     );
 }
@@ -2163,8 +2186,7 @@ async fn composite_direct_reference_fails_compilation() {
         };
         m
     };
-    let index =
-        crate::compiler::build_step_service_index(&[composite]).expect("index build ok");
+    let index = crate::compiler::build_step_service_index(&[composite]).expect("index build ok");
     let config = PipelineConfig {
         name: "p".into(),
         loop_bodies: vec![LoopBody {
@@ -2271,7 +2293,11 @@ async fn step_level_hook_receives_start_and_end_once() {
     assert_eq!(configs.len(), 2, "step 级钩子恰好分发两次");
     let events: Vec<&str> = configs
         .iter()
-        .filter_map(|c| c.get("_pipe_hook").and_then(|h| h.get("event")).and_then(|e| e.as_str()))
+        .filter_map(|c| {
+            c.get("_pipe_hook")
+                .and_then(|h| h.get("event"))
+                .and_then(|e| e.as_str())
+        })
         .collect();
     assert_eq!(events, vec!["step_start", "step_end"], "start/end 各一次");
     // payload 携带步骤复合键与事件名（最小上下文）
@@ -2299,7 +2325,10 @@ async fn body_level_hook_fires_for_every_step_in_body() {
     let compiled = compiled_with_hooks(
         &fixture,
         &config,
-        &[("main".to_string(), vec![step_hook_file("step_start", "watcher.on_step")])],
+        &[(
+            "main".to_string(),
+            vec![step_hook_file("step_start", "watcher.on_step")],
+        )],
         &[],
     );
     fixture
@@ -2313,7 +2342,11 @@ async fn body_level_hook_fires_for_every_step_in_body() {
         .iter()
         .filter_map(|c| c["_pipe_hook"]["payload"]["step_id"].as_str())
         .collect();
-    assert_eq!(step_ids, vec!["main:s1", "main:s2"], "payload 定位到具体 step");
+    assert_eq!(
+        step_ids,
+        vec!["main:s1", "main:s2"],
+        "payload 定位到具体 step"
+    );
 }
 
 /// terminate 决策：钩子返回 {"decision":"terminate"} → 引擎置 ended=true，
