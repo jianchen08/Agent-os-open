@@ -231,6 +231,9 @@ def stub_kernel(stub_llm):
             "AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE": "0",
             # debug 日志：停止链路（dispatch_stop 无 run 分支是 debug 级）可诊断
             "RUST_LOG": "info,agentos_api=debug,agentos_engine=debug",
+            # 隔离环境上限放宽：全矩阵连跑时前序场景容器销毁滞后（clear-all
+            # best-effort），默认 6/6 会让后续场景 bash 被隔离守卫拦截
+            "AO_MAX_ENVIRONMENTS": "12",
         }
     )
     with open(log_path, "w", encoding="utf-8") as log_fh:
