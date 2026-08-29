@@ -1000,7 +1000,6 @@ async fn emit_pending_inputs_changed_endpoint(
 const STATE_BASELINE_KEYS: &[&str] = &[
     "current_phase",
     "ended",
-    "status",
     "session_id",
     "thread_id",
     "pipeline_id",

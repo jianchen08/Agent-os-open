@@ -468,10 +468,9 @@ class TestServerAdapter:
         data = _run(server.execute({"pipeline_id": "p-1"}))
         assert data == {"tool_schemas": [{"function": {"name": "x"}}]}
 
-    def test_execute_tool_serializes_route_signal_and_skip(self, monkeypatch: Any) -> None:
-        """PluginResult 的 route_signal/skip_remaining 序列化进返回 dict。"""
+    def test_execute_tool_serializes_skip(self, monkeypatch: Any) -> None:
+        """PluginResult 的 state_updates/skip_remaining 序列化进返回 dict。"""
         from pipeline.plugin import PluginResult
-        from pipeline.types import RouteSignal
 
         server = _load_server()
 
@@ -479,18 +478,17 @@ class TestServerAdapter:
             async def execute(self, ctx: Any) -> PluginResult:
                 return PluginResult(
                     state_updates={"tool_schemas": []},
-                    route_signal=RouteSignal(route_type="wait", target="x", reason="r"),
                     skip_remaining=True,
                 )
 
         monkeypatch.setattr(server, "get_instance", lambda: _StubPlugin())
         data = _run(server.execute({"pipeline_id": "p-1"}))
         assert data["state_updates"] == {"tool_schemas": []}
-        assert data["route_signal"] == {"route_type": "wait", "target": "x", "reason": "r"}
+        assert "route_signal" not in data
         assert data["skip_remaining"] is True
 
-    def test_execute_tool_no_route_signal(self, monkeypatch: Any) -> None:
-        """PluginResult 无 route_signal/skip_remaining → 不写入对应键。"""
+    def test_execute_tool_plain_result(self, monkeypatch: Any) -> None:
+        """PluginResult 无 skip_remaining → 不写入对应键。"""
         from pipeline.plugin import PluginResult
 
         server = _load_server()

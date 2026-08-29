@@ -61,10 +61,6 @@ class _FakeInstance:
         return self._result
 
 
-def _make_route_signal() -> Any:
-    return SimpleNamespace(route_type="route", target="t", reason="r")
-
-
 async def test_execute_dict_result_wrapped_in_state_updates(monkeypatch: Any) -> None:
     """dict 返回 → 包成 {"state_updates": <dict>}（内核 PluginResult 反序列化形态）。"""
     server_mod = _load_server()
@@ -78,30 +74,26 @@ async def test_execute_dict_result_wrapped_in_state_updates(monkeypatch: Any) ->
     assert fake.calls[0].state["raw_result"] is None  # 默认字段存在
 
 
-async def test_execute_plugin_result_with_route_signal(monkeypatch: Any) -> None:
-    """非 dict 返回（PluginResult 形态）→ 透传 state_updates + route_signal。"""
+async def test_execute_plugin_result_passthrough(monkeypatch: Any) -> None:
+    """非 dict 返回（PluginResult 形态）→ 透传 state_updates，不产出路由键。"""
     server_mod = _load_server()
     result = SimpleNamespace(
         state_updates={"raw_result": "x"},
-        route_signal=_make_route_signal(),
         skip_remaining=False,
     )
     fake = _FakeInstance(result)
     monkeypatch.setattr(server_mod, "get_instance", lambda: fake)
 
     out = await server_mod.execute({"messages": []}, {})
-    assert out == {
-        "state_updates": {"raw_result": "x"},
-        "route_signal": {"route_type": "route", "target": "t", "reason": "r"},
-    }
+    assert out == {"state_updates": {"raw_result": "x"}}
+    assert "route_signal" not in out
 
 
 async def test_execute_plugin_result_with_skip_remaining(monkeypatch: Any) -> None:
-    """skip_remaining=True → 透传；无 route_signal → 不产出该键。"""
+    """skip_remaining=True → 透传。"""
     server_mod = _load_server()
     result = SimpleNamespace(
         state_updates={"raw_result": "y"},
-        route_signal=None,
         skip_remaining=True,
     )
     fake = _FakeInstance(result)

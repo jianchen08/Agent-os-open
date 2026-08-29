@@ -70,7 +70,7 @@ def _run(coro: Any) -> Any:
 def _completed_state(pipeline_id: str = "pipe-1") -> dict[str, Any]:
     """构造任务已完成的最小 state（触发经验沉淀）。"""
     return {
-        StateKeys.EXECUTION_STATUS: "completed",
+        "task.status": "completed",
         StateKeys.PIPELINE_ID: pipeline_id,
         "user_id": "user-1",
     }
@@ -149,13 +149,13 @@ class TestWithoutBackend:
 
 class TestTaskNotComplete:
     def test_execute_task_not_complete_skips(self) -> None:
-        """execution_status != completed → 空 OutputResult，不调 backend。"""
+        """task.status 未到 completed → 空 OutputResult，不调 backend。"""
         mod = _load_plugin_module()
         backend = FakeBackend()
         mod.set_memory_backend(backend)
         plugin = mod.ExperienceConsolidatorPlugin()
         state = {
-            StateKeys.EXECUTION_STATUS: "running",
+            "task.status": "running",
             StateKeys.PIPELINE_ID: "pipe-1",
         }
         ctx = mod.PluginContext(state=state)

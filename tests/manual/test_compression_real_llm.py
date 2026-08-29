@@ -121,7 +121,6 @@ async def main() -> None:
         "model_name": "deepseek-v4-flash",
         "core_type": "llm_call",
         "iteration": 300,
-        "execution_status": "running",
         "system_message": {"content": "你是一个智能助理"},
     }
 

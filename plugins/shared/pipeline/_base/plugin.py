@@ -11,7 +11,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from pipeline.types import RouteSignal
 
 if TYPE_CHECKING:
     from pipeline.plugin_types import PluginTypeSlot
@@ -154,24 +153,18 @@ class PluginResult:
 
     Attributes:
         state_updates: 需要合并到管道状态的更新字典
-        route_signal: 路由信号，仅输出插件有效
         skip_remaining: 是否跳过后续插件
         error: 执行过程中的异常
     """
 
     state_updates: dict[str, Any] = field(default_factory=dict)
-    route_signal: RouteSignal | None = None
     skip_remaining: bool = False
     error: Exception | None = None
 
 
 @dataclass
 class OutputResult(PluginResult):
-    """输出插件执行结果。
-
-    继承 PluginResult，专门用于输出插件返回。
-    route_signal 字段在输出插件中用于产生路由信号。
-    """
+    """输出插件执行结果（继承 PluginResult，仅类型语义区分）。"""
 
 
 def find_plugin_config(

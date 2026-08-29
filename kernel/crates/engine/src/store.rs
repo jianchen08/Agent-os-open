@@ -16,12 +16,19 @@
 /// `ended=true`（pipeline_track），若残留进下一轮 initial_state，引擎
 /// `execute_steps`/`execute_body` 见 ended 即短路——冷恢复（registry 丢失）
 /// 后 run 秒终 completed、LLM 一次请求都不发。
+///
+/// `should_stop` 同属 per-run 控制键（控制状态键契约 ADR 2026-08-30）：
+/// 插件终止请求在轮边界折算为 ended，残留会让冷恢复后的 run 立即终止。
+/// `router.stop_reason` 是终止署名键，与 should_stop 同写同消——署名跨
+/// run 残留会让恢复后的 run 按上一 run 的原因映射终态。
 pub const VOLATILE_RUN_KEYS: &[&str] = &[
     "message",
     "input",
     "message_id",
     "suspended",
     "ended",
+    "should_stop",
+    "router.stop_reason",
     "thinking_strength",
     "_assistant_id_assigned",
     "_pending_message_ops",
@@ -4395,6 +4402,33 @@ mod tests {
         let (step_no, state) = latest.unwrap();
         assert_eq!(step_no, 10, "应取 step_no 最大的 checkpoint");
         assert_eq!(state["step"], json!(10));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_strips_control_state_keys_including_should_stop() {
+        // 控制状态键契约：should_stop/ended/suspended/router.stop_reason 同属
+        // per-run 控制键（署名与终止请求同写同消），checkpoint 瘦身剥离——
+        // 冷恢复不得复活上一 run 的终止请求与署名。
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .save_checkpoint(
+                "pipe_ctrl",
+                "default",
+                3,
+                &json!({
+                    "task.status": "running",
+                    "should_stop": true,
+                    "ended": true,
+                    "suspended": true,
+                    "router.stop_reason": "budget_exhausted"
+                }),
+            )
+            .unwrap();
+        let (_, state) = store.load_latest_checkpoint("pipe_ctrl", "default").unwrap().unwrap();
+        for key in ["should_stop", "ended", "suspended", "router.stop_reason"] {
+            assert!(state.get(key).is_none(), "{key} 不得残留进 checkpoint");
+        }
+        assert_eq!(state["task.status"], json!("running"), "持久键不受瘦身影响");
     }
 
     // ── A7：槽位 blob 解码的「合法缺失 vs 损坏」区分 ──

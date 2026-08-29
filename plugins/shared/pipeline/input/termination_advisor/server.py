@@ -84,13 +84,6 @@ async def execute(state: dict, config: dict | None = None) -> dict:
         return result
 
     data: dict = {"state_updates": result.state_updates}
-    route_sig = getattr(result, "route_signal", None)
-    if route_sig:
-        data["route_signal"] = {
-            "route_type": route_sig.route_type,
-            "target": route_sig.target,
-            "reason": route_sig.reason,
-        }
     if getattr(result, "skip_remaining", False):
         data["skip_remaining"] = True
     return data

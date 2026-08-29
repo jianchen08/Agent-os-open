@@ -1,7 +1,7 @@
 """子任务守护 Output 插件。
 
 当 LLM 只输出纯文本（没有工具调用）且当前任务有 pending/running 子任务时，
-挂起管道（route_signal=wait），避免无意义地调用 LLM 浪费 token。
+写 suspended=true 挂起管道（引擎轮边界消费），避免无意义地调用 LLM 浪费 token。
 
 管道挂起后由子任务终态（task_completed 域事件 → triggers_ext 注入）或挂起恢复（resume_pipeline）唤醒。
 
@@ -17,7 +17,7 @@ from typing import Any
 
 from enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ACTIVE_TASK_STATUSES, RouteSignal
+from pipeline.types import ACTIVE_TASK_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class ChildTaskGuard(IOutputPlugin):
     """子任务守护插件。
 
     在 LLM 输出纯文本且存在未完成子任务时：
-    1. 返回 route_signal=wait 挂起管道（零 token 消耗）
+    1. 写 suspended=true 挂起管道（零 token 消耗）
 
     idle 计时器由引擎迭代计数表达，本插件不负责重置。
     优先级应高于 TaskReminder（30 < 35），确保有子任务时先被拦截。
@@ -125,11 +125,7 @@ class ChildTaskGuard(IOutputPlugin):
             active_ids,
         )
         return OutputResult(
-            state_updates={"submitted_task_ids": active_ids},
-            route_signal=RouteSignal(
-                route_type="wait",
-                reason=f"child_task_guard: active children during {core_type}",
-            ),
+            state_updates={"submitted_task_ids": active_ids, "suspended": True},
             skip_remaining=True,
         )
 

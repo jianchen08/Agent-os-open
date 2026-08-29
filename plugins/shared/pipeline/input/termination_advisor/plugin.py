@@ -110,19 +110,29 @@ class TerminationAdvisorPlugin(IInputPlugin):
         elapsed_total = float(stats.get("elapsed_total", 0.0) or 0.0)
 
         # ── 主动判断 ──
-        reasons: list[str] = []
+        # canonical = 终态署名词汇表键（router.stop_reason，引擎收尾映射终态，
+        # ADR 2026-08-30）；details = 人读原因（进 status.stop_reason）。
+        canonical: list[str] = []
+        details: list[str] = []
         if budget_exceeded or (has_budget_signal and usage_percent >= 100.0):
-            reasons.append("budget exhausted (cost_control)")
+            canonical.append("budget_exhausted")
+            details.append("budget exhausted (cost_control)")
         if stuck:
-            reasons.append(f"stalled: {stuck_reason}" if stuck_reason else "stalled (stuck_detector)")
+            canonical.append("stalled")
+            details.append(
+                f"stalled: {stuck_reason}" if stuck_reason else "stalled (stuck_detector)"
+            )
         if iteration >= self._max_iterations:
-            reasons.append(
+            canonical.append("iteration_cap")
+            details.append(
                 f"iteration cap reached: {iteration} >= {self._max_iterations}"
             )
         if elapsed_total >= self._max_elapsed_s:
-            reasons.append(
+            canonical.append("elapsed_cap")
+            details.append(
                 f"elapsed cap reached: {elapsed_total:.0f}s >= {self._max_elapsed_s:.0f}s"
             )
+        reasons = details
 
         # ── 收敛信号 ──
         convergence = "converging"
@@ -147,7 +157,7 @@ class TerminationAdvisorPlugin(IInputPlugin):
         }
 
         updates: dict[str, Any] = {"termination_advisor.status": status}
-        if reasons:
+        if canonical:
             logger.warning(
                 "[%s] 主动终止判断命中: %s (pipeline=%s)",
                 self.name,
@@ -155,6 +165,7 @@ class TerminationAdvisorPlugin(IInputPlugin):
                 state.get(StateKeys.PIPELINE_ID, ""),
             )
             updates[StateKeys.SHOULD_STOP] = True
+            updates["router.stop_reason"] = canonical[0]
 
         # 每轮推送状态到前端（指示器数据源；frontend 缺失静默跳过）
         await self._notify_status(ctx, status)

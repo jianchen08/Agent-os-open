@@ -1,7 +1,7 @@
 """经验沉淀输出插件（Step 5c 重建版）。
 
 在任务完成时，自动从 ChunkData（压缩块）提炼可检索的知识。
-触发条件：state 中 execution_status="completed"。
+触发条件：state 中 task.status="completed"（任务域终态裁决）。
 
 数据流：
   context_window_guard 产出 ChunkData → 本插件读取 → 提炼 Knowledge → 存储
@@ -55,7 +55,7 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
     """经验沉淀输出插件。
 
     在任务完成时，从 ChunkData（压缩块）提炼知识并存储。
-    触发条件：state 中 execution_status="completed"。
+    触发条件：state 中 task.status="completed"（任务域终态裁决）。
 
     压缩块经模块级 `_memory_backend`（IMemoryBackend）检索（memory_type="chunk"），
     知识以 memory_type="experience" 写入同一后端（source="consolidation"）。
@@ -98,9 +98,9 @@ class ExperienceConsolidatorPlugin(IOutputPlugin):
         Returns:
             包含沉淀结果的输出结果
         """
-        # 1. 检查任务完成状态
-        execution_status = ctx.state.get(StateKeys.EXECUTION_STATUS, "")
-        if execution_status != "completed":
+        # 1. 检查任务完成状态（任务域终态裁决：task_evaluate 评估通过才落
+        # completed——评估闸门语义，不与 run 收束键 ended 混用）
+        if ctx.state.get("task.status") != "completed":
             return OutputResult()
 
         # 2. 获取 pipeline_run_id

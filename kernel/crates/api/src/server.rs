@@ -853,11 +853,14 @@ async fn process_via_engine_inner(
 
 /// GAP-2：从 run 终态 state 派生域事件（run.* 终态 + 任务域派生）。
 ///
-/// run 终态域事件派生（内核运行域）：仅运行生命周期事件——
-/// - `failed=true` → `run.failed`
-/// - `suspended` 标志（RouteNext::Wait 落档）→ `run.suspended`
-/// - `router.stop_reason=user_requested` → `run.cancelled`（用户主动停止）
-/// - 否则 → `run.completed`
+/// run 终态域事件派生（内核运行域）：仅运行生命周期事件，与 runs 落库
+/// 共用同一终态映射单点（`RunStatus::from_control_state`，控制状态键契约
+/// ADR 2026-08-30——落库 Failed 的 run 不得对外广播 run.completed）——
+/// - `failed=true`（引擎执行失败）→ `run.failed`
+/// - 映射 Suspended → `run.suspended`
+/// - 映射 Cancelled → `run.cancelled`（用户停止/任务取消/删除署名）
+/// - 映射 Failed（署名：超线/评估失败/重复循环等）→ `run.failed`
+/// - 映射 Completed → `run.completed`
 ///
 /// 任务域事件（task_completed/task_failed）由 task_service 插件订阅本组
 /// run.* 事件后按任务域语义派生（ADR 2026-08-28 事件下沉：裁决词汇
@@ -883,23 +886,15 @@ fn derive_run_terminal_events(
         events.push(("run.failed", run_tags));
         return events;
     }
-    let suspended = final_state
-        .get("suspended")
-        .and_then(|s| s.as_bool())
-        .unwrap_or(false);
-    if suspended {
-        events.push(("run.suspended", run_tags));
-        return events;
-    }
-    let user_cancelled = final_state
-        .get("router.stop_reason")
-        .and_then(|s| s.as_str())
-        == Some("user_requested");
-    if user_cancelled {
-        events.push(("run.cancelled", run_tags));
-        return events;
-    }
-    events.push(("run.completed", run_tags));
+    let event = match agentos_core::types::RunStatus::from_control_state(final_state) {
+        agentos_core::types::RunStatus::Suspended => "run.suspended",
+        agentos_core::types::RunStatus::Cancelled => "run.cancelled",
+        agentos_core::types::RunStatus::Failed => "run.failed",
+        agentos_core::types::RunStatus::Completed | agentos_core::types::RunStatus::Running => {
+            "run.completed"
+        }
+    };
+    events.push((event, run_tags));
     events
 }
 

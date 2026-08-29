@@ -6,7 +6,7 @@
 
 迁入内容：
 - 枚举与常量：``TargetType`` / ``StateKeys`` / ``ErrorPolicy``
-- 数据类：``RouteSignal`` / ``PluginContext`` / ``PluginResult`` / ``OutputResult``
+- 数据类：``PluginContext`` / ``PluginResult`` / ``OutputResult``
 - 接口：``IPlugin`` / ``IInputPlugin`` / ``ICorePlugin`` / ``IOutputPlugin``
 - 工具函数：``create_initial_state`` / ``find_plugin_config``
 - 类型插槽：``PluginTypeSlot``
@@ -51,7 +51,6 @@ class StateKeys:
     RAW_TOOL_CALLS = "raw_tool_calls"
     RAW_THINKING = "raw_thinking"
     TOOL_RESULTS = "tool_results"
-    EXECUTION_STATUS = "execution_status"
     SHOULD_STOP = "should_stop"
     PIPELINE_ID = "pipeline_id"
     CONVERSATION_MODE = "conversation_mode"
@@ -67,30 +66,6 @@ class ErrorPolicy(Enum):
 
 
 # ── 数据类 ─────────────────────────────────────────────
-
-
-@dataclass
-class RouteSignal:
-    """路由信号数据类。
-
-    由插件产生，经输出路由表仲裁后决定管道下一步走向。
-
-    0.2 协议收敛（ROADMAP「路由方式收敛」）：仅支持 next_llm / next_tool /
-    end / wait 四种。delegate / fork 已从引擎移除——跨管道路由统一经专门服务
-    （任务系统 / 复盘系统）的工具调用显式发起，不产生路由信号；
-    decision 下沉为组合插件的 YAML 条件分支（route_check.condition）。
-
-    Attributes:
-        route_type: 路由类型，next_llm / next_tool / end / wait
-        target: 路由目标，可为字符串、字符串列表或 None
-        reason: 路由原因描述
-        payload: 附加数据
-    """
-
-    route_type: str
-    target: str | list[str] | None = None
-    reason: str = ""
-    payload: dict[str, Any] | None = None
 
 
 def create_initial_state(**overrides: Any) -> dict[str, Any]:
@@ -114,7 +89,6 @@ def create_initial_state(**overrides: Any) -> dict[str, Any]:
         StateKeys.RAW_TOOL_CALLS: [],
         StateKeys.RAW_THINKING: None,
         StateKeys.TOOL_RESULTS: [],
-        StateKeys.EXECUTION_STATUS: "pending",
         StateKeys.SHOULD_STOP: False,
         StateKeys.CONVERSATION_MODE: False,
     }
@@ -483,13 +457,11 @@ class PluginResult:
 
     Attributes:
         state_updates: 需要合并到管道状态的更新字典
-        route_signal: 路由信号，仅输出插件有效
         skip_remaining: 是否跳过后续插件
         error: 执行过程中的异常
     """
 
     state_updates: dict[str, Any] = field(default_factory=dict)
-    route_signal: RouteSignal | None = None
     skip_remaining: bool = False
     error: Exception | None = None
 
@@ -499,7 +471,6 @@ class OutputResult(PluginResult):
     """输出插件执行结果。
 
     继承 PluginResult，专门用于输出插件返回。
-    route_signal 字段在输出插件中用于产生路由信号。
     """
 
 
@@ -546,7 +517,6 @@ __all__ = [
     "PluginContext",
     "PluginResult",
     "PluginTypeSlot",
-    "RouteSignal",
     "StateKeys",
     "TargetType",
     "create_initial_state",

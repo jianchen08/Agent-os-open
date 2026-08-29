@@ -26,27 +26,9 @@ fn route_type_serde_uses_snake_case() {
 }
 
 #[test]
-fn route_signal_builder_and_skip_none() {
-    let sig = RouteSignal::new(RouteType::NextTool)
-        .with_target(vec!["file_read".into()])
-        .with_reason("需要读文件");
-    // target/reason 已设置；payload 为 None 应被 skip_serializing_if 省略
-    let json_str = serde_json::to_string(&sig).unwrap();
-    assert!(json_str.contains("\"target\""), "target 应序列化");
-    assert!(json_str.contains("file_read"));
-    assert!(!json_str.contains("\"payload\""), "payload=None 应省略");
-    // round-trip
-    let back: RouteSignal = serde_json::from_str(&json_str).unwrap();
-    assert_eq!(back.route_type, RouteType::NextTool);
-    assert_eq!(back.target.as_deref(), Some(&["file_read".to_string()][..]));
-    assert_eq!(back.reason, "需要读文件");
-}
-
-#[test]
 fn plugin_result_default_and_state_updates_round_trip() {
     let default = PluginResult::default();
     assert!(default.state_updates.is_empty());
-    assert!(default.route_signal.is_none());
     assert!(!default.skip_remaining);
     assert!(default.error.is_none());
 
@@ -54,7 +36,6 @@ fn plugin_result_default_and_state_updates_round_trip() {
     updates.insert("k".to_string(), json!(42));
     let result = PluginResult::default()
         .with_state_updates(updates)
-        .with_route_signal(RouteSignal::new(RouteType::End))
         .with_error(PluginError {
             message: "boom".into(),
             code: Some("E1".into()),
@@ -64,7 +45,6 @@ fn plugin_result_default_and_state_updates_round_trip() {
     let s = serde_json::to_string(&result).unwrap();
     let back: PluginResult = serde_json::from_str(&s).unwrap();
     assert_eq!(back.state_updates.get("k"), Some(&json!(42)));
-    assert_eq!(back.route_signal.unwrap().route_type, RouteType::End);
     let err = back.error.unwrap();
     assert_eq!(err.message, "boom");
     assert_eq!(err.code.as_deref(), Some("E1"));
@@ -122,6 +102,28 @@ fn run_status_lowercase_serde() {
     );
     let back: RunStatus = serde_json::from_str("\"failed\"").unwrap();
     assert_eq!(back, RunStatus::Failed);
+}
+
+#[test]
+fn run_status_from_control_state_mapping() {
+    // 终态映射单点（控制状态键契约 ADR 2026-08-30）：挂起优先；署名查表；
+    // 未署名兜底 Completed。落库与域事件派生共用，词汇在此断言冻结。
+    let cases = [
+        (json!({"suspended": true, "router.stop_reason": "budget_exhausted"}), RunStatus::Suspended),
+        (json!({"router.stop_reason": "user_requested"}), RunStatus::Cancelled),
+        (json!({"router.stop_reason": "task_cancelled"}), RunStatus::Cancelled),
+        (json!({"router.stop_reason": "task_deleted"}), RunStatus::Cancelled),
+        (json!({"router.stop_reason": "budget_exhausted"}), RunStatus::Failed),
+        (json!({"router.stop_reason": "timeout"}), RunStatus::Failed),
+        (json!({"router.stop_reason": "duplicate_loop"}), RunStatus::Failed),
+        (json!({"router.stop_reason": "task_failed"}), RunStatus::Failed),
+        (json!({"router.stop_reason": "task_completed"}), RunStatus::Completed),
+        (json!({"router.stop_reason": ""}), RunStatus::Completed),
+        (json!({}), RunStatus::Completed),
+    ];
+    for (state, expected) in cases {
+        assert_eq!(RunStatus::from_control_state(&state), expected, "state={state}");
+    }
 }
 
 #[test]

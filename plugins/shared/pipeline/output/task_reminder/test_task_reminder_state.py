@@ -76,7 +76,7 @@ class TestTaskIdFromState:
         assert result.state_updates == {"task.status": "running"}, (
             "pending 应推进为 running，实际 %r" % (result.state_updates,)
         )
-        assert result.route_signal is None, "推进不改变路由"
+        assert "ended" not in result.state_updates and "suspended" not in result.state_updates, "推进不改变路由"
 
     async def test_reads_dotted_task_id(self) -> None:
         """0.2 新契约：task_id 从扁平键 task.id 读取（不再读顶层 task_id）。"""
@@ -100,7 +100,6 @@ class TestTaskIdFromState:
         )
         result = await reminder.execute(ctx)
         assert not result.state_updates, "会话管道不应触发提醒"
-        assert result.route_signal is None
 
 
 class TestAgentLevelSkip:
@@ -110,7 +109,6 @@ class TestAgentLevelSkip:
         ctx = _ctx(_base_task_state(**{"agent_level": "L1"}))
         result = await reminder.execute(ctx)
         assert not result.state_updates, "L1 调度层不触发 reminder"
-        assert result.route_signal is None
 
     async def test_l2_executor_triggers_on_plain_text(self) -> None:
         """L2 执行者纯文本输出且无活跃子任务 → 注入提醒。"""
@@ -118,8 +116,7 @@ class TestAgentLevelSkip:
         ctx = _ctx(_base_task_state(**{"agent_level": "L2"}))
         result = await reminder.execute(ctx)
         assert result.state_updates, "L2 纯文本应注入提醒"
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "next_llm"
+        assert result.state_updates.get("_has_new_llm_input") is True
 
 
 class TestActiveChildrenFromState:
@@ -139,7 +136,6 @@ class TestActiveChildrenFromState:
         )
         result = await reminder.execute(ctx)
         assert not result.state_updates, "有活跃子任务不触发提醒"
-        assert result.route_signal is None
 
     async def test_no_submitted_task_ids_triggers_reminder(self) -> None:
         """无活跃子任务标记 → 正常提醒。"""

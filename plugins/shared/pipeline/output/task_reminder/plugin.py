@@ -9,7 +9,7 @@ from typing import Any
 
 from enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import ACTIVE_TASK_STATUSES, RouteSignal
+from pipeline.types import ACTIVE_TASK_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +250,7 @@ class TaskReminder(IOutputPlugin):
             tool_only_count,
             reminder_count + 1,
         )
+        # 回 LLM 由 _has_new_llm_input 状态键 + DSL 路由承载（控制状态键契约）
         return OutputResult(
             state_updates={
                 "messages": messages,
@@ -257,10 +258,6 @@ class TaskReminder(IOutputPlugin):
                 "eval_tool_only_count": 0,
                 "_has_new_llm_input": True,
             },
-            route_signal=RouteSignal(
-                route_type="next_llm",
-                reason=f"task_reminder: eval force reminder after {tool_only_count} no-text iters",
-            ),
         )
 
     def _resolve_text_output_gates(
@@ -287,11 +284,10 @@ class TaskReminder(IOutputPlugin):
                     task_id,
                 )
                 return OutputResult(
-                    state_updates={"evaluation.detected_result": detected},
-                    route_signal=RouteSignal(
-                        route_type="end",
-                        reason="task_reminder: evaluation_result JSON detected in output",
-                    ),
+                    state_updates={
+                        "evaluation.detected_result": detected,
+                        "ended": True,
+                    },
                 )
 
         # 次级证据放行（降级保留，ADR 2026-08-28 证据契约）：messages role=tool
@@ -399,6 +395,7 @@ class TaskReminder(IOutputPlugin):
             "TaskReminder[iter=%s]: tools failing repeatedly, forcing text closure round",
             iteration,
         )
+        # 回 LLM 经 _has_new_llm_input 状态键 + DSL 路由承载（控制状态键契约）
         return OutputResult(
             state_updates={
                 "messages": messages,
@@ -407,10 +404,6 @@ class TaskReminder(IOutputPlugin):
                 "raw_tool_calls": [],
                 "_has_new_llm_input": True,
             },
-            route_signal=RouteSignal(
-                route_type="next_llm",
-                reason="task_reminder: tools failing repeatedly, forcing text closure round",
-            ),
         )
 
     def _tool_fail_forced_end_result(
@@ -445,13 +438,8 @@ class TaskReminder(IOutputPlugin):
                 "TaskReminder[iter=%s]: no text closure after forced round -> end",
                 iteration,
             )
-        return OutputResult(
-            state_updates=state_updates,
-            route_signal=RouteSignal(
-                route_type="end",
-                reason="task_reminder: no text closure after forced round, ending",
-            ),
-        )
+        state_updates["ended"] = True
+        return OutputResult(state_updates=state_updates)
 
     @staticmethod
     def _has_pending_subtask_registration(state: dict[str, Any]) -> bool:
@@ -471,19 +459,19 @@ class TaskReminder(IOutputPlugin):
         iteration: Any,
         task_id: str,
     ) -> OutputResult:
-        """信号③当轮收束：本轮 end，等待子任务终态唤醒通知，不催评估。"""
+        """信号③当轮挂起：等待子任务终态唤醒通知，不催评估。
+
+        写 suspended=true（非 ended）——挂起不触发收尾体，父工作区/环境保持
+        供唤醒后的 run 续用；run 终态落 Suspended，与 child_task_guard 同语义。
+        """
         logger.info(
             "TaskReminder[iter=%s][task=%s]: pending subtask registration, "
-            "closing round to wait for wake-up",
+            "suspending to wait for wake-up",
             iteration,
             task_id,
         )
         return OutputResult(
-            state_updates={"_has_new_llm_input": False},
-            route_signal=RouteSignal(
-                route_type="end",
-                reason="task_reminder: pending subtask registration, waiting for wake-up",
-            ),
+            state_updates={"_has_new_llm_input": False, "suspended": True},
         )
 
     @staticmethod
@@ -533,13 +521,8 @@ class TaskReminder(IOutputPlugin):
             iteration,
             task_id,
         )
-        return OutputResult(
-            state_updates=state_updates,
-            route_signal=RouteSignal(
-                route_type="end",
-                reason="task_reminder: state completion evidence, closing round",
-            ),
-        )
+        state_updates["ended"] = True
+        return OutputResult(state_updates=state_updates)
 
     def _reminder_exhausted_result(
         self,
@@ -579,13 +562,8 @@ class TaskReminder(IOutputPlugin):
         # 清除续跑标志：提醒已耗尽，本轮必须结束（防残留标志把
         # 后续纯文本轮误路由回 LLM 造成死循环）
         state_updates["_has_new_llm_input"] = False
-        return OutputResult(
-            state_updates=state_updates,
-            route_signal=RouteSignal(
-                route_type="end",
-                reason=f"task_reminder: max_reminders reached ({reminder_count}/{self._max_reminders}), task may be stuck",
-            ),
-        )
+        state_updates["ended"] = True
+        return OutputResult(state_updates=state_updates)
 
     def _inject_reminder_result(
         self,
@@ -608,16 +586,13 @@ class TaskReminder(IOutputPlugin):
             reminder_count + 1,
             self._max_reminders,
         )
+        # 回 LLM 经 _has_new_llm_input 状态键 + DSL 路由承载（控制状态键契约）
         return OutputResult(
             state_updates={
                 "messages": messages,
                 "evaluate_reminder_count": reminder_count + 1,
                 "_has_new_llm_input": True,
             },
-            route_signal=RouteSignal(
-                route_type="next_llm",
-                reason=f"task_reminder: text_only output, reminder #{reminder_count + 1}",
-            ),
         )
 
     @staticmethod

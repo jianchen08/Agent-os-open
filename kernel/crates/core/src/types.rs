@@ -1,7 +1,8 @@
 //! 核心类型定义
 //!
-//! 对应 0.1 的 `pipeline/types.py`，0.2 将 RouteSignal 精简为 4 种
-//! （移除 Delegate / Fork / Decision，详见方案总纲 §3.5）。
+//! 对应 0.1 的 `pipeline/types.py`。路由经 DSL 条件表达（G10 单轨裁定），
+//! RouteSignal 信号对象已物理退役；控制流由插件写状态键、引擎轮边界消费
+//! （控制状态键契约 ADR 2026-08-30：RunStatus::from_control_state 终态映射单点）。
 //!
 //! ADR 修订新增（v2.0）：
 //! - SQLite 四表模型类型（ADR ④）：RunRecord / MessageRecord / TraceEntry / BlobRecord
@@ -40,43 +41,6 @@ pub enum RouteType {
     Wait,
 }
 
-/// 路由信号：由输出插件产生，经输出路由表仲裁后决定管道下一步走向。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteSignal {
-    /// 路由类型
-    pub route_type: RouteType,
-    /// 路由目标（工具名、LLM 标识等），可为 None
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target: Option<Vec<String>>,
-    /// 路由原因描述
-    #[serde(default)]
-    pub reason: String,
-    /// 附加数据
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<serde_json::Value>,
-}
-
-impl RouteSignal {
-    pub fn new(route_type: RouteType) -> Self {
-        Self {
-            route_type,
-            target: None,
-            reason: String::new(),
-            payload: None,
-        }
-    }
-
-    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
-        self.reason = reason.into();
-        self
-    }
-
-    pub fn with_target(mut self, target: Vec<String>) -> Self {
-        self.target = Some(target);
-        self
-    }
-}
-
 // ── 插件结果 ──────────────────────────────────────────────────
 
 /// 插件执行结果。
@@ -90,9 +54,6 @@ pub struct PluginResult {
     /// 需要合并到管道状态的更新（本质是 Patch，ADR ③）
     #[serde(default)]
     pub state_updates: HashMap<String, serde_json::Value>,
-    /// 路由信号（仅输出插件有效）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub route_signal: Option<RouteSignal>,
     /// 是否跳过后续插件
     #[serde(default)]
     pub skip_remaining: bool,
@@ -104,11 +65,6 @@ pub struct PluginResult {
 impl PluginResult {
     pub fn with_state_updates(mut self, updates: HashMap<String, serde_json::Value>) -> Self {
         self.state_updates = updates;
-        self
-    }
-
-    pub fn with_route_signal(mut self, signal: RouteSignal) -> Self {
-        self.route_signal = Some(signal);
         self
     }
 
@@ -473,6 +429,41 @@ pub enum RunStatus {
     Failed,
     /// 已取消（用户主动停止；非完成非失败，任务语义上未到达终态）
     Cancelled,
+}
+
+impl RunStatus {
+    /// run 终态映射（控制状态键契约 ADR 2026-08-30）：挂起优先；其余按
+    /// `router.stop_reason` 署名查表——谁写终止谁署名，引擎只查表不猜；
+    /// 未署名（含正常收束）→ Completed。引擎落库（update_run_status）与
+    /// 域事件派生（run.*）共用此单点，两处不得各持一套词汇。
+    pub fn from_control_state(final_state: &serde_json::Value) -> Self {
+        let truthy = |key: &str| {
+            final_state
+                .get(key)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        };
+        if truthy("suspended") {
+            return Self::Suspended;
+        }
+        match final_state.get("router.stop_reason").and_then(|v| v.as_str()) {
+            Some("user_requested") | Some("task_cancelled") | Some("task_deleted") => {
+                Self::Cancelled
+            }
+            Some(
+                "task_failed"
+                | "task_evaluate_failed"
+                | "max_iterations"
+                | "timeout"
+                | "budget_exhausted"
+                | "elapsed_cap"
+                | "iteration_cap"
+                | "stalled"
+                | "duplicate_loop",
+            ) => Self::Failed,
+            _ => Self::Completed,
+        }
+    }
 }
 
 /// runs 表记录——运行实例元数据。

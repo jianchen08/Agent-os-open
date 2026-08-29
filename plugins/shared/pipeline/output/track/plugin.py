@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
@@ -80,8 +81,10 @@ class TrackPlugin(IOutputPlugin):
             # 推送本轮单轮 token 用量到前端（输入框进度条实时显示）
             await self._try_notify_cost_update(ctx, usage)
 
-        # 2. 执行耗时追踪
-        elapsed = now - self._start_time
+        # 2. 执行耗时追踪（锚点 = 引擎每 run 覆盖写的 run_started_at；缺失时
+        # 回退实例构造时刻——sidecar 实例跨管道复用，回退值仅为旧内核/单测兜底，
+        # 不得作为生产语义：那会把宿主进程 uptime 当成 run 耗时）
+        elapsed = self._elapsed_since_run_start(ctx, now)
         if self._track_time:
             iteration = ctx.state.get(StateKeys.ITERATION, 0)
             stats = {
@@ -89,11 +92,25 @@ class TrackPlugin(IOutputPlugin):
                 "elapsed_total": round(elapsed, 3),
                 "elapsed_per_iteration": round(elapsed / max(iteration, 1), 3),
                 "core_type": ctx.state.get(StateKeys.CORE_TYPE, ""),
-                "execution_status": ctx.state.get(StateKeys.EXECUTION_STATUS, ""),
             }
             updates["track.execution_stats"] = stats
 
         return updates
+
+    def _elapsed_since_run_start(self, ctx: PluginContext, now_mono: float) -> float:
+        """本次 run 的耗时秒数（锚点 run_started_at，缺失回退实例构造时刻）。
+
+        锚点为墙钟（引擎写 RFC3339），与 time.time() 同域比较；解析失败或
+        键缺失按实例构造时刻兜底（monotonic 域，仅限同进程生存期内有效）。
+        """
+        raw = ctx.state.get("run_started_at")
+        if raw:
+            try:
+                started = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                return max(time.time() - started.timestamp(), 0.0)
+            except ValueError:
+                logger.warning("run_started_at 不可解析，耗时回退实例锚点 | raw=%s", raw)
+        return now_mono - self._start_time
 
     async def _try_report_metrics(self, ctx: PluginContext, usage: dict[str, Any]) -> None:
         """上报本轮 token 业务指标到内核聚合器（record_metric，G1）。

@@ -37,7 +37,6 @@ class StateKeys:
     RAW_TOOL_CALLS = "raw_tool_calls"
     RAW_THINKING = "raw_thinking"
     TOOL_RESULTS = "tool_results"
-    EXECUTION_STATUS = "execution_status"
     SHOULD_STOP = "should_stop"
     PIPELINE_ID = "pipeline_id"
     CONVERSATION_MODE = "conversation_mode"
@@ -56,25 +55,6 @@ class ErrorPolicy(Enum):
 # 未停摆）：pending / running / evaluating。任务域插件（task_reminder 活跃
 # 子任务判定、child_task_guard 挂起判定等）统一引用此常量，禁止各自散定义。
 ACTIVE_TASK_STATUSES = frozenset({"pending", "running", "evaluating"})
-
-
-@dataclass
-class RouteSignal:
-    """路由信号数据类。
-
-    由插件产生，经输出路由表仲裁后决定管道下一步走向。
-
-    Attributes:
-        route_type: 路由类型，支持 next_llm / next_tool / end / delegate / wait / decision
-        target: 路由目标，可为字符串、字符串列表或 None
-        reason: 路由原因描述
-        payload: 附加数据
-    """
-
-    route_type: str
-    target: str | list[str] | None = None
-    reason: str = ""
-    payload: dict[str, Any] | None = None
 
 
 def create_initial_state(**overrides: Any) -> dict[str, Any]:
@@ -98,7 +78,6 @@ def create_initial_state(**overrides: Any) -> dict[str, Any]:
         StateKeys.RAW_TOOL_CALLS: [],
         StateKeys.RAW_THINKING: None,
         StateKeys.TOOL_RESULTS: [],
-        StateKeys.EXECUTION_STATUS: "pending",
         StateKeys.SHOULD_STOP: False,
         StateKeys.CONVERSATION_MODE: False,
     }

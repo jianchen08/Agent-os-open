@@ -338,24 +338,19 @@ class TestServerExecute:
         assert out == {"state_updates": {"knowledge.context": "x"}}
         assert fake.calls[0].config == {}
 
-    def test_execute_plugin_result_with_route_signal(self, monkeypatch) -> None:
-        """PluginResult 带 route_signal → 展开为 route_signal 字典。"""
-        from agentos_plugin_sdk.pipeline_types import PluginResult, RouteSignal
+    def test_execute_plugin_result_plain(self, monkeypatch) -> None:
+        """PluginResult → 透传 state_updates，不产出路由键（RouteSignal 已退役）。"""
+        from agentos_plugin_sdk.pipeline_types import PluginResult
 
         mod, _ = self._server_with_result(
             monkeypatch,
             PluginResult(
                 state_updates={"knowledge.context": "k"},
-                route_signal=RouteSignal(route_type="next_llm", target="main", reason="有知识"),
             ),
         )
         out = _run(mod.execute({"current_query": "q"}))
         assert out["state_updates"] == {"knowledge.context": "k"}
-        assert out["route_signal"] == {
-            "route_type": "next_llm",
-            "target": "main",
-            "reason": "有知识",
-        }
+        assert "route_signal" not in out
         assert "skip_remaining" not in out
 
     def test_execute_plugin_result_skip_remaining(self, monkeypatch) -> None:
@@ -368,9 +363,3 @@ class TestServerExecute:
         out = _run(mod.execute({"current_query": "q"}))
         assert out == {"state_updates": {}, "skip_remaining": True}
 
-    def test_execute_plugin_result_plain(self, monkeypatch) -> None:
-        from agentos_plugin_sdk.pipeline_types import PluginResult
-
-        mod, _ = self._server_with_result(monkeypatch, PluginResult(state_updates={"a": 1}))
-        out = _run(mod.execute({"current_query": "q"}))
-        assert out == {"state_updates": {"a": 1}}

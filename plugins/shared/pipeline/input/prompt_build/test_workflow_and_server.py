@@ -471,10 +471,9 @@ class TestServerAdapter:
         content = data["state_updates"]["system_message"]["content"]
         assert "Please think and respond in English" in content
 
-    def test_execute_tool_serializes_route_signal_and_skip(self, monkeypatch) -> None:
-        """execute 工具把 PluginResult 的 route_signal/skip_remaining 序列化进 data。"""
+    def test_execute_tool_serializes_skip(self, monkeypatch) -> None:
+        """execute 工具把 PluginResult 的 state_updates/skip_remaining 序列化进 data。"""
         from pipeline.plugin import PluginResult
-        from pipeline.types import RouteSignal
 
         server = _load_server_module()
 
@@ -482,18 +481,13 @@ class TestServerAdapter:
             async def execute(self, ctx: Any) -> PluginResult:
                 return PluginResult(
                     state_updates={"system_message": {"role": "system", "content": "P"}},
-                    route_signal=RouteSignal(route_type="next_tool", target="bash", reason="need tool"),
                     skip_remaining=True,
                 )
 
         monkeypatch.setattr(server, "get_instance", lambda: StubPlugin())
         data = _run(server.execute({"context.system_prompt": "P"}))
         assert data["state_updates"]["system_message"]["content"] == "P"
-        assert data["route_signal"] == {
-            "route_type": "next_tool",
-            "target": "bash",
-            "reason": "need tool",
-        }
+        assert "route_signal" not in data
         assert data["skip_remaining"] is True
 
     def test_execute_tool_dict_result_passthrough(self, monkeypatch) -> None:

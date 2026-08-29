@@ -1,15 +1,14 @@
-"""停止检查 Output 插件 — 合并 stop_requested + stop_check + task_status。
+"""停止检查 Output 插件 — 迭代/超时超线检测 + 评估结果/任务终态收束。
 
-负责在管道循环的输出阶段统一管理所有"停止判断"逻辑：
-1. 用户请求停止（should_stop）
-2. 迭代上限/超时检测（stop_check_strategy）
-3. 任务被删除/取消（task_status）
-
-三个关注点共享 should_stop / iteration_count 等状态字段，
-统一在输出阶段一次判定并按优先级短路。
+负责在管道循环的输出阶段统一管理"停止判断"逻辑（控制状态键契约
+ADR 2026-08-30：终止经状态键 should_stop/ended 表达，引擎轮边界消费；
+终止方随写 router.stop_reason 署名，run 收尾按署名映射终态）：
+1. 迭代上限/超时检测 → should_stop=true + task.status=failed
+2. task_evaluate 工具结果检测 → ended=true
+3. 任务终态（取消/删除/完成/失败，外部写入）检测 → ended=true + task.status
 
 State 命名空间：
-    - router.stop_reason : 本插件写入的停止原因
+    - router.stop_reason : 终止署名键（引擎收尾映射终态的唯一依据）
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ import time
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import RouteSignal, StateKeys
+from pipeline.types import StateKeys
 
 # state 聚合读取器（server.py on_load 经 pipeline-state capability 注入）：
 # 任务实时状态的唯一可靠来源——外部终态写入（task_evaluate 经
@@ -42,17 +41,15 @@ logger = logging.getLogger(__name__)
 
 
 class StopCheckPlugin(IOutputPlugin):
-    """停止检查 Output 插件——用户停止 / 迭代上限 / 超时 / 评估终态 / 任务终态。
+    """停止检查 Output 插件——迭代上限 / 超时 / 评估终态 / 任务终态。
 
     检查维度（按优先级）：
-    1. 用户请求停止 → should_stop == True
-    2. 迭代上限检测 → iteration > max_iterations
-    4. 执行超时检测 → elapsed > max_duration
-    5. task_evaluate 工具结果检测 → completed/failed
-    6. 任务状态检测 → task 被删除/取消/完成/失败
+    1. 迭代上限检测 → iteration > max_iterations
+    2. 执行超时检测 → elapsed > max_duration
+    3. task_evaluate 工具结果检测 → completed/failed
+    4. 任务状态检测 → task 被删除/取消/完成/失败
 
-    优先级：1（系统级，最高优先级检查）
-    停止判断异常必须终止管道。
+    should_stop 的引擎侧消费（含用户停止）不经过本插件——插件只写状态键。
 
     Attributes:
         _config: 插件配置字典
@@ -102,10 +99,6 @@ class StopCheckPlugin(IOutputPlugin):
         """
         self._apply_runtime_config(ctx)
         result = await self._do_work(ctx)
-
-        if result.get("__route_signal__"):
-            signal = result.pop("__route_signal__")
-            return OutputResult(state_updates=result, route_signal=signal)
         return OutputResult(state_updates=result)
 
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
@@ -133,18 +126,7 @@ class StopCheckPlugin(IOutputPlugin):
             self._start_time,
         )
 
-        # 1. 用户请求停止
-        if ctx.state.get(StateKeys.SHOULD_STOP, False):
-            logger.info("[%s] Stop requested by user", self.name)
-            return {
-                "router.stop_reason": "user_requested",
-                "__route_signal__": RouteSignal(
-                    route_type="end",
-                    reason="User requested stop",
-                ),
-            }
-
-        # 2. 迭代上限检测（-1 表示无限制）
+        # 1. 迭代上限检测（-1 表示无限制）
         if self._max_iterations != -1 and iteration > self._max_iterations:
             logger.warning(
                 "[%s] Max iterations reached: %d > %d",
@@ -158,7 +140,7 @@ class StopCheckPlugin(IOutputPlugin):
                 reason=f"Max iterations reached: {iteration}",
             )
 
-        # 4. 执行超时检测（-1 表示无限制）
+        # 2. 执行超时检测（-1 表示无限制）
         if self._max_duration != -1 and elapsed > self._max_duration:
             logger.warning(
                 "[%s] Execution timeout: %.1f > %d seconds",
@@ -172,12 +154,12 @@ class StopCheckPlugin(IOutputPlugin):
                 reason=f"Execution timeout: {elapsed:.1f}s",
             )
 
-        # 5. task_evaluate 工具结果检测
+        # 3. task_evaluate 工具结果检测
         eval_stop = self._check_task_evaluate_result(ctx)
         if eval_stop:
             return eval_stop
 
-        # 6. 任务状态检测（state 缓存 + TaskService 实际查询）
+        # 4. 任务状态检测（state 缓存 + TaskService 实际查询）
         if self._check_task_status:
             task_status = await self._check_task_terminal_status(ctx)
             if task_status:
@@ -191,12 +173,14 @@ class StopCheckPlugin(IOutputPlugin):
                     "ended": True,
                     "task.status": task_status,
                     "router.stop_reason": f"task_{task_status}",
-                    "__route_signal__": RouteSignal(
-                        route_type="end",
-                        reason=f"Task {task_status}",
-                    ),
                 }
 
+        # 无触发轮：复位陈旧署名（router.stop_reason 跨 run 非易失，上一 run
+        # 的署名不得影响本 run 终态映射）。终止在途（should_stop/ended 已置位）
+        # 不得复位——同轮更早写方（termination_advisor/cost_control/task_reminder）
+        # 刚落的署名是 run 收尾映射终态的唯一依据，抹掉会把失败误标为完成。
+        if ctx.state.get(StateKeys.SHOULD_STOP) or ctx.state.get("ended"):
+            return {}
         return {"router.stop_reason": ""}
 
     def _task_failure_stop(self, ctx: PluginContext, stop_reason: str, reason: str) -> dict[str, Any]:
@@ -208,7 +192,7 @@ class StopCheckPlugin(IOutputPlugin):
         """
         updates: dict[str, Any] = {
             "router.stop_reason": stop_reason,
-            "__route_signal__": RouteSignal(route_type="end", reason=reason),
+            StateKeys.SHOULD_STOP: True,
         }
         if ctx.state.get("task.id"):
             updates["task.status"] = "failed"
@@ -252,10 +236,7 @@ class StopCheckPlugin(IOutputPlugin):
                 )
                 return {
                     "router.stop_reason": f"task_evaluate_{result}",
-                    "__route_signal__": RouteSignal(
-                        route_type="end",
-                        reason=message,
-                    ),
+                    "ended": True,
                 }
         return None
 

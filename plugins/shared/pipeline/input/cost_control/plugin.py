@@ -142,6 +142,7 @@ class CostControlPlugin(IInputPlugin):
                 usage_percent * 100,
             )
             updates[StateKeys.SHOULD_STOP] = True
+            updates["router.stop_reason"] = "budget_exhausted"
         elif usage_percent >= self._critical_threshold:
             logger.warning(
                 "[%s] Token usage critical: %d/%d (%.1f%%)",

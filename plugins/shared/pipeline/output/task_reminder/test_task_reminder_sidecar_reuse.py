@@ -77,15 +77,14 @@ class TestRuntimeConfigResetPerAgent:
 
         state_a = _base_state(max_reminders=3, evaluate_reminder_count=3)
         res_a = _run(plugin.execute(_ctx(state_a)))
-        assert res_a.route_signal is not None, "Agent A 提醒已达注入上限应 end"
-        assert res_a.route_signal.route_type == "end"
+        assert res_a.state_updates.get("ended") is True, "Agent A 提醒已达注入上限应 end"
 
         state_b = _base_state(evaluate_reminder_count=7)
         res_b = _run(plugin.execute(_ctx(state_b)))
-        assert res_b.route_signal is not None, "Agent B 未达默认上限应收束为 next_llm 续跑"
-        assert res_b.route_signal.route_type == "next_llm", (
-            f"Agent B 应继续注入提醒（残留上限会提前 end），实际 {res_b.route_signal.reason}"
+        assert res_b.state_updates.get("ended") is not True, (
+            f"Agent B 应继续注入提醒（残留上限会提前 end），实际 {res_b.state_updates}"
         )
+        assert res_b.state_updates.get("_has_new_llm_input") is True
         assert res_b.state_updates["evaluate_reminder_count"] == 8
 
     def test_evaluation_mode_does_not_leak_across_agents(self) -> None:

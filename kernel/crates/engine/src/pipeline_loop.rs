@@ -196,6 +196,13 @@ impl PipelineExecutor {
         if !key_present(&state, "ended") {
             set_key(&mut state, "ended", serde_json::Value::Bool(false));
         }
+        // 控制状态键契约（ADR 2026-08-30）：run 起始墙钟，track 等插件的耗时
+        // 锚点。每 run 覆盖写；挂起恢复后的新 run 从恢复点重算。
+        set_key(
+            &mut state,
+            "run_started_at",
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
         // 清空上一轮残留的插件错误收集（registry 热路径跨轮复用 state——
         // 不清理会让上一轮的 _plugin_errors 被本轮 stage_finalize 重复提取）。
         if key_present(&state, "_plugin_errors") {
@@ -385,6 +392,13 @@ impl PipelineExecutor {
                     .await;
                 }
                 open_round = Some((round_index, round_id, round_start));
+                // 控制状态键契约（ADR 2026-08-30）：插件只写 state——should_stop
+                // 在轮边界折算为 ended，复用既有收尾语义（run_on_error 收尾体
+                // 照跑）；终止原因由写方随 router.stop_reason 署名，run 收尾
+                // 按署名映射终态。
+                if truthy_flag(state, "should_stop") && !truthy_flag(state, "ended") {
+                    set_key(state, "ended", serde_json::Value::Bool(true));
+                }
                 if truthy_flag(state, "suspended") {
                     break;
                 }
@@ -1235,21 +1249,9 @@ impl PipelineExecutor {
         }
 
         // update_run_status 要求 current_branch 和 current_seq 同时 Some 或同时 None。
-        // 终态按结束方式裁决，不把用户停止/挂起覆写为 Completed：
-        // - state.suspended=true → Wait 挂起（等待外部事件），保持 Suspended；
-        // - router.stop_reason=user_requested → 用户主动停止，落 Cancelled；
-        // - 其余 → 正常结束，Completed。
-        let final_status = if truthy_flag(final_state, "suspended") {
-            agentos_core::types::RunStatus::Suspended
-        } else if final_state
-            .get("router.stop_reason")
-            .and_then(|v| v.as_str())
-            == Some("user_requested")
-        {
-            agentos_core::types::RunStatus::Cancelled
-        } else {
-            agentos_core::types::RunStatus::Completed
-        };
+        // 终态映射单点（控制状态键契约 ADR 2026-08-30）：RunStatus::from_control_state
+        // 与域事件派生（api derive_run_terminal_events）共用，两处不得各持一套词汇。
+        let final_status = agentos_core::types::RunStatus::from_control_state(final_state);
         if let Err(e) = self
             .store
             .update_run_status(&self.run_id, final_status.clone(), None, None)

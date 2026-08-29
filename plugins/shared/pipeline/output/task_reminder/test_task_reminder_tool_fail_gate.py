@@ -90,7 +90,7 @@ class TestStreakAccounting:
                 _ctx(_tool_call_state(tool_results=_failed_results()))
             )
         )
-        assert result.route_signal is None, "阈值内不得改变路由"
+        assert "ended" not in result.state_updates and "suspended" not in result.state_updates, "阈值内不得改变路由"
         assert result.state_updates.get("tool_fail_streak") == 1
 
     @pytest.mark.parametrize(
@@ -122,7 +122,6 @@ class TestStreakAccounting:
 
         result = asyncio.run(TaskReminder().execute(_ctx(_tool_call_state())))
         assert result.state_updates == {}
-        assert result.route_signal is None
 
     def test_success_resets_episode(self) -> None:
         """任一工具成功 → episode 结束：计数与注入标志复位。"""
@@ -180,7 +179,6 @@ class TestToolResultsShapeContract:
             )
         )
         assert result.state_updates == {}
-        assert result.route_signal is None
 
     @pytest.mark.parametrize(
         "bad_shape",
@@ -197,7 +195,6 @@ class TestToolResultsShapeContract:
             )
         )
         assert result.state_updates == {}
-        assert result.route_signal is None
 
 
 class TestForcedClosureRound:
@@ -215,8 +212,7 @@ class TestForcedClosureRound:
                 )
             )
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "next_llm"
+        assert result.state_updates.get("_has_new_llm_input") is True
         updates = result.state_updates
         # 续跑标志 + 清空本轮工具调用（DSL 工具路由优先，不清会被派去执行工具）
         assert updates.get("_has_new_llm_input") is True
@@ -239,8 +235,7 @@ class TestForcedClosureRound:
                 _ctx(_tool_call_state(tool_results=_failed_results()))
             )
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "next_llm"
+        assert result.state_updates.get("_has_new_llm_input") is True
         assert result.state_updates.get("tool_fail_gate_injected") is True
 
     def test_injection_clears_streak_for_post_closure_accounting(self) -> None:
@@ -268,8 +263,7 @@ class TestForcedClosureRound:
         state["tool_fail_streak"] = 2
         state["tool_results"] = _failed_results()
         result = asyncio.run(TaskReminder().execute(_ctx(state)))
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "next_llm"
+        assert result.state_updates.get("_has_new_llm_input") is True
         assert result.state_updates.get("tool_fail_gate_injected") is True
 
 
@@ -289,8 +283,7 @@ class TestPostClosureDefiance:
                 )
             )
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         updates = result.state_updates
         assert updates.get("_has_new_llm_input") is False
         assert updates.get("raw_tool_calls") == []
@@ -312,8 +305,7 @@ class TestPostClosureDefiance:
                 )
             )
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         assert result.state_updates.get("task.status") == "completed"
         assert _is_iso_datetime(result.state_updates.get("task.ended_at"))
 
@@ -326,8 +318,7 @@ class TestPostClosureDefiance:
         state["tool_fail_gate_injected"] = True
         state["tool_results"] = _failed_results()
         result = asyncio.run(TaskReminder().execute(_ctx(state)))
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         assert "task.status" not in result.state_updates
         assert "task.ended_at" not in result.state_updates
 
@@ -346,7 +337,6 @@ class TestGateDoesNotFightEvalMode:
         )
         result = asyncio.run(plugin.execute(_ctx(state)))
         assert result.state_updates == {"eval_tool_only_count": 2}
-        assert result.route_signal is None
 
 
 class TestTextRoundUntouched:

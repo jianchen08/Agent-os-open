@@ -102,7 +102,6 @@ class TestSkipBranches:
         result = asyncio.run(TaskReminder().execute(_ctx(_base_task_state(core_type="tool_call")))
         )
         assert result.state_updates == {}
-        assert result.route_signal is None
 
     def test_tool_calls_present_skipped(self) -> None:
         import asyncio
@@ -128,7 +127,6 @@ class TestSkipBranches:
             )
         )
         assert result.state_updates == {}
-        assert result.route_signal is None
 
     def test_last_assistant_message_text_counts_as_text(self) -> None:
         """评估模式下 raw_result 为空但最后 assistant 有文本 → 不进仅工具计数。"""
@@ -160,7 +158,6 @@ class TestActiveChildrenServiceFallback:
         result = asyncio.run(TaskReminder().execute(_ctx(self._state(), services={"task_service": svc}))
         )
         assert result.state_updates == {}
-        assert result.route_signal is None
 
     def test_completed_subtasks_do_not_block(self) -> None:
         import asyncio
@@ -210,7 +207,7 @@ class TestEvaluationModeToolOnly:
         result = asyncio.run(plugin.execute(_ctx(self._eval_state(eval_tool_only_count=2)))
         )
         assert result.state_updates == {"eval_tool_only_count": 3}
-        assert result.route_signal is None
+        assert "ended" not in result.state_updates and "suspended" not in result.state_updates
 
     def test_at_threshold_forces_reminder(self) -> None:
         import asyncio
@@ -218,8 +215,7 @@ class TestEvaluationModeToolOnly:
         plugin = TaskReminder(config={"evaluation_mode": True, "max_reminders": 10})
         result = asyncio.run(plugin.execute(_ctx(self._eval_state(eval_tool_only_count=5)))
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "next_llm"
+        assert result.state_updates.get("_has_new_llm_input") is True
         assert result.state_updates["evaluate_reminder_count"] == 1
         assert result.state_updates["eval_tool_only_count"] == 0
         # 强制提醒注入：置位续跑标志（autonomous.yaml post 路由据此回 LLM）
@@ -242,7 +238,7 @@ class TestEvaluationModeToolOnly:
             )
         )
         assert result.state_updates == {"eval_tool_only_count": 6}
-        assert result.route_signal is None
+        assert "ended" not in result.state_updates and "suspended" not in result.state_updates
 
 
 class TestEvaluationJsonDetection:
@@ -259,8 +255,7 @@ class TestEvaluationJsonDetection:
         )
         result = asyncio.run(plugin.execute(_ctx(_base_task_state(raw_result=raw)))
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         detected = result.state_updates["evaluation.detected_result"]
         assert detected["passed"] is True
         assert detected["score"] == 88.0
@@ -299,7 +294,6 @@ class TestTaskEvaluateEvidence:
         )
         # 评估证据放行：清除续跑标志（防残留标志把纯文本轮误路由回 LLM）
         assert result.state_updates == {"_has_new_llm_input": False}
-        assert result.route_signal is None
 
     def test_failed_evaluate_still_reminds(self) -> None:
         import asyncio
@@ -394,7 +388,7 @@ class TestEvaluateEvidencePrecision:
             ),
         )
         result = asyncio.run(plugin.execute(_ctx(state)))
-        assert result.route_signal is not None
+        assert result.state_updates.get("ended") is True
         assert result.state_updates.get("task.status") == "failed"
 
 
@@ -407,8 +401,7 @@ class TestMaxRemindersExhausted:
                 _ctx(_base_task_state(evaluate_reminder_count=2))
             )
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         assert result.state_updates["task.status"] == "failed"
         assert result.state_updates.get("task.ended_at")
         # 提醒耗尽：清除续跑标志（防残留标志把纯文本轮误路由回 LLM）
@@ -427,8 +420,7 @@ class TestMaxRemindersExhausted:
                 )
             )
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         assert "task.status" not in result.state_updates
         # 提醒耗尽：清除续跑标志（防残留标志把纯文本轮误路由回 LLM）
         assert result.state_updates["_has_new_llm_input"] is False

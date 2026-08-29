@@ -4,7 +4,7 @@
 覆盖行为面（既有 tests/test_state_read_unify.py 未触达的）：
 - 配置接口：name/priority 默认与覆盖、idle_remind_limit 默认与覆盖
 - execute 全流程：无活跃子任务放行 / 活跃但非 llm_call 放行 / 活跃 + raw_tool_calls
-  放行 / 活跃 + 纯文本 → route_signal=wait + submitted_task_ids + skip_remaining
+  放行 / 活跃 + 纯文本 → suspended=true + submitted_task_ids + skip_remaining
 - _get_active_children：
     - 主路径（state 聚合读）：pipeline_id 空时跳过主路径；scheduled/evaluating 计入
     - 回退路径（读面未注入 + task_service）：list_by_status 匹配 parent_pipeline_id；
@@ -81,7 +81,6 @@ def _load_plugin() -> Any:
 _PLUGIN_MOD = _load_plugin()
 ChildTaskGuard: Any = _PLUGIN_MOD.ChildTaskGuard
 OutputResult: Any = _PLUGIN_MOD.OutputResult
-RouteSignal: Any = _PLUGIN_MOD.RouteSignal
 TS: Any = _TASKS_TYPES.TaskStatus
 
 
@@ -178,7 +177,6 @@ class TestExecuteFlow:
         result = _run(guard.execute(ctx))
         assert isinstance(result, OutputResult)
         assert result.state_updates == {}
-        assert result.route_signal is None
         assert result.skip_remaining is False
 
     def test_active_but_non_llm_core_type_passes_through(self) -> None:
@@ -187,7 +185,6 @@ class TestExecuteFlow:
         ctx = _make_ctx(state={"pipeline_id": "p", "core_type": "tool_execute"})
         guard._get_active_children = _async_stub((True, ["c1"]))  # type: ignore[method-assign]
         result = _run(guard.execute(ctx))
-        assert result.route_signal is None
         assert result.state_updates == {}
 
     def test_active_with_raw_tool_calls_passes_through(self) -> None:
@@ -196,7 +193,6 @@ class TestExecuteFlow:
         ctx = _make_ctx(state={"pipeline_id": "p", "core_type": "llm_call", "raw_tool_calls": [{"x": 1}]})
         guard._get_active_children = _async_stub((True, ["c1"]))  # type: ignore[method-assign]
         result = _run(guard.execute(ctx))
-        assert result.route_signal is None
         assert result.state_updates == {}
 
     def test_active_plain_text_suspends(self) -> None:
@@ -205,19 +201,9 @@ class TestExecuteFlow:
         ctx = _make_ctx(state={"pipeline_id": "p", "core_type": "llm_call"})
         guard._get_active_children = _async_stub((True, ["c1", "c2"]))  # type: ignore[method-assign]
         result = _run(guard.execute(ctx))
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "wait"
-        assert "child_task_guard" in result.route_signal.reason  # 原因含守护名
+        assert result.state_updates.get("suspended") is True
         assert set(result.state_updates["submitted_task_ids"]) == {"c1", "c2"}
         assert result.skip_remaining is True
-
-    def test_suspend_reason_carries_core_type(self) -> None:
-        """wait 原因携带 core_type（性质断言：不同 core_type → 不同原因字符串）。"""
-        guard = ChildTaskGuard(config={})
-        ctx = _make_ctx(state={"pipeline_id": "p", "core_type": "llm_call"})
-        guard._get_active_children = _async_stub((True, ["c1"]))  # type: ignore[method-assign]
-        result = _run(guard.execute(ctx))
-        assert "llm_call" in result.route_signal.reason
 
     def test_uses_context_state_services(self) -> None:
         """execute 从 ctx 取 state 与 service（集成：真实 _get_active_children 主路径）。"""
@@ -227,8 +213,7 @@ class TestExecuteFlow:
         try:
             ctx = _make_ctx(state={"pipeline_id": "p", "core_type": "llm_call"})
             result = _run(guard.execute(ctx))
-            assert result.route_signal is not None
-            assert result.route_signal.route_type == "wait"
+            assert result.state_updates.get("suspended") is True
             assert result.state_updates["submitted_task_ids"] == ["c1"]
         finally:
             _clear_state_reader()
@@ -559,23 +544,21 @@ class TestServerAdapter:
         assert data == {"state_updates": {"submitted_task_ids": ["c1"]}}
 
     def test_execute_tool_serializes_result(self, monkeypatch: Any) -> None:
-        """OutputResult 的 route_signal/skip_remaining 序列化进返回 dict。"""
+        """OutputResult 的 state_updates/skip_remaining 序列化进返回 dict。"""
         server = _load_server()
         from pipeline.plugin import OutputResult as SdkOutputResult
-        from pipeline.types import RouteSignal as SdkRouteSignal
 
         class _StubPlugin:
             async def execute(self, ctx: Any) -> Any:
                 return SdkOutputResult(
                     state_updates={"submitted_task_ids": ["c1"]},
-                    route_signal=SdkRouteSignal(route_type="wait", reason="active children"),
                     skip_remaining=True,
                 )
 
         monkeypatch.setattr(server, "get_instance", lambda: _StubPlugin())
         data = _run(server.execute({"pipeline_id": "p"}))
         assert data["state_updates"] == {"submitted_task_ids": ["c1"]}
-        assert data["route_signal"] == {"route_type": "wait", "target": None, "reason": "active children"}
+        assert "route_signal" not in data
         assert data["skip_remaining"] is True
 
     def test_execute_tool_plain_result_no_optional_keys(self, monkeypatch: Any) -> None:

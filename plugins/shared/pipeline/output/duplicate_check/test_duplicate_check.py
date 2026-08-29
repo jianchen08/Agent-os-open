@@ -78,7 +78,6 @@ class TestSignatureCounting:
         plugin = DuplicateCheckPlugin()
         result = _execute(plugin, {"messages": []})
         assert result.state_updates == {}
-        assert result.route_signal is None
 
     def test_same_tool_args_increment_count_across_iterations(self) -> None:
         """同名同参连续两次 → 第二次计数 1（引擎侧合并 updates 的真实迭代口径）。"""
@@ -189,7 +188,6 @@ class TestExemptionGates:
         }
         result = _execute(plugin, state)
         assert result.state_updates == {}
-        assert result.route_signal is None
 
     def test_tool_execute_core_type_skips_output_detection(self) -> None:
         """core_type=tool_execute → 工具结果文本不参与输出重复判定。"""
@@ -201,7 +199,6 @@ class TestExemptionGates:
         }
         result = _execute(plugin, state)
         assert result.state_updates == {}
-        assert result.route_signal is None
 
     def test_evaluation_result_json_exempt_from_repetition(self) -> None:
         """含 evaluation_result + passed 的 JSON 输出不判重复（只更新哈希不计数）。"""
@@ -273,7 +270,7 @@ class TestEscalationLevels:
         """第一级：计数 1<3 → 软提示注入 messages，工具调用不动、不路由。"""
         plugin, state = self._dup_state()
         result = _execute(plugin, state)
-        assert result.route_signal is None
+        assert result.state_updates.get("router.duplicate_back_llm") is not True
         assert "raw_tool_calls" not in result.state_updates  # 调用保留
         msgs = state["messages"]
         assert msgs and msgs[-1]["role"] == "user"
@@ -297,9 +294,7 @@ class TestEscalationLevels:
         """第二级：计数≥阈值 → 清空调用、计数归零、拦截+1、路由回 LLM。"""
         plugin, state = self._dup_state(max_duplicate_calls=1)
         result = _execute(plugin, state)
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "next_llm"
-        assert "1" in result.route_signal.reason
+        assert result.state_updates.get("router.duplicate_back_llm") is True
         assert result.state_updates["raw_tool_calls"] == []
         assert result.state_updates["router.duplicate_count"] == 0
         assert result.state_updates["router.duplicate_intercepts"] == 1
@@ -326,8 +321,8 @@ class TestEscalationLevels:
         state["router.duplicate_intercepts"] = 1
         state["agent_level"] = "L1"
         result = _execute(plugin, state)
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("should_stop") is True
+        assert result.state_updates.get("router.stop_reason") == "duplicate_loop"
         assert state["messages"][-1]["role"] == "assistant"
         assert "重复" in state["messages"][-1]["content"]
 
@@ -341,7 +336,8 @@ class TestEscalationLevels:
         state["delegate_depth"] = 1
         n_msgs = len(state["messages"])
         result = _execute(plugin, state)
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("should_stop") is True
+        assert result.state_updates.get("router.stop_reason") == "duplicate_loop"
         assert len(state["messages"]) == n_msgs  # 无通知注入
 
     def test_repetitive_level2_clears_raw_result(self) -> None:
@@ -350,7 +346,7 @@ class TestEscalationLevels:
         state: dict[str, Any] = {"raw_result": "same", "messages": []}
         state.update(_execute(plugin, state).state_updates)
         result = _execute(plugin, state)
-        assert result.route_signal.route_type == "next_llm"
+        assert result.state_updates.get("router.duplicate_back_llm") is True
         assert result.state_updates["raw_result"] == ""
         assert result.state_updates["router.repetitive_count"] == 0
         assert result.state_updates["router.duplicate_intercepts"] == 1
@@ -360,7 +356,7 @@ class TestEscalationLevels:
         state: dict[str, Any] = {"raw_result": "same", "messages": []}
         state.update(_execute(plugin, state).state_updates)
         result = _execute(plugin, state)
-        assert result.route_signal is None
+        assert result.state_updates.get("router.duplicate_back_llm") is not True
         assert "raw_result" not in result.state_updates
         assert "相似内容" in state["messages"][-1]["content"]
 
@@ -373,8 +369,8 @@ class TestEscalationLevels:
         state.update(_execute(plugin, state).state_updates)
         state["router.duplicate_intercepts"] = 1
         result = _execute(plugin, state)
-        assert result.route_signal.route_type == "end"
-        assert "重复输出" in result.route_signal.reason  # 终止原因带重复维度描述
+        assert result.state_updates.get("should_stop") is True
+        assert result.state_updates.get("router.stop_reason") == "duplicate_loop"
 
     def test_hint_shows_tool_with_string_arguments(self) -> None:
         """str 参数（合法 JSON）同样参与签名；提示文本带工具名。"""
@@ -396,21 +392,20 @@ class TestEscalationLevels:
         plugin = DuplicateCheckPlugin()  # 默认 3/3/4
         calls = [{"name": "bash", "arguments": {"cmd": "ls"}}]
         state = _tool_state(calls)
-        seen_route_types: list[str] = []
+        seen_intercepts: list[bool] = []
         terminated = False
         for _ in range(24):
             # 模拟顽固 LLM：每轮重发同一工具调用（拦截清空后由引擎从模型重新获得）
             state["raw_tool_calls"] = calls
             result = _execute(plugin, state)
             state.update(result.state_updates)
-            if result.route_signal is not None:
-                seen_route_types.append(result.route_signal.route_type)
-                if result.route_signal.route_type == "end":
-                    terminated = True
-                    break
+            if result.state_updates.get("should_stop"):
+                terminated = True
+                break
+            if result.state_updates.get("router.duplicate_back_llm"):
+                seen_intercepts.append(True)
         assert terminated, "持续重复最终必须终止"
-        assert seen_route_types[0] == "next_llm"  # 先经历拦截
-        assert seen_route_types[-1] == "end"
+        assert seen_intercepts, "终止前必先经历二级拦截（回 LLM）"
         assert state["router.duplicate_intercepts"] >= 4  # 硬上限达成
 
 
@@ -466,8 +461,8 @@ class TestServerAdapter:
         srv.plugin.get_config = lambda: {"max_duplicate_calls": 1}  # type: ignore[method-assign]
         return srv
 
-    def test_execute_expands_route_signal(self) -> None:
-        """OutputResult → dict 展开 state_updates + route_signal 序列化。"""
+    def test_execute_intercepts_via_state_key(self) -> None:
+        """OutputResult → dict 展开 state_updates；二级拦截经状态键回路由。"""
         srv = self._server()
         state: dict[str, Any] = {
             "raw_tool_calls": [{"name": "bash", "arguments": {"cmd": "ls"}}],
@@ -476,8 +471,8 @@ class TestServerAdapter:
         resp1 = _run(srv.execute(state))  # 第一次写入签名
         state.update(resp1["state_updates"])  # 引擎口径：updates 并回 state
         resp = _run(srv.execute(state))  # 第二次 → 计数 1 ≥ max=1 → 拦截
-        assert resp["route_signal"]["route_type"] == "next_llm"
-        assert "reason" in resp["route_signal"]
+        assert resp["state_updates"]["router.duplicate_back_llm"] is True
+        assert "route_signal" not in resp
         assert resp["state_updates"]["raw_tool_calls"] == []
 
     def test_execute_dict_result_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:

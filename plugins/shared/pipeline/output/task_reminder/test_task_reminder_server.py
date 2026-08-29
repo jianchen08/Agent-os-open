@@ -6,7 +6,7 @@ PluginContext/OutputResult 信封（core 型 dict 与 PluginResult 两形态都�
 本文件覆盖：
 
 1. execute 工具入口：dict 返回（pending→running 推进走 core 分支）、
-   OutputResult 返回（route_signal/skip_remaining 展开）、config 覆盖传入；
+   OutputResult 返回（state_updates/skip_remaining 展开）、config 覆盖传入；
 2. on_load 预热单例、on_unload 清缓存；
 3. get_instance 单例缓存复用（同实例对象）。
 """
@@ -55,8 +55,8 @@ class TestExecuteToolEntry:
         )
         assert resp == {"state_updates": {"task.status": "running"}}
 
-    async def test_output_result_expands_route_signal(self) -> None:
-        """L2 纯文本无子任务 → OutputResult 展开 state_updates + route_signal。"""
+    async def test_output_result_expands_state_updates(self) -> None:
+        """L2 纯文本无子任务 → OutputResult 展开 state_updates（回 LLM 经状态键）。"""
         srv = _load_server()
         resp = await srv.execute(
             state={
@@ -71,8 +71,8 @@ class TestExecuteToolEntry:
             },
         )
         assert "evaluate_reminder_count" in resp["state_updates"]
-        assert resp["route_signal"]["route_type"] == "next_llm"
-        assert "task_reminder" in resp["route_signal"]["reason"]
+        assert resp["state_updates"].get("_has_new_llm_input") is True
+        assert "route_signal" not in resp
 
     async def test_skip_remaining_flag_propagates(self) -> None:
         """OutputResult.skip_remaining=True → 信封带 skip_remaining。"""
@@ -86,7 +86,7 @@ class TestExecuteToolEntry:
         finally:
             srv.get_instance = orig  # type: ignore[method-assign]
         assert resp["state_updates"] == {"k": "v"}
-        assert resp["route_signal"] == {"route_type": "success", "target": None, "reason": "r"}
+        assert "route_signal" not in resp
         assert resp["skip_remaining"] is True
 
     async def test_config_override_passed_to_plugin(self) -> None:
@@ -111,13 +111,10 @@ class TestExecuteToolEntry:
 
 
 class _FakeOutput:
-    """伪造 OutputResult 形状（route_signal 用 dict 形态验证展开）。"""
+    """伪造 OutputResult 形状（验证信封展开只携带状态与跳过标志）。"""
 
     def __init__(self) -> None:
-        from types import SimpleNamespace
-
         self.state_updates = {"k": "v"}
-        self.route_signal = SimpleNamespace(route_type="success", target=None, reason="r")
         self.skip_remaining = True
 
     async def execute(self, ctx: Any) -> Any:

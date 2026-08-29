@@ -150,6 +150,14 @@ loop_bodies:
             set:
               core_type: llm_call
               core_plugin: pipeline_llm_core
+          # duplicate_check 二级拦截（已剥离重复工具调用/清空重复输出并注入警告）
+          # → 回 LLM 看警告换路；自清该键防残留（控制状态键契约 ADR 2026-08-30）
+          - when: "router.duplicate_back_llm == True"
+            then: loop
+            set:
+              router.duplicate_back_llm: false
+              core_type: llm_call
+              core_plugin: pipeline_llm_core
           # 其余情况（纯文本回复 / 字段缺失）→ 结束，避免无限循环
           - then: end
 

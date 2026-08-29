@@ -105,7 +105,7 @@ class TestSignalOneToolCallsRouteToTools:
             tool_results=tool_results,
         )
         result = asyncio.run(reminder.execute(_ctx(state)))
-        assert result.route_signal is None, "阈值内信号①路由不变"
+        assert "ended" not in result.state_updates and "suspended" not in result.state_updates, "阈值内信号①路由不变"
         assert "messages" not in result.state_updates, "信号①轮不注入提醒"
         assert "evaluate_reminder_count" not in result.state_updates
         if expect_streak is None:
@@ -125,8 +125,7 @@ class TestSignalTwoCompletionEvidence:
         result = asyncio.run(
             reminder.execute(_ctx(_base_task_state(**{"task.status": "completed"})))
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         # 性质：收束轮零提醒注入（messages 不增、计数不动）
         assert "messages" not in result.state_updates
         assert "evaluate_reminder_count" not in result.state_updates
@@ -142,8 +141,7 @@ class TestSignalTwoCompletionEvidence:
         result = asyncio.run(
             reminder.execute(_ctx(_base_task_state(task_evaluation_completed=True)))
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         # 补落终态（与耗尽裁决写 failed 同通路对称）
         assert result.state_updates.get("task.status") == "completed"
         assert _is_iso_datetime(result.state_updates.get("task.ended_at"))
@@ -163,7 +161,7 @@ class TestSignalTwoCompletionEvidence:
                 )
             )
         )
-        assert result.route_signal is not None
+        assert result.state_updates.get("ended") is True
         assert "task.status" not in result.state_updates
         assert "task.ended_at" not in result.state_updates
 
@@ -202,8 +200,7 @@ class TestExhaustionNeverOverwritesCompletion:
         result = asyncio.run(
             reminder.execute(_ctx(_base_task_state(evaluate_reminder_count=2, **evidence)))
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         assert (result.state_updates.get("task.status") == "failed") is expect_failed
         if not expect_failed and "task.status" in result.state_updates:
             # 补落路径：写的一定是 completed，且带 ISO ended_at
@@ -218,8 +215,7 @@ class TestExhaustionNeverOverwritesCompletion:
         result = asyncio.run(
             reminder.execute(_ctx(_base_task_state(evaluate_reminder_count=2)))
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         assert result.state_updates.get("task.status") == "failed"
         assert _is_iso_datetime(result.state_updates.get("task.ended_at"))
 
@@ -245,9 +241,8 @@ class TestSignalThreePendingSubtaskRegistration:
                 )
             )
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
-        # 收束轮零提醒注入（不催评估）
+        assert result.state_updates.get("suspended") is True
+                # 收束轮零提醒注入（不催评估）
         assert "messages" not in result.state_updates
         assert "evaluate_reminder_count" not in result.state_updates
         assert result.state_updates.get("_has_new_llm_input") is False
@@ -281,8 +276,7 @@ class TestSignalThreePendingSubtaskRegistration:
             }
         )
         waiting = asyncio.run(reminder.execute(_ctx(mixed)))
-        assert waiting.route_signal is not None
-        assert waiting.route_signal.route_type == "end"
+        assert waiting.state_updates.get("suspended") is True
 
         all_cleared = _base_task_state(
             **{
@@ -310,8 +304,7 @@ class TestSignalThreePendingSubtaskRegistration:
                 )
             )
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         assert result.state_updates.get("task.status") == "completed"
 
 
@@ -339,7 +332,6 @@ class TestSecondaryEvidenceDemotedButKept:
             )
         )
         assert result.state_updates.get("_has_new_llm_input") is False
-        assert result.route_signal is None
 
     def test_secondary_evidence_with_completed_state_secondary_not_needed(self) -> None:
         """性质：主证据（②）优先于次级证据——两者同场时仍走②收束（补落幂等）。"""
@@ -356,6 +348,5 @@ class TestSecondaryEvidenceDemotedButKept:
                 )
             )
         )
-        assert result.route_signal is not None
-        assert result.route_signal.route_type == "end"
+        assert result.state_updates.get("ended") is True
         assert "task.status" not in result.state_updates

@@ -2060,6 +2060,34 @@ fn test_derive_run_terminal_events_user_cancelled() {
     assert_eq!(names, vec!["run.cancelled"]);
 }
 
+#[test]
+fn test_derive_run_terminal_events_signature_vocabulary() {
+    // 终态映射单点（控制状态键契约 ADR 2026-08-30）：落库与域事件共用
+    // RunStatus::from_control_state——署名 Failed 的 run 不得广播 run.completed，
+    // 任务取消/删除署名与用户停止同落 run.cancelled。
+    let cases: Vec<(&str, &str)> = vec![
+        ("budget_exhausted", "run.failed"),
+        ("elapsed_cap", "run.failed"),
+        ("task_failed", "run.failed"),
+        ("duplicate_loop", "run.failed"),
+        ("task_cancelled", "run.cancelled"),
+        ("task_deleted", "run.cancelled"),
+        ("task_completed", "run.completed"),
+        ("", "run.completed"),
+    ];
+    for (reason, expected) in cases {
+        let st = json!({
+            "pipeline_id": "p9",
+            "router.stop_reason": reason,
+        });
+        let names: Vec<&str> = derive_run_terminal_events(&st, false)
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(names, vec![expected], "stop_reason={reason} 应派生 {expected}");
+    }
+}
+
 #[tokio::test]
 async fn test_process_via_engine_emits_run_terminal_domain_events() {
     // wiring：真实引擎跑一轮 → 声明 domain_event hook 的启用插件收到

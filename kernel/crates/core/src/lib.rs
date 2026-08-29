@@ -7,9 +7,9 @@
 //!
 //! - [`traits`]: 插件抽象接口——PluginInvoker（透明分发 in_process / sidecar）、
 //!   CapabilityRegistry、PluginLoader、StorageBackend（ADR ③④）
-//! - [`types`]: 共享数据结构——RouteSignal（4 种）、PluginContext（含
-//!   ContentLoader ADR ⑦）、PluginResult、PluginError、TenantContext、
-//!   SQLite 四表模型（ADR ④）、多分支模型（ADR ⑤）
+//! - [`types`]: 共享数据结构——PluginContext（含 ContentLoader ADR ⑦）、
+//!   PluginResult、PluginError、TenantContext、SQLite 四表模型（ADR ④）、
+//!   多分支模型（ADR ⑤，RunStatus::from_control_state 终态映射单点）
 //!
 //! ## 设计决策
 //!

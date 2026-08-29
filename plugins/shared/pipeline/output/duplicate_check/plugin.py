@@ -8,12 +8,13 @@
 M6d 阶段：从旧代码 agents/decision/strategies/iteration/ 中的
 duplicate_call 和 repetitive_output 合并迁移。
 
-策略说明：
+策略说明（终止/回路由经控制状态键表达，引擎与 DSL 消费）：
     - 第一级（count < max）：注入软提示，工具调用仍执行
-    - 第二级（count >= max）：移除重复调用 + 注入强警告 + 路由回 LLM
-    - 第三级（拦截次数 >= hard_limit）：终止管道
+    - 第二级（count >= max）：移除重复调用 + 注入强警告 + 写
+      router.duplicate_back_llm=true（DSL 路由回 LLM）
+    - 第三级（拦截次数 >= hard_limit）：should_stop=true 终止管道
       - 主 agent：注入用户通知消息后终止
-      - 子 agent：直接终止（任务失败会通知上级）
+      - 子 agent：直接终止（署名 duplicate_loop，终态映射 Failed）
 
 State 命名空间：
     - router.duplicate_count : 工具调用重复计数（跨迭代）
@@ -31,7 +32,7 @@ import logging
 from typing import Any
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
-from pipeline.types import RouteSignal, StateKeys
+from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
@@ -111,10 +112,6 @@ class DuplicateCheckPlugin(IOutputPlugin):
             包含重复检查结果和路由信号的输出结果
         """
         result = await self._do_work(ctx)
-
-        if result.get("__route_signal__"):
-            signal = result.pop("__route_signal__")
-            return OutputResult(state_updates=result, route_signal=signal)
         return OutputResult(state_updates=result)
 
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
@@ -206,10 +203,8 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 tool_desc,
                 stripped,
             )
-            updates["__route_signal__"] = RouteSignal(
-                route_type="next_llm",
-                reason=f"Duplicate tool calls intercepted ({count}): {tool_desc}",
-            )
+            # 二级路由回 LLM 经状态键表达（DSL 路由 router.duplicate_back_llm 消费）
+            updates["router.duplicate_back_llm"] = True
             return updates
 
         # 第一级：早期重复 → 注入软提示，工具调用仍执行
@@ -258,10 +253,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 count,
                 intercepts + 1,
             )
-            updates["__route_signal__"] = RouteSignal(
-                route_type="next_llm",
-                reason=f"Repetitive output intercepted ({count})",
-            )
+            updates["router.duplicate_back_llm"] = True
             return updates
 
         # 第一级：早期重复 → 注入软提示
@@ -313,10 +305,8 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 desc,
             )
 
-        updates["__route_signal__"] = RouteSignal(
-            route_type="end",
-            reason=f"Duplicate intercepts exceeded hard limit ({intercepts}): {desc}",
-        )
+        updates[StateKeys.SHOULD_STOP] = True
+        updates["router.stop_reason"] = "duplicate_loop"
         return updates
 
     def _build_hint(self, count: int, tool_desc: str) -> str:

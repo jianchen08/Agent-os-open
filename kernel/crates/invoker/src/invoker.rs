@@ -1033,7 +1033,6 @@ impl PluginInvokerImpl {
                 })?;
             Ok(PluginResult {
                 state_updates,
-                route_signal: None,
                 skip_remaining: false,
                 error: None,
             })

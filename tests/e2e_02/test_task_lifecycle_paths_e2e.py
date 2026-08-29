@@ -710,8 +710,8 @@ class TestA1CompleteWithoutMetrics:
             f"序列 {seen}"
         )
         _assert_real_llm_ran(stub_kernel, matrix_token, task_id, state, "A1")
-        assert stub_llm.request_count("A1") >= 3, (
-            f"A1 至少 3 轮 LLM（bash→evaluate→收束），实际 {stub_llm.request_count('A1')}"
+        assert stub_llm.request_count("A1") >= 2, (
+            f"A1 至少 2 轮 LLM（bash→evaluate 当轮收束），实际 {stub_llm.request_count('A1')}"
         )
         # 工作空间/隔离实际执行证据（黑盒观察面）：ws_meta 拓扑 + 产出文件落位
         # + 隔离未拦截。state 行的 ws_meta.path 即任务工作区（工作空间根/{task_id}）。
@@ -1001,10 +1001,10 @@ class TestD1EvalFailBounded:
         assert "completed" not in seen, f"D1 评估不过不得假完成，序列 {seen}"
         _assert_real_llm_ran(stub_kernel, matrix_token, child_id, child_state, "D1 子任务")
         rounds = stub_llm.request_count("D1C")
-        # 有界性：重试耗尽后任务 failed，运行轮数有界（实测 ~21 轮——含
-        # stop_check 对外部终态写入感知滞后的空转尾巴，内核批次收口后应收紧到 ≤9）
-        assert 4 <= rounds <= 25, (
-            f"D1 反复评估应有界停止（重试耗尽 + 运行收尾，上限 25），实际 {rounds} 轮"
+        print(f"[matrix] D1 收束轮数: {rounds}")
+        # 有界性：bash + 3 次失败评估（重试耗尽 → stop_check 聚合检测当轮收束）
+        assert 4 <= rounds <= 9, (
+            f"D1 反复评估应有界停止（bash + 重试耗尽 ≈ 4 轮，上限 9），实际 {rounds} 轮"
         )
         # 耗尽计数落 state（跨调用累积的单一真值）
         retry = child_state.get("task.eval_retry_count")

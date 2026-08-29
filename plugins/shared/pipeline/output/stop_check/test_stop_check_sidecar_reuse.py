@@ -73,12 +73,12 @@ class TestRuntimeConfigResetPerAgent:
             "task.id": "",
         }
         res_a = _run(plugin.execute(_ctx(state_a)))
-        assert res_a.route_signal is not None, "Agent A 应命中自定义上限 3 终止"
-        assert res_a.route_signal.route_type == "end"
+        assert res_a.state_updates.get("should_stop") is True, "Agent A 应命中自定义上限 3 终止"
+        assert res_a.state_updates.get("router.stop_reason") == "max_iterations"
 
         state_b = {"pipeline_id": "pipe-b", "iteration": 5, "task.id": ""}
         res_b = _run(plugin.execute(_ctx(state_b)))
-        assert res_b.route_signal is None, (
+        assert res_b.state_updates.get("should_stop") is not True, (
             f"Agent B 无覆盖时应按默认上限放行，实际残留了 Agent A 的配置: "
             f"{res_b.state_updates}"
         )
@@ -92,14 +92,14 @@ class TestRuntimeConfigResetPerAgent:
 
         state_a = {"pipeline_id": "pipe-a", "iteration": 1, "timeout_seconds": 0, "task.id": ""}
         res_a = _run(plugin.execute(_ctx(state_a)))
-        assert res_a.route_signal is not None, "Agent A 注入阈值 0 应立即命中超时终止"
+        assert res_a.state_updates.get("should_stop") is True, "Agent A 注入阈值 0 应立即命中超时终止"
         assert res_a.state_updates.get("router.stop_reason") == "timeout"
 
         # Agent B 无覆盖 → 默认 600s；新管道重置计时起点后 elapsed 近零，
         # 残留的 0 阈值会让它同样立即误判超时。
         state_b = {"pipeline_id": "pipe-b", "iteration": 1, "task.id": ""}
         res_b = _run(plugin.execute(_ctx(state_b)))
-        assert res_b.route_signal is None, (
+        assert res_b.state_updates.get("should_stop") is not True, (
             "Agent B 无超时覆盖时不得继承 Agent A 注入的 timeout_seconds=0"
         )
 
@@ -123,8 +123,8 @@ class TestTaskStatusQueryChannel:
         plugin = mod.StopCheckPlugin(config={})
         state = {"pipeline_id": "p", "iteration": 6, "task.id": "p"}
         res = _run(plugin.execute(_ctx(state)))
-        assert res.route_signal is not None, "聚合读到 completed 终态应收束管道"
-        assert res.route_signal.route_type == "end"
+        assert res.state_updates.get("ended") is True, "聚合读到 completed 终态应收束管道"
+        assert res.state_updates.get("router.stop_reason") == "task_completed"
 
     def test_failed_status_ends_and_running_passes(self, monkeypatch: Any) -> None:
         """failed 同样当轮收束；running 非终态不拦截。"""
@@ -137,14 +137,14 @@ class TestTaskStatusQueryChannel:
 
         monkeypatch.setattr(mod, "_state_reader", failed_reader)
         res = _run(plugin.execute(_ctx(state)))
-        assert res.route_signal is not None and res.route_signal.route_type == "end"
+        assert res.state_updates.get("ended") is True
 
         async def running_reader():
             return [{"pipeline_id": "p", "task.id": "p", "task.status": "running"}]
 
         monkeypatch.setattr(mod, "_state_reader", running_reader)
         res = _run(plugin.execute(_ctx(state)))
-        assert res.route_signal is None, "running 非终态，不应收束"
+        assert res.state_updates.get("ended") is not True, "running 非终态，不应收束"
 
     def test_state_read_failure_warns_and_passes(
         self, monkeypatch: Any, caplog: pytest.LogCaptureFixture
@@ -162,7 +162,7 @@ class TestTaskStatusQueryChannel:
         with caplog.at_level("WARNING"):
             res = _run(plugin.execute(_ctx(state)))
 
-        assert res.route_signal is None, "读取失败不应伪造终态信号"
+        assert res.state_updates.get("ended") is not True, "读取失败不应伪造终态信号"
         warnings = [
             r for r in caplog.records
             if r.levelname == "WARNING" and "stop_check" in r.name
@@ -178,7 +178,7 @@ class TestLimitHitMarksTaskFailed:
         plugin = mod.StopCheckPlugin(config={})
         state = {"pipeline_id": "p", "iteration": 99, "max_iterations": 3, "task.id": "t1"}
         res = _run(plugin.execute(_ctx(state)))
-        assert res.route_signal is not None
+        assert res.state_updates.get("should_stop") is True
         assert res.state_updates.get("router.stop_reason") == "max_iterations"
         assert res.state_updates.get("task.status") == "failed"
 
