@@ -2,6 +2,10 @@
 
 从 service.py 拆分出的职责域，提供 TaskService 的所有资源清理方法。
 依赖 _TaskCrudMixin 和 _TaskStateMixin 的基础方法。
+
+跨进程能力（pipeline-executor 停/删管道、frontend.emit 前端通知）经
+set_cleanup_capabilities 注入（server.py on_load）；未注入时降级留痕，
+不阻断删除主流程。
 """
 
 from __future__ import annotations
@@ -14,28 +18,41 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 跨进程能力注入点（server.py on_load 装配）：
+# _pipeline_executor: async (params: dict) -> dict（pipeline-executor capability）；
+# _frontend_emitter: SDK FrontendEmitter（task_deleted 通知）。
+_pipeline_executor: Any = None
+_frontend_emitter: Any = None
+
+
+def set_cleanup_capabilities(executor: Any, emitter: Any) -> None:
+    global _pipeline_executor  # noqa: PLW0603
+    global _frontend_emitter  # noqa: PLW0603
+    _pipeline_executor = executor
+    _frontend_emitter = emitter
+
 
 class _TaskCleanupMixin:
     """任务资源清理 Mixin。"""
 
-    def _get_execution_record_storage(self):
-        """获取全局 ExecutionRecordStorage 实例。委托到公共接口。"""
-        from infrastructure.service_access import get_execution_record_storage  # noqa: PLC0415
+    async def _cancel_pipeline(self, task_id: str) -> None:
+        """取消任务关联的运行中管道（best-effort）。
 
-        return get_execution_record_storage()
+        0.2 停 = pipeline-executor.suspend_pipeline（task = pipeline，
+        task_id 即 pipeline_id）；executor 未注入或管道已终态时降级留痕。
+        """
 
-    def _cancel_pipeline(self, task_id: str) -> None:
-        """取消任务关联的运行中管道（best-effort）。"""
+        if _pipeline_executor is None:
+            logger.warning(
+                "[TaskService] 任务 %s 管道取消跳过：pipeline-executor 未注入", task_id
+            )
+            return
+
         try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-            provider = get_service_provider()
-            task_worker = provider.get("task_worker")
-            if task_worker is None:
-                return
-            cancelled = task_worker.cancel_pipeline(task_id)
-            if cancelled:
-                logger.info("[TaskService] 任务 %s 管道已取消", task_id)
+            await _pipeline_executor(
+                {"method": "suspend_pipeline", "params": {"pipeline_id": task_id}}
+            )
+            logger.info("[TaskService] 任务 %s 管道已挂起（取消）", task_id)
         except Exception as e:
             logger.warning(
                 "[TaskService] 任务 %s 管道取消失败 (non-fatal): %s",
@@ -43,12 +60,12 @@ class _TaskCleanupMixin:
                 e,
             )
 
-    def _cancel_pipeline_recursive(self, task_id: str) -> None:
+    async def _cancel_pipeline_recursive(self, task_id: str) -> None:
         """递归取消任务及其所有子任务的运行中管道。"""
-        self._cancel_pipeline(task_id)
+        await self._cancel_pipeline(task_id)
         subtasks = self.list_subtasks(task_id)
         for subtask in subtasks:
-            self._cancel_pipeline_recursive(subtask.id)
+            await self._cancel_pipeline_recursive(subtask.id)
 
     async def _cleanup_task_resources(
         self,
@@ -81,23 +98,9 @@ class _TaskCleanupMixin:
             cleanup_results["errors"].append(f"清理隔离环境失败: {str(e)}")
             logger.warning("[TaskService] 清理隔离环境失败: %s, 错误: %s", task_id, e)
 
-        lifecycle_cleaned = False
-        try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-            provider = get_service_provider()
-            lifecycle = provider.get("workspace_lifecycle_manager")
-            if lifecycle:
-                lifecycle.restore_ws_meta(task_id)
-                cleanup_result = lifecycle.cleanup_workspace(task_id)
-                if cleanup_result:
-                    lifecycle_cleaned = True
-                    cleanup_results["workspace_cleaned"] = True
-                    logger.info("[TaskService] 已通过 lifecycle 清理工作空间: %s", task_id)
-        except Exception as e:
-            logger.debug("[TaskService] lifecycle 清理不可用，回退到原有逻辑: %s", e)
-
-        if not lifecycle_cleaned and workspace:
+        # 工作空间清理直接走下方路径删除（workspace_lifecycle 插件语义由
+        # 管道输入步承载；此处纯文件面：目录/worktree + .git 分支安全删除）
+        if workspace:
             try:
                 from isolation.workspace import get_workspace_config_root  # noqa: PLC0415
 
@@ -128,7 +131,7 @@ class _TaskCleanupMixin:
                         cleanup_results["workspace_cleaned"] = True
                         logger.info("[TaskService] 已清理目录: %s", workspace_path)
                 else:
-                    logger.debug("[TaskService] 工作空间不存在: %s", workspace_path)
+                    logger.debug("[TaskService] 工作空间不存在: %s", workspace)
             except Exception as e:
                 cleanup_results["errors"].append(f"清理工作空间失败: {str(e)}")
                 logger.warning("[TaskService] 清理工作空间失败: %s, 错误: %s", workspace, e)
@@ -289,44 +292,19 @@ class _TaskCleanupMixin:
                 continue
 
             try:
-                lifecycle_cleaned = False
-                try:
-                    from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-                    provider = get_service_provider()
-                    lifecycle = provider.get("workspace_lifecycle_manager")
-                    if lifecycle:
-                        lifecycle.restore_ws_meta(subtask.id)
-                        lc_result = lifecycle.cleanup_workspace(subtask.id)
-                        if lc_result and (lc_result.get("worktree_removed") or lc_result.get("dir_removed")):
-                            lifecycle_cleaned = True
-                            result["cleaned_count"] += 1
-                            logger.info(
-                                "[TaskService] 已通过 lifecycle 清理子任务 %s 的 worktree: %s",
-                                subtask.id,
-                                workspace,
-                            )
-                except Exception as e:
-                    logger.debug(
-                        "[TaskService] lifecycle 清理子任务 %s 不可用: %s",
-                        subtask.id,
-                        e,
-                    )
-
-                if not lifecycle_cleaned:
-                    cleanup_result = await self._cleanup_task_resources(
-                        task_id=subtask.id,
-                        workspace=workspace,
-                    )
-                    if cleanup_result.get("workspace_cleaned"):
-                        result["cleaned_count"] += 1
+                cleanup_result = await self._cleanup_task_resources(
+                    task_id=subtask.id,
+                    workspace=workspace,
+                )
+                if cleanup_result.get("workspace_cleaned"):
+                    result["cleaned_count"] += 1
+                else:
+                    errors = cleanup_result.get("errors", [])
+                    if errors:
+                        result["error_count"] += 1
+                        result["errors"].extend([f"子任务 {subtask.id}: {e}" for e in errors])
                     else:
-                        errors = cleanup_result.get("errors", [])
-                        if errors:
-                            result["error_count"] += 1
-                            result["errors"].extend([f"子任务 {subtask.id}: {e}" for e in errors])
-                        else:
-                            result["skipped_count"] += 1
+                        result["skipped_count"] += 1
 
             except Exception as e:
                 result["error_count"] += 1
@@ -365,33 +343,33 @@ class _TaskCleanupMixin:
             descendants.append(subtask.id)
         return descendants
 
-    def _cleanup_pipeline_file(self, pipeline_run_id: str) -> bool:
-        """清理单个管道的执行记录文件（best-effort）。
+    async def _cleanup_pipeline_file(self, pipeline_run_id: str) -> bool:
+        """删除管道在内核的全部执行数据（best-effort）。
 
-        Args:
-            pipeline_run_id: 管道运行 ID
-
-        Returns:
-            是否成功清理了记录
+        0.2 执行数据 = runs/traces/messages/state/checkpoints（SQLite 表），
+        删除 = pipeline-executor.delete_pipeline（内核级联单一清单）；
+        0.1 的 ExecutionRecordStorage/JSON 文件已随 infrastructure 层退役。
         """
+
         if not pipeline_run_id:
             return False
-        try:
-            storage = self._get_execution_record_storage()
-            if storage is None:
-                return False
-            deleted = storage.delete_by_session(pipeline_run_id)
-            if deleted > 0:
-                logger.info(
-                    "[TaskService] 已清理管道执行文件: %s (%d 条记录)",
-                    pipeline_run_id,
-                    deleted,
-                )
-                return True
+
+        if _pipeline_executor is None:
+            logger.warning(
+                "[TaskService] 管道执行数据删除跳过：pipeline-executor 未注入 | pipeline=%s",
+                pipeline_run_id,
+            )
             return False
+
+        try:
+            await _pipeline_executor(
+                {"method": "delete_pipeline", "params": {"pipeline_id": pipeline_run_id}}
+            )
+            logger.info("[TaskService] 已删除管道执行数据: %s", pipeline_run_id)
+            return True
         except Exception as e:
             logger.warning(
-                "[TaskService] 清理管道执行文件失败 (non-fatal): %s, 错误: %s",
+                "[TaskService] 管道执行数据删除失败 (non-fatal): %s, 错误: %s",
                 pipeline_run_id,
                 e,
             )
@@ -445,7 +423,7 @@ class _TaskCleanupMixin:
                 continue
 
             # 1. 清理管道执行文件
-            if descendant_task.pipeline_run_id and self._cleanup_pipeline_file(descendant_task.pipeline_run_id):
+            if descendant_task.pipeline_run_id and await self._cleanup_pipeline_file(descendant_task.pipeline_run_id):
                 stats["pipeline_files_cleaned"] += 1
 
             # 2. 清理工作空间
@@ -514,7 +492,7 @@ class _TaskCleanupMixin:
         old_status = task.status.value
         task_title = task.title
 
-        self._cancel_pipeline_recursive(task_id)
+        await self._cancel_pipeline_recursive(task_id)
 
         cascade_stats: dict[str, Any] = {
             "subtasks_deleted": 0,
@@ -532,7 +510,7 @@ class _TaskCleanupMixin:
 
         pipeline_cleaned = False
         if task.pipeline_run_id:
-            pipeline_cleaned = self._cleanup_pipeline_file(task.pipeline_run_id)
+            pipeline_cleaned = await self._cleanup_pipeline_file(task.pipeline_run_id)
 
         workspace = task.metadata.get("workspace")
         cleanup_results = await self._cleanup_task_resources(
@@ -542,32 +520,20 @@ class _TaskCleanupMixin:
 
         await self.hard_delete(task_id)
 
-        # WebSocket 通知（按 user_id 精确路由，与 task_service 一致）
-        try:
-            from infrastructure.service_provider import get_service_provider  # noqa: PLC0415
-
-            _provider = get_service_provider()
-            _ws_notifier = _provider.get("ws_interaction_notifier")
-            if _ws_notifier:
-                _ws_payload = {
-                    "type": "task_deleted",
-                    "data": {"task_id": task_id, "title": task_title},
-                }
-                _user_id = (task.metadata.get("user_id") if task.metadata else "") or ""
-                if _user_id and hasattr(_ws_notifier, "send_to_user"):
-                    await _ws_notifier.send_to_user(_user_id, _ws_payload)
-                    logger.debug(
-                        "[TaskService] task_deleted 已通过 send_to_user 发送 | task_id=%s user=%s",
-                        task_id,
-                        _user_id[:12],
-                    )
-                else:
-                    logger.debug(
-                        "[TaskService] task metadata 缺 user_id，task_deleted 未推送 | task=%s",
-                        task_id[:12],
-                    )
-        except Exception as _ws_exc:
-            logger.warning("[TaskService] task_deleted 广播失败: %s", _ws_exc)
+        # 前端通知（frontend.emit fire-and-forget；未注入/发送失败静默——
+        # 观测出口不阻断删除主流程）。payload 携带 pipeline_id 路由键。
+        if _frontend_emitter is not None and _frontend_emitter.available:
+            user_id = (task.metadata.get("user_id") if task.metadata else "") or ""
+            await _frontend_emitter.emit(
+                "task_deleted",
+                {
+                    "pipeline_id": task_id,
+                    "thread_id": task_id,
+                    "task_id": task_id,
+                    "title": task_title,
+                    "user_id": user_id,
+                },
+            )
 
         return {
             "task_id": task_id,

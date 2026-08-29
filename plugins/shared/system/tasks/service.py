@@ -94,11 +94,11 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
         old_status: str,
         new_status: str,
     ) -> None:
-        """实际执行任务状态变更推送。
+        """状态变更直推路径（保持退役，空实现）。
 
-        0.2 推送改走 frontend.emit capability（ADR §3.5），SDK 暂未实现该 capability；
-        当前推送静默跳过，0.2 栈不再依赖 0.1 的 src/channels/websocket/
-        ws_interaction_notifier（task_11 P2-7）。待 SDK 实现后改用
-        ctx.frontend.emit(event="task_status_changed", scope=...) 恢复。
+        0.2 前端感知任务状态的现状契约：终态经 events.py 派生的
+        task_completed/task_failed 域事件（event-bus）；中间状态变更
+        （running/stopped 等）无前端通知，消费方以 state 聚合读面为准。
+        0.1 的 ws_interaction_notifier 已随 infrastructure 层退役。
         """
         return

@@ -69,6 +69,20 @@ async def _on_load(params: dict[str, Any]) -> None:
     # 传 None，由 TaskStorage 解析剩余两级：TASKS_STORAGE_DIR env → 多租户
     # 根 data/{tenant}/tasks（storage.py __init__ 契约）。
     _service = TaskService(data_dir=config.get("data_dir"))
+    # 清理链跨进程能力：pipeline-executor（删任务时停/删管道数据）+
+    # frontend（task_deleted 前端通知）。缺 capability 时降级留痕。
+    import _task_cleanup  # noqa: PLC0415
+    from agentos_plugin_sdk.capability import FrontendEmitter  # noqa: PLC0415
+
+    async def _exec(params: dict[str, Any]) -> dict[str, Any]:
+        handle = plugin.get_capability("pipeline-executor")
+        return await handle.call(params["method"], params["params"])
+
+    try:
+        _task_cleanup.set_cleanup_capabilities(_exec, FrontendEmitter.from_plugin(plugin))
+    except KeyError:
+        _task_cleanup.set_cleanup_capabilities(_exec, None)
+        logger.warning("[task_service] frontend capability 未注入，task_deleted 通知降级")
     # 容器任务实体遗留数据清除（幂等；project = 文件夹+登记 模型落地后，
     # 容器任务行/挂靠引用/container_* 隔离副本不再有写入方，此处只清不改）。
     from project_registry import purge_legacy_container_data  # noqa: PLC0415

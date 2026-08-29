@@ -9,15 +9,15 @@
 4. fail/cancel/complete：错误链追加、extra_meta 合并、级联（终态跳过）、
    complete_evaluation 通过/失败（summary/metrics/缺省 reason）；
 5. recover_to_completed / reset_to_pending；
-6. 清理：_cancel_pipeline（provider 缺 task_worker）、_is_child_of_container、
-   _cleanup_pipeline_file（空/无存储/删除成功/异常）、_cascade_cleanup_subtasks
-   （无后代/管道文件/工作空间/记录删除）、soft_delete_container 任务不存在、
+6. 清理：_cancel_pipeline（executor 未注入/挂起/异常）、_is_child_of_container、
+   _cleanup_pipeline_file（空/未注入/删除成功/异常）、_cascade_cleanup_subtasks
+   （无后代/管道数据/工作空间/记录删除）、soft_delete_container 任务不存在、
    hard_delete_task 任务不存在、_cleanup_task_resources 隔离管理器路径、
    _remove_worktree（gitdir 文件 + 分支删除 + 失败留痕）。
 
-外部依赖 mock 边界：isolation.manager / infrastructure.service_provider /
-pipeline.registry 为跨进程/第三方句柄，按外部依赖 mock；TaskService 内部
-方法用真实实现。
+外部依赖 mock 边界：isolation.manager / pipeline.registry /
+pipeline-executor·frontend 跨进程 capability（经 set_cleanup_capabilities
+注入点替身）为跨进程句柄，按外部依赖 mock；TaskService 内部方法用真实实现。
 """
 from __future__ import annotations
 
@@ -25,10 +25,22 @@ import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 pytestmark = pytest.mark.unit
+
+
+def _cleanup_mod() -> Any:
+    """取当前活跃的 _task_cleanup 模块对象。
+
+    模块隔离 fixture 每用例逐出/重灌 sys.modules，顶部 import 会绑死
+    旧对象；函数内 import 每次从 sys.modules 解析，与被测方法同源。
+    """
+    import _task_cleanup  # noqa: PLC0415
+
+    return _task_cleanup
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
 
@@ -89,6 +101,18 @@ def _install_fake_package(monkeypatch: pytest.MonkeyPatch, dotted: str, module: 
         if parent not in sys.modules:
             monkeypatch.setitem(sys.modules, parent, ModuleType(parent))
     monkeypatch.setitem(sys.modules, dotted, module)
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_capabilities():
+    """清理链跨进程能力注入点：用例结束还原为 None。"""
+    mod = _cleanup_mod()
+    prev_exec = mod._pipeline_executor
+    prev_emit = mod._frontend_emitter
+    yield
+    mod.set_cleanup_capabilities(None, None)
+    mod._pipeline_executor = prev_exec
+    mod._frontend_emitter = prev_emit
 
 
 class TestStateQueries:
@@ -815,90 +839,51 @@ class TestContextUsageInjection:
 
 
 class TestCleanupHelpers:
-    def test_cancel_pipeline_no_task_worker(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """provider 无 task_worker 时静默跳过。"""
-        class FakeProvider:
-            def get(self, key: str) -> Any:
-                return None
+    @pytest.mark.asyncio
+    async def test_cancel_pipeline_no_executor(self, svc: Any) -> None:
+        """executor 未注入 → 降级留痕（不抛异常）。"""
+        _cleanup_mod().set_cleanup_capabilities(None, None)
+        await svc._cancel_pipeline("t-1")  # 不抛异常即通过
 
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: FakeProvider()})(),
-        )
-        svc._cancel_pipeline("t-1")  # 不抛异常即通过
+    @pytest.mark.asyncio
+    async def test_cancel_pipeline_suspends(self, svc: Any) -> None:
+        executor = AsyncMock(return_value={})
+        _cleanup_mod().set_cleanup_capabilities(executor, None)
+        await svc._cancel_pipeline("t-2")
+        executor.assert_awaited_once()
+        call_params = executor.await_args.args[0]
+        assert call_params["method"] == "suspend_pipeline"
+        assert call_params["params"]["pipeline_id"] == "t-2"
 
-    def test_cancel_pipeline_cancels(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        cancelled: list[str] = []
+    @pytest.mark.asyncio
+    async def test_cancel_pipeline_exception_non_fatal(self, svc: Any) -> None:
+        executor = AsyncMock(side_effect=RuntimeError("kernel down"))
+        _cleanup_mod().set_cleanup_capabilities(executor, None)
+        await svc._cancel_pipeline("t-3")  # 不抛异常即通过
 
-        class FakeWorker:
-            def cancel_pipeline(self, task_id: str) -> bool:
-                cancelled.append(task_id)
-                return True
+    @pytest.mark.asyncio
+    async def test_cleanup_pipeline_file_empty(self, svc: Any) -> None:
+        assert await svc._cleanup_pipeline_file("") is False
 
-        class FakeProvider:
-            def get(self, key: str) -> Any:
-                return FakeWorker() if key == "task_worker" else None
+    @pytest.mark.asyncio
+    async def test_cleanup_pipeline_file_no_executor(self, svc: Any) -> None:
+        _cleanup_mod().set_cleanup_capabilities(None, None)
+        assert await svc._cleanup_pipeline_file("pipe-1") is False
 
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: FakeProvider()})(),
-        )
-        svc._cancel_pipeline("t-2")
-        assert cancelled == ["t-2"]
+    @pytest.mark.asyncio
+    async def test_cleanup_pipeline_file_deletes(self, svc: Any) -> None:
+        executor = AsyncMock(return_value={"deleted": ["pipeline_state"]})
+        _cleanup_mod().set_cleanup_capabilities(executor, None)
+        assert await svc._cleanup_pipeline_file("pipe-1") is True
+        call_params = executor.await_args.args[0]
+        assert call_params["method"] == "delete_pipeline"
+        assert call_params["params"]["pipeline_id"] == "pipe-1"
 
-    def test_cancel_pipeline_exception_non_fatal(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        def boom() -> Any:
-            raise RuntimeError("provider down")
-
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": boom})(),
-        )
-        svc._cancel_pipeline("t-3")  # 不抛异常即通过
-
-    def test_get_execution_record_storage_import(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """_get_execution_record_storage 委托 infrastructure.service_access。"""
-        sentinel = object()
-
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_access",
-            type("SA", (), {"get_execution_record_storage": lambda self: sentinel})(),
-        )
-        assert svc._get_execution_record_storage() is sentinel
-
-    def test_cleanup_pipeline_file_empty(self, svc: Any) -> None:
-        assert svc._cleanup_pipeline_file("") is False
-
-    def test_cleanup_pipeline_file_no_storage(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(svc, "_get_execution_record_storage", lambda: None)
-        assert svc._cleanup_pipeline_file("pipe-1") is False
-
-    def test_cleanup_pipeline_file_deletes(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        class FakeStorage:
-            def delete_by_session(self, session_id: str) -> int:
-                return 2
-
-        monkeypatch.setattr(svc, "_get_execution_record_storage", lambda: FakeStorage())
-        assert svc._cleanup_pipeline_file("pipe-1") is True
-
-    def test_cleanup_pipeline_file_zero_deleted(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        class FakeStorage:
-            def delete_by_session(self, session_id: str) -> int:
-                return 0
-
-        monkeypatch.setattr(svc, "_get_execution_record_storage", lambda: FakeStorage())
-        assert svc._cleanup_pipeline_file("pipe-1") is False
-
-    def test_cleanup_pipeline_file_exception(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        def boom() -> Any:
-            raise RuntimeError("storage down")
-
-        monkeypatch.setattr(svc, "_get_execution_record_storage", boom)
-        assert svc._cleanup_pipeline_file("pipe-1") is False
+    @pytest.mark.asyncio
+    async def test_cleanup_pipeline_file_exception(self, svc: Any) -> None:
+        executor = AsyncMock(side_effect=RuntimeError("storage down"))
+        _cleanup_mod().set_cleanup_capabilities(executor, None)
+        assert await svc._cleanup_pipeline_file("pipe-1") is False
 
     @pytest.mark.asyncio
     async def test_cascade_cleanup_no_descendants(self, svc: Any) -> None:
@@ -915,7 +900,7 @@ class TestCleanupHelpers:
         )
         await svc.bind_pipeline_run(child.id, "pipe-child")
 
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: True)
+        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=True))
         async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
             return {"workspace_cleaned": True, "errors": []}
 
@@ -933,7 +918,7 @@ class TestCleanupHelpers:
             title="子2", parent_task_id=parent.id,
             metadata={"workspace": "ws-same"},
         )
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: False)
+        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
         stats = await svc._cascade_cleanup_subtasks(
             parent.id, skip_workspace=True, container_workspace="ws-same",
         )
@@ -948,7 +933,7 @@ class TestCleanupHelpers:
             title="子3", parent_task_id=parent.id,
             metadata={"workspace": "ws-shared"},
         )
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: False)
+        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
         stats = await svc._cascade_cleanup_subtasks(
             parent.id, skip_workspace=False, container_workspace="ws-shared",
         )
@@ -962,7 +947,7 @@ class TestCleanupHelpers:
             title="子4", parent_task_id=parent.id,
             metadata={"workspace": "ws-child4"},
         )
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: False)
+        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
 
         async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
             raise RuntimeError("cleanup crash")
@@ -976,7 +961,7 @@ class TestCleanupHelpers:
     async def test_cascade_cleanup_hard_delete_exception(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         parent = await svc.create_task(title="父5")
         child = await svc.create_task(title="子5", parent_task_id=parent.id)
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: False)
+        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
 
         async def _boom(task_id: str) -> bool:
             raise RuntimeError("delete crash")
@@ -992,7 +977,7 @@ class TestCleanupHelpers:
         parent = await svc.create_task(title="父6")
         child = await svc.create_task(title="子6", parent_task_id=parent.id)
         svc.hard_delete_sync(child.id)  # 记录已删，但父的级联仍会枚举
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: False)
+        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
         stats = await svc._cascade_cleanup_subtasks(parent.id)
         assert stats["subtasks_deleted"] == 0
 
@@ -1005,96 +990,91 @@ class TestCleanupHelpers:
     async def test_hard_delete_task_with_subtasks_and_notifier(
         self, svc: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """硬删除带子任务：级联清理 + 管道文件 + ws_notifier 推送。"""
+        """硬删除带子任务：级联清理 + 管道数据 + task_deleted 前端通知。"""
         parent = await svc.create_task(
             title="父", metadata={"user_id": "u-1", "workspace": "ws-parent"},
         )
         child = await svc.create_task(title="子", parent_task_id=parent.id)
         await svc.bind_pipeline_run(parent.id, "pipe-parent")
 
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: True)
+        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=True))
 
         async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
             return {"workspace_cleaned": True, "errors": []}
 
         monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
-        sent: list[tuple[str, dict]] = []
+        emitted: list[tuple[str, dict]] = []
 
-        class FakeNotifier:
-            async def send_to_user(self, user_id: str, payload: dict) -> None:
-                sent.append((user_id, payload))
+        class FakeEmitter:
+            available = True
 
-        class FakeProvider:
-            def get(self, key: str) -> Any:
-                return FakeNotifier() if key == "ws_interaction_notifier" else None
+            async def emit(self, event: str, payload: dict) -> None:
+                emitted.append((event, payload))
 
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: FakeProvider()})(),
-        )
+        _cleanup_mod().set_cleanup_capabilities(None, FakeEmitter())
         result = await svc.hard_delete_task(parent.id)
         assert result["deleted"] is True
         assert result["pipeline_file_cleaned"] is True
         assert result["cascade_cleanup"]["subtasks_deleted"] == 1
-        assert sent == [("u-1", {"type": "task_deleted", "data": {"task_id": parent.id, "title": "父"}})]
+        assert len(emitted) == 1
+        event, payload = emitted[0]
+        assert event == "task_deleted"
+        assert payload["pipeline_id"] == parent.id
+        assert payload["task_id"] == parent.id
+        assert payload["title"] == "父"
+        assert payload["user_id"] == "u-1"
         assert svc.get_task(parent.id) is None
         assert svc.get_task(child.id) is None
 
     @pytest.mark.asyncio
-    async def test_hard_delete_task_notifier_missing_user_id(
+    async def test_hard_delete_task_emitter_unavailable(
         self, svc: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """metadata 缺 user_id → 不推送（不抛异常）。"""
-        task = await svc.create_task(title="无用户")
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: False)
+        """emitter 未注入 / unavailable → 跳过通知，删除照常完成。"""
+        task = await svc.create_task(title="无通道")
+        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
 
         async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
             return {"workspace_cleaned": True, "errors": []}
 
         monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
 
-        class FakeNotifier:
-            async def send_to_user(self, user_id: str, payload: dict) -> None:
+        class RefusingEmitter:
+            available = False
+
+            async def emit(self, event: str, payload: dict) -> None:
                 raise AssertionError("不应推送")
 
-        class FakeProvider:
-            def get(self, key: str) -> Any:
-                return FakeNotifier() if key == "ws_interaction_notifier" else None
+        for emitter in (None, RefusingEmitter()):
+            _cleanup_mod().set_cleanup_capabilities(None, emitter)
+            result = await svc.hard_delete_task(await self._fresh_task(svc))
+            assert result["deleted"] is True
 
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: FakeProvider()})(),
-        )
-        result = await svc.hard_delete_task(task.id)
-        assert result["deleted"] is True
+    @staticmethod
+    async def _fresh_task(svc: Any) -> str:
+        task = await svc.create_task(title="无通道续")
+        return task.id
 
     @pytest.mark.asyncio
-    async def test_hard_delete_task_notifier_exception_non_fatal(
+    async def test_hard_delete_task_emit_failure_non_fatal(
         self, svc: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """emit 链路异常不阻断删除（走真 FrontendEmitter 静默契约）。"""
+        from agentos_plugin_sdk.capability import FrontendEmitter
+
         task = await svc.create_task(title="通知炸", metadata={"user_id": "u-2"})
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", lambda pid: False)
+        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
 
         async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
             return {"workspace_cleaned": True, "errors": []}
 
         monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
 
-        class FakeNotifier:
-            async def send_to_user(self, user_id: str, payload: dict) -> None:
-                raise RuntimeError("notifier down")
+        class BoomHandle:
+            async def notify(self, method: str, params: dict) -> None:
+                raise RuntimeError("channel down")
 
-        class FakeProvider:
-            def get(self, key: str) -> Any:
-                return FakeNotifier() if key == "ws_interaction_notifier" else None
-
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: FakeProvider()})(),
-        )
+        _cleanup_mod().set_cleanup_capabilities(None, FrontendEmitter(BoomHandle()))
         result = await svc.hard_delete_task(task.id)
         assert result["deleted"] is True  # 通知失败不阻断删除
 
@@ -1129,37 +1109,8 @@ class TestCleanupHelpers:
         assert result["skipped_count"] == 1
 
     @pytest.mark.asyncio
-    async def test_cleanup_subtask_worktrees_lifecycle_path(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container", "workspace": "ws-container"},
-        )
-        child = await svc.create_task(
-            title="子", parent_task_id=container.id, metadata={"workspace": "ws-child"},
-        )
-
-        class FakeLifecycle:
-            def restore_ws_meta(self, task_id: str) -> None:
-                pass
-
-            def cleanup_workspace(self, task_id: str) -> dict:
-                return {"worktree_removed": True, "dir_removed": False}
-
-        class FakeProvider:
-            def get(self, key: str) -> Any:
-                return FakeLifecycle() if key == "workspace_lifecycle_manager" else None
-
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: FakeProvider()})(),
-        )
-        result = await svc._cleanup_subtask_worktrees(container, [child])
-        assert result["cleaned_count"] == 1
-        assert result["error_count"] == 0
-
-    @pytest.mark.asyncio
     async def test_cleanup_subtask_worktrees_fallback_path(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """lifecycle 不可用 → 回退 _cleanup_task_resources。"""
+        """子任务 worktree 清理走 _cleanup_task_resources 路径。"""
         container = await svc.create_task(
             title="容器", metadata={"task_scope": "container", "workspace": "ws-container"},
         )
@@ -1360,32 +1311,30 @@ class TestCleanupHelpers:
         assert result["workspace_cleaned"] is False
 
     @pytest.mark.asyncio
-    async def test_cleanup_task_resources_lifecycle_path(
-        self, svc: Any, monkeypatch: pytest.MonkeyPatch
+    async def test_cleanup_task_resources_direct_delete_path(
+        self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """lifecycle 可用 → 经 lifecycle 清理工作空间（不落回退目录删除）。"""
-        cleaned: list[str] = []
+        """工作空间清理直接走目录删除（无 lifecycle 中间层，不读 provider）。"""
+        ws_dir = tmp_path / "ws-direct"
+        ws_dir.mkdir()
 
-        class FakeLifecycle:
-            def restore_ws_meta(self, task_id: str) -> None:
-                pass
-
-            def cleanup_workspace(self, task_id: str) -> bool:
-                cleaned.append(task_id)
-                return True
-
-        class FakeProvider:
+        class RefusingProvider:
             def get(self, key: str) -> Any:
-                return FakeLifecycle() if key == "workspace_lifecycle_manager" else None
+                raise AssertionError("provider 路径已退役，不应被消费")
 
         _install_fake_package(
             monkeypatch,
             "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: FakeProvider()})(),
+            type("SP", (), {"get_service_provider": lambda self: RefusingProvider()})(),
         )
-        result = await svc._cleanup_task_resources("t-6", workspace="ws-any")
-        assert cleaned == ["t-6"]
+        _install_fake_package(
+            monkeypatch,
+            "isolation.workspace",
+            type("W", (), {"get_workspace_config_root": lambda self: str(tmp_path)})(),
+        )
+        result = await svc._cleanup_task_resources("t-6", workspace=str(ws_dir))
         assert result["workspace_cleaned"] is True
+        assert not ws_dir.exists()
 
     @pytest.mark.asyncio
     async def test_cleanup_task_resources_lifecycle_exception_falls_back(
