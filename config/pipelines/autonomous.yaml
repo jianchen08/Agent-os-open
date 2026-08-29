@@ -126,7 +126,6 @@ loop_bodies:
             then: loop
             set:
               conversation_mode: false
-              conversation_round: 0
               core_type: tool_execute
               core_plugin: pipeline_tool_core
           # 有非空工具调用 → 继续循环执行工具（明确判断非空列表，避免缺失字段误命中）

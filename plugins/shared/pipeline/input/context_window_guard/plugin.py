@@ -1976,7 +1976,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             # 压缩异常 → 终止管线
             ctx.state[StateKeys.ENDED] = True
             return PluginResult(
-                state_updates={StateKeys.ENDED: True, "input_route_target": "end"},
+                state_updates={StateKeys.ENDED: True},
                 skip_remaining=True,
             )
 
@@ -2051,7 +2051,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
         )
         ctx.state[StateKeys.ENDED] = True
         return PluginResult(
-            state_updates={StateKeys.ENDED: True, "input_route_target": "end"},
+            state_updates={StateKeys.ENDED: True},
             skip_remaining=True,
         )
 

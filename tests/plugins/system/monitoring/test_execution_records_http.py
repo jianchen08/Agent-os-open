@@ -146,7 +146,7 @@ _STATE_P2 = {
     "pipeline_id": "p2",
     "display_name": "会话乙",
     "message_count": 1,
-    "cost_control.total_tokens": 50,
+    "track.total_tokens": 50,
 }
 
 
@@ -492,13 +492,19 @@ def test_session_total_token_usage(server: Any, kr: Any) -> None:
     assert body["prompt_tokens"] == 0 and body["completion_tokens"] == 0
 
 
-def test_session_total_token_usage_cost_control_fallback(server: Any, kr: Any) -> None:
-    """track 缺失时回退 cost_control.total_tokens。"""
-    install_providers(kr, runs=[_RUN_P2], states=[_STATE_P2])
+def test_session_total_token_usage_only_track_source(server: Any, kr: Any) -> None:
+    """只有 track.total_tokens 计入；cost_control 侧历史键不再回退（已退役）。"""
+    state = {
+        "pipeline_id": "p2",
+        "display_name": "会话乙",
+        "message_count": 1,
+        "cost_control.total_tokens": 50,
+    }
+    install_providers(kr, runs=[_RUN_P2], states=[state])
     _, body = _decode_http(_call(
         server, path="/ext/monitoring/sessions/p2/total-token-usage", method="GET",
     ))
-    assert body["total_tokens"] == 50
+    assert body["total_tokens"] == 0
 
 
 def test_session_total_token_usage_missing_state(server: Any, kr: Any) -> None:

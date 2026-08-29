@@ -52,19 +52,9 @@ class StateKeys:
     RAW_THINKING = "raw_thinking"
     TOOL_RESULTS = "tool_results"
     EXECUTION_STATUS = "execution_status"
-    ERROR_ANALYSIS = "error_analysis"
-    LLM_ERROR_HISTORY = "llm_error_history"
-    TASK_COMPLETE = "task_complete"
     SHOULD_STOP = "should_stop"
-    APPROVAL_REQUIRED = "approval_required"
-    ROUTED_TO = "routed_to"
-    WAIT_FOR = "wait_for"
-    DELEGATION_RESULT = "delegation_result"
-    DELEGATION_SCORE = "delegation_score"
-    DELEGATION_ERROR = "delegation_error"
     PIPELINE_ID = "pipeline_id"
     CONVERSATION_MODE = "conversation_mode"
-    CONVERSATION_ROUND = "conversation_round"
     ATTACHMENTS = "attachments"
 
 
@@ -125,13 +115,8 @@ def create_initial_state(**overrides: Any) -> dict[str, Any]:
         StateKeys.RAW_THINKING: None,
         StateKeys.TOOL_RESULTS: [],
         StateKeys.EXECUTION_STATUS: "pending",
-        StateKeys.ERROR_ANALYSIS: None,
-        StateKeys.LLM_ERROR_HISTORY: [],
-        StateKeys.TASK_COMPLETE: False,
         StateKeys.SHOULD_STOP: False,
-        StateKeys.APPROVAL_REQUIRED: False,
         StateKeys.CONVERSATION_MODE: False,
-        StateKeys.CONVERSATION_ROUND: 0,
     }
     state.update(overrides)
     return state

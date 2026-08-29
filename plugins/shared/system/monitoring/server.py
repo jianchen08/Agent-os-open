@@ -427,8 +427,7 @@ async def _collect_state_tasks(status: str | None = None) -> list[dict[str, Any]
             "ended": row.get("ended"),
             "suspended": row.get("suspended"),
             "message_count": row.get("message_count"),
-            "total_tokens": row.get("track.total_tokens")
-            or row.get("cost_control.total_tokens"),
+            "total_tokens": row.get("track.total_tokens"),
             "run_status": row.get("router.stop_reason"),
             "source": "pipeline_state",
         })

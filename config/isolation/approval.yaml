@@ -5,7 +5,8 @@ enabled: true
 policies:
   # 高风险操作审批策略（由 security_check 插件统一判定）
   # security_check 通过 security_rules.yaml 配置规则，
-  # 匹配到 needs_approval 动作时设置 approval_required=True，管道挂起等待人工审批
+  # 匹配到 needs_approval 动作时经 human_interaction 服务弹审批，
+  # 工具阻塞等待人工裁决
   high_risk:
     enabled: true
     action: "NEEDS_APPROVAL"

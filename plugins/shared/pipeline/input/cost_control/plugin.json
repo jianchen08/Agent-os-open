@@ -19,7 +19,6 @@
   "permissions": {},
   "priority": 50,
   "export_fields": [
-    "cost_control.total_tokens",
     "cost_control.usage_percent"
   ]
 }

@@ -82,8 +82,6 @@ export const WS_SERVER_EVENTS = {
   CONNECTION_CONFIRMATION: 'connection_confirmation',
   /** 状态变更 */
   STATE_CHANGE: 'state_change',
-  /** 需要审批 */
-  APPROVAL_REQUIRED: 'approval_required',
   /** 任务完成 */
   TASK_COMPLETED: 'task_completed',
   /** 任务取消 */
@@ -367,14 +365,6 @@ export interface StateChangeEvent {
   thread_id: string
 }
 
-/** 审批请求事件 */
-export interface ApprovalRequiredEvent {
-  type: typeof WS_SERVER_EVENTS.APPROVAL_REQUIRED
-  approval_id: string
-  content: unknown
-  thread_id: string
-}
-
 /** 任务完成事件 */
 export interface TaskCompletedEvent {
   type: typeof WS_SERVER_EVENTS.TASK_COMPLETED
@@ -568,7 +558,6 @@ export interface IterationEndEvent {
 /** 服务端事件联合类型 */
 export type WebSocketServerEvent =
   | StateChangeEvent
-  | ApprovalRequiredEvent
   | TaskCompletedEvent
   | TaskCancelledEvent
   | ErrorEvent

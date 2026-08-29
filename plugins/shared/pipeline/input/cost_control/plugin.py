@@ -130,7 +130,6 @@ class CostControlPlugin(IInputPlugin):
         updates: dict[str, Any] = {
             "cost_control.budget": budget,
             "cost_control.usage_percent": round(usage_percent * 100, 1),
-            "cost_control.total_tokens": total_tokens,
             "cost_control.exceeded": exceeded,
         }
 
@@ -143,7 +142,6 @@ class CostControlPlugin(IInputPlugin):
                 usage_percent * 100,
             )
             updates[StateKeys.SHOULD_STOP] = True
-            updates["cost_control.stop_reason"] = f"Token budget exceeded: {total_tokens}/{budget}"
         elif usage_percent >= self._critical_threshold:
             logger.warning(
                 "[%s] Token usage critical: %d/%d (%.1f%%)",

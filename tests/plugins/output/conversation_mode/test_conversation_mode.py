@@ -124,7 +124,6 @@ class TestActivation:
             )
         )
         assert result.state_updates[StateKeys.CONVERSATION_MODE] is True
-        assert result.state_updates[StateKeys.CONVERSATION_ROUND] == 1
         # 挂起经 state.suspended 表达（route_signal 全链零消费，引擎见
         # suspended 即停轮；per-run 键下轮派发自动复位）
         assert result.state_updates["suspended"] is True
@@ -198,6 +197,6 @@ class TestActivation:
 # - when: "conversation_mode == True and raw_tool_calls == []" →
 #   then: loop + set: {suspended: true}（挂起等待用户下一条消息）
 # - when: "conversation_mode == True and raw_tool_calls != []" →
-#   then: loop + set: {conversation_mode: false, conversation_round: 0}
+#   then: loop + set: {conversation_mode: false}
 # 表达式在引擎 condition.rs 求值（缺失键 → None → False），语义与原插件
 # 布尔判断一致；DSL 求值属引擎车道（Rust 测试），此处不重复。

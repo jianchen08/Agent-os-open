@@ -18,8 +18,7 @@
   "permissions": {},
   "priority": 9,
   "persistent_fields": [
-    "termination_advisor.status",
-    "termination_advisor.stop_reason"
+    "termination_advisor.status"
   ],
   "host_group": "light",
   "export_fields": [

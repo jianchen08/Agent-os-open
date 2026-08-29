@@ -6,7 +6,7 @@ kernel_reads 组装，能力不可用时降级空结构（HTTP 200 空载荷，�
 领域语义与原实现逐项对齐（前端 executionRecords.ts / sessions.ts 直接消费：
 records/sessions/group-summary/tree/children/get/delete 形态不变）；
 sessions token-usage：总 Token 数取 pipeline-state 摘要行的
-track.total_tokens / cost_control.total_tokens，request_count 取该管道 run 次数
+track.total_tokens，request_count 取该管道 run 次数
 （内核 MessageRecord 不携带 token 计数字段，prompt/completion 无独立计数源）。
 
 [交互] 读面仅消费内核能力（service-registry→pipeline-runs.list/messages.list、
@@ -235,8 +235,8 @@ async def clear_all_records(authorization: str = "") -> dict[str, Any]:
 
 
 def _state_total_tokens(state: dict[str, Any]) -> int:
-    """从 state 摘要行取 Token 总量（track/cost_control 两个累计位，前者优先）。"""
-    value = state.get("track.total_tokens") or state.get("cost_control.total_tokens") or 0
+    """从 state 摘要行取 Token 总量（track 插件累计位）。"""
+    value = state.get("track.total_tokens") or 0
     try:
         return int(value)
     except (TypeError, ValueError):

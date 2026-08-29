@@ -95,7 +95,6 @@ class ConversationModeDetector(IOutputPlugin):
                 return OutputResult(
                     state_updates={
                         StateKeys.CONVERSATION_MODE: True,
-                        StateKeys.CONVERSATION_ROUND: 1,
                         # 挂起经 state.suspended 表达（route_signal 全链零消费，
                         # 引擎见 suspended 即停轮）；suspended 属 per-run 键，
                         # 下轮派发自动复位

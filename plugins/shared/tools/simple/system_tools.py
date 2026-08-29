@@ -332,7 +332,6 @@ def _render_skeleton(
             "router.stop_reason", "router.last_tool_call",
             "llm_usage", "track.total_tokens",
             "stuck_detected", "stuck_reason",
-            "task_complete",
         ):
             if k in state_changes:
                 key_fields[k] = state_changes[k]

@@ -75,7 +75,7 @@ def test_cost_control_exceeded_stops() -> None:
     plugin = _make_plugin()
     updates = asyncio.run(plugin._do_work(_ctx(_base_state(**{"cost_control.exceeded": True}))))
     assert updates["should_stop"] is True
-    assert "budget" in updates["termination_advisor.stop_reason"]
+    assert "budget" in _status(updates)["stop_reason"]
 
 
 def test_usage_percent_over_100_stops() -> None:
@@ -95,7 +95,7 @@ def test_stuck_detected_stops() -> None:
     assert updates["should_stop"] is True
     status = _status(updates)
     assert status["convergence"] == "stalled"
-    assert "tool repeat x3" in updates["termination_advisor.stop_reason"]
+    assert "tool repeat x3" in status["stop_reason"]
 
 
 def test_iteration_over_cap_stops() -> None:
@@ -104,7 +104,7 @@ def test_iteration_over_cap_stops() -> None:
         plugin._do_work(_ctx(_base_state(**{"track.execution_stats": {"iteration": 51, "elapsed_total": 45.0}})))
     )
     assert updates["should_stop"] is True
-    assert "iteration" in updates["termination_advisor.stop_reason"]
+    assert "iteration" in _status(updates)["stop_reason"]
 
 
 def test_config_overrides_max_iterations() -> None:
@@ -121,7 +121,7 @@ def test_elapsed_over_cap_stops() -> None:
         plugin._do_work(_ctx(_base_state(**{"track.execution_stats": {"iteration": 3, "elapsed_total": 3601.0}})))
     )
     assert updates["should_stop"] is True
-    assert "elapsed" in updates["termination_advisor.stop_reason"]
+    assert "elapsed" in _status(updates)["stop_reason"]
 
 
 def test_normal_round_no_stop_and_status_written() -> None:

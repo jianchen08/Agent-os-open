@@ -20,7 +20,6 @@
 State 命名空间：
     - termination_advisor.status : {convergence, should_stop, stop_reason,
       remaining_budget_percent, iteration, elapsed_s}
-    - termination_advisor.stop_reason : 命中时的终止原因（与 status 同源）
     - should_stop : 命中时置 True（路由终止标准信号）
 """
 
@@ -156,7 +155,6 @@ class TerminationAdvisorPlugin(IInputPlugin):
                 state.get(StateKeys.PIPELINE_ID, ""),
             )
             updates[StateKeys.SHOULD_STOP] = True
-            updates["termination_advisor.stop_reason"] = stop_reason
 
         # 每轮推送状态到前端（指示器数据源；frontend 缺失静默跳过）
         await self._notify_status(ctx, status)
