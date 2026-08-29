@@ -1187,7 +1187,7 @@ class TaskEvaluateTool(BuiltinTool):
         if retry_counts:
             metadata["eval_retry_count"] = retry_counts
         total_calls = row.get("task.eval_total_calls")
-        if total_calls not in (None, ""):
+        if total_calls is not None and total_calls != "":
             try:
                 metadata["eval_total_calls"] = int(total_calls)
             except (TypeError, ValueError):
