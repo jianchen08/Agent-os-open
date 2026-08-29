@@ -101,7 +101,10 @@ tool_ids:
 - task_manage
 - task_evaluate
 - human_interaction
-- design_review
+- browser_navigate
+- browser_take_screenshot
+- browser_click
+- browser_console_messages
 hard_constraints:
 - 遇到无法解决的问题必须报告
 - 必须先明确任务目标和验收标准再开始执行
