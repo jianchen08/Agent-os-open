@@ -266,6 +266,22 @@ class ParamInjectPlugin(IInputPlugin):
                 if project_root:
                     args["project_root"] = project_root
 
+            # 注入 parent_ws_meta：提交者（父）管道的工作空间坐标（task_submit
+            # 专用）。子任务出生契约经 lineage.parent_ws_meta 携带它，使
+            # workspace_lifecycle 的共享决策不依赖发起瞬间的聚合读可见性
+            # （父管道运行中 registry 行尚未建立，曾致同会话子任务工作空间
+            # 漂移）。覆盖式注入（父无工作空间时以 None 覆盖）防 LLM 伪造。
+            if _tool_name == "task_submit":
+                parent_ws_meta = ctx.state.get("ws_meta")
+                if isinstance(parent_ws_meta, str):
+                    try:
+                        parent_ws_meta = json.loads(parent_ws_meta)
+                    except ValueError:
+                        parent_ws_meta = None
+                if not isinstance(parent_ws_meta, dict) or not parent_ws_meta.get("path"):
+                    parent_ws_meta = None
+                args["parent_ws_meta"] = parent_ws_meta
+
             # 注入 parent_agent_level：从 state 中获取当前 Agent 层级
             # 供 task_submit / task_manage 等工具判断权限和设置子任务层级
             if "parent_agent_level" not in args:

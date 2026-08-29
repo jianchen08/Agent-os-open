@@ -131,6 +131,56 @@ class TestSubtask:
         assert meta["path"] == str(parent_ws)
         assert meta["project_root"] == str(parent_ws)
 
+    def test_inherited_parent_ws_meta_preferred(self, tmp_path: Path) -> None:
+        """出生契约继承（lineage.parent_ws_meta）优先：聚合查找缺席也能共享父空间。
+
+        父管道运行中 registry 行尚未建立、聚合读不可见（时序窗口）曾致同会话
+        子任务工作空间漂移——出生契约坐标是发起时写全的权威快照。
+        """
+        inherited_ws = tmp_path / "session_ws"
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", tasks={}, meta_store={})
+        meta = m._start_subtask(
+            "sub1",
+            "default_root_dir",
+            {
+                "workspace_mode": "",
+                "_inherited_parent_ws_meta": {
+                    "mode": "plain",
+                    "path": str(inherited_ws),
+                    "session_id": "thread-abc",
+                },
+            },
+        )
+        assert meta["mode"] == "shared"
+        assert meta["path"] == str(inherited_ws)
+        assert meta["project_root"] == ""
+        assert meta["parent_workspace"] == "default_root_dir"
+        assert m._ws_meta_store["sub1"]["path"] == str(inherited_ws)
+
+    def test_inherited_parent_ws_meta_carries_project_root(self, tmp_path: Path) -> None:
+        """继承坐标带 project_root（worktree 父任务）→ 透传给子任务 ws_meta。"""
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", tasks={}, meta_store={})
+        meta = m._start_subtask(
+            "sub1",
+            "default_root_dir",
+            {
+                "workspace_mode": "worktree",
+                "_inherited_parent_ws_meta": {
+                    "mode": "worktree",
+                    "path": str(tmp_path / "parent_wt"),
+                    "project_root": str(tmp_path / "proj"),
+                },
+            },
+        )
+        assert meta["path"] == str(tmp_path / "parent_wt")
+        assert meta["project_root"] == str(tmp_path / "proj")
+
+    def test_no_coordinates_raises_without_fallback(self, tmp_path: Path) -> None:
+        """出生契约与父链聚合双缺 → 显式报错，拒绝静默回退独立目录。"""
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", tasks={}, meta_store={})
+        with pytest.raises(RuntimeError, match="父链工作空间解析失败"):
+            m._start_subtask("sub1", "default_root_dir", {"workspace_mode": ""})
+
 
 class TestRootTask:
     def test_inherit_workspace(self, tmp_path: Path) -> None:

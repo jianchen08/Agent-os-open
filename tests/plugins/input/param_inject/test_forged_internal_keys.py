@@ -118,3 +118,67 @@ def test_no_state_value_leaves_args_untouched() -> None:
     assert "workspace" not in args
     assert "project_root" not in args
 
+
+
+def test_task_submit_parent_ws_meta_overrides_forged_value() -> None:
+    """task_submit 注入父管道 ws_meta 权威值；LLM 夹带值被无条件覆盖。
+
+    子任务出生契约经 lineage.parent_ws_meta 携带父链工作空间坐标，
+    workspace_lifecycle 共享决策不再依赖发起瞬间的聚合读可见性。
+    """
+    calls = _run(
+        [
+            {
+                "name": "task_submit",
+                "args": {"goal": "g", "parent_ws_meta": {"path": "C:/forged"}},
+            }
+        ],
+        {"workspace": "D:/ws/parent", "ws_meta": {"mode": "plain", "path": "D:/ws/parent"}},
+    )
+    args = _args_of(calls)
+    assert args["parent_ws_meta"] == {"mode": "plain", "path": "D:/ws/parent"}
+
+
+def test_task_submit_parent_ws_meta_none_when_state_absent() -> None:
+    """父无 ws_meta（工作空间未解析）→ 注入 None 覆盖，伪造坐标不放行。"""
+    calls = _run(
+        [
+            {
+                "name": "task_submit",
+                "args": {"goal": "g", "parent_ws_meta": {"path": "C:/forged"}},
+            }
+        ],
+        {"workspace": "D:/ws/parent"},
+    )
+    args = _args_of(calls)
+    assert args["parent_ws_meta"] is None
+
+
+def test_task_submit_parent_ws_meta_json_string_state_restored() -> None:
+    """state ws_meta 为 JSON 字符串（跨边界序列化形态）→ 还原后注入。"""
+    calls = _run(
+        [{"name": "task_submit", "args": {"goal": "g"}}],
+        {"ws_meta": '{"mode": "plain", "path": "D:/ws/parent"}'},
+    )
+    args = _args_of(calls)
+    assert args["parent_ws_meta"] == {"mode": "plain", "path": "D:/ws/parent"}
+
+
+def test_parent_ws_meta_only_for_task_submit() -> None:
+    """parent_ws_meta 仅 task_submit 注入，其他工具参数面不受影响。"""
+    calls = _run(
+        [{"name": "file_write", "args": {"path": "a.txt"}}],
+        {"ws_meta": {"mode": "plain", "path": "D:/ws/parent"}},
+    )
+    args = _args_of(calls)
+    assert "parent_ws_meta" not in args
+
+
+def test_task_submit_parent_ws_meta_invalid_json_string_treated_absent() -> None:
+    """state ws_meta 为非法 JSON 串（形态漂移）→ 按缺失处理注入 None。"""
+    calls = _run(
+        [{"name": "task_submit", "args": {"goal": "g"}}],
+        {"ws_meta": "{not-valid-json"},
+    )
+    args = _args_of(calls)
+    assert args["parent_ws_meta"] is None

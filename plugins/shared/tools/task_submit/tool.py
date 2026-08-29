@@ -1582,6 +1582,13 @@ class TaskSubmitTool(BuiltinTool):
                 "lineage.parent_pipeline_id": parent_pipeline_id,
                 "lineage.origin_session_id": origin_session,
             }
+            # 父链工作空间坐标（param_inject 权威注入，提交时随出生契约写全）：
+            # 子任务 workspace_lifecycle 据此共享父工作空间，不再依赖发起
+            # 瞬间的聚合读可见性。父无工作空间（None）时不写该键——子任务
+            # 侧对缺失显式报错，不静默回退。
+            parent_ws_meta = inputs.get("parent_ws_meta")
+            if isinstance(parent_ws_meta, dict) and parent_ws_meta.get("path"):
+                lineage_keys["lineage.parent_ws_meta"] = parent_ws_meta
         else:
             lineage_keys = {
                 "lineage.root": True,

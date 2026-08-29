@@ -572,3 +572,95 @@ async def test_read_rows_without_refresh_returns_empty(plugins):
             assert tree._read_rows() == []
     finally:
         ws_mod.set_state_reader(None)
+
+
+# ── 子任务父链工作空间坐标：出生契约继承（2026-08-29 时序窗口根治）──
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_task_passes_inherited_parent_ws_meta(plugins, monkeypatch):
+    """init（子任务）：state 的 lineage.parent_ws_meta 随 task_data 传服务。
+
+    父管道运行中 registry 行尚未建立、聚合读不可见（时序窗口）曾致同会话
+    子任务工作空间漂移——出生契约坐标由 _start_subtask 优先消费。
+    """
+    ws_mod = plugins["ws_mod"]
+    ws = plugins["ws"]
+    captured: dict[str, Any] = {}
+
+    class _CaptureManager:
+        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+            captured["task_data"] = task_data
+            return {"mode": "shared", "path": "D:/ws/parent"}
+
+    monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _CaptureManager())
+    result = await ws.execute(
+        plugins["ctx_factory"](
+            {
+                "current_phase": "init",
+                "task.id": "task_inherit_1",
+                "lineage.parent_pipeline_id": "parent_pipe",
+                "lineage.parent_ws_meta": {
+                    "mode": "plain",
+                    "path": "D:/ws/parent",
+                    "session_id": "thread-abc",
+                },
+                "execution_context": {"workspace": {"explicit": False, "mode": "", "source_path": ""}},
+            }
+        )
+    )
+    assert result.error is None
+    inherited = captured["task_data"]["_inherited_parent_ws_meta"]
+    assert inherited == {"mode": "plain", "path": "D:/ws/parent", "session_id": "thread-abc"}
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_task_inherited_parent_ws_meta_json_string_restored(plugins, monkeypatch):
+    """init（子任务）：lineage.parent_ws_meta 为 JSON 字符串（冷恢复形态）→ 还原后透传。"""
+    ws_mod = plugins["ws_mod"]
+    ws = plugins["ws"]
+    captured: dict[str, Any] = {}
+
+    class _CaptureManager:
+        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+            captured["task_data"] = task_data
+            return {"mode": "shared", "path": "D:/ws/parent"}
+
+    monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _CaptureManager())
+    result = await ws.execute(
+        plugins["ctx_factory"](
+            {
+                "current_phase": "init",
+                "task.id": "task_inherit_2",
+                "lineage.parent_pipeline_id": "parent_pipe",
+                "lineage.parent_ws_meta": '{"mode": "plain", "path": "D:/ws/parent"}',
+                "execution_context": {"workspace": {"explicit": False, "mode": "", "source_path": ""}},
+            }
+        )
+    )
+    assert result.error is None
+    assert captured["task_data"]["_inherited_parent_ws_meta"] == {"mode": "plain", "path": "D:/ws/parent"}
+
+
+@pytest.mark.asyncio
+async def test_refresh_state_rows_failure_keeps_cache_and_warns(plugins, monkeypatch, caplog):
+    """聚合读失败：沿用上次快照（不清空）且 WARN 留痕——静默吞掉曾致父链
+    查找失败无从排障（sidecar 重生窗口聚合读失败零日志，2026-08-29）。"""
+    import logging as _logging  # noqa: PLC0415
+
+    ws_mod = plugins["ws_mod"]
+    ws_mod._state_rows_cache = [{"pipeline_id": "stale"}]  # 预置旧快照
+    ws_mod.set_state_reader(None)
+
+    def _boom():
+        raise RuntimeError("聚合读故障")
+
+    ws_mod.set_state_reader(_boom)
+    try:
+        with caplog.at_level(_logging.WARNING):
+            await ws_mod.refresh_state_rows()
+        assert ws_mod._state_rows_cache == [{"pipeline_id": "stale"}], "失败不清空旧快照"
+        assert "state 聚合行刷新失败" in caplog.text
+    finally:
+        ws_mod.set_state_reader(None)
+        ws_mod._state_rows_cache = []

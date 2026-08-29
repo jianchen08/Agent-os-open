@@ -152,17 +152,14 @@ class TestStartEdges:
         assert meta["mode"] == "shared"
         assert meta["path"] == str(parent_ws)
 
-    def test_subtask_parent_lookup_failure_falls_back(
+    def test_subtask_parent_lookup_failure_raises_without_fallback(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """_start_subtask 父任务查找抛异常 → 回退使用调用方 workspace。"""
+        """_start_subtask 父任务查找抛异常且无出生契约继承 → 显式报错（无降级）。"""
         tree = _RaisingTree(ValueError("tree down"))
         m = _make_manager(tmp_path, tmp_path / "wsroot", tree=tree)
-        with caplog.at_level(logging.WARNING):
-            meta = m._start_subtask("sub1", "fallback_ws", {"workspace_mode": "worktree"})
-        assert meta["mode"] == "shared"
-        assert meta["path"] == "fallback_ws"
-        assert meta["parent_workspace"] == "fallback_ws"
+        with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError, match="父链工作空间解析失败"):
+            m._start_subtask("sub1", "fallback_ws", {"workspace_mode": "worktree"})
         assert "查找父任务失败" in caplog.text
 
 

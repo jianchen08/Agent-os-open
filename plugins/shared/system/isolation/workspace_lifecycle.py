@@ -90,11 +90,12 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         拓扑由 workspace_mode 显式声明决定（与隔离解耦）：
         - 显式 plain（_has_explicit_workspace 标记，agent/调用方指定）→
           直接共享宿主目录（挂项目任务的 workspace 已解析为项目文件夹）；
-        - 缺省 plain（无显式标记，bootstrap 对 mode="" 的默认值）→ 走父链
-          共享父任务工作空间——缺省值不是"显式选择"，短路会跳过父链查询，
-          子任务落独立目录（用户实测：子任务目录 ≠ 父任务目录）；
-        - worktree / 未声明 → 共享父任务工作空间（父链 ws_meta 为权威，
-          入参 workspace 仅作父链缺失时的兜底）
+        - 其余（缺省 plain / worktree / 未声明）→ 共享父任务工作空间，
+          父链坐标为权威。解析顺序：① 出生契约继承（lineage.parent_ws_meta，
+          task_submit 提交时随出生 state 写全——无时序窗口）；② 父链聚合
+          查找（task_tree ws_meta，补继承缺失的场景）。两者皆缺 = 坐标
+          不可知，显式报错——静默回退入参目录曾致同会话子任务工作空间
+          漂移（2026-08-29 诊断：六连败独立目录 vs 两成共享会话目录）。
         """
         if (
             task_data.get("_has_explicit_workspace")
@@ -110,7 +111,29 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             )
             return meta
 
-        parent_path = workspace
+        inherited = task_data.get("_inherited_parent_ws_meta")
+        inherited_path = ""
+        inherited_root = ""
+        if isinstance(inherited, dict):
+            inherited_path = str(inherited.get("path") or "")
+            inherited_root = str(inherited.get("project_root") or "")
+        if inherited_path:
+            meta = {
+                "mode": "shared",
+                "path": inherited_path,
+                "parent_workspace": workspace,
+                "project_root": inherited_root,
+            }
+            self._ws_meta_store[task_id] = meta
+            logger.info(
+                "[WorkspaceLifecycle] plain 拓扑(子任务): 出生契约继承父工作空间 "
+                "task_id=%s, path=%s",
+                task_id,
+                inherited_path,
+            )
+            return meta
+
+        parent_path = ""
         parent_meta: dict = {}
         try:
             task = self._task_tree.get_task(task_id)
@@ -118,9 +141,16 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
                 parent_id = task.parent_task_id
                 self.restore_ws_meta(parent_id)
                 parent_meta = self._ws_meta_store.get(parent_id, {})
-                parent_path = parent_meta.get("path", workspace)
+                parent_path = str(parent_meta.get("path") or "")
         except Exception as e:
             logger.warning("[WorkspaceLifecycle] _start_subtask 查找父任务失败: task_id=%s, error=%s", task_id, e)
+
+        if not parent_path:
+            raise RuntimeError(
+                f"子任务 {task_id} 父链工作空间解析失败：出生契约无 "
+                f"lineage.parent_ws_meta，父链聚合查找亦无 ws_meta"
+                f"（无降级——拒绝静默回退独立目录）"
+            )
 
         meta = {
             "mode": "shared",

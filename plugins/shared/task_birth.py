@@ -24,9 +24,12 @@
 
 出生 state 内容（task.*/lineage.* 扁平键）由调用方构造——任务域语义（验收标准/
 血缘有父与根二选一/scope）归各自持有；本模块固化「出生协议」本身：三段顺序、
-键完整性与失败语义。父工作区信息不在此复制：子任务工作区 = 父链 ws_meta 单一
-真值（workspace_lifecycle 经 lineage 链 + state 聚合解析），出生多写一份只会
-制造第二真值。
+键完整性与失败语义。血缘键可含 ``lineage.parent_ws_meta``（父管道工作空间坐标
+快照，task_submit 经 param_inject 权威注入后随出生写全）：子任务 workspace_
+lifecycle 的共享决策优先消费它——父管道运行中 registry 行尚未建立，仅靠聚合
+解析存在发起瞬间的可见性时序窗口（2026-08-29 诊断：同会话子任务工作空间漂移）；
+父链聚合查找仍为继承缺失时的次级来源，ws_meta 的读写权威始终在
+workspace_lifecycle。
 """
 
 from __future__ import annotations

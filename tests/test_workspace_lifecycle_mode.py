@@ -95,16 +95,31 @@ def test_root_task_default_mode_is_worktree(manager_cls):
     assert meta["mode"] == "worktree", "默认拓扑应为 worktree"
 
 
-def test_subtask_plain_mode_shares_host_dir(manager_cls):
-    """_start_subtask：workspace_mode=plain → 共享宿主目录（mode=shared）。"""
+def test_subtask_explicit_plain_mode_shares_host_dir(manager_cls):
+    """_start_subtask：显式 plain（_has_explicit_workspace）→ 共享宿主目录（mode=shared）。"""
     manager = make_manager(manager_cls, container_ws="/tmp/container_abc")
     meta = manager._start_subtask(
         "task_sub",
         "/tmp/whatever",
-        {"workspace_mode": "plain"},
+        {"workspace_mode": "plain", "_has_explicit_workspace": True},
     )
     assert meta["mode"] == "shared"
     assert meta["path"] == "/tmp/whatever"
+
+
+def test_subtask_default_plain_without_coordinates_raises(manager_cls):
+    """缺省 plain（无显式标记）且无父链坐标（出生契约/聚合双缺）→ 显式报错。
+
+    旧行为静默回退传入目录曾致同会话子任务工作空间漂移（2026-08-29 诊断）；
+    无降级裁定：坐标不可知必须显式失败。
+    """
+    manager = make_manager(manager_cls, container_ws="/tmp/container_abc")
+    with pytest.raises(RuntimeError, match="父链工作空间解析失败"):
+        manager._start_subtask(
+            "task_sub_no_coords",
+            "/tmp/whatever",
+            {"workspace_mode": "plain"},
+        )
 
 
 # ── 拓扑缺省：显式 workspace → worktree；无显式 → plain（工作区根/{task_id}）──

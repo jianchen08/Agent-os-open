@@ -97,8 +97,13 @@ async def refresh_state_rows() -> None:
             rows = await rows
         if isinstance(rows, list):
             _state_rows_cache = [r for r in rows if isinstance(r, dict)]
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # 保留旧值而非清空（快照仍可用），但必须留痕——静默吞掉曾致父链
+        # 查找失败无从排障（sidecar 重生窗口聚合读失败零日志，2026-08-29）。
+        logger.warning(
+            "[WorkspaceLifecycle] state 聚合行刷新失败（沿用上次快照）| error=%s",
+            exc,
+        )
 
 
 class _ExecutionContextTaskTree:
@@ -391,12 +396,21 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             # 即子任务——共享父工作空间（服务 _start_subtask 按父链 ws_meta 解析），
             # 无父（根任务/独立任务）才按声明拓扑建独立工作区。
             _parent_id = str(state.get("lineage.parent_pipeline_id") or "")
+            # 出生契约继承的父链工作空间坐标（lineage.parent_ws_meta，task_submit
+            # 提交时随出生 state 写全）：_start_subtask 据此共享父工作空间，
+            # 不依赖发起瞬间的聚合读可见性（父管道运行中 registry 行尚未建立，
+            # 曾致同会话子任务工作空间漂移）。
+            _inherited_ws_meta = state_fields.optional_dict(
+                state.get("lineage.parent_ws_meta"),
+                field="lineage.parent_ws_meta",
+            )
             task_data = {
                 "is_root": not _parent_id,
                 "workspace_mode": mode,
                 "isolation_mode": (ec.get("isolation") or {}).get("level", ""),
                 "_has_explicit_workspace": bool(ws_spec.get("explicit")),
                 "_inherit_workspace_resolved": False,
+                "_inherited_parent_ws_meta": _inherited_ws_meta,
             }
             try:
                 ws_meta = await ctx_await(manager.on_task_start, task_id, source_path, task_data)

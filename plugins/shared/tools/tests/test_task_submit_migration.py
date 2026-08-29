@@ -301,6 +301,75 @@ class TestTaskSubmitCoreSubmit:
 
     # GAP-1 统一后移除：test_workspace_init_failure_cleans_up（提交期不再初始化工作空间/is_root 查询/继承参数传 create_task——见 e2e 缺口文档延伸节）
 
+
+@pytest.mark.asyncio
+async def test_birth_contract_carries_inherited_parent_ws_meta(mod):
+    """有父提交：出生契约携带 lineage.parent_ws_meta（param_inject 权威注入值）。
+
+    子任务 workspace_lifecycle 的共享决策优先消费该出生坐标——父管道运行中
+    registry 行尚未建立，仅靠聚合解析存在发起瞬间的可见性时序窗口
+    （2026-08-29 诊断：同会话子任务工作空间漂移）。
+    """
+    calls: list[dict] = []
+
+    async def fake_sender(params: dict) -> dict:
+        calls.append(params)
+        return {"pipeline_id": "pipe_gen_deadbeef01"}
+
+    mod.set_chat_sender(fake_sender)
+    try:
+        tool = mod.TaskSubmitTool()
+        await tool._dispatch_task_pipeline(
+            title="子任务",
+            description="校验出生契约继承父工作空间坐标",
+            acceptance_criteria={},
+            dependencies=[],
+            inputs={
+                "pipeline_id": "parent_pipe_01",
+                "session_id": "thread-abc123",
+                "user_id": "u1",
+                "parent_ws_meta": {"mode": "plain", "path": "D:/ws/session", "session_id": "thread-abc123"},
+            },
+        )
+    finally:
+        mod._chat_sender = None
+    birth_state = calls[0]["state"]
+    assert birth_state["lineage.parent_pipeline_id"] == "parent_pipe_01"
+    assert birth_state["lineage.parent_ws_meta"] == {
+        "mode": "plain",
+        "path": "D:/ws/session",
+        "session_id": "thread-abc123",
+    }
+
+
+@pytest.mark.asyncio
+async def test_birth_contract_omits_parent_ws_meta_when_absent(mod):
+    """父无 ws_meta（param_inject 注入 None）→ 出生契约不含该键，子任务侧对缺失显式报错。"""
+    calls: list[dict] = []
+
+    async def fake_sender(params: dict) -> dict:
+        calls.append(params)
+        return {"pipeline_id": "pipe_gen_deadbeef02"}
+
+    mod.set_chat_sender(fake_sender)
+    try:
+        tool = mod.TaskSubmitTool()
+        await tool._dispatch_task_pipeline(
+            title="子任务",
+            description="父工作空间缺失时不得伪造坐标",
+            acceptance_criteria={},
+            dependencies=[],
+            inputs={
+                "pipeline_id": "parent_pipe_02",
+                "session_id": "thread-abc124",
+                "user_id": "u1",
+                "parent_ws_meta": None,
+            },
+        )
+    finally:
+        mod._chat_sender = None
+    assert "lineage.parent_ws_meta" not in calls[0]["state"]
+
 class TestNormalizeDescription:
     """LLM 返回的 description 归一化为 str（防 pydantic str 校验 500）。"""
 
