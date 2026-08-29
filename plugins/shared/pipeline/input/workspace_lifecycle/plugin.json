@@ -61,6 +61,7 @@
   },
   "export_fields": [
     "workspace",
-    "ws_meta"
+    "ws_meta",
+    "task.ws_meta"
   ]
 }

@@ -13,6 +13,9 @@
   完整 retry 反馈（剩余次数/失败明细/得分）；
 - 完成/失败路径：worktree 合并失败标记 failed、complete_evaluation 异常降级、
   已 failed 任务恢复为完成、终态任务跳过回写；
+- 合并门控：ws_meta 数据源解析（state 行 dict/JSON 字符串、metadata 兜底、
+  缺失空值）、非 worktree 机制层零接触、worktree 透传、缺失即失败不静默跳过
+  （机制层替身注入；真实 git 行为由 tests/plugins/shared/test_worktree_merge.py 覆盖）；
 - 写面降级：未注入 state writer 不写、写面异常不阻断评估主流程；
 - 辅助静态方法：_get_eval_timeout 自定义/非法值回退、_all_metrics_passed、
   _get_eval_progress、_increment_eval_call_count（非 int 归零）、
@@ -29,6 +32,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -38,8 +42,10 @@ pytestmark = pytest.mark.unit
 
 _TE_DIR = Path(__file__).resolve().parent
 _TASKS_DIR = _TE_DIR.parents[1] / "system" / "tasks"
+# 共享根模块（state_fields / worktree_merge）：单文件直跑时也自足解析
+_SHARED_DIR = _TE_DIR.parents[1]
 
-for _d in (_TE_DIR, _TASKS_DIR):
+for _d in (_TE_DIR, _TASKS_DIR, _SHARED_DIR):
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
@@ -75,12 +81,28 @@ async def _new_task(service: Any, *, title: str = "评估任务", description: s
     return await service.create_task(title=title, description=description, metadata=metadata or {})
 
 
-def _inject_tool(mod: Any, monkeypatch: Any, service: Any) -> tuple[Any, MagicMock]:
-    """monkeypatch 服务获取/读面/写面，返回 (tool, state_writer)。"""
+def _inject_tool(
+    mod: Any,
+    monkeypatch: Any,
+    service: Any,
+    merge_result: str | None = None,
+) -> tuple[Any, MagicMock]:
+    """monkeypatch 服务获取/读面/写面与合并机制替身，返回 (tool, state_writer)。
+
+    merge_result：worktree_merge 机制替身返回值（None=合并成功/无需合并；
+    str=失败原因）。门控的 ws_meta 解析仍走真实实现；机制层（git CLI）为
+    外部依赖故以替身注入，真实 git 行为由 tests/plugins/shared/test_worktree_merge.py
+    用真实仓库覆盖。
+    """
     state_writer = AsyncMock()
     monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
     monkeypatch.setattr(mod, "_state_reader", None)
     monkeypatch.setattr(mod, "_state_writer", state_writer)
+
+    def _merge_stub(task_id: str, ws_meta: dict[str, Any]) -> str | None:
+        return merge_result
+
+    monkeypatch.setattr(mod.worktree_merge, "merge_worktree_before_complete", _merge_stub)
     return mod.TaskEvaluateTool(), state_writer
 
 
@@ -236,11 +258,11 @@ class TestMergeGateAndCompletionPaths:
     @pytest.mark.asyncio
     async def test_merge_failure_marks_task_failed(self, mod: Any, service: Any, monkeypatch: Any) -> None:
         task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"]})
-        tool, state_writer = _inject_tool(mod, monkeypatch, service)
-        monkeypatch.setattr(mod.TaskEvaluateTool, "_try_merge_before_complete", lambda self, t: "git merge conflict")
+        tool, state_writer = _inject_tool(mod, monkeypatch, service, merge_result="git merge conflict")
         out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
         assert out.success is False
         assert "worktree 合并失败" in out.error
+        assert "git merge conflict" in out.error
         assert out.metadata.get("task_failed") is True
         # 写面落了 failed 终态（职责边界：评估终态落 state）
         assert state_writer.await_count == 1
@@ -249,13 +271,12 @@ class TestMergeGateAndCompletionPaths:
     @pytest.mark.asyncio
     async def test_merge_failure_writer_raise_not_blocking(self, mod: Any, service: Any, monkeypatch: Any) -> None:
         task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"]})
-        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="merge fail")
         monkeypatch.setattr(
             mod,
             "_state_writer",
             AsyncMock(side_effect=RuntimeError("state down")),
         )
-        monkeypatch.setattr(mod.TaskEvaluateTool, "_try_merge_before_complete", lambda self, t: "merge fail")
         out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
         # 写失败不阻断：仍返回合并失败结果
         assert out.success is False
@@ -321,6 +342,129 @@ class TestMergeGateAndCompletionPaths:
         out = await tool._fail_task(service, task, _eval_result(task.id, [_metric("m1", False)]), 3)
         assert out.success is False
         assert "complete_evaluation(passed=False) 失败" in out.error
+
+
+# ── 合并门控：ws_meta 数据源解析与分发（机制层替身/真实判定）──
+
+
+class TestMergeGate:
+    @pytest.mark.asyncio
+    async def test_read_task_ws_meta_from_state_rows(self, mod: Any, monkeypatch: Any) -> None:
+        ws_meta = {"mode": "worktree", "path": "D:/wt", "project_root": "D:/src", "branch": "task/p1"}
+        monkeypatch.setattr(mod, "_state_reader", lambda: [{"pipeline_id": "p1", "ws_meta": ws_meta}])
+        meta = await mod.TaskEvaluateTool()._read_task_ws_meta(SimpleNamespace(id="p1", metadata=None))
+        assert meta == ws_meta
+
+    @pytest.mark.asyncio
+    async def test_read_task_ws_meta_json_string_row_restored(self, mod: Any, monkeypatch: Any) -> None:
+        """聚合行 JSON 字符串形态（DB 投影原样存储）还原成 dict。"""
+        import json as _json
+
+        monkeypatch.setattr(
+            mod,
+            "_state_reader",
+            lambda: [{"pipeline_id": "p1", "ws_meta": _json.dumps({"mode": "plain", "path": "/w"})}],
+        )
+        meta = await mod.TaskEvaluateTool()._read_task_ws_meta(SimpleNamespace(id="p1", metadata=None))
+        assert meta == {"mode": "plain", "path": "/w"}
+
+    @pytest.mark.asyncio
+    async def test_read_task_ws_meta_prefers_task_key_mirror(self, mod: Any, monkeypatch: Any) -> None:
+        """task.ws_meta（init 镜像，运行中即时可见）优先于出口键 ws_meta。"""
+        monkeypatch.setattr(
+            mod,
+            "_state_reader",
+            lambda: [
+                {
+                    "pipeline_id": "p1",
+                    "task.ws_meta": {"mode": "worktree", "path": "D:/live", "project_root": "D:/src"},
+                    "ws_meta": {"mode": "plain", "path": "D:/stale"},
+                }
+            ],
+        )
+        meta = await mod.TaskEvaluateTool()._read_task_ws_meta(SimpleNamespace(id="p1", metadata=None))
+        assert meta == {"mode": "worktree", "path": "D:/live", "project_root": "D:/src"}
+
+    @pytest.mark.asyncio
+    async def test_read_task_ws_meta_metadata_fallback_without_rows(self, mod: Any, monkeypatch: Any) -> None:
+        """state 无行（读面未注入）→ task.metadata.ws_meta 兜底。"""
+        monkeypatch.setattr(mod, "_state_reader", None)
+        task = SimpleNamespace(id="p1", metadata={"ws_meta": {"mode": "plain", "path": "/m"}})
+        meta = await mod.TaskEvaluateTool()._read_task_ws_meta(task)
+        assert meta == {"mode": "plain", "path": "/m"}
+
+    @pytest.mark.asyncio
+    async def test_read_task_ws_meta_missing_returns_empty(self, mod: Any, monkeypatch: Any) -> None:
+        monkeypatch.setattr(mod, "_state_reader", None)
+        meta = await mod.TaskEvaluateTool()._read_task_ws_meta(SimpleNamespace(id="p1", metadata=None))
+        assert meta == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["plain", "shared"])
+    async def test_gate_non_worktree_no_git_via_real_mechanism(
+        self, mod: Any, monkeypatch: Any, mode: str
+    ) -> None:
+        """非 worktree：门控经真实机制层返回 None，且零 git 命令执行（0.1 判定）。"""
+
+        def _no_git(self: Any, *args: Any, **kw: Any) -> tuple[int, str, str]:
+            raise AssertionError(f"mode={mode} 不应执行任何 git 命令")
+
+        monkeypatch.setattr(mod.worktree_merge.WorktreeMerger, "_run_git", _no_git)
+        monkeypatch.setattr(
+            mod, "_state_reader", lambda: [{"pipeline_id": "p1", "ws_meta": {"mode": mode, "path": "D:/w"}}]
+        )
+        result = await mod.TaskEvaluateTool()._try_merge_before_complete(SimpleNamespace(id="p1", metadata=None))
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_gate_worktree_delegates_with_state_ws_meta(self, mod: Any, monkeypatch: Any) -> None:
+        captured: list[tuple[str, dict[str, Any]]] = []
+
+        def fake_merge(task_id: str, ws_meta: dict[str, Any]) -> str | None:
+            captured.append((task_id, ws_meta))
+            return None
+
+        monkeypatch.setattr(mod.worktree_merge, "merge_worktree_before_complete", fake_merge)
+        ws_meta = {"mode": "worktree", "path": "D:/wt", "project_root": "D:/src", "branch": "task/p1"}
+        monkeypatch.setattr(mod, "_state_reader", lambda: [{"pipeline_id": "p1", "ws_meta": ws_meta}])
+        result = await mod.TaskEvaluateTool()._try_merge_before_complete(SimpleNamespace(id="p1", metadata=None))
+        assert result is None
+        assert captured == [("p1", ws_meta)], "state 解析的 ws_meta 应原样透传机制层"
+
+    @pytest.mark.asyncio
+    async def test_gate_missing_ws_meta_fails_not_skips(self, mod: Any, monkeypatch: Any) -> None:
+        """0.1 判定：ws_meta 拿不到 = 失败（worktree 产物不能静默丢失）。
+
+        走真实机制层（不替身）：空 ws_meta 在机制入口即被判失败，绝不静默跳过。
+        """
+        monkeypatch.setattr(mod, "_state_reader", None)
+        err = await mod.TaskEvaluateTool()._try_merge_before_complete(SimpleNamespace(id="t1", metadata=None))
+        assert err is not None
+        assert "t1" in err and "ws_meta" in err
+
+    @pytest.mark.asyncio
+    async def test_complete_task_plain_ws_meta_completes_through_real_gate(
+        self, mod: Any, service: Any, monkeypatch: Any
+    ) -> None:
+        """plain 任务完成全链走真实门控与机制层（ws_meta=plain，零 git 调用）。"""
+
+        def _no_git(self: Any, *args: Any, **kw: Any) -> tuple[int, str, str]:
+            raise AssertionError("plain 模式不应执行任何 git 命令")
+
+        monkeypatch.setattr(mod.worktree_merge.WorktreeMerger, "_run_git", _no_git)
+        task = await _new_task(service)
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+        monkeypatch.setattr(mod, "_state_writer", AsyncMock())
+        monkeypatch.setattr(
+            mod,
+            "_state_reader",
+            lambda: [{"pipeline_id": task.id, "ws_meta": {"mode": "plain", "path": "D:/ws"}}],
+        )
+        out = await mod.TaskEvaluateTool()._complete_task(
+            service, task, _eval_result(task.id, [_metric("m1", True)])
+        )
+        assert out.success is True
+        assert out.metadata["result"] == "completed"
 
 
 # ── 写面降级与保存 ───────────────────────────────────────────

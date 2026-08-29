@@ -218,6 +218,13 @@ class TestTaskEvaluateFlow:
         # 测试注入写面记录调用，断言评估完成时任务状态落 state。
         state_writer = AsyncMock()
         monkeypatch.setattr(mod, "_state_writer", state_writer)
+        # 合并机制替身（git CLI 外部依赖）：默认无需合并；门控 ws_meta 解析仍走
+        # 真实实现，真实 git 行为由 tests/plugins/shared/test_worktree_merge.py 覆盖
+        monkeypatch.setattr(
+            mod.worktree_merge,
+            "merge_worktree_before_complete",
+            lambda task_id, ws_meta: None,
+        )
         tool = mod.TaskEvaluateTool(executor=executor)
         return tool, service, state_writer
 
@@ -404,6 +411,13 @@ class TestCriteriaFallbackMarked:
         # 测试注入写面记录调用，断言评估完成时任务状态落 state。
         state_writer = AsyncMock()
         monkeypatch.setattr(mod, "_state_writer", state_writer)
+        # 合并机制替身（git CLI 外部依赖）：默认无需合并；门控 ws_meta 解析仍走
+        # 真实实现，真实 git 行为由 tests/plugins/shared/test_worktree_merge.py 覆盖
+        monkeypatch.setattr(
+            mod.worktree_merge,
+            "merge_worktree_before_complete",
+            lambda task_id, ws_meta: None,
+        )
         tool = mod.TaskEvaluateTool(executor=executor)
         return tool, service, state_writer
 

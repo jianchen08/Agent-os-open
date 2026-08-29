@@ -7,11 +7,12 @@
 - **init（bootstrap）**：消费 `state.execution_context.workspace`
   （`{source_path, mode}`，由 task_submit / 会话创建参数解析注入）。有任务
   上下文（state["task.id"]，== pipeline_id 的任务身份权威键）时调
-  `on_task_start` 真实创建空间（worktree/plain）；
-  主会话（无任务）直接解析 source_path 写 state。结果写入
+  `on_task_start` 真实创建空间（worktree/plain）；主会话（无任务）直接解析
+  source_path 写 state（主会话语义，非降级）。结果写入
   `state.workspace` / `ws_meta`（project_root 不由本插件写——其语义是
-  实际项目目录，不是工作区路径）。幂等：state 已有 workspace
-  则跳过。服务不可用时降级为纯解析（不阻断管道）。
+  实际项目目录，不是工作区路径）。幂等：state 已有 workspace 则跳过。
+  任务管道无降级路径：服务不可用/创建失败/默认根解析失败一律显式报错
+  （PluginResult.error，引擎记入 _plugin_errors 可见面），不落假工作空间。
 - **exit（finalize）**：有任务且 ws_meta.mode=worktree 时调
   `merge_worktree_before_complete` 合并回源空间；否则 no-op。失败留痕不阻断。
 
@@ -65,12 +66,23 @@ _state_reader: Any = None
 # 消费链 task_tree.get_task 是同步库接口，直接调用 async reader 会产生
 # 永不 await 的协程（RuntimeWarning）且恒降级为空）
 _state_rows_cache: list[dict[str, Any]] = []
+# task.* 写面（server.py on_load 注入，pipeline-state.update）——init 创建
+# 工作空间后把 ws_meta 镜像为 task.ws_meta：update 写直入 state 注册表，
+# 运行中即时可见（state_updates 的 ws_meta 键随引擎回写快照有延迟），供
+# task_evaluate 合并门控等运行中读面即时消费。
+_task_state_writer: Any = None
 
 
 def set_state_reader(reader: Any) -> None:
     """注入 state 聚合读取器（sidecar on_load 经 pipeline-state capability）。"""
     global _state_reader  # noqa: PLW0603
     _state_reader = reader
+
+
+def set_task_state_writer(writer: Any) -> None:
+    """注入 task.* 写面（sidecar on_load 经 pipeline-state.update capability）。"""
+    global _task_state_writer  # noqa: PLW0603
+    _task_state_writer = writer
 
 
 async def refresh_state_rows() -> None:
@@ -172,7 +184,10 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
     # ── 服务对象（懒加载，插件进程内自持）──────────────────────
 
     def _get_manager(self, base_path_hint: str | None = None) -> Any | None:
-        """懒加载 WorkspaceLifecycleManager（服务不可用时返回 None，降级纯解析）。
+        """懒加载 WorkspaceLifecycleManager（实例化失败返回 None，调用方裁决）。
+
+        任务管道：manager None = 工作空间服务不可用 → 显式报错（无降级路径）。
+        主会话：manager None 仅跳过 skills 同步（工作区解析不依赖服务）。
 
         task_tree 用 execution_context 适配器（0.2 sidecar 无 task_service）：
         容器直接子任务经 parent_task_id 重建父链，定位容器空间。
@@ -325,40 +340,51 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
         # 工作流服务基础路径 = 项目根：sidecar cwd 是插件目录（非项目根），
         # 用 source_path（task 创建时带的项目根）作为 base_path 修正。
         manager = self._get_manager(base_path_hint=source_path)
-        if not source_path and task_id:
-            # 默认工作空间语义：无显式 workspace 声明的任务在
-            # 「工作空间根/{task_id}」下创建目录——默认隔离执行的工作空间
-            # （容器挂载与 bash 执行均以此为锚）。
-            try:
-                _ensure_isolation_path()
-                from isolation.workspace import (  # noqa: PLC0415
-                    find_project_root,
-                    get_workspace_base_dir,
-                )
+        if task_id:
+            # ── 任务管道：工作空间必须真实创建（无降级——失败显式报错，让
+            # 插件错误面可见；不落"源路径/占位目录"假工作空间裸奔）──
+            if not source_path:
+                # 默认工作空间语义：无显式 workspace 声明的任务在
+                # 「工作空间根/{task_id}」下创建目录——默认隔离执行的工作空间
+                # （容器挂载与 bash 执行均以此为锚）。
+                try:
+                    _ensure_isolation_path()
+                    from isolation.workspace import (  # noqa: PLC0415
+                        find_project_root,
+                        get_workspace_base_dir,
+                    )
 
-                if mode == "worktree":
-                    # worktree 拓扑：workspace 参数是**源项目**（服务自动在
-                    # 工作区根下建隔离副本）；以项目根为源。
-                    source_path = str(find_project_root())
-                else:
-                    # plain 拓扑：直接在「工作区根/{task_id}」目录操作（默认隔离）
-                    source_path = str(get_workspace_base_dir() / task_id)
-                logger.info(
-                    "[WorkspaceLifecycle] 无显式 workspace，按默认根创建 | task=%s | mode=%s | path=%s",
+                    if mode == "worktree":
+                        # worktree 拓扑：workspace 参数是**源项目**（服务自动在
+                        # 工作区根下建隔离副本）；以项目根为源。
+                        source_path = str(find_project_root())
+                    else:
+                        # plain 拓扑：直接在「工作区根/{task_id}」目录操作（默认隔离）
+                        source_path = str(get_workspace_base_dir() / task_id)
+                    logger.info(
+                        "[WorkspaceLifecycle] 无显式 workspace，按默认根创建 | task=%s | mode=%s | path=%s",
+                        task_id,
+                        mode,
+                        source_path,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[WorkspaceLifecycle] 默认工作空间根解析失败 | task=%s | error=%s",
+                        task_id,
+                        exc,
+                    )
+                    return PluginResult(
+                        error=RuntimeError(f"任务 {task_id} 默认工作空间根解析失败: {exc}")
+                    )
+            if manager is None:
+                logger.error(
+                    "[WorkspaceLifecycle] 工作空间服务不可用，任务工作空间创建失败（无降级）| task=%s",
                     task_id,
-                    mode,
-                    source_path,
                 )
-            except Exception as exc:
-                logger.warning(
-                    "[WorkspaceLifecycle] 默认工作空间根解析失败 | error=%s", exc
+                return PluginResult(
+                    error=RuntimeError(f"工作空间服务不可用，任务 {task_id} 工作空间创建失败（无降级路径）")
                 )
-        if not source_path:
-            logger.debug("[WorkspaceLifecycle] workspace source_path 为空，跳过")
-            return PluginResult()
-
-        if manager is not None and task_id:
-            # 任务管道：调工作空间服务真实创建（对齐 task_executor 契约：
+            # 调工作空间服务真实创建（对齐 task_executor 契约：
             # on_task_start(task_id, workspace, task_data) 分发 root/subtask）。
             # task_data 字段形态与 task_submit → task_data 一致。
             # is_root 由 lineage 推导：有父管道（lineage.parent_pipeline_id 非空）
@@ -374,64 +400,68 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             }
             try:
                 ws_meta = await ctx_await(manager.on_task_start, task_id, source_path, task_data)
-                if isinstance(ws_meta, dict) and ws_meta.get("path"):
-                    updates = {
-                        "workspace": ws_meta["path"],
-                        "ws_meta": ws_meta,
-                    }
-                    logger.info(
-                        "[WorkspaceLifecycle] init 服务创建工作空间 | task=%s | mode=%s | path=%s",
-                        task_id,
-                        ws_meta.get("mode"),
-                        ws_meta["path"],
-                    )
-                    return PluginResult(state_updates=updates)
             except Exception as exc:
-                logger.warning(
-                    "[WorkspaceLifecycle] 工作空间创建失败，降级为源路径 | task=%s | error=%s",
+                logger.error(
+                    "[WorkspaceLifecycle] 工作空间创建失败 | task=%s | error=%s",
                     task_id,
                     exc,
                 )
-        # 降级/主会话：直接使用源路径（plain 语义）。
-        # 无显式 workspace 时 mode 统一按 plain 落 ws_meta——服务不可用时没有
-        # worktree 被创建，声明 worktree 会造成"无 workspace 却 worktree"的
-        # 虚假标记（exit 会据此尝试 merge）。对齐服务层矫正
-        # （WorkspaceLifecycleManager._start_root_task：无显式 workspace → 强制
-        # plain 目录）。
-        # 无显式 workspace + worktree 模式时 source_path 已被解析为项目根
-        # （worktree 的源）——服务不可用降级时**不能把项目根直接当 workspace**
-        # （任务会在项目根上直接读写），回退「工作区根/{task_id}」占位目录
-        # （同 plain 默认位置，`.ai_workspaces/` 下）。
-        _effective_mode = mode
-        _effective_path = source_path
-        if not ws_spec.get("explicit"):
-            if mode == "worktree":
+                return PluginResult(
+                    error=RuntimeError(f"任务 {task_id} 工作空间创建失败: {exc}")
+                )
+            if not (isinstance(ws_meta, dict) and ws_meta.get("path")):
+                logger.error(
+                    "[WorkspaceLifecycle] 工作空间创建未返回有效路径 | task=%s | ws_meta=%s",
+                    task_id,
+                    ws_meta,
+                )
+                return PluginResult(
+                    error=RuntimeError(f"任务 {task_id} 工作空间创建未返回有效路径: {ws_meta!r}")
+                )
+            # ws_meta 镜像进任务域键空间（task.ws_meta，经 pipeline-state.update
+            # 即时入注册表）：运行中的 task_evaluate 合并门控经 state 读面即时
+            # 可见。镜像失败不阻断 init（主创建已成功、ws_meta 仍随 state_updates
+            # 入引擎 state），但 ERROR 留痕——门控运行中会读到空值并显式报错。
+            writer = _task_state_writer
+            if writer is not None:
                 try:
-                    _ensure_isolation_path()
-                    from isolation.workspace import get_workspace_base_dir  # noqa: PLC0415
-
-                    # 统一基目录解析（配置驱动：绝对路径原样，相对路径相对项目根）
-                    _effective_path = str(get_workspace_base_dir() / task_id)
-                except Exception as _exc:  # noqa: BLE001
-                    # 配置读取失败：沿用 source_path（项目根）已是最坏兜底
-                    logger.warning(
-                        "[WorkspaceLifecycle] 降级路径配置根解析失败，沿用项目根 | error=%s",
-                        _exc,
+                    await writer(task_id, {"task.ws_meta": ws_meta})
+                except Exception as mirror_exc:
+                    logger.error(
+                        "[WorkspaceLifecycle] task.ws_meta 镜像写失败 | task=%s | error=%s",
+                        task_id,
+                        mirror_exc,
                     )
-            _effective_mode = "plain"
-        # project_root 不写（语义 = 实际项目目录，见主会话分支注释）：
-        # 任务工作区路径由 workspace/ws_meta.path 独立承载。
+            logger.info(
+                "[WorkspaceLifecycle] init 服务创建工作空间 | task=%s | mode=%s | path=%s",
+                task_id,
+                ws_meta.get("mode"),
+                ws_meta["path"],
+            )
+            return PluginResult(
+                state_updates={
+                    "workspace": ws_meta["path"],
+                    "ws_meta": ws_meta,
+                }
+            )
+
+        # ── 主会话（无任务身份）显式源路径：plain 语义解析 ──
+        # 这不是降级，是主会话语义（任务管道在上方已全部返回）。
+        # project_root 不写：它语义 = 实际项目目录（提示词 {{project_root}}
+        # 与配置注入基准），工作区路径由 workspace 键独立承载（param_inject
+        # 工具锚点只认 workspace）；主会话 state 留空该键，防会话目录
+        # 伪装成项目目录污染下游（fs 锚点/提示词语义）。
         updates = {
-            "workspace": _effective_path,
+            "workspace": source_path,
             "ws_meta": {
-                "mode": _effective_mode,
-                "path": _effective_path,
+                "mode": mode,
+                "path": source_path,
             },
         }
         logger.info(
             "[WorkspaceLifecycle] init 解析工作空间 | mode=%s | path=%s",
             mode,
-            _effective_path,
+            source_path,
         )
         return PluginResult(state_updates=updates)
 

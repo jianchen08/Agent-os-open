@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -226,27 +227,92 @@ async def test_workspace_init_task_without_ws_declaration_unchanged(plugins):
     assert updates.get("workspace") != "" 
 
 
-async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypatch, tmp_path):
-    """init 降级（服务不可用）：无显式 workspace 时 ws_meta 不得标 worktree。
+@pytest.mark.asyncio
+async def test_workspace_init_task_mirrors_task_ws_meta(plugins, monkeypatch):
+    """init：任务管道创建成功后经 task.* 写面镜像 task.ws_meta（运行中即时可见）。
 
-    对齐服务层矫正（_start_root_task：无显式 workspace → 强制 plain 目录）——
-    服务不可用时没有 worktree 被创建，声明 worktree 会造成"没有 workspace
-    却 worktree 模式"的虚假标记（exit 会据此尝试 merge）。
+    task_evaluate 合并门控等运行中读面依赖该镜像——state_updates 的 ws_meta 键
+    随引擎回写快照有延迟，update 写直入注册表即时可见。
+    """
+    ws_mod = plugins["ws_mod"]
+    ws = plugins["ws"]
 
-    2026-08-24 修正：source_path 已被解析为项目根（worktree 的源）——降级时
-    workspace 必须回退「工作区根/{task_id}」（配置驱动基目录下），不得把
-    项目根直接当 workspace（任务会在项目根上直接读写）。
+    class _OkManager:
+        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+            return {"mode": "plain", "path": workspace, "task_id": task_id}
 
-    2026-08-24 收口：基目录解析统一走 get_workspace_base_dir()（配置驱动）——
-    真身配置可把基目录配到项目内相对目录或项目外绝对路径，断言只依赖解析
-    函数，测试内确定性覆盖其返回值。
+    monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _OkManager())
+    writes: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(ws_mod, "_task_state_writer", lambda pid, fields: writes.append((pid, fields)))
+    try:
+        result = await ws.execute(
+            plugins["ctx_factory"](
+                {
+                    "current_phase": "init",
+                    "task.id": "task_mirror_1",
+                    "execution_context": {
+                        "workspace": {"source_path": "D:/proj/x", "mode": "plain"}
+                    },
+                }
+            )
+        )
+    finally:
+        ws_mod._task_state_writer = None
+    assert result.error is None
+    assert writes == [("task_mirror_1", {"task.ws_meta": {"mode": "plain", "path": "D:/proj/x", "task_id": "task_mirror_1"}})]
+    assert result.state_updates["ws_meta"]["path"] == "D:/proj/x"
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_task_mirror_failure_not_blocking(plugins, monkeypatch, caplog):
+    """init：task.ws_meta 镜像写失败 → ERROR 留痕但不阻断 init（主创建已成功）。"""
+    ws_mod = plugins["ws_mod"]
+    ws = plugins["ws"]
+
+    class _OkManager:
+        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+            return {"mode": "plain", "path": workspace, "task_id": task_id}
+
+    monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _OkManager())
+
+    def _boom(pid: str, fields: dict) -> None:
+        raise RuntimeError("写面故障")
+
+    monkeypatch.setattr(ws_mod, "_task_state_writer", _boom)
+    try:
+        with caplog.at_level("ERROR"):
+            result = await ws.execute(
+                plugins["ctx_factory"](
+                    {
+                        "current_phase": "init",
+                        "task.id": "task_mirror_2",
+                        "execution_context": {
+                            "workspace": {"source_path": "D:/proj/x", "mode": "plain"}
+                        },
+                    }
+                )
+            )
+    finally:
+        ws_mod._task_state_writer = None
+    assert result.error is None, "镜像失败不阻断已成功的主创建"
+    assert result.state_updates["ws_meta"]["path"] == "D:/proj/x"
+    assert "task.ws_meta 镜像写失败" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_task_service_down_errors_without_fallback(plugins, monkeypatch, tmp_path):
+    """init（任务管道 + 服务不可用）→ 显式报错，无降级、不落占位目录。
+
+    2026-08-28 去降级：原"服务不可用 → worktree 回退占位目录/plain 源路径"
+    分支删除——假工作空间裸奔会让任务产出与合并门控全部失真，失败必须
+    显式可见（PluginResult.error，引擎记入 _plugin_errors 可见面）。
     """
     import tests._isolation_path  # noqa: F401  （system/isolation 目录入 sys.path）
     import isolation.workspace as ws_mod
 
     ws = plugins["ws"]
     monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: None)
-    # 确定性覆盖基目录解析（真身配置可能把基目录配到项目外），断言只依赖解析函数
+    # 确定性覆盖基目录解析（worktree 默认源 = 项目根；plain 默认源 = 基目录/task_id）
     frozen_base = tmp_path / "ws_base"
     monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: frozen_base)
     result = await ws.execute(
@@ -260,15 +326,90 @@ async def test_workspace_init_no_explicit_ws_degrades_to_plain(plugins, monkeypa
             }
         )
     )
-    updates = result.state_updates
-    assert updates["ws_meta"]["mode"] == "plain", "无显式 workspace 不得标 worktree"
-    ws_path = Path(updates["ws_meta"]["path"])
-    assert ws_path == frozen_base / "task_degrade_1", (
-        f"降级 workspace 应为配置基目录下占位目录，实际: {ws_path}"
+    assert result.error is not None, "服务不可用必须显式报错，不得静默降级"
+    assert "工作空间服务不可用" in str(result.error)
+    assert result.state_updates == {}, "服务不可用不得落任何工作空间 state（无占位目录）"
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_task_creation_exception_errors(plugins, monkeypatch):
+    """init（任务管道 + on_task_start 异常）→ 显式报错，不再降级为源路径。"""
+    ws = plugins["ws"]
+
+    class _BoomManager:
+        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+            raise RuntimeError("git 崩了")
+
+    monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _BoomManager())
+    result = await ws.execute(
+        plugins["ctx_factory"](
+            {
+                "current_phase": "init",
+                "task.id": "task_boom_1",
+                "execution_context": {
+                    "workspace": {"source_path": "D:/proj/x", "mode": "plain"}
+                },
+            }
+        )
     )
-    assert not str(ws_path).endswith(str(Path(__file__).resolve().parent.parent)), (
-        "不得把项目根直接当 workspace"
+    assert result.error is not None, "创建异常必须显式报错"
+    assert "工作空间创建失败" in str(result.error) and "git 崩了" in str(result.error)
+    assert result.state_updates == {}
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_task_invalid_ws_meta_errors(plugins, monkeypatch):
+    """init（任务管道 + 服务返回无 path 的 ws_meta）→ 显式报错。"""
+    ws = plugins["ws"]
+
+    class _BadManager:
+        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+            return {"mode": "plain"}  # 缺 path = 无效工作空间
+
+    monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _BadManager())
+    result = await ws.execute(
+        plugins["ctx_factory"](
+            {
+                "current_phase": "init",
+                "task.id": "task_badmeta_1",
+                "execution_context": {
+                    "workspace": {"source_path": "D:/proj/x", "mode": "plain"}
+                },
+            }
+        )
     )
+    assert result.error is not None, "无效 ws_meta 必须显式报错"
+    assert "未返回有效路径" in str(result.error)
+    assert result.state_updates == {}
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_task_default_root_resolution_failure_errors(plugins, monkeypatch):
+    """init（任务管道 + 默认工作空间根解析失败）→ 显式报错，不再静默跳过创建。"""
+    import tests._isolation_path  # noqa: F401
+    import isolation.workspace as ws_mod
+
+    ws = plugins["ws"]
+    monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: None)
+
+    def _boom() -> str:
+        raise RuntimeError("配置读不到")
+
+    monkeypatch.setattr(ws_mod, "get_workspace_base_dir", _boom)
+    result = await ws.execute(
+        plugins["ctx_factory"](
+            {
+                "current_phase": "init",
+                "task.id": "task_rootfail_1",
+                "execution_context": {
+                    "workspace": {"source_path": "", "mode": "plain"}
+                },
+            }
+        )
+    )
+    assert result.error is not None, "默认根解析失败必须显式报错"
+    assert "默认工作空间根解析失败" in str(result.error)
+    assert result.state_updates == {}
 
 
 @pytest.mark.asyncio

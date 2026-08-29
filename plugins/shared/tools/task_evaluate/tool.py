@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import state_fields
+import worktree_merge
 from _eval_core import sanitize_eval_paths
 from task_types import TaskStatus
 
@@ -130,10 +131,10 @@ class _ServiceProviderShim:
     """0.2 服务提供者适配：get(key) 返回 0.2 等价或 None（文档化降级）。
 
     0.1 的 infrastructure.service_provider 已废弃（src/ 已归档）。0.2 sidecar
-    无 agent_registry / tool_registry / workspace_lifecycle_manager /
-    execution_record_storage 等价单例 → 统一返回 None，调用方均有降级守卫
-    （如 _try_merge_before_complete 跳过合并门控、_register_eval_pipelines
-    跳过管道注册）。
+    无 agent_registry / tool_registry / execution_record_storage 等价单例 →
+    统一返回 None，调用方均有降级守卫（如 _register_eval_pipelines 跳过管道
+    注册）。worktree 合并门控已不在此列：0.2 改经 worktree_merge 共享模块
+    本地执行（数据源 state ws_meta），无跨进程服务获取。
     """
 
     def get(self, key: str) -> Any:
@@ -822,16 +823,10 @@ class TaskEvaluateTool(BuiltinTool):
             except Exception as e:
                 logger.error("[TaskEvaluate] 恢复失败状态为完成失败: %s", e)
         else:
-            # worktree 合并内部连跑多个同步 git subprocess（subprocess.run，
-            # _GIT_TIMEOUT=30s/命令），合并成功时 checkout/merge/add/commit/verify
-            # 叠加可阻塞主事件循环数分钟。本函数处于 async 工具执行链中，同步调用会
-            # 冻住主 loop → 所有 asyncio 超时失效 → 此时被终态通知唤醒的父管道首次
-            # LLM 调用会永久卡死。
-            # 丢到线程池执行：git 阻塞不再影响主 loop；合并串行的 threading.Lock
-            # （_get_merge_lock）跨线程有效，串行化语义不变。
-            import asyncio  # noqa: PLC0415
-
-            merge_error = await asyncio.to_thread(self._try_merge_before_complete, task)
+            # worktree 合并门控（0.1 判定）：worktree 模式 completed 前先合并，
+            # 合并成功才变更状态，合并失败则标记为 failed。合并是同步 git 子进程
+            # 串（可阻塞数分钟），门控内部丢线程池执行，不冻主事件循环。
+            merge_error = await self._try_merge_before_complete(task)
             if merge_error:
                 logger.error(
                     "[TaskEvaluate] worktree 合并失败，任务标记为 failed: task_id=%s, error=%s",
@@ -877,25 +872,67 @@ class TaskEvaluateTool(BuiltinTool):
             },
         )
 
-    def _try_merge_before_complete(self, task: Any) -> str | None:
-        """在标记 completed 之前执行 worktree 合并门控（委托 lifecycle）。
+    async def _try_merge_before_complete(self, task: Any) -> str | None:
+        """在标记 completed 之前执行 worktree 合并门控（0.1 判定，进程内本地执行）。
+
+        ws_meta 数据源（0.2 适配）：从管道 state 聚合行解析（task.metadata 兜底）；
+        合并 git 机制经 worktree_merge 共享模块原样执行（同步 git 子进程串，
+        asyncio.to_thread 丢线程池——不冻主事件循环，合并锁跨线程有效）。
+        0.1 的跨进程 ServiceProvider 获取不复存在，也无"服务不可用跳过"分支：
+        ws_meta 读不到 = 合并失败（worktree 产出不能静默丢失）。
 
         Returns:
             None 表示合并成功或不需要合并（plain/shared 模式），
             str 表示合并失败原因，调用方应据此标记任务 failed。
-
-        0.2 迁移（FP-MIGR）：0.1 infrastructure.service_provider 已废弃 →
-        模块级 _get_service_provider() shim（get 恒返回 None，workspace_lifecycle_manager
-        不可用 → 跳过合并门控，文档化降级）。
         """
-        lifecycle = _get_service_provider().get("workspace_lifecycle_manager")
-        if lifecycle is None:
+        ws_meta = await self._read_task_ws_meta(task)
+        return await asyncio.to_thread(
+            worktree_merge.merge_worktree_before_complete, task.id, ws_meta
+        )
+
+    async def _read_task_ws_meta(self, task: Any) -> dict[str, Any]:
+        """任务 ws_meta 数据源（0.2，三路优先级）：
+
+        1. state 行 ``task.ws_meta``——workspace_lifecycle init 经
+           pipeline-state.update 即时镜像（运行中合并门控的权威快路径）；
+        2. state 行 ``ws_meta``——引擎 state_updates 合并的出口键（run 末回写
+           快照后才可见）；
+        3. ``task.metadata["ws_meta"]`` 兜底（YAML 镜像任务）。
+
+        聚合行值可能是 JSON 字符串（DB 投影原样存储），经 state_fields.as_dict
+        还原成 dict；三路皆无返回空 dict（由合并门控按失败裁决，不静默跳过）。
+        返回空时留诊断日志（行数/行键），供合并失败根因定位。
+        """
+        rows = await self._read_state_rows()
+        if rows:
+            row = next(
+                (r for r in rows if str(r.get("pipeline_id") or "") == str(task.id)),
+                None,
+            )
+            if row is not None:
+                for key in ("task.ws_meta", "ws_meta"):
+                    meta = state_fields.as_dict(row.get(key), field=key)
+                    if meta:
+                        return meta
+                logger.warning(
+                    "[TaskEvaluate] ws_meta 诊断：state 行在但无 ws_meta 键 | task_id=%s | 行键=%s",
+                    task.id,
+                    sorted(row.keys()),
+                )
+            else:
+                logger.warning(
+                    "[TaskEvaluate] ws_meta 诊断：state 行数=%d，无本任务行 | task_id=%s",
+                    len(rows),
+                    task.id,
+                )
+        else:
             logger.warning(
-                "[TaskEvaluate] workspace_lifecycle_manager 未注册到 ServiceProvider，跳过合并门控 | task_id=%s",
+                "[TaskEvaluate] ws_meta 诊断：state 聚合行不可用（rows=%r）| task_id=%s",
+                rows,
                 task.id,
             )
-            return None
-        return lifecycle.merge_worktree_before_complete(task.id)
+        meta = (task.metadata or {}).get("ws_meta") if task.metadata else None
+        return meta if isinstance(meta, dict) and meta else {}
 
     async def _fail_task(
         self,

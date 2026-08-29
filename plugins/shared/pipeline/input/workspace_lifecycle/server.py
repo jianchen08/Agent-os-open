@@ -14,7 +14,7 @@ sys.path.insert(0, _this_dir)
 _shared_dir = os.path.join(_this_dir, "..", "..", "..")
 sys.path.insert(0, _shared_dir)
 
-from plugin import WorkspaceLifecyclePlugin, set_state_reader  # noqa: E402
+from plugin import WorkspaceLifecyclePlugin, set_state_reader, set_task_state_writer  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
@@ -41,6 +41,19 @@ async def _on_load(params: dict) -> None:
         set_state_reader(_read_state_rows)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[workspace_lifecycle] state reader 注入失败: %s", exc)
+
+    # 注入 task.* 写面（pipeline-state.update）：init 创建工作空间后把 ws_meta
+    # 以 task.ws_meta 镜像进任务域键空间——update 写直入 state 注册表，运行中
+    # 即时可见（state_updates 合并的 ws_meta 键要等引擎回写快照），供
+    # task_evaluate 合并门控等运行中读面即时消费。
+    try:
+        async def _write_task_state(pipeline_id: str, fields: dict[str, Any]) -> None:
+            handle = plugin.get_capability("pipeline-state")
+            await handle.call("update", {"pipeline_id": pipeline_id, "fields": fields})
+
+        set_task_state_writer(_write_task_state)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[workspace_lifecycle] task state writer 注入失败: %s", exc)
     """Initialize workspace_lifecycle plugin."""
     get_instance()
 

@@ -13,7 +13,8 @@ execute 编排（沿用真实 TaskService + tmp 存储，外部依赖仅 state �
 - 结果处理：unrecoverable 模式耗尽 FAILED、失败计数耗尽 FAILED、通过重置计数、
   完整 retry 反馈（剩余次数/失败明细）、空结果 METRIC_NOT_FOUND；
 - 调用次数上限 EVAL_CALL_LIMIT_EXCEEDED、AMBIGUOUS 短 id 拒绝；
-- 合并门控委托 lifecycle / 无 lifecycle 跳过；
+- 合并门控：ws_meta 缺失即失败（不静默跳过）/ state ws_meta 透传机制层
+  （worktree_merge 替身；真实 git 行为由 tests/plugins/shared/test_worktree_merge.py 覆盖）；
 - 评估子管道注册：root 存在时注册/跳过/异常降级。
 """
 
@@ -69,11 +70,28 @@ async def _new_task(service: Any, *, metadata: dict[str, Any] | None = None) -> 
     return await service.create_task(title="评估任务", description="任务描述", metadata=metadata or {})
 
 
-def _inject_tool(mod: Any, monkeypatch: Any, service: Any) -> tuple[Any, MagicMock]:
+def _inject_tool(
+    mod: Any,
+    monkeypatch: Any,
+    service: Any,
+    merge_result: str | None = None,
+) -> tuple[Any, MagicMock]:
+    """monkeypatch 服务获取/读面/写面与合并机制替身，返回 (tool, state_writer)。
+
+    merge_result：worktree_merge 机制替身返回值（None=合并成功/无需合并；
+    str=失败原因）。门控的 ws_meta 解析仍走真实实现；机制层（git CLI）为
+    外部依赖故以替身注入，真实 git 行为由 tests/plugins/shared/test_worktree_merge.py
+    用真实仓库覆盖。
+    """
     state_writer = AsyncMock()
     monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
     monkeypatch.setattr(mod, "_state_reader", None)
     monkeypatch.setattr(mod, "_state_writer", state_writer)
+
+    def _merge_stub(task_id: str, ws_meta: dict[str, Any]) -> str | None:
+        return merge_result
+
+    monkeypatch.setattr(mod.worktree_merge, "merge_worktree_before_complete", _merge_stub)
     return mod.TaskEvaluateTool(), state_writer
 
 
@@ -150,9 +168,13 @@ class TestServerAssembly:
         monkeypatch.setitem(sys.modules, "tool", fake_mod)
         server_mod = self._load_server()
         out = await server_mod.task_evaluate(action="auto_complete", task_id="t1")
-        assert out == {"task_id": "t1"}
+        # 9de6b56f6 起 server 返回完整 ToolExecutionResult 信封（metadata 携带
+        # result=completed/task_failed 等副作用信号，剥成裸 output 会丢评估证据）
+        assert out["success"] is True
+        assert out["output"] == {"task_id": "t1"}
         out_err = await server_mod.task_evaluate(action="fail", task_id="t1")
-        assert out_err == {"error": "模拟失败"}
+        assert out_err["success"] is False
+        assert out_err["error"] == "模拟失败"
 
 
 # ── 单指标模式（evaluate_single） ────────────────────────────
@@ -421,28 +443,31 @@ class TestHandleEvaluationResult:
 
 
 class TestMergeAndRegister:
-    def test_try_merge_no_lifecycle_skips(self, mod: Any, caplog: Any) -> None:
-        task = MagicMock()
-        task.id = "t1"
-        assert mod.TaskEvaluateTool()._try_merge_before_complete(task) is None
-        assert "跳过合并门控" in caplog.text
+    @pytest.mark.asyncio
+    async def test_try_merge_missing_ws_meta_fails_not_skips(self, mod: Any, monkeypatch: Any) -> None:
+        """ws_meta 拿不到 = 合并失败（worktree 产物不能静默丢失），不再有跳过分支。"""
+        monkeypatch.setattr(mod, "_state_reader", None)
+        err = await mod.TaskEvaluateTool()._try_merge_before_complete(MagicMock(id="t1"))
+        assert err is not None
+        assert "t1" in err and "ws_meta" in err
 
-    def test_try_merge_delegates_to_lifecycle(self, mod: Any, monkeypatch: Any) -> None:
-        calls: list[str] = []
+    @pytest.mark.asyncio
+    async def test_try_merge_delegates_to_local_mechanism(self, mod: Any, monkeypatch: Any) -> None:
+        """门控决策 + 机制执行分层：门控把 state 解析的 ws_meta 透传共享模块并回传结果。"""
+        calls: list[tuple[str, dict[str, Any]]] = []
 
-        class _Lifecycle:
-            def merge_worktree_before_complete(self, task_id: str) -> str:
-                calls.append(task_id)
-                return "merge boom"
+        def fake_merge(task_id: str, ws_meta: dict[str, Any]) -> str | None:
+            calls.append((task_id, ws_meta))
+            return "merge boom"
 
-        class _Provider:
-            def get(self, key: str) -> Any:
-                return _Lifecycle() if key == "workspace_lifecycle_manager" else None
-
-        monkeypatch.setattr(mod, "_get_service_provider", lambda: _Provider())
-        err = mod.TaskEvaluateTool()._try_merge_before_complete(MagicMock(id="t1"))
+        monkeypatch.setattr(mod.worktree_merge, "merge_worktree_before_complete", fake_merge)
+        ws_meta = {"mode": "worktree", "path": "D:/wt", "project_root": "D:/src", "branch": "task/t1"}
+        monkeypatch.setattr(
+            mod, "_state_reader", lambda: [{"pipeline_id": "t1", "ws_meta": ws_meta}]
+        )
+        err = await mod.TaskEvaluateTool()._try_merge_before_complete(MagicMock(id="t1"))
         assert err == "merge boom"
-        assert calls == ["t1"]
+        assert calls == [("t1", ws_meta)]
 
     def test_register_eval_pipelines_with_root(self, mod: Any, monkeypatch: Any) -> None:
         registered: list[tuple[str, str]] = []
@@ -685,8 +710,8 @@ class TestEdgeBranches:
     async def test_merge_fail_complete_evaluation_exception(self, mod: Any, service: Any, monkeypatch: Any) -> None:
         """合并失败标记 failed 时 complete_evaluation(passed=False) 异常 → 降级返回。"""
         task = await _new_task(service)
-        tool, _ = _inject_tool(mod, monkeypatch, service)
-        monkeypatch.setattr(mod.TaskEvaluateTool, "_try_merge_before_complete", lambda self, t: "merge boom")
+        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="merge boom")
+        monkeypatch.setattr(service, "complete_evaluation", AsyncMock(side_effect=RuntimeError("storage down")))
         monkeypatch.setattr(service, "complete_evaluation", AsyncMock(side_effect=RuntimeError("storage down")))
         out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
         assert out.success is False
@@ -805,8 +830,14 @@ class TestEdgeBranches:
 class TestStateRowExecuteMerge:
     @pytest.mark.asyncio
     async def test_state_row_task_then_merge_fail_then_complete(self, mod: Any, service: Any, monkeypatch: Any) -> None:
-        """state 行兜底：读面 task 不存在 → 回退 YAML 任务并完成。"""
-        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"]})
+        """state 行兜底：读面无该任务行 → 回退 YAML 任务并完成（plain ws_meta 走 metadata 兜底）。"""
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1"],
+                "ws_meta": {"mode": "plain", "path": "D:/ws"},
+            },
+        )
         monkeypatch.setattr(mod, "_state_reader", lambda: [])
         monkeypatch.setattr(mod, "_state_writer", AsyncMock())
         monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
