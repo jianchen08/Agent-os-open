@@ -6,14 +6,15 @@
 - routes_missing.py projects_router（7 端点）
 
 端点职责：
-1. 插件内部经 ``from service_access import get_task_service`` 引用（无跨包借用）。
-2. 任务列表/创建不再依赖 memory_store 数据兜底。
-3. task_phase/ac 端点：phase 由任务状态映射，AC 保持未评估占位语义。
-4. projects 域：projects = 容器任务（container task）。创建 project =
-   建容器任务（task_scope=container，含 workspace 关联元数据 ws_meta），
-   list/get/pause/resume/auto-execute/delete = 容器任务生命周期操作。
-5. 能力访问（chat / pipeline-state / pipeline-executor 内核能力）经
-   ``_capability()`` 统一取句柄（懒 import server.plugin；测试可 monkeypatch）。
+1. 任务域读面/写面单一真值 = 管道 state 聚合（pipeline-state.list 的
+   task.* 行）；创建经 tool-executor 走 task_submit 工具（单一业务入口）。
+2. task_phase/ac 端点：phase 由 state 行任务状态映射，AC 保持未评估占位语义。
+3. projects 域：projects = 真实文件夹 + project_registry 登记行（非任务），
+   list/get/pause/resume/auto-execute/delete = 项目生命周期操作；
+   名下子任务摘要读 state 聚合（task.parent_project_id）。
+4. 能力访问（chat / pipeline-state / pipeline-executor / tool-executor 内核
+   能力）经 ``_capability()`` 统一取句柄（懒 import server.plugin；测试可
+   monkeypatch）。
 
 协议：http.handle 工具按 path 分发（plugin.json http_endpoints 声明、内核
 dispatcher 调度的标准插件 HTTP 面模式，与 agent_manager/task_form 同款）。
@@ -31,9 +32,7 @@ from typing import Any
 
 import state_fields  # noqa: PLC0415 — plugins/shared 平铺模块（裸名导入先例 tenant_data）
 
-from enum_utils import safe_enum_value
 from pydantic import BaseModel, Field
-from service_access import get_task_service
 
 # 共享层样板（plugins/shared/http_json.py）入 sys.path 后裸名导入。
 _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -255,19 +254,6 @@ def _map_status_for_api(status: str) -> str:
     return status
 
 
-def _task_model_to_dict(task_model: Any) -> dict[str, Any]:
-    """将 TaskModel dataclass 转为字典。"""
-
-    from dataclasses import asdict  # noqa: PLC0415
-
-    d = asdict(task_model)
-    raw_status = safe_enum_value(task_model.status)
-    d["status"] = _map_status_for_api(raw_status)
-    if hasattr(task_model, "priority") and hasattr(task_model.priority, "value"):
-        d["priority"] = task_model.priority.value
-    return d
-
-
 def _task_to_response(t: dict[str, Any]) -> TaskResponse:
     """将存储层任务字典转为 TaskResponse。"""
 
@@ -308,10 +294,8 @@ def _task_to_response(t: dict[str, Any]) -> TaskResponse:
 
 
 # ════════════════════════════════════════════════════════════
-# 服务与能力访问（插件内部引用；测试可 monkeypatch）
+# 能力访问（测试可 monkeypatch）
 # ════════════════════════════════════════════════════════════
-
-_get_task_service = get_task_service
 
 
 def _capability(name: str) -> Any:
@@ -438,51 +422,29 @@ async def list_tasks(
     skip: int | None = None,
     _user: dict[str, Any] | None = None,
 ) -> TaskListResponse:
-    """获取任务列表。
+    """获取任务列表（state 单一真值：任务 = 管道，行源 = pipeline-state 聚合）。
 
-    支持按状态、优先级和会话 ID 筛选，分页返回。合并 api_store 和
-    TaskStorage（YAML 文件）两个数据源。session_id 筛选基于
-    task.metadata["session_id"] 字段匹配。同时支持 skip 和 offset 参数
-    （skip 优先）。
-
-    GAP-1 统一：任务即管道（state 单一真值）：0.2 提交的任务
-    （task_submit / create_root_task 经 chat.send_message 创建）不再写 YAML，
-    只存在于管道 state 聚合（pipeline-state.list 的 task.* 行）。本端点合并
-    state 聚合行（组装逻辑对齐 task_manage 工具层 _list_tasks_from_state），
-    否则任务管理面板（前端 /ext/task_service/tasks 拉取）看不到 0.2 任务，
-    任务↔管道关系无从体现。state 行与 YAML 行按 pipeline_id 去重（state 优先）。
+    支持按状态、优先级和会话 ID 筛选，分页返回（skip 优先）。session_id
+    筛选基于 task.metadata["session_id"] 字段匹配；组装逻辑对齐 task_manage
+    工具层（前端任务管理面板即本端点拉取）。
     """
     if skip is not None:
         offset = skip
 
     validate_pagination(limit, offset)
 
-    task_service = _get_task_service()
-
     tasks: list[dict[str, Any]] = []
-
-    if task_service is not None:
-        try:
-            ts_tasks = await task_service.list_all(limit=1000, session_id=session_id)
-
-            for tm in ts_tasks:
-                tasks.append(_task_model_to_dict(tm))
-
-        except Exception as exc:
-            logger.warning("从 TaskStorage 加载任务失败: %s", exc)
-
-    # GAP-1 统一：合并 state 聚合行（0.2 任务真值所在；YAML 只读镜像无 0.2 任务）
     state_tasks = await _list_tasks_from_state()
     if state_tasks:
-        seen_ids = {str(t.get("id") or "") for t in tasks}
-        for st in state_tasks:
-            if str(st.get("id") or "") in seen_ids:
-                continue
-            tasks.append(st)
-            seen_ids.add(str(st.get("id") or ""))
+        tasks = list(state_tasks)
 
     if status:
         tasks = [t for t in tasks if t.get("status") == status]
+
+    if session_id:
+        tasks = [
+            t for t in tasks if (t.get("metadata") or {}).get("session_id") == session_id
+        ]
 
     if priority is not None:
         tasks = [t for t in tasks if t.get("priority") == priority]
@@ -592,6 +554,21 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
     return out
 
 
+async def _get_task_row_from_state(task_id: str) -> dict[str, Any] | None:
+    """按 id 从 state 聚合取单个任务行（get/submit/phase 等单任务读面同源）。
+
+    None = state 未出口/桥未就绪，调用方按任务不存在处理——state 是任务域
+    唯一数据源，无 YAML 兜底。
+    """
+    tasks = await _list_tasks_from_state()
+    if not tasks:
+        return None
+    return next(
+        (t for t in tasks if str(t.get("id") or "") == task_id),
+        None,
+    )
+
+
 def _session_anchor(row: dict[str, Any]) -> str | None:
     """会话锚点：任务管道无 sessions 行，thread_id 恒等于自身 pipeline_id；
     出生侧 lineage.origin_session_id 修正后为真 thread id（对齐 task_manage
@@ -638,36 +615,21 @@ async def get_tasks_debug(
     session_id: str | None = None,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """获取任务调试数据（全字段）。"""
+    """获取任务调试数据（state 聚合行全字段）。"""
 
-    task_service = _get_task_service()
+    tasks = await _list_tasks_from_state() or []
 
-    if task_service is None:
-        return {"items": [], "total": 0}
+    if status:
+        tasks = [t for t in tasks if t.get("status") == status]
 
-    try:
-        all_tasks = await task_service.list_all(limit=limit, reverse=(sort_order == "desc"))
+    if session_id:
+        tasks = [
+            t for t in tasks if (t.get("metadata") or {}).get("session_id") == session_id
+        ]
 
-        if status:
-            all_tasks = [t for t in all_tasks if t.status.value == status]
+    tasks.sort(key=lambda t: str(t.get("created_at") or ""), reverse=(sort_order == "desc"))
 
-        if session_id:
-            all_tasks = [t for t in all_tasks if t.metadata.get("session_id") == session_id]
-
-        items = [_task_model_to_dict(t) for t in all_tasks]
-
-        return {"items": items, "total": len(items)}
-
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "获取任务调试数据失败，返回空 | limit=%s status=%s session_id=%s err=%s",
-            limit,
-            status,
-            session_id,
-            exc,
-            exc_info=True,
-        )
-        return {"items": [], "total": 0}
+    return {"items": tasks, "total": len(tasks)}
 
 
 async def _invoke_task_submit_tool(inputs: dict[str, Any], user_sub: str) -> dict[str, Any]:
@@ -808,47 +770,19 @@ async def get_task(
     task_id: str,
     _user: dict[str, Any] | None = None,
 ) -> TaskResponse:
-    """获取指定任务的详情（state 单一真值，YAML 只读镜像留 0.1 存量兜底）。
+    """获取指定任务的详情（state 单一真值，无 YAML 兜底）。
 
-    读法与 list/update 对齐：state 聚合行命中即出口（任务=管道，出生即落
-    state）；未命中回退 YAML 存量记录，双缺才 404。
+    读法与 list/update 同源：state 聚合行命中即出口，未命中 404。
     """
-    state_tasks = await _list_tasks_from_state()
-    if state_tasks:
-        row = next(
-            (t for t in state_tasks if str(t.get("id") or "") == task_id),
-            None,
-        )
-        if row is not None:
-            return _task_to_response(row)
-
-    task = None
-
-    task_service = _get_task_service()
-
-    if task_service is not None:
-        tm = task_service.get_task(task_id)
-
-        if tm is not None:
-            # 跨用户资源隔离：仅允许任务创建者访问自己的任务
-            task_user_id = (tm.metadata or {}).get("user_id")
-            if task_user_id is not None and task_user_id != _current_user(_user).get("sub"):
-                raise APIError(
-                    status_code=404,
-                    error_code="API_NOTF_2004",
-                    message="任务不存在或已被删除",
-                )
-
-            task = _task_model_to_dict(tm)
-
-    if task is None:
+    row = await _get_task_row_from_state(task_id)
+    if row is None:
         raise APIError(
             status_code=404,
             error_code="API_NOTF_2004",
             message="任务不存在或已被删除",
         )
 
-    return _task_to_response(task)
+    return _task_to_response(row)
 
 
 async def update_task(
@@ -902,88 +836,49 @@ async def delete_task(
     task_id: str,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """删除指定任务，根据任务类型执行不同策略：取消运行中的管道，并区分
-    容器子任务与根任务。
+    """删除指定任务（state 单一真值：任务 = 管道）。
 
-    - 容器任务: 软删除（标记取消，保留数据）
-    - 非容器任务(容器的子任务): 取消自己及下级管道 + 删除数据（不清理工作空间）
-    - 非容器任务(根任务): 取消管道 + 清理工作空间 + 删除数据
-
-    GAP-1 统一：0.2 任务 = 管道（state 单一真值，无 YAML
-    记录）——YAML 存储查不到时回退 state 聚合判定存在性，删除 = 调内核
-    pipeline-executor.delete_pipeline 清管道全部执行数据（runs/traces/
-    messages/state/checkpoints + registry 条目）。
+    存在性以 state 聚合为准；删除 = 调内核 pipeline-executor.delete_pipeline
+    级联清理管道全部执行数据（runs/traces/messages/state/checkpoints +
+    registry 条目）。
     """
-
-    task_service = _get_task_service()
-
-    if task_service is None:
+    # state 聚合存在性判定
+    try:
+        handle = _capability("pipeline-state")
+        rows = await handle.call("list", {})
+    except Exception:
+        rows = None
+    row = None
+    if isinstance(rows, list):
+        row = next(
+            (r for r in rows if str(r.get("pipeline_id") or "") == task_id),
+            None,
+        )
+    if row is None:
         raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法删除任务",
+            status_code=404,
+            error_code="API_NOTF_2004",
+            message="任务不存在或已被删除",
         )
-
-    # ① YAML 面（旧任务/容器任务）：task_service.delete_task 级联清理
-    deleted = await task_service.delete_task(task_id)
-
-    if not deleted:
-        # ② state 面（0.2 任务）：state 聚合存在性判定 + 内核删管道数据
-        try:
-            handle = _capability("pipeline-state")
-            rows = await handle.call("list", {})
-        except Exception:
-            rows = None
-        row = None
-        if isinstance(rows, list):
-            row = next(
-                (r for r in rows if str(r.get("pipeline_id") or "") == task_id),
-                None,
-            )
-        if row is None:
-            raise APIError(
-                status_code=404,
-                error_code="API_NOTF_2004",
-                message="任务不存在或已被删除",
-            )
-        try:
-            exec_handle = _capability("pipeline-executor")
-            await exec_handle.call("delete_pipeline", {"pipeline_id": task_id})
-        except Exception as exc:  # noqa: BLE001 — 删除失败透传
-            logger.warning(
-                "[tasks http] delete_pipeline 失败 | task_id=%s | err=%s",
-                task_id,
-                exc,
-            )
-            raise APIError(
-                status_code=500,
-                error_code="TASK_DELETE_FAILED",
-                message=f"任务管道删除失败: {exc}",
-            ) from exc
-        logger.info(
-            "用户 %s 删除 0.2 任务（state 面）: %s",
-            _current_user(_user).get("username", "system"),
+    try:
+        exec_handle = _capability("pipeline-executor")
+        await exec_handle.call("delete_pipeline", {"pipeline_id": task_id})
+    except Exception as exc:  # noqa: BLE001 — 删除失败透传
+        logger.warning(
+            "[tasks http] delete_pipeline 失败 | task_id=%s | err=%s",
             task_id,
+            exc,
         )
-        return {"message": "任务已删除"}
-
-    task = task_service.get_task(task_id)
-
-    if task is not None and task.metadata.get("soft_deleted"):
-        logger.info(
-            "用户 %s 软删除容器任务 %s",
-            _current_user(_user).get("username", "system"),
-            task_id,
-        )
-
-        return {"message": "容器任务已标记删除"}
-
+        raise APIError(
+            status_code=500,
+            error_code="TASK_DELETE_FAILED",
+            message=f"任务管道删除失败: {exc}",
+        ) from exc
     logger.info(
-        "用户 %s 删除任务 %s",
+        "用户 %s 删除任务（state 面）: %s",
         _current_user(_user).get("username", "system"),
         task_id,
     )
-
     return {"message": "任务已删除"}
 
 
@@ -991,32 +886,24 @@ async def submit_task(
     task_id: str,
     _user: dict[str, Any] | None = None,
 ) -> TaskSubmitResponse:
-    """提交任务进入执行队列（pending/failed → 注入模式重跑任务管道）。"""
+    """提交任务进入执行队列（pending/failed → 注入模式重跑任务管道）。
 
-    task_service = _get_task_service()
+    状态门读 state 聚合行（state 单一真值，无 YAML 兜底）。
+    """
+    row = await _get_task_row_from_state(task_id)
 
-    task = None
-
-    if task_service is not None:
-        tm = task_service.get_task(task_id)
-
-        if tm is not None:
-            task = _task_model_to_dict(tm)
-
-    if task is None:
+    if row is None:
         raise APIError(
             status_code=404,
             error_code="API_NOTF_2004",
             message="任务不存在或已被删除",
         )
 
-    current_status = task.get("status", "pending")
-
-    backend_status = current_status
+    current_status = str(row.get("status") or "pending")
 
     allowed_statuses = {"pending", "failed"}
 
-    if backend_status not in allowed_statuses:
+    if current_status not in allowed_statuses:
         raise APIError(
             status_code=400,
             error_code="API_VAL_2003",
@@ -1025,7 +912,7 @@ async def submit_task(
 
     # GAP-1 统一：重跑已有任务 = 注入模式（task_id 即 pipeline_id，retry 映射）
     submitted = await _submit_task_event(
-        title=str(task.get("title") or task_id),
+        title=str(row.get("title") or task_id),
         task_id=task_id,
         user_id=_current_user(_user).get("sub", ""),
     )
@@ -1106,15 +993,6 @@ async def cancel_task(
 ) -> dict[str, Any]:
     """取消指定任务（挂起管道 + lineage 级联）。"""
 
-    task_service = _get_task_service()
-
-    if task_service is None:
-        raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法取消任务",
-        )
-
     # GAP-1 统一：取消 = 挂起任务管道 + lineage 级联
     pipeline_cancelled = await _suspend_task_pipeline(task_id)
 
@@ -1127,25 +1005,6 @@ async def cancel_task(
         pipeline_cancelled,
         cascaded,
     )
-
-    updated_task = task_service.get_task(task_id)
-
-    if updated_task is not None:
-        from dataclasses import asdict as _asdict  # noqa: PLC0415
-
-        task_dict = _asdict(updated_task)
-
-        raw_status = safe_enum_value(updated_task.status)
-
-        task_dict["status"] = _map_status_for_api(raw_status)
-
-        if hasattr(updated_task, "priority") and hasattr(updated_task.priority, "value"):
-            task_dict["priority"] = updated_task.priority.value
-
-        if hasattr(updated_task, "agent_level") and hasattr(updated_task.agent_level, "value"):
-            task_dict["agent_level"] = updated_task.agent_level.value
-
-        return _pydantic_to_dict(_task_to_response(task_dict))
 
     return {
         "success": True,
@@ -1178,27 +1037,20 @@ async def get_task_phase(
     task_id: str,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """获取任务当前执行阶段（状态 → 前端阶段概念映射）。"""
+    """获取任务当前执行阶段（state 行状态 → 前端阶段概念映射）。
 
-    task_service = _get_task_service()
-    if task_service:
-        try:
-            task = task_service.get_task(task_id)
-            if task:
-                status_str = safe_enum_value(task.status)
-                phase, phase_status = _STATUS_TO_PHASE.get(status_str, ("prepare", "pending"))
-                return {
-                    "taskId": task_id,
-                    "currentPhase": phase,
-                    "phaseStatus": phase_status,
-                }
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "解析任务阶段失败，回退默认 prepare/pending | task_id=%s err=%s",
-                task_id,
-                exc,
-                exc_info=True,
-            )
+    state 无此任务行时维持既有缺省形状（prepare/pending）——阶段面板对
+    未知任务的既有契约。
+    """
+    row = await _get_task_row_from_state(task_id)
+    if row is not None:
+        status_str = str(row.get("status") or "pending")
+        phase, phase_status = _STATUS_TO_PHASE.get(status_str, ("prepare", "pending"))
+        return {
+            "taskId": task_id,
+            "currentPhase": phase,
+            "phaseStatus": phase_status,
+        }
 
     return {
         "taskId": task_id,

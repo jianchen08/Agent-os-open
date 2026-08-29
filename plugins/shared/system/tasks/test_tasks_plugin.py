@@ -767,9 +767,16 @@ class TestPanelCreateViaTaskSubmitTool:
 
 
 class TestGetTaskStateRead:
-    """任务详情读面与列表同源（state 单一真值，YAML 留 0.1 存量兜底）。"""
+    """任务域单任务读面（get/submit/phase）与列表同源：state 单一真值，无 YAML 兜底。"""
 
-    async def test_get_task_serves_state_row_without_yaml(
+    @staticmethod
+    def _state_rows(rows: list[dict[str, Any]] | None) -> Any:
+        async def fake_state() -> Any:
+            return rows
+
+        return fake_state
+
+    async def test_get_task_serves_state_row(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import http_api
@@ -782,38 +789,78 @@ class TestGetTaskStateRead:
             "pipeline_run_id": "pipe1abc123",
             "metadata": {},
         }
-
-        async def fake_state() -> Any:
-            return [row]
-
-        def _no_yaml() -> Any:
-            raise AssertionError("state 命中时不得回读 YAML 镜像")
-
-        monkeypatch.setattr(http_api, "_list_tasks_from_state", fake_state)
-        monkeypatch.setattr(http_api, "_get_task_service", _no_yaml)
+        monkeypatch.setattr(
+            http_api, "_list_tasks_from_state", self._state_rows([row])
+        )
 
         resp = await http_api.get_task("pipe1abc123")
         assert resp.id == "pipe1abc123"
         assert resp.status == "completed"
         assert resp.thread_id == "thread-s1"
 
-    async def test_get_task_404_when_state_and_yaml_both_miss(
+    async def test_get_task_404_when_state_misses(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """state 未出口即 404——任务域唯一数据源，无 YAML 兜底面。"""
         import http_api
 
-        async def fake_state() -> Any:
-            return None  # 桥未就绪
-
-        class FakeStore:
-            def get_task(self, task_id: str) -> None:
-                return None
-
-        monkeypatch.setattr(http_api, "_list_tasks_from_state", fake_state)
-        monkeypatch.setattr(http_api, "_get_task_service", lambda: FakeStore())
+        monkeypatch.setattr(http_api, "_list_tasks_from_state", self._state_rows(None))
 
         from http_api import APIError
 
         with pytest.raises(APIError) as ei:
             await http_api.get_task("missing12hex")
         assert ei.value.status_code == 404
+
+    async def test_submit_task_state_gate_allows_pending_and_gates_running(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """重跑状态门读 state 行：pending/failed 放行，running 拒绝。"""
+        import http_api
+
+        def _row(status: str) -> dict[str, Any]:
+            return {"id": "pipe1abc123", "title": "T", "status": status, "metadata": {}}
+
+        calls: list[dict] = []
+
+        class FakeChat:
+            async def call(self, name: str, params: dict) -> dict:
+                calls.append(params)
+                return {"pipeline_id": params.get("pipeline_id", "")}
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeChat())
+
+        # pending 放行 → 注入派发
+        monkeypatch.setattr(
+            http_api, "_list_tasks_from_state", self._state_rows([_row("pending")])
+        )
+        resp = await http_api.submit_task("pipe1abc123", {"sub": "u1"})
+        assert calls[0]["pipeline_id"] == "pipe1abc123"
+        assert calls[0]["background"] is True
+        assert resp.status == "pending"
+
+        # running 拒绝
+        monkeypatch.setattr(
+            http_api, "_list_tasks_from_state", self._state_rows([_row("running")])
+        )
+        from http_api import APIError
+
+        with pytest.raises(APIError) as ei:
+            await http_api.submit_task("pipe1abc123")
+        assert ei.value.status_code == 400
+        assert ei.value.error_code == "API_VAL_2003"
+
+    async def test_get_task_phase_maps_state_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import http_api
+
+        monkeypatch.setattr(
+            http_api,
+            "_list_tasks_from_state",
+            self._state_rows([{"id": "pipe1abc123", "title": "T", "status": "running"}]),
+        )
+
+        out = await http_api.get_task_phase("pipe1abc123")
+        assert out["currentPhase"] == "execute"
+        assert out["phaseStatus"] == "running"
