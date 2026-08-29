@@ -104,6 +104,11 @@ class TerminationAdvisorPlugin(IInputPlugin):
 
         stuck = bool(state.get("stuck_detected", False))
         stuck_reason = state.get("stuck_reason", "") or ""
+        # 评估在途（task_evaluate 已受理，评估重试/耗尽闸门管辖终止）时 stalled
+        # 不击杀：评估等待期的输出重复是提醒循环的预期形态，不是病理循环；
+        # 预算/迭代/超时帽不受此影响，仍绝对生效。
+        if stuck and str(state.get("task.status") or "") == "evaluating":
+            stuck = False
 
         stats = state.get("track.execution_stats", {}) or {}
         iteration = stats.get("iteration", state.get(StateKeys.ITERATION, 0)) or 0

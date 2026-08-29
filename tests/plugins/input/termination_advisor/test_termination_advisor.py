@@ -98,6 +98,37 @@ def test_stuck_detected_stops() -> None:
     assert "tool repeat x3" in status["stop_reason"]
 
 
+def test_stuck_while_evaluating_defers_to_evaluation_gate() -> None:
+    """评估在途（task.status=evaluating）stalled 不击杀：评估等待期的输出重复
+    是提醒循环的预期形态，终止交由评估重试/耗尽闸门管辖（控制状态键契约
+    ADR 2026-08-30：stalled 署名不得抢杀在飞评估）。"""
+    plugin = _make_plugin()
+    updates = asyncio.run(
+        plugin._do_work(
+            _ctx(
+                _base_state(
+                    stuck_detected=True,
+                    stuck_reason="Output repeated 3 times",
+                    **{"task.status": "evaluating"},
+                )
+            )
+        )
+    )
+    assert "should_stop" not in updates, "评估在途不得写 should_stop"
+    assert "router.stop_reason" not in updates, "评估在途不得落终止署名"
+    assert _status(updates)["convergence"] == "converging"
+
+
+def test_stuck_without_task_status_still_stops() -> None:
+    """无任务上下文（会话管道）/非评估态的卡死照常击杀——让位仅限评估在途。"""
+    plugin = _make_plugin()
+    updates = asyncio.run(
+        plugin._do_work(_ctx(_base_state(stuck_detected=True, stuck_reason="loop")))
+    )
+    assert updates["should_stop"] is True
+    assert updates["router.stop_reason"] == "stalled"
+
+
 def test_iteration_over_cap_stops() -> None:
     plugin = _make_plugin()
     updates = asyncio.run(

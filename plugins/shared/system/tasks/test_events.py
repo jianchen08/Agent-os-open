@@ -167,6 +167,49 @@ class _BrokenUpdateStateCap(_RecordingStateCap):
         return await super().call(method, params)
 
 
+# ── 终态对账（两态模型绑定不变量：派生 task_failed 须补落 state task.status）──
+
+
+def test_run_failed_reconciles_state_task_status_to_failed():
+    """kill 方未随写 task.status（如 stalled 署名终止）→ 派生时单点补落。"""
+    rows = [_task_row("running")]
+    bus = _FakeBusCap()
+    cap = _RecordingStateCap(rows)
+    emitted = asyncio.run(
+        events.handle_run_terminal_event("run.failed", {"pipeline_id": "pipe_t1"}, cap, bus)
+    )
+    assert emitted == 1
+    reconcile = [u for u in cap.updates if u["fields"] == {"task.status": "failed"}]
+    assert reconcile, "run.failed 派生 task_failed 必须对账写回 state task.status"
+    assert reconcile[0]["pipeline_id"] == "pipe_t1"
+    # 挂号清除照旧发生（父管道锚点在 tags 中）
+    clears = [u for u in cap.updates if "task.subtasks_pending.pipe_t1" in u["fields"]]
+    assert clears, "挂号清除不受对账影响"
+
+
+def test_run_failed_skips_reconcile_when_state_already_failed():
+    """state 已是 failed（评估闸门自落）→ 不重复写，仅挂号清除。"""
+    rows = [_task_row("failed")]
+    cap = _RecordingStateCap(rows)
+    asyncio.run(
+        events.handle_run_terminal_event("run.failed", {"pipeline_id": "pipe_t1"}, cap, bus := _FakeBusCap())
+    )
+    assert all(u["fields"] != {"task.status": "failed"} for u in cap.updates), (
+        "state 已终态不得重复写"
+    )
+
+
+def test_reconcile_write_failure_does_not_break_derivation():
+    """对账写失败仅告警，事件派生与挂号清除照常。"""
+    rows = [_task_row("running")]
+    bus = _FakeBusCap()
+    cap = _BrokenUpdateStateCap(rows)
+    emitted = asyncio.run(
+        events.handle_run_terminal_event("run.failed", {"pipeline_id": "pipe_t1"}, cap, bus)
+    )
+    assert emitted == 1, "对账写失败不得吞掉事件派生"
+
+
 def test_pending_clear_fields_from_terminal_tags():
     tags = {"task_id": "pipe_t1", "parent_pipeline_id": "pipe_parent"}
     assert events.pending_registration_clear_fields(tags) == {

@@ -124,6 +124,21 @@ async def handle_run_terminal_event(
         return 0
     emitted = 0
     for name, tags in derive_task_terminal_events(event_name, row):
+        # 终态对账（两态模型绑定不变量）：派生 task_failed 而该管道 state 的
+        # task.status 未达 failed（kill 方未随写，如 stalled/预算署名终止），
+        # 由此单点补落——读面（前端/轮询）否则永久看到 running。completed 由
+        # 评估闸门自落，无需对账；写失败仅告警不阻断事件派生。
+        if name == "task_failed" and str(row.get("task.status") or "") != "failed":
+            try:
+                await state_capability.call(
+                    "update",
+                    {"pipeline_id": pipeline_id, "fields": {"task.status": "failed"}},
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[task_service] task.status 终态对账写回失败（不影响事件派生）| pipeline=%s",
+                    pipeline_id,
+                )
         try:
             await bus_capability.call("emit_domain", {"event": name, "tags": tags})
             emitted += 1
