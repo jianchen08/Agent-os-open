@@ -1,8 +1,8 @@
 /**
  * Agent Tab Item 组件
  *
- * 显示单个 Agent 标签页
- * 支持主 Tab（L1，不可关闭）和子 Tab（L2/L3，可关闭）
+ * 显示单个管道标签页：主 Tab（不可关闭）显示"主管道"，子 Tab 显示任务标题。
+ * 层级关系由管道管理面板的树形结构承载，标签栏不展示层级徽章。
  *
  * 注意：Agent 切换功能位于会话列表三点菜单（SessionList），
  *       模型名显示位于对话栏 header（ChatContainer），
@@ -10,7 +10,6 @@
  */
 
 import { X } from '@/assets/icons'
-import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import type { AgentLevel } from '@/types/models'
 
@@ -68,25 +67,6 @@ const getStatusIcon = (status: AgentTabStatus) => {
   }
 }
 
-/** 获取 Agent 层级标签 */
-const getAgentLevelBadge = (level: AgentLevel | undefined) => {
-  if (!level) return null
-
-  const levelConfig = {
-    1: { label: 'L1', variant: 'default' as const },
-    2: { label: 'L2', variant: 'secondary' as const },
-    3: { label: 'L3', variant: 'outline' as const },
-  }
-
-  const config = levelConfig[level]
-
-  return (
-    <Badge variant={config.variant} className="h-icon-md px-1.5 py-0 text-xs">
-      {config.label}
-    </Badge>
-  )
-}
-
 /**
  * AgentTabItem 组件
  */
@@ -127,8 +107,6 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClos
       >
         {getStatusIcon(tab.status)}
       </span>
-
-      {getAgentLevelBadge(tab.agentLevel)}
 
       <span className="truncate text-sm font-medium">{tab.name}</span>
 

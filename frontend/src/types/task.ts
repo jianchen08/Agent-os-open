@@ -328,7 +328,7 @@ export interface AgentTab {
   parentRecordId?: string
   /** 管道运行实例 ID（用于加载子管道消息） */
   pipelineRunId?: string
-  /** 层级路径（如 ['主Agent', '规划Agent']） */
+  /** 层级路径（如 ['主管道', '规划Agent']） */
   path: string[]
   /** Tab 状态 */
   status: AgentTabStatus

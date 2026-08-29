@@ -218,10 +218,10 @@ function buildMainTab(
 ): AgentTab {
   return {
     id: `main-${sessionId}`,
-    agentId: mainAgentId, agentName: '主Agent', agentLevel: 1,
+    agentId: mainAgentId, agentName: '主管道', agentLevel: 1,
     taskId: undefined, parentRecordId: undefined,
     pipelineRunId: mainPipelineId || undefined,
-    path: ['主Agent'], status: 'running', hasUnread: false,
+    path: ['主管道'], status: 'running', hasUnread: false,
     canClose: false, messages: [],
   }
 }
@@ -701,7 +701,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     const tabId = `sub-${parentRecordId}`
 
     set((state) => {
-      const path = ['主Agent', agentName]
+      const path = ['主管道', agentName]
       const existingTab = state.tabs.find((t) => t.id === tabId)
 
       if (existingTab) {
