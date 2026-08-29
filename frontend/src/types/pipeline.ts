@@ -6,8 +6,8 @@
  * 为主键维护注册表，同一管道多条 run 取最新。
  */
 
-/** 管道运行状态（对齐内核 RunStatus，lowercase） */
-export type PipelineStatus = 'running' | 'suspended' | 'completed' | 'failed'
+/** 管道运行状态（对齐内核 RunStatus 五态，lowercase） */
+export type PipelineStatus = 'running' | 'suspended' | 'completed' | 'failed' | 'cancelled'
 
 /** 管道运行快照条目 */
 export interface PipelineRunInfo {
@@ -76,9 +76,10 @@ export interface PipelineViewEntry {
   currentPhase?: string
   /** 消息条数（state.messages 规模，迭代轮次的粗粒度指标） */
   messageCount?: number
-  /** 任务原始状态（task.status——evaluating/planning 等细态不被 4 态映射吞掉） */
+  /** 任务域状态（task.status 原值；两态模型：仅任务条目有，与运行态图标
+   * 分离展示，词汇经 TASK_STATUS_LABELS 中文化） */
   taskStatus?: string
-  /** 管道 state 真值状态（state['task.status'] ?? state.status） */
+  /** 管道 state 真值任务状态（state['task.status']） */
   stateStatus?: string
   /** 管道 state 是否已结束（state.ended） */
   stateEnded?: boolean

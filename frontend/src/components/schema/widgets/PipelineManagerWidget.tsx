@@ -13,6 +13,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  Ban,
   ChevronRight,
   CircleDot,
   CheckCircle2,
@@ -63,8 +64,11 @@ function taskStatusToPipelineStatus(taskStatus: string | undefined): PipelineSta
       return 'completed'
     case 'failed':
     case 'timeout':
-    case 'cancelled':
       return 'failed'
+    case 'cancelled':
+    case 'canceled':
+      // 绑定语义对齐：任务取消 → 运行取消（非失败）
+      return 'cancelled'
     default:
       return null
   }
@@ -112,12 +116,40 @@ function entryTokenTotal(entry: PipelineViewEntry): number | null {
   return null
 }
 
-/** 管道状态 → 展示文案 */
+/** 管道运行状态 → 展示文案（对齐内核 RunStatus 五态；非任务条目仅此一态） */
 const PIPELINE_STATUS_LABELS: Record<string, string> = {
   running: '运行中',
   suspended: '已暂停',
   completed: '已完成',
   failed: '失败',
+  cancelled: '已取消',
+}
+
+/**
+ * 任务域状态 → 展示文案（两态模型：任务条目的第二态，与运行态分离展示）。
+ * 权威词汇 = tasks 插件 TaskStatus 七态；衍生值（删除/待评估等）一并覆盖，
+ * 未知值回退原串。
+ */
+const TASK_STATUS_LABELS: Record<string, string> = {
+  pending: '待执行',
+  running: '运行中',
+  evaluating: '评估中',
+  planning: '规划中',
+  stopped: '已暂停',
+  paused: '已暂停',
+  suspended: '已暂停',
+  blocked: '已阻塞',
+  completed: '已完成',
+  failed: '已失败',
+  timeout: '已超时',
+  cancelled: '已取消',
+  canceled: '已取消',
+  deleted: '已删除',
+  pending_evaluation: '待评估',
+}
+
+function taskStatusLabel(status: string): string {
+  return TASK_STATUS_LABELS[status] ?? status
 }
 
 /** 状态 → 图标 + 颜色 */
@@ -127,6 +159,7 @@ function statusIcon(status: string): { icon: React.ReactNode; color: string; lab
     suspended: { icon: <PauseCircle className="h-4 w-4" />, color: 'text-status-pending' },
     completed: { icon: <CheckCircle2 className="h-4 w-4" />, color: 'text-status-success' },
     failed: { icon: <XCircle className="h-4 w-4" />, color: 'text-status-error' },
+    cancelled: { icon: <Ban className="h-4 w-4" />, color: 'text-muted-foreground' },
   }
   const conf = map[status] ?? { icon: <CircleDot className="h-4 w-4" />, color: 'text-status-pending' }
   return { icon: conf.icon, color: conf.color, label: PIPELINE_STATUS_LABELS[status] ?? status }
@@ -225,7 +258,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         // 原始状态与 state 真值（不被 4 态映射吞掉——evaluating/planning 等细态可见）
         taskStatus: task ? String(task.status ?? '') || undefined : undefined,
         stateStatus: st
-          ? String(st.state['task.status'] ?? st.state.status ?? '') || undefined
+          ? String(st.state['task.status'] ?? '') || undefined
           : undefined,
         stateEnded: st?.state.ended === true ? true : undefined,
         rawError: st?.state.raw_error ?? undefined,
@@ -285,7 +318,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         currentPhase: st?.state.current_phase,
         messageCount: st?.state.message_count,
         stateStatus: st
-          ? String(st.state['task.status'] ?? st.state.status ?? '') || undefined
+          ? String(st.state['task.status'] ?? '') || undefined
           : undefined,
         stateEnded: st?.state.ended === true ? true : undefined,
         rawError: st?.state.raw_error ?? undefined,
@@ -318,7 +351,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         sessionTitle: session ? session.title : undefined,
         currentPhase: s.current_phase,
         messageCount: s.message_count,
-        stateStatus: String(s['task.status'] ?? s.status ?? '') || undefined,
+        stateStatus: String(s['task.status'] ?? '') || undefined,
         stateEnded: s.ended === true ? true : undefined,
         rawError: s.raw_error ?? undefined,
         // 工作区坐标（state 真值：ws_meta.path/workspace；替代旧
@@ -1135,13 +1168,14 @@ function EntryRow({
         </span>
         {/* 名称 */}
         <span className="text-foreground/90 min-w-0 flex-1 truncate text-sm">{entry.name}</span>
-        {/* 原始状态（与 4 态标签不同才显示：evaluating/planning 等细态） */}
-        {entry.taskStatus && status.label !== entry.taskStatus && (
+        {/* 任务态（两态模型：任务条目独立展示任务域状态，与运行态图标分离；
+            非任务条目无 taskStatus 不渲染。原始值进 title 不占版面） */}
+        {entry.taskStatus && (
           <span
-            className="text-muted-foreground/70 hidden shrink-0 text-[10px] font-mono md:inline"
-            title="任务原始状态"
+            className="bg-muted text-muted-foreground hidden shrink-0 rounded px-1 py-0 text-[10px] md:inline"
+            title={`任务状态：${taskStatusLabel(entry.taskStatus)}（原始值 ${entry.taskStatus}）`}
           >
-            {entry.taskStatus}
+            任务:{taskStatusLabel(entry.taskStatus)}
           </span>
         )}
         {/* 循环体阶段（内核 state.current_phase：init/main/exit…） */}
@@ -1285,7 +1319,7 @@ function EntryDetail({ entry, depth }: { entry: PipelineViewEntry; depth: number
   if (entry.endedAt) rows.push(['结束', entry.endedAt])
   if (entry.agentName) rows.push(['Agent', entry.agentName])
   // state 真值关键数据（任务条目上的关键信息不缺位）
-  if (entry.taskStatus) rows.push(['任务状态', entry.taskStatus])
+  if (entry.taskStatus) rows.push(['任务状态', `${taskStatusLabel(entry.taskStatus)}（${entry.taskStatus}）`])
   if (entry.stateStatus) rows.push(['State 状态', entry.stateStatus])
   if (entry.stateEnded !== undefined) rows.push(['已结束', entry.stateEnded ? '是' : '否'])
   if (entry.currentPhase) rows.push(['当前阶段', entry.currentPhase])
@@ -1429,9 +1463,12 @@ function PipelineTable({
                     >
                       {status.icon}
                       {status.label}
-                      {entry.taskStatus && status.label !== entry.taskStatus && (
-                        <span className="text-muted-foreground/70 text-[10px] font-mono">
-                          {entry.taskStatus}
+                      {entry.taskStatus && (
+                        <span
+                          className="bg-muted text-muted-foreground rounded px-1 py-0 text-[10px]"
+                          title={`任务状态：${taskStatusLabel(entry.taskStatus)}（原始值 ${entry.taskStatus}）`}
+                        >
+                          任务:{taskStatusLabel(entry.taskStatus)}
                         </span>
                       )}
                     </span>

@@ -4,7 +4,8 @@
  *
  * 验证任务管理面板（管道总览）三个行为修复：
  * - 未知状态的任务不再被丢弃（原 taskStatusToPipelineStatus 返回 null 即 continue）；
- * - 条目行显示任务原始状态（evaluating 等细态不被 4 态映射吞掉）；
+ * - 条目行显示任务态 chip（两态模型：任务域状态与运行态分离，中文化标签，
+ *   未知值回退原串——细态不被运行态映射吞掉）；
  * - 展开详情含 state 真值行（任务状态/State 状态/已结束/当前阶段/消息条数）。
  *
  * 批次 4 适配：runs/states/全量任务已迁 query（usePipelineRunsQuery /
@@ -78,6 +79,13 @@ const seed = vi.hoisted(() => {
       title: '未知状态任务',
       status: 'pending_review', // 4 态映射 → null（原实现直接丢弃）
       pipeline_run_id: 'pipeB',
+      agent_name: 'general_agent',
+    },
+    {
+      id: 'task-cancel',
+      title: '取消任务',
+      status: 'cancelled', // 绑定语义：任务取消 → 运行取消（非失败）
+      pipeline_run_id: 'pipeC',
       agent_name: 'general_agent',
     },
   ]
@@ -234,14 +242,18 @@ describe('PipelineManagerWidget', () => {
     vi.mocked(navigateToPipeline).mockReset()
   })
 
-  it('未知状态任务保留且显示原始状态', async () => {
+  it('未知状态任务保留且任务态 chip 可见', async () => {
     renderWithProviders(<PipelineManagerWidget />)
     // 两个任务都出现（未知状态不再被吞）；树视图+列表视图双渲染 → 用 getAll
     expect((await screen.findAllByText('评估中任务')).length).toBeGreaterThanOrEqual(1)
     expect((await screen.findAllByText('未知状态任务')).length).toBeGreaterThanOrEqual(1)
-    // 原始状态文本可见（细态不被 4 态文案吞掉）
-    expect((await screen.findAllByText('evaluating')).length).toBeGreaterThanOrEqual(1)
-    expect((await screen.findAllByText('pending_review')).length).toBeGreaterThanOrEqual(1)
+    expect((await screen.findAllByText('取消任务')).length).toBeGreaterThanOrEqual(1)
+    // 任务态 chip 与运行态图标分离展示：细态中文化（evaluating → 评估中），
+    // 未知值回退原串（pending_review）——原始值经 title 可查不占版面
+    expect((await screen.findAllByText(/任务:评估中/)).length).toBeGreaterThanOrEqual(1)
+    expect((await screen.findAllByText(/任务:pending_review/)).length).toBeGreaterThanOrEqual(1)
+    // 绑定语义：任务取消 → 运行态图标落「已取消」（非失败）
+    expect((await screen.findAllByTitle(/运行状态：已取消/)).length).toBeGreaterThanOrEqual(1)
   })
 
   it('展开详情含 state 真值行', async () => {
