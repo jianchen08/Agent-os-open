@@ -3,6 +3,7 @@
 import { ArtifactPreviewWidget } from '@/components/schema/widgets/ArtifactPreviewWidget'
 import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
 import { CodeBlockWidget } from '@/components/schema/widgets/CodeBlockWidget'
+import { ContextUsageWidget } from '@/components/schema/widgets/ContextUsageWidget'
 import { DigitalHumanWidget } from '@/components/schema/widgets/DigitalHumanWidget'
 import {
   AgentsPanel,
@@ -123,6 +124,11 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'text_diff', component: TextDiffWidget, spaces: ['workspace', 'fullscreen'], fallback: 'code_block' },
   { name: 'image_annotation', component: ImageAnnotationWidget, spaces: ['workspace', 'fullscreen'], fallback: 'text_diff' },
   { name: 'media_timeline', component: MediaTimelineWidget, spaces: ['workspace', 'fullscreen'], fallback: 'text_diff' },
+  // 输入框上下文用量指示器（chat-input 空间 context_usage 槽位）：数据由插件
+  // ui_schema 声明（datasourceUri + refresh），组件按当前管道从 state 提取
+  // track.llm_usage / llm_model。spaces 用 'chat'——chat-input 不是
+  // RenderingSpaceType 枚举值（槽位语义靠声明 space 过滤，解析只按 type 查表）
+  { name: 'context_usage', component: ContextUsageWidget, spaces: ['chat'] },
 ]
 
 /**

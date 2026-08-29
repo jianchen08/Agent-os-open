@@ -27,6 +27,25 @@ export async function fetchPipelineRuns(params?: {
   return response.data.items ?? []
 }
 
+/**
+ * state["track.llm_usage"] 结构（track Output 插件跨轮累加，plugin.py
+ * _collect_token_usage）。`total_*` 是管道累计，`last_*` 是本轮单轮值。
+ * 输入框指示器用 last_* 表达「当前上下文窗口占用」。
+ */
+export interface PipelineLlmUsage {
+  total_input_tokens?: number
+  total_output_tokens?: number
+  total_tokens?: number
+  total_cached_tokens?: number
+  total_missed_tokens?: number
+  total_cache_hit_ratio?: number
+  last_input_tokens?: number
+  last_output_tokens?: number
+  last_cached_tokens?: number
+  last_missed_tokens?: number
+  last_cache_hit_ratio?: number
+}
+
 /** 管道 state 摘要（内核白名单裁剪：phase/迭代/上下文，messages 只出口条数） */
 export interface PipelineStateSummary {
   current_phase?: string
@@ -52,6 +71,14 @@ export interface PipelineStateSummary {
   // 血缘根会话（task_submit 出生写面）：自环子任务管道（thread=自身 id）的
   // 真实归属用户会话，任务管理面板跨会话跳转的定位锚点
   'lineage.origin_session_id'?: string
+  // LLM 观测字段（内核 STATE_SUMMARY_KEYS 放行）：track 插件每轮把累计/单轮
+  // token 写入 state，llm_core 写入实际模型名——chat-input 空间 context_usage
+  // 声明的数据源，覆盖输入框用量指示器（模型名 + 上下文圆环）。
+  'track.llm_usage'?: PipelineLlmUsage
+  'track.total_tokens'?: number
+  'cost_control.total_tokens'?: number
+  'cost_control.usage_percent'?: number
+  'llm_model'?: string
   // 工作区坐标（workspace_lifecycle init 写入；R3 裁定：所有管道类型的工作区
   // 关联底座——path=worktree 副本或 plain 目录，project_root 是源根不用于关联）
   workspace?: string
