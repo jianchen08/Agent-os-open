@@ -78,14 +78,62 @@ describe('功能点：render 声明分支注入条目增强（file_read → read
     expect(out.onOpenFile).toBeUndefined()
   })
 
-  it('声明 form 卡 → 无 meta（summary/filePath 均不注入）', () => {
+  it('声明 form 卡（task_submit）→ 通用摘要兜底=goal_title，filePath 仍不注入', () => {
     loadRenderIntents([{ name: 'task_submit', render: { card: 'form' } }])
     const out = enhanceActivityWithToolConfig(
       makeActivity('task_submit'),
-      makeToolCall('task_submit', { goal_title: 'x' }, { task_id: 't-1' }),
+      makeToolCall('task_submit', { goal_title: '修复登录超时' }, { task_id: 't-1' }),
+    )
+    expect(out.subtitle).toBe('修复登录超时')
+    expect(out.filePath).toBeUndefined()
+  })
+})
+
+describe('功能点：通用对象摘要兜底（form/table/无声明工具的条目信息量对齐文件卡）', () => {
+  it('声明 table 卡（list_directory）→ 摘要=args.path', () => {
+    loadRenderIntents([{ name: 'list_directory', render: { card: 'table' } }])
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('list_directory'),
+      makeToolCall('list_directory', { path: 'src/utils' }, { items: [{ name: 'a.py', size: 1 }] }),
+    )
+    expect(out.subtitle).toBe('src/utils')
+    expect(out.filePath).toBeUndefined()
+  })
+
+  it('无任何声明（L0）→ 摘要按字段族特异性取首个（title 优先于 content）', () => {
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('custom_ask'),
+      makeToolCall('custom_ask', { content: '正文内容', title: '关于部署的问题' }, { ok: true }),
+    )
+    expect(out.subtitle).toBe('关于部署的问题')
+  })
+
+  it('无对象字段（数值/对象参数）→ 不硬造摘要', () => {
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('metrics_query'),
+      makeToolCall('metrics_query', { limit: 10, filter: { a: 1 } }, { count: 3 }),
     )
     expect(out.subtitle).toBeUndefined()
-    expect(out.filePath).toBeUndefined()
+  })
+
+  it('args 缺位 → 回落 result.task_id', () => {
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('evaluator'),
+      makeToolCall('evaluator', { top_k: 5 }, { task_id: 't9abc', overall_passed: true }),
+    )
+    expect(out.subtitle).toBe('t9abc')
+  })
+
+  it('长文本折叠空白并截断：≤201 字符且以省略号结尾（性质断言）', () => {
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('long_note'),
+      makeToolCall('long_note', { content: `${'a'.repeat(500)}\n  尾部` }, undefined),
+    )
+    expect(out.subtitle).toBeDefined()
+    expect(out.subtitle?.length).toBeLessThanOrEqual(201)
+    expect(out.subtitle?.endsWith('…')).toBe(true)
+    expect(out.subtitle?.startsWith('aaa')).toBe(true)
+    expect(out.subtitle?.includes('\n')).toBe(false)
   })
 })
 

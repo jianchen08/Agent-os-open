@@ -14,6 +14,7 @@ import {
   applyRenderIntent,
   buildRenderContext,
   deriveCardMeta,
+  deriveGenericSummary,
   getRenderIntent,
   inferRenderIntent,
 } from './dshRenderIntent'
@@ -128,9 +129,31 @@ function applyCardMeta(
 /**
  * 使用工具配置增强 ActivityData
  *
- * 在 toolCallToActivity 转换后调用，用工具配置覆盖/增强默认渲染
+ * 在 toolCallToActivity 转换后调用，用工具配置覆盖/增强默认渲染。
+ * 各声明分支（render/chat_card/契约/L0）都未产出条目摘要时，按通用对象
+ * 字段族兜底推导一句话摘要（form/table 卡与无声明工具的条目信息量对齐
+ * file_read/write 卡）。
  */
 export function enhanceActivityWithToolConfig(
+  activity: ActivityData,
+  toolCall: MessageToolCall,
+  options?: {
+    onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void>
+  },
+): ActivityData {
+  const enhanced = enhanceWithDeclarations(activity, toolCall, options)
+  if (enhanced.type !== 'tool_call' || !enhanced.toolName || enhanced.subtitle) {
+    return enhanced
+  }
+  const summary = deriveGenericSummary(buildRenderContext(toolCall))
+  return summary ? { ...enhanced, subtitle: summary } : enhanced
+}
+
+/**
+ * 声明级联增强（render 声明 → chat_card 声明 → output_schema 契约 → 数据路由
+ * → L0 推断），不含通用摘要兜底。
+ */
+function enhanceWithDeclarations(
   activity: ActivityData,
   toolCall: MessageToolCall,
   options?: {

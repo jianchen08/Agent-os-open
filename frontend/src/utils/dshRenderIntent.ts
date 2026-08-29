@@ -468,6 +468,38 @@ export interface CardMeta {
 const QUERY_FIELDS = ['args.query', 'args.pattern', 'args.keyword', 'args.q', 'args.search', 'args.regex'] as const
 
 /**
+ * 通用对象摘要字段族：专属卡摘要（read→路径、terminal→命令等）缺位时的
+ * 兜底推导顺序——args 侧"操作对象"字段按特异性排序，result 侧收尾。
+ */
+const SUMMARY_FIELDS: readonly string[] = [
+  'args.path', 'args.file_path', 'args.save_path', 'args.source', 'args.url',
+  'args.query', 'args.pattern', 'args.keyword', 'args.title', 'args.goal_title',
+  'args.task_id', 'args.name', 'args.workspace', 'args.tool_call_id',
+  'args.pipeline_run_id', 'args.trigger_id', 'args.session_id',
+  'args.message', 'args.content',
+  'result.task_id',
+]
+
+/** 摘要单行最大长度（超长截断，展示端另有 CSS truncate） */
+const SUMMARY_MAX_LEN = 200
+
+/**
+ * 通用对象摘要：按字段族取首个非空字符串值，折叠空白为单行——
+ * 工具卡片条目"对某个对象的操作"一句话（对齐 file_read/write 卡的条目信息量）。
+ */
+export function deriveGenericSummary(ctx: RenderContext): string | undefined {
+  for (const field of SUMMARY_FIELDS) {
+    const source: 'args' | 'result' = field.startsWith('args.') ? 'args' : 'result'
+    const value = resolvePath(source, field.slice(field.indexOf('.') + 1), ctx)
+    if (typeof value !== 'string') continue
+    const summary = value.replace(/\s+/g, ' ').trim()
+    if (!summary) continue
+    return summary.length > SUMMARY_MAX_LEN ? `${summary.slice(0, SUMMARY_MAX_LEN)}…` : summary
+  }
+  return undefined
+}
+
+/**
  * 按 render 意图提取条目元信息（纯函数，与 payload 构造器同字段族）。
  * read/file/image/diff → filePath + summary；terminal/web/search → summary；
  * table/form/generic → 无（返回空对象）。

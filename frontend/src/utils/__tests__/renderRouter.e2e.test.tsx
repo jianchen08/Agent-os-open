@@ -108,7 +108,8 @@ describe('声明路由 e2e：task_submit → form 卡（任务表单渲染提交
     render(<ActivityCard defaultExpanded activity={enhanced as ActivityData} />)
 
     expect(screen.getByText('任务提交')).toBeInTheDocument()
-    expect(screen.getByText('实现登录')).toBeInTheDocument()
+    // 目标对象两处可见：条目摘要行（折叠态）+ 表单 kv 字段（展开态）
+    expect(screen.getAllByText('实现登录').length).toBeGreaterThan(0)
     expect(screen.getByText('t-1')).toBeInTheDocument()
   })
 })
