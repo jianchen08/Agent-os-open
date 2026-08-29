@@ -10,6 +10,9 @@ E2E 测试：任务状态流转（2026-08-24 职责边界裁定）
   3. 终态裁决在任务域：task_evaluate 经 pipeline-state.update 写
      completed/failed；未评估任务不被内核补 completed（保持 running 或
      pending_evaluation，绝不静默 completed）
+  4. 用户旅程断言：创建后 GET /ext/task_service/tasks/{id} 详情必须 200
+     （详情读面与列表同源 state；回归防护：详情读面曾钉死退役 YAML 镜像，
+     列表可见而详情 404）
 
 数据清理：本文件创建的任务注册到 cleanup_sessions（删会话级数据）；
 CI 用 :memory: 内存库无持久影响，本地反复跑用 clear-all 端点清执行数据。
@@ -76,6 +79,31 @@ def _find_pipeline_state(body, pipeline_id: str) -> dict | None:
     return None
 
 
+def _assert_detail_openable(token, kernel_url, task_id: str, title: str) -> None:
+    """用户旅程断言：任务详情必须打得开（创建 → 列表可见 → 详情 200）。
+
+    出生 state 在创建请求返回前已三段落库，正常一次即 200；短轮询只为吸收
+    聚合读取的亚秒级传播延迟。
+    """
+    deadline = time.time() + 15
+    last_status, last_body = 0, None
+    while time.time() < deadline:
+        last_status, last_body, _ = http_get_with_auth(
+            f"{kernel_url}/ext/task_service/tasks/{task_id}", token=token, timeout=10
+        )
+        if last_status == 200:
+            break
+        time.sleep(1)
+    assert last_status == 200, (
+        f"任务详情应 200（详情读面须与列表同源），task_id={task_id}，"
+        f"实际 {last_status}: {last_body}"
+    )
+    assert last_body is not None and last_body.get("id") == task_id, (
+        f"详情应返回该任务，实际 {last_body}"
+    )
+    assert last_body.get("title") == title, f"详情 title 应一致，实际 {last_body}"
+
+
 class TestTaskStateFlow:
     """任务状态流转：出生 pending → 执行 running（不再被内核补 completed）。"""
 
@@ -100,7 +128,7 @@ class TestTaskStateFlow:
         assert status == 200, f"创建任务应 200，实际 {status}: {body}"
         task_id = body.get("id") or body.get("task_id")
         assert task_id, f"创建任务应返回 id，实际 {body}"
-
+        _assert_detail_openable(token, kernel_url, str(task_id), "e2e 任务状态出生测试")
         # 出生即落 pipeline_state 表（chat_send_handler 创建分支），聚合可见；
         # background 派发异步落库，轮询等待出生行出口。窗口取与执行用例同量级
         # （120s）：clear-all teardown 的服务端异步清理可能残留到下一批用例
@@ -148,6 +176,9 @@ class TestTaskStateFlow:
         assert status == 200, f"创建任务应 200，实际 {status}: {body}"
         task_id = body.get("id") or body.get("task_id")
         assert task_id, f"创建任务应返回 id，实际 {body}"
+        _assert_detail_openable(
+            token, kernel_url, str(task_id), "e2e 任务状态流转测试：请返回当前时间戳"
+        )
 
         # 轮询等待任务管道出生 + 首轮推进
         deadline = time.time() + RUNNING_WAIT_SECONDS

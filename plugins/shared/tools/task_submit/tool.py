@@ -1574,6 +1574,9 @@ class TaskSubmitTool(BuiltinTool):
                 user_id=inputs.get("user_id") or "task_system",
                 agent_id=agent_id,
                 execution_context=execution_context,
+                # 会话归属锚点：面板 HTTP 传输层透传用户会话（thread-），
+                # LLM 管道路径无此注入键 → 空串省略（管道保持独立，行为不变）。
+                thread_id=str(inputs.get("thread_id") or ""),
             )
         except TaskBirthError as exc:
             logger.error(

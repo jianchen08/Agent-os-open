@@ -222,7 +222,8 @@
     "chat",
     "pipeline-state",
     "pipeline-executor",
-    "event-bus"
+    "event-bus",
+    "tool-executor"
   ],
   "http_endpoints": [
     {

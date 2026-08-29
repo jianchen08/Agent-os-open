@@ -44,7 +44,7 @@ from http_json import (  # noqa: E402
     json_response as _json_response,
     ok as _ok,
 )
-from task_birth import TaskBirthError, birth_task_pipeline  # noqa: E402
+from task_birth import TaskBirthError  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,8 @@ class TaskRootCreate(BaseModel):
     project_id: str = ""  # 挂靠项目 id（登记行；空 = 独立任务）
     target_id: str = ""  # 执行 agent（必填）
     workspace: str = ""
-    isolation_level: str = ""  # plain/worktree/shared
+    workspace_mode: str = ""  # worktree/plain（空 = 工具侧按 workspace 显式性缺省）
+    isolation_level: str = ""  # isolated/non_isolated（空 = 工具侧默认 isolated）
     inherit: dict[str, Any] | None = None
     thread_id: str  # 复用当前会话 → 作 session_id
 
@@ -313,13 +314,6 @@ def _task_to_response(t: dict[str, Any]) -> TaskResponse:
 _get_task_service = get_task_service
 
 
-def _now_iso() -> str:
-    """当前时间 ISO 串（子任务登记时间戳）。"""
-    from datetime import datetime, timezone  # noqa: PLC0415
-
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _capability(name: str) -> Any:
     """取内核能力句柄（走 __main__ 的 AgentOSPlugin 实例；未注入时抛 KeyError）。
 
@@ -382,155 +376,52 @@ async def _cascade_suspend_children(parent_task_id: str) -> int:
 async def _submit_task_event(
     *,
     title: str,
-    description: str = "",
-    acceptance_criteria: dict | None = None,
-    dependencies: list | None = None,
-    parent_pipeline_id: str = "",
+    task_id: str,
     user_id: str = "task_system",
-    scope: str = "non_container",
-    execution_context: dict | None = None,
-    task_id: str = "",
-    agent_id: str = "",
-    thread_id: str = "",
-    parent_project_id: str = "",
+    description: str = "",
 ) -> str:
-    """驱动任务执行管道，返回 pipeline_id（= task.id）。
+    """重跑已有任务执行管道（UI submit/resume = task_manage retry 映射）。
 
-    双模式：
-    - 创建模式（task_id 空）：经 plugins/shared/task_birth.py 统一出生协议
-      （与 task_submit 同一实现，出生写面单一真值）——出生登记（create +
-      no_dispatch，引擎生成 pipeline_id、内核创建分支落 pipeline_sessions
-      映射）→ 身份登记（task.id = 管道 id 先于任何管道步骤）→ 执行派发
-      （kickoff + execution_context，background 不阻塞请求）。YAML 无写路径
-      ——返回的 id 即任务身份。出生失败抛 TaskBirthError（不降级不吞异常）。
-    - 注入模式（task_id 非空）：重跑已有任务（UI submit/resume = task_manage
-      retry 映射），以 task_id 作 pipeline_id 走注入分支，background 立即返回。
+    以 task_id 作 pipeline_id 走 chat.send_message 注入分支，background
+    立即返回。创建不走本函数——面板 HTTP 创建是 task_submit 工具的表单
+    传输层（_invoke_task_submit_tool），出生写面单一真值归工具侧。
+
+    Returns:
+        task_id（注入分支原值）；派发响应缺 pipeline_id 返回空串（调用方
+        据此感知提交未生效）。
+
+    Raises:
+        TaskBirthError: chat capability 未注入。
     """
     try:
         chat = _capability("chat")
     except KeyError as exc:
         raise TaskBirthError(f"chat capability 未注入: {exc}") from exc
 
-    async def _send(params: dict[str, Any]) -> dict[str, Any]:
-        return await chat.call("send_message", params)
-
-    if task_id:
-        # ── 注入模式：重跑已有任务管道（retry/resume）──
-        kickoff = f"重新执行任务「{title}」（任务 ID: {task_id}）。"
-        if description:
-            kickoff += f"\n任务描述：{description}"
-        params: dict[str, Any] = {
-            "pipeline_id": task_id,
-            "message": kickoff,
-            "user_id": user_id or "task_system",
-            "background": True,
-        }
-        resp = await chat.call("send_message", params)
-        got = str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
-        if not got:
-            logger.warning(
-                "_submit_task_event: 注入派发缺少 pipeline_id | task_id=%s | resp=%s",
-                task_id,
-                resp,
-            )
-            return ""
-        logger.info(
-            "_submit_task_event: 任务管道已重跑 | task_id=%s",
-            task_id,
-        )
-        return task_id
-
-    # ── 创建模式：统一出生协议 ──
-    # 血缘扁平键（方案本插件自持）：有父/根二选一
-    if parent_pipeline_id:
-        lineage_keys: dict[str, Any] = {
-            "lineage.parent_pipeline_id": parent_pipeline_id,
-            # 归属会话优先（任务创建时的真实会话），无会话调用维持父管道引用
-            "lineage.origin_session_id": thread_id or parent_pipeline_id,
-        }
-    else:
-        lineage_keys = {
-            "lineage.root": True,
-            "lineage.origin.kind": "channel",
-            "lineage.origin.source": "task_service",
-        }
-
-    kickoff = f"执行任务「{title}」。"
+    # ── 注入模式：重跑已有任务管道（retry/resume）──
+    kickoff = f"重新执行任务「{title}」（任务 ID: {task_id}）。"
     if description:
         kickoff += f"\n任务描述：{description}"
-
-    # 出生 state 一次写全（2026-08-28 用户裁定：任务提交时就把任务相关的
-    # 放到 state 里面）；task.id 由统一出生协议在引擎生成 id 后、任何管道
-    # 步骤执行前补齐。
-    birth_state: dict[str, Any] = {
-        "task.goal": title,
-        "task.status": "pending",
-        "task.description": description or "",
-        "task.acceptance_criteria": acceptance_criteria or {},
-        "task.dependencies": dependencies or [],
-        "task.scope": scope,
-        "task.submitted_by": user_id or "",
-        **lineage_keys,
+    params: dict[str, Any] = {
+        "pipeline_id": task_id,
+        "message": kickoff,
+        "user_id": user_id or "task_system",
+        "background": True,
     }
-
-    # execution_context 缺省对齐 task_submit._build_execution_context：
-    # 无显式 workspace → mode 空（workspace_lifecycle 落「工作空间根/
-    # {task_id}」默认 plain 拓扑）、isolation 默认 isolated。缺声明会让
-    # workspace_lifecycle 跳过工作区创建（无 execution_context 即跳过），
-    # bash/file 工具因 workspace 空锚被隔离拦截（container_create_failed）。
-    if not execution_context:
-        execution_context = {
-            "workspace": {"source_path": "", "mode": "", "explicit": False},
-            "isolation": {"level": "isolated"},
-        }
-    # 挂靠项目（项目非管道）：任务管道 state 带 parent_project_id——
-    # 前端任务树据此把任务挂到项目节点下。
-    if parent_project_id:
-        birth_state["task.parent_project_id"] = parent_project_id
-
-    pipeline_id = await birth_task_pipeline(
-        _send,
-        title=title,
-        birth_state=birth_state,
-        kickoff=kickoff,
-        user_id=user_id or "task_system",
-        agent_id=agent_id,
-        execution_context=execution_context,
-        thread_id=thread_id,
-    )
+    resp = await chat.call("send_message", params)
+    got = str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
+    if not got:
+        logger.warning(
+            "_submit_task_event: 注入派发缺少 pipeline_id | task_id=%s | resp=%s",
+            task_id,
+            resp,
+        )
+        return ""
     logger.info(
-        "_submit_task_event: 任务执行管道已出生 | task_id=%s | title=%s",
-        pipeline_id,
-        title,
+        "_submit_task_event: 任务管道已重跑 | task_id=%s",
+        task_id,
     )
-    # 触发方登记（任务树数据链）：父管道提交的子任务，把新管道 id 记回
-    # 父管道 state（task.owned.<id>.*，与 task_submit 同款契约）——前端
-    # 任务树据此把子任务挂到主管道下；根任务（无父）无需登记。
-    if parent_pipeline_id:
-        try:
-            await chat.call(
-                "send_message",
-                {
-                    "pipeline_id": parent_pipeline_id,
-                    "message": f"登记任务「{title}」（{pipeline_id}）。",
-                    "user_id": user_id or "task_system",
-                    "no_dispatch": True,
-                    "state": {
-                        f"task.owned.{pipeline_id}.title": title,
-                        f"task.owned.{pipeline_id}.status": "pending",
-                        f"task.owned.{pipeline_id}.scope": scope,
-                        f"task.owned.{pipeline_id}.created_at": _now_iso(),
-                        f"task.owned.{pipeline_id}.submitted_by": user_id or "",
-                    },
-                },
-            )
-        except Exception as exc:
-            logger.warning(
-                "[tasks http] 任务登记到提交者管道失败（不影响执行）| task=%s | err=%s",
-                pipeline_id,
-                exc,
-            )
-    return pipeline_id
+    return task_id
 
 
 # ════════════════════════════════════════════════════════════
@@ -779,53 +670,93 @@ async def get_tasks_debug(
         return {"items": [], "total": 0}
 
 
+async def _invoke_task_submit_tool(inputs: dict[str, Any], user_sub: str) -> dict[str, Any]:
+    """面板创建 = task_submit 工具的表单提交（单一业务入口）。
+
+    HTTP 创建端点只是人类的传输层：字段映射为工具入参，经 tool-executor.invoke
+    调 task_submit 工具 sidecar——闸门（agent 存在性/指标 ID/工作空间安全/
+    层级归属）与出生协议全在工具侧单一路径执行。parent_agent_level=1
+    （人类 = L1 之上，可显式 workspace/project）+ 认证 user_id 作注入参数。
+
+    Returns:
+        工具成功信封的 data（含 task_id/pipeline_id）。
+
+    Raises:
+        APIError: 能力未注入（503）/ 调用失败（500）/ 工具拒绝信封（400，
+            DISPATCH_FAILED 为 500；error_code 原样透传）。
+    """
+    try:
+        handle = _capability("tool-executor")
+    except KeyError as exc:
+        raise APIError(
+            status_code=503,
+            error_code="API_TIME_2005",
+            message="tool-executor 能力未注入，无法创建任务",
+        ) from exc
+    try:
+        result = await handle.call(
+            "invoke",
+            {
+                # plugin_id 缺省由内核工具注册表按 tool_name 反查（单一真值，
+                # 不硬编码插件 id；工具未启用/未注册时 fail-closed 报未注册）
+                "tool_name": "task_submit",
+                "args": {"parent_agent_level": 1, "user_id": user_sub, **inputs},
+            },
+            60.0,
+        )
+    except RuntimeError as exc:
+        raise APIError(
+            status_code=500,
+            error_code="TOOL_INVOKE_FAILED",
+            message=f"task_submit 工具调用失败: {exc}",
+        ) from exc
+    if isinstance(result, dict) and result.get("success"):
+        # 信封形状自适应（对齐 approval 消费先例）：output 为 SDK 标准键，
+        # data/result 兼容平铺变体。
+        data = result.get("output") or result.get("data") or result.get("result") or {}
+        return data if isinstance(data, dict) else {}
+    if isinstance(result, dict):
+        error = str(result.get("error") or "任务提交被拒绝")
+        error_code = str(result.get("error_code") or "TASK_SUBMIT_REJECTED")
+    else:
+        error = f"工具调用返回异常形态: {result!r}"
+        error_code = "TASK_SUBMIT_REJECTED"
+    raise APIError(
+        status_code=500 if error_code == "DISPATCH_FAILED" else 400,
+        error_code=error_code,
+        message=error,
+    )
+
+
 async def create_task(
     body: TaskCreate | dict[str, Any],
     _user: dict[str, Any] | None = None,
 ) -> TaskResponse:
-    """创建新任务。
+    """创建新任务（面板表单 = task_submit 工具提交，单一业务入口）。
 
-    [改造] memory_store 无依赖；GAP-1 统一经 chat.send_message 创建执行管道
-    （引擎生成 pipeline_id = task_id），YAML 无写路径。
+    执行者/描述必填、目标 agent 存在性等闸门全由工具侧承载，本端点只做
+    字段映射与结果转写；任务即管道（引擎生成 pipeline_id = task_id）。
     """
     # SDK HTTP 端点把 body 作 dict 透传（不实例化 Pydantic 模型）——兼容两种形状
     if isinstance(body, dict):
         body = TaskCreate(**body)
 
-    task_service = _get_task_service()
+    data = await _invoke_task_submit_tool(
+        {
+            "goal_title": body.title,
+            "goal_description": body.description or "",
+            "target_type": "agent",
+            "target_id": body.agent_id,
+        },
+        _current_user(_user).get("sub", ""),
+    )
+    task_id = str(data.get("task_id") or data.get("pipeline_id") or "")
 
-    if task_service is None:
-        raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法创建任务",
-        )
-
-    # P0-安全: 执行者必须显式指定，禁止创建没有 target_id 的任务。
-    if not body.agent_id:
-        raise APIError(
-            status_code=400,
-            error_code="MISSING_TARGET_AGENT",
-            message="创建任务必须指定执行 Agent（agent_id），禁止静默降级到默认 Agent",
-        )
-
-    # GAP-1 统一（state 单一真值）：任务即管道——经统一出生协议创建执行管道
-    # （引擎生成 pipeline_id = task_id），YAML 无写路径。
-    try:
-        task_id = await _submit_task_event(
-            title=body.title,
-            description=body.description or "",
-            user_id=_current_user(_user).get("sub", ""),
-            agent_id=body.agent_id,
-        )
-    except TaskBirthError as exc:
-        raise APIError(
-            status_code=500,
-            error_code="TASK_CREATE_FAILED",
-            message=f"任务执行管道创建失败: {exc}",
-        ) from exc
-
-    logger.info("用户 %s 创建任务: %s", _current_user(_user).get("username", "system"), task_id)
+    logger.info(
+        "用户 %s 创建任务: %s",
+        _current_user(_user).get("username", "system"),
+        task_id,
+    )
 
     return _task_to_response({"id": task_id, "title": body.title, "status": "pending"})
 
@@ -836,147 +767,60 @@ async def create_root_task(
 ) -> TaskResponse:
     """用户手动创建根任务（project_id 可选挂靠项目 = 文件夹+登记）。
 
-    等价于 L1 主 agent 调 task_submit 提交根任务，为 L2+ 子 agent 提供合法的
-    任务上下文。
+    等价于 L1 主 agent 调 task_submit 提交根任务：本端点把表单字段映射为
+    工具入参经 _invoke_task_submit_tool 提交——项目挂靠校验、workspace
+    安全校验、工作区拓扑/隔离缺省全由工具侧承载。
     """
     # SDK HTTP 端点把 body 作 dict 透传——兼容两种形状
     if isinstance(body, dict):
         body = TaskRootCreate(**body)
 
-    task_service = _get_task_service()
-
-    if task_service is None:
-        raise APIError(
-            status_code=503,
-            error_code="API_TIME_2005",
-            message="TaskService 不可用，无法创建任务",
-        )
-
-    # ── 校验 ──
-    if not body.target_id:
-        raise APIError(
-            status_code=400,
-            error_code="MISSING_TARGET_AGENT",
-            message="根任务必须指定执行 Agent（target_id）",
-        )
-
-    # ── 项目挂靠解析（对齐 task_submit：登记存在 + workspace=项目文件夹）──
-    project_id = str(body.project_id or "").strip()
-    workspace = body.workspace
-    if project_id:
-        from project_registry import load_project_paths  # noqa: PLC0415
-
-        project_path = str(load_project_paths().get(project_id) or "")
-        if not project_path:
-            raise APIError(
-                status_code=404,
-                error_code="PROJECT_NOT_FOUND",
-                message=f"项目 {project_id} 不存在（登记中无此 id）",
-            )
-        if not os.path.isdir(project_path):
-            raise APIError(
-                status_code=400,
-                error_code="PROJECT_FOLDER_MISSING",
-                message=f"项目文件夹不存在: {project_path}",
-            )
-        workspace = project_path
-
-    # workspace 路径安全校验（复用 task_submit 同款）
-    if workspace:
-        import importlib.util  # noqa: PLC0415
-        from pathlib import Path  # noqa: PLC0415
-
-        _ws_spec = importlib.util.spec_from_file_location(
-            "task_submit_tool_ws_check",
-            str(
-                Path(__file__).resolve().parent.parent.parent
-                / "tools" / "task_submit" / "tool.py"
-            ),
-        )
-        assert _ws_spec is not None and _ws_spec.loader is not None
-        _ws_mod = importlib.util.module_from_spec(_ws_spec)
-        sys.modules["task_submit_tool_ws_check"] = _ws_mod
-        _ws_spec.loader.exec_module(_ws_mod)
-
-        ws_error = _ws_mod._validate_workspace_path(workspace)
-
-        if ws_error:
-            raise APIError(
-                status_code=400,
-                error_code="UNSAFE_WORKSPACE",
-                message=ws_error,
-            )
-
-    # ── 复用当前会话 ──
-    thread_id = body.thread_id
-    active_pipeline_id = ""
-
-    # ── 构造 metadata（字段集对齐 task_submit._build_metadata） ──
-    metadata: dict[str, Any] = {
+    inputs: dict[str, Any] = {
+        "goal_title": body.title,
+        "goal_description": body.description or "",
+        "target_type": "agent",
         "target_id": body.target_id,
-        "session_id": thread_id,
-        "submitted_by_level": 1,  # 用户层 = L1
-        "acceptance_criteria": {},  # 默认空，_build_full_task_input 会自动跳过评估段
-        "workspace": workspace,
+        "workspace": body.workspace,
+        "workspace_mode": body.workspace_mode,
         "isolation_level": body.isolation_level,
-        "user_id": _current_user(_user).get("sub", ""),
-        "inherit": body.inherit or {},
-        "source": "user_manual",  # 审计标记：区分用户直接发起
+        "thread_id": body.thread_id,
     }
-    if project_id:
-        metadata["project_id"] = project_id
+    if body.project_id:
+        inputs["project_id"] = body.project_id
+    if body.inherit:
+        inputs["inherit"] = body.inherit
 
-    # GAP-1 统一（state 单一真值）：任务即管道——直接经 chat.send_message 创建
-    # 执行管道（引擎生成 pipeline_id = task_id），YAML 无写路径。
-    # execution_context：组装工作区拓扑/隔离声明（对齐 task_submit._build_execution_context）。
-    _ws_mode = body.workspace or "worktree"
-    if _ws_mode not in ("worktree", "plain"):
-        _ws_mode = "worktree"
-    execution_context = {
-        "isolation": {"level": body.isolation_level or "non_isolated"},
-        "workspace": {
-            "mode": "worktree",
-            "source_path": workspace,
-            "explicit": bool(workspace),
-        },
-    }
-    try:
-        task_id = await _submit_task_event(
-            title=body.title,
-            description=body.description or "",
-            acceptance_criteria=metadata.get("acceptance_criteria") or {},
-            dependencies=list(metadata.get("dependencies") or []),
-            parent_pipeline_id=active_pipeline_id or "",
-            user_id=_current_user(_user).get("sub", ""),
-            scope="non_container",
-            execution_context=execution_context,
-            agent_id=body.target_id,
-            thread_id=thread_id,
-            parent_project_id=project_id,
-        )
-    except TaskBirthError as exc:
-        raise APIError(
-            status_code=500,
-            error_code="TASK_CREATE_FAILED",
-            message=f"根任务执行管道创建失败: {exc}",
-        ) from exc
+    data = await _invoke_task_submit_tool(inputs, _current_user(_user).get("sub", ""))
+    task_id = str(data.get("task_id") or data.get("pipeline_id") or "")
 
     logger.info(
         "[create_root_task] 用户 %s 手动创建根任务 | task_id=%s | project_id=%s | thread=%s",
         _current_user(_user).get("username", "system"),
         task_id,
-        project_id or "-",
-        thread_id,
+        body.project_id or "-",
+        body.thread_id,
     )
 
     return _task_to_response({"id": task_id, "title": body.title, "status": "pending"})
 
 
-def get_task(
+async def get_task(
     task_id: str,
     _user: dict[str, Any] | None = None,
 ) -> TaskResponse:
-    """获取指定任务的详情。"""
+    """获取指定任务的详情（state 单一真值，YAML 只读镜像留 0.1 存量兜底）。
+
+    读法与 list/update 对齐：state 聚合行命中即出口（任务=管道，出生即落
+    state）；未命中回退 YAML 存量记录，双缺才 404。
+    """
+    state_tasks = await _list_tasks_from_state()
+    if state_tasks:
+        row = next(
+            (t for t in state_tasks if str(t.get("id") or "") == task_id),
+            None,
+        )
+        if row is not None:
+            return _task_to_response(row)
 
     task = None
 
@@ -1917,7 +1761,7 @@ async def _route_tasks_domain(
     # 单级 /{task_id}（前端 UPDATE 用 PATCH）
     if len(parts) == 1:
         if method == "GET":
-            return _ok(_json_response(_pydantic_to_dict(get_task(tid, caller))))
+            return _ok(_json_response(_pydantic_to_dict(await get_task(tid, caller))))
         if method == "PATCH":
             return _ok(_json_response(_pydantic_to_dict(await update_task(
                 tid, TaskUpdate(**_decode_body(raw_body)), caller,
