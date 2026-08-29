@@ -1330,8 +1330,8 @@ impl agentos_core::traits::StorageBackend for MockStorage {
     async fn delete_session(
         &self,
         _thread_id: &str,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
+    ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+        Ok(Vec::new())
     }
     async fn link_pipeline_session(
         &self,

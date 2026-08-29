@@ -2974,7 +2974,7 @@ mod pending_inputs_failure_tests {
         async fn delete_session(
             &self,
             thread_id: &str,
-        ) -> Result<(), agentos_core::types::StorageError> {
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
             self.inner.delete_session(thread_id).await
         }
         async fn link_pipeline_session(

@@ -703,14 +703,18 @@ impl KernelCapabilityRouter {
             message: "delete_pipeline disabled: kernel store not injected".to_string(),
         })?;
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        store
-            .delete_pipeline(pipeline_id)
-            .await
-            .map_err(|e| McpError::Protocol {
-                message: format!("delete_pipeline 失败: {e}"),
-            })?;
+        // 返回值 = 实际删除清单（含血缘后代子任务管道），逐个逐出内存注册表
+        let deleted_ids =
+            store
+                .delete_pipeline(pipeline_id)
+                .await
+                .map_err(|e| McpError::Protocol {
+                    message: format!("delete_pipeline 失败: {e}"),
+                })?;
         let registry = agentos_session::pipeline_state_registry::global_registry();
-        registry.remove(&tenant_id, pipeline_id);
+        for pid in &deleted_ids {
+            registry.remove(&tenant_id, pid);
+        }
         Ok(json!({"status": "deleted", "pipeline_id": pipeline_id}))
     }
 

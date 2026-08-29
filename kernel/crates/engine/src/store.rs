@@ -1654,17 +1654,29 @@ impl SqliteStore {
     ///
     /// 通过 `pipeline_sessions` 映射表按 thread_id 找到该会话下所有 pipeline_id
     /// （主管道 + 子管道，无需父子关系；sessions.pipeline_ids JSON 兜底防主管道
-    /// 未写映射），整组交给 [`Self::delete_pipelines_cascade`] 清理，最后删
-    /// sessions 行。无记录时同样返回 Ok(())（幂等）。tenant_id 由调用方在
-    /// spawn_blocking 前解析。单次事务包裹，失败回滚。
-    fn delete_session_inner(&self, thread_id: &str, tenant_id: &str) -> Result<(), StorageError> {
+    /// 未写映射），再沿血缘 lineage.parent_pipeline_id 补全后代任务管道（子任务
+    /// 自环绑定不属于任何会话），整组交给 [`Self::delete_pipelines_cascade`]
+    /// 清理，最后删 sessions 行。返回实际删除的 pipeline_id 清单（调用方逐出
+    /// 内存 state 注册表用）。无记录时同样返回 Ok(vec![])（幂等）。
+    /// tenant_id 由调用方在 spawn_blocking 前解析。单次事务包裹，失败回滚。
+    fn delete_session_inner(
+        &self,
+        thread_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<String>, StorageError> {
         let mut conn = self.conn.lock();
         let tx = conn
             .transaction()
             .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
 
         // 1. 收集该会话全部 pipeline_id：映射表 + sessions.pipeline_ids 兜底（防主管道未写映射）。
-        let pipeline_ids = pipeline_ids_for_thread(&tx, thread_id, tenant_id)?;
+        let mut pipeline_ids = pipeline_ids_for_thread(&tx, thread_id, tenant_id)?;
+
+        // 2. 血缘后代：子任务管道出生落自环绑定（thread=自身 id），不属于任何
+        // 会话——按 thread 清单级联会漏掉整条子任务链（runs/state/绑定全残留，
+        // 管理页幽灵条目的根源），删除面清单必须沿血缘补全。
+        let descendants = descendant_pipeline_ids(&tx, &pipeline_ids, tenant_id)?;
+        pipeline_ids.extend(descendants);
 
         if pipeline_ids.is_empty() {
             // 无任何管道（纯标签会话）：直接删 sessions 行
@@ -1674,19 +1686,21 @@ impl SqliteStore {
             )?;
             return tx
                 .commit()
+                .map(|_| Vec::new())
                 .map_err(|e| StorageError::Database(format!("commit: {e}")));
         }
 
-        // 2. 级联清理全部关联管道的执行数据，清单见 delete_pipelines_cascade
+        // 3. 级联清理全部关联管道的执行数据，清单见 delete_pipelines_cascade
         Self::delete_pipelines_cascade(&tx, &pipeline_ids, tenant_id)?;
 
-        // 3. 删 sessions 行
+        // 4. 删 sessions 行
         tx.execute(
             "DELETE FROM sessions WHERE thread_id = ?1 AND tenant_id = ?2",
             rusqlite::params![thread_id, tenant_id],
         )?;
 
         tx.commit()
+            .map(|_| pipeline_ids)
             .map_err(|e| StorageError::Database(format!("commit: {e}")))
     }
 
@@ -1694,21 +1708,27 @@ impl SqliteStore {
     ///
     /// 0.2 任务 = 管道（GAP-1）：删除任务即删除其管道数据。级联清单与
     /// `delete_session_inner` 共用 [`Self::delete_pipelines_cascade`]，
-    /// 两份清单不得各自增删表。
-    /// 单次事务包裹，失败回滚；无记录时返回 Ok(())（幂等）。
+    /// 两份清单不得各自增删表。清单先沿血缘补全后代任务管道（删父任务
+    /// 连带其派生链，否则子任务自环绑定让整链残留成幽灵）。
+    /// 单次事务包裹，失败回滚；无记录时返回 Ok(vec![])（幂等）。
     fn delete_pipeline_inner(
         &self,
         pipeline_id: &str,
         tenant_id: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Vec<String>, StorageError> {
         let mut conn = self.conn.lock();
         let tx = conn
             .transaction()
             .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
 
-        Self::delete_pipelines_cascade(&tx, &[pipeline_id.to_string()], tenant_id)?;
+        let mut pipeline_ids = vec![pipeline_id.to_string()];
+        let descendants = descendant_pipeline_ids(&tx, &pipeline_ids, tenant_id)?;
+        pipeline_ids.extend(descendants);
+
+        Self::delete_pipelines_cascade(&tx, &pipeline_ids, tenant_id)?;
 
         tx.commit()
+            .map(|_| pipeline_ids)
             .map_err(|e| StorageError::Database(format!("commit: {e}")))
     }
 
@@ -2182,6 +2202,51 @@ fn pipeline_ids_for_thread(
         }
     }
     Ok(pipeline_ids)
+}
+
+/// 沿血缘 `lineage.parent_pipeline_id`（子→父指针）收集根管道集的全部后代
+/// 任务管道，BFS 逐层展开（防环 visited）。返回不含 roots 自身、按发现序排列。
+///
+/// 删除面专用：子任务管道出生落自环 pipeline_sessions 绑定（thread=自身 id，
+/// sessions 表无行），不属于任何被删会话——删除清单不沿血缘补全就会整链漏删
+/// （runs/state/绑定残留，管理页幽灵条目）。field_value 是 JSON 编码标量
+/// （字符串带引号），解析后比对，解析失败按原值兜底。
+fn descendant_pipeline_ids(
+    conn: &rusqlite::Connection,
+    roots: &[String],
+    tenant_id: &str,
+) -> Result<Vec<String>, StorageError> {
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT pipeline_id, field_value FROM pipeline_state \
+         WHERE tenant_id = ?1 AND field_key = 'lineage.parent_pipeline_id'",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![tenant_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut children_by_parent: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for r in rows {
+        let (child, raw) = r?;
+        let parent: String = serde_json::from_str(&raw).unwrap_or_else(|_| raw.clone());
+        children_by_parent.entry(parent).or_default().push(child);
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = roots.iter().cloned().collect();
+    let mut frontier: Vec<String> = roots.to_vec();
+    while let Some(pid) = frontier.pop() {
+        if let Some(children) = children_by_parent.get(&pid) {
+            for child in children {
+                if seen.insert(child.clone()) {
+                    out.push(child.clone());
+                    frontier.push(child.clone());
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// 经 message_slots 按 pipeline 集合反查产生过的 run_id 去重集合，跳过 NULL。
@@ -2667,14 +2732,14 @@ impl StorageBackend for SqliteStore {
             .await
     }
 
-    async fn delete_session(&self, thread_id: &str) -> Result<(), StorageError> {
+    async fn delete_session(&self, thread_id: &str) -> Result<Vec<String>, StorageError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let thread_id = thread_id.to_string();
         self.blocking(move |this| this.delete_session_inner(&thread_id, &tenant_id))
             .await
     }
 
-    async fn delete_pipeline(&self, pipeline_id: &str) -> Result<(), StorageError> {
+    async fn delete_pipeline(&self, pipeline_id: &str) -> Result<Vec<String>, StorageError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let pipeline_id = pipeline_id.to_string();
         self.blocking(move |this| this.delete_pipeline_inner(&pipeline_id, &tenant_id))
@@ -2908,6 +2973,134 @@ mod tests {
         assert_eq!(count("SELECT COUNT(*) FROM message_slots"), 0, "消息应删除");
         assert_eq!(count("SELECT COUNT(*) FROM runs"), 0, "runs 应删除");
         assert_eq!(count("SELECT COUNT(*) FROM traces"), 0, "traces 应删除");
+    }
+
+    /// 回归测试：delete_session 沿血缘 lineage.parent_pipeline_id 级联子任务链。
+    ///
+    /// 子任务管道出生落自环绑定（thread=自身 id，sessions 表无行），按 thread
+    /// 清单级联收集不到——不补血缘就会整链残留（runs/state/绑定），管理页出
+    /// 幽灵条目。断言：子/孙管道全部数据表清零，返回清单含根+全部后代，
+    /// 无关会话的管道数据不受波及。
+    #[tokio::test]
+    async fn test_delete_session_cascades_lineage_subtasks() {
+        let store = SqliteStore::open_memory().unwrap();
+        let tid = "thread-lineage-main";
+        let now = chrono::Utc::now().to_rfc3339();
+
+        {
+            let conn = store.conn.lock();
+            // 根会话 + 主管道绑定
+            conn.execute(
+                "INSERT INTO sessions (thread_id, title, current_state, tenant_id, created_at, updated_at) \
+                 VALUES (?1, 'main', 'active', 'default', ?2, ?2)",
+                rusqlite::params![tid, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at) \
+                 VALUES ('main-pipe', ?1, 'default', ?2)",
+                rusqlite::params![tid, now],
+            )
+            .unwrap();
+            // 子/孙管道：自环绑定（thread=自身 id，不指向任何会话行）
+            for pid in ["sub-pipe", "grandchild-pipe"] {
+                conn.execute(
+                    "INSERT INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at) \
+                     VALUES (?1, ?1, 'default', ?2)",
+                    rusqlite::params![pid, now],
+                )
+                .unwrap();
+            }
+            // 血缘指针：grandchild -> sub -> main（子→父，JSON 编码标量）
+            // 孙管道有完整执行数据（run/消息/state/checkpoint），应随会话整链删除
+            conn.execute(
+                "INSERT INTO message_slots (tenant_id, pipeline_id, seq, message_id, run_id, created_at) \
+                 VALUES ('default', 'grandchild-pipe', 1, 'm-gc', 'run-gc', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runs (run_id, config_hash, status, tenant_id, created_at, current_branch) \
+                 VALUES ('run-gc', 'h', 'completed', 'default', ?1, 'main')",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_checkpoints (pipeline_id, tenant_id, step_no, state_json, created_at) \
+                 VALUES ('grandchild-pipe', 'default', 1, '{}', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            // 无关会话 + 其管道（隔离对照：血缘链删除不得波及）
+            conn.execute(
+                "INSERT INTO sessions (thread_id, title, current_state, tenant_id, created_at, updated_at) \
+                 VALUES ('thread-other', 'other', 'active', 'default', ?1, ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_sessions (pipeline_id, thread_id, tenant_id, created_at) \
+                 VALUES ('other-pipe', 'thread-other', 'default', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        }
+        // 血缘行经真实写面落库（编码契约：field_value 为 JSON 标量）
+        store
+            .upsert_state_field(
+                "sub-pipe",
+                "default",
+                "lineage.parent_pipeline_id",
+                &serde_json::json!("main-pipe"),
+            )
+            .unwrap();
+        store
+            .upsert_state_field(
+                "grandchild-pipe",
+                "default",
+                "lineage.parent_pipeline_id",
+                &serde_json::json!("sub-pipe"),
+            )
+            .unwrap();
+        store
+            .upsert_state_field(
+                "grandchild-pipe",
+                "default",
+                "task.id",
+                &serde_json::json!("grandchild-pipe"),
+            )
+            .unwrap();
+
+        let deleted = store.delete_session(tid).await.unwrap();
+        assert_eq!(deleted.len(), 3, "应删根+子+孙三个管道");
+        for pid in ["main-pipe", "sub-pipe", "grandchild-pipe"] {
+            assert!(deleted.iter().any(|d| d == pid), "清单缺 {pid}");
+        }
+
+        let conn = store.conn.lock();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM sessions"), 1, "无关会话应保留");
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_sessions"),
+            1,
+            "仅无关管道绑定应保留"
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM runs"), 0, "孙管道 run 应删除");
+        assert_eq!(
+            count("SELECT COUNT(*) FROM message_slots"),
+            0,
+            "孙管道消息应删除"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_state"),
+            0,
+            "子/孙管道 state 行应删除"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM pipeline_checkpoints"),
+            0,
+            "孙管道 checkpoint 应删除"
+        );
     }
 
     /// 回归测试：delete_session 在映射表无行时，经 sessions.pipeline_ids（JSON）

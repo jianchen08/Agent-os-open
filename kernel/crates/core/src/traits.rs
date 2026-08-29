@@ -1436,16 +1436,22 @@ pub trait StorageBackend: Send + Sync {
     async fn update_session(&self, session: &SessionRecord) -> Result<(), StorageError>;
 
     /// 删除会话并级联清理其全部关联数据（主管道 + 子任务管道的 messages/traces/runs/state）。
-    /// 通过 pipeline_sessions 映射表按 thread_id 定位全部 pipeline_id，单次事务级联删除。
-    /// 无记录时返回 Ok(())（幂等，对齐 REST 删除语义）。
-    async fn delete_session(&self, thread_id: &str) -> Result<(), StorageError>;
+    /// 通过 pipeline_sessions 映射表按 thread_id 定位全部 pipeline_id，再沿血缘
+    /// lineage.parent_pipeline_id 收集后代任务管道（子任务出生落自环绑定
+    /// thread=自身 id，不在会话清单里），单次事务级联删除。
+    /// 返回实际删除的 pipeline_id 清单（根 + 血缘后代）——调用方据此逐出内存
+    /// state 注册表（DB 已净而注册表残留会让 /pipelines/state 继续出口幽灵行）。
+    /// 无记录时返回空清单（幂等，对齐 REST 删除语义）。
+    async fn delete_session(&self, thread_id: &str) -> Result<Vec<String>, StorageError>;
 
     /// 按 pipeline_id 删除单条管道的全部执行数据（任务删除语义，2026-08-24）。
     /// 0.2 任务 = 管道：删除任务即删除其管道数据（runs/traces/branches/
-    /// message_slots/pipeline_state/pipeline_checkpoints/pipeline_sessions）。
-    /// 无记录时返回 Ok(())（幂等）。
-    async fn delete_pipeline(&self, _pipeline_id: &str) -> Result<(), StorageError> {
-        Ok(())
+    /// message_slots/pipeline_state/pipeline_checkpoints/pipeline_sessions），
+    /// 并沿血缘 lineage.parent_pipeline_id 级联其派生的子任务链。
+    /// 返回实际删除的 pipeline_id 清单（含血缘后代，供调用方逐出内存注册表）。
+    /// 无记录时返回空清单（幂等）。
+    async fn delete_pipeline(&self, _pipeline_id: &str) -> Result<Vec<String>, StorageError> {
+        Ok(Vec::new())
     }
 
     /// 写入 pipeline↔session 映射（幂等）。每次管道开跑（persist_run_start）时记录，
@@ -1752,7 +1758,7 @@ mod tests {
         async fn update_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
             unreachable!("默认面测试不调用")
         }
-        async fn delete_session(&self, _thread_id: &str) -> Result<(), StorageError> {
+        async fn delete_session(&self, _thread_id: &str) -> Result<Vec<String>, StorageError> {
             unreachable!("默认面测试不调用")
         }
         async fn link_pipeline_session(

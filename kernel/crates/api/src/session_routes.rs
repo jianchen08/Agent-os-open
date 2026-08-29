@@ -485,7 +485,18 @@ pub async fn delete_session_handler(
         let store_clone = store.clone();
         let id_for_scope = id.clone();
         let del_result = agentos_tenant::scope(tenant_ctx, async move {
-            store_clone.delete_session(&id_for_scope).await
+            let deleted = store_clone.delete_session(&id_for_scope).await;
+            // DB 已净而内存 state 注册表残留会让 /pipelines/state 继续出口幽灵行
+            // （管理页「删了还在」的另一半）——按实际删除清单逐出。租户解析与
+            // store 同源（scope 内 current_or_default）。
+            if let Ok(deleted_ids) = &deleted {
+                let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+                let registry = agentos_session::pipeline_state_registry::global_registry();
+                for pid in deleted_ids {
+                    registry.remove(&tenant_id, pid);
+                }
+            }
+            deleted
         })
         .await;
         if let Err(e) = del_result {
@@ -1082,7 +1093,7 @@ mod sessions_list_tests {
         async fn delete_session(
             &self,
             _thread_id: &str,
-        ) -> Result<(), agentos_core::types::StorageError> {
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
             unreachable!("list_sessions 错误路径不应触碰其他存储方法")
         }
         async fn link_pipeline_session(

@@ -222,6 +222,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        export_fields: vec![],
         provides: None,
     }
 }

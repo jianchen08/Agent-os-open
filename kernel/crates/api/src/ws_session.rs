@@ -1476,8 +1476,8 @@ mod tests {
         async fn update_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
             Ok(())
         }
-        async fn delete_session(&self, _thread_id: &str) -> Result<(), StorageError> {
-            Ok(())
+        async fn delete_session(&self, _thread_id: &str) -> Result<Vec<String>, StorageError> {
+            Ok(Vec::new())
         }
         async fn link_pipeline_session(
             &self,
