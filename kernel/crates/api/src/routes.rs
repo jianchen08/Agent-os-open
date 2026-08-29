@@ -2498,7 +2498,7 @@ mod state_summary_tests {
         let s = summarize_state(
             &json!({
                 "pipeline_id": "p2",
-                "status": "running",
+                "ended": true,
                 "task.goal": "g",
                 "lineage.root": true,
                 "workspace": "D:/ws",
@@ -2506,7 +2506,7 @@ mod state_summary_tests {
             &export,
         );
         assert_eq!(s["pipeline_id"], "p2");
-        assert_eq!(s["status"], "running");
+        assert_eq!(s["ended"], true);
         for k in ["task.goal", "lineage.root", "workspace", "task.owned.x.title"] {
             assert!(s.get(k).is_none(), "未声明键 {k} 不应出口");
         }
@@ -2552,9 +2552,9 @@ mod state_summary_tests {
             "lineage.origin_session_id",
             "lineage.root",
         ])]);
-        let s = summarize_state(&json!({"pipeline_id": "p2", "status": "running"}), &export);
+        let s = summarize_state(&json!({"pipeline_id": "p2", "ended": true}), &export);
         assert_eq!(s["pipeline_id"], "p2");
-        assert_eq!(s["status"], "running");
+        assert_eq!(s["ended"], true);
         for k in [
             "task.goal",
             "task.status",

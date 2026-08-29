@@ -1176,7 +1176,7 @@ async fn test_pipeline_state_rows_are_flat_for_condition_eval() {
         &pid,
         "th",
         "agentos",
-        json!({"pipeline_id": pid, "status": "failed", "task.status": "failed"}),
+        json!({"pipeline_id": pid, "task.status": "failed"}),
     );
 
     let router = router_with_store();
@@ -1197,7 +1197,6 @@ async fn test_pipeline_state_rows_are_flat_for_condition_eval() {
         "state 字段应提升到行顶层（扁平键），不嵌套在 state 子对象里"
     );
     assert_eq!(row["task.status"], "failed");
-    assert_eq!(row["status"], "failed");
 }
 
 #[tokio::test]

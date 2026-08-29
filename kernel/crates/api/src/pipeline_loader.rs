@@ -1083,8 +1083,8 @@ loop_bodies:
             "bodies: {:?}",
             cfg.loop_bodies.iter().map(|b| &b.id).collect::<Vec<_>>()
         );
-        // main / post：DSL next 归一为 routes（6 条：对话挂起 + 对话结束 +
-        // loop + loop + loop + end）
+        // main / post：DSL next 归一为 routes（8 条：任务终态收束 + 对话挂起 +
+        // 对话结束 + 工具循环 + 回 LLM×3 + 缺省 end）
         let main = cfg
             .loop_bodies
             .iter()
@@ -1097,29 +1097,43 @@ loop_bodies:
             .iter()
             .find(|s| s.id == "post")
             .expect("post step");
-        assert_eq!(post.routes.len(), 6, "post next 六条");
-        // 对话模式分支（2026-08-27 接线 conversation_mode 时新增，置顶）
-        assert_eq!(post.routes[0].then.next, RouteNext::Loop);
+        assert_eq!(post.routes.len(), 8, "post next 八条");
+        // 任务终态当轮收束置顶（用户裁定 2026-08-29：成功/失败/取消立即 end）
+        assert_eq!(post.routes[0].then.next, RouteNext::End);
         assert_eq!(
             post.routes[0].when,
+            "task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled'"
+        );
+        // 对话模式分支（2026-08-27 接线 conversation_mode）
+        assert_eq!(post.routes[1].then.next, RouteNext::Loop);
+        assert_eq!(
+            post.routes[1].when,
             "conversation_mode == True and raw_tool_calls == []"
         );
         assert_eq!(
-            post.routes[0].then.set.get("suspended"),
+            post.routes[1].then.set.get("suspended"),
             Some(&serde_json::json!(true)),
             "对话挂起经 set suspended=true 表达"
         );
         assert_eq!(
-            post.routes[1].when,
+            post.routes[2].when,
             "conversation_mode == True and raw_tool_calls != []"
         );
         // 既有工具调用/回 LLM 分支顺序不变
         assert_eq!(
-            post.routes[2].when,
+            post.routes[3].when,
             "raw_tool_calls != [] and raw_tool_calls != None"
         );
-        assert_eq!(post.routes[5].then.next, RouteNext::End);
-        assert_eq!(post.routes[5].when, "True", "缺省 when 归一为 True");
+        // duplicate_check 二级拦截回 LLM（控制状态键契约 ADR 2026-08-30）
+        assert_eq!(post.routes[6].then.next, RouteNext::Loop);
+        assert_eq!(post.routes[6].when, "router.duplicate_back_llm == True");
+        assert_eq!(
+            post.routes[6].then.set.get("router.duplicate_back_llm"),
+            Some(&serde_json::json!(false)),
+            "回 LLM 分支自清路由键防残留"
+        );
+        assert_eq!(post.routes[7].then.next, RouteNext::End);
+        assert_eq!(post.routes[7].when, "True", "缺省 when 归一为 True");
         // 动态 core_plugin 项保留（引擎动态点；tool_cache 接线后位于其前列）
         let core = main
             .steps
