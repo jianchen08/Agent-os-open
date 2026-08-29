@@ -250,7 +250,12 @@ function buildInitialTabs(
     if (!tabs.some((t) => t.agentLevel === 1)) {
       tabs = [buildMainTab(sessionId, mainPipelineId, mainAgentId), ...tabs]
     }
-    return { tabs, activeTabId: saved.activeTabId || tabs[0].id }
+    // 悬空 activeTabId 回落：保存的活跃 Tab 已不在恢复面时回落主 Tab（缺失用
+    // 首 Tab）——放任落空会让 initSessionTabs 跳过管道激活，activePipelineId
+    // 残留上一会话值（跨会话消息桶错显）。
+    const savedActive = tabs.find((t) => t.id === saved.activeTabId)
+    const fallbackTab = tabs.find((t) => t.agentLevel === 1) ?? tabs[0]
+    return { tabs, activeTabId: savedActive?.id ?? fallbackTab.id }
   }
 
   const mainTab = buildMainTab(sessionId, mainPipelineId, mainAgentId)
@@ -339,10 +344,15 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       pipelineTabMap: newPipelineTabMap,
     })
 
-    // 激活当前活跃 Tab 对应的管道
+    // 激活当前活跃 Tab 对应的管道；无可激活管道（活跃 Tab 无 pipelineRunId）时
+    // 清空 activePipelineId——pipelineMessageStore 跨会话单例，残留上一会话值
+    // 会让消息视图/WS 绑定落到旧会话管道（跨会话消息桶错显）。
+    const pipelineStore = usePipelineMessageStore.getState()
     const activeTab = tabs.find((t) => t.id === activeTabId)
     if (activeTab?.pipelineRunId) {
-      usePipelineMessageStore.getState().activatePipeline(activeTab.pipelineRunId)
+      pipelineStore.activatePipeline(activeTab.pipelineRunId)
+    } else {
+      usePipelineMessageStore.setState({ activePipelineId: null })
     }
 
     // 子 Tab 懒加载：进会话时只注册 pipeline 元数据（无网络请求），
@@ -351,7 +361,6 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     // 触发 loadTabMessages 加载（IndexedDB 有缓存时秒开，无缓存才发请求）。
     // 这样把进会话的并发消息请求从 N（历史累积的子 Tab 数）降到最多 1，
     // 避免会话切换瞬间打爆后端。
-    const pipelineStore = usePipelineMessageStore.getState()
     tabs.forEach((tab) => {
       if (tab.agentLevel !== 1 && tab.pipelineRunId) {
         if (!pipelineStore.pipelines[tab.pipelineRunId]) {

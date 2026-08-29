@@ -30,8 +30,11 @@ vi.mock('@/stores/pipelineMessageStore', () => {
     pipelines: {} as Record<string, unknown>,
     messagesByPipeline: {} as Record<string, unknown[]>,
   }
+  const setState = vi.fn((partial: Record<string, unknown>) => {
+    Object.assign(state, partial)
+  })
   return {
-    usePipelineMessageStore: { getState: () => state },
+    usePipelineMessageStore: { getState: () => state, setState },
     __pipelineMockState: state,
   }
 })

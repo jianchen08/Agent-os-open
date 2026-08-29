@@ -30,6 +30,7 @@ vi.mock('@/stores/pipelineMessageStore', () => ({
       pipelines: {},
       messagesByPipeline: {},
     }),
+    setState: vi.fn(),
   },
 }))
 
