@@ -261,8 +261,8 @@ async def test_interrupted_partial_sets_ended() -> None:
     assert result["raw_tool_calls"] == []
 
 
-async def test_interrupted_passthrough_run_id_only_for_chat() -> None:
-    """会话轮次（run_id 注入）→ run_id 透传启用取消轮询；任务管道不传。"""
+async def test_interrupted_passthrough_run_id_all_pipelines() -> None:
+    """run_id 注入 → 恒透传启用停止感知（契约全管道同一份，无域别门控）。"""
     caller = _FakeCaller(_partial_response(status="interrupted"))
     await _make_plugin(caller).execute(_make_ctx({**_base_state(), "run_id": "run-abc"}))
     args = caller.calls[0][1]["args"]
@@ -272,7 +272,7 @@ async def test_interrupted_passthrough_run_id_only_for_chat() -> None:
     await _make_plugin(caller2).execute(
         _make_ctx({**_base_state(), "run_id": "run-abc", "task.id": "task-1"})
     )
-    assert "run_id" not in caller2.calls[0][1]["args"]
+    assert caller2.calls[0][1]["args"]["run_id"] == "run-abc"
 
 
 # ─────────────────── plugin：成功路径 id 标准化（重构回归） ───────────────────

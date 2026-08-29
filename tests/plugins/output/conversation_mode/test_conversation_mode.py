@@ -169,7 +169,6 @@ class TestActivation:
         d = ConversationModeDetector()
         result = await d.execute(_ctx({StateKeys.CONVERSATION_MODE: False}))
         assert result.state_updates == {}
-        assert result.route_signal is None
 
     @pytest.mark.asyncio
     async def test_tool_results无激活信号返回空结果(self) -> None:

@@ -2,7 +2,7 @@
 """multimodal_preprocessor server.py（MCP 接口适配层）单元测试。
 
 覆盖：懒构建单例缓存、on_load 预热、on_unload 清缓存、execute 工具入口
-（PluginResult → state_updates 序列化、dict 直通、route_signal/skip_remaining
+（PluginResult → state_updates 序列化、dict 直通、skip_remaining
 透传、create_initial_state 合并）。
 
 server.py 以唯一模块名动态加载（importlib 显式路径），加载前逐出裸名
@@ -86,7 +86,6 @@ def test_execute_returns_state_updates(monkeypatch):
 
     class _FakeResult:
         state_updates = {"multimodal_content": [{"type": "text", "text": "x"}], "has_multimodal": True}
-        route_signal = None
         skip_remaining = False
 
     async def _fake_execute(ctx: Any) -> _FakeResult:
@@ -109,13 +108,13 @@ def test_execute_dict_result_passthrough(monkeypatch):
     assert data == {"state_updates": {"k": 1}}
 
 
-def test_execute_route_signal_and_skip_remaining(monkeypatch):
+def test_execute_skip_remaining(monkeypatch):
+    """OutputResult 形态 → 信封展开 state_updates/skip_remaining（RouteSignal 已退役）。"""
     server = _load_server()
     monkeypatch.setattr(server.plugin, "get_config", lambda: {})
 
     class _FakeResult:
         state_updates = {}
-        route_signal = SimpleNamespace(route_type="route_to_agent", target="agent_a", reason="因为")
         skip_remaining = True
 
     async def _fake_execute(ctx: Any) -> _FakeResult:
@@ -125,7 +124,6 @@ def test_execute_route_signal_and_skip_remaining(monkeypatch):
     data = _run(server.execute({"user_input": "hi"}))
     assert data == {
         "state_updates": {},
-        "route_signal": {"route_type": "route_to_agent", "target": "agent_a", "reason": "因为"},
         "skip_remaining": True,
     }
 

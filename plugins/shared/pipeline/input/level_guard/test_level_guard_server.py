@@ -110,13 +110,13 @@ def test_execute_plugin_result_serialized(monkeypatch: pytest.MonkeyPatch) -> No
     assert data == {"state_updates": {"security.level_decision": {"allowed": True, "reason": "ok"}}}
 
 
-def test_execute_route_signal_and_skip_remaining(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_execute_skip_remaining(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OutputResult 形态 → 信封展开 state_updates/skip_remaining（RouteSignal 已退役）。"""
     server = _load_server()
     monkeypatch.setattr(server.plugin, "get_config", lambda: {})
 
     class _FakeResult:
         state_updates = {"security.level_decision": {"allowed": False, "reason": "x"}}
-        route_signal = SimpleNamespace(route_type="route_to_agent", target="agent_b", reason="越权")
         skip_remaining = True
 
     async def _fake_execute(ctx: Any) -> _FakeResult:
@@ -126,7 +126,6 @@ def test_execute_route_signal_and_skip_remaining(monkeypatch: pytest.MonkeyPatch
     data = _run(server.execute({"core_type": "tool_execute"}))
     assert data == {
         "state_updates": {"security.level_decision": {"allowed": False, "reason": "x"}},
-        "route_signal": {"route_type": "route_to_agent", "target": "agent_b", "reason": "越权"},
         "skip_remaining": True,
     }
 
