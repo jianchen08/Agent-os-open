@@ -34,8 +34,11 @@ pytestmark = pytest.mark.unit
 
 _TE_DIR = Path(__file__).resolve().parent
 _TASKS_DIR = _TE_DIR.parents[1] / "system" / "tasks"
+# 共享根（plugins/shared 平铺模块 state_fields/worktree_merge/task_birth）——
+# 对齐生产 sidecar sys.path 形态（自身目录 + shared 根），单文件可跑。
+_SHARED_ROOT = _TE_DIR.parents[1]
 
-for _d in (_TE_DIR, _TASKS_DIR):
+for _d in (_TE_DIR, _TASKS_DIR, _SHARED_ROOT):
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
@@ -310,7 +313,9 @@ class TestAutoComplete:
         assert result.success is True
         assert result.output["overall_passed"] is True
         assert result.output["summary"] == "未声明评估指标，自动通过"
-        assert state_writer.await_count == 1
+        # 两次状态写：①评估调用计数（eval_total_calls，耗尽判定的跨调用真值）
+        # ②完成裁决（task.status）
+        assert state_writer.await_count == 2
         assert state_writer.await_args.args[1]["task.status"] == "completed"
 
     @pytest.mark.asyncio

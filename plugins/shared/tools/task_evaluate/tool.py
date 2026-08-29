@@ -335,6 +335,9 @@ class TaskEvaluateTool(BuiltinTool):
         if task.metadata and isinstance(task.metadata, dict):
             max_eval_calls = task.metadata.get("max_eval_calls", _DEFAULT_MAX_EVAL_CALLS)
         eval_total_calls = self._increment_eval_call_count(task)
+        await _write_task_state(
+            str(task_id), {"task.eval_total_calls": eval_total_calls}
+        )
 
         if eval_total_calls > max_eval_calls:
             logger.warning(
@@ -740,6 +743,16 @@ class TaskEvaluateTool(BuiltinTool):
         if task.metadata is None:
             task.metadata = {}
         task.metadata["eval_retry_count"] = retry_counts
+
+        # 计数落 state 单一真值（0.2 任务每次由 state 行重建 metadata，仅存
+        # YAML 镜像时跨调用计数丢失 → 耗尽判定永不触发，反复评估无限循环）
+        await _write_task_state(
+            str(task.id),
+            {
+                "task.eval_retry_count": retry_counts,
+                "task.eval_total_calls": task.metadata.get("eval_total_calls", 0),
+            },
+        )
 
         # 注册评估子管道到根任务子目录
         self._register_eval_pipelines(task_service, task, eval_result)
@@ -1164,6 +1177,18 @@ class TaskEvaluateTool(BuiltinTool):
         eval_res = row.get("task.evaluation")
         if isinstance(eval_res, dict):
             metadata["evaluation"] = eval_res
+        # 评估耗尽计数读回（跨调用累积的单一真值在 state，见 _handle_eval_result）
+        retry_counts = state_fields.as_dict(
+            row.get("task.eval_retry_count"), field="task.eval_retry_count"
+        )
+        if retry_counts:
+            metadata["eval_retry_count"] = retry_counts
+        total_calls = row.get("task.eval_total_calls")
+        if total_calls not in (None, ""):
+            try:
+                metadata["eval_total_calls"] = int(total_calls)
+            except (TypeError, ValueError):
+                pass
         # ws_meta 回填（数据源适配）：workspace 注入消费点（_get_input_params）读
         # task.metadata.ws_meta，0.2 权威在管道 state——workspace_lifecycle 经
         # pipeline-state.update 即时镜像（task.ws_meta）+ 引擎出口键（ws_meta），

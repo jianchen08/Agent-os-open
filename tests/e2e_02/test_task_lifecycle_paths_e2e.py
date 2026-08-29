@@ -19,6 +19,10 @@ E2E 路径矩阵：任务执行闭环（ADR 2026-08-28-task-closure-three-signal
   B1 bash 真失败（exit != 0）且从不评估       → 合法 failed
   C1 连续调用不存在的工具                     → 收束闸门 → 有界轮数终态 failed
   C2 子任务终态                               → 父会话唤醒收束出文本
+  D1 评估提交但指标不过（文件不存在）         → 重试耗尽 → 有界 failed（不无限评估）
+  D2 评估失败任务 failed → submit 重跑        → 修复后评估通过 → completed
+  S2 指标缺必填 input_params                  → 提交期拒绝（INVALID_METRIC_PARAMS）→ 修正重提成功
+  S1 运行中 stop_generation                   → 循环有界停止（不无限执行）
 
 真实 LLM 冒烟车道不在此文件（保留 test_12 的 skipif 门禁形态）；本套件为
 脚本车道，无需任何 API key。
@@ -39,6 +43,7 @@ import tempfile
 import time
 import urllib.request
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -80,6 +85,13 @@ _M_B1 = "E2E-MTX-B1"
 _M_C1 = "E2E-MTX-C1"
 _M_C2P = "E2E-MTX-C2P"
 _M_C2C = "E2E-MTX-C2C"
+_M_D1P = "E2E-MTX-D1P"
+_M_D1C = "E2E-MTX-D1X"
+_M_D2P = "E2E-MTX-D2P"
+_M_D2C = "E2E-MTX-D2X"
+_M_S2P = "E2E-MTX-S2P"
+_M_S2C = "E2E-MTX-S2X"
+_M_S1 = "E2E-MTX-S1"
 
 _BASH_ECHO_OK = "echo E2E_BASH_OK > result.txt"
 
@@ -217,6 +229,8 @@ def stub_kernel(stub_llm):
             "AGENTOS_PLUGINS_DIR": os.path.join(_REPO_ROOT, "plugins", "shared"),
             # 本内核无监督者：cdylib 集合变更（并行会话可能触发）不自动退出
             "AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE": "0",
+            # debug 日志：停止链路（dispatch_stop 无 run 分支是 debug 级）可诊断
+            "RUST_LOG": "info,agentos_api=debug,agentos_engine=debug",
         }
     )
     with open(log_path, "w", encoding="utf-8") as log_fh:
@@ -547,6 +561,59 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
             text_step("C2 子任务：执行与评估完成。"),
         ],
     )
+    # D1C：指标指向不存在的文件 → 每次评估都不过 → default 持续重评 → 重试耗尽
+    stub.register(
+        "D1C",
+        _M_D1C,
+        [
+            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step(
+                "task_evaluate",
+                action="auto_complete",
+                summary="已生成 result.txt，任务完成。",
+            ),
+        ],
+        # 每轮 summary 可区分：绕过 duplicate_check 的相同参数拦截，
+        # 让失败评估真实累积到重试耗尽
+        default=lambda body, idx: tool_call_step(
+            "task_evaluate",
+            action="auto_complete",
+            summary=f"再次确认任务完成（第 {idx} 次评估）。",
+        ),
+    )
+    # D2C 第一次执行：flag 文件未创建 → 评估不过 → 重试耗尽 → failed
+    stub.register(
+        "D2C",
+        _M_D2C,
+        [
+            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step(
+                "task_evaluate",
+                action="auto_complete",
+                summary="已生成 result.txt，任务完成。",
+            ),
+            text_step("D2C 第 1 次执行：评估未通过，等待重跑。"),
+        ],
+        default=lambda body, idx: tool_call_step(
+            "task_evaluate",
+            action="auto_complete",
+            summary=f"再次确认任务完成（第 {idx} 次评估）。",
+        ),
+    )
+    # S2C：修正重提后的子任务（指标带全参）→ 评估通过
+    stub.register(
+        "S2C",
+        _M_S2C,
+        [
+            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            tool_call_step(
+                "task_evaluate",
+                action="auto_complete",
+                summary="已生成 result.txt，任务完成。",
+            ),
+            text_step("S2 子任务：执行与评估完成。"),
+        ],
+    )
 
 
 def _task_submit_args(
@@ -642,6 +709,26 @@ class TestA1CompleteWithoutMetrics:
         _assert_real_llm_ran(stub_kernel, matrix_token, task_id, state, "A1")
         assert stub_llm.request_count("A1") >= 3, (
             f"A1 至少 3 轮 LLM（bash→evaluate→收束），实际 {stub_llm.request_count('A1')}"
+        )
+        # 工作空间/隔离实际执行证据（黑盒观察面）：ws_meta 拓扑 + 产出文件落位
+        # + 隔离未拦截。state 行的 ws_meta.path 即任务工作区（工作空间根/{task_id}）。
+        assert not state.get("isolation.blocked"), (
+            f"A1 bash 不应被隔离拦截，实际 blocked={state.get('isolation.blocked')} "
+            f"reason={state.get('isolation.block_reason')}"
+        )
+        # 工作区落位走文件系统观察：任务默认工作区 = {base_dir}/.ai_workspaces/
+        # {task_id}（内核项目根 = 测试临时目录；state 出口的 ws_meta 受导出白名单
+        # /时序影响不作硬断言，仅诊断打印）
+        ws_meta = state.get("ws_meta") or {}
+        if isinstance(ws_meta, str):
+            try:
+                ws_meta = json.loads(ws_meta)
+            except json.JSONDecodeError:
+                ws_meta = {}
+        print(f"[matrix] A1 ws_meta 出口（诊断）: {ws_meta or '-'}")
+        ws_base = os.path.join(stub_kernel.base_dir, ".ai_workspaces")
+        assert (Path(ws_base) / str(task_id) / "result.txt").exists(), (
+            f"A1 bash 产出应落在任务工作区 {ws_base}/{task_id}/result.txt"
         )
 
 
@@ -855,3 +942,347 @@ class TestC2SubtaskWakesParent:
             _session_messages(stub_kernel, matrix_token, session_id), ensure_ascii=False
         )
         assert "子任务" in blob, "C2：父会话消息里应含子任务通知注入痕迹"
+
+
+# ============================================================
+# 评估闭环与停止路径（D1/D2/S2/S1）
+# ============================================================
+
+
+class TestD1EvalFailBounded:
+    """D1 评估提交但指标不过 → 反复评估有界停止（重试耗尽 → failed，不无限评估）。"""
+
+    @pytest.mark.timeout(600)
+    def test_failing_evaluation_exhausts_bounded(
+        self, stub_kernel, matrix_token, stub_llm, matrix_sessions
+    ):
+        stub_llm.register(
+            "D1P",
+            _M_D1P,
+            [
+                tool_call_step(
+                    "task_submit",
+                    **_task_submit_args(
+                        child_marker=_M_D1C,
+                        acceptance_criteria={
+                            "file_check": {
+                                "input_params": {
+                                    "path": "e2e_d1_missing.txt",
+                                    "check": "exists",
+                                }
+                            }
+                        },
+                    ),
+                ),
+                text_step("D1 父会话：带指标的子任务已提交。"),
+            ],
+        )
+        _register_general_agent_scripts(stub_llm)
+
+        session_id = _create_session(stub_kernel, matrix_token, "e2e-matrix-d1")
+        matrix_sessions(session_id)
+        _chat(stub_kernel, matrix_token, session_id, f"请派发一个带验收指标的任务。场景标记：{_M_D1P}")
+
+        child_row = _poll_until(
+            lambda: _row_by_marker(_state_rows(stub_kernel, matrix_token), _M_D1C),
+            _TERMINAL_WAIT_SECONDS,
+        )
+        assert child_row is not None, f"state 聚合应出现 D1 子任务（marker {_M_D1C}）"
+        child_id = str(child_row["pipeline_id"])
+        child_state, seen = _wait_task_terminal(
+            stub_kernel, matrix_token, child_id, _TERMINAL_WAIT_SECONDS
+        )
+        assert child_state.get("task.status") == "failed", (
+            f"D1 指标不过应 failed，实际 {child_state.get('task.status')}，序列 {seen}"
+        )
+        assert "completed" not in seen, f"D1 评估不过不得假完成，序列 {seen}"
+        _assert_real_llm_ran(stub_kernel, matrix_token, child_id, child_state, "D1 子任务")
+        rounds = stub_llm.request_count("D1C")
+        # 有界性：重试耗尽后任务 failed，运行轮数有界（实测 ~21 轮——含
+        # stop_check 对外部终态写入感知滞后的空转尾巴，内核批次收口后应收紧到 ≤9）
+        assert 4 <= rounds <= 25, (
+            f"D1 反复评估应有界停止（重试耗尽 + 运行收尾，上限 25），实际 {rounds} 轮"
+        )
+        # 耗尽计数落 state（跨调用累积的单一真值）
+        retry = child_state.get("task.eval_retry_count")
+        if isinstance(retry, str):
+            try:
+                retry = json.loads(retry)
+            except json.JSONDecodeError:
+                retry = {}
+        if retry:
+            assert int(retry.get("file_check") or 0) >= 3, (
+                f"D1 重试计数应累积到耗尽（3），实际 {retry}"
+            )
+        else:
+            print("[matrix] D1: state 未出口 task.eval_retry_count（诊断性键，跳过）")
+
+
+class TestD2FailedResubmitCompletes:
+    """D2 评估失败 → 任务 failed → submit 重跑 → 修复后评估通过 → completed（失败重跑闭环）。"""
+
+    @pytest.mark.timeout(600)
+    def test_failed_task_resubmit_completes(
+        self, stub_kernel, matrix_token, stub_llm, matrix_sessions
+    ):
+        stub_llm.register(
+            "D2P",
+            _M_D2P,
+            [
+                tool_call_step(
+                    "task_submit",
+                    **_task_submit_args(
+                        child_marker=_M_D2C,
+                        acceptance_criteria={
+                            "file_check": {
+                                "input_params": {
+                                    "path": "e2e_d2_flag.txt",
+                                    "check": "exists",
+                                }
+                            }
+                        },
+                    ),
+                ),
+                text_step("D2 父会话：带指标的子任务已提交。"),
+            ],
+        )
+        _register_general_agent_scripts(stub_llm)
+
+        session_id = _create_session(stub_kernel, matrix_token, "e2e-matrix-d2")
+        matrix_sessions(session_id)
+        _chat(stub_kernel, matrix_token, session_id, f"请派发一个带验收指标的任务。场景标记：{_M_D2P}")
+
+        child_row = _poll_until(
+            lambda: _row_by_marker(_state_rows(stub_kernel, matrix_token), _M_D2C),
+            _TERMINAL_WAIT_SECONDS,
+        )
+        assert child_row is not None, f"state 聚合应出现 D2 子任务（marker {_M_D2C}）"
+        child_id = str(child_row["pipeline_id"])
+        child_state, _seen = _wait_task_terminal(
+            stub_kernel, matrix_token, child_id, _TERMINAL_WAIT_SECONDS
+        )
+        assert child_state.get("task.status") == "failed", (
+            f"D2 第一次执行应 failed（指标不过耗尽），实际 {child_state.get('task.status')}"
+        )
+
+        # 第二次执行：修复产线（bash 创建 flag 文件）→ 评估通过 → completed。
+        # 重跑是同一管道（同 marker 同脚本坐标），换脚本 + 清零游标。
+        stub_llm.replace_steps(
+            "D2C",
+            [
+                tool_call_step(
+                    "bash_execute", action="execute", command="echo E2E_D2_FIXED > e2e_d2_flag.txt"
+                ),
+                tool_call_step(
+                    "task_evaluate",
+                    action="auto_complete",
+                    summary="e2e_d2_flag.txt 已生成，任务完成。",
+                ),
+                text_step("D2C 第二次执行：评估通过。"),
+            ],
+        )
+        status, body, _ = http_post_json_auth(
+            f"{stub_kernel.url}/ext/task_service/tasks/{child_id}/submit",
+            {},
+            token=matrix_token,
+            timeout=15,
+        )
+        assert status == 200, f"D2 重跑提交应 200，实际 {status}: {body}"
+
+        # 竞态防护：重跑派发后 state 仍短暂停留 failed，等它先离开 failed
+        # （推进 running）再等终态，否则轮询会把旧 failed 当成第二次终态早退
+        def _left_failed() -> bool:
+            row = _row_by_pipeline(_state_rows(stub_kernel, matrix_token), child_id)
+            if row is None:
+                return False
+            return str((_state(row) or {}).get("task.status") or "") != "failed"
+
+        left = _poll_until(_left_failed, 120)
+        assert left, "D2 重跑后状态应离开 failed（推进 running）"
+
+        final_state, seen2 = _wait_task_terminal(
+            stub_kernel, matrix_token, child_id, _TERMINAL_WAIT_SECONDS
+        )
+        assert final_state.get("task.status") == "completed", (
+            f"D2 重跑后应 completed（评估通过），实际 {final_state.get('task.status')}，"
+            f"序列 {seen2}"
+        )
+        _assert_real_llm_ran(stub_kernel, matrix_token, child_id, final_state, "D2 重跑")
+
+
+class TestS2MissingParamsRejected:
+    """S2 提交期闸门：指标缺必填 input_params → 工具拒绝 → LLM 修正重提成功。"""
+
+    @pytest.mark.timeout(600)
+    def test_missing_metric_params_rejected_then_fixed(
+        self, stub_kernel, matrix_token, stub_llm, matrix_sessions
+    ):
+        stub_llm.register(
+            "S2P",
+            _M_S2P,
+            [
+                # 第一次：file_check 缺 input_params.path → 提交期拒绝
+                tool_call_step(
+                    "task_submit",
+                    **_task_submit_args(
+                        child_marker=_M_S2C,
+                        acceptance_criteria={"file_check": {}},
+                    ),
+                ),
+                # 第二次：补齐 input_params → 提交成功
+                tool_call_step(
+                    "task_submit",
+                    **_task_submit_args(
+                        child_marker=_M_S2C,
+                        acceptance_criteria={
+                            "file_check": {
+                                "input_params": {"path": "result.txt", "check": "exists"}
+                            }
+                        },
+                    ),
+                ),
+                text_step("S2 父会话：修正后的子任务已提交。"),
+            ],
+        )
+        _register_general_agent_scripts(stub_llm)
+
+        session_id = _create_session(stub_kernel, matrix_token, "e2e-matrix-s2")
+        matrix_sessions(session_id)
+        _chat(stub_kernel, matrix_token, session_id, f"请派发一个带验收指标的任务。场景标记：{_M_S2P}")
+
+        # 唯一子任务（缺参那次必须被拒绝，不得产生黑户任务）
+        child_row = _poll_until(
+            lambda: _row_by_marker(_state_rows(stub_kernel, matrix_token), _M_S2C),
+            _TERMINAL_WAIT_SECONDS,
+        )
+        assert child_row is not None, f"state 聚合应出现 S2 子任务（marker {_M_S2C}）"
+        child_id = str(child_row["pipeline_id"])
+        rows = _state_rows(stub_kernel, matrix_token)
+        dup = [
+            r for r in rows
+            if str(r.get("pipeline_id")) != child_id
+            and _M_S2C in json.dumps(r, ensure_ascii=False, default=str)
+            and (r.get("task.goal") or r.get("task.id"))
+        ]
+        assert not dup, f"S2 缺参提交应被拒绝（只允许一次成功提交），发现多余任务行: {dup}"
+
+        child_state, seen = _wait_task_terminal(
+            stub_kernel, matrix_token, child_id, _TERMINAL_WAIT_SECONDS
+        )
+        assert child_state.get("task.status") == "completed", (
+            f"S2 修正后子任务应 completed，实际 {child_state.get('task.status')}，序列 {seen}"
+        )
+        # 拒绝反馈到达 LLM 的黑盒证据：父会话消费了两次 task_submit 步骤
+        # （第一次被拒后 stub 才会走到第二次提交步骤——顺序消费语义）
+        parent_rounds = stub_llm.request_count("S2P")
+        assert parent_rounds >= 3, (
+            f"S2 父会话应至少 3 轮（拒绝 → 修正重提 → 收束），实际 {parent_rounds}"
+        )
+
+
+class TestS1StopDuringRun:
+    """S1 运行中 stop_generation → 感知中断 → 循环有界停止（不无限执行）。"""
+
+    @pytest.mark.timeout(420)
+    def test_stop_generation_stops_running_task(
+        self, stub_kernel, matrix_token, stub_llm
+    ):
+        import asyncio
+
+        import websockets
+
+        stub_llm.register(
+            "S1",
+            _M_S1,
+            [
+                tool_call_step(
+                    "bash_execute", action="execute", command="echo E2E_S1 > s1.txt"
+                )
+            ],
+            default=lambda body, idx: tool_call_step(
+                "bash_execute",
+                action="execute",
+                command=f"echo E2E_S1_R{idx} > s1_r{idx}.txt",
+            ),
+        )
+        task_id = _create_task(
+            stub_kernel,
+            matrix_token,
+            f"路径矩阵 S1：运行中停止（{_M_S1}）",
+            f"循环执行 bash 检查。场景标记：{_M_S1}",
+        )
+
+        # 等循环真实推进：进度观察用 stub 轮数（测试自有观测，不受 state 出口
+        # 时序影响）；至少 3 轮才停，停止才有意义
+        def _rounds_advanced() -> bool:
+            return stub_llm.request_count("S1") >= 3
+
+        advanced = _poll_until(_rounds_advanced, 180)
+        assert advanced, "S1 任务循环应真实推进（>=3 轮 LLM）"
+
+        count_before = stub_llm.request_count("S1")
+        deadline = time.time() + 90
+        count_now = count_before
+        while time.time() < deadline:
+            count_now = stub_llm.request_count("S1")
+            if count_now >= count_before + 2:
+                break
+            time.sleep(2)
+        assert count_now >= count_before + 2, (
+            "S1 停止前循环应仍在推进（否则无停止意义）"
+        )
+
+        async def _send_stop() -> None:
+            # WS 目标 = 本测试自带内核实例（随机端口）——e2e_helpers.ws_chat_url
+            # 固定连 9100，矩阵自带内核场景不能用（停止会打到别的内核上空转）
+            url = (
+                f"ws://127.0.0.1:{stub_kernel.port}/ws/chat"
+                f"?token={matrix_token}&version=1"
+            )
+            async with websockets.connect(url, max_size=10 * 1024 * 1024) as ws:
+                # 连接确认帧
+                try:
+                    first = await asyncio.wait_for(ws.recv(), timeout=5)
+                    print(f"[matrix] S1 WS 连接确认: {str(first)[:160]}")
+                except asyncio.TimeoutError:
+                    print("[matrix] S1 WS 连接确认: 5s 未收到（诊断）")
+                # 先注册 thread→user 映射（前端切会话同款）：dispatch_stop 的
+                # 租户解析读该注册表，未注册回退 default 会查不到任务 run
+                await ws.send(
+                    json.dumps({"type": "active_thread_changed", "thread_id": task_id})
+                )
+                await asyncio.sleep(0.5)
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "stop_generation",
+                            "thread_id": task_id,
+                            "pipeline_id": task_id,
+                            "reason": "e2e-matrix-stop",
+                        }
+                    )
+                )
+                # 收包窗口：打印一切回包（确认/错误帧可见）
+                try:
+                    for _ in range(3):
+                        frame = await asyncio.wait_for(ws.recv(), timeout=3)
+                        print(f"[matrix] S1 WS 回包: {str(frame)[:200]}")
+                except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                    print("[matrix] S1 WS 回包窗口结束")
+
+        asyncio.run(_send_stop())
+
+        # 循环停止：轮数在停止后稳定（有界）——本场景的核心回归断言
+        time.sleep(3)
+        count_after_stop = stub_llm.request_count("S1")
+        time.sleep(20)
+        count_settled = stub_llm.request_count("S1")
+        assert count_settled - count_after_stop <= 1, (
+            f"S1 停止后循环应终止（允许中断中的在飞轮），"
+            f"实际停止时 {count_after_stop} 轮 → 20s 后 {count_settled} 轮"
+        )
+        # 停止的任务不得假完成
+        row = _row_by_pipeline(_state_rows(stub_kernel, matrix_token), task_id)
+        final_status = str((_state(row) if row else {}).get("task.status") or "")
+        print(f"[matrix] S1 停止后 task.status={final_status or '-'} 轮数 {count_before}→{count_settled}")
+        assert final_status != "completed", "S1 停止后任务不得假完成"

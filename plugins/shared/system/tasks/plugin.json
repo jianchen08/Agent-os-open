@@ -513,6 +513,8 @@
     "task.owned.*",
     "task.acceptance_criteria",
     "task.description",
-    "task.dependencies"
+    "task.dependencies",
+    "task.eval_retry_count",
+    "task.eval_total_calls"
   ]
 }

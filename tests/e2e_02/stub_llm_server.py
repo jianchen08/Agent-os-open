@@ -156,6 +156,36 @@ class ScriptedLLMUpstream:
         with self._registry_lock:
             self._scripts = []
 
+    def replace_steps(
+        self,
+        name: str,
+        steps: list[dict[str, Any]],
+        default: Callable[[dict[str, Any], int], dict[str, Any]] | dict[str, Any] | None = None,
+    ) -> None:
+        """就地替换已注册场景的步骤序列并清零消费游标（marker 不变）。
+
+        供「失败后重跑」类场景在两次 run 之间切换脚本：重跑是同一管道
+        （同 marker 同脚本坐标），但第二次执行应表现不同行为。
+        default 传 None 表示保留原 default。
+        """
+        with self._registry_lock:
+            for script in self._scripts:
+                if script.name == name:
+                    script.steps = list(steps)
+                    if default is not None:
+                        if callable(default):
+                            script.default = default
+                        else:
+                            fixed = default
+
+                            def _fixed_step(_body: dict[str, Any], _index: int) -> dict[str, Any]:
+                                return fixed
+
+                            script.default = _fixed_step
+                    script.consumed = 0
+                    return
+        raise ValueError(f"场景不存在: {name}")
+
     def request_count(self, name: str) -> int:
         script = self._find(name)
         with script.lock:
