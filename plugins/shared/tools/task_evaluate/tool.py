@@ -20,14 +20,13 @@
 import asyncio
 import contextlib
 import logging
-import types
 from datetime import UTC, datetime
 from typing import Any
 
 import state_fields
 import worktree_merge
 from _eval_core import sanitize_eval_paths
-from task_types import TaskStatus
+from task_types import TaskModel, TaskStatus
 
 from agentos_plugin_sdk import (
     BuiltinTool,
@@ -986,14 +985,15 @@ class TaskEvaluateTool(BuiltinTool):
     async def _save_task(self, task_service: Any, task: Any) -> None:
         """保存任务元数据更新（async，因 save_task 是 async）。
 
+        失败向上抛不吞（去降级裁定）：评估历史/重试计数落不进存储时继续走，
+        评估结果对上游不可见且假象延续。auto_complete 通路的调用方 try 会把
+        异常转 EVAL_FAILED 显式失败信封，任务走 failed 可见。
+
         Args:
             task_service: TaskService 实例
             task: TaskModel 实例
         """
-        try:
-            await task_service.save_task(task)
-        except Exception as e:
-            logger.warning("[TaskEvaluate] 保存任务元数据失败: %s", e)
+        await task_service.save_task(task)
 
     @staticmethod
     def _register_eval_pipelines(
@@ -1134,11 +1134,14 @@ class TaskEvaluateTool(BuiltinTool):
             task.metadata["acceptance_criteria"] = ac
 
     async def _get_task_from_state(self, task_id: str) -> Any:
-        """从 state 聚合行组装轻量任务对象（GAP-1 统一：task = pipeline）。
+        """从 state 聚合行组装任务对象（GAP-1 统一：task = pipeline）。
 
+        返回真实 TaskModel：save_task → storage.save 以 asdict 序列化并沿
+        parent_task_id 找根落盘，缺字段的占位 namespace 会在保存路径崩
+        （实测 ``'SimpleNamespace' object has no attribute 'parent_task_id'``）。
         行字段（STATE_SUMMARY_KEYS 出口）：task.goal/task.status/task.description/
-        task.acceptance_criteria/task.evaluation 等扁平点号键。缺行返回 None
-        （调用方回退 YAML 只读镜像）。
+        task.acceptance_criteria/task.evaluation/lineage.parent_pipeline_id 等
+        扁平点号键。缺行返回 None（调用方回退 YAML 只读镜像）。
         """
         rows = await self._read_state_rows()
         if rows is None:
@@ -1161,10 +1164,28 @@ class TaskEvaluateTool(BuiltinTool):
         eval_res = row.get("task.evaluation")
         if isinstance(eval_res, dict):
             metadata["evaluation"] = eval_res
-        return types.SimpleNamespace(
+        # ws_meta 回填（数据源适配）：workspace 注入消费点（_get_input_params）读
+        # task.metadata.ws_meta，0.2 权威在管道 state——workspace_lifecycle 经
+        # pipeline-state.update 即时镜像（task.ws_meta）+ 引擎出口键（ws_meta），
+        # 优先级与 _read_task_ws_meta 一致。缺 ws_meta 时指标在错误目录解析相对
+        # 路径（实测 file_check「不存在: result.txt」误判）。
+        for key in ("task.ws_meta", "ws_meta"):
+            ws_meta = state_fields.as_dict(row.get(key), field=key)
+            if ws_meta:
+                metadata["ws_meta"] = ws_meta
+                break
+        # 血缘回填：出生协议只写管道坐标（lineage.parent_pipeline_id），GAP-1 下
+        # 父任务 id = 父管道 id。父坐标在 YAML 镜像无记录时 _find_root_id 截断
+        # 回溯，本任务按根落盘（tree_{task.id}/），保存路径不受影响。
+        # 其余字段（priority/agent_level/时间戳/dependencies 等）state 无出口键，
+        # 按模型缺省落盘；updated_at 由 save_task 每次覆盖。
+        parent_pipeline_id = row.get("lineage.parent_pipeline_id") or None
+        return TaskModel(
             id=task_id,
             title=str(row.get("task.goal") or task_id),
             description=str(row.get("task.description") or ""),
+            parent_task_id=parent_pipeline_id,
+            parent_pipeline_id=parent_pipeline_id,
             status=status,
             metadata=metadata,
             result=None,

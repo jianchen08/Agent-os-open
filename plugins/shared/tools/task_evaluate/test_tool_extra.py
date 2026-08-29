@@ -5,8 +5,9 @@
 迁移面/校验面/基本编排/执行器未注入降级；本文件补齐未覆盖分支——
 
 - task_id 短 id 解析：前缀唯一命中、歧义报错、读取异常降级、非 str 原样；
-- state 聚合读面：_get_task_from_state 组装轻量任务（状态枚举解析/坏状态回退/
-  无 acceptance_criteria 行）、_read_state_rows 未注入/异常/非列表降级；
+- state 聚合读面：_get_task_from_state 组装真实 TaskModel（状态枚举解析/坏状态
+  回退/无 acceptance_criteria 行/血缘回填/stub 经真实 save_task 落盘不崩）、
+  _read_state_rows 未注入/异常/非列表降级；
 - 单指标模式：summary 透传、超时 EVAL_TIMEOUT、litellm 限速 RATE_LIMITED、
   一般异常 EVAL_FAILED、部分通过 partial_pass、全部通过自动完成；
 - 评估结果处理：unrecoverable 模式耗尽、失败计数耗尽 FAILED、通过重置计数、
@@ -210,6 +211,7 @@ class TestStateRead:
                     "task.status": "evaluating",
                     "task.acceptance_criteria": {"m1": {"input_params": {"path": "x"}}},
                     "task.evaluation": {"summary": "ok"},
+                    "lineage.parent_pipeline_id": "parent_pipe",
                 }
             ],
         )
@@ -221,12 +223,82 @@ class TestStateRead:
         assert task.metadata["acceptance_criteria"] == {"m1": {"input_params": {"path": "x"}}}
         assert task.metadata["evaluation"] == {"summary": "ok"}
         assert task.result is None
+        # 血缘回填（GAP-1：父任务 id = 父管道 id）——save_task 落盘链消费
+        assert task.parent_task_id == "parent_pipe"
+        assert task.parent_pipeline_id == "parent_pipe"
+
+    @pytest.mark.asyncio
+    async def test_get_task_from_state_stub_survives_real_save_task(
+        self, mod: Any, service: Any, monkeypatch: Any, tmp_path: Path
+    ) -> None:
+        """stub 字段完整性：state 行组装的 task 经真实 save_task 落盘不崩。
+
+        既有红线（实测 A2）：占位 namespace 缺 parent_task_id（且非 dataclass，
+        asdict 序列化即崩）会让评估死在保存路径。save_task 消费 id/
+        parent_task_id（_find_root_id 根定位）与全字段 asdict 序列化，stub 必须
+        是补全字段的真实 TaskModel。
+        """
+        from task_types import TaskModel
+
+        monkeypatch.setattr(
+            mod,
+            "_state_reader",
+            lambda: [
+                {
+                    "pipeline_id": "p1",
+                    "task.goal": "目标",
+                    "task.status": "evaluating",
+                    "task.acceptance_criteria": {"m1": {"check": "exists"}},
+                    "lineage.parent_pipeline_id": "parent_pipe",
+                }
+            ],
+        )
+        task = await mod.TaskEvaluateTool()._get_task_from_state("p1")
+        assert isinstance(task, TaskModel)
+        await service.save_task(task)  # 不抛即字段完整（含 _find_root_id/asdict 全链）
+        stored = service.get_task("p1")
+        assert stored is not None
+        assert stored.metadata["acceptance_criteria"] == {"m1": {"check": "exists"}}
+        yaml_path = tmp_path / "tasks" / "tree_p1" / "p1.yaml"
+        assert yaml_path.exists(), "stub 应按根任务落盘（父坐标在 YAML 镜像无记录 → 截断为根）"
 
     @pytest.mark.asyncio
     async def test_get_task_from_state_unknown_status_falls_back_pending(self, mod: Any, monkeypatch: Any) -> None:
         monkeypatch.setattr(mod, "_state_reader", lambda: [{"pipeline_id": "p1", "task.status": "weird"}])
         task = await mod.TaskEvaluateTool()._get_task_from_state("p1")
         assert task.status.value == "pending"
+
+    @pytest.mark.asyncio
+    async def test_get_task_from_state_ws_meta_backfills_workspace_injection(
+        self, mod: Any, monkeypatch: Any
+    ) -> None:
+        """ws_meta 数据源适配：state 行回填 metadata.ws_meta → workspace 注入生效。
+
+        实测 A2 误判红线：stub 缺 ws_meta 时指标 workspace 不注入，file_check 在
+        错误目录解析相对路径（「不存在: result.txt」误判失败）。
+        """
+        monkeypatch.setattr(
+            mod,
+            "_state_reader",
+            lambda: [
+                {
+                    "pipeline_id": "p1",
+                    "task.status": "running",
+                    "task.acceptance_criteria": {
+                        "file_check": {"input_params": {"path": "result.txt", "check": "exists"}}
+                    },
+                    "task.ws_meta": {"mode": "isolated", "path": "D:/ws/p1"},
+                }
+            ],
+        )
+        tool = mod.TaskEvaluateTool()
+        task = await tool._get_task_from_state("p1")
+        assert task.metadata["ws_meta"] == {"mode": "isolated", "path": "D:/ws/p1"}
+        params, fallback_ids = tool._get_input_params(task)
+        # 指标未配 criteria → 任务描述兜底（0.1 逻辑，兜底 id 显式返回）
+        assert fallback_ids == ["file_check"]
+        assert params["file_check"]["workspace"] == "D:/ws/p1"
+        assert params["file_check"]["path"] == "result.txt"
 
     @pytest.mark.asyncio
     async def test_get_task_from_state_no_row_returns_none(self, mod: Any, monkeypatch: Any) -> None:
@@ -487,15 +559,15 @@ class TestStateWriterDegrade:
         assert "state 写入失败" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_save_task_exception_warned(self, mod: Any, caplog: Any) -> None:
+    async def test_save_task_failure_propagates(self, mod: Any) -> None:
+        """save_task 失败向上抛（去降级裁定）：不吞异常继续走。"""
         async def boom(_task: Any) -> None:
             raise RuntimeError("save fail")
 
         service = MagicMock()
         service.save_task = boom
-        with caplog.at_level("WARNING"):
+        with pytest.raises(RuntimeError, match="save fail"):
             await mod.TaskEvaluateTool()._save_task(service, MagicMock())
-        assert "保存任务元数据失败" in caplog.text
 
 
 # ── 辅助静态方法 ─────────────────────────────────────────────
