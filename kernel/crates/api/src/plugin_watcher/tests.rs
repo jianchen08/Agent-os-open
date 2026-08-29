@@ -164,6 +164,8 @@ async fn sync_once_discovers_and_applies() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -189,6 +191,8 @@ async fn sync_once_idempotent_across_calls() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -203,6 +207,8 @@ async fn sync_once_idempotent_across_calls() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -234,6 +240,8 @@ async fn sync_once_propagates_discover_error() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -336,6 +344,8 @@ async fn sync_once_consistent_plugin_registers_all_tools() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -366,6 +376,8 @@ async fn sync_once_drifted_tool_is_rejected_from_registration() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -406,6 +418,8 @@ async fn sync_once_verify_failure_does_not_block_install() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -438,6 +452,8 @@ async fn sync_once_verify_failure_lenient_keeps_tools() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -508,6 +524,8 @@ async fn sync_once_with_explicit_baseline_detects_addition() {
         &mut known_cdylib,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -630,6 +648,8 @@ async fn sync_reregisters_plugin_on_manifest_change() {
         &mut None,
         Some(&store),
         &mut hashes,
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -647,6 +667,8 @@ async fn sync_reregisters_plugin_on_manifest_change() {
         &mut None,
         Some(&store),
         &mut hashes,
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -678,6 +700,8 @@ async fn sync_reregisters_plugin_on_manifest_change() {
         &mut None,
         Some(&store),
         &mut hashes,
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -704,6 +728,8 @@ async fn sync_http_endpoints_refreshed_on_change() {
         &mut None,
         None,
         &mut hashes,
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -723,6 +749,8 @@ async fn sync_http_endpoints_refreshed_on_change() {
         &mut None,
         None,
         &mut hashes,
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -958,6 +986,8 @@ async fn sync_skips_disabled_plugin_in_hot_discovery() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         Some(&enablement),
         None,
     )
@@ -1009,6 +1039,8 @@ async fn sync_disabled_plugin_manifest_still_enters_store() {
         &mut None,
         Some(&store),
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         Some(&enablement),
         None,
     )
@@ -1058,6 +1090,8 @@ async fn sync_uninstalls_store_only_disabled_plugin() {
         &mut None,
         Some(&store),
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         Some(&enablement),
         None,
     )
@@ -1077,6 +1111,8 @@ async fn sync_uninstalls_store_only_disabled_plugin() {
         &mut None,
         Some(&store),
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         Some(&enablement),
         None,
     )
@@ -1106,6 +1142,8 @@ async fn sync_rejects_new_plugin_with_missing_required_dep() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -1145,6 +1183,8 @@ async fn sync_uninstalls_removed_plugin_and_cascades_dependents() {
             &mut None,
             None,
             &mut HashMap::new(),
+            &mut HashMap::new(),
+            None,
             None,
             None,
         )
@@ -1166,6 +1206,8 @@ async fn sync_uninstalls_removed_plugin_and_cascades_dependents() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -1189,6 +1231,8 @@ async fn sync_uninstalls_removed_plugin_and_cascades_dependents() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -1216,6 +1260,8 @@ async fn sync_uninstall_isolated_plugin_leaves_others() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -1233,6 +1279,8 @@ async fn sync_uninstall_isolated_plugin_leaves_others() {
         &mut None,
         None,
         &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
         None,
         None,
     )
@@ -1371,4 +1419,301 @@ async fn malformed_output_schema_rejected_at_registration() {
     );
     assert_eq!(out.manifest.capabilities.tools.len(), 1, "t_ok 保留");
     assert_eq!(out.manifest.capabilities.tools[0].name, "t_ok");
+}
+
+// ── G2 复验闭环：净化不被下轮 sync 复活 / manifest 编辑绕不过 G2 / 代码修复恢复 ──
+
+/// 回归锚（复活）：净化剔除的工具不得在下轮 sync 中复活——修复前的实现以
+/// 净化版 manifest 指纹为基线，下轮 raw 声明指纹必与之相异，被误判"变更"
+/// 后把被剔工具原样重注册（复活）。基线必须落声明指纹。
+#[tokio::test]
+async fn sync_next_round_does_not_resurrect_sanitized_tool() {
+    // 首轮：声明 [t1, ghost]，实现只报 t1 → ghost 净化剔除
+    let mut inv1 = MockInvoker::new(vec![mk_manifest("d1", "tool", &["t1", "ghost"], false)]);
+    inv1.list_tools.insert(
+        "d1".into(),
+        json!({ "tools": [{"name": "t1", "description": "t1"}] }),
+    );
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let store: ManifestsStore = Arc::new(RwLock::new(Vec::new()));
+    let ledger = crate::contract::ContractLedger::new();
+    let mut known = HashSet::new();
+    let mut hashes = HashMap::new();
+    let mut code_hashes = HashMap::new();
+    let r1 = sync_once_with_store(
+        &inv1,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        Some(&store),
+        &mut hashes,
+        &mut code_hashes,
+        None,
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r1.drifted_plugins, vec!["d1".to_string()]);
+    assert!(
+        registry_arc.get_tool("ghost").is_none(),
+        "首轮 ghost 被净化剔除"
+    );
+
+    // 次轮：磁盘无任何变化——不得误判变更、不得复活 ghost
+    let r2 = sync_once_with_store(
+        &inv1,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        Some(&store),
+        &mut hashes,
+        &mut code_hashes,
+        None,
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert!(r2.changed_plugin_ids.is_empty(), "未变更不得重注册");
+    assert!(
+        registry_arc.get_tool("ghost").is_none(),
+        "被剔工具不得随下轮 sync 复活"
+    );
+    // store 与账本保持净化真相：store 条目无 ghost；账本 sanitized 证据保留
+    let store_tools: Vec<String> = store
+        .read()
+        .await
+        .iter()
+        .find(|m| m.id == "d1")
+        .expect("store 应含 d1")
+        .capabilities
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    assert_eq!(store_tools, vec!["t1".to_string()]);
+    let st = ledger.get("d1").expect("账本应含 d1");
+    assert_eq!(st.gates.g2_consistency, "sanitized");
+
+    // 第三轮：manifest 编辑（name 变更 → 声明指纹变化）但仍漂移 → 走 G2 复验，
+    // ghost 依旧剔除——manifest 编辑不得绕过 G2 复活被剔工具
+    let mut m3 = mk_manifest("d1", "tool", &["t1", "ghost"], false);
+    m3.name = "d1-edited".into();
+    let mut inv3 = MockInvoker::new(vec![m3]);
+    inv3.list_tools.insert(
+        "d1".into(),
+        json!({ "tools": [{"name": "t1", "description": "t1"}] }),
+    );
+    let r3 = sync_once_with_store(
+        &inv3,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        Some(&store),
+        &mut hashes,
+        &mut code_hashes,
+        None,
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        r3.changed_plugin_ids,
+        vec!["d1".to_string()],
+        "声明变更须触发复验重注册"
+    );
+    assert!(
+        registry_arc.get_tool("ghost").is_none(),
+        "manifest 编辑不得绕过 G2 复活被剔工具"
+    );
+    assert_eq!(r3.drifted_plugins, vec!["d1".to_string()], "复验漂移可见");
+}
+
+/// 回归锚（修复后恢复）：G2 净化剔除的工具，实现修复（代码指纹变化、manifest
+/// 未动）后由 watcher 复验自动恢复——不再要求 manifest 再改或重启内核。
+#[tokio::test]
+async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let mut known = HashSet::new();
+    let mut hashes = HashMap::new();
+    let mut code_hashes = HashMap::new();
+    let ledger = crate::contract::ContractLedger::new();
+
+    // 两个内容不同的目录（文件名不同 → 指纹必异），模拟"修复前/后"的代码；
+    // stage 记录当前指向，resolver 模拟 loader 的目录解析。
+    let dir_old = tempfile::tempdir().unwrap();
+    std::fs::write(dir_old.path().join("impl_old.py"), b"v1").unwrap();
+    let dir_new = tempfile::tempdir().unwrap();
+    std::fs::write(dir_new.path().join("impl_new.py"), b"v2").unwrap();
+    let stage = Arc::new(parking_lot::RwLock::new(dir_old.path().to_path_buf()));
+    let resolver: Arc<CodeDirResolver> = {
+        let stage = stage.clone();
+        Arc::new(move |_id: &str| Some(stage.read().clone()))
+    };
+
+    // 首轮：声明 [t1, t2]，实现只报 t1 → t2 净化剔除
+    let mut inv1 = MockInvoker::new(vec![mk_manifest("fix1", "tool", &["t1", "t2"], false)]);
+    inv1.list_tools.insert(
+        "fix1".into(),
+        json!({ "tools": [{"name": "t1", "description": "t1"}] }),
+    );
+    let r1 = sync_once_with_store(
+        &inv1,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        Some(&resolver),
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r1.drifted_plugins, vec!["fix1".to_string()]);
+    assert!(registry_arc.get_tool("t2").is_none(), "t2 首轮被净化剔除");
+
+    // 次轮：实现修复（上报恢复 t1+t2），manifest 未动，仅代码指纹变化
+    *stage.write() = dir_new.path().to_path_buf();
+    let inv2 = MockInvoker::new(vec![mk_manifest("fix1", "tool", &["t1", "t2"], false)]);
+    let r2 = sync_once_with_store(
+        &inv2,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        Some(&resolver),
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        r2.changed_plugin_ids,
+        vec!["fix1".to_string()],
+        "代码指纹变化须触发复验重注册"
+    );
+    assert!(
+        registry_arc.get_tool("t2").is_some(),
+        "修复后的工具经复验恢复，无需 manifest 变更或重启"
+    );
+    let st = ledger.get("fix1").expect("复验后账本应有记录");
+    assert_eq!(
+        st.gates.g2_consistency, "ok",
+        "复验通过即清除净化状态: {:?}",
+        st.gates.g2_consistency
+    );
+    assert!(st.gates.reverified_ts.is_some(), "显式复验通过必留痕");
+
+    // 第三轮：代码/声明都不再变 → 不重验（幂等，不重复 spawn 复核）
+    let r3 = sync_once_with_store(
+        &inv2,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        Some(&resolver),
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert!(r3.changed_plugin_ids.is_empty(), "未变更不得重注册");
+}
+
+/// 代码指纹解析缺省臂：无解析器 / 解析不到目录 → 指纹恒 0（复验退化为仅声明
+/// 指纹驱动，不误触发）。
+#[test]
+fn current_code_fp_defaults_to_zero_without_resolver_or_dir() {
+    let m = mk_manifest("x1", "tool", &["t"], false);
+    assert_eq!(current_code_fp(None, &m), 0, "无解析器 → 0");
+    let no_dir: Arc<CodeDirResolver> = Arc::new(|_id: &str| None);
+    assert_eq!(current_code_fp(Some(&no_dir), &m), 0, "目录不可得 → 0");
+}
+
+/// boot 注册插件锚点：known 预置（boot 已注册）、指纹基线空（watcher 刚启动）
+/// → 首轮 sync 只建基线不动作；声明编辑后正常触发复验重注册。
+#[tokio::test]
+async fn sync_boot_plugin_first_sync_establishes_baseline_without_action() {
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let mut known: HashSet<String> = ["boot1".to_string()].into_iter().collect();
+    let mut hashes = HashMap::new();
+    let mut code_hashes = HashMap::new();
+
+    // 首轮：boot 插件建基线，不重注册
+    let inv1 = MockInvoker::new(vec![mk_manifest("boot1", "tool", &["t"], false)]);
+    let r1 = sync_once_with_store(
+        &inv1,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        r1.changed_plugin_ids.is_empty() && r1.new_plugin_ids.is_empty(),
+        "boot 插件首轮只建基线"
+    );
+
+    // 次轮（同 manifest）：基线生效，不动作
+    let r2 = sync_once_with_store(
+        &inv1,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(r2.changed_plugin_ids.is_empty());
+
+    // 第三轮（声明编辑）：触发复验重注册
+    let inv3 = MockInvoker::new(vec![mk_manifest("boot1", "tool", &["t2"], false)]);
+    let r3 = sync_once_with_store(
+        &inv3,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(r3.changed_plugin_ids, vec!["boot1".to_string()]);
+    assert!(registry_arc.get_tool("t2").is_some(), "新声明工具注册");
+    assert!(registry_arc.get_tool("t").is_none(), "旧声明工具摘除");
 }

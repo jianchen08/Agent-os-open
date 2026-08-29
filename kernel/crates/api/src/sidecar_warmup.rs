@@ -7,9 +7,10 @@
 //!
 //! 预热集 = 编译管道引用的插件（[`CompiledPipeline::referenced_plugin_ids`]
 //! 单一来源：步骤项 + Composite 池递归 + hooks 目标）∩ enabled sidecar。
-//! 非管道插件（工具/服务等）保持纯懒加载——idle GC 治理不变：预热宿主
-//! 长时间未用自动回收，懒 spawn 兜底；预热只是提前触发，不改变生命周期
-//! 语义。Dynamic 项运行时才解析，不在预热集（同由懒 spawn 兜底）。
+//! 非管道插件（工具/服务等）保持纯懒加载。预热集插件经 [`PluginInvokerImpl::warmup_sidecar`]
+//! 登记 keep-warm 常驻集，所在宿主组豁免 idle GC——预热常驻；若预热宿主仍被
+//! 空闲回收，新会话首条消息会重新全价冷启动，预热被架空。Dynamic 项运行时
+//! 才解析，不在预热集（同由懒 spawn 兜底）。
 
 use std::sync::Arc;
 

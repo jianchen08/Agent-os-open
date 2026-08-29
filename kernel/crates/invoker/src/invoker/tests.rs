@@ -2848,3 +2848,99 @@ async fn preassign_host_key_batches_light_packing_before_spawn() {
         "solo 不进 light 分配表"
     );
 }
+
+// ── 预热常驻：keep-warm 宿主组豁免 idle GC ──
+
+#[tokio::test]
+async fn test_idle_gc_exempts_keep_warm_host_group() {
+    // 预热常驻语义：warmup_sidecar 登记的插件所在宿主组不被 idle GC 回收
+    // （否则预热被架空，新会话首条消息重新全价冷启动）；非预热宿主照常回收。
+    let loader = Arc::new(MockLoader::new());
+    loader.add_manifest(make_light_manifest("warm_a", "python server.py"));
+    loader.add_manifest(make_sidecar_manifest("lazy_b", "python server.py"));
+    let invoker = PluginInvokerImpl::new(loader);
+
+    // 两组已 spawn 宿主：slot1（light 组，成员 warm_a）与 solo（lazy_b）
+    let warm_host = invoker.resolve_host_key(&make_light_manifest("warm_a", "python server.py"));
+    assert_eq!(warm_host, "group:light:1");
+    let live_warm = Arc::new(tokio::sync::RwLock::new(
+        spawn_long_lived_stdio_client().await,
+    ));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(warm_host.clone(), live_warm.clone());
+    invoker.touch_last_used(&warm_host);
+
+    let lazy_host = invoker.resolve_host_key(&make_sidecar_manifest("lazy_b", "python server.py"));
+    assert_eq!(lazy_host, "plugin:lazy_b");
+    let live_lazy = Arc::new(tokio::sync::RwLock::new(
+        spawn_long_lived_stdio_client().await,
+    ));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(lazy_host.clone(), live_lazy.clone());
+    invoker.touch_last_used(&lazy_host);
+
+    // warm_a 登记预热常驻（公开入口）：MockLoader 无真实目录 → spawn 失败
+    // 返回 Err，但常驻登记照常生效（warmup_sidecar 契约：失败跳过、登记不变）
+    let _ = invoker
+        .warmup_sidecar(&make_light_manifest("warm_a", "python server.py"))
+        .await;
+
+    // 两组都置为空闲 400s（> 默认阈值 300s）
+    for hk in [&warm_host, &lazy_host] {
+        invoker
+            .last_used
+            .write()
+            .insert(hk.clone(), Instant::now() - Duration::from_secs(400));
+    }
+
+    invoker.run_idle_gc_pass().await;
+
+    assert!(
+        live_warm.read().await.is_alive().await,
+        "预热常驻宿主组不得被 idle GC 回收"
+    );
+    assert!(
+        !live_lazy.read().await.is_alive().await,
+        "非预热宿主组照常整组回收"
+    );
+    assert!(
+        invoker.mcp_clients.read().contains_key(&warm_host),
+        "预热宿主缓存保留（下次调用零冷启动）"
+    );
+    assert!(
+        !invoker.mcp_clients.read().contains_key(&lazy_host),
+        "回收宿主缓存清空"
+    );
+}
+
+#[tokio::test]
+async fn test_explicit_unload_still_works_on_keep_warm_host() {
+    // 豁免只约束 idle GC 的自动回收；显式卸载（unload_if_idle/force_unload）
+    // 不受预热常驻约束。
+    let loader = Arc::new(MockLoader::new());
+    loader.add_manifest(make_light_manifest("warm_c", "python server.py"));
+    let invoker = PluginInvokerImpl::new(loader);
+
+    let host = invoker.resolve_host_key(&make_light_manifest("warm_c", "python server.py"));
+    let live = Arc::new(tokio::sync::RwLock::new(
+        spawn_long_lived_stdio_client().await,
+    ));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(host.clone(), live.clone());
+    invoker.touch_last_used(&host);
+    let _ = invoker
+        .warmup_sidecar(&make_light_manifest("warm_c", "python server.py"))
+        .await;
+
+    assert!(
+        invoker.unload_if_idle("warm_c").await,
+        "显式卸载不受预热常驻豁免约束"
+    );
+    assert!(!live.read().await.is_alive().await);
+}

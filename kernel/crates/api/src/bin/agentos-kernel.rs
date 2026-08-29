@@ -1154,6 +1154,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_scopes(plugin_scopes.clone())
         .with_initial_cdylib_ids(initial_cdylib_ids)
         .with_restart_hook(restart_hook)
+        // 代码指纹复验：sidecar 实现修复（.py 改动不改 manifest）后，watcher
+        // 轮询即可复验恢复被 G2 净化剔除的工具——目录解析与 invoker respawn
+        // 判据同源（同一 loader 发现结果 + 同一指纹函数）。
+        .with_code_dir_resolver({
+            let fp_invoker = invoker.clone();
+            std::sync::Arc::new(move |plugin_id: &str| fp_invoker.plugin_source_dir(plugin_id))
+        })
         .with_manifests_store(state.manifests.clone())
         .with_enabled_ids(state.enabled_plugin_ids.clone())
         .with_enablement(enablement.clone())

@@ -137,6 +137,10 @@ fn find_group_host_dir(member_dir: &Path) -> Option<std::path::PathBuf> {
 /// 取 mtime（秒级精度），拼接为字符串后做简单 hash。
 ///
 /// 设计权衡：
+/// 插件源码/配置指纹（mtime 基）。invoker 的 respawn 判定与 watcher 的 G2
+/// 复验触发共用同一把指纹——两边对"代码变更"的判定必须同源，否则会出现
+/// respawn 了但复验不触发（或反之）的判据分叉。
+///
 /// - 用 mtime 而非内容 hash：stat 是微秒级，内容 hash 要读全部文件（毫秒级），
 ///   热路径上 stat 性能可接受，mtime 精度足够捕获代码/配置修改。
 /// - **只扫源码文件**（.py/.rs/.js/.ts/.wasm/.json/.yaml/.yml/.toml），跳过运行时
@@ -144,7 +148,7 @@ fn find_group_host_dir(member_dir: &Path) -> Option<std::path::PathBuf> {
 ///   写入临时文件（如诊断日志），会误触发 respawn。
 /// - config_files 指向的配置文件可能在插件目录外（如 config/models/llm.yaml），
 ///   单独 stat 纳入指纹，配置变更也能触发 respawn。
-fn compute_plugin_fingerprint(plugin_dir: &Path, manifest: &PluginManifest) -> u64 {
+pub fn compute_plugin_fingerprint(plugin_dir: &Path, manifest: &PluginManifest) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::Hasher;
     let mut hasher = DefaultHasher::new();
@@ -566,6 +570,11 @@ pub struct PluginInvokerImpl {
     last_used: RwLock<HashMap<String, Instant>>,
     /// light 组运行时装箱状态（分配表 + 槽位计数，见 [`LightPacking`]）。
     light_packing: RwLock<LightPacking>,
+    /// 预热常驻集（boot 预热的管道引用插件 id）：这些插件所在宿主组豁免
+    /// 空闲回收（预热常驻语义——否则预热被 GC 架空，首条消息重新全价冷启动）。
+    /// 集合只增（boot 预热一次定型）；`AGENTOS_DISABLE_SIDECAR_WARMUP=1` 时
+    /// 预热不运行、集合恒空，回到纯懒加载 + 全量 GC。
+    keep_warm_plugins: RwLock<std::collections::HashSet<String>>,
 }
 
 impl PluginInvokerImpl {
@@ -582,6 +591,7 @@ impl PluginInvokerImpl {
             fingerprints: RwLock::new(HashMap::new()),
             last_used: RwLock::new(HashMap::new()),
             light_packing: RwLock::new(LightPacking::default()),
+            keep_warm_plugins: RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -1274,14 +1284,25 @@ impl PluginInvokerImpl {
     ///
     /// boot 后台预热用：把"启动后首次调用"的宿主冷启动（spawn→MCP initialize
     /// 每宿主秒级）提前到用户尚未发消息的窗口。**不执行任何插件逻辑**——
-    /// 仅建连；native（InProcess）无进程模型，no-op Ok。预热宿主仍受 idle GC
-    /// 治理（长时间未用自动回收，懒 spawn 兜底），预热只是提前触发不改变
-    /// 生命周期语义。失败返回 Err 交调用方记日志跳过。
+    /// 仅建连；native（InProcess）无进程模型，no-op Ok。预热集插件登记进
+    /// keep-warm 常驻集：其所在宿主组豁免 idle GC（预热常驻——预热若仍被
+    /// 空闲回收架空，新会话首条消息会重新全价冷启动，预热失去意义）。非预热
+    /// 插件照常懒 spawn + idle GC 治理。失败返回 Err 交调用方记日志跳过
+    /// （常驻登记照常生效：spawn 失败的宿主组豁免回收，懒 spawn 兜底补齐）。
     pub async fn warmup_sidecar(&self, manifest: &PluginManifest) -> Result<(), PluginError> {
         if manifest.host_type != HostType::Sidecar {
             return Ok(());
         }
+        self.keep_warm_plugins.write().insert(manifest.id.clone());
         self.get_or_create_mcp_client(manifest).await.map(|_| ())
+    }
+
+    /// 插件源码目录解析（watcher G2 复验用）：复用 loader 的发现结果拿插件根
+    /// 目录。未发现（未装载/已卸载）返回 None。
+    pub fn plugin_source_dir(&self, plugin_id: &str) -> Option<std::path::PathBuf> {
+        self.loader
+            .get_plugin_dir(plugin_id)
+            .map(std::path::PathBuf::from)
     }
 
     /// 预分配宿主键（纯内存，无 IO 无 spawn）：light 成员写入装箱分配表，
@@ -2161,6 +2182,8 @@ impl PluginInvokerImpl {
     ///
     /// 每 30s 扫描 last_used（宿主键粒度），对空闲超过阈值的宿主整组回收
     /// （sidecar kill 进程，manifest 描述保留，下次调用重新 spawn）。
+    /// 预热集（keep-warm 常驻集，见 [`Self::warmup_sidecar`]）所在宿主组
+    /// 豁免回收——预热常驻语义，否则预热被架空、首条消息重新全价冷启动。
     /// 对齐 trait 文档声明的「空闲超时自动卸载」设计原则。
     ///
     /// 必须用 Arc<Self> 调用（后台任务需 'static 持有 invoker）。在 main 启动期调一次。
@@ -2201,6 +2224,15 @@ impl PluginInvokerImpl {
                 continue;
             }
             let members = self.host_members(&host_key);
+            // 预热常驻豁免：任一成员属于预热集（boot 管道引用插件）→ 整组不回收。
+            // 组语义对称——整组回收是连坐，整组豁免也按成员判定；显式卸载
+            // （force_unload / unload_if_idle）不受此豁免约束。
+            if members
+                .iter()
+                .any(|pid| self.keep_warm_plugins.read().contains(pid))
+            {
+                continue;
+            }
             let threshold = self.host_idle_timeout_secs(&members);
             // threshold == 0 表示宿主持久保活（任一成员声明"永不空闲卸载"），跳过。
             if threshold != 0 && idle_secs > threshold {
