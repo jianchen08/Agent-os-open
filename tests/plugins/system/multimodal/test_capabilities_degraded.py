@@ -1,13 +1,16 @@
 # @feature: FP-0.2.二 可观测性 | @ci: python-coverage
-"""multimodal 能力面静默降级治理测试（scan S1）。
+"""multimodal 能力面行为测试。
 
+能力真值源 = ``config/models/llm.yaml`` 的 models.<id>.multimodal 节。
 行为契约：
-1. 配置源缺失（llm_config / router_factory 不可导入）时按默认能力降级，
-   但必须 (a) 发 WARNING 告警 (b) 返回值带 degraded=True 标记；
-2. 配置源正常时 degraded 恒 False（防标记泛化）；
-3. DefaultAdapter 恒带 degraded=True——附件会被它丢弃，调用方必须可感知；
-4. 工具面透出 degraded 字段（multimodal.convert / multimodal.capability /
-   files/capabilities payload）。
+1. llm.yaml 缺失 / 解析失败 → WARNING + degraded=True（字段值不可作路由依据）；
+2. llm.yaml 正常且模型配了 multimodal 节 → 按配置如实返回（degraded=False）；
+3. llm.yaml 正常但模型无 multimodal 节 → 默认空能力（degraded=False，语义为
+   "模型未声明多模态"，与"配置断链"的 degraded=True 可区分）；
+4. 查找兼容 yaml models 键与 model_name 字段（大小写不敏感）；
+5. 配置文件变更后能力随 mtime 缓存失效而更新；
+6. DefaultAdapter 恒带 degraded=True——附件会被它丢弃，调用方必须可感知；
+7. 工具面透出 degraded 字段（multimodal.capability / files/capabilities payload）。
 """
 
 from __future__ import annotations
@@ -15,7 +18,6 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
-import types
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +54,38 @@ def _adapter() -> Any:
     return _load("adapter", "mm_adapter_degraded_test")
 
 
+_LLM_YAML = """\
+models:
+  glm-5.2:
+    model_name: glm-5.2
+    provider: zhipu_coding
+    multimodal:
+      supports_image: true
+      supported_image_types: [image/png, image/jpeg]
+      max_image_size: 20971520
+  deepseek-v4-flash:
+    model_name: deepseek-v4-flash
+    provider: deepseek
+  MiniMax-M3:
+    model_name: minimax-m3
+    provider: minimax
+    multimodal:
+      supports_image: true
+      supported_image_types: [image/png]
+"""
+
+
+@pytest.fixture
+def llm_yaml_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """能力模块指向临时 llm.yaml，并隔离模块级 mtime 缓存。"""
+    cap_mod = _capabilities()
+    yaml_path = tmp_path / "llm.yaml"
+    yaml_path.write_text(_LLM_YAML, encoding="utf-8")
+    monkeypatch.setattr(cap_mod, "_LLM_YAML_PATH", yaml_path)
+    monkeypatch.setattr(cap_mod, "_LLM_MODELS_CACHE", None)
+    return yaml_path
+
+
 @pytest.fixture
 def registry() -> Any:
     """每次用例重置 ADAPTER_MAPPING（register_adapter 会改类状态）。"""
@@ -63,69 +97,89 @@ def registry() -> Any:
 
 
 # ═══════════════════════════════════════════════════════════
-# 1. 配置源缺失 → warning + degraded 标记
+# 1. 配置源缺失/损坏 → warning + degraded 标记
 # ═══════════════════════════════════════════════════════════
 
 
-class TestCapabilityConfigMissingDegraded:
-    def test_get_capability_marks_degraded_and_warns(
-        self, registry: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+class TestCapabilityConfigBrokenDegraded:
+    def test_missing_yaml_degrades_and_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        monkeypatch.setitem(sys.modules, "llm_config", None)
-        with caplog.at_level(logging.WARNING, logger="*"):
-            cap = registry.get_capability("glm-5.2")
+        cap_mod = _capabilities()
+        monkeypatch.setattr(cap_mod, "_LLM_YAML_PATH", tmp_path / "no-such.yaml")
+        monkeypatch.setattr(cap_mod, "_LLM_MODELS_CACHE", None)
+        with caplog.at_level(logging.WARNING):
+            cap = cap_mod.ModelCapabilityRegistry.get_capability("glm-5.2")
 
-        assert getattr(cap, "degraded", None) is True
-        assert cap.supports_image is False  # 默认空能力语义不变
+        assert cap.degraded is True
+        assert cap.supports_image is False
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert warnings, "配置源缺失必须产生 WARNING 告警"
-        assert any("llm_config" in r.getMessage() for r in warnings)
-    @pytest.mark.parametrize("model_name", ["gpt-4o", "", "未知模型"])
-    def test_get_capability_with_config_not_marked(
-        self, registry: Any, monkeypatch: pytest.MonkeyPatch, model_name: str
+        assert any("llm.yaml" in r.getMessage() for r in warnings)
+
+    def test_malformed_yaml_degrades_and_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """配置源正常时（含模型未配置多模态）degraded 必须为 False。"""
+        cap_mod = _capabilities()
+        bad = tmp_path / "llm.yaml"
+        bad.write_text("models: [unclosed", encoding="utf-8")
+        monkeypatch.setattr(cap_mod, "_LLM_YAML_PATH", bad)
+        monkeypatch.setattr(cap_mod, "_LLM_MODELS_CACHE", None)
+        with caplog.at_level(logging.WARNING):
+            cap = cap_mod.ModelCapabilityRegistry.get_capability("glm-5.2")
 
-        class _MM(types.SimpleNamespace):
-            pass
+        assert cap.degraded is True
+        assert cap.supports_image is False
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warnings, "配置损坏必须产生 WARNING 告警"
 
-        mm = _MM(
-            supports_image=True,
-            supports_audio=False,
-            supports_video=False,
-            supports_document=False,
-            supported_image_types=["image/png"],
-            supported_audio_types=[],
-            supported_video_types=[],
-            max_image_size=1,
-            max_audio_size=1,
-            max_video_size=1,
-            max_document_size=1,
-        )
-        fake_config = types.ModuleType("llm_config")
-        fake_config.get_llm_config = lambda: types.SimpleNamespace(  # type: ignore[attr-defined]
-            find_model_by_name_or_alias=lambda _name: types.SimpleNamespace(multimodal=mm)
-        )
-        monkeypatch.setitem(sys.modules, "llm_config", fake_config)
 
+# ═══════════════════════════════════════════════════════════
+# 2/3/4/5. 真配置读取：配了→如实返回；没配→默认空；键/字段双兼容；缓存随 mtime 失效
+# ═══════════════════════════════════════════════════════════
+
+
+class TestCapabilityFromConfig:
+    def test_configured_model_reports_support(self, registry: Any, llm_yaml_path: Path) -> None:
+        cap = registry.get_capability("glm-5.2")
+        assert cap.degraded is False
+        assert cap.supports_image is True
+        assert cap.supported_image_types == ["image/png", "image/jpeg"]
+        assert cap.max_image_size == 20971520
+
+    @pytest.mark.parametrize("model_name", ["deepseek-v4-flash", "unknown-model", ""])
+    def test_unconfigured_model_reports_default_empty(
+        self, registry: Any, llm_yaml_path: Path, model_name: str
+    ) -> None:
+        """模型存在但无 multimodal 节 / 模型不存在：默认空能力且 degraded=False
+        （"未声明多模态"不是"配置断链"）。"""
         cap = registry.get_capability(model_name)
-        assert getattr(cap, "degraded", None) is False
+        assert cap.degraded is False
+        assert cap.supports_image is False
+
+    @pytest.mark.parametrize("query", ["minimax-m3", "MiniMax-M3", "MINIMAX-M3"])
+    def test_lookup_matches_yaml_key_case_insensitive(self, registry: Any, llm_yaml_path: Path, query: str) -> None:
+        cap = registry.get_capability(query)
         assert cap.supports_image is True
 
+    def test_capability_tracks_config_change(self, registry: Any, llm_yaml_path: Path) -> None:
+        """删值实验：配置改为不支持后，能力查询必须跟着变（缓存随 mtime 失效）。"""
+        assert registry.get_capability("glm-5.2").supports_image is True
+        llm_yaml_path.write_text(
+            "models:\n  glm-5.2:\n    model_name: glm-5.2\n",
+            encoding="utf-8",
+        )
+        cap = registry.get_capability("glm-5.2")
+        assert cap.supports_image is False
+        assert cap.degraded is False
 
-class TestAdapterForModelDegraded:
-    def test_router_missing_marks_adapter_degraded_and_warns(
-        self, registry: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        monkeypatch.setitem(sys.modules, "router_factory", None)
-        with caplog.at_level(logging.WARNING, logger="*"):
-            adapter = registry.get_adapter_for_model("any-model")
 
-        assert isinstance(adapter, _capabilities().DefaultAdapter)
-        assert getattr(adapter, "degraded", None) is True
-        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert warnings, "provider 解析源缺失必须产生 WARNING 告警"
+# ═══════════════════════════════════════════════════════════
+# 6. DefaultAdapter 丢弃语义
+# ═══════════════════════════════════════════════════════════
 
+
+class TestDefaultAdapterDegraded:
     def test_known_provider_adapter_not_marked(self, registry: Any) -> None:
         adapter = registry.get_adapter("openai")
         assert isinstance(adapter, registry.ADAPTER_MAPPING["openai"])
@@ -159,7 +213,7 @@ class TestAdapterForModelDegraded:
 
 
 # ═══════════════════════════════════════════════════════════
-# 4. 工具面透出 degraded
+# 7. 工具面透出 degraded 与真实能力
 # ═══════════════════════════════════════════════════════════
 
 
@@ -173,31 +227,23 @@ def _run(coro: Any) -> Any:
         loop.close()
 
 
-class TestToolFaceSurfacesDegraded:
-    def test_capability_payload_carries_degraded_false_normally(
-        self, monkeypatch: pytest.MonkeyPatch
+class TestToolFaceSurfacesCapability:
+    def test_capability_tool_reports_configured_model(
+        self, monkeypatch: pytest.MonkeyPatch, llm_yaml_path: Path
     ) -> None:
-        """配置源可用时工具面如实报 degraded=False。"""
         server = _load("server", "mm_server_degraded_test")
-        mm = types.SimpleNamespace(
-            supports_image=True, supports_audio=False, supports_video=False,
-            supports_document=False, supported_image_types=["image/png"],
-            supported_audio_types=[], supported_video_types=[],
-            max_image_size=1, max_audio_size=1, max_video_size=1, max_document_size=1,
-        )
-        fake_config = types.ModuleType("llm_config")
-        fake_config.get_llm_config = lambda: types.SimpleNamespace(  # type: ignore[attr-defined]
-            find_model_by_name_or_alias=lambda _name: types.SimpleNamespace(multimodal=mm)
-        )
-        monkeypatch.setitem(sys.modules, "llm_config", fake_config)
         result = _run(server.multimodal_capability("glm-5.2"))
         assert result["degraded"] is False
+        assert result["supports_image"] is True
 
-    def test_files_capabilities_payload_surfaces_model_degradation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_files_capabilities_payload_reports_configured_model(
+        self, monkeypatch: pytest.MonkeyPatch, llm_yaml_path: Path
+    ) -> None:
         server = _load("server", "mm_server_degraded_test")
-        monkeypatch.setitem(sys.modules, "llm_config", None)
         payload = server._files_capabilities_payload("glm-5.2")
-        assert payload["degraded"] is True
+        assert payload["degraded"] is False
+        assert payload["supports_image"] is True
+        assert payload["is_multimodal"] is True
 
     def test_convert_result_flags_unknown_provider(self) -> None:
         server = _load("server", "mm_server_degraded_test")

@@ -156,7 +156,7 @@ class DefaultAdapter(MultimodalAdapter):
     用于不支持多模态的模型，仅返回文本内容，忽略所有附件。
 
     附件丢弃必须可感知：本适配器 degraded 恒为 True，
-    经 get_adapter()/get_adapter_for_model() 取得的实例携带该标记。
+    经 get_adapter() 取得的实例携带该标记。
 
     适用场景:
         - 纯文本模型（如 deepseek-chat、gpt-3.5-turbo）

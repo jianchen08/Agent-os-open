@@ -1,9 +1,9 @@
 /**
  * ChatInput 粘贴降级路径测试（paste-to-path，纯文本模型）
  *
- * 移植语义（modlens）：模型不支持图片时，粘贴图片 → 上传 → 把可引用路径
- * 插入输入框（文本模型配合 read/识图工具使用）。附件管线（支持图片的模型）
- * 保持原行为。
+ * 移植语义（modlens）：模型不支持图片时，粘贴图片 → 上传 → 把 markdown
+ * 图片引用插入输入框（气泡渲染成图；multimodal_preprocessor 提取引用块，
+ * llm_core 发送前转 base64）。附件管线（支持图片的模型）保持原行为。
  */
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -87,7 +87,7 @@ describe('ChatInput 粘贴降级（text-only）', () => {
     vi.clearAllMocks()
   })
 
-  it('模型不支持图片：粘贴图片 → 上传 → 路径文本插入输入框', async () => {
+  it('模型不支持图片：粘贴图片 → 上传 → markdown 图片引用插入输入框', async () => {
     const { uploadFile } = await import('@/services/api/files')
     renderInput()
     const textbox = screen.getByRole('textbox') as HTMLTextAreaElement
@@ -96,7 +96,8 @@ describe('ChatInput 粘贴降级（text-only）', () => {
 
     await waitFor(() => {
       expect(uploadFile).toHaveBeenCalledTimes(1)
-      expect(textbox.value).toContain('图片已上传：/uploads/pasted-img.png')
+      // markdown 引用契约：消息气泡渲染成图 + multimodal_preprocessor 可提取
+      expect(textbox.value).toContain('![clipboard.png](/uploads/pasted-img.png)')
     })
   })
 
@@ -108,7 +109,7 @@ describe('ChatInput 粘贴降级（text-only）', () => {
     pasteImage()
 
     await waitFor(() => {
-      expect(textbox.value).toContain('图片已上传')
+      expect(textbox.value).toContain('![clipboard.png](/uploads/pasted-img.png)')
     })
     // 附件预览区不应出现（canPasteImage=false 不建附件）
     expect(document.querySelector('[data-testid="attachment-preview"]')).toBeNull()

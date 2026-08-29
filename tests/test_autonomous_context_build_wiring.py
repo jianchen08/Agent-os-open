@@ -143,8 +143,12 @@ def test_post_routes_continue_after_reminder_injection():
         r.get("when") == "_has_new_llm_input == true" and r.get("then") == "loop"
         for r in routes
     ), "post 路由必须含 _has_new_llm_input == true → loop 续跑分支"
-    # 续跑分支必须排在兜底 end 之前（apply_routes 按序首中即停）
-    end_idx = next(i for i, r in enumerate(routes) if r.get("then") == "end")
+    # 续跑分支必须排在兜底 end 之前（apply_routes 按序首中即停）。
+    # 只对齐兜底 end（无 when）：带条件的终态收束 end（如 task.status 终态，
+    # 用户裁定 2026-08-29 当轮收束优先）允许排在它前面。
+    end_idx = next(
+        i for i, r in enumerate(routes) if r.get("then") == "end" and r.get("when") is None
+    )
     reminder_idx = next(
         i for i, r in enumerate(routes) if r.get("when") == "_has_new_llm_input == true"
     )

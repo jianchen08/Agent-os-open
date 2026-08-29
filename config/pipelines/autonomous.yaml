@@ -60,6 +60,7 @@ loop_bodies:
           - pipeline_tool_schema       # 工具 schema 注入（tool_context/tool_schema_validator 的定义来源：tool_schema 经 registry 生成，validator 校验 raw_tool_calls 参数形状；tool_context 读 registry 在线状态，须在本步之前）
           - pipeline_tool_context      # 工具在线状态感知（ToolRegistry 在线工具 + Electron 窗口 + 适配器状态 → state.tool_context；registry 不可用降级跳过）
           - pipeline_param_inject
+          - pipeline_multimodal_preprocessor  # 多模态内容提取（用户输入中的 /uploads/ markdown 图片引用与附件 → state.multimodal_content；llm_core 发送前读文件转 base64。须在 prompt_build/llm_core 之前）
           - pipeline_memory_read
           - pipeline_knowledge_inject
           - pipeline_model_prompt_adapter  # 模型适配消息注入（仅任务首轮、历史头部；须在 godot_context 之前——reference 消息会把首轮撑到 2 条）

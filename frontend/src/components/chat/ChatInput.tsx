@@ -574,14 +574,16 @@ export const ChatInput = ({
         return
       }
 
-      // 纯文本模型降级（paste-to-path）：上传图片后把可引用路径插入输入框，
-      // 让文本模型配合 read/识图工具使用图片。与附件管线共享 uploadFile。
+      // 纯文本模型降级（paste-to-path）：上传图片后把 markdown 图片引用插入
+      // 输入框——消息气泡渲染成图，multimodal_preprocessor 按 /uploads/ 引用
+      // 提取内容块，llm_core 发送前转 base64。与附件管线共享 uploadFile。
       void (async () => {
         const inserts: string[] = []
         for (const file of imageFiles) {
           try {
             const result = await uploadFile(file, modelName)
-            inserts.push(`图片已上传：${result.url}`)
+            const name = file.name.replace(/[[\]]/g, '').trim() || '图片'
+            inserts.push(`![${name}](${result.url})`)
           } catch {
             inserts.push(`图片上传失败：${file.name}`)
           }

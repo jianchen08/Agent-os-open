@@ -28,9 +28,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
-# capabilities.py 的 get_capability() / get_adapter_for_model() 已改为可选导入：
-# 先尝试 from llm_config / from router_factory（本地未提供时 ImportError），
-# 找不到则走 fallback（返回默认空能力 / DefaultAdapter）。
+# capabilities.py 的 get_capability() 直读 config/models/llm.yaml 的
+# multimodal 节（mtime 缓存）；llm.yaml 缺失/损坏时返回 degraded=True 空能力。
 from capabilities import ModelCapabilityRegistry  # noqa: E402
 from http_json import (  # noqa: E402
     json_response as _json_response,
