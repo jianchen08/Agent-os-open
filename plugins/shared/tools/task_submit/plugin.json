@@ -70,7 +70,15 @@
             "project_id": {
               "type": "string",
               "pattern": "^[0-9a-f]{12}$",
-              "description": "挂靠项目 ID（可选）。指定后任务在项目文件夹下执行（默认 worktree 从项目仓库分叉）；缺省为独立任务。项目经 projects 域 API 创建（= 真实文件夹 + 登记）"
+              "description": "挂靠项目 ID（可选）。指定后任务在项目文件夹下执行（默认 worktree 从项目仓库分叉）；缺省为独立任务。项目经 projects 域 API 创建（= 真实文件夹 + 登记），或在 L1 提交时用 project_title 直接创建挂靠。"
+            },
+            "project_title": {
+              "type": "string",
+              "description": "新建项目标题（可选，与 project_id 二选一）。指定后创建项目（= 建文件夹 + git init + 登记）并挂靠，任务在项目文件夹下执行；同目录已登记时复用既有项目。仅 L1 可用（L2/L3 子任务沿父链继承）。"
+            },
+            "project_path": {
+              "type": "string",
+              "description": "新建项目文件夹（可选，配合 project_title）。显式指定目录；缺省自动生成 {工作空间根}/projects/<标题>。已存在目录非 git 仓库会自动 git init（不删改现有文件）。"
             },
             "parent_task_id": {
               "type": "string",

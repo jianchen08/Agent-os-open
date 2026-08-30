@@ -585,3 +585,24 @@ class TestProjectCreateOnSubmit:
         assert not r.success
         assert r.error_code == "PROJECT_CREATE_OR_ATTACH_CONFLICT"
         assert sender.calls == []
+
+
+class TestManifestSchemaLockstep:
+    """plugin.json 声明 ↔ 代码实现 schema 锁步（G2 一致性闸的测试面）。
+
+    G2 注册闸（invoker verify compare_tools）对声明了 input_schema 的工具做
+    全等比对：声明与实现不一致 → 工具被剔除 → 「工具未注册」运行事故。
+    改 get_tool_definition 的 schema 必须同步 plugin.json（本次事故即因此）。
+    """
+
+    def test_declared_input_schema_matches_implementation(self, mod: Any) -> None:
+        import json
+
+        manifest = json.loads(
+            (Path(__file__).resolve().parent.parent / "task_submit" / "plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        declared = manifest["capabilities"]["tools"][0]["input_schema"]
+
+        assert declared == mod._TASK_SUBMIT_INPUT_SCHEMA
