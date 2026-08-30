@@ -546,7 +546,7 @@ class TaskEvaluateTool(BuiltinTool):
         )
         metric_ids = self._get_metric_ids(task)
         try:
-            input_params, criteria_fallback_ids = self._get_input_params(task)
+            input_params = self._get_input_params(task)
         except ValueError as exc:
             # 指标参数解析失败（如 {tool_id} 模板歧义）：显式失败，不带病评估
             logger.error(
@@ -584,12 +584,33 @@ class TaskEvaluateTool(BuiltinTool):
             task,
             metric_ids,
         )
+        # 未配置 criteria 的指标直接通过：没有验收标准 = 视为满足（不做任务
+        # 描述顶替——评估引擎按 input_params 检查语义判定，顶替只会伪造
+        # "有标准"假象）；留 warning 让配置缺失可见。
+        no_criteria_ids = [
+            mid for mid in remaining_ids
+            if not (input_params.get(mid, {}).get("criteria") or "").strip()
+        ]
+        if no_criteria_ids:
+            already_passed += len(no_criteria_ids)
+            remaining_ids = [mid for mid in remaining_ids if mid not in no_criteria_ids]
+            logger.warning(
+                "[TaskEvaluate] 指标未配置 criteria，直接通过 | task_id=%s | metric_ids=%s",
+                task.id,
+                sorted(no_criteria_ids),
+            )
         if not remaining_ids:
             logger.info(
                 "[TaskEvaluate] 所有指标已通过，直接完成任务 | task_id=%s | passed=%d/%d",
                 task.id,
                 already_passed,
                 len(metric_ids),
+            )
+            # 通过来源如实标注：无 criteria 直接通过 ≠ 历史评估记录通过
+            _pass_note = (
+                f"（其中 {len(no_criteria_ids)} 个未配置 criteria 直接通过）"
+                if no_criteria_ids
+                else "（来自历史评估记录）"
             )
             return await self._complete_task(
                 task_service,
@@ -600,7 +621,7 @@ class TaskEvaluateTool(BuiltinTool):
                     {
                         "task_id": task.id,
                         "overall_passed": True,
-                        "summary": (f"所有 {len(metric_ids)} 个指标均已通过（来自历史评估记录）"),
+                        "summary": f"所有 {len(metric_ids)} 个指标均已通过{_pass_note}",
                         "results": [],
                     },
                 )(),
@@ -642,20 +663,6 @@ class TaskEvaluateTool(BuiltinTool):
                 ),
                 timeout=timeout,
             )
-            # criteria 兜底必须在评估结果中显式可见（质量闸门标准来源）
-            if criteria_fallback_ids:
-                _fallback_mark = (
-                    "未配置 criteria，用任务描述兜底: "
-                    + ", ".join(sorted(criteria_fallback_ids))
-                )
-                _base_summary = getattr(result, "summary", None) or ""
-                try:
-                    result.summary = f"[{_fallback_mark}] {_base_summary}"
-                except Exception:  # noqa: BLE001 — 标记失败不阻断评估结果流转
-                    logger.warning(
-                        "[TaskEvaluate] 评估结果 summary 不可写，criteria 兜底标记仅留日志 | task_id=%s",
-                        task.id,
-                    )
             return await self._handle_evaluation_result(inputs, task_service, task, result)
         except asyncio.TimeoutError:
             logger.warning(
@@ -1378,15 +1385,9 @@ class TaskEvaluateTool(BuiltinTool):
             task: TaskModel 实例
 
         Returns:
-            (key=metric_id, value=input_params 的字典, criteria 兜底 metric_id 列表)
+            key=metric_id, value=input_params 的字典
         """
         params, ac = self._extract_raw_input_params(task)
-
-        task_desc = ""
-        if hasattr(task, "description") and task.description:
-            task_desc = task.description
-        elif hasattr(task, "title") and task.title:
-            task_desc = task.title
 
         all_metric_ids: set[str] = set()
         if task.metadata and "evaluation_metric_ids" in task.metadata:
@@ -1398,11 +1399,9 @@ class TaskEvaluateTool(BuiltinTool):
         ws_meta = (task.metadata or {}).get("ws_meta") if task.metadata else None
         workspace_abs: str | None = ws_meta.get("path") if ws_meta else None
 
-        criteria_fallback_ids = self._inject_fallbacks_and_placeholders(
-            params, all_metric_ids, task, task_desc, workspace_abs,
-        )
+        self._inject_workspace_and_placeholders(params, all_metric_ids, task, workspace_abs)
         self._apply_tool_id_templates(params, all_metric_ids, workspace_abs)
-        return params, criteria_fallback_ids
+        return params
 
     @staticmethod
     def _extract_raw_input_params(
@@ -1431,30 +1430,21 @@ class TaskEvaluateTool(BuiltinTool):
                             }
         return params, ac
 
-    def _inject_fallbacks_and_placeholders(
+    def _inject_workspace_and_placeholders(
         self,
         params: dict[str, dict[str, Any]],
         metric_ids: set[str],
         task: Any,
-        task_desc: str,
         workspace_abs: str | None,
-    ) -> list[str]:
-        """criteria 任务描述兜底 + workspace 注入 + {{workspace}}/{{task_id}} 占位符替换。
+    ) -> None:
+        """workspace 注入 + {{workspace}}/{{task_id}} 占位符替换。
 
-        质量闸门用了任务描述兜底必须可见——静默顶替会掩盖配置漏配，故收集
-        兜底 metric_id 列表返回给调用方显式标记。
+        criteria 不做任何兜底：未配置就是未配置（评估引擎按 input_params
+        的检查语义判定，不消费 criteria；拿任务描述顶替只会伪造"有标准"
+        假象）。未配置 criteria 的指标在 _auto_complete 直接通过。
         """
-        criteria_fallback_ids: list[str] = []
         for metric_id in metric_ids:
             p = params.get(metric_id, {})
-            if not p.get("criteria") and task_desc:
-                p.setdefault("criteria", task_desc)
-                criteria_fallback_ids.append(metric_id)
-                logger.warning(
-                    "[TaskEvaluate] 指标未配置 criteria，已用任务描述兜底 | task_id=%s | metric_id=%s",
-                    task.id,
-                    metric_id,
-                )
             if workspace_abs:
                 p["workspace"] = workspace_abs
             for key, val in list(p.items()):
@@ -1464,7 +1454,6 @@ class TaskEvaluateTool(BuiltinTool):
                     val = val.replace("{{task_id}}", task.id)  # noqa: PLW2901
                     p[key] = val
             params[metric_id] = p
-        return criteria_fallback_ids
 
     def _apply_tool_id_templates(
         self,

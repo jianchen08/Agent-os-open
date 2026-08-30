@@ -207,7 +207,13 @@ class TestEvaluateSingle:
     @pytest.mark.asyncio
     async def test_single_metric_converts_to_auto_complete(self, mod: Any, service: Any, monkeypatch: Any) -> None:
         """单指标任务在 evaluate_single 下自动转完全评估并完成。"""
-        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"]})
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1"],
+                "acceptance_criteria": {"m1": {"input_params": {"criteria": "存在", "path": "x"}}},
+            },
+        )
 
         def _factory(kwargs: dict) -> Any:
             return _eval_result(task.id, [_metric("m1", True)], summary="全过")
@@ -340,7 +346,13 @@ class TestAutoComplete:
 
     @pytest.mark.asyncio
     async def test_auto_complete_timeout(self, mod: Any, service: Any, monkeypatch: Any) -> None:
-        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"]})
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1"],
+                "acceptance_criteria": {"m1": {"input_params": {"criteria": "存在", "path": "x"}}},
+            },
+        )
         monkeypatch.setattr(mod.TaskEvaluateTool, "_get_eval_timeout", staticmethod(lambda self: 0.001))
 
         async def _slow(**kwargs: Any) -> Any:
@@ -597,8 +609,8 @@ class TestExecuteExtraPaths:
         assert "继续改进" in result.metadata["message"]
 
     @pytest.mark.asyncio
-    async def test_auto_complete_fallback_summary_marked(self, mod: Any, service: Any, monkeypatch: Any) -> None:
-        """criteria 兜底必须显式可见：summary 前缀带兜底标记。"""
+    async def test_auto_complete_no_criteria_passed(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """未配置 criteria 的指标直接通过（不拿任务描述兜底）。"""
         task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"], "acceptance_criteria": {"m1": {"input_params": {"path": "x"}}}})
 
         def _factory(kwargs: dict[str, Any]) -> Any:
@@ -607,18 +619,23 @@ class TestExecuteExtraPaths:
         ex = _RecordingExecutor(_factory)
         tool, _ = _inject_tool(mod, monkeypatch, service)
         tool._executor = ex
-        ex = _RecordingExecutor(_factory)
-        tool, _ = _inject_tool(mod, monkeypatch, service)
-        tool._executor = ex
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is True
-        # 兜底标记显式可见 + 原 summary（compute_overall 重算）保留
-        assert "未配置 criteria，用任务描述兜底" in result.output["summary"]
-        assert "全部 1 项指标通过" in result.output["summary"]
+        assert result.metadata["result"] == "completed"
+        assert ex.calls == [], "无 criteria 直接通过，不应调用执行器"
+        # 通过来源如实标注：未配置 criteria 直接通过，而非任务描述兜底
+        assert "未配置 criteria 直接通过" in result.output["summary"]
+        assert "所有 1 个指标均已通过" in result.output["summary"]
 
     @pytest.mark.asyncio
     async def test_auto_complete_eval_failed(self, mod: Any, service: Any, monkeypatch: Any) -> None:
-        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"]})
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1"],
+                "acceptance_criteria": {"m1": {"input_params": {"criteria": "存在", "path": "x"}}},
+            },
+        )
 
         def _boom(kwargs: dict[str, Any]) -> Any:
             raise RuntimeError("engine died")
@@ -783,34 +800,6 @@ class TestEdgeBranches:
         assert state_writer.await_args.args[1]["task.status"] == "completed"
 
     @pytest.mark.asyncio
-    async def test_summary_unwritable_marked_in_log(self, mod: Any, service: Any, monkeypatch: Any, caplog: Any) -> None:
-        """评估结果 summary 不可写（只读对象）→ 兜底标记仅留日志，结果照常流转。"""
-        task = await _new_task(
-            service,
-            metadata={"evaluation_metric_ids": ["m1"], "acceptance_criteria": {"m1": {"input_params": {"path": "x"}}}},
-        )
-
-        class _ReadonlyResult:
-            """模拟只读结果对象：属性写入一律抛 AttributeError。"""
-
-            def __init__(self) -> None:
-                object.__setattr__(self, "task_id", "t1")
-                object.__setattr__(self, "overall_passed", True)
-                object.__setattr__(self, "results", [_metric("m1", True)])
-                object.__setattr__(self, "summary", "只读")
-
-            def __setattr__(self, name: str, value: Any) -> None:
-                raise AttributeError("readonly")
-
-        ex = _RecordingExecutor(lambda kw: _ReadonlyResult())
-        tool, _ = _inject_tool(mod, monkeypatch, service)
-        tool._executor = ex
-        with caplog.at_level("WARNING"):
-            result = await tool.execute({"action": "auto_complete", "task_id": task.id})
-        assert "summary 不可写" in caplog.text
-        assert result.success is True
-
-    @pytest.mark.asyncio
     async def test_tool_id_template_single_candidate_substituted(self, mod: Any, tmp_path: Path) -> None:
         """{tool_id} 唯一候选 → 替换进参数（不猜测，唯一命中）。"""
         tools_dir = tmp_path / "src" / "tools" / "builtin"
@@ -826,10 +815,10 @@ class TestEdgeBranches:
             "acceptance_criteria": {"m1": {"input_params": {"pattern": "{tool_id}"}}},
         }
         tool = mod.TaskEvaluateTool()
-        params, fallback = tool._get_input_params(task)
+        params = tool._get_input_params(task)
         assert params["m1"]["pattern"] == "my_tool"
-        # 描述/标题均为空 → 任务描述兜底不触发
-        assert fallback == [] and params["m1"].get("criteria") is None
+        # 未配置 criteria 不兜底：原样保留，不拿描述/标题顶替
+        assert params["m1"].get("criteria") is None
 
 
 class TestStateRowExecuteMerge:

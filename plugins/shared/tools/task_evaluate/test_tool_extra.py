@@ -294,9 +294,9 @@ class TestStateRead:
         tool = mod.TaskEvaluateTool()
         task = await tool._get_task_from_state("p1")
         assert task.metadata["ws_meta"] == {"mode": "isolated", "path": "D:/ws/p1"}
-        params, fallback_ids = tool._get_input_params(task)
-        # 指标未配 criteria → 任务描述兜底（0.1 逻辑，兜底 id 显式返回）
-        assert fallback_ids == ["file_check"]
+        params = tool._get_input_params(task)
+        # 指标未配 criteria 不兜底：输入参数原样保留
+        assert "criteria" not in params["file_check"]
         assert params["file_check"]["workspace"] == "D:/ws/p1"
         assert params["file_check"]["path"] == "result.txt"
 
@@ -312,7 +312,7 @@ class TestStateRead:
         monkeypatch.setattr(
             mod,
             "_state_reader",
-            lambda: [{"pipeline_id": task.id, "task.status": "running", "task.acceptance_criteria": {"m1": {}}}],
+            lambda: [{"pipeline_id": task.id, "task.status": "running", "task.acceptance_criteria": {"m1": {"input_params": {"criteria": "存在"}}}}],
         )
         monkeypatch.setattr(mod, "_state_writer", AsyncMock())
         monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
@@ -725,13 +725,12 @@ class TestInputParams:
             },
         }
         tool = mod.TaskEvaluateTool()
-        params, fallback = tool._get_input_params(task)
+        params = tool._get_input_params(task)
         assert params["a"]["path"] == "src/a.py"
         assert params["b"]["path"] == "src/b.py"
         assert "expected_output" not in params["b"] and "pass_threshold" not in params["b"]
-        # 无 criteria 的指标拿到任务描述兜底 + 兜底名单（顺序跟随声明来源）
-        assert params["a"]["criteria"] == "做点事"
-        assert set(fallback) == {"a", "b"}
+        # 未配置 criteria 不兜底：原样保留，不拿任务描述顶替
+        assert "criteria" not in params["a"] and "criteria" not in params["b"]
 
     def test_workspace_and_templates_injected(self, mod: Any, tmp_path: Path) -> None:
         ws = tmp_path / "ws"
@@ -746,15 +745,13 @@ class TestInputParams:
             "acceptance_criteria": {"m1": {"input_params": {"criteria": "检查 {{workspace}} 与 {{task_id}}"}}},
         }
         tool = mod.TaskEvaluateTool()
-        params, fallback = tool._get_input_params(task)
+        params = tool._get_input_params(task)
         p = params["m1"]
         assert p["workspace"] == str(ws)
         assert str(ws) in p["criteria"] and "t-9" in p["criteria"]
-        # 显式 criteria → 不走任务标题兜底
-        assert fallback == []
         # 非字符串参数原样保留
         task.metadata["acceptance_criteria"]["m1"]["input_params"]["min_size"] = 5
-        params2, _ = tool._get_input_params(task)
+        params2 = tool._get_input_params(task)
         assert params2["m1"]["min_size"] == 5
 
     def test_resolve_tool_id_candidates(self, mod: Any, tmp_path: Path) -> None:

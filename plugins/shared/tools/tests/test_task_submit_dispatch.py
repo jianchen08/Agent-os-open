@@ -20,7 +20,9 @@ system/tasks 同 test_task_submit_migration.py 的 sys.path 装配。
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -232,6 +234,53 @@ class TestTaskPipelineDispatch:
             mod._chat_sender = None
         assert not r2.success
         assert r2.error_code == "DEPENDENCY_NOT_FOUND"
+
+    async def test_submit_inherit_workspace_reads_birth_contract_coordinates(self, mod: Any) -> None:
+        """inherit_workspace_from 读面三路：源任务 ws_meta 未回写（运行初窗口）时
+        回退出生契约 lineage.parent_ws_meta——任务出生即带工作空间坐标，不得
+        误报"没有工作空间信息"。"""
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        # 源任务坐标目录须在容器内（同容器校验）+ 真实存在（目录存在校验）
+        ws = Path(
+            tempfile.mkdtemp(prefix="test_inherit_ws_", dir=Path(__file__).resolve().parents[4])
+        )
+        try:
+            async def _rows() -> list[dict]:
+                return [
+                    {
+                        "pipeline_id": "src-task-001",
+                        "lineage.parent_ws_meta": {"mode": "plain", "path": str(ws)},
+                    }
+                ]
+
+            tool._read_state_rows = _rows  # type: ignore[method-assign]
+            r = await tool.execute(_base_inputs(inherit_workspace_from="src-task-001"))
+            assert r.success, r.error
+            ec_call = next(c for c in sender.calls if "execution_context" in c)
+            assert ec_call["execution_context"]["workspace"]["source_path"] == str(ws)
+        finally:
+            shutil.rmtree(ws, ignore_errors=True)
+            mod._chat_sender = None
+
+    async def test_submit_inherit_workspace_all_sources_empty_fails_closed(self, mod: Any) -> None:
+        """三路坐标全空（ws_meta/task.ws_meta/lineage.parent_ws_meta）→ fail-closed
+        报"没有工作空间信息"，不猜测不虚构。"""
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+
+        async def _rows() -> list[dict]:
+            return [{"pipeline_id": "src-task-002"}]
+
+        tool._read_state_rows = _rows  # type: ignore[method-assign]
+        try:
+            r = await tool.execute(_base_inputs(inherit_workspace_from="src-task-002"))
+            assert not r.success
+            assert "没有工作空间信息" in r.error
+        finally:
+            mod._chat_sender = None
 
     async def test_submit_drops_retired_priority_max_retries(self, mod: Any) -> None:
         """参数退役（2026-08-24）：priority/max_retries 执行层零消费者，

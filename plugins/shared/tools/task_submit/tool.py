@@ -1297,12 +1297,13 @@ class TaskSubmitTool(BuiltinTool):
     ) -> tuple[str | None, ToolExecutionResult | None]:
         """从源任务 state 行取出工作空间路径（复用旧路径，不复制不初始化）。
 
-        state 单一真值（0.2 任务无 YAML 记录）：ws_meta 由执行管道
-        workspace_lifecycle init 写入、经 persistent_fields 落表，as_dict 兼容
-        跨边界 JSON 字符串形态。校验序：桥可用 → 源任务行命中 → ws_meta 形态
-        → 同容器归属 → 目录存在 → worktree 模式 git 身份有效。任一步失败返回
-        失败信封，引导 agent 去掉 inherit_workspace_from 后重新提交。
-        返回 (旧工作空间路径, 失败结果)；路径有效性由调用方按目录语义使用。
+        state 单一真值（0.2 任务无 YAML 记录）：坐标按序读 ws_meta →
+        task.ws_meta → lineage.parent_ws_meta（出生契约登记，创建即写恒可见），
+        as_dict 兼容跨边界 JSON 字符串形态。校验序：桥可用 → 源任务行命中 →
+        坐标形态 → 同容器归属 → 目录存在 → worktree 模式 git 身份有效。
+        任一步失败返回失败信封，引导 agent 去掉 inherit_workspace_from 后
+        重新提交。返回 (旧工作空间路径, 失败结果)；路径有效性由调用方按
+        目录语义使用。
         """
         rows = await self._read_state_rows()
         if rows is None:
@@ -1329,7 +1330,20 @@ class TaskSubmitTool(BuiltinTool):
                     "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
                 ),
             )
+        # 工作空间坐标按序读取：ws_meta（init 写 state 后回写 registry 有延迟
+        # 窗口）→ task.ws_meta（pipeline-state.update 镜像，registry 热路径可能
+        # 跳过）→ lineage.parent_ws_meta（出生契约登记，创建即写恒可见）。
+        # 任务出生即携带工作空间坐标（主会话/继承任务 = 自己的工作区），
+        # 源任务运行初窗口内继承不得误报"没有工作空间信息"；三路全空才
+        # fail-closed 拒绝。
         old_ws_meta = state_fields.as_dict(row.get("ws_meta"), field="ws_meta")
+        if not isinstance(old_ws_meta, dict) or not old_ws_meta:
+            old_ws_meta = state_fields.as_dict(row.get("task.ws_meta"), field="task.ws_meta")
+        if not isinstance(old_ws_meta, dict) or not old_ws_meta:
+            old_ws_meta = state_fields.as_dict(
+                row.get("lineage.parent_ws_meta"),
+                field="lineage.parent_ws_meta",
+            )
         if not isinstance(old_ws_meta, dict) or not old_ws_meta:
             return None, create_failure_result(
                 error=(
