@@ -678,7 +678,7 @@ class TestProjectsLifecycle:
         assert registry.get(proj["id"]).path == str(folder)
         assert proj["metadata"]["path"] == str(folder)
 
-    async def test_create_project_rejects_non_git_nonempty_folder(
+    async def test_create_project_non_git_nonempty_folder_auto_inits(
             self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub,
             registry: Any, tmp_path: Path) -> None:
         folder = tmp_path / "occupied"
@@ -686,10 +686,10 @@ class TestProjectsLifecycle:
         (folder / "keep.txt").write_text("x", encoding="utf-8")
         resp = await _http(monkeypatch, hub, "/ext/task_service/projects", "POST",
                            body={"goal": "目标", "path": str(folder)})
-        assert resp["status"] == 400
-        assert "非空且不是 git 仓库" in resp["payload"]["detail"]
-        # 登记未落（创建原子性）
-        assert registry.list() == []
+        # 非空非 git 目录不再拒绝：自动 git init 复用（幂等不删既有文件）
+        assert resp["status"] == 200
+        assert (folder / "keep.txt").read_text(encoding="utf-8") == "x"
+        assert (folder / ".git").is_dir()
 
     async def test_create_project_requires_goal(self, monkeypatch: pytest.MonkeyPatch,
                                                 hub: _FakeCapabilityHub,

@@ -236,9 +236,9 @@ class TestTaskPipelineDispatch:
         assert r2.error_code == "DEPENDENCY_NOT_FOUND"
 
     async def test_submit_inherit_workspace_reads_birth_contract_coordinates(self, mod: Any) -> None:
-        """inherit_workspace_from 读面三路：源任务 ws_meta 未回写（运行初窗口）时
-        回退出生契约 lineage.parent_ws_meta——任务出生即带工作空间坐标，不得
-        误报"没有工作空间信息"。"""
+        """inherit_workspace_from 读源任务自身坐标（两路）：ws_meta（registry
+        快路径）与 task.ws_meta（出生即登记的 pipeline-state 镜像，运行初
+        回写窗口内恒可见）——不得误报"没有工作空间信息"。"""
         sender = _FakeSender()
         mod.set_chat_sender(sender)
         tool = _make_tool(mod)
@@ -251,7 +251,7 @@ class TestTaskPipelineDispatch:
                 return [
                     {
                         "pipeline_id": "src-task-001",
-                        "lineage.parent_ws_meta": {"mode": "plain", "path": str(ws)},
+                        "task.ws_meta": {"mode": "plain", "path": str(ws)},
                     }
                 ]
 
@@ -264,8 +264,33 @@ class TestTaskPipelineDispatch:
             shutil.rmtree(ws, ignore_errors=True)
             mod._chat_sender = None
 
+        # lineage.parent_ws_meta 是父链坐标而非源任务自身坐标，不得作为继承
+        # 结果（继承路径曾静默漂移到父会话目录）——lineage-only 行 fail-closed
+        sender2 = _FakeSender()
+        mod.set_chat_sender(sender2)
+        tool2 = _make_tool(mod)
+        ws2 = Path(
+            tempfile.mkdtemp(prefix="test_inherit_ws_", dir=Path(__file__).resolve().parents[4])
+        )
+        try:
+            async def _rows_lineage_only() -> list[dict]:
+                return [
+                    {
+                        "pipeline_id": "src-task-001",
+                        "lineage.parent_ws_meta": {"mode": "plain", "path": str(ws2)},
+                    }
+                ]
+
+            tool2._read_state_rows = _rows_lineage_only  # type: ignore[method-assign]
+            r2 = await tool2.execute(_base_inputs(inherit_workspace_from="src-task-001"))
+            assert not r2.success
+            assert "没有工作空间信息" in (r2.error or "")
+        finally:
+            shutil.rmtree(ws2, ignore_errors=True)
+            mod._chat_sender = None
+
     async def test_submit_inherit_workspace_all_sources_empty_fails_closed(self, mod: Any) -> None:
-        """三路坐标全空（ws_meta/task.ws_meta/lineage.parent_ws_meta）→ fail-closed
+        """源任务自身两路坐标全空（ws_meta/task.ws_meta）→ fail-closed
         报"没有工作空间信息"，不猜测不虚构。"""
         sender = _FakeSender()
         mod.set_chat_sender(sender)

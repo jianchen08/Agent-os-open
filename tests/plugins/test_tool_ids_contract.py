@@ -75,8 +75,9 @@ def test_discovery_surface_non_vacuous() -> None:
     assert AGENT_YAMLS, "config/agents 下未发现任何 yaml（walk 剪枝过宽或目录漂移）"
     assert TOOL_REGISTRY, "plugins/shared 下未发现任何工具声明（walk 剪枝过宽或目录漂移）"
     # 抽查覆盖 tools 域（bash/task/task_evaluate 插件）与 system 域（review 插件）；
-    # pipeline 域现状零 LLM 工具声明，不在抽查之列
-    for probe in ("bash_execute", "task_manage", "task_evaluate", "review.get_report"):
+    # pipeline 域现状零 LLM 工具声明，不在抽查之列；
+    # review_get_report：点号名违反 OpenAI 工具名契约已改下划线（3ee3e89e7）
+    for probe in ("bash_execute", "task_manage", "task_evaluate", "review_get_report"):
         assert probe in TOOL_REGISTRY, f"注册表缺抽查工具 {probe}（发现逻辑误伤或 manifest 漂移）"
 
 

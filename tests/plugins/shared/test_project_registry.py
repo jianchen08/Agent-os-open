@@ -3,7 +3,7 @@
 
 - ProjectRegistry：CRUD + YAML 持久化往返 + 列表时序。
 - load_project_paths：只读 id → path 解析（跨插件消费面）。
-- ensure_project_folder：显式路径校验（非空非 git 拒绝）、缺省 slug 重名后缀、
+- ensure_project_folder：显式路径复用（非空非 git 自动 init）、缺省 slug 重名后缀、
   git init 幂等、空目录复用。
 - remove_project_folder：受保护路径拒删（盘符根/仓库根/工作空间基目录）。
 - purge_legacy_container_data：容器行清除、子任务挂靠退化、container_* 目录
@@ -125,14 +125,17 @@ class TestEnsureProjectFolder:
         assert folder.is_dir()
         assert (folder / ".git").exists()
 
-    def test_explicit_nonempty_non_git_rejected(self, tmp_path: Path) -> None:
+    def test_explicit_nonempty_non_git_auto_inits(self, tmp_path: Path) -> None:
         from project_registry import ensure_project_folder
 
         folder = tmp_path / "occupied"
         folder.mkdir()
         (folder / "f.txt").write_text("x", encoding="utf-8")
-        with pytest.raises(ValueError, match="非空且不是 git 仓库"):
-            ensure_project_folder("标题", str(folder))
+        # 非空非 git 目录不再拒绝：自动 git init 复用（幂等不删既有文件）
+        path = ensure_project_folder("标题", str(folder))
+        assert Path(path) == folder
+        assert (folder / "f.txt").read_text(encoding="utf-8") == "x"
+        assert (folder / ".git").is_dir()
 
     def test_default_slug_and_conflict_suffix(self, ws_base: Path) -> None:
         from project_registry import ensure_project_folder

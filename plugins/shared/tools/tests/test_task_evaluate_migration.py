@@ -29,8 +29,11 @@ pytestmark = pytest.mark.unit
 
 _TE_DIR = Path(__file__).resolve().parent.parent / "task_evaluate"
 _SYSTEM_ROOT = Path(__file__).resolve().parents[2] / "system"
-
-_PLUGIN_PATHS = tuple(str(_d) for _d in [_TE_DIR, _SYSTEM_ROOT, _SYSTEM_ROOT / "tasks"])
+# shared 根：tool.py 顶层 import state_fields（plugins/shared/state_fields.py）
+# ——不自带此路径时单目录运行依赖其他测试文件借道 sys.path（串扰），自持
+_PLUGIN_PATHS = tuple(
+    str(_d) for _d in [_TE_DIR, _SYSTEM_ROOT, _SYSTEM_ROOT / "tasks", _SYSTEM_ROOT.parent]
+)
 for _d in _PLUGIN_PATHS:
     if _d not in sys.path:
         sys.path.insert(0, _d)
@@ -75,14 +78,19 @@ def mod() -> Any:
 
 
 def _make_task(task_id: str = "t-1", metadata: dict | None = None) -> MagicMock:
-    """构造任务 mock（status 为非终态的 MagicMock，metadata 为 dict）。"""
+    """构造任务 mock（status 为非终态的 MagicMock，metadata 为 dict）。
+
+    默认补 plain 模式 ws_meta：完成前工作区门控读 ws_meta 判合并必要性，
+    plain 免合并直过——本文件测评估流程语义，不测门控失败路径。"""
     task = MagicMock()
     task.id = task_id
     task.title = "评估任务"
     task.description = "评估任务描述"
     task.result = None
     task.status = MagicMock()
-    task.metadata = metadata if metadata is not None else {}
+    meta = dict(metadata) if metadata is not None else {}
+    meta.setdefault("ws_meta", {"mode": "plain", "path": f"workspace/{task_id}"})
+    task.metadata = meta
     return task
 
 
@@ -240,11 +248,14 @@ class TestTaskEvaluateFlow:
         # 完成时以 passed=True 回写任务状态
         assert service.complete_evaluation.await_count == 1
         assert service.complete_evaluation.await_args.kwargs["passed"] is True
-        # 职责边界（2026-08-24）：评估终态落 state 单一真值（pipeline-state.update）
-        assert state_writer.await_count == 1
-        assert state_writer.await_args.args[0] == task.id
-        assert state_writer.await_args.args[1]["task.status"] == "completed"
-        assert "task.ended_at" in state_writer.await_args.args[1]
+        # 职责边界（2026-08-24）：评估终态落 state 单一真值（pipeline-state.update）；
+        # task.eval_total_calls 计数是伴随写，终态以 completed 行为准
+        completion_writes = [
+            c for c in state_writer.await_args_list if c.args[1].get("task.status") == "completed"
+        ]
+        assert len(completion_writes) == 1
+        assert completion_writes[0].args[0] == task.id
+        assert "task.ended_at" in completion_writes[0].args[1]
 
     @pytest.mark.asyncio
     async def test_auto_complete_all_passed_completes_task(self, mod, monkeypatch):
@@ -254,7 +265,9 @@ class TestTaskEvaluateFlow:
         task = _make_task(
             metadata={
                 "evaluation_metric_ids": ["file_check"],
-                "acceptance_criteria": {"file_check": {"input_params": {"path": "src/a.py"}}},
+                "acceptance_criteria": {
+                    "file_check": {"input_params": {"path": "src/a.py", "criteria": "文件存在"}}
+                },
             }
         )
 
@@ -273,9 +286,13 @@ class TestTaskEvaluateFlow:
         assert result.metadata["result"] == "completed"
         assert service.complete_evaluation.await_count == 1
         assert service.complete_evaluation.await_args.kwargs["passed"] is True
-        # 职责边界（2026-08-24）：评估终态落 state 单一真值（pipeline-state.update）
-        assert state_writer.await_count == 1
-        assert state_writer.await_args.args[1]["task.status"] == "completed"
+        # 职责边界（2026-08-24）：评估终态落 state 单一真值（pipeline-state.update）；
+        # task.eval_total_calls 计数是伴随写，终态以 completed 行为准
+        completion_writes = [
+            c for c in state_writer.await_args_list if c.args[1].get("task.status") == "completed"
+        ]
+        assert len(completion_writes) == 1
+        assert "task.ended_at" in completion_writes[0].args[1]
         # 评估历史应被记录（供后续增量评估/progress 判定）
         assert task.metadata.get("evaluation_history")
 
@@ -287,7 +304,9 @@ class TestTaskEvaluateFlow:
         task = _make_task(
             metadata={
                 "evaluation_metric_ids": ["file_check"],
-                "acceptance_criteria": {"file_check": {"input_params": {"path": "src/a.py"}}},
+                "acceptance_criteria": {
+                    "file_check": {"input_params": {"path": "src/a.py", "criteria": "文件存在"}}
+                },
             }
         )
 
@@ -313,7 +332,12 @@ class TestTaskEvaluateFlow:
         """指标 ID 全部不在注册表 → METRIC_NOT_FOUND（不误导 Agent 重试）。"""
         from _eval_core import EvaluationResult
 
-        task = _make_task(metadata={"evaluation_metric_ids": ["ghost_metric"]})
+        task = _make_task(
+            metadata={
+                "evaluation_metric_ids": ["ghost_metric"],
+                "acceptance_criteria": {"ghost_metric": {"input_params": {"criteria": "任何标准"}}},
+            }
+        )
 
         class FakeExecutor:
             async def run_evaluation(self, **kwargs):
@@ -334,7 +358,12 @@ class TestTaskEvaluateNoExecutor:
     @pytest.mark.asyncio
     async def test_auto_complete_without_executor_degrades(self, mod, monkeypatch):
         """执行器未注入 → EVAL_ENGINE_UNAVAILABLE（不崩溃、不误报成功）。"""
-        task = _make_task(metadata={"evaluation_metric_ids": ["file_check"]})
+        task = _make_task(
+            metadata={
+                "evaluation_metric_ids": ["file_check"],
+                "acceptance_criteria": {"file_check": {"input_params": {"criteria": "文件存在"}}},
+            }
+        )
         service = _make_service(task=task)
         monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
         tool = mod.TaskEvaluateTool()
@@ -345,7 +374,12 @@ class TestTaskEvaluateNoExecutor:
     @pytest.mark.asyncio
     async def test_evaluate_single_single_metric_converts_to_auto_complete(self, mod, monkeypatch):
         """单指标任务在 evaluate_single 下自动转完全评估（无执行器 → 降级错误）。"""
-        task = _make_task(metadata={"evaluation_metric_ids": ["file_check"]})
+        task = _make_task(
+            metadata={
+                "evaluation_metric_ids": ["file_check"],
+                "acceptance_criteria": {"file_check": {"input_params": {"criteria": "文件存在"}}},
+            }
+        )
         service = _make_service(task=task)
         monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
         tool = mod.TaskEvaluateTool()
@@ -395,12 +429,11 @@ class TestTaskEvaluateFunc:
 
 
 class TestCriteriaFallbackMarked:
-    """P6：指标缺 criteria 用任务描述顶替时必须在评估结果显式标记。
+    """criteria 去兜底后的行为（2026-08-30 契约：未配置即直接通过）。
 
-    选"保留顶替+显式标记"分支的依据：既有调用方（工具型指标
-    file_check/bash_check 的 params_schema 无 criteria 字段，迁移测试
-    全部以无 criteria 的 input_params 构造且期待评估照常执行）普遍
-    依赖顶替行为——报配置错误会打断合法工具指标路径。
+    指标缺 criteria 不再用任务描述顶替（顶替伪造"有标准"假象）：
+    _get_input_params 原样保留参数不注入 criteria；auto_complete 对
+    无 criteria 指标直接通过并在完成 summary 如实标注。
     """
 
     def _inject(self, mod, monkeypatch, task: MagicMock, executor: Any) -> tuple[Any, MagicMock, Any]:
@@ -422,8 +455,8 @@ class TestCriteriaFallbackMarked:
         return tool, service, state_writer
 
     @pytest.mark.asyncio
-    async def test_fallback_ids_reported_by_get_input_params(self, mod, monkeypatch):
-        """_get_input_params 第二返回值列出走了任务描述兜底的指标。"""
+    async def test_no_criteria_params_kept_as_is(self, mod, monkeypatch):
+        """_get_input_params 单 dict 返回：缺 criteria 的指标参数原样保留、不注入。"""
         task = _make_task(
             metadata={
                 "evaluation_metric_ids": ["file_check"],
@@ -431,13 +464,13 @@ class TestCriteriaFallbackMarked:
             }
         )
         tool = mod.TaskEvaluateTool()
-        params, fallback_ids = tool._get_input_params(task)
-        assert params["file_check"]["criteria"] == task.description, "顶替行为保留"
-        assert fallback_ids == ["file_check"]
+        params = tool._get_input_params(task)
+        assert params["file_check"]["path"] == "src/a.py"
+        assert "criteria" not in params["file_check"], "任务描述不得顶替 criteria"
 
     @pytest.mark.asyncio
-    async def test_configured_criteria_not_marked(self, mod, monkeypatch):
-        """显式配置了 criteria 的指标不进兜底名单。"""
+    async def test_configured_criteria_passes_through(self, mod, monkeypatch):
+        """显式配置了 criteria 的指标按声明传递。"""
         task = _make_task(
             metadata={
                 "evaluation_metric_ids": ["semantic_check"],
@@ -447,15 +480,12 @@ class TestCriteriaFallbackMarked:
             }
         )
         tool = mod.TaskEvaluateTool()
-        params, fallback_ids = tool._get_input_params(task)
+        params = tool._get_input_params(task)
         assert params["semantic_check"]["criteria"] == "必须包含结论"
-        assert fallback_ids == []
 
     @pytest.mark.asyncio
-    async def test_auto_complete_summary_carries_fallback_mark(self, mod, monkeypatch):
-        """auto_complete：评估结果 summary 与 evaluation_history 带兜底标记。"""
-        from _eval_core import EvaluationResult, MetricResult
-
+    async def test_auto_complete_no_criteria_direct_pass_marked(self, mod, monkeypatch):
+        """auto_complete：无 criteria 指标直接通过，完成 summary 如实标注来源。"""
         task = _make_task(
             metadata={
                 "evaluation_metric_ids": ["file_check"],
@@ -465,22 +495,15 @@ class TestCriteriaFallbackMarked:
 
         class FakeExecutor:
             async def run_evaluation(self, **kwargs):
-                return EvaluationResult(
-                    task_id=task.id,
-                    results=[MetricResult(metric_id="file_check", passed=True, message="ok")],
-                    overall_passed=True,
-                    summary="全部通过",
-                )
+                raise AssertionError("无 criteria 指标直接通过，不应触达评估执行器")
 
         tool, service, state_writer = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is True
-        history = task.metadata.get("evaluation_history") or []
-        assert history, "评估历史应被记录"
-        assert "未配置 criteria，用任务描述兜底" in history[-1]["summary"], (
-            "质量闸门标准来源是任务描述兜底必须在评估结果可见"
-        )
-        assert "全部通过" in history[-1]["summary"], "原 summary 保留"
+        assert result.metadata["result"] == "completed"
+        # 通过来源可见：完成结果带"未配置 criteria 直接通过"标注
+        passed_result = service.complete_evaluation.await_args.kwargs["result"]
+        assert "未配置 criteria 直接通过" in passed_result["summary"]
 
 
 # ── 猜测型匹配反模式收口（2026-08-22）───────────────────────
@@ -531,10 +554,9 @@ class TestToolIdTemplateResolution:
     def test_single_candidate_substituted(self, mod, tmp_path):
         """唯一候选 → 模板替换为该工具 id。"""
         tool, task = self._tool_with_workspace(mod, tmp_path, ["my_tool.py"])
-        params, fallback_ids = tool._get_input_params(task)
+        params = tool._get_input_params(task)
         assert params["m1"]["pattern"] == "my_tool"
         assert params["m1"]["desc"] == "检查 my_tool 实现"
-        assert fallback_ids == []
 
     def test_multiple_candidates_rejected(self, mod, tmp_path):
         """多个候选 → 拒绝（不取第一个文件）。"""
