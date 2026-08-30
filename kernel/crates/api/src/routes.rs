@@ -515,18 +515,26 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
 
     // P1-4：聚合各插件的 config_files（仅含声明 config_files 的插件）。
     // 前端据此构建"插件 → 多配置子项"配置树（ADR §4.6）。
+    // settings:false 条目是注入专用（sidecar 收文件内容），不出口为配置面板。
     let plugin_configs: Vec<serde_json::Value> = state
         .manifests
         .read()
         .await
         .iter()
-        .filter(|m| !m.config_files.is_empty())
-        .map(|m| {
-            json!({
+        .filter_map(|m| {
+            let visible: Vec<_> = m
+                .config_files
+                .iter()
+                .filter(|c| c.settings.unwrap_or(true))
+                .collect();
+            if visible.is_empty() {
+                return None;
+            }
+            Some(json!({
                 "plugin_id": m.id,
                 "plugin_name": m.name,
-                "config_files": m.config_files,
-            })
+                "config_files": visible,
+            }))
         })
         .collect();
 
@@ -1882,7 +1890,7 @@ pub async fn plugins_status_handler(
                 "enabled": enabled,
                 "activation": activation,
                 "status": run_status,
-                "config_files": m.config_files.iter().map(|c| json!({
+                "config_files": m.config_files.iter().filter(|c| c.settings.unwrap_or(true)).map(|c| json!({
                     "id": c.id,
                     "label": c.label,
                     "path": c.path,

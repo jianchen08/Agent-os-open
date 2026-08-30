@@ -131,6 +131,7 @@ fn test_plugin_configs_only_includes_declared() {
             path: "config/test.yaml".to_string(),
             label: "Test".to_string(),
             target: None,
+            settings: None,
             fields: vec![],
         }],
     );
@@ -231,6 +232,7 @@ fn test_plugin_status_data_from_manifest() {
             path: "config/test.yaml".to_string(),
             label: "Test Config".to_string(),
             target: None,
+            settings: None,
             fields: vec![],
         }],
         ui_schema: None,

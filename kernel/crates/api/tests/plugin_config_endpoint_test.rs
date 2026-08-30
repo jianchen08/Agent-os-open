@@ -88,6 +88,7 @@ async fn test_get_plugin_config_returns_file_content_with_etag() {
             path: "config/models/llm.yaml".to_string(),
             label: "LLM".to_string(),
             target: None,
+            settings: None,
             fields: vec![],
         }],
     );
@@ -144,6 +145,7 @@ async fn test_get_plugin_config_masks_plaintext_secret() {
             path: "config/external_tools/godot.yaml".to_string(),
             label: "Godot".to_string(),
             target: None,
+            settings: None,
             fields: vec![],
         }],
     );
@@ -191,6 +193,7 @@ async fn test_put_plugin_config_preserves_env_placeholder_via_sentinel() {
             path: "config/models/llm.yaml".to_string(),
             label: "LLM".to_string(),
             target: None,
+            settings: None,
             fields: vec![],
         }],
     );
@@ -266,6 +269,7 @@ async fn test_put_plugin_config_without_if_match_returns_409() {
             path: "config/models/llm.yaml".to_string(),
             label: "LLM".to_string(),
             target: None,
+            settings: None,
             fields: vec![],
         }],
     );
@@ -308,6 +312,7 @@ async fn test_get_plugin_config_unknown_file_id_returns_404() {
             path: "config/models/llm.yaml".to_string(),
             label: "LLM".to_string(),
             target: None,
+            settings: None,
             fields: vec![],
         }],
     );
@@ -341,6 +346,7 @@ fn env_mapping(file_id: &str) -> ConfigFileMapping {
         path: ".env".to_string(),
         label: "搜索源密钥".to_string(),
         target: Some("env".to_string()),
+        settings: None,
         fields: vec![
             agentos_core::traits::EnvConfigField {
                 name: "SMITHERY_API_KEY".to_string(),

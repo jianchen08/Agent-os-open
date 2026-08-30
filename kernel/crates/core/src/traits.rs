@@ -922,6 +922,14 @@ pub struct StepCapability {
 pub struct ConfigFileMapping {
     /// 配置子项标识（插件内唯一）。
     pub id: String,
+    /// 是否在设置中枢展示为可编辑配置面板（缺省 true）。
+    ///
+    /// `false` = 注入专用：条目仍参与 sidecar 配置注入（B3）与
+    /// `/api/v1/plugins/{id}/config/{file_id}` 读写，但不出口到
+    /// `/api/v1/schema` 的 plugin_configs 与插件列表的 config_files
+    /// （该文件的 UI 由插件声明的 settings 页/widget 承载，避免双入口）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<bool>,
     /// 相对 config/ 根的文件路径（含 config/ 前缀或相对形式均可，loader 归一化）。
     ///
     /// `target: "env"` 的条目例外：path 不指向 config/ 子树，而表示项目根

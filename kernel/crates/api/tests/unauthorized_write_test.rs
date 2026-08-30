@@ -76,6 +76,7 @@ async fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
             path: "config/models/llm.yaml".to_string(),
             label: "LLM".to_string(),
             target: None,
+            settings: None,
             fields: vec![],
         }],
         http_endpoints: vec![],

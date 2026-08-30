@@ -181,6 +181,7 @@ mod tests {
                     path: "config/models/llm.yaml".to_string(),
                     label: "LLM".to_string(),
                     target: None,
+                    settings: None,
                     fields: vec![],
                 },
                 ConfigFileMapping {
@@ -188,6 +189,7 @@ mod tests {
                     path: "config/models/embedding.yaml".to_string(),
                     label: "Embedding".to_string(),
                     target: None,
+                    settings: None,
                     fields: vec![],
                 },
             ],
@@ -209,6 +211,7 @@ mod tests {
                 path: "config/models/nope.yaml".to_string(),
                 label: "Nope".to_string(),
                 target: None,
+                settings: None,
                 fields: vec![],
             }],
         );
