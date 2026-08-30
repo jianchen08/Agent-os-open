@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
 
 use crate::capability::{parse_capability_method_with, CapabilityRouter, STANDARD_CAPABILITIES};
@@ -473,6 +473,18 @@ impl McpClient {
                 return;
             };
 
+            // notification 有序派发：FIFO 通道 + 单工作任务串行处理。
+            // 流式 chunk（block_start/text_delta/…）是有序增量，前端按到达序
+            // 组装正文——处理完成序必须等于发送序。每条 spawn 并发的完成序
+            // ≠ 发送序（各任务在 router.handle 与 WS 发送间独立调度），负载
+            // 抖动下相邻 chunk 换序，前端本地流式文本被打碎（与服务端权威
+            // 文本指纹不一致 → new_message 合并去重失效 → 回复气泡里重复
+            // 两份且其中一份语序错乱）。工作任务串行 await 处理，reader loop
+            // 只入队（unbounded send 永不阻塞）——chunk 推送不被读循环阻塞，
+            // 顺序同时保住。
+            let (notification_tx, notification_rx) = mpsc::unbounded_channel::<(String, Value)>();
+            spawn_notification_worker(notification_rx, router.clone());
+
             tokio::spawn(async move {
                 let mut reader = stdout.lock().await;
                 let mut line = String::new();
@@ -542,20 +554,13 @@ impl McpClient {
                             }
                             // 分支3：sidecar 主动发起的 notification（有 method 无 id）
                             // 用于流式 chunk 推送：fire-and-forget，内核不回 response。
+                            // 入有序派发队列（send 同步返回，不阻塞读循环），
+                            // 处理由单工作任务按 FIFO 串行执行。
                             if let Some(method) =
                                 msg.get("method").and_then(|v| v.as_str()).map(String::from)
                             {
                                 let params = msg.get("params").cloned().unwrap_or(Value::Null);
-                                // 关键：notification 处理用 spawn 并发，不阻塞 reader loop！
-                                // handle_incoming_notification 内部会 await session.emit_event
-                                // （WS 发送），若串行 await 会让后续 notification 攒批排队，
-                                // 破坏流式 chunk 的实时推送。
-                                // notification 是 fire-and-forget，无需等结果，spawn 后继续读下一行。
-                                let router_clone = router.clone();
-                                tokio::spawn(async move {
-                                    handle_incoming_notification(&method, params, &router_clone)
-                                        .await;
-                                });
+                                let _ = notification_tx.send((method, params));
                             }
                             // 其余忽略
                         }
@@ -1153,6 +1158,23 @@ async fn handle_incoming_request(
     if let Err(e) = write_raw_line(stdin, &resp.to_string()).await {
         tracing::warn!("[mcp] failed to write JSON-RPC response for id={id_repr}: {e}");
     }
+}
+
+/// notification 有序派发工作任务：从 FIFO 通道逐条取出并串行处理。
+///
+/// 同一 sidecar 连接的 notification（流式 chunk 为主）是有序增量，处理
+/// 完成序必须等于发送序；串行 await 同时保证 router.handle 内部副作用
+/// （如 event-bus.emit 的 WS 推送）按序完成。通道在 reader loop 结束
+/// （stdout EOF）时 sender 归零，本任务排空残留后自然退出。
+fn spawn_notification_worker(
+    mut rx: mpsc::UnboundedReceiver<(String, Value)>,
+    router: Option<Arc<dyn CapabilityRouter>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some((method, params)) = rx.recv().await {
+            handle_incoming_notification(&method, params, &router).await;
+        }
+    })
 }
 
 /// 处理 sidecar 主动发起的 JSON-RPC notification（无 id，fire-and-forget）。
@@ -2218,6 +2240,64 @@ mod tests {
         let router = Arc::new(RecordingRouter::failing());
         handle_incoming_notification("event-bus.emit", Value::Null, &Some(router.clone())).await;
         assert_eq!(router.calls.lock().unwrap().len(), 1);
+    }
+
+    /// 记录【处理完成序】的 router：偶数序号无延迟、奇数序号延迟 1ms——
+    /// 若处理是并发的，短任务会越过前面的长任务（完成序 ≠ 提交序）；
+    /// 串行 FIFO 派发下完成序必须恒等于提交序。
+    struct JitteredDelayRouter {
+        completions: Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CapabilityRouter for JitteredDelayRouter {
+        async fn handle(
+            &self,
+            _capability: &str,
+            _method: &str,
+            params: Value,
+        ) -> Result<Value, McpError> {
+            let seq = params["seq"].as_u64().unwrap_or(0);
+            if seq % 2 == 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            self.completions.lock().unwrap().push(seq);
+            Ok(json!({}))
+        }
+        fn known_namespaces(&self) -> Vec<String> {
+            vec!["event-bus".to_string()]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notification_worker_preserves_arrival_order() {
+        // 流式 chunk 是有序增量：派发工作任务必须串行处理（FIFO），
+        // 完成序 == 发送序。交错延迟构造并发场景下的确定性乱序（奇数
+        // 追平偶数），串行派发下不受影响。
+        let completions = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = Arc::new(JitteredDelayRouter {
+            completions: completions.clone(),
+        });
+        let (tx, rx) = mpsc::unbounded_channel::<(String, Value)>();
+        let worker = spawn_notification_worker(rx, Some(router));
+
+        const N: u64 = 32;
+        for i in 0..N {
+            tx.send((
+                "event-bus.emit".to_string(),
+                json!({ "event": "text_delta", "seq": i }),
+            ))
+            .unwrap();
+        }
+        drop(tx); // reader loop EOF 语义：sender 归零，worker 排空后退出
+        worker.await.unwrap();
+
+        let got = completions.lock().unwrap().clone();
+        let expected: Vec<u64> = (0..N).collect();
+        assert_eq!(
+            got, expected,
+            "notification 处理完成序必须等于发送序（流式增量有序契约）"
+        );
     }
 
     // ── stdio send_request / send_notification 错误路径 ────────────────
