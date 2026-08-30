@@ -17,6 +17,9 @@
   },
   "permissions": {},
   "priority": 50,
+  "persistent_fields": [
+    "llm_model"
+  ],
   "granted_capabilities": [
     "tool-executor"
   ],
