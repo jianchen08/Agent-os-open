@@ -399,12 +399,13 @@ class LLMCore(ICorePlugin):
                 }
 
             logger.info(
-                "[%s] LLM call succeeded (streaming=%s, thinking=%s, text=%s, tool_calls=%d)",
+                "[%s] LLM call succeeded (streaming=%s, thinking=%s, text=%s, tool_calls=%d, finish_reason=%s)",
                 self.name,
                 streaming,
                 bool(thinking_text),
                 (result_text or "")[:200],
                 len(tool_calls or []),
+                response.finish_reason,
             )
             # 完整响应记录到管道日志（DEBUG 级别）
             logger.debug(
