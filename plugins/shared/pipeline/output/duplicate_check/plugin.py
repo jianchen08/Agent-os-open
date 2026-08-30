@@ -156,9 +156,11 @@ class DuplicateCheckPlugin(IOutputPlugin):
         rep_result = self._check_repetitive_output(ctx)
         updates.update(rep_result)
 
-        # 3. 综合判断
-        duplicate_count = updates.get("router.duplicate_count", ctx.state.get("router.duplicate_count", 0))
-        repetitive_count = updates.get("router.repetitive_count", ctx.state.get("router.repetitive_count", 0))
+        # 3. 综合判断——两个检查对本轮计数恒有产出（无输入轮显式清零），
+        #    绝不回退 ctx.state 的历史值：level-1 软提示不清零，陈旧计数会让
+        #    后续无调用轮次误判重复（提示文本工具名还取空串）
+        duplicate_count = updates.get("router.duplicate_count", 0)
+        repetitive_count = updates.get("router.repetitive_count", 0)
 
         # 3a. 工具调用重复处理
         if duplicate_count > 0:
@@ -444,11 +446,12 @@ class DuplicateCheckPlugin(IOutputPlugin):
             ctx: 插件执行上下文
 
         Returns:
-            重复检查结果字典
+            重复检查结果字典；无工具调用轮返回显式清零（计数只表本轮，
+            滑动窗口保留——签名未过窗，后续轮重复仍可由窗口重数检出）
         """
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         if not tool_calls:
-            return {}
+            return {"router.duplicate_count": 0}
 
         current_signatures = []
         for tc in tool_calls:
@@ -495,11 +498,12 @@ class DuplicateCheckPlugin(IOutputPlugin):
             ctx: 插件执行上下文
 
         Returns:
-            重复检查结果字典
+            重复检查结果字典；无输出轮返回显式清零（上次输出签名保留，
+            供下一个有输出轮次对比）
         """
         raw_result = ctx.state.get(StateKeys.RAW_RESULT)
         if raw_result is None:
-            return {}
+            return {"router.repetitive_count": 0}
 
         # 包含评估结论 JSON 的输出不应被判定为重复（即使文本相似）
         raw_text = str(raw_result)

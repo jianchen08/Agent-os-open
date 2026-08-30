@@ -112,10 +112,13 @@ def _hint_ops(updates: dict[str, Any]) -> list[dict[str, Any]]:
 
 class TestSignatureCounting:
     def test_no_tool_calls_and_no_result_is_noop(self) -> None:
-        """空状态 → 无更新、无路由（不误伤正常流）。"""
+        """空状态 → 计数显式清零、无路由（不误伤正常流）。"""
         plugin = DuplicateCheckPlugin()
         result = _execute(plugin, {"messages": []})
-        assert result.state_updates == {}
+        assert result.state_updates == {
+            "router.duplicate_count": 0,
+            "router.repetitive_count": 0,
+        }
 
     def test_same_tool_args_increment_count_across_iterations(self) -> None:
         """同名同参连续两次 → 第二次计数 1（引擎侧合并 updates 的真实迭代口径）。"""
@@ -237,6 +240,64 @@ class TestMultiToolWindow:
             state["messages"] = []
             _merge_updates(state, _execute(plugin, state).state_updates)
         assert state["router.duplicate_intercepts"] == 1  # t(a) 第 3 次出现（阈值 2）
+
+
+# ═══════════════════════════════════════════════════════════
+# 陈旧计数不跨轮误判
+# ═══════════════════════════════════════════════════════════
+
+
+class TestStaleStateReset:
+    """历史轮 level-1 软提示遗留的计数不得误伤后续无输入轮次。
+
+    场景：早前轮次 file_read 重复触发软提示（level-1 不清零），
+    router.duplicate_count=1 遗留 state；后续纯文本回复轮（无工具调用）
+    若继承该计数，提示会被合并进正常回复正文且工具名为空串。
+    """
+
+    def test_stale_duplicate_count_not_inherited_on_tool_free_round(self) -> None:
+        plugin = DuplicateCheckPlugin()
+        state: dict[str, Any] = {
+            "raw_tool_calls": [],
+            "messages": [{"role": "assistant", "content": "散文正文", "seq": 41}],
+            "router.duplicate_count": 1,  # 历史轮遗留
+            "router.recent_tool_sigs": ["abc12345"],
+        }
+        updates = _execute(plugin, state).state_updates
+        assert updates["router.duplicate_count"] == 0
+        assert "messages" not in updates  # 不向回复正文追加/合并任何提示
+        # 滑动窗口保留：无调用轮不产签名，也不动窗口
+        assert "router.recent_tool_sigs" not in updates
+
+    def test_window_still_detects_repeat_after_tool_free_round(self) -> None:
+        """纯文本轮清零不清窗：下一轮同参调用仍由窗口重数检出。"""
+        plugin = DuplicateCheckPlugin(config={"max_duplicate_calls": 99})
+        call = [{"name": "file_read", "arguments": {"path": "a.py"}}]
+        state = _tool_state(call)
+        _merge_updates(state, _execute(plugin, state).state_updates)  # 轮1：签名入窗
+        state["raw_tool_calls"] = []
+        _merge_updates(state, _execute(plugin, state).state_updates)  # 轮2：纯文本
+        assert state["router.duplicate_count"] == 0
+        state["raw_tool_calls"] = call
+        _merge_updates(state, _execute(plugin, state).state_updates)  # 轮3：同参复现
+        assert state["router.duplicate_count"] == 1
+
+    def test_stale_repetitive_count_not_inherited_on_output_free_round(self) -> None:
+        plugin = DuplicateCheckPlugin()
+        state: dict[str, Any] = {
+            "raw_tool_calls": [],
+            "raw_result": None,
+            "messages": [],
+            "router.repetitive_count": 1,  # 历史轮遗留
+            "router.last_response": "abc12345",
+            "router.last_response_text": "上一轮输出",
+        }
+        updates = _execute(plugin, state).state_updates
+        assert updates["router.repetitive_count"] == 0
+        assert "messages" not in updates
+        # 上次输出签名保留在 state，不入 updates（供下一个有输出轮对比）
+        assert state["router.last_response"] == "abc12345"
+        assert "router.last_response" not in updates
 
 
 # ═══════════════════════════════════════════════════════════
