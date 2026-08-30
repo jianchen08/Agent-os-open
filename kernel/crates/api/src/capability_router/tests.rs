@@ -1047,9 +1047,11 @@ async fn emit_domain_broadcasts_to_domain_broadcaster() {
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = got.clone();
     let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_domain_broadcaster(Arc::new(move |name: &str, tags: Vec<(String, serde_json::Value)>| {
-            sink.lock().unwrap().push((name.to_string(), tags));
-        }));
+        .with_domain_broadcaster(Arc::new(
+            move |name: &str, tags: Vec<(String, serde_json::Value)>| {
+                sink.lock().unwrap().push((name.to_string(), tags));
+            },
+        ));
     let res = router
         .handle(
             "event-bus",
@@ -1816,11 +1818,27 @@ async fn g3_envelope_grant_allows_registration() {
 #[tokio::test]
 async fn test_suspend_resume_pipeline_by_id() {
     // GAP-1 统一：task = pipeline——按管道挂起/恢复（stop/resume 映射）。
-    // 先建 run 并记录管道归属（SqliteStore 的 set_run_pipeline 真实写）。
+    // resume_pipeline 三分语义：停泊挂起拉起续跑轮（PipelineResumerFn 派发）、
+    // 审批挂起翻 Running 簿记、执行在飞幂等空转（见 resume_pipeline_* 用例族）。
     let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let store: Arc<dyn StorageBackend> = sqlite.clone();
-    let router =
-        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
+    let dispatched: Arc<std::sync::Mutex<Vec<(String, String, String)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = dispatched.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_pipeline_resumer(Arc::new(
+            move |pipeline_id: String, thread_id: String, user_id: String| {
+                let sink = sink.clone();
+                Box::pin(async move {
+                    sink.lock().unwrap().push((pipeline_id, thread_id, user_id));
+                    Ok(())
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+                    >
+            },
+        ));
 
     agentos_tenant::scope(
         agentos_core::types::TenantContext::new("tenant_sr", "thread_sr"),
@@ -1834,6 +1852,10 @@ async fn test_suspend_resume_pipeline_by_id() {
             store.create_run("run_sr_2", "h", &tenant).await.unwrap();
             store
                 .set_run_pipeline("run_sr_2", "pipe_task_9")
+                .await
+                .unwrap();
+            store
+                .link_pipeline_session("pipe_task_9", "thread_sr", &tenant)
                 .await
                 .unwrap();
 
@@ -1862,29 +1884,271 @@ async fn test_suspend_resume_pipeline_by_id() {
                 .unwrap();
             assert_eq!(r2["run_id"], "run_sr_2");
 
-            // resume：恢复最新 suspended run
+            // resume：停泊挂起 → 拉起续跑轮；旧 run 保持 Suspended（挂起即其
+            // 真实收束史，新 run 另起一行承载执行，不造幽灵 running）
             let r3 = router
                 .handle(
                     "pipeline-executor",
                     "resume_pipeline",
-                    json!({"pipeline_id": "pipe_task_9"}),
+                    json!({"pipeline_id": "pipe_task_9", "user_id": "u_1"}),
                 )
                 .await
                 .unwrap();
             assert_eq!(r3["run_id"], "run_sr_2");
+            assert_eq!(r3["dispatched"], true, "停泊挂起应派发续跑轮");
             let got2 = store.get_run("run_sr_2").await.unwrap();
-            assert_eq!(got2.status, agentos_core::types::RunStatus::Running);
+            assert_eq!(
+                got2.status,
+                agentos_core::types::RunStatus::Suspended,
+                "旧 run 不翻 Running——翻了无人收尾即幽灵 running"
+            );
+            assert_eq!(
+                dispatched.lock().unwrap().as_slice(),
+                [(
+                    "pipe_task_9".to_string(),
+                    "thread_sr".to_string(),
+                    "u_1".to_string()
+                )],
+                "续跑派发应带 pipeline/thread/user 三坐标走统一派发链"
+            );
 
-            // 无管道 → 幂等 ok（run_id 空）
+            // 孤儿管道（无会话挂载）→ 拒绝派发（回复无人订阅，静默即假成功）
             let r4 = router
                 .handle(
                     "pipeline-executor",
                     "resume_pipeline",
                     json!({"pipeline_id": "pipe_ghost"}),
                 )
+                .await;
+            assert!(r4.is_err(), "孤儿/伪造 id 应拒绝派发");
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn resume_pipeline_approval_pending_flips_only() {
+    // 审批挂起（metadata.pending_interaction_request_id 署名，run 在飞未收束）：
+    // 翻 Running 簿记，真唤醒走 interaction.respond——不派发续跑轮（重复派发
+    // 会在旧 run 仍执行时叠出第二轮）。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let dispatched: Arc<std::sync::Mutex<Vec<(String, String, String)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = dispatched.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_pipeline_resumer(Arc::new(
+            move |pipeline_id: String, thread_id: String, user_id: String| {
+                let sink = sink.clone();
+                Box::pin(async move {
+                    sink.lock().unwrap().push((pipeline_id, thread_id, user_id));
+                    Ok(())
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+                    >
+            },
+        ));
+
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_ap", "thread_ap"),
+        async {
+            let tenant = agentos_tenant::current_or_default("default").tenant_id;
+            store.create_run("run_ap_1", "h", &tenant).await.unwrap();
+            store.set_run_pipeline("run_ap_1", "pipe_ap").await.unwrap();
+            store
+                .link_pipeline_session("pipe_ap", "thread_ap", &tenant)
                 .await
                 .unwrap();
-            assert_eq!(r4["run_id"], "");
+            router
+                .handle(
+                    "pipeline-executor",
+                    "suspend_pipeline",
+                    json!({"pipeline_id": "pipe_ap"}),
+                )
+                .await
+                .unwrap();
+            sqlite
+                .set_run_metadata(
+                    "run_ap_1",
+                    &json!({"pending_interaction_request_id": "req_1"}),
+                )
+                .unwrap();
+
+            let r = router
+                .handle(
+                    "pipeline-executor",
+                    "resume_pipeline",
+                    json!({"pipeline_id": "pipe_ap"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r["run_id"], "run_ap_1");
+            assert_eq!(r["dispatched"], false, "审批挂起只翻簿记不派发");
+            let got = store.get_run("run_ap_1").await.unwrap();
+            assert_eq!(got.status, agentos_core::types::RunStatus::Running);
+            assert!(dispatched.lock().unwrap().is_empty());
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn resume_pipeline_running_in_flight_idempotent() {
+    // 最新 run Running（执行在飞）：幂等空转——不翻状态、不重复派发。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let dispatched: Arc<std::sync::Mutex<Vec<(String, String, String)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = dispatched.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_pipeline_resumer(Arc::new(
+            move |pipeline_id: String, thread_id: String, user_id: String| {
+                let sink = sink.clone();
+                Box::pin(async move {
+                    sink.lock().unwrap().push((pipeline_id, thread_id, user_id));
+                    Ok(())
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+                    >
+            },
+        ));
+
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_rf", "thread_rf"),
+        async {
+            let tenant = agentos_tenant::current_or_default("default").tenant_id;
+            store.create_run("run_rf_1", "h", &tenant).await.unwrap();
+            store.set_run_pipeline("run_rf_1", "pipe_rf").await.unwrap();
+            store
+                .link_pipeline_session("pipe_rf", "thread_rf", &tenant)
+                .await
+                .unwrap();
+
+            let r = router
+                .handle(
+                    "pipeline-executor",
+                    "resume_pipeline",
+                    json!({"pipeline_id": "pipe_rf"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r["run_id"], "run_rf_1");
+            assert_eq!(r["dispatched"], false, "执行在飞不重复派发");
+            let got = store.get_run("run_rf_1").await.unwrap();
+            assert_eq!(got.status, agentos_core::types::RunStatus::Running);
+            assert!(dispatched.lock().unwrap().is_empty());
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn resume_pipeline_terminal_history_dispatches_new_round() {
+    // 无在飞 run（最新 run 已终态 Cancelled——面板 pause 后 llm_core 中断收束的
+    // 主路径，suspended run 不存在）：仍拉起续跑轮，state 由快照恢复。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let dispatched: Arc<std::sync::Mutex<Vec<(String, String, String)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = dispatched.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_pipeline_resumer(Arc::new(
+            move |pipeline_id: String, thread_id: String, user_id: String| {
+                let sink = sink.clone();
+                Box::pin(async move {
+                    sink.lock().unwrap().push((pipeline_id, thread_id, user_id));
+                    Ok(())
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+                    >
+            },
+        ));
+
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_th", "thread_th"),
+        async {
+            let tenant = agentos_tenant::current_or_default("default").tenant_id;
+            store.create_run("run_th_1", "h", &tenant).await.unwrap();
+            store.set_run_pipeline("run_th_1", "pipe_th").await.unwrap();
+            store
+                .update_run_status(
+                    "run_th_1",
+                    agentos_core::types::RunStatus::Cancelled,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            store
+                .link_pipeline_session("pipe_th", "thread_th", &tenant)
+                .await
+                .unwrap();
+
+            let r = router
+                .handle(
+                    "pipeline-executor",
+                    "resume_pipeline",
+                    json!({"pipeline_id": "pipe_th"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                r["run_id"], "",
+                "无在飞 run：run_id 保持空串约定，续跑由新 run 承载"
+            );
+            assert_eq!(r["dispatched"], true, "终态历史应拉起新续跑轮");
+            assert_eq!(dispatched.lock().unwrap().len(), 1);
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn resume_pipeline_without_resumer_degrades_bookkeeping() {
+    // 恢复派发未装配（旧装配/测试形态）：降级既有簿记语义（suspended → running），
+    // dispatched:false 显式化——调用方可据此区分簿记与真派发。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let router =
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
+
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_nr", "thread_nr"),
+        async {
+            let tenant = agentos_tenant::current_or_default("default").tenant_id;
+            store.create_run("run_nr_1", "h", &tenant).await.unwrap();
+            store.set_run_pipeline("run_nr_1", "pipe_nr").await.unwrap();
+            store
+                .link_pipeline_session("pipe_nr", "thread_nr", &tenant)
+                .await
+                .unwrap();
+            router
+                .handle(
+                    "pipeline-executor",
+                    "suspend_pipeline",
+                    json!({"pipeline_id": "pipe_nr"}),
+                )
+                .await
+                .unwrap();
+
+            let r = router
+                .handle(
+                    "pipeline-executor",
+                    "resume_pipeline",
+                    json!({"pipeline_id": "pipe_nr"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(r["run_id"], "run_nr_1");
+            assert_eq!(r["dispatched"], false);
+            let got = store.get_run("run_nr_1").await.unwrap();
+            assert_eq!(got.status, agentos_core::types::RunStatus::Running);
         },
     )
     .await;

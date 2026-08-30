@@ -2,8 +2,9 @@
 //!
 //! 把 sidecar 的 `<capability>.<method>` 反向调用路由到内核实现：
 //! - pipeline-executor.{suspend, resume, get_run_status} → 直接操作 runs 表
-//!   （审批挂起/恢复与复盘轮询走 StorageBackend；任务执行统一走
-//!   chat.send_message → PipelineExecutor）
+//!   （审批挂起/恢复与复盘轮询走 StorageBackend；resume_pipeline 额外经
+//!   PipelineResumerFn 拉起续跑轮；任务执行统一走 chat.send_message →
+//!   PipelineExecutor）
 //! - event-bus.emit → 广播事件（当前记录日志，前端推送留 P1）
 //! - metrics.record → 写入指标聚合器（监控设计 §三 通道2，第 6 个 capability）
 //! - service-registry.<域>.<op> → 插件访问内核共享基础设施存储（execution-records/
@@ -81,12 +82,33 @@ pub struct KernelCapabilityRouter {
     /// state 出口声明查询闭包（manifest export_fields 并集，见 routes::ExportFields）。
     /// None = 无插件声明（仅内核基线出口，兼容旧装配/测试）。
     export_fields_lookup: Option<ExportFieldsLookupFn>,
+    /// 管道恢复派发闭包（resume_pipeline 拉起续跑轮，见 PipelineResumerFn）。
+    /// None = 恢复派发不可用（resume_pipeline 降级为纯 runs 表簿记，兼容旧装配/测试）。
+    pipeline_resumer: Option<PipelineResumerFn>,
 }
 
 /// state 出口声明查询闭包：() → 当前 manifest 集合的 export_fields 并集。
 pub type ExportFieldsLookupFn = Arc<dyn Fn() -> ExportFields + Send + Sync>;
 
 pub use crate::routes::ExportFields;
+
+/// 管道恢复派发闭包：(pipeline_id, thread_id, user_id) → 拉起一轮续跑。
+///
+/// 实现方经 `EngineDispatcher::dispatch_user_input` 走与聊天/催促同一条派发链
+/// （pending 入队 → RunChain FIFO → process_via_engine → stage_recover_history
+/// 快照恢复），空 content + `_skip_user_append` overlay = 不落 user 消息、
+/// 纯按快照续跑。生产装配在 agentos-kernel（dispatcher 构造晚于 router，
+/// 经 OnceLock 槽位二阶段接线）；None = 恢复派发不可用（仅簿记降级）。
+pub type PipelineResumerFn = Arc<
+    dyn Fn(
+            String,
+            String,
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// 域事件广播闭包：(event_name, tags) → 点对点投递给声明 domain_event 的
 /// 启用插件（组件版 broadcast_domain_event_from；观察总线由调用方决定）。
@@ -130,6 +152,7 @@ impl KernelCapabilityRouter {
             streaming_declaration_lookup: None,
             tool_failure_tracker: None,
             export_fields_lookup: None,
+            pipeline_resumer: None,
         }
     }
 
@@ -147,6 +170,12 @@ impl KernelCapabilityRouter {
     /// 注入域事件广播闭包（启用 event-bus 域事件名单同步广播：approval.created 等）。
     pub fn with_domain_broadcaster(mut self, broadcaster: DomainBroadcaster) -> Self {
         self.domain_broadcaster = Some(broadcaster);
+        self
+    }
+
+    /// 注入管道恢复派发闭包（启用 resume_pipeline 的续跑拉起，见 PipelineResumerFn）。
+    pub fn with_pipeline_resumer(mut self, resumer: PipelineResumerFn) -> Self {
+        self.pipeline_resumer = Some(resumer);
         self
     }
 
@@ -617,7 +646,18 @@ impl KernelCapabilityRouter {
         }
     }
 
-    /// pipeline-executor.resume_pipeline：恢复该管道最新 suspended run。
+    /// pipeline-executor.resume_pipeline：恢复该管道执行。
+    ///
+    /// 恢复语义按 run 状态三分（状态簿记与执行拉起统一在此收口）：
+    /// - 最新 run **Running**：执行在飞，幂等空转不重复派发（RunChain 已有本轮）。
+    /// - 最新 run **Suspended + metadata.pending_interaction_request_id**：审批
+    ///   挂起在飞（引擎 run 未结束、human_interaction 工具进程内阻塞）——翻
+    ///   Running 簿记，真唤醒走 interaction.respond（回复载荷不经本能力）。
+    /// - **其余**（停泊挂起：child_task_guard/DSL Wait/G8 排空；或无在飞 run：
+    ///   历史已终态）：拉起一轮续跑——经恢复派发闭包走与聊天/催促同一条
+    ///   派发链，state 由 stage_recover_history 从快照/DB 全量恢复，调用方
+    ///   无需透传 state。旧 run 不翻状态（挂起即其真实收束史，新 run 另起
+    ///   一行承载执行，避免翻 Running 后无人收尾的幽灵 running）。
     async fn handle_pipeline_executor_resume_pipeline(
         &self,
         params: Value,
@@ -628,6 +668,7 @@ impl KernelCapabilityRouter {
             .ok_or_else(|| McpError::Protocol {
                 message: "resume_pipeline 缺少 pipeline_id 参数".to_string(),
             })?;
+        let user_id = params.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
         let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
             message: "resume_pipeline disabled: kernel store not injected".to_string(),
         })?;
@@ -638,11 +679,24 @@ impl KernelCapabilityRouter {
             .map_err(|e| McpError::Protocol {
                 message: format!("resume_pipeline 查询失败: {e}"),
             })?;
-        let target = runs
-            .into_iter()
-            .find(|r| r.status == agentos_core::types::RunStatus::Suspended);
-        match target {
-            Some(run) => {
+        let target = runs.into_iter().find(|r| {
+            r.status == agentos_core::types::RunStatus::Running
+                || r.status == agentos_core::types::RunStatus::Suspended
+        });
+        if let Some(run) = &target {
+            if run.status == agentos_core::types::RunStatus::Running {
+                // 执行在飞：幂等空转，不重复派发。
+                return Ok(json!({
+                    "status": "resumed", "pipeline_id": pipeline_id,
+                    "run_id": run.run_id, "dispatched": false,
+                }));
+            }
+            let approval_pending = run
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("pending_interaction_request_id"))
+                .is_some();
+            if approval_pending {
                 store
                     .update_run_status(
                         &run.run_id,
@@ -654,10 +708,67 @@ impl KernelCapabilityRouter {
                     .map_err(|e| McpError::Protocol {
                         message: format!("resume_pipeline 失败: {e}"),
                     })?;
-                Ok(json!({"status": "resumed", "pipeline_id": pipeline_id, "run_id": run.run_id}))
+                return Ok(json!({
+                    "status": "resumed", "pipeline_id": pipeline_id,
+                    "run_id": run.run_id, "dispatched": false,
+                }));
             }
-            None => Ok(json!({"status": "resumed", "pipeline_id": pipeline_id, "run_id": ""})),
         }
+        // 停泊挂起 / 无在飞 run：拉起续跑轮。管道须挂真实会话（thread 是派发
+        // 坐标；孤儿/伪造 id 拒绝——静默跑完会把回复发到无人订阅的频道）。
+        let thread_id = match store.get_thread_id_by_pipeline(pipeline_id).await {
+            Ok(Some(tid)) => tid,
+            Ok(None) => {
+                return Err(McpError::Protocol {
+                    message: format!(
+                        "resume_pipeline 的 pipeline_id（{pipeline_id}）不属于任何会话\
+                         （pipeline_sessions 未命中）：孤儿或伪造 id，拒绝派发"
+                    ),
+                });
+            }
+            Err(e) => {
+                return Err(McpError::Protocol {
+                    message: format!("resume_pipeline 解析管道会话坐标失败: {e}"),
+                });
+            }
+        };
+        let Some(resumer) = self.pipeline_resumer.as_ref() else {
+            // 恢复派发未装配：降级为既有簿记语义（suspended → running），留痕。
+            if let Some(run) = &target {
+                warn!(
+                    pipeline = %pipeline_id,
+                    run_id = %run.run_id,
+                    "resume_pipeline 恢复派发未装配，降级纯簿记（翻 Running 不拉起执行）"
+                );
+                store
+                    .update_run_status(
+                        &run.run_id,
+                        agentos_core::types::RunStatus::Running,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("resume_pipeline 失败: {e}"),
+                    })?;
+            }
+            return Ok(json!({
+                "status": "resumed", "pipeline_id": pipeline_id,
+                "run_id": target.as_ref().map(|r| r.run_id.clone()).unwrap_or_default(),
+                "dispatched": false,
+            }));
+        };
+        resumer(pipeline_id.to_string(), thread_id, user_id.to_string())
+            .await
+            .map_err(|e| McpError::Protocol {
+                message: format!("resume_pipeline 续跑派发失败: {e}"),
+            })?;
+        Ok(json!({
+            "status": "resumed",
+            "pipeline_id": pipeline_id,
+            "run_id": target.as_ref().map(|r| r.run_id.clone()).unwrap_or_default(),
+            "dispatched": true,
+        }))
     }
 
     /// pipeline-executor.get_run_status：复盘侧轮询子管道真实完成状态
@@ -798,9 +909,8 @@ impl KernelCapabilityRouter {
         plugin_id: Option<&str>,
     ) -> Option<Value> {
         let contracts = self.capability_contracts.as_ref()?;
-        if crate::kernel_capabilities::find_spec(contracts, "streaming", event_name).is_none() {
-            return None;
-        }
+        // 契约族未声明该事件 = 不归本闸（None 放行进分族）。
+        crate::kernel_capabilities::find_spec(contracts, "streaming", event_name)?;
         // 声明闸（ADR 2026-08-22）：插件须声明 capabilities.streaming 才能发射
         // 流式事件；未声明即拒（fail-closed）。引擎管道家族（llm_core/tool_core）
         // 是内核 LLM 路径的器官，豁免——它们携带内核签发的 a_ id，命名空间执法见下。
@@ -932,7 +1042,7 @@ impl KernelCapabilityRouter {
                 // 钩子协议面，装载表恒空短路，零开销；协议面归管道步骤服务化
                 // 提案 §3.6，留注引用）。注意：热路径查表优先于分配，勿在此
                 // 追加大对象构造。
-                self.accumulate_stream_interception(event_name, payload, &thread_id, &message_id);
+                self.accumulate_stream_interception(event_name, payload, thread_id, message_id);
                 return Some(Ok(json!({
                     "status": if delivered { "emitted" } else { "dropped" },
                     "event": event_name,

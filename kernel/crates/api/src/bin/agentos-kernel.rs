@@ -808,6 +808,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
+    // 管道恢复派发闭包（resume_pipeline 续跑拉起）：经 EngineDispatcher 走与
+    // 聊天/催促同一条派发链。dispatcher 构造晚于 router（AppState 之后，见下方
+    // chat handler 注册块），经 OnceLock 槽位二阶段接线——未 set 前调用报
+    // 显式错误（装配期窗口极短，不静默降级）。
+    // 空 content + _skip_user_append overlay：续跑轮不落 user 消息、纯按快照
+    // 恢复执行（stage_recover_history 热/冷路径全量恢复 state），源标记 Trigger
+    // （系统发起，与任务派发同源）。
+    let resume_dispatcher_slot: Arc<
+        std::sync::OnceLock<std::sync::Arc<dyn agentos_session::router::PipelineDispatcher>>,
+    > = Arc::new(std::sync::OnceLock::new());
+    let pipeline_resumer: agentos_api::capability_router::PipelineResumerFn = {
+        let slot = resume_dispatcher_slot.clone();
+        Arc::new(
+            move |pipeline_id: String, thread_id: String, user_id: String| {
+                let slot = slot.clone();
+                Box::pin(async move {
+                    let dispatcher = slot
+                        .get()
+                        .ok_or_else(|| "恢复派发通道未就绪（dispatcher 尚未装配）".to_string())?;
+                    dispatcher
+                        .dispatch_user_input(
+                            &thread_id,
+                            &user_id,
+                            "",
+                            &pipeline_id,
+                            "",
+                            None,
+                            Some(&serde_json::json!({"_skip_user_append": true})),
+                            "",
+                            "",
+                            agentos_core::types::PendingInputSource::Trigger,
+                        )
+                        .await
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+                    >
+            },
+        )
+    };
+
     let mut router_builder = KernelCapabilityRouter::with_metrics(metrics_aggregator.clone())
         .with_invoker(invoker.clone())
         .with_registry(registry.clone())
@@ -819,6 +860,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_domain_broadcaster(domain_broadcaster)
         .with_streaming_declaration_lookup(streaming_declaration_lookup)
         .with_export_fields_lookup(export_fields_lookup)
+        .with_pipeline_resumer(pipeline_resumer)
         .with_capability_contracts(capability_contracts.clone());
     // AGENTOS_GRANTS_STRICT=1：未声明 granted_capabilities 的插件反向调用一律
     // 拒绝（fail-closed）。启动期读取——开关随进程生效，不随插件热发现翻转。
@@ -1026,6 +1068,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::sync::Arc::new(agentos_api::ws_session::EngineDispatcher::new(
                 state.clone(),
             ));
+        // 管道恢复派发通道接线（resume_pipeline 续跑拉起，见 router 装配处）。
+        let _ = resume_dispatcher_slot.set(dispatcher.clone());
         handler_registry.register(std::sync::Arc::new(
             agentos_api::chat_send_handler::ChatSendHandler::with_session(
                 dispatcher,

@@ -328,11 +328,13 @@ async def _suspend_task_pipeline(task_id: str) -> bool:
         return False
 
 
-async def _resume_task_pipeline(task_id: str) -> bool:
-    """GAP-1 统一：恢复任务 = resume_pipeline（按管道恢复最新 suspended run）。"""
+async def _resume_task_pipeline(task_id: str, user_id: str = "") -> bool:
+    """恢复任务 = resume_pipeline（内核按 run 状态簿记或拉起续跑轮）。"""
     try:
         handle = _capability("pipeline-executor")
-        resp = await handle.call("resume_pipeline", {"pipeline_id": task_id})
+        resp = await handle.call(
+            "resume_pipeline", {"pipeline_id": task_id, "user_id": user_id}
+        )
         return bool(resp and resp.get("run_id") is not None)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[tasks http] resume_pipeline 失败 | task_id=%s | err=%s", task_id, exc)
@@ -967,11 +969,12 @@ async def resume_task(
     task_id: str,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """恢复指定暂停的任务（GAP-1：resume_pipeline 按管道恢复最新 suspended run）。"""
+    """恢复指定暂停的任务（resume_pipeline 按管道簿记或拉起续跑轮）。"""
 
-    # GAP-1 统一：恢复 = resume_pipeline；task_submitted 恒 False（旧字段仅保留响应形状）
+    # 恢复 = resume_pipeline（内核续跑派发，state 由快照恢复，无需透传）；
+    # task_submitted 恒 False（旧字段仅保留响应形状）
     task_submitted = False
-    if not await _resume_task_pipeline(task_id):
+    if not await _resume_task_pipeline(task_id, user_id=_current_user(_user).get("sub", "")):
         raise APIError(
             status_code=404,
             error_code="API_NOTF_2004",
@@ -1389,8 +1392,9 @@ async def resume_project(
     project = _get_project_or_404(registry, project_id)
 
     resumed = 0
+    uid = _current_user(_user).get("sub", "")
     for pid in await _project_child_pids(project_id):
-        if await _resume_task_pipeline(pid):
+        if await _resume_task_pipeline(pid, user_id=uid):
             resumed += 1
 
     project.status = "active"

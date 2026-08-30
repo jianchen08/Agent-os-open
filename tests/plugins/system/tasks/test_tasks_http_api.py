@@ -499,6 +499,19 @@ class TestTasksEndpoints:
         assert resp["status"] == 200
         assert resp["payload"]["resumed_count"] == 1
 
+    async def test_resume_task_passes_caller_user_to_kernel(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
+        # 恢复续跑轮的租户/归属解析依赖调用方 user——resume_pipeline 调用
+        # 必须携带 user_id（缺省空串走内核 default 租户降级，带认证时须是真值）。
+        hub._responses["pipeline-executor"] = {"resume_pipeline": {"run_id": "r-9"}}
+        headers = {"Authorization": f"Bearer {_make_token('u-9')}"}
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/t-1/resume", "POST",
+                           headers=headers)
+        assert resp["status"] == 200
+        calls = [(m, pr) for m, pr in hub.handles["pipeline-executor"].calls
+                 if m == "resume_pipeline"]
+        assert calls[0][1]["user_id"] == "u-9"
+
     async def test_pause_task_no_run_404(self, monkeypatch: pytest.MonkeyPatch,
                                          hub: _FakeCapabilityHub) -> None:
         hub._responses["pipeline-executor"] = {"suspend_pipeline": {}}
