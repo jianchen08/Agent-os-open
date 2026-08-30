@@ -22,10 +22,18 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
 from _eval_core import EvaluationResult, MetricResult
+
+# plugins/shared 平铺契约模块（state_fields.py：ws_meta 跨边界 JSON 字符串还原）——
+# 与 task_submit/tool.py 同款自举注入（server.py 已注入，此处幂等兜底直跑场景）。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+import state_fields  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +185,20 @@ class PipelineEvaluationExecutor:
         metric_id: str,
         params: dict[str, Any],
     ) -> MetricResult:
-        task_row = await self._find_state_row(task_id)
-        ws_meta = (task_row or {}).get("ws_meta")
+        task_row = await self._find_state_row(task_id) or {}
+        # 工作区坐标三路读取（与 task_submit 继承解析同款，state_fields 还原跨
+        # 边界 JSON 字符串形态）：ws_meta（引擎回写快照有延迟窗口）→ task.ws_meta
+        # （workspace_lifecycle init 经 pipeline-state.update 镜像，运行中即时
+        # 可见）→ lineage.parent_ws_meta（出生契约登记，创建即写恒可见；继承/
+        # 无独立工作区任务 = 父工作区）。三路全空才诚实失败。
+        ws_meta = state_fields.as_dict(task_row.get("ws_meta"), field="ws_meta")
+        if not isinstance(ws_meta, dict) or not ws_meta.get("path"):
+            ws_meta = state_fields.as_dict(task_row.get("task.ws_meta"), field="task.ws_meta")
+        if not isinstance(ws_meta, dict) or not ws_meta.get("path"):
+            ws_meta = state_fields.as_dict(
+                task_row.get("lineage.parent_ws_meta"),
+                field="lineage.parent_ws_meta",
+            )
         if not isinstance(ws_meta, dict) or not ws_meta.get("path"):
             return MetricResult(
                 metric_id=metric_id,

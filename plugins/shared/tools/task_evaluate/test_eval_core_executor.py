@@ -446,6 +446,94 @@ class TestAgentMetricPipelineExtra:
         assert r.results[0].passed is False
         assert "未返回 pipeline_id" in (r.results[0].error or "")
 
+    def test_task_ws_meta_mirror_dispatches(self, exec_mod: Any, metrics_path: str, tmp_path: Path) -> None:
+        """运行中任务顶层 ws_meta 延迟可见（引擎回写快照未到）——task.ws_meta
+        镜像（workspace_lifecycle init 经 pipeline-state.update 即时写）应作为
+        工作区坐标回退派发评估子管道，不得误报"无工作区坐标"使语义评估空转失败。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        dispatch_calls: list[dict[str, Any]] = []
+
+        async def chat_send(params: dict[str, Any]) -> dict[str, Any]:
+            dispatch_calls.append(params)
+            return {"pipeline_id": "evalPipe1"}
+
+        async def state_rows() -> list[dict[str, Any]]:
+            return [
+                {
+                    "pipeline_id": "taskP1",
+                    "task.ws_meta": {"mode": "worktree", "path": str(ws)},
+                    "lineage.origin_session_id": "sessRoot1",
+                },
+                {
+                    "pipeline_id": "evalPipe1",
+                    "evaluation.detected_result": {"passed": True, "score": 90, "feedback": "产出达标"},
+                },
+            ]
+
+        ex = _make_executor(exec_mod, chat_send=chat_send, state_rows=state_rows, metrics=metrics_path)
+        r = _run(ex.run_evaluation("taskP1", ["semantic_check"], {}))
+        m = r.results[0]
+        assert m.passed is True
+        assert m.pipeline_run_id == "evalPipe1"
+        # 派发继承被评估任务工作区坐标
+        assert len(dispatch_calls) == 1
+        st = dispatch_calls[0]["state"]
+        assert st["workspace"] == str(ws)
+        assert st["ws_meta"]["path"] == str(ws)
+
+    def test_task_ws_meta_json_string_restored(self, exec_mod: Any, metrics_path: str, tmp_path: Path) -> None:
+        """task.ws_meta 以 JSON 字符串形态出口（DB 冷路径投影）→ state_fields
+        还原后仍应派发（跨边界序列化形态不阻断评估）。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        dispatch_calls: list[dict[str, Any]] = []
+
+        async def chat_send(params: dict[str, Any]) -> dict[str, Any]:
+            dispatch_calls.append(params)
+            return {"pipeline_id": "evalPipe1"}
+
+        async def state_rows() -> list[dict[str, Any]]:
+            import json as _json
+
+            return [
+                {
+                    "pipeline_id": "taskP1",
+                    "task.ws_meta": _json.dumps({"mode": "worktree", "path": str(ws)}),
+                },
+                {"pipeline_id": "evalPipe1", "evaluation.detected_result": {"passed": True, "score": 80, "feedback": "ok"}},
+            ]
+
+        ex = _make_executor(exec_mod, chat_send=chat_send, state_rows=state_rows, metrics=metrics_path)
+        r = _run(ex.run_evaluation("taskP1", ["semantic_check"], {}))
+        assert r.results[0].passed is True
+        assert dispatch_calls[0]["state"]["workspace"] == str(ws)
+
+    def test_lineage_parent_ws_meta_last_resort(self, exec_mod: Any, metrics_path: str, tmp_path: Path) -> None:
+        """继承任务（无独立工作区，ws_meta/task.ws_meta 均缺）→ 父链出生坐标
+        lineage.parent_ws_meta 兜底（创建即写恒可见），评估在父工作区跑。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        dispatch_calls: list[dict[str, Any]] = []
+
+        async def chat_send(params: dict[str, Any]) -> dict[str, Any]:
+            dispatch_calls.append(params)
+            return {"pipeline_id": "evalPipe1"}
+
+        async def state_rows() -> list[dict[str, Any]]:
+            return [
+                {
+                    "pipeline_id": "taskP1",
+                    "lineage.parent_ws_meta": {"mode": "plain", "path": str(ws)},
+                },
+                {"pipeline_id": "evalPipe1", "evaluation.detected_result": {"passed": True, "score": 70, "feedback": "ok"}},
+            ]
+
+        ex = _make_executor(exec_mod, chat_send=chat_send, state_rows=state_rows, metrics=metrics_path)
+        r = _run(ex.run_evaluation("taskP1", ["semantic_check"], {}))
+        assert r.results[0].passed is True
+        assert dispatch_calls[0]["state"]["workspace"] == str(ws)
+
     def test_recover_detected_result_first_poll(self, exec_mod: Any, metrics_path: str, tmp_path: Path) -> None:
         ws = tmp_path / "ws"
         ws.mkdir()
