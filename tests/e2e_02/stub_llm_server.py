@@ -90,7 +90,13 @@ class _Script:
             index = self.consumed
             self.consumed += 1
             if index < len(self.steps):
-                return self.steps[index]
+                step = self.steps[index]
+                # 步骤可为 callable：(body, index) -> step——脚本步骤需要依赖
+                # 前序真实工具结果（如从 project_create 输出提取 project_id
+                # 构造下一步 task_submit 参数）时使用。
+                if callable(step):
+                    return step(body, index)
+                return step
             return self.default(body, index + 1)
 
 

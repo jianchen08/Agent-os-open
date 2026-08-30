@@ -66,5 +66,7 @@ plugins:
     enabled: true
   agentos-builtin-tools:
     enabled: true
+  task_submit_tool:
+    enabled: true
 defaults:
   enabled: true

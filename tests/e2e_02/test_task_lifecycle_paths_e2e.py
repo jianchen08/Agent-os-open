@@ -92,6 +92,8 @@ _M_D2C = "E2E-MTX-D2X"
 _M_S2P = "E2E-MTX-S2P"
 _M_S2C = "E2E-MTX-S2X"
 _M_S1 = "E2E-MTX-S1"
+_M_P1P = "E2E-MTX-P1P"
+_M_P1C = "E2E-MTX-P1C"
 
 _BASH_ECHO_OK = "echo E2E_BASH_OK > result.txt"
 
@@ -617,6 +619,69 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
             text_step("S2 子任务：执行与评估完成。"),
         ],
     )
+
+
+
+
+
+
+def _project_row_by_title(kernel: StubKernel, token: str, title: str) -> dict[str, Any] | None:
+    """projects 域列表按标题找登记行（project_create 真实执行后观察面）。"""
+    status, body, _ = http_get_with_auth(
+        f"{kernel.url}/ext/task_service/projects?limit=100", token=token, timeout=10
+    )
+    if status != 200 or not isinstance(body, dict):
+        return None
+    for item in body.get("items", []):
+        if isinstance(item, dict) and str(item.get("goal") or "") == title:
+            return item
+    return None
+
+
+def _tool_result_field(body: dict[str, Any], key: str) -> str:
+    """从请求 messages 历史提取工具结果字段（yaml 风格 key: value 或 JSON 信封）。
+
+    stub 脚本步骤可为 callable (body, index)——P1 父会话第二步的 task_submit
+    参数依赖前序真实工具结果（project_id 运行时生成，脚本无法预编码）。
+    """
+    for message in reversed(body.get("messages", [])):
+        if message.get("role") != "tool":
+            continue
+        content = str(message.get("content") or "")
+        stripped = content.strip()
+        if stripped.startswith("{"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict) and parsed.get(key):
+                    return str(parsed[key])
+            except json.JSONDecodeError:
+                pass
+        for line in stripped.splitlines():
+            if line.startswith(f"{key}:") and len(line) > len(key) + 1:
+                return line[len(key) + 1:].strip()
+    raise AssertionError(f"工具结果未找到字段 {key!r}: {body}")
+
+
+def _tool_result_project_id(body: dict[str, Any]) -> str:
+    """project_create 工具输出的 project_id（12hex，行解析防路径误扫）。"""
+    pid = _tool_result_field(body, "project_id")
+    assert len(pid) == 12, f"project_id 应为 12hex，实际 {pid!r}"
+    return pid
+
+
+def _tool_result_workspace_path(body: dict[str, Any]) -> str:
+    """从请求 messages 历史提取 project_create 工具输出的项目文件夹路径。"""
+    for message in reversed(body.get("messages", [])):
+        if message.get("role") != "tool":
+            continue
+        content = str(message.get("content") or "")
+        try:
+            parsed = json.loads(content.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and parsed.get("path"):
+            return str(parsed["path"])
+    raise AssertionError(f"project_create 工具结果未找到 path: {body}")
 
 
 def _task_submit_args(
@@ -1289,3 +1354,126 @@ class TestS1StopDuringRun:
         final_status = str((_state(row) if row else {}).get("task.status") or "")
         print(f"[matrix] S1 停止后 task.status={final_status or '-'} 轮数 {count_before}→{count_settled}")
         assert final_status != "completed", "S1 停止后任务不得假完成"
+
+
+class TestP1ProjectAttachWorkspace:
+    """P1 项目挂靠全链路：agent 用 project_create 建项目（无执行者）→ L1 父会话
+    task_submit 带 project_id 派发子任务 → 子任务 workspace 真实落在项目文件夹
+    的 worktree（branch=task/{id}），产出文件在 worktree 内。
+
+    覆盖 2026-08-30 修复：挂 project 的子任务 workspace 曾被"继承父工作空间"
+    吞掉（任务跑进会话目录）；以及 project_create 工具入口（杜绝 bash 调
+    Python 的 WSL /mnt 路径坑）。
+    """
+
+    @pytest.mark.timeout(600)
+    def test_project_attached_task_runs_in_project_worktree(
+        self, stub_kernel, matrix_token, stub_llm, matrix_sessions
+    ):
+        project_goal = f"P1项目_{_M_P1P}"
+
+        def _step2_submit(body: dict[str, Any], index: int) -> dict[str, Any]:
+            """第二步：从第一步 project_create 的真实输出提取 project_id，
+            构造挂靠该项目的 task_submit 调用（worktree 拓扑缺省）。"""
+            pid = _tool_result_project_id(body)
+            args = _task_submit_args(child_marker=_M_P1C)
+            args["project_id"] = pid
+            args["workspace_mode"] = "worktree"
+            return tool_call_step("task_submit", **args)
+
+        # 父脚本先注册（注册序 = stub 匹配优先级）
+        stub_llm.register(
+            "P1P",
+            _M_P1P,
+            [
+                tool_call_step("project_create", goal=project_goal),
+                _step2_submit,
+                text_step("P1 父会话：项目已建、子任务已挂靠提交。"),
+            ],
+        )
+        # 子任务脚本（与 A1 同构：bash 生成 result.txt + task_evaluate）
+        stub_llm.register(
+            "P1C",
+            _M_P1C,
+            [
+                tool_call_step(
+                    "bash_execute",
+                    action="execute",
+                    command=_BASH_ECHO_OK + " && git add result.txt && git commit -m p1-output",
+                ),
+                tool_call_step(
+                    "task_evaluate",
+                    action="auto_complete",
+                    summary="已用 bash_execute 生成 result.txt，任务完成。",
+                ),
+                text_step("P1 子任务：执行与评估均完成。"),
+            ],
+        )
+
+        session_id = _create_session(stub_kernel, matrix_token, "e2e-matrix-p1")
+        matrix_sessions(session_id)
+        _chat(
+            stub_kernel,
+            matrix_token,
+            session_id,
+            f"请创建项目并派发一个挂靠该项目的任务。场景标记：{_M_P1P}",
+        )
+
+        # 项目已登记（project_create 真实执行：建文件夹 + git init + 登记）
+        project_row = _poll_until(
+            lambda: _project_row_by_title(stub_kernel, matrix_token, project_goal),
+            _TERMINAL_WAIT_SECONDS,
+        )
+        assert project_row is not None, f"project_create 应登记项目 {project_goal}"
+        project_id = str(project_row["id"])
+        metadata = project_row.get("metadata") or {}
+        project_path = str(metadata.get("path") or "")
+        assert os.path.isdir(project_path), f"项目文件夹应存在: {project_path}"
+        assert (Path(project_path) / ".git").is_dir(), f"项目文件夹应已 git init: {project_path}"
+
+        # 子任务终态
+        child_row = _poll_until(
+            lambda: _row_by_marker(_state_rows(stub_kernel, matrix_token), _M_P1C),
+            _TERMINAL_WAIT_SECONDS,
+        )
+        assert child_row is not None, f"state 聚合应出现 P1 子任务（marker {_M_P1C}）"
+        child_id = str(child_row["pipeline_id"])
+        child_state, seen = _wait_task_terminal(
+            stub_kernel, matrix_token, child_id, _TERMINAL_WAIT_SECONDS
+        )
+        assert child_state.get("task.status") == "completed", (
+            f"P1 子任务应 completed，实际 {child_state.get('task.status')}，序列 {seen}"
+        )
+        # 挂靠键
+        assert str(child_state.get("task.parent_project_id") or "") == project_id, (
+            f"子任务应挂靠项目 {project_id}，实际 "
+            f"{child_state.get('task.parent_project_id')}"
+        )
+        # workspace 落位（问题1 修复的观察面）：worktree 拓扑 + 在项目文件夹上分叉
+        ws_meta = child_state.get("ws_meta") or {}
+        if isinstance(ws_meta, str):
+            try:
+                ws_meta = json.loads(ws_meta)
+            except json.JSONDecodeError:
+                ws_meta = {}
+        assert ws_meta.get("mode") == "worktree", (
+            f"挂项目子任务应 worktree 拓扑，实际 ws_meta={ws_meta}"
+        )
+        assert str(ws_meta.get("project_root") or "") == project_path, (
+            f"worktree 源应为项目文件夹，实际 project_root={ws_meta.get('project_root')}"
+        )
+        worktree_dir = str(ws_meta.get("path") or "")
+        assert worktree_dir, f"ws_meta 应记录 worktree 目录，实际 {ws_meta}"
+        print(f"[matrix] P1 worktree 目录（终态可能已合并清理，仅诊断）: {worktree_dir}")
+        # 分支契约：branch = task/{child_id}
+        assert ws_meta.get("branch") == f"task/{child_id}", (
+            f"worktree 分支应为 task/{child_id}，实际 {ws_meta.get('branch')}"
+        )
+        # 产出合并回项目文件夹（worktree 终态合并：分支提交合回主分支）。
+        # 合并失败（保留文件）时产出仍在 worktree 目录——两路取一即真实执行证据。
+        merged_out = Path(project_path) / "result.txt"
+        kept_out = Path(worktree_dir) / "result.txt" if worktree_dir else None
+        assert merged_out.exists() or (kept_out is not None and kept_out.exists()), (
+            f"产出应落位：项目文件夹 {merged_out} 或 worktree {kept_out}"
+        )
+        _assert_real_llm_ran(stub_kernel, matrix_token, child_id, child_state, "P1 子任务")

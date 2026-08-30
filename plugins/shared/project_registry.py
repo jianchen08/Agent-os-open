@@ -180,7 +180,17 @@ def _isolation_config_path() -> Path:
 
 
 def project_root_of_tree() -> Path:
-    """仓库根（含 config/ 目录的最近祖先）。"""
+    """仓库根（含 config/ 目录的最近祖先）。
+
+    对齐 isolation/workspace.py find_project_root：AGENTOS_CONFIG_ROOT 优先
+    （内核启动时把它发布到进程环境，指向 <project_root>/config——其父目录
+    即项目根；e2e/多环境部署布局无关）；回退从本文件向上找 config/ 祖先。
+    """
+    env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
+    if env_root:
+        parent = Path(env_root).parent
+        if (parent / "config").is_dir():
+            return parent
     for ancestor in Path(__file__).resolve().parents:
         if (ancestor / "config").is_dir():
             return ancestor
