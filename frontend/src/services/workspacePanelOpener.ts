@@ -40,9 +40,9 @@ export const TOP_NAV_PANELS: Record<string, WorkspacePanelSpec> = {
     icon: 'plugin',
     moduleId: '__panel_plugins__',
   },
-  // 监控/记忆面板已声明化（widget 化 T11）：monitoring/hindsight_memory 插件
-  // contributes.pages 声明（openWorkspacePanelByPath 解析顺序 1），禁用插件
-  // 即移除入口；此处不再硬编码。
+  // 监控面板已声明化（monitoring 插件 contributes.pages 声明，解析顺序 1），
+  // 禁用插件即移除入口；此处不再硬编码。记忆面板声明已摘除（hindsight_memory
+  // 不再贡献侧边栏记忆页）。
   // 智能体面板同款声明化：agent_manager 插件 contributes.pages
   // 声明 path=/agents（widget=agents_panel）；ToolsPage/AgentsPage 硬编码入口
   // 已随页面退役（能力浏览并入 /settings/plugins）。

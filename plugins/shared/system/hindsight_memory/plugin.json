@@ -490,48 +490,5 @@
   ],
   "granted_capabilities": [
     "tool-executor"
-  ],
-  "ui_schema": {
-    "widgets": [
-      {
-        "id": "memory_table",
-        "type": "table",
-        "space": "memory",
-        "order": 10,
-        "props": {
-          "title": "最近记忆（Hindsight）",
-          "datasourceUri": "/ext/hindsight_memory_service/recall?query=&limit=10"
-        }
-      },
-      {
-        "id": "memory_stats",
-        "type": "status_card",
-        "space": "memory",
-        "order": 20,
-        "props": {
-          "label": "记忆后端",
-          "datasourceUri": "/ext/hindsight_memory_service/stats",
-          "valueKey": "backend"
-        }
-      }
-    ]
-  },
-  "contributes": {
-    "pages": [
-      {
-        "id": "memory",
-        "title": "记忆",
-        "icon": "🧠",
-        "space": "workspace",
-        "slot": "activity-bar",
-        "order": 30,
-        "path": "/memory",
-        "widget": "widget_stage",
-        "props": {
-          "space": "memory"
-        },
-        "description": "记忆回顾（widget 化：Hindsight 记忆表+后端状态卡）"
-      }
-    ]
-  }
+  ]
 }
