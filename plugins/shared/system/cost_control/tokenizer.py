@@ -5,7 +5,7 @@ Token 计数工具
 从 0.1 src/core/tokenizer.py 直接复制，无导入适配需求（仅依赖 tiktoken）。
 """
 
-from typing import Any, cast
+from typing import Any
 
 import tiktoken
 
@@ -54,29 +54,6 @@ class TokenCounter:
             if prefix != "default" and model.startswith(prefix):
                 return self.MODEL_ENCODINGS[prefix]
         return None
-
-    def count_text(self, text: str, model: str = "gpt-4") -> int:
-        """
-        计算文本的 Token 数量（兼容旧接口）
-
-        Args:
-            text: 输入文本
-            model: 模型名称，用于选择编码器
-
-        Returns:
-            Token 数量
-        """
-        if not text:
-            return 0
-
-        try:
-            encoding_name = self._encoding_for_model(model) or self.MODEL_ENCODINGS["default"]
-            encoding = tiktoken.get_encoding(cast(str, encoding_name))
-            tokens = encoding.encode(text)
-            return len(tokens)
-        except Exception:
-            # 如果编码失败，使用快速估算
-            return self.estimate_tokens(text)
 
     def count_tokens(self, text: str) -> int:
         """

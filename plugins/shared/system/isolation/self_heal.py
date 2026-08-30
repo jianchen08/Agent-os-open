@@ -39,13 +39,8 @@ def wsl_shutdown(timeout: int = 15) -> bool:
     shutdown_script = os.path.join(script_dir, "scripts", "wsl_shutdown.ps1")
 
     if not os.path.exists(shutdown_script):
-        logger.warning("[self_heal] wsl_shutdown.ps1 not found, trying direct shutdown")
-        try:
-            return True
-            return True
-        except Exception as e:
-            logger.warning("[self_heal] direct wsl --shutdown failed: %s", e)
-            return False
+        logger.warning("[self_heal] wsl_shutdown.ps1 not found, skip shutdown (treat as no-op success)")
+        return True
 
     try:
         result = subprocess.run(
