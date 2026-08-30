@@ -13,6 +13,7 @@ import {
   handleStreamEnd,
   handleStreamError,
   handleStreamStart,
+  handlePipelineRoundFinished,
   handleTextDelta,
   handleToolCallDelta,
   handleToolProgress,
@@ -74,6 +75,11 @@ export function initStreamingEvents(): void {
   _handlers[WS_SERVER_EVENTS.USAGE_EVENT] = _logWrap(WS_SERVER_EVENTS.USAGE_EVENT, handleUsage)
   _handlers[WS_SERVER_EVENTS.FINISH] = _logWrap(WS_SERVER_EVENTS.FINISH, handleFinish)
   _handlers[WS_SERVER_EVENTS.STREAM_END] = _logWrap(WS_SERVER_EVENTS.STREAM_END, handleStreamEnd)
+  // run 级收尾：整次执行结束（轮间 stream_end 不再终结生成态，终止信号在此）
+  _handlers[WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED] = _logWrap(
+    WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED,
+    handlePipelineRoundFinished,
+  )
   _handlers[WS_SERVER_EVENTS.STREAM_ERROR] = _logWrap(WS_SERVER_EVENTS.STREAM_ERROR, handleStreamError)
   _handlers[WS_SERVER_EVENTS.PLUGIN_ERROR] = _logWrap(WS_SERVER_EVENTS.PLUGIN_ERROR, handlePluginError)
   _handlers[WS_SERVER_EVENTS.NEW_MESSAGE] = _logWrap(WS_SERVER_EVENTS.NEW_MESSAGE, handleNewMessage)

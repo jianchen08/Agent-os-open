@@ -198,17 +198,27 @@ export function startPipelineStreaming(
   // "思考中"。**按 messageId 命中**：仅当当前 streamingState 仍是本条消息时才清理，
   // 因此不会误杀后续新轮次（新轮次 messageId 不同）。后端数据已持久化，强制收尾后
   // 内容仍可正常渲染/刷新恢复。
+  // 工具执行轮间豁免：本条消息已随轮收尾 completed/被移除而生成态仍挂着时，
+  // 说明 run 仍在跑（生成态由 pipeline_round_finished 终结）——只有消息还挂在
+  // streaming 状态（chunk 断流真卡死）才强制收尾，不得掐断轮间生成态。
   const turnMsgId = messageId
   setTimeout(() => {
     const ps = pipelineStore.getState()
     const cur = (ps as any).streamingState?.[pipelineId]
-    if (cur?.isStreaming && cur?.messageId === turnMsgId) {
-      loggers.websocket.warn(
-        '[STREAM-TIMEOUT] 单消息流式超过 90s 未结束，强制收尾防卡死: pipeline=%s msg=%s',
+    if (!(cur?.isStreaming && cur?.messageId === turnMsgId)) return
+    const msg = ps.getMessages(pipelineId).find((m: any) => m.id === turnMsgId)
+    if (!msg || msg.status !== 'streaming') {
+      loggers.websocket.info(
+        '[STREAM-TIMEOUT] 轮间生成态维持（消息已收尾，run 未结束）: pipeline=%s msg=%s',
         pipelineId?.slice(0, 12), turnMsgId?.slice(0, 12),
       )
-      ps.stopStreaming(pipelineId)
+      return
     }
+    loggers.websocket.warn(
+      '[STREAM-TIMEOUT] 单消息流式超过 90s 未结束，强制收尾防卡死: pipeline=%s msg=%s',
+      pipelineId?.slice(0, 12), turnMsgId?.slice(0, 12),
+    )
+    ps.stopStreaming(pipelineId)
   }, 90000)
 }
 

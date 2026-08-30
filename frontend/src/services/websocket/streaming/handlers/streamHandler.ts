@@ -88,10 +88,11 @@ export function handleStreamEnd(eventData: any) {
   )
 
   if (pipelineId) {
-    terminatePipeline(pipelineId)
-    // 管道注册表实时同步：completed
-    usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'completed')
-
+    // 引擎逐轮发射 stream_end（一轮 = 一条消息）：轮收尾 ≠ 整次执行结束。
+    // 多轮执行的工具轮间在此终止生成态，会把"执行中"误判回"空闲"——
+    // busy 发送分支失效，乐观气泡与待发队列同屏（互斥破坏）。生成态的
+    // 终止信号是 run 级 pipeline_round_finished / stream_error，此处只做
+    // 当轮消息收尾。
     if (messageId) {
       // 清理块协议累积状态（正文/思考 delta 已 flush，残留缓冲丢弃——权威内容由
       // 下方 mergeStreamingParts / 对账兜底）
@@ -271,6 +272,27 @@ export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确
         ? errorMsg.source
         : undefined,
   })
+}
+
+/** 处理 run 级收尾事件（pipeline_round_finished）——生成态的唯一成功终止信号。
+ *
+ * 引擎逐轮发射 stream_end（一轮 = 一条消息），轮收尾不代表整次执行结束：
+ * 多轮执行的工具轮间曾在此误判，导致执行中发送分支失效（乐观气泡与待发
+ * 队列同屏互斥破坏）。stream_end 只收尾当轮消息；终止生成态改由本事件承载，
+ * 失败路径 stream_error 已先行终止（此处再终止幂等）。
+ */
+export function handlePipelineRoundFinished(eventData: any) {
+  const pipelineId = resolvePipelineId(eventData)
+  if (!pipelineId) {
+    _debugLogger.error(
+      '[ROUND_FINISHED] pipeline_id 缺失，跳过清理: _threadId=%s',
+      extractThreadId(eventData)?.slice(0, 12) || 'null',
+    )
+    return
+  }
+  const failed = eventData?.data?.failed === true
+  terminatePipeline(pipelineId)
+  usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, failed ? 'failed' : 'completed')
 }
 
 /** 处理插件执行错误事件（非终止信号）

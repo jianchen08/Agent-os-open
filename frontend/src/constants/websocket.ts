@@ -126,8 +126,10 @@ export const WS_SERVER_EVENTS = {
   FINISH: 'finish',
   /** 流式保活（LLM 流式 8 事件协议：超时探活，无业务载荷） */
   KEEPALIVE: 'keepalive',
-  /** 流式输出结束 */
+  /** 流式输出结束（轮级：一轮 = 一条消息，不代表整次执行结束） */
   STREAM_END: 'stream_end',
+  /** run 级收尾：一次用户输入触发的整次执行结束（生成态终止信号） */
+  PIPELINE_ROUND_FINISHED: 'pipeline_round_finished',
   /** 流式输出错误（LLM 调用失败等） */
   STREAM_ERROR: 'stream_error',
   /** 插件执行错误（非终止信号：引擎 warn+继续的插件失败，只弹通知不标记消息失败） */

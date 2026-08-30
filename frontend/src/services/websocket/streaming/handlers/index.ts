@@ -2,7 +2,7 @@
  * 事件处理器统一导出
  */
 export { handleNewMessage } from './messageHandler'
-export { handleStreamEnd, handleStreamError, handleStreamStart, handlePluginError } from './streamHandler'
+export { handleStreamEnd, handleStreamError, handleStreamStart, handlePluginError, handlePipelineRoundFinished } from './streamHandler'
 export {
   handleBlockEnd,
   handleBlockStart,

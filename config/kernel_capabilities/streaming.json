@@ -378,7 +378,7 @@
     },
     {
       "method": "stream_end",
-      "description": "流式结束（成功路径终止信号）。携带 final_sequence 同步占位消息的权威 seq（流式期间占位 seq 挂空）。",
+      "description": "流式结束（轮级收尾：一轮 = 一条消息，多轮执行的工具轮间不代表整次执行结束——生成态终止信号是 pipeline_round_finished / stream_error）。携带 final_sequence 同步占位消息的权威 seq（流式期间占位 seq 挂空）。",
       "input_schema": {
         "type": "object",
         "required": [
@@ -422,6 +422,37 @@
       }
     },
     {
+      "method": "pipeline_round_finished",
+      "description": "run 级收尾：一次用户输入触发的整次执行结束（内核消费循环出口统一发射，成功/失败均发）。前端生成态（streamingState）的唯一成功终止信号——stream_end 是轮级收尾，工具执行轮间不得据其终止生成态；失败路径 stream_error 已先行终止，本事件幂等兜底。failed=true 时前端注册表状态标 failed。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "thread_id",
+          "failed"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "管道坐标（前端生成态归属键）"
+          },
+          "failed": {
+            "type": "boolean",
+            "description": "本次执行是否失败（失败路径 stream_error 已先行，true 驱动注册表标 failed 而非 completed）"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
       "method": "stream_error",
       "description": "流式失败（终止信号）。前端只标记目标消息 status='failed' + error（不删除、不合成气泡、不启动重试）。",
       "input_schema": {
@@ -443,7 +474,12 @@
           "error": {
             "type": "object",
             "description": "统一错误信封（单一真值源 config/error_codes.json）：{code, message, source, retryable, details, request_id}。code 为稳定机器码（如 ENGINE_RUN_FAILED），source 供前端渲染来源标签",
-            "required": ["code", "message", "source", "retryable"],
+            "required": [
+              "code",
+              "message",
+              "source",
+              "retryable"
+            ],
             "properties": {
               "code": {
                 "type": "string",
@@ -455,7 +491,13 @@
               },
               "source": {
                 "type": "string",
-                "enum": ["kernel", "plugin", "llm", "infra", "frontend"]
+                "enum": [
+                  "kernel",
+                  "plugin",
+                  "llm",
+                  "infra",
+                  "frontend"
+                ]
               },
               "retryable": {
                 "type": "boolean"
@@ -505,7 +547,12 @@
           "error": {
             "type": "object",
             "description": "统一错误信封（单一真值源 config/error_codes.json）：{code, message, source, retryable, details, request_id}。source 恒为 plugin",
-            "required": ["code", "message", "source", "retryable"],
+            "required": [
+              "code",
+              "message",
+              "source",
+              "retryable"
+            ],
             "properties": {
               "code": {
                 "type": "string",
@@ -517,7 +564,13 @@
               },
               "source": {
                 "type": "string",
-                "enum": ["kernel", "plugin", "llm", "infra", "frontend"]
+                "enum": [
+                  "kernel",
+                  "plugin",
+                  "llm",
+                  "infra",
+                  "frontend"
+                ]
               },
               "retryable": {
                 "type": "boolean"
