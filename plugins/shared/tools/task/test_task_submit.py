@@ -380,10 +380,10 @@ def test_submit_writes_submitted_by_user_id_into_initial_state():
     chat.send_message 才有身份——曾硬编码空串被内核 -32603 拒绝（2026-08-17
     子任务结果回传断点）。
     """
-    captured: dict = {}
+    calls: list[dict] = []
 
     async def fake_sender(params: dict) -> dict:
-        captured.update(params)
+        calls.append(dict(params))
         return {"pipeline_id": "child_pipe_001"}
 
     tool = TaskSubmitTool()
@@ -402,9 +402,14 @@ def test_submit_writes_submitted_by_user_id_into_initial_state():
     assert result.error_code in (None, ""), f"应派发成功，实际 error_code={result.error_code}"
     # 2026-08-22 短化定案（8db4c6b16）：LLM 工具面回传 12 位短 id
     assert result.output.get("pipeline_id") == "child_pipe_001"[:12]
-    assert captured.get("user_id") == "u_admin", "chat.send_message 的 user_id 应为提交者"
+    assert calls, "出生协议应有 chat.send_message 调用"
+    # 出生协议三阶段（登记/身份/派发）：各阶段 user_id 都是提交者
+    assert all(c.get("user_id") == "u_admin" for c in calls), (
+        "chat.send_message 各阶段 user_id 应为提交者"
+    )
+    birth_call = next(c for c in calls if c.get("create") and c.get("state"))
     assert (
-        captured.get("state", {}).get("task.submitted_by") == "u_admin"
+        birth_call["state"].get("task.submitted_by") == "u_admin"
     ), "初始 state 必须写 task.submitted_by（内核事件带出 user_id 的依据）"
 
 

@@ -2,8 +2,8 @@
 
 覆盖：
 
-- count_text / count_tokens：空输入归零、与 tiktoken 真值一致、模型前缀
-  → 编码映射（gpt-4o 走 o200k_base，与 cl100k 可区分）；
+- count_tokens：空输入归零、与 tiktoken 真值一致；模型前缀 → 编码映射
+  （_encoding_for_model：gpt-4o 走 o200k_base，与 cl100k 可区分）；
 - count_messages：固定开销公式（4/message + 2+2 字段名 + 3 收尾）、
   不支持的模型 ValueError、KeyError 包装为 ValueError；
 - count_message：单条消息开销公式；
@@ -42,20 +42,20 @@ def _reset_singleton():
 class TestCountText:
     def test_empty_returns_zero(self) -> None:
         counter = TokenCounter()
-        assert counter.count_text("") == 0
-        assert counter.count_text(None, "gpt-4") == 0  # type: ignore[arg-type]
+        assert counter.count_tokens("") == 0
+        assert counter.count_tokens(None) == 0  # type: ignore[arg-type]
 
     def test_matches_cl100k_ground_truth(self) -> None:
         counter = TokenCounter()
         text = "hello world 你好世界"
-        assert counter.count_text(text, "gpt-4") == len(_CL.encode(text))
+        assert counter.count_tokens(text) == len(_CL.encode(text))
 
     def test_gpt4o_longest_prefix_wins(self) -> None:
         # 最长前缀优先：gpt-4o 命中 "gpt-4o"（o200k_base）而非被短前缀
         # "gpt-4"（cl100k_base）遮蔽——两编码对该文本计数确实可区分
         counter = TokenCounter()
+        assert counter._encoding_for_model("gpt-4o") == "o200k_base"
         text = "😀 emoji 中文测试"
-        assert counter.count_text(text, "gpt-4o") == len(_O2.encode(text))
         assert len(_O2.encode(text)) != len(_CL.encode(text))  # 两者确实可区分
 
     def test_instance_encoding_used_by_count_tokens(self) -> None:
@@ -66,9 +66,8 @@ class TestCountText:
 
     def test_glm_and_deepseek_map_to_cl100k(self) -> None:
         counter = TokenCounter()
-        text = "中文文本 token 计数"
-        assert counter.count_text(text, "glm-4") == len(_CL.encode(text))
-        assert counter.count_text(text, "deepseek-chat") == len(_CL.encode(text))
+        assert counter._encoding_for_model("glm-4") == "cl100k_base"
+        assert counter._encoding_for_model("deepseek-chat") == "cl100k_base"
 
 
 class TestCountTokens:
