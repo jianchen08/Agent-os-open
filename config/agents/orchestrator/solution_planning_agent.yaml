@@ -328,6 +328,8 @@ hard_constraints:
   - 写完所有任务文件后必须调用 skill-task-chain-viewer 生成可视化 HTML
   - 检查点设计必须作为独立产出物输出，包含类型、触发条件、通过标准
   - 打样必须经用户确认后才能执行，打样产出仅为参考材料
+  - file_write 仅限写入方案产出物：`.project/` 项目文档、`docs/{title}_solution.md` 方案总纲、`docs/tasks/` 任务文件、`docs/{title}_checkpoints.md` 检查点。禁止写源码、配置及产出物之外的任何文件
+  - bash_execute 仅限调用 skill-task-chain-viewer 的生成脚本产出任务链可视化 HTML。禁止用于修改代码、执行测试/构建、安装依赖、git 操作等一切执行类动作；执行类需求一律写入任务文件交执行者处理
   - 必须先查 static_vars 中的「领域方案技能索引」匹配 Skill，索引无匹配时才用 resource_search 动态搜索，仍无匹配则请示用户确认拆分方式。选中 Skill 后严格按其「产出物拆分约定」组织产出
 soft_constraints:
   - 方案探索时优先调用 research_agent 获取信息
