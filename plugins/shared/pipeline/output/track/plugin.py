@@ -74,8 +74,10 @@ class TrackPlugin(IOutputPlugin):
             updates["track.llm_usage"] = usage
             # 写入标准累计 token 值，供 cost_control 插件读取
             updates["track.total_tokens"] = usage.get("total_tokens", 0)
-            # cache 命中异常检测（本轮单轮语义，详见 _check_cache_anomaly）
-            self._check_cache_anomaly(usage, ctx.state.get(StateKeys.PIPELINE_ID, "") or "")
+            # cache 命中异常检测（本轮单轮语义，详见 _check_cache_anomaly）；
+            # 仅 LLM 轮检测——非 LLM 轮 last_* 是继承值，重检会对同一轮重复告警
+            if ctx.state.get(StateKeys.CORE_TYPE, "") == "llm_call":
+                self._check_cache_anomaly(usage, ctx.state.get(StateKeys.PIPELINE_ID, "") or "")
             # 业务指标经 record_metric 上报内核聚合器（监控设计 §三 通道2）
             await self._try_report_metrics(ctx, usage)
             # 推送本轮单轮 token 用量到前端（输入框进度条实时显示）
@@ -263,7 +265,10 @@ class TrackPlugin(IOutputPlugin):
         core_type = ctx.state.get(StateKeys.CORE_TYPE, "")
         current_usage = ctx.state.get("llm_usage", {})
 
-        # tool_execute 轮不累加 token（llm_usage 是上一轮残留）
+        # tool_execute 轮不累加 token（llm_usage 是上一轮残留）；last_* 同样
+        # 继承上一轮值——「本轮」语义 = 最近一次 LLM 轮的单轮量（state["llm_usage"]
+        # 注释与前端消费面均按「当前上下文窗口占用」消费 last_input）。管道停在
+        # 非 LLM 轮时清零会让输入框用量/浮窗显示假 0（total_* 却有大额累计）。
         if core_type != "llm_call" or not current_usage:
             prev_total = ctx.state.get("track.llm_usage", {})
             prev_input = prev_total.get("total_input_tokens", 0)
@@ -275,11 +280,11 @@ class TrackPlugin(IOutputPlugin):
                 "total_cached_tokens": prev_cached,
                 "total_missed_tokens": max(prev_input - prev_cached, 0),
                 "total_cache_hit_ratio": (prev_cached / prev_input) if prev_input > 0 else 0.0,
-                "last_input_tokens": 0,
-                "last_output_tokens": 0,
-                "last_cached_tokens": 0,
-                "last_missed_tokens": 0,
-                "last_cache_hit_ratio": 0.0,
+                "last_input_tokens": prev_total.get("last_input_tokens", 0),
+                "last_output_tokens": prev_total.get("last_output_tokens", 0),
+                "last_cached_tokens": prev_total.get("last_cached_tokens", 0),
+                "last_missed_tokens": prev_total.get("last_missed_tokens", 0),
+                "last_cache_hit_ratio": prev_total.get("last_cache_hit_ratio", 0.0),
             }
 
         prev_total = ctx.state.get("track.llm_usage", {})

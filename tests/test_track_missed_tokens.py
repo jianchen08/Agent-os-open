@@ -5,7 +5,8 @@
 - last_missed_tokens = 本轮 input - 本轮 cached（独立字段输出，不再只藏在差值里）
 - total_missed_tokens = 累计 input - 累计 cached
 - last_cache_hit_ratio / total_cache_hit_ratio = cached / input（input == 0 时为 0.0）
-- tool_execute 轮（llm_usage 残留）不累加，单轮字段全 0
+- tool_execute 轮（llm_usage 残留）不累加，单轮字段继承上一轮 LLM 轮值
+  （「本轮」= 最近一次 LLM 轮；清零会让前端上下文占用显示假 0）
 - llm_core 未上报 cached_tokens 时按 0 处理（missed = input）
 """
 
@@ -53,8 +54,12 @@ def test_llm_call_round_missed_and_ratio_fields() -> None:
     assert usage["last_input_tokens"] == 10000
 
 
-def test_tool_execute_round_zero_single_fields() -> None:
-    """tool_execute 轮：llm_usage 是上一轮残留，单轮 missed/ratio 全 0，累计保留。"""
+def test_tool_execute_round_carries_last_llm_values() -> None:
+    """tool_execute 轮：llm_usage 是上一轮残留，不累加；单轮字段继承上一轮 LLM 轮值。
+
+    「本轮」语义 = 最近一次 LLM 轮（last_input 表达当前上下文窗口占用）。
+    管道停在工具轮/收尾轮时清零会让前端显示假 0（total 却有大额累计）。
+    """
     plugin = _make_plugin()
     ctx = _ctx({
         "core_type": "tool_execute",
@@ -63,14 +68,38 @@ def test_tool_execute_round_zero_single_fields() -> None:
             "total_input_tokens": 10000,
             "total_output_tokens": 100,
             "total_cached_tokens": 9000,
+            "last_input_tokens": 8000,
+            "last_output_tokens": 200,
+            "last_cached_tokens": 7200,
+            "last_missed_tokens": 800,
+            "last_cache_hit_ratio": 0.9,
         },
     })
     usage = plugin._collect_token_usage(ctx)
-    assert usage["last_missed_tokens"] == 0
-    assert usage["last_cache_hit_ratio"] == 0.0
-    # 累计 missed/ratio 基于既有累计值重算（10000 - 9000）
+    # 累计不被残留 llm_usage 污染
+    assert usage["total_input_tokens"] == 10000
     assert usage["total_missed_tokens"] == 1000
     assert usage["total_cache_hit_ratio"] == 0.9
+    # 单轮字段继承上一轮 LLM 轮值（不清零）
+    assert usage["last_input_tokens"] == 8000
+    assert usage["last_output_tokens"] == 200
+    assert usage["last_cached_tokens"] == 7200
+    assert usage["last_missed_tokens"] == 800
+    assert usage["last_cache_hit_ratio"] == 0.9
+
+
+def test_tool_execute_first_round_zero_single_fields() -> None:
+    """首轮即非 LLM 轮（无上一轮可继承）→ 单轮字段仍为 0，不编造数据。"""
+    plugin = _make_plugin()
+    ctx = _ctx({
+        "core_type": "tool_execute",
+        "llm_usage": {"input_tokens": 9999, "output_tokens": 1, "cached_tokens": 9999},
+    })
+    usage = plugin._collect_token_usage(ctx)
+    assert usage["last_input_tokens"] == 0
+    assert usage["last_output_tokens"] == 0
+    assert usage["last_cache_hit_ratio"] == 0.0
+    assert usage["total_input_tokens"] == 0
 
 
 def test_missing_cached_tokens_treated_as_zero() -> None:
