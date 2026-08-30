@@ -128,10 +128,11 @@ struct SendParams<'a> {
     /// 归属会话声明，仅创建分支消费（None → 以引擎新 id 兼作派发坐标）。
     ownership_thread: Option<&'a str>,
     execution_context: Option<&'a Value>,
-    /// 显式指定的执行 agent（None = 调用方未指定）。内核不兜底不落库——
-    /// None 时派发槽位传空串，由派发层按管道快照 `agent.id`（出生方经 state
-    /// 透传的自由字段）→ 线程绑定解析；身份属管道，不随调用方漂移。
-    agent_id: Option<String>,
+    /// 显式指定的执行 agent（可选，默认 "agentos"）：任务派发按 target 选执行
+    /// agent。仅作派发簿记（registry 登记/run 日志）——run 的执行身份已改为
+    /// 管道 state 持久键 `agent.id`（出生方经 state 透传、context_build 与
+    /// 内核工具面消费），派发不再注入身份。
+    agent_id: String,
     overlay: Option<Value>,
 }
 
@@ -169,7 +170,7 @@ impl ChatSendHandler {
             user = %p.user_id,
             msg_len = p.message.len(),
             created,
-            agent = p.agent_id.as_deref().unwrap_or(""),
+            agent = %p.agent_id,
             has_execution_context = p.execution_context.is_some(),
             has_state = p.overlay.is_some(),
             "chat.send_message 派发触发消息"
@@ -201,7 +202,7 @@ impl ChatSendHandler {
                 "",
                 p.execution_context,
                 p.overlay.as_ref(),
-                p.agent_id.as_deref().unwrap_or(""),
+                &p.agent_id,
                 "",
                 PendingInputSource::Trigger,
             )
@@ -296,17 +297,15 @@ impl ChatSendHandler {
         // init 体 workspace_lifecycle / environment_lifecycle 插件消费。
         let execution_context = params.get("execution_context").filter(|v| v.is_object());
 
-        // agent_id（可选）：任务派发按 target 选执行 agent——引擎据此加载
-        // config/agents/**/<agent_id>.yaml（人格/tool_ids）。内核不兜底缺省、
-        // 不落身份：未指定时空串下传派发层，按管道快照 agent.id（出生方经
-        // state 透传的自由字段）→ 线程绑定解析——提前兜底会让续跑管道被
-        // 调用方身份覆盖（task_manage 催促把 general_agent 子任务跑成
-        // agentos 的根因）。
+        // agent_id（可选，默认 "agentos"）：任务派发按 target 选执行 agent——
+        // 引擎据此加载 config/agents/**/<agent_id>.yaml（人格/tool_ids）。
+        // 该值仅作派发簿记，run 执行身份读管道 state 持久键 agent.id。
         let agent_id = params
             .get("agent_id")
             .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .unwrap_or("agentos")
+            .to_string();
 
         // state 注入（可选）：校验保留字后作为 overlay 透传。
         let overlay = validate_state_overlay(params.get("state"))?;
@@ -349,9 +348,6 @@ impl ChatSendHandler {
                     ),
                 });
             }
-            // 出生身份由出生方经 state 透传（agent.id 自由字段），内核零知识
-            // 不兜底——未指定时空串下传派发层解析链。
-
             // 三次定案：pipeline_id 由引擎生成（身份权威统一），uuid v4 simple
             // 取前 12 位 hex（与 0.1 uuid4().hex[:12]、插件侧短 id 截断同长，
             // 前端展示 slice(0,12) 原样透出）。
@@ -471,7 +467,7 @@ impl ChatSendHandler {
                 &tenant_id,
                 pipeline_id,
                 thread_id,
-                p.agent_id.as_deref().unwrap_or(""),
+                &p.agent_id,
                 serde_json::Value::Object(base),
             );
         }
@@ -519,7 +515,7 @@ impl ChatSendHandler {
         let msg = p.message.to_string();
         let ec = p.execution_context.cloned();
         let ov = p.overlay.clone();
-        let aid = p.agent_id.clone().unwrap_or_default();
+        let aid = p.agent_id.clone();
         let session = self.session.clone();
         tokio::spawn(async move {
             if let Err(e) = dispatcher
@@ -915,15 +911,15 @@ mod tests {
         assert_eq!(get("lineage.origin_session_id"), "th_1");
     }
 
-    // ── 执行 agent 身份（2026-08-31：身份属管道，不随调用方漂移）──────
-    // 事故回归锚 75a097118e75：task_manage 催促（无 agent_id 注入派发）把
-    // general_agent 子任务重跑成 agentos——handler 层提前兜底缺省是根因。
+    // ── 执行 agent 身份（2026-08-31：身份属管道 state，派发只管簿记）──
+    // 事故回归锚 75a097118e75：task_manage 催促（无 agent_id）把 general_agent
+    // 子任务重跑成 agentos——run 执行身份不再取派发参数，改读管道 state 持久键
+    // agent.id（出生方经 state 透传，context_build 与内核工具面消费）。
 
     #[tokio::test]
     async fn create_branch_persists_agent_identity_from_state_overlay() {
         // 出生身份由出生方经 state 透传（agent.id 自由字段，task_birth 单点
-        // 写入）→ 内核零知识透传持久化；续跑据此解析。派发槽位收空串（未
-        // 显式指定），由派发层解析链消费。
+        // 写入）→ 内核零知识透传持久化；续跑由执行面从 state 读身份。
         let d = RecordingDispatcher::shared();
         let store: Arc<dyn StorageBackend> =
             Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
@@ -951,36 +947,12 @@ mod tests {
                 .expect("agent.id 应随出生 state 落快照"),
             "general_agent"
         );
-        assert_eq!(calls(&d)[0].7, "", "未显式指定 → 空串下传派发层解析");
-    }
-
-    #[tokio::test]
-    async fn create_branch_explicit_agent_dispatched_not_persisted() {
-        // 显式 agent_id 参数（task_birth 阶段三 kickoff 形态）→ 原样透传派发；
-        // 内核不落身份键（快照里没有 agent.id = 出生方未透传）
-        let d = RecordingDispatcher::shared();
-        let store: Arc<dyn StorageBackend> =
-            Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
-        let h = ChatSendHandler::with_store(d.clone(), Some(store.clone()));
-        h.handle(
-            "send_message",
-            json!({
-                "create": true,
-                "message": "执行任务。",
-                "user_id": "u_birth_explicit",
-                "agent_id": "general_agent",
-                "state": {"task.status": "pending"},
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(calls(&d)[0].7, "general_agent", "显式 agent 原样透传");
     }
 
     #[tokio::test]
     async fn create_branch_unspecified_agent_leaves_snapshot_absent() {
-        // 出生方未透传 agent.id（会话类管道）→ 快照无该键，派发空串由派发层
-        // 落线程绑定/agentos 兜底；内核不得擅自写身份
+        // 出生方未透传 agent.id（会话类管道）→ 快照无该键；内核不得擅自写身份。
+        // 身份缺省（主 agent）由消费面自持，不靠出生写面兜底。
         let d = RecordingDispatcher::shared();
         let store: Arc<dyn StorageBackend> =
             Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
@@ -1003,14 +975,13 @@ mod tests {
             "内核不得擅自写身份键：{:?}",
             fields.get("agent.id")
         );
-        assert_eq!(calls(&d)[0].7, "");
     }
 
     #[tokio::test]
-    async fn inject_branch_without_agent_defers_identity_to_dispatch_layer() {
-        // 续跑注入（task_manage 催促形态：无 agent_id）→ 派发槽位收空串，
-        // 由派发层按管道快照 agent.id → 线程绑定解析；handler 不得提前兜底
-        // "agentos" 覆盖管道身份。
+    async fn inject_branch_agent_param_is_bookkeeping_only() {
+        // 注入分支（task_manage 催促形态：无 agent_id → 缺省 agentos）：
+        // 该值只进派发簿记槽位，run 身份由管道 state agent.id 决定——
+        // 催促方不带身份不再改变子任务的执行 agent。
         let (h, d) = handler();
         h.handle(
             "send_message",
@@ -1022,13 +993,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(calls(&d)[0].7, "", "空串 = 未指定，交给派发层解析");
-    }
+        assert_eq!(calls(&d)[0].7, "agentos");
 
-    #[tokio::test]
-    async fn inject_branch_with_explicit_agent_passes_through() {
-        // 显式 agent_id（task_birth 阶段三 kickoff 形态）→ 原样透传
-        let (h, d) = handler();
         h.handle(
             "send_message",
             json!({
@@ -1040,7 +1006,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(calls(&d)[0].7, "general_agent");
+        assert_eq!(calls(&d)[1].7, "general_agent", "显式值原样透传簿记");
     }
 
     #[tokio::test]

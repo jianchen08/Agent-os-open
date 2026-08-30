@@ -839,7 +839,7 @@ impl PluginInvokerImpl {
             "pipeline_id": ctx.state.get("pipeline_id").cloned().unwrap_or(Value::Null),
             "request_id": ctx.state.get("request_id").cloned().unwrap_or(Value::Null),
             "session_id": ctx.state.get("session_id").cloned().unwrap_or(Value::Null),
-            "agent_name": ctx.state.get("agent_id").cloned().unwrap_or(Value::Null),
+            "agent_name": ctx.state.get("agent.id").cloned().unwrap_or(Value::Null),
         });
         let tool_args = serde_json::json!({
             "state": ctx.state,

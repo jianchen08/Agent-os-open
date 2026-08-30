@@ -1,6 +1,6 @@
 """上下文构建 Input 插件 — agent 配置加载与上下文装配的唯一归口。
 
-负责在管道循环的输入阶段构建上下文信息：按 state.agent_id 加载
+负责在管道循环的输入阶段构建上下文信息：按 state 持久键 agent.id 加载
 agent yaml（自持配置，内核只留 tool_ids 窄接口），将提示词骨架、
 agent 名称/层级、会话元数据等写入 state，
 供后续插件（prompt_build、knowledge_inject 等）和 Core 读取。
@@ -52,9 +52,9 @@ class ContextBuildPlugin(IInputPlugin):
         self._agent_name = self._config.get("agent_name", "")
         self._agent_level = self._config.get("agent_level", "L1")
         self._extra_context = self._config.get("extra_context", {})
-        # agent 配置自持：内核只把 agent_id 放进 state，
-        # 加载 config/agents/**/<agent_id>.yaml 是本插件（sidecar）的职责。
-        # 缓存：yaml 路径 → 解析结果（mtime 失效），进程内复用。
+        # agent 配置自持：执行身份是管道 state 持久键 agent.id（出生方经 state
+        # 透传落库），加载 config/agents/**/<agent_id>.yaml 是本插件（sidecar）
+        # 的职责。缓存：yaml 路径 → 解析结果（mtime 失效），进程内复用。
         self._agent_yaml_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def _find_agent_yaml(self, agents_dir, agent_id: str):
@@ -168,10 +168,13 @@ class ContextBuildPlugin(IInputPlugin):
         # 不得残留到下一 agent。
         self._agent_level = self._config.get("agent_level", "L1")
 
-        # 1. 系统提示词：优先 state 注入；否则按 state.agent_id 加载 agent yaml
-        #    （agent 配置自持——内核不再读 yaml，只负责把 agent_id 放进 state）；
-        #    最终回退插件配置默认。
-        agent_cfg = self._load_agent_config(str(ctx.state.get("agent_id", "") or ""))
+        # 1. 系统提示词：优先 state 注入；否则按 state 持久键 agent.id 加载
+        #    agent yaml（执行身份是管道 state 的一部分：出生方经 chat.send_message
+        #    state 透传落库，热启动在内存 state、冷启动在 DB——派发不携带身份；
+        #    缺省主 agent 由本消费面自持）。最终回退插件配置默认。
+        agent_cfg = self._load_agent_config(
+            str(ctx.state.get("agent.id", "") or "") or "agentos"
+        )
         updates["context.system_prompt"] = (
             ctx.state.get("system_prompt", "")
             or str(agent_cfg.get("system_prompt", "") or "")

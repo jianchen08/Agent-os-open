@@ -59,7 +59,7 @@ def test_agent_dynamic_vars_loaded_into_state(config_root, tmp_path):
         "    name: 会话\n",
     )
     cb = context_build_mod.ContextBuildPlugin(config={})
-    updates = asyncio.run(cb.execute(_ctx({"agent_id": "dv_agent"}))).state_updates
+    updates = asyncio.run(cb.execute(_ctx({"agent.id": "dv_agent"}))).state_updates
     assert updates.get("context.dynamic_vars") == [
         "{{timestamp:%Y-%m-%d}}",
         {"type": "session", "name": "会话"},
@@ -78,7 +78,7 @@ def test_agent_dynamic_vars_disabled_not_loaded(config_root, tmp_path):
         "  - '{{timestamp}}'\n",
     )
     cb = context_build_mod.ContextBuildPlugin(config={})
-    updates = asyncio.run(cb.execute(_ctx({"agent_id": "dv_off"}))).state_updates
+    updates = asyncio.run(cb.execute(_ctx({"agent.id": "dv_off"}))).state_updates
     assert "context.dynamic_vars" not in updates
 
 
@@ -95,7 +95,7 @@ def test_chain_renders_configured_dynamic_vars(config_root, tmp_path):
         "    name: 时间\n"
         "    format: '%H:%M:%S'\n",
     )
-    state: dict = {"agent_id": "dv_chain"}
+    state: dict = {"agent.id": "dv_chain"}
     cb = context_build_mod.ContextBuildPlugin(config={})
     for k, v in asyncio.run(cb.execute(_ctx(state))).state_updates.items():
         state[k] = v
@@ -122,8 +122,8 @@ def test_agent_name_no_instance_cache_pollution(config_root, tmp_path):
     _write_agent(tmp_path / "agents", "sub_reviewer", "display_name: 代码审查专家\n")
 
     cb = context_build_mod.ContextBuildPlugin(config={})  # 同一实例
-    first = asyncio.run(cb.execute(_ctx({"agent_id": "l1_main"}))).state_updates
-    second = asyncio.run(cb.execute(_ctx({"agent_id": "sub_reviewer"}))).state_updates
+    first = asyncio.run(cb.execute(_ctx({"agent.id": "l1_main"}))).state_updates
+    second = asyncio.run(cb.execute(_ctx({"agent.id": "sub_reviewer"}))).state_updates
 
     assert first["context.agent_name"] == "灵汐"
     assert second["context.agent_name"] == "代码审查专家", (
@@ -135,5 +135,5 @@ def test_agent_name_config_default_when_yaml_missing(config_root, tmp_path):
     """agent yaml 缺 display_name → 回退插件配置默认（agent_name 键）。"""
     _write_agent(tmp_path / "agents", "no_display", "system_prompt: x\n")
     cb = context_build_mod.ContextBuildPlugin(config={"agent_name": "配置默认名"})
-    updates = asyncio.run(cb.execute(_ctx({"agent_id": "no_display"}))).state_updates
+    updates = asyncio.run(cb.execute(_ctx({"agent.id": "no_display"}))).state_updates
     assert updates["context.agent_name"] == "配置默认名"

@@ -307,52 +307,22 @@ async fn handle_inbound(
     }
 }
 
-/// 执行 agent 解析（绑定真值进管道 state 的消费点）。
+/// 执行 agent 解析（会话绑定链，仅供派发簿记：registry 登记 / run 日志）。
 ///
-/// 优先级：
-/// 1. 显式传入（chat.send_message 任务派发按 target 选 agent，非空）
-/// 2. 管道快照 `agent.id`（出生登记落库的持久身份——任务管道续跑/冷恢复
-///    据此解析，不随调用方或线程绑定漂移）
-/// 3. registry 线程绑定（热路径，会话编辑后即生效）
-/// 4. DB sessions.agent_id（冷路径，内核重启后 registry 丢失）
-/// 5. "agentos"（默认主 agent）。
+/// 优先级：显式传入（chat.send_message 任务派发，非空）→ registry 线程绑定
+/// （热）→ DB sessions.agent_id（冷）→ "agentos"（默认主 agent）。
 ///
-/// WS 主会话路径（InboundRouter::route_user_input）传空串 = 未指定，
-/// 由本函数按绑定解析——硬编码 "agentos" 会使会话 agent 切换
-/// 成为纯展示字段（docs/working/管道配置输入契约与动态管道能力设计_20260824.md §4.3），
-/// 也会让 task_manage 催促把 general_agent 子任务重跑成 agentos（快照层即为此设）。
-pub(crate) async fn resolve_dispatch_agent(
+/// run 的执行身份已不取此值（2026-08-31）：身份是管道 state 持久键
+/// `agent.id`（出生方经 state 透传、context_build 与内核工具面消费）——
+/// 热启动在内存 state、冷启动在 DB，续跑派发无需携带身份。
+async fn resolve_dispatch_agent(
     registry: Option<&agentos_session::ConnectionRegistry>,
     store: Option<&Arc<dyn StorageBackend>>,
-    tenant_id: &str,
     thread_id: &str,
-    pipeline_id: &str,
     explicit_agent: &str,
 ) -> String {
     if !explicit_agent.is_empty() {
         return explicit_agent.to_string();
-    }
-    if let Some(store) = store {
-        if !pipeline_id.is_empty() {
-            match store.load_pipeline_state(pipeline_id, tenant_id).await {
-                Ok(state) => {
-                    if let Some(aid) = state
-                        .get("agent.id")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                    {
-                        return aid.to_string();
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        pipeline = %pipeline_id,
-                        error = %e,
-                        "load_pipeline_state 读取失败，agent 解析跳过管道快照层"
-                    );
-                }
-            }
-        }
     }
     if let Some(reg) = registry {
         if let Some(aid) = reg.get_agent_for_thread(thread_id) {
@@ -402,10 +372,14 @@ impl EngineDispatcher {
         let exec_thread = record.thread.clone();
         let exec_user = record.user_id.clone();
         let cmid = record.client_message_id.clone();
+        let exec_route = record.route_id.clone();
         registry.enqueue(&chain_key, &chain_user, async move {
             let outcome =
                 Self::run_pipeline_round(&exec_state, &tenant, &exec_thread, &exec_user, record)
                     .await;
+            if let Some(session) = exec_state.session.as_ref() {
+                emit_round_finished_event(session, &exec_thread, &exec_route, outcome.failed).await;
+            }
             notify_outcome_waiter(&cmid, outcome);
         });
     }
@@ -423,18 +397,20 @@ impl EngineDispatcher {
         // 生成 run 级 message_id：仅失败路径收尾（stream_error/plugin_error）使用
         // ——成功路径的消息事件由引擎轮次观察点逐轮发射（见 SessionRoundEvents）。
         let message_id = format!("a_{}", uuid::Uuid::new_v4().simple());
-        // 执行 agent：任务派发显式指定；未指定 → 按管道快照 agent.id → 线程绑定
-        // 解析（registry → DB sessions.agent_id → agentos，2026-08-24 阶段1；
-        // 快照层 2026-08-31——续跑身份属管道，不随调用方漂移）。
-        let exec_agent = resolve_dispatch_agent(
-            state.session.as_ref().map(|s| s.registry().as_ref()),
-            state.store.as_ref(),
-            &tenant.tenant_id,
-            thread_id,
-            &rec.route_id,
-            &rec.agent_id,
-        )
-        .await;
+        // 执行 agent（派发簿记：registry 登记 / run 日志）。run 的执行身份
+        // 不取此值——身份是管道 state 持久键 agent.id，由 context_build 与
+        // 内核工具面消费（热启动在内存 state、冷启动在 DB）。
+        let exec_agent = if rec.agent_id.is_empty() {
+            resolve_dispatch_agent(
+                state.session.as_ref().map(|s| s.registry().as_ref()),
+                state.store.as_ref(),
+                thread_id,
+                "",
+            )
+            .await
+        } else {
+            rec.agent_id.clone()
+        };
         let exec_thread = thread_id.to_string();
         let exec_user = user_id.to_string();
 
@@ -511,6 +487,31 @@ impl EngineDispatcher {
         emit_plugin_error_events(session, &exec_thread, &rec.route_id, &message_id, &outcome).await;
         outcome
     }
+}
+
+/// run 级收尾事件（pipeline_round_finished）：一次用户输入触发的整次执行结束。
+///
+/// 引擎逐轮发射的 stream_end 只收尾当轮消息——多轮执行的工具轮间不能用
+/// stream_end 判定「整次执行结束」，否则前端生成态在工具执行期间被提前掐断，
+/// 执行中发送分支失效（乐观气泡与待发队列同屏互斥破坏）。本事件是整次执行
+/// 的唯一成功终止信号；失败路径 stream_error 已先行终止，此处再发幂等兜底。
+async fn emit_round_finished_event(
+    session: &SessionCoordinator,
+    thread_id: &str,
+    route_id: &str,
+    failed: bool,
+) {
+    let _ = session
+        .emit_event(
+            thread_id,
+            "pipeline_round_finished",
+            serde_json::json!({
+                "pipeline_id": route_id,
+                "_threadId": thread_id,
+                "failed": failed,
+            }),
+        )
+        .await;
 }
 
 /// assistant 消息的权威 seq 提取（new_message / stream_end 共用）：
@@ -898,6 +899,15 @@ impl PipelineDispatcher for EngineDispatcher {
                     rec,
                 )
                 .await;
+                if let Some(session) = exec_state.session.as_ref() {
+                    emit_round_finished_event(
+                        session,
+                        &exec_thread,
+                        &exec_chain_key,
+                        outcome.failed,
+                    )
+                    .await;
+                }
                 notify_outcome_waiter(&cmid, outcome);
             }
         });
@@ -1412,6 +1422,7 @@ mod tests {
     use super::message_status_from_blob;
     use super::resolve_dispatch_agent;
     use super::resolve_pipeline_id_for_thread;
+    use super::emit_round_finished_event;
     use super::EngineDispatcher;
     use agentos_core::traits::StorageBackend;
     use agentos_core::traits::{MessageQueryOpts, SessionListFilter};
@@ -1421,17 +1432,14 @@ mod tests {
     use agentos_session::router::PipelineDispatcher;
     use async_trait::async_trait;
     use serde_json::json;
-    use serde_json::Value;
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    /// resolve_pipeline_id_for_thread / resolve_dispatch_agent 行为测试专用 mock：
-    /// 只控制 list_pipeline_ids_by_thread（Err / 成员列表）、get_session（活跃管道）
-    /// 与 load_pipeline_state（管道快照 agent.id），其余走 stub（契约 mock 同款）。
+    /// resolve_pipeline_id_for_thread 行为测试专用 mock：
+    /// 只控制 list_pipeline_ids_by_thread（Err / 成员列表）与 get_session（活跃管道），
+    /// 其余走 stub（契约 mock 同款）。
     struct ResolveMock {
         list_result: Mutex<Result<Vec<String>, StorageError>>,
         session: Mutex<Option<SessionRecord>>,
-        pipeline_state: Mutex<HashMap<String, HashMap<String, Value>>>,
     }
 
     impl ResolveMock {
@@ -1442,17 +1450,7 @@ mod tests {
             Self {
                 list_result: Mutex::new(list_result),
                 session: Mutex::new(session),
-                pipeline_state: Mutex::new(HashMap::new()),
             }
-        }
-
-        /// 注入管道快照字段（agent.id 等持久标量），供解析链快照层消费。
-        fn with_pipeline_state(self, pipeline_id: &str, fields: HashMap<String, Value>) -> Self {
-            self.pipeline_state
-                .lock()
-                .unwrap()
-                .insert(pipeline_id.to_string(), fields);
-            self
         }
     }
 
@@ -1521,19 +1519,6 @@ mod tests {
             _thread_id: &str,
         ) -> Result<Option<SessionRecord>, StorageError> {
             Ok(self.session.lock().unwrap().clone())
-        }
-        async fn load_pipeline_state(
-            &self,
-            pipeline_id: &str,
-            _tenant_id: &str,
-        ) -> Result<HashMap<String, Value>, StorageError> {
-            Ok(self
-                .pipeline_state
-                .lock()
-                .unwrap()
-                .get(pipeline_id)
-                .cloned()
-                .unwrap_or_default())
         }
         async fn list_sessions(
             &self,
@@ -2161,8 +2146,8 @@ mod tests {
     }
 
     // ── resolve_dispatch_agent：执行 agent 解析（2026-08-24 阶段1）──
-    // 优先级：显式传入（任务派发）→ 管道快照 agent.id（出生身份，2026-08-31）
-    // → registry 线程绑定（热）→ DB sessions.agent_id（冷）→ agentos
+    // 优先级：显式传入（任务派发）→ registry 线程绑定（热）→ DB sessions.agent_id（冷）→ agentos
+    // （派发簿记专用；run 执行身份 = 管道 state agent.id，2026-08-31）
 
     fn session_with_agent(agent_id: Option<&str>) -> SessionRecord {
         let mut s = session_record(None);
@@ -2175,25 +2160,8 @@ mod tests {
         mock: Option<ResolveMock>,
         explicit: &str,
     ) -> String {
-        resolve_agent_for(registry, mock, "PIPE1", explicit).await
-    }
-
-    async fn resolve_agent_for(
-        registry: Option<&agentos_session::ConnectionRegistry>,
-        mock: Option<ResolveMock>,
-        pipeline_id: &str,
-        explicit: &str,
-    ) -> String {
         let store = mock.map(|m| Arc::new(m) as Arc<dyn StorageBackend>);
-        resolve_dispatch_agent(
-            registry,
-            store.as_ref(),
-            "default",
-            "T1",
-            pipeline_id,
-            explicit,
-        )
-        .await
+        resolve_dispatch_agent(registry, store.as_ref(), "T1", explicit).await
     }
 
     #[tokio::test]
@@ -2205,53 +2173,6 @@ mod tests {
         assert_eq!(
             resolve_agent(Some(&registry), Some(mock), "code_writer_agent").await,
             "code_writer_agent"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_agent_pipeline_snapshot_wins_over_thread_binding() {
-        // 任务管道续跑（task_manage 催促/重试，无显式 agent）：父会话线程绑定
-        // 是 agentos，管道快照 agent.id=general_agent 必须赢——身份属管道，
-        // 不随调用方线程漂移（75a097118e75 事故的回归锚）。
-        let registry = agentos_session::ConnectionRegistry::new();
-        registry.register_thread_agent("T1", "agentos");
-        let snapshot = HashMap::from([("agent.id".to_string(), json!("general_agent"))]);
-        let mock = ResolveMock::new(Ok(vec![]), Some(session_with_agent(Some("agentos"))))
-            .with_pipeline_state("PIPE1", snapshot);
-        assert_eq!(
-            resolve_agent_for(Some(&registry), Some(mock), "PIPE1", "").await,
-            "general_agent"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_agent_explicit_wins_over_pipeline_snapshot() {
-        // 出生即派发（task_birth 阶段三显式带 agent_id）→ 显式优先于快照
-        let registry = agentos_session::ConnectionRegistry::new();
-        let snapshot = HashMap::from([("agent.id".to_string(), json!("general_agent"))]);
-        let mock = ResolveMock::new(Ok(vec![]), None).with_pipeline_state("PIPE1", snapshot);
-        assert_eq!(
-            resolve_agent_for(Some(&registry), Some(mock), "PIPE1", "code_writer_agent").await,
-            "code_writer_agent"
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_agent_snapshot_missing_or_empty_falls_to_binding() {
-        // 快照无 agent.id（存量管道/会话管道未写）或空串 → 落线程绑定链
-        let registry = agentos_session::ConnectionRegistry::new();
-        registry.register_thread_agent("T1", "general_agent");
-        let mock = ResolveMock::new(Ok(vec![]), Some(session_with_agent(Some("general_agent"))));
-        assert_eq!(
-            resolve_agent_for(Some(&registry), Some(mock), "PIPE1", "").await,
-            "general_agent"
-        );
-        let empty = HashMap::from([("agent.id".to_string(), json!(""))]);
-        let mock2 = ResolveMock::new(Ok(vec![]), Some(session_with_agent(Some("general_agent"))))
-            .with_pipeline_state("PIPE1", empty);
-        assert_eq!(
-            resolve_agent_for(Some(&registry), Some(mock2), "PIPE1", "").await,
-            "general_agent"
         );
     }
 
@@ -2333,5 +2254,75 @@ mod tests {
                 "不同 seq 输入产生不同输出（非常量映射）"
             );
         }
+    }
+
+    /// run 级收尾事件帧：事件名/pipeline_id 路由键/failed 标志逐字段锁定
+    /// （前端生成态终止信号——字段缺失或改名即前端终止断链）。
+    #[tokio::test]
+    async fn round_finished_event_frame_shape() {
+        struct CaptureSink {
+            frames: std::sync::Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl agentos_session::EventSink for CaptureSink {
+            async fn send_text(&self, text: &str) -> bool {
+                self.frames.lock().unwrap().push(text.to_string());
+                true
+            }
+            fn id(&self) -> u64 {
+                7
+            }
+        }
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let coord = agentos_session::SessionCoordinator::new();
+        coord.register(
+            "u1",
+            Arc::new(CaptureSink {
+                frames: frames.clone(),
+            }),
+        );
+        coord.register_thread("thread-rf", "u1");
+
+        // 事件信封带 _threadId 时按 thread 单播（生产路径：emit_event thread 坐标）
+        emit_round_finished_event(&coord, "thread-rf", "pipe-rf-1", false).await;
+        let captured = frames.lock().unwrap();
+        assert_eq!(captured.len(), 1, "应恰好一帧");
+        let parsed: serde_json::Value = serde_json::from_str(&captured[0]).unwrap();
+        assert_eq!(parsed["type"], "pipeline_round_finished");
+        assert_eq!(parsed["data"]["pipeline_id"], "pipe-rf-1");
+        assert_eq!(parsed["data"]["failed"], false);
+    }
+
+    /// failed=true 透传：失败路径（stream_error 先行终止后）的 run 收尾帧
+    /// 必须携带 failed=true，前端据此把注册表状态标 failed 而非 completed。
+    #[tokio::test]
+    async fn round_finished_event_failed_flag_passthrough() {
+        struct CaptureSink {
+            frames: std::sync::Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl agentos_session::EventSink for CaptureSink {
+            async fn send_text(&self, text: &str) -> bool {
+                self.frames.lock().unwrap().push(text.to_string());
+                true
+            }
+            fn id(&self) -> u64 {
+                8
+            }
+        }
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let coord = agentos_session::SessionCoordinator::new();
+        coord.register(
+            "u1",
+            Arc::new(CaptureSink {
+                frames: frames.clone(),
+            }),
+        );
+        coord.register_thread("thread-rf-fail", "u1");
+
+        emit_round_finished_event(&coord, "thread-rf-fail", "pipe-rf-2", true).await;
+        let captured = frames.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&captured[0]).unwrap();
+        assert_eq!(parsed["data"]["failed"], true);
     }
 }

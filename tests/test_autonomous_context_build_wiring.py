@@ -69,7 +69,7 @@ import plugin as prompt_build_mod  # noqa: E402
 
 def _chain_system_message(agent_cfg_root: Path, agent_id: str, run_context_build: bool):
     """串联执行插件链，返回 prompt_build 产出的 system_message。"""
-    state: dict = {"agent_id": agent_id, "project_root": str(_REPO_ROOT)}
+    state: dict = {"agent.id": agent_id, "project_root": str(_REPO_ROOT)}
     if run_context_build:
         cb = context_build_mod.ContextBuildPlugin(config={})
         for k, v in asyncio.run(cb.execute(_ctx(state))).state_updates.items():

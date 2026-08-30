@@ -1554,7 +1554,7 @@ fn inject_tool_schemas_resolves_tool_ids_from_agent_yaml() {
 
     let mut app_state = app_state_with_tools(&["bash_execute", "file_read", "spill_retrieve"]);
     app_state.config_center = Some(cc);
-    let mut state = json!({"agent_id": "main_agent"});
+    let mut state = json!({"agent.id": "main_agent"});
     inject_tool_schemas(&mut state, &app_state);
 
     let names: Vec<&str> = state["tool_schemas"]
@@ -1588,7 +1588,7 @@ fn inject_tool_schemas_yaml_without_tool_ids_keys_is_empty_surface() {
 
     let mut app_state = app_state_with_tools(&["bash_execute", "spill_retrieve"]);
     app_state.config_center = Some(cc);
-    let mut state = json!({"agent_id": "no_tools"});
+    let mut state = json!({"agent.id": "no_tools"});
     inject_tool_schemas(&mut state, &app_state);
 
     let names: Vec<&str> = state["tool_schemas"]
@@ -1789,7 +1789,6 @@ async fn session_execution_context_assembled_from_thread_field_declarations() {
         &state,
         &store,
         "msg",
-        "agentos",
         "pipe_ec1",
         "thread-ec1",
         "m1",
@@ -1849,7 +1848,6 @@ async fn session_execution_context_no_kernel_mode_default() {
         &state,
         &store,
         "msg",
-        "agentos",
         "pipe_ec2",
         "thread-ec2",
         "m1",
@@ -1904,7 +1902,6 @@ async fn session_execution_context_disabled_plugin_declarations_ignored() {
         &state,
         &store,
         "msg",
-        "agentos",
         "pipe_ec3",
         "thread-ec3",
         "m1",
@@ -1938,7 +1935,6 @@ async fn test_stage_build_initial_state_merges_overlay_after_execution_context()
         &state,
         &store,
         "msg",
-        "agentos",
         "pipe_new",
         "thread_new",
         "m1",

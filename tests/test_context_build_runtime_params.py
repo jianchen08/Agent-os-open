@@ -54,7 +54,7 @@ def test_runtime_params_loaded_from_agent_yaml(config_root, tmp_path):
         "timeout_seconds: 2400\n",
     )
     cb = context_build_mod.ContextBuildPlugin(config={})
-    updates = asyncio.run(cb.execute(_ctx({"agent_id": "rt_agent"}))).state_updates
+    updates = asyncio.run(cb.execute(_ctx({"agent.id": "rt_agent"}))).state_updates
     assert updates.get("model_tier") == "small"
     assert updates.get("max_iterations") == 500
     assert updates.get("max_reminders") == 3
@@ -69,7 +69,7 @@ def test_runtime_params_negative_one_passthrough(config_root, tmp_path):
         "max_iterations: -1\ntimeout_seconds: -1\n",
     )
     cb = context_build_mod.ContextBuildPlugin(config={})
-    updates = asyncio.run(cb.execute(_ctx({"agent_id": "rt_unlimited"}))).state_updates
+    updates = asyncio.run(cb.execute(_ctx({"agent.id": "rt_unlimited"}))).state_updates
     assert updates.get("max_iterations") == -1
     assert updates.get("timeout_seconds") == -1
 
@@ -83,7 +83,7 @@ def test_state_explicit_value_wins_over_yaml(config_root, tmp_path):
     )
     cb = context_build_mod.ContextBuildPlugin(config={})
     updates = asyncio.run(
-        cb.execute(_ctx({"agent_id": "rt_override", "model_tier": "small", "max_iterations": 50}))
+        cb.execute(_ctx({"agent.id": "rt_override", "model_tier": "small", "max_iterations": 50}))
     ).state_updates
     assert "model_tier" not in updates, "state 显式 model_tier 存在时 yaml 值不得覆盖"
     assert "max_iterations" not in updates, "state 显式 max_iterations 存在时 yaml 值不得覆盖"
@@ -104,7 +104,7 @@ def test_state_empty_value_treated_as_unset(config_root, tmp_path):
     cb = context_build_mod.ContextBuildPlugin(config={})
     updates = asyncio.run(
         cb.execute(
-            _ctx({"agent_id": "rt_empty", "model_tier": "", "max_iterations": None})
+            _ctx({"agent.id": "rt_empty", "model_tier": "", "max_iterations": None})
         )
     ).state_updates
     assert updates.get("model_tier") == "large", "state 空串 model_tier 不得挡住 yaml 装载"
@@ -115,6 +115,6 @@ def test_runtime_params_absent_not_injected(config_root, tmp_path):
     """零兜底：yaml 未声明的键不注入（下游回退各自默认值）。"""
     _write_agent(tmp_path / "agents", "rt_bare", "display_name: Bare\n")
     cb = context_build_mod.ContextBuildPlugin(config={})
-    updates = asyncio.run(cb.execute(_ctx({"agent_id": "rt_bare"}))).state_updates
+    updates = asyncio.run(cb.execute(_ctx({"agent.id": "rt_bare"}))).state_updates
     for key in ("model_tier", "max_iterations", "max_reminders", "timeout_seconds"):
         assert key not in updates

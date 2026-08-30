@@ -446,7 +446,8 @@ pub(crate) async fn request_tenant_ctx(
 // + `step_library`，按 YAML 定义的 step 顺序执行（三级命中规则）。
 //
 // 流程：
-// 1. 构造初始 state（含 `message` / 默认 `agent_id` / `core_type` 等）
+// 1. 构造初始 state（含 `message` / `core_type` 等；执行身份走 state 持久键
+//    `agent.id`，非 per-run 注入）
 // 2. 注入工具 schema（按 state.tool_ids 或 agent yaml 的 tool_ids 过滤；
 //    agent 全量配置由 context_build 插件在管道内自持加载）
 // 3. 构造 PipelineExecutor 并执行 `run`
@@ -784,7 +785,6 @@ async fn process_via_engine_inner(
         state,
         &store,
         message,
-        agent_id,
         effective_pipeline_id,
         thread_id,
         message_id,
@@ -960,7 +960,6 @@ async fn stage_build_initial_state(
     state: &AppState,
     store: &Arc<dyn StorageBackend>,
     message: &str,
-    agent_id: &str,
     effective_pipeline_id: &str,
     thread_id: &str,
     message_id: &str,
@@ -973,7 +972,11 @@ async fn stage_build_initial_state(
     let mut initial_state = serde_json::json!({
         "message": message,
         "input": message,
-        "agent_id": agent_id,
+        // 执行身份不是 per-run 注入键：agent 身份是管道 state 持久键 `agent.id`
+        // （出生方经 chat.send_message state 透传落库），随本函数之后的热恢复
+        // （registry）/冷恢复（pipeline_state 表）进入 state，供 context_build
+        // 与内核工具面（resolve_agent_tool_ids）消费——缺省主 agent 由消费面
+        // 自持，派发不再携带/注入身份。
         "core_type": "llm_call",
         "core_plugin": DEFAULT_CORE_PLUGIN,
         "ended": false,
@@ -1358,11 +1361,12 @@ async fn stage_recover_history(
 
 /// 阶段 2b：注入工具 schema。
 ///
-/// agent 配置（system_prompt/persona 等 yaml 字段）已从内核解耦：内核只负责
-/// 把 agent_id 放进 initial_state（stage_build_initial_state），yaml 加载归
-/// sidecar 的 context_build 插件（按 state.agent_id 读
-/// AGENTOS_CONFIG_ROOT/agents/**）。工具 schema 注入留在内核——ToolRegistry
-/// 在内核，这是工具面契约（按 agent tool_ids 过滤下发）而非 agent 配置。
+/// agent 配置（system_prompt/persona 等 yaml 字段）已从内核解耦：内核不注入
+/// agent_id——执行身份是管道 state 持久键 `agent.id`（出生方经 chat.send_message
+/// state 透传落库，热/冷恢复进入 state），yaml 加载归 sidecar 的 context_build
+/// 插件（按 state agent.id 读 AGENTOS_CONFIG_ROOT/agents/**）。工具 schema 注入
+/// 留在内核——ToolRegistry 在内核，这是工具面契约（按 agent tool_ids 过滤下发）
+/// 而非 agent 配置。
 fn stage_inject_agent_and_tools(state: &AppState, initial_state: &mut serde_json::Value) {
     // 2b. 注入工具 schema 到 state（0.2 sidecar 架构适配）。
     // 0.1 单进程时 tool_schema 插件经 ctx.get_service("tool_registry") 直接访问内核
@@ -1621,7 +1625,7 @@ fn extract_response_content(final_state: &serde_json::Value) -> String {
 /// 存在 = 已安装"即可作为注入判据，无需读 pipeline 配置做条件联动。
 const FRAMEWORK_ALWAYS_INCLUDE_TOOLS: &[&str] = &["spill_retrieve"];
 
-/// state 无 tool_ids 时按 `state.agent_id` 从 ConfigCenter 解析 agent yaml 的
+/// state 无 tool_ids 时按 state `agent.id`（缺省 agentos）从 ConfigCenter 解析 agent yaml 的
 /// tool_ids（K10：内核侧工具面过滤的配置解析点，窄接口——只读 tool_ids，不
 /// 注入 agent 全量配置；agent 配置唯一事实源在 sidecar context_build）。
 ///
@@ -1635,10 +1639,14 @@ fn resolve_agent_tool_ids(
     app_state: &AppState,
 ) -> Option<std::collections::HashSet<String>> {
     let cc = app_state.config_center.as_ref()?;
+    // 执行身份 = 管道 state 持久键 agent.id（出生方经 state 透传；热恢复在内存
+    // state、冷恢复在 DB——热冷同源）。缺省主 agent 由本消费面自持。
     let agent_id = state
-        .get("agent_id")
+        .get("agent.id")
         .and_then(|v| v.as_str())
-        .map(str::to_string)?;
+        .filter(|s| !s.is_empty())
+        .unwrap_or("agentos")
+        .to_string();
     match agentos_config::resolve_agent_tool_ids(cc, &agent_id) {
         Ok(Some(ids)) => Some(ids.into_iter().collect()),
         Ok(None) => None,
@@ -1705,7 +1713,7 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
     };
     let all_tools = registry.list_tools();
 
-    // 按 agent 的 tool_ids 过滤；state 未带时按 agent_id 从 agent yaml 解析（K10）
+    // 按 agent 的 tool_ids 过滤；state 未带时按 state agent.id 从 agent yaml 解析（K10）
     let wanted: Option<std::collections::HashSet<String>> =
         match state.get("tool_ids").and_then(|v| v.as_array()) {
             Some(arr) => Some(
@@ -1718,7 +1726,7 @@ fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
     if wanted.is_none() {
         tracing::warn!(
             target: "tool-surface",
-            agent_id = state.get("agent_id").and_then(|v| v.as_str()).unwrap_or(""),
+            agent_id = state.get("agent.id").and_then(|v| v.as_str()).unwrap_or(""),
             "state 无 tool_ids 且按 agent yaml 解析不出（配置断链，K10）：工具面置空（仅保留框架强制工具），拒绝兜底全量"
         );
     }
@@ -1827,18 +1835,13 @@ async fn chat_handler(
     // 消除 HTTP 与 WS 同会话并发 run 的竞态（ADR-2026-08-15 的 FIFO 语义不变）。
     // 同步响应经 waiter 桥回传：cmid 为 `http_` 前缀（与前端 uuid cmid 空间
     // 区分），消费完成或排队中被 DELETE/清空时发送。
-    // 执行 agent：显式指定优先；未指定 → 管道快照 agent.id → 线程绑定 → agentos
-    // （与 WS/chat.send_message 同一解析链——硬编码缺省会让会话切换与任务
-    // 管道续跑身份失效）。
-    let exec_agent = crate::ws_session::resolve_dispatch_agent(
-        state.session.as_ref().map(|s| s.registry().as_ref()),
-        state.store.as_ref(),
-        tenant_ctx.tenant_id.as_str(),
-        &req.session_id,
-        &pipeline_id,
-        &req.agent_id,
-    )
-    .await;
+    // 执行 agent（派发簿记：registry 登记 / run 日志；run 执行身份 = 管道
+    // state agent.id，不取此值）。
+    let exec_agent = if req.agent_id.is_empty() {
+        "agentos".to_string()
+    } else {
+        req.agent_id.clone()
+    };
     let dispatcher = crate::ws_session::EngineDispatcher::new(state.clone());
     let cmid = format!("http_{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
     let (tx, rx) = tokio::sync::oneshot::channel::<EngineOutcome>();

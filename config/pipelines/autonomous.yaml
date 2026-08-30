@@ -70,7 +70,6 @@ loop_bodies:
           - pipeline_level_guard       # 层级权限守卫（仅 tool_execute 轮次：任务类工具按 tool_ids 拦截，写 state["security.level_decision"]，tool_core 执行前检查）
           - pipeline_security_check    # 安全守卫（仅 tool_execute 轮次：路径遍历/敏感目录/危险工具审批，写 state["security.decision"]；读 isolation_guard 写入的 execution_contexts 判定隔离放行）
         context:                  # 自由 key-value，merge 进 state 供插件读取
-          agent_id: "{{state.agent_id}}"
           model_tier: "{{state.model_tier}}"
 
       # ── LLM 或工具执行（由 core_type 决定）──
@@ -89,7 +88,6 @@ loop_bodies:
           # llm_core 轮次天然 no-op（tool_results 已小/已标记，幂等透传）。
           - pipeline_spill_guard
         context:
-          agent_id: "{{state.agent_id}}"
           temperature: 0.7
 
       # ── 输出处理 + 路由仲裁 ──

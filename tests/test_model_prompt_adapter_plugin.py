@@ -114,7 +114,7 @@ def test_real_state_shape_no_model_id():
     """
     real_state = {
         "message": "帮我检查项目",
-        "agent_id": "agentos",
+        "agent.id": "agentos",
         "core_type": "llm_call",
         "core_plugin": "pipeline_llm_core",
         "ended": False,

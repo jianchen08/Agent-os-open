@@ -66,7 +66,7 @@ def test_corrupt_yaml_execute_terminates(config_root, tmp_path):
     )
     cb = context_build_mod.ContextBuildPlugin(config={})
     with pytest.raises(RuntimeError, match="解析失败"):
-        asyncio.run(cb.execute(_ctx({"agent_id": "broken_e2e"})))
+        asyncio.run(cb.execute(_ctx({"agent.id": "broken_e2e"})))
 
 
 def test_missing_yaml_logs_debug_and_defaults(config_root, tmp_path, caplog):
@@ -94,7 +94,7 @@ def test_agents_dir_missing_still_runs_with_defaults(tmp_path, caplog):
         cb = context_build_mod.ContextBuildPlugin(
             config={"system_prompt": "默认骨架提示词"}
         )
-        updates = asyncio.run(cb.execute(_ctx({"agent_id": "any_agent"}))).state_updates
+        updates = asyncio.run(cb.execute(_ctx({"agent.id": "any_agent"}))).state_updates
     finally:
         os.environ.pop("AGENTOS_CONFIG_ROOT", None)
     assert updates["context.system_prompt"] == "默认骨架提示词", (
