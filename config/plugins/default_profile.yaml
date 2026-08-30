@@ -68,5 +68,13 @@ plugins:
     enabled: true
   task_submit_tool:
     enabled: true
+  pipeline_memory_read:
+    enabled: false
+  pipeline_knowledge_inject:
+    enabled: false
+  pipeline_cost_control:
+    enabled: false
+  pipeline_termination_advisor:
+    enabled: false
 defaults:
   enabled: true
