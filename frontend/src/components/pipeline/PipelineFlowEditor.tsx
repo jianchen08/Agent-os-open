@@ -72,7 +72,7 @@ export function PipelineFlowEditor({
               <div className="text-muted-foreground flex flex-col items-center gap-0.5 py-1.5">
                 <ChevronDown className="h-4 w-4" />
                 <span className="text-[10px]">
-                  {i < bodies.length - 1 ? '顺序推进（exit_routes 可覆盖）' : 'run 结束'}
+                  {i < bodies.length - 1 ? '顺序推进（体级 next 可覆盖）' : 'run 结束'}
                 </span>
               </div>
             </div>

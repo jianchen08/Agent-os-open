@@ -4,7 +4,8 @@
  * 对接内核 P7 端点（kernel/crates/api/src/routes.rs §P7）：
  * - GET /api/v1/config/pipelines/{name}：读管道配置（config/pipelines/{name}.yaml → JSON），
  *   返回 { name, data, etag }
- * - PUT /api/v1/config/pipelines/{name}：原子写回管道配置，body { data }，返回 { name, etag }
+ * - PUT /api/v1/config/pipelines/{name}：原子写回管道配置，body { data, if_match }，
+ *   返回 { name, etag }；内核写盘前做 G10 文件 DSL 结构校验（旧形态键/死形态拒绝）
  *
  * 注意：内核 config_service 的 denylist 含 "pipelines"，通用 generic config 接口不暴露管道配置，
  * 必须走本服务的专用端点（见 config_service.rs B1 denylist）。
@@ -22,9 +23,9 @@ import type { RetryOptions } from '@/utils/retry'
 /** GET 管道配置响应体（与后端 PipelineConfigResponse 对齐） */
 export interface PipelineConfigResponse {
   name: string
-  /** 管道配置内容（YAML 解析后的 JSON，0.1 扁平格式：input_routes/output_routes/plugins/core_plugins） */
+  /** 管道配置内容（YAML 解析后的 JSON，G10 文件 DSL：loop_bodies/next/while） */
   data: Record<string, unknown>
-  /** 内容 ETag（B4 乐观锁语义，供前端并发提示用） */
+  /** 内容 ETag（B4 乐观锁语义，PUT 时回传 if_match） */
   etag: string
 }
 
@@ -57,19 +58,21 @@ export async function getPipelineConfig(
  * PUT 保存管道配置。
  *
  * @param name - 管道名
- * @param data - 完整管道配置内容（与 GET 返回的 data 同构）
+ * @param data - 完整管道配置内容（与 GET 返回的 data 同构，G10 文件 DSL）
+ * @param ifMatch - GET 返回的 ETag（If-Match 乐观锁；缺失/不匹配内核 409）
  * @param options - 重试选项
  * @returns { name, etag }（新 ETag）
  */
 export async function savePipelineConfig(
   name: string,
   data: Record<string, unknown>,
+  ifMatch: string,
   options: RetryOptions = {},
 ): Promise<PipelineConfigSaveResult> {
   return requestWithRetry(async () => {
     const response = await apiClient.put<PipelineConfigSaveResult>(
       API_ENDPOINTS.CONFIG.PIPELINE_UPDATE(name),
-      { data },
+      { data, if_match: ifMatch },
     )
     return response.data
   }, options)

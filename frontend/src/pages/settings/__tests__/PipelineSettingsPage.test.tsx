@@ -54,14 +54,14 @@ vi.mock('@/components/ui/sonner', () => ({
   },
 }))
 
-/** 样例管道配置（0.2 多循环体格式，结构对齐 autonomous.yaml） */
+/** 样例管道配置（0.2 多循环体格式，G10 文件 DSL，结构对齐 autonomous.yaml） */
 const sampleV2 = {
   name: 'autonomous',
   loop_bodies: [
     { id: 'init', steps: [{ id: 'init', steps: ['pipeline_workspace_lifecycle'] }] },
     {
       id: 'main',
-      loop_config: { enabled: true, max_iterations: -1 },
+      while: 'True',
       steps: [
         {
           id: 'prepare',
@@ -76,15 +76,13 @@ const sampleV2 = {
         {
           id: 'post',
           steps: ['pipeline_track', 'pipeline_result_format'],
-          routes: [
+          next: [
             {
               when: 'raw_tool_calls != [] and raw_tool_calls != None',
-              then: {
-                next: 'loop',
-                set: { core_type: 'tool_execute', core_plugin: 'pipeline_tool_core' },
-              },
+              then: 'loop',
+              set: { core_type: 'tool_execute', core_plugin: 'pipeline_tool_core' },
             },
-            { when: 'True', then: { next: 'end' } },
+            { when: 'True', then: 'end' },
           ],
         },
       ],
@@ -209,9 +207,9 @@ describe('PipelineSettingsPage', () => {
       expect(screen.getByTestId('loop-body-init')).toBeInTheDocument()
       expect(screen.getByTestId('loop-body-main')).toBeInTheDocument()
       expect(screen.getByTestId('loop-body-exit')).toBeInTheDocument()
-      // main 循环体（∞=无限迭代）/ exit 错误必经
+      // main 有 while = 循环体；init/exit 无 while = 单次执行；exit 错误必经
       expect(screen.getByText('循环体', { exact: true })).toBeInTheDocument()
-      expect(screen.getByText('∞', { exact: true })).toBeInTheDocument()
+      expect(screen.getAllByText('单次执行')).toHaveLength(2)
       expect(screen.getByText('错误必经')).toBeInTheDocument()
       expect(screen.getAllByText(/顺序推进/).length).toBeGreaterThan(0)
     })
@@ -250,7 +248,7 @@ describe('PipelineSettingsPage', () => {
   })
 
   describe('编辑与保存', () => {
-    it('移除插件 chip 后保存透传更新后的 data', async () => {
+    it('移除插件 chip 后保存透传更新后的 data 与 GET ETag（If-Match）', async () => {
       await renderLoaded()
 
       // prepare step 组合的第一个 chip（tool_schema）移除
@@ -266,6 +264,7 @@ describe('PipelineSettingsPage', () => {
           expect.objectContaining({
             loop_bodies: expect.any(Array),
           }),
+          'e1',
         )
       })
       const saved = mockSavePipelineConfig.mock.calls[0][1] as typeof sampleV2

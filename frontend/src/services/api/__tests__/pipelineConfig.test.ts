@@ -3,7 +3,7 @@
  *
  * 覆盖 P7 前端数据层：
  * - getPipelineConfig：GET /api/v1/config/pipelines/{name}（返回 {name, data, etag}）
- * - savePipelineConfig：PUT /api/v1/config/pipelines/{name}（body {data}，返回 {name, etag}）
+ * - savePipelineConfig：PUT /api/v1/config/pipelines/{name}（body {data, if_match}，返回 {name, etag}）
  *
  * 测试策略：Mock 仅传输层（apiClient），被测服务本身及其解析逻辑真实运行。
  */
@@ -40,7 +40,7 @@ describe('getPipelineConfig — GET 管道配置', () => {
   it('调用 /api/v1/config/pipelines/{name} 并返回 {name, data, etag}', async () => {
     const pipelineData = {
       name: 'agentos_agent',
-      input_routes: [{ name: 'tool_execute', target: 'core', plugins: ['tool_schema'], priority: 10 }],
+      loop_bodies: [{ id: 'main', while: 'True', steps: [{ id: 'core', steps: ['tool_schema'] }] }],
     }
     mockGet.mockResolvedValue(axResponse({ name: 'default', data: pipelineData, etag: 'etag-1' }))
 
@@ -66,28 +66,29 @@ describe('savePipelineConfig — PUT 管道配置', () => {
     vi.clearAllMocks()
   })
 
-  it('调用 PUT /api/v1/config/pipelines/{name}，body 为 {data}，返回 {name, etag}', async () => {
+  it('调用 PUT /api/v1/config/pipelines/{name}，body 为 {data, if_match}，返回 {name, etag}', async () => {
     const pipelineData = {
       name: 'agentos_agent',
-      input_routes: [],
+      loop_bodies: [],
     }
     mockPut.mockResolvedValue(axResponse({ name: 'default', etag: 'etag-new' }))
 
-    const result = await savePipelineConfig('default', pipelineData)
+    const result = await savePipelineConfig('default', pipelineData, 'etag-1')
 
     expect(mockPut).toHaveBeenCalledWith('/api/v1/config/pipelines/default', {
       data: pipelineData,
+      if_match: 'etag-1',
     })
     expect(result.name).toBe('default')
     expect(result.etag).toBe('etag-new')
   })
 
-  it('非 2xx 错误原样透传（如 404 管道不存在）', async () => {
-    const notFound = Object.assign(new Error('Request failed with status code 404'), {
-      response: { status: 404, data: { message: 'pipeline config not found' } },
+  it('非 2xx 错误原样透传（如 409 ETag 冲突 / 400 结构校验拒绝）', async () => {
+    const conflict = Object.assign(new Error('Request failed with status code 409'), {
+      response: { status: 409, data: { message: 'ETag mismatch' } },
     })
-    mockPut.mockRejectedValue(notFound)
+    mockPut.mockRejectedValue(conflict)
 
-    await expect(savePipelineConfig('nope', {})).rejects.toBe(notFound)
+    await expect(savePipelineConfig('default', {}, 'stale-etag')).rejects.toBe(conflict)
   })
 })

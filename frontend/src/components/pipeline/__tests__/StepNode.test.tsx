@@ -63,6 +63,7 @@ function renderStep(step: PipelineStepV2, ops: PipelineEditorOps) {
       catalog={catalog}
       knownStepIds={['prepare', 'core', 'post', 'other_step']}
       knownPhaseIds={['init', 'main', 'exit']}
+      bodyStepIds={['prepare', 'core', 'post']}
     />,
   )
 }
@@ -169,6 +170,55 @@ describe('StepNode', () => {
       op: 'set',
       args: [[...STEP_PATH, 'loop_config', 'enabled'], true],
     })
+  })
+
+  // ── G10 出口转移（DSL `next:` 列表）──────────────────────────────────
+
+  it('渲染 step 的 next 转移规则（autonomous.yaml post 同形数据）', () => {
+    renderStep(
+      {
+        id: 'post',
+        steps: ['pipeline_result_format'],
+        next: [
+          {
+            when: "task.status == 'completed' or task.status == 'failed'",
+            then: 'end',
+          },
+          {
+            when: 'conversation_mode == True and raw_tool_calls == []',
+            then: 'loop',
+            set: { suspended: true },
+          },
+        ],
+      },
+      ops,
+    )
+
+    expect(
+      screen.getByLabelText('规则 1 when 条件'),
+    ).toHaveValue("task.status == 'completed' or task.status == 'failed'")
+    expect(screen.getByLabelText('规则 1 then 目标')).toHaveValue('end')
+    expect(screen.getByLabelText('规则 2 then 目标')).toHaveValue('loop')
+  })
+
+  it('next 规则编辑 ops 落到 step.next 路径（then 为字符串）', () => {
+    renderStep(
+      { id: 'post', steps: [], next: [{ when: 'True', then: 'end' }] },
+      ops,
+    )
+
+    fireEvent.change(screen.getByLabelText('规则 1 then 目标'), {
+      target: { value: 'prepare' },
+    })
+    expect(calls.at(-1)).toEqual({
+      op: 'set',
+      args: [[...STEP_PATH, 'next', 0, 'then'], 'prepare'],
+    })
+  })
+
+  it('无 next 规则显示空态（缺省顺序执行语义）', () => {
+    renderStep({ id: 'prepare', steps: [] }, ops)
+    expect(screen.getByText(/无路由规则/)).toBeInTheDocument()
   })
 
   // ── G9 项级 when 门对象条目（{name, when}）回归 ──────────────────────

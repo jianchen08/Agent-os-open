@@ -1,8 +1,8 @@
 /**
  * 循环体卡片（0.2 多循环体管道的一个执行体）。
  *
- * 头部：id + 循环/单次徽标 + 迭代上限 + run_on_error「错误必经」徽标；
- * 可折叠体设置（loop_config / run_on_error / exit_routes）；
+ * 头部：id + 循环/单次徽标（按 G10 `while` 判定）+ run_on_error「错误必经」徽标；
+ * 可折叠体设置（while / run_on_error / next 出口转移）；
  * 主体：step 节点列表（增删/排序）。
  */
 
@@ -24,8 +24,8 @@ import type { LoopBodyV2, Path, PipelineEditorOps } from '@/services/pipeline/mo
  * @param bodyIndex 体下标（展示序号）
  * @param ops 编辑器操作集
  * @param catalog 插件目录（透传 StepNode）
- * @param knownStepIds 管道内全部 step id
- * @param knownPhaseIds 全部循环体 id
+ * @param knownStepIds 管道内全部 step id（透传 StepNode 引用分类）
+ * @param knownPhaseIds 全部循环体 id（体级 next 转移目标）
  * @param knownStepIdSet step id 集合（新 step 去重命名）
  */
 export function LoopBodyCard({
@@ -50,7 +50,12 @@ export function LoopBodyCard({
   const [settingsOpen, setSettingsOpen] = useState(false)
   const steps = Array.isArray(body?.steps) ? body.steps : []
   const stepsPath: Path = [...bodyPath, 'steps']
-  const looping = body?.loop_config?.enabled === true
+  // G10：体级循环由 `while` 表达（缺省 = 单次执行；迭代上限由 stop_check 兜底）
+  const looping = typeof body?.while === 'string' && body.while.trim() !== ''
+  // 本体 step id 集：step 级 next 的本地跳转目标（内核只接受同体内 step 目标）
+  const localStepIds = steps
+    .map((s) => (typeof s?.id === 'string' ? s.id : ''))
+    .filter((id) => id !== '')
 
   const addStep = () => {
     let id = 'new_step'
@@ -76,16 +81,13 @@ export function LoopBodyCard({
           spellCheck={false}
         />
         {looping ? (
-          <Badge variant="info" className="gap-1 text-[10px]">
+          <Badge
+            variant="info"
+            className="gap-1 text-[10px]"
+            title={`循环继续条件 while: ${body.while}`}
+          >
             <RotateCcw className="h-3 w-3" />
             循环体
-            {typeof body.loop_config?.max_iterations === 'number' && (
-              <span className="font-mono">
-                {body.loop_config.max_iterations === -1
-                  ? ' ∞'
-                  : ` ×${body.loop_config.max_iterations}`}
-              </span>
-            )}
           </Badge>
         ) : (
           <Badge variant="secondary" className="text-[10px]">
@@ -108,41 +110,27 @@ export function LoopBodyCard({
         </button>
       </header>
 
-      {/* 体设置：loop_config / run_on_error / exit_routes */}
+      {/* 体设置：while / run_on_error / next */}
       {settingsOpen && (
         <div className="border-border bg-[var(--ds-bg-panel,rgba(148,163,184,0.04))] mb-3 space-y-3 rounded-xl border p-3">
           <div className="text-muted-foreground flex flex-wrap items-center gap-4 text-xs">
-            <label className="flex cursor-pointer items-center gap-1.5">
-              <input
-                type="checkbox"
-                checked={looping}
-                onChange={(e) =>
-                  ops.set([...bodyPath, 'loop_config', 'enabled'], e.target.checked)
-                }
-                className="h-3.5 w-3.5 accent-[var(--btn-primary-bg)]"
-              />
-              启用循环
-            </label>
             <label className="flex items-center gap-1.5">
-              最大迭代
+              while（循环继续条件）
               <Input
-                type="number"
-                value={
-                  typeof body?.loop_config?.max_iterations === 'number'
-                    ? body.loop_config.max_iterations
-                    : ''
-                }
+                value={typeof body?.while === 'string' ? body.while : ''}
                 onChange={(e) => {
-                  const parsed = Number(e.target.value)
-                  ops.set(
-                    [...bodyPath, 'loop_config', 'max_iterations'],
-                    e.target.value === '' || Number.isNaN(parsed)
-                      ? e.target.value
-                      : parsed,
-                  )
+                  const v = e.target.value
+                  if (v.trim() === '') {
+                    // 空条件 = 单次执行，摘掉键（缺省语义）
+                    ops.remove([...bodyPath, 'while'])
+                  } else {
+                    ops.set([...bodyPath, 'while'], v)
+                  }
                 }}
-                className="h-7 w-24 font-mono text-xs"
-                aria-label="循环体最大迭代次数"
+                placeholder='如 "True"（恒真循环）；空 = 单次执行'
+                className="h-7 w-56 font-mono text-xs"
+                aria-label="循环体 while 条件"
+                spellCheck={false}
               />
             </label>
             <label className="flex cursor-pointer items-center gap-1.5" title="ended/出错提前终止时仍执行本收尾体">
@@ -156,12 +144,12 @@ export function LoopBodyCard({
             </label>
           </div>
           <RouteRulesEditor
-            rules={body?.exit_routes}
-            arrayPath={[...bodyPath, 'exit_routes']}
+            rules={body?.next}
+            arrayPath={[...bodyPath, 'next']}
             ops={ops}
-            knownStepIds={knownStepIds}
-            knownPhaseIds={knownPhaseIds}
-            label="exit_routes（循环体结束转移；不配 = 默认顺序进下一个体）"
+            scope="body"
+            knownBodyIds={knownPhaseIds}
+            label="next（循环体结束转移；不配 = 默认顺序进下一个体）"
           />
           <section>
             <h4 className="text-foreground mb-1.5 text-xs font-medium">
@@ -185,6 +173,7 @@ export function LoopBodyCard({
             catalog={catalog}
             knownStepIds={knownStepIds}
             knownPhaseIds={knownPhaseIds}
+            bodyStepIds={localStepIds}
           />
         ))}
         {steps.length === 0 && (

@@ -4,13 +4,14 @@
  * 覆盖 0.2 模型的纯函数辅助：
  * - 格式判断 / id 收集
  * - 引用四类分类（plugin/step/template/unknown）
- * - RouteNext 解析与构建（含非法形态回退）
  * - raw data 路径不可变更新（set/delete/insert/move + 未知字段保真）
+ *
+ * 类型口径 = G10 文件 DSL：转移在 `next:`（then 目标字符串）、体级循环为
+ * `while`；旧内部形态（routes/exit_routes/体级 loop_config）不得出现。
  */
 
 import { describe, it, expect } from 'vitest'
 import {
-  buildRouteNext,
   collectBodyIds,
   collectStepIds,
   deleteAtPath,
@@ -19,7 +20,6 @@ import {
   isPipelineV2Data,
   isTemplateRef,
   moveArrayItem,
-  parseRouteNext,
   resolveRef,
   setAtPath,
 } from '../model'
@@ -31,10 +31,10 @@ const sample = {
     { id: 'init', steps: [{ id: 'init', steps: ['pipeline_a'] }] },
     {
       id: 'main',
-      loop_config: { enabled: true, max_iterations: -1 },
+      while: 'True',
       steps: [
         { id: 'prepare', steps: ['pipeline_b', '{{state.core_plugin}}'] },
-        { id: 'post', steps: ['pipeline_c'], routes: [{ when: 'True', then: { next: 'end' } }] },
+        { id: 'post', steps: ['pipeline_c'], next: [{ when: 'True', then: 'end' }] },
       ],
     },
     { id: 'exit', run_on_error: true, steps: [] },
@@ -78,40 +78,16 @@ describe('model — 引用分类', () => {
   })
 })
 
-describe('model — RouteNext 解析与构建', () => {
-  it('解析各形态；非法回退 end', () => {
-    expect(parseRouteNext('loop')).toEqual({ kind: 'loop' })
-    expect(parseRouteNext({ step: 'post' })).toEqual({ kind: 'step', target: 'post' })
-    expect(parseRouteNext({ phase: 'exit' })).toEqual({ kind: 'phase', target: 'exit' })
-    expect(parseRouteNext('weird')).toEqual({ kind: 'end' })
-    expect(parseRouteNext(null)).toEqual({ kind: 'end' })
-  })
-
-  it('构建各形态；step/phase 缺目标回退 end', () => {
-    expect(buildRouteNext({ kind: 'loop' })).toBe('loop')
-    expect(buildRouteNext({ kind: 'step', target: 'post' })).toEqual({ step: 'post' })
-    expect(buildRouteNext({ kind: 'phase', target: 'main' })).toEqual({ phase: 'main' })
-    expect(buildRouteNext({ kind: 'step' })).toBe('end')
-  })
-
-  it('parse → build 往返保真', () => {
-    for (const next of ['loop', 'end', 'wait', { step: 'x' }, { phase: 'y' }] as const) {
-      const edit = parseRouteNext(next)
-      expect(buildRouteNext(edit)).toEqual(next)
-    }
-  })
-})
-
 describe('model — raw data 路径不可变更新', () => {
   it('setAtPath：写入嵌套路径并创建缺失中间对象，原对象不被修改', () => {
-    const next = setAtPath(sample, ['loop_bodies', 2, 'loop_config', 'enabled'], true)
-    expect(next.loop_bodies[2].loop_config).toEqual({ enabled: true })
-    expect(sample.loop_bodies[2].loop_config).toBeUndefined()
+    const next = setAtPath(sample, ['loop_bodies', 2, 'while'], 'True')
+    expect(next.loop_bodies[2].while).toBe('True')
+    expect(sample.loop_bodies[2].while).toBeUndefined()
   })
 
   it('deleteAtPath：删除对象 key 与数组元素', () => {
-    const noRoute = deleteAtPath(sample, ['loop_bodies', 1, 'steps', 1, 'routes'])
-    expect(noRoute.loop_bodies[1].steps[1].routes).toBeUndefined()
+    const noNext = deleteAtPath(sample, ['loop_bodies', 1, 'steps', 1, 'next'])
+    expect(noNext.loop_bodies[1].steps[1].next).toBeUndefined()
     const spliced = deleteAtPath(sample, ['loop_bodies', 1, 'steps', 1])
     expect(spliced.loop_bodies[1].steps.map((s) => s.id)).toEqual(['prepare'])
   })
@@ -135,5 +111,12 @@ describe('model — raw data 路径不可变更新', () => {
     const next = insertAtPath(sample, ['loop_bodies', 0, 'steps'], 0, { id: 'x', steps: [] })
     expect(next.custom_top_level).toBe('keep-me')
     expect(next.name).toBe('autonomous')
+  })
+
+  it('G10 DSL 字段在更新后保真（while / next / G9 门条目）', () => {
+    const next = setAtPath(sample, ['loop_bodies', 0, 'run_on_error'], true)
+    expect(next.loop_bodies[1].while).toBe('True')
+    expect(next.loop_bodies[1].steps[1].next).toEqual([{ when: 'True', then: 'end' }])
+    expect(next.loop_bodies[1].steps[0].steps[1]).toBe('{{state.core_plugin}}')
   })
 })

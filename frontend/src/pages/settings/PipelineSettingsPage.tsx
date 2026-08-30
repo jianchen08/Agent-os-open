@@ -9,8 +9,8 @@
  * - 源码视图：ConfigObject 通用表单兜底（配置非 0.2 格式时自动切到本视图）
  * - 插件目录：fetchPipelinePluginCatalog()（role/enabled/config_files）；
  *   目录获取失败不阻塞编辑，引用降级为「未命中」chip
- * - 读写：GET/PUT /api/v1/config/pipelines/autonomous（P7 端点原子写，
- *   无 If-Match；PUT 后引擎需重启生效——启动期加载，无热重载）
+ * - 读写：GET/PUT /api/v1/config/pipelines/autonomous（P7 端点原子写 +
+ *   If-Match 乐观锁 + G10 结构校验；保存后引擎 mtime 热加载，1s TTL 门内生效）
  *
  * @param embedded 嵌入设置主页右侧面板时为 true（去掉独立全屏头）
  */
@@ -57,6 +57,7 @@ type ViewMode = 'visual' | 'raw'
  */
 export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null)
+  const [etag, setEtag] = useState('')
   const [catalog, setCatalog] = useState<PipelinePluginCatalogEntry[]>([])
   const [catalogError, setCatalogError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -77,6 +78,7 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
     if (!result) return
     const data = result.data ?? {}
     setConfig(data)
+    setEtag(result.etag ?? '')
     // 非 0.2 格式（无 loop_bodies）时可视化无从渲染，自动落源码视图
     if (!isPipelineV2Data(data)) setViewMode('raw')
   }, [configQuery.data])
@@ -144,12 +146,17 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
     if (!config) return
     setSaveState('saving')
     try {
-      await savePipelineConfig(PIPELINE_NAME, config)
-      // 已保存的编辑副本回填缓存，重进页面不重拉
-      queryClient.setQueryData(queryKeys.pipelineConfig(PIPELINE_NAME), { data: config })
+      const result = await savePipelineConfig(PIPELINE_NAME, config, etag)
+      // 已保存的编辑副本回填缓存（连同新 ETag，续存不用重拉），重进页面不重拉
+      queryClient.setQueryData(queryKeys.pipelineConfig(PIPELINE_NAME), {
+        data: config,
+        etag: result.etag,
+      })
+      setEtag(result.etag)
       setSaveState('saved')
       toast.success('管道配置已保存', {
-        description: '已写入 config/pipelines/autonomous.yaml，重启内核后生效（启动期加载，无热重载）',
+        description:
+          '已写入 config/pipelines/autonomous.yaml，下次执行自动热加载生效（结构非法时内核拒绝保存）',
       })
       setTimeout(() => setSaveState('idle'), 2000)
     } catch (error: unknown) {
@@ -157,7 +164,7 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
       setSaveState('error')
       toast.error('配置保存失败', { description: msg })
     }
-  }, [config])
+  }, [config, etag])
 
   const visualAvailable = isPipelineV2Data(config)
 
@@ -275,8 +282,8 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
       )}
 
       <div className="text-muted-foreground mt-4 border-t pt-3 text-[10px]">
-        保存写入 config/pipelines/{PIPELINE_NAME}.yaml（原子写，重启内核后生效）；
-        写回后 YAML 键序按字母重排，不影响引擎解析。
+        保存写入 config/pipelines/{PIPELINE_NAME}.yaml（原子写 + If-Match 乐观锁 + G10
+        结构校验，下次执行自动热加载生效）；写回后 YAML 键序按字母重排，不影响引擎解析。
       </div>
     </>
   )

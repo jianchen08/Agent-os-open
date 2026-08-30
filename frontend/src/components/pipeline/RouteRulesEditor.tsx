@@ -1,65 +1,84 @@
 /**
- * 路由规则列表编辑器（step 级 routes 与循环体 exit_routes 复用）。
+ * 路由规则列表编辑器（step 级 next 与循环体级 next 复用）。
  *
- * 每条规则 = when 条件表达式 → then 动作（next 跳转目标 + set 状态写入）。
- * next 对齐内核 RouteNext：'loop' | 'end' | 'wait' | {step} | {phase}，
- * step/phase 目标从当前管道已知 id 下拉选择（也可保留未知现值）。
- * 空串 / 'True' 视为恒真（默认兜底路由）。
+ * 每条规则 = G10 文件 DSL 转移分支：`{when?, then: 目标字符串, set?}`。
+ * then 目标选项按 scope 收窄（内核加载期校验口径，非法目标启动报错）：
+ * - step 级：end / loop / 本循环体 step id / 循环体 id（跨体转移）；
+ * - 循环体级：end / 循环体 id（loop 非法——出口转移在体循环结束后求值）。
+ * `wait` 已退役（挂起由 state.suspended 表达），不提供。
  */
 
 import { ChevronDown, ChevronUp, Plus, Trash2 } from '@/assets/icons'
 import { Input } from '@/components/ui/input'
-import {
-  buildRouteNext,
-  parseRouteNext,
-} from '@/services/pipeline/model'
 import { KeyValueEditor } from './KeyValueEditor'
-import type { Path, PipelineEditorOps, RouteRule } from '@/services/pipeline/model'
+import type { Path, PipelineEditorOps, TransitionRule } from '@/services/pipeline/model'
 
-/** next 跳转类型选项（kind → 中文标签） */
-const NEXT_KIND_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: 'loop', label: '继续循环 (loop)' },
-  { value: 'end', label: '结束 (end)' },
-  { value: 'wait', label: '挂起等待 (wait)' },
-  { value: 'step', label: '跳转 step' },
-  { value: 'phase', label: '转移到循环体 (phase)' },
-]
+/** 目标下拉选项 */
+interface TargetOption {
+  value: string
+  label: string
+}
+
+/** 构建目标选项；现值不在合法集（如历史遗留目标）也保留，避免显示丢失 */
+function buildTargetOptions(
+  scope: 'step' | 'body',
+  localStepIds: string[],
+  knownBodyIds: string[],
+  current: string,
+): TargetOption[] {
+  const options: TargetOption[] =
+    scope === 'step'
+      ? [
+          { value: 'end', label: '结束 (end)' },
+          { value: 'loop', label: '继续循环 (loop)' },
+          ...localStepIds.map((id) => ({ value: id, label: `step: ${id}` })),
+          ...knownBodyIds.map((id) => ({ value: id, label: `体: ${id}` })),
+        ]
+      : [
+          { value: 'end', label: '结束 (end)' },
+          ...knownBodyIds.map((id) => ({ value: id, label: `体: ${id}` })),
+        ]
+  if (current && !options.some((o) => o.value === current)) {
+    return [{ value: current, label: current }, ...options]
+  }
+  return options
+}
 
 const selectClass =
   'border-input bg-[var(--bg-input,hsl(var(--background)))] h-7 rounded-lg border px-2 text-xs focus:outline-none'
 
 /**
- * 路由规则编辑器。
+ * 路由规则编辑器（G10 DSL：when 条件 → then 目标字符串 + set 状态写入）。
  *
  * @param rules 当前规则数组（可能 undefined）
- * @param arrayPath rules 数组在 raw data 中的路径
+ * @param arrayPath rules 数组在 raw data 中的路径（step 的 `next` / 循环体的 `next`）
  * @param ops 编辑器操作集
- * @param knownStepIds 已知 step id（next=step 的目标选项）
- * @param knownPhaseIds 已知循环体 id（next=phase 的目标选项）
- * @param label 区块标题（如「路由分支」「循环体转移 exit_routes」）
+ * @param scope 规则挂载层级（决定 then 目标合法集）
+ * @param localStepIds step 级专用：本循环体 step id 集（then 本地跳转目标）
+ * @param knownBodyIds 全部循环体 id（step 级跨体目标 / 循环体级转移目标）
+ * @param label 区块标题
  */
 export function RouteRulesEditor({
   rules,
   arrayPath,
   ops,
-  knownStepIds,
-  knownPhaseIds,
+  scope,
+  localStepIds = [],
+  knownBodyIds,
   label,
 }: {
-  rules: RouteRule[] | undefined
+  rules: TransitionRule[] | undefined
   arrayPath: Path
   ops: PipelineEditorOps
-  knownStepIds: string[]
-  knownPhaseIds: string[]
+  scope: 'step' | 'body'
+  localStepIds?: string[]
+  knownBodyIds: string[]
   label: string
 }) {
   const list = rules ?? []
 
   const addRule = () => {
-    ops.insert(arrayPath, list.length, {
-      when: 'True',
-      then: { next: 'end' },
-    })
+    ops.insert(arrayPath, list.length, { when: 'True', then: 'end' })
   }
 
   return (
@@ -84,12 +103,8 @@ export function RouteRulesEditor({
 
       {list.map((rule, i) => {
         const rulePath: Path = [...arrayPath, i]
-        const next = parseRouteNext(rule?.then?.next)
-        const targetIds = next.kind === 'phase' ? knownPhaseIds : knownStepIds
-        const target = next.target ?? ''
-        // 现值不在已知列表（如引用了公共库 step）也保留为选项，避免显示丢失
-        const targetOptions =
-          target && !targetIds.includes(target) ? [target, ...targetIds] : targetIds
+        const target = typeof rule?.then === 'string' ? rule.then : ''
+        const targetOptions = buildTargetOptions(scope, localStepIds, knownBodyIds, target)
 
         return (
           <div
@@ -103,51 +118,34 @@ export function RouteRulesEditor({
               </span>
               <Input
                 value={typeof rule?.when === 'string' ? rule.when : ''}
-                onChange={(e) => ops.set([...rulePath, 'when'], e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v === '') {
+                    // 空条件 = 恒真，摘掉键（缺省语义），不写空串
+                    ops.remove([...rulePath, 'when'])
+                  } else {
+                    ops.set([...rulePath, 'when'], v)
+                  }
+                }}
                 className="h-7 flex-1 font-mono text-xs"
                 aria-label={`规则 ${i + 1} when 条件`}
-                placeholder='条件表达式，如 "raw_tool_calls != []"，True=恒真'
+                placeholder='条件表达式，如 "raw_tool_calls != []"，空 = 恒真'
                 spellCheck={false}
               />
               <span className="text-muted-foreground shrink-0 text-[10px]">→</span>
               <select
-                value={next.kind}
-                onChange={(e) => {
-                  const kind = e.target.value as typeof next.kind
-                  ops.set(
-                    [...rulePath, 'then', 'next'],
-                    buildRouteNext({ kind, target: next.target }),
-                  )
-                }}
+                value={target}
+                onChange={(e) => ops.set([...rulePath, 'then'], e.target.value)}
                 className={selectClass}
-                aria-label={`规则 ${i + 1} next 类型`}
+                aria-label={`规则 ${i + 1} then 目标`}
               >
-                {NEXT_KIND_OPTIONS.map((opt) => (
+                {target === '' && <option value="">选择目标…</option>}
+                {targetOptions.map((opt) => (
                   <option key={opt.value} value={opt.value}>
                     {opt.label}
                   </option>
                 ))}
               </select>
-              {(next.kind === 'step' || next.kind === 'phase') && (
-                <select
-                  value={target}
-                  onChange={(e) =>
-                    ops.set(
-                      [...rulePath, 'then', 'next'],
-                      buildRouteNext({ kind: next.kind, target: e.target.value }),
-                    )
-                  }
-                  className={selectClass}
-                  aria-label={`规则 ${i + 1} next 目标`}
-                >
-                  <option value="">选择目标…</option>
-                  {targetOptions.map((id) => (
-                    <option key={id} value={id}>
-                      {id}
-                    </option>
-                  ))}
-                </select>
-              )}
               <div className="ml-auto flex shrink-0 items-center">
                 <button
                   type="button"
@@ -183,15 +181,15 @@ export function RouteRulesEditor({
 
             <div className="pl-6">
               <span className="text-muted-foreground mb-1 block text-[10px]">
-                then.set（写入 state）
+                set（写入 state）
               </span>
               <KeyValueEditor
-                value={rule?.then?.set}
+                value={rule?.set}
                 onChange={(nextSet) => {
                   if (nextSet === undefined) {
-                    ops.remove([...rulePath, 'then', 'set'])
+                    ops.remove([...rulePath, 'set'])
                   } else {
-                    ops.set([...rulePath, 'then', 'set'], nextSet)
+                    ops.set([...rulePath, 'set'], nextSet)
                   }
                 }}
                 emptyHint="不写入 state 字段"

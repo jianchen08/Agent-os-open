@@ -226,8 +226,9 @@ function ChipActions({
  * @param totalSteps 父 steps 数组长度
  * @param ops 编辑器操作集
  * @param catalog 插件目录（引用解析 + 添加弹窗）
- * @param knownStepIds 管道内全部 step id（引用分类 + 路由目标）
- * @param knownPhaseIds 全部循环体 id（路由 phase 目标）
+ * @param knownStepIds 管道内全部 step id（引用分类）
+ * @param knownPhaseIds 全部循环体 id（next 跨体转移目标）
+ * @param bodyStepIds 本循环体 step id 集（next 本地跳转目标；内核只接受同体 step 目标）
  */
 export function StepNode({
   step,
@@ -238,6 +239,7 @@ export function StepNode({
   catalog,
   knownStepIds,
   knownPhaseIds,
+  bodyStepIds,
 }: {
   step: PipelineStepV2
   stepPath: Path
@@ -247,6 +249,7 @@ export function StepNode({
   catalog: PipelinePluginCatalogEntry[]
   knownStepIds: string[]
   knownPhaseIds: string[]
+  bodyStepIds: string[]
 }) {
   const [detailOpen, setDetailOpen] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -465,12 +468,13 @@ export function StepNode({
           </section>
 
           <RouteRulesEditor
-            rules={step?.routes}
-            arrayPath={[...stepPath, 'routes']}
+            rules={step?.next}
+            arrayPath={[...stepPath, 'next']}
             ops={ops}
-            knownStepIds={knownStepIds}
-            knownPhaseIds={knownPhaseIds}
-            label="routes（step 级路由分支）"
+            scope="step"
+            localStepIds={bodyStepIds}
+            knownBodyIds={knownPhaseIds}
+            label="next（step 级出口转移；缺省顺序执行下一步）"
           />
         </div>
       )}

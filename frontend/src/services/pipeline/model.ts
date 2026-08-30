@@ -6,9 +6,11 @@
  * - GET /api/v1/config/pipelines/{name} 返回 YAML→JSON 的原始对象，编辑器以
  *   「raw data 为唯一真相 + path 不可变更新」方式工作——模型之外的未知字段
  *   在保存（PUT 整个 data）时原样保留，不会因为经过类型化模型而丢失。
- * - 类型对齐内核 kernel/crates/core/src/types.rs 的 PipelineConfig 族
- *   （serde：RouteNext 外部标签，unit 变体为 "loop"/"end"/"wait" 字符串，
- *   newtype 变体为 {step:"id"} / {phase:"id"}）。
+ * - 类型对齐 G10 文件 DSL（kernel/crates/api/src/pipeline_loader.rs 的 `*File`
+ *   结构，deny_unknown_fields）：转移写在 `next:` 列表（`then` 为目标字符串，
+ *   `set` 平级）、循环体循环条件为 `while`。旧内部形态（`routes`/`exit_routes`/
+ *   体级 `loop_config`/`then:{next,set}` 对象/`then: wait`）内核加载即报错，
+ *   编辑器不得写出。
  *
  * @module services/pipeline/model
  */
@@ -16,23 +18,28 @@
 /** 编辑器定位 raw data 内节点的路径段（对象 key 或数组下标） */
 export type Path = Array<string | number>
 
-/** 循环配置（内核 LoopConfig；字段可缺省，缺省语义见内核 default） */
+/** 循环配置（step 级合法字段；循环体级循环用 `while`，无 loop_config） */
 export interface LoopConfigV2 {
   enabled?: boolean
   /** -1=无限循环；>0=安全阀 */
   max_iterations?: number
 }
 
-/** 路由跳转目标（内核 RouteNext 的 JSON 形态） */
-export type RouteNextValue = 'loop' | 'end' | 'wait' | { step: string } | { phase: string }
-
-/** 路由分支规则（step routes 与循环体 exit_routes 共用） */
-export interface RouteRule {
-  when: string
-  then: {
-    next: RouteNextValue
-    set?: Record<string, unknown>
-  }
+/**
+ * G10 转移分支（文件 DSL `next:` 列表项；内核 TransitionFile）。
+ *
+ * `then` 目标合法集（内核加载期校验，非法目标启动报错）：
+ * - step 级：`'end'` / `'loop'` / 本循环体内 step id / 循环体 id（跨体转移）；
+ * - 循环体级：`'end'` / 循环体 id（`loop` 非法——出口转移在体循环结束后求值）。
+ * `wait` 已退役（挂起由 state.suspended 表达）。
+ */
+export interface TransitionRule {
+  /** 条件表达式；缺省 / 'True' = 恒真（兜底路由） */
+  when?: string
+  /** 跳转目标字符串（合法集见接口注释） */
+  then: string
+  /** 命中时写入 state 的字段（可省） */
+  set?: Record<string, unknown>
 }
 
 /** 管道 step 节点（组合节点；原子执行单元是 steps 里的引用） */
@@ -40,16 +47,16 @@ export interface PipelineStepV2 {
   id: string
   /**
    * 引用列表：管道 step id / 公共 step 库 id / 插件名 / "{{...}}" 动态模板；
-   * 条目形态两态——字符串直引，或 G9 项级 when 门对象（{name, when}）。
+   * 条目形态两态——字符串直引，或 G9 项级 when 门对象（{name, when, inputs?}）。
    */
   steps?: (string | Record<string, unknown>)[]
   /** step 级钩子（管道步骤服务化提案 §3.6：{on, run}，P1 只读展示） */
   hooks?: PipeHookEntry[]
   /** 自由 key-value（模板字符串），merge 进 state 供插件读取 */
   context?: Record<string, unknown>
-  /** step 级路由分支 */
-  routes?: RouteRule[]
-  /** step 自带循环 */
+  /** G10 出口转移（DSL `next:` 列表；缺省顺序执行下一步） */
+  next?: TransitionRule[]
+  /** step 自带循环（组合节点可自带循环，如批量处理） */
   loop_config?: LoopConfigV2
 }
 
@@ -96,9 +103,10 @@ export interface LoopBodyV2 {
   steps: PipelineStepV2[]
   /** 体级钩子（管道步骤服务化提案 §3.6，P1 只读展示） */
   hooks?: PipeHookEntry[]
-  loop_config?: LoopConfigV2
-  /** 循环体结束转移（默认顺序进下一个体） */
-  exit_routes?: RouteRule[]
+  /** G10 循环继续条件（DSL `while: "expr"`；缺省 = 单次执行） */
+  while?: string
+  /** G10 循环体结束转移（DSL `next:` 列表；缺省顺序进下一个体） */
+  next?: TransitionRule[]
   /** 提前终止（ended/出错）时仍执行（收尾语义） */
   run_on_error?: boolean
 }
@@ -178,33 +186,6 @@ export function resolveRef(
     if (entry.id === ref) return { kind: 'plugin', catalogEntry: entry }
   }
   return { kind: 'unknown' }
-}
-
-// ── 路由 next 的编辑形态（RouteNextValue ↔ {kind, target}） ─────────
-
-/** next 的编辑器形态：kind + step/phase 时的目标 id */
-export interface RouteNextEdit {
-  kind: 'loop' | 'end' | 'wait' | 'step' | 'phase'
-  target?: string
-}
-
-/** RouteNextValue → 编辑形态（未知形态回退 end） */
-export function parseRouteNext(next: unknown): RouteNextEdit {
-  if (next === 'loop' || next === 'end' || next === 'wait') return { kind: next }
-  if (next !== null && typeof next === 'object') {
-    const obj = next as Record<string, unknown>
-    if (typeof obj.step === 'string') return { kind: 'step', target: obj.step }
-    if (typeof obj.phase === 'string') return { kind: 'phase', target: obj.phase }
-  }
-  return { kind: 'end' }
-}
-
-/** 编辑形态 → RouteNextValue（step/phase 缺目标时回退 end，避免写出非法配置） */
-export function buildRouteNext(edit: RouteNextEdit): RouteNextValue {
-  if (edit.kind === 'step' && edit.target) return { step: edit.target }
-  if (edit.kind === 'phase' && edit.target) return { phase: edit.target }
-  if (edit.kind === 'loop' || edit.kind === 'wait') return edit.kind
-  return 'end'
 }
 
 // ── raw data 路径不可变更新（编辑器的 ops 实现） ─────────────────────
