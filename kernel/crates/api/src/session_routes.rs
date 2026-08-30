@@ -25,8 +25,10 @@ use agentos_http::error::ApiError;
 ///
 /// 域2持久化：优先从 sessions 表读（重启后可恢复）。DB 查询失败 → 503
 /// （对齐同文件 [`map_messages_query_failure`] 先例——「存储挂了」不得回退内存
-/// registry 伪装成 200 陈旧列表，前端必须能区分故障与空）；DB 正常但空 → 回退
-/// 内存 registry（兼容 store 未配置或历史场景，显式兼容契约非吞错）。
+/// registry 伪装成 200 陈旧列表，前端必须能区分故障与空）；**store 存在即权威**：
+/// DB 空就是空列表，不回退内存 registry（清空执行数据后 sessions 表清空——回退
+/// 会把内存"曾注册线程"以 null 标题出口，前端渲染成「未命名会话」幽灵）。
+/// 仅 store 未配置（无持久化会话数据源）时回退内存 registry（显式兼容契约非吞错）。
 /// 返回结构对齐前端 Session 类型。
 pub async fn list_sessions_handler(
     State(state): State<AppState>,
@@ -37,8 +39,10 @@ pub async fn list_sessions_handler(
 
     // 优先读 DB（持久化会话列表）。list_sessions 按 task_local tenant 过滤，
     // 需在请求租户 scope 内执行——scope 缺失回退 default 租户，跨租户读错位。
-    let mut db_has_data = false;
+    // store 存在即权威：DB 空 = 无会话（不回退内存 registry 出口幽灵）。
+    let mut db_authoritative = false;
     if let Some(store) = state.store.as_ref() {
+        db_authoritative = true;
         let tenant_ctx =
             crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
         let store_clone = store.clone();
@@ -82,7 +86,6 @@ pub async fn list_sessions_handler(
         .await;
         match sessions_result {
             Ok(sessions) if !sessions.is_empty() => {
-                db_has_data = true;
                 for s in sessions {
                     threads.push(session_to_session_json(&s));
                 }
@@ -92,8 +95,8 @@ pub async fn list_sessions_handler(
         }
     }
 
-    // DB 无数据时回退内存 registry（兼容场景）
-    if !db_has_data {
+    // 仅 store 未配置（无持久化会话数据源）时回退内存 registry（兼容场景）
+    if !db_authoritative {
         if let Some(session) = &state.session {
             let registry = session.registry();
             for (thread_id, user_id) in session.list_threads() {
@@ -993,8 +996,10 @@ mod messages_query_tests {
 #[cfg(test)]
 mod sessions_list_tests {
     //! 扫描 2026-08-27 辖区一 Should#6：list_sessions DB 故障 → 503，不再回退
-    //! 内存 registry 把「存储挂了」伪装成 200 陈旧列表（假成功）；DB 正常但空
-    //! → 内存 registry 兼容回退契约保持不变（显式兼容语义非吞错）。
+    //! 内存 registry 把「存储挂了」伪装成 200 陈旧列表（假成功）；store 存在即
+    //! 权威——DB 空 = 空列表（清空执行数据后不回退内存 registry 出口未命名幽灵，
+    //! 2026-08-30 修正），仅 store 未配置（无持久化数据源）时回退内存 registry
+    //! （显式兼容语义非吞错）。
 
     use super::*;
     use agentos_core::traits::StorageBackend;
@@ -1186,8 +1191,9 @@ mod sessions_list_tests {
     }
 
     #[tokio::test]
-    async fn empty_db_falls_back_to_memory_registry_with_200() {
-        // DB 正常但空 → 内存 registry 兼容回退不变（区分此契约与上例故障短路）。
+    async fn empty_db_returns_empty_list_with_200() {
+        // DB 正常但空 = 无会话（store 存在即权威，不回退内存 registry 出口
+        // title=null 幽灵——清空执行数据后 sessions 表清空即此场景）。
         let store = std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
         let mut state = AppState::new();
         state.store = Some(store as std::sync::Arc<dyn StorageBackend>);
@@ -1205,8 +1211,12 @@ mod sessions_list_tests {
             .await
             .expect("DB 空属正常场景应 200");
 
-        assert_eq!(resp.0["total"], 1);
-        assert_eq!(resp.0["threads"][0]["thread_id"], "thread-mem-1");
+        assert_eq!(resp.0["total"], 0, "DB 空不得回退内存 registry: {}", resp.0);
+        assert!(
+            resp.0["threads"].as_array().unwrap().is_empty(),
+            "threads 应为空: {}",
+            resp.0
+        );
     }
 
     #[test]
