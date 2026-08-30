@@ -621,6 +621,31 @@ class TestCompleteRetired:
         assert "llm.health_check" in mod.plugin._tools
 
 
+class TestHttpHandleDispatch:
+    """http.handle 工具必须绑定域分发器 http_handle（60ef33d02 回归：装饰器
+    错挂 _handle_thinking_mode 致 config/llm 段全 404——sub 按 thinking-mode
+    前缀截取成 dels/faults/空串）。"""
+
+    def test_bound_to_domain_dispatcher(self) -> None:
+        """注册的 http.handle handler 是域分发器而非 thinking-mode 单域处理器。"""
+        mod = _load_server()
+        handler = mod.plugin._tools["http.handle"].handler
+        assert handler.__name__ == "http_handle"
+
+    def test_config_domain_returns_200_through_registered_handler(self) -> None:
+        """经注册 handler 打 config/llm 路径返回 200（直呼 http_handle 会绕开注册面）。"""
+        mod = _load_server()
+        handler = mod.plugin._tools["http.handle"].handler
+        for path in (
+            "/ext/llm_service/config/llm",
+            "/ext/llm_service/config/llm/models",
+            "/ext/llm_service/config/llm/defaults",
+        ):
+            result = _run(handler(path=path, method="GET", raw_body=""))
+            assert result["success"] is True
+            assert result["data"]["status"] == 200, path
+
+
 class TestManifestServices:
     """plugin.json 服务声明与实现一致（G2 双写对照）。"""
 

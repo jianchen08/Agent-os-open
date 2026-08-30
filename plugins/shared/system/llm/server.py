@@ -577,21 +577,6 @@ def _api_error_response(exc: Exception) -> dict[str, Any]:
     return _ok(_json_response({"detail": message}, status))
 
 
-@plugin.tool(
-    name="http.handle",
-    schema={
-        "type": "object",
-        "properties": {
-            "path": {"type": "string"},
-            "method": {"type": "string"},
-            "plugin_id": {"type": "string"},
-            "raw_body": {"type": "string"},
-            "headers": {"type": "object"},
-            "query": {"type": "object"},
-        },
-    },
-    description="HTTP endpoint handler for /ext/llm_service/** (thinking-mode + config/llm domains)",
-)
 async def _handle_thinking_mode(path: str, method: str, raw_body: str) -> dict[str, Any]:
     """thinking-mode 域 6 端点：字面量 (sub,method) 表 + 两个 GET 前缀参数路由。"""
     import routes_thinking_mode as rtm  # noqa: PLC0415
@@ -661,6 +646,21 @@ async def _handle_config_llm(path: str, method: str, raw_body: str) -> dict[str,
     return _ok(_json_response({"error": "not found", "path": path}, 404))
 
 
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/llm_service/** (thinking-mode + config/llm domains)",
+)
 async def http_handle(
     path: str = "",
     method: str = "GET",
