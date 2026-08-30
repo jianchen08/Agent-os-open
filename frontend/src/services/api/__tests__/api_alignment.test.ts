@@ -3,7 +3,6 @@
  * 前后端 API 对齐修复测试
  *
  * 验证前端 API 调用与后端接口的对齐修复项：
- * - F9: getTasks 响应解包 {items, total}
  * - F10: longTermTasks pause/resume/toggleAutoExecute 使用 PATCH
  * - F11: fetchLongTermTasks 不发送后端不支持的参数
  */
@@ -78,98 +77,6 @@ vi.mock('../client', () => ({
 
 import * as taskApi from '@/services/api/tasks'
 import * as longTermTasksApi from '@/services/api/longTermTasks'
-
-// ============================================================================
-// F9: getTasks 响应解包测试
-// ============================================================================
-
-describe('F9 - getTasks 响应解包', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-  })
-
-  afterEach(() => {
-    vi.clearAllMocks()
-  })
-
-  it('应正确解包后端 {items, total} 响应格式', async () => {
-    const mockResponse = {
-      data: {
-        items: [
-          {
-            id: 'task-1',
-            title: '测试任务1',
-            status: 'completed',
-            priority: 'normal',
-            created_at: '2026-05-14T00:00:00Z',
-            updated_at: '2026-05-14T01:00:00Z',
-          },
-          {
-            id: 'task-2',
-            title: '测试任务2',
-            status: 'running',
-            priority: 'high',
-            created_at: '2026-05-14T02:00:00Z',
-            updated_at: '2026-05-14T03:00:00Z',
-          },
-        ],
-        total: 2,
-      },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
-
-    mockGet.mockResolvedValueOnce(mockResponse)
-
-    const result = await taskApi.getTasks({ skip: 0, limit: 20 })
-
-    // 验证返回的是完整的 {items, total} 结构
-    expect(result).toHaveProperty('items')
-    expect(result).toHaveProperty('total')
-    expect(result.items).toHaveLength(2)
-    expect(result.total).toBe(2)
-    expect(Array.isArray(result.items)).toBe(true)
-    expect(result.items[0].id).toBe('task-1')
-    expect(result.items[1].id).toBe('task-2')
-  })
-
-  it('应正确处理空列表响应', async () => {
-    const mockResponse = {
-      data: { items: [], total: 0 },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
-
-    mockGet.mockResolvedValueOnce(mockResponse)
-
-    const result = await taskApi.getTasks()
-
-    expect(result.items).toEqual([])
-    expect(result.total).toBe(0)
-  })
-
-  it('应使用正确的 API 端点传递参数', async () => {
-    const mockResponse = {
-      data: { items: [], total: 0 },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
-
-    mockGet.mockResolvedValueOnce(mockResponse)
-
-    await taskApi.getTasks({ skip: 10, limit: 20, status: 'running' })
-
-    expect(mockGet).toHaveBeenCalledWith('/ext/task_service/tasks', {
-      params: { skip: 10, limit: 20, status: 'running' },
-    })
-  })
-})
 
 // ============================================================================
 // F10: longTermTasks HTTP 方法测试
@@ -526,65 +433,5 @@ describe('前后端 Projects API 响应解包验证', () => {
       auto_execute: true,
       metadata: undefined,
     })
-  })
-
-  it('pauseProject 应调用 POST 端点并解包 {project: {...}} 响应', async () => {
-    const mockResponse = {
-      data: {
-        project: {
-          id: 'proj-1',
-          goal: '测试目标',
-          status: 'suspended',
-          auto_execute: false,
-          current_task_index: 0,
-          created_at: '2026-05-14T00:00:00Z',
-          updated_at: '2026-05-14T01:00:00Z',
-        },
-      },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
-
-    mockPost.mockResolvedValueOnce(mockResponse)
-
-    const result = await taskApi.pauseProject('proj-1')
-
-    expect(result.id).toBe('proj-1')
-    expect(result.status).toBe('suspended')
-
-    // 验证调用端点（POST，而非 PATCH）
-    expect(mockPost).toHaveBeenCalledWith('/ext/task_service/projects/proj-1/pause')
-  })
-
-  it('resumeProject 应调用 POST 端点并解包 {project: {...}} 响应', async () => {
-    const mockResponse = {
-      data: {
-        project: {
-          id: 'proj-1',
-          goal: '测试目标',
-          status: 'running',
-          auto_execute: false,
-          current_task_index: 0,
-          created_at: '2026-05-14T00:00:00Z',
-          updated_at: '2026-05-14T02:00:00Z',
-        },
-      },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
-
-    mockPost.mockResolvedValueOnce(mockResponse)
-
-    const result = await taskApi.resumeProject('proj-1')
-
-    expect(result.id).toBe('proj-1')
-    expect(result.status).toBe('running')
-
-    // 验证调用端点（POST，而非 PATCH）
-    expect(mockPost).toHaveBeenCalledWith('/ext/task_service/projects/proj-1/resume')
   })
 })

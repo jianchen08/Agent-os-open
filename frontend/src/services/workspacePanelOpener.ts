@@ -126,31 +126,3 @@ export function openWorkspacePanelByPath(path: string): boolean {
   }
   return false
 }
-
-/**
- * 确保默认「任务管理」页签存在（右侧面板打开即直接展示任务管理，非钉住可关闭）。
- * 面板是内容承载区：默认展示任务管理，用户可关闭后经入口重新打开。
- */
-export function ensureDefaultTaskPanel(): void {
-  const store = useLayoutModeStore.getState()
-  const hasTaskPanel = store.workspaceTabs.some((t) => t.id === 'ws-panel-tasks')
-  if (hasTaskPanel) return
-  const shouldActivate = store.workspaceTabs.length === 0
-  const spec = TOP_NAV_PANELS['/tasks']
-  const tab: WorkspaceTab = {
-    id: spec.id,
-    title: spec.title,
-    icon: spec.icon,
-    moduleId: spec.moduleId || `__panel__${spec.id}`,
-    component: spec.component,
-    isActive: shouldActivate,
-    isPinned: false,
-  }
-  if (shouldActivate) {
-    store.addWorkspaceTab(tab)
-  } else {
-    useLayoutModeStore.setState((s) => ({
-      workspaceTabs: [...s.workspaceTabs, { ...tab, isActive: false }],
-    }))
-  }
-}

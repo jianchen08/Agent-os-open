@@ -90,37 +90,3 @@ export async function cancelLongTermTask(taskId: string, reason?: string): Promi
   })
   return response.data
 }
-
-export function taskToProject(task: Task) {
-  return {
-    id: task.id,
-    userId: task.userId || '',
-    sessionId: task.sessionId,
-    goal: task.title,
-    status: mapTaskStatusToProjectStatus(task.status),
-    autoExecute: task.tags?.includes('auto-execute') || false,
-    currentTaskIndex: 0,
-    tasks: [],
-    timestamps: {
-      createdAt: task.timestamps?.createdAt || '',
-      updatedAt: task.timestamps?.updatedAt || '',
-    },
-  }
-}
-
-function mapTaskStatusToProjectStatus(status: TaskStatus): string {
-  const statusMap: Record<string, string> = {
-    pending: 'planning',
-    running: 'running',
-    evaluating: 'running',
-    scheduled: 'planning',
-    blocked: 'suspended',
-    suspended: 'suspended',
-    completed: 'completed',
-    failed: 'failed',
-    cancelled: 'failed',
-    timeout: 'failed',
-  }
-
-  return statusMap[status] || 'planning'
-}

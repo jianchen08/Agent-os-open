@@ -81,50 +81,6 @@ describe('Execution Records API', () => {
     })
   })
 
-  describe('getExecutionRecord - 单条记录', () => {
-    it('成功时返回记录', async () => {
-      const rec = { id: 'r1', session_id: 's1', message_data: {}, created_at: 't' }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(rec))
-
-      const result = await executionRecordsApi.getExecutionRecord('r1')
-
-      expect(result).toEqual(rec)
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/monitoring/execution/records/r1')
-    })
-
-    it('请求失败时降级返回 null 且不抛异常', async () => {
-      vi.mocked(apiClient.get).mockRejectedValueOnce(new Error('Network Error'))
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-
-      const result = await executionRecordsApi.getExecutionRecord('r1')
-
-      expect(result).toBeNull()
-      consoleSpy.mockRestore()
-    })
-  })
-
-  describe('getChildrenRecords - 子记录', () => {
-    it('返回子记录数组', async () => {
-      const children = [{ id: 'c1', session_id: 's1', message_data: {}, created_at: 't' }]
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(children))
-
-      const result = await executionRecordsApi.getChildrenRecords('p1')
-
-      expect(result).toEqual(children)
-      expect(apiClient.get).toHaveBeenCalledWith(
-        '/ext/monitoring/execution/records/p1/children',
-      )
-    })
-
-    it('后端返回空时兜底为空数组', async () => {
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(null))
-
-      const result = await executionRecordsApi.getChildrenRecords('p1')
-
-      expect(result).toEqual([])
-    })
-  })
-
   describe('clearAllExecutionRecords - 清空', () => {
     it('POST 清空端点并返回响应', async () => {
       const resp = { success: true, message: 'cleared', cleared_count: 9 }

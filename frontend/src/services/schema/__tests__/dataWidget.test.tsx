@@ -212,7 +212,6 @@ describe('组件接线（datasourceUri）', () => {
 
 // ── A1c：WS 事件驱动数据源 ─────────────────────────────────
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { useWsDataSource } from '@/services/schema/dataWidget'
 
 describe('A1c：WS 事件驱动数据源', () => {
   beforeEach(() => {
@@ -237,18 +236,6 @@ describe('A1c：WS 事件驱动数据源', () => {
     await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('42'))
   })
 
-  it('useWsDataSource：独立 hook 订阅/退订', async () => {
-    function Host() {
-      const { data } = useWsDataSource({ channel: 'cost_update', initial: 0 })
-      return <span data-testid="w">{String(data)}</span>
-    }
-    const { unmount } = render(<Host />)
-    expect(wsSubscribe).toHaveBeenCalledWith('cost_update', expect.any(Function))
-    ;(globalThis.wsHandler as (p: unknown) => void)?.(7)
-    await waitFor(() => expect(screen.getByTestId('w').textContent).toBe('7'))
-    unmount()
-    expect(wsUnsubscribe).toHaveBeenCalledWith('cost_update', expect.any(Function))
-  })
 })
 
 // ── A1b：TableWidget 行操作（rowActions） ──────────────────

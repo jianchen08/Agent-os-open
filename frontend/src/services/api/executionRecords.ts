@@ -88,27 +88,6 @@ export async function getExecutionRecordsSessions(): Promise<SessionsListRespons
 }
 
 /**
- * @param recordId 记录ID
- * @returns 执行记录详情（端点失败时返回 null）
- */
-export async function getExecutionRecord(recordId: string): Promise<ExecutionRecord | null> {
-  try {
-    const response = await apiClient.get<ExecutionRecord>(MONITORING_ENDPOINTS.mon_execution_record_get.replace('{record_id}', recordId))
-    return response.data
-  } catch (error) {
-    console.error('[ExecutionRecordsAPI] 获取执行记录失败:', error)
-    return null
-  }
-}
-
-export async function getChildrenRecords(parentId: string): Promise<ExecutionRecord[]> {
-  const response = await apiClient.get<ExecutionRecord[]>(
-    MONITORING_ENDPOINTS.mon_execution_record_children.replace('{record_id}', parentId),
-  )
-  return response.data || []
-}
-
-/**
  * 清空全部执行记录与轨迹响应（内核 9 表 + registry + payload_diag 文件）
  */
 export interface ClearAllExecutionRecordsResponse {

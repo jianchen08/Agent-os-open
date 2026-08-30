@@ -8,7 +8,7 @@
 
 /* eslint-disable import-x/order */
 import { describe, expect, it } from 'vitest'
-import { getFileCategory, validateFile } from '@/services/api/files'
+import { validateFile } from '@/services/api/files'
 import type { ModelCapabilities } from '@/types/capabilities'
 
 /** 构造 File 对象的辅助函数 */
@@ -132,20 +132,3 @@ describe('validateFile - 多模态按能力校验', () => {
   })
 })
 
-describe('getFileCategory - 文件分类', () => {
-  it('按 MIME 前缀分类', () => {
-    expect(getFileCategory('image/png')).toBe('image')
-    expect(getFileCategory('audio/mpeg')).toBe('audio')
-    expect(getFileCategory('video/mp4')).toBe('video')
-  })
-
-  it('纯文本归为 text', () => {
-    expect(getFileCategory('text/plain')).toBe('text')
-    expect(getFileCategory('application/json')).toBe('text')
-  })
-
-  it('未知二进制归为 unknown', () => {
-    expect(getFileCategory('application/zip')).toBe('unknown')
-    expect(getFileCategory('')).toBe('unknown')
-  })
-})

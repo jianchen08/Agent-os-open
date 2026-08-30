@@ -14,16 +14,12 @@
  * - 单元 mock（如 agents.test.ts）vi.mock 整个 client 模块 → 服务拿到的是假 client；
  *   若服务误导入别的 client，单测发现不了。本测试用真实 client + spyOn，验证真实接线。
  *
- * 覆盖的 5 条契约（对应 6 条前端数据路径中的上行/读写路径）：
- *   C1. getAgentSchema()        → GET    /ext/agent_manager/agents/schema
- *   C2. putAgentConfig(id,yaml) → PUT    /ext/agent_manager/agents/{id}/config   body { yaml }
+ * 覆盖的 3 条契约（对应前端数据路径中的上行/读写路径）：
  *   C3. commandDispatcher transport → POST /api/v1/actions/execute    body { action, args }
  *   C4. WebviewWidget HTML 加载 → GET    /ext/{pluginId}{path}        (默认 path=/webview)
  *   C5. WebviewWidget action 上行 → POST /api/v1/actions/execute      body { action: method, args: params }
  *
  * 后端端点定义（kernel/crates/api/src/server.rs）：
- *   - GET  /ext/agent_manager/agents/schema         (line 95)
- *   - GET|PUT /ext/agent_manager/agents/{id}/config (line 96-99)
  *   - POST /api/v1/actions/execute       (line 102)
  *   - /ext/{*rest} 通配                  (http_dispatcher.rs:197)
  */
@@ -37,7 +33,6 @@ import type { Mock } from 'vitest'
 import apiClient from '@/services/api/client'
 
 // 真实服务模块（不 mock）
-import { getAgentSchema, putAgentConfig } from '@/services/api/agents'
 import { initializeGrowthLoop } from '@/services/modules/GrowthLoop'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
@@ -46,74 +41,16 @@ import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 // ── spyOn 工具：在每个用例前重置 ──
 let getSpy: Mock
 let postSpy: Mock
-let putSpy: Mock
 
 beforeEach(() => {
   getSpy = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: {} }) as unknown as Mock
   postSpy = vi.spyOn(apiClient, 'post').mockResolvedValue({ data: {} }) as unknown as Mock
-  putSpy = vi.spyOn(apiClient, 'put').mockResolvedValue({ data: {} }) as unknown as Mock
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
   // commandDispatcher 的 transport 在 GrowthLoop 测试中被注入，清理避免串扰
   contributionRegistry.clear()
-})
-
-// ============================================================================
-// C1: getAgentSchema → GET /ext/agent_manager/agents/schema
-// ============================================================================
-
-describe('C1 契约: getAgentSchema() → GET /ext/agent_manager/agents/schema', () => {
-  it('调用 getAgentSchema 应发 GET /ext/agent_manager/agents/schema（method + url 对齐后端）', async () => {
-    getSpy.mockResolvedValue({ data: { fields: [{ name: 'config_id', type: 'string' }] } })
-
-    await getAgentSchema()
-
-    expect(getSpy).toHaveBeenCalledTimes(1)
-    const [url, config] = getSpy.mock.calls[0]
-    expect(url).toBe('/ext/agent_manager/agents/schema')
-    // 不应附带 body（GET）
-    expect(config).toBeUndefined()
-  })
-
-  it('响应应含 fields 数组（与后端 agents_schema_handler 返回 shape 对齐）', async () => {
-    getSpy.mockResolvedValue({
-      data: { fields: [{ name: 'name', type: 'string', label: '名称', required: true }] },
-    })
-
-    const result = await getAgentSchema()
-
-    expect(Array.isArray(result.fields)).toBe(true)
-  })
-})
-
-// ============================================================================
-// C2: putAgentConfig(id, yaml) → PUT /ext/agent_manager/agents/{id}/config body { yaml }
-// ============================================================================
-
-describe('C2 契约: putAgentConfig(id, yaml) → PUT /ext/agent_manager/agents/{id}/config', () => {
-  it('应发 PUT /ext/agent_manager/agents/{id}/config，body 为 { yaml }（路径插值 + body shape 对齐）', async () => {
-    putSpy.mockResolvedValue({ data: { config_id: 'my-agent', success: true, backup: 'my-agent.yaml.bak' } })
-
-    const yamlContent = 'name: 测试\nmodel: gpt-4\n'
-    await putAgentConfig('my-agent', yamlContent)
-
-    expect(putSpy).toHaveBeenCalledTimes(1)
-    const [url, body] = putSpy.mock.calls[0]
-    // 路径参数插值正确
-    expect(url).toBe('/ext/agent_manager/agents/my-agent/config')
-    // body shape: 后端 AgentConfigUpdateRequest { yaml: String }
-    expect(body).toEqual({ yaml: yamlContent })
-  })
-
-  it('agentId 含特殊字符时应原样进入路径段（不做额外编码/拼接）', async () => {
-    putSpy.mockResolvedValue({ data: { config_id: 'a.b-c', success: true } })
-
-    await putAgentConfig('a.b-c', 'k: v')
-
-    expect(putSpy.mock.calls[0][0]).toBe('/ext/agent_manager/agents/a.b-c/config')
-  })
 })
 
 // ============================================================================

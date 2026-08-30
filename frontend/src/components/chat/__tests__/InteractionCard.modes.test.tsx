@@ -8,7 +8,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InteractionCard } from '../InteractionCard'
-import { loadInteractionModes, resolveInteractionFeatures } from '@/utils/interactionModes'
+import { loadInteractionModes, resolveInteractionLayout } from '@/utils/interactionModes'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
 vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
@@ -70,34 +70,34 @@ describe('声明注册表', () => {
       { ui: {} },
       {},
     ])
-    const decl = resolveInteractionFeatures(makeInteraction({ mode: 'approval_v2' }))
+    const decl = resolveInteractionLayout(makeInteraction({ mode: 'approval_v2' })).features
     expect([...decl].sort()).toEqual(['options', 'text_input'].sort())
     // 未声明的未知模式 → 通用兜底（message + text_input）
-    expect([...resolveInteractionFeatures(makeInteraction({ mode: 'unknown' }))].sort()).toEqual(
+    expect([...resolveInteractionLayout(makeInteraction({ mode: 'unknown' })).features].sort()).toEqual(
       ['message', 'text_input'].sort(),
     )
   })
 
   it('内置默认件兜底（声明缺席时三模式布局不变）', () => {
-    expect([...resolveInteractionFeatures(makeInteraction({ mode: 'choice' }))].sort()).toEqual(
+    expect([...resolveInteractionLayout(makeInteraction({ mode: 'choice' })).features].sort()).toEqual(
       ['options', 'options_detail', 'text_input'].sort(),
     )
-    expect([...resolveInteractionFeatures(makeInteraction({ mode: 'conversation' }))].sort()).toEqual(
+    expect([...resolveInteractionLayout(makeInteraction({ mode: 'conversation' })).features].sort()).toEqual(
       ['navigate', 'options', 'suggestions', 'text_input'].sort(),
     )
-    expect([...resolveInteractionFeatures(makeInteraction({ mode: 'notification' }))].sort()).toEqual(
+    expect([...resolveInteractionLayout(makeInteraction({ mode: 'notification' })).features].sort()).toEqual(
       ['message', 'progress'].sort(),
     )
   })
 
   it('未知未声明模式：通用兜底 + 数据形状增强（带 options/progress 载荷自动补）', () => {
-    const features = resolveInteractionFeatures(
+    const features = resolveInteractionLayout(
       makeInteraction({
         mode: 'brand_new_mode',
         options: [{ id: 'a', label: 'A' }],
         progress: 40,
       }),
-    )
+    ).features
     expect(features.has('options')).toBe(true)
     expect(features.has('progress')).toBe(true)
     expect(features.has('text_input')).toBe(true)
@@ -107,7 +107,7 @@ describe('声明注册表', () => {
     loadInteractionModes([
       { ui: { interaction_modes: [{ mode: 'choice', features: ['options'] }] } },
     ])
-    const features = resolveInteractionFeatures(makeInteraction({ mode: 'choice' }))
+    const features = resolveInteractionLayout(makeInteraction({ mode: 'choice' })).features
     expect(features.has('options')).toBe(true)
     expect(features.has('text_input')).toBe(false)
   })

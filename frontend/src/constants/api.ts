@@ -86,15 +86,8 @@ export const API_ENDPOINTS = {
   MEMORY: {
     /** 获取情景记忆列表 */
     EPISODES: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_episodes_list,
-    /** 获取单个情景记忆 */
-    EPISODE: (id: string) =>
-      HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_episode_get.replace('{episode_id}', id),
-    /** 搜索记忆 */
-    SEARCH: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_search_get,
     /** 获取语义记忆列表 */
     SEMANTIC: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_semantic_list,
-    /** 记忆整合 */
-    CONSOLIDATE: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_consolidate,
     /** 获取记忆统计 */
     STATS: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_stats,
   },
@@ -164,16 +157,8 @@ export const API_ENDPOINTS = {
   },
   /** 监控相关 - monitoring 插件端点（生成物投影，已从内核 compat_routes 迁出） */
   MONITORING: {
-    /** 获取系统指标 */
-    SYSTEM_METRICS: MONITORING_ENDPOINTS.mon_system_metrics,
-    /** 获取任务统计 */
-    TASK_STATISTICS: MONITORING_ENDPOINTS.mon_task_statistics,
     /** 获取任务列表 */
     TASK_LIST: MONITORING_ENDPOINTS.mon_tasks,
-    /** 获取 Token 使用统计 */
-    TOKEN_USAGE: MONITORING_ENDPOINTS.mon_token_usage,
-    /** 获取缓存命中率统计 */
-    CACHE_STATS: MONITORING_ENDPOINTS.mon_cache_stats,
   },
   /** 任务管理 - task_service 插件端点（生成物投影，原 channel_api tasks 域；内核 /api/v1/tasks 无路由） */
   TASKS: {
@@ -204,32 +189,8 @@ export const API_ENDPOINTS = {
     CREATE: TASK_SERVICE_ENDPOINTS.projects_create,
     /** 获取长期任务详情 */
     GET: (id: string) => TASK_SERVICE_ENDPOINTS.project_get.replace('{project_id}', id),
-    /** 切换自动执行开关 */
-    TOGGLE_AUTO_EXECUTE: (id: string) =>
-      TASK_SERVICE_ENDPOINTS.project_toggle_auto_execute.replace('{project_id}', id),
-    /** 暂停长期任务 */
-    PAUSE: (id: string) => TASK_SERVICE_ENDPOINTS.project_pause.replace('{project_id}', id),
-    /** 恢复长期任务 */
-    RESUME: (id: string) => TASK_SERVICE_ENDPOINTS.project_resume.replace('{project_id}', id),
     /** 删除长期任务 */
     DELETE: (id: string) => TASK_SERVICE_ENDPOINTS.project_delete.replace('{project_id}', id),
-  },
-  /** 任务阶段相关 - task_service 插件端点 */
-  TASK_PHASES: {
-    /** 获取任务阶段状态 */
-    GET_STATUS: (taskId: string) =>
-      TASK_SERVICE_ENDPOINTS.task_phase_status.replace('{task_id}', taskId),
-    /** 完成准备阶段 */
-    COMPLETE_PREPARE: (taskId: string) =>
-      TASK_SERVICE_ENDPOINTS.task_phase_complete_prepare.replace('{task_id}', taskId),
-    /** 完成执行阶段 */
-    COMPLETE_EXECUTE: (taskId: string) =>
-      TASK_SERVICE_ENDPOINTS.task_phase_complete_execute.replace('{task_id}', taskId),
-    /** 获取阶段产物 */
-    GET_OUTPUT: (taskId: string, phase: string) =>
-      TASK_SERVICE_ENDPOINTS.task_phase_output
-        .replace('{task_id}', taskId)
-        .replace('{phase}', phase),
   },
   /** 任务验收标准评估相关 - task_service 插件端点 */
   TASK_EVALUATION: {

@@ -8,7 +8,6 @@ import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 import type {
   GetProjectsResponse,
-  GetTaskPhaseResponse,
   Project,
 } from '@/types/task'
 
@@ -34,21 +33,6 @@ export interface TaskInfo {
   created_at: string
   updated_at?: string
   user_id?: string
-}
-
-export interface TaskListResponse {
-  items: TaskInfo[]
-  total: number
-}
-
-export async function getTasks(params?: {
-  skip?: number
-  limit?: number
-  status?: string
-  session_id?: string
-}): Promise<TaskListResponse> {
-  const response = await apiClient.get<TaskListResponse>(API_ENDPOINTS.TASKS.LIST, { params })
-  return response.data
 }
 
 /** @returns 删除成功与否 */
@@ -118,42 +102,6 @@ export async function createRootTask(payload: {
   thread_id: string
 }): Promise<TaskInfo> {
   const response = await apiClient.post<TaskInfo>(API_ENDPOINTS.TASKS.CREATE_ROOT, payload)
-  return response.data
-}
-
-export async function toggleProjectAutoExecute(
-  projectId: string,
-  enabled: boolean,
-): Promise<Project> {
-  const response = await apiClient.post<{ project: Project }>(
-    API_ENDPOINTS.PROJECTS.TOGGLE_AUTO_EXECUTE(projectId),
-    { enabled },
-  )
-  return response.data.project
-}
-
-export async function pauseProject(projectId: string): Promise<Project> {
-  const response = await apiClient.post<{ project: Project }>(
-    API_ENDPOINTS.PROJECTS.PAUSE(projectId),
-  )
-  return response.data.project
-}
-
-export async function resumeProject(projectId: string): Promise<Project> {
-  const response = await apiClient.post<{ project: Project }>(
-    API_ENDPOINTS.PROJECTS.RESUME(projectId),
-  )
-  return response.data.project
-}
-
-// ============================================================================
-// 任务阶段 API
-// ============================================================================
-
-export async function fetchTaskPhase(taskId: string): Promise<GetTaskPhaseResponse> {
-  const response = await apiClient.get<GetTaskPhaseResponse>(
-    API_ENDPOINTS.TASK_PHASES.GET_STATUS(taskId),
-  )
   return response.data
 }
 

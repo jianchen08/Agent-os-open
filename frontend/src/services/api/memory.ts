@@ -25,15 +25,6 @@ export interface MemorySearchResponse {
   query: string
 }
 
-export interface MemorySearchRequest {
-  query: string
-  /** 记忆类型过滤 */
-  memory_types?: string[]
-  top_k?: number
-  /** 最小相关性得分 */
-  min_score?: number
-}
-
 export interface Episode {
   id: string
   intent_text: string
@@ -76,13 +67,6 @@ export async function getEpisodes(
     const response = await apiClient.get<EpisodesListResponse>(API_ENDPOINTS.MEMORY.EPISODES, {
       params: { page, page_size: pageSize },
     })
-    return response.data
-  }, options)
-}
-
-export async function getEpisode(id: string, options: RetryOptions = {}): Promise<Episode> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.get<Episode>(API_ENDPOINTS.MEMORY.EPISODE(id))
     return response.data
   }, options)
 }
@@ -131,21 +115,6 @@ export async function searchHindsight(
   }, options)
 }
 
-export async function searchMemory(
-  query: string | MemorySearchRequest,
-  options: RetryOptions = {},
-): Promise<MemorySearchResponse> {
-  return requestWithRetry(async () => {
-    const requestData = typeof query === 'string' ? { query, top_k: 10, min_score: 0.5 } : query
-
-    const response = await apiClient.post<MemorySearchResponse>(
-      API_ENDPOINTS.MEMORY.SEARCH,
-      requestData,
-    )
-    return response.data
-  }, options)
-}
-
 export async function getSemanticMemory(
   options: RetryOptions = {},
 ): Promise<{ items: SemanticKnowledge[]; total: number }> {
@@ -154,19 +123,6 @@ export async function getSemanticMemory(
       items: SemanticKnowledge[]
       total: number
     }>(API_ENDPOINTS.MEMORY.SEMANTIC)
-    return response.data
-  }, options)
-}
-
-export async function consolidateMemory(
-  options: RetryOptions = {},
-): Promise<{ success: boolean; message: string; consolidated_count?: number }> {
-  return requestWithRetry(async () => {
-    const response = await apiClient.post<{
-      success: boolean
-      message: string
-      consolidated_count?: number
-    }>(API_ENDPOINTS.MEMORY.CONSOLIDATE)
     return response.data
   }, options)
 }

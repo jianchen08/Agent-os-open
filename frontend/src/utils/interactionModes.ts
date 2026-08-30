@@ -95,8 +95,3 @@ export function resolveInteractionLayout(interaction: PendingInteraction): Inter
   if (interaction.progress != null) features.add('progress')
   return { features, textInputPlaceholder: decl.textInputPlaceholder ?? '输入回复...' }
 }
-
-/** 兼容旧签名：仅取特性集 */
-export function resolveInteractionFeatures(interaction: PendingInteraction): Set<InteractionFeature> {
-  return resolveInteractionLayout(interaction).features
-}

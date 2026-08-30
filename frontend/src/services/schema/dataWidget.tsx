@@ -10,7 +10,7 @@
  *   （A1c）承接——事件驱动更新，不走 remount。
  * - 无 uri/ws 时回退静态 props（零行为变化，兼容旧声明）。
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import apiClient from '@/services/api/client'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 
@@ -173,34 +173,6 @@ function parseWsRefresh(props: Record<string, unknown>): WsRefreshConfig | null 
   if (cfg.type !== 'ws') return null
   const channel = cfg.channel
   return typeof channel === 'string' && channel !== '' ? { type: 'ws', channel } : null
-}
-
-/**
- * 通用声明式 WS 数据源（A1c）：订阅 WS channel → 事件驱动更新数据。
- * 明确不走 RefreshBox remount——WS 是持续推送状态，remount 会丢事件/重复订阅。
- * 非 widget 宿主也可直接用本 hook（如成本实时卡）。
- */
-export function useWsDataSource(options: {
-  channel?: string
-  initial?: unknown
-  extract?: (payload: unknown) => unknown
-}): { data: unknown } {
-  const { channel, initial, extract } = options
-  const [data, setData] = useState<unknown>(initial)
-  const extractRef = useRef(extract)
-  extractRef.current = extract
-
-  useEffect(() => {
-    if (!channel) return
-    const handler = (payload: unknown) => {
-      const fn = extractRef.current
-      setData(fn ? fn(payload) : payload)
-    }
-    globalWS.subscribe(channel, handler)
-    return () => globalWS.unsubscribe(channel, handler)
-  }, [channel])
-
-  return { data }
 }
 
 /**

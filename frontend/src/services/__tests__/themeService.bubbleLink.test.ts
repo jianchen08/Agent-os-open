@@ -9,7 +9,8 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { getAllPresetThemes, compileThemeVariables } from '../themeService'
+import { compileThemeVariables } from '../themeService'
+import { presetThemes } from '@/config/themes'
 
 const REL_LUM_CACHE = new Map<string, number>()
 
@@ -49,7 +50,7 @@ function assert(cond: unknown, msg: string): asserts cond {
 }
 
 describe('compileThemeVariables: --bubble-link 发射', () => {
-  const themes = getAllPresetThemes()
+  const themes = Object.values(presetThemes)
 
   it.each(themes.map((t) => [t.id, t] as const))(
     '%s: 链接色对用户气泡面 ≥3',

@@ -206,7 +206,7 @@ export function evalPath(ctx: ToolCallContext, path?: string): unknown {
  *
  * 用于内容块（text/code/markdown/log）的 source，如 fetch 的 `result | truncate:500`。
  */
-export function evalSource(ctx: ToolCallContext, expr?: string): unknown {
+function evalSource(ctx: ToolCallContext, expr?: string): unknown {
   if (!expr) return undefined
   const parts = expr.split('|').map((s) => s.trim())
   const value = evalPath(ctx, parts[0])

@@ -229,13 +229,3 @@ export function validateFile(
 
   return { valid: true }
 }
-
-/** 获取文件类型分类 */
-export function getFileCategory(mimeType: string): 'image' | 'document' | 'audio' | 'video' | 'text' | 'unknown' {
-  if (mimeType.startsWith('image/')) return 'image'
-  if (mimeType.startsWith('audio/')) return 'audio'
-  if (mimeType.startsWith('video/')) return 'video'
-  if (isPlainTextMime(mimeType)) return 'text'
-  // 二进制文档（pdf/docx 等）经 markitdown 转 text，归类为 document
-  return 'unknown'
-}

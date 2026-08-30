@@ -38,30 +38,6 @@ describe('任务管理 API 补充', () => {
     vi.clearAllMocks()
   })
 
-  describe('getTasks - 任务列表', () => {
-    it('默认参数请求', async () => {
-      const resp = { items: [taskInfo], total: 1 }
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(resp))
-
-      const result = await taskApi.getTasks()
-
-      expect(result.total).toBe(1)
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/tasks', {
-        params: undefined,
-      })
-    })
-
-    it('透传 skip/limit/status/session_id', async () => {
-      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({ items: [], total: 0 }))
-
-      await taskApi.getTasks({ skip: 10, limit: 5, status: 'running', session_id: 's1' })
-
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/tasks', {
-        params: { skip: 10, limit: 5, status: 'running', session_id: 's1' },
-      })
-    })
-  })
-
   describe('deleteTask - 删除任务', () => {
     it('成功返回 true', async () => {
       vi.mocked(apiClient.delete).mockResolvedValueOnce(okResponse({}))
@@ -97,28 +73,6 @@ describe('任务管理 API 补充', () => {
         task_scope: 'container',
         thread_id: 'th1',
       })
-    })
-  })
-
-  describe('项目暂停/恢复', () => {
-    it('pauseProject POST 暂停端点并解包', async () => {
-      const project = { id: 'p1', title: '项目1' }
-      vi.mocked(apiClient.post).mockResolvedValueOnce(okResponse({ project }))
-
-      const result = await taskApi.pauseProject('p1')
-
-      expect(result.id).toBe('p1')
-      expect(apiClient.post).toHaveBeenCalledWith('/ext/task_service/projects/p1/pause')
-    })
-
-    it('resumeProject POST 恢复端点并解包', async () => {
-      const project = { id: 'p1', title: '项目1' }
-      vi.mocked(apiClient.post).mockResolvedValueOnce(okResponse({ project }))
-
-      const result = await taskApi.resumeProject('p1')
-
-      expect(result.id).toBe('p1')
-      expect(apiClient.post).toHaveBeenCalledWith('/ext/task_service/projects/p1/resume')
     })
   })
 

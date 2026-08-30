@@ -6,7 +6,6 @@
  * 1. 打开已存在面板 → 仅 setActiveTab（不重复 add）
  * 2. 面板打开时工作区折叠 → 自动展开
  * 3. openWorkspacePanelByPath：TOP_NAV_PANELS 精确命中 / 前缀命中（/settings/xxx）/ 未命中 false
- * 4. ensureDefaultTaskPanel：已有任务面板跳过 / 空列表激活添加 / 非空列表追加不激活
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
@@ -46,7 +45,6 @@ import {
   TOP_NAV_PANELS,
   openWorkspacePanel,
   openWorkspacePanelByPath,
-  ensureDefaultTaskPanel,
 } from '@/services/workspacePanelOpener'
 
 describe('openWorkspacePanel', () => {
@@ -113,35 +111,5 @@ describe('openWorkspacePanelByPath', () => {
   it('无匹配路径 → 返回 false 且不打开任何面板', () => {
     expect(openWorkspacePanelByPath('/no-such-route')).toBe(false)
     expect(mockLayoutStore.addWorkspaceTab).not.toHaveBeenCalled()
-  })
-})
-
-describe('ensureDefaultTaskPanel', () => {
-  beforeEach(() => {
-    mockLayoutStore.workspaceTabs = []
-    mockLayoutStore.addWorkspaceTab.mockClear()
-  })
-
-  it('已有任务面板 → 跳过（不重复添加）', () => {
-    mockLayoutStore.workspaceTabs = [{ id: 'ws-panel-tasks' }]
-    ensureDefaultTaskPanel()
-    expect(mockLayoutStore.addWorkspaceTab).not.toHaveBeenCalled()
-  })
-
-  it('无任何面板 → 添加任务面板且 isActive=true', () => {
-    ensureDefaultTaskPanel()
-    expect(mockLayoutStore.addWorkspaceTab).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'ws-panel-tasks', isActive: true }),
-    )
-  })
-
-  it('已有其他面板 → 追加任务面板且 isActive=false（走 setState 直接追加）', () => {
-    mockLayoutStore.workspaceTabs = [{ id: 'other-tab', isActive: true }]
-    ensureDefaultTaskPanel()
-    expect(mockLayoutStore.addWorkspaceTab).not.toHaveBeenCalled()
-    expect(mockLayoutStore.workspaceTabs).toHaveLength(2)
-    expect(mockLayoutStore.workspaceTabs[1]).toEqual(
-      expect.objectContaining({ id: 'ws-panel-tasks', isActive: false }),
-    )
   })
 })

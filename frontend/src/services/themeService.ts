@@ -23,15 +23,6 @@ export function getPresetTheme(themeId: string): ThemeConfig | null {
   return presetThemes[themeId] || null
 }
 
-/**
- * 获取所有预设主题
- *
- * @returns 预设主题列表
- */
-export function getAllPresetThemes(): ThemeConfig[] {
-  return Object.values(presetThemes)
-}
-
 /** 编译各变量域共享的派生量（深浅族决定多组成对变量的取值） */
 interface CompileCtx {
   config: ThemeConfig

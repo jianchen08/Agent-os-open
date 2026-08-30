@@ -17,7 +17,7 @@
 /* eslint-disable import-x/order */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as taskApi from '@/services/api/tasks'
-import type { ProjectStatus, TaskPhase } from '@/services/api/../../types/task'
+import type { ProjectStatus } from '@/services/api/../../types/task'
 // Mock axios
 vi.mock('../client', () => ({
   default: {
@@ -219,90 +219,4 @@ describe('任务管理 API', () => {
     })
   })
 
-  describe('toggleProjectAutoExecute - 切换自动执行', () => {
-    it('应该成功切换自动执行开关', async () => {
-      // 0.2 实现：POST /ext/task_service/projects/{id}/auto-execute { enabled }，返回 { project }
-      const mockPostResponse = {
-        data: {
-          project: {
-            id: 'project-1',
-            user_id: 'user-1',
-            goal: '实现用户认证',
-            status: 'running' as ProjectStatus,
-            auto_execute: true,
-            current_task_index: 1,
-            created_at: '2024-01-01T00:00:00Z',
-            updated_at: '2024-01-01T02:00:00Z',
-          },
-        },
-        status: 200,
-        statusText: 'OK',
-        headers: {},
-        config: {} as any,
-      }
-
-      vi.mocked(apiClient.post).mockResolvedValueOnce(mockPostResponse)
-
-      // 调用 API
-      const result = await taskApi.toggleProjectAutoExecute('project-1', true)
-
-      // 验证结果（impl 解包 response.data.project）
-      expect(result.auto_execute).toBe(true)
-
-      // 验证 API 调用（POST 而非 PATCH；0.2 迁移路径）
-      expect(apiClient.post).toHaveBeenCalledWith(
-        '/ext/task_service/projects/project-1/auto-execute',
-        { enabled: true },
-      )
-    })
-  })
-
-  // ========================================================================
-  // 任务阶段 API 测试
-  // ========================================================================
-
-  describe('fetchTaskPhase - 获取任务阶段状态', () => {
-    it('应该成功获取任务阶段状态', async () => {
-      const mockResponse = {
-        data: {
-          task_id: 'task-1',
-          current_phase: 'execute' as TaskPhase,
-          task_status: 'running',
-          phases: {
-            prepare: {
-              status: 'completed',
-              startTime: '2024-01-01T00:00:00Z',
-              endTime: '2024-01-01T00:10:00Z',
-              output: { plan: '执行计划' },
-            },
-            execute: {
-              status: 'running',
-              startTime: '2024-01-01T00:10:00Z',
-            },
-            evaluate: {
-              status: 'pending',
-            },
-          },
-        },
-        status: 200,
-        statusText: 'OK',
-        headers: {},
-        config: {} as any,
-      }
-
-      vi.mocked(apiClient.get).mockResolvedValueOnce(mockResponse)
-
-      // 调用 API
-      const result = await taskApi.fetchTaskPhase('task-1')
-
-      // 验证结果（impl 原样返回 response.data，字段为后端 snake_case）
-      expect(result.task_id).toBe('task-1')
-      expect(result.current_phase).toBe('execute')
-      expect(result.phases.prepare?.status).toBe('completed')
-      expect(result.phases.execute?.status).toBe('running')
-
-      // 验证 API 调用（0.2 迁移：/ext/task_service/tasks/{id}/phase）
-      expect(apiClient.get).toHaveBeenCalledWith('/ext/task_service/tasks/task-1/phase')
-    })
-  })
 })
