@@ -77,24 +77,26 @@ def _is_iso_datetime(value: Any) -> bool:
 
 
 class TestSignalOneToolCallsRouteToTools:
-    """信号①：本轮有工具调用 → 路由工具执行，不评判（现状保留）。"""
+    """信号①：本轮有工具调用 → 路由工具执行，不评判（ADR 原语义）。
+
+    工具重复调用/死循环防护不在本插件：由 duplicate_check 按
+    「同工具+相同参数」签名承接（ADR 2026-08-30-retire-tool-fail-streak-gate）。
+    """
 
     @pytest.mark.parametrize(
-        ("tool_results", "expect_streak"),
+        "tool_results",
         [
-            ([], None),
-            ([{"tool_name": "bash", "success": False, "error": "boom"}], 1),
-            ([{"tool_name": "bash", "success": True, "data": {}}], None),
+            [],
+            [{"tool_name": "bash", "success": False, "error": "boom"}],
+            [{"tool_name": "bash", "success": True, "data": {}}],
         ],
         ids=["no-results", "failed-results", "ok-results"],
     )
-    def test_tool_call_round_routes_to_tools(
-        self, tool_results: list, expect_streak: int | None
-    ) -> None:
-        """有工具调用的轮次路由工具执行、不评判不催提醒（参数化：3 组区分度）。
+    def test_tool_call_round_routes_to_tools(self, tool_results: list) -> None:
+        """有工具调用的轮次零评判放行（参数化：无结果/全失败/全成功）。
 
-        上一轮全失败时闸门仅做连续失败计数（bookkeeping），不改变路由、
-        不注入提醒——"路由工具执行" 的信号①现状在阈值内保持。
+        上一轮工具成败不影响本轮路由——工具轮不做任何收束评判，亦不注入
+        提醒、不消耗提醒配额；混合轮（文本+工具调用）同样按①放行。
         """
         import asyncio
 
@@ -105,13 +107,22 @@ class TestSignalOneToolCallsRouteToTools:
             tool_results=tool_results,
         )
         result = asyncio.run(reminder.execute(_ctx(state)))
-        assert "ended" not in result.state_updates and "suspended" not in result.state_updates, "阈值内信号①路由不变"
-        assert "messages" not in result.state_updates, "信号①轮不注入提醒"
+        assert result.state_updates == {}, "信号①轮零评判零副作用"
+        assert "ended" not in result.state_updates and "suspended" not in result.state_updates
+
+    def test_mixed_text_and_tool_call_round_routes_to_tools(self) -> None:
+        """混合轮（文本+工具调用）按信号①放行：不进提醒级联、不耗配额。"""
+        import asyncio
+
+        reminder = TaskReminder(config={"max_reminders": 3})
+        state = _base_task_state(
+            raw_tool_calls=[{"function": {"name": "task_submit"}}],
+            raw_result="参数已修正，重新派发。",
+        )
+        result = asyncio.run(reminder.execute(_ctx(state)))
+        assert result.state_updates == {}
         assert "evaluate_reminder_count" not in result.state_updates
-        if expect_streak is None:
-            assert result.state_updates == {}
-        else:
-            assert result.state_updates.get("tool_fail_streak") == expect_streak
+        assert "messages" not in result.state_updates
 
 
 class TestSignalTwoCompletionEvidence:

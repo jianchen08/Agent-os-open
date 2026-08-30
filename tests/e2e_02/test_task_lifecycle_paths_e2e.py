@@ -17,7 +17,7 @@ E2E 路径矩阵：任务执行闭环（ADR 2026-08-28-task-closure-three-signal
   A2 有指标任务（file_check 全过，经 L1 task_submit 派发）→ 子任务 completed
   A3 bash 成功但 agent 从不评估（纯文本×N）   → 提醒耗尽 → failed
   B1 bash 真失败（exit != 0）且从不评估       → 合法 failed
-  C1 连续调用不存在的工具                     → 收束闸门 → 有界轮数终态 failed
+  C1 连续调用不存在的工具（同工具同参重复）  → duplicate_check 硬上限 → 有界轮数终态 failed
   C2 子任务终态                               → 父会话唤醒收束出文本
   D1 评估提交但指标不过（文件不存在）         → 重试耗尽 → 有界 failed（不无限评估）
   D2 评估失败任务 failed → submit 重跑        → 修复后评估通过 → completed
@@ -439,7 +439,7 @@ def _wait_task_terminal(
     print(
         f"[matrix] task={task_id} 诊断指纹: reminders={terminal.get('evaluate_reminder_count')} "
         f"stop_reason={terminal.get('router.stop_reason')!r} "
-        f"tool_fail_streak={terminal.get('tool_fail_streak')} "
+        f"duplicate_intercepts={terminal.get('router.duplicate_intercepts')} "
         f"usage={_llm_usage(terminal).get('total_tokens')}"
     )
     return terminal, seen
@@ -919,11 +919,17 @@ class TestB1BashRealFailure:
         assert rounds >= 4, f"B1 应至少 4 轮 LLM（bash + 3 轮提醒内文本），实际 {rounds}"
 
 
-class TestC1BoundedClosureGate:
-    """C1 连续调用不存在的工具 → 收束闸门 → 有界轮数终态（不无限循环）。"""
+class TestC1BoundedLoopProtection:
+    """C1 连续调用不存在的工具 → duplicate_check 硬上限 → 有界轮数终态。
+
+    循环防护语义（用户裁定 2026-08-30）：重复检测以「同工具+相同参数」签名
+    为准，由 duplicate_check 三级渐进承接——软提示 ×2 → 拦截剥离+回 LLM
+    ×4（hard_limit_intercepts=4）→ should_stop 终止，署名 duplicate_loop
+    映射 run failed，任务域终态对账补落 task.status=failed。
+    """
 
     @pytest.mark.timeout(420)
-    def test_tool_fail_streak_forces_bounded_terminal(
+    def test_duplicate_loop_forces_bounded_terminal(
         self, stub_kernel, matrix_token, stub_llm
     ):
         _register_general_agent_scripts(stub_llm)
@@ -937,13 +943,15 @@ class TestC1BoundedClosureGate:
             stub_kernel, matrix_token, task_id, _TERMINAL_WAIT_SECONDS
         )
         assert state.get("task.status") == "failed", (
-            f"C1 收束闸门后应 failed（无完成证据不可覆盖），"
+            f"C1 死循环终止后应 failed（无完成证据不可覆盖），"
             f"实际 {state.get('task.status')}，序列 {seen}"
         )
         _assert_real_llm_ran(stub_kernel, matrix_token, task_id, state, "C1")
         rounds = stub_llm.request_count("C1")
-        # 有界性：失败闸门（3 轮）+ 强制收束轮 + 兜底 end ≈ 5 轮，给硬上限
-        assert rounds <= 8, f"C1 应有界收束（<=8 轮），实际 {rounds} 轮（疑似无限循环）"
+        # 有界性（duplicate_check 三级算术）：前 4 轮变参探测 + 首个同参轮
+        # 计数归零 + 4 个拦截周期 × 3 轮（max_duplicate_calls=3）+ 终止轮
+        # ≈ 18 轮，给硬上限 20（不无限循环即有界）。
+        assert rounds <= 20, f"C1 应有界收束（<=20 轮），实际 {rounds} 轮（疑似无限循环）"
         print(f"[matrix] C1 收束轮数: {rounds}")
 
 

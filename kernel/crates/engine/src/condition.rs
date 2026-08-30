@@ -93,6 +93,26 @@ fn eval_value(expr: &Expr, state: &Value) -> Value {
         Expr::Literal(v) => v.clone(),
         Expr::List(items) => Value::Array(items.iter().map(|e| eval_value(e, state)).collect()),
         Expr::Path { root, steps } => {
+            // 平键优先：本仓 state 惯例是平铺点键（插件 state_updates 经
+            // set_key 平插 "task.status"/"router.duplicate_back_llm"，不拆
+            // 点）——全 Field 链先按平键整体查一次；未命中再走点链嵌套
+            // 解析（嵌套写入方兼容不变）。含 Index 下标的链无平键形态，
+            // 直接走嵌套解析。
+            let all_fields = steps.iter().all(|s| matches!(s, PathStep::Field(_)));
+            if all_fields && !steps.is_empty() {
+                let mut flat = root.clone();
+                for s in steps {
+                    if let PathStep::Field(f) = s {
+                        flat.push('.');
+                        flat.push_str(f);
+                    }
+                }
+                if let Some(obj) = state.as_object() {
+                    if let Some(v) = obj.get(&flat) {
+                        return v.clone();
+                    }
+                }
+            }
             let mut v = resolve_name(state, root);
             for step in steps {
                 v = match step {
@@ -756,6 +776,30 @@ mod tests {
     fn test_dot_chain() {
         let state = json!({ "pause_guard": { "checked": { "paused": true } } });
         assert!(eval_condition("pause_guard.checked.paused == True", &state));
+    }
+
+    #[test]
+    fn test_flat_dotted_key() {
+        // 平键点链：本仓 state 惯例是平铺点键（插件 state_updates 经 set_key
+        // 平插 "task.status"/"router.duplicate_back_llm"，不拆点）——路由条件
+        // 对平键形态必须命中，否则 post 路由表的路由恒假静默落入兜底 end。
+        let state = json!({ "task.status": "completed" });
+        assert!(eval_condition("task.status == 'completed'", &state));
+        assert!(!eval_condition("task.status == 'failed'", &state));
+        let flagged = json!({ "router.duplicate_back_llm": true });
+        assert!(eval_condition(
+            "router.duplicate_back_llm == True",
+            &flagged
+        ));
+        // 平键未命中时回退点链嵌套解析（嵌套写入方兼容不变）
+        let nested = json!({ "task": { "status": "completed" } });
+        assert!(eval_condition("task.status == 'completed'", &nested));
+        // 平键优先于嵌套：两者同场时平键获胜
+        let both = json!({
+            "task.status": "completed",
+            "task": { "status": "failed" }
+        });
+        assert!(eval_condition("task.status == 'completed'", &both));
     }
 
     #[test]
