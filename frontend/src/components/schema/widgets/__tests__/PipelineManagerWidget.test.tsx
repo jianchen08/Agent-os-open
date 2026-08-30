@@ -27,6 +27,9 @@ vi.mock('@/services/api/tasks', () => ({
   cancelTask: vi.fn(),
   fetchProjects: seed.mockFetchProjects,
 }))
+vi.mock('@/services/api/client', () => ({
+  default: { post: seed.mockWorkspaceOpen },
+}))
 vi.mock('@/services/pipelineNavigator', () => ({
   navigateToPipeline: vi.fn(),
 }))
@@ -190,6 +193,8 @@ const seed = vi.hoisted(() => {
   const mockUsePipelineStatesQuery = vi.fn(() => ({ data: FAKE_STATES }))
   /** 项目登记行（默认空——项目分组用例自行覆写） */
   const mockFetchProjects = vi.fn(() => Promise.resolve({ items: [] as unknown[] }))
+  /** 项目文件夹打开端点（workspaces open，默认成功信封） */
+  const mockWorkspaceOpen = vi.fn(() => Promise.resolve({ data: { success: true } }))
   /** 会话缓存读数与 ensureSessionsLoaded（S1 阻断用例需按用例覆写） */
   const mockReadSessions = vi.fn(() => [] as unknown[])
   const mockEnsureSessionsLoaded = vi.fn(() => Promise.resolve([] as unknown[]))
@@ -197,6 +202,7 @@ const seed = vi.hoisted(() => {
     mockReadSessions,
     mockEnsureSessionsLoaded,
     mockFetchProjects,
+    mockWorkspaceOpen,
     FAKE_RUNS,
     FAKE_STATES,
     FAKE_ALL_TASKS,
@@ -243,6 +249,7 @@ describe('PipelineManagerWidget', () => {
     seed.mockUsePipelineRunsQuery.mockReturnValue({ data: seed.FAKE_RUNS })
     seed.mockUsePipelineStatesQuery.mockReturnValue({ data: seed.FAKE_STATES })
     seed.mockFetchProjects.mockResolvedValue({ items: [] })
+    seed.mockWorkspaceOpen.mockResolvedValue({ data: { success: true } })
     // 导航 mock 跨用例清历史清实现（需返回值的用例自行 mockResolvedValue）
     vi.mocked(navigateToPipeline).mockReset()
   })
@@ -582,6 +589,32 @@ describe('PipelineManagerWidget', () => {
     fireEvent.click(projectRow)
     await waitFor(() => {
       expect(useAgentTabStore.getState().tabs.slice(tabsBefore)).toHaveLength(0)
+    })
+  })
+
+  it('项目分组行渲染打开文件夹按钮：点击调 workspaces open 端点（项目登记通道）', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockFetchProjects.mockResolvedValue({
+      items: [
+        { id: 'proj-open', goal: '可打开项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
+      ],
+    })
+
+    renderWithProviders(<PipelineManagerWidget />)
+    await screen.findByText('可打开项目')
+
+    // 只有项目行有「打开文件夹」按钮（本树无会话/任务条目）
+    const folderButtons = screen.getAllByLabelText('打开文件夹')
+    expect(folderButtons).toHaveLength(1)
+
+    // 点击 → workspaces open 端点收到裸项目登记 id（后端登记通道解析文件夹）
+    fireEvent.click(folderButtons[0])
+    await waitFor(() => {
+      expect(seed.mockWorkspaceOpen).toHaveBeenCalledWith(
+        '/ext/workspace_service/workspaces/proj-open/open',
+      )
     })
   })
 })

@@ -57,6 +57,8 @@ export interface PipelineViewEntry {
   agentName?: string
   /** 关联任务 ID（kind=task 时有值） */
   taskId?: string
+  /** 项目登记行 id（kind=project 时有值——文件夹打开面按登记 id 解析） */
+  projectId?: string
   /** 归属会话标题（threadId 命中会话列表时有值；无则视为无归属孤儿管道） */
   sessionTitle?: string
   /** 工作区坐标（R3：state 真值 ws_meta.path/workspace 优先，任务 metadata

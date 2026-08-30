@@ -25,9 +25,12 @@ import {
   FolderTree,
   CopyIcon,
   ExternalLink,
+  FolderOpen,
   InfoIcon,
   MessageSquare,
 } from '@/assets/icons'
+import apiClient from '@/services/api/client'
+import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
 import { invalidateLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
 import { usePipelineRunsQuery, usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
@@ -460,6 +463,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         entry: {
           key,
           runId: key,
+          projectId: pid,
           status: 'running',
           startedAt: String(p.timestamps?.createdAt ?? ''),
           kind: 'project',
@@ -693,11 +697,11 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     })
   }, [])
 
-  /** 操作：暂停/恢复/取消（任务管道）/复制 ID/打开工作空间 */
+  /** 操作：暂停/恢复/取消（任务管道）/复制 ID/打开工作空间/打开项目文件夹 */
   const handleAction = useCallback(
     async (
       entry: PipelineViewEntry,
-      action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace',
+      action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
     ) => {
       const pipelineId = entry.pipelineId || entry.key
       if (action === 'copy') {
@@ -705,6 +709,43 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
           await navigator.clipboard.writeText(pipelineId)
         } catch {
           // clipboard 不可用时静默失败
+        }
+        return
+      }
+      if (action === 'open-folder') {
+        // 项目文件夹打开：workspaces open 端点的项目登记通道按 id 解析文件夹，
+        // 有 IDE 连接器走连接器、否则系统文件管理器（与工作区标签内按钮同链路）
+        if (!entry.projectId) return
+        try {
+          const resp = await apiClient.post(
+            WORKSPACE_SERVICE_ENDPOINTS.workspaces_open.replace(
+              '{container_task_id}',
+              entry.projectId,
+            ),
+          )
+          const data = resp?.data as { success?: boolean; message?: string } | undefined
+          if (data && data.success === false) {
+            useNotificationStore.getState().addNotification({
+              title: '打开文件夹失败',
+              message: data.message || '后端未能打开项目文件夹',
+              priority: 'normal',
+              category: 'alert',
+              isBlocking: false,
+              autoDismissMs: 6000,
+              sourceLabel: '前端',
+            })
+          }
+        } catch (e) {
+          console.error('[PipelineManager] 打开项目文件夹失败', e)
+          useNotificationStore.getState().addNotification({
+            title: '打开文件夹失败',
+            message: `项目 ${entry.name} 打开失败，请稍后重试`,
+            priority: 'normal',
+            category: 'alert',
+            isBlocking: false,
+            autoDismissMs: 6000,
+            sourceLabel: '前端',
+          })
         }
         return
       }
@@ -893,7 +934,10 @@ function PipelineTree({
   onTreeToggle: (key: string) => void
   onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
-  onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
+  onAction: (
+    entry: PipelineViewEntry,
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+  ) => void
 }) {
   // 主管道（顶层）与容器任务按状态分组：执行中 / 最近完成（子树跟随父级）
   const isActiveNode = (n: PipelineTreeNode): boolean =>
@@ -980,7 +1024,10 @@ function TreeGroup({
   onTreeToggle: (key: string) => void
   onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
-  onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
+  onAction: (
+    entry: PipelineViewEntry,
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+  ) => void
 }) {
   const [collapsed, setCollapsed] = useState(false)
   return (
@@ -1048,7 +1095,10 @@ function TreeChildren({
   onTreeToggle: (key: string) => void
   onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
-  onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
+  onAction: (
+    entry: PipelineViewEntry,
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+  ) => void
 }) {
   return (
     <div>
@@ -1111,7 +1161,10 @@ function EntryRow({
   onTreeToggle: (key: string) => void
   onToggleDetail: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
-  onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
+  onAction: (
+    entry: PipelineViewEntry,
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+  ) => void
 }) {
   const status = statusIcon(entry.status)
   const durationMs = entry.endedAt
@@ -1240,6 +1293,20 @@ function EntryRow({
               tabIndex={-1}
             >
               <MessageSquare className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {entry.kind === 'project' && entry.projectId && (
+            <button
+              className="bg-primary/15 text-primary hover:bg-primary/25 flex h-6 w-6 items-center justify-center rounded transition-colors"
+              onClick={(e) => {
+                e.stopPropagation()
+                onAction(entry, 'open-folder')
+              }}
+              title="在系统文件管理器中打开项目文件夹"
+              aria-label="打开文件夹"
+              tabIndex={-1}
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
             </button>
           )}
           <button
@@ -1385,7 +1452,10 @@ function PipelineTable({
   expandedKeys: Set<string>
   onToggle: (key: string) => void
   onEntryClick: (entry: PipelineViewEntry) => void
-  onAction: (entry: PipelineViewEntry, action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace') => void
+  onAction: (
+    entry: PipelineViewEntry,
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+  ) => void
 }) {
   if (entries.length === 0) {
     return (
@@ -1501,6 +1571,20 @@ function PipelineTable({
                           tabIndex={-1}
                         >
                           <MessageSquare className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      {entry.kind === 'project' && entry.projectId && (
+                        <button
+                          className="bg-primary/15 text-primary hover:bg-primary/25 flex h-6 w-6 items-center justify-center rounded"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onAction(entry, 'open-folder')
+                          }}
+                          title="在系统文件管理器中打开项目文件夹"
+                          aria-label="打开文件夹"
+                          tabIndex={-1}
+                        >
+                          <FolderOpen className="h-3.5 w-3.5" />
                         </button>
                       )}
                       <button
