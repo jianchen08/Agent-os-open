@@ -131,6 +131,24 @@ class TestSubtask:
         assert meta["path"] == str(parent_ws)
         assert meta["project_root"] == str(parent_ws)
 
+    def test_explicit_worktree_builds_isolation_copy(self, tmp_path: Path) -> None:
+        """显式 workspace（挂项目）的 worktree 子任务：在源目录（项目文件夹）
+        上建隔离 worktree，不继承父工作空间（2026-08-30 修复：项目挂靠曾被
+        子任务继承父逻辑吞掉，任务跑进会话目录）。"""
+        source = tmp_path / "proj"
+        _git_init(source)
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m._start_subtask(
+            "sub1",
+            str(source),
+            {"workspace_mode": "worktree", "_has_explicit_workspace": True},
+        )
+        assert meta["mode"] == "worktree"
+        assert meta["project_root"] == str(source)
+        assert meta["branch"] == "task/sub1"
+        assert Path(meta["path"]).is_dir()
+        assert meta["path"] != str(source)
+
     def test_inherited_parent_ws_meta_preferred(self, tmp_path: Path) -> None:
         """出生契约继承（lineage.parent_ws_meta）优先：聚合查找缺席也能共享父空间。
 

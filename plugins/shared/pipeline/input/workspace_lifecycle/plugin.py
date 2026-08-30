@@ -409,7 +409,11 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                 "is_root": not _parent_id,
                 "workspace_mode": mode,
                 "isolation_mode": (ec.get("isolation") or {}).get("level", ""),
-                "_has_explicit_workspace": bool(ws_spec.get("explicit")),
+                # 显式坐标 = 调用方显式 workspace 或项目挂靠（task_submit 解析
+                # 项目时恒把 workspace 覆写为项目文件夹）——两者都不得被
+                # 子任务"继承父工作空间"缺省覆盖。
+                "_has_explicit_workspace": bool(ws_spec.get("explicit"))
+                or bool(state.get("task.parent_project_id")),
                 "_inherit_workspace_resolved": False,
                 "_inherited_parent_ws_meta": _inherited_ws_meta,
             }

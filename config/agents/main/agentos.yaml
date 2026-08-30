@@ -156,6 +156,7 @@ dynamic_vars:
 tool_ids:
 - task_submit
 - task_manage
+- project_create
 - memory
 - resource_search
 - human_interaction

@@ -11,9 +11,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
 
 import { CreateTaskFormModal } from '../CreateTaskFormModal'
-import { createRootTask } from '@/services/api/tasks'
+import { createProject, createRootTask } from '@/services/api/tasks'
 
 vi.mock('@/services/api/tasks', () => ({
+  createProject: vi.fn(),
   createRootTask: vi.fn(),
 }))
 
@@ -30,11 +31,13 @@ vi.mock('../FormWidget', () => ({
 }))
 
 const createRootMock = vi.mocked(createRootTask)
+const createProjectMock = vi.mocked(createProject)
 
 beforeEach(() => {
   h.formProps = {}
   createRootMock.mockReset()
   createRootMock.mockResolvedValue(undefined as never)
+  createProjectMock.mockReset()
 })
 
 async function submit(values: Record<string, unknown>): Promise<void> {
@@ -92,7 +95,10 @@ describe('CreateTaskFormModal：字段声明后移 + 提交派生', () => {
     )
   })
 
-  it('新建项目：project_title/project_path 透传（与 project_id 互斥）', async () => {
+  it('新建项目：先 projects 域创建（无执行者）再挂靠创建任务', async () => {
+    createProjectMock.mockResolvedValue({
+      id: 'newproj000001',
+    } as never)
     render(
       <CreateTaskFormModal isOpen onClose={() => {}} sessionId="sess_1" onCreated={() => {}} />,
     )
@@ -104,11 +110,12 @@ describe('CreateTaskFormModal：字段声明后移 + 提交派生', () => {
       workspace_mode: 'worktree',
       isolation_level: '',
     })
+    expect(createProjectMock).toHaveBeenCalledWith('新项目', 'sess_1', {
+      path: 'D:/new_proj',
+    })
     expect(createRootMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        project_title: '新项目',
-        project_path: 'D:/new_proj',
-        project_id: undefined,
+        project_id: 'newproj000001',
         workspace_mode: 'worktree',
       }),
     )

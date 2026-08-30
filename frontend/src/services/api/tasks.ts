@@ -98,8 +98,8 @@ export async function createProject(
  * 手动创建根任务
  *
  * 用户以 L1 身份手动发起一项工作（等价于 L1 主 agent 调 task_submit 提根任务），
- * 为 L2+ 子 agent 提供合法的任务上下文；project_id 挂靠项目（= 文件夹+登记），
- * project_title/project_path 新建项目并挂靠（与 project_id 二选一）。
+ * 为 L2+ 子 agent 提供合法的任务上下文；project_id 挂靠项目（= 文件夹+登记，
+ * 项目创建与任务解耦：新建项目走 createProject 独立入口，本接口只挂靠）。
  *
  * @param payload 根任务参数
  * @returns 新创建的任务
@@ -109,10 +109,6 @@ export async function createRootTask(payload: {
   description?: string
   /** 挂靠项目 id（可选，任务在项目文件夹下执行） */
   project_id?: string
-  /** 新建项目标题（可选，与 project_id 二选一；填了则创建项目并挂靠） */
-  project_title?: string
-  /** 新建项目文件夹（可选，配合 project_title；缺省自动生成） */
-  project_path?: string
   target_id?: string
   workspace?: string
   /** 工作空间拓扑（与隔离解耦）：worktree（默认）/ plain */

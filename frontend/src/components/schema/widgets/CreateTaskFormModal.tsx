@@ -13,7 +13,7 @@ import { useMemo } from 'react'
 import { TASK_FORM_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { toast } from '@/components/ui/sonner'
 import { FormWidget } from './FormWidget'
-import { createRootTask } from '@/services/api/tasks'
+import { createProject, createRootTask } from '@/services/api/tasks'
 
 export function CreateTaskFormModal({
   isOpen,
@@ -51,12 +51,18 @@ export function CreateTaskFormModal({
         const projectId = String(values.project_id ?? '').trim()
         const projectTitle = String(values.project_title ?? '').trim()
         const projectPath = String(values.project_path ?? '').trim()
+        // 新建项目与任务解耦：先经 projects 域独立创建（无执行者），再挂靠创建任务
+        let attachProjectId = projectId || undefined
+        if (!attachProjectId && projectTitle) {
+          const project = await createProject(projectTitle, sessionId, {
+            path: projectPath || undefined,
+          })
+          attachProjectId = project.id
+        }
         await createRootTask({
           title: String(values.title ?? '').trim(),
           description: String(values.description ?? '').trim(),
-          project_id: projectId || undefined,
-          project_title: projectTitle || undefined,
-          project_path: projectPath || undefined,
+          project_id: attachProjectId,
           target_id: targetId,
           workspace: String(values.workspace ?? '').trim(),
           workspace_mode: workspaceMode,
@@ -64,11 +70,11 @@ export function CreateTaskFormModal({
           thread_id: sessionId,
         })
         toast.success(
-          projectId
-            ? '任务已创建并挂靠项目，开始执行'
-            : projectTitle
-              ? '任务已创建并新建项目挂靠，开始执行'
-              : '任务已创建并开始执行',
+          attachProjectId
+            ? projectTitle
+              ? '项目已创建，任务已挂靠并开始执行'
+              : '任务已创建并挂靠项目，开始执行'
+            : '任务已创建并开始执行',
         )
         onCreated()
       }}

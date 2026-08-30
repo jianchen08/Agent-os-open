@@ -70,8 +70,6 @@ class TaskRootCreate(BaseModel):
     title: str
     description: str = ""
     project_id: str = ""  # 挂靠项目 id（登记行；空 = 独立任务）
-    project_title: str = ""  # 新建项目标题（与 project_id 二选一；填了则创建项目并挂靠）
-    project_path: str = ""  # 新建项目文件夹（配合 project_title；缺省自动生成）
     target_id: str = ""  # 执行 agent（必填）
     workspace: str = ""
     workspace_mode: str = ""  # worktree/plain（空 = 工具侧按 workspace 显式性缺省）
@@ -755,9 +753,6 @@ async def create_root_task(
     }
     if body.project_id:
         inputs["project_id"] = body.project_id
-    if body.project_title:
-        inputs["project_title"] = body.project_title
-        inputs["project_path"] = body.project_path
     if body.inherit:
         inputs["inherit"] = body.inherit
 

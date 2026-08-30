@@ -111,6 +111,32 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             )
             return meta
 
+        # 显式 workspace（挂项目/调用方指定源目录）的 worktree 子任务：在源
+        # 目录（项目文件夹）上建隔离 worktree（与根任务 worktree 同构）——
+        # 项目挂靠语义 = 任务工作空间锚定项目文件夹；父链继承只是"无显式
+        # 坐标"的缺省，不得覆盖显式项目锚（2026-08-30 诊断：挂 project 的
+        # 子任务 worktree 被继承父工作空间吞掉，任务跑进会话目录）。
+        if (
+            task_data.get("_has_explicit_workspace")
+            and task_data.get("workspace_mode", "") == "worktree"
+            and workspace
+        ):
+            ws_base = self._get_workspace_root()
+            root_path = Path(workspace)
+            if not root_path.exists():
+                root_path.mkdir(parents=True, exist_ok=True)
+            self._prepare_root_repo(root_path, task_id)
+            meta = self._create_worktree_root(ws_base, root_path, task_id)
+            self._ws_meta_store[task_id] = meta
+            logger.info(
+                "[WorkspaceLifecycle] worktree 拓扑(子任务): 源目录建隔离副本 "
+                "task_id=%s, source=%s, path=%s",
+                task_id,
+                root_path,
+                meta["path"],
+            )
+            return meta
+
         inherited = task_data.get("_inherited_parent_ws_meta")
         inherited_path = ""
         inherited_root = ""
