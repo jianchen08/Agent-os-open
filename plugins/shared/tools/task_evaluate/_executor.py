@@ -208,6 +208,12 @@ class PipelineEvaluationExecutor:
         origin_session = str(
             (task_row or {}).get("lineage.origin_session_id") or task_id
         )
+        # 会话归属（task_submit 出生契约同款）：被评估任务行的 thread_id = 其
+        # 归属会话（pipeline_sessions 真映射）——评估子管道挂同一会话，前端
+        # 管道树可见可定位；缺会话（自环根任务）不传，保持 task_birth 缺省语义。
+        ownership_thread = str(task_row.get("thread_id") or "")
+        if not ownership_thread or ownership_thread == task_id:
+            ownership_thread = ""
 
         kickoff = (
             f"评估任务 {task_id[:8]} 的指标 {metric_id}。\n"
@@ -216,11 +222,24 @@ class PipelineEvaluationExecutor:
             '```json\n{"evaluation_result": {"passed": true/false, "score": 0-100, '
             '"feedback": "评估说明..."}}\n```'
         )
+        # 执行环境共享（task_submit 子任务同款 execution_context）：工作区声明
+        # 指向被评估任务工作区（workspace_lifecycle 见 state.workspace 已就位
+        # 幂等跳过创建，同目录跑）；隔离声明按任务默认隔离执行（isolation_guard/
+        # environment_lifecycle 的容器决策消费键）。
+        execution_context: dict[str, Any] = {
+            "workspace": {
+                "source_path": str(ws_meta["path"]),
+                "mode": str(ws_meta.get("mode") or "plain"),
+                "explicit": True,
+            },
+            "isolation": {"level": "isolated"},
+        }
         dispatch: dict[str, Any] = {
             "create": True,
             "message": kickoff,
             "user_id": "task_system",
             "agent_id": _EVALUATOR_AGENT_ID,
+            "execution_context": execution_context,
             "state": {
                 # 血缘扁平键（有父形式）：父 = 被评估任务管道
                 "lineage.parent_pipeline_id": task_id,
@@ -238,6 +257,8 @@ class PipelineEvaluationExecutor:
             },
             "background": True,
         }
+        if ownership_thread:
+            dispatch["thread_id"] = ownership_thread
 
         try:
             resp = await self._chat_send(dispatch)

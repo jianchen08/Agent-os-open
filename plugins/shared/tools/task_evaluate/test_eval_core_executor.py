@@ -534,6 +534,66 @@ class TestAgentMetricPipelineExtra:
         assert r.results[0].passed is True
         assert dispatch_calls[0]["state"]["workspace"] == str(ws)
 
+    def test_dispatch_inherits_session_thread(self, exec_mod: Any, metrics_path: str, tmp_path: Path) -> None:
+        """评估子管道与 task_submit 子任务同款：挂被评估任务的归属会话
+        （thread_id 真会话映射，前端管道树可见可定位）+ execution_context
+        共享执行环境（工作区 + 隔离声明）。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        dispatch_calls: list[dict[str, Any]] = []
+
+        async def chat_send(params: dict[str, Any]) -> dict[str, Any]:
+            dispatch_calls.append(params)
+            return {"pipeline_id": "evalPipe1"}
+
+        async def state_rows() -> list[dict[str, Any]]:
+            return [
+                {
+                    "pipeline_id": "taskP1",
+                    "thread_id": "sessRoot1",
+                    "task.ws_meta": {"mode": "worktree", "path": str(ws)},
+                    "lineage.origin_session_id": "sessRoot1",
+                },
+                {"pipeline_id": "evalPipe1", "evaluation.detected_result": {"passed": True, "score": 85, "feedback": "ok"}},
+            ]
+
+        ex = _make_executor(exec_mod, chat_send=chat_send, state_rows=state_rows, metrics=metrics_path)
+        r = _run(ex.run_evaluation("taskP1", ["semantic_check"], {}))
+        assert r.results[0].passed is True
+        assert len(dispatch_calls) == 1
+        d = dispatch_calls[0]
+        # 会话归属：真会话（非自环）——task_submit 出生契约同款
+        assert d["thread_id"] == "sessRoot1"
+        # 执行环境共享：工作区 + 隔离声明一次给全（environment_lifecycle 解析
+        # environment_basis、isolation_guard 容器决策的消费键）
+        ec = d.get("execution_context") or {}
+        assert ec["workspace"] == {"source_path": str(ws), "mode": "worktree", "explicit": True}
+        assert ec["isolation"] == {"level": "isolated"}
+
+    def test_dispatch_without_thread_keeps_selfloop(self, exec_mod: Any, metrics_path: str, tmp_path: Path) -> None:
+        """被评估任务无会话归属（行缺 thread_id，自环根任务）→ 不传 thread_id
+        （保持自环，与 task_birth 缺省语义一致），execution_context 仍共享。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        dispatch_calls: list[dict[str, Any]] = []
+
+        async def chat_send(params: dict[str, Any]) -> dict[str, Any]:
+            dispatch_calls.append(params)
+            return {"pipeline_id": "evalPipe1"}
+
+        async def state_rows() -> list[dict[str, Any]]:
+            return [
+                {"pipeline_id": "taskP1", "task.ws_meta": {"mode": "plain", "path": str(ws)}},
+                {"pipeline_id": "evalPipe1", "evaluation.detected_result": {"passed": True, "score": 60, "feedback": "ok"}},
+            ]
+
+        ex = _make_executor(exec_mod, chat_send=chat_send, state_rows=state_rows, metrics=metrics_path)
+        r = _run(ex.run_evaluation("taskP1", ["semantic_check"], {}))
+        assert r.results[0].passed is True
+        assert "thread_id" not in dispatch_calls[0]
+        ec = dispatch_calls[0].get("execution_context") or {}
+        assert ec["workspace"]["source_path"] == str(ws)
+
     def test_recover_detected_result_first_poll(self, exec_mod: Any, metrics_path: str, tmp_path: Path) -> None:
         ws = tmp_path / "ws"
         ws.mkdir()
