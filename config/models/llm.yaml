@@ -9,11 +9,18 @@ defaults:
   first_token_timeout: 120
   stream_idle_timeout: 180
   tiers:
-    large: minimax-m3
+    large: deepseek-v4-flash
     medium: minimax-m3
     small: minimax-m3
 embeddings: {}
 models:
+  bge-m3:
+    api_base: https://api.siliconflow.cn/v1/
+    context_window: 8192
+    dimension: 1024
+    display_name: BGE-M3 (SiliconFlow)
+    model_name: BAAI/bge-m3
+    provider: siliconflow
   deepseek-v4-flash:
     api_base: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY}
@@ -30,17 +37,13 @@ models:
     model_name: deepseek-v4-flash
     provider: deepseek
     reasoning_model: true
-    # 思考强度 → 思考参数路由规则（模型级，不同模型可不同；未配置档位回退
-    # llm_core 内置默认表）。只覆盖思考相关参数（reasoning_effort / thinking）；
-    # temperature/max_tokens 等采样参数不随强度变化（始终用 default_params）。
-    # DeepSeek 经 openai 中转时 reasoning_effort 自动进 extra_body 透传。
     thinking_strength_params:
+      high:
+        reasoning_effort: max
       low:
         reasoning_effort: low
       medium:
         reasoning_effort: medium
-      high:
-        reasoning_effort: max
   deepseek-v4-pro:
     api_base: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY}
@@ -71,15 +74,6 @@ models:
     display_name: Embedding-3
     model_name: embedding-3
     provider: zhipu_coding
-  bge-m3:
-    # BAAI/bge-m3 @ 硅基流动（免费，国内直连，1024 维，8K 上下文）
-    # 用于 Hindsight 记忆库向量检索。OpenAI 兼容端点。
-    api_base: https://api.siliconflow.cn/v1/
-    context_window: 8192
-    dimension: 1024
-    display_name: BGE-M3 (SiliconFlow)
-    model_name: BAAI/bge-m3
-    provider: siliconflow
   glm-5.2:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
     context_window: 1000000
@@ -137,7 +131,6 @@ models:
     provider: mock_llm
 providers:
   anthropic:
-    # Anthropic 官方（litellm 原生 anthropic 前缀）。获取 key: https://console.anthropic.com
     api_base: https://api.anthropic.com
     keys:
     - api_key: ${ANTHROPIC_API_KEY}
@@ -147,7 +140,6 @@ providers:
       token_quota: 0
     type: anthropic
   cerebras:
-    # Cerebras（超低延迟推理）。获取 key: https://cloud.cerebras.ai
     api_base: https://api.cerebras.ai/v1
     keys:
     - api_key: ${CEREBRAS_API_KEY}
@@ -157,13 +149,21 @@ providers:
       token_quota: 0
     type: openai
   cohere:
-    # Cohere（OpenAI 兼容端点）。获取 key: https://dashboard.cohere.com/api-keys
     api_base: https://api.cohere.ai/compatibility/v1
     keys:
     - api_key: ${COHERE_API_KEY}
       id: cohere_main
       max_concurrent: 6
       rpm: 10
+      token_quota: 0
+    type: openai
+  deepinfra:
+    api_base: https://api.deepinfra.com/v1/openai
+    keys:
+    - api_key: ${DEEPINFRA_API_KEY}
+      id: deepinfra_main
+      max_concurrent: 6
+      rpm: 30
       token_quota: 0
     type: openai
   deepseek:
@@ -175,19 +175,7 @@ providers:
       rpm: 10
       token_quota: 0
     type: deepseek
-  deepinfra:
-    # DeepInfra（开源模型托管）。获取 key: https://deepinfra.com/dashborad/keys
-    api_base: https://api.deepinfra.com/v1/openai
-    keys:
-    - api_key: ${DEEPINFRA_API_KEY}
-      id: deepinfra_main
-      max_concurrent: 6
-      rpm: 30
-      token_quota: 0
-    type: openai
   doubao:
-    # 豆包（火山方舟 Ark v3，OpenAI 兼容）。获取 key: https://console.volcengine.com/ark
-    # 部分模型需在方舟控制台开通后才能调用
     api_base: https://ark.cn-beijing.volces.com/api/v3
     keys:
     - api_key: ${ARK_API_KEY}
@@ -197,7 +185,6 @@ providers:
       token_quota: 0
     type: openai
   fireworks:
-    # Fireworks AI（开源模型托管）。获取 key: https://fireworks.ai/account/api-keys
     api_base: https://api.fireworks.ai/inference/v1
     keys:
     - api_key: ${FIREWORKS_API_KEY}
@@ -207,7 +194,6 @@ providers:
       token_quota: 0
     type: openai
   gemini:
-    # Google Gemini（OpenAI 兼容端点）。获取 key: https://aistudio.google.com/apikey
     api_base: https://generativelanguage.googleapis.com/v1beta/openai/
     keys:
     - api_key: ${GEMINI_API_KEY}
@@ -217,7 +203,6 @@ providers:
       token_quota: 0
     type: openai
   groq:
-    # Groq（超低延迟推理）。获取 key: https://console.groq.com/keys
     api_base: https://api.groq.com/openai/v1
     keys:
     - api_key: ${GROQ_API_KEY}
@@ -227,8 +212,6 @@ providers:
       token_quota: 0
     type: openai
   huawei:
-    # 华为云 ModelArts MaaS（OpenAI 兼容端点）。
-    # 获取 key: https://console.huaweicloud.com/modelarts/
     api_base: https://api.modelarts-maas.com/v1
     keys:
     - api_key: ${MODELARTS_API_KEY}
@@ -238,7 +221,6 @@ providers:
       token_quota: 0
     type: openai
   hunyuan:
-    # 腾讯混元（OpenAI 兼容端点）。获取 key: https://console.cloud.tencent.com/hunyuan
     api_base: https://api.hunyuan.cloud.tencent.com/v1
     keys:
     - api_key: ${HUNYUAN_API_KEY}
@@ -257,7 +239,6 @@ providers:
       token_quota: 0
     type: minimax
   mistral:
-    # Mistral AI。获取 key: https://console.mistral.ai/api-keys
     api_base: https://api.mistral.ai/v1
     keys:
     - api_key: ${MISTRAL_API_KEY}
@@ -276,7 +257,6 @@ providers:
       token_quota: 0
     type: openai
   modelscope:
-    # 魔搭 ModelScope（部分模型免费额度）。获取 key: https://modelscope.cn/my/myaccesstoken
     api_base: https://api-inference.modelscope.cn/v1
     keys:
     - api_key: ${MODELSCOPE_API_KEY}
@@ -286,7 +266,6 @@ providers:
       token_quota: 0
     type: openai
   moonshot:
-    # 月之暗面 Kimi（OpenAI 兼容）。获取 key: https://platform.moonshot.cn
     api_base: https://api.moonshot.cn/v1
     keys:
     - api_key: ${MOONSHOT_API_KEY}
@@ -296,17 +275,15 @@ providers:
       token_quota: 0
     type: openai
   ollama:
-    # Ollama 本地推理（无需真实 key，OpenAI 兼容端点）
     api_base: http://127.0.0.1:11434/v1
     keys:
-    - api_key: ollama
+    - api_key: '****'
       id: ollama_main
       max_concurrent: 4
       rpm: 100
       token_quota: 0
     type: openai
   openai:
-    # OpenAI 官方。获取 key: https://platform.openai.com/api-keys
     api_base: https://api.openai.com/v1
     keys:
     - api_key: ${OPENAI_API_KEY}
@@ -316,8 +293,6 @@ providers:
       token_quota: 0
     type: openai
   opencode:
-    # OpenCode Zen/Go 订阅（OpenAI 兼容网关，Go 为订阅套餐）。
-    # 获取 key: https://opencode.ai/auth（Zen）或 https://opencode.ai/go（Go 订阅）
     api_base: https://opencode.ai/zen/v1
     keys:
     - api_key: ${OPENCODE_ZEN_API_KEY}
@@ -327,7 +302,6 @@ providers:
       token_quota: 0
     type: openai
   openrouter:
-    # OpenRouter（聚合 400+ 模型）。获取 key: https://openrouter.ai/keys
     api_base: https://openrouter.ai/api/v1
     keys:
     - api_key: ${OPENROUTER_API_KEY}
@@ -337,7 +311,6 @@ providers:
       token_quota: 0
     type: openai
   perplexity:
-    # Perplexity（搜索增强模型）。获取 key: https://www.perplexity.ai/settings/api
     api_base: https://api.perplexity.ai
     keys:
     - api_key: ${PERPLEXITY_API_KEY}
@@ -347,7 +320,6 @@ providers:
       token_quota: 0
     type: openai
   qianfan:
-    # 百度千帆（OpenAI 兼容端点 v2）。获取 key: https://console.bce.baidu.com/iam/#/iam/apikey
     api_base: https://qianfan.baidubce.com/v2
     keys:
     - api_key: ${QIANFAN_API_KEY}
@@ -357,8 +329,6 @@ providers:
       token_quota: 0
     type: openai
   qwen:
-    # 阿里通义千问（百炼 DashScope OpenAI 兼容模式）。
-    # 获取 key: https://bailian.console.aliyun.com（API-KEY 管理）
     api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
     keys:
     - api_key: ${DASHSCOPE_API_KEY}
@@ -368,8 +338,6 @@ providers:
       token_quota: 0
     type: openai
   siliconflow:
-    # 硅基流动 SiliconFlow（embedding: BAAI/bge-m3 免费）
-    # OpenAI 兼容端点，国内直连。获取 key: https://siliconflow.cn
     api_base: https://api.siliconflow.cn/v1/
     keys:
     - api_key: ${SILICONFLOW_API_KEY}
@@ -379,7 +347,6 @@ providers:
       token_quota: 0
     type: openai
   spark:
-    # 讯飞星火（OpenAI 兼容端点）。获取 key: https://xinghuo.xfyun.cn
     api_base: https://spark-api-open.xf-yun.com/v1
     keys:
     - api_key: ${SPARK_API_KEY}
@@ -389,7 +356,6 @@ providers:
       token_quota: 0
     type: openai
   stepfun:
-    # 阶跃星辰 Step. 获取 key: https://platform.stepfun.com
     api_base: https://api.stepfun.com/v1
     keys:
     - api_key: ${STEPFUN_API_KEY}
@@ -399,7 +365,6 @@ providers:
       token_quota: 0
     type: openai
   together:
-    # Together AI（开源模型托管）。获取 key: https://api.together.ai/settings/api-keys
     api_base: https://api.together.xyz/v1
     keys:
     - api_key: ${TOGETHER_API_KEY}
@@ -409,7 +374,6 @@ providers:
       token_quota: 0
     type: openai
   xai:
-    # xAI Grok。获取 key: https://console.x.ai
     api_base: https://api.x.ai/v1
     keys:
     - api_key: ${XAI_API_KEY}
