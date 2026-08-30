@@ -133,21 +133,13 @@ export const MessageList = ({
   const isNearTop = useRef(false)
   /**
    * 是否"跟随底部"——决定流式/新内容时是否把视图钉在底部。
-   * 初始 true（看最新消息）；用户主动上滑 → false（停止跟随，翻历史）；
-   * 用户滚回底部附近 → true（恢复跟随）。
-   * 这是控制流式钉底的关键：用户上滑必须立即停止跟随，否则滚不动。
+   * 初始 true（看最新消息）；视口上移 → false（停止跟随，翻历史，滚动条拖拽/
+   * 键盘滚动同样生效）；用户滚回底部附近 → true（恢复跟随）。
+   * 这是控制流式钉底的关键：用户上移必须立即停止跟随，否则滚不动。
    */
   const isFollowingBottom = useRef(true)
   /** 首次滚动是否完成 */
   const initialScrollDone = useRef(false)
-  /**
-   * 用户是否通过真实手势（wheel/touch）滚动过。
-   * 用于区分"用户主动上滑"与"程序性滚动"（高度变化导致 scrollTop 变小）。
-   * onScroll 对两者都会触发，但只有真实手势才算用户意图上滑。
-   * 刷新恢复时 initFromAPI 重建导致高度突减，浏览器程序性滚动会触发 onScroll，
-   * 若仅凭 scrollTop 方向判断会把 isFollowingBottom 误置 false → 不钉底 → 停中间。
-   */
-  const userScrolled = useRef(false)
   const prevGenerating = useRef(false)
   /** 上一帧消息数量，用于判断是新消息追加还是 prepend 历史 */
   const lastMessageCount = useRef(messages.length)
@@ -225,13 +217,12 @@ export const MessageList = ({
    * - 当前管道非跟随底部（定位时停止钉底，避免流式/内容变化把视图拉回）。
    *
    * 滚动经 requestAnimationFrame 排队：首次定位的 RAF 钉底先执行，本定位后执行，
-   * 避免被钉底覆盖。定位后置 userScrolled，1.2s 轮询钉底随即停止。
+   * 避免被钉底覆盖。定位后置 isFollowingBottom=false，首次钉底轮询随即终止。
    */
   useEffect(() => {
     if (!jumpTarget || !jumpMessageId) return
     // 停止跟随底部：定位是用户意图，后续内容变化不得把视图拉回底部
     isFollowingBottom.current = false
-    userScrolled.current = true
     const el = scrollRef.current
     if (!el) return
     const anchor = el.querySelector<HTMLElement>(`[data-msg-id="${jumpMessageId}"]`)
@@ -252,10 +243,15 @@ export const MessageList = ({
   /**
    * 滚动事件处理
    *
-   * 用 scrollTop 方向判断用户意图——只要用户往上滚（scrollTop 变小），
-   * 立即停止跟随（isFollowingBottom=false）并断开钉底 observer，把控制权完全交给用户。
-   * 不等"离开底部 150px"才停（流式期间若等过阈值才停，下一帧又会被钉底拉回，导致"滚不动"）。
-   * 滚回底部附近时恢复跟随。
+   * 用 scrollTop 方向判定用户意图——视口上移（scrollTop 变小）立即停止跟随
+   * （isFollowingBottom=false）并断开钉底 observer，把控制权完全交给用户。
+   * 不区分手势：滚动条拖拽/键盘滚动没有 wheel/touch 事件，同样是用户意图。
+   * 不等"离开底部 150px"才停（流式期间若等过阈值才停，下一帧又会被钉底拉回，
+   * 导致"滚不动"）。滚回底部附近时恢复跟随。
+   *
+   * 程序性上移（内容收缩引发的浏览器钳制、scroll-anchoring 视口保持）由底部
+   * 恢复自愈，无需单独豁免：钳制落点必在底部，锚定保持视口原位（跟随中距底
+   * ≈0），两者停下时都满足 isNearBottom，同一事件内随即恢复跟随，不会停中间。
    */
   const onScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
@@ -268,15 +264,13 @@ export const MessageList = ({
       // 实时记录：卸载时 DOM 内容已被 React 清空（scrollHeight=0），读 DOM 拿到的是 0
       lastScrollTopRef.current = scrollTop
 
-      // 用户主动上滑（scrollTop 变小）→ 立即停止跟随。
-      // contentResize observer 内部判断 isFollowingBottom，停止跟随后不再钉底。
-      // 仅在用户通过真实手势（wheel/touch）滚动时才判定为"主动上滑"。
-      // 刷新恢复时 initFromAPI 重建导致高度突减，浏览器产生程序性滚动（无手势），
-      // 此时不应把 isFollowingBottom 置 false，否则后续 ResizeObserver 不钉底 → 停中间。
-      if (scrollTop < prevScrollTop - 1 && userScrolled.current) {
+      // 视口上移 → 用户翻历史，停止跟随。
+      // contentResize observer 与各钉底点内部判断 isFollowingBottom，
+      // 停止跟随后不再钉底。
+      if (scrollTop < prevScrollTop - 1) {
         isFollowingBottom.current = false
       }
-      // 用户滚回底部附近 → 恢复跟随
+      // 用户滚回底部附近（含程序性上移的自愈落点）→ 恢复跟随
       if (isNearBottom.current) {
         isFollowingBottom.current = true
       }
@@ -304,10 +298,16 @@ export const MessageList = ({
     if (messages.length === 0 || initialScrollDone.current) return
     initialScrollDone.current = true
 
+    const el = scrollRef.current
+    if (!el) return
+
     const cached = tabId ? scrollTopCache.get(tabId) : undefined
-    // 缓存恢复：直接定位，不需要 observer 校正（停在用户离开的位置）
+    // 缓存恢复：定位到用户离开的位置。不在底部即不跟随（流式内容变化不得把
+    // 视图拉回底部）；滚回底部附近经 onScroll 恢复跟随。
     if (cached !== undefined) {
-      isNearBottom.current = false
+      const distance = el.scrollHeight - cached - el.clientHeight
+      isNearBottom.current = distance <= 150
+      isFollowingBottom.current = distance <= 150
       requestAnimationFrame(() => {
         if (scrollRef.current) {
           scrollRef.current.scrollTop = cached
@@ -318,17 +318,15 @@ export const MessageList = ({
     }
 
     // 无缓存钉底：首次定位到底部。同步钉底 + RAF 钉底双管齐下避免中间态，
-    // 并启动 1.2s 轮询钉底覆盖各浏览器渲染时序差异与异步高度变化（用户上滑会置 userScrolled 跳过，不抢滚动）。
-    const el = scrollRef.current
-    if (!el) return
+    // 并启动 1.2s 轮询钉底覆盖各浏览器渲染时序差异与异步高度变化（用户上移
+    // 经 onScroll 置 isFollowingBottom=false，轮询随之终止，不抢滚动）。
     pinToBottom()
     requestAnimationFrame(() => pinToBottom())
     // 持续钉底兜底（覆盖 Edge 等浏览器的渲染时序差异）
-    // 用户在此窗口内 wheel/touch 上滑会置 userScrolled，此时停止强制钉底
     let ticks = 0
     const intervalId = window.setInterval(() => {
       ticks++
-      if (userScrolled.current) {
+      if (!isFollowingBottom.current) {
         window.clearInterval(intervalId)
         return
       }
@@ -336,25 +334,6 @@ export const MessageList = ({
       if (ticks >= 24) window.clearInterval(intervalId) // 1.2s 后停止
     }, 50)
   }, [messages.length, tabId, pinToBottom])
-
-  /**
-   * 注册真实手势监听（wheel/touch），区分用户主动滚动与程序性滚动。
-   * 只有真实手势触发时 userScrolled 才置位，onScroll 据此判断是否为用户意图上滑。
-   * 程序性滚动（高度变化导致）不置位。
-   */
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const markUserScroll = () => {
-      userScrolled.current = true
-    }
-    el.addEventListener('wheel', markUserScroll, { passive: true })
-    el.addEventListener('touchstart', markUserScroll, { passive: true })
-    return () => {
-      el.removeEventListener('wheel', markUserScroll)
-      el.removeEventListener('touchstart', markUserScroll)
-    }
-  }, [])
 
   /**
    * 持续跟随底部：内容高度变化时重新钉底。
@@ -386,31 +365,33 @@ export const MessageList = ({
   /**
    * 底部追加新消息 → 跟随底部
    *
-   * 仅在已首次定位后、消息数量增加且仍在跟随底部时钉底。
-   * 用户上滑（isFollowingBottom=false）时不强行拉回。
+   * 仅在已首次定位后且消息数量增加时排队钉底。跟随判定放 rAF 内：scroll 事件
+   * （停止跟随）先于 rAF 执行，排队时仍在跟随、执行前用户已上滑的钉底不落盘。
    */
   useEffect(() => {
-    if (
-      initialScrollDone.current &&
-      messages.length > lastMessageCount.current &&
-      isFollowingBottom.current
-    ) {
-      requestAnimationFrame(pinToBottom)
+    if (initialScrollDone.current && messages.length > lastMessageCount.current) {
+      requestAnimationFrame(() => {
+        if (isFollowingBottom.current) pinToBottom()
+      })
     }
     lastMessageCount.current = messages.length
   }, [messages.length, pinToBottom])
 
-  /** 流式输出期间持续跟随底部（用户上滑后 isFollowingBottom=false，不再钉底） */
+  /** 流式输出期间持续跟随底部（用户上移后 isFollowingBottom=false，不再钉底） */
   useEffect(() => {
-    if (isGenerating && isFollowingBottom.current) {
-      requestAnimationFrame(pinToBottom)
+    if (isGenerating) {
+      requestAnimationFrame(() => {
+        if (isFollowingBottom.current) pinToBottom()
+      })
     }
   }, [isGenerating, messages, pinToBottom])
 
-  /** 流式结束后钉底一次（仅当仍在跟随底部时，否则用户在翻历史不打扰） */
+  /** 流式结束后钉底一次（跟随判定放定时器内：收尾窗口内用户上移则放行其位置） */
   useEffect(() => {
     if (prevGenerating.current && !isGenerating && isFollowingBottom.current) {
-      const timer = setTimeout(pinToBottom, 300)
+      const timer = setTimeout(() => {
+        if (isFollowingBottom.current) pinToBottom()
+      }, 300)
       return () => clearTimeout(timer)
     }
     prevGenerating.current = isGenerating

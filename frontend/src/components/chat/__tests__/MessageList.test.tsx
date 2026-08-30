@@ -479,8 +479,8 @@ describe('MessageList', () => {
       flushRaf()
       expect(listEl.scrollTop).toBe(1000)
 
-      // 用户上滑到中间（真实用户滚动是 wheel→scroll，wheel 置位 userScrolled，
-      // 随后 onScroll 据 userScrolled 判定为主动上滑，置 isFollowingBottom=false）
+      // 用户滚轮上滑到中间（wheel→浏览器滚动→scroll 事件，onScroll 按方向
+      // 判定主动上滑，置 isFollowingBottom=false）
       fireEvent.wheel(listEl, { deltaY: -100 })
       listEl.scrollTop = 300
       fireEvent.scroll(listEl)
@@ -494,6 +494,179 @@ describe('MessageList', () => {
 
       // 不被拉回底部，停留在用户的滚动位置
       expect(listEl.scrollTop).toBe(300)
+    })
+
+    it('无手势上滑（滚动条拖拽/键盘滚动）后流式内容变化不钉底', () => {
+      const ro = makeTriggerableResizeObserver()
+
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { container, rerender } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="drag-up" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 流式内容增长：跟随状态下 effect 排队 rAF 钉底
+      const grown = [...messages, makeMessage({ id: 'msg-2', sequence: 2 })]
+      rerender(<MessageList {...defaultProps} messages={grown} isGenerating tabId="drag-up" />)
+      mockScrollMetrics(listEl, 1200)
+
+      // 滚动条拖拽/键盘滚动没有 wheel/touchstart 手势事件，只有 scroll 事件——
+      // 方向判定若依赖手势标记，用户会被流式钉底每帧拽回底部（无条件盯底）
+      listEl.scrollTop = 300
+      fireEvent.scroll(listEl)
+
+      // 已排队的 rAF 钉底执行时跟随已停止，不落盘；ResizeObserver 同样不拉回
+      flushRaf()
+      ro.cb?.()
+
+      expect(listEl.scrollTop).toBe(300)
+    })
+
+    it('内容收缩钳制 scrollTop 减小是程序性滚动，不停止跟随', () => {
+      const ro = makeTriggerableResizeObserver()
+
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { container, rerender } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="clamp" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1000)
+
+      // initFromAPI 重建使内容变矮，浏览器钳制 scrollTop 到新的最大值（无手势）：
+      // 程序性上移的落点在底部附近，onScroll 内随即恢复跟随（自愈），不停中间
+      mockScrollMetrics(listEl, 700)
+      listEl.scrollTop = 500
+      fireEvent.scroll(listEl)
+
+      // 跟随未被误停：后续内容变化仍钉回底部，不停中间
+      const grown = [...messages, makeMessage({ id: 'msg-2', sequence: 2 })]
+      rerender(<MessageList {...defaultProps} messages={grown} tabId="clamp" />)
+      mockScrollMetrics(listEl, 900)
+      ro.cb?.()
+
+      expect(listEl.scrollTop).toBe(900)
+    })
+
+    it('用户上滑翻历史后滚回底部附近，恢复跟随', () => {
+      const ro = makeTriggerableResizeObserver()
+
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { container, rerender } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="recover" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+
+      // 上滑到中部 → 停止跟随
+      listEl.scrollTop = 300
+      fireEvent.scroll(listEl)
+      // 滚回底部附近（距底 50px ≤ 150 阈值）→ 恢复跟随
+      listEl.scrollTop = 750
+      fireEvent.scroll(listEl)
+
+      const grown = [...messages, makeMessage({ id: 'msg-2', sequence: 2 })]
+      rerender(<MessageList {...defaultProps} messages={grown} tabId="recover" />)
+      mockScrollMetrics(listEl, 1200)
+      ro.cb?.()
+
+      // 跟随已恢复：内容变化重新钉底
+      expect(listEl.scrollTop).toBe(1200)
+    })
+
+    it('首次钉底轮询窗口内上滑，轮询终止不再强制钉底', () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+      try {
+        const messages = [makeMessage({ id: 'msg-1' })]
+        const { container } = render(
+          <MessageList {...defaultProps} messages={messages} tabId="poll-stop" />,
+        )
+        const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+        mockScrollMetrics(listEl, 1000)
+        flushRaf()
+        expect(listEl.scrollTop).toBe(1000)
+
+        // 无手势上滑（滚动条拖拽/键盘），scroll 事件方向判定停止跟随
+        listEl.scrollTop = 300
+        fireEvent.scroll(listEl)
+
+        // 轮询到期：跟随已停止，不再强制钉底；轮询自终止后亦然
+        vi.advanceTimersByTime(100)
+        expect(listEl.scrollTop).toBe(300)
+        vi.advanceTimersByTime(2000)
+        expect(listEl.scrollTop).toBe(300)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('流式结束后仍在跟随，300ms 收尾钉底覆盖最终渲染高度', () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+      try {
+        const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+        const { container, rerender } = render(
+          <MessageList {...defaultProps} messages={messages} isGenerating tabId="end-pin" />,
+        )
+        const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+        mockScrollMetrics(listEl, 1000)
+        flushRaf()
+        expect(listEl.scrollTop).toBe(1000)
+
+        // 流式结束，最终 markdown 渲染使内容变高（scrollTop 停在旧位置）
+        rerender(
+          <MessageList
+            {...defaultProps}
+            messages={messages}
+            isGenerating={false}
+            tabId="end-pin"
+          />,
+        )
+        mockScrollMetrics(listEl, 1200)
+
+        vi.advanceTimersByTime(400)
+
+        // 收尾钉底落到最终底部
+        expect(listEl.scrollTop).toBe(1200)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('流式结束后用户已上滑，300ms 收尾钉底放行用户位置', () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+      try {
+        const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+        const { container, rerender } = render(
+          <MessageList {...defaultProps} messages={messages} isGenerating tabId="end-stay" />,
+        )
+        const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+        mockScrollMetrics(listEl, 1000)
+        flushRaf()
+
+        // 流式结束（跟随中 → 排队收尾钉底），收尾窗口内用户上滑翻历史
+        rerender(
+          <MessageList
+            {...defaultProps}
+            messages={messages}
+            isGenerating={false}
+            tabId="end-stay"
+          />,
+        )
+        listEl.scrollTop = 300
+        fireEvent.scroll(listEl)
+
+        vi.advanceTimersByTime(400)
+
+        // 收尾钉底不把视图拉回底部
+        expect(listEl.scrollTop).toBe(300)
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 
