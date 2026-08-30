@@ -83,14 +83,15 @@ interface CompactOption {
   description?: string
 }
 
-/** 当前选中管道标签的 pipeline id（权限模式按管道隔离的 key） */
+/** 当前选中管道标签的 pipeline id（权限模式按管道隔离的 key）。
+ *  会话 id 是组织集合 id，绝不兜底进 pipeline_id 字段（2026-08-30 管道身份裁定）：
+ *  无管道上下文时返回空串，由后端端点对空值显式处置。 */
 function useActivePipelineId(): string {
   const activeTabId = useAgentTabStore((s) => s.activeTabId)
   const tabs = useAgentTabStore((s) => s.tabs)
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
-  const sessionId = useSessionStore((s) => s.activeSessionId)
   const tabPipelineId = tabs.find((t) => t.id === activeTabId)?.pipelineRunId
-  return tabPipelineId ?? activePipelineId ?? sessionId ?? ''
+  return tabPipelineId ?? activePipelineId ?? ''
 }
 
 /**

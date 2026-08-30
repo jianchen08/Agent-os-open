@@ -25,7 +25,6 @@ import { emitFormEvent } from '@/services/schema/formEventBus'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import type { UIInputFormField } from '@/types/schema'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useSessionStore } from '@/stores/sessionStore'
 
 function extractSteps(steps: unknown): Array<{ title: string; fields: UIInputFormField[] }> {
   if (!Array.isArray(steps)) return []
@@ -56,8 +55,9 @@ export function WizardWidget(props: Record<string, unknown>) {
   const activeTabId = useAgentTabStore((s) => s.activeTabId)
   const tabs = useAgentTabStore((s) => s.tabs)
   const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
-  const sessionId = useSessionStore((s) => s.activeSessionId)
-  const pipelineId = tabs.find((t) => t.id === activeTabId)?.pipelineRunId ?? activePipelineId ?? sessionId ?? ''
+  // 会话 id 不兜底进 pipeline_id（组织集合 id 不充当管道坐标，2026-08-30 裁定）；
+  // 无管道上下文 → 空串，后端端点对空值显式处置。
+  const pipelineId = tabs.find((t) => t.id === activeTabId)?.pipelineRunId ?? activePipelineId ?? ''
 
   if (steps.length === 0) {
     return (
