@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """duplicate_check output pipeline plugin MCP 服务端——纯接口适配层。
 
-老代码从 src/plugins/shared/output/duplicate_check/plugin.py 原封不动复制到本目录，
-本文件只做接口适配：通过 MCP SDK 暴露为工具。
+通过 MCP SDK 暴露 execute 工具，把引擎的 state 调用适配为插件实例执行，
+state_updates 原样回传（含 messages._ops 信封）。
 """
+
 from __future__ import annotations
 
 import logging

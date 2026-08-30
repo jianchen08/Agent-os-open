@@ -5,9 +5,6 @@
 
 合并收益：共享重复计数状态（router.duplicate_count / router.repetitive_count）+ 低维护成本。
 
-M6d 阶段：从旧代码 agents/decision/strategies/iteration/ 中的
-duplicate_call 和 repetitive_output 合并迁移。
-
 策略说明（终止/回路由经控制状态键表达，引擎与 DSL 消费）：
     - 第一级（count < max）：注入软提示，工具调用仍执行
     - 第二级（count >= max）：移除重复调用 + 注入强警告 + 写
@@ -17,11 +14,15 @@ duplicate_call 和 repetitive_output 合并迁移。
       - 子 agent：直接终止（署名 duplicate_loop，终态映射 Failed）
 
 State 命名空间：
-    - router.duplicate_count : 工具调用重复计数（跨迭代）
+    - router.duplicate_count : 工具调用重复计数（窗口内同签名的多余出现次数最大值）
+    - router.recent_tool_sigs : 最近 signature_window_size 条单调用签名（跨迭代滑动窗口）
     - router.repetitive_count : 输出内容重复计数（跨迭代）
     - router.duplicate_intercepts : 拦截总次数
-    - router.last_tool_call : 上一次工具调用签名
     - router.last_response : 上一次 LLM 响应摘要
+
+消息修改一律经 state_updates["messages"]={"_ops":[...]} 回传——引擎 merge 只认
+slot ops（set 缺 seq=append / set(seq,msg)=modify / set(seq,null)=delete），
+直接改 ctx.state 的修改过不了 server 适配层的新 dict，真实链路上必丢。
 """
 
 from __future__ import annotations
@@ -54,7 +55,9 @@ class DuplicateCheckPlugin(IOutputPlugin):
     两者都维护重复计数器，合并后共享 router.duplicate_count 命名空间。
 
     检查维度：
-    1. 工具调用重复：相同工具+相同参数被连续调用
+    1. 工具调用重复：单调用签名（工具+参数）在滑动窗口内的多余出现——
+       整组只比上一轮的旧算法对多工具场景恒不计数（LLM 每轮微调一个调用
+       或交替两个调用即可绕过），已退役
     2. 输出内容重复：LLM 连续返回相同或高度相似的内容
 
     三级渐进策略：
@@ -78,12 +81,15 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 - max_repetitive_output: 输出内容重复拦截阈值（默认 3）
                 - hard_limit_intercepts: 拦截次数硬上限，达到后终止管道（默认 4）
                 - similarity_threshold: 输出相似度阈值（默认 0.9）
+                - signature_window_size: 单调用签名滑动窗口条数（默认 16，
+                  覆盖 4 工具轮转时第 4 次出现的拦截）
         """
         self._config = config or {}
         self._max_duplicate_calls = self._config.get("max_duplicate_calls", 3)
         self._max_repetitive_output = self._config.get("max_repetitive_output", 3)
         self._hard_limit_intercepts = self._config.get("hard_limit_intercepts", 4)
         self._similarity_threshold = self._config.get("similarity_threshold", 0.9)
+        self._signature_window_size = self._config.get("signature_window_size", 16)
 
     @property
     def name(self) -> str:
@@ -190,8 +196,10 @@ class DuplicateCheckPlugin(IOutputPlugin):
         # 第二级：重复达到阈值 → 拦截 + 路由回 LLM
         if count >= self._max_duplicate_calls:
             warning = f"检测到重复工具调用{tool_desc}，已跳过执行。请不要再次使用相同的工具和参数，请尝试其他方法。"
-            stripped = self._strip_trailing_tool_call_assistant(ctx)
-            self._inject_warning(ctx, warning)
+            messages = list(ctx.state.get("messages", []))
+            strip_ops, stripped = self._build_strip_ops(messages)
+            self._apply_strip_locally(messages, strip_ops)
+            merge_ops = self._build_merge_ops(messages, f"[DuplicateCheck] {warning}")
             updates[StateKeys.RAW_TOOL_CALLS] = []
             updates["router.duplicate_count"] = 0
             updates["router.duplicate_intercepts"] = intercepts + 1
@@ -205,11 +213,12 @@ class DuplicateCheckPlugin(IOutputPlugin):
             )
             # 二级路由回 LLM 经状态键表达（DSL 路由 router.duplicate_back_llm 消费）
             updates["router.duplicate_back_llm"] = True
+            updates["messages"] = {"_ops": strip_ops + merge_ops}
             return updates
 
         # 第一级：早期重复 → 注入软提示，工具调用仍执行
         hint = self._build_hint(count, tool_desc)
-        self._inject_hint(ctx, hint)
+        self._inject_hint(ctx, updates, hint)
         logger.info(
             "[%s] Duplicate tool call soft hint | count=%d tool=%s",
             self.name,
@@ -243,7 +252,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
         # 第二级：重复达到阈值 → 清空输出 + 路由回 LLM
         if count >= self._max_repetitive_output:
             warning = "检测到重复输出相似内容，请尝试其他方法或给出不同的回复。"
-            self._inject_warning(ctx, warning)
+            self._inject_warning(ctx, updates, warning)
             updates[StateKeys.RAW_RESULT] = ""
             updates["router.repetitive_count"] = 0
             updates["router.duplicate_intercepts"] = intercepts + 1
@@ -258,7 +267,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
 
         # 第一级：早期重复 → 注入软提示
         hint = f"你已经连续 {count} 次输出相似内容，请尝试换一种方式回复。"
-        self._inject_hint(ctx, hint)
+        self._inject_hint(ctx, updates, hint)
         logger.info(
             "[%s] Repetitive output soft hint | count=%d",
             self.name,
@@ -288,9 +297,10 @@ class DuplicateCheckPlugin(IOutputPlugin):
         is_main = agent_level in ("L1", "L1_MAIN") or ctx.state.get("delegate_depth", 0) == 0
 
         if is_main:
-            messages = list(ctx.state.get("messages", []))
-            messages.append({"role": "assistant", "content": _MAIN_AGENT_TERMINATE_MSG})
-            ctx.state["messages"] = messages
+            # 终止通知是给用户的自然语言收尾，append assistant 消息（不并入末尾消息）
+            updates["messages"] = {
+                "_ops": [{"op": "set", "msg": {"role": "assistant", "content": _MAIN_AGENT_TERMINATE_MSG}}]
+            }
             logger.warning(
                 "[%s] Pipeline terminating (main agent) | intercepts=%d desc=%s",
                 self.name,
@@ -348,102 +358,87 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 parts.append(f"{name}({args_str})")
         return "、".join(parts)
 
-    def _inject_warning(self, ctx: PluginContext, message: str) -> None:
-        """注入强警告（第二级拦截时使用）。
+    def _inject_warning(self, ctx: PluginContext, updates: dict[str, Any], message: str) -> None:
+        """注入强警告（输出重复二级拦截时使用），merge ops 写入 updates。"""
+        updates["messages"] = {
+            "_ops": self._build_merge_ops(list(ctx.state.get("messages", [])), f"[DuplicateCheck] {message}")
+        }
 
-        安全合并策略：不追加独立的 system
-        消息，而是合并进末尾消息的 content，避免打断 assistant(tool_calls)
-        → tool 消息序列导致引擎中断。
+    def _inject_hint(self, ctx: PluginContext, updates: dict[str, Any], message: str) -> None:
+        """注入软提示（第一级早期提示时使用），merge ops 写入 updates。"""
+        updates["messages"] = {
+            "_ops": self._build_merge_ops(list(ctx.state.get("messages", [])), f"[DuplicateCheck] {message}")
+        }
 
-        - 末尾为 tool/assistant → 合并进其 content
-        - 末尾为空或其他 → 追加一条 role=user（此时无 tool_calls 配对问题）
-
-        Args:
-            ctx: 插件执行上下文
-            message: 警告消息内容
-        """
-        self._merge_into_messages(ctx, f"[DuplicateCheck] {message}")
-
-    def _strip_trailing_tool_call_assistant(self, ctx: PluginContext) -> int:
-        """移除 messages 末尾连续的 assistant(tool_calls) 消息。
+    def _build_strip_ops(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+        """构造移除末尾连续 assistant(tool_calls) 的 delete ops。
 
         Level-2 拦截会清空 RAW_TOOL_CALLS，但 llm_core 已 append 的
         assistant(tool_calls) 仍残留 → 永远等不到 tool result → 未配对消息。
-        因此本方法在拦截时同步移除这些 assistant 消息，撤销本次工具调用意图。
-
-        从末尾向前剥离：只移除 role=assistant 且带 tool_calls 的消息，
-        遇到普通 assistant 文本消息或其他角色时停止。
+        因此拦截时同步产出删除 ops 撤销本次工具调用意图。
 
         Args:
-            ctx: 插件执行上下文
+            messages: 当前 messages 数组（元素带引擎分配的 seq）
 
         Returns:
-            被移除的 assistant(tool_calls) 消息数量
+            (delete ops 列表, 被剥离的 assistant 消息数量)
         """
-        messages = list(ctx.state.get("messages", []))
+        ops: list[dict[str, Any]] = []
         stripped = 0
-        while messages:
-            last = messages[-1]
-            if last.get("role") == "assistant" and last.get("tool_calls"):
-                messages.pop()
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                seq = msg.get("seq")
+                if seq is None:
+                    break  # 无 seq 不可定位（真实链路消息恒带引擎 seq）
+                ops.append({"op": "set", "seq": seq, "msg": None})
                 stripped += 1
                 continue
             break
-        if stripped:
-            ctx.state["messages"] = messages
-        return stripped
+        ops.reverse()
+        return ops, stripped
 
-    def _inject_hint(self, ctx: PluginContext, message: str) -> None:
-        """注入软提示（第一级早期提示时使用）。
+    @staticmethod
+    def _apply_strip_locally(messages: list[dict[str, Any]], strip_ops: list[dict[str, Any]]) -> None:
+        """把 delete ops 应用到本地 messages 副本（后续 merge op 的定位基准）。"""
+        removed = {op["seq"] for op in strip_ops}
+        messages[:] = [m for m in messages if m.get("seq") not in removed]
 
-        安全合并策略：不追加独立的 system 消息（那会插在 assistant(tool_calls)
-        与 tool 之间打断序列、导致引擎中断），而是合并进末尾消息的 content。
-
-        Args:
-            ctx: 插件执行上下文
-            message: 提示消息内容
-        """
-        self._merge_into_messages(ctx, f"[DuplicateCheck] {message}")
-
-    def _merge_into_messages(self, ctx: PluginContext, content: str) -> None:
-        """把提醒内容安全地合并进 messages，不打断 assistant(tool_calls)→tool 序列。
+    def _build_merge_ops(self, messages: list[dict[str, Any]], content: str) -> list[dict[str, Any]]:
+        """构造把提醒合并进末尾消息的 slot ops（引擎三落点唯一通道）。
 
         合并规则：
-        - 末尾为 tool 或 assistant 消息 → 合并进其 content（保持序列完整）
-        - 末尾为 system 消息 → 合并进其 content
-        - messages 为空或末尾为 user → 追加 role=user（无 tool_calls 配对问题）
+        - 末尾为 tool/assistant/system 且带 seq → set modify（同 seq 替换，
+          content 合并，保持 assistant(tool_calls)→tool 序列完整）
+        - 末尾为 user、空数组或无 seq 可定位 → set 缺 seq = append 一条 user
+          （append 无配对约束；无 seq 的受保护角色退化为 append 而非静默丢弃）
 
         Args:
-            ctx: 插件执行上下文
+            messages: 当前 messages 数组（元素带引擎分配的 seq）
             content: 要合并/追加的提醒文本
-        """
-        messages = list(ctx.state.get("messages", []))
 
+        Returns:
+            slot ops 列表
+        """
         if not messages:
-            messages.append({"role": "user", "content": content})
-            ctx.state["messages"] = messages
-            return
+            return [{"op": "set", "msg": {"role": "user", "content": content}}]
 
         last = messages[-1]
-        last_role = last.get("role")
-
-        if last_role in ("tool", "assistant", "system"):
-            # 合并进末尾消息 content，保持 assistant(tool_calls)→tool 序列完整
+        seq = last.get("seq")
+        if last.get("role") in ("tool", "assistant", "system") and seq is not None:
             merged = dict(last)
             original = merged.get("content") or ""
             merged["content"] = f"{original}\n\n{content}" if original else content
-            messages[-1] = merged
-        else:
-            # 末尾为 user（或其它无配对约束的角色）→ 追加 user
-            messages.append({"role": "user", "content": content})
+            return [{"op": "set", "seq": seq, "msg": merged}]
 
-        ctx.state["messages"] = messages
+        return [{"op": "set", "msg": {"role": "user", "content": content}}]
 
     def _check_duplicate_calls(self, ctx: PluginContext) -> dict[str, Any]:
-        """检查工具调用重复。
+        """检查工具调用重复（单调用粒度滑动窗口）。
 
-        通过对工具名+参数生成签名，与上一次工具调用签名对比，
-        相同则增加重复计数。
+        对每个调用生成 工具名+参数 签名，与最近 signature_window_size 条
+        签名窗口累计比对：重复计数 = 窗口 + 本轮中同一签名的"多余出现次数"
+        （相对首次出现）最大值。整组只比上一轮的旧算法对多工具场景恒不
+        计数——部分重复（组内一个调用变化即整组重置）与交替循环永不触发。
 
         Args:
             ctx: 插件执行上下文
@@ -455,7 +450,6 @@ class DuplicateCheckPlugin(IOutputPlugin):
         if not tool_calls:
             return {}
 
-        # 生成当前工具调用签名
         current_signatures = []
         for tc in tool_calls:
             name = tc.get("name", "")
@@ -470,24 +464,25 @@ class DuplicateCheckPlugin(IOutputPlugin):
             sig = hashlib.md5(f"{name}:{sorted(args.items())}".encode()).hexdigest()[:8]  # noqa: S324
             current_signatures.append(sig)
 
-        current_sig = ",".join(current_signatures)
-        last_sig = ctx.state.get("router.last_tool_call", "")
-
-        # 对比
-        duplicate_count = ctx.state.get("router.duplicate_count", 0)
-        if current_sig and current_sig == last_sig:
-            duplicate_count += 1
+        window = list(ctx.state.get("router.recent_tool_sigs", []))
+        round_counts: dict[str, int] = {}
+        for sig in current_signatures:
+            round_counts[sig] = round_counts.get(sig, 0) + 1
+        duplicate_count = max(
+            (window.count(sig) + n - 1 for sig, n in round_counts.items()),
+            default=0,
+        )
+        if duplicate_count > 0:
             logger.debug(
                 "[%s] Duplicate tool call detected | count=%d",
                 self.name,
                 duplicate_count,
             )
-        else:
-            duplicate_count = 0  # 不同则重置
 
+        updated_window = (window + current_signatures)[-(self._signature_window_size) :]
         return {
             "router.duplicate_count": duplicate_count,
-            "router.last_tool_call": current_sig,
+            "router.recent_tool_sigs": updated_window,
         }
 
     def _check_repetitive_output(self, ctx: PluginContext) -> dict[str, Any]:

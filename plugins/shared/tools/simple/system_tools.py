@@ -329,7 +329,7 @@ def _render_skeleton(
         key_fields: dict[str, Any] = {}
         for k in (
             "core_type", "raw_error",
-            "router.stop_reason", "router.last_tool_call",
+            "router.stop_reason", "router.recent_tool_sigs",
             "llm_usage", "track.total_tokens",
             "stuck_detected", "stuck_reason",
         ):

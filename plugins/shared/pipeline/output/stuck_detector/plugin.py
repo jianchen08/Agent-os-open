@@ -1,20 +1,24 @@
 """卡死检测 Output 插件。
 
-检测管道循环中的卡死状态，包括工具调用重复、输出内容重复
-和无进展检测。检测到卡死时标记 state 并发布 stuck 事件。
+检测管道循环中的卡死状态，包括工具调用重复、输出内容重复。
+检测到卡死时标记 state 并发布 stuck 事件。
 
 检测策略：
-1. 相同工具调用重复（连续 N 次相同 tool_name + args）
-2. 相同输出重复（连续 N 次结果完全相同）
-3. 无进展检测（iteration 增加但 state 无实质变化）
+1. 相同工具调用重复（窗口内连续 N 轮相同 tool_name + args）
+2. 相同输出重复（窗口内连续 N 轮结果相同/高度相似）
 
 State 命名空间：
     - stuck_detected : 是否检测到卡死
     - stuck_reason : 卡死原因描述
+    - stuck_history : 滑动窗口快照（per-run 持久，经 state_updates 回传）
+
+仅 llm_call 轮检测：工具轮 raw_tool_calls 已被 tool_core 清空、raw_result 是
+上轮残留，快照只会产出空签名与旧文本，污染窗口与判定。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from difflib import SequenceMatcher
 from typing import Any
@@ -29,9 +33,8 @@ class StuckDetector(IOutputPlugin):
     """卡死检测 Output 插件。
 
     检测策略：
-    1. 相同工具调用重复（连续 N 次相同 tool_name + args）
-    2. 相同输出重复（连续 N 次结果完全相同）
-    3. 无进展检测（iteration 增加但 state 无实质变化）
+    1. 相同工具调用重复（窗口内连续 N 轮相同 tool_name + args）
+    2. 相同输出重复（窗口内连续 N 轮结果相同/高度相似）
 
     Attributes:
         _window_size: 历史窗口大小（默认 5）
@@ -52,7 +55,6 @@ class StuckDetector(IOutputPlugin):
         self._window_size = self._config.get("window_size", 5)
         self._similarity_threshold = self._config.get("similarity_threshold", 0.9)
         self._repeat_threshold = self._config.get("repeat_threshold", 3)
-        self._history: list[dict[str, Any]] = []
 
     @property
     def name(self) -> str:
@@ -67,7 +69,8 @@ class StuckDetector(IOutputPlugin):
     async def execute(self, ctx: PluginContext) -> OutputResult:
         """执行卡死检测。
 
-        保存当前轮快照到历史窗口，依次检查工具调用重复
+        保存当前轮快照到历史窗口（经 state_updates 随 run 持久——sidecar 插件
+        单例的实例属性会跨 run/会话污染），依次检查工具调用重复
         和输出内容重复，检测到卡死时标记 state 并发布事件。
 
         Args:
@@ -77,20 +80,27 @@ class StuckDetector(IOutputPlugin):
             包含卡死检测结果的输出结果
         """
         state = ctx.state
+        core_type = state.get(StateKeys.CORE_TYPE, "llm_call")
+        if core_type != "llm_call":
+            return OutputResult(state_updates={})
+
+        history = list(state.get("stuck_history", []))
         snapshot = self._take_snapshot(state)
+        # 零信号轮（无工具调用且无文本）不入窗，避免稀释连续性判定
+        if snapshot["tool_signature"] or snapshot["result_text"]:
+            history.append(snapshot)
+        if len(history) > self._window_size:
+            history = history[-self._window_size :]
 
-        # 维护滑动窗口
-        self._history.append(snapshot)
-        if len(self._history) > self._window_size:
-            self._history = self._history[-self._window_size :]
+        updates: dict[str, Any] = {
+            "stuck_history": history,
+            "stuck_detected": False,
+            "stuck_reason": "",
+        }
 
-        # 检查工具调用重复
-        tool_reason = self._check_tool_repeat(self._history)
+        tool_reason = self._check_tool_repeat(history)
+        output_reason = self._check_output_repeat(history)
 
-        # 检查输出重复
-        output_reason = self._check_output_repeat(self._history)
-
-        # 汇总卡死原因
         reasons = [r for r in (tool_reason, output_reason) if r]
 
         if reasons:
@@ -100,25 +110,16 @@ class StuckDetector(IOutputPlugin):
                 self.name,
                 combined_reason,
             )
-            return OutputResult(
-                state_updates={
-                    "stuck_detected": True,
-                    "stuck_reason": combined_reason,
-                }
-            )
+            updates["stuck_detected"] = True
+            updates["stuck_reason"] = combined_reason
 
-        return OutputResult(
-            state_updates={
-                "stuck_detected": False,
-                "stuck_reason": "",
-            }
-        )
+        return OutputResult(state_updates=updates)
 
     def _check_tool_repeat(self, history: list[dict[str, Any]]) -> str:
         """检查工具调用重复。
 
-        从历史快照中提取连续的工具调用签名，若连续
-        repeat_threshold 次相同则判定为卡死。
+        从历史快照中提取非空工具调用签名，最近
+        repeat_threshold 个相同则判定为卡死。
 
         Args:
             history: 历史快照列表
@@ -126,28 +127,21 @@ class StuckDetector(IOutputPlugin):
         Returns:
             卡死原因字符串，空字符串表示未检测到
         """
-        if len(history) < self._repeat_threshold:
+        signatures = [h.get("tool_signature", "") for h in history if h.get("tool_signature")]
+        if len(signatures) < self._repeat_threshold:
             return ""
 
-        # 取最近 repeat_threshold 轮的工具调用签名
-        recent = history[-self._repeat_threshold :]
-        signatures = [h.get("tool_signature") for h in recent]
-
-        # 所有签名必须相同且非空
-        first_sig = signatures[0]
-        if not first_sig:
-            return ""
-
-        if all(sig == first_sig for sig in signatures):
+        first_sig = signatures[-self._repeat_threshold]
+        if all(sig == first_sig for sig in signatures[-self._repeat_threshold :]):
             return f"Tool call repeated {self._repeat_threshold} times: {first_sig[:100]}"
 
         return ""
 
     def _check_output_repeat(self, history: list[dict[str, Any]]) -> str:
-        """检查输出重复。
+        """检查输出内容重复。
 
-        从历史快照中提取连续的输出内容，若连续
-        repeat_threshold 次完全相同则判定为卡死。
+        从历史快照中提取非空输出内容，最近
+        repeat_threshold 个完全相同或高度相似则判定为卡死。
 
         Args:
             history: 历史快照列表
@@ -155,22 +149,19 @@ class StuckDetector(IOutputPlugin):
         Returns:
             卡死原因字符串，空字符串表示未检测到
         """
-        if len(history) < self._repeat_threshold:
+        outputs = [h.get("result_text", "") for h in history if h.get("result_text")]
+        if len(outputs) < self._repeat_threshold:
             return ""
 
-        recent = history[-self._repeat_threshold :]
-        outputs = [h.get("result_text", "") for h in recent]
-
-        first_output = outputs[0]
-        if not first_output:
-            return ""
+        recent = outputs[-self._repeat_threshold :]
+        first_output = recent[0]
 
         # 检查完全相同
-        if all(out == first_output for out in outputs):
+        if all(out == first_output for out in recent):
             return f"Output repeated {self._repeat_threshold} times identically"
 
         # 检查高度相似
-        if all(self._compute_similarity(out, first_output) >= self._similarity_threshold for out in outputs[1:]):
+        if all(self._compute_similarity(out, first_output) >= self._similarity_threshold for out in recent[1:]):
             return f"Output repeated {self._repeat_threshold} times (similarity >= {self._similarity_threshold})"
 
         return ""
@@ -179,6 +170,8 @@ class StuckDetector(IOutputPlugin):
         """从 state 提取关键信息作为快照。
 
         提取工具调用签名和输出文本，用于后续重复检测。
+        参数形状归一与 duplicate_check 同款：raw_tool_calls 的 arguments
+        为 LLM 返回的 JSON 字符串，解析失败/非 dict 归一为空参数。
 
         Args:
             state: 管道当前状态字典
@@ -191,7 +184,14 @@ class StuckDetector(IOutputPlugin):
         tool_parts: list[str] = []
         for tc in tool_calls:
             name = tc.get("name", "")
-            args = tc.get("args", {})
+            args = tc.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
             tool_parts.append(f"{name}({sorted(args.items())})")
         tool_signature = "|".join(tool_parts) if tool_parts else ""
 

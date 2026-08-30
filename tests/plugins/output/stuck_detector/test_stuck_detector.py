@@ -26,9 +26,9 @@ def _ctx(state: dict[str, Any] | None = None) -> PluginContext:
 
 
 def _state_with_tool(name: str, args: dict[str, Any], result: Any) -> dict[str, Any]:
-    """构造一轮带工具调用与结果的状态。"""
+    """构造一轮带工具调用与结果的状态（llm_call 轮，arguments 为生产方真实键名）。"""
     return {
-        StateKeys.RAW_TOOL_CALLS: [{"name": name, "args": args}],
+        StateKeys.RAW_TOOL_CALLS: [{"name": name, "arguments": args}],
         StateKeys.RAW_RESULT: result,
         StateKeys.ITERATION: 1,
     }
@@ -60,7 +60,9 @@ class TestConfig:
         d = StuckDetector()
         state = _state_with_tool("file_write", {"p": "/x"}, "same")
         res1 = await d.execute(_ctx(state))
+        state.update(res1.state_updates)  # 引擎口径：updates 并回 state
         res2 = await d.execute(_ctx(state))
+        state.update(res2.state_updates)
         res3 = await d.execute(_ctx(state))
         assert res1.state_updates["stuck_detected"] is False
         assert res2.state_updates["stuck_detected"] is False
@@ -75,9 +77,11 @@ class TestConfig:
         assert d.priority == 99
         state = _state_with_tool("t", {}, "same")
         res1 = await d.execute(_ctx(state))
+        state.update(res1.state_updates)  # 引擎口径：updates 并回 state
         res2 = await d.execute(_ctx(state))
         assert res1.state_updates["stuck_detected"] is False
         assert res2.state_updates["stuck_detected"] is True
+
 
 # ============================================================
 # _compute_similarity
@@ -116,9 +120,7 @@ class TestSnapshot:
         from plugin import StuckDetector
 
         d = StuckDetector()
-        snap = d._take_snapshot(
-            _state_with_tool("file_write", {"path": "/a", "content": "x"}, "done")
-        )
+        snap = d._take_snapshot(_state_with_tool("file_write", {"path": "/a", "content": "x"}, "done"))
         assert "file_write(" in snap["tool_signature"]
         assert snap["result_text"] == "done"
         assert snap["iteration"] == 1
@@ -211,9 +213,7 @@ class TestOutputRepeat:
     def test_高度相似输出报卡死(self) -> None:
         from plugin import StuckDetector
 
-        d = StuckDetector(
-            config={"repeat_threshold": 3, "similarity_threshold": 0.7}
-        )
+        d = StuckDetector(config={"repeat_threshold": 3, "similarity_threshold": 0.7})
         # 仅末尾差异，相似度高
         history = [
             {"result_text": "the quick brown fox jumps"},
@@ -263,9 +263,10 @@ class TestExecute:
 
         d = StuckDetector(config={"repeat_threshold": 3})
         state = _state_with_tool("file_write", {"p": "/x"}, "same")
-        # 连续执行三次同样的状态
+        # 连续执行三次同样的状态（引擎口径：每轮 updates 并回）
         for _ in range(3):
             res = await d.execute(_ctx(state))
+            state.update(res.state_updates)
         # 第三次应报告卡死，原因同时含工具重复与输出重复
         assert res.state_updates["stuck_detected"] is True
         reason = res.state_updates["stuck_reason"]
@@ -277,12 +278,17 @@ class TestExecute:
         from plugin import StuckDetector
 
         d = StuckDetector(config={"window_size": 3})
+        state: dict[str, Any] = {}
         for i in range(7):
-            await d.execute(_ctx({StateKeys.RAW_RESULT: f"r{i}", StateKeys.ITERATION: i}))
-        assert len(d._history) == 3
+            state[StateKeys.RAW_RESULT] = f"r{i}"
+            state[StateKeys.ITERATION] = i
+            res = await d.execute(_ctx(state))
+            state.update(res.state_updates)  # 引擎口径：updates 并回 state
+        history = state["stuck_history"]
+        assert len(history) == 3
         # 保留的是最后 3 个
-        assert d._history[0]["result_text"] == "r4"
-        assert d._history[-1]["result_text"] == "r6"
+        assert history[0]["result_text"] == "r4"
+        assert history[-1]["result_text"] == "r6"
 
     @pytest.mark.asyncio
     async def test_未达repeat_threshold即使重复也不报(self) -> None:
@@ -291,6 +297,97 @@ class TestExecute:
         d = StuckDetector(config={"repeat_threshold": 3})
         state = _state_with_tool("t", {}, "same")
         res1 = await d.execute(_ctx(state))
+        state.update(res1.state_updates)  # 引擎口径：updates 并回 state
         res2 = await d.execute(_ctx(state))
         assert res1.state_updates["stuck_detected"] is False
         assert res2.state_updates["stuck_detected"] is False
+
+
+# ============================================================
+# 真实链路口径（08-30 修复回归）
+# ============================================================
+
+
+class TestRealChainContract:
+    @pytest.mark.asyncio
+    async def test_工具轮跳过检测零更新(self) -> None:
+        """core_type=tool_execute 轮 raw_tool_calls 已清/文本是残留 → 跳过不产出快照。"""
+        from plugin import StuckDetector
+
+        d = StuckDetector()
+        state = {
+            StateKeys.CORE_TYPE: "tool_execute",
+            StateKeys.RAW_TOOL_CALLS: [],
+            StateKeys.RAW_RESULT: "stale",
+        }
+        res = await d.execute(_ctx(state))
+        assert res.state_updates == {}
+
+    @pytest.mark.asyncio
+    async def test_历史经state回传实例间不串扰(self) -> None:
+        """stuck_history 经 state_updates 回传（per-run 隔离）——sidecar 单例跨任务不共享。"""
+        from plugin import StuckDetector
+
+        d1, d2 = StuckDetector(), StuckDetector()
+        state = _state_with_tool("t", {"p": 1}, "same")
+        await d1.execute(_ctx(state))
+        res2 = await d2.execute(_ctx(_state_with_tool("t", {"p": 1}, "other")))
+        # d2 从空 state 起步，不受 d1 实例内部状态影响
+        assert res2.state_updates["stuck_detected"] is False
+        assert len(res2.state_updates["stuck_history"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_参数str_json归一参与签名(self) -> None:
+        """arguments 为 JSON 字符串（LLM 返回原形）与等价 dict 同签名。"""
+        from plugin import StuckDetector
+
+        d = StuckDetector(config={"repeat_threshold": 3})
+        states = [
+            {
+                StateKeys.RAW_TOOL_CALLS: [{"name": "t", "arguments": '{"p": 1}'}],
+                StateKeys.RAW_RESULT: "same",
+            },
+            {
+                StateKeys.RAW_TOOL_CALLS: [{"name": "t", "arguments": {"p": 1}}],
+                StateKeys.RAW_RESULT: "same",
+            },
+            {
+                StateKeys.RAW_TOOL_CALLS: [{"name": "t", "arguments": '{"p": 1}'}],
+                StateKeys.RAW_RESULT: "same",
+            },
+        ]
+        state = states[0]
+        last = None
+        for i in range(len(states)):
+            if i > 0:
+                state.update(
+                    {
+                        StateKeys.RAW_TOOL_CALLS: states[i][StateKeys.RAW_TOOL_CALLS],
+                        StateKeys.RAW_RESULT: states[i][StateKeys.RAW_RESULT],
+                    }
+                )
+            last = await d.execute(_ctx(state))
+            state.update(last.state_updates)
+        assert "Tool call repeated 3 times" in last.state_updates["stuck_reason"]
+
+    @pytest.mark.asyncio
+    async def test_纯文本轮不稀释工具重复连续性(self) -> None:
+        """零信号轮（无调用无文本）不入窗：签名与纯文本轮交替仍可判工具重复。"""
+        from plugin import StuckDetector
+
+        d = StuckDetector(config={"repeat_threshold": 3})
+        tool_state = _state_with_tool("t", {"p": 1}, None)
+        text_state = {StateKeys.RAW_RESULT: "thinking..."}
+        state = dict(tool_state)
+        for i in range(5):
+            st = tool_state if i % 2 == 0 else text_state
+            state.update(
+                {
+                    StateKeys.RAW_TOOL_CALLS: st.get(StateKeys.RAW_TOOL_CALLS, []),
+                    StateKeys.RAW_RESULT: st.get(StateKeys.RAW_RESULT),
+                }
+            )
+            res = await d.execute(_ctx(state))
+            state.update(res.state_updates)
+        assert res.state_updates["stuck_detected"] is True
+        assert "Tool call repeated 3 times" in res.state_updates["stuck_reason"]
