@@ -2085,15 +2085,32 @@ impl SqliteStore {
         thread_id: &str,
         tenant_id: &str,
     ) -> Result<Vec<TraceEntry>, StorageError> {
-        let conn = self.conn.lock();
         // pipeline_id 集合：映射表 + sessions.pipeline_ids 兜底
-        let pipeline_ids = pipeline_ids_for_thread(&conn, thread_id, tenant_id)?;
+        let pipeline_ids = pipeline_ids_for_thread(&self.conn.lock(), thread_id, tenant_id)?;
         if pipeline_ids.is_empty() {
             return Ok(vec![]);
         }
+        self.get_step_traces_for_pipelines_inner(&pipeline_ids, tenant_id)
+    }
 
+    /// 查询单个管道自己的 step 级轨迹（管道执行态冷恢复专用，见 trait 文档）。
+    fn get_step_traces_by_pipeline_inner(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceEntry>, StorageError> {
+        self.get_step_traces_for_pipelines_inner(&[pipeline_id.to_string()], tenant_id)
+    }
+
+    /// 按 pipeline_id 集合取 step 级轨迹（created_at 升序）。
+    fn get_step_traces_for_pipelines_inner(
+        &self,
+        pipeline_ids: &[String],
+        tenant_id: &str,
+    ) -> Result<Vec<TraceEntry>, StorageError> {
+        let conn = self.conn.lock();
         // run_id 集合（经 messages.pipeline_id 反查）
-        let run_ids: Vec<String> = run_ids_of_pipelines(&conn, &pipeline_ids, tenant_id)?;
+        let run_ids: Vec<String> = run_ids_of_pipelines(&conn, pipeline_ids, tenant_id)?;
         if run_ids.is_empty() {
             return Ok(vec![]);
         }
@@ -2796,6 +2813,17 @@ impl StorageBackend for SqliteStore {
         let thread_id = thread_id.to_string();
         let tenant_id = tenant_id.to_string();
         self.blocking(move |this| this.get_step_traces_by_thread_inner(&thread_id, &tenant_id))
+            .await
+    }
+
+    async fn get_step_traces_by_pipeline(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<TraceEntry>, StorageError> {
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        self.blocking(move |this| this.get_step_traces_by_pipeline_inner(&pipeline_id, &tenant_id))
             .await
     }
 

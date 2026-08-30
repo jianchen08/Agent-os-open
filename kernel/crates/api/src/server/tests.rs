@@ -347,7 +347,11 @@ async fn test_tools_returns_200() {
 
 #[tokio::test]
 async fn test_chat_post_returns_200() {
-    let app = build_router(AppState::new());
+    let (state, _invoker, _store, sqlite) = make_engine_state();
+    // 会话先建：REST chat 按 session 的 active_pipeline_id 解析执行坐标，
+    // 会话不存在 = 协议违约（会话 id 不得充当管道坐标回退）。
+    seed_session_with_pipeline(&sqlite, "s1", "pipe-s1", "default").await;
+    let app = build_router(state);
     // A11：chat 已纳入写面鉴权，先 login 拿 token
     let token = admin_token(&app).await;
     let body = serde_json::to_string(&WsRequest {
@@ -418,7 +422,9 @@ async fn test_health_response_body() {
 #[tokio::test]
 async fn test_chat_uses_engine_not_echo() {
     // 验证 chat 响应不再是简单的 "Response to: xxx"
-    let app = build_router(AppState::new());
+    let (state, _invoker, _store, sqlite) = make_engine_state();
+    seed_session_with_pipeline(&sqlite, "test_session", "pipe-test_session", "default").await;
+    let app = build_router(state);
     // A11：chat 已纳入写面鉴权，先 login 拿 token
     let token = admin_token(&app).await;
     let body = serde_json::to_string(&WsRequest {
@@ -753,6 +759,48 @@ async fn hot_reload_compiles_step_referencing_plugin_discovered_after_boot() {
 /// 创建临时 config 目录 + autonomous.yaml（引用 mock LLM 插件），使
 /// maybe_reload_pipeline_configs 能加载真实配置（否则 load_pipeline_config
 /// 在文件缺失时返回空 steps 配置，executor 不会调用任何插件）。
+/// 建会话并绑定 active_pipeline_id + pipeline_sessions 映射（REST chat 坐标解析前置）。
+async fn seed_session_with_pipeline(
+    sqlite: &Arc<agentos_engine::SqliteStore>,
+    thread_id: &str,
+    pipeline_id: &str,
+    tenant_id: &str,
+) {
+    // 播种 admin（与生产 seed_admin_user 一致）：带 store 的 router 登录走 DB 用户表
+    let admin = agentos_core::types::UserRecord {
+        user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+        username: "admin".to_string(),
+        password: "admin12345".to_string(),
+        email: Some("admin@agentos.dev".to_string()),
+        role: "admin".to_string(),
+        tenant_id: tenant_id.to_string(),
+        created_at: "2026-08-30T00:00:00Z".to_string(),
+        last_login_at: None,
+    };
+    let _ = StorageBackend::create_user(sqlite.as_ref(), &admin).await;
+    let now = "2026-08-30T00:00:00Z";
+    sqlite
+        .create_session(&agentos_core::types::SessionRecord {
+            thread_id: thread_id.to_string(),
+            title: None,
+            intent: None,
+            current_state: "active".to_string(),
+            agent_id: None,
+            active_pipeline_id: Some(pipeline_id.to_string()),
+            pipeline_ids: vec![pipeline_id.to_string()],
+            metadata: None,
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+            last_active_at: Some(now.to_string()),
+        })
+        .await
+        .unwrap();
+    sqlite
+        .link_pipeline_session(pipeline_id, thread_id, tenant_id)
+        .await
+        .unwrap();
+}
+
 fn make_engine_state() -> (
     AppState,
     Arc<RecordingInvoker>,
@@ -880,12 +928,21 @@ async fn test_multi_turn_second_round_sees_first_round_context() {
 }
 
 #[tokio::test]
-async fn test_multi_turn_http_empty_pipeline_id_falls_back_to_thread() {
-    // HTTP 路径 pipeline_id=""，effective 应回退 thread_id，
-    // 使 store 写入/查询键一致，第二轮仍能看到第一轮上下文。
+async fn test_multi_turn_http_pipeline_coordinate_context_and_reject_missing() {
+    // pipeline_id 是执行态唯一坐标：多轮上下文按管道坐标累积；空坐标 = 协议
+    // 违约，显式拒绝（会话 id 是组织集合 id，不得回退充当执行坐标）。
     let (state, invoker, _store, _sqlite) = make_engine_state();
     let tenant = TenantContext::new("tenant_http", "thread_http");
     let thread = "thread_http";
+    let pipe = "pipe_http";
+
+    // 空坐标拒绝：failed outcome，不产生任何执行
+    let rejected = agentos_tenant::scope(
+        tenant.clone(),
+        process_via_engine(&state, "HTTP 零轮", "agentos", "", thread, "h0", "", "", None, None, ""),
+    )
+    .await;
+    assert!(rejected.failed, "空 pipeline_id 必须显式拒绝");
 
     let r1 = agentos_tenant::scope(
         tenant.clone(),
@@ -893,7 +950,7 @@ async fn test_multi_turn_http_empty_pipeline_id_falls_back_to_thread() {
             &state,
             "HTTP 第一轮",
             "agentos",
-            "",
+            pipe,
             thread,
             "h1",
             "",
@@ -912,7 +969,7 @@ async fn test_multi_turn_http_empty_pipeline_id_falls_back_to_thread() {
             &state,
             "HTTP 第二轮",
             "agentos",
-            "",
+            pipe,
             thread,
             "h2",
             "",
@@ -931,7 +988,7 @@ async fn test_multi_turn_http_empty_pipeline_id_falls_back_to_thread() {
     assert_eq!(
         second.len(),
         3,
-        "HTTP 空 pipeline_id 也应通过 thread_id 回退看到历史"
+        "HTTP 路径多轮上下文按 pipeline 坐标累积，第二轮应看到历史"
     );
     assert_eq!(second[0]["content"], "HTTP 第一轮");
     assert_eq!(second[2]["content"], "HTTP 第二轮");
@@ -2721,7 +2778,7 @@ async fn inject_dispatch_events_reach_user_connection_via_pipeline_coordinate() 
         }
     }
 
-    let (mut state, _invoker, _store, _sqlite) = make_engine_state();
+    let (mut state, _invoker, store, _sqlite) = make_engine_state();
     let coord = Arc::new(agentos_session::SessionCoordinator::new());
     state = state.enable_session_with(coord.clone());
     let sink = Arc::new(RecSink {
@@ -2730,14 +2787,19 @@ async fn inject_dispatch_events_reach_user_connection_via_pipeline_coordinate() 
     coord.register("u1", sink.clone());
     // 前端已按会话 thread 注册；注入路径的派发键 = 管道唯一坐标，未注册
     coord.register_thread("thread-1", "u1");
+    // 生产形状（chat.send_message）：管道出生即登记归属会话，派发带真实
+    // thread + pipeline 各归其位（会话 id 不充当管道坐标）。
+    store
+        .link_pipeline_session("pid-12hex-inject", "thread-1", "default")
+        .await
+        .unwrap();
 
     let dispatcher = crate::ws_session::EngineDispatcher::new(state);
-    // 注入派发：thread_id 与 pipeline_id 同取管道唯一坐标（chat.send_message 现状）
     // stream_start 在链任务激活时才发（ADR-2026-08-26 等待窗口不占位），轮询等待。
     use agentos_session::router::PipelineDispatcher;
     let _ = dispatcher
         .dispatch_user_input(
-            "pid-12hex-inject",
+            "thread-1",
             "u1",
             "嗨",
             "pid-12hex-inject",
@@ -2769,6 +2831,11 @@ async fn inject_dispatch_events_reach_user_connection_via_pipeline_coordinate() 
 #[tokio::test]
 async fn test_pending_input_idle_consumed_immediately() {
     let (state, _invoker, store, _sqlite) = make_engine_state();
+    // 管道出生即登记归属会话（chat.send_message 创建分支同款），派发坐标校验依赖它
+    store
+        .link_pipeline_session("pipe-idle-1", "thread-idle-1", "default")
+        .await
+        .unwrap();
     let dispatcher = crate::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
     dispatcher
@@ -2776,7 +2843,7 @@ async fn test_pending_input_idle_consumed_immediately() {
             "thread-idle-1",
             "u1",
             "空闲直发",
-            "",
+            "pipe-idle-1",
             "",
             None,
             None,
@@ -2791,7 +2858,7 @@ async fn test_pending_input_idle_consumed_immediately() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let rows = store2
-                .list_pending_inputs("default", "thread-idle-1")
+                .list_pending_inputs("default", "pipe-idle-1")
                 .await
                 .unwrap();
             if rows.is_empty() {
@@ -2810,6 +2877,11 @@ async fn test_pending_input_idle_consumed_immediately() {
 #[tokio::test]
 async fn test_pending_input_dispatch_leaves_no_residue() {
     let (state, _invoker, store, _sqlite) = make_engine_state();
+    // 管道出生即登记归属会话（chat.send_message 创建分支同款），派发坐标校验依赖它
+    store
+        .link_pipeline_session("pipe-del-1", "thread-del-1", "default")
+        .await
+        .unwrap();
     let dispatcher = crate::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
     dispatcher
@@ -2817,7 +2889,7 @@ async fn test_pending_input_dispatch_leaves_no_residue() {
             "thread-del-1",
             "u1",
             "将被消费",
-            "",
+            "pipe-del-1",
             "",
             None,
             None,
@@ -2832,7 +2904,7 @@ async fn test_pending_input_dispatch_leaves_no_residue() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let rows = store2
-                .list_pending_inputs("default", "thread-del-1")
+                .list_pending_inputs("default", "pipe-del-1")
                 .await
                 .unwrap();
             if rows.is_empty() {
@@ -2857,7 +2929,6 @@ async fn test_stage_recover_history_stamps_cmid_metadata() {
         st,
         &store,
         "带键消息",
-        "thread_cmid1",
         "pipe_cmid1",
         "tenant_cmid1",
         "0198-cmid-a",
@@ -2879,7 +2950,6 @@ async fn test_stage_recover_history_stamps_cmid_metadata() {
         st2,
         &store,
         "无键消息",
-        "thread_cmid1",
         "pipe_cmid1",
         "tenant_cmid1",
         "",
@@ -2921,7 +2991,6 @@ async fn test_interrupted_tail_respects_client_message_id() {
             st,
             &store,
             "ok",
-            "t_it",
             "p_it",
             "tenant_it",
             incoming_cmid,
@@ -2977,7 +3046,6 @@ async fn test_stage_recover_history_skip_user_append() {
             st,
             &store,
             incoming,
-            "t_skip",
             "p_skip",
             "tenant_skip",
             incoming_cmid,
@@ -3243,7 +3311,7 @@ async fn test_pending_input_no_store_dispatch_direct() {
             "thread-nostore-1",
             "u1",
             "无存储直发",
-            "",
+            "pipe-nostore-1",
             "",
             None,
             None,
@@ -3301,4 +3369,121 @@ fn test_extract_response_content_never_falls_back_to_user_message() {
 #[test]
 fn test_extract_response_content_no_keys_returns_fixed_text() {
     assert_eq!(extract_response_content(&json!({})), "pipeline finished");
+}
+
+// ── 冷恢复轨迹回放作用域（2026-08-30 管道身份裁定回归）──────────────
+// pipeline_id 是执行态唯一坐标：同会话其它管道（父会话/兄弟子任务）的
+// 轨迹一律不得回放进本管道初始 state——曾致新子任务被父线程轨迹里的
+// conversation_mode=true + core_type=tool_execute 送到对话挂起路由，
+// 第 0 轮未跑 LLM 即 suspended，任务假 running 永挂。
+
+use agentos_core::types::{PatchType, TraceEntry};
+
+async fn seed_pipeline_trace(
+    store: &agentos_engine::SqliteStore,
+    pipeline_id: &str,
+    run_id: &str,
+    patch_data: serde_json::Value,
+) {
+    store.create_run(run_id, "cfg", "default").unwrap();
+    store.set_run_pipeline(run_id, pipeline_id).await.unwrap();
+    store
+        .apply_messages_ops_to_table(
+            pipeline_id,
+            "default",
+            &[json!({"op": "set", "seq": 0,
+                     "msg": {"role": "user", "content": "hi"}, "_run_id": run_id})],
+        )
+        .unwrap();
+    store
+        .append_trace(TraceEntry {
+            trace_id: format!("t-{run_id}"),
+            run_id: run_id.to_string(),
+            branch_id: "main".into(),
+            seq_in_branch: 0,
+            plugin_id: "post".into(),
+            patch_type: PatchType::StateUpdate,
+            patch_data,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cold_recovery_replays_only_own_pipeline_traces() {
+    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    store
+        .link_pipeline_session("pipe-parent", "T1", "default")
+        .await
+        .unwrap();
+    store
+        .link_pipeline_session("pipe-child", "T1", "default")
+        .await
+        .unwrap();
+
+    // 父管道轨迹携带对话挂起控制态（事故现场同款）
+    seed_pipeline_trace(
+        &store,
+        "pipe-parent",
+        "run-parent",
+        json!({"conversation_mode": true, "core_type": "tool_execute",
+               "core_plugin": "pipeline_tool_core"}),
+    )
+    .await;
+    // 子任务自己的轨迹只含任务域标量
+    seed_pipeline_trace(
+        &store,
+        "pipe-child",
+        "run-child",
+        json!({"task.status": "running"}),
+    )
+    .await;
+
+    // 子任务冷恢复：初始 state 是新鲜默认（core_type=llm_call）
+    let initial = json!({"core_type": "llm_call", "core_plugin": "pipeline_llm_core"});
+    let recovered = super::stage_recover_history(
+        initial,
+        &(store.clone() as Arc<dyn agentos_core::traits::StorageBackend>),
+        "kickoff",
+        "pipe-child",
+        "default",
+        "",
+        true,
+    )
+    .await;
+
+    assert!(
+        recovered.get("conversation_mode").is_none(),
+        "父管道控制态 conversation_mode 不得串进子任务: {:?}",
+        recovered.get("conversation_mode")
+    );
+    assert_eq!(
+        recovered.get("core_type").and_then(|v| v.as_str()),
+        Some("llm_call"),
+        "父管道 core_type=tool_execute 不得覆盖子任务初始轮次类型"
+    );
+    // 正对照：本管道自己的轨迹正常回放
+    assert_eq!(
+        recovered.get("task.status").and_then(|v| v.as_str()),
+        Some("running"),
+        "子任务自己的轨迹标量必须回放"
+    );
+
+    // 父管道自身冷恢复仍能拿回自己的控制态（作用域收窄不丢自己的历史）
+    let parent_recovered = super::stage_recover_history(
+        json!({}),
+        &(store as Arc<dyn agentos_core::traits::StorageBackend>),
+        "resume",
+        "pipe-parent",
+        "default",
+        "",
+        true,
+    )
+    .await;
+    assert_eq!(
+        parent_recovered.get("conversation_mode"),
+        Some(&json!(true)),
+        "本管道历史控制态必须完整恢复"
+    );
 }

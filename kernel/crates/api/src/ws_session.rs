@@ -756,8 +756,6 @@ impl PipelineDispatcher for EngineDispatcher {
         let state = self.state.clone();
         let content = content.to_string();
         // pipeline_id 是前端消息路由键，引擎回推流式事件时用它定位占位气泡。
-        // 缺失时回退 thread_id（前端 handleStreamStart 的 resolvePipelineId
-        // 不回退 _threadId，故缺失会导致事件被丢弃——这里尽量传真实值）。
         //
         // 防御性校验（后端不盲目信任前端数据）：前端切换/新建会话后，activePipelineId
         // 可能因 React 渲染时序残留旧值，导致消息写到错误的 pipeline 桶（串消息）。
@@ -766,13 +764,20 @@ impl PipelineDispatcher for EngineDispatcher {
         //   - 不属于 → 用该 thread 的真实 active_pipeline_id（主管道），杜绝串桶
         // 这是与前端源头修复（router.tsx 实时读 sessionStore）互补的双层防线。
         // 注意：resolve 必须在 tenant 构造前调用（TenantContext::new 会 move tenant_id）。
-        let route_id = resolve_pipeline_id_for_thread(
-            state.store.as_ref(),
-            thread_id,
-            pipeline_id,
-            &tenant_id,
-        )
-        .await;
+        let route_id = match state.store.as_ref() {
+            Some(store) => {
+                resolve_pipeline_id_for_thread(store, thread_id, pipeline_id, &tenant_id).await
+            }
+            // 无 store（降级模式）：无解析依据，透传前端值；空值由下方守卫拒绝
+            None => pipeline_id.to_string(),
+        };
+        if route_id.is_empty() {
+            // 会话无活跃管道且前端未带 pipeline_id：显式报错，不做 thread 回退
+            // （执行坐标缺失属于协议违约，静默回退会写出幽灵管道数据）。
+            return Err(
+                "会话无可派发管道：缺少 pipeline_id 且会话无 active_pipeline_id".into(),
+            );
+        }
         let tenant = TenantContext::new(tenant_id, thread_id.to_string());
 
         // ── pending 入队（ADR-2026-08-26）──
@@ -982,10 +987,17 @@ impl PipelineDispatcher for EngineDispatcher {
         // 改写回主管道（历史 bug：点停止永远停不住子任务管道）——此处前端值
         // 非空即直采，仅空串（旧客户端）回退 thread 主管道。
         let target_pipeline = if pipeline_id.is_empty() {
-            resolve_pipeline_id_for_thread(Some(store), thread_id, "", &tenant_id).await
+            resolve_pipeline_id_for_thread(store, thread_id, "", &tenant_id).await
         } else {
             pipeline_id.to_string()
         };
+        if target_pipeline.is_empty() {
+            debug!(
+                thread = thread_id,
+                "stop_generation 无可定位管道（旧客户端未带 pipeline_id 且会话无主管道），幂等空转"
+            );
+            return Ok(());
+        }
         let runs = store
             .list_runs_by_pipeline(&target_pipeline, &tenant_id)
             .await
@@ -1030,13 +1042,19 @@ impl PipelineDispatcher for EngineDispatcher {
         // 该 thread 的真实主管道；纯内存写入，即时返回不占收包循环。
         let tenant_id =
             agentos_http::auth::resolve_tenant_id_by_user(self.state.store.as_ref(), user_id).await;
-        let route_id = resolve_pipeline_id_for_thread(
-            self.state.store.as_ref(),
-            thread_id,
-            pipeline_id,
-            &tenant_id,
-        )
-        .await;
+        let route_id = match self.state.store.as_ref() {
+            Some(store) => {
+                resolve_pipeline_id_for_thread(store, thread_id, pipeline_id, &tenant_id).await
+            }
+            None => pipeline_id.to_string(),
+        };
+        if route_id.is_empty() {
+            debug!(
+                thread = thread_id,
+                "dispatch_active_thread 无可定位管道，跳过活跃管道登记"
+            );
+            return Ok(());
+        }
         crate::run_chain::RunChainRegistry::global().note_user_pipeline(user_id, &route_id);
         // 域事件插座：session.active_changed → 观察总线 + 声明订阅的插件。
         crate::plugin_lifecycle::broadcast_domain_event(
@@ -1075,7 +1093,7 @@ impl PipelineDispatcher for EngineDispatcher {
         };
         let tenant_id = agentos_http::auth::resolve_tenant_id_by_user(Some(store), user_id).await;
         let route_id =
-            resolve_pipeline_id_for_thread(Some(store), thread_id, pipeline_id, &tenant_id).await;
+            resolve_pipeline_id_for_thread(store, thread_id, pipeline_id, &tenant_id).await;
         if route_id.is_empty() {
             return Err("regenerate 缺少 pipeline_id".into());
         }
@@ -1281,18 +1299,11 @@ fn find_target_user_seq(
 /// 这与前端源头修复（router.tsx 实时读 sessionStore）互补，形成双层防线：
 /// 前端尽量传对，后端兜底确保即使前端传错也不串桶。
 async fn resolve_pipeline_id_for_thread(
-    store: Option<&Arc<dyn agentos_core::traits::StorageBackend>>,
+    store: &Arc<dyn agentos_core::traits::StorageBackend>,
     thread_id: &str,
     frontend_pipeline_id: &str,
     tenant_id: &str,
 ) -> String {
-    let Some(store) = store else {
-        return if frontend_pipeline_id.is_empty() {
-            thread_id.to_string()
-        } else {
-            frontend_pipeline_id.to_string()
-        };
-    };
 
     // ① 前端值非空且属于该 thread → 信任
     if !frontend_pipeline_id.is_empty() {
@@ -1351,8 +1362,10 @@ async fn resolve_pipeline_id_for_thread(
         }
     }
 
-    // ③ 回退 thread_id（兼容）
-    thread_id.to_string()
+    // ③ 解析不出真实管道 → 空串，由调用方显式报错/幂等跳过。
+    // 会话 thread_id 是组织集合 id，绝不充当执行坐标回填（否则消息/state
+    // 落进以 thread id 为键的幽灵管道；2026-08-30 管道身份裁定）。
+    String::new()
 }
 
 /// new_message 事件 message.status 的取值规则：从消息 blob（final_assistant）
@@ -1532,8 +1545,7 @@ mod tests {
 
     async fn resolve(mock: ResolveMock, thread_id: &str, frontend_pipeline_id: &str) -> String {
         let store = Arc::new(mock) as Arc<dyn StorageBackend>;
-        resolve_pipeline_id_for_thread(Some(&store), thread_id, frontend_pipeline_id, "tenant-1")
-            .await
+        resolve_pipeline_id_for_thread(&store, thread_id, frontend_pipeline_id, "tenant-1").await
     }
 
     #[test]
@@ -2069,9 +2081,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_session_falls_back_to_thread_id() {
+    async fn no_session_yields_empty_not_thread_id() {
+        // 会话 id 是组织集合 id，绝不充当管道执行坐标回填（2026-08-30 管道身份裁定）。
+        // 解析不出真实管道 → 空串，由调用方显式报错/幂等跳过。
         let mock = ResolveMock::new(Ok(vec![]), None);
-        assert_eq!(resolve(mock, "T1", "").await, "T1");
+        assert_eq!(resolve(mock, "T1", "").await, "");
     }
 
     // ── resolve_dispatch_agent：执行 agent 解析（2026-08-24 阶段1）──

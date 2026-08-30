@@ -751,11 +751,17 @@ async fn process_via_engine_inner(
         return echo_fallback("project_root not configured", message);
     };
 
-    // 0. 统一管道查询键：pipeline_id 为空（HTTP 路径不传 / 旧 WS handler）时
-    //    回退 thread_id，保证 messages 表 pipeline_id 列 + registry 键落到同一维度。
-    //    WS 路径（ws_session.rs）已用 route_id（pipeline_id 空时回退 thread_id）。
+    // 0. 统一管道查询键：pipeline_id 是执行态唯一坐标，缺失即拒绝——会话
+    //    thread_id 是组织集合 id，不得充当执行坐标（2026-08-30 用户裁定：
+    //    thread 回退曾让消息/state 落进以 thread id 为键的幽灵管道）。
     let effective_pipeline_id = if pipeline_id.is_empty() {
-        thread_id
+        return EngineOutcome {
+            content: "[error] 缺少 pipeline_id，拒绝派发（会话 id 不得充当管道执行坐标）".into(),
+            final_assistant: None,
+            failed: true,
+            degraded: false,
+            plugin_errors: Vec::new(),
+        };
     } else {
         pipeline_id
     };
@@ -803,7 +809,6 @@ async fn process_via_engine_inner(
         initial_state,
         &store,
         message,
-        thread_id,
         effective_pipeline_id,
         &tenant_id,
         client_message_id,
@@ -1125,7 +1130,6 @@ async fn stage_recover_history(
     mut initial_state: serde_json::Value,
     store: &Arc<dyn StorageBackend>,
     message: &str,
-    thread_id: &str,
     effective_pipeline_id: &str,
     tenant_id: &str,
     client_message_id: &str,
@@ -1187,7 +1191,14 @@ async fn stage_recover_history(
             }
         }
         if !ckpt_hit {
-            match store.get_step_traces_by_thread(thread_id, tenant_id).await {
+            // 只回放本管道自己的轨迹。thread 全量回放会把同会话其它管道
+            // （父会话/兄弟子任务）的控制态（conversation_mode/core_type/router.*）
+            // 种进本管道初始 state——曾致新子任务第 0 轮即被对话挂起路由误挂
+            // （2026-08-30 管道身份裁定：执行态恢复只认 pipeline_id）。
+            match store
+                .get_step_traces_by_pipeline(effective_pipeline_id, tenant_id)
+                .await
+            {
                 Ok(step_traces) => {
                     for entry in &step_traces {
                         merge_patch(&mut recovered, &entry.patch_data);
@@ -1196,9 +1207,9 @@ async fn stage_recover_history(
                 Err(e) => {
                     // 持久化恢复失败：bug 信号（内存丢 + DB 也读不到），显式 error 暴露。
                     error!(
-                        thread_id = %thread_id,
+                        pipeline_id = %effective_pipeline_id,
                         error = %e,
-                        "get_step_traces_by_thread 回放失败"
+                        "get_step_traces_by_pipeline 回放失败"
                     );
                 }
             }

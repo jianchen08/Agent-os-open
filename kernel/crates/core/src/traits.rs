@@ -1485,11 +1485,27 @@ pub trait StorageBackend: Send + Sync {
     /// 查询某会话下的 step 级轨迹（冷启动统一回放用）。
     /// 经 pipeline_sessions 映射 → run_id → traces，只取 step 级（plugin_id 为配置
     /// step id），按 created_at 升序以便按序 merge 回放重建完整 state（含 messages）。
+    ///
+    /// 会话是组织集合：本方法只供会话面聚合读（执行记录页/复盘骨架），
+    /// 管道执行态恢复禁止用它（会串其它管道的控制态）——用
+    /// [`Self::get_step_traces_by_pipeline`]。
     async fn get_step_traces_by_thread(
         &self,
         thread_id: &str,
         tenant_id: &str,
     ) -> Result<Vec<TraceEntry>, StorageError>;
+
+    /// 查询单个管道自己的 step 级轨迹（管道执行态冷恢复专用）。
+    /// pipeline_id 是执行态唯一坐标：state 回放只允许读本管道产生的轨迹，
+    /// 同会话其它管道（父/兄弟子任务）的轨迹一律不可见。
+    /// 默认 `Ok(vec![])`（mock/null store 不破），SqliteStore 覆盖为真实查询。
+    async fn get_step_traces_by_pipeline(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+    ) -> Result<Vec<TraceEntry>, StorageError> {
+        Ok(vec![])
+    }
 
     // ── 域6：users（0.5.0 完整用户系统的最小持久化地基）───────────────
     // register 真实建用户、login/me/refresh/WS 查 DB。RBAC/JWT/bcrypt 留给 0.5.0。
