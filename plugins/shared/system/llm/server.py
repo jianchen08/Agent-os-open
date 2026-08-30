@@ -472,6 +472,13 @@ async def llm_complete_stream(
                 poll_task = asyncio.create_task(_poll_run_cancel(poll_handle, run_id, cancel_event))
 
         try:
+            # 透传 llm_core 经 kwargs 携带的模型参数（llm.yaml default_params
+            # 的 thinking/reasoning_effort 等）：先前只显式传固定形参，配置的
+            # adaptive thinking 从未到达上游——MiniMax-M3 只能按模型默认思考
+            # 预算运行（2026-08-30 实测 2870 tokens 即配置未生效的模型默认
+            # 行为，正文偶发为空）。_call_context 是内核路由信封
+            # （thread/pipeline/message 键），非模型参数，pop 不外传。
+            kwargs.pop("_call_context", None)
             response = await adapter.completion(
                 model=model,
                 messages=messages,
@@ -480,6 +487,7 @@ async def llm_complete_stream(
                 on_chunk=_on_chunk,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                **kwargs,
             )
         except StreamCancelledError:
             # 调用方停止（run suspended → on_chunk 返回 cancel → adapter 中断流）：

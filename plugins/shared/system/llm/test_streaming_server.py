@@ -450,6 +450,38 @@ class TestCompleteStream:
         # 透传键不得泄漏给 adapter（litellm 不认 agent_level）
         assert "agent_level" not in mod._adapter.calls[0]
 
+    def test_thinking_param_passthrough_to_adapter(self) -> None:
+        """llm.yaml default_params 的 thinking 经 kwargs 透传 → adapter 收到。
+
+        此前 server 调 adapter.completion 只显式传固定形参，adaptive thinking
+        配置被丢弃——MiniMax-M3 只能按模型默认思考预算运行（2026-08-30 实测
+        2870 tokens 即配置未生效的模型默认行为）。
+        """
+        mod = _load_server()
+        bus = FakeBus()
+        captured: dict[str, Any] = {}
+
+        class _RecordingAdapter(FakeAdapter):
+            async def completion(self, **kwargs: Any) -> Any:
+                captured.update(kwargs)
+                return await super().completion(**kwargs)
+
+        _inject(mod, "event-bus", bus)
+        mod._adapter = _RecordingAdapter(chunks=[_text("hi")], text="hi")
+
+        result = _run(
+            mod.llm_complete_stream(
+                model="minimax/MiniMax-M3",
+                messages=[{"role": "user", "content": "hi"}],
+                thinking={"type": "adaptive"},
+                _call_context={"thread_id": "t1"},
+            )
+        )
+        assert result["status"] == "streamed"
+        assert captured.get("thinking") == {"type": "adaptive"}
+        # 内核路由信封非模型参数，不得透传给 adapter/litellm
+        assert "_call_context" not in captured
+
     # ── 取消轮询：run suspended → interrupted 半截返回 ──────────────
 
 
