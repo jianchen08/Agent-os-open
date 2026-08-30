@@ -775,7 +775,7 @@ impl PipelineDispatcher for EngineDispatcher {
             // 会话无活跃管道且前端未带 pipeline_id：显式报错，不做 thread 回退
             // （执行坐标缺失属于协议违约，静默回退会写出幽灵管道数据）。
             return Err(
-                "会话无可派发管道：缺少 pipeline_id 且会话无 active_pipeline_id".into(),
+                "会话无可派发管道：pipeline_id 缺失或不属于该会话（拒绝静默换管道）".into(),
             );
         }
         let tenant = TenantContext::new(tenant_id, thread_id.to_string());
@@ -1297,7 +1297,9 @@ fn find_target_user_seq(
 /// 3. 仍取不到 → 回退 thread_id（兼容旧路径，与原 route_id 语义一致）
 ///
 /// 这与前端源头修复（router.tsx 实时读 sessionStore）互补，形成双层防线：
-/// 前端尽量传对，后端兜底确保即使前端传错也不串桶。
+/// 解析语义：前端显式管道经成员校验后信任；解析不出真实管道（缺失/不属于
+/// 该会话/无会话）一律返回空串由调用方显式处置——绝不静默换管道（拿主管道
+/// 顶替用户指向的管道 = 写错桶，2026-08-30 管道身份裁定）。
 async fn resolve_pipeline_id_for_thread(
     store: &Arc<dyn agentos_core::traits::StorageBackend>,
     thread_id: &str,
@@ -1318,8 +1320,9 @@ async fn resolve_pipeline_id_for_thread(
                 warn!(
                     thread_id = %thread_id,
                     frontend_pid = %frontend_pipeline_id,
-                    "前端传来的 pipeline_id 不属于该 thread（可能残留旧会话值），改用 thread 真实主管道"
+                    "前端传来的 pipeline_id 不属于该 thread（可能残留旧会话值），拒绝派发——不回落主管道（静默换管道=写错桶）"
                 );
+                return String::new();
             }
             // 存储故障 ≠ 无关联：报错可见，不得兜成空列表误诊为"前端值不属于该 thread"。
             // 且不再回落主管道改写 route_id（2026-08-22 裁决）——用户在子管道视图
@@ -1849,6 +1852,10 @@ mod tests {
             .create_session(&session_record(Some("reg3")))
             .await
             .unwrap();
+        store
+            .link_pipeline_session("reg3", "T1", "default")
+            .await
+            .unwrap();
 
         let mut state = crate::routes::AppState::new();
         state.store = Some(store.clone());
@@ -1894,6 +1901,10 @@ mod tests {
             .create_session(&session_record(Some("reg2")))
             .await
             .unwrap();
+        store
+            .link_pipeline_session("reg2", "T1", "default")
+            .await
+            .unwrap();
 
         let mut state = crate::routes::AppState::new();
         state.store = Some(store.clone());
@@ -1934,6 +1945,10 @@ mod tests {
         store.set_run_pipeline("reg4", "reg4").await.unwrap();
         store
             .create_session(&session_record(Some("reg4")))
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session("reg4", "T1", "default")
             .await
             .unwrap();
 
@@ -1979,6 +1994,10 @@ mod tests {
         store.set_run_pipeline("reg4", "reg4").await.unwrap();
         store
             .create_session(&session_record(Some("reg4")))
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session("reg4", "T1", "default")
             .await
             .unwrap();
 
@@ -2056,13 +2075,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frontend_not_member_falls_to_main_pipeline() {
-        // 前端值不属于该 thread（正常校验失败）→ 仍回落主管道（既有防御语义不变）
+    async fn frontend_not_member_rejected_not_snapped_to_main() {
+        // 前端值不属于该 thread（校验失败）→ 空串由调用方显式拒绝，
+        // 绝不静默换管道写进主管道（2026-08-30 管道身份裁定：拿别的管道当回退=写错桶）。
         let mock = ResolveMock::new(
             Ok(vec!["P-other".to_string()]),
             Some(session_record(Some("P-main"))),
         );
-        assert_eq!(resolve(mock, "T1", "P-sub").await, "P-main");
+        assert_eq!(resolve(mock, "T1", "P-sub").await, "");
     }
 
     #[tokio::test]
