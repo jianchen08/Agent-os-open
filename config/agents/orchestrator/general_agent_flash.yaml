@@ -61,11 +61,11 @@ static_vars:
 
       以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
 
-      - lsp.definition: 跳转到代码定义
+      - lsp_definition: 跳转到代码定义
 
-      - lsp.references: 查找代码引用
+      - lsp_references: 查找代码引用
 
-      - lsp.diagnostics: 获取代码诊断信息
+      - lsp_diagnostics: 获取代码诊断信息
 
       - yaml_validate: 验证YAML配置文件
 

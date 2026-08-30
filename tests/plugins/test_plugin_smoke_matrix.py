@@ -195,7 +195,7 @@ def _safe_invocations(plugin_dir: Path, tmp_path: Path) -> dict:
         "shared/system/cost_control": {"cost_control.get_status": {}},
         "shared/system/human_interaction": {"interaction.get_pending": {}},
         "shared/system/monitoring": {"monitoring.get_health": {}},
-        "shared/system/review": {"review.get_report": {"review_id": "smoke_nonexistent"}},
+        "shared/system/review": {"review_get_report": {"review_id": "smoke_nonexistent"}},
         "shared/tools/triggers": {"trigger.list": {}},
         "shared/tools/simple": {
             "yaml_validate": {"content": "a: 1\nb: 2\n"},

@@ -84,7 +84,7 @@
         }
       },
       {
-        "name": "review.get_report",
+        "name": "review_get_report",
         "description": "Get review report by ID",
         "input_schema": {
           "type": "object",

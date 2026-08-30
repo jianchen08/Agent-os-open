@@ -43,7 +43,7 @@ async def _on_unload(params: dict[str, Any]) -> None:
 
 
 @plugin.tool(
-    name="lsp.definition",
+    name="lsp_definition",
     schema={
         "type": "object",
         "properties": {
@@ -72,7 +72,7 @@ async def lsp_definition(file_path: str, line: int, character: int = 0, language
 
 
 @plugin.tool(
-    name="lsp.references",
+    name="lsp_references",
     schema={
         "type": "object",
         "properties": {
@@ -101,7 +101,7 @@ async def lsp_references(file_path: str, line: int, character: int = 0, language
 
 
 @plugin.tool(
-    name="lsp.diagnostics",
+    name="lsp_diagnostics",
     schema={
         "type": "object",
         "properties": {
@@ -136,7 +136,7 @@ async def lsp_diagnostics(file_path: str, language: str | None = None) -> dict[s
 
 
 @plugin.tool(
-    name="lsp.jump_to_file",
+    name="lsp_jump_to_file",
     schema={
         "type": "object",
         "properties": {

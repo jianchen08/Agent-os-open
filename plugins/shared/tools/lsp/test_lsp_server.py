@@ -55,21 +55,21 @@ def lsp_types_mod() -> Any:
 class TestModuleAssembly:
     def test_four_tools_registered(self, server_mod: Any) -> None:
         names = set(server_mod.plugin._tools.keys())
-        assert names == {"lsp.definition", "lsp.references", "lsp.diagnostics", "lsp.jump_to_file"}
+        assert names == {"lsp_definition", "lsp_references", "lsp_diagnostics", "lsp_jump_to_file"}
 
     def test_definition_schema(self, server_mod: Any) -> None:
-        tool = server_mod.plugin._tools["lsp.definition"]
+        tool = server_mod.plugin._tools["lsp_definition"]
         assert tool.schema["required"] == ["file_path", "line"]
         assert tool.schema["properties"]["character"]["default"] == 0
 
     def test_jump_schema_defaults(self, server_mod: Any) -> None:
-        tool = server_mod.plugin._tools["lsp.jump_to_file"]
+        tool = server_mod.plugin._tools["lsp_jump_to_file"]
         assert tool.schema["required"] == ["file_path"]
         assert tool.schema["properties"]["line"]["default"] == 0
         assert tool.schema["properties"]["character"]["default"] == 0
 
     def test_diagnostics_schema(self, server_mod: Any) -> None:
-        tool = server_mod.plugin._tools["lsp.diagnostics"]
+        tool = server_mod.plugin._tools["lsp_diagnostics"]
         assert tool.schema["required"] == ["file_path"]
 
 

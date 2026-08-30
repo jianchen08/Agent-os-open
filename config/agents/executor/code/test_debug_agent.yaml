@@ -162,10 +162,10 @@ tool_ids:
 - bash_execute
 - web_operate
 - task_evaluate
-- lsp.definition
-- lsp.references
-- lsp.diagnostics
-- lsp.jump_to_file
+- lsp_definition
+- lsp_references
+- lsp_diagnostics
+- lsp_jump_to_file
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
 - 评估通过才能结束任务

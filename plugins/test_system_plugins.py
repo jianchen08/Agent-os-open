@@ -263,7 +263,7 @@ class TestReviewPlugin:
     def test_review_tools_registered(self) -> None:
         mod = _load_plugin_module("review")
         assert "trigger_review" in mod.plugin._tools
-        assert "review.get_report" in mod.plugin._tools
+        assert "review_get_report" in mod.plugin._tools
 
     def test_trigger_review(self) -> None:
         mod = _load_plugin_module("review")
@@ -296,7 +296,7 @@ class TestReviewPlugin:
             task_id="task_3",
             summary="Test",
         )
-        report = _call_tool(mod, "review.get_report", review_id=triggered["review_id"])
+        report = _call_tool(mod, "review_get_report", review_id=triggered["review_id"])
         assert report["task_id"] == "task_3"
         assert "lessons" in report
 

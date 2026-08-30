@@ -352,7 +352,7 @@ async def trigger_review(
 
 
 @plugin.tool(
-    name="review.get_report",
+    name="review_get_report",
     schema={
         "type": "object",
         "properties": {

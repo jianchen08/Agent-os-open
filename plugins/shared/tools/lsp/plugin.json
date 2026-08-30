@@ -10,7 +10,7 @@
   "capabilities": {
     "tools": [
       {
-        "name": "lsp.definition",
+        "name": "lsp_definition",
         "description": "跳转到符号定义位置",
         "input_schema": {
           "type": "object",
@@ -68,7 +68,7 @@
         }
       },
       {
-        "name": "lsp.references",
+        "name": "lsp_references",
         "description": "查找符号的所有引用位置",
         "input_schema": {
           "type": "object",
@@ -126,7 +126,7 @@
         }
       },
       {
-        "name": "lsp.diagnostics",
+        "name": "lsp_diagnostics",
         "description": "获取文件的诊断信息（错误和警告）",
         "input_schema": {
           "type": "object",
@@ -187,7 +187,7 @@
         }
       },
       {
-        "name": "lsp.jump_to_file",
+        "name": "lsp_jump_to_file",
         "description": "在 IDE 中打开文件并跳转到指定位置",
         "input_schema": {
           "type": "object",
