@@ -113,14 +113,30 @@
     {
       "id": "llm",
       "path": "config/models/llm.yaml",
-      "label": "LLM 模型配置"
+      "label": "LLM 模型配置",
+      "settings": false
     },
     {
       "id": "embedding",
       "path": "config/models/embedding.yaml",
-      "label": "向量模型配置"
+      "label": "向量模型配置",
+      "settings": false
     }
   ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "llm_settings",
+        "title": "模型设置",
+        "icon": "🤖",
+        "space": "settings",
+        "slot": "nav",
+        "widget": "llm_settings",
+        "order": 10,
+        "description": "配置大语言模型提供商、密钥与模型（预置提供者填入 API Key 即可用）"
+      }
+    ]
+  },
   "http_endpoints": [
     {
       "route_id": "thinking_mode_health",
