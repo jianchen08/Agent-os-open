@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import stat
 import subprocess
 import sys
 import uuid
@@ -287,6 +288,15 @@ def ensure_project_registered(
     return project, True
 
 
+def _rmtree_onexc(func: Any, path: str, exc: BaseException) -> None:
+    """rmtree 遇 Windows 只读文件（git 对象恒只读）解锁重试，其余异常原样抛出。"""
+    if isinstance(exc, PermissionError):
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+        return
+    raise exc
+
+
 def remove_project_folder(path: str) -> bool:
     """删除项目文件夹（破坏性，调用方负责确认；带路径安全校验）。
 
@@ -302,7 +312,9 @@ def remove_project_folder(path: str) -> bool:
         return False
     import shutil
 
-    shutil.rmtree(target)
+    # onexc 为 3.12+ API（3.11 的 onerror 已废弃移除中）；mypy python_version=3.11
+    # 存根缺署名，定点豁免——插件运行时地板 3.12
+    shutil.rmtree(target, onexc=_rmtree_onexc)  # type: ignore[call-arg]
     return True
 
 

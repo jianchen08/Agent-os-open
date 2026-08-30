@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from project_registry import (  # noqa: E402
     ensure_project_folder,
     ensure_project_registered,
     load_project_paths,
+    remove_project_folder,
 )
 
 
@@ -170,3 +172,39 @@ class TestCreateProjectApi:
         assert r1["created"] is True
         assert r2["created"] is False
         assert r2["project"]["id"] == r1["project"]["id"]
+
+
+class TestRemoveProjectFolder:
+    def _git_repo_with_commit(self, target: Path) -> None:
+        import subprocess
+
+        target.mkdir(parents=True)
+        subprocess.run(["git", "init"], cwd=str(target), check=True, capture_output=True)
+        (target / "f.txt").write_text("x", encoding="utf-8")
+        subprocess.run(["git", "-C", str(target), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(target), "-c", "user.name=t", "-c", "user.email=t@t",
+             "commit", "-m", "i"],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_removes_git_repo_with_readonly_objects(self, reg_env: dict[str, Any]) -> None:
+        """git 对象文件恒只读——删除须解锁后成功（Windows 删除端点实爆点）。"""
+        target = reg_env["ws_base"] / "repo"
+        self._git_repo_with_commit(target)
+        readonly = [
+            p
+            for p in (target / ".git" / "objects").rglob("*")
+            if p.is_file() and not (p.stat().st_mode & stat.S_IWRITE)
+        ]
+        if os.name == "nt":
+            assert readonly, "git commit 落盘的松散对象应有只读位"
+
+        assert remove_project_folder(str(target)) is True
+        assert not target.exists()
+
+    def test_rejects_workspace_base_and_missing_path(self, reg_env: dict[str, Any]) -> None:
+        """保护路径（工作空间基目录）与不存在路径都返回 False，不抛错。"""
+        assert remove_project_folder(str(reg_env["ws_base"])) is False
+        assert remove_project_folder(str(reg_env["ws_base"] / "nope")) is False
