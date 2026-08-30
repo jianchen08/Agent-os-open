@@ -320,6 +320,36 @@ class TestTasksEndpoints:
         # 会话锚点：lineage.origin_session_id 为真 thread id（非自身 pipeline_id）
         assert t["thread_id"] == "sess-pipe-0-2-task"
 
+    async def test_list_tasks_ws_meta_prefers_task_mirror(self, monkeypatch: pytest.MonkeyPatch,
+                                                          hub: _FakeCapabilityHub) -> None:
+        """任务域镜像 task.ws_meta 优先于裸 ws_meta：任务管道的裸键会被会话
+        工作区投影污染成会话目录，打开工作空间不能落到会话默认文件夹。"""
+        _seed_state(hub, [
+            _state_row(
+                "pipe-ws", "带污染键的任务", "running",
+                ws_meta={"mode": "plain", "path": "D:/ws/sessions/thread-x",
+                         "session_id": "thread-x"},
+                **{"task.ws_meta": {"mode": "worktree", "path": "D:/ws/proj__wt_1",
+                                    "project_root": "D:/ws/proj"}},
+            ),
+        ])
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks")
+        t = resp["payload"]["items"][0]
+        assert t["metadata"]["ws_meta"]["path"] == "D:/ws/proj__wt_1"
+
+    async def test_list_tasks_ws_meta_fallback_to_bare_key(self, monkeypatch: pytest.MonkeyPatch,
+                                                           hub: _FakeCapabilityHub) -> None:
+        """无任务镜像（主会话形态行）→ 回退裸 ws_meta，行为不变。"""
+        _seed_state(hub, [
+            _state_row(
+                "pipe-plain", "仅有裸键的任务", "running",
+                ws_meta={"mode": "plain", "path": "D:/ws/plain-dir"},
+            ),
+        ])
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks")
+        t = resp["payload"]["items"][0]
+        assert t["metadata"]["ws_meta"]["path"] == "D:/ws/plain-dir"
+
     async def test_list_tasks_state_unavailable_empty(
             self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
         """pipeline-state 能力不可用 → 空列表 200（state 是唯一数据源，无兜底面）。"""

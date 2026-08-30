@@ -86,13 +86,20 @@ function taskPipelineId(task: Record<string, unknown>): string | undefined {
   return typeof metaRaw === 'string' && metaRaw ? metaRaw : undefined
 }
 
-/** 从 state 摘要提取工作区坐标（R3：ws_meta.path 优先——worktree 副本或
- *  plain 目录；workspace 标量回退。project_root 是源根，不用于关联） */
+/** 从 state 摘要提取工作区坐标（R3：任务域镜像 task.ws_meta 优先——任务管道
+ *  的裸 ws_meta 会被会话工作区投影污染成会话目录；ws_meta.path 次之，
+ *  workspace 标量回退。project_root 是源根，不用于关联） */
 function stateWorkspacePath(
-  s: { ws_meta?: { path?: string }; workspace?: string } | undefined,
+  s:
+    | {
+        'task.ws_meta'?: { path?: string }
+        ws_meta?: { path?: string }
+        workspace?: string
+      }
+    | undefined,
 ): string | undefined {
   if (!s) return undefined
-  const p = s.ws_meta?.path ?? s.workspace
+  const p = s['task.ws_meta']?.path ?? s.ws_meta?.path ?? s.workspace
   return typeof p === 'string' && p ? p : undefined
 }
 

@@ -437,6 +437,46 @@ describe('PipelineManagerWidget', () => {
     expect(tabs.some((t) => t.dataSource === 'workspace://sessPipe')).toBe(true)
   })
 
+  it('state 双键并存时任务域镜像 task.ws_meta 优先（裸 ws_meta 被会话投影污染场景）', async () => {
+    // 运行中任务：state 出口同时带 task.ws_meta（任务域镜像，worktree 真值）
+    // 与被会话投影污染的裸 ws_meta（会话目录）——按钮路径必须取镜像，
+    // 不能落到会话默认文件夹
+    seed.mockUseAllTasksQuery.mockReturnValue({
+      data: [
+        {
+          id: 'subPipe',
+          title: '镜像优先子任务',
+          status: 'running',
+          pipeline_run_id: 'subPipe',
+          agent_name: 'general_agent',
+        },
+      ],
+    })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({
+      data: {
+        subPipe: {
+          pipeline_id: 'subPipe',
+          thread_id: 'th-1',
+          source: 'memory',
+          state: {
+            status: 'active',
+            ws_meta: { path: 'D:/ws/sessions/thread-x', mode: 'plain' },
+            'task.ws_meta': {
+              path: 'D:/ws/proj__wt_9',
+              mode: 'worktree',
+              project_root: 'D:/ws/proj',
+            },
+          },
+        },
+      },
+    })
+    renderWithProviders(<PipelineManagerWidget />)
+    expect(await screen.findAllByText('镜像优先子任务')).toHaveLength(1)
+    expect(
+      await screen.findAllByTitle('打开工作空间: D:/ws/proj__wt_9')
+    ).toHaveLength(1)
+  })
+
   it('无工作区坐标的条目不渲染打开工作空间按钮（主会话 R1 自然推论）', async () => {
     seed.mockUsePipelineRunsQuery.mockReturnValue({
       data: {

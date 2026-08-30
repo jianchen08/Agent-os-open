@@ -229,6 +229,8 @@
     }
   ],
   "export_fields": [
-    "task.parent_project_id"
+    "task.parent_project_id",
+    "ws_meta",
+    "task.ws_meta"
   ]
 }
