@@ -31,6 +31,7 @@ import { DebugCenterHubWidget } from '@/components/schema/widgets/DebugCenterHub
 import { ImageAnnotationView } from '@/components/approval/ImageAnnotationView'
 import { MediaTimelineView } from '@/components/approval/MediaTimelineView'
 import { TextDiffView } from '@/components/shared/TextDiffView'
+import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
 import type { Annotation } from '@/types/review'
@@ -59,6 +60,10 @@ const MediaTimelineWidget = (props: Record<string, unknown>) => (
     readOnly={props.readOnly === true}
   />
 )
+
+/** 模型设置面板（llm_service 插件 contributes.pages space=settings 声明承载；
+ *  原内核导航「模型」页迁移，设置中枢唯一模型配置入口） */
+const LlmSettingsWidget = () => <LlmSettingsPage embedded />
 
 /** Widget 注册条目 */
 interface WidgetEntry {
@@ -129,6 +134,8 @@ const WIDGETS: WidgetEntry[] = [
   // track.llm_usage / llm_model。spaces 用 'chat'——chat-input 不是
   // RenderingSpaceType 枚举值（槽位语义靠声明 space 过滤，解析只按 type 查表）
   { name: 'context_usage', component: ContextUsageWidget, spaces: ['chat'] },
+  // 模型设置（llm_service 插件声明 settings 页，原内核导航「模型」迁移而来）
+  { name: 'llm_settings', component: LlmSettingsWidget, spaces: ['workspace'] },
 ]
 
 /**

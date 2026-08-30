@@ -38,10 +38,12 @@ import {
   addProvider,
   deleteProvider,
   updateProviderConfig,
+  saveDefaults,
   type LLMConfigResponse,
   type ModelConfig,
   type ProviderConfig,
   type RemoteModel,
+  type LLMDefaults,
 } from '@/services/api/config'
 
 
@@ -125,6 +127,13 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   // 拉取模型对话框的目标提供者
   const [fetchTarget, setFetchTarget] = useState<string | null>(null)
 
+  // 默认模型草稿（Tab2「默认模型」段，随 config.defaults 同步）
+  const [defaultsDraft, setDefaultsDraft] = useState<LLMDefaults>({
+    chat: '',
+    embedding: '',
+    tiers: {},
+  })
+
   // 新模型表单
   const [newModelId, setNewModelId] = useState('')
   const [newModelConfig, setNewModelConfig] = useState<ModelConfig>({
@@ -169,10 +178,32 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     }
   }, [configQuery.isPending, configQuery.isError, configQuery.error])
 
+  // 默认模型草稿随配置同步（保存/增删模型后回显服务器最新值）
+  useEffect(() => {
+    if (!config) return
+    const d = config.defaults ?? { chat: '', embedding: '', tiers: {} }
+    setDefaultsDraft({
+      chat: d.chat ?? '',
+      embedding: d.embedding ?? '',
+      tiers: d.tiers ?? {},
+    })
+  }, [config])
+
   const modelIds = config ? Object.keys(config.models ?? {}) : []
   const providerIds = config ? Object.keys(config.providers ?? {}) : []
 
   // 保存默认模型选择
+
+  // 保存默认模型选择（chat/embedding/tiers 部分更新，PUT /llm/defaults）
+  const handleSaveDefaults = useCallback(async () => {
+    try {
+      const defaults = await saveDefaults(defaultsDraft)
+      setConfig((prev) => (prev ? { ...prev, defaults } : prev))
+      toast.success('默认模型已保存')
+    } catch (e) {
+      toast.error('保存默认模型失败', { description: getApiMsg(e, '保存默认模型失败') })
+    }
+  }, [defaultsDraft])
 
   // 添加新模型
   const handleAddModel = useCallback(async () => {
@@ -483,13 +514,45 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         {/* ── Tab 2：模型 ── */}
         <TabsContent value="models">
           <div className="mt-4 space-y-6">
-            {/* 默认模型：widget 化 T5 迁至插件配置表单（设置 → 插件配置 → LLM Core） */}
-            <section className="rounded-lg border border-dashed p-4">
+            {/* 默认模型：chat/tiers/embedding 选择，保存写 llm.yaml defaults 段 */}
+            <section className="rounded-lg border p-4">
               <h3 className="mb-1 text-sm font-semibold">默认模型</h3>
-              <p className="text-muted-foreground text-xs leading-relaxed">
-                默认对话/分级/向量模型与并发上限已迁移至插件配置表单（数据归属
-                llm_core）：设置 → <span className="text-foreground font-medium">插件配置 → LLM 模型配置</span>。
+              <p className="text-muted-foreground mb-3 text-xs leading-relaxed">
+                默认对话/分级/向量模型——模型须已在下文「已注册模型」列表中；被删模型在保存前保留原值不覆盖。
               </p>
+              <div className="space-y-2">
+                <DefaultModelSelect
+                  id="default-chat"
+                  label="默认对话模型"
+                  value={defaultsDraft.chat}
+                  models={modelIds}
+                  onChange={(v) => setDefaultsDraft((p) => ({ ...p, chat: v }))}
+                />
+                {['large', 'medium', 'small'].map((tier) => (
+                  <DefaultModelSelect
+                    key={tier}
+                    id={`default-tier-${tier}`}
+                    label={`${tier} 档位`}
+                    value={defaultsDraft.tiers[tier] ?? ''}
+                    models={modelIds}
+                    onChange={(v) =>
+                      setDefaultsDraft((p) => ({ ...p, tiers: { ...p.tiers, [tier]: v } }))
+                    }
+                  />
+                ))}
+                <DefaultModelSelect
+                  id="default-embedding"
+                  label="默认向量模型"
+                  value={defaultsDraft.embedding}
+                  models={modelIds}
+                  onChange={(v) => setDefaultsDraft((p) => ({ ...p, embedding: v }))}
+                />
+                <div className="flex items-center gap-2 pt-1">
+                  <Button size="sm" onClick={handleSaveDefaults}>
+                    保存默认模型
+                  </Button>
+                </div>
+              </div>
             </section>
 
             {/* 模型列表 */}
@@ -1251,6 +1314,37 @@ function ModelRow({
 /* ============================================ */
 /* 共享子组件 (与 ApiSettingsPage 相同模式)       */
 /* ============================================ */
+
+/** 默认模型下拉：选项来自已注册模型；当前值已不在列表中时仍展示（防保存前误丢） */
+function DefaultModelSelect({
+  id,
+  label,
+  value,
+  models,
+  onChange,
+}: {
+  id: string
+  label: string
+  value: string
+  models: string[]
+  onChange: (v: string) => void
+}) {
+  const options = models.includes(value) ? models : [value, ...models].filter(Boolean)
+  return (
+    <FieldRow label={label} htmlFor={id}>
+      <Select value={value || undefined} onValueChange={onChange}>
+        <SelectTrigger id={id}>
+          <SelectValue placeholder="未设置" />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((m) => (
+            <SelectItem key={m} value={m}>{m}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </FieldRow>
+  )
+}
 
 function FieldRow({
   label,

@@ -13,7 +13,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
 import { renderPageContent } from '@/components/schema/PageRenderer'
 import { cn } from '@/lib/utils'
-import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
@@ -26,7 +25,6 @@ type NavKey =
   | 'kernel-theme'
   | 'kernel-plugins'
   | 'kernel-pipeline'
-  | 'kernel-llm'
   | `plugin:${string}`
   | `declared:${string}`
 
@@ -155,7 +153,6 @@ export function SettingsHubWidget({ initialActive = 'kernel-plugins' }: Settings
       <main className="min-h-0 min-w-0 flex-1 overflow-auto">
         {active === 'kernel-theme' && <ThemeSettingsPage />}
         {active === 'kernel-pipeline' && <PipelineSettingsPage embedded />}
-        {active === 'kernel-llm' && <LlmSettingsPage embedded />}
         {active === 'kernel-plugins' && <PluginsSettingsPage />}
         {String(active).startsWith('plugin:') && (
           <PluginConfigEmbed pathKey={String(active).slice('plugin:'.length)} />

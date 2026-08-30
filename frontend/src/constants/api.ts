@@ -122,6 +122,8 @@ export const API_ENDPOINTS = {
     LLM_MODELS: LLM_SERVICE_ENDPOINTS.config_llm_models_get,
     /** 获取默认配置 */
     LLM_DEFAULTS: LLM_SERVICE_ENDPOINTS.config_llm_defaults_get,
+    /** 更新默认配置（body: chat/embedding/tiers 可空部分更新） */
+    LLM_DEFAULTS_UPDATE: LLM_SERVICE_ENDPOINTS.config_llm_defaults_update,
     /** 获取成本控制配置 */
     COST_CONTROL_GET: COST_CONTROL_ENDPOINTS.cost_config_file_get,
     /** 更新成本控制配置 */

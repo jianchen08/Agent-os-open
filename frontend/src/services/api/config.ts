@@ -135,6 +135,20 @@ export async function getDefaults(options: RetryOptions = {}): Promise<LLMDefaul
   }, options)
 }
 
+/** 更新默认模型配置（chat/embedding/tiers 可空部分更新；返回最新 defaults） */
+export async function saveDefaults(
+  patch: Partial<LLMDefaults>,
+  options: RetryOptions = {},
+): Promise<LLMDefaults> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.put<LLMDefaults>(
+      API_ENDPOINTS.CONFIG.LLM_DEFAULTS_UPDATE,
+      patch,
+    )
+    return response.data
+  }, options)
+}
+
 export async function addModel(
   modelId: string,
   config: ModelConfig,

@@ -17,6 +17,7 @@ import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
 
 // ── Mock 外部依赖 ──
 const mockGetSchema = vi.hoisted(() => vi.fn().mockResolvedValue({}))
@@ -45,6 +46,14 @@ vi.mock('@/components/config/PluginConfigEditor', () => ({
   PluginConfigEditor: ({ pluginId, fileId }: { pluginId?: string; fileId?: string }) => (
     <div data-testid="plugin-config-editor">
       {pluginId}/{fileId}
+    </div>
+  ),
+}))
+
+vi.mock('@/pages/settings/LlmSettingsPage', () => ({
+  LlmSettingsPage: ({ embedded }: { embedded?: boolean }) => (
+    <div data-testid="llm-settings-widget" data-embedded={embedded ? 'true' : 'false'}>
+      模型设置页
     </div>
   ),
 }))
@@ -140,5 +149,61 @@ describe('SettingsHubWidget — 声明驱动（contributes.pages space=settings�
       expect(screen.getByTestId('ext-widget-rendered')).toBeInTheDocument()
     })
     expect(screen.getByText('扩展设置内容可见')).toBeInTheDocument()
+  })
+})
+
+describe('SettingsHubWidget — 模型设置迁为插件 widget（内核导航不再持有）', () => {
+  beforeEach(() => {
+    contributionRegistry.clear()
+    widgetRegistry.clear()
+    initializeWidgets()
+    mockGetSchema.mockResolvedValue({
+      plugin_contributes: [
+        {
+          plugin_id: 'llm_service',
+          plugin_name: 'LLM Service',
+          contributes: {
+            pages: [
+              {
+                id: 'llm_settings',
+                title: '模型设置',
+                space: 'settings',
+                slot: 'nav',
+                widget: 'llm_settings',
+              },
+            ],
+          },
+        },
+      ],
+    })
+  })
+
+  afterEach(() => {
+    contributionRegistry.clear()
+    widgetRegistry.clear()
+    mockGetSchema.mockReset()
+    mockGetSchema.mockResolvedValue({})
+  })
+
+  it('内核设置分组不再出现「模型」入口（已迁出）', async () => {
+    renderWithProviders(<SettingsHubWidget />)
+
+    await waitFor(() => {
+      expect(screen.getByText('内核设置')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('模型', { exact: true })).not.toBeInTheDocument()
+  })
+
+  it('llm_service 声明的「模型设置」settings 页经 llm_settings widget 渲染', async () => {
+    renderWithProviders(<SettingsHubWidget />)
+
+    await waitFor(() => {
+      expect(screen.getByText('插件页面')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('模型设置', { exact: true }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('llm-settings-widget')).toBeInTheDocument()
+    })
   })
 })

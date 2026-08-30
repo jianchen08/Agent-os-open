@@ -2,7 +2,8 @@
  * 内核设置导航项共享数据源
  *
  * SettingsHubWidget（工作区设置面板 settings_hub，设置唯一 UI）的「内核设置」
- * 导航（模型 / 主题 / 插件 / 管道）。无独立路由页 /settings。
+ * 导航（主题 / 插件 / 管道）。无独立路由页 /settings。模型设置已迁为
+ * llm_service 插件声明的 settings 页（contributes.pages，widget 承载）。
  */
 
 export interface KernelNavItem {
@@ -21,14 +22,6 @@ export interface KernelNavItem {
 }
 
 export const KERNEL_NAV_ITEMS: KernelNavItem[] = [
-  {
-    id: 'llm',
-    title: '模型设置',
-    label: '模型',
-    description: '配置大语言模型提供商、密钥与模型',
-    icon: '🤖',
-    group: '内核',
-  },
   {
     id: 'theme',
     title: '主题设置',
