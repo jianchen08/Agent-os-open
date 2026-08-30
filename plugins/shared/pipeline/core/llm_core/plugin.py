@@ -203,6 +203,11 @@ class LLMCore(ICorePlugin):
         # 配置层(models.py)与 resolver 均不覆盖空 dict，漏配模型最终落此。
         self._default_params: dict[str, Any] = self._config.get("default_params", {})
 
+        # 空回复重试上限（用户裁定 2026-08-30）：LLM 返回空文本且无工具调用
+        # 时跨轮重试，超过上限标记耗尽交 output 步骤裁决任务失败。
+        # 每次 execute 由 _apply_runtime_config 按 plugin_configs 覆盖。
+        self._max_empty_retries: int = int(self._config.get("max_empty_retries", 2))
+
         # 构建适配器：llm_core 的 LLM 面唯一事实源 = llm_service 的
         # llm.complete_stream（经 tool-executor 跨进程调用）；adapter 参数仅
         # 测试注入用（进程内假实现），None = 走 llm_service 通道。
@@ -220,6 +225,22 @@ class LLMCore(ICorePlugin):
     def priority(self) -> int:
         """插件执行优先级。"""
         return 50
+
+    def _apply_runtime_config(self, ctx: PluginContext) -> None:
+        """从 Agent 配置覆盖运行时参数（每次 execute 复位后应用）。
+
+        同 sidecar 实例被多个 agent 管道连续复用：先回构造默认值再应用本
+        管道 state.plugin_configs 注入的 max_empty_retries——前一 agent 的
+        配置不得残留到下一 agent（与 task_reminder 同范式）。
+        """
+        self._max_empty_retries = int(self._config.get("max_empty_retries", 2))
+        plugin_configs = ctx.state.get("plugin_configs", {})
+        if isinstance(plugin_configs, dict):
+            llm_core_cfg = plugin_configs.get("llm_core", {})
+            if isinstance(llm_core_cfg, dict):
+                override = llm_core_cfg.get("max_empty_retries")
+                if isinstance(override, int) and override >= 0:
+                    self._max_empty_retries = override
 
     def _apply_model_from_state(self, state: dict[str, Any]) -> None:
         """从管道 state 动态解析本次调用的模型并更新 self。
@@ -343,6 +364,7 @@ class LLMCore(ICorePlugin):
         """
         # 动态模型解析：每次 execute 从 state 读 model_id/model_tier 并按
         # llm.yaml 整体切换实例配置（优先级与失败语义见 _apply_model_from_state）。
+        self._apply_runtime_config(ctx)
         self._apply_model_from_state(ctx.state)
 
         messages = self._build_messages(ctx.state)
@@ -475,6 +497,38 @@ class LLMCore(ICorePlugin):
             }
             if messages_update is not None:
                 result["messages"] = messages_update
+            # 空回复重试（用户裁定 2026-08-30）：LLM 偶发"只思考不回答"
+            # （adaptive thinking 下 content 空且无工具调用，实测 MiniMax-M3）。
+            # 跨轮计数：未超限置 _has_new_llm_input 触发 post 路由回 LLM 重试
+            # （输入不变再给一次机会，模型输出有随机性）；超限置
+            # llm_empty_exhausted 交 output 步骤裁决任务终态（直接失败）。
+            # 有产出即复位计数并清续跑标志（防残留标志把后续纯文本轮误路由回
+            # LLM 造成死循环，与 task_reminder 次级证据放行同键语义）。
+            is_empty = not (result_text or "").strip() and not tool_calls
+            if is_empty:
+                streak = int(ctx.state.get("llm_empty_streak", 0) or 0) + 1
+                result["llm_empty_streak"] = streak
+                if streak > self._max_empty_retries:
+                    result["llm_empty_exhausted"] = True
+                    result["_has_new_llm_input"] = False
+                    logger.warning(
+                        "[%s] 空回复重试耗尽（已重试 %d 次）pipeline=%s，交任务域裁决失败",
+                        self.name,
+                        streak - 1,
+                        _pipeline_id,
+                    )
+                else:
+                    result["_has_new_llm_input"] = True
+                    logger.warning(
+                        "[%s] 空回复（无文本无工具调用），第 %d/%d 次重试 pipeline=%s",
+                        self.name,
+                        streak,
+                        self._max_empty_retries,
+                        _pipeline_id,
+                    )
+            else:
+                result["llm_empty_streak"] = 0
+                result["_has_new_llm_input"] = False
             return result
 
         except Exception as exc:

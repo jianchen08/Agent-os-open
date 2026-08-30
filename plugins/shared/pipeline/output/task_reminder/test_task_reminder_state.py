@@ -143,3 +143,56 @@ class TestActiveChildrenFromState:
         ctx = _ctx(_base_task_state(**{"raw_result": "我完成了，但还没提交评估"}))
         result = await reminder.execute(ctx)
         assert result.state_updates, "无活跃子任务应提醒提交评估"
+
+
+class TestEmptyResponseExhausted:
+    """空回复重试耗尽裁决（用户裁定 2026-08-30：多次空回复后任务直接失败）。
+
+    llm_core 连续 N 轮空文本无工具调用后置 ``llm_empty_exhausted``；本放行
+    检测点在空文本分支裁决：任务管道无完成证据 → failed；完成证据在场不
+    覆盖；会话管道只收束不落任务终态。
+    """
+
+    async def test_exhausted_without_evidence_marks_failed(self) -> None:
+        """空回复重试耗尽 + 无完成证据 → task.status=failed + ended。"""
+        reminder = TaskReminder(config={})
+        ctx = _ctx(
+            _base_task_state(**{"raw_result": "", "llm_empty_exhausted": True})
+        )
+        result = await reminder.execute(ctx)
+        assert result.state_updates["task.status"] == "failed"
+        assert result.state_updates["ended"] is True
+        assert result.state_updates["_has_new_llm_input"] is False
+        assert "task.ended_at" in result.state_updates
+
+    async def test_exhausted_with_completion_evidence_preserves_status(self) -> None:
+        """空回复重试耗尽但已有完成证据（task.status=completed）→ 信号②先收束，
+        已完成态不可覆盖为 failed。"""
+        reminder = TaskReminder(config={})
+        ctx = _ctx(
+            _base_task_state(
+                **{"raw_result": "", "llm_empty_exhausted": True, "task.status": "completed"}
+            )
+        )
+        result = await reminder.execute(ctx)
+        assert result.state_updates.get("task.status", "completed") == "completed"
+        assert result.state_updates["ended"] is True
+
+    async def test_exhausted_session_pipeline_ends_without_task_status(self) -> None:
+        """会话管道（无 task.id）空回复耗尽 → 只收束不落任务终态。"""
+        reminder = TaskReminder(config={})
+        state = _base_task_state(**{"raw_result": "", "llm_empty_exhausted": True})
+        del state["task.id"]
+        ctx = _ctx(state)
+        result = await reminder.execute(ctx)
+        assert "task.status" not in result.state_updates
+        assert result.state_updates["ended"] is True
+        assert result.state_updates["_has_new_llm_input"] is False
+
+    async def test_not_exhausted_empty_result_still_skips(self) -> None:
+        """空文本但未耗尽（重试中）→ 维持现状 skip，不裁决（重试由 llm_core
+        跨轮驱动，本检测点不越权）。"""
+        reminder = TaskReminder(config={})
+        ctx = _ctx(_base_task_state(**{"raw_result": ""}))
+        result = await reminder.execute(ctx)
+        assert not result.state_updates

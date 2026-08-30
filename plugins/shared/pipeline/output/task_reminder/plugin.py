@@ -125,6 +125,14 @@ class TaskReminder(IOutputPlugin):
             return gated
 
         if not has_text:
+            # 空回复重试耗尽（llm_core 连续 N 轮空文本无工具调用后置
+            # llm_empty_exhausted）：agent 未产出任何内容即退出，等同放弃
+            # 执行义务 → 任务直接失败（用户裁定 2026-08-30）；完成证据在场
+            # 不覆盖（已完成态不可覆盖，与提醒耗尽裁决同一复查面）。
+            if self._llm_empty_exhausted(state):
+                return self._empty_exhausted_result(
+                    state, iteration=iteration, task_id=state.get("task.id"),
+                )
             logger.debug(
                 "TaskReminder[iter=%s]: skip, raw_result is empty",
                 iteration,
@@ -561,6 +569,49 @@ class TaskReminder(IOutputPlugin):
             )
         # 清除续跑标志：提醒已耗尽，本轮必须结束（防残留标志把
         # 后续纯文本轮误路由回 LLM 造成死循环）
+        state_updates["_has_new_llm_input"] = False
+        state_updates["ended"] = True
+        return OutputResult(state_updates=state_updates)
+
+    @staticmethod
+    def _llm_empty_exhausted(state: dict[str, Any]) -> bool:
+        """空回复重试耗尽信号（llm_core 写入，本放行检测点的裁决触发面）。"""
+        return bool(state.get("llm_empty_exhausted"))
+
+    def _empty_exhausted_result(
+        self,
+        state: dict[str, Any],
+        *,
+        iteration: Any,
+        task_id: Any,
+    ) -> OutputResult:
+        """空回复重试耗尽 → 任务直接失败（用户裁定 2026-08-30）。
+
+        复查完成证据（信号② state 证据 ∪ evaluation.detected_result，与
+        _reminder_exhausted_result 同一复查面）：任一在场保持现状不覆盖
+        （已完成态不可覆盖）；无证据且为任务管道 → task.status=failed
+        （agent 连续空响应退出 = 未完成执行义务 = 任务失败，task_failed
+        事件经通知链上报上级）；会话管道（无 task.id）只收束不落任务终态。
+        两者都结束本轮并发 end。
+        """
+        state_updates: dict[str, Any] = {}
+        if task_id:
+            if not self._has_completion_evidence(state):
+                state_updates["task.status"] = "failed"
+                state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
+                logger.warning(
+                    "TaskReminder[iter=%s][task=%s]: empty-response retries exhausted, "
+                    "task.status -> failed",
+                    iteration,
+                    task_id,
+                )
+            else:
+                logger.info(
+                    "TaskReminder[iter=%s][task=%s]: empty-response retries exhausted, "
+                    "completion evidence present, status preserved",
+                    iteration,
+                    task_id,
+                )
         state_updates["_has_new_llm_input"] = False
         state_updates["ended"] = True
         return OutputResult(state_updates=state_updates)

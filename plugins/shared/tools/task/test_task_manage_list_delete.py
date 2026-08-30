@@ -668,6 +668,7 @@ async def test_delete_state_priority_over_yaml_mirror(tool: TaskTool, svc: Any) 
     assert result.success, result.error
     assert result.output["deleted"] is True
     executor.assert_awaited_once()
+    assert executor.await_args is not None  # mypy 窄化：assert_awaited_once 保证非 None
     call_params = executor.await_args.args[0]
     assert call_params["method"] == "delete_pipeline"
 

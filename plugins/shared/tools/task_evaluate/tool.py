@@ -1371,11 +1371,9 @@ class TaskEvaluateTool(BuiltinTool):
                 return list(ac.keys())
         return []
 
-    def _get_input_params(self, task: Any) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    def _get_input_params(self, task: Any) -> dict[str, dict[str, Any]]:
         """从任务模型的 acceptance_criteria 中提取各指标的输入参数。
 
-        对于 input_params 为空的指标，自动从任务描述中构建 criteria
-        （返回值第二项记录走了该兜底的 metric_id，供调用方在评估结果显式标记）。
         对于工具型评估指标（如 file_check），自动注入 workspace 参数，
         确保评估工具在正确的工作目录下解析文件路径。
         从 task.metadata 解析 workspace 绝对路径，注入到工具型评估指标的参数中，

@@ -327,13 +327,77 @@ async def test_success_finish_reason_length_sets_output_truncated() -> None:
 
 
 async def test_success_no_text_no_tool_calls_no_messages_update() -> None:
-    """无文本且无工具调用 → 不 emit append op（messages 键缺失）。"""
+    """无文本且无工具调用 → 不 emit append op（messages 键缺失）；空回复触发重试计数。"""
     caller = _FakeCaller(
         {"success": True, "data": _ok_response(text=None, tool_calls=[], thinking_text=None)}
     )
     result = await _make_plugin(caller).execute(_make_ctx(_base_state()))
     assert "messages" not in result
     assert result["raw_result"] is None
+    # 空回复重试（2026-08-30 用户裁定）：首轮计数 1 + 置续跑标志回 LLM
+    assert result["llm_empty_streak"] == 1
+    assert result["_has_new_llm_input"] is True
+
+
+# ─────────────────── 空回复重试（2026-08-30 用户裁定） ───────────────────
+
+
+async def test_empty_response_retries_then_exhausts() -> None:
+    """连续空回复：未超限每轮置续跑标志回 LLM 重试；超限（max=2 重试）后
+    置 llm_empty_exhausted 停止续跑，交 output 步骤裁决任务失败。"""
+    caller = _FakeCaller(
+        {"success": True, "data": _ok_response(text=None, tool_calls=[], thinking_text=None)}
+    )
+    plugin = _make_plugin(caller)
+    ctx = _make_ctx(_base_state())
+
+    r1 = await plugin.execute(ctx)  # 第 1 次尝试：重试 #1
+    assert r1["llm_empty_streak"] == 1
+    assert r1["_has_new_llm_input"] is True
+    assert "llm_empty_exhausted" not in r1
+
+    ctx.state["llm_empty_streak"] = 1
+    r2 = await plugin.execute(ctx)  # 第 2 次尝试：重试 #2
+    assert r2["llm_empty_streak"] == 2
+    assert r2["_has_new_llm_input"] is True
+
+    ctx.state["llm_empty_streak"] = 2
+    r3 = await plugin.execute(ctx)  # 第 3 次尝试：超限 → 耗尽
+    assert r3["llm_empty_streak"] == 3
+    assert r3["llm_empty_exhausted"] is True
+    assert r3["_has_new_llm_input"] is False
+
+
+async def test_empty_response_streak_resets_on_output() -> None:
+    """重试后 LLM 有产出（文本）→ 计数复位 + 清续跑标志（防残留标志把
+    后续纯文本轮误路由回 LLM 造成死循环）。"""
+    caller = _FakeCaller({"success": True, "data": _ok_response(text="正常回复")})
+    state = _base_state()
+    state["llm_empty_streak"] = 2
+    result = await _make_plugin(caller).execute(_make_ctx(state))
+    assert result["llm_empty_streak"] == 0
+    assert result["_has_new_llm_input"] is False
+    assert "llm_empty_exhausted" not in result
+
+
+async def test_empty_response_retry_limit_from_plugin_configs() -> None:
+    """plugin_configs.llm_core.max_empty_retries 覆盖重试上限（每轮复位后应用）。"""
+    caller = _FakeCaller(
+        {"success": True, "data": _ok_response(text=None, tool_calls=[], thinking_text=None)}
+    )
+    plugin = _make_plugin(caller)
+    ctx = _make_ctx(_base_state())
+    ctx.state["plugin_configs"] = {"llm_core": {"max_empty_retries": 1}}
+
+    r1 = await plugin.execute(ctx)  # 第 1 次：重试 #1（上限 1）
+    assert r1["llm_empty_streak"] == 1
+    assert r1["_has_new_llm_input"] is True
+
+    ctx.state["llm_empty_streak"] = 1
+    r2 = await plugin.execute(ctx)  # 第 2 次：超限 → 耗尽
+    assert r2["llm_empty_streak"] == 2
+    assert r2["llm_empty_exhausted"] is True
+    assert r2["_has_new_llm_input"] is False
 
 
 # ─────────────────── 信封校验 fail-closed ───────────────────
