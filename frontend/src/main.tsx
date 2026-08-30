@@ -8,6 +8,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ImagePreviewHost } from '@/components/chat/ImagePreviewHost'
+import { AntdThemeProvider } from '@/components/shared/AntdThemeBridge'
 import {
   installGlobalErrorListeners,
   reportError,
@@ -58,9 +59,11 @@ async function bootstrap() {
   // ProtectedRoute 在 isInitializing=true 时显示加载动画
   createRoot(root).render(
     <StrictMode>
-      <App />
-      {/* 全局图片预览灯箱（chat_card actions preview_image 协议宿主，widget 化 T3） */}
-      <ImagePreviewHost />
+      <AntdThemeProvider>
+        <App />
+        {/* 全局图片预览灯箱（chat_card actions preview_image 协议宿主，widget 化 T3） */}
+        <ImagePreviewHost />
+      </AntdThemeProvider>
     </StrictMode>,
   )
 
