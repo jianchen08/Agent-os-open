@@ -174,6 +174,20 @@ impl PipelineFile {
     }
 }
 
+/// 校验管道配置 JSON（PUT `/api/v1/config/pipelines/{name}` 写盘前调用）。
+///
+/// 走与启动加载同一条解析路径：[`PipelineFile`]（deny_unknown_fields）反序列化 +
+/// [`PipelineFile::to_internal`] 目标解析——旧形态键（`routes` / `exit_routes` /
+/// 体级 `loop_config`）、死形态（`then: {next,set}` 对象 / `then: wait`）、未知
+/// 转移目标在此全部报错，把「保存无告警 → 重启加载失败 → 内置默认空配置静默
+/// 降级」提前到「保存即报错」。
+pub fn validate_pipeline_config_data(data: &serde_json::Value) -> Result<(), PipelineLoadError> {
+    let file: PipelineFile = serde_json::from_value(data.clone()).map_err(|e| {
+        PipelineLoadError::InvalidConfig(format!("结构校验失败（G10 文件 DSL）: {e}"))
+    })?;
+    file.to_internal().map(|_| ())
+}
+
 /// hooks 声明聚合（服务化提案 §3.6）：body 级 + step 级（复合键 `"<body id>:<step id>"`）。
 ///
 /// 由 [`load_pipeline_with_hooks`] 单次解析产出，供编译期
@@ -587,6 +601,7 @@ impl std::error::Error for PipelineLoadError {}
 mod tests {
     use super::*;
     use agentos_core::types::{LoopBody, Route, RouteAction};
+    use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
     use tempfile::TempDir;
@@ -1255,5 +1270,103 @@ next:
 
         let plugin_ids = HashSet::new();
         assert!(validate_no_name_conflicts(&cfg, &lib, &plugin_ids).is_ok());
+    }
+
+    /// validate_pipeline_config_data：合法 G10 DSL 放行（与加载同一条归一路径）。
+    #[test]
+    fn test_validate_data_accepts_valid_dsl() {
+        let ok = json!({
+            "name": "autonomous",
+            "loop_bodies": [
+                {
+                    "id": "main",
+                    "while": "True",
+                    "steps": [
+                        { "id": "post", "steps": ["result_format"], "next": [
+                            { "when": "raw_tool_calls != []", "then": "loop",
+                              "set": { "core_type": "tool_execute" } },
+                            { "then": "end" }
+                        ] }
+                    ],
+                    "next": [{ "when": "suspended == True", "then": "end" }]
+                }
+            ]
+        });
+        assert!(validate_pipeline_config_data(&ok).is_ok());
+    }
+
+    /// validate_pipeline_config_data：旧形态键 / 死形态 / 未知目标 / 缺 name 全部报错
+    /// （deny_unknown_fields + to_internal 目标解析，与启动加载同一口径）。
+    #[test]
+    fn test_validate_data_rejects_legacy_and_dead_forms() {
+        let legacy_step_routes = json!({
+            "name": "p",
+            "loop_bodies": [
+                { "id": "main", "steps": [
+                    { "id": "post", "steps": [], "routes": [
+                        { "when": "True", "then": { "next": "end" } }
+                    ] }
+                ] }
+            ]
+        });
+        let legacy_body_exit_routes = json!({
+            "name": "p",
+            "loop_bodies": [
+                { "id": "main", "steps": [], "exit_routes": [
+                    { "when": "True", "then": { "next": "end" } }
+                ] }
+            ]
+        });
+        let legacy_body_loop_config = json!({
+            "name": "p",
+            "loop_bodies": [
+                { "id": "main", "steps": [], "loop_config": { "enabled": true } }
+            ]
+        });
+        let dead_then_object = json!({
+            "name": "p",
+            "loop_bodies": [
+                { "id": "main", "steps": [
+                    { "id": "post", "steps": [], "next": [
+                        { "when": "True", "then": { "next": "end", "set": {} } }
+                    ] }
+                ] }
+            ]
+        });
+        let dead_then_wait = json!({
+            "name": "p",
+            "loop_bodies": [
+                { "id": "main", "steps": [
+                    { "id": "post", "steps": [], "next": [{ "when": "True", "then": "wait" }] }
+                ] }
+            ]
+        });
+        let unknown_target = json!({
+            "name": "p",
+            "loop_bodies": [
+                { "id": "main", "steps": [
+                    { "id": "post", "steps": [], "next": [{ "when": "True", "then": "nowhere" }] }
+                ] }
+            ]
+        });
+        let missing_name = json!({ "loop_bodies": [] });
+
+        for (name, bad) in [
+            ("step_routes", &legacy_step_routes),
+            ("body_exit_routes", &legacy_body_exit_routes),
+            ("body_loop_config", &legacy_body_loop_config),
+            ("then_object", &dead_then_object),
+            ("then_wait", &dead_then_wait),
+            ("unknown_target", &unknown_target),
+            ("missing_name", &missing_name),
+        ] {
+            let err = validate_pipeline_config_data(bad)
+                .err()
+                .unwrap_or_else(|| panic!("{name} 应校验报错"));
+            assert!(
+                matches!(err, PipelineLoadError::InvalidConfig(_)),
+                "{name}: 期望 InvalidConfig，实际 {err:?}"
+            );
+        }
     }
 }

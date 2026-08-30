@@ -36,7 +36,7 @@ async fn admin_token(app: &axum::Router) -> String {
     v["access_token"].as_str().unwrap().to_string()
 }
 
-/// 在临时 config/pipelines/ 下写一份 default.yaml。
+/// 在临时 config/pipelines/ 下写一份 default.yaml（G10 文件 DSL 格式）。
 /// 注意：project_root 语义 = 项目根（config/ 的父目录），
 /// handler 读取 `project_root/config/pipelines/{name}.yaml`（对齐 0.1 白名单）。
 fn write_pipeline(project_root: &std::path::Path) {
@@ -44,7 +44,7 @@ fn write_pipeline(project_root: &std::path::Path) {
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("default.yaml"),
-        "name: agentos_agent\ninput_routes:\n  - name: default\n    target: core\n    plugins: [tool_schema]\n    priority: 30\n",
+        "name: agentos_agent\nloop_bodies:\n  - id: main\n    while: \"True\"\n    steps:\n      - id: core\n        steps: [tool_schema]\n",
     )
     .unwrap();
 }
@@ -164,8 +164,15 @@ async fn test_put_pipeline_config_writes_atomically() {
     let body = json!({
         "data": {
             "name": "agentos_agent",
-            "input_routes": [
-                { "name": "default", "target": "core", "plugins": ["tool_schema", "security_check"], "priority": 30 }
+            "loop_bodies": [
+                {
+                    "id": "main",
+                    "while": "True",
+                    "steps": [
+                        { "id": "core", "steps": ["tool_schema", "security_check"] }
+                    ],
+                    "next": [{ "when": "suspended == True", "then": "end" }]
+                }
             ]
         },
         "if_match": etag
@@ -303,4 +310,186 @@ async fn test_put_pipeline_config_invalid_name_returns_400() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// PUT 请求构造（带合法 If-Match）。
+async fn put_with_valid_etag(
+    app: &axum::Router,
+    token: &str,
+    data: Value,
+) -> axum::http::Response<axum::body::Body> {
+    let get_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/config/pipelines/default")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag = get_resp
+        .headers()
+        .get("etag")
+        .expect("GET 应带 etag 头")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = json!({ "data": data, "if_match": etag });
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/config/pipelines/default")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// PUT 旧形态键（routes / exit_routes / 体级 loop_config）→ 400 且磁盘保持原值。
+///
+/// 这些键在 G10 单轨化后已退役（*File 结构 deny_unknown_fields，加载即报错）——
+/// 写盘前校验把「保存无告警 → 加载失败静默降级空管道」提前到「保存即报错」。
+#[tokio::test]
+async fn test_put_pipeline_config_legacy_shape_rejected_400() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pipeline(tmp.path());
+
+    let app = make_router(&tmp);
+    let token = admin_token(&app).await;
+    let before = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
+
+    let legacy_bodies = vec![
+        // step 级旧路由键 routes（现役键为 next，且 then 必须是目标字符串）
+        json!({
+            "name": "agentos_agent",
+            "loop_bodies": [
+                { "id": "main", "steps": [
+                    { "id": "post", "steps": [], "routes": [
+                        { "when": "True", "then": { "next": "end" } }
+                    ] }
+                ] }
+            ]
+        }),
+        // 体级旧出口键 exit_routes（现役键为 next）
+        json!({
+            "name": "agentos_agent",
+            "loop_bodies": [
+                { "id": "main", "steps": [], "exit_routes": [
+                    { "when": "True", "then": { "next": "end" } }
+                ] }
+            ]
+        }),
+        // 体级 loop_config（体级循环现役形态为 while）
+        json!({
+            "name": "agentos_agent",
+            "loop_bodies": [
+                { "id": "main", "steps": [], "loop_config": { "enabled": true } }
+            ]
+        }),
+    ];
+
+    for bad in &legacy_bodies {
+        let response = put_with_valid_etag(&app, &token, bad.clone()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "旧形态 data 应 400: {bad}"
+        );
+    }
+    let after = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
+    assert_eq!(after, before, "400 时磁盘应保持原值");
+}
+
+/// PUT 死形态转移目标（then: wait / then: {next,set} / 未知目标）→ 400。
+#[tokio::test]
+async fn test_put_pipeline_config_dead_then_forms_rejected_400() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pipeline(tmp.path());
+
+    let app = make_router(&tmp);
+    let token = admin_token(&app).await;
+    let before = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
+
+    let dead_forms = vec![
+        // then: wait 已退役（挂起由 state.suspended 表达）
+        json!({
+            "name": "agentos_agent",
+            "loop_bodies": [
+                { "id": "main", "steps": [
+                    { "id": "post", "steps": [], "next": [{ "when": "True", "then": "wait" }] }
+                ] }
+            ]
+        }),
+        // then: {next,set} 旧对象形态（现役形态 then 为目标字符串、set 平级）
+        json!({
+            "name": "agentos_agent",
+            "loop_bodies": [
+                { "id": "main", "steps": [
+                    { "id": "post", "steps": [], "next": [
+                        { "when": "True", "then": { "next": "end", "set": {} } }
+                    ] }
+                ] }
+            ]
+        }),
+        // 未知转移目标（加载期语义校验前移到保存期）
+        json!({
+            "name": "agentos_agent",
+            "loop_bodies": [
+                { "id": "main", "steps": [
+                    { "id": "post", "steps": [], "next": [{ "when": "True", "then": "nowhere" }] }
+                ] }
+            ]
+        }),
+    ];
+
+    for bad in &dead_forms {
+        let response = put_with_valid_etag(&app, &token, bad.clone()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "死形态 data 应 400: {bad}"
+        );
+    }
+    let after = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
+    assert_eq!(after, before, "400 时磁盘应保持原值");
+}
+
+/// PUT 合法 G10 DSL（next/while/set 平级）→ 200 正常写盘（校验不放行漏拦）。
+#[tokio::test]
+async fn test_put_pipeline_config_valid_dsl_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_pipeline(tmp.path());
+
+    let app = make_router(&tmp);
+    let token = admin_token(&app).await;
+    let data = json!({
+        "name": "agentos_agent",
+        "loop_bodies": [
+            {
+                "id": "main",
+                "while": "True",
+                "steps": [
+                    { "id": "post", "steps": [], "next": [
+                        { "when": "raw_tool_calls != []", "then": "loop",
+                          "set": { "core_type": "tool_execute" } },
+                        { "then": "end" }
+                    ] }
+                ]
+            }
+        ]
+    });
+    let response = put_with_valid_etag(&app, &token, data).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let raw = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
+    assert!(
+        raw.contains("core_type"),
+        "disk content should be updated: {raw}"
+    );
 }

@@ -2327,6 +2327,14 @@ pub async fn put_pipeline_config_handler(
             ),
         });
     }
+    // G10 文件 DSL 结构校验：与启动加载同一条 PipelineFile 解析路径——旧形态键
+    // （routes/exit_routes/体级 loop_config）、死形态（then:{next,set}/wait）、
+    // 未知转移目标在写盘前拒绝；否则保存无告警，重启加载失败静默降级空管道。
+    crate::pipeline_loader::validate_pipeline_config_data(&req.data).map_err(|e| {
+        ApiError::BadRequest {
+            message: format!("pipeline config validation failed: {e}"),
+        }
+    })?;
     let project_root = state.project_root.ok_or_else(|| ApiError::Internal {
         message: "project_root not configured".to_string(),
     })?;
