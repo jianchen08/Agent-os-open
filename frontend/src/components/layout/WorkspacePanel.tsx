@@ -126,19 +126,20 @@ export function WorkspacePanel({
             key={tab.id}
             role="tab"
             aria-selected={tab.isActive}
-            className={`flex cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2 text-sm whitespace-nowrap transition-colors ${
+            className={`flex max-w-[220px] cursor-pointer items-center gap-1.5 border-b-2 px-3 py-2 text-sm whitespace-nowrap transition-colors ${
               tab.isActive
                 ? 'border-primary text-foreground font-medium'
                 : 'text-muted-foreground hover:text-foreground border-transparent'
             }`}
+            title={tab.title}
             onClick={() => onTabChange(tab.id)}
             onContextMenu={(e) => handleTabContextMenu(e, tab)}
             data-testid={`workspace-tab-${tab.id}`}
           >
-            <span>{tab.title}</span>
+            <span className="min-w-0 truncate">{tab.title}</span>
             {!tab.isPinned && (
               <button
-                className="hover:bg-accent text-muted-foreground ml-1 flex h-4 w-4 items-center justify-center rounded text-xs"
+                className="hover:bg-accent text-muted-foreground ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded text-xs"
                 aria-label={`关闭 ${tab.title}`}
                 title={`关闭 ${tab.title}`}
                 data-testid={`workspace-tab-close-${tab.id}`}

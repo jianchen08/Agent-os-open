@@ -48,6 +48,19 @@ describe('WorkspacePanel — tab 渲染', () => {
     expect(screen.getByText(/暂无内容/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /打开任务管理/ })).toBeInTheDocument()
   })
+
+  it('长标题 tab 悬浮显示完整标题（title 属性）', () => {
+    const longTitle = 'a-very-long-file-name-that-exceeds-tab-width-config.yaml'
+    render(
+      <WorkspacePanel
+        tabs={[makeTab({ id: 'a', title: longTitle })]}
+        onTabChange={() => {}}
+        onTabClose={() => {}}
+        renderTabContent={() => <div>content</div>}
+      />,
+    )
+    expect(screen.getByRole('tab')).toHaveAttribute('title', longTitle)
+  })
 })
 
 describe('WorkspacePanel — tab 切换', () => {
