@@ -122,3 +122,18 @@ class TestProjectCreate:
         assert definition.level == mod.ToolLevel.L1_L2_ONLY
         assert definition.injected_params == ["user_id", "session_id"]
         assert "goal" in definition.input_schema.get("required", [])
+
+
+class TestManifestSchemaLockstep:
+    """plugin.json 声明 ↔ 代码实现 schema 锁步（G2 一致性闸的测试面）。"""
+
+    def test_declared_input_schema_matches_implementation(self) -> None:
+        import json
+
+        manifest = json.loads(
+            (_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8")
+        )
+        declared = manifest["capabilities"]["tools"][0]["input_schema"]
+        mod = _load_module()
+
+        assert declared == mod._PROJECT_INPUT_SCHEMA
