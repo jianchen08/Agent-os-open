@@ -244,6 +244,17 @@ async def get_file_content(container_task_id: str, path: str) -> dict[str, Any]:
             }
 
     if not full_path.is_file():
+        # 已合并 worktree 的死路径重定位：任务过程产出的 worktree 绝对路径
+        # （文件卡片等）在合并清理后失效，按 state 的 worktree 元数据映射回
+        # project_root 读取；返回体仍携带原请求路径，前端契约不变。
+        remapped = await get_workspace_service().resolve_merged_worktree_target(
+            str(full_path)
+        )
+        if remapped and Path(remapped).is_file():
+            logger.info("已合并 worktree 路径重定位 | %s -> %s", full_path, remapped)
+            full_path = Path(remapped)
+
+    if not full_path.is_file():
         return {
             "success": False,
             "message": f"文件不存在或不是普通文件: {path}",

@@ -51,8 +51,10 @@ _GIT_TIMEOUT = 30  # git 命令执行超时（秒）
 _GIT_INIT_TIMEOUT = 120  # git init/add/commit 超时（秒），初始化操作耗时更长
 
 
-def _safe_ws_name(project_name: str, task_id: str, name_limit: int = 15) -> str:
-    """生成安全的 worktree 目录名，项目名截断到 name_limit 字符避免 Windows 路径超限。"""
+def _safe_ws_name(project_name: str, task_id: str, name_limit: int = 100) -> str:
+    """生成安全的 worktree 目录名，项目名原样保留（上限 name_limit 仅防
+    Windows 单组件 255 上限的病态长名）。截断过短会让目录名与项目失去
+    可读对应（如「Worktree_与_Plai__wt_xx」），故上限取宽松值。"""
     import re  # noqa: PLC0415
 
     safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", project_name)

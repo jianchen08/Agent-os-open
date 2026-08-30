@@ -337,6 +337,62 @@ class TestFileContent:
         assert body["success"] is False
         assert "文件不存在" in body["message"]
 
+    def test_read_file_merged_worktree_remaps_to_project_root(
+        self, server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """已合并 worktree 的死路径 → 重定位到 project_root 读取；返回体仍携带
+        原请求路径（文件卡片契约不变）。"""
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / "merged.txt").write_text("merged-content", encoding="utf-8")
+        dead = tmp_path / "proj__wt_deadbeef" / "merged.txt"
+        ws_mod = sys.modules["workspace_service"]
+        monkeypatch.setattr(
+            ws_mod,
+            "_state_reader",
+            lambda: [
+                {
+                    "pipeline_id": "t1",
+                    "ws_meta": {
+                        "mode": "worktree",
+                        "path": str(dead.parent),
+                        "project_root": str(project),
+                    },
+                }
+            ],
+        )
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-content",
+                method="GET",
+                query={"path": str(dead)},
+            )
+        )
+        assert status == 200
+        assert body["success"] is True
+        assert body["content"] == "merged-content"
+        assert body["path"] == str(dead)
+
+    def test_read_file_merged_worktree_no_match_reports_missing(
+        self, server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """死路径在 state 无 worktree 命中 → 如实报文件不存在。"""
+        dead = tmp_path / "x__wt_deadbeef" / "gone.txt"
+        ws_mod = sys.modules["workspace_service"]
+        monkeypatch.setattr(ws_mod, "_state_reader", lambda: [])
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/file-content",
+                method="GET",
+                query={"path": str(dead)},
+            )
+        )
+        assert status == 200
+        assert body["success"] is False
+        assert "文件不存在" in body["message"]
+
     def test_read_file_io_error(self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
         _inject_workspace_path(server, ws_dir)
         target = Path(ws_dir) / "locked.txt"

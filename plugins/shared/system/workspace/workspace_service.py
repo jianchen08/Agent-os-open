@@ -5,11 +5,25 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from workspace.models import FileTreeNode, Workspace
 
 logger = logging.getLogger(__name__)
+
+
+def _relative_under(target: Path, root_dir: str) -> Path | None:
+    """target 位于 root_dir 之下时返回其相对路径，否则 None。
+
+    两侧路径同源（agent 注入的 workspace 与 ws_meta.path 同一产出链），
+    字符串形态一致，做精确前缀匹配即可，不做大小写猜测。
+    """
+    try:
+        rel = target.relative_to(root_dir)
+    except ValueError:
+        return None
+    return rel if str(rel) not in ("", ".") else None
 
 # ── GAP-1 统一：state 聚合读取器（on_load 注入）──
 # 约定签名：``() -> list[dict]``（sync 或 async，管道 state 聚合行，行为扁平点号键
@@ -142,6 +156,51 @@ class WorkspaceService:
             logger.warning(
                 "[WorkspaceService] state 行工作区解析失败 | pipeline=%s | err=%s",
                 pipeline_id,
+                exc,
+            )
+            return None
+
+    async def resolve_merged_worktree_target(self, path: str) -> str | None:
+        """已合并 worktree 的死路径重定位：路径落在某任务 worktree 副本内
+        → project_root + 相对后缀。
+
+        worktree 任务合并后副本即删，任务过程中产出的绝对路径（工具结果/
+        文件卡片）随之失效；state 行的 worktree 元数据（ws_meta / task.ws_meta）
+        合并后仍持久，是重定位真值源。仅匹配绝对路径；无命中返回 None。
+        """
+        if "__wt_" not in path or not Path(path).is_absolute():
+            return None
+        reader = _get_state_reader()
+        if reader is None:
+            return None
+        try:
+            rows = reader()
+            if asyncio.iscoroutine(rows):
+                rows = await rows
+            if not isinstance(rows, list):
+                return None
+            target = Path(path)
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                meta = row.get("ws_meta")
+                if not isinstance(meta, dict):
+                    meta = row.get("task.ws_meta")
+                if not isinstance(meta, dict) or meta.get("mode") != "worktree":
+                    continue
+                wt_root = str(meta.get("path") or "")
+                project_root = str(meta.get("project_root") or "")
+                if not wt_root or not project_root:
+                    continue
+                rel = _relative_under(target, wt_root)
+                if rel is None:
+                    continue
+                return str(Path(project_root) / rel)
+            return None
+        except Exception as exc:  # noqa: BLE001 — 重定位失败按无命中处理，不阻断读取
+            logger.warning(
+                "[WorkspaceService] 合并 worktree 路径重定位失败 | path=%s | err=%s",
+                path,
                 exc,
             )
             return None

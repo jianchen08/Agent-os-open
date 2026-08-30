@@ -1117,8 +1117,9 @@ class TaskSubmitTool(BuiltinTool):
           对象，供 _build_metadata 及管道引擎按既有契约读取（旧式 inherit 对象仍兼容）；
         - mode 可传单字符串或列表（如 ["pipe","workspace"]），两种模式相互独立可组合；
         - pipe：查源任务的 pipeline_run_id（日志观测，管道身份由引擎生成）；
-        - workspace：等价于 inherit_workspace_from，直接复用旧任务的 ws_meta.path，
-          不复制、不初始化；源不存在/跨容器/git 身份失效则报错让 agent 重提。
+        - workspace：等价于 inherit_workspace_from，复用源任务工作空间坐标
+          （worktree 源取 project_root 持久基座），不复制、不初始化；
+          源不存在/跨容器/git 身份失效则报错让 agent 重提。
         当 inherit 和 inherit_workspace_from 同时存在时，inherit 优先。
         返回 (最终 workspace, 失败结果)。
         """
@@ -1222,10 +1223,11 @@ class TaskSubmitTool(BuiltinTool):
     ) -> tuple[str | None, ToolExecutionResult | None]:
         """从源任务 state 行取出工作空间路径（复用旧路径，不复制不初始化）。
 
-        state 单一真值（0.2 任务无 YAML 记录）：坐标按序读 ws_meta →
-        task.ws_meta → lineage.parent_ws_meta（出生契约登记，创建即写恒可见），
-        as_dict 兼容跨边界 JSON 字符串形态。校验序：桥可用 → 源任务行命中 →
-        坐标形态 → 同容器归属 → 目录存在 → worktree 模式 git 身份有效。
+        state 单一真值（0.2 任务无 YAML 记录）：坐标只读源任务自身两路
+        ws_meta → task.ws_meta（lineage.parent_ws_meta 是父链坐标，不作继承
+        结果），as_dict 兼容跨边界 JSON 字符串形态；worktree 源任务取
+        project_root（worktree 副本合并后即删）。校验序：桥可用 → 源任务行
+        命中 → 坐标形态 → 同容器归属 → 目录存在 → worktree 模式 git 身份有效。
         任一步失败返回失败信封，引导 agent 去掉 inherit_workspace_from 后
         重新提交。返回 (旧工作空间路径, 失败结果)；路径有效性由调用方按
         目录语义使用。
@@ -1255,20 +1257,15 @@ class TaskSubmitTool(BuiltinTool):
                     "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
                 ),
             )
-        # 工作空间坐标按序读取：ws_meta（init 写 state 后回写 registry 有延迟
-        # 窗口）→ task.ws_meta（pipeline-state.update 镜像，registry 热路径可能
-        # 跳过）→ lineage.parent_ws_meta（出生契约登记，创建即写恒可见）。
-        # 任务出生即携带工作空间坐标（主会话/继承任务 = 自己的工作区），
-        # 源任务运行初窗口内继承不得误报"没有工作空间信息"；三路全空才
-        # fail-closed 拒绝。
+        # 工作空间坐标只读源任务自身两路：ws_meta（init 写 state 后回写
+        # registry 有延迟窗口）→ task.ws_meta（pipeline-state.update 镜像，
+        # registry 热路径可能跳过）。lineage.parent_ws_meta 是父链坐标而非源
+        # 任务自身坐标，不得作为继承结果——曾把继承路径静默漂移到父会话目录
+        # （2026-08-30 诊断：同参三次提交，第 3 次合并目标漂到会话工作区）。
+        # 两路全空 fail-closed 拒绝，引导 agent 重提。
         old_ws_meta = state_fields.as_dict(row.get("ws_meta"), field="ws_meta")
         if not isinstance(old_ws_meta, dict) or not old_ws_meta:
             old_ws_meta = state_fields.as_dict(row.get("task.ws_meta"), field="task.ws_meta")
-        if not isinstance(old_ws_meta, dict) or not old_ws_meta:
-            old_ws_meta = state_fields.as_dict(
-                row.get("lineage.parent_ws_meta"),
-                field="lineage.parent_ws_meta",
-            )
         if not isinstance(old_ws_meta, dict) or not old_ws_meta:
             return None, create_failure_result(
                 error=(
@@ -1276,21 +1273,25 @@ class TaskSubmitTool(BuiltinTool):
                     "请去掉 inherit_workspace_from 参数重新提交，使用空工作空间。"
                 ),
             )
+        # worktree 源任务的持久基座是 project_root：worktree 副本合并后即删，
+        # 不可作为继承坐标（否则继承到一个必然失效的临时目录）。
+        if old_ws_meta.get("mode") == "worktree" and old_ws_meta.get("project_root"):
+            old_ws_path = str(old_ws_meta["project_root"])
+        else:
+            old_ws_path = old_ws_meta.get("path", "")
         # 同容器才能 inherit，避免产出落到错误容器。
-        source_root = old_ws_meta.get("project_root", "") or old_ws_meta.get("path", "")
         current_container = Path(__file__).resolve().parents[4]
-        if source_root:
+        if old_ws_path:
             try:
-                Path(source_root).resolve().relative_to(current_container)
+                Path(old_ws_path).resolve().relative_to(current_container)
             except ValueError:
                 return None, create_failure_result(
                     error=(
-                        f"任务 {inherit_from} 属于其它容器({source_root})，"
+                        f"任务 {inherit_from} 属于其它容器({old_ws_path})，"
                         f"不能跨容器继承工作空间。"
                         f"请去掉 inherit_workspace_from 参数重新提交。"
                     ),
                 )
-        old_ws_path = old_ws_meta.get("path", "")
         if not old_ws_path or not Path(old_ws_path).exists():
             return None, create_failure_result(
                 error=(

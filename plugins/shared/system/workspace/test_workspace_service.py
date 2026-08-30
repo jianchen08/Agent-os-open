@@ -350,6 +350,166 @@ class TestResolveWorkspaceFromState:
 
 
 # ═══════════════════════════════════════════════════════════
+# resolve_merged_worktree_target：已合并 worktree 死路径重定位
+# ═══════════════════════════════════════════════════════════
+
+
+class TestResolveMergedWorktreeTarget:
+    def test_dead_worktree_path_maps_to_project_root(self, tmp_path: Path) -> None:
+        """worktree 副本内死路径 → project_root + 相对后缀（合并后副本即删的补偿）。"""
+        project = tmp_path / "proj"
+        wt = tmp_path / "proj__wt_deadbeef"
+        target = wt / "sub" / "out.txt"
+        rows = [
+            {"pipeline_id": "other"},
+            {
+                "pipeline_id": "p1",
+                "ws_meta": {
+                    "mode": "worktree",
+                    "path": str(wt),
+                    "project_root": str(project),
+                },
+            },
+        ]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_merged_worktree_target(str(target))) == str(
+            project / "sub" / "out.txt"
+        )
+        _reset_state_reader()
+
+    def test_task_ws_meta_mirror_key_also_hits(self, tmp_path: Path) -> None:
+        """行内只有 task.ws_meta 镜像键 → 同样命中。"""
+        project = tmp_path / "proj"
+        wt = tmp_path / "proj__wt_cafe01"
+        rows = [
+            {
+                "pipeline_id": "p1",
+                "task.ws_meta": {
+                    "mode": "worktree",
+                    "path": str(wt),
+                    "project_root": str(project),
+                },
+            }
+        ]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_merged_worktree_target(str(wt / "a.txt"))) == str(
+            project / "a.txt"
+        )
+        _reset_state_reader()
+
+    def test_target_equal_to_worktree_root_returns_none(self, tmp_path: Path) -> None:
+        """请求路径恰为 worktree 根本身（目录，非文件产物）→ 不映射。"""
+        project = tmp_path / "proj"
+        wt = tmp_path / "proj__wt_equal1"
+        rows = [
+            {
+                "pipeline_id": "p1",
+                "ws_meta": {
+                    "mode": "worktree",
+                    "path": str(wt),
+                    "project_root": str(project),
+                },
+            }
+        ]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_merged_worktree_target(str(wt))) is None
+        _reset_state_reader()
+
+    def test_path_outside_all_worktrees_returns_none(self, tmp_path: Path) -> None:
+        """路径不在任何已登记 worktree 之内 → None（含子串撞车场景：__wt_ 出现在
+        文件名但路径前缀不匹配）。"""
+        project = tmp_path / "proj"
+        wt = tmp_path / "proj__wt_deadbeef"
+        rows = [
+            {
+                "pipeline_id": "p1",
+                "ws_meta": {
+                    "mode": "worktree",
+                    "path": str(wt),
+                    "project_root": str(project),
+                },
+            }
+        ]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        stranger = tmp_path / "other__wt_x" / "f.txt"
+        assert _run(svc.resolve_merged_worktree_target(str(stranger))) is None
+        _reset_state_reader()
+
+    @pytest.mark.parametrize(
+        ("meta", "case"),
+        [
+            ({"mode": "plain", "path": "D:/ws/plain"}, "plain 模式非副本坐标"),
+            ({"mode": "worktree", "path": "D:/ws/x__wt_1"}, "worktree 缺 project_root"),
+        ],
+    )
+    def test_non_redirectable_meta_skipped(self, tmp_path: Path, meta: dict, case: str) -> None:
+        """plain 元数据 / 缺 project_root 的 worktree 行 → 跳过，不产出悬空映射。"""
+        rows = [{"pipeline_id": "p1", "ws_meta": meta}]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_merged_worktree_target(str(tmp_path / "f.txt"))) is None, case
+        _reset_state_reader()
+
+    def test_path_without_wt_marker_short_circuits(self, tmp_path: Path) -> None:
+        """绝对路径不含 __wt_ 段 → 不触读面直接 None。"""
+
+        def _fail() -> list[dict]:
+            raise AssertionError("不应触读 state")
+
+        _MODS["workspace_service"].set_state_reader(_fail)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_merged_worktree_target(str(tmp_path / "note.txt"))) is None
+        _reset_state_reader()
+
+    def test_relative_path_short_circuits(self) -> None:
+        """相对路径（非 worktree 产物形态）→ 短路 None。"""
+
+        def _fail() -> list[dict]:
+            raise AssertionError("不应触读 state")
+
+        _MODS["workspace_service"].set_state_reader(_fail)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_merged_worktree_target("rel/a__wt_b/f.txt")) is None
+        _reset_state_reader()
+
+    def test_reader_not_injected_returns_none(self, tmp_path: Path) -> None:
+        _reset_state_reader()
+        svc = WorkspaceService()
+        assert (
+            _run(svc.resolve_merged_worktree_target(str(tmp_path / "a__wt_b" / "f.txt")))
+            is None
+        )
+
+    def test_async_reader_supported(self, tmp_path: Path) -> None:
+        """注入约定 sync/async 均可（与 resolve_workspace_from_state 同口径）。"""
+        project = tmp_path / "proj"
+        wt = tmp_path / "proj__wt_async01"
+
+        async def _read() -> list[dict]:
+            return [
+                {
+                    "pipeline_id": "p1",
+                    "ws_meta": {
+                        "mode": "worktree",
+                        "path": str(wt),
+                        "project_root": str(project),
+                    },
+                }
+            ]
+
+        _MODS["workspace_service"].set_state_reader(_read)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_merged_worktree_target(str(wt / "b.txt"))) == str(
+            project / "b.txt"
+        )
+        _reset_state_reader()
+
+
+# ═══════════════════════════════════════════════════════════
 # server.get_file_tree：无工作区/目录缺失如实报错（不再折叠成空树）
 # ═══════════════════════════════════════════════════════════
 

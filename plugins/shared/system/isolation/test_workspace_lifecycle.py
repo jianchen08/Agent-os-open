@@ -363,3 +363,46 @@ class TestCleanup:
         r = m.cleanup_workspace("r1")
         assert r["worktree_removed"] is True
         assert r["branch_deleted"] is True
+
+
+# ═══════════════════════════════════════════════════════════
+# _safe_ws_name：worktree 目录名生成
+# ═══════════════════════════════════════════════════════════
+
+
+class TestSafeWsName:
+    @pytest.mark.parametrize(
+        "project_name",
+        [
+            "Worktree_与_Plain_模式合并测试项目",  # 中文项目名（原 15 上限会截成 Worktree_与_Plai）
+            "thread-a4d3c62b-d500-4790-8b69-b53d",  # 会话目录形态长名
+            "myproj",  # 短名
+        ],
+    )
+    def test_project_name_preserved_verbatim(self, project_name: str) -> None:
+        """常规长度项目名原样保留——worktree 目录名与项目保持可读对应。"""
+        assert _MOD._safe_ws_name(project_name, "a67b31846401") == (
+            f"{project_name}__wt_a67b3184"
+        )
+
+    def test_illegal_chars_and_spaces_sanitized(self) -> None:
+        """Windows 非法字符/空格清洗为下划线，折叠后不含连续下划线。"""
+        import re
+
+        name = _MOD._safe_ws_name('a<b>:"c d|e?*x', "t1234567890")
+        stem = name.rsplit("__wt_", 1)[0]
+        assert name.endswith("__wt_t1234567")
+        assert not re.search(r'[<>:"/\|?*\x00-\x1f ]', stem)
+        assert "__" not in stem
+
+    def test_pathological_length_capped(self) -> None:
+        """病态超长名截到上限且不残留结尾分隔符（Windows 单组件上限保护）。"""
+        name = _MOD._safe_ws_name("长" * 250, "t1234567890")
+        stem, _sep, task_part = name.rpartition("__wt_")
+        assert task_part == "t1234567"
+        assert len(stem) <= 100
+        assert not stem.endswith(("_", "."))
+
+    def test_blank_name_falls_back_to_ws(self) -> None:
+        """清洗后为空 → 固定 ws 前缀，目录名仍可生成。"""
+        assert _MOD._safe_ws_name("///", "t1234567890") == "ws__wt_t1234567"

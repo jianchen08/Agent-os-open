@@ -675,3 +675,92 @@ def test_inherit_state_bridge_down_fail_honest(tool_module, monkeypatch):
     assert path is None
     assert fail is not None
     assert "state 聚合不可用" in fail.error
+
+
+def test_inherit_worktree_source_serves_project_root(tool_module, monkeypatch, tmp_proj):
+    """worktree 源任务 → 继承坐标取 project_root（持久基座），不取合并后即删的副本。
+
+    性质断言：返回路径不含 __wt_（临时副本段），且与 project_root 相等。
+    """
+    import asyncio
+    import json as _json
+
+    project = Path(tmp_proj) / "proj"
+    wt = Path(tmp_proj) / "proj__wt_deadbeef"
+    project.mkdir()
+    (project / ".git").mkdir()
+    wt.mkdir()
+    rows = [
+        {
+            "pipeline_id": "wtsrc12345678",
+            "task.id": "wtsrc12345678",
+            "ws_meta": _json.dumps(
+                {
+                    "path": str(wt),
+                    "mode": "worktree",
+                    "branch": "task/wtsrc12345678",
+                    "project_root": str(project),
+                }
+            ),
+        }
+    ]
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    tool = tool_module.TaskSubmitTool()
+    path, fail = asyncio.run(tool._extract_inherited_workspace("wtsrc12345678"))
+    assert fail is None
+    assert path == str(project)
+    assert "__wt_" not in path
+
+
+def test_inherit_worktree_source_lost_git_rejected(tool_module, monkeypatch, tmp_proj):
+    """worktree 源 project_root 无 .git → git 身份失效拒绝（后续合并找不到仓库）。"""
+    import asyncio
+    import json as _json
+
+    project = Path(tmp_proj) / "bare_proj"
+    wt = Path(tmp_proj) / "bare_proj__wt_deadbeef"
+    project.mkdir()
+    wt.mkdir()
+    rows = [
+        {
+            "pipeline_id": "bare123456789",
+            "task.id": "bare123456789",
+            "ws_meta": _json.dumps(
+                {"path": str(wt), "mode": "worktree", "project_root": str(project)}
+            ),
+        }
+    ]
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    tool = tool_module.TaskSubmitTool()
+    path, fail = asyncio.run(tool._extract_inherited_workspace("bare123456789"))
+    assert path is None
+    assert fail is not None
+    assert "git 身份已失效" in fail.error
+
+
+def test_inherit_parent_ws_meta_never_serves_as_source_coordinates(
+    tool_module, monkeypatch, tmp_proj
+):
+    """源任务行只有 lineage.parent_ws_meta（父链坐标）→ fail-closed。
+
+    父链坐标不是源任务自身坐标：曾把继承路径静默漂移到父会话目录
+    （2026-08-30 诊断：同参三次提交第 3 次合并目标漂到会话工作区）。
+    """
+    import asyncio
+    import json as _json
+
+    rows = [
+        {
+            "pipeline_id": "owncoord12345",
+            "task.id": "owncoord12345",
+            "lineage.parent_ws_meta": _json.dumps(
+                {"path": str(Path(tmp_proj) / "sessions"), "mode": "plain"}
+            ),
+        }
+    ]
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    tool = tool_module.TaskSubmitTool()
+    path, fail = asyncio.run(tool._extract_inherited_workspace("owncoord12345"))
+    assert path is None
+    assert fail is not None
+    assert "没有工作空间信息" in fail.error
