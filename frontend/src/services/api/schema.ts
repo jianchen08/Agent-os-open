@@ -56,11 +56,13 @@ export interface SchemaResponse {
     plugin_name: string
     config_files: Array<{ id: string; path: string; label: string }>
   }>
-  /** 声明了 contributes 的插件（贡献点数据源，内核原样透传 contributes 结构） */
+  /** 声明了 contributes/ui_schema 的插件（贡献点数据源，内核原样透传；tool 等非 System/Pipeline 类型插件的 ui_schema 唯一出口） */
   plugin_contributes: Array<{
     plugin_id: string
     plugin_name: string
     contributes: Record<string, unknown[]>
+    /** 插件声明的前端 UI Schema（可能与 contributes 一并声明；可能为 null） */
+    ui_schema?: PluginUiSchema | null
   }>
 }
 

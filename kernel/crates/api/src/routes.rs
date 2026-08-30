@@ -538,21 +538,26 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
         })
         .collect();
 
-    // P4/P5：聚合各插件的 contributes（仅含声明 contributes 且 enabled 的插件）。
+    // P4/P5：聚合各插件的 contributes（仅含声明 contributes/ui_schema 且 enabled 的插件）。
     // 内核不解释结构，透传给前端 ContributionRegistry（ADR §3.4/§六）。
-    // 安装触发模型 L1：disabled 插件的 contributes 不出口（tools/http 已过滤，UI 也不过来）。
+    // ui_schema 随同一通道出口：agents/pipelines 数组只收 System/Pipeline 类型清单，
+    // tool 等其余类型插件的 ui_schema.widgets 只有这里能到达前端。
+    // 安装触发模型 L1：disabled 插件的不出口（tools/http 已过滤，UI 也不过来）。
     let enabled_ids = state.enabled_plugin_ids.read().await;
     let plugin_contributes: Vec<serde_json::Value> = state
         .manifests
         .read()
         .await
         .iter()
-        .filter(|m| m.contributes.is_some() && enabled_ids.contains(&m.id))
+        .filter(|m| {
+            (m.contributes.is_some() || m.ui_schema.is_some()) && enabled_ids.contains(&m.id)
+        })
         .map(|m| {
             json!({
                 "plugin_id": m.id,
                 "plugin_name": m.name,
                 "contributes": m.contributes,
+                "ui_schema": m.ui_schema,
             })
         })
         .collect();

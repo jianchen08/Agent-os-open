@@ -209,3 +209,73 @@ async fn schema_omits_visual_contributes_for_disabled_plugin() {
         "disabled 插件的 themes/client_styles 不应出口, got: {plugin_contributes:?}"
     );
 }
+
+#[tokio::test]
+async fn schema_exports_ui_schema_for_tool_plugin_via_contributes_entry() {
+    // 非 System/Pipeline 类型插件（如 tool 型 trigger_setup_tool）的 ui_schema.widgets
+    // 进不了 agents/pipelines 数组（那两处只收 System/Pipeline），contributes 入口项
+    // 是它们到达前端的唯一通道：ui_schema 必须随 entry 原样出口，否则声明页面
+    // 只有壳（contributes.pages）没有内容件（widgets）——页面渲染为空。
+    let widgets = json!([
+        {
+            "id": "triggers_table",
+            "type": "table",
+            "space": "triggers",
+            "props": {"title": "触发器列表"}
+        },
+        {
+            "id": "triggers_create",
+            "type": "form",
+            "space": "triggers",
+            "props": {"title": "创建触发器"}
+        }
+    ]);
+    let mut manifest = manifest_with_contributes(
+        "trigger_setup_tool",
+        Some(json!({"pages": [{"id": "triggers", "title": "触发器"}]})),
+    );
+    manifest.plugin_type = PluginType::Tool;
+    manifest.ui_schema = Some(json!({"widgets": widgets.clone()}));
+
+    let schema = fetch_schema(
+        vec![manifest],
+        HashSet::from(["trigger_setup_tool".to_string()]),
+    )
+    .await;
+
+    let arr = schema["plugin_contributes"]
+        .as_array()
+        .expect("plugin_contributes array missing");
+    assert_eq!(arr.len(), 1, "got: {arr:?}");
+    let entry = &arr[0];
+    assert_eq!(
+        entry["ui_schema"]["widgets"], widgets,
+        "tool 类型插件的 ui_schema.widgets 应随 contributes 入口项原样出口"
+    );
+}
+
+#[tokio::test]
+async fn schema_exports_ui_schema_only_plugin_without_contributes() {
+    // 过滤条件是 contributes 或 ui_schema 任一存在：只声明 ui_schema 的插件
+    // 也出口（否则 widget 声明被静默吞掉）。
+    let ui_schema = json!({"widgets": [{"id": "w1", "type": "table", "space": "s1"}]});
+    let mut manifest = manifest_with_contributes("ui_only_plugin", None);
+    manifest.plugin_type = PluginType::Tool;
+    manifest.ui_schema = Some(ui_schema.clone());
+
+    let schema = fetch_schema(
+        vec![manifest],
+        HashSet::from(["ui_only_plugin".to_string()]),
+    )
+    .await;
+
+    let arr = schema["plugin_contributes"]
+        .as_array()
+        .expect("plugin_contributes array missing");
+    assert_eq!(arr.len(), 1, "got: {arr:?}");
+    assert_eq!(arr[0]["ui_schema"], ui_schema);
+    assert!(
+        arr[0]["contributes"].is_null(),
+        "未声明 contributes 时该字段应为 null"
+    );
+}

@@ -334,17 +334,25 @@ export class ContributionRegistry {
   }
 
   /**
-   * 从 agents / pipelines 的 ui_schema 提取 widget 声明
+   * 从 agents / pipelines / plugin_contributes 的 ui_schema 提取 widget 声明
+   *
+   * plugin_contributes 入口项是 tool 等非 System/Pipeline 类型插件的唯一来源——
+   * 内核 schema 的 agents/pipelines 数组只收 System/Pipeline 类型清单，
+   * 其余类型插件的 ui_schema 随 contributes 入口项出口。
    */
   private extractWidgets(schema: Record<string, unknown>): void {
-    const sources: Array<{ list?: Array<Record<string, unknown>> }> = [
-      { list: schema.agents as Array<Record<string, unknown>> | undefined },
-      { list: schema.pipelines as Array<Record<string, unknown>> | undefined },
+    const sources: Array<{ list?: Array<Record<string, unknown>>; idKey: string }> = [
+      { list: schema.agents as Array<Record<string, unknown>> | undefined, idKey: 'id' },
+      { list: schema.pipelines as Array<Record<string, unknown>> | undefined, idKey: 'id' },
+      {
+        list: schema.plugin_contributes as Array<Record<string, unknown>> | undefined,
+        idKey: 'plugin_id',
+      },
     ]
-    for (const { list } of sources) {
+    for (const { list, idKey } of sources) {
       if (!Array.isArray(list)) continue
       for (const entry of list) {
-        const pluginId = entry.id as string | undefined
+        const pluginId = entry[idKey] as string | undefined
         if (!pluginId) continue
         const uiSchema = entry.ui_schema as { widgets?: Array<Record<string, unknown>> } | null | undefined
         if (!uiSchema || !Array.isArray(uiSchema.widgets)) continue
@@ -519,7 +527,7 @@ export class ContributionRegistry {
     return this.settingsPanels.get(pluginId)
   }
 
-  // ── Widget 声明（来自 agents/pipelines 的 ui_schema）──
+  // ── Widget 声明（来自 agents/pipelines/plugin_contributes 的 ui_schema）──
 
   /**
    * 获取指定插件的 widget 声明（来自 ui_schema.widgets）

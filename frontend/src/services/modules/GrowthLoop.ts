@@ -101,6 +101,8 @@ async function reloadContributionRegistry(): Promise<void> {
       const widgetSources = [
         ...(((schemaVal.agents as Array<Record<string, unknown>> | undefined) ?? [])),
         ...(((schemaVal.pipelines as Array<Record<string, unknown>> | undefined) ?? [])),
+        // tool 等非 System/Pipeline 类型插件的 ui_schema 随 plugin_contributes 出口
+        ...(((schemaVal.plugin_contributes as Array<Record<string, unknown>> | undefined) ?? [])),
       ]
         .map((a) => a.ui_schema)
         .filter((u): u is { widgets?: unknown } => !!u && typeof u === 'object')

@@ -177,6 +177,56 @@ describe('ContributionRegistry — UI Widget（ui_schema）聚合', () => {
     const all = registry.getAllWidgets()
     expect(all[0].pluginId).toBe('a')
   })
+
+  it('从 plugin_contributes 入口项提取 tool 类型插件的 widget 声明', () => {
+    // tool 类型插件的 ui_schema 不在 agents/pipelines 数组（内核只收 System/Pipeline），
+    // 只随 plugin_contributes 入口项出口（plugin_id 键）——如触发器页的表格+表单。
+    const widgets = [
+      { id: 'triggers_table', type: 'table', space: 'triggers', order: 10, props: { title: '触发器列表' } },
+      { id: 'triggers_create', type: 'form', space: 'triggers', order: 20, props: { title: '创建触发器' } },
+    ]
+    registry.loadFromSchema(
+      makeSchema({
+        plugin_contributes: [
+          {
+            plugin_id: 'trigger_setup_tool',
+            plugin_name: 'Trigger Setup Tool',
+            contributes: { pages: [{ id: 'triggers', title: '触发器' }] },
+            ui_schema: { widgets },
+          },
+        ],
+      }),
+    )
+
+    const extracted = registry.getWidgetsForPlugin('trigger_setup_tool')
+    expect(extracted.map((w) => w.id)).toEqual(['triggers_table', 'triggers_create'])
+    expect(extracted[0].space).toBe('triggers')
+    expect(extracted[0].order).toBe(10)
+    expect(extracted[0].props).toEqual({ title: '触发器列表' })
+    expect(registry.getAllWidgets().map((w) => w.id)).toEqual(['triggers_table', 'triggers_create'])
+  })
+
+  it('同插件双来源（agents + plugin_contributes）后到者覆盖，不产生重复声明', () => {
+    const registry = new ContributionRegistry()
+    registry.loadFromSchema(
+      makeSchema({
+        agents: [
+          { id: 'svc', name: 'Svc', version: '1', ui_schema: { widgets: [{ id: 'w1', type: 't1' }] } },
+        ],
+        plugin_contributes: [
+          {
+            plugin_id: 'svc',
+            plugin_name: 'Svc',
+            contributes: {},
+            ui_schema: { widgets: [{ id: 'w1', type: 't1' }, { id: 'w2', type: 't2' }] },
+          },
+        ],
+      }),
+    )
+
+    expect(registry.getWidgetsForPlugin('svc').map((w) => w.id)).toEqual(['w1', 'w2'])
+    expect(registry.getAllWidgets().filter((w) => w.pluginId === 'svc')).toHaveLength(2)
+  })
 })
 
 describe('ContributionRegistry — 重新加载与单例', () => {
