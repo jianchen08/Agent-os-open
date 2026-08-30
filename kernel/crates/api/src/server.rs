@@ -1113,13 +1113,40 @@ fn apply_state_overlay(initial_state: &mut serde_json::Value, overlay: &serde_js
     }
 }
 
+/// 把恢复源（热路径 = registry 快照，冷路径 = checkpoint/traces/表重建）的标量键
+/// 并入 initial_state 顶层扁平键，两条路径共用同一合并语义。
+///
+/// 跳过三类键：`messages`（队列真值由热/冷路径独立装配，不在此恢复）；内部
+/// 下划线键与 [`agentos_engine::VOLATILE_RUN_KEYS`]（per-run 指令与锚点/终止
+/// 标志——快照残留会顶掉本轮新输入，旧 run_id 会顶掉取消轮询新锚，GAP-3 与
+/// 批次 D 重跑标志同源）。
+fn merge_recovered_scalars(initial_state: &mut serde_json::Value, source: &serde_json::Value) {
+    let Some(src_obj) = source.as_object() else {
+        return;
+    };
+    let Some(init_obj) = initial_state.as_object_mut() else {
+        return;
+    };
+    for (k, v) in src_obj {
+        if k == "messages" || k.starts_with('_') {
+            continue;
+        }
+        if agentos_engine::VOLATILE_RUN_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        init_obj.insert(k.clone(), v.clone());
+    }
+}
+
 /// 阶段 1b：多轮上下文装配 + 本轮 user 消息入账，返回补全后的 initial_state。
 ///
 /// state.messages 是 LLMCore._build_messages 读取的对话历史。单一权威（不搞降级路径）：
-///   ① 热路径：PipelineStateRegistry 内存 state 完整（每轮 final_state 含 messages
-///      写回，LLM 插件负责 append assistant 回复）→ 直接复用 entry.state["messages"]。
-///   ② 冷路径：registry 未命中（重启/新会话/内存丢失）→ 从 messages 表（持久化
-///      冷数据）按 effective_pipeline_id 恢复完整历史，后续轮走热路径。
+///   ① 热路径：PipelineStateRegistry 内存快照即上轮 final_state → messages 直接复用，
+///      标量键（task.id/workspace/lineage.*/execution_context…）经
+///      merge_recovered_scalars 一并恢复——快照是管道合法数据全集，续跑不丢键。
+///   ② 冷路径：registry 未命中（重启/新会话/内存丢失）→ checkpoint/traces/表恢复
+///      标量基线 + messages 表（持久化冷数据）按 effective_pipeline_id 恢复完整
+///      历史，后续轮走热路径。
 /// 恢复失败 = bug（内存丢 + DB 读不到）：显式 error 暴露，不静默吞掉。
 ///
 /// `skip_user_append`（批次 D 显式重跑标志，经 state_overlay 注入）：regenerate
@@ -1139,16 +1166,16 @@ async fn stage_recover_history(
     let mut history_loaded = false;
     let registry = agentos_session::global_registry();
     if let Some(entry) = registry.get(tenant_id, effective_pipeline_id) {
-        // 热路径：内存 state 完整，直接复用（无需走 DB）
-        if let Some(msgs) = entry
-            .read()
-            .state
-            .get("messages")
-            .and_then(|v| v.as_array())
-        {
+        // 热路径：内存快照即上轮 final_state——messages 复用，标量键随
+        // merge_recovered_scalars 全量恢复。快照是管道合法数据全集：标量
+        // 不恢复会让下游按身份缺席误判（任务管道缺 task.id 被判成主会话，
+        // 工作区漂移到会话共享目录，产物落错位置）。
+        let entry = entry.read();
+        if let Some(msgs) = entry.state.get("messages").and_then(|v| v.as_array()) {
             history_prefix = msgs.clone();
             history_loaded = true;
         }
+        merge_recovered_scalars(&mut initial_state, &entry.state);
     }
     if !history_loaded {
         // 冷路径（零兼容重排）：
@@ -1253,25 +1280,10 @@ async fn stage_recover_history(
                 }
             }
         }
-        // 标量字段注入 state（GAP-3：跳过易变 per-run 键——修复前已写的旧
-        // checkpoint 仍携带 message/input/suspended 等，覆盖会顶掉本轮新输入，
-        // 导致重启后旧 user 消息被重放消费。键集与 checkpoint 瘦身同源）。
-        // 内部下划线键（_skip_user_append 等）同为 per-run 指令，不跨轮恢复——
-        // 上一轮的重跑标志泄漏到本轮会把正常消息吞掉（批次 D 显式重跑标志）。
-        if let Some(rec_obj) = recovered.as_object_mut() {
-            rec_obj.remove("messages");
-            if let Some(init_obj) = initial_state.as_object_mut() {
-                for (k, v) in rec_obj.iter() {
-                    if k.starts_with('_') {
-                        continue;
-                    }
-                    if agentos_engine::VOLATILE_RUN_KEYS.contains(&k.as_str()) {
-                        continue;
-                    }
-                    init_obj.insert(k.clone(), v.clone());
-                }
-            }
-        }
+        // 标量字段注入 state——跳过规则见 merge_recovered_scalars（GAP-3：
+        // message/input/suspended 等 per-run 键残留会顶掉本轮新输入，重启后
+        // 旧 user 消息被重放消费；_skip_user_append 等下划线键泄漏会吞消息）。
+        merge_recovered_scalars(&mut initial_state, &recovered);
     }
     // messages 塞回 state（热路径元素自带 seq；冷路径表读也已带 seq——零兼容，
     // 不做缺 seq 补位、不做客户端 history 兜底）

@@ -939,7 +939,19 @@ async fn test_multi_turn_http_pipeline_coordinate_context_and_reject_missing() {
     // 空坐标拒绝：failed outcome，不产生任何执行
     let rejected = agentos_tenant::scope(
         tenant.clone(),
-        process_via_engine(&state, "HTTP 零轮", "agentos", "", thread, "h0", "", "", None, None, ""),
+        process_via_engine(
+            &state,
+            "HTTP 零轮",
+            "agentos",
+            "",
+            thread,
+            "h0",
+            "",
+            "",
+            None,
+            None,
+            "",
+        ),
     )
     .await;
     assert!(rejected.failed, "空 pipeline_id 必须显式拒绝");
@@ -2141,7 +2153,11 @@ fn test_derive_run_terminal_events_signature_vocabulary() {
             .iter()
             .map(|(n, _)| *n)
             .collect();
-        assert_eq!(names, vec![expected], "stop_reason={reason} 应派生 {expected}");
+        assert_eq!(
+            names,
+            vec![expected],
+            "stop_reason={reason} 应派生 {expected}"
+        );
     }
 }
 
@@ -2987,16 +3003,9 @@ async fn test_interrupted_tail_respects_client_message_id() {
             .await
             .unwrap();
         let st = json!({"pipeline_id": "p_it"});
-        let out = stage_recover_history(
-            st,
-            &store,
-            "ok",
-            "p_it",
-            "tenant_it",
-            incoming_cmid,
-            false,
-        )
-        .await;
+        let out =
+            stage_recover_history(st, &store, "ok", "p_it", "tenant_it", incoming_cmid, false)
+                .await;
         out["messages"].as_array().unwrap().len()
     }
     // ① 同 cmid 重派 → 吞（真·断线重试幂等）
@@ -3085,6 +3094,121 @@ async fn test_stage_recover_history_skip_user_append() {
         .await,
         1,
         "skip_user_append 下不重复 append（重跑消息已在截断后历史）"
+    );
+}
+
+// ── 热路径全量快照恢复：state 快照是管道合法数据全集，续跑不丢键 ──
+
+/// 热路径（registry 命中）：上轮 final_state 的标量键（task.id / workspace /
+/// execution_context…）必须随续跑恢复——缺恢复会让下游按身份缺席误判
+/// （任务管道缺 task.id 被判成主会话，工作区漂移到会话共享目录）。
+/// 同时锁跳过契约：per-run 键（message/suspended/ended/run_id）与下划线键
+/// 保持本轮新值，快照残留不得顶掉新锚点。
+#[tokio::test]
+async fn test_hot_resume_restores_snapshot_scalars() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite;
+    let snapshot = json!({
+        "messages": [{"role": "user", "content": "上轮提问", "seq": 0}],
+        "task.id": "task_hot1",
+        "task.parent_project_id": "proj_hot1",
+        "workspace": "D:/ws/thread__wt_hot1",
+        "ws_meta": {"mode": "worktree", "path": "D:/ws/thread__wt_hot1"},
+        "execution_context": {
+            "workspace": {"source_path": "项目目录", "mode": "worktree"},
+            "isolation": {"level": "isolated"},
+        },
+        // per-run 键残留：合并必须全部跳过
+        "run_id": "old-run",
+        "suspended": true,
+        "ended": true,
+        "message": "旧输入",
+        "_skip_user_append": true,
+    });
+    agentos_session::global_registry().get_or_init(
+        "tenant_hot1",
+        "pipe_hot1",
+        "thread_hot1",
+        "agent_hot1",
+        snapshot,
+    );
+    let out = stage_recover_history(
+        json!({
+            "message": "新输入",
+            "input": "新输入",
+            "run_id": "new-run",
+            "suspended": false,
+            "ended": false,
+            "pipeline_id": "pipe_hot1",
+            "session_id": "thread_hot1",
+            "execution_context": {"workspace": {"source_path": "会话级目录"}},
+        }),
+        &store,
+        "新输入",
+        "pipe_hot1",
+        "tenant_hot1",
+        "",
+        false,
+    )
+    .await;
+    // 标量身份键全量恢复
+    assert_eq!(out["task.id"], "task_hot1", "task.id 必须随快照恢复");
+    assert_eq!(out["task.parent_project_id"], "proj_hot1");
+    assert_eq!(out["workspace"], "D:/ws/thread__wt_hot1");
+    assert_eq!(out["ws_meta"]["mode"], "worktree");
+    // execution_context 整键恢复：任务级快照覆盖本轮会话级种子（优先级契约）
+    assert_eq!(
+        out["execution_context"]["workspace"]["source_path"], "项目目录",
+        "快照 execution_context 整键覆盖会话级种子"
+    );
+    // per-run 键保持本轮新值（快照残留被跳过）
+    assert_eq!(out["run_id"], "new-run", "旧 run_id 不得顶掉取消轮询新锚");
+    assert_eq!(out["suspended"], false);
+    assert_eq!(out["ended"], false);
+    assert_eq!(out["message"], "新输入");
+    assert!(out.get("_skip_user_append").is_none(), "下划线键不跨轮恢复");
+    // messages 热路径复用 + 本轮新消息 append 在尾部
+    let msgs = out["messages"].as_array().expect("messages 数组");
+    assert_eq!(msgs[0]["content"], "上轮提问", "历史首条来自快照");
+    assert_eq!(
+        msgs.last().unwrap()["content"],
+        "新输入",
+        "本轮消息 append 在尾部"
+    );
+}
+
+/// 热路径边界：快照只有 messages（无标量键）→ 合并零副作用，本轮种子值原样保留。
+#[tokio::test]
+async fn test_hot_resume_without_scalars_is_noop_merge() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite;
+    let snapshot = json!({
+        "messages": [{"role": "user", "content": "只有历史", "seq": 0}],
+    });
+    agentos_session::global_registry().get_or_init(
+        "tenant_hot2",
+        "pipe_hot2",
+        "thread_hot2",
+        "agent_hot2",
+        snapshot,
+    );
+    let out = stage_recover_history(
+        json!({"run_id": "new-run-2", "message": "第二轮"}),
+        &store,
+        "第二轮",
+        "pipe_hot2",
+        "tenant_hot2",
+        "",
+        false,
+    )
+    .await;
+    assert_eq!(out["run_id"], "new-run-2");
+    assert_eq!(out["message"], "第二轮");
+    assert!(out.get("workspace").is_none(), "无标量快照不得凭空造键");
+    assert_eq!(
+        out["messages"].as_array().unwrap().len(),
+        2,
+        "历史复用 + 本轮 append"
     );
 }
 

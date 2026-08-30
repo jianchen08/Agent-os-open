@@ -25,6 +25,9 @@ pub const VOLATILE_RUN_KEYS: &[&str] = &[
     "message",
     "input",
     "message_id",
+    // run_id 是本轮取消/状态轮询的定位锚：快照恢复若不跳过，上一 run 的
+    // run_id 会顶掉新 run 刚种的锚，停止/中断信号路由到旧 run 而失效。
+    "run_id",
     "suspended",
     "ended",
     "should_stop",
@@ -4452,7 +4455,10 @@ mod tests {
                 }),
             )
             .unwrap();
-        let (_, state) = store.load_latest_checkpoint("pipe_ctrl", "default").unwrap().unwrap();
+        let (_, state) = store
+            .load_latest_checkpoint("pipe_ctrl", "default")
+            .unwrap()
+            .unwrap();
         for key in ["should_stop", "ended", "suspended", "router.stop_reason"] {
             assert!(state.get(key).is_none(), "{key} 不得残留进 checkpoint");
         }
