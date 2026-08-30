@@ -11,7 +11,7 @@ import { FileQuestion, Download, ZoomIn, ZoomOut, RotateCw } from '@/assets/icon
 import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { useCallback, useMemo, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { codeHighlightStyle } from '@/components/shared/markdown/codeHighlightStyle'
 import { cn } from '@/lib/utils'
 
 /** 图片扩展名集合 */
@@ -308,7 +308,7 @@ export function FilePreview({
         <div className="min-h-0 flex-1 overflow-auto">
           <SyntaxHighlighter
             language={language}
-            style={oneDark}
+            style={codeHighlightStyle}
             showLineNumbers={true}
             wrapLongLines={true}
             lineProps={HIGHLIGHTER_LINE_PROPS}
@@ -317,6 +317,7 @@ export function FilePreview({
               borderRadius: 0,
               fontSize: '0.8125rem',
               background: 'var(--code-bg, #1e1e1e)',
+              color: 'var(--code-text)',
               minHeight: '100%',
             }}
             codeTagProps={{

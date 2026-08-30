@@ -3,7 +3,7 @@
 import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw, Quote } from '@/assets/icons'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { codeHighlightStyle } from '@/components/shared/markdown/codeHighlightStyle'
 import { LobeChatMarkdown } from '../chat/LobeChatMarkdown'
 import { cn } from '@/lib/utils'
 import { useChatInputStore } from '@/stores/chatInputStore'
@@ -602,7 +602,7 @@ export function CodeEditor({
         >
           <SyntaxHighlighter
             language={language}
-            style={oneDark}
+            style={codeHighlightStyle}
             showLineNumbers={true}
             wrapLongLines={true}
             lineProps={HIGHLIGHTER_LINE_PROPS}
@@ -611,6 +611,7 @@ export function CodeEditor({
               borderRadius: 0,
               fontSize: '0.8125rem',
               background: 'var(--code-bg, #1e1e1e)',
+              color: 'var(--code-text)',
               minHeight: '100%',
             }}
             codeTagProps={{
@@ -751,7 +752,7 @@ export function CodeEditor({
           >
             <SyntaxHighlighter
               language={language}
-              style={oneDark}
+              style={codeHighlightStyle}
               showLineNumbers={true}
               wrapLongLines={true}
               lineProps={HIGHLIGHTER_LINE_PROPS}
@@ -760,6 +761,7 @@ export function CodeEditor({
                 borderRadius: 0,
                 fontSize: '0.8125rem',
                 background: 'var(--code-bg, #1e1e1e)',
+                color: 'var(--code-text)',
                 minHeight: '100%',
               }}
               codeTagProps={{

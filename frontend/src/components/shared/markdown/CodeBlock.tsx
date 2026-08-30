@@ -5,11 +5,11 @@
  * 流式输出时不做语法高亮，避免性能抖动
  */
 
-import { Check, Copy, Loader2 } from '@/assets/icons'
 import { type FC, memo, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { Check, Copy, Loader2 } from '@/assets/icons'
 import { cn } from '@/lib/utils'
+import { codeHighlightStyle } from './codeHighlightStyle'
 
 export interface CodeBlockProps {
   /** 代码内容 */
@@ -117,7 +117,7 @@ export const CodeBlock: FC<CodeBlockProps> = memo(
         ) : (
           <SyntaxHighlighter
             language={normalizedLanguage}
-            style={oneDark}
+            style={codeHighlightStyle}
             showLineNumbers={showLineNumbers}
             wrapLongLines={true}
             customStyle={{
@@ -125,11 +125,13 @@ export const CodeBlock: FC<CodeBlockProps> = memo(
               borderRadius: '0 0 0.5rem 0.5rem',
               fontSize: '0.875rem',
               background: 'var(--code-bg)',
+              color: 'var(--code-text)',
               maxWidth: '100%',
               overflowX: 'auto',
             }}
             codeTagProps={{
               style: {
+                color: 'var(--code-text)',
                 fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
               },
             }}

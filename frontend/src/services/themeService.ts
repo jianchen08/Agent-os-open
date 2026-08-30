@@ -472,11 +472,51 @@ function pushAccentGlowVars(vars: string[], { config }: CompileCtx): void {
   }
 }
 
-/** 代码块底色：深色主题固定深底（兼容语法高亮配色），浅色用主题 input 色 */
+/**
+ * 代码块语法字色调色板（键拼进 --code-<key>，与 codeHighlightStyle 的令牌引用一一对应）
+ *
+ * 深色 = oneDark 原生值：深色族 --code-bg 钉死深底本就是迁就这套配色，沿用即观感不变。
+ * 浅色 = 亮底适配组：全部令牌对全部浅色主题的 --code-bg 实测 AA ≥ 4.5
+ * （themeService.codeSyntax 测试锁定，色值取自无障碍浅色系）。
+ */
+const CODE_SYNTAX_DARK: Record<string, string> = {
+  text: '#abb2bf',
+  comment: '#5c6370',
+  keyword: '#c678dd',
+  string: '#98c379',
+  number: '#d19a66',
+  function: '#61afef',
+  tag: '#e06c75',
+  attr: '#d19a66',
+}
+const CODE_SYNTAX_LIGHT: Record<string, string> = {
+  text: '#111827',
+  comment: '#57606a',
+  keyword: '#a21caf',
+  string: '#3f6210',
+  number: '#9a3412',
+  function: '#1d4ed8',
+  tag: '#be123c',
+  attr: '#9a3412',
+}
+
+/** 代码块底色 + 语法字色：字色随底色深浅分发，撞色防线收口在主题层 */
 function pushCodeBlockVars(vars: string[], { config, isDarkTheme }: CompileCtx): void {
-  // === 代码块底色 ===
   // 深色主题固定深底（兼容语法高亮配色）；浅色主题用主题 input 色（淡主题色调）
-  vars.push(`--code-bg: ${isDarkTheme ? 'rgba(15, 23, 42, 0.85)' : config.colors.background.input}`)
+  const bg = isDarkTheme ? 'rgba(15, 23, 42, 0.85)' : config.colors.background.input
+  vars.push(`--code-bg: ${bg}`)
+  // 字色组按底色实际亮度分发而非主题 category（special 族也可能是深底），
+  // 组件侧高亮样式表只消费 --code-* 令牌，不感知主题。
+  const palette = codeBgIsDark(bg) ? CODE_SYNTAX_DARK : CODE_SYNTAX_LIGHT
+  for (const [token, value] of Object.entries(palette)) {
+    vars.push(`--code-${token}: ${value}`)
+  }
+}
+
+/** 代码块底色是否深底（亮度分界与语义前景黑白择优同点 L≈0.179；不可解析按深底） */
+function codeBgIsDark(bg: string): boolean {
+  const rgb = colorToRgb(bg)
+  return !rgb || relativeLuminance(rgb) <= 0.179
 }
 
 /** 字体族 + 字号阶梯（Tailwind 工具类与语义阶梯双套输出） */
@@ -892,18 +932,22 @@ function colorToRgb(color: string): { r: number; g: number; b: number } | null {
 }
 
 /**
+ * 颜色相对亮度（WCAG 2.1）：0（纯黑）..1（纯白），对比度复算与黑白择优的共用基元
+ */
+function relativeLuminance(rgb: { r: number; g: number; b: number }): number {
+  const channels = [rgb.r, rgb.g, rgb.b].map((v) => {
+    const n = v / 255
+    return n <= 0.03928 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4
+  })
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+}
+
+/**
  * 两实色的 WCAG 对比度（2.2:1..21:1），气泡内链接保底判据用
  */
 function wcagRatio(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): number {
-  const lum = (c: { r: number; g: number; b: number }) => {
-    const ch = [c.r, c.g, c.b].map((v) => {
-      const n = v / 255
-      return n <= 0.03928 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4
-    })
-    return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
-  }
-  const la = lum(a)
-  const lb = lum(b)
+  const la = relativeLuminance(a)
+  const lb = relativeLuminance(b)
   const [hi, lo] = la >= lb ? [la, lb] : [lb, la]
   return (hi + 0.05) / (lo + 0.05)
 }
@@ -921,12 +965,7 @@ function wcagRatio(a: { r: number; g: number; b: number }, b: { r: number; g: nu
 function contrastPick(bg: string): string {
   const rgb = colorToRgb(bg)
   if (!rgb) return '#ffffff'
-  const channels = [rgb.r, rgb.g, rgb.b].map((v) => {
-    const n = v / 255
-    return n <= 0.03928 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4
-  })
-  const luminance = 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
-  return luminance > 0.179 ? '#000000' : '#ffffff'
+  return relativeLuminance(rgb) > 0.179 ? '#000000' : '#ffffff'
 }
 
 /**
