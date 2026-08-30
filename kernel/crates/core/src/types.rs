@@ -251,26 +251,6 @@ impl TenantContext {
             credential_handle: None,
         }
     }
-
-    pub fn with_role(mut self, role: impl Into<String>) -> Self {
-        self.role = Some(role.into());
-        self
-    }
-
-    pub fn with_permissions(mut self, permissions: Vec<String>) -> Self {
-        self.permissions = permissions;
-        self
-    }
-
-    pub fn with_enabled_plugins(mut self, enabled_plugins: Vec<String>) -> Self {
-        self.enabled_plugins = enabled_plugins;
-        self
-    }
-
-    pub fn with_credential_handle(mut self, handle: impl Into<String>) -> Self {
-        self.credential_handle = Some(handle.into());
-        self
-    }
 }
 
 // ── 工具元信息 ──────────────────────────────────────────────────

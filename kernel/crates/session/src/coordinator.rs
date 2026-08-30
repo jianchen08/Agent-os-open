@@ -38,23 +38,6 @@ impl SessionCoordinator {
         }
     }
 
-    /// 用指定重放容量创建（测试用小容量触发溢出）。
-    pub fn with_replay_capacity(capacity: usize) -> Self {
-        let registry = Arc::new(ConnectionRegistry::new());
-        let bus = FrontendEventBus::new(registry.clone());
-        let replay = Arc::new(ReplayBuffer::new(ReplayConfig {
-            capacity,
-            ttl_secs: 300,
-        }));
-        let metrics = Arc::new(crate::metrics::SessionMetrics::new());
-        Self {
-            registry,
-            bus,
-            replay,
-            metrics,
-        }
-    }
-
     /// 监控 M2：暴露 session 计数器句柄（聚合器周期性 snapshot）。
     pub fn metrics(&self) -> &Arc<crate::metrics::SessionMetrics> {
         &self.metrics

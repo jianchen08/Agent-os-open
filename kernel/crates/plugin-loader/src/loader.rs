@@ -742,12 +742,6 @@ impl PluginLoader for PluginLoaderImpl {
 }
 
 impl PluginLoaderImpl {
-    /// 获取已发现的所有 manifest。
-    pub fn get_manifests(&self) -> Vec<PluginManifest> {
-        let manifests = self.manifests.read();
-        manifests.values().map(|(m, _)| m.clone()).collect()
-    }
-
     /// 获取所有已发现插件的根目录映射（plugin_id → 插件目录绝对路径）。
     ///
     /// HTTP dispatcher 据此把 `/ext/{plugin_id}/assets/{*path}`
