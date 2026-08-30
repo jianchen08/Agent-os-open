@@ -145,6 +145,8 @@ Agent 配置（YAML）mtime 缓存热生效，改提示词/工具白名单无需
 ### 前置要求
 
 - Python 3.11+（启动脚本自动探测 3.11/3.12/3.13）
+- [uv](https://docs.astral.sh/uv/)（Python 插件依赖每目录 venv 管理；启动脚本首次运行自动 `uv sync`）
+- Rust stable（编译内核；`rustup` 安装）
 - Node.js 18+（前端构建，Vite 要求）
 - Docker（WSL2 + docker-ce；前端容器 + Redis 容器，后端运行在宿主机）
 

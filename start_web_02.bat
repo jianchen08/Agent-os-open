@@ -94,9 +94,9 @@ REM ============================================================
 REM  Step 1: build kernel (release)
 REM ============================================================
 if "%NO_BUILD%"=="1" (
-    echo [1/3] Skipping kernel build (--no-build)
+    echo [1/4] Skipping kernel build (--no-build)
 ) else (
-    echo [1/3] Building Rust kernel (release)...
+    echo [1/4] Building Rust kernel (release)...
     pushd "%KERNEL_DIR%"
     set "CARGO_INCREMENTAL=0"
     cargo +stable build --release --bin agentos-kernel -j 1
@@ -112,9 +112,67 @@ if "%NO_BUILD%"=="1" (
 echo.
 
 REM ============================================================
-REM  Step 2: start kernel
+REM  Step 2: prepare plugin venvs (first run only; skip dirs with .venv)
+REM  Plugins run in per-directory uv venvs - the kernel refuses to fall
+REM  back to a bare PATH python, so a fresh clone without this step gets
+REM  every Python sidecar down (502 on plugin endpoints).
 REM ============================================================
-echo [2/3] Starting kernel on port :%AGENTOS_KERNEL_PORT%...
+echo [2/4] Preparing Python plugin venvs...
+where uv >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] uv not found in PATH.
+    echo         Plugins need per-directory venvs created by uv.
+    echo         Install: https://docs.astral.sh/uv/  then re-run.
+    pause
+    exit /b 1
+)
+set "VENV_CREATED=0"
+REM 插件目录三种子布局：system|tools/<name>（两层）、pipeline/<phase>/<name>（三层）、
+REM shared/<name> 顶层（db_admin 等）；逐个无 .venv 才 uv sync（幂等跳过）
+for %%A in (system tools) do (
+    for /d %%B in ("%PROJECT_ROOT%\plugins\shared\%%A\*") do (
+        if exist "%%B\plugin.json" if exist "%%B\pyproject.toml" if not exist "%%B\.venv" (
+            echo        uv sync: %%~nB
+            uv sync --project "%%B" >nul 2>&1
+            if errorlevel 1 (
+                echo [WARN] uv sync failed: %%B ^(see plugin uv.lock/pyproject^)
+            ) else (
+                set /a VENV_CREATED+=1
+            )
+        )
+    )
+)
+for /d %%A in ("%PROJECT_ROOT%\plugins\shared\pipeline\*") do (
+    for /d %%B in ("%%A\*") do (
+        if exist "%%B\plugin.json" if exist "%%B\pyproject.toml" if not exist "%%B\.venv" (
+            echo        uv sync: %%~nB
+            uv sync --project "%%B" >nul 2>&1
+            if errorlevel 1 (
+                echo [WARN] uv sync failed: %%B ^(see plugin uv.lock/pyproject^)
+            ) else (
+                set /a VENV_CREATED+=1
+            )
+        )
+    )
+)
+for /d %%B in ("%PROJECT_ROOT%\plugins\shared\*") do (
+    if exist "%%B\plugin.json" if exist "%%B\pyproject.toml" if not exist "%%B\.venv" (
+        echo        uv sync: %%~nB
+        uv sync --project "%%B" >nul 2>&1
+        if errorlevel 1 (
+            echo [WARN] uv sync failed: %%B ^(see plugin uv.lock/pyproject^)
+        ) else (
+            set /a VENV_CREATED+=1
+        )
+    )
+)
+echo [OK] Plugin venvs ready ^(created !VENV_CREATED! this run; existing ones skipped^).
+echo.
+
+REM ============================================================
+REM  Step 3: start kernel
+REM ============================================================
+echo [3/4] Starting kernel on port :%AGENTOS_KERNEL_PORT%...
 
 set "AGENTOS_KERNEL_HOST=0.0.0.0"
 set "AGENTOS_PLUGINS_DIR=%PROJECT_ROOT%\plugins\shared"
@@ -160,9 +218,9 @@ if "%KERNEL_ONLY%"=="1" (
 )
 
 REM ============================================================
-REM  Step 3: start frontend (proxy to 0.2 kernel :9100)
+REM  Step 4: start frontend (proxy to 0.2 kernel :9100)
 REM ============================================================
-echo [3/3] Starting frontend on port :%AGENTOS_FRONTEND_PORT%...
+echo [4/4] Starting frontend on port :%AGENTOS_FRONTEND_PORT%...
 
 REM Check frontend deps really complete (node_modules/.bin/vite.cmd exists).
 REM Do not only check node_modules dir existence: it may be empty/incomplete,

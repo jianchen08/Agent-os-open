@@ -208,7 +208,7 @@ echo ""
 if [ "$NO_BUILD" = true ]; then
     echo -e "${YELLOW}[SKIP] 跳过内核编译（--no-build）${NC}"
 else
-    echo -e "${YELLOW}[1/4] 编译 Rust 内核 (cargo build --release)...${NC}"
+    echo -e "${YELLOW}[1/5] 编译 Rust 内核 (cargo build --release)...${NC}"
     echo -e "${YELLOW}       这可能需要几分钟（首次编译约 4-5 分钟，增量编译约 30 秒）${NC}"
     cd "$KERNEL_DIR"
     if cargo build --release --bin agentos-kernel 2>&1; then
@@ -263,8 +263,40 @@ cleanup() {
 }
 trap cleanup INT TERM
 
-# ========== 步骤 2: 启动内核 ==========
-echo -e "${YELLOW}[2/4] 启动 Rust 内核 (端口 :$KERNEL_PORT)...${NC}"
+# ========== 步骤 2: 准备插件 venv（首次运行；已有 .venv 跳过） ==========
+# 插件 sidecar 按目录 venv 运行，内核不回退 PATH 裸 python——
+# 新克隆不装 venv 则所有 Python 插件不可用（插件端点 502）。
+echo -e "${YELLOW}[2/5] 准备 Python 插件 venv...${NC}"
+if ! command -v uv >/dev/null 2>&1; then
+    echo -e "${RED}[ERROR] 未找到 uv。插件依赖每目录 venv（uv sync）创建。${NC}"
+    echo -e "${YELLOW}       安装: https://docs.astral.sh/uv/ 后重跑。${NC}"
+    exit 1
+fi
+VENV_CREATED=0
+# 插件目录三种子布局：system|tools/<name>、pipeline/<phase>/<name>、shared/<name> 顶层；
+# 已有 .venv 跳过（幂等）
+for manifest in \
+    "$PROJECT_ROOT"/plugins/shared/*/plugin.json \
+    "$PROJECT_ROOT"/plugins/shared/system/*/plugin.json \
+    "$PROJECT_ROOT"/plugins/shared/tools/*/plugin.json \
+    "$PROJECT_ROOT"/plugins/shared/pipeline/*/*/plugin.json
+do
+    [ -f "$manifest" ] || continue
+    dir=$(dirname "$manifest")
+    if [ -f "$dir/pyproject.toml" ] && [ ! -d "$dir/.venv" ]; then
+        echo -e "       uv sync: $(basename "$dir")"
+        if uv sync --project "$dir" >/dev/null 2>&1; then
+            VENV_CREATED=$((VENV_CREATED + 1))
+        else
+            echo -e "${YELLOW}[WARN] uv sync 失败: $dir（检查 uv.lock/pyproject）${NC}"
+        fi
+    fi
+done
+echo -e "${GREEN}  插件 venv 就绪（本次新建 $VENV_CREATED 个；既有 .venv 跳过）${NC}"
+echo ""
+
+# ========== 步骤 3: 启动内核 ==========
+echo -e "${YELLOW}[3/5] 启动 Rust 内核 (端口 :$KERNEL_PORT)...${NC}"
 export AGENTOS_KERNEL_PORT=$KERNEL_PORT
 export AGENTOS_KERNEL_HOST=0.0.0.0
 # G8 监督者循环：退出码 75 = restart requested（POST /api/v1/system/restart 或
@@ -323,7 +355,7 @@ if [ "$KERNEL_ONLY" = true ]; then
     echo -e "${YELLOW}[SKIP] 仅内核模式（--kernel-only）${NC}"
 else
     echo ""
-    echo -e "${YELLOW}[3/4] 启动前端 (Vite :$FRONTEND_PORT, 连接内核 :$KERNEL_PORT)...${NC}"
+    echo -e "${YELLOW}[4/5] 启动前端 (Vite :$FRONTEND_PORT, 连接内核 :$KERNEL_PORT)...${NC}"
 
     # 安装前端依赖（如需要）
     # 不能只判断 node_modules 目录是否存在：该目录可能为空或不完整，

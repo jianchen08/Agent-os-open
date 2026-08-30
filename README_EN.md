@@ -145,6 +145,8 @@ Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via pr
 ### Prerequisites
 
 - Python 3.11+ (launch scripts auto-detect 3.11/3.12/3.13)
+- [uv](https://docs.astral.sh/uv/) (per-plugin venv management; the launch script runs `uv sync` automatically on first run)
+- Rust stable (to build the kernel; install via `rustup`)
 - Node.js 18+ (for frontend build, Vite required)
 - Docker (WSL2 + docker-ce; frontend container + Redis container, backend runs on the host)
 
