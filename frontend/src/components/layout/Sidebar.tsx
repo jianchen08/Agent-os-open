@@ -34,6 +34,7 @@ import {
 import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
 import { cn } from '@/lib/utils'
 import { searchGlobal, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
+import { createProject } from '@/services/api/tasks'
 import { reportError, ErrorSeverity, ErrorType } from '@/services/errorReporting'
 import { saveSessionExecutionOptions } from '@/services/sessionExecutionOptions'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
@@ -283,6 +284,35 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   }, [])
 
   /**
+   * 会话目录 → 项目登记：保存会话时若声明了工作空间目录（source_path），
+   * 立即以该目录为项目登记（projects 域 API；同路径幂等复用）。
+   *
+   * 登记失败不阻断会话保存（会话保存是主体），错误上报可见。
+   */
+  const registerSessionProject = useCallback(
+    async (sessionId: string, title: string, options?: SessionFormOptions) => {
+      const wsSpec = options?.executionContext?.workspace
+      const sourcePath =
+        wsSpec && typeof wsSpec === 'object' && 'source_path' in wsSpec
+          ? String((wsSpec as { source_path?: unknown }).source_path ?? '')
+          : ''
+      if (!sourcePath.trim()) return
+      try {
+        await createProject(title.trim() || '新会话', sessionId, { path: sourcePath.trim() })
+      } catch (error) {
+        reportError(error instanceof Error ? error.message : String(error), {
+          type: ErrorType.SERVER,
+          severity: ErrorSeverity.ERROR,
+          componentName: 'Sidebar',
+          operation: 'registerSessionProject',
+          sessionId,
+        })
+      }
+    },
+    [reportError],
+  )
+
+  /**
    * 确认创建 / 编辑会话
    */
   const handleSaveSession = useCallback(
@@ -307,14 +337,16 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               ? { executionContext: options.executionContext }
               : {}),
           })
+          await registerSessionProject(sessionId, title, options)
           setModal(null)
         } else {
           // 新建会话：createSession 内部已设置 activeSessionId，
           // ChatContainer 会随 activeSessionId 自动渲染，无需 navigate。
-          await createSession(title || undefined, {
+          const created = await createSession(title || undefined, {
             agentId: agentId || undefined,
             fieldMetadata: options?.fieldMetadata,
           })
+          await registerSessionProject(created.id, created.title || title, options)
           setModal(null)
         }
       } catch (error) {
@@ -329,7 +361,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         setIsSaving(false)
       }
     },
-    [createSession, renameSession, updateSessionAgent],
+    [createSession, renameSession, updateSessionAgent, registerSessionProject],
   )
 
   /**

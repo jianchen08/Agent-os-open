@@ -555,7 +555,24 @@ _TASK_SUBMIT_INPUT_SCHEMA: dict[str, Any] = {
             "description": (
                 "挂靠项目 ID（可选）。指定后任务在项目文件夹下执行"
                 "（默认 worktree 从项目仓库分叉）；缺省为独立任务。"
-                "项目经 projects 域 API 创建（= 真实文件夹 + 登记）"
+                "项目经 projects 域 API 创建（= 真实文件夹 + 登记），"
+                "或在 L1 提交时用 project_title 直接创建挂靠。"
+            ),
+        },
+        "project_title": {
+            "type": "string",
+            "description": (
+                "新建项目标题（可选，与 project_id 二选一）。指定后创建项目"
+                "（= 建文件夹 + git init + 登记）并挂靠，任务在项目文件夹下执行；"
+                "同目录已登记时复用既有项目。仅 L1 可用（L2/L3 子任务沿父链继承）。"
+            ),
+        },
+        "project_path": {
+            "type": "string",
+            "description": (
+                "新建项目文件夹（可选，配合 project_title）。显式指定目录；"
+                "缺省自动生成 {工作空间根}/projects/<标题>。已存在目录非 git 仓库"
+                "会自动 git init（不删改现有文件）。"
             ),
         },
         "parent_task_id": {
@@ -688,6 +705,12 @@ class TaskSubmitTool(BuiltinTool):
             param_level_restrictions={
                 "project_id": {
                     "max_visible_level": 1,  # 项目挂靠由 L1 组织（L2/L3 子任务继承项目）
+                },
+                "project_title": {
+                    "max_visible_level": 1,  # 新建项目由 L1 发起（L2/L3 继承既有项目）
+                },
+                "project_path": {
+                    "max_visible_level": 1,  # 新建项目目录由 L1 指定
                 },
                 "parent_task_id": {
                     "max_visible_level": 1,  # L2/L3 系统自动注入，不应手动指定
@@ -920,16 +943,36 @@ class TaskSubmitTool(BuiltinTool):
         parent_agent_level: int,
         explicit_workspace_raw: str,
     ) -> tuple[str, ToolExecutionResult | None]:
-        """项目挂靠解析（project_id）：L1 显式指定；L2/L3 沿父链由系统继承。
+        """项目挂靠解析（project_id / project_title）：L1 显式指定或新建；
+        L2/L3 沿父链由系统继承。
 
         项目 = 文件夹 + 登记（ADR 2026-08-27）：挂靠键 task.parent_project_id
         由 task_submit 唯一写入（state 行），每级子任务继承同值——深层任务
         仍归属项目（任务树分组/制品聚合按单跳键覆盖全深度）。
+        project_title（仅 L1）= 创建项目（建文件夹 + git init + 登记，
+        同目录已登记复用）后挂靠；与 project_id 二选一。
 
-        校验序：L2/L3 显式指定拒绝 → 登记存在性 → 文件夹存在性 → 与 agent
-        显式 workspace 冲突拒绝；全部通过后把 inputs["workspace"] 覆写为项目文件夹。
+        校验序：L2/L3 显式指定拒绝 → 新建/挂靠二选一冲突拒绝 → 登记存在性
+        → 文件夹存在性 → 与 agent 显式 workspace 冲突拒绝；全部通过后把
+        inputs["workspace"] 覆写为项目文件夹。
         返回 (project_id（空串 = 不挂靠）, 失败结果)。
         """
+        project_title = str(inputs.get("project_title") or "").strip()
+        project_path = str(inputs.get("project_path") or "").strip()
+        if (project_title or project_path) and parent_agent_level >= 2:
+            # 防伪造：L2/L3 的项目归属由系统继承，新建项目一律拒绝
+            logger.warning(
+                "[TaskSubmit] L%d Agent 显式指定 project_title/project_path=%s，已拦截（项目归属沿父链继承）",
+                parent_agent_level,
+                project_title or project_path,
+            )
+            return "", create_failure_result(
+                error=(
+                    f"L{parent_agent_level} Agent 不能新建项目——子任务的项目归属"
+                    "由系统沿父链自动继承，直接提交子任务即可。"
+                ),
+                error_code="L2_CANNOT_SPECIFY_PROJECT_ID",
+            )
         project_id = str(inputs.get("project_id") or "")
         if project_id and parent_agent_level >= 2:
             # 防伪造：L2/L3 的项目归属由系统继承，显式指定一律拒绝
@@ -944,6 +987,41 @@ class TaskSubmitTool(BuiltinTool):
                     "子任务的项目归属由系统沿父链自动继承，直接提交子任务即可。"
                 ),
                 error_code="L2_CANNOT_SPECIFY_PROJECT_ID",
+            )
+        if project_title and project_id:
+            return "", create_failure_result(
+                error=(
+                    "project_title 与 project_id 二选一：新建项目（project_title）"
+                    "与挂靠已有项目（project_id）不能同时指定。"
+                ),
+                error_code="PROJECT_CREATE_OR_ATTACH_CONFLICT",
+            )
+        if project_title:
+            # 共享层自举（plugins/shared/ —— project_registry 所在）
+            shared_root = str(Path(__file__).resolve().parents[2])
+            if shared_root not in sys.path:
+                sys.path.insert(0, shared_root)
+            from project_registry import ensure_project_registered  # noqa: PLC0415
+
+            try:
+                project, _created = ensure_project_registered(
+                    title=project_title,
+                    explicit_path=project_path,
+                    session_id=str(inputs.get("session_id") or ""),
+                    submitted_by=str(inputs.get("user_id") or ""),
+                )
+            except (ValueError, RuntimeError) as exc:
+                logger.error("[TaskSubmit] 新建项目失败 | title=%s | err=%s", project_title, exc)
+                return "", create_failure_result(
+                    error=f"新建项目失败: {exc}",
+                    error_code="PROJECT_CREATE_FAILED",
+                )
+            project_id = project.id
+            logger.info(
+                "[TaskSubmit] 新建项目并挂靠 | project_id=%s | title=%s | path=%s",
+                project_id,
+                project_title,
+                project.path,
             )
         if not project_id and parent_task_id:
             project_id = await self._inherit_project_id(parent_task_id)

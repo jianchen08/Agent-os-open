@@ -443,3 +443,96 @@ class TestPendingSubtaskRegistration:
             mod._chat_sender = None
         assert r.success, r.error
         assert len(sender.calls) == 3, "根任务只有出生三段，无登记分支"
+
+
+class TestProjectCreateOnSubmit:
+    """task_submit 新建项目挂靠（project_title/project_path，仅 L1）。"""
+
+    async def test_l1_creates_project_and_attaches(
+        self, mod: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """L1 给 project_title → 创建项目（git init + 登记）并挂靠：出生 state
+        带 task.parent_project_id（12hex 新项目 id），登记目录落一条 YAML。"""
+        import project_registry as pr
+
+        tasks_root = tmp_path / "tasks_data"
+        ws_base = tmp_path / "ws"
+        monkeypatch.setenv("TASKS_STORAGE_DIR", str(tasks_root))
+        monkeypatch.setattr(pr, "workspace_base_dir", lambda: ws_base)
+        target = ws_base / "new_proj"
+        target.mkdir(parents=True)
+
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(_base_inputs(project_title="新项目", project_path=str(target)))
+        finally:
+            mod._chat_sender = None
+        assert r.success, r.error
+
+        birth = sender.calls[0]
+        pid = birth["state"]["task.parent_project_id"]
+        assert len(pid) == 12
+        assert pid == r.metadata["project_id"]
+        assert list((tasks_root / "projects").glob("*.yaml"))
+        # 项目文件夹成为任务工作空间（inputs 覆写；执行派发段携带 execution_context）
+        assert sender.calls[2]["execution_context"]["workspace"]["source_path"] == str(target)
+
+    async def test_l1_reuses_registered_path(
+        self, mod: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """同路径已登记 → 复用既有项目（不重复登记），挂靠同 id。"""
+        import project_registry as pr
+
+        tasks_root = tmp_path / "tasks_data"
+        ws_base = tmp_path / "ws"
+        monkeypatch.setenv("TASKS_STORAGE_DIR", str(tasks_root))
+        monkeypatch.setattr(pr, "workspace_base_dir", lambda: ws_base)
+        target = ws_base / "proj"
+        target.mkdir(parents=True)
+
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r1 = await tool.execute(_base_inputs(project_title="项目A", project_path=str(target)))
+            r2 = await tool.execute(_base_inputs(project_title="项目B", project_path=str(target)))
+        finally:
+            mod._chat_sender = None
+        assert r1.success, r1.error
+        assert r2.success, r2.error
+        pid1 = sender.calls[0]["state"]["task.parent_project_id"]
+        pid2 = sender.calls[4]["state"]["task.parent_project_id"]
+        assert pid1 == pid2
+        assert len(list((tasks_root / "projects").glob("*.yaml"))) == 1
+
+    async def test_l2_cannot_create_project(self, mod: Any) -> None:
+        """L2/L3 显式新建项目被拦截（项目归属沿父链继承）。"""
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(
+                _base_inputs(parent_agent_level=2, project_title="新项目")
+            )
+        finally:
+            mod._chat_sender = None
+        assert not r.success
+        assert r.error_code == "L2_CANNOT_SPECIFY_PROJECT_ID"
+        assert sender.calls == []
+
+    async def test_project_title_and_id_conflict(self, mod: Any) -> None:
+        """project_title 与 project_id 二选一：同时指定拒绝。"""
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(
+                _base_inputs(project_title="新项目", project_id="abc123def456")
+            )
+        finally:
+            mod._chat_sender = None
+        assert not r.success
+        assert r.error_code == "PROJECT_CREATE_OR_ATTACH_CONFLICT"
+        assert sender.calls == []

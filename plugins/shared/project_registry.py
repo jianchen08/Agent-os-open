@@ -213,15 +213,14 @@ def _slugify(title: str) -> str:
 def ensure_project_folder(title: str, explicit_path: str = "") -> str:
     """解析并创建项目文件夹，返回宿主绝对路径。
 
-    - 显式路径优先（已存在必须是空目录或 git 仓库，否则报错防误吞）；
+    - 显式路径优先（已存在目录直接复用，非 git 自动 ``git init``——幂等
+      不删改现有文件；worktree 分叉前提）；
     - 缺省 ``{workspace_base}/projects/<slug>``，重名递增后缀 ``-2/-3...``；
     - 非 git 仓库时 ``git init``（worktree 前提；失败抛错，创建整体失败）。
     """
     base = workspace_base_dir() / "projects"
     if explicit_path:
         target = Path(explicit_path).resolve()
-        if target.exists() and target.is_dir() and any(target.iterdir()) and not (target / ".git").exists():
-            raise ValueError(f"目标文件夹非空且不是 git 仓库，拒绝作为项目文件夹: {target}")
     else:
         target = base / _slugify(title)
         suffix = 2
@@ -236,6 +235,46 @@ def ensure_project_folder(title: str, explicit_path: str = "") -> str:
         if result.returncode != 0:
             raise RuntimeError(f"git init 失败（项目文件夹已建于 {target}）: {result.stderr.strip()}")
     return str(target)
+
+
+def _norm_path(path: str) -> str:
+    """登记路径归一化（Windows 大小写不敏感）。"""
+    norm = os.path.normpath(os.path.abspath(path))
+    return norm.lower() if os.name == "nt" else norm
+
+
+def ensure_project_registered(
+    title: str,
+    explicit_path: str = "",
+    session_id: str = "",
+    submitted_by: str = "",
+    auto_execute: bool = False,
+    registry: ProjectRegistry | None = None,
+) -> tuple[ProjectModel, bool]:
+    """按路径幂等登记项目：同路径已登记 → 复用（created=False），否则建文件夹 + 登记。
+
+    多入口共用（projects 域 API / task_submit 创建挂靠 / 会话目录登记）：
+    登记簿是 id ↔ 路径最薄账本，同一文件夹不应产生多条登记——重复提交
+    返回既有登记行，调用方按 created 区分新建与复用。
+    """
+    if registry is None:
+        registry = ProjectRegistry()
+    explicit = explicit_path or ""
+    if explicit:
+        want = _norm_path(explicit)
+        for project in registry.list():
+            if project.path and _norm_path(project.path) == want:
+                return project, False
+    folder = ensure_project_folder(title, explicit)
+    project = ProjectModel(
+        path=folder,
+        title=title,
+        auto_execute=auto_execute,
+        submitted_by=submitted_by,
+        session_id=session_id,
+    )
+    registry.save(project)
+    return project, True
 
 
 def remove_project_folder(path: str) -> bool:

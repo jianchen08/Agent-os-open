@@ -92,6 +92,28 @@ describe('CreateTaskFormModal：字段声明后移 + 提交派生', () => {
     )
   })
 
+  it('新建项目：project_title/project_path 透传（与 project_id 互斥）', async () => {
+    render(
+      <CreateTaskFormModal isOpen onClose={() => {}} sessionId="sess_1" onCreated={() => {}} />,
+    )
+    await submit({
+      title: '项目任务',
+      project_title: '新项目',
+      project_path: 'D:/new_proj',
+      target_id: 'general_agent',
+      workspace_mode: 'worktree',
+      isolation_level: '',
+    })
+    expect(createRootMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project_title: '新项目',
+        project_path: 'D:/new_proj',
+        project_id: undefined,
+        workspace_mode: 'worktree',
+      }),
+    )
+  })
+
   it('缺 target_id → 拒绝提交', async () => {
     render(
       <CreateTaskFormModal isOpen onClose={() => {}} sessionId="sess_1" onCreated={() => {}} />,

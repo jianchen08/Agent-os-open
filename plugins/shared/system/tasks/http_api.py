@@ -70,6 +70,8 @@ class TaskRootCreate(BaseModel):
     title: str
     description: str = ""
     project_id: str = ""  # 挂靠项目 id（登记行；空 = 独立任务）
+    project_title: str = ""  # 新建项目标题（与 project_id 二选一；填了则创建项目并挂靠）
+    project_path: str = ""  # 新建项目文件夹（配合 project_title；缺省自动生成）
     target_id: str = ""  # 执行 agent（必填）
     workspace: str = ""
     workspace_mode: str = ""  # worktree/plain（空 = 工具侧按 workspace 显式性缺省）
@@ -753,6 +755,9 @@ async def create_root_task(
     }
     if body.project_id:
         inputs["project_id"] = body.project_id
+    if body.project_title:
+        inputs["project_title"] = body.project_title
+        inputs["project_path"] = body.project_path
     if body.inherit:
         inputs["inherit"] = body.inherit
 
@@ -1257,9 +1262,11 @@ async def create_project(
 ) -> dict[str, Any]:
     """创建项目 = 建文件夹（显式路径优先，缺省 {ws_base}/projects/<slug>）+ 登记。
 
-    非 git 文件夹会 git init（子任务 worktree 前提）；git init 失败创建整体失败。
+    同路径幂等：登记中已有该文件夹 → 返回既有登记（created=false），
+    不重复建文件夹/登记行。非 git 文件夹会 git init（worktree 前提）；
+    git init 失败创建整体失败。
     """
-    from project_registry import ProjectModel, ensure_project_folder  # noqa: PLC0415
+    from project_registry import ensure_project_registered  # noqa: PLC0415
 
     body = dict(body or {})
     goal = str(body.get("goal") or body.get("title") or "").strip()
@@ -1273,7 +1280,14 @@ async def create_project(
 
     explicit_path = str(body.get("path") or body.get("workspace") or "").strip()
     try:
-        folder = ensure_project_folder(goal, explicit_path)
+        project, created = ensure_project_registered(
+            title=goal,
+            explicit_path=explicit_path,
+            session_id=str(body.get("session_id") or ""),
+            submitted_by=str(_current_user(_user).get("sub", "") or ""),
+            auto_execute=bool(body.get("auto_execute", False)),
+            registry=registry,
+        )
     except (ValueError, RuntimeError) as exc:
         raise APIError(
             status_code=400,
@@ -1281,23 +1295,15 @@ async def create_project(
             message=str(exc),
         ) from exc
 
-    project = ProjectModel(
-        path=folder,
-        title=goal,
-        auto_execute=bool(body.get("auto_execute", False)),
-        submitted_by=str(_current_user(_user).get("sub", "") or ""),
-        session_id=str(body.get("session_id") or ""),
-    )
-    registry.save(project)
-
     logger.info(
-        "[projects] 创建项目 | project_id=%s | goal=%s | path=%s | user=%s",
+        "[projects] %s项目 | project_id=%s | goal=%s | path=%s | user=%s",
+        "复用已登记" if not created else "创建",
         project.id,
         goal,
-        folder,
+        project.path,
         project.submitted_by or "-",
     )
-    return {"project": _project_to_dict(project)}
+    return {"project": _project_to_dict(project), "created": created}
 
 
 async def get_project(

@@ -49,17 +49,27 @@ export function CreateTaskFormModal({
             ? values.isolation_level
             : ''
         const projectId = String(values.project_id ?? '').trim()
+        const projectTitle = String(values.project_title ?? '').trim()
+        const projectPath = String(values.project_path ?? '').trim()
         await createRootTask({
           title: String(values.title ?? '').trim(),
           description: String(values.description ?? '').trim(),
           project_id: projectId || undefined,
+          project_title: projectTitle || undefined,
+          project_path: projectPath || undefined,
           target_id: targetId,
           workspace: String(values.workspace ?? '').trim(),
           workspace_mode: workspaceMode,
           isolation_level: isolationLevel,
           thread_id: sessionId,
         })
-        toast.success(projectId ? '任务已创建并挂靠项目，开始执行' : '任务已创建并开始执行')
+        toast.success(
+          projectId
+            ? '任务已创建并挂靠项目，开始执行'
+            : projectTitle
+              ? '任务已创建并新建项目挂靠，开始执行'
+              : '任务已创建并开始执行',
+        )
         onCreated()
       }}
     />

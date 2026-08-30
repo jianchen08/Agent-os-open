@@ -80,6 +80,8 @@ export async function createProject(
   options?: {
     autoExecute?: boolean
     metadata?: Record<string, unknown>
+    /** 项目文件夹（显式目录；缺省自动生成 {工作空间}/projects/<标题>） */
+    path?: string
   },
 ): Promise<Project> {
   const response = await apiClient.post<{ project: Project }>(API_ENDPOINTS.PROJECTS.CREATE, {
@@ -87,6 +89,7 @@ export async function createProject(
     session_id: sessionId,
     auto_execute: options?.autoExecute,
     metadata: options?.metadata,
+    path: options?.path,
   })
   return response.data.project
 }
@@ -95,7 +98,8 @@ export async function createProject(
  * 手动创建根任务
  *
  * 用户以 L1 身份手动发起一项工作（等价于 L1 主 agent 调 task_submit 提根任务），
- * 为 L2+ 子 agent 提供合法的任务上下文；project_id 挂靠项目（= 文件夹+登记）。
+ * 为 L2+ 子 agent 提供合法的任务上下文；project_id 挂靠项目（= 文件夹+登记），
+ * project_title/project_path 新建项目并挂靠（与 project_id 二选一）。
  *
  * @param payload 根任务参数
  * @returns 新创建的任务
@@ -105,6 +109,10 @@ export async function createRootTask(payload: {
   description?: string
   /** 挂靠项目 id（可选，任务在项目文件夹下执行） */
   project_id?: string
+  /** 新建项目标题（可选，与 project_id 二选一；填了则创建项目并挂靠） */
+  project_title?: string
+  /** 新建项目文件夹（可选，配合 project_title；缺省自动生成） */
+  project_path?: string
   target_id?: string
   workspace?: string
   /** 工作空间拓扑（与隔离解耦）：worktree（默认）/ plain */

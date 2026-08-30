@@ -20,7 +20,17 @@ form:
       type: select
       label: 挂靠项目（可选，任务在项目文件夹下执行，默认 worktree 分叉）
       datasourceUri: /ext/task_form/options/projects
-      description: 缺省为独立任务
+      description: 缺省为独立任务；与「新建项目」二选一
+    - name: project_title
+      type: input
+      label: 新建项目标题（可选）
+      placeholder: 填了则创建项目并挂靠（目录缺省自动生成）
+      description: 与「挂靠项目」二选一；已存在目录非 git 仓库会自动 git init
+    - name: project_path
+      type: input
+      label: 新建项目目录（可选）
+      placeholder: 留空自动生成 {工作空间}/projects/<标题>
+      description: 配合「新建项目标题」；已存在目录直接复用
     - name: target_id
       type: select
       label: 执行 Agent（必填）

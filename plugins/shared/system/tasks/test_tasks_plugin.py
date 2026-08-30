@@ -737,6 +737,69 @@ class TestPanelCreateViaTaskSubmitTool:
         assert args["project_id"] == "proj00112233"
         assert resp.id == "def456abc123"
 
+    async def test_create_root_task_maps_project_title_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """新建项目字段透传：project_title/project_path 进工具入参（创建即挂靠）。"""
+        import http_api
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            http_api,
+            "_capability",
+            self._fake_executor(
+                calls,
+                {"success": True, "output": {"task_id": "def456abc123", "title": "R"}},
+            ),
+        )
+
+        resp = await http_api.create_root_task(
+            {
+                "title": "R",
+                "description": "D",
+                "target_id": "general_agent",
+                "project_title": "新项目",
+                "project_path": "D:/new_proj",
+                "thread_id": "thread-s1",
+            }
+        )
+
+        args = calls[0]["args"]
+        assert args["project_title"] == "新项目"
+        assert args["project_path"] == "D:/new_proj"
+        assert "project_id" not in args
+        assert resp.id == "def456abc123"
+
+    async def test_create_root_task_omits_project_title_when_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """空新建项目字段不进工具入参（与 project_id 同规则）。"""
+        import http_api
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            http_api,
+            "_capability",
+            self._fake_executor(
+                calls, {"success": True, "output": {"task_id": "abc123def456"}}
+            ),
+        )
+
+        await http_api.create_root_task(
+            {
+                "title": "R",
+                "description": "D",
+                "target_id": "general_agent",
+                "project_title": "",
+                "project_path": "",
+                "thread_id": "thread-s1",
+            }
+        )
+
+        args = calls[0]["args"]
+        assert "project_title" not in args
+        assert "project_path" not in args
+
     async def test_create_root_task_omits_empty_optionals(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
