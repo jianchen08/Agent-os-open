@@ -34,9 +34,9 @@ import { useMemo } from 'react'
 import { ContextUsageIndicator } from '@/components/chat/ContextUsageIndicator'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
-import type { PipelineLlmUsage, PipelineStateInfo } from '@/services/api/pipelines'
 import { useDataWidget } from '@/services/schema/dataWidget'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import type { PipelineLlmUsage, PipelineStateInfo } from '@/services/api/pipelines'
 
 /** 默认数据源：内核管道 state 聚合（已出口 track.llm_usage / llm_model） */
 const DEFAULT_DATASOURCE = '/api/v1/pipelines/state'
@@ -97,6 +97,19 @@ export function ContextUsageWidget(props: Record<string, unknown>) {
       currentTokenUsage={currentTokenUsage}
       maxTokens={contextWindow}
       totalTokens={totalTokens || undefined}
+      completionTokens={completionTokens || undefined}
+      cumulative={
+        usage?.total_tokens
+          ? {
+              total_input: usage.total_input_tokens ?? 0,
+              total_output: usage.total_output_tokens ?? 0,
+              total_cached: usage.total_cached_tokens ?? 0,
+              missed: usage.total_missed_tokens ?? 0,
+              total_tokens: usage.total_tokens ?? 0,
+              cache_hit_ratio: usage.total_cache_hit_ratio ?? 0,
+            }
+          : undefined
+      }
       cachedTokens={usage?.last_cached_tokens || undefined}
       hitRatio={usage?.last_cache_hit_ratio || undefined}
       className={props.className as string | undefined}

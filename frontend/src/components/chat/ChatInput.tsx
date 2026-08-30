@@ -14,8 +14,8 @@ import {
   X,
 } from '@/assets/icons'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
-import { useControlledSlotBridge } from '@/hooks/useControlledSlotBridge'
 import { Button } from '@/components/ui/button'
+import { useControlledSlotBridge } from '@/hooks/useControlledSlotBridge'
 import { useModelCapabilities } from '@/hooks/useModelCapabilities'
 import { useVoiceInput } from '@/hooks/useVoiceInput'
 import { cn } from '@/lib/utils'
@@ -27,10 +27,10 @@ import {
   STRENGTH_TO_ENABLE,
   type ThinkingStrength,
 } from '@/types/thinkingMode'
+import { formatFileSize } from '@/utils/format'
 import { ChatInputActions } from './ChatInputActions'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { VoiceInputButton } from './VoiceInputButton'
-import { formatFileSize } from '@/utils/format'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
 
 /** 格式化录音时长为 mm:ss */
@@ -119,7 +119,9 @@ export const ChatInput = ({
   modelName,
   currentTokenUsage = 0,
   maxTokens = 0,
-  totalTokens: _totalTokens = 0,
+  totalTokens = 0,
+  completionTokens = 0,
+  cumulative,
   cachedTokens = 0,
   hitRatio = 0,
   enableThinkingMode = false,
@@ -866,8 +868,8 @@ export const ChatInput = ({
             )}
 
             {/* token 用量槽位（chat-input 空间）：前端默认 ContextUsageIndicator
-                （模型名 + 上下文圈型进度，可收缩：空间不足时先截断模型名/数字；
-                总量/缓存命中详情在悬停 title），插件声明 id=context_usage 可覆盖 */}
+                （模型名 + 上下文圈型进度 + 紧凑数字；悬停/点击弹出浮窗：
+                上下文用量、本轮明细与该管道累计明细），插件声明 id=context_usage 可覆盖 */}
             <DeclaredWidgetLayer
               space="chat-input"
               slotId="context_usage"
@@ -876,7 +878,9 @@ export const ChatInput = ({
                 modelName,
                 currentTokenUsage,
                 maxTokens,
-                totalTokens: _totalTokens || undefined,
+                totalTokens: totalTokens || undefined,
+                completionTokens: completionTokens || undefined,
+                cumulative,
                 cachedTokens: cachedTokens || undefined,
                 hitRatio: hitRatio || undefined,
               }}

@@ -2,6 +2,7 @@
  * 消息系统组件类型定义
  */
 
+import type { CumulativeUsage } from '@/stores/contextUsageStore'
 import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
 
 /**
@@ -219,6 +220,10 @@ export interface ChatInputProps {
   maxTokens?: number
   /** 上一轮总 tokens */
   totalTokens?: number
+  /** 上一轮输出 tokens（用量浮窗明细） */
+  completionTokens?: number
+  /** 该管道累计 token 消耗（用量浮窗明细） */
+  cumulative?: CumulativeUsage
   /** 是否启用思考模式切换 */
   enableThinkingMode?: boolean
   /** 当前思考强度（off/low/medium/high；随消息传给后端 llm_core 路由模型参数） */

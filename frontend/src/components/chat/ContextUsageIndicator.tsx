@@ -1,17 +1,19 @@
 /**
- * 上下文使用进度指示器（圈型进度）
+ * 上下文使用进度指示器（圈型进度 + 用量明细浮窗）
  *
- * 用户决策：输入框上下文用量由横向进度条改为圈型进度
- * （AI app 标准，如 ChatGPT/Claude 的 token 圆环）——横向空间占用小，
- * 大字体主题/插件动作多时不易挤出发送按钮。
+ * 主条：模型名 | 圆环 | 已用/上限（紧凑数字）；maxTokens <= 0 时只显示模型名
+ * （不展示假进度）。语义：>=90% error 红 / >=70% warning 黄 / 其余 success 绿。
  *
- * 展示：模型名 | 圆环 | 已用 / 上限；maxTokens <= 0 时只显示模型名（不展示假进度）。
- * 语义：>=90% error 红 / >=70% warning 黄 / 其余 success 绿。
+ * 浮窗：鼠标悬停或点击弹出（输入框在页面底部，向上弹），展示上下文使用量、
+ * 本轮 token 明细（输出/总计/缓存命中）与该管道的累计 token 明细；
+ * 悬停移入浮窗不关闭，点击浮窗外/再次点击关闭。
  */
 
+import { useState } from 'react'
 import { AlertCircle, Database } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import { formatNumber } from '@/utils/format'
+import type { CumulativeUsage } from '@/stores/contextUsageStore'
 
 export interface ContextUsageIndicatorProps {
   /** 模型名；空则显示「模型无效」 */
@@ -20,12 +22,16 @@ export interface ContextUsageIndicatorProps {
   currentTokenUsage?: number
   /** 上下文窗口上限；<=0 时不显示进度 */
   maxTokens?: number
-  /** 总 token（本轮输入+输出，悬停详情） */
+  /** 本轮总 token（输入+输出，浮窗明细） */
   totalTokens?: number
-  /** 本轮缓存命中 token（悬停详情） */
+  /** 本轮输出 token（浮窗明细） */
+  completionTokens?: number
+  /** 本轮缓存命中 token（浮窗明细） */
   cachedTokens?: number
-  /** 本轮缓存命中率 0-1（悬停详情） */
+  /** 本轮缓存命中率 0-1（浮窗明细） */
   hitRatio?: number
+  /** 该管道累计消耗（浮窗明细；无累计数据不显示累计段） */
+  cumulative?: CumulativeUsage
   /** 紧凑模式（小尺寸，侧栏/旧 StatusBar 场景） */
   compact?: boolean
   className?: string
@@ -34,6 +40,28 @@ export interface ContextUsageIndicatorProps {
 /** 圆环尺寸（compact 12 / 常规 16） */
 const RING_SIZE = 16
 const RING_SIZE_COMPACT = 12
+
+/** token 紧凑格式（主条用）：1000→1.0k，128000→128k，2500000→2.5M */
+function formatCompactTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 100_000) return `${Math.round(n / 1_000)}k`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+/** 浮窗明细行（有值才渲染） */
+function DetailRow({ label, value, ratio }: { label: string; value?: number; ratio?: number }) {
+  if (!value || value <= 0) return null
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-medium tabular-nums">
+        {formatNumber(value)}
+        {typeof ratio === 'number' && ratio > 0 ? ` (${Math.round(ratio * 100)}%)` : ''}
+      </span>
+    </div>
+  )
+}
 
 /**
  * 圈型进度（SVG 圆环）：
@@ -88,18 +116,121 @@ function UsageRing({ ratio, size, tone }: { ratio: number; size: number; tone: s
 }
 
 /**
- * 模型名 + 圈型上下文进度（与原 ChatInput 输入栏一致）
+ * 用量明细浮窗：上下文使用量 + 本轮明细 + 管道累计明细（段内无数据的行不渲染）。
+ * 定位：锚点上方左对齐（输入框位于页面底部，向上弹出）。
+ */
+function UsagePopover({
+  modelName,
+  currentTokenUsage,
+  maxTokens,
+  totalTokens,
+  completionTokens,
+  cachedTokens,
+  hitRatio,
+  cumulative,
+  onMouseEnter,
+  onMouseLeave,
+}: {
+  modelName: string
+  currentTokenUsage: number
+  maxTokens: number
+  totalTokens: number
+  completionTokens: number
+  cachedTokens: number
+  hitRatio: number
+  cumulative?: CumulativeUsage
+  onMouseEnter: () => void
+  onMouseLeave: () => void
+}) {
+  const ratio = maxTokens > 0 ? Math.min(1, currentTokenUsage / maxTokens) : 0
+  return (
+    // 外层承载定位与 hover 桥（pb-2 把视觉间隙纳入浮窗 hover 区，鼠标从主条
+    // 移入浮窗不穿缝隙、不闪关）；内层是面板本体
+    <div
+      className="absolute bottom-full left-0 z-[100] pb-2"
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+      data-testid="context-usage-popover"
+    >
+      <div
+        className="border-border bg-[var(--ds-bg-panel,hsl(var(--card)))] w-64 rounded-lg border p-3 shadow-xl"
+      >
+      {/* 上下文使用量 */}
+      <div className="text-muted-foreground mb-1.5 text-[10px] font-medium tracking-wide">
+        上下文 · {modelName}
+      </div>
+      {maxTokens > 0 && (
+        <div className="bg-primary/15 mb-1 h-1.5 overflow-hidden rounded-full">
+          <div
+            className="bg-primary h-full rounded-full"
+            style={{ width: `${ratio * 100}%` }}
+            data-testid="context-usage-popover-bar"
+          />
+        </div>
+      )}
+      <div className="flex items-center justify-between gap-4 text-xs">
+        <span className="text-muted-foreground">{maxTokens > 0 ? '已用 / 上限' : '已用'}</span>
+        <span className="font-medium tabular-nums">
+          {formatNumber(currentTokenUsage)}
+          {maxTokens > 0 ? ` / ${formatNumber(maxTokens)}（${Math.round(ratio * 100)}%）` : ''}
+        </span>
+      </div>
+
+      {/* 本轮 token 明细 */}
+      {(totalTokens > 0 || completionTokens > 0 || cachedTokens > 0) && (
+        <div className="border-border mt-2 border-t pt-2 text-xs">
+          <div className="text-muted-foreground mb-1 text-[10px] font-medium tracking-wide">
+            本轮
+          </div>
+          <div className="space-y-0.5">
+            <DetailRow label="输入" value={currentTokenUsage} />
+            <DetailRow label="输出" value={completionTokens} />
+            <DetailRow label="总计" value={totalTokens} />
+            <DetailRow label="缓存命中" value={cachedTokens} ratio={hitRatio} />
+          </div>
+        </div>
+      )}
+
+      {/* 该管道累计 token 明细 */}
+      {cumulative && cumulative.total_tokens > 0 && (
+        <div className="border-border mt-2 border-t pt-2 text-xs">
+          <div className="text-muted-foreground mb-1 text-[10px] font-medium tracking-wide">
+            本管道累计
+          </div>
+          <div className="space-y-0.5">
+            <DetailRow label="输入" value={cumulative.total_input} />
+            <DetailRow label="输出" value={cumulative.total_output} />
+            <DetailRow label="总计" value={cumulative.total_tokens} />
+            <DetailRow
+              label="缓存命中"
+              value={cumulative.total_cached}
+              ratio={cumulative.cache_hit_ratio}
+            />
+          </div>
+        </div>
+      )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 模型名 + 圈型上下文进度 + 用量明细浮窗（输入框工具栏槽位默认件）
  */
 export function ContextUsageIndicator({
   modelName,
   currentTokenUsage = 0,
   maxTokens = 0,
   totalTokens = 0,
+  completionTokens = 0,
   cachedTokens = 0,
   hitRatio = 0,
+  cumulative,
   compact = false,
   className,
 }: ContextUsageIndicatorProps) {
+  const [popoverOpen, setPopoverOpen] = useState(false)
+
   if (!modelName || modelName === 'unknown') {
     return (
       <div
@@ -126,38 +257,46 @@ export function ContextUsageIndicator({
         ? 'text-status-warning'
         : 'text-status-success'
 
-  // 悬停详情：上下文 + 总 token + 缓存命中（有值才显示段）
-  const detailParts: string[] = []
-  if (maxTokens > 0) {
-    detailParts.push(`上下文 ${formatNumber(currentTokenUsage)} / ${formatNumber(maxTokens)}`)
-  }
-  if (totalTokens > 0) {
-    detailParts.push(`总 ${formatNumber(totalTokens)} tok`)
-  }
-  if (cachedTokens > 0) {
-    detailParts.push(`缓存命中 ${formatNumber(cachedTokens)} tok`)
-  } else if (hitRatio > 0) {
-    detailParts.push(`缓存命中率 ${Math.round(hitRatio * 100)}%`)
-  }
-  const titleText = detailParts.length > 0 ? detailParts.join(' · ') : modelName
-
   return (
-    <div
-      className={cn(
-        'bg-primary/10 border-primary/20 min-w-0 items-center gap-2 rounded-lg border',
-        compact
-          ? 'flex h-[18px] gap-1.5 px-1.5 text-[10px]'
-          : 'hidden h-8 px-3 text-xs sm:flex',
-        className,
+    <div className={cn('relative', className)}>
+      <div
+        className={cn(
+          'bg-primary/10 border-primary/20 min-w-0 cursor-pointer items-center gap-2 rounded-lg border',
+          compact
+            ? 'flex h-[18px] gap-1.5 px-1.5 text-[10px]'
+            : 'hidden h-8 px-3 text-xs sm:flex',
+        )}
+        data-testid="context-usage-indicator"
+        aria-expanded={popoverOpen}
+        onClick={() => setPopoverOpen((v) => !v)}
+        onMouseEnter={() => setPopoverOpen(true)}
+        onMouseLeave={() => setPopoverOpen(false)}
+      >
+        <Database
+          className={cn('text-primary shrink-0', compact ? 'h-icon-xs w-icon-xs' : 'h-icon-sm w-icon-sm')}
+        />
+        <span className="text-primary max-w-[120px] truncate font-semibold">{modelName}</span>
+        {maxTokens > 0 && <UsageRing ratio={ratio} size={compact ? RING_SIZE_COMPACT : RING_SIZE} tone={tone} />}
+        {maxTokens > 0 && (
+          <span className="text-primary/80 tabular-nums whitespace-nowrap">
+            {formatCompactTokens(currentTokenUsage)} / {formatCompactTokens(maxTokens)}
+          </span>
+        )}
+      </div>
+      {popoverOpen && (
+        <UsagePopover
+          modelName={modelName}
+          currentTokenUsage={currentTokenUsage}
+          maxTokens={maxTokens}
+          totalTokens={totalTokens}
+          completionTokens={completionTokens}
+          cachedTokens={cachedTokens}
+          hitRatio={hitRatio}
+          cumulative={cumulative}
+          onMouseEnter={() => setPopoverOpen(true)}
+          onMouseLeave={() => setPopoverOpen(false)}
+        />
       )}
-      data-testid="context-usage-indicator"
-      title={titleText}
-    >
-      <Database
-        className={cn('text-primary shrink-0', compact ? 'h-icon-xs w-icon-xs' : 'h-icon-sm w-icon-sm')}
-      />
-      <span className="text-primary max-w-[120px] truncate font-semibold">{modelName}</span>
-      {maxTokens > 0 && <UsageRing ratio={ratio} size={compact ? RING_SIZE_COMPACT : RING_SIZE} tone={tone} />}
     </div>
   )
 }
