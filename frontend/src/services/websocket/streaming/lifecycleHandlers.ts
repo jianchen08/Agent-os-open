@@ -144,7 +144,11 @@ export async function handleReconnected(): Promise<void> {
   }
 }
 
-/** 处理 SYSTEM_NOTIFICATION 事件（任务完成/失败等系统通知） 系统消息气泡的唯一创建入口。后端 emit_notification 生成 record_id（唯一 id 来源），事件 payload 带上它；前端用它作消息 id，与后端落库的 record_id 一致，刷新后按 id 自然去重（与 AI 消息同款 id 契约）。 */
+/**
+ * 处理 SYSTEM_NOTIFICATION 事件（任务完成/失败等系统通知）——系统消息气泡的唯一创建入口。
+ * 后端 emit_notification 生成 record_id（唯一 id 来源），事件 payload 带上它；前端用它作
+ * 消息 id，与后端落库的 record_id 一致，刷新后按 id 自然去重（与 AI 消息同款 id 契约）。
+ */
 export function handleSystemNotification(eventData: any): void {
   const pipelineId = resolvePipelineId(eventData)
   const data = eventData?.data || eventData

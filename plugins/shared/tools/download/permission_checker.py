@@ -6,7 +6,9 @@ sidecar 进程无法 import 其他插件的包，路径权限校验必须随插�
 两副本需保持同步：以 system/isolation 为源，改任何一边必须同步另一边。
 
 暴露接口：
-- check_write_permission(path: str, workspace: str | None, policy: WorkspacePermissionPolicy | dict[str, Any], project_root: str, operation: str) -> tuple[bool, str]：check_write_permission功能
+- check_write_permission(path: str, workspace: str | None,
+  policy: WorkspacePermissionPolicy | dict[str, Any], project_root: str, operation: str)
+  -> tuple[bool, str]：check_write_permission功能
 - check_read_permission(self, path: str, workspace: str | None, policy: WorkspacePermissionPolicy) -> tuple[bool, str]：check_read_permission功能
 - check_write_permission(self, path: str, workspace: str | None, policy: WorkspacePermissionPolicy, operation: str) -> tuple[bool, str]：check_write_permission功能
 - is_path_in_workspace(self, path: str, workspace: str) -> tuple[bool, str | None]：is_path_in_workspace功能
