@@ -1514,9 +1514,11 @@ class TaskTool(BuiltinTool):
     async def _delete_task(self, inputs: dict[str, Any], parent_agent_level: int) -> ToolExecutionResult:
         """删除任务，根据任务类型执行不同策略。
 
-        0.2 任务 = 管道（state 单一真值，无 YAML 记录）——YAML 存储查不到时
-        回退 state 聚合判定存在性，
-        删除 = 调内核 pipeline-executor.delete_pipeline 清管道全部执行数据。
+        0.2 任务 = 管道（state 单一真值）——state 聚合优先；state 查不到时
+        回退 0.1 YAML 存储判定存在性（遗留任务兜底）。
+        state 任务删除 = 内核 delete_pipeline 清管道全部执行数据 + 清同名
+        YAML 镜像（评估写面残留，防删除后镜像"复活"任务）。
+        两个分支统一走 _check_permission 收口。
         """
 
         try:
@@ -1530,17 +1532,29 @@ class TaskTool(BuiltinTool):
 
             service = self._get_task_service()
 
-            task = service.get_task(task_id)
+            task = await self._get_task_from_state(task_id)
+            from_state = task is not None
+
+            if task is None:
+                # 0.1 YAML 遗留任务兜底（非 state 任务，0.2 无此新建路径）
+                task = service.get_task(task_id)
 
             if not task:
-                # 0.2 任务：state 聚合回退（task = pipeline，无 YAML 记录）
-                task = await self._get_task_from_state(task_id)
-                if task is None:
-                    return create_failure_result(
-                        error=f"任务不存在: {task_id}",
-                        error_code="TASK_NOT_FOUND",
-                    )
-                # 0.2 任务删除 = 内核删管道数据（runs/traces/messages/state/checkpoints）
+                return create_failure_result(
+                    error=f"任务不存在: {task_id}",
+                    error_code="TASK_NOT_FOUND",
+                )
+
+            has_permission, error_msg = self._check_permission(task, parent_agent_level, inputs)
+
+            if not has_permission:
+                return create_failure_result(
+                    error=error_msg or "权限不足",
+                    error_code="INSUFFICIENT_PERMISSION",
+                )
+
+            # state 任务删除 = 内核删管道数据（runs/traces/messages/state/checkpoints）
+            if from_state:
                 if _pipeline_executor is None:
                     return create_failure_result(
                         error="pipeline-executor capability 未注入（sidecar 未接线），无法删除任务",
@@ -1556,17 +1570,14 @@ class TaskTool(BuiltinTool):
                         error=f"任务管道删除失败: {exc}",
                         error_code="DELETE_FAILED",
                     )
+                # 清同名 YAML 镜像（评估写面残留文件），防删除后镜像"复活"任务
+                try:
+                    await service.hard_delete(task_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[TaskTool] 清理 YAML 镜像失败（非致命）: %s", exc)
                 return create_success_result(
                     data={"task_id": task_id, "deleted": True},
                     metadata={"action": "delete_task"},
-                )
-
-            has_permission, error_msg = self._check_permission(task, parent_agent_level, inputs)
-
-            if not has_permission:
-                return create_failure_result(
-                    error=error_msg or "权限不足",
-                    error_code="INSUFFICIENT_PERMISSION",
                 )
 
             reason = inputs.get("reason", "用户请求删除")
@@ -1689,11 +1700,10 @@ class TaskTool(BuiltinTool):
             # P0-3 纵深防御：批量入口先逐任务预检权限，越权任务短路返回，
             # 不委派子动作（即便未来新增无自身鉴权的批量动作也在此收口）。
             service = self._get_task_service()
-            pre_task = service.get_task(task_id)
+            # state 真值优先（task = pipeline），YAML 镜像仅作 0.1 遗留兜底
+            pre_task = await self._get_task_from_state(task_id)
             if pre_task is None:
-                # state 任务（task.* 行 / task.owned 容器）不在 YAML 存储——
-                # 预检加 state 兜底，否则批量操作绕过权限收口
-                pre_task = await self._get_task_from_state(task_id)
+                pre_task = service.get_task(task_id)
             if pre_task is not None:
                 pre_ok, pre_err = self._check_permission(pre_task, parent_agent_level, file_inputs)
                 if not pre_ok:

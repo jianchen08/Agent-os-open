@@ -200,7 +200,11 @@
                     "type": "boolean"
                   },
                   "data": {
-                    "type": "object"
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "description": "逐任务成功结果对象；失败条目为 null（与实现锁步，防批量单条失败整体被 schema 拒绝）"
                   },
                   "error": {
                     "type": [

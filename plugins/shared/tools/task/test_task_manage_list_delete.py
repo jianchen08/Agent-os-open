@@ -638,6 +638,113 @@ async def test_delete_service_exception_returns_delete_failed(tool: TaskTool, sv
     assert "disk error" in (result.error or "")
 
 
+async def test_delete_state_priority_over_yaml_mirror(tool: TaskTool, svc: Any) -> None:
+    """镜像遮蔽回归：YAML 镜像（metadata 无 session_id）+ state 真任务同 id。
+
+    0.2 任务真值在 state（lineage.origin_session_id 带会话锚点），YAML 仅是
+    评估写面残留镜像（缺 session_id）。state 优先 → L1 会话校验通过并走
+    delete_pipeline；镜像不再抢先命中导致「任务不属于当前会话」误拒。
+    """
+    mirror = await svc.create_task(title="镜像任务")  # YAML 存储里的镜像（无 session_id）
+    executor = AsyncMock()
+    _task_mod.set_pipeline_executor(executor)
+    _set_reader(
+        tool,
+        [
+            _state_row(
+                pipeline_id=mirror.id,
+                **{"task.status": "completed", "lineage.origin_session_id": "sess-me"},
+            )
+        ],
+    )
+    result = await tool.execute(
+        {
+            "action": "delete",
+            "task_id": mirror.id,
+            "session_id": "sess-me",
+            "parent_agent_level": 1,
+        }
+    )
+    assert result.success, result.error
+    assert result.output["deleted"] is True
+    executor.assert_awaited_once()
+    call_params = executor.await_args.args[0]
+    assert call_params["method"] == "delete_pipeline"
+
+
+async def test_delete_state_task_cleans_yaml_mirror(tool: TaskTool, svc: Any) -> None:
+    """state 任务删除后清同名 YAML 镜像，防「删了又见」。"""
+    mirror = await svc.create_task(title="镜像待清")
+    executor = AsyncMock()
+    _task_mod.set_pipeline_executor(executor)
+    _set_reader(
+        tool,
+        [_state_row(pipeline_id=mirror.id, **{"lineage.origin_session_id": "sess-me"})],
+    )
+    result = await tool.execute(
+        {"action": "delete", "task_id": mirror.id, "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    assert svc.get_task(mirror.id) is None, "同名 YAML 镜像应从存储中清除"
+
+
+async def test_delete_state_task_requires_permission(tool: TaskTool) -> None:
+    """state 兜底路径权限收口：L2 无归属参数 → INSUFFICIENT_PERMISSION。
+
+    回归护栏：state 任务删除此前绕过 _check_permission 直接删管道。
+    """
+    _set_reader(tool, [_state_row(pipeline_id="pipe-guard")])
+    executor = AsyncMock()
+    _task_mod.set_pipeline_executor(executor)
+    result = await tool.execute(
+        {"action": "delete", "task_id": "pipe-guard", "parent_agent_level": 2}
+    )
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+    executor.assert_not_awaited()
+
+
+async def test_batch_delete_state_priority_over_mirror(tool: TaskTool, svc: Any) -> None:
+    """批量预检 state 优先：镜像任务（无 session_id）+ state 真值同 id → 预检通过。"""
+    mirror = await svc.create_task(title="批量镜像")
+    executor = AsyncMock()
+    _task_mod.set_pipeline_executor(executor)
+    _set_reader(
+        tool,
+        [
+            _state_row(
+                pipeline_id=mirror.id,
+                **{"task.status": "completed", "lineage.origin_session_id": "sess-me"},
+            )
+        ],
+    )
+    result = await tool.execute(
+        {
+            "action": "delete",
+            "task_ids": [mirror.id],
+            "session_id": "sess-me",
+            "parent_agent_level": 1,
+        }
+    )
+    assert result.success, result.error
+    assert result.output["summary"]["success"] == 1
+    assert result.output["results"][0]["success"] is True
+    assert result.output["results"][0]["data"]["deleted"] is True
+
+
+async def test_batch_output_schema_allows_null_data() -> None:
+    """批量条目 data 允许 null（与失败条目 data=None 实现锁步）。
+
+    回归护栏：此前 data 声明 object 不允许 null，批量中任意一条失败即
+    output_schema validation failed 整体被拒（本仓 G2 契约同源比对）。
+    """
+    manifest = json.loads(
+        (_HERE / "plugin.json").read_text(encoding="utf-8")
+    )
+    item_schema = manifest["capabilities"]["tools"][0]["output_schema"]["properties"]["results"]["items"]
+    assert item_schema["properties"]["data"]["type"] == ["object", "null"]
+
+
 # ─────────────────────────── 其它控制面分支 ───────────────────────────
 
 
