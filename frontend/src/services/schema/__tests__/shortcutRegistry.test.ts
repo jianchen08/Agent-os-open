@@ -80,6 +80,25 @@ describe('ShortcutRegistry — 注册与匹配', () => {
     expect(registry.matchKey(evNo as unknown as KeyboardEvent)).toBeUndefined()
   })
 
+  it('matchKey 对 key 为 undefined 的事件不崩溃（扩展/自动化派发的非标准事件）', () => {
+    ;(contrib as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
+      plugin_contributes: [
+        { plugin_id: 'e', contributes: { shortcuts: [{ command: 'e.save', key: 'Ctrl+S', when: 'workspace.focus' }] } },
+      ],
+    })
+    registry.refresh()
+
+    // 真实浏览器中扩展/远程输入可能派发 key 为 undefined 的 keydown
+    const evUndefined = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, key: undefined }
+    expect(() => registry.matchKey(evUndefined as unknown as KeyboardEvent)).not.toThrow()
+    expect(registry.matchKey(evUndefined as unknown as KeyboardEvent)).toBeUndefined()
+
+    // 空串 key（另一类非标准形态）同样不命中
+    const evEmpty = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, key: '' }
+    expect(() => registry.matchKey(evEmpty as unknown as KeyboardEvent)).not.toThrow()
+    expect(registry.matchKey(evEmpty as unknown as KeyboardEvent)).toBeUndefined()
+  })
+
   it('when 失配时不触发（shouldFire 返回 false）', () => {
     ;(contrib as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
       plugin_contributes: [

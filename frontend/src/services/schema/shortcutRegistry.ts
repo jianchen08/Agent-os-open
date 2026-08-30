@@ -72,7 +72,7 @@ function eventToKey(ev: KeyboardEvent): string {
   if (ev.shiftKey) modifiers.push('shift')
   if (ev.altKey) modifiers.push('alt')
   if (ev.metaKey) modifiers.push('meta')
-  const main = ev.key.toLowerCase()
+  const main = (ev.key ?? '').toLowerCase()
   return [...modifiers, main].join('+')
 }
 
