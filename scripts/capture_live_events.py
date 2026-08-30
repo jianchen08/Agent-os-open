@@ -4,6 +4,7 @@
 用法: python scripts/capture_live_events.py
 前置: 内核 :9100 在线且已登录身份可用（E2E_PARITY_USERNAME 或 admin）。
 """
+
 import asyncio
 import json
 import os
@@ -16,7 +17,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests", "e2e_0
 from e2e_helpers import KERNEL_URL, create_session, http_post_json, login_admin, ws_chat_url
 
 PROMPT = "请分别用 file_read 读取 config/agents/main/agentos.yaml 和 config/pipelines/autonomous.yaml 这两个文件（先读第一个再读第二个），最后把两个文件的内容概要告诉我。"
-OUT = os.path.join(os.path.dirname(__file__), "..", "frontend", "src", "stores", "__tests__", "__fixtures__", "live_events.json")
+OUT = os.path.join(
+    os.path.dirname(__file__), "..", "frontend", "src", "stores", "__tests__", "__fixtures__", "live_events.json"
+)
 
 
 def _token():
@@ -43,23 +46,27 @@ async def main():
     async with websockets.connect(url, max_size=10 * 1024 * 1024) as ws:
         try:
             await asyncio.wait_for(ws.recv(), timeout=5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
-        await ws.send(json.dumps({
-            "type": "user_input",
-            "thread_id": sid,
-            "content": PROMPT,
-            "pipeline_id": "",
-            "attachments": [],
-            "enable_thinking": True,
-            "thinking_strength": "medium",
-            "client_message_id": f"e2e-capture-{uuid.uuid4().hex[:8]}",
-        }))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "user_input",
+                    "thread_id": sid,
+                    "content": PROMPT,
+                    "pipeline_id": "",
+                    "attachments": [],
+                    "enable_thinking": True,
+                    "thinking_strength": "medium",
+                    "client_message_id": f"e2e-capture-{uuid.uuid4().hex[:8]}",
+                }
+            )
+        )
         last = asyncio.get_running_loop().time()
         while asyncio.get_running_loop().time() - last < 45:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             last = asyncio.get_running_loop().time()
             data = json.loads(raw)
@@ -76,6 +83,7 @@ async def main():
     # 删除会话（避免残留）
     try:
         from e2e_helpers import delete_session
+
         delete_session(token, sid)
     except Exception as e:
         print("cleanup:", e)

@@ -68,6 +68,8 @@ plugins:
     enabled: true
   task_submit_tool:
     enabled: true
+  trigger_setup_tool:
+    enabled: true
   pipeline_memory_read:
     enabled: false
   pipeline_knowledge_inject:

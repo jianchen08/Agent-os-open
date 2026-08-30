@@ -9,7 +9,7 @@ defaults:
   first_token_timeout: 120
   stream_idle_timeout: 180
   tiers:
-    large: deepseek-v4-flash
+    large: minimax-m3
     medium: minimax-m3
     small: minimax-m3
 embeddings: {}

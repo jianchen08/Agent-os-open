@@ -962,5 +962,3 @@ class TestServerClosures:
             assert "不存在" in result.results[0].message
         finally:
             tool_mod.set_default_executor(None)
-
-

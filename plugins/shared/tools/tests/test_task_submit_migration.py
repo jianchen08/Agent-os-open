@@ -394,6 +394,3 @@ class TestNormalizeDescription:
 
     def test_non_string_scalar(self, mod):
         assert mod._normalize_description(42) == "42"
-
-
-

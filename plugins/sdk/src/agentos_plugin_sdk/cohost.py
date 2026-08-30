@@ -97,10 +97,7 @@ class CohostServer:
         for plugin in self._members.values():
             for event, handler in plugin._lifecycle_handlers.items():
                 handlers_by_event.setdefault(event, []).append(handler)
-        return {
-            event: self._make_fan_out_handler(handlers)
-            for event, handlers in handlers_by_event.items()
-        }
+        return {event: self._make_fan_out_handler(handlers) for event, handlers in handlers_by_event.items()}
 
     def _make_fan_out_handler(self, handlers: list[Callable[..., Any]]) -> Callable[..., Any]:
         """构造单事件扇出：同步/异步 handler 按成员注册顺序执行。"""

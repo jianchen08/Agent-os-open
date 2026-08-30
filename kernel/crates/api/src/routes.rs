@@ -1644,7 +1644,10 @@ pub async fn system_restart_handler(
 fn read_disk_manifest_diffs(
     state: &AppState,
     m: &PluginManifest,
-) -> (Option<Vec<crate::contract::RegistryDiskDiff>>, Option<String>) {
+) -> (
+    Option<Vec<crate::contract::RegistryDiskDiff>>,
+    Option<String>,
+) {
     let Some(root) = state.plugin_dirs.get(&m.id) else {
         return (
             None,
@@ -1659,10 +1662,7 @@ fn read_disk_manifest_diffs(
         Ok(d) => d,
         Err(e) => return (None, Some(format!("磁盘 plugin.json 解析失败: {e}"))),
     };
-    (
-        Some(crate::contract::registry_disk_diffs(m, &disk)),
-        None,
-    )
+    (Some(crate::contract::registry_disk_diffs(m, &disk)), None)
 }
 
 /// POST /api/v1/plugins/validate-all — G2 双写一致性全量巡检。
@@ -2116,11 +2116,9 @@ async fn reenable_hot_path(
             // not_covered 弱信号（既有证据粘滞保留，ADR 2026-08-28 决策1）。
             if !m.capabilities.tools.is_empty() || !m.capabilities.services.is_empty() {
                 if let Some(invoker) = &state.invoker {
-                    let outcome = crate::plugin_watcher::g2_verify_and_sanitize(
-                        invoker.as_ref(),
-                        m.clone(),
-                    )
-                    .await;
+                    let outcome =
+                        crate::plugin_watcher::g2_verify_and_sanitize(invoker.as_ref(), m.clone())
+                            .await;
                     g2_outcome = Some(outcome.clone());
                     if outcome.drift {
                         tracing::warn!(
@@ -2528,7 +2526,12 @@ mod state_summary_tests {
         );
         assert_eq!(s["pipeline_id"], "p2");
         assert_eq!(s["ended"], true);
-        for k in ["task.goal", "lineage.root", "workspace", "task.owned.x.title"] {
+        for k in [
+            "task.goal",
+            "lineage.root",
+            "workspace",
+            "task.owned.x.title",
+        ] {
             assert!(s.get(k).is_none(), "未声明键 {k} 不应出口");
         }
     }
@@ -2650,10 +2653,8 @@ mod state_summary_tests {
     #[test]
     fn test_summarize_still_cuts_non_whitelisted_fields() {
         // 默认拒绝机制本身不变：声明之外的新键不出口
-        let export = ExportFields::from_manifests(&[export_manifest(&[
-            "task.goal",
-            "task.ended_at",
-        ])]);
+        let export =
+            ExportFields::from_manifests(&[export_manifest(&["task.goal", "task.ended_at"])]);
         let s = summarize_state(
             &json!({
                 "pipeline_id": "p3",

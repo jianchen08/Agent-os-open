@@ -224,7 +224,7 @@ async def test_workspace_init_task_without_ws_declaration_unchanged(plugins):
     )
     updates = result.state_updates
     assert "workspace" in updates, "任务管道必须创建任务工作区"
-    assert updates.get("workspace") != "" 
+    assert updates.get("workspace") != ""
 
 
 @pytest.mark.asyncio

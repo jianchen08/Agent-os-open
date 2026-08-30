@@ -362,4 +362,3 @@ class TestServerExecute:
         )
         out = _run(mod.execute({"current_query": "q"}))
         assert out == {"state_updates": {}, "skip_remaining": True}
-

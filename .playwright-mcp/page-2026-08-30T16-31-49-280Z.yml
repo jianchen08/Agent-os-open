@@ -1,0 +1,2167 @@
+- generic [active] [ref=e1]:
+  - link "Jump to content" [ref=e2] [cursor=pointer]:
+    - /url: "#bodyContent"
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - navigation "Site" [ref=e6]:
+        - generic "Main menu" [ref=e7]:
+          - button "Main menu" [ref=e8] [cursor=pointer]
+      - link [ref=e12] [cursor=pointer]:
+        - /url: /wiki/Main_Page
+        - generic [ref=e13]:
+          - img "Wikipedia" [ref=e14]
+          - img "The Free Encyclopedia" [ref=e15]
+    - generic [ref=e16]:
+      - search [ref=e17]:
+        - generic [ref=e20]:
+          - searchbox "Search Wikipedia" [ref=e23]
+          - button "Search" [ref=e25]
+      - navigation "Personal tools" [ref=e26]:
+        - list [ref=e30]:
+          - listitem [ref=e31]:
+            - link "Donate" [ref=e32] [cursor=pointer]:
+              - /url: https://donate.wikimedia.org/?wmf_source=donate&wmf_medium=sidebar&wmf_campaign=en.wikipedia.org&uselang=en
+          - listitem [ref=e33]:
+            - link "Create account" [ref=e34] [cursor=pointer]:
+              - /url: /w/index.php?title=Special:CreateAccount&returnto=Markdown
+          - listitem [ref=e35]:
+            - link "Log in" [ref=e36] [cursor=pointer]:
+              - /url: /w/index.php?title=Special:UserLogin&returnto=Markdown
+  - generic [ref=e38]:
+    - navigation "Contents" [ref=e42]:
+      - generic [ref=e44]:
+        - generic [ref=e45]:
+          - heading "Contents" [level=2] [ref=e46]
+          - button "Hide Contents" [ref=e47] [cursor=pointer]: hide
+        - list [ref=e48]:
+          - listitem [ref=e49]:
+            - link "(Top)" [ref=e50] [cursor=pointer]:
+              - /url: "#"
+          - listitem [ref=e52]:
+            - link "History" [ref=e53] [cursor=pointer]:
+              - /url: "#History"
+            - list
+          - listitem [ref=e55]:
+            - link "Rise and divergence" [ref=e56] [cursor=pointer]:
+              - /url: "#Rise_and_divergence"
+            - list
+          - listitem [ref=e58]:
+            - link "CommonMark" [ref=e59] [cursor=pointer]:
+              - /url: "#CommonMark"
+            - list
+          - listitem [ref=e61]:
+            - link "Variants" [ref=e62] [cursor=pointer]:
+              - /url: "#Variants"
+            - button "Toggle Variants subsection" [expanded] [ref=e64]
+            - list [ref=e67]:
+              - listitem [ref=e68]:
+                - link "GitHub Flavored Markdown" [ref=e69] [cursor=pointer]:
+                  - /url: "#GitHub_Flavored_Markdown"
+                - list
+              - listitem [ref=e72]:
+                - link "Markdown Extra" [ref=e73] [cursor=pointer]:
+                  - /url: "#Markdown_Extra"
+                - list
+          - listitem [ref=e75]:
+            - link "Examples" [ref=e76] [cursor=pointer]:
+              - /url: "#Examples"
+            - list
+          - listitem [ref=e78]:
+            - link "Implementations" [ref=e79] [cursor=pointer]:
+              - /url: "#Implementations"
+            - list
+          - listitem [ref=e81]:
+            - link "See also" [ref=e82] [cursor=pointer]:
+              - /url: "#See_also"
+            - list
+          - listitem [ref=e84]:
+            - link "Explanatory notes" [ref=e85] [cursor=pointer]:
+              - /url: "#Explanatory_notes"
+            - list
+          - listitem [ref=e87]:
+            - link "References" [ref=e88] [cursor=pointer]:
+              - /url: "#References"
+            - list
+          - listitem [ref=e90]:
+            - link "External links" [ref=e91] [cursor=pointer]:
+              - /url: "#External_links"
+            - list
+    - main [ref=e94]:
+      - generic [ref=e95]:
+        - heading "Markdown" [level=1] [ref=e96]
+        - generic [ref=e98]:
+          - button "33 languages" [ref=e99] [cursor=pointer]
+          - generic [ref=e100]: 33 languages
+      - generic [ref=e104]:
+        - navigation "Namespaces" [ref=e106]:
+          - list [ref=e109]:
+            - listitem [ref=e110]:
+              - link "Article" [ref=e111] [cursor=pointer]:
+                - /url: /wiki/Markdown
+            - listitem [ref=e113]:
+              - link "Talk" [ref=e114] [cursor=pointer]:
+                - /url: /wiki/Talk:Markdown
+        - generic [ref=e116]:
+          - navigation "Views" [ref=e117]:
+            - list [ref=e120]:
+              - listitem [ref=e121]:
+                - link "Read" [ref=e122] [cursor=pointer]:
+                  - /url: /wiki/Markdown
+              - listitem [ref=e124]:
+                - link "Edit" [ref=e125] [cursor=pointer]:
+                  - /url: /w/index.php?title=Markdown&action=edit
+              - listitem [ref=e127]:
+                - link "View history" [ref=e128] [cursor=pointer]:
+                  - /url: /w/index.php?title=Markdown&action=history
+          - navigation "Page tools" [ref=e130]:
+            - generic [ref=e131]:
+              - button "Tools" [ref=e132] [cursor=pointer]
+              - generic [ref=e133]: Tools
+      - navigation "Appearance" [ref=e138]:
+        - generic [ref=e140]:
+          - generic [ref=e141]:
+            - generic [ref=e142]: Appearance
+            - button "Hide Appearance" [ref=e143] [cursor=pointer]: hide
+          - generic [ref=e144]:
+            - generic [ref=e145]: Text
+            - list [ref=e147]:
+              - listitem [ref=e148]:
+                - generic [ref=e150]:
+                  - generic [ref=e151]:
+                    - radio "Small" [ref=e152]
+                    - generic [ref=e154]: Small
+                  - generic [ref=e156]:
+                    - radio "Standard" [checked] [ref=e157]
+                    - generic [ref=e159]: Standard
+                  - generic [ref=e161]:
+                    - radio "Large" [ref=e162]
+                    - generic [ref=e164]: Large
+          - generic [ref=e166]:
+            - generic [ref=e167]: Width
+            - list [ref=e169]:
+              - listitem [ref=e170]:
+                - generic [ref=e172]:
+                  - generic [ref=e173]:
+                    - radio "Standard" [checked] [ref=e174]
+                    - generic [ref=e176]: Standard
+                  - generic [ref=e178]:
+                    - radio "Wide" [ref=e179]
+                    - generic [ref=e181]: Wide
+          - generic [ref=e183]:
+            - generic [ref=e184]: Color
+            - list [ref=e186]:
+              - listitem [ref=e187]:
+                - generic [ref=e189]:
+                  - generic [ref=e190]:
+                    - radio "Automatic" [ref=e191]
+                    - generic [ref=e193]: Automatic
+                  - generic [ref=e195]:
+                    - radio "Light" [checked] [ref=e196]
+                    - generic [ref=e198]: Light
+                  - generic [ref=e200]:
+                    - radio "Dark" [ref=e201]
+                    - generic [ref=e203]: Dark
+      - generic "Markdown" [ref=e205]:
+        - generic [ref=e206]: From Wikipedia, the free encyclopedia
+        - generic [ref=e209]:
+          - generic [ref=e210]:
+            - note [ref=e211]:
+              - text: For the marketing term, see
+              - link "Price markdown" [ref=e212] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Price_markdown
+              - text: .
+            - link [ref=e215] [cursor=pointer]:
+              - /url: https://en.wikipedia.org/wiki/File:Question_book-new.svg
+              - img "icon" [ref=e216]
+            - generic [ref=e217]:
+              - text: This article
+              - generic [ref=e218]:
+                - text: relies excessively on
+                - link "references" [ref=e219] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Wikipedia:Verifiability
+                - text: to
+                - link "primary sources" [ref=e220] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Wikipedia:No_original_research#Primary,_secondary_and_tertiary_sources
+              - text: .
+              - generic [ref=e221]:
+                - text: Please improve this article by adding
+                - link "secondary or tertiary sources" [ref=e222] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Wikipedia:No_original_research#Primary,_secondary_and_tertiary_sources
+                - text: .
+                - generic [ref=e224]:
+                  - text: "Find sources:"
+                  - link "\"Markdown\"" [ref=e225] [cursor=pointer]:
+                    - /url: https://www.google.com/search?as_eq=wikipedia&q=%22Markdown%22
+                  - text: –
+                  - link "news" [ref=e226] [cursor=pointer]:
+                    - /url: https://www.google.com/search?tbm=nws&q=%22Markdown%22+-wikipedia&tbs=ar:1
+                  - text: ·
+                  - link "newspapers" [ref=e227] [cursor=pointer]:
+                    - /url: https://www.google.com/search?&q=%22Markdown%22&tbs=bkt:s&tbm=bks
+                  - text: ·
+                  - link "books" [ref=e228] [cursor=pointer]:
+                    - /url: https://www.google.com/search?tbs=bks:1&q=%22Markdown%22+-wikipedia
+                  - text: ·
+                  - link "scholar" [ref=e229] [cursor=pointer]:
+                    - /url: https://scholar.google.com/scholar?q=%22Markdown%22
+                  - text: ·
+                  - link "JSTOR" [ref=e230] [cursor=pointer]:
+                    - /url: https://www.jstor.org/action/doBasicSearch?Query=%22Markdown%22&acc=on&wc=on
+              - generic [ref=e231]: (September 2025)
+              - generic [ref=e234]:
+                - text: (
+                - link "Learn how and when to remove this message" [ref=e236] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Help:Maintenance_template_removal
+                - text: )
+            - table [ref=e237]:
+              - rowgroup [ref=e238]:
+                - row [ref=e239]:
+                  - columnheader "Markdown" [ref=e240]
+                - row [ref=e241]:
+                  - cell [ref=e242]:
+                    - link [ref=e244] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/File:Markdown-mark.svg
+                - row [ref=e246]:
+                  - rowheader [ref=e247]:
+                    - link "Filename extensions" [ref=e248] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Filename_extension
+                  - cell [ref=e249]:
+                    - code [ref=e250]: .md
+                    - text: ","
+                    - code [ref=e251]: .markdown
+                    - superscript [ref=e252]:
+                      - link "[1]" [ref=e253] [cursor=pointer]:
+                        - /url: "#cite_note-df-2022-1"
+                    - superscript [ref=e255]:
+                      - link "[2]" [ref=e256] [cursor=pointer]:
+                        - /url: "#cite_note-rfc7763-2"
+                - row [ref=e258]:
+                  - rowheader [ref=e259]:
+                    - link "Internet media type" [ref=e260] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Media_type
+                  - cell [ref=e261]:
+                    - code [ref=e262]: text/markdown
+                    - superscript [ref=e263]:
+                      - link "[2]" [ref=e264] [cursor=pointer]:
+                        - /url: "#cite_note-rfc7763-2"
+                - row [ref=e266]:
+                  - rowheader [ref=e267]:
+                    - link "Uniform Type Identifier (UTI)" [ref=e268] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Uniform_Type_Identifier
+                  - cell [ref=e269]:
+                    - code [ref=e270]: net.daringfireball.markdown
+                - row [ref=e271]:
+                  - rowheader "UTI conformation" [ref=e272]
+                  - cell [ref=e273]:
+                    - code [ref=e274]: public.utf8-plain-text
+                - row [ref=e275]:
+                  - rowheader [ref=e276]:
+                    - link "Magic number" [ref=e277] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/File_format#Magic_number
+                  - cell "None" [ref=e278]
+                - row [ref=e279]:
+                  - rowheader "Developed by" [ref=e280]
+                  - cell [ref=e281]:
+                    - list [ref=e283]:
+                      - listitem [ref=e284]:
+                        - link "John Gruber" [ref=e285] [cursor=pointer]:
+                          - /url: https://en.wikipedia.org/wiki/John_Gruber
+                - row [ref=e286]:
+                  - rowheader "Initial release" [ref=e287]
+                  - cell "March 9, 2004 (22 years ago) [3][4]" [ref=e288]:
+                    - text: March 9, 2004
+                    - generic [ref=e289]: (22 years ago)
+                    - superscript [ref=e290]:
+                      - link "[3]" [ref=e291] [cursor=pointer]:
+                        - /url: "#cite_note-markdown-swartz-3"
+                    - superscript [ref=e293]:
+                      - link "[4]" [ref=e294] [cursor=pointer]:
+                        - /url: "#cite_note-gruber-2004-release-4"
+                - row [ref=e296]:
+                  - rowheader [ref=e297]:
+                    - link "Latest release" [ref=e298] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Software_release_life_cycle
+                  - cell "1.0.1 December 17, 2004 (21 years ago) [5]" [ref=e299]:
+                    - generic [ref=e300]:
+                      - text: 1.0.1December 17, 2004
+                      - generic [ref=e301]: (21 years ago)
+                      - superscript [ref=e302]:
+                        - link "[5]" [ref=e303] [cursor=pointer]:
+                          - /url: "#cite_note-md-5"
+                - row [ref=e305]:
+                  - rowheader "Type of format" [ref=e306]
+                  - cell [ref=e307]:
+                    - link "Open file format" [ref=e308] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Open_file_format
+                    - superscript [ref=e309]:
+                      - link "[6]" [ref=e310] [cursor=pointer]:
+                        - /url: "#cite_note-license-6"
+                - row [ref=e312]:
+                  - rowheader "Extended to" [ref=e313]
+                  - cell [ref=e314]:
+                    - link "pandoc" [ref=e315] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Pandoc
+                    - text: ","
+                    - link "MultiMarkdown" [ref=e316] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/MultiMarkdown
+                    - text: ","
+                    - link "Markdown Extra" [ref=e317] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Markdown_Extra
+                    - text: ","
+                    - link "CommonMark" [ref=e318] [cursor=pointer]:
+                      - /url: "#CommonMark"
+                    - text: ","
+                    - superscript [ref=e319]:
+                      - link "[7]" [ref=e320] [cursor=pointer]:
+                        - /url: "#cite_note-rfc7764-7"
+                    - link "RMarkdown" [ref=e322] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/RMarkdown
+                    - superscript [ref=e323]:
+                      - link "[8]" [ref=e324] [cursor=pointer]:
+                        - /url: "#cite_note-RMarkdown-8"
+                - row [ref=e326]:
+                  - rowheader "Website" [ref=e327]
+                  - cell [ref=e328]:
+                    - link "daringfireball.net/projects/markdown/" [ref=e330] [cursor=pointer]:
+                      - /url: https://daringfireball.net/projects/markdown/
+            - paragraph [ref=e331]:
+              - text: Markdown
+              - superscript [ref=e332]:
+                - link "[9]" [ref=e333] [cursor=pointer]:
+                  - /url: "#cite_note-philosophy-9"
+              - text: is a
+              - link "lightweight markup language" [ref=e335] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Lightweight_markup_language
+              - text: for creating
+              - link "formatted text" [ref=e336] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Formatted_text
+              - text: using a
+              - link "plain-text editor" [ref=e337] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Text_editor
+              - text: .
+              - link "John Gruber" [ref=e338] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/John_Gruber
+              - text: created Markdown in 2004 as an easy-to-read
+              - link "markup language" [ref=e339] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Markup_language
+              - text: .
+              - superscript [ref=e340]:
+                - link "[9]" [ref=e341] [cursor=pointer]:
+                  - /url: "#cite_note-philosophy-9"
+              - text: Markdown is widely used for
+              - link "blogging" [ref=e343] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Blog
+              - text: ","
+              - link "instant messaging" [ref=e344] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Instant_messaging
+              - text: ", and"
+              - link "large language models" [ref=e345] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Large_language_models
+              - text: ","
+              - superscript [ref=e346]:
+                - link "[10]" [ref=e347] [cursor=pointer]:
+                  - /url: "#cite_note-llm-markdown-10"
+              - text: and also used elsewhere in
+              - link "online forums" [ref=e349] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Online_forums
+              - text: ","
+              - link "collaborative software" [ref=e350] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Collaborative_software
+              - text: ","
+              - link "documentation" [ref=e351] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Documentation
+              - text: pages, and
+              - link "readme files" [ref=e352] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/README
+              - text: .
+            - paragraph [ref=e353]:
+              - text: The initial description of Markdown
+              - superscript [ref=e354]:
+                - link "[11]" [ref=e355] [cursor=pointer]:
+                  - /url: "#cite_note-11"
+              - text: contained ambiguities and raised unanswered questions, causing implementations to both intentionally and accidentally diverge from the original version. This was addressed in 2014 when long-standing Markdown contributors released
+              - link "CommonMark" [ref=e357] [cursor=pointer]:
+                - /url: "#CommonMark"
+              - text: ", an unambiguous specification and test suite for Markdown."
+              - superscript [ref=e358]:
+                - link "[12]" [ref=e359] [cursor=pointer]:
+                  - /url: "#cite_note-FutureOfMarkdown-12"
+              - superscript [ref=e361]:
+                - text: "["
+                - link "better source needed" [ref=e363] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Wikipedia:Verifiability#Questionable_sources
+                  - generic "The current source is a blog (WP:BLOG). (September 2025)" [ref=e364]: better source needed
+                - text: "]"
+          - region [ref=e365]:
+            - generic [ref=e366]:
+              - heading "History" [level=2] [ref=e367]
+              - generic [ref=e368]:
+                - link "edit":
+                  - /url: /w/index.php?title=Markdown&action=edit&section=1
+            - paragraph [ref=e369]:
+              - text: Markdown was inspired by pre-existing
+              - link "conventions" [ref=e370] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Convention_(norm)
+              - text: for marking up
+              - link "plain text" [ref=e371] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Plain_text
+              - text: in
+              - link "email" [ref=e372] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Email
+              - text: and
+              - link "usenet" [ref=e373] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Usenet
+              - text: posts,
+              - superscript [ref=e374]:
+                - link "[13]" [ref=e375] [cursor=pointer]:
+                  - /url: "#cite_note-ArsTechnica2014-13"
+              - text: such as the earlier markup languages
+              - link "setext" [ref=e377] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Setext
+              - text: (c.
+              - generic [ref=e378]: "1992"
+              - text: ),
+              - link "Textile" [ref=e379] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Textile_(markup_language)
+              - text: (c.
+              - generic [ref=e380]: "2002"
+              - text: ), and
+              - link "reStructuredText" [ref=e381] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/ReStructuredText
+              - text: (c.
+              - generic [ref=e382]: "2002"
+              - text: ).
+              - superscript [ref=e383]:
+                - link "[9]" [ref=e384] [cursor=pointer]:
+                  - /url: "#cite_note-philosophy-9"
+            - paragraph [ref=e386]:
+              - text: In 2002,
+              - link "Aaron Swartz" [ref=e387] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Aaron_Swartz
+              - text: created
+              - link "atx" [ref=e388] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Atx_(markup_language)
+              - text: and referred to it as "the true structured text format". Gruber created the Markdown language in 2004 with Swartz as his "sounding board".
+              - superscript [ref=e389]:
+                - link "[14]" [ref=e390] [cursor=pointer]:
+                  - /url: "#cite_note-Gruber-14"
+              - text: The goal of the language was to enable people "to write using an easy-to-read and easy-to-write plain text format, optionally convert it to structurally valid
+              - link "XHTML" [ref=e392] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/XHTML
+              - text: (or
+              - link "HTML" [ref=e393] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/HTML
+              - text: )".
+              - superscript [ref=e394]:
+                - link "[5]" [ref=e395] [cursor=pointer]:
+                  - /url: "#cite_note-md-5"
+            - paragraph [ref=e397]:
+              - text: Another key design goal was readability, that the language be readable as-is, without looking like it has been marked up with tags or formatting instructions,
+              - superscript [ref=e398]:
+                - link "[9]" [ref=e399] [cursor=pointer]:
+                  - /url: "#cite_note-philosophy-9"
+              - text: unlike text formatted with "heavier"
+              - link "markup languages" [ref=e401] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Markup_language
+              - text: ", such as"
+              - link "Rich Text Format" [ref=e402] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Rich_Text_Format
+              - text: (RTF), HTML, or even
+              - link "wikitext" [ref=e403] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Wikitext
+              - text: ", each of which have obvious in-line tags and formatting instructions which can make the text more difficult for humans to read."
+              - superscript [ref=e404]:
+                - text: "["
+                - link "citation needed" [ref=e406] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Wikipedia:Citation_needed
+                - text: "]"
+            - paragraph [ref=e407]:
+              - text: Gruber wrote a
+              - link "Perl" [ref=e408] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Perl
+              - text: script,
+              - code [ref=e409]: Markdown.pl
+              - text: ", which converts marked-up text input to valid,"
+              - link "well-formed" [ref=e410] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Well-formed_document
+              - text: XHTML or HTML, encoding angle brackets (
+              - code [ref=e411]: <
+              - text: ","
+              - code [ref=e412]: ">"
+              - text: ) and
+              - link "ampersands" [ref=e413] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Ampersand
+              - text: (
+              - code [ref=e414]: "&"
+              - text: ), which would be misinterpreted as special characters in those languages. It can take the role of a standalone script, a plugin for
+              - link "Blosxom" [ref=e415] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Blosxom
+              - text: or
+              - link "Movable Type" [ref=e416] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Movable_Type
+              - text: ", or of a text filter for"
+              - link "BBEdit" [ref=e417] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/BBEdit
+              - text: .
+              - superscript [ref=e418]:
+                - link "[5]" [ref=e419] [cursor=pointer]:
+                  - /url: "#cite_note-md-5"
+          - region [ref=e421]:
+            - generic [ref=e422]:
+              - heading "Rise and divergence" [level=2] [ref=e423]
+              - generic [ref=e424]:
+                - link "edit":
+                  - /url: /w/index.php?title=Markdown&action=edit&section=2
+            - paragraph [ref=e425]:
+              - text: As Markdown's popularity grew rapidly, many Markdown
+              - link "implementations" [ref=e426] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Implementation
+              - text: appeared, driven mostly by the need for additional features such as
+              - link "tables" [ref=e427] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Table_(information)
+              - text: ","
+              - link "footnotes" [ref=e428] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Note_(typography)
+              - text: ", definition lists,"
+              - superscript [ref=e429]:
+                - link "[note 1]" [ref=e430] [cursor=pointer]:
+                  - /url: "#cite_note-17"
+              - text: and Markdown inside HTML blocks.
+              - superscript [ref=e432]:
+                - text: "["
+                - link "citation needed" [ref=e434] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Wikipedia:Citation_needed
+                - text: "]"
+            - paragraph [ref=e435]:
+              - text: The behavior of some of these diverged from the reference implementation, as Markdown was only characterised by an informal
+              - link "specification" [ref=e436] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Specification_(technical_standard)
+              - superscript [ref=e437]:
+                - link "[17]" [ref=e438] [cursor=pointer]:
+                  - /url: "#cite_note-18"
+              - text: and a
+              - link "Perl" [ref=e440] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Perl
+              - text: implementation for conversion to HTML.
+              - superscript [ref=e441]:
+                - text: "["
+                - link "citation needed" [ref=e443] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Wikipedia:Citation_needed
+                - text: "]"
+            - paragraph [ref=e444]:
+              - text: At the same time, a number of ambiguities in the informal specification had attracted attention.
+              - superscript [ref=e445]:
+                - link "[18]" [ref=e446] [cursor=pointer]:
+                  - /url: "#cite_note-gfm_on_github-why_spec-19"
+              - text: These issues spurred the creation of tools such as Babelmark
+              - superscript [ref=e448]:
+                - link "[19]" [ref=e449] [cursor=pointer]:
+                  - /url: "#cite_note-babelmark-2-20"
+              - superscript [ref=e451]:
+                - link "[20]" [ref=e452] [cursor=pointer]:
+                  - /url: "#cite_note-babelmark-3-21"
+              - text: to compare the output of various implementations,
+              - superscript [ref=e454]:
+                - link "[21]" [ref=e455] [cursor=pointer]:
+                  - /url: "#cite_note-22"
+              - text: and an effort by some developers of Markdown
+              - link "parsers" [ref=e457] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Parsing
+              - text: "for standardization. However, Gruber has argued that complete standardization would be a mistake: \"Different sites (and people) have different needs. No one syntax would make all happy.\""
+              - superscript [ref=e458]:
+                - link "[22]" [ref=e459] [cursor=pointer]:
+                  - /url: "#cite_note-23"
+            - paragraph [ref=e461]:
+              - text: Gruber avoided using curly braces in Markdown to unofficially reserve them for implementation-specific extensions.
+              - superscript [ref=e462]:
+                - link "[23]" [ref=e463] [cursor=pointer]:
+                  - /url: "#cite_note-curlyBraces-24"
+          - region [ref=e465]:
+            - generic [ref=e466]:
+              - heading "CommonMark" [level=2] [ref=e467]
+              - generic [ref=e468]:
+                - link "edit":
+                  - /url: /w/index.php?title=Markdown&action=edit&section=3
+            - table [ref=e469]:
+              - rowgroup [ref=e470]:
+                - row [ref=e471]:
+                  - columnheader "CommonMark" [ref=e472]
+                - row [ref=e473]:
+                  - rowheader [ref=e474]:
+                    - link "Filename extensions" [ref=e475] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Filename_extension
+                  - cell [ref=e476]:
+                    - code [ref=e477]: .md
+                    - text: ","
+                    - code [ref=e478]: .markdown
+                    - superscript [ref=e479]:
+                      - link "[2]" [ref=e480] [cursor=pointer]:
+                        - /url: "#cite_note-rfc7763-2"
+                - row [ref=e482]:
+                  - rowheader [ref=e483]:
+                    - link "Internet media type" [ref=e484] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Media_type
+                  - cell [ref=e485]:
+                    - code [ref=e486]: text/markdown; variant=CommonMark
+                    - superscript [ref=e487]:
+                      - link "[7]" [ref=e488] [cursor=pointer]:
+                        - /url: "#cite_note-rfc7764-7"
+                - row [ref=e490]:
+                  - rowheader [ref=e491]:
+                    - link "Uniform Type Identifier (UTI)" [ref=e492] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Uniform_Type_Identifier
+                  - cell [ref=e493]:
+                    - text: uncertain
+                    - superscript [ref=e494]:
+                      - link "[24]" [ref=e495] [cursor=pointer]:
+                        - /url: "#cite_note-cm-uti-25"
+                - row [ref=e497]:
+                  - rowheader "UTI conformation" [ref=e498]
+                  - cell "public.plain-text" [ref=e499]
+                - row [ref=e500]:
+                  - rowheader "Developed by" [ref=e501]
+                  - cell [ref=e502]:
+                    - link "John MacFarlane" [ref=e503] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/John_MacFarlane_(philosopher)
+                    - text: ", open source"
+                - row [ref=e504]:
+                  - rowheader "Initial release" [ref=e505]
+                  - cell "October 25, 2014 (11 years ago)" [ref=e506]:
+                    - text: October 25, 2014
+                    - generic [ref=e507]: (11 years ago)
+                - row [ref=e508]:
+                  - rowheader [ref=e509]:
+                    - link "Latest release" [ref=e510] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Software_release_life_cycle
+                  - cell "0.31.2 January 28, 2024 (2 years ago) [25]" [ref=e511]:
+                    - generic [ref=e512]:
+                      - text: 0.31.2January 28, 2024
+                      - generic [ref=e513]: (2 years ago)
+                      - superscript [ref=e514]:
+                        - link "[25]" [ref=e515] [cursor=pointer]:
+                          - /url: "#cite_note-cm-spec-26"
+                - row [ref=e517]:
+                  - rowheader "Type of format" [ref=e518]
+                  - cell [ref=e519]:
+                    - link "Open file format" [ref=e520] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Open_file_format
+                - row [ref=e521]:
+                  - rowheader "Extended from" [ref=e522]
+                  - cell "Markdown" [ref=e523]
+                - row [ref=e524]:
+                  - rowheader "Extended to" [ref=e525]
+                  - cell [ref=e526]:
+                    - link "GitHub Flavored Markdown" [ref=e527] [cursor=pointer]:
+                      - /url: "#GFM"
+                - row [ref=e528]:
+                  - rowheader "Website" [ref=e529]
+                  - cell [ref=e530]:
+                    - link "commonmark.org" [ref=e532] [cursor=pointer]:
+                      - /url: https://commonmark.org/
+                    - link "spec.commonmark.org" [ref=e534] [cursor=pointer]:
+                      - /url: http://spec.commonmark.org/
+            - generic [ref=e535]:
+              - term [ref=e536]: Standardization
+              - definition
+            - paragraph [ref=e537]:
+              - text: In 2012, a group of people, including
+              - link "Jeff Atwood" [ref=e538] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Jeff_Atwood
+              - text: and
+              - link "John MacFarlane" [ref=e539] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/John_MacFarlane_(philosopher)
+              - text: ", launched what Atwood characterised as a standardization effort."
+              - superscript [ref=e540]:
+                - link "[12]" [ref=e541] [cursor=pointer]:
+                  - /url: "#cite_note-FutureOfMarkdown-12"
+            - paragraph [ref=e543]:
+              - text: A community website now aims to "document various tools and resources available to document authors and developers, as well as implementors of the various Markdown implementations".
+              - superscript [ref=e544]:
+                - link "[26]" [ref=e545] [cursor=pointer]:
+                  - /url: "#cite_note-27"
+            - generic [ref=e547]:
+              - term [ref=e548]: Name
+              - definition
+            - paragraph [ref=e549]:
+              - text: In September 2014, Gruber objected to the usage of "Markdown" in the name of this effort and it was rebranded as "CommonMark".
+              - superscript [ref=e550]:
+                - link "[13]" [ref=e551] [cursor=pointer]:
+                  - /url: "#cite_note-ArsTechnica2014-13"
+              - superscript [ref=e553]:
+                - link "[27]" [ref=e554] [cursor=pointer]:
+                  - /url: "#cite_note-28"
+              - superscript [ref=e556]:
+                - link "[28]" [ref=e557] [cursor=pointer]:
+                  - /url: "#cite_note-29"
+              - text: CommonMark.org published several versions of a specification, reference implementation, test suite, and "[plans] to announce a finalized 1.0 spec and test suite in 2019".
+              - superscript [ref=e559]:
+                - link "[29]" [ref=e560] [cursor=pointer]:
+                  - /url: "#cite_note-commonmark.org-30"
+              - text: A finalized 1.0 spec has not been released, as major issues still remain unsolved.
+              - superscript [ref=e562]:
+                - link "[30]" [ref=e563] [cursor=pointer]:
+                  - /url: "#cite_note-31"
+            - generic [ref=e565]:
+              - term [ref=e566]: Adoption
+              - definition
+            - paragraph [ref=e567]:
+              - text: Nonetheless, several websites and projects have adopted CommonMark, including
+              - link "Codeberg" [ref=e568] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Codeberg
+              - text: ","
+              - link "Discourse" [ref=e569] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Discourse_(software)
+              - text: ","
+              - link "GitHub" [ref=e570] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/GitHub
+              - text: ","
+              - link "GitLab" [ref=e571] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/GitLab
+              - text: ","
+              - link "Reddit" [ref=e572] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Reddit
+              - text: ","
+              - link "Qt" [ref=e573] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Qt_(software)
+              - text: ","
+              - link "Stack Exchange" [ref=e574] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Stack_Exchange
+              - text: (
+              - link "Stack Overflow" [ref=e575] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Stack_Overflow
+              - text: ), and
+              - link "Swift" [ref=e576] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Swift_(programming_language)
+              - text: .
+            - paragraph [ref=e577]:
+              - text: In March 2016, two relevant informational Internet
+              - link "RFCs" [ref=e578] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Request_for_Comments
+              - text: "were published:"
+            - list [ref=e579]:
+              - listitem [ref=e580]:
+                - text: RFC
+                - link "7763" [ref=e581] [cursor=pointer]:
+                  - /url: https://www.rfc-editor.org/rfc/rfc7763
+                - text: – "The text/markdown Media Type,"
+                - superscript [ref=e582]:
+                  - link "[2]" [ref=e583] [cursor=pointer]:
+                    - /url: "#cite_note-rfc7763-2"
+                - text: Informational.
+                - generic [ref=e585]:
+                  - text: Introduces
+                  - link "MIME" [ref=e586] [cursor=pointer]:
+                    - /url: https://en.wikipedia.org/wiki/MIME
+                  - text: type
+                  - code [ref=e588]: text/markdown
+                  - text: .
+              - listitem [ref=e589]:
+                - text: RFC
+                - link "7764" [ref=e590] [cursor=pointer]:
+                  - /url: https://www.rfc-editor.org/rfc/rfc7764
+                - text: "– \"Guidance on Markdown: Design Philosophies, Stability Strategies, and Select Registrations,\""
+                - superscript [ref=e591]:
+                  - link "[7]" [ref=e592] [cursor=pointer]:
+                    - /url: "#cite_note-rfc7764-7"
+                - text: Informational.
+                - generic [ref=e594]:
+                  - text: Discusses and registers the variants
+                  - link "MultiMarkdown" [ref=e595] [cursor=pointer]:
+                    - /url: https://en.wikipedia.org/wiki/MultiMarkdown
+                  - text: ","
+                  - link "GitHub Flavored Markdown" [ref=e596] [cursor=pointer]:
+                    - /url: "#GFM"
+                  - text: (GFM),
+                  - link "Pandoc" [ref=e597] [cursor=pointer]:
+                    - /url: https://en.wikipedia.org/wiki/Pandoc
+                  - text: ", and Markdown Extra (among others)."
+                  - superscript [ref=e598]:
+                    - link "[31]" [ref=e599] [cursor=pointer]:
+                      - /url: "#cite_note-IANA-32"
+          - region [ref=e601]:
+            - generic [ref=e602]:
+              - heading "Variants" [level=2] [ref=e603]
+              - generic [ref=e604]:
+                - link "edit":
+                  - /url: /w/index.php?title=Markdown&action=edit&section=4
+            - paragraph [ref=e605]:
+              - text: Websites including
+              - link "Bitbucket" [ref=e606] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Bitbucket
+              - text: ","
+              - link "Diaspora" [ref=e607] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Diaspora_(social_network)
+              - text: ","
+              - link "Discord" [ref=e608] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Discord
+              - text: ","
+              - superscript [ref=e609]:
+                - link "[32]" [ref=e610] [cursor=pointer]:
+                  - /url: "#cite_note-33"
+              - link "GitHub" [ref=e612] [cursor=pointer]:
+                - /url: "#GFM"
+              - text: ","
+              - superscript [ref=e613]:
+                - link "[33]" [ref=e614] [cursor=pointer]:
+                  - /url: "#cite_note-gfm_on_github-34"
+              - link "OpenStreetMap" [ref=e616] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/OpenStreetMap
+              - text: ","
+              - link "Reddit" [ref=e617] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Reddit
+              - text: ","
+              - superscript [ref=e618]:
+                - link "[34]" [ref=e619] [cursor=pointer]:
+                  - /url: "#cite_note-35"
+              - link "SourceForge" [ref=e621] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/SourceForge
+              - superscript [ref=e622]:
+                - link "[35]" [ref=e623] [cursor=pointer]:
+                  - /url: "#cite_note-36"
+              - text: and
+              - link "Stack Exchange" [ref=e625] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Stack_Exchange
+              - superscript [ref=e626]:
+                - link "[36]" [ref=e627] [cursor=pointer]:
+                  - /url: "#cite_note-37"
+              - text: use variants of Markdown to make discussions between users easier.
+            - paragraph [ref=e629]:
+              - text: Depending on implementation, basic inline
+              - link "HTML tags" [ref=e630] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/HTML_tag
+              - text: may be supported.
+              - superscript [ref=e631]:
+                - link "[37]" [ref=e632] [cursor=pointer]:
+                  - /url: "#cite_note-38"
+            - paragraph [ref=e634]:
+              - text: Italic text may be implemented by
+              - code [ref=e635]: _underscores_
+              - text: or
+              - code [ref=e636]: "*single-asterisks*"
+              - text: .
+              - superscript [ref=e637]:
+                - link "[38]" [ref=e638] [cursor=pointer]:
+                  - /url: "#cite_note-italic-39"
+            - paragraph [ref=e640]:
+              - text: Many platforms implement spoiler formatting that hides text until hovered, clicked or tapped. The most common markup is ||spoiler|| used by Discord
+              - superscript [ref=e641]:
+                - link "[39]" [ref=e642] [cursor=pointer]:
+                  - /url: "#cite_note-40"
+              - text: ", Telegram"
+              - superscript [ref=e644]:
+                - link "[40]" [ref=e645] [cursor=pointer]:
+                  - /url: "#cite_note-41"
+              - superscript [ref=e647]:
+                - link "[41]" [ref=e648] [cursor=pointer]:
+                  - /url: "#cite_note-42"
+              - text: ", various Matrix clients"
+              - superscript [ref=e650]:
+                - link "[42]" [ref=e651] [cursor=pointer]:
+                  - /url: "#cite_note-43"
+              - text: ", now defunct Guilded"
+              - superscript [ref=e653]:
+                - link "[43]" [ref=e654] [cursor=pointer]:
+                  - /url: "#cite_note-44"
+              - text: ", a forum called Flarum"
+              - superscript [ref=e656]:
+                - link "[44]" [ref=e657] [cursor=pointer]:
+                  - /url: "#cite_note-45"
+              - text: ", a NodeBB plugin"
+              - superscript [ref=e659]:
+                - link "[45]" [ref=e660] [cursor=pointer]:
+                  - /url: "#cite_note-46"
+              - text: ", the imageboard engine JSChan"
+              - superscript [ref=e662]:
+                - link "[46]" [ref=e663] [cursor=pointer]:
+                  - /url: "#cite_note-47"
+              - text: and possibly more.
+            - region [ref=e665]:
+              - generic [ref=e666]:
+                - heading "GitHub Flavored Markdown" [level=3] [ref=e667]
+                - generic [ref=e668]:
+                  - link "edit":
+                    - /url: /w/index.php?title=Markdown&action=edit&section=5
+              - paragraph [ref=e669]:
+                - link "GitHub" [ref=e670] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/GitHub
+                - text: had been using its own variant of Markdown since as early as 2009,
+                - superscript [ref=e671]:
+                  - link "[47]" [ref=e672] [cursor=pointer]:
+                    - /url: "#cite_note-48"
+                - text: which added support for additional formatting such as tables and nesting
+                - link "block content" [ref=e674] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/HTML_element#Block_elements
+                - text: inside list elements, as well as GitHub-specific features such as auto-linking references to commits, issues, usernames, etc.
+              - paragraph [ref=e675]:
+                - text: In 2017, GitHub released a formal specification of its
+                - link "GitHub Flavored Markdown" [ref=e676] [cursor=pointer]:
+                  - /url: https://github.github.com/gfm/
+                - text: (GFM) that is based on
+                - link "CommonMark" [ref=e677] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/CommonMark
+                - text: .
+                - superscript [ref=e678]:
+                  - link "[33]" [ref=e679] [cursor=pointer]:
+                    - /url: "#cite_note-gfm_on_github-34"
+                - text: It is a
+                - link "strict superset" [ref=e681] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Superset
+                - text: of CommonMark, following its specification exactly except for tables,
+                - link "strikethrough" [ref=e682] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Strikethrough
+                - text: ","
+                - link "autolinks" [ref=e683] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Automatic_hyperlinking
+                - text: and task lists, which GFM adds as extensions.
+                - superscript [ref=e684]:
+                  - link "[48]" [ref=e685] [cursor=pointer]:
+                    - /url: "#cite_note-49"
+              - paragraph [ref=e687]:
+                - text: Accordingly, GitHub also changed the parser used on their sites, which required that some documents be changed. For instance, GFM now requires that the
+                - link "hash symbol" [ref=e688] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Number_sign
+                - text: that creates a heading be separated from the heading text by a space character.
+            - region [ref=e689]:
+              - generic [ref=e690]:
+                - heading "Markdown Extra" [level=3] [ref=e691]
+                - generic [ref=e692]:
+                  - link "edit":
+                    - /url: /w/index.php?title=Markdown&action=edit&section=6
+              - paragraph [ref=e693]:
+                - text: Markdown Extra is a
+                - link "lightweight markup language" [ref=e694] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Lightweight_markup_language
+                - text: based on Markdown implemented in
+                - link "PHP" [ref=e695] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/PHP
+                - text: (originally),
+                - link "Python" [ref=e696] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Python_(programming_language)
+                - text: and
+                - link "Ruby" [ref=e697] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Ruby_(programming_language)
+                - text: .
+                - superscript [ref=e698]:
+                  - link "[49]" [ref=e699] [cursor=pointer]:
+                    - /url: "#cite_note-fortin-2018-50"
+                - text: "It adds the following features that are not available with regular Markdown:"
+              - list [ref=e701]:
+                - listitem [ref=e702]:
+                  - text: Markdown markup inside
+                  - link "HTML" [ref=e703] [cursor=pointer]:
+                    - /url: https://en.wikipedia.org/wiki/HTML
+                  - text: blocks
+                - listitem [ref=e704]: Elements with id/class attribute
+                - listitem [ref=e705]: "\"Fenced code blocks\" that span multiple lines of code"
+                - listitem [ref=e706]:
+                  - text: Tables
+                  - superscript [ref=e707]:
+                    - link "[49]" [ref=e708] [cursor=pointer]:
+                      - /url: "#cite_note-fortin-2018-50"
+                - listitem [ref=e710]: Definition lists
+                - listitem [ref=e711]: Footnotes
+                - listitem [ref=e712]: Abbreviations
+              - paragraph [ref=e713]:
+                - text: Markdown Extra is supported in some
+                - link "content management systems" [ref=e714] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Content_management_system
+                - text: such as
+                - link "Drupal" [ref=e715] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Drupal
+                - text: ","
+                - superscript [ref=e716]:
+                  - link "[50]" [ref=e717] [cursor=pointer]:
+                    - /url: "#cite_note-51"
+                - link "Grav (CMS)" [ref=e719] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Grav_(CMS)
+                - text: ","
+                - link "Textpattern CMS" [ref=e720] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Textpattern
+                - superscript [ref=e721]:
+                  - link "[51]" [ref=e722] [cursor=pointer]:
+                    - /url: "#cite_note-52"
+                - text: and
+                - link "TYPO3" [ref=e724] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/TYPO3
+                - text: .
+                - superscript [ref=e725]:
+                  - link "[52]" [ref=e726] [cursor=pointer]:
+                    - /url: "#cite_note-53"
+          - region [ref=e728]:
+            - generic [ref=e729]:
+              - heading "Examples" [level=2] [ref=e730]
+              - generic [ref=e731]:
+                - link "edit":
+                  - /url: /w/index.php?title=Markdown&action=edit&section=7
+            - table [ref=e732]:
+              - rowgroup [ref=e733]:
+                - row [ref=e734]:
+                  - columnheader "Text using Markdown syntax" [ref=e735]
+                  - columnheader "Corresponding HTML produced by a Markdown processor" [ref=e736]
+                  - columnheader "Text viewed in a browser" [ref=e737]
+                - row [ref=e738]:
+                  - 'cell "Heading ======= Sub-heading ----------- # Alternative heading ## Alternative sub-heading Paragraphs are separated by a blank line. Two spaces at the end of a line produce a line break." [ref=e739]'
+                  - cell "<h1>Heading</h1> <h2>Sub-heading</h2> <h1>Alternative heading</h1> <h2>Alternative sub-heading</h2> <p>Paragraphs are separated by a blank line.</p> <p>Two spaces at the end of a line<br /> produce a line break.</p>" [ref=e742]
+                  - cell "Heading Sub-heading Alternative heading Alternative sub-heading Paragraphs are separated by a blank line. Two spaces at the end of a line produce a line break." [ref=e745]:
+                    - generic [ref=e746]: Heading
+                    - generic [ref=e747]: Sub-heading
+                    - generic [ref=e748]: Alternative heading
+                    - generic [ref=e749]: Alternative sub-heading
+                    - paragraph [ref=e750]: Paragraphs are separated by a blank line.
+                    - paragraph [ref=e751]: Two spaces at the end of a line produce a line break.
+                - row [ref=e752]:
+                  - 'cell "Text attributes *italic*, **bold**, `monospace`. Horizontal rule: ---" [ref=e753]'
+                  - cell "<p>Text attributes <em>italic</em>, <strong>bold</strong>, <code>monospace</code>.</p> <p>Horizontal rule:</p> <hr />" [ref=e756]
+                  - cell [ref=e759]:
+                    - text: Text attributes italic, bold,
+                    - code [ref=e760]: monospace
+                    - text: .
+                    - paragraph [ref=e761]: "Horizontal rule:"
+                    - separator [ref=e762]
+                - row [ref=e763]:
+                  - 'cell "Bullet lists nested within numbered list: 1. fruits * apple * banana 2. vegetables - carrot - broccoli" [ref=e764]'
+                  - cell "<p>Bullet lists nested within numbered list:</p> <ol> <li>fruits <ul> <li>apple</li> <li>banana</li> </ul></li> <li>vegetables <ul> <li>carrot</li> <li>broccoli</li> </ul></li> </ol>" [ref=e767]
+                  - cell [ref=e770]:
+                    - text: "Bullet lists nested within numbered list:"
+                    - list [ref=e771]:
+                      - listitem [ref=e772]:
+                        - text: fruits
+                        - list [ref=e773]:
+                          - listitem [ref=e774]: apple
+                          - listitem [ref=e775]: banana
+                      - listitem [ref=e776]:
+                        - text: vegetables
+                        - list [ref=e777]:
+                          - listitem [ref=e778]: carrot
+                          - listitem [ref=e779]: broccoli
+                - row [ref=e780]:
+                  - cell "A [link](http://example.com). ![Image](Icon-pictures.png \"icon\") > Markdown uses email-style characters for blockquoting. > > Multiple paragraphs need to be prepended individually. Most inline <abbr title=\"Hypertext Markup Language\">HTML</abbr> tags are supported." [ref=e781]
+                  - cell "<p>A <a href=\"http://example.com\">link</a>.</p> <p><img alt=\"Image\" title=\"icon\" src=\"Icon-pictures.png\" /></p> <blockquote> <p>Markdown uses email-style characters for blockquoting.</p> <p>Multiple paragraphs need to be prepended individually.</p> </blockquote> <p>Most inline <abbr title=\"Hypertext Markup Language\">HTML</abbr> tags are supported.</p>" [ref=e784]
+                  - cell [ref=e787]:
+                    - text: A
+                    - link "link" [ref=e788] [cursor=pointer]:
+                      - /url: https://example.com/
+                    - text: .
+                    - paragraph [ref=e789]:
+                      - generic "icon" [ref=e791]:
+                        - img "Image" [ref=e792]
+                    - blockquote [ref=e793]:
+                      - paragraph [ref=e794]: Markdown uses email-style characters for blockquoting.
+                      - paragraph [ref=e795]: Multiple paragraphs need to be prepended individually.
+                    - paragraph [ref=e796]: Most inline HTML tags are supported.
+          - region [ref=e797]:
+            - generic [ref=e798]:
+              - heading "Implementations" [level=2] [ref=e799]
+              - generic [ref=e800]:
+                - link "edit":
+                  - /url: /w/index.php?title=Markdown&action=edit&section=8
+            - paragraph [ref=e801]:
+              - text: Implementations of Markdown are available for over a dozen
+              - link "programming languages" [ref=e802] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Programming_language
+              - text: ; in addition, many
+              - link "applications" [ref=e803] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Application_software
+              - text: ", platforms and"
+              - link "frameworks" [ref=e804] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Software_framework
+              - text: support Markdown.
+              - superscript [ref=e805]:
+                - link "[53]" [ref=e806] [cursor=pointer]:
+                  - /url: "#cite_note-54"
+              - text: For example, Markdown
+              - link "plugins" [ref=e808] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Plug-in_(computing)
+              - text: exist for every major
+              - link "blogging" [ref=e809] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Blog
+              - text: platform.
+              - superscript [ref=e810]:
+                - link "[13]" [ref=e811] [cursor=pointer]:
+                  - /url: "#cite_note-ArsTechnica2014-13"
+            - paragraph [ref=e813]:
+              - text: While Markdown is a minimal markup language and is read and edited with a normal
+              - link "text editor" [ref=e814] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Text_editor
+              - text: ", there are specially designed editors that preview the files with styles, which are available for all major platforms. Many general-purpose text and"
+              - link "code editors" [ref=e815] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Source-code_editor
+              - text: have
+              - link "syntax highlighting" [ref=e816] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/Syntax_highlighting
+              - text: plugins for Markdown built into them or available as optional download. Editors may feature a side-by-side preview window or render the code directly in a
+              - link "WYSIWYG" [ref=e817] [cursor=pointer]:
+                - /url: https://en.wikipedia.org/wiki/WYSIWYG
+              - text: fashion.
+          - region [ref=e818]:
+            - generic [ref=e819]:
+              - heading "See also" [level=2] [ref=e820]
+              - generic [ref=e821]:
+                - link "edit":
+                  - /url: /w/index.php?title=Markdown&action=edit&section=9
+            - list [ref=e822]:
+              - listitem [ref=e823]:
+                - link "Comparison of document markup languages" [ref=e824] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Comparison_of_document_markup_languages
+              - listitem [ref=e825]:
+                - link "Comparison of documentation generators" [ref=e826] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Comparison_of_documentation_generators
+              - listitem [ref=e827]:
+                - link "Comparison of wiki software" [ref=e828] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Comparison_of_wiki_software
+              - listitem [ref=e829]:
+                - link "Lightweight markup language" [ref=e830] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Lightweight_markup_language
+              - listitem [ref=e831]:
+                - link "List of markup languages" [ref=e832] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/List_of_markup_languages
+              - listitem [ref=e833]:
+                - link "List of text editors" [ref=e834] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/List_of_text_editors
+              - listitem [ref=e835]:
+                - link "Wiki markup" [ref=e836] [cursor=pointer]:
+                  - /url: https://en.wikipedia.org/wiki/Wiki_markup
+          - region [ref=e837]:
+            - generic [ref=e838]:
+              - heading "Explanatory notes" [level=2] [ref=e839]
+              - generic [ref=e840]:
+                - link "edit":
+                  - /url: /w/index.php?title=Markdown&action=edit&section=10
+            - list [ref=e843]:
+              - listitem [ref=e844]:
+                - link "Jump up" [ref=e846] [cursor=pointer]:
+                  - /url: "#cite_ref-17"
+                  - text: ^
+                - text: Technically HTML description lists
+          - region [ref=e847]:
+            - generic [ref=e848]:
+              - heading "References" [level=2] [ref=e849]
+              - generic [ref=e850]:
+                - link "edit":
+                  - /url: /w/index.php?title=Markdown&action=edit&section=11
+            - list [ref=e852]:
+              - listitem [ref=e853]:
+                - link "Jump up" [ref=e855] [cursor=pointer]:
+                  - /url: "#cite_ref-df-2022_1-0"
+                  - text: ^
+                - generic [ref=e856]:
+                  - generic [ref=e857]:
+                    - text: Gruber, John (8 January 2014).
+                    - link "\"The Markdown File Extension\"" [ref=e858] [cursor=pointer]:
+                      - /url: https://daringfireball.net/linked/2014/01/08/markdown-extension
+                    - text: . The Daring Fireball Company, LLC.
+                    - link "Archived" [ref=e859] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20200712120733/https://daringfireball.net/linked/2014/01/08/markdown-extension
+                    - text: from the original on 12 July 2020
+                    - generic [ref=e860]: . Retrieved 27 March 2022
+                    - text: .
+                    - generic [ref=e861]: "Too late now, I suppose, but the only file extension I would endorse is \".markdown\", for the same reason offered by Hilton Lipschitz: We no longer live in a 8.3 world, so we should be using the most descriptive file extensions. It's sad that all our operating systems rely on this stupid convention instead of the better creator code or a metadata model, but great that they now support longer file extensions."
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=The+Markdown+File+Extension&rft.pub=The+Daring+Fireball+Company%2C+LLC&rft.date=2014-01-08&rft.au=Gruber%2C+John&rft_id=https%3A%2F%2Fdaringfireball.net%2Flinked%2F2014%2F01%2F08%2Fmarkdown-extension&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e862]:
+                - generic [ref=e863]:
+                  - text: ^
+                  - link "Jump up to:" [ref=e864] [cursor=pointer]:
+                    - /url: "#cite_ref-rfc7763_2-0"
+                  - link [ref=e866] [cursor=pointer]:
+                    - /url: "#cite_ref-rfc7763_2-1"
+                  - link [ref=e867] [cursor=pointer]:
+                    - /url: "#cite_ref-rfc7763_2-2"
+                  - link [ref=e868] [cursor=pointer]:
+                    - /url: "#cite_ref-rfc7763_2-3"
+                - generic [ref=e869]:
+                  - generic [ref=e870]:
+                    - text: S. Leonard (March 2016).
+                    - link "The text/markdown Media Type" [ref=e871] [cursor=pointer]:
+                      - /url: https://www.rfc-editor.org/rfc/rfc7763
+                    - text: .
+                    - link "Internet Engineering Task Force" [ref=e872] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Internet_Engineering_Task_Force
+                    - text: .
+                    - link "doi" [ref=e873] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Doi_(identifier)
+                    - text: ":"
+                    - generic "Freely accessible" [ref=e874]:
+                      - link "10.17487/RFC7763" [ref=e875] [cursor=pointer]:
+                        - /url: https://doi.org/10.17487%2FRFC7763
+                    - text: .
+                    - link "ISSN" [ref=e876] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/ISSN_(identifier)
+                    - link "2070-1721" [ref=e877] [cursor=pointer]:
+                      - /url: https://search.worldcat.org/issn/2070-1721
+                    - text: .
+                    - link "RFC" [ref=e878] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Request_for_Comments
+                    - link "7763" [ref=e879] [cursor=pointer]:
+                      - /url: https://datatracker.ietf.org/doc/html/rfc7763
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=book&rft.btitle=The+text%2Fmarkdown+Media+Type&rft.pub=Internet+Engineering+Task+Force&rft.date=2016-03&rft_id=info%3Adoi%2F10.17487%2FRFC7763&rft.issn=2070-1721&rft.au=S.+Leonard&rft_id=https%3A%2F%2Fwww.rfc-editor.org%2Frfc%2Frfc7763&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+                  - text: Informational.
+              - listitem [ref=e880]:
+                - link "Jump up" [ref=e882] [cursor=pointer]:
+                  - /url: "#cite_ref-markdown-swartz_3-0"
+                  - text: ^
+                - generic [ref=e883]:
+                  - generic [ref=e884]:
+                    - link "Swartz, Aaron" [ref=e885] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Aaron_Swartz
+                    - text: (2004-03-19).
+                    - link "\"Markdown\"" [ref=e886] [cursor=pointer]:
+                      - /url: http://www.aaronsw.com/weblog/001189
+                    - text: ". Aaron Swartz: The Weblog."
+                    - link "Archived" [ref=e887] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20171224200232/http://www.aaronsw.com/weblog/001189
+                    - text: from the original on 2017-12-24
+                    - generic [ref=e888]: . Retrieved 2013-09-01
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=Aaron+Swartz%3A+The+Weblog&rft.atitle=Markdown&rft.date=2004-03-19&rft.aulast=Swartz&rft.aufirst=Aaron&rft_id=http%3A%2F%2Fwww.aaronsw.com%2Fweblog%2F001189&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e889]:
+                - link "Jump up" [ref=e891] [cursor=pointer]:
+                  - /url: "#cite_ref-gruber-2004-release_4-0"
+                  - text: ^
+                - generic [ref=e892]:
+                  - generic [ref=e893]:
+                    - link "Gruber, John" [ref=e894] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/John_Gruber
+                    - text: .
+                    - link "\"Markdown\"" [ref=e895] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20040311230924/https://daringfireball.net/projects/markdown/index.text
+                    - text: .
+                    - link "Daring Fireball" [ref=e897] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Daring_Fireball
+                    - text: . Archived from
+                    - link "the original" [ref=e898] [cursor=pointer]:
+                      - /url: https://daringfireball.net/projects/markdown/index.text
+                    - text: on 2004-03-11
+                    - generic [ref=e899]: . Retrieved 2022-08-20
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=Daring+Fireball&rft.atitle=Markdown&rft.aulast=Gruber&rft.aufirst=John&rft_id=https%3A%2F%2Fdaringfireball.net%2Fprojects%2Fmarkdown%2Findex.text&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e900]:
+                - generic [ref=e901]:
+                  - text: ^
+                  - link "Jump up to:" [ref=e902] [cursor=pointer]:
+                    - /url: "#cite_ref-md_5-0"
+                  - link [ref=e904] [cursor=pointer]:
+                    - /url: "#cite_ref-md_5-1"
+                  - link [ref=e905] [cursor=pointer]:
+                    - /url: "#cite_ref-md_5-2"
+                - generic [ref=e906]:
+                  - text: Markdown 1.0.1 readme source code
+                  - generic [ref=e907]:
+                    - link "\"Daring Fireball – Markdown\"" [ref=e908] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20040402182332/http://daringfireball.net/projects/markdown/
+                    - text: . 2004-12-17. Archived from
+                    - link "the original" [ref=e909] [cursor=pointer]:
+                      - /url: http://daringfireball.net/projects/markdown/
+                    - text: on 2004-04-02.
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Daring+Fireball+%E2%80%93+Markdown&rft.date=2004-12-17&rft_id=http%3A%2F%2Fdaringfireball.net%2Fprojects%2Fmarkdown%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e910]:
+                - link "Jump up" [ref=e912] [cursor=pointer]:
+                  - /url: "#cite_ref-license_6-0"
+                  - text: ^
+                - generic [ref=e913]:
+                  - generic [ref=e914]:
+                    - 'link "\"Markdown: License\"" [ref=e915] [cursor=pointer]':
+                      - /url: http://daringfireball.net/projects/markdown/license
+                    - text: . Daring Fireball.
+                    - link "Archived" [ref=e916] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20200218183533/https://daringfireball.net/projects/markdown/license
+                    - text: from the original on 2020-02-18
+                    - generic [ref=e917]: . Retrieved 2014-04-25
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Markdown%3A+License&rft.pub=Daring+Fireball&rft_id=http%3A%2F%2Fdaringfireball.net%2Fprojects%2Fmarkdown%2Flicense&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e918]:
+                - generic [ref=e919]:
+                  - text: ^
+                  - link "Jump up to:" [ref=e920] [cursor=pointer]:
+                    - /url: "#cite_ref-rfc7764_7-0"
+                  - link [ref=e922] [cursor=pointer]:
+                    - /url: "#cite_ref-rfc7764_7-1"
+                  - link [ref=e923] [cursor=pointer]:
+                    - /url: "#cite_ref-rfc7764_7-2"
+                - generic [ref=e924]:
+                  - generic [ref=e925]:
+                    - text: S. Leonard (March 2016).
+                    - 'link "Guidance on Markdown: Design Philosophies, Stability Strategies, and Select Registrations" [ref=e926] [cursor=pointer]':
+                      - /url: https://www.rfc-editor.org/rfc/rfc7764
+                    - text: .
+                    - link "Internet Engineering Task Force" [ref=e927] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Internet_Engineering_Task_Force
+                    - text: .
+                    - link "doi" [ref=e928] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Doi_(identifier)
+                    - text: ":"
+                    - generic "Freely accessible" [ref=e929]:
+                      - link "10.17487/RFC7764" [ref=e930] [cursor=pointer]:
+                        - /url: https://doi.org/10.17487%2FRFC7764
+                    - text: .
+                    - link "ISSN" [ref=e931] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/ISSN_(identifier)
+                    - link "2070-1721" [ref=e932] [cursor=pointer]:
+                      - /url: https://search.worldcat.org/issn/2070-1721
+                    - text: .
+                    - link "RFC" [ref=e933] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Request_for_Comments
+                    - link "7764" [ref=e934] [cursor=pointer]:
+                      - /url: https://datatracker.ietf.org/doc/html/rfc7764
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=book&rft.btitle=Guidance+on+Markdown%3A+Design+Philosophies%2C+Stability+Strategies%2C+and+Select+Registrations&rft.pub=Internet+Engineering+Task+Force&rft.date=2016-03&rft_id=info%3Adoi%2F10.17487%2FRFC7764&rft.issn=2070-1721&rft.au=S.+Leonard&rft_id=https%3A%2F%2Fwww.rfc-editor.org%2Frfc%2Frfc7764&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+                  - text: Informational.
+              - listitem [ref=e935]:
+                - link "Jump up" [ref=e937] [cursor=pointer]:
+                  - /url: "#cite_ref-RMarkdown_8-0"
+                  - text: ^
+                - generic [ref=e938]:
+                  - generic [ref=e939]:
+                    - link "\"RMarkdown Reference site\"" [ref=e940] [cursor=pointer]:
+                      - /url: https://rmarkdown.rstudio.com/
+                    - text: .
+                    - link "Archived" [ref=e941] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20200303054734/https://rmarkdown.rstudio.com/
+                    - text: from the original on 2020-03-03
+                    - generic [ref=e942]: . Retrieved 2019-11-21
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=RMarkdown+Reference+site&rft_id=https%3A%2F%2Frmarkdown.rstudio.com%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e943]:
+                - generic [ref=e944]:
+                  - text: ^
+                  - link "Jump up to:" [ref=e945] [cursor=pointer]:
+                    - /url: "#cite_ref-philosophy_9-0"
+                  - link [ref=e947] [cursor=pointer]:
+                    - /url: "#cite_ref-philosophy_9-1"
+                  - link [ref=e948] [cursor=pointer]:
+                    - /url: "#cite_ref-philosophy_9-2"
+                  - link [ref=e949] [cursor=pointer]:
+                    - /url: "#cite_ref-philosophy_9-3"
+                - generic [ref=e950]:
+                  - text: Markdown Syntax
+                  - generic [ref=e951]:
+                    - link "\"Daring Fireball – Markdown – Syntax\"" [ref=e952] [cursor=pointer]:
+                      - /url: https://daringfireball.net/projects/markdown/syntax#philosophy
+                    - text: . 2013-06-13.
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Daring+Fireball+%E2%80%93+Markdown+%E2%80%93+Syntax&rft.date=2013-06-13&rft_id=https%3A%2F%2Fdaringfireball.net%2Fprojects%2Fmarkdown%2Fsyntax%23philosophy&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+                  - text: "\"Readability, however, is emphasized above all else. A Markdown-formatted document should be publishable as-is, as plain text, without looking like it's been marked up with tags or formatting instructions. While Markdown's syntax has been influenced by several existing text-to-HTML filters — including Setext, atx, Textile, reStructuredText, Grutatext"
+                  - superscript [ref=e953]:
+                    - link "[15]" [ref=e954] [cursor=pointer]:
+                      - /url: "#cite_note-grutatext-15"
+                  - text: ", and EtText"
+                  - superscript [ref=e956]:
+                    - link "[16]" [ref=e957] [cursor=pointer]:
+                      - /url: "#cite_note-ettext-16"
+                  - text: — the single biggest source of inspiration for Markdown's syntax is the format of plain text email."
+              - listitem [ref=e959]:
+                - link "Jump up" [ref=e961] [cursor=pointer]:
+                  - /url: "#cite_ref-llm-markdown_10-0"
+                  - text: ^
+                - generic [ref=e962]:
+                  - generic [ref=e963]:
+                    - text: Dillet, Romain (6 March 2025).
+                    - link "\"Mistral adds a new API that turns any PDF document into an AI-ready Markdown file\"" [ref=e964] [cursor=pointer]:
+                      - /url: https://techcrunch.com/2025/03/06/mistrals-new-ocr-api-turns-any-pdf-document-into-an-ai-ready-markdown-file/
+                    - text: . TechCrunch
+                    - generic [ref=e965]: . Retrieved 7 September 2025
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=TechCrunch&rft.atitle=Mistral+adds+a+new+API+that+turns+any+PDF+document+into+an+AI-ready+Markdown+file&rft.date=2025-03-06&rft.aulast=Dillet&rft.aufirst=Romain&rft_id=https%3A%2F%2Ftechcrunch.com%2F2025%2F03%2F06%2Fmistrals-new-ocr-api-turns-any-pdf-document-into-an-ai-ready-markdown-file%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e966]:
+                - link "Jump up" [ref=e968] [cursor=pointer]:
+                  - /url: "#cite_ref-11"
+                  - text: ^
+                - generic [ref=e969]:
+                  - generic [ref=e970]:
+                    - 'link "\"Daring Fireball: Introducing Markdown\"" [ref=e971] [cursor=pointer]':
+                      - /url: https://daringfireball.net/2004/03/introducing_markdown
+                    - text: . daringfireball.net.
+                    - link "Archived" [ref=e972] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20200920182442/https://daringfireball.net/2004/03/introducing_markdown
+                    - text: from the original on 2020-09-20
+                    - generic [ref=e973]: . Retrieved 2020-09-23
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=daringfireball.net&rft.atitle=Daring+Fireball%3A+Introducing+Markdown&rft_id=https%3A%2F%2Fdaringfireball.net%2F2004%2F03%2Fintroducing_markdown&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e974]:
+                - generic [ref=e975]:
+                  - text: ^
+                  - link "Jump up to:" [ref=e976] [cursor=pointer]:
+                    - /url: "#cite_ref-FutureOfMarkdown_12-0"
+                  - link [ref=e978] [cursor=pointer]:
+                    - /url: "#cite_ref-FutureOfMarkdown_12-1"
+                - generic [ref=e979]:
+                  - generic [ref=e980]:
+                    - text: Atwood, Jeff (2012-10-25).
+                    - link "\"The Future of Markdown\"" [ref=e981] [cursor=pointer]:
+                      - /url: https://blog.codinghorror.com/the-future-of-markdown/
+                    - text: . CodingHorror.com.
+                    - link "Archived" [ref=e982] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20140211233513/http://www.codinghorror.com/blog/2012/10/the-future-of-markdown.html
+                    - text: from the original on 2014-02-11
+                    - generic [ref=e983]: . Retrieved 2014-04-25
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=The+Future+of+Markdown&rft.pub=CodingHorror.com&rft.date=2012-10-25&rft.aulast=Atwood&rft.aufirst=Jeff&rft_id=https%3A%2F%2Fblog.codinghorror.com%2Fthe-future-of-markdown%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e984]:
+                - generic [ref=e985]:
+                  - text: ^
+                  - link "Jump up to:" [ref=e986] [cursor=pointer]:
+                    - /url: "#cite_ref-ArsTechnica2014_13-0"
+                  - link [ref=e988] [cursor=pointer]:
+                    - /url: "#cite_ref-ArsTechnica2014_13-1"
+                  - link [ref=e989] [cursor=pointer]:
+                    - /url: "#cite_ref-ArsTechnica2014_13-2"
+                - generic [ref=e990]:
+                  - generic [ref=e991]:
+                    - text: Gilbertson, Scott (October 5, 2014).
+                    - 'link "\"Markdown throwdown: What happens when FOSS software gets corporate backing?\"" [ref=e992] [cursor=pointer]':
+                      - /url: https://arstechnica.com/information-technology/2014/10/markdown-throwdown-what-happens-when-foss-software-gets-corporate-backing/
+                    - text: .
+                    - link "Ars Technica" [ref=e994] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Ars_Technica
+                    - text: .
+                    - link "Archived" [ref=e995] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20201114231130/https://arstechnica.com/information-technology/2014/10/markdown-throwdown-what-happens-when-foss-software-gets-corporate-backing/
+                    - text: from the original on November 14, 2020
+                    - generic [ref=e996]: . Retrieved June 14, 2017
+                    - text: .
+                    - generic [ref=e997]:
+                      - link "CommonMark" [ref=e998] [cursor=pointer]:
+                        - /url: https://en.wikipedia.org/wiki/CommonMark
+                      - text: fork could end up better for users... but original creators seem to disagree.
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=article&rft.jtitle=Ars+Technica&rft.atitle=Markdown+throwdown%3A+What+happens+when+FOSS+software+gets+corporate+backing%3F&rft.date=2014-10-05&rft.aulast=Gilbertson&rft.aufirst=Scott&rft_id=https%3A%2F%2Farstechnica.com%2Finformation-technology%2F2014%2F10%2Fmarkdown-throwdown-what-happens-when-foss-software-gets-corporate-backing%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e999]:
+                - link "Jump up" [ref=e1001] [cursor=pointer]:
+                  - /url: "#cite_ref-Gruber_14-0"
+                  - text: ^
+                - generic [ref=e1002]:
+                  - generic [ref=e1003]:
+                    - text: "@gruber (June 12, 2016)."
+                    - 'link "\"I should write about it, but it''s painful. More or less: Aaron was my sounding board, my muse\"" [ref=e1004] [cursor=pointer]':
+                      - /url: https://twitter.com/gruber/status/741989829173510145
+                    - text: (
+                    - link "Tweet" [ref=e1005] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Tweet_(social_media)
+                    - text: ) – via
+                    - link "Twitter" [ref=e1006] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Twitter
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=I+should+write+about+it%2C+but+it%27s+painful.+More+or+less%3A+Aaron+was+my+sounding+board%2C+my+muse.&rft.date=2016-06-12&rft.au=gruber&rft_id=https%3A%2F%2Ftwitter.com%2Fgruber%2Fstatus%2F741989829173510145&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1007]:
+                - link "Jump up" [ref=e1009] [cursor=pointer]:
+                  - /url: "#cite_ref-grutatext_15-0"
+                  - text: ^
+                - generic [ref=e1010]:
+                  - generic [ref=e1011]:
+                    - 'link "\"Un naufragio personal: The Grutatxt markup\"" [ref=e1012] [cursor=pointer]':
+                      - /url: https://web.archive.org/web/20220630230546/https://triptico.com/docs/grutatxt_markup.html
+                    - text: . triptico.com. Archived from
+                    - link "the original" [ref=e1013] [cursor=pointer]:
+                      - /url: https://triptico.com/docs/grutatxt_markup.html
+                    - text: on 2022-06-30
+                    - generic [ref=e1014]: . Retrieved 2022-06-30
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=triptico.com&rft.atitle=Un+naufragio+personal%3A+The+Grutatxt+markup&rft_id=https%3A%2F%2Ftriptico.com%2Fdocs%2Fgrutatxt_markup.html&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1015]:
+                - link "Jump up" [ref=e1017] [cursor=pointer]:
+                  - /url: "#cite_ref-ettext_16-0"
+                  - text: ^
+                - generic [ref=e1018]:
+                  - generic [ref=e1019]:
+                    - 'link "\"EtText: Documentation: Using EtText\"" [ref=e1020] [cursor=pointer]':
+                      - /url: http://ettext.taint.org/doc/ettext.html
+                    - text: . ettext.taint.org
+                    - generic [ref=e1021]: . Retrieved 2022-06-30
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=ettext.taint.org&rft.atitle=EtText%3A+Documentation%3A+Using+EtText&rft_id=http%3A%2F%2Fettext.taint.org%2Fdoc%2Fettext.html&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1022]:
+                - link "Jump up" [ref=e1024] [cursor=pointer]:
+                  - /url: "#cite_ref-18"
+                  - text: ^
+                - generic [ref=e1025]:
+                  - generic [ref=e1026]:
+                    - link "\"Markdown Syntax Documentation\"" [ref=e1027] [cursor=pointer]:
+                      - /url: https://daringfireball.net/projects/markdown/syntax
+                    - text: . Daring Fireball.
+                    - link "Archived" [ref=e1028] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20190909051956/https://daringfireball.net/projects/markdown/syntax
+                    - text: from the original on 2019-09-09
+                    - generic [ref=e1029]: . Retrieved 2018-03-09
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Markdown+Syntax+Documentation&rft.pub=Daring+Fireball&rft_id=https%3A%2F%2Fdaringfireball.net%2Fprojects%2Fmarkdown%2Fsyntax&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1030]:
+                - link "Jump up" [ref=e1032] [cursor=pointer]:
+                  - /url: "#cite_ref-gfm_on_github-why_spec_19-0"
+                  - text: ^
+                - generic [ref=e1033]:
+                  - generic [ref=e1034]:
+                    - link "\"GitHub Flavored Markdown Spec – Why is a spec needed?\"" [ref=e1035] [cursor=pointer]:
+                      - /url: https://github.github.com/gfm/#why-is-a-spec-needed-
+                    - text: . github.github.com.
+                    - link "Archived" [ref=e1036] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20200203204734/https://github.github.com/gfm/#why-is-a-spec-needed-
+                    - text: from the original on 2020-02-03
+                    - generic [ref=e1037]: . Retrieved 2018-05-17
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=github.github.com&rft.atitle=GitHub+Flavored+Markdown+Spec+%E2%80%93+Why+is+a+spec+needed%3F&rft_id=https%3A%2F%2Fgithub.github.com%2Fgfm%2F%23why-is-a-spec-needed-&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1038]:
+                - link "Jump up" [ref=e1040] [cursor=pointer]:
+                  - /url: "#cite_ref-babelmark-2_20-0"
+                  - text: ^
+                - generic [ref=e1041]:
+                  - generic [ref=e1042]:
+                    - link "\"Babelmark 2 – Compare markdown implementations\"" [ref=e1043] [cursor=pointer]:
+                      - /url: http://johnmacfarlane.net/babelmark2/
+                    - text: . Johnmacfarlane.net.
+                    - link "Archived" [ref=e1044] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20170718113552/http://johnmacfarlane.net/babelmark2/
+                    - text: from the original on 2017-07-18
+                    - generic [ref=e1045]: . Retrieved 2014-04-25
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Babelmark+2+%E2%80%93+Compare+markdown+implementations&rft.pub=Johnmacfarlane.net&rft_id=http%3A%2F%2Fjohnmacfarlane.net%2Fbabelmark2%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1046]:
+                - link "Jump up" [ref=e1048] [cursor=pointer]:
+                  - /url: "#cite_ref-babelmark-3_21-0"
+                  - text: ^
+                - generic [ref=e1049]:
+                  - generic [ref=e1050]:
+                    - link "\"Babelmark 3 – Compare Markdown Implementations\"" [ref=e1051] [cursor=pointer]:
+                      - /url: https://babelmark.github.io/
+                    - text: . github.io.
+                    - link "Archived" [ref=e1052] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20201112043521/https://babelmark.github.io/
+                    - text: from the original on 2020-11-12
+                    - generic [ref=e1053]: . Retrieved 2017-12-10
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Babelmark+3+%E2%80%93+Compare+Markdown+Implementations&rft.pub=github.io&rft_id=https%3A%2F%2Fbabelmark.github.io%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1054]:
+                - link "Jump up" [ref=e1056] [cursor=pointer]:
+                  - /url: "#cite_ref-22"
+                  - text: ^
+                - generic [ref=e1057]:
+                  - generic [ref=e1058]:
+                    - link "\"Babelmark 2 – FAQ\"" [ref=e1059] [cursor=pointer]:
+                      - /url: http://johnmacfarlane.net/babelmark2/faq.html
+                    - text: . Johnmacfarlane.net.
+                    - link "Archived" [ref=e1060] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20170728115918/http://johnmacfarlane.net/babelmark2/faq.html
+                    - text: from the original on 2017-07-28
+                    - generic [ref=e1061]: . Retrieved 2014-04-25
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Babelmark+2+%E2%80%93+FAQ&rft.pub=Johnmacfarlane.net&rft_id=http%3A%2F%2Fjohnmacfarlane.net%2Fbabelmark2%2Ffaq.html&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1062]:
+                - link "Jump up" [ref=e1064] [cursor=pointer]:
+                  - /url: "#cite_ref-23"
+                  - text: ^
+                - generic [ref=e1065]:
+                  - generic [ref=e1066]:
+                    - link "Gruber, John [@gruber]" [ref=e1067] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/John_Gruber
+                    - text: (4 September 2014).
+                    - link "\"@tobie @espadrine @comex @wycats Because different sites (and people) have different needs. No one syntax would make all happy\"" [ref=e1068] [cursor=pointer]:
+                      - /url: https://twitter.com/gruber/status/507670720886091776
+                    - text: (
+                    - link "Tweet" [ref=e1069] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Tweet_(social_media)
+                    - text: ) – via
+                    - link "Twitter" [ref=e1070] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Twitter
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=%40tobie+%40espadrine+%40comex+%40wycats+Because+different+sites+%28and+people%29+have+different+needs.+No+one+syntax+would+make+all+happy.&rft.date=2014-09-04&rft.aulast=Gruber&rft.aufirst=John&rft_id=https%3A%2F%2Ftwitter.com%2Fgruber%2Fstatus%2F507670720886091776&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1071]:
+                - link "Jump up" [ref=e1073] [cursor=pointer]:
+                  - /url: "#cite_ref-curlyBraces_24-0"
+                  - text: ^
+                - generic [ref=e1074]:
+                  - generic [ref=e1075]:
+                    - text: Gruber, John (19 May 2022).
+                    - link "\"Markdoc\"" [ref=e1076] [cursor=pointer]:
+                      - /url: https://daringfireball.net/linked/2022/05/19/markdoc
+                    - text: . Daring Fireball.
+                    - link "Archived" [ref=e1077] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20220519202920/https://daringfireball.net/linked/2022/05/19/markdoc
+                    - text: from the original on 19 May 2022
+                    - generic [ref=e1078]: . Retrieved May 19, 2022
+                    - text: . I love their syntax extensions — very true to the spirit of Markdown. They use curly braces for their extensions; I'm not sure I ever made this clear, publicly, but I avoided using curly braces in Markdown itself — even though they are very tempting characters — to unofficially reserve them for implementation-specific extensions. Markdoc's extensive use of curly braces for its syntax is exactly the sort of thing I was thinking about.
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=Daring+Fireball&rft.atitle=Markdoc&rft.date=2022-05-19&rft.aulast=Gruber&rft.aufirst=John&rft_id=https%3A%2F%2Fdaringfireball.net%2Flinked%2F2022%2F05%2F19%2Fmarkdoc&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1079]:
+                - link "Jump up" [ref=e1081] [cursor=pointer]:
+                  - /url: "#cite_ref-cm-uti_25-0"
+                  - text: ^
+                - generic [ref=e1082]:
+                  - generic [ref=e1083]:
+                    - link "\"UTI of a CommonMark document\"" [ref=e1084] [cursor=pointer]:
+                      - /url: https://talk.commonmark.org/t/uti-of-a-commonmark-document/2406
+                    - text: . 12 April 2017.
+                    - link "Archived" [ref=e1085] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20181122140119/https://talk.commonmark.org/t/uti-of-a-commonmark-document/2406
+                    - text: from the original on 22 November 2018
+                    - generic [ref=e1086]: . Retrieved 29 September 2017
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=UTI+of+a+CommonMark+document&rft.date=2017-04-12&rft_id=https%3A%2F%2Ftalk.commonmark.org%2Ft%2Futi-of-a-commonmark-document%2F2406&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1087]:
+                - link "Jump up" [ref=e1089] [cursor=pointer]:
+                  - /url: "#cite_ref-cm-spec_26-0"
+                  - text: ^
+                - generic [ref=e1090]:
+                  - generic [ref=e1091]:
+                    - link "\"CommonMark specification\"" [ref=e1092] [cursor=pointer]:
+                      - /url: http://spec.commonmark.org/
+                    - text: .
+                    - link "Archived" [ref=e1093] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20170807052756/http://spec.commonmark.org/
+                    - text: from the original on 2017-08-07
+                    - generic [ref=e1094]: . Retrieved 2017-07-26
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=CommonMark+specification&rft_id=http%3A%2F%2Fspec.commonmark.org%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1095]:
+                - link "Jump up" [ref=e1097] [cursor=pointer]:
+                  - /url: "#cite_ref-27"
+                  - text: ^
+                - generic [ref=e1098]:
+                  - generic [ref=e1099]:
+                    - link "\"Markdown Community Page\"" [ref=e1100] [cursor=pointer]:
+                      - /url: https://markdown.github.io/
+                    - text: . GitHub.
+                    - link "Archived" [ref=e1101] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20201026161924/http://markdown.github.io/
+                    - text: from the original on 2020-10-26
+                    - generic [ref=e1102]: . Retrieved 2014-04-25
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Markdown+Community+Page&rft.pub=GitHub&rft_id=https%3A%2F%2Fmarkdown.github.io%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1103]:
+                - link "Jump up" [ref=e1105] [cursor=pointer]:
+                  - /url: "#cite_ref-28"
+                  - text: ^
+                - generic [ref=e1106]:
+                  - generic [ref=e1107]:
+                    - link "\"Standard Markdown is now Common Markdown\"" [ref=e1108] [cursor=pointer]:
+                      - /url: http://blog.codinghorror.com/standard-markdown-is-now-common-markdown/
+                    - text: . Jeff Atwood. 4 September 2014.
+                    - link "Archived" [ref=e1109] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20141009181014/http://blog.codinghorror.com/standard-markdown-is-now-common-markdown/
+                    - text: from the original on 2014-10-09
+                    - generic [ref=e1110]: . Retrieved 2014-10-07
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Standard+Markdown+is+now+Common+Markdown&rft.pub=Jeff+Atwood&rft.date=2014-09-04&rft_id=http%3A%2F%2Fblog.codinghorror.com%2Fstandard-markdown-is-now-common-markdown%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1111]:
+                - link "Jump up" [ref=e1113] [cursor=pointer]:
+                  - /url: "#cite_ref-29"
+                  - text: ^
+                - generic [ref=e1114]:
+                  - generic [ref=e1115]:
+                    - link "\"Standard Markdown Becomes Common Markdown then CommonMark\"" [ref=e1116] [cursor=pointer]:
+                      - /url: https://www.infoq.com/news/2014/09/markdown-commonmark
+                    - text: . InfoQ.
+                    - link "Archived" [ref=e1117] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20200930150521/https://www.infoq.com/news/2014/09/markdown-commonmark/
+                    - text: from the original on 2020-09-30
+                    - generic [ref=e1118]: . Retrieved 2014-10-07
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=InfoQ&rft.atitle=Standard+Markdown+Becomes+Common+Markdown+then+CommonMark&rft_id=https%3A%2F%2Fwww.infoq.com%2Fnews%2F2014%2F09%2Fmarkdown-commonmark&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1119]:
+                - link "Jump up" [ref=e1121] [cursor=pointer]:
+                  - /url: "#cite_ref-commonmark.org_30-0"
+                  - text: ^
+                - generic [ref=e1122]:
+                  - generic [ref=e1123]:
+                    - link "\"CommonMark\"" [ref=e1124] [cursor=pointer]:
+                      - /url: http://commonmark.org/
+                    - text: .
+                    - link "Archived" [ref=e1125] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20160412211434/http://commonmark.org/
+                    - text: from the original on 12 April 2016
+                    - generic [ref=e1126]: . Retrieved 20 Jun 2018
+                    - text: . The current version of the CommonMark spec is complete, and quite robust after a year of public feedback … but not quite final. With your help, we plan to announce a finalized 1.0 spec and test suite in 2019.
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=CommonMark&rft_id=http%3A%2F%2Fcommonmark.org%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1127]:
+                - link "Jump up" [ref=e1129] [cursor=pointer]:
+                  - /url: "#cite_ref-31"
+                  - text: ^
+                - generic [ref=e1130]:
+                  - generic [ref=e1131]:
+                    - link "\"Issues we MUST resolve before 1.0 release [6 remaining]\"" [ref=e1132] [cursor=pointer]:
+                      - /url: https://talk.commonmark.org/t/issues-we-must-resolve-before-1-0-release-6-remaining/1287
+                    - text: . CommonMark Discussion. 2015-07-26.
+                    - link "Archived" [ref=e1133] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20210414032229/https://talk.commonmark.org/t/issues-we-must-resolve-before-1-0-release-6-remaining/1287
+                    - text: from the original on 2021-04-14
+                    - generic [ref=e1134]: . Retrieved 2020-10-02
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=CommonMark+Discussion&rft.atitle=Issues+we+MUST+resolve+before+1.0+release+%5B6+remaining%5D&rft.date=2015-07-26&rft_id=https%3A%2F%2Ftalk.commonmark.org%2Ft%2Fissues-we-must-resolve-before-1-0-release-6-remaining%2F1287&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1135]:
+                - link "Jump up" [ref=e1137] [cursor=pointer]:
+                  - /url: "#cite_ref-IANA_32-0"
+                  - text: ^
+                - generic [ref=e1138]:
+                  - generic [ref=e1139]:
+                    - link "\"Markdown Variants\"" [ref=e1140] [cursor=pointer]:
+                      - /url: https://www.iana.org/assignments/markdown-variants/markdown-variants.xhtml
+                    - text: .
+                    - link "IANA" [ref=e1141] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Internet_Assigned_Numbers_Authority
+                    - text: . 2016-03-28.
+                    - link "Archived" [ref=e1142] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20201027005128/https://www.iana.org/assignments/markdown-variants/markdown-variants.xhtml
+                    - text: from the original on 2020-10-27
+                    - generic [ref=e1143]: . Retrieved 2016-07-06
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Markdown+Variants&rft.pub=IANA&rft.date=2016-03-28&rft_id=https%3A%2F%2Fwww.iana.org%2Fassignments%2Fmarkdown-variants%2Fmarkdown-variants.xhtml&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1144]:
+                - link "Jump up" [ref=e1146] [cursor=pointer]:
+                  - /url: "#cite_ref-33"
+                  - text: ^
+                - generic [ref=e1147]:
+                  - generic [ref=e1148]:
+                    - 'link "\"Markdown Text 101 (Chat Formatting: Bold, Italic, Underline)\"" [ref=e1149] [cursor=pointer]':
+                      - /url: https://support.discord.com/hc/en-us/articles/210298617-Markdown-Text-101-Chat-Formatting-Bold-Italic-Underline
+                    - text: . Discord. 2024-10-03
+                    - generic [ref=e1150]: . Retrieved 2025-02-07
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=Discord&rft.atitle=Markdown+Text+101+%28Chat+Formatting%3A+Bold%2C+Italic%2C+Underline%29&rft.date=2024-10-03&rft_id=https%3A%2F%2Fsupport.discord.com%2Fhc%2Fen-us%2Farticles%2F210298617-Markdown-Text-101-Chat-Formatting-Bold-Italic-Underline&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1151]:
+                - generic [ref=e1152]:
+                  - text: ^
+                  - link "Jump up to:" [ref=e1153] [cursor=pointer]:
+                    - /url: "#cite_ref-gfm_on_github_34-0"
+                  - link [ref=e1155] [cursor=pointer]:
+                    - /url: "#cite_ref-gfm_on_github_34-1"
+                - generic [ref=e1156]:
+                  - generic [ref=e1157]:
+                    - link "\"GitHub Flavored Markdown Spec\"" [ref=e1158] [cursor=pointer]:
+                      - /url: https://github.github.com/gfm/
+                    - text: . GitHub.
+                    - link "Archived" [ref=e1159] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20200203204734/https://github.github.com/gfm/
+                    - text: from the original on 2020-02-03
+                    - generic [ref=e1160]: . Retrieved 2020-06-11
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=GitHub+Flavored+Markdown+Spec&rft.pub=GitHub&rft_id=https%3A%2F%2Fgithub.github.com%2Fgfm%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1161]:
+                - link "Jump up" [ref=e1163] [cursor=pointer]:
+                  - /url: "#cite_ref-35"
+                  - text: ^
+                - generic [ref=e1164]:
+                  - generic [ref=e1165]:
+                    - link "\"Reddit markdown primer. Or, how do you do all that fancy formatting in your comments, anyway?\"" [ref=e1166] [cursor=pointer]:
+                      - /url: https://www.reddit.com/r/reddit.com/comments/6ewgt/reddit_markdown_primer_or_how_do_you_do_all_that/
+                    - text: . Reddit.
+                    - link "Archived" [ref=e1167] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20190611185827/https://www.reddit.com/r/reddit.com/comments/6ewgt/reddit_markdown_primer_or_how_do_you_do_all_that/
+                    - text: from the original on 2019-06-11
+                    - generic [ref=e1168]: . Retrieved 2013-03-29
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Reddit+markdown+primer.+Or%2C+how+do+you+do+all+that+fancy+formatting+in+your+comments%2C+anyway%3F&rft.pub=Reddit&rft_id=https%3A%2F%2Fwww.reddit.com%2Fr%2Freddit.com%2Fcomments%2F6ewgt%2Freddit_markdown_primer_or_how_do_you_do_all_that%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1169]:
+                - link "Jump up" [ref=e1171] [cursor=pointer]:
+                  - /url: "#cite_ref-36"
+                  - text: ^
+                - generic [ref=e1172]:
+                  - generic [ref=e1173]:
+                    - 'link "\"SourceForge: Markdown Syntax Guide\"" [ref=e1174] [cursor=pointer]':
+                      - /url: https://sourceforge.net/p/forge/documentation/markdown_syntax/
+                    - text: .
+                    - link "SourceForge" [ref=e1175] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/SourceForge
+                    - text: .
+                    - link "Archived" [ref=e1176] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20190613130356/https://sourceforge.net/p/forge/documentation/markdown_syntax/
+                    - text: from the original on 2019-06-13
+                    - generic [ref=e1177]: . Retrieved 2013-05-10
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=SourceForge%3A+Markdown+Syntax+Guide&rft.pub=SourceForge&rft_id=https%3A%2F%2Fsourceforge.net%2Fp%2Fforge%2Fdocumentation%2Fmarkdown_syntax%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1178]:
+                - link "Jump up" [ref=e1180] [cursor=pointer]:
+                  - /url: "#cite_ref-37"
+                  - text: ^
+                - generic [ref=e1181]:
+                  - generic [ref=e1182]:
+                    - link "\"Markdown Editing Help\"" [ref=e1183] [cursor=pointer]:
+                      - /url: https://stackoverflow.com/editing-help
+                    - text: . StackOverflow.com.
+                    - link "Archived" [ref=e1184] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20140328061854/http://stackoverflow.com/editing-help
+                    - text: from the original on 2014-03-28
+                    - generic [ref=e1185]: . Retrieved 2014-04-11
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Markdown+Editing+Help&rft.pub=StackOverflow.com&rft_id=https%3A%2F%2Fstackoverflow.com%2Fediting-help&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1186]:
+                - link "Jump up" [ref=e1188] [cursor=pointer]:
+                  - /url: "#cite_ref-38"
+                  - text: ^
+                - generic [ref=e1189]:
+                  - generic [ref=e1190]:
+                    - link "\"Markdown Syntax Documentation\"" [ref=e1191] [cursor=pointer]:
+                      - /url: https://daringfireball.net/projects/markdown/syntax#html
+                    - text: . daringfireball.net.
+                    - link "Archived" [ref=e1192] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20190909051956/https://daringfireball.net/projects/markdown/syntax#html
+                    - text: from the original on 2019-09-09
+                    - generic [ref=e1193]: . Retrieved 2021-03-01
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=daringfireball.net&rft.atitle=Markdown+Syntax+Documentation&rft_id=https%3A%2F%2Fdaringfireball.net%2Fprojects%2Fmarkdown%2Fsyntax%23html&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1194]:
+                - link "Jump up" [ref=e1196] [cursor=pointer]:
+                  - /url: "#cite_ref-italic_39-0"
+                  - text: ^
+                - generic [ref=e1197]:
+                  - generic [ref=e1198]:
+                    - 'link "\"Basic Syntax: Italic\"" [ref=e1199] [cursor=pointer]':
+                      - /url: https://www.markdownguide.org/basic-syntax/#italic
+                    - text: . The Markdown Guide. Matt Cone.
+                    - link "Archived" [ref=e1200] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20220326234942/https://www.markdownguide.org/basic-syntax/#italic
+                    - text: from the original on 26 March 2022
+                    - generic [ref=e1201]: . Retrieved 27 March 2022
+                    - text: . To italicize text, add one asterisk or underscore before and after a word or phrase. To italicize the middle of a word for emphasis, add one asterisk without spaces around the letters.
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=The+Markdown+Guide&rft.atitle=Basic+Syntax%3A+Italic&rft_id=https%3A%2F%2Fwww.markdownguide.org%2Fbasic-syntax%2F%23italic&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1202]:
+                - link "Jump up" [ref=e1204] [cursor=pointer]:
+                  - /url: "#cite_ref-40"
+                  - text: ^
+                - generic [ref=e1205]:
+                  - generic [ref=e1206]:
+                    - link "\"Spoiler Tags!\"" [ref=e1207] [cursor=pointer]:
+                      - /url: https://support.discord.com/hc/en-us/articles/360022320632-Spoiler-Tags
+                    - text: . Discord. 2022-01-30
+                    - generic [ref=e1208]: . Retrieved 2026-06-02
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=Discord&rft.atitle=Spoiler+Tags%21&rft.date=2022-01-30&rft_id=https%3A%2F%2Fsupport.discord.com%2Fhc%2Fen-us%2Farticles%2F360022320632-Spoiler-Tags&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1209]:
+                - link "Jump up" [ref=e1211] [cursor=pointer]:
+                  - /url: "#cite_ref-41"
+                  - text: ^
+                - generic [ref=e1212]:
+                  - generic [ref=e1213]:
+                    - 'link "\"Telegram Text Formatting Options: A Complete Guide by Umnico\"" [ref=e1214] [cursor=pointer]':
+                      - /url: https://umnico.com/blog/telegram-text-formatting/
+                    - text: . umnico.com. 2024-12-16
+                    - generic [ref=e1215]: . Retrieved 2026-06-02
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=umnico.com&rft.atitle=Telegram+Text+Formatting+Options%3A+A+Complete+Guide+by+Umnico&rft.date=2024-12-16&rft_id=https%3A%2F%2Fumnico.com%2Fblog%2Ftelegram-text-formatting%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1216]:
+                - link "Jump up" [ref=e1218] [cursor=pointer]:
+                  - /url: "#cite_ref-42"
+                  - text: ^
+                - generic [ref=e1219]:
+                  - generic [ref=e1220]:
+                    - 'link "\"GitHub - AndyRightNow/telegram-markdown-v2: Transform your markdown to be ready and compatible for Telegram''s MarkdownV2 parse mode\"" [ref=e1221] [cursor=pointer]':
+                      - /url: https://github.com/AndyRightNow/telegram-markdown-v2
+                    - text: . GitHub
+                    - generic [ref=e1222]: . Retrieved 2026-06-02
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=GitHub&rft.atitle=GitHub+-+AndyRightNow%2Ftelegram-markdown-v2%3A+Transform+your+markdown+to+be+ready+and+compatible+for+Telegram%27s+MarkdownV2+parse+mode&rft_id=https%3A%2F%2Fgithub.com%2FAndyRightNow%2Ftelegram-markdown-v2&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1223]:
+                - link "Jump up" [ref=e1225] [cursor=pointer]:
+                  - /url: "#cite_ref-43"
+                  - text: ^
+                - generic [ref=e1226]:
+                  - generic [ref=e1227]:
+                    - text: Suomalainen, Aminda.
+                    - link "\"Spoilers on Matrix protocol\"" [ref=e1228] [cursor=pointer]:
+                      - /url: https://aminda.eu/n/matrixspoilers.html
+                    - text: . Aminda Suomalainen
+                    - generic [ref=e1229]: . Retrieved 2026-06-02
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=Aminda+Suomalainen&rft.atitle=Spoilers+on+Matrix+protocol&rft.aulast=Suomalainen&rft.aufirst=Aminda&rft_id=https%3A%2F%2Faminda.eu%2Fn%2Fmatrixspoilers.html&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1230]:
+                - link "Jump up" [ref=e1232] [cursor=pointer]:
+                  - /url: "#cite_ref-44"
+                  - text: ^
+                - generic [ref=e1233]:
+                  - generic [ref=e1234]:
+                    - link "\"Using Markdowns\"" [ref=e1235] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20251124052456/https://support.guilded.gg/hc/en-us/articles/360039352653-Using-Markdowns
+                    - text: . Guilded. 2025-07-01. Archived from
+                    - link "the original" [ref=e1236] [cursor=pointer]:
+                      - /url: https://support.guilded.gg/hc/en-us/articles/360039352653-Using-Markdowns
+                    - text: on 24 Nov 2025
+                    - generic [ref=e1237]: . Retrieved 2026-06-02
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=Guilded&rft.atitle=Using+Markdowns&rft.date=2025-07-01&rft_id=https%3A%2F%2Fsupport.guilded.gg%2Fhc%2Fen-us%2Farticles%2F360039352653-Using-Markdowns&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1238]:
+                - link "Jump up" [ref=e1240] [cursor=pointer]:
+                  - /url: "#cite_ref-45"
+                  - text: ^
+                - generic [ref=e1241]:
+                  - generic [ref=e1242]:
+                    - link "\"Markdown spoilers - Flarum Community\"" [ref=e1243] [cursor=pointer]:
+                      - /url: https://discuss.flarum.org/d/20817-markdown-spoilers
+                    - text: . discuss.flarum.org
+                    - generic [ref=e1244]: . Retrieved 2026-06-02
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=discuss.flarum.org&rft.atitle=Markdown+spoilers+-+Flarum+Community&rft_id=https%3A%2F%2Fdiscuss.flarum.org%2Fd%2F20817-markdown-spoilers&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1245]:
+                - link "Jump up" [ref=e1247] [cursor=pointer]:
+                  - /url: "#cite_ref-46"
+                  - text: ^
+                - generic [ref=e1248]:
+                  - generic [ref=e1249]:
+                    - link "\"nodebb-plugin-extended-markdown - npm\"" [ref=e1250] [cursor=pointer]:
+                      - /url: https://www.npmjs.com/package/nodebb-plugin-extended-markdown
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=nodebb-plugin-extended-markdown+-+npm&rft_id=https%3A%2F%2Fwww.npmjs.com%2Fpackage%2Fnodebb-plugin-extended-markdown&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1251]:
+                - link "Jump up" [ref=e1253] [cursor=pointer]:
+                  - /url: "#cite_ref-47"
+                  - text: ^
+                - generic [ref=e1254]:
+                  - generic [ref=e1255]:
+                    - link "\"lib/post/markdown/markdown.js · master · Thomas Lynch / jschan · GitLab\"" [ref=e1256] [cursor=pointer]:
+                      - /url: https://gitgud.io/fatchan/jschan/-/blob/master/lib/post/markdown/markdown.js
+                    - text: . GitLab
+                    - generic [ref=e1257]: . Retrieved 2026-06-03
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=GitLab&rft.atitle=lib%2Fpost%2Fmarkdown%2Fmarkdown.js+%C2%B7+master+%C2%B7+Thomas+Lynch+%2F+jschan+%C2%B7+GitLab&rft_id=https%3A%2F%2Fgitgud.io%2Ffatchan%2Fjschan%2F-%2Fblob%2Fmaster%2Flib%2Fpost%2Fmarkdown%2Fmarkdown.js&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1258]:
+                - link "Jump up" [ref=e1260] [cursor=pointer]:
+                  - /url: "#cite_ref-48"
+                  - text: ^
+                - generic [ref=e1261]:
+                  - generic [ref=e1262]:
+                    - link "Tom Preston-Werner" [ref=e1263] [cursor=pointer]:
+                      - /url: https://en.wikipedia.org/wiki/Tom_Preston-Werner
+                    - text: .
+                    - link "\"GitHub Flavored Markdown Examples\"" [ref=e1264] [cursor=pointer]:
+                      - /url: https://github.com/mojombo/github-flavored-markdown/issues/1
+                    - text: . GitHub.
+                    - link "Archived" [ref=e1265] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20210513154115/https://github.com/mojombo/github-flavored-markdown/issues/1
+                    - text: from the original on 2021-05-13
+                    - generic [ref=e1266]: . Retrieved 2021-04-02
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=GitHub&rft.atitle=GitHub+Flavored+Markdown+Examples&rft.au=Tom+Preston-Werner&rft_id=https%3A%2F%2Fgithub.com%2Fmojombo%2Fgithub-flavored-markdown%2Fissues%2F1&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1267]:
+                - link "Jump up" [ref=e1269] [cursor=pointer]:
+                  - /url: "#cite_ref-49"
+                  - text: ^
+                - generic [ref=e1270]:
+                  - generic [ref=e1271]:
+                    - link "\"A formal spec for GitHub Flavored Markdown\"" [ref=e1272] [cursor=pointer]:
+                      - /url: https://githubengineering.com/a-formal-spec-for-github-markdown/
+                    - text: . GitHub Engineering. 14 March 2017.
+                    - link "Archived" [ref=e1273] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20200203205138/https://githubengineering.com/a-formal-spec-for-github-markdown/
+                    - text: from the original on 3 February 2020
+                    - generic [ref=e1274]: . Retrieved 16 Mar 2017
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=GitHub+Engineering&rft.atitle=A+formal+spec+for+GitHub+Flavored+Markdown&rft.date=2017-03-14&rft_id=https%3A%2F%2Fgithubengineering.com%2Fa-formal-spec-for-github-markdown%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1275]:
+                - generic [ref=e1276]:
+                  - text: ^
+                  - link "Jump up to:" [ref=e1277] [cursor=pointer]:
+                    - /url: "#cite_ref-fortin-2018_50-0"
+                  - link [ref=e1279] [cursor=pointer]:
+                    - /url: "#cite_ref-fortin-2018_50-1"
+                - generic [ref=e1280]:
+                  - generic [ref=e1281]:
+                    - text: Fortin, Michel (2018).
+                    - link "\"PHP Markdown Extra\"" [ref=e1282] [cursor=pointer]:
+                      - /url: https://michelf.ca/projects/php-markdown/extra
+                    - text: . Michel Fortin website.
+                    - link "Archived" [ref=e1283] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20210117015819/https://michelf.ca/projects/php-markdown/extra/
+                    - text: from the original on 2021-01-17
+                    - generic [ref=e1284]: . Retrieved 2018-12-26
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=Michel+Fortin+website&rft.atitle=PHP+Markdown+Extra&rft.date=2018&rft.aulast=Fortin&rft.aufirst=Michel&rft_id=https%3A%2F%2Fmichelf.ca%2Fprojects%2Fphp-markdown%2Fextra&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1285]:
+                - link "Jump up" [ref=e1287] [cursor=pointer]:
+                  - /url: "#cite_ref-51"
+                  - text: ^
+                - generic [ref=e1288]:
+                  - generic [ref=e1289]:
+                    - link "\"Markdown editor for BUEditor\"" [ref=e1290] [cursor=pointer]:
+                      - /url: https://drupal.org/project/markdowneditor
+                    - text: . 4 December 2008.
+                    - link "Archived" [ref=e1291] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20200917172201/https://www.drupal.org/project/markdowneditor
+                    - text: from the original on 17 September 2020
+                    - generic [ref=e1292]: . Retrieved 15 January 2017
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Abook&rft.genre=unknown&rft.btitle=Markdown+editor+for+BUEditor&rft.date=2008-12-04&rft_id=https%3A%2F%2Fdrupal.org%2Fproject%2Fmarkdowneditor&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1293]:
+                - link "Jump up" [ref=e1295] [cursor=pointer]:
+                  - /url: "#cite_ref-52"
+                  - text: ^
+                - generic [ref=e1296]:
+                  - generic [ref=e1297]:
+                    - 'link "\"Plugin: wet_textfilter_markdown\"" [ref=e1298] [cursor=pointer]':
+                      - /url: https://plugins.textpattern.com/plugins/wet_textfilter_markdown
+                    - text: . Textpattern CMS plugins. 2025-04-27.
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=Textpattern+CMS+plugins&rft.atitle=Plugin%3A+wet_textfilter_markdown&rft.date=2025-04-27&rft_id=https%3A%2F%2Fplugins.textpattern.com%2Fplugins%2Fwet_textfilter_markdown&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1299]:
+                - link "Jump up" [ref=e1301] [cursor=pointer]:
+                  - /url: "#cite_ref-53"
+                  - text: ^
+                - generic [ref=e1302]:
+                  - generic [ref=e1303]:
+                    - link "\"Markdown for TYPO3 (markdown_content)\"" [ref=e1304] [cursor=pointer]:
+                      - /url: https://extensions.typo3.org/extension/markdown_content/
+                    - text: . extensions.typo3.org.
+                    - link "Archived" [ref=e1305] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20210201205749/https://extensions.typo3.org/extension/markdown_content/
+                    - text: from the original on 2021-02-01
+                    - generic [ref=e1306]: . Retrieved 2019-02-06
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=extensions.typo3.org&rft.atitle=Markdown+for+TYPO3+%28markdown_content%29&rft_id=https%3A%2F%2Fextensions.typo3.org%2Fextension%2Fmarkdown_content%2F&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+              - listitem [ref=e1307]:
+                - link "Jump up" [ref=e1309] [cursor=pointer]:
+                  - /url: "#cite_ref-54"
+                  - text: ^
+                - generic [ref=e1310]:
+                  - generic [ref=e1311]:
+                    - link "\"W3C Community Page of Markdown Implementations\"" [ref=e1312] [cursor=pointer]:
+                      - /url: https://www.w3.org/community/markdown/wiki/MarkdownImplementations
+                    - text: . W3C Markdown Wiki.
+                    - link "Archived" [ref=e1313] [cursor=pointer]:
+                      - /url: https://web.archive.org/web/20200917231621/https://www.w3.org/community/markdown/wiki/MarkdownImplementations
+                    - text: from the original on 17 September 2020
+                    - generic [ref=e1314]: . Retrieved 24 March 2016
+                    - text: .
+                  - generic "ctx_ver=Z39.88-2004&rft_val_fmt=info%3Aofi%2Ffmt%3Akev%3Amtx%3Ajournal&rft.genre=unknown&rft.jtitle=W3C+Markdown+Wiki&rft.atitle=W3C+Community+Page+of+Markdown+Implementations&rft_id=https%3A%2F%2Fwww.w3.org%2Fcommunity%2Fmarkdown%2Fwiki%2FMarkdownImplementations&rfr_id=info%3Asid%2Fen.wikipedia.org%3AMarkdown"
+          - region [ref=e1315]:
+            - generic [ref=e1316]:
+              - heading "External links" [level=2] [ref=e1317]
+              - generic [ref=e1318]:
+                - link "edit":
+                  - /url: /w/index.php?title=Markdown&action=edit&section=12
+            - list [ref=e1319]:
+              - listitem [ref=e1320]:
+                - link "Official website" [ref=e1323] [cursor=pointer]:
+                  - /url: https://daringfireball.net/projects/markdown/
+                - text: for original John Gruber markup
+            - navigation [ref=e1324]:
+              - table [ref=e1325]:
+                - rowgroup [ref=e1326]:
+                  - row [ref=e1327]:
+                    - columnheader [ref=e1328]:
+                      - button "[show]" [ref=e1329] [cursor=pointer]
+                      - list [ref=e1331]:
+                        - listitem [ref=e1332]:
+                          - link "v" [ref=e1333] [cursor=pointer]:
+                            - /url: https://en.wikipedia.org/wiki/Template:Document_markup_languages
+                          - text: ·
+                        - listitem [ref=e1334]:
+                          - link "t" [ref=e1335] [cursor=pointer]:
+                            - /url: https://en.wikipedia.org/wiki/Template_talk:Document_markup_languages
+                          - text: ·
+                        - listitem [ref=e1336]:
+                          - link "e" [ref=e1337] [cursor=pointer]:
+                            - /url: https://en.wikipedia.org/wiki/Special:EditPage/Template:Document_markup_languages
+                      - link "Document markup languages" [ref=e1339] [cursor=pointer]:
+                        - /url: https://en.wikipedia.org/wiki/Markup_language
+                  - row: ( · · ) ·
+                  - row: · · · · · ·
+                  - row: · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · · ·
+                  - row
+            - navigation [ref=e1340]:
+              - table [ref=e1341]:
+                - rowgroup [ref=e1342]:
+                  - row [ref=e1343]:
+                    - columnheader [ref=e1344]:
+                      - button "[show]" [ref=e1345] [cursor=pointer]
+                      - list [ref=e1347]:
+                        - listitem [ref=e1348]:
+                          - link "v" [ref=e1349] [cursor=pointer]:
+                            - /url: https://en.wikipedia.org/wiki/Template:Data_exchange
+                          - text: ·
+                        - listitem [ref=e1350]:
+                          - link "t" [ref=e1351] [cursor=pointer]:
+                            - /url: https://en.wikipedia.org/wiki/Template_talk:Data_exchange
+                          - text: ·
+                        - listitem [ref=e1352]:
+                          - link "e" [ref=e1353] [cursor=pointer]:
+                            - /url: https://en.wikipedia.org/wiki/Special:EditPage/Template:Data_exchange
+                      - generic [ref=e1354]:
+                        - link "Data exchange" [ref=e1355] [cursor=pointer]:
+                          - /url: https://en.wikipedia.org/wiki/Data_exchange
+                        - text: formats
+                  - row: · · ( · · ) · · · · · · · () ·
+                  - row: · · () · · · · · () · · · · · · · · · · ·
+                  - row
+            - navigation [ref=e1356]:
+              - table [ref=e1357]:
+                - rowgroup [ref=e1358]:
+                  - row [ref=e1359]:
+                    - columnheader [ref=e1360]:
+                      - button "[show]" [ref=e1361] [cursor=pointer]
+                      - generic [ref=e1362]:
+                        - link "Authority control databases" [ref=e1363] [cursor=pointer]:
+                          - /url: https://en.wikipedia.org/wiki/Help:Authority_control
+                        - link [ref=e1365] [cursor=pointer]:
+                          - /url: https://www.wikidata.org/wiki/Q1193600#identifiers
+                          - img "Edit this at Wikidata" [ref=e1366]
+                  - row
+                  - row: ·
+        - generic [ref=e1368]:
+          - link "Categories" [ref=e1369] [cursor=pointer]:
+            - /url: /wiki/Help:Category
+          - text: ":"
+          - list [ref=e1370]:
+            - listitem [ref=e1371]:
+              - link "Computer-related introductions in 2004" [ref=e1372] [cursor=pointer]:
+                - /url: /wiki/Category:Computer-related_introductions_in_2004
+            - listitem [ref=e1373]:
+              - link "Lightweight markup languages" [ref=e1374] [cursor=pointer]:
+                - /url: /wiki/Category:Lightweight_markup_languages
+            - listitem [ref=e1375]:
+              - link "Open formats" [ref=e1376] [cursor=pointer]:
+                - /url: /wiki/Category:Open_formats
+    - contentinfo [ref=e1378]:
+      - list [ref=e1379]:
+        - listitem [ref=e1380]: This page was last edited on 28 August 2026, at 04:55 (UTC).
+        - listitem [ref=e1381]:
+          - text: Page was rendered with
+          - link "Parsoid" [ref=e1382] [cursor=pointer]:
+            - /url: https://www.mediawiki.org/wiki/Special:MyLanguage/Parsoid
+          - text: .
+        - listitem [ref=e1383]:
+          - text: Text is available under the
+          - link "Creative Commons Attribution-ShareAlike 4.0 License" [ref=e1384] [cursor=pointer]:
+            - /url: /wiki/Wikipedia:Text_of_the_Creative_Commons_Attribution-ShareAlike_4.0_International_License
+          - text: ; additional terms may apply. By using this site, you agree to the
+          - link "Terms of Use" [ref=e1385] [cursor=pointer]:
+            - /url: https://foundation.wikimedia.org/wiki/Special:MyLanguage/Policy:Terms_of_Use
+          - text: and
+          - link "Privacy Policy" [ref=e1386] [cursor=pointer]:
+            - /url: https://foundation.wikimedia.org/wiki/Special:MyLanguage/Policy:Privacy_policy
+          - text: . Wikipedia® is a registered trademark of the
+          - link "Wikimedia Foundation, Inc." [ref=e1387] [cursor=pointer]:
+            - /url: https://wikimediafoundation.org/
+          - text: ", a non-profit organization."
+      - list:
+        - listitem [ref=e1388]:
+          - link "Privacy policy" [ref=e1389] [cursor=pointer]:
+            - /url: https://foundation.wikimedia.org/wiki/Special:MyLanguage/Policy:Privacy_policy
+        - listitem [ref=e1390]:
+          - link "About Wikipedia" [ref=e1391] [cursor=pointer]:
+            - /url: /wiki/Wikipedia:About
+        - listitem [ref=e1392]:
+          - link "Disclaimers" [ref=e1393] [cursor=pointer]:
+            - /url: /wiki/Wikipedia:General_disclaimer
+        - listitem [ref=e1394]:
+          - link "Contact Wikipedia" [ref=e1395] [cursor=pointer]:
+            - /url: //en.wikipedia.org/wiki/Wikipedia:Contact_us
+        - listitem [ref=e1396]:
+          - link "Legal & safety contacts" [ref=e1397] [cursor=pointer]:
+            - /url: https://foundation.wikimedia.org/wiki/Special:MyLanguage/Legal:Wikimedia_Foundation_Legal_and_Safety_Contact_Information
+        - listitem [ref=e1398]:
+          - link "Code of Conduct" [ref=e1399] [cursor=pointer]:
+            - /url: https://foundation.wikimedia.org/wiki/Special:MyLanguage/Policy:Universal_Code_of_Conduct
+        - listitem [ref=e1400]:
+          - link "Developers" [ref=e1401] [cursor=pointer]:
+            - /url: https://developer.wikimedia.org
+        - listitem [ref=e1402]:
+          - link "Statistics" [ref=e1403] [cursor=pointer]:
+            - /url: https://stats.wikimedia.org/#/en.wikipedia.org
+        - listitem [ref=e1404]:
+          - link "Cookie statement" [ref=e1405] [cursor=pointer]:
+            - /url: https://foundation.wikimedia.org/wiki/Special:MyLanguage/Policy:Cookie_statement
+        - listitem [ref=e1406]:
+          - link "Mobile view" [ref=e1407] [cursor=pointer]:
+            - /url: //en.wikipedia.org/w/index.php?title=Markdown&mobileaction=toggle_view_mobile
+      - list [ref=e1408]:
+        - listitem [ref=e1409]:
+          - link [ref=e1410] [cursor=pointer]:
+            - /url: https://www.wikimedia.org/
+            - img "Wikimedia Foundation" [ref=e1412]
+        - listitem [ref=e1413]:
+          - link [ref=e1414] [cursor=pointer]:
+            - /url: https://www.mediawiki.org/
+            - img "Powered by MediaWiki" [ref=e1416]
+  - generic [ref=e1417]:
+    - list

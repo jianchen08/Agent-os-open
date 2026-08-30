@@ -15,6 +15,7 @@
 豁免：--exempt-file 指向 json（{"相对路径": "归因"}），豁免文件跳过判定
       但仍列出（豁免必须可见）。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -84,16 +85,19 @@ def functions_with_ranges(path: Path) -> list[tuple[str, int, int]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--coverage-file", default=str(REPO_ROOT / "coverage.xml"),
+        "--coverage-file",
+        default=str(REPO_ROOT / "coverage.xml"),
         help="coverage.py 产出的 cobertura XML",
     )
     parser.add_argument("--check", action="store_true", help="检查模式：未达 100%% 即红")
     parser.add_argument(
-        "--require-branch", action="store_true",
+        "--require-branch",
+        action="store_true",
         help="分支维度数据缺失时也判红（车道开 --cov-branch 后使用）",
     )
     parser.add_argument(
-        "--exempt-file", default="",
+        "--exempt-file",
+        default="",
         help="豁免 json：{相对路径: 归因}；豁免文件跳过判定但列出",
     )
     args = parser.parse_args()
@@ -157,9 +161,7 @@ def main() -> int:
                 rel_ok = True
             elif not rel_ok:
                 failures.append(rel)
-            print(
-                f"{rel:<58}{line_pct:>6.0f}%{fn_pct:>7.0f}%{branch_note:>8}  {status}"
-            )
+            print(f"{rel:<58}{line_pct:>6.0f}%{fn_pct:>7.0f}%{branch_note:>8}  {status}")
 
     print("-" * 92)
     if failures:

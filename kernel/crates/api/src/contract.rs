@@ -143,7 +143,8 @@ impl PluginContractState {
                         rejected_tools: o.rejected_tools.clone(),
                         tools_before: plugin.capabilities.tools.len(),
                         tools_after: o.manifest.capabilities.tools.len(),
-                        reason: "G2 声明↔实现一致性复核失败，剔除工具后按净化 manifest 重注册".to_string(),
+                        reason: "G2 声明↔实现一致性复核失败，剔除工具后按净化 manifest 重注册"
+                            .to_string(),
                         sanitized_ts: now_ms(),
                     })
                 } else {
@@ -632,14 +633,13 @@ mod tests {
         assert!(l.get("a").unwrap().gates.registry_disk_diffs.is_some());
         // 复检一致 → 显式清空
         l.record_registry_disk_diffs("a", Vec::new());
-        assert!(
-            l.get("a")
-                .unwrap()
-                .gates
-                .registry_disk_diffs
-                .expect("Some(空) = 已检一致，区别于未检出")
-                .is_empty()
-        );
+        assert!(l
+            .get("a")
+            .unwrap()
+            .gates
+            .registry_disk_diffs
+            .expect("Some(空) = 已检一致，区别于未检出")
+            .is_empty());
     }
 
     #[test]
@@ -677,9 +677,6 @@ mod tests {
         assert_eq!(gates["g2_consistency"], "sanitized");
         assert_eq!(gates["sanitized"]["tools_before"], 2);
         assert_eq!(gates["sanitized"]["tools_after"], 1);
-        assert_eq!(
-            gates["rejected_tools"].as_array().expect("数组").len(),
-            1
-        );
+        assert_eq!(gates["rejected_tools"].as_array().expect("数组").len(), 1);
     }
 }
