@@ -42,7 +42,12 @@ from http_json import (  # noqa: E402
 )
 
 # 直接导入同目录老代码
-from workspace_service import WorkspaceService, get_workspace_service, set_state_reader  # noqa: E402
+from workspace_service import (  # noqa: E402
+    WorkspaceService,
+    get_workspace_service,
+    resolve_meta_workspace_path,
+    set_state_reader,
+)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
@@ -636,7 +641,8 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
 
         _metadata = getattr(task, "metadata", None) or {}
         _ws_meta = _metadata.get("ws_meta", {}) or {}
-        return _ws_meta.get("path")
+        # 与 state 通道同口径：worktree 副本已删（合并清理）→ project_root
+        return resolve_meta_workspace_path(_ws_meta) if isinstance(_ws_meta, dict) else None
 
     except Exception as exc:  # noqa: BLE001
         logger.warning(

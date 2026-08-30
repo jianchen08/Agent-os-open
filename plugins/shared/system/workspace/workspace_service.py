@@ -25,6 +25,23 @@ def _relative_under(target: Path, root_dir: str) -> Path | None:
         return None
     return rel if str(rel) not in ("", ".") else None
 
+
+def resolve_meta_workspace_path(meta: dict) -> str | None:
+    """从 ws_meta 形态字典解析可用工作区坐标。
+
+    worktree 模式：副本目录存在返回副本（运行中任务的真实工作区）；副本已删
+    （合并清理）而 project_root 存在 → 返回 project_root（合并目标，产物所在
+    地）。其余模式取 path。
+    """
+    path = str(meta.get("path") or "")
+    if not path:
+        return None
+    if meta.get("mode") == "worktree":
+        project_root = str(meta.get("project_root") or "")
+        if project_root and not Path(path).is_dir() and Path(project_root).is_dir():
+            return project_root
+    return path
+
 # ── GAP-1 统一：state 聚合读取器（on_load 注入）──
 # 约定签名：``() -> list[dict]``（sync 或 async，管道 state 聚合行，行为扁平点号键
 # 如 {"pipeline_id": ..., "task.scope": ..., "lineage.parent_pipeline_id": ...}）。
@@ -126,9 +143,12 @@ class WorkspaceService:
     async def resolve_workspace_from_state(self, pipeline_id: str) -> str | None:
         """按 pipeline_id 从 state 聚合行解析工作区坐标（非任务管道关联通道）。
 
-        行为扁平键（内核 STATE_SUMMARY_KEYS 出口 ``workspace``/``ws_meta``）：
-        ``ws_meta`` 对象取 ``.path``（worktree 副本或 plain 目录，非 project_root），
-        回退 ``workspace`` 标量。读面未注入/无命中/命中行无工作区键 → None。
+        任务管道坐标优先取任务域镜像 ``task.ws_meta``（任务 init 即写，不受
+        会话工作区投影污染——任务管道的 ``ws_meta`` 键曾会被写成会话目录，
+        打开工作空间落到会话默认文件夹）；主会话管道无任务镜像，回退
+        ``ws_meta``。worktree 模式合并后副本即删，按 ``resolve_meta_workspace_path``
+        重定位到 project_root。最后回退 ``workspace`` 标量。读面未注入/无命中/
+        命中行无工作区键 → None。
         """
         reader = _get_state_reader()
         if reader is None:
@@ -144,9 +164,13 @@ class WorkspaceService:
                     continue
                 if str(row.get("pipeline_id") or "") != pipeline_id:
                     continue
-                ws_meta = row.get("ws_meta")
-                if isinstance(ws_meta, dict) and ws_meta.get("path"):
-                    return str(ws_meta["path"])
+                for key in ("task.ws_meta", "ws_meta"):
+                    meta = row.get(key)
+                    if not isinstance(meta, dict):
+                        continue
+                    path = resolve_meta_workspace_path(meta)
+                    if path:
+                        return path
                 ws = row.get("workspace")
                 if isinstance(ws, str) and ws:
                     return ws

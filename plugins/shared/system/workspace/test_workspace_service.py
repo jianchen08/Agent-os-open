@@ -348,6 +348,132 @@ class TestResolveWorkspaceFromState:
         assert _run(svc.resolve_workspace_from_state("p1")) is None
         _reset_state_reader()
 
+    def test_task_pipeline_prefers_task_ws_meta_and_relocates_merged_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        """任务管道 ws_meta 被会话投影污染（plain 会话目录）时，任务域镜像
+        task.ws_meta 优先；worktree 副本已删（合并清理）且 project_root 存在
+        → 重定位到合并目标，不再打开会话默认文件夹。"""
+        session_dir = tmp_path / "sessions" / "thread-a4d3c62b"
+        wt = tmp_path / "proj__wt_deadbeef"  # 已合并删除，不创建
+        project = tmp_path / "proj"
+        project.mkdir()
+        rows = [
+            {
+                "pipeline_id": "p1",
+                "ws_meta": {
+                    "mode": "plain",
+                    "path": str(session_dir),
+                    "session_id": "thread-a4d3c62b",
+                },
+                "task.ws_meta": {
+                    "mode": "worktree",
+                    "path": str(wt),
+                    "project_root": str(project),
+                },
+            }
+        ]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) == str(project)
+        _reset_state_reader()
+
+    def test_task_pipeline_worktree_alive_returns_worktree_path(self, tmp_path: Path) -> None:
+        """运行中任务：worktree 副本存在 → 返回副本路径（真实工作区），不重定位。"""
+        wt = tmp_path / "proj__wt_alive01"
+        wt.mkdir()
+        project = tmp_path / "proj"
+        project.mkdir()
+        rows = [
+            {
+                "pipeline_id": "p1",
+                "ws_meta": {"mode": "plain", "path": str(tmp_path / "sessions")},
+                "task.ws_meta": {
+                    "mode": "worktree",
+                    "path": str(wt),
+                    "project_root": str(project),
+                },
+            }
+        ]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) == str(wt)
+        _reset_state_reader()
+
+    def test_session_pipeline_without_task_mirror_keeps_ws_meta(self, tmp_path: Path) -> None:
+        """主会话管道（无 task.ws_meta 镜像）→ 回退 ws_meta，行为不变。"""
+        session_dir = tmp_path / "sessions" / "thread-x"
+        session_dir.mkdir(parents=True)
+        rows = [
+            {
+                "pipeline_id": "p1",
+                "ws_meta": {"mode": "plain", "path": str(session_dir)},
+            }
+        ]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) == str(session_dir)
+        _reset_state_reader()
+
+
+# ═══════════════════════════════════════════════════════════
+# resolve_meta_workspace_path：ws_meta 字典 → 可用工作区坐标
+# ═══════════════════════════════════════════════════════════
+
+
+class TestResolveMetaWorkspacePath:
+    resolve_meta = staticmethod(_MODS["workspace_service"].resolve_meta_workspace_path)
+
+    def test_plain_mode_returns_path(self, tmp_path: Path) -> None:
+        assert self.resolve_meta({"mode": "plain", "path": str(tmp_path)}) == str(tmp_path)
+
+    def test_worktree_alive_returns_copy_path(self, tmp_path: Path) -> None:
+        """副本目录存在 → 返回副本（运行中任务的真实工作区）。"""
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        assert (
+            self.resolve_meta(
+                {"mode": "worktree", "path": str(wt), "project_root": str(tmp_path / "p")}
+            )
+            == str(wt)
+        )
+
+    def test_worktree_merged_relocates_to_project_root(self, tmp_path: Path) -> None:
+        """副本已删（合并清理）而 project_root 存在 → 返回 project_root。"""
+        project = tmp_path / "p"
+        project.mkdir()
+        assert (
+            self.resolve_meta(
+                {
+                    "mode": "worktree",
+                    "path": str(tmp_path / "proj__wt_gone"),
+                    "project_root": str(project),
+                }
+            )
+            == str(project)
+        )
+
+    @pytest.mark.parametrize(
+        ("meta", "case"),
+        [
+            ({"mode": "worktree", "path": "", "project_root": "D:/p"}, "空 path"),
+            (
+                {
+                    "mode": "worktree",
+                    "path": "D:/nowhere__wt_1",
+                    "project_root": "D:/nowhere_proj",
+                },
+                "副本与 project_root 都不存在 → 原样返回不伪造",
+            ),
+        ],
+    )
+    def test_edge_cases_return_path_verbatim_or_none(self, meta: dict, case: str) -> None:
+        result = self.resolve_meta(meta)
+        if case.startswith("空 path"):
+            assert result is None, case
+        else:
+            assert result == meta["path"], case
+
 
 # ═══════════════════════════════════════════════════════════
 # resolve_merged_worktree_target：已合并 worktree 死路径重定位
