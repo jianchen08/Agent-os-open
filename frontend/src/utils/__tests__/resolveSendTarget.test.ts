@@ -1,4 +1,4 @@
-/** @ci frontend-test */
+// @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
  * resolveSendTarget 发送目标解析测试（一对一 + 串桶防线）
  *

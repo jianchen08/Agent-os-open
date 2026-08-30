@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 管道引擎与插件执行模型 | @ci: rust-test
 // 由 pipeline_loop.rs 的主 #[cfg(test)] 测试块体平移而来（保留私有项访问）。
 
 use super::*;
@@ -2504,7 +2505,9 @@ async fn should_stop_breaks_loop_and_normalizes_ended() {
         },
     );
     let config = always_loop_body("a");
-    let final_state = fixture.run(&config, &StepLibrary::default(), json!({})).await;
+    let final_state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
     assert_eq!(
         fixture.invoker.call_count("a"),
         1,
@@ -2544,7 +2547,9 @@ async fn stop_reason_signature_maps_run_status() {
             },
         );
         let config = always_loop_body("a");
-        fixture.run(&config, &StepLibrary::default(), json!({})).await;
+        fixture
+            .run(&config, &StepLibrary::default(), json!({}))
+            .await;
         assert_eq!(
             fixture.store.recorded_run_statuses(),
             vec![expected.clone()],
@@ -2577,7 +2582,9 @@ async fn suspended_still_skips_exit_body_and_maps_suspended() {
         exit_routes: vec![],
         run_on_error: true,
     });
-    let final_state = fixture.run(&config, &StepLibrary::default(), json!({})).await;
+    let final_state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
     assert_eq!(
         fixture.invoker.call_count("exit"),
         0,
@@ -2603,10 +2610,16 @@ async fn run_started_at_written_per_run() {
         },
     );
     let config = always_loop_body("a");
-    let first = fixture.run(&config, &StepLibrary::default(), json!({})).await;
-    let second = fixture.run(&config, &StepLibrary::default(), json!({})).await;
+    let first = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    let second = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
     for state in [&first, &second] {
-        let raw = state["run_started_at"].as_str().expect("run_started_at 存在");
+        let raw = state["run_started_at"]
+            .as_str()
+            .expect("run_started_at 存在");
         chrono::DateTime::parse_from_rfc3339(raw).expect("RFC3339 可解析");
     }
 }

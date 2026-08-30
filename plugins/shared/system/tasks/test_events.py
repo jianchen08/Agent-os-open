@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @ci: python-coverage
 """task_service 任务域事件派生测试（ADR 2026-08-28 事件下沉）。
 
 断行为不断实现：derive 纯函数断 输入 state 行 → 派生事件与标签；

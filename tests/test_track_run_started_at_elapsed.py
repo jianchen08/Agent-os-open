@@ -1,3 +1,4 @@
+# @feature: FP-0.2.可观测性 | @ci: python-coverage
 """TrackPlugin 耗时锚点测试（控制状态键契约 ADR 2026-08-30）。
 
 钉死 elapsed 的锚点语义：

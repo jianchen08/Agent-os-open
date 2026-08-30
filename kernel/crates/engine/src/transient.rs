@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 管道引擎与插件执行模型 | @ci: rust-test
 //! 插件中间态内存寄存器（Transient State Register，ADR 2026-08-27）。
 //!
 //! 中间态不落库、引擎内存持有、停止时合并落库、用完即清（ADR 决策核心）。
