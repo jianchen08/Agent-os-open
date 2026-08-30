@@ -35,8 +35,9 @@ pub const VOLATILE_RUN_KEYS: &[&str] = &[
     "thinking_strength",
     "_assistant_id_assigned",
     "_pending_message_ops",
-    // agent_id 是每轮派发注入键（dispatcher 按线程绑定解析），
-    // 不得被 checkpoint/轨迹恢复的历史值覆盖——绑定真值在 agent.id 持久键。
+    // agent_id 是每轮派发注入键，不得被 checkpoint/轨迹恢复的历史值覆盖。
+    // 解析真值链在派发层：显式指定 → 管道快照 agent.id（出生登记落库的持久
+    // 身份）→ 线程绑定 → agentos——快照缺 agent.id 的存量管道才落线程绑定。
     "agent_id",
 ];
 

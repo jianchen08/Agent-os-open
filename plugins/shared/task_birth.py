@@ -92,6 +92,12 @@ async def birth_task_pipeline(
             "任务管道出生缺 user_id：内核 chat.send_message 硬校验非空（tenant 反查）"
         )
 
+    # 执行 agent 身份属管道快照（agent.id 自由字段，出生一次写全）：续跑
+    # （task_manage 注入/重试等无 agent_id 的派发）与内核重启冷恢复据此解析，
+    # 不随催促方线程的绑定漂移。内核对键语义零知识，只透传落库。
+    if agent_id:
+        birth_state = {**birth_state, "agent.id": agent_id}
+
     # ── 阶段一：出生登记（create + no_dispatch，只登记不派发）──
     birth_params: dict[str, Any] = {
         "create": True,

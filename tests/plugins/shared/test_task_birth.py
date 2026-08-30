@@ -3,7 +3,8 @@
 
 覆盖 ``plugins/shared/task_birth.py`` 三段式协议的行为契约：
 
-- 三段顺序与参数形状：出生登记（create + no_dispatch，出生 state 原样透传）
+- 三段顺序与参数形状：出生登记（create + no_dispatch，出生 state 原样透传，
+  声明 agent_id 时追加 agent.id 身份键）
   → 身份登记（task.id = 引擎管道 id，先于执行）→ 执行派发（kickoff +
   background，execution_context/agent_id/thread_id 按声明透传）；
 - 失败即报错（用户裁定：不要有降级路径）：任一阶段 send 异常 / 响应缺
@@ -113,13 +114,28 @@ class TestThreePhaseBirthShape:
         )
         assert pid == "pipe_engine_gen_1"
         birth, _identity, dispatch = send.calls
-        assert birth["state"] == state
+        # agent.id 是出生 state 的一部分（身份随快照走），不是独立派发参数的副作用
+        assert birth["state"] == {**state, "agent.id": "code_writer"}
         assert birth["thread_id"] == "thread-user-1"
         assert birth["agent_id"] == "code_writer"
         # execution_context 是派发参数：只在阶段三出现
         assert "execution_context" not in birth
         assert dispatch["execution_context"]["workspace"]["mode"] == "worktree"
         assert dispatch["agent_id"] == "code_writer"
+
+    async def test_agent_id_lands_in_birth_state_snapshot(self) -> None:
+        """执行 agent 身份随出生 state 落快照（agent.id）：续跑/冷恢复据此解析，
+        不随催促方线程绑定漂移（事故锚 75a097118e75）。未声明时不注入该键。"""
+        send = _FakeSend()
+        await _birth(send, agent_id="general_agent")
+        birth, _identity, dispatch = send.calls
+        assert birth["state"]["agent.id"] == "general_agent"
+        assert dispatch["agent_id"] == "general_agent"
+
+        send2 = _FakeSend()
+        await _birth(send2)
+        assert "agent.id" not in send2.calls[0]["state"], "未声明 agent 不得注入身份键"
+        assert "agent_id" not in send2.calls[2]
 
     @pytest.mark.parametrize(
         ("responses", "pid_after"),

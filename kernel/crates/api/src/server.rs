@@ -1827,11 +1827,18 @@ async fn chat_handler(
     // 消除 HTTP 与 WS 同会话并发 run 的竞态（ADR-2026-08-15 的 FIFO 语义不变）。
     // 同步响应经 waiter 桥回传：cmid 为 `http_` 前缀（与前端 uuid cmid 空间
     // 区分），消费完成或排队中被 DELETE/清空时发送。
-    let exec_agent = if req.agent_id.is_empty() {
-        "agentos".to_string()
-    } else {
-        req.agent_id.clone()
-    };
+    // 执行 agent：显式指定优先；未指定 → 管道快照 agent.id → 线程绑定 → agentos
+    // （与 WS/chat.send_message 同一解析链——硬编码缺省会让会话切换与任务
+    // 管道续跑身份失效）。
+    let exec_agent = crate::ws_session::resolve_dispatch_agent(
+        state.session.as_ref().map(|s| s.registry().as_ref()),
+        state.store.as_ref(),
+        tenant_ctx.tenant_id.as_str(),
+        &req.session_id,
+        &pipeline_id,
+        &req.agent_id,
+    )
+    .await;
     let dispatcher = crate::ws_session::EngineDispatcher::new(state.clone());
     let cmid = format!("http_{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
     let (tx, rx) = tokio::sync::oneshot::channel::<EngineOutcome>();
