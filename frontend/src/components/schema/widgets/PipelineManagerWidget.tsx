@@ -364,8 +364,23 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       })
     }
 
+    // 项目登记行（项目=文件夹的登记数据行；列表视图与树视图同款展示，
+    // 树视图的分组节点仍由 pipelineTree 合成块建——两侧 key 同为 project-<id>）
+    for (const p of projects) {
+      const pid = String(p.id)
+      entries.push({
+        key: `project-${pid}`,
+        runId: `project-${pid}`,
+        projectId: pid,
+        status: 'running',
+        startedAt: String(p.timestamps?.createdAt ?? ''),
+        kind: 'project',
+        name: String(p.goal ?? p.id),
+      })
+    }
+
     return entries
-  }, [registryRuns, registryStates, usageByPipeline, allTasks, sessions])
+  }, [registryRuns, registryStates, usageByPipeline, allTasks, sessions, projects])
 
   /** 展示视图：tree（树视图）/ list（列表视图） */
   const [viewMode, setViewMode] = useState<'tree' | 'list'>('tree')
@@ -481,6 +496,8 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     const taskRowNodes = new Map<string, PipelineTreeNode>()
     // 1) 任务管道条目：直接成行（不包任务节点层——一对一绑定一个层级）
     for (const e of filteredPipelineEntries) {
+      // 项目登记行节点由上方合成块统一建（任务挂靠目标 + 根），跳过防同 key 重复行
+      if (e.kind === 'project') continue
       if (e.kind === 'task' && e.taskId) {
         const node: PipelineTreeNode = { key: e.key, entry: e, depth: 0, children: [] }
         nodeByKey.set(e.key, node)

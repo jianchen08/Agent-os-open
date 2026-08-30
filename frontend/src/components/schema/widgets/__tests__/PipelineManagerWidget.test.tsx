@@ -617,4 +617,83 @@ describe('PipelineManagerWidget', () => {
       )
     })
   })
+
+  it('打开文件夹业务失败（success:false）：失败通知携带后端 message', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockFetchProjects.mockResolvedValue({
+      items: [
+        { id: 'proj-biz-fail', goal: '业务失败项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
+      ],
+    })
+    seed.mockWorkspaceOpen.mockResolvedValueOnce({
+      data: { success: false, message: 'IDE 连接器不可用' },
+    })
+    const addNotification = vi
+      .spyOn(useNotificationStore.getState(), 'addNotification')
+      .mockImplementation(() => {})
+
+    renderWithProviders(<PipelineManagerWidget />)
+    fireEvent.click((await screen.findAllByLabelText('打开文件夹'))[0])
+
+    await waitFor(() => {
+      expect(addNotification).toHaveBeenCalledWith(
+        expect.objectContaining({ title: '打开文件夹失败', message: 'IDE 连接器不可用' }),
+      )
+    })
+    addNotification.mockRestore()
+  })
+
+  it('打开文件夹传输失败（请求抛错）：失败通知落到用户可见通道', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockFetchProjects.mockResolvedValue({
+      items: [
+        { id: 'proj-net-fail', goal: '传输失败项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
+      ],
+    })
+    seed.mockWorkspaceOpen.mockRejectedValueOnce(new Error('network down'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const addNotification = vi
+      .spyOn(useNotificationStore.getState(), 'addNotification')
+      .mockImplementation(() => {})
+
+    renderWithProviders(<PipelineManagerWidget />)
+    fireEvent.click((await screen.findAllByLabelText('打开文件夹'))[0])
+
+    await waitFor(() => {
+      expect(addNotification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: '打开文件夹失败',
+          message: '项目 传输失败项目 打开失败，请稍后重试',
+        }),
+      )
+    })
+    consoleError.mockRestore()
+    addNotification.mockRestore()
+  })
+
+  it('列表视图同款：项目行打开文件夹按钮走同一端点', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockFetchProjects.mockResolvedValue({
+      items: [
+        { id: 'proj-list', goal: '列表视图项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
+      ],
+    })
+
+    renderWithProviders(<PipelineManagerWidget />)
+    await screen.findByText('列表视图项目')
+    fireEvent.click(screen.getByTitle('列表视图'))
+
+    fireEvent.click((await screen.findAllByLabelText('打开文件夹'))[0])
+    await waitFor(() => {
+      expect(seed.mockWorkspaceOpen).toHaveBeenCalledWith(
+        '/ext/workspace_service/workspaces/proj-list/open',
+      )
+    })
+  })
 })
