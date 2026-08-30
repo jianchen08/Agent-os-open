@@ -578,6 +578,8 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
    *  避免误判无归属而在当前会话新建标签），有归属 → 定位/跳转到对应会话标签
    *  （主管道=主标签、子管道=已有子标签跳转/无则新建），无归属 → 创建独立标签。 */
   const handleEntryClick = useCallback(async (entry: PipelineViewEntry) => {
+    // 项目 = 文件夹 + 登记行，无管道无会话（ADR 2026-08-27）——没有可打开的对话
+    if (entry.kind === 'project') return
     const pipelineId = entry.pipelineId || entry.key
     // 会话列表未加载时先拉取；拉取失败即阻断跳转——继续执行会把有归属管道
     // 误判为孤儿而在当前会话新建重复标签（L540 注释要避免的正是这个后果）。
@@ -1120,10 +1122,12 @@ function EntryRow({
   return (
     <div>
       <div
-        className="hover:bg-accent group flex cursor-pointer items-center gap-1.5 py-1.5 pr-2 transition-colors"
+        className={`group flex items-center gap-1.5 py-1.5 pr-2 transition-colors ${
+          entry.kind === 'project' ? '' : 'hover:bg-accent cursor-pointer'
+        }`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
-        onClick={() => onEntryClick(entry)}
-        title="打开对话标签"
+        onClick={entry.kind === 'project' ? undefined : () => onEntryClick(entry)}
+        title={entry.kind === 'project' ? undefined : '打开对话标签'}
       >
         {/* 树子级展开 chevron（仅有子级时渲染；叶子行占位对齐） */}
         {hasChildren ? (
@@ -1224,18 +1228,20 @@ function EntryRow({
           >
             <InfoIcon className="h-3.5 w-3.5" />
           </button>
-          <button
-            className="bg-primary/15 text-primary hover:bg-primary/25 flex h-6 w-6 items-center justify-center rounded transition-colors"
-            onClick={(e) => {
-              e.stopPropagation()
-              onEntryClick(entry)
-            }}
-            title="打开对话"
-            aria-label="打开对话"
-            tabIndex={-1}
-          >
-            <MessageSquare className="h-3.5 w-3.5" />
-          </button>
+          {entry.kind !== 'project' && (
+            <button
+              className="bg-primary/15 text-primary hover:bg-primary/25 flex h-6 w-6 items-center justify-center rounded transition-colors"
+              onClick={(e) => {
+                e.stopPropagation()
+                onEntryClick(entry)
+              }}
+              title="打开对话"
+              aria-label="打开对话"
+              tabIndex={-1}
+            >
+              <MessageSquare className="h-3.5 w-3.5" />
+            </button>
+          )}
           <button
             className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors"
             onClick={(e) => {
@@ -1413,9 +1419,11 @@ function PipelineTable({
             return (
               <React.Fragment key={entry.key}>
                 <tr
-                  className="hover:bg-accent/20 cursor-pointer border-b last:border-b-0"
-                  onClick={() => onEntryClick(entry)}
-                  title="打开对话标签"
+                  className={`border-b last:border-b-0 ${
+                    entry.kind === 'project' ? '' : 'hover:bg-accent/20 cursor-pointer'
+                  }`}
+                  onClick={entry.kind === 'project' ? undefined : () => onEntryClick(entry)}
+                  title={entry.kind === 'project' ? undefined : '打开对话标签'}
                 >
                   <td className="px-3 py-1.5">
                     <button
@@ -1481,18 +1489,20 @@ function PipelineTable({
                   </td>
                   <td className="px-3 py-1.5">
                     <div className="flex items-center gap-0.5">
-                      <button
-                        className="bg-primary/15 text-primary hover:bg-primary/25 flex h-6 w-6 items-center justify-center rounded"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onEntryClick(entry)
-                        }}
-                        title="打开对话"
-                        aria-label="打开对话"
-                        tabIndex={-1}
-                      >
-                        <MessageSquare className="h-3.5 w-3.5" />
-                      </button>
+                      {entry.kind !== 'project' && (
+                        <button
+                          className="bg-primary/15 text-primary hover:bg-primary/25 flex h-6 w-6 items-center justify-center rounded"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onEntryClick(entry)
+                          }}
+                          title="打开对话"
+                          aria-label="打开对话"
+                          tabIndex={-1}
+                        >
+                          <MessageSquare className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                       <button
                         className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded"
                         onClick={(e) => {

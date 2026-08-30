@@ -25,6 +25,7 @@ vi.mock('@/services/api/tasks', () => ({
   pauseTask: vi.fn(),
   resumeTask: vi.fn(),
   cancelTask: vi.fn(),
+  fetchProjects: seed.mockFetchProjects,
 }))
 vi.mock('@/services/pipelineNavigator', () => ({
   navigateToPipeline: vi.fn(),
@@ -187,12 +188,15 @@ const seed = vi.hoisted(() => {
   const mockUseAllTasksQuery = vi.fn(() => ({ data: FAKE_ALL_TASKS }))
   const mockUsePipelineRunsQuery = vi.fn(() => ({ data: FAKE_RUNS }))
   const mockUsePipelineStatesQuery = vi.fn(() => ({ data: FAKE_STATES }))
+  /** 项目登记行（默认空——项目分组用例自行覆写） */
+  const mockFetchProjects = vi.fn(() => Promise.resolve({ items: [] as unknown[] }))
   /** 会话缓存读数与 ensureSessionsLoaded（S1 阻断用例需按用例覆写） */
   const mockReadSessions = vi.fn(() => [] as unknown[])
   const mockEnsureSessionsLoaded = vi.fn(() => Promise.resolve([] as unknown[]))
   return {
     mockReadSessions,
     mockEnsureSessionsLoaded,
+    mockFetchProjects,
     FAKE_RUNS,
     FAKE_STATES,
     FAKE_ALL_TASKS,
@@ -238,6 +242,7 @@ describe('PipelineManagerWidget', () => {
     seed.mockUseAllTasksQuery.mockReturnValue({ data: seed.FAKE_ALL_TASKS })
     seed.mockUsePipelineRunsQuery.mockReturnValue({ data: seed.FAKE_RUNS })
     seed.mockUsePipelineStatesQuery.mockReturnValue({ data: seed.FAKE_STATES })
+    seed.mockFetchProjects.mockResolvedValue({ items: [] })
     // 导航 mock 跨用例清历史清实现（需返回值的用例自行 mockResolvedValue）
     vi.mocked(navigateToPipeline).mockReset()
   })
@@ -543,5 +548,40 @@ describe('PipelineManagerWidget', () => {
       )
     })
     expect(navigateToPipeline).not.toHaveBeenCalled()
+  })
+
+  it('项目分组行无对话入口：按钮不渲染、点击行不开标签（项目无管道无会话）', async () => {
+    // 对照组：同一棵树里会话条目保留「打开对话」按钮——差异只在 kind
+    seed.mockUsePipelineRunsQuery.mockReturnValue({
+      data: {
+        mainRun: {
+          pipeline_id: 'sessPipe',
+          run_id: 'run-sess',
+          thread_id: 'th-p',
+          status: 'running',
+          started_at: '2026-08-30T00:00:00Z',
+        },
+      },
+    })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockFetchProjects.mockResolvedValue({
+      items: [
+        { id: 'proj-ghost', goal: '孤儿测试项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
+      ],
+    })
+
+    const tabsBefore = useAgentTabStore.getState().tabs.length
+    renderWithProviders(<PipelineManagerWidget />)
+    const projectRow = await screen.findByText('孤儿测试项目')
+
+    // 树视图只有会话行有「打开对话」按钮；项目行没有
+    expect(screen.getByLabelText('打开对话')).toBeInTheDocument()
+
+    // 点击项目行（无按钮路径的兜底入口）：不开任何标签
+    fireEvent.click(projectRow)
+    await waitFor(() => {
+      expect(useAgentTabStore.getState().tabs.slice(tabsBefore)).toHaveLength(0)
+    })
   })
 })
