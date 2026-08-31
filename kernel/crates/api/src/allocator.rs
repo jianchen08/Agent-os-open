@@ -19,6 +19,9 @@
 //!   Windows 上 eager commit 大块 arena，全量启用内核实测启动峰值
 //!   931MB → 268MB（08-31 对照实验：同 exe 同树同 config，仅环境变量
 //!   MIMALLOC_ARENA_EAGER_COMMIT=0 差异）。需要时按需提交，不预占。
+//! - `arena_reserve=128MiB`：mimalloc 默认 1GiB 起步预留（64 位），无大
+//!   分配时过度预留虚拟地址空间——实测 405MB 单 arena 里非零活数据仅
+//!   43MB，其余是零字节预留空洞；调小后按实际分配量逐步增长。
 //! - 用 `mi_option_set`（无条件生效）而非 `mi_option_set_default`：tokio
 //!   运行时在 main 体前创建，选项可能已初始化，set_default 会 no-op。
 //! - 选项值取自 libmimalloc-sys c_src/mimalloc/{v2,v3}/include/mimalloc.h
@@ -43,18 +46,42 @@ static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 /// mimalloc `mi_option_arena_eager_commit` 的枚举值（v2/v3 一致）。
 const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+/// mimalloc `mi_option_arena_reserve` 的枚举值（v2/v3 一致，KiB 单位）。
+const MI_OPTION_ARENA_RESERVE: libmimalloc_sys::mi_option_t = 23;
+
+/// arena 起步预留调小值：128MiB（KiB 单位）。mimalloc 默认 1GiB 起步预留
+/// （64 位），无大分配时过度预留虚拟地址空间——实测 405MB 单 arena 里非零
+/// 活数据仅 43MB，其余是零字节预留空洞。调小后按实际分配量逐步增长，
+/// 同时高于 `MI_ARENA_MIN_SIZE`（32MiB）保证基本 arena 语义。
+const ARENA_RESERVE_DEFAULT_KIB: i64 = 128 * 1024;
 
 /// 安装全局分配器并设置内存策略：purge_delay=0（空闲页立即归还 OS）+
-/// arena_eager_commit=0（不预提交 arena，需要时按需提交）。
+/// arena_eager_commit=0（不预提交 arena，需要时按需提交）+
+/// arena_reserve=128MiB（起步预留从 1GiB 调小，不浪费虚拟地址空间）。
 ///
 /// 必须在任何分配发生前调用（main 第一行）。幂等：重复调用无害
 /// （mi_option_set 每次无条件生效）。
+///
+/// 环境变量覆盖：mimalloc 在进程初始化（main 之前）从环境读选项，本函数的
+/// `mi_option_set` 晚于它执行会覆盖环境变量——因此 arena 两选项仅在环境
+/// 变量未显式设置时落调优值（部署侧可设 MIMALLOC_ARENA_EAGER_COMMIT=0 /
+/// MIMALLOC_ARENA_RESERVE=… 显式覆盖，与 purge_delay 的 env 覆盖语义一致）。
 pub fn install_global_allocator() {
     // SAFETY: mi_option_set 是 mimalloc C API 的线程安全选项设置函数；
-    // 传入合法枚举值（15=purge_delay / 4=arena_eager_commit），无指针参数。
+    // 传入合法枚举值（15=purge_delay / 4=arena_eager_commit /
+    // 23=arena_reserve，i64 在 32 位 c_long 上截断安全——KiB 值不超范围），
+    // 无指针参数。
     unsafe {
         libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0);
-        libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+        if std::env::var("MIMALLOC_ARENA_EAGER_COMMIT").is_err() {
+            libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+        }
+        if std::env::var("MIMALLOC_ARENA_RESERVE").is_err() {
+            libmimalloc_sys::mi_option_set(
+                MI_OPTION_ARENA_RESERVE,
+                ARENA_RESERVE_DEFAULT_KIB as libmimalloc_sys::mi_option_t,
+            );
+        }
     }
 }
 
@@ -68,6 +95,12 @@ pub fn purge_delay() -> i64 {
 pub fn arena_eager_commit() -> i64 {
     // SAFETY: 同上，合法枚举值 4。
     unsafe { libmimalloc_sys::mi_option_get(MI_OPTION_ARENA_EAGER_COMMIT) as i64 }
+}
+
+/// 读取当前 arena_reserve 选项值（诊断/测试用，KiB 单位）。
+pub fn arena_reserve_kib() -> i64 {
+    // SAFETY: 同上，合法枚举值 23。
+    unsafe { libmimalloc_sys::mi_option_get(MI_OPTION_ARENA_RESERVE) as i64 }
 }
 
 #[cfg(test)]
@@ -99,5 +132,19 @@ mod tests {
     fn install_sets_purge_delay_zero() {
         install_global_allocator();
         assert_eq!(purge_delay(), 0, "install 后 purge_delay 应为 0（立即归还）");
+    }
+
+    /// arena_eager_commit / arena_reserve 调优生效：install 后 eager_commit 为 0、
+    /// reserve 为 128MiB（KiB 单位）。
+    ///
+    /// 环境变量覆盖语义（部署侧 MIMALLOC_ARENA_* 显式设置时 install 跳过落值）
+    /// 不在本进程内断言：mimalloc 在选项首次读取（首个分配，早于 main）时从
+    /// 环境初始化选项，`mi_option_set` 之后环境变量不再回读——进程内无法
+    /// 稳定复现"先设 env 再 install"的时序（并行测试共享进程级选项）。
+    #[test]
+    fn install_sets_arena_tuning() {
+        install_global_allocator();
+        assert_eq!(arena_eager_commit(), 0, "install 后 eager_commit 应为 0");
+        assert_eq!(arena_reserve_kib(), 128 * 1024, "install 后 reserve 应为 128MiB");
     }
 }

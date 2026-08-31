@@ -461,14 +461,10 @@ async fn test_chat_uses_engine_not_echo() {
 }
 
 #[tokio::test]
-async fn test_schema_with_config() {
-    let config = json!({
-        "agents": [{"id": "agent1", "name": "Test Agent"}],
-        "pipelines": [{"id": "default", "name": "Default Pipeline"}],
-        "tools": [{"name": "search", "description": "Search tool"}],
-        "routes": {"input": ["plugin1"], "output": ["plugin2"]}
-    });
-    let app = build_router(AppState::with_config(config));
+async fn test_schema_shape_without_registry() {
+    // config 树已删：无 registry 装配时 schema 形状不变但 agents/pipelines/
+    // tools 全部为空（生产装配必有 registry；空面是测试装配态的真实反映）。
+    let app = build_router(AppState::new());
     let response = app
         .oneshot(
             Request::builder()
@@ -482,20 +478,19 @@ async fn test_schema_with_config() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    // config-based 模式下 agents 为空（因为 manifests 为空）
+    // 形状不变（agents/pipelines/tools/routes 恒在）
+    for key in ["agents", "pipelines", "tools", "routes"] {
+        assert!(json.get(key).is_some(), "schema 响应应含 {key}");
+    }
     assert_eq!(json["agents"].as_array().unwrap().len(), 0);
-    // tools 来自 config（capability_registry 为 None 时 fallback 到 config）
-    assert_eq!(json["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(json["tools"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
-async fn test_tools_handler_returns_tools_list() {
-    // 验证 tools handler 从 config 返回工具列表（无 registry 时）。
+async fn test_tools_handler_without_registry_returns_empty() {
+    // config 树已删：无 registry 时 tools handler 返回空工具面。
     // W-C2：响应信封统一为 {items, total}。
-    let config = json!({
-        "tools": [{"name": "calculator", "description": "A calculator"}],
-    });
-    let app = build_router(AppState::with_config(config));
+    let app = build_router(AppState::new());
     let response = app
         .oneshot(
             Request::builder()
@@ -510,9 +505,8 @@ async fn test_tools_handler_returns_tools_list() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let items = json["items"].as_array().expect("应含 items 数组");
-    assert_eq!(json["total"], 1);
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["name"], "calculator");
+    assert_eq!(json["total"], 0);
+    assert!(items.is_empty());
 }
 
 // ── 监控 M5/M5b：指标查询端点 + Prometheus 导出端点 ──

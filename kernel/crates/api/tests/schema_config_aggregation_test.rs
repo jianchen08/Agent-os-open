@@ -210,3 +210,94 @@ async fn test_schema_hides_inject_only_config_files() {
     assert_eq!(files[0]["id"], "panel");
     assert_eq!(files[0]["path"], "config/hybrid/panel.yaml");
 }
+
+/// schema.routes 源自能力注册表的 http_routes（config 树已删）：
+/// 注册的插件端点按 `{plugin_id: [route…]}` 对象出口；无注册 = 空对象。
+/// 输出结构保持对象形态（前端 SchemaResponse.routes 类型为 object，
+/// 生产环境原值恒为 {} 占位）。
+#[tokio::test]
+async fn test_schema_routes_from_registry() {
+    use agentos_api::http_dispatcher::register_manifest_http_routes; // 复用注册入口（行为对齐生产）
+    use agentos_core::traits::HttpEndpoint;
+
+    let mut state = AppState::new();
+    let registry = std::sync::Arc::new(agentos_plugin_loader::CapabilityRegistryImpl::new());
+    let ep = HttpEndpoint {
+        route_id: "cb".to_string(),
+        method: "POST".to_string(),
+        path: "/ext/p1/cb".to_string(),
+        auth: "none".to_string(),
+        handler_capability: "http.handle".to_string(),
+        timeout_ms: None,
+        max_concurrency: None,
+        description: Some("回调".to_string()),
+    };
+    let m = manifest("p1", vec![]);
+    let mut with_ep = m.clone();
+    with_ep.http_endpoints = vec![ep];
+    // 第二条路由（同插件）：触发 routes 序列化的排序分支（确定性输出）
+    let mut with_ep2 = m.clone();
+    with_ep2.http_endpoints = vec![HttpEndpoint {
+        route_id: "aa".to_string(),
+        method: "GET".to_string(),
+        path: "/ext/p1/aa".to_string(),
+        auth: "none".to_string(),
+        handler_capability: "http.handle".to_string(),
+        timeout_ms: None,
+        max_concurrency: None,
+        description: None,
+    }];
+    register_manifest_http_routes(&registry, &[with_ep, with_ep2], None);
+    state.capability_registry = Some(registry);
+
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/schema")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 16384)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let routes = json["routes"].as_object().expect("routes 应为对象");
+    assert_eq!(routes.len(), 1, "已注册的插件端点应出口");
+    let entries = routes["p1"].as_array().expect("routes[plugin_id] 应为数组");
+    assert_eq!(entries.len(), 2);
+    // 排序断言：route_id 升序（aa 先于 cb），确定性输出
+    assert_eq!(entries[0]["route_id"], "aa");
+    assert_eq!(entries[1]["route_id"], "cb");
+    assert_eq!(entries[1]["method"], "POST");
+    assert_eq!(entries[1]["path"], "/ext/p1/cb");
+    assert_eq!(entries[1]["description"], "回调");
+}
+
+/// 无注册表装配时 schema.routes 为空对象（config 树已删，无静态回退）。
+#[tokio::test]
+async fn test_schema_routes_empty_without_registry() {
+    let app = build_router(AppState::new());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/schema")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 16384)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["routes"],
+        Value::Object(serde_json::Map::new()),
+        "无注册表时 routes 为空对象"
+    );
+}

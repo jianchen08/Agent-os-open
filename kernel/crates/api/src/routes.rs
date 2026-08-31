@@ -63,7 +63,6 @@ pub struct SchemaResponse {
 /// id 集合不在此快照——经 `manifests` 共享存储现读（watcher 热发现即时可见）。
 #[derive(Clone)]
 pub struct AppState {
-    pub config: serde_json::Value,
     /// 已发现的插件 manifest 列表。
     ///
     /// RwLock 共享存储：watcher 热发现的新插件经 [`crate::plugin_watcher`] 每轮
@@ -140,7 +139,6 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            config: json!({}),
             manifests: Arc::new(RwLock::new(Vec::new())),
             capability_registry: None,
             pipeline_config: Arc::new(PipelineConfig {
@@ -168,15 +166,6 @@ impl AppState {
         }
     }
 
-    /// 指定 config、其余字段取默认值的构造器（`..Self::new()` 基底收敛，
-    /// 加字段只改 [`AppState::new`] 一处）。
-    pub fn with_config(config: serde_json::Value) -> Self {
-        Self {
-            config,
-            ..Self::new()
-        }
-    }
-
     /// 构建集成了插件系统的 AppState（生产装配入口）。
     ///
     /// 多参签名保证能力面非空：registry / invoker / store / project_root 均为
@@ -192,35 +181,9 @@ impl AppState {
         project_root: PathBuf,
         enabled_plugin_ids: std::collections::HashSet<String>,
     ) -> Self {
-        // 从 manifest 构建 config JSON：schema（agents/pipelines 聚合、routes 面）
-        // 与 tools_handler 在 registry 未装配时的回退数据源。
-        let agents: Vec<serde_json::Value> = manifests
-            .iter()
-            .filter(|m| m.plugin_type == PluginType::System)
-            .map(|m| serde_json::to_value(m).unwrap_or_default())
-            .collect();
-        let pipelines: Vec<serde_json::Value> = manifests
-            .iter()
-            .filter(|m| m.plugin_type == PluginType::Pipeline)
-            .map(|m| serde_json::to_value(m).unwrap_or_default())
-            .collect();
-        let tools: Vec<serde_json::Value> = registry
-            .list_tools()
-            .iter()
-            .map(|t| serde_json::to_value(t).unwrap_or_default())
-            .collect();
-
-        let config = json!({
-            "agents": agents,
-            "pipelines": pipelines,
-            "tools": tools,
-            "routes": {},
-        });
-
         // 注入面字段覆盖基底默认；其余（session/http_handler/metrics/plugin_dirs/
         // config_center 等）经 `..Self::new()` 收敛，加字段只改 [`AppState::new`] 一处。
         Self {
-            config,
             manifests: Arc::new(RwLock::new(manifests)),
             capability_registry: Some(registry),
             pipeline_config,
@@ -469,12 +432,9 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
             .map(|t| serde_json::to_value(t).unwrap_or_default())
             .collect()
     } else {
-        state
-            .config
-            .get("tools")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
+        // registry 未装配（测试装配路径）：schema 无工具面（config 树已删，
+        // 不再有回退数据源——生产装配必有 registry，缺装配是测试态）。
+        Vec::new()
     };
 
     // 从 manifest 构建 agents/pipelines
@@ -511,7 +471,46 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
         })
         .collect();
 
-    let routes = state.config.get("routes").cloned().unwrap_or(json!({}));
+    // routes 面：插件 HTTP 端点登记（注册表数据驱动——热发现/热重载/reenable
+    // 即时反映；config 树已删，不再有静态 routes 回退）。结构保持对象
+    // `{plugin_id: [route…]}`（前端 SchemaResponse.routes 类型为 object，
+    // 生产环境原值恒为 {} 占位——现在带真实注册数据，形状不变）。
+    // 排序保确定性：注册表是 HashMap，直接序列化会让相同内容产出不同字节，
+    // ETag 内容寻址会误变（schema 304 协商失效）；plugin_id 与路由均排序。
+    let routes = state
+        .capability_registry
+        .as_ref()
+        .map(|registry| {
+            let mut by_plugin: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            for r in registry.list_http_routes() {
+                by_plugin
+                    .entry(r.plugin_id.clone())
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+                    .as_array_mut()
+                    .expect("just inserted array")
+                    .push(serde_json::json!({
+                        "route_id": r.endpoint.route_id,
+                        "method": r.endpoint.method,
+                        "path": r.endpoint.path,
+                        "auth": r.endpoint.auth,
+                        "handler_capability": r.endpoint.handler_capability,
+                        "timeout_ms": r.endpoint.timeout_ms,
+                        "max_concurrency": r.endpoint.max_concurrency,
+                        "description": r.endpoint.description,
+                    }));
+            }
+            for entry in by_plugin.values_mut() {
+                if let Some(arr) = entry.as_array_mut() {
+                    arr.sort_by(|a, b| {
+                        let ka = format!("{}|{}|{}", a["route_id"], a["method"], a["path"]);
+                        let kb = format!("{}|{}|{}", b["route_id"], b["method"], b["path"]);
+                        ka.cmp(&kb)
+                    });
+                }
+            }
+            serde_json::Value::Object(by_plugin)
+        })
+        .unwrap_or_else(|| json!({}));
 
     // P1-4：聚合各插件的 config_files（仅含声明 config_files 的插件）。
     // 前端据此构建"插件 → 多配置子项"配置树（ADR §4.6）。
@@ -1230,8 +1229,9 @@ pub async fn pipelines_state_handler(
 
 /// /api/v1/tools 端点处理器。
 ///
-/// 从 CapabilityRegistry 返回已注册的工具列表；registry 未装配时回退
-/// state.config 的 tools 数组。响应信封统一为 `{ "items": [...], "total": n }`
+/// 从 CapabilityRegistry 返回已注册的工具列表；registry 未装配时返回空列表
+/// （config 树已删——生产装配必有 registry，空面是测试装配态的真实反映）。
+/// 响应信封统一为 `{ "items": [...], "total": n }`
 /// （消费方为插件管理页能力浏览/调试数据面）。
 pub async fn tools_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -1251,14 +1251,8 @@ pub async fn tools_handler(
             })
             .collect()
     } else {
-        // registry 未装配（测试装配路径）→ 从 config 的 tools 数组回退，
-        // 响应信封仍为 {items, total}。
-        state
-            .config
-            .get("tools")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
+        // registry 未装配（测试装配路径）→ 空工具面，响应信封仍为 {items, total}。
+        Vec::new()
     };
     let total = tools.len();
     axum::Json(json!({ "items": tools, "total": total }))

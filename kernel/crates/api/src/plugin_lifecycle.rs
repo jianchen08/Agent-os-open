@@ -332,7 +332,7 @@ mod domain_event_tests {
         let invoker = Arc::new(RecordingInvoker {
             hooks: Mutex::new(Vec::new()),
         });
-        let mut state = AppState::with_config(json!({}));
+        let mut state = AppState::new();
         // A：声明 + 启用 → 收到；B：未声明 → 不收到；C：声明但禁用 → 不收到
         state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
             manifest("p_a", true),

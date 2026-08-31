@@ -108,8 +108,14 @@ pub struct PluginLoaderImpl {
     config_root: Option<PathBuf>,
     /// 插件准入白名单（P2-2）
     allowlist: AllowlistConfig,
-    /// 已发现的 manifest 缓存 {plugin_id: (manifest, source_path)}
-    manifests: RwLock<HashMap<String, (PluginManifest, PathBuf)>>,
+    /// 已发现的 manifest 来源缓存 {plugin_id: manifest 文件路径}。
+    ///
+    /// 内存归一（manifest 唯一真源 = AppState.manifests）：本表只持轻量路径
+    /// 摘要，**不**持久持有解析后的完整 PluginManifest——完整内容按需
+    /// 读盘 + 重新解析（[`Self::read_manifest`]）。路径本身兼作内容指纹的
+    /// 粗判（同 id 换路径 = manifest 换源），watcher 热发现经 discover
+    /// 重扫刷新。
+    manifests: RwLock<HashMap<String, PathBuf>>,
     /// 已加载的插件状态 {plugin_id: LoadedPlugin}
     loaded: RwLock<HashMap<String, LoadedPlugin>>,
 }
@@ -573,11 +579,11 @@ impl PluginLoader for PluginLoaderImpl {
             });
         }
 
-        // 更新缓存
+        // 更新缓存（只存轻量路径摘要；完整 manifest 由调用方按需读盘解析）
         let mut cache = self.manifests.write();
         cache.clear();
-        for (id, (manifest, path)) in &all_manifests {
-            cache.insert(id.clone(), (manifest.clone(), path.clone()));
+        for (id, (_, path)) in &all_manifests {
+            cache.insert(id.clone(), path.clone());
         }
 
         Ok(all_manifests.into_values().map(|(m, _)| m).collect())
@@ -612,17 +618,23 @@ impl PluginLoader for PluginLoaderImpl {
             }
         }
 
-        // 查找 manifest
+        // 查找 manifest（缓存只持路径，完整 manifest 按需读盘解析）
         let manifest = {
             let manifests = self.manifests.read();
-            manifests
-                .get(plugin_id)
-                .map(|(m, _)| m.clone())
-                .ok_or_else(|| agentos_core::types::PluginError {
+            let path = manifests.get(plugin_id).cloned().ok_or_else(|| {
+                agentos_core::types::PluginError {
                     message: format!("plugin not found: {}", plugin_id),
                     code: Some("PLUGIN_NOT_FOUND".to_string()),
                     source: Some("plugin-loader".to_string()),
-                })?
+                }
+            })?;
+            self.read_manifest(&path).map_err(|e| {
+                agentos_core::types::PluginError {
+                    message: format!("plugin manifest unreadable: {}: {e}", path.display()),
+                    code: Some("MANIFEST_READ".to_string()),
+                    source: Some("plugin-loader".to_string()),
+                }
+            })?
         };
 
         // 组合插件不实例化（ADR ⑥），只标记为 Active
@@ -729,19 +741,49 @@ impl PluginLoader for PluginLoaderImpl {
         let manifests = self.manifests.read();
         manifests
             .get(plugin_id)
-            .and_then(|(_, path)| path.parent().map(|p| p.to_string_lossy().to_string()))
+            .and_then(|path| path.parent().map(|p| p.to_string_lossy().to_string()))
     }
 
-    /// 获取指定插件的 manifest（同步读缓存）。
+    /// 获取指定插件的 manifest（按需读盘 + 重新解析）。
     ///
     /// 供内核同步查询插件声明的运行时属性（如 lifecycle 空闲卸载阈值）。
+    /// 读盘失败按未发现处理（返回 None）——manifest 在源路径上已丢失/损坏，
+    /// 与"从未发现"同语义（调用方降级路径兜底）。
     fn get_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
-        let manifests = self.manifests.read();
-        manifests.get(plugin_id).map(|(m, _)| m.clone())
+        let path = {
+            let manifests = self.manifests.read();
+            manifests.get(plugin_id).cloned()?
+        };
+        self.read_manifest(&path)
+            .map_err(|e| {
+                warn!("get_manifest 读盘失败（按未发现处理）: {}: {}", path.display(), e);
+                e
+            })
+            .ok()
     }
 }
 
 impl PluginLoaderImpl {
+    /// 从缓存路径读盘 + 解析完整 manifest（JSON 优先，YAML 兜底——与
+    /// discover 扫描同一解析顺序）。解析失败返回 Err（调用方决定语义）。
+    ///
+    /// 供 [`Self::get_manifest`] 与 [`PluginLoader::load`] 按需读盘用——
+    /// 运行时完整 manifest 不常驻内存（唯一真源在 AppState.manifests）。
+    fn read_manifest(&self, path: &Path) -> Result<PluginManifest, LoaderError> {
+        let content = std::fs::read_to_string(path).map_err(|e| LoaderError::Io {
+            message: format!("Failed to read {}: {}", path.display(), e),
+        })?;
+        match serde_json::from_str::<PluginManifest>(&content) {
+            Ok(m) => Ok(m),
+            Err(json_err) => serde_yaml::from_str::<PluginManifest>(&content).map_err(|yaml_err| {
+                LoaderError::ManifestParse {
+                    path: path.display().to_string(),
+                    message: format!("json error: {}, yaml error: {}", json_err, yaml_err),
+                }
+            }),
+        }
+    }
+
     /// 获取所有已发现插件的根目录映射（plugin_id → 插件目录绝对路径）。
     ///
     /// HTTP dispatcher 据此把 `/ext/{plugin_id}/assets/{*path}`
@@ -752,7 +794,7 @@ impl PluginLoaderImpl {
         let manifests = self.manifests.read();
         manifests
             .iter()
-            .filter_map(|(id, (_, path))| path.parent().map(|p| (id.clone(), p.to_path_buf())))
+            .filter_map(|(id, path)| path.parent().map(|p| (id.clone(), p.to_path_buf())))
             .collect()
     }
 
@@ -929,6 +971,102 @@ mod tests {
             id, id, plugin_type, invoke_entry_field
         );
         fs::write(dir.join("plugin.json"), manifest_json).unwrap();
+    }
+
+    /// 内存归一（唯一真源在 AppState.manifests）：loader 缓存只持轻量路径
+    /// 摘要，完整 manifest 按需读盘——磁盘 plugin.json 编辑后 get_manifest /
+    /// load 读到新内容（不经过 discover 重扫）。
+    #[tokio::test]
+    async fn test_manifest_cache_slim_reparses_disk_on_demand() {
+        let builtin = tempfile::tempdir().unwrap();
+        create_test_plugin_dir(builtin.path(), "slim_cache", "pipeline");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        loader.discover(&[]).await.unwrap();
+
+        // discover 后缓存不持完整 manifest：改磁盘声明，get_manifest 应读到新值
+        let manifest_path = builtin.path().join("slim_cache").join("plugin.json");
+        let edited = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("Test Plugin slim_cache", "Edited Manifest Name");
+        std::fs::write(&manifest_path, edited).unwrap();
+
+        let m = loader.get_manifest("slim_cache").expect("get_manifest 应可读");
+        assert_eq!(m.name, "Edited Manifest Name", "按需读盘应读到磁盘最新声明");
+        assert_eq!(m.id, "slim_cache");
+
+        // load 路径同源：加载出的 manifest 也是按需读盘的当前磁盘内容
+        let loaded = loader.load("slim_cache").await.expect("load 应成功");
+        assert_eq!(loaded.manifest.name, "Edited Manifest Name");
+
+        // get_plugin_dirs 走同一路径摘要缓存（根目录映射不受磁盘编辑影响）
+        let dirs = loader.get_plugin_dirs();
+        assert!(dirs.contains_key("slim_cache"), "目录映射应含该插件");
+        assert_eq!(
+            dirs["slim_cache"],
+            builtin.path().join("slim_cache"),
+            "目录映射应指向缓存路径的父目录"
+        );
+    }
+
+    /// loader 缓存瘦身后的失败语义：manifest 读盘失败时 load 报显式错误、
+    /// get_manifest 按未发现处理（None + warn），不静默返回旧缓存。
+    #[tokio::test]
+    async fn test_manifest_cache_slim_failures_when_disk_unreadable() {
+        let builtin = tempfile::tempdir().unwrap();
+        create_test_plugin_dir(builtin.path(), "slim_gone", "pipeline");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        loader.discover(&[]).await.unwrap();
+
+        let manifest_path = builtin.path().join("slim_gone").join("plugin.json");
+
+        // ① 文件删除（IO 错误）：load 显式报 MANIFEST_READ，不静默降级
+        std::fs::remove_file(&manifest_path).unwrap();
+        let err = loader.load("slim_gone").await.expect_err("读盘失败应报错");
+        assert_eq!(err.code.as_deref(), Some("MANIFEST_READ"));
+        // get_manifest 按未发现处理（None）。warn 走 always-enabled 测试订阅者
+        // 包裹：默认无订阅者时 tracing 按 callsite 缓存 never-interest，warn!
+        // 的 format args 不会被求值（覆盖率盲区）；订阅者在场保证失败路径
+        // 真实执行（断言仍是 None 语义，不 assert 日志内容）。
+        let missing = tracing::subscriber::with_default(AlwaysSubscriber, || {
+            loader.get_manifest("slim_gone").is_none()
+        });
+        assert!(missing);
+
+        // ② 文件内容损坏（JSON/YAML 双解析失败）：同样按未发现处理
+        std::fs::write(&manifest_path, "not a manifest: {{{").unwrap();
+        let missing = tracing::subscriber::with_default(AlwaysSubscriber, || {
+            loader.get_manifest("slim_gone").is_none()
+        });
+        assert!(missing, "损坏 manifest 应按未发现处理");
+        assert!(loader.load("slim_gone").await.is_err());
+    }
+
+    /// 全开测试订阅者：`register_callsite` 返回 always-interest、`enabled` 恒真，
+    /// 事件/span 记录全部 no-op。仅供失败路径测试包裹用——不注入日志输出，
+    /// 只让 tracing 宏的 format args 被求值（默认无订阅者时 callsite 以
+    /// never-interest 缓存，错误路径的 warn 文案永不执行）。
+    struct AlwaysSubscriber;
+
+    impl tracing::Subscriber for AlwaysSubscriber {
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::always()
+        }
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::Id) {}
+        fn exit(&self, _span: &tracing::Id) {}
     }
 
     /// Phase 1 契约定型：manifest 未知字段从"静默忽略"改为

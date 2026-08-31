@@ -125,7 +125,7 @@ async fn path_b_schema_contributes_multi_key_passthrough() {
         enabled_plugin_ids: Arc::new(RwLock::new(HashSet::from([
             "multi_contrib_plugin".to_string()
         ]))),
-        ..AppState::with_config(json!({}))
+        ..AppState::new()
     };
 
     let app = build_router(state);
@@ -182,7 +182,7 @@ async fn path_b_disabled_plugin_contributes_not_exported() {
     let state = AppState {
         manifests: Arc::new(RwLock::new(vec![manifest])),
         enabled_plugin_ids: Arc::new(RwLock::new(HashSet::new())),
-        ..AppState::with_config(json!({}))
+        ..AppState::new()
     };
 
     let app = build_router(state);
@@ -565,7 +565,7 @@ async fn path_f_sessions_schema_aggregates_plugin_thread_fields() {
             "isolation".to_string(),
             "no_contributes_plugin".to_string(),
         ]))),
-        ..AppState::with_config(json!({}))
+        ..AppState::new()
     };
 
     let app = build_router(state);

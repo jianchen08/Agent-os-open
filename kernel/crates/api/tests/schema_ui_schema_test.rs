@@ -50,7 +50,7 @@ fn manifest_with_ui(
 }
 
 async fn fetch_schema(manifests: Vec<PluginManifest>) -> Value {
-    let state = AppState::with_config(json!({}));
+    let state = AppState::new();
     // 注入 manifests：用 with_plugins 太重，直接构造带 manifests 的 state
     let state = AppState {
         manifests: std::sync::Arc::new(tokio::sync::RwLock::new(manifests)),

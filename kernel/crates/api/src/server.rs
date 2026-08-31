@@ -1542,6 +1542,8 @@ async fn stage_execute(
 /// 回写：final_state 含完整 messages 历史（LLM 插件 append 了 assistant 回复），
 /// 按 (tenant_id, effective_pipeline_id) 常驻：下一轮热路径直接复用，
 /// 免 DB 查询；重启/内存丢失时冷路径从 messages 表恢复（见 stage_recover_history）。
+/// 常驻副本剥离 `tool_schemas`（每轮注入的 LLM 工具面，跨轮无意义——不随
+/// final_state 滞留内存；每轮 stage_inject 重新注入）。
 fn stage_finalize(
     final_state: &serde_json::Value,
     tenant_id: &str,
@@ -1551,16 +1553,23 @@ fn stage_finalize(
 ) -> EngineOutcome {
     if !effective_pipeline_id.is_empty() {
         let reg = agentos_session::global_registry();
+        // 常驻快照剥离 tool_schemas（每轮注入的 LLM 工具面，跨轮无意义）——
+        // 否则整树 schema 随 final_state 滞留内存注册表（90 工具 62KB 声明被
+        // 反复持有放大）。下一轮 stage_inject_agent_and_tools 按注册表重注入。
+        let mut persisted = final_state.clone();
+        if let Some(obj) = persisted.as_object_mut() {
+            obj.remove("tool_schemas");
+        }
         if !reg.contains(tenant_id, effective_pipeline_id) {
             reg.get_or_init(
                 tenant_id,
                 effective_pipeline_id,
                 thread_id,
                 agent_id,
-                final_state.clone(),
+                persisted,
             );
         } else {
-            reg.update_state(tenant_id, effective_pipeline_id, final_state.clone());
+            reg.update_state(tenant_id, effective_pipeline_id, persisted);
         }
     }
 
