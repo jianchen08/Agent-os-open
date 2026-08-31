@@ -570,6 +570,18 @@ pub struct PluginInvokerImpl {
     last_used: RwLock<HashMap<String, Instant>>,
     /// light 组运行时装箱状态（分配表 + 槽位计数，见 [`LightPacking`]）。
     light_packing: RwLock<LightPacking>,
+    /// light 宿主**实际 spawn 时**的成员集快照 {宿主键: 成员集}（惰性装箱漂移
+    /// 检测基准，§4.5）。
+    ///
+    /// 进程成员集在 spawn 时定格，而分配表随惰性装箱动态变化——新成员装箱进
+    /// 已存活宿主后两者漂移，fast path 据此判定 stale 触发整宿主 respawn（见
+    /// [`Self::is_host_stale`]）。纯内存比对（无 stat），不受指纹 TTL 门约束：
+    /// 装箱调用本身落在 TTL 窗口内，靠指纹过期检测会漏（指纹记录的是分配表
+    /// 期望态，漂移对指纹不可见）。
+    ///
+    /// 生命周期与 `mcp_clients` 条目同步：spawn 时写入（[`Self::build_sidecar_transport_client`]），
+    /// 进程 kill/驱逐时清除（[`Self::unload_host`] / fast path 驱逐）。
+    spawned_members: RwLock<HashMap<String, Vec<String>>>,
     /// 预热常驻集（boot 预热的管道引用插件 id）：这些插件所在宿主组豁免
     /// 空闲回收（预热常驻语义——否则预热被 GC 架空，首条消息重新全价冷启动）。
     /// 集合只增（boot 预热一次定型）；`AGENTOS_DISABLE_SIDECAR_WARMUP=1` 时
@@ -591,6 +603,7 @@ impl PluginInvokerImpl {
             fingerprints: RwLock::new(HashMap::new()),
             last_used: RwLock::new(HashMap::new()),
             light_packing: RwLock::new(LightPacking::default()),
+            spawned_members: RwLock::new(HashMap::new()),
             keep_warm_plugins: RwLock::new(std::collections::HashSet::new()),
         }
     }
@@ -1177,6 +1190,8 @@ impl PluginInvokerImpl {
         if invalidated.is_empty() {
             return;
         }
+        // spawn 成员集快照与缓存条目同生命周期：全量驱逐一并清空（respawn 重记）
+        self.spawned_members.write().clear();
         let kill = async move {
             for (id, client) in invalidated {
                 if let Err(e) = client.write().await.kill().await {
@@ -1218,6 +1233,8 @@ impl PluginInvokerImpl {
         if drained.is_empty() {
             return;
         }
+        // spawn 成员集快照与缓存条目同生命周期：停机 drain 一并清空
+        self.spawned_members.write().clear();
         let total = drained.len();
         for (id, client) in drained {
             // 超时盖住整个「取写锁 + kill」——写锁死锁与 kill 挂起同等会卡退出。
@@ -1253,6 +1270,8 @@ impl PluginInvokerImpl {
         let Some(client) = self.mcp_clients.write().remove(&host_key) else {
             return;
         };
+        // spawn 成员集快照与缓存条目同生命周期：kill 即清（respawn 重记）
+        self.spawned_members.write().remove(&host_key);
         let kill_fut = async { client.write().await.kill().await };
         match tokio::time::timeout(Duration::from_secs(2), kill_fut).await {
             Ok(Ok(())) => {
@@ -1440,6 +1459,7 @@ impl PluginInvokerImpl {
                 self.notify_crash(&member);
             }
             self.mcp_clients.write().remove(host_key);
+            self.spawned_members.write().remove(host_key);
             return None;
         }
         if !self.is_host_stale(host_key, manifest).await {
@@ -1458,13 +1478,16 @@ impl PluginInvokerImpl {
             );
         }
         self.mcp_clients.write().remove(host_key);
+        self.spawned_members.write().remove(host_key);
         None
     }
 
     /// Double-check 复用判定（持 spawn 锁后调用）：前一个持锁者可能已创建好
     /// client。命中且存活 → touch 后返回 Some；又崩溃 → kill+驱逐返回 None 继续
     /// spawn。判死与 fast path 同用 is_dead_sidecar 门控（HTTP transport 不判死，
-    /// 防误报）；不做指纹 staleness 检测（刚 spawn/校验过的进程无需 stat）。
+    /// 防误报）；不做指纹 staleness 检测（刚 spawn/校验过的进程无需 stat），
+    /// 但做成员集漂移检测——spawn 窗口内新成员装箱进本宿主（分配表已更新、
+    /// 快照未写入）时，前一个持锁者 spawn 的进程成员集已过期，必须 kill 重来。
     async fn reuse_fresh_host_locked(&self, host_key: &str) -> Option<SharedMcpClient> {
         let cached = {
             let clients = self.mcp_clients.read();
@@ -1472,7 +1495,8 @@ impl PluginInvokerImpl {
         };
         let client = cached?;
         let client_guard = client.read().await;
-        if !Self::is_dead_sidecar(&client_guard).await {
+        if !Self::is_dead_sidecar(&client_guard).await && !self.light_host_members_drifted(host_key)
+        {
             self.touch_last_used(host_key);
             return Some(Arc::clone(&client));
         }
@@ -1484,6 +1508,7 @@ impl PluginInvokerImpl {
             );
         }
         self.mcp_clients.write().remove(host_key);
+        self.spawned_members.write().remove(host_key);
         None
     }
 
@@ -1602,6 +1627,14 @@ impl PluginInvokerImpl {
             let slot = parse_light_slot(host_key)
                 .expect("light 成员宿主键必含槽位号（resolve_host_key 分配保证）");
             let members = self.host_members(host_key);
+            // 记录实际 spawn 的成员集快照（漂移检测基准，见 spawned_members 字段
+            // 注释）。先装箱后 spawn 的调用序保证：此处快照 = 本次 spawn 的
+            // --members 注入集；快照写入先于客户端入缓存，fast path 判定时必已
+            // 就位。失败路径（resolve_group_host_command 报错）不写快照——进程
+            // 未 spawn，无漂移可言。
+            self.spawned_members
+                .write()
+                .insert(host_key.to_string(), members.clone());
             let (command, args, workdir) =
                 self.resolve_group_host_command(LIGHT_HOST_GROUP, slot, &members)?;
             (command, args, Some(workdir))
@@ -1916,6 +1949,31 @@ impl PluginInvokerImpl {
         }
     }
 
+    /// light 宿主成员集漂移检测：分配表当前成员集 vs 实际 spawn 时的成员集快照。
+    ///
+    /// 返回 true = 漂移（有新成员装箱进已存活宿主，进程成员集已过期，必须
+    /// kill 整宿主 respawn 按新成员集重建）。非 light 宿主恒 false（独占宿主
+    /// 成员集 = 键内嵌 plugin_id，spawn 后不变）。
+    ///
+    /// 纯内存比对（无 stat、无锁竞争窗口），不受指纹 TTL 门约束——装箱调用
+    /// 本身落在 TTL 窗口内，指纹过期检测会漏（指纹记录的是分配表期望态，
+    /// 漂移对指纹不可见）。spawn 时快照与分配表更新同序（先装箱后 spawn），
+    /// 快照写入先于客户端入缓存，fast path 判定时快照必已就位。
+    ///
+    /// 快照缺失（缓存条目存在但无快照）按**无漂移**处理：生产路径下缓存条目
+    /// 必带快照（spawn 时写入先于入缓存），缺失只可能来自测试手工注入的假
+    /// 客户端——保守不杀，避免基于缺失数据误杀进程。
+    fn light_host_members_drifted(&self, host_key: &str) -> bool {
+        if parse_light_slot(host_key).is_none() {
+            return false;
+        }
+        let current = self.host_members(host_key);
+        let Some(spawned) = self.spawned_members.read().get(host_key).cloned() else {
+            return false;
+        };
+        current != spawned
+    }
+
     /// 已 spawn 宿主的宿主键反查（kill/unload 入口按 plugin_id 进来时用）。
     ///
     /// 优先级：light 分配表条目（manifest 可能已不可得但分配仍在）→ manifest
@@ -2022,7 +2080,16 @@ impl PluginInvokerImpl {
     ///
     /// 独占宿主指纹 = 插件自身指纹（现状语义）；light 宿主 = 成员指纹并集。
     /// 首次调用（缓存无记录）写入指纹返回 false（首次走 spawn，必是最新）。
+    ///
+    /// light 宿主额外做**成员集漂移检测**（[`Self::light_host_members_drifted`]）：
+    /// 新成员惰性装箱进已存活宿主后，进程成员集（spawn 时定格）与分配表漂移，
+    /// 必须 kill 整宿主 respawn——否则复用旧进程会报 MCP [-32602] tool not found。
+    /// 漂移检测在 TTL 门**之前**（纯内存比对，无 stat 开销；指纹记录的是分配表
+    /// 期望态，漂移对指纹不可见，靠指纹过期检测会漏）。
     async fn is_host_stale(&self, host_key: &str, caller: &PluginManifest) -> bool {
+        if self.light_host_members_drifted(host_key) {
+            return true;
+        }
         let now = Instant::now();
         // TTL 门 + 指纹比对在同一把读锁下原子完成（计算指纹前先快照缓存）。
         let cached = self.fingerprints.read().get(host_key).cloned();
@@ -2355,6 +2422,8 @@ impl PluginInvokerImpl {
         // 清除指纹缓存 + last_used（宿主键），下次调用重新计算并 respawn
         self.fingerprints.write().remove(host_key);
         self.last_used.write().remove(host_key);
+        // 清除 spawn 成员集快照（与 mcp_clients 条目同生命周期，见字段注释）
+        self.spawned_members.write().remove(host_key);
 
         // idle GC 回收语境：清分配表内该宿主的全部成员条目——槽位全部释放，
         // 后续新插件装箱时优先复用（§4.5 第 3 条 / §4.8「回收即清空」）。
@@ -2667,6 +2736,8 @@ impl PluginInvoker for PluginInvokerImpl {
                 );
             }
             self.mcp_clients.write().remove(&host_key_probe);
+            // spawn 成员集快照与缓存条目同生命周期：回收即清（下次调用重记）
+            self.spawned_members.write().remove(&host_key_probe);
         }
         Ok(raw)
     }

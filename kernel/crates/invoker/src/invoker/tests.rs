@@ -2365,6 +2365,69 @@ async fn test_member_set_change_triggers_full_host_respawn() {
 }
 
 #[tokio::test]
+async fn test_lazy_member_boxed_into_live_host_triggers_respawn() {
+    // 惰性装箱漂移（缺陷回归）：新 light 成员装箱进**已 spawn 的未满宿主**后，
+    // 宿主进程成员集必须重建——否则复用旧进程（成员集在 spawn 时定格）会
+    // 报 MCP [-32602] tool not found。
+    //
+    // 与 test_member_set_change_triggers_full_host_respawn 的差异：该测试把
+    // 指纹回写 2s 前绕过 TTL 门；本测试指纹保持**新鲜**（spawn 后立即装箱的
+    // 真实时序）——缺陷正是 TTL 门（1s）短路了成员集漂移检测，装箱调用本身
+    // 落在 TTL 窗口内，fast path 直接复用旧进程。
+    let loader = Arc::new(MockLoader::new());
+    let manifest_a = make_light_manifest("guard_a", "python server.py");
+    let manifest_b = make_light_manifest("guard_b", "python server.py");
+    loader.add_manifest(manifest_a.clone());
+    loader.add_manifest(manifest_b.clone());
+    let invoker = PluginInvokerImpl::new(loader);
+
+    // 成员 a 装箱 + 模拟已 spawn 宿主（假进程入缓存 + 指纹新鲜记录 +
+    // spawn 成员集快照——生产路径下 spawn 时写入，见 spawned_members 注释）
+    let host_key = invoker.resolve_host_key(&manifest_a);
+    assert_eq!(host_key, "group:light:1");
+    let live = spawn_long_lived_stdio_client().await;
+    let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(host_key.clone(), Arc::clone(&live_arc));
+    invoker.spawned_members.write().insert(
+        host_key.clone(),
+        invoker.host_members(&host_key),
+    );
+    invoker.fingerprints.write().insert(
+        host_key.clone(),
+        (invoker.host_union_fingerprint(&host_key), Instant::now()),
+    );
+
+    // 新成员 b 惰性装箱进同一未满宿主（成员集变化，指纹新鲜窗口内）
+    assert_eq!(
+        invoker.resolve_host_key(&manifest_b),
+        host_key,
+        "未满宿主优先塞入（缺陷场景：装箱复用已 spawn 宿主）"
+    );
+
+    let result = invoker.get_or_create_mcp_client(&manifest_a).await;
+    // respawn 必须被触发：host 命令解析先于 spawn 失败（_host 未落地，
+    // HOST_DIR_NOT_FOUND）——不得返回缓存实例（旧进程成员集无 b）
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("装箱到已存活宿主后必须触发整宿主 respawn，不得复用旧进程"),
+    };
+    assert_eq!(
+        err.code.as_deref(),
+        Some("HOST_DIR_NOT_FOUND"),
+        "respawn 路径证据：{err}"
+    );
+    // 旧宿主进程被 kill + 缓存逐出
+    assert!(
+        !live_arc.read().await.is_alive().await,
+        "整宿主 respawn 必须 kill 旧进程"
+    );
+    assert!(invoker.mcp_clients.read().get(&host_key).is_none());
+}
+
+#[tokio::test]
 async fn test_spawn_lock_per_host_granularity() {
     // spawn 锁粒度（§4.2 第 4 条）：per-host-key——同宿主成员共享锁条目
     // （串行 spawn），跨宿主各自独立锁条目（并行 spawn）。
