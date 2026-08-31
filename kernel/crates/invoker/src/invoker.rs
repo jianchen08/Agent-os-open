@@ -473,7 +473,18 @@ struct NativeHostServices {
     /// runtime worker，`block_in_place` 在其上会 panic——改用直接
     /// `Handle::block_on`（blocking 线程不参与调度，阻塞安全）。
     on_blocking_thread: bool,
+    /// capability 调用结果缓冲（**exe 堆**，本结构持有）。跨分配器契约：
+    /// `call_capability` 把结果写进这里再借 `&str` 给插件——exe 分配、exe 释放，
+    /// 零跨界所有权转移。线程安全：execute 在 blocking 线程串行（同 host 一次
+    /// 一个调用），`&self` 独占借用期间写读不重叠，UnsafeCell 足够。
+    response_buf: std::cell::UnsafeCell<String>,
 }
+
+// SAFETY: response_buf 的 UnsafeCell 仅在 `&self` 独占借用期间写入；借出的 &str
+// 由调用方（插件，blocking 线程内同步消费）在下一次同 host 调用前读完。execute 的
+// 调用形态=单 blocking 线程串行，无并发写面。
+unsafe impl Send for NativeHostServices {}
+unsafe impl Sync for NativeHostServices {}
 
 impl agentos_native_sdk::HostServices for NativeHostServices {
     fn call_capability(
@@ -481,7 +492,7 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
         capability: &str,
         method: &str,
         params_json: &str,
-    ) -> Result<String, String> {
+    ) -> Result<&str, String> {
         let router = Arc::clone(&self.router);
         let cap = capability.to_string();
         let mth = method.to_string();
@@ -511,7 +522,19 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
             tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
         };
         match result {
-            Ok(v) => Ok(serde_json::to_string(&v).unwrap_or_default()),
+            // 跨分配器契约：结果写进自我持有的缓冲（exe 堆），返回 &str 借用——
+            // dll 只读消费（立即转 Value），不存引用、不释放。旧 `String` 返回会
+            // 把 exe 分配的串交 dll 侧 drop = 反方向跨堆 free UB。
+            Ok(v) => {
+                // SAFETY(跨分配器契约)：response_buf 由本结构（exe 侧）持有，
+                // 此处写、借出 &str 给 dll 只读——分配/释放全在 exe 堆。
+                // 并发安全性：execute 在单个 blocking 线程串行，同 host 的
+                // call_capability 不重入（tool_core 同轮串行调用），&self 已独占。
+                let buf = unsafe { &mut *self.response_buf.get() };
+                buf.clear();
+                buf.push_str(&serde_json::to_string(&v).unwrap_or_default());
+                Ok(buf.as_str())
+            }
             Err(e) => Err(format!("{e}")),
         }
     }
@@ -686,7 +709,6 @@ impl PluginInvokerImpl {
         manifest: &PluginManifest,
     ) -> Result<(), PluginError> {
         let native_path = self.resolve_native_artifact(plugin_id, manifest)?;
-        tracing::info!("[diag-segv] {} dlopen path={}", plugin_id, native_path.display());
         loader.load(plugin_id, &native_path)?;
         Ok(())
     }
@@ -971,7 +993,6 @@ impl PluginInvokerImpl {
         ctx: &PluginContext,
     ) -> Result<PluginResult, PluginError> {
         let loader = self.native_loader_or_err(plugin_id)?;
-        info!("[diag-segv] {} stage1 loader_ok", plugin_id);
 
         // 热重载指纹检测（与 sidecar 同逻辑）：代码/配置变更告警。
         if self.is_plugin_stale(plugin_id, manifest).await {
@@ -983,7 +1004,6 @@ impl PluginInvokerImpl {
         }
 
         self.load_native(loader, plugin_id, manifest)?;
-        info!("[diag-segv] {} dlopen_ok", plugin_id);
 
         // config 注入（shared::build_injected_config，按 manifest.config_files 命名空间）。
         let config = crate::shared::build_injected_config(
@@ -994,7 +1014,6 @@ impl PluginInvokerImpl {
                 .unwrap_or(serde_json::Value::Null),
             manifest,
         );
-        info!("[diag-segv] {} config_ok", plugin_id);
 
         // 构造 PluginCtx（state/config 用 JSON 字符串；tool_call_json=None = pipeline 语义）。
         let plugin_ctx = agentos_native_sdk::PluginCtx {
@@ -1020,19 +1039,16 @@ impl PluginInvokerImpl {
                     router: Arc::clone(router),
                     plugin_id: plugin_id.to_string(),
                     on_blocking_thread: true,
+                    response_buf: std::cell::UnsafeCell::new(String::with_capacity(4096)),
                 });
 
         let loader = Arc::clone(loader);
         let pid = plugin_id.to_string();
-        info!("[diag-segv] {} pre_spawn_blocking", plugin_id);
         let result = tokio::task::spawn_blocking(move || {
-            info!("[diag-segv] in_blocking_thread");
             let host_ref: Option<&dyn agentos_native_sdk::HostServices> = host_svc
                 .as_ref()
                 .map(|h| h as &dyn agentos_native_sdk::HostServices);
-            info!("[diag-segv] calling loader.execute");
             let r = loader.execute(&pid, &plugin_ctx, host_ref);
-            info!("[diag-segv] loader.execute returned");
             r
         })
         .await
@@ -1136,6 +1152,7 @@ impl PluginInvokerImpl {
                     router: Arc::clone(router),
                     plugin_id: plugin_id.to_string(),
                     on_blocking_thread: true,
+                    response_buf: std::cell::UnsafeCell::new(String::with_capacity(4096)),
                 });
 
         let loader = Arc::clone(loader);

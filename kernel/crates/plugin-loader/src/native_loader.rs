@@ -34,10 +34,6 @@ use tracing::{debug, warn};
 /// 构造函数签名：返回双重 Box 裸指针（实为 `Box<Box<dyn PipelinePlugin>>`）。
 type CreateFn = unsafe extern "C" fn() -> *mut ();
 
-/// execute 返回缓冲的初始容量（字节）。多数 state_updates JSON 在几 KB 量级，
-/// 预分配避免小结果反复扩容；大结果由 OutBuffer 按需增长。
-const OUT_INITIAL_CAPACITY: usize = 4 * 1024;
-
 /// 一个已加载的原生插件实例：Library（保活）+ trait 对象。
 pub struct NativePlugin {
     /// Library 句柄——以 ManuallyDrop 持有，**drop 阶段刻意不释放**（见模块注释：
@@ -131,9 +127,7 @@ impl NativePluginLoader {
 
         // 调构造函数拿裸指针，还原为 Box<dyn PipelinePlugin>。
         // SAFETY: create_fn 由插件 cdylib 导出，返回 plugin_into_raw 产生的双重 Box 指针。
-        tracing::info!("[diag-segv] dlopen ok, symbol resolved, calling create_fn");
         let ptr = unsafe { create_fn() };
-        tracing::info!("[diag-segv] create_fn returned");
         // SAFETY: ptr 由 create_fn()（插件 agentos_plugin_create 导出）产生，按 native-sdk 契约
         // 必须是 plugin_into_raw 生成的双重 Box 指针；box_from_raw 还原所有权（随即 Box::leak 保活）。
         // null 已由 box_from_raw 内部处理（返回 None → 下游 NATIVE_CREATE_NULL 错误）。
@@ -177,18 +171,17 @@ impl NativePluginLoader {
                 })?
         };
 
-        // 构造执行上下文（ctx + host + 内核预分配返回缓冲），调 trait 对象 execute。
+        // 构造执行上下文（ctx + host），调 trait 对象 execute。
         //
-        // 跨分配器契约：`out` 由内核（exe 侧）分配，插件只经 `ectx.out.fill(&str)`
-        // 写入——返回字符串的分配与释放都在内核侧，杜绝 dll 堆 String 所有权跨越
-        // FFI 边界（内核 drop = 跨堆 free = UB，2026-09-01 差分实验定案）。
-        let mut ectx = agentos_native_sdk::ExecContext {
+        // 跨分配器契约（对称借用协议）：插件返回**其自身堆**的结果借用（&str 绑
+        // &self），本侧**立即 to_string 拷贝**（exe 堆）；不持有 dll 堆引用、不
+        // 释放——杜绝 dll↔exe 任何方向的跨堆 free（2026-09-01 差分实验定案）。
+        let ectx = agentos_native_sdk::ExecContext {
             ctx: ctx.clone(),
             host,
-            out: agentos_native_sdk::OutBuffer::with_capacity(OUT_INITIAL_CAPACITY),
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            plugin.instance.execute(&mut ectx)
+            plugin.instance.execute(&ectx).map(str::to_string)
         }))
         .map_err(|_| PluginError {
             message: format!("native plugin '{}' panicked during execute", plugin_id),
@@ -197,7 +190,7 @@ impl NativePluginLoader {
         })?;
 
         match result {
-            Ok(()) => Ok(ectx.out.into_string()),
+            Ok(state_updates_json) => Ok(state_updates_json),
             Err(err) => {
                 warn!(plugin_id = plugin_id, error = %err, "native plugin returned error");
                 Err(PluginError {

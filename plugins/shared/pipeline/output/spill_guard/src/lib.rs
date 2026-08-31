@@ -36,26 +36,50 @@ use retention::{RetainedText, TextRetainer, TextStrategy};
 use spill_store::SpillStore;
 
 /// spill_guard 插件实例。
-pub struct SpillGuard;
+///
+/// 跨分配器契约：execute 结果存自持缓冲（dll 堆），以 `&str` 借给内核读——
+/// 不返回 String（内核 drop = 跨堆 free UB）。调用形态=blocking 线程串行，
+/// `UnsafeCell` 写读不重叠。
+pub struct SpillGuard {
+    out_buf: std::cell::UnsafeCell<String>,
+}
+
+impl Default for SpillGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SpillGuard {
+    pub fn new() -> Self {
+        Self {
+            out_buf: std::cell::UnsafeCell::new(String::with_capacity(256 * 1024)),
+        }
+    }
+}
+
+// SAFETY: out_buf 仅在 execute（内核 blocking 线程串行调用，单实例不重入）
+// 的 &self 独占借用期间写入；借出的 &str 由调用方同步拷贝消费，无并发写面。
+unsafe impl Send for SpillGuard {}
+unsafe impl Sync for SpillGuard {}
 
 impl PipelinePlugin for SpillGuard {
-    fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
+    fn execute(&self, ectx: &ExecContext) -> Result<&str, String> {
         let state = ectx.ctx.state_value();
         let config = ectx.ctx.config_value();
         // run 内部全路径 best-effort：任何存档/解析失败都收敛为空更新（no-op），
         // 不会把 Err 上抛（引擎对插件错误统一 warn+继续，ADR 2026-08-18；此处再加一层自保）。
         let updates = run(&state, &config);
-        let json =
-            serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?;
-        ectx.out.fill(&json);
-        Ok(())
+        let buf = unsafe { &mut *self.out_buf.get() };
+        *buf = serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?;
+        Ok(buf.as_str())
     }
 }
 
 /// 构造函数（extern "C"）：内核 dlopen 后调它拿 trait 对象裸指针。
 #[no_mangle]
 pub extern "C" fn agentos_plugin_create() -> *mut () {
-    plugin_into_raw(SpillGuard)
+    plugin_into_raw(SpillGuard::new())
 }
 
 /// spill 配置（config/system/spill_config.yaml 的 `spill` 命名空间）。

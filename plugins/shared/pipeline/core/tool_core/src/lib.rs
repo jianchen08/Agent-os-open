@@ -21,24 +21,52 @@ mod types;
 use types::{StateKey, ToolCall, ToolResult};
 
 /// tool_core 插件实例。
-pub struct ToolCore;
+///
+/// 跨分配器契约：`execute` 的返回 JSON 存放于 [`ToolCore::out_buf`](内部缓冲，
+/// dll 堆)，以 `&str` 借给内核——内核立即拷贝消费，缓冲分配/释放都在 dll 堆。
+/// 线程安全：内核侧 execute 在 blocking 线程**串行**调用（单实例不重入），
+/// `UnsafeCell` 写读不重叠；`Send+Sync` 显式承诺成立（无并发写）。
+pub struct ToolCore {
+    /// execute 结果缓冲（借给内核读，下一次 execute 前有效）。
+    out_buf: std::cell::UnsafeCell<String>,
+}
+
+impl Default for ToolCore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ToolCore {
+    pub fn new() -> Self {
+        Self {
+            out_buf: std::cell::UnsafeCell::new(String::with_capacity(64 * 1024)),
+        }
+    }
+}
+
+// SAFETY: out_buf 仅在 execute（内核 blocking 线程串行调用，单实例不重入）
+// 的 &self 独占借用期间写入；借出的 &str 由调用方同步拷贝消费，无并发写面。
+unsafe impl Send for ToolCore {}
+unsafe impl Sync for ToolCore {}
 
 impl PipelinePlugin for ToolCore {
-    fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
+    fn execute(&self, ectx: &ExecContext) -> Result<&str, String> {
         let state = ectx.ctx.state_value();
         // 执行主流程（返回 state_updates HashMap）。
         let updates = run(&state, ectx.host);
-        // 序列化并写进内核返回缓冲（跨分配器契约：不走 String 返回）。
+        // 序列化进自持缓冲，返回借用（跨分配器契约：不返回 String）。
         let json = serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?;
-        ectx.out.fill(&json);
-        Ok(())
+        let buf = unsafe { &mut *self.out_buf.get() };
+        *buf = json;
+        Ok(buf.as_str())
     }
 }
 
 /// 构造函数（extern "C"）：内核 dlopen 后调它拿 trait 对象裸指针。
 #[no_mangle]
 pub extern "C" fn agentos_plugin_create() -> *mut () {
-    plugin_into_raw(ToolCore)
+    plugin_into_raw(ToolCore::new())
 }
 
 /// 执行工具调用核心流程（对齐 plugin.py:609-1050）。
@@ -135,10 +163,12 @@ fn execute_single_tool(tc: &ToolCall, host: Option<&dyn HostServices>, state: &V
         Some(h) => {
             let invoke_params = build_invoke_params(tc, state);
             let params_json = serde_json::to_string(&invoke_params).unwrap_or_else(|_| "{}".into());
-            // 调内核 tool-executor.invoke（经 HostServices → CapabilityRouter）。
+            // 跨分配器契约：返回值是 exe 侧缓冲的 &str 借用（不持有、不释放，
+            // 立即转 Value 消费内完成）。旧 `String` 返回会把 exe 分配的串交
+            // dll drop = 反方向跨堆 free UB（2026-09-01 真机本崩点）。
             match h.call_capability("tool-executor", "invoke", &params_json) {
                 Ok(resp_json) => {
-                    let resp: Value = serde_json::from_str(&resp_json).unwrap_or(json!({}));
+                    let resp: Value = serde_json::from_str(resp_json).unwrap_or(json!({}));
                     parse_tool_executor_response(&tc.name, resp, start.elapsed().as_secs_f64() * 1000.0)
                 }
                 Err(e) => ToolResult::failed(
@@ -448,7 +478,10 @@ fn emit_tool_event(
         "payload": Value::Object(payload),
     });
     let params_json = serde_json::to_string(&params).unwrap_or_default();
-    // fire-and-forget：忽略返回（event-bus.emit 不需要结果）。
+    // fire-and-forget：忽略返回（event-bus.emit 不需要结果）。响应走借用缓冲
+    // （跨分配器契约：exe 分配的 String 不跨界 drop）。
+    // fire-and-forget：忽略返回（event-bus.emit 不需要结果）。返回串是 exe 侧
+    // 缓冲借用（跨分配器契约），不存引用、不释放。
     let _ = host.call_capability("event-bus", "emit", &params_json);
 }
 
@@ -489,9 +522,9 @@ mod tests {
             _capability: &str,
             _method: &str,
             params_json: &str,
-        ) -> Result<String, String> {
+        ) -> Result<&str, String> {
             *self.last_params.lock().unwrap() = Some(params_json.to_string());
-            Ok("{}".into())
+            Ok("{}")  // 借用协议：'static 字面量即实现方持有的 &str
         }
     }
 

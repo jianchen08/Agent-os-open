@@ -52,10 +52,28 @@ struct Sanitized {
 }
 
 /// sensitive_checker 插件实例。
-pub struct SensitiveChecker;
+///
+/// 跨分配器契约：execute 结果存自持缓冲（dll 堆）借 `&str` 给内核，不返回
+/// String（内核 drop = 跨堆 free UB）。blocking 线程串行调用。
+pub struct SensitiveChecker {
+    out_buf: std::cell::UnsafeCell<String>,
+}
+
+impl SensitiveChecker {
+    pub fn new() -> Self {
+        Self {
+            out_buf: std::cell::UnsafeCell::new(String::with_capacity(64 * 1024)),
+        }
+    }
+}
+
+// SAFETY: out_buf 仅在 execute（内核 blocking 线程串行调用，单实例不重入）
+// 的 &self 独占借用期间写入；借出的 &str 由调用方同步拷贝消费，无并发写面。
+unsafe impl Send for SensitiveChecker {}
+unsafe impl Sync for SensitiveChecker {}
 
 impl PipelinePlugin for SensitiveChecker {
-    fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
+    fn execute(&self, ectx: &ExecContext) -> Result<&str, String> {
         let state = ectx.ctx.state_value();
         let config = ectx.ctx.config_value();
 
@@ -65,8 +83,7 @@ impl PipelinePlugin for SensitiveChecker {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
         if !enabled {
-            ectx.out.fill("{}");
-            return Ok(());
+            return Ok(self.write_out("{}"));
         }
         let mask = config
             .get("mask")
@@ -78,8 +95,7 @@ impl PipelinePlugin for SensitiveChecker {
         let tool_results = match tool_results {
             Some(arr) if !arr.is_empty() => arr,
             _ => {
-                ectx.out.fill("{}");
-                return Ok(());
+                return Ok(self.write_out("{}"));
             }
         };
 
@@ -101,17 +117,26 @@ impl PipelinePlugin for SensitiveChecker {
             updates.insert("sensitive_detected".into(), Value::Bool(true));
         }
 
-        let json =
-            serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?;
-        ectx.out.fill(&json);
-        Ok(())
+        Ok(self.write_out(
+            &serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?,
+        ))
+    }
+}
+
+impl SensitiveChecker {
+    /// 写自持缓冲并借出（跨分配器契约：&str 绑 &self，调用方立即拷贝消费）。
+    fn write_out(&self, json: &str) -> &str {
+        let buf = unsafe { &mut *self.out_buf.get() };
+        buf.clear();
+        buf.push_str(json);
+        buf.as_str()
     }
 }
 
 /// 构造函数（extern "C"）：内核 dlopen 后调它拿 trait 对象裸指针。
 #[no_mangle]
 pub extern "C" fn agentos_plugin_create() -> *mut () {
-    plugin_into_raw(SensitiveChecker)
+    plugin_into_raw(SensitiveChecker::new())
 }
 
 // ── 递归脱敏（对齐 plugin.py:133-164） ────────────────────────────────────

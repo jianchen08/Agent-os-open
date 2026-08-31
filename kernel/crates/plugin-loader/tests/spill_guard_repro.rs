@@ -6,12 +6,21 @@ use std::sync::Arc;
 #[derive(Clone)]
 struct ReplyOk;
 impl HostServices for ReplyOk {
-    fn call_capability(&self, capability: &str, method: &str, params: &str) -> Result<String, String> {
+    fn call_capability(
+        &self,
+        capability: &str,
+        method: &str,
+        params: &str,
+    ) -> Result<&str, String> {
         eprintln!("[host] {} {} {} bytes", capability, method, params.len());
         if capability == "tool-executor" {
-            return Ok(r#"{"success":true,"data":{"content":"hello tool result"},"tool":{"name":"file_read"}}"#.into());
+            // 借用协议（跨分配器契约）：返回实现方持有的 &str。
+            // 单调用串行 + &self 生命周期，static 推导安全（测试桩数据不可变）。
+            if capability == "tool-executor" {
+                return Ok(r#"{"success":true,"data":{"content":"hello tool result"},"tool":{"name":"file_read"}}"#);
+            }
         }
-        Ok(r#"{"ok":true}"#.into())
+        Ok(r#"{"ok":true}"#)
     }
 }
 

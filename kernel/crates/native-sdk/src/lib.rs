@@ -40,6 +40,8 @@ pub use serde_json;
 
 // ── HostServices：插件 → 内核 capability 调用 ─────────────────────────
 
+// ── HostServices：插件 → 内核 capability 调用 ─────────────────────────
+
 /// 插件调用内核 capability 的句柄。
 ///
 /// 内核实现此 trait（包 `CapabilityRouter`），构造 `PluginCtx` 时注入。
@@ -49,86 +51,52 @@ pub use serde_json;
 /// 注：这是普通 Rust trait（非 FFI-safe），依赖"内核与插件同 rustc 版本编译"
 /// 保证 vtable 一致。toolchain 已锁定 1.85，满足此前提。
 pub trait HostServices: Send + Sync {
-    /// 调用内核 capability，返回结果 JSON 字符串。
+    /// 调用内核 capability，返回**实现方（exe）持有**的结果 JSON 借用。
     ///
     /// - `capability`：能力名（如 `"tool-executor"` / `"event-bus"`）。
     /// - `method`：方法名（如 `"invoke"` / `"emit"`）。
     /// - `params_json`：方法参数（序列化后的 JSON 字符串）。
     ///
-    /// 返回 `Ok(result_json)` 或 `Err(error_msg)`。
-    fn call_capability(
-        &self,
-        capability: &str,
-        method: &str,
-        params_json: &str,
-    ) -> Result<String, String>;
+    /// 返回 `Ok(result_json)`（借用绑定 `&self` 生命周期）或 `Err(error_msg)`。
+    ///
+    /// # 跨分配器契约（2026-09-01，两个方向都不能省）
+    ///
+    /// exe 与 cdylib 的全局分配器可能不同（mi exe × 系统堆 dll），**任何跨边界的
+    /// 所有权转移都是跨堆 free UB**。协议：
+    /// - 入参 `capability`/`method`/`params_json`：dll 分配的 `&str` 只读借用，
+    ///   exe 实现内部复制后使用（不持有、不释放其指针）。
+    /// - 返回值：exe 内部缓冲（exe 堆分配/释放），借给 dll 只读消费；
+    ///   dll **立即**解析（转 Value/拷贝），不存引用、不释放——下次同 host 调用
+    ///   会覆盖缓冲。`&str` 生命周期与 `&self` 绑定，借用检查强制消费内完成。
+    fn call_capability(&self, capability: &str, method: &str, params_json: &str)
+        -> Result<&str, String>;
 }
 
-// ── 返回值缓冲：跨分配器同堆写回（不能省）───────────────────────────────
+// ── PipelinePlugin：插件实现的主契约 ───────────────────────────────────
 
-/// 插件 `execute` 返回协议的**同侧分配**保证（2026-09-01 跨堆 free 修复）。
+/// 原生管道插件契约。插件（如 tool_core）`impl` 此 trait。
 ///
-/// 背景：内核 exe 可能安装自己的全局分配器（mimalloc），cdylib 用系统堆——
-/// 两者堆不互通。`execute` 若按 `Result<String, String>` 把字符串**所有权**交给
-/// 内核，内核 drop = 用 mimalloc free 系统堆指针 = UB（SIGSEGV，2026-09-01
-/// 差分实验 10/15 复现）。
+/// `execute` 接收 `&ExecContext`（含 ctx + host capability 句柄），返回 state 更新
+/// Patch 的 JSON 字符串。
 ///
-/// 形态（对齐 `HostServices::call_capability_report` 的借用协议）：
-/// 插件把结果写进**调用方提供**的缓冲（内核侧分配），返回 `&str` 借用——
-/// 分配与释放都在内核（exe）侧发生，跨界只有只读借用。
-///
-/// 旧签名 `execute`（返回 String）由 SDK 提供的默认实现桥接：插件把 JSON 写
-/// 进 `ectx.out_buffer` 后返回 Ok("")；直接返回 String 的旧实现不受影响（SDK
-/// 层归一）。
+/// 注：普通 Rust trait，依赖同 rustc 版本编译保证 vtable 一致。
 pub trait PipelinePlugin: Send + Sync {
-    /// 执行插件逻辑。
+    /// 执行插件逻辑，返回**实现方（dll）持有**的结果 JSON 借用。
     ///
-    /// - `ectx`：执行上下文（ctx 含 state/config，host 是内核 capability 句柄；
-    ///   `out` 是内核预分配的返回缓冲——**用 `ectx.out.fill(&str)` 写入结果**）。
-    /// - 返回 `Ok(())`（结果在 `ectx.out`）或 `Err(error_msg)`。
+    /// - `ectx`：执行上下文（ctx 含 state/config；host 是内核 capability 句柄）。
+    /// - 返回 `Ok(state_updates_json)`（借用绑定 `&self` 生命周期）或
+    ///   `Err(error_msg)`。
     ///
-    /// # 跨分配器契约
+    /// # 跨分配器契约（2026-09-01，与 `HostServices` 对称）
     ///
-    /// 结果字符串生命周期归**内核**：写进 `ectx.out`（内核分配的缓冲），
-    /// 不得以 `String` 返回——dll 堆上分配的缓冲内核 drop = 跨堆 free = UB。
-    fn execute(&self, ectx: &mut ExecContext) -> Result<(), String>;
-}
-
-/// execute 的返回缓冲：内核预分配、插件侧只写入。
-///
-/// 写入用 [`OutBuffer::fill`]（插件侧）——内部把 `&str` 拷进内核分配的 `Vec<u8>`，
-/// 没有任何跨堆所有权转移。
-pub struct OutBuffer {
-    buf: Vec<u8>,
-}
-
-impl OutBuffer {
-    /// 内核侧构造（预分配 capacity 减少扩容拷贝）。
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            buf: Vec::with_capacity(cap),
-        }
-    }
-
-    /// 插件侧写入结果（&str 借用，无跨堆分配/释放）。
-    pub fn fill(&mut self, s: &str) {
-        self.buf.clear();
-        self.buf.extend_from_slice(s.as_bytes());
-    }
-
-    /// 内核侧取出结果（消耗缓冲）。
-    pub fn into_string(self) -> String {
-        // SAFETY: OutBuffer 只经 fill 接收合法 UTF-8（&str 写入）。
-        unsafe { String::from_utf8_unchecked(self.buf) }
-    }
-}
-
-impl std::fmt::Debug for OutBuffer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OutBuffer")
-            .field("len", &self.buf.len())
-            .finish()
-    }
+    /// **跨边界零所有权转移**：调用方（内核）对返回串**立即拷贝**（转
+    /// Value/落 state），不存引用、不释放——缓冲由 dll 分配与释放（dll 堆），
+    /// 借用生命周期与 `&self` 绑定。禁止返回 `String`（exe drop = 跨堆 free UB，
+    /// 2026-09-01 差分实验 10/15 复现真机段错误）。
+    ///
+    /// 插件实现惯例：把 JSON 存进 `&self` 的内部缓冲字段（`Mutex<String>`，
+    /// execute 在 blocking 线程串行调用），返回其 `&str`。
+    fn execute(&self, ectx: &ExecContext) -> Result<&str, String>;
 }
 
 // ── PluginCtx：传给 execute 的上下文 ──────────────────────────────────
@@ -217,8 +185,6 @@ impl PluginCtx {
 pub struct ExecContext<'a> {
     pub ctx: PluginCtx,
     pub host: Option<&'a dyn HostServices>,
-    /// 返回缓冲：内核（exe 侧）预分配，插件用 `ectx.out.fill(&str)` 写入。
-    pub out: OutBuffer,
 }
 
 // ── 构造函数契约 + 安全封装 ────────────────────────────────────────────
@@ -271,7 +237,7 @@ pub unsafe fn box_from_raw(ptr: *mut ()) -> Option<Box<dyn PipelinePlugin>> {
     // （不 drop、不 free——跨分配器 UB）。内层 from_raw 还原后由调用方 Box::leak。
     let outer = unsafe { &*(ptr as *const Box<dyn PipelinePlugin>) };
     let inner_fat: *mut dyn PipelinePlugin =
-        unsafe { &**outer as *const dyn PipelinePlugin as *mut dyn PipelinePlugin };
+        &**outer as *const dyn PipelinePlugin as *mut dyn PipelinePlugin;
     Some(unsafe { Box::from_raw(inner_fat) })
 }
 
@@ -323,27 +289,44 @@ mod tests {
         assert!(ctx.tool_call_value().is_none());
     }
 
-    struct DummyPlugin;
+    struct DummyPlugin {
+        buf: std::cell::UnsafeCell<String>,
+    }
+    impl DummyPlugin {
+        fn new() -> Self {
+            Self {
+                buf: std::cell::UnsafeCell::new(String::new()),
+            }
+        }
+    }
     impl PipelinePlugin for DummyPlugin {
-        fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
-            ectx.out.fill(r#"{"ok":true}"#);
-            Ok(())
+        fn execute(&self, _ectx: &ExecContext) -> Result<&str, String> {
+            // 对称借用协议：结果存 &self 内部缓冲，返回其 &str（dll 侧持有）。
+            // SAFETY: execute 由 loader 在 blocking 线程串行调用（见 trait 契约），
+            // &self 期间无并发写者；内部缓冲借出 &str 且调用方同步消费。
+            let buf = unsafe { &mut *self.buf.get() };
+            buf.clear();
+            buf.push_str(r#"{"ok":true}"#);
+            Ok(buf.as_str())
         }
     }
 
+    // SAFETY: execute 契约=blocking 线程串行（见 trait 契约），UnsafeCell 无并发写。
+    unsafe impl Sync for DummyPlugin {}
+
     #[test]
     fn raw_pointer_roundtrip() {
-        let ptr = plugin_into_raw(DummyPlugin);
+        let ptr = plugin_into_raw(DummyPlugin::new());
         assert!(!ptr.is_null());
         // SAFETY: ptr 来自 plugin_into_raw，仅还原一次。
         let boxed = unsafe { box_from_raw(ptr) }.unwrap();
-        let mut ectx = ExecContext {
+        let ectx = ExecContext {
             ctx: PluginCtx::default(),
             host: None,
-            out: OutBuffer::with_capacity(64),
         };
-        boxed.execute(&mut ectx).unwrap();
-        assert_eq!(ectx.out.into_string(), r#"{"ok":true}"#);
+        // 内核侧立即拷贝返回串（跨分配器契约：不持有 dll 堆引用）。
+        let out = boxed.execute(&ectx).unwrap().to_string();
+        assert_eq!(out, r#"{"ok":true}"#);
     }
 
     #[test]
