@@ -37,6 +37,13 @@ fn mk_manifest(id: &str, plugin_type: &str, tools: &[&str], http: bool) -> Plugi
     serde_json::from_value(v).expect("valid manifest")
 }
 
+/// 构造 light 合宿成员 manifest（host_group="light"，模拟被装箱进 group:light:N）。
+fn mk_manifest_light(id: &str, tools: &[&str]) -> PluginManifest {
+    let mut m = mk_manifest(id, "tool", tools, false);
+    m.host_group = Some("light".to_string());
+    m
+}
+
 /// 测试用 PluginInvoker：仅 discover_new_plugins / list_plugin_tools 有意义，
 /// 其余方法不可达。（仿 invoker.rs 的 MockLoader 风格手写，仓库无 mockall。）
 struct MockInvoker {
@@ -878,8 +885,27 @@ async fn g2_verify_consistent_returns_unchanged() {
 }
 
 #[tokio::test]
-async fn g2_verify_drift_sanitizes_rejected_tool_only() {
-    let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "ghost"], false)]);
+async fn g2_verify_light_member_namespaced_names_not_drift() {
+    // 合宿成员上报的工具名带 "{plugin_id}." 前缀（宿主按 §4.2 命名空间注册）：
+    // G2 对照声明（裸名）前必须归一化前缀，否则 100% 误判 missing 漂移剔光工具
+    // （08-31 实测：三 SDK-only 插件入 light 组后 task_manage/memory 全被剔除）。
+    let mut invoker = MockInvoker::new(vec![mk_manifest_light("task_manage_tool", &["task_manage"])]);
+    invoker.list_tools.insert(
+        "task_manage_tool".into(),
+        json!({ "tools": [{"name": "task_manage_tool.task_manage", "description": "任务管理"}] }),
+    );
+    let m = mk_manifest_light("task_manage_tool", &["task_manage"]);
+    let out = g2_verify_and_sanitize(&invoker, m).await;
+    assert!(!out.drift, "带命名空间前缀的上报不应判漂移");
+    assert!(
+        out.rejected_tools.is_empty(),
+        "light 成员前缀归一后无剔除——工具不得被误杀"
+    );
+    assert_eq!(out.manifest.capabilities.tools.len(), 1);
+}
+
+#[tokio::test]
+async fn g2_verify_drift_sanitizes_rejected_tool_only() {    let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "ghost"], false)]);
     invoker.list_tools.insert(
         "p1".into(),
         json!({ "tools": [{"name": "t1", "description": "t1"}] }),

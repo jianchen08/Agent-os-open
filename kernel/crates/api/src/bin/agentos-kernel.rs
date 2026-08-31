@@ -489,8 +489,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 && manifest.host_type == agentos_core::traits::HostType::Sidecar
                 && (!manifest.capabilities.tools.is_empty()
                     || !manifest.capabilities.services.is_empty());
-            if !g2_applicable {
-                // 非 G2 覆盖（禁用/非 sidecar/无 tools+services）：登记 not_covered 缺省
+            // light 合宿成员跳过 boot 个体探测：宿主按成员集整组装载有时序窗口，
+            // 探测可能早于成员工具登记 → 空列表误判漂移剔光（08-31 实测 memory
+            // 三试俱败、task_manage 靠时序侥幸过）。成员能力随宿主装载统一登记，
+            // 一致性由 watcher 复验（宿主已定型后探测可信 + 前缀归一）兜底。
+            let is_light_member = manifest.host_group.as_deref() == Some("light");
+            if !g2_applicable || is_light_member {
+                // 非 G2 覆盖（禁用/非 sidecar/无 tools+services/合宿成员）：登记 not_covered 缺省
                 contract_states.upsert(agentos_api::contract::PluginContractState::not_covered(
                     manifest, enabled,
                 ));

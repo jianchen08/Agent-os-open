@@ -29,7 +29,8 @@ use std::time::Duration;
 use agentos_core::traits::{HostType, PluginInvoker, PluginManifest};
 use agentos_core::types::PluginError;
 use agentos_invoker::verify::{
-    compare_tools, declared_with_services, parse_actual_tools, rejected_tool_names,
+    compare_tools, declared_with_services, normalize_member_actual_tools, parse_actual_tools,
+    rejected_tool_names,
 };
 use agentos_plugin_loader::{
     output_schema_error, provides_methods_unbacked, CapabilityRegistryImpl, PluginEnablement,
@@ -435,6 +436,14 @@ pub async fn g2_verify_and_sanitize(
     match listed {
         Ok(raw) => {
             let (actual, _malformed) = parse_actual_tools(&raw);
+            // 合宿成员（host_group="light"）的工具经宿主注册为 `{plugin_id}.{tool}`
+            // （§4.2 命名空间），G2 对照声明裸名前必须归一前缀；否则成员 100%
+            // 被误判 missing 漂移而剔光（08-31 实测 task_manage/memory/human 全灭）。
+            let actual = if manifest.host_group.as_deref() == Some("light") {
+                normalize_member_actual_tools(actual, &manifest.id)
+            } else {
+                actual
+            };
             let mismatches = compare_tools(&declared_with_services(&manifest), &actual);
             let rejected = rejected_tool_names(&mismatches);
             let mut outcome = if rejected.is_empty() {
@@ -845,7 +854,7 @@ pub async fn sync_once_with_store(
         if !decl_changed && !code_changed {
             continue;
         }
-        let (effective, tools, http_routes) = if g2_applicable {
+        let (tools, http_routes) = if g2_applicable {
             let outcome = g2_verify_and_sanitize(invoker, m.clone()).await;
             if let Some(ledger) = contract_states {
                 ledger.upsert(crate::contract::PluginContractState::derived(
@@ -881,22 +890,18 @@ pub async fn sync_once_with_store(
                     "G2 复验观测失败（重试后仍 spawn/上报不可用）——按声明重注册，账本标记校验未完成，待复验"
                 );
             }
-            let (tools, http_routes) = crate::plugin_lifecycle::reenable_plugin_capabilities(
-                &outcome.manifest,
-                registry,
-                scopes,
-            );
-            (outcome.manifest, tools, http_routes)
+            crate::plugin_lifecycle::reenable_plugin_capabilities(&outcome.manifest, registry, scopes)
         } else {
-            let (tools, http_routes) =
-                crate::plugin_lifecycle::reenable_plugin_capabilities(m, registry, scopes);
-            (m.clone(), tools, http_routes)
+            crate::plugin_lifecycle::reenable_plugin_capabilities(m, registry, scopes)
         };
+        // 共享 store（AppState.manifests）落**磁盘声明**（未净化）——净化版只存于
+        // 注册面/账本；若净化版覆盖 store，enable 热路径读到空工具声明→永远复验
+        // 无物→剔除死锁（08-31 实测 task_manage/memory disable-enable 救不回）。
         if let Some(store) = manifests_store {
             let mut guard = store.write().await;
             match guard.iter_mut().find(|x| x.id == m.id) {
-                Some(slot) => *slot = effective.clone(),
-                None => guard.push(effective.clone()),
+                Some(slot) => *slot = m.clone(),
+                None => guard.push(m.clone()),
             }
         }
         info!(
