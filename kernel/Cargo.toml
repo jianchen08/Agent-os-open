@@ -70,6 +70,10 @@ dirs = "5"
 # tool_core messages 序列化（对齐 Python get_format_manager 默认 YAML）。
 serde_yaml = "0.9"
 form_urlencoded = "1"
+# 全局分配器（Windows 段堆并发高水位滞留修复，ADR 2026-08-31-mimalloc-global-allocator）
+mimalloc = { version = "0.1.52", features = ["extended"] }
+# mimalloc 选项控制（mi_option_set：purge_delay=0 空闲页立即归还 OS）
+libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 # 内核 crate（workspace 内部引用）
 agentos-core = { path = "crates/core" }
 agentos-config = { path = "crates/config" }

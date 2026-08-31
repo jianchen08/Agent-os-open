@@ -44,6 +44,9 @@ futures-util = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
+# 全局分配器（Windows 段堆并发高水位滞留修复，ADR 2026-08-31-mimalloc-global-allocator）
+mimalloc.workspace = true
+libmimalloc-sys.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

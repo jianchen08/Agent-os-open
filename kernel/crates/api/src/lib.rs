@@ -10,6 +10,7 @@
 //! [来源: docs/0.2_rust_plugin_solution.md §2.2 Web 框架映射]
 //! [来源: docs/tasks/task_07_llm_api.md]
 
+pub mod allocator;
 pub mod auth;
 pub mod capability_router;
 pub mod chat_send_handler;

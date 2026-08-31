@@ -70,6 +70,10 @@ async fn seed_admin_user(store: Arc<dyn agentos_core::traits::StorageBackend>) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 全局分配器（mimalloc + purge_delay=0）：必须在任何分配前安装。
+    // Windows 段堆并发高水位滞留修复（ADR 2026-08-31-mimalloc-global-allocator）。
+    agentos_api::allocator::install_global_allocator();
+
     // 初始化日志
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(false))
