@@ -686,6 +686,7 @@ impl PluginInvokerImpl {
         manifest: &PluginManifest,
     ) -> Result<(), PluginError> {
         let native_path = self.resolve_native_artifact(plugin_id, manifest)?;
+        tracing::info!("[diag-segv] {} dlopen path={}", plugin_id, native_path.display());
         loader.load(plugin_id, &native_path)?;
         Ok(())
     }
