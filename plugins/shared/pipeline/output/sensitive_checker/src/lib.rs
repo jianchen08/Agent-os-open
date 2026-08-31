@@ -55,7 +55,7 @@ struct Sanitized {
 pub struct SensitiveChecker;
 
 impl PipelinePlugin for SensitiveChecker {
-    fn execute(&self, ectx: &ExecContext) -> Result<String, String> {
+    fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
         let state = ectx.ctx.state_value();
         let config = ectx.ctx.config_value();
 
@@ -65,8 +65,8 @@ impl PipelinePlugin for SensitiveChecker {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
         if !enabled {
-            return serde_json::to_string(&HashMap::<String, Value>::new())
-                .map_err(|e| format!("serialize empty updates: {e}"));
+            ectx.out.fill("{}");
+            return Ok(());
         }
         let mask = config
             .get("mask")
@@ -78,8 +78,8 @@ impl PipelinePlugin for SensitiveChecker {
         let tool_results = match tool_results {
             Some(arr) if !arr.is_empty() => arr,
             _ => {
-                return serde_json::to_string(&HashMap::<String, Value>::new())
-                    .map_err(|e| format!("serialize empty updates: {e}"));
+                ectx.out.fill("{}");
+                return Ok(());
             }
         };
 
@@ -101,7 +101,10 @@ impl PipelinePlugin for SensitiveChecker {
             updates.insert("sensitive_detected".into(), Value::Bool(true));
         }
 
-        serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))
+        let json =
+            serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?;
+        ectx.out.fill(&json);
+        Ok(())
     }
 }
 

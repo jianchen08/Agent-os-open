@@ -14,7 +14,7 @@ use agentos_native_sdk::{plugin_into_raw, ExecContext, PipelinePlugin};
 pub struct TestPlugin;
 
 impl PipelinePlugin for TestPlugin {
-    fn execute(&self, ectx: &ExecContext) -> Result<String, String> {
+    fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
         // B2：tool_call 约定字段 → 工具调用语义（与 pipeline 同一 execute 入口）。
         if let Some(tool_call) = ectx.ctx.tool_call_value() {
             let name = tool_call
@@ -22,11 +22,13 @@ impl PipelinePlugin for TestPlugin {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown_tool");
             let args = ectx.ctx.state_value();
-            return serde_json::to_string(&serde_json::json!({
+            let json = serde_json::to_string(&serde_json::json!({
                 "success": true,
                 "data": {"tool": name, "echo_args": args},
             }))
-            .map_err(|e| format!("serialize: {e}"));
+            .map_err(|e| format!("serialize: {e}"))?;
+            ectx.out.fill(&json);
+            return Ok(());
         }
 
         let state = ectx.ctx.state_value();
@@ -42,7 +44,9 @@ impl PipelinePlugin for TestPlugin {
         if ectx.host.is_some() {
             updates.insert("host_available".to_string(), serde_json::json!(true));
         }
-        serde_json::to_string(&updates).map_err(|e| format!("serialize: {e}"))
+        let json = serde_json::to_string(&updates).map_err(|e| format!("serialize: {e}"))?;
+        ectx.out.fill(&json);
+        Ok(())
     }
 }
 

@@ -24,12 +24,14 @@ use types::{StateKey, ToolCall, ToolResult};
 pub struct ToolCore;
 
 impl PipelinePlugin for ToolCore {
-    fn execute(&self, ectx: &ExecContext) -> Result<String, String> {
+    fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
         let state = ectx.ctx.state_value();
         // 执行主流程（返回 state_updates HashMap）。
         let updates = run(&state, ectx.host);
-        // 序列化为 JSON 字符串。
-        serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))
+        // 序列化并写进内核返回缓冲（跨分配器契约：不走 String 返回）。
+        let json = serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?;
+        ectx.out.fill(&json);
+        Ok(())
     }
 }
 

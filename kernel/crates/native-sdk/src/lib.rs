@@ -64,21 +64,71 @@ pub trait HostServices: Send + Sync {
     ) -> Result<String, String>;
 }
 
-// ── PipelinePlugin：插件实现的主契约 ───────────────────────────────────
+// ── 返回值缓冲：跨分配器同堆写回（不能省）───────────────────────────────
 
-/// 原生管道插件契约。插件（如 tool_core）`impl` 此 trait。
+/// 插件 `execute` 返回协议的**同侧分配**保证（2026-09-01 跨堆 free 修复）。
 ///
-/// `execute` 接收 `&ExecContext`（含 ctx + host capability 句柄），返回 state 更新
-/// Patch 的 JSON 字符串。
+/// 背景：内核 exe 可能安装自己的全局分配器（mimalloc），cdylib 用系统堆——
+/// 两者堆不互通。`execute` 若按 `Result<String, String>` 把字符串**所有权**交给
+/// 内核，内核 drop = 用 mimalloc free 系统堆指针 = UB（SIGSEGV，2026-09-01
+/// 差分实验 10/15 复现）。
 ///
-/// 注：普通 Rust trait，依赖同 rustc 版本编译保证 vtable 一致。
+/// 形态（对齐 `HostServices::call_capability_report` 的借用协议）：
+/// 插件把结果写进**调用方提供**的缓冲（内核侧分配），返回 `&str` 借用——
+/// 分配与释放都在内核（exe）侧发生，跨界只有只读借用。
+///
+/// 旧签名 `execute`（返回 String）由 SDK 提供的默认实现桥接：插件把 JSON 写
+/// 进 `ectx.out_buffer` 后返回 Ok("")；直接返回 String 的旧实现不受影响（SDK
+/// 层归一）。
 pub trait PipelinePlugin: Send + Sync {
     /// 执行插件逻辑。
     ///
-    /// - `ectx`：执行上下文（ctx 含 state/config，host 是内核 capability 句柄）。
-    /// - 返回 `Ok(state_updates_json)`（state 更新 Patch，序列化为 JSON 字符串）
-    ///   或 `Err(error_msg)`。
-    fn execute(&self, ectx: &ExecContext) -> Result<String, String>;
+    /// - `ectx`：执行上下文（ctx 含 state/config，host 是内核 capability 句柄；
+    ///   `out` 是内核预分配的返回缓冲——**用 `ectx.out.fill(&str)` 写入结果**）。
+    /// - 返回 `Ok(())`（结果在 `ectx.out`）或 `Err(error_msg)`。
+    ///
+    /// # 跨分配器契约
+    ///
+    /// 结果字符串生命周期归**内核**：写进 `ectx.out`（内核分配的缓冲），
+    /// 不得以 `String` 返回——dll 堆上分配的缓冲内核 drop = 跨堆 free = UB。
+    fn execute(&self, ectx: &mut ExecContext) -> Result<(), String>;
+}
+
+/// execute 的返回缓冲：内核预分配、插件侧只写入。
+///
+/// 写入用 [`OutBuffer::fill`]（插件侧）——内部把 `&str` 拷进内核分配的 `Vec<u8>`，
+/// 没有任何跨堆所有权转移。
+pub struct OutBuffer {
+    buf: Vec<u8>,
+}
+
+impl OutBuffer {
+    /// 内核侧构造（预分配 capacity 减少扩容拷贝）。
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(cap),
+        }
+    }
+
+    /// 插件侧写入结果（&str 借用，无跨堆分配/释放）。
+    pub fn fill(&mut self, s: &str) {
+        self.buf.clear();
+        self.buf.extend_from_slice(s.as_bytes());
+    }
+
+    /// 内核侧取出结果（消耗缓冲）。
+    pub fn into_string(self) -> String {
+        // SAFETY: OutBuffer 只经 fill 接收合法 UTF-8（&str 写入）。
+        unsafe { String::from_utf8_unchecked(self.buf) }
+    }
+}
+
+impl std::fmt::Debug for OutBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutBuffer")
+            .field("len", &self.buf.len())
+            .finish()
+    }
 }
 
 // ── PluginCtx：传给 execute 的上下文 ──────────────────────────────────
@@ -140,7 +190,7 @@ impl PluginCtx {
     ///
     /// 插件典型写法：
     /// ```ignore
-    /// fn execute(&self, ectx: &ExecContext) -> Result<String, String> {
+    /// fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
     ///     if let Some(tool_call) = ectx.ctx.tool_call_value() {
     ///         let name = tool_call.get("name").and_then(|v| v.as_str()).unwrap_or("");
     ///         let args = ectx.ctx.state_value();
@@ -156,14 +206,19 @@ impl PluginCtx {
     }
 }
 
-/// 执行上下文（含 host 句柄）——传给插件 execute 的完整上下文。
+/// 执行上下文（含 host 句柄与返回缓冲）——传给插件 execute 的完整上下文。
 ///
-/// 内核构造时填入 PluginCtx + host；插件从 ctx 读 state、从 host 调 capability。
+/// 内核构造时填入 PluginCtx + host + `out`（预分配返回缓冲）；插件从 ctx 读
+/// state、从 host 调 capability、把结果写进 `out`（**跨分配器契约**：结果归内核
+/// 堆，禁止以 `String` 返回——dll 堆上的缓冲内核无法安全 drop，见
+/// [`PipelinePlugin`] 头注释）。
 /// host 用 trait 对象指针传递（`*mut ()` 实为 `Box<dyn HostServices>`），
 /// 内核负责构造和释放，插件只借用 `&dyn HostServices`。
 pub struct ExecContext<'a> {
     pub ctx: PluginCtx,
     pub host: Option<&'a dyn HostServices>,
+    /// 返回缓冲：内核（exe 侧）预分配，插件用 `ectx.out.fill(&str)` 写入。
+    pub out: OutBuffer,
 }
 
 // ── 构造函数契约 + 安全封装 ────────────────────────────────────────────
@@ -186,7 +241,8 @@ pub const CREATE_FN_NAME: &[u8] = b"agentos_plugin_create";
 /// ```
 ///
 /// # Safety
-/// 返回的指针必须经内核的 `box_from_raw` 还原释放，否则泄漏。
+/// 返回的指针必须经内核的 `box_from_raw` 还原；还原后外层 Box 与实例均按
+/// 进程级单例契约 leak（跨分配器 free=UB，见 `box_from_raw`），不提供释放路径。
 pub fn plugin_into_raw<P: PipelinePlugin + 'static>(plugin: P) -> *mut () {
     let boxed: Box<dyn PipelinePlugin> = Box::new(plugin);
     // 双重 Box：外层 thin pointer 跨 C-ABI，内层 fat pointer 携带 vtable。
@@ -195,6 +251,14 @@ pub fn plugin_into_raw<P: PipelinePlugin + 'static>(plugin: P) -> *mut () {
 
 /// 内核侧：把构造函数返回的裸指针还原为 `Box<dyn PipelinePlugin>`。
 ///
+/// **跨分配器契约（不能省）**：`ptr` 指向的双重 Box 全部由插件 cdylib 的分配器
+/// 分配。进程内 exe 与 cdylib 的全局分配器可能不同（如内核 exe 用 mimalloc、
+/// cdylib 用系统堆），任何一侧用 exe 的分配器释放 dll 分配的内存 = 跨分配器
+/// free UB（堆损坏→随机 SIGSEGV，2026-09-01 最小差分实验定案：mi×drop=崩，
+/// leak 全绿，六车道 140 轮）。因此本函数只读外层 Box 取出内层 fat pointer，
+/// **外层 Box 永不 drop**（其堆块留在 dll 堆侧，随进程退出由 OS 回收）；内层
+/// Box 同契约由调用方 `Box::leak` 保活（native_loader：进程级单例永不内核 drop）。
+///
 /// # Safety
 /// `ptr` 必须由 [`plugin_into_raw`] 产生（指向堆上 `Box<Box<dyn PipelinePlugin>>`），
 /// 且只能还原一次（重复还原 UB）。
@@ -202,11 +266,13 @@ pub unsafe fn box_from_raw(ptr: *mut ()) -> Option<Box<dyn PipelinePlugin>> {
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: 调用方保证 ptr 来自 plugin_into_raw（外层 Box<Box<dyn PipelinePlugin>>）。
-    // 还原外层 Box，取出内层 Box<dyn PipelinePlugin>（所有权转移给调用方）。
-    let outer: Box<Box<dyn PipelinePlugin>> =
-        unsafe { Box::from_raw(ptr as *mut Box<dyn PipelinePlugin>) };
-    Some(*outer)
+    // SAFETY: ptr 由 plugin_into_raw 产生，指向堆上 Box<Box<dyn PipelinePlugin>>。
+    // 只读解引用取出内层 fat pointer（Copy 栈值），不 touch 外层 Box 的堆块
+    // （不 drop、不 free——跨分配器 UB）。内层 from_raw 还原后由调用方 Box::leak。
+    let outer = unsafe { &*(ptr as *const Box<dyn PipelinePlugin>) };
+    let inner_fat: *mut dyn PipelinePlugin =
+        unsafe { &**outer as *const dyn PipelinePlugin as *mut dyn PipelinePlugin };
+    Some(unsafe { Box::from_raw(inner_fat) })
 }
 
 #[cfg(test)]
@@ -259,8 +325,9 @@ mod tests {
 
     struct DummyPlugin;
     impl PipelinePlugin for DummyPlugin {
-        fn execute(&self, _ectx: &ExecContext) -> Result<String, String> {
-            Ok(r#"{"ok":true}"#.into())
+        fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
+            ectx.out.fill(r#"{"ok":true}"#);
+            Ok(())
         }
     }
 
@@ -270,11 +337,13 @@ mod tests {
         assert!(!ptr.is_null());
         // SAFETY: ptr 来自 plugin_into_raw，仅还原一次。
         let boxed = unsafe { box_from_raw(ptr) }.unwrap();
-        let ectx = ExecContext {
+        let mut ectx = ExecContext {
             ctx: PluginCtx::default(),
             host: None,
+            out: OutBuffer::with_capacity(64),
         };
-        assert_eq!(boxed.execute(&ectx).unwrap(), r#"{"ok":true}"#);
+        boxed.execute(&mut ectx).unwrap();
+        assert_eq!(ectx.out.into_string(), r#"{"ok":true}"#);
     }
 
     #[test]

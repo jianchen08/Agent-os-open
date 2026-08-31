@@ -39,13 +39,16 @@ use spill_store::SpillStore;
 pub struct SpillGuard;
 
 impl PipelinePlugin for SpillGuard {
-    fn execute(&self, ectx: &ExecContext) -> Result<String, String> {
+    fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
         let state = ectx.ctx.state_value();
         let config = ectx.ctx.config_value();
         // run 内部全路径 best-effort：任何存档/解析失败都收敛为空更新（no-op），
         // 不会把 Err 上抛（引擎对插件错误统一 warn+继续，ADR 2026-08-18；此处再加一层自保）。
         let updates = run(&state, &config);
-        serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))
+        let json =
+            serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?;
+        ectx.out.fill(&json);
+        Ok(())
     }
 }
 

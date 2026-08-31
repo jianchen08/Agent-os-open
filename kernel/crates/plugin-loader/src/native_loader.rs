@@ -34,6 +34,10 @@ use tracing::{debug, warn};
 /// 构造函数签名：返回双重 Box 裸指针（实为 `Box<Box<dyn PipelinePlugin>>`）。
 type CreateFn = unsafe extern "C" fn() -> *mut ();
 
+/// execute 返回缓冲的初始容量（字节）。多数 state_updates JSON 在几 KB 量级，
+/// 预分配避免小结果反复扩容；大结果由 OutBuffer 按需增长。
+const OUT_INITIAL_CAPACITY: usize = 4 * 1024;
+
 /// 一个已加载的原生插件实例：Library（保活）+ trait 对象。
 pub struct NativePlugin {
     /// Library 句柄——以 ManuallyDrop 持有，**drop 阶段刻意不释放**（见模块注释：
@@ -46,7 +50,8 @@ pub struct NativePlugin {
     /// 分配器 free = UB（堆损坏→随机 SIGSEGV，2026-08-31 真机实测）。生命周期
     /// 与 `_lib` 同契约：进程级单例，物理回收随进程退出由 OS 完成。
     instance: &'static dyn PipelinePlugin,
-    /// 保留原始双重 Box 裸指针（当前契约=永不释放；留给未来 DLL 侧 destroy 导出）。
+    /// 保留原始双重 Box 裸指针（当前契约=永不释放；外层 Box 分配在 dll 侧，
+    /// 跨分配器 free=UB——见 native-sdk box_from_raw 契约）。
     #[allow(dead_code)]
     raw: *mut (),
     /// 加载来源路径（调试/日志用）。
@@ -172,13 +177,18 @@ impl NativePluginLoader {
                 })?
         };
 
-        // 构造执行上下文（ctx + host），调 trait 对象 execute。
-        let ectx = agentos_native_sdk::ExecContext {
+        // 构造执行上下文（ctx + host + 内核预分配返回缓冲），调 trait 对象 execute。
+        //
+        // 跨分配器契约：`out` 由内核（exe 侧）分配，插件只经 `ectx.out.fill(&str)`
+        // 写入——返回字符串的分配与释放都在内核侧，杜绝 dll 堆 String 所有权跨越
+        // FFI 边界（内核 drop = 跨堆 free = UB，2026-09-01 差分实验定案）。
+        let mut ectx = agentos_native_sdk::ExecContext {
             ctx: ctx.clone(),
             host,
+            out: agentos_native_sdk::OutBuffer::with_capacity(OUT_INITIAL_CAPACITY),
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            plugin.instance.execute(&ectx)
+            plugin.instance.execute(&mut ectx)
         }))
         .map_err(|_| PluginError {
             message: format!("native plugin '{}' panicked during execute", plugin_id),
@@ -187,7 +197,7 @@ impl NativePluginLoader {
         })?;
 
         match result {
-            Ok(state_updates_json) => Ok(state_updates_json),
+            Ok(()) => Ok(ectx.out.into_string()),
             Err(err) => {
                 warn!(plugin_id = plugin_id, error = %err, "native plugin returned error");
                 Err(PluginError {
