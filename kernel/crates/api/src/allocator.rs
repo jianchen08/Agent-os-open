@@ -15,10 +15,15 @@
 //!   （含 tokio/axum/serde_json/rusqlite 等）统一走 mimalloc。
 //! - `purge_delay=0`：空闲页立即 purge/decommit 归还 OS（mimalloc 默认
 //!   purge_delay=10ms 不主动归还，实测滞留全量峰值）。
+//! - `arena_eager_commit=0`：不做 arena 启动预提交——mimalloc 默认在
+//!   Windows 上 eager commit 大块 arena，全量启用内核实测启动峰值
+//!   931MB → 268MB（08-31 对照实验：同 exe 同树同 config，仅环境变量
+//!   MIMALLOC_ARENA_EAGER_COMMIT=0 差异）。需要时按需提交，不预占。
 //! - 用 `mi_option_set`（无条件生效）而非 `mi_option_set_default`：tokio
 //!   运行时在 main 体前创建，选项可能已初始化，set_default 会 no-op。
-//! - 选项值 15 = `mi_option_purge_delay`（v2/v3 枚举序一致，见
-//!   libmimalloc-sys c_src/mimalloc/{v2,v3}/include/mimalloc.h）。
+//! - 选项值取自 libmimalloc-sys c_src/mimalloc/{v2,v3}/include/mimalloc.h
+//!   枚举序（stable 选项 0-2 + advanced 从 3 起）：
+//!   15 = `mi_option_purge_delay`，4 = `mi_option_arena_eager_commit`。
 //!
 //! ## 环境变量覆盖
 //!
@@ -36,16 +41,20 @@ static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// mimalloc `mi_option_purge_delay` 的枚举值（v2/v3 一致）。
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+/// mimalloc `mi_option_arena_eager_commit` 的枚举值（v2/v3 一致）。
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 
-/// 安装全局分配器并设置 purge_delay=0（空闲页立即归还 OS）。
+/// 安装全局分配器并设置内存策略：purge_delay=0（空闲页立即归还 OS）+
+/// arena_eager_commit=0（不预提交 arena，需要时按需提交）。
 ///
 /// 必须在任何分配发生前调用（main 第一行）。幂等：重复调用无害
 /// （mi_option_set 每次无条件生效）。
 pub fn install_global_allocator() {
     // SAFETY: mi_option_set 是 mimalloc C API 的线程安全选项设置函数；
-    // 传入合法枚举值 15（purge_delay），无指针参数。
+    // 传入合法枚举值（15=purge_delay / 4=arena_eager_commit），无指针参数。
     unsafe {
         libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0);
+        libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
     }
 }
 
@@ -53,6 +62,12 @@ pub fn install_global_allocator() {
 pub fn purge_delay() -> i64 {
     // SAFETY: mi_option_get 是 mimalloc C API 的线程安全选项读取函数。
     unsafe { libmimalloc_sys::mi_option_get(MI_OPTION_PURGE_DELAY) as i64 }
+}
+
+/// 读取当前 arena_eager_commit 选项值（诊断/测试用）。
+pub fn arena_eager_commit() -> i64 {
+    // SAFETY: 同上，合法枚举值 4。
+    unsafe { libmimalloc_sys::mi_option_get(MI_OPTION_ARENA_EAGER_COMMIT) as i64 }
 }
 
 #[cfg(test)]
