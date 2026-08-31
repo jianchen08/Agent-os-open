@@ -26,5 +26,6 @@ libloading = "0.8"
 agentos-native-sdk.workspace = true
 
 [dev-dependencies]
+mimalloc = { version = "0.1.52", features = ["extended"] }
 tempfile = "3"
 agentos-native-sdk.workspace = true

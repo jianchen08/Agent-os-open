@@ -970,6 +970,7 @@ impl PluginInvokerImpl {
         ctx: &PluginContext,
     ) -> Result<PluginResult, PluginError> {
         let loader = self.native_loader_or_err(plugin_id)?;
+        info!("[diag-segv] {} stage1 loader_ok", plugin_id);
 
         // 热重载指纹检测（与 sidecar 同逻辑）：代码/配置变更告警。
         if self.is_plugin_stale(plugin_id, manifest).await {
@@ -981,6 +982,7 @@ impl PluginInvokerImpl {
         }
 
         self.load_native(loader, plugin_id, manifest)?;
+        info!("[diag-segv] {} dlopen_ok", plugin_id);
 
         // config 注入（shared::build_injected_config，按 manifest.config_files 命名空间）。
         let config = crate::shared::build_injected_config(
@@ -991,6 +993,7 @@ impl PluginInvokerImpl {
                 .unwrap_or(serde_json::Value::Null),
             manifest,
         );
+        info!("[diag-segv] {} config_ok", plugin_id);
 
         // 构造 PluginCtx（state/config 用 JSON 字符串；tool_call_json=None = pipeline 语义）。
         let plugin_ctx = agentos_native_sdk::PluginCtx {
@@ -1020,11 +1023,16 @@ impl PluginInvokerImpl {
 
         let loader = Arc::clone(loader);
         let pid = plugin_id.to_string();
+        info!("[diag-segv] {} pre_spawn_blocking", plugin_id);
         let result = tokio::task::spawn_blocking(move || {
+            info!("[diag-segv] in_blocking_thread");
             let host_ref: Option<&dyn agentos_native_sdk::HostServices> = host_svc
                 .as_ref()
                 .map(|h| h as &dyn agentos_native_sdk::HostServices);
-            loader.execute(&pid, &plugin_ctx, host_ref)
+            info!("[diag-segv] calling loader.execute");
+            let r = loader.execute(&pid, &plugin_ctx, host_ref);
+            info!("[diag-segv] loader.execute returned");
+            r
         })
         .await
         .map_err(|join_err| PluginError {

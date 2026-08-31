@@ -40,8 +40,15 @@ pub struct NativePlugin {
     /// Windows 上 dlclose 带 Rust 静态的 cdylib 会 AV）。进程退出时由 OS 回收。
     /// 下划线前缀即死代码豁免（保活字段永不读取）。
     _lib: std::mem::ManuallyDrop<Library>,
-    /// 插件构造出的 trait 对象。
-    instance: Box<dyn PipelinePlugin>,
+    /// 插件 trait 对象——`Box::leak` 成 'static，**内核永不 drop**。
+    ///
+    /// 跨分配器契约：实例由插件 cdylib（plugin_into_raw）分配，内核侧 drop = 跨
+    /// 分配器 free = UB（堆损坏→随机 SIGSEGV，2026-08-31 真机实测）。生命周期
+    /// 与 `_lib` 同契约：进程级单例，物理回收随进程退出由 OS 完成。
+    instance: &'static dyn PipelinePlugin,
+    /// 保留原始双重 Box 裸指针（当前契约=永不释放；留给未来 DLL 侧 destroy 导出）。
+    #[allow(dead_code)]
+    raw: *mut (),
     /// 加载来源路径（调试/日志用）。
     path: PathBuf,
 }
@@ -53,6 +60,11 @@ pub struct NativePluginLoader {
     /// plugin_id → 已加载插件。
     loaded: RwLock<HashMap<String, Arc<NativePlugin>>>,
 }
+
+// SAFETY(契约级)：instance 为进程级单例、execute 不可变派发；raw 永不解引用、
+// 永不释放。与原 Box<dyn P> 版线程模型一致（Arc 缓存并发调用依赖 P 的 Sync 语义）。
+unsafe impl Send for NativePlugin {}
+unsafe impl Sync for NativePlugin {}
 
 impl Default for NativePluginLoader {
     fn default() -> Self {
@@ -114,11 +126,13 @@ impl NativePluginLoader {
 
         // 调构造函数拿裸指针，还原为 Box<dyn PipelinePlugin>。
         // SAFETY: create_fn 由插件 cdylib 导出，返回 plugin_into_raw 产生的双重 Box 指针。
+        tracing::info!("[diag-segv] dlopen ok, symbol resolved, calling create_fn");
         let ptr = unsafe { create_fn() };
+        tracing::info!("[diag-segv] create_fn returned");
         // SAFETY: ptr 由 create_fn()（插件 agentos_plugin_create 导出）产生，按 native-sdk 契约
-        // 必须是 plugin_into_raw 生成的双重 Box 指针；box_from_raw 还原所有权并转移给 loader。
+        // 必须是 plugin_into_raw 生成的双重 Box 指针；box_from_raw 还原所有权（随即 Box::leak 保活）。
         // null 已由 box_from_raw 内部处理（返回 None → 下游 NATIVE_CREATE_NULL 错误）。
-        let instance: Box<dyn PipelinePlugin> =
+        let boxed: Box<dyn PipelinePlugin> =
             unsafe { box_from_raw(ptr) }.ok_or_else(|| PluginError {
                 message: format!(
                     "native plugin create returned null pointer: {}",
@@ -127,10 +141,12 @@ impl NativePluginLoader {
                 code: Some("NATIVE_CREATE_NULL".to_string()),
                 source: Some("native-loader".to_string()),
             })?;
+        let instance: &'static dyn PipelinePlugin = Box::leak(boxed);
 
         Ok(NativePlugin {
             _lib: std::mem::ManuallyDrop::new(lib),
             instance,
+            raw: ptr,
             path: path.to_path_buf(),
         })
     }

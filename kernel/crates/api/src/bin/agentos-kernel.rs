@@ -68,8 +68,95 @@ async fn seed_admin_user(store: Arc<dyn agentos_core::traits::StorageBackend>) {
     }
 }
 
+// [诊断 2026-08-31] 崩溃现场捕获：SEH 过滤器写 minidump 到 .crashdumps/（验证后移除）。
+// SIGSEGV 不走 Rust panic hook，只能用 SetUnhandledExceptionFilter 拿现场。
+#[cfg(windows)]
+fn install_crash_dumper() {
+    #[repr(C)]
+    struct ExceptionPointers {
+        exception_record: *mut core::ffi::c_void,
+        context_record: *mut core::ffi::c_void,
+    }
+    #[repr(C)]
+    struct MinidumpExceptionInfo {
+        thread_id: u32,
+        exception_pointers: *mut core::ffi::c_void,
+        client_pointers: i32,
+    }
+    #[allow(non_snake_case)]
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetUnhandledExceptionFilter(
+            f: Option<unsafe extern "system" fn(*mut ExceptionPointers) -> i32>,
+        ) -> isize;
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+    }
+    #[link(name = "dbghelp")]
+    extern "system" {
+        fn MiniDumpWriteDump(
+            process: *mut core::ffi::c_void,
+            pid: u32,
+            file: isize,
+            dump_type: u32,
+            einfo: *mut MinidumpExceptionInfo,
+            user_stream: usize,
+            cb: usize,
+        ) -> i32;
+    }
+    extern "system" {
+        fn CreateFileW(
+            name: *const u16, access: u32, share: u32, sa: *mut core::ffi::c_void,
+            disp: u32, flags: u32, tpl: *mut core::ffi::c_void) -> isize;
+        fn CloseHandle(h: isize) -> i32;
+        fn GetCurrentThreadId() -> u32;
+    }
+    unsafe extern "system" fn filter(info: *mut ExceptionPointers) -> i32 {
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const CREATE_ALWAYS: u32 = 2;
+        const INVALID_HANDLE_VALUE: isize = -1;
+        let dir = std::path::Path::new(".crashdumps");
+        let _ = std::fs::create_dir_all(dir);
+        let path: Vec<u16> = dir
+            .join(format!("kernel_{}.dmp", std::process::id()))
+            .to_string_lossy()
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        unsafe {
+            let h = CreateFileW(
+                path.as_ptr(), GENERIC_WRITE, 0, core::ptr::null_mut(),
+                CREATE_ALWAYS, 0, core::ptr::null_mut(),
+            );
+            if h != INVALID_HANDLE_VALUE {
+                let mut mei = MinidumpExceptionInfo {
+                    thread_id: GetCurrentThreadId(),
+                    exception_pointers: info as *mut core::ffi::c_void,
+                    client_pointers: 0,
+                };
+                // 0x2 = MiniDumpNormal（够定位模块+函数偏移）
+                let _ = MiniDumpWriteDump(
+                    GetCurrentProcess(),
+                    std::process::id(),
+                    h,
+                    0x2,
+                    &mut mei,
+                    0,
+                    0,
+                );
+                CloseHandle(h);
+            }
+        }
+        1 // EXCEPTION_EXECUTE_HANDLER → 继续默认终止
+    }
+    unsafe {
+        std::fs::create_dir_all(".crashdumps").ok();
+        SetUnhandledExceptionFilter(Some(filter));
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    install_crash_dumper();
     // 全局分配器（mimalloc + purge_delay=0）：必须在任何分配前安装。
     // Windows 段堆并发高水位滞留修复（ADR 2026-08-31-mimalloc-global-allocator）。
     agentos_api::allocator::install_global_allocator();
