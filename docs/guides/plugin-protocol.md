@@ -2,7 +2,7 @@
 
 > 面向**想给灵汐 AgentOS 0.2 开发一个新插件**的开发者。读完本文，你应能在 1 小时内发布第一个可被内核加载的插件。
 >
-> 本文是 0.2 架构（Rust 内核 + Python sidecar + YAML 配置）的统一插件协议说明。历史方案记录见 [working/_archive_0.2_migration/0.2_rust_plugin_solution.md](working/_archive_0.2_migration/0.2_rust_plugin_solution.md)，整体架构见 [ARCHITECTURE.md](ARCHITECTURE.md)，分篇上手教程见 [开发指南索引](README.md)。
+> 本文是 0.2 架构（Rust 内核 + Python sidecar + YAML 配置）的统一插件协议说明。历史方案记录见 [working/_archive_0.2_migration/0.2_rust_plugin_solution.md](../working/_archive_0.2_migration/0.2_rust_plugin_solution.md)，整体架构见 [ARCHITECTURE.md](../ARCHITECTURE.md)，分篇上手教程见 [开发指南索引](README.md)。
 
 ---
 
@@ -44,7 +44,7 @@
 内核启动
   → discover(): 扫描双根，递归找所有 plugin.json，校验 manifest schema
   → 注册 capabilities 到 CapabilityRegistry
-  → 按需 load(id): 首次调用某工具时启动 sidecar 进程（python3 server.py）
+  → 按需 load(id): 首次调用某工具时启动 sidecar 进程（python server.py）
   → MCP 握手（initialize）+ 配置注入
   → tools/call 调用 → 返回结果
   → 空闲超时 unload(id)
@@ -65,7 +65,7 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 | `version` | string | ✅ | 语义化版本号，如 `1.0.0`。 |
 | `plugin_type` | enum | ✅ | `pipeline` / `tool` / `system` / `composite`。见 [§3](#3-插件类型分类)。 |
 | `host_type` | enum | ✅ | `sidecar`（独立进程，默认）或 `in_process`（Rust 原生）。见 [§4](#4-hosttypesidecar-vs-in-process)。 |
-| `entry` | string | ✅* | 启动命令。Python 插件一般是 `python3 server.py`。`composite` 类型可空。 |
+| `entry` | string | ✅* | 启动命令。Python 插件一般是 `python server.py`。`composite` 类型可空。 |
 | `language` | string | ✅ | 实现语言，如 `python` / `rust`。 |
 | `capabilities` | object | ✅ | 能力声明，见 [§2.2](#22-capabilities-子字段)。 |
 | `requires_services` | array | — | 插件间耦合唯一轴：声明需要的能力角色（`ns` / `ns.method`），见 [§2.3](#23-requires_services插件间依赖)。 |
@@ -78,8 +78,21 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 | `config_files` | array | — | 配置文件显式映射（`{id, path, label}` 三要素）。见 [§6](#6-config_files配置显式映射注入)。 |
 | `ui_schema` | object | — | 前端 UI schema 声明（P0-3）。见 [§7](#7-uischema前端-schema-驱动p0-3)。 |
 | `mcp` | object | — | MCP 传输配置（`transport` / `endpoint` / `idle_timeout_secs` / `protocol_version` / `request_timeout_secs`）；接入**外部第三方 MCP 服务**也经它声明，见 [§2.6](#26-接入外部-mcp-服务)。 |
+| `invoke_entry` | string | ✅** | 管道/系统等非 tool 插件的 MCP 入口方法名（如 `llm_core.execute`）；`plugin_type=pipeline` 必填，缺失启动期校验失败。tool 插件不用此字段。 |
+| `http_endpoints` | array | — | HTTP 端点贡献：每项 `{route_id, method, path, auth, handler_capability, timeout_ms}`，path 必须落在 `/ext/{plugin_id}/**`，经 capability RPC 调插件 `http.handle`。 |
+| `native` | object | —* | 原生插件产物（cdylib 路径与符号）；`host_type=in_process` 必填。见 [plugin-native-rust.md](plugin-native-rust.md)。 |
+| `lifecycle` | object | — | 生命周期策略覆盖（如 `idle_timeout_secs`，交互类插件设 0 = 永不卸载）。缺省用内核默认。 |
+| `host_group` | string | — | 合宿分组声明（`"light"` = 准入轻量合宿组，多插件共享宿主进程）；缺省 = 独占宿主。白名单制：声明即作者担保无阻塞调用/无 C 扩展/无重依赖。 |
+| `granted_capabilities` | array | — | 反向 capability 调用白名单（如 `["config-reader"]`）；空 = 默认全授予（存量兼容），一旦非空即白名单制，越权单点拒绝。 |
+| `contributes` | object | — | 前端贡献点声明（viewsContainers/widgets/menus/commands/settingsPanels 等），内核仅在 `/api/v1/schema` 透传，前端 ContributionRegistry 消费。 |
+| `enabled` | bool | — | 启用开关（`false` = 已安装但不进注册表出口）；缺省由 `config/plugins/default_profile.yaml` 决定。 |
+| `activation` | enum | — | 激活策略：`eager`（启动即 load）/ `lazy`（首次调用再 load，默认）/ `manual`（仅用户显式启动）。 |
+| `persistent_fields` | array | — | 声明需持久化的 state 累计型标量键（如 `track.total_tokens`），引擎 merge 时投影落库。 |
+| `export_fields` | array | — | state 出口白名单（支持 `前缀.*` 通配）；未声明且不在内核基线 = 不出口（默认拒绝）。 |
+| `tool_prefix` | string | — | 工具名前缀，避免多插件工具名冲突时 McpBridge 拼错工具名。 |
 
-> \* `entry` 对 `composite` 类型可空；`pipeline_role` 仅 pipeline 类型有意义。
+> \* `entry` 对 `composite` 类型可空；`pipeline_role` 仅 pipeline 类型有意义；`native` 仅 `in_process` 必填。
+> \*\* `invoke_entry` 对 `plugin_type=pipeline` 必填（启动期聚合校验）。
 
 ### 2.2 capabilities 子字段
 
@@ -235,8 +248,8 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 | 字段 | 含义 |
 |------|------|
 | `widgets[].id` | 前端 widget 实例标识 |
-| `widgets[].type` | widget 类型（对应前端已注册的 14+ Widget，如 `review_document` / `choice` / `task_card` 等） |
-| `widgets[].space` | 渲染空间：`chat` / `workspace` / `floating` / `dock` / `scene`（共 5 个） |
+| `widgets[].type` | widget 类型（对应前端已注册的 14+ Widget，如 `review_document` / `decision` / `task_card` 等） |
+| `widgets[].space` | 渲染空间：`chat` / `workspace` / `floating` / `dock` / `fullscreen` / `scene`（共 6 个；`scene` 已标废弃，新插件勿用） |
 | `widgets[].trigger` | 触发时机，如 `on_event:<event>`（事件到达时） |
 | `widgets[].props` | 传给 widget 的配置项（如是否启用 diff 视图、批注） |
 
@@ -501,49 +514,48 @@ if __name__ == "__main__":
 
 ## 附录 A：manifest 覆盖现状统计
 
-> 数据基于 `plugins/shared/` 全量扫描（92 个 `plugin.json`），核对日期 2026-07。
->
-> **历史快照说明**：此后形态已演进——`builtin_tools/` 已补齐 manifest；已出现 `in_process` native 插件（`pipeline_tool_core` / `pipeline_sensitive_checker` / `pipeline_spill_guard`），host_type 不再全为 sidecar。下表数量仅供量级参考。
+> 数据基于 `plugins/shared/` 全量扫描（97 个 `plugin.json`），核对日期 2026-09。
+> 数量随插件增删会漂移，以本表口径（git 跟踪 manifest 全量解析）自行复测为准。
 
 **按目录类别：**
 
 | 类别 | 目录位置 | 数量 |
 |------|----------|------|
-| pipeline / input | `plugins/shared/pipeline/input/` | 21 |
-| pipeline / core | `plugins/shared/pipeline/core/` | 3 |
-| pipeline / output | `plugins/shared/pipeline/output/` | 20 |
-| system（含连接器/通道/Agent/系统服务） | `plugins/shared/system/` | 22 |
-| tools | `plugins/shared/tools/`（含 `external_mcp/` 子目录 8 个） | 26 |
-| **合计** | | **92** |
-
-> 注：上表按**目录位置**计数。"按 plugin_type"统计中 `system=24`、`tool=24`，与按目录的 22/26 不一致——因为 `plugins/shared/tools/` 下有 2 个目录（`channel_ws/`、`triggers/`）声明为 `plugin_type: "system"`（属于通道/触发器侧的 system 服务，只是物理放在 tools/ 下）。
+| pipeline / input | `plugins/shared/pipeline/input/` | 22 |
+| pipeline / core | `plugins/shared/pipeline/core/` | 2 |
+| pipeline / output | `plugins/shared/pipeline/output/` | 14 |
+| pipeline（根下直挂） | `plugins/shared/pipeline/<name>/` | 4 |
+| system（含连接器/通道/系统服务） | `plugins/shared/system/` | 29 |
+| tools | `plugins/shared/tools/`（18 个顶层插件 + `external_mcp/` 下 8 个预置接入清单） | 26 |
+| **合计** | | **97** |
 
 **按 `plugin_type`：**
 
 | plugin_type | 数量 |
 |-------------|------|
-| `pipeline` | 44 |
-| `system` | 24 |
-| `tool` | 24 |
+| `pipeline` | 39 |
+| `system` | 28 |
+| `tool` | 30 |
 
 **按 `host_type`：**
 
 | host_type | 数量 |
 |-----------|------|
-| `sidecar` | 92（全部） |
+| `sidecar` | 93 |
+| `in_process`（Rust cdylib） | 4（`pipeline_tool_core` / `pipeline_sensitive_checker` / `pipeline_spill_guard` / `native_test`） |
 
 **关键内部模块覆盖确认：**
 
 | 模块类别 | 期望 | 已有 manifest | 状态 |
 |----------|------|--------------|------|
 | 连接器（connectors） | `connectors_service`（聚合） | `plugins/shared/system/connectors/plugin.json` | ✅ |
-| 通道（channel_*） | 7 个（api/cli/dingtalk/feishu/gateway/qq/wecom） | 7 个 | ✅ 全覆盖 |
+| 通道（channel_*） | 5 个（cli/dingtalk/feishu/qq/wecom） | 5 个 | ✅ 全覆盖（`channel_api` 已整体退役，ADR 2026-08-21 插件自持 http_endpoints；`channel_gateway` 不再是独立插件） |
 | Agent（scene） | `scene_service` | `plugins/shared/system/scene/plugin.json` | ✅ |
-| 工具（tools） | 18 个顶层 + 8 个 external_mcp | 26 个 | ✅ 全覆盖 |
-| 系统服务 | memory/llm/approval/evaluation/... | 22 个 | ✅ |
-| 内置工具聚合 sidecar（builtin_tools） | 1 个（10 个工具的 MCP 聚合） | 0 | ⚠️ **缺 manifest，见下** |
+| 工具（tools） | 18 个顶层 + 8 个 external_mcp 预置接入 | 26 个 | ✅ 全覆盖（`external_mcp/` 本身是聚合目录，manifest 在其 8 个子目录里） |
+| 系统服务 | memory/llm/approval/evaluation/... | 29 个 | ✅ |
+| 内置工具聚合 sidecar（builtin_tools） | 1 个（8 个工具的 MCP 聚合） | 1 | ✅ |
 
-**结论**：快照期发现的唯一遗漏——`plugins/shared/tools/builtin_tools/`（有标准 `server.py` 注册 10 个工具但缺 `plugin.json`）——**已补齐 manifest**，全部应独立加载的内部模块均已收敛到 `plugin.json` 协议。
+**结论**：全部应独立加载的内部模块均已收敛到 `plugin.json` 协议（含原 `builtin_tools`、`artifacts` 两处历史缺口已补齐 manifest）。
 
 ---
 
@@ -555,8 +567,8 @@ if __name__ == "__main__":
 |------|--------|------|
 | `plugins/shared/system/connectors/creative/` | `connectors_service` | 创意类连接器实现（comfyui / game_engine / generic） |
 | `plugins/shared/system/connectors/vscode/` | `connectors_service` | VS Code 连接器适配器 |
-| `plugins/shared/system/artifacts/` | （由 gateway/api 通道 sidecar 加载） | 制品服务模块（annotation/artifact 服务） |
 | `plugins/shared/pipeline/_base/` | — | 管道插件公共基类 |
+| `plugins/shared/tools/external_mcp/`（目录本身） | — | 预置外部 MCP 接入的聚合目录：manifest 在其 8 个子目录里，目录自身不需要 |
 | 各插件目录下的 `__pycache__/` | — | Python 缓存，非代码 |
 
 **判断原则**：一个目录是否需要 manifest，取决于它是否要**被内核作为独立插件加载**。如果只是被某个 `server.py` 通过 `import` 引用的实现细节，就不需要——加了反而会被错误地当成新插件发现。

@@ -54,7 +54,7 @@
 - **Python plugins**: ~166K lines (`plugins/`, 97 `plugin.json` manifests)
 - **Frontend code**: ~143K lines (`frontend/src/`)
 - **Python tests**: ~124K lines (`tests/` + in-plugin tests)
-- **Tool plugins**: 19 (41 built-in tool declarations, plus zero-code MCP external tool integration)
+- **Tool plugins**: 26 manifests (18 self-built tool plugins + 8 preset external-MCP integrations, 41 tool declarations in total; plus zero-code integration of any MCP external tool)
 - **Client**: Web frontend (talking straight to the kernel)
 
 ---
@@ -110,7 +110,7 @@ Agent configs (YAML) hot-apply via mtime caching — change prompts or tool whit
 Almost every behavior is customizable via YAML: agent identity, prompts, tool whitelist, constraints, model selection — a direct consequence of everything-is-a-plugin + configuration; changes apply instantly (see Highlight 2).
 
 ### 4. Tool System — Contract-based Design, Out of the Box
-Unified contract (`input_schema` + `output_schema` + `render` intent): the kernel validates results against `output_schema` (fail-closed), the frontend renders result cards by `render`, and `tool_ids` whitelists precisely control the LLM-visible surface. 19 built-in tool plugins with 41 tools (files, shell, code search, browser, network, memory, media generation, IDE integration), plus zero-code integration of any third-party MCP service.
+Unified contract (`input_schema` + `output_schema` + `render` intent): the kernel validates results against `output_schema` (fail-closed), the frontend renders result cards by `render`, and `tool_ids` whitelists precisely control the LLM-visible surface. 18 self-built tool plugins plus 8 preset external-MCP integrations (41 tools in total: files, shell, code search, browser, network, memory, media generation, IDE integration), plus zero-code integration of any third-party MCP service.
 
 ### 5. Mandatory Evaluation System — Hard Constraint on Task Quality
 Task submission must include acceptance criteria (evaluation metrics); after pipeline exit, a mandatory gate transitions the task into evaluation and reviews it against the metrics. Only when all metrics pass is the task marked complete; exhausted retries mean failure. Even if the Agent doesn't actively evaluate, the system forces the task into the evaluation gate (no completion without evaluation evidence) — quality is never skipped.
