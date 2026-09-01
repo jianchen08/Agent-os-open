@@ -56,14 +56,19 @@ def sanitize_eval_paths(data: Any) -> Any:  # noqa: PLR0912
         if _CWD_ABS in result:
             result = result.replace(_CWD_ABS, "")
         win_drive_pattern = re.compile(r"[A-Za-z]:\\[^\s\"']*")
-        if win_drive_pattern.search(result):
-            for m in win_drive_pattern.finditer(result):
-                abs_path = m.group()
-                try:
-                    rel = os.path.relpath(abs_path).replace("\\", "/")
-                    result = result.replace(abs_path, rel)
-                except ValueError:
-                    pass
+        win_drive_hits = win_drive_pattern.findall(result)
+        for abs_path in win_drive_hits:
+            try:
+                rel = os.path.relpath(abs_path).replace("\\", "/")
+                result = result.replace(abs_path, rel)
+            except ValueError:
+                pass
+        if win_drive_hits:
+            # Windows 盘符路径已相对化（E:\x → E:/x 形态），其中 /home|/tmp 等
+            # 段不是 POSIX 绝对路径（前缀 E: 在前），不得再被 posix 分支二次
+            # 相对化——两轮替换互相打架曾产出 E:../../../../../tmp/x 混合体。
+            # 二次脱敏只服务纯 posix 输入：win 分支命中后直接返回。
+            return result
         posix_abs_pattern = re.compile(r"/(?:home|root|opt|var|tmp|usr)/[^\s\"']*")
         if posix_abs_pattern.search(result):
             for m in posix_abs_pattern.finditer(result):
