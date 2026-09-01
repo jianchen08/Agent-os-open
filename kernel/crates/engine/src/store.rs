@@ -39,10 +39,10 @@ pub const VOLATILE_RUN_KEYS: &[&str] = &[
     // 持久键 agent.id（出生方经 state 透传，context_build/工具面消费），派发
     // 不再注入。保留拦截旧 checkpoint/轨迹恢复把残留 agent_id 带回 state。
     "agent_id",
-    // tool_schemas 是内核每轮按 agent tool_ids 注入的 LLM 工具面（server.rs
-    // inject_tool_schemas），只对本轮 LLM 调用有效——跨轮持久=整树 schema 滞留
-    // 内存/checkpoint（90 工具 62KB 声明被反复持有放大）。恢复后 stage_inject
-    // 按当前注册表重新注入，persist 前剥离即可。
+    // tool_schemas 是每轮 prepare 链 tool_schema 插件经内核 tool-surface
+    // capability 拉取的 LLM 工具面，只对本轮 LLM 调用有效——跨轮持久=整树
+    // schema 滞留内存/checkpoint（90 工具 62KB 声明被反复持有放大）。下一轮
+    // prepare 重新拉取，persist 前剥离即可。
     "tool_schemas",
 ];
 

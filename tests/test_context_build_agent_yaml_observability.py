@@ -116,3 +116,40 @@ def test_valid_yaml_no_logs(config_root, tmp_path, caplog):
     assert data.get("level") == "L2"
     assert data.get("system_prompt") == "来自yaml"
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_tool_ids_key_present_writes_even_when_empty(config_root, tmp_path):
+    """tool_ids 键存在即写（含显式空表 = 声明零工具），与"未声明"严格区分——
+    下游 tool_schema 据此跳过配置断链告警（K10）。"""
+    _write_agent(
+        tmp_path / "agents",
+        "zero_tool_agent",
+        "system_prompt: p\ntool_ids: []\n",
+    )
+    cb = context_build_mod.ContextBuildPlugin(config={})
+    updates = asyncio.run(cb.execute(_ctx({"agent.id": "zero_tool_agent"}))).state_updates
+    assert updates["tool_ids"] == [], "显式空表必须写入（声明零工具 ≠ 断链）"
+
+
+def test_tool_ids_absent_writes_nothing(config_root, tmp_path):
+    """yaml 无 tool_ids 键 → 不写该键（由下游按断链处理）。"""
+    _write_agent(
+        tmp_path / "agents",
+        "no_tools_key_agent",
+        "system_prompt: p\n",
+    )
+    cb = context_build_mod.ContextBuildPlugin(config={})
+    updates = asyncio.run(cb.execute(_ctx({"agent.id": "no_tools_key_agent"}))).state_updates
+    assert "tool_ids" not in updates
+
+
+def test_tool_ids_nonempty_written(config_root, tmp_path):
+    """非空 tool_ids 照常写入（唯一供给方 = context_build）。"""
+    _write_agent(
+        tmp_path / "agents",
+        "tool_agent",
+        "system_prompt: p\ntool_ids: [file_read, bash_execute]\n",
+    )
+    cb = context_build_mod.ContextBuildPlugin(config={})
+    updates = asyncio.run(cb.execute(_ctx({"agent.id": "tool_agent"}))).state_updates
+    assert updates["tool_ids"] == ["file_read", "bash_execute"]

@@ -60,7 +60,9 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   manifests 活集合（新插件热注册后管道引用即可编译）；前端 schema 需刷新页面才更新。
 - **多循环体/执行上下文**：`execution_context` 贯穿任务链；agent_id 的本质是执行上下文
   键——内核无 Agent 运行时对象，语义由插件按键展开（context_build 按键加载配置，
-  工具面 `tool_ids` 同属这份执行上下文，与提示词同源注入）。
+  工具面 `tool_ids` 同属这份执行上下文，与提示词同源注入）；内核零 agent 配置
+  知识（不读 `config/agents/**`）——工具面过滤 = tool_schema 插件读 state.tool_ids
+  经内核 `tool-surface` capability 服务完成（ADR 2026-09-02）。
 
 ## 约定
 

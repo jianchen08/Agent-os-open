@@ -252,7 +252,7 @@ fn parse_tool_executor_response(tool_name: &str, resp: Value, duration_ms: f64) 
 
 /// 取工具输出契约并校验（无契约/无 schema 返回 None = 通过）。
 ///
-/// 契约由内核 inject_tool_schemas 注入 state["tool_output_contracts"]
+/// 契约由 tool_schema 插件经 tool-surface capability 写入 state["tool_output_contracts"]
 /// （tool_name → {schema, render}）；render 供前端路由，schema 供本处校验。
 fn validate_output_contract(state: &Value, tool_name: &str, data: &Value) -> Option<String> {
     let contract = state

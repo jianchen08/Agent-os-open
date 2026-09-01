@@ -39,6 +39,9 @@ pub const STANDARD_CAPABILITIES: &[&str] = &[
     "event-bus",
     "metrics",
     "tool-executor",
+    // tool-surface.schemas：LLM 工具面过滤服务（agent 配置解析归 context_build
+    // 插件，内核只持注册表过滤这一纯执行面，见 capability_router.rs）。
+    "tool-surface",
     "service-registry",
     "frontend",
 ];

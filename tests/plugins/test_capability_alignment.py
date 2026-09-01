@@ -14,12 +14,14 @@ from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.capability import STANDARD_CAPABILITIES as SDK_CAPS
 
 
-def test_standard_capabilities_matches_expected_eight():
-    """SDK 清单应包含全部 8 个标准能力，且无重复。
+def test_standard_capabilities_matches_expected_nine():
+    """SDK 清单应包含全部 9 个标准能力，且无重复。
 
     2026-08-19（fbf0a1316）pipeline-state 补入两端清单：router 静态路由存在
     但不在声明面时，sidecar initialize 拿不到句柄，state 聚合读桥永远
     KeyError（e2e 实测）——故 SDK/内核清单均为 8 项。
+    2026-09-02 tool-surface 补入两端清单：LLM 工具面过滤服务（agent 配置
+    解耦，tool_schema 插件经此取过滤面，ADR 2026-09-02）——9 项。
     """
     expected = {
         "pipeline-executor",
@@ -29,6 +31,8 @@ def test_standard_capabilities_matches_expected_eight():
         "event-bus",
         "metrics",
         "tool-executor",
+        # tool-surface.schemas：LLM 工具面过滤服务（内核零 agent 配置知识）
+        "tool-surface",
         "service-registry",
         # task_observability：插件 → 内核 → 前端一次性事件出口（ADR §3.5）
         "frontend",
@@ -38,7 +42,7 @@ def test_standard_capabilities_matches_expected_eight():
 
 
 def test_sdk_injects_all_standard_caps_when_kernel_declares_them():
-    """当内核声明全部 8 项能力时，SDK 应能为每一项创建 CapabilityHandle。
+    """当内核声明全部 9 项能力时，SDK 应能为每一项创建 CapabilityHandle。
 
     模拟内核 initialize 的行为：build_declared_capabilities(true) 返回
     全部 8 项。SDK 的 _on_initialize 必须全部注入，否则该能力对插件不可用。

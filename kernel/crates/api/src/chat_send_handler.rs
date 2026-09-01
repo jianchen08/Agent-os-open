@@ -298,8 +298,8 @@ impl ChatSendHandler {
         let execution_context = params.get("execution_context").filter(|v| v.is_object());
 
         // agent_id（可选，默认 "agentos"）：任务派发按 target 选执行 agent——
-        // 引擎据此加载 config/agents/**/<agent_id>.yaml（人格/tool_ids）。
-        // 该值仅作派发簿记，run 执行身份读管道 state 持久键 agent.id。
+        // 仅作派发簿记；agent yaml 加载（人格/tool_ids）归 context_build 插件，
+        // run 执行身份读管道 state 持久键 agent.id。
         let agent_id = params
             .get("agent_id")
             .and_then(|v| v.as_str())

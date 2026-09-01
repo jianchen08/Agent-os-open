@@ -1,0 +1,43 @@
+{
+  "namespace": "tool-surface",
+  "description": "LLM 工具面过滤服务——按 tool_ids 白名单过滤能力注册表工具，返回 function-calling schema 与输出契约（内核基础设施能力）。agent 配置解析（读 config/agents/** 取 tool_ids）归 context_build 插件，内核零 agent 配置知识，只持注册表过滤这一纯执行面。单一真值源：内核入口校验、/api/v1/schema 聚合、调用方（tool_schema 管道插件）均消费本文件。",
+  "capabilities": [
+    {
+      "method": "schemas",
+      "description": "按 tool_ids 白名单过滤注册表工具。白名单命中 + 框架强制工具（spill_retrieve，兜底闭环必需）注入；input_schema 非 object 的工具不注入。contracts 不过滤——凡声明 output_schema/render 的工具都产生条目（tool_core 按 tool_name 查表校验）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tool_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "agent 工具面白名单（context_build 按 agent yaml 注入 state.tool_ids，本插件转发）。空数组 = agent 声明零工具（仅框架强制工具返回）"
+          }
+        },
+        "required": [
+          "tool_ids"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "schemas": {
+            "type": "array",
+            "description": "OpenAI function-calling 格式 schema 列表 {type:function, function:{name,description,parameters}}"
+          },
+          "contracts": {
+            "type": "object",
+            "description": "tool_name → {schema, render} 工具输出契约表（不过滤，声明了 output_schema/render 的工具才有条目）"
+          }
+        },
+        "required": [
+          "schemas",
+          "contracts"
+        ]
+      }
+    }
+  ]
+}

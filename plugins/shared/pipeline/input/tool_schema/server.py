@@ -34,13 +34,28 @@ def get_instance() -> ToolSchemaPlugin:
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
-    """Initialize tool_schema plugin."""
+    """Initialize tool_schema plugin.
+
+    注入 capability caller：工具面拉取（tool-surface.schemas）经内核能力
+    跨进程调用（ToolRegistry 在内核，sidecar 拿不到注册表服务）。随后预热
+    构建插件单例。
+    """
+    from plugin import set_capability_caller  # noqa: PLC0415
+
+    set_capability_caller(
+        lambda method, params_, timeout=None: plugin.get_capability(
+            "tool-surface"
+        ).call(method, params_, timeout)
+    )
     get_instance()  # 启动时预热，保持原 on_load 构造时机
 
 
 @plugin.on_unload
 async def _on_unload(params: dict) -> None:
     """Cleanup tool_schema plugin."""
+    from plugin import set_capability_caller  # noqa: PLC0415
+
+    set_capability_caller(None)
     get_instance.cache_clear()
 
 

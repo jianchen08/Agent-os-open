@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime};
 
 use parking_lot::RwLock as ParkingRwLock;
 
-use agentos_core::traits::{CapabilityRegistry, StorageBackend};
+use agentos_core::traits::StorageBackend;
 use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
 use axum::{
     body::Body,
@@ -448,16 +448,16 @@ pub(crate) async fn request_tenant_ctx(
 // 流程：
 // 1. 构造初始 state（含 `message` / `core_type` 等；执行身份走 state 持久键
 //    `agent.id`，非 per-run 注入）
-// 2. 注入工具 schema（按 state.tool_ids 或 agent yaml 的 tool_ids 过滤；
-//    agent 全量配置由 context_build 插件在管道内自持加载）
+// 2. agent 配置与工具面均归插件域：context_build 按 state agent.id 加载
+//    agent yaml 并写 state.tool_ids，tool_schema 插件经内核 tool-surface
+//    capability 取过滤后 schema（prepare 链每轮刷新）
 // 3. 构造 PipelineExecutor 并执行 `run`
 // 4. 从最终 state 提取响应（优先 `raw_result`，回退 `message`，再回退原消息）
 //
 // 降级条件：AppState 缺少 invoker / store / project_root（典型为测试或老式构造）
 // 时走 echo-fallback，标注降级原因。
 
-/// 默认核心管道插件 id（可被 agent 配置 config/agents/<id>.yaml 的 core_plugin 覆盖）。
-/// 提取为常量，便于发现与替换。
+/// 默认核心管道插件 id（提取为常量，便于发现与替换）。
 const DEFAULT_CORE_PLUGIN: &str = "pipeline_llm_core";
 
 // 冷路径回放从该 pipeline 的 step 级轨迹按序 merge 重建完整 state（含 messages），
@@ -805,7 +805,7 @@ async fn process_via_engine_inner(
         .and_then(|o| o.get("_skip_user_append"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let mut initial_state = stage_recover_history(
+    let initial_state = stage_recover_history(
         initial_state,
         &store,
         message,
@@ -816,8 +816,9 @@ async fn process_via_engine_inner(
     )
     .await;
 
-    // 2/2b. agent 配置加载 + 工具 schema 注入。
-    stage_inject_agent_and_tools(state, &mut initial_state);
+    // 2/2b. agent 配置加载与工具面注入均归插件域：context_build 按 state 持久键
+    //    agent.id 加载 agent yaml 并写 state.tool_ids，tool_schema 插件经内核
+    //    tool-surface capability 取过滤后 schema（prepare 链每轮刷新）。
 
     // 3. 构造 PipelineExecutor 并执行；失败（含 run 标记 Failed 的兜底）直接
     //    以失败 outcome 出口。
@@ -975,8 +976,7 @@ async fn stage_build_initial_state(
         // 执行身份不是 per-run 注入键：agent 身份是管道 state 持久键 `agent.id`
         // （出生方经 chat.send_message state 透传落库），随本函数之后的热恢复
         // （registry）/冷恢复（pipeline_state 表）进入 state，供 context_build
-        // 与内核工具面（resolve_agent_tool_ids）消费——缺省主 agent 由消费面
-        // 自持，派发不再携带/注入身份。
+        // 等插件消费面读取——缺省主 agent 由消费面自持，派发不再携带/注入身份。
         "core_type": "llm_call",
         "core_plugin": DEFAULT_CORE_PLUGIN,
         "ended": false,
@@ -1359,24 +1359,6 @@ async fn stage_recover_history(
     initial_state
 }
 
-/// 阶段 2b：注入工具 schema。
-///
-/// agent 配置（system_prompt/persona 等 yaml 字段）已从内核解耦：内核不注入
-/// agent_id——执行身份是管道 state 持久键 `agent.id`（出生方经 chat.send_message
-/// state 透传落库，热/冷恢复进入 state），yaml 加载归 sidecar 的 context_build
-/// 插件（按 state agent.id 读 AGENTOS_CONFIG_ROOT/agents/**）。工具 schema 注入
-/// 留在内核——ToolRegistry 在内核，这是工具面契约（按 agent tool_ids 过滤下发）
-/// 而非 agent 配置。
-fn stage_inject_agent_and_tools(state: &AppState, initial_state: &mut serde_json::Value) {
-    // 2b. 注入工具 schema 到 state（0.2 sidecar 架构适配）。
-    // 0.1 单进程时 tool_schema 插件经 ctx.get_service("tool_registry") 直接访问内核
-    // ToolRegistry；0.2 sidecar 是独立进程拿不到该 service。改为内核侧在管道启动前
-    // 按 agent tool_ids 过滤、转成 OpenAI function-calling 格式注入 state["tool_schemas"]，
-    // 这样 prepare 阶段的 tool_schema 插件读到非空 schema（它优先用 state 里的值），
-    // LLM 即可看到工具并调用（tool_core 执行时内核 invoke_tool 经 MCP 调 sidecar）。
-    inject_tool_schemas(initial_state, state);
-}
-
 /// 阶段 3：构造 PipelineExecutor 并执行 initial_state，返回 final_state。
 ///
 /// branch_id 用固定 "main"；run_id 由调用方生成（process_via_engine_inner 权威
@@ -1473,9 +1455,8 @@ async fn stage_execute(
         executor
     };
 
-    // 双轨收敛（审计变更#1）：agent 全量配置唯一事实源 = context_build 插件，
-    // 引擎不再 per-iteration 注入 agent yaml；内核只经 resolve_agent_tool_ids
-    // 读 tool_ids 做工具面过滤（K10 窄接口）。
+    // agent 配置唯一事实源 = context_build 插件；工具面过滤 = tool_schema 插件
+    // 经内核 tool-surface capability（K10 执行时契约）。引擎/内核零 agent 配置知识。
     info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
 
     // GAP-2：防御网路径的失败事件标签预捕获（run_compiled 会 move initial_state）。
@@ -1542,8 +1523,8 @@ async fn stage_execute(
 /// 回写：final_state 含完整 messages 历史（LLM 插件 append 了 assistant 回复），
 /// 按 (tenant_id, effective_pipeline_id) 常驻：下一轮热路径直接复用，
 /// 免 DB 查询；重启/内存丢失时冷路径从 messages 表恢复（见 stage_recover_history）。
-/// 常驻副本剥离 `tool_schemas`（每轮注入的 LLM 工具面，跨轮无意义——不随
-/// final_state 滞留内存；每轮 stage_inject 重新注入）。
+/// 常驻副本剥离 `tool_schemas`（每轮 prepare 链 tool_schema 插件经
+/// tool-surface capability 重新拉取，跨轮无意义——不随 final_state 滞留内存）。
 fn stage_finalize(
     final_state: &serde_json::Value,
     tenant_id: &str,
@@ -1553,9 +1534,9 @@ fn stage_finalize(
 ) -> EngineOutcome {
     if !effective_pipeline_id.is_empty() {
         let reg = agentos_session::global_registry();
-        // 常驻快照剥离 tool_schemas（每轮注入的 LLM 工具面，跨轮无意义）——
-        // 否则整树 schema 随 final_state 滞留内存注册表（90 工具 62KB 声明被
-        // 反复持有放大）。下一轮 stage_inject_agent_and_tools 按注册表重注入。
+        // 常驻快照剥离 tool_schemas（每轮 prepare 链重新拉取的 LLM 工具面，
+        // 跨轮无意义）——否则整树 schema 随 final_state 滞留内存注册表
+        // （90 工具 62KB 声明被反复持有放大）。
         let mut persisted = final_state.clone();
         if let Some(obj) = persisted.as_object_mut() {
             obj.remove("tool_schemas");
@@ -1624,54 +1605,6 @@ fn extract_response_content(final_state: &serde_json::Value) -> String {
     }
 }
 
-/// 框架级强制工具：无视 agent `tool_ids`，只要 registry 里存在就注入。
-///
-/// 这些工具的存在是**无害**的（LLM 不会无缘无故调——需要具体参数引导），但对
-/// 框架兜底闭环**必需**。例如 `spill_retrieve`：spill_guard 把大输出替换为
-/// 摘要 + "调用 spill_retrieve(tool_call_id=...) 取回" 引导，若 agent 的
-/// tool_ids 未列此工具，LLM 工具列表里没有它的 schema，原文就永远取不回——
-/// 兜底链路断裂。它与 spill_guard 配套安装（要么都装要么都不装），故"registry
-/// 存在 = 已安装"即可作为注入判据，无需读 pipeline 配置做条件联动。
-const FRAMEWORK_ALWAYS_INCLUDE_TOOLS: &[&str] = &["spill_retrieve"];
-
-/// state 无 tool_ids 时按 state `agent.id`（缺省 agentos）从 ConfigCenter 解析 agent yaml 的
-/// tool_ids（K10：内核侧工具面过滤的配置解析点，窄接口——只读 tool_ids，不
-/// 注入 agent 全量配置；agent 配置唯一事实源在 sidecar context_build）。
-///
-/// 返回：
-/// - `Some(集合)`：yaml 带 `tool_ids` 键（含显式空表 = agent 声明零工具）；
-/// - `None`：配置断链（无 config_center / 无 agent_id / yaml 缺失或损坏 /
-///   yaml 无 tool_ids 键）。yaml 缺失或损坏时顺带把 `_agent_config_missing`
-///   标记写进真实 state（与 K5 同键，诊断出口统一）。
-fn resolve_agent_tool_ids(
-    state: &mut serde_json::Value,
-    app_state: &AppState,
-) -> Option<std::collections::HashSet<String>> {
-    let cc = app_state.config_center.as_ref()?;
-    // 执行身份 = 管道 state 持久键 agent.id（出生方经 state 透传；热恢复在内存
-    // state、冷恢复在 DB——热冷同源）。缺省主 agent 由本消费面自持。
-    let agent_id = state
-        .get("agent.id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("agentos")
-        .to_string();
-    match agentos_config::resolve_agent_tool_ids(cc, &agent_id) {
-        Ok(Some(ids)) => Some(ids.into_iter().collect()),
-        Ok(None) => None,
-        Err(_) => {
-            if let Some(obj) = state.as_object_mut() {
-                obj.insert(
-                    "_agent_config_missing".to_string(),
-                    serde_json::Value::Bool(true),
-                );
-            }
-            None
-        }
-    }
-}
-
-/// 注入工具 schema 到 state["tool_schemas"]（0.2 sidecar 架构适配）。
 /// RFC 7396 JSON Merge Patch：把 patch 按序合并进 target。
 /// 用于冷启动时按 step 级轨迹逐条 merge 回放，重建完整 state（**仅标量字段**）。
 /// - patch 中值为对象：递归 merge（target 同 key 也为对象时）
@@ -1703,102 +1636,6 @@ fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
         }
     } else {
         *target = patch.clone();
-    }
-}
-
-///
-/// 按 state["tool_ids"] 过滤 capability_registry 的工具，转成 OpenAI function-calling
-/// 格式（`{type:"function", function:{name, description, parameters}}`）。
-///
-/// tool_ids 解析链（K10）：state 显式 tool_ids（overlay/上游注入）优先；缺失时按
-/// state.agent_id 从 ConfigCenter 解析 agent yaml 的 tool_ids（0.2 契约：agentos.yaml
-/// tool_ids 白名单控制 LLM 工具面）。两层都解析不出 = 配置断链 → **空工具面**
-/// （仅保留 FRAMEWORK_ALWAYS_INCLUDE_TOOLS 框架强制工具）+ warn 报警，禁止
-/// 静默全量（agent 配置断链时权限边界消失、配置错误伪装成"全工具可用"）。
-/// registry 不可用时注入空列表（LLM 无工具可用）。
-fn inject_tool_schemas(state: &mut serde_json::Value, app_state: &AppState) {
-    let Some(registry) = app_state.capability_registry.as_ref() else {
-        return;
-    };
-    let all_tools = registry.list_tools();
-
-    // 按 agent 的 tool_ids 过滤；state 未带时按 state agent.id 从 agent yaml 解析（K10）
-    let wanted: Option<std::collections::HashSet<String>> =
-        match state.get("tool_ids").and_then(|v| v.as_array()) {
-            Some(arr) => Some(
-                arr.iter()
-                    .filter_map(|t| t.as_str().map(String::from))
-                    .collect(),
-            ),
-            None => resolve_agent_tool_ids(state, app_state),
-        };
-    if wanted.is_none() {
-        tracing::warn!(
-            target: "tool-surface",
-            agent_id = state.get("agent.id").and_then(|v| v.as_str()).unwrap_or(""),
-            "state 无 tool_ids 且按 agent yaml 解析不出（配置断链，K10）：工具面置空（仅保留框架强制工具），拒绝兜底全量"
-        );
-    }
-    let schemas: Vec<serde_json::Value> = all_tools
-        .iter()
-        .filter(|t| match &wanted {
-            Some(ids) => {
-                // tool_ids 命中 或 框架级强制工具（spill_retrieve 等，无视 agent 配置）
-                ids.contains(&t.name) || FRAMEWORK_ALWAYS_INCLUDE_TOOLS.contains(&t.name.as_str())
-            }
-            // 配置断链：不再全量兜底（K10）。FRAMEWORK_ALWAYS_INCLUDE_TOOLS 是
-            // 文档化框架机制（spill_retrieve 配套），保留。
-            None => FRAMEWORK_ALWAYS_INCLUDE_TOOLS.contains(&t.name.as_str()),
-        })
-        .filter(|t| {
-            // LLM 严格校验工具 schema:parameters 必须是 type:object 的 JSON Schema。
-            // 注意（K9 勘误）：注册路径（plugin_lifecycle / agentos-kernel 启动循环）
-            // 对缺 input_schema 的 manifest 工具按 {} 补注册，{} 是 object——本过滤
-            // 对这些工具**恒不触发**；真正的防线在注册期的 warn + 启动报告计数，
-            // 此处过滤只拦"注册后 schema 被改写成非 object"的极端形态。
-            t.input_schema.is_object()
-        })
-        .map(|t| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.input_schema,
-                }
-            })
-        })
-        .collect();
-
-    if let Some(obj) = state.as_object_mut() {
-        obj.insert(
-            "tool_schemas".to_string(),
-            serde_json::Value::Array(schemas),
-        );
-    }
-
-    // 注入工具输出契约（task_dsh_plugin_adapter 任务 1）：tool_name →
-    // {schema, render}。tool_core 执行后按 `schema` 校验返回值（fail-closed），
-    // 前端按 `render` 意图路由渲染。只收集声明了 output_schema/render 的工具，
-    // 未声明者不产生条目（41 个存量工具零负担）。
-    let contracts: serde_json::Map<String, serde_json::Value> = all_tools
-        .iter()
-        .filter(|t| t.output_schema.is_some() || t.render.is_some())
-        .map(|t| {
-            (
-                t.name.clone(),
-                serde_json::json!({
-                    "schema": t.output_schema.clone().unwrap_or(serde_json::Value::Null),
-                    "render": t.render.clone().unwrap_or(serde_json::Value::Null),
-                }),
-            )
-        })
-        .collect();
-    if let Some(obj) = state.as_object_mut() {
-        obj.insert(
-            "tool_output_contracts".to_string(),
-            serde_json::Value::Object(contracts),
-        );
     }
 }
 

@@ -1,40 +1,54 @@
 """工具 Schema 注入 Input 插件。
 
-负责在管道循环的输入阶段将工具的 JSON Schema 描述
-注入到 state 中，供 LLM Core 调用时作为 function calling 的 tools 参数。
+在管道 prepare 链把 LLM 工具面写入 state：读 state["tool_ids"]（context_build
+按 agent yaml 注入，显式空表 = 声明零工具），经内核 tool-surface capability
+过滤能力注册表，把 OpenAI function calling 格式的 schema 列表与工具输出契约
+写回 state，供 llm_core（tools 参数）与 tool_core（输出契约校验）消费。
 
-默认不再生成 prompt.tool_descriptions（走 function calling）。
-当配置 include_tools_description_in_prompt=true 时，
-才额外生成人类可读的工具描述写入 state（供 prompt_build 拼入 SystemMessage）。
+agent 配置解析（读 config/agents/** 取 tool_ids）归 context_build；本插件不做
+任何 yaml 读取，也不做全量兜底——state 无 tool_ids = 配置断链，工具面置空。
 
 State 命名空间：
-    - tool_schemas : 本插件写入的工具 Schema 列表（JSON 格式，始终写入）
-    - prompt.tool_descriptions : 本插件写入的工具描述（文本格式，仅当开关开启时写入）
+    - tool_schemas : 过滤后的工具 Schema 列表（始终写入；配置断链 = 空列表）
+    - tool_output_contracts : tool_name → {schema, render} 输出契约表（始终写入）
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)
 
+# tool-surface capability 调用通道（server.py on_load 注入，与 llm_core 的
+# llm 调用通道同构）。签名：(method, params, timeout=None) → result dict。
+_capability_caller: Callable[..., Awaitable[dict[str, Any]]] | None = None
+
+
+def set_capability_caller(
+    caller: Callable[..., Awaitable[dict[str, Any]]] | None,
+) -> None:
+    """注入/清除 tool-surface capability 调用通道。
+
+    server.py on_load 注入（``plugin.get_capability("tool-surface").call``
+    组装 ``<capability>.<method>`` 全名，method 传短名）；on_unload 清除。
+    未注入时工具面置空（fail-closed，不阻断管道）。
+    """
+    global _capability_caller
+    _capability_caller = caller
+
 
 class ToolSchemaPlugin(IInputPlugin):
     """工具 Schema 注入 Input 插件。
 
-    从 ToolRegistry 获取已注册工具的 Schema 信息，
-    生成 OpenAI function calling 格式的 JSON 列表写入 state["tool_schemas"]。
-    当配置 include_tools_description_in_prompt=true 时，
-    额外生成人类可读的文本描述写入 state["prompt.tool_descriptions"]。
+    经内核 tool-surface capability 按 state["tool_ids"] 过滤注册表工具，
+    结果写入 state["tool_schemas"] 与 state["tool_output_contracts"]。
 
-    优先级：50（构建级，与 prompt_build 同级）
-    没工具描述也能对话。
-
-    Attributes:
-        _config: 插件配置字典
+    优先级：50（构建级，与 prompt_build 同级）；排在 context_build（写
+    tool_ids）之后。
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -43,14 +57,9 @@ class ToolSchemaPlugin(IInputPlugin):
         Args:
             config: 插件配置字典，支持以下键：
                 - enabled: 是否启用工具 Schema 注入（默认 True）
-                - tool_ids: 指定要注入的工具 ID 列表（空列表表示全部）
-                - include_tools_description_in_prompt: 是否生成人类可读的工具描述
-                  写入 state["prompt.tool_descriptions"]（默认 False）
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
-        self._tool_ids = self._config.get("tool_ids", [])
-        self._include_desc = self._config.get("include_tools_description_in_prompt", False)
 
     @property
     def name(self) -> str:
@@ -63,204 +72,71 @@ class ToolSchemaPlugin(IInputPlugin):
         return self._config.get("priority", 50)
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
-        """注入工具 Schema 到 state。
-
-        通过 ctx.get_service("tool_registry") 获取工具注册表，
-        生成 OpenAI function calling 格式的 Schema 列表。
-        当配置开关开启时，额外生成人类可读的工具描述。
-
-        Args:
-            ctx: 插件执行上下文
-
-        Returns:
-            包含工具 Schema 状态更新的插件执行结果
-        """
+        """拉取过滤后的工具面并写入 state。"""
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0912
-        """执行工具 Schema 注入逻辑。
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
+        """执行工具 Schema 拉取。
 
-        工具 ID 来源优先级：
-        1. ctx.state["tool_ids"] — 运行时由 Agent 配置注入（优先）
-        2. self._tool_ids — 插件初始化配置（降级）
+        白名单来源：ctx.state["tool_ids"]（context_build 按 agent yaml 注入；
+        显式空表 = agent 声明零工具）。缺失 = 配置断链 → 空工具面 + 报警，
+        禁止兜底全量（K10：agent 配置断链时权限边界不得静默放宽）。
 
         Returns:
             要写入 state 的工具字段字典
         """
         if not self._enabled:
-            return {"tool_schemas": []}
+            return {"tool_schemas": [], "tool_output_contracts": {}}
 
-        # 获取工具注册表
+        wanted = ctx.state.get("tool_ids")
+        if not isinstance(wanted, list):
+            logger.warning(
+                "[%s] state 无 tool_ids（context_build 应按 agent yaml 注入），"
+                "工具面置空（K10 配置断链，不兜底全量）",
+                self.name,
+            )
+            return {"tool_schemas": [], "tool_output_contracts": {}}
+
+        caller = _capability_caller
+        if caller is None:
+            logger.error(
+                "[%s] capability caller 未注入：tool-surface 调用通道未接线"
+                "（server.py on_load 应调用 set_capability_caller），工具面置空",
+                self.name,
+            )
+            return {"tool_schemas": [], "tool_output_contracts": {}}
+
         try:
-            tool_registry = ctx.get_service("tool_registry")
-        except KeyError:
-            logger.debug("[%s] No tool_registry service, skipping", self.name)
-            # 0.2 sidecar 架构:sidecar 拿不到内核 tool_registry。若内核已注入
-            # tool_schemas（process_via_engine 经 capability_registry 生成），保留它，
-            # 不覆盖为空（否则 LLM 拿不到任何工具）。无内核注入时返回空。
-            schemas = ctx.state.get("tool_schemas")
-            if schemas:
-                # agent 配置解耦后的过滤点：context_build 按 agent yaml 注入
-                # state.tool_ids——此处对内核全量注入按 agent 工具面过滤
-                # （内核读不到 yaml，缺失 tool_ids 时是全量兜底）。
-                wanted = ctx.state.get("tool_ids") or []
-                if wanted:
-                    # 与内核 FRAMEWORK_ALWAYS_INCLUDE_TOOLS（server.rs）对齐：
-                    # 框架级强制工具无视 agent 配置保留。
-                    keep = set(wanted) | {"spill_retrieve"}
-                    filtered = [
-                        s for s in schemas
-                        if isinstance(s, dict)
-                        and (s.get("function") or {}).get("name") in keep
-                    ]
-                    # 加载期工具面漂移检测：agent tool_ids
-                    # 引用了注册表不存在的工具 = 配置错误/注册异常（被 G2 净化、
-                    # 插件未启用、名字写错），报警暴露而非静默缩面。
-                    available = {
-                        (s.get("function") or {}).get("name")
-                        for s in schemas
-                        if isinstance(s, dict)
-                    }
-                    # 只检 agent 声明的 wanted——框架强制工具（spill_retrieve）
-                    # 非 agent 配置管辖，不计入漂移
-                    missing = sorted(t for t in set(wanted) if t not in available)
-                    if missing:
-                        logger.warning(
-                            "[%s] 工具面漂移：agent tool_ids 引用的工具不在注册表"
-                            "（被 G2 净化/插件未启用/名字有误，需排查）| missing=%s",
-                            self.name, missing,
-                        )
-                    if len(filtered) != len(schemas):
-                        logger.info(
-                            "[%s] 按 agent tool_ids 过滤工具面 | %d -> %d",
-                            self.name, len(schemas), len(filtered),
-                        )
-                        return {"tool_schemas": filtered}
-                else:
-                    # agent/state 完全无 tool_ids = agent 配置加载断链的信号
-                    # （context_build 应按 agent yaml 注入 state.tool_ids；
-                    # 内核侧无 tool_ids 已不再全量注入）。
-                    # 报警暴露而非静默全量/空面。
-                    logger.warning(
-                        "[%s] agent 未声明 tool_ids，工具面为空——检查 agent 配置"
-                        "加载是否断链（context_build 按 agent yaml 注入 state.tool_ids）",
-                        self.name,
-                    )
-                return {}  # 不覆盖，保留内核注入的 schema
-            return {"tool_schemas": []}
+            result = await caller("schemas", {"tool_ids": wanted})
+        except Exception as exc:
+            logger.error(
+                "[%s] tool-surface.schemas 调用失败，工具面置空 | %s", self.name, exc
+            )
+            return {"tool_schemas": [], "tool_output_contracts": {}}
 
-        # 确定工具过滤列表：优先从 state 读取（Agent 配置注入），降级用插件配置
-        active_tool_ids: list[str] = ctx.state.get("tool_ids", []) or self._tool_ids
+        schemas = result.get("schemas") or []
+        contracts = result.get("contracts") or {}
 
-        # 合并动态加载的工具（由 resource_search 在运行时触发加载）
-        dynamic_names = tool_registry.get_dynamic_tool_names()
-        logger.debug(
-            "[%s] registry_id=%s dynamic_names=%s",
-            self.name,
-            id(tool_registry),
-            dynamic_names,
+        # 工具面漂移检测：agent tool_ids 引用了注册表不存在的工具 = 配置错误/
+        # 注册异常（被 G2 净化、插件未启用、名字写错），报警暴露而非静默缩面。
+        # 只检 agent 声明的 wanted——框架强制工具（spill_retrieve）非 agent
+        # 配置管辖，不计入漂移。
+        available = {
+            (s.get("function") or {}).get("name")
+            for s in schemas
+            if isinstance(s, dict)
+        }
+        missing = sorted(t for t in set(wanted) if t not in available)
+        if missing:
+            logger.warning(
+                "[%s] 工具面漂移：agent tool_ids 引用的工具不在注册表"
+                "（被 G2 净化/插件未启用/名字有误，需排查）| missing=%s",
+                self.name, missing,
+            )
+
+        logger.info(
+            "[%s] 工具面注入 | tool_ids=%d | schemas=%d",
+            self.name, len(wanted), len(schemas),
         )
-        if dynamic_names:
-            active_tool_ids = list(set(active_tool_ids) | dynamic_names)
-
-        logger.debug("[%s] active_tool_ids=%s (count=%d)", self.name, active_tool_ids, len(active_tool_ids))
-
-        if active_tool_ids:
-            try:
-                from tools.loader import get_dynamic_tool_loader  # noqa: PLC0415
-
-                dyn_loader = get_dynamic_tool_loader()
-                if dyn_loader is not None:
-                    dyn_loader.ensure_loaded_sync(active_tool_ids)
-            except Exception as exc:
-                logger.debug("[%s] Dynamic sync preload failed: %s", self.name, exc)
-
-        # 获取所有工具或指定工具
-        if active_tool_ids:
-            tools = []
-            for tool_id in active_tool_ids:
-                try:
-                    tools.append(tool_registry.get(tool_id))
-                except Exception:
-                    logger.warning("[%s] Tool not found: %s", self.name, tool_id)
-        else:
-            tools = tool_registry.list_all()
-
-        if not tools:
-            return {"tool_schemas": []}
-
-        # 构建 function calling 格式的 Schema（始终写入）
-        agent_level = self._resolve_agent_level(ctx)
-        schemas = []
-        services = self._get_services(ctx)
-        for tool in tools:
-            enricher = tool_registry.get_schema_enricher(tool.name)
-            if enricher:
-                try:
-                    enriched_tool = enricher(tool, services)
-                    llm_format = enriched_tool.to_llm_format(agent_level=agent_level)
-                except Exception as exc:
-                    logger.debug(
-                        "[%s] Schema enrichment failed for %s: %s",
-                        self.name,
-                        tool.name,
-                        exc,
-                    )
-                    llm_format = tool.to_llm_format(agent_level=agent_level)
-            else:
-                llm_format = tool.to_llm_format(agent_level=agent_level)
-            schemas.append(llm_format)
-
-        result: dict[str, Any] = {"tool_schemas": schemas}
-
-        # 仅当开关开启时，生成人类可读的工具描述
-        if self._include_desc:
-            descriptions = []
-            for tool in tools:
-                descriptions.append(f"- {tool.name}: {tool.description}")
-            result["prompt.tool_descriptions"] = "## 可用工具\n" + "\n".join(descriptions)
-
-        logger.debug(
-            "[%s] Tool schemas injected | count=%d | desc=%s",
-            self.name,
-            len(schemas),
-            self._include_desc,
-        )
-
-        return result
-
-    def _get_services(self, ctx: PluginContext) -> dict[str, Any]:
-        """从上下文获取可用服务字典，供 Schema 丰富器使用。"""
-        services: dict[str, Any] = {}
-        for key in (
-            "tool_registry",
-            "media_provider_registry",
-            "memory_store",
-            "retriever",
-        ):
-            try:
-                svc = ctx.get_service(key)
-                if svc is not None:
-                    services[key] = svc
-            except KeyError:
-                continue
-        return services
-
-    @staticmethod
-    def _resolve_agent_level(ctx: PluginContext) -> int | None:
-        """从管道 state 解析当前 Agent 层级。
-
-        Returns:
-            Agent 层级数字（1/2/3），解析失败返回 None（不过滤）
-        """
-        from pipeline.types import StateKeys  # noqa: PLC0415
-
-        raw_level = ctx.state.get(StateKeys.AGENT_LEVEL, "")
-        if raw_level:
-            level_str = str(raw_level).upper().lstrip("L")
-            try:
-                return int(level_str)
-            except (ValueError, TypeError):
-                pass
-        return None
+        return {"tool_schemas": schemas, "tool_output_contracts": contracts}

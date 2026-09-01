@@ -9,10 +9,11 @@
 //!   外部文件引用 `{{path:filename}}`、组合插件 YAML 解析（ADR ⑥）
 //! - `config_center`: 配置中心——基于 notify 的热重载、500ms 防抖 + 内容哈希去重、
 //!   读写锁并发安全、加载失败回滚 + 审计日志
-//! - `pipeline`: 管道配置承载（P7）——Agent 配置加载（config_id/level/model_tier/
-//!   system_prompt/tool_ids/max_iterations）；管道配置（多循环体）由 api crate 的
-//!   pipeline_loader 直接解析为引擎模型
 //! - `error`: 配置系统错误类型
+//!
+//! agent 配置（`config/agents/**`）不归本 crate：加载在 context_build 插件
+//! （sidecar 自持），工具面过滤经内核 tool-surface capability（ADR
+//! 2026-09-02-agent-config-decouple-tool-surface）。
 //!
 //! ## 设计决策
 //!
@@ -23,16 +24,11 @@
 //!
 //! [来源: docs/0.2_rust_plugin_solution.md §3.3]
 //! [来源: docs/tasks/task_04_config_system.md]
-//! [来源: docs/working/frontend_01_alignment_plan.md §P7]
 
-pub mod agent_loader;
 pub mod config_center;
 pub mod error;
 pub mod loader;
-pub mod pipeline;
 
-pub use agent_loader::{resolve_agent_tool_ids, AgentToolIdsError};
 pub use config_center::{AuditEntry, ConfigCenter, ConfigChangeEvent, ConfigEventType};
 pub use error::ConfigError;
 pub use loader::{CompositePluginYaml, ConfigLoader, StepConfig};
-pub use pipeline::{load_agent_config, AgentConfig};

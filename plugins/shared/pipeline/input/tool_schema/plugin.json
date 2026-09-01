@@ -17,5 +17,8 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "granted_capabilities": [
+    "tool-surface"
+  ]
 }

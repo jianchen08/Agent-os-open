@@ -2428,3 +2428,134 @@ async fn stream_interception_skips_without_session() {
         "无 session 时不得累积（该分支不属拦截路径）"
     );
 }
+
+// ── tool-surface.schemas：LLM 工具面过滤服务（K10 执行时契约）──────────
+
+/// 构造挂了工具注册表的路由器（工具逐个按描述符注册）。
+fn router_with_tool_descriptors(
+    tools: &[agentos_core::traits::ToolDescriptor],
+) -> KernelCapabilityRouter {
+    use agentos_plugin_loader::CapabilityRegistryImpl;
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    for t in tools {
+        registry.register_tool("test_plugin", t.clone());
+    }
+    KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_registry(registry)
+}
+
+fn plain_tool(name: &str) -> agentos_core::traits::ToolDescriptor {
+    agentos_core::traits::ToolDescriptor {
+        name: name.to_string(),
+        description: format!("test tool {name}"),
+        plugin_id: "test_plugin".to_string(),
+        input_schema: json!({"type": "object", "properties": {}}),
+        output_schema: None,
+        category: agentos_core::types::ToolCategory::System,
+        source: agentos_core::types::ToolSource::Builtin,
+        ui: None,
+        render: None,
+    }
+}
+
+fn schema_names(result: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = result["schemas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["function"]["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn tool_surface_filters_by_tool_ids_and_keeps_framework_tools() {
+    // 契约：白名单命中注入；spill_retrieve（框架强制）无视白名单保留。
+    let router = router_with_tool_descriptors(&[
+        plain_tool("bash_execute"),
+        plain_tool("file_read"),
+        plain_tool("spill_retrieve"),
+    ]);
+    let result = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["bash_execute"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        schema_names(&result),
+        vec!["bash_execute".to_string(), "spill_retrieve".to_string()],
+        "白名单命中 + 框架强制工具"
+    );
+    // OpenAI function-calling 形态
+    let first = &result["schemas"][0];
+    assert_eq!(first["type"], "function");
+    assert!(first["function"]["parameters"].is_object());
+}
+
+#[tokio::test]
+async fn tool_surface_empty_whitelist_yields_framework_only() {
+    // 契约：空数组 = agent 声明零工具 → 仅框架强制工具（非断链、非全量）。
+    let router =
+        router_with_tool_descriptors(&[plain_tool("bash_execute"), plain_tool("spill_retrieve")]);
+    let result = router
+        .handle("tool-surface", "schemas", json!({"tool_ids": []}))
+        .await
+        .unwrap();
+    assert_eq!(schema_names(&result), vec!["spill_retrieve".to_string()]);
+}
+
+#[tokio::test]
+async fn tool_surface_excludes_non_object_input_schema() {
+    // input_schema 被改写成非 object 的工具不注入（LLM 严格校验 parameters）。
+    let mut broken = plain_tool("broken_schema");
+    broken.input_schema = json!("not-an-object");
+    let router = router_with_tool_descriptors(&[plain_tool("ok_tool"), broken]);
+    let result = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["ok_tool", "broken_schema"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(schema_names(&result), vec!["ok_tool".to_string()]);
+}
+
+#[tokio::test]
+async fn tool_surface_contracts_unfiltered_by_whitelist() {
+    // 契约：输出契约表不过滤——凡声明 output_schema/render 的工具都有条目，
+    // 与被白名单收窄的 schema 面解耦（tool_core 按 tool_name 查表）。
+    let mut contracted = plain_tool("dsh_read");
+    contracted.output_schema = Some(json!({"type": "object", "required": ["path"]}));
+    contracted.render = Some(json!({"card": "read"}));
+    contracted.category = agentos_core::types::ToolCategory::File;
+    let router = router_with_tool_descriptors(&[plain_tool("legacy_tool"), contracted]);
+    let result = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["bash_execute"]}),
+        )
+        .await
+        .unwrap();
+    assert!(result["schemas"].as_array().unwrap().is_empty());
+    let contracts = result["contracts"].as_object().unwrap();
+    assert_eq!(contracts.len(), 1, "只有声明契约的工具进入: {contracts:?}");
+    assert_eq!(contracts["dsh_read"]["schema"]["required"][0], "path");
+    assert_eq!(contracts["dsh_read"]["render"]["card"], "read");
+    assert!(contracts.get("legacy_tool").is_none());
+}
+
+#[tokio::test]
+async fn tool_surface_requires_registry() {
+    // registry 未注入 → 显式错误（不静默空面）。
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
+    let err = router
+        .handle("tool-surface", "schemas", json!({"tool_ids": ["x"]}))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("registry not injected"));
+}

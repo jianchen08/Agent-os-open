@@ -184,10 +184,11 @@ class ContextBuildPlugin(IInputPlugin):
         # 同 sidecar 进程内多个管道复用本插件实例，缓存会造成 agent_name
         # 跨管道污染）。实例属性只作配置默认值，不缓存解析结果。
         agent_name = self._agent_name or str(agent_cfg.get("display_name") or "")
-        # tool_ids 随 agent 配置注入（内核 inject_tool_schemas 读 state.tool_ids
-        # 过滤；agent 配置加载归本插件后由这里供给）。
+        # tool_ids 随 agent 配置注入：键存在即写（含显式空表 = agent 声明零工具，
+        # 须与"未声明/断链"区分，下游 tool_schema 据此跳过断链告警）；本键唯一
+        # 供给方是本插件，tool_schema 经 tool-surface capability 据此过滤工具面。
         _tool_ids = agent_cfg.get("tool_ids")
-        if isinstance(_tool_ids, list) and _tool_ids:
+        if isinstance(_tool_ids, list):
             updates["tool_ids"] = _tool_ids
         # 任务域出生投影（ADR 2026-08-28 声明化）：血缘扁平键存在 = 任务管道
         # （聊天管道无血缘键，不写 task.*）——task.id 即引擎管道 id，调用方预传

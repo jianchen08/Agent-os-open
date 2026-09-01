@@ -95,9 +95,9 @@ def test_execute_serializes_state_updates(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(server.get_instance(), "execute", _fake_execute)
     data = _run(server.execute({"current_phase": "init"}))
+    # 成功路径不含 error 键（结构化 PluginError 仅在失败时出现）
     assert data == {
         "state_updates": {"environment_basis": {"level": "isolated", "resolved": True}},
-        "error": None,
     }
     # 配置直通实例 execute
     assert captured["ctx"].state["current_phase"] == "init"
@@ -116,7 +116,8 @@ def test_execute_serializes_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(server.get_instance(), "execute", _fake_execute)
     data = _run(server.execute({"current_phase": "exit"}))
-    assert data == {"state_updates": {}, "error": "boom"}
+    # error 为结构化 PluginError（内核 invoker 契约），非裸字符串
+    assert data == {"state_updates": {}, "error": {"message": "boom"}}
 
 
 def test_execute_passes_config_overrides(monkeypatch: pytest.MonkeyPatch) -> None:

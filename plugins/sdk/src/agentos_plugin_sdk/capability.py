@@ -113,6 +113,7 @@ STANDARD_CAPABILITIES = [
     "event-bus",
     "metrics",
     "tool-executor",
+    "tool-surface",
     "service-registry",
     "frontend",
 ]

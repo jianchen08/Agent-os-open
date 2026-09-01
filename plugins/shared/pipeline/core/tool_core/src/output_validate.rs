@@ -1,7 +1,8 @@
 //! 工具输出 JSON Schema 校验（task_dsh_plugin_adapter 任务 1）。
 //!
-//! 内核在 pipeline 启动时把 `tool_output_contracts`（tool_name → {schema, render}）
-//! 注入 state（server.rs inject_tool_schemas）。tool_core 执行工具成功后按
+//! prepare 链的 tool_schema 插件经内核 tool-surface capability 把
+//! `tool_output_contracts`（tool_name → {schema, render}）写入 state。
+//! tool_core 执行工具成功后按
 //! `schema` 校验返回值——这是 output_schema 的第一个消费端：此前该字段全链路
 //! 零消费（41 工具仅 3 个填写，声明无意义）。
 //!
