@@ -33,7 +33,6 @@
 
 | 文档 | 定位 |
 |---|---|
-| [contract-files-tutorial.md](contract-files-tutorial.md) | 内核契约文件怎么来的（traits.rs / 决策文档 / manifest 演进 / 契约间依赖） |
 | [logging.md](logging.md) | 日志体系（双语言运行时日志汇聚与追踪字段） |
 
 ## 参考手册
