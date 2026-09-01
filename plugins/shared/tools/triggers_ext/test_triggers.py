@@ -1148,6 +1148,77 @@ class TestDomainEventBridge:
         finally:
             mgr.stop_check_loop()
 
+    def test_task_completed_rich_notification_content(self) -> None:
+        """完成通知带 0.1 同款富内容：标题/评估结论/上下文使用率。"""
+        received: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        mgr = TriggerManager()
+        mgr.set_injector(fake_injector)
+        try:
+            _run(
+                mgr.handle_domain_event(
+                    "task_completed",
+                    {
+                        "pipeline_id": "child_pipe",
+                        "task_id": "t_child",
+                        "parent_pipeline_id": "parent_pipe",
+                        "user_id": "u_admin",
+                        "title": "写周报",
+                        "eval_summary": "全部 2 项指标通过",
+                        "context_usage": {
+                            "pct": 30.0,
+                            "input_tokens": 38400,
+                            "context_window": 128000,
+                        },
+                    },
+                )
+            )
+            msg = received[0][1]
+            assert "写周报" in msg, "通知应包含任务标题"
+            assert "已完成 ✅" in msg
+            assert "📋 评估结论: 全部 2 项指标通过" in msg, "通知应包含评估结论"
+            assert "📊 上下文使用率: 30.0% (38,400/128,000 tokens)" in msg, "通知应包含上下文使用率"
+            assert "不建议继续向此 Agent 继承提交" in msg, "30% 应命中 25-50% 档提示"
+        finally:
+            mgr.stop_check_loop()
+
+    def test_task_failed_rich_notification_content(self) -> None:
+        """失败通知带 0.1 同款富内容：标题/失败原因/重试计数。"""
+        received: list[tuple] = []
+
+        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        mgr = TriggerManager()
+        mgr.set_injector(fake_injector)
+        try:
+            _run(
+                mgr.handle_domain_event(
+                    "task_failed",
+                    {
+                        "pipeline_id": "child_pipe",
+                        "task_id": "t_fail",
+                        "parent_pipeline_id": "parent_pipe",
+                        "user_id": "u_admin",
+                        "title": "写周报",
+                        "error": "评估未通过: 1/2 项指标通过",
+                        "retry_count": 3,
+                    },
+                )
+            )
+            msg = received[0][1]
+            assert "写周报" in msg, "通知应包含任务标题"
+            assert "失败 ❌" in msg
+            assert "(已重试 3 次)" in msg, "通知应包含重试计数"
+            assert "评估未通过: 1/2 项指标通过" in msg, "通知应包含失败原因"
+        finally:
+            mgr.stop_check_loop()
+
     def test_task_failed_auto_notifies_parent_pipeline(self) -> None:
         """GAP-1：task_failed 同样自动通知父管道（失败也需上级知晓）。"""
         received: list[tuple] = []

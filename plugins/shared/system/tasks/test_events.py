@@ -41,6 +41,39 @@ def test_completed_status_derives_task_completed_with_tags():
     assert tags["user_id"] == "admin"
 
 
+def test_terminal_tags_carry_rich_notification_fields():
+    """富通知字段（0.1 task_notifier 同款）：标题/失败原因/重试/评估结论/上下文。"""
+    row = _task_row(
+        "failed",
+        **{
+            "task.error": "评估未通过: 1/2 项指标通过",
+            "task.eval_total_calls": 3,
+            "task.eval_summary": "1/2 项指标通过",
+            "track.llm_usage": {"total_input_tokens": 50000},
+            "context_window": 128000,
+        },
+    )
+    (name, tags) = events.derive_task_terminal_events("run.completed", row)[0]
+    assert name == "task_failed"
+    assert tags["title"] == "写周报"
+    assert tags["error"] == "评估未通过: 1/2 项指标通过"
+    assert tags["retry_count"] == 3
+    assert tags["eval_summary"] == "1/2 项指标通过"
+    assert tags["context_usage"] == {
+        "pct": 39.1,
+        "input_tokens": 50000,
+        "context_window": 128000,
+    }
+
+
+def test_context_usage_missing_keys_returns_empty():
+    """缺 track.llm_usage / context_window 任一 → 空 dict（通知侧按无遥测处理）。"""
+    assert events._context_usage(_task_row()) == {}
+    assert events._context_usage(_task_row(**{"track.llm_usage": {"total_input_tokens": 1}})) == {}
+    assert events._context_usage(_task_row(**{"context_window": 128000})) == {}
+    assert events._context_usage(_task_row(**{"track.llm_usage": {}, "context_window": 0})) == {}
+
+
 def test_unevaluated_statuses_derive_nothing():
     # 完成唯一判据 = 评估通过：pending/pending_evaluation/running/缺失 一律不派生
     for status in ["pending", "running", "pending_evaluation", ""]:

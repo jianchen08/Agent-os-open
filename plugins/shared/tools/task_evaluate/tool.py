@@ -121,6 +121,8 @@ async def _write_task_state(task_id: str, fields: dict[str, Any]) -> None:
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_EVAL_TIMEOUT = 1200.0
 _DEFAULT_MAX_EVAL_CALLS = 15
+# ws_meta 读取失败类合并门控的重试上限（耗尽判死，与评估重试同构）
+_MERGE_GATE_MAX_FAILURES = 3
 
 _VALID_EVALUATE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
 _VALID_AUTO_COMPLETE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
@@ -837,7 +839,11 @@ class TaskEvaluateTool(BuiltinTool):
                 await task_service.recover_to_completed(task.id, result=eval_data)
                 await _write_task_state(
                     task.id,
-                    {"task.status": "completed", "task.ended_at": _now_iso()},
+                    {
+                        "task.status": "completed",
+                        "task.ended_at": _now_iso(),
+                        "task.eval_summary": eval_data.get("summary", ""),
+                    },
                 )
             except Exception as e:
                 logger.error("[TaskEvaluate] 恢复失败状态为完成失败: %s", e)
@@ -849,6 +855,40 @@ class TaskEvaluateTool(BuiltinTool):
             # 此处按原文透传，不得再套统一前缀。
             merge_error = await self._try_merge_before_complete(task)
             if merge_error:
+                # ws_meta 读取失败 = 元数据镜像时序窗口（init 镜像早于引擎注册
+                # 时只落 DB 表，聚合读面可能短暂缺键），可重试——计入
+                # task.merge_gate_failures，达阈值才判死（耗尽语义，与评估
+                # 重试同构）；真合并失败/元数据残缺仍直接判死（重试无意义）。
+                is_meta_read_failure = "ws_meta 读取失败" in merge_error
+                if is_meta_read_failure:
+                    gate_failures = 0
+                    if task.metadata and isinstance(task.metadata, dict):
+                        gate_failures = int(task.metadata.get("merge_gate_failures", 0) or 0)
+                    gate_failures += 1
+                    if task.metadata is None:
+                        task.metadata = {}
+                    task.metadata["merge_gate_failures"] = gate_failures
+                    try:
+                        await _write_task_state(
+                            str(task.id),
+                            {"task.merge_gate_failures": gate_failures},
+                        )
+                    except Exception as e:
+                        logger.error("[TaskEvaluate] merge_gate_failures 落 state 失败: %s", e)
+                    if gate_failures < _MERGE_GATE_MAX_FAILURES:
+                        logger.warning(
+                            "[TaskEvaluate] 工作区元数据未就绪（合并门控第 %d/%d 次），返回重试不判死: task_id=%s",
+                            gate_failures,
+                            _MERGE_GATE_MAX_FAILURES,
+                            task.id,
+                        )
+                        return create_failure_result(
+                            error=(
+                                f"工作区元数据尚未就绪（合并门控第 {gate_failures}/{_MERGE_GATE_MAX_FAILURES} 次），"
+                                f"请稍后重新提交评估: {merge_error}"
+                            ),
+                            error_code="MERGE_GATE_RETRY",
+                        )
                 logger.error(
                     "[TaskEvaluate] 完成前工作区门控失败，任务标记为 failed: task_id=%s, error=%s",
                     task.id,
@@ -862,7 +902,12 @@ class TaskEvaluateTool(BuiltinTool):
                     await task_service.complete_evaluation(task.id, passed=False, result=eval_data)
                     await _write_task_state(
                         task.id,
-                        {"task.status": "failed", "task.ended_at": _now_iso()},
+                        {
+                            "task.status": "failed",
+                            "task.ended_at": _now_iso(),
+                            "task.eval_summary": eval_data.get("summary", ""),
+                            "task.error": merge_error,
+                        },
                     )
                 except Exception as e:
                     logger.error("[TaskEvaluate] complete_evaluation(passed=False) 失败: %s", e)
@@ -875,7 +920,11 @@ class TaskEvaluateTool(BuiltinTool):
                 await task_service.complete_evaluation(task.id, passed=True, result=eval_data)
                 await _write_task_state(
                     task.id,
-                    {"task.status": "completed", "task.ended_at": _now_iso()},
+                    {
+                        "task.status": "completed",
+                        "task.ended_at": _now_iso(),
+                        "task.eval_summary": eval_data.get("summary", ""),
+                    },
                 )
             except Exception as e:
                 logger.error("[TaskEvaluate] complete_evaluation(passed=True) 失败: %s", e)
@@ -980,9 +1029,18 @@ class TaskEvaluateTool(BuiltinTool):
             if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 eval_data = self._build_result_data(eval_result)
                 await task_service.complete_evaluation(task.id, passed=False, result=eval_data)
+                # 与 complete_evaluation 内部 fail_task 的 reason 同格式（YAML 镜像
+                # 与 state 单一真值一致），供终态通知带出失败原因
+                _summary = eval_data.get("summary", "")
+                _reason = f"评估未通过: {_summary}" if _summary else "评估未通过"
                 await _write_task_state(
                     task.id,
-                    {"task.status": "failed", "task.ended_at": _now_iso()},
+                    {
+                        "task.status": "failed",
+                        "task.ended_at": _now_iso(),
+                        "task.eval_summary": _summary,
+                        "task.error": _reason,
+                    },
                 )
             else:
                 logger.info("[TaskEvaluate] 任务 %s 已是终态(%s)，跳过状态回写", task.id, task.status.value)
@@ -1197,6 +1255,13 @@ class TaskEvaluateTool(BuiltinTool):
         if total_calls is not None and total_calls != "":
             try:
                 metadata["eval_total_calls"] = int(total_calls)
+            except (TypeError, ValueError):
+                pass
+        # 合并门控重试计数读回（跨调用累积的单一真值在 state）
+        gate_failures = row.get("task.merge_gate_failures")
+        if gate_failures is not None and gate_failures != "":
+            try:
+                metadata["merge_gate_failures"] = int(gate_failures)
             except (TypeError, ValueError):
                 pass
         # ws_meta 回填（数据源适配）：workspace 注入消费点（_get_input_params）读

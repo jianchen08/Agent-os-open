@@ -341,6 +341,9 @@ class TestMergeGateAndCompletionPaths:
         # 写面落了 failed 终态（职责边界：评估终态落 state）
         assert state_writer.await_count == 1
         assert state_writer.await_args.args[1]["task.status"] == "failed"
+        # 富通知字段随终态落 state（评估结论/失败原因）
+        assert "评估指标已通过，但完成前工作区门控失败" in state_writer.await_args.args[1]["task.eval_summary"]
+        assert state_writer.await_args.args[1]["task.error"] == "worktree 合并失败: git merge conflict"
 
     @pytest.mark.asyncio
     async def test_merge_failure_writer_raise_not_blocking(self, mod: Any, service: Any, monkeypatch: Any) -> None:
@@ -416,6 +419,22 @@ class TestMergeGateAndCompletionPaths:
         out = await tool._fail_task(service, task, _eval_result(task.id, [_metric("m1", False)]), 3)
         assert out.success is False
         assert "complete_evaluation(passed=False) 失败" in out.error
+
+    @pytest.mark.asyncio
+    async def test_fail_task_writes_rich_state_fields(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """评估耗尽失败：state 落 failed 终态 + 评估结论/失败原因（富通知数据源）。"""
+        task = await _new_task(service)
+        tool, state_writer = _inject_tool(mod, monkeypatch, service)
+        out = await tool._fail_task(
+            service, task, _eval_result(task.id, [_metric("m1", False)]), 3
+        )
+        assert out.success is True
+        assert state_writer.await_count == 1
+        fields = state_writer.await_args.args[1]
+        assert fields["task.status"] == "failed"
+        # compute_overall 按指标实况生成 summary（0/1 项指标通过）
+        assert fields["task.eval_summary"] == "0/1 项指标通过"
+        assert fields["task.error"] == "评估未通过: 0/1 项指标通过"
 
 
 # ── 合并门控：ws_meta 数据源解析与分发（机制层替身/真实判定）──

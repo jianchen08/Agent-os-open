@@ -114,6 +114,7 @@
   },
   "export_fields": [
     "llm_model",
-    "router.stop_reason"
+    "router.stop_reason",
+    "context_window"
   ]
 }

@@ -14,8 +14,10 @@ task_completed / task_failed 并经 event-bus.emit_domain 发回域事件总线�
   task.status=failed → task_failed；其余（pending/pending_evaluation 等）→
   不派生（杜绝"跑完就假完成通知上级"）。
 
-事件标签：pipeline_id / thread_id / task_id / parent_pipeline_id / user_id——
-triggers_ext 的父任务通知注入器（_auto_notify_parent）依赖这组标签。
+事件标签：pipeline_id / thread_id / task_id / parent_pipeline_id / user_id /
+title / error / retry_count / eval_summary / context_usage——triggers_ext 的
+父任务通知注入器（_auto_notify_parent）依赖这组标签拼装 0.1 同款富通知
+（标题/失败原因/重试计数/评估结论/上下文使用率）。
 """
 
 from __future__ import annotations
@@ -47,6 +49,31 @@ def _tag(row: dict[str, Any], key: str) -> Any:
     return val if val is not None else ""
 
 
+def _context_usage(row: dict[str, Any]) -> dict[str, Any]:
+    """从 state 摘要行提取上下文使用率（0.1 通知同款遥测）。
+
+    数据源：track.llm_usage（track 插件跨轮累计，已出口）+ context_window
+    （llm_core 每轮写入，已出口）。缺任一键返回空 dict（通知侧按无遥测处理）。
+    """
+    usage = row.get("track.llm_usage")
+    window = row.get("context_window")
+    if not isinstance(usage, dict) or not window:
+        return {}
+    try:
+        window = int(window)
+        input_tokens = int(usage.get("total_input_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return {}
+    if window <= 0:
+        return {}
+    pct = round((input_tokens / window) * 100, 1)
+    return {
+        "pct": pct,
+        "input_tokens": input_tokens,
+        "context_window": window,
+    }
+
+
 def derive_task_terminal_events(
     event_name: str, row: dict[str, Any]
 ) -> list[tuple[str, dict[str, Any]]]:
@@ -63,6 +90,13 @@ def derive_task_terminal_events(
         "task_id": _tag(row, "task.id"),
         "parent_pipeline_id": _tag(row, "lineage.parent_pipeline_id"),
         "user_id": _tag(row, "task.submitted_by"),
+        # 富通知字段（0.1 task_notifier 同款）：标题/失败原因/重试计数/
+        # 评估结论/上下文使用率——state 已有键直接带出，缺键空串由通知侧兜底
+        "title": _tag(row, "task.goal"),
+        "error": _tag(row, "task.error"),
+        "retry_count": _tag(row, "task.eval_total_calls"),
+        "eval_summary": _tag(row, "task.eval_summary"),
+        "context_usage": _context_usage(row),
     }
     if event_name == "run.failed":
         return [("task_failed", tags)]

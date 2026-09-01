@@ -515,6 +515,8 @@
     "task.description",
     "task.dependencies",
     "task.eval_retry_count",
-    "task.eval_total_calls"
+    "task.eval_total_calls",
+    "task.eval_summary",
+    "task.error"
   ]
 }

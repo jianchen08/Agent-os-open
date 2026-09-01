@@ -1097,6 +1097,11 @@ class TriggerManager:
         系统会自动通知你并恢复执行"的承诺。任务系统零触发代码：注册逻辑
         收敛在统一触发服务（triggers_ext），事件本身携带父锚点即触发。
 
+        通知内容与 0.1 task_notifier 同款富文本：标题（task.goal）、失败原因
+        （task.error）、重试计数（task.eval_total_calls）、评估结论
+        （task.eval_summary）、上下文使用率（track.llm_usage + context_window）
+        ——由 tasks 插件事件派生时从 state 摘要行带出，缺键空串兜底。
+
         Returns:
             None（注入失败仅记录，不阻断域事件桥主流程）。
         """
@@ -1106,18 +1111,49 @@ class TriggerManager:
         if not parent_pipeline_id:
             return
         task_id = str(event_data.get("task_id") or "")
+        title = str(event_data.get("title") or "") or task_id
         error = str(event_data.get("error") or "")
+        retry_count = str(event_data.get("retry_count") or "")
+        eval_summary = str(event_data.get("eval_summary") or "")
         # 子任务提交者（task_submit 写入子任务初始 state 的 task.submitted_by，
         # 内核 task_completed/task_failed 事件随 parent_pipeline_id 一并带出）。
         # chat.send_message 硬校验 user_id 非空（tenant 反查）——传空串会被内核
         # 拒绝（-32603 缺少 user_id）。
         user_id = str(event_data.get("user_id") or "")
 
+        # 上下文使用率（0.1 同款遥测提示；缺数据不拼）
+        context_usage_text = ""
+        cu = event_data.get("context_usage")
+        if isinstance(cu, dict):
+            pct = cu.get("pct", 0)
+            input_tokens = cu.get("input_tokens", 0)
+            window = cu.get("context_window", 0)
+            if pct and window:
+                if pct > 50:
+                    hint = "⚠️ 建议优先创建新任务（上下文已超过50%，继续派发可能触发压缩或截断）"
+                elif pct > 25:
+                    hint = "⚠️ 不建议继续向此 Agent 继承提交（上下文已超25%，建议新建任务以保留充足余量）"
+                else:
+                    hint = "✅ 可直接继续向此 Agent 派发任务（上下文充足）"
+                context_usage_text = (
+                    f"\n📊 上下文使用率: {pct}% ({input_tokens:,}/{window:,} tokens)\n{hint}"
+                )
+
         if event_name == "task_completed":
-            message = f"[系统通知] 子任务 {task_id} 已完成，请检查结果并继续。"
+            conclusion_hint = f"\n📋 评估结论: {eval_summary[:200]}" if eval_summary else ""
+            message = (
+                f"[系统通知] 子任务 '{title}' (ID: {task_id}) 已完成 ✅"
+                f"{conclusion_hint}{context_usage_text}\n"
+                "请查阅子任务产出与评估结论后决定下一步。"
+            )
         else:
-            reason = f"：{error}" if error else ""
-            message = f"[系统通知] 子任务 {task_id} 失败{reason}，请处理。"
+            err_hint = f": {error[:300]}" if error else ""
+            retry_hint = f" (已重试 {retry_count} 次)" if retry_count else ""
+            message = (
+                f"[系统通知] 子任务 '{title}' (ID: {task_id}) 失败 ❌"
+                f"{retry_hint}{err_hint}{context_usage_text}\n"
+                "请根据失败情况决定后续操作（重试/替代方案/标记失败）。"
+            )
 
         if self._injector is None:
             logger.warning(
