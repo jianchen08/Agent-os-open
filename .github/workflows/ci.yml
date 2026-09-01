@@ -361,14 +361,17 @@ jobs:
       #       .github/pytest-failure-baseline.txt 只减不增 → 整体覆盖率基线锁
       #       .github/python-coverage-baseline.txt 只升不降（取代旧 fail-under=44
       #       静态地板；coverage.xml 供 diff 门禁与矩阵回填消费））
+      #     + channel-per-file-coverage（渠道三件 wecom/qq/dingtalk 逐源文件
+      #       行/函数 100% 检查，DSH 口径——run_gates 定义 2026-08-26，
+      #       此前漏接线，2026-09-01 补入；消费本 job 产出的 coverage.xml）
       #     + plugins-diff-coverage（改动行覆盖率 100%：PR 事件按 merge-base，
       #       push 事件查最后一个提交；[skip-diff-cov] 逃生口，ADR 2026-08-20）
       #     + plugins-mypy-baseline（plugins/shared mypy 只减不增，
       #       基线 .github/mypy-baseline.txt；uv run 保证与本地计数口径一致）
-      - name: Run gates (pairing + copy-guard + coverage + diff-coverage + mypy baseline)
+      - name: Run gates (pairing + copy-guard + coverage + channel per-file + diff-coverage + mypy baseline)
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: python scripts/run_gates.py --filter plugins-coverage-pairing,channel-copy-guard,plugins-coverage,plugins-diff-coverage,plugins-mypy-baseline
+        run: python scripts/run_gates.py --filter plugins-coverage-pairing,channel-copy-guard,plugins-coverage,channel-per-file-coverage,plugins-diff-coverage,plugins-mypy-baseline
 
   # ── Python Heavy Suites（免插桩 gate：重型套件并排执行）────────────────
   # 与 python-coverage 并行（无 needs 依赖）：94 插件（85 sidecar + 8
