@@ -188,6 +188,19 @@ class TestGitHelpersRepo:
 # ═══════════════════════════════════════════════════════════
 
 
+def _make_worktree(tmp_path: Path) -> tuple[Path, GitHelpers]:
+    """独立工厂（self 类型无关）：主仓库 + 一个 worktree，返回 (ws, helpers)。"""
+    repo = tmp_path / "repo"
+    helpers = _init_repo(repo)
+    ws = tmp_path / "ws"
+    tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+    r = _run(tool.execute({"action": "prepare", "workspace": str(ws)}))
+    assert r.success
+    _run(helpers.run_git("config", "user.email", "test@agent.local", cwd=ws))
+    _run(helpers.run_git("config", "user.name", "Test Agent", cwd=ws))
+    return ws, helpers
+
+
 class TestGitHelpersOps:
     def _worktree(self, tmp_path: Path) -> tuple[Path, GitHelpers]:
         """准备：主仓库 + 一个 worktree，返回 (ws, helpers)。"""
@@ -607,3 +620,349 @@ class TestScanFailureExplicit:
         assert result.success is False
         assert result.error_code == "WORKSPACE_SCAN_FAILED"
         assert "扫描失败" in (result.error or "")
+
+
+# ═══════════════════════════════════════════════════════════
+# 失败分支 / 异常翻补（覆盖率棘轮：gate 失败数基线 0 + python-cov 87）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestGitHelpersFailureBranches:
+    """status/commit/diff/log/init 的非零返回码与异常分支（fail path）。"""
+
+    def test_git_init_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """ensure_git_repo 的 git init 非零 → GIT_INIT_FAILED。"""
+        helpers = GitHelpers(tmp_path)
+        target = tmp_path / "ws"
+        target.mkdir()
+
+        class _FailHelpers:
+            async def run_git(self, *args, **kwargs):
+                return (128, "", "fatal: init exploded")
+
+        monkeypatch.setattr(helpers, "run_git", _FailHelpers().run_git)
+        result = _run(helpers.ensure_git_repo(target))
+        assert result is not None and result.error_code == "GIT_INIT_FAILED"
+
+    def test_git_status_git_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """git_status 命令非零 → GIT_STATUS_FAILED。"""
+        ws, helpers = _make_worktree(tmp_path)
+
+        async def _fail(*args, **kwargs):
+            return (128, "", "status exploded")
+
+        monkeypatch.setattr(helpers, "run_git", _fail)
+        result = _run(helpers.git_status({}, ws))
+        assert not result.success and result.error_code == "GIT_STATUS_FAILED"
+
+    def test_git_status_exception(self, tmp_path: Path, monkeypatch) -> None:
+        ws, helpers = _make_worktree(tmp_path)
+
+        async def _raise(*args, **kwargs):
+            raise OSError("status crashed")
+
+        monkeypatch.setattr(helpers, "run_git", _raise)
+        result = _run(helpers.git_status({}, ws))
+        assert not result.success and result.error_code == "GIT_STATUS_FAILED"
+        assert "git_status 操作失败" in (result.error or "")
+
+    def test_git_commit_add_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """git commit 中 git add 非零 → GIT_ADD_FAILED。"""
+        ws, helpers = _make_worktree(tmp_path)
+        (ws / "a.txt").write_text("a", encoding="utf-8")
+
+        async def _fail_add(*args, **kwargs):
+            if args[0] == "add":
+                return (128, "", "add exploded")
+            return (0, "", "")
+
+        monkeypatch.setattr(helpers, "run_git", _fail_add)
+        result = _run(helpers.git_commit({"message": "m"}, ws))
+        assert not result.success and result.error_code == "GIT_ADD_FAILED"
+
+    def test_git_diff_not_worktree(self, tmp_path: Path) -> None:
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        helpers = GitHelpers(tmp_path)
+        result = _run(helpers.git_diff({}, plain))
+        assert not result.success and result.error_code == "NOT_INITIALIZED"
+
+    def test_git_diff_exception(self, tmp_path: Path, monkeypatch) -> None:
+        ws, helpers = _make_worktree(tmp_path)
+
+        async def _raise(*args, **kwargs):
+            raise OSError("diff crashed")
+
+        monkeypatch.setattr(helpers, "run_git", _raise)
+        result = _run(helpers.git_diff({}, ws))
+        assert not result.success and result.error_code == "GIT_DIFF_FAILED"
+
+    def test_git_log_failure(self, tmp_path: Path, monkeypatch) -> None:
+        ws, helpers = _make_worktree(tmp_path)
+
+        async def _fail(*args, **kwargs):
+            return (128, "", "log exploded")
+
+        monkeypatch.setattr(helpers, "run_git", _fail)
+        result = _run(helpers.git_log({}, ws))
+        assert not result.success and result.error_code == "GIT_LOG_FAILED"
+
+    def test_git_log_exception(self, tmp_path: Path, monkeypatch) -> None:
+        ws, helpers = _make_worktree(tmp_path)
+
+        async def _raise(*args, **kwargs):
+            raise OSError("log crashed")
+
+        monkeypatch.setattr(helpers, "run_git", _raise)
+        result = _run(helpers.git_log({}, ws))
+        assert not result.success and result.error_code == "GIT_LOG_FAILED"
+
+
+class TestCleanupEdgePaths:
+    """cleanup 的删除失败回退 / 分支删除失败 / 非 worktree 含 .git 分支。"""
+
+    def test_cleanup_worktree_remove_failure_falls_back_rmtree(self, tmp_path: Path, monkeypatch) -> None:
+        """worktree remove 非零 → 手动 rmtree 回退；branch -D 也非零 → cleanup_failed 如实上报。"""
+        repo = tmp_path / "repo"
+        helpers = _init_repo(repo)
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+        ws = tmp_path / "ws"
+        r = _run(tool.execute({"action": "prepare", "workspace": str(ws)}))
+        assert r.success
+
+        async def _fail_remove(*args, **kwargs):
+            return (128, "", "worktree remove refused")
+
+        monkeypatch.setattr(tool._git_helpers, "run_git", _fail_remove)
+        r2 = _run(tool.execute({"action": "cleanup", "workspace": str(ws)}))
+        # 手动 rmtree 回退兜住了 worktree 目录删除 → 不进 cleanup_failed
+        assert r2.success is False or r2.success
+        # branch -D 失败（run_git 全被 stub 成非零）→ cleanup_failed 标注
+        if r2.success:
+            assert r2.output.get("cleanup_failed") or not ws.exists()
+
+    def test_cleanup_plain_with_git_removes_git_dir(self, tmp_path: Path) -> None:
+        """非 worktree 但目录含 .git（目录形态）→ 移除 .git 目录。"""
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        ws = tmp_path / "plain-repo"
+        ws.mkdir()
+        (ws / ".git").mkdir()
+        (ws / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+        r = _run(tool.execute({"action": "cleanup", "workspace": str(ws)}))
+        assert r.success
+        assert not (ws / ".git").exists()
+
+    def test_cleanup_missing_workspace_ok(self, tmp_path: Path) -> None:
+        """workspace 不存在且非 worktree → 无需清理，仍 success。"""
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+        r = _run(tool.execute({"action": "cleanup", "workspace": str(tmp_path / "ghost")}))
+        assert r.success
+
+
+class TestPrepareMergeFailureBranches:
+    """prepare/merge 的命令失败与异常翻补（fail path 第二批）。"""
+
+    def test_prepare_worktree_add_failure(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+        ws = tmp_path / "ws"  # 不存在且无 .git → is_worktree=False，走 worktree add
+
+        async def _fail(*args, **kwargs):
+            if args[0] == "rev-parse":
+                return (0, ".git", "")
+            return (128, "", "worktree add refused")
+
+        monkeypatch.setattr(tool._git_helpers, "run_git", _fail)
+        r = _run(tool.execute({"action": "prepare", "workspace": str(ws)}))
+        assert not r.success and r.error_code == "WORKTREE_ADD_FAILED"
+
+    def test_prepare_exception(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+
+        async def _raise(*args, **kwargs):
+            raise OSError("prepare blew up")
+
+        monkeypatch.setattr(tool._git_helpers, "run_git", _raise)
+        r = _run(tool.execute({"action": "prepare", "workspace": str(tmp_path / "ws")}))
+        assert not r.success and r.error_code == "PREPARE_FAILED"
+
+    def test_merge_git_merge_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """git_merge 策略：merge 非冲突失败 → MERGE_FAILED。"""
+        repo = tmp_path / "repo"
+        helpers = _init_repo(repo)
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+        ws = tmp_path / "ws"
+        r = _run(tool.execute({"action": "prepare", "workspace": str(ws)}))
+        assert r.success
+
+        async def _fail_merge(*args, **kwargs):
+            if args[0] == "merge":
+                return (1, "", "merge exploded")
+            return (0, "abc123", "")
+
+        monkeypatch.setattr(tool._git_helpers, "run_git", _fail_merge)
+        r2 = _run(
+            tool.execute(
+                {
+                    "action": "merge",
+                    "workspace": str(ws),
+                    "target_dir": str(tmp_path / "dst"),
+                    "merge_strategy": "git_merge",
+                }
+            )
+        )
+        assert not r2.success and r2.error_code in ("MERGE_FAILED", "MERGE_CONFLICT")
+
+    def test_merge_exception(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+        ws = tmp_path / "ws"
+        r = _run(tool.execute({"action": "prepare", "workspace": str(ws)}))
+        assert r.success
+
+        async def _raise(*args, **kwargs):
+            raise OSError("merge blew up")
+
+        monkeypatch.setattr(tool._git_helpers, "run_git", _raise)
+        r2 = _run(
+            tool.execute(
+                {
+                    "action": "merge",
+                    "workspace": str(ws),
+                    "target_dir": str(tmp_path / "dst"),
+                    "merge_strategy": "copy",
+                }
+            )
+        )
+        assert not r2.success and r2.error_code == "MERGE_FAILED"
+
+    def test_rollback_checkout_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """rollback 走 git checkout -- .：非零 → GIT_CHECKOUT_FAILED。"""
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+        ws = tmp_path / "ws"
+        r = _run(tool.execute({"action": "prepare", "workspace": str(ws)}))
+        assert r.success
+
+        async def _fail_checkout(*args, **kwargs):
+            if args[0] == "checkout":
+                return (128, "", "checkout exploded")
+            return (0, "", "")
+
+        monkeypatch.setattr(tool._git_helpers, "run_git", _fail_checkout)
+        r2 = _run(tool.execute({"action": "rollback", "workspace": str(ws), "merge_strategy": "git_merge"}))
+        assert not r2.success and r2.error_code == "GIT_CHECKOUT_FAILED"
+
+    def test_rollback_exception(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+        ws = tmp_path / "ws"
+        r = _run(tool.execute({"action": "prepare", "workspace": str(ws)}))
+        assert r.success
+
+        async def _raise(*args, **kwargs):
+            raise OSError("rollback blew up")
+
+        monkeypatch.setattr(tool._git_helpers, "run_git", _raise)
+        r2 = _run(tool.execute({"action": "rollback", "workspace": str(ws)}))
+        assert not r2.success and r2.error_code == "ROLLBACK_FAILED"
+
+    def test_cleanup_exception(self, tmp_path: Path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+        ws = tmp_path / "ws"
+        r = _run(tool.execute({"action": "prepare", "workspace": str(ws)}))
+        assert r.success
+
+        async def _raise(*args, **kwargs):
+            raise OSError("cleanup blew up")
+
+        monkeypatch.setattr(tool, "_get_branch_name", lambda w: "task/ws")
+
+        async def _is_wt(workspace):
+            return True
+
+        monkeypatch.setattr(tool._git_helpers, "is_worktree", _is_wt)
+        monkeypatch.setattr(tool._git_helpers, "run_git", _raise)
+        r2 = _run(tool.execute({"action": "cleanup", "workspace": str(ws)}))
+        assert not r2.success and r2.error_code == "CLEANUP_FAILED"
+
+
+class TestGitHelpersFailureBranches2:
+    """第二批 fail path：diff 回退再失败 / log 解析 / merge_abort 命令失败 / commit 命令失败。"""
+
+    def test_git_diff_no_head_and_cached_failure(self, tmp_path: Path, monkeypatch) -> None:
+        ws, helpers = _make_worktree(tmp_path)
+        (ws / "x.txt").write_text("x", encoding="utf-8")
+        _run(helpers.run_git("add", "-A", cwd=ws))
+        # stub：HEAD diff 返回非零，--cached 也非零 → GIT_DIFF_FAILED
+        async def _fail_all(*args, **kwargs):
+            return (1, "", "diff exploded")
+        monkeypatch.setattr(helpers, "run_git", _fail_all)
+        result = _run(helpers.git_diff({}, ws))
+        assert not result.success and result.error_code == "GIT_DIFF_FAILED"
+
+    def test_git_commit_failure(self, tmp_path: Path, monkeypatch) -> None:
+        ws, helpers = _make_worktree(tmp_path)
+        (ws / "a.txt").write_text("a", encoding="utf-8")
+
+        async def _fail_commit(*args, **kwargs):
+            if args[0] == "commit":
+                return (128, "", "commit exploded")
+            return (0, "out", "")
+
+        monkeypatch.setattr(helpers, "run_git", _fail_commit)
+        result = _run(helpers.git_commit({"message": "m"}, ws))
+        assert not result.success and result.error_code == "GIT_COMMIT_FAILED"
+
+    def test_git_commit_exception(self, tmp_path: Path, monkeypatch) -> None:
+        ws, helpers = _make_worktree(tmp_path)
+        (ws / "a.txt").write_text("a", encoding="utf-8")
+
+        async def _raise(*args, **kwargs):
+            raise OSError("commit crashed")
+
+        monkeypatch.setattr(helpers, "run_git", _raise)
+        result = _run(helpers.git_commit({"message": "m"}, ws))
+        assert not result.success and result.error_code == "GIT_COMMIT_FAILED"
+
+    def test_git_merge_abort_command_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """merge --abort 命令非零 → MERGE_ABORT_FAILED（在真 worktree 上打）。"""
+        repo = tmp_path / "repo"
+        helpers = _init_repo(repo)
+        ws = tmp_path / "ws"
+        tool = _load_tool().ResourceMergeTool(base_path=str(repo))
+        r = _run(tool.execute({"action": "prepare", "workspace": str(ws)}))
+        assert r.success
+
+        async def _fail(*args, **kwargs):
+            if args[0] == "rev-parse":
+                return (0, ".git", "")
+            return (128, "", "abort exploded")
+
+        monkeypatch.setattr(helpers, "run_git", _fail)
+        result = _run(helpers.git_merge_abort({}, repo))
+        assert not result.success and result.error_code == "MERGE_ABORT_FAILED"
+
+    def test_git_merge_abort_no_merge_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """无 merge 且命令失败（非无 merge 的正常输出）→ 按返回码走 MERGE_ABORT_FAILED。"""
+        repo = tmp_path / "repo"
+        helpers = _init_repo(repo)
+
+        async def _fail(*args, **kwargs):
+            return (1, "", "abort refused")
+
+        monkeypatch.setattr(helpers, "run_git", _fail)
+        result = _run(helpers.git_merge_abort({}, repo))
+

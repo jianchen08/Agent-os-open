@@ -129,10 +129,29 @@ class TestEnsureProjectRegistered:
 class TestCreateProjectApi:
     """projects 域 create_project 端点（http_api）：幂等复用 + created 标志。"""
 
+    @staticmethod
+    def _load_tasks_http_api() -> Any:
+        """按本插件目录解析 http_api 并返回模块。
+
+        ``http_api`` 是 0.2 平铺共享裸名（conftest 收集期逐出后按 sys.path
+        重解析）；先跑的插件测试（triggers_ext/test_triggers.py 等）会把
+        自家目录残留在 sys.path[0]，逐出后在残序上重解析即劫持到别家
+        http_api（其顶层 from tool import 又落到 bash/tool.py → ImportError）。
+        导入前置顶本目录，与 triggers_ext/test_triggers.py 同款防御。
+        """
+        _HERE = os.path.dirname(os.path.abspath(__file__))
+        if _HERE in sys.path:
+            sys.path.remove(_HERE)
+        sys.path.insert(0, _HERE)
+        sys.modules.pop("http_api", None)
+        import http_api
+
+        return http_api
+
     async def test_create_project_idempotent_by_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reg_env: dict[str, Any]
     ) -> None:
-        import http_api
+        http_api = self._load_tasks_http_api()
         from project_registry import ProjectRegistry
 
         registry = ProjectRegistry(data_dir=reg_env["tasks_root"])
@@ -154,7 +173,7 @@ class TestCreateProjectApi:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reg_env: dict[str, Any]
     ) -> None:
         """会话目录已登记 → 复用既有登记，不新建（会话保存多次幂等）。"""
-        import http_api
+        http_api = self._load_tasks_http_api()
         from project_registry import ProjectRegistry
 
         registry = ProjectRegistry(data_dir=reg_env["tasks_root"])

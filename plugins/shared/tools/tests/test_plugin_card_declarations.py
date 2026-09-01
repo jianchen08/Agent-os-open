@@ -58,12 +58,23 @@ CHAT_CARD_BLOCK_TYPES = {
 _SKIP_DIRS = {".venv", "node_modules", "__pycache__", ".git", ".pytest_cache"}
 
 
+def _is_junction(path: str) -> bool:
+    """junction/符号链接判定（跨版本）。
+
+    ``os.path.isjunction`` 仅 py3.12+；CI runner 为 py3.11，
+    降级判 islink（junction 在 POSIX 侧即 symlink，覆盖 CI 场景）。
+    """
+    if hasattr(os.path, "isjunction"):
+        return bool(os.path.isjunction(path))
+    return os.path.islink(path)
+
+
 def _iter_plugin_jsons(root: Path) -> Iterator[Path]:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
             d
             for d in dirnames
-            if d not in _SKIP_DIRS and not os.path.isjunction(os.path.join(dirpath, d))
+            if d not in _SKIP_DIRS and not _is_junction(os.path.join(dirpath, d))
         ]
         if "plugin.json" in filenames:
             yield Path(dirpath) / "plugin.json"

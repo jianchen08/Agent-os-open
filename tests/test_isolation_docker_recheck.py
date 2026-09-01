@@ -29,7 +29,19 @@ import pytest
 
 import tests._isolation_path  # noqa: F401  # 注入 isolation 插件目录到 sys.path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"))
+# 平铺共享裸名自防御：先导的测试（security_check 等 add_plugin_dir 系）会把自家
+# 目录钉在 sys.path[0] 并缓存 plugin 模块；conftest 收集期逐出按残序重解析仍可能
+# 劫持（实测 security_check/plugin.py 抢走 `plugin` 名）。与
+# _pipeline_plugin_path.add_plugin_dir 同款：本目录置顶 + 裸名逐出后再 import。
+_ISOLATION_GUARD_DIR = str(
+    Path(__file__).resolve().parent.parent
+    / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard",
+)
+if _ISOLATION_GUARD_DIR in sys.path:
+    sys.path.remove(_ISOLATION_GUARD_DIR)
+sys.path.insert(0, _ISOLATION_GUARD_DIR)
+for _bare in ("plugin", "tool", "models", "service"):
+    sys.modules.pop(_bare, None)
 
 from isolation_types import IsolationLevel
 from pipeline.plugin import PluginContext

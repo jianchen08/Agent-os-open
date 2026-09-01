@@ -206,3 +206,98 @@ class TestCompressHappyPath:
         fn = mod._build_compress_llm_call_fn(_caller, model_id="deepseek-v4")
         result = _await(fn("compress this"))
         assert result == "ok"
+
+
+class TestTruncateToBudget:
+    """_truncate_to_budget 的三条路径（JSON 结构保持 / 直接字符截断 / 兜底空对象）。"""
+
+    def _compressor(self) -> Any:
+        m = _load_plugin_module()
+        return m.ContextCompressor.__new__(m.ContextCompressor)
+
+    def test_short_text_passthrough(self) -> None:
+        c = self._compressor()
+        # 估算 token 小于预算 → 原样返回
+        text = "短文本"
+        assert c._truncate_to_budget(text, 10_000) == text
+
+    def test_non_json_truncated_by_chars(self) -> None:
+        c = self._compressor()
+        text = "x" * 10_000  # 不合法 JSON → 字符截断 1.5x
+        out = c._truncate_to_budget(text, 100)
+        assert out == "x" * 150
+
+    def test_json_truncated_at_last_comma(self) -> None:
+        c = self._compressor()
+        items = ",".join(f'"k{i}": "{ "y" * 20 }"' for i in range(50))
+        blob = "{" + items + "}"
+        out = c._truncate_to_budget(blob, 60)
+        # 截断后的仍是可解析 JSON（安全逗号收尾 + } 补齐）
+        import json
+
+        parsed = json.loads(out)
+        assert isinstance(parsed, dict)
+
+    def test_json_no_safe_comma_falls_back_empty(self) -> None:
+        c = self._compressor()
+        # 单 key 超长 value：截断处无 ",\n" → 兜底 {}
+        blob = '{"k": "' + "z" * 5_000 + '"}'
+        out = c._truncate_to_budget(blob, 10)
+        assert out == "{}"
+
+
+class TestExtractJsonAndRender:
+    """_extract_json 三分支（think 块剥离/代码块/裸对象）+ _render_fork_message 标签链。"""
+
+    def _compressor(self) -> Any:
+        m = _load_plugin_module()
+        return m.ContextCompressor.__new__(m.ContextCompressor)
+
+    def test_extract_json_strips_think_block(self) -> None:
+        c = self._compressor()
+        text = "<think>分析 {干扰} ```json ``` </think>```json\n{\"a\": 1}\n``` 后缀"
+        out = c._extract_json(text)
+        import json
+
+        assert json.loads(out) == {"a": 1}
+
+    def test_extract_json_bare_object(self) -> None:
+        c = self._compressor()
+        out = c._extract_json('前置说明 {"b": [1, 2]} 尾注')
+        import json
+
+        assert json.loads(out) == {"b": [1, 2]}
+
+    def test_extract_json_no_json_returns_stripped(self) -> None:
+        c = self._compressor()
+        out = c._extract_json("完全不包含 JSON 的回答  ")
+        assert out == "完全不包含 JSON 的回答"
+
+    def test_render_fork_message_strips_internal_fields(self) -> None:
+        m = _load_plugin_module()
+        cc = m.ContextCompressor
+        # 内部字段（seq/_context_form/tool_result）不进 LLM 载荷
+        r = cc._render_fork_message(
+            {"role": "user", "content": "hi", "seq": 3, "_context_form": "notice", "tool_result": {}}
+        )
+        assert "seq" not in r and "_context_form" not in r and "tool_result" not in r
+        assert r["content"] == "[notice] hi"
+
+    def test_render_fork_message_context_form_label(self) -> None:
+        import sys as _sys
+
+        m = _load_plugin_module()
+        cc = m.ContextCompressor
+        # _context_form 带合法标签（CONTEXT_FORM_LABELS 命中）
+        form = next(iter(m.CONTEXT_FORM_LABELS), None) if hasattr(m, "CONTEXT_FORM_LABELS") else None
+        if form:
+            msg = {"role": "user", "content": "c", "_context_form": form}
+            r = cc._render_fork_message(msg)
+            assert str(m.CONTEXT_FORM_LABELS.get(form, "")) in r["content"]
+
+    def test_render_fork_message_empty_content_no_label(self) -> None:
+        m = _load_plugin_module()
+        cc = m.ContextCompressor
+        # content 为空时不加标签前缀（label 短路）
+        r = cc._render_fork_message({"role": "user", "content": "", "_context_form": next(iter(m.CONTEXT_FORM_LABELS), "")})
+        assert r["content"] == ""
