@@ -48,7 +48,10 @@ def load_line_hits(coverage_file: Path) -> dict[str, dict[int, int]]:
         fn = cls.get("filename", "").replace("\\", "/")
         hits: dict[int, int] = {}
         for line in cls.iter("line"):
-            hits[int(line.get("number"))] = int(line.get("hits", 0))
+            number = line.get("number")
+            if number is None:
+                continue
+            hits[int(number)] = int(line.get("hits", 0))
         merged = out.setdefault(fn, {})
         for num, h in hits.items():
             merged[num] = max(merged.get(num, 0), h)
