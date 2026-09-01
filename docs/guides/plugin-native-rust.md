@@ -19,7 +19,7 @@ edition = "2021"
 crate-type = ["cdylib"]        # 产出 .dll/.so/.dylib 供 NativePluginLoader 加载
 
 [dependencies]
-agentos-native-sdk = { path = "../../../../../../kernel/crates/native-sdk" }
+agentos-native-sdk = { path = "../../../../../kernel/crates/native-sdk" }
 serde_json = "1"
 
 [profile.release]

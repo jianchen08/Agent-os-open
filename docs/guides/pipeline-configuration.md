@@ -61,7 +61,7 @@ next:
 
 给某个管道插件传参的两条通道（走 config，不进 state、不落 trace）：
 - 管道 yaml 的 step `context:`（如 `temperature: 0.7`）。
-- agent yaml 的 `plugins.enabled.<plugin_id>`（如 `task_reminder: {max_reminders: 3, cooldown_seconds: 180}`）。
+- agent yaml 的 `plugins.enabled.<plugin_id>`（如 `task_reminder: {max_reminders: 3, evaluation_mode: true}`）。
 
 插件侧经 `PluginContext.config` / `plugin.get_config()` 读取（native 侧 `ectx.ctx.config_value()`）。
 

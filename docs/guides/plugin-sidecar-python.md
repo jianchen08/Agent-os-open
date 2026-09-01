@@ -155,7 +155,7 @@ manifest 关键差异：`plugin_type: "pipeline"` + `pipeline_role` + **`invoke_
 - `IInputPlugin` / `IOutputPlugin`：`async def execute(self, ctx: PluginContext) -> PluginResult | OutputResult`
 - `ICorePlugin`：`async def execute(self, ctx: PluginContext) -> dict`（返回值直接合并 state）
 - `PluginContext`：`state` / `config` / `get_service(name)`
-- `PluginResult`：`{state_updates, route_signal, skip_remaining, error}`；OutputResult 同构（`route_signal` 为遗留字段，执行链不消费——出口裁决走管道路由 DSL）
+- `PluginResult`：`{state_updates, skip_remaining, error}`；`OutputResult` 是其无新增字段的子类（仅类型语义区分）。出口裁决不走返回值——插件经 `state_updates` 写入路由 DSL 条件依赖的字段即可
 
 server.py 适配层骨架（`plugins/shared/pipeline/input/context_build/server.py`）：
 
@@ -176,9 +176,7 @@ async def execute(state: dict, config: dict | None = None) -> dict:
     if isinstance(result, dict):
         return result                       # Core 插件
     data = {"state_updates": result.state_updates}
-    if result.route_signal:
-        data["route_signal"] = {"route_type": ..., "target": ..., "reason": ...}
-    if result.skip_remaining:
+    if getattr(result, "skip_remaining", False):
         data["skip_remaining"] = True
     return data
 

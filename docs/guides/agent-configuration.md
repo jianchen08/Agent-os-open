@@ -7,7 +7,7 @@
 ```
 config/agents/
 ├── main/agentos.yaml                 # L1 主 Agent（唯一 main）
-├── orchestrator/*.yaml               # L2 编排（7 个）
+├── orchestrator/*.yaml               # L2 编排（6 个）
 ├── executor/                         # L3 执行（general_agent + code/ environment/ generation/ 分组）
 ├── system/*.yaml                     # evaluator / function_verifier / review
 └── task/container_verification_agent.yaml
@@ -20,11 +20,11 @@ config/agents/
 | 分组 | 字段 |
 |---|---|
 | 身份 | `config_id` `name` `display_name` `description` `agent_type`（main/orchestrator/executor/system）`category` `level`（L1/L2/L3）`model_tier` `model_name`（executor 可指定如 `deepseek-v4-flash`）`version` `is_active` `status` `tags` `metadata` |
-| 提示词 | `system_prompt`（支持 `{{path:...}}` 文件注入、`{{project_root}}` 占位）、`static_vars.items`（静态注入，`type: reference` 或 `{{path:...}}`）、`dynamic_vars.items`（每次执行求值，如 `{{timestamp:...}}`）、`prompt_structure`（include_* 开关 + `layer_order` 提示词分层顺序） |
+| 提示词 | `system_prompt`（支持 `{{path:...}}` 文件注入、`{{project_root}}` 占位）、`static_vars.items`（静态注入，`type: reference` 或 `{{path:...}}`）、`dynamic_vars.items`（每次执行求值，如 `{{timestamp:...}}`；分层组装顺序由 prompt_build 插件固定，非 agent yaml 字段） |
 | 工具面 | **`tool_ids`**（LLM 可见工具白名单，核心字段） |
 | 行为约束 | `hard_constraints[]`（硬约束，进提示词）`soft_constraints[]` |
 | 运行限额 | `max_iterations`（-1 不限，post 链 stop_check 强制兜底默认 20）`max_reminders` `timeout_seconds` |
-| 插件参数 | `plugins.enabled.<plugin_id>`（per-plugin inputs，如 `task_reminder: {max_reminders: 3, cooldown_seconds: 180}`）`plugins.disabled[]` |
+| 插件参数 | `plugins.enabled.<plugin_id>`（per-plugin inputs，如 `task_reminder: {max_reminders: 3, evaluation_mode: true}`）`plugins.disabled[]` |
 | IO 契约 | `input_schema`（用户消息结构）`output_schema` |
 | executor 特有 | `deliverables[]`（产出物声明：`output_path: '{{workspace}}/reports/{{task_id}}_report.md'` 等）`recommended_metrics`（默认评估指标如 `file_check`） |
 | orchestrator 特有 | `team`（固定外包的 L3 列表） |
