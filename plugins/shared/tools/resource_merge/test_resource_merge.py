@@ -965,4 +965,3 @@ class TestGitHelpersFailureBranches2:
 
         monkeypatch.setattr(helpers, "run_git", _fail)
         result = _run(helpers.git_merge_abort({}, repo))
-

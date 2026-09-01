@@ -9,7 +9,6 @@ import asyncio
 import json
 import os
 import sys
-import time
 import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests", "e2e_02"))
