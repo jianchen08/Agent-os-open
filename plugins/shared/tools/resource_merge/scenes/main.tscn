@@ -1,0 +1,21 @@
+[gd_scene load_steps=4 format="3"]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="PackedScene" path="res://scenes/player.tscn" id="2_player"]
+[ext_resource type="PackedScene" path="res://scenes/obstacle_spawner.tscn" id="3_spawner"]
+[ext_resource type="PackedScene" path="res://scenes/hud.tscn" id="4_hud"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_main")
+
+[node name="Background" type="ColorRect" parent="."]
+offset_right = 480.0
+offset_bottom = 720.0
+color = Color(0.08, 0.08, 0.12, 1)
+
+[node name="Player" parent="." instance=ExtResource("2_player")]
+position = Vector2(240, 620)
+
+[node name="ObstacleSpawner" parent="." instance=ExtResource("3_spawner")]
+
+[node name="HUD" parent="." instance=ExtResource("4_hud")]

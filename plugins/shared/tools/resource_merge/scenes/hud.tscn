@@ -1,0 +1,35 @@
+[gd_scene load_steps=2 format="3"]
+
+[ext_resource type="Script" path="res://scripts/hud.gd" id="1_hud"]
+
+[node name="HUD" type="CanvasLayer"]
+script = ExtResource("1_hud")
+
+[node name="TimeLabel" type="Label" parent="."]
+offset_left = 360.0
+offset_top = 12.0
+offset_right = 472.0
+offset_bottom = 44.0
+text = "0.0s"
+horizontal_alignment = 2
+vertical_alignment = 1
+
+[node name="GameOverPanel" type="ColorRect" parent="."]
+visible = false
+offset_right = 480.0
+offset_bottom = 720.0
+color = Color(0, 0, 0, 0.7)
+
+[node name="VBox" type="VBoxContainer" parent="GameOverPanel"]
+offset_left = 90.0
+offset_top = 280.0
+offset_right = 390.0
+offset_bottom = 440.0
+
+[node name="FinalLabel" type="Label" parent="GameOverPanel/VBox"]
+text = "Game Over"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="RetryButton" type="Button" parent="GameOverPanel/VBox"]
+text = "Retry"
