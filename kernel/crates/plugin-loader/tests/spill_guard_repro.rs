@@ -32,6 +32,14 @@ static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[test]
 fn tool_round_tokio_blocking_no_segfault() {
+    // Windows-only SEGV 复现/回归：native cdylib 产物（.dll）不入库（.gitignore
+    // *.dll），CI runner 无产物也无 D:\crashdumps_kernel 大状态文件——该测试
+    // 依赖取证期本机资产，非 Windows 环境直接跳过（与 rust-coverage 注释的
+    // STATUS_ACCESS_VIOLATION 容错同族）。
+    if !cfg!(windows) {
+        eprintln!("skip: Windows-only native cdylib SEGV repro（CI 无 dll 产物/取证资产）");
+        return;
+    }
     let base = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../plugins/shared");
     let tc =
         std::path::Path::new(base).join("pipeline/core/tool_core/pipeline_tool_core_native.dll");

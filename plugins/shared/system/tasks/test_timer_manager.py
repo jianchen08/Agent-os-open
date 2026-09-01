@@ -488,8 +488,12 @@ class TestRestoreFromStorage:
     async def test_restore_expired_triggers_callback(self, mgr: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         from task_types import TaskStatus
 
-        # 剩余时间 <= 0：updated_at 距今超过 task_max_duration
-        old = datetime.now(UTC) - timedelta(seconds=7200)
+        # 剩余时间 <= 0：updated_at 距今超过 task_max_duration(3600)。
+        # 取 5400s：>3600 保证走 expired 分支，且留 1800s 余量远离
+        # restore_lookback(7200) 下界——7200 恰在 lookback 边界，构造时间到
+        # restore 执行之间几毫秒的挂钟差即被判"超出 lookback"跳过
+        # （CI 慢机 100% 复现的边界竞态）。
+        old = datetime.now(UTC) - timedelta(seconds=5400)
         tasks = [self._make_task("t-expired", TaskStatus.RUNNING, old.isoformat())]
         fired: list[str] = []
 

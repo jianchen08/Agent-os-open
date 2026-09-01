@@ -506,8 +506,14 @@ class TestInjectTriggerMessage:
             mgr._inject_trigger_message(cfg)  # 不抛异常
             mgr.stop_check_loop()
 
-    def test_check_loop_sync_drives_injector(self) -> None:
+    def test_check_loop_sync_drives_injector(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """后台检查循环：到期触发器经注入器投递消息。"""
+        # _check_loop_sync 的 sleep 引用的是模块级常量（实例属性不生效）——
+        # patch 模块级值才能加速轮询；否则每轮 sleep 5s 与 wait(5) 同长，
+        # Linux CI 慢机上首轮检查未跑完即超时（临界竞态）。
+        import triggers.manager as _tm_mod
+
+        monkeypatch.setattr(_tm_mod, "_TRIGGER_CHECK_INTERVAL", 0.01)
         fired = threading.Event()
         received: list[str] = []
 
@@ -527,7 +533,6 @@ class TestInjectTriggerMessage:
                 metadata={"register_time": past},
             )
             mgr.register(cfg)
-            mgr._TRIGGER_CHECK_INTERVAL = 0.01  # type: ignore[misc]
             t = threading.Thread(target=mgr._check_loop_sync, daemon=True)
             t.start()
             assert fired.wait(timeout=5), "检查循环应在超时内投递消息"
