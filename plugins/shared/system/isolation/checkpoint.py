@@ -84,26 +84,43 @@ class CheckpointManager:
     def _validate_relative_path(self, path: str) -> None:
         """F-ISO-1: 相对路径校验——拒绝绝对路径与含 ``..`` 段，抛 ValueError。
 
-        注意 ``Path.is_absolute`` 在 Windows 对 ``/etc/passwd`` 这类 Unix 绝对
-        路径返回 False（无盘符），故额外用前导分隔符判断堵住跨平台漏洞。
+        双平台语义补位：``Path.is_absolute`` 依赖当前 OS 的解析语义——
+        Windows 对 ``/etc/passwd``（无盘符 Unix 绝对路径）返回 False，而
+        Linux 对 ``C:\\windows\\...``（无前导分隔符）返回 True 但 parts 不同——
+        均可能漏判。故按「主机语义 + 字面量规则」双向判定：
+        - 前导 ``/``/``\\``：任一平台的 Unix 绝对路径；
+        - 盘符前缀（``X:`` 开头）：Windows 绝对路径字面量（在 Linux 上
+          ``PureWindowsPath.is_absolute`` 语义才为 True）；
+        - ``..`` 段：用 PurePosixPath 切（Linux 侧 ``Path`` 对 ``C:\\windows``
+          会把反斜杠当文件名字符，parts 检测须双语义兜底）。
         """
         if not path:
             return
+        if path.lstrip().startswith(("/", "\\")):
+            raise ValueError(f"非法路径（绝对路径或含穿越段不允许）: {path!r}")
         p = Path(path)
-        if p.is_absolute() or path.lstrip().startswith(("/", "\\")) or ".." in p.parts:
+        if p.is_absolute() or ".." in p.parts:
+            raise ValueError(f"非法路径（绝对路径或含穿越段不允许）: {path!r}")
+        # Linux 上 Windows 盘符路径（C:\...）不构成 is_absolute——按字面
+        # 盘符规则补判（跨平台字面量：盘符冒号 + 分隔符出现即视为 Windows 路径）。
+        if len(path) >= 2 and path[0].isalpha() and path[1] == ":":
             raise ValueError(f"非法路径（绝对路径或含穿越段不允许）: {path!r}")
 
     @staticmethod
     def _is_safe_relative_path(path: str) -> bool:
-        """F-ISO-1: 相对路径安全检查（返回 bool，供 restore 的 manifest 校验）。"""
+        """F-ISO-1: 相对路径安全检查（返回 bool，供 restore 的 manifest 校验）。
+
+        与 _validate_relative_path 同款双平台字面量规则（Linux 上
+        ``Path('C:\\\\windows').is_absolute()`` 为 False 的漏判由盘符前缀
+        检查兜底）。
+        """
         if not path:
             return True
         p = Path(path)
-        return (
-            not p.is_absolute()
-            and not path.lstrip().startswith(("/", "\\"))
-            and ".." not in p.parts
-        )
+        if p.is_absolute() or path.lstrip().startswith(("/", "\\")) or ".." in p.parts:
+            return False
+        # Windows 盘符字面量（Linux 侧解析为普通目录名）
+        return not (len(path) >= 2 and path[1] == ":" and path[0].isalpha())
 
     @staticmethod
     def _rel_or_none(file_path: Path, base: Path) -> str | None:
