@@ -83,7 +83,7 @@
 
 ---
 
-### 0.2.0 🎯 核心地基层
+### 0.2.0 ✅ 已发布（2026-08-01）—— 核心地基层
 
 **主题**：率先把核心能力做透——都是后续版本的地基。本版本以**架构设计与调试**为主，少加新功能。
 
@@ -135,7 +135,7 @@
 
 | ADR 要点 | 0.2 决策 | 替代 / 变更 |
 |----------|----------|-------------|
-| 引擎极简主义（①） | 引擎仅为**调度器 + 状态账本**，不含业务逻辑；路由表仲裁**下沉到 YAML 配置**（`route_check` 条件分支 step，`condition`/`then_steps`/`else_steps`） | 移除引擎内路由表仲裁逻辑 |
+| 引擎极简主义（①） | 引擎仅为**调度器 + 状态账本**，不含业务逻辑；路由表仲裁**下沉到 YAML 配置**（初版设计为 `route_check` 条件分支 step；落地形态为统一路由 DSL `next:`/`while:`，见 ARCHITECTURE「管道引擎」） | 移除引擎内路由表仲裁逻辑 |
 | 单一真相源 + Append-Only（③） | 所有状态变更以**追加 Patch** 记录，历史永不修改、永不删除 | redb event log → SQLite `traces` 表 |
 | SQLite 四表（④） | `runs` / `messages` / `traces` / `blobs` 四表为唯一核心存储（向量库不再承担核心存储） | redb + YAML state 文件 → SQLite 四表 |
 | 多分支回滚（⑤） | 引入 `branch_id + seq_in_branch`；回滚 = **创建新分支 + 正向重放 Patch** 恢复状态，不删除、不逆操作、可审计 | checkpoint 标记「已回退」 → 新分支正向重放 |
@@ -245,6 +245,8 @@
 | **SUMMARY（摘要注入）** | ⚠️ stub（`_retrieve_summary` 直接返回检索结果，无摘要生成） | 实现：接 embedding_service 做真正摘要生成 |
 
 #### 七、路由方式收敛
+
+> **落地状态（2026-08）**：本节为 0.2 设计期的收敛方向，实际落地更进一步——delegate/fork 已移除，路由信号整体退役：引擎只解释路由 DSL（`next:` / `when` / `then` / `set`），manifest 的 `route_signals` 仅为历史声明位、执行链零消费。现状见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)「管道引擎」。
 
 把路由信号与管道编排能力从「半成品」收敛为「干净可用」。现状：next_llm / next_tool / end / wait 已上线并闭环；delegate、decision 有插件引用但引擎不消费；管道/message 级 fork 完全缺失。
 
@@ -599,7 +601,7 @@
 | `PLR0912` | 函数分支过多（>12） | 需拆分函数 | 提取分支为独立方法 |
 | `PLR0915` | 函数语句过多（>50） | 需拆分函数 | 按职责拆分 |
 
-**mypy 类型注解**：基线锁现值 337（`.github/mypy-baseline.txt`，只减不增；`call-arg`/`union-attr`/`arg-type` 为主，多为 Optional 链路与字符串注解引用，非崩溃级 Bug）。CI 的 typecheck job 已设 `continue-on-error`，报告可见但不阻塞。完善类型注解是长期工作，欢迎认领：补全函数签名注解 → 收窄 Optional → 移除 `continue-on-error` 恢复硬门禁。
+**mypy 类型注解**：基线锁现值 0（2026-08-23 CI 治理批清零；`.github/mypy-baseline.txt` 只减不增）。CI 经 `run_gates.py` 作硬门禁。维持基线不回增：新增代码带类型注解，修老错误时随之下调基线。
 
 **认领方式**：搜索对应规则码（如 `# noqa: PLR0912`），逐个函数重构，移除 noqa 注释后确保 CI 通过。
 
@@ -704,15 +706,15 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 ### 工程基础设施补全（测试 / CI / 质量门禁）
 
-**触发条件**：0.2 迁移收尾后，作为"用户可信度"的硬基础。当前 mypy 仍有 337 个类型检查错误（基线锁，`.github/mypy-baseline.txt` 只减不增；ROADMAP 已知技术债），测试覆盖率无硬门禁。
+**触发条件**：0.2 迁移收尾后，作为"用户可信度"的硬基础。mypy 基线已清零（2026-08-23，`.github/mypy-baseline.txt` 现值 0、只减不增），覆盖率棘轮门禁已建成（Python 64.0 / Rust 86.0 基线；2026-09-01 用户裁定整体基线暂时挂起观察，`run_gates.py --skip`）。剩余工作是持续收紧与恢复硬闸门。
 
 **已落地（2026-08-15，机械门禁部分）**：统一机械门禁入口 `scripts/run_gates.py`（21 个门禁单一事实源，CI 跑穷尽集 + 本地 fast 廉价检查，每个承诺都有非零退出命令）+ 覆盖率豁免重型套件 `scripts/coverage_exempt.py`（94 插件子进程冒烟矩阵免插桩、与插桩 gate 并行，实测对父进程覆盖率零贡献；覆盖率地板 44% 只升不降 + 失败数基线锁只减不增自动守护名单与车道）+ electron 桌面壳编译门禁（新增 CI job）+ 修复一批门禁接入后机械暴露的既有破损（python-lint mypy 路径 bug、SDK 5 处类型错误、10 处非法追溯标记、47 个新测试文件未标记、kernel fmt 漂移、root 死 test 脚本）。详见 `docs/working/机械门禁统一入口与覆盖率豁免.md`。
 
 **现状对比**：DSH 有完整工程基础设施——oxlint + knip（未用依赖检测）+ jscpd（重复码检测）+ publint + lefthook + Vitest e2e/snapshot test，且 `test:coverage` 是 CI 硬门禁（per-file 100%）。本项目在测试/CI 门禁上明显弱于 DSH，这直接影响用户/开发者对项目的信任度。
 
 **落地方向**：
-1. mypy 类型错误清零（337 → 0，基线锁只减不增），CI typecheck job 取消 `continue-on-error` 恢复硬门禁
-2. 测试覆盖率门禁收紧（底线 44%（run_gates.py `--fail-under=44`），路线 44→50→80%，对标 DSH 的 per-file 100%；Rust line% 基线锁只升不降、前端 vitest thresholds 已设）
+1. mypy 类型错误已清零（2026-08-23，基线锁现值 0，CI 硬门禁）；维持基线只减不增不回退
+2. 覆盖率门禁：整体基线（Python 64.0 / Rust 86.0）已建成，2026-09-01 起暂时挂起闸门（`--skip`，插桩度量照跑）；恢复后沿棘轮向 80% 收紧，对标 DSH 的 per-file 100%；前端 vitest thresholds 已设
 3. 引入 knip（未用依赖/导出检测）、jscpd（重复码）等质量工具
 4. e2e/snapshot test 基础设施（对标 DSH 的 vitest e2e + keyless snapshot replay）
 
@@ -801,7 +803,7 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 ```
 ▓▓▓ 0.1.0 ✅ (已发布)
-░░░ 0.2.0 核心地基层（管道引擎执行模型 + AdrEngine 重设计 + 插件化 + Schema + 审批 + 记忆补全 + 路由收敛 + 多租户契约预留）
+▓▓▓ 0.2.0 ✅ (已发布) 核心地基层（管道引擎执行模型 + AdrEngine 重设计 + 插件化 + Schema + 审批 + 记忆补全 + 路由收敛 + 多租户契约预留）
 ░░░ 0.3.0 (跨平台 + 打包交付)
 ░░░ 0.4.0 (可用性：预置能力 + 用户向导 + 配置可视化 + 性能)
 ░░░ 0.5.0 (多用户与能力隔离：多租户完整实现)

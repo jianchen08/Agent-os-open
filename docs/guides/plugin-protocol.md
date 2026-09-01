@@ -13,7 +13,7 @@
 - [3. 插件类型分类](#3-插件类型分类)
 - [4. host_type：sidecar vs in-process](#4-hosttypesidecar-vs-in-process)
 - [5. 双插件根约定](#5-双插件根约定)
-- [6. config_refs：配置按需注入（P0-2）](#6-configrefs配置按需注入p0-2)
+- [6. config_files：配置显式映射注入](#6-config_files配置显式映射注入)
 - [7. ui_schema：前端 schema 驱动（P0-3）](#7-uischema前端-schema-驱动p0-3)
 - [8. 完整示例：从零开发一个新插件](#8-完整示例从零开发一个新插件)
 - [9. SDK 用法速查](#9-sdk-用法速查)
@@ -75,7 +75,7 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 | `pipeline_role` | enum | —* | 仅 `plugin_type=pipeline` 时必填：`input` / `core` / `output`。 |
 | `description` | string | — | 一句话描述（展示用）。 |
 | `requires_content` | int | — | 内容懒加载声明：需要预加载的最近消息条数。见 [§2.5](#25-requirescontent)。 |
-| `config_refs` | array | — | 配置按需注入声明（P0-2）。见 [§6](#6-configrefs配置按需注入p0-2)。 |
+| `config_files` | array | — | 配置文件显式映射（`{id, path, label}` 三要素）。见 [§6](#6-config_files配置显式映射注入)。 |
 | `ui_schema` | object | — | 前端 UI schema 声明（P0-3）。见 [§7](#7-uischema前端-schema-驱动p0-3)。 |
 | `mcp` | object | — | MCP 传输配置（`transport` / `endpoint` / `idle_timeout_secs` / `protocol_version` / `request_timeout_secs`）；接入**外部第三方 MCP 服务**也经它声明，见 [§2.6](#26-接入外部-mcp-服务)。 |
 
@@ -172,29 +172,34 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 
 ---
 
-## 6. config_refs：配置按需注入（P0-2）
+## 6. config_files：配置显式映射注入
 
-> 对应 ROADMAP P0-2：配置按需注入。
+> 对应 ROADMAP P0-2：配置按需注入（早期设计名 `config_refs`，已被本字段取代并从契约删除——残留 `config_refs` 会被 `deny_unknown_fields` 拒载）。
 
-**问题**：内核 `load_config` 会扫描 `config/` 下所有 YAML 合并为一个大 JSON。早期会把**全量配置**塞给每个插件——既浪费，也泄露无关配置。
+**问题**：插件需要读 `config/` 下的运行配置。内核不做全量投递——未声明 `config_files` 的插件收空配置。
 
-**解法**：manifest 用 `config_refs` 声明"我只关心哪些配置节"。内核据此过滤，只投递声明的节。
+**解法**：manifest 用 `config_files` 逐项声明"我要哪个配置文件"。每项三要素：
+
+- `id`：配置子项标识（插件内唯一，作为注入命名空间 key 与 API file_id）；
+- `path`：相对 `config/` 根的文件路径（如 `config/models/llm.yaml`）；
+- `label`：前端展示用的名称。
 
 ```json
 {
-  "config_refs": ["models"]
+  "config_files": [
+    { "id": "llm", "path": "config/models/llm.yaml", "label": "LLM 模型配置" }
+  ]
 }
 ```
 
-效果：握手时 `initialize` params 里的 `config` 只含 `models` 节，而非全量。
-
 **规则**：
 
-- `config_refs` 省略或为空 → 注入全量配置（向后兼容，老插件无需改动）。
-- 数组元素是 `config/` 下的 YAML 文件名（不含扩展名），如 `models` / `memory_storage` / `channels`。
-- 配置内容仍可在运行时通过 `on_config_change` 钩子接收热更新。
+- 未声明（或空数组）→ 插件收空配置：需要哪个文件就显式映射哪条（fail-closed）。
+- `path` 经内核安全校验：归一化后必须落在 `config/` 子树内。
+- 声明的文件参与 sidecar 配置注入，并经 `/api/v1/plugins/{id}/config/{file_id}` 读写，配置热更新走 mtime 缓存。
+- 追加 `"settings": false` = 注入专用：不出口到 `/api/v1/schema` 的 plugin_configs（该文件的 UI 由插件自声明的 settings 页/widget 承载，避免双入口）。
 
-**现状参考**：`llm_service`（`config_refs: ["models"]`）、`memory_service`、`tasks_service` 已采用。
+**现状参考**：`llm_service`（`config/models/llm.yaml` + `config/models/embedding.yaml` 两条映射）。
 
 ---
 
@@ -377,7 +382,9 @@ Discovered N plugin manifests
 
 ```json
 {
-  "config_refs": ["my_echo_config"]
+  "config_files": [
+    { "id": "echo", "path": "config/tools/echo.yaml", "label": "Echo 配置" }
+  ]
 }
 ```
 
@@ -488,7 +495,7 @@ if __name__ == "__main__":
 排障对照表见 [troubleshooting.md](troubleshooting.md)。协议侧两条高频问题：
 
 - **工具注册了但 LLM 不调用**：`capabilities.tools[].name` 与 server.py 注册名完全一致（含大小写）；`description` 写清用途（LLM 据此选择）；`input_schema` 越准成功率越高。另见三层可见性过滤（troubleshooting 首条）。
-- **`config_refs` 配置注入没生效**：节名须与 `config/` 下 YAML 文件名一致（不含扩展名）；省略/留空 = 注入全量配置。
+- **`config_files` 配置注入没生效**：`path` 须相对 `config/` 根且落在 `config/` 子树内；未声明（或空）= 收空配置，需要哪个文件就显式映射哪条。
 
 ---
 

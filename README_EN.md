@@ -50,10 +50,10 @@
 
 ### 📊 Project Scale
 
-- **Rust kernel**: ~81K lines (`kernel/`, ~18K of which are Rust tests)
-- **Python plugins**: ~60K lines (`plugins/`, 110 `plugin.json` manifests)
-- **Frontend code**: ~45K lines (`frontend/src/`)
-- **Python tests**: ~54K lines (`tests/` + in-plugin tests)
+- **Rust kernel**: ~95K lines (`kernel/`, ~20K of which are Rust tests)
+- **Python plugins**: ~166K lines (`plugins/`, 97 `plugin.json` manifests)
+- **Frontend code**: ~143K lines (`frontend/src/`)
+- **Python tests**: ~124K lines (`tests/` + in-plugin tests)
 - **Tool plugins**: 26 (plus zero-code MCP external tool integration)
 - **Client**: Web frontend (talking straight to the kernel)
 
@@ -113,7 +113,7 @@ Almost every behavior is customizable via YAML: agent identity, prompts, tool wh
 Unified contract (`input_schema` + `output_schema` + `render` intent): the kernel validates results against `output_schema` (fail-closed), the frontend renders result cards by `render`, and `tool_ids` whitelists precisely control the LLM-visible surface. 26 built-in tool plugins (files, shell, code search, browser, network, memory, media generation, IDE integration), plus zero-code integration of any third-party MCP service.
 
 ### 5. Mandatory Evaluation System — Hard Constraint on Task Quality
-Task submission must include acceptance criteria (evaluation metrics); after pipeline exit, a mandatory gate transitions the task into evaluation and reviews it against the metrics. Only when all metrics pass is the task marked complete; exhausted retries mean failure. Even if the Agent doesn't actively evaluate, the system forces a re-run — quality is never skipped.
+Task submission must include acceptance criteria (evaluation metrics); after pipeline exit, a mandatory gate transitions the task into evaluation and reviews it against the metrics. Only when all metrics pass is the task marked complete; exhausted retries mean failure. Even if the Agent doesn't actively evaluate, the system forces the task into the evaluation gate (no completion without evaluation evidence) — quality is never skipped.
 
 ### 6. Approval Closed Loop — Quality Gate for Human-AI Collaboration
 Human approval (choice / conversation dual modes; the human-interaction tool blocks awaiting the user's response) + feedback injection + task rework, forming a "generate → approve → feedback → iterate" quality-gate loop.
@@ -148,12 +148,12 @@ Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via pr
 - [uv](https://docs.astral.sh/uv/) (per-plugin venv management; the launch script runs `uv sync` automatically on first run)
 - Rust stable (to build the kernel; install via `rustup`)
 - Node.js 18+ (for frontend build, Vite required)
-- Docker (WSL2 + docker-ce; frontend container + Redis container, backend runs on the host)
+- Docker (WSL2 + docker-ce; docker compose provides the Redis container on demand, kernel and frontend both run on the host)
 
 > **Architecture note**: 0.2 is a Rust kernel (`kernel/`) + Vite frontend talking straight to the
 > kernel: `start_web_02.*` builds and starts `agentos-kernel` (:9100, host process) and the Vite
-> dev server (:6390, proxying to the kernel); `docker compose` only provides the Redis container
-> on demand (docker/0.2/docker-compose.yml).
+> dev server (:6390, proxying to the kernel); `docker compose` provides the Redis container
+> on demand (the start script launches only the compose `redis` service, see docker/0.2/docker-compose.yml).
 
 ### Option 1: Windows One-Click (Recommended)
 
@@ -203,7 +203,7 @@ The defaults work out of the box. Adjust as needed for the cases below.
 
 **Workspace root**: task working files are stored under the path set by `workspace.root` in `config/isolation/isolation_config.yaml`. If your project lives elsewhere, or you prefer a different drive/partition, edit that file and set `root` to your actual path (absolute paths only, e.g. `/tmp/ai_workspaces` on Linux or `D:/workspaces` on Windows). In container isolation mode `root` **must** be absolute — a relative path breaks the Docker bind mount.
 
-**Multi-instance (running two versions side by side for comparison)**: the compose project is auto-isolated by **directory name** (different directories = different container/network/volume names, no conflict). You do **not** need to set `COMPOSE_PROJECT_NAME`. The only thing that clashes is the **host port** (frontend 6390 / kernel 9100 / Redis 6480).
+**Multi-instance (running two versions side by side for comparison)**: the compose project is auto-isolated by **directory name** (different directories = different container/network/volume names, no conflict). You do **not** need to set `COMPOSE_PROJECT_NAME`. The only thing that clashes is the **host port** (frontend 6390 / kernel 9100 / Redis 6690).
 
 Host ports are parameterized (with defaults), so a single instance needs zero config. To run a second instance, just give it different ports:
 
@@ -212,7 +212,7 @@ Host ports are parameterized (with defaults), so a single instance needs zero co
 
 :: Instance 2 (different ports), in the other directory's shell:
 set FRONTEND_HOST_PORT=5290
-set REDIS_HOST_PORT=6481
+set REDIS_HOST_PORT=6691
 set AGENTOS_KERNEL_PORT=9101
 set AGENTOS_FRONTEND_PORT=6391
 start_web_02.bat

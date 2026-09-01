@@ -97,7 +97,7 @@ Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自
                              │ MCP over stdio（sidecar）/ C-ABI（原生）
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                          插件（110 个 manifest）                   │
+│                          插件（97 个 manifest）                    │
 │  pipeline/{input,core,output}  管道步骤（Python 边车 + Rust cdylib）│
 │  tools/                        LLM 工具（26 个，含外部 MCP 接入）   │
 │  system/                       系统服务（LLM/记忆/审批/评估/通道…）  │
@@ -108,9 +108,11 @@ Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+> 注：图中列举为主干 crate；另有 `native-sdk`（Rust 原生插件 SDK）与 `integration-tests` 等支撑 crate。
+
 ### 关键路径
 
-**用户消息 → 前端 → 内核 chat 入口 → 管道引擎（init → main 循环体[prepare → core → post] → exit）→ 流式响应（block 协议八事件）→ 前端渲染**
+**用户消息 → 前端 → 内核 chat 入口 → 管道引擎（init → main 循环体[prepare → core → post] → exit）→ 流式响应（block 协议事件）→ 前端渲染**
 
 ---
 
@@ -196,8 +198,8 @@ plugins:
 ### 配置系统
 
 - **ConfigCenter 单一真相源**（内核 `config` crate）：优先级 remote > env > yaml > manifest > hardcode；mtime 缓存热更新；具体配置加载失败不阻断内核启动（panic 降级 warn + 空配置），管道级配置失败才阻塞。
-- **配置目录**（`config/`）：agents（Agent 定义）、pipelines（管道编排）、plugins（启用档案 `default_profile.yaml`）、models（LLM/向量模型）、isolation（工作空间/隔离）、evaluation（评估指标）、rules / skills / templates 等。
-- **按需注入**：插件经 manifest `config_files` / `config_refs` 声明要哪些配置节，握手时注入，未声明收空配置。
+- **配置目录**（`config/`）：agents（Agent 定义）、pipelines（管道编排）、plugins（启用档案 `default_profile.yaml`）、models（LLM/向量模型）、isolation（工作空间/隔离）、evaluation（评估指标）、storage.yaml（存储 driver）、rules / templates 等（可复用技能包在仓库根 `skills/`，不在 config/ 下）。
+- **显式映射注入**：插件经 manifest `config_files` 声明要哪些配置文件（`{id, path, label}`），握手时注入，未声明收空配置。
 
 ### 任务系统与评估闸门
 
@@ -237,7 +239,7 @@ plugins:
 - **主题双轨**：前端预设（`frontend/src/config/themes/presets/`，7 套）+ 插件主题（manifest `contributes.themes` CSS 变量包，可带 skin 皮肤），另有动态 JSON 主题与用户自定义。
 - **前端贡献通道**：`ui_schema`（页面/表单 schema 驱动）、`contributes`（主题/样式/页面）、`http_endpoints`（`/ext/{plugin_id}/**` 前端可达的 HTTP 面）。
 
-见 [guides/theme-development.md](guides/theme-development.md) 与 [guides/theme-development.md](guides/theme-development.md)。
+见 [guides/theme-development.md](guides/theme-development.md) 与 [guides/theme-customization.md](guides/theme-customization.md)。
 
 ---
 
@@ -322,7 +324,7 @@ plugins:
 
 - [plugin-protocol.md](guides/plugin-protocol.md) —— 插件协议权威文档
 - [guides/README.md](guides/README.md) —— 开发指南索引
-- [ROADMAP.md](../ROADMAP.md) —— 版本路线图与被否方案索引
+- [ROADMAP.md](../ROADMAP.md) —— 版本路线图（被否方案记录于各 ADR 的 Alternatives Considered 节）
 - [CONTRIBUTING.md](../CONTRIBUTING.md) —— 贡献流程
 - [decisions/](decisions/) —— ADR 决策记录（任何非平凡决策的背景/决策/被否方案/影响）
 

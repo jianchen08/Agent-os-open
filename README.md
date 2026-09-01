@@ -50,10 +50,10 @@
 
 ### 📊 项目规模
 
-- **Rust 内核**：约 8.1 万行（`kernel/`，其中约 1.8 万行为 Rust 测试）
-- **Python 插件**：约 6.0 万行（`plugins/`，110 份 `plugin.json` 清单）
-- **前端代码**：约 4.5 万行（`frontend/src/`）
-- **Python 测试**：约 5.4 万行（`tests/` + 插件目录就地测试）
+- **Rust 内核**：约 9.5 万行（`kernel/`，其中约 2.0 万行为 Rust 测试）
+- **Python 插件**：约 16.6 万行（`plugins/`，97 份 `plugin.json` 清单）
+- **前端代码**：约 14.3 万行（`frontend/src/`）
+- **Python 测试**：约 12.3 万行（`tests/` + 插件目录就地测试）
 - **工具插件**：26 个（另可零代码接入任意 MCP 外部工具）
 - **接入端**：Web 前端（直连内核）
 
@@ -113,7 +113,7 @@ Agent 配置（YAML）mtime 缓存热生效，改提示词/工具白名单无需
 统一契约（`input_schema` + `output_schema` + `render` 渲染意图）：内核按 `output_schema` fail-closed 校验结果，前端按 `render` 渲染结果卡片，`tool_ids` 白名单精确控制 LLM 可见面。内置 26 个工具插件（文件、Shell、代码搜索、浏览器、网络、记忆、媒体生成、IDE 集成），任意第三方 MCP 服务零代码接入。
 
 ### 5. 强制评估系统——任务质量的硬约束
-任务提交时必须同时提交评估指标（acceptance criteria），管道退出后强制门控转入评估、按指标审查；指标全过才标记完成，失败重试耗尽则失败。即使 Agent 不主动评估，系统也会强制重跑——质量不被跳过。
+任务提交时必须同时提交评估指标（acceptance criteria），管道退出后强制门控转入评估、按指标审查；指标全过才标记完成，失败重试耗尽则失败。即使 Agent 不主动评估，系统也会强制转入评估门控（无评估证据不落完成）——质量不被跳过。
 
 ### 6. 审批交互闭环——人机协同的质量闸
 人工审批（choice / conversation 双模式，human-interaction 工具阻塞等待用户响应）+ 反馈注入 + 任务打回重做，构成"生成→审批→反馈→迭代"的质量闸闭环。
@@ -148,11 +148,11 @@ Agent 配置（YAML）mtime 缓存热生效，改提示词/工具白名单无需
 - [uv](https://docs.astral.sh/uv/)（Python 插件依赖每目录 venv 管理；启动脚本首次运行自动 `uv sync`）
 - Rust stable（编译内核；`rustup` 安装）
 - Node.js 18+（前端构建，Vite 要求）
-- Docker（WSL2 + docker-ce；前端容器 + Redis 容器，后端运行在宿主机）
+- Docker（WSL2 + docker-ce；docker compose 按需提供 Redis 容器，内核与前端均运行在宿主机）
 
 > **架构说明**：0.2 为 Rust 内核（`kernel/`）+ Vite 前端直连内核架构：`start_web_02.*` 编译并启动
 > `agentos-kernel`（:9100，宿主机进程）与 Vite 前端 dev server（:6390，反代到内核）；
-> `docker compose` 仅按需提供 Redis 容器（docker/0.2/docker-compose.yml）。
+> `docker compose` 按需提供 Redis 容器（启动脚本仅拉起其中 redis 服务，见 docker/0.2/docker-compose.yml）。
 
 ### 方式一：Windows 一键启动（推荐）
 
@@ -202,7 +202,7 @@ chmod +x start_web_02.sh
 
 **工作空间根目录**：任务的工作文件默认存放在 `config/isolation/isolation_config.yaml` 中 `workspace.root` 指定的目录下。如果你的项目不在该路径，或希望放到其他盘符/分区，编辑该文件把 `root` 改为你的实际路径（支持绝对路径，如 Linux 的 `/tmp/ai_workspaces` 或 Windows 的 `D:/workspaces`）。注意：容器隔离模式下 `root` 必须是绝对路径，相对路径会导致 Docker bind mount 失败。
 
-**多实例运行（同时跑两个版本做对比测试）**：compose project 会自动按**所在目录名**隔离（不同目录 = 不同的容器名/网络/卷，互不冲突），无需手动设置 `COMPOSE_PROJECT_NAME`。唯一会冲突的是**宿主端口**（前端 6390 / 内核 9100 / Redis 6480）。
+**多实例运行（同时跑两个版本做对比测试）**：compose project 会自动按**所在目录名**隔离（不同目录 = 不同的容器名/网络/卷，互不冲突），无需手动设置 `COMPOSE_PROJECT_NAME`。唯一会冲突的是**宿主端口**（前端 6390 / 内核 9100 / Redis 6690）。
 
 宿主端口已参数化（带默认值），单实例零配置。需要同时运行第二份实例时，给它设置不同的端口即可：
 
@@ -211,7 +211,7 @@ chmod +x start_web_02.sh
 
 :: 实例二（不同端口）：在另一个目录的命令行里
 set FRONTEND_HOST_PORT=5290
-set REDIS_HOST_PORT=6481
+set REDIS_HOST_PORT=6691
 set AGENTOS_KERNEL_PORT=9101
 set AGENTOS_FRONTEND_PORT=6391
 start_web_02.bat

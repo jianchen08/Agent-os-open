@@ -534,7 +534,7 @@ class {PluginClass}(IOutputPlugin):
 
 #### 这是什么？
 
-plugin.json manifest 全字段规范（字段总表 / capabilities / requires_services / 外部 MCP 接入 / 双根发现 / config_refs / ui_schema）+ 从零开发 echo_tool 完整走查 + SDK 用法速查 + 调试 FAQ。命名规范与 State 命名空间约定的现行版本在 [guides/plugin-development.md §8](plugin-development.md#8-命名与-state-约定)。
+plugin.json manifest 全字段规范（字段总表 / capabilities / requires_services / 外部 MCP 接入 / 双根发现 / config_files / ui_schema）+ 从零开发 echo_tool 完整走查 + SDK 用法速查 + 调试 FAQ。命名规范与 State 命名空间约定的现行版本在 [guides/plugin-development.md §8](plugin-development.md#8-命名与-state-约定)。
 
 > **来源**：[来源: docs/guides/plugin-protocol.md]
 
