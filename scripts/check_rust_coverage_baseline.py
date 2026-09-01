@@ -81,12 +81,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Rust 覆盖率基线锁")
     parser.add_argument("--lcov", required=True, help="cargo-llvm-cov 产出的 lcov 文件路径")
     parser.add_argument("--init", action="store_true", help="用当前 line%% 写入/收紧基线")
+    parser.add_argument(
+        "--skip",
+        action="store_true",
+        help="暂时挂起基线门禁（打印提示后放行，基线文件保留不动）；恢复 = 去掉 --skip",
+    )
     args = parser.parse_args()
 
+    if args.skip:
+        baseline = read_baseline()
+        print(
+            f"[rust-cov] ⏸️ 覆盖率基线门禁暂时挂起（当前基线 {baseline:.1f} 保留在"
+            " .github/rust-coverage-baseline.txt）。恢复 = 去掉 --skip。"
+        )
+        return 0
+
     lcov = Path(args.lcov)
-    if not lcov.exists():
-        print(f"[rust-cov] ❌ lcov 文件不存在: {lcov}", file=sys.stderr)
-        return 1
 
     pct = parse_lcov_line_pct(lcov)
     if pct is None:

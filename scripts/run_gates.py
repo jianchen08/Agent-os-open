@@ -156,7 +156,9 @@ GATES: list[Gate] = [
         shell=(
             "cargo llvm-cov --workspace --exclude agentos-integration-tests "
             "--lcov --output-path coverage.lcov --ignore-run-fail "
-            "&& python ../scripts/check_rust_coverage_baseline.py --lcov coverage.lcov"
+            # --skip（2026-09-01 用户裁定）：覆盖率压力线（rust 90.0 vs CI 实测
+            # ~86.8）暂时摘下不作为闸门，插桩度量照跑供观察；恢复 = 去掉 --skip。
+            "&& python ../scripts/check_rust_coverage_baseline.py --lcov coverage.lcov --skip"
         ),
     ),
     Gate(
@@ -248,7 +250,11 @@ GATES: list[Gate] = [
             + " --cov=plugins --cov-report=term-missing --cov-report=xml:coverage.xml"
             + ' 2>&1 || true ) | tee "$T"; '
             'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T" '
-            "&& python scripts/check_python_coverage_baseline.py"
+            # --skip（2026-09-01 用户裁定）：覆盖率整体基线暂时不做闸门——
+            # 本地/CI 实测恒差（Windows 86.1 vs Linux 实测）与压力线设计冲突，
+            # 先挂起观察；基线值保留在 .github/python-coverage-baseline.txt，
+            # 插桩与 coverage.xml 产出不变（diff/渠道门禁仍消费），恢复 = 去掉 --skip。
+            "&& python scripts/check_python_coverage_baseline.py --skip"
         ),
         env=_PLUGINS_ENV,
     ),

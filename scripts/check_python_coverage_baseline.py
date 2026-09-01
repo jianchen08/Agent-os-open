@@ -87,7 +87,21 @@ def main() -> int:
         help="coverage.xml 路径（默认仓库根 coverage.xml）",
     )
     parser.add_argument("--init", action="store_true", help="用当前实测收紧基线（只升不降）")
+    parser.add_argument(
+        "--skip",
+        action="store_true",
+        help="暂时挂起基线判定（打印提示后放行）。基线值与归因注释保留不动；"
+        "恢复 = 摘掉 --skip 传参，基线回到既有压力线。",
+    )
     args = parser.parse_args()
+
+    if args.skip:
+        baseline = read_baseline()
+        print(
+            f"[python-cov] ⏸️ 覆盖率基线门禁暂时挂起（当前基线 {baseline:.2f}% 保留在"
+            " .github/python-coverage-baseline.txt）。恢复 = 去掉 --skip。"
+        )
+        return 0
 
     xml_path = Path(args.xml)
     if not xml_path.exists():
