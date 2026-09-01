@@ -580,8 +580,22 @@ jobs:
         run: npx playwright install --with-deps chromium
         working-directory: frontend
 
-      - name: Run gates (frontend-e2e-smoke)
-        run: python scripts/run_gates.py --filter frontend-e2e-smoke
+      # 直排 workflow steps（同 run_gates frontend-e2e-smoke 命令）：run_gates 的
+      # subprocess 一次性捕获会让挂死阶段零日志无从定位（2026-09-01 挂 80min+
+      # 实证），分步原生输出即可见挂点。build→preview→smoke 三段同序同参。
+      - name: Build frontend (vite build)
+        working-directory: frontend
+        run: npm run build
+
+      - name: Vite preview + playwright ci-smoke
+        working-directory: frontend
+        run: |
+          npm run preview -- --port 5188 --strictPort & PREVIEW_PID=$!
+          for i in $(seq 1 30); do curl -sf http://localhost:5188 >/dev/null && break; sleep 2; done
+          if ! curl -sf http://localhost:5188 >/dev/null; then
+            echo "preview 服务未就绪"; kill $PREVIEW_PID || true; exit 1
+          fi
+          npx playwright test e2e/specs/ci-smoke.spec.ts
 
   # ── Electron 主进程编译门禁 ─────────────────────────────────────────────
   # electron/ 桌面壳（main/preload/tray/window-info）tsc 编译门禁
