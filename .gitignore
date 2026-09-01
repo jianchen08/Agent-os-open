@@ -205,3 +205,11 @@ kernel/schema_tmp.json
 
 # e2e 产物 token 文件（已过期凭据物证，不入库）
 .e2e_token_*
+
+# ─── 根目录调试响应/进程转储（一次性排查产物，不入库）───
+/resp*.json
+/_procs*.json
+# playwright-MCP 会话产物（截图/状态 yml）
+.playwright-mcp/
+# 根目录 outputs/：探针脚本、调试截图、一次性诊断产物，不入库
+/outputs/
