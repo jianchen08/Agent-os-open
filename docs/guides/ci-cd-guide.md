@@ -64,80 +64,68 @@ pip install ruff mypy
 
 ### 2.1 流程图
 
+机械门禁的单一事实源是 `scripts/run_gates.py`（21 个门禁：CI 跑穷尽集，本地 `--mode fast` 跑廉价检查）；GitHub Actions 只是它的宿主之一。
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         触发条件                                        │
-│   push 到 main/develop 分支                                            │
-│   Pull Request 到 main/develop 分支                                    │
-│   workflow_dispatch（手动）/ schedule（定时跑全链路 LLM e2e）          │
+│  触发条件（.github/workflows/ci.yml）                                   │
+│   push / PR 到 main/develop 分支；workflow_dispatch 手动                 │
+│   concurrency: ci-${{ github.ref }}，同分支新提交自动取消旧流水线        │
 └─────────────────────────┬───────────────────────────────────────────────┘
-                          │
                           ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  阶段 1: Lint & Format（lint job）                                     │
-│  ┌──────────────────────┐    ┌───────────────────────────┐              │
-│  │ Ruff Lint            │───▶│ reports/ruff_results.json  │              │
-│  │ ruff check .         │    └───────────────────────────┘              │
-│  └──────────────────────┘                                               │
-│  ┌──────────────────────┐                                               │
-│  │ Ruff Format Check    │                                               │
-│  │ ruff format --check  │                                               │
-│  └──────────────────────┘                                               │
-│  产出物: lint-results artifact                                          │
-└─────────────────────────┬───────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  阶段 2: Type Check（typecheck job）                                   │
-│  ┌──────────────────────┐                                               │
-│  │ mypy（run_gates 车道）│                                               │
-│  └──────────────────────┘                                               │
-└─────────────────────────┬───────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  阶段 3: Tests（test job，依赖 lint 通过）                             │
-│  ┌──────────────────────────────────────────────────────┐               │
-│  │ pytest <显式指定子目录，详见 3.3 节>                │               │
-│  │   ├── conftest.py 初始化统一日志系统                  │               │
-│  │   ├── 每个 test 自动收集结果到 ReportGenerator       │               │
-│  │   ├── 失败 test 触发 BugLocator 定位                 │               │
-│  │   └── 会话结束生成 JSON + HTML 报告                   │               │
-│  └──────────────────────────────────────────────────────┘               │
-│  环境变量: LOG_LEVEL=WARNING, LOG_OUTPUT=console                        │
-│  产出物:                                                                │
-│    - reports/test_report.json（结构化 JSON）                            │
-│    - reports/test_report.html（可视化 HTML）                            │
-└─────────────────────────┬───────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  阶段 4: CI Summary（summary job）                                     │
-│  ┌──────────────────────────────────────────────────────┐               │
-│  │ 下载所有 artifact                                    │               │
-│  │ 汇总 Lint / TypeCheck / Test 结果                    │               │
-│  │ 解析 test_report.json 中的 Bug 定位信息              │               │
-│  │ 输出最终摘要到 GitHub Actions 日志                    │               │
-│  └──────────────────────────────────────────────────────┘               │
+│  Rust 族（cargo + sccache）                                             │
+│   rust-lint（fmt + clippy） / rust-build / rust-test                    │
+│   rust-coverage（lcov + 基线检查） / rust-deny（依赖许可与漏洞门禁）     │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Python 族（uv.lock 冻结安装）                                          │
+│   python-lint（ruff + run_gates sdk-lint/sdk-mypy 等车道）              │
+│   python-test（SDK pytest：run_gates --filter sdk-test）                │
+│   python-coverage（run_gates --filter plugins-coverage-pairing,         │
+│     channel-copy-guard,plugins-coverage,channel-per-file-coverage,      │
+│     plugins-diff-coverage,plugins-mypy-baseline：                       │
+│     插桩 + 失败数基线锁 + mypy 基线(0) + 改动行 diff 100%；             │
+│     整体覆盖率基线 2026-09-01 起挂起观察 --skip，插桩照跑）             │
+│   python-heavy-suites（重型套件，失败数基线锁）                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│  前端 / 桌面                                                            │
+│   frontend-endpoints-sync（端点生成物一致性） / frontend-test（vitest） │
+│   frontend-e2e（Playwright）/ electron-compile（桌面壳编译门禁）         │
+├─────────────────────────────────────────────────────────────────────────┤
+│  专项门禁                                                               │
+│   timing（时序不变量 @pytest.mark.timing）/ pre-commit / tdd-gate       │
+│   / traceability-gate（追溯标记）                                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│  all-checks-passed（汇总门：以上全部通过才绿）                           │
 └─────────────────────────────────────────────────────────────────────────┘
+
+独立 workflow（.github/workflows/e2e.yml）：
+  check-key → e2e（编译 Linux 内核 + 插件 venv/cdylib + tests/e2e_02，
+  真实 WebSocket/LLM 链路；schedule 定时 + push 触发，API key 就绪才跑）
 ```
 
 ### 2.2 配置文件位置
 
 | 文件 | 用途 |
 |------|------|
-| `.github/workflows/ci.yml` | CI/CD 流水线定义 |
+| `.github/workflows/ci.yml` | 主 CI（18 个 job，见 §2.1） |
+| `.github/workflows/e2e.yml` | e2e workflow（check-key + 真实 LLM e2e） |
+| `scripts/run_gates.py` | 机械门禁单一事实源（21 门禁；`--mode fast/kernel/plugins/frontend/all` 或 `--filter <id>`） |
 | `pyproject.toml` | pytest / ruff / mypy 配置 |
 | `tests/conftest.py` | 测试框架增强（日志、报告、Bug 定位） |
+| `.github/mypy-baseline.txt` | mypy 错误基线（现值 0，只减不增） |
+| `.github/pytest-failure-baseline.txt` | 红测失败数基线锁（plugins-coverage 19 / heavy 0，只减不增） |
 
 ### 2.3 CI 环境变量
 
-| 变量 | CI 中的值 | 说明 |
-|------|----------|------|
-| `PYTHON_VERSION` | `3.11` | Python 版本 |
-| `REPORT_DIR` | `reports` | 报告输出目录 |
-| `LOG_LEVEL` | `WARNING` | 测试期间日志级别 |
-| `LOG_OUTPUT` | `console` | 日志输出目标 |
+ci.yml 的 workflow 级全局 env（各 job 可按需追加）：
+
+| 变量 | 说明 |
+|------|------|
+| `CARGO_TERM_COLOR` | cargo 输出着色 |
+| `RUST_BACKTRACE` | Rust panic 栈回溯 |
+| `RUSTC_WRAPPER` / `SCCACHE_DIR` | sccache 编译缓存（best-effort） |
+| `AGENTOS_GATE_VERBOSE` | run_gates 门禁详细输出 |
 
 ### 2.4 并发控制
 
@@ -163,15 +151,17 @@ tests/
 │   ├── log_collector.py     # 日志收集器
 │   └── report_generator.py  # 结构化报告生成器
 ├── unit/                    # 单元测试（独立模块，无外部依赖）
-├── integration/             # 集成测试（模块间交互）
-├── channels/                # 通道层测试（Web/CLI/API 等）
+├── channels/                # 通道层测试
 ├── connectors/              # 连接器测试
 ├── tools/                   # 工具测试
 ├── monitoring/              # 监控模块测试
-├── electron/                # Electron 相关测试
+├── multimodal/              # 多模态测试
 ├── suites/                  # 测试套件（按功能组织）
-├── manual/                  # 手动测试脚本
-└── test_*.py                # 各功能模块测试文件（120+ 文件）
+├── plugins/                 # 插件车道镜像测试（CI 必跑，分层 marker 强制）
+├── gates/                   # 门禁自检测试
+├── e2e_02/                  # 0.2 端到端测试（真实内核 + WebSocket/LLM，e2e workflow 跑）
+├── manual/                  # 手动脚本（conftest collect_ignore 排除，不进默认收集）
+└── test_*.py                # 各功能模块测试文件（60+ 文件）
 ```
 
 ### 3.2 pytest 常用命令
@@ -185,14 +175,14 @@ python -m pytest tests/ -q
 #### 运行特定模块的测试
 
 ```bash
-# 任务相关测试
-python -m pytest tests/test_task2_bugfixes.py tests/test_task_manage_refactor.py -v
+# 任务域相关测试
+python -m pytest tests/test_task_submit_params.py tests/test_delete_task_cascade_pipeline.py -v
 
-# 管道相关测试
-python -m pytest tests/test_pipeline_integration.py tests/test_ws_routing_defect.py -v
+# LLM 轨道相关测试
+python -m pytest tests/test_llm_core_providers.py tests/test_llm_adapter_call_streaming.py -v
 
-# WebSocket 相关测试
-python -m pytest tests/test_websocket_api_imports.py tests/test_ws_and_api_alignment.py -v
+# 安全守卫相关测试
+python -m pytest tests/test_security_check_isolation.py tests/test_security_check_permission_modes.py -v
 ```
 
 #### 按关键词筛选
@@ -208,7 +198,7 @@ python -m pytest tests/ -k "memory" -v
 #### 按标记筛选
 
 ```bash
-# pyproject.toml 中注册了 18 个标记（unit/integration/e2e/slow/requires_api 等）
+# pyproject.toml 中注册了 12 个标记（unit/integration/e2e/timing 等）
 # 用 -m 按标记筛选
 
 # 只运行单元测试
@@ -216,9 +206,6 @@ python -m pytest tests/ -m "unit" -v
 
 # 只运行集成测试
 python -m pytest tests/ -m "integration" -v
-
-# 排除需要外部服务的测试
-python -m pytest tests/ -m "not requires_api and not requires_redis" -v
 ```
 
 > **注意**：项目启用了 `--strict-markers`，未在 `pyproject.toml` 注册的标记会直接报错。
@@ -238,56 +225,21 @@ python -m pytest tests/ --tb=short --no-header -q
 
 ### 3.3 CI 中的测试运行方式
 
-CI 的 `test` job **显式指定要运行的测试目录**（而非全量跑 `tests/` 再排除）。完整定义见 `.github/workflows/ci.yml` 的 `test` job，要点：
+CI 不再单独拼 pytest 命令——Python 测试车道统一经 `scripts/run_gates.py` 持有（门禁 id 与命令见该文件）：
 
-**批次 1 — 核心单元/功能测试**（显式列目录）：
+| CI job | 门禁/命令 | 覆盖内容 |
+|--------|----------|---------|
+| `python-test` | `run_gates.py --filter sdk-test` | SDK pytest |
+| `python-coverage` | `run_gates.py --filter plugins-coverage-pairing,channel-copy-guard,plugins-coverage,channel-per-file-coverage,plugins-diff-coverage,plugins-mypy-baseline` | 插件测试全量插桩 + 失败数基线锁 + mypy 基线 + 改动行 diff 100% |
+| `python-heavy-suites` | 重型套件车道（失败数基线锁） | 慢速/重环境套件 |
+| `timing` | `@pytest.mark.timing` 用例 | 时序不变量（事件顺序/间隔/超时边界） |
 
-```bash
-python -m pytest \
-  tests/unit \
-  tests/test_utils \
-  tests/core \
-  tests/tools \
-  tests/triggers \
-  tests/pipeline \
-  tests/multimodal \
-  tests/suites/core \
-  tests/channels \
-  tests/connectors \
-  tests/monitoring \
-  --tb=long --no-header -q
-```
+- **失败数基线锁**：失败数 > `.github/pytest-failure-baseline.txt` 基线 → CI 红（拦截增长）；≤ 基线 → 绿（允许 pre-existing 持平，修好后收紧基线并 commit 留归因）。当前基线：plugins-coverage 19 / heavy 0。
+- **mypy 基线**：`.github/mypy-baseline.txt` 现值 0，只减不增。
+- **整体覆盖率基线**：2026-09-01 用户裁定暂时挂起观察（run_gates `--skip`，插桩与 coverage.xml 产出照跑，diff/车道门禁仍消费）；恢复 = 去掉 `--skip`。
+- e2e 与真实 LLM 链路不在 ci.yml，在独立的 `.github/workflows/e2e.yml`（`check-key` 前置 → `e2e` job 跑 `tests/e2e_02`，编译 Linux 内核 + 插件 venv/cdylib 后真机验证；schedule 定时 + push 触发）。
 
-- 0.1 的逐条 `--deselect` 红测名单（`.github/known-skipped-tests.txt`）已废弃删除；
-  0.2 的红测治理统一走**失败数基线锁** `.github/pytest-failure-baseline.txt`
-  （`scripts/check_pytest_failure_baseline.py`，只减不增，见批次 4/5）。
-
-**批次 2/3 — 精确纳入的稳定测试**（整目录存在既有红测时，仅纳入指定文件）：
-
-```bash
-python -m pytest tests/suites/plugins/test_multimodal_preprocessor_text.py ...
-python -m pytest tests/suites/memory/test_restart_recompression_guard.py tests/suites/memory/test_e2e_compression.py ...
-```
-
-**批次 4/5 — 散落测试与功能套件**（随 plugins-coverage 门禁运行，batch 脚本已废弃移除）：
-
-```bash
-python scripts/run_gates.py --filter plugins-coverage   # pytest 全量 + 失败数基线锁
-```
-
-- 基线锁机制：失败数 > `.github/pytest-failure-baseline.txt` 的基线 → CI 红（拦截增长）；失败数 ≤ 基线 → CI 绿（允许 pre-existing 持平，鼓励逐步修复后收紧）。
-- 每测试 30 秒超时（pytest-timeout `--timeout=30`），防止挂起。
-
-**其他 CI job 覆盖的测试**（不在 test job 内）：
-
-| Job | 运行内容 | 触发条件 |
-|-----|---------|---------|
-| `e2e`（阶段 3b） | `tests/e2e`（真实 WebSocket 链路，排除 `test_auth`/`test_chat_flow`） | push/PR |
-| `llm-e2e`（阶段 3c） | `tests/e2e/test_review_b_path_llm_e2e.py`（真实 LLM 复盘） | 仅手动/定时 |
-| `timing`（阶段 3a） | `@pytest.mark.timing` 时序不变量用例 | push/PR |
-| `soak-smoke` / `soak-nightly` | `@pytest.mark.soak` 长时间渗漏稳定性 | push/PR / 定时 |
-
-> 完整 job 定义与触发条件以 `.github/workflows/ci.yml` 为准。
+> 完整 job 定义与触发条件以 `.github/workflows/ci.yml` / `e2e.yml` 为准。
 
 ### 3.4 pytest 配置（pyproject.toml）
 
@@ -300,13 +252,7 @@ markers = [
     "unit: 单元测试",
     "integration: 集成测试",
     "e2e: 端到端测试",
-    "slow: 慢速测试",
-    "requires_api: 需要真实 API 的测试",
-    "requires_redis: 需要 Redis 的测试",
-    "requires_db: 需要数据库的测试",
-    "offline: 可离线运行的测试",
     "timing: 关键时序不变量（事件顺序/间隔/超时边界），独立 stage 阻塞门禁",
-    "soak: 长时间渗漏与稳定性回归（资源回收/RSS斜率/任务累积）",
     "core: 核心单元测试",
     "m6: M6插件测试",
     "stage: Stage闭环测试",
@@ -318,7 +264,7 @@ markers = [
 ]
 ```
 
-> **注意**：完整 markers 列表以 `pyproject.toml` 为准（共 18 个）。`asyncio_mode = "auto"` 意味着所有 `async def test_*()` 函数自动被 pytest-asyncio 处理，无需 `@pytest.mark.asyncio` 装饰器。`--strict-markers` 要求所有 `@pytest.mark.xxx` 必须在上方 markers 列表中注册，否则报错。
+> **注意**：完整 markers 列表以 `pyproject.toml` 为准（共 12 个）。`asyncio_mode = "auto"` 意味着所有 `async def test_*()` 函数自动被 pytest-asyncio 处理，无需 `@pytest.mark.asyncio` 装饰器。`--strict-markers` 要求所有 `@pytest.mark.xxx` 必须在上方 markers 列表中注册，否则报错。
 
 ### 3.5 conftest.py 中的全局配置
 
@@ -326,30 +272,13 @@ markers = [
 
 | 阶段 | Hook 函数 | 行为 |
 |------|-----------|------|
-| 会话开始 | `pytest_sessionstart` | 初始化统一日志系统（WARNING 级别 + 控制台输出）；创建 `ReportGenerator` 实例 |
+| 会话开始 | `pytest_sessionstart` | `logging.basicConfig(level=WARNING)`（不用 `setup_logging`——会破坏 pytest capture 的临时文件）；创建 `ReportGenerator` 实例 |
 | 每个测试 | `pytest_runtest_makereport` | 收集测试结果到 `ReportGenerator`；失败时调用 `BugLocator` 自动定位 |
 | 会话结束 | `pytest_sessionfinish` | 生成控制台摘要、JSON 报告、HTML 报告 |
 
-#### 排除的测试文件
+#### 排除的测试目录
 
-`conftest.py` 中的 `collect_ignore` 列表会在默认 `pytest` 运行时排除需要特殊外部服务（向量库/Redis/真实 LLM 等）的根级测试文件：
-
-```python
-collect_ignore = [
-    "test_cross_domain_discovery.py",
-    "test_directory_generator.py",
-    "test_memory_metrics.py",
-    "test_pgvector_store.py",
-    "test_task_submit_event_chain.py",
-    "test_yaml_error_chain.py",
-]
-```
-
-> **注意**：`suites` 目录已从 `collect_ignore` 移除，`tests/suites/` 现可被正常收集为集成测试。
-    "test_task_submit_event_chain.py",
-    "test_yaml_error_chain.py",
-]
-```
+`conftest.py` 的 `collect_ignore = ["manual"]`——`tests/manual/` 为需手动环境（kernel + LLM key）的脚本（无断言或命中真实外部 API），不进默认收集，避免污染 `pytest tests/`；`tests/channels/`、`tests/suites/` 等集成测试正常收集。
 
 ### 3.6 可用的 pytest Fixture
 
@@ -637,14 +566,15 @@ ws.onmessage = (event) => {
 
 ### 5.1 统一日志架构
 
-灵汐系统使用 `src/core/logging/` 模块提供统一日志功能。**现有代码中的 `logging.getLogger(__name__)` 无需修改即可自动受益**。
+灵汐系统使用 `agentos_plugin_sdk.logging` 模块（`plugins/sdk/src/agentos_plugin_sdk/logging/`，0.2 架构从 0.1 的 `src/core/logging/` 下沉到插件 SDK）提供统一日志功能。**现有代码中的 `logging.getLogger(__name__)` 无需修改即可自动受益**。
 
 | 文件 | 职责 |
 |------|------|
-| `src/core/logging/__init__.py` | 公共入口：`setup_logging()` 和 `get_logger()` |
-| `src/core/logging/config.py` | `LoggingConfig` 数据类（环境变量驱动） |
-| `src/core/logging/formatters.py` | `StructuredFormatter`（人类可读）和 `JsonFormatter`（JSON） |
-| `src/core/logging/context.py` | `LogContext` — 请求级追踪字段（线程安全 + asyncio 安全） |
+| `agentos_plugin_sdk/logging/__init__.py` | 公共入口：`setup_logging()` 和 `get_logger()` |
+| `agentos_plugin_sdk/logging/config.py` | `LoggingConfig` 数据类（环境变量驱动） |
+| `agentos_plugin_sdk/logging/formatters.py` | `StructuredFormatter`（人类可读）和 `JsonFormatter`（JSON） |
+| `agentos_plugin_sdk/logging/filters.py` | 日志过滤器 |
+| `agentos_plugin_sdk/logging/context.py` | `LogContext` — 请求级追踪字段（线程安全 + asyncio 安全） |
 
 ### 5.2 两种输出格式
 
@@ -779,7 +709,7 @@ LogContext.unbind()
 pytest 启动
   │
   ├─ pytest_sessionstart()
-  │    └─ setup_logging(level=WARNING, output="console")
+  │    └─ logging.basicConfig(level=WARNING)
   │    └─ 创建 ReportGenerator 实例
   │
   ├─ 每个测试执行
@@ -1262,14 +1192,16 @@ def test_with_context(log_context):
 
 ## 附录 A：CI/CD 流水线主要 Job 概览
 
-> 来源：`.github/workflows/ci.yml`。完整 job 定义以该文件为准（还包含 e2e、定时全链路 LLM 测试等 job，此处仅列主干）。
+> 来源：`.github/workflows/ci.yml`（18 个 job，四族 + 专项门禁 + 汇总）。完整 job 定义以该文件为准；e2e 在独立的 `.github/workflows/e2e.yml`。
 
-| 阶段 | Job 名称 | 依赖 | 产出物 |
-|------|----------|------|--------|
-| Lint & Format | `lint` | 无 | `lint-results/ruff_results.json` |
-| Type Check | `typecheck` | 无 | 控制台输出 |
-| Tests | `test` | `lint` | `test-reports/test_report.json` + `.html` |
-| CI Summary | `summary` | `lint`, `typecheck`, `test` | 控制台摘要 |
+| 族 | Job 名称 | 要点 |
+|----|----------|------|
+| Rust | `rust-lint` / `rust-build` / `rust-test` / `rust-coverage` / `rust-deny` | fmt+clippy / 编译 / 测试 / lcov 基线 / 依赖许可门禁 |
+| Python | `python-lint` / `python-test` / `python-coverage` / `python-heavy-suites` | run_gates 车道（sdk-lint/sdk-mypy/sdk-test/plugins-coverage 族），基线锁见 §3.3 |
+| 前端 | `frontend-endpoints-sync` / `frontend-test` / `frontend-e2e` | 端点生成物一致性 / vitest / Playwright |
+| 桌面 | `electron-compile` | 桌面壳编译门禁 |
+| 专项 | `timing` / `pre-commit` / `tdd-gate` / `traceability-gate` | 时序不变量 / 钩子 / TDD 合规 / 追溯标记 |
+| 汇总 | `all-checks-passed` | 以上全部通过才绿 |
 
 ## 附录 B：代码质量工具配置参考
 
@@ -1278,7 +1210,7 @@ def test_with_context(log_context):
 | 工具 | 配置项 | 值 |
 |------|--------|-----|
 | ruff | `line-length` | 120 |
-| ruff | `target-version` | py310 |
+| ruff | `target-version` | py311 |
 | ruff | `lint.select` | E, W, F, I, B, C4, UP, N, SIM, PT, RET, ARG, PTH, ERA, PL |
 | mypy | `python_version` | 3.11 |
 | mypy | `ignore_missing_imports` | true |
@@ -1289,13 +1221,15 @@ def test_with_context(log_context):
 
 | 文件 | 用途 |
 |------|------|
-| `.github/workflows/ci.yml` | CI/CD 流水线定义 |
+| `.github/workflows/ci.yml` | 主 CI 流水线定义（18 job） |
+| `.github/workflows/e2e.yml` | e2e workflow（真实 LLM） |
+| `scripts/run_gates.py` | 机械门禁单一事实源 |
 | `pyproject.toml` | pytest / ruff / mypy 配置 |
 | `tests/conftest.py` | 测试框架增强 |
 | `tests/test_utils/bug_locator.py` | Bug 自动定位器 |
 | `tests/test_utils/log_collector.py` | 测试日志收集器 |
 | `tests/test_utils/report_generator.py` | 结构化报告生成器 |
-| `src/core/logging/__init__.py` | 统一日志系统入口 |
-| `src/core/logging/config.py` | 日志配置 |
-| `src/core/logging/formatters.py` | 日志格式化器（JSON + 结构化文本） |
-| `src/core/logging/context.py` | 日志上下文追踪 |
+| `plugins/sdk/src/agentos_plugin_sdk/logging/__init__.py` | 统一日志系统入口 |
+| `plugins/sdk/src/agentos_plugin_sdk/logging/config.py` | 日志配置 |
+| `plugins/sdk/src/agentos_plugin_sdk/logging/formatters.py` | 日志格式化器（JSON + 结构化文本） |
+| `plugins/sdk/src/agentos_plugin_sdk/logging/context.py` | 日志上下文追踪 |

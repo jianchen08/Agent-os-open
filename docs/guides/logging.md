@@ -20,7 +20,7 @@
 | 层 | 运行时 | 框架 | 输出 |
 |---|---|---|---|
 | Rust 内核 | tokio 进程内 | `tracing` + `tracing-subscriber`(EnvFilter) | 直接进 tracing sink |
-| Python sidecar | 独立进程/进程内 | `logging` + `src.core.logging` 统一基础设施 | stderr → 内核 reader 转发 |
+| Python sidecar | 独立进程/进程内 | `logging` + `agentos_plugin_sdk.logging` 统一基础设施 | stderr → 内核 reader 转发 |
 | Prompt 审计 | sidecar 内 | 独立 `_prompt_logger` | `data/logs/prompt_audit.log` |
 
 ### 为什么 sidecar 日志走 stderr 转发？
@@ -80,7 +80,7 @@ sidecar 进程按 plugin_id 缓存复用（一个 sidecar 服务多次请求）�
 | `kernel/crates/api/src/bin/agentos-kernel.rs` | 内核 tracing 初始化 |
 | `kernel/crates/mcp/src/client.rs` | `start_stderr_reader`（sidecar 日志汇聚） |
 | `kernel/crates/invoker/src/invoker.rs` | LOG_* env 透传 + `_log_ctx` 注入 |
-| `src/core/logging/` | 统一日志基础设施（LoggingConfig/LogContext/Formatter） |
+|  `plugins/sdk/src/agentos_plugin_sdk/logging/` | 统一日志基础设施（LoggingConfig/LogContext/Formatter） |
 | `plugins/sdk/src/agentos_plugin_sdk/_logging.py` | sidecar `setup_sidecar_logging` |
 | `plugins/sdk/src/agentos_plugin_sdk/server.py` | `_handle_tools_call` 的 `_log_ctx` 绑定 |
 | `plugins/shared/system/llm/adapter.py` | prompt 审计落盘 + 脱敏 |
