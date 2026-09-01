@@ -83,10 +83,12 @@ async def execute(state: dict, config: dict | None = None) -> dict:
     instance = get_instance()
     ctx = PluginContext(state=state, config=config or {})
     result = await instance.execute(ctx)
-    return {
-        "state_updates": result.state_updates,
-        "error": str(result.error) if result.error else None,
-    }
+    # error 必须是结构化 PluginError（{message}）：裸字符串令内核 invoker
+    # 反序列化 PluginResult 报 PARSE_ERROR，整个 state_updates 连带丢失
+    payload: dict = {"state_updates": result.state_updates}
+    if result.error:
+        payload["error"] = {"message": str(result.error)}
+    return payload
 
 
 if __name__ == "__main__":

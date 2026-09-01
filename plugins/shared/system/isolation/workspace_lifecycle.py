@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 import shutil
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -371,7 +375,52 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         return meta
 
     def _prepare_root_repo(self, root_path: Path, task_id: str) -> None:
-        """把项目根整理成可建 worktree 的就绪仓库（git init / 补提交 / auto-save 守卫）。"""
+        """把项目根整理成可建 worktree 的就绪仓库（git init / 补提交 / auto-save 守卫）。
+
+        并发互斥：多个子任务同时派发到同一项目仓时，init/add/commit 会互相
+        竞争（index.lock / rev-parse 撞上 HEAD 中间态）——初始化段用进程级
+        锁文件串行化（临时目录按项目路径哈希命名，不污染项目内容）；竞争
+        等待方在拿锁前先复检 HEAD，其他任务已完成初始化则直接跳过。
+        """
+        deadline = time.monotonic() + 30.0
+        digest = hashlib.sha1(str(root_path).lower().encode("utf-8")).hexdigest()[:16]
+        lock_path = Path(tempfile.gettempdir()) / f"agentos_init_{digest}.lock"
+        while True:
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(task_id).encode("utf-8"))
+                os.close(fd)
+                break
+            except FileExistsError:
+                if self._root_repo_ready(root_path):
+                    logger.info(
+                        "[WorkspaceLifecycle] 项目仓已由并发任务完成初始化，跳过: task_id=%s, path=%s",
+                        task_id,
+                        root_path,
+                    )
+                    return
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"项目空间初始化锁等待超时(30s): task_id={task_id}, path={root_path}"
+                    ) from None
+                time.sleep(0.5)
+        try:
+            self._prepare_root_repo_locked(root_path, task_id)
+        finally:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+
+    def _root_repo_ready(self, root_path: Path) -> bool:
+        """项目仓是否已就绪（.git 存在且 HEAD 可解析）。"""
+        if not (root_path / ".git").exists():
+            return False
+        rc, _, _ = self._run_git("rev-parse", "HEAD", cwd=root_path)
+        return rc == 0
+
+    def _prepare_root_repo_locked(self, root_path: Path, task_id: str) -> None:
+        """初始化段本体（调用方持有 _prepare_root_repo 的互斥锁）。"""
         if not (root_path / ".git").exists():
             if not self._git_init_and_initial_commit(root_path, "chore: initial project"):
                 raise RuntimeError(f"项目空间初始化失败（git init）: task_id={task_id}, path={root_path}")

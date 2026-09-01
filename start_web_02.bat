@@ -109,6 +109,16 @@ if "%NO_BUILD%"=="1" (
     popd
     echo [OK] Kernel build succeeded.
 )
+
+REM 同源守卫：native cdylib 与内核源码异源编译会让 tool 派发点位 SIGSEGV
+REM （2026-09-01/08-31 两次实证）——启动前检查并给出重编指引。
+echo [1.5/4] Checking native cdylib sync with kernel...
+python "%PROJECT_ROOT%\scripts\check_native_artifacts_sync.py"
+if errorlevel 1 (
+    echo [ERROR] native cdylib / kernel exe 异源，按上方指引重编后重试。
+    pause
+    exit /b 1
+)
 echo.
 
 REM ============================================================

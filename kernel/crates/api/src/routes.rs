@@ -1051,6 +1051,11 @@ impl ExportFields {
         }
         out
     }
+
+    /// 键是否在出口声明内（精确命中或命中 `前缀.*` 通配）。
+    pub fn contains(&self, key: &str) -> bool {
+        self.exact.contains(key) || self.prefixes.iter().any(|p| key.starts_with(p.as_str()))
+    }
 }
 
 /// 从一份管道 state 提取摘要（内核基线 + 插件声明出口 + messages 条数）。

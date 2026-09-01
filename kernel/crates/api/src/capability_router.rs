@@ -387,6 +387,12 @@ impl CapabilityRouter for KernelCapabilityRouter {
             // ── tool-executor.invoke：tool_core 反向委托内核执行工具插件 sidecar ──
             ("tool-executor", "invoke") => self.handle_tool_executor_invoke(params).await,
 
+            // ── tool-surface.schemas：LLM 工具面过滤服务（K10 执行时契约）──
+            // agent 配置解析（读 yaml 取 tool_ids）归插件域：context_build 写
+            // state.tool_ids，tool_schema 管道插件转发本调用。内核零 agent 配置
+            // 知识，只持"注册表过滤"这一纯执行面。
+            ("tool-surface", "schemas") => self.handle_tool_surface_schemas(&params).await,
+
             // ── service-registry：基础设施下沉内核后的共享存储（M2）──────────
             // method 形如 `<域>.<op>`（如 execution-records.list / memory.create）。
             // 经此 capability，插件统一访问内核 execution_records / pipeline_run_summaries
@@ -453,6 +459,82 @@ impl CapabilityRouter for KernelCapabilityRouter {
 }
 
 impl KernelCapabilityRouter {
+    /// 框架级强制工具：无视 agent `tool_ids`，只要 registry 里存在就注入。
+    ///
+    /// 这些工具的存在是**无害**的（LLM 不会无缘无故调——需要具体参数引导），但对
+    /// 框架兜底闭环**必需**。例如 `spill_retrieve`：spill_guard 把大输出替换为
+    /// 摘要 + "调用 spill_retrieve(tool_call_id=...) 取回" 引导，若 agent 的
+    /// tool_ids 未列此工具，LLM 工具列表里没有它的 schema，原文就永远取不回——
+    /// 兜底链路断裂。它与 spill_guard 配套安装（要么都装要么都不装），故"registry
+    /// 存在 = 已安装"即可作为注入判据，无需读 pipeline 配置做条件联动。
+    const FRAMEWORK_ALWAYS_INCLUDE_TOOLS: &[&str] = &["spill_retrieve"];
+
+    /// tool-surface.schemas：按 tool_ids 白名单过滤能力注册表，返回 OpenAI
+    /// function-calling schema 列表 + 工具输出契约。调用方（tool_schema 管道
+    /// 插件）把结果写进 state["tool_schemas"]/["tool_output_contracts"]。
+    ///
+    /// 过滤语义：
+    /// - 白名单命中 + 框架强制工具（`FRAMEWORK_ALWAYS_INCLUDE_TOOLS`，无视
+    ///   白名单）注入；空白名单 = agent 声明零工具，仅框架强制工具返回；
+    /// - input_schema 非 object 的工具不注入（LLM 严格校验 parameters 是
+    ///   object；注册路径已对缺 schema 工具按 {} 补注册，本过滤只拦注册后
+    ///   被改写成非 object 的极端形态）；
+    /// - 契约表不过滤：凡声明 output_schema/render 的工具都产生条目
+    ///   （tool_core 按 tool_name 查表校验，与被过滤的 schema 面解耦）。
+    async fn handle_tool_surface_schemas(&self, params: &Value) -> Result<Value, McpError> {
+        let Some(registry) = self.registry.as_ref() else {
+            return Err(McpError::Protocol {
+                message: "tool-surface.schemas disabled: capability registry not injected"
+                    .to_string(),
+            });
+        };
+        let wanted: std::collections::HashSet<String> = params
+            .get("tool_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let all_tools = registry.list_tools();
+        let schemas: Vec<Value> = all_tools
+            .iter()
+            .filter(|t| {
+                wanted.contains(&t.name)
+                    || Self::FRAMEWORK_ALWAYS_INCLUDE_TOOLS.contains(&t.name.as_str())
+            })
+            .filter(|t| t.input_schema.is_object())
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    }
+                })
+            })
+            .collect();
+        let contracts: serde_json::Map<String, Value> = all_tools
+            .iter()
+            .filter(|t| t.output_schema.is_some() || t.render.is_some())
+            .map(|t| {
+                (
+                    t.name.clone(),
+                    json!({
+                        "schema": t.output_schema.clone().unwrap_or(Value::Null),
+                        "render": t.render.clone().unwrap_or(Value::Null),
+                    }),
+                )
+            })
+            .collect();
+        Ok(json!({
+            "schemas": schemas,
+            "contracts": Value::Object(contracts),
+        }))
+    }
+
     /// 处理 service-registry.<域>.<op> 反向调用。
     ///
     /// method 形如 `execution-records.list`，先 split 出 (domain, op) 再分派。
@@ -1685,6 +1767,7 @@ impl KernelCapabilityRouter {
         let registry = agentos_session::pipeline_state_registry::global_registry();
         let mut rows: Vec<Value> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut memory_row_idx: Vec<(String, usize)> = Vec::new();
         for listing in registry.list() {
             if listing.tenant_id != tenant_id {
                 continue;
@@ -1705,7 +1788,29 @@ impl KernelCapabilityRouter {
                 }
                 obj.insert("source".to_string(), json!("memory"));
             }
+            memory_row_idx.push((listing.pipeline_id.clone(), rows.len()));
             rows.push(row);
+        }
+        // DB 任务域镜像补齐：pipeline-state.update 的热路径在管道尚未注册内存
+        // registry 时（workspace init 早于引擎注册的窗口）只落 pipeline_state 表，
+        // 内存聚合行会缺 task.ws_meta 等任务域键 → 运行中评估的 worktree 合并
+        // 门控按"ws_meta 读取失败"误判。按 export 白名单从表行补齐内存行缺失键
+        // （内存已有键不覆盖——运行时态权威）。
+        if let Some(store) = &self.store {
+            for (pid, idx) in &memory_row_idx {
+                let fields = match store.load_pipeline_state(pid, &tenant_id).await {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let Some(obj) = rows.get_mut(*idx).and_then(|r| r.as_object_mut()) else {
+                    continue;
+                };
+                for (k, v) in fields {
+                    if export.contains(&k) && !obj.contains_key(&k) {
+                        obj.insert(k, v);
+                    }
+                }
+            }
         }
         // DB 冷数据兜底（与 /api/v1/pipelines/state 同策略）：registry 未覆盖的
         // 冷管道（重启后未再轮）从「最新 checkpoint + pipeline_state 表最新标量

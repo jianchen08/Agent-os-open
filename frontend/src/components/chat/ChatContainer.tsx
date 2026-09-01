@@ -24,6 +24,8 @@ import {
   type ThinkingStrength,
 } from '@/types/thinkingMode'
 import { resolveModelDisplayName } from '@/utils/modelName'
+import { mainPipelineIdOf } from '@/utils/mappers'
+import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { findModelParams, mapParamsToStrength } from '@/utils/thinkingStrength'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
@@ -438,11 +440,16 @@ export const ChatContainer = ({
           isGenerating={effectiveIsGenerating}
           onSendMessage={(params) => {
             if (isSubTabFinished) return
-            // 管道 ID 用单一来源：当前标签的 pipelineRunId（主标签=后端回填的主管道 ID，
-            // 子标签=sub_agent_created 事件下发的子管道 ID）。
-            // 不再 fallback 到 store 级 activePipelineId——发送是确定性动作，
-            // 必须用当前标签确定的 ID，混用会导致消息路由错管道。
-            const pid = activeTab?.pipelineRunId
+            // 管道 ID 单一来源：当前标签的 pipelineRunId（主标签=后端回填的主管道
+            // ID，子标签=sub_agent_created 事件下发的子管道 ID）。
+            // 主标签兜底：对话框预建会话在缓存重拉/事件回填竞态下 pipelineRunId
+            // 可能短暂为空——回退到会话主管道确定性解析（activePipelineId /
+            // pipelineIds 唯一），发送不再静默丢失；子标签不兜底（串管道风险）。
+            let pid = activeTab?.pipelineRunId
+            if (!pid && !isSubTabActive) {
+              const session = readSessions().find((s) => s.id === sessionId)
+              pid = (session && mainPipelineIdOf(session)) || ''
+            }
             if (!pid) return
             onSendMessage({ ...params, pipelineId: pid })
           }}
