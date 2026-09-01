@@ -33,12 +33,12 @@
 |---|---------|------|------|------|
 | 1 | `docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md` | 方案总纲 | 0.2 整体方案的设计决策与 AC 总表（已归档） | ✅ 已存在 |
 | 2 | `docs/working/0.2插件体系核心决策.md` | 决策文档 | 9+1 条插件体系核心决策（统一 trait / 状态隔离 / 路由信号精简等） | ✅ 已存在 |
-| 3 | `docs/0.2_rust_plugin_checkpoints.md` | 检查点设计 | 13 个检查点 + 里程碑门控 | ✅ 已存在 |
+| 3 | `docs/working/_archive_0.2_migration/0.2_rust_plugin_checkpoints.md` | 检查点设计 | 13 个检查点 + 里程碑门控（已归档） | ✅ 已存在 |
 | 4 | `.project/manifest_v2_schema.json` | JSON Schema | 插件 manifest V2.0 字段校验规范 | ⏳ task_02 待产出 |
 | 5 | `.project/mcp_extension_protocol.md` | 协议文档 | MCP 灵汐扩展协议（`__kernel_*` 扩展消息） | ⏳ task_02 待产出 |
 | 6 | `kernel/crates/core/src/lib.rs` | Rust 模块入口 | 0.2 内核 core crate 的模块组织入口 | ✅ 已存在 |
-| 7 | `kernel/crates/core/src/traits.rs` | Rust Trait 定义 | 内核核心契约——PipelinePlugin / PluginInvoker / CapabilityRegistry / DependencyResolver / LlmProvider / PluginLoader | ✅ 已存在 |
-| 8 | `kernel/crates/core/src/types.rs` | Rust 数据类型 | 核心共享类型——RouteType / ErrorPolicy / PluginResult / PluginContext / TenantContext / ToolCategory 等 | ✅ 已存在 |
+| 7 | `kernel/crates/core/src/traits.rs` | Rust Trait 定义 | 内核核心契约——PluginInvoker / CapabilityRegistry / PluginLoader / HttpHandleCapability / StorageBackend（PipelinePlugin 在 `agentos_native_sdk` crate） | ✅ 已存在 |
+| 8 | `kernel/crates/core/src/types.rs` | Rust 数据类型 | 核心共享类型——RouteType / PluginResult / PluginContext / TenantContext / ToolCategory 等 | ✅ 已存在 |
 | 9 | `plugins/shared/pipeline/_base/plugin.py` | Python 抽象基类 | 管道插件 Python 基类（IPlugin / IInputPlugin / ICorePlugin / IOutputPlugin / PluginContext / PluginResult / OutputResult），0.2 sidecar 管道插件业务层继承它 | ✅ 已存在 |
 | 10 | `plugins/sdk/src/agentos_plugin_sdk/pipeline_types.py` | Python 类型定义 | StateKeys / RouteSignal / TargetType / create_initial_state 等 SDK 侧类型 | ✅ 已存在 |
 | 11 | `config/templates/plugin_scaffold/core_plugin.py` | 脚手架模板 | Core 插件模板（含 `ICorePlugin` 继承） | ✅ 已存在 |
@@ -58,7 +58,7 @@
 
 #### 这是什么？
 
-0.2 项目的"路线图"。一份 286 行的方案总纲，回答"为什么从 0.1 迁到 0.2、迁到什么样子、怎么验证迁完了"。
+0.2 项目的"路线图"。一份约 300 行的方案总纲，回答"为什么从 0.1 迁到 0.2、迁到什么样子、怎么验证迁完了"。
 
 #### 关键内容
 
@@ -138,7 +138,7 @@
 
 ---
 
-### 2.3 检查点设计：`docs/0.2_rust_plugin_checkpoints.md`
+### 2.3 检查点设计：`docs/working/_archive_0.2_migration/0.2_rust_plugin_checkpoints.md`（已归档）
 
 #### 这是什么？
 
@@ -163,13 +163,13 @@
 - **Agent 互审**：每个 task 完成后，照"通过标准"逐条检查
 - **人类决策**：CP-02 / CP-13 必须人类确认，不能跳过
 
-> **来源**：[来源: docs/0.2_rust_plugin_checkpoints.md, CP-02 章节]
+> **来源**：[来源: docs/working/_archive_0.2_migration/0.2_rust_plugin_checkpoints.md, CP-02 章节]
 
 ---
 
 ### 2.4 Manifest V2.0 JSON Schema：`.project/manifest_v2_schema.json`
 
-> ⚠️ **状态说明**：此文件是 task_02 的产出目标，当前仓库 `.project/` 目录尚未生成。以下内容基于 [来源: kernel/crates/core/src/traits.rs PluginManifest / ManifestCapabilities / ManifestPermissions 等结构体] 反向推导，等价于"如果它现在存在，会长什么样"。
+> ⚠️ **状态说明**：manifest 的真值源是 `kernel/crates/core/src/traits.rs::PluginManifest`（配 [docs/guides/plugin-protocol.md](plugin-protocol.md) 全字段说明），`.project/manifest_v2_schema.json` 未作为独立 JSON Schema 文件产出。以下内容基于 [来源: kernel/crates/core/src/traits.rs PluginManifest / ManifestCapabilities / ManifestPermissions 等结构体] 反向推导，等价于"如果它存在，会长什么样"。
 
 #### 这是什么？
 
@@ -188,7 +188,7 @@
 | `host_type` | enum | ✅ | 宿主类型 | `"in_process"`（Rust 原生）/ `"sidecar"`（MCP 边车） |
 | `entry` | string | ✅ | 入口点 | `"MyPlugin"`（类名）或 `"main.py:serve"` |
 | `capabilities` | object | ✅ | 能力声明（详见下表） | 见下方 |
-| `dependencies` | array | ❌ | 依赖的其他插件 | `[{"plugin_id": "tool_schema"}]` |
+| `requires_services` | array | ❌ | 插件间耦合唯一轴：需要的能力角色名 | `["human-interaction", "event-bus"]` |
 | `permissions` | object | ❌ | 权限申请（默认空） | 见下方 |
 | `error_policy` | enum | ❌ | 已收敛为唯一值 `retry` 并整体移除（ADR 2026-08-18），不要再声明 | `"retry"`（缺省值，字段非必填） |
 | `priority` | int | ❌ | 优先级，默认 100 | 数值越小越先执行 |
@@ -199,9 +199,13 @@
 | 子字段 | 含义 | 例子 |
 |--------|------|------|
 | `tools[]` | 提供的工具列表 | `[{"name": "web_search", "input_schema": {...}}]` |
-| `resources[]` | 暴露的数据源 | `[{"uri": "config://agents", "mime_type": "application/json"}]` |
-| `route_signals[]` | 可能产出的路由信号 | `["next_llm", "end"]` |
+| `services[]` | 内部服务方法元数据（不进 LLM 面） | `[{"name": "ns.method"}]` |
+| `steps[]` | 管道步骤声明 | — |
+| `route_signals[]` | 历史声明位（执行面零消费） | `["next_llm", "end"]` |
 | `lifecycle_hooks[]` | 订阅的生命周期事件 | `["on_load", "on_pipeline_start"]` |
+| `streaming` | 流式事件声明（fail-closed） | `{events, part_types, persist}` |
+
+> `resources` 能力已删除（全链无消费方，`deny_unknown_fields` 下声明即拒载）。
 
 **`permissions` 子字段**：
 
@@ -255,7 +259,7 @@ MCP（Model Context Protocol）是 Anthropic 提出的 AI 工具通信标准。�
 | 扩展消息 | 方向 | 用途 |
 |---------|------|------|
 | `__kernel_inject_capabilities` | 内核 → 插件 | 初始化时由内核把"我（内核）能提供什么"注入插件（如租户上下文句柄、事件总线句柄、配置读取句柄） |
-| `__kernel_lifecycle_hook` | 内核 → 插件 | 内核触发生命周期钩子事件（`on_load` / `on_unload` / `on_pipeline_start` / `on_pipeline_end` / `on_error`） |
+| `__kernel_lifecycle_hook` | 内核 → 插件 | 内核触发生命周期钩子事件（`on_load` / `on_unload` / `on_pipeline_start` / `on_pipeline_end` / `on_error` / `domain_event`——共 6 种，`domain_event` 为通用域事件通道） |
 | `__plugin_lifecycle_event` | 插件 → 内核 | 插件异步上报生命周期事件（如"我的配置已更新"、"我重启了"） |
 
 **对应到 Rust trait 的入口**：
@@ -290,7 +294,7 @@ async fn send_lifecycle_hook(
 
 #### 这是什么？
 
-0.2 内核 `core` crate 的模块入口文件，27 行，定义"core crate 由哪些模块组成"。
+0.2 内核 `core` crate 的模块入口文件，37 行，定义"core crate 由哪些模块组成"。
 
 #### 关键内容
 
@@ -298,16 +302,18 @@ async fn send_lifecycle_hook(
 //! # Lingxi AgentOS 0.2 — Kernel Core Library
 //! 本 crate 是 0.2 架构的"宪法层"，定义内核与所有插件之间的接口契约。
 
+pub mod ids;     // ID 类型
 pub mod traits;  // 插件抽象接口
 pub mod types;   // 共享数据结构
 ```
 
-**就两个模块**：
+**三个模块**：
 
 | 模块 | 角色 |
 |------|------|
-| `traits` | 插件抽象接口（PipelinePlugin、PluginInvoker、CapabilityRegistry、DependencyResolver、LlmProvider、PluginLoader） |
-| `types` | 共享数据结构（RouteSignal、ErrorPolicy、PluginContext、PluginResult、PluginError、TenantContext 等） |
+| `ids` | 强类型 ID（插件/管道等标识） |
+| `traits` | 插件抽象接口（PluginInvoker、CapabilityRegistry、PluginLoader、HttpHandleCapability、StorageBackend） |
+| `types` | 共享数据结构（RouteSignal、PluginContext、PluginResult、PluginError、TenantContext 等） |
 
 #### 实际场景
 
@@ -326,12 +332,12 @@ pub mod types;   // 共享数据结构
 
 | Trait | 角色 | 什么场景用 |
 |---|---|---|
-| `PluginMeta` | 插件元信息（id / name / version / plugin_type / priority） | 内核从 manifest 构造 |
-| `PipelinePlugin` | **核心 trait**——管道插件统一入口 | 写 Rust 原生插件时实现（见 [guides/plugin-native-rust.md](plugin-native-rust.md)） |
 | `PluginInvoker` | 调用器：按 `host_type` 透明分发（in_process 直调 trait 对象 / sidecar 走 MCP tools/call），两条路径对引擎透明 | 引擎唯一调用入口 |
 | `CapabilityRegistry` | 能力注册表（tools / route_signals / http_routes，guarded 注册、禁用即结构性收回） | 插件能力注册与治理 |
 | `PluginLoader` | 发现 / 校验 / 加载 / 卸载 | 内核启动 + watcher 热发现 |
 | `HttpHandleCapability` / `StorageBackend` | `/ext/*` 端点插件处理能力 / 存储后端（SQLite driver 化） | HTTP 分发、存储切换 |
+
+> **位置注意**：`PipelinePlugin`（管道插件统一入口 trait）不在 core crate，在 `agentos_native_sdk`（`kernel/crates/native-sdk/src/lib.rs`）——写 Rust 原生插件时实现它（见 [guides/plugin-native-rust.md](plugin-native-rust.md)）。插件元信息（id/name/version/plugin_type/priority）不是独立 trait，是 `PluginManifest` 结构体字段。
 
 **口径说明**：三角色不拆 trait——`pipeline_role` 是 manifest 声明位 + Python 基类层（`plugins/shared/pipeline/_base/plugin.py`）概念；LLM 无内核 trait——调用归 `llm_service` 插件（一切皆插件）；插件间依赖无拓扑排序器——走 `requires_services` 能力角色 + boot 期闸。
 
@@ -343,18 +349,17 @@ pub mod types;   // 共享数据结构
 
 #### 这是什么？
 
-0.2 内核的"共享词汇表"。311 行，定义 trait 之间传递的所有数据结构的形状。
+0.2 内核的"共享词汇表"。1100+ 行，定义 trait 之间传递的所有数据结构的形状。
 
 #### 关键类型
 
 | 类型 | 角色 | 实际场景 |
 |------|------|----------|
 | `RouteType` 枚举 | 路由类型（4 种） | `NextLlm` / `NextTool` / `End` / `Wait` |
-| `RouteSignal` struct | 路由信号包 | Output 插件返回 `PluginResult.route_signal` |
-| `ErrorPolicy` 枚举 | 错误策略（已收敛为唯一值 `retry`，ADR 2026-08-18） | `Retry` |
-| `PluginResult` struct | 插件执行结果 | 包含 `state_updates` + `route_signal` + `skip_remaining` + `error` |
+| `RouteSignal` struct | 路由信号包（历史声明位，执行面零消费） | manifest `capabilities.route_signals` 对应物 |
+| `PluginResult` struct | 插件执行结果 | 包含 `state_updates` + `skip_remaining` + `error` |
 | `PluginError` struct | 插件错误 | `message` + `code` + `source` |
-| `PluginContext` struct | 插件执行上下文 | 包含 `state` + `config` + `tenant` + `pipeline_id` + `session_id` + `task_id` |
+| `PluginContext` struct | 插件执行上下文 | 包含 `state` + `config` + `tenant` + `pipeline_id` + `session_id` + `task_id` + `content_loader`（七字段） |
 | `TenantContext` struct | 多租户上下文 | 通过 `tokio::task_local!` 穿透 |
 | `TargetType` 枚举 | 执行目标类型 | `LlmCall` / `ToolExecute` |
 | `ToolCategory` 枚举 | 工具分类 | File / FileSystem / Search / Web / Memory / Task / System / Execution / Analysis / Evaluation / Agent / Monitoring |
@@ -374,31 +379,25 @@ pub enum RouteType {
 
 > **关键变更**：0.1 有 6 种（`next_llm` / `next_tool` / `end` / `delegate` / `wait` / `decision`），0.2 删除 `delegate` 和 `fork`，精简为 4 种。详见 0.2插件体系核心决策 §决策 10。
 
-#### `ErrorPolicy` 详解（已收敛，不再声明）
+#### `ErrorPolicy`（已整体删除）
 
-> **ADR 2026-08-18**：0.2 引擎**不再按 `error_policy` 分发行为**。枚举已收敛为唯一值
-> `retry`（`abort` / `skip` / `fallback` 已删除）；错误处理由引擎/编排层按错误类型决定
-> （瞬态 sidecar 崩溃→retry 一次；工具失败→回喂 LLM 自我修正；非瞬态→上抛编排层）。
-> 插件**不要再声明** `error_policy`（manifest 字段可选，缺省即 retry）。
-
-```rust
-pub enum ErrorPolicy {
-    Retry,  // 瞬态错误重试一次（invoker with_transparent_recovery）；其余上抛编排层
-}
-```
-
-| `Retry` | 瞬态错误重试一次；其余错误决策上抛编排层（ADR 2026-08-18） | — |
+> **ADR 2026-08-18**：0.2 引擎**不再按 `error_policy` 分发行为**，枚举已从 types.rs
+> 整体删除（仅 invoker 注释留有 ADR 引用）。错误处理由引擎/编排层按错误类型决定
+> （瞬态 sidecar 崩溃→`invoker.with_transparent_recovery` respawn + 重试一次；
+> 工具失败→回喂 LLM 自我修正；非瞬态→上抛编排层）。插件**不要声明**
+> `error_policy`（manifest 残留该字段会被 `deny_unknown_fields` 拒载）。
 
 #### `PluginContext` 详解
 
 ```rust
 pub struct PluginContext {
-    pub state: serde_json::Value,       // 管道当前状态
+    pub state: serde_json::Value,       // 管道当前状态（摘要，ADR ⑦）
     pub config: serde_json::Value,      // 插件配置
     pub tenant: TenantContext,          // 租户上下文
     pub pipeline_id: Uuid,              // 管道 ID
     pub session_id: String,             // 会话 ID
     pub task_id: String,                // 任务 ID
+    pub content_loader: ContentLoader,  // 内容懒加载句柄（ADR ⑦：完整消息内容按需从 blobs 加载）
 }
 ```
 
@@ -406,10 +405,10 @@ pub struct PluginContext {
 
 #### 实际场景
 
-- **插件作者**：实现 `execute()` 时，从 ctx 读 state / config / tenant，向 PluginResult 写 state_updates / route_signal / error
+- **插件作者**：实现 `execute()` 时，从 ctx 读 state / config / tenant，向 PluginResult 写 state_updates / skip_remaining / error
 - **架构师**：这些类型加在一起，就是 0.2 的"数据字典"
 
-> **来源**：[来源: kernel/crates/core/src/types.rs, 全文 311 行]
+> **来源**：[来源: kernel/crates/core/src/types.rs]
 
 ---
 
@@ -424,12 +423,12 @@ sidecar 管道插件业务层的 Python 抽象基类（ABC）——`server.py` M
 | 类 | 角色 | 与内核 Rust 侧的对应 |
 |-----|------|---------------|
 | `IPlugin` | 插件抽象基类，所有管道插件的统一接口 | 对应 `PipelinePlugin` trait |
-| `IInputPlugin(IPlugin)` | Input 插件基类 | 对应 `InputPipelinePlugin` trait |
-| `ICorePlugin(IPlugin)` | Core 插件基类，返回 dict | 对应 `CorePipelinePlugin` trait |
-| `IOutputPlugin(IPlugin)` | Output 插件基类，返回 OutputResult | 对应 `OutputPipelinePlugin` trait |
+| `IInputPlugin(IPlugin)` | Input 插件基类 | 对应 `PipelinePlugin` trait + manifest `pipeline_role: input`（内核无子 trait） |
+| `ICorePlugin(IPlugin)` | Core 插件基类，返回 dict | 对应 `PipelinePlugin` trait + `pipeline_role: core`（内核无子 trait） |
+| `IOutputPlugin(IPlugin)` | Output 插件基类，返回 OutputResult | 对应 `PipelinePlugin` trait + `pipeline_role: output`（内核无子 trait） |
 | `PluginContext` | 插件上下文（state / config / `_services`） | 对应 `PluginContext` struct |
-| `PluginResult` | 插件结果（state_updates / route_signal / skip_remaining / error） | 对应 `PluginResult` struct |
-| `OutputResult(PluginResult)` | Output 插件专用结果 | 对应 `PluginResult` + `route_signal` |
+| `PluginResult` | 插件结果（state_updates / skip_remaining / error） | 对应 `PluginResult` struct |
+| `OutputResult(PluginResult)` | Output 插件专用结果（无新增字段，仅类型语义区分） | 对应 `PluginResult` struct |
 
 #### Python 业务层 vs 内核 Rust 契约对比
 
@@ -566,7 +565,7 @@ plugin.json manifest 全字段规范（字段总表 / capabilities / requires_se
 - **二次开发者**：照"扩展点"一节，加新工具/新 Agent/新管道
 - **0.2 迁移参考**：0.1 的子系统划分是 0.2 重写时的"功能清单"基线
 
-> **来源**：[来源: docs/ARCHITECTURE.md, 全文 435 行]
+> **来源**：[来源: docs/ARCHITECTURE.md]
 
 ---
 
