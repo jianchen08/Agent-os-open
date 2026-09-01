@@ -49,7 +49,7 @@
 
 ### 📊 Project Scale
 
-- **Rust kernel**: ~95K lines (`kernel/`, ~20K of which are Rust tests)
+- **Rust kernel**: ~95K lines (`kernel/`, ~40K of which are Rust tests — `tests/` dirs + inline `#[cfg(test)]` modules)
 - **Python plugins**: ~166K lines (`plugins/`, 97 `plugin.json` manifests)
 - **Frontend code**: ~143K lines (`frontend/src/`)
 - **Python tests**: ~124K lines (`tests/` + in-plugin tests)

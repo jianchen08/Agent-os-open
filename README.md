@@ -49,7 +49,7 @@
 
 ### 📊 项目规模
 
-- **Rust 内核**：约 9.5 万行（`kernel/`，其中约 2.0 万行为 Rust 测试）
+- **Rust 内核**：约 9.5 万行（`kernel/`，其中约 4.0 万行为 Rust 测试——`tests/` 目录 + 内联 `#[cfg(test)]` 模块）
 - **Python 插件**：约 16.6 万行（`plugins/`，97 份 `plugin.json` 清单）
 - **前端代码**：约 14.3 万行（`frontend/src/`）
 - **Python 测试**：约 12.3 万行（`tests/` + 插件目录就地测试）
