@@ -783,7 +783,7 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 | 🟢 低 | UI 美化 | 主题、动画、可访问性 |
 | 🟢 低 | 国际化 | 翻译新增语言 |
 
-详见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ---
 

@@ -9,7 +9,7 @@
 > - `.project/manifest_v2_schema.json` / `.project/mcp_extension_protocol.md` → 始终未作为独立文件产出；manifest 真值源 = `kernel/crates/core/src/traits.rs::PluginManifest`，协议文档 = `docs/guides/plugin-protocol.md`
 > - `docs/guides/plugin_development_guide.md` / `plugin_development_standard.md`（0.1）→ 已删除；现行开发指南 = `docs/guides/` 分篇（见 [README.md](README.md)）
 > - 路由信号（`next_llm` / `next_tool` / `end` / `wait`）**已不驱动路由**：0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`）按 state 条件裁决；`RouteType` / `PluginResult.route_signal` 为遗留类型（native 恒 None、引擎不读），manifest `route_signals` 声明位保留但执行面零消费
-> - `docs/guides/contract_qa.md`（契约设计 Q&A）→ 已删除：其回答基于旧版 traits.rs（755 行时期），`dependencies`/`DependencyResolver`/`LlmProvider`/三子 trait 等前提在当前代码中不存在；具体做法见各分篇指南（依赖→[plugin-sidecar-python.md](plugin-sidecar-python.md) §4、宿主选型→[plugin-development.md](plugin-development.md) §2、字段→[plugin-protocol.md](guides/plugin-protocol.md)）
+> - `docs/guides/contract_qa.md`（契约设计 Q&A）→ 已删除：其回答基于旧版 traits.rs（755 行时期），`dependencies`/`DependencyResolver`/`LlmProvider`/三子 trait 等前提在当前代码中不存在；具体做法见各分篇指南（依赖→[plugin-sidecar-python.md](plugin-sidecar-python.md) §4、宿主选型→[plugin-development.md](plugin-development.md) §2、字段→[plugin-protocol.md](plugin-protocol.md)）
 > - `docs/ARCHITECTURE.md` → 已更新为 0.2 架构口径
 
 ---
@@ -607,4 +607,4 @@ plugin.json manifest 全字段规范（字段总表 / capabilities / requires_se
 
 1. `docs/ARCHITECTURE.md`（0.2 现状）→ `docs/working/0.2插件体系核心决策.md`（9+1 条决策）
 2. `kernel/crates/core/src/traits.rs` + `types.rs`（Rust 契约）→ `plugins/shared/pipeline/_base/plugin.py` + SDK `pipeline_types.py`（Python 侧契约）
-3. 动手：[plugin-protocol.md §8](guides/plugin-protocol.md)（echo_tool 从零走查）→ `config/templates/plugin_scaffold/` 复制模板开写
+3. 动手：[plugin-protocol.md §8](plugin-protocol.md)（echo_tool 从零走查）→ `config/templates/plugin_scaffold/` 复制模板开写
