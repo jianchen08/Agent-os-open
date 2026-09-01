@@ -146,9 +146,12 @@ repos:
       - id: mypy
         name: mypy 类型检查
         # 允许现有警告（不强制 0 错误），工具本身正常运行即可
-        # --show-traceback：2026-09-01 CI Linux 出现 mypy 2.1.0 INTERNAL ERROR
-        # （本地 Windows 同文件集全绿，间歇性），崩溃时日志带 traceback 供定位
-        entry: mypy --config-file=pyproject.toml --no-incremental --show-traceback
+        # --show-traceback + --cache-dir=NONE：2026-09-01 CI Linux mypy 2.1.0
+        # 间歇性 INTERNAL ERROR，traceback 定根因 = --no-incremental 仍写 sqlite
+        # 缓存库，多 worker 并发写偶发 "database is locked"（ OperationalError 被
+        # 包装成 INTERNAL ERROR）。--no-incremental 本就不读缓存，配
+        # --cache-dir=NONE 禁写根治；--show-traceback 保留供将来取证。
+        entry: mypy --config-file=pyproject.toml --no-incremental --cache-dir=NONE --show-traceback
         language: system
         files: \.py$
         # 实际检查范围：根目录 .py 脚本 + scripts/（src/ 已迁移至 plugins/）。

@@ -54,6 +54,11 @@ def count_mypy_errors() -> int:
             "--config-file",
             "pyproject.toml",
             "--no-incremental",
+            # --no-incremental 只跳过读缓存但仍写 sqlite 缓存库，多 worker 并发写
+            # 偶发 "database is locked"（CI 实证，INTERNAL ERROR 包装）；全量分析
+            # 本不消费缓存，NONE 禁写根治
+            "--cache-dir",
+            "NONE",
             "--explicit-package-bases",  # 平铺插件架构：消除同名 server.py 的 Duplicate module 阻断
         ],
         capture_output=True,
