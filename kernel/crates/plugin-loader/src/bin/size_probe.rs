@@ -2,7 +2,10 @@
 use agentos_core::traits::PluginManifest;
 use std::collections::HashMap;
 
-// Windows 进程工作集（GetProcessMemoryInfo，kernel32 导出，免额外依赖）
+// Windows 进程工作集（GetProcessMemoryInfo，kernel32 导出，免额外依赖）。
+// extern "system" 声明不落符号引用则不影响链接；Linux 无 kernel32，
+// 走 /proc/self/status 读取 VmRSS（非 Windows 平台的探针实现）。
+#[cfg(windows)]
 #[repr(C)]
 struct ProcessMemoryCounters {
     cb: u32,
@@ -17,6 +20,7 @@ struct ProcessMemoryCounters {
     peak_pagefile_usage: usize,
 }
 
+#[cfg(windows)]
 extern "system" {
     fn K32GetProcessMemoryInfo(
         process: *mut std::ffi::c_void,
@@ -26,6 +30,7 @@ extern "system" {
     fn GetCurrentProcess() -> *mut std::ffi::c_void;
 }
 
+#[cfg(windows)]
 fn rss_mb() -> f64 {
     unsafe {
         let mut c = std::mem::zeroed::<ProcessMemoryCounters>();
@@ -36,6 +41,26 @@ fn rss_mb() -> f64 {
             0.0
         }
     }
+}
+
+#[cfg(not(windows))]
+fn rss_mb() -> f64 {
+    // /proc/self/status 的 VmRSS（kB）——Linux runner 的等价工作集读数
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return 0.0;
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb: f64 = rest
+                .trim()
+                .trim_end_matches("kB")
+                .trim()
+                .parse()
+                .unwrap_or(0.0);
+            return kb / 1024.0;
+        }
+    }
+    0.0
 }
 
 fn main() {

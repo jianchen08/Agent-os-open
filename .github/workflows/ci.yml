@@ -253,8 +253,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      # cargo-deny 走 cargo metadata（rustc -vV）；本 job 未装 sccache，
+      # 全局 env 的 RUSTC_WRAPPER 指向不存在二进制会直接炸——置空（与
+      # python-heavy-suites 的 native build 步同款防御）。
       - name: Run gates (rust-deny)
-        run: python scripts/run_gates.py --filter rust-deny
+        run: RUSTC_WRAPPER= python scripts/run_gates.py --filter rust-deny
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
