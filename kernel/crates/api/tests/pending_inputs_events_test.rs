@@ -231,6 +231,40 @@ async fn wait_for_frame(frames: &Arc<Mutex<Vec<String>>>, needle: &str) {
     .expect("应收到事件帧");
 }
 
+/// 播种会话记录并绑定 active_pipeline_id（dispatch_user_input 的管道坐标
+/// 解析前置：无 session/无归属管道 = 显式拒绝派发，不静默回退）。
+async fn seed_session_with_pipeline(
+    sqlite: &Arc<agentos_engine::SqliteStore>,
+    thread_id: &str,
+    pipeline_id: &str,
+) {
+    use agentos_core::traits::StorageBackend;
+    use agentos_core::types::SessionRecord;
+    let now = "2026-09-01T00:00:00Z";
+    StorageBackend::create_session(
+        sqlite.as_ref(),
+        &SessionRecord {
+            thread_id: thread_id.to_string(),
+            title: None,
+            intent: None,
+            current_state: "active".to_string(),
+            agent_id: None,
+            active_pipeline_id: Some(pipeline_id.to_string()),
+            pipeline_ids: vec![pipeline_id.to_string()],
+            metadata: None,
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+            last_active_at: Some(now.to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    sqlite
+        .link_pipeline_session(pipeline_id, thread_id, "default")
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn dispatch_success_pushes_new_message_and_stream_end() {
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
@@ -243,6 +277,7 @@ async fn dispatch_success_pushes_new_message_and_stream_end() {
         }),
     );
     coord.register_thread("thread-ok-1", "u1");
+    seed_session_with_pipeline(&store, "thread-ok-1", "pipe-ok-1").await;
     let state = make_engine_state(store, Arc::new(OkInvoker), coord, false);
 
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
@@ -286,6 +321,7 @@ async fn dispatch_silent_core_pushes_no_assistant_reply_error_not_echo() {
         }),
     );
     coord.register_thread("thread-silent-1", "u1");
+    seed_session_with_pipeline(&store, "thread-silent-1", "pipe-silent-1").await;
     let state = make_engine_state(store, Arc::new(SilentInvoker), coord, false);
 
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
@@ -340,6 +376,7 @@ async fn dispatch_engine_failure_pushes_stream_error() {
         }),
     );
     coord.register_thread("thread-fail-1", "u1");
+    seed_session_with_pipeline(&store, "thread-fail-1", "pipe-fail-1").await;
     let state = make_engine_state(store, Arc::new(OkInvoker), coord, true);
 
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
