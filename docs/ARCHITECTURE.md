@@ -40,7 +40,7 @@
 | 能力 | 承载插件（示例） |
 |---|---|
 | LLM 调用 | `llm_service`（`llm.complete_stream` 服务）+ `pipeline_llm_core`（core 步骤） |
-| 工具执行 | `pipeline_tool_core`（Rust 原生）+ 各工具插件（26 个） |
+| 工具执行 | `pipeline_tool_core`（Rust 原生）+ 各工具插件（19 个，41 个工具声明） |
 | 记忆 | `hindsight_memory` + `memory` 工具 |
 | 评估闸门 | `evaluation`（task_evaluate）+ `pipeline_task_reminder`（放行检测） |
 | 审批 / 人机交互 | `approval` + `human`（human-interaction） |
@@ -99,7 +99,7 @@ Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自
 ┌──────────────────────────────────────────────────────────────────┐
 │                          插件（97 个 manifest）                    │
 │  pipeline/{input,core,output}  管道步骤（Python 边车 + Rust cdylib）│
-│  tools/                        LLM 工具（26 个，含外部 MCP 接入）   │
+│  tools/                        LLM 工具（19 个插件，含外部 MCP 接入）│
 │  system/                       系统服务（LLM/记忆/审批/评估/通道…）  │
 └────────────────────────────┬─────────────────────────────────────┘
                              ▼
@@ -173,7 +173,7 @@ soft_constraints: [...]
 deliverables: [...]           # executor 特有：产出物声明
 plugins:
   enabled:
-    task_reminder: { max_reminders: 3, cooldown_seconds: 180 }     # per-plugin inputs
+    task_reminder: { max_reminders: 3, evaluation_mode: true }  # per-plugin inputs
 ```
 
 - **agent_id 的本质是执行上下文**：Agent 在内核中**没有运行时对象**——`agent_id` 只是执行上下文（pipeline state / `execution_context`）里的一个键，会话创建时写入 initial_state，随 `execution_context` 贯穿任务链全链传导。引擎对它只透传；agent 的全部语义由插件按这个键展开（见下条）。切换会话 Agent = 换一个上下文键，下一轮管道自然整体切换人设/工具/约束——不存在"注册/反注册 Agent"这类内核动作。
@@ -186,7 +186,7 @@ plugins:
 
 - **统一契约**：每个工具声明 `input_schema` + `output_schema` + `render`（前端渲染意图）。工具执行后按 `output_schema` fail-closed 校验；前端按 `render` 路由渲染结果卡片；MCP 对外下发同一契约。
 - **执行**：工具调用由管道 core 步的 `pipeline_tool_core`（Rust 原生插件）执行，大输出经 `pipeline_spill_guard` 落盘兜底（`spill_retrieve` 为框架强制工具）。
-- **分类来源**：内置工具插件（26 个）／外部 MCP 工具（零代码接入）／用户根自研插件。
+- **分类来源**：内置工具插件（19 个）／外部 MCP 工具（零代码接入）／用户根自研插件。
 - **工具面控制**：Agent 的 `tool_ids` 白名单 + 层级守卫（level_guard 拦截越级任务类工具）+ 安全守卫（security_check 判定路径/危险工具审批/隔离放行）。
 
 ### 记忆系统
