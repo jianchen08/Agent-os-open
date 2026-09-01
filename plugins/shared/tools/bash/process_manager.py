@@ -1220,46 +1220,24 @@ class ProcessManager:
 
     @staticmethod
     def _sync_poll_process(proc_info: ProcessInfo) -> None:
-        """同步检测进程是否已退出，更新 ProcessInfo 状态。"""
+        """同步 asyncio transport 的退出状态到 ProcessInfo。
+
+        只读 process.returncode（asyncio child watcher 线程写入的权威值）。
+        不做 OS 级 waitpid/OpenProcess 探测：Linux 上 waitpid(WNOHANG) 会与
+        child watcher 竞争 reap，抢先 reap 后 watcher 线程 ECHILD，asyncio
+        硬编码 returncode=255 写回 transport（ThreadedChildWatcher._do_waitpid
+        的既定行为），真实退出码被污染成 255；Windows 分支探测命中时还会把
+        exit_code 置 None 污染完成路径判断。轮询循环每轮都过事件循环 tick，
+        transport 状态最迟下一轮即可见，OS 级探测无实际收益。
+        """
         process = proc_info.process
         if process is None:
             return
 
-        # asyncio Process.returncode 可能已被 transport 设置
         rc = process.returncode
         if rc is not None:
             proc_info.exit_code = rc
             proc_info.status = "completed" if rc == 0 else "error"
-            return
-
-        # OS 级同步检测
-        pid = proc_info.pid
-        try:
-            if platform.system() == "Windows":
-                import _winapi  # noqa: PLC0415
-
-                # SYNCHRONIZE 用于 WaitForSingleObject，QUERY_LIMITED_INFORMATION 获取退出码
-                ACCESS = _winapi.SYNCHRONIZE | 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION  # noqa: N806
-                handle = _winapi.OpenProcess(ACCESS, False, pid)
-                if handle == 0:
-                    return  # 无法打开进程，保守处理
-                result = _winapi.WaitForSingleObject(handle, 0)
-                if result == _winapi.WAIT_OBJECT_0:
-                    # 进程已退出
-                    proc_info.status = "completed"  # 无法获取精确退出码，保守标记
-                    proc_info.exit_code = None
-                _winapi.CloseHandle(handle)
-            else:
-                _pid, _status = os.waitpid(pid, os.WNOHANG)
-                if _pid == pid:
-                    proc_info.exit_code = os.WEXITSTATUS(_status) if os.WIFEXITED(_status) else 1
-                    proc_info.status = "completed" if proc_info.exit_code == 0 else "error"
-        except OSError:
-            # 探测对象是刚结束的子进程：waitpid ECHILD / OpenProcess 句柄失效
-            # 都以 OSError 族暴露。本轮探测视为"仍未观测到退出"，状态留待
-            # asyncio transport 的 returncode 兜底；非 OS 异常不属于该竞态面，
-            # 不在此吞掉。
-            pass
 
     # ── WSL 直连支持 ──────────────────────────────────────────────
 

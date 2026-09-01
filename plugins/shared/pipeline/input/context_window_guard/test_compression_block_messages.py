@@ -67,8 +67,12 @@ def _load_llm_core_module() -> Any:
     llm_core 自己的 adapter.py（与 bash 测试 conftest 同款防御）。
     """
     llm_core_dir = _PLUGIN_DIR.parents[1] / "core" / "llm_core"
-    if str(llm_core_dir) not in sys.path:
-        sys.path.insert(0, str(llm_core_dir))
+    # 强制置顶：目录已存在但位于他插件目录（如 multimodal）之后时，
+    # 平铺 import 'adapter' 仍会先命中排在前面的同名模块
+    llm_core_str = str(llm_core_dir)
+    if llm_core_str in sys.path:
+        sys.path.remove(llm_core_str)
+    sys.path.insert(0, llm_core_str)
     cached = sys.modules.get("adapter")
     cached_file = getattr(cached, "__file__", None)
     if cached is not None and not (

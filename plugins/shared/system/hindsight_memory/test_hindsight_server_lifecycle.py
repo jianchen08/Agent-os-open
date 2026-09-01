@@ -671,7 +671,7 @@ class TestOnLoad:
         # 测试聚焦 spawn 命令形状本身（其余路径走真实 isfile）。
         real_isfile = os.path.isfile
 
-        def _fake_isfile(p: object) -> bool:
+        def _fake_isfile(p: str | os.PathLike[str]) -> bool:
             s = str(p)
             if ".venv-hindsight" in s and s.replace("\\", "/").endswith("Scripts/python.exe"):
                 return True
