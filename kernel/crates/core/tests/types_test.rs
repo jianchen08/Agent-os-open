@@ -109,20 +109,48 @@ fn run_status_from_control_state_mapping() {
     // 终态映射单点（控制状态键契约 ADR 2026-08-30）：挂起优先；署名查表；
     // 未署名兜底 Completed。落库与域事件派生共用，词汇在此断言冻结。
     let cases = [
-        (json!({"suspended": true, "router.stop_reason": "budget_exhausted"}), RunStatus::Suspended),
-        (json!({"router.stop_reason": "user_requested"}), RunStatus::Cancelled),
-        (json!({"router.stop_reason": "task_cancelled"}), RunStatus::Cancelled),
-        (json!({"router.stop_reason": "task_deleted"}), RunStatus::Cancelled),
-        (json!({"router.stop_reason": "budget_exhausted"}), RunStatus::Failed),
+        (
+            json!({"suspended": true, "router.stop_reason": "budget_exhausted"}),
+            RunStatus::Suspended,
+        ),
+        (
+            json!({"router.stop_reason": "user_requested"}),
+            RunStatus::Cancelled,
+        ),
+        (
+            json!({"router.stop_reason": "task_cancelled"}),
+            RunStatus::Cancelled,
+        ),
+        (
+            json!({"router.stop_reason": "task_deleted"}),
+            RunStatus::Cancelled,
+        ),
+        (
+            json!({"router.stop_reason": "budget_exhausted"}),
+            RunStatus::Failed,
+        ),
         (json!({"router.stop_reason": "timeout"}), RunStatus::Failed),
-        (json!({"router.stop_reason": "duplicate_loop"}), RunStatus::Failed),
-        (json!({"router.stop_reason": "task_failed"}), RunStatus::Failed),
-        (json!({"router.stop_reason": "task_completed"}), RunStatus::Completed),
+        (
+            json!({"router.stop_reason": "duplicate_loop"}),
+            RunStatus::Failed,
+        ),
+        (
+            json!({"router.stop_reason": "task_failed"}),
+            RunStatus::Failed,
+        ),
+        (
+            json!({"router.stop_reason": "task_completed"}),
+            RunStatus::Completed,
+        ),
         (json!({"router.stop_reason": ""}), RunStatus::Completed),
         (json!({}), RunStatus::Completed),
     ];
     for (state, expected) in cases {
-        assert_eq!(RunStatus::from_control_state(&state), expected, "state={state}");
+        assert_eq!(
+            RunStatus::from_control_state(&state),
+            expected,
+            "state={state}"
+        );
     }
 }
 

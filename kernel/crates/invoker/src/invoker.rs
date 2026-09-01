@@ -1048,8 +1048,7 @@ impl PluginInvokerImpl {
             let host_ref: Option<&dyn agentos_native_sdk::HostServices> = host_svc
                 .as_ref()
                 .map(|h| h as &dyn agentos_native_sdk::HostServices);
-            let r = loader.execute(&pid, &plugin_ctx, host_ref);
-            r
+            loader.execute(&pid, &plugin_ctx, host_ref)
         })
         .await
         .map_err(|join_err| PluginError {

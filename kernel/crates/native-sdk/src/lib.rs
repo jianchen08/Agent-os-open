@@ -68,8 +68,12 @@ pub trait HostServices: Send + Sync {
     /// - 返回值：exe 内部缓冲（exe 堆分配/释放），借给 dll 只读消费；
     ///   dll **立即**解析（转 Value/拷贝），不存引用、不释放——下次同 host 调用
     ///   会覆盖缓冲。`&str` 生命周期与 `&self` 绑定，借用检查强制消费内完成。
-    fn call_capability(&self, capability: &str, method: &str, params_json: &str)
-        -> Result<&str, String>;
+    fn call_capability(
+        &self,
+        capability: &str,
+        method: &str,
+        params_json: &str,
+    ) -> Result<&str, String>;
 }
 
 // ── PipelinePlugin：插件实现的主契约 ───────────────────────────────────

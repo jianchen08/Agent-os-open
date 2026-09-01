@@ -39,13 +39,21 @@ fn rss_mb() -> f64 {
 }
 
 fn main() {
-    let dir = std::path::PathBuf::from(
-        std::env::args().nth(1).unwrap_or_else(|| "src/bin".into()),
-    );
+    let dir = std::path::PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "src/bin".into()));
     let mut walk = Vec::new();
     fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        const SKIP: &[&str] = &["node_modules", ".venv", "__pycache__", "dsh_plugins", "runtime", ".venv-hindsight", "target"];
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        const SKIP: &[&str] = &[
+            "node_modules",
+            ".venv",
+            "__pycache__",
+            "dsh_plugins",
+            "runtime",
+            ".venv-hindsight",
+            "target",
+        ];
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -69,7 +77,11 @@ fn main() {
             manifests.push(m);
         }
     }
-    println!("stage1 parsed {} manifests rss={:.1}MB", manifests.len(), rss_mb());
+    println!(
+        "stage1 parsed {} manifests rss={:.1}MB",
+        manifests.len(),
+        rss_mb()
+    );
     std::thread::sleep(std::time::Duration::from_secs(5));
 
     // 模拟 loader cache（clone）
@@ -84,25 +96,28 @@ fn main() {
     std::thread::sleep(std::time::Duration::from_secs(5));
 
     // 模拟 AppState config（to_value System/Pipeline）
-    let agents: Vec<serde_json::Value> = manifests.iter()
+    let agents: Vec<serde_json::Value> = manifests
+        .iter()
         .filter(|m| m.plugin_type == agentos_core::traits::PluginType::System)
         .map(|m| serde_json::to_value(m).unwrap_or_default())
         .collect();
-    let pipelines: Vec<serde_json::Value> = manifests.iter()
+    let pipelines: Vec<serde_json::Value> = manifests
+        .iter()
         .filter(|m| m.plugin_type == agentos_core::traits::PluginType::Pipeline)
         .map(|m| serde_json::to_value(m).unwrap_or_default())
         .collect();
-    let config = serde_json::json!({"agents": agents, "pipelines": pipelines, "tools": [], "routes": {}});
+    let config =
+        serde_json::json!({"agents": agents, "pipelines": pipelines, "tools": [], "routes": {}});
     println!("stage3 AppState config rss={:.1}MB", rss_mb());
     std::thread::sleep(std::time::Duration::from_secs(5));
 
     // 模拟 manifests_shared clone
-    let shared = manifests.clone();
+    let _shared = manifests.clone();
     println!("stage4 shared clone rss={:.1}MB", rss_mb());
     std::thread::sleep(std::time::Duration::from_secs(5));
 
     // 模拟 enabled_manifests clone
-    let enabled: Vec<PluginManifest> = manifests.iter().cloned().collect();
+    let _enabled: Vec<PluginManifest> = manifests.to_vec();
     println!("stage5 enabled clone rss={:.1}MB", rss_mb());
     std::thread::sleep(std::time::Duration::from_secs(5));
 

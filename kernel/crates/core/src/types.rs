@@ -426,7 +426,10 @@ impl RunStatus {
         if truthy("suspended") {
             return Self::Suspended;
         }
-        match final_state.get("router.stop_reason").and_then(|v| v.as_str()) {
+        match final_state
+            .get("router.stop_reason")
+            .and_then(|v| v.as_str())
+        {
             Some("user_requested") | Some("task_cancelled") | Some("task_deleted") => {
                 Self::Cancelled
             }

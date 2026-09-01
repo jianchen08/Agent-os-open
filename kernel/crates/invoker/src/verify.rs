@@ -88,10 +88,7 @@ pub fn parse_actual_tools(raw: &serde_json::Value) -> (Vec<ActualTool>, usize) {
 /// G2 对照声明（裸名）前必须剥掉该前缀，否则合宿成员 100% 误报 missing 漂移
 /// （08-31 实测：三 SDK-only 插件入 light 组后 task_manage/memory 全被剔除）。
 /// 只剥 `{plugin_id}.` 前缀；其余名原样保留（独占宿主/外部 MCP 无前缀）。
-pub fn normalize_member_actual_tools(
-    actual: Vec<ActualTool>,
-    plugin_id: &str,
-) -> Vec<ActualTool> {
+pub fn normalize_member_actual_tools(actual: Vec<ActualTool>, plugin_id: &str) -> Vec<ActualTool> {
     let prefix = format!("{plugin_id}.");
     actual
         .into_iter()
@@ -432,21 +429,45 @@ mod tests {
     #[test]
     fn normalize_member_actual_tools_strips_own_prefix() {
         let actual = vec![
-            ActualTool { name: "task_manage_tool.task_manage".into(), description: Some("d".into()), input_schema: json!({"type":"object"}) },
-            ActualTool { name: "task_manage_tool.task_submit".into(), description: None, input_schema: json!({}) },
+            ActualTool {
+                name: "task_manage_tool.task_manage".into(),
+                description: Some("d".into()),
+                input_schema: json!({"type":"object"}),
+            },
+            ActualTool {
+                name: "task_manage_tool.task_submit".into(),
+                description: None,
+                input_schema: json!({}),
+            },
         ];
         let norm = normalize_member_actual_tools(actual, "task_manage_tool");
         assert_eq!(norm[0].name, "task_manage");
-        assert_eq!(norm[0].description.as_deref(), Some("d"), "前缀归一不得丢描述");
-        assert_eq!(norm[0].input_schema, json!({"type":"object"}), "前缀归一不得丢schema");
+        assert_eq!(
+            norm[0].description.as_deref(),
+            Some("d"),
+            "前缀归一不得丢描述"
+        );
+        assert_eq!(
+            norm[0].input_schema,
+            json!({"type":"object"}),
+            "前缀归一不得丢schema"
+        );
         assert_eq!(norm[1].name, "task_submit");
     }
 
     #[test]
     fn normalize_member_actual_tools_keeps_unrelated_names() {
         let actual = vec![
-            ActualTool { name: "host_unrelated_tool.other".into(), description: None, input_schema: json!({}) },
-            ActualTool { name: "plain_tool".into(), description: None, input_schema: json!({}) },
+            ActualTool {
+                name: "host_unrelated_tool.other".into(),
+                description: None,
+                input_schema: json!({}),
+            },
+            ActualTool {
+                name: "plain_tool".into(),
+                description: None,
+                input_schema: json!({}),
+            },
         ];
         let norm = normalize_member_actual_tools(actual, "task_manage_tool");
         assert_eq!(norm[0].name, "host_unrelated_tool.other");

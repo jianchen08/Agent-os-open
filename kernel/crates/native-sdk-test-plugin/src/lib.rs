@@ -34,6 +34,12 @@ impl TestPlugin {
     }
 }
 
+impl Default for TestPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PipelinePlugin for TestPlugin {
     fn execute(&self, ectx: &ExecContext) -> Result<&str, String> {
         // B2：tool_call 约定字段 → 工具调用语义（与 pipeline 同一 execute 入口）。

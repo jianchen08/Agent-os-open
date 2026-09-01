@@ -890,7 +890,11 @@ pub async fn sync_once_with_store(
                     "G2 复验观测失败（重试后仍 spawn/上报不可用）——按声明重注册，账本标记校验未完成，待复验"
                 );
             }
-            crate::plugin_lifecycle::reenable_plugin_capabilities(&outcome.manifest, registry, scopes)
+            crate::plugin_lifecycle::reenable_plugin_capabilities(
+                &outcome.manifest,
+                registry,
+                scopes,
+            )
         } else {
             crate::plugin_lifecycle::reenable_plugin_capabilities(m, registry, scopes)
         };

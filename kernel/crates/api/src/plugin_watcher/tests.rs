@@ -889,7 +889,10 @@ async fn g2_verify_light_member_namespaced_names_not_drift() {
     // 合宿成员上报的工具名带 "{plugin_id}." 前缀（宿主按 §4.2 命名空间注册）：
     // G2 对照声明（裸名）前必须归一化前缀，否则 100% 误判 missing 漂移剔光工具
     // （08-31 实测：三 SDK-only 插件入 light 组后 task_manage/memory 全被剔除）。
-    let mut invoker = MockInvoker::new(vec![mk_manifest_light("task_manage_tool", &["task_manage"])]);
+    let mut invoker = MockInvoker::new(vec![mk_manifest_light(
+        "task_manage_tool",
+        &["task_manage"],
+    )]);
     invoker.list_tools.insert(
         "task_manage_tool".into(),
         json!({ "tools": [{"name": "task_manage_tool.task_manage", "description": "任务管理"}] }),
@@ -905,7 +908,8 @@ async fn g2_verify_light_member_namespaced_names_not_drift() {
 }
 
 #[tokio::test]
-async fn g2_verify_drift_sanitizes_rejected_tool_only() {    let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "ghost"], false)]);
+async fn g2_verify_drift_sanitizes_rejected_tool_only() {
+    let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1", "ghost"], false)]);
     invoker.list_tools.insert(
         "p1".into(),
         json!({ "tools": [{"name": "t1", "description": "t1"}] }),

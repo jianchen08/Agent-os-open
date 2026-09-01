@@ -17,20 +17,26 @@ impl HostServices for ReplyOk {
             // 借用协议（跨分配器契约）：返回实现方持有的 &str。
             // 单调用串行 + &self 生命周期，static 推导安全（测试桩数据不可变）。
             if capability == "tool-executor" {
-                return Ok(r#"{"success":true,"data":{"content":"hello tool result"},"tool":{"name":"file_read"}}"#);
+                return Ok(
+                    r#"{"success":true,"data":{"content":"hello tool result"},"tool":{"name":"file_read"}}"#,
+                );
             }
         }
         Ok(r#"{"ok":true}"#)
     }
 }
 
+// 取证期对齐真机 mimalloc 分配器用；当前断言不依赖，保留待再次取证启用
+#[allow(dead_code)]
 static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[test]
 fn tool_round_tokio_blocking_no_segfault() {
     let base = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../plugins/shared");
-    let tc = std::path::Path::new(base).join("pipeline/core/tool_core/pipeline_tool_core_native.dll");
-    let sg = std::path::Path::new(base).join("pipeline/output/spill_guard/pipeline_spill_guard_native.dll");
+    let tc =
+        std::path::Path::new(base).join("pipeline/core/tool_core/pipeline_tool_core_native.dll");
+    let sg = std::path::Path::new(base)
+        .join("pipeline/output/spill_guard/pipeline_spill_guard_native.dll");
     let loader = Arc::new(NativePluginLoader::new());
     loader.load("pipeline_tool_core", &tc).expect("load tc");
     loader.load("pipeline_spill_guard", &sg).expect("load sg");
@@ -68,17 +74,15 @@ fn tool_round_tokio_blocking_no_segfault() {
         }
         {
             let host = ReplyOk;
-            let out = loader.execute("pipeline_spill_guard", &ctx_tc, Some(&host)).expect("spill ok");
+            let out = loader
+                .execute("pipeline_spill_guard", &ctx_tc, Some(&host))
+                .expect("spill ok");
             eprintln!("spill_guard -> {} bytes", out.len());
         }
     }
 }
 
-fn loader_clone_execute(
-    loader: Arc<NativePluginLoader>,
-    ctx: PluginCtx,
-    host: ReplyOk,
-) -> String {
+fn loader_clone_execute(loader: Arc<NativePluginLoader>, ctx: PluginCtx, host: ReplyOk) -> String {
     loader
         .execute("pipeline_tool_core", &ctx, Some(&host))
         .expect("tool_core ok")

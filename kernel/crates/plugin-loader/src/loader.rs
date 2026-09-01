@@ -628,13 +628,12 @@ impl PluginLoader for PluginLoaderImpl {
                     source: Some("plugin-loader".to_string()),
                 }
             })?;
-            self.read_manifest(&path).map_err(|e| {
-                agentos_core::types::PluginError {
+            self.read_manifest(&path)
+                .map_err(|e| agentos_core::types::PluginError {
                     message: format!("plugin manifest unreadable: {}: {e}", path.display()),
                     code: Some("MANIFEST_READ".to_string()),
                     source: Some("plugin-loader".to_string()),
-                }
-            })?
+                })?
         };
 
         // 组合插件不实例化（ADR ⑥），只标记为 Active
@@ -756,7 +755,11 @@ impl PluginLoader for PluginLoaderImpl {
         };
         self.read_manifest(&path)
             .map_err(|e| {
-                warn!("get_manifest 读盘失败（按未发现处理）: {}: {}", path.display(), e);
+                warn!(
+                    "get_manifest 读盘失败（按未发现处理）: {}: {}",
+                    path.display(),
+                    e
+                );
                 e
             })
             .ok()
@@ -991,7 +994,9 @@ mod tests {
             .replace("Test Plugin slim_cache", "Edited Manifest Name");
         std::fs::write(&manifest_path, edited).unwrap();
 
-        let m = loader.get_manifest("slim_cache").expect("get_manifest 应可读");
+        let m = loader
+            .get_manifest("slim_cache")
+            .expect("get_manifest 应可读");
         assert_eq!(m.name, "Edited Manifest Name", "按需读盘应读到磁盘最新声明");
         assert_eq!(m.id, "slim_cache");
 

@@ -1080,7 +1080,13 @@ mod tests {
             .with_conn(|conn| {
                 setup_notes(conn);
                 for i in 0..3 {
-                    insert_note(conn, &format!("n{i}"), &format!("c{i}"), i as f64, "default");
+                    insert_note(
+                        conn,
+                        &format!("n{i}"),
+                        &format!("c{i}"),
+                        i as f64,
+                        "default",
+                    );
                 }
                 // limit 超上限 → 钳到 500；offset 负数 → 0
                 let out = query_rows_inner(
@@ -1144,10 +1150,10 @@ mod tests {
         let store = agentos_engine::SqliteStore::open_memory().unwrap();
         store
             .with_conn(|conn| {
-                conn.execute_batch("CREATE TABLE t_allblob (a BLOB, b BLOB)").unwrap();
-                let err =
-                    query_rows_inner(conn, "t_allblob", &ListParams::default(), "default")
-                        .unwrap_err();
+                conn.execute_batch("CREATE TABLE t_allblob (a BLOB, b BLOB)")
+                    .unwrap();
+                let err = query_rows_inner(conn, "t_allblob", &ListParams::default(), "default")
+                    .unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 Ok::<(), String>(())
             })
@@ -1279,7 +1285,8 @@ mod tests {
                 insert_note(conn, "b", "y", 3.0, "default");
                 insert_note(conn, "c", "z", 2.0, "default");
                 // 默认主键 asc
-                let out = query_rows_inner(conn, "notes", &ListParams::default(), "default").unwrap();
+                let out =
+                    query_rows_inner(conn, "notes", &ListParams::default(), "default").unwrap();
                 let ids: Vec<&str> = out["rows"]
                     .as_array()
                     .unwrap()
@@ -1352,16 +1359,19 @@ mod tests {
         store
             .with_conn(|conn| {
                 // 无主键表：默认无 ORDER BY，仍可查询
-                conn.execute_batch("CREATE TABLE t_nopk (a TEXT, b TEXT)").unwrap();
+                conn.execute_batch("CREATE TABLE t_nopk (a TEXT, b TEXT)")
+                    .unwrap();
                 conn.execute("INSERT INTO t_nopk (a, b) VALUES ('x', '1')", [])
                     .unwrap();
                 conn.execute("INSERT INTO t_nopk (a, b) VALUES ('y', '2')", [])
                     .unwrap();
-                let out = query_rows_inner(conn, "t_nopk", &ListParams::default(), "default").unwrap();
+                let out =
+                    query_rows_inner(conn, "t_nopk", &ListParams::default(), "default").unwrap();
                 assert_eq!(out["total"], 2);
                 // 表不存在 → 404
-                let err = query_rows_inner(conn, "no_such_table", &ListParams::default(), "default")
-                    .unwrap_err();
+                let err =
+                    query_rows_inner(conn, "no_such_table", &ListParams::default(), "default")
+                        .unwrap_err();
                 assert!(matches!(err, ApiError::NotFound { .. }));
                 Ok::<(), String>(())
             })
@@ -1403,9 +1413,17 @@ mod tests {
         let store = agentos_engine::SqliteStore::open_memory().unwrap();
         store
             .with_conn(|conn| {
-                conn.execute_batch("CREATE TABLE t_comp (a TEXT, b TEXT, v TEXT, PRIMARY KEY (a, b))")
-                    .unwrap();
-                let out = insert_row_inner(conn, "t_comp", &json!({"a": "x", "b": "y", "v": "1"}), "default").unwrap();
+                conn.execute_batch(
+                    "CREATE TABLE t_comp (a TEXT, b TEXT, v TEXT, PRIMARY KEY (a, b))",
+                )
+                .unwrap();
+                let out = insert_row_inner(
+                    conn,
+                    "t_comp",
+                    &json!({"a": "x", "b": "y", "v": "1"}),
+                    "default",
+                )
+                .unwrap();
                 assert_eq!(out["row_id"], "x,y");
                 // 带空格的主键值 trim 后匹配
                 let row = get_row_inner(conn, "t_comp", "x, y", "default").unwrap();
@@ -1414,7 +1432,8 @@ mod tests {
                 let err = get_row_inner(conn, "t_comp", "x", "default").unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // 更新
-                let out = update_row_inner(conn, "t_comp", "x,y", &json!({"v": "2"}), "default").unwrap();
+                let out =
+                    update_row_inner(conn, "t_comp", "x,y", &json!({"v": "2"}), "default").unwrap();
                 assert_eq!(out["row"]["v"], "2");
                 // 删除
                 let out = delete_row_inner(conn, "t_comp", "x,y", "default").unwrap();
@@ -1437,13 +1456,17 @@ mod tests {
                 let err = insert_row_inner(conn, "notes", &json!([1, 2]), "default").unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // 未知列 → 400
-                let err = insert_row_inner(conn, "notes", &json!({"nope": 1}), "default").unwrap_err();
+                let err =
+                    insert_row_inner(conn, "notes", &json!({"nope": 1}), "default").unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // BLOB 列写入 → 400
-                let err = insert_row_inner(conn, "notes", &json!({"id": "b1", "data": "x"}), "default").unwrap_err();
+                let err =
+                    insert_row_inner(conn, "notes", &json!({"id": "b1", "data": "x"}), "default")
+                        .unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // 表不存在 → 404
-                let err = insert_row_inner(conn, "no_such", &json!({"a": 1}), "default").unwrap_err();
+                let err =
+                    insert_row_inner(conn, "no_such", &json!({"a": 1}), "default").unwrap_err();
                 assert!(matches!(err, ApiError::NotFound { .. }));
                 Ok::<(), String>(())
             })
@@ -1455,9 +1478,11 @@ mod tests {
         let store = agentos_engine::SqliteStore::open_memory().unwrap();
         store
             .with_conn(|conn| {
-                conn.execute_batch("CREATE TABLE t_num (id INTEGER PRIMARY KEY, v TEXT)").unwrap();
+                conn.execute_batch("CREATE TABLE t_num (id INTEGER PRIMARY KEY, v TEXT)")
+                    .unwrap();
                 // 数值主键 → row_id 为十进制字符串
-                let out = insert_row_inner(conn, "t_num", &json!({"id": 42, "v": "x"}), "default").unwrap();
+                let out = insert_row_inner(conn, "t_num", &json!({"id": 42, "v": "x"}), "default")
+                    .unwrap();
                 assert_eq!(out["row_id"], "42");
                 assert_eq!(out["row"]["v"], "x");
                 // 主键缺失 → last_insert_rowid（显式 id 42 已消耗 rowid，下一个为 43）
@@ -1512,10 +1537,12 @@ mod tests {
                 insert_note(conn, "u1", "old", 1.0, "t1");
                 // 无主键表 → 400
                 conn.execute_batch("CREATE TABLE t_nopk3 (a TEXT)").unwrap();
-                let err = update_row_inner(conn, "t_nopk3", "x", &json!({"a": "y"}), "default").unwrap_err();
+                let err = update_row_inner(conn, "t_nopk3", "x", &json!({"a": "y"}), "default")
+                    .unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // 主键数量不匹配 → 400
-                let err = update_row_inner(conn, "notes", "a,b", &json!({"content": "x"}), "t1").unwrap_err();
+                let err = update_row_inner(conn, "notes", "a,b", &json!({"content": "x"}), "t1")
+                    .unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // updates 非对象 → 400
                 let err = update_row_inner(conn, "notes", "u1", &json!([1]), "t1").unwrap_err();
@@ -1524,19 +1551,25 @@ mod tests {
                 let err = update_row_inner(conn, "notes", "u1", &json!({}), "t1").unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // 未知列 → 400
-                let err = update_row_inner(conn, "notes", "u1", &json!({"nope": 1}), "t1").unwrap_err();
+                let err =
+                    update_row_inner(conn, "notes", "u1", &json!({"nope": 1}), "t1").unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // BLOB 列 → 400
-                let err = update_row_inner(conn, "notes", "u1", &json!({"data": "x"}), "t1").unwrap_err();
+                let err =
+                    update_row_inner(conn, "notes", "u1", &json!({"data": "x"}), "t1").unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // tenant_id 修改 → 400
-                let err = update_row_inner(conn, "notes", "u1", &json!({"tenant_id": "evil"}), "t1").unwrap_err();
+                let err =
+                    update_row_inner(conn, "notes", "u1", &json!({"tenant_id": "evil"}), "t1")
+                        .unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // 不存在 → 404
-                let err = update_row_inner(conn, "notes", "nope", &json!({"content": "x"}), "t1").unwrap_err();
+                let err = update_row_inner(conn, "notes", "nope", &json!({"content": "x"}), "t1")
+                    .unwrap_err();
                 assert!(matches!(err, ApiError::NotFound { .. }));
                 // 租户隔离：错误租户 → 404（affected 0）
-                let err = update_row_inner(conn, "notes", "u1", &json!({"content": "x"}), "t2").unwrap_err();
+                let err = update_row_inner(conn, "notes", "u1", &json!({"content": "x"}), "t2")
+                    .unwrap_err();
                 assert!(matches!(err, ApiError::NotFound { .. }));
                 Ok::<(), String>(())
             })
@@ -1578,8 +1611,11 @@ mod tests {
         let store = agentos_engine::SqliteStore::open_memory().unwrap();
         store
             .with_conn(|conn| {
-                conn.execute_batch("CREATE TABLE t_nopk5 (a TEXT, b TEXT)").unwrap();
-                let out = insert_row_inner(conn, "t_nopk5", &json!({"a": "x", "b": "y"}), "default").unwrap();
+                conn.execute_batch("CREATE TABLE t_nopk5 (a TEXT, b TEXT)")
+                    .unwrap();
+                let out =
+                    insert_row_inner(conn, "t_nopk5", &json!({"a": "x", "b": "y"}), "default")
+                        .unwrap();
                 assert!(out["row_id"].is_null());
                 assert_eq!(out["row"]["a"], "x");
                 assert_eq!(out["row"]["b"], "y");
@@ -1594,14 +1630,16 @@ mod tests {
         let store = agentos_engine::SqliteStore::open_memory().unwrap();
         store
             .with_conn(|conn| {
-                conn.execute_batch("CREATE TABLE t_dyn (id TEXT PRIMARY KEY, payload)").unwrap();
-                conn.execute(
-                    "INSERT INTO t_dyn (id, payload) VALUES ('d1', X'0102')",
-                    [],
-                )
-                .unwrap();
-                let out = query_rows_inner(conn, "t_dyn", &ListParams::default(), "default").unwrap();
-                assert!(out["rows"][0]["payload"].is_null(), "BLOB 值应返回 null: {out}");
+                conn.execute_batch("CREATE TABLE t_dyn (id TEXT PRIMARY KEY, payload)")
+                    .unwrap();
+                conn.execute("INSERT INTO t_dyn (id, payload) VALUES ('d1', X'0102')", [])
+                    .unwrap();
+                let out =
+                    query_rows_inner(conn, "t_dyn", &ListParams::default(), "default").unwrap();
+                assert!(
+                    out["rows"][0]["payload"].is_null(),
+                    "BLOB 值应返回 null: {out}"
+                );
                 Ok::<(), String>(())
             })
             .unwrap();
@@ -1649,7 +1687,8 @@ mod tests {
                 let err = execute_sql_inner(conn, "SELECT * FROM no_such", true).unwrap_err();
                 assert!(matches!(err, ApiError::BadRequest { .. }));
                 // 读：columns + rows（BLOB 列 → null）
-                let out = execute_sql_inner(conn, "SELECT id, content, data FROM notes", true).unwrap();
+                let out =
+                    execute_sql_inner(conn, "SELECT id, content, data FROM notes", true).unwrap();
                 assert_eq!(out["columns"], json!(["id", "content", "data"]));
                 assert_eq!(out["rows"][0][0], "e1");
                 assert_eq!(out["rows"][0][1], "hello");

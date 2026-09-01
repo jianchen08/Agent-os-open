@@ -1853,7 +1853,7 @@ async fn set_run_pipeline_failure_counts_persist_failure_and_run_continues() {
 /// 构造带"条件 loop 分支 + 兜底 end"的 step 路由：验证路由按序首中即停、
 /// 条件分支命中时循环续跑、未命中时兜底 end。
 fn routed_loop_body(steps: Vec<StepItem>) -> PipelineConfig {
-    let config = PipelineConfig {
+    PipelineConfig {
         name: "routed_loop".into(),
         loop_bodies: vec![LoopBody {
             id: "main".into(),
@@ -1885,8 +1885,7 @@ fn routed_loop_body(steps: Vec<StepItem>) -> PipelineConfig {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
-    };
-    config
+    }
 }
 
 #[tokio::test]

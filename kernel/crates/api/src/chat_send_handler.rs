@@ -971,7 +971,7 @@ mod tests {
         let pid = res["pipeline_id"].as_str().unwrap().to_string();
         let fields = store.load_pipeline_state(&pid, "default").await.unwrap();
         assert!(
-            fields.get("agent.id").is_none(),
+            !fields.contains_key("agent.id"),
             "内核不得擅自写身份键：{:?}",
             fields.get("agent.id")
         );

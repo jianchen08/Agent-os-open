@@ -1418,11 +1418,11 @@ fn message_status_from_blob(fa: &serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::assistant_authoritative_seq;
+    use super::emit_round_finished_event;
     use super::find_target_user_seq;
     use super::message_status_from_blob;
     use super::resolve_dispatch_agent;
     use super::resolve_pipeline_id_for_thread;
-    use super::emit_round_finished_event;
     use super::EngineDispatcher;
     use agentos_core::traits::StorageBackend;
     use agentos_core::traits::{MessageQueryOpts, SessionListFilter};

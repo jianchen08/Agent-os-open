@@ -131,7 +131,11 @@ mod tests {
     #[test]
     fn install_sets_purge_delay_zero() {
         install_global_allocator();
-        assert_eq!(purge_delay(), 0, "install 后 purge_delay 应为 0（立即归还）");
+        assert_eq!(
+            purge_delay(),
+            0,
+            "install 后 purge_delay 应为 0（立即归还）"
+        );
     }
 
     /// arena_eager_commit / arena_reserve 调优生效：install 后 eager_commit 为 0、
@@ -145,6 +149,10 @@ mod tests {
     fn install_sets_arena_tuning() {
         install_global_allocator();
         assert_eq!(arena_eager_commit(), 0, "install 后 eager_commit 应为 0");
-        assert_eq!(arena_reserve_kib(), 128 * 1024, "install 后 reserve 应为 128MiB");
+        assert_eq!(
+            arena_reserve_kib(),
+            128 * 1024,
+            "install 后 reserve 应为 128MiB"
+        );
     }
 }

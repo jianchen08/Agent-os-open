@@ -647,7 +647,7 @@ mod tests {
         // 工具集差异：磁盘有注册表无（净化剔除主信号）+ 注册表有磁盘无
         let reg = manifest_with_tools("a", &["t1", "t9"]);
         let disk = manifest_with_tools("a", &["t1", "t2"]);
-        let mut d = registry_disk_diffs(&reg, &disk);
+        let d = registry_disk_diffs(&reg, &disk);
         assert!(d.iter().any(|x| x.kind == "missing_tool" && x.tool == "t2"));
         assert!(d.iter().any(|x| x.kind == "extra_tool" && x.tool == "t9"));
         // schema 摘要差异（同名工具）

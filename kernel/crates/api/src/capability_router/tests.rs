@@ -1036,15 +1036,13 @@ async fn test_tool_executor_missing_invoker_returns_protocol_error() {
     }
 }
 
-// ── M2：service-registry capability（用真实内存 SqliteStore 验证端到端）──
+// ── event-bus.emit_domain（ADR 2026-08-28 事件下沉底座，用真实内存 SqliteStore 验证端到端）──
 
-/// 构造一个注入了内存 store 的路由器。
-// ── event-bus.emit_domain（ADR 2026-08-28 事件下沉底座） ──────────────
+type DomainSink = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(String, serde_json::Value)>)>>>;
 
 #[tokio::test]
 async fn emit_domain_broadcasts_to_domain_broadcaster() {
-    let got: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(String, serde_json::Value)>)>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let got: DomainSink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = got.clone();
     let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
         .with_domain_broadcaster(Arc::new(

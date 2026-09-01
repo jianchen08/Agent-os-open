@@ -1810,10 +1810,7 @@ mod tests {
         async fn create_user(&self, _user: &UserRecord) -> Result<(), StorageError> {
             unreachable!("默认面测试不调用")
         }
-        async fn get_user_by_id(
-            &self,
-            _user_id: &str,
-        ) -> Result<Option<UserRecord>, StorageError> {
+        async fn get_user_by_id(&self, _user_id: &str) -> Result<Option<UserRecord>, StorageError> {
             unreachable!("默认面测试不调用")
         }
         async fn get_user_by_username(
@@ -1857,79 +1854,33 @@ mod tests {
         let s = BareStore;
         // run/pipeline 投影族默认：Ok / 空集
         assert!(s.set_run_pipeline("r", "p").await.is_ok());
-        assert!(
-            s.list_runs_by_pipeline("p", "t")
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(s.list_runs_by_pipeline("p", "t").await.unwrap().is_empty());
         assert!(s.list_pipelines("t", None, 10).await.unwrap().is_empty());
         assert!(s.delete_pipeline("p").await.is_ok());
         // state 投影族默认：no-op / 空 map / None
-        assert!(
-            s.apply_messages_ops_to_table("p", "t", &[])
-                .await
-                .is_ok()
-        );
-        assert!(
-            s.upsert_state_field("p", "t", "k", &serde_json::json!(1))
-                .await
-                .is_ok()
-        );
-        assert!(
-            s.load_pipeline_state("p", "t")
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            s.save_checkpoint("p", "t", 1, &serde_json::json!({}))
-                .await
-                .is_ok()
-        );
-        assert!(
-            s.load_latest_checkpoint("p", "t")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            s.list_state_pipeline_ids("t")
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            s.load_message_history("p", "t")
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(s.apply_messages_ops_to_table("p", "t", &[]).await.is_ok());
+        assert!(s
+            .upsert_state_field("p", "t", "k", &serde_json::json!(1))
+            .await
+            .is_ok());
+        assert!(s.load_pipeline_state("p", "t").await.unwrap().is_empty());
+        assert!(s
+            .save_checkpoint("p", "t", 1, &serde_json::json!({}))
+            .await
+            .is_ok());
+        assert!(s.load_latest_checkpoint("p", "t").await.unwrap().is_none());
+        assert!(s.list_state_pipeline_ids("t").await.unwrap().is_empty());
+        assert!(s.load_message_history("p", "t").await.unwrap().is_empty());
         // pending 队列族默认：no-op / None / 空 / false / 0
         let rec = bare_pending_input();
         assert!(s.enqueue_pending_input("t", "p", &rec).await.is_ok());
-        assert!(
-            s.pop_pending_input("t", "p")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            s.list_pending_inputs("t", "p")
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            !s.update_pending_input_content("t", "p", "i", "x")
-                .await
-                .unwrap()
-        );
-        assert!(
-            !s.delete_pending_input("t", "p", "i")
-                .await
-                .unwrap()
-        );
+        assert!(s.pop_pending_input("t", "p").await.unwrap().is_none());
+        assert!(s.list_pending_inputs("t", "p").await.unwrap().is_empty());
+        assert!(!s
+            .update_pending_input_content("t", "p", "i", "x")
+            .await
+            .unwrap());
+        assert!(!s.delete_pending_input("t", "p", "i").await.unwrap());
         assert_eq!(s.clear_pending_inputs("t", "p").await.unwrap(), 0);
     }
 }

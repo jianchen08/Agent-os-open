@@ -2391,10 +2391,10 @@ async fn test_lazy_member_boxed_into_live_host_triggers_respawn() {
         .mcp_clients
         .write()
         .insert(host_key.clone(), Arc::clone(&live_arc));
-    invoker.spawned_members.write().insert(
-        host_key.clone(),
-        invoker.host_members(&host_key),
-    );
+    invoker
+        .spawned_members
+        .write()
+        .insert(host_key.clone(), invoker.host_members(&host_key));
     invoker.fingerprints.write().insert(
         host_key.clone(),
         (invoker.host_union_fingerprint(&host_key), Instant::now()),
