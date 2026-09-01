@@ -23,6 +23,7 @@ E2E 路径矩阵：任务执行闭环（ADR 2026-08-28-task-closure-three-signal
   D2 评估失败任务 failed → submit 重跑        → 修复后评估通过 → completed
   S2 指标缺必填 input_params                  → 提交期拒绝（INVALID_METRIC_PARAMS）→ 修正重提成功
   S1 运行中 stop_generation                   → 循环有界停止（不无限执行）
+  R1 完成率混合批：8 任务并发（6 成功 + 2 设计失败）→ 逐任务结局映射 + 聚合完成率 6/8
 
 真实 LLM 冒烟车道不在此文件（保留 test_12 的 skipif 门禁形态）；本套件为
 脚本车道，无需任何 API key。
@@ -94,6 +95,13 @@ _M_S2C = "E2E-MTX-S2X"
 _M_S1 = "E2E-MTX-S1"
 _M_P1P = "E2E-MTX-P1P"
 _M_P1C = "E2E-MTX-P1C"
+
+# 完成率混合批（R1）marker：S1..S6 成功设计（bash+task_evaluate）/ F1 bash 真
+# 失败从不评估 / F2 bash 成功但从不评估（提醒耗尽）。与路径矩阵分属不同用例
+# （autouse 先 reset stub），仅本批内部校验子串不重叠。
+_M_RATE_S = [f"E2E-RATE-S{i}" for i in range(1, 7)]
+_M_RATE_F1 = "E2E-RATE-F1"
+_M_RATE_F2 = "E2E-RATE-F2"
 
 _BASH_ECHO_OK = "echo E2E_BASH_OK > result.txt"
 
@@ -234,8 +242,9 @@ def stub_kernel(stub_llm):
             # debug 日志：停止链路（dispatch_stop 无 run 分支是 debug 级）可诊断
             "RUST_LOG": "info,agentos_api=debug,agentos_engine=debug",
             # 隔离环境上限放宽：全矩阵连跑时前序场景容器销毁滞后（clear-all
-            # best-effort），默认 6/6 会让后续场景 bash 被隔离守卫拦截
-            "AO_MAX_ENVIRONMENTS": "12",
+            # best-effort），默认 6/6 会让后续场景 bash 被隔离守卫拦截；
+            # 完成率混合批（R1）8 任务并发各占环境，放宽到 16 留余量
+            "AO_MAX_ENVIRONMENTS": "16",
         }
     )
     with open(log_path, "w", encoding="utf-8") as log_fh:
@@ -623,6 +632,51 @@ def _register_general_agent_scripts(stub: ScriptedLLMUpstream) -> None:
 
 
 
+
+
+def _register_rate_batch_scripts(stub: ScriptedLLMUpstream) -> None:
+    """完成率混合批（R1）脚本：S1..S6 = bash 成功 + task_evaluate（completed）；
+    F1 = bash 真失败从不评估（failed）；F2 = bash 成功但从不评估、提醒耗尽
+    （failed）。脚本名 == marker，request_count(marker) 按场景查命中。"""
+    for marker in _M_RATE_S:
+        stub.register(
+            marker,
+            marker,
+            [
+                tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+                tool_call_step(
+                    "task_evaluate",
+                    action="auto_complete",
+                    summary=f"{marker}：已生成 result.txt，任务完成。",
+                ),
+                text_step(f"{marker}：执行与评估均完成。"),
+            ],
+        )
+    stub.register(
+        _M_RATE_F1,
+        _M_RATE_F1,
+        [
+            tool_call_step(
+                "bash_execute", action="execute", command="ls e2e_rate_f1_missing_dir"
+            ),
+            text_step("RATE-F1 第 1 轮：命令执行失败了。"),
+            text_step("RATE-F1 第 2 轮：失败原因无法修复。"),
+            text_step("RATE-F1 第 3 轮：我声明本任务无法完成。"),
+        ],
+        default=text_step("RATE-F1 兜底轮：任务失败，无法继续。"),
+    )
+    stub.register(
+        _M_RATE_F2,
+        _M_RATE_F2,
+        [
+            tool_call_step("bash_execute", action="execute", command=_BASH_ECHO_OK),
+            text_step("RATE-F2 第 1 轮：我已完成任务工作。"),
+            text_step("RATE-F2 第 2 轮：工作确实已经全部完成。"),
+            text_step("RATE-F2 第 3 轮：再次确认任务已全部完成。"),
+            text_step("RATE-F2 第 4 轮：没有需要评估的内容。"),
+        ],
+        default=text_step("RATE-F2 兜底轮：任务已完成，无需进一步操作。"),
+    )
 
 
 def _project_row_by_title(kernel: StubKernel, token: str, title: str) -> dict[str, Any] | None:
@@ -1488,3 +1542,108 @@ class TestP1ProjectAttachWorkspace:
             f"产出应落位：项目文件夹 {merged_out} 或 worktree {kept_out}"
         )
         _assert_real_llm_ran(stub_kernel, matrix_token, child_id, child_state, "P1 子任务")
+
+
+# ============================================================
+# 完成率混合批（R1）
+# ============================================================
+
+
+class TestCompletionRateBatch:
+    """R1 完成率混合批：8 任务并发（6 成功设计 + 2 失败设计）→ 逐任务结局映射
+    + 聚合完成率（输入条件推导的精确值 6/8=75%，非拍脑袋阈值）。
+
+    比单任务路径多覆盖的行为面：并发批结局不串台（成功/失败互不污染）、
+    无任务滞留（收束率 100%）、完成率口径（completed / 全部派发）。
+    """
+
+    # 单批窗口（轮询上限；实测 8 任务并发 ~1-3 分钟）
+    _BATCH_WINDOW_SECONDS = 420
+
+    @pytest.mark.timeout(480)
+    def test_mixed_batch_reaches_design_completion_rate(
+        self, stub_kernel, matrix_token, stub_llm
+    ):
+        _register_rate_batch_scripts(stub_llm)
+
+        # 1. 批量创建（真实业务接口，background 并发派发独立管道）
+        task_ids: dict[str, str] = {}  # task_id -> marker
+        for marker in _M_RATE_S + [_M_RATE_F1, _M_RATE_F2]:
+            task_ids[
+                _create_task(
+                    stub_kernel,
+                    matrix_token,
+                    f"完成率批 {marker}",
+                    f"按场景标记执行并适时调用 task_evaluate 评估。场景标记：{marker}",
+                )
+            ] = marker
+        assert len(task_ids) == 8, f"应创建 8 个任务，实际 {len(task_ids)}"
+
+        # 2. 集体轮询至全部终态（收束率 100% 断言的数据基础）
+        seen: dict[str, list[str]] = {tid: [] for tid in task_ids}
+        terminal: dict[str, dict[str, Any]] = {}
+        deadline = time.time() + self._BATCH_WINDOW_SECONDS
+        while time.time() < deadline and len(terminal) < len(task_ids):
+            rows = _state_rows(stub_kernel, matrix_token)
+            for tid in task_ids:
+                if tid in terminal:
+                    continue
+                row = _row_by_pipeline(rows, tid)
+                if row is None:
+                    continue
+                state = _state(row)
+                status_now = str(state.get("task.status") or "")
+                if status_now and status_now not in seen[tid]:
+                    seen[tid].append(status_now)
+                if status_now in ("completed", "failed", "pending_evaluation"):
+                    terminal[tid] = state
+            time.sleep(_POLL_INTERVAL_SECONDS)
+
+        # 3. 逐任务结局映射（真门禁）：成功组 completed、失败组 failed 且不得假完成
+        completed: list[str] = []
+        failed: list[str] = []
+        for tid, marker in task_ids.items():
+            assert tid in terminal, (
+                f"收束率应 100%：{marker}（{tid}）未达终态，观测序列 {seen[tid]}"
+            )
+            state = terminal[tid]
+            final_status = str(state.get("task.status") or "")
+            if marker in _M_RATE_S:
+                assert final_status == "completed", (
+                    f"成功设计任务应 completed，实际 {final_status}，序列 {seen[tid]}"
+                )
+                completed.append(tid)
+            else:
+                assert final_status == "failed", (
+                    f"失败设计任务应 failed，实际 {final_status}，序列 {seen[tid]}"
+                )
+                assert "completed" not in seen[tid], (
+                    f"失败设计任务 {marker} 不得假完成，序列 {seen[tid]}"
+                )
+                failed.append(tid)
+            _assert_real_llm_ran(stub_kernel, matrix_token, tid, state, f"R1 {marker}")
+            assert not state.get("isolation.blocked"), (
+                f"{marker} 不应被隔离拦截，blocked={state.get('isolation.blocked')}"
+            )
+
+        # 4. 聚合完成率（输入混合推导的精确值 6/8）+ 场景均被真实命中
+        total = len(task_ids)
+        rate = len(completed) / total
+        assert len(completed) == len(_M_RATE_S), (
+            f"完成数应 {len(_M_RATE_S)}，实际 {len(completed)}"
+        )
+        assert len(failed) == 2, f"失败数应 2，实际 {len(failed)}"
+        assert rate == 6 / 8, f"完成率应 6/8=0.75，实际 {rate}"
+        for marker in task_ids.values():
+            assert stub_llm.request_count(marker) >= 2, (
+                f"场景 {marker} 应被真实命中（>=2 轮 LLM），实际 "
+                f"{stub_llm.request_count(marker)}（marker 串台/注入失败？）"
+            )
+
+        # 5. 逐任务核验报告（每个任务的真实终态与观测序列）
+        print(f"[rate] 完成率 {rate:.0%}（{len(completed)}/{total}）")
+        for tid, marker in task_ids.items():
+            print(
+                f"[rate]   {marker} task={tid} 终态={terminal[tid].get('task.status')} "
+                f"序列={seen[tid]} 轮数={stub_llm.request_count(marker)}"
+            )
