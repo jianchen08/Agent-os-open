@@ -61,9 +61,7 @@ def load_branch_coverage(coverage_file: Path) -> dict[str, bool]:
     has: dict[str, bool] = {}
     for cls in root.iter("class"):
         fn = cls.get("filename", "").replace("\\", "/")
-        found = any(
-            lne.get("condition-coverage") for lne in cls.iter("line")
-        )
+        found = any(lne.get("condition-coverage") for lne in cls.iter("line"))
         has[fn] = has.get(fn, False) or found
     return has
 
