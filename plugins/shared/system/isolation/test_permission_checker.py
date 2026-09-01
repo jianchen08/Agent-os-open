@@ -211,7 +211,13 @@ class TestPathUtils:
 
         checker = PermissionChecker(project_root=".")
         assert checker.resolve_path("rel/x.py") == os.path.normpath(os.path.abspath("rel/x.py"))
-        assert checker.resolve_path("C:/abs/x.py") == os.path.normpath("C:/abs/x.py")
+        # Windows 盘符路径：Windows 原样保留；POSIX 上 os.path.isabs 不认盘符
+        # （resolve_path 走 project_root 拼接），断言"不丢盘符标识"语义
+        resolved = checker.resolve_path("C:/abs/x.py")
+        if os.name == "nt":
+            assert resolved == os.path.normpath("C:/abs/x.py")
+        else:
+            assert resolved.endswith("C:/abs/x.py")
 
     def test_get_project_root(self) -> None:
         checker = PermissionChecker(project_root=str(Path().resolve()))

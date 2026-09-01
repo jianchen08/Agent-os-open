@@ -118,35 +118,33 @@ class TestValidateWorkspacePath:
     def test_empty_workspace_returns_none(self) -> None:
         assert validate_workspace_path("") is None
 
-    def test_windows_disk_root_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_MOD.os, "name", "nt")
+    def test_windows_disk_root_rejected(self) -> None:
+        # 盘符根目录按路径形态判定（不 patch os.name——Linux 上把全局 os 模块
+        # 补丁成 nt 会让任何 Path() 构造抛 NotImplementedError，pytest 进程
+        # 整体崩溃 INTERNALERROR）
         err = validate_workspace_path("C:\\")
         assert err and "磁盘根目录" in err
 
-    def test_unix_root_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_MOD.os, "name", "posix")
+    def test_unix_root_rejected(self) -> None:
         err = validate_workspace_path("/")
+        # "/" 命中磁盘根目录分支或系统目录分支（_DANGEROUS_UNIX_DIRS 含 "/"），
+        # 两者的报错都属"拒绝"，断言不通过即可
         assert err and ("根目录" in err or "系统目录" in err)
 
-    def test_system_dangerous_dir_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_MOD.os, "name", "posix")
+    def test_system_dangerous_dir_rejected(self) -> None:
         err = validate_workspace_path("/etc")
         assert err and "系统目录" in err
 
-    def test_windows_system_dir_rejected_lowercase(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_MOD.os, "name", "nt")
+    def test_windows_system_dir_rejected_lowercase(self) -> None:
         err = validate_workspace_path(r"c:\windows\system32")
         assert err and "系统目录" in err
 
     def test_config_workspace_root_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_MOD.os, "name", "posix")
         monkeypatch.setattr(_MOD, "get_workspace_config_root", lambda: "/data/ws")
         err = validate_workspace_path("/data/ws")
         assert err and "工作空间根目录" in err
 
     def test_config_root_read_failure_skips_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_MOD.os, "name", "posix")
-
         def _boom() -> str:
             raise RuntimeError("config read failed")
 
@@ -154,7 +152,6 @@ class TestValidateWorkspacePath:
         assert validate_workspace_path("/data/safe/dir") is None
 
     def test_normal_path_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_MOD.os, "name", "posix")
         monkeypatch.setattr(_MOD, "get_workspace_config_root", lambda: "/data/ws")
         assert validate_workspace_path("/data/project/src") is None
 

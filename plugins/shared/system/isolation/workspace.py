@@ -82,12 +82,12 @@ def validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
     Path(normalized)
 
     # ── 1. 磁盘根目录检查 ──
-    if os.name == "nt":
-        # Windows: 检查是否为盘符根目录，如 C:\ D:\
-        if len(normalized) == 3 and normalized[1] == ":" and normalized[2] == "\\":
-            return f"目标空间不能设置为磁盘根目录: {workspace}。请指定具体的项目子目录。"
-    # Unix: 检查是否为 /
-    elif normalized == "/":
+    # 判定基准 = 路径形态而非运行平台：任务 workspace 可能来自 Windows 项目
+    # （sidecar 在 Linux 容器消费），此时 os.name 是 posix 但 "C:\" 形态的
+    # 盘符根目录同样必须拒绝；反之亦然。
+    if len(normalized) == 3 and normalized[1] == ":" and normalized[2] in ("\\", "/"):
+        return f"目标空间不能设置为磁盘根目录: {workspace}。请指定具体的项目子目录。"
+    if normalized == "/" or (len(normalized) == 2 and normalized[1] == ":"):
         return f"目标空间不能设置为根目录: {workspace}。请指定具体的项目子目录。"
 
     # ── 2. 系统危险目录检查 ──
@@ -279,7 +279,14 @@ def get_workspace_base_dir() -> Path:
 
 
 def _is_absolute_path(path_str: str) -> bool:
-    """判断路径是否为绝对路径（兼容 Windows 和 Unix 风格）"""
+    """判断路径是否为绝对路径（兼容 Windows 和 Unix 风格）
+
+    Linux 上 ``Path.is_absolute()`` 不认 Windows 盘符（``D:/x`` 返回 False），
+    需盘符正则兜底——任务 workspace 里的 Windows 盘符路径（任务在 Windows
+    项目上建立、sidecar 在 Linux 消费）必须原样使用，不能被拼接进 root。
+    """
+    if _WIN_ABS_PATH.match(path_str):
+        return True
     p = Path(path_str)
     if p.is_absolute():
         return True
