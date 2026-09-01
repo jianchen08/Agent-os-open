@@ -235,6 +235,10 @@ show_column_numbers = true
 # 增量检查：从缓存开始
 incremental = true
 cache_dir = ".mypy_cache"
+# mypy 2.1.0 起 sqlite 缓存默认开启；多进程并发跑 mypy（pre-commit 分片/
+# 基线脚本）时并发建表写锁偶发 "database is locked"（被包装成 INTERNAL
+# ERROR，CI 实证 2026-09-01）。退回文件缓存后端，无 sqlite 锁语义。
+sqlite_cache = false
 # 排除目录
 exclude = [
     "frontend",

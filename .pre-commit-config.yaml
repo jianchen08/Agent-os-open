@@ -146,12 +146,12 @@ repos:
       - id: mypy
         name: mypy 类型检查
         # 允许现有警告（不强制 0 错误），工具本身正常运行即可
-        # --show-traceback + --cache-dir=NONE：2026-09-01 CI Linux mypy 2.1.0
-        # 间歇性 INTERNAL ERROR，traceback 定根因 = --no-incremental 仍写 sqlite
-        # 缓存库，多 worker 并发写偶发 "database is locked"（ OperationalError 被
-        # 包装成 INTERNAL ERROR）。--no-incremental 本就不读缓存，配
-        # --cache-dir=NONE 禁写根治；--show-traceback 保留供将来取证。
-        entry: mypy --config-file=pyproject.toml --no-incremental --cache-dir=NONE --show-traceback
+        # --show-traceback：2026-09-01 CI Linux mypy 2.1.0 间歇性 INTERNAL ERROR，
+        # traceback 定根因 = sqlite 缓存默认开启（sqlite_cache 默认 True），多
+        # mypy 进程并发建表写锁 "database is locked"。根治走 pyproject
+        # sqlite_cache=false（命令行无 --sqlite-cache 关闭开关）；另注意 2.1.0
+        # 的 --cache-dir=NONE 已不翻译 devnull（成字面目录），勿再使用。
+        entry: mypy --config-file=pyproject.toml --no-incremental --show-traceback
         language: system
         files: \.py$
         # 实际检查范围：根目录 .py 脚本 + scripts/（src/ 已迁移至 plugins/）。
