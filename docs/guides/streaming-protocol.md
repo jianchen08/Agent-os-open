@@ -3,8 +3,8 @@
 > 面向**想给灵汐 AgentOS 0.2 提供实时流式能力**的插件开发者，以及维护消息链路的前端/内核工程师。
 > 本文定义流式事件的**平台公共契约**：所有消息实时通道（LLM 流式回复、插件实时进度/结构化卡片）发射的事件信封统一走本协议。
 > 单一真值源：`config/kernel_capabilities/streaming.json`（内核入口校验 + 前端消费 + 插件发射端均读本文件，不读代码副本）。
-> 决策背景见 [ADR 2026-08-22 流式链路重写为平台公共契约](decisions/2026-08-22-streaming-protocol-rewrite.md)。
-> **协议状态：已采纳（文档先行）**——本文描述的是目标契约；实施进度（前端模块/网关校验/后端字段）以 ADR「实施顺序」为准，未全部落地前插件暂不可实际接入（接线前置见 §5）。
+> 决策背景见 [ADR 2026-08-22 流式链路重写为平台公共契约](../decisions/2026-08-22-streaming-protocol-rewrite.md)。
+> **协议状态：已采纳并落地**——`ManifestCapabilities.streaming` 字段已进内核契约（`kernel/crates/core/src/traits.rs`），前端 `pluginDeclarationValidate` 已按声明校验，插件可实际接入。LLM 正文流式已迁移 8 事件块协议（2026-08-26 定稿，见 §3.1）。
 
 ---
 
@@ -17,7 +17,7 @@
 - [5. 插件接入指南](#5-插件接入指南)
 - [6. 持久化语义（displayed vs persisted）](#6-持久化语义displayed-vs-persisted)
 - [7. 对账与认领](#7-对账与认领)
-- [8. part 类型注册表（渲染扩展点）](#8-part-类型注册表渲染扩展点)
+- [8. part 类型（渲染扩展点）](#8-part-类型渲染扩展点)
 - [9. 测试与门禁](#9-测试与门禁)
 - [附录 A：LLM 路径事件序列示例](#附录-allm-路径事件序列示例)
 
@@ -50,8 +50,8 @@
 |------|------|------|------|
 | `pipeline_id` | 是 | 非空字符串 | 管道坐标（前端消息路由键）。LLM 路径=引擎 route_id；插件路径=插件已注册管道 id |
 | `message_id` | 是 | 见下表 | 本条消息唯一标识（精确寻址键）。**id 空间按前缀隔离**（见下） |
-| `_threadId` | 否 | `thread-` 前缀 | 会话坐标（归属与断线补漏定位）。**仅 `stream_start` 定义**（消息级坐标，随占位建立） |
-| `sequence` | 否 | 整数 | 事件序号（进程内单调递增，仅调试定位，**非消息权威 seq**）。**仅 `stream_chunk` 定义**；注意 `new_message.sequence` 是另一个语义（消息权威 seq），`stream_end` 用 `final_sequence` |
+| `thread_id` | 是 | `thread-` 前缀 | 会话坐标（归属与断线补漏定位）。schema 对**全部事件**必选；内核转发时自动补 `_threadId` 路由键（capability_router），前端兼容读取 `thread_id` / `_threadId` 双键名 |
+| `sequence` | 否 | 整数 | 事件序号（进程内单调递增，仅调试定位，**非消息权威 seq**）。注意 `new_message.sequence` 是另一个语义（消息权威 seq），`stream_end` 用 `final_sequence` |
 | `persist` | 否 | 布尔 | 持久化语义：`true`=正式消息（落库，刷新保留）；缺省/`false`=纯展示（只进 store，刷新弃）。**缺省统一 `false` 不分路径**——内核 LLM 路径发射时显式携带 `true` |
 
 ### message_id 命名空间（前缀隔离，防冲突）
@@ -82,32 +82,44 @@
 
 | 事件 | 必选字段 | 载荷语义 | 前端操作 |
 |------|---------|---------|---------|
-| `stream_start` | pipeline_id, message_id | 一条新消息开始流式输出 | 按 (pipeline_id, message_id) 建占位消息（status='streaming'） |
-| `stream_chunk` | pipeline_id, message_id, content | 正文增量文本 | 追加到目标消息的 text part |
-| `thinking_start` | pipeline_id, message_id | 思考开始 | push 新 thinking part（state='streaming'） |
-| `thinking_chunk` | pipeline_id, message_id, content | 思考增量文本 | 追加到目标消息的 thinking part |
-| `thinking_end` | pipeline_id, message_id | 思考结束（可带 duration_ms） | thinking part state='done' |
-| `tool_start` | pipeline_id, message_id, call_id | 工具调用开始（name/args） | push tool_call part（state='calling'） |
-| `tool_result` | pipeline_id, message_id, call_id | 工具结果（result/error/success/result_data） | 按 call_id 更新 tool_call part（state='done'/'error'） |
-| `new_message` | pipeline_id, message_id | 消息确认（权威终态）：assistant 完整形态 + user_message 权威版 + client_message_id | ① 按 cmid 认领乐观 user（UI id 不变，权威 id/seq 记入 recordId）；② assistant parts 权威合并收尾 |
-| `stream_end` | pipeline_id, message_id | 成功终止（final_sequence/parts/full_content 兜底） | 收尾 + 同步权威 seq |
-| `stream_error` | pipeline_id, message_id | 失败终止（error） | 标记 status='failed' + error（不删除、不合成气泡） |
+| `stream_start` | pipeline_id, message_id, thread_id | 一条新消息开始流式输出 | 按 (pipeline_id, message_id) 建占位消息（status='streaming'） |
+| `stream_chunk` ⚠️已退役 | pipeline_id, message_id, content, thread_id | 正文增量文本（历史契约位） | 前端 handler 已删除——llm_service 不再发射，插件勿用（正文增量走 §3.1 块协议或整段 `new_message`） |
+| `thinking_start` / `thinking_chunk` / `thinking_end` ⚠️已退役 | pipeline_id, message_id(, content), thread_id | 思考流（历史契约位） | 同上——思考起止由块协议 `block_start(reasoning)`/`block_end` 表达 |
+| `tool_start` | pipeline_id, message_id, call_id, thread_id | 工具调用开始（name/args） | push tool_call part（state='calling'） |
+| `tool_result` | pipeline_id, message_id, call_id, thread_id | 工具结果（result/error/success/result_data） | 按 call_id 更新 tool_call part（state='done'/'error'） |
+| `new_message` | pipeline_id, message_id, thread_id | 消息确认（权威终态）：assistant 完整形态 + user_message 权威版 + client_message_id | ① 按 cmid 认领乐观 user（UI id 不变，权威 id/seq 记入 recordId）；② assistant parts 权威合并收尾 |
+| `stream_end` | pipeline_id, message_id, thread_id | 成功终止（final_sequence/parts/full_content 兜底）——轮级：一轮 = 一条消息，不代表整次执行结束 | 收尾 + 同步权威 seq |
+| `pipeline_round_finished` | pipeline_id, message_id, thread_id | **run 级收尾**：一次用户输入触发的整次执行结束（生成态终止信号） | 结束本轮执行态（区别于 stream_end 的轮级语义） |
+| `stream_error` | pipeline_id, thread_id, failed | 失败终止 | 标记 status='failed' + error（不删除、不合成气泡） |
+| `plugin_error` | pipeline_id, message_id, thread_id | 插件执行错误（**非终止信号**：引擎 warn+继续的插件失败） | 只弹通知，不标记消息失败 |
+
+### 3.1 LLM 正文流式：8 事件块协议（现行）
+
+LLM 路径的正文/思考/工具调用增量**不走**上表 `stream_chunk`/`thinking_*`（已退役），走 2026-08-26 定稿的块协议（后端 `llm_service` 发射、前端 `blockHandler` 消费；事件名见 `frontend/src/constants/websocket.ts`）：
+
+| 事件 | 语义 |
+|------|------|
+| `block_start` | 块开始（`index`=块索引，`block_type`=`text`/`reasoning`/`tool-call`） |
+| `text_delta` / `reasoning_delta` / `tool_call_delta` | 按块索引归组追加的增量（reasoning 取代 thinking 三事件；tool_call 的 `arguments_delta` 为原始 JSON 串累积） |
+| `block_end` | 块闭合（`block` 携带该块累积完整内容） |
+| `usage` | 用量（finish 前发出） |
+| `finish` | 流式终结（`reason`=`stop`/`length`/`tool_calls`/`error`；断流由调用方补发 error） |
+| `keepalive` | 超时探活，无业务载荷 |
 
 事件时序（典型序列，**非强制**——前端对乱序宽容，见下）：
 
 ```
-stream_start → [thinking_start → thinking_chunk* → thinking_end]*
+stream_start → [block_start → delta* → block_end]*（text/reasoning/tool-call 块可多轮交替）
               → [tool_start → tool_result]*
-              → stream_chunk*          ← text 与 thinking/tool 可交替多轮
-              → 收尾
+              → usage → finish → 收尾（new_message / stream_end / pipeline_round_finished）
 ```
 
 收尾语义：`new_message`（权威确认）与 `stream_end`（兜底收尾）**可先后都到达**
 （new_message 先确认、stream_end 后到只补 final_sequence，幂等）；`stream_error`
-与成功路径互斥。
+与成功路径互斥；`pipeline_round_finished` 最后到达终结整轮。
 
-前端对**乱序/缺失事件是宽容的**：chunk 先于 start 到达 → 自动建占位；
-thinking_end 丢失 → 超时兜底置 done；new_message 缺失 → stream_end 兜底收尾；
+前端对**乱序/缺失事件是宽容的**：delta 先于 start/block_start 到达 → 自动建占位/占位块；
+block 未闭合 → `finish`/error 补收；new_message 缺失 → stream_end 兜底收尾；
 全部缺失 → 对账/刷新补正。前端**不宽容**的是寻址失效（事件乱序错挂到别的消息）。
 
 ---
@@ -156,7 +168,7 @@ thinking_end 丢失 → 超时兜底置 done；new_message 缺失 → stream_end
     "route_signals": [],
     "lifecycle_hooks": ["on_load", "on_unload"],
     "streaming": {
-      "events": ["stream_start", "stream_chunk", "thinking_start", "thinking_chunk", "thinking_end", "stream_end"],
+      "events": ["stream_start", "tool_start", "tool_result", "stream_end"],
       "part_types": ["progress_card"],
       "persist": false
     }
@@ -165,17 +177,14 @@ thinking_end 丢失 → 超时兜底置 done；new_message 缺失 → stream_end
 ```
 
 - `events`（可选，缺省=全部事件类型均可发射）：声明插件实际发射的事件类型，
-  供校验器（G2）检查声明与实现一致性。
+  供校验器（G2）检查声明与实现一致性。**不要声明已退役事件**（`stream_chunk`/
+  `thinking_*`——前端无 handler，发射等于丢弃）。
 - `part_types`（可选）：插件自定义渲染的 part 类型（见 §8）。
 - `persist`（可选，缺省 false）：插件事件的默认持久化语义。
 
-> **接线前置（实施时落地）**：`capabilities.streaming` 与既有四键
-> （tools/services/route_signals/lifecycle_hooks）平级，但 Rust 侧
-> `ManifestCapabilities`（kernel/crates/core/src/traits.rs:1127）带
-> `#[serde(deny_unknown_fields)]`——**不先加字段，任何插件声明 `streaming` 都会被
-> 严格反序列化拒绝**（与当年 `capabilities.resources` 同款教训）。实施顺序见 ADR：
-> 先扩展 ManifestCapabilities + 前端 pluginDeclarationValidate + G2 校验器，
-> 再放行声明。
+> **接线现状**：`capabilities.streaming` 与既有四键（tools/services/route_signals/
+> lifecycle_hooks）平级，Rust 侧 `ManifestCapabilities` 已带该字段（`deny_unknown_fields`
+> 下合法），前端 `pluginDeclarationValidate` 同步校验——声明即可用，无前置开关。
 
 ### 步骤 2：通过 event-bus 发射事件
 
@@ -232,22 +241,17 @@ await event_bus.notify("emit", {
 
 ---
 
-## 8. part 类型注册表（渲染扩展点）
+## 8. part 类型（渲染扩展点）
 
-流式事件里的 part 渲染按类型分发（与工具卡片的 render 声明同一机制）：
+part 类型当前为**内置封闭集合**，由前端 handler 固定映射（块协议 `block_type`
+→part 类型，见 `blockHandler.ts` 的 `partTypeOf`）：
 
-```ts
-// 前端注册自定义 part 渲染组件（插件声明 part_types 后由插件包注册）
-// 名字必须与 manifest 声明的 part_types 一致（本例 = 'progress_card'）
-registerPartRenderer('progress_card', ProgressCard)
-```
+- `text`（正文）、`thinking`（思考折叠卡片）、`tool_call`（工具调用卡片，含结果/失败态）、`system`（系统通知）。
 
-内置 part 类型（开箱即用）：`thinking`（思考折叠卡片）、`text`（正文）、
-`tool_call`（工具调用卡片，含结果/失败态）、`system`（系统通知）。
-
-自定义 part 事件载荷：插件在 `stream_chunk`/`tool_result` 等事件中携带
-`part_type` 字段（缺省 text），前端按注册表分发渲染；未注册类型 → 丢弃留痕 +
-告警（fail-closed）。
+**自定义 part 类型注册表（`registerPartRenderer` 类机制）为规划项，尚未实现**：
+manifest 的 `part_types` 声明会通过 G2/前端声明校验，但前端尚无按注册表分发
+自定义 part 渲染组件的通道——插件现阶段请使用内置 part 类型承载内容
+（整段内容走 `new_message`，增量走块协议事件由内核侧发射）。
 
 ---
 
@@ -255,8 +259,8 @@ registerPartRenderer('progress_card', ProgressCard)
 
 - **契约机械闸**：`config/kernel_capabilities/streaming.json` ↔ 内核校验执行器
   一致（kernel_capabilities tests，与 chat.json 同款机械闸）。
-- **事件序列测试**（前端 vitest）：start→thinking→chunk→tool→new_message 多事件
-  序列断言 store 终态；含"user 不消失、part 不错位"回归用例（2026-08-22 用户
+- **事件序列测试**（前端 vitest）：block_start→delta→block_end→tool→new_message
+  多事件序列断言 store 终态；含"user 不消失、part 不错位"回归用例（2026-08-22 用户
   报告的症状）。
 - **对账矩阵测试**：本地/远端状态矩阵（sending/streaming/completed × 命中/未命中）。
 - **插件接入端到端**：假插件按 §5 发射事件 → 前端渲染断言。
@@ -273,18 +277,20 @@ registerPartRenderer('progress_card', ProgressCard)
   → ws user_input（带 client_message_id）
 内核 dispatch_user_input
   → stream_start { pipeline_id: route_id, message_id: a_<uuid> }   ← 建占位
-  → 引擎执行（sidecar llm_core 流式）
-      → thinking_start / thinking_chunk* / thinking_end
-      → tool_start / tool_result*
-      → stream_chunk*
+  → 引擎执行（sidecar llm_core 流式，8 事件块协议）
+      → block_start(text/reasoning/tool-call) → text_delta / reasoning_delta / tool_call_delta* → block_end
+      → tool_start / tool_result*（管道流式事件）
+      → usage → finish
   → new_message {
       pipeline_id, message_id,
       client_message_id,            ← 认领键
       user_message { id, content, sequence, metadata.client_message_id },  ← user 权威版（认领回传）
       message { ...assistant 完整形态 }, sequence
     }
-  → stream_end { final_sequence }   ← 收尾兜底
+  → stream_end { final_sequence }          ← 轮级收尾兜底
+  → pipeline_round_finished                ← run 级终结（生成态终止信号）
 ```
 
-同一事件序列对插件路径完全适用——插件替换发射源（自持 message_id、自定 persist）
-即可，协议与前端消费逻辑零差异。
+插件路径复用同一信封与前端消费逻辑——插件替换发射源（自持 `p_` 命名空间
+message_id、自定 persist、经 event-bus 发射 streaming.json 契约事件）即可；
+LLM 正文增量块协议由内核/llm_service 侧发射，插件不直接发块事件。

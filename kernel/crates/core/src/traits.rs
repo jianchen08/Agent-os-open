@@ -857,10 +857,10 @@ pub struct ManifestCapabilities {
     pub streaming: Option<StreamingCapability>,
 }
 
-/// 流式能力声明（capabilities.streaming，文档见 docs/streaming-protocol.md）。
+/// 流式能力声明（capabilities.streaming，文档见 docs/guides/streaming-protocol.md）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingCapability {
-    /// 插件实际发射的事件类型清单（缺省 = 全部 10 个事件均可发射）。
+    /// 插件实际发射的事件类型清单（缺省 = streaming.json 契约的全部事件均可发射）。
     /// G2 校验器对照插件实现实际发射的事件做一致性检查。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events: Option<Vec<String>>,
