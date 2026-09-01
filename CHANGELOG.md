@@ -168,5 +168,6 @@
 - **次版本号**：向下兼容的功能新增
 - **修订号**：向下兼容的 Bug 修复
 
-[未发布]: https://github.com/jianchen08/Agent-os-open/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/jianchen08/Agent-os-open/releases/tag/v0.1.0
+[未发布]: https://github.com/jianchen08/Agent-os-open/compare/4ff88d52a...HEAD
+[0.2.0]: https://github.com/jianchen08/Agent-os-open/commit/4ff88d52a
+[0.1.0]: https://github.com/jianchen08/Agent-os-open/commit/c1704748d

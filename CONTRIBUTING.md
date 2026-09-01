@@ -191,8 +191,8 @@ python -m pytest tests/path/to/test.py::test_name -v
 # Rust 单测
 cargo test -p agentos-engine <测试名>   # 单跑（在 kernel/ 下）
 
-# 全量回归（对齐 CI 车道）
-python scripts/run_gates.py
+# 全量回归（对齐 CI 车道；--mode 必填：fast / kernel / plugins / frontend / all）
+python scripts/run_gates.py --mode all
 cargo test --all                         # 在 kernel/ 下
 ```
 
@@ -207,7 +207,7 @@ Agent-os/
 │   ├── sdk/             # Python 插件 SDK（agentos_plugin_sdk）
 │   └── shared/
 │       ├── pipeline/    # 管道插件（input/core/output，含 Rust cdylib 原生插件）
-│       ├── tools/       # LLM 工具插件（26 个，含 external_mcp 零代码接入）
+│       ├── tools/       # LLM 工具插件（18 个自研 + 8 个预置外部 MCP 接入清单）
 │       └── system/      # 系统服务插件（LLM/记忆/审批/评估/通道…）
 ├── frontend/            # 前端源码（React 19 + Vite）
 ├── config/              # 运行配置（agents/pipelines/plugins/models/isolation/...）
@@ -223,10 +223,10 @@ Agent-os/
 
 我们欢迎多语言翻译贡献：
 
-- 文档翻译：在 `docs/i18n/<lang>/` 下创建对应翻译
-- UI 翻译：在 `frontend/src/locales/<lang>/` 下提交 PR
+- **文档翻译**：以 `README_EN.md` 的平行文件形式贡献（如指南篇目的英文版）；核心文档（README / ARCHITECTURE / ROADMAP）中英对齐优先。
+- **UI 翻译**：前端 i18n 基础设施尚未落地（无 locales 框架，界面文案暂为中文硬编码）——排期见 [ROADMAP.md](ROADMAP.md)「文档国际化基础设施」方向，欢迎参与先行设计。
 
-目前已支持：简体中文、英文。
+当前状态：文档层有英文 README；UI 层暂仅简体中文。
 
 ---
 
