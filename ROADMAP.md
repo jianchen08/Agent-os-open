@@ -799,6 +799,27 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 ---
 
+## 🚫 被否方案索引（动手前先查）
+
+> 任何非平凡决策都必须写 ADR（`docs/decisions/`，按日期排序），**被否掉的备选方案强制记录在各 ADR 的 Alternatives Considered 节**。下表只列最容易被人重新提出的架构级被否方向；提功能建议/PR 前请先对照，避免重复讨论已否决的路线。完整归档见 [docs/decisions/](docs/decisions/) 目录（制度说明：[docs/decisions/README.md](docs/decisions/README.md)；2026-08-15 前的 57 个决策点另有时间线索引 [docs/decisions/ROADMAP.md](docs/decisions/ROADMAP.md)）。
+
+| 被否方向 | 现行结论 | ADR |
+|---|---|---|
+| 插件全 Rust 原生化（不留 Python 轨） | 双轨：Python sidecar 为默认轨，热路径按基准晋升 Rust cdylib | [2026-07-13-sidecar-process-model.md](docs/decisions/2026-07-13-sidecar-process-model.md) |
+| 引擎内路由表仲裁 / `delegate`·`fork` 特殊路由信号 | 路由仲裁下沉管道 YAML 路由 DSL（`when`/`then`/`set`），路由信号面整体退役 | [2026-07-14-adr-engine-12-points.md](docs/decisions/2026-07-14-adr-engine-12-points.md) |
+| 覆盖率静态地板（等 80% 再收紧） | 基线棘轮只升不降且略高于实测留压力 + 改动行 diff 100% | [2026-08-20-coverage-ratchet-diff-100.md](docs/decisions/2026-08-20-coverage-ratchet-diff-100.md) |
+| `channel_api` 统一 HTTP 网关壳 / REST 面收回内核 | 插件自持 `http_endpoints`（`/ext/{plugin_id}/**`），内核 HTTP 面只留核心端点 | [2026-08-21-channel-api-retire-plugin-owned-http.md](docs/decisions/2026-08-21-channel-api-retire-plugin-owned-http.md) |
+| LLM 流式旧 4 事件协议（`stream_chunk`/`thinking_*`） | 8 事件块协议（`block_start`/`text_delta`/`reasoning_delta`/…），单一真值源 `config/kernel_capabilities/streaming.json` | [2026-08-22-streaming-protocol-rewrite.md](docs/decisions/2026-08-22-streaming-protocol-rewrite.md) |
+| sidecar 自动依赖指纹分桶 / 全插件塞单宿主 | manifest 声明 `host_group` 静态分组合宿 | [2026-08-26-sidecar-co-hosting-host-grouping.md](docs/decisions/2026-08-26-sidecar-co-hosting-host-grouping.md) |
+| 中间态 / 飞行中消息落库 | 中间态寄存器：引擎内存两区（A 键值 LRU + B message→step 归属），落库即清 | [2026-08-27-transient-state-register.md](docs/decisions/2026-08-27-transient-state-register.md) |
+| 面板/前端独立任务创建入口（`POST /tasks` 类专用口） | 面板 = 工具的参数表单，与 LLM 走同一条 `task_submit` 工具通道 | [2026-08-29-panel-create-via-task-submit-tool.md](docs/decisions/2026-08-29-panel-create-via-task-submit-tool.md) |
+| thread / 会话 id 充当执行坐标 | `pipeline_id` 是执行态唯一身份，thread 仅组织集合 | [2026-08-30-pipeline-id-sole-execution-coordinate.md](docs/decisions/2026-08-30-pipeline-id-sole-execution-coordinate.md) |
+| 工具失败连击熔断闸门 | 三信号收束闸门（连击门误杀可自愈任务，已退役） | [2026-08-30-retire-tool-fail-streak-gate.md](docs/decisions/2026-08-30-retire-tool-fail-streak-gate.md) |
+| 保留系统分配器硬扛 Windows 段堆并发高水位滞留 | 内核全局分配器换 mimalloc（实测滞留根因为段堆线程本地缓存惰性 decommit） | [2026-08-31-mimalloc-global-allocator.md](docs/decisions/2026-08-31-mimalloc-global-allocator.md) |
+| FFI 边界跨堆 `free` / 外层装箱归属模糊 | 对称借用协议：`Result<&str,_>` + 实现方自持缓冲，杜绝跨堆释放 | [2026-09-01-native-ffi-cross-heap-free-fix.md](docs/decisions/2026-09-01-native-ffi-cross-heap-free-fix.md) |
+
+---
+
 ## 🕒 时间线
 
 ```

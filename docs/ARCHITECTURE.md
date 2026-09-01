@@ -324,7 +324,7 @@ plugins:
 
 - [plugin-protocol.md](guides/plugin-protocol.md) —— 插件协议权威文档
 - [guides/README.md](guides/README.md) —— 开发指南索引
-- [ROADMAP.md](../ROADMAP.md) —— 版本路线图（被否方案记录于各 ADR 的 Alternatives Considered 节）
+- [ROADMAP.md](../ROADMAP.md) —— 版本路线图（含被否方案索引；完整记录见各 ADR 的 Alternatives Considered 节）
 - [CONTRIBUTING.md](../CONTRIBUTING.md) —— 贡献流程
 - [decisions/](decisions/) —— ADR 决策记录（任何非平凡决策的背景/决策/被否方案/影响）
 
