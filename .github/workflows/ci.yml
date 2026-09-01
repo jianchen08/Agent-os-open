@@ -552,6 +552,9 @@ jobs:
   frontend-e2e:
     name: Frontend E2E (冒烟子集, 零后端依赖)
     runs-on: ubuntu-latest
+    # 首跑实证会挂死无果（2026-09-01 挂 80min+），无超时保护默认 6h 才超——
+    # 限时快速失败拿日志定位根因；正常耗时 build+smoke 应 <15min
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
