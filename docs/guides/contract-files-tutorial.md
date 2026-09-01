@@ -555,7 +555,7 @@ plugin.json manifest 全字段规范（字段总表 / capabilities / requires_se
 
 **总体架构**——五层结构图：Channels（Web/CLI/HTTP API）→ Gateway（协议解析/鉴权/限流）→ Pipeline Engine（Input/Output 插件链 + 4 种路由信号仲裁）→ Tools/Memory/Agents/Triggers → Infrastructure（Redis/LLM/MCP/FS）。
 
-**核心子系统**——管道引擎、Agent 系统、工具系统、记忆系统、配置系统、通道层、容器任务系统、隔离与工作区、复盘与记忆维护、触发器系统、审批交互闭环、强制评估系统、Skill 能力集成。
+**核心子系统**——管道引擎、Agent 系统、工具系统、记忆系统、配置系统、通道层、项目与任务系统、隔离与工作区、复盘与记忆维护、触发器系统、审批交互闭环、强制评估系统、Skill 能力集成。
 
 **数据流示例 + 扩展点 + 架构设计四问**——提供完整端到端示例和"扩展新工具/新 Agent/新管道"的具体步骤。
 

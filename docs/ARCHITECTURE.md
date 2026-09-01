@@ -50,7 +50,7 @@
 | 复盘 | `review` |
 | 隔离与工作区 | `isolation` + `pipeline_isolation_guard` / `pipeline_workspace_lifecycle` / `pipeline_environment_lifecycle` |
 | 监控与成本 | `monitoring` + `pipeline_cost_control` / `pipeline_track` |
-| 任务域 | `tasks`（task_service）+ `task_form` |
+| 任务域 | `tasks`（task_service）+ `task_form` + `project_create_tool`（项目） |
 | 主题 / 皮肤 / 页面 | `contributes.themes` / `ui_schema` / `http_endpoints`（如 `dsh_adapter`、`agent_manager`） |
 | Agent 配置加载 | `pipeline_context_build`（按 agent_id 自持加载 YAML） |
 
@@ -207,7 +207,7 @@ plugins:
 
 - **提交即带指标**：`task_submit` 提交任务须带评估指标（acceptance criteria）；可从 Agent 的 `recommended_metrics` 自动补全。
 - **评估裁决在插件**：`task_evaluate` 工具（`plugins/shared/system/evaluation/`）执行评估；管道 output 步 `pipeline_task_reminder` 是放行闸门——提醒耗尽仍无评估证据 → 任务标 `pending_evaluation`，不落 completed；有证据内核才补落默认 completed。
-- **容器任务**：对"开发一个 App""写一部小说"这类多阶段大任务，提供方案规划 → 阶段执行 → 人类审查 → 完成验收闭环；容器只组织子任务链（`parent_task_id` 传递），不直接执行。
+- **项目（Project）**：对"开发一个 App""写一部小说"这类多阶段大任务，提供方案规划 → 阶段执行 → 人类审查 → 完成验收闭环。项目 = 用户创建的真实文件夹 + 登记，是任务树分组锚点——只组织任务链（`project_id` / `parent_task_id` 传递），不直接执行。
 - **任务状态**：task = pipeline state 单一真值，状态由任务域插件经 pipeline-state 写面裁决。
 
 ### 隔离与工作区（Isolation & Workspace）

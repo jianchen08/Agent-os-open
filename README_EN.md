@@ -33,7 +33,6 @@
 - ⚙️ **Highly Configurable (a direct consequence)** — Agents are YAML data: persona, prompts, tool whitelist, constraints — all configurable; dynamic prompts inject as trailing messages without breaking prompt cache; changes apply without restart.
 - 🔄 **Self-Evolving Loop** — Execute → review & sediment experience → generate new plugins and hot-load them: the system modifies itself by adding plugins, never touching the kernel.
 - 🔀 **Plugin-based Pipeline** — The engine just interprets one pipeline YAML: plugins read/write a shared `state`, and a declarative routing DSL decides every transition (see [Key Highlight 1](#1-plugin-based-pipeline-architecture--everything-is-a-plugin-every-state-of-agent-execution-is-yours-to-control)).
-- 🧠 **Memory System** — Carried by the hindsight memory plugin: automatic retention, on-demand recall, and document import; read/written by the LLM via the memory tool.
 
 ### Tech Stack
 
@@ -112,30 +111,33 @@ Almost every behavior is customizable via YAML: agent identity, prompts, tool wh
 ### 4. Tool System — Contract-based Design, Out of the Box
 Unified contract (`input_schema` + `output_schema` + `render` intent): the kernel validates results against `output_schema` (fail-closed), the frontend renders result cards by `render`, and `tool_ids` whitelists precisely control the LLM-visible surface. 18 self-built tool plugins plus 8 preset external-MCP integrations (41 tools in total: files, shell, code search, browser, network, memory, media generation, IDE integration), plus zero-code integration of any third-party MCP service.
 
-### 5. Mandatory Evaluation System — Hard Constraint on Task Quality
+### 5. Memory System — Retain & Recall Conversation Experience
+Carried by the hindsight memory plugin: automatic retention, on-demand recall, and document import; read/written by the LLM via the memory tool.
+
+### 6. Mandatory Evaluation System — Hard Constraint on Task Quality
 Task submission must include acceptance criteria (evaluation metrics); after pipeline exit, a mandatory gate transitions the task into evaluation and reviews it against the metrics. Only when all metrics pass is the task marked complete; exhausted retries mean failure. Even if the Agent doesn't actively evaluate, the system forces the task into the evaluation gate (no completion without evaluation evidence) — quality is never skipped.
 
-### 6. Approval Closed Loop — Quality Gate for Human-AI Collaboration
+### 7. Approval Closed Loop — Quality Gate for Human-AI Collaboration
 Human approval (choice / conversation dual modes; the human-interaction tool blocks awaiting the user's response) + feedback injection + task rework, forming a "generate → approve → feedback → iterate" quality-gate loop.
 
-### 7. Container Tasks — Engine for Complex Long-term Projects
-For multi-stage tasks with deliverables ("develop an App", "write a novel", "make a game"), container tasks provide a complete solution planning → phase execution → human review → final acceptance loop.
+### 8. Projects — Organizing Engine for Complex Long-term Tasks
+For multi-stage tasks with deliverables ("develop an App", "write a novel", "make a game"), a project organizes the whole task chain: solution planning → phase execution → human review → final acceptance. A project = a real folder + registration created by the user in the UI — a grouping anchor for the task tree that never executes by itself; tasks attach via `project_id` (inherited by subtasks).
 
-### 8. Workspace Isolation & Worktree Mechanism
+### 9. Workspace Isolation & Worktree Mechanism
 Each task runs in its own **isolated workspace**: folder-level isolation by default, with Docker container isolation for higher-risk execution paths. In multi-task scenarios the **git worktree** mechanism forks a dedicated working directory per task, so concurrent tasks never collide on the filesystem and any side-effect can be reviewed or rolled back at the worktree boundary.
 
-### 9. Trigger System — Unattended Operation
+### 10. Trigger System — Unattended Operation
 Scheduled triggers (Cron), event triggers, interval triggers let Lingxi run itself.
 
-### 10. Intelligent Conversation — Not Just Chatting, but "Thinking Dialog"
+### 11. Intelligent Conversation — Not Just Chatting, but "Thinking Dialog"
 Streaming response + real-time thinking display with mode toggle + proactive clarification + (document) approval interaction.
 
 > **Planned (0.2.0+)**: Voting panels, media timelines and other interaction enhancements are not yet implemented. See [ROADMAP.md](ROADMAP.md).
 
-### 11. Frontend Excellence — Beautiful, Usable, Customizable
+### 12. Frontend Excellence — Beautiful, Usable, Customizable
 7 compile-time preset themes (Dark / Light / Deep Space Command Center / Ocean Breeze / Pixel Candy / Moe Soft / High Contrast) + 3 dynamic JSON themes + plugin-delivered themes/skins (`contributes.themes`), full configuration visualization, YAML-to-form auto-mapping.
 
-### 12. Skill Integration — Extend Domain Capabilities on Demand
+### 13. Skill Integration — Extend Domain Capabilities on Demand
 Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via prompt guidance (file_read on demand, then follow the instructions) — new domain capabilities without code changes; skills, rules and prompts are three decoupled layers, added/removed independently.
 
 ---

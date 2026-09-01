@@ -83,13 +83,13 @@
 
 2. **网络安全**
    - 生产部署务必启用 HTTPS（反向代理 Nginx / Caddy）
-   - 不要将后端端口 `8988` 直接暴露到公网
-   - Redis 端口 `6480` 应仅监听内网或 Unix Socket
+   - 不要将内核端口 `9100` 直接暴露到公网
+   - Redis 端口 `6690`（可用 `REDIS_HOST_PORT` 覆盖）应仅监听内网
 
 3. **认证与授权**
-   - 启用 RBAC（参考 `src/auth/rbac.py`）
-   - 定期审计 `audit_logs`（参考 `src/monitoring/`）
-   - 关闭未使用的 IM 通道适配器
+   - 启用内核认证（JWT 登录，`kernel/crates/user-admin`）；细粒度 RBAC 排期见 [ROADMAP.md](ROADMAP.md) 0.5.0
+   - 定期审计执行轨迹（SQLite `traces` 表）与监控插件输出
+   - 关闭未使用的 IM 通道适配器（`config/plugins/default_profile.yaml` 中对应 `channel_*` 置 `false`）
 
 4. **依赖安全**
    - 定期运行 `pip-audit` 和 `npm audit`
@@ -97,8 +97,8 @@
    - 启用 Dependabot 自动升级 PR
 
 5. **代码执行隔离**
-   - 容器任务默认在 Docker 隔离环境执行（`src/isolation/providers/docker_provider.py`）
-   - 不要禁用 `isolation_policy.yaml` 中的安全规则
+   - 任务默认文件夹隔离，高风险执行路径走 Docker 容器隔离（`isolation` 系统插件 Provider，配置见 `config/isolation/isolation_config.yaml`）
+   - 不要禁用 `config/isolation/isolation_policy.yaml` 中的安全规则
 
 ---
 
