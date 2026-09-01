@@ -155,12 +155,29 @@ class TestParseUri:
         assert position.line == 0
         assert position.character == 0
 
-    def test_roundtrip(self, fj: Any, lsp_types_mod: Any) -> None:
-        # 性质断言：generate → parse 还原（Windows 盘符路径，路径比较归一化分隔符）
+    def test_roundtrip(self, fj: Any, lsp_types_mod: Any, tmp_path: Path) -> None:
+        # 性质断言：generate → parse 还原（真实文件路径，平台无关）
+        target = tmp_path / "a.py"
         pos = lsp_types_mod.Position(line=2, character=3)
-        uri = fj.FileJumpProtocol.generate_uri("C:/ws/a.py", position=pos, ide_type=fj.IDEType.VSCODE)
+        uri = fj.FileJumpProtocol.generate_uri(str(target), position=pos, ide_type=fj.IDEType.VSCODE)
         file_path, parsed = fj.FileJumpProtocol.parse_uri(uri)
-        assert os.path.normpath(file_path) == os.path.normpath("C:/ws/a.py")
+        assert os.path.normpath(file_path) == os.path.normpath(str(target))
+        assert parsed is not None
+        assert parsed.line == 2
+        assert parsed.character == 3
+
+    def test_roundtrip_windows_drive_parse_only(self, fj: Any, lsp_types_mod: Any) -> None:
+        # Windows 盘符路径的 generate→parse 闭环只能在 Windows 主机上成立
+        # （Linux 上 os.path.abspath 会把 "C:/ws/a.py" 拼成 cwd 前缀），故本机
+        # 非 Windows 时只验证 parse 侧还原（协议解析与平台无关）
+        pos = lsp_types_mod.Position(line=2, character=3)
+        if os.name == "nt":
+            uri = fj.FileJumpProtocol.generate_uri("C:/ws/a.py", position=pos, ide_type=fj.IDEType.VSCODE)
+            file_path, parsed = fj.FileJumpProtocol.parse_uri(uri)
+            assert os.path.normpath(file_path) == os.path.normpath("C:/ws/a.py")
+        else:
+            file_path, parsed = fj.FileJumpProtocol.parse_uri("vscode://file/C:/ws/a.py:3:4")
+            assert os.path.normpath(file_path) == os.path.normpath("C:/ws/a.py")
         assert parsed is not None
         assert parsed.line == 2
         assert parsed.character == 3
@@ -179,8 +196,11 @@ class TestJumpToFile:
         result = asyncio.run(fj.FileJumpProtocol.jump_to_file(str(target), ide_info=ide))
         assert result is True
         assert len(calls) == 1
-        assert calls[0][:2] == ["cmd", "/c"]
-        assert calls[0][2] == "code"
+        if sys.platform == "win32":
+            assert calls[0][:2] == ["cmd", "/c"]
+            assert calls[0][2] == "code"
+        else:
+            assert calls[0][0] == "code"
         assert "--goto" in calls[0]
 
     def test_with_ide_info_jetbrains_args(self, fj: Any, lsp_types_mod: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,8 +212,12 @@ class TestJumpToFile:
         ide = lsp_types_mod.IDEInfo(type=fj.IDEType.JETBRAINS, name="IDEA")
         result = asyncio.run(fj.FileJumpProtocol.jump_to_file(str(target), position=pos, ide_info=ide))
         assert result is True
-        assert calls[0][2] == "idea64.exe"
-        assert calls[0][3:7] == ["--line", "1", "--column", "1"]
+        if sys.platform == "win32":
+            assert calls[0][2] == "idea64.exe"
+            assert calls[0][3:7] == ["--line", "1", "--column", "1"]
+        else:
+            assert calls[0][0] == "idea.sh"
+            assert calls[0][1:5] == ["--line", "1", "--column", "1"]
 
     def test_unsupported_ide_type(self, fj: Any, lsp_types_mod: Any, tmp_path: Path) -> None:
         target = tmp_path / "a.py"
@@ -205,7 +229,12 @@ class TestJumpToFile:
         target = tmp_path / "a.py"
         target.write_text("x")
         started: list[str] = []
-        monkeypatch.setattr(fj.os, "startfile", lambda p: started.append(p))
+        # 本测试断言"无 IDE → 默认方式打开"协议语义（platform.system→Windows→
+        # os.startfile），与运行平台无关——显式钉死 system
+        monkeypatch.setattr(platform, "system", lambda: "Windows")
+        # os.startfile 仅 Windows 存在：POSIX 上补属性再 patch（monkeypatch
+        # 会话结束自动删除——raising=False 对缺失属性是跳过检查而非跳过设置）
+        monkeypatch.setattr(fj.os, "startfile", lambda p: started.append(p), raising=False)
         monkeypatch.setattr(fj.IDEDetector, "detect", staticmethod(lambda: None))
         result = asyncio.run(fj.FileJumpProtocol.jump_to_file(str(target)))
         assert result is True
@@ -223,7 +252,10 @@ class TestJumpToFile:
         )
         result = asyncio.run(fj.FileJumpProtocol.jump_to_file(str(target)))
         assert result is True
-        assert calls and calls[0][2] == "code"
+        if sys.platform == "win32":
+            assert calls[0][2] == "code"
+        else:
+            assert calls[0][0] == "code"
 
     def test_jump_error_translated_to_false(self, fj: Any, lsp_types_mod: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         target = tmp_path / "a.py"
@@ -292,7 +324,7 @@ class TestOpenWithDefault:
     def test_windows_startfile(self, fj: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         started: list[str] = []
         monkeypatch.setattr(platform, "system", lambda: "Windows")
-        monkeypatch.setattr(fj.os, "startfile", lambda p: started.append(p))
+        monkeypatch.setattr(fj.os, "startfile", lambda p: started.append(p), raising=False)
         assert fj.FileJumpProtocol._open_with_default("C:/a.py") is True
         assert started == ["C:/a.py"]
 
@@ -316,7 +348,7 @@ class TestOpenWithDefault:
         def raiser(p):
             raise OSError("denied")
 
-        monkeypatch.setattr(fj.os, "startfile", raiser)
+        monkeypatch.setattr(fj.os, "startfile", raiser, raising=False)
         assert fj.FileJumpProtocol._open_with_default("a.py") is False
 
 
@@ -325,7 +357,8 @@ class TestJumpFromUri:
         target = tmp_path / "a.py"
         target.write_text("x")
         started: list[str] = []
-        monkeypatch.setattr(fj.os, "startfile", lambda p: started.append(p))
+        monkeypatch.setattr(platform, "system", lambda: "Windows")
+        monkeypatch.setattr(fj.os, "startfile", lambda p: started.append(p), raising=False)
         monkeypatch.setattr(fj.IDEDetector, "detect", staticmethod(lambda: None))
         uri = fj.FileJumpProtocol.generate_uri(str(target), ide_type=fj.IDEType.VSCODE)
         assert asyncio.run(fj.FileJumpProtocol.jump_from_uri(uri)) is True
