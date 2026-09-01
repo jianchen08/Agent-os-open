@@ -350,8 +350,11 @@ jobs:
         # 从 uv.lock 安装根项目依赖（全量锁定、可复现构建），不再 pip 在线解析。
         # 注：plugins/sdk 是独立包（自身无锁文件、其依赖 mcp 未纳入根 uv.lock），
         # 故单独 editable 安装以补齐 SDK 源码与其依赖；根依赖均由锁文件锁定。
+        # --extra isolation：isolation docker timeout/manager 系测试 patch
+        #   ('docker.from_env')，需 docker 包（本地 .venv 常驻装有故本地绿、
+        #   CI 2026-09-01 首跑暴露 45 失败簇——mock.py:1419 AttributeError）。
         run: |
-          uv sync --frozen --extra dev
+          uv sync --frozen --extra dev --extra isolation
           uv pip install -e ./plugins/sdk
 
       # 门禁：plugins-coverage-pairing（名单配对校验，瞬时）

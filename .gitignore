@@ -149,9 +149,12 @@ packages/npm-tarballs/*
 .crashdumps/
 *.dmp
 
-# Rust 备用 target 目录（非标准名，转义 target/ 规则；e26f09532 auto-save
-# 曾误跟踪 1394 产物拖垮 pre-commit/mypy，2026-09-01 始显式忽略）
+# Rust 备用 target 目录（非标准名，转义 target/ 规则；auto-save/诊断提交
+# 曾误跟踪 target-rel-alt 1394 产物 + target_release_check 1356 +
+# target_warmup_diag 229，拖垮 pre-commit/mypy，2026-09-01 始显式忽略）
 **/target-rel-alt/
+**/target_release_check/
+**/target_warmup_diag/
 target_diag/
 
 # 内核数据库清空前的自动备份（db-admin clear 方法写盘）

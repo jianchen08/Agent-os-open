@@ -312,9 +312,20 @@ def remove_project_folder(path: str) -> bool:
         return False
     import shutil
 
-    # onexc 为 3.12+ API（3.11 的 onerror 已废弃移除中）；mypy python_version=3.11
-    # 存根缺署名，定点豁免——插件运行时地板 3.12
-    shutil.rmtree(target, onexc=_rmtree_onexc)  # type: ignore[call-arg]
+    # 只读解锁回调双签名：onexc(func, path, exc)=3.12+ 增补 API；
+    # onerror(func, path, excinfo)=3.11 及以下（未删除，仅弃用）。
+    # CI（3.11）与本地（3.12/3.14）并存，按签名可用性分发（不猜版本号）。
+    import inspect
+
+    if "onexc" in inspect.signature(shutil.rmtree).parameters:
+        shutil.rmtree(target, onexc=_rmtree_onexc)  # type: ignore[call-arg]
+    else:
+
+        def _onerror(func: Any, path: str, excinfo: Any) -> None:
+            # onerror 的 excinfo 是 (type, value, tb) 元组
+            _rmtree_onexc(func, path, excinfo[1])
+
+        shutil.rmtree(target, onerror=_onerror)
     return True
 
 

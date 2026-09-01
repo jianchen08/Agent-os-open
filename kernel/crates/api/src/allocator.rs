@@ -77,9 +77,11 @@ pub fn install_global_allocator() {
             libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
         }
         if std::env::var("MIMALLOC_ARENA_RESERVE").is_err() {
+            // value 参数是 c_long（Linux i64 / Windows i32），按目标平台 c_long
+            // 宽度转换（KiB 值不超 32 位范围，截断安全）。
             libmimalloc_sys::mi_option_set(
                 MI_OPTION_ARENA_RESERVE,
-                ARENA_RESERVE_DEFAULT_KIB as libmimalloc_sys::mi_option_t,
+                ARENA_RESERVE_DEFAULT_KIB as core::ffi::c_long,
             );
         }
     }
