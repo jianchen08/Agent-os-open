@@ -24,6 +24,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+import os
+
 import worktree_merge  # noqa: E402 — 依赖 conftest 的 sys.path 注入
 from worktree_merge import WorktreeMerger  # noqa: E402
 
@@ -275,6 +277,7 @@ class TestSafeMergeDiagnostics:
 
 
 class TestCleanupEdges:
+    @pytest.mark.skipif(os.name != "nt", reason="Windows 只读属性语义：POSIX unlink 不看文件写位，handler 不触发")
     def test_force_rmtree_chmod_failure_retries_then_raises(self, tmp_path: Path, monkeypatch: Any) -> None:
         """只读文件修复被破坏 → 重试路径走完仍失败，异常上抛（不静默吞）。"""
         import os as _os
