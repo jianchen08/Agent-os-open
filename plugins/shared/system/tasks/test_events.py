@@ -9,11 +9,12 @@ task.owned 登记键不误判、bus 失败不中断等契约。
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 
 import events
 
 
-def _task_row(status: str = "completed", **extra) -> dict:
+def _task_row(status: str = "completed", **extra: Any) -> dict:
     row = {
         "pipeline_id": "pipe_t1",
         "thread_id": "thread-1",
@@ -69,9 +70,9 @@ def test_terminal_tags_carry_rich_notification_fields():
 def test_context_usage_missing_keys_returns_empty():
     """缺 track.llm_usage / context_window 任一 → 空 dict（通知侧按无遥测处理）。"""
     assert events._context_usage(_task_row()) == {}
-    assert events._context_usage(_task_row(**{"track.llm_usage": {"total_input_tokens": 1}})) == {}
-    assert events._context_usage(_task_row(**{"context_window": 128000})) == {}
-    assert events._context_usage(_task_row(**{"track.llm_usage": {}, "context_window": 0})) == {}
+    assert events._context_usage(_task_row(**cast("dict[str, Any]", {"track.llm_usage": {"total_input_tokens": 1}}))) == {}
+    assert events._context_usage(_task_row(**cast("dict[str, Any]", {"context_window": 128000}))) == {}
+    assert events._context_usage(_task_row(**cast("dict[str, Any]", {"track.llm_usage": {}, "context_window": 0}))) == {}
 
 
 def test_unevaluated_statuses_derive_nothing():
