@@ -37,6 +37,7 @@ const mocks = vi.hoisted(() => {
     addNotification: vi.fn(() => 'notif-id'),
     updateUsage: vi.fn(),
     autoRenameSessionIfNeeded: vi.fn(),
+    applyStreamStatus: vi.fn(),
   }
 })
 
@@ -62,9 +63,15 @@ vi.mock('@/stores/agentTabStore', () => ({
 vi.mock('@/utils/logger', () => ({
   loggers: { websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } },
 }))
+// run 级终止（pipeline_round_finished）走 registry 的 applyStreamStatus
+vi.mock('@/stores/pipelineRegistryStore', () => ({
+  usePipelineRegistryStore: {
+    getState: () => ({ applyStreamStatus: mocks.applyStreamStatus }),
+  },
+}))
 
 // ── 导入被测 handler（真实 router.ts / utils.ts，依赖已被 mock）──
-import { handleGlobalError, handleStreamEnd } from '../streaming/handlers'
+import { handleStreamEnd, handlePipelineRoundFinished } from '../streaming/handlers'
 
 // ── 重置辅助 ──
 function resetAllMocks(): void {
@@ -111,14 +118,28 @@ describe('M-02: handleStreamEnd - 空轮次收尾（逐轮模型）', () => {
     expect(mocks.addNotification).not.toHaveBeenCalled()
   })
 
-  it('空轮次收尾仍正常终止 pipeline streaming 状态', () => {
+  it('空轮次轮收尾不终止生成态（run 级终止由 pipeline_round_finished 承载）', () => {
+    // 7bee84e44 契约迁移：stream_end 降级为轮级收尾，terminatePipeline 从
+    // handleStreamEnd 摘除——多轮执行的工具轮间不再被误判回空闲。（过期
+    // 断言「stream_end 调 stopStreaming」随旧契约退役，断言反契约成立。）
     handleStreamEnd({
       data: { pipeline_id: 'pipe-001', parts: [], full_content: '' },
       message_id: 'msg-1',
       _threadId: 'thread-1',
     })
 
+    expect(mocks.pipelineMethods.stopStreaming).not.toHaveBeenCalled()
+    expect(mocks.applyStreamStatus).not.toHaveBeenCalled()
+  })
+
+  it('run 级收尾（pipeline_round_finished）→ terminatePipeline + 状态落 completed', () => {
+    handlePipelineRoundFinished({
+      data: { pipeline_id: 'pipe-001', failed: false },
+      _threadId: 'thread-1',
+    })
+
     expect(mocks.pipelineMethods.stopStreaming).toHaveBeenCalledWith('pipe-001')
+    expect(mocks.applyStreamStatus).toHaveBeenCalledWith('pipe-001', 'completed')
   })
 
   it('full_content 为 null（缺失）且消息无内容时同样移除占位', () => {
