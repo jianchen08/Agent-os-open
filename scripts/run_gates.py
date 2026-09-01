@@ -406,7 +406,10 @@ GATES: list[Gate] = [
         cwd="frontend",
         shell=(
             "npm run build && {\n"
-            "  npm run preview -- --port 5188 --strictPort & PREVIEW_PID=$!\n"
+            # preview 后台进程必须重定向脱离 stdout 管道：kill npm 不一定杀透
+            # node 层，残留 node 持有管道会让 run_gate 的 subprocess.run 等
+            # EOF 永久阻塞（CI 实证挂死 80min+，2026-09-01）。
+            "  npm run preview -- --port 5188 --strictPort >/dev/null 2>&1 & PREVIEW_PID=$!\n"
             "  for i in $(seq 1 30); do curl -sf http://localhost:5188 >/dev/null && break; sleep 2; done\n"
             "  if ! curl -sf http://localhost:5188 >/dev/null; then\n"
             '    echo "preview 服务未就绪"; kill $PREVIEW_PID || true; exit 1\n'
