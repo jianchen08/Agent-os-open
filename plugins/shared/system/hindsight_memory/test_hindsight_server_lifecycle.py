@@ -666,6 +666,19 @@ class TestOnLoad:
         monkeypatch.setenv("HINDSIGHT_PORT", "18420")
         monkeypatch.setenv("HINDSIGHT_DATA_DIR", str(tmp_path / "data"))
 
+        # venv 探测平台中立化：生产先探 Windows 布局再回退 Unix 布局（isfile）。
+        # CI Linux 上两布局都真实缺失会提前 raise；这里让 Windows 布局恒命中，
+        # 测试聚焦 spawn 命令形状本身（其余路径走真实 isfile）。
+        real_isfile = os.path.isfile
+
+        def _fake_isfile(p: object) -> bool:
+            s = str(p)
+            if ".venv-hindsight" in s and s.replace("\\", "/").endswith("Scripts/python.exe"):
+                return True
+            return real_isfile(p)
+
+        monkeypatch.setattr(os.path, "isfile", _fake_isfile)
+
         # 首次 health 探测失败（未起）→ 进入 spawn 路径；轮询首轮即 200
         probe_count = {"n": 0}
 

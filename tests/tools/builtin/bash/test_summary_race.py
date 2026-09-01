@@ -133,3 +133,47 @@ async def test_execute_multiple_fast_commands_no_race(tmp_path):
         result = await tool.execute({"command": f"echo line{i}", "timeout": 10, "workspace": str(tmp_path)})
         assert result.success, f"第 {i} 次执行失败: {result.error}"
         assert f"line{i}" in result.output["output"]
+
+
+# ============================================================
+# 轮询同步探测先于输出落盘的竞态（wait_output_settled 回归）
+# ============================================================
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command,expect",
+    [
+        ("echo settled-one", "settled-one"),
+        ("echo settled-a && echo settled-b", "settled-b"),
+    ],
+    ids=["single_line", "compound"],
+)
+async def test_execute_reads_output_when_poll_detects_exit_before_flush(
+    tmp_path, monkeypatch, command, expect
+):
+    """轮询同步探测先观测到退出、输出尚未 flush 落盘时，完成路径仍读到完整输出。
+
+    复现 CI 高负载竞态：_sync_poll_process 在轮询循环里同步探测（waitpid/
+    returncode）把 status 置 completed，而 _read_output 任务还没 flush 落盘——
+    旧代码完成路径直接读 summary/output 得到空内容。注入的落盘延迟（1.2s）
+    大于轮询周期（0.5s），保证 break 发生在输出落盘之前，确定性触发该窗口。
+    """
+    original = ProcessManager._read_output
+
+    async def slow_read_output(self, *args, **kwargs):
+        await asyncio.sleep(1.2)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ProcessManager, "_read_output", slow_read_output)
+
+    tool = BashTool()
+    tool.process_manager = ProcessManager(log_dir=tmp_path / "logs" / "bash")
+
+    result = await tool.execute({"command": command, "timeout": 10, "workspace": str(tmp_path)})
+
+    assert result.success, f"快命令不应失败: {result.error}"
+    assert result.output["status"] == "completed"
+    assert expect in result.output["output"], (
+        "轮询先探测到退出时输出不应丢失（wait_output_settled 未生效）"
+    )

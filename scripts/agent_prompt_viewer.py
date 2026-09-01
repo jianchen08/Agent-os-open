@@ -552,11 +552,19 @@ def generate_html(agents: list[dict], workspace_path: str) -> str:
         grouped[agent["category"]].append(agent)
 
     # 左侧导航
+    # 注：条目行先在表达式外拼好再嵌入模板——f-string 表达式内嵌含 \' 的
+    # f-string 在 Python 3.11 及以下报 SyntaxError（PEP 701 前，表达式内禁反斜杠）
     nav_items = []
     for category in sorted(grouped.keys()):
         cat_agents = grouped[category]
         cat_label = category.replace("_", " ").title()
         cat_id = f"cat-{category}"
+        item_rows = "".join(
+            f'<div class="nav-item" data-agent="{a["config_id"]}" '
+            f'onclick="showAgent(\'{a["config_id"]}\')">'
+            f'{a["name"]} <span class="level">{a["level"]}</span></div>'
+            for a in cat_agents
+        )
         nav_items.append(
             f"""
             <div class="nav-group">
@@ -566,12 +574,7 @@ def generate_html(agents: list[dict], workspace_path: str) -> str:
                     <span class="count">{len(cat_agents)}</span>
                 </div>
                 <div class="nav-group-items" id="{cat_id}">
-                    {" ".join(
-                        f'<div class="nav-item" data-agent="{a["config_id"]}" '
-                        f'onclick="showAgent(\'{a["config_id"]}\')">'
-                        f'{a["name"]} <span class="level">{a["level"]}</span></div>'
-                        for a in cat_agents
-                    )}
+                    {item_rows}
                 </div>
             </div>
         """

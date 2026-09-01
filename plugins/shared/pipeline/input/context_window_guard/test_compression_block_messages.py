@@ -58,11 +58,23 @@ def _load_guard_module() -> Any:
 
 
 def _load_llm_core_module() -> Any:
-    """动态加载 llm_core plugin.py（拼消息零特判断言的被测方）。"""
+    """动态加载 llm_core plugin.py（拼消息零特判断言的被测方）。
+
+    plugin.py 内部平铺 import 裸名 'adapter'。pytest 单进程收集多插件，
+    sys.modules['adapter'] 可能已指向其他插件的 adapter.py（channel_*/llm/
+    multimodal 同名，生产 sidecar 每插件独立进程无此冲突）——逐出指向
+    llm_core 目录之外的缓存并把自身目录置顶，保证平铺 import 命中
+    llm_core 自己的 adapter.py（与 bash 测试 conftest 同款防御）。
+    """
     llm_core_dir = _PLUGIN_DIR.parents[1] / "core" / "llm_core"
-    for p in (str(llm_core_dir),):
-        if p not in sys.path:
-            sys.path.insert(0, p)
+    if str(llm_core_dir) not in sys.path:
+        sys.path.insert(0, str(llm_core_dir))
+    cached = sys.modules.get("adapter")
+    cached_file = getattr(cached, "__file__", None)
+    if cached is not None and not (
+        cached_file and Path(cached_file).resolve().is_relative_to(llm_core_dir.resolve())
+    ):
+        sys.modules.pop("adapter", None)
     mod_name = "llm_core_block_messages_test"
     sys.modules.pop(mod_name, None)
     spec = importlib.util.spec_from_file_location(mod_name, str(llm_core_dir / "plugin.py"))

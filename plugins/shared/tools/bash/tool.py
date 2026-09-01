@@ -586,7 +586,9 @@ class BashTool(WorkspaceAwareMixin):
                 # 短暂等待
                 await asyncio.sleep(0.5)
 
-            # 进程已完成，获取摘要和输出
+            # 进程已完成，等输出读取任务收尾再获取摘要和输出
+            # （_sync_poll_process 可能抢在输出 flush 落盘前观测到退出）
+            await self.process_manager.wait_output_settled(pid)
             summary = self.process_manager.get_summary(pid)
             output = self.process_manager.get_output(pid)
 
@@ -675,6 +677,7 @@ class BashTool(WorkspaceAwareMixin):
 
         # 如果进程已完成，直接返回结果（对齐 execute 完成路径，带 output）
         if proc_info.status != "running":
+            await self.process_manager.wait_output_settled(pid)
             summary = self.process_manager.get_summary(pid)
             exit_code = proc_info.exit_code
             if exit_code is not None and exit_code != 0:
@@ -734,6 +737,7 @@ class BashTool(WorkspaceAwareMixin):
             await asyncio.sleep(0.5)
 
         # 进程已完成（对齐 execute 完成路径，带 output）
+        await self.process_manager.wait_output_settled(pid)
         summary = self.process_manager.get_summary(pid)
         exit_code = proc_info.exit_code if proc_info else None
         if exit_code is not None and exit_code != 0:

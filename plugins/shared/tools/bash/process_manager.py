@@ -795,6 +795,24 @@ class ProcessManager:
         raw_output = raw_output.replace("\x00", "")
         return raw_output
 
+    async def wait_output_settled(self, pid: int, timeout: float = 5.0) -> None:
+        """等待输出读取任务收尾，再放行 summary/output 读取。
+
+        轮询路径的 _sync_poll_process 同步探测退出（returncode/waitpid），在快
+        命令 + 事件循环高负载下会抢在 _read_output 把输出 flush 落盘之前把
+        status 置为 completed——完成路径随即读 summary/output 拿到空内容。
+        读取前显式等输出任务收尾；任务已清（即时清理竞态先到）或超时则直接
+        放行，磁盘日志是兜底真理源。
+        """
+        proc_info = self.active_processes.get(pid)
+        task = proc_info.output_task if proc_info else None
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait({task}, timeout=timeout)
+        except Exception:
+            pass
+
     def get_summary(self, pid: int) -> dict[str, Any] | None:
         """获取进程摘要。
 

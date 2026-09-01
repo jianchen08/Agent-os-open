@@ -145,7 +145,10 @@ class TestSanitizeEvalPaths:
     def test_home_and_var_abs_paths_made_relative(self, core: Any) -> None:
         s = core.sanitize_eval_paths("a /home/u/f.txt b /var/log/x c")
         _assert_no_abs_path_prefix(s)
-        assert "home/u/f.txt" in s and "var/log/x" in s
+        # 契约 = 绝对前缀被消除 + 文件名/路径段仍可定位。relpath 输出形状
+        # 平台各异：Windows 把无盘符 POSIX 路径当相对路径（保留 home/u/ 前段），
+        # POSIX 相对 cwd 产出 ../.. 前缀（home/u 被层级消化）——断言兼容两形
+        assert ("home/u/f.txt" in s or "u/f.txt" in s) and "var/log/x" in s
 
     def test_cross_drive_win_path_valueerror_degrade(self, core: Any) -> None:
         """跨盘符相对化抛 ValueError → 原样保留（不炸评估调用）。

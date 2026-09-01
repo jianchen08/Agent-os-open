@@ -88,6 +88,12 @@ def _git_init(repo: Path, branch: str = "main") -> None:
     import subprocess
 
     subprocess.run(["git", "init", "-b", branch, str(repo)], check=True, capture_output=True, text=True)
+    # CI runner 无全局 git 身份，commit 会以 128 失败——repo 级补身份（与
+    # 生产 _ensure_git_user 同口径）
+    subprocess.run(["git", "config", "user.name", "Agent OS"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "agent@agent-os.local"], cwd=repo, check=True, capture_output=True, text=True
+    )
     (repo / "README.md").write_text("proj", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, text=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)

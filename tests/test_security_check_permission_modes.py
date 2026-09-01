@@ -119,11 +119,13 @@ class TestDefaultMode:
 
 class TestAcceptEdits:
     @pytest.mark.asyncio
-    async def test_文件类放行(self) -> None:
+    async def test_文件类放行(self, tmp_path: Any) -> None:
         svc = _mock_approval()
         p = _make_plugin()
         _set_pipeline_mode("p1", "accept_edits")
-        result = await p.execute(_ctx(_tool_state("file_write", {"path": "/etc/hosts", "content": "x"})))
+        # 普通文件路径（临时目录内）：/etc/hosts 在 Linux 上命中敏感系统目录
+        # 硬拦截（设计内安全底线，优先于 accept_edits 放行），不代表"文件类"
+        result = await p.execute(_ctx(_tool_state("file_write", {"path": str(tmp_path / "x.txt"), "content": "x"})))
         assert result.state_updates["security.decision"]["allowed"] is True
         assert "tool_results" not in result.state_updates
         assert len(svc.requests) == 0, "accept_edits 下文件类放行不得发起审批请求"

@@ -24,6 +24,15 @@ pytestmark = pytest.mark.unit
 class TestConvertWindowsPathsForWsl:
     """Windows 路径转 WSL 路径测试。"""
 
+    @pytest.fixture(autouse=True)
+    def _pretend_windows(self):
+        """统一 mock 平台为 Windows：转换是纯字符串正则逻辑，与宿主平台无关；
+        不 mock 时 Linux 上函数按设计原样返回，转换断言全假红、不转换断言全假绿。
+        需要非平台语义的用例（test_non_windows_platform_returns_unchanged）在测试体内
+        自行嵌套 patch 覆盖。"""
+        with patch("process_manager.platform.system", return_value="Windows"):
+            yield
+
     # ---- 盘符路径 ----
 
     def test_drive_backslash(self):

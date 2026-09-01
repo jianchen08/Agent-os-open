@@ -235,9 +235,12 @@ def test_get_workspace_root_injected_config_wins(manager_cls, tmp_path):
     )
     assert manager._get_workspace_root() == (base / "my_ws").resolve()
 
+    # 绝对 root 原样采用（不被 base_path 拼接）：用真实绝对路径表达，
+    # "D:/xxx" 在 POSIX 上是相对路径，会拼进 cwd 导致平台假红
+    injected_abs = tmp_path / "injected_abs"
     manager_abs = make_manager(
         manager_cls,
-        config={"workspace": {"root": "D:/injected/abs"}},
+        config={"workspace": {"root": str(injected_abs)}},
         base_path=str(base),
     )
-    assert manager_abs._get_workspace_root() == Path("D:/injected/abs").resolve()
+    assert manager_abs._get_workspace_root() == injected_abs.resolve()
