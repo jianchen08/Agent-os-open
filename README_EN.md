@@ -186,7 +186,7 @@ cp .env.example .env
 # Edit .env and fill in your LLM API keys
 
 # 2. Start (builds the Rust kernel + starts kernel :9100 / frontend :6390 / Redis)
-#    NOTE: the 0.1 start_web.sh was removed; use start_web_02.sh / stop_web_02.sh for 0.2
+#    use start_web_02.sh / stop_web_02.sh to start/stop
 chmod +x start_web_02.sh
 ./start_web_02.sh            # full start (build + kernel + frontend)
 # or ./start_web_02.sh --no-build   # skip the build step
@@ -227,7 +227,7 @@ The two instances don't interfere: different directories → different compose p
 For developers who skip the scripts and need fine-grained control.
 
 ```bash
-# 1. Build and start the Rust kernel (the 0.1 src/ + channels.websocket entries are gone)
+# 1. Build and start the Rust kernel
 cd kernel && cargo build --release --bin agentos-kernel
 export AGENTOS_PLUGINS_DIR=../plugins/shared AGENTOS_CONFIG_ROOT=../config
 ./target/release/agentos-kernel    # kernel runs at http://localhost:9100
@@ -238,12 +238,8 @@ npm install
 npm run dev    # frontend dev server at http://localhost:6390 (proxies to kernel :9100)
 ```
 
-> **About CLI mode**: the 0.1 standalone CLI entries (`cli_cn.bat` / `run.py` /
-> `channels.cli.cli_main`) were cut by decision on 2026-08-20 (CLI pluginization inventory):
-> the interactive REPL depended on the 0.1 in-process Python pipeline engine
-> (`pipeline.engine` / `infrastructure.*`), which 0.2 replaced with the Rust kernel engine —
-> no equivalent, no real consumers; interactive usage is unified in the Web frontend
-> (`start_web_02.bat` / `start_web_02.sh`). `plugins/shared/system/channel_cli` remains a
+> **About CLI mode**: interactive usage is unified in the Web frontend
+> (`start_web_02.bat` / `start_web_02.sh`). `plugins/shared/system/channel_cli` is a
 > plugin shell loaded via sidecar (the only supported path), exposing the
 > `cli.get_status` / `cli.sanitize_text` services plus `CLIOutputAdapter` (terminal text
 > sanitizing; interface from the `channel_common` shared package).

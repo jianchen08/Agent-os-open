@@ -185,7 +185,7 @@ cp .env.example .env
 # 编辑 .env，填入 LLM API Key
 
 # 2. 启动（编译 Rust 内核 + 启动内核 :9100 / 前端 :6390 / Redis）
-#    注意：0.1 的 start_web.sh 已删除；0.2 启动/停止请用 start_web_02.sh / stop_web_02.sh
+#    启动/停止请用 start_web_02.sh / stop_web_02.sh
 chmod +x start_web_02.sh
 ./start_web_02.sh            # 完整启动（编译 + 内核 + 前端）
 # 或 ./start_web_02.sh --no-build   # 跳过编译直接启动
@@ -226,7 +226,7 @@ start_web_02.bat
 适合不使用脚本、需要精细控制的开发者。
 
 ```bash
-# 1. 编译并启动 Rust 内核（0.1 的 src/ + channels.websocket 入口已删除）
+# 1. 编译并启动 Rust 内核
 cd kernel && cargo build --release --bin agentos-kernel
 export AGENTOS_PLUGINS_DIR=../plugins/shared AGENTOS_CONFIG_ROOT=../config
 ./target/release/agentos-kernel    # 内核运行在 http://localhost:9100
@@ -237,13 +237,10 @@ npm install
 npm run dev    # 前端开发服务器运行在 http://localhost:6390（反代到内核 :9100）
 ```
 
-> **关于 CLI 模式**：0.1 的独立 CLI 入口（`cli_cn.bat` / `run.py` / `channels.cli.cli_main`）
-> 已于 0.2 裁定砍掉（CLI 插件化盘点结论，2026-08-20）：交互式 REPL 依赖的 0.1 进程内
-> Python 管道引擎（`pipeline.engine` / `infrastructure.*` 等）在 0.2 已由 Rust 内核引擎
-> 取代，无等价物也无真实消费场景，交互体验统一走 Web 前端（`start_web_02.bat` /
-> `start_web_02.sh`）。`plugins/shared/system/channel_cli` 保留为插件壳，经 sidecar
-> 加载（唯一正途），提供 `cli.get_status` / `cli.sanitize_text` 服务与
-> `CLIOutputAdapter`（终端文本清理，接口来自 `channel_common` 渠道共享包）。
+> **关于 CLI 模式**：交互式使用统一走 Web 前端（`start_web_02.bat` / `start_web_02.sh`）。
+> `plugins/shared/system/channel_cli` 是插件壳，经 sidecar 加载（唯一正途），提供
+> `cli.get_status` / `cli.sanitize_text` 服务与 `CLIOutputAdapter`（终端文本清理，接口来自
+> `channel_common` 渠道共享包）。
 
 
 ---

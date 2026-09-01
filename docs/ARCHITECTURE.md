@@ -62,7 +62,7 @@
 2. **改动半径分离**：高频变化（业务能力）与低频冻结（执行基座、契约）分开放。内核变更 = 重编译 + 全量回归 + 整体重启；插件变更 = 热发现/热注册/热重载，坏插件自动保留旧版回退。把 99% 的变化挡在内核之外，基座才能稳定到可以冻结契约。
 3. **故障隔离**：能力默认跑在 sidecar 独立进程——插件崩溃只死插件进程，内核透明 respawn 并重试一次；反例是能力内置内核，一处 panic 全系统不可用。
 4. **语言与生态自由**：AI 生态迭代最快在 Python（LiteLLM、各厂商 SDK），插件轨让它们即插即用；性能敏感路径再按基准晋升 Rust cdylib。全内置 Rust 方案被否——第三方贡献门槛高、改核心必须重编译（ADR `2026-07-13-sidecar-process-model.md`）。
-5. **一个契约覆盖一切扩展**：plugin.json 一套机制（发现/校验/注册/权限/观测/热更新）管所有能力类型——新增能力类型零新机制。0.1 时代每类扩展点各有一套注册与加载路径，分叉即漂移，是收敛到统一协议的直接动因。
+5. **一个契约覆盖一切扩展**：plugin.json 一套机制（发现/校验/注册/权限/观测/热更新）管所有能力类型——新增能力类型零新机制；扩展点若各持一套注册与加载路径，分叉即漂移，这是收敛到统一协议的直接动因。
 6. **治理单点**：能力全部过能力注册表——LLM 工具面（三层过滤）、权限、观测、禁用收回都在同一 choke point 上，"哪些能力对谁可见"一处可查、一处可收。
 
 ### 2. 配置优于代码（Configuration over Code）
@@ -135,7 +135,7 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 - **G10 路由 DSL**（冻结）：条件永远 `when`、目标永远 `then`（`end` / `loop` / step id / 循环体 id）、附带写入 `set:`。配置在**加载期编译**（when 预编译 AST、引用静态解析、命名冲突启动即报），运行时零解析。
 - **Pull 热加载**：每次 chat 执行前检测 autonomous.yaml + `config/steps/` 的 mtime 指纹（1s TTL 门），变化即重新加载编译，改配置无需重启内核；热重载失败保留旧配置 + warn，在途 run 按快照跑完。
 - **step 三级命中**：管道 step id → 公共 step 库（`config/steps/`）→ 插件 id。
-- **声明式路由**：出口转移全部写在管道 YAML 的 `next:` DSL（`when`/`then`/`set`，目标 `end` / `loop` / step id / 循环体 id），加载期编译。插件只读写 state 参与（输出 DSL 条件依赖的字段），不产路由信号——manifest 的 `capabilities.route_signals` 与 `PluginResult.route_signal` 为历史声明位/字段，执行链零消费。
+- **声明式路由**：出口转移全部写在管道 YAML 的 `next:` DSL（`when`/`then`/`set`，目标 `end` / `loop` / step id / 循环体 id），加载期编译。插件只读写 state 参与（输出 DSL 条件依赖的字段），不产路由信号——manifest 的 `capabilities.route_signals` 与 `PluginResult.route_signal` 仅是声明位/遗留字段，执行链零消费，新插件无需声明。
 - **并发模型**：RunChainRegistry 按 effective_pipeline_id 串行（同管道 FIFO、异管道并行、全局并发上限）。
 - **task = pipeline state 单一真值**：`task.id = pipeline_id`；任务状态由任务域插件裁决（评估闸门），内核不回写任务状态。
 
@@ -148,7 +148,7 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 - **三类目录**：`plugins/shared/pipeline/{input,core,output}/`（管道步骤）、`plugins/shared/tools/`（LLM 工具）、`plugins/shared/system/`（系统服务）。
 - **双根发现**：内置根 `plugins/shared/` + 用户根（`AGENTOS_USER_PLUGINS_DIR`），同 id 用户根覆盖内置根。
 - **宿主三轨**：Python sidecar（默认；独立进程、MCP over stdio、uv venv 单轨、懒启动/空闲回收/崩溃自愈/热重载）、Rust cdylib 原生（`in_process`；高频管道步骤晋升轨、永不 dlclose）、外部 MCP（`entry: "mcp:external"`；零代码直连第三方 MCP 服务）。
-- **能力声明**：`capabilities.tools`（进 LLM 面）/ `services`（内部服务，不进 LLM 面）/ `lifecycle_hooks` / `streaming`（流式事件声明，fail-closed）；`route_signals` 为历史声明位，执行面零消费。
+- **能力声明**：`capabilities.tools`（进 LLM 面）/ `services`（内部服务，不进 LLM 面）/ `lifecycle_hooks` / `streaming`（流式事件声明，fail-closed）；`route_signals` 仅是声明位，执行面零消费，新插件无需声明。
 - **插件间耦合唯一轴**：`requires_services`（能力角色名，boot 期闸校验）。
 - **LLM 可见工具三层过滤**：启用档案（`config/plugins/default_profile.yaml`，watcher 每轮 sync 重读）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。
 - **全链路热生效**：新插件自动发现注册、manifest 变更自动 revoke + 重注册（G2 漂移校验）、Python 代码改动 respawn、cdylib 集合变更 G8 优雅重启——插件改动无需 re-enable 或重启内核。
@@ -177,7 +177,7 @@ plugins:
 ```
 
 - **agent_id 的本质是执行上下文**：Agent 在内核中**没有运行时对象**——`agent_id` 只是执行上下文（pipeline state / `execution_context`）里的一个键，会话创建时写入 initial_state，随 `execution_context` 贯穿任务链全链传导。引擎对它只透传；agent 的全部语义由插件按这个键展开（见下条）。切换会话 Agent = 换一个上下文键，下一轮管道自然整体切换人设/工具/约束——不存在"注册/反注册 Agent"这类内核动作。
-- **消费分权（按 agent_id 展开的两侧）**：内核只读 `tool_ids`（窄接口，按 agent_id 解析后过滤注入工具 schema）；全量配置由管道 prepare 步的 `pipeline_context_build` 插件自持加载——按 `state.agent_id` 定位 YAML，注入 `context.system_prompt` / `tool_ids` / `context.agent_level` 等。
+- **消费分权（按 agent_id 展开的执行上下文）**：全量配置由管道 prepare 步的 `pipeline_context_build` 插件自持加载——按 `state.agent_id` 定位 YAML，注入 `context.system_prompt` / `tool_ids` / `context.agent_level` 等；工具面同属这份执行上下文（LLM 请求构建按已展开的 `tool_ids` 过滤工具 schema），内核不解析 Agent 配置、对 `agent_id` 只透传。
 - **多层协作**：主管（灵汐，L1）面向用户负责任务分类与派发；编排（L2）做多步骤编排与审查节点；执行（L3）是具体执行单元。
 
 配置方法见 [guides/agent-configuration.md](guides/agent-configuration.md)。
@@ -311,7 +311,7 @@ plugins:
 ### 3. 找"谁该知道"——每个概念，谁需要知道它？
 > 不该知道的人知道了 → 边界泄漏，需收回。
 
-**例**：Agent 全量配置只有 context_build 插件消费，内核只留 `tool_ids` 窄接口——内核不需要知道提示词骨架与静态变量。
+**例**：Agent 全量配置（含工具面 `tool_ids`）只有 context_build 等管道插件按 agent_id 展开——内核不需要知道提示词骨架、静态变量与工具白名单。
 
 ### 4. 找"变化方向"——什么会变，什么不会变？
 > 把"会变的"封装在内部，"不变的"暴露为接口。

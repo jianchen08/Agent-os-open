@@ -4,7 +4,7 @@
 > 本文定义流式事件的**平台公共契约**：所有消息实时通道（LLM 流式回复、插件实时进度/结构化卡片）发射的事件信封统一走本协议。
 > 单一真值源：`config/kernel_capabilities/streaming.json`（内核入口校验 + 前端消费 + 插件发射端均读本文件，不读代码副本）。
 > 决策背景见 [ADR 2026-08-22 流式链路重写为平台公共契约](../decisions/2026-08-22-streaming-protocol-rewrite.md)。
-> **协议状态：已采纳并落地**——`ManifestCapabilities.streaming` 字段已进内核契约（`kernel/crates/core/src/traits.rs`），前端 `pluginDeclarationValidate` 已按声明校验，插件可实际接入。LLM 正文流式已迁移 8 事件块协议（2026-08-26 定稿，见 §3.1）。
+> **协议状态：已采纳并落地**——`ManifestCapabilities.streaming` 字段已进内核契约（`kernel/crates/core/src/traits.rs`），前端 `pluginDeclarationValidate` 已按声明校验，插件可实际接入。LLM 正文流式为 8 事件块协议（见 §3.1）。
 
 ---
 
@@ -83,8 +83,8 @@
 | 事件 | 必选字段 | 载荷语义 | 前端操作 |
 |------|---------|---------|---------|
 | `stream_start` | pipeline_id, message_id, thread_id | 一条新消息开始流式输出 | 按 (pipeline_id, message_id) 建占位消息（status='streaming'） |
-| `stream_chunk` ⚠️已退役 | pipeline_id, message_id, content, thread_id | 正文增量文本（历史契约位） | 前端 handler 已删除——llm_service 不再发射，插件勿用（正文增量走 §3.1 块协议或整段 `new_message`） |
-| `thinking_start` / `thinking_chunk` / `thinking_end` ⚠️已退役 | pipeline_id, message_id(, content), thread_id | 思考流（历史契约位） | 同上——思考起止由块协议 `block_start(reasoning)`/`block_end` 表达 |
+| `stream_chunk` ⚠️ 不可用 | pipeline_id, message_id, content, thread_id | 正文增量文本 | 前端无对应 handler，发射即丢弃——插件勿用（正文增量走 §3.1 块协议或整段 `new_message`） |
+| `thinking_start` / `thinking_chunk` / `thinking_end` ⚠️ 不可用 | pipeline_id, message_id(, content), thread_id | 思考流 | 同上——思考起止由块协议 `block_start(reasoning)`/`block_end` 表达 |
 | `tool_start` | pipeline_id, message_id, call_id, thread_id | 工具调用开始（name/args） | push tool_call part（state='calling'） |
 | `tool_result` | pipeline_id, message_id, call_id, thread_id | 工具结果（result/error/success/result_data） | 按 call_id 更新 tool_call part（state='done'/'error'） |
 | `new_message` | pipeline_id, message_id, thread_id | 消息确认（权威终态）：assistant 完整形态 + user_message 权威版 + client_message_id | ① 按 cmid 认领乐观 user（UI id 不变，权威 id/seq 记入 recordId）；② assistant parts 权威合并收尾 |
@@ -95,7 +95,7 @@
 
 ### 3.1 LLM 正文流式：8 事件块协议（现行）
 
-LLM 路径的正文/思考/工具调用增量**不走**上表 `stream_chunk`/`thinking_*`（已退役），走 2026-08-26 定稿的块协议（后端 `llm_service` 发射、前端 `blockHandler` 消费；事件名见 `frontend/src/constants/websocket.ts`）：
+LLM 路径的正文/思考/工具调用增量**不走**上表 `stream_chunk`/`thinking_*`（前端无 handler），走块协议（后端 `llm_service` 发射、前端 `blockHandler` 消费；事件名见 `frontend/src/constants/websocket.ts`）：
 
 | 事件 | 语义 |
 |------|------|
@@ -177,7 +177,7 @@ block 未闭合 → `finish`/error 补收；new_message 缺失 → stream_end �
 ```
 
 - `events`（可选，缺省=全部事件类型均可发射）：声明插件实际发射的事件类型，
-  供校验器（G2）检查声明与实现一致性。**不要声明已退役事件**（`stream_chunk`/
+  供校验器（G2）检查声明与实现一致性。**不要声明 `stream_chunk`/
   `thinking_*`——前端无 handler，发射等于丢弃）。
 - `part_types`（可选）：插件自定义渲染的 part 类型（见 §8）。
 - `persist`（可选，缺省 false）：插件事件的默认持久化语义。

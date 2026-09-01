@@ -3,14 +3,11 @@
 > **目标读者**：刚加入灵汐 AgentOS 0.2 项目的开发者、插件作者、想理解"内核和插件到底是怎么约定合作的"的好奇者
 > **读完你能懂**：项目里有哪些"契约文件"、它们各自规定了什么、为什么这么规定、在真实开发场景里怎么用
 
-> **📍 现状勘误（相对 2026-07-13 调研时点的路径变更）**：
-> - `docs/0.2_rust_plugin_solution.md` → 已归档至 `docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md`
-> - `src/pipeline/plugin.py` / `src/pipeline/types.py` → 已随 0.1 `src/` 整体删除；0.2 等价契约：管道插件 Python 基类在 `plugins/shared/pipeline/_base/plugin.py`，类型定义在 `plugins/sdk/src/agentos_plugin_sdk/pipeline_types.py`
-> - `.project/manifest_v2_schema.json` / `.project/mcp_extension_protocol.md` → 始终未作为独立文件产出；manifest 真值源 = `kernel/crates/core/src/traits.rs::PluginManifest`，协议文档 = `docs/guides/plugin-protocol.md`
-> - `docs/guides/plugin_development_guide.md` / `plugin_development_standard.md`（0.1）→ 已删除；现行开发指南 = `docs/guides/` 分篇（见 [README.md](README.md)）
-> - 路由信号（`next_llm` / `next_tool` / `end` / `wait`）**已不驱动路由**：0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`）按 state 条件裁决；`RouteType` / `PluginResult.route_signal` 为遗留类型（native 恒 None、引擎不读），manifest `route_signals` 声明位保留但执行面零消费
-> - `docs/guides/contract_qa.md`（契约设计 Q&A）→ 已删除：其回答基于旧版 traits.rs（755 行时期），`dependencies`/`DependencyResolver`/`LlmProvider`/三子 trait 等前提在当前代码中不存在；具体做法见各分篇指南（依赖→[plugin-sidecar-python.md](plugin-sidecar-python.md) §4、宿主选型→[plugin-development.md](plugin-development.md) §2、字段→[plugin-protocol.md](plugin-protocol.md)）
-> - `docs/ARCHITECTURE.md` → 已更新为 0.2 架构口径
+> **📍 现状速览**：
+> - 管道插件 Python 基类：`plugins/shared/pipeline/_base/plugin.py`；SDK 类型定义：`plugins/sdk/src/agentos_plugin_sdk/pipeline_types.py`
+> - manifest 真值源 = `kernel/crates/core/src/traits.rs::PluginManifest`，协议文档 = `docs/guides/plugin-protocol.md`（`.project/` 下无独立 schema 文件）
+> - 现行开发指南 = `docs/guides/` 分篇（见 [README.md](README.md)）：依赖→[plugin-sidecar-python.md](plugin-sidecar-python.md) §4、宿主选型→[plugin-development.md](plugin-development.md) §2、字段→[plugin-protocol.md](plugin-protocol.md)
+> - 路由信号（`next_llm` / `next_tool` / `end` / `wait`）**不驱动路由**：路由由管道 YAML 的 G10 DSL（`when`/`then`）按 state 条件裁决；`RouteType` / `PluginResult.route_signal` 为遗留类型（native 恒 None、引擎不读），manifest `route_signals` 声明位保留但执行面零消费
 
 ---
 
@@ -26,16 +23,15 @@
 
 > **表头说明**：`状态`列说明文件是否已实际产出。
 > - ✅ 已存在：在仓库里能直接看到
-> - ⏳ task_02 待产出：任务书里点名要产出，但当前仓库中尚未生成（教程引用其预期内容）
-> - 🔁 双重身份：既是 0.1 旧版契约的对照参考，又是 0.2 演进基线
+> - ⏳ 待产出：规划点名要产出，但当前仓库中尚未生成（教程引用其预期内容）
 
 | # | 文件路径 | 形式 | 角色 | 状态 |
 |---|---------|------|------|------|
 | 1 | `docs/working/_archive_0.2_migration/0.2_rust_plugin_solution.md` | 方案总纲 | 0.2 整体方案的设计决策与 AC 总表（已归档） | ✅ 已存在 |
 | 2 | `docs/working/0.2插件体系核心决策.md` | 决策文档 | 9+1 条插件体系核心决策（统一 trait / 状态隔离 / 路由信号精简等） | ✅ 已存在 |
 | 3 | `docs/working/_archive_0.2_migration/0.2_rust_plugin_checkpoints.md` | 检查点设计 | 13 个检查点 + 里程碑门控（已归档） | ✅ 已存在 |
-| 4 | `.project/manifest_v2_schema.json` | JSON Schema | 插件 manifest V2.0 字段校验规范 | ⏳ task_02 待产出 |
-| 5 | `.project/mcp_extension_protocol.md` | 协议文档 | MCP 灵汐扩展协议（`__kernel_*` 扩展消息） | ⏳ task_02 待产出 |
+| 4 | `.project/manifest_v2_schema.json` | JSON Schema | 插件 manifest V2.0 字段校验规范 | ⏳ 待产出 |
+| 5 | `.project/mcp_extension_protocol.md` | 协议文档 | MCP 灵汐扩展协议（`__kernel_*` 扩展消息） | ⏳ 待产出 |
 | 6 | `kernel/crates/core/src/lib.rs` | Rust 模块入口 | 0.2 内核 core crate 的模块组织入口 | ✅ 已存在 |
 | 7 | `kernel/crates/core/src/traits.rs` | Rust Trait 定义 | 内核核心契约——PluginInvoker / CapabilityRegistry / PluginLoader / HttpHandleCapability / StorageBackend（PipelinePlugin 在 `agentos_native_sdk` crate） | ✅ 已存在 |
 | 8 | `kernel/crates/core/src/types.rs` | Rust 数据类型 | 核心共享类型——RouteType / PluginResult / PluginContext / TenantContext / ToolCategory 等 | ✅ 已存在 |
@@ -58,28 +54,28 @@
 
 #### 这是什么？
 
-0.2 项目的"路线图"。一份约 300 行的方案总纲，回答"为什么从 0.1 迁到 0.2、迁到什么样子、怎么验证迁完了"。
+0.2 的方案总纲（已归档于 `docs/working/_archive_0.2_migration/`）。一份约 300 行的设计决策与验收总纲，回答"0.2 长什么样子、怎么验证"。
 
 #### 关键内容
 
-**第一节"背景与目标"**——对比 0.1 和 0.2 的差异：
+**第一节"背景与目标"**——0.2 的设计目标：
 
-| 维度 | 0.1 现状 | 0.2 目标 |
-|------|----------|----------|
-| 多租户并行 | Python GIL 限制并发 | Rust 无 GIL，tokio work-stealing |
-| 部署依赖 | Python 运行时 + 大量第三方库 | 单一二进制，零运行时依赖 |
-| 内核/插件分离 | 同进程同语言 | MCP 协议解耦，可多语言 |
-| 性能瓶颈 | asyncio 单线程 + GC | tokio 多线程 + 零成本抽象 + 无 GC |
+| 维度 | 0.2 目标 |
+|------|----------|
+| 多租户并行 | Rust 无 GIL，tokio work-stealing |
+| 部署依赖 | 单一二进制，零运行时依赖 |
+| 内核/插件分离 | MCP 协议解耦，可多语言 |
+| 性能 | tokio 多线程 + 零成本抽象 + 无 GC |
 
 **第三节"关键决策理由"**——这是教程最关心的部分，藏着 5 条核心决策（详细理由都列在文档里）：
 
 1. **选 MCP 协议而非自研 RPC**（§3.1）
 2. **管道插件混合方案**（§3.2）：高频用 Rust 原生（零 IPC 开销），低频用 MCP 边车
-3. **路由信号从 6 种精简为 4 种**（§3.5）：删掉 `delegate` 和 `fork`
+3. **路由信号为 4 种**（§3.5）：`next_llm` / `next_tool` / `end` / `wait`
 4. **多租户用 `tokio::task_local!`**（§3.4）：隐式穿透而非显式传参
 5. **按需加载全局原则**（§3.7）：所有插件和系统组件都不预启动，空闲超时自动卸载
 
-**第四节"方案级 AC 总表"**——16 条验收标准（AC-1 到 AC-16），每条都有"如何验证"的具体方法。task_02 关注的是 AC-9（Manifest 规范 V2.0 固化并可校验）。
+**第四节"方案级 AC 总表"**——16 条验收标准（AC-1 到 AC-16），每条都有"如何验证"的具体方法。
 
 #### 实际场景
 
@@ -117,16 +113,14 @@
 
 **决策 10：子管道由专门服务触发**
 
-> 0.2 **不保留** 0.1 的 `delegate` 和 `fork` 路由信号。管道引擎不主动 spawn 子管道；子任务、复盘等需求由"任务系统""复盘系统"等专门服务自己调度。**这直接导致路由信号从 6 种精简为 4 种**：
+> 管道引擎不主动 spawn 子管道；子任务、复盘等需求由"任务系统""复盘系统"等专门服务自己调度。路由信号共 **4 种**（`next_llm` / `next_tool` / `end` / `wait`），不存在 `delegate` / `fork`：
 
-| 0.1 路由信号 | 含义 | 0.2 保留 |
-|---|---|---|
-| `NextLlm` | 下一轮调 LLM | ✅ |
-| `NextTool` | 执行工具 | ✅ |
-| `End` | 管道结束 | ✅ |
-| `Wait` | 挂起等外部事件 | ✅ |
-| `Delegate` | 同步委派子管道 | ❌ 删 |
-| `Fork` | 异步分叉子管道 | ❌ 删 |
+| 路由信号 | 含义 |
+|---|---|
+| `NextLlm` | 下一轮调 LLM |
+| `NextTool` | 执行工具 |
+| `End` | 管道结束 |
+| `Wait` | 挂起等外部事件 |
 
 #### 实际场景
 
@@ -150,7 +144,7 @@
 
 | 里程碑 | 位置 | 重要性 | 人类参与 |
 |--------|------|--------|----------|
-| **CP-02 协议冻结** | task_02 完成后 | 🔴 极高 | ✅ 必须人类确认 |
+| **CP-02 协议冻结** | 契约评审通过后 | 🔴 极高 | ✅ 必须人类确认 |
 | CP-06 内核可用 | task_06 完成后 | 🔴 极高 | Agent 互审 |
 | CP-08 SDK 可用 | task_08 完成后 | 🟡 高 | ✅ 建议人类确认 |
 | **CP-13 发布门控** | task_13 完成后 | 🔴 极高 | ✅ 必须人类确认 |
@@ -201,7 +195,7 @@
 | `tools[]` | 提供的工具列表 | `[{"name": "web_search", "input_schema": {...}}]` |
 | `services[]` | 内部服务方法元数据（不进 LLM 面） | `[{"name": "ns.method"}]` |
 | `steps[]` | 管道步骤声明 | — |
-| `route_signals[]` | 历史声明位（执行面零消费） | `["next_llm", "end"]` |
+| `route_signals[]` | 遗留声明位（执行面零消费） | `["next_llm", "end"]` |
 | `lifecycle_hooks[]` | 订阅的生命周期事件 | `["on_load", "on_pipeline_start"]` |
 | `streaming` | 流式事件声明（fail-closed） | `{events, part_types, persist}` |
 
@@ -356,7 +350,7 @@ pub mod types;   // 共享数据结构
 | 类型 | 角色 | 实际场景 |
 |------|------|----------|
 | `RouteType` 枚举 | 路由类型（4 种） | `NextLlm` / `NextTool` / `End` / `Wait` |
-| `RouteSignal` struct | 路由信号包（历史声明位，执行面零消费） | manifest `capabilities.route_signals` 对应物 |
+| `RouteSignal` struct | 路由信号包（遗留声明位，执行面零消费） | manifest `capabilities.route_signals` 对应物 |
 | `PluginResult` struct | 插件执行结果 | 包含 `state_updates` + `skip_remaining` + `error` |
 | `PluginError` struct | 插件错误 | `message` + `code` + `source` |
 | `PluginContext` struct | 插件执行上下文 | 包含 `state` + `config` + `tenant` + `pipeline_id` + `session_id` + `task_id` + `content_loader`（七字段） |
@@ -377,7 +371,7 @@ pub enum RouteType {
 }
 ```
 
-> **关键变更**：0.1 有 6 种（`next_llm` / `next_tool` / `end` / `delegate` / `wait` / `decision`），0.2 删除 `delegate` 和 `fork`，精简为 4 种。详见 0.2插件体系核心决策 §决策 10。
+> **口径**：路由信号共 4 种（`next_llm` / `next_tool` / `end` / `wait`），无 `delegate` / `fork`——跨管道一律经专门服务/工具触发。详见 docs/working/0.2插件体系核心决策.md §决策 10。
 
 #### `ErrorPolicy`（已整体删除）
 
@@ -416,7 +410,7 @@ pub struct PluginContext {
 
 #### 这是什么？
 
-sidecar 管道插件业务层的 Python 抽象基类（ABC）——`server.py` MCP 适配层之下的业务实现继承它。（0.1 的 `src/pipeline/plugin.py` 已随 src/ 删除，本文件是它的 0.2 承接者，心智模型一致。）
+sidecar 管道插件业务层的 Python 抽象基类（ABC）——`server.py` MCP 适配层之下的业务实现继承它。
 
 #### 关键类
 
@@ -432,7 +426,7 @@ sidecar 管道插件业务层的 Python 抽象基类（ABC）——`server.py` M
 
 #### Python 业务层 vs 内核 Rust 契约对比
 
-| 维度 | 0.1 Python | 0.2 Rust |
+| 维度 | Python 业务层 | 内核 Rust 契约 |
 |------|-----------|----------|
 | 抽象机制 | ABC + `@abstractmethod` | Rust trait + `#[async_trait]` |
 | 错误处理 | raise exception → 由 plugin chain 按 error_policy 处理 | 返回 `Result<PluginResult, PluginError>`（引擎不按 error_policy 分发，ADR 2026-08-18） |
@@ -563,7 +557,7 @@ plugin.json manifest 全字段规范（字段总表 / capabilities / requires_se
 
 - **新人入职第一周**：先读"设计哲学"和"总体架构"，建立全局心智模型
 - **二次开发者**：照"扩展点"一节，加新工具/新 Agent/新管道
-- **0.2 迁移参考**：0.1 的子系统划分是 0.2 重写时的"功能清单"基线
+- **子系统速览**：按 ARCHITECTURE 的核心子系统清单建立功能地图（管道引擎 / Agent / 工具 / 记忆 / 任务 / 隔离 / 触发器 / 审批 / 复盘 / 主题）
 
 > **来源**：[来源: docs/ARCHITECTURE.md]
 

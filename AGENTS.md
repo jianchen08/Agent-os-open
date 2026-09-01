@@ -59,8 +59,8 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   cdylib 集合变更走 G8 自动重启（同 id 换产物保守重启）；已知插件面取自共享
   manifests 活集合（新插件热注册后管道引用即可编译）；前端 schema 需刷新页面才更新。
 - **多循环体/执行上下文**：`execution_context` 贯穿任务链；agent_id 的本质是执行上下文
-  键——内核无 Agent 运行时对象，语义由插件按键展开（context_build 加载配置，内核只留
-  `tool_ids` 窄接口）。
+  键——内核无 Agent 运行时对象，语义由插件按键展开（context_build 按键加载配置，
+  工具面 `tool_ids` 同属这份执行上下文，与提示词同源注入）。
 
 ## 约定
 

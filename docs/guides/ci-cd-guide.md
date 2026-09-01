@@ -3,11 +3,10 @@
 > 灵汐系统（Agent OS）测试与持续集成完整手册
 > 适用对象：人类开发者、AI Agent、新成员
 
-> **现状说明（2026-08）**：0.2 架构（Rust 内核 + Python 插件）下，lint/type 车道由
+> **现状说明（2026-08）**：lint/type 车道由
 > `scripts/run_gates.py` 统一持有（如 `python scripts/run_gates.py --filter sdk-lint,sdk-mypy`），
 > 全量格式化为 `ruff format .` / `ruff check .`——本文速查命令与流水线图已按此对齐。
-> 第 4 章 API curl 示例为 0.1 时代编写（端口 8988 与 `src/` 路径已退役；现为内核 :9100，
-> 代码在 `kernel/` + `plugins/`），接口语义可参照，路径与端口以内核实际路由为准。
+> 第 4 章 API 示例对准内核 :9100 的现役 `/api/v1/*` 路由，路径与端口以内核实际路由为准。
 
 ---
 
@@ -311,254 +310,124 @@ def test_with_context(log_context):
 
 ## 4. 前端测试消息（API 请求示例）
 
-本节列出前后端通信的关键 API 请求示例。每个示例说明：请求什么、测试什么系统/功能、预期响应。
+本节列出前端与内核通信的关键 API 示例，全部对准内核 `:9100` 的现役 REST 面（`/api/v1/*`，
+路由清单以 `kernel/crates/api` 为准）；实时消息走 WebSocket，契约见
+[streaming-protocol.md](streaming-protocol.md)。
 
 ### 4.1 认证 API
 
 #### 用户登录 — 测试认证系统
 
 ```bash
-# 测试目标：JWT Token 签发
-# 关联后端：src/auth/token.py, src/channels/api/routes_auth.py
-curl -X POST http://localhost:8988/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username": "admin", "password": "your-password"}'
+# 测试目标：JWT Token 签发（内核 user-admin：kernel/crates/user-admin）
+curl -X POST http://localhost:9100/api/v1/auth/login   -H "Content-Type: application/json"   -d '{"username": "admin", "password": "your-password"}'
 
-# 预期响应：
-# {
-#   "access_token": "eyJhbGciOiJIUzI1NiIs...",
-#   "token_type": "bearer",
-#   "expires_in": 3600
-# }
+# 预期响应：携带 access_token（后续请求 Header 带 Authorization: Bearer <token>）
 ```
 
 #### 用户注册 — 测试用户创建
 
 ```bash
-# 测试目标：新用户注册与密码加密
-# 关联后端：src/auth/service.py
-curl -X POST http://localhost:8988/api/v1/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username": "newuser", "password": "secure-password", "role": "user"}'
+# 测试目标：新用户注册
+curl -X POST http://localhost:9100/api/v1/auth/register   -H "Content-Type: application/json"   -d '{"username": "newuser", "password": "secure-password"}'
 
-# 预期响应：
-# {"id": "user_xxx", "username": "newuser", "role": "user"}
+# 预期响应：返回新建用户信息（id / username）
 ```
 
-> 后续所有请求都需要在 Header 中携带 `Authorization: Bearer <token>`。
+### 4.2 会话 API
 
-### 4.2 会话/线程 API
-
-#### 获取会话列表 — 测试会话管理系统
+#### 获取会话列表
 
 ```bash
-# 测试目标：分页获取用户会话列表
-# 关联后端：src/channels/api/routes_threads.py
-curl http://localhost:8988/api/v1/threads?page=1&page_size=20 \
-  -H "Authorization: Bearer <token>"
+# 测试目标：分页获取当前用户会话
+curl "http://localhost:9100/api/v1/sessions?page=1&page_size=20"   -H "Authorization: Bearer <token>"
 
-# 预期响应：
-# {
-#   "items": [...],
-#   "total": 42,
-#   "page": 1,
-#   "page_size": 20
-# }
+# 预期响应：会话列表（thread 坐标；前端据此渲染侧边栏）
 ```
 
-#### 创建新会话 — 测试会话创建与 Agent 绑定
+#### 创建会话并绑定 Agent
 
 ```bash
-# 测试目标：创建会话并绑定主 Agent
-# 关联后端：src/infrastructure/session/
-curl -X POST http://localhost:8988/api/v1/threads \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"title": "测试对话", "agent_id": "agentos"}'
-
-# 预期响应：
-# {"id": "thread_xxx", "title": "测试对话", "agent_id": "agentos", "created_at": "..."}
+# 测试目标：创建会话（agent_id 写入执行上下文 initial_state）
+curl -X POST http://localhost:9100/api/v1/sessions   -H "Authorization: Bearer <token>"   -H "Content-Type: application/json"   -d '{"title": "测试对话", "agent_id": "agentos"}'
 ```
 
-### 4.3 任务 API
-
-#### 提交任务 — 测试任务创建与状态机初始化
+#### 切换会话 Agent
 
 ```bash
-# 测试目标：创建任务、验证初始状态为 pending
-# 关联后端：src/tasks/service.py, src/tasks/state_machine.py
-curl -X POST http://localhost:8988/api/v1/tasks \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "编写单元测试",
-    "description": "为 auth 模块编写单元测试",
-    "agent_name": "coding_agent",
-    "priority": 5
-  }'
-
-# 预期响应：
-# {
-#   "id": "abc123def456",
-#   "title": "编写单元测试",
-#   "status": "pending",
-#   "priority": 5,
-#   "agent_name": "coding_agent",
-#   "created_at": "2026-06-08T12:00:00Z"
-# }
+# 测试目标：切换执行上下文键（下一轮管道整体切人设/工具/约束）
+curl -X POST http://localhost:9100/api/v1/sessions/{id}/agent   -H "Authorization: Bearer <token>"   -H "Content-Type: application/json"   -d '{"agent_id": "code_writer_agent"}'
 ```
 
-#### 查询任务状态 — 测试状态追踪
+### 4.3 任务与管道
+
+任务没有独立 REST 创建口——**任务创建/派发经 `task_submit` 工具**（LLM 工具调用与
+前端面板表单同一条工具通道，见 ARCHITECTURE「任务系统与评估闸门」）；评估由
+`task_evaluate` 承担。运行态用 pipelines 只读面查询：
 
 ```bash
-# 测试目标：验证任务状态流转（pending → running → completed）
-# 关联后端：src/tasks/state_machine.py（7 种状态）
-curl http://localhost:8988/api/v1/tasks/abc123def456 \
-  -H "Authorization: Bearer <token>"
+# 管道（执行）列表
+curl "http://localhost:9100/api/v1/pipelines" -H "Authorization: Bearer <token>"
 
-# 预期响应：
-# {"id": "abc123def456", "status": "running", ...}
+# 某管道的 state（task 状态的真值所在）
+curl "http://localhost:9100/api/v1/pipelines/state?pipeline_id=<id>"   -H "Authorization: Bearer <token>"
 ```
 
-#### 评估任务 — 测试评估引擎
+### 4.4 配置读写
+
+配置按插件 `config_files` 声明读写（未声明收空配置）；LLM 配置归 `llm_service`
+插件（无全局 /config/llm 端点）：
 
 ```bash
-# 测试目标：验证评估指标检查
-# 关联后端：src/evaluation/engine.py, src/evaluation/executor.py
-curl -X POST http://localhost:8988/api/v1/tasks/abc123def456/evaluate \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "metric_ids": ["file_check", "format_valid"],
-    "context": {"output_path": "src/auth/test_new.py"}
-  }'
+# 读某插件声明的配置文件（file_id 见该插件 manifest 的 config_files）
+curl "http://localhost:9100/api/v1/plugins/llm_service/config/llm"   -H "Authorization: Bearer <token>"
 
-# 预期响应：
-# {
-#   "task_id": "abc123def456",
-#   "results": [
-#     {"metric_id": "file_check", "passed": true, "score": 1.0},
-#     {"metric_id": "format_valid", "passed": true, "score": 1.0}
-#   ]
-# }
+# 写回（mtime 缓存热更新）
+curl -X PUT "http://localhost:9100/api/v1/plugins/llm_service/config/llm"   -H "Authorization: Bearer <token>" -H "Content-Type: application/json" -d '{...}'
 ```
 
-### 4.4 配置管理 API
-
-#### 读取 LLM 配置 — 测试配置读取
+### 4.5 工具面
 
 ```bash
-# 测试目标：验证 YAML 配置读取与 API Key 脱敏
-# 关联后端：src/channels/api/routes_config.py
-curl http://localhost:8988/api/v1/config/llm \
-  -H "Authorization: Bearer <token>"
-
-# 预期响应：API Key 字段会被脱敏为 "sk-************xyz" 格式
+# 已注册工具清单（可见面 = 启用档案 ∩ 能力注册 ∩ Agent tool_ids 白名单）
+curl "http://localhost:9100/api/v1/tools" -H "Authorization: Bearer <token>"
 ```
 
-#### 更新并发配置 — 测试配置写入
+Agent 无独立 REST 面：Agent 是 `config/agents/` 下的 YAML，由 context_build 插件
+按 agent_id 展开为执行上下文（见 [agent-configuration.md](agent-configuration.md) §3）。
 
-```bash
-# 测试目标：验证配置修改实时写入 YAML 文件
-# 关联后端：src/channels/api/routes_config.py → config/system/concurrency_config.yaml
-curl -X PUT http://localhost:8988/api/v1/config/concurrency \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"max_concurrent_tasks": 10, "max_concurrent_llm_calls": 5}'
+### 4.6 记忆
 
-# 预期响应：
-# {"success": true, "message": "配置已更新"}
-```
+记忆无 REST 面：由 `hindsight_memory` 插件承载服务（`hindsight.retain` / `recall` /
+`import_document`），LLM 经 `memory` 工具读写——测试走工具调用链路，不走 HTTP。
 
-### 4.5 Agent API
-
-#### 获取 Agent 列表 — 测试 Agent 注册系统
-
-```bash
-# 测试目标：验证 Agent 注册与层级分类
-# 关联后端：src/agents/registry.py
-curl http://localhost:8988/api/v1/agents \
-  -H "Authorization: Bearer <token>"
-
-# 预期响应：返回所有已注册的 Agent（L1/L2/L3 层级）
-# [{"config_id": "agentos", "level": "L1", ...}, ...]
-```
-
-### 4.6 工具 API
-
-#### 获取工具列表 — 测试工具注册系统
-
-```bash
-# 测试目标：验证内置工具和外部工具注册
-# 关联后端：src/channels/api/routes_tools.py
-curl http://localhost:8988/api/v1/tools \
-  -H "Authorization: Bearer <token>"
-
-# 预期响应：返回所有已注册的工具列表
-```
-
-### 4.7 记忆 API
-
-#### 存储记忆 — 测试记忆存储系统
-
-```bash
-# 测试目标：验证语义记忆存储
-# 关联后端：src/memory/service.py, src/channels/api/routes_memory.py
-curl -X POST http://localhost:8988/api/v1/memory \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "semantic",
-    "content": "灵汐系统使用 FastAPI 框架",
-    "tags": ["architecture", "backend"]
-  }'
-```
-
-### 4.8 WebSocket 消息
-
-#### 建立聊天连接 — 测试实时消息系统
+### 4.7 WebSocket 消息
 
 ```javascript
-// 前端 WebSocket 连接（fetch API 方式示意）
-// 测试目标：验证 WebSocket v3 协议的消息推送
-// 关联后端：src/websocket/handler.py, src/pipeline/stream_bridge.py
+// 前端 WebSocket 连接（:9100/ws/chat，JWT 经 query 传入；重连可带 last_sequence 回放断线事件）
+const ws = new WebSocket('ws://localhost:9100/ws/chat?token=<access_token>');
 
-const ws = new WebSocket('ws://localhost:8988/ws/chat');
-
-// 连接建立后发送消息
+// 入站：用户消息（thread_id 定位会话；client_message_id 作乐观消息认领键）
 ws.onopen = () => {
   ws.send(JSON.stringify({
-    type: 'chat_message',
-    data: {
-      thread_id: 'thread_xxx',
-      content: '你好，灵汐'
-    }
+    type: 'user_input',
+    thread_id: 'thread_xxx',
+    content: '你好，灵汐',
+    client_message_id: '<uuid>'
   }));
 };
 
-// 接收流式响应
+// 出站：流式事件序列（契约真值源 config/kernel_capabilities/streaming.json）
 ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
-  // msg.type 可能的值：
-  //   "execution_start"  — 执行开始
-  //   "execution_done"   — 执行完成
-  //   "interaction_request" — 交互请求（审批/输入）
-  //   "interaction_cancelled" — 交互取消
-  //   "session_update"   — 会话变更通知
-  console.log(msg.type, msg.data);
+  // connection_confirmation → stream_start
+  // → block_start / text_delta / reasoning_delta / tool_call_delta / block_end（LLM 块协议）
+  // → tool_start / tool_result → usage → finish
+  // → new_message（权威确认）→ stream_end（轮级收尾）→ pipeline_round_finished（run 级终结）
+  // 另有：approval_request（审批）、task_status_update、heartbeat_ack 等
+  console.log(msg.type);
 };
 ```
-
-#### WebSocket 消息类型一览
-
-| 消息 type | 方向 | 测试什么功能 | 关联后端 |
-|-----------|------|-------------|----------|
-| `chat_message` | C→S | 主对话 | `pipeline/engine.py` |
-| `execution_start` | S→C | 执行开始事件 | `api/websocket/service.py` |
-| `execution_done` | S→C | 执行完成事件 | `api/websocket/service.py` |
-| `interaction_request` | S→C | 审批交互 | `human_interaction/service.py` |
-| `interaction_cancelled` | S→C | 交互取消 | `human_interaction/service.py` |
-| `session_update` | S→C | 会话列表刷新 | `channels/api/routes_threads.py` |
 
 ---
 
@@ -566,7 +435,7 @@ ws.onmessage = (event) => {
 
 ### 5.1 统一日志架构
 
-灵汐系统使用 `agentos_plugin_sdk.logging` 模块（`plugins/sdk/src/agentos_plugin_sdk/logging/`，0.2 架构从 0.1 的 `src/core/logging/` 下沉到插件 SDK）提供统一日志功能。**现有代码中的 `logging.getLogger(__name__)` 无需修改即可自动受益**。
+灵汐系统使用 `agentos_plugin_sdk.logging` 模块（`plugins/sdk/src/agentos_plugin_sdk/logging/`）提供统一日志功能。**现有代码中的 `logging.getLogger(__name__)` 无需修改即可自动受益**。
 
 | 文件 | 职责 |
 |------|------|
@@ -647,8 +516,8 @@ ws.onmessage = (event) => {
 #### 方式二：代码配置
 
 ```python
-from src.core.logging import setup_logging
-from src.core.logging.config import LoggingConfig
+from agentos_plugin_sdk.logging import setup_logging
+from agentos_plugin_sdk.logging.config import LoggingConfig
 
 config = LoggingConfig(level=logging.DEBUG, output="both", json_output=True)
 setup_logging(config, reset=True)
@@ -659,7 +528,7 @@ setup_logging(config, reset=True)
 通过 `LogContext`（基于 `contextvars`，线程安全 + asyncio 安全）在日志中注入追踪字段：
 
 ```python
-from src.core.logging.context import LogContext
+from agentos_plugin_sdk.logging.context import LogContext
 
 # 绑定追踪字段
 LogContext.bind(request_id="abc123", task_id="t-001")

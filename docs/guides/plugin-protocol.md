@@ -121,7 +121,7 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 - `tools[]`：必填 `name`；建议带全 `input_schema` + `output_schema` + `render`（工具契约 fail-closed：tool_core 执行后按 `output_schema` 校验结果，前端按 `render` 意图路由渲染）。
 - `tools[].category` 取值见 `ToolCategory`（`file` / `file_system` / `search` / `web` / `memory` / `task` / `system` / `execution` / `analysis` / `evaluation` / `agent` / `monitoring`），省略时默认 `system`。
 - `services[]`：内部服务方法元数据，经 capability 调用（调用方声明 `requires_services`），**不进 LLM 面**。
-- `route_signals`：历史声明位（`next_llm` / `next_tool` / `end` / `wait`），加载时仍会校验并注册进能力注册表，但**执行面零消费**——0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`/`set`）驱动，见 [pipeline-configuration.md](pipeline-configuration.md)。新插件无需声明。
+- `route_signals`：遗留声明位（`next_llm` / `next_tool` / `end` / `wait`），加载时仍会校验并注册进能力注册表，但**执行面零消费**——0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`/`set`）驱动，见 [pipeline-configuration.md](pipeline-configuration.md)。新插件无需声明。
 - `lifecycle_hooks` 取值（`LifecycleHook`）：`on_load` / `on_unload` / `on_pipeline_start` / `on_pipeline_end` / `on_error` / `domain_event`。
 - 发流式事件的插件必须声明 `capabilities.streaming`（`{events, part_types, persist}`），未声明网关拒绝（fail-closed），见 [streaming-protocol.md](streaming-protocol.md)。
 
