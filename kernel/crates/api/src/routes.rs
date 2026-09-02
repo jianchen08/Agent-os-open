@@ -1373,9 +1373,24 @@ pub async fn get_plugin_config_handler(
     }
 
     let resolved = validate_config_path(&project_root, &mapping.path).map_err(config_err_to_api)?;
-    let raw = std::fs::read_to_string(&resolved).map_err(|e| ApiError::NotFound {
-        message: format!("config file read failed: {}: {e}", mapping.path),
-    })?;
+    let raw = match std::fs::read_to_string(&resolved) {
+        Ok(raw) => raw,
+        Err(_) => {
+            // 文件缺失（manifest 内联默认，ADR 2026-09-02-context-window-config-
+            // inline-manifest）：值声明在 fields.default，磁盘文件仅用户覆盖层。
+            // GET 回退默认组装 + ETag，前端表单仍可完整渲染。
+            let data = agentos_invoker::shared::config_defaults_from_fields(&mapping.fields);
+            let etag = compute_etag(serde_json::to_string(&data).unwrap_or_default().as_bytes());
+            return Ok(axum::Json(PluginConfigResponse {
+                plugin_id,
+                file_id,
+                label: mapping.label.clone(),
+                path: mapping.path.clone(),
+                data,
+                etag,
+            }));
+        }
+    };
 
     let etag = compute_etag(raw.as_bytes());
     let parsed: serde_json::Value = serde_yaml::from_str(&raw).map_err(|e| ApiError::Internal {
@@ -1472,9 +1487,15 @@ pub async fn put_plugin_config_handler(
 
     let resolved = validate_config_path(&project_root, &mapping.path).map_err(config_err_to_api)?;
 
-    let raw = std::fs::read_to_string(&resolved).map_err(|e| ApiError::NotFound {
-        message: format!("config file read failed: {}: {e}", mapping.path),
-    })?;
+    // 文件缺失（manifest 内联默认）：当前值视为 fields.default 组装（与 GET
+    // 回退同源，ETag 一致），保存即创建用户覆盖文件。
+    let raw = match std::fs::read_to_string(&resolved) {
+        Ok(raw) => raw,
+        Err(_) => serde_json::to_string(
+            &agentos_invoker::shared::config_defaults_from_fields(&mapping.fields),
+        )
+        .unwrap_or_default(),
+    };
     let current_etag = compute_etag(raw.as_bytes());
 
     // B4 乐观锁：If-Match 必须匹配当前 ETag，否则 409

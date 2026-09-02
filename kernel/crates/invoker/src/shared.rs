@@ -3,6 +3,7 @@
 //! 这些逻辑 sidecar / InProcess 都要用，独立成模块避免在 invoker.rs 里
 //! 堆叠，也确保三种插件拿到一致的配置和输入。
 
+use agentos_core::traits::EnvConfigField;
 use agentos_core::traits::{PluginLoader, PluginManifest};
 use agentos_core::types::{PluginContext, PluginError};
 use serde_json::{json, Value};
@@ -60,6 +61,10 @@ pub async fn build_plugin_input(
 ///
 /// - 声明了 `config_files`：按 `config_files[].id` 命名空间合并（B3）。
 /// - 未声明：收空 Object（P6 删除 config_refs 后不再回退全量）。
+///
+/// 文件缺失时回退 [`config_defaults_from_fields`]（manifest fields.default 内联
+/// 默认，ADR 2026-09-02-context-window-config-inline-manifest）——配置值
+/// 声明在 manifest，磁盘文件仅是用户覆盖层。
 pub fn build_injected_config(full_config: &Value, manifest: &PluginManifest) -> Value {
     if manifest.config_files.is_empty() {
         return Value::Object(serde_json::Map::new());
@@ -68,10 +73,54 @@ pub fn build_injected_config(full_config: &Value, manifest: &PluginManifest) -> 
     for mapping in &manifest.config_files {
         let value = resolve_config_path(full_config, &mapping.path)
             .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
+            .unwrap_or_else(|| {
+                // env target 条目（.env 密钥）不进 full_config——密钥无默认语义，保持空 dict
+                if mapping.target.as_deref() == Some("env") {
+                    serde_json::json!({})
+                } else {
+                    config_defaults_from_fields(&mapping.fields)
+                }
+            });
         merged.insert(mapping.id.clone(), value);
     }
     Value::Object(merged)
+}
+
+/// 从 `config_files[].fields` 的 `default`（extra 透传）组装命名空间 dict。
+///
+/// 字段 name 支持点号路径（如 `budgets.l1`、`compression.enabled`），按路径
+/// 展开为嵌套 Object；无 `default` 或值为 null 的字段跳过。manifest 因此成为
+/// 配置值的单一声明源，磁盘文件不必预置模板（文件缺失即用本函数兜底）。
+pub fn config_defaults_from_fields(fields: &[EnvConfigField]) -> Value {
+    let mut out = serde_json::Map::new();
+    for field in fields {
+        let Some(extra) = field.extra.as_ref() else {
+            continue;
+        };
+        let Some(default) = extra.get("default") else {
+            continue;
+        };
+        if default.is_null() {
+            continue;
+        }
+        let segs: Vec<&str> = field.name.split('.').collect();
+        set_nested_default(&mut out, &segs, default.clone());
+    }
+    Value::Object(out)
+}
+
+fn set_nested_default(map: &mut serde_json::Map<String, Value>, segs: &[&str], value: Value) {
+    debug_assert!(!segs.is_empty());
+    if segs.len() == 1 {
+        map.insert(segs[0].to_string(), value);
+        return;
+    }
+    let entry = map
+        .entry(segs[0].to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Value::Object(child) = entry {
+        set_nested_default(child, &segs[1..], value);
+    }
 }
 
 /// 按 `config_files[].path` 在递归扫描的 full_config 中定位文件内容。
@@ -126,7 +175,8 @@ pub fn with_step_method(mut config: Value, step_method: &str) -> Value {
 mod tests {
     use super::*;
     use agentos_core::traits::{
-        ConfigFileMapping, HostType, ManifestCapabilities, ManifestPermissions, PluginType,
+        ConfigFileMapping, EnvConfigField, HostType, ManifestCapabilities, ManifestPermissions,
+        PluginType,
     };
     use serde_json::json;
 
@@ -217,6 +267,65 @@ mod tests {
         );
         let injected = build_injected_config(&full, &manifest);
         assert_eq!(injected["nope"], json!({}));
+    }
+
+    /// manifest 内联默认（ADR 2026-09-02）：文件缺失时按 fields.default 组装，
+    /// 点号路径展开为嵌套 Object；null 默认跳过。
+    #[test]
+    fn build_injected_config_missing_file_falls_back_to_field_defaults() {
+        let full = json!({});
+        let manifest = manifest_with_id(
+            "pipeline_context_window_guard",
+            vec![ConfigFileMapping {
+                id: "context_window".to_string(),
+                path: "config/system/context_window_config.yaml".to_string(),
+                label: "上下文窗口配置".to_string(),
+                target: None,
+                settings: None,
+                fields: vec![
+                    EnvConfigField {
+                        name: "compress_trigger_ratio".to_string(),
+                        label: "压缩触发比例".to_string(),
+                        field_type: "slider".to_string(),
+                        required: false,
+                        description: None,
+                        extra: Some(
+                            json!({"default": 0.55, "min": 0, "max": 1})
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                        ),
+                    },
+                    EnvConfigField {
+                        name: "budgets.l1".to_string(),
+                        label: "预算·L1 记忆".to_string(),
+                        field_type: "slider".to_string(),
+                        required: false,
+                        description: None,
+                        extra: Some(json!({"default": 0.1}).as_object().unwrap().clone()),
+                    },
+                    // null 默认（如压缩模型留空）不进入组装
+                    EnvConfigField {
+                        name: "compression.model".to_string(),
+                        label: "压缩模型".to_string(),
+                        field_type: "string".to_string(),
+                        required: false,
+                        description: None,
+                        extra: Some(json!({"default": null}).as_object().unwrap().clone()),
+                    },
+                ],
+            }],
+        );
+        let injected = build_injected_config(&full, &manifest);
+        assert_eq!(injected["context_window"]["compress_trigger_ratio"], 0.55);
+        assert_eq!(injected["context_window"]["budgets"]["l1"], 0.1);
+        assert!(
+            injected["context_window"]["compression"].is_null()
+                || injected["context_window"]["compression"]["model"].is_null()
+                || injected["context_window"]["compression"]
+                    .get("model")
+                    .is_none()
+        );
     }
 
     /// P6：未声明 config_files 的插件收空配置，全量配置里的 secrets 不泄漏。

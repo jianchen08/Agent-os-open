@@ -179,39 +179,53 @@ class CompressionConfig:
     max_turn_ratio: float = 0.5
 
     @classmethod
-    def from_yaml_config(cls, context_window: int) -> CompressionConfig:
-        """从 config/system/context_window_config.yaml 加载预算配置。
+    def from_yaml_config(
+        cls,
+        context_window: int,
+        injected: dict[str, Any] | None = None,
+    ) -> CompressionConfig:
+        """加载压缩预算配置。
 
-        通过 ConfigCenter 读取（统一缓存 + 热重载），路径由 ConfigCenter 解析。
-        读取失败时回退到代码默认。
+        取值优先级：
+        ① 注入命名空间 dict（config["context_window"]，manifest
+           config_files.fields.default 内联展开，ADR 2026-09-02
+           context-window-config-inline-manifest——值与 manifest 同构：
+           compress_trigger_ratio / budgets / compression.*）
+        ② ConfigCenter 兼容路径（0.1 历史装配缝注入场景）
+        ③ 代码默认
 
         Args:
             context_window: 当前模型上下文窗口大小
+            injected: 注入的窗口配置 dict；空/None 时走 ② 兼容路径
 
         Returns:
             填充好预算比例的 CompressionConfig
         """
-        try:
-            from config.config_center import get_config_center  # noqa: PLC0415
+        yaml_data = injected if isinstance(injected, dict) and injected else None
+        if yaml_data is None:
+            try:
+                from config.config_center import get_config_center  # noqa: PLC0415
 
-            yaml_data = get_config_center().get("system/context_window_config.yaml") or {}
-            budgets = yaml_data.get("budgets", {})
-            return cls(
-                context_window=context_window,
-                compress_trigger_ratio=yaml_data.get(
-                    "compress_trigger_ratio", 0.55
-                ),  # 见 config/system/context_window_config.yaml
-                l1_ratio=budgets.get("l1", 0.1),
-                l2_ratio=budgets.get("l2", 0.05),
-                recent_ratio=budgets.get("recent", 0.18),
-                retrieval_ratio=budgets.get("retrieval", 0.05),
-            )
-        except Exception as e:
-            logger.warning(
-                "[context_window_guard] 压缩预算配置读取失败，回退代码默认 | path=system/context_window_config.yaml | error=%s",
-                e,
-            )
-            return cls(context_window=context_window)
+                yaml_data = get_config_center().get("system/context_window_config.yaml") or {}
+            except Exception as e:
+                logger.warning(
+                    "[context_window_guard] 压缩预算配置读取失败，回退代码默认 | path=system/context_window_config.yaml | error=%s",
+                    e,
+                )
+                return cls(context_window=context_window)
+        budgets = yaml_data.get("budgets", {})
+        compression = yaml_data.get("compression", {})
+        return cls(
+            context_window=context_window,
+            compress_trigger_ratio=yaml_data.get(
+                "compress_trigger_ratio", 0.55
+            ),
+            l1_ratio=budgets.get("l1", 0.1),
+            l2_ratio=budgets.get("l2", 0.05),
+            recent_ratio=budgets.get("recent", 0.18),
+            retrieval_ratio=budgets.get("retrieval", 0.05),
+            max_turn_ratio=compression.get("max_turn_ratio", 0.5),
+        )
 
     def get_budgets(self) -> dict[str, int]:
         """计算各部分实际 token 预算。
@@ -823,6 +837,7 @@ class CompressionService:
         backend: Any | None = None,
         llm_call_fn: LLMCallFn | None = None,
         config: CompressionConfig | None = None,
+        injected: dict[str, Any] | None = None,
     ) -> None:
         """初始化压缩服务。
 
@@ -831,9 +846,12 @@ class CompressionService:
                 （块消息仍以内联摘要进入序列，引用留空）
             llm_call_fn: LLM 调用函数；None 时压缩无法执行（compress_messages 早退）
             config: 压缩配置；None 用默认 CompressionConfig
+            injected: 注入的窗口配置 dict（manifest fields.default 内联）；
+                _compress_messages_impl 的预算读取用它（单一值源）
         """
         self._backend = backend
         self._llm_call_fn: LLMCallFn | None = llm_call_fn
+        self._injected: dict[str, Any] | None = injected
         self._compressor = ContextCompressor(config=config or CompressionConfig())
         if llm_call_fn:
             self._compressor.set_llm_call_fn(llm_call_fn)
@@ -949,7 +967,7 @@ class CompressionService:
             logger.warning("[CompressionService] 跳过压缩：未提供 LLM 调用函数")
             return None
 
-        config = CompressionConfig.from_yaml_config(context_window)
+        config = CompressionConfig.from_yaml_config(context_window, injected=self._injected)
         budgets = config.get_budgets()
         trigger_tokens = int(context_window * trigger_ratio)
 
@@ -1484,31 +1502,44 @@ class ContextWindowGuardPlugin(IInputPlugin):
              （由 plugin_resolver 合并进 config，或由 _apply_runtime_config 从 ctx.state 读）
           ② Pipeline YAML plugins.context_window_guard.config.trigger_ratio
              （即本 __init__ 收到的 config 参数）
-          ③ System YAML config/system/context_window_config.yaml 的 compress_trigger_ratio
+          ③ manifest 内联注入 context_window.compress_trigger_ratio
+             （config_files.fields.default 经 build_injected_config 注入，
+             ADR 2026-09-02-context-window-config-inline-manifest）
           ④ 代码硬编码默认 0.55
 
         Args:
-            config: 插件配置字典（来自 pipeline yaml），支持以下键：
+            config: 插件配置字典（来自 pipeline yaml / 注入命名空间合并），支持：
                 - enabled: 是否启用（默认 True）
-                - trigger_ratio: 触发压缩的阈值比例（不配则继承 system yaml）
+                - trigger_ratio: 触发压缩的阈值比例（不配则继承注入值）
+                - context_window: 注入命名空间 dict（compress_trigger_ratio/
+                  budgets/compression.*，manifest fields.default 内联展开）
         """
         self._config = config or {}
-        self._trigger_ratio = self._resolve_trigger_ratio(self._config.get("trigger_ratio"))
+        window_cfg = self._config.get("context_window")
+        self._window_cfg = (
+            window_cfg if isinstance(window_cfg, dict) else {}
+        )
+        self._trigger_ratio = self._resolve_trigger_ratio(
+            self._config.get("trigger_ratio"), self._window_cfg
+        )
         # 实例级追踪：插件可能被重复实例化，state 不一定跨迭代持久化
         # 用实例变量做主存储，ctx.state 做辅助（重启恢复场景）
         self._tracked_msg_count: int = 0
 
     @staticmethod
-    def _resolve_trigger_ratio(explicit: float | None) -> float:
-        """解析 trigger_ratio：pipeline 显式值 → system yaml → 代码默认。
+    def _resolve_trigger_ratio(
+        explicit: float | None, window_cfg: dict[str, Any] | None = None
+    ) -> float:
+        """解析 trigger_ratio：pipeline 显式值 → manifest 注入值 → 代码默认。
 
-        三层覆盖链路中 ②→③ 的衔接：当 pipeline yaml 没配 trigger_ratio 时，
-        从 system 的 context_window_config.yaml 继承 compress_trigger_ratio；
-        yaml 不可达时 from_yaml_config 自带回退（返回代码默认 0.55），
+        ②→③ 的衔接：pipeline yaml 没配 trigger_ratio 时，从注入命名空间
+        context_window.compress_trigger_ratio 继承；注入缺失时
+        from_yaml_config 自带回退（ConfigCenter 兼容 → 代码默认 0.55），
         故此处无需再包异常防御。
 
         Args:
             explicit: pipeline yaml 显式配置的 trigger_ratio（可能为 None）
+            window_cfg: 注入的 context_window 命名空间 dict（可能为 None）
 
         Returns:
             最终生效的 trigger_ratio
@@ -1517,7 +1548,13 @@ class ContextWindowGuardPlugin(IInputPlugin):
         if explicit is not None:
             return explicit
 
-        # ③ System YAML fallback（内联 CompressionConfig，内部已含读取失败回退）
+        # ③ manifest 内联注入优先于 ConfigCenter 兼容路径
+        if window_cfg:
+            injected_ratio = window_cfg.get("compress_trigger_ratio")
+            if isinstance(injected_ratio, (int, float)):
+                return injected_ratio
+
+        # ④ 兼容路径 + 代码默认（内部已含读取失败回退）
         return CompressionConfig.from_yaml_config(context_window=128000).compress_trigger_ratio
 
     @property
@@ -1867,6 +1904,11 @@ class ContextWindowGuardPlugin(IInputPlugin):
         # Agent 级覆盖：从 ctx.state 读 agent YAML 中 plugins.enabled.context_window_guard 的配置
         self._apply_runtime_config(ctx)
 
+        # 压缩总开关：manifest 内联 compression.enabled=false 时整个守卫不工作
+        # （不触发压缩也不做压缩块清理——关闭语义即上下文守卫停摆）
+        if not self._window_cfg.get("compression", {}).get("enabled", True):
+            return PluginResult()
+
         context_window = ctx.state.get("context_window")
         if not context_window:
             if not self._warned_no_context_window:
@@ -1884,7 +1926,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
             return PluginResult()
 
         # 获取压缩服务（基于模块级 backend + capability 注入；无依赖返回 None 早退）
-        service = self._get_memory_service(ctx)
+        service = self._get_memory_service(ctx, self._window_cfg)
         if not service:
             return PluginResult()
 
@@ -2292,7 +2334,10 @@ class ContextWindowGuardPlugin(IInputPlugin):
         return 0
 
     @staticmethod
-    def _get_memory_service(ctx: PluginContext):  # noqa: C901
+    def _get_memory_service(
+        ctx: PluginContext,
+        window_cfg: dict[str, Any] | None = None,  # noqa: C901
+    ):
         """获取 CompressionService 实例（基于模块级注入的 backend + capability）。
 
         Step 4 修复：
@@ -2320,15 +2365,22 @@ class ContextWindowGuardPlugin(IInputPlugin):
             return None
 
         context_window = ctx.state.get("context_window", 128000)
-        config = CompressionConfig.from_yaml_config(context_window)
+        config = CompressionConfig.from_yaml_config(context_window, injected=window_cfg)
 
         # 构建 LLM 调用函数：经 capability_caller 调 llm.complete_stream
         # （llm_service 服务轴）。model 解析链与 llm_core 同款：
-        # state.model_id > state.model_tier(→ defaults.tiers) > defaults.chat。
+        # 注入 compression.model > state.model_id > state.model_tier(→ defaults.tiers)
+        # > defaults.chat。
         llm_call_fn = None
         if _capability_caller is not None:
             llm_call_fn = _build_compress_llm_call_fn(
-                _capability_caller, model_id=_resolve_compress_model(ctx)
+                _capability_caller,
+                model_id=_resolve_compress_model(
+                    ctx,
+                    injected=(
+                        window_cfg.get("compression", {}) if window_cfg else {}
+                    ),
+                ),
             )
 
         try:
@@ -2336,6 +2388,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 backend=_memory_backend,
                 llm_call_fn=llm_call_fn,
                 config=config,
+                injected=window_cfg,
             )
         except Exception as exc:
             logger.warning(
@@ -2370,10 +2423,13 @@ class ContextWindowGuardPlugin(IInputPlugin):
             logger.error("[%s] setup 异常: %s", self.name, exc, exc_info=True)
 
 
-def _resolve_compress_model(ctx: PluginContext) -> str:
-    """解析压缩用模型 id（与 llm_core 同款链路）。
+def _resolve_compress_model(
+    ctx: PluginContext, injected: dict[str, Any] | None = None
+) -> str:
+    """解析压缩用模型 id（注入 compression.model > llm_core 同款链路）。
 
-    优先级：state.model_id > state.model_tier(→ llm.yaml defaults.tiers)
+    优先级：注入 compression.model（manifest 内联，非空时最优先）
+    > state.model_id > state.model_tier(→ llm.yaml defaults.tiers)
     > llm.yaml defaults.chat；全部缺失返回空串（llm_service 默认 chat 兜底）。
 
     模型配置经 _config_models loader 读取（llm_core server.py 注入的
@@ -2382,10 +2438,14 @@ def _resolve_compress_model(ctx: PluginContext) -> str:
 
     Args:
         ctx: 插件执行上下文，读 model_id/model_tier
+        injected: 注入的 compression 配置 dict（manifest fields.default 内联）
 
     Returns:
         model_id（可为空串）
     """
+    if injected and isinstance(injected.get("model"), str) and injected["model"]:
+        return injected["model"]
+
     resolved = ctx.state.get("model_id", "")
     if not resolved:
         tier = ctx.state.get("model_tier", "")

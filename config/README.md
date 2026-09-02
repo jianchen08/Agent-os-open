@@ -40,7 +40,6 @@ config/
 ├── system/                     # 系统配置
 │   ├── redis.yaml             # Redis 配置
 │   ├── memory_storage.yaml    # 存储配置
-│   ├── context_window_config.yaml # 上下文窗口配置
 │   ├── claude-code-router-config.json # Claude路由配置
 │   └── system_resources_inventory.md  # 系统资源清单
 ├── evaluation/                 # 评估配置

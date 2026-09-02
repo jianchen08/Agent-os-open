@@ -538,3 +538,99 @@ async fn test_env_target_etag_conflict_and_undeclared_rejected() {
         .unwrap();
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST, "未声明字段应 400");
 }
+
+/// manifest 内联默认（ADR 2026-09-02-context-window-config-inline-manifest）：
+/// 配置文件缺失时 GET 回退 fields.default 组装（含点号路径展开）+ ETag，
+/// PUT（带该 ETag）保存即创建用户覆盖文件（当前值 = 默认组装的 JSON 串）。
+#[tokio::test]
+async fn test_get_missing_file_falls_back_to_field_defaults_and_put_creates_file() {
+    use agentos_core::traits::EnvConfigField;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // config/system/context_window_config.yaml 不存在（值内联 manifest）
+
+    let fields = vec![
+        EnvConfigField {
+            name: "compress_trigger_ratio".to_string(),
+            label: "压缩触发比例".to_string(),
+            field_type: "slider".to_string(),
+            required: false,
+            description: None,
+            extra: Some(json!({"default": 0.55, "min": 0, "max": 1}).as_object().unwrap().clone()),
+        },
+        EnvConfigField {
+            name: "budgets.l1".to_string(),
+            label: "预算·L1 记忆".to_string(),
+            field_type: "slider".to_string(),
+            required: false,
+            description: None,
+            extra: Some(json!({"default": 0.1}).as_object().unwrap().clone()),
+        },
+    ];
+    let manifest = manifest_with_files(
+        "pipeline_context_window_guard",
+        vec![ConfigFileMapping {
+            id: "context_window".to_string(),
+            path: "config/system/context_window_config.yaml".to_string(),
+            label: "上下文窗口配置".to_string(),
+            target: None,
+            settings: None,
+            fields,
+        }],
+    );
+
+    let mut state = AppState::new();
+    state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(vec![manifest]));
+    state.project_root = Some(tmp.path().to_path_buf());
+
+    let app = build_router(state);
+    let token = admin_token(&app).await;
+    let uri = "/api/v1/plugins/pipeline_context_window_guard/config/context_window";
+
+    // GET：文件缺失 → 200 + fields.default 组装（点号展开为嵌套 budgets）
+    let got = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.status(), StatusCode::OK, "文件缺失应 200 而非 404");
+    let etag = got
+        .headers()
+        .get("etag")
+        .and_then(|h| h.to_str().ok())
+        .expect("ETag 头")
+        .to_string();
+    let body = axum::body::to_bytes(got.into_body(), 8192).await.unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["data"]["compress_trigger_ratio"], 0.55);
+    assert_eq!(v["data"]["budgets"]["l1"], 0.1, "点号路径应展开为嵌套对象");
+
+    // PUT：带 GET 返回的 etag → 200，并创建用户覆盖文件（当前值 = 默认组装）
+    let put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(axum::http::Method::PUT)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({"if_match": etag, "data": {"compress_trigger_ratio": 0.3}})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK, "文件缺失时保存应创建覆盖文件");
+
+    let written = fs::read_to_string(tmp.path().join("config/system/context_window_config.yaml"))
+        .expect("PUT 应创建磁盘覆盖文件");
+    assert!(written.contains("0.3"), "覆盖值应落盘: {written}");
+}

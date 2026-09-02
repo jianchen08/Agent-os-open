@@ -179,7 +179,9 @@ function fieldToRjsfProperty(field: UIInputFormField): { prop: Record<string, un
       case 'slider': {
         prop.type = 'number'
         Object.assign(prop, numericBounds(field))
-        if (field.step !== undefined) prop.multipleOf = field.step
+        // 无 step 声明时兜底 0.01：antd Slider 缺省 step=1，min/max 为 0~1 的
+        // 配置（如压缩触发比例）只能取 0/1 两档，中间值拖不出来
+        prop.multipleOf = field.step ?? 0.01
         ui['ui:widget'] = 'range'
         break
       }

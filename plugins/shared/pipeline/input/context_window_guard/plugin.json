@@ -23,6 +23,7 @@
       "id": "context_window",
       "path": "config/system/context_window_config.yaml",
       "label": "上下文窗口配置",
+      "description": "配置值内联于本 manifest 的 fields.default（ADR 2026-09-02-context-window-config-inline-manifest）；保存自定义值时才落盘生成配置文件",
       "fields": [
         {
           "name": "compress_trigger_ratio",
@@ -30,6 +31,8 @@
           "label": "压缩触发比例",
           "min": 0,
           "max": 1,
+          "step": 0.01,
+          "default": 0.55,
           "description": "上下文占用超过该比例触发压缩"
         },
         {
@@ -48,6 +51,7 @@
           "name": "compression.model",
           "type": "string",
           "label": "压缩模型",
+          "default": "",
           "description": "留空则用默认 chat 模型"
         },
         {
@@ -55,84 +59,108 @@
           "type": "slider",
           "label": "层级压缩触发比例",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.8
         },
         {
           "name": "compression.max_turn_ratio",
           "type": "slider",
           "label": "最大轮次占比",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.5
         },
         {
           "name": "budgets.system_prompt",
           "type": "slider",
           "label": "预算·系统提示",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.06
         },
         {
           "name": "budgets.tools_description",
           "type": "slider",
           "label": "预算·工具描述",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.0
         },
         {
           "name": "budgets.static_vars",
           "type": "slider",
           "label": "预算·静态变量",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.03
         },
         {
           "name": "budgets.dynamic_variables",
           "type": "slider",
           "label": "预算·动态变量",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.03
         },
         {
           "name": "budgets.l3",
           "type": "slider",
           "label": "预算·L3 记忆",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.02
         },
         {
           "name": "budgets.l2",
           "type": "slider",
           "label": "预算·L2 记忆",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.05
         },
         {
           "name": "budgets.l1",
           "type": "slider",
           "label": "预算·L1 记忆",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.1
         },
         {
           "name": "budgets.recent",
           "type": "slider",
           "label": "预算·最近消息",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.18
         },
         {
           "name": "budgets.retrieval",
           "type": "slider",
           "label": "预算·检索",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.05
         },
         {
           "name": "budgets.response_reserve",
           "type": "slider",
           "label": "预算·响应预留",
           "min": 0,
-          "max": 1
+          "max": 1,
+          "step": 0.01,
+          "default": 0.14
         }
       ]
     }

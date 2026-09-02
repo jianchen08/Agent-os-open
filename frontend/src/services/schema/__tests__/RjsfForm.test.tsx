@@ -68,6 +68,15 @@ describe('toRjsf — 词汇表映射', () => {
     expect(uiSchema.sl).toMatchObject({ 'ui:widget': 'range' })
   })
 
+  it('slider 未声明 step 时兜底 0.01（防 antd 默认 step=1 只取 0/1 两档）', () => {
+    const { schema, uiSchema } = toRjsf([
+      { name: 'ratio', type: 'slider', label: '比例', min: 0, max: 1 },
+    ])
+    const props = schema.properties as Record<string, Record<string, unknown>>
+    expect(props.ratio).toMatchObject({ type: 'number', minimum: 0, maximum: 1, multipleOf: 0.01 })
+    expect(uiSchema.ratio).toMatchObject({ 'ui:widget': 'range' })
+  })
+
   it('boolean/toggle → switch；color/file → 自定义 widget', () => {
     const { schema, uiSchema } = toRjsf([
       { name: 'b', type: 'boolean', label: 'B' },
