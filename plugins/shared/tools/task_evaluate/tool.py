@@ -515,7 +515,12 @@ class TaskEvaluateTool(BuiltinTool):
                 "[TaskEvaluate] 所有指标已通过，完成任务 | task_id=%s",
                 task_id,
             )
-            return await self._complete_task(task_service, task, result)
+            return await self._complete_task(
+                task_service,
+                task,
+                result,
+                str(inputs.get("summary") or "").strip(),
+            )
 
         # 还有指标未评估，返回进度
         evaluated, remaining = self._get_eval_progress(task, metric_ids)
@@ -579,6 +584,7 @@ class TaskEvaluateTool(BuiltinTool):
                         "results": [],
                     },
                 )(),
+                str(inputs.get("summary") or "").strip(),
             )
 
         # 跳过已通过的指标，只评估未通过的
@@ -623,10 +629,12 @@ class TaskEvaluateTool(BuiltinTool):
                     {
                         "task_id": task.id,
                         "overall_passed": True,
-                        "summary": f"所有 {len(metric_ids)} 个指标均已通过{_pass_note}",
+                        "summary": str(inputs.get("summary") or "").strip()
+                        or f"所有 {len(metric_ids)} 个指标均已通过{_pass_note}",
                         "results": [],
                     },
                 )(),
+                str(inputs.get("summary") or "").strip(),
             )
 
         summary_from_input = inputs.get("summary", "")
@@ -779,7 +787,12 @@ class TaskEvaluateTool(BuiltinTool):
             )
 
         if not has_failure:
-            return await self._complete_task(task_service, task, eval_result)
+            return await self._complete_task(
+                task_service,
+                task,
+                eval_result,
+                str(inputs.get("summary") or "").strip(),
+            )
         if exhausted:
             return await self._fail_task(task_service, task, eval_result, max_retries)
         min_remaining = max_retries - min(retry_counts.values())
@@ -810,7 +823,9 @@ class TaskEvaluateTool(BuiltinTool):
             },
         )
 
-    async def _complete_task(self, task_service: Any, task: Any, eval_result: Any) -> ToolExecutionResult:
+    async def _complete_task(
+        self, task_service: Any, task: Any, eval_result: Any, submitted_summary: str = ""
+    ) -> ToolExecutionResult:
         """评估通过，完成任务。
 
         合并前置策略：对于 worktree 模式的任务，在标记 completed 之前先执行合并，
@@ -823,6 +838,8 @@ class TaskEvaluateTool(BuiltinTool):
             task_service: TaskService 实例
             task: TaskModel 实例
             eval_result: EvaluationResult 实例
+            submitted_summary: LLM 经 task_evaluate 入参提交的任务完成总结
+                （0.1 task_notifier 评估结论数据源；优先于系统生成的逐指标说明）
 
         Returns:
             工具执行结果
@@ -842,7 +859,8 @@ class TaskEvaluateTool(BuiltinTool):
                     {
                         "task.status": "completed",
                         "task.ended_at": _now_iso(),
-                        "task.eval_summary": self._build_rich_summary(eval_result),
+                        "task.eval_summary": submitted_summary
+                        or self._build_rich_summary(eval_result),
                     },
                 )
             except Exception as e:
@@ -905,7 +923,8 @@ class TaskEvaluateTool(BuiltinTool):
                         {
                             "task.status": "failed",
                             "task.ended_at": _now_iso(),
-                            "task.eval_summary": self._build_rich_summary(eval_result),
+                            "task.eval_summary": submitted_summary
+                            or self._build_rich_summary(eval_result),
                             "task.error": merge_error,
                         },
                     )
@@ -923,7 +942,8 @@ class TaskEvaluateTool(BuiltinTool):
                     {
                         "task.status": "completed",
                         "task.ended_at": _now_iso(),
-                        "task.eval_summary": self._build_rich_summary(eval_result),
+                        "task.eval_summary": submitted_summary
+                        or self._build_rich_summary(eval_result),
                     },
                 )
             except Exception as e:
@@ -1636,10 +1656,15 @@ class TaskEvaluateTool(BuiltinTool):
         """构建富评估摘要（0.1 evaluation.mapper.build_summary 同款）。
 
         首行汇总 + 逐指标说明（agent 型评估 = 评估 Agent 提交的 feedback
-        总结，脚本化评估 = 检查结果 message），供终态通知带出评估结论。
+        总结，脚本化评估 = 检查结果 message）。无指标结果时回退 result.summary
+        ——那是 LLM 经 task_evaluate 入参提交的任务完成总结（"直接通过"
+        分支无逐指标说明，不能输出空泛的 0/0）。
         """
-        lines: list[str] = []
         total = len(result.results)
+        if total == 0:
+            return str(getattr(result, "summary", "") or "").strip()
+
+        lines: list[str] = []
         passed = sum(1 for r in result.results if r.passed)
         lines.append(f"评估结果: {passed}/{total} 指标通过")
 

@@ -749,9 +749,23 @@ class TestHelpers:
             "  ✅ PASS no_msg"
         )
 
-    def test_build_rich_summary_empty_metrics(self, mod: Any) -> None:
+    def test_build_rich_summary_empty_metrics_falls_back_to_summary(self, mod: Any) -> None:
+        """空指标结果（"直接通过"分支）→ 回退 result.summary（LLM 提交的总结）。"""
+        # compute_overall 空 results 生成"无评估指标"
         result = _eval_result("t1", [])
-        assert mod.TaskEvaluateTool._build_rich_summary(result) == "评估结果: 0/0 指标通过"
+        assert mod.TaskEvaluateTool._build_rich_summary(result) == "无评估指标"
+        # 直接通过分支 EvalResult 的 summary = LLM 提交的总结
+        stub = type(
+            "EvalResult",
+            (),
+            {
+                "task_id": "t1",
+                "overall_passed": True,
+                "summary": "已完成所有工具测试，报告见 docs/working/tool_test_report.md",
+                "results": [],
+            },
+        )()
+        assert mod.TaskEvaluateTool._build_rich_summary(stub) == "已完成所有工具测试，报告见 docs/working/tool_test_report.md"
 
 
 # ── 输入参数组装（含模板替换） ───────────────────────────────
