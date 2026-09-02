@@ -229,6 +229,15 @@ fi
 echo -e "${GREEN}  内核二进制: $KERNEL_BIN${NC}"
 echo ""
 
+# 同源守卫：native cdylib 与内核源码异源编译会让 tool 派发点位 SIGSEGV
+# （2026-09-01/08-31 两次实证）——启动前检查并给出重编指引。
+echo -e "${YELLOW}[CHECK] 检查 native cdylib 与内核同源性...${NC}"
+if ! python "$PROJECT_ROOT/scripts/check_native_artifacts_sync.py"; then
+    echo -e "${RED}[ERROR] native cdylib / kernel exe 异源，按上方指引重编后重试${NC}"
+    exit 1
+fi
+echo ""
+
 # ========== 清理旧实例 ==========
 cleanup_old() {
     if [ -f "$PORTS_FILE" ]; then
@@ -299,6 +308,8 @@ echo ""
 echo -e "${YELLOW}[3/5] 启动 Rust 内核 (端口 :$KERNEL_PORT)...${NC}"
 export AGENTOS_KERNEL_PORT=$KERNEL_PORT
 export AGENTOS_KERNEL_HOST=0.0.0.0
+export AGENTOS_PLUGINS_DIR="$PROJECT_ROOT/plugins/shared"
+export AGENTOS_CONFIG_ROOT="$PROJECT_ROOT/config"
 # G8 监督者循环：退出码 75 = restart requested（POST /api/v1/system/restart 或
 # watcher 的 cdylib 集合变更自动重启排空后退出），自动拉起新进程；
 # 其它退出码不重启（崩溃/启动错误不做自动掩蔽）。

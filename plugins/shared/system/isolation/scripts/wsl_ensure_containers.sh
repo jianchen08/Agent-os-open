@@ -225,7 +225,7 @@ rm -f "${COMPOSE_OUT:-/dev/null}"
 
 # 真正等待容器进入 running，而非盲目 sleep 后报 OK
 # 容器名跟随 compose project（目录名），用 `docker compose ps` 按服务名查询，
-# 不依赖固定容器名前缀（update_frontend.ps1 已采用同一范式）。
+# 不依赖固定容器名前缀，用 compose 标准命名 + 动态查询。
 echo "[INFO] 等待容器进入 running ..."
 ok=0
 for i in $(seq 1 15); do
