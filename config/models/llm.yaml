@@ -100,7 +100,7 @@ models:
       max_image_size: 20971520
       max_video_size: 104857600
 defaults:
-  chat: deepseek-v4-flash-go
+  chat: glm-5.2
   embedding: embedding-3
   call_timeout: 600
   first_token_timeout: 120

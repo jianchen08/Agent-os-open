@@ -1,5 +1,5 @@
 workspace:
-  root: D:/myproject
+  root: .ai_workspaces
   nesting_mode: shared
   sparse_threshold_mb: 500
   worktree_include_patterns:
