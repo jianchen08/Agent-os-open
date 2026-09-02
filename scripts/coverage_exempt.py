@@ -247,7 +247,6 @@ def instrumented_args() -> list[str]:
     args = list(BASE_TEST_PATHS)
     args.append("-m")
     args.append(MARKER_FILTER)
-    args.append("--ignore=tests/manual")
     for p in heavy_paths():
         args.append(f"--ignore={p}")
     return args
@@ -286,7 +285,7 @@ def check() -> int:
     ignores = sorted(
         a.removeprefix("--ignore=")
         for a in instrumented_args()
-        if a.startswith("--ignore=") and a != "--ignore=tests/manual"
+        if a.startswith("--ignore=")
     )
     if ignores != sorted(heavy_paths()):
         problems.append(f"--ignore 名单与 positional 名单不一致: {ignores} != {sorted(heavy_paths())}")

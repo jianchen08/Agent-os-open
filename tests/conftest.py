@@ -15,10 +15,6 @@ import pytest
 
 from tests import _stdlib_guard
 
-# 仅忽略 manual/：需手动环境（kernel + LLM key）的脚本，不进默认收集，避免污染 `pytest tests/`。
-#   tests/channels/ 与 tests/suites/ 等集成测试正常收集；manual/ 内为无断言或命中真实
-#   外部 API 的手动脚本（test_compression_real_llm、test_litellm_direct、test_keypool_adapter）。
-collect_ignore: list[str] = ["manual"]
 
 # ── 报告输出目录 ──────────────────────────────────────────
 REPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")

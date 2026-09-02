@@ -323,7 +323,7 @@ jobs:
   # ── Python Coverage（插桩 gate：插件测试 + 覆盖率阈值 + mypy 基线锁）──
   # 覆盖（豁免名单之外的全部）：
   #   1. 全部插件测试（system/tools/pipeline 目录下的 test_*.py）
-  #   2. tests/suites/ 插件单元测试矩阵（plugins + m6_plugins：路径修复 + 接口同步）
+  #   2. tests/suites/ 插件单元测试矩阵（plugins/core/task：路径修复 + 接口同步）
   #   3. MCP 服务与 skills 清单校验、tests/channels/、tests/ 顶层回归/安全/时序外的
   #      有价值测试（P0 回归、isolation、security_check、track 契约、process_watchdog）
   # 豁免（scripts/coverage_exempt.py 单一名单点）：
@@ -549,7 +549,7 @@ jobs:
   # ── Frontend E2E 冒烟（零后端依赖）──────────────────────────────────────
   # PR 级 e2e 门禁：构建前端 → vite preview 服务于 5188 → 跑零外部依赖冒烟子集
   # (e2e/specs/ci-smoke.spec.ts，不依赖 kernel/LLM)。journey_* 全流程需后端，
-  # 仍归本地/手动（见 tests/manual/ 与 frontend/e2e/specs/journey_*.spec.ts）。
+  # 仍归本地/手动（见 frontend/e2e/specs/journey_*.spec.ts）。
   frontend-e2e:
     name: Frontend E2E (冒烟子集, 零后端依赖)
     runs-on: ubuntu-latest
