@@ -60,6 +60,13 @@ models:
     model_name: deepseek-v4-pro
     provider: deepseek
     reasoning_model: true
+    thinking_strength_params:
+      high:
+        reasoning_effort: max
+      low:
+        reasoning_effort: low
+      medium:
+        reasoning_effort: medium
   embedding-2:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
     context_window: 1000000
@@ -97,6 +104,16 @@ models:
       supports_image: true
     provider: zhipu_coding
     reasoning_model: true
+    thinking_strength_params:
+      high:
+        thinking:
+          type: enabled
+      low:
+        thinking:
+          type: disabled
+      medium:
+        thinking:
+          type: enabled
   minimax-m3:
     api_base: https://api.minimaxi.com/v1
     context_window: 1000000
@@ -119,6 +136,16 @@ models:
       supports_video: true
     provider: minimax
     reasoning_model: true
+    thinking_strength_params:
+      high:
+        thinking:
+          type: adaptive
+      low:
+        thinking:
+          type: disabled
+      medium:
+        thinking:
+          type: adaptive
   mock-llm:
     api_base: http://127.0.0.1:18080/v1
     api_key: '****'
