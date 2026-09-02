@@ -91,6 +91,13 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
     updateSessionsCache((prev) => [...prev, newSession])
     useSessionStore.setState({ activeSessionId: newSession.id })
 
+    // 会话面初始化与 setActiveSession 同款：重建 agentTabStore 标签面（顶部
+    // 对话标签随 activeTabId 切换、ChatInput 随 key 重建草稿状态）+ 持久化
+    // 选中会话。缺失会导致创建会话后消息区已切到新管道、但顶部标签与输入框
+    // 状态仍停留上一会话（需手动切换才对齐）。
+    useAgentTabStore.getState().initSessionTabs(newSession.id)
+    uiStorage.setLastActiveSession(newSession.id)
+
     if (newSession.activePipelineId) {
       const pipelineStore = usePipelineMessageStore.getState()
       pipelineStore.registerPipeline({

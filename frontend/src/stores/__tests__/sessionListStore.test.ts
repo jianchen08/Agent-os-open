@@ -61,10 +61,11 @@ vi.mock('@/stores/agentStore', () => ({
   },
 }))
 
+const mockInitSessionTabs = vi.fn()
 vi.mock('@/stores/agentTabStore', () => ({
   useAgentTabStore: {
     getState: () => ({
-      initSessionTabs: vi.fn(),
+      initSessionTabs: mockInitSessionTabs,
       getTabIdByPipeline: vi.fn(),
       resetAllTabs: vi.fn(),
       currentSessionId: null,
@@ -80,11 +81,13 @@ vi.mock('@/stores/layoutModeStore', () => ({
   },
 }))
 
+const mockRegisterPipeline = vi.fn()
+const mockActivatePipeline = vi.fn()
 vi.mock('@/stores/pipelineMessageStore', () => ({
   usePipelineMessageStore: {
     getState: () => ({
-      registerPipeline: vi.fn(),
-      activatePipeline: vi.fn(),
+      registerPipeline: mockRegisterPipeline,
+      activatePipeline: mockActivatePipeline,
       fetchMessages: vi.fn(),
       isStreaming: vi.fn(),
       getMessages: vi.fn(() => []),
@@ -172,6 +175,10 @@ describe('sessionListStore', () => {
     mockUpdateSessionApi.mockReset()
     mockCreateSessionApi.mockReset()
     mockDeleteSessionApi.mockReset()
+    mockInitSessionTabs.mockReset()
+    mockSetLastActiveSession.mockReset()
+    mockRegisterPipeline.mockReset()
+    mockActivatePipeline.mockReset()
   })
 
   // ── searchSessions ──
@@ -485,6 +492,50 @@ describe('sessionListStore', () => {
       useSessionListStore.getState().autoRenameSessionIfNeeded('s1', 'pipe-001')
 
       expect(mockUpdateSessionApi).not.toHaveBeenCalled()
+    })
+  })
+
+  // ── createSession：会话面同步初始化（标签/输入框随 activeSessionId 切换） ──
+
+  describe('createSession', () => {
+    it('创建后切换选中并重建标签面（顶部标签/输入框状态随 activeTabId 更新）', async () => {
+      const newSession = makeSession({ id: 'sess-new', title: '新会话', agentId: 'agent-1' })
+      mockCreateSessionApi.mockResolvedValue(newSession)
+      useSessionStore.setState(() => ({ activeSessionId: null }))
+
+      const created = await useSessionListStore.getState().createSession()
+
+      expect(created.id).toBe('sess-new')
+      // 选中会话切到新会话（侧边栏高亮/聊天区渲染依据）
+      expect(useSessionStore.getState().activeSessionId).toBe('sess-new')
+      // 标签面以新会话重建——缺失会致顶部标签/输入框草稿停留上一会话
+      expect(mockInitSessionTabs).toHaveBeenCalledWith('sess-new')
+      // 选中会话持久化（刷新恢复链）
+      expect(mockSetLastActiveSession).toHaveBeenCalledWith('sess-new')
+      // 新管道注册并激活（消息区切到新管道）
+      expect(mockRegisterPipeline).toHaveBeenCalledWith(
+        expect.objectContaining({ pipelineId: 'pipe-001', sessionId: 'sess-new' }),
+      )
+      expect(mockActivatePipeline).toHaveBeenCalledWith('pipe-001')
+      // 新会话已进入列表缓存
+      expect(readSessions().some((s) => s.id === 'sess-new')).toBe(true)
+    })
+
+    it('新会话无管道时同样重建标签面（不残留上一会话管道激活）', async () => {
+      const newSession = makeSession({
+        id: 'sess-none',
+        activePipelineId: null,
+        pipelineIds: [],
+      })
+      mockCreateSessionApi.mockResolvedValue(newSession)
+
+      await useSessionListStore.getState().createSession()
+
+      expect(mockInitSessionTabs).toHaveBeenCalledWith('sess-none')
+      expect(mockSetLastActiveSession).toHaveBeenCalledWith('sess-none')
+      // 无管道不注册/激活（标签面重建由 initSessionTabs 决定管道激活）
+      expect(mockRegisterPipeline).not.toHaveBeenCalled()
+      expect(mockActivatePipeline).not.toHaveBeenCalled()
     })
   })
 
