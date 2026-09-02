@@ -1141,6 +1141,59 @@ fn merge_recovered_scalars(initial_state: &mut serde_json::Value, source: &serde
     }
 }
 
+#[cfg(test)]
+mod merge_recovered_scalars_tests {
+    use super::*;
+
+    /// 2026-09-02 裁定：新消息到达 = 用户已响应交互，新一轮应从非对话态开始
+    /// 直接运行——上轮挂起轮的对话/执行态（conversation_mode/core_type/
+    /// core_plugin 及终止标志）不得经恢复合并复活。
+    #[test]
+    fn skips_volatile_run_keys_including_conversation_state() {
+        let mut initial = serde_json::json!({
+            "message": "新消息",
+            "run_id": "new-run",
+            "suspended": false,
+            "ended": false,
+            "core_type": "llm_call",
+            "core_plugin": "pipeline_llm_core",
+        });
+        // 恢复源 = 上一轮 final_state（交互挂起轮）：对话态 + 执行态 + 终止标志残留
+        let source = serde_json::json!({
+            "task.id": "t1",
+            "workspace": "/ws",
+            "conversation_mode": true,
+            "core_type": "tool_execute",
+            "core_plugin": "pipeline_tool_core",
+            "suspended": true,
+            "ended": true,
+            "run_id": "old-run",
+        });
+        merge_recovered_scalars(&mut initial, &source);
+        // 持久键照常恢复
+        assert_eq!(initial["task.id"], "t1");
+        assert_eq!(initial["workspace"], "/ws");
+        // 本轮执行态不被上轮覆盖（新 run 从 llm_call 开始；空转根因回归断言）
+        assert!(initial.get("conversation_mode").is_none(), "对话等待态不得跨轮复活");
+        assert_eq!(initial["core_type"], "llm_call");
+        assert_eq!(initial["core_plugin"], "pipeline_llm_core");
+        // 终止标志与新 run_id 保持本轮初始值
+        assert_eq!(initial["suspended"], false);
+        assert_eq!(initial["ended"], false);
+        assert_eq!(initial["run_id"], "new-run");
+    }
+
+    /// 非易变标量照常合并（合并语义不破坏续跑不丢键）。
+    #[test]
+    fn merges_persistent_scalars() {
+        let mut initial = serde_json::json!({"message": "m"});
+        let source = serde_json::json!({"task.id": "t9", "track.total_tokens": 42});
+        merge_recovered_scalars(&mut initial, &source);
+        assert_eq!(initial["task.id"], "t9");
+        assert_eq!(initial["track.total_tokens"], 42);
+    }
+}
+
 /// 阶段 1b：多轮上下文装配 + 本轮 user 消息入账，返回补全后的 initial_state。
 ///
 /// state.messages 是 LLMCore._build_messages 读取的对话历史。单一权威（不搞降级路径）：

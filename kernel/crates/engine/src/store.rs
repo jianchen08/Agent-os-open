@@ -44,6 +44,16 @@ pub const VOLATILE_RUN_KEYS: &[&str] = &[
     // schema 滞留内存/checkpoint（90 工具 62KB 声明被反复持有放大）。下一轮
     // prepare 重新拉取，persist 前剥离即可。
     "tool_schemas",
+    // conversation_mode 是交互挂起轮的对话等待态（human_interaction 返回
+    // conversation_mode=true → post 链置 suspended 停泊）。新消息到达 = 用户
+    // 已响应，新一轮应从非对话态开始直接运行——残留会让 llm_core 继续空轮
+    // （"在等用户输入"语义）且 post 链再次置 suspended，管道永久"消息中断"
+    // （2026-09-02 真机实证：交互挂起后所有后续 run 空转，冷/热恢复双残留）。
+    // core_type/core_plugin 同属本轮执行态（stage_build_initial_state 每轮
+    // 显式种 llm_call 初始值，恢复合并不得用上轮 tool_execute 覆盖）。
+    "conversation_mode",
+    "core_type",
+    "core_plugin",
 ];
 
 use std::sync::Arc;
@@ -4446,6 +4456,9 @@ mod tests {
         // 控制状态键契约：should_stop/ended/suspended/router.stop_reason 同属
         // per-run 控制键（署名与终止请求同写同消），checkpoint 瘦身剥离——
         // 冷恢复不得复活上一 run 的终止请求与署名。
+        // conversation_mode/core_type/core_plugin 同属本轮执行态：交互挂起轮
+        // 残留 conversation_mode=true 会让新消息轮继续空转（2026-09-02 真机
+        // 实证），恢复合并/冷恢复均须跳过。
         let store = SqliteStore::open_memory().unwrap();
         store
             .save_checkpoint(
@@ -4457,7 +4470,10 @@ mod tests {
                     "should_stop": true,
                     "ended": true,
                     "suspended": true,
-                    "router.stop_reason": "budget_exhausted"
+                    "router.stop_reason": "budget_exhausted",
+                    "conversation_mode": true,
+                    "core_type": "tool_execute",
+                    "core_plugin": "pipeline_tool_core"
                 }),
             )
             .unwrap();
@@ -4465,7 +4481,15 @@ mod tests {
             .load_latest_checkpoint("pipe_ctrl", "default")
             .unwrap()
             .unwrap();
-        for key in ["should_stop", "ended", "suspended", "router.stop_reason"] {
+        for key in [
+            "should_stop",
+            "ended",
+            "suspended",
+            "router.stop_reason",
+            "conversation_mode",
+            "core_type",
+            "core_plugin",
+        ] {
             assert!(state.get(key).is_none(), "{key} 不得残留进 checkpoint");
         }
         assert_eq!(state["task.status"], json!("running"), "持久键不受瘦身影响");
