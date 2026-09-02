@@ -64,15 +64,26 @@ unsafe impl Send for SpillGuard {}
 unsafe impl Sync for SpillGuard {}
 
 impl PipelinePlugin for SpillGuard {
-    fn execute(&self, ectx: &ExecContext) -> Result<&str, String> {
+    fn execute(&self, ectx: &ExecContext) -> Result<&str, &str> {
         let state = ectx.ctx.state_value();
         let config = ectx.ctx.config_value();
         // run 内部全路径 best-effort：任何存档/解析失败都收敛为空更新（no-op），
         // 不会把 Err 上抛（引擎对插件错误统一 warn+继续，ADR 2026-08-18；此处再加一层自保）。
         let updates = run(&state, &config);
         let buf = unsafe { &mut *self.out_buf.get() };
-        *buf = serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?;
-        Ok(buf.as_str())
+        // Err 分支同契约（2026-09-02 收口）：错误消息也写自持缓冲借 &str——
+        // 旧 `?` 上抛 `format!` 的 String（dll 堆）交内核 drop = 跨堆 free UB，
+        // 真机 SIGSEGV（spill_guard 每轮 output 出错即同秒崩）实测。
+        match serde_json::to_string(&updates) {
+            Ok(json) => {
+                *buf = json;
+                Ok(buf.as_str())
+            }
+            Err(e) => {
+                *buf = format!("serialize state_updates: {e}");
+                Err(buf.as_str())
+            }
+        }
     }
 }
 
@@ -681,7 +692,8 @@ mod tests {
             },
             host: None,
         };
-        let out = SpillGuard.execute(&ectx).expect("execute ok");
+        let guard = SpillGuard::new();
+        let out = guard.execute(&ectx).expect("execute ok");
         let parsed: HashMap<String, Value> = serde_json::from_str(&out).unwrap();
         assert!(parsed.contains_key("tool_results"));
     }

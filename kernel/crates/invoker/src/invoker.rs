@@ -478,9 +478,13 @@ struct NativeHostServices {
     /// 零跨界所有权转移。线程安全：execute 在 blocking 线程串行（同 host 一次
     /// 一个调用），`&self` 独占借用期间写读不重叠，UnsafeCell 足够。
     response_buf: std::cell::UnsafeCell<String>,
+    /// capability 调用**错误**缓冲（**exe 堆**，本结构持有）。Err 分支同契约
+    /// （2026-09-02 收口）：错误消息写这里再借 `&str`——旧 `Err(String)` 把 exe
+    /// 堆 String 交 dll 侧 drop = 反方向跨堆 free UB，真机 SIGSEGV 实测。
+    err_buf: std::cell::UnsafeCell<String>,
 }
 
-// SAFETY: response_buf 的 UnsafeCell 仅在 `&self` 独占借用期间写入；借出的 &str
+// SAFETY: response_buf/err_buf 的 UnsafeCell 仅在 `&self` 独占借用期间写入；借出的 &str
 // 由调用方（插件，blocking 线程内同步消费）在下一次同 host 调用前读完。execute 的
 // 调用形态=单 blocking 线程串行，无并发写面。
 unsafe impl Send for NativeHostServices {}
@@ -492,7 +496,7 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
         capability: &str,
         method: &str,
         params_json: &str,
-    ) -> Result<&str, String> {
+    ) -> Result<&str, &str> {
         let router = Arc::clone(&self.router);
         let cap = capability.to_string();
         let mth = method.to_string();
@@ -535,7 +539,16 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
                 buf.push_str(&serde_json::to_string(&v).unwrap_or_default());
                 Ok(buf.as_str())
             }
-            Err(e) => Err(format!("{e}")),
+            // Err 分支同契约（2026-09-02 收口）：错误消息写 err_buf（exe 堆）
+            // 借 &str 返回——dll 只读消费（立即拷贝/格式化），不持有、不释放。
+            // 旧 `Err(format!("{e}"))` 把 exe 堆 String 交 dll 侧 drop = 反方向
+            // 跨堆 free UB（真机 SIGSEGV 实测，与 execute 的 Err(String) 同根）。
+            Err(e) => {
+                let buf = unsafe { &mut *self.err_buf.get() };
+                buf.clear();
+                buf.push_str(&format!("{e}"));
+                Err(buf.as_str())
+            }
         }
     }
 }
@@ -1045,6 +1058,7 @@ impl PluginInvokerImpl {
                     plugin_id: plugin_id.to_string(),
                     on_blocking_thread: true,
                     response_buf: std::cell::UnsafeCell::new(String::with_capacity(4096)),
+                    err_buf: std::cell::UnsafeCell::new(String::with_capacity(256)),
                 });
 
         let loader = Arc::clone(loader);
@@ -1157,6 +1171,7 @@ impl PluginInvokerImpl {
                     plugin_id: plugin_id.to_string(),
                     on_blocking_thread: true,
                     response_buf: std::cell::UnsafeCell::new(String::with_capacity(4096)),
+                    err_buf: std::cell::UnsafeCell::new(String::with_capacity(256)),
                 });
 
         let loader = Arc::clone(loader);

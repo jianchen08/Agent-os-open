@@ -173,9 +173,11 @@ impl NativePluginLoader {
 
         // 构造执行上下文（ctx + host），调 trait 对象 execute。
         //
-        // 跨分配器契约（对称借用协议）：插件返回**其自身堆**的结果借用（&str 绑
-        // &self），本侧**立即 to_string 拷贝**（exe 堆）；不持有 dll 堆引用、不
-        // 释放——杜绝 dll↔exe 任何方向的跨堆 free（2026-09-01 差分实验定案）。
+        // 跨分配器契约（对称借用协议，2026-09-02 收口 Err 分支）：插件返回**其
+        // 自身堆**的结果/错误借用（`Result<&str, &str>` 均绑 &self），本侧**立即
+        // to_string 拷贝**（exe 堆）；不持有 dll 堆引用、不释放——杜绝 dll↔exe
+        // 任何方向的跨堆 free（2026-09-01 差分实验定案；Err 分支曾为 `String`
+        // 原样 move，exe drop dll 堆块 = 跨堆 free UB，真机 SIGSEGV 5 连实测）。
         let ectx = agentos_native_sdk::ExecContext {
             ctx: ctx.clone(),
             host,
@@ -194,7 +196,9 @@ impl NativePluginLoader {
             Err(err) => {
                 warn!(plugin_id = plugin_id, error = %err, "native plugin returned error");
                 Err(PluginError {
-                    message: err,
+                    // err 是 dll 自持缓冲的 &str 借用：to_string 拷贝到 exe 堆，
+                    // &str 绑插件 &self（dll 侧释放），本侧不 drop dll 堆块。
+                    message: err.to_string(),
                     code: Some("NATIVE_PLUGIN_ERROR".to_string()),
                     source: Some("native-loader".to_string()),
                 })

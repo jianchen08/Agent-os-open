@@ -51,15 +51,23 @@ unsafe impl Send for ToolCore {}
 unsafe impl Sync for ToolCore {}
 
 impl PipelinePlugin for ToolCore {
-    fn execute(&self, ectx: &ExecContext) -> Result<&str, String> {
+    fn execute(&self, ectx: &ExecContext) -> Result<&str, &str> {
         let state = ectx.ctx.state_value();
         // 执行主流程（返回 state_updates HashMap）。
         let updates = run(&state, ectx.host);
-        // 序列化进自持缓冲，返回借用（跨分配器契约：不返回 String）。
-        let json = serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?;
         let buf = unsafe { &mut *self.out_buf.get() };
-        *buf = json;
-        Ok(buf.as_str())
+        // Err 分支同契约（2026-09-02 收口）：序列化错误也写自持缓冲借 &str——
+        // 旧 `?` 上抛 `format!` 的 String（dll 堆）交内核 drop = 跨堆 free UB。
+        match serde_json::to_string(&updates) {
+            Ok(json) => {
+                *buf = json;
+                Ok(buf.as_str())
+            }
+            Err(e) => {
+                *buf = format!("serialize state_updates: {e}");
+                Err(buf.as_str())
+            }
+        }
     }
 }
 
@@ -522,7 +530,7 @@ mod tests {
             _capability: &str,
             _method: &str,
             params_json: &str,
-        ) -> Result<&str, String> {
+        ) -> Result<&str, &str> {
             *self.last_params.lock().unwrap() = Some(params_json.to_string());
             Ok("{}")  // 借用协议：'static 字面量即实现方持有的 &str
         }

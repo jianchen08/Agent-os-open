@@ -41,7 +41,7 @@ impl Default for TestPlugin {
 }
 
 impl PipelinePlugin for TestPlugin {
-    fn execute(&self, ectx: &ExecContext) -> Result<&str, String> {
+    fn execute(&self, ectx: &ExecContext) -> Result<&str, &str> {
         // B2：tool_call 约定字段 → 工具调用语义（与 pipeline 同一 execute 入口）。
         if let Some(tool_call) = ectx.ctx.tool_call_value() {
             let name = tool_call
@@ -52,9 +52,13 @@ impl PipelinePlugin for TestPlugin {
             let json = serde_json::to_string(&serde_json::json!({
                 "success": true,
                 "data": {"tool": name, "echo_args": args},
-            }))
-            .map_err(|e| format!("serialize: {e}"))?;
-            return Ok(self.write_out(json));
+            }));
+            // Err 分支同契约（2026-09-02 收口）：错误写自持缓冲借 &str，
+            // 旧 `?` 上抛 String（dll 堆）交内核 drop = 跨堆 free UB。
+            return match json {
+                Ok(s) => Ok(self.write_out(s)),
+                Err(e) => Err(self.write_out(format!("serialize: {e}"))),
+            };
         }
 
         let state = ectx.ctx.state_value();
@@ -70,8 +74,10 @@ impl PipelinePlugin for TestPlugin {
         if ectx.host.is_some() {
             updates.insert("host_available".to_string(), serde_json::json!(true));
         }
-        let json = serde_json::to_string(&updates).map_err(|e| format!("serialize: {e}"))?;
-        Ok(self.write_out(json))
+        match serde_json::to_string(&updates) {
+            Ok(json) => Ok(self.write_out(json)),
+            Err(e) => Err(self.write_out(format!("serialize: {e}"))),
+        }
     }
 }
 

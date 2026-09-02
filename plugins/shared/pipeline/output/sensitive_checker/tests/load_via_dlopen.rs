@@ -25,8 +25,8 @@ fn dll_path() -> PathBuf {
 /// 假 HostServices（本插件不调 capability，host=None 也能工作；这里仅用于占位）。
 struct NoopHost;
 impl HostServices for NoopHost {
-    fn call_capability(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
-        Err("not implemented".into())
+    fn call_capability(&self, _: &str, _: &str, _: &str) -> Result<&str, &str> {
+        Err("not implemented")
     }
 }
 

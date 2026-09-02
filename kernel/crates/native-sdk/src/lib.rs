@@ -59,7 +59,7 @@ pub trait HostServices: Send + Sync {
     ///
     /// 返回 `Ok(result_json)`（借用绑定 `&self` 生命周期）或 `Err(error_msg)`。
     ///
-    /// # 跨分配器契约（2026-09-01，两个方向都不能省）
+    /// # 跨分配器契约（2026-09-01 两方向都不能省；2026-09-02 收口 Err 分支）
     ///
     /// exe 与 cdylib 的全局分配器可能不同（mi exe × 系统堆 dll），**任何跨边界的
     /// 所有权转移都是跨堆 free UB**。协议：
@@ -68,12 +68,15 @@ pub trait HostServices: Send + Sync {
     /// - 返回值：exe 内部缓冲（exe 堆分配/释放），借给 dll 只读消费；
     ///   dll **立即**解析（转 Value/拷贝），不存引用、不释放——下次同 host 调用
     ///   会覆盖缓冲。`&str` 生命周期与 `&self` 绑定，借用检查强制消费内完成。
+    /// - **Err 分支同契约**：错误消息同样写 exe 自持缓冲借 `&str` 返回，禁止
+    ///   返回 `String`（此前 `Err(String)` 把 exe 堆 String 交 dll 侧 drop =
+    ///   反方向跨堆 free UB，2026-09-02 真机 SIGSEGV 实测）。
     fn call_capability(
         &self,
         capability: &str,
         method: &str,
         params_json: &str,
-    ) -> Result<&str, String>;
+    ) -> Result<&str, &str>;
 }
 
 // ── PipelinePlugin：插件实现的主契约 ───────────────────────────────────
@@ -91,16 +94,20 @@ pub trait PipelinePlugin: Send + Sync {
     /// - 返回 `Ok(state_updates_json)`（借用绑定 `&self` 生命周期）或
     ///   `Err(error_msg)`。
     ///
-    /// # 跨分配器契约（2026-09-01，与 `HostServices` 对称）
+    /// # 跨分配器契约（2026-09-01，与 `HostServices` 对称；2026-09-02 收口 Err 分支）
     ///
-    /// **跨边界零所有权转移**：调用方（内核）对返回串**立即拷贝**（转
-    /// Value/落 state），不存引用、不释放——缓冲由 dll 分配与释放（dll 堆），
+    /// **跨边界零所有权转移（含 Err 分支）**：调用方（内核）对返回串**立即拷贝**
+    /// （转 Value/落 state），不存引用、不释放——缓冲由 dll 分配与释放（dll 堆），
     /// 借用生命周期与 `&self` 绑定。禁止返回 `String`（exe drop = 跨堆 free UB，
-    /// 2026-09-01 差分实验 10/15 复现真机段错误）。
+    /// 2026-09-01 差分实验 10/15 复现真机段错误）；**`Err` 分支同样禁止返回
+    /// `String`**——此前 `Err(String)` 把 dll 堆 String 交 exe 侧 drop =
+    /// 正向跨堆 free UB（2026-09-02 真机 5 连 SIGSEGV 定案：spill_guard 每轮
+    /// output 出错即同秒崩，崩溃点 mimalloc segmap 查询）。错误消息写实现方
+    /// 自持缓冲、借 `&str` 返回。
     ///
     /// 插件实现惯例：把 JSON 存进 `&self` 的内部缓冲字段（`Mutex<String>`，
     /// execute 在 blocking 线程串行调用），返回其 `&str`。
-    fn execute(&self, ectx: &ExecContext) -> Result<&str, String>;
+    fn execute(&self, ectx: &ExecContext) -> Result<&str, &str>;
 }
 
 // ── PluginCtx：传给 execute 的上下文 ──────────────────────────────────
@@ -162,11 +169,11 @@ impl PluginCtx {
     ///
     /// 插件典型写法：
     /// ```ignore
-    /// fn execute(&self, ectx: &mut ExecContext) -> Result<(), String> {
+    /// fn execute(&self, ectx: &ExecContext) -> Result<&str, &str> {
     ///     if let Some(tool_call) = ectx.ctx.tool_call_value() {
     ///         let name = tool_call.get("name").and_then(|v| v.as_str()).unwrap_or("");
     ///         let args = ectx.ctx.state_value();
-    ///         return Ok(format!(r#"{{"success": true, "data": {{}}"}}"#)); // 工具逻辑
+    ///         return self.write_out(format!(r#"{{"success": true, "data": {{}}"}}"#)); // 工具逻辑
     ///     }
     ///     // …原 pipeline 逻辑…
     /// }
@@ -304,7 +311,7 @@ mod tests {
         }
     }
     impl PipelinePlugin for DummyPlugin {
-        fn execute(&self, _ectx: &ExecContext) -> Result<&str, String> {
+        fn execute(&self, _ectx: &ExecContext) -> Result<&str, &str> {
             // 对称借用协议：结果存 &self 内部缓冲，返回其 &str（dll 侧持有）。
             // SAFETY: execute 由 loader 在 blocking 线程串行调用（见 trait 契约），
             // &self 期间无并发写者；内部缓冲借出 &str 且调用方同步消费。
@@ -331,6 +338,46 @@ mod tests {
         // 内核侧立即拷贝返回串（跨分配器契约：不持有 dll 堆引用）。
         let out = boxed.execute(&ectx).unwrap().to_string();
         assert_eq!(out, r#"{"ok":true}"#);
+    }
+
+    /// Err 分支同样走实现方自持缓冲借用（2026-09-02 收口回归）：
+    /// `Result<&str, &str>` 的 Err 内容可被内核侧立即拷贝消费，且未向调用方
+    /// 转移任何 String 所有权（类型层已不可能——跨堆 free UB 根治）。
+    #[test]
+    fn error_path_borrow_protocol() {
+        struct ErrorPlugin {
+            buf: std::cell::UnsafeCell<String>,
+        }
+        impl ErrorPlugin {
+            fn new() -> Self {
+                Self {
+                    buf: std::cell::UnsafeCell::new(String::new()),
+                }
+            }
+        }
+        // SAFETY: 同 DummyPlugin（blocking 线程串行，&self 独占期写读不重叠）。
+        unsafe impl Sync for ErrorPlugin {}
+        impl PipelinePlugin for ErrorPlugin {
+            fn execute(&self, _ectx: &ExecContext) -> Result<&str, &str> {
+                let buf = unsafe { &mut *self.buf.get() };
+                buf.clear();
+                buf.push_str(r#"{"error":"boom"}"#);
+                Err(buf.as_str())
+            }
+        }
+        let ptr = plugin_into_raw(ErrorPlugin::new());
+        // SAFETY: ptr 来自 plugin_into_raw，仅还原一次。
+        let boxed = unsafe { box_from_raw(ptr) }.unwrap();
+        let ectx = ExecContext {
+            ctx: PluginCtx::default(),
+            host: None,
+        };
+        let err = boxed.execute(&ectx).unwrap_err();
+        // 内核侧立即拷贝（跨分配器契约），内容完整可用。
+        assert_eq!(err.to_string(), r#"{"error":"boom"}"#);
+        // 再次调用确认缓冲可复用（每次覆盖，借用消费完成）。
+        let err2 = boxed.execute(&ectx).unwrap_err();
+        assert_eq!(err2.to_string(), r#"{"error":"boom"}"#);
     }
 
     #[test]

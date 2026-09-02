@@ -73,7 +73,7 @@ unsafe impl Send for SensitiveChecker {}
 unsafe impl Sync for SensitiveChecker {}
 
 impl PipelinePlugin for SensitiveChecker {
-    fn execute(&self, ectx: &ExecContext) -> Result<&str, String> {
+    fn execute(&self, ectx: &ExecContext) -> Result<&str, &str> {
         let state = ectx.ctx.state_value();
         let config = ectx.ctx.config_value();
 
@@ -117,9 +117,15 @@ impl PipelinePlugin for SensitiveChecker {
             updates.insert("sensitive_detected".into(), Value::Bool(true));
         }
 
-        Ok(self.write_out(
-            &serde_json::to_string(&updates).map_err(|e| format!("serialize state_updates: {e}"))?,
-        ))
+        // Err 分支同契约（2026-09-02 收口）：序列化错误写 out_buf 借 &str——
+        // 旧 `?` 上抛 `format!` 的 String（dll 堆）交内核 drop = 跨堆 free UB。
+        match serde_json::to_string(&updates) {
+            Ok(json) => Ok(self.write_out(&json)),
+            Err(e) => {
+                let msg = format!("serialize state_updates: {e}");
+                Err(self.write_out(&msg))
+            }
+        }
     }
 }
 
@@ -323,7 +329,7 @@ mod tests {
     #[test]
     fn execute_writes_state_only_when_detected() {
         // 模拟内核：直接调 execute。
-        let checker = SensitiveChecker;
+        let checker = SensitiveChecker::new();
         // 无敏感数据 → 空 updates。
         let state = json!({"tool_results": [{"msg": "clean output"}]});
         let ectx = ExecContext {
@@ -355,7 +361,7 @@ mod tests {
 
     #[test]
     fn disabled_returns_empty() {
-        let checker = SensitiveChecker;
+        let checker = SensitiveChecker::new();
         let state = json!({"tool_results": [{"msg": "token=sk-abcdef1234567890ABCDEF1234"}]});
         let config = json!({"enabled": false});
         let ectx = ExecContext {

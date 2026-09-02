@@ -11,7 +11,7 @@ impl HostServices for ReplyOk {
         capability: &str,
         method: &str,
         params: &str,
-    ) -> Result<&str, String> {
+    ) -> Result<&str, &str> {
         eprintln!("[host] {} {} {} bytes", capability, method, params.len());
         if capability == "tool-executor" {
             // 借用协议（跨分配器契约）：返回实现方持有的 &str。
