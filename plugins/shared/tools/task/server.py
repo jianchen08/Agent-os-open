@@ -44,16 +44,28 @@ async def _on_load(_params: dict[str, Any]) -> None:
         return await handle.call(params["method"], params["params"])
 
     async def _list_traces(pipeline_id: str) -> list[dict[str, Any]]:
-        # service-registry 约定：handle.call("<域>.<op>")。任务管道无 sessions 行，
-        # 其 thread_id 恒等于自身 pipeline_id，故以 pipeline_id 作 thread_id 查。
+        # service-registry 约定：handle.call("<域>.<op>")。按 pipeline_id 直查
+        # 本管道 step 轨迹（traces.list_by_pipeline）——pipeline_id 是执行态
+        # 唯一坐标；绑真会话的任务管道在 pipeline_sessions 落 (task→thread-xxx)
+        # 映射，按 thread_id=pipeline_id 查恒空（recent_activities 恒 []）。
         handle = plugin.get_capability("service-registry")
-        rows = await handle.call("traces.list", {"thread_id": pipeline_id})
+        rows = await handle.call("traces.list_by_pipeline", {"pipeline_id": pipeline_id})
+        return rows if isinstance(rows, list) else []
+
+    async def _list_runs(pipeline_id: str) -> list[dict[str, Any]]:
+        # pipeline-runs.list_by_pipeline：该管道全部 run 记录（含 created_at /
+        # ended_at / status）——任务耗时起点终点数据源（elapsed_seconds）。
+        handle = plugin.get_capability("service-registry")
+        rows = await handle.call(
+            "pipeline-runs.list_by_pipeline", {"pipeline_id": pipeline_id}
+        )
         return rows if isinstance(rows, list) else []
 
     tool_mod.set_chat_sender(_chat)
     tool_mod.set_state_reader(_read_state_rows)
     tool_mod.set_pipeline_executor(_exec)
     tool_mod.set_traces_reader(_list_traces)
+    tool_mod.set_runs_reader(_list_runs)
 
 
 
@@ -169,7 +181,8 @@ async def task_manage(**kwargs: dict[str, Any]) -> dict[str, Any]:
     task_tool = TaskTool()
     result = await task_tool.execute(kwargs)
     if result.success:
-        return result.output
+        # output 类型是 T | None：成功但无输出载荷 → 空 dict（契约仍是 object）
+        return result.output if isinstance(result.output, dict) else {}
     return {"error": result.error}
 
 

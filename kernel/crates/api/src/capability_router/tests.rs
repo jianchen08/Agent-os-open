@@ -2,6 +2,7 @@
 // 由 capability_router.rs 的主 #[cfg(test)] 测试块体平移而来（保留私有项访问）。
 
 use super::*;
+use agentos_core::types::TraceEntry;
 use serde_json::json;
 
 fn router_with_metrics() -> (KernelCapabilityRouter, MetricsAggregator) {
@@ -1473,6 +1474,153 @@ async fn test_service_registry_unknown_method() {
         res.is_err(),
         "unknown service-registry domain/op must error"
     );
+}
+
+// ── traces.list_by_pipeline / pipeline-runs.list_by_pipeline ────────────────
+// pipeline_id 是执行态唯一坐标：绑真会话的任务管道在 pipeline_sessions 落
+// (task→thread-xxx) 映射，按 thread_id=pipeline_id 查恒空——插件侧
+// （task_manage recent_activities / elapsed_seconds）按管道直查。
+
+#[tokio::test]
+async fn test_traces_list_by_pipeline_bypasses_session_mapping() {
+    // run↔管道映射按生产链路落全（run_id 经 message_slots 落槽 + runs.pipeline_id
+    // 回填）→ 两条 step 级 trace；pipeline_sessions 只落 (task→thread-xxx)
+    // 真会话映射（无自环行）——按旧 traces.list(thread_id=task) 查恒空，
+    // list_by_pipeline 仍能查到。
+    let store: Arc<dyn StorageBackend> =
+        Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let router =
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
+    store.create_run("run_tp_1", "hash", "default").await.unwrap();
+    store.set_run_pipeline("run_tp_1", "task_tp").await.unwrap();
+    let user_msg = json!({"role": "user", "content": "kickoff"});
+    // 引擎真实链路 merge_and_project 给每个 op 注入 _run_id（write_slot_to_
+    // table_locked 落 message_slots.run_id）——run_ids_of_pipelines 经槽表反查
+    // run 集合，缺槽行则按管道查轨迹恒空（生产语义，非测试捷径）。
+    store
+        .apply_messages_ops_to_table(
+            "task_tp",
+            "default",
+            &[json!({"op": "set", "seq": 0, "msg": user_msg, "_run_id": "run_tp_1"})],
+        )
+        .await
+        .unwrap();
+    for (i, plugin) in ["core", "post"].iter().enumerate() {
+        store
+            .append_trace(TraceEntry {
+                trace_id: format!("trace_tp_{i}"),
+                run_id: "run_tp_1".to_string(),
+                branch_id: "main".to_string(),
+                seq_in_branch: i as u32,
+                plugin_id: plugin.to_string(),
+                patch_type: agentos_core::types::PatchType::StateUpdate,
+                patch_data: json!({"k": i}),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .await
+            .unwrap();
+    }
+    store
+        .link_pipeline_session("task_tp", "thread-xxx", "default")
+        .await
+        .unwrap();
+
+    // 旧读面：thread_id=task → 会话映射反查无 (thread-xxx 下无 task_tp) → 空。
+    // 注意 pipeline_sessions 是 (task_tp → thread-xxx)，按 thread_id=task_tp
+    // 查不到任何行——这正是绑真会话任务 recent_activities 恒空的历史根因。
+    let via_thread = router
+        .handle("service-registry", "traces.list", json!({"thread_id": "task_tp"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        via_thread.as_array().map(Vec::len),
+        Some(0),
+        "绑真会话任务按 thread_id=task 查恒空（历史根因）"
+    );
+
+    // 新读面：按 pipeline_id 直查 → 命中 2 条 step 级轨迹。
+    let via_pipeline = router
+        .handle(
+            "service-registry",
+            "traces.list_by_pipeline",
+            json!({"pipeline_id": "task_tp"}),
+        )
+        .await
+        .unwrap();
+    let rows = via_pipeline.as_array().expect("traces list_by_pipeline rows");
+    assert_eq!(rows.len(), 2, "按管道直查命中全部 step 轨迹");
+    let plugin_ids: Vec<&str> = rows
+        .iter()
+        .map(|r| r["plugin_id"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(plugin_ids, vec!["core", "post"], "created_at 升序");
+
+    let missing = router
+        .handle(
+            "service-registry",
+            "traces.list_by_pipeline",
+            json!({"pipeline_id": "no_such_task"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.as_array().map(Vec::len), Some(0), "无 run → 空列表非报错");
+}
+
+#[tokio::test]
+async fn test_pipeline_runs_list_by_pipeline_returns_runs() {
+    // 同管道两条 run → list_by_pipeline 返回 2 条（含 created_at/ended_at/status），
+    // 终态 run 带 ended_at（elapsed_seconds 终点数据源）。
+    let store: Arc<dyn StorageBackend> =
+        Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let router =
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
+    store.create_run("run_lp_1", "hash", "default").await.unwrap();
+    store.set_run_pipeline("run_lp_1", "task_lp").await.unwrap();
+    store.create_run("run_lp_2", "hash", "default").await.unwrap();
+    store.set_run_pipeline("run_lp_2", "task_lp").await.unwrap();
+    store
+        .update_run_status(
+            "run_lp_1",
+            agentos_core::types::RunStatus::Completed,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let res = router
+        .handle(
+            "service-registry",
+            "pipeline-runs.list_by_pipeline",
+            json!({"pipeline_id": "task_lp"}),
+        )
+        .await
+        .unwrap();
+    let rows = res.as_array().expect("runs list_by_pipeline rows");
+    assert_eq!(rows.len(), 2, "管道全部 run 记录");
+    assert!(
+        rows.iter().all(|r| r.get("created_at").and_then(|v| v.as_str()).is_some()),
+        "每条 run 带 created_at（耗时起点数据源）"
+    );
+    let completed = rows
+        .iter()
+        .find(|r| r["run_id"] == "run_lp_1")
+        .expect("run_lp_1 in rows");
+    assert_eq!(completed["status"], "completed");
+    assert!(
+        completed.get("ended_at").is_some(),
+        "终态 run 带 ended_at（耗时终点数据源）"
+    );
+
+    let empty = router
+        .handle(
+            "service-registry",
+            "pipeline-runs.list_by_pipeline",
+            json!({"pipeline_id": "no_such_task"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.as_array().map(Vec::len), Some(0), "无 run → 空列表非报错");
 }
 
 // ── F-REVIEW-2：pipeline-executor.get_run_status（复盘轮询真实完成）──

@@ -3299,13 +3299,13 @@ async fn cold_recovery_replays_only_own_pipeline_traces() {
         .await
         .unwrap();
 
-    // 父管道轨迹携带对话挂起控制态（事故现场同款）
+    // 父管道轨迹携带对话挂起控制态（事故现场同款）+ 持久任务域标量
     seed_pipeline_trace(
         &store,
         "pipe-parent",
         "run-parent",
         json!({"conversation_mode": true, "core_type": "tool_execute",
-               "core_plugin": "pipeline_tool_core"}),
+               "core_plugin": "pipeline_tool_core", "task.status": "running"}),
     )
     .await;
     // 子任务自己的轨迹只含任务域标量
@@ -3347,7 +3347,10 @@ async fn cold_recovery_replays_only_own_pipeline_traces() {
         "子任务自己的轨迹标量必须回放"
     );
 
-    // 父管道自身冷恢复仍能拿回自己的控制态（作用域收窄不丢自己的历史）
+    // 父管道自身冷恢复仍能拿回自己的历史（作用域收窄不丢自己的历史）：
+    // 持久键 task.status 照常恢复；2026-09-02 VOLATILE 裁定（4f6cb15fb）后
+    // conversation_mode/core_type 属本轮执行态，跨 run 剥离不得复活——
+    // 旧断言「conversation_mode 必须完整恢复」随该裁定过期，同刀更新。
     let parent_recovered = super::stage_recover_history(
         json!({}),
         &(store as Arc<dyn agentos_core::traits::StorageBackend>),
@@ -3359,8 +3362,12 @@ async fn cold_recovery_replays_only_own_pipeline_traces() {
     )
     .await;
     assert_eq!(
-        parent_recovered.get("conversation_mode"),
-        Some(&json!(true)),
-        "本管道历史控制态必须完整恢复"
+        parent_recovered.get("task.status"),
+        Some(&json!("running")),
+        "本管道持久标量必须完整恢复"
+    );
+    assert!(
+        parent_recovered.get("conversation_mode").is_none(),
+        "对话等待态是本轮执行态，跨 run 剥离不得复活（2026-09-02 裁定）"
     );
 }

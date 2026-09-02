@@ -105,12 +105,15 @@ def _is_task_pipeline_row(row: dict[str, Any]) -> bool:
 # ── GAP-1 统一：能力注入点（server.py on_load）──
 # chat_sender：chat.send_message（注入/重试驱动）；state_reader：pipeline-state.list
 # （任务状态/子链读面）；pipeline_executor：pipeline-executor（stop→suspend_pipeline /
-# resume→resume_pipeline）；traces_reader：service-registry traces.list（执行活动
-# 读面，recent_activities/latest 数据源）。
+# resume→resume_pipeline）；traces_reader：service-registry traces.list_by_pipeline
+# （执行活动读面，recent_activities/latest 数据源）；runs_reader：
+# service-registry pipeline-runs.list_by_pipeline（run 起点/终点，elapsed_seconds
+# 数据源——task=pipeline 后无 task.started_at state 键，耗时以首 run created_at 起）。
 _chat_sender: Any = None
 _state_reader: Any = None
 _pipeline_executor: Any = None
 _traces_reader: Any = None
+_runs_reader: Any = None
 
 
 def set_chat_sender(sender: Any) -> None:
@@ -131,6 +134,11 @@ def set_traces_reader(reader: Any) -> None:
 def set_pipeline_executor(executor: Any) -> None:
     global _pipeline_executor  # noqa: PLW0603
     _pipeline_executor = executor
+
+
+def set_runs_reader(reader: Any) -> None:
+    global _runs_reader  # noqa: PLW0603
+    _runs_reader = reader
 
 
 class TaskTool(BuiltinTool):
@@ -280,7 +288,7 @@ class TaskTool(BuiltinTool):
 
     @staticmethod
     def _calc_elapsed_seconds(task: TaskModel) -> float | None:
-        """计算任务已耗时（秒）。"""
+        """计算任务已耗时（秒）——旧 service 回落路径（TaskModel 带 started_at）。"""
 
         if not task.started_at:
             return None
@@ -293,6 +301,69 @@ class TaskTool(BuiltinTool):
             completed = datetime.fromisoformat(task.completed_at)
 
             return (completed - started).total_seconds()
+
+        return (datetime.now() - started).total_seconds()
+
+    async def _calc_elapsed_from_runs(self, pipeline_id: str) -> float | None:
+        """任务耗时（秒）——state 桥路径：run 记录起点终点直算。
+
+        task=pipeline 后无 task.started_at state 键（用户裁定：不新增字段，
+        管道 id 唯一，直接查 runs）：起点 = 最早 run created_at；终点 = 全部
+        run 已终态时最晚 ended_at（任一 run 仍在跑则任务在执行，用当前时间）。
+        runs reader 未注入 / 查询失败 / 无 run 记录 → None（详情字段缺失
+        不阻断任务主数据）。
+        """
+
+        if not pipeline_id or _runs_reader is None:
+            return None
+
+        try:
+            runs = _runs_reader(pipeline_id)
+
+            if asyncio.iscoroutine(runs):
+                runs = await runs
+        except Exception as exc:
+            logger.warning(
+                "[TaskTool] run 记录读取失败（耗时降级 None）| pipeline=%s err=%s",
+                pipeline_id,
+                exc,
+            )
+            return None
+
+        if not isinstance(runs, list) or not runs:
+            return None
+
+        from datetime import datetime  # noqa: PLC0415
+
+        created_ats: list[datetime] = []
+        ended_ats: list[datetime] = []
+        all_terminal = True
+
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+
+            created_raw = str(run.get("created_at") or "")
+
+            if created_raw:
+                created_ats.append(datetime.fromisoformat(created_raw))
+
+            status = str(run.get("status") or "")
+
+            ended_raw = str(run.get("ended_at") or "")
+
+            if ended_raw:
+                ended_ats.append(datetime.fromisoformat(ended_raw))
+            elif status not in ("completed", "failed", "suspended", "cancelled"):
+                all_terminal = False
+
+        if not created_ats:
+            return None
+
+        started = min(created_ats)
+
+        if all_terminal and ended_ats:
+            return (max(ended_ats) - started).total_seconds()
 
         return (datetime.now() - started).total_seconds()
 
@@ -884,7 +955,15 @@ class TaskTool(BuiltinTool):
                 result["max_retries"] = max_retries
 
         if include_details or include_agent_calls:
-            result["elapsed_seconds"] = self._calc_elapsed_seconds(task)
+            # 耗时双源：state 桥路径以 run 记录直算（task.started_at 已随
+            # task=pipeline 退役，用户裁定不新增字段）；旧 service 回落
+            # （TaskModel 带 started_at）保留原计算。run 源 None 时回退旧源。
+            elapsed = await self._calc_elapsed_from_runs(task.pipeline_run_id or "")
+
+            if elapsed is None:
+                elapsed = self._calc_elapsed_seconds(task)
+
+            result["elapsed_seconds"] = elapsed
 
             activities = await self._get_recent_activities(task, limit=activity_limit)
 
@@ -1064,6 +1143,12 @@ class TaskTool(BuiltinTool):
         """单任务 → 7 列简表行（短id/标题/状态/优先级/目标/最近动作/耗时）。"""
         activity = await self._get_latest_activity(task)
 
+        # 耗时双源与详情一致：run 记录直算优先，None 回退旧 service 路径
+        elapsed = await self._calc_elapsed_from_runs(task.pipeline_run_id or "")
+
+        if elapsed is None:
+            elapsed = self._calc_elapsed_seconds(task)
+
         priority = (
             task.priority.value if hasattr(task.priority, "value") else task.priority
         )
@@ -1074,7 +1159,7 @@ class TaskTool(BuiltinTool):
             priority,
             task.metadata.get("target_name", ""),
             activity["action"] if activity else "-",
-            self._format_elapsed(self._calc_elapsed_seconds(task)),
+            self._format_elapsed(elapsed),
         ]
 
 

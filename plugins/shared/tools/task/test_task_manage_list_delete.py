@@ -6,8 +6,9 @@ get 详情（含 evaluation_summary/elapsed/activities 组装）、
 delete 双路径（YAML 任务 / state 任务删管道）、耗时/活动摘要辅助函数。
 
 真实依赖：TaskService（tmp 数据目录）+ 真实 TaskStorage；仅 mock 跨进程
-capability（pipeline-executor / state 聚合 / service-registry traces.list
-——执行活动数据源在内核 traces 表，测试用假 traces reader 直连覆盖组装面）。
+capability（pipeline-executor / state 聚合 / service-registry
+traces.list_by_pipeline + pipeline-runs.list_by_pipeline——执行活动数据源
+在内核 traces 表、耗时起点终点在 runs 表，测试用假 reader 直连覆盖组装面）。
 """
 
 from __future__ import annotations
@@ -39,11 +40,11 @@ for _d in _PLUGIN_PATHS:
 sys.modules.pop("tool", None)
 
 import tool as _task_mod  # noqa: E402
-from tool import TaskTool  # noqa: E402
 
 # 模块级绑定（收集期路径已就位）：函数内裸名 import 在共跑车道里会因
 # sys.modules["state_machine"] 被前序套件替换而命中错误实现。
 from state_machine import InvalidTransitionError  # noqa: E402
+from tool import TaskTool  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -80,21 +81,23 @@ def _capabilities():
     prev_state = _task_mod._state_reader
     prev_exec = _task_mod._pipeline_executor
     prev_traces = _task_mod._traces_reader
+    prev_runs = _task_mod._runs_reader
     yield
     _task_mod._chat_sender = prev_chat
     _task_mod._state_reader = prev_state
     _task_mod._pipeline_executor = prev_exec
     _task_mod._traces_reader = prev_traces
+    _task_mod._runs_reader = prev_runs
 
 
-@pytest.fixture()
+@pytest.fixture
 def svc(tmp_path: Path) -> Any:
     from service import TaskService
 
     return TaskService(data_dir=str(tmp_path))
 
 
-@pytest.fixture()
+@pytest.fixture
 def tool(svc: Any) -> TaskTool:
     t = TaskTool()
     t._task_service = svc
@@ -521,6 +524,79 @@ async def test_elapsed_seconds_calculation(tool: TaskTool, monkeypatch: Any) -> 
     assert TaskTool._calc_elapsed_seconds(running) == 60.0
 
 
+def _run(run_id: str, created_at: str, *, status: str = "completed", ended_at: str | None = None) -> dict[str, Any]:
+    """内核 pipeline-runs.list_by_pipeline 返回形状（RunRecord serde JSON）。"""
+    d: dict[str, Any] = {
+        "run_id": run_id,
+        "config_hash": "h",
+        "status": status,
+        "tenant_id": "default",
+        "created_at": created_at,
+        "current_branch": "main",
+        "current_seq": 0,
+    }
+    if ended_at is not None:
+        d["ended_at"] = ended_at
+    return d
+
+
+def _set_runs(tool: TaskTool, runs: list[dict[str, Any]] | None) -> None:
+    if runs is None:
+        _task_mod.set_runs_reader(None)
+    else:
+        _task_mod.set_runs_reader(AsyncMock(return_value=runs))
+
+
+async def test_elapsed_from_runs_completed_diff(tool: TaskTool) -> None:
+    """完成态：起点=最早 run created_at，终点=最晚 ended_at，取差值。"""
+    _set_runs(
+        tool,
+        [
+            _run("r1", "2026-08-25T10:00:05", ended_at="2026-08-25T10:01:00"),
+            _run("r2", "2026-08-25T10:00:00", ended_at="2026-08-25T10:00:30"),
+        ],
+    )
+    # 最早起点 10:00:00，最晚终点 10:01:00 → 60s（非首行起点/末行终点的行序无关性）
+    assert await tool._calc_elapsed_from_runs("pipe-run") == 60.0
+
+
+async def test_elapsed_from_runs_running_uses_now(tool: TaskTool, monkeypatch: Any) -> None:
+    """运行态：存在未终态 run → 用当前时间；ended_at 缺失的终态 run 同样按运行中。"""
+    import datetime as dt
+
+    _set_runs(
+        tool,
+        [
+            _run("r1", "2026-08-25T10:00:00", status="running"),
+            _run("r2", "2026-08-25T09:59:00", status="completed", ended_at="2026-08-25T09:59:30"),
+        ],
+    )
+    fake_now = dt.datetime(2026, 8, 25, 10, 1, 0)
+    monkeypatch.setattr(
+        "datetime.datetime",
+        type("FakeDT", (), {"now": staticmethod(lambda: fake_now), "fromisoformat": staticmethod(dt.datetime.fromisoformat)}),
+    )
+    # 最早起点 09:59:00 → 120s；r1 在跑，不取 ended_at 差值
+    assert await tool._calc_elapsed_from_runs("pipe-run") == 120.0
+
+
+async def test_elapsed_from_runs_reader_missing_or_fails(tool: TaskTool) -> None:
+    """reader 未注入 / 查询失败 / 空记录 / 无管道 id → None（优雅降级）。"""
+    _set_runs(tool, None)
+    assert await tool._calc_elapsed_from_runs("pipe-run") is None
+    _set_runs(tool, [])
+    assert await tool._calc_elapsed_from_runs("pipe-run") is None
+    assert await tool._calc_elapsed_from_runs("") is None
+    _task_mod.set_runs_reader(AsyncMock(side_effect=RuntimeError("kernel down")))
+    assert await tool._calc_elapsed_from_runs("pipe-run") is None
+
+
+async def test_elapsed_from_runs_all_created_at_missing(tool: TaskTool) -> None:
+    """全部 run 无 created_at → 无起点可用 → None。"""
+    _set_runs(tool, [{"run_id": "r1", "status": "completed"}])
+    assert await tool._calc_elapsed_from_runs("pipe-run") is None
+
+
 def test_format_elapsed_cases() -> None:
     """_format_elapsed 全分支：None/秒/分/小时+余分。"""
     assert TaskTool._format_elapsed(None) == "-"
@@ -627,7 +703,7 @@ async def test_delete_service_exception_returns_delete_failed(tool: TaskTool, sv
     async def boom(task_id: str, reason: str = "用户请求删除") -> dict[str, Any]:
         raise RuntimeError("disk error")
 
-    import unittest.mock as mock
+    from unittest import mock
 
     with mock.patch.object(svc, "hard_delete_task", boom):
         result = await tool.execute(

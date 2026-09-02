@@ -581,6 +581,25 @@ impl KernelCapabilityRouter {
                     .map_err(|e| srv_err(format!("traces.list: {e}")))?;
                 serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
             }
+            // ── traces.list_by_pipeline：按 pipeline_id 直查单管道 step 轨迹 ──
+            // pipeline_id 是执行态唯一坐标；绑真会话的任务管道落映射
+            // (task→thread-xxx)，按 thread_id=pipeline_id 查恒空（task_manage
+            // recent_activities 数据源）——本读面绕开会话映射直查。
+            ("traces", "list_by_pipeline") => {
+                let pipeline_id = params
+                    .get("pipeline_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| srv_err("missing pipeline_id".into()))?;
+                let tenant_id = params
+                    .get("tenant_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default");
+                let rows = store
+                    .get_step_traces_by_pipeline(pipeline_id, tenant_id)
+                    .await
+                    .map_err(|e| srv_err(format!("traces.list_by_pipeline: {e}")))?;
+                serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
+            }
             // ── pipeline-runs 域（runs 快照列表，调试中心会话/执行记录数据源）──
             // 与 GET /api/v1/pipelines/runs 同查询（list_pipelines_inner 四表联结），
             // 按 started_at 倒序；插件侧（channel_api）以此为「有执行记录的会话」清单。
@@ -602,6 +621,23 @@ impl KernelCapabilityRouter {
                     .list_pipelines(tenant_id, status, limit)
                     .await
                     .map_err(|e| srv_err(format!("pipeline-runs.list: {e}")))?;
+                serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
+            }
+            // ── pipeline-runs.list_by_pipeline：按 pipeline_id 列该管道全部 run ──
+            // 任务耗时起点数据源（task_manage elapsed_seconds：首 run created_at）。
+            ("pipeline-runs", "list_by_pipeline") => {
+                let pipeline_id = params
+                    .get("pipeline_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| srv_err("missing pipeline_id".into()))?;
+                let tenant_id = params
+                    .get("tenant_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default");
+                let rows = store
+                    .list_runs_by_pipeline(pipeline_id, tenant_id)
+                    .await
+                    .map_err(|e| srv_err(format!("pipeline-runs.list_by_pipeline: {e}")))?;
                 serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
             }
             (domain, op) => Err(McpError::Protocol {
