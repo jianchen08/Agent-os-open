@@ -80,5 +80,7 @@ plugins:
     enabled: false
   pipeline_tool_context:
     enabled: false
+  pipeline_stuck_detector:
+    enabled: false
 defaults:
   enabled: true

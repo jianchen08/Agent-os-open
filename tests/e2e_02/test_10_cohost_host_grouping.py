@@ -3,10 +3,10 @@
 
 真实内核（:9100）+ 真实 sidecar + 真实 LLM chat 全链路，psutil 进程级断言：
 
-  1. chat 全链路跑通（6 个 light guard 成员在管道链中被真实调用）；
+  1. chat 全链路跑通（5 个 light guard 成员在管道链中被真实调用）；
   2. 进程形态断言：light 成员只以 host.py 合宿进程形态存在——
-     - 合宿宿主进程数 = ceil(6 / 挂载上限 6) = 1（同一组内共享一个进程）；
-     - 6 个 light 成员全部出现在宿主 --members 注入列表（装箱覆盖全）；
+     - 合宿宿主进程数 = ceil(5 / 挂载上限 6) = 1（同一组内共享一个进程）；
+     - 5 个 light 成员全部出现在宿主 --members 注入列表（装箱覆盖全）；
      - 没有任何 light 成员以"独占 sidecar"形态存在（判别：exe =
        plugins/shared/pipeline/*/<name>/.venv 的 python，即每插件独立进程）。
 
@@ -40,23 +40,23 @@ pytestmark = [
 
 CHAT_PROMPT = "请只回复两个字：好的"
 
-# 已声明 host_group: light 的 6 个插件
-# （pipeline_termination_advisor 已禁用摘除，见 default_profile.yaml）
+# 已声明 host_group: light 的 5 个插件
+# （pipeline_termination_advisor、pipeline_stuck_detector 已禁用摘除，
+#   见 default_profile.yaml）
 LIGHT_PLUGIN_IDS = [
     "pipeline_pause_guard",
     "pipeline_level_guard",
     "pipeline_stop_check",
     "pipeline_duplicate_check",
-    "pipeline_stuck_detector",
     "pipeline_task_reminder",
 ]
-# 挂载上限默认 6（AGENTOS_LIGHT_HOST_MAX_MEMBERS 可覆盖）→ 6 成员恰 1 宿主
+# 挂载上限默认 6（AGENTOS_LIGHT_HOST_MAX_MEMBERS 可覆盖）→ 5 成员恰 1 宿主
 EXPECTED_HOST_COUNT = 1
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _light_member_exes() -> list[str]:
-    """6 个 light 成员各自的独立 sidecar venv python 可执行路径。
+    """5 个 light 成员各自的独立 sidecar venv python 可执行路径。
 
     合宿生效判据：这些 exe 一个都不该作为独立进程存在（成员应只出现在
     共享宿主 _host/.venv 的 host.py 进程里，见 _host_venv_python）。
@@ -174,7 +174,7 @@ def _solo_light_processes() -> list:
 
 @pytest.fixture(scope="module")
 def chat_flow(auth_token):
-    """登录 + 建会话 + 一次真实 LLM chat 调用，触发全管道执行（6 light 成员全部落位）。"""
+    """登录 + 建会话 + 一次真实 LLM chat 调用，触发全管道执行（5 light 成员全部落位）。"""
     token = auth_token
     session = create_session(token, title="e2e-cohost-grouping")
     status, body, _ = http_post_json_auth(
@@ -205,25 +205,25 @@ class TestCohostHostGrouping:
             "content 不应为空（期望 LLM 回复）"
         )
 
-        # 管道已跑完 → 6 个 light 成员全部被装箱调用 → 宿主进程应已 spawn。
+        # 管道已跑完 → 5 个 light 成员全部被装箱调用 → 宿主进程应已 spawn。
         # （idle GC 阈值默认 300s，测试窗口内宿主存活；轮询至稳态。）
         hosts = _stable_hosts()
         assert hosts, "未发现 host.py 合宿宿主进程（light 装箱未生效？）"
 
     @pytest.mark.timeout(60)
     def test_light_members_share_one_host_not_solo(self, chat_flow):
-        """进程形态：6 成员 = 1 个宿主（每宿主 ≤6），且无任何成员独立进程。
+        """进程形态：5 成员 = 1 个宿主（每宿主 ≤6），且无任何成员独立进程。
 
         这正是"合宿 vs 每插件一进程"的可观测差异：若 host_group 未生效，
-        6 个成员会以 6 个独立 sidecar（各自 .venv python）进程存在。
+        5 个成员会以 5 个独立 sidecar（各自 .venv python）进程存在。
         """
         hosts = _stable_hosts()
         assert len(hosts) == EXPECTED_HOST_COUNT, (
-            f"6 个 light 成员应装箱到 {EXPECTED_HOST_COUNT} 个宿主进程，"
+            f"5 个 light 成员应装箱到 {EXPECTED_HOST_COUNT} 个宿主进程，"
             f"实际 {len(hosts)} 个：{hosts}"
         )
 
-        # 成员集并集 == 全部 6 个 light 成员（一个不落）
+        # 成员集并集 == 全部 5 个 light 成员（一个不落）
         union = sorted({m for _, members in hosts for m in members})
         assert union == sorted(LIGHT_PLUGIN_IDS), (
             f"宿主 --members 并集应覆盖全部 light 成员，实际 {union}"

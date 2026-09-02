@@ -74,7 +74,6 @@ loop_bodies:
     - pipeline_task_reminder
     - pipeline_stop_check
     - pipeline_duplicate_check
-    - pipeline_stuck_detector
     - pipeline_tool_cache_writer
     - pipeline_conversation_mode
     - pipeline_sensitive_checker
