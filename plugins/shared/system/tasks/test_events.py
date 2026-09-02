@@ -50,7 +50,8 @@ def test_terminal_tags_carry_rich_notification_fields():
             "task.error": "评估未通过: 1/2 项指标通过",
             "task.eval_total_calls": 3,
             "task.eval_summary": "1/2 项指标通过",
-            "track.llm_usage": {"total_input_tokens": 50000},
+            # 上下文占用 = 最近 LLM 轮输入（last_*），非跨轮累计（total_*）
+            "track.llm_usage": {"last_input_tokens": 50000, "total_input_tokens": 200000},
             "context_window": 128000,
         },
     )
@@ -70,7 +71,7 @@ def test_terminal_tags_carry_rich_notification_fields():
 def test_context_usage_missing_keys_returns_empty():
     """缺 track.llm_usage / context_window 任一 → 空 dict（通知侧按无遥测处理）。"""
     assert events._context_usage(_task_row()) == {}
-    assert events._context_usage(_task_row(**cast("dict[str, Any]", {"track.llm_usage": {"total_input_tokens": 1}}))) == {}
+    assert events._context_usage(_task_row(**cast("dict[str, Any]", {"track.llm_usage": {"last_input_tokens": 1}}))) == {}
     assert events._context_usage(_task_row(**cast("dict[str, Any]", {"context_window": 128000}))) == {}
     assert events._context_usage(_task_row(**cast("dict[str, Any]", {"track.llm_usage": {}, "context_window": 0}))) == {}
 

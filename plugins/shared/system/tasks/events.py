@@ -52,8 +52,10 @@ def _tag(row: dict[str, Any], key: str) -> Any:
 def _context_usage(row: dict[str, Any]) -> dict[str, Any]:
     """从 state 摘要行提取上下文使用率（0.1 通知同款遥测）。
 
-    数据源：track.llm_usage（track 插件跨轮累计，已出口）+ context_window
-    （llm_core 每轮写入，已出口）。缺任一键返回空 dict（通知侧按无遥测处理）。
+    数据源：track.llm_usage（track 插件已出口）+ context_window（llm_core
+    每轮写入，已出口）。占用取 last_input_tokens（最近一次 LLM 轮的输入 =
+    当前上下文窗口占用，与前端输入框用量/浮窗同语义；total_* 是跨轮累计，
+    不是当前占用）。缺任一键返回空 dict（通知侧按无遥测处理）。
     """
     usage = row.get("track.llm_usage")
     window = row.get("context_window")
@@ -61,7 +63,7 @@ def _context_usage(row: dict[str, Any]) -> dict[str, Any]:
         return {}
     try:
         window = int(window)
-        input_tokens = int(usage.get("total_input_tokens", 0) or 0)
+        input_tokens = int(usage.get("last_input_tokens", 0) or 0)
     except (TypeError, ValueError):
         return {}
     if window <= 0:
