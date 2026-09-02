@@ -286,11 +286,7 @@ def check() -> int:
             problems.append(f"基集路径不存在: {base}")
 
     # 配对不变量：插桩侧剔除的 --ignore 名单 ≡ 免插桩侧 positional 名单
-    ignores = sorted(
-        a.removeprefix("--ignore=")
-        for a in instrumented_args()
-        if a.startswith("--ignore=")
-    )
+    ignores = sorted(a.removeprefix("--ignore=") for a in instrumented_args() if a.startswith("--ignore="))
     if ignores != sorted(heavy_paths()):
         problems.append(f"--ignore 名单与 positional 名单不一致: {ignores} != {sorted(heavy_paths())}")
 
