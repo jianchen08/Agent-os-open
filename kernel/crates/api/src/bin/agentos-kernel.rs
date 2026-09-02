@@ -908,6 +908,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
     }
 
+    // 监控 M3 后半：进程态周期轮询（每 10s）——遍历活宿主（含 light 合宿组）按
+    // 成员插件写 process.alive/pid/memory_rss_bytes/uptime_seconds gauge；
+    // last_crash_ts 由上方崩溃回调单独写，轮询快照 None 不覆盖。
+    let _proc_state_poller = agentos_api::metrics::spawn_proc_state_poller(
+        Arc::clone(&invoker),
+        metrics_aggregator.clone(),
+        std::time::Duration::from_secs(10),
+    );
+
     info!(
         target: "agentos-kernel",
         "Pipeline engine initialized (in-memory SQLite, reverse capability channel + metrics aggregator enabled)"

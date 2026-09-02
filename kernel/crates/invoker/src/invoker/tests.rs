@@ -3007,3 +3007,80 @@ async fn test_explicit_unload_still_works_on_keep_warm_host() {
     );
     assert!(!live.read().await.is_alive().await);
 }
+
+// ── 监控 M3：宿主进程态快照（host_proc_snapshots） ─────────────────────────
+
+fn unconnected_stdio_client() -> SharedMcpClient {
+    // 未连接的 stdio client：无子进程 → pid=None、判死门控不触发
+    Arc::new(tokio::sync::RwLock::new(McpClient::new_stdio(
+        "python",
+        vec!["-c".to_string(), "pass".to_string()],
+    )))
+}
+
+#[tokio::test]
+async fn host_proc_snapshots_empty_invoker_is_empty() {
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    assert!(invoker.host_proc_snapshots().await.is_empty());
+}
+
+#[tokio::test]
+async fn host_proc_snapshots_reports_member_uptime_and_alive() {
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    invoker
+        .mcp_clients
+        .write()
+        .insert("plugin:demo".to_string(), unconnected_stdio_client());
+    invoker
+        .host_spawned_at
+        .write()
+        .insert("plugin:demo".to_string(), Instant::now());
+
+    let snaps = invoker.host_proc_snapshots().await;
+    assert_eq!(snaps.len(), 1);
+    let s = &snaps[0];
+    assert_eq!(s.host_key, "plugin:demo");
+    assert!(s.alive, "未连接 client 无子进程，不应判死");
+    assert_eq!(s.pid, None);
+    assert!(s.uptime_secs.is_some(), "有 spawn 记账应有 uptime");
+    // 独占宿主：成员 = 宿主键前缀解析
+    assert_eq!(s.plugin_ids, vec!["demo".to_string()]);
+}
+
+#[tokio::test]
+async fn host_proc_snapshots_light_group_lists_all_members() {
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    invoker
+        .mcp_clients
+        .write()
+        .insert("group:light:1".to_string(), unconnected_stdio_client());
+    // 轻量组成员 = packing 分配表（plugin_id → 宿主键）
+    invoker
+        .light_packing
+        .write()
+        .assignments
+        .insert("member_a".to_string(), "group:light:1".to_string());
+    invoker
+        .light_packing
+        .write()
+        .assignments
+        .insert("member_b".to_string(), "group:light:1".to_string());
+
+    let snaps = invoker.host_proc_snapshots().await;
+    assert_eq!(snaps.len(), 1);
+    let mut ids = snaps[0].plugin_ids.clone();
+    ids.sort();
+    assert_eq!(ids, vec!["member_a".to_string(), "member_b".to_string()]);
+}
+
+#[tokio::test]
+async fn host_proc_snapshots_without_spawn_record_omits_uptime() {
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    invoker
+        .mcp_clients
+        .write()
+        .insert("plugin:x".to_string(), unconnected_stdio_client());
+    let snaps = invoker.host_proc_snapshots().await;
+    assert_eq!(snaps.len(), 1);
+    assert_eq!(snaps[0].uptime_secs, None, "无 spawn 记账 uptime 应为 None");
+}

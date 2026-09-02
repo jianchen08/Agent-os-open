@@ -591,6 +591,10 @@ pub struct PluginInvokerImpl {
     /// 都空闲（即宿主键条目超时）。每次 get_or_create_mcp_client 命中/创建时
     /// 刷新；后台 GC 据此判定是否空闲超时。
     last_used: RwLock<HashMap<String, Instant>>,
+    /// 宿主进程 spawn 时刻（监控 M3 进程态轮询的 uptime 源；同宿主键 respawn 覆盖写，
+    /// 驱逐不清理——宿主键集合有界 `plugin:{id}`/`group:light:{n}`，快照按
+    /// mcp_clients 键取值，陈旧条目无副作用）。
+    host_spawned_at: RwLock<HashMap<String, Instant>>,
     /// light 组运行时装箱状态（分配表 + 槽位计数，见 [`LightPacking`]）。
     light_packing: RwLock<LightPacking>,
     /// light 宿主**实际 spawn 时**的成员集快照 {宿主键: 成员集}（惰性装箱漂移
@@ -625,6 +629,7 @@ impl PluginInvokerImpl {
             native_loader: None,
             fingerprints: RwLock::new(HashMap::new()),
             last_used: RwLock::new(HashMap::new()),
+            host_spawned_at: RwLock::new(HashMap::new()),
             light_packing: RwLock::new(LightPacking::default()),
             spawned_members: RwLock::new(HashMap::new()),
             keep_warm_plugins: RwLock::new(std::collections::HashSet::new()),
@@ -1799,6 +1804,11 @@ impl PluginInvokerImpl {
             let mut clients = self.mcp_clients.write();
             clients.insert(host_key.to_string(), Arc::clone(&client_arc));
         }
+        // 监控 M3：记录宿主 spawn 时刻（进程态轮询的 uptime 源；respawn 覆盖写）
+        {
+            let mut spawned = self.host_spawned_at.write();
+            spawned.insert(host_key.to_string(), Instant::now());
+        }
         // 新 spawn 即"活跃"，记录宿主最后调用时刻（空闲软卸载依据）
         self.touch_last_used(host_key);
 
@@ -2853,6 +2863,68 @@ impl PluginInvokerImpl {
                 }
             }
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 监控 M3：宿主进程态快照（api crate 进程态轮询任务的取数面）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 宿主进程态快照行（一次采集、一个宿主进程；合宿宿主的成员共享该进程）。
+#[derive(Debug, Clone)]
+pub struct HostProcSnapshot {
+    pub host_key: String,
+    /// stdio 宿主的 OS 进程号；HTTP transport / 未连接 = None
+    pub pid: Option<u32>,
+    /// 未判死即 true（判死门控同 is_dead_sidecar；HTTP transport 恒 true）
+    pub alive: bool,
+    /// 宿主进程运行秒数（spawn 时刻起算；无记账时 None）
+    pub uptime_secs: Option<u64>,
+    /// 本宿主承载的成员插件 id（合宿宿主 = 多个；轻量组按分配表，独占按宿主键前缀）
+    pub plugin_ids: Vec<String>,
+}
+
+impl PluginInvokerImpl {
+    /// 枚举全部在册宿主的进程态快照（只读：不判死驱逐、不 touch、不 spawn）。
+    ///
+    /// 锁序纪律：mcp_clients / host_spawned_at 是 parking_lot 锁，先克隆收窄
+    /// 立即放锁，再对每个 client 做 tokio 锁内的 async 判死/pid 读取——保证
+    /// 返回 future Send（调用方在 tokio::spawn 任务里 await）。
+    pub async fn host_proc_snapshots(&self) -> Vec<HostProcSnapshot> {
+        let pairs: Vec<(String, SharedMcpClient)> = {
+            let clients = self.mcp_clients.read();
+            clients
+                .iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect()
+        };
+        let uptimes: HashMap<String, Option<u64>> = {
+            let spawned = self.host_spawned_at.read();
+            spawned
+                .iter()
+                .map(|(k, t)| (k.clone(), Some(t.elapsed().as_secs())))
+                .collect()
+        };
+        let members: HashMap<String, Vec<String>> = pairs
+            .iter()
+            .map(|(k, _)| (k.clone(), self.host_members(k)))
+            .collect();
+
+        let mut out = Vec::with_capacity(pairs.len());
+        for (host_key, client) in pairs {
+            let guard = client.read().await;
+            let alive = !Self::is_dead_sidecar(&guard).await;
+            let pid = guard.pid().await;
+            drop(guard);
+            out.push(HostProcSnapshot {
+                uptime_secs: uptimes.get(&host_key).copied().flatten(),
+                plugin_ids: members.get(&host_key).cloned().unwrap_or_default(),
+                host_key,
+                pid,
+                alive,
+            });
+        }
+        out
     }
 }
 

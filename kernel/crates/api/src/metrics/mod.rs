@@ -34,4 +34,4 @@ pub use plugin_widget_broadcast::{
     collect_all_bindings, parse_plugin_bindings, remove_plugin_bindings, BindingScope,
     PluginWidgetBroadcaster, SharedBindings, WidgetBinding, WidgetEmitter,
 };
-pub use proc_state::{collect_proc_state, ProcStateSnapshot};
+pub use proc_state::{collect_proc_state, spawn_proc_state_poller, ProcStateSnapshot};
