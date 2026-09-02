@@ -99,7 +99,7 @@ jobs:
       # 归档 GitHub Release：tag 触发用 github.ref_name，
       # 手动触发用输入 tag（含 v 前缀校验）
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@a92927147a4f36aee0a282d6a84a9ba1ac51c76c # v2.2.2
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2（旧 pin a9292714 上游不可达被 GC，2026-09-02 公开仓 CI 首跑抓出）
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true

@@ -1174,7 +1174,10 @@ mod merge_recovered_scalars_tests {
         assert_eq!(initial["task.id"], "t1");
         assert_eq!(initial["workspace"], "/ws");
         // 本轮执行态不被上轮覆盖（新 run 从 llm_call 开始；空转根因回归断言）
-        assert!(initial.get("conversation_mode").is_none(), "对话等待态不得跨轮复活");
+        assert!(
+            initial.get("conversation_mode").is_none(),
+            "对话等待态不得跨轮复活"
+        );
         assert_eq!(initial["core_type"], "llm_call");
         assert_eq!(initial["core_plugin"], "pipeline_llm_core");
         // 终止标志与新 run_id 保持本轮初始值

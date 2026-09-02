@@ -556,18 +556,21 @@ class _FakeCapabilityHandle:
 
 
 def test_on_load_injects_kernel_reads_providers(server: Any, kr: Any) -> None:
-    """_on_load 经 get_capability 注入四个 provider（与 channel_api 同构）。"""
+    """_on_load 经 get_capability 注入六个 provider（与 channel_api 同构）。"""
     caps: dict[str, Any] = {
         "service-registry": _FakeCapabilityHandle(lambda m, p: []),
         "pipeline-state": _FakeCapabilityHandle([]),
         "db-admin": _FakeCapabilityHandle({"status": 200, "body": {"rows": [], "total": 0}}),
+        # metrics-admin 读面：监控页接通插件运行态后 _on_load 注入的两个 provider
+        "metrics-admin": _FakeCapabilityHandle([]),
     }
     server.plugin.get_capability = lambda name: caps[name]  # type: ignore[method-assign]
 
     _run(server._on_load({}))
 
     assert sorted(kr._PROVIDERS) == [
-        "db-admin-clear", "messages", "pipeline-runs", "pipeline-state",
+        "db-admin-clear", "messages", "metrics-admin-list", "metrics-admin-query",
+        "pipeline-runs", "pipeline-state",
     ]
     # 注入的 provider 可真实调用（service-registry 信封 → kernel_reads._rows 收敛）
     rows = _run(kr.list_pipeline_runs())

@@ -165,7 +165,7 @@
     'series': '/ext/metrics_admin/series',
   } as const
 
-  /** monitoring（Monitoring Service）：plugin.json 声明 23 端点 */
+  /** monitoring（Monitoring Service）：plugin.json 声明 24 端点 */
   export const MONITORING_ENDPOINTS = {
     'mon_agent_calls_list': '/ext/monitoring/agent-calls',
     'mon_agent_calls_statistics': '/ext/monitoring/agent-calls/statistics',
@@ -182,6 +182,7 @@
     'mon_tool_calls_page': '/ext/monitoring/page/tool-calls',
     'mon_payload_diag_list': '/ext/monitoring/payload-diag',
     'mon_payload_diag_get': '/ext/monitoring/payload-diag/file',
+    'mon_plugins_runtime': '/ext/monitoring/plugins',
     'mon_search_global': '/ext/monitoring/search',
     'mon_sessions_context_token_usage': '/ext/monitoring/sessions/{session_id}/context-token-usage',
     'mon_sessions_total_token_usage': '/ext/monitoring/sessions/{session_id}/total-token-usage',

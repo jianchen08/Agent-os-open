@@ -51,14 +51,13 @@ def test_drift_warns_on_missing_tool_ids(caplog):
         # 内核过滤结果缺 task_manage（被 G2 净化的同款场景）
         [_schema("file_read"), _schema("task_submit")]
     )
-    tool_schema_mod.set_capability_caller(caller)
-    state = {"tool_ids": ["file_read", "task_manage", "task_submit"]}
+    # caller 挂实例（2026-09-02 合宿撕裂修复后收敛自 server.py get_instance()，
+    # 模块级 set_capability_caller 已随旧实现退役）——实例本地注入即自洽。
     plugin = tool_schema_mod.ToolSchemaPlugin(config={})
-    try:
-        with caplog.at_level(logging.WARNING, logger=plugin.name):
-            updates = asyncio.run(plugin.execute(_ctx(state))).state_updates
-    finally:
-        tool_schema_mod.set_capability_caller(None)
+    plugin.set_capability_caller(caller)
+    state = {"tool_ids": ["file_read", "task_manage", "task_submit"]}
+    with caplog.at_level(logging.WARNING, logger=plugin.name):
+        updates = asyncio.run(plugin.execute(_ctx(state))).state_updates
 
     # 转发契约：短方法名 + state.tool_ids 原样透传内核
     assert caller.calls == [("schemas", {"tool_ids": ["file_read", "task_manage", "task_submit"]})]
@@ -73,14 +72,11 @@ def test_drift_warns_on_missing_tool_ids(caplog):
 def test_no_drift_no_warning(caplog):
     """tool_ids 全部在注册表 → 无漂移报警（防误报噪音）。"""
     caller = _caller_with([_schema("file_read"), _schema("task_submit")])
-    tool_schema_mod.set_capability_caller(caller)
-    state = {"tool_ids": ["file_read", "task_submit"]}
     plugin = tool_schema_mod.ToolSchemaPlugin(config={})
-    try:
-        with caplog.at_level(logging.WARNING, logger=plugin.name):
-            asyncio.run(plugin.execute(_ctx(state)))
-    finally:
-        tool_schema_mod.set_capability_caller(None)
+    plugin.set_capability_caller(caller)
+    state = {"tool_ids": ["file_read", "task_submit"]}
+    with caplog.at_level(logging.WARNING, logger=plugin.name):
+        asyncio.run(plugin.execute(_ctx(state)))
     assert not [r for r in caplog.records if "工具面漂移" in r.message]
 
 

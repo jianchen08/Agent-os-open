@@ -1491,7 +1491,10 @@ async fn test_traces_list_by_pipeline_bypasses_session_mapping() {
         Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let router =
         KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
-    store.create_run("run_tp_1", "hash", "default").await.unwrap();
+    store
+        .create_run("run_tp_1", "hash", "default")
+        .await
+        .unwrap();
     store.set_run_pipeline("run_tp_1", "task_tp").await.unwrap();
     let user_msg = json!({"role": "user", "content": "kickoff"});
     // 引擎真实链路 merge_and_project 给每个 op 注入 _run_id（write_slot_to_
@@ -1529,7 +1532,11 @@ async fn test_traces_list_by_pipeline_bypasses_session_mapping() {
     // 注意 pipeline_sessions 是 (task_tp → thread-xxx)，按 thread_id=task_tp
     // 查不到任何行——这正是绑真会话任务 recent_activities 恒空的历史根因。
     let via_thread = router
-        .handle("service-registry", "traces.list", json!({"thread_id": "task_tp"}))
+        .handle(
+            "service-registry",
+            "traces.list",
+            json!({"thread_id": "task_tp"}),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1547,7 +1554,9 @@ async fn test_traces_list_by_pipeline_bypasses_session_mapping() {
         )
         .await
         .unwrap();
-    let rows = via_pipeline.as_array().expect("traces list_by_pipeline rows");
+    let rows = via_pipeline
+        .as_array()
+        .expect("traces list_by_pipeline rows");
     assert_eq!(rows.len(), 2, "按管道直查命中全部 step 轨迹");
     let plugin_ids: Vec<&str> = rows
         .iter()
@@ -1563,7 +1572,11 @@ async fn test_traces_list_by_pipeline_bypasses_session_mapping() {
         )
         .await
         .unwrap();
-    assert_eq!(missing.as_array().map(Vec::len), Some(0), "无 run → 空列表非报错");
+    assert_eq!(
+        missing.as_array().map(Vec::len),
+        Some(0),
+        "无 run → 空列表非报错"
+    );
 }
 
 #[tokio::test]
@@ -1574,9 +1587,15 @@ async fn test_pipeline_runs_list_by_pipeline_returns_runs() {
         Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let router =
         KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
-    store.create_run("run_lp_1", "hash", "default").await.unwrap();
+    store
+        .create_run("run_lp_1", "hash", "default")
+        .await
+        .unwrap();
     store.set_run_pipeline("run_lp_1", "task_lp").await.unwrap();
-    store.create_run("run_lp_2", "hash", "default").await.unwrap();
+    store
+        .create_run("run_lp_2", "hash", "default")
+        .await
+        .unwrap();
     store.set_run_pipeline("run_lp_2", "task_lp").await.unwrap();
     store
         .update_run_status(
@@ -1599,7 +1618,8 @@ async fn test_pipeline_runs_list_by_pipeline_returns_runs() {
     let rows = res.as_array().expect("runs list_by_pipeline rows");
     assert_eq!(rows.len(), 2, "管道全部 run 记录");
     assert!(
-        rows.iter().all(|r| r.get("created_at").and_then(|v| v.as_str()).is_some()),
+        rows.iter()
+            .all(|r| r.get("created_at").and_then(|v| v.as_str()).is_some()),
         "每条 run 带 created_at（耗时起点数据源）"
     );
     let completed = rows
@@ -1620,7 +1640,11 @@ async fn test_pipeline_runs_list_by_pipeline_returns_runs() {
         )
         .await
         .unwrap();
-    assert_eq!(empty.as_array().map(Vec::len), Some(0), "无 run → 空列表非报错");
+    assert_eq!(
+        empty.as_array().map(Vec::len),
+        Some(0),
+        "无 run → 空列表非报错"
+    );
 }
 
 // ── F-REVIEW-2：pipeline-executor.get_run_status（复盘轮询真实完成）──
