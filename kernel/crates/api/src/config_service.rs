@@ -67,15 +67,23 @@ pub fn validate_config_path(
         });
     }
 
-    let config_root = project_root.join("config");
+    // 统一以 project_root 的 canonical 形态派生 config_root 与 target：
+    // 目标文件不存在时 target.canonicalize() 失败会回退原始路径，与单独
+    // canonicalize 的 config_root 在 Windows（canonicalize 返回 \\?\ 前缀）/
+    // junction 环境下组件前缀不同源，误判"路径越界"（manifest 内联默认
+    // 模式文件缺失是常态，ADR 2026-09-02-context-window-config-inline-manifest）。
+    let root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let config_root = root.join("config");
     let target = if normalized.starts_with("config/") || normalized.starts_with("config") {
-        project_root.join(&normalized)
+        root.join(&normalized)
     } else {
         config_root.join(&normalized)
     };
 
-    // 校验落在 config/ 子树内（用 components 比较，避免前缀字符串误判）
-    if !is_under_config(&target, &config_root) {
+    // 校验落在 config/ 子树内（同源派生，组件前缀必一致；../ 已在上面拒绝）
+    if !target.starts_with(&config_root) {
         return Err(ConfigError::PathOutsideConfigRoot {
             path: mapping_path.to_string(),
         });
@@ -97,18 +105,6 @@ pub fn validate_config_path(
     }
 
     Ok(target)
-}
-
-/// 判断 `target` 是否落在 `config_root` 子树内（components 逐段比较）。
-fn is_under_config(target: &Path, config_root: &Path) -> bool {
-    let cfg = match config_root.canonicalize() {
-        Ok(c) => c,
-        Err(_) => config_root.to_path_buf(),
-    };
-    let tgt = target
-        .canonicalize()
-        .unwrap_or_else(|_| target.to_path_buf());
-    tgt.starts_with(&cfg)
 }
 
 /// B2（GET 掩码）：递归掩码真实明文 secret 值，**保留 `${ENV_VAR}` 占位符**。
@@ -266,6 +262,33 @@ mod tests {
             err,
             ConfigError::PathOutsideConfigRoot {
                 path: "config/../etc/passwd".to_string()
+            }
+        );
+    }
+
+    /// manifest 内联默认（ADR 2026-09-02：值在 fields.default，磁盘文件缺失是
+    /// 常态）——目标文件不存在时不得误判越界（canonicalize 单边解析的坑）。
+    #[test]
+    fn test_validate_accepts_missing_file_in_config_subtree() {
+        let tmp = tempfile::tempdir().unwrap();
+        // config 根存在、目标文件不存在（config/system/ 目录也不存在）
+        let validated = validate_config_path(
+            tmp.path(),
+            "config/system/context_window_config.yaml",
+        )
+        .expect("文件缺失（manifest 内联默认）不得误判越界");
+        assert!(validated.ends_with("config/system/context_window_config.yaml"));
+    }
+
+    /// 越界仍拒绝：显式 ../ 与 config 根之外的绝对路径。
+    #[test]
+    fn test_validate_rejects_path_outside_config_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_config_path(tmp.path(), "../outside.yaml").unwrap_err();
+        assert_eq!(
+            err,
+            ConfigError::PathOutsideConfigRoot {
+                path: "../outside.yaml".to_string()
             }
         );
     }
