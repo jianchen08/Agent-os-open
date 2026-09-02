@@ -24,6 +24,14 @@ vi.mock('@/services/api/client', () => ({
 vi.mock('@/components/ui/sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }))
+// readbackUri 依赖 useActivePipelineId：固定一个已绑定管道标签的 tab
+vi.mock('@/stores/agentTabStore', () => ({
+  useAgentTabStore: (sel: (s: unknown) => unknown) =>
+    sel({ activeTabId: 'tab-1', tabs: [{ id: 'tab-1', pipelineRunId: 'p1' }] }),
+}))
+vi.mock('@/stores/pipelineMessageStore', () => ({
+  usePipelineMessageStore: (sel: (s: unknown) => unknown) => sel({ activePipelineId: 'p1' }),
+}))
 
 const submitForm = () => fireEvent.submit(document.querySelector('form')!)
 
@@ -110,6 +118,53 @@ describe('G1：反馈文案/成功动作声明化', () => {
     submitForm()
     await waitFor(() => expect(apiRequest).toHaveBeenCalled())
     await waitFor(() => expect(apiGet.mock.calls.length).toBeGreaterThan(getsBefore))
+  })
+})
+
+describe('G3：readbackUri 回读当前值（权限模式选择器）', () => {
+  it('挂载时 GET 回读并刷新选择器显示；提交成功后再次回读', async () => {
+    const fetchMock = vi.fn()
+    // 顺序：①挂载回读 → mode=bypass ②POST 提交成功 ③提交后回读 → mode=default
+    fetchMock
+      .mockResolvedValueOnce({ json: async () => ({ mode: 'bypass' }) })
+      .mockResolvedValueOnce({ json: async () => ({ switched: true, mode: 'bypass' }) })
+      .mockResolvedValueOnce({ json: async () => ({ mode: 'default' }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(
+      <FormWidget
+        fields={[
+          {
+            name: 'mode',
+            type: 'select' as const,
+            label: '权限模式',
+            options: [
+              { label: '默认（命中规则才确认）', value: 'default' },
+              { label: '旁路（跳过审批）', value: 'bypass' },
+            ],
+          },
+        ]}
+        endpoint="/ext/pipeline_security_check/permission_mode"
+        readbackUri="/ext/pipeline_security_check/permission_mode"
+      />,
+    )
+    // 挂载回读生效：按钮显示旁路档（而非默认占位）
+    await waitFor(() =>
+      expect(screen.getByTestId('compact-select-trigger').textContent).toContain('旁路'),
+    )
+    // 点开菜单选择默认档 → POST → 提交后回读 → 按钮回到默认
+    // Radix DropdownMenu 需要完整指针事件序列（pointerDown → pointerUp → click）
+    const trigger = screen.getByTestId('compact-select-trigger')
+    fireEvent.pointerDown(trigger)
+    fireEvent.pointerUp(trigger)
+    fireEvent.click(trigger)
+    fireEvent.click(await screen.findByText('默认（命中规则才确认）'))
+    await waitFor(() =>
+      expect(screen.getByTestId('compact-select-trigger').textContent).toContain(
+        '默认（命中规则才确认）',
+      ),
+    )
+    vi.unstubAllGlobals()
   })
 })
 

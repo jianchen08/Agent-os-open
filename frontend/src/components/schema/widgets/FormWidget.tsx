@@ -30,7 +30,7 @@
  * @module FormWidget
  */
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Check, ChevronDown } from '@/assets/icons'
 import {
   DropdownMenu,
@@ -113,6 +113,32 @@ export function FormWidget(props: Record<string, unknown>) {
   // endpoint 直连走裸 fetch（不走 apiClient 拦截链），auth:user 的 /ext 端点
   // 须自带 Bearer 凭据——缺头的请求会被内核 401 拒绝
   const token = useAuthStore((s) => s.token)
+  // 回读端点（可选）：挂载时 + 提交成功后 GET 查询当前值并刷新选择器显示。
+  // 用于"切换端点的当前值不在表单初值里"的声明式选择器（如权限模式——
+  // 值存后端 _PERMISSION_MODES 表，前端无初值来源，不回读则恒显示默认档）。
+  const readbackUri = props.readbackUri as string | undefined
+  const [backValue, setBackValue] = useState<string | undefined>(undefined)
+
+  const readBack = useCallback(async () => {
+    if (!readbackUri || !pipelineId) return
+    try {
+      const query = `?pipeline_id=${encodeURIComponent(pipelineId)}${
+        sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ''
+      }`
+      const resp = await fetch(`${readbackUri}${query}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      const data = (await resp.json()) as { mode?: string; error?: string }
+      if (data.error) throw new Error(data.error)
+      if (typeof data.mode === 'string' && data.mode !== '') {
+        setBackValue(data.mode)
+      }
+    } catch (err) {
+      // 回读失败保留占位显示（currentValue 缺省回退 field.default），不阻断交互
+      console.warn('[FormWidget] readback failed:', readbackUri, err instanceof Error ? err.message : err)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readbackUri])
 
   // ── datasource 模式（widget 化 T12）──
   const fieldsUri = props.fieldsUri as string | undefined
@@ -179,6 +205,11 @@ export function FormWidget(props: Record<string, unknown>) {
       cancelled = true
     }
   }, [fieldsUri, dataUri, dataFormat, reloadKey])
+
+  useEffect(() => {
+    // 挂载时回读一次当前值：保证选择器显示真实状态而非默认占位
+    void readBack()
+  }, [readBack])
 
   const fields = extractFields(dsFields ?? props.fields)
   const controlledValue = (props.value ?? props.initialValues) as
@@ -271,6 +302,7 @@ export function FormWidget(props: Record<string, unknown>) {
           onSaved?.()
           runSuccessAction(successAction)
           emitSuccess(values)
+          void readBack()
         }
       } catch {
         setStatus('error')
@@ -362,7 +394,10 @@ export function FormWidget(props: Record<string, unknown>) {
         onSelect={handleSubmit}
         onPick={onChange}
         currentValue={
-          effectiveInitial ? (effectiveInitial[compactField.name] as string | undefined) : undefined
+          backValue ??
+          (effectiveInitial
+            ? (effectiveInitial[compactField.name] as string | undefined)
+            : undefined)
         }
         disabled={props.disabled as boolean | undefined}
         status={status}

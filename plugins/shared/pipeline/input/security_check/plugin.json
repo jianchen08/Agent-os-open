@@ -98,6 +98,7 @@
             }
           ],
           "endpoint": "/ext/pipeline_security_check/permission_mode",
+          "readbackUri": "/ext/pipeline_security_check/permission_mode",
           "description": "切换当前管道标签的权限模式。模式只影响非隔离会话：隔离会话/任务的容器内操作从不弹审批；未命中安全规则的操作任何档位都直接执行。auto/bypass 属高风险档，切换需在审批窗二次确认"
         }
       }
