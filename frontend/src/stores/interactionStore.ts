@@ -83,6 +83,8 @@ interface InteractionState {
   getPendingForThread: (threadId: string) => PendingInteraction[]
   /** 按 pipelineId 获取已进入但未响应的交互 */
   getEnteredForPipeline: (pipelineId: string) => PendingInteraction | undefined
+  /** 按 pipelineId 获取未决 conversation 交互（用户发消息即解除，2026-09-02 裁定） */
+  getPendingConversationsForPipeline: (pipelineId: string) => PendingInteraction[]
   /** 打开全局交互浮层 */
   setGlobalOpenRequestId: (id: string | null) => void
   /** 切换最小化状态 */
@@ -203,6 +205,23 @@ export const useInteractionStore = create<InteractionState>()((set, get) => ({
       return undefined
     }
     return matches[0]
+  },
+
+  /** 按 pipelineId 获取未决 conversation 交互（用户发消息即解除）
+   *
+   * 2026-09-02 裁定：对交互工具，用户发送消息本身即一次响应——解除挂起、
+   * 工具返回空回复、消息继续推进。覆盖 pending（未点进入对话）与 entered
+   * 两态；choice 模式需用户显式选选项，不自动解除；notification 不阻塞。
+   * 归属规则同 getEnteredForPipeline（pipelineId 精确 / 缺失时 threadId 兼容）。
+   * 用户发消息 == 明确交互意图，同管道多条全部返回（逐一解除，不做歧义豁免）。
+   */
+  getPendingConversationsForPipeline: (pipelineId) => {
+    return get().pendingInteractions.filter(
+      (i) =>
+        (i.status === 'pending' || i.status === 'entered') &&
+        i.mode === 'conversation' &&
+        (i.pipelineId === pipelineId || (!i.pipelineId && i.threadId === pipelineId)),
+    )
   },
 
   setGlobalOpenRequestId: (id) => {

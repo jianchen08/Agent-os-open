@@ -360,16 +360,19 @@ function HomePage(): ReactNode {
       // 发送瞬间启动流式态（驱动"思考中"指示）；stream_start 到达时会以
       // 后端真实 message_id 重建流式态并建 assistant 占位气泡。
       pipelineStore.startStreaming(targetPipelineId, userMessageId)
-      // 只按主管道探测一次：sid 是会话坐标不是管道坐标，
-      // 二次探测会把"另一个会话的 entered 交互"自动批准掉；歧义由 store 层 fail-closed。
-      const enteredInteraction =
-        useInteractionStore.getState().getEnteredForPipeline(targetPipelineId)
-      if (enteredInteraction) {
-        globalWS.sendInteractionResponse(sid, enteredInteraction.requestId, {
+      // 用户发消息 = 对挂起中 conversation 交互的响应（2026-09-02 裁定）：
+      // 先解除挂起（提交空 approved，交互工具返回空回复），消息再推进下一步。
+      // 覆盖 pending（未点"进入对话"）与 entered 两态；choice 模式需显式
+      // 选选项不自动解除。只按目标管道探测一次：sid 是会话坐标不是管道坐标，
+      // 二次探测会把"另一个会话的交互"自动批准掉（store 层按管道精确归属）。
+      const pendingConversations =
+        useInteractionStore.getState().getPendingConversationsForPipeline(targetPipelineId)
+      for (const interaction of pendingConversations) {
+        globalWS.sendInteractionResponse(sid, interaction.requestId, {
           response_type: 'approved',
-          feedback: '用户已到达对话页面',
+          feedback: '',
         })
-        useInteractionStore.getState().markResponded(enteredInteraction.requestId)
+        useInteractionStore.getState().markResponded(interaction.requestId)
       }
 
       // globalWS.sendUserInput 是同步入队（_send 永不抛异常：已连接则 ws.send，
