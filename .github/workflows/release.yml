@@ -70,7 +70,7 @@ jobs:
         run: |
           uv sync --frozen --extra dev
           uv pip install build
-          python -m build --outdir dist
+          uv run python -m build --outdir dist
           ls -la dist/
 
       # Rust 内核：release 二进制（sccache 兜底，编译失败即红）
