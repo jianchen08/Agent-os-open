@@ -272,11 +272,9 @@ mod tests {
     fn test_validate_accepts_missing_file_in_config_subtree() {
         let tmp = tempfile::tempdir().unwrap();
         // config 根存在、目标文件不存在（config/system/ 目录也不存在）
-        let validated = validate_config_path(
-            tmp.path(),
-            "config/system/context_window_config.yaml",
-        )
-        .expect("文件缺失（manifest 内联默认）不得误判越界");
+        let validated =
+            validate_config_path(tmp.path(), "config/system/context_window_config.yaml")
+                .expect("文件缺失（manifest 内联默认）不得误判越界");
         assert!(validated.ends_with("config/system/context_window_config.yaml"));
     }
 

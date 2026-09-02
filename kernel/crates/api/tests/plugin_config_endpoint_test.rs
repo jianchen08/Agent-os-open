@@ -556,7 +556,12 @@ async fn test_get_missing_file_falls_back_to_field_defaults_and_put_creates_file
             field_type: "slider".to_string(),
             required: false,
             description: None,
-            extra: Some(json!({"default": 0.55, "min": 0, "max": 1}).as_object().unwrap().clone()),
+            extra: Some(
+                json!({"default": 0.55, "min": 0, "max": 1})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
         },
         EnvConfigField {
             name: "budgets.l1".to_string(),
@@ -621,8 +626,7 @@ async fn test_get_missing_file_falls_back_to_field_defaults_and_put_creates_file
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
-                    json!({"if_match": etag, "data": {"compress_trigger_ratio": 0.3}})
-                        .to_string(),
+                    json!({"if_match": etag, "data": {"compress_trigger_ratio": 0.3}}).to_string(),
                 ))
                 .unwrap(),
         )

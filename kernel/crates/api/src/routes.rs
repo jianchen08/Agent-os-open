@@ -1491,9 +1491,9 @@ pub async fn put_plugin_config_handler(
     // 回退同源，ETag 一致），保存即创建用户覆盖文件。
     let raw = match std::fs::read_to_string(&resolved) {
         Ok(raw) => raw,
-        Err(_) => serde_json::to_string(
-            &agentos_invoker::shared::config_defaults_from_fields(&mapping.fields),
-        )
+        Err(_) => serde_json::to_string(&agentos_invoker::shared::config_defaults_from_fields(
+            &mapping.fields,
+        ))
         .unwrap_or_default(),
     };
     let current_etag = compute_etag(raw.as_bytes());
