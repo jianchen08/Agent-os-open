@@ -283,15 +283,15 @@
         "x_execution_path": "isolation.level",
         "options": [
           {
-            "label": "非隔离",
-            "value": "non_isolated"
-          },
-          {
             "label": "隔离（容器）",
             "value": "isolated"
+          },
+          {
+            "label": "非隔离",
+            "value": "non_isolated"
           }
         ],
-        "description": "主会话执行环境隔离（容器/宿主），与工作空间拓扑解耦。不依赖工作空间填写——未填时按默认目录自动生成后同样生效，随线程创建写入 thread metadata → execution_context."
+        "description": "主会话执行环境隔离（容器/宿主），与工作空间拓扑解耦。默认隔离（容器内操作不弹审批）；显式选择非隔离后，权限模式与命中安全规则的审批才生效。不依赖工作空间填写——未填时按默认目录自动生成后同样生效，随线程创建写入 thread metadata → execution_context."
       }
     ],
     "pages": [
