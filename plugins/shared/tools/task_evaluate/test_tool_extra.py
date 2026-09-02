@@ -341,8 +341,8 @@ class TestMergeGateAndCompletionPaths:
         # 写面落了 failed 终态（职责边界：评估终态落 state）
         assert state_writer.await_count == 1
         assert state_writer.await_args.args[1]["task.status"] == "failed"
-        # 富通知字段随终态落 state（评估结论/失败原因）
-        assert "评估指标已通过，但完成前工作区门控失败" in state_writer.await_args.args[1]["task.eval_summary"]
+        # 富通知字段随终态落 state（富评估摘要/失败原因）
+        assert state_writer.await_args.args[1]["task.eval_summary"] == "评估结果: 1/1 指标通过\n  ✅ PASS m1"
         assert state_writer.await_args.args[1]["task.error"] == "worktree 合并失败: git merge conflict"
 
     @pytest.mark.asyncio
@@ -432,9 +432,9 @@ class TestMergeGateAndCompletionPaths:
         assert state_writer.await_count == 1
         fields = state_writer.await_args.args[1]
         assert fields["task.status"] == "failed"
-        # compute_overall 按指标实况生成 summary（0/1 项指标通过）
-        assert fields["task.eval_summary"] == "0/1 项指标通过"
-        assert fields["task.error"] == "评估未通过: 0/1 项指标通过"
+        # 富评估摘要（0.1 build_summary 同款：汇总 + 逐指标说明）
+        assert fields["task.eval_summary"] == "评估结果: 0/1 指标通过\n  ❌ FAIL m1"
+        assert fields["task.error"] == "评估未通过: 评估结果: 0/1 指标通过\n  ❌ FAIL m1"
 
 
 # ── 合并门控：ws_meta 数据源解析与分发（机制层替身/真实判定）──
@@ -726,6 +726,32 @@ class TestHelpers:
         assert bad_metric["failed_conditions"] == ["c1"]
         assert bad_metric["pipeline_run_id"] == "evalP"
         assert bad_metric["error"] == "expected"
+
+    def test_build_rich_summary_includes_agent_feedback(self, mod: Any) -> None:
+        """富评估摘要（0.1 build_summary 同款）：汇总 + 逐指标说明。
+
+        agent 型评估的 message = 评估 Agent 提交的 feedback 总结；脚本化评估
+        message = 检查结果说明。无 message 的指标只列状态。
+        """
+        result = _eval_result(
+            "t1",
+            [
+                _metric("ok_m", passed=True, message="功能实现完整，符合验收标准"),
+                _metric("bad_m", passed=False, message="边界条件未覆盖"),
+                _metric("no_msg", passed=True),
+            ],
+        )
+        summary = mod.TaskEvaluateTool._build_rich_summary(result)
+        assert summary == (
+            "评估结果: 2/3 指标通过\n"
+            "  ✅ PASS ok_m: 功能实现完整，符合验收标准\n"
+            "  ❌ FAIL bad_m: 边界条件未覆盖\n"
+            "  ✅ PASS no_msg"
+        )
+
+    def test_build_rich_summary_empty_metrics(self, mod: Any) -> None:
+        result = _eval_result("t1", [])
+        assert mod.TaskEvaluateTool._build_rich_summary(result) == "评估结果: 0/0 指标通过"
 
 
 # ── 输入参数组装（含模板替换） ───────────────────────────────

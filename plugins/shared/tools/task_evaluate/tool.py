@@ -842,7 +842,7 @@ class TaskEvaluateTool(BuiltinTool):
                     {
                         "task.status": "completed",
                         "task.ended_at": _now_iso(),
-                        "task.eval_summary": eval_data.get("summary", ""),
+                        "task.eval_summary": self._build_rich_summary(eval_result),
                     },
                 )
             except Exception as e:
@@ -905,7 +905,7 @@ class TaskEvaluateTool(BuiltinTool):
                         {
                             "task.status": "failed",
                             "task.ended_at": _now_iso(),
-                            "task.eval_summary": eval_data.get("summary", ""),
+                            "task.eval_summary": self._build_rich_summary(eval_result),
                             "task.error": merge_error,
                         },
                     )
@@ -923,7 +923,7 @@ class TaskEvaluateTool(BuiltinTool):
                     {
                         "task.status": "completed",
                         "task.ended_at": _now_iso(),
-                        "task.eval_summary": eval_data.get("summary", ""),
+                        "task.eval_summary": self._build_rich_summary(eval_result),
                     },
                 )
             except Exception as e:
@@ -1031,7 +1031,7 @@ class TaskEvaluateTool(BuiltinTool):
                 await task_service.complete_evaluation(task.id, passed=False, result=eval_data)
                 # 与 complete_evaluation 内部 fail_task 的 reason 同格式（YAML 镜像
                 # 与 state 单一真值一致），供终态通知带出失败原因
-                _summary = eval_data.get("summary", "")
+                _summary = self._build_rich_summary(eval_result)
                 _reason = f"评估未通过: {_summary}" if _summary else "评估未通过"
                 await _write_task_state(
                     task.id,
@@ -1630,3 +1630,25 @@ class TaskEvaluateTool(BuiltinTool):
             "summary": result.summary,
             "metrics": metrics,
         }
+
+    @staticmethod
+    def _build_rich_summary(result: Any) -> str:
+        """构建富评估摘要（0.1 evaluation.mapper.build_summary 同款）。
+
+        首行汇总 + 逐指标说明（agent 型评估 = 评估 Agent 提交的 feedback
+        总结，脚本化评估 = 检查结果 message），供终态通知带出评估结论。
+        """
+        lines: list[str] = []
+        total = len(result.results)
+        passed = sum(1 for r in result.results if r.passed)
+        lines.append(f"评估结果: {passed}/{total} 指标通过")
+
+        for r in result.results:
+            status = "✅ PASS" if r.passed else "❌ FAIL"
+            msg = (r.message or "").strip()
+            if msg:
+                lines.append(f"  {status} {r.metric_id}: {msg}")
+            else:
+                lines.append(f"  {status} {r.metric_id}")
+
+        return "\n".join(lines)
