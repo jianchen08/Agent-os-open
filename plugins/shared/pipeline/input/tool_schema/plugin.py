@@ -23,24 +23,6 @@ from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)
 
-# tool-surface capability 调用通道（server.py on_load 注入，与 llm_core 的
-# llm 调用通道同构）。签名：(method, params, timeout=None) → result dict。
-_capability_caller: Callable[..., Awaitable[dict[str, Any]]] | None = None
-
-
-def set_capability_caller(
-    caller: Callable[..., Awaitable[dict[str, Any]]] | None,
-) -> None:
-    """注入/清除 tool-surface capability 调用通道。
-
-    server.py on_load 注入（``plugin.get_capability("tool-surface").call``
-    组装 ``<capability>.<method>`` 全名，method 传短名）；on_unload 清除。
-    未注入时工具面置空（fail-closed，不阻断管道）。
-    """
-    global _capability_caller
-    _capability_caller = caller
-
-
 class ToolSchemaPlugin(IInputPlugin):
     """工具 Schema 注入 Input 插件。
 
@@ -60,6 +42,17 @@ class ToolSchemaPlugin(IInputPlugin):
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
+        # capability 调用通道挂在**单例实例**上：合宿下同进程多个 pipeline 插件
+        # 共享裸名 `plugin` 模块（先加载者占住 sys.modules），模块级全局会被
+        # 别家插件的注入写走（llm_core 也叫 plugin.py 且有同名 setter）——
+        # server.py 经自己的 get_instance() 缓存注入/读取，实例身份唯一。
+        self._capability_caller: Callable[..., Awaitable[dict[str, Any]]] | None = None
+
+    def set_capability_caller(
+        self, caller: Callable[..., Awaitable[dict[str, Any]]] | None
+    ) -> None:
+        """注入/清除 tool-surface capability 调用通道（server.py on_load 调用）。"""
+        self._capability_caller = caller
 
     @property
     def name(self) -> str:
@@ -98,7 +91,7 @@ class ToolSchemaPlugin(IInputPlugin):
             )
             return {"tool_schemas": [], "tool_output_contracts": {}}
 
-        caller = _capability_caller
+        caller = self._capability_caller
         if caller is None:
             logger.error(
                 "[%s] capability caller 未注入：tool-surface 调用通道未接线"

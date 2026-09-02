@@ -89,10 +89,11 @@ class _FakeCaller:
 
 @pytest.fixture(autouse=True)
 def _reset_capability_caller() -> Any:
-    """每个用例前后清 caller，防模块级状态跨用例污染。"""
-    _PLUGIN_MOD.set_capability_caller(None)
+    """每个用例前后清 caller，防单例状态跨用例污染（caller 现挂单例实例）。"""
+    inst = ToolSchemaPlugin(config={})
+    inst.set_capability_caller(None)
     yield
-    _PLUGIN_MOD.set_capability_caller(None)
+    inst.set_capability_caller(None)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -114,8 +115,8 @@ class TestConfigInterface:
     def test_execute_disabled_returns_empty_without_call(self) -> None:
         """禁用时返回空工具面，不发起 capability 调用。"""
         caller = _FakeCaller()
-        _PLUGIN_MOD.set_capability_caller(caller)
         p = ToolSchemaPlugin(config={"enabled": False})
+        p.set_capability_caller(caller)
         result = _run(p.execute(_make_ctx(state={"tool_ids": ["x"]})))
         assert result.state_updates == {"tool_schemas": [], "tool_output_contracts": {}}
         assert caller.calls == []
@@ -137,8 +138,8 @@ class TestWantedResolution:
     def test_missing_tool_ids_yields_empty_surface(self, caplog: Any) -> None:
         """state 无 tool_ids = 配置断链 → 空工具面 + warning，不发起调用（K10 不兜底全量）。"""
         caller = _FakeCaller()
-        _PLUGIN_MOD.set_capability_caller(caller)
         p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
         with caplog.at_level(logging.WARNING):
             result = _run(p.execute(_make_ctx(state={})))
         assert result.state_updates == {"tool_schemas": [], "tool_output_contracts": {}}
@@ -147,8 +148,8 @@ class TestWantedResolution:
 
     def test_non_list_tool_ids_yields_empty_surface(self, caplog: Any) -> None:
         """tool_ids 非列表（脏数据）→ 同断链处理：空面 + warning。"""
-        _PLUGIN_MOD.set_capability_caller(_FakeCaller())
         p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(_FakeCaller())
         with caplog.at_level(logging.WARNING):
             result = _run(p.execute(_make_ctx(state={"tool_ids": "alpha"})))
         assert result.state_updates["tool_schemas"] == []
@@ -158,8 +159,8 @@ class TestWantedResolution:
         """显式空表 = agent 声明零工具：照常转发空白名单（与断链区分），无告警。"""
         caller = _FakeCaller(result={"schemas": [{"function": {"name": "spill_retrieve"}}],
                                      "contracts": {}})
-        _PLUGIN_MOD.set_capability_caller(caller)
         p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
         result = _run(p.execute(_make_ctx(state={"tool_ids": []})))
         assert caller.calls == [("schemas", {"tool_ids": []})]
         names = [s["function"]["name"] for s in result.state_updates["tool_schemas"]]
@@ -190,8 +191,8 @@ class TestCapabilityFetch:
         ]
         contracts = {"alpha": {"schema": {"type": "object"}, "render": None}}
         caller = _FakeCaller(result={"schemas": schemas, "contracts": contracts})
-        _PLUGIN_MOD.set_capability_caller(caller)
         p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
         result = _run(p.execute(_make_ctx(state={"tool_ids": ["alpha", "spill_retrieve"]}))
                       )
         assert result.state_updates["tool_schemas"] == schemas
@@ -200,15 +201,15 @@ class TestCapabilityFetch:
     def test_caller_receives_short_method_and_tool_ids(self) -> None:
         """转发契约：短方法名 "schemas" + {"tool_ids": [...]} 参数包。"""
         caller = _FakeCaller()
-        _PLUGIN_MOD.set_capability_caller(caller)
         p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
         _run(p.execute(_make_ctx(state={"tool_ids": ["alpha", "beta"]})))
         assert caller.calls == [("schemas", {"tool_ids": ["alpha", "beta"]})]
 
     def test_capability_failure_yields_empty_surface(self, caplog: Any) -> None:
         """capability 调用异常（内核未注入 registry 等）→ 空工具面 + error 留痕。"""
-        _PLUGIN_MOD.set_capability_caller(_FakeCaller(result=RuntimeError("boom")))
         p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(_FakeCaller(result=RuntimeError("boom")))
         with caplog.at_level(logging.ERROR):
             result = _run(p.execute(_make_ctx(state={"tool_ids": ["alpha"]})))
         assert result.state_updates == {"tool_schemas": [], "tool_output_contracts": {}}
@@ -220,8 +221,8 @@ class TestCapabilityFetch:
             "schemas": [{"function": {"name": "alpha"}}],
             "contracts": {},
         })
-        _PLUGIN_MOD.set_capability_caller(caller)
         p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
         with caplog.at_level(logging.WARNING):
             result = _run(p.execute(_make_ctx(state={"tool_ids": ["alpha", "ghost"]})))
         assert result.state_updates["tool_schemas"] == [{"function": {"name": "alpha"}}]
@@ -234,8 +235,8 @@ class TestCapabilityFetch:
             "schemas": [{"function": {"name": "alpha"}}, {"function": {"name": "beta"}}],
             "contracts": {},
         })
-        _PLUGIN_MOD.set_capability_caller(caller)
         p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
         with caplog.at_level(logging.WARNING):
             _run(p.execute(_make_ctx(state={"tool_ids": ["alpha", "beta"]})))
         assert not any("工具面漂移" in r.getMessage() for r in caplog.records)
@@ -273,12 +274,12 @@ class TestServerAdapter:
         """on_load 注入 tool-surface caller + 预热单例；on_unload 清 caller 与缓存。"""
         server = _load_server()
         plugin_mod = sys.modules["plugin"]
-        assert plugin_mod._capability_caller is None
+        assert server.get_instance()._capability_caller is None
         _run(server._on_load({}))
-        assert plugin_mod._capability_caller is not None
+        assert server.get_instance()._capability_caller is not None
         assert isinstance(server.get_instance(), server.ToolSchemaPlugin)
         _run(server._on_unload({}))
-        assert plugin_mod._capability_caller is None
+        assert server.get_instance()._capability_caller is None
         rebuilt = server.get_instance()
         assert isinstance(rebuilt, server.ToolSchemaPlugin)
 

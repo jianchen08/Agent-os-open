@@ -40,9 +40,11 @@ async def _on_load(params: dict) -> None:
     跨进程调用（ToolRegistry 在内核，sidecar 拿不到注册表服务）。随后预热
     构建插件单例。
     """
-    from plugin import set_capability_caller  # noqa: PLC0415
-
-    set_capability_caller(
+    # caller 挂在本文件 get_instance() 缓存的单例上：合宿下同进程多个
+    # pipeline 插件共享裸名 `plugin` 模块（先加载者占住 sys.modules），
+    # `from plugin import set_capability_caller` 会把注入写进别家插件的同名
+    # 全局（llm_core 亦有同名 setter）——实例属性身份唯一，不随合宿撕裂。
+    get_instance().set_capability_caller(
         lambda method, params_, timeout=None: plugin.get_capability(
             "tool-surface"
         ).call(method, params_, timeout)
@@ -53,9 +55,7 @@ async def _on_load(params: dict) -> None:
 @plugin.on_unload
 async def _on_unload(params: dict) -> None:
     """Cleanup tool_schema plugin."""
-    from plugin import set_capability_caller  # noqa: PLC0415
-
-    set_capability_caller(None)
+    get_instance().set_capability_caller(None)
     get_instance.cache_clear()
 
 
