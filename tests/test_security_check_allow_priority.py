@@ -45,19 +45,41 @@ def _make_plugin() -> SecurityCheckPlugin:
 class TestMatchRulesAllowPriority:
     """_match_rules 应让 action=allow 优先于 block/needs_approval。"""
 
-    def test_safe_command_with_danger_keyword_allowed(self) -> None:
-        """allow 规则命中时优先于 needs_approval，即使命令含危险关键词。
+    def test_compound_danger_not_masked_by_allow_prefix(self) -> None:
+        """组合命令（安全命令开头 + && 接危险命令）不享受 allow——否则 echo && curl 绕过审批。
 
-        验证 allow 优先逻辑本身：构造 wc 开头命令（命中 safe_commands allow），
-        同时命令含 curl（命中 dangerous_commands needs_approval）。
-        allow 必须赢——这就是 _match_rules 修复的核心契约。
+        safe_commands 白名单整条锚定 + 禁连接符（&&/;/|）：echo 开头不会再
+        掩蔽后接的 curl / pip install / rm -rf 等危险关键词，它们照常命中
+        needs_approval。
         """
         plugin = _make_plugin()
         action, rule = plugin._match_rules(
             "bash_execute",
+            {"command": "echo \"=== 1. curl 版本 ===\" && curl --version"},
+        )
+        assert action == "needs_approval", (
+            f"echo && curl 应命中 curl 审批规则，实际 action={action} rule={rule}"
+        )
+
+    def test_compound_install_not_masked_by_allow_prefix(self) -> None:
+        """echo 开头 + && pip install 同样不享受 allow（与 curl 同路径）。"""
+        plugin = _make_plugin()
+        action, rule = plugin._match_rules(
+            "bash_execute",
+            {"command": "echo start && pip install requests"},
+        )
+        assert action == "needs_approval", (
+            f"echo && pip install 应命中审批规则，实际 action={action} rule={rule}"
+        )
+
+    def test_compound_safe_command_falls_to_default(self) -> None:
+        """纯安全组合（wc && echo，无危险关键词）→ action 空（默认档放行，与 allow 行为等价）。"""
+        plugin = _make_plugin()
+        action, _ = plugin._match_rules(
+            "bash_execute",
             {"command": "wc -l file.txt && echo done"},
         )
-        assert action == "allow", f"安全命令应被 allow 放行，实际 action={action} rule={rule}"
+        assert action == ""
 
     def test_compound_command_no_longer_matches_removed_keyword(self) -> None:
         """复合命令 cd /workspace && wc ... 不再被 2>/dev/null 误伤。
