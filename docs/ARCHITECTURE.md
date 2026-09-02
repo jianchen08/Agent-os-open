@@ -97,7 +97,7 @@ Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自
                              │ MCP over stdio（sidecar）/ C-ABI（原生）
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                          插件（97 个 manifest）                    │
+│                          插件（在用 81 个 manifest）                 │
 │  pipeline/{input,core,output}  管道步骤（Python 边车 + Rust cdylib）│
 │  tools/                        LLM 工具（18 自研 + 8 预置 MCP 接入）│
 │  system/                       系统服务（LLM/记忆/审批/评估/通道…）  │
