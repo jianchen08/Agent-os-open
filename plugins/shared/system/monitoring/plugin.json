@@ -118,7 +118,8 @@
     "pipeline-state",
     "service-registry",
     "db-admin",
-    "metrics"
+    "metrics",
+    "metrics-admin"
   ],
   "http_endpoints": [
     {
@@ -350,6 +351,16 @@
       "timeout_ms": 5000,
       "max_concurrency": 8,
       "description": "search 域（批次3 接真）：统一搜索会话与消息（query: q/type/limit，响应形态对齐前端 search.ts）"
+    },
+    {
+      "route_id": "mon_plugins_runtime",
+      "method": "GET",
+      "path": "/ext/monitoring/plugins",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "插件运行态（metrics-admin 读面桥）：每插件进程 gauge（alive/pid/RSS/uptime/上次崩溃）+ lifecycle 加载/报错计数（留存窗口累计）"
     }
   ],
   "ui_schema": {
@@ -429,6 +440,25 @@
         }
       },
       {
+        "id": "plugin_error_card",
+        "type": "status_card",
+        "space": "monitoring",
+        "order": 45,
+        "props": {
+          "title": "插件报错",
+          "label": "插件报错次数",
+          "datasourceUri": "/ext/monitoring/plugins",
+          "valueKey": "lifecycle.plugin_error_total",
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 30
+          },
+          "variant": "metric",
+          "icon": "⚠️",
+          "description": "插件 OnError 事件累计（内核聚合器留存窗口，滚动约2小时）"
+        }
+      },
+      {
         "id": "tasks_table",
         "type": "table",
         "space": "monitoring",
@@ -441,6 +471,22 @@
             "type": "poll",
             "intervalSeconds": 30
           }
+        }
+      },
+      {
+        "id": "plugins_runtime_table",
+        "type": "table",
+        "space": "monitoring",
+        "order": 60,
+        "props": {
+          "title": "插件运行",
+          "datasourceUri": "/ext/monitoring/plugins",
+          "pageSize": 10,
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 30
+          },
+          "description": "每插件进程态（内核 10s 轮询代采）：状态/PID/内存/运行时长/上次崩溃；lazy 未 spawn 的插件不占行"
         }
       }
     ]

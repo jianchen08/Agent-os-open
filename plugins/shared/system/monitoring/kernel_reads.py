@@ -152,3 +152,91 @@ async def clear_execution_data(authorization: str = "") -> dict[str, Any]:
             status = 500
         raise ClearExecutionDataError(status, str(message or "清理失败"))
     raise ClearExecutionDataError(502, f"清理能力返回异常信封: {envelope!r}")
+
+
+# process.* gauge → 行字段（metrics-admin.list 读面过滤集；监控设计 §三 通道3 C 类）
+_PROCESS_FIELDS: dict[str, str] = {
+    "process.alive": "alive",
+    "process.pid": "pid",
+    "process.memory_rss_bytes": "memory_rss_bytes",
+    "process.uptime_seconds": "uptime_seconds",
+    "process.last_crash_ts": "last_crash_ts",
+}
+
+
+async def plugin_runtime(authorization: str = "") -> dict[str, Any]:
+    """插件运行态表 + lifecycle 计数（metrics-admin list/query 只读桥）。
+
+    - rows：list 的 process.* gauge 按 plugin_id 组行（alive/pid/memory_rss_bytes/
+      uptime_seconds/last_crash_ts + 派生 status/memory_rss_mb）。仅被内核周期轮询
+      采到进程态的插件会出现（lazy 未 spawn 的插件无 series，不占行）。
+    - lifecycle：query(plugin=kernel) 的 lifecycle.plugin_load_total /
+      plugin_error_total 计数器样本求和——聚合器留存窗口内的累计（滚动约 2 小时，
+      非进程全生命周期总量，Prometheus counter 模型的诚实口径）。
+
+    Returns:
+        {columns, rows, total, lifecycle}（columns 声明中文表头，前端表格零改动渲染）。
+
+    能力未注入/调用失败降级空结构（读面契约同 list_pipeline_runs 等）。
+    """
+    rows_map: dict[str, dict[str, Any]] = {}
+    list_body = _unwrap(await _call("metrics-admin-list", authorization=authorization))
+    series = list_body.get("series") if isinstance(list_body, dict) else list_body
+    for s in _rows(series):
+        field = _PROCESS_FIELDS.get(str(s.get("name", "")))
+        plugin_id = s.get("plugin_id")
+        if field is None or not isinstance(plugin_id, str):
+            continue
+        row = rows_map.setdefault(plugin_id, {"plugin_id": plugin_id})
+        row[field] = s.get("latest")
+
+    rows: list[dict[str, Any]] = []
+    for plugin_id in sorted(rows_map):
+        row = rows_map[plugin_id]
+        alive = row.get("alive")
+        row["alive"] = int(alive) if isinstance(alive, (int, float)) else 0
+        row["status"] = "running" if row["alive"] == 1 else "dead"
+        rss = row.get("memory_rss_bytes")
+        row["memory_rss_mb"] = (
+            round(float(rss) / (1024 * 1024), 1) if isinstance(rss, (int, float)) else None
+        )
+        # gauge series 缺失（未崩过或留存窗外）按 0 = 未知/未崩
+        row["last_crash_ts"] = row.get("last_crash_ts") or 0
+        rows.append(row)
+
+    load_total = 0.0
+    error_total = 0.0
+    query_body = _unwrap(
+        await _call("metrics-admin-query", authorization=authorization, plugin="kernel")
+    )
+    metrics = query_body.get("metrics") if isinstance(query_body, dict) else query_body
+    for s in _rows(metrics):
+        name = str(s.get("name", ""))
+        if name not in ("lifecycle.plugin_load_total", "lifecycle.plugin_error_total"):
+            continue
+        total = sum(
+            float(sample.get("value") or 0)
+            for sample in (s.get("samples") or [])
+            if isinstance(sample, dict)
+        )
+        if name == "lifecycle.plugin_load_total":
+            load_total += total
+        else:
+            error_total += total
+
+    return {
+        "columns": [
+            {"key": "plugin_id", "label": "插件"},
+            {"key": "status", "label": "状态"},
+            {"key": "pid", "label": "PID"},
+            {"key": "memory_rss_mb", "label": "内存 (MB)"},
+            {"key": "uptime_seconds", "label": "运行时长 (秒)"},
+            {"key": "last_crash_ts", "label": "上次崩溃时间戳"},
+        ],
+        "rows": rows,
+        "total": len(rows),
+        "lifecycle": {
+            "plugin_load_total": int(load_total),
+            "plugin_error_total": int(error_total),
+        },
+    }

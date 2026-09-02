@@ -34,6 +34,8 @@ import psutil
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+import kernel_reads  # 平铺同目录模块（上方 sys.path 已插插件目录）
+
 from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)
@@ -90,10 +92,32 @@ async def _on_load(params: dict[str, Any]) -> None:
             handle = plugin.get_capability("db-admin")
             return await handle.call("clear_execution_data", params)
 
+        # metrics-admin 读面（插件运行态：process.* gauge + lifecycle 计数）；
+        # 鉴权凭证原样透传，内核 handler 侧 resolve_request_user 校验 admin/viewer。
+        async def _kr_metrics_admin_list(authorization: str = ""):
+            params: dict[str, Any] = {}
+            if authorization:
+                params["_authorization"] = authorization
+            handle = plugin.get_capability("metrics-admin")
+            return await handle.call("list", params)
+
+        async def _kr_metrics_admin_query(
+            authorization: str = "", plugin: str = "", window: str = "24h"
+        ):
+            params: dict[str, Any] = {"window": window}
+            if authorization:
+                params["_authorization"] = authorization
+            if plugin:
+                params["plugin"] = plugin
+            handle = plugin.get_capability("metrics-admin")
+            return await handle.call("query", params)
+
         kernel_reads.set_provider("pipeline-runs", _kr_list_pipeline_runs)
         kernel_reads.set_provider("messages", _kr_list_messages)
         kernel_reads.set_provider("pipeline-state", _kr_list_state_rows)
         kernel_reads.set_provider("db-admin-clear", _kr_clear_execution_data)
+        kernel_reads.set_provider("metrics-admin-list", _kr_metrics_admin_list)
+        kernel_reads.set_provider("metrics-admin-query", _kr_metrics_admin_query)
     except Exception as exc:  # noqa: BLE001 — 注入失败降级（handler 返回空结构）
         logger.warning("[monitoring] kernel_reads provider 注入失败: %s", exc)
 
@@ -575,6 +599,10 @@ async def http_handle(
         if path == "/ext/monitoring/tool-calls" and method == "GET":
             q = query or {}
             return _ok(_json_response(_query_tool_calls(q)))
+
+        # ── 插件运行态：metrics-admin 读面桥（kernel_reads.plugin_runtime）──
+        if path == "/ext/monitoring/plugins" and method == "GET":
+            return _ok(_json_response(await kernel_reads.plugin_runtime(authorization=_authorization(headers))))
 
         # ── T4/T5 webview 页面 HTML ──
         if path == "/ext/monitoring/page/payload-diag" and method == "GET":

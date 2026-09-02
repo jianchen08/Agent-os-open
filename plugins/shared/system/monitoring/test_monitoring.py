@@ -485,3 +485,150 @@ class TestToolCalls:
         resp = _run(mod.http_handle(path="/ext/monitoring/tool-calls", method="GET"))
         payload = _decode_body(resp)
         assert payload["total"] == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 插件运行态端点（/ext/monitoring/plugins——metrics-admin 读面桥）
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _async_provider(payload: Any, seen: dict[str, Any] | None = None):
+    """伪内核 provider：捕获 kwargs（_authorization 透传契约）恒返回 payload。"""
+
+    async def _p(**kwargs: Any) -> Any:
+        if seen is not None:
+            seen.update(kwargs)
+        return payload
+
+    return _p
+
+
+class TestPluginRuntimeRoute:
+    """kernel_reads.plugin_runtime（metrics-admin list/query 组装）+ 路由降级。"""
+
+    def setup_method(self) -> None:
+        import kernel_reads
+
+        self.kernel_reads = kernel_reads
+        self.mod, _ = _make_module_with_monitor()
+
+    def teardown_method(self) -> None:
+        self.kernel_reads.reset_providers()
+
+    def test_assembles_rows_columns_and_lifecycle_totals(self) -> None:
+        seen_list: dict[str, Any] = {}
+        seen_query: dict[str, Any] = {}
+        self.kernel_reads.set_provider(
+            "metrics-admin-list",
+            _async_provider(
+                {
+                    "status": 200,
+                    "body": {
+                        "series": [
+                            {"plugin_id": "llm", "name": "process.alive", "latest": 1},
+                            {"plugin_id": "llm", "name": "process.pid", "latest": 123},
+                            {
+                                "plugin_id": "llm",
+                                "name": "process.memory_rss_bytes",
+                                "latest": 52_428_800,
+                            },
+                            {
+                                "plugin_id": "llm",
+                                "name": "process.uptime_seconds",
+                                "latest": 3600,
+                            },
+                            {
+                                "plugin_id": "llm",
+                                "name": "process.last_crash_ts",
+                                "latest": 0,
+                            },
+                            {"plugin_id": "dead", "name": "process.alive", "latest": 0},
+                            # 非进程态 series（业务计数）不入运行态行
+                            {"plugin_id": "llm", "name": "tokens_used", "latest": 9},
+                        ],
+                        "total": 7,
+                    },
+                },
+                seen_list,
+            ),
+        )
+        self.kernel_reads.set_provider(
+            "metrics-admin-query",
+            _async_provider(
+                {
+                    "status": 200,
+                    "body": {
+                        "metrics": [
+                            {
+                                "plugin_id": "kernel",
+                                "name": "lifecycle.plugin_load_total",
+                                "samples": [
+                                    {"ts": 1, "value": 3.0},
+                                    {"ts": 2, "value": 2.0},
+                                ],
+                            },
+                            {
+                                "plugin_id": "kernel",
+                                "name": "lifecycle.plugin_error_total",
+                                "samples": [{"ts": 1, "value": 1.0}],
+                            },
+                            # 非目标名（其余内核计数）不计入 lifecycle
+                            {
+                                "plugin_id": "kernel",
+                                "name": "kernel.api.dispatcher_errors",
+                                "samples": [{"ts": 1, "value": 9.0}],
+                            },
+                        ]
+                    },
+                },
+                seen_query,
+            ),
+        )
+        resp = _run(
+            self.mod.http_handle(
+                path="/ext/monitoring/plugins",
+                method="GET",
+                headers={"authorization": "Bearer tok"},
+            )
+        )
+        assert resp["success"] is True
+        body = _decode_body(resp)
+        assert body["total"] == 2
+        rows = {r["plugin_id"]: r for r in body["rows"]}
+        assert rows["llm"]["status"] == "running"
+        assert rows["llm"]["pid"] == 123
+        assert rows["llm"]["memory_rss_mb"] == 50.0
+        assert rows["llm"]["uptime_seconds"] == 3600
+        assert rows["dead"]["status"] == "dead"
+        assert rows["dead"]["last_crash_ts"] == 0
+        # lifecycle 计数 = 目标两名计数器样本求和
+        assert body["lifecycle"] == {"plugin_load_total": 5, "plugin_error_total": 1}
+        # 凭证透传契约（内核 handler 侧做 admin/viewer 角色校验）
+        assert seen_list == {"authorization": "Bearer tok"}
+        assert seen_query == {"authorization": "Bearer tok", "plugin": "kernel"}
+        # 中文表头列声明（前端表格零改动渲染）
+        assert [c["key"] for c in body["columns"]][:2] == ["plugin_id", "status"]
+
+    def test_capability_unavailable_degrades_to_empty(self) -> None:
+        # provider 未注入（内核能力不可用）→ HTTP 200 空结构（读面降级契约）
+        resp = _run(
+            self.mod.http_handle(path="/ext/monitoring/plugins", method="GET", headers={})
+        )
+        assert resp["success"] is True
+        body = _decode_body(resp)
+        assert body["rows"] == []
+        assert body["total"] == 0
+        assert body["lifecycle"] == {"plugin_load_total": 0, "plugin_error_total": 0}
+
+    def test_kernel_error_envelope_degrades_to_empty(self) -> None:
+        # 内核信封非 200（如非 admin 角色 403）→ 空结构不崩 handler
+        err = {"status": 403, "error": {"code": "403", "message": "需要 admin 或 viewer 角色"}}
+        self.kernel_reads.set_provider("metrics-admin-list", _async_provider(err))
+        self.kernel_reads.set_provider("metrics-admin-query", _async_provider(err))
+        resp = _run(
+            self.mod.http_handle(path="/ext/monitoring/plugins", method="GET", headers={})
+        )
+        assert resp["success"] is True
+        body = _decode_body(resp)
+        assert body["rows"] == []
+        assert body["lifecycle"] == {"plugin_load_total": 0, "plugin_error_total": 0}
