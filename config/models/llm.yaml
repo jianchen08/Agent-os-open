@@ -3,7 +3,7 @@ concurrency:
   max_concurrent_pipelines: 5
 defaults:
   call_timeout: 600
-  chat: minimax-m3
+  chat: glm-5.2
   compression: minimax-m3
   embedding: embedding-3
   first_token_timeout: 120
