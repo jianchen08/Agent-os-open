@@ -33,11 +33,11 @@ class DockerProvider(IsolationProvider):
     # 加新语言:在下面列表追加一行 (volume名, 容器内路径) 即可。
     _BUILD_CACHE_VOLUMES: ClassVar[list[tuple[str, str]]] = [
         # ── Rust ──
-        # sccache 编译产物缓存(内容寻址,跨 crate 复用编译结果)。配合镜像里
-        # RUSTC_WRAPPER=sccache + SCCACHE_DIR=/cargo-cache/sccache(见 Dockerfile.sccache)。
+        # sccache 编译产物缓存(内容寻址,跨 crate 复用编译结果)。依赖镜像里
+        # RUSTC_WRAPPER=sccache + SCCACHE_DIR=/cargo-cache/sccache 两个环境变量。
         ("agentos-cargo-cache", "/cargo-cache"),
         # cargo registry:下载的 crate 源码 + index。省去每个 worktree 重新下载
-        # 全部依赖源码(CARGO_HOME=/usr/local/cargo,见 Dockerfile.rust)。
+        # 全部依赖源码(镜像内 CARGO_HOME=/usr/local/cargo)。
         ("agentos-cargo-registry", "/usr/local/cargo/registry"),
         # ── Node ──
         # npm 下载缓存(tarball)。node_modules 仍随各项目 bind mount,不共享

@@ -155,7 +155,7 @@ Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via pr
 > **Architecture note**: 0.2 is a Rust kernel (`kernel/`) + Vite frontend talking straight to the
 > kernel: `start_web_02.*` builds and starts `agentos-kernel` (:9100, host process) and the Vite
 > dev server (:6390, proxying to the kernel); `docker compose` provides the Redis container
-> on demand (the start script launches only the compose `redis` service, see docker/0.2/docker-compose.yml).
+> on demand (the start script launches only the compose `redis` service, see the root docker-compose.yml).
 
 ### Option 1: Windows One-Click (Recommended)
 

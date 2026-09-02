@@ -154,7 +154,7 @@ hindsight 记忆插件承载：对话经验自动沉淀（retain）、按需检�
 
 > **架构说明**：0.2 为 Rust 内核（`kernel/`）+ Vite 前端直连内核架构：`start_web_02.*` 编译并启动
 > `agentos-kernel`（:9100，宿主机进程）与 Vite 前端 dev server（:6390，反代到内核）；
-> `docker compose` 按需提供 Redis 容器（启动脚本仅拉起其中 redis 服务，见 docker/0.2/docker-compose.yml）。
+> `docker compose` 按需提供 Redis 容器（启动脚本仅拉起其中 redis 服务，见根目录 docker-compose.yml）。
 
 ### 方式一：Windows 一键启动（推荐）
 

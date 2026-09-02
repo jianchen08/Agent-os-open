@@ -34,7 +34,7 @@ KERNEL_BIN="$KERNEL_DIR/target/release/agentos-kernel"
 PORTS_FILE="$PROJECT_ROOT/.ports_02"
 PROJECT_ID=$(echo -n "$PROJECT_ROOT" | md5sum | cut -c1-8)
 REDIS_CONTAINER="lingxi-redis-02-$PROJECT_ID"
-COMPOSE_FILE="$PROJECT_ROOT/docker/0.2/docker-compose.yml"
+COMPOSE_FILE="$PROJECT_ROOT/docker-compose.yml"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -105,7 +105,7 @@ ensure_docker_and_redis() {
         fi
     fi
 
-    # 使用 docker compose 管理 Redis（对标 docker/0.2/docker-compose.yml）
+    # 使用根 docker-compose.yml 管理 Redis（只拉起 redis 服务）
     if [ -f "$COMPOSE_FILE" ]; then
         echo -e "${YELLOW}[INFO] 使用 docker compose 启动 Redis（$COMPOSE_FILE）...${NC}"
         REDIS_HOST_PORT=$(find_available_port 6690)
