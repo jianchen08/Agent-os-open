@@ -675,6 +675,53 @@ describe('GlobalWebSocketService', () => {
 
       disconnect()
     })
+
+    it('sendUserInput 携带 thinkingStrength 时帧带 thinking_strength 字段', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      service.sendUserInput('thread-1', '强度测试', {
+        thinkingStrength: 'high',
+        pipelineId: 'pipe-s',
+        clientMessageId: 'cmid-s',
+      })
+
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      const sendCalls = ws.send.mock.calls.map((call: string[]) => {
+        try { return JSON.parse(call[0]) } catch { return null }
+      })
+      const userMsg = sendCalls.find((c: any) => c?.type === 'user_input')
+      expect(userMsg).toBeDefined()
+      expect(userMsg.thinking_strength).toBe('high')
+
+      disconnect()
+    })
+
+    it('sendUserInput 未指定 strength 时帧 thinking_strength 为空串', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      service.sendUserInput('thread-1', '无强度', {
+        pipelineId: 'pipe-s',
+        clientMessageId: 'cmid-s',
+      })
+
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      const sendCalls = ws.send.mock.calls.map((call: string[]) => {
+        try { return JSON.parse(call[0]) } catch { return null }
+      })
+      const userMsg = sendCalls.find((c: any) => c?.type === 'user_input')
+      expect(userMsg).toBeDefined()
+      expect(userMsg.thinking_strength).toBe('')
+
+      disconnect()
+    })
   })
 
   // ──────────────────────────────────────────────
