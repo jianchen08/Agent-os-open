@@ -692,23 +692,43 @@ async fn test_recovery_non_death_error_no_retry() {
 
 #[test]
 fn test_is_recoverable_sidecar_death_classification() {
-    // 死亡分类：仅 PLUGIN_CRASHED 可透明恢复。
-    let mk = |code: &str| PluginError {
-        message: "x".to_string(),
+    // 死亡分类：PLUGIN_CRASHED 可透明恢复；stdio 运输写失败（MCP_CALL_FAILED
+    // 携带 transport error + write/flush/broken pipe 特征）视同死亡可恢复
+    // （写失败只可能发生在已死进程句柄上，与 is_dead_sidecar 写失败标记互补）。
+    let mk = |code: &str, msg: &str| PluginError {
+        message: msg.to_string(),
         code: Some(code.to_string()),
         source: None,
     };
     assert!(PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
-        "PLUGIN_CRASHED"
+        "PLUGIN_CRASHED",
+        "x"
+    )));
+    // 运输写失败 → 可恢复（Windows os error 232 本地化消息同样命中）
+    assert!(PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
+        "MCP_CALL_FAILED",
+        "MCP call failed: tool call failed: isolation_guard.execute: transport error: write newline error: 管道正在被关闭。 (os error 232)"
+    )));
+    assert!(PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
+        "MCP_CALL_FAILED",
+        "transport error: flush error: broken pipe"
+    )));
+    // 非运输失败不恢复：协议错误 / 纯工具错误 / HTTP 网络错误（http post）
+    assert!(!PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
+        "MCP_CALL_FAILED",
+        "MCP call failed: protocol error"
     )));
     assert!(!PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
-        "MCP_CALL_FAILED"
+        "MCP_CALL_FAILED",
+        "transport error: http post: connect failed"
     )));
     assert!(!PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
-        "MCP_TOOL_CALL_FAILED"
+        "MCP_TOOL_CALL_FAILED",
+        "transport error: write error: broken pipe"
     )));
     assert!(!PluginInvokerImpl::is_recoverable_sidecar_death(&mk(
-        "MCP_CONNECT_FAILED"
+        "MCP_CONNECT_FAILED",
+        "x"
     )));
     assert!(!PluginInvokerImpl::is_recoverable_sidecar_death(
         &PluginError {
@@ -3011,7 +3031,9 @@ async fn test_explicit_unload_still_works_on_keep_warm_host() {
 // ── 监控 M3：宿主进程态快照（host_proc_snapshots） ─────────────────────────
 
 fn unconnected_stdio_client() -> SharedMcpClient {
-    // 未连接的 stdio client：无子进程 → pid=None、判死门控不触发
+    // 未连接的 stdio client：无子进程 → 判死（stdio 存活期恒持有 child，
+    // 缓存中出现无 child 的 stdio 条目 = 未连接/已 kill 的残留，不可用；
+    // 真实缓存只会写入 connect 成功的 client，本构造只为覆盖判死路径）
     Arc::new(tokio::sync::RwLock::new(McpClient::new_stdio(
         "python",
         vec!["-c".to_string(), "pass".to_string()],
@@ -3040,7 +3062,10 @@ async fn host_proc_snapshots_reports_member_uptime_and_alive() {
     assert_eq!(snaps.len(), 1);
     let s = &snaps[0];
     assert_eq!(s.host_key, "plugin:demo");
-    assert!(s.alive, "未连接 client 无子进程，不应判死");
+    assert!(
+        !s.alive,
+        "缓存中无 child 的 stdio client = 未连接/已 kill 残留，应判死"
+    );
     assert_eq!(s.pid, None);
     assert!(s.uptime_secs.is_some(), "有 spawn 记账应有 uptime");
     // 独占宿主：成员 = 宿主键前缀解析

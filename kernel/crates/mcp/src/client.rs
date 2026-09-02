@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -96,6 +97,11 @@ pub struct McpClient {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
     /// 是否已初始化
     initialized: Arc<Mutex<bool>>,
+    /// stdio 写失败标记：stdin 写入/冲刷失败 = sidecar 进程已死铁证
+    /// （管道破裂/句柄关闭）。与 [`is_alive`](Self::is_alive) 的 try_wait 快照
+    /// 互补——Windows 退出通知未到/进程被强杀时 try_wait 有竞态盲区，
+    /// 写失败标记让死亡判定在下次调用前即可成立。仅 stdio transport 置位。
+    stdio_dead: Arc<AtomicBool>,
     /// Capability 路由器——处理 sidecar 反向调用内核能力。
     /// None 时 sidecar 反向调用将被拒绝（返回 method not found）。
     router: Option<Arc<dyn CapabilityRouter>>,
@@ -278,6 +284,7 @@ impl McpClient {
             plugin_id: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
+            stdio_dead: Arc::new(AtomicBool::new(false)),
             router: None,
             request_timeout: Duration::from_secs(300),
             http_client: None,
@@ -311,6 +318,7 @@ impl McpClient {
             plugin_id: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
+            stdio_dead: Arc::new(AtomicBool::new(false)),
             router: None,
             request_timeout: Duration::from_secs(300),
             http_client: None,
@@ -804,17 +812,23 @@ impl McpClient {
             writer
                 .write_all(request_str.as_bytes())
                 .await
-                .map_err(|e| McpError::Transport {
-                    message: format!("write error: {}", e),
+                .map_err(|e| {
+                    self.mark_stdio_dead();
+                    McpError::Transport {
+                        message: format!("write error: {}", e),
+                    }
                 })?;
-            writer
-                .write_all(b"\n")
-                .await
-                .map_err(|e| McpError::Transport {
+            writer.write_all(b"\n").await.map_err(|e| {
+                self.mark_stdio_dead();
+                McpError::Transport {
                     message: format!("write newline error: {}", e),
-                })?;
-            writer.flush().await.map_err(|e| McpError::Transport {
-                message: format!("flush error: {}", e),
+                }
+            })?;
+            writer.flush().await.map_err(|e| {
+                self.mark_stdio_dead();
+                McpError::Transport {
+                    message: format!("flush error: {}", e),
+                }
             })?;
         } else {
             return Err(McpError::ConnectionFailed {
@@ -980,6 +994,41 @@ impl McpClient {
         }
     }
 
+    /// 记录一次 stdin 写入/冲刷失败（stdio 下 = sidecar 进程已死铁证）。
+    ///
+    /// 写入失败只可能发生在已关闭的管道句柄上——进程死后 try_wait 的退出
+    /// 通知可能未到（Windows 强杀/句柄竞态），写失败标记让判死在下次调用
+    /// 前即可成立，不依赖退出状态快照。
+    fn mark_stdio_dead(&self) {
+        self.stdio_dead.store(true, Ordering::SeqCst);
+    }
+
+    /// stdio 运输下判定 sidecar 进程是否已死（供 invoker 复用/驱逐与崩溃恢复）。
+    ///
+    /// 证据三选一（任一命中即死）：
+    /// 1. [`stdio_dead`](Self::stdio_dead) 写失败标记——进程死亡铁证；
+    /// 2. child 已清——stdio 存活期恒持有 child，缺失 = 已被 kill（防御
+    ///    kill 后未驱逐的残留缓存，杜绝"永远判活 → 复用死管道"）；
+    /// 3. 退出快照（try_wait 已捕获退出状态）。
+    ///
+    /// HTTP 运输恒 false：远端进程不在本地，网络错误不等价于目标死亡。
+    pub async fn is_dead(&self) -> bool {
+        if !matches!(self.transport, McpTransport::Stdio { .. }) {
+            return false;
+        }
+        if self.stdio_dead.load(Ordering::SeqCst) {
+            return true;
+        }
+        let Some(child) = &self.child else {
+            return true;
+        };
+        let mut child = child.lock().await;
+        match child.try_wait() {
+            Ok(None) => false,
+            Ok(Some(_)) | Err(_) => true,
+        }
+    }
+
     /// 获取子进程 PID
     pub async fn pid(&self) -> Option<u32> {
         if let Some(child) = &self.child {
@@ -1019,6 +1068,9 @@ impl McpClient {
         self.stdout = None;
         self.stderr = None;
         *self.initialized.lock().await = false;
+        // 复用的防御边界：kill 后 child=None 本身已判死；重置标记避免同一
+        // client 对象被异常复用（重新 connect）时残留陈旧死亡证据。
+        self.stdio_dead.store(false, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -1402,6 +1454,37 @@ mod tests {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    /// stdio 写失败标记 / child 缺失（kill 后残留缓存）证据 → 判死。
+    #[tokio::test]
+    async fn is_dead_by_write_failure_mark() {
+        let client = McpClient::new_stdio("cat", vec![]);
+        // 模拟一次 stdin 写失败（进程已死铁证）
+        client.mark_stdio_dead();
+        assert!(client.is_dead().await, "写失败标记后必须判死");
+    }
+
+    /// child 被清（kill 后未驱逐的残留缓存）→ stdio 判死（杜绝永远判活）。
+    #[tokio::test]
+    async fn is_dead_by_missing_child() {
+        let client = McpClient::new_stdio("cat", vec![]);
+        // 未 connect / 已 kill 的 client 均无 child：stdlib 存活期恒持有 child
+        assert!(
+            client.is_dead().await,
+            "stdio client 无 child（未连接/已 kill）必须判死"
+        );
+        client.mark_stdio_dead();
+        assert!(client.is_dead().await);
+    }
+
+    /// HTTP transport 永不判死（远端进程不在本地，网络错误不等价死亡）。
+    #[tokio::test]
+    async fn is_dead_http_never() {
+        let client = McpClient::new_http("http://127.0.0.1:9", HashMap::new(), None);
+        assert!(!client.is_dead().await, "HTTP transport 不得判死");
+        // HTTP 也不应被写失败标记影响（send_request 不经过 stdio 标记路径）
+        assert!(!client.is_dead().await);
     }
 
     /// 从回显替身的 stdout 读一行（回显进程把写入 stdin 的行原样回显）。

@@ -747,21 +747,38 @@ impl PluginInvokerImpl {
 
     /// B1（M2-reactive 第一刀）：判定 MCP 客户端是否为「已死亡的 stdio sidecar 进程」。
     ///
-    /// `is_alive()` 对 HTTP transport 恒为 false（无子进程），不能单独作死亡信号
-    /// （会把外部远程 MCP 误判为崩溃）。`pid()` 仅 stdio spawn 后有值：
-    /// - `Some(pid)` + `!is_alive()` → stdio sidecar 进程已退出（真死亡）；
-    /// - `None` → HTTP transport（无进程概念，不判死，调用走网络错误语义）。
+    /// 委托 [`McpClient::is_dead`] 三证据判定：stdio 写失败标记（进程死亡铁证，
+    /// 弥补 try_wait 快照在退出通知未到/被强杀时的竞态盲区）/ child 缺失
+    /// （kill 后残留缓存）/ 退出快照。HTTP transport 不判死（远端进程不在
+    /// 本地，网络错误走调用侧错误语义）。
     async fn is_dead_sidecar(client: &McpClient) -> bool {
-        client.pid().await.is_some() && !client.is_alive().await
+        // 委托 client 自身状态：stdio 写失败标记 / child 缺失（kill 后残留缓存）
+        // / 退出快照 三证据（见 McpClient::is_dead）。HTTP 运输恒 false。
+        client.is_dead().await
     }
 
     /// B1：错误是否为「sidecar 死亡/传输断开」——可透明恢复类失败。
     ///
-    /// 仅 `PLUGIN_CRASHED`（attempt 侧经 [`Self::is_dead_sidecar`] 判定）触发恢复；
-    /// `MCP_CALL_FAILED`/`MCP_TOOL_CALL_FAILED`（进程仍存活的协议/工具错误）、
-    /// `MCP_CONNECT_FAILED`（spawn 失败，重试同样失败）等不重试。
+    /// 命中条件：
+    /// - `PLUGIN_CRASHED`（attempt 侧经 [`Self::is_dead_sidecar`] 判定）；
+    /// - `MCP_CALL_FAILED` 携带 stdio 运输写失败特征（transport error + write/
+    ///   flush/broken pipe）——写失败只可能发生在已死进程的句柄上，是死亡铁证；
+    ///   既往归为"进程仍存活的协议/工具错误"导致进程死后既不驱逐也不重试
+    ///   （与 is_dead_sidecar 的写失败标记互补，双保险）。
+    /// - `MCP_TOOL_CALL_FAILED`（协议/工具错误）、`MCP_CONNECT_FAILED`（spawn
+    ///   失败，重试同样失败）等不重试。
     fn is_recoverable_sidecar_death(err: &PluginError) -> bool {
-        err.code.as_deref() == Some("PLUGIN_CRASHED")
+        if err.code.as_deref() == Some("PLUGIN_CRASHED") {
+            return true;
+        }
+        // call_tool 把底层错误统一包成 "transport error: <write/flush/broken pipe>..."
+        // （Windows os error 232 "管道正在被关闭" 等被本地化成消息文本）。
+        if err.code.as_deref() == Some("MCP_CALL_FAILED") {
+            let msg = err.message.to_lowercase();
+            return msg.contains("transport error")
+                && (msg.contains("write") || msg.contains("flush") || msg.contains("broken pipe"));
+        }
+        false
     }
 
     /// B1（M2-reactive 第一刀）：sidecar 死亡**透明恢复**（brokered transparent
@@ -843,9 +860,11 @@ impl PluginInvokerImpl {
     /// [`Self::with_transparent_recovery`] 重试）。
     ///
     /// 死亡判定（`PLUGIN_CRASHED`，可透明恢复）出现在两处：
-    /// ① 调用前存活检查（stdio 进程已死；HTTP transport 无进程不判死）；
+    /// ① 调用前存活检查（stdio 进程已死——写失败标记/child 缺失/退出快照三
+    ///    证据，见 [`McpClient::is_dead`]；HTTP transport 无进程不判死）；
     /// ② call_tool 失败后复查存活——在途调用中死亡（依赖被 idle GC 杀掉的
-    ///    §9.4 场景；进程仍存活则归 MCP_CALL_FAILED，协议/工具错误重试无益）。
+    ///    §9.4 场景；进程仍存活则归 MCP_CALL_FAILED，协议/工具错误重试无益，
+    ///    运输写失败则由 is_recoverable_sidecar_death 特征兜底恢复）。
     async fn attempt_sidecar_pipeline(
         &self,
         plugin_id: &str,
