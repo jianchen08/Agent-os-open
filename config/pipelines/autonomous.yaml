@@ -1,165 +1,90 @@
-# 通用自主循环管道配置（多循环体模型）
-#
-# 引擎作为配置解释执行器：读此配置，按 loop_bodies 顺序执行每个循环体
-# （各自独立的 steps 与循环配置），据 next（统一 DSL）决定循环、
-# 分支与循环体间转移。所有 Agent 共用此管道，差异由 Agent 配置
-# （system_prompt/tool_ids/model_tier）体现。
-#
-# 循环体语义：
-# - init：前处理（工作空间/环境解析），单次执行，顺序推进到 main；
-# - main：agent 循环（llm_call ↔ tool_execute），ended 只结束本体的循环，
-#   之后仍顺序推进到 exit；
-# - exit：后处理（workspace 合并/环境释放），run_on_error=true 保证
-#   提前终止（ended/出错）时仍执行收尾；挂起（suspended）不触发。
-# 转移：step 级路由设置的 state.next_phase > 循环体 next（Phase）>
-# 默认顺序进入下一循环体；最后一个循环体结束 = run 结束。
-#
-# G10 统一 DSL（2026-08-15 冻结）：条件永远 `when`、目标永远 `then`、
-# 缺省顺序推进。转移写在节点/循环体的 `next:` 列表，`then` 目标为
-# `end` / `loop` / step id（step 级）/ 循环体 id；`when` 可省（缺省 True）。
-# 挂起经 `set: {suspended: true}` 表达（DSL 不支持 then: wait——挂起由
-# state.suspended 表达；suspended 属 per-run 键，下一轮派发自动复位）。
-# 配置在加载期编译成执行计划（when 预编译为 AST、引用静态解析、语法错误
-# 启动即报），运行时零解析。
-#
-# 一切皆 step：steps 字段引用的内容按三级命中规则解析：
-#   ① 当前管道 step id → 组合节点递归
-#   ② 公共 step 库 id（config/steps/）→ 组合节点递归
-#   ③ 插件名 → 原子插件 invoker 调用
-#
-# 项级 when 门（G9）：`- name: <插件id>` + `when: "<条件>"`，invoke 前对
-# state 求值，假则整项跳过（零调用）。简单判断优先用配置 when 表达，
-# 不落插件代码。
-#
-# [来源: 配置驱动的管道引擎设计]
-# [来源: docs/working/重要设计/插件三轨一致性与Cordis机制迁移计划.md §G10]
-
-name: autonomous
-
 loop_bodies:
-  # ── init：前处理（工作空间解析 + 环境基线），单次执行 ──
+- id: init
+  steps:
   - id: init
     steps:
-      - id: init
-        steps:
-          - pipeline_workspace_lifecycle     # 消费 execution_context.workspace → state.workspace/project_root/ws_meta
-          - pipeline_environment_lifecycle   # 消费 execution_context.isolation → state.environment_basis
-
-  # ── main：agent 自主循环（LLM ↔ 工具执行）──
-  - id: main
-    while: "True"                 # 恒真循环（ended/suspended 退出）；迭代上限由
-                                  # post 链 pipeline_stop_check 按 Agent 配置
-                                  # max_iterations（默认 20）强制 ended 兜底
+    - pipeline_workspace_lifecycle
+    - pipeline_environment_lifecycle
+- id: main
+  steps:
+  - context:
+      model_tier: '{{state.model_tier}}'
+    id: prepare
     steps:
-      # ── 上下文准备（input 插件链）──
-      - id: prepare
-        steps:                    # 插件 id（manifest 里的 id，带 pipeline_ 前缀）
-          - pipeline_pause_guard       # 任务暂停检查（迭代起点，priority=5 最早；task_service 未接线时降级 paused=False + warning 留痕，写 state["pause_guard.checked"]）
-          - pipeline_context_build     # agent 配置自持加载（AGENTOS_CONFIG_ROOT/agents/**/<agent_id>.yaml → context.system_prompt/tool_ids/AGENT_LEVEL；须先于 tool_schema 与 prompt_build——它们的供给键由本步写入，漏接线会致 LLM 请求 system 消息为空）
-          - pipeline_injected_param_validator  # 注入参数声明校验（防御性，只跑首轮：injected_param_check_done 防重）
-          - pipeline_tool_schema       # 工具 schema 注入（tool_context/tool_schema_validator 的定义来源：tool_schema 读 context_build 写入的 state.tool_ids 经内核 tool-surface capability 取过滤面，validator 校验 raw_tool_calls 参数形状；tool_context 读 registry 在线状态，须在本步之前）
-          - pipeline_tool_context      # 工具在线状态感知（ToolRegistry 在线工具 + Electron 窗口 + 适配器状态 → state.tool_context；registry 不可用降级跳过）
-          - pipeline_param_inject
-          - pipeline_multimodal_preprocessor  # 多模态内容提取（用户输入中的 /uploads/ markdown 图片引用与附件 → state.multimodal_content；llm_core 发送前读文件转 base64。须在 prompt_build/llm_core 之前）
-          - pipeline_model_prompt_adapter  # 模型适配消息注入（仅任务首轮、历史头部；须在 godot_context 之前——reference 消息会把首轮撑到 2 条）
-          - pipeline_godot_context       # Godot 选中引用注入（选中非空时在用户消息后插入 <reference> 消息）
-          - pipeline_prompt_build
-          - pipeline_context_window_guard  # 上下文窗口守卫（token 估算超阈值触发分层压缩；压缩 LLM 调用经 llm.complete_stream，model 透传见本 step context）
-          - pipeline_tool_schema_validator  # 工具 schema 校验与自动修复（raw_tool_calls 参数形状修复；须在 param_inject 之后——它已把 arguments 规范化为 args dict）
-          - pipeline_isolation_guard   # 工具执行前决策隔离级别（写 state["execution_contexts"]）
-          - pipeline_level_guard       # 层级权限守卫（仅 tool_execute 轮次：任务类工具按 tool_ids 拦截，写 state["security.level_decision"]，tool_core 执行前检查）
-          - pipeline_security_check    # 安全守卫（仅 tool_execute 轮次：路径遍历/敏感目录/危险工具审批，写 state["security.decision"]；读 isolation_guard 写入的 execution_contexts 判定隔离放行）
-        context:                  # 自由 key-value，merge 进 state 供插件读取
-          model_tier: "{{state.model_tier}}"
-
-      # ── LLM 或工具执行（由 core_type 决定）──
-      - id: core
-        steps:
-          # 工具缓存读（仅工具轮：raw_tool_calls 非空才查）——命中时写
-          # tool_results + 补 messages 配对 + 清空 raw_tool_calls +
-          # skip_remaining 跳过工具执行（与 output 侧 tool_cache_writer 形成
-          # 读写闭环）；未命中零副作用，继续走 tool_core
-          - name: pipeline_tool_cache
-            when: "raw_tool_calls != [] and raw_tool_calls != None"
-          - "{{state.core_plugin}}"   # 动态：pipeline_llm_core 或 pipeline_tool_core
-          # spill_guard（大输出兜底）：必须与 tool_core 同 step 后置组合——
-          # tool_core 大结果 merge 进内存 state（纯内存未落轨迹）→ spill_guard
-          # 立刻替换成小的 → step 末尾才落轨迹/messages 收尾，落的是小结果。
-          # llm_core 轮次天然 no-op（tool_results 已小/已标记，幂等透传）。
-          - pipeline_spill_guard
-        context:
-          temperature: 0.7
-
-      # ── 输出处理 + 路由仲裁 ──
-      - id: post
-        steps:
-          - pipeline_track             # token/耗时统计 + cache 可观测 + cost_update 推送（首位：提前 end 也不丢统计）
-          - pipeline_task_reminder    # 任务域：pending→running 推进 + 评估闸门（无评估证据不 end，提醒耗尽标 pending_evaluation）
-          - pipeline_stop_check
-          - pipeline_duplicate_check
-          - pipeline_stuck_detector
-          - pipeline_tool_cache_writer  # 工具结果缓存写（读 tool_core 的 _executed_tool_calls 快照 + tool_results，成功结果写共享缓存；须在 duplicate_check 之后——它可能清空 raw_tool_calls）
-          - pipeline_conversation_mode  # 对话模式激活检测（human_interaction 返回 conversation_mode=True 时激活；已激活态的 wait/清状态由下方 next 路由承载）
-          - pipeline_sensitive_checker  # 敏感数据脱敏（扫描 tool_results 中的 API Key/Token/密码并替换；Rust native 实现，须在 result_format 之前——格式化后内容进 messages 不再经此）
-          - pipeline_result_format
-        next:                   # 出口转移（统一 DSL：when/then/缺省顺序推进）
-          # 任务终态当轮收束（用户裁定 2026-08-29：任务成功/失败/取消立即结束，
-          # 禁止空转）——task_evaluate 或外部写入 task.status 终态后本轮即 end
-          # （exit 循环体 run_on_error=true 仍执行收尾）。会话主管道无 task.status
-          # 键，条件恒假不受影响；重跑派发时注入分支把 task.status 复位 running。
-          - when: "task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled'"
-            then: end
-          # 对话模式已激活 + 无工具调用（AI 纯文本回复）→ 挂起管道等待用户下一条
-          # 消息（set suspended=true 挂起——DSL 不支持 then: wait，挂起由
-          # state.suspended 表达；suspended 属 per-run 键，下轮派发自动复位）
-          - when: "conversation_mode == True and raw_tool_calls == []"
-            then: loop
-            set:
-              suspended: true
-          # 对话模式已激活 + AI 产生工具调用 → 对话结束，清除状态，按工具调用路由继续
-          - when: "conversation_mode == True and raw_tool_calls != []"
-            then: loop
-            set:
-              conversation_mode: false
-              core_type: tool_execute
-              core_plugin: pipeline_tool_core
-          # 有非空工具调用 → 继续循环执行工具（明确判断非空列表，避免缺失字段误命中）
-          - when: "raw_tool_calls != [] and raw_tool_calls != None"
-            then: loop
-            set:
-              core_type: tool_execute
-              core_plugin: pipeline_tool_core
-          # 工具刚执行完（core_type=tool_execute，raw_tool_calls 已被 tool_core 清空）
-          # → 回 LLM 让它看到 tool_results 产生下一轮或文本回复（对齐 0.1 handle_no_route_signals
-          #   的 "tool_execute 后自动 next_llm" 逻辑）
-          - when: "core_type == 'tool_execute'"
-            then: loop
-            set:
-              core_type: llm_call
-              core_plugin: pipeline_llm_core
-          # task_reminder 刚注入评估提醒（_has_new_llm_input=true）→ 回 LLM 让它
-          # 看到提醒并调用 task_evaluate；否则纯文本轮会命中兜底 end，提醒被吞
-          - when: "_has_new_llm_input == true"
-            then: loop
-            set:
-              core_type: llm_call
-              core_plugin: pipeline_llm_core
-          # duplicate_check 二级拦截（已剥离重复工具调用/清空重复输出并注入警告）
-          # → 回 LLM 看警告换路；自清该键防残留（控制状态键契约 ADR 2026-08-30）
-          - when: "router.duplicate_back_llm == True"
-            then: loop
-            set:
-              router.duplicate_back_llm: false
-              core_type: llm_call
-              core_plugin: pipeline_llm_core
-          # 其余情况（纯文本回复 / 字段缺失）→ 结束，避免无限循环
-          - then: end
-
-  # ── exit：后处理（工作空间收尾 + 环境释放），单次执行，提前终止必经 ──
+    - pipeline_pause_guard
+    - pipeline_context_build
+    - pipeline_injected_param_validator
+    - pipeline_tool_schema
+    - pipeline_param_inject
+    - pipeline_multimodal_preprocessor
+    - pipeline_model_prompt_adapter
+    - pipeline_godot_context
+    - pipeline_prompt_build
+    - pipeline_context_window_guard
+    - pipeline_tool_schema_validator
+    - pipeline_isolation_guard
+    - pipeline_level_guard
+    - pipeline_security_check
+  - context:
+      temperature: 0.7
+    id: core
+    steps:
+    - name: pipeline_tool_cache
+      when: raw_tool_calls != [] and raw_tool_calls != None
+    - '{{state.core_plugin}}'
+    - pipeline_spill_guard
+  - id: post
+    next:
+    - then: end
+      when: task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled'
+    - set:
+        suspended: true
+      then: loop
+      when: conversation_mode == True and raw_tool_calls == []
+    - set:
+        conversation_mode: false
+        core_plugin: pipeline_tool_core
+        core_type: tool_execute
+      then: loop
+      when: conversation_mode == True and raw_tool_calls != []
+    - set:
+        core_plugin: pipeline_tool_core
+        core_type: tool_execute
+      then: loop
+      when: raw_tool_calls != [] and raw_tool_calls != None
+    - set:
+        core_plugin: pipeline_llm_core
+        core_type: llm_call
+      then: loop
+      when: core_type == 'tool_execute'
+    - set:
+        core_plugin: pipeline_llm_core
+        core_type: llm_call
+      then: loop
+      when: _has_new_llm_input == true
+    - set:
+        core_plugin: pipeline_llm_core
+        core_type: llm_call
+        router.duplicate_back_llm: false
+      then: loop
+      when: router.duplicate_back_llm == True
+    - then: end
+    steps:
+    - pipeline_track
+    - pipeline_task_reminder
+    - pipeline_stop_check
+    - pipeline_duplicate_check
+    - pipeline_stuck_detector
+    - pipeline_tool_cache_writer
+    - pipeline_conversation_mode
+    - pipeline_sensitive_checker
+    - pipeline_result_format
+  while: 'True'
+- id: exit
+  run_on_error: true
+  steps:
   - id: exit
-    run_on_error: true
     steps:
-      - id: exit
-        steps:
-          - pipeline_workspace_lifecycle     # finalize：消费 state.workspace（merge/清理占位）
-          - pipeline_environment_lifecycle   # release：环境释放（占位）
+    - pipeline_workspace_lifecycle
+    - pipeline_environment_lifecycle
+name: autonomous

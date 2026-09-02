@@ -78,5 +78,7 @@ plugins:
     enabled: false
   pipeline_termination_advisor:
     enabled: false
+  pipeline_tool_context:
+    enabled: false
 defaults:
   enabled: true
