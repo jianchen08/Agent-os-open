@@ -228,7 +228,11 @@ async def file_write(
     workspace: str | None = None,
     project_root: str | None = None,
 ) -> ToolResult:
-    """写入/编辑文件。workspace/project_root 可用时禁止根外路径（B5）。"""
+    """写入/编辑文件。workspace/project_root 可用时禁止根外路径（B5）。
+
+    写文件语义自包含：write/append/insert 在目标父目录缺失时自动创建
+    （parents）；search_replace/delete_lines 只改已存在文件，不建目录。
+    """
     # 工作空间约束（写路径：根外一律拒绝；相对路径以根锚定后执行）
     allowed, reason, resolved = _check_workspace_path(path, workspace, project_root, operation="write")
     if not allowed:
@@ -237,6 +241,8 @@ async def file_write(
         path = resolved
 
     file_path = Path(path)
+    if action in ("write", "append", "insert"):
+        file_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         if action == "write":

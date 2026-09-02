@@ -103,6 +103,72 @@ class TestFileWriteWorkspaceConstraint:
         assert not (tmp_path / "rel.txt").exists()
 
 
+class TestFileWriteCreatesParentDirs:
+    """file_write 写文件语义自包含：目标父目录缺失时自动创建。
+
+    agents 配置常把过程文档写到 docs/working/ 等深层路径，全新隔离工作区
+    该目录不存在；write/append/insert 不建父目录时 write_text 直接抛
+    errno 2（IO error），逼 agent 绕道 create_directory 才能落盘。
+    """
+
+    @pytest.mark.parametrize(
+        ("action", "extra_kwargs", "expected_content"),
+        [
+            ("write", {}, "hello"),
+            ("append", {}, "hello"),
+            ("insert", {"line": 0}, "hello\n"),
+        ],
+    )
+    async def test_missing_parent_dirs_auto_created(
+        self, tmp_path: Path, action: str, extra_kwargs: dict, expected_content: str
+    ) -> None:
+        """父目录不存在时自动建目录并落盘，file 字段回宿主绝对路径。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        target = ws / "docs" / "working" / "note.md"
+
+        result = await file_write(
+            path=str(target),
+            action=action,
+            content="hello",
+            workspace=str(ws),
+            **extra_kwargs,
+        )
+
+        assert result.success is True, result.error
+        assert target.read_text(encoding="utf-8") == expected_content
+        # 性质：落盘坐标落在 workspace 内且为绝对路径（卡片打开契约）
+        assert Path(result.output["file"]) == target.resolve()
+
+    async def test_deeply_nested_missing_dirs_created(self, tmp_path: Path) -> None:
+        """多级缺失目录一次性建全（parents 语义）。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        target = ws / "a" / "b" / "c" / "d.txt"
+
+        result = await file_write(
+            path=str(target), action="write", content="deep", workspace=str(ws),
+        )
+
+        assert result.success is True, result.error
+        assert target.read_text(encoding="utf-8") == "deep"
+
+    async def test_search_replace_keeps_existing_file_semantics(self, tmp_path: Path) -> None:
+        """search_replace 只改已存在文件：仍报 File not found，且不副作用建目录。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        target = ws / "ghost" / "f.txt"
+
+        result = await file_write(
+            path=str(target), action="search_replace",
+            old_str="a", new_str="b", workspace=str(ws),
+        )
+
+        assert result.success is False
+        assert "File not found" in result.error
+        assert not (ws / "ghost").exists()
+
+
 class TestMoveFileWorkspaceConstraint:
     async def test_move_destination_outside_rejected(self, tmp_path: Path) -> None:
         """目标在 workspace 外：移动被拒，源文件保留原地。"""
