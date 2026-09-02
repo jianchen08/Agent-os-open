@@ -74,6 +74,9 @@ export default defineConfig({
         'src/**/*.d.ts',
         'src/main.tsx',
         'src/vite-env.d.ts',
+        // 自动生成图标聚合器：零测试引用走 uncovered raw-parse，rolldown 把
+        // `import type {` 按 JS 解析崩（公开仓 CI 首跑实证）——生成物不度量
+        'src/assets/icons/index.ts',
       ],
       thresholds: {
         lines: 1,
