@@ -64,7 +64,9 @@ jobs:
   # 改为本 workflow 内自建内核；rust-cache 共享 key 兜底避免全量重编）。
   # 覆盖 tests/e2e_02 全部 Python e2e（01 内核 API/02 认证与管道 chat/
   # 04 审批闭环/05 管道/06 WS 流式/07 插件生命周期/08 任务状态/
-  # 09 Godot 选中桥/10 合宿分组）；02 前端浏览器套件依赖 Vite dev
+  # 09 Godot 选中桥/10 合宿分组/11 聊天顺序/12 完成性防假完成/
+  # 13 工作空间模式/任务收束三信号路径矩阵——后者自带 stub LLM 上游，
+  # 无需 key 也零 mock）；02 前端浏览器套件依赖 Vite dev
   # server 与 Chromium，本车道不提供，故不在列。
   # 依赖真实 LLM 的用例带 skipif 守卫：无 secrets.ZHIPU_API_KEY 时自动跳过。
   e2e:
@@ -167,7 +169,7 @@ jobs:
             tests/e2e_02/test_08_task_state_flow.py \
             tests/e2e_02/test_09_godot_selection_bridge.py \
             tests/e2e_02/test_10_cohost_host_grouping.py \
-            tests/e2e_02/test_11_chat_order_parity.py
+            tests/e2e_02/test_11_chat_order_parity.py             tests/e2e_02/test_12_pipeline_completion_e2e.py             tests/e2e_02/test_13_workspace_modes_e2e.py             tests/e2e_02/test_task_lifecycle_paths_e2e.py
 
       - name: Show kernel log on failure
         if: failure()
