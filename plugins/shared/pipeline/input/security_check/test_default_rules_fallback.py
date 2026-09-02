@@ -122,3 +122,54 @@ class TestDefaultRulesFallback:
             assert not any("tool" in k and k != "security.decision" for k in updates), (
                 f"普通命令放行不应产生工具结果/状态改写: {benign!r} → keys={sorted(updates)}"
             )
+
+
+class TestInjectedSecurityRulesNamespace:
+    """manifest config_files 注入（id=security_rules）是生产唯一规则真相源。
+
+    内核按 config_files[].id 命名空间合并进 plugin.get_config()（
+    invoker/build_injected_config），形状 = security_rules.yaml 顶层对象
+    {mode, rules}。本契约保障：注入存在即生效，YAML 全量规则（含 curl/pip
+    install 等）不必依赖 0.1 已不存在的 config.config_center。
+    """
+
+    def _injected(self, rules: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"mode": "blacklist", "rules": rules}
+
+    @pytest.mark.asyncio
+    async def test_injected_rules_are_loaded_and_enforced(self) -> None:
+        """注入命名空间被加载：curl 关键词命中 needs_approval → 走审批链。"""
+        plugin = SecurityCheckPlugin(
+            config={
+                "enabled": True,
+                "security_rules": self._injected([
+                    {
+                        "name": "injected_curl_rule",
+                        "tools": ["*"],
+                        "params": ["command", "cmd"],
+                        "action": "needs_approval",
+                        "patterns": [{"type": "keyword", "value": "curl "}],
+                    }
+                ]),
+            }
+        )
+        names = [r.get("name") for r in plugin._rules]
+        assert "injected_curl_rule" in names, "注入的 security_rules 应成为生效规则"
+
+        r = await plugin.execute(_ctx_for("curl -s http://example.com"))
+        decision = r.state_updates.get("security.decision", {})
+        assert "soft_block" in decision.get("reason", ""), (
+            f"注入规则命中 curl 应触发审批链（无交互服务→软拦截），实际={decision.get('reason')!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_injected_without_rules_key_falls_back(self, monkeypatch) -> None:
+        """注入命名空间存在但无 rules 键 → 走兼容路径（config_center stub → 内联默认）。"""
+        _stub_yaml_payload(monkeypatch, {})
+        plugin = SecurityCheckPlugin(
+            config={"enabled": True, "security_rules": {"mode": "blacklist"}}
+        )
+        assert plugin._rules, "rules 键缺失时应回退成功，绝不为空"
+        r = await plugin.execute(_ctx_for("rm -rf /tmp/fallback-2"))
+        decision = r.state_updates.get("security.decision", {})
+        assert "soft_block" in decision.get("reason", ""), "回退默认规则应仍能命中 rm -rf"

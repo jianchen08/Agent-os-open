@@ -274,8 +274,13 @@ class SecurityCheckPlugin(IInputPlugin):
     def _load_rules(self) -> list[dict[str, Any]]:
         """从配置或 YAML 文件加载安全规则。
 
-        优先使用 config 中直接提供的 rules 列表，
-        否则从 rules_path 指定的 YAML 文件加载。
+        优先级（高 → 低）：
+        1. config 中直接提供的 rules 列表（测试/旧装配缝）
+        2. manifest config_files 注入的 security_rules 命名空间
+           （plugin.json 声明 config/isolation/security_rules.yaml，内核按 id
+           命名空间合并进 plugin.get_config()）——生产环境唯一真相源
+        3. ConfigCenter 兼容路径（历史装配缝注入场景）
+        4. 内联默认规则
 
         YAML 无 rules 键、数据形状不符或加载异常时一律回退内联默认规则：
         规则缺位 = 安全闸门失效（_match_rules 迭代 None 直接 TypeError），
@@ -288,7 +293,18 @@ class SecurityCheckPlugin(IInputPlugin):
         if "rules" in self._config and self._config["rules"]:
             return self._config["rules"]
 
-        # 从 YAML 文件加载（通过 ConfigCenter 统一缓存）
+        # 注入配置优先：manifest config_files 按 id 命名空间合并进 plugin.get_config()
+        # （invoker/build_injected_config 按 config_files[].path 精确定位）。0.1 的
+        # config.config_center Python 模块已不存在，旧直读路径恒回退内联默认规则
+        # （仅 15 关键词，YAML 的 curl/pip install 等全量规则不生效）——注入路径
+        # 是 YAML 规则在生产生效的唯一入口。
+        injected = self._config.get("security_rules")
+        if isinstance(injected, dict):
+            yaml_rules = injected.get("rules")
+            if yaml_rules:
+                return yaml_rules
+
+        # 兼容路径：通过 ConfigCenter 统一缓存加载（历史装配缝注入场景）。
         # 注意：ConfigCenter.get() 内部已捕获 yaml.YAMLError 和 IO 错误，
         # 这里只需兜底防御 ConfigCenter 抛出意外异常（如未初始化）。
         rules_path = self._config.get("rules_path", "config/isolation/security_rules.yaml")
@@ -296,9 +312,6 @@ class SecurityCheckPlugin(IInputPlugin):
         data: Any = None
         try:
             from config.config_center import get_config_center  # noqa: PLC0415
-            # P1-7 DEBT(task_11): 🔴 高危——安全规则直读，迁移需 manifest 加 config_files
-            # 映射 + _load_rules 改读注入的 plugin.get_config()，否则规则空=安全闸门失效。
-            # 见 docs/working/p1_7_config_center_migration_checklist.md #1，整体延后 P6。
 
             data = get_config_center().get(rel)
         except Exception as exc:
