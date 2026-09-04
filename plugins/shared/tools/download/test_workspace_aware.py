@@ -23,7 +23,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_TOOLS_DIR = Path(__file__).resolve().parent  # plugins/shared/tools/
+_TOOLS_DIR = Path(__file__).resolve().parent.parent  # plugins/shared/tools/
 _SYSTEM_DIR = _TOOLS_DIR.parent / "system"
 _ISOLATION_DIR = _SYSTEM_DIR / "isolation"
 _DOWNLOAD_DIR = _TOOLS_DIR / "download"  # 插件自带策略模块所在目录

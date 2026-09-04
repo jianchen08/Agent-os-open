@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-PLUGIN_DIR = Path(__file__).resolve().parents[2] / "system" / "dsh_adapter"
+PLUGIN_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from bridge import DshRuntimeBridge  # noqa: E402

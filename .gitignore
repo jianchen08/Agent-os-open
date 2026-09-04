@@ -215,3 +215,6 @@ kernel/schema_tmp.json
 .playwright-mcp/
 # 根目录 outputs/：探针脚本、调试截图、一次性诊断产物，不入库
 /outputs/
+
+# ─── 再生产物(脚本可随时再生,不入库)───
+docs/agent_prompts_viewer.html
