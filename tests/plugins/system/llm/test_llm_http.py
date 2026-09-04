@@ -419,7 +419,8 @@ def test_post_model_and_409(server: Any, llm_yaml: Path) -> None:
         )
     )
     assert status == 409
-    assert body == {"detail": "模型 'new-m3' 已存在"}
+    # 冲突分派改造（7bfc905e8）后：409 detail 带提供商归属
+    assert body == {"detail": "模型 'new-m3' 已存在于提供商 'openai'"}
 
 
 def test_put_and_delete_model(server: Any, llm_yaml: Path) -> None:

@@ -1,31 +1,17 @@
 {
   "id": "godot_mcp",
   "name": "Godot MCP (godot-mcp-go)",
-  "description": "Godot 4 编辑器执行面 MCP：对运行中的 Godot 编辑器执行命令(建场景/写脚本/运行/调试/导出)，godot-mcp-go(Go) 经 addon WebSocket 通道驱动。二进制与 demo 工程路径机器本地，由 GODOT_MCP_BIN / GODOT_PROJECT_DIR 环境变量注入（.env 或进程环境；缺失时启动即失败并指名变量）：GODOT_MCP_BIN 指向 github.com/regiellis/godot-mcp-go v0.9.0 release 的可执行文件，GODOT_PROJECT_DIR 指向仓库内 hosts/godot-demo 的绝对路径（addon 已装于该工程）。与 pipeline_godot_context(选中引用注入)配合：引用给出用户所指对象，本工具执行操作。",
-  "version": "0.9.0",
+  "description": "Godot 4 编辑器执行面：对运行中的 Godot 编辑器执行命令(建场景/写脚本/运行/调试/导出)。Python 工具按需驱动 godot-mcp-go serve（--typed=false 单工具代理），执行面按当前任务 workspace 指向的 Godot 工程自动路由（workspace 或其祖先含 project.godot；worktree 还原主工程），按工程缓存 serve 进程；不读 GODOT_PROJECT_DIR。机器级 env 只需 GODOT_MCP_BIN 指向 github.com/regiellis/godot-mcp-go v0.9.0 可执行文件（缺失时调用即失败并指名变量）。与 pipeline_godot_context(选中引用注入)配合：引用给出用户所指对象，本工具执行操作。",
+  "version": "1.0.0",
   "plugin_type": "tool",
-  "language": "external",
+  "language": "python",
   "host_type": "sidecar",
-  "entry": "mcp:external",
-  "mcp": {
-    "transport": "stdio",
-    "endpoint": {
-      "command": "python",
-      "args": [
-        "-c",
-        "import os\nimport sys\nimport subprocess\nbin_path = os.environ['GODOT_MCP_BIN']\nproject = os.environ['GODOT_PROJECT_DIR']\nsys.exit(subprocess.call([bin_path, 'serve', '--typed=false', '--project', project]))\n"
-      ],
-      "env": {
-        "GODOT_MCP_BIN": "${GODOT_MCP_BIN}",
-        "GODOT_PROJECT_DIR": "${GODOT_PROJECT_DIR}"
-      }
-    }
-  },
+  "entry": "python server.py",
   "capabilities": {
     "tools": [
       {
         "name": "godot_run",
-        "description": "对运行中的 Godot 编辑器执行任意命令并返回 JSON 结果。method 为 '<group>.<command>'（如 node.add / engine.search），params 为该命令的参数。命令组：project scene node script csharp editor runtime engine input animation anim_tree tilemap theme shader particles scene3d physics navigation audio input_map resource analysis batch profiling export test android 等。API 发现：engine.search {query} 模糊搜索、engine.class_info {class} 类详情、engine.commands {group?} 列本服务命令；调未知 method 也返回命令清单。编辑器改动走 UndoRedo 可撤销；runtime.*/input.* 需先 scene.play（或 game:true 直连独立调试构建）。编辑器未开时结果带 editor_unreachable/verdict 与恢复指引（可启动一次编辑器，禁止启动第二个）。3D 放置：锚定实测 bounds（node.get global_position / get_aabb）回读校验，不要只信截图。与 godot 选中引用配合：消息中 <reference source=\"godot\"> 标出用户所选节点，操作应锚定这些节点路径。",
+        "description": "对运行中的 Godot 编辑器执行命令：建场景、写脚本、运行游戏、调试、导出。\n\n命令写法：method = \"组.命令\"，params = 参数对象（可省略）。例：\n- scene.tree {} —— 查看场景节点树\n- node.add {\"type\": \"Sprite2D\", \"name\": \"Player\"} —— 加节点\n- script.create {\"path\": \"res://player.gd\"} —— 新建脚本\n- scene.play / scene.stop —— 运行 / 停止游戏\n- editor.errors {} —— 看编辑器报错\n\n常用命令：\n- 场景：scene.tree、scene.open、scene.save、scene.play、scene.stop\n- 节点：node.add、node.set、node.get、node.delete、node.connect\n- 脚本：script.create、script.edit、script.read、script.attach\n- 工程与 API：project.info、engine.search、engine.commands、engine.class_info\n- 编辑器与运行：editor.errors、editor.screenshot、runtime.screenshot（需先 scene.play）\n\n完整清单：engine.commands 按组列出；调未知 method 也返回命令清单，不必盲猜。\n",
         "input_schema": {
           "properties": {
             "method": {
@@ -40,6 +26,10 @@
             "game": {
               "description": "Route to a standalone debug-build game's direct server instead of the editor (requires godot_mcp/runtime/direct_server).",
               "type": "boolean"
+            },
+            "project": {
+              "description": "目标 Godot 工程目录（可选）。缺省按任务 workspace 自动解析：workspace 或其祖先含 project.godot 即为工程；workspace 是 git worktree 时还原主工程（编辑器开的是主工程路径）。",
+              "type": "string"
             }
           },
           "required": [

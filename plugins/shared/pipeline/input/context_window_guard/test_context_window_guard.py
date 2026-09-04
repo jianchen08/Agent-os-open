@@ -796,3 +796,145 @@ class TestSaveFailureFailOpen:
             assert block["metadata"]["compression_ref"]["memory_ids"], (
                 "全部落库成功时块必须携带引用"
             )
+
+
+class TestCompressionDegradeNotBlocking:
+    """压缩无产出时降级继续管线（类契约：压缩失败不阻塞管线）。
+
+    2026-09-02 真机事故回归：触发线（0.06×窗口）低于 recent 预算
+    （0.18×窗口）时，压缩服务判"全部消息都在 recent 预算内"返回 None，
+    守卫曾把 None 当压缩失败置 ENDED 终止管线——用户消息零回复。
+    """
+
+    @staticmethod
+    def _mock_service(return_value: Any = None, side_effect: Any = None) -> MagicMock:
+        service = MagicMock()
+        service.setup = MagicMock()
+        service.compress_messages = AsyncMock(
+            return_value=return_value, side_effect=side_effect
+        )
+        service._last_deleted_seqs = []
+        service._last_block_msgs = []
+        return service
+
+    @staticmethod
+    def _trigger_messages() -> list[dict[str, Any]]:
+        """15 条消息，字符估算约 6 万 token，配合 llm_usage 越过 0.5×128k 触发线。"""
+        return [
+            {"role": "user", "content": f"msg {i} " + "x" * 4000, "seq": i}
+            for i in range(1, 16)
+        ]
+
+    def test_band_below_recent_budget_continues_pipeline(self) -> None:
+        """触发线已越过但全部消息在 recent 预算内（无料可压）→ 管线继续。
+
+        真实 CompressionService 复现事故区间：trigger=0.06×100k=6000 <
+        总量 8000（守卫触发），recent=0.18×100k=18000 > 总量 8000（无料可压）。
+        断言：不 END、不 skip_remaining、不浪费压缩 LLM 调用。
+        """
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.06})
+        injected = {"budgets": {"recent": 0.18, "l1": 0.1, "l2": 0.05}}
+        llm_fn = AsyncMock(return_value="{}")
+        service = mod.CompressionService(
+            backend=None,
+            llm_call_fn=llm_fn,
+            config=mod.CompressionConfig.from_yaml_config(100_000, injected=injected),
+            injected=injected,
+        )
+
+        messages = [{"role": "system", "content": "s", "seq": 0}] + [
+            {
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": "x" * 800,
+                "seq": i + 1,
+            }
+            for i in range(20)
+        ]
+        ctx = mod._make_minimal_ctx(
+            state={"context_window": 100_000, "messages": messages},
+            pipeline_id="pipe-band",
+        )
+        ctx._services["context_service"] = service
+
+        result = _run(plugin.execute(ctx))
+
+        assert result.state_updates.get(mod.StateKeys.ENDED) is not True
+        assert not result.skip_remaining
+        llm_fn.assert_not_called()
+
+    def test_service_exception_continues_pipeline(self) -> None:
+        """压缩服务抛异常 → 降级继续管线（不 END、不 skip）。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.5})
+        service = self._mock_service(side_effect=RuntimeError("compress llm down"))
+        ctx = mod._make_minimal_ctx(
+            state={
+                "context_window": 128_000,
+                "messages": self._trigger_messages(),
+                "llm_usage": {"input_tokens": 80_000},
+            },
+            pipeline_id="pipe-exc",
+        )
+        ctx._services["context_service"] = service
+
+        result = _run(plugin.execute(ctx))
+
+        assert result.state_updates.get(mod.StateKeys.ENDED) is not True
+        assert not result.skip_remaining
+        assert "messages" not in result.state_updates
+
+    def test_service_returns_none_continues_pipeline(self) -> None:
+        """压缩服务返回 None（如全部批次失败）→ 降级继续管线，无消息写入。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.5})
+        service = self._mock_service(return_value=None)
+        ctx = mod._make_minimal_ctx(
+            state={
+                "context_window": 128_000,
+                "messages": self._trigger_messages(),
+                "llm_usage": {"input_tokens": 80_000},
+            },
+            pipeline_id="pipe-none",
+        )
+        ctx._services["context_service"] = service
+
+        result = _run(plugin.execute(ctx))
+
+        assert result.state_updates.get(mod.StateKeys.ENDED) is not True
+        assert not result.skip_remaining
+        assert "messages" not in result.state_updates
+
+    def test_no_shrink_result_continues_without_ops(self) -> None:
+        """压缩产出未收缩 token（边界：压缩前后等量）→ 继续管线且不应用 ops。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.5})
+        messages = self._trigger_messages()
+        service = self._mock_service(return_value=[dict(m) for m in messages])
+        ctx = mod._make_minimal_ctx(
+            state={
+                "context_window": 128_000,
+                "messages": messages,
+                "llm_usage": {"input_tokens": 80_000},
+            },
+            pipeline_id="pipe-noshrink",
+        )
+        ctx._services["context_service"] = service
+
+        result = _run(plugin.execute(ctx))
+
+        assert result.state_updates.get(mod.StateKeys.ENDED) is not True
+        assert not result.skip_remaining
+        assert "messages" not in result.state_updates

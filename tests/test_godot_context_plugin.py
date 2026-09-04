@@ -1,7 +1,8 @@
 # @feature: FP-0.2.三 宿主接入 | @ci: python-coverage
 """pipeline_godot_context 插件单元测试。
 
-覆盖：推送接收→前端转发、心跳/清空/离线语义、管道注入 op 构造与幂等去重。
+覆盖：推送接收→前端转发、心跳/清空/离线语义、引用与 user 消息合并（set op）
+与双重幂等（同轮 injected_for / 消息已含引用）。
 """
 
 from tests._pipeline_plugin_path import add_plugin_dir
@@ -107,61 +108,138 @@ def test_snapshot_heartbeat_timeout_marks_offline():
     assert p.snapshot()["connected"] is False
 
 
-def test_execute_inserts_reference_after_user_message():
-    """新用户消息首轮且选中非空 → 在消息末尾（紧随 user）插入 <reference> 消息。"""
+# ═══════════════════════════════════════════════════════════
+# 管道合并语义（用户裁定 2026-09-03）：插件只有两个功能——引用推送前端、
+# 引用与 user 消息合并。不插入独立消息（insert 路径已退役）。
+# ═══════════════════════════════════════════════════════════
+
+import pytest  # noqa: E402
+
+
+def _run_execute(p, state):
+    class _Ctx:
+        pass
+
+    ctx = _Ctx()
+    ctx.state = state
+    ctx.config = {}
+    return asyncio.run(p.execute(ctx))
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        # 正常：单条 user
+        [{"role": "user", "content": "对这个加个碰撞体", "seq": 3}],
+        # 边界：多轮后最后一条 user（前面有 assistant/tool，合并目标必须仍是它）
+        [
+            {"role": "user", "content": "第一轮", "seq": 0},
+            {"role": "assistant", "content": "回复", "seq": 1, "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "content": "工具结果", "seq": 2},
+            {"role": "assistant", "content": "继续", "seq": 4},
+            {"role": "user", "content": "把这个也改一下", "seq": 5},
+        ],
+    ],
+    ids=["single-user", "last-user-after-rounds"],
+)
+def test_execute_merges_reference_into_last_user_message(messages):
+    """选中非空 → 引用块追加进最后一条 user 消息内容（set op 同 seq 替换，无 insert）。"""
     gc_plugin.set_emitter(None)
     p = gc_plugin.GodotContextPlugin()
     asyncio.run(p.handle_push(_selection_payload()))
 
-    class _Ctx:
-        state = {
-            "message_id": "m1",
-            "messages": [{"role": "user", "content": "对这个加个碰撞体"}],
-        }
-        config = {}
-
-    result = asyncio.run(p.execute(_Ctx()))
+    result = _run_execute(p, {"message_id": "m1", "messages": messages})
 
     ops = result.state_updates["messages"]["_ops"]
     assert len(ops) == 1
-    assert ops[0]["op"] == "insert"
-    assert ops[0]["at"] == 1  # 紧随最后一条 user 消息
-    msg = ops[0]["msg"]
-    assert msg["role"] == "user"
-    assert '<reference source="godot" scene="res://demo_main.tscn">' in msg["content"]
-    assert "- Player (Sprite2D) @ Node2D/Player" in msg["content"]
+    op = ops[0]
+    assert op["op"] == "set"  # 同槽位替换，非独立插入
+    last_user = [m for m in messages if m["role"] == "user"][-1]
+    assert op["seq"] == last_user["seq"]
+    merged = op["msg"]
+    # 性质断言：原文为前缀 + 引用块为后缀，一体消息
+    assert merged["content"].startswith(last_user["content"])
+    assert '<reference source="godot" scene="res://demo_main.tscn">' in merged["content"]
+    assert "- Player (Sprite2D) @ Node2D/Player" in merged["content"]
+    assert merged["role"] == "user"
     assert result.state_updates["godot.injected_for"] == "m1"
 
 
-def test_execute_dedup_on_same_message():
-    """同一条消息（引擎 merge 后）第二轮不再注入。"""
+def test_execute_merge_preserves_message_fields():
+    """合并保留原消息除 content 外的字段（metadata 等）。"""
     gc_plugin.set_emitter(None)
     p = gc_plugin.GodotContextPlugin()
     asyncio.run(p.handle_push(_selection_payload()))
 
-    state = {
-        "message_id": "m1",
-        "messages": [{"role": "user", "content": "hi"}],
-    }
+    messages = [{
+        "role": "user",
+        "content": "hi",
+        "seq": 7,
+        "metadata": {"client_message_id": "cm-1"},
+    }]
+    result = _run_execute(p, {"message_id": "m1", "messages": messages})
 
-    class _Ctx1:
-        pass
+    merged = result.state_updates["messages"]["_ops"][0]["msg"]
+    assert merged["metadata"] == {"client_message_id": "cm-1"}
+    assert merged["seq"] == 7
 
-    ctx1 = _Ctx1()
-    ctx1.state = state
-    ctx1.config = {}
-    r1 = asyncio.run(p.execute(ctx1))
-    state.update(r1.state_updates)  # 模拟引擎 merge state_updates
 
-    class _Ctx2:
-        pass
+def test_execute_skips_when_last_user_message_already_has_reference():
+    """前端拼接路径（消息已含引用）→ 不二次合并（幂等）。"""
+    gc_plugin.set_emitter(None)
+    p = gc_plugin.GodotContextPlugin()
+    asyncio.run(p.handle_push(_selection_payload()))
 
-    ctx2 = _Ctx2()
-    ctx2.state = state
-    ctx2.config = {}
-    r2 = asyncio.run(p.execute(ctx2))
+    messages = [{"role": "user", "content": "改一下\n\n<reference source=\"godot\" scene=\"res://demo_main.tscn\">\n- Player (Sprite2D) @ Node2D/Player\n</reference>", "seq": 1}]
+    result = _run_execute(p, {"message_id": "m1", "messages": messages})
 
-    assert r2.state_updates == {}
+    assert result.state_updates == {}
+
+
+def test_execute_no_user_message_is_noop():
+    """无任何 user 消息（如触发器首轮回合）→ 无处合并，不动消息。"""
+    gc_plugin.set_emitter(None)
+    p = gc_plugin.GodotContextPlugin()
+    asyncio.run(p.handle_push(_selection_payload()))
+
+    messages = [{"role": "assistant", "content": "欢迎"}]
+    result = _run_execute(p, {"message_id": "m1", "messages": messages})
+
+    assert result.state_updates == {}
+
+
+def test_execute_skips_when_user_message_lacks_seq():
+    """消息缺 seq（无法同槽寻址）→ fail-closed 跳过合并，绝不退回独立插入。"""
+    gc_plugin.set_emitter(None)
+    p = gc_plugin.GodotContextPlugin()
+    asyncio.run(p.handle_push(_selection_payload()))
+
+    messages = [{"role": "user", "content": "hi"}]
+    result = _run_execute(p, {"message_id": "m1", "messages": messages})
+
+    assert result.state_updates == {}
+
+
+def test_execute_merge_idempotent_both_guards():
+    """双幂等分支互不遮蔽：同轮（injected_for）与已含引用（contains）各自跳过。"""
+    gc_plugin.set_emitter(None)
+    p = gc_plugin.GodotContextPlugin()
+    asyncio.run(p.handle_push(_selection_payload()))
+
+    state = {"message_id": "m1", "messages": [{"role": "user", "content": "hi", "seq": 0}]}
+    r1 = _run_execute(p, state)
+    # 模拟引擎应用 set op（同 seq 替换）+ 记录 injected_for
+    for op in r1.state_updates["messages"]["_ops"]:
+        state["messages"] = [
+            op["msg"] if m.get("seq") == op["seq"] else m for m in state["messages"]
+        ]
+    state["godot.injected_for"] = r1.state_updates["godot.injected_for"]
+
+    # 同一轮再执行：injected_for 分支
+    assert _run_execute(p, state).state_updates == {}
+    # 下一轮（新 message_id）：消息已含引用，contains 分支
+    state["message_id"] = "m2"
+    assert _run_execute(p, state).state_updates == {}
 
 
 def test_execute_skips_when_no_selection_or_offline():
@@ -238,7 +316,12 @@ def _decode_http(resp: dict) -> dict:
 
 
 def _http(method: str, path: str, raw_body: str = "", query: dict | None = None) -> dict:
-    kw = {"path": path, "method": method, "plugin_id": "pipeline_godot_context", "raw_body": raw_body}
+    kw: dict[str, object] = {
+        "path": path,
+        "method": method,
+        "plugin_id": "pipeline_godot_context",
+        "raw_body": raw_body,
+    }
     if query is not None:
         kw["query"] = query
     return asyncio.run(server_mod.http_handle(**kw))
@@ -371,8 +454,8 @@ def test_dismiss_empty_selection_is_noop():
     assert emitter.calls == []
 
 
-def test_execute_skips_injection_after_dismiss():
-    """dismiss 后管道注入停止（清了卡片，消息不再带 <reference>）。"""
+def test_execute_skips_merge_after_dismiss():
+    """dismiss 后引用合并停止（清了卡片，消息不再带 <reference>）。"""
     gc_plugin.set_emitter(None)
     p = gc_plugin.GodotContextPlugin()
     asyncio.run(p.handle_push(_selection_payload()))

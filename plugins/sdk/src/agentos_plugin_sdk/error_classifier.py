@@ -96,6 +96,18 @@ _RATE_LIMIT_KEYWORDS = (
     "频率",
 )
 
+# litellm 兜底包装（APIConnectionError）载荷里的结构化 400 证据。
+# provider 返回无专属映射的错误体时 litellm 统一 raise APIConnectionError
+# 而非 BadRequestError（如 MiniMax JSON-RPC 风格 400），按类型名归 NETWORK
+# 会把参数错误当上游抖动退避重试——载荷带这些证据必须按 BAD_REQUEST
+# 快速失败（不可重试）。
+_BAD_REQUEST_DISGUISE_KEYWORDS = (
+    "bad_request_error",  # OpenAI/MiniMax 风格 error.type
+    "invalid_request_error",  # OpenAI 风格 error.type
+    '"http_code":"400"',  # MiniMax 特有字段
+    '"http_code": "400"',  # 同上（带空格变体）
+)
+
 
 def _extract_retry_after(exc: BaseException) -> float | None:
     """从异常里提取 Retry-After 建议秒数。
@@ -234,6 +246,10 @@ def classify_error(exc: BaseException) -> ErrorInfo:
         return ErrorInfo(ErrorKind.NETWORK, retry_after, exc)
 
     if "APIConnectionError" in type_name:
+        # litellm 兜底映射伪装：载荷带结构化 400 证据的是参数错误，
+        # 快速失败（不可重试），不当上游抖动退避重试。
+        if any(kw in msg for kw in _BAD_REQUEST_DISGUISE_KEYWORDS):
+            return ErrorInfo(ErrorKind.BAD_REQUEST, None, exc)
         return ErrorInfo(ErrorKind.NETWORK, retry_after, exc)
 
     if "ServiceUnavailableError" in type_name:

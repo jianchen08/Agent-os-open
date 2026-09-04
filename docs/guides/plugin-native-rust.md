@@ -46,47 +46,68 @@ manifest（参考 `plugins/shared/pipeline/output/sensitive_checker/plugin.json`
 
 ## 3. ABI 契约（`kernel/crates/native-sdk/src/lib.rs`）
 
-- 唯一导出符号：`agentos_plugin_create`，返回裸指针（双重 Box 跨 C-ABI 传递 fat trait 对象）。
-- 实现 `PipelinePlugin` trait：`fn execute(&self, ectx: &ExecContext) -> Result<String, String>`，**返回 state_updates 的 JSON 字符串**。
-- `ExecContext`：`ctx`（`state_json` / `config_json` / `tenant_id` / `session_id` / `task_id` / `pipeline_id` / `tool_call_json`——`tool_call_json` 含 `{"name": ...}` 即工具调用语义，返回 `{success, data}` 信封）+ `host`（`HostServices`，`call_capability(capability, method, params_json)` 反调内核，与 sidecar 走同一 router）。
+- 唯一导出符号：`agentos_plugin_create`（契约常量 `CREATE_FN_NAME`），经 native-sdk 的 `plugin_into_raw` 把 trait 对象装箱为裸指针，内核 dlopen 后调它取对象。
+- 实现 `PipelinePlugin` trait：`fn execute(&self, ectx: &ExecContext) -> Result<&str, &str>`，**返回 state_updates JSON 的借用**（实现方自持缓冲，如 `&self` 内的 `Mutex<String>`/`UnsafeCell<String>`，借用生命周期绑定 `&self`）。
+- **跨分配器契约（ADR `2026-09-01-native-ffi-cross-heap-free-fix.md`）**：exe 与 cdylib 全局分配器可能不同，跨边界**零所有权转移**——禁止返回 `String`（含 `Err` 分支，错误消息同样写自持缓冲借 `&str`）；调用方（内核）对返回串立即拷贝消费。
+- `ExecContext`：`ctx`（`state_json` / `config_json` / `tenant_id` / `session_id` / `task_id` / `pipeline_id` / `tool_call_json`——`tool_call_json` 含 `{"name": ...}` 即工具调用语义，返回 `{success, data}` 信封）+ `host`（`HostServices`，`call_capability(capability, method, params_json) -> Result<&str, &str>` 反调内核，与 sidecar 走同一 router，对称借用协议）。
 - 不用 abi_stable：靠 rustc 版本锁定保证 vtable 一致——**不要用与内核不同的工具链版本编译**。
 
 ## 4. 完整示例（`plugins/shared/pipeline/output/sensitive_checker/src/lib.rs` 节选）
 
 ```rust
+use std::collections::HashMap;
+
 use agentos_native_sdk::{plugin_into_raw, ExecContext, PipelinePlugin};
 use serde_json::{Map, Value};
 
-pub struct SensitiveChecker;
+/// 跨分配器契约：execute 结果存自持缓冲（dll 堆）借 `&str` 给内核，不返回
+/// String（内核 drop = 跨堆 free UB）。execute 在内核 blocking 线程串行调用。
+pub struct SensitiveChecker {
+    out_buf: std::cell::UnsafeCell<String>,
+}
 
 impl PipelinePlugin for SensitiveChecker {
-    fn execute(&self, ectx: &ExecContext) -> Result<String, String> {
+    fn execute(&self, ectx: &ExecContext) -> Result<&str, &str> {
         let state = ectx.ctx.state_value();
         let config = ectx.ctx.config_value();
 
         let enabled = config.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
         if !enabled {
-            return serde_json::to_string(&serde_json::json!({})).map_err(|e| e.to_string());
+            return Ok(self.write_out("{}"));
         }
         let mask = config.get("mask").and_then(|v| v.as_str()).unwrap_or("***");
 
         // 扫描 state["tool_results"] 中的敏感模式并脱敏 ...
-        let mut updates = serde_json::Map::new();
+        let mut updates: HashMap<String, Value> = HashMap::new();
         // updates.insert("tool_results".into(), ...);
         // updates.insert("sensitive_detected".into(), Value::Bool(true));
 
-        serde_json::to_string(&updates).map_err(|e| e.to_string())
+        // Err 分支同契约：错误消息也写自持缓冲借 &str，禁止返回 String
+        match serde_json::to_string(&updates) {
+            Ok(json) => Ok(self.write_out(&json)),
+            Err(e) => Err(self.write_out(&format!("serialize state_updates: {e}"))),
+        }
+    }
+}
+
+impl SensitiveChecker {
+    /// 写自持缓冲并借出（&str 绑 &self，调用方立即拷贝消费）。
+    fn write_out(&self, json: &str) -> &str {
+        let buf = unsafe { &mut *self.out_buf.get() };
+        buf.clear();
+        buf.push_str(json);
+        buf.as_str()
     }
 }
 
 /// 构造函数（extern "C"）：内核 dlopen 后调它拿 trait 对象裸指针。
 #[no_mangle]
 pub extern "C" fn agentos_plugin_create() -> *mut () {
-    plugin_into_raw(SensitiveChecker)
+    plugin_into_raw(SensitiveChecker::new())
 }
 ```
 
-业务代码零 unsafe——FFI 全部由 native-sdk 的 `plugin_into_raw` 封装。源文件尾部带 `#[cfg(test)]` 行为契约测试（脱敏正则、state 写回条件、disabled 空转），`cargo test` 直接跑。
+FFI 装箱全部由 native-sdk 的 `plugin_into_raw` 封装；插件内唯一的 unsafe 是自持缓冲的内部可变性（`Send`/`Sync` 担保注释说明安全性）。源文件尾部带 `#[cfg(test)]` 行为契约测试（脱敏正则、state 写回条件、disabled 空转），`cargo test` 直接跑。
 
 ## 5. 生命周期契约
 

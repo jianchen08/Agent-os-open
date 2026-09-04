@@ -82,5 +82,7 @@ plugins:
     enabled: false
   pipeline_stuck_detector:
     enabled: false
+  pipeline_context_window_guard:
+    enabled: true
 defaults:
   enabled: true

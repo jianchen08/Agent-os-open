@@ -371,6 +371,7 @@
         "props": {
           "title": "创建触发器",
           "eventName": "trigger_setup_tool.created",
+          "createSession": true,
           "successText": "触发器已创建，列表已刷新",
           "fields": [
             {
@@ -378,7 +379,7 @@
               "type": "select",
               "label": "目标管道",
               "datasourceUri": "/ext/trigger_setup_tool/pipelines",
-              "description": "触发时向该管道注入消息；留空则提交给当前激活管道"
+              "description": "触发时向该管道注入消息；留空则提交给当前激活管道，无激活管道可先新建会话"
             },
             {
               "name": "trigger_type",
@@ -427,6 +428,10 @@
               "label": "延迟秒数",
               "min": 1,
               "max": 86400,
+              "requiredWhen": {
+                "field": "trigger_type",
+                "equals": "delay"
+              },
               "description": "类型=延迟 时必填（1-86400）"
             },
             {
@@ -434,6 +439,10 @@
               "type": "input",
               "label": "定时时间",
               "placeholder": "2026-08-27T15:00:00",
+              "requiredWhen": {
+                "field": "trigger_type",
+                "equals": "schedule"
+              },
               "description": "类型=定时 时必填，ISO 8601 格式，最远 7 天"
             },
             {
@@ -441,6 +450,10 @@
               "type": "input",
               "label": "周期间隔",
               "placeholder": "30s / 5m / 1h / 1d",
+              "requiredWhen": {
+                "field": "trigger_type",
+                "equals": "interval"
+              },
               "description": "类型=周期 时必填，最小 10 秒，最大 30 天"
             },
             {
@@ -448,6 +461,10 @@
               "type": "input",
               "label": "监听事件",
               "placeholder": "task_completed",
+              "requiredWhen": {
+                "field": "trigger_type",
+                "equals": "event"
+              },
               "description": "类型=事件 时必填，如 task_completed / task_failed"
             },
             {
@@ -455,6 +472,10 @@
               "type": "input",
               "label": "条件表达式",
               "placeholder": "task.status == 'completed'",
+              "requiredWhen": {
+                "field": "trigger_type",
+                "equals": "condition"
+              },
               "description": "类型=条件 时必填，对管道 state 聚合行求值"
             },
             {

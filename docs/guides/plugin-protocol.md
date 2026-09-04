@@ -70,7 +70,7 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 | `capabilities` | object | ✅ | 能力声明，见 [§2.2](#22-capabilities-子字段)。 |
 | `requires_services` | array | — | 插件间耦合唯一轴：声明需要的能力角色（`ns` / `ns.method`），见 [§2.3](#23-requires_services插件间依赖)。 |
 | `permissions` | object | — | 权限声明（文件系统 / 网络 / 环境变量 / 系统调用）。默认全空。 |
-| `error_policy` | enum | — | 已收敛为唯一值 `retry` 并整体移除（ADR 2026-08-18），不要再声明。见 [§2.4](#24-error_policy已收敛不再声明)。 |
+| `error_policy` | enum | — | **已整体移除，不要再声明**（ADR 2026-08-18）。内核 `PluginManifest` 已无此字段，`deny_unknown_fields` 下声明任何值都会拒载。见 [§2.4](#24-error_policy已收敛不再声明)。 |
 | `priority` | int | — | 优先级，数字越小越靠前。默认 `100`。管道插件执行顺序按此排序。 |
 | `pipeline_role` | enum | —* | 仅 `plugin_type=pipeline` 时必填：`input` / `core` / `output`。 |
 | `description` | string | — | 一句话描述（展示用）。 |
@@ -89,7 +89,6 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 | `activation` | enum | — | 激活策略：`eager`（启动即 load）/ `lazy`（首次调用再 load，默认）/ `manual`（仅用户显式启动）。 |
 | `persistent_fields` | array | — | 声明需持久化的 state 累计型标量键（如 `track.total_tokens`），引擎 merge 时投影落库。 |
 | `export_fields` | array | — | state 出口白名单（支持 `前缀.*` 通配）；未声明且不在内核基线 = 不出口（默认拒绝）。 |
-| `tool_prefix` | string | — | 工具名前缀，避免多插件工具名冲突时 McpBridge 拼错工具名。 |
 
 > \* `entry` 对 `composite` 类型可空；`pipeline_role` 仅 pipeline 类型有意义；`native` 仅 `in_process` 必填。
 > \*\* `invoke_entry` 对 `plugin_type=pipeline` 必填（启动期聚合校验）。
@@ -139,17 +138,16 @@ manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/trait
 
 ### 2.4 error_policy（已收敛，不再声明）
 
-> **ADR 2026-08-18**：0.2 引擎**不再按 `error_policy` 分发行为**，且枚举已收敛为
-> 唯一值 `retry`（`abort` / `skip` / `fallback` 已删除）。运行时错误处理由
+> **ADR 2026-08-18**：0.2 引擎**不再按 `error_policy` 分发行为**，该字段已从内核
+> `PluginManifest` 契约中整体移除。运行时错误处理由
 > 引擎/编排层按错误类型自动决定：
 > - 瞬态错误（sidecar 进程崩溃 `PLUGIN_CRASHED`）→ `invoker.with_transparent_recovery`
 >   force_unload + respawn + **重试一次**；
 > - 工具失败结果 → tool_core 回喂 LLM 自我修正；
 > - 非瞬态错误 → 引擎 warn + 继续，跳过/终止决策上抛编排层。
 >
-> 插件**不应再声明该字段**：manifest 的 `error_policy` 字段为可选（serde default），
-> 已从全部冻结 manifest 移除，缺省即 `retry`。声明任何非 `retry` 值将因枚举收敛
-> 在加载期校验失败（fail-closed）。
+> 插件**不应再声明该字段**：manifest 无 `error_policy` 字段，`deny_unknown_fields`
+> 下声明任何值（包括 `retry`）都会在加载期被拒（fail-closed）。
 
 ### 2.5 requires_content
 
@@ -380,7 +378,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
 
 ### 第 5 步：让内核发现它
 
-把插件目录放到用户根（或内置根），重启内核。日志应出现：
+把插件目录放到用户根（或内置根）——watcher 自动发现并注册（秒级），**无需重启内核**；日志应出现：
 
 ```
 Manifest validated: id=echo_tool type=Tool host=Sidecar path=.../echo_tool/plugin.json
@@ -524,7 +522,7 @@ if __name__ == "__main__":
 | pipeline / input | `plugins/shared/pipeline/input/` | 22 |
 | pipeline / core | `plugins/shared/pipeline/core/` | 2 |
 | pipeline / output | `plugins/shared/pipeline/output/` | 14 |
-| pipeline（根下直挂） | `plugins/shared/pipeline/<name>/` | 4 |
+| shared 根下直挂（db_admin / metrics_admin / native_test / user_admin） | `plugins/shared/<name>/` | 4 |
 | system（含连接器/通道/系统服务） | `plugins/shared/system/` | 29 |
 | tools | `plugins/shared/tools/`（18 个顶层插件 + `external_mcp/` 下 8 个预置接入清单） | 26 |
 | **合计** | | **97** |

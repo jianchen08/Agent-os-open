@@ -30,6 +30,7 @@ import {
 import { formatFileSize } from '@/utils/format'
 import { ChatInputActions } from './ChatInputActions'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
+import { clearGodotSelection, getGodotSelection } from '@/services/godot/selectionBridge'
 import { VoiceInputButton } from './VoiceInputButton'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
 
@@ -466,6 +467,21 @@ export const ChatInput = ({
       return
     }
 
+    /** Godot 选中引用：随消息拼接发送（同消息渲染），发送即消耗（卡片消失，
+        重新点选物品恢复） */
+    const godotSel = getGodotSelection()
+    let content = trimmedText
+    if (godotSel.items.length > 0) {
+      const lines = godotSel.items.map((it) => {
+        let line = `- ${it.name} (${it.type}) @ ${it.path}`
+        if (it.position) line += ` [position=${it.position}]`
+        return line
+      })
+      const scenePath = godotSel.scene?.path ?? ''
+      const refBlock = ['<reference source="godot" scene="' + scenePath + '">', ...lines, '</reference>'].join('\n')
+      content = content + '\n\n' + refBlock
+    }
+
     const allAttachments: Attachment[] = [...attachments]
 
     pendingFiles
@@ -482,13 +498,16 @@ export const ChatInput = ({
       })
 
     const params: SendMessageParams = {
-      content: trimmedText,
+      content: content,
       attachments: allAttachments.length > 0 ? allAttachments : undefined,
       enableThinking: STRENGTH_TO_ENABLE[currentThinkingStrength],
       thinkingStrength: currentThinkingStrength,
     }
 
     onSendMessage(params)
+    if (godotSel.items.length > 0) {
+      void clearGodotSelection()
+    }
     setText('')
     textRef.current = ''
     interimVoiceStartRef.current = -1

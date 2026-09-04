@@ -64,7 +64,8 @@
                   "user_id",
                   "run_id",
                   "execution_context",
-                  "message_id"
+                  "message_id",
+                  "run_status"
                 ]
               }
             }

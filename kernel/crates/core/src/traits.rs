@@ -917,6 +917,12 @@ pub struct StepCapability {
 /// - `path`：相对 `config/` 根的路径（如 `config/models/llm.yaml`）；
 /// - `label`：前端展示用的名称。
 ///
+/// 单一真值形态（2026-09-02 用户裁定，G2 校验执法）：配置真值全系统只有一份——
+/// - **引用形态**（`path` 非空）：真值在 `path` 指向的文件，`fields` 仅表单
+///   schema，**禁止声明 `default`**（manifest 默认值 + 文件值并存 = 双真值错误）；
+/// - **内联形态**（`path` 省略）：真值即 `fields.default`（存在 manifest），
+///   PUT 保存直接写回 manifest，不落独立配置文件。
+///
 /// path 安全校验见 loader 的 B1 实现（归一化 + 落 config/ 子树 + denylist）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfigFileMapping {
@@ -932,8 +938,14 @@ pub struct ConfigFileMapping {
     pub settings: Option<bool>,
     /// 相对 config/ 根的文件路径（含 config/ 前缀或相对形式均可，loader 归一化）。
     ///
+    /// 省略（空串）= 内联形态：配置真值即 `fields.default`（存在 manifest，
+    /// 保存经 PUT 直接写回 manifest）；非空 = 引用形态：真值在文件，`fields`
+    /// 仅表单 schema（禁声明 `default`，G2 校验拦截双真值）。
+    ///
     /// `target: "env"` 的条目例外：path 不指向 config/ 子树，而表示项目根
-    /// `.env`（GAP-4 外部 MCP 源 key 的声明驱动配置入口）。
+    /// `.env`（GAP-4 外部 MCP 源 key 的声明驱动配置入口）；env 条目必须
+    /// 声明 path（写入目标语义不可省）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub path: String,
     /// 前端展示名称。
     pub label: String,
@@ -941,10 +953,12 @@ pub struct ConfigFileMapping {
     /// 缺省 = 写进 path 指向的插件配置文件（既有 YAML 语义）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    /// 字段级声明：`target: "env"` 时为 env 密钥表单（`name` 须与
-    /// `mcp.endpoint.auth.value` / `env` 里的 `${VAR}` 引用一致，loader 交叉
-    /// 核对，漂移启动期暴露）；YAML target 时为类型化表单声明（UI 词汇表经
-    /// `EnvConfigField::extra` 透传，前端 RJSF 表单消费，内核不解释）。
+    /// 字段级声明：`target: "env"` 时为 env 密钥表单（`name` 对应
+    /// `mcp.endpoint.auth.value` / `env` 里的 `${VAR}` 引用；未手写声明的
+    /// 引用由内核在装载期自动生成条目，见 loader 的
+    /// auto_generate_env_declarations，引用本身即声明）；YAML target 时为
+    /// 类型化表单声明（UI 词汇表经 `EnvConfigField::extra` 透传，前端 RJSF
+    /// 表单消费，内核不解释）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<EnvConfigField>,
 }

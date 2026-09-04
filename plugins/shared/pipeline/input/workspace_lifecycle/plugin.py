@@ -13,15 +13,17 @@
   实际项目目录，不是工作区路径）。幂等：state 已有 workspace 则跳过。
   任务管道无降级路径：服务不可用/创建失败/默认根解析失败一律显式报错
   （PluginResult.error，引擎记入 _plugin_errors 可见面），不落假工作空间。
-- **exit（finalize）**：有任务且 ws_meta.mode=worktree 时调
-  `merge_worktree_before_complete` 合并回源空间；否则 no-op。失败留痕不阻断。
+- **exit（finalize）**：**零操作**（2026-09-04 用户裁定）。合并/清理 worktree 的
+  唯一合法触发点 = 评估通过（task_evaluate 完成门控 `_try_merge_before_complete`，
+  合并+清理一体执行）；run 结束 ≠ 任务终态——exit 若在此合并/拆工作区，续跑轮
+  会踩在被拆的空壳上（598b4ad4 实锤）。失败即失败的语义由完成门控承载，
+  exit 不再做任何合并/删除动作。
 
 与隔离解耦：本插件只管"在哪个目录执行"（拓扑），执行环境（容器/宿主）由
 environment_lifecycle / isolation_guard 决策。
 
 State 命名空间：
     - workspace / ws_meta：init 阶段写入
-    - workspace_finalized：exit 阶段写入
 """
 
 from __future__ import annotations
@@ -265,13 +267,24 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
             if state.get(k) is not None
         }
         logger.info("[WorkspaceLifecycle] bootstrap state keys=%s", _dbg)
-        if state.get("workspace"):
+        ws_state_path = str(state.get("workspace") or "")
+        if ws_state_path and Path(ws_state_path).is_dir():
             logger.debug(
                 "[WorkspaceLifecycle] workspace 已就位，跳过创建 | workspace=%s",
                 state["workspace"],
             )
             await self._mirror_inherited_ws_meta(state)
             return PluginResult()
+        if ws_state_path:
+            # state 里的 workspace 指向不存在的目录（worktree 被外部清理/
+            # 目录被删）——禁止静默跳过：续跑轮会踩在被拆的空壳上（598b4ad4
+            # 实锤）。落空即重建，走下方创建段按 execution_context 重新分叉。
+            logger.warning(
+                "[WorkspaceLifecycle] state.workspace 指向不存在的目录，重建 | path=%s",
+                ws_state_path,
+            )
+        else:
+            await self._mirror_inherited_ws_meta(state)
 
         ec = state.get("execution_context")
         ws_spec = ec.get("workspace") if isinstance(ec, dict) else None
@@ -409,11 +422,14 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
                 "is_root": not _parent_id,
                 "workspace_mode": mode,
                 "isolation_mode": (ec.get("isolation") or {}).get("level", ""),
-                # 显式坐标 = 调用方显式 workspace 或项目挂靠（task_submit 解析
-                # 项目时恒把 workspace 覆写为项目文件夹）——两者都不得被
-                # 子任务"继承父工作空间"缺省覆盖。
-                "_has_explicit_workspace": bool(ws_spec.get("explicit"))
-                or bool(state.get("task.parent_project_id")),
+                # 显式坐标 = 调用方显式声明（execution_context.workspace.explicit，
+                # task_submit 只在调用方显式指定 workspace 或显式挂靠项目时置位；
+                # L2/L3 沿父链继承的项目挂靠不置位）。继承型子任务的落位由出生
+                # 契约的父链坐标（lineage.parent_ws_meta）决定——继承直接上级的
+                # 工作空间；父无任务工作空间（主会话派的根任务显式挂靠等）才按
+                # 声明拓扑在项目文件夹上建自己的工作区（2026-09-03 用户裁定，
+                # 收窄 2026-08-30「挂靠即显式锚」至显式挂靠）。
+                "_has_explicit_workspace": bool(ws_spec.get("explicit")),
                 "_inherit_workspace_resolved": False,
                 "_inherited_parent_ws_meta": _inherited_ws_meta,
             }
@@ -538,36 +554,19 @@ class WorkspaceLifecyclePlugin(IInputPlugin):
     # ── exit：合并/清理（服务自持，真实执行）──────────────────
 
     async def _finalize(self, ctx: PluginContext) -> PluginResult:
-        """工作空间收尾：worktree 合并回源空间。
+        """工作空间收尾：**零操作**（2026-09-04 用户裁定）。
 
-        有任务且 ws_meta.mode=worktree → 调服务 merge_worktree_before_complete；
-        其余（plain/主会话）no-op。失败留痕不阻断（收尾类操作不得让 run 翻车）。
+        合并/清理 worktree 的唯一合法触发点 = 评估通过（task_evaluate 完成门控
+        `_try_merge_before_complete`，合并+清理一体）。run 结束 ≠ 任务终态：
+        exit 在此合并/拆工作区，同任务续跑轮会重新 bootstrap 到被拆的空壳路径
+        （598b4ad4 实锤：23:51 拆除、23:51:18 续跑踩壳、产物链全断）。故 exit
+        不做任何合并/删除动作。
         """
-        state = ctx.state
-        ws_meta = state_fields.optional_dict(state.get("ws_meta"), field="ws_meta")
-        if ws_meta.get("mode") != "worktree":
-            return PluginResult()
-        task_id = state.get("task.id") or ""
-        if not task_id:
-            return PluginResult()
-        manager = self._get_manager()
-        if manager is None:
-            return PluginResult(state_updates={"workspace_finalized": False})
-        try:
-            merged = await ctx_await(manager.merge_worktree_before_complete, task_id)
-            logger.info(
-                "[WorkspaceLifecycle] exit 合并 worktree | task=%s | merged=%s",
-                task_id,
-                merged,
-            )
-            return PluginResult(state_updates={"workspace_finalized": True})
-        except Exception as exc:
-            logger.warning(
-                "[WorkspaceLifecycle] exit 合并失败（留痕不阻断）| task=%s | error=%s",
-                task_id,
-                exc,
-            )
-            return PluginResult(state_updates={"workspace_finalized": False})
+        logger.debug(
+            "[WorkspaceLifecycle] exit 零操作（合并归评估通过门控）| task=%s",
+            ctx.state.get("task.id") or "-",
+        )
+        return PluginResult()
 
 
 async def ctx_await(fn: Any, *args: Any, **kwargs: Any) -> Any:

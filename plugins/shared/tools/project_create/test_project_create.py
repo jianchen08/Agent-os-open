@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -125,7 +127,12 @@ class TestProjectCreate:
 
 
 class TestManifestSchemaLockstep:
-    """plugin.json 声明 ↔ 代码实现 schema 锁步（G2 一致性闸的测试面）。"""
+    """plugin.json 声明 ↔ 代码实现 schema 锁步（G2 一致性闸的测试面）。
+
+    input_schema 真值 = config/tools/project_create.yaml（类型映射说明与枚举
+    由配置生成），manifest 是生成结果的同步投影：配置改动不同步 manifest =
+    本测试红 + G2 启动 SchemaMismatch 拒绝，双保险防漂移。
+    """
 
     def test_declared_input_schema_matches_implementation(self) -> None:
         import json
@@ -136,4 +143,197 @@ class TestManifestSchemaLockstep:
         declared = manifest["capabilities"]["tools"][0]["input_schema"]
         mod = _load_module()
 
-        assert declared == mod._PROJECT_INPUT_SCHEMA
+        assert declared == mod._build_input_schema(mod._load_type_config())
+
+
+def _godot_config(source_root: Path) -> str:
+    """隔离测试用的类型配方表（addon 源指向传入目录）。"""
+    return (
+        "project_types:\n"
+        "  godot:\n"
+        "    schema_summary: Godot 4 测试配方\n"
+        "    detect_file: project.godot\n"
+        "    addons_source: " + source_root.as_posix() + "\n"
+        "    addons:\n"
+        "      - agentos\n"
+        "      - godot_mcp\n"
+        "    project_file: project.godot\n"
+        '    scaffold: "config_version=5\\n\\n[application]\\n\\nconfig/name=\\\"{title}\\\"\\n"\n'
+        "    enable_section: editor_plugins\n"
+        "    enable_entries:\n"
+        "      - res://addons/agentos/plugin.cfg\n"
+        "      - res://addons/godot_mcp/plugin.cfg\n"
+    )
+
+
+@pytest.fixture
+def godot_env(env: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """隔离类型配方：addon 源与配置文件均落 tmp，不触真实仓库 config/hosts。"""
+    src_root = tmp_path / "addons_src"
+    for name in ("agentos", "godot_mcp"):
+        addon_dir = src_root / name
+        addon_dir.mkdir(parents=True)
+        (addon_dir / "plugin.cfg").write_text(f'[plugin]\nname="{name}"\n', encoding="utf-8")
+    cfg = tmp_path / "project_create.yaml"
+    cfg.write_text(_godot_config(src_root), encoding="utf-8")
+    monkeypatch.setattr(_load_module(), "_TYPE_CONFIG_PATH", cfg)
+    return {**env, "cfg": cfg}
+
+
+class TestProjectTypeInit:
+    """项目类型出生初始化：路由（显式/auto）→ 装 addon → 清单脚手架 → 启用合并。"""
+
+    async def test_explicit_godot_installs_addons_and_enables(
+        self, godot_env: dict[str, Any]
+    ) -> None:
+        """显式 godot：双 addon 落位 + 清单脚手架 + enabled 双条目。"""
+        target = godot_env["ws_base"] / "g1"
+        r = await _tool().execute(
+            {"goal": "G游戏", "path": str(target), "project_type": "godot"}
+        )
+        assert r.success, r.error
+        assert r.output["project_type"] == "godot"
+        init = r.output["init"]
+        assert init["addons_installed"] == ["agentos", "godot_mcp"]
+        assert init["project_file_created"] is True
+        assert init["enabled_added"] == [
+            "res://addons/agentos/plugin.cfg",
+            "res://addons/godot_mcp/plugin.cfg",
+        ]
+        text = (target / "project.godot").read_text(encoding="utf-8")
+        assert 'config/name="G游戏"' in text
+        assert (
+            'enabled=PackedStringArray("res://addons/agentos/plugin.cfg", '
+            '"res://addons/godot_mcp/plugin.cfg")' in text
+        )
+        assert (target / "addons" / "agentos" / "plugin.cfg").is_file()
+
+    async def test_auto_detects_existing_project_and_merges_enabled(
+        self, godot_env: dict[str, Any]
+    ) -> None:
+        """auto：已有 project.godot 即路由；enabled 并集保序（既有在前新增在后）。"""
+        target = godot_env["ws_base"] / "g2"
+        target.mkdir(parents=True)
+        (target / "project.godot").write_text(
+            'config_version=5\n\n[application]\n\nconfig/name="已存在"\n'
+            '\n[editor_plugins]\n\nenabled=PackedStringArray("res://addons/mine/plugin.cfg")\n',
+            encoding="utf-8",
+        )
+        r = await _tool().execute({"goal": "G2", "path": str(target)})
+        assert r.success, r.error
+        assert r.output["project_type"] == "godot"
+        init = r.output["init"]
+        assert init["addons_installed"] == ["agentos", "godot_mcp"]
+        assert init["project_file_created"] is False
+        assert init["enabled_added"] == [
+            "res://addons/agentos/plugin.cfg",
+            "res://addons/godot_mcp/plugin.cfg",
+        ]
+        text = (target / "project.godot").read_text(encoding="utf-8")
+        m = re.search(r"enabled=PackedStringArray\(([^)]*)\)", text)
+        assert m is not None
+        entries = re.findall(r'"([^"]+)"', m.group(1))
+        assert entries[0] == "res://addons/mine/plugin.cfg"
+        assert len(entries) == len(set(entries)) == 3
+
+    async def test_merges_into_existing_section_without_enabled_key(
+        self, godot_env: dict[str, Any]
+    ) -> None:
+        """清单已有 editor_plugins 段但无 enabled 键：段内补行，不另起重复段。"""
+        target = godot_env["ws_base"] / "g7"
+        target.mkdir(parents=True)
+        (target / "project.godot").write_text(
+            'config_version=5\n\n[application]\n\nconfig/name="S"\n\n[editor_plugins]\n\n',
+            encoding="utf-8",
+        )
+        r = await _tool().execute({"goal": "G7", "path": str(target)})
+        assert r.success, r.error
+        text = (target / "project.godot").read_text(encoding="utf-8")
+        assert text.count("[editor_plugins]") == 1
+        assert (
+            'enabled=PackedStringArray("res://addons/agentos/plugin.cfg", '
+            '"res://addons/godot_mcp/plugin.cfg")' in text
+        )
+
+    async def test_reuse_rerun_is_idempotent(self, godot_env: dict[str, Any]) -> None:
+        """同路径重跑（自愈口）：created=False、零重复安装、零新增启用。"""
+        target = godot_env["ws_base"] / "g3"
+        r1 = await _tool().execute(
+            {"goal": "G3", "path": str(target), "project_type": "godot"}
+        )
+        r2 = await _tool().execute(
+            {"goal": "G3", "path": str(target), "project_type": "godot"}
+        )
+        assert r1.success and r2.success, r2.error
+        assert r2.output["created"] is False
+        init2 = r2.output["init"]
+        assert init2["addons_installed"] == []
+        assert init2["addons_present"] == ["agentos", "godot_mcp"]
+        assert init2["project_file_created"] is False
+        assert init2["enabled_added"] == []
+        assert init2["committed"] is False
+        log = subprocess.run(
+            ["git", "log", "--oneline"], cwd=str(target), capture_output=True, text=True
+        )
+        assert len(log.stdout.strip().splitlines()) == 1
+
+    async def test_init_commits_born_state(self, godot_env: dict[str, Any]) -> None:
+        """出生提交：初始化产物（addon/清单）入库——worktree 分叉从此有文件。"""
+        target = godot_env["ws_base"] / "g8"
+        r = await _tool().execute(
+            {"goal": "G8", "path": str(target), "project_type": "godot"}
+        )
+        assert r.success, r.error
+        assert r.output["init"]["committed"] is True
+        log = subprocess.run(
+            ["git", "log", "--oneline"], cwd=str(target), capture_output=True, text=True
+        )
+        assert len(log.stdout.strip().splitlines()) == 1
+        ls = subprocess.run(
+            ["git", "ls-files"], cwd=str(target), capture_output=True, text=True
+        )
+        tracked = ls.stdout.replace("\\", "/")
+        assert "addons/agentos/plugin.cfg" in tracked
+        assert "addons/godot_mcp/plugin.cfg" in tracked
+        assert "project.godot" in tracked
+
+    async def test_unknown_type_fails_closed(self, godot_env: dict[str, Any]) -> None:
+        """未声明类型：整体报错且不落任何 addon（禁止静默半装）。"""
+        target = godot_env["ws_base"] / "g4"
+        r = await _tool().execute(
+            {"goal": "G4", "path": str(target), "project_type": "unity"}
+        )
+        assert not r.success
+        assert "未知项目类型" in r.error
+        addons = target / "addons"
+        assert not addons.is_dir() or not any(addons.iterdir())
+
+    async def test_plain_project_no_routing(self, env: dict[str, Any]) -> None:
+        """普通项目（无类型无清单文件）：行为与既有契约一致，init 为 null。"""
+        target = env["ws_base"] / "p1"
+        r = await _tool().execute({"goal": "普通", "path": str(target)})
+        assert r.success, r.error
+        assert r.output["project_type"] == ""
+        assert r.output["init"] is None
+
+    async def test_missing_addon_source_fails(self, godot_env: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """addon 安装源缺失：报错指名路径（fail-closed），不假成功。"""
+        broken = tmp_path / "broken.yaml"
+        broken.write_text(_godot_config(tmp_path / "nonexistent_src"), encoding="utf-8")
+        monkeypatch.setattr(_load_module(), "_TYPE_CONFIG_PATH", broken)
+        r = await _tool().execute(
+            {"goal": "G5", "path": str(godot_env["ws_base"] / "g5"), "project_type": "godot"}
+        )
+        assert not r.success
+        assert "addon 安装源缺失" in r.error
+
+    async def test_missing_config_with_explicit_type_fails(
+        self, env: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """配置缺失 + 显式指定类型：报错（禁止静默忽略调用方意图）。"""
+        monkeypatch.setattr(_load_module(), "_TYPE_CONFIG_PATH", tmp_path / "absent.yaml")
+        r = await _tool().execute(
+            {"goal": "G6", "path": str(env["ws_base"] / "g6"), "project_type": "godot"}
+        )
+        assert not r.success
+        assert "未知项目类型" in r.error and "配置缺失" in r.error

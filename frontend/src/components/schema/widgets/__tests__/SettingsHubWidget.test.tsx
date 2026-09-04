@@ -102,6 +102,15 @@ describe('SettingsHubWidget — 声明驱动（contributes.pages space=settings�
     contributionRegistry.clear()
     widgetRegistry.clear()
     mockGetSchema.mockResolvedValue({
+      plugin_configs: [
+        {
+          plugin_id: 'ext-plugin',
+          plugin_name: '扩展插件',
+          config_files: [
+            { id: 'default', path: 'config/ext.yaml', label: '扩展配置文件' },
+          ],
+        },
+      ],
       plugin_contributes: [
         {
           plugin_id: 'ext-plugin',
@@ -149,6 +158,20 @@ describe('SettingsHubWidget — 声明驱动（contributes.pages space=settings�
       expect(screen.getByTestId('ext-widget-rendered')).toBeInTheDocument()
     })
     expect(screen.getByText('扩展设置内容可见')).toBeInTheDocument()
+  })
+
+  it('分组排序：内核设置 → 插件页面 → 插件配置（插件页面在普通配置之上）', async () => {
+    renderWithProviders(<SettingsHubWidget />)
+
+    await waitFor(() => {
+      expect(screen.getByText('插件配置')).toBeInTheDocument()
+    })
+    const kernel = screen.getByText('内核设置')
+    const pages = screen.getByText('插件页面')
+    const configs = screen.getByText('插件配置')
+    // compareDocumentPosition： FOLLOWING 位表示参数节点在本节点之后
+    expect(kernel.compareDocumentPosition(pages) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(pages.compareDocumentPosition(configs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })
 

@@ -103,6 +103,22 @@ describe('toRjsf — 词汇表映射', () => {
     expect(props.b).toMatchObject({ pattern: '^\\d+$' })
   })
 
+  it('requiredWhen → allOf if/then 条件必填映射', () => {
+    const { schema } = toRjsf([
+      { name: 'trigger_type', type: 'select', label: '类型', required: true, options: [{ label: '延迟', value: 'delay' }] },
+      { name: 'delay_seconds', type: 'number', label: '延迟秒数', requiredWhen: { field: 'trigger_type', equals: 'delay' } },
+    ])
+    expect(schema.required).toEqual(['trigger_type'])
+    const allOf = schema.allOf as Array<Record<string, unknown>>
+    expect(allOf).toHaveLength(1)
+    // if 分支必须带 required:[依赖字段]——properties 约束对缺席属性恒真
+    expect(allOf[0].if).toEqual({
+      properties: { trigger_type: { const: 'delay' } },
+      required: ['trigger_type'],
+    })
+    expect(allOf[0].then).toEqual({ required: ['delay_seconds'] })
+  })
+
   it('datasourceUri → asyncSelect，schema 去掉枚举约束但保留 type', () => {
     const { schema, uiSchema } = toRjsf([
       {
@@ -210,5 +226,55 @@ describe('RjsfForm — 组件层', () => {
   it('空字段列表 → 占位提示', () => {
     render(<RjsfForm fields={[]} onSubmit={vi.fn()} />)
     expect(screen.getByText('暂无表单字段')).toBeInTheDocument()
+  })
+
+  it('requiredWhen 条件命中缺值 → 拦截提交并就近提示；未命中可提交', async () => {
+    const onSubmit = vi.fn()
+    const fields: UIInputFormField[] = [
+      {
+        name: 'trigger_type',
+        type: 'select',
+        label: '类型',
+        options: [
+          { label: '延迟', value: 'delay' },
+          { label: '定时', value: 'schedule' },
+        ],
+      },
+      { name: 'delay_seconds', type: 'number', label: '延迟秒数', requiredWhen: { field: 'trigger_type', equals: 'delay' } },
+    ]
+    const { container } = render(<RjsfForm fields={fields} onSubmit={onSubmit} />)
+    const form = container.querySelector('form')!
+
+    // 类型缺省落首选项「延迟」（RJSF/antd 既有语义）→ 不填延迟秒数直接提交：
+    // 被拦，字段级中文提示可见
+    fireEvent.submit(form)
+    expect(await screen.findByText('延迟秒数不能为空')).toBeInTheDocument()
+    expect(onSubmit).not.toHaveBeenCalled()
+
+    // 切「定时」→ 条件未命中，无该字段也能提交
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: /类型/ }))
+    fireEvent.click(await screen.findByText('定时'))
+    fireEvent.submit(form)
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({ trigger_type: 'schedule' })
+  })
+
+  it('requiredWhen 命中且值已填 → 正常提交', async () => {
+    const onSubmit = vi.fn()
+    const fields: UIInputFormField[] = [
+      {
+        name: 'trigger_type',
+        type: 'select',
+        label: '类型',
+        options: [{ label: '延迟', value: 'delay' }],
+      },
+      { name: 'delay_seconds', type: 'number', label: '延迟秒数', requiredWhen: { field: 'trigger_type', equals: 'delay' } },
+    ]
+    const { container } = render(<RjsfForm fields={fields} onSubmit={onSubmit} />)
+
+    fireEvent.change(screen.getByLabelText('延迟秒数'), { target: { value: '60' } })
+    fireEvent.submit(container.querySelector('form')!)
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({ trigger_type: 'delay', delay_seconds: 60 })
   })
 })

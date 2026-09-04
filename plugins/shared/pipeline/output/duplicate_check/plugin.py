@@ -37,9 +37,10 @@ from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
+# count = 重复计数（窗口内首次出现之后的累计出现次数，含本次）；total = count+1 = 含首次的总出现次数
 _HINT_TEMPLATES = {
-    1: "你已经连续 {count} 次使用 {tool} 执行相同操作，结果不会有变化。请考虑换一种方式完成任务。",
-    2: "你仍然在重复调用 {tool}，这已经是第 {count} 次了。请立即停止使用该工具和参数，尝试完全不同的方法。",
+    1: "{tool} 以相同参数重复了 {count} 次（这是近期第 {total} 次调用），结果不会有变化。请考虑换一种方式完成任务。",
+    2: "{tool} 已重复调用 {count} 次（这是近期第 {total} 次调用）。请立即停止使用该工具和参数，尝试完全不同的方法。",
 }
 
 _MAIN_AGENT_TERMINATE_MSG = (
@@ -81,15 +82,15 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 - max_repetitive_output: 输出内容重复拦截阈值（默认 3）
                 - hard_limit_intercepts: 拦截次数硬上限，达到后终止管道（默认 4）
                 - similarity_threshold: 输出相似度阈值（默认 0.9）
-                - signature_window_size: 单调用签名滑动窗口条数（默认 16，
-                  覆盖 4 工具轮转时第 4 次出现的拦截）
+                - signature_window_size: 单调用签名滑动窗口条数（默认 8，
+                  1-2 工具交替循环仍可升级到二级拦截，更大轮转循环保留软提示）
         """
         self._config = config or {}
         self._max_duplicate_calls = self._config.get("max_duplicate_calls", 3)
         self._max_repetitive_output = self._config.get("max_repetitive_output", 3)
         self._hard_limit_intercepts = self._config.get("hard_limit_intercepts", 4)
         self._similarity_threshold = self._config.get("similarity_threshold", 0.9)
-        self._signature_window_size = self._config.get("signature_window_size", 16)
+        self._signature_window_size = self._config.get("signature_window_size", 8)
 
     @property
     def name(self) -> str:
@@ -267,8 +268,8 @@ class DuplicateCheckPlugin(IOutputPlugin):
             updates["router.duplicate_back_llm"] = True
             return updates
 
-        # 第一级：早期重复 → 注入软提示
-        hint = f"你已经连续 {count} 次输出相似内容，请尝试换一种方式回复。"
+        # 第一级：早期重复 → 注入软提示（count+1 = 连续相似输出的总轮数）
+        hint = f"你已连续 {count + 1} 次输出相似内容，请尝试换一种方式回复。"
         self._inject_hint(ctx, updates, hint)
         logger.info(
             "[%s] Repetitive output soft hint | count=%d",
@@ -325,7 +326,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
         """构建早期软提示消息。
 
         Args:
-            count: 当前重复计数
+            count: 重复计数（窗口内首次出现之后的累计出现次数，含本次）
             tool_desc: 工具调用描述
 
         Returns:
@@ -333,7 +334,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
         """
         template = _HINT_TEMPLATES.get(count, _HINT_TEMPLATES[max(_HINT_TEMPLATES)])
         # 模板来自 _HINT_TEMPLATES 配置常量的运行时渲染，非静态拼接（f-string 不适用）
-        return template.format(count=count, tool=tool_desc)
+        return template.format(count=count, total=count + 1, tool=tool_desc)
 
     def _build_tool_call_description(self, ctx: PluginContext) -> str:
         """构建工具调用的可读描述。

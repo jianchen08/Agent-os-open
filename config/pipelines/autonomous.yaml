@@ -73,11 +73,11 @@ loop_bodies:
     - pipeline_track
     - pipeline_task_reminder
     - pipeline_stop_check
-    - pipeline_duplicate_check
     - pipeline_tool_cache_writer
     - pipeline_conversation_mode
     - pipeline_sensitive_checker
     - pipeline_result_format
+    - pipeline_duplicate_check
   while: 'True'
 - id: exit
   run_on_error: true

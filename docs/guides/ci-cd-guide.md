@@ -63,12 +63,12 @@ pip install ruff mypy
 
 ### 2.1 流程图
 
-机械门禁的单一事实源是 `scripts/run_gates.py`（21 个门禁：CI 跑穷尽集，本地 `--mode fast` 跑廉价检查）；GitHub Actions 只是它的宿主之一。
+机械门禁的单一事实源是 `scripts/run_gates.py`（27 个门禁：CI 跑穷尽集，本地 `--mode fast` 跑廉价检查）；GitHub Actions 只是它的宿主之一。
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  触发条件（.github/workflows/ci.yml）                                   │
-│   push / PR 到 main/develop 分支；workflow_dispatch 手动                 │
+│   push / PR 到 main 与 dev/* 分支；workflow_dispatch 手动                │
 │   concurrency: ci-${{ github.ref }}，同分支新提交自动取消旧流水线        │
 └─────────────────────────┬───────────────────────────────────────────────┘
                           ▼
@@ -109,11 +109,11 @@ pip install ruff mypy
 |------|------|
 | `.github/workflows/ci.yml` | 主 CI（18 个 job，见 §2.1） |
 | `.github/workflows/e2e.yml` | e2e workflow（check-key + 真实 LLM e2e） |
-| `scripts/run_gates.py` | 机械门禁单一事实源（21 门禁；`--mode fast/kernel/plugins/frontend/all` 或 `--filter <id>`） |
+| `scripts/run_gates.py` | 机械门禁单一事实源（27 门禁；`--mode fast/kernel/plugins/frontend/all` 或 `--filter <id>`） |
 | `pyproject.toml` | pytest / ruff / mypy 配置 |
 | `tests/conftest.py` | 测试框架增强（日志、报告、Bug 定位） |
 | `.github/mypy-baseline.txt` | mypy 错误基线（现值 0，只减不增） |
-| `.github/pytest-failure-baseline.txt` | 红测失败数基线锁（plugins-coverage 19 / heavy 0，只减不增） |
+| `.github/pytest-failure-baseline.txt` | 红测失败数基线锁（现值 plugins-coverage 0 / heavy 0，只减不增） |
 
 ### 2.3 CI 环境变量
 
@@ -159,7 +159,7 @@ tests/
 ├── plugins/                 # 插件车道镜像测试（CI 必跑，分层 marker 强制）
 ├── gates/                   # 门禁自检测试
 ├── e2e_02/                  # 0.2 端到端测试（真实内核 + WebSocket/LLM，e2e workflow 跑）
-├── manual/                  # 手动脚本（conftest collect_ignore 排除，不进默认收集）
+├── manual/                  # 手动脚本预留目录（需手动环境，当前为空，不入默认收集）
 └── test_*.py                # 各功能模块测试文件（60+ 文件）
 ```
 
@@ -233,9 +233,9 @@ CI 不再单独拼 pytest 命令——Python 测试车道统一经 `scripts/run_
 | `python-heavy-suites` | 重型套件车道（失败数基线锁） | 慢速/重环境套件 |
 | `timing` | `@pytest.mark.timing` 用例 | 时序不变量（事件顺序/间隔/超时边界） |
 
-- **失败数基线锁**：失败数 > `.github/pytest-failure-baseline.txt` 基线 → CI 红（拦截增长）；≤ 基线 → 绿（允许 pre-existing 持平，修好后收紧基线并 commit 留归因）。当前基线：plugins-coverage 19 / heavy 0。
+- **失败数基线锁**：失败数 > `.github/pytest-failure-baseline.txt` 基线 → CI 红（拦截增长）；≤ 基线 → 绿（允许 pre-existing 持平，修好后收紧基线并 commit 留归因）。当前基线：plugins-coverage 0 / heavy 0。
 - **mypy 基线**：`.github/mypy-baseline.txt` 现值 0，只减不增。
-- **整体覆盖率基线**：2026-09-01 用户裁定暂时挂起观察（run_gates `--skip`，插桩与 coverage.xml 产出照跑，diff/车道门禁仍消费）；恢复 = 去掉 `--skip`。
+- **整体覆盖率基线**：2026-09-01 用户裁定暂时挂起观察（基线检查脚本以 `--skip` 挂起，插桩与 coverage.xml 产出照跑，diff/车道门禁仍消费）；恢复 = 去掉 `scripts/run_gates.py` 对应门禁命令中的 `--skip` 参数。
 - e2e 与真实 LLM 链路不在 ci.yml，在独立的 `.github/workflows/e2e.yml`（`check-key` 前置 → `e2e` job 跑 `tests/e2e_02`，编译 Linux 内核 + 插件 venv/cdylib 后真机验证；schedule 定时 + push 触发）。
 
 > 完整 job 定义与触发条件以 `.github/workflows/ci.yml` / `e2e.yml` 为准。
@@ -277,7 +277,7 @@ markers = [
 
 #### 排除的测试目录
 
-`conftest.py` 的 `collect_ignore = ["manual"]`——`tests/manual/` 为需手动环境（kernel + LLM key）的脚本（无断言或命中真实外部 API），不进默认收集，避免污染 `pytest tests/`；`tests/channels/`、`tests/suites/` 等集成测试正常收集。
+`tests/manual/` 预留给需手动环境（kernel + LLM key）的脚本（无断言或命中真实外部 API），不进默认收集，避免污染 `pytest tests/`（当前为空目录）；`tests/channels/`、`tests/suites/` 等集成测试正常收集。
 
 ### 3.6 可用的 pytest Fixture
 
@@ -339,8 +339,8 @@ curl -X POST http://localhost:9100/api/v1/auth/register   -H "Content-Type: appl
 #### 获取会话列表
 
 ```bash
-# 测试目标：分页获取当前用户会话
-curl "http://localhost:9100/api/v1/sessions?page=1&page_size=20"   -H "Authorization: Bearer <token>"
+# 测试目标：获取当前用户会话列表
+curl "http://localhost:9100/api/v1/sessions"   -H "Authorization: Bearer <token>"
 
 # 预期响应：会话列表（thread 坐标；前端据此渲染侧边栏）
 ```
@@ -356,7 +356,7 @@ curl -X POST http://localhost:9100/api/v1/sessions   -H "Authorization: Bearer <
 
 ```bash
 # 测试目标：切换执行上下文键（下一轮管道整体切人设/工具/约束）
-curl -X POST http://localhost:9100/api/v1/sessions/{id}/agent   -H "Authorization: Bearer <token>"   -H "Content-Type: application/json"   -d '{"agent_id": "code_writer_agent"}'
+curl -X PATCH http://localhost:9100/api/v1/sessions/{id}/agent   -H "Authorization: Bearer <token>"   -H "Content-Type: application/json"   -d '{"agent_id": "code_writer_agent"}'
 ```
 
 ### 4.3 任务与管道
@@ -369,8 +369,8 @@ curl -X POST http://localhost:9100/api/v1/sessions/{id}/agent   -H "Authorizatio
 # 管道（执行）列表
 curl "http://localhost:9100/api/v1/pipelines" -H "Authorization: Bearer <token>"
 
-# 某管道的 state（task 状态的真值所在）
-curl "http://localhost:9100/api/v1/pipelines/state?pipeline_id=<id>"   -H "Authorization: Bearer <token>"
+# 管道 state 投影（task 状态的真值所在；返回当前租户全部管道，无单管道过滤参数）
+curl "http://localhost:9100/api/v1/pipelines/state"   -H "Authorization: Bearer <token>"
 ```
 
 ### 4.4 配置读写
@@ -695,9 +695,11 @@ collector.stop()
   ├─ 定位断言失败位置
   │    └─ traceback 最内层帧（最后一个）
   │
-  └─ 生成 Bug 候选列表
-       └─ 项目源码（src/）但非测试代码的帧，按调用深度倒序排列
+       └─ 生成 Bug 候选列表
+            └─ 项目源码（src/）但非测试代码的帧，按调用深度倒序排列
 ```
+
+> 注：`src/` 判定为 0.1 布局遗留（`_PROJECT_SRC = Path("src")`），0.2 仓库布局（`plugins/`/`kernel/`）下该分支不命中——失败定位以断言位置与 traceback 帧为准。
 
 ### 7.2 自动触发的 Bug 定位
 

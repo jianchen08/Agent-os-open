@@ -78,7 +78,7 @@
 
 1. **密钥管理**
    - 所有 API Key 通过 `.env` 文件注入，不要硬编码
-   - 生产环境必须轮换默认 `APP_JWT_SECRET_KEY` 和 `DEFAULT_ADMIN_PASSWORD`
+   - 生产环境必须轮换 `APP_JWT_SECRET_KEY`，并在首次登录后立即修改默认管理员账号密码（`DEFAULT_ADMIN_PASSWORD` 目前为预留变量、尚无代码消费，请勿依赖它改密）
    - `.env` 文件权限设为 `chmod 600`
 
 2. **网络安全**

@@ -1413,9 +1413,12 @@ async def delete_project(
     query: dict[str, str] | None = None,
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """删除项目 = 级联挂起名下子任务 + 删登记行；delete_files=true 时删文件夹。
+    """删除项目 = 处置名下子任务 + 删登记行；delete_files=true 时删文件夹。
 
-    文件夹删除带路径安全校验（盘符根/仓库根/工作空间基目录拒删）。
+    子任务处置口径由 delete_children 决定：缺省级联挂起（子任务保留），
+    true 时逐个级联删除任务管道——任一失败即中止且不删登记行（已删除的
+    子任务不回滚）。文件夹删除带路径安全校验（盘符根/仓库根/工作空间
+    基目录拒删）。
     """
     from project_registry import remove_project_folder  # noqa: PLC0415
 
@@ -1423,24 +1426,48 @@ async def delete_project(
     project = _get_project_or_404(registry, project_id)
 
     suspended = 0
-    for pid in await _project_child_pids(project_id):
-        if await _suspend_task_pipeline(pid):
-            suspended += 1
+    deleted_children = 0
+    if _qflag(query, "delete_children"):
+        failed: list[str] = []
+        for pid in await _project_child_pids(project_id):
+            try:
+                await delete_task(pid, _user)
+                deleted_children += 1
+            except APIError as exc:
+                if exc.status_code != 404:  # 列举后已被删的子任务视为已处置
+                    failed.append(pid)
+        if failed:
+            raise APIError(
+                status_code=500,
+                error_code="PROJECT_CHILDREN_DELETE_FAILED",
+                message=f"子任务删除失败，项目未删除: {', '.join(failed)}",
+            )
+    else:
+        for pid in await _project_child_pids(project_id):
+            if await _suspend_task_pipeline(pid):
+                suspended += 1
 
     registry.delete(project_id)
 
     folder_removed = False
-    if query and str(query.get("delete_files") or "").lower() in ("1", "true", "yes"):
+    if _qflag(query, "delete_files"):
         folder_removed = remove_project_folder(project.path)
 
     logger.info(
-        "[projects] 删除项目 | project_id=%s | suspended_children=%s | folder_removed=%s | user=%s",
+        "[projects] 删除项目 | project_id=%s | suspended_children=%s | deleted_children=%s | folder_removed=%s | user=%s",
         project_id,
         suspended,
+        deleted_children,
         folder_removed,
         _current_user(_user).get("username", "system"),
     )
-    return {"message": "项目已删除", "id": project_id, "folder_removed": folder_removed}
+    return {
+        "message": "项目已删除",
+        "id": project_id,
+        "suspended_children": suspended,
+        "deleted_children": deleted_children,
+        "folder_removed": folder_removed,
+    }
 
 
 # ════════════════════════════════════════════════════════════
@@ -1461,6 +1488,11 @@ def _qint(query: dict[str, str], key: str, default: int | None) -> int | None:
 
 def _qopt(query: dict[str, str], key: str) -> str | None:
     return query.get(key)
+
+
+def _qflag(query: dict[str, str] | None, key: str) -> bool:
+    """查询参数布尔解析（1/true/yes 为真，缺省假）。"""
+    return bool(query and str(query.get(key) or "").lower() in ("1", "true", "yes"))
 
 
 async def _dispatch_task_phase(task_id: str, parts: list[str], method: str) -> dict[str, Any]:

@@ -1,0 +1,35 @@
+# 项目类型 → 出生初始化配方（project_create 工具消费）
+#
+# 通用映射机制：新增项目类型 = 在 project_types 下加一个条目，不改插件代码。
+# 创建项目时显式传 project_type=<类型> 即路由到对应初始化；缺省 auto 按
+# detect_file 自动识别项目目录中已有的类型清单文件。初始化失败整体报错
+# （fail-closed），同路径重跑幂等补装。
+
+project_types:
+  godot:
+    # schema_summary：工具 schema 中该类型的映射说明（运行时由本文件生成
+    # project_type 的枚举与描述——唯一真值在本文件，plugin.json 为同步投影，
+    # 由 TestManifestSchemaLockstep 锁步校验）
+    schema_summary: "Godot 4 游戏项目——出生即装两个宿主插件 addons/agentos（宿主桥：9600 探活/取上下文 + 选中引用推送）与 addons/godot_mcp（godot-mcp-go 执行面通道，配 godot_run 工具），并写入 project.godot [editor_plugins] 启用（清单缺失则脚手架最小 project.godot）；godot_run 执行面按任务 workspace 自动路由到本工程（编辑器打开即接线），机器 env 只需 GODOT_MCP_BIN"
+    # 自动识别标记：项目文件夹存在该文件 → 视为 godot 项目
+    detect_file: project.godot
+    # addon 安装源（仓库相对或绝对路径）：逐个目录复制到 <项目>/addons/<name>/，
+    # 已存在不覆盖（幂等）
+    addons_source: hosts/godot-addons
+    addons:
+      - agentos
+      - godot_mcp
+    # 类型清单文件：缺失时按 scaffold 最小内容创建（{title} 为项目标题占位）
+    project_file: project.godot
+    scaffold: |-
+      config_version=5
+
+      [application]
+
+      config/name="{title}"
+    # 启用条目：并入 project_file 的 [enable_section] enabled（PackedStringArray，
+    # 并集保序、幂等）
+    enable_section: editor_plugins
+    enable_entries:
+      - res://addons/agentos/plugin.cfg
+      - res://addons/godot_mcp/plugin.cfg

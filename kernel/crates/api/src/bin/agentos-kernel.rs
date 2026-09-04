@@ -714,9 +714,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 置位，未声明一律拒绝（fail-closed，新插件必须显式声明）。执行点在
     // KernelCapabilityRouter::handle 单点，sidecar（PluginScopedRouter 注
     // _plugin_id）与 native（NativeHostServices 注 _plugin_id）同判。
+    // 组主体分支：合宿连接的 _plugin_id = 宿主键（进程即主体），按当前装箱成员
+    // 声明归并判（group_granted_capabilities；任一成员未声明 = 组未声明）。
     let loader_for_grants = loader_arc.clone();
+    let invoker_for_grants = invoker.clone();
     let grants_lookup: agentos_api::capability_router::GrantsLookupFn =
         Arc::new(move |plugin_id| {
+            if plugin_id.starts_with("group:") {
+                return invoker_for_grants.group_granted_capabilities(plugin_id);
+            }
             loader_for_grants.get_manifest(plugin_id).and_then(|m| {
                 if m.granted_capabilities.is_empty() {
                     None

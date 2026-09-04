@@ -242,6 +242,62 @@ class TestRecallFilter:
         assert contents == ["a", "c"]
 
 
+class TestRecallRankingAndTopK:
+    """B6 回归：真实 RecallResult 的相关度在嵌套 scores.final（顶层无
+    score），且召回条数由 token 预算驱动与 top_k 无关——工具层曾收超量
+    乱序结果。服务端按 final 降序排序并截断 top_k。"""
+
+    def test_recall_sorts_by_final_score_and_truncates_top_k(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        mock_client.arecall.return_value = MagicMock(
+            results=[
+                MagicMock(model_dump=lambda: {
+                    "id": "lo", "text": "弱相关", "scores": {"final": 0.2},
+                }),
+                MagicMock(model_dump=lambda: {
+                    "id": "hi", "text": "强相关",
+                    "scores": {"final": 0.95, "semantic": 0.8},
+                }),
+                MagicMock(model_dump=lambda: {
+                    "id": "no", "text": "无分", "scores": None,
+                }),
+            ],
+            chunks=[],
+            source_facts=[],
+        )
+
+        result = _call_tool(
+            mod, "hindsight.recall", bank_id="bank_A", query="q", top_k=2,
+        )
+
+        # final 降序截断 top_k：0.95 / 0.2 入选，无分条目被截掉
+        assert [r["id"] for r in result["results"]] == ["hi", "lo"]
+        assert result["total"] == 2
+        assert result["results"][0]["content"] == "强相关"
+
+    def test_recall_default_top_k_truncates_oversized_recall(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """不传 top_k 时按默认 5 截断（召回条数 > top_k 的场景）。"""
+        mock_client.arecall.return_value = MagicMock(
+            results=[
+                MagicMock(model_dump=lambda i=i: {
+                    "id": f"r{i}", "text": f"内容{i}",
+                    "scores": {"final": float(10 - i)},
+                })
+                for i in range(8)
+            ],
+            chunks=[],
+            source_facts=[],
+        )
+
+        result = _call_tool(mod, "hindsight.recall", bank_id="b", query="q")
+
+        assert result["total"] == 5
+        assert [r["id"] for r in result["results"]] == [f"r{i}" for i in range(5)]
+
+
 # ═══════════════════════════════════════════════════════════
 # 6. import_document 切分
 # ═══════════════════════════════════════════════════════════
@@ -283,6 +339,28 @@ class TestImportDocument:
         assert "error" in result
         # 关键：未触发 aretain
         mock_client.aretain.assert_not_called()
+
+    def test_import_document_skips_blank_chunks(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """N2 回归：空白 chunk（如整段空行）不投 retain——hindsight 对空
+        content 必 422（'content cannot be empty'），曾让整个导入中断。"""
+        mock_client.aretain.return_value = MagicMock(operation_id="mem_x", accepted=True)
+        long_text = "甲" * 2000 + "\n" * 2000 + "乙" * 2000
+
+        result = _call_tool(
+            mod,
+            "hindsight.import_document",
+            bank_id="bank_A",
+            text=long_text,
+            knowledge_name="kb1",
+        )
+
+        # 3 个切块中空白块被跳过，只落 2 块
+        assert result["chunks_imported"] == 2
+        assert mock_client.aretain.call_count == 2
+        for call in mock_client.aretain.call_args_list:
+            assert call.kwargs["content"].strip()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -768,6 +846,64 @@ class TestDeleteTargeted:
 
         assert result["deleted"] is False
         assert "error" in result
+
+
+class TestDeleteUnitIdResolution:
+    """B5 回归：retrieve 返回的是记忆单元 id（RecallResult），而
+    documents.delete_document 只认文档 id——按单元 id 直删必然 404 落残留。
+    删除面须把单元 id 解析到父文档后级联删除，残留条目才可清理。
+    """
+
+    def test_delete_unit_id_resolves_parent_document(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        mock_client.documents = MagicMock()
+        mock_client.documents.delete_document = AsyncMock(
+            side_effect=[
+                # 首次：按单元 id 当文档直删 → 文档不存在
+                RuntimeError("document not found"),
+                # 回退：按解析出的父文档 id 级联删除 → 成功
+                MagicMock(model_dump=lambda: {"success": True, "document_id": "doc-7"}),
+            ]
+        )
+        mock_client.memory = MagicMock()
+        mock_client.memory.get_memory = AsyncMock(
+            return_value={"id": "unit-9", "document_id": "doc-7"}
+        )
+
+        result = _call_tool(
+            mod, "hindsight.delete", bank_id="bank_del", memory_id="unit-9",
+        )
+
+        assert result["deleted"] is True
+        calls = mock_client.documents.delete_document.await_args_list
+        assert len(calls) == 2
+        # 第二次按解析出的父文档 id 级联删除
+        assert calls[1].kwargs == {"bank_id": "bank_del", "document_id": "doc-7"}
+        mock_client.memory.get_memory.assert_awaited_once_with(
+            bank_id="bank_del", memory_id="unit-9",
+        )
+
+    def test_delete_unknown_unit_id_returns_false(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """id 既非文档也查不到单元 → 诚实失败（不假装删除）。"""
+        mock_client.documents = MagicMock()
+        mock_client.documents.delete_document = AsyncMock(
+            side_effect=RuntimeError("document not found"),
+        )
+        mock_client.memory = MagicMock()
+        mock_client.memory.get_memory = AsyncMock(
+            side_effect=RuntimeError("unit not found"),
+        )
+
+        result = _call_tool(
+            mod, "hindsight.delete", bank_id="bank_del", memory_id="ghost-1",
+        )
+
+        assert result["deleted"] is False
+        assert "error" in result
+        assert mock_client.documents.delete_document.await_count == 1
 
 
 class TestImportDocMetaStr:

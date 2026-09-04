@@ -106,6 +106,59 @@ class TestExceptionTypeMapping:
         assert info.kind is ErrorKind.NETWORK
 
 
+class TestApiConnectionErrorDisguisedBadRequest:
+    """litellm 兜底映射把上游 400 包成 APIConnectionError 的识别。
+
+    provider 返回无专属映射的错误体（如 MiniMax JSON-RPC 风格 400）时，
+    litellm exception_mapping 兜底 raise APIConnectionError——按类型名归
+    NETWORK 会把参数错误当上游抖动退避重试（2026-09-03 孤儿 tool result
+    400 连败 189 次的根因）。载荷带结构化 400 证据 → BAD_REQUEST 快速失败。
+    """
+
+    # 2026-09-03 真实日志取证：MiniMax 拒绝孤儿 tool result 的原始载荷
+    _MINIMAX_ORPHAN_400 = (
+        'MinimaxException - {"type":"error","error":{"type":"bad_request_error",'
+        '"message":"invalid params, tool result\'s tool id(call_0657a642987d4056aaab935e)'
+        ' not found (2013)","http_code":"400"},"request_id":"06e8642ea07d0eabc2aa005f6bda87d2"}'
+    )
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            pytest.param(_MINIMAX_ORPHAN_400, id="minimax-orphan-tool-result"),
+            pytest.param(
+                'BadRequest - {"error":{"type":"bad_request_error","message":"invalid messages"}}',
+                id="bad-request-error-type",
+            ),
+            pytest.param(
+                '{"error":{"type":"invalid_request_error","message":"messages: field required"}}',
+                id="invalid-request-error-type",
+            ),
+            pytest.param('upstream rejected: "http_code":"400" payload invalid', id="http-code-400"),
+            pytest.param('upstream rejected: "http_code": "400" payload invalid', id="http-code-400-spaced"),
+        ],
+    )
+    def test_disguised_400_maps_to_bad_request(self, message: str) -> None:
+        info = classify_error(_exc("APIConnectionError", message))
+        assert info.kind is ErrorKind.BAD_REQUEST
+        # 400 无重试语义：retry_after 不携带
+        assert info.retry_after is None
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            pytest.param("conn refused", id="conn-refused"),
+            pytest.param("Connection reset by peer", id="conn-reset"),
+            pytest.param("SSL: handshake failure", id="ssl-failure"),
+            pytest.param("503 service temporarily unavailable", id="plain-503-text"),
+        ],
+    )
+    def test_pure_network_stays_network(self, message: str) -> None:
+        """防误伤：真网络错误消息不含结构化 400 证据，仍按 NETWORK 重试。"""
+        info = classify_error(_exc("APIConnectionError", message))
+        assert info.kind is ErrorKind.NETWORK
+
+
 class TestQuotaDetection:
     """配额耗尽识别：429/400 伪装配额必须冷却 3600s（防 5s 冷却死循环）。"""
 

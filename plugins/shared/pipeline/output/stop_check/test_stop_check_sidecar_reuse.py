@@ -31,6 +31,8 @@ for _d in [_DIR, _SHARED, _SYSTEM]:
 
 from pipeline.plugin import PluginContext  # noqa: E402
 
+from test_stop_check_run_reset import _FakeClock  # noqa: E402
+
 
 def _load_plugin_module() -> Any:
     mod_name = "stop_check_plugin_sidecar_test"
@@ -198,3 +200,70 @@ class TestLimitHitMarksTaskFailed:
         res = _run(plugin.execute(_ctx(state)))
         assert res.state_updates.get("router.stop_reason") == "max_iterations"
         assert "task.status" not in res.state_updates
+
+
+class TestLimitStopWritesSystemMessage:
+    """超线强停追加会话 system 消息：run 以 failed 收尾后终止原因用户可见。"""
+
+    def test_max_iterations_message_content(self) -> None:
+        """迭代上限强停：messages 恰一条 append set op，role=system，文案带
+        实际轮数与上限数值。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 5, "max_iterations": 3, "task.id": "t1"}
+        res = _run(plugin.execute(_ctx(state)))
+
+        ops = res.state_updates["messages"]["_ops"]
+        assert len(ops) == 1
+        assert ops[0]["op"] == "set"
+        assert "seq" not in ops[0], "无 seq 的 set = append（引擎按 max seq 分配槽位）"
+        msg = ops[0]["msg"]
+        assert msg["role"] == "system"
+        assert msg["content"] == (
+            "⚠️ 达到迭代上限被强制停止：已连续执行 5 轮（上限 3 轮），"
+            "进度已保存，可重新发送消息继续。"
+        )
+
+    def test_timeout_message_content_with_fake_clock(self, monkeypatch: Any) -> None:
+        """超时强停：文案带实际运行秒数与上限秒数（fake clock 注入，禁真实 sleep）。"""
+        mod = _load_plugin_module()
+        clock = _FakeClock()
+        monkeypatch.setattr(mod.time, "monotonic", clock.monotonic)
+        plugin = mod.StopCheckPlugin(config={})
+        state = {
+            "pipeline_id": "p",
+            "run_id": "run-1",
+            "iteration": 1,
+            "timeout_seconds": 50,
+            "task.id": "t1",
+        }
+        first = _run(plugin.execute(_ctx(state)))
+        assert first.state_updates.get("router.stop_reason", "") == ""
+
+        clock.advance(60)
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("router.stop_reason") == "timeout"
+        msg = res.state_updates["messages"]["_ops"][0]["msg"]
+        assert msg["role"] == "system"
+        assert "已连续运行 60.0 秒（上限 50 秒）" in msg["content"]
+        assert msg["content"].startswith("⚠️ 执行超时被强制停止：")
+        assert msg["content"].endswith("，进度已保存，可重新发送消息继续。")
+
+    def test_chat_pipeline_no_task_status_but_message(self) -> None:
+        """非任务管道（无 task.id）超线：不写 task.status，但消息照写（与
+        task.status 的分支条件解耦——聊天用户同样需要看到终止原因）。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "chat", "iteration": 99, "max_iterations": 3, "task.id": ""}
+        res = _run(plugin.execute(_ctx(state)))
+        assert "task.status" not in res.state_updates
+        msg = res.state_updates["messages"]["_ops"][0]["msg"]
+        assert msg["role"] == "system"
+
+    def test_normal_round_produces_no_message(self) -> None:
+        """正常轮（未超线）：不产生任何消息 op。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 1, "task.id": "t1"}
+        res = _run(plugin.execute(_ctx(state)))
+        assert "messages" not in res.state_updates

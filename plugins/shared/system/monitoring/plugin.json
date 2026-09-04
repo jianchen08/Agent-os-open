@@ -163,6 +163,16 @@
       "description": "Get token usage statistics"
     },
     {
+      "route_id": "mon_token_usage_by_time",
+      "method": "GET",
+      "path": "/ext/monitoring/token-usage/by-time",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Get token usage statistics grouped by day (UTC)"
+    },
+    {
       "route_id": "mon_cache_stats",
       "method": "GET",
       "path": "/ext/monitoring/cache-stats",
@@ -456,6 +466,53 @@
           "variant": "metric",
           "icon": "⚠️",
           "description": "插件 OnError 事件累计（内核聚合器留存窗口，滚动约2小时）"
+        }
+      },
+      {
+        "id": "token_by_model_table",
+        "type": "table",
+        "space": "monitoring",
+        "order": 47,
+        "props": {
+          "title": "Token 按模型统计",
+          "datasourceUri": "/ext/monitoring/token-usage",
+          "columns": [
+            { "key": "icon", "label": "图标" },
+            { "key": "model", "label": "模型" },
+            { "key": "requests", "label": "调用次数" },
+            { "key": "input_tokens", "label": "输入 Tokens" },
+            { "key": "output_tokens", "label": "输出 Tokens" },
+            { "key": "total_tokens", "label": "合计 Tokens" }
+          ],
+          "pageSize": 10,
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 60
+          },
+          "description": "跨运行 LLM Tokens 按模型细分（traces 账本，图标按 provider 映射；早期无模型归属的轨迹归入「未记录模型」）"
+        }
+      },
+      {
+        "id": "token_by_time_table",
+        "type": "table",
+        "space": "monitoring",
+        "order": 48,
+        "props": {
+          "title": "Token 按时间统计",
+          "datasourceUri": "/ext/monitoring/token-usage/by-time",
+          "columns": [
+            { "key": "date", "label": "日期 (UTC)" },
+            { "key": "requests", "label": "调用次数" },
+            { "key": "input_tokens", "label": "输入 Tokens" },
+            { "key": "output_tokens", "label": "输出 Tokens" },
+            { "key": "total_tokens", "label": "合计 Tokens" }
+          ],
+          "pageSize": 10,
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 60
+          },
+          "description": "跨运行 LLM Tokens 按日（UTC）细分（traces 账本）"
         }
       },
       {

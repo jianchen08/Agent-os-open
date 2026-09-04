@@ -6,7 +6,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use agentos_core::traits::{LoadedPlugin, PluginLoader, PluginManifest, PluginStatus, PluginType};
+use agentos_core::traits::{
+    ConfigFileMapping, EnvConfigField, LoadedPlugin, PluginLoader, PluginManifest, PluginStatus,
+    PluginType,
+};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -216,7 +219,7 @@ impl PluginLoaderImpl {
             };
 
             // 解析 manifest（跳过解析失败的插件，不影响同 root 的其他插件）
-            let manifest: PluginManifest = match serde_json::from_str::<PluginManifest>(&content) {
+            let mut manifest: PluginManifest = match serde_json::from_str::<PluginManifest>(&content) {
                 Ok(m) => m,
                 Err(json_err) => match serde_yaml::from_str::<PluginManifest>(&content) {
                     Ok(m) => m,
@@ -233,7 +236,7 @@ impl PluginLoaderImpl {
             };
 
             // 校验 manifest（跳过校验失败的插件，不阻断同 root 的其他插件）
-            if let Err(e) = self.validate_manifest_internal(&manifest, &manifest_path) {
+            if let Err(e) = self.validate_manifest_internal(&mut manifest, &manifest_path) {
                 warn!(
                     "Skipping plugin at {}: validation error: {}",
                     manifest_path.display(),
@@ -251,7 +254,7 @@ impl PluginLoaderImpl {
     /// 内部 manifest 校验逻辑。
     fn validate_manifest_internal(
         &self,
-        manifest: &PluginManifest,
+        manifest: &mut PluginManifest,
         source_path: &Path,
     ) -> Result<(), LoaderError> {
         // 必填字段校验
@@ -351,10 +354,45 @@ impl PluginLoaderImpl {
         // ── P2-2 插件准入校验（白名单 + SHA256）──
         self.validate_allowlist(manifest, source_path)?;
 
-        // ── GAP-4：env target 声明闭环——mcp 端点的 ${VAR} 引用（无默认值
-        // 语法）必须被 config_files[target=env].fields 覆盖，漂移启动期暴露
-        // （新插件带 key 接入只改 manifest，内核/前端零改动的对称代价）──
-        validate_env_field_coverage(manifest)?;
+        // ── 配置单一真值校验（2026-09-02 用户裁定）：真值要么在 manifest
+        // （内联形态，path 省略，fields.default 即真值），要么在引用文件
+        // （引用形态，path 非空，fields 仅 schema 禁声明 default）——两处
+        // 同时存值即双真值错误，加载期显式报出，不拖到读值漂移才暴露 ──
+        for cf in &manifest.config_files {
+            if cf.path.is_empty() {
+                if cf.target.as_deref() == Some("env") {
+                    return Err(LoaderError::ManifestValidation {
+                        plugin_id: manifest.id.clone(),
+                        reason: format!(
+                            "config_files[{}] target=env 但未声明 path——env 条目的写入目标（.env）不可省略",
+                            cf.id
+                        ),
+                    });
+                }
+                continue;
+            }
+            let offender = cf.fields.iter().find(|f| {
+                f.extra
+                    .as_ref()
+                    .and_then(|e| e.get("default"))
+                    .is_some_and(|d| !d.is_null())
+            });
+            if let Some(f) = offender {
+                return Err(LoaderError::ManifestValidation {
+                    plugin_id: manifest.id.clone(),
+                    reason: format!(
+                        "config_files[{}].fields[{}] 声明了 default——引用形态（path={:?}）真值在文件，manifest 与文件两处存值即双真值错误；要内联请删除 path",
+                        cf.id, f.name, cf.path
+                    ),
+                });
+            }
+        }
+
+        // ── GAP-4：env 声明自动生成——mcp 端点引用的 ${VAR}（无默认值语法）
+        // 即视为 env 配置面，内核自动生成 config_files[target=env] 声明
+        // （合并进既有 env 条目或新建），设置页据此提供 key 入口；插件只写
+        // endpoint 引用即可被发现使用，无需手写声明（2026-09-03 用户裁定）──
+        auto_generate_env_declarations(manifest);
 
         info!(
             "Manifest validated: id={} type={:?} host={:?} path={}",
@@ -594,7 +632,11 @@ impl PluginLoader for PluginLoaderImpl {
         &self,
         manifest: &PluginManifest,
     ) -> Result<(), agentos_core::types::PluginError> {
-        self.validate_manifest_internal(manifest, Path::new("(runtime)"))
+        // 内部校验会原地补自动生成的 env 声明（auto_generate_env_declarations），
+        // 只读包装在副本上跑——生成的条目对调用方不可见（要看生成结果请走
+        // validate_manifest_internal 或扫描流程的 manifest 本体）。
+        let mut owned = manifest.clone();
+        self.validate_manifest_internal(&mut owned, Path::new("(runtime)"))
             .map_err(|e| agentos_core::types::PluginError {
                 message: e.to_string(),
                 code: Some("MANIFEST_VALIDATION".to_string()),
@@ -884,17 +926,19 @@ impl PluginLoaderImpl {
     }
 }
 
-/// GAP-4 校验闭环：manifest 里 mcp.endpoint 的 `${VAR}` 引用（无 `:-` 默认值）
-/// 必须被某个 `target: "env"` 的 config_files 条目的 fields 覆盖。
-///
-/// 覆盖了才能在设置页配置——否则 key 无入口，connect 硬失败且用户无处可填
-/// （e2e 缺口 GAP-4 的病根）。`${VAR:-def}` 带默认值的引用豁免（可选凭据）。
-fn validate_env_field_coverage(manifest: &PluginManifest) -> Result<(), LoaderError> {
+/// GAP-4 声明自动生成（2026-09-03 用户裁定）：manifest 里 mcp.endpoint 的
+/// `${VAR}` 引用（无 `:-` 默认值语法）即视为 env 配置面——引用本身即声明。
+/// 内核把未被既有 `config_files[target="env"]` 条目覆盖的引用自动生成声明
+/// （合并进既有 env 条目；没有则新建 path=".env" 条目），设置页据此提供
+/// key 入口，spawn/connect 侧照旧走「进程环境 → .env overlay」解析——
+/// 插件只写 endpoint 引用即可被发现使用。`${VAR:-def}` 带默认值的引用
+/// 豁免（可选凭据，无需设置页入口）。
+fn auto_generate_env_declarations(manifest: &mut PluginManifest) {
     let Some(mcp) = manifest.mcp.as_ref() else {
-        return Ok(());
+        return;
     };
     let Some(endpoint) = mcp.endpoint.as_ref() else {
-        return Ok(());
+        return;
     };
     // 收集全部 ${VAR} 引用（auth.value + env 值），排除 ${VAR:-def} 默认值语法
     let mut refs: Vec<String> = Vec::new();
@@ -918,7 +962,7 @@ fn validate_env_field_coverage(manifest: &PluginManifest) -> Result<(), LoaderEr
         collect(v);
     }
     if refs.is_empty() {
-        return Ok(());
+        return;
     }
     let declared: std::collections::HashSet<&str> = manifest
         .config_files
@@ -926,20 +970,45 @@ fn validate_env_field_coverage(manifest: &PluginManifest) -> Result<(), LoaderEr
         .filter(|f| f.target.as_deref() == Some("env"))
         .flat_map(|f| f.fields.iter().map(|fd| fd.name.as_str()))
         .collect();
-    let missing: Vec<&String> = refs
-        .iter()
+    let missing: Vec<String> = refs
+        .into_iter()
         .filter(|r| !declared.contains(r.as_str()))
         .collect();
     if missing.is_empty() {
-        return Ok(());
+        return;
     }
-    Err(LoaderError::ManifestValidation {
-        plugin_id: manifest.id.clone(),
-        reason: format!(
-            "mcp endpoint references undeclared env vars {:?}: declare them in a              config_files[target=\"env\"] fields entry so the settings page can manage them",
-            missing
-        ),
-    })
+    let fields: Vec<EnvConfigField> = missing
+        .iter()
+        .map(|name| EnvConfigField {
+            name: name.clone(),
+            label: name.clone(),
+            // 保守默认：宁可掩码不可泄漏（与反序列化缺省语义一致）
+            field_type: "secret".to_string(),
+            required: false,
+            description: Some("内核自动生成：来自 mcp endpoint 的 ${VAR} 引用".to_string()),
+            extra: None,
+        })
+        .collect();
+    let existing = manifest
+        .config_files
+        .iter_mut()
+        .find(|f| f.target.as_deref() == Some("env"));
+    match existing {
+        Some(entry) => entry.fields.extend(fields),
+        None => manifest.config_files.push(ConfigFileMapping {
+            id: "env".to_string(),
+            settings: None,
+            // env 条目写入目标语义不可省：真值在项目根 .env
+            path: ".env".to_string(),
+            label: "环境变量".to_string(),
+            target: Some("env".to_string()),
+            fields,
+        }),
+    }
+    info!(
+        "Auto-generated env declarations for plugin {}: {:?}",
+        manifest.id, missing
+    );
 }
 
 #[cfg(test)]
@@ -1281,6 +1350,96 @@ mod tests {
             export_fields: vec![],
         };
         assert!(loader.validate_manifest(&manifest).is_ok());
+    }
+
+    /// 配置单一真值校验（2026-09-02 用户裁定）：引用形态（path 非空）禁止
+    /// fields 声明 default（manifest+文件两处存值 = 双真值错误）；内联形态
+    /// （path 空）带 default 合法；env 条目必须声明 path。
+    #[test]
+    fn test_manifest_validation_config_single_truth() {
+        use agentos_core::traits::{ConfigFileMapping, EnvConfigField};
+
+        fn base_manifest(id: &str) -> PluginManifest {
+            PluginManifest {
+                id: id.to_string(),
+                name: "Single Truth".to_string(),
+                description: None,
+                version: "1.0.0".to_string(),
+                plugin_type: PluginType::Pipeline,
+                pipeline_role: None,
+                language: "rust".to_string(),
+                host_type: HostType::InProcess,
+                host_group: None,
+                entry: "test_entry".to_string(),
+                capabilities: Default::default(),
+                requires_services: vec![],
+                permissions: Default::default(),
+                priority: 100,
+                mcp: None,
+                lifecycle: None,
+                native: None,
+                granted_capabilities: vec![],
+                requires_content: None,
+                invoke_entry: None,
+                config_files: vec![],
+                http_endpoints: vec![],
+                ui_schema: None,
+                contributes: None,
+                enabled: None,
+                activation: None,
+                provides: None,
+                persistent_fields: vec![],
+                export_fields: vec![],
+            }
+        }
+
+        fn field_with_default(name: &str) -> EnvConfigField {
+            EnvConfigField {
+                name: name.to_string(),
+                label: "F".to_string(),
+                field_type: "toggle".to_string(),
+                required: false,
+                description: None,
+                extra: Some(serde_json::json!({"default": true}).as_object().unwrap().clone()),
+            }
+        }
+
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let mut manifest = base_manifest("single_truth");
+
+        // ① 引用形态 + default → 双真值错误
+        manifest.config_files = vec![ConfigFileMapping {
+            id: "cfg".to_string(),
+            path: "config/system/foo.yaml".to_string(),
+            label: "F".to_string(),
+            target: None,
+            settings: None,
+            fields: vec![field_with_default("enabled")],
+        }];
+        let err = loader.validate_manifest(&manifest).unwrap_err().to_string();
+        assert!(err.contains("双真值"), "应报双真值错误: {err}");
+
+        // ② 引用形态无 default（纯 schema）→ 合法
+        manifest.config_files[0].fields = vec![EnvConfigField {
+            name: "enabled".to_string(),
+            label: "F".to_string(),
+            field_type: "toggle".to_string(),
+            required: false,
+            description: None,
+            extra: None,
+        }];
+        assert!(loader.validate_manifest(&manifest).is_ok());
+
+        // ③ 内联形态（path 空）带 default → 合法
+        manifest.config_files[0].path = String::new();
+        manifest.config_files[0].fields = vec![field_with_default("enabled")];
+        assert!(loader.validate_manifest(&manifest).is_ok());
+
+        // ④ env 条目省 path → 报错（写入目标语义不可省）
+        manifest.config_files[0].target = Some("env".to_string());
+        manifest.config_files[0].fields = vec![];
+        let err = loader.validate_manifest(&manifest).unwrap_err().to_string();
+        assert!(err.contains("不可省略"), "env 条目应必须声明 path: {err}");
     }
 
     /// capabilities.steps 校验（管道步骤服务化提案 §3.1）：空 name 报错，
@@ -2292,7 +2451,7 @@ mod tests {
         assert_eq!(manifests.len(), 2);
     }
 
-    // ── GAP-4：env target 声明闭环 ──────────────────────────────
+    // ── GAP-4：env 声明自动生成（引用本身即声明）────────────────
 
     fn env_coverage_manifest_json(declare: bool) -> String {
         let files = if declare {
@@ -2320,31 +2479,91 @@ mod tests {
     }
 
     #[test]
-    fn test_env_coverage_rejects_undeclared_var() {
+    fn test_env_declarations_auto_generated_when_undeclared() {
+        // 未声明引用不再拒绝：校验通过 + 自动生成 env 条目（引用即声明）
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
-        let manifest: PluginManifest =
+        let mut manifest: PluginManifest =
             serde_json::from_str(&env_coverage_manifest_json(false)).unwrap();
-        let err = loader.validate_manifest(&manifest);
-        assert!(err.is_err(), "未声明的 env var 引用应被拒：{err:?}");
+        let r = loader.validate_manifest_internal(&mut manifest, Path::new("(test)"));
+        assert!(r.is_ok(), "未声明引用应自动生成而非拒绝：{r:?}");
+        let entry = manifest
+            .config_files
+            .iter()
+            .find(|f| f.target.as_deref() == Some("env"))
+            .expect("应自动生成 target=env 条目");
+        assert_eq!(entry.path, ".env", "env 条目写入目标（.env）不可省");
+        let field = entry
+            .fields
+            .iter()
+            .find(|f| f.name == "SMITHERY_API_KEY")
+            .expect("引用的 var 应生成对应 field");
+        assert_eq!(field.field_type, "secret", "生成字段走保守掩码默认");
+        assert!(!field.required, "生成字段不强制必填");
     }
 
     #[test]
-    fn test_env_coverage_accepts_declared_var() {
+    fn test_env_declarations_merge_into_existing_entry() {
+        // 已有 env 条目声明了别的 var → 新引用合并进同一条目，不另建
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
-        let manifest: PluginManifest =
+        let json = env_coverage_manifest_json(false).replace(
+            r#""mcp": {"#,
+            r#""config_files": [{
+                "id": "api_keys", "label": "Keys", "path": ".env", "target": "env",
+                "fields": [{"name": "OTHER_KEY", "label": "Other", "type": "string", "required": true}]
+            }],
+            "mcp": {"#,
+        );
+        let mut manifest: PluginManifest = serde_json::from_str(&json).unwrap();
+        let r = loader.validate_manifest_internal(&mut manifest, Path::new("(test)"));
+        assert!(r.is_ok(), "{r:?}");
+        let env_entries: Vec<_> = manifest
+            .config_files
+            .iter()
+            .filter(|f| f.target.as_deref() == Some("env"))
+            .collect();
+        assert_eq!(env_entries.len(), 1, "应合并进既有 env 条目而非新建");
+        let names: Vec<_> = env_entries[0].fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"OTHER_KEY") && names.contains(&"SMITHERY_API_KEY"));
+    }
+
+    #[test]
+    fn test_env_declarations_declared_not_duplicated() {
+        // 手写声明仍在 → 校验通过且不重复生成
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let mut manifest: PluginManifest =
             serde_json::from_str(&env_coverage_manifest_json(true)).unwrap();
-        let r = loader.validate_manifest(&manifest);
+        let r = loader.validate_manifest_internal(&mut manifest, Path::new("(test)"));
         assert!(r.is_ok(), "声明覆盖应通过：{r:?}");
+        let env_fields: Vec<_> = manifest
+            .config_files
+            .iter()
+            .filter(|f| f.target.as_deref() == Some("env"))
+            .flat_map(|f| f.fields.iter().map(|fd| fd.name.as_str()))
+            .collect();
+        assert_eq!(
+            env_fields.iter().filter(|n| **n == "SMITHERY_API_KEY").count(),
+            1,
+            "已声明的 var 不应重复生成"
+        );
     }
 
     #[test]
     fn test_env_coverage_default_syntax_exempt() {
-        // ${VAR:-def} 带默认值（可选凭据）豁免声明要求
+        // ${VAR:-def} 带默认值（可选凭据）豁免：不生成声明条目
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
         let json =
             env_coverage_manifest_json(false).replace("${SMITHERY_API_KEY}", "${OPTIONAL_KEY:-}");
-        let manifest: PluginManifest = serde_json::from_str(&json).unwrap();
-        assert!(loader.validate_manifest(&manifest).is_ok());
+        let mut manifest: PluginManifest = serde_json::from_str(&json).unwrap();
+        assert!(loader
+            .validate_manifest_internal(&mut manifest, Path::new("(test)"))
+            .is_ok());
+        assert!(
+            !manifest
+                .config_files
+                .iter()
+                .any(|f| f.target.as_deref() == Some("env")),
+            "带默认值的引用不应生成声明"
+        );
     }
 
     /// 契约闸门 2.5：native 产物预检——artifact 缺失 → 加载期明确报错（不是拖到
@@ -2367,9 +2586,9 @@ mod tests {
         )
         .unwrap();
         let loader = PluginLoaderImpl::new(dir.path(), None);
-        let manifest: PluginManifest =
+        let mut manifest: PluginManifest =
             serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
-        let err = loader.validate_manifest_internal(&manifest, &json_path);
+        let err = loader.validate_manifest_internal(&mut manifest, &json_path);
         let msg = err.expect_err("native artifact 缺失应被拒").to_string();
         assert!(msg.contains("native artifact 缺失"), "{msg}");
     }
@@ -2394,9 +2613,9 @@ mod tests {
         .unwrap();
         std::fs::write(plugin_dir.join("libp_native.so"), b"not-really-so").unwrap();
         let loader = PluginLoaderImpl::new(dir.path(), None);
-        let manifest: PluginManifest =
+        let mut manifest: PluginManifest =
             serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
-        let r = loader.validate_manifest_internal(&manifest, &json_path);
+        let r = loader.validate_manifest_internal(&mut manifest, &json_path);
         assert!(r.is_ok(), "native artifact 存在应通过：{r:?}");
     }
 

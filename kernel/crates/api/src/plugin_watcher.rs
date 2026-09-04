@@ -26,7 +26,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentos_core::traits::{HostType, PluginInvoker, PluginManifest};
+use agentos_core::traits::{
+    CapabilityRegistry, HostType, PluginInvoker, PluginManifest, ToolCapability,
+};
 use agentos_core::types::PluginError;
 use agentos_invoker::verify::{
     compare_tools, declared_with_services, normalize_member_actual_tools, parse_actual_tools,
@@ -380,9 +382,20 @@ async fn run_smoke(
 /// 可能瞬态死亡——重试即过；真漂移走"比对出不一致"路径不受影响。
 const G2_OBSERVE_RETRY_BACKOFF_MS: [u64; 2] = [300, 1000];
 
+/// 一行接入（2026-09-03 用户裁定）判定：external MCP 允许零工具声明——
+/// 空声明 = 观测即声明，采信握手 `tools/list` 全量导入（多工具服务免抄
+/// schema）；声明非空的 external MCP 仍走静态 drift 对照，行为不变。
+fn is_dynamic_mcp(manifest: &PluginManifest) -> bool {
+    manifest.host_type == HostType::Sidecar
+        && manifest.entry == "mcp:external"
+        && manifest.capabilities.tools.is_empty()
+        && manifest.capabilities.services.is_empty()
+}
+
 /// G2：单插件"声明 ↔ 实际暴露"一致性校验 + 冒烟 + 处置（公共化，供注册/启动/重启用复用）。
 ///
 /// - 无 tools 且无 services（route 仅插件 / InProcess / native）→ 跳过，原样返回；
+///   例外：零声明的 external MCP（[`is_dynamic_mcp`]）不跳过——观测导入其全部工具；
 /// - 比对出可拒绝漂移（missing / schema_mismatch）→ 剔除漂移工具，其余照常；
 /// - spawn/list_tools 失败 = **观测失败 ≠ 判定失败**：重试 2 次（退避见
 ///   [`G2_OBSERVE_RETRY_BACKOFF_MS`]）后仍失败 → 保留声明注册不动
@@ -397,9 +410,12 @@ pub async fn g2_verify_and_sanitize(
 ) -> G2VerifyOutcome {
     // G2 只验 sidecar（InProcess/native 无 describe 通道，verify.rs 自述——它们
     // 的一致性走 A3 重启 + native describe 后续落地）；无 tools 且无 services
-    // （route 仅插件）跳过。均原样返回。
+    // （route 仅插件）跳过——零声明的 external MCP 例外（观测导入，见下）。
+    let dynamic_mcp = is_dynamic_mcp(&manifest);
     if manifest.host_type != HostType::Sidecar
-        || (manifest.capabilities.tools.is_empty() && manifest.capabilities.services.is_empty())
+        || (manifest.capabilities.tools.is_empty()
+            && manifest.capabilities.services.is_empty()
+            && !dynamic_mcp)
     {
         return G2VerifyOutcome {
             manifest,
@@ -436,6 +452,39 @@ pub async fn g2_verify_and_sanitize(
     match listed {
         Ok(raw) => {
             let (actual, _malformed) = parse_actual_tools(&raw);
+            // 一行接入：零声明 external MCP → 观测即声明，tools/list 全量回填
+            // manifest（无可对照声明，不做 drift 对照；每次安装期/复验全量重导入，
+            // 幂等）。spawn 失败走下方既有 Err 分支：manifest 保持零声明 +
+            // spawn_failed，由 resync 零工具自愈重试。
+            if dynamic_mcp {
+                let mut manifest = manifest;
+                manifest.capabilities.tools = actual
+                    .into_iter()
+                    .map(|t| ToolCapability {
+                        name: t.name,
+                        description: t.description,
+                        input_schema: Some(t.input_schema),
+                        output_schema: None,
+                        category: None,
+                        ui: None,
+                        render: None,
+                        smoke: None,
+                    })
+                    .collect();
+                info!(
+                    target: "plugin_watcher",
+                    plugin = %manifest.id,
+                    tools = manifest.capabilities.tools.len(),
+                    "一行接入：external MCP 零声明，观测导入 tools/list 全量工具"
+                );
+                return G2VerifyOutcome {
+                    manifest,
+                    rejected_tools: Vec::new(),
+                    drift: false,
+                    spawn_failed: false,
+                    smoke_failed: false,
+                };
+            }
             // 合宿成员（host_group="light"）的工具经宿主注册为 `{plugin_id}.{tool}`
             // （§4.2 命名空间），G2 对照声明裸名前必须归一前缀；否则成员 100%
             // 被误判 missing 漂移而剔光（08-31 实测 task_manage/memory/human 全灭）。
@@ -689,10 +738,13 @@ pub async fn sync_once_with_store(
     let mut dependency_rejected = Vec::new();
     for m in kept_refs {
         if known_ids.contains(&m.id)
-            || (m.capabilities.tools.is_empty() && m.capabilities.services.is_empty())
+            || (m.capabilities.tools.is_empty()
+                && m.capabilities.services.is_empty()
+                && !is_dynamic_mcp(m))
         {
             // 已知插件/无 tools+services：此处不重验；已知插件的变更复验在下方
             // GAP-6 块按声明/代码指纹触发，账本保持既有状态（不覆盖）。
+            // 例外：零声明 external MCP（一行接入）照常观测导入。
             filtered.push(m.clone());
             continue;
         }
@@ -831,13 +883,23 @@ pub async fn sync_once_with_store(
             continue;
         }
         let fp = manifest_fingerprint(m);
+        // 一行接入自愈：动态 MCP 注册面零工具 = 观测未成功过（boot 纯声明注册
+        // 不走 G2 / 上轮 spawn 失败）——本轮补观测导入，不依赖声明/代码指纹
+        // （第三方服务的工具集变更本就不在本地指纹内）。导入成功后条件即失效，
+        // 不再逐轮重观测。须在无基线分支之前算：boot 后首轮 sync 只建基线，
+        // 不提前 hoist 会把导入推迟到第二轮。
+        let dynamic_import =
+            is_dynamic_mcp(m) && !registry.list_tools().iter().any(|t| t.plugin_id == m.id);
         let decl_changed = match known_manifest_hashes.get(&m.id) {
             Some(old_fp) => *old_fp != fp,
             None => {
                 // 无基线（boot 注册/升级前）：建基线不动作，避免首轮误重注册
                 known_manifest_hashes.insert(m.id.clone(), fp);
                 known_code_hashes.insert(m.id.clone(), current_code_fp(code_dirs, m));
-                continue;
+                if !dynamic_import {
+                    continue;
+                }
+                false
             }
         };
         let g2_applicable = m.host_type == HostType::Sidecar
@@ -851,10 +913,10 @@ pub async fn sync_once_with_store(
             && known_code_hashes
                 .get(&m.id)
                 .is_some_and(|old| cur_code_fp != *old);
-        if !decl_changed && !code_changed {
+        if !decl_changed && !code_changed && !dynamic_import {
             continue;
         }
-        let (tools, http_routes) = if g2_applicable {
+        let (tools, http_routes) = if g2_applicable || dynamic_import {
             let outcome = g2_verify_and_sanitize(invoker, m.clone()).await;
             if let Some(ledger) = contract_states {
                 ledger.upsert(crate::contract::PluginContractState::derived(

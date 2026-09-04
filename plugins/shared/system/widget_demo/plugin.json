@@ -129,8 +129,7 @@
         {
           "name": "enabled",
           "type": "toggle",
-          "label": "启用演示",
-          "default": true
+          "label": "启用演示"
         },
         {
           "name": "level",
@@ -152,8 +151,7 @@
           "type": "slider",
           "label": "演示阈值",
           "min": 0,
-          "max": 100,
-          "default": 50
+          "max": 100
         },
         {
           "name": "tags",

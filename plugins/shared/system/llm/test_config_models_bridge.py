@@ -199,7 +199,9 @@ class TestLoaderShim:
         assert got is not None
         # 模型无 key、provider.api_key 空 → keys[0] 回退
         assert got["api_key"] == "k0"
-        assert got["default_params"] == {"temperature": 0.7, "max_tokens": 4096}
+        # 模型条目未写 default_params → 空 dict（不发明 0.7/4096 兜底：
+        # 参数缺省由 llm.complete_stream 按 llm.yaml 回填，缺即不发）
+        assert got["default_params"] == {}
 
     def test_get_llm_core_config_unknown_model(self, mod: Any) -> None:
         shim = self._shim(mod, {"models": {}})
@@ -220,3 +222,28 @@ class TestLoaderShim:
         got = shim.get_llm_core_config("m3")
         assert got is not None
         assert got["thinking_strength_params"] == {"high": {"enabled": True}}
+
+    def test_provider_thinking_strength_params_passthrough(self, mod: Any) -> None:
+        """providers.<name>.thinking_strength_params → provider_thinking_strength_params
+        桥接透出（厂商级映射）；未配置的 provider 键省略。"""
+        provider_mapping = {
+            "high": {"thinking": {"type": "enabled"}},
+            "low": {"thinking": {"type": "disabled"}},
+        }
+        shim = self._shim(
+            mod,
+            {
+                "models": {"glm-x": {"provider": "zhipu"}},
+                "providers": {
+                    "zhipu": {"type": "zai", "thinking_strength_params": provider_mapping}
+                },
+            },
+        )
+        got = shim.get_llm_core_config("glm-x")
+        assert got is not None
+        assert got["provider_thinking_strength_params"] == provider_mapping
+
+        shim2 = self._shim(mod, {"models": {"m": {"provider": "plain"}}})
+        got2 = shim2.get_llm_core_config("m")
+        assert got2 is not None
+        assert "provider_thinking_strength_params" not in got2

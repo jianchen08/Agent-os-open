@@ -500,6 +500,38 @@ def _move_to_extra_body(kwargs: dict[str, Any], keys: tuple[str, ...]) -> None:
         kwargs["extra_body"] = extra
 
 
+# 思考参数必须经 extra_body 透传的 litellm provider type：openai（自定义中转
+# 端点）与 zai（GLM）。这类端点的上游直接接受 reasoning_effort/thinking body
+# 字段，而 litellm 顶层 kwargs 通道对它们不可用——模型不在 litellm 注册表时
+# 抛 UnsupportedParamsError，在注册表时原样转发（OpenAI SDK create() 无此
+# 形参 → TypeError）。
+_EXTRA_BODY_PROVIDER_TYPES = ("openai", "zai")
+
+
+def _needs_extra_body_transport(model: str) -> bool:
+    """判断该模型的 reasoning_effort/thinking 是否必须经 extra_body 透传。
+
+    命中两种形态之一即为真：model 字符串自带 litellm 前缀（"openai/x" /
+    "zai/x"）；或 model 经 router_factory 解析出的 provider type 属于
+    extra_body 通道——生产调用传的是 model_id（yaml key），litellm 前缀在
+    KeyPool 内层才拼上，仅看前缀会漏掉该形态。解析失败（provider 未注册等）
+    按 False 处理，维持 litellm 原生行为，不因分类失败扩大故障面。
+    """
+    if model.lower().startswith(tuple(f"{t}/" for t in _EXTRA_BODY_PROVIDER_TYPES)):
+        return True
+    try:
+        from router_factory import (  # noqa: PLC0415
+            get_litellm_prefix,
+            get_provider_for_model,
+        )
+
+        bare = model.split("/", 1)[1] if "/" in model else model
+        provider = get_provider_for_model(bare)
+        return bool(provider) and get_litellm_prefix(provider) in _EXTRA_BODY_PROVIDER_TYPES
+    except Exception:  # noqa: BLE001 —— 分类失败回落 litellm 原生行为
+        return False
+
+
 # ---------------------------------------------------------------------------
 # 数据类型
 # ---------------------------------------------------------------------------
@@ -710,9 +742,11 @@ class _BaseLiteLLMAdapter:
         # 弹出 adapter 专属参数（不发给 litellm / API）
         kwargs.pop("reasoning_retention", None)
 
-        # openai/ 前缀的中转端点：litellm openai provider 不认 reasoning_effort
-        # 等专有参数，故挪进 extra_body 透传（上游本身能接受）。
-        if model.lower().startswith("openai/"):
+        # OpenAI 兼容端点（litellm type=openai/zai，判定见 _needs_extra_body_transport）：
+        # reasoning_effort / thinking 经 extra_body 透传，litellm 不再校验/转发
+        # 这两个顶层 kwargs，上游 API 按自身契约消费（GLM 的 thinking 即官方
+        # body 字段）。
+        if _needs_extra_body_transport(model):
             _move_to_extra_body(kwargs, ("reasoning_effort", "thinking"))
 
         # Prompt 审计落盘（默认关，经基础脱敏）：记录真正发往远端 API 的请求体。

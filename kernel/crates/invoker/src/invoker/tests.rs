@@ -3109,3 +3109,218 @@ async fn host_proc_snapshots_without_spawn_record_omits_uptime() {
     assert_eq!(snaps.len(), 1);
     assert_eq!(snaps[0].uptime_secs, None, "无 spawn 记账 uptime 应为 None");
 }
+
+#[tokio::test]
+async fn emit_lifecycle_error_fans_out_to_bus_with_context() {
+    // OnError 旁路广播契约：emit 后总线订阅者收到事件，ctx 携带 plugin_id /
+    // error / error_code（监控页"插件报错"计数的数据源）。
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    let bus = Arc::new(HookEventBus::new(32));
+    invoker.set_hook_bus(bus.clone());
+    let mut rx = bus.subscribe();
+
+    invoker.emit_lifecycle_error("my_plugin", "tool execution failed", Some("MCP_TOOL_CALL_FAILED"));
+
+    let ev = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+        .await
+        .expect("应在超时前收到 OnError 事件")
+        .expect("总线未关闭");
+    assert_eq!(ev.hook, LifecycleHook::OnError);
+    assert_eq!(ev.ctx.get("plugin_id"), Some(&json!("my_plugin")));
+    assert_eq!(ev.ctx.get("error"), Some(&json!("tool execution failed")));
+    assert_eq!(
+        ev.ctx.get("error_code"),
+        Some(&json!("MCP_TOOL_CALL_FAILED"))
+    );
+}
+
+#[tokio::test]
+async fn emit_lifecycle_error_without_bus_is_noop() {
+    // bus 未注入（如单测环境）时 no-op 不 panic——best-effort 观察路径契约。
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    invoker.emit_lifecycle_error("my_plugin", "boom", None);
+}
+
+#[test]
+fn pipeline_error_params_counts_err_and_ok_error_field() {
+    // Err（崩溃/MCP/解析）→ 报错；Ok 携带 error 字段（业务失败）→ 同样报错；
+    // Ok 无 error → None 不发事件。
+    let err = Err(PluginError {
+        message: "plugin process crashed: p".to_string(),
+        code: Some("PLUGIN_CRASHED".to_string()),
+        source: None,
+    });
+    let (msg, code) = pipeline_error_params(&err).expect("Err 应计报错");
+    assert_eq!(msg, "plugin process crashed: p");
+    assert_eq!(code.as_deref(), Some("PLUGIN_CRASHED"));
+
+    let ok_err = Ok(PluginResult::default().with_error(PluginError {
+        message: "step blew up".to_string(),
+        code: None,
+        source: None,
+    }));
+    let (msg, code) = pipeline_error_params(&ok_err).expect("Ok error 字段应计报错");
+    assert_eq!(msg, "step blew up");
+    assert_eq!(code, None);
+
+    assert!(pipeline_error_params(&Ok(PluginResult::default())).is_none());
+}
+
+#[test]
+fn tool_error_params_counts_success_false_only() {
+    // success=false（isError/失败信封）→ 报错，error 缺省给兜底文案；
+    // success=true → None。两个失败形态是计数器的行为契约。
+    let failed = Ok(ToolExecutionResult::failure("container_create_failed"));
+    let (msg, code) = tool_error_params(&failed).expect("success=false 应计报错");
+    assert_eq!(msg, "container_create_failed");
+    assert_eq!(code, None);
+
+    let failed_no_msg = Ok(ToolExecutionResult {
+        success: false,
+        data: json!({}),
+        error: None,
+        duration_ms: None,
+        metadata: None,
+    });
+    let (msg, _) = tool_error_params(&failed_no_msg).expect("success=false 无 error 也计");
+    assert_eq!(msg, "tool execution failed");
+
+    assert!(tool_error_params(&Ok(ToolExecutionResult::success(json!({})))).is_none());
+    assert!(tool_error_params(&Err(PluginError {
+        message: "MCP tool call failed".to_string(),
+        code: Some("MCP_TOOL_CALL_FAILED".to_string()),
+        source: None,
+    }))
+    .is_some());
+}
+
+// ── 反向调用连接身份 = 进程身份（G6 组主体配套，2026-09-03 工具面置空事故修复）──
+
+#[test]
+fn test_scoped_router_identity_light_member_uses_host_key() {
+    // 合宿成员身份 = 宿主键（进程即主体），不随组重生锚定成员漂移。
+    let m = make_light_manifest("pipeline_tool_schema", "python server.py");
+    assert_eq!(
+        super::scoped_router_identity(&m, "group:light:3"),
+        "group:light:3"
+    );
+}
+
+#[test]
+fn test_scoped_router_identity_exclusive_uses_manifest_id() {
+    // 独占插件身份 = manifest.id（现状语义；注意不是 plugin: 前缀宿主键）。
+    let m = make_sidecar_manifest("llm_core", "python server.py");
+    assert_eq!(super::scoped_router_identity(&m, "plugin:llm_core"), "llm_core");
+}
+
+#[test]
+fn test_scoped_router_identity_external_mcp_not_grouped() {
+    // host_group=light 但外部 stdio 命令 → 不进合宿，身份仍 = manifest.id。
+    let mut m = make_light_manifest("external_stdio", "unused entry");
+    m.mcp = Some(McpConfig {
+        transport: McpTransport::Stdio,
+        endpoint: Some(McpEndpoint {
+            command: Some("npx".to_string()),
+            args: vec!["-y".to_string()],
+            ..Default::default()
+        }),
+        idle_timeout_secs: 300,
+        protocol_version: "2025-06-18".to_string(),
+        request_timeout_secs: None,
+    });
+    assert_eq!(
+        super::scoped_router_identity(&m, "group:light:1"),
+        "external_stdio"
+    );
+}
+
+// ── group_granted_capabilities：组 = 授权主体，声明 = 成员归并 ──
+
+#[test]
+fn test_group_grants_union_sorted_deduped() {
+    // 全员声明 → 并集排序去重；同组多成员交叉声明去重。
+    let loader = Arc::new(MockLoader::new());
+    let mut a = make_light_manifest("ga", "python a.py");
+    a.granted_capabilities = vec!["tool-surface".to_string()];
+    let mut b = make_light_manifest("gb", "python b.py");
+    b.granted_capabilities = vec!["pipeline-state".to_string(), "tool-surface".to_string()];
+    loader.add_manifest(a);
+    loader.add_manifest(b);
+
+    let invoker = PluginInvokerImpl::new(loader);
+    assert_eq!(invoker.assign_light_host_with("ga", 6), "group:light:1");
+    assert_eq!(invoker.assign_light_host_with("gb", 6), "group:light:1");
+
+    let grants = invoker
+        .group_granted_capabilities("group:light:1")
+        .expect("全员声明应得 Some");
+    assert_eq!(grants, vec!["pipeline-state".to_string(), "tool-surface".to_string()]);
+}
+
+#[test]
+fn test_group_grants_any_undeclared_member_is_none() {
+    // 任一成员未声明 = 组未声明（沿用未声明语义开关），存量不因合宿收窄。
+    let loader = Arc::new(MockLoader::new());
+    let mut a = make_light_manifest("ga", "python a.py");
+    a.granted_capabilities = vec!["tool-surface".to_string()];
+    let b = make_light_manifest("gb", "python b.py"); // 未声明
+    loader.add_manifest(a);
+    loader.add_manifest(b);
+
+    let invoker = PluginInvokerImpl::new(loader);
+    invoker.assign_light_host_with("ga", 6);
+    invoker.assign_light_host_with("gb", 6);
+
+    assert!(invoker.group_granted_capabilities("group:light:1").is_none());
+}
+
+#[test]
+fn test_group_grants_missing_member_manifest_is_none() {
+    // 装箱表有成员但 manifest 缺失（热发现窗口/被禁用）→ 组按未声明处理。
+    let loader = Arc::new(MockLoader::new());
+    let mut a = make_light_manifest("ga", "python a.py");
+    a.granted_capabilities = vec!["tool-surface".to_string()];
+    loader.add_manifest(a);
+
+    let invoker = PluginInvokerImpl::new(loader);
+    invoker.assign_light_host_with("ga", 6);
+    invoker.assign_light_host_with("ghost", 6); // 无 manifest
+
+    assert!(invoker.group_granted_capabilities("group:light:1").is_none());
+}
+
+#[test]
+fn test_group_grants_non_group_or_empty_keys_are_none() {
+    // 非 light 组键 / 无成员组键 → None（独占键根本不该进组分支，双保险）。
+    let loader = Arc::new(MockLoader::new());
+    let invoker = PluginInvokerImpl::new(loader);
+    assert!(invoker.group_granted_capabilities("plugin:ga").is_none());
+    assert!(invoker.group_granted_capabilities("group:heavy:1").is_none());
+    assert!(invoker.group_granted_capabilities("group:light:9").is_none());
+}
+
+#[test]
+fn test_group_grants_follows_live_packing_no_stale_snapshot() {
+    // 性质断言：归并按当前装箱表现算，成员集变化即时生效（无快照失效面）。
+    let loader = Arc::new(MockLoader::new());
+    let mut a = make_light_manifest("ga", "python a.py");
+    a.granted_capabilities = vec!["tool-surface".to_string()];
+    let mut b = make_light_manifest("gb", "python b.py");
+    b.granted_capabilities = vec!["pipeline-state".to_string()];
+    loader.add_manifest(a);
+    loader.add_manifest(b);
+
+    let invoker = PluginInvokerImpl::new(loader);
+    invoker.assign_light_host_with("ga", 6);
+    assert_eq!(
+        invoker.group_granted_capabilities("group:light:1"),
+        Some(vec!["tool-surface".to_string()])
+    );
+
+    // gb 装箱进同组后，归并立即包含其声明。
+    invoker.assign_light_host_with("gb", 6);
+    assert_eq!(
+        invoker.group_granted_capabilities("group:light:1"),
+        Some(vec!["pipeline-state".to_string(), "tool-surface".to_string()])
+    );
+}

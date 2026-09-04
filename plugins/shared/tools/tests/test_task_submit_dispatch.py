@@ -23,6 +23,8 @@ import importlib.util
 import shutil
 import sys
 import tempfile
+import types
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -200,6 +202,8 @@ class TestTaskPipelineDispatch:
         ec = sender.calls[2]["execution_context"]
         assert ec["workspace"]["source_path"] == "D:/proj/demo"
         assert ec["workspace"]["mode"] == "worktree"
+        # 显式 workspace = 调用方显式声明（落位锚定该路径，不被父链继承覆盖）
+        assert ec["workspace"]["explicit"] is True
         assert ec["isolation"]["level"] == "isolated"
 
     async def test_submit_dependency_check_reads_state_aggregation(self, mod: Any) -> None:
@@ -537,6 +541,97 @@ class TestProjectAttachOnly:
         assert not r.success
         assert r.error_code == "L2_CANNOT_SPECIFY_PROJECT_ID"
         assert sender.calls == []
+
+
+class TestWorkspaceExplicitness:
+    """execution_context.workspace.explicit 只认调用方显式声明。
+
+    子任务沿父链继承的项目挂靠（_inherit_project_id 注入 workspace=项目
+    文件夹）不算显式——其落位由出生契约父链坐标（lineage.parent_ws_meta）
+    决定，继承直接上级的工作空间（2026-09-03 用户裁定，收窄 2026-08-30
+    「挂靠即显式锚」至显式挂靠）。L1/面板显式挂靠仍为显式。
+    """
+
+    @pytest.fixture
+    def project_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Iterator[dict[str, Any]]:
+        """登记项目 {pid: 项目文件夹}（仓库根下临时目录，过同容器路径闸）
+        并以 fake 模块替换 project_registry（tool.py 函数内 import）。"""
+        proj_dir = Path(tempfile.mkdtemp(prefix="test_proj_ws_", dir=Path(__file__).resolve().parents[4]))
+        fake_reg = types.ModuleType("project_registry")
+        fake_reg.load_project_paths = lambda: {"proj00000001": str(proj_dir)}  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "project_registry", fake_reg)
+        try:
+            yield {"id": "proj00000001", "dir": proj_dir}
+        finally:
+            shutil.rmtree(proj_dir, ignore_errors=True)
+
+    async def test_inherited_project_attach_is_not_explicit(
+        self, mod: Any, project_env: dict[str, Any]
+    ) -> None:
+        """L2 子任务沿父链继承项目挂靠 → explicit=False（落位归父链坐标）。"""
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+
+        async def _rows() -> list[dict]:
+            return [
+                {
+                    "pipeline_id": "pipe_parent_task_1",
+                    "task.parent_project_id": project_env["id"],
+                }
+            ]
+
+        tool._read_state_rows = _rows  # type: ignore[method-assign]
+        try:
+            r = await tool.execute(
+                _base_inputs(parent_agent_level=2, task_id="pipe_parent_task_1")
+            )
+        finally:
+            mod._chat_sender = None
+        assert r.success, r.error
+        ec = sender.calls[2]["execution_context"]
+        # 项目归属继承成功：source_path 解析为项目文件夹供工具锚点使用，
+        # 但不得标显式——否则子任务在项目根上另开副本、无视父链工作空间。
+        assert ec["workspace"]["source_path"] == str(project_env["dir"])
+        assert ec["workspace"]["explicit"] is False
+        # 出生 state 仍携带挂靠键（任务树分组不依赖显式性）
+        assert sender.calls[0]["state"]["task.parent_project_id"] == project_env["id"]
+
+    async def test_explicit_project_attach_is_explicit(
+        self, mod: Any, project_env: dict[str, Any]
+    ) -> None:
+        """L1 显式指定 project_id → explicit=True（挂靠即锚，项目根分叉）。"""
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(
+                _base_inputs(project_id=project_env["id"])
+            )
+        finally:
+            mod._chat_sender = None
+        assert r.success, r.error
+        ec = sender.calls[2]["execution_context"]
+        assert ec["workspace"]["source_path"] == str(project_env["dir"])
+        assert ec["workspace"]["explicit"] is True
+
+    async def test_root_task_without_workspace_or_project_not_explicit(
+        self, mod: Any
+    ) -> None:
+        """无显式 workspace、无挂靠 → 无 workspace 显式声明（explicit 缺省路径）。"""
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(_base_inputs())
+        finally:
+            mod._chat_sender = None
+        assert r.success, r.error
+        ec = sender.calls[2]["execution_context"]
+        assert ec["workspace"]["source_path"] == ""
+        assert ec["workspace"]["explicit"] is False
 
 
 class TestManifestSchemaLockstep:

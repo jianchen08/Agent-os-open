@@ -10,9 +10,10 @@ media/server 插件同款模式）。invoke 信封两层解包：
 - 业务 dict（hindsight sidecar 返回）含 ``error`` / ``initialized: false``
   即降级签名 → 明确失败，杜绝空 id 假成功。
 
-异常策略两档：写读判定面 add/search 失败诚实上抛 RuntimeError（吞错会让
-工具层包装成 success:true 假成功）；低风险面 delete/import_document 记告警
-后降级返回（False / {chunks_imported: 0, error}），不阻断调用方主流程。
+异常策略两档：写读判定面 add/search/delete 失败诚实上抛 RuntimeError（吞错会让
+工具层包装成 success:true 假成功，或产出无 error 键的 {"success": false} 被内核
+归一层掩蔽成 "tool execution failed"）；低风险面 import_document 记告警后降级
+返回 {chunks_imported: 0, error}，不阻断调用方主流程。
 
 暴露接口：
 - HindsightBackend(caller)：add / search / delete / import_document 四方法
@@ -168,11 +169,18 @@ class HindsightBackend:
             if not isinstance(item, dict):
                 continue
             meta = item.get("metadata") or {}
+            # 相关度：顶层 score 优先；真实 RecallResult 的分数在嵌套
+            # scores.final（顶层无 score），缺失回退 0
+            score = item.get("score")
+            if score is None:
+                nested = item.get("scores")
+                final = nested.get("final") if isinstance(nested, dict) else None
+                score = final if isinstance(final, (int, float)) else 0.0
             results.append(
                 {
                     "id": str(item.get("id", "")),
                     "content": item.get("content", ""),
-                    "score": float(item.get("score", 0.0) or 0.0),
+                    "score": float(score or 0.0),
                     "memory_type": meta.get("memory_type")
                     or item.get("memory_type")
                     or "semantic",
@@ -188,18 +196,27 @@ class HindsightBackend:
         return results
 
     async def delete(self, user_id: str, memory_id: str | None = None) -> bool:
-        """删除记忆（→ hindsight.delete）；失败告警降级返回 False。"""
+        """删除记忆（→ hindsight.delete）；成功返回 True。
+
+        失败（能力调用失败/服务端报错/deleted=false）上抛 RuntimeError 并
+        携带具体原因——吞成 False 会让工具层产出无 error 键的
+        {"success": false}，被内核归一层掩蔽成无信息的 "tool execution
+        failed"。
+        """
         args: dict[str, Any] = {"bank_id": user_id}
         if memory_id:
             args["memory_id"] = memory_id
         try:
             raw = await self._invoke("hindsight.delete", args)
         except Exception as e:
-            logger.warning("[HindsightBackend.delete] 调用失败降级 | error=%s", e)
-            return False
+            raise RuntimeError(f"hindsight.delete 调用失败: {e}") from e
         mapped, _ = _unwrap_envelope(raw)
         if isinstance(mapped, dict):
-            return bool(mapped.get("deleted", False))
+            if mapped.get("deleted"):
+                return True
+            raise RuntimeError(
+                f"hindsight.delete 失败: {mapped.get('error') or 'not deleted'}"
+            )
         return True
 
     async def import_document(

@@ -135,7 +135,7 @@
             },
             "memory_id": {
               "type": "string",
-              "description": "store/update/delete：目标记忆 id"
+              "description": "store/update：文档锚点 id（delete/update 按此定向）。注意 retrieve 返回的条目 id 是抽取后的记忆单元 id，不是文档锚点"
             },
             "results": {
               "type": "array",
@@ -182,6 +182,10 @@
             },
             "updated": {
               "type": "boolean"
+            },
+            "degraded": {
+              "type": "boolean",
+              "description": "update 专属：true=后端无原生 update，经同锚点 replace 写入完成更新（内容已覆盖，仅为实现路径标记，不影响结果）"
             },
             "deleted": {
               "type": "boolean"

@@ -1,19 +1,19 @@
 """Godot 选中引用 Input 插件。
 
 灵汐 AgentOS 与 Godot 4 编辑器的选中对象引用桥（事件驱动，无轮询）：
-Godot 宿主插件（hosts/godot-addon）在 EditorSelection.selection_changed
+Godot 宿主插件（hosts/godot-addons/agentos）在 EditorSelection.selection_changed
 信号时 POST 推送到本插件 /ext/pipeline_godot_context/selection 端点，
 本插件负责三件事：
 
 1. 维护最新选中快照（心跳 15s 内视为在线）；
 2. 选中变化时经 FrontendEmitter 向订阅线程 emit ``godot_selection_changed``
    （前端聊天框引用卡片实时镜像：选中出现、取消消失）；
-3. 管道注入（prepare 链）：每条新用户消息首轮、且选中非空时，
-   在该用户消息后紧邻 insert 一条 ``<reference source="godot">`` 消息
-   （messages op 协议），随历史落库——agent 据此理解"对这个/这个对象"所指。
+3. 引用合并（prepare 链）：每条新用户消息首轮、且选中非空时，把引用块
+   追加进该用户消息的 content（messages set op，同槽位替换）——用户消息与
+   引用一体落库，agent 据此理解"对这个/这个对象"所指；不插入独立消息。
 
 State 命名空间：
-    - godot.injected_for : 已注入引用的 message_id（幂等去重）。
+    - godot.injected_for : 已合并引用的 message_id（幂等去重）。
 
 引用清理（dismiss）：前端可请求清除当前引用（用户不想让这条选中随消息注入）。
 清理后被清理签名的**心跳**被抑制——Godot 里节点仍选中时 5s 心跳不会把引用带
@@ -110,6 +110,12 @@ class GodotContextPlugin(IInputPlugin):
             self._snapshot["ts"] = payload.get("ts", 0)
             return {"status": "ok"}
 
+        # 动作语义：type=selection 是用户点击/选择的显式动作——清除后重选同节点
+        # （签名相同）也必须恢复快照并广播；心跳尊重清除抑制（不自动恢复）。
+        # 广播条件 = 内容变化（签名变化或清除后恢复），与推送类型无关——
+        # 文件选中经心跳携带，签名变化同样要广播到前端。
+        restore = self._dismissed_signature is not None
+        content_changed = signature != self._last_signature or restore
         self._dismissed_signature = None
         self._snapshot = {
             "connected": True,
@@ -121,8 +127,8 @@ class GodotContextPlugin(IInputPlugin):
             "ts": payload.get("ts", 0),
         }
         self._last_push_ms = time.monotonic() * 1000.0
-        if ptype == "selection" and signature != self._last_signature:
-            self._last_signature = signature
+        self._last_signature = signature
+        if content_changed:
             await self._broadcast()
         return {"status": "ok"}
 
@@ -170,33 +176,39 @@ class GodotContextPlugin(IInputPlugin):
             except Exception as e:  # noqa: BLE001
                 logger.warning("[godot_context] emit %s 失败（继续）: %s", thread_id, e)
 
-    # ── 管道注入（prepare 链调用） ──
+    # ── 引用合并（prepare 链调用） ──
 
     async def execute(self, ctx: PluginContext) -> PluginResult:
-        """新用户消息首轮且选中非空时，在用户消息后插入引用消息。"""
+        """引用与最后一条 user 消息合并：追加进其 content（set op 同槽位替换）。"""
         state = ctx.state
         snap = self.snapshot()
         if not snap.get("connected") or not snap.get("items"):
             return PluginResult()
 
-        # 幂等：同一条消息只注入一次（state 标量随 pipeline_state 持久化）
+        # 幂等：同一条消息只合并一次（state 标量随 pipeline_state 持久化）
         message_id = str(state.get("message_id", ""))
         if not message_id or state.get("godot.injected_for") == message_id:
             return PluginResult()
 
-        ref_msg = {
-            "role": "user",
-            "name": "godot_reference",
-            "content": self._build_reference_content(snap),
-        }
         messages = state.get("messages") or []
+        last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+        if last_user is None:
+            return PluginResult()
+
+        seq = last_user.get("seq")
+        content = str(last_user.get("content", ""))
+        # 前端已把引用拼进本条用户消息（随消息发送渲染）时不再二次合并；
+        # 缺 seq 无法同槽寻址（set 语义要求），fail-closed 跳过、绝不退回独立插入
+        if seq is None or '<reference source="godot"' in content:
+            return PluginResult()
+
+        merged = dict(last_user)
+        merged["content"] = content + "\n\n" + self._build_reference_content(snap)
         return PluginResult(
             state_updates={
                 "godot.injected_for": message_id,
                 "messages": {
-                    "_ops": [
-                        {"op": "insert", "at": len(messages), "msg": ref_msg},
-                    ]
+                    "_ops": [{"op": "set", "seq": seq, "msg": merged}],
                 },
             }
         )
@@ -206,8 +218,9 @@ class GodotContextPlugin(IInputPlugin):
         scene = snap.get("scene") or {}
         lines = [f'<reference source="godot" scene="{scene.get("path", "")}">']
         for it in snap.get("items", []):
-            lines.append(
-                f'- {it.get("name", "")} ({it.get("type", "")}) @ {it.get("path", "")}'
-            )
+            line = f'- {it.get("name", "")} ({it.get("type", "")}) @ {it.get("path", "")}'
+            if it.get("position"):
+                line += f' [position={it["position"]}]'
+            lines.append(line)
         lines.append("</reference>")
         return "\n".join(lines)

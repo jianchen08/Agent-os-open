@@ -2679,6 +2679,69 @@ async fn tool_surface_empty_whitelist_yields_framework_only() {
     assert_eq!(schema_names(&result), vec!["spill_retrieve".to_string()]);
 }
 
+/// 多插件工具注册（一行接入通配测试用：工具归属不同 plugin_id）。
+fn router_with_multi_plugin_tools(pairs: &[(&str, &str)]) -> KernelCapabilityRouter {
+    use agentos_plugin_loader::CapabilityRegistryImpl;
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    for (name, plugin) in pairs {
+        let mut d = plain_tool(name);
+        d.plugin_id = plugin.to_string();
+        registry.register_tool(plugin, d);
+    }
+    KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_registry(registry)
+}
+
+#[tokio::test]
+async fn tool_surface_plugin_id_whitelist_includes_all_plugin_tools() {
+    // 一行接入：tool_ids 条目等于插件 id → 该插件全部工具入面（动态导入的
+    // 多工具 MCP 免逐个罗列），其他插件工具不受影响。
+    let router = router_with_multi_plugin_tools(&[
+        ("pw_navigate", "playwright"),
+        ("pw_click", "playwright"),
+        ("other_tool", "other_plugin"),
+    ]);
+    let result = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["playwright"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        schema_names(&result),
+        vec!["pw_click".to_string(), "pw_navigate".to_string()],
+        "插件名白名单透出该插件全部工具"
+    );
+}
+
+#[tokio::test]
+async fn tool_surface_plugin_id_and_tool_name_whitelist_union() {
+    // 插件名条目与精确工具名条目并存 = 并集（两者命中规则独立，无互斥）。
+    let router = router_with_multi_plugin_tools(&[
+        ("pw_navigate", "playwright"),
+        ("pw_click", "playwright"),
+        ("other_tool", "other_plugin"),
+    ]);
+    let result = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["playwright", "other_tool"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        schema_names(&result),
+        vec![
+            "other_tool".to_string(),
+            "pw_click".to_string(),
+            "pw_navigate".to_string()
+        ],
+        "插件名 + 精确名取并集"
+    );
+}
+
 #[tokio::test]
 async fn tool_surface_excludes_non_object_input_schema() {
     // input_schema 被改写成非 object 的工具不注入（LLM 严格校验 parameters）。

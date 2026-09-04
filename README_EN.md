@@ -50,17 +50,17 @@
 ### 📊 Project Scale
 
 - **Rust kernel**: ~95K lines (`kernel/`, ~40K of which are Rust tests — `tests/` dirs + inline `#[cfg(test)]` modules)
-- **Python plugins**: ~166K lines (`plugins/`; 81 plugins currently enabled, 97 `plugin.json` manifests on disk)
+- **Python plugins**: ~168K lines (`plugins/`; 80 plugins currently enabled, 97 `plugin.json` manifests on disk)
 - **Frontend code**: ~143K lines (`frontend/src/`)
 - **Python tests**: ~124K lines (`tests/` + in-plugin tests)
-- **Tool plugins**: 26 manifests (18 self-built tool plugins + 8 preset external-MCP integrations, 41 tool declarations in total; plus zero-code integration of any MCP external tool)
+- **Tool plugins**: 26 manifests (18 self-built tool plugins + 8 preset external-MCP integrations, 58 tool declarations in total; plus zero-code integration of any MCP external tool)
 - **Client**: Web frontend (talking straight to the kernel)
 
 ---
 
 ## 🎬 Demo Video
 
-<a href="https://www.bilibili.com/video/BV1d1NV62Efh">
+<a href="https://www.bilibili.com/video/BV1wrbF6jEJv">
   <img src="https://img.shields.io/badge/▶_Watch_Demo-Bilibili-FF69B4?style=for-the-badge&logo=bilibili&logoColor=white" alt="Lingxi AgentOS Demo Video" />
 </a>
 
@@ -109,7 +109,7 @@ Agent configs (YAML) hot-apply via mtime caching — change prompts or tool whit
 Almost every behavior is customizable via YAML: agent identity, prompts, tool whitelist, constraints, model selection — a direct consequence of everything-is-a-plugin + configuration; changes apply instantly (see Highlight 2).
 
 ### 4. Tool System — Contract-based Design, Out of the Box
-Unified contract (`input_schema` + `output_schema` + `render` intent): the kernel validates results against `output_schema` (fail-closed), the frontend renders result cards by `render`, and `tool_ids` whitelists precisely control the LLM-visible surface. 18 self-built tool plugins plus 8 preset external-MCP integrations (41 tools in total: files, shell, code search, browser, network, memory, media generation, IDE integration), plus zero-code integration of any third-party MCP service.
+Unified contract (`input_schema` + `output_schema` + `render` intent): the kernel validates results against `output_schema` (fail-closed), the frontend renders result cards by `render`, and `tool_ids` whitelists precisely control the LLM-visible surface. 18 self-built tool plugins plus 8 preset external-MCP integrations (58 tool declarations in total: files, shell, code search, browser, network, memory, tasks, approvals, media generation, IDE integration), plus zero-code integration of any third-party MCP service.
 
 ### 5. Memory System — Retain & Recall Conversation Experience
 Carried by the hindsight memory plugin: automatic retention, on-demand recall, and document import; read/written by the LLM via the memory tool.
@@ -155,7 +155,8 @@ Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via pr
 > **Architecture note**: 0.2 is a Rust kernel (`kernel/`) + Vite frontend talking straight to the
 > kernel: `start_web_02.*` builds and starts `agentos-kernel` (:9100, host process) and the Vite
 > dev server (:6390, proxying to the kernel); `docker compose` provides the Redis container
-> on demand (the start script launches only the compose `redis` service, see the root docker-compose.yml).
+> on demand (the Linux/macOS start script launches the compose `redis` service; the Windows
+> script does not touch Redis).
 
 ### Option 1: Windows One-Click (Recommended)
 
@@ -164,10 +165,10 @@ Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via pr
 copy .env.example .env
 ::    Edit .env and fill in your LLM API keys (see config/models/llm.yaml)
 
-:: 2. (optional) Set up WSL2 + docker-ce for the Redis container; skip if already configured
+:: 2. (optional) Set up WSL2 + docker-ce (used by container-isolated execution for high-risk paths such as bash); skip if already configured
 install_native_docker.bat
 
-:: 3. Start the project (builds the Rust kernel + starts kernel :9100 / frontend :6390 / Redis)
+:: 3. Start the project (builds the Rust kernel + starts kernel :9100 / frontend :6390)
 start_web_02.bat
 
 :: Stop
@@ -213,8 +214,6 @@ Host ports are parameterized (with defaults), so a single instance needs zero co
 :: Instance 1 (default ports 9100/6390): double-click start_web_02.bat
 
 :: Instance 2 (different ports), in the other directory's shell:
-set FRONTEND_HOST_PORT=5290
-set REDIS_HOST_PORT=6691
 set AGENTOS_KERNEL_PORT=9101
 set AGENTOS_FRONTEND_PORT=6391
 start_web_02.bat

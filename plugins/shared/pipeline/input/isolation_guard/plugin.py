@@ -18,6 +18,8 @@ IsolationManager 按 workspace 幂等获取/创建容器并注入 _container_id
 
 State 命名空间：
     - execution_contexts : 各工具调用的执行上下文列表
+    - isolation.container_name : 已落地的容器绑定（执行环境显式数据；
+      后续轮凭绑定验活直读，不再重复推导/查找；失活才重新落地刷新）
     - isolation.blocked   : 被策略阻止时设置（供路由拦截）
 """
 
@@ -36,6 +38,10 @@ from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
+
+# 容器绑定在管道 state 里的键：执行环境（容器名）是显式数据，落地一次
+# 全程直读，与 isolation.blocked 同命名空间。
+_CONTAINER_STATE_KEY = "isolation.container_name"
 
 
 def _ensure_isolation_path() -> None:
@@ -267,7 +273,7 @@ class IsolationGuard(IInputPlugin):
         docker_ctxs = [c for c in execution_contexts if c.get("provider") == "docker"]
         if docker_ctxs:
             workspace = ctx.state.get("workspace") or task_metadata.get("workspace")
-            container_id = await self._get_or_create_container(workspace, ctx)
+            container_id = await self._resolve_container(workspace, ctx)
             if container_id:
                 injected_calls = self._inject_container_id(
                     tool_calls,
@@ -276,6 +282,8 @@ class IsolationGuard(IInputPlugin):
                 )
                 if injected_calls is not None:
                     state_updates[StateKeys.RAW_TOOL_CALLS] = injected_calls
+                # 执行环境绑定显式落 state（幂等）：后续轮凭绑定直读
+                state_updates[_CONTAINER_STATE_KEY] = container_id
             else:
                 for c in docker_ctxs:
                     c["provider"] = "denied"
@@ -300,6 +308,42 @@ class IsolationGuard(IInputPlugin):
         return PluginResult(state_updates=state_updates)
 
     # ── 容器落地辅助 ────────────────────────────────────────────
+
+    async def _resolve_container(
+        self,
+        workspace: str | None,
+        ctx: PluginContext,
+    ) -> str | None:
+        """解析容器绑定：state 已有绑定则验活直读，缺失/失活才重新落地。
+
+        执行环境是显式 state 数据（isolation.container_name，持久化字段）：
+        首轮落地后写入，后续轮凭绑定验活（存在+running+探针通过）直接复用；
+        绑定失活（容器被删/失活/daemon 慢超时）则重新走 get_or_create
+        落地并刷新绑定。
+
+        Returns:
+            容器 id（env_id = workspace 派生的容器名）；服务不可用或落地失败
+            返回 None（调用方据此把对应调用标 blocked，不降级裸跑）。
+        """
+        manager = self._get_manager()
+        if manager is None:
+            return None
+        bound = ctx.state.get(_CONTAINER_STATE_KEY) if isinstance(ctx.state, dict) else None
+        if bound:
+            try:
+                if await manager.ensure_container_alive(bound):
+                    return bound
+                logger.warning(
+                    "[IsolationGuard] state 绑定的容器已失活，重新落地 | container=%s",
+                    bound,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[IsolationGuard] state 绑定容器验活失败，重新落地 | container=%s | error=%s",
+                    bound,
+                    exc,
+                )
+        return await self._get_or_create_container(workspace, ctx)
 
     async def _get_or_create_container(
         self,

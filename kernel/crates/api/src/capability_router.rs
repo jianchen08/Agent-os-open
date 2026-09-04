@@ -476,6 +476,7 @@ impl KernelCapabilityRouter {
     /// 过滤语义：
     /// - 白名单命中 + 框架强制工具（`FRAMEWORK_ALWAYS_INCLUDE_TOOLS`，无视
     ///   白名单）注入；空白名单 = agent 声明零工具，仅框架强制工具返回；
+    ///   白名单条目等于插件 id 时该插件全部工具注入（一行接入配法）；
     /// - input_schema 非 object 的工具不注入（LLM 严格校验 parameters 是
     ///   object；注册路径已对缺 schema 工具按 {} 补注册，本过滤只拦注册后
     ///   被改写成非 object 的极端形态）；
@@ -498,10 +499,16 @@ impl KernelCapabilityRouter {
             })
             .unwrap_or_default();
         let all_tools = registry.list_tools();
+        // tool_ids 条目等于插件 id → 该插件全部工具入面（一行接入的 agent 侧
+        // 配法：白名单写插件名即透出其全部工具，动态导入的多工具 MCP 免逐个
+        // 罗列；与精确工具名并存，同名时取并集）。
+        let wanted_plugin_ids: std::collections::HashSet<&str> =
+            wanted.iter().map(|s| s.as_str()).collect();
         let schemas: Vec<Value> = all_tools
             .iter()
             .filter(|t| {
                 wanted.contains(&t.name)
+                    || wanted_plugin_ids.contains(t.plugin_id.as_str())
                     || Self::FRAMEWORK_ALWAYS_INCLUDE_TOOLS.contains(&t.name.as_str())
             })
             .filter(|t| t.input_schema.is_object())

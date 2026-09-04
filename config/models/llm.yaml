@@ -4,13 +4,12 @@ concurrency:
 defaults:
   call_timeout: 600
   chat: glm-5.2
-  compression: minimax-m3
-  embedding: embedding-3
+  embedding: bge-m3
   first_token_timeout: 120
   stream_idle_timeout: 180
   tiers:
-    large: minimax-m3
-    medium: minimax-m3
+    large: glm-5.3-flash
+    medium: glm-5.3-flash
     small: minimax-m3
 embeddings: {}
 models:
@@ -67,13 +66,6 @@ models:
         reasoning_effort: low
       medium:
         reasoning_effort: medium
-  embedding-2:
-    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
-    context_window: 1000000
-    dimension: 1024
-    display_name: Embedding-2
-    model_name: embedding-2
-    provider: zhipu_coding
   embedding-3:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
     context_window: 1000000
@@ -156,6 +148,49 @@ models:
     display_name: Mock LLM (本地验证)
     model_name: mock-llm
     provider: mock_llm
+  deepseek-ai/DeepSeek-V4-Pro:
+    provider: siliconflow
+    model_name: deepseek-ai/DeepSeek-V4-Pro
+    display_name: deepseek-ai/DeepSeek-V4-Pro
+  glm-5.3-flash:
+    provider: zhipu_coding
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+    model_name: glm-5.3-flash
+    display_name: glm-5.3-flash
+    context_window: 1000000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 100000
+      top_p: 1
+      thinking:
+        type: enabled
+      reasoning_effort: max
+  deepseek-v4-flash-vision-exp:
+    provider: deepseek
+    model_name: deepseek-v4-flash-vision-exp
+    display_name: deepseek-v4-flash-vision-exp
+    context_window: 1000000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 100000
+      top_p: 1
+    thinking_strength_params:
+      high:
+        reasoning_effort: max
+      medium:
+        reasoning_effort: high
+      low:
+        reasoning_effort: low
+    multimodal:
+      supports_image: true
+      supported_image_types:
+      - image/jpeg
+      - image/png
+      - image/gif
+      - image/webp
+      max_image_size: 20971520
 providers:
   anthropic:
     api_base: https://api.anthropic.com
@@ -201,6 +236,13 @@ providers:
       max_concurrent: 6
       rpm: 10
       token_quota: 0
+    thinking_strength_params:
+      high:
+        reasoning_effort: max
+      low:
+        reasoning_effort: low
+      medium:
+        reasoning_effort: medium
     type: deepseek
   doubao:
     api_base: https://ark.cn-beijing.volces.com/api/v3
@@ -264,6 +306,16 @@ providers:
       max_concurrent: 6
       rpm: 10
       token_quota: 0
+    thinking_strength_params:
+      high:
+        thinking:
+          type: adaptive
+      low:
+        thinking:
+          type: disabled
+      medium:
+        thinking:
+          type: adaptive
     type: minimax
   mistral:
     api_base: https://api.mistral.ai/v1
@@ -318,6 +370,13 @@ providers:
       max_concurrent: 6
       rpm: 10
       token_quota: 0
+    thinking_strength_params:
+      high:
+        reasoning_effort: high
+      low:
+        reasoning_effort: low
+      medium:
+        reasoning_effort: medium
     type: openai
   opencode:
     api_base: https://opencode.ai/zen/v1
@@ -417,13 +476,33 @@ providers:
       max_concurrent: 6
       rpm: 10
       token_quota: 0
+    thinking_strength_params:
+      high:
+        thinking:
+          type: enabled
+      low:
+        thinking:
+          type: disabled
+      medium:
+        thinking:
+          type: enabled
     type: zai
   zhipu_coding:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
     keys:
-    - api_key: ${ZHIPU_API_KEY}
+    - api_key: ${ZHIPU_CODING_API_KEY}
       id: zhipu_coding_main
       max_concurrent: 6
       rpm: 10
       token_quota: 0
+    thinking_strength_params:
+      high:
+        thinking:
+          type: enabled
+      low:
+        thinking:
+          type: disabled
+      medium:
+        thinking:
+          type: enabled
     type: zai

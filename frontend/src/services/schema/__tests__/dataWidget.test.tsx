@@ -165,6 +165,36 @@ describe('useDataWidget', () => {
       expect(apiGet).toHaveBeenCalledWith('/api/v1/datasource/monitoring/tasks'),
     )
   })
+
+  it('重挂载：先渲上次成功载荷再静默刷新（不闪空窗）', async () => {
+    let resolveFetch: ((v: { data: { value: number } }) => void) | undefined
+    apiGet.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve
+        }),
+    )
+    function Host() {
+      const r = useDataWidget({ datasourceUri: '/api/v1/cache-probe' }, 'scalar')
+      return (
+        <div>
+          <span data-testid="v">{JSON.stringify((r.data as { value?: number } | undefined)?.value)}</span>
+          <span data-testid="loading">{String(r.loading)}</span>
+        </div>
+      )
+    }
+    const { unmount } = render(<Host />)
+    expect(screen.getByTestId('v').textContent).toBe('')
+    resolveFetch?.({ data: { value: 1 } })
+    await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('1'))
+    unmount()
+
+    // 重挂载（槽位轮询递增 key / 切标签重建宿主的等价场景）：新 fetch 永不返回，
+    // 上次成功载荷立即渲染——不闪空窗、不进 loading
+    render(<Host />)
+    expect(screen.getByTestId('v').textContent).toBe('1')
+    expect(screen.getByTestId('loading').textContent).toBe('false')
+  })
 })
 
 describe('组件接线（datasourceUri）', () => {

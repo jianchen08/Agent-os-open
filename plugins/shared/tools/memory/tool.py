@@ -16,7 +16,8 @@ Tool / ToolExecutionResult / 枚举 / 结果工厂均从 ``agentos_plugin_sdk`` 
   - import_text  → backend.import_document(user_id, text=..., name=...)
   - import_file  → backend.import_document(user_id, file_path=..., name=...)
   - delete       → backend.delete(user_id, memory_id)
-  - update       → 后端支持 update 则调用；否则降级为 backend.add（同内容）
+  - update       → 后端支持 update 则调用；否则降级为带锚点的 backend.add
+    （document_id=锚点或自动生成，update_mode="replace" 覆盖式更新）
   - get_context  → backend.search 更宽泛查询（更大 top_k，不过滤类型）
 
 暴露接口：
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -39,6 +41,7 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
 )
+from agentos_plugin_sdk.workspace_aware import WorkspaceAwareMixin
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════
 
 
-class MemoryTool:
+class MemoryTool(WorkspaceAwareMixin):
     """
     记忆工具（IMemoryBackend 注入版）
 
@@ -56,8 +59,10 @@ class MemoryTool:
     - store：存储记忆（backend.add）
     - retrieve：检索记忆（backend.search）
     - import_text：导入文本知识（backend.import_document）
-    - import_file：导入文件知识（backend.import_document）
-    - update：更新知识（后端不支持时降级为 add）
+    - import_file：导入文件知识（backend.import_document）——相对 file_path
+      按注入 workspace 解析为绝对路径（读取发生在 hindsight sidecar 进程，
+      其 cwd 不可作相对路径锚点）
+    - update：更新知识（后端不支持时降级为带锚点的 add）
     - delete：删除记忆（backend.delete）
     - get_context：获取会话上下文（更宽泛的 backend.search）
 
@@ -190,7 +195,9 @@ class MemoryTool:
             description=(
                 "记忆工具：存储和检索知识、情景记忆，支持导入文本和文件知识。\n"
                 "⚠️ 重要：存储记忆时必须填写 tags 参数，用简洁的关键词标签标记内容分类和主题，"
-                "便于后续精准检索。系统会自动将当前 Agent 名称作为标签注入，无需手动添加。"
+                "便于后续精准检索。系统会自动将当前 Agent 名称作为标签注入，无需手动添加。\n"
+                "⚠️ id 契约：store/update 返回的 memory_id 是文档锚点（delete/update 按它定向）；"
+                "retrieve 返回条目的 id 是抽取后的记忆单元 id，不能直接用于 delete/update。"
             ),
             input_schema={
                 "type": "object",
@@ -307,6 +314,10 @@ class MemoryTool:
         if self._memory_backend is None:
             return create_failure_result("memory backend 未注入")
 
+        # 消费注入的 workspace/project_root（param_inject 权威注入）——
+        # 供 import_file 相对路径解析锚定。
+        self._init_workspace(inputs)
+
         action = inputs.get("action")
 
         # IDOR 防护（B6）：敏感（写/删用户数据）action 无服务端可信身份注入时
@@ -338,7 +349,11 @@ class MemoryTool:
         return create_failure_result(f"未知操作: {action}")
 
     async def _store(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """存储记忆，自动将 agent_config_id 注入为标签。"""
+        """存储记忆，自动将 agent_config_id 注入为标签。
+
+        语义为 upsert：同 document_id 重复 store 覆盖该文档内容（replace），
+        不累积衍生条目；缺省锚点自动生成。
+        """
         backend = self._memory_backend
         if backend is None:
             return create_failure_result("memory backend 未注入")
@@ -363,6 +378,7 @@ class MemoryTool:
                 tags=tags,
                 source="memory_tool",
                 document_id=doc_id,
+                update_mode="replace",
             )
             if not memory_id:
                 # 空 id = 后端未确认写入（降级/静默失败），不得报成功
@@ -444,7 +460,15 @@ class MemoryTool:
             return create_failure_result(f"导入文本失败: {str(e)}")
 
     async def _import_file(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """导入文件知识（name 缺省取文件名）。"""
+        """导入文件知识（name 缺省取文件名）。
+
+        路径解析（边界双向翻译）：
+        - ``/workspace/...`` 前缀按容器挂载约定（IsolationManager 以 /workspace
+          挂载任务工作区）翻译为注入 workspace 下的相对路径；
+        - 其余相对路径直接按注入 workspace 解析为绝对路径——文件读取发生在
+          hindsight sidecar 进程（cwd=插件目录），相对路径直传会解析到错误
+          位置而失败。
+        """
         backend = self._memory_backend
         if backend is None:
             return create_failure_result("memory backend 未注入")
@@ -453,7 +477,17 @@ class MemoryTool:
         if not file_path:
             return create_failure_result("缺少 file_path 参数")
 
-        name = inputs.get("name") or os.path.basename(str(file_path))
+        file_path = str(file_path)
+        if file_path == "/workspace":
+            file_path = ""
+        elif file_path.startswith("/workspace/"):
+            file_path = file_path[len("/workspace/") :]
+        if file_path and not Path(file_path).is_absolute():
+            workspace = getattr(self, "_workspace", None)
+            if workspace is not None:
+                file_path = str(self.resolve_path(file_path))
+
+        name = inputs.get("name") or os.path.basename(file_path)
         try:
             user_id = self._resolve_user_id(inputs)
             result = await backend.import_document(
@@ -467,19 +501,24 @@ class MemoryTool:
             return create_failure_result(f"导入文件失败: {str(e)}")
 
     async def _update(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """更新记忆；后端不支持 update 时降级为 add（同内容），永不崩溃。
+        """更新记忆；后端不支持 update 时降级为带锚点的 add，永不崩溃。
 
-        降级逻辑：以相同 content/tags 调用 backend.add（memory_id 作为
-        document_id 原样保留——删除式更新/定向覆盖的锚点），返回新 memory_id，
-        并标记 degraded=True。
+        降级逻辑：backend.add(document_id=锚点, update_mode="replace")——
+        锚点缺失时自动生成（同步 retain 无 document_id 不返回 id，无锚点
+        写入必报「写入未确认」）；replace 覆盖同锚点文档内容而非追加残留。
+        返回 memory_id 并标记 degraded=True。
         """
         backend = self._memory_backend
         if backend is None:
             return create_failure_result("memory backend 未注入")
         content = inputs.get("content")
         tags = self._inject_agent_tags(inputs, list(inputs.get("tags", [])))
+        # 锚点源：memory_id / document_id / file_path（schema 声明 update 按
+        # document_id 定向）——三者皆缺时自动生成（写入必须可确认）
         target_id = self._extract_memory_id(
-            inputs.get("memory_id") or inputs.get("file_path")
+            inputs.get("memory_id")
+            or inputs.get("document_id")
+            or inputs.get("file_path")
         )
 
         if not content:
@@ -501,15 +540,15 @@ class MemoryTool:
                     {"success": True, "memory_id": result, "updated": True}
                 )
 
-            # 降级：重新写入同内容记忆（保留原 memory_id 作 document_id——
-            # 同一 document 覆盖写入，旧记忆单元由服务端合并/替换语义处理）
+            # 降级：带锚点写入（锚点缺失自动生成，保证写入可确认）
             memory_id = await backend.add(
                 user_id=user_id,
                 content=content,
                 memory_type="semantic",
                 tags=tags,
                 source="memory_tool:update",
-                document_id=target_id or "",
+                update_mode="replace",
+                document_id=target_id or f"mem-{uuid4().hex}",
             )
             logger.info(
                 "[MemoryTool] update 降级为 add | new_memory_id=%s", memory_id
@@ -527,12 +566,19 @@ class MemoryTool:
             return create_failure_result(f"更新失败: {str(e)}")
 
     async def _delete(self, inputs: dict[str, Any]) -> ToolExecutionResult:
-        """删除记忆。"""
+        """删除记忆。
+
+        锚点源：memory_id / document_id / file_path（schema 声明 delete 按
+        document_id 定向删除）。失败必须带具体原因——裸 {"success": false}
+        无 error 键会被内核归一层掩蔽成无信息的 "tool execution failed"。
+        """
         backend = self._memory_backend
         if backend is None:
             return create_failure_result("memory backend 未注入")
         memory_id = self._extract_memory_id(
-            inputs.get("memory_id") or inputs.get("file_path")
+            inputs.get("memory_id")
+            or inputs.get("document_id")
+            or inputs.get("file_path")
         )
 
         if not memory_id:
@@ -541,12 +587,16 @@ class MemoryTool:
         try:
             user_id = self._resolve_user_id(inputs)
             deleted = await backend.delete(user_id=user_id, memory_id=memory_id)
-            return create_success_result(
-                {"success": deleted, "deleted": deleted, "memory_id": memory_id}
-            )
         except Exception as e:
             logger.warning("[MemoryTool] 删除失败 | error=%s", e)
             return create_failure_result(f"删除失败: {str(e)}")
+        if not deleted:
+            return create_failure_result(
+                f"删除失败: 记忆 {memory_id} 不存在或后端拒绝删除"
+            )
+        return create_success_result(
+            {"success": True, "deleted": True, "memory_id": memory_id}
+        )
 
     async def _get_context(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """获取会话上下文：以更宽泛的查询（更大 top_k，不过滤类型）检索记忆。"""

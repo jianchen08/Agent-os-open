@@ -25,7 +25,10 @@ pytestmark = pytest.mark.unit
 _PLUGIN_DIR = Path(__file__).resolve().parent
 # 去重插入 [0]：车道共跑时其他插件目录可能残留于 sys.path 前部，
 # 平铺 `import adapter` 会命中他插件同名模块。
-for _m in ("adapter", "router_factory", "exceptions", "key_pool", "_config_models"):
+# 注意不得逐出 _config_models：全仓仅本目录一份、无同名遮蔽风险，而逐出
+# 会在收集期产生第二实例——已持有旧实例引用的测试（如 context_window_guard
+# 的 monkeypatch 配置注入）与运行时 import 读到不同 `_config` 全局态。
+for _m in ("adapter", "router_factory", "exceptions", "key_pool"):
     sys.modules.pop(_m, None)
 if str(_PLUGIN_DIR) in sys.path:
     sys.path.remove(str(_PLUGIN_DIR))

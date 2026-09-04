@@ -195,6 +195,11 @@ export interface UIInputFormField {
   default?: unknown
   /** 是否必填 */
   required?: boolean
+  /**
+   * 条件必填：依赖字段的值等于 equals 时本字段必填（提交期校验）。
+   * 如触发器表单按 trigger_type 要求类型专属参数（delay 类型必填 delay_seconds）。
+   */
+  requiredWhen?: { field: string; equals: string | number }
   /** 选择项（type 为 select/multiselect/radio/checkbox 时使用） */
   options?: Array<{ label: string; value: string | number }>
   /** 动态数据源 URI（调用内核代理端点获取选项列表） */

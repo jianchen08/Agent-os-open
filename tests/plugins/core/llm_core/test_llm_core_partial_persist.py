@@ -159,6 +159,9 @@ async def test_partial_usage_mapped() -> None:
         "output_tokens": 3,
         "total_tokens": 10,
         "cached_tokens": 1,
+        # model/provider 归属随用量同帧落轨迹（监控按模型聚合 token 的依据）
+        "model": "deepseek-v3",
+        "provider": "openai",
     }
 
 
@@ -329,6 +332,8 @@ async def test_success_text_response_assembles_llmresponse() -> None:
         "output_tokens": 9,
         "total_tokens": 14,
         "cached_tokens": 0,
+        "model": "deepseek-v3",
+        "provider": "openai",
     }
     assert result["messages"]["_ops"][0]["msg"]["content"] == "Hello"
 

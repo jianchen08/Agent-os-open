@@ -135,6 +135,9 @@ pub async fn run_ws_session(
             // 「4001 → refreshToken → 重连」自愈路径永远不触发，表现为掉线后
             // 无限重连失败（“未连接”常驻、发消息无响应）。Close 帧发送失败也不
             // 影响语义（连接随 drop 关闭）。
+            // warn 留痕：拒绝路径此前完全静默，前端重连风暴时内核日志零痕迹
+            //（2026-09-04 断连排障实测），排障全靠猜。
+            warn!(code = code, reason = %reason, "WS 握手鉴权拒绝（accept+close）");
             let mut rejected_socket = socket;
             let _ = rejected_socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -214,10 +217,21 @@ async fn run_socket_loop(
     let mut send_task = tokio::spawn(async move {
         while let Some(text) = out_rx.recv().await {
             if text.is_empty() {
-                // 踢旧关闭（WsSink::shutdown 发出空串哨兵）：必须发带
-                // CLOSE_CODE_KICKED 状态码的 Close 帧而非普通空 Close——前端
-                // GlobalWebSocket 对 4000 判"被新连接替换"跳过重连；若按普通
-                // 掉线处理，A/B 双客户端会各自退避重连互踢，形成循环。
+                // 踢旧关闭（WsSink::shutdown 发出空串哨兵）：两段式通知——先发应用层
+                // kicked 文本帧，再发带 CLOSE_CODE_KICKED 状态码的 Close 帧。前端
+                // GlobalWebSocket 对 4000 判"被新连接替换"跳过重连；若按普通掉线
+                // 处理，A/B 双客户端会各自退避重连互踢，形成循环。代理链（Vite dev
+                // proxy 等）可能吞掉 Close 帧状态码（浏览器端退化为 1006），文本帧
+                // 先于 Close 送达即可让前端照常置位防重连——两段缺一不可。
+                let kicked = json!({
+                    "type": "kicked",
+                    "data": {"reason": "replaced_by_new_connection"},
+                });
+                let _ = sender
+                    .send(Message::Text(
+                        serde_json::to_string(&kicked).unwrap_or_default().into(),
+                    ))
+                    .await;
                 let _ = sender
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: agentos_session::auth::CLOSE_CODE_KICKED,

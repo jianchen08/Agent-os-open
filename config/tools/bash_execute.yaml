@@ -1,0 +1,70 @@
+# -*- coding: utf-8 -*-
+# bash_execute 工具独立配置文件
+# 来源参考：config/tools/builtin_tools_config.yaml（已含完整定义）
+# 本文件为工具独立声明，便于按工具维度管理与查阅
+
+name: bash_execute
+description: 执行 Shell 命令，支持长时间运行进程和交互式输入。不要手动 nohup/setsid/disown/行尾&（本工具自带后台执行，手动后台化会使进程脱离管理）。危险命令（rm -rf /、format、dd if= 等）会被拦截。
+category: system
+level: user
+requires_approval: true
+dangerous_operations:
+  - rm -rf
+  - format
+  - del /q
+  - shutdown
+  - reboot
+  - mkfs
+  - dd if=
+  - '> /dev/sd'
+  - curl
+  - wget
+tags:
+  - bash
+  - shell
+  - command
+  - dangerous
+  - interactive
+  - long-running
+capabilities:
+  - shell_command_execution
+  - long_running_process
+  - interactive_input
+  - background_execution
+  - timeout_callback
+  - dangerous_command_intercept
+execution_defaults:
+  default_timeout_seconds: 30
+  long_running_log_dir: logs/bash/
+  background_mode: built-in
+  manual_background_forbidden:
+    - nohup
+    - setsid
+    - disown
+    - append_ampersand
+sensitive_input_handling:
+  auto_mask: true
+  support_types:
+    - confirm_prompt
+    - password_prompt
+platform_notes:
+  windows_command_syntax: different_from_unix
+  unix_command_syntax: standard_shell
+approval:
+  requires_approval: true
+  typical_approvers:
+    - admin
+    - developer
+when_to_use:
+  - 执行系统命令（ls/cat/grep/pip/npm 等）
+  - 运行脚本
+  - 查看系统信息
+  - 安装依赖
+  - 编译构建项目
+  - 需要长时间运行的后台进程（由工具自行管理）
+  - 需要交互式输入确认/密码的场景
+when_not_to_use:
+  - 仅需读取文件（使用 file_read）
+  - 仅需搜索文件（使用 enhanced_search）
+  - 危险操作（rm -rf /、format、dd if= 等）
+  - 需要手动 nohup/setsid/disown/& 化的后台进程

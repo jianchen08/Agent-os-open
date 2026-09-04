@@ -14,7 +14,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { DebugLlmPayloadPage } from '@/pages/debug/DebugLlmPayloadPage'
-import { renderWithProviders } from '@/test/renderWithProviders'
+import { createTestQueryClient, renderWithProviders } from '@/test/renderWithProviders'
 
 vi.mock('@/services/api/llmPayload', () => ({
   getPayloadDiagList: vi.fn(),
@@ -85,5 +85,33 @@ describe('DebugLlmPayloadPage', () => {
     // 参数行（temperature）与原始 JSON 折叠入口
     expect(screen.getAllByText(/temperature/).length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('原始 JSON')).toBeTruthy()
+  })
+
+  it('新快照产生后重进页面应显示最新快照（列表不落后一轮）', async () => {
+    // 真实应用中 QueryClient 是全局单例：共享同一实例模拟切页往返的缓存复用
+    const queryClient = createTestQueryClient()
+
+    // 第一次进入：只有第 1 轮快照
+    vi.mocked(getPayloadDiagList).mockResolvedValueOnce({ items: FAKE_ITEMS, total: 1 })
+    const first = renderWithProviders(<DebugLlmPayloadPage />, { queryClient })
+    await screen.findByRole('button', { name: /5 条消息/ })
+    first.unmount()
+
+    // 会话里又跑了一轮 LLM：服务端新增第 2 个快照；重进页面必须重取并显示它
+    const round2 = {
+      name: '1787131833999__MiniMax-M3__d34db33fc9f0__7msg.json',
+      ts: 1787131833999,
+      model: 'MiniMax-M3',
+      msgs_hash: 'd34db33fc9f0',
+      msg_count: 7,
+      size: 20480,
+    }
+    vi.mocked(getPayloadDiagList).mockResolvedValue({
+      items: [...FAKE_ITEMS, round2],
+      total: 2,
+    })
+    renderWithProviders(<DebugLlmPayloadPage />, { queryClient })
+    // 新快照出现在列表中（重挂触发重取的调用次数契约由 useDebugQueries.test 承载）
+    await screen.findByRole('button', { name: /7 条消息/ })
   })
 })

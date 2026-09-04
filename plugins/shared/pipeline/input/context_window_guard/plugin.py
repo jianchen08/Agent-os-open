@@ -70,10 +70,12 @@ _COMPRESSION_NOTICE = (
 # 语义标记词汇表（对齐 DSH ContextForm，docs/tasks/task_compression_optimization.md 任务 1）
 # ═══════════════════════════════════════════════════════════
 # 消息的内部字段 _context_form 声明"这条内容是什么"（语义形态），与 role（谁说的）
-# 正交。产出方（prompt_build 压缩块 / memory_read 检索条目等）打标，两个消费者：
-# 1. 压缩 LLM——喂压缩时渲染为 [form] 可见前缀，据此分配摘要权重
-#    （instructions 详细保留、notice 一笔带过）；
-# 2. 最终 LLM——llm_core._build_messages 发送前清理该字段（同 seq/tool_result），
+# 正交。产出方（prompt_build 压缩块 / memory_read 检索条目等）打标，消费者：
+# 1. 压缩 fork——与执行路径（llm_core._build_messages）同集剥离，内容原样，
+#    不渲染标签（2026-09-03 用户裁定：渲染会在首个标记消息处分叉 token
+#    前缀，击穿与执行请求的 prefix cache 对齐）；
+# 2. capability 回退序列化（_format_messages）——渲染为 [form] 可见前缀；
+# 3. 最终 LLM——llm_core._build_messages 发送前清理该字段（同 seq/tool_result），
 #    不进 API 载荷，不影响 prompt cache。
 CONTEXT_FORM_INSTRUCTIONS = "instructions"  # 文件规则/项目约定（须遵守的指令性内容）
 CONTEXT_FORM_NOTICE = "notice"  # 一次性通知（发生了什么，无需展开）
@@ -127,6 +129,23 @@ def set_capability_caller(caller: CapabilityCaller | None) -> None:
     _capability_caller = caller
 
 
+# 前端一次性事件通道（frontend.emit，内核内置能力）——压缩彻底失败时向
+# 前端推送 compression_failed 通知。独立于 _capability_caller（那是
+# tool-executor 形态，调用协议不同）。
+FrontendEmitFn = Callable[[str, dict[str, Any], str], Awaitable[None]]
+_frontend_emit: FrontendEmitFn | None = None
+
+
+def set_frontend_emit(fn: FrontendEmitFn | None) -> None:
+    """注入前端事件发射函数（async fn `(event, payload, thread_id)`）。
+
+    server.py 在 on_load 时从 ``plugin.get_capability("frontend")`` 构造注入；
+    传 None 清空（未注入时压缩失败只留日志，管线行为不变）。
+    """
+    global _frontend_emit
+    _frontend_emit = fn
+
+
 def _make_minimal_ctx(
     state: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
@@ -151,7 +170,8 @@ def _make_minimal_ctx(
 
 
 # ═══════════════════════════════════════════════════════════
-# 压缩预算配置（读 config/system/context_window_config.yaml，失败回退默认的单一实现）
+# 压缩预算配置（注入命名空间 context_window 的单一实现；内联形态真值即
+# manifest fields.default，引用/内联两形态统一经 build_injected_config 送达）
 # ═══════════════════════════════════════════════════════════
 
 @dataclass
@@ -162,21 +182,20 @@ class CompressionConfig:
 
     Attributes:
         context_window: 模型上下文窗口大小
-        compress_trigger_ratio: 压缩触发比例（默认 0.55，见 config/system/context_window_config.yaml）
-        l1_ratio: L1 预算比例
-        l2_ratio: L2 预算比例
+        compress_trigger_ratio: 压缩触发比例（代码默认 0.55；真值经注入命名空间 compress_trigger_ratio 送达）
+        l1_ratio: L1 过程块预算比例
+        l2_ratio: L2 过程块预算比例
         recent_ratio: 最近原文预算比例
-        retrieval_ratio: 检索召回预算比例
-        max_turn_ratio: 单轮次最大比例
+
+    预算只保留三类（2026-09-02 裁定）：最近原文 recent / 过程块 L1 / L2；
+    其余维度（retrieval/max_turn 等）不管控。
     """
 
     context_window: int = 128000
-    compress_trigger_ratio: float = 0.55  # 见 config/system/context_window_config.yaml
+    compress_trigger_ratio: float = 0.55  # 代码默认兜底；真值经注入命名空间送达
     l1_ratio: float = 0.1
     l2_ratio: float = 0.05
     recent_ratio: float = 0.18
-    retrieval_ratio: float = 0.05
-    max_turn_ratio: float = 0.5
 
     @classmethod
     def from_yaml_config(
@@ -214,7 +233,6 @@ class CompressionConfig:
                 )
                 return cls(context_window=context_window)
         budgets = yaml_data.get("budgets", {})
-        compression = yaml_data.get("compression", {})
         return cls(
             context_window=context_window,
             compress_trigger_ratio=yaml_data.get(
@@ -223,23 +241,18 @@ class CompressionConfig:
             l1_ratio=budgets.get("l1", 0.1),
             l2_ratio=budgets.get("l2", 0.05),
             recent_ratio=budgets.get("recent", 0.18),
-            retrieval_ratio=budgets.get("retrieval", 0.05),
-            max_turn_ratio=compression.get("max_turn_ratio", 0.5),
         )
 
     def get_budgets(self) -> dict[str, int]:
         """计算各部分实际 token 预算。
 
         Returns:
-            各层 token 预算字典 {recent, L1, L2, retrieval, max_turn}
+            各层 token 预算字典 {recent, L1, L2}（三类，2026-09-02 裁定）
         """
-        recent_budget = int(self.context_window * self.recent_ratio)
         return {
-            "recent": recent_budget,
+            "recent": int(self.context_window * self.recent_ratio),
             "L1": int(self.context_window * self.l1_ratio),
             "L2": int(self.context_window * self.l2_ratio),
-            "retrieval": int(self.context_window * self.retrieval_ratio),
-            "max_turn": int(recent_budget * self.max_turn_ratio),
         }
 
     def get_trigger_threshold(self) -> int:
@@ -294,14 +307,6 @@ class ContextCompressor:
 你现在作为压缩引擎工作：把上方（本条指令之前）的消息流压缩为五部分：l1 / l2 / keywords / state_snapshot / memory_items。
 
 上方的消息流即压缩输入，包括：系统提示、<compressed> 压缩摘要块（此前压缩的产物，只描述已覆盖的旧消息）、<current_state> 状态快照、以及其后的对话消息。不要复述压缩摘要块已覆盖的内容，只在 state_snapshot 中合并更新。
-
-### 语义标签
-部分消息内容前带 [form] 语义标签，摘要时据此分配权重：
-- [instructions] 文件规则/项目约定——必须在 L1 中详细保留
-- [notice] 一次性通知——一笔带过即可
-- [recall] 从记忆库检索的内容——提炼要点，不逐字保留
-- [relay] 其他 agent 传来的——保留关键信息
-- [snapshot] 状态快照——并入 state_snapshot，不重复描述
 
 l1/l2/keywords 描述同一批对话，详略不同。
 **L1 必须比 L2 详细得多**：L1 含具体步骤、决策、产出，
@@ -481,10 +486,10 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
 
         压缩块消息排在 message 序列里（ADR 2026-08-28 压缩块消息化），由调用方
         从序列中拣出传入——压缩 LLM 据此"只合并更新，不复述已覆盖内容"。
-        同模型时前缀与执行请求一致（cache 复用）；任何模型时压缩 LLM 读到
-        完整连贯消息流（理解质量）。带 _context_form 的消息渲染 [form] 标签前缀
-        （任务 1 语义标记叠加生效），内部字段（seq/tool_result/_context_form）
-        渲染后剥离，不进 LLM 载荷。
+        同模型时前缀与执行请求逐字节一致（cache 复用）；任何模型时压缩 LLM
+        读到完整连贯消息流（理解质量）。内部字段（seq/tool_result/
+        _context_form）剥离后进载荷，内容原样不渲染标签（与执行路径
+        llm_core._build_messages 同一清理集，前缀 cache 对齐）。
 
         Args:
             messages: 待压缩消息列表
@@ -707,17 +712,21 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
 
         return "\n".join(lines)
 
-    # 发送给 LLM 前必须剥离的内部字段（fork 复制消息时清理，不改动原消息）
-    _INTERNAL_MSG_FIELDS = ("seq", "tool_result", "_context_form")
+    # 发送给 LLM 前必须剥离的内部字段（fork 复制消息时清理，不改动原消息；
+    # metadata=内核 client_message_id 等持久化对账数据，与 llm_core 出站
+    # 黑名单 _OUTBOUND_INTERNAL_FIELDS 对齐——严格 provider 拒收未知字段）
+    _INTERNAL_MSG_FIELDS = ("seq", "tool_result", "_context_form", "metadata")
 
     @classmethod
     def _render_fork_message(cls, msg: dict[str, Any]) -> dict[str, Any]:
-        """把消息转为可发压缩 LLM 的副本：剥离内部字段，渲染语义标签。
+        """把消息转为可发压缩 LLM 的副本：剥离内部字段，内容原样。
 
-        - 内部字段（seq/tool_result/_context_form）不进 LLM 载荷（对齐
-          llm_core._build_messages 的清理集）；
-        - 带 _context_form 的消息在 content 前渲染 [form] 标签前缀，
-          让压缩 LLM 区分重要性（instructions 详细保留、notice 一笔带过）；
+        - 内部字段（seq/tool_result/_context_form）不进 LLM 载荷——清理集与
+          执行路径 llm_core._build_messages 完全一致，fork 内容与执行请求
+          逐字节相同。2026-09-03 用户裁定：不再渲染 [form] 标签前缀——渲染
+          会在首个标记消息处改变 token 前缀，击穿「fork=执行请求真前缀」的
+          prefix cache 对齐；块消息靠内容自带的 <compressed>/
+          <current_state> 结构标记区分。
         - 其余字段（role/content/name/tool_calls 等）原样保留——fork 前缀
           与执行请求保持一致是 cache 复用的前提。
 
@@ -727,12 +736,7 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         Returns:
             可发送的消息副本
         """
-        rendered = {k: v for k, v in msg.items() if k not in cls._INTERNAL_MSG_FIELDS}
-        form = msg.get("_context_form")
-        label = CONTEXT_FORM_LABELS.get(form, "") if isinstance(form, str) else ""
-        if label and isinstance(rendered.get("content"), str) and rendered["content"]:
-            rendered["content"] = f"{label} {rendered['content']}"
-        return rendered
+        return {k: v for k, v in msg.items() if k not in cls._INTERNAL_MSG_FIELDS}
 
     def _build_fork_messages(
         self,
@@ -748,7 +752,8 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         唯一新增输入（DSH summarizer 方案）。
 
         Args:
-            messages: 待压缩消息（原样进 fork，不 _format_messages 压扁）
+            messages: 待压缩消息（孤儿 tool result 摘除后进 fork，不
+                _format_messages 压扁；state 原列表不被修改）
             system_message: 执行时系统消息（dict 或 str；None 跳过）
             prior_blocks: 序列中既有的压缩块消息（None/空跳过）
 
@@ -767,9 +772,41 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
             if isinstance(pb, dict) and pb.get("content"):
                 fork.append(self._render_fork_message(pb))
 
+        # 孤儿 tool result 摘除：state 历史遗留的孤儿（cancelled/failed run
+        # 留下，或更早压缩块吞掉 assistant 后残留）进 fork 载荷会被 MiniMax
+        # 严格校验拒 400（tool result's tool id not found 2013）。判定语义与
+        # 执行路径 llm_core normalizer Phase A 一致。state 原消息不动——
+        # 执行请求的清理由 llm_core normalizer 负责，此处只管压缩请求。
+        expecting_ids: set[str] = set()
+        dropped_orphans = 0
         for m in messages:
-            if isinstance(m, dict):
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            if role == "assistant":
+                if m.get("tool_calls"):
+                    expecting_ids = {
+                        tc.get("id") for tc in m["tool_calls"] if tc.get("id")
+                    }
+                else:
+                    expecting_ids = set()
                 fork.append(self._render_fork_message(m))
+            elif role == "tool":
+                tc_id = m.get("tool_call_id")
+                if tc_id and tc_id in expecting_ids:
+                    expecting_ids.discard(tc_id)
+                    fork.append(self._render_fork_message(m))
+                else:
+                    dropped_orphans += 1
+            else:
+                if role in ("user", "system"):
+                    expecting_ids = set()
+                fork.append(self._render_fork_message(m))
+        if dropped_orphans:
+            logger.warning(
+                "[ContextCompressor] fork 载荷摘除 %d 条孤儿 tool result（无配对 assistant tool_calls）",
+                dropped_orphans,
+            )
 
         fork.append({"role": "user", "content": self.COMPACTION_INSTRUCTION})
         return fork
@@ -1522,6 +1559,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
         self._trigger_ratio = self._resolve_trigger_ratio(
             self._config.get("trigger_ratio"), self._window_cfg
         )
+        # 压缩失败已透传前端的去重标记：连续失败只推一次 compression_failed
+        # 事件（同一故障周期不刷屏），压缩成功后复位。
+        self._compress_fail_notified = False
         # 实例级追踪：插件可能被重复实例化，state 不一定跨迭代持久化
         # 用实例变量做主存储，ctx.state 做辅助（重启恢复场景）
         self._tracked_msg_count: int = 0
@@ -1572,25 +1612,29 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # ------------------------------------------------------------------
 
     def _apply_runtime_config(self, ctx: PluginContext) -> None:
-        """从 Agent 配置覆盖运行时参数。
+        """从每调用注入与 Agent 配置覆盖运行时参数。
 
-        三层覆盖链路（高优先级覆盖低优先级）：
-          ① Agent YAML (plugins.enabled.context_window_guard.{key})
-          ② Pipeline YAML (plugins.context_window_guard.config.{key})
-          ③ 代码默认值
-
-        Agent 覆盖通过两条路径生效：
-        - 路径 A：plugin_resolver.apply_agent_plugin_configs() 已用合并后的
-          config 重新构造本插件实例（_config 已含 agent override），构造时
-          _trigger_ratio 已正确。此方法处理路径 B。
-        - 路径 B：ctx.state 中可能携带 agent 注入的运行时覆盖（与 stop_check
-          等插件从 ctx.state 读 max_iterations 同一机制）。
-
-        本方法读 ctx.state 里的 context_guard.trigger_ratio（如有）覆盖 _trigger_ratio。
+        覆盖链（高→低）：
+          ① ctx.state["context_guard.trigger_ratio"]（agent YAML 运行时覆盖，
+             与 stop_check 等插件从 ctx.state 读 max_iterations 同一机制）
+          ② pipeline/agent 显式 trigger_ratio（构造时 _config 已带，
+             _resolve_trigger_ratio 内保持其高于注入值）
+          ③ ctx.config["context_window"] 注入命名空间——内核 sidecar 管道每
+             调用合入 build_injected_config（内联形态真值即 manifest
+             fields.default）；每调用重解析，保存即热生效，不依赖实例重建
+          ④ 构造时的 _config/_window_cfg（initialize 握手注入；合宿宿主按
+             首触发成员的 manifest 注入后同份扇给全员，本插件可能拿到空值）
 
         Args:
             ctx: 插件执行上下文
         """
+        config = ctx.config if isinstance(ctx.config, dict) else {}
+        window_ns = config.get("context_window")
+        if isinstance(window_ns, dict) and window_ns:
+            self._window_cfg = window_ns
+            self._trigger_ratio = self._resolve_trigger_ratio(
+                self._config.get("trigger_ratio"), self._window_cfg
+            )
         state_ratio = ctx.state.get("context_guard.trigger_ratio")
         if state_ratio is not None:
             self._trigger_ratio = state_ratio
@@ -2008,19 +2052,17 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 system_message=ctx.state.get("system_message"),
             )
         except Exception as exc:
+            # 压缩异常 → 降级继续（压缩失败不阻塞管线；上下文超窗由真实
+            # LLM 调用的报错暴露，不以零回复终止会话）
             logger.error(
-                "[%s] compress_messages 异常: %s | service=%s",
+                "[%s] compress_messages 异常，降级继续管线: %s | service=%s",
                 self.name,
                 exc,
                 type(service).__name__,
                 exc_info=True,
             )
-            # 压缩异常 → 终止管线
-            ctx.state[StateKeys.ENDED] = True
-            return PluginResult(
-                state_updates={StateKeys.ENDED: True},
-                skip_remaining=True,
-            )
+            await self._notify_compress_failure(ctx)
+            compressed = None
 
         # 成功判据 = 估算 token 收缩（压缩块消息原位替换被压消息后，条数可能
         # 不减——如单条超大消息被替换为一条块消息——token 收缩才是压缩的
@@ -2036,6 +2078,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 original_tokens,
                 compressed_tokens,
             )
+            self._compress_fail_notified = False
             # 压缩只搬运消息不格式化，会原样保留历史段里的 raw 格式 tool_calls，
             # 写回 state 前强制标准化为 OpenAI API 格式，否则上游报"工具类型不能为空"。
             # standardize 返回被改写的消息下标，外层据此 emit set(seq, 新内容) ops。
@@ -2079,9 +2122,11 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 }
             )
 
-        # 压缩返回 None（失败）或未收缩 token → 终止管线
-        logger.error(
-            "[%s] 上下文压缩失败: estimated=%d 超过 trigger=%d 但压缩未能收缩上下文 "
+        # 压缩无产出（无料可压/失败/未收缩）→ 降级继续管线，不阻塞回复。
+        # 类契约"压缩失败不阻塞管线"：clean/trim 的删除 ops 照常上报，
+        # 压缩本身跳过；上下文超窗由真实 LLM 调用的报错暴露。
+        logger.warning(
+            "[%s] 压缩未产出有效收缩，跳过压缩继续管线: estimated=%d 超过 trigger=%d "
             "(compressed=%s, original=%d, tokens ~%d -> ~%d)",
             self.name,
             estimated_tokens,
@@ -2091,11 +2136,51 @@ class ContextWindowGuardPlugin(IInputPlugin):
             original_tokens,
             compressed_tokens,
         )
-        ctx.state[StateKeys.ENDED] = True
-        return PluginResult(
-            state_updates={StateKeys.ENDED: True},
-            skip_remaining=True,
+        current_non_sys = sum(1 for m in messages if m.get("role") != "system")
+        self._tracked_msg_count = current_non_sys
+        degrade_updates: dict[str, Any] = {"_tracked_msg_count": current_non_sys}
+        if delete_ops:
+            degrade_updates["messages"] = {"_ops": delete_ops}
+        await self._notify_compress_failure(ctx)
+        return PluginResult(state_updates=degrade_updates)
+
+    async def _notify_compress_failure(self, ctx: PluginContext) -> None:
+        """压缩彻底失败时向前端推送一次 compression_failed 事件。
+
+        「重试到上限透传」语义：走到这里的失败已是本轮压缩的最终失败
+        （压缩失败不阻塞管线，fail-open 降级继续）。连续失败只在首个失败
+        轮推送一次（同一故障周期不刷屏），压缩成功后复位。通道未注入或
+        发射失败均只留日志，绝不反噬管线降级路径。
+        """
+        if self._compress_fail_notified:
+            return
+        self._compress_fail_notified = True
+        emit = _frontend_emit
+        if emit is None:
+            logger.debug(
+                "[%s] frontend.emit 未注入，压缩失败不推前端（仅日志）",
+                self.name,
+            )
+            return
+        thread_id = str(
+            ctx.state.get("session_id") or ctx.state.get("thread_id") or ""
         )
+        payload = {
+            "thread_id": thread_id,
+            "pipeline_id": str(ctx.state.get(StateKeys.PIPELINE_ID) or ""),
+            "message": (
+                "上下文压缩失败（重试已耗尽），会话继续但上下文将持续膨胀，"
+                "建议关注会话状态或新建会话。"
+            ),
+        }
+        try:
+            await emit("compression_failed", payload, thread_id)
+        except Exception as exc:  # noqa: BLE001 —— 通知是增强能力，失败不阻断降级路径
+            logger.warning(
+                "[%s] compression_failed 事件推送失败（忽略）: %s",
+                self.name,
+                exc,
+            )
 
     # ------------------------------------------------------------------
     # 辅助方法
@@ -2368,20 +2453,32 @@ class ContextWindowGuardPlugin(IInputPlugin):
         config = CompressionConfig.from_yaml_config(context_window, injected=window_cfg)
 
         # 构建 LLM 调用函数：经 capability_caller 调 llm.complete_stream
-        # （llm_service 服务轴）。model 解析链与 llm_core 同款：
-        # 注入 compression.model > state.model_id > state.model_tier(→ defaults.tiers)
-        # > defaults.chat。
+        # （llm_service 服务轴）。压缩模型唯一真值 = manifest 内联
+        # compression.model；未配置即停用压缩（服务不构建，与依赖不全早退
+        # 同构），禁止把空模型名发往 llm_service。采样参数不在此配置：
+        # 缺省由 llm.complete_stream 按 llm.yaml 模型条目服务侧回填；
+        # compression 配置显式携带的键（enabled/model 之外）作为调用方
+        # 覆盖透传（2026-09-03 用户裁定）。
         llm_call_fn = None
         if _capability_caller is not None:
-            llm_call_fn = _build_compress_llm_call_fn(
-                _capability_caller,
-                model_id=_resolve_compress_model(
-                    ctx,
-                    injected=(
-                        window_cfg.get("compression", {}) if window_cfg else {}
-                    ),
-                ),
-            )
+            compress_cfg = window_cfg.get("compression", {}) if window_cfg else {}
+            compress_model = _resolve_compress_model(ctx, injected=compress_cfg)
+            if compress_model:
+                extra_params = {
+                    key: value
+                    for key, value in compress_cfg.items()
+                    if key not in ("enabled", "model") and value is not None
+                }
+                llm_call_fn = _build_compress_llm_call_fn(
+                    _capability_caller,
+                    model_id=compress_model,
+                    extra_params=extra_params,
+                )
+            else:
+                logger.warning(
+                    "[ContextWindowGuardPlugin] compression.model 未配置，压缩停用"
+                )
+                return None
 
         try:
             return CompressionService(
@@ -2426,48 +2523,23 @@ class ContextWindowGuardPlugin(IInputPlugin):
 def _resolve_compress_model(
     ctx: PluginContext, injected: dict[str, Any] | None = None
 ) -> str:
-    """解析压缩用模型 id（注入 compression.model > llm_core 同款链路）。
+    """压缩用模型 id：唯一真值 = manifest 内联字段 ``compression.model``。
 
-    优先级：注入 compression.model（manifest 内联，非空时最优先）
-    > state.model_id > state.model_tier(→ llm.yaml defaults.tiers)
-    > llm.yaml defaults.chat；全部缺失返回空串（llm_service 默认 chat 兜底）。
-
-    模型配置经 _config_models loader 读取（llm_core server.py 注入的
-    llm.yaml 配置 shim 同源；本 sidecar 未注入时 loader 返回空配置，
-    解析结果为空串 → llm_service 兜底）。
+    本 manifest 的 fields.default 即配置本体（单一真值裁定 2026-09-02 同款
+    形态），不经 state/llm.yaml 解析——guard 所在 sidecar 未注入 llm.yaml
+    配置 shim，任何经 loader 的兜底链在这里都是死路。返回空串表示未配置，
+    调用方据此停用压缩（见 _get_memory_service）。
 
     Args:
-        ctx: 插件执行上下文，读 model_id/model_tier
+        ctx: 插件执行上下文（模型解析不再消费 state，保留形参对齐调用形态）
         injected: 注入的 compression 配置 dict（manifest fields.default 内联）
 
     Returns:
-        model_id（可为空串）
+        model_id；未配置返回空串
     """
-    if injected and isinstance(injected.get("model"), str) and injected["model"]:
-        return injected["model"]
-
-    resolved = ctx.state.get("model_id", "")
-    if not resolved:
-        tier = ctx.state.get("model_tier", "")
-        if tier:
-            try:
-                from _config_models import get_model_config_loader  # noqa: PLC0415
-
-                resolved = get_model_config_loader().resolve_tier(tier)
-            except ImportError:
-                logger.debug(
-                    "[context_window_guard] _config_models 不可达（llm.yaml 未注入），"
-                    "压缩模型走 llm_service 默认 chat"
-                )
-                return ""
-    if not resolved:
-        try:
-            from _config_models import get_model_config_loader  # noqa: PLC0415
-
-            resolved = get_model_config_loader().get_default_chat_model()
-        except ImportError:
-            return ""
-    return resolved or ""
+    if injected and isinstance(injected.get("model"), str):
+        return injected["model"].strip()
+    return ""
 
 
 def _compress_capability_timeout(model_id: str) -> float:
@@ -2477,23 +2549,24 @@ def _compress_capability_timeout(model_id: str) -> float:
     LLM 级耗时，上界即 llm.yaml call_timeout）。+60s 余量让 llm_service 的
     结构化错误信封先于 SDK 超时返回（错误是值，不丢语义）。
 
-    model_id 为空时按 defaults.chat 指向模型取值（与 _resolve_compress_model
-    的运行语义对齐——空串即 llm_service 按默认 chat 兜底）。_config_models
-    不可达（llm.yaml 未注入，本插件既有降级语义）或模型无配置时，用 loader
-    内部默认 300s 口径（与 get_llm_core_config 的 defaults 兜底一致）。
+    _config_models 不可达（llm.yaml 未注入本 sidecar）或模型无配置时，
+    用 360s 口径（loader 内部默认 300s + 60s 余量）。
     """
     try:
         from _config_models import get_model_config_loader  # noqa: PLC0415
     except ImportError:
         return 360.0
     loader = get_model_config_loader()
-    eff_model = model_id or loader.get_default_chat_model()
-    conf = loader.get_llm_core_config(eff_model) if eff_model else None
+    conf = loader.get_llm_core_config(model_id) if model_id else None
     call_timeout = float(conf["call_timeout"]) if conf else 300.0
     return call_timeout + 60.0
 
 
-def _build_compress_llm_call_fn(caller: CapabilityCaller, model_id: str = "") -> LLMCallFn:
+def _build_compress_llm_call_fn(
+    caller: CapabilityCaller,
+    model_id: str = "",
+    extra_params: dict[str, Any] | None = None,
+) -> LLMCallFn:
     """构建压缩用的 LLM 调用函数。
 
     经 capability_caller 调 llm.complete_stream（llm_service 服务轴，与
@@ -2502,12 +2575,20 @@ def _build_compress_llm_call_fn(caller: CapabilityCaller, model_id: str = "") ->
     （text/tool_calls/thinking_text/usage/finish_reason/partial），压缩取
     data.text 为摘要。
 
-    model 参数由调用方从 state 解析（model_id → model_tier → defaults.chat），
-    空串时 llm_service 按默认 chat 兜底。
+    model 参数 = manifest 内联 compression.model（_resolve_compress_model
+    解析），由调用方保证非空——空模型名发往 llm_service 会被 litellm
+    以 BadRequest 拒绝（You passed in model=）。
+
+    采样参数（temperature/max_tokens/thinking 等）不在本函数硬编码：
+    缺省由 llm.complete_stream 按 llm.yaml 模型条目 default_params 服务侧
+    回填（单一真值在模型配置）；extra_params = compression 配置显式携带
+    的参数（enabled/model 之外的键），作为调用方显式参数覆盖服务侧默认
+    （2026-09-03 用户裁定：manifest 只给模型名也行，给了完整参数就覆盖）。
 
     Args:
         caller: 能力调用 async 函数 (method, params, timeout) -> Any
-        model_id: 压缩用模型 id（空 = llm_service 默认 chat）
+        model_id: 压缩用模型 id（manifest compression.model）
+        extra_params: 调用方显式覆盖参数（原样透传进工具 args）
 
     Returns:
         async (messages) -> response_text 的 LLM 调用函数；
@@ -2525,7 +2606,7 @@ def _build_compress_llm_call_fn(caller: CapabilityCaller, model_id: str = "") ->
         params = {
             "tool_name": "llm.complete_stream",
             "plugin_id": "llm_service",
-            "args": {"model": model_id, "messages": messages, "max_tokens": 8000},
+            "args": {"model": model_id, "messages": messages, **(extra_params or {})},
         }
         try:
             result = await caller("tool-executor.invoke", params, timeout)

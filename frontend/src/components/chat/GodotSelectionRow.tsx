@@ -16,7 +16,7 @@ export function GodotSelectionRow({ threadId }: { threadId?: string }) {
   const chips: ReferenceChipData[] = sel.items.map((it, i) => ({
     kind: 'godot-node',
     title: it.name,
-    subtitle: `${it.type} @ ${it.path}`,
+    subtitle: `${it.type} @ ${it.path}${it.position ? ' · ' + it.position : ''}`,
     previewUrl: it.preview_kind ? godotPreviewUrl(i, sel.signature) : undefined,
   }))
 

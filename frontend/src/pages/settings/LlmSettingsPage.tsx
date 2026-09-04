@@ -7,6 +7,8 @@
  *    自定义输入模型名直接写入配置；可编辑每提供者的并发/RPM（KeyPool 消费）。
  * 2. 模型——默认模型选择（chat/tiers/embedding）、模型列表管理、
  *    每模型采样参数编辑（default_params，PUT /llm/models/{id}）。
+ * 添加模型表单与模型行「参数」面板共用 ModelParamsEditor（上下文/采样/
+ * 思考模式/思考强度映射/多模态/自定义参数），添加时即可一并填写。
  */
 
 import { useState, useEffect, useCallback } from 'react'
@@ -45,6 +47,8 @@ import {
   type RemoteModel,
   type LLMDefaults,
 } from '@/services/api/config'
+import { buildModelFields, draftFromModel, emptyModelParamsDraft } from './modelParams'
+import { ModelParamsEditor } from './ModelParamsEditor'
 
 
 /**
@@ -134,13 +138,14 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     tiers: {},
   })
 
-  // 新模型表单
-  const [newModelId, setNewModelId] = useState('')
+  // 新模型表单（模型名称即身份：模型 ID 由名称派生，后端冲突时自动改名；
+  // 参数随添加一并填写，走共享 ModelParamsEditor 草稿）
   const [newModelConfig, setNewModelConfig] = useState<ModelConfig>({
     provider: '',
     model_name: '',
     display_name: '',
   })
+  const [addParams, setAddParams] = useState(emptyModelParamsDraft)
 
   // 新提供商表单
   const [newProviderId, setNewProviderId] = useState('')
@@ -205,21 +210,29 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     }
   }, [defaultsDraft])
 
-  // 添加新模型
+  // 添加新模型（模型 ID = 模型名称；同名模型已在其他提供商下时后端自动改名）
   const handleAddModel = useCallback(async () => {
-    if (!newModelId.trim()) return
+    const modelName = newModelConfig.model_name.trim()
+    if (!modelName) return
     try {
-      const models = await addModel(newModelId.trim(), {
-        ...newModelConfig,
-        model_name: newModelConfig.model_name || newModelId.trim(),
+      const { models, added_ids } = await addModel(modelName, {
+        provider: newModelConfig.provider,
+        model_name: modelName,
+        display_name: newModelConfig.display_name,
+        ...buildModelFields(addParams),
       })
       setConfig((prev) => (prev ? { ...prev, models } : prev))
-      setNewModelId('')
       setNewModelConfig({ provider: '', model_name: '', display_name: '' })
+      setAddParams(emptyModelParamsDraft())
+      if (added_ids[0] !== modelName) {
+        toast.success('模型已添加，ID 自动命名以避开其他提供商的同名模型', {
+          description: `${modelName} → ${added_ids[0]}`,
+        })
+      }
     } catch (e) {
       toast.error('添加模型失败', { description: getApiMsg(e, '添加模型失败') })
     }
-  }, [newModelId, newModelConfig])
+  }, [newModelConfig, addParams])
 
   // 删除模型
   const handleDeleteModel = useCallback(async (modelId: string) => {
@@ -323,7 +336,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       const failed: string[] = []
       for (const name of modelNames) {
         try {
-          const models = await addModel(name, {
+          const { models } = await addModel(name, {
             provider: providerId,
             model_name: name,
             display_name: name,
@@ -496,6 +509,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                     <Input
                       id="new-provider-apikey"
                       type="password"
+                      autoComplete="new-password"
                       value={newProviderApiKey}
                       onChange={(e) => setNewProviderApiKey(e.target.value)}
                       placeholder="输入 API Key（自动写入 .env）"
@@ -559,7 +573,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
             <section className="border-t pt-4">
               <h3 className="mb-3 text-sm font-semibold">已注册模型 ({modelIds.length})</h3>
               <p className="text-muted-foreground mb-3 text-xs">
-                展开「参数」可设置上下文窗口、最大输出 tokens、temperature/top_p 与 think 参数（思考模式/推理力度）。
+                展开「参数」可设置上下文窗口、采样参数、思考模式、思考强度映射与多模态能力；添加模型时也可直接填写同一组参数。
               </p>
               {modelIds.length === 0 ? (
                 <div className="text-muted-foreground py-4 text-center text-sm">
@@ -580,16 +594,18 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
               )}
             </section>
 
-            {/* 手动添加模型 */}
+            {/* 手动添加模型：模型名称即身份（ID 由名称派生，跨提供商同名自动改名） */}
             <section className="border-t pt-4">
               <h3 className="mb-3 text-sm font-semibold">添加模型</h3>
               <div className="space-y-2">
-                <FieldRow label="模型 ID" htmlFor="new-model-id">
+                <FieldRow label="模型名称" htmlFor="new-model-name">
                   <Input
-                    id="new-model-id"
-                    value={newModelId}
-                    onChange={(e) => setNewModelId(e.target.value)}
-                    placeholder="如: gpt-5.1"
+                    id="new-model-name"
+                    value={newModelConfig.model_name}
+                    onChange={(e) =>
+                      setNewModelConfig((prev) => ({ ...prev, model_name: e.target.value }))
+                    }
+                    placeholder="如: gpt-5.1（作为模型 ID 与调用名）"
                   />
                 </FieldRow>
                 <FieldRow label="提供商" htmlFor="new-model-provider">
@@ -609,16 +625,6 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                     </SelectContent>
                   </Select>
                 </FieldRow>
-                <FieldRow label="模型名称" htmlFor="new-model-name">
-                  <Input
-                    id="new-model-name"
-                    value={newModelConfig.model_name}
-                    onChange={(e) =>
-                      setNewModelConfig((prev) => ({ ...prev, model_name: e.target.value }))
-                    }
-                    placeholder="留空则与模型 ID 相同"
-                  />
-                </FieldRow>
                 <FieldRow label="显示名称" htmlFor="new-model-display">
                   <Input
                     id="new-model-display"
@@ -629,38 +635,10 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                     placeholder="如: GPT-5.1"
                   />
                 </FieldRow>
-                <FieldRow label="上下文窗口" htmlFor="new-model-ctx">
-                  <Input
-                    id="new-model-ctx"
-                    type="number"
-                    min={0}
-                    value={newModelConfig.context_window ?? ''}
-                    onChange={(e) =>
-                      setNewModelConfig((prev) => ({
-                        ...prev,
-                        context_window: e.target.value ? Number(e.target.value) : undefined,
-                      }))
-                    }
-                    placeholder="如: 128000"
-                  />
-                </FieldRow>
-                <FieldRow label="推理模型" htmlFor="new-model-reasoning">
-                  <div className="flex items-center pt-2">
-                    <input
-                      id="new-model-reasoning"
-                      type="checkbox"
-                      checked={newModelConfig.reasoning_model ?? false}
-                      onChange={(e) =>
-                        setNewModelConfig((prev) => ({ ...prev, reasoning_model: e.target.checked }))
-                      }
-                      className="border-border h-4 w-4 rounded"
-                    />
-                    <span className="text-muted-foreground ml-2 text-xs">
-                      勾选表示该模型支持 thinking/reasoning 能力
-                    </span>
-                  </div>
-                </FieldRow>
-                <Button size="sm" onClick={handleAddModel} disabled={!newModelId.trim() || !newModelConfig.provider}>
+                <div className="rounded-lg border p-3">
+                  <ModelParamsEditor value={addParams} onChange={setAddParams} />
+                </div>
+                <Button size="sm" onClick={handleAddModel} disabled={!newModelConfig.model_name.trim() || !newModelConfig.provider}>
                   添加模型
                 </Button>
               </div>
@@ -747,6 +725,7 @@ function ProviderCard({
           <span className="text-muted-foreground font-mono text-xs">Key: {maskedKey}</span>
           <Input
             type="password"
+            autoComplete="new-password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             placeholder="输入新的 API Key"
@@ -773,6 +752,7 @@ function ProviderCard({
           <div className="flex items-center gap-2">
             <Input
               type="password"
+              autoComplete="new-password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder="填入 API Key（自动写入 .env，立即生效）"
@@ -1027,24 +1007,12 @@ function FetchModelsModal({
   )
 }
 
-/** 自定义参数值类型解析：true/false → 布尔，数字 → 数值，其余原样字符串 */
-const parseCustomValue = (v: string): unknown => {
-  if (v === 'true') return true
-  if (v === 'false') return false
-  if (v !== '' && !Number.isNaN(Number(v))) return Number(v)
-  return v
-}
-
 /**
  * 模型行：展示 + 删除 + 模型设置编辑。
  *
- * 覆盖 llm.yaml 中模型条目的常用字段——拉取/自定义添加的模型初始只有
- * 最小配置（provider/model_name/display_name），上下文窗口、输出上限、
- * think 参数都在这里补全：
- * - 模型级：context_window（上下文窗口）、reasoning_model（推理模型标记）
- * - default_params：temperature / max_tokens / top_p / thinking.type /
- *   reasoning_effort
- * - 「保持原样」的选项不写入该字段（保留 yaml 原值或维持未设置）
+ * 参数编辑（上下文窗口、输出上限、采样、thinking、思考强度映射、多模态、
+ * 自定义参数）走共享 ModelParamsEditor 草稿，保存经 buildModelFields
+ * 序列化为部分字段 PUT /llm/models/{id}。
  */
 function ModelRow({
   modelId,
@@ -1058,61 +1026,10 @@ function ModelRow({
   onSaveSettings: (id: string, settings: Partial<ModelConfig>) => Promise<void>
 }) {
   const [expanded, setExpanded] = useState(false)
-  const params = (model.default_params ?? {}) as Record<string, unknown>
-  const currentThinking = (params.thinking as { type?: string } | undefined)?.type ?? ''
-  const currentEffort = typeof params.reasoning_effort === 'string' ? params.reasoning_effort : ''
-
-  // 上下文窗口用 string state（空串=未设置，允许清空展示）
-  const [contextWindow, setContextWindow] = useState(
-    model.context_window != null ? String(model.context_window) : '',
-  )
-  const [temperature, setTemperature] = useState(
-    (params.temperature as number) ?? 0.7,
-  )
-  const [maxTokens, setMaxTokens] = useState((params.max_tokens as number) ?? 4096)
-  const [topP, setTopP] = useState((params.top_p as number) ?? 1)
-  const [reasoningModel, setReasoningModel] = useState(model.reasoning_model ?? false)
-  const [thinkingType, setThinkingType] = useState(currentThinking)
-  const [effort, setEffort] = useState(currentEffort)
-
-  // 自定义参数（key/value 多条，保存时合并进 default_params）
-  const [customKey, setCustomKey] = useState('')
-  const [customValue, setCustomValue] = useState('')
-  const [customParams, setCustomParams] = useState<{ key: string; value: string }[]>([])
-
-  const addCustomParam = () => {
-    const k = customKey.trim()
-    if (!k) return
-    // 同名覆盖：允许修改已加入的自定义参数
-    setCustomParams((prev) => [...prev.filter((p) => p.key !== k), { key: k, value: customValue.trim() }])
-    setCustomKey('')
-    setCustomValue('')
-  }
+  const [draft, setDraft] = useState(() => draftFromModel(model))
 
   const handleSave = () => {
-    const settings: Partial<ModelConfig> = {}
-    if (contextWindow.trim() !== '') settings.context_window = Number(contextWindow)
-    settings.reasoning_model = reasoningModel
-
-    // 合并保留 default_params 中的其他字段（extra_body / reasoning_retention /
-    // thinking_strength_params 在模型级，不受影响）
-    const nextParams: Record<string, unknown> = {
-      ...params,
-      temperature,
-      max_tokens: maxTokens,
-      top_p: topP,
-    }
-    if (thinkingType) {
-      nextParams.thinking = { ...((params.thinking as Record<string, unknown>) ?? {}), type: thinkingType }
-    }
-    if (effort) nextParams.reasoning_effort = effort
-    // 自定义参数最后合并（覆盖同名字段——即「自定义」的意义）
-    for (const p of customParams) {
-      nextParams[p.key] = parseCustomValue(p.value)
-    }
-    settings.default_params = nextParams
-
-    onSaveSettings(modelId, settings)
+    onSaveSettings(modelId, buildModelFields(draft, model))
   }
 
   return (
@@ -1134,169 +1051,7 @@ function ModelRow({
       </div>
       {expanded && (
         <div className="mt-2 space-y-3 border-t pt-2">
-          {/* 基础参数 */}
-          <div>
-            <h4 className="text-muted-foreground mb-1.5 text-[10px] font-semibold uppercase tracking-wide">
-              基础
-            </h4>
-            <div className="flex flex-wrap items-end gap-3">
-              <label className="text-muted-foreground flex flex-col gap-1 text-xs">
-                上下文窗口 (tokens)
-                <Input
-                  type="number"
-                  min={0}
-                  value={contextWindow}
-                  onChange={(e) => setContextWindow(e.target.value)}
-                  placeholder="未设置"
-                  className="h-7 w-32 text-xs"
-                />
-              </label>
-              <label className="text-muted-foreground flex flex-col gap-1 text-xs">
-                最大输出 (max_tokens)
-                <Input
-                  type="number"
-                  min={1}
-                  value={maxTokens}
-                  onChange={(e) => setMaxTokens(Number(e.target.value))}
-                  className="h-7 w-28 text-xs"
-                />
-              </label>
-              <label className="text-muted-foreground flex flex-col gap-1 text-xs">
-                Temperature
-                <Input
-                  type="number"
-                  min={0}
-                  max={2}
-                  step={0.1}
-                  value={temperature}
-                  onChange={(e) => setTemperature(Number(e.target.value))}
-                  className="h-7 w-24 text-xs"
-                />
-              </label>
-              <label className="text-muted-foreground flex flex-col gap-1 text-xs">
-                Top P
-                <Input
-                  type="number"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={topP}
-                  onChange={(e) => setTopP(Number(e.target.value))}
-                  className="h-7 w-24 text-xs"
-                />
-              </label>
-            </div>
-          </div>
-
-          {/* 推理参数（think 类模型） */}
-          <div>
-            <h4 className="text-muted-foreground mb-1.5 text-[10px] font-semibold uppercase tracking-wide">
-              推理 (thinking)
-            </h4>
-            <div className="flex flex-wrap items-end gap-3">
-              <label className="text-muted-foreground flex items-center gap-1.5 pb-1.5 text-xs">
-                <input
-                  type="checkbox"
-                  checked={reasoningModel}
-                  onChange={(e) => setReasoningModel(e.target.checked)}
-                  className="border-border h-3.5 w-3.5"
-                />
-                推理模型
-              </label>
-              <label className="text-muted-foreground flex flex-col gap-1 text-xs">
-                思考模式
-                <select
-                  value={thinkingType}
-                  onChange={(e) => setThinkingType(e.target.value)}
-                  aria-label="思考模式"
-                  className="border-border bg-background h-7 w-28 rounded px-1.5 text-xs"
-                >
-                  <option value="">保持原样</option>
-                  <option value="enabled">开启 (enabled)</option>
-                  <option value="adaptive">自适应 (adaptive)</option>
-                  <option value="disabled">关闭 (disabled)</option>
-                </select>
-              </label>
-              <label className="text-muted-foreground flex flex-col gap-1 text-xs">
-                推理力度
-                <select
-                  value={effort}
-                  onChange={(e) => setEffort(e.target.value)}
-                  aria-label="推理力度"
-                  className="border-border bg-background h-7 w-28 rounded px-1.5 text-xs"
-                >
-                  <option value="">保持原样</option>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="max">max</option>
-                </select>
-              </label>
-            </div>
-          </div>
-
-          {/* 自定义参数：合并进 default_params，随请求发送 */}
-          <div>
-            <h4 className="text-muted-foreground mb-1.5 text-[10px] font-semibold uppercase tracking-wide">
-              自定义参数
-            </h4>
-            <div className="flex items-center gap-2">
-              <Input
-                value={customKey}
-                onChange={(e) => setCustomKey(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault()
-                    addCustomParam()
-                  }
-                }}
-                placeholder="参数名，如 extra_body"
-                className="h-7 w-40 text-xs"
-                aria-label="自定义参数名"
-              />
-              <span className="text-muted-foreground text-xs">=</span>
-              <Input
-                value={customValue}
-                onChange={(e) => setCustomValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault()
-                    addCustomParam()
-                  }
-                }}
-                placeholder="值（数字/true/false 自动识别类型）"
-                className="h-7 flex-1 text-xs"
-                aria-label="自定义参数值"
-              />
-              <Button size="xs" variant="outline" onClick={addCustomParam} disabled={!customKey.trim()}>
-                加入
-              </Button>
-            </div>
-            {customParams.length > 0 && (
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {customParams.map((p) => (
-                  <span
-                    key={p.key}
-                    className="bg-muted flex items-center gap-1 rounded px-2 py-0.5 font-mono text-xs"
-                  >
-                    {p.key}={p.value || "''"}
-                    <button
-                      type="button"
-                      onClick={() => setCustomParams((prev) => prev.filter((x) => x.key !== p.key))}
-                      className="text-muted-foreground hover:text-foreground"
-                      aria-label={`移除自定义参数 ${p.key}`}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-            <p className="text-muted-foreground mt-1 text-[10px]">
-              保存时合并进 default_params 随请求发送；同名覆盖既有字段
-            </p>
-          </div>
-
+          <ModelParamsEditor value={draft} onChange={setDraft} />
           <div className="flex items-center gap-2">
             <Button size="xs" onClick={handleSave}>
               保存设置

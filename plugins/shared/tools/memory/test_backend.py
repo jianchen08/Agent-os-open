@@ -125,6 +125,24 @@ async def test_search_maps_results_and_adds_session_tag() -> None:
     assert results[1]["memory_type"] == "semantic"  # 缺省回填
 
 
+async def test_search_maps_score_from_nested_scores_final() -> None:
+    """B6 回归：真实 recall 条目的相关度在嵌套 scores.final（RecallResult 无
+    顶层 score）——映射必须取 final，否则所有结果 score 恒 0。"""
+    caller = AsyncMock(
+        return_value={
+            "data": {
+                "results": [
+                    {"id": "a", "content": "甲",
+                     "scores": {"final": 0.93, "semantic": 0.8}},
+                    {"id": "b", "content": "乙", "scores": None},
+                ]
+            }
+        }
+    )
+    results = await HindsightBackend(caller).search("查", user_id="u1")
+    assert [(r["id"], r["score"]) for r in results] == [("a", 0.93), ("b", 0.0)]
+
+
 async def test_search_knowledge_name_filters_client_side() -> None:
     caller = AsyncMock(
         return_value={
@@ -166,12 +184,25 @@ async def test_delete_success_mapping() -> None:
     assert args == {"bank_id": "u1", "memory_id": "mem://d-1"}
 
 
-async def test_delete_failure_degrades_false(caplog: Any) -> None:
+async def test_delete_caller_failure_raises_with_detail() -> None:
+    """能力调用失败 → RuntimeError 携带原因（吞成 False 会被掩蔽成
+    "tool execution failed"）。"""
     caller = AsyncMock(side_effect=RuntimeError("down"))
-    with caplog.at_level("WARNING"):
-        ok = await HindsightBackend(caller).delete("u1")
-    assert ok is False
-    assert any("[HindsightBackend.delete]" in r.getMessage() for r in caplog.records)
+    with pytest.raises(RuntimeError) as exc_info:
+        await HindsightBackend(caller).delete("u1")
+    assert "hindsight.delete 调用失败" in str(exc_info.value)
+    assert "down" in str(exc_info.value)
+
+
+async def test_delete_deleted_false_raises_with_detail() -> None:
+    """deleted=false（含服务端 error）→ RuntimeError 携带具体原因。"""
+    caller = AsyncMock(
+        return_value={"data": {"deleted": False, "error": "(404) not found"}}
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        await HindsightBackend(caller).delete("u1", memory_id="m1")
+    assert "hindsight.delete 失败" in str(exc_info.value)
+    assert "(404)" in str(exc_info.value)
 
 
 async def test_import_document_unwraps_envelope_and_defaults_name() -> None:

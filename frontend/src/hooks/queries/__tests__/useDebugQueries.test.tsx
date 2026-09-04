@@ -4,7 +4,8 @@
  *
  * 验证「mount 即拉、零缓存」→ stale-while-revalidate 的两个契约：
  * 1. 二次挂载零请求：组件卸载重挂（切页往返）在 staleTime 窗口内 queryFn
- *    只执行一次（useDebugSessionsQuery / useLlmPayloadDiagQuery 两个页面级 hook）；
+ *    只执行一次（useDebugSessionsQuery）；例外是 useLlmPayloadDiagQuery——
+ *    快照随每次 LLM 调用实时落盘，重挂必须重取，否则列表恒落后实际发送一轮；
  * 2. 翻页/过滤显式重拉：静态 key 槽下 page/status 变化触发 refetch
  *    （useDebugTasksQuery），同一 staleTime 窗口内同参重挂仍零请求。
  */
@@ -68,17 +69,30 @@ describe('useDebugQueries（批次 3 验收）', () => {
     expect(mockGetSessions).toHaveBeenCalledTimes(1)
   })
 
-  it('useLlmPayloadDiagQuery：二次挂载零请求（页面级缓存复用）', async () => {
-    mockGetPayloadList.mockResolvedValue({ items: [{ name: 'a.json', ts: 1, model: 'M', msgs_hash: 'h', msg_count: 1 }], total: 1 })
+  it('useLlmPayloadDiagQuery：重挂即重取（快照实时增长，不适用 SWR 窗口）', async () => {
+    // 第 1 轮：只有 1 个快照
+    mockGetPayloadList.mockResolvedValueOnce({
+      items: [{ name: 'a.json', ts: 1, model: 'M', msgs_hash: 'h', msg_count: 1 }],
+      total: 1,
+    })
 
     const first = renderHook(() => useLlmPayloadDiagQuery(1), { wrapper })
     await waitFor(() => expect(first.result.current.isSuccess).toBe(true))
     expect(mockGetPayloadList).toHaveBeenCalledTimes(1)
 
+    // 会话又跑了一轮 LLM：服务端新增快照；重挂（回到页面）必须重取拿到新列表，
+    // 否则页面恒显示上一轮列表（「落后一轮」bug）
+    mockGetPayloadList.mockResolvedValue({
+      items: [
+        { name: 'a.json', ts: 1, model: 'M', msgs_hash: 'h', msg_count: 1 },
+        { name: 'b.json', ts: 2, model: 'M', msgs_hash: 'h2', msg_count: 3 },
+      ],
+      total: 2,
+    })
     first.unmount()
     const second = renderHook(() => useLlmPayloadDiagQuery(1), { wrapper })
-    await waitFor(() => expect(second.result.current.isSuccess).toBe(true))
-    expect(mockGetPayloadList).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(mockGetPayloadList).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(second.result.current.data?.total).toBe(2))
   })
 
   it('useDebugTasksQuery：翻页显式重拉；重挂同参零请求', async () => {

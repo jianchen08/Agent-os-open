@@ -40,7 +40,7 @@
 | 能力 | 承载插件（示例） |
 |---|---|
 | LLM 调用 | `llm_service`（`llm.complete_stream` 服务）+ `pipeline_llm_core`（core 步骤） |
-| 工具执行 | `pipeline_tool_core`（Rust 原生）+ 各工具插件（tools/ 26 份 manifest：18 个自研 + 8 个预置外部 MCP 接入，41 个工具声明） |
+| 工具执行 | `pipeline_tool_core`（Rust 原生）+ 各工具插件（tools/ 26 份 manifest：18 个自研 + 8 个预置外部 MCP 接入，58 个工具声明） |
 | 记忆 | `hindsight_memory` + `memory` 工具 |
 | 评估闸门 | `evaluation`（task_evaluate）+ `pipeline_task_reminder`（放行检测） |
 | 审批 / 人机交互 | `approval` + `human`（human-interaction） |
@@ -58,7 +58,7 @@
 
 **为什么要一切皆插件**（每条都有现实机制对应，非设计愿景）：
 
-1. **可进化是立项目标，不是附带收益**。灵汐定位"可进化的智能体操作系统"：系统自我改造 = 生成新插件（资源准备流程：`tool_maker` / `agent_maker`）→ watcher 热装载秒级生效。能力若在内核里，"自进化"就退化成"改核心代码、重编译、发版"；只有一切能力在插件里，Agent 才能真的改造系统自己。
+1. **可进化是立项目标，不是附带收益**。灵汐定位"可进化的智能体操作系统"：系统自我改造 = 生成新插件（资源准备 agent：`tool_maker` / `agent_maker`）→ watcher 热装载秒级生效。能力若在内核里，"自进化"就退化成"改核心代码、重编译、发版"；只有一切能力在插件里，Agent 才能真的改造系统自己。
 2. **改动半径分离**：高频变化（业务能力）与低频冻结（执行基座、契约）分开放。内核变更 = 重编译 + 全量回归 + 整体重启；插件变更 = 热发现/热注册/热重载，坏插件自动保留旧版回退。把 99% 的变化挡在内核之外，基座才能稳定到可以冻结契约。
 3. **故障隔离**：能力默认跑在 sidecar 独立进程——插件崩溃只死插件进程，内核透明 respawn 并重试一次；反例是能力内置内核，一处 panic 全系统不可用。
 4. **语言与生态自由**：AI 生态迭代最快在 Python（LiteLLM、各厂商 SDK），插件轨让它们即插即用；性能敏感路径再按基准晋升 Rust cdylib。全内置 Rust 方案被否——第三方贡献门槛高、改核心必须重编译（ADR `2026-07-13-sidecar-process-model.md`）。
@@ -97,7 +97,7 @@ Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自
                              │ MCP over stdio（sidecar）/ C-ABI（原生）
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                          插件（在用 81 个 manifest）                 │
+│                          插件（在用 80 个 manifest）                 │
 │  pipeline/{input,core,output}  管道步骤（Python 边车 + Rust cdylib）│
 │  tools/                        LLM 工具（18 自研 + 8 预置 MCP 接入）│
 │  system/                       系统服务（LLM/记忆/审批/评估/通道…）  │

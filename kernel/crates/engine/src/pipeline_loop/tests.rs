@@ -2622,3 +2622,96 @@ async fn run_started_at_written_per_run() {
         chrono::DateTime::parse_from_rfc3339(raw).expect("RFC3339 可解析");
     }
 }
+
+// ── 实际状态 run_status（内核持有，2026-09-03 双状态裁定）─────────────
+
+#[tokio::test]
+async fn run_status_terminal_written_from_expected_control_keys() {
+    // 预期层插件写 ended=true → 引擎收尾按终态映射单点折算 run_status=completed；
+    // state 快照与 runs 表（recorded statuses）同词汇同源。
+    let fixture = Fixture::build(&["a"]);
+    fixture.invoker.set_result(
+        "a",
+        PluginResult {
+            state_updates: updates(&[("ended", json!(true))]),
+            ..Default::default()
+        },
+    );
+    let config = gated_body(vec![StepItem::Bare("a".into())]);
+    let final_state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    assert_eq!(final_state["run_status"], json!("completed"));
+    assert_eq!(
+        fixture.store.recorded_run_statuses(),
+        vec![RunStatus::Completed],
+        "state 实际状态与 runs 表同源同词汇"
+    );
+}
+
+#[tokio::test]
+async fn run_status_reflects_suspension() {
+    // 预期层 suspended=true → 实际状态 suspended（挂起在终态映射中优先级最高）
+    let fixture = Fixture::build(&["a"]);
+    fixture.invoker.set_result(
+        "a",
+        PluginResult {
+            state_updates: updates(&[("suspended", json!(true))]),
+            ..Default::default()
+        },
+    );
+    let config = gated_body(vec![StepItem::Bare("a".into())]);
+    let final_state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    assert_eq!(final_state["run_status"], json!("suspended"));
+    assert_eq!(
+        fixture.store.recorded_run_statuses(),
+        vec![RunStatus::Suspended]
+    );
+}
+
+#[tokio::test]
+async fn run_status_plugin_forgery_dropped_by_terminal_mapping() {
+    // 实际状态不可被插件改写：插件伪造 run_status=failed，收束仍由引擎按
+    // 控制键折算（ended=true → completed）——伪造值不得存活到终态。
+    let fixture = Fixture::build(&["a"]);
+    fixture.invoker.set_result(
+        "a",
+        PluginResult {
+            state_updates: updates(&[("run_status", json!("failed")), ("ended", json!(true))]),
+            ..Default::default()
+        },
+    );
+    let config = gated_body(vec![StepItem::Bare("a".into())]);
+    let final_state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    assert_eq!(
+        final_state["run_status"],
+        json!("completed"),
+        "实际状态只出自终态映射单点，插件伪造值不得落地"
+    );
+}
+
+#[tokio::test]
+async fn merge_drops_run_status_plugin_write() {
+    // merge 层拦截（内核持有不变量）：插件直写 run_status 即刻丢弃，state
+    // 保持内核写入值；非内核键（ended）照常合并。
+    let fixture = Fixture::build(&["a"]);
+    let mut state = json!({"run_status": "running"});
+    fixture
+        .executor
+        .merge_and_project(&mut state, &updates(&[("run_status", json!("failed"))]))
+        .await;
+    assert_eq!(
+        state["run_status"],
+        json!("running"),
+        "插件直写 run_status 必须被丢弃"
+    );
+    fixture
+        .executor
+        .merge_and_project(&mut state, &updates(&[("ended", json!(true))]))
+        .await;
+    assert_eq!(state["ended"], json!(true), "预期层控制键照常合并");
+}

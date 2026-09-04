@@ -1,0 +1,9 @@
+config_version=5
+
+[application]
+
+config/name="Godot 2D 平台跳跃最小原型"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/agentos/plugin.cfg", "res://addons/godot_mcp/plugin.cfg")

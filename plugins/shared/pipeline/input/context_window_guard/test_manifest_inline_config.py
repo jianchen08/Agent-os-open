@@ -12,7 +12,7 @@ context-window-config-inline-manifest）。
 3. 插件实例化 _trigger_ratio 读注入命名空间的 compress_trigger_ratio
 4. pipeline/agent 显式 trigger_ratio 仍最高优先级
 5. compression.enabled=false → execute 早退不压缩
-6. compression.model 注入 → 压缩模型选择优先于 state 解析链
+6. compression.model 单一真值 = manifest 内联字段（state/llm.yaml 解析链已退役）
 
 [来源: ADR 2026-09-02-context-window-config-inline-manifest]
 """
@@ -65,26 +65,18 @@ def _run(coro: Any) -> Any:
         loop.close()
 
 
-# 与旧 YAML 同构的注入命名空间样例（fields.default 点号展开后的形态）
+# 与 manifest fields.default 同构的注入命名空间样例（点号展开后的形态；
+# 预算只保留三类 2026-09-02 裁定：recent/L1/L2）
 _INJECTED_WINDOW_CFG = {
     "compress_trigger_ratio": 0.3,
     "budgets": {
-        "system_prompt": 0.06,
-        "tools_description": 0.0,
-        "static_vars": 0.03,
-        "dynamic_variables": 0.03,
-        "l3": 0.02,
         "l2": 0.05,
         "l1": 0.2,
         "recent": 0.25,
-        "retrieval": 0.1,
-        "response_reserve": 0.14,
     },
     "compression": {
         "enabled": True,
         "model": "compress-model-x",
-        "layer_trigger_ratio": 0.8,
-        "max_turn_ratio": 0.5,
     },
 }
 
@@ -100,8 +92,9 @@ class TestFromYamlConfigInjected:
         assert cfg.l1_ratio == 0.2
         assert cfg.l2_ratio == 0.05
         assert cfg.recent_ratio == 0.25
-        assert cfg.retrieval_ratio == 0.1
         budgets = cfg.get_budgets()
+        # 预算三类化（2026-09-02 裁定）：只有 recent/L1/L2，无其他维度
+        assert set(budgets.keys()) == {"recent", "L1", "L2"}
         assert budgets["recent"] == int(128000 * 0.25)
         assert budgets["L1"] == int(128000 * 0.2)
         assert cfg.get_trigger_threshold() == int(128000 * 0.3)
@@ -118,6 +111,18 @@ class TestFromYamlConfigInjected:
         mod = _load_plugin_module()
         cfg = mod.CompressionConfig.from_yaml_config(128000, injected={})
         assert cfg.compress_trigger_ratio == 0.55
+
+    def test_manifest_budget_fields_only_three_kinds(self) -> None:
+        """manifest 配置面只暴露三类预算（recent/L1/L2），死预算字段不回潮。"""
+        import json
+
+        manifest_path = _PLUGIN_DIR / "plugin.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        fields = manifest["config_files"][0]["fields"]
+        budget_names = {
+            f["name"] for f in fields if f["name"].startswith("budgets.")
+        }
+        assert budget_names == {"budgets.recent", "budgets.l1", "budgets.l2"}
 
 
 class TestPluginTriggerRatio:
@@ -145,6 +150,97 @@ class TestPluginTriggerRatio:
         mod = _load_plugin_module()
         plugin = mod.ContextWindowGuardPlugin({})
         assert plugin._trigger_ratio == 0.55
+
+
+class TestPerCallRuntimeConfig:
+    """每调用注入重解析（2026-09-02 单一真值 + sidecar 每调用注入）。"""
+
+    def test_per_call_injected_namespace_reresolves_ratio(self) -> None:
+        """构造期空配置（合宿扇出可能给空 dict），execute 时 ctx.config 带注入
+        → _trigger_ratio/_window_cfg 按注入值重解析。"""
+        mod = _load_plugin_module()
+        plugin = mod.ContextWindowGuardPlugin({})
+        assert plugin._trigger_ratio == 0.55
+
+        ctx = mod._make_minimal_ctx(
+            state={},
+            config={"context_window": {"compress_trigger_ratio": 0.06}},
+            pipeline_id="pipe-1",
+        )
+        plugin._apply_runtime_config(ctx)
+        assert plugin._trigger_ratio == 0.06
+        assert plugin._window_cfg.get("compress_trigger_ratio") == 0.06
+
+    def test_explicit_pipeline_ratio_wins_over_per_call_injection(self) -> None:
+        """pipeline 显式 trigger_ratio 在每调用注入下仍最高。"""
+        mod = _load_plugin_module()
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.9})
+        ctx = mod._make_minimal_ctx(
+            state={},
+            config={"context_window": {"compress_trigger_ratio": 0.06}},
+            pipeline_id="pipe-1",
+        )
+        plugin._apply_runtime_config(ctx)
+        assert plugin._trigger_ratio == 0.9
+
+    def test_state_override_still_highest(self) -> None:
+        """ctx.state context_guard.trigger_ratio（agent 运行时覆盖）仍最高。"""
+        mod = _load_plugin_module()
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.9})
+        ctx = mod._make_minimal_ctx(
+            state={"context_guard.trigger_ratio": 0.1},
+            config={"context_window": {"compress_trigger_ratio": 0.06}},
+            pipeline_id="pipe-1",
+        )
+        plugin._apply_runtime_config(ctx)
+        assert plugin._trigger_ratio == 0.1
+
+    def test_execute_uses_per_call_threshold(self) -> None:
+        """行为级：构造期无注入（默认 0.55 → 触发线 70400），60000 tokens 不压；
+        ctx.config 注入 0.06（触发线 7680）→ 同一上下文触发压缩。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        plugin = mod.ContextWindowGuardPlugin({})  # 构造期空 → 代码默认 0.55
+        messages = [{"role": "user", "content": "hello", "seq": 0}]
+
+        def make_service() -> MagicMock:
+            service = MagicMock()
+            service.setup = MagicMock()
+            service.compress_messages = AsyncMock(return_value=None)
+            service._last_deleted_seqs = []
+            service._last_block_msgs = []
+            return service
+
+        # 无注入：60000 < 0.55*128000=70400 → 不压
+        service_a = make_service()
+        ctx_a = mod._make_minimal_ctx(
+            state={
+                "context_window": 128000,
+                "messages": messages,
+                "llm_usage": {"input_tokens": 60000},
+            },
+            pipeline_id="pipe-percall",
+        )
+        ctx_a._services["context_service"] = service_a
+        _run(plugin.execute(ctx_a))
+        service_a.compress_messages.assert_not_called()
+
+        # 同一实例，每调用注入 0.06：60000 > 0.06*128000=7680 → 压
+        service_b = make_service()
+        ctx_b = mod._make_minimal_ctx(
+            state={
+                "context_window": 128000,
+                "messages": messages,
+                "llm_usage": {"input_tokens": 60000},
+            },
+            config={"context_window": {"compress_trigger_ratio": 0.06}},
+            pipeline_id="pipe-percall",
+        )
+        ctx_b._services["context_service"] = service_b
+        _run(plugin.execute(ctx_b))
+        service_b.compress_messages.assert_called_once()
 
 
 class TestCompressionEnabled:
@@ -218,18 +314,59 @@ class TestCompressionEnabled:
 
 
 class TestCompressModel:
-    def test_injected_model_preferred_over_state_chain(self) -> None:
-        """注入 compression.model 非空 → 压缩模型优先用它（跳过 state 解析链）。"""
+    """压缩模型单一真值 = manifest 内联 compression.model（state/llm.yaml 链退役）。"""
+
+    def test_injected_model_is_sole_truth(self) -> None:
+        """manifest 内联 model 非空 → 即为压缩模型。"""
         mod = _load_plugin_module()
-        ctx = mod._make_minimal_ctx()  # state 无 model_id/model_tier
+        ctx = mod._make_minimal_ctx()
         resolved = mod._resolve_compress_model(
             ctx, injected={"model": "compress-model-x"}
         )
         assert resolved == "compress-model-x"
 
-    def test_no_injected_model_falls_back_to_state_chain(self) -> None:
-        """注入 model 为空 → 回退 state 解析链（model_id → tier → defaults）。"""
+    def test_injected_model_whitespace_stripped(self) -> None:
+        """表单输入的首尾空白不进模型名。"""
         mod = _load_plugin_module()
-        ctx = mod._make_minimal_ctx(state={"model_id": "deepseek-v4"})
-        resolved = mod._resolve_compress_model(ctx, injected={"model": ""})
-        assert resolved == "deepseek-v4"
+        ctx = mod._make_minimal_ctx()
+        resolved = mod._resolve_compress_model(
+            ctx, injected={"model": "  compress-model-x "}
+        )
+        assert resolved == "compress-model-x"
+
+    def test_state_chain_retired(self) -> None:
+        """state.model_id/model_tier 不再被消费（旧回退链退役的防回潮断言）。"""
+        mod = _load_plugin_module()
+        ctx = mod._make_minimal_ctx(
+            state={"model_id": "deepseek-v4", "model_tier": "chat"}
+        )
+        assert mod._resolve_compress_model(ctx, injected={"model": ""}) == ""
+        assert mod._resolve_compress_model(ctx, injected={}) == ""
+
+    def test_no_injected_returns_empty(self) -> None:
+        """无注入（injected=None）→ 未配置，返回空串。"""
+        mod = _load_plugin_module()
+        ctx = mod._make_minimal_ctx()
+        assert mod._resolve_compress_model(ctx, injected=None) == ""
+
+    def test_unconfigured_model_disables_compression(self) -> None:
+        """compression.model 未配置 → 压缩服务不构建（不把空模型发往 llm_service）。"""
+        mod = _load_plugin_module()
+        mod._capability_caller = AsyncMock()
+        mod._memory_backend = MagicMock()
+        ctx = mod._make_minimal_ctx(state={"context_window": 128000})
+        svc = mod.ContextWindowGuardPlugin._get_memory_service(
+            ctx, {"compression": {"model": ""}}
+        )
+        assert svc is None
+
+    def test_manifest_default_model_is_sole_truth(self) -> None:
+        """manifest fields.default 携带非空压缩模型（真值本体，禁止回潮空默认+兜底叙事）。"""
+        import json
+
+        manifest_path = _PLUGIN_DIR / "plugin.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        fields = manifest["config_files"][0]["fields"]
+        model_field = next(f for f in fields if f["name"] == "compression.model")
+        assert model_field["default"]
+        assert "留空则用默认" not in model_field["description"]

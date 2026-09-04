@@ -458,13 +458,38 @@ async def _collect_state_tasks(status: str | None = None) -> list[dict[str, Any]
     return items
 
 
+# provider / 模型名前缀 → 展示图标（token 按模型表；未命中回退 🔤）
+_MODEL_ICON_RULES: list[tuple[str, str]] = [
+    ("deepseek", "🐋"),
+    ("zhipu", "🤖"),
+    ("glm", "🤖"),
+    ("minimax", "🐚"),
+    ("siliconflow", "⚙️"),
+    ("openai", "🟢"),
+    ("anthropic", "🎭"),
+    ("mock", "🧪"),
+]
+
+
+def _model_icon(model: str, provider: str) -> str:
+    """按 provider 优先、模型名前缀兜底映射图标。"""
+    model_l = (model or "").lower()
+    provider_l = (provider or "").lower()
+    for prefix, icon in _MODEL_ICON_RULES:
+        if provider_l.startswith(prefix) or model_l.startswith(prefix):
+            return icon
+    return "🔤"
+
+
 def _collect_token_usage() -> dict[str, Any]:
     """从 traces 表聚合 LLM token 用量（真数据源，G4）。
 
     traces.patch_data 的 llm_usage 字段由 llm_core 每轮写入（单轮
-    input/output/total/cached token），逐行累加即跨运行累计。请求数
+    input/output/total/cached token + model/provider 归属），GROUP BY 模型
+    逐行累加即跨运行按模型统计；总量 = 各模型行求和。请求数
     （request_count/active_requests/error_count/total_response_time）保持读
     PerformanceMonitor 本地计数（record_llm_request 的 response_time 口径）。
+    早期轨迹无 model 字段 → 归入「（未记录模型）」行。
     DB 不可用时降级本地计数 + token 为 0（与 _query_tool_calls 同策略）。
     """
     monitor = _ensure_monitor()
@@ -472,9 +497,7 @@ def _collect_token_usage() -> dict[str, Any]:
 
     import sqlite3
 
-    prompt = 0.0
-    completion = 0.0
-    total = 0.0
+    rows: list[dict[str, Any]] = []
     db_path = _kernel_db_path()
     if os.path.isfile(db_path):
         conn = None
@@ -482,19 +505,35 @@ def _collect_token_usage() -> dict[str, Any]:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
             cur.execute(
-                "SELECT COALESCE(SUM(json_extract(patch_data, '$.llm_usage.input_tokens')), 0),"
-                "       COALESCE(SUM(json_extract(patch_data, '$.llm_usage.output_tokens')), 0),"
-                "       COALESCE(SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), 0)"
+                "SELECT COALESCE(json_extract(patch_data, '$.llm_usage.model'), ''),"
+                "       COALESCE(json_extract(patch_data, '$.llm_usage.provider'), ''),"
+                "       SUM(json_extract(patch_data, '$.llm_usage.input_tokens')),"
+                "       SUM(json_extract(patch_data, '$.llm_usage.output_tokens')), "
+                "       SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), "
+                "       COUNT(*)"
                 " FROM traces WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
+                " GROUP BY 1, 2 ORDER BY 5 DESC"
             )
-            row = cur.fetchone()
-            if row:
-                prompt, completion, total = float(row[0]), float(row[1]), float(row[2])
+            for model, provider, prompt, completion, total, reqs in cur.fetchall():
+                label = model or "（未记录模型）"
+                rows.append({
+                    "icon": _model_icon(model, provider),
+                    "model": label,
+                    "requests": int(reqs or 0),
+                    "input_tokens": float(prompt or 0),
+                    "output_tokens": float(completion or 0),
+                    "total_tokens": float(total or 0),
+                })
         except sqlite3.Error as exc:  # noqa: BLE001 — 查询失败降级本地计数
             logger.warning("[monitoring] traces token 聚合失败（降级本地计数）: %s", exc)
+            rows = []
         finally:
             if conn is not None:
                 conn.close()
+
+    prompt = sum(r["input_tokens"] for r in rows)
+    completion = sum(r["output_tokens"] for r in rows)
+    total = sum(r["total_tokens"] for r in rows)
 
     return {
         "total_tokens": total,
@@ -504,6 +543,69 @@ def _collect_token_usage() -> dict[str, Any]:
         "active_requests": ls.get("active_requests", 0),
         "error_count": ls.get("error_count", 0),
         "total_response_time": ls.get("total_response_time", 0.0),
+        # 按模型统计（表格 widget 消费 {columns, rows}，与 /plugins 端点同约定）
+        "columns": [
+            {"key": "icon", "label": "图标"},
+            {"key": "model", "label": "模型"},
+            {"key": "requests", "label": "调用次数"},
+            {"key": "input_tokens", "label": "输入 Tokens"},
+            {"key": "output_tokens", "label": "输出 Tokens"},
+            {"key": "total_tokens", "label": "合计 Tokens"},
+        ],
+        "rows": rows,
+    }
+
+
+def _collect_token_usage_by_time() -> dict[str, Any]:
+    """按日（UTC）聚合 traces 的 llm_usage token 用量（时间维度，G4 同源）。
+
+    created_at 为 ISO8601 UTC 文本，`substr(created_at, 1, 10)` 即日期——
+    不经 datetime() 解析（纳秒精度 + 时区后缀解析行为版本相关）。
+    表格 widget 消费 {columns, rows}；DB 不可用降级空行。
+    """
+    import sqlite3
+
+    rows: list[dict[str, Any]] = []
+    db_path = _kernel_db_path()
+    if os.path.isfile(db_path):
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT substr(created_at, 1, 10) AS day,"
+                "       SUM(json_extract(patch_data, '$.llm_usage.input_tokens')),"
+                "       SUM(json_extract(patch_data, '$.llm_usage.output_tokens')), "
+                "       SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), "
+                "       COUNT(*)"
+                " FROM traces WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
+                " GROUP BY 1 ORDER BY 1 DESC"
+            )
+            for day, prompt, completion, total, reqs in cur.fetchall():
+                rows.append({
+                    "date": day or "unknown",
+                    "requests": int(reqs or 0),
+                    "input_tokens": float(prompt or 0),
+                    "output_tokens": float(completion or 0),
+                    "total_tokens": float(total or 0),
+                })
+        except sqlite3.Error as exc:  # noqa: BLE001 — 查询失败降级空行
+            logger.warning("[monitoring] traces 按日 token 聚合失败（降级空）: %s", exc)
+            rows = []
+        finally:
+            if conn is not None:
+                conn.close()
+
+    return {
+        "columns": [
+            {"key": "date", "label": "日期 (UTC)"},
+            {"key": "requests", "label": "调用次数"},
+            {"key": "input_tokens", "label": "输入 Tokens"},
+            {"key": "output_tokens", "label": "输出 Tokens"},
+            {"key": "total_tokens", "label": "合计 Tokens"},
+        ],
+        "rows": rows,
+        "total": len(rows),
     }
 
 
@@ -581,6 +683,9 @@ async def http_handle(
 
         if path == "/ext/monitoring/token-usage" and method == "GET":
             return _ok(_json_response({"token_usage": _collect_token_usage()}))
+
+        if path == "/ext/monitoring/token-usage/by-time" and method == "GET":
+            return _ok(_json_response(_collect_token_usage_by_time()))
 
         if path == "/ext/monitoring/cache-stats" and method == "GET":
             return _ok(_json_response({"cache_stats": _collect_cache_stats()}))

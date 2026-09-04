@@ -9,51 +9,26 @@
 
 ## [0.2.0] - 2026-08-01
 
-### 🐛 修复：Bash 工具 sidecar 生命周期与治理（评审 H-issue）
+### 🏗️ 架构重构：Rust 微内核 + Python 插件 + React 前端
 
-#### 状态生命周期（核心）
-- **跨调用进程状态保持**：`plugins/shared/tools/bash/server.py` 由"每次 MCP 调用新建
-  BashTool"改为**模块级单例**（`_get_tool()`）——execute → input → continue → terminate
-  全链路跨 MCP 调用可用（原实现每次调用新建 ProcessManager，进程表丢失导致
-  continue/input/terminate 报"进程不存在"）。
-- **sidecar 退出清理**：注册 `on_unload` 生命周期钩子 + `atexit` 兜底，退出前调用
-  `ProcessManager.shutdown_all()` 终止全部活动进程并取消看门狗，防卸载残留。
+0.2 是一次架构级重写：0.1 的 Python `src/` 单体（FastAPI 后端）由 **Rust 微内核 + 插件生态** 取代。内核只是执行基座（管道解释执行、能力注册表、插件装载、存储），不含任何业务能力。
 
-#### 自包含重构（0.2 范围，零 0.1 src 依赖）
-- sidecar 原依赖 0.1 `src/` 树（`tools.builtin.base → core.results → src.core.di`），
-  **实际无法启动**（`No module named 'src.config'`）。现已全部本地化：
-  `bash_types.py`（原 `types.py` 重命名——顶层名遮蔽 stdlib `types` 的隐形崩溃点）、
-  `encoding.py`、`result_types.py`（ToolResult + 工厂）、`workspace_aware.py`、
-  本地 `BuiltinTool` 语义（删 0.1 的 `get_tool_definition`/`tools.types` 依赖）。
-- **WSL 交互竞态修复**：send_input 后 ~ms 窗口内读取该进程日志文件会丢失 WSL2
-  stdio relay 退出前最后一批输出（预存在环境问题）。`_handle_input` 改为**先取摘要
-  再写 stdin**，规避竞态窗口。
+#### 核心变更
 
-#### 越权防护
-- 进程记录会话身份 owner（内核注入的 `_owner`，tool_core 由 session_id/thread_id
-  拼接）；continue/input/terminate/read_log 强制校验 owner 一致，跨会话操作拒绝
-  （`PROCESS_FORBIDDEN`），防多会话 PID 越权/劫持。日志头写 `# Owner:`，磁盘降级
-  路径同样校验。
-- 内核侧：`tool-executor.invoke` 缺会话身份时告警（capability_router）；工具调用
-  参数注入 `_owner`（tool_core）。
+- **一切皆插件**：LLM 调用、记忆、评估、审批、触发器、IM 通道、主题、乃至 Agent 配置的加载皆由插件承载——改任何业务行为 = 加/改插件或配置，不动内核；插件改动全链热生效（watcher 自动发现 / 重注册 / 进程 respawn）。
+- **统一插件协议**：一个插件 = 一个目录 + 一份 `plugin.json` manifest（声明即注册、双根发现、加载期校验）。宿主三轨自选：Python sidecar（独立进程，MCP over stdio，uv venv 隔离）/ Rust cdylib 原生（进程内零 IPC）/ external MCP（零代码直连第三方 MCP 服务）。
+- **管道引擎**：引擎只解释一份管道 YAML（共享 `state` + 循环体调度），出口转移由声明式路由 DSL（`when`/`then`/`set`）在加载期编译、运行时零解析；0.1 的引擎内路由信号面整体退役。
+- **存储**：SQLite（默认 `agentos_kernel.db`，driver 化可切换；runs / messages / traces / blobs 四表 + pipeline_state）。
+- **流式协议**：LLM 正文/思考/工具调用增量统一为 8 事件块协议（`block_start` / `text_delta` / `reasoning_delta` / …），单一真值源 `config/kernel_capabilities/streaming.json`。
+- **任务域**：任务创建/派发统一走 `task_submit` 工具（面板 = 工具的参数表单）；强制评估闸门——无评估证据不落 completed；项目（Project）作为多阶段任务的组织锚点。
+- **多租户隔离地基**：TenantContext 穿透 + 数据访问按 `tenant_id` 强制过滤（单租户场景无感；多租户运营见 ROADMAP 0.5.0）。
+- **接入面**：Web 前端直连内核（HTTP / WebSocket）；独立 CLI 入口裁撤，仅存 `channel_cli` 插件壳。
 
-#### 工程/安全
-- **manifest 补齐**：`capabilities.tools[0]` 声明完整 input/output schema；
-  `permissions` 诚实声明（system_calls/filesystem/network/env_vars）。
-- **批量日志写入**：`_read_output` 攒批落盘（512 行或 64KB），替代逐行 open/write/close。
-- **摘要 tail 读取**：summary 压缩只喂尾部窗口（`_read_tail_lines`，默认 5000 行），
-  `read_log` 完整输出不变。
-- **敏感信息掩码**：日志头 `# Command:` 落盘前掩码
-  （Authorization/Bearer/API key/密码/URL 凭据）；输入掩码保留；看门狗日志同样掩码。
+#### 🛠️ 修复
 
-#### 内核进程树治理
-- `McpClient.kill()` 杀整棵进程树：Windows `taskkill /PID /T /F`、Unix 进程组信号
-  （spawn 时 `process_group(0)`）——sidecar 卸载/崩溃/热重载时 bash 孙进程不再变孤儿。
+- Bash 工具 sidecar 生命周期与治理：跨调用进程状态保持、sidecar 退出清理（防孤儿孙进程）、会话 owner 越权防护、敏感信息掩码。
 
-### 已知限制
-- idle GC 卸载时运行中任务被树杀终止；内存运行态不可恢复，磁盘日志
-  （`logs/bash/bash_<pid>.log`）保留，重启后可 `read_log`。
-- owner 隔离依赖内核注入 `_owner`；未注入身份的历史/异常调用走宽松兜底。
+详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（0.2 架构）与 [docs/guides/plugin-protocol.md](docs/guides/plugin-protocol.md)（插件协议权威）。
 
 ---
 

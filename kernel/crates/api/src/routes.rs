@@ -1012,6 +1012,9 @@ async fn emit_pending_inputs_changed_endpoint(
 const STATE_BASELINE_KEYS: &[&str] = &[
     "current_phase",
     "ended",
+    // 实际状态内核持有（2026-09-03 双状态裁定）：可观测性的唯一运行状态
+    // 真值，属内核运行域自有键，随基线出口、不依赖插件 export_fields 声明。
+    "run_status",
     "session_id",
     "thread_id",
     "pipeline_id",
@@ -1185,6 +1188,34 @@ pub async fn pipelines_state_handler(
             "source": "memory",
             "state": summary,
         }));
+    }
+
+    // 1.5) DB 任务域镜像补齐（与 capability_router pipeline-state.list 同款语义）：
+    // run 期间引擎只在本地内存推进 state，registry 快照拍在 stage_finalize（run
+    // 收尾）——运行中的内存行停在出生/上次终态，llm_model / track.llm_usage /
+    // context_window 等每轮投影键全部缺失，前端用量指示器拿不到任何模型信息。
+    // 按 export 白名单从 pipeline_state 表补齐内存行缺失键（内存已有键不覆盖：
+    // pipeline-state.update 热路径双写内存+表，两处一致的键无需仲裁）。
+    if let Some(store) = state.store.as_ref() {
+        for item in items.iter_mut() {
+            if item.get("source").and_then(|v| v.as_str()) != Some("memory") {
+                continue;
+            }
+            let Some(pid) = item.get("pipeline_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Ok(fields) = store.load_pipeline_state(pid, &tenant_id).await else {
+                continue;
+            };
+            let Some(obj) = item.get_mut("state").and_then(|v| v.as_object_mut()) else {
+                continue;
+            };
+            for (k, v) in fields {
+                if export.contains(&k) && !obj.contains_key(&k) {
+                    obj.insert(k, v);
+                }
+            }
+        }
     }
 
     // 2) DB 冷数据兜底：runs 清单里 registry 未覆盖的管道读最新 checkpoint
@@ -1372,21 +1403,38 @@ pub async fn get_plugin_config_handler(
         }));
     }
 
+    // ── 内联形态（path 空）：真值 = fields.default（单一真值裁定
+    // 2026-09-02），无文件语义，PUT 直接写回 manifest ──
+    if mapping.path.is_empty() {
+        let data = agentos_invoker::shared::config_defaults_from_fields(&mapping.fields);
+        let etag = compute_etag(serde_json::to_string(&data).unwrap_or_default().as_bytes());
+        return Ok(axum::Json(PluginConfigResponse {
+            plugin_id,
+            file_id,
+            label: mapping.label.clone(),
+            path: mapping.path.clone(),
+            data,
+            etag,
+        }));
+    }
+
     let resolved = validate_config_path(&project_root, &mapping.path).map_err(config_err_to_api)?;
     let raw = match std::fs::read_to_string(&resolved) {
         Ok(raw) => raw,
         Err(_) => {
-            // 文件缺失（manifest 内联默认，ADR 2026-09-02-context-window-config-
-            // inline-manifest）：值声明在 fields.default，磁盘文件仅用户覆盖层。
-            // GET 回退默认组装 + ETag，前端表单仍可完整渲染。
-            let data = agentos_invoker::shared::config_defaults_from_fields(&mapping.fields);
-            let etag = compute_etag(serde_json::to_string(&data).unwrap_or_default().as_bytes());
+            // 引用形态文件缺失：fields 不声明 default（G2 拦截双真值），无值
+            // 可读即空配置视图（PUT 保存将创建文件）
+            let etag = compute_etag(
+                serde_json::to_string(&serde_json::Value::Object(Default::default()))
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
             return Ok(axum::Json(PluginConfigResponse {
                 plugin_id,
                 file_id,
                 label: mapping.label.clone(),
                 path: mapping.path.clone(),
-                data,
+                data: serde_json::Value::Object(Default::default()),
                 etag,
             }));
         }
@@ -1418,25 +1466,32 @@ pub async fn put_plugin_config_handler(
     axum::extract::Path((plugin_id, file_id)): axum::extract::Path<(String, String)>,
     axum::Json(req): axum::Json<PluginConfigUpdateRequest>,
 ) -> Result<axum::Json<serde_json::Value>, ApiError> {
-    let project_root = state.project_root.ok_or_else(|| ApiError::Internal {
-        message: "project_root not configured".to_string(),
-    })?;
+    let project_root = state
+        .project_root
+        .clone()
+        .ok_or_else(|| ApiError::Internal {
+            message: "project_root not configured".to_string(),
+        })?;
 
-    let manifests = state.manifests.read().await;
-    let manifest = find_manifest(&manifests, &plugin_id).ok_or_else(|| ApiError::NotFound {
-        message: format!("plugin not found: {plugin_id}"),
-    })?;
-
-    let mapping = find_config_mapping(manifest, &file_id).ok_or_else(|| ApiError::NotFound {
-        message: format!("config file_id not found: {file_id}"),
-    })?;
+    // 克隆后即刻释放读锁：内联形态保存末尾要拿写锁同步内存 manifest
+    let mapping = {
+        let manifests = state.manifests.read().await;
+        let manifest = find_manifest(&manifests, &plugin_id).ok_or_else(|| ApiError::NotFound {
+            message: format!("plugin not found: {plugin_id}"),
+        })?;
+        find_config_mapping(manifest, &file_id)
+            .ok_or_else(|| ApiError::NotFound {
+                message: format!("config file_id not found: {file_id}"),
+            })?
+            .clone()
+    };
 
     // ── env target 分支（GAP-4）：*** 哨兵跳过、空值清除、新值写入 .env ──
     // 生效语义：写入即生效（stdio spawn overlay + HTTP resolve_env_placeholders
     // 均回读 .env，配合 invoker 的 .env mtime 指纹触发客户端重建）。
     if mapping.target.as_deref() == Some("env") {
         let env_path = agentos_mcp::env_file::env_path_for_root(&project_root);
-        let current = masked_env_fields(mapping, &env_path);
+        let current = masked_env_fields(&mapping, &env_path);
         let current_etag = compute_etag(
             serde_json::to_string(&current)
                 .unwrap_or_default()
@@ -1475,7 +1530,7 @@ pub async fn put_plugin_config_handler(
                 message: format!("write .env: {e}"),
             }
         })?;
-        let data = masked_env_fields(mapping, &env_path);
+        let data = masked_env_fields(&mapping, &env_path);
         let new_etag = compute_etag(serde_json::to_string(&data).unwrap_or_default().as_bytes());
         return Ok(axum::Json(json!({
             "ok": true,
@@ -1485,16 +1540,20 @@ pub async fn put_plugin_config_handler(
         })));
     }
 
+    // ── 内联形态（path 空）：真值 = fields.default，保存直接写回 manifest
+    // （plugin.json），不再生成独立覆盖文件（单一真值裁定 2026-09-02）──
+    if mapping.path.is_empty() {
+        return put_inline_manifest_config(state, &mapping, plugin_id, file_id, req).await;
+    }
+
     let resolved = validate_config_path(&project_root, &mapping.path).map_err(config_err_to_api)?;
 
-    // 文件缺失（manifest 内联默认）：当前值视为 fields.default 组装（与 GET
-    // 回退同源，ETag 一致），保存即创建用户覆盖文件。
+    // 引用形态：真值在文件。文件缺失（新配置尚未保存过）时当前值视图为空
+    // 对象（fields 禁声明 default，G2 拦截双真值），ETag 与 GET 同源。
     let raw = match std::fs::read_to_string(&resolved) {
         Ok(raw) => raw,
-        Err(_) => serde_json::to_string(&agentos_invoker::shared::config_defaults_from_fields(
-            &mapping.fields,
-        ))
-        .unwrap_or_default(),
+        Err(_) => serde_json::to_string(&serde_json::Value::Object(Default::default()))
+            .unwrap_or_default(),
     };
     let current_etag = compute_etag(raw.as_bytes());
 
@@ -1527,6 +1586,182 @@ pub async fn put_plugin_config_handler(
             })?
             .as_bytes(),
     );
+
+    Ok(axum::Json(json!({
+        "plugin_id": plugin_id,
+        "file_id": file_id,
+        "etag": new_etag,
+    })))
+}
+
+/// 内联 PUT data 的声明闭环收集器：递归下钻嵌套对象，收集 (字段名, 新值)。
+///
+/// data 接受两种形态：与 GET 视图同形的嵌套对象（`{"budgets": {"l1": 0.1}}`，
+/// 往返对称）与扁平点分键（`{"budgets.l1": 0.1}`）。判定按**叶路径**进行——
+/// 路径命中 `fields[].name` 即为叶（无论值类型，保持声明字段可写对象值的旧
+/// 契约），否则对象值继续下钻；未声明的叶路径 fail-closed 返回 Err(路径)。
+fn collect_inline_field_updates<'a>(
+    path: &str,
+    value: &'a serde_json::Value,
+    declared: &std::collections::HashSet<&str>,
+    out: &mut Vec<(String, &'a serde_json::Value)>,
+) -> Result<(), String> {
+    if declared.contains(path) {
+        out.push((path.to_string(), value));
+        return Ok(());
+    }
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                collect_inline_field_updates(&format!("{path}.{k}"), v, declared, out)?;
+            }
+            Ok(())
+        }
+        _ => Err(path.to_string()),
+    }
+}
+
+/// 内联形态 PUT：把字段值直接写回插件 manifest（fields.default）。
+///
+/// 单一真值裁定（2026-09-02）：内联条目不引用磁盘配置文件，保存 = 原地编辑
+/// plugin.json 的 `config_files[file_id].fields[name].default`（raw JSON 编辑，
+/// 不经结构体序列化回写以免丢未建模键）+ 内存 manifest 同步（GET/ETag 即时
+/// 一致；watcher 热重载随后 respawn 让注入层生效）。data 为字段名 → 新值的
+/// 部分更新；值 null = 清除该字段 default（组装时跳过，语义同未声明值）。
+async fn put_inline_manifest_config(
+    state: AppState,
+    mapping: &ConfigFileMapping,
+    plugin_id: String,
+    file_id: String,
+    req: PluginConfigUpdateRequest,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    // B4 乐观锁：当前值视图 = fields.default 组装（与 GET 同源，ETag 一致）
+    let current = agentos_invoker::shared::config_defaults_from_fields(&mapping.fields);
+    let current_etag = compute_etag(
+        serde_json::to_string(&current)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    match req.if_match.as_deref() {
+        Some(given) if given == current_etag => {}
+        _ => {
+            return Err(ApiError::Conflict {
+                message: format!(
+                    "ETag mismatch: current={current_etag}, given={:?}",
+                    req.if_match
+                ),
+            });
+        }
+    }
+
+    // 字段声明闭环：按下钻叶路径判定（嵌套视图与扁平点分键两形态见收集器）
+    let Some(data) = req.data.as_object() else {
+        return Err(ApiError::BadRequest {
+            message: "inline config data must be an object".to_string(),
+        });
+    };
+    let declared: std::collections::HashSet<&str> =
+        mapping.fields.iter().map(|f| f.name.as_str()).collect();
+    let mut updates: Vec<(String, &serde_json::Value)> = Vec::new();
+    for (name, value) in data {
+        collect_inline_field_updates(name, value, &declared, &mut updates).map_err(|p| {
+            ApiError::BadRequest {
+                message: format!("undeclared inline config field: {p}"),
+            }
+        })?;
+    }
+
+    // 先在 fields 副本上落值，磁盘与内存两处共用同一份结果
+    let mut new_fields = mapping.fields.clone();
+    for f in &mut new_fields {
+        let Some((_, v)) = updates.iter().find(|(name, _)| *name == f.name) else {
+            continue;
+        };
+        let extra = f.extra.get_or_insert_with(serde_json::Map::new);
+        if v.is_null() {
+            extra.remove("default");
+        } else {
+            extra.insert("default".to_string(), (*v).clone());
+        }
+    }
+
+    // 定位 plugin.json（启动期 loader 扫描出的插件根目录映射）
+    let Some(dir) = state.plugin_dirs.get(&plugin_id) else {
+        return Err(ApiError::Internal {
+            message: format!("plugin dir not found: {plugin_id}"),
+        });
+    };
+    let manifest_path = dir.join("plugin.json");
+    let raw = std::fs::read_to_string(&manifest_path).map_err(|e| ApiError::Internal {
+        message: format!("read manifest {}: {e}", manifest_path.display()),
+    })?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| ApiError::Internal {
+            message: format!("manifest json parse error: {e}"),
+        })?;
+    let Some(fields_json) = root
+        .get_mut("config_files")
+        .and_then(|v| v.as_array_mut())
+        .and_then(|arr| {
+            arr.iter_mut()
+                .find(|e| e.get("id").and_then(|v| v.as_str()) == Some(mapping.id.as_str()))
+        })
+        .and_then(|entry| entry.get_mut("fields"))
+        .and_then(|v| v.as_array_mut())
+    else {
+        return Err(ApiError::Internal {
+            message: format!("config_files[{}].fields not found in manifest", mapping.id),
+        });
+    };
+    for (name, value) in &updates {
+        let Some(field) = fields_json
+            .iter_mut()
+            .find(|f| f.get("name").and_then(|v| v.as_str()) == Some(name.as_str()))
+        else {
+            return Err(ApiError::Internal {
+                message: format!("field {name} not found in manifest"),
+            });
+        };
+        let Some(obj) = field.as_object_mut() else {
+            continue;
+        };
+        if value.is_null() {
+            obj.remove("default");
+        } else {
+            obj.insert("default".to_string(), (*value).clone());
+        }
+    }
+
+    // 原子写 + 末尾换行（对齐仓库 end-of-file 约定）
+    let mut out = serde_json::to_string_pretty(&root).map_err(|e| ApiError::Internal {
+        message: format!("manifest serialize error: {e}"),
+    })?;
+    out.push('\n');
+    let tmp = manifest_path.with_extension("json.tmp");
+    std::fs::write(&tmp, out.as_bytes()).map_err(|e| ApiError::Internal {
+        message: format!("write manifest tmp: {e}"),
+    })?;
+    std::fs::rename(&tmp, &manifest_path).map_err(|e| ApiError::Internal {
+        message: format!("rename manifest: {e}"),
+    })?;
+
+    // 新 ETag 从写入后的值视图派生（先算后移交，new_fields 随后移入内存 manifest）
+    let updated = agentos_invoker::shared::config_defaults_from_fields(&new_fields);
+    let new_etag = compute_etag(
+        serde_json::to_string(&updated)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+
+    // 内存 manifest 同步：GET/ETag 即时反映新值（watcher 热重载随后接管）
+    {
+        let mut manifests = state.manifests.write().await;
+        if let Some(slot) = manifests.iter_mut().find(|m| m.id == plugin_id) {
+            if let Some(cf) = slot.config_files.iter_mut().find(|c| c.id == mapping.id) {
+                cf.fields = new_fields;
+            }
+        }
+    }
 
     Ok(axum::Json(json!({
         "plugin_id": plugin_id,
@@ -2698,6 +2933,18 @@ mod state_summary_tests {
         );
         assert_eq!(s3["task.ended_at"], "2026-08-16T09:00:00Z");
     }
+
+    #[test]
+    fn test_summarize_exports_run_status_baseline() {
+        // 实际状态内核持有（2026-09-03 双状态裁定）：可观测性唯一运行状态真值，
+        // 属内核运行域基线键，无需插件 export_fields 声明即出口。
+        let s = summarize_state(
+            &json!({"pipeline_id": "p8", "run_status": "running", "secret": "x"}),
+            &ExportFields::default(),
+        );
+        assert_eq!(s["run_status"], "running");
+        assert!(s.get("secret").is_none(), "基线出口不放大未声明键");
+    }
 }
 
 #[cfg(test)]
@@ -3298,6 +3545,110 @@ mod cold_state_row_tests {
                 .await
                 .is_none(),
             "checkpoint 与表行双空 = 真孤儿不出口"
+        );
+    }
+}
+
+#[cfg(test)]
+mod inline_field_updates_tests {
+    use super::*;
+
+    fn collect(
+        data: serde_json::Value,
+        declared: &[&str],
+    ) -> Result<Vec<(String, serde_json::Value)>, String> {
+        let set: std::collections::HashSet<&str> = declared.iter().copied().collect();
+        let mut out: Vec<(String, &serde_json::Value)> = Vec::new();
+        let obj = data.as_object().expect("data 须为对象");
+        for (k, v) in obj {
+            collect_inline_field_updates(k, v, &set, &mut out)?;
+        }
+        Ok(out.into_iter().map(|(n, v)| (n, v.clone())).collect())
+    }
+
+    /// 嵌套视图（GET 同形）整体收集：扁平键 + 嵌套子树混合，叶路径齐入列。
+    #[test]
+    fn nested_view_and_flat_keys_mixed_collected() {
+        let updates = collect(
+            serde_json::json!({
+                "compress_trigger_ratio": 0.1,
+                "budgets": {"recent": 0.2, "l1": 0.3}
+            }),
+            &["compress_trigger_ratio", "budgets.recent", "budgets.l1"],
+        )
+        .unwrap();
+        let names: std::collections::HashSet<&str> =
+            updates.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["compress_trigger_ratio", "budgets.recent", "budgets.l1"]
+                .into_iter()
+                .collect(),
+            "声明的全部叶路径都应入列"
+        );
+        let get = |n: &str| {
+            updates
+                .iter()
+                .find(|(name, _)| name == n)
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        };
+        assert_eq!(get("budgets.l1"), serde_json::json!(0.3));
+    }
+
+    /// 扁平点分键（形态二）单独收集。
+    #[test]
+    fn flat_dotted_key_collected() {
+        let updates = collect(
+            serde_json::json!({"budgets.l1": 0.3}),
+            &["budgets.recent", "budgets.l1"],
+        )
+        .unwrap();
+        assert_eq!(
+            updates,
+            vec![("budgets.l1".to_string(), serde_json::json!(0.3))]
+        );
+    }
+
+    /// 路径命中声明名即停（无论值类型）——保持声明字段可写对象值的旧契约。
+    #[test]
+    fn declared_name_with_object_value_is_leaf() {
+        let updates = collect(serde_json::json!({"cfg": {"a": 1}}), &["cfg"]).unwrap();
+        assert_eq!(
+            updates,
+            vec![("cfg".to_string(), serde_json::json!({"a": 1}))]
+        );
+    }
+
+    /// 未声明叶路径 fail-closed，Err 点名完整叶路径。
+    #[test]
+    fn undeclared_leaf_rejected_with_full_path() {
+        let err = collect(
+            serde_json::json!({"budgets": {"nonsense": 1}}),
+            &["budgets.recent"],
+        )
+        .unwrap_err();
+        assert_eq!(err, "budgets.nonsense");
+    }
+
+    /// 空对象在未声明前缀下无叶可入列 = 合法 no-op。
+    #[test]
+    fn empty_object_at_undeclared_prefix_is_noop() {
+        let updates = collect(serde_json::json!({"budgets": {}}), &["budgets.recent"]).unwrap();
+        assert!(updates.is_empty(), "空子树应零更新");
+    }
+
+    /// null 落在声明点分路径 = 收集为清除语义（写回侧剥 default）。
+    #[test]
+    fn null_leaf_at_declared_path_collected() {
+        let updates = collect(
+            serde_json::json!({"compression": {"model": null}}),
+            &["compression.model"],
+        )
+        .unwrap();
+        assert_eq!(
+            updates,
+            vec![("compression.model".to_string(), serde_json::Value::Null)]
         );
     }
 }

@@ -24,19 +24,28 @@ import {
   ClipboardList,
   FolderTree,
   CopyIcon,
-  ExternalLink,
   FolderOpen,
   InfoIcon,
   MessageSquare,
+  Trash2,
 } from '@/assets/icons'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import apiClient from '@/services/api/client'
 import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
 import { invalidateLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
 import { usePipelineRunsQuery, usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
 import { useSessionsQuery, readSessions, ensureSessionsLoaded } from '@/hooks/queries/useSessionsQuery'
-import { useQuery } from '@tanstack/react-query'
-import { fetchProjects, pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { deleteProject, fetchProjects, pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
@@ -49,6 +58,21 @@ import type { AgentTab } from '@/types/task'
 // ═════════════════════════════════════════════════════════════════
 // 辅助
 // ═════════════════════════════════════════════════════════════════
+
+/** 内核实际状态（run_status）→ 管道运行状态（词汇与 RunStatus 五态一致）。
+ *  非五态词汇（缺省/旧 checkpoint 数据无该键）返回 null，由调用方回退推断。 */
+function runStatusToPipelineStatus(runStatus: string | undefined): PipelineStatus | null {
+  switch (runStatus) {
+    case 'running':
+    case 'suspended':
+    case 'completed':
+    case 'failed':
+    case 'cancelled':
+      return runStatus
+    default:
+      return null
+  }
+}
 
 /** 任务状态 → 管道运行状态映射（对齐 RunStatus 语义） */
 function taskStatusToPipelineStatus(taskStatus: string | undefined): PipelineStatus | null {
@@ -342,8 +366,11 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       seen.add(st.pipeline_id)
       const s = st.state
       const session = st.thread_id ? sessionById.get(st.thread_id) : undefined
-      // ended=true → completed；status=active 但未 ended → running
-      const mapped: PipelineStatus = s.raw_error ? 'failed' : s.ended ? 'completed' : 'running'
+      // 实际状态内核持有（run_status 五态直映，轮中=running 不失真）；旧
+      // checkpoint 数据无该键时回退 ended/raw_error 推断
+      const mapped: PipelineStatus =
+        runStatusToPipelineStatus(s.run_status)
+        ?? (s.raw_error ? 'failed' : s.ended ? 'completed' : 'running')
       entries.push({
         key: st.pipeline_id,
         pipelineId: st.pipeline_id,
@@ -409,6 +436,53 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     const timer = setInterval(() => setNowMs(Date.now()), 1000)
     return () => clearInterval(timer)
   }, [pipelineEntries])
+
+  /** 项目删除确认弹窗（待删项目；null = 关闭） */
+  const [projectDeleteTarget, setProjectDeleteTarget] = useState<{
+    id: string
+    name: string
+  } | null>(null)
+  /** 删除口径：连子任务一起删除（缺省仅挂起保留）/ 连文件夹一起删除 */
+  const [deleteChildren, setDeleteChildren] = useState(false)
+  const [deleteFiles, setDeleteFiles] = useState(false)
+  const [deletingProject, setDeletingProject] = useState(false)
+  const queryClient = useQueryClient()
+
+  /** 确认删除项目：成功后刷新项目登记与任务列表（级联口径下子任务随之消失） */
+  const handleProjectDeleteConfirm = useCallback(async () => {
+    if (!projectDeleteTarget) return
+    setDeletingProject(true)
+    try {
+      const result = await deleteProject(projectDeleteTarget.id, { deleteChildren, deleteFiles })
+      queryClient.invalidateQueries({ queryKey: ['projects'] })
+      invalidateLongTermTasks()
+      useNotificationStore.getState().addNotification({
+        title: '项目已删除',
+        message:
+          result.deleted_children > 0
+            ? `项目「${projectDeleteTarget.name}」已删除，连同 ${result.deleted_children} 个子任务`
+            : `项目「${projectDeleteTarget.name}」已删除，名下子任务已挂起保留`,
+        priority: 'normal',
+        category: 'alert',
+        isBlocking: false,
+        autoDismissMs: 6000,
+        sourceLabel: '前端',
+      })
+      setProjectDeleteTarget(null)
+    } catch (e) {
+      useNotificationStore.getState().addNotification({
+        title: '删除项目失败',
+        message: (e as { message?: string })?.message || '删除失败，请稍后重试',
+        priority: 'normal',
+        category: 'alert',
+        isBlocking: false,
+        autoDismissMs: 6000,
+        sourceLabel: '前端',
+      })
+    } finally {
+      setDeletingProject(false)
+    }
+  }, [projectDeleteTarget, deleteChildren, deleteFiles, queryClient])
 
   /** 按类型 + 状态筛选管道条目 */
   const filteredPipelineEntries = useMemo(
@@ -531,7 +605,9 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     }
     // 3) 任务条目行归属：父任务条目行（parent_task_id=父任务 id）→ 父管道条目
     //    （子任务管道出生即 lineage.parent_pipeline_id = 提交者管道 id）→ 会话
-    //    主管道 → 顶层
+    //    主管道 → 顶层。自挂守卫（与循环 2 的 threadTop!==key 同款）：父任务/
+    //    线程顶层解析到自身（会话主管道缺席时 threadTop 回退最早任务条目=自身）
+    //    时落根平铺——树与列表同源同量，建树环节不得丢条目
     for (const [taskId, node] of taskRowNodes) {
       // 项目挂靠优先：登记命中的任务挂项目分组节点（项目不是管道，不能当 lineage 父）
       const projId = projectOfTask.get(taskId)
@@ -540,16 +616,17 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         continue
       }
       const parentTaskId = parentTaskOf.get(taskId)
-      if (parentTaskId) {
+      if (parentTaskId && parentTaskId !== taskId) {
         const parentEntryKey = taskEntryKeyOf.get(parentTaskId)
         if (
           parentEntryKey
+          && parentEntryKey !== node.key
           && (entryByKey.has(parentEntryKey) || childrenMap.has(parentEntryKey))
         ) {
           pushChild(parentEntryKey, node)
           continue
         }
-        if (entryByKey.has(parentTaskId) || childrenMap.has(parentTaskId)) {
+        if (parentTaskId !== node.key && (entryByKey.has(parentTaskId) || childrenMap.has(parentTaskId))) {
           pushChild(parentTaskId, node)
           continue
         }
@@ -559,7 +636,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       // thread_id 在 TaskModel.metadata 中（API 顶层无此字段）
       const tid = String(t?.thread_id ?? t?.threadId ?? tmeta?.thread_id ?? tmeta?.threadId ?? '')
       const topKey = tid && threadTop.has(tid) ? threadTop.get(tid)! : ''
-      if (topKey && (entryByKey.has(topKey) || childrenMap.has(topKey))) {
+      if (topKey && topKey !== node.key && (entryByKey.has(topKey) || childrenMap.has(topKey))) {
         pushChild(topKey, node)
       } else {
         roots.push(node)
@@ -721,11 +798,11 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     })
   }, [])
 
-  /** 操作：暂停/恢复/取消（任务管道）/复制 ID/打开工作空间/打开项目文件夹 */
+  /** 操作：暂停/恢复/取消（任务管道）/复制 ID/打开工作空间/打开项目文件夹/删除项目 */
   const handleAction = useCallback(
     async (
       entry: PipelineViewEntry,
-      action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+      action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
     ) => {
       const pipelineId = entry.pipelineId || entry.key
       if (action === 'copy') {
@@ -734,6 +811,14 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         } catch {
           // clipboard 不可用时静默失败
         }
+        return
+      }
+      if (action === 'delete') {
+        // 项目删除：打开确认弹窗（口径选择在弹窗内），不在行上直接删
+        if (!entry.projectId) return
+        setDeleteChildren(false)
+        setDeleteFiles(false)
+        setProjectDeleteTarget({ id: entry.projectId, name: entry.name })
         return
       }
       if (action === 'open-folder') {
@@ -923,6 +1008,81 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         )}
       </div>
 
+      {/* 项目删除确认弹窗（删除口径二选一 + 文件夹勾选） */}
+      <Dialog
+        open={!!projectDeleteTarget}
+        onOpenChange={(open) => {
+          if (!open && !deletingProject) setProjectDeleteTarget(null)
+        }}
+      >
+        <DialogContent className="max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>删除项目</DialogTitle>
+            <DialogDescription>
+              确定要删除项目「{projectDeleteTarget?.name}」吗？请选择名下子任务的处置方式：
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 text-sm">
+            <label className="flex cursor-pointer items-start gap-2">
+              <input
+                type="radio"
+                name="project-delete-scope"
+                checked={!deleteChildren}
+                onChange={() => setDeleteChildren(false)}
+                className="accent-primary mt-0.5"
+              />
+              <span>仅删除项目——名下子任务挂起并保留</span>
+            </label>
+            <label className="flex cursor-pointer items-start gap-2">
+              <input
+                type="radio"
+                name="project-delete-scope"
+                checked={deleteChildren}
+                onChange={() => setDeleteChildren(true)}
+                className="accent-primary mt-0.5"
+              />
+              <span>连同子任务一起删除（不可恢复）</span>
+            </label>
+            <label className="border-border flex cursor-pointer items-start gap-2 border-t pt-2">
+              <input
+                type="checkbox"
+                checked={deleteFiles}
+                onChange={(e) => setDeleteFiles(e.target.checked)}
+                className="accent-primary mt-0.5"
+              />
+              <span>同时删除项目文件夹（不可恢复）</span>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setProjectDeleteTarget(null)}
+              disabled={deletingProject}
+            >
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={handleProjectDeleteConfirm}
+              disabled={deletingProject}
+            >
+              {deletingProject ? (
+                <>
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  删除中...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="mr-1 h-3.5 w-3.5" />
+                  确认删除
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -960,7 +1120,7 @@ function PipelineTree({
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (
     entry: PipelineViewEntry,
-    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
   ) => void
 }) {
   // 主管道（顶层）与容器任务按状态分组：执行中 / 最近完成（子树跟随父级）
@@ -1050,7 +1210,7 @@ function TreeGroup({
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (
     entry: PipelineViewEntry,
-    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
   ) => void
 }) {
   const [collapsed, setCollapsed] = useState(false)
@@ -1121,7 +1281,7 @@ function TreeChildren({
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (
     entry: PipelineViewEntry,
-    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
   ) => void
 }) {
   return (
@@ -1187,7 +1347,7 @@ function EntryRow({
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (
     entry: PipelineViewEntry,
-    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
   ) => void
 }) {
   const status = statusIcon(entry.status)
@@ -1333,6 +1493,20 @@ function EntryRow({
               <FolderOpen className="h-3.5 w-3.5" />
             </button>
           )}
+          {entry.kind === 'project' && entry.projectId && (
+            <button
+              className="text-muted-foreground hover:bg-status-error/15 hover:text-status-error flex h-6 w-6 items-center justify-center rounded transition-colors"
+              onClick={(e) => {
+                e.stopPropagation()
+                onAction(entry, 'delete')
+              }}
+              title="删除项目"
+              aria-label="删除项目"
+              tabIndex={-1}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          )}
           <button
             className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors"
             onClick={(e) => {
@@ -1394,7 +1568,7 @@ function EntryRow({
               title={`打开工作空间: ${entry.workspacePath}`}
               tabIndex={-1}
             >
-              <ExternalLink className="h-3.5 w-3.5" />
+              <FolderOpen className="h-3.5 w-3.5" />
             </button>
           )}
         </div>
@@ -1478,7 +1652,7 @@ function PipelineTable({
   onEntryClick: (entry: PipelineViewEntry) => void
   onAction: (
     entry: PipelineViewEntry,
-    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder',
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
   ) => void
 }) {
   if (entries.length === 0) {
@@ -1611,6 +1785,20 @@ function PipelineTable({
                           <FolderOpen className="h-3.5 w-3.5" />
                         </button>
                       )}
+                      {entry.kind === 'project' && entry.projectId && (
+                        <button
+                          className="text-muted-foreground hover:bg-status-error/15 hover:text-status-error flex h-6 w-6 items-center justify-center rounded"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onAction(entry, 'delete')
+                          }}
+                          title="删除项目"
+                          aria-label="删除项目"
+                          tabIndex={-1}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                       <button
                         className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded"
                         onClick={(e) => {
@@ -1672,7 +1860,7 @@ function PipelineTable({
                           title={`打开工作空间: ${entry.workspacePath}`}
                           tabIndex={-1}
                         >
-                          <ExternalLink className="h-3.5 w-3.5" />
+                          <FolderOpen className="h-3.5 w-3.5" />
                         </button>
                       )}
                     </div>

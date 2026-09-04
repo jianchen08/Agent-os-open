@@ -20,6 +20,7 @@ sys.path.insert(0, _shared_dir)
 from plugin import (
     ContextWindowGuardPlugin,
     set_capability_caller,
+    set_frontend_emit,
     set_memory_backend,
 )  # noqa: E402
 
@@ -57,6 +58,25 @@ async def _on_load(params: dict) -> None:
         set_capability_caller(caller)
     else:
         logger.warning("[context_window_guard_pipeline] capability_caller 未注入")
+    # 前端一次性事件通道（压缩失败透传用；内核内置能力，缺失只降级日志）
+    try:
+        frontend_handle = plugin.get_capability("frontend")
+    except KeyError:
+        frontend_handle = None
+    if frontend_handle is not None:
+
+        async def _frontend_emit(event: str, payload: dict, thread_id: str) -> None:
+            await frontend_handle.call(
+                "emit",
+                {"event": event, "payload": payload, "thread_id": thread_id},
+            )
+
+        set_frontend_emit(_frontend_emit)
+    else:
+        set_frontend_emit(None)
+        logger.warning(
+            "[context_window_guard_pipeline] frontend 能力未注入，压缩失败不推前端"
+        )
 
 
 @plugin.on_unload

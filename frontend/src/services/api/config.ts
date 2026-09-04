@@ -19,6 +19,10 @@ export interface ModelConfig {
   /** 是否推理模型（支持 thinking/reasoning） */
   reasoning_model?: boolean
   default_params?: Record<string, unknown>
+  /** 思考强度→参数映射（high/medium/low → thinking/reasoning_effort；空档位回退 llm_core 内置默认表） */
+  thinking_strength_params?: Record<string, Record<string, unknown>>
+  /** 多模态能力声明（supports_image/supported_image_types/max_image_size 等，multimodal 插件消费） */
+  multimodal?: Record<string, unknown>
 }
 
 /**
@@ -153,12 +157,12 @@ export async function addModel(
   modelId: string,
   config: ModelConfig,
   options: RetryOptions = {},
-): Promise<Record<string, ModelConfig>> {
+): Promise<{ models: Record<string, ModelConfig>; added_ids: string[] }> {
   return requestWithRetry(async () => {
-    const response = await apiClient.post<Record<string, ModelConfig>>(
-      API_ENDPOINTS.CONFIG.LLM_MODELS,
-      { models: { [modelId]: config } },
-    )
+    const response = await apiClient.post<{
+      models: Record<string, ModelConfig>
+      added_ids: string[]
+    }>(API_ENDPOINTS.CONFIG.LLM_MODELS, { models: { [modelId]: config } })
     return response.data
   }, options)
 }
@@ -169,11 +173,11 @@ export async function updateModel(
   options: RetryOptions = {},
 ): Promise<Record<string, ModelConfig>> {
   return requestWithRetry(async () => {
-    const response = await apiClient.put<Record<string, ModelConfig>>(
+    const response = await apiClient.put<{ models: Record<string, ModelConfig> }>(
       `${API_ENDPOINTS.CONFIG.LLM_MODELS}/${modelId}`,
       { config },
     )
-    return response.data
+    return response.data.models
   }, options)
 }
 
@@ -182,10 +186,10 @@ export async function deleteModel(
   options: RetryOptions = {},
 ): Promise<Record<string, ModelConfig>> {
   return requestWithRetry(async () => {
-    const response = await apiClient.delete<Record<string, ModelConfig>>(
+    const response = await apiClient.delete<{ models: Record<string, ModelConfig> }>(
       `${API_ENDPOINTS.CONFIG.LLM_MODELS}/${modelId}`,
     )
-    return response.data
+    return response.data.models
   }, options)
 }
 

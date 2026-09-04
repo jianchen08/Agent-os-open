@@ -612,17 +612,8 @@ class IsolationManager:
             # 3. 尝试从 Docker 查找已有容器
             existing_env = await self._find_existing_container(container_name)
             if existing_env:
-                self._environments[existing_env.env_id] = existing_env
-                self._workspace_env_map[ws_key] = existing_env.env_id
-                # 同步注册到 provider，确保 execute_in_environment 能在 provider 侧命中。
-                # _find_existing_container 绕过 provider 直接构造了 env，
-                # 若不注册则 provider._environments 中无此记录。
-                provider = self._providers.get(existing_env.level)
-                if provider is not None:
-                    provider._environments[existing_env.env_id] = existing_env
                 logger.debug(f"[IsolationManager] 恢复已有容器: {container_name}")
-                self._ws_env_fail_counts.pop(ws_key, None)
-                return existing_env
+                return self._adopt_found_env(existing_env, ws_key)
 
             # 4. 检查是否可以复用父级环境
             if parent_env_id:
@@ -702,6 +693,24 @@ class IsolationManager:
                 env = await provider.create_environment(context, container_name=container_name)
             else:
                 env = await provider.create_environment(context)
+
+            # ── 撞名兜底：create 报 daemon Conflict = 同名容器实际存在 ──
+            # find 一次超时/慢响应会被当成"不存在"走到 create，而容器其实
+            # 在跑；Conflict 是"容器在"的确定性信号，回头复查复用，绝不把
+            # 存在的容器当创建失败上抛（否则 bash_execute 全线
+            # container_create_failed 且每轮重试都撞同一个 Conflict）。
+            if (
+                env.status == EnvironmentStatus.ERROR.value
+                and self._is_container_name_conflict(
+                    str((env.provider_info or {}).get("error", ""))
+                )
+            ):
+                logger.warning(
+                    f"[IsolationManager] create 撞名（容器已存在），复查复用: {container_name}"
+                )
+                recovered = await self._find_existing_container(container_name)
+                if recovered is not None:
+                    return self._adopt_found_env(recovered, ws_key)
 
             self._environments[env.env_id] = env
             self._workspace_env_map[ws_key] = env.env_id
@@ -886,6 +895,36 @@ class IsolationManager:
             return None
         finally:
             client.close()
+
+    def _adopt_found_env(self, env: IsolationEnvironment, ws_key: str) -> IsolationEnvironment:
+        """把 docker 侧找到的既有容器注册进内存映射并返回。
+
+        _find_existing_container 绕过 provider 直接构造了 env，内存映射与
+        provider 侧都要补注册（provider._environments 无记录则后续
+        execute_in_environment 在 provider 侧命不中）。
+        """
+        self._environments[env.env_id] = env
+        self._workspace_env_map[ws_key] = env.env_id
+        provider = self._providers.get(env.level)
+        if provider is not None:
+            provider._environments[env.env_id] = env
+        self._ws_env_fail_counts.pop(ws_key, None)
+        return env
+
+    async def ensure_container_alive(self, container_name: str) -> bool:
+        """校验容器当前可服务（存在 + running + 活性探针通过）。
+
+        state 持久绑定的消费面：调用方凭 state 里的容器名直读执行环境，
+        验活失败（被删/失活/daemon 慢超时）即重新走 get_or_create_environment
+        落地并刷新绑定。
+        """
+        return await self._find_existing_container(container_name) is not None
+
+    @staticmethod
+    def _is_container_name_conflict(error_msg: str) -> bool:
+        """daemon 报容器名被占（Conflict ... already in use）= 同名容器存在。"""
+        lowered = error_msg.lower()
+        return "conflict" in lowered and "already in use" in lowered
 
     async def destroy_by_task_id(self, task_id: str, success: bool = True) -> None:
         """根据任务 ID 销毁关联的隔离容器（强制销毁）

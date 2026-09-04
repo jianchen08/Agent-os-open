@@ -199,7 +199,7 @@ await event_bus.notify("emit", {
         "persist": False,
     },
 })
-# ... 后续 stream_chunk / thinking_* / tool_* / stream_end 同信封（message_id 一致）
+# ... 后续 tool_start / tool_result / stream_end 同信封（message_id 一致；正文/思考增量走块协议由内核侧发射，插件勿发 stream_chunk/thinking_*——前端无 handler）
 ```
 
 ### 步骤 3：前端渲染

@@ -14,7 +14,8 @@
 任务 2 —— fork 消息队列压缩（对标 DSH summarizer，产物结构不变）：
 7. test_compress_all_sends_message_list —— 压缩调用发消息列表，fork = [system] +
    compression_messages + 待压缩消息（原样）+ [user 压缩指令]
-8. test_fork_renders_semantic_labels —— fork 时带语义标签（任务 1+2 叠加生效）
+8. test_fork_content_identical_to_execution_path —— fork 内容与执行路径逐字节一致
+   （不渲染 [form] 标签，前缀 cache 对齐；2026-09-03 用户裁定）
 9. test_instruction_requires_five_part_json —— COMPACTION_INSTRUCTION 五段 JSON，
    旧占位符 {messages}/{state_snapshot}/{recent_process_blocks} 已删
 10. test_chat_completion_accepts_message_list —— llm_client 支持任意消息列表
@@ -361,9 +362,10 @@ class TestForkCompressionCall:
         # fork[0]：执行时 system（原样）
         assert fork[0]["role"] == "system"
         assert fork[0]["content"] == "执行时系统提示"
-        # fork[1]：既有压缩块消息在消息流原位（渲染 [recall] 语义标签前缀）
-        assert "<compressed>L2 三元组</compressed>" in fork[1]["content"]
-        assert fork[1]["content"].startswith("[recall] ")
+        # fork[1]：既有压缩块消息在消息流原位，内容与执行路径逐字节一致
+        # （fork 不渲染 [form] 前缀——渲染会在首个标记消息处改变 token 前缀，
+        # 击穿与执行请求的 prefix cache 对齐）
+        assert fork[1]["content"] == "<compressed>L2 三元组</compressed>"
         # fork[2:4]：待压缩消息原样 role/content（不压成 【用户 N】），seq 已剥离
         assert fork[2] == {"role": "user", "content": "请帮我做 X"}
         assert fork[3] == {"role": "assistant", "content": "好的，开始"}
@@ -372,8 +374,13 @@ class TestForkCompressionCall:
         assert "l1" in fork[-1]["content"]
         assert "memory_items" in fork[-1]["content"]
 
-    def test_fork_renders_semantic_labels(self) -> None:
-        """带 _context_form 的消息在 fork 中渲染 [form] 内容前缀（任务 1+2 叠加生效）。"""
+    def test_fork_content_identical_to_execution_path(self) -> None:
+        """带 _context_form 的消息在 fork 中内容保持原样（与执行路径逐字节一致）。
+
+        2026-09-03 用户裁定：fork 渲染 [form] 前缀会在首个标记消息处改变
+        token 前缀，击穿「fork=执行请求真前缀」的 cache 复用——fork 对
+        _context_form 只剥离不渲染（对齐 llm_core._build_messages 清理集）。
+        """
         mod = _load_cwg()
         captured: list[Any] = []
 
@@ -391,11 +398,16 @@ class TestForkCompressionCall:
 
         fork = captured[0]
         contents = [m.get("content", "") for m in fork]
-        assert any(c.startswith("[instructions] 项目规则") for c in contents)
-        assert any(c.startswith("[notice] 任务已完成") for c in contents)
-        # 无标记消息不加前缀
+        # 内容原样（无 [form] 前缀）
+        assert "项目规则：必须用中文" in contents
+        assert "任务已完成的通知" in contents
+        # 无标记消息不受影响
         assert "普通消息" in contents
-        # 渲染后 _context_form 字段本身不进载荷
+        # 性质：任何消息内容都不得携带 [form] 标签前缀
+        for c in contents:
+            for label in ("[instructions]", "[notice]", "[recall]", "[relay]", "[snapshot]"):
+                assert not c.startswith(label)
+        # _context_form 字段本身不进载荷
         assert all("_context_form" not in m for m in fork)
 
     def test_fork_without_context_messages(self) -> None:
@@ -465,9 +477,10 @@ class TestCompactionInstruction:
         # 旧占位符已删（去冗余：内容已在 fork 消息流里）
         for ph in ("{messages}", "{state_snapshot}", "{recent_process_blocks}"):
             assert ph not in instr, f"占位符 {ph} 应已删除"
-        # 语义标签 legend（任务 1 联动：压缩 LLM 据此分配摘要权重）
-        assert "[instructions]" in instr
-        assert "[notice]" in instr
+        # [form] 语义标签 legend 已删（fork 不渲染标签，前缀 cache 对齐）——
+        # 指令不得引用载荷中不存在的标记
+        for label in ("[instructions]", "[notice]", "[recall]", "[relay]", "[snapshot]"):
+            assert label not in instr, f"标签 {label} 应已从指令删除"
 
     def test_instruction_mentions_prior_compressed_blocks(self) -> None:
         """指令说明 <compressed>/<current_state> 是此前压缩产物，state_snapshot 合并更新。"""
@@ -557,8 +570,8 @@ class TestCompressionServiceForkThreading:
         assert fork[0]["role"] == "system"
         assert fork[0]["content"] == "执行时系统提示"
         assert "<current_state>已有状态</current_state>" in fork[1]["content"]
-        # 语义标签渲染（snapshot）
-        assert fork[1]["content"].startswith("[snapshot] ")
+        # 内容保持原样，不渲染 [snapshot] 前缀（前缀 cache 对齐）
+        assert fork[1]["content"] == "<current_state>已有状态</current_state>"
         # 待压缩消息原样进入（seq 剥离）
         assert {"role": "user", "content": "A" * 400} in fork
         # 末尾指令

@@ -67,6 +67,7 @@ export const SessionSearch = memo<SessionSearchProps>(
           <input
             ref={inputRef}
             type="text"
+            autoComplete="off"
             value={value}
             placeholder="搜索会话和消息..."
             onChange={handleInputChange}

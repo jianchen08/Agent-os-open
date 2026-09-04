@@ -70,6 +70,26 @@ def _error_env_manager(error: str = "Invalid container name") -> Any:
     return SimpleNamespace(get_or_create_environment=_get_or_create)
 
 
+def _binding_manager(alive: bool, resolve_id: str = "container-abc") -> Any:
+    """构造带验活接口的假 manager（state 绑定直读路径）。
+
+    ensure_container_alive 恒返回 alive；get_or_create_environment 返回
+    resolve_id（落地路径），并记录落地调用次数。
+    """
+    state = {"resolve_calls": 0}
+
+    async def _alive(name: str) -> bool:
+        return alive
+
+    async def _get_or_create(**kwargs: Any) -> Any:
+        state["resolve_calls"] += 1
+        return SimpleNamespace(env_id=resolve_id)
+
+    manager = SimpleNamespace(ensure_container_alive=_alive, get_or_create_environment=_get_or_create)
+    manager._test_state = state  # type: ignore[attr-defined]
+    return manager
+
+
 def _base_state(**overrides: Any) -> dict[str, Any]:
     """主会话（无 task_id，L1 缺省）tool_execute 状态：workspace + isolated。"""
     base = {
@@ -287,3 +307,71 @@ class TestContainerUnavailable:
         contexts = result.state_updates["execution_contexts"]
         assert contexts[0]["blocked"] is True
         assert result.state_updates["isolation.blocked"] is True
+
+
+# ============================================================
+# state 容器绑定：执行环境显式数据，直读/失活重落地
+# ============================================================
+
+
+class TestStateBinding:
+    @pytest.mark.asyncio
+    async def test_首轮落地写入绑定(self) -> None:
+        """无绑定时走落地，容器 id 写入 state（幂等键）。"""
+        guard = _make_guard()
+        guard._manager = _fake_manager("container-abc")
+        result = await guard.execute(_ctx(_base_state()))
+
+        assert result.state_updates["isolation.container_name"] == "container-abc"
+        calls = result.state_updates[StateKeys.RAW_TOOL_CALLS]
+        assert calls[0]["args"]["_container_id"] == "container-abc"
+
+    @pytest.mark.asyncio
+    async def test_state绑定存活_直读不落地(self) -> None:
+        """state 已有绑定且验活通过 → 凭绑定注入，不走 get_or_create 落地。"""
+        guard = _make_guard()
+        manager = _binding_manager(alive=True)
+        guard._manager = manager
+        result = await guard.execute(
+            _ctx(_base_state(**{"isolation.container_name": "container-bound"}))
+        )
+
+        calls = result.state_updates[StateKeys.RAW_TOOL_CALLS]
+        assert calls[0]["args"]["_container_id"] == "container-bound"
+        assert manager._test_state["resolve_calls"] == 0
+        # 绑定幂等回写，值不变
+        assert result.state_updates["isolation.container_name"] == "container-bound"
+
+    @pytest.mark.asyncio
+    async def test_state绑定失活_重新落地并刷新绑定(self) -> None:
+        """绑定验活失败（容器被删/失活）→ 重新落地，绑定刷新为新容器。"""
+        guard = _make_guard()
+        manager = _binding_manager(alive=False, resolve_id="container-new")
+        guard._manager = manager
+        result = await guard.execute(
+            _ctx(_base_state(**{"isolation.container_name": "container-stale"}))
+        )
+
+        calls = result.state_updates[StateKeys.RAW_TOOL_CALLS]
+        assert calls[0]["args"]["_container_id"] == "container-new"
+        assert manager._test_state["resolve_calls"] == 1
+        assert result.state_updates["isolation.container_name"] == "container-new"
+
+    @pytest.mark.asyncio
+    async def test_state绑定验活异常_重新落地兜底(self) -> None:
+        """验活调用本身抛异常（daemon 慢/服务异常）→ 视为失活，重新落地。"""
+        guard = _make_guard()
+        manager = _binding_manager(alive=True, resolve_id="container-abc")
+
+        async def _boom(name: str) -> bool:
+            raise RuntimeError("daemon slow")
+
+        manager.ensure_container_alive = _boom
+        guard._manager = manager
+        result = await guard.execute(
+            _ctx(_base_state(**{"isolation.container_name": "container-bound"}))
+        )
+
+        calls = result.state_updates[StateKeys.RAW_TOOL_CALLS]
+        assert calls[0]["args"]["_container_id"] == "container-abc"
+        assert manager._test_state["resolve_calls"] == 1

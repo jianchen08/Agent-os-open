@@ -345,8 +345,8 @@ async def _poll_run_cancel(
                 "items": {"type": "object"},
                 "description": "Optional tool schemas for function calling",
             },
-            "temperature": {"type": "number", "default": 0.7},
-            "max_tokens": {"type": "integer", "default": 4096},
+            "temperature": {"type": "number", "description": "Sampling temperature; omitted = filled per llm.yaml model entry default_params, sent only if neither is configured"},
+            "max_tokens": {"type": "integer", "description": "Maximum output tokens; omitted = filled per model config, sent only if neither is configured"},
         },
         "required": ["model", "messages"],
     },
@@ -360,8 +360,8 @@ async def llm_complete_stream(
     model: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
-    temperature: float = 0.7,
-    max_tokens: int = 4096,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Execute a streaming LLM completion request.
@@ -384,9 +384,9 @@ async def llm_complete_stream(
         model: LiteLLM model identifier string.
         messages: Chat message list.
         tools: Optional tool schemas for function calling.
-        temperature: Sampling temperature.
-        max_tokens: Maximum tokens to generate.
-
+        temperature: 采样温度；None = 按 llm.yaml 模型条目 default_params
+            回填，模型条目也未配置则不携带该参数。
+        max_tokens: 最大输出 token；None = 按模型配置回填，均未配置则不携带。
     Returns:
         Dict with ``status`` / ``stream_id`` plus the full response:
         ``text`` (str|None), ``tool_calls`` (list), ``thinking_text``
@@ -471,6 +471,24 @@ async def llm_complete_stream(
                     return _partial_result(stream_id, "interrupted", accumulator.build_snapshot())
                 poll_task = asyncio.create_task(_poll_run_cancel(poll_handle, run_id, cancel_event))
 
+        # 参数回填（单一真值 = llm.yaml models.<id>.default_params）：
+        # 调用方（llm_core/压缩等）只需给模型名；未显式传的参数按模型条目
+        # default_params 逐键补齐，显式传参恒优先（setdefault 语义）。模型
+        # 条目未配置的键不发——不发明兜底值（如 0.7/4096），上游按模型自身
+        # 默认运行（2026-09-03 用户裁定）。放在各 pop 之后：回填只补真实缺席键。
+        model_entry = ModelConfigLoaderShim(get_config()).get_model_config(model)
+        default_params = (
+            model_entry.get("default_params") if isinstance(model_entry, dict) else None
+        )
+        if isinstance(default_params, dict):
+            if temperature is None:
+                temperature = default_params.get("temperature")
+            if max_tokens is None:
+                max_tokens = default_params.get("max_tokens")
+            for dp_key, dp_value in default_params.items():
+                if dp_key not in ("temperature", "max_tokens"):
+                    kwargs.setdefault(dp_key, dp_value)
+
         try:
             # 透传 llm_core 经 kwargs 携带的模型参数（llm.yaml default_params
             # 的 thinking/reasoning_effort 等）：先前只显式传固定形参，配置的
@@ -479,15 +497,20 @@ async def llm_complete_stream(
             # 行为，正文偶发为空）。_call_context 是内核路由信封
             # （thread/pipeline/message 键），非模型参数，pop 不外传。
             kwargs.pop("_call_context", None)
+            # 回填后仍未设置的采样参数不携带（None 不发给 litellm）——
+            # 请求里只出现模型条目或调用方显式写过的参数。
+            call_kwargs: dict[str, Any] = dict(kwargs)
+            if temperature is not None:
+                call_kwargs["temperature"] = temperature
+            if max_tokens is not None:
+                call_kwargs["max_tokens"] = max_tokens
             response = await adapter.completion(
                 model=model,
                 messages=messages,
                 tools=tools,
                 stream=True,
                 on_chunk=_on_chunk,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **kwargs,
+                **call_kwargs,
             )
         except StreamCancelledError:
             # 调用方停止（run suspended → on_chunk 返回 cancel → adapter 中断流）：

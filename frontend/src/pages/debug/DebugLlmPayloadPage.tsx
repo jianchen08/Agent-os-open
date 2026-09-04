@@ -1,5 +1,6 @@
 /**
- * 调试 LLM 请求页面（列表 query 化：useLlmPayloadDiagQuery 缓存 SWR，重挂零请求）
+ * 调试 LLM 请求页面（列表 query 化：缓存先渲染不闪 loading，挂载即后台重取——
+ * 快照随每次 LLM 调用实时落盘，重进页面必须重取，否则恒落后实际发送一轮）
  *
  * 展示最近发送给大模型的真实请求体快照（payload_diag）：每次 LLM 调用前
  * 由 llm adapter 落盘的最终 HTTP body（含 model + 完整 messages）。

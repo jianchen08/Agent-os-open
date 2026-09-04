@@ -212,12 +212,16 @@ pub fn build_router_with_http_routes(
     // 注册一条 /ext/{*rest} 通配路由，所有 /ext/** 请求统一进 handler。
     // handler 先尝试静态资源（plugin_dirs 命中 + 文件存在）→ 命中则直接返回；
     // 否则若有 dispatcher，走 find_http_route 模板匹配插件 http_endpoints；
-    // 都不命中 → 404。
-    let wildcard_handler = build_wildcard_handler(dispatcher.clone(), plugin_dirs.clone());
+    // 都不命中：manifest 在册且插件启用（生命周期空窗）→ 503，其余 → 404。
+    let wildcard_handler = build_wildcard_handler(
+        state.clone(),
+        dispatcher.clone(),
+        plugin_dirs.clone(),
+    );
     router = router.route("/ext/{*rest}", wildcard_handler);
     // G6-a：/api/v1/datasource/{*rest} 数据源代理——改写 /ext/{rest} 复用同一分发。
     // 前端 fetchDatasourceOptions 对非绝对 URI 走此前缀。
-    let datasource_handler = build_datasource_handler(dispatcher, plugin_dirs);
+    let datasource_handler = build_datasource_handler(state, dispatcher, plugin_dirs);
     router = router.route("/api/v1/datasource/{*rest}", datasource_handler);
     router
 }
@@ -234,6 +238,7 @@ pub fn build_router_with_http_routes(
 ///   共用。path 形如 `/ext/{plugin_id}/...`。
 #[allow(clippy::too_many_arguments)]
 async fn exec_ext_request(
+    state: crate::routes::AppState,
     dispatcher: Option<Arc<HttpDispatcher>>,
     plugin_dirs: Arc<HashMap<String, std::path::PathBuf>>,
     method: axum::http::Method,
@@ -288,7 +293,35 @@ async fn exec_ext_request(
                 (StatusCode::INTERNAL_SERVER_ERROR, "response build failed").into_response()
             })
         }
-        DispatchOutcome::NotFound => (StatusCode::NOT_FOUND, "route not found").into_response(),
+        DispatchOutcome::NotFound => {
+            // 声明面在册（manifest 已知且插件启用）但路由缺席 = 插件生命周期空窗
+            // （G2 复验重注册 / enable-disable 切换 / 空闲卸载后的再注册间隙，
+            // scopes.revoke 与重注册之间静默无日志）——瞬态不可用而非路由不存在：
+            // 503+Retry-After 让前端按可重试处理（裸 404 会被前端当「路由没了」
+            // 常态化报错，2026-09-04 任务页实测反复 404）；warn 补上空窗观测。
+            let plugin_id = ext_path_plugin_id(&path);
+            let declared = match plugin_id {
+                Some(pid) => {
+                    state.manifests.read().await.iter().any(|m| m.id == pid)
+                        && state.enabled_plugin_ids.read().await.contains(pid)
+                }
+                None => false,
+            };
+            if declared {
+                warn!(
+                    path = %path,
+                    plugin = plugin_id.unwrap_or_default(),
+                    "http route missing for declared plugin (503, transient lifecycle window)"
+                );
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [("retry-after", "1")],
+                    "plugin route temporarily unavailable (transient)",
+                )
+                    .into_response();
+            }
+            (StatusCode::NOT_FOUND, "route not found").into_response()
+        }
         DispatchOutcome::Timeout => {
             (StatusCode::GATEWAY_TIMEOUT, "endpoint timeout").into_response()
         }
@@ -300,6 +333,7 @@ async fn exec_ext_request(
 }
 
 fn build_wildcard_handler(
+    state: crate::routes::AppState,
     dispatcher: Option<Arc<HttpDispatcher>>,
     plugin_dirs: Arc<HashMap<String, std::path::PathBuf>>,
 ) -> axum::routing::MethodRouter<crate::routes::AppState> {
@@ -309,12 +343,14 @@ fn build_wildcard_handler(
     // query 多值解析统一走 [`parse_query_multi`]（重复 key 不塌缩，A1）。
     let handler =
         move |method: Method, uri: axum::http::Uri, headers: HeaderMap, body: axum::body::Bytes| {
+            let state = state.clone();
             let dispatcher = dispatcher.clone();
             let plugin_dirs = plugin_dirs.clone();
             async move {
                 let path = uri.path().to_string();
                 let query_multi = parse_query_multi(&uri);
                 exec_ext_request(
+                    state,
                     dispatcher,
                     plugin_dirs,
                     method,
@@ -328,6 +364,13 @@ fn build_wildcard_handler(
         };
 
     axum::routing::any(handler)
+}
+
+/// 从 `/ext/{plugin_id}/...` 提取插件 id 段（非 /ext 前缀或空段返回 None）。
+fn ext_path_plugin_id(path: &str) -> Option<&str> {
+    path.strip_prefix("/ext/")
+        .and_then(|rest| rest.split('/').next())
+        .filter(|s| !s.is_empty())
 }
 
 /// 解析 URI query 为多值形态（重复 key 不塌缩）。
@@ -356,12 +399,14 @@ fn parse_query_multi(uri: &axum::http::Uri) -> HashMap<String, Vec<String>> {
 /// 兼容短形式 `/api/v1/datasource/{route_id}` 时按 `/ext/{route_id}` 处理。
 /// 未命中 → 404（前端 datasource 占位护栏由真实路由接管后移除）。
 fn build_datasource_handler(
+    state: crate::routes::AppState,
     dispatcher: Option<Arc<HttpDispatcher>>,
     plugin_dirs: Arc<HashMap<String, std::path::PathBuf>>,
 ) -> axum::routing::MethodRouter<crate::routes::AppState> {
     use axum::http::{HeaderMap, Method, Uri};
 
     let handler = move |method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes| {
+        let state = state.clone();
         let dispatcher = dispatcher.clone();
         let plugin_dirs = plugin_dirs.clone();
         async move {
@@ -374,6 +419,7 @@ fn build_datasource_handler(
             };
             let query_multi = parse_query_multi(&uri);
             exec_ext_request(
+                state,
                 dispatcher,
                 plugin_dirs,
                 method,

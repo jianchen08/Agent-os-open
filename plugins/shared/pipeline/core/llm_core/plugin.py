@@ -91,47 +91,49 @@ class PartialStreamOutcome:
 # 决策（用户确认）：temperature / max_tokens 等采样参数**不随强度覆盖**——
 # 强度只路由思考参数，采样参数始终用模型 default_params。
 #
-# 路由规则（模型配置优先）：模型可在 llm.yaml 的 models.<id>.thinking_strength_params
-# 定义自己的强度→参数映射（不同模型思考参数不一致：DeepSeek reasoning_effort /
-# MiniMax adaptive thinking / 无 reasoning 的普通模型）。模型配置了某档位 →
-# 用模型配置；未配置的档位 → 回退内置默认表。内置表是各模型的兜底基线。
-_THINKING_STRENGTH_PARAMS: dict[str, dict[str, Any]] = {
-    "low": {"reasoning_effort": "low"},
-    "medium": {"reasoning_effort": "medium"},
-    "high": {"reasoning_effort": "high"},
-}
-
+# 路由优先级（2026-09-03 用户裁定：所有映射显式，不在代码里靠推断兜底）：
+# 厂商级映射（llm.yaml providers.<name>.thinking_strength_params，即各厂商 API
+# 真实接受的参数形态，经 _config_models 桥接为 provider_thinking_strength_params
+# 注入）> 模型级手填映射（models.<id>.thinking_strength_params）。两级都未配置
+# 的模型 → 强度不覆盖任何参数（保持 default_params 现状）；无内置兜底表。
 # 思考强度允许覆盖的参数白名单：只含思考相关字段；
 # temperature/max_tokens 等采样参数不随强度覆盖（即使用户配置里写了也过滤）。
 _THINKING_STRENGTH_ALLOWED = {"reasoning_effort", "thinking"}
+
+# 出站载荷内部字段黑名单：管道持久化态携带、但不属于任何 provider wire 契约
+# 的消息字段。严格 provider（zhipu 错误码 1210/1214）对 messages 内未知字段
+# 整请求拒绝；宽松 provider（minimax/deepseek）容忍但同样无消费方。
+# reasoning_content 不入此名单——provider 适配层（adapt_messages_before_send）
+# 的采样保留策略在下游消费它（DeepSeek rc 采样）。
+_OUTBOUND_INTERNAL_FIELDS = frozenset(
+    {"seq", "tool_result", "_context_form", "metadata", "status", "llm_error_info"}
+)
 
 
 def resolve_thinking_strength_params(
     strength: str,
     model_params: dict[str, dict[str, Any]] | None = None,
+    *,
+    provider_params: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """思考强度 → 思考参数覆盖集；off/未知/空 → None（不覆盖）。
+    """思考强度 → 思考参数覆盖集；off/未知/空/无显式映射 → None（不覆盖）。
 
     Args:
         strength: 思考强度档位（off/low/medium/high）
-        model_params: 模型级路由规则（llm.yaml models.<id>.thinking_strength_params），
-            配置了该档位则优先使用（缺失字段用内置表补全）；None 或未配置该档位
-            时回退内置默认表。仅白名单内思考参数生效（temperature/max_tokens 忽略）。
+        model_params: 模型级手填映射（llm.yaml models.<id>.thinking_strength_params），
+            仅无厂商级映射（或厂商映射缺该档位）时参与路由。
+        provider_params: 厂商级映射（llm.yaml providers.<name>.
+            thinking_strength_params，经 _config_models 桥接注入）。命中该档位
+            → 直接映射（厂商参数即上游真实契约）。
     """
     if not strength or strength == "off":
         return None
-    if model_params and isinstance(model_params, dict):
-        override = model_params.get(strength)
-        if isinstance(override, dict):
-            base = _THINKING_STRENGTH_PARAMS.get(strength, {})
-            merged = {**base, **override}
-        else:
-            merged = _THINKING_STRENGTH_PARAMS.get(strength, {})
-    else:
-        merged = _THINKING_STRENGTH_PARAMS.get(strength, {})
-    if not merged:
-        return None
-    return {k: v for k, v in merged.items() if k in _THINKING_STRENGTH_ALLOWED}
+    for params in (provider_params, model_params):
+        if isinstance(params, dict):
+            override = params.get(strength)
+            if isinstance(override, dict):
+                return {k: v for k, v in override.items() if k in _THINKING_STRENGTH_ALLOWED}
+    return None
 
 
 class LLMCore(ICorePlugin):
@@ -183,10 +185,15 @@ class LLMCore(ICorePlugin):
         self._model: str = self._config.get("model_name", "gpt-4")
         self._api_base: str | None = self._config.get("api_base")
         self._api_key: str | None = self._config.get("api_key")
-        # 模型级思考强度路由规则（llm.yaml models.<id>.thinking_strength_params）：
-        # 由 _apply_model_from_state 解析模型时更新；None = 未配置 → 用内置默认表。
+        # 模型级思考强度手填映射（llm.yaml models.<id>.thinking_strength_params）
+        # 与厂商级映射（providers.<name>.thinking_strength_params，桥接键
+        # provider_thinking_strength_params）：由 _apply_model_from_state 解析
+        # 模型时更新；路由优先级 厂商 > 手填，两级都未配置 → 强度不覆盖。
         self._thinking_strength_params: dict[str, dict[str, Any]] | None = (
             self._config.get("thinking_strength_params")
+        )
+        self._provider_thinking_strength_params: dict[str, dict[str, Any]] | None = (
+            self._config.get("provider_thinking_strength_params")
         )
         self._context_window: int | None = self._config.get("context_window")
         if not self._context_window:
@@ -298,9 +305,12 @@ class LLMCore(ICorePlugin):
         self._api_key = llm_conf.get("api_key") or ""
         self._context_window = llm_conf.get("context_window")
         self._default_params = llm_conf.get("default_params") or {}
-        # 模型级思考强度路由规则（llm.yaml models.<id>.thinking_strength_params）：
-        # 随模型解析更新；未配置 → None（_call_llm 回退内置默认表）。
+        # 模型级手填映射与厂商级映射（桥接键 provider_thinking_strength_params）
+        # 随模型解析更新；路由优先级 厂商 > 手填，两级都未配置 → 强度不覆盖。
         self._thinking_strength_params = llm_conf.get("thinking_strength_params")
+        self._provider_thinking_strength_params = llm_conf.get(
+            "provider_thinking_strength_params"
+        )
         logger.info(
             "[%s] model resolved: model_id=%s provider=%s model=%s",
             self.name,
@@ -391,11 +401,15 @@ class LLMCore(ICorePlugin):
 
             llm_usage = None
             if response.usage:
+                # model/provider 随用量同帧落轨迹（traces 按模型聚合 token 的归属依据；
+                # state.llm_model 是可变当前值，diff 轨迹在模型未变的轮次不落盘）
                 llm_usage = {
                     "input_tokens": response.usage.get("prompt_tokens", 0),
                     "output_tokens": response.usage.get("completion_tokens", 0),
                     "total_tokens": response.usage.get("total_tokens", 0),
                     "cached_tokens": response.usage.get("cached_tokens", 0),
+                    "model": self._model,
+                    "provider": self._provider,
                 }
 
             logger.info(
@@ -682,11 +696,14 @@ class LLMCore(ICorePlugin):
         usage = partial.get("usage")
         llm_usage: dict[str, Any] = {}
         if usage:
+            # model/provider 归属依据，同成功路径（监控按模型聚合 token）
             llm_usage = {
                 "input_tokens": usage.get("prompt_tokens", 0),
                 "output_tokens": usage.get("completion_tokens", 0),
                 "total_tokens": usage.get("total_tokens", 0),
                 "cached_tokens": usage.get("cached_tokens", 0),
+                "model": self._model,
+                "provider": self._provider,
             }
 
         logger.warning(
@@ -829,24 +846,25 @@ class LLMCore(ICorePlugin):
             messages.append(system_msg)
 
         # 2. 压缩消息（每个块独立消息，老→新。前缀匹配 → cache hit）
-        #    _context_form 是语义标记内部字段（prompt_build 打标），发送前剥离，
-        #    不进 API 载荷（同下方 history 段的 seq/tool_result 处理）。
+        #    块消息持久化态携带 seq/_context_form/metadata.compression_ref 等
+        #    管道内部字段——出站剥离（与 history 段同一黑名单）。
         for cm in state.get("compression_messages", []):
-            if "_context_form" in cm:
-                cm = {k: v for k, v in cm.items() if k != "_context_form"}  # noqa: PLW2901
+            if any(k in cm for k in _OUTBOUND_INTERNAL_FIELDS):
+                cm = {k: v for k, v in cm.items() if k not in _OUTBOUND_INTERNAL_FIELDS}  # noqa: PLW2901
             messages.append(cm)
 
         # 3. 历史消息（管道维护的对话历史——压缩后只含最近消息）
         history = state.get("messages", [])
         for m in history:
-            # 清理内部标记字段，不发给 LLM：
-            # seq 槽位号（内核 apply 时带上，LLM 不需要）；
-            # tool_result envelope 字段（tool 消息持久形态的一部分，发送前剥离，
-            # 是 Rust 侧后续 envelope 搬家改动的前置配合）；
-            # _context_form 语义标记（压缩优化任务 1：产出方打的内部字段，
-            # 只供压缩链路消费，最终 LLM 载荷必须剥离以保持 cache 不变）。
-            if "seq" in m or "tool_result" in m or "_context_form" in m:
-                m = {k: v for k, v in m.items() if k not in ("seq", "tool_result", "_context_form")}  # noqa: PLW2901
+            # 清理管道内部字段，不发给 LLM（_OUTBOUND_INTERNAL_FIELDS，严格
+            # provider 如 zhipu 对 messages 内未知字段整请求拒绝——1210 实锤
+            # 2026-09-03）：seq 槽位号；tool_result 持久化信封；_context_form
+            # 语义标记；metadata（内核 client_message_id 幂等键等 UI 对账数据，
+            # router.rs ADR-2026-08-21）；status/llm_error_info（轮次终态与
+            # 错误信息，前端消费）。reasoning_content 不剥——provider 适配层
+            # 的采样保留策略在下游消费它。
+            if any(k in m for k in _OUTBOUND_INTERNAL_FIELDS):
+                m = {k: v for k, v in m.items() if k not in _OUTBOUND_INTERNAL_FIELDS}  # noqa: PLW2901
             messages.append(m)
 
         # 4. 多模态内容（合并到最后一条用户消息）
@@ -1005,10 +1023,13 @@ class LLMCore(ICorePlugin):
 
         # 思考强度 → 模型参数覆盖：state.thinking_strength 非空（low/medium/high）
         # 时覆盖采样参数（与 default_params 合并）；off/缺失不覆盖（现状不变）。
-        # 路由规则：模型级 thinking_strength_params 优先，未配置回退内置默认表。
+        # 路由优先级：厂商级映射（provider_thinking_strength_params）> 模型级
+        # 手填（thinking_strength_params）；两级都未配置 → 不覆盖（无代码兜底）。
         thinking_strength = str(ctx.state.get("thinking_strength") or "")
         strength_params = resolve_thinking_strength_params(
-            thinking_strength, self._thinking_strength_params
+            thinking_strength,
+            self._thinking_strength_params,
+            provider_params=self._provider_thinking_strength_params,
         )
         if strength_params:
             kwargs.update(strength_params)

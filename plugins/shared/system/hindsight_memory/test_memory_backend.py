@@ -132,6 +132,29 @@ class TestHindsightBackend:
         assert item["score"] == 0.9
         assert item["memory_type"] == "semantic"
 
+    async def test_hindsight_search_maps_nested_scores_final(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """B6 回归：真实 RecallResult 的相关度在嵌套 scores.final（顶层无
+        score 键）——映射取 final，否则所有结果 score 恒 0。"""
+        caller.return_value = {
+            "results": [
+                {
+                    "id": "m2",
+                    "content": "beta",
+                    "scores": {"final": 0.87, "semantic": 0.8},
+                    "metadata": {"memory_type": "semantic"},
+                }
+            ],
+            "total": 1,
+        }
+        backend = mod.HindsightBackend(caller)
+
+        results = await backend.search(query="q", user_id="user-1")
+
+        assert len(results) == 1
+        assert results[0]["score"] == 0.87
+
     async def test_hindsight_add_unwraps_invoke_envelope(
         self, mod: Any, caller: AsyncMock
     ) -> None:

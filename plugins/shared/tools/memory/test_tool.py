@@ -116,6 +116,8 @@ class TestExecuteStore:
         assert kwargs["memory_type"] == "semantic"
         assert "t1" in kwargs["tags"]
         assert kwargs["source"] == "memory_tool"
+        # upsert 语义：同锚点重复 store 覆盖（replace），不累积衍生条目（N4）
+        assert kwargs["update_mode"] == "replace"
 
         assert result.success is True
         assert result.output["memory_id"] == "mem-1"
@@ -184,6 +186,74 @@ class TestExecuteImport:
         assert result.success is True
         assert result.output["chunks_imported"] == 3
 
+    async def test_execute_import_file_resolves_relative_path_in_workspace(
+        self, mod: Any, backend: AsyncMock, tool_inst: Any
+    ) -> None:
+        """B7 回归：相对 file_path 按注入 workspace 解析为绝对路径。
+
+        读取发生在 hindsight sidecar 进程（cwd=插件目录），相对路径直传会
+        解析到错误位置而失败；workspace 由 param_inject 权威注入。
+        """
+        workspace = str(Path.cwd())
+        result = await tool_inst.execute(
+            {
+                "action": "import_file",
+                "file_path": "docs/guide.md",
+                "name": "g",
+                "workspace": workspace,
+            }
+        )
+
+        backend.import_document.assert_awaited_once()
+        kwargs = backend.import_document.await_args.kwargs
+        expected = str((Path(workspace) / "docs/guide.md").resolve())
+        assert kwargs["file_path"] == expected
+
+        assert result.success is True
+        assert result.output["chunks_imported"] == 3
+
+    async def test_execute_import_file_keeps_absolute_path_with_workspace(
+        self, mod: Any, backend: AsyncMock, tool_inst: Any
+    ) -> None:
+        """绝对路径不被 workspace 二次拼接。"""
+        abs_path = str((Path.cwd() / "abs.md").resolve())
+        result = await tool_inst.execute(
+            {
+                "action": "import_file",
+                "file_path": abs_path,
+                "name": "a",
+                "workspace": str(Path.cwd()),
+            }
+        )
+
+        backend.import_document.assert_awaited_once()
+        kwargs = backend.import_document.await_args.kwargs
+        assert kwargs["file_path"] == abs_path
+        assert result.success is True
+
+    async def test_execute_import_file_translates_workspace_prefix(
+        self, mod: Any, backend: AsyncMock, tool_inst: Any
+    ) -> None:
+        """N1 回归：/workspace/ 前缀按容器挂载约定翻译为注入 workspace。
+
+        复测实锤 /workspace/... 被拼成 D:\\workspace\\...（盘符误配）。
+        """
+        workspace = str(Path.cwd())
+        result = await tool_inst.execute(
+            {
+                "action": "import_file",
+                "file_path": "/workspace/docs/guide.md",
+                "name": "g",
+                "workspace": workspace,
+            }
+        )
+
+        backend.import_document.assert_awaited_once()
+        kwargs = backend.import_document.await_args.kwargs
+        expected = str((Path(workspace) / "docs/guide.md").resolve())
+        assert kwargs["file_path"] == expected
+        assert result.success is True
+
 
 # ═══════════════════════════════════════════════════════════
 # 5. delete → backend.delete
@@ -205,6 +275,58 @@ class TestExecuteDelete:
 
         assert result.success is True
         assert result.output["deleted"] is True
+
+    async def test_execute_delete_accepts_document_id(
+        self, mod: Any, backend: AsyncMock, tool_inst: Any
+    ) -> None:
+        """N3 回归：delete 按 schema 声明接受 document_id 定向删除。"""
+        result = await tool_inst.execute(
+            {"action": "delete", "document_id": "retest_baseline_ml"}
+        )
+
+        backend.delete.assert_awaited_once()
+        kwargs = backend.delete.await_args.kwargs
+        assert kwargs["memory_id"] == "retest_baseline_ml"
+        assert result.success is True
+        assert result.output["deleted"] is True
+
+    async def test_delete_false_yields_failure_result_with_reason(
+        self, mod: Any
+    ) -> None:
+        """B5 回归：删除失败必须产出带原因的失败结果。
+
+        后端返回 False（或抛错）时若产出无 error 键的 {"success": false}，
+        会被内核归一层掩蔽成无信息的 "tool execution failed"。
+        """
+
+        class _RefusingBackend:
+            async def delete(self, user_id: str, memory_id: str) -> bool:
+                return False
+
+        t = mod.MemoryTool(memory_backend=_RefusingBackend())
+        t.set_trusted_user_id("tester")
+
+        result = await t.execute({"action": "delete", "memory_id": "gone-1"})
+
+        assert result.success is False
+        assert result.error
+        assert "gone-1" in str(result.error)
+
+    async def test_delete_error_surfaces_backend_reason(self, mod: Any) -> None:
+        """B5 回归：后端抛出的具体原因必须透传到结果（不再吞成裸失败）。"""
+
+        class _RaisingBackend:
+            async def delete(self, user_id: str, memory_id: str) -> bool:
+                raise RuntimeError("hindsight.delete 失败: (404)")
+
+        t = mod.MemoryTool(memory_backend=_RaisingBackend())
+        t.set_trusted_user_id("tester")
+
+        result = await t.execute({"action": "delete", "memory_id": "gone-1"})
+
+        assert result.success is False
+        assert "删除失败" in str(result.error)
+        assert "(404)" in str(result.error)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -253,6 +375,91 @@ class TestExecuteUpdate:
         assert backend.add.await_count >= 1
         assert result.success is True
         assert result.output["degraded"] is True
+
+
+class _UnanchoredWriteRejectedBackend:
+    """行为镜像真实 HindsightBackend.add：同步 retain 无 document_id 时服务端
+    不返回任何 id（RetainResponse 无 id 字段）——空锚点写入上抛「写入未确认」。
+    """
+
+    def __init__(self) -> None:
+        self.add_kwargs: list[dict[str, Any]] = []
+
+    async def add(
+        self,
+        user_id: str,
+        content: str,
+        memory_type: str = "semantic",
+        tags: list[str] | None = None,
+        source: str = "",
+        metadata: dict[str, Any] | None = None,
+        document_id: str = "",
+        update_mode: str | None = None,
+    ) -> str:
+        self.add_kwargs.append({k: v for k, v in locals().items() if k != "self"})
+        if not document_id:
+            raise RuntimeError("hindsight.retain 未返回 memory id（写入未确认）")
+        return document_id
+
+
+class TestExecuteUpdateWriteConfirmed:
+    """B4 回归：update 的降级写入必须带锚点且被确认——真实链路里同步 retain
+    无 document_id 不返回 id（RetainResponse 无 id 字段），无锚点 update 曾
+    报「写入未确认」假失败，有锚点 update 曾不传 update_mode 落成追加残留。
+    """
+
+    async def test_update_without_anchor_generates_anchor_and_confirms_write(
+        self, mod: Any
+    ) -> None:
+        backend = _UnanchoredWriteRejectedBackend()
+        t = mod.MemoryTool(memory_backend=backend)
+        t.set_trusted_user_id("tester")
+
+        result = await t.execute(
+            {"action": "update", "content": "new content", "tags": ["t2"]}
+        )
+
+        assert result.success is True, result.error
+        out = result.output
+        assert out["updated"] is True
+        assert out["degraded"] is True
+        assert out["memory_id"], "update 必须回传确认的 memory_id"
+        kw = backend.add_kwargs[-1]
+        assert kw["document_id"], "update 写入必须携带 document 锚点"
+        assert kw["document_id"] == out["memory_id"]
+
+    async def test_update_with_anchor_replaces_same_document(self, mod: Any) -> None:
+        backend = _UnanchoredWriteRejectedBackend()
+        t = mod.MemoryTool(memory_backend=backend)
+        t.set_trusted_user_id("tester")
+
+        result = await t.execute(
+            {"action": "update", "content": "v2", "memory_id": "mem-abc"}
+        )
+
+        assert result.success is True, result.error
+        assert result.output["memory_id"] == "mem-abc"
+        kw = backend.add_kwargs[-1]
+        assert kw["document_id"] == "mem-abc"
+        # 覆盖式更新语义：replace（不 replace 时同锚点重复 retain 落成追加残留）
+        assert kw["update_mode"] == "replace"
+
+    async def test_update_honors_document_id_input(self, mod: Any) -> None:
+        """B4 残留回归：update 按 schema 声明接受 document_id 定向——
+        复测实锤 document_id 入参被忽略，每次 update 生成新锚点落成重复条目。"""
+        backend = _UnanchoredWriteRejectedBackend()
+        t = mod.MemoryTool(memory_backend=backend)
+        t.set_trusted_user_id("tester")
+
+        result = await t.execute(
+            {"action": "update", "content": "v2", "document_id": "retest_update_001"}
+        )
+
+        assert result.success is True, result.error
+        assert result.output["memory_id"] == "retest_update_001"
+        kw = backend.add_kwargs[-1]
+        assert kw["document_id"] == "retest_update_001"
+        assert kw["update_mode"] == "replace"
 
 
 # ═══════════════════════════════════════════════════════════

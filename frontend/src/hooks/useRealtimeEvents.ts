@@ -221,6 +221,27 @@ export function useRealtimeEvents(): void {
     globalWS.subscribe('pending_inputs_changed', handlePendingInputsChanged)
 
     /**
+     * 上下文压缩彻底失败（context_window_guard 经 frontend.emit 透传）：
+     * 压缩失败不阻塞管线（fail-open 降级），但上下文会持续膨胀——后端
+     * 已按故障周期去重（连续失败只推一次，成功后复位），前端照常弹通知。
+     */
+    const handleCompressionFailed = (eventData: {
+      data?: { thread_id?: string; pipeline_id?: string; message?: string }
+    }) => {
+      const data = eventData?.data || {}
+      useNotificationStore.getState().addNotification({
+        title: '上下文压缩失败',
+        message: data.message || '会话继续但上下文将持续膨胀，建议关注会话状态或新建会话。',
+        priority: 'high',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 8000,
+        sourceLabel: '上下文压缩',
+      })
+    }
+    globalWS.subscribe('compression_failed', handleCompressionFailed)
+
+    /**
      * 被同账号新连接替换（B10 单连接踢旧，code=4000）：本页已永久失联且不再
      * 自动重连——必须明示用户，否则页面静默装死、消息全黑洞。典型成因：
      * 同一浏览器开了多个前端标签页互踢。

@@ -63,11 +63,32 @@ fn collect_memory_rss_linux(pid: u32) -> Option<u64> {
     None
 }
 
+/// 解析 tasklist /fo csv 单行输出，取末列 MEM 字段的 KB 数 × 1024 得字节 RSS。
+///
+/// MEM 字段是最后一个引号字段且数字含千分位逗号（如 `"python.exe","1234",
+/// "Console","1","111,768 K"`），必须按 `","` 字段边界取整列；裸 split(',')
+/// 会把字段截成末三位（111,768 K → "768 K"）。畸形行返回 None。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_tasklist_mem_line(line: &str) -> Option<u64> {
+    let line = line.trim();
+    if !line.starts_with('"') || !line.ends_with('"') {
+        return None;
+    }
+    let mem_field = line
+        .strip_suffix('"')?
+        .rsplit("\",\"")
+        .next()?
+        .trim_matches('"')
+        .trim();
+    let cleaned: String = mem_field.chars().filter(|c| c.is_ascii_digit()).collect();
+    let kb: u64 = cleaned.parse().ok()?;
+    Some(kb * 1024)
+}
+
 #[cfg(target_os = "windows")]
 fn collect_memory_rss_windows(pid: u32) -> Option<u64> {
     use std::process::Command;
     // tasklist /fi "PID eq <pid>" /fo csv /nh
-    // 输出形如："python.exe","1234","Console","1","12,345 K"
     let output = Command::new("tasklist")
         .args(["/fi", &format!("PID eq {pid}"), "/fo", "csv", "/nh"])
         .output()
@@ -77,20 +98,7 @@ fn collect_memory_rss_windows(pid: u32) -> Option<u64> {
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout.lines().next()?;
-    // 解析 csv 最后一个字段 "12,345 K"
-    let fields: Vec<&str> = line.split(',').collect();
-    if fields.len() < 5 {
-        return None;
-    }
-    let mem_field = fields[fields.len() - 1].trim();
-    // 去引号 + "K"
-    let cleaned: String = mem_field
-        .trim_matches('"')
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .collect();
-    let kb: u64 = cleaned.parse().ok()?;
-    Some(kb * 1024)
+    parse_tasklist_mem_line(line)
 }
 
 /// 把进程态快照写入聚合器（周期轮询任务每 10s 调一次）。
@@ -301,6 +309,50 @@ mod tests {
         let _ = collect_memory_rss(self_pid);
         // 不存在的 pid
         assert!(collect_memory_rss(9_999_999).is_none() || collect_memory_rss(9_999_999).is_some());
+    }
+
+    #[test]
+    fn parse_tasklist_mem_returns_actual_full_value() {
+        // 真实 tasklist /fo csv /nh 输出形状（MEM 含千分位逗号），断言解析值
+        // 等于实际字节数——而非被逗号截断的末三位（旧 bug：恒 < 1 MB）
+        let cases = [
+            (
+                r#""python.exe","21120","Console","1","111,768 K""#,
+                111_768 * 1024,
+            ),
+            (
+                r#""python.exe","43236","Console","1","67,456 K""#,
+                67_456 * 1024,
+            ),
+            (r#""python.exe","123","Console","1","984 K""#, 984 * 1024),
+            (
+                r#""python.exe","1","Services","0","1,234,567 K""#,
+                1_234_567 * 1024,
+            ),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(parse_tasklist_mem_line(line), Some(expected), "{line}");
+        }
+    }
+
+    #[test]
+    fn parse_tasklist_mem_properties_and_malformed() {
+        // 性质：KB→bytes 恒为 1024 倍；含千分位逗号的真实进程（≥1 MB）解析值
+        // 必须 ≥ 1 MB——旧 split(',') bug 下该性质恒假
+        let real = parse_tasklist_mem_line(r#""a","21120","Console","1","111,768 K""#).unwrap();
+        assert_eq!(real % 1024, 0);
+        assert!(real >= 1024 * 1024, "含千分位的进程 RSS 不可能 < 1 MB");
+        // 性质：解析值随真实 KB 单调
+        let small = parse_tasklist_mem_line(r#""a","1","Console","1","999 K""#).unwrap();
+        assert!(real > small);
+        // 畸形行：空行 / 无引号 / 末字段非 MEM
+        assert_eq!(parse_tasklist_mem_line(""), None);
+        assert_eq!(parse_tasklist_mem_line("no quotes here"), None);
+        assert_eq!(parse_tasklist_mem_line(r#""a","1","Console""#), None);
+        assert_eq!(
+            parse_tasklist_mem_line(r#""a","1","Console","1"," K""#),
+            None
+        );
     }
 
     /// 无插件空加载器（poller 只需一个可构造的 invoker，不触达 loader）。

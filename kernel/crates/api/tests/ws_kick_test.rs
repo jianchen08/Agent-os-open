@@ -1,11 +1,14 @@
 // @feature: FP-0.2.七 路由收敛 | @ci: rust-test
-//! WS 单连接踢旧（B10）关闭码测试：同一 user 第二连接注册时，第一连接必须
-//! 收到带`CLOSE_CODE_KICKED`（4000）状态码的 Close 帧。
+//! WS 单连接踢旧（B10）两段式通知测试：同一 user 第二连接注册时，第一连接
+//! 必须先收到应用层 `{"type":"kicked"}` 文本帧，再收到带`CLOSE_CODE_KICKED`
+//! （4000）状态码的 Close 帧。
 //!
 //! 背景：踢旧若走空串哨兵 → `sender.close()` 发空 Close（浏览器 onclose=1000/1005）
 //! → 前端 GlobalWebSocket 按普通掉线 4s 退避重连 → 双客户端（ZCode webview +
 //! Edge 标签页）互踢无限循环。前端对 4000 已有"被新连接替换
 //! 跳过重连"分支（GlobalWebSocket.ts onclose），内核补齐带码关闭即可断根。
+//! 两段式（2026-09-04）：代理链可能吞掉 Close 帧状态码（浏览器端退化 1006），
+//! 应用层文本帧先行送达，前端照常置位防重连——文本帧 + Close 缺一不可。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,10 +113,31 @@ async fn ws_second_connection_kicks_old_with_coded_close() {
         "A 首帧应为 connection_confirmation，实际: {first_a:?}"
     );
 
-    // 连接 B：同一 user 注册 → 踢旧 A。A 必须收到带 CLOSE_CODE_KICKED 的 Close 帧。
+    // 连接 B：同一 user 注册 → 踢旧 A。A 先收到应用层 kicked 文本帧（先于
+    // Close：代理链可能吞 Close 码，文本帧先行让前端置位防重连）。
     let (_ws_b, _) = tokio_tungstenite::connect_async(url(&token))
         .await
         .expect("B 应能建立 WS");
+
+    let kicked = tokio::time::timeout(Duration::from_secs(5), ws_a.next())
+        .await
+        .expect("A 应在 5s 内收到踢旧通知")
+        .expect("A 流未关闭")
+        .expect("A 帧非错误");
+    match kicked {
+        Message::Text(t) => {
+            let v: Value = serde_json::from_str(&t).expect("kicked 帧应为合法 JSON");
+            assert_eq!(
+                v["type"], "kicked",
+                "应用层踢旧帧 type 必须为 kicked，实际: {v}"
+            );
+            assert_eq!(
+                v["data"]["reason"], "replaced_by_new_connection",
+                "kicked 帧必须携带替换原因（与 Close 帧语义一致）"
+            );
+        }
+        other => panic!("A 应先收到应用层 kicked 文本帧，实际: {other:?}"),
+    }
 
     let closed = tokio::time::timeout(Duration::from_secs(5), ws_a.next())
         .await

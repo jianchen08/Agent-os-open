@@ -219,4 +219,70 @@ describe('任务管理 API', () => {
     })
   })
 
+  describe('deleteProject - 删除项目', () => {
+    it('缺省口径：DELETE 不带任何处置参数，返回后端载荷', async () => {
+      const mockResponse = {
+        data: {
+          message: '项目已删除',
+          id: 'project-1',
+          suspended_children: 2,
+          deleted_children: 0,
+          folder_removed: false,
+        },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config: {} as any,
+      }
+      vi.mocked(apiClient.delete).mockResolvedValueOnce(mockResponse)
+
+      const result = await taskApi.deleteProject('project-1')
+
+      expect(result.deleted_children).toBe(0)
+      expect(apiClient.delete).toHaveBeenCalledWith('/ext/task_service/projects/project-1', {
+        params: {},
+      })
+    })
+
+    it('级联口径：deleteChildren/deleteFiles 映射为 query 参数', async () => {
+      const mockResponse = {
+        data: {
+          message: '项目已删除',
+          id: 'project-1',
+          suspended_children: 0,
+          deleted_children: 3,
+          folder_removed: true,
+        },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config: {} as any,
+      }
+      vi.mocked(apiClient.delete).mockResolvedValueOnce(mockResponse)
+
+      const result = await taskApi.deleteProject('project-1', {
+        deleteChildren: true,
+        deleteFiles: true,
+      })
+
+      expect(result.deleted_children).toBe(3)
+      expect(result.folder_removed).toBe(true)
+      expect(apiClient.delete).toHaveBeenCalledWith('/ext/task_service/projects/project-1', {
+        params: { delete_children: 'true', delete_files: 'true' },
+      })
+    })
+
+    it('应该在删除失败时抛出错误（后端文案透传给调用方）', async () => {
+      vi.mocked(apiClient.delete).mockRejectedValueOnce(
+        Object.assign(new Error('x'), {
+          message: '子任务删除失败，项目未删除: child-2',
+        }),
+      )
+
+      await expect(taskApi.deleteProject('project-1')).rejects.toThrow(
+        '子任务删除失败，项目未删除: child-2',
+      )
+    })
+  })
+
 })

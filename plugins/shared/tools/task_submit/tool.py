@@ -1421,9 +1421,11 @@ class TaskSubmitTool(BuiltinTool):
         if parent_fail is not None:
             return parent_fail
 
-        # agent 原始 workspace 入参先留底：项目解析可能注入 workspace（项目文件夹），
-        # 子任务闸门只认原始入参，系统注入值不算显式指定。
+        # agent 原始入参先留底：项目解析可能注入 workspace（项目文件夹）、项目
+        # 归属可能沿父链继承，下游 execution_context 的显式性判定只认原始入参，
+        # 系统注入值不算显式指定。
         explicit_workspace_raw = str(inputs.get("workspace") or "")
+        explicit_project_raw = str(inputs.get("project_id") or "")
         project_id, project_fail = await self._resolve_project_binding(
             inputs,
             parent_task_id,
@@ -1501,6 +1503,10 @@ class TaskSubmitTool(BuiltinTool):
             # 前端任务树据此把子任务挂到项目节点下（项目不是管道，不能当
             # lineage 父）；L1 显式指定与 L2/L3 父链继承同值。
             parent_project_id=project_id,
+            # 工作空间显式性只认原始入参（显式 workspace / 显式挂靠）——
+            # 子任务沿父链继承的项目挂靠不算显式，其落位由出生契约的父链
+            # 工作空间坐标决定（继承直接上级的工作空间）。
+            workspace_explicit=bool(explicit_workspace_raw) or bool(explicit_project_raw),
         )
         if dispatch.get("pipeline_id"):
             task_id = dispatch["pipeline_id"]
@@ -1558,6 +1564,7 @@ class TaskSubmitTool(BuiltinTool):
         inputs: dict[str, Any],
         agent_id: str = "",
         parent_project_id: str = "",
+        workspace_explicit: bool = False,
     ) -> dict[str, Any]:
         """GAP-1 统一：经统一出生协议创建任务执行管道（引擎生成 id = task.id）。
 
@@ -1619,7 +1626,7 @@ class TaskSubmitTool(BuiltinTool):
             kickoff += f"\n任务描述：{description}"
         if acceptance_criteria:
             kickoff += f"\n验收标准：{acceptance_criteria}"
-        execution_context = self._build_execution_context(inputs)
+        execution_context = self._build_execution_context(inputs, workspace_explicit)
         kickoff += _build_evaluation_criteria_prompt(acceptance_criteria)
         kickoff += _build_workspace_guidance(execution_context)
         kickoff += _build_task_progress_method()
@@ -1710,7 +1717,9 @@ class TaskSubmitTool(BuiltinTool):
                 )
         return {"pipeline_id": pipeline_id}
 
-    def _build_execution_context(self, inputs: dict[str, Any]) -> dict[str, Any]:
+    def _build_execution_context(
+        self, inputs: dict[str, Any], workspace_explicit: bool
+    ) -> dict[str, Any]:
         """结构化 execution_context（GAP-1 统一：随派发透传，不写 YAML metadata）。
 
         对齐 0.1 执行语义（task_executor）：任务默认隔离执行——
@@ -1721,13 +1730,19 @@ class TaskSubmitTool(BuiltinTool):
           workspace_lifecycle._bootstrap 的 mode 缺省 plain）。worktree 拓扑
           仅在显式 workspace 或显式 workspace_mode='worktree' 下成立
           （源 = workspace 路径 / 项目根）；显式 workspace 时 mode 缺省 worktree。
+        - explicit = 调用方显式声明（显式 workspace 或显式项目挂靠，L1/面板
+          才可能成立——L2/L3 两者均被闸门拒绝）。子任务沿父链继承的项目挂靠
+          **不算显式**：source_path 仍解析为项目文件夹供工具锚点使用，但落位
+          由出生契约的父链工作空间坐标（lineage.parent_ws_meta）决定——
+          子任务继承直接上级的工作空间（2026-09-03 用户裁定，收窄 2026-08-30
+          「挂靠即显式锚」裁定的适用范围至显式挂靠）。
         """
         _ec: dict[str, Any] = {}
         if inputs.get("workspace"):
             _ec["workspace"] = {
                 "source_path": inputs["workspace"],
                 "mode": inputs.get("workspace_mode") or "worktree",
-                "explicit": True,
+                "explicit": workspace_explicit,
             }
         else:
             _ec["workspace"] = {

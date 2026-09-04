@@ -632,3 +632,112 @@ class TestPluginRuntimeRoute:
         body = _decode_body(resp)
         assert body["rows"] == []
         assert body["lifecycle"] == {"plugin_load_total": 0, "plugin_error_total": 0}
+
+
+# ═══════════════════════════════════════════════════════════
+# Token 用量聚合（按模型 / 按日）
+# ═══════════════════════════════════════════════════════════
+
+
+def _make_llm_traces_db(tmp_path: Path) -> Path:
+    """造含多模型 llm_usage 轨迹的内核 DB（含一条早期无 model 归属的行）。"""
+    db_path = tmp_path / "agentos_kernel.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE traces (trace_id TEXT, run_id TEXT, created_at TEXT,"
+        " plugin_id TEXT, patch_data TEXT)"
+    )
+    usage_rows = [
+        ("tr-1", "2026-09-01T08:00:00+00:00", {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110, "model": "deepseek-v4-flash", "provider": "deepseek"}),
+        ("tr-2", "2026-09-01T09:30:00+00:00", {"input_tokens": 200, "output_tokens": 20, "total_tokens": 220, "model": "deepseek-v4-flash", "provider": "deepseek"}),
+        ("tr-3", "2026-09-02T14:00:00+00:00", {"input_tokens": 50, "output_tokens": 5, "total_tokens": 55, "model": "MiniMax-M3", "provider": "minimax"}),
+        ("tr-4", "2026-08-30T12:00:00+00:00", {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}),
+    ]
+    for tid, ts, usage in usage_rows:
+        conn.execute(
+            "INSERT INTO traces VALUES (?, ?, ?, ?, ?)",
+            (tid, "run-1", ts, "core", json.dumps({"llm_usage": usage})),
+        )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+class TestTokenUsageByModel:
+    def test_groups_by_model_with_icons(self, tmp_path: Path, monkeypatch) -> None:
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        payload = mod._collect_token_usage()
+
+        rows = {r["model"]: r for r in payload["rows"]}
+        assert set(rows) == {"deepseek-v4-flash", "MiniMax-M3", "（未记录模型）"}
+        # 同模型多轮聚合：输入/输出/合计/次数逐列累加
+        assert rows["deepseek-v4-flash"]["input_tokens"] == 300
+        assert rows["deepseek-v4-flash"]["output_tokens"] == 30
+        assert rows["deepseek-v4-flash"]["total_tokens"] == 330
+        assert rows["deepseek-v4-flash"]["requests"] == 2
+        assert rows["MiniMax-M3"]["requests"] == 1
+        # 图标按 provider 前缀映射；无归属回退缺省
+        assert rows["deepseek-v4-flash"]["icon"] == "🐋"
+        assert rows["MiniMax-M3"]["icon"] == "🐚"
+        assert rows["（未记录模型）"]["icon"] == "🔤"
+
+    def test_totals_equal_sum_of_model_rows(self, tmp_path: Path, monkeypatch) -> None:
+        # 性质断言：总量卡口径 = 各模型行之和（同一查询源，不许两套账）
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        payload = mod._collect_token_usage()
+        assert payload["prompt_tokens"] == sum(r["input_tokens"] for r in payload["rows"])
+        assert payload["completion_tokens"] == sum(r["output_tokens"] for r in payload["rows"])
+        assert payload["total_tokens"] == 330 + 55 + 10
+        # 行按合计倒序（最大模型在前）
+        totals = [r["total_tokens"] for r in payload["rows"]]
+        assert totals == sorted(totals, reverse=True)
+
+    def test_db_missing_degrades_to_empty(self, tmp_path: Path, monkeypatch) -> None:
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(tmp_path / "nonexistent.db"))
+        payload = mod._collect_token_usage()
+        assert payload["rows"] == []
+        assert payload["total_tokens"] == 0
+
+    def test_model_icon_prefix_rules(self) -> None:
+        mod = _load_server()
+        # provider 优先、模型名兜底、未命中缺省
+        assert mod._model_icon("glm-5.3-flash", "zhipu_coding") == "🤖"
+        assert mod._model_icon("glm-5.3-flash", "") == "🤖"
+        assert mod._model_icon("some-unknown", "some-unknown") == "🔤"
+
+
+class TestTokenUsageByTime:
+    def test_groups_by_utc_day_desc(self, tmp_path: Path, monkeypatch) -> None:
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        payload = mod._collect_token_usage_by_time()
+
+        days = {r["date"]: r for r in payload["rows"]}
+        assert set(days) == {"2026-09-01", "2026-09-02", "2026-08-30"}
+        assert days["2026-09-01"]["total_tokens"] == 330
+        assert days["2026-09-01"]["requests"] == 2
+        assert days["2026-08-30"]["total_tokens"] == 10
+        # 日期倒序（最近的在前）
+        dates = [r["date"] for r in payload["rows"]]
+        assert dates == sorted(dates, reverse=True)
+        # 总量性质：按日行之和 = 跨运行总量（与按模型口径同源）
+        assert sum(r["total_tokens"] for r in payload["rows"]) == 395
+
+    def test_db_missing_degrades_to_empty(self, tmp_path: Path, monkeypatch) -> None:
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(tmp_path / "nonexistent.db"))
+        payload = mod._collect_token_usage_by_time()
+        assert payload["rows"] == []
+        assert payload["total"] == 0
+
+    def test_route_envelope(self, tmp_path: Path, monkeypatch) -> None:
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        resp = _run(mod.http_handle(path="/ext/monitoring/token-usage/by-time", method="GET"))
+        assert resp["success"] is True
+        body = _decode_body(resp)
+        assert body["columns"][0]["key"] == "date"
+        assert len(body["rows"]) == 3

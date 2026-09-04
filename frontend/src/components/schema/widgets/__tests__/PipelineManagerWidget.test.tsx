@@ -25,6 +25,7 @@ vi.mock('@/services/api/tasks', () => ({
   pauseTask: vi.fn(),
   resumeTask: vi.fn(),
   cancelTask: vi.fn(),
+  deleteProject: seed.mockDeleteProject,
   fetchProjects: seed.mockFetchProjects,
 }))
 vi.mock('@/services/api/client', () => ({
@@ -188,11 +189,65 @@ const seed = vi.hoisted(() => {
       },
     },
   }
+  /** 会话主管道缺席场景：主管道 run 被快照过滤后条目集里没有会话根，
+   *  threadTop 回退线程组最早任务条目。契约：树与列表同源同量，建树环节
+   *  不得丢条目（此前最早任务自挂自身，整族从树里静默消失） */
+  const ORPHAN_THREAD_RUNS: Record<string, unknown> = {
+    ghost: {
+      pipeline_id: 'ghost13009006',
+      run_id: 'run-ghost',
+      thread_id: 'th-ghost',
+      status: 'cancelled',
+      started_at: '2026-08-22T00:05:00Z',
+      ended_at: '2026-08-22T00:05:15Z',
+    },
+  }
+  const ORPHAN_THREAD_TASKS: Record<string, unknown>[] = [
+    {
+      id: 't-meteor',
+      title: '陨石躲避',
+      status: 'running',
+      pipeline_run_id: 'pipe-meteor',
+      threadId: 'th-godot',
+      timestamps: { createdAt: '2026-08-22T00:00:00Z' },
+    },
+    {
+      id: 't-tool',
+      title: '工具链自检',
+      status: 'running',
+      pipeline_run_id: 'pipe-tool',
+      threadId: 'th-godot',
+      timestamps: { createdAt: '2026-08-22T00:01:00Z' },
+    },
+    {
+      id: 't-eval',
+      title: '评估子任务',
+      status: 'running',
+      pipeline_run_id: 'pipe-eval',
+      parent_task_id: 't-tool',
+    },
+    {
+      id: 't-mcp',
+      title: '通道实测',
+      status: 'running',
+      pipeline_run_id: 'pipe-mcp',
+    },
+  ]
   const mockUseAllTasksQuery = vi.fn(() => ({ data: FAKE_ALL_TASKS }))
   const mockUsePipelineRunsQuery = vi.fn(() => ({ data: FAKE_RUNS }))
   const mockUsePipelineStatesQuery = vi.fn(() => ({ data: FAKE_STATES }))
   /** 项目登记行（默认空——项目分组用例自行覆写） */
   const mockFetchProjects = vi.fn(() => Promise.resolve({ items: [] as unknown[] }))
+  /** 项目删除端点（默认成功信封——删除用例自行覆写） */
+  const mockDeleteProject = vi.fn(() =>
+    Promise.resolve({
+      message: '项目已删除',
+      id: 'proj-x',
+      suspended_children: 0,
+      deleted_children: 0,
+      folder_removed: false,
+    }),
+  )
   /** 项目文件夹打开端点（workspaces open，默认成功信封） */
   const mockWorkspaceOpen = vi.fn(() => Promise.resolve({ data: { success: true } }))
   /** 会话缓存读数与 ensureSessionsLoaded（S1 阻断用例需按用例覆写） */
@@ -202,6 +257,7 @@ const seed = vi.hoisted(() => {
     mockReadSessions,
     mockEnsureSessionsLoaded,
     mockFetchProjects,
+    mockDeleteProject,
     mockWorkspaceOpen,
     FAKE_RUNS,
     FAKE_STATES,
@@ -212,6 +268,8 @@ const seed = vi.hoisted(() => {
     SESSION_MAIN_TASKS,
     DECOUPLE_TASKS,
     DECOUPLE_STATES,
+    ORPHAN_THREAD_RUNS,
+    ORPHAN_THREAD_TASKS,
     mockUseAllTasksQuery,
     mockUsePipelineRunsQuery,
     mockUsePipelineStatesQuery,
@@ -361,6 +419,28 @@ describe('PipelineManagerWidget', () => {
     expect(subtaskRow).toBeDefined()
     const padding = subtaskRow?.closest('div')?.getAttribute('style') ?? ''
     expect(padding).toMatch(/padding-left:\s*2[48]px/)
+  })
+
+  it('会话主管道缺席时线程组任务不自挂丢行（树与列表同量）', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: seed.ORPHAN_THREAD_RUNS })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: seed.ORPHAN_THREAD_TASKS })
+    renderWithProviders(<PipelineManagerWidget />)
+    // 顶层即可见：线程组最早任务（threadTop 回退目标）、无线程任务、孤儿会话
+    expect((await screen.findAllByText('陨石躲避')).length).toBe(1)
+    expect(screen.getAllByText('通道实测').length).toBe(1)
+    expect(screen.getAllByText('会话 th-ghost').length).toBe(1)
+    // 展开最早任务行：同线程兄弟全部在树中（此前整族消失）
+    const chevron = screen.getAllByText('陨石躲避')[0].closest('div')?.querySelector('button')
+    fireEvent.click(chevron!)
+    expect((await screen.findAllByText('工具链自检')).length).toBe(1)
+    // 同线程兄弟挂 threadTop（depth 1 = 24px）
+    const toolRow = screen.getAllByText('工具链自检')[0].closest('div')
+    expect(toolRow?.getAttribute('style')).toMatch(/padding-left:\s*24px/)
+    // 树逐层点击展开：再展开兄弟行，parent_task_id 孙级在树中（depth 2 = 40px）
+    const toolChevron = toolRow?.querySelector('button')
+    fireEvent.click(toolChevron!)
+    const evalRow = (await screen.findAllByText('评估子任务'))[0].closest('div')
+    expect(evalRow?.getAttribute('style')).toMatch(/padding-left:\s*40px/)
   })
 
   it('挂会话主管道下的非任务子管道仍渲染（防回归）', async () => {
@@ -735,5 +815,189 @@ describe('PipelineManagerWidget', () => {
         '/ext/workspace_service/workspaces/proj-list/open',
       )
     })
+  })
+
+  it('项目行渲染删除按钮：默认口径确认调删除端点（子任务挂起保留）', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockFetchProjects.mockResolvedValue({
+      items: [
+        { id: 'proj-del', goal: '待删项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
+      ],
+    })
+    seed.mockDeleteProject.mockResolvedValueOnce({
+      message: '项目已删除',
+      id: 'proj-del',
+      suspended_children: 2,
+      deleted_children: 0,
+      folder_removed: false,
+    })
+    const addNotification = vi
+      .spyOn(useNotificationStore.getState(), 'addNotification')
+      .mockImplementation(() => {})
+
+    renderWithProviders(<PipelineManagerWidget />)
+    await screen.findByText('待删项目')
+
+    // 点击行上删除按钮 → 打开确认弹窗（不是直接删）
+    fireEvent.click(screen.getByLabelText('删除项目'))
+    expect(await screen.findByText(/请选择名下子任务的处置方式/)).toBeTruthy()
+    expect(seed.mockDeleteProject).not.toHaveBeenCalled()
+
+    // 默认口径（仅删项目）直接确认：不带级联/删文件夹参数
+    fireEvent.click(screen.getByRole('button', { name: /确认删除/ }))
+    await waitFor(() => {
+      expect(seed.mockDeleteProject).toHaveBeenCalledWith('proj-del', {
+        deleteChildren: false,
+        deleteFiles: false,
+      })
+    })
+    await waitFor(() => {
+      expect(addNotification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: '项目已删除',
+          message: '项目「待删项目」已删除，名下子任务已挂起保留',
+        }),
+      )
+    })
+    addNotification.mockRestore()
+  })
+
+  it('删除弹窗选级联口径+删文件夹：deleteProject 收到双 true，通知报级联数', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockFetchProjects.mockResolvedValue({
+      items: [
+        { id: 'proj-cas', goal: '级联项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
+      ],
+    })
+    seed.mockDeleteProject.mockResolvedValueOnce({
+      message: '项目已删除',
+      id: 'proj-cas',
+      suspended_children: 0,
+      deleted_children: 3,
+      folder_removed: true,
+    })
+    const addNotification = vi
+      .spyOn(useNotificationStore.getState(), 'addNotification')
+      .mockImplementation(() => {})
+
+    renderWithProviders(<PipelineManagerWidget />)
+    await screen.findByText('级联项目')
+    fireEvent.click(screen.getByLabelText('删除项目'))
+    await screen.findByText(/请选择名下子任务的处置方式/)
+
+    fireEvent.click(screen.getByLabelText('连同子任务一起删除（不可恢复）'))
+    fireEvent.click(screen.getByLabelText('同时删除项目文件夹（不可恢复）'))
+    fireEvent.click(screen.getByRole('button', { name: /确认删除/ }))
+
+    await waitFor(() => {
+      expect(seed.mockDeleteProject).toHaveBeenCalledWith('proj-cas', {
+        deleteChildren: true,
+        deleteFiles: true,
+      })
+    })
+    await waitFor(() => {
+      expect(addNotification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: '项目已删除',
+          message: '项目「级联项目」已删除，连同 3 个子任务',
+        }),
+      )
+    })
+    addNotification.mockRestore()
+  })
+
+  it('删除失败（后端报子任务删除失败）：失败通知携带后端 message，弹窗不关', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockFetchProjects.mockResolvedValue({
+      items: [
+        { id: 'proj-fail', goal: '失败项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
+      ],
+    })
+    seed.mockDeleteProject.mockRejectedValueOnce(
+      Object.assign(new Error('x'), {
+        message: '子任务删除失败，项目未删除: child-2',
+      }),
+    )
+    const addNotification = vi
+      .spyOn(useNotificationStore.getState(), 'addNotification')
+      .mockImplementation(() => {})
+
+    renderWithProviders(<PipelineManagerWidget />)
+    await screen.findByText('失败项目')
+    fireEvent.click(screen.getByLabelText('删除项目'))
+    fireEvent.click(await screen.findByRole('button', { name: /确认删除/ }))
+
+    await waitFor(() => {
+      expect(addNotification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: '删除项目失败',
+          message: '子任务删除失败，项目未删除: child-2',
+        }),
+      )
+    })
+    // 失败后弹窗保持打开（用户可换口径重试或取消）
+    expect(screen.getByRole('button', { name: /确认删除/ })).toBeInTheDocument()
+    addNotification.mockRestore()
+  })
+
+  it('列表视图同款：项目行删除按钮打开同一确认弹窗', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockFetchProjects.mockResolvedValue({
+      items: [
+        { id: 'proj-list-del', goal: '列表删除项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
+      ],
+    })
+
+    renderWithProviders(<PipelineManagerWidget />)
+    await screen.findByText('列表删除项目')
+    fireEvent.click(screen.getByTitle('列表视图'))
+
+    fireEvent.click((await screen.findAllByLabelText('删除项目'))[0])
+    expect(await screen.findByText(/请选择名下子任务的处置方式/)).toBeTruthy()
+  })
+
+  it('state 独有条目读内核实际状态 run_status：轮中不按上轮 ended 误报已结束', async () => {
+    // 回归场景（2026-09-03 双状态裁定）：runs 不可见的管道仅存在于 state 摘要，
+    // 上一轮终态残留（ended=true）+ 本轮进行中（内核 run_status=running）——
+    // 状态必须落「运行中」（实际状态优先），不得按预期层残留键误报「已完成」。
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({
+      data: {
+        ghostPipe: {
+          pipeline_id: 'ghostPipe',
+          thread_id: 'th-ghost',
+          source: 'memory',
+          state: { run_status: 'running', ended: true, current_phase: 'exit' },
+        },
+      },
+    })
+    renderWithProviders(<PipelineManagerWidget />)
+    expect((await screen.findAllByTitle(/运行状态：运行中/)).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('state 独有条目无 run_status（旧 checkpoint 数据）回退 ended 推断', async () => {
+    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+    seed.mockUsePipelineStatesQuery.mockReturnValue({
+      data: {
+        coldPipe: {
+          pipeline_id: 'coldPipe',
+          thread_id: 'th-cold',
+          source: 'checkpoint',
+          state: { ended: true },
+        },
+      },
+    })
+    renderWithProviders(<PipelineManagerWidget />)
+    expect((await screen.findAllByTitle(/运行状态：已完成/)).length).toBeGreaterThanOrEqual(1)
   })
 })

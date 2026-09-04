@@ -485,6 +485,143 @@ class TestCompleteStream:
     # ── 取消轮询：run suspended → interrupted 半截返回 ──────────────
 
 
+class TestModelDefaultParamsFill:
+    """llm.complete_stream 服务侧参数回填（单一真值 = llm.yaml 模型条目）。
+
+    契约（2026-09-03 用户裁定）：调用方（llm_core/压缩等）只需给模型名；
+    未显式传的参数由本服务按模型条目 default_params 补齐；显式传参恒优先；
+    模型条目未配置的键不发——不发明 0.7/4096 之类的兜底值，上游按模型
+    自身默认运行。
+    """
+
+    def _set_models(self, monkeypatch: Any, models: dict[str, Any]) -> None:
+        """把伪 llm.yaml models 段注入 _config_models（monkeypatch 自动还原）。"""
+        import _config_models
+
+        monkeypatch.setattr(
+            _config_models, "_config", {"llm": {"models": models}}
+        )
+
+    def _run_call(
+        self,
+        mod: Any,
+        *,
+        model: str,
+        call_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """调用 llm_complete_stream 并返回 RecordingAdapter 捕获的完成参数。"""
+
+        class _RecordingAdapter(FakeAdapter):
+            captured: dict[str, Any] = {}
+
+            async def completion(self, **kwargs: Any) -> Any:
+                self.captured = dict(kwargs)
+                return await super().completion(**kwargs)
+
+        rec = _RecordingAdapter(chunks=[_text("ok")], text="ok")
+        _inject(mod, "event-bus", FakeBus())
+        mod._adapter = rec
+        result = _run(
+            mod.llm_complete_stream(
+                model=model,
+                messages=[{"role": "user", "content": "hi"}],
+                **call_kwargs,
+            )
+        )
+        assert result["status"] == "streamed"
+        return rec.captured
+
+    @pytest.mark.parametrize(
+        ("model_id", "default_params"),
+        [
+            (
+                "fill-model-a",
+                {
+                    "temperature": 0.3,
+                    "max_tokens": 555,
+                    "thinking": {"type": "enabled"},
+                },
+            ),
+            ("fill-model-b", {"temperature": 1.2, "max_tokens": 77, "top_p": 0.5}),
+            ("fill-model-c", {"temperature": 0.5}),
+        ],
+        ids=["full-params", "with-top-p", "temperature-only"],
+    )
+    def test_omitted_params_filled_from_model_entry(
+        self,
+        monkeypatch: Any,
+        model_id: str,
+        default_params: dict[str, Any],
+    ) -> None:
+        """调用方未传的参数按模型条目 default_params 逐键补齐。
+
+        fill-model-c 只有 temperature——max_tokens 必须缺席而非回退 4096
+        （不发明模型条目未配置的值）。
+        """
+        mod = _load_server()
+        self._set_models(
+            monkeypatch,
+            {model_id: {"provider": "p", "model_name": "m", "default_params": default_params}},
+        )
+        captured = self._run_call(mod, model=model_id, call_kwargs={})
+        for key, value in default_params.items():
+            assert captured.get(key) == value
+        # 性质：temperature/max_tokens 只在模型条目写了时才出现在请求里
+        for key in ("temperature", "max_tokens"):
+            if key not in default_params:
+                assert key not in captured
+
+    def test_explicit_params_override_model_entry(self, monkeypatch: Any) -> None:
+        """调用方显式传参恒优先；未显式传的键仍按模型条目回填。"""
+        mod = _load_server()
+        self._set_models(
+            monkeypatch,
+            {
+                "fill-model-x": {
+                    "provider": "p",
+                    "model_name": "m",
+                    "default_params": {
+                        "temperature": 0.3,
+                        "max_tokens": 555,
+                        "thinking": {"type": "enabled"},
+                    },
+                }
+            },
+        )
+        captured = self._run_call(
+            mod,
+            model="fill-model-x",
+            call_kwargs={"temperature": 0.9, "max_tokens": 123},
+        )
+        assert captured["temperature"] == 0.9
+        assert captured["max_tokens"] == 123
+        assert captured["thinking"] == {"type": "enabled"}
+
+    @pytest.mark.parametrize(
+        "models",
+        [
+            {"fill-model-naked": {"provider": "p", "model_name": "m"}},
+            {},
+        ],
+        ids=["entry-without-default-params", "unknown-model"],
+    )
+    def test_no_default_params_sends_no_sampling_args(
+        self, monkeypatch: Any, models: dict[str, Any]
+    ) -> None:
+        """模型条目缺 default_params 或模型未知 → 不发任何采样参数。
+
+        此前函数签名默认 temperature=0.7/max_tokens=4096 恒发送——调用方
+        （如压缩）的请求参数与 llm.yaml 模型配置脱钩且不可辨识来源。
+        """
+        mod = _load_server()
+        self._set_models(monkeypatch, models)
+        captured = self._run_call(
+            mod, model="fill-model-naked", call_kwargs={}
+        )
+        assert "temperature" not in captured
+        assert "max_tokens" not in captured
+
+
 class _FakeRunStatus:
     """伪 pipeline-executor 能力句柄：get_run_status 按预设序列返回。"""
 

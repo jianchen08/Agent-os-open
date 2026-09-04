@@ -105,33 +105,38 @@ describe('配置管理 API（LLM 配置域）', () => {
   })
 
   describe('模型 CRUD', () => {
-    it('addModel POST 模型配置', async () => {
+    it('addModel POST 模型配置，返回全量 models + added_ids', async () => {
       const config = { provider: 'openai', model_name: 'gpt-4o', display_name: 'GPT-4o' }
-      vi.mocked(apiClient.post).mockResolvedValueOnce(okResponse({ gpt4o: config }))
+      vi.mocked(apiClient.post).mockResolvedValueOnce(
+        okResponse({ models: { gpt4o: config }, added_ids: ['gpt4o'] }),
+      )
 
       const result = await configApi.addModel('gpt4o', config)
 
-      expect(result.gpt4o).toEqual(config)
+      expect(result.added_ids).toEqual(['gpt4o'])
+      expect(result.models.gpt4o).toEqual(config)
       expect(apiClient.post).toHaveBeenCalledWith('/ext/llm_service/config/llm/models', {
         models: { gpt4o: config },
       })
     })
 
-    it('updateModel PUT 到模型子路径', async () => {
-      vi.mocked(apiClient.put).mockResolvedValueOnce(okResponse({}))
+    it('updateModel PUT 到模型子路径，解包 models', async () => {
+      vi.mocked(apiClient.put).mockResolvedValueOnce(okResponse({ models: { gpt4o: {} } }))
 
-      await configApi.updateModel('gpt4o', { display_name: 'GPT-4o 新' })
+      const result = await configApi.updateModel('gpt4o', { display_name: 'GPT-4o 新' })
 
+      expect(result).toEqual({ gpt4o: {} })
       expect(apiClient.put).toHaveBeenCalledWith('/ext/llm_service/config/llm/models/gpt4o', {
         config: { display_name: 'GPT-4o 新' },
       })
     })
 
-    it('deleteModel DELETE 到模型子路径', async () => {
-      vi.mocked(apiClient.delete).mockResolvedValueOnce(okResponse({}))
+    it('deleteModel DELETE 到模型子路径，解包 models', async () => {
+      vi.mocked(apiClient.delete).mockResolvedValueOnce(okResponse({ models: {} }))
 
-      await configApi.deleteModel('gpt4o')
+      const result = await configApi.deleteModel('gpt4o')
 
+      expect(result).toEqual({})
       expect(apiClient.delete).toHaveBeenCalledWith('/ext/llm_service/config/llm/models/gpt4o')
     })
   })

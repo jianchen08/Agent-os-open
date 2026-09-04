@@ -299,6 +299,14 @@ impl PipelineExecutor {
 
         // ADR ②③：一轮结束时落完整 assistant 消息 + 更新 run 状态。
         // 流式期间只更新内存 state，此处 stream_end 一次性原子落库。
+        // 实际状态内核持有（2026-09-03 双状态裁定）：预期层控制键
+        // （suspended/ended/router.stop_reason）经终态映射单点折算成 run_status
+        // 写回 state——checkpoint / registry 快照 / runs 表三处同词汇同源，
+        // 可观测性只读这一个字段。
+        let terminal = agentos_core::types::RunStatus::from_control_state(&state);
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("run_status".into(), serde_json::json!(terminal));
+        }
         self.persist_run_end(&state).await;
 
         // on_pipeline_end 钩子分发（spill_guard 原文清理等）：run 结束后逐个
@@ -1314,6 +1322,13 @@ impl PipelineExecutor {
                 } else {
                     warn!("messages 更新未携带 _ops（全量数组已退役，零兼容），该更新被忽略");
                 }
+                continue;
+            }
+            if k == "run_status" {
+                // 实际状态内核持有（2026-09-03 双状态裁定）：插件表达意图走预期层
+                // 控制键（ended/suspended/router.stop_reason），折算成 run_status 是
+                // 引擎收尾单点的职责——插件直写一律丢弃，防实际状态被伪造。
+                warn!(key = %k, "插件试图写内核持有的 run_status，该更新被忽略");
                 continue;
             }
             set_key(state, k, v.clone());

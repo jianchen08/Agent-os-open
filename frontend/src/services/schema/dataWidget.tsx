@@ -159,6 +159,13 @@ export function normalizeDataPayload(payload: unknown, shape: DataShape): unknow
 
 // ── hook ───────────────────────────────────────────────────
 
+/**
+ * uri → 最近一次成功载荷（模块级缓存）。数据在挂载时获取的组件（槽位轮询
+ * 递增 key、切标签重建宿主）每次重挂载都会重放"拉取中→空窗"：先渲上次
+ * 成功载荷再静默刷新，重挂载不再闪空。
+ */
+const lastPayloadByUri = new Map<string, unknown>()
+
 /** 声明 WS 推送源（A1c）：refresh:{type:'ws', channel} */
 export interface WsRefreshConfig {
   type: 'ws'
@@ -190,11 +197,14 @@ export function useDataWidget(
   const uri = props.datasourceUri as string | undefined
   const staticData = props.data ?? props.value
   const ws = parseWsRefresh(props)
-  const [state, setState] = useState<DataWidgetResult>({
-    data: staticData,
+  const [state, setState] = useState<DataWidgetResult>(() => ({
+    data:
+      uri && lastPayloadByUri.has(uri)
+        ? normalizeDataPayload(lastPayloadByUri.get(uri), shape)
+        : staticData,
     loading: false,
     error: null,
-  })
+  }))
 
   useEffect(() => {
     // WS 事件驱动（A1c）：事件即数据，shape 归一后更新，不走 loading
@@ -225,6 +235,7 @@ export function useDataWidget(
     fetchDatasourcePayload(uri)
       .then((payload) => {
         if (!cancelled) {
+          lastPayloadByUri.set(uri, payload)
           setState({ data: normalizeDataPayload(payload, shape), loading: false, error: null })
         }
       })

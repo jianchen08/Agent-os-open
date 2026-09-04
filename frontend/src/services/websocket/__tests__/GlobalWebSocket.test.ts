@@ -410,6 +410,33 @@ describe('GlobalWebSocketService', () => {
       expect(service.wasKickedByReplacement()).toBe(false)
     })
 
+    it('收到应用层 kicked 帧应置位防重连（Close 码被代理退化为 1006 也不重连）', async () => {
+      const { service, connect, getLatestWs } = await createService()
+      const onKicked = vi.fn()
+      service.subscribe('kicked_by_replacement', onKicked)
+
+      connect('test-token')
+      vi.advanceTimersByTime(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      // 内核踢旧两段式：kicked 文本帧先到（先于 Close 帧）
+      ws.onmessage?.({
+        data: JSON.stringify({ type: 'kicked', data: { reason: 'replaced_by_new_connection' } }),
+      })
+      // Close 帧状态码被代理链退化：浏览器端只见 1006
+      simulateClose(ws, 1006, '')
+
+      expect(service.wasKickedByReplacement()).toBe(true)
+      expect(onKicked).toHaveBeenCalledTimes(1)
+      // 自动路径（visibilitychange/router token 变化）再调 connect 必须拦截，
+      // 否则 A/B 双客户端互踢循环（2026-09-04 实测互踢风暴）
+      const instancesBefore = instances.length
+      connect('test-token')
+      expect(instances.length).toBe(instancesBefore)
+      service.disconnect()
+    })
+
     it('完整流程: disconnected → connecting → connected → reconnecting → connected', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 

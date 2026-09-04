@@ -1,0 +1,16 @@
+# 成本控制配置（cost_control 插件 config_files[cost] 的真值）。
+# 单一真值裁定（2026-09-02）：引用形态条目的值存本文件，manifest fields 只留表单 schema。
+enabled: true
+global_config:
+  daily_token_limit: 1000000
+  monthly_token_limit: 30000000
+  per_task_token_limit: 200000
+  per_session_token_limit: 500000
+alerts:
+  warning_threshold: 70
+  critical_threshold: 90
+  exhausted_threshold: 100
+protection:
+  auto_save_at_warning: true
+  auto_pause_at_critical: true
+  auto_stop_at_exhausted: true

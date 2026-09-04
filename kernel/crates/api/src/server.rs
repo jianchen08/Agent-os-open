@@ -816,6 +816,13 @@ async fn process_via_engine_inner(
     )
     .await;
 
+    // 2a. 实际状态轮中可见（2026-09-03 双状态裁定）：上一轮 final_state 若滞留
+    //     registry，轮中可观测性（/pipelines/state）会读到陈旧终态——「显示已
+    //     结束但还在输出」。dispatch 在引擎执行前用带 run_status=running 的
+    //     initial_state 覆写 registry（热路径本就自 registry 恢复，内容等价、
+    //     控制键已刷新）。条目不存在（管道首轮）跳过——stage_finalize 收尾补建。
+    stage_refresh_registry_snapshot(&tenant_id, effective_pipeline_id, &initial_state);
+
     // 2/2b. agent 配置加载与工具面注入均归插件域：context_build 按 state 持久键
     //    agent.id 加载 agent yaml 并写 state.tool_ids，tool_schema 插件经内核
     //    tool-surface capability 取过滤后 schema（prepare 链每轮刷新）。
@@ -981,6 +988,11 @@ async fn stage_build_initial_state(
         "core_plugin": DEFAULT_CORE_PLUGIN,
         "ended": false,
         "suspended": false,
+        // 实际状态（内核持有，2026-09-03 双状态裁定）：run 生命周期唯一真值，
+        // 起点恒为 running；收束由引擎经终态映射单点改写。插件对该键的写入在
+        // merge 处拦截、overlay 写入被保留字拦截，恢复合并经 VOLATILE_RUN_KEYS
+        // 剥离——上轮终态不会复活成本轮起点。
+        "run_status": "running",
         // run_id：本轮 run 的轮询定位锚（批次 C 注入，llm_core 取消轮询经
         // pipeline-executor.get_run_status 查询它；跨轮被下一轮覆盖，属 per-run 键）。
         "run_id": run_id,
@@ -1155,6 +1167,7 @@ mod merge_recovered_scalars_tests {
             "run_id": "new-run",
             "suspended": false,
             "ended": false,
+            "run_status": "running",
             "core_type": "llm_call",
             "core_plugin": "pipeline_llm_core",
         });
@@ -1167,6 +1180,7 @@ mod merge_recovered_scalars_tests {
             "core_plugin": "pipeline_tool_core",
             "suspended": true,
             "ended": true,
+            "run_status": "completed",
             "run_id": "old-run",
         });
         merge_recovered_scalars(&mut initial, &source);
@@ -1180,9 +1194,10 @@ mod merge_recovered_scalars_tests {
         );
         assert_eq!(initial["core_type"], "llm_call");
         assert_eq!(initial["core_plugin"], "pipeline_llm_core");
-        // 终止标志与新 run_id 保持本轮初始值
+        // 终止标志、实际状态与新 run_id 保持本轮初始值
         assert_eq!(initial["suspended"], false);
         assert_eq!(initial["ended"], false);
+        assert_eq!(initial["run_status"], "running");
         assert_eq!(initial["run_id"], "new-run");
     }
 
@@ -1194,6 +1209,97 @@ mod merge_recovered_scalars_tests {
         merge_recovered_scalars(&mut initial, &source);
         assert_eq!(initial["task.id"], "t9");
         assert_eq!(initial["track.total_tokens"], 42);
+    }
+}
+
+#[cfg(test)]
+mod stage_refresh_registry_snapshot_tests {
+    use super::*;
+
+    /// 实际状态轮中可见（2026-09-03 双状态裁定）：上一轮 final_state（ended=true
+    /// / 上轮阶段）滞留 registry 时，dispatch 启动前刷新为带 run_status=running
+    /// 的本轮 initial——轮中可观测性不得读到陈旧终态（「显示已结束但还在输出」
+    /// 的显示侧根因）。
+    #[test]
+    fn overwrites_stale_terminal_snapshot_before_run() {
+        let reg = agentos_session::pipeline_state_registry::global_registry();
+        let tenant = "tenant_refresh_test";
+        let pid = "pipe_refresh_test";
+        let stale = serde_json::json!({
+            "run_status": "completed",
+            "ended": true,
+            "current_phase": "exit",
+            "messages": [{"role": "assistant", "content": "old"}],
+        });
+        if reg.contains(tenant, pid) {
+            reg.update_state(tenant, pid, stale);
+        } else {
+            reg.get_or_init(tenant, pid, "thread_refresh_test", "agentos", stale);
+        }
+
+        let fresh = serde_json::json!({
+            "run_status": "running",
+            "ended": false,
+            "message": "新消息",
+            "messages": [{"role": "user", "content": "新消息"}],
+        });
+        stage_refresh_registry_snapshot(tenant, pid, &fresh);
+
+        let entry = reg.get(tenant, pid).expect("registry 条目存在");
+        let e = entry.read();
+        assert_eq!(e.state["run_status"], "running");
+        assert_eq!(e.state["ended"], false);
+        assert!(
+            e.state.get("current_phase").is_none(),
+            "上轮阶段残留不得跨轮滞留快照"
+        );
+        assert_eq!(
+            e.state["messages"],
+            serde_json::json!([{"role": "user", "content": "新消息"}]),
+            "快照整体覆写为本轮 initial（热路径本就自 registry 恢复）"
+        );
+    }
+
+    /// 条目不存在的管道（首轮/重启后首跑）：刷新为 no-op，不创建条目——
+    /// 收尾 stage_finalize 的 get_or_init 负责补建。
+    #[test]
+    fn missing_entry_is_noop() {
+        let reg = agentos_session::pipeline_state_registry::global_registry();
+        let tenant = "tenant_refresh_absent";
+        let pid = "pipe_refresh_absent";
+        stage_refresh_registry_snapshot(tenant, pid, &serde_json::json!({"run_status": "running"}));
+        assert!(!reg.contains(tenant, pid), "不得为不存在的条目抢先建项");
+    }
+}
+
+#[cfg(test)]
+mod apply_state_overlay_tests {
+    use super::*;
+
+    /// 实际状态内核持有（2026-09-03 双状态裁定）：overlay（chat.send_message
+    /// state 参数）命中保留字 run_status 一律跳过——实际状态只出自引擎折算。
+    #[test]
+    fn overlay_cannot_write_kernel_held_run_status() {
+        let mut initial = serde_json::json!({"run_status": "running", "pipeline_id": "p1"});
+        let overlay = serde_json::json!({
+            "run_status": "failed",
+            "task.goal": "合法注入",
+        });
+        apply_state_overlay(&mut initial, &overlay);
+        assert_eq!(initial["run_status"], "running", "保留字拦截 overlay 直写");
+        assert_eq!(initial["task.goal"], "合法注入", "非保留键照常并入");
+    }
+}
+
+/// 阶段 2a：run 启动前刷新 registry 快照（实际状态轮中可见）。
+fn stage_refresh_registry_snapshot(
+    tenant_id: &str,
+    effective_pipeline_id: &str,
+    initial_state: &serde_json::Value,
+) {
+    let reg = agentos_session::pipeline_state_registry::global_registry();
+    if reg.contains(tenant_id, effective_pipeline_id) {
+        reg.update_state(tenant_id, effective_pipeline_id, initial_state.clone());
     }
 }
 

@@ -251,7 +251,17 @@ impl MetricSeries {
             if let Some(agg) = self.tier1.remove(&ts) {
                 let t2_start = Self::bucket_start(ts, TIER2_BUCKET);
                 let t2 = self.tier2.entry(t2_start).or_default();
-                t2.merge(&agg);
+                match self.metric_type {
+                    MetricType::Counter => {
+                        // counter：t1 桶 last 是该 1s 窗口的增量，跨桶合并必须累加
+                        // （t2.last = 10s 桶总增量）；覆盖语义会把同桶其余 9 秒的
+                        // 事件丢掉，窗口求和恒被低估。
+                        t2.sum += agg.sum;
+                        t2.count += agg.count;
+                        t2.last += agg.last;
+                    }
+                    _ => t2.merge(&agg),
+                }
             }
         }
     }
@@ -755,6 +765,36 @@ mod tests {
         assert!(
             views.is_empty() || views[0].samples.is_empty(),
             "beyond 2h samples should be evicted"
+        );
+    }
+
+    #[test]
+    fn test_rollup_counter_accumulates_across_tier1_buckets() {
+        // counter 跨 1s 桶合并到同一 10s 桶必须累加（每桶值是窗口增量）；
+        // 覆盖语义会只留最后一秒的增量，窗口求和被低估（插件报错计数恒偏小的根因）。
+        let agg = MetricsAggregator::new();
+        let lbl = labels(&[]);
+        // 同一 10s 桶（1000..1009）内三个 1s 桶分别增量 5/3/2 → 桶总值 10
+        for (ts, delta) in [(1000, 5.0), (1005, 3.0), (1008, 2.0)] {
+            agg.record_at(
+                ts,
+                "p1",
+                "errors",
+                MetricType::Counter,
+                delta,
+                &lbl,
+                None,
+                None,
+            );
+        }
+        let now = 1000 + TIER1_WINDOW.as_secs() as i64 + 60;
+        agg.rollup_at(now);
+        let views = agg.query_at(now, Some("p1"), Some("errors"), None, &labels(&[]));
+        assert_eq!(views.len(), 1);
+        let total: f64 = views[0].samples.iter().map(|s| s.value).sum();
+        assert!(
+            (total - 10.0).abs() < f64::EPSILON,
+            "counter 跨桶累加后窗口总量应为 10，实际 {total}"
         );
     }
 

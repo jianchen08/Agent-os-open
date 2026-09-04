@@ -15,6 +15,7 @@
 import { screen, waitFor, fireEvent, within } from '@testing-library/react'
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { toast } from '@/components/ui/sonner'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { LlmSettingsPage } from '../LlmSettingsPage'
 
@@ -63,15 +64,29 @@ vi.mock('@/components/ui/sonner', () => ({
   },
 }))
 
-vi.mock('@/components/ui/select', () => ({
-  Select: ({ children }: any) => <div>{children}</div>,
-  SelectTrigger: ({ children }: any) => <div>{children}</div>,
-  SelectValue: ({ placeholder }: any) => <span>{placeholder}</span>,
-  SelectContent: ({ children }: any) => <div>{children}</div>,
-  SelectGroup: ({ children }: any) => <div>{children}</div>,
-  SelectLabel: ({ children }: any) => <div>{children}</div>,
-  SelectItem: ({ children }: any) => <div>{children}</div>,
-}))
+vi.mock('@/components/ui/select', async () => {
+  const { createContext, useContext } = await import('react')
+  // 最小上下文：SelectItem 点击回传 onValueChange，驱动真实选择逻辑
+  const SelectCtx = createContext<{ onValueChange?: (v: string) => void }>({})
+  return {
+    Select: ({ children, onValueChange }: any) => (
+      <SelectCtx.Provider value={{ onValueChange }}>{children}</SelectCtx.Provider>
+    ),
+    SelectTrigger: ({ children }: any) => <div>{children}</div>,
+    SelectValue: ({ placeholder }: any) => <span>{placeholder}</span>,
+    SelectContent: ({ children }: any) => <div>{children}</div>,
+    SelectGroup: ({ children }: any) => <div>{children}</div>,
+    SelectLabel: ({ children }: any) => <div>{children}</div>,
+    SelectItem: ({ value, children }: any) => {
+      const { onValueChange: onItemChange } = useContext(SelectCtx)
+      return (
+        <button type="button" onClick={() => onItemChange?.(value)}>
+          {children}
+        </button>
+      )
+    },
+  }
+})
 
 vi.mock('@/components/ui/Modal', () => ({
   Modal: ({ open, children }: any) => (open ? <div role="dialog">{children}</div> : null),
@@ -189,7 +204,10 @@ describe('LlmSettingsPage', () => {
         { id: 'gpt-5.1-mini', owned_by: 'openai' },
       ],
     })
-    mockAddModel.mockResolvedValue({ ...sampleLLMConfig.models })
+    mockAddModel.mockResolvedValue({
+      models: { ...sampleLLMConfig.models },
+      added_ids: ['gpt-5.1-mini', 'gpt-6-preview'],
+    })
 
     // 作用域限定在 openai 卡片内（未配置的提供者也有禁用的「拉取模型」按钮）
     const masked = screen.getByText('Key: sk-1********abcd')
@@ -233,32 +251,33 @@ describe('LlmSettingsPage', () => {
       expect(screen.getByText('默认模型')).toBeInTheDocument()
     })
 
-    // 展开参数面板
+    // 展开参数面板（添加表单也挂了同一编辑器，查询须限定在模型行面板内）
     fireEvent.click(screen.getByRole('button', { name: /参数/ }))
+    const panel = screen.getByRole('button', { name: /参数/ }).closest('div.bg-card') as HTMLElement
 
     // 上下文窗口（样例模型未设置 → 空输入，填入值）
-    const ctxInput = screen.getByPlaceholderText('未设置')
+    const ctxInput = within(panel).getByPlaceholderText('未设置')
     fireEvent.change(ctxInput, { target: { value: '1000000' } })
 
     // 采样参数：temperature 0.5 → 0.9
-    fireEvent.change(screen.getByDisplayValue('0.5'), { target: { value: '0.9' } })
+    fireEvent.change(within(panel).getByDisplayValue('0.5'), { target: { value: '0.9' } })
 
     // think 参数：思考模式/推理力度（原生 select）
-    fireEvent.change(screen.getByLabelText('思考模式'), { target: { value: 'enabled' } })
-    fireEvent.change(screen.getByLabelText('推理力度'), { target: { value: 'high' } })
+    fireEvent.change(within(panel).getByLabelText('思考模式'), { target: { value: 'enabled' } })
+    fireEvent.change(within(panel).getByLabelText('推理力度'), { target: { value: 'high' } })
 
     // 自定义参数：字符串 + 数字（类型自动解析）
-    fireEvent.change(screen.getByLabelText('自定义参数名'), { target: { value: 'service_tier' } })
-    fireEvent.change(screen.getByLabelText('自定义参数值'), { target: { value: 'auto' } })
-    fireEvent.click(screen.getByRole('button', { name: '加入' }))
-    fireEvent.change(screen.getByLabelText('自定义参数名'), { target: { value: 'top_k' } })
-    fireEvent.change(screen.getByLabelText('自定义参数值'), { target: { value: '50' } })
-    fireEvent.keyDown(screen.getByLabelText('自定义参数值'), { key: 'Enter' })
+    fireEvent.change(within(panel).getByLabelText('自定义参数名'), { target: { value: 'service_tier' } })
+    fireEvent.change(within(panel).getByLabelText('自定义参数值'), { target: { value: 'auto' } })
+    fireEvent.click(within(panel).getByRole('button', { name: '加入' }))
+    fireEvent.change(within(panel).getByLabelText('自定义参数名'), { target: { value: 'top_k' } })
+    fireEvent.change(within(panel).getByLabelText('自定义参数值'), { target: { value: '50' } })
+    fireEvent.keyDown(within(panel).getByLabelText('自定义参数值'), { key: 'Enter' })
     // chip 可见（字符串与数字各一条）
     expect(screen.getByText(/service_tier=auto/)).toBeInTheDocument()
     expect(screen.getByText(/top_k=50/)).toBeInTheDocument()
 
-    mockUpdateModel.mockResolvedValue({ ...sampleLLMConfig.models })
+    mockUpdateModel.mockResolvedValue({ models: { ...sampleLLMConfig.models } })
     fireEvent.click(screen.getByRole('button', { name: '保存设置' }))
 
     await waitFor(() => {
@@ -275,6 +294,64 @@ describe('LlmSettingsPage', () => {
           top_k: 50,
         },
       })
+    })
+  })
+
+  it('手动添加模型：模型名称即身份，参数随添加一并提交，自动改名时提示最终 ID', async () => {
+    await renderLoaded()
+    fireEvent.click(screen.getByRole('tab', { name: '模型' }))
+    const addSection = (await waitFor(() =>
+      screen.getByRole('heading', { name: '添加模型' }).closest('section'),
+    )) as HTMLElement
+
+    // 填模型名称 + 选提供商（样例配置已有 deepseek 提供商下的同名模型 →
+    // 后端按 added_ids 回报自动改名结果）
+    fireEvent.change(
+      within(addSection).getByPlaceholderText(/作为模型 ID 与调用名/),
+      { target: { value: 'deepseek-v4-flash' } },
+    )
+    fireEvent.click(within(addSection).getByRole('button', { name: 'openai' }))
+
+    // 参数随添加直接填写：默认思考模式 + 多模态图片
+    fireEvent.change(within(addSection).getByLabelText('思考模式'), {
+      target: { value: 'enabled' },
+    })
+    fireEvent.click(within(addSection).getByLabelText('图片'))
+
+    mockAddModel.mockResolvedValue({
+      models: {
+        ...sampleLLMConfig.models,
+        'deepseek-v4-flash-openai': {
+          provider: 'openai',
+          model_name: 'deepseek-v4-flash',
+          display_name: '',
+        },
+      },
+      added_ids: ['deepseek-v4-flash-openai'],
+    })
+    fireEvent.click(within(addSection).getByRole('button', { name: '添加模型' }))
+
+    await waitFor(() => {
+      expect(mockAddModel).toHaveBeenCalledWith('deepseek-v4-flash', {
+        provider: 'openai',
+        model_name: 'deepseek-v4-flash',
+        display_name: '',
+        reasoning_model: false,
+        default_params: {
+          temperature: 0.7,
+          max_tokens: 4096,
+          top_p: 1,
+          thinking: { type: 'enabled' },
+        },
+        multimodal: {
+          supports_image: true,
+          supported_image_types: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
+          max_image_size: 20 * 1024 * 1024,
+        },
+      })
+    })
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalled()
     })
   })
 })

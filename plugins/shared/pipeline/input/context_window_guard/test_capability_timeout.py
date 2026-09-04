@@ -7,7 +7,8 @@
 
 契约：
 1. timeout = 压缩模型 call_timeout + 60s 余量（下游结构化错误先于 SDK 超时返回）；
-2. model_id 为空（llm_service 按默认 chat 兜底）→ 按 defaults.chat 模型配置取值；
+2. model_id 由调用方保证非空（manifest compression.model 单一真值）；空串按
+   无配置 360s 口径（不再解析 defaults.chat）；
 3. _config_models 不可达（llm.yaml 未注入，guard 既有降级语义）→ 300s 内部
    默认口径 + 60s；
 4. method/params 不受影响（透传回归保护）。
@@ -129,10 +130,10 @@ def test_timeout_uses_compress_model_call_timeout(
     assert timeout > _CAPABILITY_CALL_TIMEOUT_S
 
 
-def test_timeout_resolves_via_default_chat_model_when_model_empty(
+def test_timeout_empty_model_uses_no_config_caliber(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """model_id 为空 → 按 defaults.chat 指向模型的 call_timeout=450 → 510。"""
+    """model_id 为空（未配置）→ 不解析 defaults.chat，按无配置 300s + 60s 口径。"""
     _install_llm_config(
         monkeypatch,
         {
@@ -152,8 +153,8 @@ def test_timeout_resolves_via_default_chat_model_when_model_empty(
     _make_fn_and_call(mod, caller, "")
 
     timeout = caller.calls[0][2]
-    assert timeout == 510.0
-    assert timeout is not None and timeout > 450
+    assert timeout == 360.0
+    assert timeout is not None and timeout > _CAPABILITY_CALL_TIMEOUT_S
 
 
 def test_timeout_falls_back_when_config_unreachable(

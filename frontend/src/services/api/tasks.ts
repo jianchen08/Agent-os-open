@@ -78,6 +78,41 @@ export async function createProject(
   return response.data.project
 }
 
+export interface DeleteProjectOptions {
+  /** 连同名下子任务一起删除（缺省仅级联挂起，子任务保留） */
+  deleteChildren?: boolean
+  /** 同时删除项目文件夹（不可恢复；后端有路径安全校验兜底） */
+  deleteFiles?: boolean
+}
+
+export interface DeleteProjectResult {
+  message: string
+  id: string
+  /** 缺省口径下被挂起保留的子任务数 */
+  suspended_children: number
+  /** deleteChildren 口径下被级联删除的子任务数 */
+  deleted_children: number
+  /** 是否删除了项目文件夹 */
+  folder_removed: boolean
+}
+
+/** 删除项目（登记行 + 名下子任务处置）。失败抛 ApiError（message 含后端文案）。 */
+export async function deleteProject(
+  id: string,
+  options: DeleteProjectOptions = {},
+): Promise<DeleteProjectResult> {
+  const response = await apiClient.delete<DeleteProjectResult>(
+    API_ENDPOINTS.PROJECTS.DELETE(id),
+    {
+      params: {
+        ...(options.deleteChildren ? { delete_children: 'true' } : {}),
+        ...(options.deleteFiles ? { delete_files: 'true' } : {}),
+      },
+    },
+  )
+  return response.data
+}
+
 /**
  * 手动创建根任务
  *

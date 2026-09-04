@@ -444,11 +444,18 @@ class HindsightBackend(IMemoryBackend):
                         parsed = None
                 tags = parsed if isinstance(parsed, list) else []
             meta["tags"] = [str(t) for t in tags if t]
+            # 相关度：顶层 score 优先；真实 RecallResult 的分数在嵌套
+            # scores.final（顶层无 score），缺失回退 0
+            score = item.get("score")
+            if score is None:
+                nested = item.get("scores")
+                final = nested.get("final") if isinstance(nested, dict) else None
+                score = final if isinstance(final, (int, float)) else 0.0
             mapped.append(
                 {
                     "id": str(item.get("id", "")),
                     "content": item.get("content", ""),
-                    "score": float(item.get("score", 0.0) or 0.0),
+                    "score": float(score or 0.0),
                     "memory_type": meta.get("memory_type")
                     or item.get("memory_type")
                     or "semantic",

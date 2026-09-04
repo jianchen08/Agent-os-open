@@ -593,6 +593,93 @@ class TestGetOrCreate:
             )
 
 
+class _ConflictProvider(FakeProvider):
+    """create 恒返回 daemon 撞名 Conflict 的 ERROR 占位环境。"""
+
+    _CONFLICT_MSG = (
+        'Error response from daemon: Conflict. The container name "/cua-ws-a" '
+        'is already in use by container "96b0eb5c2c4b". You have to remove '
+        "(or rename) that container to be able to reuse that name."
+    )
+
+    async def create_environment(
+        self, context: IsolationContext, container_name: str | None = None
+    ) -> IsolationEnvironment:
+        env = IsolationEnvironment(
+            env_id=f"docker-{context.task_id}",
+            level=self.level,
+            provider_type="fake",
+            status=EnvironmentStatus.ERROR.value,
+            context=context,
+            provider_info={"error": self._CONFLICT_MSG},
+        )
+        self.created.append(env)
+        return env
+
+
+class TestCreateNameConflictRecovery:
+    """create 撞 daemon Conflict = 容器实际存在 → 复查复用，不当创建失败。"""
+
+    def test_撞名后复查复用已有容器(self) -> None:
+        mod = _load_manager()
+        provider = _ConflictProvider(IsolationLevel.CONTAINER)
+        mgr = _make_manager(mod, providers={IsolationLevel.CONTAINER: provider})
+        found = _ready_env(env_id="cua-ws-a")
+        calls = {"n": 0}
+
+        async def _find(name: str) -> Any:
+            calls["n"] += 1
+            # 首次（create 前的常规查找）超时式未命中；复查命中
+            return None if calls["n"] == 1 else found
+
+        mgr._find_existing_container = _find  # type: ignore[method-assign]
+
+        result = _run(
+            mgr.get_or_create_environment(
+                task_id="t1", task_type=TaskType.ATOMIC, workspace="/proj/ws-a"
+            )
+        )
+        assert result is found
+        assert calls["n"] == 2
+        # 复查命中后注册进双面映射，ERROR 占位环境不落数据
+        assert mgr._workspace_env_map["ws-a"] == "cua-ws-a"
+        assert provider._environments.get("cua-ws-a") is found
+        assert "docker-t1" not in mgr._environments
+
+    def test_撞名但复查仍未命中_保留错误环境(self) -> None:
+        mod = _load_manager()
+        provider = _ConflictProvider(IsolationLevel.CONTAINER)
+        mgr = _make_manager(mod, providers={IsolationLevel.CONTAINER: provider})
+        mgr._find_existing_container = _async_return(None)  # type: ignore[method-assign]
+
+        result = _run(
+            mgr.get_or_create_environment(
+                task_id="t1", task_type=TaskType.ATOMIC, workspace="/proj/ws-a"
+            )
+        )
+        assert result.status == EnvironmentStatus.ERROR.value
+
+    def test_撞名探测器区分签名(self) -> None:
+        mod = _load_manager()
+        conflict = (
+            'Error response from daemon: Conflict. The container name "/cua-x" '
+            'is already in use by container "96b0".'
+        )
+        assert mod.IsolationManager._is_container_name_conflict(conflict)
+        assert not mod.IsolationManager._is_container_name_conflict(
+            "工作空间路径不存在: /proj/ws-a"
+        )
+        assert not mod.IsolationManager._is_container_name_conflict("")
+
+    def test_ensure_container_alive_透传查找结果(self) -> None:
+        mod = _load_manager()
+        mgr = _make_manager(mod)
+        mgr._find_existing_container = _async_return(_ready_env())  # type: ignore[method-assign]
+        assert _run(mgr.ensure_container_alive("cua-ws-a")) is True
+        mgr._find_existing_container = _async_return(None)  # type: ignore[method-assign]
+        assert _run(mgr.ensure_container_alive("cua-gone")) is False
+
+
 def _async_return(value: Any) -> Any:
     async def _fake(*args: Any, **kwargs: Any) -> Any:
         return value

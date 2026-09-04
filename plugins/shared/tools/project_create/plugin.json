@@ -11,7 +11,7 @@
     "tools": [
       {
         "name": "project_create",
-        "description": "创建项目（= 真实文件夹 + 登记行）。项目是任务树分组锚点，不执行、无执行者；创建后把 project_id 传给 task_submit 挂靠，任务即在项目文件夹下执行（默认 worktree 分叉）。同目录已登记时复用既有项目（created=false）。",
+        "description": "创建项目（= 真实文件夹 + 登记行 + 类型出生初始化）。项目是任务树分组锚点，不执行、无执行者；创建后把 project_id 传给 task_submit 挂靠，任务即在项目文件夹下执行（默认 worktree 分叉）。同目录已登记时复用既有项目（created=false）并幂等补装类型初始化。project_type 参数见映射说明。",
         "render": {
           "card": "form",
           "title": "创建项目"
@@ -27,6 +27,15 @@
             "path": {
               "type": "string",
               "description": "项目文件夹（可选）。显式指定目录；缺省自动生成{工作空间根}/projects/<标题>。已存在目录非 git 仓库会自动git init（不删改现有文件）；同目录已登记时复用既有项目。"
+            },
+            "project_type": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "godot"
+              ],
+              "default": "auto",
+              "description": "项目类型 → 出生初始化映射（唯一真值 config/tools/project_create.yaml，本说明与枚举由其生成）。godot：Godot 4 游戏项目——出生即装两个宿主插件 addons/agentos（宿主桥：9600 探活/取上下文 + 选中引用推送）与 addons/godot_mcp（godot-mcp-go 执行面通道，配 godot_run 工具），并写入 project.godot [editor_plugins] 启用（清单缺失则脚手架最小 project.godot）；godot_run 执行面按任务 workspace 自动路由到本工程（编辑器打开即接线），机器 env 只需 GODOT_MCP_BIN。auto（缺省）：目录已有该类型的清单文件时自动按该类型初始化。未声明类型报错；初始化失败整体报错，同路径重跑幂等补装。"
             }
           },
           "required": [
@@ -66,6 +75,39 @@
             "session_id": {
               "type": "string",
               "description": "创建时关联的会话（可选）"
+            },
+            "project_type": {
+              "type": "string",
+              "description": "路由到的项目类型（未路由为空串）"
+            },
+            "init": {
+              "type": ["object", "null"],
+              "description": "出生初始化执行明细（未路由为 null）",
+              "properties": {
+                "addons_installed": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "本次新装的宿主插件名"
+                },
+                "addons_present": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "已就位未重复安装的插件名"
+                },
+                "project_file_created": {
+                  "type": "boolean",
+                  "description": "类型清单文件是否本次脚手架创建"
+                },
+                "enabled_added": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "本次新增的启用条目"
+                },
+                "committed": {
+                  "type": "boolean",
+                  "description": "初始化后是否执行了 git 提交（无变更则跳过为 false）"
+                }
+              }
             }
           }
         }

@@ -641,3 +641,28 @@ async def test_run_id_absent_when_state_lacks_it() -> None:
     await plugin.execute(_make_ctx(_base_state()))
     _, params = caller.calls[0]
     assert "run_id" not in params["args"]
+
+
+async def test_success_llm_usage_carries_model_attribution() -> None:
+    """llm_usage 随用量携带 model/provider——traces 按模型/按日聚合 token 的归属依据
+    （state.llm_model 是可变当前值，diff 轨迹在模型未变的轮次不落盘，不能作归属）。"""
+    caller = _FakeCaller(
+        {
+            "success": True,
+            "data": _ok_response(
+                usage={"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+            ),
+        }
+    )
+    result = await _make_plugin(caller).execute(_make_ctx(_base_state()))
+    usage = result["llm_usage"]
+    assert usage["total_tokens"] == 120
+    assert usage["model"] == "deepseek-v3"
+    assert usage["provider"] == "openai"
+
+
+async def test_success_no_usage_keeps_llm_usage_empty() -> None:
+    """上游未回 usage（空 dict 为假）→ llm_usage 为空 dict，不伪造归属。"""
+    caller = _FakeCaller({"success": True, "data": _ok_response(usage={})})
+    result = await _make_plugin(caller).execute(_make_ctx(_base_state()))
+    assert result["llm_usage"] == {}

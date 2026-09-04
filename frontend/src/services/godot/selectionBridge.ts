@@ -18,6 +18,8 @@ export interface GodotSelectionItem {
   name: string
   type: string
   path: string
+  /** 节点全局坐标（2D/3D），文件选中为空 */
+  position?: string
   /** texture=贴图缩略图 / viewport=编辑器视口截图 / 空=无预览 */
   preview_kind?: string
 }
@@ -75,6 +77,18 @@ export function subscribeGodotSelection(fn: (s: GodotSelectionState) => void): (
 function hookWsEvents(): void {
   if (wsHooked) return
   wsHooked = true
+  // sidecar 重载/重连会清空插件订阅表——重连后重新订阅当前线程并拉快照，
+  // 否则实时事件静默失效（必须手动刷新页面才恢复）。
+  globalWS.subscribe('reconnected', () => {
+    if (currentThread) void initGodotSelection(currentThread)
+  })
+  // 低频重申订阅：sidecar 重载（插件热更新等）会清空其内存订阅表且无前端可感知
+  // 信号——30s 重发一次 subscribe（幂等微请求），页面自愈无需手动刷新
+  window.setInterval(() => {
+    if (currentThread) {
+      apiClient.post(ENDPOINTS.subscribe, { thread_id: currentThread }).catch(() => {})
+    }
+  }, 30_000)
   globalWS.subscribe(WS_SERVER_EVENTS.GODOT_SELECTION_CHANGED, (payload: unknown) => {
     const data = (payload as { data?: GodotSelectionState & { thread_id?: string } })?.data
     if (!data) return

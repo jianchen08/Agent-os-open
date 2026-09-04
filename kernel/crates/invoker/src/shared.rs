@@ -57,30 +57,51 @@ pub async fn build_plugin_input(
     }))
 }
 
+/// 把 manifest 注入命名空间与引擎步骤 config 合成 sidecar 管道调用的 config。
+///
+/// 注入键 = config_files[].id 命名空间（如 `context_window`）；步骤 config
+/// 键 = `inputs`/`_step_method`，置于后者、同名覆盖（当前两键集合不相交，
+/// 覆盖序只为语义确定）。
+pub fn merge_injected_with_step_config(injected: Value, step_config: &Value) -> Value {
+    let mut merged = injected.as_object().cloned().unwrap_or_default();
+    if let Some(obj) = step_config.as_object() {
+        for (k, v) in obj {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    Value::Object(merged)
+}
+
 /// 按 manifest 的 `config_files` 命名空间合并配置（ADR §4.3，P6：只走 config_files）。
 ///
 /// - 声明了 `config_files`：按 `config_files[].id` 命名空间合并（B3）。
 /// - 未声明：收空 Object（P6 删除 config_refs 后不再回退全量）。
 ///
-/// 文件缺失时回退 [`config_defaults_from_fields`]（manifest fields.default 内联
-/// 默认，ADR 2026-09-02-context-window-config-inline-manifest）——配置值
-/// 声明在 manifest，磁盘文件仅是用户覆盖层。
+/// 单一真值（2026-09-02 用户裁定）：内联形态（path 空）真值即
+/// [`config_defaults_from_fields`]（fields.default 存在 manifest）；引用形态
+/// 真值在文件，缺失时同样以 fields.default 组装兜底（G2 已禁止引用形态声明
+/// default，该兜底对引用形态恒为空 dict，仅为直构 manifest 的容错）。
 pub fn build_injected_config(full_config: &Value, manifest: &PluginManifest) -> Value {
     if manifest.config_files.is_empty() {
         return Value::Object(serde_json::Map::new());
     }
     let mut merged = serde_json::Map::new();
     for mapping in &manifest.config_files {
-        let value = resolve_config_path(full_config, &mapping.path)
-            .cloned()
-            .unwrap_or_else(|| {
-                // env target 条目（.env 密钥）不进 full_config——密钥无默认语义，保持空 dict
-                if mapping.target.as_deref() == Some("env") {
-                    serde_json::json!({})
-                } else {
-                    config_defaults_from_fields(&mapping.fields)
-                }
-            });
+        let value = if mapping.path.is_empty() {
+            // 内联形态：真值在 manifest，无文件语义
+            config_defaults_from_fields(&mapping.fields)
+        } else {
+            resolve_config_path(full_config, &mapping.path)
+                .cloned()
+                .unwrap_or_else(|| {
+                    // env target 条目（.env 密钥）不进 full_config——密钥无默认语义，保持空 dict
+                    if mapping.target.as_deref() == Some("env") {
+                        serde_json::json!({})
+                    } else {
+                        config_defaults_from_fields(&mapping.fields)
+                    }
+                })
+        };
         merged.insert(mapping.id.clone(), value);
     }
     Value::Object(merged)
@@ -326,6 +347,45 @@ mod tests {
                     .get("model")
                     .is_none()
         );
+    }
+
+    /// 内联形态（path 空，单一真值裁定 2026-09-02）：真值 = fields.default，
+    /// 不做文件查找（full_config 为空也不影响）。
+    #[test]
+    fn build_injected_config_inline_entry_uses_field_defaults() {
+        let full = json!({});
+        let manifest = manifest_with_id(
+            "pipeline_context_window_guard",
+            vec![ConfigFileMapping {
+                id: "context_window".to_string(),
+                path: String::new(),
+                label: "上下文窗口配置".to_string(),
+                target: None,
+                settings: None,
+                fields: vec![EnvConfigField {
+                    name: "compress_trigger_ratio".to_string(),
+                    label: "压缩触发比例".to_string(),
+                    field_type: "slider".to_string(),
+                    required: false,
+                    description: None,
+                    extra: Some(json!({"default": 0.06}).as_object().unwrap().clone()),
+                }],
+            }],
+        );
+        let injected = build_injected_config(&full, &manifest);
+        assert_eq!(injected["context_window"]["compress_trigger_ratio"], 0.06);
+    }
+
+    /// merge_injected_with_step_config：注入命名空间与步骤 config 合并，
+    /// 步骤键（inputs/_step_method）齐全。
+    #[test]
+    fn merge_injected_with_step_config_overlays_step_keys() {
+        let injected = json!({"context_window": {"compress_trigger_ratio": 0.06}});
+        let step = json!({"inputs": {"a": 1}, "_step_method": "execute"});
+        let merged = merge_injected_with_step_config(injected, &step);
+        assert_eq!(merged["context_window"]["compress_trigger_ratio"], 0.06);
+        assert_eq!(merged["inputs"]["a"], 1);
+        assert_eq!(merged["_step_method"], "execute");
     }
 
     /// P6：未声明 config_files 的插件收空配置，全量配置里的 secrets 不泄漏。

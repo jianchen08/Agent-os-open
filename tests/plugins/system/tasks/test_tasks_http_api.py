@@ -852,6 +852,118 @@ class TestProjectsLifecycle:
         assert not folder.exists()
         assert registry.get(pid) is None
 
+    async def test_delete_project_default_suspends_children_only(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub,
+            registry: Any) -> None:
+        """缺省口径：子任务级联挂起保留，不触达删除。"""
+        import project_registry as projects_mod
+
+        p = registry.save(projects_mod.ProjectModel(title="项目F"))
+        _seed_state(hub, [
+            {"pipeline_id": "child-1", "task.parent_project_id": p.id},
+            {"pipeline_id": "child-2", "task.parent_project_id": p.id},
+        ])
+        hub._responses["pipeline-executor"] = {
+            "suspend_pipeline": {"run_id": "r-1"},
+            "delete_pipeline": {"deleted": True},
+        }
+        headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        resp = await _http(monkeypatch, hub, f"/ext/task_service/projects/{p.id}",
+                           "DELETE", headers=headers)
+        assert resp["status"] == 200
+        assert resp["payload"]["suspended_children"] == 2
+        assert resp["payload"]["deleted_children"] == 0
+        exec_calls = hub.handles["pipeline-executor"].calls
+        assert [m for m, _ in exec_calls] == ["suspend_pipeline", "suspend_pipeline"]
+        assert registry.get(p.id) is None
+
+    async def test_delete_project_cascade_deletes_children(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub,
+            registry: Any) -> None:
+        """delete_children=true：逐个删除子任务管道，不挂起，登记行删除。"""
+        import project_registry as projects_mod
+
+        p = registry.save(projects_mod.ProjectModel(title="项目G"))
+        _seed_state(hub, [
+            {"pipeline_id": "child-1", "task.parent_project_id": p.id},
+            {"pipeline_id": "child-2", "task.parent_project_id": p.id},
+        ])
+        hub._responses["pipeline-executor"] = {"delete_pipeline": {"deleted": True}}
+        headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        resp = await _http(monkeypatch, hub, f"/ext/task_service/projects/{p.id}",
+                           "DELETE", query={"delete_children": "true"}, headers=headers)
+        assert resp["status"] == 200
+        assert resp["payload"]["deleted_children"] == 2
+        exec_calls = hub.handles["pipeline-executor"].calls
+        assert sorted(pr["pipeline_id"] for m, pr in exec_calls
+                      if m == "delete_pipeline") == ["child-1", "child-2"]
+        assert not [m for m, _ in exec_calls if m == "suspend_pipeline"]
+        assert registry.get(p.id) is None
+
+    async def test_delete_project_cascade_failure_keeps_registration(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub,
+            registry: Any) -> None:
+        """级联删除中任一子任务失败 → 500 中止，登记行保留（项目未删除）。"""
+        import project_registry as projects_mod
+
+        p = registry.save(projects_mod.ProjectModel(title="项目H"))
+        _seed_state(hub, [
+            {"pipeline_id": "child-1", "task.parent_project_id": p.id},
+            {"pipeline_id": "child-2", "task.parent_project_id": p.id},
+        ])
+        hub._responses["pipeline-executor"] = {"delete_pipeline": {"deleted": True}}
+        exec_handle = hub.get("pipeline-executor")
+        original_call = exec_handle.call
+
+        async def flaky_call(method: str, params: dict[str, Any],
+                             timeout: float | None = None) -> Any:
+            if method == "delete_pipeline" and params.get("pipeline_id") == "child-2":
+                raise RuntimeError("内核删除失败")
+            return await original_call(method, params, timeout)
+
+        monkeypatch.setattr(exec_handle, "call", flaky_call)
+        headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        resp = await _http(monkeypatch, hub, f"/ext/task_service/projects/{p.id}",
+                           "DELETE", query={"delete_children": "true"}, headers=headers)
+        assert resp["status"] == 500
+        assert "child-2" in resp["payload"]["detail"]
+        assert registry.get(p.id) is not None
+
+    async def test_delete_project_cascade_skips_already_gone_child(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub,
+            registry: Any) -> None:
+        """列举后被并发删除的子任务（存在性 404）不算失败，项目照常删除。"""
+        import project_registry as projects_mod
+
+        p = registry.save(projects_mod.ProjectModel(title="项目I"))
+        hub._responses["pipeline-state"] = {"list": [
+            {"pipeline_id": "child-1", "task.parent_project_id": p.id},
+            {"pipeline_id": "child-2", "task.parent_project_id": p.id},
+        ]}
+        hub._responses["pipeline-executor"] = {"delete_pipeline": {"deleted": True}}
+        state_handle = hub.get("pipeline-state")
+        original_call = state_handle.call
+        list_calls = {"n": 0}
+
+        async def counting_call(method: str, params: dict[str, Any],
+                                timeout: float | None = None) -> Any:
+            result = await original_call(method, params, timeout)
+            if method == "list":
+                list_calls["n"] += 1
+                # 首次 list = 项目子任务列举；其后为逐个 delete_task 的存在性检查，
+                # child-2 在列举后被并发删除 → 视图缺行
+                if list_calls["n"] > 1:
+                    return [row for row in result if row["pipeline_id"] != "child-2"]
+            return result
+
+        monkeypatch.setattr(state_handle, "call", counting_call)
+        headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        resp = await _http(monkeypatch, hub, f"/ext/task_service/projects/{p.id}",
+                           "DELETE", query={"delete_children": "true"}, headers=headers)
+        assert resp["status"] == 200
+        assert resp["payload"]["deleted_children"] == 1
+        assert registry.get(p.id) is None
+
 
 # ═══════════════════════════════════════════════════════════
 # 6. 边界与降级路径（http_api.py 剩余可及分支）

@@ -141,7 +141,7 @@ def _build_tmp_config_root(base_dir: str, stub_api_base: str) -> str:
     """复制共享 config/ 到测试专属临时目录并改写 llm.yaml 注入 stub provider。
 
     硬约束兑现：运行中内核消费的共享配置文件零改动——内核实例的
-    AGENTOS_CONFIG_ROOT 指向本副本，defaults（chat/tiers/compression/embedding）
+    AGENTOS_CONFIG_ROOT 指向本副本，defaults（chat/tiers/embedding）
     全部指向 stub 模型，杜绝任何真实 LLM/embedding 外呼。
     """
     src = os.path.join(_REPO_ROOT, "config")
@@ -183,7 +183,6 @@ def _build_tmp_config_root(base_dir: str, stub_api_base: str) -> str:
     }
     defaults = data.setdefault("defaults", {})
     defaults["chat"] = "stub-llm"
-    defaults["compression"] = "stub-llm"
     defaults["embedding"] = "stub-embedding"
     tiers = defaults.setdefault("tiers", {})
     tiers["large"] = "stub-llm"

@@ -3,7 +3,7 @@
 负责在管道循环的输出阶段统一管理"停止判断"逻辑（控制状态键契约
 ADR 2026-08-30：终止经状态键 should_stop/ended 表达，引擎轮边界消费；
 终止方随写 router.stop_reason 署名，run 收尾按署名映射终态）：
-1. 迭代上限/超时检测 → should_stop=true + task.status=failed
+1. 迭代上限/超时检测 → should_stop=true + task.status=failed + 会话 system 消息
 2. task_evaluate 工具结果检测 → ended=true
 3. 任务终态（取消/删除/完成/失败，外部写入）检测 → ended=true + task.status
 
@@ -69,6 +69,7 @@ class StopCheckPlugin(IOutputPlugin):
         self._max_duration = self._config.get("max_duration_seconds", 600)
         self._check_task_status = self._config.get("check_task_status", True)
         self._start_time = time.monotonic()
+        self._last_identity: tuple[str, str] | None = None
 
     @property
     def name(self) -> str:
@@ -137,7 +138,7 @@ class StopCheckPlugin(IOutputPlugin):
             return self._task_failure_stop(
                 ctx,
                 stop_reason="max_iterations",
-                reason=f"Max iterations reached: {iteration}",
+                reason=f"已连续执行 {iteration} 轮（上限 {self._max_iterations} 轮）",
             )
 
         # 2. 执行超时检测（-1 表示无限制）
@@ -151,7 +152,7 @@ class StopCheckPlugin(IOutputPlugin):
             return self._task_failure_stop(
                 ctx,
                 stop_reason="timeout",
-                reason=f"Execution timeout: {elapsed:.1f}s",
+                reason=f"已连续运行 {elapsed:.1f} 秒（上限 {self._max_duration} 秒）",
             )
 
         # 3. task_evaluate 工具结果检测
@@ -189,6 +190,10 @@ class StopCheckPlugin(IOutputPlugin):
         任务完成唯一判据是 task_evaluate 评估通过；跑到检测线仍未通过评估
         = 失败（用户裁定）。仅任务管道（state 带 task.id）写任务状态——
         聊天主管道无 task 上下文，写 task.* 会制造幽灵任务标记。
+
+        同时往会话消息流追加一条 system 消息（无 seq 的 set = append，引擎
+        merge_and_project 统一落库/投影）：超线强停的 run 用户可见终止原因，
+        而非只有 agent 的半截回复。
         """
         updates: dict[str, Any] = {
             "router.stop_reason": stop_reason,
@@ -196,7 +201,15 @@ class StopCheckPlugin(IOutputPlugin):
         }
         if ctx.state.get("task.id"):
             updates["task.status"] = "failed"
+        label = self._STOP_LABELS.get(stop_reason, stop_reason)
+        content = f"⚠️ {label}被强制停止：{reason}，进度已保存，可重新发送消息继续。"
+        updates["messages"] = {
+            "_ops": [{"op": "set", "msg": {"role": "system", "content": content}}]
+        }
         return updates
+
+    # stop_reason → 消息文案前缀（仅本插件两个超线分支会传入）
+    _STOP_LABELS = {"max_iterations": "达到迭代上限", "timeout": "执行超时"}
 
     def _check_task_evaluate_result(self, ctx: PluginContext) -> dict[str, Any] | None:
         """检查 task_evaluate 工具执行结果是否表明任务已完成或失败。
@@ -348,8 +361,10 @@ class StopCheckPlugin(IOutputPlugin):
         state 注入的 max_iterations / timeout_seconds 覆盖——前一 agent 注入的
         阈值不得残留到下一 agent。特殊值 -1 表示无限制。
 
-        重置 _start_time（新 pipeline_id 首次出现时），防止共享实例在子管道
-        （如评估管道）中因 elapsed 时间已超过 timeout_seconds 而误触发超时终止。
+        计时起点键 = (pipeline_id, run_id)：同 run 多轮累计计时（阈值语义 =
+        单次 run 执行 ≤ timeout_seconds）；同一管道跨 run 复用（聊天会话每条
+        消息 = 同 pipeline_id 起新 run）时 run_id 变化即重置，run 间空闲挂钟
+        不计入 elapsed。pipeline_id 为空无法定位归属，不重置（保守）。
 
         Args:
             ctx: 插件执行上下文
@@ -366,6 +381,8 @@ class StopCheckPlugin(IOutputPlugin):
             self._max_duration = agent_timeout
 
         pipeline_id = ctx.state.get("pipeline_id", "")
-        if pipeline_id and pipeline_id != getattr(self, "_last_pipeline_id", None):
+        run_id = ctx.state.get("run_id", "")
+        identity = (pipeline_id, run_id)
+        if pipeline_id and identity != self._last_identity:
             self._start_time = time.monotonic()
-            self._last_pipeline_id = pipeline_id
+            self._last_identity = identity

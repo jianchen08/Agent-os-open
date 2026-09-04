@@ -71,6 +71,10 @@ _bank_default_warned = False
 # 文档切块大小（字符）
 _CHUNK_SIZE = 2000
 
+# 导入切块并发 retain 上限（服务端并行抽取，实测 ~16s/chunk 串行、并发 3 提速
+# 2.4x；大文档串行必然撞工具 300s 超时）
+_IMPORT_CONCURRENCY = 6
+
 # 允许导入的文件扩展名
 _ALLOWED_DOC_EXTS = (".txt", ".md")
 
@@ -349,6 +353,19 @@ async def hindsight_recall(
         for item in items:
             if "text" in item and "content" not in item:
                 item["content"] = item.pop("text")
+        # 相关度排序 + top_k 截断：RecallResult 的分数在嵌套 scores.final
+        # （顶层无 score 键，读取归各消费方映射层），召回条数由 token 预算
+        # 驱动与 top_k 无关——按 final 降序排并截断 top_k，「检索数量」契约
+        # 才成立。
+        limit = max(1, int(top_k or 5))
+
+        def _final_score(item: dict[str, Any]) -> float:
+            nested = item.get("scores")
+            final = nested.get("final") if isinstance(nested, dict) else None
+            return float(final) if isinstance(final, (int, float)) else 0.0
+
+        items.sort(key=_final_score, reverse=True)
+        items = items[:limit]
         return {"results": items, "total": len(items)}
     except Exception as e:
         logger.warning("[hindsight.recall] 调用失败 | error=%s", e)
@@ -493,9 +510,10 @@ async def hindsight_summarize(
 async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, Any]:
     """Delete memories from a hindsight bank.
 
-    - memory_id 给定：走 documents.delete_document 级联删除该文档及其全部
-      记忆单元（2026-08-22 真机实证：delete_document 级联删 document +
-      关联 memory units，是真删除通路）。
+    - memory_id 是文档 id：documents.delete_document 级联删除该文档及其全部
+      记忆单元（真删除通路）。
+    - memory_id 是记忆单元 id（retrieve 返回 RecallResult 的 id，documents
+      直删 404）：按单元解析父文档后级联删除——残留条目可清理。
     - memory_id 缺省：删整个 bank（adelete_bank，既有语义保留）。
     """
     if _client is None:
@@ -504,23 +522,41 @@ async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, 
     try:
         bank = _resolve_bank_id(bank_id)
         if memory_id:
-            # 逐条删除：documents API 级联删除（工具层 memory_id = store
-            # 时回传的 document_id）
             documents_api = getattr(_client, "documents", None)
             if documents_api is None or not hasattr(documents_api, "delete_document"):
                 return {"deleted": False, "error": "client has no documents.delete_document"}
-            resp = await documents_api.delete_document(
-                bank_id=bank, document_id=memory_id
-            )
-            # DeleteDocumentResponse → 语义值 success
-            if hasattr(resp, "model_dump"):
-                payload = resp.model_dump()
-                deleted = bool(payload.get("success", True))
-            elif isinstance(resp, dict):
-                deleted = bool(resp.get("success", True))
-            else:
-                deleted = True
-            return {"deleted": deleted, "memory_id": memory_id}
+            # 先按文档直删（delete_document 级联删 document + 全部记忆单元）
+            try:
+                resp = await documents_api.delete_document(
+                    bank_id=bank, document_id=memory_id
+                )
+                deleted = _deleted_from_response(resp)
+                doc_error: str | None = None
+            except Exception as e:
+                deleted = False
+                doc_error = str(e)
+            if deleted:
+                return {"deleted": True, "memory_id": memory_id}
+            # 单元 id 回退：retrieve 给的是记忆单元 id，documents API 只认
+            # 文档 id——按单元解析父文档后级联删除（残留条目可清理）。
+            doc_id = await _resolve_unit_document_id(bank, memory_id)
+            if doc_id:
+                resp = await documents_api.delete_document(
+                    bank_id=bank, document_id=doc_id
+                )
+                return {
+                    "deleted": _deleted_from_response(resp),
+                    "memory_id": memory_id,
+                    "document_id": doc_id,
+                }
+            return {
+                "deleted": False,
+                "memory_id": memory_id,
+                "error": (
+                    f"memory id 既非文档也查不到所属记忆单元（不存在或已删除）"
+                    f"| detail={doc_error or 'not found'}"
+                ),
+            }
         # 无 memory_id：删整个 bank
         deleter = getattr(_client, "adelete_bank", None) or getattr(_client, "adelete", None)
         if deleter is None:
@@ -534,6 +570,44 @@ async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, 
     except Exception as e:
         logger.warning("[hindsight.delete] 调用失败 | error=%s", e)
         return {"deleted": False, "error": str(e)}
+
+
+def _deleted_from_response(resp: Any) -> bool:
+    """从 DeleteDocumentResponse 取语义值 success。
+
+    模型/dict 读 success 键；None 及其它形态按客户端契约视为成功
+    （204 风格无体删除响应）。
+    """
+    if hasattr(resp, "model_dump"):
+        payload = resp.model_dump()
+        return bool(payload.get("success", True))
+    if isinstance(resp, dict):
+        return bool(resp.get("success", True))
+    return True
+
+
+async def _resolve_unit_document_id(bank_id: str, memory_id: str) -> str | None:
+    """记忆单元 id → 父文档 id（documents API 只认文档 id，删除回退用）。
+
+    get_memory 返回形态 tolerant（pydantic model_dump / dict / __dict__）；
+    能力缺失或解析失败返回 None——删除面照常诚实失败，不吞错误。
+    """
+    memory_api = getattr(_client, "memory", None)
+    if memory_api is None:
+        return None
+    getter = getattr(memory_api, "get_memory", None)
+    if not callable(getter):
+        return None
+    try:
+        unit = await getter(bank_id=bank_id, memory_id=memory_id)
+    except Exception:
+        return None
+    if hasattr(unit, "model_dump"):
+        unit = unit.model_dump()
+    elif not isinstance(unit, dict):
+        unit = vars(unit) if hasattr(unit, "__dict__") else {}
+    doc_id = str((unit or {}).get("document_id", "") or "")
+    return doc_id or None
 
 
 @plugin.tool(
@@ -598,20 +672,29 @@ async def hindsight_import_document(
 
     try:
         bank = _resolve_bank_id(bank_id)
-        chunks = _chunk_text(raw_text)
+        chunks = [c for c in _chunk_text(raw_text) if c.strip()]
         name = knowledge_name or "document"
-        for idx, chunk in enumerate(chunks):
+        total = len(chunks)
+        sem = asyncio.Semaphore(_IMPORT_CONCURRENCY)
+
+        async def _retain_chunk(idx: int, chunk: str) -> None:
             meta = {
                 "memory_type": "semantic",
                 "knowledge_name": name,
                 # MemoryItem.metadata 是 dict[str,str] pydantic 校验面——
                 # 数字/布尔值必 422，全部字符串化
                 "chunk_index": str(idx),
-                "chunk_total": str(len(chunks)),
+                "chunk_total": str(total),
                 "source": "import_document",
             }
-            await _client.aretain(bank_id=bank, content=chunk, metadata=meta, tags=["type:semantic"])
-        return {"chunks_imported": len(chunks), "knowledge_name": name}
+            async with sem:
+                await _client.aretain(
+                    bank_id=bank, content=chunk, metadata=meta,
+                    tags=["type:semantic"],
+                )
+
+        await asyncio.gather(*(_retain_chunk(i, c) for i, c in enumerate(chunks)))
+        return {"chunks_imported": total, "knowledge_name": name}
     except Exception as e:
         logger.warning("[hindsight.import_document] 导入失败 | error=%s", e)
         return {"chunks_imported": 0, "knowledge_name": knowledge_name, "error": str(e)}

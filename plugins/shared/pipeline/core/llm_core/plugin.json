@@ -38,8 +38,7 @@
         {
           "name": "embedding.enabled",
           "type": "toggle",
-          "label": "启用向量模型",
-          "default": false
+          "label": "启用向量模型"
         },
         {
           "name": "embedding.default_provider",

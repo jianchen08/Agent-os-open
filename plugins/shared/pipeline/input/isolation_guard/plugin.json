@@ -7,6 +7,7 @@
   "host_type": "sidecar",
   "entry": "python server.py",
   "invoke_entry": "isolation_guard.execute",
+  "persistent_fields": ["isolation.container_name"],
   "capabilities": {
     "tools": [],
     "route_signals": [],

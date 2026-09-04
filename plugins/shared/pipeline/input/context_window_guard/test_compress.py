@@ -11,7 +11,7 @@ LLM 面收敛由 llm_service 承接）：
 3. 流中断（partial 非 None）→ 上抛（半截内容不可作压缩摘要）
 4. 正常时返回 data.text（llm.complete_stream 聚合响应）
 5. 消息列表原样透传（不再压平成字符串 prompt）
-6. model_id 参数透传（空串兜底 llm_service 默认 chat）
+6. model_id（manifest compression.model 单一真值）原样透传
 7. 压缩服务级失败路径：调用异常沿链路上抛，由 compress_messages 顶层捕获
    （error 日志 + 返回 None，本轮压缩显式跳过）
 
@@ -196,7 +196,7 @@ class TestCompressHappyPath:
         assert captured["args"]["messages"] == payload
 
     def test_model_id_passthrough(self, mod: Any) -> None:
-        """model_id 参数透传给 llm.complete_stream（空串兜底默认 chat）。"""
+        """model_id（manifest compression.model）原样透传给 llm.complete_stream。"""
         mod.set_capability_caller(None)
 
         async def _caller(method: str, params: dict, timeout: float | None = None) -> Any:
@@ -206,6 +206,38 @@ class TestCompressHappyPath:
         fn = mod._build_compress_llm_call_fn(_caller, model_id="deepseek-v4")
         result = _await(fn("compress this"))
         assert result == "ok"
+
+    def test_no_hardcoded_sampling_params(self, mod: Any) -> None:
+        """未配置额外参数时 args 只含 model/messages。
+
+        采样参数（temperature/max_tokens/thinking 等）由 llm.complete_stream
+        按 llm.yaml 模型条目 default_params 服务侧回填——本函数不再硬编码
+        max_tokens: 8000（2026-09-03 用户裁定：调用方只给模型名）。
+        """
+        mod.set_capability_caller(None)
+
+        async def _caller(method: str, params: dict, timeout: float | None = None) -> Any:
+            assert set(params["args"].keys()) == {"model", "messages"}
+            return {"success": True, "data": {"text": "ok", "finish_reason": "stop"}}
+
+        fn = mod._build_compress_llm_call_fn(_caller, model_id="minimax-m3")
+        assert _await(fn("compress this")) == "ok"
+
+    def test_extra_params_passthrough_as_override(self, mod: Any) -> None:
+        """compression 配置显式携带的参数原样透传（作为调用方覆盖服务侧模型默认）。"""
+        mod.set_capability_caller(None)
+
+        async def _caller(method: str, params: dict, timeout: float | None = None) -> Any:
+            assert params["args"]["max_tokens"] == 8000
+            assert params["args"]["temperature"] == 0.2
+            return {"success": True, "data": {"text": "ok", "finish_reason": "stop"}}
+
+        fn = mod._build_compress_llm_call_fn(
+            _caller,
+            model_id="minimax-m3",
+            extra_params={"max_tokens": 8000, "temperature": 0.2},
+        )
+        assert _await(fn("compress this")) == "ok"
 
 
 class TestTruncateToBudget:
@@ -276,24 +308,26 @@ class TestExtractJsonAndRender:
     def test_render_fork_message_strips_internal_fields(self) -> None:
         m = _load_plugin_module()
         cc = m.ContextCompressor
-        # 内部字段（seq/_context_form/tool_result）不进 LLM 载荷
+        # 内部字段（seq/_context_form/tool_result）不进 LLM 载荷；内容原样
+        # （fork 不渲染 [form] 前缀，与执行路径逐字节一致）
         r = cc._render_fork_message(
             {"role": "user", "content": "hi", "seq": 3, "_context_form": "notice", "tool_result": {}}
         )
         assert "seq" not in r and "_context_form" not in r and "tool_result" not in r
-        assert r["content"] == "[notice] hi"
+        assert r["content"] == "hi"
 
     def test_render_fork_message_context_form_label(self) -> None:
         import sys as _sys
 
         m = _load_plugin_module()
         cc = m.ContextCompressor
-        # _context_form 带合法标签（CONTEXT_FORM_LABELS 命中）
+        # _context_form 只剥离不渲染：任何合法标签都不得出现在内容里
         form = next(iter(m.CONTEXT_FORM_LABELS), None) if hasattr(m, "CONTEXT_FORM_LABELS") else None
         if form:
             msg = {"role": "user", "content": "c", "_context_form": form}
             r = cc._render_fork_message(msg)
-            assert str(m.CONTEXT_FORM_LABELS.get(form, "")) in r["content"]
+            assert r["content"] == "c"
+            assert str(m.CONTEXT_FORM_LABELS.get(form, "")) not in r["content"]
 
     def test_render_fork_message_empty_content_no_label(self) -> None:
         m = _load_plugin_module()

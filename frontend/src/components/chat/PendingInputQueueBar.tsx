@@ -66,7 +66,8 @@ export function PendingInputQueueBar({ pipelineId }: PendingInputQueueBarProps) 
       data-testid="pending-queue-bar"
       className="border-border/60 bg-muted/40 mb-2 flex flex-col gap-1 rounded-lg border px-2 py-1.5 text-xs"
     >
-      {/* 收起态：N 条待处理 + 首条预览 */}
+      {/* 首条预览只在收起态渲染：展开后列表已逐条呈现（含编辑输入框），
+          预览行继续渲染会让同一条消息出现两次 */}
       <div className="flex items-center gap-2">
         <Clock className="text-muted-foreground h-icon-sm w-icon-sm shrink-0" />
         <button
@@ -78,11 +79,15 @@ export function PendingInputQueueBar({ pipelineId }: PendingInputQueueBarProps) 
           <span className="text-muted-foreground shrink-0">
             {items.length} 条待处理
           </span>
-          <span className="text-muted-foreground/70 min-w-0 flex-1 truncate">
-            {items[0].content}
-          </span>
-          {items.length > 1 && (
-            <span className="text-muted-foreground/50 shrink-0">+{items.length - 1}</span>
+          {!expanded && (
+            <>
+              <span className="text-muted-foreground/70 min-w-0 flex-1 truncate">
+                {items[0].content}
+              </span>
+              {items.length > 1 && (
+                <span className="text-muted-foreground/50 shrink-0">+{items.length - 1}</span>
+              )}
+            </>
           )}
         </button>
         <Button
@@ -132,6 +137,15 @@ export function PendingInputQueueBar({ pipelineId }: PendingInputQueueBarProps) 
                       aria-label="保存修改"
                     >
                       <Check className="h-icon-xs w-icon-xs" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-muted-foreground hover:text-destructive h-5 w-5 p-0"
+                      onClick={cancelEdit}
+                      aria-label="取消修改"
+                    >
+                      <X className="h-icon-xs w-icon-xs" />
                     </Button>
                   </>
                 ) : (

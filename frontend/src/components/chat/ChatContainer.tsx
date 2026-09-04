@@ -425,8 +425,11 @@ export const ChatContainer = ({
         style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
         data-testid="chat-composer"
       >
-        {/* Godot 选中引用（实时镜像：选中出现 / 取消消失；选中非空发送时插件随消息注入引用） */}
-        <GodotSelectionRow threadId={activeTabId || sessionId} />
+        {/* Godot 选中引用（实时镜像：选中出现 / 取消消失；选中非空发送时插件随消息注入引用）。
+            threadId 必须用 sessionId：内核 WS 绑定按 activeSessionId 注册
+            （sendActiveThread），用 activeTabId（main-<sessionId>）订阅会导致
+            事件单播查无绑定被丢弃——引用只随刷新显示。 */}
+        <GodotSelectionRow threadId={sessionId} />
         {/* 待处理输入队列条（ADR-2026-08-26）：执行中发送的消息在此排队，
             点击条目内联编辑/删除/清空；消费激活后进主消息流 */}
         {currentTabPipelineId && (

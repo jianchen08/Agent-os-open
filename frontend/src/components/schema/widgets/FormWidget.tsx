@@ -21,6 +21,8 @@
  *   ...extraBody, ...values} 到该端点，展示提交中/成功/失败状态。pipeline_id
  *   跟随当前选中的管道标签（agentTabStore.activeTabId → pipelineRunId，回退
  *   store 级 activePipelineId / sessionId）——权限模式按管道隔离，切换标签即切换目标。
+ *   声明 createSession=true 时，无激活管道提供「新建会话」入口（会话创建共享
+ *   流，创建即激活新主管道，pipeline_id 注入随之解析）。
  * - props.dataUri：GET 初值（yaml 文本自动解析）；提交 PUT/POST 回写
  *   （dataFormat=yaml 时序列化为 {yaml} 体，对齐 agent 配置写回协议）。
  * - props.onSubmit：显式 JS 回调（宿主注入场景；modal 模式提交成功自动关闭）。
@@ -32,6 +34,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { Check, ChevronDown } from '@/assets/icons'
+import { SessionEditModal, type SessionFormOptions } from '@/components/session/SessionEditModal'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,6 +52,7 @@ import {
 import apiClient from '@/services/api/client'
 import { RjsfForm } from '@/services/schema/RjsfForm'
 import { parseYamlObject, serializeYaml } from '@/services/schema/yaml'
+import { createSessionWithProject } from '@/services/sessionCreation'
 import { cn } from '@/lib/utils'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
@@ -229,6 +233,34 @@ export function FormWidget(props: Record<string, unknown>) {
   // 缺口 G3：事件联动——提交成功 emit `{eventName}`(payload=表单值)，
   // 失败 emit `{eventName}:failed`(payload={error, values})；声明传 eventName
   const eventName = props.eventName as string | undefined
+  // 声明 createSession：无激活管道（提交必缺 pipeline_id）时提供「新建会话」
+  // 入口——模态框复用会话创建共享流，创建即激活新主管道，pipeline_id 注入
+  // 随之解析（useActivePipelineId 响应式），提示条自行消失
+  const createSessionEnabled = props.createSession === true && Boolean(endpoint)
+  const [sessionModalOpen, setSessionModalOpen] = useState(false)
+  const [isCreatingSession, setIsCreatingSession] = useState(false)
+
+  const handleSessionModalSave = useCallback(
+    async (
+      _sessionId: string | null,
+      title: string,
+      agentId: string | null,
+      options?: SessionFormOptions,
+    ) => {
+      setIsCreatingSession(true)
+      try {
+        await createSessionWithProject(title || undefined, agentId, options, 'FormWidget')
+        setSessionModalOpen(false)
+      } catch (err) {
+        toast.error('创建会话失败', {
+          description: err instanceof Error ? err.message : String(err),
+        })
+      } finally {
+        setIsCreatingSession(false)
+      }
+    },
+    [],
+  )
   const emitSuccess = (values: Record<string, unknown>) => {
     if (eventName) emitFormEvent(eventName, values)
   }
@@ -344,6 +376,19 @@ export function FormWidget(props: Record<string, unknown>) {
           {dsError}
         </p>
       )}
+      {createSessionEnabled && !pipelineId && (
+        <p className="text-muted-foreground mb-2 text-xs">
+          当前没有激活管道：可在「目标管道」选择已有管道，或
+          <button
+            type="button"
+            onClick={() => setSessionModalOpen(true)}
+            className="text-primary mx-1 underline-offset-2 hover:underline"
+          >
+            新建会话
+          </button>
+          后再提交
+        </p>
+      )}
       {!dsReady ? (
         <p className="text-muted-foreground py-4 text-center text-sm">加载表单数据…</p>
       ) : (
@@ -406,7 +451,21 @@ export function FormWidget(props: Record<string, unknown>) {
     )
   }
 
-  return formBody
+  return (
+    <>
+      {formBody}
+      {createSessionEnabled && (
+        <SessionEditModal
+          mode="create"
+          isOpen={sessionModalOpen}
+          session={null}
+          onClose={() => setSessionModalOpen(false)}
+          onSave={handleSessionModalSave}
+          isSaving={isCreatingSession}
+        />
+      )}
+    </>
+  )
 }
 
 /** modal 壳：受控 open/onClose（缺省 trigger 按钮自开关），成功态自动关闭 */

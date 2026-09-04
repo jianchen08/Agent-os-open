@@ -237,6 +237,7 @@ export function toRjsf(fields: UIInputFormField[]): {
   const properties: Record<string, unknown> = {}
   const uiSchema: UiSchema = {}
   const required: string[] = []
+  const conditional: Record<string, unknown>[] = []
 
   for (const field of fields) {
     const { prop, ui } = fieldToRjsfProperty(field)
@@ -245,6 +246,18 @@ export function toRjsf(fields: UIInputFormField[]): {
     properties[field.name] = prop
     uiSchema[field.name] = ui
     if (field.required) required.push(field.name)
+    // 条件必填 → ajv if/then：依赖字段值命中 equals 时本字段进入 required。
+    // if 分支必须带 required:[依赖字段]——properties 约束对缺席属性恒真，
+    // 缺它会在依赖字段未填时也误触发条件必填
+    if (field.requiredWhen) {
+      conditional.push({
+        if: {
+          properties: { [field.requiredWhen.field]: { const: field.requiredWhen.equals } },
+          required: [field.requiredWhen.field],
+        },
+        then: { required: [field.name] },
+      })
+    }
   }
 
   return {
@@ -252,6 +265,7 @@ export function toRjsf(fields: UIInputFormField[]): {
       type: 'object',
       properties: properties as RJSFSchema['properties'],
       ...(required.length > 0 ? { required } : {}),
+      ...(conditional.length > 0 ? { allOf: conditional } : {}),
     },
     uiSchema,
   }

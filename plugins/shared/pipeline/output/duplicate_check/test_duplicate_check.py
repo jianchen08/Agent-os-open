@@ -184,6 +184,24 @@ class TestSignatureCounting:
         result = _execute(plugin, state)
         assert result.state_updates["router.duplicate_count"] == 0
 
+    def test_default_window_holds_eight_signatures(self) -> None:
+        """默认窗口 8 条：7 条其他签名后同参复现仍检出，再压 8 条后滚出不再计数。"""
+        plugin = DuplicateCheckPlugin(config={"max_duplicate_calls": 99})
+        state = _tool_state([{"name": "t", "arguments": {"q": "a"}}])
+        _merge_updates(state, _execute(plugin, state).state_updates)  # a 入窗
+        for i in range(7):  # 7 条其他签名，a 仍在 8 条窗口内
+            state["raw_tool_calls"] = [{"name": "t", "arguments": {"q": f"b{i}"}}]
+            _merge_updates(state, _execute(plugin, state).state_updates)
+        state["raw_tool_calls"] = [{"name": "t", "arguments": {"q": "a"}}]
+        _merge_updates(state, _execute(plugin, state).state_updates)
+        assert state["router.duplicate_count"] == 1  # 窗口内复现
+        for i in range(8):  # 再压 8 条，a 滚出窗口
+            state["raw_tool_calls"] = [{"name": "t", "arguments": {"q": f"c{i}"}}]
+            _merge_updates(state, _execute(plugin, state).state_updates)
+        state["raw_tool_calls"] = [{"name": "t", "arguments": {"q": "a"}}]
+        result = _execute(plugin, state)
+        assert result.state_updates["router.duplicate_count"] == 0  # 已滚出
+
 
 class TestMultiToolWindow:
     """多工具盲区回归（08-30）：旧整组算法对以下场景恒不计数，永不拦截。"""
@@ -332,10 +350,11 @@ class TestEscalation:
         assert ops[0].get("seq") is None  # 空 messages → append（缺 seq=append 契约）
         assert ops[0]["msg"]["role"] == "user"
         assert "[DuplicateCheck]" in ops[0]["msg"]["content"]
-        assert "1 次" in ops[0]["msg"]["content"]  # 计数入提示
+        assert "重复了 1 次" in ops[0]["msg"]["content"]  # 重复计数入提示
+        assert "第 2 次" in ops[0]["msg"]["content"]  # 含首次的总出现次数 = count+1
 
     def test_level1_hint_template_escalates_wording(self) -> None:
-        """性质断言：计数升高提示措辞升级（第 2 次出现「立即停止」）。"""
+        """性质断言：计数升高提示措辞升级（第 3 次出现「立即停止」）。"""
         plugin = DuplicateCheckPlugin(config={"max_duplicate_calls": 99})
         state = _tool_state([{"name": "bash", "arguments": {"cmd": "ls"}}])
         _merge_updates(state, _execute(plugin, state).state_updates)  # 写入签名
@@ -345,7 +364,10 @@ class TestEscalation:
         assert "立即停止" not in content1
         state["messages"] = []
         _merge_updates(state, _execute(plugin, state).state_updates)  # count=2 → 提示 2
-        assert "立即停止" in state["messages"][-1]["content"]
+        content2 = state["messages"][-1]["content"]
+        assert "立即停止" in content2
+        assert "重复调用 2 次" in content2
+        assert "第 3 次" in content2  # 序数随计数递增（count+1）
 
     def test_level2_intercepts_and_reroutes(self) -> None:
         """第二级：计数≥阈值 → 清空调用、计数归零、拦截+1、路由回 LLM。"""
@@ -415,6 +437,7 @@ class TestEscalation:
         assert "raw_result" not in result.state_updates
         ops = _hint_ops(result.state_updates)
         assert ops and "相似内容" in ops[0]["msg"]["content"]
+        assert "连续 2 次" in ops[0]["msg"]["content"]  # count=1 → 连续相似输出总轮数 2
 
     def test_repetitive_level3_terminates(self) -> None:
         """输出重复第三级：拦截数达硬上限 → 终止（与工具路径同构）。"""

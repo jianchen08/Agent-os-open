@@ -67,7 +67,7 @@ git push origin feature/your-feature-name
 
 - ✅ **遵循 PR 模板**（见 [PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md)）
 - ✅ **通过所有 CI 检查**（Lint / Type Check / Unit Test）
-- ✅ **新代码覆盖率 ≥ 80%**
+- ✅ **改动行覆盖率 100%**（diff coverage 门禁；特殊情形可用 `[skip-diff-cov]` 逃生口并说明原因）
 - ✅ **无新增 Lint warning**（`--max-warnings 0`）
 - ✅ **更新相关文档**（如修改了 API、配置、架构）
 - ✅ **commit message 遵循 [Conventional Commits](https://www.conventionalcommits.org/)**
@@ -132,7 +132,7 @@ docs(readme): update quick start for Docker
 
 - **新功能必须附带测试**（单元 + 集成）
 - **Bug 修复必须先写失败用例**（TDD 修复流程）
-- **覆盖率 ≥ 80%**（行覆盖 + 分支覆盖）
+- **改动行覆盖率 100%**（diff coverage；整体覆盖率基线棘轮只升不降）
 - **测试名描述意图**：`should_reject_expired_token` 而非 `test_1`
 
 ### TDD 分层规范（强制）

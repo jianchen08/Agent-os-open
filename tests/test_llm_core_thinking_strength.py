@@ -2,10 +2,12 @@
 """llm_core 思考强度 → 模型参数路由测试（思考强度全链路）。
 
 推演链：思考强度需求 → 决策「强度随 user_input 透传，llm_core 在请求构造时
-覆盖模型参数（temperature/max_tokens/reasoning_effort）」→ 功能点：
-- resolve_thinking_strength_params：off/缺失 → 不覆盖；low/medium/high →
-  对应参数集（与前端 STRENGTH_TO_PARAMS 对齐）
-- _call_llm 集成：state.thinking_strength 非空时 kwargs 被覆盖并最终传给 adapter
+覆盖思考参数」→ 裁定（2026-09-03）：所有映射显式，不在代码里靠推断——
+- resolve_thinking_strength_params：厂商级映射（providers.<name>）> 模型级
+  手填（models.<id>）；无显式映射 → 不覆盖（无内置兜底表）
+- 白名单过滤：temperature/max_tokens 等采样参数永不随强度覆盖
+- _call_llm 集成：state.thinking_strength 非空且映射命中时 kwargs 被覆盖并
+  最终传给 adapter
 """
 
 from __future__ import annotations
@@ -36,11 +38,11 @@ from llm_core.plugin import LLMCore, resolve_thinking_strength_params  # noqa: E
 
 # ─────────────────── 纯函数：强度 → 参数映射 ───────────────────
 
-def test_strength_params_mapping() -> None:
-    """low/medium/high → 思考参数集（仅 reasoning_effort）；off/未知/空 → None。"""
-    assert resolve_thinking_strength_params("low") == {"reasoning_effort": "low"}
-    assert resolve_thinking_strength_params("medium") == {"reasoning_effort": "medium"}
-    assert resolve_thinking_strength_params("high") == {"reasoning_effort": "high"}
+def test_no_mapping_means_no_override() -> None:
+    """无任何显式映射 → 任何档位都不覆盖（无代码内置兜底，映射全显式）。"""
+    for strength in ("low", "medium", "high"):
+        assert resolve_thinking_strength_params(strength) is None
+        assert resolve_thinking_strength_params(strength, None, provider_params=None) is None
     assert resolve_thinking_strength_params("off") is None
     assert resolve_thinking_strength_params("") is None
     assert resolve_thinking_strength_params("ultra") is None
@@ -59,17 +61,14 @@ def test_strength_params_temperature_max_tokens_ignored() -> None:
     assert resolve_thinking_strength_params("high", model_params) == {
         "reasoning_effort": "max"
     }
-    # thinking 开关属于思考参数，保留；与内置 effort 字段级合并（模型字段覆盖）
+    # thinking 开关属于思考参数，保留；映射直接生效（无内置表字段合并）
     model_params2 = {"medium": {"thinking": {"type": "enabled"}, "temperature": 0.5}}
     merged = resolve_thinking_strength_params("medium", model_params2)
-    assert merged == {
-        "reasoning_effort": "medium",
-        "thinking": {"type": "enabled"},
-    }
+    assert merged == {"thinking": {"type": "enabled"}}
 
 
 def test_strength_params_model_config_override() -> None:
-    """模型配置了 thinking_strength_params → 按模型路由规则覆盖（逐档）。"""
+    """模型配置了 thinking_strength_params → 按模型路由规则覆盖（逐档直取）。"""
     model_params = {
         "low": {"reasoning_effort": "low"},
         "medium": {"reasoning_effort": "medium"},
@@ -86,15 +85,94 @@ def test_strength_params_model_config_override() -> None:
     assert resolve_thinking_strength_params("nope", model_params) is None
 
 
-def test_strength_params_partial_model_config_falls_back() -> None:
-    """模型只配置了部分档位 → 未配置的档位回退内置默认表（不丢覆盖能力）。"""
+def test_strength_params_partial_model_config_missing_tier_no_override() -> None:
+    """模型只配置了部分档位 → 未配置的档位不覆盖（显式映射缺失即无操作，不回退代码）。"""
     model_params = {"high": {"reasoning_effort": "max"}}
     assert resolve_thinking_strength_params("high", model_params) == {
         "reasoning_effort": "max"
     }
-    # low 未配置 → 回退内置默认
-    assert resolve_thinking_strength_params("low", model_params) == {
-        "reasoning_effort": "low",
+    # low 未配置 → 不覆盖
+    assert resolve_thinking_strength_params("low", model_params) is None
+
+
+# ─────────────── 厂商级映射（providers.<name>.thinking_strength_params）───────
+
+def test_provider_params_map_directly_without_builtin_merge() -> None:
+    """厂商级映射命中档位 → 直接映射（厂商参数即上游真实契约）。"""
+    provider_params = {
+        "high": {"thinking": {"type": "enabled"}},
+        "low": {"thinking": {"type": "disabled"}},
+    }
+    assert resolve_thinking_strength_params("high", provider_params=provider_params) == {
+        "thinking": {"type": "enabled"}
+    }
+    assert resolve_thinking_strength_params("low", provider_params=provider_params) == {
+        "thinking": {"type": "disabled"}
+    }
+
+
+def test_provider_params_filtered_by_whitelist() -> None:
+    """厂商映射同样只透传思考参数（采样参数不随强度覆盖）。"""
+    provider_params = {"high": {"thinking": {"type": "enabled"}, "temperature": 0.3}}
+    assert resolve_thinking_strength_params("high", provider_params=provider_params) == {
+        "thinking": {"type": "enabled"}
+    }
+
+
+def test_provider_params_wins_over_model_manual_params() -> None:
+    """厂商级映射优先于模型手填：同一档位厂商值生效。"""
+    provider_params = {"high": {"thinking": {"type": "enabled"}}}
+    manual = {"high": {"reasoning_effort": "max"}}
+    assert resolve_thinking_strength_params(
+        "high", manual, provider_params=provider_params
+    ) == {"thinking": {"type": "enabled"}}
+
+
+def test_provider_params_missing_strength_falls_through() -> None:
+    """off/未知档位 → 不覆盖；厂商映射缺档位 → 回退手填，再缺 → 不覆盖。"""
+    provider_params = {"high": {"thinking": {"type": "enabled"}}}
+    manual = {"low": {"reasoning_effort": "low"}}
+    assert resolve_thinking_strength_params("off", provider_params=provider_params) is None
+    assert resolve_thinking_strength_params("ultra", provider_params=provider_params) is None
+    # 厂商映射缺 low 档 → 手填参与
+    assert resolve_thinking_strength_params(
+        "low", manual, provider_params=provider_params
+    ) == {"reasoning_effort": "low"}
+    # 厂商映射缺 low 档、无手填 → 不覆盖（显式映射缺失即无操作）
+    assert resolve_thinking_strength_params(
+        "low", None, provider_params=provider_params
+    ) is None
+
+
+def test_llm_yaml_carries_vendor_strength_mappings() -> None:
+    """真实配置源：llm.yaml providers 段承载厂商级映射（厂商事实唯一落点）。"""
+    import yaml
+
+    data = yaml.safe_load(
+        (_REPO_ROOT / "config" / "models" / "llm.yaml").read_text(encoding="utf-8")
+    )
+    providers = data["providers"]
+    glm_params = {
+        "high": {"thinking": {"type": "enabled"}},
+        "low": {"thinking": {"type": "disabled"}},
+        "medium": {"thinking": {"type": "enabled"}},
+    }
+    assert providers["zhipu"]["thinking_strength_params"] == glm_params
+    assert providers["zhipu_coding"]["thinking_strength_params"] == glm_params
+    assert providers["minimax"]["thinking_strength_params"] == {
+        "high": {"thinking": {"type": "adaptive"}},
+        "low": {"thinking": {"type": "disabled"}},
+        "medium": {"thinking": {"type": "adaptive"}},
+    }
+    assert providers["deepseek"]["thinking_strength_params"] == {
+        "high": {"reasoning_effort": "max"},
+        "low": {"reasoning_effort": "low"},
+        "medium": {"reasoning_effort": "medium"},
+    }
+    assert providers["openai"]["thinking_strength_params"] == {
+        "high": {"reasoning_effort": "high"},
+        "low": {"reasoning_effort": "low"},
+        "medium": {"reasoning_effort": "medium"},
     }
 
 
@@ -149,9 +227,9 @@ def _make_ctx(state: dict[str, Any]) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_call_llm_applies_thinking_strength_params() -> None:
-    """state.thinking_strength=high → 仅覆盖思考参数（reasoning_effort），
-    temperature/max_tokens 保持 default_params 不变。"""
+async def test_call_llm_without_mapping_strength_is_noop() -> None:
+    """无任何显式映射 + strength=high → 不覆盖任何参数（映射全显式，无代码兜底），
+    采样参数保持 default_params。"""
     caller = _CapturingCaller()
     plugin = _make_plugin(caller)
     ctx = _make_ctx(
@@ -171,20 +249,21 @@ async def test_call_llm_applies_thinking_strength_params() -> None:
     args = caller.captured_args
     # capability 短名契约：传全名会被 SDK 拼成双重前缀（真机 not implemented）
     assert caller.captured_method == "invoke"
-    assert args["reasoning_effort"] == "high"
-    # 采样参数不随强度覆盖（保持 default_params）
+    assert "reasoning_effort" not in args
+    assert "thinking" not in args
     assert args["temperature"] == 0.7
     assert args["max_tokens"] == 4096
 
 
 @pytest.mark.asyncio
 async def test_call_llm_applies_model_config_strength_params() -> None:
-    """模型级 thinking_strength_params（llm.yaml）优先于内置表；只覆盖思考参数。"""
+    """模型级 thinking_strength_params（llm.yaml）按档直取（provider 未配置厂商
+    映射场景）；只覆盖思考参数。"""
     caller = _CapturingCaller()
     plugin_mod.set_capability_caller(caller)
     plugin = LLMCore(
         {
-            "provider": "deepseek",
+            "provider": "openai",
             "model_name": "deepseek-v4-flash",
             "default_params": {"temperature": 0.7, "max_tokens": 100000},
             "thinking_strength_params": {
@@ -262,3 +341,41 @@ async def test_call_llm_off_keeps_defaults() -> None:
     args = caller.captured_args
     assert args["temperature"] == 0.7
     assert "reasoning_effort" not in args
+
+
+@pytest.mark.asyncio
+async def test_call_llm_applies_vendor_params_for_glm() -> None:
+    """厂商级映射（桥接注入 provider_thinking_strength_params）→ high 直接映射
+    GLM thinking 二态，reasoning_effort 不出现。"""
+    caller = _CapturingCaller()
+    plugin_mod.set_capability_caller(caller)
+    plugin = LLMCore(
+        {
+            "provider": "zhipu",
+            "model_name": "glm-5.3-flash",
+            "default_params": {"temperature": 0.7, "max_tokens": 4096},
+            "provider_thinking_strength_params": {
+                "high": {"thinking": {"type": "enabled"}},
+                "low": {"thinking": {"type": "disabled"}},
+                "medium": {"thinking": {"type": "enabled"}},
+            },
+        }
+    )
+    ctx = _make_ctx(
+        {
+            "thinking_strength": "high",
+            "pipeline_id": "p1",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    )
+
+    await plugin._call_llm(
+        [{"role": "user", "content": "hi"}],
+        ctx,
+        stream=False,
+    )
+
+    args = caller.captured_args
+    assert args["thinking"] == {"type": "enabled"}
+    assert "reasoning_effort" not in args
+    assert args["temperature"] == 0.7

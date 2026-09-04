@@ -932,6 +932,7 @@ class TestTaskEvaluateFunc:
         task = MagicMock()
         task.status = TaskStatus.RUNNING
         task.result = None
+        task.metadata = {"ws_meta": {"mode": "plain", "path": "C:/ws/t1"}}
         service = MagicMock()
         service.get_task.return_value = task
         service.move_to_evaluating = AsyncMock()
@@ -955,6 +956,7 @@ class TestTaskEvaluateFunc:
     ) -> None:
         task = MagicMock()
         task.status = TaskStatus.RUNNING
+        task.metadata = {"ws_meta": {"mode": "plain", "path": "C:/ws/t1"}}
         service = MagicMock()
         service.get_task.return_value = task
         service.move_to_evaluating = AsyncMock(side_effect=RuntimeError("transition invalid"))
@@ -971,6 +973,7 @@ class TestTaskEvaluateFunc:
     ) -> None:
         task = MagicMock()
         task.status = TaskStatus.EVALUATING
+        task.metadata = {"ws_meta": {"mode": "plain", "path": "C:/ws/t1"}}
         service = MagicMock()
         service.get_task.return_value = task
         service.complete_evaluation = AsyncMock(side_effect=RuntimeError("write failed"))
@@ -978,3 +981,27 @@ class TestTaskEvaluateFunc:
         out = await mod.task_evaluate_func({"action": "evaluate_single", "task_id": "t1"})
         assert out["success"] is False
         assert out["error_code"] == "EVAL_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_worktree_merge_gate_failure_marks_failed(
+        self, mod: Any, patch_service_access: Any, monkeypatch: Any, tmp_path: Any
+    ) -> None:
+        """回归（2026-09-04 裁定）：worktree 合并门控失败 → 任务标记 failed，
+        禁止绕门置完成（产物会留在未合并副本里静默丢失）。"""
+        task = MagicMock()
+        task.status = TaskStatus.EVALUATING
+        task.metadata = {"ws_meta": {"mode": "worktree", "path": str(tmp_path / "nope_wt")}}
+        service = MagicMock()
+        service.get_task.return_value = task
+        service.complete_evaluation = AsyncMock()
+        patch_service_access["service"] = service
+        state_writer = AsyncMock()
+        monkeypatch.setattr(mod, "_state_writer", state_writer)
+        out = await mod.task_evaluate_func({"action": "auto_complete", "task_id": "t1"})
+        assert out["success"] is False
+        assert out["error_code"] == "MERGE_GATE_FAILED"
+        # passed=False 落库（任务标 failed），状态写含 failed 与错误
+        assert service.complete_evaluation.await_count == 1
+        assert service.complete_evaluation.call_args.kwargs.get("passed") is False
+        assert state_writer.await_count == 1
+        assert state_writer.await_args.args[1]["task.status"] == "failed"

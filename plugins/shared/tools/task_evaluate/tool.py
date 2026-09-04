@@ -197,6 +197,31 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:  # noqa:
         if inputs.get("result") is not None:
             task.result = inputs["result"]
 
+        # worktree 合并门控（2026-09-04 裁定）：completed 前必须合并成功。
+        # ws_meta 数据源取 task.metadata 兜底（本函数无 state 聚合行读面）；
+        # 合并失败 = 任务标记 failed，禁止绕门置完成（worktree 产物会留在
+        # 未合并副本里静默丢失）。
+        ws_meta = task.metadata.get("ws_meta") if isinstance(task.metadata, dict) else {}
+        merge_error = await asyncio.to_thread(
+            worktree_merge.merge_worktree_before_complete, task_id, ws_meta
+        )
+        if merge_error:
+            with contextlib.suppress(Exception):
+                await task_service.complete_evaluation(task_id, passed=False)
+                await _write_task_state(
+                    task_id,
+                    {
+                        "task.status": "failed",
+                        "task.ended_at": _now_iso(),
+                        "task.error": merge_error,
+                    },
+                )
+            return {
+                "success": False,
+                "error_code": "MERGE_GATE_FAILED",
+                "error": f"评估通过但完成前工作区合并失败，任务标记为 failed: {merge_error}",
+            }
+
         await task_service.complete_evaluation(task_id, passed=True)
         await _write_task_state(
             task_id,
@@ -851,6 +876,21 @@ class TaskEvaluateTool(BuiltinTool):
                 "[TaskEvaluate] 任务 %s 已失败但评估通过，尝试恢复为完成",
                 task.id,
             )
+            # 恢复为完成同样必须过合并门控（2026-09-04 裁定：合并成功才准
+            # 置完成）——失败任务的工作区可能仍是 worktree，绕门恢复会把
+            # worktree 产物留在未合并的副本里。
+            merge_error = await self._try_merge_before_complete(task)
+            if merge_error:
+                logger.error(
+                    "[TaskEvaluate] 恢复完成前合并门控失败，保持 failed: task_id=%s, error=%s",
+                    task.id,
+                    merge_error,
+                )
+                return create_failure_result(
+                    error=f"评估通过但完成前工作区合并失败，任务保持 failed: {merge_error}",
+                    error_code="MERGE_GATE_FAILED",
+                    metadata={"task_failed": True},
+                )
             try:
                 eval_data = self._build_result_data(eval_result)
                 await task_service.recover_to_completed(task.id, result=eval_data)

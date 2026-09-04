@@ -50,17 +50,17 @@
 ### 📊 项目规模
 
 - **Rust 内核**：约 9.5 万行（`kernel/`，其中约 4.0 万行为 Rust 测试——`tests/` 目录 + 内联 `#[cfg(test)]` 模块）
-- **Python 插件**：约 16.6 万行（`plugins/`；当前在用 81 个插件，盘面共 97 份 `plugin.json` 清单）
+- **Python 插件**：约 16.8 万行（`plugins/`；当前在用 80 个插件，盘面共 97 份 `plugin.json` 清单）
 - **前端代码**：约 14.3 万行（`frontend/src/`）
-- **Python 测试**：约 12.3 万行（`tests/` + 插件目录就地测试）
-- **工具插件**：26 份 manifest（18 个自研工具插件 + 8 个预置外部 MCP 接入清单，共 41 个工具声明；另可零代码接入任意 MCP 外部工具）
+- **Python 测试**：约 12.4 万行（`tests/` + 插件目录就地测试）
+- **工具插件**：26 份 manifest（18 个自研工具插件 + 8 个预置外部 MCP 接入清单，共 58 个工具声明；另可零代码接入任意 MCP 外部工具）
 - **接入端**：Web 前端（直连内核）
 
 ---
 
 ## 🎬 演示视频
 
-<a href="https://www.bilibili.com/video/BV1d1NV62Efh">
+<a href="https://www.bilibili.com/video/BV1wrbF6jEJv">
   <img src="https://img.shields.io/badge/▶_观看演示视频-B站-FF69B4?style=for-the-badge&logo=bilibili&logoColor=white" alt="灵汐 AgentOS 演示视频" />
 </a>
 
@@ -109,7 +109,7 @@ Agent 配置（YAML）mtime 缓存热生效，改提示词/工具白名单无需
 几乎所有行为都能通过 YAML 定制：Agent 身份、提示词、工具白名单、约束、模型选择全部可配——"一切皆插件 + 配置化"的直接结果，改完即生效（见亮点 2）。
 
 ### 4. 工具系统——契约化设计，开箱即用
-统一契约（`input_schema` + `output_schema` + `render` 渲染意图）：内核按 `output_schema` fail-closed 校验结果，前端按 `render` 渲染结果卡片，`tool_ids` 白名单精确控制 LLM 可见面。内置 18 个自研工具插件 + 8 个预置外部 MCP 接入（共 41 个工具：文件、Shell、代码搜索、浏览器、网络、记忆、媒体生成、IDE 集成），任意第三方 MCP 服务零代码接入。
+统一契约（`input_schema` + `output_schema` + `render` 渲染意图）：内核按 `output_schema` fail-closed 校验结果，前端按 `render` 渲染结果卡片，`tool_ids` 白名单精确控制 LLM 可见面。内置 18 个自研工具插件 + 8 个预置外部 MCP 接入（共 58 个工具声明：文件、Shell、代码搜索、浏览器、网络、记忆、任务、审批、媒体生成、IDE 集成），任意第三方 MCP 服务零代码接入。
 
 ### 5. 记忆系统——对话经验的沉淀与检索
 hindsight 记忆插件承载：对话经验自动沉淀（retain）、按需检索（recall）、文档导入，LLM 经 memory 工具读写。
@@ -154,7 +154,8 @@ hindsight 记忆插件承载：对话经验自动沉淀（retain）、按需检�
 
 > **架构说明**：0.2 为 Rust 内核（`kernel/`）+ Vite 前端直连内核架构：`start_web_02.*` 编译并启动
 > `agentos-kernel`（:9100，宿主机进程）与 Vite 前端 dev server（:6390，反代到内核）；
-> `docker compose` 按需提供 Redis 容器（启动脚本仅拉起其中 redis 服务，见根目录 docker-compose.yml）。
+> `docker compose` 按需提供 Redis 容器（Linux/macOS 启动脚本会拉起其中 redis 服务；
+> Windows 脚本不涉及 Redis）。
 
 ### 方式一：Windows 一键启动（推荐）
 
@@ -163,10 +164,10 @@ hindsight 记忆插件承载：对话经验自动沉淀（retain）、按需检�
 copy .env.example .env
 ::    编辑 .env，填入 LLM API Key（参考 config/models/llm.yaml）
 
-:: 2.（可选）配置 WSL2 + docker-ce 环境供 Redis 容器使用；已配置可跳过
+:: 2.（可选）配置 WSL2 + docker-ce 环境（bash 容器隔离等高风险执行路径使用；已配置可跳过）
 install_native_docker.bat
 
-:: 3. 启动项目（编译 Rust 内核 + 启动内核 :9100 / 前端 :6390 / Redis）
+:: 3. 启动项目（编译 Rust 内核 + 启动内核 :9100 / 前端 :6390）
 start_web_02.bat
 
 :: 停止
@@ -212,8 +213,6 @@ chmod +x start_web_02.sh
 :: 实例一（默认端口 9100/6390）：直接双击 start_web_02.bat
 
 :: 实例二（不同端口）：在另一个目录的命令行里
-set FRONTEND_HOST_PORT=5290
-set REDIS_HOST_PORT=6691
 set AGENTOS_KERNEL_PORT=9101
 set AGENTOS_FRONTEND_PORT=6391
 start_web_02.bat

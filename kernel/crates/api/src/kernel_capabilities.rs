@@ -49,6 +49,9 @@ pub(crate) const RESERVED_STATE_KEYS: &[&str] = &[
     "run_id",
     "execution_context",
     "message_id",
+    // 实际状态内核持有（2026-09-03 双状态裁定）：预期层经控制键表达，
+    // run_status 由引擎折算写回，overlay 直写即协议错误。
+    "run_status",
 ];
 
 /// 一个 namespace 的内核能力契约（对应 config/kernel_capabilities/ 下一个文件）。

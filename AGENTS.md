@@ -78,7 +78,7 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   （plugins/shared / kernel/crates / frontend/src）时，同刀清该模块对应的治理债：
   Python 模块 mypy 错误不增、清了就下调 `.github/mypy-baseline.txt`（现值 0，
   只减不增）；修好基线内既有红测试就收紧 `.github/pytest-failure-baseline.txt`
-  （plugins-coverage 19 / plugins-heavy 0）；新代码带测试（覆盖率棘轮门禁
+  （现值 plugins-coverage 0 / plugins-heavy 0）；新代码带测试（覆盖率棘轮门禁
   兜底，2026-08-20 ADR：整体覆盖率基线只升不降且**略高于实测留压力**——
   Python 64.0/Rust 86.0/前端待校准，改动行覆盖率 100%（diff coverage，
   `[skip-diff-cov]` 逃生口），检查器 `scripts/check_*_coverage_baseline.py` +

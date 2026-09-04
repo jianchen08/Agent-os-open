@@ -30,6 +30,10 @@ pub const VOLATILE_RUN_KEYS: &[&str] = &[
     "run_id",
     "suspended",
     "ended",
+    // run_status 是内核持有的实际状态（2026-09-03 双状态裁定）：每轮派发
+    // 注入 running、收束由引擎按终态映射单点改写——快照恢复若不剥离，上一
+    // run 的终态（如 completed）会顶掉本轮 running 起点，轮中可观测性失真。
+    "run_status",
     "should_stop",
     "router.stop_reason",
     "thinking_strength",

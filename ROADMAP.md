@@ -25,7 +25,7 @@
 
 - 🧬 **可进化** —— 复盘系统（`trigger_review` → `review_agent` → 经验报告）已上线，自进化闭环已具备；插件化越彻底，复盘产出能落到的可优化面越广，自进化能力越强。后续版本持续打磨这条回路（贯穿全版本）
 - 🔁 **全能闭环** —— 创意生产核心交互：AI 生产制品 → 人类审批 → 批注反馈 → AI 修改 → 交付。文本审批闭环在 0.2.0 率先优化，多模态审批（图片/视频/3D）随对应场景后续补全
-- 🔌 **可嵌入** —— 0.2.0 核心地基层一并做透：管道引擎执行模型与 AdrEngine 重设计（统一插件模型 + 串行循环 + state 契约/隔离 + 引擎回归调度器/账本 + SQLite 四表 + 多分支回滚）+ 第三方插件协议（含内部模块完全插件化）+ 宿主接入 + 前端 Schema 驱动 + 记忆检索/注入补全 + 路由方式收敛 + 多租户契约预留；再跨平台打包分发（0.3.0）
+- 🔌 **可嵌入** —— 0.2.0 核心地基层一并做透：最小内核 + 全插件（统一插件协议 + 管道引擎路由 DSL + SQLite 存储）+ 第三方插件协议（含内部模块完全插件化）+ 宿主接入 + 前端 Schema 驱动 + 审批闭环 + 记忆系统 + 多租户契约预留；再跨平台打包分发（0.3.0）
 - 👥 **多用户** —— 0.5.0 完整实现多租户：每用户独立的插件/配置/记忆/人设组合，RBAC 权限 + 凭据保险库 + 插件市场分享；单实例多租户与独立实例混合部署
 - 🎭 **可扮演** —— 从任务型助手走向可导入角色卡、有人设、有形象、能进入游戏世界的智能体（0.6.0 地基 → 0.7.0 形象/NPC）
 - 🛠️ **可即用** —— 从"框架"走向"开箱即用的办公技能与 Agent 团队"（0.4.0）
@@ -98,205 +98,27 @@
 
 > 多租户是**内核**,不是插件——它和管道引擎同级,为插件提供「为谁执行、能用什么」的租户上下文。插件感知租户(用租户的配置/凭据),但不负责隔离(隔离由内核完成)。
 
-#### 〇、管道引擎与插件执行模型（内核地基决策）
+#### 功能清单（0.2 已交付）
 
-> 本版本在内核地基层固化一组贯穿性架构决策，是「第三方插件协议」「路由收敛」「多租户」等其它功能小节共同依赖的**最底层约定**——后面几项都建立在它之上。决策详情见 `docs/working/0.2插件体系核心决策.md`（决策 1–10）与 `docs/working/adr_engine_design.md`（ADR 引擎重设计）；本节为路线图层面的固化与交叉引用，**不含实现细节**，排在「一」之前。
+- **最小内核 + 一切皆插件**：内核只是执行基座（管道解释执行、能力注册表、插件装载、存储、会话/租户/HTTP 基础设施）；LLM 调用、记忆、评估、审批、触发器、工具、通道、主题、乃至 Agent 配置的加载都由插件承载——改任何业务行为 = 加/改插件或配置，不动内核。
+- **管道引擎**：引擎只解释一份管道 YAML（`config/pipelines/autonomous.yaml`，所有 Agent 共用，差异由 Agent 配置体现），维护共享 `state` 与循环体调度（init → main[prepare/core/post] → exit）；出口转移由路由 DSL（`when`/`then`/`set`）在加载期编译、运行时零解析；管道配置热重载（mtime 指纹，改完无需重启内核）。
+- **统一插件协议**：一个插件 = 一个目录 + 一份 `plugin.json`（声明即注册、双根发现、加载期校验、`deny_unknown_fields`）；watcher 全链热生效（新插件自动发现注册、manifest 变更重注册、Python 代码改动 respawn）；工具 / 连接器 / 通道 / Agent 配置加载等内部模块全部收敛到同一协议。
+- **宿主三轨**：Python sidecar（独立进程，MCP over stdio，uv venv 隔离，懒启动/空闲回收/崩溃自愈）／Rust cdylib 原生（进程内零 IPC，高频管道步骤晋升轨）／external MCP（零代码直连第三方 MCP 服务）。
+- **工具系统**：26 份工具 manifest（18 个自研 + 8 个预置外部 MCP 接入，58 个工具声明）；统一契约 `input_schema` + `output_schema` + `render`（执行后 fail-closed 校验、前端按 render 意图渲染）；LLM 可见面经「启用档案 → 能力注册 → Agent `tool_ids` 白名单」三层过滤。
+- **流式协议**：LLM 正文/思考/工具调用增量统一为 8 事件块协议（`block_start` → `text_delta` / `reasoning_delta` / `tool_call_delta` → `block_end` → `usage` → `finish`），单一真值源 `config/kernel_capabilities/streaming.json`；插件可声明 `capabilities.streaming` 发射自定义事件。
+- **任务域**：任务创建/派发统一走 `task_submit` 工具（前端任务面板 = 该工具的参数表单，同一通道）；提交即带评估指标（acceptance criteria），强制评估闸门——无评估证据不落 completed；任务状态单一真值 = pipeline state。
+- **项目（Project）**：方案规划 → 阶段执行 → 人类审查 → 完成验收闭环；项目 = 用户创建的真实文件夹 + 登记，作为任务树分组锚点；子任务经 `project_id` 自动继承挂靠。
+- **审批闭环**：choice / conversation 双模式（human-interaction 工具阻塞等待用户响应）+ 审批结果反馈注入 + 任务打回重做，构成"生成 → 审批 → 反馈 → 迭代"质量闸。
+- **记忆系统**：`hindsight_memory` 插件承载（`hindsight.retain` 沉淀 / `recall` 检索 / `reflect` / `summarize` / `import_document` 文档导入），LLM 经 `memory` 工具读写。
+- **隔离与工作区**：任务默认运行在独立工作区（默认文件夹隔离 `workspace/{task_id}`，高风险执行路径 Docker 容器隔离；多任务场景 git worktree 分叉独立工作目录）。
+- **触发器**：定时（Cron）/ 事件 / 间隔触发，`trigger_setup` / `trigger_review` 工具注册管理，可绑定特定管道，无人值守运行。
+- **Agent 体系**：Agent = `config/agents/` 下的 YAML（人设、提示词、工具白名单、约束全配置化）；`agent_id` 即执行上下文键，由管道插件按键展开（含工具面）；主管（L1）→ 编排（L2）→ 执行（L3）多层协作。
+- **配置与热生效**：ConfigCenter 单一真相源（remote > env > yaml > manifest > hardcode）；Agent 配置 mtime 热生效、管道配置热重载、插件全链热生效，改动无需重启。
+- **存储**：SQLite（默认 `agentos_kernel.db`，driver 化可切换；runs / messages / traces / blobs 四表 + pipeline_state）。
+- **主题与前端定制**：7 套编译期预设主题 + 3 套动态 JSON 主题 + 插件 `contributes.themes` 主题/皮肤（skin）；配置可视化（YAML 字段自动映射表单控件）、插件设置页、ui_schema 前端贡献面。
+- **多租户隔离地基**：TenantContext 贯穿管道执行（含异步路径）+ 数据访问统一咽喉点按 `tenant_id` 强制过滤，单租户场景无感；多租户运营（创建/切换/RBAC/凭据保险库）留待 0.5.0。
 
-**① 插件统一执行模型**（核心决策 1–4）
-
-| 决策点 | 0.2 决策 | 否决项（防止回退） |
-|--------|----------|--------------------|
-| 插件本质 | 所有插件（管道 / 工具 / 触发器 / 钩子 / 记忆服务）共用同一模型：`输入 → 输出 + 副作用`，没有第二种 | ❌ 按类型区分多套执行模型 |
-| 执行特征归属 | 串行 / 并行 / 异步 / 同步是**引擎的属性**，不是插件的属性；插件不声明自己被怎么调度 | ❌ 在 trait 上标注 `serial`/`parallel`/`async` |
-| 统一契约 | 所有插件满足同一签名 `execute(Value) -> Value`；类型安全由**消费者**负责，不在 trait 层强制 | ❌ 多个特化 trait；❌ 单 trait + 枚举信封 |
-| 消费者 / 执行者分离 | 执行者只管产出输出；消费者决定调谁 / 传什么 / 怎么用输出；**消费者用错就报错，不兜底、不兼容、不猜测** | ❌ 执行者反向理解调用方；❌ 系统层兜底消费者错误 |
-
-**② 引擎核心循环与状态契约**（核心决策 5–8）
-
-| 决策点 | 0.2 决策 | 否决项 |
-|--------|----------|--------|
-| 管道引擎执行语义 | **严格串行循环**：`Input链(串行) → Core → Output链(串行)`，一步执行 + state 合并完才进下一步，无异步、无并发、无「等所有插件返回」 | ❌ 管道内并行执行插件链（破坏 state 依赖语义） |
-| 工具执行器执行语义 | **并行调度**：LLM 返回多个 tool_calls 时并行发起、收集结果交回管道 | ❌ 工具串行执行（无谓损失并行收益） |
-| state 归属 | state 是**管道引擎的固定 Value 契约**，只存在于管道引擎内部；工具 / 记忆 / 评估插件不接触 state，其状态在各自存储里 | ❌ 全局共享 state；❌ 工具读写 state |
-| state 隔离 | 每个管道（含子管道）独立 state；「共享」是消费者**显式编排**的效果（父管道显式传输入、子管道显式交输出），不是隐式机制 | ❌ 子管道继承父 state；❌ 全局 state 树 |
-| 字段 schema | `FieldSpec` 只对管道插件存在（声明 state 字段）；工具插件声明 args/result JSON Schema，不碰 state | ❌ 所有插件统一进字段 schema；❌ 管道走 trait、工具走 manifest 的分裂设计 |
-
-**③ 插件一等公民与子管道归属**（核心决策 9–10）
-
-| 决策点 | 0.2 决策 | 否决项 |
-|--------|----------|--------|
-| 插件反向调用 | 插件是一等公民，可作为消费者调用其他插件，但**必须走统一 invoker**（`ctx.call_plugin`），让日志 / 错误 / metrics / 热插拔统一生效 | ❌ 插件直接持有其他插件引用；❌ 插件持有引擎引用（循环依赖） |
-| 运行时句柄能力 | 运行时句柄只提供 `call_plugin`，**不提供 `spawn_pipeline`** | ❌ 插件直接 spawn 子管道 |
-| 子管道触发权 | 子管道由**专门业务服务**（任务系统 / 复盘系统等）触发调度，不由管道引擎 fork/delegate；引擎对此无感知 | ❌ 引擎层 fork；❌ 引擎层 delegate |
-
-> 子管道触发权 + 路由信号精简（0.1 的 6 种 → 0.2 的 4 种：删 `delegate`/`fork`，保留 `next_llm`/`next_tool`/`end`/`wait`）的完整论证见下方「**七、路由方式收敛**」。
-
-**④ 引擎极简主义重设计（ADR）**——把 0.1 的 `PipelineEngine` 重写为 `AdrEngine`
-
-| ADR 要点 | 0.2 决策 | 替代 / 变更 |
-|----------|----------|-------------|
-| 引擎极简主义（①） | 引擎仅为**调度器 + 状态账本**，不含业务逻辑；路由表仲裁**下沉到 YAML 配置**（初版设计为 `route_check` 条件分支 step；落地形态为统一路由 DSL `next:`/`while:`，见 ARCHITECTURE「管道引擎」） | 移除引擎内路由表仲裁逻辑 |
-| 单一真相源 + Append-Only（③） | 所有状态变更以**追加 Patch** 记录，历史永不修改、永不删除 | redb event log → SQLite `traces` 表 |
-| SQLite 四表（④） | `runs` / `messages` / `traces` / `blobs` 四表为唯一核心存储（向量库不再承担核心存储） | redb + YAML state 文件 → SQLite 四表 |
-| 多分支回滚（⑤） | 引入 `branch_id + seq_in_branch`；回滚 = **创建新分支 + 正向重放 Patch** 恢复状态，不删除、不逆操作、可审计 | checkpoint 标记「已回退」 → 新分支正向重放 |
-| 原子 + 组合插件（⑥） | 新增组合插件：YAML 编排 step 序列由引擎解释执行，每个 step 仍是原子插件（走统一 `execute` 接口，不加新 trait） | 仅原子插件 → 原子 + 组合 |
-| 内容懒加载（⑦） | 插件声明 `requires_content: N`，按需从 `blobs` 表加载消息内容；state 只存摘要 | state 全量加载 → 按需懒加载 |
-| HookContext 标签化（⑨） | 固定 6 字段 struct → `HashMap<String, Value>` 动态标签（新增字段只调 `set`，不改 struct + 所有消费方） | 改 struct + 消费方 → 只调 `set`/`get` |
-| 向量库独立可选（⑩） | 向量库降为**附属索引**，从 SQLite 异步同步、可独立启停，不参与核心一致性 | pgvector 核心存储 → 可选附属 |
-
-> 这组重设计在 0.2 已落地（`kernel/crates/engine`，实现见 `docs/working/task06_engine_review_report.md`）；插件系统（trait / invoker / manifest）基本不动（ADR ⑫ 验证通过）。
-
----
-
-本版本汇集多项核心能力，按工作量组合分多个小版本逐步上线（做完一批发一个小版本，不追求一次性全上）：
-
-- **管道引擎与插件执行模型固化**（内核地基：统一执行模型 + 串行循环 + state 契约/隔离 + 插件一等公民走 invoker；`PipelineEngine` 重写为 `AdrEngine`——调度器+状态账本、路由仲裁下沉 YAML、SQLite 四表、多分支回滚、组合插件、内容懒加载、HookContext 标签化）
-- 插件协议（含内部模块完全插件化）+ 宿主接入
-- 前端 Schema 驱动调试齐全
-- 审批闭环优化
-- 记忆检索/注入补全（VECTOR / TAGWAVE / SUMMARY 从「有代码未上线」到「正式可用」）
-- 路由方式收敛（路由信号精简为 next_llm / next_tool / end / wait 四种；跨管道路由统一走工具触发专门服务，不再走引擎 delegate/fork）
-- **多租户核心系统**（TenantContext 穿透 + 数据访问咽喉点 + tenant_id 隔离过滤，单租户无感；多租户管理/RBAC/凭据保险库放到后续版本）
-
-#### 一、第三方插件协议（基础，先做）
-
-| 类别 | 条目 | 说明 |
-|------|------|------|
-| 插件清单协议 | **manifest schema**（能力、依赖、版本约束、宿主类型） | 声明式；JSON Schema 可校验；支持声明「我是给 Unity 的插件」/「我是给灵汐核心的插件」 |
-| 双插件根 | **只读内置根 + 可写用户根** | 内置插件随发行只读；第三方插件落到用户目录（如 `%APPDATA%/agentos/plugins`） |
-| 生命周期 | 加载 / 启动 / 热更新 / 卸载 | 进程内 + 进程外双形态；复用已上线的 `hot_swap`/`hot_reload` 能力 |
-| 事件总线与扩展点 | 稳定的可被插件监听/干预的接口 | 版本化扩展点表 |
-| 第三方插件注册中心 | HTTP / 本地双模式 | 公网托管源 + 内网私有源 |
-| 准入安全 | 插件签名 + 白名单 + 崩溃隔离 | 防恶意插件；加载失败不影响宿主核心 |
-
-#### 二、内部模块统一 manifest 化
-
-> 各内部模块**已具备约定式自动发现 + 热插拔**（工具 `auto_loader` + `hot_swap`、连接器 `registry`、Agent YAML + `hot_reload`、通道适配器），本版本只把它们**收敛到第三方插件 manifest 协议之下**（统一加载入口、可独立分发），不是从零做插件化。
-
-| 类别 | 现状 | 本版本收敛 |
-|------|------|-----------|
-| 工具 | 约定式自动发现 + 热替换**已上线**（41 个 builtin） | 按 manifest 封装，统一加载入口，与第三方同一协议 |
-| 连接器 | 注册表式发现**已上线**（vscode/game_engine/comfyui/generic） | 按 manifest 封装，可独立分发 |
-| Agent / 通道 | YAML + 热重载**已上线** | 纳入 manifest，支持独立分发 |
-
-#### 三、宿主接入
-
-灵汐与外部宿主**统一**通过三种形态接入，同一套接口，不同外壳：
-
-| 接入形态 | 机制 | 适用宿主 |
-|----------|------|----------|
-| **悬浮窗** | 独立浮层窗口，叠加在宿主 UI 之上 | 游戏引擎、VS Code、视频剪辑器、任意桌面应用 |
-| **内置插件** | 作为宿主原生插件加载（Editor 扩展 / VS Code Extension 等） | 有插件体系宿主首选 |
-| **进程内调用** | 宿主直接 RPC 调用灵汐后端 | 无 UI 需求、需高性能的场景 |
-
-**本版本只接 1–2 个宿主作为协议验证**（插件化后，新增宿主只是"多加一个插件"，无需再做大版本）：
-
-| 宿主 | 接入形态 | 交付内容 |
-|------|----------|----------|
-| **游戏引擎（选 1–2 个）** | 内置插件 + 悬浮窗 | 补悬浮窗外壳与一个可运行的"聊天 Agent 嵌入 Demo"；**不追求三大引擎全接入** |
-| **编辑器/工具（选 1 个，如 VS Code）** | 内置插件 | 验证"悬浮窗 + 内置插件"模式在非游戏宿主同样成立 |
-
-- 引擎沙箱与权限边界：宿主化执行，防止越权与误操作
-- 后续 Unity/Unreal/Godot 全家、视频剪辑器、设计工具等，均可作为社区插件增量补充
-
-#### 四、前端 Schema 驱动调优
-
-> 超级终端愿景的基础能力：后端能力定义 → 前端自动生成对应界面。**现有框架已相当成熟**（5 渲染空间 Chat/Workspace/Floating/Dock/Scene + 14 个 Widget + SchemaParser/RenderingEngine/CompositionEngine 引擎层 + 后端 ui_schema 校验），本版本做的是**全覆盖调优**，不是从零搭框架。
-
-| 类别 | 现状 | 本版本调优 |
-|------|------|-----------|
-| 后端配置 → 前端控件全映射 | YAML-to-form 基础已有 | 覆盖无遗漏，全部可配置项可渲染 |
-| 能力 → 界面自动生成 | 引擎层已就绪 | 打磨「新增能力/插件 → 前端自动长出界面」链路稳定性 |
-| Widget 覆盖 | 14 个 Widget 已实现 | 补全审批/任务/制品等场景的 Widget |
-| 工作区 Tab 与 Widget 联动 | 渲染空间 + Widget 注册已就绪 | Schema 路由到正确渲染空间，打通自动联动 |
-
-#### 五、审批闭环补全（全能闭环核心）
-
-> 文本审批闭环**已上线**：choice/conversation 审批 + 管道暂停/恢复 + 反馈注入 + 打回重做都通了。diff 渲染能力也已具备（`ReviewDiff` 组件 LCS 算法 + 后端 `get_version_diff` API + 批注 CRUD 全套）。本版本只补「最后一公里」：review-request 协议增强 + 工作区自动联动。
-
-| 类别 | 现状 | 本版本补全 |
-|------|------|-----------|
-| 审批协议增强 | 现有 `create_choice_request` / `create_conversation_request` | 新增 `create_review_request`：携带制品（artifacts）+ 结构化批注（annotations）反馈 |
-| diff 渲染 | `ReviewDiff`（LCS 算法 side-by-side/unified）+ `TextDiffView` + 后端 `get_version_diff` **已具备** | 接进审批 Workspace 渲染回路（目前组件已实现但未在审批场景接线） |
-| 批注服务 | `annotation_service.py` 全套 CRUD **已上线** | 接进文档审阅交互（选中文字→批注框→提交） |
-| 工作区自动联动 | 5 渲染空间 + Widget 注册 + Schema 路由**已就绪** | 审批请求到达 → 自动打开 Workspace 审阅 Tab → Schema 路由到 `review_document` Widget |
-| 对话+制品互补 | conversation 模式已上线 | 扩展携带 artifacts：Chat 快速讨论 + Workspace 精确批注互补 |
-
-> 图片/视频/3D 等多模态审批（`review_image`/`review_video`/`review_3d`）为 P1-P3，放到后续版本随对应场景（数字人/游戏）一起做。
-
-#### 六、记忆检索/注入补全
-
-把设计中的 3×3 检索×注入矩阵从「部分上线」补全为「全量可用」。现状：KEYWORD 检索 + FULL/RETRIEVAL 注入已上线；VECTOR 装配链路已通（仅运行环境缺 PG 配置）；TAGWAVE 有代码未注册；SUMMARY 是 stub。
-
-**检索方式**：
-
-| 方式 | 现状 | 目标 |
-|------|------|------|
-| KEYWORD | ✅ 已上线 | 保持 |
-| **VECTOR（向量语义）** | ⚠️ 装配链路已通（`PgVectorRetriever` 已实例化+注册+API 已暴露 hybrid），仅运行环境缺 PG+pgvector+embedding 配置（缺则降级 keyword） | 补全运行环境配置 + `.env` 模板，使其默认可用 |
-| **TAGWAVE（标签联想）** | ⚠️ 有代码未上线（`tag_network.py` 三阶段算法完整，但未注册进 `_retrievers`，引擎不消费） | 注册 tagwave 检索器；澄清「标签检索」语义 |
-
-**注入方式**：
-
-| 方式 | 现状 | 目标 |
-|------|------|------|
-| FULL | ✅ 已上线 | 保持 |
-| RETRIEVAL | ✅ 已上线（仅走 keyword） | 扩展：vector/tagwave 方法也走通 |
-| **SUMMARY（摘要注入）** | ⚠️ stub（`_retrieve_summary` 直接返回检索结果，无摘要生成） | 实现：接 embedding_service 做真正摘要生成 |
-
-#### 七、路由方式收敛
-
-> **落地状态（2026-08）**：本节为 0.2 设计期的收敛方向，实际落地更进一步——delegate/fork 已移除，路由信号整体退役：引擎只解释路由 DSL（`next:` / `when` / `then` / `set`），manifest 的 `route_signals` 仅为历史声明位、执行链零消费。现状见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)「管道引擎」。
-
-把路由信号与管道编排能力从「半成品」收敛为「干净可用」。现状：next_llm / next_tool / end / wait 已上线并闭环；delegate、decision 有插件引用但引擎不消费；管道/message 级 fork 完全缺失。
-
-**决策方向**：核心判断——子管道触发权不在引擎，而在专门服务（任务系统、复盘系统等）。路由信号只负责"本管道内下一步走向"，跨管道的派生由专门服务通过工具调用显式发起。
-
-**路由信号精简**：0.1 的 6 种 → 0.2 的 4 种
-
-| 信号 | 0.2 处置 | 说明 |
-|------|----------|------|
-| next_llm / next_tool / end / wait | ✅ 保留 | 核心循环必需 |
-| ~~delegate~~ | ❌ 移除 | 语义已被"工具同步调用专门服务"覆盖；引擎不再消费 delegate 信号 |
-| ~~fork（管道级 / message 级）~~ | ❌ 移除 | 与 state 隔离、消费者/执行者分离原则冲突；用工具/触发器异步调用专门服务替代 |
-| decision | ⬇️ 下沉为路由表条件分支 | 引擎不作为独立信号消费，由 output_routes 的 condition 表达式承担决策逻辑 |
-
-**跨管道路由统一走工具触发**：
-
-| 场景 | 0.1 做法 | 0.2 做法 |
-|------|----------|----------|
-| 同步委派子管道 | delegate 路由信号 | 工具同步调用任务系统/复盘系统等服务 |
-| 异步分叉子管道 | fork 路由信号（缺失） | 触发器/工具异步调用专门服务 |
-| 子任务结果回传父管道 | ✅ 已上线（走 task 工具链） | 沿用——这正是 0.2 的统一模式 |
-
-> 跨管道路由在 0.1 已通过 task 工具链跑通，0.2 把这条路径确立为唯一模式，并移除引擎层的 delegate/fork 特殊路径。引擎回归纯粹——只跑 next_llm / next_tool / end / wait 四种信号的串行循环。
-
-#### 八、多租户核心系统
-
-> 多租户的完整运营（多租户创建/切换、RBAC、凭据保险库、配额）放到后续版本，但**隔离地基现在做实**——避免后续给已定型内核补 tenant 维度时大面积返工。本版本只支持默认租户运行，单租户场景下无感，但隔离机制是完整的、可验证的。
-
-| 条目 | 说明 |
-|------|------|
-| **TenantContext** | 定义租户上下文数据结构（tenant_id / user_id / 角色 / 权限 / 启用插件清单 / 凭据句柄），作为内核对象贯穿管道执行全程 |
-| **管道注入点 + 异步路径穿透** | 管道执行第一件事装配 TenantContext，后续子系统（记忆/工具/Agent）均从此取租户信息；触发器、跨管道通知等异步路径同样穿透租户上下文 |
-| **数据访问统一咽喉点** | 所有数据读写必经内核统一数据访问层，按 tenant_id 强制过滤；插件拿不到原始连接，只能通过带租户上下文的接口访问数据 |
-| **数据模型 tenant_id** | 记忆（EPISODE/SEMANTIC）、会话、制品等数据模型内置 `tenant_id` 字段，默认值=默认租户（单租户无感） |
-| **插件归属契约** | 约定全局插件（`plugins/`，所有租户可用）+ 租户插件（`tenants/{id}/plugins/`，某用户独有）的目录与发现契约 |
-
-#### 通过标准
-
-- **管道引擎与插件执行模型固化**：统一执行模型（`输入→输出+副作用` + 统一 `execute` 签名 + 类型安全归消费者）、引擎串行循环 / 工具并行调度、state 为管道引擎固定契约且按管道隔离、插件走 invoker 反向调用（无 `spawn_pipeline`）—— 全部落地且无可绕过路径
-- **AdrEngine 重设计落地**：引擎回归「调度器 + 状态账本」，路由仲裁下沉 YAML（`route_check` 条件分支）；SQLite 四表（runs/messages/traces/blobs）为唯一核心存储，Append-Only Patch + 多分支正向重放回滚；组合插件 / 内容懒加载 / HookContext 标签化 / 向量库降为附属索引均已就绪（插件系统 trait/invoker 不返工）
-- 第三方插件协议固化，文档齐全，可在 1 小时内发布第一个内部插件
-- 内部模块（工具/连接器/Agent/通道）收敛到统一插件协议，与第三方插件同一加载入口
-- 双插件根落地：内置插件只读、第三方插件可写入用户目录，二者均能被正确发现加载
-- 至少 1 个游戏引擎 + 1 个非游戏宿主跑通"悬浮窗/内置插件 + 灵汐对话"的端到端 Demo
-- 插件加载失败不影响宿主核心（沙箱边界已落地）
-- 前端可由后端 schema 完整长出界面，新增能力/插件无需手写前端
-- 文本审批闭环的 diff 渲染联动补全：审批请求 → 自动打开工作区审阅 Tab → ReviewDiff 渲染版本对比（现有组件已具备，本版本接线）
-- VECTOR / TAGWAVE 检索正式注册可用；SUMMARY 注入产出真正摘要；3×3 矩阵全部可达
-- delegate / fork 路由信号从引擎移除，跨管道路由统一走工具触发专门服务；decision 下沉为路由表条件分支
-- 多租户核心系统落地：TenantContext 穿透管道执行上下文（含异步路径）+ 数据访问统一咽喉点按 tenant_id 强制过滤 + 记忆/会话/制品内置 tenant_id（单租户场景无感，隔离机制完整可验证）
+> 架构变化：0.1 的 Python 单体后端由 Rust 微内核 + 插件生态取代；独立 CLI 入口裁撤，仅存 `channel_cli` 插件壳。
 
 ---
 
@@ -673,7 +495,7 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 **维护成本**：DSH 处于 developer preview，明确会有 breaking changes，fork 需跟随 rebase。改动越集中（单文件）冲突越小。
 
-**参考**：本地 DSH 源码已 clone 至 `D:\reference_repos\deepseek-harness\`（如不存在可重新 `git clone --depth 1 https://github.com/deepseek-ai/deepseek-harness.git`）。关键文件：`packages/sdk/server/src/server.ts`（SDK server，改这里）、`packages/core/tools/src/index.ts`（Events 接口，钩子点权威清单）、`packages/shell/shell/src/types.ts`（service 契约样例）。
+**参考**：DSH 源码获取：`git clone --depth 1 https://github.com/deepseek-ai/deepseek-harness.git`。关键文件：`packages/sdk/server/src/server.ts`（SDK server，改这里）、`packages/core/tools/src/index.ts`（Events 接口，钩子点权威清单）、`packages/shell/shell/src/types.ts`（service 契约样例）。
 
 ### subagent 桥接外部 agent（spawn Codex / Claude Code）
 
@@ -708,7 +530,7 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 **触发条件**：0.2 迁移收尾后，作为"用户可信度"的硬基础。mypy 基线已清零（2026-08-23，`.github/mypy-baseline.txt` 现值 0、只减不增），覆盖率棘轮门禁已建成（Python 64.0 / Rust 86.0 基线；2026-09-01 用户裁定整体基线暂时挂起观察，`run_gates.py --skip`）。剩余工作是持续收紧与恢复硬闸门。
 
-**已落地（2026-08-15，机械门禁部分）**：统一机械门禁入口 `scripts/run_gates.py`（21 个门禁单一事实源，CI 跑穷尽集 + 本地 fast 廉价检查，每个承诺都有非零退出命令）+ 覆盖率豁免重型套件 `scripts/coverage_exempt.py`（94 插件子进程冒烟矩阵免插桩、与插桩 gate 并行，实测对父进程覆盖率零贡献；覆盖率地板 44% 只升不降 + 失败数基线锁只减不增自动守护名单与车道）+ electron 桌面壳编译门禁（新增 CI job）+ 修复一批门禁接入后机械暴露的既有破损（python-lint mypy 路径 bug、SDK 5 处类型错误、10 处非法追溯标记、47 个新测试文件未标记、kernel fmt 漂移、root 死 test 脚本）。详见 `docs/working/机械门禁统一入口与覆盖率豁免.md`。
+**已落地（2026-08-15，机械门禁部分）**：统一机械门禁入口 `scripts/run_gates.py`（27 个门禁单一事实源，CI 跑穷尽集 + 本地 fast 廉价检查，每个承诺都有非零退出命令）+ 覆盖率豁免重型套件 `scripts/coverage_exempt.py`（94 插件子进程冒烟矩阵免插桩、与插桩 gate 并行，实测对父进程覆盖率零贡献；覆盖率地板 44% 只升不降 + 失败数基线锁只减不增自动守护名单与车道）+ electron 桌面壳编译门禁（新增 CI job）+ 修复一批门禁接入后机械暴露的既有破损（python-lint mypy 路径 bug、SDK 5 处类型错误、10 处非法追溯标记、47 个新测试文件未标记、kernel fmt 漂移、root 死 test 脚本）。详见 `docs/working/机械门禁统一入口与覆盖率豁免.md`。
 
 **现状对比**：DSH 有完整工程基础设施——oxlint + knip（未用依赖检测）+ jscpd（重复码检测）+ publint + lefthook + Vitest e2e/snapshot test，且 `test:coverage` 是 CI 硬门禁（per-file 100%）。本项目在测试/CI 门禁上明显弱于 DSH，这直接影响用户/开发者对项目的信任度。
 
@@ -722,7 +544,7 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 ### 插件契约完善（0.2 定型后）
 
-**触发条件**：0.2 核心地基层定型（路由收敛 / capabilities 交互面 / contributes 定型）之后。当前契约已具备基础：`plugin.json` capabilities（tools/resources/route_signals/lifecycle_hooks/services）、工具契约（含 output_schema/render，消费端见 `task_dsh_plugin_adapter.md` 任务 1）、管道插件接口（Input/Core/Output + RouteSignal 四信号）、contributes 全景——**这些 0.2 定型后尽量不再动**。
+**触发条件**：0.2 核心地基层定型（路由 DSL / capabilities 交互面 / contributes 定型）之后。当前契约已具备基础：`plugin.json` capabilities（tools/resources/route_signals/lifecycle_hooks/services）、工具契约（含 output_schema/render，消费端见 `task_dsh_plugin_adapter.md` 任务 1）、管道插件接口（Input/Core/Output + RouteSignal 四信号）、contributes 全景——**这些 0.2 定型后尽量不再动**。
 
 **核心原则（契约冻结）**：0.2 定型后，接口契约**能不动就不动**——版本更新必须考虑旧插件兼容，频繁改契约会让系统往更复杂方向走。动契约 = breaking change，必须走 ADR 记录 + 兼容机制（旧插件继续可用）。
 
@@ -733,6 +555,21 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 4. **自进化衔接**：agent 按契约三问立契 → 实现 → 校验器放行 → 复盘闭环
 
 **优先级**：🟢 P2——0.2 定型后完善；当前只做不破坏契约的事（如 output_schema 消费端、spill_guard）。
+
+### runs 表退役：执行上下文收敛进 pipeline_state（0.2 后）
+
+**触发条件**：0.2 定型后，执行上下文（status / 起止时间 / 挂起恢复坐标）全部收敛进 `pipeline_state`（一管道一行），`runs` 表退役。当前 `runs` 表每轮一条 run 记录（status / created_at / ended_at / metadata），与 `pipeline_state`（跨轮累计字段）职责重叠；traces 已承载全部执行增量，run 级状态是唯一未入 state 的残留。
+
+**现状（2026-09-02 已查证）**：所有消费面（`resume_pipeline` 恢复三分、`suspend_pipeline`、`get_run_status` 停止信号轮询、task_manage elapsed 计算、前端管道页快照）**只读当前状态，无"逐次尝试结局历史"消费面**；`current_branch`/`current_seq` 为死字段（实库恒 `('main', 0)`，零读面）。收敛后恢复语义从"查最新非终态 run"退化为"查单行状态"，更简单；代价是丢失"第 N 次尝试以什么状态结束"的历史（traces 无 status 字段，无法回放）。
+
+**落地方向**（条件成熟后执行）：
+1. `pipeline_state` 增 status / started_at / ended_at / 挂起坐标键（一管道一行，upsert）
+2. 引擎收尾按 pipeline_id 定位（消除"翻活旧 run 无人收尾"的幽灵 running 模型问题）
+3. 消费面迁移：`resume_pipeline` 三分 → 单行状态判断；`get_run_status` → 按管道查；task_manage elapsed → 管道级起止；llm 插件停止信号轮询改按管道
+4. 审批挂起 metadata（`pending_interaction_request_id` + `suspend_branch_id` + `suspend_seq`）迁入 state 键
+5. 迁移脚本：runs 行合并为管道级当前状态行；`runs`/`branches` 表退役（traces 保留）
+
+**优先级**：🟢 P2——0.2 定型后；动存储模型 = breaking change，需 ADR + 迁移脚本。
 
 ### 插件包管理器与语言运行时插件（0.2 后）
 
@@ -824,7 +661,7 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 
 ```
 ▓▓▓ 0.1.0 ✅ (已发布)
-▓▓▓ 0.2.0 ✅ (已发布) 核心地基层（管道引擎执行模型 + AdrEngine 重设计 + 插件化 + Schema + 审批 + 记忆补全 + 路由收敛 + 多租户契约预留）
+▓▓▓ 0.2.0 ✅ (已发布) 核心地基层（最小内核+全插件 / 统一插件协议 / 管道引擎 / 工具与流式契约 / 审批 / 记忆 / 触发器 / 多租户契约预留）
 ░░░ 0.3.0 (跨平台 + 打包交付)
 ░░░ 0.4.0 (可用性：预置能力 + 用户向导 + 配置可视化 + 性能)
 ░░░ 0.5.0 (多用户与能力隔离：多租户完整实现)

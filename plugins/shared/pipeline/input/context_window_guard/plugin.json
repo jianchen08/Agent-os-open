@@ -1,168 +1,83 @@
 {
-  "id": "pipeline_context_window_guard",
-  "name": "Context Window Guard",
-  "version": "1.0.0",
-  "plugin_type": "pipeline",
-  "language": "python",
-  "host_type": "sidecar",
-  "host_group": "light",
-  "entry": "python server.py",
-  "invoke_entry": "context_window_guard.execute",
   "capabilities": {
-    "tools": [],
-    "route_signals": [],
     "lifecycle_hooks": [
       "on_load",
       "on_unload"
-    ]
+    ],
+    "route_signals": [],
+    "tools": []
   },
-  "permissions": {},
-  "priority": 50,
   "config_files": [
     {
-      "id": "context_window",
-      "path": "config/system/context_window_config.yaml",
-      "label": "上下文窗口配置",
-      "description": "配置值内联于本 manifest 的 fields.default（ADR 2026-09-02-context-window-config-inline-manifest）；保存自定义值时才落盘生成配置文件",
+      "description": "配置真值内联于本 manifest 的 fields.default（单一真值裁定 2026-09-02：不引用磁盘文件，保存经 PUT 直接写回本 manifest）",
       "fields": [
         {
-          "name": "compress_trigger_ratio",
-          "type": "slider",
+          "default": 0.6,
+          "description": "上下文占用超过该比例触发压缩",
           "label": "压缩触发比例",
-          "min": 0,
           "max": 1,
-          "step": 0.01,
-          "default": 0.55,
-          "description": "上下文占用超过该比例触发压缩"
-        },
-        {
-          "name": "include_tools_description_in_prompt",
-          "type": "toggle",
-          "label": "提示词内嵌工具描述",
-          "default": false
-        },
-        {
-          "name": "compression.enabled",
-          "type": "toggle",
-          "label": "启用上下文压缩",
-          "default": true
-        },
-        {
-          "name": "compression.model",
-          "type": "string",
-          "label": "压缩模型",
-          "default": "",
-          "description": "留空则用默认 chat 模型"
-        },
-        {
-          "name": "compression.layer_trigger_ratio",
-          "type": "slider",
-          "label": "层级压缩触发比例",
           "min": 0,
-          "max": 1,
+          "name": "compress_trigger_ratio",
           "step": 0.01,
-          "default": 0.8
+          "type": "slider"
         },
         {
-          "name": "compression.max_turn_ratio",
-          "type": "slider",
-          "label": "最大轮次占比",
+          "default": 0.18,
+          "description": "最近原文段保留预算（占窗口比例）",
+          "label": "预算·最近原文",
+          "max": 1,
           "min": 0,
-          "max": 1,
-          "step": 0.01,
-          "default": 0.5
-        },
-        {
-          "name": "budgets.system_prompt",
-          "type": "slider",
-          "label": "预算·系统提示",
-          "min": 0,
-          "max": 1,
-          "step": 0.01,
-          "default": 0.06
-        },
-        {
-          "name": "budgets.tools_description",
-          "type": "slider",
-          "label": "预算·工具描述",
-          "min": 0,
-          "max": 1,
-          "step": 0.01,
-          "default": 0.0
-        },
-        {
-          "name": "budgets.static_vars",
-          "type": "slider",
-          "label": "预算·静态变量",
-          "min": 0,
-          "max": 1,
-          "step": 0.01,
-          "default": 0.03
-        },
-        {
-          "name": "budgets.dynamic_variables",
-          "type": "slider",
-          "label": "预算·动态变量",
-          "min": 0,
-          "max": 1,
-          "step": 0.01,
-          "default": 0.03
-        },
-        {
-          "name": "budgets.l3",
-          "type": "slider",
-          "label": "预算·L3 记忆",
-          "min": 0,
-          "max": 1,
-          "step": 0.01,
-          "default": 0.02
-        },
-        {
-          "name": "budgets.l2",
-          "type": "slider",
-          "label": "预算·L2 记忆",
-          "min": 0,
-          "max": 1,
-          "step": 0.01,
-          "default": 0.05
-        },
-        {
-          "name": "budgets.l1",
-          "type": "slider",
-          "label": "预算·L1 记忆",
-          "min": 0,
-          "max": 1,
-          "step": 0.01,
-          "default": 0.1
-        },
-        {
           "name": "budgets.recent",
-          "type": "slider",
-          "label": "预算·最近消息",
-          "min": 0,
-          "max": 1,
           "step": 0.01,
-          "default": 0.18
+          "type": "slider"
         },
         {
-          "name": "budgets.retrieval",
-          "type": "slider",
-          "label": "预算·检索",
-          "min": 0,
+          "default": 0.08,
+          "description": "L1 过程摘要块预算（占窗口比例）",
+          "label": "预算·L1 过程块",
           "max": 1,
+          "min": 0,
+          "name": "budgets.l1",
           "step": 0.01,
-          "default": 0.05
+          "type": "slider"
         },
         {
-          "name": "budgets.response_reserve",
-          "type": "slider",
-          "label": "预算·响应预留",
-          "min": 0,
+          "default": 0.05,
+          "description": "L2 三元组块预算（占窗口比例）",
+          "label": "预算·L2 过程块",
           "max": 1,
+          "min": 0,
+          "name": "budgets.l2",
           "step": 0.01,
-          "default": 0.14
+          "type": "slider"
+        },
+        {
+          "default": true,
+          "label": "启用上下文压缩",
+          "name": "compression.enabled",
+          "type": "toggle"
+        },
+        {
+          "default": "minimax-m3",
+          "description": "压缩摘要生成所用模型 id（manifest 单一真值；留空则压缩停用）",
+          "label": "压缩模型",
+          "name": "compression.model",
+          "type": "string"
         }
-      ]
+      ],
+      "id": "context_window",
+      "label": "上下文窗口配置"
     }
-  ]
+  ],
+  "entry": "python server.py",
+  "host_group": "light",
+  "host_type": "sidecar",
+  "id": "pipeline_context_window_guard",
+  "invoke_entry": "context_window_guard.execute",
+  "language": "python",
+  "name": "Context Window Guard",
+  "permissions": {},
+  "plugin_type": "pipeline",
+  "priority": 50,
+  "version": "1.0.0"
 }

@@ -107,6 +107,17 @@ fn is_light_group_member(manifest: &PluginManifest) -> bool {
     !is_external
 }
 
+/// 反向调用连接身份（G6 信任锚点 + metrics 命名空间）：合宿 = 宿主键（进程即
+/// 授权主体，内核按 group_granted_capabilities 归并成员白名单判）；独占 =
+/// manifest.id。身份取进程而非成员，保证不随组重生换人。
+fn scoped_router_identity(manifest: &PluginManifest, host_key: &str) -> String {
+    if is_light_group_member(manifest) {
+        host_key.to_string()
+    } else {
+        manifest.id.clone()
+    }
+}
+
 /// 合宿成员的 MCP 工具名命名空间（§4.2 第 3 条）：宿主把成员插件的每个工具
 /// 注册为 `{plugin_id}.{tool_name}`，调用侧拼前缀分发；独占宿主无前缀（现状不变）。
 fn namespaced_tool_name(manifest: &PluginManifest, tool_name: &str) -> String {
@@ -343,6 +354,37 @@ fn extract_mcp_content(mcp_result: &serde_json::Value) -> serde_json::Value {
             );
             mcp_result.clone()
         }
+    }
+}
+
+/// 中央返回处的 OnError 判定（pipeline 形态）：调用层 `Err`（崩溃/MCP/解析）
+/// 或 Ok 携带 error 字段都算插件报错——业务失败若不计，`lifecycle.plugin_error_total`
+/// 恒零。None = 无报错（不发事件）。
+fn pipeline_error_params(
+    result: &Result<PluginResult, PluginError>,
+) -> Option<(String, Option<String>)> {
+    match result {
+        Err(e) => Some((e.message.clone(), e.code.clone())),
+        Ok(r) => r
+            .error
+            .as_ref()
+            .map(|e| (e.message.clone(), e.code.clone())),
+    }
+}
+
+/// 同 [`pipeline_error_params`]（tool 形态）：Ok 携带 success=false 也算报错。
+fn tool_error_params(
+    result: &Result<ToolExecutionResult, PluginError>,
+) -> Option<(String, Option<String>)> {
+    match result {
+        Err(e) => Some((e.message.clone(), e.code.clone())),
+        Ok(r) if !r.success => Some((
+            r.error
+                .clone()
+                .unwrap_or_else(|| "tool execution failed".to_string()),
+            None,
+        )),
+        Ok(_) => None,
     }
 }
 
@@ -914,9 +956,24 @@ impl PluginInvokerImpl {
             "session_id": ctx.state.get("session_id").cloned().unwrap_or(Value::Null),
             "agent_name": ctx.state.get("agent.id").cloned().unwrap_or(Value::Null),
         });
+        // 每调用 config 注入（对齐 native 管道 invoke_native_pipeline）：引擎
+        // 步骤 config 只携带 inputs/_step_method，manifest config_files 注入
+        // 此前仅发生在 initialize 握手——合宿宿主按首触发成员的 manifest 注入
+        // 后同份扇给全员，声明 config_files 的成员（如 context_window_guard）
+        // 从未收到自己的注入（2026-09-02 压缩阈值断链根因）。此处按调用方
+        // manifest 现算注入并与步骤 config 合并。
+        let full_config = self
+            .loader
+            .load_config()
+            .await
+            .unwrap_or(serde_json::Value::Null);
+        let call_config = crate::shared::merge_injected_with_step_config(
+            crate::shared::build_injected_config(&full_config, manifest),
+            &ctx.config,
+        );
         let tool_args = serde_json::json!({
             "state": ctx.state,
-            "config": ctx.config,
+            "config": call_config,
             "_log_ctx": log_ctx,
         });
 
@@ -1401,21 +1458,23 @@ impl PluginInvokerImpl {
 
     /// 旁路广播 OnError 给总线订阅者（审计 / `lifecycle.plugin_error_total` 计数）。
     ///
-    /// 与 OnLoad 的旁路 emit 对称：插件 execute/call 返回 `Err` 时由调用方（
-    /// [`invoke_pipeline_plugin`] / [`invoke_tool`] 的中央错误返回处）调一次本方法，
-    /// 把"插件调用失败"这一事实 fan-out 给观察层。**不改错误处理语义**——原 `Err`
-    /// 照常向上传播，本方法仅 fire-and-forget 观察一次。
+    /// 与 OnLoad 的旁路 emit 对称：插件调用**失败**时由调用方（[`invoke_pipeline_plugin`]
+    /// / [`invoke_tool`] 的中央返回处）调一次本方法，把"插件调用失败"这一事实
+    /// fan-out 给观察层。失败两种形态都计：调用层 `Err`（崩溃/MCP/解析）与
+    /// Ok 携带失败结果（pipeline error 字段 / tool success=false）。
+    /// **不改错误处理语义**——原错误/结果照常向上传播，本方法仅 fire-and-forget
+    /// 观察一次。
     ///
     /// best-effort、非阻塞：未注入总线（`None`，如单测）时 no-op，行为不变。
-    fn emit_lifecycle_error(&self, plugin_id: &str, err: &PluginError) {
+    fn emit_lifecycle_error(&self, plugin_id: &str, message: &str, code: Option<&str>) {
         let bus_guard = self.hook_bus.read();
         let Some(bus) = bus_guard.as_ref() else {
             return;
         };
         let mut ctx = HookContext::new();
         ctx.set("plugin_id", json!(plugin_id));
-        ctx.set("error", json!(err.message));
-        if let Some(code) = &err.code {
+        ctx.set("error", json!(message));
+        if let Some(code) = code {
             ctx.set("error_code", json!(code));
         }
         bus.emit(LifecycleEvent {
@@ -1713,15 +1772,17 @@ impl PluginInvokerImpl {
             .with_plugin_id(host_key);
 
         // 应用 Capability 路由器（启用 sidecar→内核反向调用通道）。
-        // 用 PluginScopedRouter 包装，把 manifest.id 注入每次反向调用的 params，
-        // 内核侧 metrics.record 据此做命名空间（监控设计 §三 通道2 + §十 安全）。
-        // 合宿连接为共享连接，_plugin_id 锚定触发本次 spawn 的成员（G6
-        // 信任锚点语义保留；首批灰度成员为 guard 类，无反向调用需求）。
+        // PluginScopedRouter 把连接身份注入每次反向调用的 params（G6 信任锚点 +
+        // metrics 命名空间）。身份 = 进程身份：独占 = manifest.id；合宿 = 宿主键
+        // ——合宿进程是一个授权主体，G6 侧按 group_granted_capabilities 归并成员
+        // 白名单判。旧实现锚定"触发本次 spawn 的成员"：身份随每次重生漂移，且
+        // G6 拿该成员的个人白名单判全组调用（首个声明 grants 的成员恰好装箱
+        // 触发 spawn 时全组反调被拒 = 2026-09-03 工具面置空事故根因）。
         {
             let router_guard = self.router.read();
             if let Some(router) = router_guard.as_ref() {
                 let scoped: Arc<dyn CapabilityRouter> = Arc::new(PluginScopedRouter {
-                    plugin_id: manifest.id.clone(),
+                    plugin_id: scoped_router_identity(manifest, host_key),
                     inner: Arc::clone(router),
                 });
                 c = c.with_router(scoped);
@@ -2016,6 +2077,36 @@ impl PluginInvokerImpl {
                 .map(|pid| vec![pid.to_string()])
                 .unwrap_or_default()
         }
+    }
+
+    /// 组主体的 granted_capabilities 归并（G6 组身份配套，合宿进程 = 一个授权主体）。
+    ///
+    /// 组声明 = 当前装箱成员声明的并集（排序去重）。任一成员 manifest 缺失或未
+    /// 声明 granted_capabilities → 组视为未声明（返回 None），沿用未声明语义开关
+    /// （默认全授予 / AGENTOS_GRANTS_STRICT=1 拒绝）——与单插件"未声明"语义同构，
+    /// 存量未声明成员不因合宿收窄。每次调用从装箱分配表现算：成员集随装箱/重生
+    /// 动态变化，归并结果自动跟随，无快照、无失效清理面。
+    pub fn group_granted_capabilities(&self, host_key: &str) -> Option<Vec<String>> {
+        if parse_light_slot(host_key).is_none() {
+            return None;
+        }
+        let members = self.host_members(host_key);
+        if members.is_empty() {
+            return None;
+        }
+        let mut union: Vec<String> = Vec::new();
+        for pid in members {
+            match self.loader.get_manifest(&pid) {
+                Some(m) if !m.granted_capabilities.is_empty() => {
+                    union.extend(m.granted_capabilities)
+                }
+                // 成员未声明 = 组未声明（同进程互信，成员的默认授予即组的默认授予）
+                _ => return None,
+            }
+        }
+        union.sort();
+        union.dedup();
+        Some(union)
     }
 
     /// light 宿主成员集漂移检测：分配表当前成员集 vs 实际 spawn 时的成员集快照。
@@ -2616,11 +2707,13 @@ impl PluginInvoker for PluginInvokerImpl {
             }
         };
 
-        // 旁路广播 OnError：插件 execute/call 失败即在此中央错误返回处 emit 一次
-        // （审计日志 / `lifecycle.plugin_error_total` 计数）。best-effort、非阻塞；
-        // bus=None 时 no-op。**不改错误处理语义**——原 Err 照常向上传播。
-        if let Err(ref e) = result {
-            self.emit_lifecycle_error(plugin_id, e);
+        // 旁路广播 OnError：插件调用失败即在此中央返回处 emit 一次（审计日志 /
+        // `lifecycle.plugin_error_total` 计数）。失败 = Err（进程崩溃/MCP/解析）
+        // **或** Ok 携带失败结果（error 字段）——业务失败若不计，计数器恒零。
+        // best-effort、非阻塞；bus=None 时 no-op。**不改错误处理语义**——原
+        // Err 照常向上传播。
+        if let Some((message, code)) = pipeline_error_params(&result) {
+            self.emit_lifecycle_error(plugin_id, &message, code.as_deref());
         }
         result
     }
@@ -2659,11 +2752,13 @@ impl PluginInvoker for PluginInvokerImpl {
             }
         };
 
-        // 旁路广播 OnError：工具插件 execute/call 失败即在此中央错误返回处 emit 一次
-        // （审计日志 / `lifecycle.plugin_error_total` 计数）。best-effort、非阻塞；
-        // bus=None 时 no-op。**不改错误处理语义**——原 Err 照常向上传播。
-        if let Err(ref e) = result {
-            self.emit_lifecycle_error(plugin_id, e);
+        // 旁路广播 OnError：工具插件调用失败即在此中央返回处 emit 一次（审计日志 /
+        // `lifecycle.plugin_error_total` 计数）。失败 = Err（进程崩溃/MCP/解析）
+        // **或** Ok 携带 success=false（isError/失败信封）——业务失败若不计，
+        // 计数器恒零。best-effort、非阻塞；bus=None 时 no-op。**不改错误处理
+        // 语义**——原 Err 照常向上传播。
+        if let Some((message, code)) = tool_error_params(&result) {
+            self.emit_lifecycle_error(plugin_id, &message, code.as_deref());
         }
         result
     }

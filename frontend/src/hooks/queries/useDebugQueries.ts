@@ -7,6 +7,8 @@
  * - 带参 key（executionRecords(sessionId) / llmPayloadDiag(page)）参数变 = 缓存条目变
  * - 分页/过滤类（tasks 页码+状态、evaluationMetrics 分类）key 无工厂参数，
  *   参数变化用显式 refetch 重拉（静态 key 槽缓存最新一页，SWR 语义不变）
+ * - 例外：llmPayloadDiag 快照随每次 LLM 调用实时增长，staleTime 0 挂载即重取
+ *   （缓存仅用于先渲染不闪 loading），否则列表恒落后实际发送一轮
  *
  * staleTime 统一 60_000：调试/监控类数据允许分钟级陈旧，后台静默刷新。
  */
@@ -121,7 +123,11 @@ export function useLlmPayloadDiagQuery(page = 1) {
   return useQuery({
     queryKey: queryKeys.llmPayloadDiag(page),
     queryFn: () => getPayloadDiagList(),
-    staleTime: DEBUG_STALE_TIME,
+    // 快照随每次 LLM 调用实时落盘，是本组页面中唯一随聊天高频增长的数据：
+    // 不适用 60s SWR 窗口（无 WS invalidate / 无轮询兜底，窗口内重进页面
+    // 零请求会恒显示上一轮列表）。staleTime 0 = 挂载即后台重取，缓存仅用于
+    // 先渲染不闪 loading。
+    staleTime: 0,
   })
 }
 

@@ -388,25 +388,49 @@ def save_defaults(body: dict[str, Any]) -> dict[str, Any]:
 def add_model(body: dict[str, Any]) -> dict[str, Any]:
     """添加模型。
 
+    请求的 model_id 已存在时按来源分派（模型 ID 由模型名派生，同名模型常
+    出现在多个提供商下）：
+    - 同 provider 且同 model_name：真重复，409；
+    - 否则（典型为同名模型挂在不同 provider）：自动派生新 ID
+      ``<model_id>-<provider>`` 新增，仍冲突则追加序号，绝不覆盖既有条目。
+
+    Returns:
+        全量 models + added_ids（实际写入的模型 ID，供前端提示自动改名结果）。
+
     Raises:
         ConfigAPIError 400: models 字段缺失或类型错误（镜像源 ModelAddRequest 必填语义）
-        ConfigAPIError 409: model_id 已存在（避免静默覆盖既有配置）
+        ConfigAPIError 409: 同 provider 同 model_name 的重复添加
     """
     data = _read_yaml(_LLM_YAML)
     models = data.setdefault("models", {})
     model_entries = body.get("models")
     if not isinstance(model_entries, dict):
         raise ConfigAPIError(status_code=400, detail="models 字段必填（模型 ID → 配置字典）")
-    # 写入前逐个检测：已存在的 model_id 视为冲突，避免静默覆盖既有配置。
-    for model_id in model_entries:
-        if model_id in models:
-            raise ConfigAPIError(status_code=409, detail=f"模型 '{model_id}' 已存在")
+    added_ids: list[str] = []
     for model_id, model_conf in model_entries.items():
-        models[model_id] = model_conf
+        target_id = model_id
+        if model_id in models:
+            existing = models[model_id]
+            if (
+                existing.get("provider") == model_conf.get("provider")
+                and existing.get("model_name") == model_conf.get("model_name")
+            ):
+                raise ConfigAPIError(
+                    status_code=409,
+                    detail=f"模型 '{model_id}' 已存在于提供商 '{existing.get('provider')}'",
+                )
+            base = f"{model_id}-{model_conf.get('provider') or 'custom'}"
+            target_id = base
+            seq = 2
+            while target_id in models:
+                target_id = f"{base}-{seq}"
+                seq += 1
+        models[target_id] = model_conf
+        added_ids.append(target_id)
     _write_yaml(_LLM_YAML, data)
     _invalidate_llm_caches()
-    logger.info("添加模型: %s", list(model_entries.keys()))
-    return {"models": models}
+    logger.info("添加模型: %s", added_ids)
+    return {"models": models, "added_ids": added_ids}
 
 
 def update_model(model_id: str, body: dict[str, Any]) -> dict[str, Any]:

@@ -960,6 +960,102 @@ async fn g2_verify_observation_fail_retries_then_passes() {
     assert_eq!(out.manifest.capabilities.tools.len(), 1);
 }
 
+/// 零声明 external MCP（一行接入形态）：entry=mcp:external + 空 capabilities。
+fn mk_manifest_dynamic_mcp(id: &str) -> PluginManifest {
+    let v = json!({
+        "id": id, "name": id, "version": "1.0.0",
+        "plugin_type": "tool", "language": "external",
+        "host_type": "sidecar", "entry": "mcp:external",
+        "capabilities": {},
+    });
+    serde_json::from_value(v).unwrap()
+}
+
+/// 带声明的 external MCP（静态模式）：行为应与既有声明式插件一致。
+fn mk_manifest_external_mcp(id: &str, tools: &[&str]) -> PluginManifest {
+    let tools_json: Vec<_> = tools
+        .iter()
+        .map(|t| json!({ "name": t, "description": t }))
+        .collect();
+    let v = json!({
+        "id": id, "name": id, "version": "1.0.0",
+        "plugin_type": "tool", "language": "external",
+        "host_type": "sidecar", "entry": "mcp:external",
+        "capabilities": { "tools": tools_json },
+    });
+    serde_json::from_value(v).unwrap()
+}
+
+#[tokio::test]
+async fn g2_dynamic_mcp_adopts_observed_tools() {
+    // 一行接入：零声明 external MCP → 观测即声明，tools/list 全量回填 manifest
+    // （多工具服务免抄 schema，第三方 inputSchema 原样保留）。
+    let mut invoker = MockInvoker::new(vec![mk_manifest_dynamic_mcp("fs_mcp")]);
+    invoker.list_tools.insert(
+        "fs_mcp".into(),
+        json!({
+            "tools": [
+                {"name": "read_file", "description": "读文件",
+                 "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+                {"name": "write_file", "description": "写文件",
+                 "inputSchema": {"type": "object"}},
+            ]
+        }),
+    );
+    let out = g2_verify_and_sanitize(&invoker, mk_manifest_dynamic_mcp("fs_mcp")).await;
+    assert!(!out.drift && !out.spawn_failed, "导入不是漂移也不是失败");
+    assert!(out.rejected_tools.is_empty());
+    let tools = &out.manifest.capabilities.tools;
+    assert_eq!(tools.len(), 2, "观测到的工具应全量导入");
+    let read = tools.iter().find(|t| t.name == "read_file").unwrap();
+    assert_eq!(read.description.as_deref(), Some("读文件"));
+    let schema = read
+        .input_schema
+        .as_ref()
+        .expect("inputSchema 应随导入回填");
+    assert_eq!(
+        schema["required"][0], "path",
+        "第三方 schema 结构原样保留（泛性：非空对象任意形状）"
+    );
+}
+
+#[tokio::test]
+async fn g2_dynamic_mcp_spawn_fail_stays_empty_and_flags() {
+    // 观测失败：manifest 保持零声明 + spawn_failed（resync 零工具自愈会重试）。
+    let mut invoker = MockInvoker::new(vec![mk_manifest_dynamic_mcp("down_mcp")]);
+    invoker.list_tools_fail = true;
+    let out = g2_verify_and_sanitize(&invoker, mk_manifest_dynamic_mcp("down_mcp")).await;
+    assert!(out.spawn_failed && !out.drift);
+    assert!(
+        out.manifest.capabilities.tools.is_empty(),
+        "观测失败不伪造工具声明"
+    );
+}
+
+#[tokio::test]
+async fn g2_external_mcp_with_declared_tools_still_sanitizes() {
+    // 静态模式保持：有声明的 external MCP 仍走 drift 对照——声明即契约不松动，
+    // 一行接入只对零声明形态生效。
+    let mut invoker = MockInvoker::new(vec![mk_manifest_external_mcp(
+        "static_mcp",
+        &["t1", "ghost"],
+    )]);
+    invoker.list_tools.insert(
+        "static_mcp".into(),
+        json!({
+            "tools": [{"name": "t1", "description": "t1", "inputSchema": {"type": "object"}}]
+        }),
+    );
+    let out = g2_verify_and_sanitize(
+        &invoker,
+        mk_manifest_external_mcp("static_mcp", &["t1", "ghost"]),
+    )
+    .await;
+    assert!(out.drift);
+    assert_eq!(out.rejected_tools, vec!["ghost".to_string()]);
+    assert_eq!(out.manifest.capabilities.tools.len(), 1);
+}
+
 /// services-only（无 tools）插件：不 spawn 校验，原样返回（若被调用会因
 /// list_tools_fail 炸——应被跳过）。
 #[tokio::test]

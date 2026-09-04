@@ -51,6 +51,8 @@ export interface PipelineStateSummary {
   current_phase?: string
   status?: string
   ended?: boolean
+  /** 实际状态（内核持有，RunStatus 五态小写；插件不可写，可观测性唯一运行状态真值） */
+  run_status?: 'running' | 'suspended' | 'completed' | 'failed' | 'cancelled'
   session_id?: string
   pipeline_id?: string
   agent_id?: string
@@ -79,6 +81,8 @@ export interface PipelineStateSummary {
   'cost_control.total_tokens'?: number
   'cost_control.usage_percent'?: number
   'llm_model'?: string
+  /** 管道上下文窗口上限（内核 state 出口，输入框用量指示器圆环的分母真值） */
+  context_window?: number
   // 工作区坐标（workspace_lifecycle init 写入；R3 裁定：所有管道类型的工作区
   // 关联底座——path=worktree 副本或 plain 目录，project_root 是源根不用于关联）
   workspace?: string

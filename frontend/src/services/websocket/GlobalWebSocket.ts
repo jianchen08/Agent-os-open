@@ -208,6 +208,13 @@ class GlobalWebSocketService {
           _wsLogger.warn('[GlobalWS] 收到 resync_required，触发全量消息重同步')
           this._emit('resync_required', data)
         }
+        // 应用层踢旧通知（内核踢旧两段式：kicked 文本帧先于 Close(4000) 送达）。
+        // 代理链可能吞掉 Close 帧状态码（浏览器端退化为 1006），文本帧先行送达
+        // 即可置位防重连，避免 A/B 双客户端互踢循环——处置与 onclose(4000) 一致。
+        if (data.type === 'kicked') {
+          this._handleKickedByReplacement()
+          return
+        }
         _wsLogger.debug(
           `[WS_RAW] type=${data.type} pipeline_id=${data.data?.pipeline_id?.slice(0, 12) || 'null'} message_id=${data.data?.message_id?.slice(0, 12) || 'null'}`,
         )
@@ -237,18 +244,13 @@ class GlobalWebSocketService {
       useLayoutModeStore.getState().updateConnectionStatus({ state: 'disconnected' })
 
       if (event.code === 4000) {
-        this._kickedByReplacement = true
-        // 被踢页面已永久失联：滞留队列的消息永远不会发出（连接不再重建），
-        // 立即清空并撤销其排队超时计时，再广播 kicked 让 UI 明示用户——
-        // 否则静默装死，用户以为页面在线，实际消息全部黑洞。
-        this._queue = []
-        this._userInputTimers.forEach((timer) => clearTimeout(timer))
-        this._userInputTimers.clear()
-        console.info('[GlobalWS] 被新连接替换(code=4000)，跳过重连')
-        this._emit('kicked_by_replacement', {
-          type: 'kicked_by_replacement',
-          data: { reason: '本页连接已被同账号的其他页面替换' },
-        })
+        this._handleKickedByReplacement()
+        return
+      }
+
+      // 应用层 kicked 帧已先行置位（Close 帧被代理吞掉状态码、浏览器端退化为
+      // 1006 的场合）：本页已被替换，任何掉线路径都不得重连
+      if (this._kickedByReplacement) {
         return
       }
 
@@ -573,6 +575,28 @@ class GlobalWebSocketService {
       this._heartbeatTimer = null
     }
     this._clearHeartbeatTimeout()
+  }
+
+  /**
+   * 踢旧处置（onclose(4000) 与应用层 kicked 帧两入口共用）：置位防重连、
+   * 清空滞留队列、广播 kicked_by_replacement。幂等——kicked 帧与 Close(4000)
+   * 先后到达时只处置一次。
+   *
+   * 被踢页面已永久失联：滞留队列的消息永远不会发出（连接不再重建），立即
+   * 清空并撤销其排队超时计时，再广播让 UI 明示用户——否则静默装死，用户
+   * 以为页面在线，实际消息全部黑洞。
+   */
+  private _handleKickedByReplacement(): void {
+    if (this._kickedByReplacement) return
+    this._kickedByReplacement = true
+    this._queue = []
+    this._userInputTimers.forEach((timer) => clearTimeout(timer))
+    this._userInputTimers.clear()
+    console.info('[GlobalWS] 被新连接替换，跳过重连')
+    this._emit('kicked_by_replacement', {
+      type: 'kicked_by_replacement',
+      data: { reason: '本页连接已被同账号的其他页面替换' },
+    })
   }
 
   /** 调度重连 - true：需先刷新 token 再连；刷新真失效则登出并停止重连。 */
