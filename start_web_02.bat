@@ -111,11 +111,12 @@ if "%NO_BUILD%"=="1" (
 )
 
 REM 同源守卫：native cdylib 与内核源码异源编译会让 tool 派发点位 SIGSEGV
-REM （2026-09-01/08-31 两次实证）——启动前检查并给出重编指引。
-echo [1.5/4] Checking native cdylib sync with kernel...
-python "%PROJECT_ROOT%\scripts\check_native_artifacts_sync.py"
+REM （2026-09-01/08-31 两次实证）。--build 会先自动重编缺失/过期的 cdylib
+REM （新克隆首次运行即靠这一步补齐产物），仍过不了才中止。
+echo [1.5/4] Syncing native cdylibs with kernel (--build)...
+python "%PROJECT_ROOT%\scripts\check_native_artifacts_sync.py" --build
 if errorlevel 1 (
-    echo [ERROR] native cdylib / kernel exe 异源，按上方指引重编后重试。
+    echo [ERROR] native cdylib 自动重编失败或内核 exe 过期，按上方指引处理后重试。
     pause
     exit /b 1
 )
@@ -285,7 +286,7 @@ echo.
 echo   Open http://localhost:%AGENTOS_FRONTEND_PORT% in browser.
 echo   Frontend proxies directly to 0.2 kernel (no 0.1 channel_api).
 echo.
-echo   Stop: run stop_web_02.sh, or kill by port (what this script does):
+echo   Stop: run stop_web_02.bat (Git Bash 下也可用 stop_web_02.sh), or kill by port:
 echo     netstat -aon ^| findstr /C:":%AGENTOS_KERNEL_PORT% " ^| findstr LISTENING  -^> taskkill /F /T /PID ^<pid^>
 echo ========================================
 echo.

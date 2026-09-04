@@ -29,6 +29,12 @@ use agentos_plugin_loader::{CapabilityRegistryImpl, NativePluginLoader, PluginLo
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*};
 
+/// 管理员初始密码来源：`DEFAULT_ADMIN_PASSWORD` 环境变量优先，未设置时回退内置
+/// 默认值。内置默认值是公开信息，仅保证开箱可登录，不能作为生产凭据。
+fn resolve_admin_password() -> String {
+    std::env::var("DEFAULT_ADMIN_PASSWORD").unwrap_or_else(|_| "admin12345".to_string())
+}
+
 /// 播种内置 admin 用户（首次启动插入，已存在则跳过）。
 ///
 /// 0.5.0 最小持久化地基：auth 由硬编码占位改为查 DB，启动时确保 admin 存在。
@@ -48,7 +54,7 @@ async fn seed_admin_user(store: Arc<dyn agentos_core::traits::StorageBackend>) {
             let admin = UserRecord {
                 user_id: ADMIN_ID.to_string(),
                 username: "admin".to_string(),
-                password: "admin12345".to_string(), // 明文（DEBT: 0.5.0 哈希）
+                password: resolve_admin_password(), // 明文（DEBT: 0.5.0 哈希）
                 email: Some("admin@agentos.dev".to_string()),
                 role: "admin".to_string(),
                 tenant_id: "default".to_string(),
@@ -56,7 +62,15 @@ async fn seed_admin_user(store: Arc<dyn agentos_core::traits::StorageBackend>) {
                 last_login_at: None,
             };
             match store.create_user(&admin).await {
-                Ok(()) => info!(target: "agentos-kernel", "已播种内置 admin 用户 (tenant=default)"),
+                Ok(()) => {
+                    if std::env::var("DEFAULT_ADMIN_PASSWORD").is_err() {
+                        warn!(target: "agentos-kernel",
+                            "已播种内置 admin 用户 (tenant=default)，使用内置默认密码（公开值）——首次登录前请在 .env 设置 DEFAULT_ADMIN_PASSWORD")
+                    } else {
+                        info!(target: "agentos-kernel",
+                            "已播种内置 admin 用户 (tenant=default)，初始密码取自 DEFAULT_ADMIN_PASSWORD")
+                    }
+                }
                 Err(e) => {
                     warn!(target: "agentos-kernel", error = %e, "播种 admin 用户失败（DB 查询将查不到 admin，登录不可用）")
                 }
@@ -1343,6 +1357,21 @@ pub(crate) fn build_plugin_loader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 管理员初始密码解析：DEFAULT_ADMIN_PASSWORD 设置时优先生效，未设置回退内置默认。
+    /// 两个分支串在一个测试内执行：环境变量是进程全局态，拆两个测试会互相竞争。
+    #[test]
+    fn admin_password_env_overrides_builtin_default() {
+        std::env::remove_var("DEFAULT_ADMIN_PASSWORD");
+        assert_eq!(resolve_admin_password(), "admin12345");
+        assert!(
+            resolve_admin_password().len() >= 8,
+            "回退默认密码须满足最小长度契约"
+        );
+        std::env::set_var("DEFAULT_ADMIN_PASSWORD", "custom-secret-pw");
+        assert_eq!(resolve_admin_password(), "custom-secret-pw");
+        std::env::remove_var("DEFAULT_ADMIN_PASSWORD");
+    }
 
     /// P0-1：build_plugin_loader 接入 config_root 后，load_config 返回非空（含 models 节）。
     ///

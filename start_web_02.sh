@@ -230,10 +230,11 @@ echo -e "${GREEN}  内核二进制: $KERNEL_BIN${NC}"
 echo ""
 
 # 同源守卫：native cdylib 与内核源码异源编译会让 tool 派发点位 SIGSEGV
-# （2026-09-01/08-31 两次实证）——启动前检查并给出重编指引。
-echo -e "${YELLOW}[CHECK] 检查 native cdylib 与内核同源性...${NC}"
-if ! python "$PROJECT_ROOT/scripts/check_native_artifacts_sync.py"; then
-    echo -e "${RED}[ERROR] native cdylib / kernel exe 异源，按上方指引重编后重试${NC}"
+# （2026-09-01/08-31 两次实证）。--build 会先自动重编缺失/过期的 cdylib
+# （新克隆首次运行即靠这一步补齐产物），仍过不了才中止。
+echo -e "${YELLOW}[CHECK] 同步 native cdylib 与内核同源性 (--build)...${NC}"
+if ! python "$PROJECT_ROOT/scripts/check_native_artifacts_sync.py" --build; then
+    echo -e "${RED}[ERROR] native cdylib 自动重编失败或内核 exe 过期，按上方指引处理后重试${NC}"
     exit 1
 fi
 echo ""

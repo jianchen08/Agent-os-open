@@ -38,10 +38,13 @@ config/
 │   ├── tool_permissions.yaml      # 工具权限配置
 │   └── */                         # 各类工具配置
 ├── system/                     # 系统配置
-│   ├── redis.yaml             # Redis 配置
-│   ├── memory_storage.yaml    # 存储配置
-│   ├── claude-code-router-config.json # Claude路由配置
-│   └── system_resources_inventory.md  # 系统资源清单
+│   ├── api_config.yaml
+│   ├── cost_control.yaml
+│   ├── long_term_task.yaml
+│   ├── plugin_allowlist.yaml
+│   ├── plugin_roots.yaml
+│   ├── spill_config.yaml
+│   └── widget_demo.yaml
 ├── evaluation/                 # 评估配置
 │   ├── evaluation_metrics.yaml   # 评估指标
 │   └── cost_control.yaml         # 成本控制
@@ -85,7 +88,6 @@ config/
 | `models/embedding.yaml`              | 嵌入模型配置  | ✅ 新建   |
 | `tools/builtin_tools_config.yaml`    | 内置工具配置  | ✅ 已移动 |
 | `tools/tool_permissions.yaml`        | 工具权限配置  | ✅ 已移动 |
-| `system/redis.yaml`                  | Redis 配置    | ✅ 已移动 |
 | `evaluation/evaluation_metrics.yaml` | 评估指标      | ✅ 已移动 |
 
 ### 配置优先级

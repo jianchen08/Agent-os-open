@@ -45,7 +45,7 @@
 | 协议 | MCP（Model Context Protocol）|
 | 部署 | Docker / Docker Compose（按需 Redis 容器） |
 
-> **构建说明**：内核 `cd kernel && cargo build --release --bin agentos-kernel`；每个 Python 插件目录自带 `pyproject.toml`，用 `uv sync --project <插件目录>` 建独立 venv；前端 `npm install`。启动脚本 `start_web_02.*` 一键完成上述步骤。
+> **构建说明**：内核 `cd kernel && cargo build --release --bin agentos-kernel`；每个 Python 插件目录自带 `pyproject.toml`，用 `uv sync --project <插件目录>` 建独立 venv；native cdylib 插件（tool_core / sensitive_checker / spill_guard）需逐插件 `cargo build --release` 并复制产物到插件目录根（启动脚本首次运行会自动完成，手动执行为 `python scripts/check_native_artifacts_sync.py --build`）；前端在仓库根 `pnpm install`（pnpm workspace，锁文件 `pnpm-lock.yaml`）。启动脚本 `start_web_02.*` 一键完成上述步骤。
 
 ### 📊 项目规模
 
@@ -146,16 +146,16 @@ hindsight 记忆插件承载：对话经验自动沉淀（retain）、按需检�
 
 ### 前置要求
 
-- Python 3.11+（启动脚本自动探测 3.11/3.12/3.13）
+- Python 3.11+（`python` 需在 PATH：启动脚本用它运行构建检查；插件解释器由 uv 按 `requires-python` 自动准备）
 - [uv](https://docs.astral.sh/uv/)（Python 插件依赖每目录 venv 管理；启动脚本首次运行自动 `uv sync`）
-- Rust stable（编译内核；`rustup` 安装）
-- Node.js 18+（前端构建，Vite 要求）
-- Docker（WSL2 + docker-ce；docker compose 按需提供 Redis 容器，内核与前端均运行在宿主机）
+- Rust（`rustup` 安装即可；仓库经 `rust-toolchain.toml` 钉 1.85.0，rustup 自动装配）
+- Node.js 20.19+ / 22.12+（前端构建；Vite 8 要求。包管理用 pnpm，见构建说明）
+- Docker（可选：高风险执行路径的容器隔离需要；Linux/macOS 启动脚本检测到 Docker 时会顺带拉起 Redis 容器——0.2 运行时当前未消费 Redis，可不安装）
 
 > **架构说明**：0.2 为 Rust 内核（`kernel/`）+ Vite 前端直连内核架构：`start_web_02.*` 编译并启动
-> `agentos-kernel`（:9100，宿主机进程）与 Vite 前端 dev server（:6390，反代到内核）；
-> `docker compose` 按需提供 Redis 容器（Linux/macOS 启动脚本会拉起其中 redis 服务；
-> Windows 脚本不涉及 Redis）。
+> `agentos-kernel`（:9100，宿主机进程）与 Vite 前端 dev server（:6390，反代到内核）。
+> Docker 仅容器隔离执行需要（可选）；Linux/macOS 启动脚本检测到 Docker 时会顺带拉起一个
+> Redis 容器（0.2 运行时未消费，遗留），Windows 脚本不涉及。
 
 ### 方式一：Windows 一键启动（推荐）
 
@@ -163,6 +163,8 @@ hindsight 记忆插件承载：对话经验自动沉淀（retain）、按需检�
 :: 1. 配置环境变量
 copy .env.example .env
 ::    编辑 .env，填入 LLM API Key（参考 config/models/llm.yaml）
+::    建议同时设置 DEFAULT_ADMIN_PASSWORD（admin 初始密码；未设置时使用内置默认
+::    admin/admin12345——公开值，仅建议本机体验用，且暂无改密端点）
 
 :: 2.（可选）配置 WSL2 + docker-ce 环境（bash 容器隔离等高风险执行路径使用；已配置可跳过）
 install_native_docker.bat
@@ -171,7 +173,7 @@ install_native_docker.bat
 start_web_02.bat
 
 :: 停止
-stop_web_02.sh   （或按端口结束进程，见脚本末尾提示）
+stop_web_02.bat   （或按端口结束进程，见脚本末尾提示）
 ```
 
 启动后：
@@ -184,8 +186,10 @@ stop_web_02.sh   （或按端口结束进程，见脚本末尾提示）
 # 1. 配置环境变量
 cp .env.example .env
 # 编辑 .env，填入 LLM API Key
+# 建议同时设置 DEFAULT_ADMIN_PASSWORD（admin 初始密码；未设置时使用内置默认
+# admin/admin12345——公开值，仅建议本机体验用，且暂无改密端点）
 
-# 2. 启动（编译 Rust 内核 + 启动内核 :9100 / 前端 :6390 / Redis）
+# 2. 启动（编译 Rust 内核 + 启动内核 :9100 / 前端 :6390；检测到 Docker 时顺带拉起 Redis 容器）
 #    启动/停止请用 start_web_02.sh / stop_web_02.sh
 chmod +x start_web_02.sh
 ./start_web_02.sh            # 完整启动（编译 + 内核 + 前端）
@@ -225,14 +229,20 @@ start_web_02.bat
 适合不使用脚本、需要精细控制的开发者。
 
 ```bash
+# 0. 准备插件 venv 与 native cdylib（内核不回退裸 Python，缺 .venv 时插件端点 502）
+for m in plugins/shared/*/plugin.json plugins/shared/*/*/plugin.json plugins/shared/pipeline/*/*/plugin.json; do
+  d=$(dirname "$m"); [ -f "$d/pyproject.toml" ] && [ ! -d "$d/.venv" ] && uv sync --project "$d"
+done
+python scripts/check_native_artifacts_sync.py --build   # 编译/同步 native cdylib 插件产物
+
 # 1. 编译并启动 Rust 内核
 cd kernel && cargo build --release --bin agentos-kernel
 export AGENTOS_PLUGINS_DIR=../plugins/shared AGENTOS_CONFIG_ROOT=../config
 ./target/release/agentos-kernel    # 内核运行在 http://localhost:9100
 
-# 2. 启动前端（另一个终端）
+# 2. 启动前端（另一个终端；仓库根执行安装，pnpm workspace 锁文件 pnpm-lock.yaml）
+pnpm install        # 无 pnpm 时 npm install 亦可用，但不带锁、版本与 CI 不保证一致
 cd frontend
-npm install
 npm run dev    # 前端开发服务器运行在 http://localhost:6390（反代到内核 :9100）
 ```
 

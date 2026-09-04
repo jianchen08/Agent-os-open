@@ -45,7 +45,7 @@
 | Protocol | MCP (Model Context Protocol) |
 | Deployment | Docker / Docker Compose (on-demand Redis container) |
 
-> **Build**: kernel via `cd kernel && cargo build --release --bin agentos-kernel`; every Python plugin directory carries its own `pyproject.toml` — create its isolated venv with `uv sync --project <plugin-dir>`; frontend via `npm install`. The `start_web_02.*` launch scripts do all of this in one step.
+> **Build**: kernel via `cd kernel && cargo build --release --bin agentos-kernel`; every Python plugin directory carries its own `pyproject.toml` — create its isolated venv with `uv sync --project <plugin-dir>`; native cdylib plugins (tool_core / sensitive_checker / spill_guard) each need `cargo build --release` plus copying the artifact into the plugin directory root (done automatically on the launch scripts' first run, or manually via `python scripts/check_native_artifacts_sync.py --build`); frontend via `pnpm install` at the repo root (pnpm workspace, lockfile `pnpm-lock.yaml`). The `start_web_02.*` launch scripts do all of this in one step.
 
 ### 📊 Project Scale
 
@@ -146,17 +146,17 @@ Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via pr
 
 ### Prerequisites
 
-- Python 3.11+ (launch scripts auto-detect 3.11/3.12/3.13)
+- Python 3.11+ (`python` must be on PATH: the launch scripts use it for build checks; plugin interpreters are provisioned by uv per `requires-python`)
 - [uv](https://docs.astral.sh/uv/) (per-plugin venv management; the launch script runs `uv sync` automatically on first run)
-- Rust stable (to build the kernel; install via `rustup`)
-- Node.js 18+ (for frontend build, Vite required)
-- Docker (WSL2 + docker-ce; docker compose provides the Redis container on demand, kernel and frontend both run on the host)
+- Rust (just install via `rustup`; the repo pins 1.85.0 in `rust-toolchain.toml`, which rustup provisions automatically)
+- Node.js 20.19+ / 22.12+ (frontend build; required by Vite 8. pnpm for package management, see Build note)
+- Docker (optional: needed by container-isolated execution for high-risk paths; on Linux/macOS the start script also launches a Redis container when Docker is detected — Redis is currently unconsumed at runtime in 0.2, so installing Docker is optional)
 
 > **Architecture note**: 0.2 is a Rust kernel (`kernel/`) + Vite frontend talking straight to the
 > kernel: `start_web_02.*` builds and starts `agentos-kernel` (:9100, host process) and the Vite
-> dev server (:6390, proxying to the kernel); `docker compose` provides the Redis container
-> on demand (the Linux/macOS start script launches the compose `redis` service; the Windows
-> script does not touch Redis).
+> dev server (:6390, proxying to the kernel). Docker is only needed for container-isolated
+> execution (optional); on Linux/macOS the start script also launches a Redis container when
+> Docker is detected (unconsumed at runtime in 0.2, legacy); the Windows script does not touch it.
 
 ### Option 1: Windows One-Click (Recommended)
 
@@ -164,6 +164,9 @@ Reusable skill packages (SKILL.md) under `skills/`: Agents lazy-load them via pr
 :: 1. Configure environment
 copy .env.example .env
 ::    Edit .env and fill in your LLM API keys (see config/models/llm.yaml)
+::    Also set DEFAULT_ADMIN_PASSWORD (initial admin password; when unset it falls
+::    back to the built-in admin/admin12345 — a public value for local trials only,
+::    and there is no password-change endpoint yet)
 
 :: 2. (optional) Set up WSL2 + docker-ce (used by container-isolated execution for high-risk paths such as bash); skip if already configured
 install_native_docker.bat
@@ -172,7 +175,7 @@ install_native_docker.bat
 start_web_02.bat
 
 :: Stop
-stop_web_02.sh   (or stop by port, see the hint printed at the end of the script)
+stop_web_02.bat   (or stop by port, see the hint printed at the end of the script)
 ```
 
 After startup:
@@ -185,8 +188,11 @@ After startup:
 # 1. Configure environment
 cp .env.example .env
 # Edit .env and fill in your LLM API keys
+# Also set DEFAULT_ADMIN_PASSWORD (initial admin password; when unset it falls
+# back to the built-in admin/admin12345 — a public value for local trials only,
+# and there is no password-change endpoint yet)
 
-# 2. Start (builds the Rust kernel + starts kernel :9100 / frontend :6390 / Redis)
+# 2. Start (builds the Rust kernel + starts kernel :9100 / frontend :6390; also launches a Redis container when Docker is detected)
 #    use start_web_02.sh / stop_web_02.sh to start/stop
 chmod +x start_web_02.sh
 ./start_web_02.sh            # full start (build + kernel + frontend)
@@ -226,14 +232,21 @@ The two instances don't interfere: different directories → different compose p
 For developers who skip the scripts and need fine-grained control.
 
 ```bash
+# 0. Prepare plugin venvs and native cdylibs (the kernel does not fall back to a bare
+#    PATH python; missing .venv means every plugin endpoint returns 502)
+for m in plugins/shared/*/plugin.json plugins/shared/*/*/plugin.json plugins/shared/pipeline/*/*/plugin.json; do
+  d=$(dirname "$m"); [ -f "$d/pyproject.toml" ] && [ ! -d "$d/.venv" ] && uv sync --project "$d"
+done
+python scripts/check_native_artifacts_sync.py --build   # build/sync native cdylib plugin artifacts
+
 # 1. Build and start the Rust kernel
 cd kernel && cargo build --release --bin agentos-kernel
 export AGENTOS_PLUGINS_DIR=../plugins/shared AGENTOS_CONFIG_ROOT=../config
 ./target/release/agentos-kernel    # kernel runs at http://localhost:9100
 
-# 2. Start frontend (separate terminal)
+# 2. Start frontend (separate terminal; install from the repo root — pnpm workspace, lockfile pnpm-lock.yaml)
+pnpm install       # npm install also works, but is lockfile-free and may diverge from CI
 cd frontend
-npm install
 npm run dev    # frontend dev server at http://localhost:6390 (proxies to kernel :9100)
 ```
 

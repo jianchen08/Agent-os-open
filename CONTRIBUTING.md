@@ -38,7 +38,7 @@
 
 1. **Fork 仓库** 并克隆到本地
 2. 创建特性分支：`git checkout -b feature/your-feature-name`
-3. 安装开发工具链：`pip install -e ".[dev]"`（pytest / ruff / mypy 等，根 `pyproject.toml` 声明）；改到某个 Python 插件时，在其目录执行 `uv sync --project <插件目录>` 建独立 venv（uv 单轨，内核不回退 PATH 裸 python）
+3. 安装开发工具链：`pip install -e ".[dev]"`（pytest / ruff / mypy 等，根 `pyproject.toml` 声明）；改到某个 Python 插件时，在其目录执行 `uv sync --project <插件目录>` 建独立 venv（uv 单轨，内核不回退 PATH 裸 python）。前端/桌面（electron）开发：Node.js 20.19+ / 22.12+（Vite 8 要求）+ pnpm（根 `package.json` 的 `packageManager` 钉 pnpm@11，启用 corepack 即可），在仓库根执行 `pnpm install`（workspace 锁文件 `pnpm-lock.yaml`，frontend 无独立 lockfile；npm install 可用但不带锁）；Rust 侧由 `rust-toolchain.toml` 钉 1.85.0，rustup 自动装配
 4. 阅读 [开发规范](#开发规范) 和 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ### 编码流程
