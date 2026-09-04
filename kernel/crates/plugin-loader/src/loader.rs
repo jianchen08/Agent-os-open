@@ -219,21 +219,22 @@ impl PluginLoaderImpl {
             };
 
             // 解析 manifest（跳过解析失败的插件，不影响同 root 的其他插件）
-            let mut manifest: PluginManifest = match serde_json::from_str::<PluginManifest>(&content) {
-                Ok(m) => m,
-                Err(json_err) => match serde_yaml::from_str::<PluginManifest>(&content) {
+            let mut manifest: PluginManifest =
+                match serde_json::from_str::<PluginManifest>(&content) {
                     Ok(m) => m,
-                    Err(yaml_err) => {
-                        warn!(
-                            "Skipping plugin at {}: json error: {}, yaml error: {}",
-                            manifest_path.display(),
-                            json_err,
-                            yaml_err
-                        );
-                        continue;
-                    }
-                },
-            };
+                    Err(json_err) => match serde_yaml::from_str::<PluginManifest>(&content) {
+                        Ok(m) => m,
+                        Err(yaml_err) => {
+                            warn!(
+                                "Skipping plugin at {}: json error: {}, yaml error: {}",
+                                manifest_path.display(),
+                                json_err,
+                                yaml_err
+                            );
+                            continue;
+                        }
+                    },
+                };
 
             // 校验 manifest（跳过校验失败的插件，不阻断同 root 的其他插件）
             if let Err(e) = self.validate_manifest_internal(&mut manifest, &manifest_path) {
@@ -1400,7 +1401,12 @@ mod tests {
                 field_type: "toggle".to_string(),
                 required: false,
                 description: None,
-                extra: Some(serde_json::json!({"default": true}).as_object().unwrap().clone()),
+                extra: Some(
+                    serde_json::json!({"default": true})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
             }
         }
 
@@ -2522,7 +2528,11 @@ mod tests {
             .filter(|f| f.target.as_deref() == Some("env"))
             .collect();
         assert_eq!(env_entries.len(), 1, "应合并进既有 env 条目而非新建");
-        let names: Vec<_> = env_entries[0].fields.iter().map(|f| f.name.as_str()).collect();
+        let names: Vec<_> = env_entries[0]
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
         assert!(names.contains(&"OTHER_KEY") && names.contains(&"SMITHERY_API_KEY"));
     }
 
@@ -2541,7 +2551,10 @@ mod tests {
             .flat_map(|f| f.fields.iter().map(|fd| fd.name.as_str()))
             .collect();
         assert_eq!(
-            env_fields.iter().filter(|n| **n == "SMITHERY_API_KEY").count(),
+            env_fields
+                .iter()
+                .filter(|n| **n == "SMITHERY_API_KEY")
+                .count(),
             1,
             "已声明的 var 不应重复生成"
         );

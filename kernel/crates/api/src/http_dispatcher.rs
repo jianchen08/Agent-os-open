@@ -213,11 +213,8 @@ pub fn build_router_with_http_routes(
     // handler 先尝试静态资源（plugin_dirs 命中 + 文件存在）→ 命中则直接返回；
     // 否则若有 dispatcher，走 find_http_route 模板匹配插件 http_endpoints；
     // 都不命中：manifest 在册且插件启用（生命周期空窗）→ 503，其余 → 404。
-    let wildcard_handler = build_wildcard_handler(
-        state.clone(),
-        dispatcher.clone(),
-        plugin_dirs.clone(),
-    );
+    let wildcard_handler =
+        build_wildcard_handler(state.clone(), dispatcher.clone(), plugin_dirs.clone());
     router = router.route("/ext/{*rest}", wildcard_handler);
     // G6-a：/api/v1/datasource/{*rest} 数据源代理——改写 /ext/{rest} 复用同一分发。
     // 前端 fetchDatasourceOptions 对非绝对 URI 走此前缀。

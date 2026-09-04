@@ -89,7 +89,11 @@ fn manifest_with_endpoint(plugin_id: &str, method: &str, path: &str) -> PluginMa
 
 /// AppState：dispatcher 资源齐备；manifests/enabled 由调用方注入。
 /// `register_route`：false 模拟「声明面在册但路由被摘」（生命周期空窗）。
-fn make_state(manifests: Vec<PluginManifest>, enabled: Vec<&str>, register_route: bool) -> AppState {
+fn make_state(
+    manifests: Vec<PluginManifest>,
+    enabled: Vec<&str>,
+    register_route: bool,
+) -> AppState {
     let mut state = AppState::new();
     let registry = Arc::new(CapabilityRegistryImpl::new());
     if register_route {
@@ -112,12 +116,7 @@ fn make_state(manifests: Vec<PluginManifest>, enabled: Vec<&str>, register_route
 
 async fn get_status(app: axum::Router, path: &str) -> (StatusCode, Option<String>) {
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(path)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
         .await
         .unwrap();
     let retry_after = resp
@@ -182,5 +181,9 @@ async fn registered_route_still_dispatches_normally() {
         true,
     );
     let (status, _) = get_status(build_router(state), "/ext/svc/ping").await;
-    assert_eq!(status, StatusCode::OK, "路由在册时正常分发，不受 503 分支影响");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "路由在册时正常分发，不受 503 分支影响"
+    );
 }

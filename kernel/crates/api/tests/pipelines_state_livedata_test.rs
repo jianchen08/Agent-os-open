@@ -103,13 +103,8 @@ async fn test_running_pipeline_memory_row_filled_from_state_table() {
         "current_phase": "core",
         "messages": [{"role": "user", "content": "出生唯一消息"}],
     });
-    agentos_session::pipeline_state_registry::global_registry().get_or_init(
-        tenant,
-        &pid,
-        "thread-x",
-        "agent-x",
-        birth,
-    );
+    agentos_session::pipeline_state_registry::global_registry()
+        .get_or_init(tenant, &pid, "thread-x", "agent-x", birth);
 
     // DB 表投影（引擎每轮 merge 时同步落库）：run 期唯一活面
     store
@@ -145,7 +140,9 @@ async fn test_running_pipeline_memory_row_filled_from_state_table() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
     let v: Value = serde_json::from_slice(&body).unwrap();
     let item = v["items"]
         .as_array()
@@ -177,13 +174,8 @@ async fn test_memory_key_not_overwritten_by_table() {
         "context_window": 111,
         "messages": [],
     });
-    agentos_session::pipeline_state_registry::global_registry().get_or_init(
-        tenant,
-        &pid,
-        "thread-y",
-        "agent-y",
-        birth,
-    );
+    agentos_session::pipeline_state_registry::global_registry()
+        .get_or_init(tenant, &pid, "thread-y", "agent-y", birth);
     store
         .upsert_state_field(&pid, tenant, "context_window", &json!(222))
         .unwrap();
@@ -206,7 +198,9 @@ async fn test_memory_key_not_overwritten_by_table() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
     let v: Value = serde_json::from_slice(&body).unwrap();
     let item = v["items"]
         .as_array()

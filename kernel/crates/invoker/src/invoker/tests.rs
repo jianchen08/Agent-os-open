@@ -3119,7 +3119,11 @@ async fn emit_lifecycle_error_fans_out_to_bus_with_context() {
     invoker.set_hook_bus(bus.clone());
     let mut rx = bus.subscribe();
 
-    invoker.emit_lifecycle_error("my_plugin", "tool execution failed", Some("MCP_TOOL_CALL_FAILED"));
+    invoker.emit_lifecycle_error(
+        "my_plugin",
+        "tool execution failed",
+        Some("MCP_TOOL_CALL_FAILED"),
+    );
 
     let ev = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
         .await
@@ -3210,7 +3214,10 @@ fn test_scoped_router_identity_light_member_uses_host_key() {
 fn test_scoped_router_identity_exclusive_uses_manifest_id() {
     // 独占插件身份 = manifest.id（现状语义；注意不是 plugin: 前缀宿主键）。
     let m = make_sidecar_manifest("llm_core", "python server.py");
-    assert_eq!(super::scoped_router_identity(&m, "plugin:llm_core"), "llm_core");
+    assert_eq!(
+        super::scoped_router_identity(&m, "plugin:llm_core"),
+        "llm_core"
+    );
 }
 
 #[test]
@@ -3254,7 +3261,10 @@ fn test_group_grants_union_sorted_deduped() {
     let grants = invoker
         .group_granted_capabilities("group:light:1")
         .expect("全员声明应得 Some");
-    assert_eq!(grants, vec!["pipeline-state".to_string(), "tool-surface".to_string()]);
+    assert_eq!(
+        grants,
+        vec!["pipeline-state".to_string(), "tool-surface".to_string()]
+    );
 }
 
 #[test]
@@ -3271,7 +3281,9 @@ fn test_group_grants_any_undeclared_member_is_none() {
     invoker.assign_light_host_with("ga", 6);
     invoker.assign_light_host_with("gb", 6);
 
-    assert!(invoker.group_granted_capabilities("group:light:1").is_none());
+    assert!(invoker
+        .group_granted_capabilities("group:light:1")
+        .is_none());
 }
 
 #[test]
@@ -3286,7 +3298,9 @@ fn test_group_grants_missing_member_manifest_is_none() {
     invoker.assign_light_host_with("ga", 6);
     invoker.assign_light_host_with("ghost", 6); // 无 manifest
 
-    assert!(invoker.group_granted_capabilities("group:light:1").is_none());
+    assert!(invoker
+        .group_granted_capabilities("group:light:1")
+        .is_none());
 }
 
 #[test]
@@ -3295,8 +3309,12 @@ fn test_group_grants_non_group_or_empty_keys_are_none() {
     let loader = Arc::new(MockLoader::new());
     let invoker = PluginInvokerImpl::new(loader);
     assert!(invoker.group_granted_capabilities("plugin:ga").is_none());
-    assert!(invoker.group_granted_capabilities("group:heavy:1").is_none());
-    assert!(invoker.group_granted_capabilities("group:light:9").is_none());
+    assert!(invoker
+        .group_granted_capabilities("group:heavy:1")
+        .is_none());
+    assert!(invoker
+        .group_granted_capabilities("group:light:9")
+        .is_none());
 }
 
 #[test]
@@ -3321,6 +3339,9 @@ fn test_group_grants_follows_live_packing_no_stale_snapshot() {
     invoker.assign_light_host_with("gb", 6);
     assert_eq!(
         invoker.group_granted_capabilities("group:light:1"),
-        Some(vec!["pipeline-state".to_string(), "tool-surface".to_string()])
+        Some(vec![
+            "pipeline-state".to_string(),
+            "tool-surface".to_string()
+        ])
     );
 }
