@@ -86,7 +86,8 @@ jobs:
           # 换重车道按档跳过（与 tdd-gate 等既有 fetch-depth: 0 job 同口径）
           fetch-depth: 0
 
-      - name: Compute lanes
+      - id: lanes
+        name: Compute lanes
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
