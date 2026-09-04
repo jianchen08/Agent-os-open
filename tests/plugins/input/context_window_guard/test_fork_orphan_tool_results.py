@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """_build_fork_messages 孤儿 tool result 摘除测试。
 
 契约：fork 消息队列发往压缩 LLM（与执行请求同一 MiniMax 严格校验），

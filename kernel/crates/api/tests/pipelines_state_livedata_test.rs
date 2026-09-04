@@ -1,4 +1,4 @@
-// @ci: rust-test
+// @feature: FP-0.2.七 路由收敛 | @ci: rust-test
 //! /api/v1/pipelines/state 运行期数据补齐集成测试。
 //!
 //! 契约：run 期间引擎只在本地内存推进 state，registry 快照拍在 stage_finalize

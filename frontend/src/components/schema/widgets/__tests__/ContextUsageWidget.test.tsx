@@ -1,4 +1,6 @@
 /**
+ * @feature FP-0.2.可观测性 上下文用量指示器数据消费契约 | @ci frontend-test
+ *
  * ContextUsageWidget 单测：输入框上下文用量指示器的数据消费契约
  *
  * 模型名/上下文窗口/用量三类真值全部出自管道 state 行（/api/v1/pipelines/state）：

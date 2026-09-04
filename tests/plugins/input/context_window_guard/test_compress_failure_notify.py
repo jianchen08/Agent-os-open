@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """压缩彻底失败的前端透传测试（frontend.emit 通道）。
 
 契约：压缩失败（compress_messages 异常或无有效收缩）时，经 frontend.emit

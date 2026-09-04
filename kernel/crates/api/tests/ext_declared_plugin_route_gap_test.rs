@@ -1,4 +1,4 @@
-// @ci: rust-test
+// @feature: FP-0.2.七 路由收敛 | @ci: rust-test
 //! /ext 通配分发「声明面在册但路由缺席」语义测试（TDD RED）。
 //!
 //! 插件生命周期存在路由空窗：G2 复验重注册（scopes.revoke → guarded 重注册，
