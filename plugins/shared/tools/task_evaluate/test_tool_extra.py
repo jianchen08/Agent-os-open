@@ -1004,4 +1004,5 @@ class TestTaskEvaluateFunc:
         assert service.complete_evaluation.await_count == 1
         assert service.complete_evaluation.call_args.kwargs.get("passed") is False
         assert state_writer.await_count == 1
+        assert state_writer.await_args is not None
         assert state_writer.await_args.args[1]["task.status"] == "failed"

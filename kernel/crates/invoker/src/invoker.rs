@@ -2087,9 +2087,7 @@ impl PluginInvokerImpl {
     /// 存量未声明成员不因合宿收窄。每次调用从装箱分配表现算：成员集随装箱/重生
     /// 动态变化，归并结果自动跟随，无快照、无失效清理面。
     pub fn group_granted_capabilities(&self, host_key: &str) -> Option<Vec<String>> {
-        if parse_light_slot(host_key).is_none() {
-            return None;
-        }
+        parse_light_slot(host_key)?;
         let members = self.host_members(host_key);
         if members.is_empty() {
             return None;
