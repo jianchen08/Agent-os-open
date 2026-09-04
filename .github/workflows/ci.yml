@@ -11,10 +11,21 @@
 #     94 插件子进程冒烟矩阵，正确性信号不缩水）。名单单点：
 #     scripts/coverage_exempt.py。
 #
-# 流程：push/PR → Rust Lint → Rust Build → Rust Test / Rust Coverage
-#        → SDK Lint → SDK Test → Python Coverage（插桩）/ Python Heavy（免插桩）
-#        → Timing → Frontend Test/E2E → Electron Compile
-#        → Pre-commit / TDD / Traceability
+# 车道分档（2026-09-04）：changes job 按变更面计算车道，重车道按档执行，
+# 不再每次推送全量跑（判定单点 scripts/ci_changed_areas.py，与门禁命令
+# 同样本地可复现）：
+#   full        内核/CI 工作流/门禁脚本 → 全量（Rust + Python + 前端）
+#   python_full 核心面（pipeline 管道插件/SDK/依赖锁）→ 全量 Python 车道
+#   related     非核心插件(system/tools)/配置/测试面 → 仅变更关联的单元+集成测试
+#   frontend / electron / endpoints → 独立叠加车道（endpoints 廉价一致性闸）
+#   pre-commit / TDD / Traceability 恒跑（格式与追溯防线不缩水）
+#   all-checks-passed 放行 skipped：车道未命中的 job 记 skipped 不红
+#
+# 流程：push/PR → changes（车道判定）
+#        → full: Rust Lint→Build→Test / Coverage / Deny + 前端 + Electron
+#        → python_full: SDK Lint/Test + Python Coverage（插桩）/ Heavy（免插桩）+ Timing
+#        → related: 变更关联测试（plugins-related-tests）
+#        → 恒跑: Pre-commit / TDD / Traceability
 #        （真实 LLM E2E 已拆至 e2e.yml：nightly/手动/push main，密钥预检）
 #
 # 触发条件：
@@ -56,10 +67,38 @@ env:
   AGENTOS_GATE_VERBOSE: "1"
 
 jobs:
+  # ── 变更面分档（车道判定，单点 scripts/ci_changed_areas.py）────────────
+  changes:
+    name: Changes (车道判定)
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.lanes.outputs.full }}
+      python_full: ${{ steps.lanes.outputs.python_full }}
+      related: ${{ steps.lanes.outputs.related }}
+      frontend: ${{ steps.lanes.outputs.frontend }}
+      electron: ${{ steps.lanes.outputs.electron }}
+      endpoints: ${{ steps.lanes.outputs.endpoints }}
+      docs_only: ${{ steps.lanes.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # push 多提交区间与 PR merge-base 都需要历史；一次性全量 checkout
+          # 换重车道按档跳过（与 tdd-gate 等既有 fetch-depth: 0 job 同口径）
+          fetch-depth: 0
+
+      - name: Compute lanes
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python scripts/ci_changed_areas.py
+
   # ── Rust Lint ──────────────────────────────────────────────
   rust-lint:
     name: Rust Lint (fmt + clippy)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     defaults:
       run:
         working-directory: kernel
@@ -188,6 +227,8 @@ jobs:
   rust-coverage:
     name: Rust Coverage (llvm-cov 插桩 + 改动行 100%；整体基线挂起)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -239,6 +280,8 @@ jobs:
   rust-deny:
     name: Rust Deny (cargo-deny 依赖审计)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -274,6 +317,8 @@ jobs:
   python-lint:
     name: Python Lint (SDK ruff + mypy)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.python_full == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -335,6 +380,8 @@ jobs:
   python-coverage:
     name: Python Coverage (插桩 + 失败数基线 + mypy 基线 + 改动行 100%；整体基线挂起)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.python_full == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -392,6 +439,8 @@ jobs:
   python-heavy-suites:
     name: Python Heavy (免插桩冒烟矩阵)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.python_full == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -454,6 +503,40 @@ jobs:
       - name: Run gates (plugins-heavy)
         run: python scripts/run_gates.py --filter plugins-heavy
 
+  # ── 变更关联测试（非核心插件/配置 → 对应单元+集成测试）────────────────
+  # related 车道：system/tools 插件、config、tests 面变更只跑受影响测试，
+  # 不触发全量插桩与冒烟矩阵（车道判定见 changes job；映射与执行单点
+  # scripts/ci_related_tests.py，经 run_gates 同一入口）。无关联命中放行；
+  # 失败即红（新车道无失败基线锁，只验增量——失败基线仍由全量车道持有）。
+  python-related:
+    name: Python Related Tests (变更关联单元+集成)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.related == 'true'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies from uv.lock (frozen, reproducible)
+        # 与 python-coverage 同款：--extra isolation 供 docker patch 系测试。
+        run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+
+      - name: Run gates (plugins-related-tests)
+        run: python scripts/run_gates.py --filter plugins-related-tests
+
   # ── 前端端点供给一致性（生成物漂移闸 + /ext/ 手写棘轮闸）──────────────
   # 插件端点 URL 唯一真值源 = 各插件 plugin.json 的 http_endpoints 声明
   # （ADR 2026-08-21 channel_api 退役：前端端点供给模型改生成式）。
@@ -466,6 +549,8 @@ jobs:
   frontend-endpoints-sync:
     name: Frontend Endpoints Sync (生成物漂移闸 + /ext/ 手写棘轮闸)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.endpoints == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -486,6 +571,8 @@ jobs:
   timing:
     name: Timing Gate (时序不变量, 独立阻塞)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.python_full == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -517,6 +604,8 @@ jobs:
   frontend-test:
     name: Frontend Test (tsc + lint + vitest + 改动行 100%)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -553,6 +642,8 @@ jobs:
   frontend-e2e:
     name: Frontend E2E (冒烟子集, 零后端依赖)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     # 首跑实证会挂死无果（2026-09-01 挂 80min+），无超时保护默认 6h 才超——
     # 限时快速失败拿日志定位根因；正常耗时 build+smoke 应 <15min
     timeout-minutes: 20
@@ -605,6 +696,8 @@ jobs:
   electron-compile:
     name: Electron Compile (主进程 tsc)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.electron == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -702,6 +795,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
+      - changes
       - rust-lint
       - rust-build
       - rust-test
@@ -711,6 +805,7 @@ jobs:
       - python-test
       - python-coverage
       - python-heavy-suites
+      - python-related
       - frontend-endpoints-sync
       - timing
       - frontend-test

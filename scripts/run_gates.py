@@ -320,6 +320,19 @@ GATES: list[Gate] = [
         command=("uv", "run", "--frozen", "python", "scripts/check_mypy_baseline.py"),
     ),
     Gate(
+        # 变更关联测试车道（2026-09-04 CI 分档）：非核心插件/配置/测试面变更
+        # 只跑受影响插件的单元+集成测试；全量插桩/冒烟矩阵保留给核心面
+        # （kernel + pipeline + SDK）。变更面解析契约与 check_diff_coverage.py
+        # 一致（--base > GITHUB_BASE_REF > push 最后提交），CI 由 changes job
+        # 的 related 输出决定是否挂本门禁；无关联命中放行，失败即红（无基线
+        # 锁——新车道只验增量，失败基线仍由全量车道持有）。
+        id="plugins-related-tests",
+        label="变更关联测试（非核心插件/配置 → 对应单元+集成测试）",
+        domain="plugins",
+        command=("uv", "run", "--frozen", "python", "scripts/ci_related_tests.py"),
+        env=_PLUGINS_ENV,
+    ),
+    Gate(
         id="timing-gate",
         label="时序不变量（-m timing，独立阻塞）",
         domain="plugins",
