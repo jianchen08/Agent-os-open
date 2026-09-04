@@ -146,7 +146,9 @@ def main() -> int:
             print(f"  - {rel}")
     if stale:
         rc = 1
-        print(f"[native-sync] ❌ {len(stale)} 个 cdylib 缺失或编译于 native-sdk 源码最近变更之前（异源 → SIGSEGV 风险）：")
+        print(
+            f"[native-sync] ❌ {len(stale)} 个 cdylib 缺失或编译于 native-sdk 源码最近变更之前（异源 → SIGSEGV 风险）："
+        )
         for dll in stale:
             rel = dll.relative_to(REPO) if dll.is_relative_to(REPO) else dll
             print(f"  - {rel}")
