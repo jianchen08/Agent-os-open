@@ -4,18 +4,18 @@
 变更背景（0.2 迁移）：
   后端从 0.1 channel_api（:8988）迁移到 Rust 内核 agentos-kernel（:9100）：
     后端    : 8888 → 8988（0.1）→ 9100（0.2 内核）
-    前端(宿主机): 5189 → 5289（容器内部 5188 不变）
     Redis(宿主机): 6380 → 6480（容器内部 6379 不变）
+  0.2 compose 仅承载 Redis（b72c0eb00 裁撤 0.1 时代 frontend 容器）：
+    内核与 Vite 前端均运行在宿主机，compose 无前端/反代端口可断言。
 
 验证范围：
-  1. docker-compose.yml 端口映射正确
-  2. docker-compose.yml 中 BACKEND_URL / BACKEND_WS_URL 端口为 9100
-  3. config/system/api_config.yaml 中 base_url 端口为 9100
-  4. frontend/.env.example 中 VITE_API_BASE_URL / VITE_WS_BASE_URL 端口为 9100
-  5. 容器内部端口未被修改（5188 / 6379）
-  6. 旧端口不再作为服务端口出现
+  1. docker-compose.yml Redis 端口映射正确
+  2. config/system/api_config.yaml 中 base_url 端口为 9100
+  3. frontend/.env.example 中 VITE_API_BASE_URL / VITE_WS_BASE_URL 端口为 9100
+  4. 容器内部端口未被修改（6379）
+  5. 旧端口不再作为服务端口出现
 """
-import re
+
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,6 @@ import pytest
 # 常量：新端口 / 旧端口 / 容器内部端口
 # ---------------------------------------------------------------------------
 NEW_BACKEND_PORT = "9100"
-NEW_FRONTEND_HOST_PORT = "5289"
 NEW_REDIS_HOST_PORT = "6480"
 
 OLD_BACKEND_PORT = "8888"
@@ -32,7 +31,6 @@ OLD_BACKEND_PORT_01 = "8988"
 OLD_FRONTEND_HOST_PORT = "5189"
 OLD_REDIS_HOST_PORT = "6380"
 
-CONTAINER_FRONTEND_PORT = "5188"
 CONTAINER_REDIS_PORT = "6379"
 
 # 项目根目录（tests/ 的上一级）
@@ -50,7 +48,7 @@ def _read_file(rel_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. docker-compose.yml — 端口映射
+# 1. docker-compose.yml — 端口映射（0.2 仅 Redis，前端容器已裁撤）
 # ---------------------------------------------------------------------------
 class TestDockerComposePortMapping:
     """验证 docker-compose.yml 中的端口映射配置"""
@@ -58,12 +56,6 @@ class TestDockerComposePortMapping:
     @pytest.fixture
     def content(self):
         return _read_file("docker-compose.yml")
-
-    def test_frontend_port_mapping(self, content):
-        """前端宿主端口应参数化，默认 5289，容器内 5188"""
-        assert "${FRONTEND_HOST_PORT:-5289}:5188" in content, (
-            "前端端口映射应为 ${FRONTEND_HOST_PORT:-5289}:5188（参数化+默认值）"
-        )
 
     def test_redis_port_mapping(self, content):
         """Redis 宿主端口应参数化，默认 6480，容器内 6379"""
@@ -81,27 +73,15 @@ class TestDockerComposePortMapping:
 
 
 # ---------------------------------------------------------------------------
-# 2. docker-compose.yml — BACKEND_URL / BACKEND_WS_URL
+# 2. docker-compose.yml — 旧后端端口负向检查
 # ---------------------------------------------------------------------------
 class TestDockerComposeBackendUrl:
-    """验证 docker-compose.yml 中后端 URL 的端口"""
+    """验证 docker-compose.yml 不含 0.1 时代后端端口（frontend 容器反代已随
+    b72c0eb00 裁撤，无正向 BACKEND_URL 断言对象）"""
 
     @pytest.fixture
     def content(self):
         return _read_file("docker-compose.yml")
-
-    def test_backend_url_port(self, content):
-        """BACKEND_URL 端口应参数化，默认 9100"""
-        # 形式：BACKEND_URL=http://${BACKEND_HOST_IP:-host.docker.internal}:${BACKEND_PORT:-9100}
-        assert re.search(r"BACKEND_URL=http://\$\{BACKEND_HOST_IP:-host\.docker\.internal\}:\$\{BACKEND_PORT:-9100\}", content), (
-            "BACKEND_URL 端口应参数化为 ${BACKEND_PORT:-9100}"
-        )
-
-    def test_backend_ws_url_port(self, content):
-        """BACKEND_WS_URL 端口应参数化，默认 9100"""
-        assert re.search(r"BACKEND_WS_URL=ws://\$\{BACKEND_HOST_IP:-host\.docker\.internal\}:\$\{BACKEND_PORT:-9100\}", content), (
-            "BACKEND_WS_URL 端口应参数化为 ${BACKEND_PORT:-9100}"
-        )
 
     def test_no_old_backend_port_in_urls(self, content):
         """旧后端端口 8888 不应出现在 URL 配置中"""
@@ -111,6 +91,7 @@ class TestDockerComposeBackendUrl:
 # ---------------------------------------------------------------------------
 # 3. config/system/api_config.yaml — base_url 端口
 # ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
 class TestApiConfig:
@@ -122,9 +103,7 @@ class TestApiConfig:
 
     def test_base_url_port(self, content):
         """base_url 应使用端口 9100（0.2 内核）"""
-        assert "base_url: http://localhost:9100" in content, (
-            "api_config.yaml 中 base_url 应使用端口 9100"
-        )
+        assert "base_url: http://localhost:9100" in content, "api_config.yaml 中 base_url 应使用端口 9100"
 
     def test_no_old_backend_port(self, content):
         """旧后端端口 8888 不应出现在 api_config.yaml 中"""
@@ -135,18 +114,11 @@ class TestApiConfig:
 # 5. 容器内部端口未被修改
 # ---------------------------------------------------------------------------
 class TestContainerInternalPorts:
-    """验证 Docker 容器内部端口保持不变"""
+    """验证 Docker 容器内部端口保持不变（0.2 仅 Redis 容器）"""
 
     @pytest.fixture
     def content(self):
         return _read_file("docker-compose.yml")
-
-    def test_frontend_container_port_unchanged(self, content):
-        """前端容器内部端口仍为 5188（参数化只改宿主端口，容器内不变）"""
-        # 映射形式 "${FRONTEND_HOST_PORT:-5289}:5188"，容器端口 5188 紧跟在 }: 后
-        assert "}:5188" in content, "前端容器内部端口应为 5188"
-        # healthcheck 中的 localhost 端口（容器内部访问）
-        assert "localhost:5188" in content, "healthcheck 中前端容器端口应为 5188"
 
     def test_redis_container_port_unchanged(self, content):
         """Redis 容器内部端口仍为 6379"""
@@ -171,9 +143,7 @@ class TestFrontendEnvExample:
 
     def test_ws_base_url_port(self, content):
         """VITE_WS_BASE_URL 应使用端口 9100（0.2 内核）"""
-        assert "VITE_WS_BASE_URL=ws://127.0.0.1:9100" in content, (
-            ".env.example 中 VITE_WS_BASE_URL 应使用内核端口 9100"
-        )
+        assert "VITE_WS_BASE_URL=ws://127.0.0.1:9100" in content, ".env.example 中 VITE_WS_BASE_URL 应使用内核端口 9100"
 
     def test_no_old_backend_port(self, content):
         """旧后端端口 8888 不应作为服务端口出现在 .env.example 中"""
@@ -187,37 +157,40 @@ class TestFrontendEnvExample:
 class TestNoOldPortsInKeyConfigs:
     """验证旧端口（8888/5189/6380）不再作为服务端口出现在关键配置文件中"""
 
-    @pytest.mark.parametrize("rel_path", [
-        "docker-compose.yml",
-        "config/system/api_config.yaml",
-    ])
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            "docker-compose.yml",
+            "config/system/api_config.yaml",
+        ],
+    )
     def test_no_old_backend_port_as_service(self, rel_path):
         """旧后端端口 8888 不应作为服务端口出现在关键配置中"""
         content = _read_file(rel_path)
         # 检查 8888 出现在端口上下文中（:8888 或 =8888 或 localhost:8888）
         port_patterns = [":8888", "8888", "port.*8888"]
         matches = [p for p in port_patterns if p in content]
-        assert not matches, (
-            f"{rel_path} 中仍然包含旧后端端口 8888（匹配模式: {matches}）"
-        )
+        assert not matches, f"{rel_path} 中仍然包含旧后端端口 8888（匹配模式: {matches}）"
 
-    @pytest.mark.parametrize("rel_path", [
-        "docker-compose.yml",
-        "frontend/.env.example",
-    ])
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            "docker-compose.yml",
+            "frontend/.env.example",
+        ],
+    )
     def test_no_old_frontend_host_port(self, rel_path):
         """旧前端宿主机端口 5189 不应出现在关键配置中"""
         content = _read_file(rel_path)
-        assert "5189" not in content, (
-            f"{rel_path} 中仍然包含旧前端宿主机端口 5189"
-        )
+        assert "5189" not in content, f"{rel_path} 中仍然包含旧前端宿主机端口 5189"
 
-    @pytest.mark.parametrize("rel_path", [
-        "docker-compose.yml",
-    ])
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            "docker-compose.yml",
+        ],
+    )
     def test_no_old_redis_host_port(self, rel_path):
         """旧 Redis 宿主机端口 6380 不应出现在关键配置中"""
         content = _read_file(rel_path)
-        assert "6380" not in content, (
-            f"{rel_path} 中仍然包含旧 Redis 宿主机端口 6380"
-        )
+        assert "6380" not in content, f"{rel_path} 中仍然包含旧 Redis 宿主机端口 6380"

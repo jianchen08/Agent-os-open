@@ -29,6 +29,7 @@
   6. wsl 脚本用 wslpath 动态推导镜像目录（不写死挂载路径）
   7. .gitignore 持续忽略 .env（防凭据入库回归）
 """
+
 from pathlib import Path
 
 import pytest
@@ -54,16 +55,17 @@ class TestNoHardcodedDirSuffix:
     换部署目录后 compose 生成的容器名与脚本探测的名字对不上。
     """
 
-    @pytest.mark.parametrize("rel_path", [
-        "docker-compose.yml",
-        "plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh",
-    ])
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            "docker-compose.yml",
+            "plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh",
+        ],
+    )
     def test_no_22404_literal(self, rel_path):
         """三脚本均不应含 22404 字面量"""
         content = _read_file(rel_path)
-        assert "22404" not in content, (
-            f"{rel_path} 仍含硬编码目录哈希后缀 22404，换部署目录会失效"
-        )
+        assert "22404" not in content, f"{rel_path} 仍含硬编码目录哈希后缀 22404，换部署目录会失效"
 
 
 # ---------------------------------------------------------------------------
@@ -93,9 +95,7 @@ class TestComposeStandardNaming:
 
     def test_no_container_name(self, content):
         """不应有显式 container_name（否则多实例容器名冲突）"""
-        assert "container_name:" not in content, (
-            "docker-compose.yml 含 container_name，会锁死容器名导致多实例冲突"
-        )
+        assert "container_name:" not in content, "docker-compose.yml 含 container_name，会锁死容器名导致多实例冲突"
 
     def test_network_and_volume_unsuffixed(self, content):
         """网络名 agent-net、卷名 redis-data 无目录哈希后缀"""
@@ -117,18 +117,12 @@ class TestDynamicContainerLookup:
 
     def test_wsl_uses_compose_ps(self, wsl_sh):
         """wsl 脚本用 docker compose ps -q <service> 获取容器 ID"""
-        assert "docker compose ps -q" in wsl_sh, (
-            "wsl 脚本应使用 docker compose ps -q 动态获取容器，而非写死容器名"
-        )
+        assert "docker compose ps -q" in wsl_sh, "wsl 脚本应使用 docker compose ps -q 动态获取容器，而非写死容器名"
 
     def test_wsl_no_hardcoded_name_filter(self, wsl_sh):
         """wsl 脚本不应写死 --filter name=agent-os-* 容器名"""
-        assert "name=agent-os-frontend" not in wsl_sh, (
-            "wsl 脚本仍写死 name=agent-os-frontend 过滤，换目录会失配"
-        )
-        assert "name=agent-os-redis" not in wsl_sh, (
-            "wsl 脚本仍写死 name=agent-os-redis 过滤，换目录会失配"
-        )
+        assert "name=agent-os-frontend" not in wsl_sh, "wsl 脚本仍写死 name=agent-os-frontend 过滤，换目录会失配"
+        assert "name=agent-os-redis" not in wsl_sh, "wsl 脚本仍写死 name=agent-os-redis 过滤，换目录会失配"
 
 
 # ---------------------------------------------------------------------------
@@ -146,19 +140,17 @@ class TestWslProjectDirDynamic:
 
     def test_uses_wslpath(self, content):
         """脚本应使用 wslpath 动态推导当前目录的 WSL 路径"""
-        assert "wslpath" in content, (
-            "wsl 脚本未用 wslpath 动态推导项目目录，仍依赖写死路径"
-        )
+        assert "wslpath" in content, "wsl 脚本未用 wslpath 动态推导项目目录，仍依赖写死路径"
 
     def test_no_hardcoded_project_path(self, content):
         """不应写死 container_224042d3b925 目录名"""
-        assert "container_224042d3b925" not in content, (
-            "wsl 脚本仍写死 container_224042d3b925 目录名，换目录即失效"
-        )
+        assert "container_224042d3b925" not in content, "wsl 脚本仍写死 container_224042d3b925 目录名，换目录即失效"
 
 
 # ---------------------------------------------------------------------------
 # 4.6 宿主端口参数化（支持多实例共存，不互相冲突）
+# 0.2 compose 仅承载 Redis（b72c0eb00 裁撤 frontend 容器），前端/反代端口
+# 参数化断言随之退役，仅存 Redis 侧。
 # ---------------------------------------------------------------------------
 class TestPortParameterization:
     """验证宿主端口已参数化（${VAR:-default}），多实例设不同 env 即可隔离。
@@ -167,36 +159,16 @@ class TestPortParameterization:
     唯一冲突点是宿主端口。参数化后，第二实例设不同端口即可共存。
     """
 
-    def test_compose_frontend_port_parameterized(self):
-        """docker-compose.yml 前端宿主端口应参数化"""
-        content = _read_file("docker-compose.yml")
-        assert "${FRONTEND_HOST_PORT:-5289}" in content, (
-            "前端宿主端口应参数化为 ${FRONTEND_HOST_PORT:-5289}"
-        )
-
     def test_compose_redis_port_parameterized(self):
         """docker-compose.yml Redis 宿主端口应参数化"""
         content = _read_file("docker-compose.yml")
-        assert "${REDIS_HOST_PORT:-6480}" in content, (
-            "Redis 宿主端口应参数化为 ${REDIS_HOST_PORT:-6480}"
-        )
-
-    def test_compose_backend_port_parameterized(self):
-        """docker-compose.yml BACKEND_URL 端口应参数化"""
-        content = _read_file("docker-compose.yml")
-        assert "${BACKEND_PORT:-9100}" in content, (
-            "BACKEND_URL 端口应参数化为 ${BACKEND_PORT:-9100}"
-        )
+        assert "${REDIS_HOST_PORT:-6480}" in content, "Redis 宿主端口应参数化为 ${REDIS_HOST_PORT:-6480}"
 
     def test_wsl_no_dangerous_foreign_container_removal(self):
         """wsl_ensure_containers.sh 不应含'自动删除 foreign 容器'的危险预检"""
         content = _read_file("plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh")
-        assert "foreign" not in content, (
-            "wsl 脚本仍含自动删除 foreign 容器的危险逻辑"
-        )
-        assert "预检端口冲突" not in content, (
-            "wsl 脚本仍含旧的端口冲突预检（已改为参数化隔离）"
-        )
+        assert "foreign" not in content, "wsl 脚本仍含自动删除 foreign 容器的危险逻辑"
+        assert "预检端口冲突" not in content, "wsl 脚本仍含旧的端口冲突预检（已改为参数化隔离）"
 
 
 # ---------------------------------------------------------------------------
