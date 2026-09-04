@@ -43,7 +43,9 @@ docs/coverage_report.md
 .dbg/
 
 # ─── 测试 / 报告产物(可随时再生,不入库)───
-reports/
+# 注意必须用 reports/* 而非 reports/：父目录整体排除时 git 不再下探，
+# 下方反豁免永不生效（T5_tests.md 曾因此无法入库，CI checkout 缺数据红门禁）。
+reports/*
 # 例外:traceability 门禁的审查号清单源数据(非可再生产物)
 !reports/audit_round3/
 !reports/audit_round3/T5_tests.md
