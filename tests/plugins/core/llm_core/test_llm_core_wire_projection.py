@@ -1,4 +1,4 @@
-# @feature: FP-0.2 llm | @ci: python-coverage
+# @feature: FP-0.2.〇 管道引擎 | @ci: python-coverage
 """llm_core 发送边界 wire 投影测试：管道内部字段不得进 LLM 载荷。
 
 背景（2026-09-03 实锤）：内核把 client_message_id 幂等键放 user 消息 metadata
