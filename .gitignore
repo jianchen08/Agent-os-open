@@ -218,3 +218,6 @@ kernel/schema_tmp.json
 
 # ─── 再生产物(脚本可随时再生,不入库)───
 docs/agent_prompts_viewer.html
+
+# 提交信息卫生闸的本地敏感词表（真实凭据字面量），永不入库
+scripts/.commit_msg_sensitive_words.local
