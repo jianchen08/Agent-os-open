@@ -18,7 +18,7 @@
 - [Overview](#-overview) · [Demo Video](#-demo-video) · [Key Highlights](#-key-highlights) · [Project Scale](#-project-scale)
 - [Quick Start](#-quick-start)（[Windows](#option-1-windows-one-click-recommended) / [Linux·macOS](#option-2-linux--macos-one-click) / [Manual](#option-3-manual-development)）
 - [Multi-Instance Config](#cross-device--multi-instance-configuration)
-- [Documentation](#-documentation-navigation) · [Mirrors](#-mirror-repositories)
+- [Documentation](#-documentation-navigation) · [Version Evolution & Two History Lines](#-version-evolution-and-the-two-history-lines) · [Mirrors](#-mirror-repositories)
 - [Contributing](#-contributing) · [Security](#-security-policy) · [License](#-license)
 
 ---
@@ -273,6 +273,25 @@ npm run dev    # frontend dev server at http://localhost:6390 (proxies to kernel
 | [SECURITY.md](SECURITY.md) | Security policy & vulnerability reporting |
 | [AUTHORS.md](AUTHORS.md) | Contributors list |
 | [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) | Third-party dependency licenses |
+
+---
+
+## 🧬 Version Evolution and the Two History Lines
+
+This repository carries two **independent** history lines:
+
+| Line | Branch | Generation | Notes |
+|---|---|---|---|
+| Active | `main` | **0.2** — Rust micro-kernel + Python plugins + React frontend | Current development line; architecture in [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Archive | `legacy/0.1` | **0.1** — Python app (`src/` layout, launched via `run.py`) | Full 0.1-era history (Apr 2026 – Aug 2026), frozen, kept for reference only |
+
+0.1 → 0.2 is an **architecture generational shift** rather than an incremental
+refactor: the execution base was rewritten from a Python app into a Rust
+micro-kernel (`kernel/`), and all business capabilities (LLM, memory, evaluation,
+approval, triggers, etc.) moved into hot-loadable plugins (`plugins/`) —
+everything is a plugin. The two lines are separate chains with no shared
+history: `main` is not a continuation of `legacy/0.1` but a fresh start on the
+new execution base.
 
 ---
 
