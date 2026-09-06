@@ -3,7 +3,6 @@
 > 面向**想给灵汐 AgentOS 0.2 提供实时流式能力**的插件开发者，以及维护消息链路的前端/内核工程师。
 > 本文定义流式事件的**平台公共契约**：所有消息实时通道（LLM 流式回复、插件实时进度/结构化卡片）发射的事件信封统一走本协议。
 > 单一真值源：`config/kernel_capabilities/streaming.json`（内核入口校验 + 前端消费 + 插件发射端均读本文件，不读代码副本）。
-> 决策背景见 [ADR 2026-08-22 流式链路重写为平台公共契约](../decisions/2026-08-22-streaming-protocol-rewrite.md)。
 > **协议状态：已采纳并落地**——`ManifestCapabilities.streaming` 字段已进内核契约（`kernel/crates/core/src/traits.rs`），前端 `pluginDeclarationValidate` 已按声明校验，插件可实际接入。LLM 正文流式为 8 事件块协议（见 §3.1）。
 
 ---

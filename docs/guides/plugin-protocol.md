@@ -2,7 +2,7 @@
 
 > 面向**想给灵汐 AgentOS 0.2 开发一个新插件**的开发者。读完本文，你应能在 1 小时内发布第一个可被内核加载的插件。
 >
-> 本文是 0.2 架构（Rust 内核 + Python sidecar + YAML 配置）的统一插件协议说明。历史方案记录见 [working/_archive_0.2_migration/0.2_rust_plugin_solution.md](../working/_archive_0.2_migration/0.2_rust_plugin_solution.md)，整体架构见 [ARCHITECTURE.md](../ARCHITECTURE.md)，分篇上手教程见 [开发指南索引](README.md)。
+> 本文是 0.2 架构（Rust 内核 + Python sidecar + YAML 配置）的统一插件协议说明。整体架构见 [ARCHITECTURE.md](../ARCHITECTURE.md)，分篇上手教程见 [开发指南索引](README.md)。
 
 ---
 
