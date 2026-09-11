@@ -40,7 +40,6 @@ export function DebugEvaluationMetricsPage({ embedded }: { embedded?: boolean } 
   return (
     <PageShell
       title="评估指标"
-      backHref="/debug"
       embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {total} 个指标</span>}
     >

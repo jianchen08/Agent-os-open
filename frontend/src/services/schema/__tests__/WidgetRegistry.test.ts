@@ -119,7 +119,7 @@ class TestableWidgetRegistry {
 
 /** 创建模拟 React 组件 */
 function createMockComponent(name: string): WidgetComponent {
-  const comp = ((props: any) => null) as any
+  const comp = ((_props: any) => null) as any
   comp.displayName = name
   return comp
 }

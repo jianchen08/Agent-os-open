@@ -113,7 +113,6 @@ class LevelGuardPlugin(IInputPlugin):
         if core_type != "tool_execute":
             return {"security.level_decision": {"allowed": True, "reason": "not a tool execution"}}
 
-        # 获取当前工具调用
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         if not tool_calls:
             return {"security.level_decision": {"allowed": True, "reason": "no tool calls to check"}}

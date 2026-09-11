@@ -160,7 +160,9 @@ class TestActivation:
                 }
             )
         )
-        assert result.state_updates == {}
+        # 22b3fcd22 增量游标契约：未激活的新增结果也要推进游标
+        # （防同一历史结果跨轮被反复重扫），state_updates 只含游标键。
+        assert result.state_updates == {"conversation_mode.seen_tool_results_len": 1}
 
     @pytest.mark.asyncio
     async def test_无tool_results返回空结果(self) -> None:
@@ -185,7 +187,8 @@ class TestActivation:
                 }
             )
         )
-        assert result.state_updates == {}
+        # 22b3fcd22 增量游标契约：未命中也推进游标
+        assert result.state_updates == {"conversation_mode.seen_tool_results_len": 1}
 
 
 # ============================================================

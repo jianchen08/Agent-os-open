@@ -91,7 +91,6 @@ class FileJumpProtocol:
 
         system = platform.system().lower()
 
-        # 获取命令格式
         format_info = FileJumpProtocol.COMMAND_FORMATS[ide_type]
         command = format_info.get(system, format_info.get("linux"))
 
@@ -110,15 +109,11 @@ class FileJumpProtocol:
             arg = arg.replace("{col}", str(col + 1))  # noqa: PLW2901
             args.append(arg)
 
-        # 执行命令 - 避免使用shell=True以提高安全性
+        # 执行命令：直接 argv 执行目标（shell=False），路径元字符不再经
+        # cmd.exe 二次解析（file_path 来自 LLM 可控输入，cmd /c 包装会给
+        # &/^/| 留下破出参数意图的通道）
         try:
-            # 在Windows上，某些命令可能需要通过cmd执行
-            if system == "windows":
-                # 使用完整的cmd路径并避免shell注入
-                cmd_args = ["cmd", "/c"] + [command] + args
-                subprocess.Popen(cmd_args, shell=False)
-            else:
-                subprocess.Popen([command] + args, shell=False)
+            subprocess.Popen([command] + args, shell=False)
             logger.info(f"已打开 {file_path}:{line}:{col} in {command}")
             return True
         except Exception as e:

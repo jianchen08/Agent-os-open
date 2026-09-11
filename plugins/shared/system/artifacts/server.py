@@ -22,17 +22,15 @@ import sys
 import uuid
 from typing import Any
 
-_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-if _PLUGIN_DIR not in sys.path:
-    sys.path.insert(0, _PLUGIN_DIR)
-_SYSTEM_DIR = os.path.abspath(os.path.join(_PLUGIN_DIR, ".."))
-if _SYSTEM_DIR not in sys.path:
-    sys.path.insert(0, _SYSTEM_DIR)
-# 多租户数据根咽喉点（plugins/shared/tenant_data.py）——参考
-# hindsight_memory/wiring.py 的 sys.path 自举模式。
-_SHARED_ROOT = os.path.abspath(os.path.join(_PLUGIN_DIR, "..", ".."))
-if _SHARED_ROOT not in sys.path:
-    sys.path.insert(0, _SHARED_ROOT)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（tenant_data/http_json）入 sys.path
+
+# system/ 根：本目录作为 `artifacts` 包被导入（artifact_service 的
+# `from artifacts.models import …`）的路径前提——组根不随 bootstrap 注入
+# （ADR 2026-09-08-plugin-bootstrap-sink 决策 1）
+if _paths.group_root not in sys.path:
+    sys.path.insert(0, _paths.group_root)
 
 from annotation_service import get_annotation_service  # noqa: E402
 from artifact_service import get_artifact_service  # noqa: E402

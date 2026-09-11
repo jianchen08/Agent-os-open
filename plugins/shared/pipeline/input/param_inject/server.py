@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 """param_inject input pipeline plugin MCP 服务端——纯接口适配层。
 
-老代码从 src/plugins/shared/input/param_inject/plugin.py 原封不动复制到本目录，
-本文件只做接口适配：通过 MCP SDK 暴露为工具。
+本目录为实现模块，本文件只做接口适配：通过 MCP SDK 暴露为工具。
 """
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from functools import lru_cache
 
-# 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _this_dir)
-_shared_dir = os.path.join(_this_dir, "..", "..", "..")
-sys.path.insert(0, _shared_dir)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-from plugin import ParamInjectPlugin  # noqa: E402
+_paths = bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
+
+from plugin import ParamInjectPlugin, set_capability_caller  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+
+from wiring import make_capability_caller  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("param_inject_pipeline")
@@ -34,8 +31,15 @@ def get_instance() -> ParamInjectPlugin:
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
-    """Initialize param_inject plugin."""
+    """Initialize param_inject plugin + 注入能力调用器。"""
     get_instance()  # 启动时预热，保持原 on_load 构造时机
+    caller = make_capability_caller(plugin)
+    if caller:
+        set_capability_caller(caller)
+    else:
+        logger.warning(
+            "[param_inject] 能力调用器未注入，arguments 兜底修复降级为不可修复"
+        )
 
 
 @plugin.on_unload

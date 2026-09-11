@@ -7,11 +7,11 @@
  */
 import { render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { NotificationItemComponent } from '../NotificationItem'
 import {
   clearNotificationModes,
   loadNotificationModes,
 } from '@/utils/notificationModes'
+import { NotificationItemComponent } from '../NotificationItem'
 import type { NotificationItem } from '@/types/notification'
 
 vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({

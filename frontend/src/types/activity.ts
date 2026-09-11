@@ -11,23 +11,23 @@ import type { ReactNode } from 'react'
  * 活动类型枚举
  */
 export type ActivityType =
-  | 'tool_call' // 工具调用
-  | 'task_created' // 任务创建
-  | 'task_phase' // 任务阶段
-  | 'task_completed' // 任务完成
-  | 'task_failed' // 任务失败
-  | 'agent_thinking' // 思考过程
-  | 'custom' // 自定义类型（可扩展）
+  | 'tool_call'
+  | 'task_created'
+  | 'task_phase'
+  | 'task_completed'
+  | 'task_failed'
+  | 'agent_thinking'
+  | 'custom'
 
 /**
  * 活动状态枚举
  */
 export type ActivityStatus =
-  | 'pending' // 等待中
-  | 'running' // 执行中
-  | 'completed' // 已完成
-  | 'failed' // 失败
-  | 'cancelled' // 已取消
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
 
 /**
  * 详情区块内容类型
@@ -61,11 +61,11 @@ export type DetailContentType =
  * 活动操作类型
  */
 export type ActivityActionType =
-  | 'retry' // 重试
-  | 'delete' // 删除
-  | 'cancel' // 取消
-  | 'copy' // 复制
-  | 'custom' // 自定义操作
+  | 'retry'
+  | 'delete'
+  | 'cancel'
+  | 'copy'
+  | 'custom'
 
 /**
  * 详情区块接口
@@ -201,9 +201,14 @@ export interface ActivityCardProps {
  * 格式化时长
  *
  * 后端 duration_ms 为 f64 浮点（tool_core ToolResult.duration_ms），此处统一
- * 收敛显示位数：<1s 取整毫秒；10s 内 1 位小数秒；更长取整秒；分钟级 m+s。
+ * 收敛显示位数：<1s 取整毫秒；10s 内 1 位小数秒；更长取整秒；分钟级 m+s；
+ * 小时级 h+m（不输出 125m 式累计分钟）。null/undefined → '--'（耗时缺失态，
+ * 原 PipelineManagerWidget 本地版兜底口径），非法数值 → '0ms'。
  */
-export function formatDuration(ms: number): string {
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) {
+    return '--'
+  }
   if (!Number.isFinite(ms) || ms < 0) {
     return '0ms'
   }
@@ -216,5 +221,22 @@ export function formatDuration(ms: number): string {
   }
   const minutes = Math.floor(seconds / 60)
   const remainingSeconds = Math.round(seconds % 60)
-  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
+  if (minutes < 60) {
+    return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`
+  }
+  const hours = Math.floor(minutes / 60)
+  return minutes % 60 > 0 ? `${hours}h ${minutes % 60}m` : `${hours}h`
+}
+
+/** 条目耗时（ms）：startedAt 无真值（空串/非法日期）时返回 null，展示层显示
+ *  '--'——不得把非法起点折算成天文数字假耗时。endedAt 缺席 = 进行中（now 起算）。 */
+export function entryDurationMs(
+  entry: { endedAt?: string | null; startedAt: string },
+  nowMs: number,
+): number | null {
+  const start = new Date(entry.startedAt).getTime()
+  if (!Number.isFinite(start)) return null
+  return entry.endedAt
+    ? new Date(entry.endedAt).getTime() - start
+    : nowMs - start
 }

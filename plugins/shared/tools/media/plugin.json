@@ -33,6 +33,30 @@
           "required": [
             "prompt"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "生成图片落盘路径"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string",
+              "description": "生成服务提供方"
+            },
+            "metadata": {
+              "type": "object",
+              "description": "提供方附加元数据（可缺省）"
+            }
+          },
+          "required": [
+            "file_path",
+            "media_type"
+          ]
         }
       },
       {
@@ -55,6 +79,31 @@
           },
           "required": [
             "prompt"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "生成音频落盘路径"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "duration_seconds": {
+              "type": "number"
+            },
+            "provider_name": {
+              "type": "string"
+            },
+            "metadata": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "file_path",
+            "media_type"
           ]
         }
       },
@@ -96,6 +145,31 @@
           "required": [
             "prompt"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "生成视频落盘路径"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "duration_seconds": {
+              "type": "number"
+            },
+            "provider_name": {
+              "type": "string"
+            },
+            "metadata": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "file_path",
+            "media_type"
+          ]
         }
       },
       {
@@ -136,6 +210,30 @@
           "required": [
             "text"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "合成语音落盘路径"
+            },
+            "duration_seconds": {
+              "type": "number"
+            },
+            "format": {
+              "type": "string"
+            },
+            "voice": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path"
+          ]
         }
       }
     ],
@@ -145,5 +243,6 @@
     ]
   },
   "permissions": {},
-  "priority": 30
+  "priority": 30,
+  "host_group": "light"
 }

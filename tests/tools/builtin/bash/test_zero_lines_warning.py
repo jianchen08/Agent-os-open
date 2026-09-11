@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """[0行] bug 告警测试。
 
 背景：长任务（编译类）由于子进程 stdout 块缓冲，日志文件长时间为空，

@@ -9,11 +9,9 @@
   配置更新 self、model_id 未配置保持现状；
 - ``_build_messages``：compression_messages 剥离 ``_context_form``、history 剥离
   ``seq``/``tool_result``、multimodal 合并进 list 型 content、dynamic_vars 三种形态；
-- ``_writeback_cleaned_history``：normalize 清理写回 state["messages"]（含早退）；
 - 成功路径：tool_call arguments >100 字符诊断、tool_calls+thinking 的
   reasoning_content、finish_reason=length → output_truncated；
-- 信封校验 fail-closed：非 dict 信封 / success=false / data 非 dict → RuntimeError；
-- 错误路径：tool_call 相关异常 → 重置配对缓存后上抛。
+- 信封校验 fail-closed：非 dict 信封 / success=false / data 非 dict → RuntimeError。
 
 加载：importlib 唯一模块名装载 plugin.py（裸名 ``plugin`` 会被兄弟插件目录
 串扰）；``_config_models`` 经 system/llm 目录平铺 import（与 server.py 同解析）。
@@ -254,41 +252,6 @@ def test_build_messages_dynamic_vars_three_forms() -> None:
     assert len(msgs3) == 1  # 空 content 不追加
 
 
-# ─────────────────── _writeback_cleaned_history ───────────────────
-
-
-async def test_call_llm_writeback_cleaned_history(monkeypatch: Any) -> None:
-    """normalize 清理（孤儿 tool result 被丢）→ 清理后历史写回 state["messages"]。"""
-    caller = _FakeCaller({"success": True, "data": _ok_response()})
-    plugin = _make_plugin(caller)
-    state = {
-        **_base_state(),
-        "system_message": {"role": "system", "content": "sys"},
-        "compression_messages": [{"role": "user", "content": "c1"}],
-        "messages": [
-            {"role": "user", "content": "q"},
-            {"role": "tool", "tool_call_id": "call_orphan", "content": "r"},
-        ],
-        "prompt.dynamic_vars": {"content": "now=1"},
-    }
-    await plugin.execute(_make_ctx(state))
-    # 孤儿 tool result 被配对校验丢弃 → 写回后只剩 user 消息
-    assert state["messages"] == [{"role": "user", "content": "q"}]
-
-
-async def test_call_llm_writeback_skipped_when_nothing_cleaned() -> None:
-    """normalize 无清理（历史长度不变）→ 不写回（早退，state 原样）。"""
-    caller = _FakeCaller({"success": True, "data": _ok_response()})
-    plugin = _make_plugin(caller)
-    state = {
-        **_base_state(),
-        "system_message": {"role": "system", "content": "sys"},
-        "messages": [{"role": "user", "content": "q"}],
-    }
-    await plugin.execute(_make_ctx(state))
-    assert state["messages"] == [{"role": "user", "content": "q"}]
-
-
 # ─────────────────── 成功路径组装分支 ───────────────────
 
 
@@ -424,56 +387,59 @@ async def test_envelope_data_non_dict_raises() -> None:
         await _make_plugin(caller).execute(_make_ctx(_base_state()))
 
 
-# ─────────────────── 错误路径：tool_call 相关异常重置配对缓存 ───────────────────
+# ─────────────────── 错误路径：异常原样上抛 ───────────────────
 
 
-async def test_tool_call_error_resets_pairing_cache(monkeypatch: Any) -> None:
-    """tool_call 相关异常 → 重置当前管道配对缓存后上抛（下次全量扫描）。"""
-    import _message_normalizer
-
-    monkeypatch.setattr(_message_normalizer, "_pairing_validated_len", {})
-    _message_normalizer._pairing_validated_len["openai:llm_core:test-execute-paths"] = (2, "fp")
-
+async def test_tool_call_error_propagates() -> None:
+    """tool_call 相关异常原样上抛（消息面修复由 llm_service 唯一关卡承担）。"""
     caller = _FakeCaller(exc=RuntimeError("tool_call pairing failed: insufficient tool messages"))
     with pytest.raises(RuntimeError, match="tool_call pairing failed"):
         await _make_plugin(caller).execute(_make_ctx(_base_state()))
 
-    assert "openai:llm_core:test-execute-paths" not in _message_normalizer._pairing_validated_len
 
-
-async def test_non_tool_call_error_propagates_without_reset(monkeypatch: Any) -> None:
-    """非 tool_call 相关异常 → 原样上抛，不触碰配对缓存。"""
-    import _message_normalizer
-
-    monkeypatch.setattr(_message_normalizer, "_pairing_validated_len", {})
-    _message_normalizer._pairing_validated_len["openai:llm_core:test-execute-paths"] = (2, "fp")
-
+async def test_non_tool_call_error_propagates() -> None:
+    """非 tool_call 相关异常 → 原样上抛。"""
     caller = _FakeCaller(exc=RuntimeError("upstream connection refused"))
     with pytest.raises(RuntimeError, match="upstream connection refused"):
         await _make_plugin(caller).execute(_make_ctx(_base_state()))
-
-    assert "openai:llm_core:test-execute-paths" in _message_normalizer._pairing_validated_len
 
 
 # ─────────────────── 杂项：构造/属性/消息日志分支 ───────────────────
 
 
-def test_priority_and_adapter_injection() -> None:
-    """priority=50；adapter 参数注入时 _adapter 保留（测试注入协议）。"""
+def test_default_priority() -> None:
+    """priority=50。"""
     assert LLMCore({}).priority == 50
-    injected = object()
-    plugin = LLMCore({}, adapter=injected)  # type: ignore[arg-type]
-    assert plugin._adapter is injected  # noqa: SLF001
+
+
+def test_resolve_image_ref_success_returns_data_url_with_empty_reason(tmp_path: Any) -> None:
+    """成功路径不变：本地图片 → (data URL, 空原因)。"""
+    f = tmp_path / "shot.png"
+    f.write_bytes(b"png")
+    data_url, reason = LLMCore._resolve_image_ref(str(f))  # noqa: SLF001
+    assert data_url.startswith("data:image/png;base64,")
+    assert reason == ""
 
 
 def test_resolve_image_ref_absolute_path_not_a_file(tmp_path: Any) -> None:
-    """绝对路径引用但文件不存在 → 空串（不阻断请求）。"""
+    """绝对路径引用但文件不存在 → 空串 + 失败原因（供占位块显式化）。"""
     missing = tmp_path / "nope.png"
-    assert LLMCore._resolve_image_ref(str(missing)) == ""  # noqa: SLF001
+    data_url, reason = LLMCore._resolve_image_ref(str(missing))  # noqa: SLF001
+    assert data_url == ""
+    assert reason == "文件不存在"
 
 
-def test_resolve_image_ref_read_oserror_returns_empty(tmp_path: Any, monkeypatch: Any) -> None:
-    """读取文件抛 OSError → warning + 空串（降级不阻断）。"""
+def test_resolve_image_ref_oversize_returns_reason(tmp_path: Any) -> None:
+    """图片超字节上限 → 空串 + 过大原因（不静默）。"""
+    f = tmp_path / "big.png"
+    f.write_bytes(b"x" * (LLMCore._MAX_IMAGE_BYTES + 1))  # noqa: SLF001
+    data_url, reason = LLMCore._resolve_image_ref(str(f))  # noqa: SLF001
+    assert data_url == ""
+    assert "过大" in reason
+
+
+def test_resolve_image_ref_read_oserror_returns_reason(tmp_path: Any, monkeypatch: Any) -> None:
+    """读取文件抛 OSError → 空串 + 读取失败原因（降级不阻断但显式）。"""
     f = tmp_path / "shot.png"
     f.write_bytes(b"x")
 
@@ -481,29 +447,75 @@ def test_resolve_image_ref_read_oserror_returns_empty(tmp_path: Any, monkeypatch
         raise OSError("read denied")
 
     monkeypatch.setattr(Path, "read_bytes", _raise_oserror)
-    assert LLMCore._resolve_image_ref(str(f)) == ""  # noqa: SLF001
+    data_url, reason = LLMCore._resolve_image_ref(str(f))  # noqa: SLF001
+    assert data_url == ""
+    assert reason == "文件读取失败"
 
 
-async def test_call_llm_writeback_skipped_when_history_empty() -> None:
-    """normalize 清理后历史为空（全被丢）→ 不写回（早退，state 原样）。"""
-    caller = _FakeCaller({"success": True, "data": _ok_response()})
-    plugin = _make_plugin(caller)
+def test_resolve_multimodal_blocks_missing_file_emits_notice_block(tmp_path: Any) -> None:
+    """本地引用解析失败 → 不再静默丢弃，替换为 `[附件 … 解析失败：…]` 占位块；
+    其余块（text/其他）原样保留。"""
+    missing = tmp_path / "nope.png"
+    blocks = [
+        {"type": "text", "text": "看图"},
+        {"type": "image_url", "image_url": {"url": str(missing)}},
+    ]
+    resolved = LLMCore._resolve_multimodal_blocks(blocks)  # noqa: SLF001
+    assert resolved[0] == {"type": "text", "text": "看图"}
+    assert len(resolved) == 2
+    notice = resolved[1]
+    assert notice["type"] == "text"
+    assert "解析失败" in notice["text"]
+    assert str(missing) in notice["text"]
+
+
+def test_resolve_multimodal_blocks_oversize_notice_carries_reason(tmp_path: Any) -> None:
+    """超限图片占位块携带过大原因（有区分度输入，与文件缺失区分）。"""
+    f = tmp_path / "big.png"
+    f.write_bytes(b"x" * (LLMCore._MAX_IMAGE_BYTES + 1))  # noqa: SLF001
+    resolved = LLMCore._resolve_multimodal_blocks(  # noqa: SLF001
+        [{"type": "image_url", "image_url": {"url": str(f)}}]
+    )
+    assert len(resolved) == 1
+    assert resolved[0]["type"] == "text"
+    assert "过大" in resolved[0]["text"]
+
+
+def test_resolve_multimodal_blocks_http_url_passthrough_unchanged() -> None:
+    """http(s)/data URL 不属于本地解析失败 → 原样透传（行为不变）。"""
+    blocks = [
+        {"type": "image_url", "image_url": {"url": "https://a.com/x.png"}},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+    assert LLMCore._resolve_multimodal_blocks(blocks) == blocks  # noqa: SLF001
+
+
+def test_build_messages_multimodal_failure_notice_reaches_llm_messages(tmp_path: Any) -> None:
+    """装配级验证：解析失败的图片引用以占位块合并进最后一条 user 消息
+    content——LLM 可见附件缺失说明（后端报错腿①）。"""
+    missing = tmp_path / "gone.png"
+    pre = LLMCore.__new__(LLMCore)
     state = {
-        **_base_state(),
-        "system_message": {"role": "system", "content": "sys"},
-        "messages": [{"role": "tool", "tool_call_id": "call_orphan", "content": "r"}],
+        "messages": [{"role": "user", "content": "看这张图"}],
+        "multimodal_content": [{"type": "image_url", "image_url": {"url": str(missing)}}],
     }
-    await plugin.execute(_make_ctx(state))
-    # 历史全被配对校验丢弃 → cleaned_history_len=0 → 早退不写回
-    assert state["messages"] == [{"role": "tool", "tool_call_id": "call_orphan", "content": "r"}]
+    msgs = pre._build_messages(state)  # noqa: SLF001
+    content = msgs[0]["content"]
+    assert isinstance(content, list)
+    assert {"type": "text", "text": "看这张图"} in content
+    notices = [b for b in content if b.get("type") == "text" and "解析失败" in b.get("text", "")]
+    assert len(notices) == 1
+    assert str(missing) in notices[0]["text"]
+    # 失败引用不得再以 image_url 块形态进请求（旧行为是整块丢弃/空块）
+    assert not any(b.get("type") == "image_url" for b in content)
 
 
 async def test_call_llm_message_logging_branches() -> None:
     """消息日志：name 字段、tool_calls 序列化失败（循环引用）回退 str。"""
     caller = _FakeCaller({"success": True, "data": _ok_response()})
     plugin = _make_plugin(caller)
-    # 循环引用藏在标准结构 tc 的 function 内：normalize 不改写标准 tc，
-    # json.dumps(default=str) 对循环引用抛 ValueError → 回退 str(tc_list)
+    # 循环引用藏在标准结构 tc 的 function 内：json.dumps(default=str)
+    # 对循环引用抛 ValueError → 回退 str(tc_list)
     cyclic: dict[str, Any] = {}
     cyclic["self"] = cyclic
     await plugin._call_llm(  # noqa: SLF001
@@ -659,6 +671,8 @@ async def test_success_llm_usage_carries_model_attribution() -> None:
     assert usage["total_tokens"] == 120
     assert usage["model"] == "deepseek-v3"
     assert usage["provider"] == "openai"
+    # W2a 锚与 usage 同点位：有用量回写的成功轮必落锚（入参无字符账本 → 0）
+    assert result["track.messages_chars_at_llm"] == 0
 
 
 async def test_success_no_usage_keeps_llm_usage_empty() -> None:
@@ -666,3 +680,66 @@ async def test_success_no_usage_keeps_llm_usage_empty() -> None:
     caller = _FakeCaller({"success": True, "data": _ok_response(usage={})})
     result = await _make_plugin(caller).execute(_make_ctx(_base_state()))
     assert result["llm_usage"] == {}
+
+
+# ─────────────────── W2a 上下文粗门锚（字符锚 + 模型窗口） ───────────────────
+
+
+async def test_success_stamps_chars_anchor_and_model_window(monkeypatch: Any) -> None:
+    """真实调用成功 → 锚=入参 track.messages_chars（透传引擎记账数字）、
+    窗口=本轮解析到的模型 context_window——与 usage 同点位写回。"""
+    _inject_llm_config(monkeypatch)
+    caller = _FakeCaller(
+        {"success": True, "data": _ok_response(usage={"prompt_tokens": 100})}
+    )
+    plugin = _make_plugin(caller)
+    state = {**_base_state(), "model_tier": "large", "track.messages_chars": 12345}
+    result = await plugin.execute(_make_ctx(state))
+    assert result["track.messages_chars_at_llm"] == 12345
+    assert result["track.model_context_window"] == 64000
+    assert result["llm_usage"]["input_tokens"] == 100
+
+
+async def test_anchor_missing_chars_defaults_zero_and_unresolved_window_writes_zero(
+    monkeypatch: Any,
+) -> None:
+    """入参无 track.messages_chars → 锚写 0；模型未配置 context_window → 窗口写 0
+    （沿用既有"未配置"告警语义；窗口 0 使管道公式支除零 fail-soft 关闭，冷启动支兜底）。"""
+    import _config_models
+
+    monkeypatch.setattr(
+        _config_models,
+        "_config",
+        {
+            "llm": {
+                "models": {
+                    "bare": {
+                        "provider": "x",
+                        "model_name": "m",
+                        "api_base": "https://a",
+                        "api_key": "k",
+                    }
+                },
+                "defaults": {"chat": "bare"},
+            }
+        },
+    )
+    caller = _FakeCaller({"success": True, "data": _ok_response()})
+    plugin = _make_plugin(caller)
+    result = await plugin.execute(_make_ctx(_base_state()))
+    assert result["track.messages_chars_at_llm"] == 0
+    assert result["track.model_context_window"] == 0
+
+
+async def test_interrupted_partial_does_not_stamp_anchor(monkeypatch: Any) -> None:
+    """流中断/取消的半截返回不落锚（非成功路径不 stamp，防非主轮覆盖锚）。"""
+    _inject_llm_config(monkeypatch)
+    caller = _FakeCaller(
+        {"success": True, "data": _ok_response(partial={"text": "半截"}, status="interrupted")}
+    )
+    plugin = _make_plugin(caller)
+    state = {**_base_state(), "track.messages_chars": 777}
+    result = await plugin.execute(_make_ctx(state))
+    assert result["raw_result"] == "半截"  # 确认走的是 partial 落库路径
+    assert "track.messages_chars_at_llm" not in result
+    assert "track.model_context_window" not in result

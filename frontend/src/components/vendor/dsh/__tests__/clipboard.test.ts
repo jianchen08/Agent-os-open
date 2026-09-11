@@ -6,8 +6,8 @@
  * execCommand('copy')；均不可用时返回 false。
  * useCopyFeedback：成功写入后 1s 置位 copied，拒绝写入不置位。
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { writeClipboard } from '@/components/vendor/dsh/clipboard'
 import { useCopyFeedback } from '@/components/vendor/dsh/use-copy-feedback'
 

@@ -27,7 +27,6 @@ from agentos_plugin_sdk.url_security import is_private_ip, resolve_hostname_ips
 
 logger = logging.getLogger(__name__)
 
-# Suppress trafilatura's verbose logging
 for _traf_logger in ("trafilatura", "trafilatura.utils", "trafilatura.core"):
     logging.getLogger(_traf_logger).setLevel(logging.CRITICAL)
 
@@ -74,7 +73,6 @@ class WebTool(BuiltinTool):
         if default_headers:
             self._default_headers.update(default_headers)
         self._proxy_url: str | None = None
-        # Check proxy environment variables
         for env_var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
             proxy = os.environ.get(env_var)
             if proxy:
@@ -146,7 +144,6 @@ class WebTool(BuiltinTool):
                 error_code="MISSING_URL",
             )
 
-        # 安全检查
         is_safe, error_msg = self._check_url_security(url)
         if not is_safe:
             return create_failure_result(
@@ -182,15 +179,12 @@ class WebTool(BuiltinTool):
             parsed = urlparse(url)
             domain = parsed.netloc.lower()
 
-            # 移除端口号
             if ":" in domain:
                 domain = domain.split(":")[0]
 
-            # 检查协议
             if parsed.scheme not in ["http", "https"]:
                 return False, f"不支持的协议: {parsed.scheme}"
 
-            # 检查禁止域名（支持子域名匹配）
             for blocked in self.blocked_domains:
                 if domain == blocked or domain.endswith("." + blocked):
                     return False, f"域名在禁止列表中: {domain}"
@@ -402,7 +396,6 @@ class WebTool(BuiltinTool):
                         error_code="RESPONSE_TOO_LARGE",
                     )
 
-                # 读取 HTML
                 html_text = response.content.decode("utf-8", errors="ignore")
 
                 result_data: dict[str, Any] = {

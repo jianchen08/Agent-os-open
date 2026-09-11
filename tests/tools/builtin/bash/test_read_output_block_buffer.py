@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """_read_output 块缓冲根治测试。
 
 背景：原 stream.readline() 在 cargo/gcc 等块缓冲场景下长时间读不到行，

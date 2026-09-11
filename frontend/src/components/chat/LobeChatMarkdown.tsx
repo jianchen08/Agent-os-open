@@ -3,7 +3,7 @@
 import { ConfigProvider, Markdown } from '@lobehub/ui'
 import { motion } from 'motion/react'
 import { useMemo, type FC, type ReactNode } from 'react'
-
+import { AttachmentImage } from '@/components/shared/markdown/AttachmentImage'
 import { preprocessSvgCodeBlocks } from '@/components/shared/markdown/shared'
 import './LobeChatMarkdown.css'
 
@@ -39,7 +39,14 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
     <ConfigProvider motion={motion}>
       <div className="lobe-chat-isolated" onDoubleClick={onDoubleClick}>
         {children ?? (
-          <Markdown variant="chat" enableStream={false} enableMermaid={true}>
+          <Markdown
+            variant="chat"
+            enableStream={false}
+            enableMermaid={true}
+            // 附件图片引用（![f](/uploads/x.png)）加载失败 → 显式失败卡
+            // （2026-09-08 附件解析失败显式化：前端要说明，禁无文字占位图）
+            components={{ img: AttachmentImage }}
+          >
             {processedContent}
           </Markdown>
         )}

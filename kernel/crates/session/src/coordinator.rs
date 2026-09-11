@@ -38,11 +38,6 @@ impl SessionCoordinator {
         }
     }
 
-    /// 监控 M2：暴露 session 计数器句柄（聚合器周期性 snapshot）。
-    pub fn metrics(&self) -> &Arc<crate::metrics::SessionMetrics> {
-        &self.metrics
-    }
-
     /// 暴露连接注册表（ws_handler 注册连接用）。
     pub fn registry(&self) -> &Arc<ConnectionRegistry> {
         &self.registry

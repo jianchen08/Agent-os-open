@@ -5,9 +5,8 @@
 （task_evaluate 合并门控）决策。工作空间域（workspace_lifecycle）清理收尾
 后续复用同一机制，单一归属零复制。
 
-机制逻辑与 0.1（plugins/shared/system/isolation/_workspace_merge_ops.py 合并
-部分 + _workspace_git_ops.py git 操作）保持一致，随任务域迁入 0.2 进程内执行
-——不经内核 capability、不依赖跨进程服务。
+合并/验证/git 操作机制单点归属本模块（进程内执行）——不经内核
+capability、不依赖跨进程服务。
 
 数据源适配（0.2）：ws_meta 由调用方从管道 state 聚合行解析后传入——0.2 任务
 =管道，ws_meta 落 state 单一真值（0.1 经 task_tree/task.metadata 读取，该通路
@@ -25,11 +24,10 @@ add/commit/merge/verify 叠加可阻塞数分钟）——调用方必须丢线�
 
 from __future__ import annotations
 
+from agentos_plugin_sdk.fs_utils import force_rmtree
+
 import contextlib
 import logging
-import os
-import shutil
-import stat
 import subprocess
 import threading
 from pathlib import Path
@@ -38,26 +36,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _GIT_TIMEOUT = 30  # git 命令执行超时（秒）
-
-
-def _force_rmtree(path: str) -> None:
-    """强制删除目录树，兼容 Windows 下 .git 只读文件。
-
-    Windows 上 git objects 文件为只读属性，shutil.rmtree 默认无法删除。
-    通过 onerror 回调去除只读属性后重试。
-    """
-
-    def _on_error(func, filepath, exc_info):
-        if os.name == "nt":
-            os.chmod(filepath, stat.S_IWRITE)  # noqa: PTH101  # pragma: no cover —— Windows 只读文件修复路径（Linux 不触 Handler）
-            func(filepath)
-        else:
-            raise  # noqa: PLE0704  # pragma: no cover —— 非 Windows 平台分支
-
-    try:
-        shutil.rmtree(path, onerror=_on_error)
-    except OSError:
-        shutil.rmtree(path, onerror=_on_error)
 
 
 class WorktreeMerger:
@@ -187,7 +165,87 @@ class WorktreeMerger:
             return h.strip() if h else None
         return None
 
-    # ── 合并门控（自 _workspace_merge_ops.py 原样移植，判定不变）──
+    # ── 产物清单（合并前照：两个空间 diff 的期望集）──────────────
+
+    @staticmethod
+    def _parse_porcelain_path(entry: str) -> tuple[str, bool] | None:
+        """解析 status --porcelain 一行 → (相对路径, 是否删除)。
+
+        重命名形如 ``R  old -> new``，取 new 侧按新增核验。
+        """
+        if len(entry) < 4:
+            return None
+        xy, path = entry[:2], entry[3:]
+        deleted = "D" in xy
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip().strip('"')
+        if not path:
+            return None
+        return path, deleted
+
+    def _pending_products(self, workspace: str, project_root: str, branch: str) -> dict[str, Any]:
+        """合并前产物快照：期望集 = 「wt/分支 相对目标空间的 diff」（磁盘+分支状态锚定）。
+
+        两路来源并集（2026-09-05 用户裁定：验证对比的是产物，不是空不空）：
+        1. wt 未提交变更（status --porcelain -uall，含未跟踪文件）——agent 写盘
+           但尚未 commit 的产物；
+        2. 分支已提交但未并入目标空间当前分支的全部提交差异
+           （HEAD...branch 全量，非 tip 单提交）——任务中途自主 commit 的产物。
+
+        返回 {"items": {path: deleted}, "uncommitted": bool, "error": ""}。
+        空清单 = 工作区无事可合并（执行与否由评估门控裁决），合并平凡成功。
+        """
+        items: dict[str, bool] = {}
+        uncommitted = False
+
+        rc, out, err = self._run_git(
+            "-c", "core.quotepath=false", "status", "--porcelain", "-uall", cwd=Path(workspace)
+        )
+        if rc != 0:
+            return {"items": {}, "uncommitted": False, "error": f"工作区状态读取失败: {err}"}
+        for entry in out.splitlines():
+            parsed = self._parse_porcelain_path(entry.strip("\n"))
+            if parsed is None:
+                continue
+            path, deleted = parsed
+            items[path] = deleted or items.get(path, False)
+            uncommitted = True
+
+        rc, out, err = self._run_git(
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--name-status",
+            f"HEAD...{branch}",
+            cwd=Path(project_root),
+        )
+        if rc != 0:
+            # 分支不存在等差异读取失败：交由 _safe_merge 的分支校验给出明确根因
+            return {"items": {}, "uncommitted": uncommitted, "error": f"分支差异读取失败: {err}"}
+        for line in out.splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            op, path = parts[0], parts[1]
+            deleted = op.startswith("D")
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            path = path.strip().strip('"')
+            if not path:
+                continue
+            items[path] = items.get(path, False) or deleted
+
+        return {"items": items, "uncommitted": uncommitted, "error": ""}
+
+    @staticmethod
+    def _content_equal(left: Path, right: Path) -> bool:
+        try:
+            return left.read_bytes() == right.read_bytes()
+        except OSError:
+            return False
+
+    # ── 合并门控（产物到达语义，2026-09-05 重构）────────────────
 
     def merge_worktree_before_complete(self, task_id: str, ws_meta: Any) -> str | None:
         """任务标记 completed 前的合并门控（统一入口）。
@@ -197,9 +255,10 @@ class WorktreeMerger:
         state 是唯一真值，读不到即失败显式暴露）。
 
         Returns:
-            None 表示合并成功或不需要合并（plain/shared 模式），
-            str 表示门控失败原因（自描述分类：ws_meta 读取失败 / 元数据残缺 /
-            worktree 合并失败），调用方按原文透传并据此标记任务 failed。
+            None 表示合并成功（产物已到达目标空间）或无事可合并
+            （plain/shared 模式 / 工作区无产物），str 表示门控失败原因
+            （自描述分类：ws_meta 读取失败 / 元数据残缺 / worktree 合并
+            失败 / 产物未到达），调用方按原文透传并据此标记任务 failed。
         """
         if not ws_meta or not isinstance(ws_meta, dict):
             # ws_meta 读不到 → fail-closed：静默放行会让 worktree 产物静默丢失。
@@ -235,17 +294,42 @@ class WorktreeMerger:
     def on_eval_passed(self, task_id: str, workspace: str, ws_meta: dict) -> dict:
         """评估通过后的 worktree 合并（并发安全：按 project_root 粒度加锁）。
 
-        0.1 版还分流 plain/shared 的 no-op 分支——本入口上方已按 mode 过滤，
-        仅 worktree 路径可达，故只保留 worktree 合并逻辑（判定原样）。
+        流程 = 前照快照 → 合并 → 产物到达对比 → 清理（2026-09-05 用户裁定：
+        验证对比的是「合并前两个空间 diff 的产物」合并后是否落地，与工作区
+        空不空无关——空清单=无事可合并，平凡成功，执行与否归评估门控）。
+        仅 worktree 路径可达，冲突不自动解决（=失败，保留现场）。
         """
         project_root = ws_meta.get("project_root", "")
+        branch = ws_meta.get("branch", "")
+        if not project_root:
+            return {"success": False, "error": "缺少 project_root 信息"}
+        if not branch:
+            return {"success": False, "error": "缺少 branch 信息，ws_meta 不完整"}
+
+        # 分支存在性前置校验（先于产物快照：wt 目录缺失时 status 会先行失败，
+        # 掩盖「分支已删」这个更根本的根因）
+        rc_v, _, verify_err = self._run_git(
+            "rev-parse", "--verify", f"{branch}^{{commit}}", cwd=Path(project_root)
+        )
+        if rc_v != 0:
+            return {
+                "success": False,
+                "error": f"待合并分支不存在(branch={branch})，"
+                f"可能继承自已清理的父任务 worktree: "
+                f"{verify_err[:200] if verify_err else 'unknown'}",
+            }
+
+        pending = self._pending_products(workspace, project_root, branch)
+        if pending["error"]:
+            return {"success": False, "error": pending["error"]}
+
         lock = self._get_merge_lock(project_root)
         with lock:
             max_retries = 2
             verify_detail = ""
             result: dict[str, Any] = {}
             for attempt in range(1, max_retries + 1):
-                result = self._safe_merge(workspace, ws_meta)
+                result = self._safe_merge(workspace, ws_meta, pending)
                 if not result.get("success"):
                     logger.warning(
                         "[WorktreeMerge] 合并失败 (attempt %d/%d)，跳过清理以保留文件: "
@@ -259,13 +343,15 @@ class WorktreeMerger:
                     if attempt < max_retries:
                         continue
                     return result
-                verified, verify_detail = self._verify_merge_result(workspace, project_root, ws_meta, result)
+                verified, verify_detail = self._verify_products_arrived(
+                    workspace, project_root, pending["items"]
+                )
                 if verified:
                     logger.debug(
-                        "[WorktreeMerge] 合并验证通过 (attempt %d): task_id=%s, method=%s",
+                        "[WorktreeMerge] 产物到达验证通过 (attempt %d): task_id=%s, 期望集=%d 项",
                         attempt,
                         task_id,
-                        result.get("method"),
+                        len(pending["items"]),
                     )
                     self._cleanup_worktree(
                         workspace, ws_meta, tag_task_id=task_id, merge_method=result.get("method", "")
@@ -274,7 +360,7 @@ class WorktreeMerger:
                     self._cleanup_unstaged_changes(project_root)
                     return result
                 logger.warning(
-                    "[WorktreeMerge] 合并验证失败 (attempt %d/%d): task_id=%s, detail=%s",
+                    "[WorktreeMerge] 产物到达验证失败 (attempt %d/%d): task_id=%s, detail=%s",
                     attempt,
                     max_retries,
                     task_id,
@@ -293,8 +379,12 @@ class WorktreeMerger:
             result["success"] = False
             return result
 
-    def _safe_merge(self, workspace: str, ws_meta: dict) -> dict:
-        """安全合并：通过 git merge 将 worktree 分支合并到项目根目录。"""
+    def _safe_merge(self, workspace: str, ws_meta: dict, pending: dict) -> dict:
+        """安全合并：通过 git merge 将 worktree 分支合并到项目根目录。
+
+        pending["uncommitted"] 为真时，auto-commit 是产物进分支的唯一通路，
+        失败必须 fail-closed（静默 None 曾致空合并假成功——游戏1/3/5/7 事故）。
+        """
         project_root = ws_meta.get("project_root", "")
         branch = ws_meta.get("branch", "")
         if not project_root:
@@ -303,24 +393,18 @@ class WorktreeMerger:
             return {"success": False, "error": "缺少 branch 信息，ws_meta 不完整"}
         proj_path, ws_path = Path(project_root), Path(workspace)
         self._ensure_git_user(ws_path)
-        self._git_add_commit_if_dirty(ws_path, "chore: auto commit before merge")
+        if pending.get("uncommitted"):
+            commit_hash = self._git_add_commit_if_dirty(ws_path, "chore: auto commit before merge")
+            if commit_hash is None:
+                return {
+                    "success": False,
+                    "error": "工作区产物未能提交到分支（git add/commit 失败），拒绝合并清理",
+                }
         self._ensure_git_user(proj_path)
         self._git_add_tracked_and_commit(proj_path, "chore: auto-save before merge")
         rc, current_branch, _ = self._run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=proj_path)
         if rc != 0 or not current_branch.strip():
             return {"success": False, "error": f"无法获取当前分支: rc={rc}, output={current_branch!r}"}
-        # 校验待合并分支存在：worktree 模式下 branch 来自 ws_meta，
-        # 子任务 inherit 父任务工作空间时可能复用已被清理的分支引用
-        # （分支已删但元数据仍在），此时 git merge 会报模糊的
-        # "not something we can merge"，提前校验给出明确根因。
-        rc_v, _, verify_err = self._run_git("rev-parse", "--verify", f"{branch}^{{commit}}", cwd=proj_path)
-        if rc_v != 0:
-            return {
-                "success": False,
-                "error": f"待合并分支不存在(branch={branch})，"
-                f"可能继承自已清理的父任务 worktree: "
-                f"{verify_err[:200] if verify_err else 'unknown'}",
-            }
         rc_pre, pre_merge_head, _ = self._run_git("rev-parse", "HEAD", cwd=proj_path)
         rc, stdout, stderr = self._run_git("merge", branch, cwd=proj_path)
         if rc == 0:
@@ -347,91 +431,46 @@ class WorktreeMerger:
         detail = " | ".join(detail_parts) if detail_parts else "无输出(可能是文件系统错误)"
         return {"success": False, "error": f"git merge 失败(branch={branch}): {detail}"}
 
-    # ── 合并验证（自 _workspace_merge_ops.py 原样移植）──────────
+    # ── 产物到达验证（合并前后对比，2026-09-05 重构）────────────
 
-    @staticmethod
-    def _first_missing_paths(proj_path: Path, expected: list[str]) -> list[str]:
-        """按声明序找出前若干个未落地的目标文件（上限 10 个早退）。"""
-        missing: list[str] = []
-        for rel_str in expected:
-            if not (proj_path / rel_str).exists():
-                missing.append(rel_str)
-            if len(missing) >= 10:
-                break
-        return missing
-
-    @staticmethod
-    def _same_name_sibling_exists(target: Path) -> bool:
-        """模糊匹配：同名目录下搜索同名文件（git 输出编码不一致时路径不完全匹配）。"""
-        parent = target.parent
-        target_name = target.name
-        if not (parent.exists() and target_name):
-            return False
-        try:
-            return any(existing.name == target_name for existing in parent.iterdir())
-        except OSError:
-            return False
-
-    def _missing_branch_diff_files(self, branch: str, proj_path: Path) -> list[str]:
-        """对 git_merge 分支 diff 应达清单做磁盘核验，返回前 10 个缺失项。
-
-        --diff-filter=AMRC 只校验应到达目标的文件（新增/修改/重命名新路径/复制），
-        排除删除(D)。否则任务正确删除的废弃文件合并后本就不存在，
-        会被 exists() 误判为「文件未到达目标」，导致重组/清理类任务必然合并失败。
-        """
-        rc, diff_out, _ = self._run_git(
-            "-c",
-            "core.quotepath=false",
-            "diff",
-            "--name-only",
-            "--diff-filter=AMRC",
-            branch + "~1",
-            branch,
-            cwd=proj_path,
-        )
-        if rc != 0 or not diff_out.strip():
-            return []
-        branch_files = set(diff_out.strip().splitlines())
-        missing: list[str] = []
-        for f in branch_files:
-            f_stripped = f.strip().strip('"')
-            target = proj_path / f_stripped
-            if not target.exists() and not self._same_name_sibling_exists(target):
-                missing.append(f_stripped)
-            if len(missing) >= 10:
-                break
-        return missing
-
-    def _verify_merge_result(
+    def _verify_products_arrived(
         self,
         workspace: str,
         project_root: str,
-        ws_meta: dict,
-        merge_result: dict,
+        pending: dict[str, bool],
     ) -> tuple[bool, str]:
-        """统一验证合并是否成功：不论 git_merge 还是 copy_merge 都验证文件到达。"""
-        branch = ws_meta.get("branch", "")
-        method = merge_result.get("method", "")
-        proj_path = Path(project_root)
+        """产物到达对比：合并前期望集逐项核对目标空间现状。
 
+        - A/M/R 产物：目标空间存在且内容与 wt 磁盘一致（字节级）；
+        - D 产物：目标空间已不存在（任务删除的废弃文件不误判）；
+        - 空期望集：无事可合并，平凡通过（执行与否归评估门控裁决）。
+        """
+        if not pending:
+            return True, "工作区无产物差异，无事可合并"
+
+        proj_path = Path(project_root)
         if not proj_path.exists():
             return False, f"project_root 不存在: {project_root}"
 
-        if method == "git_merge" and branch and not self._verify_merge_in_main(branch, cwd=proj_path):
-            return False, f"git_merge commit graph 验证失败: branch={branch}"
+        ws_path = Path(workspace)
+        problems: list[str] = []
+        for rel_path, deleted in pending.items():
+            target = proj_path / rel_path
+            if deleted:
+                if target.exists():
+                    problems.append(f"{rel_path}(应已删除仍存在)")
+                continue
+            if not target.exists():
+                problems.append(rel_path)
+                continue
+            if not self._content_equal(ws_path / rel_path, target):
+                problems.append(f"{rel_path}(内容不一致)")
+            if len(problems) >= 10:
+                break
 
-        merged_files = merge_result.get("merged_files", [])
-        if method == "copy" and merged_files:
-            missing = self._first_missing_paths(proj_path, merged_files)
-            if missing:
-                return False, f"copy_merge 文件验证失败: {len(missing)} 个文件未到达目标，前几个: {missing[:5]}"
-
-        if method == "git_merge" and branch:
-            missing = self._missing_branch_diff_files(branch, proj_path)
-            if missing:
-                return False, f"git_merge 文件验证失败: {len(missing)} 个文件未到达目标"
-
-        return True, "验证通过"
+        if problems:
+            return False, f"{len(problems)} 项产物未到达目标空间: {problems}"
+        return True, "产物全部到达目标空间"
 
     def _verify_merge_in_main(self, branch_name: str, cwd: Path) -> bool:
         """验证分支已合并到当前分支：git log HEAD..{branch} 应为空，不为空则阻止后续清理。"""
@@ -511,7 +550,7 @@ class WorktreeMerger:
         ws_path = Path(workspace).resolve()
         if ws_path.exists() and "__wt_" in ws_path.name:
             try:
-                _force_rmtree(str(ws_path))
+                force_rmtree(str(ws_path))
                 logger.debug("[WorktreeMerge] 强制清理残留 worktree 目录: %s", workspace)
             except OSError as e:
                 logger.warning("[WorktreeMerge] 强制清理 worktree 目录失败: %s, %s", workspace, e)

@@ -12,10 +12,10 @@
 // Both front ends share the line-terminator rule and distinct-path file count.
 // Output never soft-wraps — an aligned source line keeps its indentation and
 // scrolls horizontally instead of folding. Colors resolve through --dsw-*
-// tokens; geometry mirrors CodeBlock.
+// tokens.
 
-import { useCallback, useMemo, useState } from 'react'
 import clsx from 'clsx'
+import { useCallback, useMemo, useState } from 'react'
 import { writeClipboard } from './clipboard.ts'
 import css from './DiffBlock.module.css'
 

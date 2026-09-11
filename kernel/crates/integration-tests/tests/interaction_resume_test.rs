@@ -5,8 +5,8 @@
 //! 审批闭环在内核侧的最后一环。
 //!
 //! 架构背景（0.2 收尾：旧引擎 AdrEngineImpl 已清理，suspend/resume 改走 store）：
-//! - approval 插件通过 pipeline-executor.suspend 挂起 run，内核返回 SuspendHandle
-//! - suspend 时把 request_id → SuspendHandle 映射存入 run metadata
+//! - approval 插件通过 pipeline-executor.suspend 挂起 run，内核返回 resume 凭据（run_id + branch_id + seq）
+//! - suspend 时把 request_id → resume 凭据映射存入 run metadata
 //! - 前端用户操作后回传 interaction_response(request_id)
 //! - dispatch_interaction_response 根据 request_id 查映射，调 update_run_status(Running)
 //!
@@ -52,7 +52,7 @@ async fn suspend_and_resume_by_request_id() {
     // 1. 挂起 run（模拟 approval 插件调 pipeline-executor.suspend）
     suspend_run(&store, run_id).await;
 
-    // 2. 把 request_id → SuspendHandle 映射存入 run metadata
+    // 2. 把 request_id → resume 凭据映射存入 run metadata
     //    （approval 插件 suspend 后、返回前端前写入）
     let request_id = "req-approval-001";
     store
@@ -74,7 +74,7 @@ async fn suspend_and_resume_by_request_id() {
     assert_eq!(run_record.run_id, run_id);
     assert_eq!(run_record.status, RunStatus::Suspended);
 
-    // 从 metadata 还原 SuspendHandle 并 resume（update_run_status 状态簿记）
+    // 从 metadata 还原 resume 凭据并 resume（update_run_status 状态簿记）
     let meta = run_record.metadata.unwrap();
     let branch_id = meta
         .get("suspend_branch_id")

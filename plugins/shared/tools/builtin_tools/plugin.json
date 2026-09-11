@@ -203,6 +203,9 @@
               "description": "写后全文（diff 卡数据源 + 完整文件视图）"
             }
           }
+        },
+        "render": {
+          "card": "diff"
         }
       },
       {

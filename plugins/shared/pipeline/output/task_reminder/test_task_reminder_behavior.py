@@ -48,6 +48,8 @@ sys.modules["task_reminder_plugin_behavior_test"] = _mod
 _spec.loader.exec_module(_mod)
 TaskReminder = _mod.TaskReminder  # noqa: E402
 
+_FP_KEY = _mod._RESULT_FP_KEY
+
 
 def _ctx(state: dict[str, Any], services: dict[str, Any] | None = None) -> PluginContext:
     return PluginContext(state=state, config={}, _services=services or {})
@@ -79,9 +81,12 @@ class TestStatusAdvance:
     def test_pending_advances_to_running(self) -> None:
         import asyncio
 
-        result = asyncio.run(TaskReminder().execute(_ctx(_base_task_state(**{"task.status": "pending"})))
-        )
-        assert result.state_updates == {"task.status": "running"}
+        state = _base_task_state(**{"task.status": "pending"})
+        result = asyncio.run(TaskReminder().execute(_ctx(state)))
+        assert result.state_updates == {
+            "task.status": "running",
+            _FP_KEY: TaskReminder._result_fingerprint(state.get("raw_result")),
+        }
 
     def test_non_pending_status_not_overwritten(self) -> None:
         import asyncio
@@ -101,7 +106,7 @@ class TestSkipBranches:
 
         result = asyncio.run(TaskReminder().execute(_ctx(_base_task_state(core_type="tool_call")))
         )
-        assert result.state_updates == {}
+        assert set(result.state_updates) - {_FP_KEY} == set()
 
     def test_tool_calls_present_skipped(self) -> None:
         import asyncio
@@ -110,14 +115,14 @@ class TestSkipBranches:
                 _ctx(_base_task_state(raw_tool_calls=[{"function": {"name": "bash"}}]))
             )
         )
-        assert result.state_updates == {}
+        assert set(result.state_updates) - {_FP_KEY} == set()
 
     def test_no_text_no_tools_skipped(self) -> None:
         import asyncio
 
         result = asyncio.run(TaskReminder().execute(_ctx(_base_task_state(raw_result="")))
         )
-        assert result.state_updates == {}
+        assert set(result.state_updates) - {_FP_KEY} == set()
 
     def test_conversation_mode_skipped(self) -> None:
         import asyncio
@@ -126,7 +131,7 @@ class TestSkipBranches:
                 _ctx(_base_task_state(conversation_mode=True))
             )
         )
-        assert result.state_updates == {}
+        assert set(result.state_updates) - {_FP_KEY} == set()
 
     def test_last_assistant_message_text_counts_as_text(self) -> None:
         """评估模式下 raw_result 为空但最后 assistant 有文本 → 不进仅工具计数。"""
@@ -142,7 +147,7 @@ class TestSkipBranches:
         )
         result = asyncio.run(plugin.execute(_ctx(state)))
         # 有文本 → 不计 eval_tool_only_count；随后 has_tool_calls 跳过
-        assert result.state_updates == {}
+        assert set(result.state_updates) - {_FP_KEY} == set()
 
 
 class TestActiveChildrenServiceFallback:
@@ -157,7 +162,7 @@ class TestActiveChildrenServiceFallback:
         )
         result = asyncio.run(TaskReminder().execute(_ctx(self._state(), services={"task_service": svc}))
         )
-        assert result.state_updates == {}
+        assert set(result.state_updates) - {_FP_KEY} == set()
 
     def test_completed_subtasks_do_not_block(self) -> None:
         import asyncio
@@ -179,7 +184,7 @@ class TestActiveChildrenServiceFallback:
         )
         result = asyncio.run(TaskReminder().execute(_ctx(self._state(), services={"task_service": svc}))
         )
-        assert result.state_updates == {}
+        assert set(result.state_updates) - {_FP_KEY} == set()
 
     def test_no_service_no_import_path_returns_false(self) -> None:
         """服务未注册且进程内导入不可达 → 视为无活跃子任务，不抛。"""
@@ -206,7 +211,7 @@ class TestEvaluationModeToolOnly:
         plugin = TaskReminder(config={"evaluation_mode": True, "max_reminders": 10})
         result = asyncio.run(plugin.execute(_ctx(self._eval_state(eval_tool_only_count=2)))
         )
-        assert result.state_updates == {"eval_tool_only_count": 3}
+        assert result.state_updates == {"eval_tool_only_count": 3, "evaluate_reminder_run": "", _FP_KEY: _mod.TaskReminder._result_fingerprint("")}
         assert "ended" not in result.state_updates and "suspended" not in result.state_updates
 
     def test_at_threshold_forces_reminder(self) -> None:
@@ -237,7 +242,7 @@ class TestEvaluationModeToolOnly:
                 )
             )
         )
-        assert result.state_updates == {"eval_tool_only_count": 6}
+        assert result.state_updates == {"eval_tool_only_count": 6, "evaluate_reminder_run": "", _FP_KEY: _mod.TaskReminder._result_fingerprint("")}
         assert "ended" not in result.state_updates and "suspended" not in result.state_updates
 
 
@@ -290,10 +295,13 @@ class TestTaskEvaluateEvidence:
         import asyncio
 
         msgs = self._messages_with_eval('{"success": true, "data": {}}')
-        result = asyncio.run(TaskReminder().execute(_ctx(_base_task_state(messages=msgs)))
-        )
+        state = _base_task_state(messages=msgs)
+        result = asyncio.run(TaskReminder().execute(_ctx(state)))
         # 评估证据放行：清除续跑标志（防残留标志把纯文本轮误路由回 LLM）
-        assert result.state_updates == {"_has_new_llm_input": False}
+        assert result.state_updates == {
+            "_has_new_llm_input": False,
+            _FP_KEY: TaskReminder._result_fingerprint(state.get("raw_result")),
+        }
 
     def test_failed_evaluate_still_reminds(self) -> None:
         import asyncio
@@ -537,7 +545,7 @@ class TestRuntimeConfigOverride:
             raw_tool_calls=[{"function": {"name": "bash"}}],
         )
         result = asyncio.run(plugin.execute(_ctx(state)))
-        assert result.state_updates == {"eval_tool_only_count": 1}
+        assert result.state_updates == {"eval_tool_only_count": 1, "evaluate_reminder_run": "", _FP_KEY: _mod.TaskReminder._result_fingerprint("")}
 
     def test_identity_properties(self) -> None:
         plugin = TaskReminder(config={"priority": 50})

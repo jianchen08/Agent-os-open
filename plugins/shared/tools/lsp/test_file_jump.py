@@ -5,7 +5,7 @@
 1. generate_uri：VSCode/JetBrains/Nvim/file 四类 scheme，带/不带位置
 2. parse_uri：file/vscode/idea/nvim/未知协议/无协议，位置解析（3 段/2 段/非法值）
 3. jump_to_file：文件不存在、显式 ide_info、自动检测、默认打开、异常翻译
-4. _jump_by_ide_type：不支持的 IDE、Windows cmd 包装、非 Windows 直启、Popen 失败
+4. _jump_by_ide_type：不支持的 IDE、跨平台直接 argv 启动（无 cmd 包装）、Popen 失败
 5. _open_with_default：Windows/Darwin/Linux 三分支与失败
 6. jump_from_uri：URI → 跳转闭环
 """
@@ -196,11 +196,8 @@ class TestJumpToFile:
         result = asyncio.run(fj.FileJumpProtocol.jump_to_file(str(target), ide_info=ide))
         assert result is True
         assert len(calls) == 1
-        if sys.platform == "win32":
-            assert calls[0][:2] == ["cmd", "/c"]
-            assert calls[0][2] == "code"
-        else:
-            assert calls[0][0] == "code"
+        # 直接 argv 执行：目标命令是 argv[0]，不经 cmd /c 包装（元字符不二次解析）
+        assert calls[0][0] == "code"
         assert "--goto" in calls[0]
 
     def test_with_ide_info_jetbrains_args(self, fj: Any, lsp_types_mod: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,12 +209,10 @@ class TestJumpToFile:
         ide = lsp_types_mod.IDEInfo(type=fj.IDEType.JETBRAINS, name="IDEA")
         result = asyncio.run(fj.FileJumpProtocol.jump_to_file(str(target), position=pos, ide_info=ide))
         assert result is True
-        if sys.platform == "win32":
-            assert calls[0][2] == "idea64.exe"
-            assert calls[0][3:7] == ["--line", "1", "--column", "1"]
-        else:
-            assert calls[0][0] == "idea.sh"
-            assert calls[0][1:5] == ["--line", "1", "--column", "1"]
+        # 直接 argv 执行：命令在 argv[0]，参数紧跟其后（平台无关）
+        expected_cmd = "idea64.exe" if sys.platform == "win32" else "idea.sh"
+        assert calls[0][0] == expected_cmd
+        assert calls[0][1:5] == ["--line", "1", "--column", "1"]
 
     def test_unsupported_ide_type(self, fj: Any, lsp_types_mod: Any, tmp_path: Path) -> None:
         target = tmp_path / "a.py"
@@ -252,10 +247,7 @@ class TestJumpToFile:
         )
         result = asyncio.run(fj.FileJumpProtocol.jump_to_file(str(target)))
         assert result is True
-        if sys.platform == "win32":
-            assert calls[0][2] == "code"
-        else:
-            assert calls[0][0] == "code"
+        assert calls[0][0] == "code"
 
     def test_jump_error_translated_to_false(self, fj: Any, lsp_types_mod: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         target = tmp_path / "a.py"
@@ -269,15 +261,22 @@ class TestJumpByIdeType:
     def test_unsupported_type(self, fj: Any) -> None:
         assert asyncio.run(fj.FileJumpProtocol._jump_by_ide_type(fj.IDEType.EMACS, "a.py")) is False
 
-    def test_windows_cmd_wrap(self, fj: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        target = tmp_path / "a.py"
-        target.write_text("x")
+    def test_windows_direct_argv(self, fj: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Windows 分支契约：直接 argv 执行目标，不经 cmd /c 包装。
+
+        file_path 来自 LLM 可控输入——cmd /c 会把 &/^/| 等元字符二次解析，
+        路径可破出参数意图；直启后含元字符路径必须原样保持单个参数。
+        """
+        metachar_path = tmp_path / "a&b^c.py"
+        metachar_path.write_text("x")
         calls: list[list[str]] = []
         monkeypatch.setattr(platform, "system", lambda: "windows")
         monkeypatch.setattr(fj.subprocess, "Popen", lambda args, shell=False: calls.append(args))
-        assert asyncio.run(fj.FileJumpProtocol._jump_by_ide_type(fj.IDEType.VSCODE, str(target))) is True
-        assert calls[0][0] == "cmd"
-        assert calls[0][2] == "code"
+        assert asyncio.run(fj.FileJumpProtocol._jump_by_ide_type(fj.IDEType.VSCODE, str(metachar_path))) is True
+        assert calls[0][0] == "code", "Windows 上也必须直接执行目标命令，无 cmd /c 包装"
+        # 性质断言：元字符路径原样进入单个 argv 槽位（--goto 拼接行列后缀，
+        # 未被 shell 二次解析/拆分）
+        assert any(arg.startswith(str(metachar_path)) for arg in calls[0])
 
     def test_linux_direct(self, fj: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         target = tmp_path / "a.py"

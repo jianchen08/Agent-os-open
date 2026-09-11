@@ -11,14 +11,14 @@
 // scrolls horizontally instead of folding. Colors resolve through --dsw-*
 // tokens; ANSI parsing lives in ansi.ts.
 
-import { useCallback, useMemo, useState } from 'react'
 import clsx from 'clsx'
+import { useCallback, useMemo, useState } from 'react'
 import { parseAnsiLines, type AnsiLine } from './ansi.ts'
 import { headTailCap } from './head-tail-cap.ts'
-import { useCopyFeedback } from './use-copy-feedback.ts'
 import { Pill } from './Pill.tsx'
 import { StateDot, type StateDotState } from './StateDot.tsx'
 import css from './TerminalBlock.module.css'
+import { useCopyFeedback } from './use-copy-feedback.ts'
 
 /**
  * Output lines shown before the height cap collapses the middle. Matches the

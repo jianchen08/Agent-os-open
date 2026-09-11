@@ -33,6 +33,8 @@ export interface SessionInfo {
   updated_at: string
   /** 消息条数（state 摘要缺失时为 null，前端隐藏显示） */
   record_count: number | null
+  /** 该管道最新 run 状态（runs 读面提供） */
+  run_status?: string | null
 }
 
 /**

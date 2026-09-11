@@ -1,8 +1,8 @@
 //! user-admin capability handler——用户管理策略面（boot-plugin 第二刀）。
 //!
-//! §9.6 判据的精确拆分：**auth 执行门永留内核**（登录验签/JWT 校验/路由准入
-//! ——`/api/v1/auth/login|logout|me|register|refresh`，前端与 WS 握手在用，
-//! api/src/auth.rs 一行不动）；本 handler 承载的是**管理性质**的用户管理
+//! §9.6 判据的精确拆分：**auth 执行门永留内核**（登录验签/签名校验/路由准入
+//! ——`/api/v1/auth/login|logout|me|register|refresh|change-password`，前端与
+//! WS 握手在用）；本 handler 承载的是**管理性质**的用户管理
 //! 策略面（用户列表/改角色/改租户/删用户）。这些管理端点在拆分前**不存在**，
 //! 本刀直接以插件化形态新建——HTTP 面由 `plugins/shared/user_admin`
 //! （Python sidecar 插件）承载：内核 `/ext/{*rest}` 通配分发 → 插件
@@ -27,8 +27,8 @@
 //! （agentos-http 单一实现，与 api 执行门同源），校验 **admin 角色**。
 //! 用户列表含全员租户归属，属敏感管理面——viewer 亦拒绝（全 method 仅 admin，
 //! 与 db-admin 的"读面 admin/viewer"不同，本面无只读豁免）。
-//! manifest 的 `http_endpoints[].auth: "admin"` 目前是声明性字段，内核
-//! dispatcher 不执行它，实际执行点在本 handler。
+//! manifest 的 `http_endpoints[].auth: "admin"` 由内核 dispatcher 执行（W3-2/D2
+//! 第一刀），本 handler 内再校验一次（纵深防御，语义一致）。
 //!
 //! ## self-service 防护（鉴权铁律，防锁死系统）
 //!
@@ -341,6 +341,7 @@ fn api_error_parts(e: &ApiError) -> (u16, String) {
         ApiError::NotFound { message } => (404, message.clone()),
         ApiError::Conflict { message } => (409, message.clone()),
         ApiError::UnprocessableEntity { message } => (422, message.clone()),
+        ApiError::TooManyRequests { message, .. } => (429, message.clone()),
         ApiError::Internal { message } | ApiError::WebSocket { message } => (500, message.clone()),
         ApiError::ServiceUnavailable { message } => (503, message.clone()),
     }
@@ -402,6 +403,7 @@ mod tests {
             tenant_id: admin.tenant_id.clone(),
             created_at: admin.created_at.clone(),
             last_login_at: None,
+            must_change_password: false,
         };
         store.create_user(&record).await.unwrap();
         (
@@ -439,6 +441,7 @@ mod tests {
                 tenant_id: user_id.clone(),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 last_login_at: None,
+                must_change_password: false,
             })
             .await
             .unwrap();

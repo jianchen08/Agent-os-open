@@ -315,7 +315,6 @@ def _render_skeleton(
         plugin_id = tr.get("plugin_id", "?")
         seq = tr.get("seq_in_branch")
         patch_data = tr.get("patch_data")
-        # 解析 state_updates,提取复盘关心的关键字段
         state_changes: dict[str, Any] = {}
         if isinstance(patch_data, str):
             try:

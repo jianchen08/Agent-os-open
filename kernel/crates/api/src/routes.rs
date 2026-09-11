@@ -126,14 +126,28 @@ pub struct AppState {
     /// （端点照常返回 manifest 派生的 not_covered 缺省）。
     pub contract_states: Arc<crate::contract::ContractLedger>,
     /// 能力命名空间注册表（provides 声明驱动装配）：内核按**服务角色**
-    /// （namespace）调用插件服务的出口——如交互应答 route("human-interaction",
-    /// "respond")，内核不点名插件 id/工具名（ADR 2026-08-28 服务角色解析）。
+    /// （namespace）调用插件服务的出口——如交互应答按 interaction-respond
+    /// 协议角色解析路由目标（P1-3 声明驱动），内核不点名 namespace/插件 id/工具名。
     /// None = 未装配（兼容旧装配/测试，调用点显式降级报错）。
     pub capability_handlers: Option<Arc<agentos_mcp::CapabilityHandlerRegistry>>,
     /// 内核能力契约（config/kernel_capabilities/*.json）——schema 聚合透出用。
     /// None = 未装配（契约目录缺失或测试装配；入口校验由 router 侧独立持有）。
     pub kernel_capability_contracts:
         Option<Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>>,
+    /// D12：已消费的 refresh token jti 注册表（单次轮换——旧值即废）。
+    ///
+    /// 生产装配（`with_db`）的持久真值在 store 的 `consumed_refresh_jtis` 表
+    /// （跨重启判已消费，行保留 7 天对齐 refresh TTL 上限）；本进程内集合只在
+    /// db 未接线的装配（裸 `AppState` 测试脚手架）下作兜底，语义 = 重启即清。
+    pub consumed_refresh_jtis: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
+    /// 登录失败滑动窗口：username → 失败时刻队列（15 分钟窗口 ≥10 次 → 429）。
+    /// 进程内存记录：同机单进程内核部署形态下等价于全量状态，重启即清零。
+    pub login_failures: Arc<parking_lot::Mutex<HashMap<String, Vec<std::time::Instant>>>>,
+    /// 注册限频滑动窗口：全局尝试时刻队列（15 分钟窗口限 20 次 → 429）。
+    /// 进程内存记录，约束同上（单机单进程；多实例部署需外置限流）。
+    pub register_attempts: Arc<parking_lot::Mutex<Vec<std::time::Instant>>>,
+    /// WS 一次性握手票据表（POST /api/v1/ws-ticket 签发、?ticket= 单次消费）。
+    pub ws_tickets: Arc<crate::ws_ticket::WsTicketStore>,
 }
 
 impl AppState {
@@ -145,6 +159,8 @@ impl AppState {
                 name: "default".to_string(),
                 loop_bodies: Vec::new(),
                 checkpoint: Default::default(),
+                initial_state: std::collections::HashMap::new(),
+                max_rounds: None,
             }),
             step_library: Arc::new(StepLibrary::default()),
             invoker: None,
@@ -163,7 +179,37 @@ impl AppState {
             contract_states: Arc::new(crate::contract::ContractLedger::new()),
             capability_handlers: None,
             kernel_capability_contracts: None,
+            consumed_refresh_jtis: Arc::new(parking_lot::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+            login_failures: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            register_attempts: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            ws_tickets: Arc::new(crate::ws_ticket::WsTicketStore::new()),
         }
+    }
+
+    /// 消费一个 refresh token jti（D12 单次轮换）。返回 true = 首次消费
+    /// （token 有效）；false = 已被消费过（旧值复用，调用方拒绝）。
+    ///
+    /// db 已接线（生产装配）走 store 的 `consumed_refresh_jtis` 持久账本：
+    /// 重启后旧 jti 仍判已消费，过期行由 store 侧按 refresh TTL 上限顺手清理。
+    /// 账本故障按 fail-closed 处理（记 error 并返回 false 拒绝本次刷新），
+    /// 不因存储异常放行旧值复用。db 未接线（裸 AppState 测试装配）退回进程内
+    /// 集合。低频路径（每 token 至多一次），经 with_conn 同步执行不派 DB 线程池。
+    pub fn consume_refresh_jti(&self, jti: &str) -> bool {
+        if let Some(db) = self.db.as_ref() {
+            return match db.consume_refresh_jti(jti) {
+                Ok(first) => first,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "refresh jti 消费账本写入失败，fail-closed 拒绝本次刷新"
+                    );
+                    false
+                }
+            };
+        }
+        self.consumed_refresh_jtis.lock().insert(jti.to_string())
     }
 
     /// 构建集成了插件系统的 AppState（生产装配入口）。
@@ -319,6 +365,49 @@ impl Default for AppState {
     }
 }
 
+#[cfg(test)]
+mod consume_refresh_jti_tests {
+    //! D12 持久账本装配契约：db 接线（with_db）时消费走 store 持久账本
+    //! （跨 AppState 实例/重启判已消费）；db 未接线退回进程内集合。
+
+    use super::*;
+
+    #[test]
+    fn db_wired_consume_uses_persistent_ledger_across_state_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("jti_glue.db");
+        let sqlite =
+            Arc::new(agentos_engine::SqliteStore::open(db_path.to_str().unwrap()).unwrap());
+
+        let state = AppState::new().with_db(sqlite);
+        assert!(
+            state.consume_refresh_jti("jti-glue-1"),
+            "db 接线下首次消费必须放行"
+        );
+        assert!(
+            !state.consume_refresh_jti("jti-glue-1"),
+            "同 jti 二次消费必须拒绝"
+        );
+
+        // 同库文件新开 AppState（模拟内核重启）：已消费 jti 不得复活
+        let sqlite2 =
+            Arc::new(agentos_engine::SqliteStore::open(db_path.to_str().unwrap()).unwrap());
+        let state2 = AppState::new().with_db(sqlite2);
+        assert!(
+            !state2.consume_refresh_jti("jti-glue-1"),
+            "重启后已消费 jti 必须仍判已消费（持久账本）"
+        );
+    }
+
+    #[test]
+    fn db_unwired_consume_falls_back_to_in_memory_set() {
+        let state = AppState::new();
+        assert!(state.db.is_none(), "前置：裸 AppState 未接线 db");
+        assert!(state.consume_refresh_jti("jti-mem-1"), "首次消费放行");
+        assert!(!state.consume_refresh_jti("jti-mem-1"), "旧值复用拒绝");
+    }
+}
+
 /// /health 端点处理器（AC-06-3）。
 pub async fn health_handler() -> axum::Json<HealthResponse> {
     axum::Json(HealthResponse {
@@ -328,11 +417,19 @@ pub async fn health_handler() -> axum::Json<HealthResponse> {
     })
 }
 
+/// /uploads/{filename} 匿名可达的媒体扩展名白名单：<img>/<video> 标签无法携带
+/// Authorization 头，上传 URL 必须保持匿名；白名单外扩展名（可执行/文档/数据
+/// 类）一律 404，防匿名遍历读取上传目录内非媒体文件。
+const UPLOAD_ALLOWED_EXTENSIONS: [&str; 12] = [
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "mp4", "mp3", "wav", "pdf", "webm", "ico",
+];
+
 /// /uploads/{filename} 静态服务（上传文件读取）。
 ///
 /// channel_api artifacts 上传落盘 data/{tenant}/uploads 并返回
 /// `/uploads/{filename}` URL（前端附件预览 / 主题背景图引用）。本 handler
-/// 直读默认租户（default）上传目录；路径安全：拒绝 `..` 与路径分隔符。
+/// 直读默认租户（default）上传目录；路径安全：拒绝 `..` 与路径分隔符；
+/// 扩展名白名单外 404（媒体类型契约，见 UPLOAD_ALLOWED_EXTENSIONS）。
 pub async fn serve_upload_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
@@ -346,6 +443,14 @@ pub async fn serve_upload_handler(
         || filename.contains('\\')
         || filename.contains("..")
     {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let ext_allowed = filename
+        .rsplit('.')
+        .next()
+        .map(|ext| UPLOAD_ALLOWED_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false);
+    if !ext_allowed {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     let Some(project_root) = state.project_root.as_ref() else {
@@ -713,6 +818,16 @@ pub async fn pipelines_handler(
     axum::Json(pipelines)
 }
 
+/// 管道域 REST 端点的租户上下文解析单点：统一「无 session_id」变体
+/// （会话域端点携带 thread_id，在 session_routes 直接调用 request_tenant_ctx）。
+/// async：tenant 解析需查 store（持久化用户的一用户一租户映射）。
+async fn endpoint_tenant_ctx(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> agentos_core::types::TenantContext {
+    crate::server::request_tenant_ctx(state.store.as_ref(), headers, "").await
+}
+
 /// GET /api/v1/pipelines/runs——管道运行快照（统一管道管理数据源）。
 ///
 /// runs × message_slots × pipeline_sessions × pipeline_run_summaries 四表联结
@@ -734,7 +849,7 @@ pub async fn pipelines_runs_handler(
     let db = state.db.clone().ok_or_else(|| ApiError::NotFound {
         message: "db store not injected".to_string(),
     })?;
-    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let tenant_ctx = endpoint_tenant_ctx(&state, &headers).await;
     let status = params.get("status").filter(|s| !s.is_empty()).cloned();
     let limit = params
         .get("limit")
@@ -767,7 +882,7 @@ pub async fn pending_inputs_list_handler(
     let store = state.store.as_ref().ok_or_else(|| ApiError::NotFound {
         message: "store not injected".to_string(),
     })?;
-    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let tenant_ctx = endpoint_tenant_ctx(&state, &headers).await;
     let rows = store
         .list_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
         .await
@@ -806,7 +921,7 @@ pub async fn pending_inputs_update_handler(
         .ok_or_else(|| ApiError::BadRequest {
             message: "content 必须为非空字符串".to_string(),
         })?;
-    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let tenant_ctx = endpoint_tenant_ctx(&state, &headers).await;
     let updated = store
         .update_pending_input_content(&tenant_ctx.tenant_id, &pipeline_id, &input_id, content)
         .await
@@ -832,7 +947,7 @@ pub async fn pending_inputs_delete_handler(
     let store = state.store.as_ref().ok_or_else(|| ApiError::NotFound {
         message: "store not injected".to_string(),
     })?;
-    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let tenant_ctx = endpoint_tenant_ctx(&state, &headers).await;
     // 删除前读取条目 cmid：排队中的 REST chat 请求（http_ 前缀 cmid）据此收到
     // 失败 outcome 解除挂起；条目已被消费循环 pop 时 list 查不到，不通知。
     // fail-closed：列表读取失败 = 无法识别待通知 cmid → 跳过删除并报 503，
@@ -892,7 +1007,7 @@ pub async fn pending_inputs_clear_handler(
     let store = state.store.as_ref().ok_or_else(|| ApiError::NotFound {
         message: "store not injected".to_string(),
     })?;
-    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let tenant_ctx = endpoint_tenant_ctx(&state, &headers).await;
     // 清空前读取全部 cmid（同 delete：解除排队中 REST chat 请求的挂起）。
     // fail-closed 同删除分支：读取失败跳过清空并报 503，不丢 cmid 挂死 waiter。
     let cmids: Vec<String> = store
@@ -1158,7 +1273,7 @@ pub async fn pipelines_state_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<axum::Json<serde_json::Value>, ApiError> {
-    let tenant_ctx = crate::server::request_tenant_ctx(state.store.as_ref(), &headers, "").await;
+    let tenant_ctx = endpoint_tenant_ctx(&state, &headers).await;
     let tenant_id = tenant_ctx.tenant_id;
 
     // 出口声明按当前 manifest 集合实时收集（热重载刷新后下一请求即生效）
@@ -1184,7 +1299,6 @@ pub async fn pipelines_state_handler(
             "pipeline_id": listing.pipeline_id,
             "thread_id": listing.thread_id,
             "agent_id": listing.agent_id,
-            "msg_sequence": listing.msg_sequence,
             "source": "memory",
             "state": summary,
         }));
@@ -1741,9 +1855,15 @@ async fn put_inline_manifest_config(
     std::fs::write(&tmp, out.as_bytes()).map_err(|e| ApiError::Internal {
         message: format!("write manifest tmp: {e}"),
     })?;
-    std::fs::rename(&tmp, &manifest_path).map_err(|e| ApiError::Internal {
-        message: format!("rename manifest: {e}"),
-    })?;
+    if let Err(e) = std::fs::rename(&tmp, &manifest_path) {
+        // rename 失败 best-effort 清 tmp（D7：不留 .tmp 残骸）
+        if let Err(cleanup_err) = std::fs::remove_file(&tmp) {
+            tracing::warn!(target = %tmp.display(), error = %cleanup_err, "清理 .tmp 残骸失败");
+        }
+        return Err(ApiError::Internal {
+            message: format!("rename manifest: {e}"),
+        });
+    }
 
     // 新 ETag 从写入后的值视图派生（先算后移交，new_fields 随后移入内存 manifest）
     let updated = agentos_invoker::shared::config_defaults_from_fields(&new_fields);
@@ -1890,6 +2010,17 @@ pub async fn system_restart_handler(
         "exit_code": 75,
         "suspended_runs": suspended_runs,
     }))
+}
+
+/// GET /api/v1/system/memstats — mimalloc 分配器统计快照（M1 测量面）。
+///
+/// 内核自有只读端点：返回调用时刻的进程级 [`crate::allocator::MemStats`]。
+/// 字段语义、release 构建下的可用性（malloc 计量面受 MI_STAT 门控恒 0，
+/// 可信信号为 committed/purged/process 面）与 None 防御见 allocator 模块
+/// 文档；分辨活增长 vs 分配器滞留 = 消费方对两次快照相减（mimalloc 无增量
+/// delta API）。
+pub async fn system_memstats_handler() -> axum::Json<crate::allocator::MemStats> {
+    axum::Json(crate::allocator::snapshot_stats())
 }
 
 /// 读磁盘 plugin.json 并与注册表 manifest 做工具集/schema 差异比对
@@ -2198,17 +2329,33 @@ pub async fn plugins_set_enabled_handler(
     })?;
     // A12：写盘失败 → 5xx 统一错误信封（不再 200 + success:false 混装，
     // 前端无法据状态码区分"已生效"与"根本没写进去"）。
-    std::fs::write(&profile_path, new_raw).map_err(|e| {
+    // B4：tmp + rename 原子写（对照同文件写 plugin.json 的范式）——直写被中断
+    // （进程退出/断电）会留半截 yaml，后续 load_profile_doc 解析失败连锁拒写。
+    let tmp_path = profile_path.with_extension("yaml.tmp");
+    std::fs::write(&tmp_path, new_raw).map_err(|e| {
         tracing::error!(
             target: "plugin-enablement",
             plugin_id = %plugin_id,
             error = %e,
-            "写入 profile 失败"
+            "写入 profile tmp 失败"
         );
         ApiError::Internal {
             message: format!("写入 profile 失败: {e}"),
         }
     })?;
+    if let Err(e) = std::fs::rename(&tmp_path, &profile_path) {
+        // rename 失败 best-effort 清 tmp（不留 .tmp 残骸）
+        let _ = std::fs::remove_file(&tmp_path);
+        tracing::error!(
+            target: "plugin-enablement",
+            plugin_id = %plugin_id,
+            error = %e,
+            "替换 profile 失败"
+        );
+        return Err(ApiError::Internal {
+            message: format!("写入 profile 失败: {e}"),
+        });
+    }
 
     // ── 热加载：立即改内存状态，不用重启 ──
     // 1) 改 enabled_plugin_ids（schema 出口的 contributes/configs 立即生效）
@@ -2698,6 +2845,8 @@ mod state_summary_tests {
     /// 构造带指定 export_fields 声明的测试 manifest。
     fn export_manifest(fields: &[&str]) -> PluginManifest {
         PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: "test_plugin".to_string(),
             name: "test_plugin".to_string(),
             description: None,
@@ -2887,9 +3036,9 @@ mod state_summary_tests {
 
     #[test]
     fn test_summarize_cuts_retired_task_submit_params() {
-        // 参数退役守卫：task.priority/task.max_retries 已随 task_submit 参数瘦身
-        // 移除（执行层零消费者，ADR 2026-08-24-task-submit-param-diet）——退役后
-        // 无插件声明，即使任务域其他键已声明也不出口。
+        // 本守卫拒绝的历史参数名清单（task.priority/task.max_retries，
+        // ADR 2026-08-24-task-submit-param-diet：执行层零消费者已移除）——
+        // 收到即不出口，即使任务域其他键已声明。
         let export = ExportFields::from_manifests(&[export_manifest(&["task.goal"])]);
         let s = summarize_state(
             &json!({
@@ -3201,12 +3350,6 @@ mod pending_inputs_failure_tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             self.inner.append_trace(entry).await
         }
-        async fn create_branch(
-            &self,
-            branch: agentos_core::types::Branch,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            self.inner.create_branch(branch).await
-        }
         async fn update_run_status(
             &self,
             run_id: &str,
@@ -3319,6 +3462,16 @@ mod pending_inputs_failure_tests {
         ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
         {
             self.inner.list_users().await
+        }
+        async fn update_user_password(
+            &self,
+            user_id: &str,
+            password_hash: &str,
+            must_change_password: bool,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            self.inner
+                .update_user_password(user_id, password_hash, must_change_password)
+                .await
         }
         async fn update_last_login(
             &self,
@@ -3649,6 +3802,131 @@ mod inline_field_updates_tests {
         assert_eq!(
             updates,
             vec![("compression.model".to_string(), serde_json::Value::Null)]
+        );
+    }
+}
+
+#[cfg(test)]
+mod system_memstats_tests {
+    //! GET /api/v1/system/memstats（M1 测量面）：内核自有只读端点 + 白名单鉴权。
+    //! 测试构造与 auth.rs 同构（内存库播种 admin → 真实 login 换 access token）。
+
+    use super::*;
+    use agentos_core::traits::StorageBackend;
+    use agentos_http::auth::hash_password;
+    use axum::body::Body;
+    use axum::http::Request;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    const TEST_ADMIN_PW: &str = "test-admin-pw-2026";
+
+    /// 内存库 + 播种 admin 的完整路由 app（同 auth.rs 测试构造）。
+    async fn app_with_seeded_admin() -> axum::Router {
+        let store = std::sync::Arc::new(
+            agentos_engine::SqliteStore::open_memory().expect("open_memory 失败"),
+        );
+        let admin = agentos_core::types::UserRecord {
+            user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            username: "admin".to_string(),
+            password: hash_password(TEST_ADMIN_PW).unwrap(),
+            email: Some("admin@agentos.dev".to_string()),
+            role: "admin".to_string(),
+            tenant_id: agentos_http::auth::DEFAULT_TENANT_ID.to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_login_at: None,
+            must_change_password: false,
+        };
+        let _ = store.create_user(&admin).await; // 已有则忽略错误
+        let mut state = AppState::new();
+        state.store = Some(store);
+        crate::server::build_router(state)
+    }
+
+    async fn login_token(app: &axum::Router) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"username": "admin", "password": TEST_ADMIN_PW}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        v["access_token"]
+            .as_str()
+            .expect("login 应签发 access_token")
+            .to_string()
+    }
+
+    /// 未鉴权 GET → 401（白名单读面拒绝匿名：缺凭证即 Unauthorized，
+    /// 403 保留给"有凭证但角色不足"；与 /api/v1/sessions 同语义链）。
+    #[tokio::test]
+    async fn memstats_without_token_unauthorized() {
+        let app = app_with_seeded_admin().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/system/memstats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    /// admin Bearer token GET → 200，JSON 快照字段齐备（数值或 null；
+    /// 值不判具体大小——测试进程构建开关与运行期负载都会影响数值）。
+    #[tokio::test]
+    async fn memstats_with_admin_token_returns_snapshot() {
+        let app = app_with_seeded_admin().await;
+        let token = login_token(&app).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/system/memstats")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        for field in [
+            "in_use_bytes",
+            "requested_bytes",
+            "committed_bytes",
+            "reserved_bytes",
+            "purged_bytes",
+            "total_allocs",
+            "freed_bytes",
+            "abandoned_pages",
+            "process_commit_bytes",
+            "process_rss_bytes",
+        ] {
+            let val = &v[field];
+            assert!(
+                val.is_u64() || val.is_null(),
+                "字段 {field} 应为数值或 null，实际 {val}"
+            );
+        }
+        // 可信面（OS 口径 + arena 原子量）：有分配发生时必非零
+        assert!(
+            v["process_commit_bytes"].as_u64().unwrap_or(0) > 0,
+            "process_commit_bytes 应 > 0（进程存活即有已提交内存）"
         );
     }
 }

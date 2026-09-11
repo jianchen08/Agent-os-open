@@ -5,7 +5,12 @@
 
 工作空间约束（punch B5，参考 download/tool.py 的 project_root 前缀校验）：
 - 全部路径参数以 workspace/project_root 为锚：相对路径以根解析，绝对路径
-  越界拒绝（file_read 越界读放行但记录 warning）。
+  越界拒绝——读写同规则 fail-closed，读操作不豁免（越界读 = 任意宿主
+  文件读取原语，曾以 warning 放行，已收口）。
+- 凭据类文件硬拒（与根内外无关）：.env 族（.env.example 豁免）、
+  .git-credentials / .netrc、id_rsa/id_dsa/id_ecdsa/id_ed25519、
+  *.pem/*.p12/*.pfx/*.jks/*.keystore。泛化后缀 *.key 不拦（工作区内
+  正常开发文件误伤面大），高危凭据格式已覆盖。
 - **fail-closed**：workspace/project_root 均未注入时一律报错，不做 sidecar
   cwd 兜底——否则相对路径会落到插件目录，把宿主仓库当工作区读写。
   workspace/project_root 为运行时注入参数（param_inject 注入，
@@ -33,6 +38,38 @@ logger = logging.getLogger(__name__)
 # 不属于静默截断，保留。
 
 
+# 凭据类文件硬拒清单：basename 精确匹配 / .env 族前缀 / 密钥文件后缀与
+# SSH 私钥命名。命中即拒绝（读写同规），与 workspace 锚定无关——.env 类
+# 文件常驻项目根内，仅靠根校验拦不住（.env.example 是模板，豁免）。
+_SENSITIVE_EXACT = {".env", ".git-credentials", ".netrc"}
+_SENSITIVE_SUFFIXES = (".pem", ".p12", ".pfx", ".jks", ".keystore")
+_SENSITIVE_SSH_PREFIXES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
+
+
+def _sensitive_file_reason(resolved: Path) -> str | None:
+    """命中凭据类文件名则返回拒绝原因，否则 None。
+
+    比较统一 casefold：Windows/macOS 文件系统大小写不敏感，`.ENV` 与 `.env`
+    同名等价——区分大小写的名单比较会让非小写形态创建/访问全程放行
+    （S3：`Path.resolve()` 只在目标已存在时回填真名，新建路径不回填）。
+    """
+    name = resolved.name
+    folded = name.casefold()
+    # Windows FS 剥离文件名尾随空格/点：`open('.env ')` 落盘同名 .env——
+    # 比较前先归一（resolve() 对不存在的目标不回填真名，此处需自行覆盖）。
+    win_normalized = folded.rstrip(" .")
+    candidates = {folded, win_normalized}
+    if candidates & _SENSITIVE_EXACT:
+        return f"凭据类文件禁止访问：{name}"
+    if any(c.startswith(".env.") and c != ".env.example" for c in candidates):
+        return f"凭据类文件禁止访问：{name}（.env 族，仅豁免 .env.example）"
+    if any(c.endswith(_SENSITIVE_SUFFIXES) for c in candidates):
+        return f"凭据类文件禁止访问：{name}（密钥/证书私钥格式）"
+    if any(c.startswith(_SENSITIVE_SSH_PREFIXES) for c in candidates):
+        return f"凭据类文件禁止访问：{name}（SSH 私钥）"
+    return None
+
+
 def _check_workspace_path(
     path: str,
     workspace: str | None,
@@ -45,7 +82,8 @@ def _check_workspace_path(
         path: 待校验路径（绝对或相对；相对路径以根为基准解析）
         workspace: 工作空间路径（运行时注入，可选）
         project_root: 项目根路径（运行时注入，可选；优先于 workspace 作根）
-        operation: "read" / "write" / "delete" / "move"（后三者一律拒绝根外路径）
+        operation: "read" / "write" / "delete" / "move"（语义仅用于报错文案；
+            根外路径与凭据类文件对所有操作一律拒绝）
 
     Returns:
         (是否允许, 拒绝原因, 校验用绝对路径)
@@ -69,17 +107,12 @@ def _check_workspace_path(
         logger.info("[fs_tools] 容器挂载点 /workspace 重映射到宿主工作空间 | -> %s", path)
     target = Path(path)
     resolved = target.resolve() if target.is_absolute() else (root / target).resolve()
+    sensitive = _sensitive_file_reason(resolved)
+    if sensitive:
+        return False, sensitive, str(resolved)
     try:
         resolved.relative_to(root)
     except ValueError:
-        if operation == "read":
-            # 读放行但记录（越界读是可观测事件）
-            logger.warning(
-                "[fs_tools] file_read 访问 workspace 外路径（允许但记录）| path=%s | root=%s",
-                resolved,
-                root,
-            )
-            return True, "", str(resolved)
         return False, f"路径 {path} 超出 workspace/project_root（{root}）范围，{operation} 操作被拒绝", str(resolved)
     return True, "", str(resolved)
 

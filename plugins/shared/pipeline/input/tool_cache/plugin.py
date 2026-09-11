@@ -3,11 +3,13 @@
 负责在管道循环的输入阶段检查工具调用是否命中内存缓存，
 命中时直接返回缓存结果并跳过后续插件执行。
 
-缓存存储在**模块级单例字典**中（进程内全局），与 tool_cache_writer
-（output 阶段插件）共享同一份缓存。这样 input 读缓存 / output 写缓存
-才能命中同一条目。
+缓存实现与单例字典在 agentos_plugin_sdk.tool_result_cache（SDK 单一
+真值源），与 tool_cache_writer（output 阶段插件）共享同一份缓存，
+input 读缓存 / output 写缓存才能命中同一条目。
 
-使用基于 (tool_name + sorted_args_json) 的 MD5 哈希作为缓存 key，
+使用基于 (namespace + tool_name + sorted_args_json) 的 MD5 哈希作为
+缓存 key（namespace 由 pipeline state 身份键 pipeline_id/user_id/
+session_id 组装，跨会话同参调用不互命中；无身份键时退化为旧键语义），
     支持 TTL 过期和最大缓存条目限制。
     淘汰策略为 LRU（基于最近访问时间）。
 
@@ -18,117 +20,28 @@ State 命名空间：
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import time
 from typing import Any
+
+from agentos_plugin_sdk.tool_result_cache import (
+    ToolResultCache,
+    make_cache_key,
+    namespace_from_state,
+)
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
 
-# 全局缓存载体：挂在 pipeline 包上（两端插件都 import pipeline，sys.path 一致，
-# 保证是同一份字典）。不用模块级单例是因为 tool_cache_writer 通过 importlib
-# 动态加载本模块时会得到独立的模块副本，模块级字典无法共享。
-import pipeline as _pipeline_pkg  # noqa: E402
-
-_GLOBAL_CACHE_ATTR = "_tool_result_cache"
-if not hasattr(_pipeline_pkg, _GLOBAL_CACHE_ATTR):
-    setattr(_pipeline_pkg, _GLOBAL_CACHE_ATTR, {})
-# _GLOBAL_CACHE 是 pipeline 包上那个字典的直接引用
-_GLOBAL_CACHE: dict[str, tuple[Any, float, float]] = getattr(_pipeline_pkg, _GLOBAL_CACHE_ATTR)
-
-# 默认不缓存的工具：
-# - 有副作用工具（写操作 / 外部副作用，结果不可复用）；
-# - 路径型读工具 file_read：同内容合法两次独立读（读→改→
-#   再读）在 TTL 窗口内会被内容键误合并，第二次读返回改前内容。
-_DEFAULT_EXCLUDE_TOOLS: set[str] = {
-    "bash_execute",
-    "file_read",
-    "file_write",
-    "file_delete",
-    "file_move",
-    "file_copy",
-    "create_directory",
-    "web_operate",
-    "task_submit",
-    "task_manage",
-    "state_update",
-}
-
-
-def get_global_cache() -> dict[str, tuple[Any, float, float]]:
-    """返回模块级单例缓存字典。
-
-    供 tool_cache_writer（output 阶段）共享同一份缓存。
-    """
-    return _GLOBAL_CACHE
-
-
-def evict_expired(cache: dict[str, tuple[Any, float, float]], max_size: int) -> None:
-    """清理过期的缓存条目。
-
-    如果清理后仍超过 max_size，按 LRU 策略移除最久未访问的条目。
-
-    Args:
-        cache: 缓存字典（就地修改）
-        max_size: 最大条目数
-    """
-    now = time.time()
-    expired_keys = [k for k, (_, exp, _) in cache.items() if now >= exp]
-    for k in expired_keys:
-        del cache[k]
-
-    if len(cache) > max_size:
-        # LRU: 按 last_access_time 排序，移除最久未访问的条目
-        sorted_items = sorted(
-            cache.items(),
-            key=lambda item: item[1][2],
-        )
-        to_remove = len(cache) - max_size
-        for k, _ in sorted_items[:to_remove]:
-            del cache[k]
-
-
-def make_cache_key(tool_call: dict[str, Any]) -> str:
-    """根据工具名称和参数生成缓存 key。
-
-    使用 (tool_name + sorted_args_json) 的 MD5 哈希作为 key，
-    确保相同参数的工具调用命中同一缓存条目。
-
-    参数读取兼容两种生产形状：
-    - 0.2 llm_core 产出 OpenAI 风格 {"id", "name", "arguments"}（arguments
-      是 JSON 字符串）；
-    - 工具链/测试构造的 {"name", "args"}（args 是 dict）。
-    arguments 字符串先 json.loads 解析为 dict 再参与 key 组装，
-    保证两种形状下同参调用 key 一致（否则字符串原文参与哈希，
-    同一调用在查询/写入两端 key 分叉）。
-
-    Args:
-        tool_call: 工具调用描述，包含 name 和 args/arguments
-
-    Returns:
-        MD5 哈希字符串
-    """
-    tool_name = tool_call.get("name", "")
-    args = tool_call.get("args", tool_call.get("arguments", {}))
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except (TypeError, ValueError):
-            args = {"_raw": args}
-    raw = f"{tool_name}:{json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
-
 
 class ToolCache(IInputPlugin):
     """工具缓存 Input 插件。
 
     基于 (tool_name + sorted_args_json) 的 MD5 哈希作为缓存 key，
-    使用模块级单例内存缓存（与 tool_cache_writer 共享）。
-    命中缓存时直接返回结果，跳过后续所有插件和工具执行。
+    使用 SDK tool_result_cache 的进程内共享单例缓存（与 tool_cache_writer
+    共享）。命中缓存时直接返回结果，跳过后续所有插件和工具执行。
     淘汰策略为 LRU（基于最近访问时间），每次缓存命中时更新访问时间。
 
     配置项：
@@ -156,12 +69,7 @@ class ToolCache(IInputPlugin):
                   （默认含 bash_execute/file_write 等有副作用的工具）
         """
         self._config = config or {}
-        self._enabled = self._config.get("enabled", True)
-        self._default_ttl = self._config.get("default_ttl", 300)
-        self._max_size = self._config.get("max_size", 100)
-        # exclude_tools 合并默认值（用户配置追加，不覆盖默认的有副作用工具）
-        self._exclude_tools: set[str] = set(_DEFAULT_EXCLUDE_TOOLS)
-        self._exclude_tools.update(self._config.get("exclude_tools", []))
+        self._cache = ToolResultCache(self._config)
 
     @property
     def name(self) -> str:
@@ -187,41 +95,34 @@ class ToolCache(IInputPlugin):
         Returns:
             缓存命中时包含结果和跳过标记的插件执行结果
         """
-        if not self._enabled:
+        if not self._cache.enabled:
             return PluginResult()
 
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         if not tool_calls:
             return PluginResult()
 
-        now = time.time()
         cached_results: list[Any] = []
+        # 身份隔离维度：合宿进程服务多会话，同参调用必须按 pipeline/user/
+        # session 隔离（memory 族等工具返回用户私有数据），跨身份不命中。
+        # 无任何身份键时为 None（旧键语义，向后兼容）。
+        namespace = namespace_from_state(ctx.state)
 
         for tc in tool_calls:
             # 有副作用的工具不查缓存（结果不可复用）
-            if self._is_excluded(tc.get("name", "")):
+            if self._cache.is_excluded(tc.get("name", "")):
                 return PluginResult()
 
-            cache_key = make_cache_key(tc)
-            entry = _GLOBAL_CACHE.get(cache_key)
-            if entry is not None:
-                result, expire_time, _last_access = entry
-                if now < expire_time:
-                    # LRU: 命中时更新访问时间
-                    _GLOBAL_CACHE[cache_key] = (result, expire_time, now)
-                    cached_results.append(result)
-                    logger.debug(
-                        "[%s] Cache hit | key=%s",
-                        self.name,
-                        cache_key[:12],
-                    )
-                    continue
-                del _GLOBAL_CACHE[cache_key]
+            cache_key = make_cache_key(tc, namespace=namespace)
+            hit, result = self._cache.get(cache_key)
+            if hit:
                 logger.debug(
-                    "[%s] Cache expired | key=%s",
+                    "[%s] Cache hit | key=%s",
                     self.name,
                     cache_key[:12],
                 )
+                cached_results.append(result)
+                continue
 
             return PluginResult()
 
@@ -294,35 +195,10 @@ class ToolCache(IInputPlugin):
         return {"_ops": ops}
 
     def put(self, tool_call: dict[str, Any], result: Any) -> None:
-        """将工具执行结果写入缓存。
-
-        外部调用方（如 tool_cache_writer output 插件）在工具执行完成后
-        调用此方法将结果缓存。有副作用的工具（exclude_tools）不写缓存。
-        当缓存条目数超过 max_size 时，清理所有已过期的条目。
+        """将工具执行结果写入缓存（委托 SDK ToolResultCache.put）。
 
         Args:
             tool_call: 工具调用描述，包含 name 和 args
             result: 工具执行结果
         """
-        if not self._enabled:
-            return
-        if self._is_excluded(tool_call.get("name", "")):
-            return
-
-        cache_key = make_cache_key(tool_call)
-        expire_time = time.time() + self._default_ttl
-        _GLOBAL_CACHE[cache_key] = (result, expire_time, time.time())
-
-        if len(_GLOBAL_CACHE) > self._max_size:
-            evict_expired(_GLOBAL_CACHE, self._max_size)
-
-    def _is_excluded(self, tool_name: str) -> bool:
-        """判断工具是否在排除列表（不缓存）。
-
-        Args:
-            tool_name: 工具名
-
-        Returns:
-            True 表示该工具不查/不写缓存
-        """
-        return tool_name in self._exclude_tools
+        self._cache.put(tool_call, result)

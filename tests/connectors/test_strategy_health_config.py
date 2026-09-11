@@ -20,7 +20,7 @@ import pytest
 
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
-from base import BaseConnector
+from base import BaseConnector, backoff_delays
 from config_mixin import ConfigSubscriberMixin
 from connector_types import (
     ActionResult,
@@ -323,7 +323,12 @@ class TestHealthCheck:
 
     @pytest.mark.asyncio
     async def test_reconnect_with_backoff_retries(self) -> None:
-        """指数退避重连：失败后多次重试。"""
+        """指数退避重连：失败后多次重试直至成功。
+
+        connect 是与外部 IDE 的边界；重试直至成功的尝试次数即重连的
+        可观察契约。base_delay 取亚 10ms 量级只为用例提速——本用例断言
+        重试次数边界，退避间隔性质由 TestBackoffDelaySequence 断言。
+        """
         conn = MockIDEConnector()
         conn._set_state(ConnectorState.DISCONNECTED)
 
@@ -340,7 +345,7 @@ class TestHealthCheck:
 
         conn.connect = flaky_connect  # type: ignore[assignment]
 
-        await conn._reconnect_with_backoff(max_retries=3, base_delay=0.01)
+        await conn._reconnect_with_backoff(max_retries=3, base_delay=0.001)
         assert call_count == 3
         assert conn.is_connected is True
 
@@ -354,7 +359,7 @@ class TestHealthCheck:
 
         conn = AlwaysFailConnector()
         with pytest.raises(ConnectionError, match="重连失败"):
-            await conn._reconnect_with_backoff(max_retries=2, base_delay=0.01)
+            await conn._reconnect_with_backoff(max_retries=2, base_delay=0.001)
 
     def test_get_status_returns_state_info(self) -> None:
         """get_status 返回正确状态字典。"""
@@ -364,6 +369,47 @@ class TestHealthCheck:
         assert status["state"] == "disconnected"
         assert status["connected"] is False
         assert "info" in status
+
+
+class TestBackoffDelaySequence:
+    """退避延迟序列性质：单调不减 + 指数增长 + 重试次数边界。
+
+    延迟计算在生产侧是同步纯函数（backoff_delays），时序不变量在序列上
+    断言而非靠真实 sleep 计时；重连循环消费同一序列（见 base.py）。
+    """
+
+    @pytest.mark.parametrize(
+        ("max_retries", "base_delay"),
+        [(1, 0.5), (2, 1.0), (3, 0.25), (5, 0.1), (4, 2.0), (3, 0.0)],
+    )
+    def test_delay_sequence_properties(
+        self, max_retries: int, base_delay: float,
+    ) -> None:
+        """序列长度=重试间隔数、单调不减、相邻 2 倍、首项=base_delay。"""
+        delays = backoff_delays(max_retries=max_retries, base_delay=base_delay)
+
+        # 最后一次失败后不再等待：间隔数 = max_retries - 1
+        assert len(delays) == max(0, max_retries - 1)
+        if not delays:
+            return
+
+        # 首次失败后等待 base_delay
+        assert delays[0] == base_delay
+        # 单调不减（指数退避不会越等越短）
+        assert all(
+            delays[i] <= delays[i + 1] for i in range(len(delays) - 1)
+        )
+        # 相邻间隔恒为 2 倍（指数增长）
+        assert all(
+            delays[i + 1] == delays[i] * 2 for i in range(len(delays) - 1)
+        )
+
+    @pytest.mark.parametrize("max_retries", [2, 3, 6])
+    def test_delay_sequence_scales_with_base_delay(self, max_retries: int) -> None:
+        """base_delay 翻倍 → 整个序列等比放大（延迟由配置驱动，非写死）。"""
+        small = backoff_delays(max_retries=max_retries, base_delay=0.1)
+        big = backoff_delays(max_retries=max_retries, base_delay=0.2)
+        assert all(b == s * 2 for s, b in zip(small, big))
 
 
 # ── ConfigSubscriberMixin 测试 ────────────────────────────────────────────

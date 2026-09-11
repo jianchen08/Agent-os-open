@@ -17,6 +17,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -198,7 +201,7 @@ class AgentOSPlugin:
         """注册生命周期钩子。
 
         Args:
-            event: 事件类型（on_load/on_unload/on_config_change 等）。
+            event: 事件类型（on_load/on_unload 等）。
             handler: 事件处理函数。
         """
         self._lifecycle_handlers[event] = handler
@@ -217,11 +220,6 @@ class AgentOSPlugin:
     def on_unload(self, func: Callable[..., Any]) -> Callable[..., Any]:
         """装饰器——注册 on_unload 钩子。"""
         self._lifecycle_handlers[LifecycleEvent.ON_UNLOAD.value] = func
-        return func
-
-    def on_config_change(self, func: Callable[..., Any]) -> Callable[..., Any]:
-        """装饰器——注册 on_config_change 钩子。"""
-        self._lifecycle_handlers[LifecycleEvent.ON_CONFIG_CHANGE.value] = func
         return func
 
     def on_domain_event(self, func: Callable[..., Any]) -> Callable[..., Any]:
@@ -367,7 +365,6 @@ class AgentOSPlugin:
         反向调用通道（KernelChannel）由服务端 middleware 在 initialize 握手时
         绑定到官方 SDK 的连接级通道。
         """
-        import asyncio
 
         # sidecar 日志统一初始化：stdout 被 JSON-RPC 占用，日志输出到 stderr，
         # 由内核 McpClient 的 stderr reader 消费转发到 tracing。
@@ -388,4 +385,34 @@ class AgentOSPlugin:
             steps=self.steps,
             pipe_hooks=self.pipe_hooks,
         )
-        asyncio.run(server.run())
+
+        async def _heartbeat() -> None:
+            """事件循环心跳：周期往 stderr 写 `#HB <unix_millis>` 行。
+
+            内核 stderr reader 静默消费并记 last_heartbeat，用于「进程存活但
+            事件循环冻结」类假死判定（try_wait 只能证明进程存在）。心跳协程
+            跑在本主事件循环内——事件循环冻结心跳即停，这正是信号语义本身。
+            stderr 是旁路通道：长流式调用期间心跳照常，不依赖请求-响应配对。
+            间隔 env AGENTOS_SIDECAR_HEARTBEAT_SECS（默认 10s；"0" = 关闭）。
+            stderr 关闭（进程退出中）即静默终止，不干扰收尾。
+            """
+            import time as _time
+
+            try:
+                interval = float(os.environ.get("AGENTOS_SIDECAR_HEARTBEAT_SECS", "10"))
+            except ValueError:
+                interval = 10.0
+            if interval <= 0:
+                return
+            while True:
+                try:
+                    sys.stderr.write(f"#HB {int(_time.time() * 1000)}\n")
+                    sys.stderr.flush()
+                except (ValueError, OSError):
+                    return
+                await asyncio.sleep(interval)
+
+        async def _run_with_heartbeat() -> None:
+            await asyncio.gather(_heartbeat(), server.run())
+
+        asyncio.run(_run_with_heartbeat())

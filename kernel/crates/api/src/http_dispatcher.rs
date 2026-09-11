@@ -8,6 +8,11 @@
 //! 3. 插件返回 `{status, headers, body, body_encoding}`，dispatcher 原样回写（**插件全权控制响应**）；
 //! 4. per-endpoint `timeout_ms`（默认 30000）超时返回 504；
 //!    per-endpoint `max_concurrency`（默认 16）超限返回 503。
+//! 5. 鉴权闸（D2 两刀均落地）：按 manifest `http_endpoints[].auth` 声明执行——
+//!    `user`/`admin` 走 /api/v1 同一 token 校验；`none` 显式匿名放行；
+//!    无声明一律 401 fail-closed（读写同规，见 [`enforce_ext_auth`]）；
+//!    已认证请求向插件转发身份头 `X-AgentOS-Tenant` / `X-AgentOS-User` /
+//!    `X-AgentOS-Role`（租户过滤等插件侧归属校验的信任锚）。
 //!
 //! `build_router_with_http_routes` 把内核静态路由 + 插件 http_routes 动态挂到 axum 树。
 
@@ -248,8 +253,8 @@ async fn exec_ext_request(
     use axum::http::{HeaderName, HeaderValue, StatusCode};
     use axum::response::IntoResponse;
 
-    // 1) 静态资源直读：命中则直接返回（200 + mime / 404）。
-    if let Some(resp) = try_serve_static_asset(&path, &plugin_dirs) {
+    // 1) 静态资源直读：命中则直接返回（200 + mime / 404 / 超限 413）。
+    if let Some(resp) = try_serve_static_asset(&path, &plugin_dirs).await {
         return resp;
     }
 
@@ -259,7 +264,38 @@ async fn exec_ext_request(
     };
 
     let method_str = method.as_str().to_string();
-    let headers_map = header_map_to_hashmap(&headers);
+    let mut headers_map = header_map_to_hashmap(&headers);
+
+    // 3) 鉴权闸（D2 两刀均落地）：执行 manifest `http_endpoints[].auth` 声明。
+    //    静态资源（/assets/**）不声明 http_endpoints，不受此闸约束。
+    //    已认证（user/admin 声明）时注入身份头（X-AgentOS-Tenant / User / Role，
+    //    值来自已验签 token 解析的用户记录）——插件侧租户过滤/归属校验只信
+    //    这组内核注入头，不自行解析 token（HMAC 密钥不出内核）。
+    if let Some(registry) = state.capability_registry.as_ref() {
+        if let Some(route) = registry.find_http_route(&path, &method_str) {
+            match enforce_ext_auth(state.store.as_ref(), &headers, &route).await {
+                ExtAuthOutcome::AllowAnonymous => {
+                    // A2：匿名放行 ≠ 信任客户端——剥离客户端伪造的身份头
+                    //（键集与认证分支覆盖注入严格一致），否则匿名端点的插件
+                    // 会把伪造租户/用户/角色当真（越权读写他人租户数据）。
+                    for spoofed in ["x-agentos-tenant", "x-agentos-user", "x-agentos-role"] {
+                        headers_map.remove(spoofed);
+                    }
+                }
+                ExtAuthOutcome::Authenticated {
+                    user_id,
+                    role,
+                    tenant_id,
+                } => {
+                    headers_map.insert("x-agentos-tenant".to_string(), tenant_id);
+                    headers_map.insert("x-agentos-user".to_string(), user_id);
+                    headers_map.insert("x-agentos-role".to_string(), role);
+                }
+                ExtAuthOutcome::Deny(resp) => return resp,
+            }
+        }
+    }
+
     let raw_body = body.to_vec();
     let outcome = dispatch_http(
         &dispatcher,
@@ -272,20 +308,38 @@ async fn exec_ext_request(
     .await;
     match outcome {
         DispatchOutcome::Handled(resp) => {
-            let mut builder = axum::response::Response::builder()
-                .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK));
+            // 插件回包任一段落不合法（状态码越界 / body 非 base64）= 上游故障，
+            // 回 502 让调用方感知，不得静默改写成 200 空载荷假装成功。
+            let status = match StatusCode::from_u16(resp.status) {
+                Ok(s) => s,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        format!("plugin returned invalid status {}", resp.status),
+                    )
+                        .into_response()
+                }
+            };
+            let body_bytes = if resp.body.is_empty() {
+                Vec::new()
+            } else {
+                match base64::engine::general_purpose::STANDARD.decode(&resp.body) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            format!("plugin response body decode failed: {e}"),
+                        )
+                            .into_response()
+                    }
+                }
+            };
+            let mut builder = axum::response::Response::builder().status(status);
             for (k, v) in &resp.headers {
                 if let (Ok(name), Ok(val)) = (HeaderName::try_from(k), HeaderValue::try_from(v)) {
                     builder = builder.header(name, val);
                 }
             }
-            let body_bytes = if resp.body.is_empty() {
-                Vec::new()
-            } else {
-                base64::engine::general_purpose::STANDARD
-                    .decode(&resp.body)
-                    .unwrap_or_default()
-            };
             builder.body(Body::from(body_bytes)).unwrap_or_else(|_| {
                 (StatusCode::INTERNAL_SERVER_ERROR, "response build failed").into_response()
             })
@@ -326,6 +380,70 @@ async fn exec_ext_request(
             (StatusCode::SERVICE_UNAVAILABLE, "concurrency limit").into_response()
         }
         DispatchOutcome::HandlerError(msg) => (StatusCode::BAD_GATEWAY, msg).into_response(),
+    }
+}
+
+/// /ext 端点鉴权闸（D2 两刀均落地）的裁决结果。
+///
+/// - `AllowAnonymous`：manifest 显式声明 `auth:"none"`（webhook 验签自管等），全放行；
+/// - `Authenticated`：声明 `user`/`admin` 且 token 校验通过，携带解析出的身份
+///   （调用方注入转发头给插件）；
+/// - `Deny`：拒绝（401 未认证 / 403 角色不足），响应直接回写。
+enum ExtAuthOutcome {
+    AllowAnonymous,
+    Authenticated {
+        user_id: String,
+        role: String,
+        tenant_id: String,
+    },
+    Deny(axum::response::Response),
+}
+
+/// /ext 端点鉴权闸（D2 两刀均落地）：执行 manifest `http_endpoints[].auth` 声明。
+///
+/// 语义：
+/// - `user`：与 /api/v1 管理面同一 token 校验（`resolve_request_user` 单一实现：
+///   HMAC 验签/过期/类型/口令绑定/用户存在性）；
+/// - `admin`：同上 + admin 角色（不足 403）；
+/// - `none`：显式匿名白名单（webhook 验签自管等），全方法放行；
+/// - 无声明：一律 401 fail-closed（读写同规——读面数据（监控快照/trace/配置）
+///   与写面同样敏感，缺省即拒绝，插件要匿名或鉴权必须显式声明）。
+async fn enforce_ext_auth(
+    store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
+    headers: &axum::http::HeaderMap,
+    route: &HttpRouteDescriptor,
+) -> ExtAuthOutcome {
+    use axum::response::IntoResponse;
+
+    let declared = route.endpoint.auth.as_deref();
+    match declared {
+        Some("none") => ExtAuthOutcome::AllowAnonymous,
+        Some(declared) => {
+            let (user_id, _, role, tenant_id) =
+                match agentos_http::auth::resolve_request_user(store, headers).await {
+                    Ok(user) => user,
+                    Err(e) => return ExtAuthOutcome::Deny(e.into_response()),
+                };
+            if declared == "admin" && role != "admin" {
+                return ExtAuthOutcome::Deny(
+                    agentos_http::error::ApiError::Forbidden {
+                        message: "该端点需要 admin 角色".to_string(),
+                    }
+                    .into_response(),
+                );
+            }
+            ExtAuthOutcome::Authenticated {
+                user_id,
+                role,
+                tenant_id,
+            }
+        }
+        None => ExtAuthOutcome::Deny(
+            agentos_http::error::ApiError::Unauthorized {
+                message: "端点未声明 auth，默认拒绝（fail-closed）".to_string(),
+            }
+            .into_response(),
+        ),
     }
 }
 
@@ -431,6 +549,11 @@ fn build_datasource_handler(
     axum::routing::any(handler)
 }
 
+/// 静态资源单文件大小上限（字节）：超限直接 413 拒绝，不整读入内存。
+/// 插件前端资源（JS/CSS/图片）正常远小于此；上限只挡异常巨物（误放文件/
+/// 恶意构造），同时约束单请求读盘的内存峰值。
+const STATIC_ASSET_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 /// 尝试把 `/ext/{plugin_id}/assets/{*rest}` 解析为插件 `web/` 子目录下的文件并直读返回。
 ///
 /// 返回：
@@ -440,7 +563,10 @@ fn build_datasource_handler(
 /// 路径安全：
 /// - 拒绝 `..` 段；
 /// - canonicalize 后必须仍在插件 `web/` 子树内（防 symlink 逃逸）。
-fn try_serve_static_asset(
+///
+/// 文件读取契约：整读移出 async 执行器（`spawn_blocking`），且先 stat 校验
+/// [`STATIC_ASSET_MAX_BYTES`] 上限——超限 413 拒绝，不整读超限文件。
+async fn try_serve_static_asset(
     path: &str,
     plugin_dirs: &HashMap<String, std::path::PathBuf>,
 ) -> Option<axum::response::Response> {
@@ -495,9 +621,33 @@ fn try_serve_static_asset(
         return Some((StatusCode::NOT_FOUND, "not found").into_response());
     }
 
-    let bytes = match std::fs::read(&canonical_file) {
-        Ok(b) => b,
-        Err(_) => return Some((StatusCode::NOT_FOUND, "not found").into_response()),
+    // 整读在阻塞线程执行（async 执行器上不做同步磁盘 IO），先 stat 校验
+    // 上限——超限 413 拒绝，不整读超限文件。
+    let read_path = canonical_file.clone();
+    let read = tokio::task::spawn_blocking(move || read_static_asset_capped(&read_path)).await;
+    let bytes = match read {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(StaticAssetReadError::TooLarge)) => {
+            return Some(
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "static asset exceeds size limit",
+                )
+                    .into_response(),
+            );
+        }
+        Ok(Err(StaticAssetReadError::Io)) => {
+            return Some((StatusCode::NOT_FOUND, "not found").into_response());
+        }
+        Err(_) => {
+            return Some(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "static asset read task failed",
+                )
+                    .into_response(),
+            );
+        }
     };
 
     let mime = mime_for_extension(
@@ -524,6 +674,25 @@ fn try_serve_static_asset(
     Some(builder.body(Body::from(bytes)).unwrap_or_else(|_| {
         (StatusCode::INTERNAL_SERVER_ERROR, "response build failed").into_response()
     }))
+}
+
+/// 单文件读取结果：超限 / IO 失败分立（分别映射 413 / 404；IO 细节按既有
+/// 契约不外泄——读失败统一 404）。
+enum StaticAssetReadError {
+    TooLarge,
+    Io,
+}
+
+/// 阻塞线程内的静态资源读取：先 stat 校验大小上限，再整读。
+fn read_static_asset_capped(path: &std::path::Path) -> Result<Vec<u8>, StaticAssetReadError> {
+    let len = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(_) => return Err(StaticAssetReadError::Io),
+    };
+    if len > STATIC_ASSET_MAX_BYTES {
+        return Err(StaticAssetReadError::TooLarge);
+    }
+    std::fs::read(path).map_err(|_| StaticAssetReadError::Io)
 }
 
 /// 扩展名 → Content-Type 映射表（覆盖常见 web 资源类型）。
@@ -675,6 +844,77 @@ mod tests {
         assert_eq!(
             manifest_path_to_axum("/ext/p/generic/{config_path:path}"),
             "/ext/p/generic/{*config_path}"
+        );
+    }
+
+    /// 建一个带 web/ 子目录的插件目录桩：plugin_id → 插件目录。
+    fn plugin_dirs_with_web(dir: &tempfile::TempDir) -> HashMap<String, std::path::PathBuf> {
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(&web).expect("create web dir");
+        let mut map = HashMap::new();
+        map.insert("p".to_string(), dir.path().to_path_buf());
+        map
+    }
+
+    fn response_status(resp: &axum::response::Response) -> axum::http::StatusCode {
+        resp.status()
+    }
+
+    #[tokio::test]
+    async fn static_asset_serves_small_file_with_mime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dirs = plugin_dirs_with_web(&dir);
+        std::fs::write(dir.path().join("web/app.js"), b"console.log(1);").unwrap();
+
+        let resp = try_serve_static_asset("/ext/p/assets/app.js", &dirs)
+            .await
+            .expect("路径形态匹配必须返回响应");
+        assert_eq!(response_status(&resp), axum::http::StatusCode::OK);
+        let headers = resp.headers();
+        assert_eq!(
+            headers.get("content-type").unwrap(),
+            "application/javascript; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"console.log(1);");
+    }
+
+    #[tokio::test]
+    async fn static_asset_oversize_file_rejected_with_413() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dirs = plugin_dirs_with_web(&dir);
+        // 上限 + 1 字节：超限文件必须被拒绝（不整读入内存）。
+        let oversize = vec![b'x'; STATIC_ASSET_MAX_BYTES as usize + 1];
+        std::fs::write(dir.path().join("web/big.bin"), oversize).unwrap();
+
+        let resp = try_serve_static_asset("/ext/p/assets/big.bin", &dirs)
+            .await
+            .expect("路径形态匹配必须返回响应");
+        assert_eq!(
+            response_status(&resp),
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "超限静态资源必须 413 拒绝"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_asset_file_at_limit_is_served() {
+        // 边界区分度：恰好等于上限（≤ 上限）必须正常返回，与超限用例形成
+        // 边界两侧断言。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dirs = plugin_dirs_with_web(&dir);
+        let at_limit = vec![b'a'; STATIC_ASSET_MAX_BYTES as usize];
+        std::fs::write(dir.path().join("web/edge.bin"), at_limit).unwrap();
+
+        let resp = try_serve_static_asset("/ext/p/assets/edge.bin", &dirs)
+            .await
+            .expect("路径形态匹配必须返回响应");
+        assert_eq!(
+            response_status(&resp),
+            axum::http::StatusCode::OK,
+            "恰好等于上限的文件必须正常返回（上限为闭区间）"
         );
     }
 }

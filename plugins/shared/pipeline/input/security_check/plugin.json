@@ -25,6 +25,23 @@
       "on_unload"
     ]
   },
+  "export_fields": [
+    "security.decision"
+  ],
+  "state": {
+    "volatile_keys": [
+      "security.decision"
+    ],
+    "reads": [
+      "core_type",
+      "execution_contexts",
+      "messages_tail:50",
+      "pipeline_id",
+      "raw_tool_calls",
+      "session_id",
+      "thread_id"
+    ]
+  },
   "permissions": {},
   "priority": 50,
   "config_files": [

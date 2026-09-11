@@ -2,7 +2,9 @@
 
 import { lazy, Suspense, useEffect, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
+import { ChangePasswordGate } from './components/auth/ChangePasswordGate'
 import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
+import ErrorBoundary from './components/ErrorBoundary'
 import { ChatPanelShell } from './components/layout/ChatPanelShell'
 import { Sidebar } from './components/layout/Sidebar'
 import { SchemaFullscreenHost } from './components/schema/SchemaFullscreenHost'
@@ -15,8 +17,9 @@ import { useRealtimeEvents } from './hooks/useRealtimeEvents'
 import { useWidgetEvents } from './hooks/useWidgetEvents'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
-import { globalWS } from './services/websocket/GlobalWebSocket'
 import { loadSessionExecutionOptions } from './services/sessionExecutionOptions'
+import { performLogout } from './services/auth/logout'
+import { globalWS } from './services/websocket/GlobalWebSocket'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
 import { openWorkspacePanelByPath } from './services/workspacePanelOpener'
@@ -44,47 +47,6 @@ import type { ReactNode } from 'react'
 const ChatContainer = lazy(() =>
   import('./components/chat/ChatContainer').then((m) => ({ default: m.ChatContainer })),
 )
-const AdminPage = lazy(() =>
-  import('@/pages/admin/AdminPage').then((m) => ({ default: m.AdminPage })),
-)
-const MemoryPage = lazy(() =>
-  import('@/pages/memory/MemoryPage').then((m) => ({ default: m.MemoryPage })),
-)
-const DebugPage = lazy(() =>
-  import('@/pages/debug/DebugPage').then((m) => ({ default: m.DebugPage })),
-)
-const DebugExecutionRecordsPage = lazy(() =>
-  import('@/pages/debug/DebugExecutionRecordsPage').then((m) => ({
-    default: m.DebugExecutionRecordsPage,
-  })),
-)
-const DebugSessionsPage = lazy(() =>
-  import('@/pages/debug/DebugSessionsPage').then((m) => ({ default: m.DebugSessionsPage })),
-)
-const DebugTasksPage = lazy(() =>
-  import('@/pages/debug/DebugTasksPage').then((m) => ({ default: m.DebugTasksPage })),
-)
-const DebugEvaluationMetricsPage = lazy(() =>
-  import('@/pages/debug/DebugEvaluationMetricsPage').then((m) => ({
-    default: m.DebugEvaluationMetricsPage,
-  })),
-)
-const DebugUsersPage = lazy(() =>
-  import('@/pages/debug/DebugUsersPage').then((m) => ({ default: m.DebugUsersPage })),
-)
-const DbAdminPage = lazy(() =>
-  import('@/pages/debug/DbAdminPage').then((m) => ({ default: m.DbAdminPage })),
-)
-const DebugLlmPayloadPage = lazy(() =>
-  import('@/pages/debug/DebugLlmPayloadPage').then((m) => ({
-    default: m.DebugLlmPayloadPage,
-  })),
-)
-const KnowledgeBasePage = lazy(() =>
-  import('@/pages/knowledge-base/KnowledgeBasePage').then((m) => ({
-    default: m.KnowledgeBasePage,
-  })),
-)
 // 插件 page 独立路由渲染器：通配 /p/:pageId → contributionRegistry.getPage → renderPageContent
 // （react-router 路由动态化；让插件 page 成为真实 URL 路由，可分享/刷新）
 const PluginPageRenderer = lazy(() =>
@@ -93,6 +55,23 @@ const PluginPageRenderer = lazy(() =>
 
 /** 懒加载 fallback */
 const LazyFallback = <div className="text-muted-foreground p-4">加载中...</div>
+
+/**
+ * 懒加载路由元素统一装配：ProtectedRoute → 路由级 ErrorBoundary → Suspense(lazy)。
+ *
+ * 路由级边界（E11）：懒加载 chunk 拉取失败（部署后旧 chunk 404/网络抖动）或
+ * 路由组件渲染抛错时，降级 UI 只替换该路由内容，认证壳保持存活——若漏到
+ * App.tsx 顶层边界，整个 RouterProvider 被卸载，导航彻底瘫痪只能整页刷新。
+ */
+export function LazyRoute({ children }: { children: ReactNode }): ReactNode {
+  return (
+    <ProtectedRoute>
+      <ErrorBoundary>
+        <Suspense fallback={LazyFallback}>{children}</Suspense>
+      </ErrorBoundary>
+    </ProtectedRoute>
+  )
+}
 
 /** 判断当前视口是否为移动端（< md 断点 768px） */
 function isMobileViewport(): boolean {
@@ -103,12 +82,18 @@ function isMobileViewport(): boolean {
 
 /** 路由守卫组件 检查用户认证状态： */
 function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
-  const { isAuthenticated, isInitializing } = useAuthStore()
+  const { isAuthenticated, isInitializing, mustChangePassword } = useAuthStore()
 
   // 开发/本地模式：直接放行，不跳登录页（便于查看布局效果）
   // 生产模式仍走正常鉴权。
   // TODO: 登录入口改为侧边栏（VS Code 式）
   const devBypass = import.meta.env.DEV
+
+  // 首登强制改密闸（D1-4）：播种账号未改密前拦下所有受保护页面
+  // （独立于 devBypass——初始口令未换，任何模式下都不放行）
+  if (isAuthenticated && mustChangePassword) {
+    return <ChangePasswordGate />
+  }
 
   if (!devBypass && isInitializing) {
     return (
@@ -141,7 +126,6 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
 /** 聊天主页组件 登录后的主界面，包含： */
 function HomePage(): ReactNode {
   const navigate = useNavigate()
-  const { logout } = useAuthStore()
 
   // Phase 1 hooks: connection status and real-time events
   useConnectionStatus()
@@ -157,7 +141,6 @@ function HomePage(): ReactNode {
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const connectWebSocket = useSessionStore((s) => s.connectWebSocket)
-  const disconnectWebSocket = useSessionStore((s) => s.disconnectWebSocket)
   const createSession = useSessionListStore((s) => s.createSession)
   const setActiveSession = useSessionListStore((s) => s.setActiveSession)
   const restoreActiveSessionIfNeeded = useSessionListStore((s) => s.restoreActiveSessionIfNeeded)
@@ -269,14 +252,15 @@ function HomePage(): ReactNode {
     }
   }, [createSession, handleSelectSession])
 
-  /** 发送消息：目标 = 所在标签管道（主/子一对一，成员校验不过 fail-closed），乐观消息与流式态写 pipelineMessageStore 对应管道桶 */
+  /** 发送消息：目标 = 所在标签管道（主/子一对一，成员校验不过 fail-closed），乐观消息与流式态写 pipelineMessageStore 对应管道桶。
+   *  受理协议：返回 false = 未受理（无会话/令牌、目标管道校验不过），ChatInput 保留输入；其余路径视为受理（void）。 */
   const handleSendMessage = useCallback(
-    async (params: SendMessageParams) => {
+    (params: SendMessageParams) => {
       const { activeSessionId: sid } = useSessionStore.getState()
       const currentToken = useAuthStore.getState().token
 
       if (!sid || !currentToken) {
-        return
+        return false
       }
 
       const listStore = useSessionListStore.getState()
@@ -317,7 +301,7 @@ function HomePage(): ReactNode {
           autoDismissMs: 8000,
           sourceLabel: '前端',
         })
-        return
+        return false
       }
 
       const userMessageId = generateUUID()
@@ -398,6 +382,11 @@ function HomePage(): ReactNode {
     if (sid) {
       globalWS.sendCancel(sid, undefined, currentPipelineId || undefined)
     }
+    // 用户裁定（2026-09-11）：停止 = 停当前 run + 待处理队列退回输入框。
+    // 退回由内核在 stop 处理时同步清队列并发还 pending_inputs_changed
+    // （action="returned"）驱动（useRealtimeEvents 回填）——本地不乐观回填
+    // 也不前端 DELETE：内核同步清先于引擎收尾的 drain，退回与消费无竞争，
+    // 且多客户端队列视图单点权威。
     // 始终刷写缓冲并清理流式状态。即使 activePipelineId 为 null（如点 Stop 时
     // pipeline 尚未激活），也要兜底清理任意残留 streamingState，否则 Stop 按钮
     // 持续显示、下一条新消息会卡在"思考中"。
@@ -448,14 +437,10 @@ function HomePage(): ReactNode {
     globalWS.sendRegenerate(sid, { pipelineId, userMessageId: messageId, newContent })
   }, [])
 
-  /** 登出并跳转到登录页 */
+  /** 登出并跳转到登录页（清理/登出/跳转统一收敛在 performLogout） */
   const handleLogout = useCallback(async () => {
-    destroyStreamingEvents()
-    disconnectWebSocket()
-    globalWS.disconnect()
-    await logout()
-    navigate(ROUTES.LOGIN)
-  }, [logout, navigate, disconnectWebSocket])
+    await performLogout(navigate)
+  }, [navigate])
 
   // 统一使用 Sidebar 组件（VS Code 风格导航 + 会话列表）
   const sidebarContent = <Sidebar />
@@ -560,116 +545,13 @@ export function createRouter() {
         </ProtectedRoute>
       ),
     },
-    {
-      path: ROUTES.ADMIN,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <AdminPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.MEMORY,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <MemoryPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.KNOWLEDGE_BASE,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <KnowledgeBasePage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.DEBUG.ROOT,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <DebugPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.DEBUG.EXECUTION_RECORDS,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <DebugExecutionRecordsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.DEBUG.SESSIONS,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <DebugSessionsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.DEBUG.TASKS,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <DebugTasksPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.DEBUG.EVALUATION_METRICS,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <DebugEvaluationMetricsPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.DEBUG.USERS,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <DebugUsersPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.DEBUG.DB,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <DbAdminPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
-    {
-      path: ROUTES.DEBUG.LLM_PAYLOAD,
-      element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <DebugLlmPayloadPage />
-          </Suspense>
-        </ProtectedRoute>
-      ),
-    },
+    // /admin 无独立路由：user_admin 插件声明页（widget_stage 组台：统计卡+
+    // 用户表+启停行操作，contributes.pages path=/admin 仅管理员可见）。
+    // /memory、/knowledge-base 无独立路由：hindsight_memory 插件声明页
+    // （memory_panel/knowledge_base_panel 预置域 widget，/p/memory、
+    // /p/knowledge_base 全页可达）。
+    // 调试页面无独立路由：debug_center 插件声明页（debug_center_hub）内嵌九个子页
+    // （pages/debug/* 以 embedded 模式复用），路由侧双通道已退役。
     {
       path: ROUTES.LOGIN,
       element: <LoginPage />,
@@ -684,11 +566,9 @@ export function createRouter() {
     {
       path: '/p/:pageId',
       element: (
-        <ProtectedRoute>
-          <Suspense fallback={LazyFallback}>
-            <PluginPageRenderer />
-          </Suspense>
-        </ProtectedRoute>
+        <LazyRoute>
+          <PluginPageRenderer />
+        </LazyRoute>
       ),
     },
     {

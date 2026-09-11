@@ -3,7 +3,7 @@
 - 业务函数响应形态逐项对齐（前端 services/api/memory.ts 直接消费）；
 - 剥离 FastAPI 依赖：无 APIRouter/Depends/Query/pydantic 模型，返回纯 dict；
 - 出错抛 :class:`MemoryAPIError`（status_code/error_code/message），由 server.py
-  http.handle 统一捕获转对应 HTTP 状态（404 形态与旧版一致：body `{"detail": ...}`）；
+  http.handle 统一捕获转对应 HTTP 状态（404 响应 body 形态：`{"detail": ...}`）；
 - 后端注入机制：模块级 ``set_memory_backend`` / ``_get_memory_backend``，
   server.py 分发时懒构建注入（幂等；能力缺失保持 None → 空结果降级），测试直接传 mock；
 - user_id 恒 "default"——与 channel_api 分发时省略 ``_user``（Depends 缺省 → "default"）

@@ -1,5 +1,5 @@
 # @feature: FP-0.2.〇 管道引擎 | @ci: none-local
-"""isolation permission_policy.py 策略管理器测试（A5.3 补）。
+"""isolation 权限策略管理器测试（A5.3 补；策略已沉 SDK 单一真值源）。
 
 覆盖 PermissionPolicyManager 直接面：
 1. 默认五策略加载（default/subtask/root_task/system_config/readonly）与字段形状；
@@ -13,37 +13,18 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
 
+from agentos_plugin_sdk.permission_policy import (
+    PermissionPolicyManager,
+    PermissionPolicyType,
+    PermissionScope,
+    get_policy_name_for_agent_level,
+)
+
 pytestmark = pytest.mark.unit
-
-_PLUGIN_DIR = Path(__file__).resolve().parent  # plugins/shared/system/isolation/
-if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
-
-
-def _load_mod() -> Any:
-    mod_name = "isolation_permission_policy_test"
-    if mod_name in sys.modules:
-        del sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "permission_policy.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_MOD = _load_mod()
-PermissionPolicyManager = _MOD.PermissionPolicyManager
-PermissionPolicyType = _MOD.PermissionPolicyType
-PermissionScope = _MOD.PermissionScope
-get_policy_name_for_agent_level = _MOD.get_policy_name_for_agent_level
 
 
 class TestDefaultPolicies:

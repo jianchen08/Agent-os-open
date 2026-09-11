@@ -45,7 +45,6 @@ export function MediaTimelineView({
   const [currentTime, setCurrentTime] = useState(0)
   const [mediaDuration, setMediaDuration] = useState(propDuration ?? 0)
 
-  // 过滤出视频时间轴批注
   const videoAnnotations = useMemo(
     () =>
       annotations

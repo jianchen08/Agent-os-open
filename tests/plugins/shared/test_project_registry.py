@@ -25,19 +25,26 @@ _TASKS_PLUGIN_DIR = _SHARED_DIR / "system" / "tasks"
 
 @pytest.fixture(autouse=True)
 def _isolate_registry_module():
-    """共享层 + tasks 插件裸名逐出 + 代际还原（串扰防线，与 tasks 测试同款）。"""
+    """共享层 + tasks 插件裸名逐出 + 代际还原（串扰防线，与 tasks 测试同款）。
+
+    tasks/shared 目录强制置顶（先移除再插入）：其他测试文件收集期/运行期
+    会把同名裸名插件的目录残留在 sys.path 前部（如 multimodal 的 storage.py），
+    仅判断"已在"不纠位会让 from storage import 命中敌意同名模块。
+    """
     evict = ("project_registry", "task_types", "storage", "service", "service_access")
     was: dict[str, Any] = {}
     for m in evict:
         if m in sys.modules:
             was[m] = sys.modules.pop(m)
     d = str(_SHARED_DIR)
-    if d not in sys.path:
-        sys.path.insert(0, d)
+    if d in sys.path:
+        sys.path.remove(d)
+    sys.path.insert(0, d)
     t = str(_TASKS_PLUGIN_DIR)
     task_dir_was_present = t in sys.path
-    if not task_dir_was_present:
-        sys.path.insert(0, t)
+    if t in sys.path:
+        sys.path.remove(t)
+    sys.path.insert(0, t)
     yield
     if not task_dir_was_present and t in sys.path:
         sys.path.remove(t)
@@ -246,3 +253,33 @@ class TestPurgeLegacyContainerData:
         stats = purge_legacy_container_data(storage)
         assert stats["removed_containers"] == 0
         assert storage.get("t-9") is not None
+
+
+class TestProjectRootOfTree:
+    def test_env_config_root_resolves_parent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """AGENTOS_CONFIG_ROOT（指向 <project_root>/config）→ 父目录即项目根。"""
+        import project_registry as pr
+
+        cfg = tmp_path / "proj" / "config"
+        cfg.mkdir(parents=True)
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(cfg))
+        assert pr.project_root_of_tree() == tmp_path / "proj"
+
+    def test_config_ancestor_found_without_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """无 env 时向上找 config/ 祖先：本仓布局命中仓库根（正常布局不变）。"""
+        import project_registry as pr
+
+        monkeypatch.delenv("AGENTOS_CONFIG_ROOT", raising=False)
+        root = pr.project_root_of_tree()
+        assert (root / "config").is_dir()
+
+    def test_all_probes_miss_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """探针全失（env 无效 + 祖先链无 config/）→ raise，不再兜底落插件树。"""
+        import project_registry as pr
+
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path / "elsewhere" / "config"))
+        fake_tree = tmp_path / "deploy" / "plugins" / "shared"
+        fake_tree.mkdir(parents=True)
+        monkeypatch.setattr(pr, "__file__", str(fake_tree / "project_registry.py"))
+        with pytest.raises(RuntimeError, match="AGENTOS_CONFIG_ROOT"):
+            pr.project_root_of_tree()

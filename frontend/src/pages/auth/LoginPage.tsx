@@ -41,7 +41,6 @@ export function LoginPage() {
     }
   }, [isAuthenticated, navigate])
 
-  // 清除错误
   useEffect(() => {
     return () => {
       clearError()

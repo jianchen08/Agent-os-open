@@ -5,9 +5,9 @@
  */
 
 import { API_ENDPOINTS } from '@/constants/api'
-import { HINDSIGHT_MEMORY_SERVICE_ENDPOINTS } from './endpoints.generated'
 import apiClient from '@/services/api/client'
 import { requestWithRetry } from '@/utils/retry'
+import { HINDSIGHT_MEMORY_SERVICE_ENDPOINTS } from './endpoints.generated'
 import type { RetryOptions } from '@/utils/retry'
 
 export interface MemoryItem {

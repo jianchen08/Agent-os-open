@@ -30,6 +30,23 @@ DEFAULT_MAX_RETRIES: int = 3
 DEFAULT_BASE_RETRY_DELAY: float = 1.0  # 秒
 
 
+def backoff_delays(max_retries: int, base_delay: float) -> list[float]:
+    """指数退避延迟序列（纯函数）。
+
+    第 i 次失败后（i < max_retries）等待 base_delay * 2^(i-1) 秒再重试；
+    最后一次失败后不再等待，故序列长度为 max(0, max_retries - 1)。
+    重连循环与测试共享此定义，保证退避性质可独立断言。
+
+    Args:
+        max_retries: 最大重试次数
+        base_delay: 基础延迟（秒）
+
+    Returns:
+        逐次失败的等待秒数序列，单调不减且按 2 倍指数增长
+    """
+    return [base_delay * (2 ** (attempt - 1)) for attempt in range(1, max_retries)]
+
+
 class BaseConnector(ABC):
     """连接器抽象基类。
 
@@ -119,6 +136,7 @@ class BaseConnector(ABC):
             base_delay: 基础延迟（秒），实际延迟为 base_delay * 2^attempt
         """
         last_error: Exception | None = None
+        delays = backoff_delays(max_retries, base_delay)
         for attempt in range(1, max_retries + 1):
             try:
                 await self.disconnect()
@@ -138,7 +156,7 @@ class BaseConnector(ABC):
                     e,
                 )
                 if attempt < max_retries:
-                    delay = base_delay * (2 ** (attempt - 1))
+                    delay = delays[attempt - 1]
                     self._logger.info("等待 %.1f 秒后重试...", delay)
                     await asyncio.sleep(delay)
 

@@ -10,10 +10,10 @@
  * ——对齐 task_submit 参数矩阵）。
  */
 import { useMemo } from 'react'
-import { TASK_FORM_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { toast } from '@/components/ui/sonner'
-import { FormWidget } from './FormWidget'
+import { TASK_FORM_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { createProject, createRootTask } from '@/services/api/tasks'
+import { FormWidget } from './FormWidget'
 
 export function CreateTaskFormModal({
   isOpen,

@@ -6,8 +6,22 @@
  * llm_core 发送前转 base64）。附件管线（支持图片的模型）保持原行为。
  */
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+const getModelsMock = vi.fn()
+vi.mock('@/services/api/config', () => ({
+  getModels: (...args: unknown[]) => getModelsMock(...args),
+}))
+const fetchStatesMock = vi.fn()
+vi.mock('@/services/api/pipelines', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/api/pipelines')>()),
+  fetchPipelineStates: (...args: unknown[]) => fetchStatesMock(...args),
+}))
+// 本文件用例与指示器数据面无关：模型注册表/states 两个数据源保持挂起，
+// 避免测试结束后异步 resolve 触发 act() 告警噪声
+getModelsMock.mockImplementation(() => new Promise(() => {}))
+fetchStatesMock.mockImplementation(() => new Promise(() => {}))
+import { renderWithProviders as render } from '@/test/renderWithProviders'
 import { ChatInput } from '../ChatInput'
 
 vi.mock('@/hooks/useModelCapabilities', () => ({
@@ -61,8 +75,6 @@ function renderInput() {
       enableFileUpload
       enableDragDrop
       modelName="deepseek-v3"
-      currentTokenUsage={0}
-      maxTokens={10000}
       enableThinkingMode
     />,
   )

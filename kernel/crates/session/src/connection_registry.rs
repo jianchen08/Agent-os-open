@@ -11,6 +11,10 @@ use parking_lot::RwLock;
 use crate::EventSink;
 
 /// 连接注册表：user_id → 当前活跃连接 + thread_id → user_id 逻辑映射。
+///
+/// 三张 thread 映射条目随连接生命周期：连接注销（显式 unregister 或
+/// broadcast 清理死连接）时同步清除该连接名下的全部条目——映射只服务
+/// 活跃连接的读面（send_to_thread 反查 / REST 会话列表回退），不留历史。
 pub struct ConnectionRegistry {
     /// user_id → 当前活跃 sink（单连接真相之源）。
     connections: RwLock<HashMap<String, Arc<dyn EventSink>>>,
@@ -47,16 +51,11 @@ impl ConnectionRegistry {
         self.connections.read().get(user_id).cloned()
     }
 
-    /// 注销连接。仅当传入的 sink id 是当前注册的 sink 时才删除——
-    /// 防止旧连接的 finally 块误删已被新连接替换的注册项（参考 0.1
-    /// `unregister_global` 的 `current is not websocket` 判定）。
+    /// 注销连接（含该连接名下全部 thread 映射条目）。仅当传入的 sink id 是
+    /// 当前注册的 sink 时才删除——防止旧连接的 finally 块误删已被新连接替换
+    /// 的注册项（参考 0.1 `unregister_global` 的 `current is not websocket` 判定）。
     pub fn unregister(&self, user_id: &str, sink_id: u64) {
-        let mut conns = self.connections.write();
-        if let Some(current) = conns.get(user_id) {
-            if current.id() == sink_id {
-                conns.remove(user_id);
-            }
-        }
+        self.remove_connection(user_id, sink_id);
     }
 
     /// 建立 thread_id → user_id 逻辑映射（流式发送路径反查用）。
@@ -102,6 +101,39 @@ impl ConnectionRegistry {
         self.thread_agent_map.read().get(thread_id).cloned()
     }
 
+    /// 移除连接的注销语义（unregister 与 broadcast 死连接清理共用）：
+    /// 仅当注册表当前 sink id 与传入一致时移除连接，并同步清除该连接名下
+    /// 全部 thread 映射条目。返回是否实际移除。
+    fn remove_connection(&self, user_id: &str, sink_id: u64) -> bool {
+        let removed = {
+            let mut conns = self.connections.write();
+            match conns.get(user_id) {
+                Some(current) if current.id() == sink_id => conns.remove(user_id).is_some(),
+                _ => false,
+            }
+        };
+        if removed {
+            self.purge_thread_maps(user_id);
+        }
+        removed
+    }
+
+    /// 清除 user 名下全部 thread 映射条目。thread 归属 user 唯一
+    /// （thread_user_map 值反查），条目只服务活跃连接的读面，随连接移除。
+    fn purge_thread_maps(&self, user_id: &str) {
+        let mut thread_user = self.thread_user_map.write();
+        let owned: Vec<String> = thread_user
+            .iter()
+            .filter(|(_, uid)| uid.as_str() == user_id)
+            .map(|(tid, _)| tid.clone())
+            .collect();
+        for tid in owned {
+            thread_user.remove(&tid);
+            self.thread_pipeline_map.write().remove(&tid);
+            self.thread_agent_map.write().remove(&tid);
+        }
+    }
+
     /// 向指定 user 的连接推送一条文本消息（唯一出口 push_to_user 底层）。
     ///
     /// 返回是否投递成功（false = user 不在线 / 发送失败）。
@@ -143,14 +175,10 @@ impl ConnectionRegistry {
                 dead.push((user_id.clone(), sink.id()));
             }
         }
-        // 清理发送失败的连接：仅当注册表当前 sink id 与失败的一致时才删
-        if !dead.is_empty() {
-            let mut conns = self.connections.write();
-            for (user_id, failed_id) in &dead {
-                if conns.get(user_id).map(|s| s.id()) == Some(*failed_id) {
-                    conns.remove(user_id);
-                }
-            }
+        // 清理发送失败的连接：注销语义（id 比对 + thread 映射同步清除），
+        // 与 unregister 共用同一路径
+        for (user_id, failed_id) in &dead {
+            self.remove_connection(user_id, *failed_id);
         }
         delivered
     }
@@ -162,7 +190,8 @@ impl ConnectionRegistry {
 
     /// 枚举当前 thread_id → user_id 映射（供 REST 会话列表端点使用）。
     ///
-    /// 0.2 暂无持久化会话历史，此列表仅反映内存中的活跃/曾注册线程。
+    /// 只反映当前活跃连接名下的线程：连接注销（含 broadcast 清理死连接）
+    /// 时条目同步清除，不保留历史会话。
     pub fn list_threads(&self) -> Vec<(String, String)> {
         self.thread_user_map
             .read()

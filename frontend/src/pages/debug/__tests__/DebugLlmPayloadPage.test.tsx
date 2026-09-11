@@ -14,14 +14,13 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { DebugLlmPayloadPage } from '@/pages/debug/DebugLlmPayloadPage'
+import { getPayloadDiagFile, getPayloadDiagList } from '@/services/api/llmPayload'
 import { createTestQueryClient, renderWithProviders } from '@/test/renderWithProviders'
 
 vi.mock('@/services/api/llmPayload', () => ({
   getPayloadDiagList: vi.fn(),
   getPayloadDiagFile: vi.fn(),
 }))
-
-import { getPayloadDiagFile, getPayloadDiagList } from '@/services/api/llmPayload'
 
 function renderPage() {
   return renderWithProviders(<DebugLlmPayloadPage />)

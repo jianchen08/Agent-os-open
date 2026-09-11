@@ -156,7 +156,7 @@ class StreamTranslator:
             )
             return events
         if chunk_type == "thinking_end":
-            # 思考块由 block_end 闭合（thinking_start/chunk/end 三事件退役）
+            # 思考块由 block_end 闭合
             if self._open_type == "reasoning":
                 return self._close_block()
             return []

@@ -292,5 +292,6 @@
       "max_concurrency": 2,
       "description": "reviews 域：为审批添加媒体附件（JSON body: files/auto_review，文件路径非上传；auto_review 触发媒体审阅——原 POST /ext/channel_api/reviews/{review_id}/attachments 语义）"
     }
-  ]
+  ],
+  "host_group": "light"
 }

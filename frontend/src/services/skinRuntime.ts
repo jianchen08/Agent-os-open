@@ -20,9 +20,9 @@
  * 本运行对 DSH 零特判。
  */
 import { apiClient } from '@/services/api/client'
-import { loggers } from '@/utils/logger'
-import { sanitizeCss, getStyleNonce } from '@/services/pluginStyles'
 import { EXT_ROUTE } from '@/services/api/extRoute'
+import { sanitizeCss, getStyleNonce } from '@/services/pluginStyles'
+import { loggers } from '@/utils/logger'
 import type { PluginTheme } from '@/types/theme'
 
 // 独立属性命名空间：主题按择注入的 <style> 不带 data-plugin-style 属性，

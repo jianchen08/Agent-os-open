@@ -59,13 +59,14 @@ def _install_caps(
     wait_res: dict[str, Any] | None = None,
     wait_exc: BaseException | None = None,
     create_res: dict[str, Any] | None = None,
+    resume_ok: bool = True,
 ) -> tuple[list[tuple[str, dict[str, Any]]], list[tuple[str, dict[str, Any]]]]:
     """注入假的 capability 句柄，返回 (human_calls, pipeline_calls) 调用记录。
 
     - human.create_choice → create_res（默认 {"request_id": "req-test"}）
     - human.wait_for_choice → wait_res，或 raise wait_exc
     - pipeline.suspend → {"run_id":"run-1","branch_id":"b1","seq":1}
-    - pipeline.resume → {} （是否被调用由测试断言）
+    - pipeline.resume → resume_ok 时 {}，否则 raise（模拟 executor 恢复失败）
     """
     from agentos_plugin_sdk import CapabilityHandle
 
@@ -92,8 +93,12 @@ def _install_caps(
         pipeline_calls.append((method, params))
         if method == "suspend":
             return {"run_id": "run-1", "branch_id": "b1", "seq": 1}
+        if method == "resume" and not resume_ok:
+            raise RuntimeError("executor resume failed")
         return {}
 
+    # plugin._capabilities 是内核能力句柄注入槽（外部依赖，无公开注入 API）；
+    # 两个假句柄隔离 human-interaction / pipeline-executor 外部服务。
     server.plugin._capabilities["human-interaction"] = CapabilityHandle(
         "human-interaction", call_fn=human_call_fn
     )
@@ -109,7 +114,10 @@ def _resume_calls(pipeline_calls: list[tuple[str, dict[str, Any]]]) -> list[Any]
 
 @pytest.fixture(autouse=True)
 def _reset_state() -> None:
-    """每个测试前后清掉模块级 _suspended / _decisions，杜绝跨用例污染。"""
+    """每个测试前后清掉模块级 _suspended / _decisions，杜绝跨用例污染。
+
+    二者是模块级真实状态（无公开 reset API），此为测试隔离性清理而非断言。
+    """
     server._suspended.clear()
     server._decisions.clear()
     server.plugin._capabilities.clear()
@@ -143,16 +151,21 @@ class TestApprovalTimeoutReject:
         assert result["resumed"] is False
         assert result.get("reason")
 
-        # 杜绝句柄泄漏：_suspended 必须已清理
+        # 杜绝句柄泄漏：_suspended 必须已清理（内部不变量，无公开读面；
+        # 其公开后果——管道挂死——正是本契约要防的）
         assert "req-test" not in server._suspended
         assert len(server._suspended) == 0
 
         # 关键护栏：超时绝不恢复管道（"超时即恢复"= 绕过审批）
         assert _resume_calls(pipeline_calls) == []
 
-        # 拒绝状态可查
-        assert server._decisions["req-test"]["approved"] is False
-        assert server._decisions["req-test"]["reason"] == "timeout"
+        # 拒绝状态可查（公开面）：submit 返回已记录的终态，且绝不二次恢复
+        queried = await server.submit(request_id="req-test", result="whatever")
+        assert queried["status"] == "rejected"
+        assert queried["approved"] is False
+        assert queried["reason"] == "timeout"
+        assert queried["resumed"] is False
+        assert _resume_calls(pipeline_calls) == []
 
     async def test_wait_exception_cleans_suspended_and_does_not_resume(self) -> None:
         """wait_for_choice raise（连接中断等）→ 同样拒绝 + 句柄不泄漏。"""
@@ -166,7 +179,10 @@ class TestApprovalTimeoutReject:
         assert result["resumed"] is False
         assert len(server._suspended) == 0
         assert _resume_calls(pipeline_calls) == []
-        assert server._decisions["req-test"]["approved"] is False
+        # 拒绝终态可查（公开面）
+        queried = await server.submit(request_id="req-test", result="whatever")
+        assert queried["status"] == "rejected"
+        assert queried["approved"] is False
 
     async def test_submit_after_timeout_returns_rejected(self) -> None:
         """超时决断后，submit 命中已拒绝结果，不再尝试恢复。"""
@@ -203,9 +219,90 @@ class TestApprovalNormalPath:
         assert result["status"] == "resolved"
         assert result["selected_option"] == "1"
         assert result["resumed"] is True
+        # 句柄不泄漏（内部不变量，见超时用例注释）
         assert len(server._suspended) == 0
         assert len(_resume_calls(pipeline_calls)) == 1
-        assert server._decisions["req-test"]["approved"] is True
+        # 决断终态可查（公开面）：submit 命中已决断记录，不再重复恢复
+        queried = await server.submit(request_id="req-test", result="1")
+        assert queried["status"] == "resolved"
+        assert queried["approved"] is True
+
+
+# ============================================================
+# 恢复失败不谎报（M13：决策记录 resumed 真值 + 维持挂起态）
+# ============================================================
+
+
+class TestResumeFailureHonesty:
+    async def test_create_choice_resume_failed_keeps_pending_and_submit_retries(self) -> None:
+        """选择后 resume 失败 → 显式 resume_failed、不落 approved 决策、保持挂起。
+
+        submit 重试路径：executor 恢复后返回 resolved + resumed=True（真值）。
+        """
+        human_calls, pipeline_calls = _install_caps(
+            wait_res={"request_id": "req-test", "selected_option": "0"},
+            resume_ok=False,
+        )
+        result = await server.create_choice(
+            title="继续执行？", options=["同意", "拒绝"], run_id="run-1"
+        )
+
+        assert result["status"] == "resume_failed"
+        assert result["resumed"] is False
+        assert result.get("reason")
+        # 不落 approved 决策（谎报源）：submit 不得回放 approved→resumed=True
+        assert "req-test" not in server._decisions
+        # 挂起记录保持（供 submit 重试）
+        assert "req-test" in server._suspended
+
+        # 命中已失败决断前，submit 走重试而非谎报终态
+        _, retry_calls = _install_caps(
+            wait_res={"request_id": "req-test", "selected_option": "0"},
+            resume_ok=True,
+        )
+        retried = await server.submit(request_id="req-test", result="0")
+        assert retried["status"] == "resolved"
+        assert retried["resumed"] is True
+        assert len(_resume_calls(retry_calls)) == 1
+        # 成功后决策记录携带 resumed 真值
+        assert server._decisions["req-test"]["resumed"] is True
+
+    async def test_submit_direct_resume_failed_does_not_record_approved(self) -> None:
+        """submit 直恢复路径 resume 失败 → resume_failed，不落 approved、不清理挂起。"""
+        human_calls, pipeline_calls = _install_caps(resume_ok=False)
+        server._suspended["req-direct"] = {
+            "suspend_handle": {"run_id": "run-1", "branch_id": "b1", "seq": 1},
+            "run_id": "run-1",
+            "created_at": 0.0,
+        }
+
+        res = await server.submit(request_id="req-direct", result="yes")
+        assert res["status"] == "resume_failed"
+        assert res["resumed"] is False
+        assert "req-direct" not in server._decisions
+        assert "req-direct" in server._suspended
+
+        # 二次 submit（executor 恢复正常）成功，回放真值
+        _install_caps(resume_ok=True)
+        res2 = await server.submit(request_id="req-direct", result="yes")
+        assert res2["status"] == "resolved"
+        assert res2["resumed"] is True
+        assert server._decisions["req-direct"]["resumed"] is True
+
+    async def test_decision_replay_reports_true_resumed_value(self) -> None:
+        """已决断记录回放 resumed 真值：无 run_id 决断 resumed=False 不被推成 True。
+
+        （M13 回归：旧实现 resumed 恒等于 approved，approved=True 即谎报已恢复。）
+        """
+        _install_caps(wait_res={"request_id": "req-test", "selected_option": "0"})
+        result = await server.create_choice(title="t", options=["a"])  # 无 run_id
+
+        assert result["status"] == "resolved"
+        assert result["resumed"] is False
+        queried = await server.submit(request_id="req-test", result="0")
+        assert queried["status"] == "resolved"
+        assert queried["approved"] is True
+        assert queried["resumed"] is False
 
 
 # ============================================================
@@ -238,11 +335,12 @@ class TestApprovalDefaultTimeout:
         assert server.DEFAULT_TIMEOUT_SECONDS == 86400
 
     def test_default_timeout_env_overridable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """环境变量在加载期决定公开常量 DEFAULT_TIMEOUT_SECONDS；非法值回退 86400。"""
         monkeypatch.setenv("APPROVAL_DEFAULT_TIMEOUT_SECONDS", "120")
-        assert server._read_default_timeout() == 120.0
+        assert _load_server().DEFAULT_TIMEOUT_SECONDS == 120.0
 
         monkeypatch.setenv("APPROVAL_DEFAULT_TIMEOUT_SECONDS", "not-a-number")
-        assert server._read_default_timeout() == 86400.0
+        assert _load_server().DEFAULT_TIMEOUT_SECONDS == 86400.0
 
         monkeypatch.delenv("APPROVAL_DEFAULT_TIMEOUT_SECONDS", raising=False)
-        assert server._read_default_timeout() == 86400.0
+        assert _load_server().DEFAULT_TIMEOUT_SECONDS == 86400.0

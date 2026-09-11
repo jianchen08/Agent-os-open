@@ -7,18 +7,28 @@
  * 自动重拉（fetchDatasourceOptions 对绝对 URI 走 apiClient.get——以 apiGet 断言）
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
-
-import { FormWidget } from '../FormWidget'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { RjsfForm } from '@/services/schema/RjsfForm'
+import { FormWidget } from '../FormWidget'
 
 const apiGet = vi.fn()
+const apiPost = vi.fn()
 const apiRequest = vi.fn()
 vi.mock('@/services/api/client', () => ({
   default: Object.assign(
     (...args: unknown[]) => apiRequest(...args),
-    { get: (...args: unknown[]) => apiGet(...args) },
+    {
+      get: (...args: unknown[]) => apiGet(...args),
+      post: (...args: unknown[]) => apiPost(...args),
+    },
+  ),
+  apiClient: Object.assign(
+    (...args: unknown[]) => apiRequest(...args),
+    {
+      get: (...args: unknown[]) => apiGet(...args),
+      post: (...args: unknown[]) => apiPost(...args),
+    },
   ),
 }))
 vi.mock('@/components/ui/sonner', () => ({
@@ -68,8 +78,7 @@ describe('G1：反馈文案/成功动作声明化', () => {
   })
 
   it('endpoint 响应无 error/reason → 成功（通用表单端点不再误判失败）', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ task_id: 't-1' }) })
-    vi.stubGlobal('fetch', fetchMock)
+    apiPost.mockResolvedValue({ data: { task_id: 't-1' } })
     render(
       <FormWidget
         fields={[textField('title', '标题')]}
@@ -83,7 +92,6 @@ describe('G1：反馈文案/成功动作声明化', () => {
     await waitFor(() =>
       expect(screen.getByTestId('form-widget-status').textContent).toBe('已创建任务'),
     )
-    vi.unstubAllGlobals()
   })
 
   it('successAction.open_panel：成功后按声明路径打开面板（不抛错）', async () => {
@@ -101,7 +109,7 @@ describe('G1：反馈文案/成功动作声明化', () => {
   })
 
   it('successAction.reload：成功后 datasource 重拉（再次 GET）', async () => {
-    apiGet.mockImplementation((url: string) =>
+    apiGet.mockImplementation((_url: string) =>
       Promise.resolve({ data: { fields: [textField('v', 'V')] } }),
     )
     apiRequest.mockResolvedValue({ data: {} })
@@ -123,13 +131,11 @@ describe('G1：反馈文案/成功动作声明化', () => {
 
 describe('G3：readbackUri 回读当前值（权限模式选择器）', () => {
   it('挂载时 GET 回读并刷新选择器显示；提交成功后再次回读', async () => {
-    const fetchMock = vi.fn()
     // 顺序：①挂载回读 → mode=bypass ②POST 提交成功 ③提交后回读 → mode=default
-    fetchMock
-      .mockResolvedValueOnce({ json: async () => ({ mode: 'bypass' }) })
-      .mockResolvedValueOnce({ json: async () => ({ switched: true, mode: 'bypass' }) })
-      .mockResolvedValueOnce({ json: async () => ({ mode: 'default' }) })
-    vi.stubGlobal('fetch', fetchMock)
+    apiGet
+      .mockResolvedValueOnce({ data: { mode: 'bypass' } })
+      .mockResolvedValueOnce({ data: { mode: 'default' } })
+    apiPost.mockResolvedValue({ data: { switched: true } })
 
     render(
       <FormWidget
@@ -164,7 +170,6 @@ describe('G3：readbackUri 回读当前值（权限模式选择器）', () => {
         '默认（命中规则才确认）',
       ),
     )
-    vi.unstubAllGlobals()
   })
 })
 

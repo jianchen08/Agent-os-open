@@ -76,11 +76,6 @@
     'tables': '/ext/db_admin/tables',
   } as const
 
-  /** demo_widget_plugin（Demo Widget Plugin）：plugin.json 声明 1 端点 */
-  export const DEMO_WIDGET_PLUGIN_ENDPOINTS = {
-    'webview': '/ext/demo_widget_plugin/webview',
-  } as const
-
   /** dsh_adapter（DSH Plugin Adapter）：plugin.json 声明 3 端点 */
   export const DSH_ADAPTER_ENDPOINTS = {
     'dsh_skin_assets': '/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}',
@@ -98,14 +93,6 @@
     'metrics_list': '/ext/evaluation_service/metrics',
     'metric_delete': '/ext/evaluation_service/metrics/{metric_id}',
     'metric_detail': '/ext/evaluation_service/metrics/{metric_id}',
-  } as const
-
-  /** feature_matrix_plugin（Feature Matrix Plugin）：plugin.json 声明 4 端点 */
-  export const FEATURE_MATRIX_PLUGIN_ENDPOINTS = {
-    'config': '/ext/feature_matrix_plugin/config',
-    'config_update': '/ext/feature_matrix_plugin/config',
-    'wc_demo': '/ext/feature_matrix_plugin/wc_demo',
-    'webview': '/ext/feature_matrix_plugin/webview',
   } as const
 
   /** hindsight_memory_service（Hindsight Memory Service）：plugin.json 声明 23 端点 */
@@ -135,7 +122,7 @@
     'hindsight_stats': '/ext/hindsight_memory_service/stats',
   } as const
 
-  /** llm_service（LLM Service）：plugin.json 声明 19 端点 */
+  /** llm_service（LLM Service）：plugin.json 声明 20 端点 */
   export const LLM_SERVICE_ENDPOINTS = {
     'config_llm_get': '/ext/llm_service/config/llm',
     'config_llm_defaults_get': '/ext/llm_service/config/llm/defaults',
@@ -144,6 +131,7 @@
     'config_llm_models_get': '/ext/llm_service/config/llm/models',
     'config_llm_models_delete': '/ext/llm_service/config/llm/models/{model_id}',
     'config_llm_models_update': '/ext/llm_service/config/llm/models/{model_id}',
+    'config_llm_presets_get': '/ext/llm_service/config/llm/presets',
     'config_llm_provider_types_get': '/ext/llm_service/config/llm/provider-types',
     'config_llm_providers_create': '/ext/llm_service/config/llm/providers',
     'config_llm_providers_get': '/ext/llm_service/config/llm/providers',
@@ -165,11 +153,8 @@
     'series': '/ext/metrics_admin/series',
   } as const
 
-  /** monitoring（Monitoring Service）：plugin.json 声明 24 端点 */
+  /** monitoring（Monitoring Service）：plugin.json 声明 25 端点 */
   export const MONITORING_ENDPOINTS = {
-    'mon_agent_calls_list': '/ext/monitoring/agent-calls',
-    'mon_agent_calls_statistics': '/ext/monitoring/agent-calls/statistics',
-    'mon_agent_call_get': '/ext/monitoring/agent-calls/{execution_id}',
     'mon_cache_stats': '/ext/monitoring/cache-stats',
     'mon_execution_records_list': '/ext/monitoring/execution/records',
     'mon_execution_records_clear_all': '/ext/monitoring/execution/records/clear-all',
@@ -178,10 +163,12 @@
     'mon_execution_records_tree': '/ext/monitoring/execution/records/tree/{session_id}',
     'mon_execution_record_get': '/ext/monitoring/execution/records/{record_id}',
     'mon_execution_record_children': '/ext/monitoring/execution/records/{record_id}/children',
+    'mon_orphan_runs': '/ext/monitoring/orphans',
     'mon_payload_diag_page': '/ext/monitoring/page/payload-diag',
     'mon_tool_calls_page': '/ext/monitoring/page/tool-calls',
     'mon_payload_diag_list': '/ext/monitoring/payload-diag',
     'mon_payload_diag_get': '/ext/monitoring/payload-diag/file',
+    'mon_pipeline_state_full': '/ext/monitoring/pipeline-state',
     'mon_plugins_runtime': '/ext/monitoring/plugins',
     'mon_search_global': '/ext/monitoring/search',
     'mon_sessions_context_token_usage': '/ext/monitoring/sessions/{session_id}/context-token-usage',
@@ -190,7 +177,9 @@
     'mon_tasks': '/ext/monitoring/tasks',
     'mon_task_statistics': '/ext/monitoring/tasks/statistics',
     'mon_token_usage': '/ext/monitoring/token-usage',
+    'mon_token_usage_by_time': '/ext/monitoring/token-usage/by-time',
     'mon_tool_calls': '/ext/monitoring/tool-calls',
+    'mon_traces_by_pipeline': '/ext/monitoring/traces',
   } as const
 
   /** multimodal_service（Multimodal Service）：plugin.json 声明 3 端点 */
@@ -303,18 +292,6 @@
     'user_role_update': '/ext/user_admin/users/{user_id}/role',
     'user_role_update_put': '/ext/user_admin/users/{user_id}/role',
     'user_tenant_update': '/ext/user_admin/users/{user_id}/tenant',
-  } as const
-
-  /** widget_demo（Widget Demo（前端特性演示））：plugin.json 声明 8 端点 */
-  export const WIDGET_DEMO_ENDPOINTS = {
-    'demo_submit': '/ext/widget_demo/actions/submit',
-    'demo_toggle': '/ext/widget_demo/actions/toggle',
-    'demo_config_get': '/ext/widget_demo/config',
-    'demo_config_put': '/ext/widget_demo/config',
-    'demo_options_models': '/ext/widget_demo/options/models',
-    'demo_options_regions': '/ext/widget_demo/options/regions',
-    'demo_schema': '/ext/widget_demo/schema',
-    'demo_state': '/ext/widget_demo/state',
   } as const
 
   /** workspace_service（Workspace Service）：plugin.json 声明 11 端点 */

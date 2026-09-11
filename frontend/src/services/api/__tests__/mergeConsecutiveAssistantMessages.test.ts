@@ -163,7 +163,7 @@ describe('mergeConsecutiveAssistantMessages', () => {
 
   describe('跨消息 part 逻辑顺序', () => {
     it('两条 assistant 各有 thinking+text 时，思考紧跟其回复（不被全局排序打散）', () => {
-      // 多条 API 消息各自 parts 从 0 起算，旧版全局排序导致思考与回复「分家」
+      // 多条 API 消息各自 parts 从 0 起算，全局排序会让思考与回复「分家」
       const messages: Message[] = [
         msg('ai-1', {
           content: '回复A',

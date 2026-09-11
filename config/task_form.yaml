@@ -1,3 +1,4 @@
+schema_version: 1
 # 新建任务表单声明（task_form 服务插件消费，config_files.task_form.path 唯一真相源）。
 #
 # 前端 "新建任务" 模态框经 fieldsUri=/ext/task_form/form 拉此声明渲染（FormWidget），

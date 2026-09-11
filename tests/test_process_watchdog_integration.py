@@ -48,6 +48,7 @@ async def test_local_backend_sample_memory_returns_real_value():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timing
 async def test_local_backend_sample_memory_reflects_growth():
     """起一个吃内存的进程,采样水位应能反映增长(非恒定)。"""
     backend = LocalProcessBackend()
@@ -89,6 +90,7 @@ def _spawn_memory_eater(mb: int):
 
 
 @pytest.mark.asyncio
+@pytest.mark.timing
 async def test_local_backend_kills_real_process_tree():
     """kill 真的能杀掉一个跑着的进程(含子进程),不是只记日志。"""
     import subprocess
@@ -112,6 +114,7 @@ async def test_local_backend_kills_real_process_tree():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timing
 async def test_local_backend_kills_process_with_children():
     """kill 杀整棵树:父进程 fork 的子进程也要被杀(防孤儿)。"""
     import subprocess
@@ -154,6 +157,7 @@ async def test_local_backend_kills_process_with_children():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timing
 async def test_watchdog_kills_process_on_memory_pressure_e2e():
     """端到端:注册一个真实进程到 ProcessManager,注入能反映增长的内存后端,
     手动触发巡检,验证进程真的被看门狗杀掉。

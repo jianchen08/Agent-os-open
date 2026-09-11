@@ -4,9 +4,6 @@
 此接口落库/检索记忆。唯一后端：
 - HindsightBackend：经 tool-executor 调 hindsight sidecar 工具（向量检索）
 
-0.1 的内核记忆表后端（KernelMemoryBackend，关键词检索降级）已随内核 memory 表
-DROP 一并退役（2026-08-19 用户裁定：不留两套真值、禁用备用后端糊弄）。
-
 设计要点：
 - 唯一外部依赖是注入的 capability_caller（async fn `(method, params) -> Any`），
   构造时传入，便于测试 mock；解耦插件全局状态。

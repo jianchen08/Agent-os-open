@@ -58,10 +58,10 @@ impl HookRecordingInvoker {
 
 #[async_trait]
 impl PluginInvoker for HookRecordingInvoker {
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         _plugin_id: &str,
-        _ctx: &PluginContext,
+        _ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError> {
         Ok(PluginResult::default())
     }
@@ -128,6 +128,8 @@ fn minimal_config() -> agentos_core::types::PipelineConfig {
             run_on_error: false,
         }],
         checkpoint: agentos_core::types::CheckpointConfig::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     }
 }
 

@@ -10,7 +10,7 @@ description: |
 agent_type: orchestrator
 category: task
 level: L2
-model_tier: large
+model_tier: medium
 team: []
 system_prompt: |
   {{path:config/rules/information_integrity_rules.md}}

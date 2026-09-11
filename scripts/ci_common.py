@@ -14,6 +14,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# 根目录运维脚本后缀（车道分档 ci_changed_areas.py 与关联测试映射
+# ci_related_tests.py 共用的同一份口径）：仅根目录（路径不含 /）的此类文件
+# 触发轻量车道；scripts/ 等子目录脚本已由 FULL_PREFIXES 全量覆盖。
+ROOT_OPS_SUFFIXES = (".bat", ".sh", ".ps1")
+
 # 插件平铺模块 + SDK 源码注入（与 scripts/run_gates.py 的 _PLUGINS_ENV 同契约）：
 # 插件就地测试与 tests/ 集成测试 import 邻插件模块 / agentos_plugin_sdk 依赖此路径。
 PLUGINS_ENV = {"PYTHONPATH": os.pathsep.join([str(ROOT / "plugins"), str(ROOT / "plugins" / "sdk" / "src")])}

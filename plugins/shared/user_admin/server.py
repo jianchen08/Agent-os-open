@@ -45,13 +45,21 @@ http_endpoints[].auth 字段（dispatch_http 只查路由/并发/超时）。本
 
 from __future__ import annotations
 
-import base64
-import json
 import logging
 from typing import Any
 from urllib.parse import unquote
 
 from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
+
+from http_json import (  # noqa: E402
+    decode_body as _decode_body,
+    json_response as _json_response,
+    ok as _ok,
+    protocol_error as _error,
+)
 
 plugin = AgentOSPlugin("user_admin")
 logger = logging.getLogger(__name__)
@@ -62,46 +70,6 @@ _DB_CAPABILITY = "db-admin"
 
 # users 表中绝不出口的敏感列（含口令散列）
 _USER_SENSITIVE_COLUMNS = frozenset({"password", "password_hash"})
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """把 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
-    return {"success": True, "data": data}
-
-
-def _error(status: int, message: str) -> dict[str, Any]:
-    """错误响应（对齐 ApiError 的 {"error": {code, message}} 形状）。"""
-    return _ok(_json_response({"error": {"code": str(status), "message": message}}, status))
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 → JSON dict；空 body 返回 {}）。"""
-    if not raw_body:
-        return {}
-    decoded = raw_body
-    try:
-        candidate = base64.b64decode(raw_body).decode("utf-8")
-        if candidate.lstrip().startswith(("{", "[")):
-            decoded = candidate
-    except Exception:  # noqa: BLE001 —— 非 base64 明文 body 直接按 JSON 解
-        pass
-    try:
-        parsed = json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON body: {exc}") from exc
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def _authorization(headers: dict[str, str] | None) -> str:
@@ -248,21 +216,39 @@ async def _users_list(auth: str, query: dict[str, str] | None) -> dict[str, Any]
 
 
 async def _users_stats(auth: str) -> dict[str, Any]:
-    """GET /users/stats：db-admin.table_query（limit 500）聚合统计。"""
+    """GET /users/stats：db-admin.table_query（limit 500）聚合统计。
+
+    metrics 数组是声明 widget（status_card scalar 形状）消费面；平键
+    （total_users 等）保留为机器可读真值，两形态同源同值。
+    """
     envelope = await _call_db("table_query", {
         "table": "users", "limit": 500, "offset": 0, "_authorization": auth,
     })
     if envelope is None:
-        return _ok(_json_response({"total_users": 0, "active_users": 0, "admin_count": 0}))
+        return _ok(_json_response(_stats_payload(0, 0, 0)))
     err = _envelope_error(envelope)
     if err is not None:
         return err
     rows = [r for r in (envelope.get("body") or {}).get("rows", []) if isinstance(r, dict)]
-    return _ok(_json_response({
-        "total_users": len(rows),
-        "active_users": sum(1 for r in rows if r.get("is_active", 1) in (1, True)),
-        "admin_count": sum(1 for r in rows if r.get("role") == "admin"),
-    }))
+    return _ok(_json_response(_stats_payload(
+        total=len(rows),
+        active=sum(1 for r in rows if r.get("is_active", 1) in (1, True)),
+        admins=sum(1 for r in rows if r.get("role") == "admin"),
+    )))
+
+
+def _stats_payload(total: int, active: int, admins: int) -> dict[str, Any]:
+    """统计两形态：平键真值 + metrics 卡片形状（status_card 消费）。"""
+    return {
+        "total_users": total,
+        "active_users": active,
+        "admin_count": admins,
+        "metrics": [
+            {"title": "总用户数", "value": total},
+            {"title": "活跃用户", "value": active},
+            {"title": "管理员", "value": admins},
+        ],
+    }
 
 
 async def _users_update_role(user_id: str, raw_body: str, auth: str) -> dict[str, Any]:
@@ -270,16 +256,16 @@ async def _users_update_role(user_id: str, raw_body: str, auth: str) -> dict[str
     try:
         body = _decode_body(raw_body)
     except ValueError as exc:
-        return _error(400, str(exc))
+        return _error(str(exc), 400)
     role = body.get("role")
     if role not in ("admin", "user"):
-        return _error(400, "role 必须为 admin 或 user")
+        return _error("role 必须为 admin 或 user", 400)
     envelope = await _call_db("table_update_row", {
         "table": "users", "pk_value": user_id, "updates": {"role": role},
         "_authorization": auth,
     })
     if envelope is None:
-        return _error(502, "db-admin capability not injected (kernel handshake pending)")
+        return _error("db-admin capability not injected (kernel handshake pending)", 502)
     err = _envelope_error(envelope)
     if err is not None:
         return err
@@ -296,7 +282,7 @@ async def _users_delete(user_id: str, auth: str) -> dict[str, Any]:
         "table": "users", "pk_value": user_id, "_authorization": auth,
     })
     if envelope is None:
-        return _error(502, "db-admin capability not injected (kernel handshake pending)")
+        return _error("db-admin capability not injected (kernel handshake pending)", 502)
     err = _envelope_error(envelope)
     if err is not None:
         return err
@@ -360,7 +346,7 @@ async def http_handle(
     # ── user-admin capability 面（PATCH role / PATCH tenant）──
     routed = _route(path, method)
     if routed is None:
-        return _error(404, f"user_admin: no route for {method} {path}")
+        return _error(f"user_admin: no route for {method} {path}", 404)
     cap_method, path_params, body_fields = routed
 
     params: dict[str, Any] = dict(path_params)
@@ -370,7 +356,7 @@ async def http_handle(
         try:
             body = _decode_body(raw_body)
         except ValueError as exc:
-            return _error(400, str(exc))
+            return _error(str(exc), 400)
         for field in body_fields:
             params[field] = body.get(field)
 
@@ -378,13 +364,13 @@ async def http_handle(
         cap = plugin.get_capability(_CAPABILITY)
         envelope = await cap.call(cap_method, params)
     except KeyError:
-        return _error(502, f"{_CAPABILITY} capability not injected (kernel handshake pending)")
+        return _error(f"{_CAPABILITY} capability not injected (kernel handshake pending)", 502)
     except Exception as exc:  # noqa: BLE001 —— capability 调用失败统一 502
         logger.warning("user_admin http.handle: capability %s failed: %s", cap_method, exc)
-        return _error(502, f"user-admin capability call failed: {exc}")
+        return _error(f"user-admin capability call failed: {exc}", 502)
 
     if not isinstance(envelope, dict):
-        return _error(502, f"user-admin capability returned non-dict envelope: {type(envelope)}")
+        return _error(f"user-admin capability returned non-dict envelope: {type(envelope)}", 502)
     status = int(envelope.get("status", 200))
     if 200 <= status < 300:
         payload = envelope.get("body", {})

@@ -300,7 +300,7 @@ class TestOneBotClient:
         回调缺位不抛（连接循环存续）。"""
         from aiohttp import web
 
-        client = OneBotClient()
+        client = OneBotClient(access_token="test-token")
         message_frame = json.dumps({"post_type": "message", "user_id": 1})
         notice_frame = json.dumps({"post_type": "notice"})
 
@@ -322,6 +322,8 @@ class TestOneBotClient:
 
         request = MagicMock()
         request.remote = "127.0.0.1"
+        request.headers = {"Authorization": "Bearer test-token"}
+        request.query = {}
 
         got: list[dict] = []
 
@@ -374,7 +376,7 @@ class TestOneBotWebSocket:
     async def test_ws_handler_receives_message_and_disconnects(self, monkeypatch) -> None:
         from aiohttp import web
 
-        client = OneBotClient()
+        client = OneBotClient(access_token="test-token")
         got = []
 
         async def cb(data):
@@ -408,6 +410,8 @@ class TestOneBotWebSocket:
         monkeypatch.setattr(web, "WebSocketResponse", lambda: fake_ws)
         request = MagicMock()
         request.remote = "127.0.0.1"
+        request.headers = {"Authorization": "Bearer test-token"}
+        request.query = {}
         result = await client._ws_handler(request)
         assert got and got[0]["post_type"] == "message"
         # 处理器内部 append 后 finally 移除——连接不再存活（公共观察面）
@@ -423,7 +427,7 @@ class TestOneBotWebSocket:
 
         from aiohttp import web
 
-        client = OneBotClient()
+        client = OneBotClient(access_token="test-token")
         processed: list[dict] = []
         calls = {"n": 0}
 
@@ -461,6 +465,8 @@ class TestOneBotWebSocket:
         monkeypatch.setattr(web, "WebSocketResponse", lambda: fake_ws)
         request = MagicMock()
         request.remote = "127.0.0.1"
+        request.headers = {"Authorization": "Bearer test-token"}
+        request.query = {}
 
         with caplog.at_level("WARNING", logger="onebot_client"):
             await client._ws_handler(request)
@@ -620,7 +626,7 @@ class TestOneBotConnectServer:
         """经真实 ws_handler 注册的连接，disconnect 时被统一关闭。"""
         from aiohttp import web
 
-        client = OneBotClient()
+        client = OneBotClient(access_token="test-token")
 
         class _BlockedWS:
             def __init__(self):
@@ -643,6 +649,8 @@ class TestOneBotConnectServer:
         monkeypatch.setattr(web, "WebSocketResponse", lambda: blocked)
         request = MagicMock()
         request.remote = "127.0.0.1"
+        request.headers = {"Authorization": "Bearer test-token"}
+        request.query = {}
         handler_task = asyncio.create_task(client._ws_handler(request))
 
         async def _wait_registered():
@@ -734,3 +742,208 @@ class TestOneBotConnectServer:
         assert calls["loop"] >= 2
         await client.disconnect()
         assert fake_runner.cleanup_called
+
+
+# ═══════════════════════════════════════════════════════════
+# OneBot access_token 鉴权（U12 fail-closed）
+# ═══════════════════════════════════════════════════════════
+
+
+def _auth_request(token: str | None = None, query_token: str | None = None) -> MagicMock:
+    """构造带鉴权信息的假 request（Authorization 头 / access_token 查询参数）。"""
+    request = MagicMock()
+    request.remote = "127.0.0.1"
+    headers: dict = {}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    request.headers = headers
+    request.query = {"access_token": query_token} if query_token else {}
+    return request
+
+
+class TestOneBotAccessToken:
+    """OneBot access_token 鉴权契约（U12，fail-closed）。
+
+    反向 WS 服务端是全部通道插件中唯一监听面：无鉴权时网络可达者可伪装
+    OneBot 实例注入任意 QQ 消息事件。契约：
+    - 未配置 token = 拒绝所有连接（fail-closed）并告警，绝不放行；
+    - token 不符 = 拒绝（401）；
+    - token 匹配（Authorization: Bearer 头或 access_token 查询参数）= 放行。
+    """
+
+    @staticmethod
+    def _make_ws(monkeypatch, received: list) -> None:
+        """注入假 WebSocketResponse：收到事件帧后自然关闭。"""
+        from aiohttp import web
+
+        frame = MagicMock(
+            type=aiohttp.WSMsgType.TEXT,
+            data=json.dumps({"post_type": "message", "user_id": 42}),
+        )
+
+        class _FakeWS:
+            def __init__(self) -> None:
+                self.closed = False
+                self._msgs = [frame, MagicMock(type=aiohttp.WSMsgType.CLOSED)]
+
+            async def prepare(self, request):
+                return None
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self._msgs:
+                    raise StopAsyncIteration
+                return self._msgs.pop(0)
+
+        fake_ws = _FakeWS()
+        monkeypatch.setattr(web, "WebSocketResponse", lambda: fake_ws)
+
+        async def cb(data):
+            received.append(data)
+
+        return cb
+
+    @pytest.mark.asyncio
+    async def test_no_token_configured_rejects_all_connections(self, monkeypatch, caplog) -> None:
+        """未配置 token = fail-closed：拒绝所有 WS 连接并告警，事件绝不入链。"""
+        import logging
+
+        client = OneBotClient(access_token="")
+        received: list = []
+        cb = self._make_ws(monkeypatch, received)
+        client.on_message = cb
+
+        with caplog.at_level(logging.WARNING):
+            resp = await client._ws_handler(_auth_request(token="any-token"))
+
+        assert getattr(resp, "status", None) == 401, "无 token 配置必须 401 拒绝"
+        assert received == [], "被拒连接的事件不得进入处理链"
+        assert client.is_connected is False
+        assert any("access_token" in r.getMessage() for r in caplog.records), (
+            "无 token 拒连必须落告警日志"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"token": "wrong-token"},  # 配置了 token，头来错
+            {"query_token": "wrong-token"},  # 查询参数错
+            {},  # 不带任何凭据
+        ],
+        ids=["wrong-header-token", "wrong-query-token", "missing-credentials"],
+    )
+    async def test_invalid_credentials_rejected(self, monkeypatch, kwargs) -> None:
+        """token 不符或缺席 → 401 拒绝，事件不入链。"""
+        client = OneBotClient(access_token="secret-token")
+        received: list = []
+        cb = self._make_ws(monkeypatch, received)
+        client.on_message = cb
+
+        resp = await client._ws_handler(_auth_request(**kwargs))
+
+        assert getattr(resp, "status", None) == 401
+        assert received == []
+        assert client.is_connected is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"token": "secret-token"},  # Authorization: Bearer 头
+            {"query_token": "secret-token"},  # access_token 查询参数
+        ],
+        ids=["header-token", "query-token"],
+    )
+    async def test_valid_credentials_accepted_and_events_flow(self, monkeypatch, kwargs) -> None:
+        """token 匹配（头或查询参数两种携带方式）→ 放行，事件正常进入处理链。"""
+        client = OneBotClient(access_token="secret-token")
+        received: list = []
+        cb = self._make_ws(monkeypatch, received)
+        client.on_message = cb
+
+        result = await client._ws_handler(_auth_request(**kwargs))
+
+        assert received, f"合法凭据放行后事件应进入处理链: {received!r}"
+        assert received[0]["post_type"] == "message"
+        assert client.is_connected is False  # 处理完连接自然关闭（公共观察面）
+        assert result.closed is False
+
+    @pytest.mark.asyncio
+    async def test_real_socket_wrong_token_rejected_correct_token_accepted(self) -> None:
+        """真实 TCP/WS 集成断言（关键路径走真实依赖）：错 token 握手 401，对 token 事件入链。"""
+        import socket
+        from contextlib import suppress
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        client = OneBotClient(ws_host="127.0.0.1", ws_port=port, access_token="real-secret")
+        received: list = []
+
+        async def cb(data):
+            received.append(data)
+
+        client.on_message = cb
+        task = asyncio.create_task(client.connect())
+        try:
+            accepted = False
+            async with aiohttp.ClientSession() as sess:
+                # 轮询等待服务端就绪：正确 token 应完成 WS 握手
+                ws = None
+                for _ in range(50):
+                    try:
+                        ws = await sess.ws_connect(
+                            f"http://127.0.0.1:{port}/ws",
+                            headers={"Authorization": "Bearer real-secret"},
+                        )
+                        accepted = True
+                        break
+                    except aiohttp.WSServerHandshakeError:
+                        await asyncio.sleep(0.05)
+                assert ws is not None, "正确 token 应完成 WS 握手"
+                await ws.send_json({"post_type": "message", "user_id": 7})
+                for _ in range(100):
+                    if received:
+                        break
+                    await asyncio.sleep(0.02)
+                await ws.close()
+
+                # 错误 token：握手必须被 401 拒绝
+                try:
+                    async with sess.ws_connect(
+                        f"http://127.0.0.1:{port}/ws",
+                        headers={"Authorization": "Bearer bad-token"},
+                    ):
+                        wrong_status: int | None = None
+                except aiohttp.WSServerHandshakeError as e:
+                    wrong_status = e.status
+
+            assert accepted is True, "正确 token 握手应成功"
+            assert wrong_status == 401, "错误 token 必须被 401 拒绝握手"
+        finally:
+            await client.disconnect()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        assert received, f"正确 token 连接的事件应进入处理链: {received!r}"
+        assert received[0]["user_id"] == 7
+
+
+class TestLoopbackDefaultBinding:
+    """默认监听地址契约（U12）：不显式配置时只绑回环地址，不暴露到所有网卡。"""
+
+    def test_onebot_client_default_ws_host_is_loopback(self) -> None:
+        import inspect
+
+        default = inspect.signature(OneBotClient.__init__).parameters["ws_host"].default
+        assert default == "127.0.0.1", f"OneBotClient 默认应绑 127.0.0.1，实际 {default!r}"
+
+    def test_qq_adapter_default_ws_host_is_loopback(self) -> None:
+        import inspect
+
+        default = inspect.signature(QQAdapter.__init__).parameters["ws_host"].default
+        assert default == "127.0.0.1", f"QQAdapter 默认应绑 127.0.0.1，实际 {default!r}"

@@ -53,8 +53,12 @@ class EncodingHandler:
             enc = locale.getpreferredencoding()
             if enc:
                 return enc
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 —— 探测失败回退 utf-8，但留痕
+            logging.getLogger(__name__).debug(
+                "[encoding] locale 首选编码探测失败（回退 utf-8）: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
         return "utf-8"
 
     @classmethod

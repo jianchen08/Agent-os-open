@@ -5,17 +5,17 @@
  * 支持三层 Agent 架构：L1 (主 Agent), L2 (Sub Agent), L3 (执行 Agent)
  */
 
-import { Plus } from '@/assets/icons'
 import { useCallback, useRef } from 'react'
+import { Plus } from '@/assets/icons'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import { AgentTabItem } from './AgentTabItem'
-import type { AgentTab as AgentTabType } from '@/types/task'
+import type { AgentTab as AgentTabType, AgentTabStatus } from '@/types/task'
 
 /** Agent Tab 数据接口 */
 export interface AgentTab {
   id: string
   name: string
-  status: 'running' | 'waiting_input' | 'completed' | 'failed'
+  status: AgentTabStatus
   isActive: boolean
   unreadCount?: number
   canClose: boolean

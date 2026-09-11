@@ -218,9 +218,19 @@ pub fn atomic_write_yaml(target: &Path, value: &Value) -> Result<(), ConfigError
     std::fs::write(&tmp, serialized.as_bytes()).map_err(|e| ConfigError::Io {
         message: format!("write tmp {}: {}", tmp.display(), e),
     })?;
-    std::fs::rename(&tmp, target).map_err(|e| ConfigError::Io {
-        message: format!("replace {}: {}", target.display(), e),
-    })?;
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        // rename 失败 best-effort 清 tmp（D7：不留 .tmp 残骸）
+        if let Err(cleanup_err) = std::fs::remove_file(&tmp) {
+            tracing::warn!(
+                target = %tmp.display(),
+                error = %cleanup_err,
+                "清理 .tmp 残骸失败"
+            );
+        }
+        return Err(ConfigError::Io {
+            message: format!("replace {}: {}", target.display(), e),
+        });
+    }
 
     Ok(())
 }
@@ -228,6 +238,32 @@ pub fn atomic_write_yaml(target: &Path, value: &Value) -> Result<(), ConfigError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_yaml_rename_failure_cleans_tmp() {
+        // D7：rename 失败（目标被同名目录占位模拟占用）→ Err 且 .tmp 被清理
+        let tmp = tempfile::tempdir().unwrap();
+        let occupied = tmp.path().join("occupied.yaml");
+        std::fs::create_dir_all(&occupied).unwrap();
+        let err = atomic_write_yaml(&occupied, &serde_json::json!({"a": 1})).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Io { .. }),
+            "rename 失败应报 Io 错: {err:?}"
+        );
+        assert!(
+            !tmp.path().join("occupied.yaml.tmp").exists(),
+            "rename 失败后 .tmp 残骸必须被清理"
+        );
+        // 成功路径回归：正常目标原子替换成功且无 .tmp 残留
+        let normal = tmp.path().join("normal.yaml");
+        atomic_write_yaml(&normal, &serde_json::json!({"a": 1})).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&normal).unwrap(),
+            "a: 1
+"
+        );
+        assert!(!tmp.path().join("normal.yaml.tmp").exists());
+    }
 
     #[test]
     fn test_is_secret_key_detection() {

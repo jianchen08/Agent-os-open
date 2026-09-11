@@ -63,47 +63,90 @@ echo -e "${YELLOW}[INFO] 前端端口: ${FRONTEND_PORT:-未设置}${NC}"
 [ -n "$STORED_KERNEL_PID" ] && echo -e "${YELLOW}[INFO] 内核 PID: $STORED_KERNEL_PID${NC}"
 [ -n "$STORED_FRONTEND_PID" ] && echo -e "${YELLOW}[INFO] 前端 PID: $STORED_FRONTEND_PID${NC}"
 
-# ========== 关闭内核进程（带 PID 验证） ==========
-if [ -n "$KERNEL_PORT" ] && command -v lsof &>/dev/null 2>&1; then
-    PIDS=$(lsof -ti:$KERNEL_PORT 2>/dev/null || true)
-    if [ -n "$PIDS" ]; then
-        if [ -n "$STORED_KERNEL_PID" ]; then
-            for pid in $PIDS; do
-                if [ "$pid" = "$STORED_KERNEL_PID" ]; then
-                    echo -e "${YELLOW}[INFO] 关闭内核进程: $pid (端口 $KERNEL_PORT)${NC}"
-                    kill -9 "$pid" 2>/dev/null || true
-                    FOUND=1
-                else
-                    echo -e "${YELLOW}[WARN] 端口 $KERNEL_PORT 上的进程已变更（存储PID=$STORED_KERNEL_PID，当前PID=$pid），跳过关闭以防误杀${NC}"
-                fi
-            done
-        else
-            echo -e "${YELLOW}[INFO] 关闭内核进程: $PIDS (端口 $KERNEL_PORT)${NC}"
-            echo "$PIDS" | xargs kill -9 2>/dev/null || true
-            FOUND=1
-        fi
+# ========== 跨端进程工具（S15：停机链双端失效修复） ==========
+# 三类失效已收口：
+# ① PID 错位：存储的 OLD_*_PID 是启动器/监督者（函数子 shell、npx），
+#    监听端口的内核/前端是其后代——PID 严格相等判定永远 miss 且监督者
+#    不死会自动重拉内核（G8）。改为「先杀监督者，再按端口找监听进程」，
+#    归属校验用命令行含项目根做二次确认，不再依赖 PID 相等。
+# ② Git Bash 无 lsof：整个 kill 块静默跳过 = 停机 no-op。补 netstat/taskkill
+#    的 Windows 回退路径。
+# ③ lsof 缺失不再静默：显式提示走手动处置，不留"看似停了"的假终态。
+IS_WINDOWS=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;; esac
+
+port_pids() {
+    local port="$1"
+    if [ "$IS_WINDOWS" = "1" ]; then
+        # Git Bash/MSYS 无 lsof：netstat -ano 的 LISTENING 行第 5 列为 PID
+        netstat -ano 2>/dev/null | awk -v p=":$port" '$2 ~ p"$" && $0 ~ /LISTENING/ {print $5}' | sort -u
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -ti:"$port" 2>/dev/null || true
+    fi
+}
+
+kill_pid() {
+    local pid="$1"
+    if [ "$IS_WINDOWS" = "1" ]; then
+        # //F 强杀 //T 连子树（supervisor→内核→sidecar 一并终止）
+        taskkill //F //T //PID "$pid" >/dev/null 2>&1 || kill -9 "$pid" 2>/dev/null || true
+    else
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+}
+
+pid_belongs_to_project() {
+    local pid="$1"
+    if [ "$IS_WINDOWS" = "1" ]; then
+        powershell -NoProfile -Command \
+            "(Get-CimInstance Win32_Process -Filter \"ProcessId=$pid\").CommandLine" \
+            2>/dev/null | grep -F "$PROJECT_ROOT" >/dev/null 2>&1
+    else
+        ps -p "$pid" -o args= 2>/dev/null | grep -F "$PROJECT_ROOT" >/dev/null 2>&1
+    fi
+}
+
+# 关闭一个服务面：先杀存储的启动器/监督者 PID（防自动重拉），再按端口
+# 找监听进程补杀；监听进程经归属校验（命令行含项目根）确认后才杀。
+stop_service() {
+    local label="$1" port="$2" stored_pid="$3"
+    local stopped=0
+
+    if [ -n "$stored_pid" ] && kill -0 "$stored_pid" 2>/dev/null; then
+        echo -e "${YELLOW}[INFO] 关闭 $label 启动器/监督者: $stored_pid${NC}"
+        kill_pid "$stored_pid"
+        stopped=1
+    fi
+
+    if [ -n "$port" ]; then
+        local pids
+        pids=$(port_pids "$port")
+        for pid in $pids; do
+            if pid_belongs_to_project "$pid"; then
+                echo -e "${YELLOW}[INFO] 关闭 $label 监听进程: $pid (端口 $port)${NC}"
+                kill_pid "$pid"
+                stopped=1
+            else
+                echo -e "${RED}[WARN] 端口 $port 上的进程 $pid 命令行不含本项目路径，跳过关闭以防误杀（如需手动处置请自查）${NC}"
+            fi
+        done
+    fi
+    return $((1 - stopped))
+}
+
+# ========== 关闭内核进程 ==========
+if [ -n "$KERNEL_PORT" ]; then
+    if stop_service "内核" "$KERNEL_PORT" "$STORED_KERNEL_PID"; then
+        FOUND=1
+    elif ! command -v lsof >/dev/null 2>&1 && [ "$IS_WINDOWS" != "1" ]; then
+        echo -e "${RED}[WARN] 本机无 lsof 且非 Windows，无法按端口定位 $KERNEL_PORT 监听进程，请手动核查${NC}"
     fi
 fi
 
-# ========== 关闭前端进程（带 PID 验证） ==========
-if [ -n "$FRONTEND_PORT" ] && command -v lsof &>/dev/null 2>&1; then
-    PIDS=$(lsof -ti:$FRONTEND_PORT 2>/dev/null || true)
-    if [ -n "$PIDS" ]; then
-        if [ -n "$STORED_FRONTEND_PID" ]; then
-            for pid in $PIDS; do
-                if [ "$pid" = "$STORED_FRONTEND_PID" ]; then
-                    echo -e "${YELLOW}[INFO] 关闭前端进程: $pid (端口 $FRONTEND_PORT)${NC}"
-                    kill -9 "$pid" 2>/dev/null || true
-                    FOUND=1
-                else
-                    echo -e "${YELLOW}[WARN] 端口 $FRONTEND_PORT 上的进程已变更（存储PID=$STORED_FRONTEND_PID，当前PID=$pid），跳过关闭以防误杀${NC}"
-                fi
-            done
-        else
-            echo -e "${YELLOW}[INFO] 关闭前端进程: $PIDS (端口 $FRONTEND_PORT)${NC}"
-            echo "$PIDS" | xargs kill -9 2>/dev/null || true
-            FOUND=1
-        fi
+# ========== 关闭前端进程 ==========
+if [ -n "$FRONTEND_PORT" ]; then
+    if stop_service "前端" "$FRONTEND_PORT" "$STORED_FRONTEND_PID"; then
+        FOUND=1
     fi
 fi
 

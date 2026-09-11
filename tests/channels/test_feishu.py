@@ -1,8 +1,8 @@
 # @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-coverage
 """飞书通道适配器测试。
 
-测试 FeishuInputAdapter、FeishuOutputAdapter、FeishuAdapter 组合、
-FeishuStreamClient（Mock）和 CardBuilder 的核心功能。
+测试 FeishuInputAdapter、FeishuOutputAdapter、FeishuAdapter 组合与
+FeishuStreamClient（Mock）的核心功能。
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from tests.channels.conftest import use_channel
 
 use_channel("feishu")
 from adapter import FeishuAdapter, FeishuInputAdapter, FeishuOutputAdapter
-from card_builder import CardBuilder
 from stream_client import FeishuStreamClient
 
 # ═══════════════════════════════════════════════════════════
@@ -103,6 +102,8 @@ class TestFeishuOutputAdapter:
             "ended": True,
         }
         await adapter.send(state)
+        # FeishuStreamClient 是对外部飞书平台的边界：一条结果恰发一条消息
+        # （含收件人与正文）即输出适配器的契约，交互本身就是行为。
         client.send_message.assert_called_once()
         call_args = client.send_message.call_args
         assert call_args[0][0] == "ou_test"
@@ -118,6 +119,7 @@ class TestFeishuOutputAdapter:
             "_channel_user_id": "ou_test",
         }
         await adapter.send(state)
+        # 错误信息必须送达用户（外部边界交互即契约）
         client.send_message.assert_called_once()
         assert "Something went wrong" in client.send_message.call_args[0][1]
 
@@ -157,6 +159,7 @@ class TestFeishuOutputAdapter:
 
         chunk = {"text": "Hello", "type": "token", "flush": True}
         await adapter.send_stream(chunk)
+        # flush 恰好触发一次对外发送（外部边界交互即契约）
         client.send_message.assert_called_once()
         assert client.send_message.call_args[0][1] == "Hello"
         # 发送后累积文本清空（公共只读观察面）
@@ -191,6 +194,7 @@ class TestFeishuAdapter:
         adapter = FeishuAdapter(app_id="test_id", app_secret="test_secret")
         adapter.stream_client.connect = AsyncMock()
         await adapter.start()
+        # start 的对外行为就是与平台建立一次连接（外部边界交互即契约）
         adapter.stream_client.connect.assert_called_once()
 
     @pytest.mark.asyncio
@@ -199,6 +203,7 @@ class TestFeishuAdapter:
         adapter = FeishuAdapter(app_id="test_id", app_secret="test_secret")
         adapter.stream_client.disconnect = AsyncMock()
         await adapter.stop()
+        # stop 的对外行为就是断开与平台的连接（外部边界交互即契约）
         adapter.stream_client.disconnect.assert_called_once()
 
 
@@ -238,7 +243,7 @@ class TestFeishuStreamClient:
 
         await client.send_message("ou_test", "Hello")
 
-        # 验证调用格式
+        # aiohttp session 是对外部飞书 API 的网络边界：一次请求 + 报文格式即契约
         mock_session.post.assert_called_once()
         call_args = mock_session.post.call_args
         url = call_args[0][0]
@@ -263,92 +268,6 @@ class TestFeishuStreamClient:
 
         # connect 在 max_retries=1 时会因获取不到 endpoint 而退出
         await client.connect()
-        client._ensure_token.assert_called()
-
-
-# ═══════════════════════════════════════════════════════════
-# CardBuilder 测试
-# ═══════════════════════════════════════════════════════════
-
-
-class TestCardBuilder:
-    """CardBuilder 卡片构建器测试。"""
-
-    def test_build_empty_card(self) -> None:
-        """空卡片构建。"""
-        card = CardBuilder().build()
-        assert "elements" in card
-        assert card["elements"] == []
-
-    def test_build_text_card(self) -> None:
-        """纯文本卡片。"""
-        card = CardBuilder().add_markdown("Hello **world**").build()
-        assert len(card["elements"]) == 1
-        elem = card["elements"][0]
-        assert elem["tag"] == "div"
-        assert elem["text"]["content"] == "Hello **world**"
-        assert elem["text"]["tag"] == "lark_md"
-
-    def test_build_card_with_header(self) -> None:
-        """带标题的卡片。"""
-        card = CardBuilder().add_header("My Title").build()
-        assert "header" in card
-        assert card["header"]["title"]["content"] == "My Title"
-        assert card["header"]["title"]["tag"] == "plain_text"
-
-    def test_build_card_with_actions(self) -> None:
-        """带按钮的卡片。"""
-        actions = [
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "Click"},
-                "value": {"action": "click"},
-            }
-        ]
-        card = CardBuilder().add_action(actions).build()
-        assert len(card["elements"]) == 1
-        elem = card["elements"][0]
-        assert elem["tag"] == "action"
-        assert len(elem["actions"]) == 1
-
-    def test_build_text_card_template(self) -> None:
-        """预置模板：纯文本卡片。"""
-        card = CardBuilder.build_text_card(title="Greeting", content="Hi there")
-        assert card["header"]["title"]["content"] == "Greeting"
-        assert len(card["elements"]) == 1
-        assert card["elements"][0]["text"]["content"] == "Hi there"
-
-    def test_build_action_card_template(self) -> None:
-        """预置模板：带按钮的卡片。"""
-        buttons = [
-            {"text": "OK", "value": {"action": "ok"}},
-            {"text": "Cancel", "value": {"action": "cancel"}},
-        ]
-        card = CardBuilder.build_action_card(
-            title="Confirm", content="Are you sure?", buttons=buttons
-        )
-        assert card["header"]["title"]["content"] == "Confirm"
-        assert card["elements"][0]["text"]["content"] == "Are you sure?"
-        action_elem = card["elements"][1]
-        assert action_elem["tag"] == "action"
-        assert len(action_elem["actions"]) == 2
-
-    def test_add_hr_and_note(self) -> None:
-        """分割线和备注。"""
-        card = (
-            CardBuilder()
-            .add_markdown("Content")
-            .add_hr()
-            .add_note("This is a note")
-            .build()
-        )
-        assert len(card["elements"]) == 3
-        assert card["elements"][1]["tag"] == "hr"
-        assert card["elements"][2]["tag"] == "note"
-        assert card["elements"][2]["elements"][0]["content"] == "This is a note"
-
-    def test_build_returns_serializable_dict(self) -> None:
-        """build 返回可序列化的 dict。"""
-        card = CardBuilder().add_markdown("test").build()
-        serialized = json.dumps(card)
-        assert isinstance(serialized, str)
+        # 可观察行为：拿不到 endpoint → 干净退出（不抛出）且连接未建立。
+        # _ensure_token/_get_endpoint 的 mock 仅为隔离外部 token/endpoint 网络请求。
+        assert client.is_connected is False

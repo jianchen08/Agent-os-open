@@ -1,11 +1,11 @@
 /**
  * AntdThemeBridge — antd 主题桥测试
  *
- * 真实缺陷：@rjsf/antd 表单（设置页/Agent 配置/会话编辑/聊天 widget）的
- * Form.Item label、输入框走 antd 自带 token；全应用此前无 ConfigProvider，
- * antd 恒为浅色默认（label rgba(0,0,0,0.88)、输入框白底），深色主题下压在
- * 应用深色面板上不可读。契约：antd 主题由应用主题统一下发——resolvedTheme
- * 切深浅算法，主色/基准字色桥接主题令牌。
+ * @rjsf/antd 表单（设置页/Agent 配置/会话编辑/聊天 widget）的 Form.Item label、
+ * 输入框走 antd 自带 token：不经 ConfigProvider 下发应用主题时 antd 恒为浅色
+ * 默认（label rgba(0,0,0,0.88)、输入框白底），深色主题下压在应用深色面板上
+ * 不可读。契约：antd 主题由应用主题统一下发——resolvedTheme 切深浅算法，
+ * 主色/基准字色桥接主题令牌。
  */
 
 import { render } from '@testing-library/react'

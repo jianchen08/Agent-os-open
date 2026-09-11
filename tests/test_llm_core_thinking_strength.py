@@ -40,12 +40,31 @@ from llm_core.plugin import LLMCore, resolve_thinking_strength_params  # noqa: E
 
 def test_no_mapping_means_no_override() -> None:
     """无任何显式映射 → 任何档位都不覆盖（无代码内置兜底，映射全显式）。"""
-    for strength in ("low", "medium", "high"):
+    for strength in ("off", "low", "medium", "high"):
         assert resolve_thinking_strength_params(strength) is None
         assert resolve_thinking_strength_params(strength, None, provider_params=None) is None
-    assert resolve_thinking_strength_params("off") is None
     assert resolve_thinking_strength_params("") is None
     assert resolve_thinking_strength_params("ultra") is None
+
+
+def test_off_is_a_lookup_gear_not_a_skip_sentinel() -> None:
+    """off 与其余档位同级查表：命中映射即覆盖为厂商关闭形态。
+
+    off 曾被短路成"不覆盖"，而模型 default_params 普遍自带思考开启
+    （thinking: enabled / reasoning_effort: max），用户选「关闭」时默认值
+    原样出站 → 思考照跑。此断言锁死 off 走同一条映射查找。
+    """
+    model_params = {"off": {"thinking": {"type": "disabled"}}}
+    assert resolve_thinking_strength_params("off", model_params) == {
+        "thinking": {"type": "disabled"}
+    }
+    # 厂商级映射同样按档位命中 off
+    provider_params = {"off": {"reasoning_effort": "none"}}
+    assert resolve_thinking_strength_params("off", provider_params=provider_params) == {
+        "reasoning_effort": "none"
+    }
+    # 未配置 off 档的模型：同其余档位不覆盖（显式映射缺失即无操作）
+    assert resolve_thinking_strength_params("off", {"high": {"reasoning_effort": "max"}}) is None
 
 
 def test_strength_params_temperature_max_tokens_ignored() -> None:
@@ -80,7 +99,7 @@ def test_strength_params_model_config_override() -> None:
     assert resolve_thinking_strength_params("high", model_params) == {
         "reasoning_effort": "max",
     }
-    # off/未知 → 仍不覆盖
+    # 该映射未配 off 档 / 未知档位 → 不覆盖（显式映射缺失即无操作）
     assert resolve_thinking_strength_params("off", model_params) is None
     assert resolve_thinking_strength_params("nope", model_params) is None
 
@@ -129,9 +148,10 @@ def test_provider_params_wins_over_model_manual_params() -> None:
 
 
 def test_provider_params_missing_strength_falls_through() -> None:
-    """off/未知档位 → 不覆盖；厂商映射缺档位 → 回退手填，再缺 → 不覆盖。"""
+    """厂商映射缺档位 → 回退手填，再缺 → 不覆盖；未知档位不覆盖。"""
     provider_params = {"high": {"thinking": {"type": "enabled"}}}
     manual = {"low": {"reasoning_effort": "low"}}
+    # 该厂商映射未配 off 档、手填也无 → 不覆盖
     assert resolve_thinking_strength_params("off", provider_params=provider_params) is None
     assert resolve_thinking_strength_params("ultra", provider_params=provider_params) is None
     # 厂商映射缺 low 档 → 手填参与
@@ -156,6 +176,7 @@ def test_llm_yaml_carries_vendor_strength_mappings() -> None:
         "high": {"thinking": {"type": "enabled"}},
         "low": {"thinking": {"type": "disabled"}},
         "medium": {"thinking": {"type": "enabled"}},
+        "off": {"thinking": {"type": "disabled"}, "reasoning_effort": "none"},
     }
     assert providers["zhipu"]["thinking_strength_params"] == glm_params
     assert providers["zhipu_coding"]["thinking_strength_params"] == glm_params
@@ -163,17 +184,68 @@ def test_llm_yaml_carries_vendor_strength_mappings() -> None:
         "high": {"thinking": {"type": "adaptive"}},
         "low": {"thinking": {"type": "disabled"}},
         "medium": {"thinking": {"type": "adaptive"}},
+        "off": {"thinking": {"type": "disabled"}},
     }
     assert providers["deepseek"]["thinking_strength_params"] == {
         "high": {"reasoning_effort": "max"},
         "low": {"reasoning_effort": "low"},
         "medium": {"reasoning_effort": "medium"},
+        "off": {"thinking": {"type": "disabled"}},
     }
     assert providers["openai"]["thinking_strength_params"] == {
         "high": {"reasoning_effort": "high"},
         "low": {"reasoning_effort": "low"},
         "medium": {"reasoning_effort": "medium"},
     }
+
+
+def test_llm_yaml_off_gear_is_string_key() -> None:
+    """off 档位键必须是字符串 "off"：YAML 1.1 把裸 ``off`` 解析为布尔 False，
+    与前端发送的字符串档位永不相等（映射静默失配，关闭档再次失效）。"""
+    import yaml
+
+    data = yaml.safe_load(
+        (_REPO_ROOT / "config" / "models" / "llm.yaml").read_text(encoding="utf-8")
+    )
+    for provider_name, mapping in data["providers"].items():
+        params = mapping.get("thinking_strength_params")
+        if not isinstance(params, dict):
+            continue
+        for gear in params:
+            assert isinstance(gear, str), (
+                f"providers.{provider_name} 档位键 {gear!r} 非字符串"
+                "（YAML 裸 off 会被解析成布尔 False，映射永不命中）"
+            )
+
+
+def test_every_reasoning_model_resolves_off_override() -> None:
+    """真机配置闸：每个 reasoning_model 选「关闭」都能解析出覆盖集。
+
+    用户选关闭却仍在思考的根因是 off 短路成"不覆盖"，而模型 default_params
+    自带思考开启。此断言保证配置层不再出现"关闭档无家可归"的模型。
+    """
+    import yaml
+
+    data = yaml.safe_load(
+        (_REPO_ROOT / "config" / "models" / "llm.yaml").read_text(encoding="utf-8")
+    )
+    providers = data["providers"]
+    missing: list[str] = []
+    for model_id, model in data["models"].items():
+        if not model.get("reasoning_model"):
+            continue
+        provider_name = model.get("provider", "")
+        provider_params = (providers.get(provider_name) or {}).get(
+            "thinking_strength_params"
+        )
+        resolved = resolve_thinking_strength_params(
+            "off",
+            model.get("thinking_strength_params"),
+            provider_params=provider_params,
+        )
+        if not resolved:
+            missing.append(model_id)
+    assert not missing, f"以下推理模型选「关闭」不覆盖任何参数（思考照跑）：{missing}"
 
 
 # ─────────────────── 集成：_call_llm 覆盖 kwargs ───────────────────
@@ -320,8 +392,8 @@ async def test_call_llm_keeps_defaults_when_strength_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_llm_off_keeps_defaults() -> None:
-    """thinking_strength=off → 不覆盖（显式关闭 = 普通模式，保持默认参数）。"""
+async def test_call_llm_off_without_mapping_keeps_defaults() -> None:
+    """无 off 档映射的模型：选关闭不覆盖（同其余档位的显式映射缺失语义）。"""
     caller = _CapturingCaller()
     plugin = _make_plugin(caller)
     ctx = _make_ctx(
@@ -341,6 +413,54 @@ async def test_call_llm_off_keeps_defaults() -> None:
     args = caller.captured_args
     assert args["temperature"] == 0.7
     assert "reasoning_effort" not in args
+
+
+@pytest.mark.asyncio
+async def test_call_llm_off_applies_vendor_disable_override() -> None:
+    """选关闭且厂商映射配了 off 档 → 覆盖为厂商关闭形态。
+
+    真机语义：default_params 自带 thinking=enabled + reasoning_effort=max，
+    只覆盖 thinking=disabled（不覆盖 effort）实测已归零思考；off 档覆盖集
+    以配置为准，断言落在"关闭参数确实进了出站 kwargs"。
+    """
+    caller = _CapturingCaller()
+    plugin_mod.set_capability_caller(caller)
+    plugin = LLMCore(
+        {
+            "provider": "deepseek",
+            "model_name": "deepseek-v4-flash",
+            "default_params": {
+                "temperature": 0.7,
+                "max_tokens": 100000,
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": "max",
+            },
+            "provider_thinking_strength_params": {
+                "off": {"thinking": {"type": "disabled"}},
+                "high": {"reasoning_effort": "max"},
+            },
+        }
+    )
+    ctx = _make_ctx(
+        {
+            "thinking_strength": "off",
+            "pipeline_id": "p1",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    )
+
+    await plugin._call_llm(
+        [{"role": "user", "content": "hi"}],
+        ctx,
+        stream=False,
+    )
+
+    args = caller.captured_args
+    # 关闭参数覆盖了 default_params 的开启值
+    assert args["thinking"] == {"type": "disabled"}
+    # 采样参数不随强度覆盖
+    assert args["temperature"] == 0.7
+    assert args["max_tokens"] == 100000
 
 
 @pytest.mark.asyncio

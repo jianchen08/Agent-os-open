@@ -1,10 +1,9 @@
-/** cost_control 成本卡声明契约测试（B1：预算/用量卡并入监控页，2026-08-18 合并） */
-import { render, screen, waitFor } from '@testing-library/react'
+/** cost_control 成本卡声明契约测试（成本并入监控页：ui_schema space=monitoring） */
 import fs from 'node:fs'
 import path from 'node:path'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
-
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { WidgetStage } from '@/components/schema/widgets/WidgetStage'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
@@ -38,19 +37,19 @@ beforeEach(() => {
   })
 })
 
-describe('cost 卡声明（B1 合并后）', () => {
-  it('三张卡存在且并入 monitoring 空间；不独占侧边栏页面（pages 为空）', () => {
+describe('cost 卡声明（并入监控页）', () => {
+  it('三张卡存在且归入 monitoring 空间（用量与成本组）；独立 /cost 页已撤（无声明背书）', () => {
     const widgets = contributionRegistry.getAllWidgets().map((w) => w.id)
     expect(widgets).toContain('budget_card')
     expect(widgets).toContain('usage_daily_card')
     expect(widgets).toContain('usage_monthly_card')
-    // 合并拍板：成本卡并入监控页（space=monitoring），不再声明独立 activity-bar 页
     const costWidgets = contributionRegistry
       .getAllWidgets()
       .filter((w) => ['budget_card', 'usage_daily_card', 'usage_monthly_card'].includes(w.id))
     expect(costWidgets.every((w) => w.space === 'monitoring')).toBe(true)
-    const pages = contributionRegistry.getPages()
-    expect(pages.find((p) => p.id === 'cost_dashboard')).toBeUndefined()
+    // 独立 /cost 页撤销：无任何声明 path=/cost（openWorkspacePanelByPath 解析失败显式报错）
+    const page = contributionRegistry.getPages().find((p) => p.path === '/cost')
+    expect(page).toBeUndefined()
   })
 
   it('预算卡：datasourceUri + valueKey=usage_percent 渲染百分比（monitoring 空间）', async () => {
@@ -64,6 +63,8 @@ describe('cost 卡声明（B1 合并后）', () => {
       return Promise.resolve({ data: {} })
     })
     render(<WidgetStage space="monitoring" />)
+    // 分组 tab：成本卡在「用量与成本」组（首组「资源」不含成本卡）
+    fireEvent.click(screen.getByTestId('widget-stage-tab-用量与成本'))
     await waitFor(() => expect(screen.getByText('70')).toBeInTheDocument())
     await waitFor(() => expect(screen.getByText('13513')).toBeInTheDocument())
     await waitFor(() => expect(screen.getByText('25117')).toBeInTheDocument())
@@ -72,6 +73,7 @@ describe('cost 卡声明（B1 合并后）', () => {
   it('端点不可用 → 降级不崩（后端 budget/status 未上线时）', async () => {
     apiGet.mockRejectedValue(new Error('404'))
     render(<WidgetStage space="monitoring" />)
+    fireEvent.click(screen.getByTestId('widget-stage-tab-用量与成本'))
     await waitFor(() =>
       expect(screen.queryByText('暂无图表数据')).not.toBeInTheDocument(),
     )

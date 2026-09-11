@@ -16,5 +16,12 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "state": {
+    "reads": [
+      "attachments",
+      "messages",
+      "multimodal_seen"
+    ]
+  }
 }

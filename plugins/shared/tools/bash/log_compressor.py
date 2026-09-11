@@ -81,14 +81,12 @@ class LogCompressor:
         """检测输出类型"""
         cmd_lower = command.lower()
 
-        # 根据命令检测类型
         for output_type, patterns in self.TYPE_PATTERNS.items():
             for pattern in patterns:
                 if pattern in cmd_lower:
                     return output_type
 
-        # 根据输出内容检测类型
-        for line in lines[:50]:  # 检查前50行
+        for line in lines[:50]:
             line_lower = line.lower()
             if "npm" in line_lower and ("install" in line_lower or "package" in line_lower):
                 return OutputType.NPM_INSTALL
@@ -105,31 +103,26 @@ class LogCompressor:
 
     def extract_progress(self, lines: list[str], output_type: OutputType) -> str | None:  # noqa: PLR0912
         """提取进度信息"""
-        # 从最近50行查找进度
         recent_lines = lines[-50:] if len(lines) > 50 else lines
 
         for line in reversed(recent_lines):
-            # npm/yarn 进度
             if output_type == OutputType.NPM_INSTALL:
                 if "packages" in line.lower():
                     match = re.search(r"(\d+)\s+packages?", line)
                     if match:
                         return f"{match.group(1)} packages"
 
-            # pip 进度
             elif output_type == OutputType.PIP_INSTALL:
                 if "Collecting" in line or "Installing" in line:
                     match = re.search(r"(Collecting|Installing|Successfully installed)", line)
                     if match:
                         return match.group(1)
 
-            # pytest 进度
             elif output_type == OutputType.PYTEST:
                 match = re.search(r"(\d+)\s+passed|(\d+)\s+failed|(\d+)%", line)
                 if match:
                     return match.group(0)
 
-            # 通用进度检测
             for pattern, pattern_type in self.PROGRESS_PATTERNS:
                 match = pattern.search(line)
                 if match:
@@ -189,32 +182,26 @@ class LogCompressor:
         """
         error_lines = []
 
-        # 提取所有错误行
         for line in lines:
             for pattern in self.ERROR_PATTERNS:
                 if pattern.search(line):
                     error_lines.append(line.strip())
                     break
 
-        # 如果没有错误，返回空列表
         if not error_lines:
             return []
 
-        # 如果不合并重复，直接返回（最多 20 条）
         if not dedup:
             return error_lines[-20:]
 
-        # 合并重复错误
         error_counts: dict[str, int] = {}
         for error in error_lines:
-            # 标准化错误信息（去除时间戳等变化部分）
             normalized = self._normalize_error(error)
             if normalized in error_counts:
                 error_counts[normalized] += 1
             else:
                 error_counts[normalized] = 1
 
-        # 构建压缩后的错误列表
         compressed_errors = []
         for error, count in error_counts.items():
             if count > 1:
@@ -222,7 +209,6 @@ class LogCompressor:
             else:
                 compressed_errors.append(error)
 
-        # 返回最多 20 条错误
         return compressed_errors[-20:]
 
     def _normalize_error(self, error: str) -> str:
@@ -237,11 +223,8 @@ class LogCompressor:
         Returns:
             标准化后的错误信息
         """
-        # 去除常见的时间戳格式
         normalized = re.sub(r"\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}", "", error)
-        # 去除行号
         normalized = re.sub(r":\d+", ":*", normalized)
-        # 去除多余的空格
         normalized = re.sub(r"\s+", " ", normalized).strip()
 
         return normalized
@@ -290,13 +273,10 @@ class LogCompressor:
         # 统计警告和错误
         warnings, errors = self.count_warnings_errors(recent_lines)
 
-        # 提取进度
         progress = self.extract_progress(recent_lines, output_type)
 
-        # 获取最新消息
         latest = self.get_latest_message(recent_lines)
 
-        # 构建摘要行
         summary_lines = []
 
         # 行数信息

@@ -6,8 +6,8 @@
  * 自定义渲染即可复用，无需改动本组件。
  *
  * 当前消费方：
- * - ChatContainer：Godot 实时选中引用（输入框上方，选中出现 / 取消消失）
- * - MessageItem：对话历史中插件注入的 <reference> 引用消息渲染
+ * - GodotSelectionRow：实时选中引用（输入框上方，选中出现 / 取消消失）
+ * - MessageItem：对话历史中插件注入的 <reference> 引用消息渲染（源无关）
  */
 import { Box } from '@/assets/icons'
 import type { ReactNode } from 'react'
@@ -34,18 +34,25 @@ export function registerReferenceRenderer(kind: string, renderer: ReferenceRende
   renderers.set(kind, renderer)
 }
 
-/** 解析插件注入的引用消息内容（<reference source="godot" scene="...">…</reference>） */
+/**
+ * 解析引用消息内容（`<reference source="..." k="v">- 名称 (类型) @ 路径</reference>`）。
+ *
+ * 协议源无关（ADR 2026-09-10-generic-reference-protocol）：source 与其余头部
+ * 属性从内容解析，任何插件域的引用块都可被解析渲染；scene 是 Godot 域的
+ * 常用属性，单列便于展示。
+ */
 export function parseReferenceMessage(
   content: string,
 ): { source: string; scene: string; items: Array<{ name: string; type: string; path: string }> } | null {
   if (typeof content !== 'string' || !content.startsWith('<reference ')) return null
+  const sourceMatch = content.match(/source="([^"]*)"/)
   const sceneMatch = content.match(/scene="([^"]*)"/)
   const items: Array<{ name: string; type: string; path: string }> = []
   for (const m of content.matchAll(/- (.+?) \((.+?)\) @ (.+)/g)) {
     items.push({ name: m[1], type: m[2], path: m[3] })
   }
   return {
-    source: 'godot',
+    source: sourceMatch?.[1] ?? 'unknown',
     scene: sceneMatch?.[1] ?? '',
     items,
   }

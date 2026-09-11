@@ -6,14 +6,16 @@
 ``from plugin import ...`` 会命中缓存拿到错误模块
 （ImportError: cannot import name 'StuckDetector' from 'plugin' (.../llm_core/plugin.py)）。
 
-策略：tests/plugins/conftest.py 的 pytest_runtest_setup 在每个测试执行前，
-根据该测试所在目录的 conftest 声明的源目录（``_PLUGIN_SOURCE_DIRS``），
+策略：tests/conftest.py 的 pytest_collect_file（收集期，每个测试文件导入前）
+与 tests/plugins/conftest.py 的 pytest_runtest_setup（运行期，每个测试执行前），
+根据该文件/测试所在目录的 conftest 声明的源目录（``_PLUGIN_SOURCE_DIRS``），
 把源目录推到 sys.path 最前，并踢掉这些裸名（连同子模块）的缓存，
-使测试内的 ``from plugin import ...`` 按 sys.path[0] 重新解析到正确文件。
+使测试内的 ``from plugin import ...`` 按本插件目录重新解析到正确文件。
 """
 
 from __future__ import annotations
 
+import os
 import sys
 
 # 已知的平铺模块名（跨插件同名冲突，逐出名单必须覆盖全部常见名）：
@@ -57,8 +59,41 @@ _COLLIDING_NAMES = frozenset(
         "constants",
         # pipeline 是 namespace 包，剔除后会被各 conftest 的 sys.path[0] 重新定位
         "pipeline",
+        # mcp-bridge 网关的 policy.py 与其他平铺目录同名（security_check 测试
+        # 置前 sys.path 后 from policy import 命中错误缓存）
+        "policy",
     }
 )
+
+
+def find_conftest_declared_dirs(config: object, start_dir: str, attr: str) -> list[str]:
+    """沿 start_dir 向上找最近一个声明了 ``attr`` 的 conftest，返回其目录列表。
+
+    attr 取 ``_PLUGIN_SOURCE_DIRS``（插件源目录，按优先级排序）或
+    ``_PLUGIN_CONFLICT_DIRS``（需从 sys.path 摘除的冲突目录）。
+
+    从 pytest pluginmanager 注册表按 ``__file__`` 定位 conftest 模块：
+    无 ``__init__.py`` 的测试目录下 pytest 把 conftest 以裸名 ``conftest``
+    导入，多个此类目录互相顶掉 sys.modules['conftest'] 槽位（仅最后一个
+    存活），注册表对每个 conftest 模块都有独立登记，不受该冲突影响。
+    未找到声明返回空列表。
+    """
+    current = start_dir
+    for _ in range(10):  # 最多向上查 10 层
+        conftest_path = os.path.join(current, "conftest.py")
+        if os.path.isfile(conftest_path):
+            for plug in config.pluginmanager.get_plugins():
+                plug_file = getattr(plug, "__file__", None)
+                if plug_file and os.path.abspath(plug_file) == os.path.abspath(conftest_path):
+                    dirs = getattr(plug, attr, None)
+                    if dirs:
+                        return list(dirs)
+                    break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return []
 
 
 def evict_bare_modules() -> None:

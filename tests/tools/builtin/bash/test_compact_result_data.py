@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """_compact_result_data 一致性测试。
 
 验证 result data 字段的保留策略：

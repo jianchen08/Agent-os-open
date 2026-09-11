@@ -641,7 +641,7 @@ class TestPathPolicyFailClosed:
     """策略层不可用 → execute 失败信封携带拒绝原因（错误传播到用户提示）。
 
     对照组：策略层可用时同形输入走完整下载成功（见上方分段/流式下载用例，
-    走真实自带 permission_policy 默认策略）。不可用态经 _get_policy_manager
+    走真实 SDK permission_policy 默认策略）。不可用态经 _get_policy_manager
     接缝注入——生产中任何加载失败最终都落在"manager 为 None"这一状态。
     """
 
@@ -675,3 +675,105 @@ class TestPathPolicyFailClosed:
         r = _run(tool.execute({"url": "https://example.com/file.zip", "save_path": str(save_dir), "workspace": str(save_dir)}))
         assert not r.success
         assert not save_dir.exists(), "fail-closed 拒绝不得创建目录"
+
+
+# ═══════════════════════════════════════════════════════════
+# 合宿裸名遮蔽防护（server.py handler 取实现面）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestCohostShadowing:
+    """合宿平铺下裸名 ``tool`` 槽位被异成员占据时，handler 仍取本目录实现。
+
+    邻成员（task_evaluate 等）exec 期绑定后占据 sys.modules["tool"]，静息态
+    槽位是异成员模块——server loader 必须按显式路径命中本目录 tool.py。
+    decoy 常驻/不常驻两组输入；另断言缓存幂等（二次取用同一类）。
+    """
+
+    _IMPL_KEY = "download_tool_impl"
+
+    @staticmethod
+    def _load_server() -> Any:
+        mod_name = "download_server_test"
+        if mod_name in sys.modules:
+            del sys.modules[mod_name]
+        spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "server.py")
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _plant_decoy() -> Any:
+        import types
+
+        decoy = types.ModuleType("tool")
+
+        class _ForeignDownloadTool:  # 异成员同名类：命中即错
+            pass
+
+        decoy.DownloadTool = _ForeignDownloadTool
+        sys.modules["tool"] = decoy
+        return decoy
+
+    @pytest.mark.parametrize("decoy_resident", [True, False])
+    def test_loader_resolves_local_impl(self, decoy_resident: bool) -> None:
+        saved_tool = sys.modules.get("tool")
+        saved_impl = sys.modules.get(self._IMPL_KEY)
+        saved_wa = sys.modules.get("workspace_aware")
+        try:
+            server = self._load_server()
+            decoy = self._plant_decoy() if decoy_resident else None
+
+            cls = server._load_download_tool()
+            assert cls.__module__ == self._IMPL_KEY
+            if decoy is not None:
+                assert cls is not decoy.DownloadTool
+            assert hasattr(cls, "execute")
+            # 缓存幂等：二次取用同一类（不重复 exec tool.py）
+            assert server._load_download_tool() is cls
+        finally:
+            sys.modules.pop(self._IMPL_KEY, None)
+            sys.modules.pop("tool", None)
+            for restored in (saved_tool, saved_impl):
+                if restored is not None:
+                    sys.modules[restored.__name__] = restored
+            if saved_wa is None:
+                sys.modules.pop("workspace_aware", None)
+
+    @pytest.mark.parametrize(
+        ("bad_params", "expect_marker"),
+        [
+            ({"save_path": "x"}, "url"),
+            ({"url": "https://example.com/a.txt"}, "save_path"),
+        ],
+    )
+    @pytest.mark.parametrize("decoy_resident", [True, False])
+    def test_handler_entry_uses_local_impl(
+        self, decoy_resident: bool, bad_params: dict[str, str], expect_marker: str
+    ) -> None:
+        """handler 入口契约：经模块级 loader 取本目录实现执行，失败路径返回
+        {"error": ...}（真实参数校验分支，无 mock）。decoy 占槽时若命中异成员
+        实现，_ForeignDownloadTool 无 execute 即当场 AttributeError。"""
+        saved_tool = sys.modules.get("tool")
+        saved_impl = sys.modules.get(self._IMPL_KEY)
+        saved_wa = sys.modules.get("workspace_aware")
+        try:
+            server = self._load_server()
+            if decoy_resident:
+                self._plant_decoy()
+
+            result = _run(server.download(**bad_params))
+            assert isinstance(result, dict)
+            assert "error" in result, "失败路径应返回 error 字段"
+            assert expect_marker in result["error"]
+        finally:
+            sys.modules.pop(self._IMPL_KEY, None)
+            sys.modules.pop("tool", None)
+            for restored in (saved_tool, saved_impl):
+                if restored is not None:
+                    sys.modules[restored.__name__] = restored
+            if saved_wa is None:
+                sys.modules.pop("workspace_aware", None)

@@ -46,7 +46,6 @@ function tokenize(expr: string): Token[] | null {
   const n = expr.length
   while (i < n) {
     const ch = expr[i]
-    // 跳过空白
     if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
       i++
       continue
@@ -95,7 +94,6 @@ function tokenize(expr: string): Token[] | null {
       i++
       continue
     }
-    // 字符串字面量
     if (ch === "'" || ch === '"') {
       const quote = ch
       i++
@@ -129,7 +127,6 @@ function tokenize(expr: string): Token[] | null {
       }
       continue
     }
-    // 未知字符
     return null
   }
   tokens.push({ type: 'EOF', value: '' })
@@ -227,8 +224,7 @@ class Parser {
     }
     if (tok.type === 'LITERAL') {
       this.next()
-      // 布尔字面量
-      if (tok.value === 'true') return { value: 'true', truthy: true }
+        if (tok.value === 'true') return { value: 'true', truthy: true }
       if (tok.value === 'false') return { value: 'false', truthy: false }
       return { value: tok.value, truthy: tok.value !== '' }
     }

@@ -4,8 +4,8 @@ import { useMemo } from 'react'
 import { buildDefaultActions } from '@/utils/activityConverter'
 import { enhanceActivityWithToolConfig, getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import type { ActivityData, ActivityDetailBlock } from '@/types/activity'
-import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { MessagePart, SystemLevel, ToolCallPart } from '@/types/messageParts'
+import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 /** 渲染片段类型 */
 export type RenderFragment =
   | {

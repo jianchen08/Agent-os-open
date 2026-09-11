@@ -11,16 +11,14 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { RJSFValidationError } from '@rjsf/utils'
+import apiClient from '@/services/api/client'
+import { RjsfForm, buildFormValues, makeErrorTransformer, toRjsf } from '../RjsfForm'
 import type { UIInputFormField } from '@/types/schema'
+import type { RJSFValidationError } from '@rjsf/utils'
 
 vi.mock('@/services/api/client', () => ({
   default: { get: vi.fn() },
 }))
-
-import apiClient from '@/services/api/client'
-
-import { RjsfForm, buildFormValues, makeErrorTransformer, toRjsf } from '../RjsfForm'
 
 describe('toRjsf — 词汇表映射', () => {
   it('string/input → string，textarea/date 挂对应 widget', () => {

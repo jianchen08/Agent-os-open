@@ -2,19 +2,20 @@
 """fs_tools 工作空间约束测试（punch B5）。
 
 project_root 前缀校验（参考 download/tool.py 的 WorkspaceAwareMixin 语义）：
-- file_write / move_file / delete_file：workspace 外绝对路径被拒；
+- 读写同规：workspace 外绝对路径一律拒绝（读不豁免）；
+- 凭据类文件（.env 族/SSH 私钥/证书私钥）硬拒，与根内外无关，
+  .env.example 豁免；
 - workspace 内路径（含相对路径解析）通过；
-- file_read：workspace 外允许读取但记录 warning（只读向后兼容）；
-- 未注入 workspace/project_root 时维持 0.1 兼容行为（不约束）。
+- 未注入 workspace/project_root 时 fail-closed 报错（不做 cwd 兜底）。
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import pytest
 
+from agentos_builtin_tools import fs_tools
 from agentos_builtin_tools.fs_tools import (
     copy_file,
     create_directory,
@@ -291,8 +292,8 @@ class TestFileReadReturnsResolvedPath:
         assert result.success is False
         assert "未注入" in result.error
 
-    async def test_absolute_outside_path_readable_and_normalized(self, tmp_path: Path) -> None:
-        """根外绝对路径读取放行（只读兼容），file 回传 resolve 归一后的宿主路径。"""
+    async def test_absolute_outside_path_rejected(self, tmp_path: Path) -> None:
+        """根外绝对路径读取拒绝（与写同规 fail-closed），不返回文件内容。"""
         ws = tmp_path / "ws"
         ws.mkdir()
         outside = tmp_path / "cfg.ini"
@@ -300,25 +301,88 @@ class TestFileReadReturnsResolvedPath:
 
         result = await file_read(path=str(outside), workspace=str(ws))
 
-        assert result.success is True
-        assert Path(result.output["file"]) == outside.resolve()
+        assert result.success is False
+        assert "超出 workspace/project_root" in result.error
 
 
-class TestFileReadWorkspaceLogging:
-    async def test_read_outside_workspace_allowed_but_logged(
-        self, tmp_path: Path, caplog: logging.Logger
-    ) -> None:
-        """workspace 外读取放行（只读兼容），但记录 warning。"""
+class TestSensitiveFileDeny:
+    """凭据类文件硬拒：与根内外无关，读写同规（.env.example 豁免）。"""
+
+    async def test_read_env_inside_workspace_denied(self, tmp_path: Path) -> None:
         ws = tmp_path / "ws"
         ws.mkdir()
-        outside = tmp_path / "config.ini"
-        outside.write_text("[a]\n", encoding="utf-8")
+        env_file = ws / ".env"
+        env_file.write_text("API_KEY=x\n", encoding="utf-8")
 
-        with caplog.at_level(logging.WARNING, logger="agentos_builtin_tools.fs_tools"):
-            result = await file_read(path=str(outside), workspace=str(ws))
+        result = await file_read(path=str(env_file), workspace=str(ws))
+
+        assert result.success is False
+        assert "凭据类文件" in result.error
+
+    async def test_read_env_example_allowed(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        example = ws / ".env.example"
+        example.write_text("API_KEY=\n", encoding="utf-8")
+
+        result = await file_read(path=str(example), workspace=str(ws))
 
         assert result.success is True
-        assert "workspace 外路径" in caplog.text
+
+    async def test_read_env_dot_variant_denied(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        variant = ws / ".env.production"
+        variant.write_text("API_KEY=x\n", encoding="utf-8")
+
+        result = await file_read(path=str(variant), workspace=str(ws))
+
+        assert result.success is False
+        assert "凭据类文件" in result.error
+
+    async def test_write_env_inside_workspace_denied(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        result = await file_write(path=str(ws / ".env"), content="API_KEY=x\n", workspace=str(ws))
+
+        assert result.success is False
+        assert "凭据类文件" in result.error
+        assert not (ws / ".env").exists()
+
+    @pytest.mark.parametrize("name", ["server.pem", "keystore.p12", "cert.pfx", "app.jks", "id_rsa", "id_ed25519"])
+    async def test_read_key_files_denied(self, tmp_path: Path, name: str) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        target = ws / name
+        target.write_text("secret\n", encoding="utf-8")
+
+        result = await file_read(path=str(target), workspace=str(ws))
+
+        assert result.success is False
+        assert "凭据类文件" in result.error
+
+    async def test_move_env_source_denied(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        env_file = ws / ".env"
+        env_file.write_text("API_KEY=x\n", encoding="utf-8")
+
+        result = await move_file(source=str(env_file), destination=str(ws / "leak.txt"), workspace=str(ws))
+
+        assert result.success is False
+        assert env_file.exists()
+
+    async def test_normal_file_unaffected(self, tmp_path: Path) -> None:
+        """非凭据文件不受敏感名单影响（防误伤性质断言）。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        target = ws / "environment.txt"
+        target.write_text("ok\n", encoding="utf-8")
+
+        result = await file_read(path=str(target), workspace=str(ws))
+
+        assert result.success is True
 
     async def test_read_inside_workspace_no_warning(self, tmp_path: Path) -> None:
         """workspace 内读取正常，不产生越界告警。"""
@@ -418,3 +482,25 @@ class TestPathToolsWorkspaceAnchoring:
         result = await enhanced_search("x", path=".")
         assert result.success is False
         assert "未注入" in result.error
+
+
+class TestSensitiveFileNameNormalization:
+    """S3：凭据名单比较大小写/尾随字符归一（Windows FS 同名等价）。"""
+
+    @pytest.mark.parametrize("name", [".ENV", ".Env", ".env ", ".env.", ".ENV."])
+    def test_env_case_and_trailing_variants_denied(self, tmp_path: Path, name: str) -> None:
+        reason = fs_tools._sensitive_file_reason(tmp_path / name)
+        assert reason is not None, f"{name!r} 与 .env 在宿主 FS 同名等价，必须拒"
+
+    @pytest.mark.parametrize("name", ["ID_RSA", "id_ed25519.pub".replace("pub", "PEM"), "server.PEM"])
+    def test_key_case_variants_denied(self, tmp_path: Path, name: str) -> None:
+        reason = fs_tools._sensitive_file_reason(tmp_path / name)
+        assert reason is not None, f"{name!r} 是既有凭据名的大小写变体，必须拒"
+
+    def test_env_example_still_allowed_after_normalization(self, tmp_path: Path) -> None:
+        assert fs_tools._sensitive_file_reason(tmp_path / ".env.example") is None
+        assert fs_tools._sensitive_file_reason(tmp_path / ".ENV.EXAMPLE") is None
+
+    def test_normal_files_unaffected(self, tmp_path: Path) -> None:
+        assert fs_tools._sensitive_file_reason(tmp_path / "readme.md") is None
+        assert fs_tools._sensitive_file_reason(tmp_path / "environment") is None

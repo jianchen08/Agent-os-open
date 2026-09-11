@@ -214,8 +214,8 @@ fn check_one(manifest_path: &Path) -> CheckReport {
     }
 
     // 2. native 产物预检（与 loader validate_manifest_internal 同规则：裸名按平台
-    // 补 cdylib 后缀，与真实加载路径一致——否则 `pipeline_tool_core_native` 声明
-    // 会因磁盘上是 `..._native.dll` 而被误判缺失）
+    // 补 cdylib 后缀，与真实加载路径一致——否则 cdylib 形态插件（`<id>_native`）
+    // 声明会因磁盘上是 `..._native.dll` 而被误判缺失）
     if let Some(native) = &manifest.native {
         let artifact_path = plugin_dir.join(
             agentos_plugin_loader::NativePluginLoader::platform_artifact_name(&native.artifact),

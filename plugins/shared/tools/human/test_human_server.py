@@ -519,7 +519,10 @@ async def test_interaction_create_choice_and_respond_roundtrip(server: Any, real
     assert created["status"] == "pending"
     rid = created["request_id"]
 
-    responded = await server.interaction_respond(rid, "approved", selected_option="批准", feedback="同意")
+    responded = await server.interaction_respond(
+        rid,
+        {"response_type": "approved", "selected_option": "批准", "feedback": "同意"},
+    )
     assert responded == {"ok": True, "request_id": rid, "status": "submitted"}
 
     waited = await server.interaction_wait_for_choice(rid, timeout=5)
@@ -530,7 +533,7 @@ async def test_interaction_create_choice_and_respond_roundtrip(server: Any, real
 
 async def test_interaction_respond_unknown_request(server: Any, real_service: Any) -> None:
     """interaction.respond：未知请求 → ok=False / not_found。"""
-    result = await server.interaction_respond("no-such", "approved")
+    result = await server.interaction_respond("no-such", {"response_type": "approved"})
     assert result == {"ok": False, "request_id": "no-such", "status": "not_found"}
 
 

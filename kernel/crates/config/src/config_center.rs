@@ -237,9 +237,19 @@ impl ConfigCenter {
         std::fs::write(&tmp_path, content).map_err(|e| ConfigError::Io {
             message: e.to_string(),
         })?;
-        std::fs::rename(&tmp_path, &abs_path).map_err(|e| ConfigError::Io {
-            message: e.to_string(),
-        })?;
+        if let Err(e) = std::fs::rename(&tmp_path, &abs_path) {
+            // rename 失败 best-effort 清 tmp（D7：不留 .tmp 残骸）
+            if let Err(cleanup_err) = std::fs::remove_file(&tmp_path) {
+                tracing::warn!(
+                    target = %tmp_path.display(),
+                    error = %cleanup_err,
+                    "清理 .tmp 残骸失败"
+                );
+            }
+            return Err(ConfigError::Io {
+                message: e.to_string(),
+            });
+        }
 
         // 刷新缓存：直接用新内容 + 新 mtime，让 load() 立即读到
         let new_value: serde_json::Value =
@@ -247,6 +257,7 @@ impl ConfigCenter {
                 path: path_str.clone(),
                 message: e.to_string(),
             })?;
+        crate::loader::validate_schema_version(&new_value, &path_str)?;
         let new_mtime = abs_path
             .metadata()
             .and_then(|m| m.modified())
@@ -293,63 +304,29 @@ impl ConfigCenter {
         }
 
         let mut result = serde_json::Map::new();
-        self.collect_dir_recursive(&abs_dir, &mut result)?;
-        Ok(result)
-    }
-
-    /// 递归收集目录内容到 config_map（结构对齐 collect_yaml_configs）。
-    fn collect_dir_recursive(
-        &self,
-        dir: &Path,
-        config_map: &mut serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), ConfigError> {
-        let entries = std::fs::read_dir(dir).map_err(|e| ConfigError::Io {
-            message: e.to_string(),
-        })?;
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-
-            if path.is_dir() {
-                let dir_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let mut sub_map = serde_json::Map::new();
-                self.collect_dir_recursive(&path, &mut sub_map)?;
-                if !sub_map.is_empty() {
-                    config_map.insert(dir_name, serde_json::Value::Object(sub_map));
-                }
-            } else if path.is_file() {
-                // 跳过隐藏文件
-                let is_hidden = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().starts_with('.'))
-                    .unwrap_or(false);
-                if is_hidden {
-                    continue;
-                }
-                // 只处理 yaml/yml
-                let ext = path.extension().map(|e| e.to_string_lossy().to_string());
-                if ext.as_deref() != Some("yaml") && ext.as_deref() != Some("yml") {
-                    continue;
-                }
-                let stem = path
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                // 复用 load()（mtime 缓存 + 失败回滚）；单文件失败跳过
-                match self.load(&path.to_string_lossy()) {
-                    Ok(v) => {
-                        config_map.insert(stem, v);
-                    }
-                    Err(e) => {
-                        warn!("Skipping unparseable config file {}: {}", path.display(), e);
-                    }
+        // 单文件装载复用 load()（mtime 缓存 + 失败回滚）；单文件失败告警跳过
+        let mut load_file = |path: &Path| -> Result<Option<serde_json::Value>, ConfigError> {
+            match self.load(&path.to_string_lossy()) {
+                Ok(v) => Ok(Some(v)),
+                Err(e) => {
+                    warn!("Skipping unparseable config file {}: {}", path.display(), e);
+                    Ok(None)
                 }
             }
-        }
-        Ok(())
+        };
+        let mut read_dir_error = |dir: &Path, e: std::io::Error| -> ConfigError {
+            let _ = dir;
+            ConfigError::Io {
+                message: e.to_string(),
+            }
+        };
+        agentos_core::config_scan::collect_yaml_dir(
+            &abs_dir,
+            &mut result,
+            &mut load_file,
+            &mut read_dir_error,
+        )?;
+        Ok(result)
     }
 
     /// 手动重载指定配置文件。
@@ -385,7 +362,13 @@ impl ConfigCenter {
             }
         };
 
-        let data: serde_json::Value = match serde_yaml::from_str(&content) {
+        let data: serde_json::Value = match serde_yaml::from_str(&content)
+            .map_err(|e| e.to_string())
+            .and_then(|v| {
+                crate::loader::validate_schema_version(&v, &abs_path.to_string_lossy())
+                    .map_err(|e| e.to_string())
+                    .map(|_| v)
+            }) {
             Ok(v) => v,
             Err(e) => {
                 return self.handle_load_failure(
@@ -459,7 +442,13 @@ impl ConfigCenter {
             }
         };
 
-        let data: serde_json::Value = match serde_yaml::from_str(&content) {
+        let data: serde_json::Value = match serde_yaml::from_str(&content)
+            .map_err(|e| e.to_string())
+            .and_then(|v| {
+                crate::loader::validate_schema_version(&v, &abs_path.to_string_lossy())
+                    .map_err(|e| e.to_string())
+                    .map(|_| v)
+            }) {
             Ok(v) => v,
             Err(e) => {
                 warn!("YAML parse error in {}: {}", abs_path.display(), e);
@@ -498,12 +487,10 @@ impl ConfigCenter {
                     for path in &event.paths {
                         let path_str = path.to_string_lossy().to_string();
 
-                        // 过滤非 YAML 文件
                         if path.extension().is_none_or(|e| e != "yaml" && e != "yml") {
                             continue;
                         }
 
-                        // 过滤临时文件
                         let name = path
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
@@ -514,7 +501,6 @@ impl ConfigCenter {
 
                         let config_type = Self::determine_config_type(&path_str);
 
-                        // 删除事件
                         if matches!(event.kind, EventKind::Remove(_)) {
                             let mut h = hashes.write();
                             let mut c = cache.write();
@@ -543,7 +529,7 @@ impl ConfigCenter {
                             continue;
                         }
 
-                        // 创建/修改事件
+                        // 创建/修改事件：文件须仍存在（Remove 事件同路径先行已处理）
                         if !path.exists() {
                             continue;
                         }
@@ -581,7 +567,13 @@ impl ConfigCenter {
                         }
 
                         // 解析 — 失败时走 handle_load_failure 逻辑（保留旧配置 + 审计）
-                        let data: serde_json::Value = match serde_yaml::from_str(&content) {
+                        let data: serde_json::Value = match serde_yaml::from_str(&content)
+                            .map_err(|e| e.to_string())
+                            .and_then(|v| {
+                                crate::loader::validate_schema_version(&v, &path_str)
+                                    .map_err(|e| e.to_string())
+                                    .map(|_| v)
+                            }) {
                             Ok(v) => v,
                             Err(e) => {
                                 let error_msg = format!("YAML parse error: {}", e);
@@ -611,7 +603,6 @@ impl ConfigCenter {
                             }
                         };
 
-                        // 更新缓存
                         {
                             let mut h = hashes.write();
                             let mut c = cache.write();
@@ -1348,5 +1339,36 @@ mod tests {
             },
             Duration::from_secs(5),
         );
+    }
+
+    #[test]
+    fn test_store_rename_failure_cleans_tmp() {
+        // D7：rename 失败（目标被同名目录占位模拟占用）→ Err 且 .tmp 被清理
+        let temp = tempfile::tempdir().unwrap();
+        let center = ConfigCenter::new(temp.path());
+        let occupied = temp.path().join("occupied.yaml");
+        std::fs::create_dir_all(&occupied).unwrap();
+        assert!(
+            center
+                .store(
+                    "occupied.yaml",
+                    "a: 1
+"
+                )
+                .is_err(),
+            "目标被目录占位时 rename 必败"
+        );
+        assert!(
+            !temp.path().join("occupied.yaml.tmp").exists(),
+            "rename 失败后 .tmp 残骸必须被清理"
+        );
+        // 成功路径回归：正常目标写入成功
+        center
+            .store(
+                "ok.yaml", "a: 1
+",
+            )
+            .unwrap();
+        assert!(temp.path().join("ok.yaml").exists());
     }
 }

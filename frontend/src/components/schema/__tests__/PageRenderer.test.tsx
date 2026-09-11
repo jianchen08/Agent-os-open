@@ -11,14 +11,14 @@
  * - StatusBar 迁移后：getPagesBySpace('dock') + slot==='status'
  */
 
-import { render, screen } from '@testing-library/react'
-import { renderWithProviders } from '@/test/renderWithProviders'
+import { screen } from '@testing-library/react'
 import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Sidebar } from '@/components/layout/Sidebar'
 import { PluginStatusItems } from '@/components/layout/StatusItems'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import { PageRenderer, renderPageContent, schemaToFields } from '../PageRenderer'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 

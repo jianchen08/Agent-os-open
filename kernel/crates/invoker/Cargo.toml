@@ -26,3 +26,5 @@ tempfile = "3"
 uuid.workspace = true
 chrono.workspace = true
 wat = "1"
+# test-util：tokio paused time（fake clock）供时序测试注入可调延迟
+tokio = { workspace = true, features = ["full", "test-util"] }

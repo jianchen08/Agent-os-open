@@ -242,5 +242,6 @@
   "export_fields": [
     "task.owned.*",
     "task.submitted_by"
-  ]
+  ],
+  "host_group": "light"
 }

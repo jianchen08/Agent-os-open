@@ -26,14 +26,16 @@
 #        → python_full: SDK Lint/Test + Python Coverage（插桩）/ Heavy（免插桩）+ Timing
 #        → related: 变更关联测试（plugins-related-tests）
 #        → 恒跑: Pre-commit / TDD / Traceability
-#        （真实 LLM E2E 已拆至 e2e.yml：nightly/手动/push main，密钥预检）
+#        （真实 LLM E2E 已拆至 e2e.yml：nightly/手动/push main 与 dev/*，密钥预检）
 #
 # 触发条件：
 #   - push 到 main / dev/* 分支（实际开发分支是 dev/0.2）
 #   - Pull Request 到 main / dev/* 分支
 #
 # 缓存策略：
-#   - Swatinem/rust-cache 跨 job 共享（shared-key: agentos-0.2）
+#   - Swatinem/rust-cache 跨 job 共享（shared-key: agentos-0.2）；
+#     恢复发生在 uses 步执行时（post 阶段才保存），故该步必须排在一切
+#     cargo 编译步之前——排后=恢复永远无效（每次冷编译）
 #   - sccache 加速 Rust 编译（RUSTC_WRAPPER）
 #
 # 权限：PR 级流水线最小权限（contents: read），不持有任何写权限；
@@ -125,15 +127,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run gates (kernel-fmt, kernel-clippy)
-        working-directory: ${{ github.workspace }}
-        run: python scripts/run_gates.py --filter kernel-fmt,kernel-clippy
-
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: kernel
           shared-key: agentos-0.2
+
+      - name: Run gates (kernel-fmt, kernel-clippy)
+        working-directory: ${{ github.workspace }}
+        run: python scripts/run_gates.py --filter kernel-fmt,kernel-clippy
 
   # ── Rust Build ─────────────────────────────────────────────
   rust-build:
@@ -162,14 +164,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run gates (kernel-build, kernel-build-release)
-        run: python scripts/run_gates.py --filter kernel-build,kernel-build-release
-
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: kernel
           shared-key: agentos-0.2
+
+      - name: Run gates (kernel-build, kernel-build-release)
+        run: python scripts/run_gates.py --filter kernel-build,kernel-build-release
 
   # ── Rust Test ─────────────────────────────────────────────
   # 覆盖全插件热加载单测（invoker 的指纹/TTL/force_unload 单测在 agentos-invoker crate 内）：
@@ -208,14 +210,14 @@ jobs:
       - name: Install SDK (config_injection 等测试 spawn 真 python sidecar)
         run: pip install -e ./plugins/sdk
 
-      - name: Run gates (kernel-test + 失败数基线锁)
-        run: python scripts/run_gates.py --filter kernel-test
-
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: kernel
           shared-key: agentos-0.2
+
+      - name: Run gates (kernel-test + 失败数基线锁)
+        run: python scripts/run_gates.py --filter kernel-test
 
   # ── Rust Coverage（llvm-cov 插桩度量；整体基线 2026-09-01 挂起）────────
   # cargo-llvm-cov 产出 lcov，check_rust_coverage_baseline.py 解析 line% 对照
@@ -259,16 +261,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run gates (kernel-coverage + 改动行 100%)
-        env:
-          GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: python scripts/run_gates.py --filter kernel-coverage,kernel-diff-coverage
-
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: kernel
           shared-key: agentos-0.2
+
+      - name: Run gates (kernel-coverage + 改动行 100%)
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: python scripts/run_gates.py --filter kernel-coverage,kernel-diff-coverage
 
   # ── Rust Dependency Audit（cargo-deny 门禁）──────────────────────────────
   # Rust 依赖安全审计（rust_dependency_review 报告 §二 #1）：RUSTSEC 公告 +
@@ -303,14 +305,14 @@ jobs:
       # cargo-deny 走 cargo metadata（rustc -vV）；本 job 未装 sccache，
       # 全局 env 的 RUSTC_WRAPPER 指向不存在二进制会直接炸——置空（与
       # python-heavy-suites 的 native build 步同款防御）。
-      - name: Run gates (rust-deny)
-        run: RUSTC_WRAPPER= python scripts/run_gates.py --filter rust-deny
-
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: kernel
           shared-key: agentos-0.2
+
+      - name: Run gates (rust-deny)
+        run: RUSTC_WRAPPER= python scripts/run_gates.py --filter rust-deny
 
   # ── Python Lint（插件 SDK）─────────────────────────────────
   # 注：sdk-mypy 的路径参数由 run_gates.py 统一持有（cwd=plugins/sdk 下
@@ -471,7 +473,7 @@ jobs:
           for lock in $(git ls-files 'plugins/**/uv.lock' | sort -u); do
             d=$(dirname "$lock")
             echo "::group::uv sync $d"
-            if ! uv sync --project "$d"; then
+            if ! uv sync --frozen --project "$d"; then
               echo "::error::uv sync failed: $d"
               failed=1
             fi
@@ -567,8 +569,10 @@ jobs:
   # 专门运行标记了 @pytest.mark.timing 的用例（事件顺序 / 间隔 / 超时边界）。
   # 与单元测试 stage 隔离运行（避免真实延迟影响主套件稳定性）；
   # 失败**直接拦截合并**，与单测同级，禁止降级为 warning 或 `|| true`。
-  # 当前覆盖：test_isolation_docker_timeout.py 超时边界（3 个 @pytest.mark.timing）
-  #   + test_pipeline_stability.py 事件循环时序（1 个），见 run_gates.py timing-gate。
+  # 收录面：按 marker 全量收集 tests/（run_gates.py timing-gate，唯一归口；
+  # 普通插件车道与 e2e 车道均 -m "not timing" 排除）。需真实内核二进制的
+  # 时序用例（如 e2e_02 S1）在本 job 无二进制时按自身 skipif 跳过，由本地
+  # timing-gate 承接。
   timing:
     name: Timing Gate (时序不变量, 独立阻塞)
     runs-on: ubuntu-latest
@@ -631,10 +635,10 @@ jobs:
       - name: Install dependencies (pnpm workspace,根 lock；不同步直接红——安全审查：禁 fallback 绕过锁定)
         run: pnpm install --frozen-lockfile
 
-      - name: Run gates (typecheck + lint 基线 + coverage 基线 + 改动行 100%)
+      - name: Run gates (typecheck + lint 基线 + coverage 基线 + 改动行 100% + any/大文件冻结)
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage,frontend-diff-coverage
+        run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage,frontend-diff-coverage,frontend-any-baseline
 
   # ── Frontend E2E 冒烟（零后端依赖）──────────────────────────────────────
   # PR 级 e2e 门禁：构建前端 → vite preview 服务于 5188 → 跑零外部依赖冒烟子集
@@ -726,6 +730,35 @@ jobs:
   # .pre-commit-config.yaml 自述为"项目代码质量门禁的入口"。
   # 归属说明：pre-commit 的承诺由本 job（pre-commit/action，非零退出）持有，
   # 不进 run_gates.py（避免同一承诺两个所有者）。
+  # ── Secret Scan（gitleaks 全仓全历史，恒跑）─────────────────────────────
+  # 密钥扫描不分车道（任何提交面都可能夹带密钥）。
+  # - .gitleaks.toml：精确放行 env 占位符 + 测试 fixture 哑 key（按路径+字面）。
+  # - .github/gitleaks-baseline.json：存量历史命中基线（0.1 时代遗留/已删
+  #   文件/文档样例，报告全脱敏可入库）；只有【新增】命中才红。清理存量后
+  #   重生成基线以收紧：gitleaks detect --source . --redact
+  #   --report-format json --report-path .github/gitleaks-baseline.json。
+  # - fetch-depth: 0 必须：gitleaks 按 git log -p 全历史扫描，浅克隆下基线
+  #   fingerprint（commit:file:rule:line）对不上会整体误红。
+  # - 本地生成基线与 CI 同参验证过（gitleaks 8.28.0，--log-opts=--all
+  #   → no leaks found）；改扫描参数须同步重生成基线。
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0  # 全历史扫描 + 基线 fingerprint 对齐
+
+      - name: Install gitleaks (pinned 8.28.0)
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz -o /tmp/gitleaks.tgz
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Detect secrets (redacted, baseline-aware, fail on new leaks)
+        run: gitleaks detect --source . --redact --baseline-path .github/gitleaks-baseline.json --log-opts="--all"
+
   pre-commit:
     name: Pre-commit (ruff + mypy + 基础检查)
     runs-on: ubuntu-latest
@@ -768,7 +801,7 @@ jobs:
         run: python scripts/run_gates.py --filter tdd-gate
 
   # ── Traceability Gate（测试追溯标记闭环）────────────────────────────────
-  # 强制每个测试文件带合法 @feature（引用闭环到 docs/test_traceability.md）。
+  # 强制每个测试文件带合法 @feature（引用闭环到 docs/working/test_traceability.md）。
   # 非法标记（引用不存在的功能点/愿景/审查号）→ 硬失败；
   # 未标记文件数走"只减不增"基线锁（.github/traceability-baseline.txt）。
   traceability-gate:
@@ -813,6 +846,7 @@ jobs:
       - frontend-e2e
       - electron-compile
       - pre-commit
+      - secret-scan
       - tdd-gate
       - traceability-gate
     steps:

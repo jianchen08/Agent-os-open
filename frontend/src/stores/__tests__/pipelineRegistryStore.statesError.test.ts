@@ -11,25 +11,21 @@
  * 3. reset 清空 runs 缓存。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
 const mockFetchPipelineRuns = vi.fn()
 const mockFetchPipelineStates = vi.fn()
-
 vi.mock('@/services/api/pipelines', () => ({
   fetchPipelineRuns: (...args: unknown[]) => mockFetchPipelineRuns(...args),
   fetchPipelineStates: (...args: unknown[]) => mockFetchPipelineStates(...args),
 }))
-
 vi.mock('@/stores/pipelineMessageStore', () => ({
   usePipelineMessageStore: {
     getState: () => ({ pipelineSessionMap: {}, pipelines: {} }),
   },
 }))
-
+import { readPipelineRuns } from '@/hooks/queries/usePipelineRunsQuery'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 import { usePipelineRegistryStore } from '../pipelineRegistryStore'
-import { readPipelineRuns } from '@/hooks/queries/usePipelineRunsQuery'
 
 describe('pipelineRegistryStore 批次 4 query 化', () => {
   beforeEach(() => {

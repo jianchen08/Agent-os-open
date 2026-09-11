@@ -17,5 +17,11 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "state": {
+    "reads": [
+      "has_multimodal",
+      "raw_result"
+    ]
+  }
 }

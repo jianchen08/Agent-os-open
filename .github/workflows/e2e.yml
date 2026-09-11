@@ -65,10 +65,13 @@ jobs:
   # 覆盖 tests/e2e_02 全部 Python e2e（01 内核 API/02 认证与管道 chat/
   # 04 审批闭环/05 管道/06 WS 流式/07 插件生命周期/08 任务状态/
   # 09 Godot 选中桥/10 合宿分组/11 聊天顺序/12 完成性防假完成/
-  # 13 工作空间模式/任务收束三信号路径矩阵——后者自带 stub LLM 上游，
-  # 无需 key 也零 mock）；02 前端浏览器套件依赖 Vite dev
+  # 13 工作空间模式/14 产物保全/任务收束三信号路径矩阵——后者自带 stub
+  # LLM 上游，无需 key 也零 mock）；02 前端浏览器套件依赖 Vite dev
   # server 与 Chromium，本车道不提供，故不在列。
   # 依赖真实 LLM 的用例带 skipif 守卫：无 secrets.ZHIPU_API_KEY 时自动跳过。
+  # 14 产物保全另依赖 Docker（bash 容器隔离），runner 自带；shared 蒸发
+  # 用例 xfail(strict) 契约先行——修复落地前红属预期（xfail 不入账），
+  # 转绿即 XPASS 报错提示摘标。
   e2e:
     name: Python E2E (kernel + e2e_02, real LLM)
     runs-on: ubuntu-latest
@@ -76,6 +79,12 @@ jobs:
     if: needs.check-key.outputs.has_key == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Cache Rust artifacts (shared-key 与 ci.yml 共享兜底)
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: kernel
+          shared-key: agentos-0.2
 
       - name: sccache best-effort (workflow 级 RUSTC_WRAPPER 兜底)
         run: |
@@ -109,7 +118,7 @@ jobs:
           for lock in $(git ls-files 'plugins/**/uv.lock' | sort -u); do
             d=$(dirname "$lock")
             echo "::group::uv sync $d"
-            if ! uv sync --project "$d"; then
+            if ! uv sync --frozen --project "$d"; then
               echo "::error::uv sync failed: $d"
               failed=1
             fi
@@ -159,7 +168,7 @@ jobs:
           # github.workspace 经 env 注入而非内插 run（安全审查：表达式内插 shell 的规范写法）
           PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src
         run: |
-          uv run --frozen python -m pytest -q \
+          uv run --frozen python -m pytest -q -m "not timing" \
             tests/e2e_02/test_01_kernel_api.py \
             tests/e2e_02/test_02_auth_pipeline_e2e.py \
             tests/e2e_02/test_04_approval_flow.py \
@@ -169,7 +178,7 @@ jobs:
             tests/e2e_02/test_08_task_state_flow.py \
             tests/e2e_02/test_09_godot_selection_bridge.py \
             tests/e2e_02/test_10_cohost_host_grouping.py \
-            tests/e2e_02/test_11_chat_order_parity.py             tests/e2e_02/test_12_pipeline_completion_e2e.py             tests/e2e_02/test_13_workspace_modes_e2e.py             tests/e2e_02/test_task_lifecycle_paths_e2e.py
+            tests/e2e_02/test_11_chat_order_parity.py             tests/e2e_02/test_12_pipeline_completion_e2e.py             tests/e2e_02/test_13_workspace_modes_e2e.py             tests/e2e_02/test_14_artifact_preservation_e2e.py             tests/e2e_02/test_task_lifecycle_paths_e2e.py
 
       - name: Show kernel log on failure
         if: failure()

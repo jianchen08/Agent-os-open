@@ -31,6 +31,33 @@ const ENV_VAR_PATTERN: &str = r"\$\{([^}:]+)(?::-([^}]*))?\}";
 ///
 /// 与 0.1 PromptBuildPlugin._resolve_placeholders 中的 path 类型一致。
 /// [来源: src/plugins/input/prompt_build/plugin.py L115-117]
+/// 配置 schema 版本：当前支持的版本列表。
+///
+/// H10（契约冻结审计）：配置文件顶层可声明 `schema_version`，加载时校验——
+/// 声明了但不支持 → 显式报错（不猜、不静默降级）；未声明 → 放行（目录级
+/// 配置渐进采用，触即清）。目录配置全面采用前，缺省放行是兼容契约。
+pub const SUPPORTED_CONFIG_SCHEMA_VERSIONS: &[i64] = &[1];
+
+/// 校验配置映射的顶层 `schema_version` 声明（存在才校验）。
+pub fn validate_schema_version(data: &Value, source: &str) -> Result<(), ConfigError> {
+    let Some(v) = data.get("schema_version") else {
+        return Ok(());
+    };
+    let declared = v
+        .as_i64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()));
+    match declared {
+        Some(ver) if SUPPORTED_CONFIG_SCHEMA_VERSIONS.contains(&ver) => Ok(()),
+        other => Err(ConfigError::YamlParse {
+            path: source.to_string(),
+            message: format!(
+                "不支持的 config schema_version: {:?}（支持 {:?}）——配置由更新版本内核写出，禁止猜测语义",
+                other, SUPPORTED_CONFIG_SCHEMA_VERSIONS
+            ),
+        }),
+    }
+}
+
 const PATH_REF_PATTERN: &str = r"\{\{path:([^}]+)\}\}";
 
 /// 配置加载器。
@@ -269,6 +296,7 @@ impl ConfigLoader {
                 path: source_path.to_string(),
                 message: format!("YAML to JSON conversion error: {}", e),
             })?;
+        validate_schema_version(&parsed, source_path)?;
 
         self.substitute_env_vars(&parsed)
     }
@@ -354,26 +382,24 @@ fn expand_merge_keys(value: serde_yaml::Value) -> serde_yaml::Value {
 
             let merge_key = serde_yaml::Value::String("<<".to_string());
             if let Some(merge_val) = map.remove(&merge_key) {
-                match merge_val {
-                    serde_yaml::Value::Mapping(merge_map) => {
-                        for (k, v) in merge_map {
-                            if !map.contains_key(&k) {
-                                map.insert(k, v);
-                            }
-                        }
-                    }
+                // merge 来源归一为 Mapping 迭代器：单映射 = 单元素；序列 =
+                // 逐项过滤出 Mapping（按声明序，先到先得）；其他类型 = 空。
+                let merge_maps: Box<dyn Iterator<Item = serde_yaml::Mapping>> = match merge_val {
+                    serde_yaml::Value::Mapping(m) => Box::new(std::iter::once(m)),
                     serde_yaml::Value::Sequence(seq) => {
-                        for item in seq {
-                            if let serde_yaml::Value::Mapping(merge_map) = item {
-                                for (k, v) in merge_map {
-                                    if !map.contains_key(&k) {
-                                        map.insert(k, v);
-                                    }
-                                }
-                            }
+                        Box::new(seq.into_iter().filter_map(|item| match item {
+                            serde_yaml::Value::Mapping(m) => Some(m),
+                            _ => None,
+                        }))
+                    }
+                    _ => Box::new(std::iter::empty()),
+                };
+                for merge_map in merge_maps {
+                    for (k, v) in merge_map {
+                        if !map.contains_key(&k) {
+                            map.insert(k, v);
                         }
                     }
-                    _ => {}
                 }
             }
 
@@ -479,6 +505,49 @@ impl CompositePluginYaml {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_schema_version_supported_passes() {
+        let cfg = ConfigLoader::new(".", None);
+        let parsed = cfg
+            .parse_yaml(
+                "schema_version: 1
+key: value
+",
+                "t.yaml",
+            )
+            .unwrap();
+        assert_eq!(parsed["key"], "value");
+    }
+
+    #[test]
+    fn test_schema_version_unsupported_rejected_explicitly() {
+        let cfg = ConfigLoader::new(".", None);
+        let err = cfg
+            .parse_yaml(
+                "schema_version: 99
+key: value
+",
+                "t.yaml",
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("schema_version"), "实际: {msg}");
+        assert!(msg.contains("99"), "实际: {msg}");
+    }
+
+    #[test]
+    fn test_schema_version_absent_passes_backcompat() {
+        let cfg = ConfigLoader::new(".", None);
+        let parsed = cfg
+            .parse_yaml(
+                "key: value
+",
+                "t.yaml",
+            )
+            .unwrap();
+        assert_eq!(parsed["key"], "value");
+    }
+
     use super::*;
 
     #[test]
@@ -644,6 +713,31 @@ service2:
         assert_eq!(result["service1"]["name"], "svc1");
         assert_eq!(result["service2"]["timeout"], 30);
         assert_eq!(result["service2"]["name"], "svc2");
+    }
+
+    #[test]
+    fn test_yaml_merge_key_sequence_form() {
+        // merge 来源为映射序列：按声明序先到先得（后者不覆盖前者），
+        // 本键优先于一切 merge 来源；序列中的非 Mapping 项跳过。
+        let yaml = r#"
+defaults_a: &a
+  timeout: 30
+  retries: 3
+defaults_b: &b
+  retries: 9
+  extra: true
+service:
+  <<:
+    - *a
+    - *b
+    - "not-a-mapping"
+  timeout: 60
+"#;
+        let loader = ConfigLoader::new("/tmp", None);
+        let result = loader.parse_yaml(yaml, "test").unwrap();
+        assert_eq!(result["service"]["timeout"], 60, "本键覆盖 merge 来源");
+        assert_eq!(result["service"]["retries"], 3, "序列先项先得，后者不覆盖");
+        assert_eq!(result["service"]["extra"], true, "序列后项的新键正常并入");
     }
 
     #[test]

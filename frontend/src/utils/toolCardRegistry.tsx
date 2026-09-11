@@ -8,7 +8,7 @@
  */
 
 import { resolveChatCardIcon } from './chatCardIconRegistry'
-import { interpretChatCard, getChatCardDeclaration, type ToolCallContext } from './chatCardInterpreter'
+import { interpretChatCard, getChatCardDeclaration, isSafeOpenUrl, type ToolCallContext } from './chatCardInterpreter'
 import {
   applyDataDrivenIntent,
   applyRenderIntent,
@@ -69,6 +69,9 @@ export function getGlobalImagePreviewCallback(): (src: string) => void {
   return (
     globalImagePreview ||
     ((src: string) => {
+      // 兜底新标签打开与 open_url 同协议白名单：preview src 可能来自插件
+      // 输出（不可信面），javascript:/data: 等协议不得经 window.open 执行。
+      if (!isSafeOpenUrl(src)) return
       window.open(src, '_blank', 'noopener,noreferrer')
     })
   )
@@ -273,12 +276,11 @@ function looksLikePath(value: string): boolean {
 }
 
 /** 常用工具名的中文显示映射（L0 标题人性化） */
-const TOOL_NAME_ZH: Record<string, string> = {
+/** 中文映射表（导出仅供契约测试与 manifest 工具名对账；运行时行为不变） */
+export const TOOL_NAME_ZH: Record<string, string> = {
   file_read: '读取文件',
   file_write: '写入文件',
   bash_execute: '执行命令',
-  web_search: '网页搜索',
-  fetch: '访问网页',
   task_submit: '提交任务',
   task_manage: '任务管理',
   human_interaction: '人工交互',

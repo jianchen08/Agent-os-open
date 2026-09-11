@@ -13,8 +13,8 @@
  */
 
 import { useEffect } from 'react'
-import { shortcutRegistry, ShortcutRegistry } from '@/services/schema/shortcutRegistry'
-import { commandDispatcher, CommandDispatcher } from '@/services/schema/commandDispatcher'
+import { commandDispatcher, type CommandDispatcher } from '@/services/schema/commandDispatcher'
+import { shortcutRegistry, type ShortcutRegistry } from '@/services/schema/shortcutRegistry'
 
 /** 可编辑元素类型，聚焦时跳过快捷键 */
 const EDITABLE_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT'])

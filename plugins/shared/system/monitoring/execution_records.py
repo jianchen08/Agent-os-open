@@ -37,7 +37,7 @@ _SESSION_MSG_FETCH_LIMIT = 500
 async def recent_pipelines(limit: int = _ALL_SESSIONS_SCAN) -> list[dict[str, Any]]:
     """最近 N 个去重管道（runs 按 started_at 倒序，同管道多 run 只取最新）。
 
-    agent-calls / search 域复用同一个"最近会话扫描"边界，控制内核能力调用次数。
+    search 域复用同一个"最近会话扫描"边界，控制内核能力调用次数。
     """
     runs = await kernel_reads.list_pipeline_runs(status=None, limit=500)
     seen: set[str] = set()
@@ -229,6 +229,51 @@ async def clear_all_records(authorization: str = "") -> dict[str, Any]:
         "tables": result.get("cleared"),
         "backup_path": result.get("backup_path"),
     }
+
+
+# ── 孤儿管道观测域（1 端点；治理方案 docs/working/孤儿管道治理方案_20260909.md）──
+
+
+async def list_orphan_runs(min_minutes: int = 10, limit: int = 50) -> dict[str, Any]:
+    """running 管道按时长倒序的孤儿候选清单（观测面，人工 cancel 决策用）。
+
+    孤儿判据刻意只做"running 且时长超阈值"的客观事实呈现，不做自动终止
+    （合法长任务存在，治理方案裁定自动 cancel 误杀风险高于人工成本）。
+    """
+    from datetime import datetime, timezone
+
+    runs = await kernel_reads.list_pipeline_runs(status="running", limit=200)
+    states = {
+        row.get("pipeline_id"): row
+        for row in await kernel_reads.list_state_rows()
+        if row.get("pipeline_id")
+    }
+    now = datetime.now(timezone.utc)
+    items: list[dict[str, Any]] = []
+    for run in runs:
+        started = run.get("started_at") or ""
+        try:
+            age_minutes = (now - datetime.fromisoformat(started.replace("Z", "+00:00"))).total_seconds() / 60
+        except (TypeError, ValueError):
+            continue
+        if age_minutes < min_minutes:
+            continue
+        pid = run.get("pipeline_id") or ""
+        state = states.get(pid, {})
+        items.append({
+            "run_id": run.get("run_id"),
+            "pipeline_id": pid,
+            "thread_id": run.get("thread_id"),
+            "title": state.get("display_name") or state.get("task.goal") or pid[:12],
+            "task_status": state.get("task.status"),
+            "current_phase": state.get("current_phase"),
+            "suspended": state.get("suspended"),
+            "started_at": started,
+            "age_minutes": round(age_minutes, 1),
+            "message_count": state.get("message_count"),
+        })
+    items.sort(key=lambda r: r["age_minutes"], reverse=True)
+    return {"items": items[:limit], "total": len(items), "min_minutes": min_minutes}
 
 
 # ── sessions token-usage 域（2 端点）────────────────────────────────────

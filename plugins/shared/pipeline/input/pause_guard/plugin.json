@@ -17,5 +17,10 @@
   },
   "permissions": {},
   "priority": 50,
-  "host_group": "light"
+  "host_group": "light",
+  "state": {
+    "reads": [
+      "task.id"
+    ]
+  }
 }

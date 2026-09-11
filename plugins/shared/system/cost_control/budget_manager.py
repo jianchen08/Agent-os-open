@@ -102,7 +102,6 @@ class BudgetManager:
         self.config = config or get_cost_control_config()
         self.alert_callback = alert_callback
 
-        # 使用量跟踪
         self._daily_usage: dict[str, int] = {}  # user_id -> tokens
         self._monthly_usage: dict[str, int] = {}  # user_id -> tokens
         self._task_usage: dict[str, int] = {}  # task_id -> tokens
@@ -116,17 +115,14 @@ class BudgetManager:
         self._global_daily_reserved: int = 0
         self._global_monthly_reserved: int = 0
 
-        # 使用记录
         self._usage_records: list[UsageRecord] = []
 
-        # 时间跟踪
         self._day_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         self._month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # 告警状态（防止重复告警）
+        # 防止重复告警
         self._last_alerts: dict[str, BudgetAlertLevel] = {}
 
-        # 锁
         self._lock = asyncio.Lock()
 
     async def check_budget(
@@ -286,28 +282,22 @@ class BudgetManager:
                     quota_type="monthly",
                 )
 
-            # 计算成本
             cost_rate = self.config.get_model_cost_rate(model)
             cost = (tokens / 1000) * cost_rate
 
-            # 更新全局使用量
             self._global_daily_usage += tokens
             self._global_monthly_usage += tokens
 
-            # 更新用户使用量
             if user_id:
                 self._daily_usage[user_id] = self._daily_usage.get(user_id, 0) + tokens
                 self._monthly_usage[user_id] = self._monthly_usage.get(user_id, 0) + tokens
 
-            # 更新任务使用量
             if task_id:
                 self._task_usage[task_id] = self._task_usage.get(task_id, 0) + tokens
 
-            # 更新会话使用量
             if session_id:
                 self._session_usage[session_id] = self._session_usage.get(session_id, 0) + tokens
 
-            # 记录使用
             record = UsageRecord(
                 tokens=tokens,
                 model=model,

@@ -118,7 +118,7 @@ class VideoGenerateTool(BuiltinTool):
         """执行视频生成。
 
         F-MEDIA-2：经 capability 调用后端服务（未注入调用方时显式
-        PROVIDER_UNAVAILABLE）。0.1 的 not_configured 成功态已废除（不降级空转）。
+        PROVIDER_UNAVAILABLE）——不降级空转、不伪装成功。
 
         Args:
             inputs: 工具输入参数，包含 prompt（必填）

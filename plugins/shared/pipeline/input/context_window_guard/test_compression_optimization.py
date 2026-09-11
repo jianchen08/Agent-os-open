@@ -9,7 +9,8 @@
 3. test_l1_l2_blocks_tagged_recall —— prompt_build 产出的 L1/L2 压缩块消息打 _context_form="recall"
 4. test_state_snapshot_message_tagged_snapshot —— 状态快照消息打 _context_form="snapshot"
 5. test_build_messages_strips_context_form —— llm_core 发给最终 LLM 前清理 _context_form
-6. test_normalize_results_tags_recall —— memory_read 检索结果条目打 _context_form="recall"
+（原第 6 项 memory_read 检索条目打标随 memory_read 插件删除退役——批次G
+fef1e325c 检索收敛，检索面不复存在）
 
 任务 2 —— fork 消息队列压缩（对标 DSH summarizer，产物结构不变）：
 7. test_compress_all_sends_message_list —— 压缩调用发消息列表，fork = [system] +
@@ -34,7 +35,6 @@ import importlib.util
 import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -56,7 +56,7 @@ _INPUT_DIR = str(_PLUGIN_DIR.parents[0])
 if _INPUT_DIR not in sys.path:
     sys.path.insert(0, _INPUT_DIR)
 
-# llm_core 插件目录（import adapter / _message_normalizer 用）
+# llm_core 插件目录（import adapter / uploads_path 用）
 _LLM_CORE_DIR = str(_PLUGIN_DIR.parents[1] / "core" / "llm_core")
 if _LLM_CORE_DIR not in sys.path:
     sys.path.insert(0, _LLM_CORE_DIR)
@@ -87,21 +87,16 @@ def _load_cwg() -> Any:
     return _load_module("cwg_compress_opt_test", ("input", "context_window_guard", "plugin.py"))
 
 
-def _load_memory_read() -> Any:
-    """加载 memory_read plugin 模块。"""
-    return _load_module("mr_compress_opt_test", ("input", "memory_read", "plugin.py"))
-
-
 def _load_llm_core() -> Any:
     """加载 llm_core plugin 模块（spec 加载避免裸名 'plugin' 跨文件冲突）。
 
-    llm_core/plugin.py 平铺 import 本目录模块（adapter/_message_normalizer/
-    uploads_path），全车道共跑时这些裸名可能被其他插件
+    llm_core/plugin.py 平铺 import 本目录模块（adapter/uploads_path），
+    全车道共跑时这些裸名可能被其他插件
     目录的同名模块（7 个 adapter.py 等）占据 sys.modules 或 sys.path 优先位。
     加载窗口内 pin 住：逐出裸名缓存 + llm_core 目录压 sys.path[0]，执行完
     还原现场，保证解析到本目录实现且不污染其他测试。
     """
-    bare_names = ("adapter", "_message_normalizer", "uploads_path")
+    bare_names = ("adapter", "uploads_path")
     saved = {n: sys.modules.get(n) for n in bare_names}
     for n in bare_names:
         sys.modules.pop(n, None)
@@ -258,7 +253,7 @@ class TestLLMCoreStripsContextForm:
 
     def _build(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         mod = _load_llm_core()
-        core = mod.LLMCore(config={"model_name": "test"}, adapter=MagicMock())
+        core = mod.LLMCore(config={"model_name": "test"})
         return core._build_messages(state)
 
     def test_build_messages_strips_context_form(self) -> None:
@@ -293,27 +288,6 @@ class TestLLMCoreStripsContextForm:
         contents = [m.get("content", "") for m in built]
         assert any("<compressed>摘要</compressed>" in c for c in contents)
         assert any("历史消息" in c for c in contents)
-
-
-class TestMemoryReadTagsRecall:
-    """memory_read 检索结果条目打 _context_form="recall"。"""
-
-    def test_normalize_results_tags_recall(self) -> None:
-        mod = _load_memory_read()
-        sample = {
-            "id": "m1",
-            "content": "记忆内容1",
-            "score": 0.95,
-            "memory_type": "semantic",
-            "metadata": {"tags": []},
-        }
-        normalized = mod.MemoryReadPlugin._normalize_results([sample])
-
-        assert normalized, "应归一化出结果"
-        assert normalized[0]["_context_form"] == "recall"
-        # 原有字段原样保留
-        assert normalized[0]["content"] == "记忆内容1"
-        assert normalized[0]["id"] == "m1"
 
 
 # ═══════════════════════════════════════════════════════════

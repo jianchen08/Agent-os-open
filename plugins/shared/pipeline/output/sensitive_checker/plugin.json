@@ -18,5 +18,10 @@
     "lifecycle_hooks": []
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "state": {
+    "reads": [
+      "tool_results"
+    ]
+  }
 }

@@ -1,5 +1,8 @@
 /** 复现测试：发送新消息后上一条 AI 回复重复 Bug 场景： */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as handlersMod from '@/services/websocket/streaming/handlers'
+import type * as utilsMod2 from '@/services/websocket/streaming/handlers/utils'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 vi.mock('@/utils/logger', () => ({
@@ -26,8 +29,8 @@ const PIPELINE_ID = '39ef1314a7b9000000000000'
 const THREAD_ID = 'thread-test-001'
 
 describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
-  let pipelineStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
-  let ensureStreamingPlaceholder: typeof import('@/services/websocket/streaming/handlers/utils').ensureStreamingPlaceholder
+  let pipelineStore: pipelineMessageStoreMod.usePipelineMessageStore
+  let ensureStreamingPlaceholder: utilsMod2.ensureStreamingPlaceholder
 
   let _seq = 0
   const nextSeq = () => ++_seq

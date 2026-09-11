@@ -121,6 +121,9 @@ func _start_push() -> void:
 		var esel := edt.get_selection()
 		if esel != null:
 			esel.selection_changed.connect(_on_selection_changed)
+		var dock := edt.get_file_system_dock()
+		if dock != null:
+			dock.selection_changed.connect(_on_selection_changed)
 	# 插件启用即推一次初始快照（AgentOS 后启动也能拿到当前状态）
 	_push("selection")
 
@@ -131,6 +134,9 @@ func _stop_push() -> void:
 		var esel := edt.get_selection()
 		if esel != null and esel.selection_changed.is_connected(_on_selection_changed):
 			esel.selection_changed.disconnect(_on_selection_changed)
+		var dock := edt.get_file_system_dock()
+		if dock != null and dock.selection_changed.is_connected(_on_selection_changed):
+			dock.selection_changed.disconnect(_on_selection_changed)
 	if _heartbeat_timer != null:
 		_heartbeat_timer.stop()
 		_heartbeat_timer.queue_free()
@@ -168,7 +174,7 @@ func _push(kind: String) -> void:
 
 func _build_push_payload(kind: String) -> Dictionary:
 	var items := _editor_selection_details()
-	# 场景节点未选中时回退文件系统 Dock 的选中（随心跳生效）
+	# 场景节点未选中时回退文件系统 Dock 的选中（selection_changed 即时，心跳兜底）
 	if items.is_empty():
 		items = _file_selection_details()
 	var sig_parts := PackedStringArray()
@@ -422,8 +428,11 @@ func _node_position(node: Node) -> String:
 		return str((node as Node3D).global_position)
 	return ""
 
-## 文件系统 Dock 的选中文件（场景节点未选中时作为引用回退；
-## Dock 无选中变化信号，经心跳周期生效，延迟 ≤ HEARTBEAT_INTERVAL_SEC）。
+## 文件系统 Dock 的选中文件/目录（场景节点未选中时作为引用回退；
+## selection_changed 即时推送，心跳保留为兜底周期）。
+## get_selected_paths 在无实际选中时回退返回树根 "res://"（Godot issue #88228；
+## 4.7.1 实证导航后仍返回 ["res://"]）——"res://" 是「什么都没选」的哨兵值而非
+## 引用，必须过滤；真实选中的文件与子目录照常进引用。
 func _file_selection_details() -> Array:
 	var out: Array = []
 	var edt: EditorInterface = get_editor_interface() if has_method("get_editor_interface") else null
@@ -431,11 +440,12 @@ func _file_selection_details() -> Array:
 		return out
 	for p in edt.get_selected_paths():
 		var s := String(p)
-		if s.is_empty():
+		var t := s.trim_suffix("/")  # 目录选中带尾斜杠，name 须取自去斜杠路径
+		if s == "res://" or t.is_empty() or t == "res://":
 			continue
 		out.append({
-			"name": s.get_file(),
-			"type": "file",
+			"name": t.get_file(),
+			"type": "file" if FileAccess.file_exists(s) else "directory",
 			"path": s,
 		})
 	return out

@@ -152,6 +152,35 @@
 | 系统安装包 | msi / dmg / deb / rpm / AppImage | 走标准包管理器或双击安装 |
 | 分发安全 | 产物签名 + 校验码 | 避免杀软误报与中间人篡改；SBOM + 依赖锁定 |
 
+#### 嵌入剖面：固定 Agent 组合抽取为独立应用（2026-09-09 方向拍板）
+
+> 把"某个 agent + 插件闭包 + 管道编排"作为一个应用嵌入外部宿主（游戏引擎 / VS Code / 站点 iframe，与产品原则「可嵌入」「灵汐作为插件嵌入外部宿主」同源）。目标形态裁定：**只保留管道运行时对应的插件，能 in_process 的全部 in_process，不依赖任何 Python 外进程**。与被否方案「插件全 Rust 原生化」不冲突：主线 Python 双轨不动（[2026-07-13-sidecar-process-model.md](docs/decisions/2026-07-13-sidecar-process-model.md)），嵌入剖面是该 ADR「热路径按基准晋升 cdylib」在固定闭包上的整体应用——特化构建剖面，非架构返航。
+
+| 阶段 | 内容 | 说明 |
+|------|------|------|
+| E1 配置层裁剪（零代码，可先行） | `default_profile.yaml` 裁至闭包 + `plugin_allowlist.yaml` 切 `strict`（id+sha256 准入锁，已真接线）+ `tool_ids` 白名单 | profile 是黑名单语义（未列默认启用），固定应用以 strict 白名单为准入真值 |
+| E2 嵌入开关（小改内核，一篇 ADR） | 热发现 watcher 总开关（现 `agentos-kernel.rs` 无条件 spawn，仅有 cdylib 变更重启开关）+ embed 模式封管理写面：`PUT /plugins/{id}/enabled`、`/plugins/validate-all`、`/system/restart`、`PUT /pipelines`、`/auth/register` | 固定应用不需要运行期变更通道；读面（status/schema/tools）保留供前端渲染 |
+| E3 全 in_process 终态 | 管道闭包 28 个步骤引用中 3 个已 cdylib（tool_core / sensitive_checker / spill_guard），其余迁 Rust；llm_core 的 litellm 依赖在固定 provider 前提下改 Rust 直写 OpenAI 兼容协议（流式/重试/key 池） | **禁止双实现漂移**：嵌入剖面只装配 Rust 步骤集，不维护同一插件的 Python+Rust 两份；与 [LLM流式服务契约与Native迁移评估_20260826.md](docs/working/LLM流式服务契约与Native迁移评估_20260826.md)「全量车队转二进制负收益」否决前提不同（全量 → 固定闭包），动工前须 ADR 重新裁定 |
+| E4 前端嵌入 | `/embed` 专用路由 + token 注入通道（URL / postMessage）供 iframe / 组件嵌入 | 插件页 `/p/:pageId` 已是可分享 URL 雏形；登录墙（ProtectedRoute 全路由覆盖）与 globalWS 单例 + 全局 store 耦合是主要重构点（ChatContainer 已是纯 props 组件） |
+
+**权衡声明**：in_process 放弃进程级故障隔离（sidecar 模型立论之一），嵌入形态以「固定闭包 + 监督重启（exit 75 自愈语义）」接受该代价；主线架构不变。
+
+**资源预算（2026-09-09 实测）**：
+
+| 口径 | 全量现状 | E1-E2 过渡态 | E3 终态 |
+|------|------|------|------|
+| 内核二进制 / 进程 RSS | 17.6MB / 空闲 63MB、长运行 400MB | ≈不变（管理面代码占比极小） | ≈不变 |
+| 全链路常驻内存 | ~1.5GB（内核 + hindsight 402MB + sidecar 群） | ~500-800MB（hindsight 留/裁是最大单变量） | 目标 ~100-200MB（零 Python 进程） |
+| 插件 venv 磁盘 | ~1GB（77 个） | ~300-400MB（15-20 个） | 0 |
+
+**配套工程债（2026-09-09 实测发现，随本剖面清）**：
+
+- **日志降噪**：sidecar stderr 全量转发 + watcher 每轮全量 re-validate manifest → 13.5h 写 209MB 日志；改分级转发 + 变更触发校验。
+- **内核内存驻留归因（2026-09-09 全量 minidump 内容归类 + 区域开膛复核）**：长运行 Private ~860MB / 工作集 ~290MB；大头 = **LLM 轮次产物跨轮/跨管道累积不逐出**——渲染提示词/规则文档副本（execution_review_rules 渲染 ×6,661、上下文类型表 ×95）、完整对话历史含工具错误结果、worktree/bash 路径串海（.ai_workspaces ×27,571）+ 42.5MB 全零页（mimalloc arena 预留，无害）。**最大单一来源 = 坏 MCP 插件 `langchain_hub_search` 的失败记录流**：该插件自 09-07 起 "MCP initialize failed" 从未成功（G2 保留声明注册待复验），仍被反复调用 **×33,761**，每次失败在对话历史/记录里留 5-20KB 完整记录（错误+参数+路径+ids）≈ 数百 MB——压缩机制管不着（不是活跃上下文预算内）。**排除**：插件契约元数据（host_type 全 dump 仅 169 ≈ 2×86）、流式帧（每帧一个汉字中位 326B，全部 ~3.5MB，流式链路清理正常）、metrics 桶、SQL（大半是 db_admin 文档示例 + 21 条 ? 模板预编译缓存）、checkpoint 实体搬运、transient B 区（只存 id）、断线回放缓冲（现按 message 保存、终态即弃，杂项环 1000 条/5min 有界）。修复优先级 = ①止血：profile/tool_ids 摘除 langchain_hub_search（LangChain Hub/LangSmith 远端搜索适配器，`entry: mcp:external` 转发第三方 MCP——此部署远端不可达故从未成功，摘除零风险；失败流归零+验证归因）；②watcher 对从未成功插件熔断复验（兼治 209MB 日志）；③轮次产物/失败记录按字节预算逐出；④transient A 区 LRU 加字节上限；⑤WS 出站改有界通道；⑥断线回放改按 message 保存（2026-09-09 裁定，已落地 a7be22735）：流式帧按 message_id 分组只保留**在飞消息**，stream_end/stream_error 终态到达整组即弃（evicted_below 推进、缺口客户端 resync 整树刷新从 message_slots 真值恢复）；TTL/条数/字节三上限对消息帧不再适用（生命周期=消息终态）；杂项事件（run 状态等无 message_id）保留 1000 条/5min 小环防洪泛。逐帧重放 wire 格式未变（前端零改动）。
+  **落地状态（2026-09-09）**：①已摘除（e501ece35——4 分钟内失败流归零、Private -180MB 实证归因）；②已落地（d660d2200 观测连击熔断 5 轮上限）；④已落地（8e0660cbb——A 区 64MB + chunk 累积缓冲 32MB 字节预算）；⑤已落地（b6e5914ad——出站 512 帧有界 + 满载背压自愈，B10 踢旧语义保留）；⑥快照语义属前端契约变更待 ADR 后实施（现缓冲已有界非泄漏项）；③历史存量 ~680MB 入流已全断，待下次内核重启回收（exit 75 自重启或手动），重启后若仍持续增长再启新归因。三车道测试 474/204/12 全绿。
+- **runaway 任务看门狗**：eval 小任务（统计 yaml 行数）活跃空转 21h 无任何拦截；需任务级时长 / 轮数 / 无进展熔断。
+- **口令轮换**：`admin12345` 历史凭据仍可登录 dev 库（W3-1 已哈希化存储，口令本体未轮换）。
+
 #### 零配置启动
 
 | 类别 | 条目 | 说明 |

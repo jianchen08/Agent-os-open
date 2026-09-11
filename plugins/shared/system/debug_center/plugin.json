@@ -23,8 +23,90 @@
         "order": 10,
         "widget": "debug_center_hub",
         "when": "user.role == 'admin'",
-        "description": "调试中心（仅管理员）：数据库管理/执行记录/会话/任务/用户/评估指标"
+        "description": "调试中心（仅管理员）：子页由 space=debug_center 声明组台（数据库/执行记录/会话/任务/用户/评估指标/LLM 请求/插件契约）"
+      },
+      {
+        "id": "db_admin",
+        "title": "数据库管理",
+        "icon": "🗄️",
+        "space": "debug_center",
+        "slot": "tab",
+        "order": 10,
+        "widget": "debug_db_admin"
+      },
+      {
+        "id": "execution_records",
+        "title": "执行 Trace",
+        "icon": "📋",
+        "space": "debug_center",
+        "slot": "tab",
+        "order": 20,
+        "widget": "debug_execution_records"
+      },
+      {
+        "id": "pipeline_state",
+        "title": "管道 State",
+        "icon": "🧬",
+        "space": "debug_center",
+        "slot": "tab",
+        "order": 30,
+        "widget": "debug_pipeline_state"
+      },
+      {
+        "id": "sessions",
+        "title": "会话",
+        "icon": "💬",
+        "space": "debug_center",
+        "slot": "tab",
+        "order": 40,
+        "widget": "debug_sessions"
+      },
+      {
+        "id": "tasks",
+        "title": "任务",
+        "icon": "⚙️",
+        "space": "debug_center",
+        "slot": "tab",
+        "order": 50,
+        "widget": "debug_tasks"
+      },
+      {
+        "id": "users",
+        "title": "用户",
+        "icon": "👤",
+        "space": "debug_center",
+        "slot": "tab",
+        "order": 60,
+        "widget": "debug_users"
+      },
+      {
+        "id": "evaluation",
+        "title": "评估指标",
+        "icon": "📊",
+        "space": "debug_center",
+        "slot": "tab",
+        "order": 70,
+        "widget": "debug_evaluation"
+      },
+      {
+        "id": "llm_payload",
+        "title": "LLM 请求",
+        "icon": "🧠",
+        "space": "debug_center",
+        "slot": "tab",
+        "order": 80,
+        "widget": "debug_llm_payload"
+      },
+      {
+        "id": "contract_status",
+        "title": "插件契约",
+        "icon": "🛡️",
+        "space": "debug_center",
+        "slot": "tab",
+        "order": 90,
+        "widget": "debug_contract_status"
       }
     ]
-  }
+  },
+  "host_group": "light"
 }

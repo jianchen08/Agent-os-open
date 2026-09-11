@@ -101,15 +101,19 @@ export function useCostControl() {
     [run, fetchBudgetStatus, fetchUsageStatistics, fetchCostConfig],
   )
 
-  // 初始化时加载数据
   useEffect(() => {
     refreshAll()
   }, [refreshAll])
 
-  // 监听 WS cost_update 事件，事件驱动刷新使用统计
+  // 监听 WS cost_update 事件，事件驱动刷新使用统计。
+  // WS 回调内吞掉 rejection：fetchUsageStatistics 内部会 rethrow 给调用方组
+  // 装错误态，fire-and-forget 调用下 unhandled rejection 会被全局监听兜成
+  // 「前端运行时错误」高优通知（假告警）。
   useEffect(() => {
     const handleCostUpdate = () => {
-      fetchUsageStatistics()
+      fetchUsageStatistics().catch(() => {
+        // 失败态已由 hook 内 error 状态承载，WS 回调无需再上报
+      })
     }
     globalWS.subscribe(WS_SERVER_EVENTS.COST_UPDATE, handleCostUpdate)
     return () => {
@@ -118,16 +122,13 @@ export function useCostControl() {
   }, [fetchUsageStatistics])
 
   return {
-    // 数据
-    budgetStatus,
+      budgetStatus,
     usageStats,
     costConfig,
     costReport,
-    // 状态
-    isLoading,
+      isLoading,
     error,
-    // 方法
-    fetchBudgetStatus,
+      fetchBudgetStatus,
     fetchUsageStatistics,
     fetchCostConfig,
     fetchCostReport,

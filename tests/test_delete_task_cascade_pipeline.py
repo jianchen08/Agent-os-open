@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import tempfile
-from unittest.mock import AsyncMock, patch
+from contextlib import contextmanager
+from collections.abc import Iterator
 
 import sys
 from pathlib import Path
@@ -23,6 +24,8 @@ for _d in (_SYSTEM_DIR, _TASKS_DIR):
         sys.path.insert(0, _s)
 
 from tasks.service import TaskService
+from _task_cleanup import set_cleanup_capabilities
+import _task_cleanup as _cleanup_mod
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +59,28 @@ def _make_service() -> TaskService:
     return TaskService(data_dir=tmp_dir)
 
 
+@contextmanager
+def _fake_pipeline_executor() -> Iterator[list[dict]]:
+    """注入假 pipeline-executor 能力并记录收到的调用。
+
+    跨进程管道服务只能经 set_cleanup_capabilities 公开注入缝进入；
+    记录到的 params 即 TaskService 对内核管道服务的可观察请求
+    （suspend_pipeline / delete_pipeline）。退出时恢复原注入。
+    """
+    calls: list[dict] = []
+
+    async def fake_executor(params: dict) -> dict:
+        calls.append(params)
+        return {}
+
+    saved = (_cleanup_mod._pipeline_executor, _cleanup_mod._frontend_emitter)
+    set_cleanup_capabilities(fake_executor, None)
+    try:
+        yield calls
+    finally:
+        set_cleanup_capabilities(*saved)
+
+
 class TestDeleteTaskCascadePipeline:
     """delete_task 级联清理管道的回归测试。"""
 
@@ -66,13 +91,14 @@ class TestDeleteTaskCascadePipeline:
         task = await svc.create_task(title="带管道的任务")
         await svc.start_task(task.id)
 
-        with patch.object(
-            svc, "_cancel_pipeline_recursive",
-        ) as mock_cancel:
+        with _fake_pipeline_executor() as executor_calls:
             result = await svc.delete_task(task.id)
 
         assert result is True
-        mock_cancel.assert_called_once_with(task.id)
+        # 运行中管道被取消：向内核管道服务发出 suspend_pipeline 请求
+        assert {
+            "method": "suspend_pipeline", "params": {"pipeline_id": task.id},
+        } in executor_calls
 
     @pytest.mark.asyncio
     async def test_delete_task_cleans_pipeline_execution_records(self) -> None:
@@ -82,13 +108,14 @@ class TestDeleteTaskCascadePipeline:
         await svc.start_task(task.id)
         await svc.bind_pipeline_run(task.id, "pipe-run-001")
 
-        with patch.object(
-            svc, "_cleanup_pipeline_file", return_value=True,
-        ) as mock_cleanup:
+        with _fake_pipeline_executor() as executor_calls:
             result = await svc.delete_task(task.id)
 
         assert result is True
-        mock_cleanup.assert_called_once_with("pipe-run-001")
+        # 管道执行数据被清理：向内核管道服务发出 delete_pipeline 请求
+        assert {
+            "method": "delete_pipeline", "params": {"pipeline_id": "pipe-run-001"},
+        } in executor_calls
         # 任务记录已硬删除
         assert svc.get_task(task.id) is None
 
@@ -103,22 +130,18 @@ class TestDeleteTaskCascadePipeline:
         await svc.start_task(child.id)
         await svc.bind_pipeline_run(child.id, "child-pipe-001")
 
-        cleaned_pipelines: list[str] = []
-
-        def _track_cleanup(pipeline_run_id: str) -> bool:
-            cleaned_pipelines.append(pipeline_run_id)
-            return True
-
-        with patch.object(
-            svc, "_cleanup_pipeline_file", side_effect=_track_cleanup,
-        ):
+        with _fake_pipeline_executor() as executor_calls:
             result = await svc.delete_task(parent.id)
 
         assert result is True
-        # 父任务记录硬删除（容器软删分支已随容器语义退役）
+        # 父任务记录硬删除
         assert svc.get_task(parent.id) is None
-        # 子任务管道文件被级联清理
-        assert "child-pipe-001" in cleaned_pipelines
+        # 子任务管道执行数据被级联清理
+        deleted_runs = [
+            c["params"]["pipeline_id"] for c in executor_calls
+            if c["method"] == "delete_pipeline"
+        ]
+        assert "child-pipe-001" in deleted_runs
         # 子任务记录被硬删除
         assert svc.get_task(child.id) is None
 
@@ -127,13 +150,9 @@ class TestDeleteTaskCascadePipeline:
         """删除不存在的任务返回 False，且不触发任何清理。"""
         svc = _make_service()
 
-        with patch.object(
-            svc, "_cleanup_pipeline_file",
-        ) as mock_cleanup, patch.object(
-            svc, "_cancel_pipeline_recursive",
-        ) as mock_cancel:
+        with _fake_pipeline_executor() as executor_calls:
             result = await svc.delete_task("不存在")
 
         assert result is False
-        mock_cleanup.assert_not_called()
-        mock_cancel.assert_not_called()
+        # 未向内核管道服务发出任何 suspend/delete 请求（无清理副作用）
+        assert executor_calls == []

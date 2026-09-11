@@ -1,13 +1,19 @@
 /**
  * 管道运行快照类型（统一管道管理）
  *
- * 数据源：`GET /api/v1/pipelines/runs`（内核 runs × message_slots ×
- * pipeline_sessions × pipeline_run_summaries 四表联结）。前端以 pipeline_id
- * 为主键维护注册表，同一管道多条 run 取最新。
+ * 数据源：`GET /api/v1/pipelines/runs`（内核管道运行读面投影；对账测试见
+ * services/api/__tests__/pipelines.mapper.test.ts 与 apiEndpoints.contract.test）。
+ * 前端以 pipeline_id 为主键维护注册表，同一管道多条 run 取最新。
  */
 
-/** 管道运行状态（对齐内核 RunStatus 五态，lowercase） */
-export type PipelineStatus = 'running' | 'suspended' | 'completed' | 'failed' | 'cancelled'
+/** 管道运行状态（对齐内核 RunStatus 五态，lowercase）+ unknown（任务态映射不上时的诚实视图态，不猜 running） */
+export type PipelineStatus =
+  | 'running'
+  | 'suspended'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'unknown'
 
 /** 管道运行快照条目 */
 export interface PipelineRunInfo {
@@ -39,9 +45,9 @@ export interface PipelineViewEntry {
   runId: string
   /** 归属会话 ID */
   threadId?: string
-  /** 血缘根会话（state lineage.origin_session_id）：子任务管道出生落
-   *  pipeline_sessions 自环映射（thread=自身 id，sessions 表无行），
-   *  真实归属的用户会话由该键承载 */
+  /** 血缘根会话（state lineage.origin_session_id）：自环子任务管道的
+   *  thread_id=自身 id（不在任何会话成员列表中），真实归属的用户会话由
+   *  该键承载 */
   originSessionId?: string
   /** 运行状态 */
   status: PipelineStatus

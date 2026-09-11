@@ -15,19 +15,12 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
-import sys
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-# http.handle 响应封装 + multipart 解析（内核 HttpHandleResponse/ToolExecutionResult
-# 样板）：公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
-# `_error` = protocol_error：本插件上传面协议级错误契约（success:true 包
-# HTTP status + 结构化错误体），参数序与 review 一致统一为 (message, status)。
-_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _SHARED_ROOT not in sys.path:
-    sys.path.insert(0, _SHARED_ROOT)
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
+
 # capabilities.py 的 get_capability() 直读 config/models/llm.yaml 的
 # multimodal 节（mtime 缓存）；llm.yaml 缺失/损坏时返回 degraded=True 空能力。
 from capabilities import ModelCapabilityRegistry  # noqa: E402

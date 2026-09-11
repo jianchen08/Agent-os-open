@@ -35,6 +35,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 后台回调任务强引用集合：asyncio.create_task 返回值不持引用时 CPython 只存
+# 弱引用，任务可能被 GC 静默取消（回调无声丢失）；done callback 自移除
+# （对照 dsh_adapter/bridge.py 的正确形态）。
+_background_tasks: set[asyncio.Task[None]] = set()
+
+
+def _spawn_background_callback(coro: Any) -> asyncio.Task[None]:
+    """派发后台回调任务并持强引用（完成自移除）。"""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 class TimerStatus(str, Enum):
     """计时器状态枚举"""
@@ -540,7 +553,7 @@ class TimerManager:
                     )
                     if callback:
                         try:
-                            asyncio.create_task(self._async_callback(callback, task.id))
+                            _spawn_background_callback(self._async_callback(callback, task.id))
                         except Exception as e:
                             logger.error("触发超时回调失败: task_id=%s, error=%s", task.id, e)
 

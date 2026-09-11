@@ -1,7 +1,7 @@
 /**
  * 文件工具卡片功能测试（点击交互全链路，声明取自真实 plugin.json）
  *
- * 覆盖两条此前零功能测试的链路：
+ * 覆盖两条链路：
  * 1. file_read（render.card=read）：点击卡片"打开文件"按钮 → 真实 fileOpener
  *    （仅 mock HTTP 层）→ 拉取内容 → 注册编辑器数据 + 工作区 Tab 出现；
  * 2. file_write（ui.chat_card 声明）：diff 块真实渲染（TextDiffView +/- 行）→
@@ -10,24 +10,24 @@
  * 声明直接读 plugins/shared/tools/builtin_tools/plugin.json（与生产 schema 同源），
  * 防止测试 fixture 与插件声明镜像漂移。
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ActivityCard from '@/components/chat/ActivityCard'
+import { apiClient } from '@/services/api/client'
+import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
+import { openFile } from '@/services/fileOpener'
+import { getFileEditorData } from '@/stores/fileEditorRegistry'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { toolCallToActivity } from '@/utils/activityConverter'
+import { addChatCardDeclaration, clearChatCardDeclarations } from '@/utils/chatCardInterpreter'
+import { loadRenderIntents } from '@/utils/dshRenderIntent'
 import {
   enhanceActivityWithToolConfig,
   registerGlobalOpenFileCallback,
 } from '@/utils/toolCardRegistry'
-import { loadRenderIntents } from '@/utils/dshRenderIntent'
-import { addChatCardDeclaration, clearChatCardDeclarations } from '@/utils/chatCardInterpreter'
-import { openFile } from '@/services/fileOpener'
-import { apiClient } from '@/services/api/client'
-import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { getFileEditorData } from '@/stores/fileEditorRegistry'
 import type { MessageToolCall } from '@/types/models'
 
 vi.mock('@/services/api/client', () => ({

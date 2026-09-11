@@ -110,5 +110,6 @@
       "path": "config/tools/search/resource_search.yaml",
       "label": "资源搜索配置"
     }
-  ]
+  ],
+  "host_group": "light"
 }

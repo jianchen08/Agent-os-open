@@ -1,12 +1,12 @@
 /** Five Space Layout Component Implements the five-rendering-space layout: */
 
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { FolderOpen, Menu, Minimize2, PanelRightIcon } from '@/assets/icons'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { getEditorForFile } from '@/config/fileEditors'
 // 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（26+ 组件 → 全部 icons →
 // 触发 847 项 @ant-design/icons-svg/lib/asn/* 全量预构建，首屏 JS 与启动预构建时间双高）
+import { cn } from '@/lib/utils'
 import apiClient from '@/services/api/client'
 import { WORKSPACE_SERVICE_ENDPOINTS as W } from '@/services/api/endpoints.generated'
 import { safeLoadLayout } from '@/services/layout/resolver'
@@ -17,8 +17,8 @@ import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFile
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/uiStore'
+import { taskStatusToAgentTabStatus } from '@/types/taskStatus'
 import { AlertBanner, useLayoutAlerts, type AlertBannerItem } from './AlertBanner'
 import { FloatingWindowManager, renderFloatingWindowContent } from './FloatingWindowManager'
 import { FullscreenOverlay } from './FullscreenOverlay'
@@ -26,7 +26,6 @@ import { WorkspaceHost } from './WorkspaceHost'
 import { CodeEditor } from '../workspace/CodeEditor'
 import { FilePreview } from '../workspace/FilePreview'
 import type { WorkspaceTab  } from '@/types/layout'
-import type { AgentTab } from '@/types/task'
 
 /** Props for the FiveSpaceLayout component */
 export interface FiveSpaceLayoutProps {
@@ -38,12 +37,6 @@ export interface FiveSpaceLayoutProps {
 
   /** Callback when layout mode toggle is requested */
   onToggleMode?: () => void
-
-  /** Whether to show the theme panel */
-  showThemePanel?: boolean
-
-  /** Callback to toggle theme panel visibility */
-  onShowThemePanel?: (show: boolean) => void
 
   /** 登出回调 */
   onLogout?: () => void
@@ -59,8 +52,6 @@ function isMobileViewport(width: number, mobileBreakpoint: number): boolean {
 export function FiveSpaceLayout({
   chatContent,
   sidebarContent,
-  showThemePanel: _showThemePanel = false,
-  onShowThemePanel: _onShowThemePanel,
   onLogout: _onLogout,
 }: FiveSpaceLayoutProps) {
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
@@ -80,7 +71,6 @@ export function FiveSpaceLayout({
   const [viewportWidth, setViewportWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth : 1280,
   )
-  const navigate = useNavigate()
 
   // Store state
   const floatingWindows = useLayoutModeStore((s) => s.floatingWindows)
@@ -246,22 +236,16 @@ export function FiveSpaceLayout({
   }, [viewportWidth, sidebarRatio, workspacePanelRatio])
 
 
-  /** 异常提示条点击：连接 → 打开监控面板；预算 → 成本看板；审批 → 审批弹窗全局可见，无需跳转 */
-  const handleAlertAction = useCallback(
-    (item: AlertBannerItem) => {
-      if (item.kind === 'connection') {
-        // 监控页已声明化（monitoring 插件 contributes.pages path /monitoring）——直接打开
-        const opened = openWorkspacePanelByPath('/monitoring')
-        if (!opened) navigate('/monitoring')
-      }
-      if (item.kind === 'budget') {
-        // 成本看板已声明化（cost_control 插件 contributes.pages path /cost）——直接打开
-        const opened = openWorkspacePanelByPath('/cost')
-        if (!opened) navigate('/cost')
-      }
-    },
-    [navigate],
-  )
+  /** 异常提示条点击：连接 → 打开监控面板；预算 → 成本面板；审批 → 审批弹窗全局可见，无需跳转 */
+  const handleAlertAction = useCallback((item: AlertBannerItem) => {
+    if (item.kind === 'connection' || item.kind === 'budget') {
+      // 监控页已声明化（monitoring 插件 contributes.pages path /monitoring），
+      // 成本卡并入监控页（cost_control ui_schema space=monitoring，独立 /cost 页已撤）；
+      // 解析失败由 opener 显式报错——/monitoring 无路由页，navigate 兜底只会
+      // 落 '*' 通配静默回首页（P0-1）
+      openWorkspacePanelByPath('/monitoring')
+    }
+  }, [])
   const layoutAlerts = useLayoutAlerts()
 
   /** 处理任务树节点点击（对话按钮）。 通过全局管道导航服务（pipelineNavigator）实现跨会话跳转： */
@@ -282,7 +266,8 @@ export function FiveSpaceLayout({
       agentName: title,
       agentLevel,
       taskId,
-      status: (node.status as AgentTab['status']) ?? 'running',
+      // 词表归一见 types/taskStatus：未知状态落 'unknown'，不猜 running
+      status: taskStatusToAgentTabStatus(node.status),
     })
 
     if (isMobile) {
@@ -377,7 +362,6 @@ export function FiveSpaceLayout({
         )
       }
 
-      // 文件审批标签渲染
       if (tab.moduleId === '__file_review__') {
         // 兼容旧持久化数据：__file_review__ Tab 已统一为 __file_editor__，此处提示用户关闭。
         return (

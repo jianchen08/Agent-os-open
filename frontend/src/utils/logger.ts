@@ -148,8 +148,7 @@ class LogManager {
   private moduleCache: Map<string, ModuleLogger> = new Map()
 
   constructor() {
-    // 根据环境变量设置日志级别
-    const isProduction = import.meta.env.PROD
+      const isProduction = import.meta.env.PROD
     this.config = {
       ...DEFAULT_CONFIG,
       level: isProduction ? LogLevel.INFO : LogLevel.DEBUG,
@@ -209,17 +208,14 @@ class LogManager {
   formatPrefix(moduleName: string, level: LogLevel): string {
     const parts: string[] = []
 
-    // 添加时间戳
     if (this.config.showTimestamp) {
       parts.push(`[${new Date().toISOString().split('T')[1].split('.')[0]}]`)
     }
 
-    // 添加模块名
     if (this.config.showModule && moduleName) {
       parts.push(`[${moduleName}]`)
     }
 
-    // 添加级别标识
     const levelMap: Record<LogLevel, string> = {
       [LogLevel.ERROR]: '❌ ERROR',
       [LogLevel.WARN]: '⚠️ WARN',
@@ -364,7 +360,6 @@ class ModuleLogger {
   }
 }
 
-// 创建全局日志管理器实例
 const logManager = new LogManager()
 
 /**

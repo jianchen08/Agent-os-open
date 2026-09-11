@@ -34,7 +34,6 @@ interface CommandPaletteProps {
 export function CommandPalette({ open, dispatcher, onClose }: CommandPaletteProps): React.ReactElement | null {
   const [query, setQuery] = useState('')
 
-  // 关闭时重置查询
   useEffect(() => {
     if (!open) setQuery('')
   }, [open])

@@ -7,15 +7,11 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from functools import lru_cache
 
-# 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _this_dir)
-_shared_dir = os.path.join(_this_dir, "..", "..", "..")
-sys.path.insert(0, _shared_dir)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+_paths = bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
 
 from plugin import (
     ContextWindowGuardPlugin,
@@ -26,12 +22,7 @@ from plugin import (
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
-# hindsight_memory 插件目录（wiring.py 所在处）加入 sys.path
-_HINDSIGHT_MEMORY_DIR = os.path.join(_shared_dir, "system", "hindsight_memory")
-if _HINDSIGHT_MEMORY_DIR not in sys.path:
-    sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
-
-from wiring import build_memory_backend, make_capability_caller  # noqa: E402
+from wiring import build_memory_backend, make_capability_caller  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("context_window_guard_pipeline")

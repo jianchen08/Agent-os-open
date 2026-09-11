@@ -95,7 +95,7 @@ def _make_git_manager(repo: Any) -> Any:
     reg._reversers = {}
     reg._tool_mapping = {}
     reg.register(GitReverser(repo_path=str(repo)))
-    return RollbackManager(session=None, reverser_registry=reg)
+    return RollbackManager(reverser_registry=reg)
 
 
 # ============================================================

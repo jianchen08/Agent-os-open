@@ -1,0 +1,7 @@
+# tool_core 工具输出截断配置（2026-09-09 大载荷治理）
+# 单条工具结果进消息/事件的最大字符数；超出触发头尾截断。
+# 全文经 tool_cache 缓存，LLM 重发同一调用即可取回。
+tool_output:
+  max_chars: 16384
+  head_chars: 12288
+  tail_chars: 2048

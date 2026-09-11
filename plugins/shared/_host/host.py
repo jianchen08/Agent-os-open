@@ -14,7 +14,8 @@ spawn 契约（内核 invoker 注入）：::
   ``CohostServer`` 聚合为单个 MCP stdio server（工具带 ``{plugin_id}.``
   前缀，initialize/生命周期通知扇出，共享反向调用通道）；
 - 事件循环 watchdog：独立线程监控主 asyncio 循环心跳打点，停滞超过
-  ``AGENTOS_HOST_WATCHDOG_SECS``（默认 30s）即 ``os._exit(1)`` 自杀，
+  ``AGENTOS_HOST_WATCHDOG_SECS``（默认 30s）先有界（≤2s）尽力杀掉成员
+  登记的活跃子进程（防 os._exit 留无主孤儿），再 ``os._exit(1)`` 自杀，
   交由内核既有 crash-respawn 自愈（把"事件循环被阻塞"转化为可自愈崩溃）；
 - 成员加载失败 fail-fast：任一成员 import/init 失败立即退出非零码并
   打印明确错误，内核按崩溃处理重试。
@@ -39,6 +40,7 @@ import contextlib
 import importlib.util
 import json
 import logging
+from typing import Any
 import os
 import re
 import sys
@@ -47,6 +49,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 from agentos_plugin_sdk import AgentOSPlugin, CohostServer
 
@@ -67,6 +70,9 @@ _WATCHDOG_ENV = "AGENTOS_HOST_WATCHDOG_SECS"
 # watchdog 检查间隔与主循环心跳打点间隔
 _WATCHDOG_CHECK_INTERVAL_SECS = 5.0
 _HEARTBEAT_INTERVAL_SECS = 5.0
+# 自杀退出前的子进程清理预算（秒）：os._exit 跳过 atexit（bash server.py 的
+# shutdown_all 挂在那里），退出前必须以同步方式有界尽力杀掉活跃子进程
+_EXIT_CLEANUP_BUDGET_SECS = 2.0
 
 
 class CohostError(Exception):
@@ -269,6 +275,61 @@ def _load_members(shared_root: Path, member_ids: Sequence[str]) -> dict[str, Age
 # ── 事件循环 watchdog ────────────────────────────────────
 
 
+def _kill_registered_process(info: Any) -> bool:
+    """同步杀死单个活跃进程登记（watchdog 线程内运行，事件循环已停滞）。
+
+    优先复用进程所属 backend 的同步整树杀（LocalProcessBackend 的
+    psutil 叶子→根，防孙子进程变孤儿）；无该能力的 backend（容器路径，
+    宿主侧句柄是 docker exec 客户端进程）退化为单进程 kill。
+
+    Returns:
+        True 表示发起了杀进程调用；False 表示无可杀句柄（process 缺失）。
+    """
+    proc = getattr(info, "process", None)
+    if proc is None:
+        return False
+    kill_tree = getattr(getattr(info, "backend", None), "_kill_tree_sync", None)
+    if callable(kill_tree):
+        kill_tree(proc.pid, force=True)
+        return True
+    proc.kill()
+    return True
+
+
+def _kill_tracked_children(budget_secs: float = _EXIT_CLEANUP_BUDGET_SECS) -> int:
+    """自杀退出前的有界尽力清理：杀掉成员插件登记的活跃子进程。
+
+    扫描合宿成员模块（``_MEMBER_MODULE_PREFIX`` 前缀）暴露的进程管理器
+    活跃表（ProcessManager 形状：``active_processes`` 字典，BashTool 经
+    ``process_manager`` 属性持有），逐个同步杀。事件循环已停滞（watchdog
+    正因停滞触发），async terminate/kill 不可用，只能同步杀。``budget_secs``
+    内尽力多杀，超预算立即放弃；任何异常就地吞并——清理失败不阻断自杀，
+    这是 best-effort 的合法点。
+
+    Returns:
+        尝试杀掉的进程数（诊断用）
+    """
+    deadline = time.monotonic() + budget_secs
+    killed = 0
+    for name, module in list(sys.modules.items()):
+        if not name.startswith(_MEMBER_MODULE_PREFIX):
+            continue
+        for attr in vars(module).values():
+            for holder in (attr, getattr(attr, "process_manager", None)):
+                active = getattr(holder, "active_processes", None)
+                if not isinstance(active, dict):
+                    continue
+                for info in list(active.values()):
+                    if time.monotonic() > deadline:
+                        return killed
+                    try:
+                        if _kill_registered_process(info):
+                            killed += 1
+                    except Exception:  # noqa: BLE001 — best-effort 清理，失败不阻断自杀
+                        continue
+    return killed
+
+
 class _Heartbeat:
     """主事件循环心跳打点（watchdog 判活依据）。"""
 
@@ -285,8 +346,9 @@ class _LoopWatchdog:
     """独立线程 watchdog：主事件循环心跳停滞超阈值即自杀退出。
 
     心跳由 ``_heartbeat_loop`` 在主循环内打点；若成员工具的同步阻塞调用
-    冻住事件循环，打点停滞，本线程到点 ``os._exit(1)``，进程退出由内核
-    crash-respawn 自愈。``clock``/``exit_fn`` 可注入（测试用 fake clock）。
+    冻住事件循环，打点停滞，本线程到点先有界清理成员活跃子进程（防
+    ``os._exit`` 留无主孤儿），再 ``os._exit(1)``，进程退出由内核
+    crash-respawn 自愈。``clock``/``exit_fn``/``cleanup_fn`` 可注入（测试用）。
     """
 
     def __init__(
@@ -297,12 +359,14 @@ class _LoopWatchdog:
         *,
         clock: Callable[[], float] = time.monotonic,
         exit_fn: Callable[[int], None] = os._exit,
+        cleanup_fn: Callable[[], int] = _kill_tracked_children,
     ) -> None:
         self._heartbeat = heartbeat
         self._stall_secs = stall_secs
         self._check_interval_secs = check_interval_secs
         self._clock = clock
         self._exit_fn = exit_fn
+        self._cleanup_fn = cleanup_fn
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -319,7 +383,7 @@ class _LoopWatchdog:
         self._stop.set()
 
     def _run(self) -> None:
-        """线程主体：周期检查心跳，停滞超阈值自杀。"""
+        """线程主体：周期检查心跳，停滞超阈值清理子进程后自杀。"""
         while not self._stop.wait(timeout=self._check_interval_secs):
             stalled = self._clock() - self._heartbeat.last_beat
             if stalled > self._stall_secs:
@@ -328,6 +392,7 @@ class _LoopWatchdog:
                     stalled,
                     self._stall_secs,
                 )
+                self._cleanup_fn()
                 self._exit_fn(1)
                 return
 

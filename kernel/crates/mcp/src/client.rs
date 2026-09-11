@@ -1,12 +1,13 @@
+// @feature: FP-0.2.一 插件协议 | @ci: rust-test
 //! MCP JSON-RPC 客户端
 //!
 //! 实现基于 JSON-RPC 2.0 的 MCP 协议客户端，支持 stdio 和 HTTP 两种 transport。
 //! 通过 stdin/stdout 与 Python 边车进程通信，完成 initialize 握手和 tools/call 调用。
 //!
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,13 +15,25 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
 use crate::capability::{parse_capability_method_with, CapabilityRouter, STANDARD_CAPABILITIES};
 use crate::error::McpError;
 
 use agentos_core::traits::AuthType;
+
+/// MCP initialize 握手协议版本（2024-11-05 spec）。MCP 发布新 spec 版本时更新
+/// 此常量；AGENTOS_MCP_PROTOCOL_VERSION 环境变量可临时覆盖（协商逃生口）。
+pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// stdio 读侧行缓冲收缩阈值（字节）：单帧超过该量级后换新分配，防一次
+/// 多 MB 大帧把 per-sidecar 行缓冲容量永久棘轮在峰值（35+ sidecar 常驻放大）。
+const LINE_BUF_SHRINK_BYTES: usize = 128 * 1024;
+
+/// notification 派发队列容量（有界）：慢消费 + 高频流式 chunk 下防无界
+/// 积压——待处理条目内存上限恒为容量 × 单条目大小。
+const NOTIFICATION_QUEUE_CAPACITY: usize = 1024;
 
 // tracing 的 warn 宏用于 reader_loop 的降级日志
 use tracing::warn;
@@ -33,6 +46,20 @@ struct JsonRpcRequest {
     method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     params: Option<Value>,
+}
+
+/// JSON-RPC 2.0 请求（params 原文透传形态）。
+///
+/// `params` 是**已序列化的 JSON 原文**（[`serde_json::value::RawValue`]），
+/// 整帧序列化时原样嵌入、零解析零拷贝——供大体量调用方（引擎每步整包
+/// state 的 tools/call）直接拼参数串，跳过中间 `Value` 树深拷。
+#[derive(Debug, Serialize)]
+struct JsonRpcRequestRaw {
+    jsonrpc: &'static str,
+    id: String,
+    method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<Box<serde_json::value::RawValue>>,
 }
 
 /// JSON-RPC 2.0 响应
@@ -102,6 +129,13 @@ pub struct McpClient {
     /// 互补——Windows 退出通知未到/进程被强杀时 try_wait 有竞态盲区，
     /// 写失败标记让死亡判定在下次调用前即可成立。仅 stdio transport 置位。
     stdio_dead: Arc<AtomicBool>,
+    /// sidecar 事件循环心跳：最后一次收到 `#HB` 心跳行的 UNIX 毫秒（0 = 从未
+    /// 收到）。心跳协程跑在 sidecar 主事件循环里（SDK 侧每 AGENTOS_SIDECAR_
+    /// HEARTBEAT_SECS 秒写一行 stderr），事件循环冻结心跳即停——这是「进程
+    /// 活着但事件循环死锁」类假死的唯一可观测信号（try_wait 只能证明进程
+    /// 存在）。stderr 是旁路通道，长流式调用期间心跳照常，不依赖请求-响应
+    /// 配对。同构 systemd sd_notify watchdog 的服务侧语义。
+    last_heartbeat_ms: Arc<AtomicU64>,
     /// Capability 路由器——处理 sidecar 反向调用内核能力。
     /// None 时 sidecar 反向调用将被拒绝（返回 method not found）。
     router: Option<Arc<dyn CapabilityRouter>>,
@@ -115,6 +149,10 @@ pub struct McpClient {
     /// HTTP transport 的 reqwest 客户端（connect 时构建，含解析后的 auth 默认头）。
     /// stdio 模式为 None。
     http_client: Option<reqwest::Client>,
+    /// `call_tool_raw` 组帧缓冲（per-client 复用）：重载荷 state 每步数百 KB，
+    /// 每步新分配大缓冲在长跑下放大分配器压力——容量保留、内容每帧清零重写
+    /// （M3 热路径缓冲复用；stdout/stderr 行缓冲另有容量棘轮治理）。
+    raw_frame_scratch: parking_lot::Mutex<Vec<u8>>,
 }
 
 /// 出网 URL 边界守卫（安全审查摘出）。
@@ -285,9 +323,11 @@ impl McpClient {
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
             stdio_dead: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             router: None,
             request_timeout: Duration::from_secs(300),
             http_client: None,
+            raw_frame_scratch: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -319,9 +359,11 @@ impl McpClient {
             pending: Arc::new(Mutex::new(HashMap::new())),
             initialized: Arc::new(Mutex::new(false)),
             stdio_dead: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             router: None,
             request_timeout: Duration::from_secs(300),
             http_client: None,
+            raw_frame_scratch: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -441,7 +483,6 @@ impl McpClient {
                     self.stderr = Some(Arc::new(Mutex::new(BufReader::new(stderr))));
                 }
 
-                // 启动 stdout 读取循环
                 self.start_reader_loop().await;
                 // 启动 stderr 读取循环（消费 sidecar 日志，转发到 tracing）
                 self.start_stderr_reader().await;
@@ -481,17 +522,17 @@ impl McpClient {
                 return;
             };
 
-            // notification 有序派发：FIFO 通道 + 单工作任务串行处理。
+            // notification 有序派发：有界 FIFO 队列 + 单工作任务串行处理。
             // 流式 chunk（block_start/text_delta/…）是有序增量，前端按到达序
             // 组装正文——处理完成序必须等于发送序。每条 spawn 并发的完成序
             // ≠ 发送序（各任务在 router.handle 与 WS 发送间独立调度），负载
             // 抖动下相邻 chunk 换序，前端本地流式文本被打碎（与服务端权威
             // 文本指纹不一致 → new_message 合并去重失效 → 回复气泡里重复
             // 两份且其中一份语序错乱）。工作任务串行 await 处理，reader loop
-            // 只入队（unbounded send 永不阻塞）——chunk 推送不被读循环阻塞，
-            // 顺序同时保住。
-            let (notification_tx, notification_rx) = mpsc::unbounded_channel::<(String, Value)>();
-            spawn_notification_worker(notification_rx, router.clone());
+            // 只入队（满载丢最旧、同步返回）——chunk 推送不被读循环阻塞，
+            // 顺序同时保住，且慢消费下积压有界。
+            let notification_queue = Arc::new(NotificationQueue::new());
+            spawn_notification_worker(Arc::clone(&notification_queue), router.clone());
 
             tokio::spawn(async move {
                 let mut reader = stdout.lock().await;
@@ -499,6 +540,13 @@ impl McpClient {
 
                 loop {
                     line.clear();
+                    // 行缓冲容量棘轮治理：read_line 复用容量，一次多 MB 大帧
+                    //（工具结果/状态 JSON 单行）会让容量永久停在峰值——35+
+                    // sidecar 各自常驻 MB 级缓冲。超阈值即换新分配（小帧场景
+                    // 容量按需增长，无行为变化）。
+                    if line.capacity() > LINE_BUF_SHRINK_BYTES {
+                        line = String::new();
+                    }
                     match reader.read_line(&mut line).await {
                         Ok(0) => {
                             // sidecar stdout 关闭（进程退出/崩溃）：记 warn 让
@@ -522,59 +570,58 @@ impl McpClient {
                                 Err(_) => continue,
                             };
 
-                            // 分支1：可能是对内核请求的响应（有 id，无 method）
+                            // 分支1：可能是对内核请求的响应（有 id，无 method）。
+                            // 带字符串 id 的帧一律在此消费（无论是否命中 pending 表）。
                             if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
-                                let mut pending_map = pending.lock().await;
-                                if let Some(sender) = pending_map.remove(id) {
-                                    // 匹配 pending → 这是 response
-                                    if let Ok(response) =
-                                        serde_json::from_str::<JsonRpcResponse>(&line_str)
-                                    {
-                                        if sender.send(response).is_err() {
-                                            tracing::warn!(
-                                                "[mcp] pending receiver dropped; JSON-RPC response id={id} not delivered"
-                                            );
-                                        }
-                                    }
-                                    continue;
-                                }
+                                resolve_pending_response(&line_str, id, &pending).await;
+                                continue;
                             }
 
                             // 分支2：sidecar 主动发起的 request（有 method + id）
                             // id 可为 string 或 number（官方 Python SDK v2 反向请求用
                             // 整数 id）——仅认字符串会漏到分支3被当 notification 处理，
                             // router 照常被调但不回响应，sidecar 反向调用必超时。
+                            // 派发到独立任务处理（读循环不被反向调用阻塞，见
+                            // spawn_request_dispatch）。
                             if let (Some(method), Some(id)) = (
                                 msg.get("method").and_then(|v| v.as_str()),
                                 msg.get("id").filter(|v| !v.is_null()),
                             ) {
-                                let raw_id = id.clone();
-                                // 日志/错误消息用规范化字符串形式（数值 id 转十进制）
-                                let id_repr = match id {
-                                    Value::String(s) => s.clone(),
-                                    other => other.to_string(),
-                                };
-                                handle_incoming_request(
-                                    method, &msg, &raw_id, &id_repr, &router, &stdin,
-                                )
-                                .await;
+                                spawn_request_dispatch(
+                                    msg.clone(),
+                                    method.to_string(),
+                                    id.clone(),
+                                    router.clone(),
+                                    Arc::clone(&stdin),
+                                );
                                 continue;
                             }
                             // 分支3：sidecar 主动发起的 notification（有 method 无 id）
                             // 用于流式 chunk 推送：fire-and-forget，内核不回 response。
-                            // 入有序派发队列（send 同步返回，不阻塞读循环），
+                            // 入有序派发队列（满载丢最旧、同步返回，不阻塞读循环），
                             // 处理由单工作任务按 FIFO 串行执行。
                             if let Some(method) =
                                 msg.get("method").and_then(|v| v.as_str()).map(String::from)
                             {
-                                let params = msg.get("params").cloned().unwrap_or(Value::Null);
-                                let _ = notification_tx.send((method, params));
+                                dispatch_notification(method, &msg, &notification_queue);
                             }
                             // 其余忽略
                         }
-                        Err(_) => break,
+                        Err(e) => {
+                            // 读错误与 EOF 同害：在飞 send_request 不能干等满
+                            // 超时——清空 pending（drop 所有 oneshot sender）
+                            // → rx 端立即 channel closed 快速失败。warn 留痕
+                            // （EOF 是退出常态，读错误是异常态，日志须可区分）。
+                            tracing::warn!(error = %e, "[mcp] sidecar stdout 读取错误");
+                            let mut pending_map = pending.lock().await;
+                            pending_map.clear();
+                            break;
+                        }
                     }
                 }
+                // 读循环结束（stdout EOF / 读错误）：置关闭位，工作任务排空
+                // 已入队残留后退出（关停不丢已入队条目）。
+                notification_queue.close();
             });
         }
     }
@@ -597,10 +644,20 @@ impl McpClient {
     /// UTF-8 字节——严格 UTF-8 解码会返回 `InvalidData` 中断消费循环，sidecar
     /// 继续写 stderr 填满管道缓冲（~64KB）后 `write` 阻塞、进程卡死、无法响应
     /// MCP 请求。按字节读行 + lossy 解码保证读取永不因编码中断，杜绝管道反压。
+    /// 解析 stderr 心跳行：`#HB <unix_millis>` → Some(毫秒)；其余行 None。
+    /// 纯函数（单测面）；调用方（stderr reader）命中后静默消费并刷新
+    /// last_heartbeat_ms，不转发 tracing。
+    fn try_parse_heartbeat(trimmed: &str) -> Option<u64> {
+        trimmed
+            .strip_prefix("#HB ")
+            .and_then(|ts| ts.trim().parse::<u64>().ok())
+    }
+
     async fn start_stderr_reader(&self) {
         if let Some(stderr) = &self.stderr {
             let stderr = Arc::clone(stderr);
             let plugin_id = self.plugin_id.clone().unwrap_or_else(|| "?".to_string());
+            let heartbeat = Arc::clone(&self.last_heartbeat_ms);
 
             tokio::spawn(async move {
                 let mut reader = stderr.lock().await;
@@ -608,6 +665,12 @@ impl McpClient {
 
                 loop {
                     buf.clear();
+                    // 容量棘轮治理（与 stdout reader 的 LINE_BUF_SHRINK_BYTES
+                    // 同理）：sidecar 一次多 MB 的 traceback/大日志行会让缓冲
+                    // 容量永久停在峰值，超阈值即换新分配。
+                    if buf.capacity() > LINE_BUF_SHRINK_BYTES {
+                        buf = Vec::new();
+                    }
                     // read_until 按字节读，不校验 UTF-8（read_line 会因非法字节报
                     // InvalidData 并 break，导致 stderr 管道阻塞 sidecar）。
                     match reader.read_until(b'\n', &mut buf).await {
@@ -625,6 +688,14 @@ impl McpClient {
                             let line = String::from_utf8_lossy(&buf);
                             let trimmed = line.trim();
                             if trimmed.is_empty() {
+                                continue;
+                            }
+                            // 事件循环心跳行：静默消费（不进日志转发），只刷新
+                            // last_heartbeat_ms。格式契约见 SDK 心跳协程：
+                            // `#HB <unix_millis>`。心跳跑在 sidecar 主事件循环，
+                            // 冻结即停跳——假死判定的唯一信号源。
+                            if let Some(ms) = Self::try_parse_heartbeat(trimmed) {
+                                heartbeat.store(ms, Ordering::Relaxed);
                                 continue;
                             }
                             tracing::info!(target: "sidecar", "[{}] {}", plugin_id, trimmed);
@@ -799,6 +870,54 @@ impl McpClient {
             return self.http_post(url, &request).await;
         }
 
+        self.send_frame_and_await(id, &request_str).await
+    }
+
+    /// 发送 JSON-RPC 请求（params 为**已序列化 JSON 原文**形态）。
+    ///
+    /// 与 [`Self::send_request`] 同语义；区别仅在 params 免中间 `Value` 树——
+    /// 大体量调用方（引擎每步整包 state 的 tools/call）直接拼参数串，跳过
+    /// 构树+再序列化的深拷。HTTP transport（外部 MCP，载荷小）回退解析重走
+    /// Value 路径，行为一致。
+    async fn send_request_raw(
+        &self,
+        method: &str,
+        params_json: Option<String>,
+    ) -> Result<Value, McpError> {
+        if let McpTransport::Http { .. } = &self.transport {
+            let params_value = match params_json {
+                Some(s) => Some(serde_json::from_str(&s).map_err(|e| McpError::Protocol {
+                    message: format!("raw params 非法 JSON: {}", e),
+                })?),
+                None => None,
+            };
+            return self.send_request(method, params_value).await;
+        }
+        let id = Uuid::new_v4().to_string();
+        let params = params_json
+            .map(serde_json::value::RawValue::from_string)
+            .transpose()
+            .map_err(|e| McpError::Protocol {
+                message: format!("raw params 非法 JSON: {}", e),
+            })?;
+        let request = JsonRpcRequestRaw {
+            jsonrpc: "2.0",
+            id: id.clone(),
+            method: method.to_string(),
+            params,
+        };
+        let request_str = serde_json::to_string(&request).map_err(|e| McpError::Protocol {
+            message: format!("serialize error: {}", e),
+        })?;
+        self.send_frame_and_await(id, &request_str).await
+    }
+
+    /// stdio 发帧等待响应（pending 注册/写失败与超时摘除/EOF 快败的公共尾段）。
+    ///
+    /// pending 摘除语义：写失败（请求未送达）与超时（响应可能永不抵达）都
+    /// 先摘条目再返回——不摘则 oneshot sender 永久滞留（内存泄漏）；迟到
+    /// 响应由 reader 侧 remove 落空容忍（miss 不报错）。
+    async fn send_frame_and_await(&self, id: String, request_str: &str) -> Result<Value, McpError> {
         // 注册 oneshot 等待响应
         let (tx, rx) = oneshot::channel();
         {
@@ -806,31 +925,41 @@ impl McpClient {
             pending.insert(id.clone(), tx);
         }
 
-        // 发送请求
+        // stdio 分帧 = 一行一个 JSON 消息（newline-delimited）：request 与
+        // notification 同帧型，靠是否携带 id 区分——写侧必须补 `\n`，读侧
+        // 按行切分后路由（见 start_reader_loop 的三类消息区分）。
         if let Some(stdin) = &self.stdin {
             let mut writer = stdin.lock().await;
-            writer
-                .write_all(request_str.as_bytes())
-                .await
-                .map_err(|e| {
+            let written: Result<(), McpError> = async {
+                writer
+                    .write_all(request_str.as_bytes())
+                    .await
+                    .map_err(|e| {
+                        self.mark_stdio_dead();
+                        McpError::Transport {
+                            message: format!("write error: {}", e),
+                        }
+                    })?;
+                writer.write_all(b"\n").await.map_err(|e| {
                     self.mark_stdio_dead();
                     McpError::Transport {
-                        message: format!("write error: {}", e),
+                        message: format!("write newline error: {}", e),
                     }
                 })?;
-            writer.write_all(b"\n").await.map_err(|e| {
-                self.mark_stdio_dead();
-                McpError::Transport {
-                    message: format!("write newline error: {}", e),
-                }
-            })?;
-            writer.flush().await.map_err(|e| {
-                self.mark_stdio_dead();
-                McpError::Transport {
-                    message: format!("flush error: {}", e),
-                }
-            })?;
+                writer.flush().await.map_err(|e| {
+                    self.mark_stdio_dead();
+                    McpError::Transport {
+                        message: format!("flush error: {}", e),
+                    }
+                })
+            }
+            .await;
+            if let Err(e) = written {
+                self.pending.lock().await.remove(&id);
+                return Err(e);
+            }
         } else {
+            self.pending.lock().await.remove(&id);
             return Err(McpError::ConnectionFailed {
                 message: "not connected (stdin is None)".to_string(),
             });
@@ -840,14 +969,17 @@ impl McpClient {
         // 300s 须覆盖 sidecar 端 first_token_timeout（llm.yaml 默认 120s）并留足
         // 余量——否则 reasoning model 首 token 接近上限时内核先掐断，sidecar 的
         // 最终响应永远到不了内核。可用 with_request_timeout 按插件覆盖。）
-        let response = tokio::time::timeout(self.request_timeout, rx)
-            .await
-            .map_err(|_| McpError::Timeout {
-                timeout_secs: self.request_timeout.as_secs(),
-            })?
-            .map_err(|_| McpError::Protocol {
+        let response = match tokio::time::timeout(self.request_timeout, rx).await {
+            Ok(r) => r.map_err(|_| McpError::Protocol {
                 message: "response channel closed".to_string(),
-            })?;
+            })?,
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(McpError::Timeout {
+                    timeout_secs: self.request_timeout.as_secs(),
+                });
+            }
+        };
 
         if let Some(error) = response.error {
             return Err(McpError::Protocol {
@@ -867,15 +999,17 @@ impl McpClient {
     pub async fn initialize(&self, config: &Value) -> Result<Value, McpError> {
         // 声明内核可被 sidecar 反向调用的 capability 名单。
         // 从 router 的 known_namespaces() 动态派生——router 是注册表时，
-        // 运行时注册的 namespace（如插件的 human-interaction）自动出现在声明里，
+        // 运行时注册的 namespace（如交互插件声明）自动出现在声明里，
         // sidecar SDK 据此创建 CapabilityHandle。无 router 时声明空。
         let capabilities: Value = match &self.router {
             Some(r) => build_declared_capabilities_from_namespaces(&r.known_namespaces()),
             None => build_declared_capabilities(false),
         };
 
+        let protocol_version = std::env::var("AGENTOS_MCP_PROTOCOL_VERSION")
+            .unwrap_or_else(|_| MCP_PROTOCOL_VERSION.to_string());
         let params = serde_json::json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": protocol_version,
             "capabilities": capabilities,
             "clientInfo": {
                 "name": "agentos",
@@ -883,9 +1017,6 @@ impl McpClient {
             },
             "config": config
         });
-
-        // DEBT: protocolVersion 硬编码为 "2024-11-05"。ceiling: MCP 协议升级时。
-        // upgrade: MCP 发布新 spec 版本时更新。
         let result = self.send_request("initialize", Some(params)).await?;
 
         // 发送 initialized 通知（fire-and-forget，不等响应）
@@ -981,6 +1112,78 @@ impl McpClient {
         Ok(result)
     }
 
+    /// 调用工具（arguments 为**已序列化 JSON 原文**）。
+    ///
+    /// 与 [`Self::call_tool`] 同语义；arguments 免中间 `Value` 树深拷——
+    /// 引擎每步把整包 state 塞进 arguments，走此通道直接拼帧。
+    pub async fn call_tool_raw(&self, name: &str, arguments_json: &str) -> Result<Value, McpError> {
+        // 组帧缓冲 per-client 复用（锁只护组帧，帧串 copy 出来后立即放锁——
+        // send_request_raw 的 await 不持锁，不阻塞并发调用方）：
+        // 容量保留省每步大分配，内容每帧清零重写，帧字节与一次性分配逐字节一致。
+        let params = {
+            let mut buf = self.raw_frame_scratch.lock();
+            buf.clear();
+            buf.reserve(arguments_json.len() + 64);
+            buf.extend_from_slice(b"{\"name\":");
+            serde_json::to_writer(&mut *buf, &name).map_err(|e| McpError::Protocol {
+                message: format!("serialize error: {}", e),
+            })?;
+            buf.extend_from_slice(b",\"arguments\":");
+            buf.extend_from_slice(arguments_json.as_bytes());
+            buf.extend_from_slice(b"}");
+            // JSON 输出恒为合法 UTF-8；copy 出帧串，scratch 容量留在 client 内复用
+            String::from_utf8(buf.to_vec()).map_err(|e| McpError::Protocol {
+                message: format!("raw params 非 UTF-8: {}", e),
+            })?
+        };
+        self.send_request_raw("tools/call", Some(params))
+            .await
+            .map_err(|e| McpError::ToolCallFailed {
+                tool_name: name.to_string(),
+                message: e.to_string(),
+            })
+    }
+
+    /// 调用工具（arguments 由调用方闭包**直写复用缓冲**）。
+    ///
+    /// M3b：`call_tool_raw` 的调用方仍需自建 arguments String（重载荷 state
+    /// 每步数百 KB 的独立分配）；本形态把 scratch 锁交给调用方闭包——
+    /// state/config/日志上下文三段序列化直接写进 per-client 复用缓冲，
+    /// 每步 state 级大分配降为 1 次且容量跨步复用。锁只护组帧（闭包同步
+    /// 返回后即放），不横跨 send await。
+    pub async fn call_tool_raw_fragments<F>(
+        &self,
+        name: &str,
+        write_arguments: F,
+    ) -> Result<Value, McpError>
+    where
+        F: FnOnce(&mut Vec<u8>) -> Result<(), serde_json::Error>,
+    {
+        let params = {
+            let mut buf = self.raw_frame_scratch.lock();
+            buf.clear();
+            buf.extend_from_slice(b"{\"name\":");
+            serde_json::to_writer(&mut *buf, &name).map_err(|e| McpError::Protocol {
+                message: format!("serialize error: {}", e),
+            })?;
+            buf.extend_from_slice(b",\"arguments\":");
+            write_arguments(&mut buf).map_err(|e| McpError::Protocol {
+                message: format!("serialize arguments error: {}", e),
+            })?;
+            buf.extend_from_slice(b"}");
+            // JSON 输出恒为合法 UTF-8；copy 出帧串，scratch 容量留在 client 内复用
+            String::from_utf8(buf.to_vec()).map_err(|e| McpError::Protocol {
+                message: format!("raw params 非 UTF-8: {}", e),
+            })?
+        };
+        self.send_request_raw("tools/call", Some(params))
+            .await
+            .map_err(|e| McpError::ToolCallFailed {
+                tool_name: name.to_string(),
+                message: e.to_string(),
+            })
+    }
+
     /// 检查子进程是否存活
     pub async fn is_alive(&self) -> bool {
         if let Some(child) = &self.child {
@@ -1027,6 +1230,27 @@ impl McpClient {
             Ok(None) => false,
             Ok(Some(_)) | Err(_) => true,
         }
+    }
+
+    /// 事件循环心跳年龄（秒）。
+    ///
+    /// `None` = 从未收到心跳（旧版本 sidecar 未实现心跳协议，或 HTTP transport
+    /// 无进程语义）——调用方应走兼容分支不判假死。`Some(age)` = 距最后一次
+    /// 心跳的秒数；心跳由 sidecar 主事件循环内的协程周期性写入（SDK 默认
+    /// 10s），事件循环冻结即停跳。
+    pub fn heartbeat_age_secs(&self) -> Option<u64> {
+        if !matches!(self.transport, McpTransport::Stdio { .. }) {
+            return None;
+        }
+        let ms = self.last_heartbeat_ms.load(Ordering::Relaxed);
+        if ms == 0 {
+            return None;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Some(now_ms.saturating_sub(ms) / 1000)
     }
 
     /// 获取子进程 PID
@@ -1078,20 +1302,15 @@ impl McpClient {
 /// 杀整棵进程树（sidecar 的孙进程——bash 等——一并清理，防孤儿）。
 ///
 /// 平台策略：
-/// - Windows: `taskkill /PID <pid> /T /F`（递归枚举并强制终止整棵树）
+/// - Windows: `taskkill /PID <pid> /T /F`（递归枚举并强制终止整棵树），经
+///   [`run_tree_kill_windows`] 在阻塞线程池限时执行
 /// - Unix: `kill(-pid, SIGKILL)` 进程组信号（spawn 时 process_group(0)
 ///   保证 sidecar 是进程组组长，子孙进程同组）
 ///
 /// best-effort：失败不阻断调用方（随后 child.kill() 兜底直接子进程）。
 async fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
+    run_tree_kill_windows(pid, tree_kill_command(pid)).await;
     #[cfg(unix)]
     {
         // 负 pid → 进程组：组长被杀，组内全部子孙进程一并终止（POSIX 语义）。
@@ -1101,6 +1320,50 @@ async fn kill_process_tree(pid: u32) {
         unsafe {
             libc::kill(-(pid as i32), libc::SIGKILL);
         }
+    }
+}
+
+/// Windows 树杀命令构造（taskkill /PID <pid> /T /F）。
+///
+/// 独立成函数供测试注入慢命令（超时分支的可控前置：真实 taskkill 无法
+/// 稳定构造成挂起）。
+#[cfg(windows)]
+fn tree_kill_command(pid: u32) -> std::process::Command {
+    let mut cmd = std::process::Command::new("taskkill");
+    cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+    cmd
+}
+
+/// 执行 Windows 进程树终止（阻塞线程池 + 限时 3s）。
+///
+/// taskkill 等待整棵进程树退出，可能长时间不返回——async 上下文同步调用
+/// 会卡死 worker；移入 spawn_blocking 并限时 3s，超时放弃等待并 warn
+/// （进程树终止由随后的 child.kill() / kill_on_drop 兜底承担）。
+/// `cmd` 参数化供测试注入慢命令覆盖超时分支。
+#[cfg(windows)]
+async fn run_tree_kill_windows(pid: u32, mut cmd: std::process::Command) {
+    const TREE_KILL_TIMEOUT_SECS: u64 = 3;
+    let spawned = tokio::task::spawn_blocking(move || {
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+    });
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(TREE_KILL_TIMEOUT_SECS),
+        spawned,
+    )
+    .await
+    {
+        Ok(Ok(Ok(status))) => {
+            tracing::debug!("[mcp] taskkill (pid={pid}) exit={status}");
+        }
+        Ok(Ok(Err(e))) => tracing::warn!(
+            "[mcp] taskkill (pid={pid}) 执行失败: {e}（child.kill()/kill_on_drop 兜底）"
+        ),
+        Ok(Err(e)) => tracing::warn!("[mcp] taskkill 任务 join 失败 (pid={pid}): {e}"),
+        Err(_) => tracing::warn!(
+            "[mcp] taskkill (pid={pid}) 超时 {TREE_KILL_TIMEOUT_SECS}s——进程树终止交由 child.kill()/kill_on_drop 兜底"
+        ),
     }
 }
 
@@ -1128,6 +1391,172 @@ async fn write_raw_line(
         message: format!("flush error: {}", e),
     })?;
     Ok(())
+}
+
+/// 读循环分支1：响应帧处理——按字符串 id 查 pending 表，命中则 resolve
+/// oneshot（未命中：无任务在等该 id，帧丢弃）。
+async fn resolve_pending_response(
+    line_str: &str,
+    id: &str,
+    pending: &Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
+) {
+    let mut pending_map = pending.lock().await;
+    let Some(sender) = pending_map.remove(id) else {
+        return;
+    };
+    // 匹配 pending → 这是 response
+    if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(line_str) {
+        if sender.send(response).is_err() {
+            tracing::warn!(
+                "[mcp] pending receiver dropped; JSON-RPC response id={id} not delivered"
+            );
+        }
+    }
+}
+
+/// 读循环分支2：sidecar 主动发起的 request（有 method + id）→ 派发独立处理任务。
+///
+/// 处理必须离开读循环：同宿主自反调用（插件经 router 调同宿主工具）写 stdin
+/// 后等待响应，而响应只能被读循环读出——内联 await = 读循环等自己，死锁至
+/// request_timeout；非自反的长反向调用同样队头阻塞读循环，令同宿主其他
+/// pending 响应延迟解析造成假超时。派发即返回，读循环继续消费下一帧。
+/// 处理任务内所有失败路径（router 错误 / stdin 回写失败）已在
+/// handle_incoming_request 内 warn 留痕；任务自身 panic 的 JoinError 由
+/// 看护任务 warn，不静默。
+fn spawn_request_dispatch(
+    msg: Value,
+    method: String,
+    id: Value,
+    router: Option<Arc<dyn CapabilityRouter>>,
+    stdin: Arc<Mutex<tokio::process::ChildStdin>>,
+) {
+    let task = tokio::spawn(async move {
+        dispatch_incoming_request(&msg, &method, &id, &router, &stdin).await;
+    });
+    tokio::spawn(async move {
+        if let Err(e) = task.await {
+            warn!("[mcp] 反向调用处理任务异常终止: {e}");
+        }
+    });
+}
+
+/// 读循环分支2：sidecar 主动发起的 request（有 method + id）→ 路由反向调用。
+async fn dispatch_incoming_request(
+    msg: &Value,
+    method: &str,
+    id: &Value,
+    router: &Option<Arc<dyn CapabilityRouter>>,
+    stdin: &Arc<Mutex<tokio::process::ChildStdin>>,
+) {
+    let raw_id = id.clone();
+    // 日志/错误消息用规范化字符串形式（数值 id 转十进制）
+    let id_repr = match id {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    handle_incoming_request(method, msg, &raw_id, &id_repr, router, stdin).await;
+}
+
+/// notification 有界派发队列（FIFO + 满载丢最旧）。
+///
+/// notification（流式 chunk 推送为主）是 best-effort 单向通知：读循环不允许
+/// 被慢消费阻塞（否则响应 resolve 时效受损），也不能无界积压——容量打满后
+/// 淘汰最旧条目并累计计数告警。丢最旧保完成帧：流式正文丢头仍会终结，丢尾
+/// 则前端等不到完成标记而悬挂。条目随连接生命周期：reader loop 结束置关闭
+/// 位，工作任务排空残留后退出。
+struct NotificationQueue {
+    /// FIFO 队列体。锁只护出入队（无 await 持锁），工作任务在锁外串行处理。
+    inner: std::sync::Mutex<VecDeque<(String, Value)>>,
+    /// 空队列/关闭唤醒：push 与 close 各补一个许可，pop 侧不丢唤醒。
+    notify: tokio::sync::Notify,
+    /// reader loop 结束置位：队列排空后工作任务退出。
+    closed: AtomicBool,
+    /// 满载淘汰最旧的累计条数（过载观测面）。
+    dropped: AtomicU64,
+}
+
+impl NotificationQueue {
+    fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(VecDeque::new()),
+            notify: tokio::sync::Notify::new(),
+            closed: AtomicBool::new(false),
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// 入队（同步返回，不阻塞读循环）。容量满则淘汰最旧并计数告警。
+    fn push(&self, item: (String, Value)) {
+        let evicted = {
+            let mut q = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            q.push_back(item);
+            if q.len() > NOTIFICATION_QUEUE_CAPACITY {
+                q.pop_front().is_some()
+            } else {
+                false
+            }
+        };
+        if evicted {
+            let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            warn!(
+                target: "mcp:notification",
+                total_dropped = total,
+                capacity = NOTIFICATION_QUEUE_CAPACITY,
+                "notification queue full; dropped oldest (best-effort)"
+            );
+        }
+        self.notify.notify_one();
+    }
+
+    /// 取出最旧条目；空且未关闭时挂起等待；空且已关闭时返回 None
+    /// （工作任务退出点）。
+    async fn pop(&self) -> Option<(String, Value)> {
+        loop {
+            let item = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front();
+            if item.is_some() {
+                return item;
+            }
+            if self.closed.load(Ordering::Relaxed) {
+                return None;
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    /// reader loop 结束调用：置关闭位并唤醒工作任务（排空残留后退出）。
+    fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
+        self.notify.notify_one();
+    }
+
+    /// 当前队列长度（测试观测面）。
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// 满载淘汰累计条数（测试观测面）。
+    #[cfg(test)]
+    fn dropped_count(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+/// 读循环分支3：sidecar 主动发起的 notification（有 method 无 id）→
+/// 入有序派发队列（满载丢最旧、同步返回，不阻塞读循环）。
+fn dispatch_notification(method: String, msg: &Value, queue: &NotificationQueue) {
+    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+    queue.push((method, params));
 }
 
 /// 处理 sidecar 主动发起的 JSON-RPC request。
@@ -1212,18 +1641,18 @@ async fn handle_incoming_request(
     }
 }
 
-/// notification 有序派发工作任务：从 FIFO 通道逐条取出并串行处理。
+/// notification 有序派发工作任务：从有界 FIFO 队列逐条取出并串行处理。
 ///
 /// 同一 sidecar 连接的 notification（流式 chunk 为主）是有序增量，处理
 /// 完成序必须等于发送序；串行 await 同时保证 router.handle 内部副作用
-/// （如 event-bus.emit 的 WS 推送）按序完成。通道在 reader loop 结束
-/// （stdout EOF）时 sender 归零，本任务排空残留后自然退出。
+/// （如 event-bus.emit 的 WS 推送）按序完成。队列在 reader loop 结束
+/// （stdout EOF）置关闭位，排空残留后本任务退出。
 fn spawn_notification_worker(
-    mut rx: mpsc::UnboundedReceiver<(String, Value)>,
+    queue: Arc<NotificationQueue>,
     router: Option<Arc<dyn CapabilityRouter>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some((method, params)) = rx.recv().await {
+        while let Some((method, params)) = queue.pop().await {
             handle_incoming_notification(&method, params, &router).await;
         }
     })
@@ -1292,7 +1721,7 @@ pub fn build_declared_capabilities(router_present: bool) -> Value {
 /// [`crate::capability::CapabilityRouter::known_namespaces`]）。
 ///
 /// 这让运行时注册的 namespace（如插件通过 manifest `provides.capabilities`
-/// 注册的 `human-interaction`）自动出现在 initialize 声明里，sidecar SDK
+/// 注册的交互 namespace）自动出现在 initialize 声明里，sidecar SDK
 /// 据此创建对应的 `CapabilityHandle`，无需改内核常量。
 pub fn build_declared_capabilities_from_namespaces<T: AsRef<str>>(namespaces: &[T]) -> Value {
     namespaces
@@ -1435,6 +1864,26 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn heartbeat_parse_valid_line() {
+        assert_eq!(
+            McpClient::try_parse_heartbeat("#HB 1788510000123"),
+            Some(1_788_510_000_123)
+        );
+    }
+
+    #[test]
+    fn heartbeat_parse_ignores_logs_and_garbage() {
+        // 普通日志行与乱码/空后缀都不是心跳
+        assert_eq!(
+            McpClient::try_parse_heartbeat("2026-09-04T09:00:00 INFO started"),
+            None
+        );
+        assert_eq!(McpClient::try_parse_heartbeat("#HB"), None);
+        assert_eq!(McpClient::try_parse_heartbeat("#HB not-a-number"), None);
+        assert_eq!(McpClient::try_parse_heartbeat(""), None);
+    }
+
     /// python 可执行名（Windows 为 python，其余为 python3）。
     fn python_exe() -> &'static str {
         #[cfg(windows)]
@@ -1564,6 +2013,102 @@ mod tests {
         assert!(matches!(http, McpTransport::Http { .. }));
     }
 
+    /// stdio 写失败契约：sidecar 已退出后发起请求，必须快速失败为 Transport
+    /// 写错误（而非等满超时），且客户端立即判死（供 invoker 复用/驱逐）。
+    /// 写失败路径同时摘除 pending 条目——响应永不抵达的 oneshot sender
+    /// 不得滞留（该行为无公开观测面，由本用例执行路径覆盖）。
+    #[tokio::test]
+    async fn write_failure_after_sidecar_exit_fails_fast_and_marks_dead() {
+        // 断言式前置（非早退跳过）：泄漏回归用例在缺 python 环境响亮失败，
+        // 且断言通过时本行计入覆盖（早退分支会留 0 命中行，diff coverage 红）。
+        assert!(
+            python_available(),
+            "python 不可用——本用例依赖真实 python sidecar"
+        );
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), "import sys; sys.exit(1)".to_string()],
+        );
+        client
+            .connect()
+            .await
+            .expect("connect 应成功（spawn 即返回）");
+
+        // 轮询等待 sidecar 确定退出：try_wait 观察到终止 = 管道读端已关，
+        // 其后对 stdin 的写入必失败（写失败路径的确定性前置条件）。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !client.is_dead().await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "sidecar 未在 10s 内退出，前置条件不成立"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let started = tokio::time::Instant::now();
+        let result = client.initialize(&json!({})).await;
+        let elapsed = started.elapsed();
+        match result {
+            Err(McpError::Transport { message }) => {
+                assert!(
+                    message.contains("write"),
+                    "死管道上的请求应报 Transport 写错误，实际: {message}"
+                );
+            }
+            Err(e) => panic!("死管道上的请求应为 Transport 写错误，实际: {e}"),
+            Ok(_) => panic!("sidecar 已退出，initialize 不应成功"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "写失败必须快速失败，实际耗时 {elapsed:?}"
+        );
+        assert!(client.is_dead().await, "写失败后客户端必须判死");
+    }
+
+    /// 大帧棘轮契约：stdout/stderr 单行大帧（> LINE_BUF_SHRINK_BYTES）后，
+    /// 读循环换新缓冲继续消费——后续合法响应照常 resolve、心跳行照常解析。
+    /// stderr 大帧先于请求写出还验证了消费侧不反压（管道填满不阻塞 sidecar）。
+    #[tokio::test]
+    async fn huge_frames_do_not_break_subsequent_message_flow() {
+        // 断言式前置（非早退跳过）：理由同 write_failure 用例。
+        assert!(
+            python_available(),
+            "python 不可用——本用例依赖真实 python sidecar"
+        );
+        let script = r#"
+import sys, json
+sys.stderr.write('E' * (200 * 1024) + '\n')
+sys.stderr.flush()
+sys.stderr.write('#HB 1000\n')
+sys.stderr.flush()
+sys.stdout.write('X' * (200 * 1024) + '\n')
+sys.stdout.flush()
+req = json.loads(sys.stdin.readline())
+sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": {"ok": True}}) + '\n')
+sys.stdout.flush()
+sys.stdin.readline()
+"#;
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        );
+        client.connect().await.expect("connect 应成功");
+
+        let result = tokio::time::timeout(Duration::from_secs(15), client.initialize(&json!({})))
+            .await
+            .expect("大帧后 initialize 不应卡死（15s 超时）");
+        let init = result.expect("大帧噪声行不应破坏后续合法响应的处理");
+        assert_eq!(
+            init.get("ok"),
+            Some(&json!(true)),
+            "initialize 响应 result 应原样透传"
+        );
+        assert!(
+            client.heartbeat_age_secs().is_some(),
+            "stderr 心跳行在大帧之后应照常解析（#HB 协议契约）"
+        );
+    }
+
     #[tokio::test]
     async fn test_pid_after_connect() {
         let mut client = McpClient::new_stdio("cat", vec![]);
@@ -1664,7 +2209,7 @@ mod tests {
                 }
             }
             *cap2.lock().unwrap() = Some(data.clone());
-            // 解析 body 取 id 回显
+            // 解析 body 取 JSON-RPC id 回显（响应帧按 id 关联请求）
             let body_start = subseq(&data, b"\r\n\r\n")
                 .map(|p| p + 4)
                 .unwrap_or(data.len());
@@ -2155,6 +2700,70 @@ mod tests {
         (stdin, capture, child)
     }
 
+    /// 超时路径的 pending 摘除：黑洞替身（读 stdin 永不回行）→ 请求必超时 →
+    /// 返回 Timeout 且 pending 表必须为空（条目不滞留 oneshot sender）。
+    /// 写失败路径（进程已死）与未连接路径同语义收口，不单独造场景。
+    /// raw 参数通道字节级回环：替身把收到的 params 原样回显——断言
+    /// call_tool_raw 拼的帧（name + arguments 原文嵌帧）与 call_tool 等价。
+    #[tokio::test]
+    async fn call_tool_raw_assembles_equivalent_frame() {
+        let script = concat!(
+            "import sys, json\n",
+            "for line in sys.stdin:\n",
+            "    try: m = json.loads(line)\n",
+            "    except Exception: continue\n",
+            "    if 'id' in m and 'method' in m:\n",
+            "        r = {'jsonrpc': '2.0', 'id': m['id'], 'result': {'echo': m.get('params')}}\n",
+            "        sys.stdout.write(json.dumps(r) + '\\n'); sys.stdout.flush()\n",
+        );
+        let mut client =
+            McpClient::new_stdio(python_exe(), vec!["-u".into(), "-c".into(), script.into()])
+                .with_request_timeout(Duration::from_secs(10));
+        client.connect().await.expect("回显替身可连接");
+        let result = client
+            .call_tool_raw("demo_tool", r#"{"state":{"a":1},"config":{"k":"v"}}"#)
+            .await
+            .expect("raw 调用应成功");
+        let params = &result["echo"];
+        assert_eq!(params["name"], json!("demo_tool"), "工具名正确嵌帧");
+        assert_eq!(
+            params["arguments"]["state"]["a"],
+            json!(1),
+            "arguments 原文透传（state 完整到达）"
+        );
+        assert_eq!(params["arguments"]["config"]["k"], json!("v"));
+        // 与 call_tool（Value 路径）同帧型对照：同替身同参数走旧通道
+        let result2 = client
+            .call_tool(
+                "demo_tool",
+                &json!({"state": {"a": 1}, "config": {"k": "v"}}),
+            )
+            .await
+            .expect("Value 路径应成功");
+        assert_eq!(result["echo"], result2["echo"], "两通道帧字节等价");
+    }
+
+    #[tokio::test]
+    async fn send_request_timeout_removes_pending_entry() {
+        let script = "import sys\nfor _ in sys.stdin:\n    pass\n";
+        let mut client =
+            McpClient::new_stdio(python_exe(), vec!["-u".into(), "-c".into(), script.into()])
+                .with_request_timeout(Duration::from_millis(200));
+        client.connect().await.expect("黑洞替身可连接");
+        let err = client
+            .send_request("tools/call", Some(json!({"x": 1})))
+            .await
+            .expect_err("永不响应必超时");
+        assert!(
+            matches!(err, McpError::Timeout { .. }),
+            "应为 Timeout，实际 {err:?}"
+        );
+        assert!(
+            client.pending.lock().await.is_empty(),
+            "超时后 pending 表必须为空（条目已摘除）"
+        );
+    }
+
     #[tokio::test]
     async fn test_incoming_request_routes_and_echoes_id() {
         let router = Arc::new(RecordingRouter::new(json!({"ok": true})));
@@ -2361,18 +2970,17 @@ mod tests {
         let router = Arc::new(JitteredDelayRouter {
             completions: completions.clone(),
         });
-        let (tx, rx) = mpsc::unbounded_channel::<(String, Value)>();
-        let worker = spawn_notification_worker(rx, Some(router));
+        let queue = Arc::new(NotificationQueue::new());
+        let worker = spawn_notification_worker(queue.clone(), Some(router));
 
         const N: u64 = 32;
         for i in 0..N {
-            tx.send((
+            queue.push((
                 "event-bus.emit".to_string(),
                 json!({ "event": "text_delta", "seq": i }),
-            ))
-            .unwrap();
+            ));
         }
-        drop(tx); // reader loop EOF 语义：sender 归零，worker 排空后退出
+        queue.close(); // reader loop EOF 语义：关闭后 worker 排空残留退出
         worker.await.unwrap();
 
         let got = completions.lock().unwrap().clone();
@@ -2381,6 +2989,194 @@ mod tests {
             got, expected,
             "notification 处理完成序必须等于发送序（流式增量有序契约）"
         );
+    }
+
+    #[tokio::test]
+    async fn notification_queue_bounds_backlog_and_drops_oldest() {
+        // best-effort 契约：队列打满后积压有界（≤ 容量），淘汰最旧条目并
+        // 计数——不阻塞生产方，也不无界吃内存。
+        let queue = NotificationQueue::new();
+        let total = NOTIFICATION_QUEUE_CAPACITY + 10;
+        for i in 0..total {
+            queue.push(("event-bus.emit".to_string(), json!({ "seq": i })));
+        }
+        assert_eq!(
+            queue.len(),
+            NOTIFICATION_QUEUE_CAPACITY,
+            "积压不得超过队列容量"
+        );
+        assert_eq!(
+            queue.dropped_count(),
+            (total - NOTIFICATION_QUEUE_CAPACITY) as u64,
+            "满载淘汰必须累计计数（防静默）"
+        );
+
+        // 淘汰的是最旧：close 后排空，首条应为第 10 条（前 10 条被丢），
+        // 且其余按发送序完整保留。
+        queue.close();
+        let mut drained: Vec<u64> = Vec::new();
+        while let Some((_, params)) = queue.pop().await {
+            drained.push(params["seq"].as_u64().unwrap());
+        }
+        let expected: Vec<u64> =
+            (((total - NOTIFICATION_QUEUE_CAPACITY) as u64)..(total as u64)).collect();
+        assert_eq!(drained, expected);
+
+        // 消费恢复：排空后可继续入队出队（无永久性退化）。
+        queue.push(("event-bus.emit".to_string(), json!({ "seq": "after" })));
+        queue.close();
+        let (_, params) = queue.pop().await.expect("恢复后应能继续消费");
+        assert_eq!(params["seq"], "after");
+    }
+
+    #[tokio::test]
+    async fn notification_worker_exits_after_close_and_drains_pending() {
+        // 关停契约：close 后工作任务排空已入队条目再退出（不丢、不悬挂）。
+        let router = Arc::new(RecordingRouter::new(json!({})));
+        let queue = Arc::new(NotificationQueue::new());
+        let worker = spawn_notification_worker(queue.clone(), Some(router.clone()));
+
+        for i in 0..3 {
+            queue.push(("event-bus.emit".to_string(), json!({ "seq": i })));
+        }
+        queue.close();
+        worker.await.unwrap();
+
+        let calls = router.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3, "关闭后排空残留：全部条目必须被处理");
+    }
+
+    /// 带固定处理延迟的 router：延迟期间读循环若被内联等待（队头阻塞），
+    /// 其后到达的正常响应无法被读取。
+    struct SlowRouter {
+        delay: Duration,
+        calls: Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CapabilityRouter for SlowRouter {
+        async fn handle(
+            &self,
+            capability: &str,
+            method: &str,
+            params: Value,
+        ) -> Result<Value, McpError> {
+            tokio::time::sleep(self.delay).await;
+            self.calls
+                .lock()
+                .unwrap()
+                .push((capability.to_string(), method.to_string(), params));
+            Ok(json!({}))
+        }
+        fn known_namespaces(&self) -> Vec<String> {
+            vec!["event-bus".to_string()]
+        }
+    }
+
+    #[tokio::test]
+    async fn incoming_request_dispatch_does_not_head_of_line_block_responses() {
+        // 读循环队头阻塞回归：反向 request 的处理（慢 router）不得内联阻塞
+        // 读循环——其后到达的正常响应必须立即 resolve。修复前读循环 await
+        // router.handle，响应行滞留管道 → 请求假超时（router 延迟 1s > 请求
+        // 超时 300ms，红测确定性失败）；修复后派发即返回，读循环继续消费。
+        assert!(
+            python_available(),
+            "python 不可用——本用例依赖真实 python sidecar 替身"
+        );
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = Arc::new(SlowRouter {
+            delay: Duration::from_secs(1),
+            calls: calls.clone(),
+        });
+
+        // 替身：收到内核请求后先发反向 request（整数 id，官方 SDK 风格），
+        // 随后立即回内核的响应——两帧背靠背到达读循环。
+        let script = concat!(
+            "import sys, json\n",
+            "for line in sys.stdin:\n",
+            "    m = json.loads(line)\n",
+            "    rev = {'jsonrpc': '2.0', 'id': 42, 'method': 'event-bus.emit', 'params': {'seq': 1}}\n",
+            "    resp = {'jsonrpc': '2.0', 'id': m['id'], 'result': {'ok': True}}\n",
+            "    sys.stdout.write(json.dumps(rev) + '\\n' + json.dumps(resp) + '\\n')\n",
+            "    sys.stdout.flush()\n",
+        );
+        let mut client = McpClient::new_stdio(
+            python_exe(),
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        )
+        .with_request_timeout(Duration::from_millis(300))
+        .with_router(router);
+        client.connect().await.expect("替身可连接");
+
+        let started = tokio::time::Instant::now();
+        let result = client.send_request("tools/list", None).await;
+        let elapsed = started.elapsed();
+        let value = result.expect("反向调用派发不得阻塞同宿主后续响应（队头阻塞回归）");
+        assert_eq!(value["ok"], json!(true), "响应 result 应原样透传");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "响应必须先于慢反向调用的处理延迟到达，实际 {elapsed:?}"
+        );
+
+        // 派发的反向调用最终仍被处理（不丢帧）：慢 router 延迟后记录。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while calls.lock().unwrap().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "反向调用必须最终被处理（派发 ≠ 丢弃）"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let got = calls.lock().unwrap();
+        assert_eq!(got[0].0, "event-bus");
+        assert_eq!(got[0].1, "emit");
+        assert_eq!(got[0].2["seq"], json!(1));
+    }
+
+    /// handler 直接 panic 的 router：验证派发任务与读循环的故障隔离。
+    struct PanickingRouter;
+
+    #[async_trait::async_trait]
+    impl CapabilityRouter for PanickingRouter {
+        async fn handle(&self, _c: &str, _m: &str, _p: Value) -> Result<Value, McpError> {
+            panic!("handler boom");
+        }
+        fn known_namespaces(&self) -> Vec<String> {
+            vec!["event-bus".to_string()]
+        }
+    }
+
+    #[tokio::test]
+    async fn reverse_call_handler_panic_does_not_kill_reader_loop() {
+        // 派发任务 panic（JoinError）只 warn 留痕，不得波及读循环：后续正常
+        // 响应照常解析。修复前内联派发把 handler panic 直接带进读循环任务
+        // （stdout EOF → pending 清空 → 请求快败）。
+        assert!(
+            python_available(),
+            "python 不可用——本用例依赖真实 python sidecar 替身"
+        );
+        let script = concat!(
+            "import sys, json\n",
+            "for line in sys.stdin:\n",
+            "    m = json.loads(line)\n",
+            "    rev = {'jsonrpc': '2.0', 'id': 7, 'method': 'event-bus.emit', 'params': {}}\n",
+            "    resp = {'jsonrpc': '2.0', 'id': m['id'], 'result': {'ok': True}}\n",
+            "    sys.stdout.write(json.dumps(rev) + '\\n' + json.dumps(resp) + '\\n')\n",
+            "    sys.stdout.flush()\n",
+        );
+        let mut client = McpClient::new_stdio(
+            python_exe(),
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        )
+        .with_request_timeout(Duration::from_secs(5))
+        .with_router(Arc::new(PanickingRouter));
+        client.connect().await.expect("替身可连接");
+
+        let value = client
+            .send_request("tools/list", None)
+            .await
+            .expect("反向调用 handler panic 不得影响读循环与响应解析");
+        assert_eq!(value["ok"], json!(true), "响应 result 应原样透传");
     }
 
     // ── stdio send_request / send_notification 错误路径 ────────────────
@@ -2769,6 +3565,48 @@ mod tests {
         assert_eq!(
             resolve_windows_command("definitely_not_a_real_cmd_xyz"),
             "definitely_not_a_real_cmd_xyz"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn tree_kill_timeout_abandons_slow_taskkill_without_blocking() {
+        // 树杀限时回归：注入慢命令（ping -n 6 ≈ 5s，远超 3s 限时）→ 超时分支
+        // 命中——函数在 3s 限时处返回（不阻塞调用方等待慢命令完成），进程树
+        // 终止交由 child.kill()/kill_on_drop 兜底。修复前同步 status() 会把
+        // 慢命令的全程阻塞带进 async worker。
+        let mut slow = std::process::Command::new("ping");
+        slow.args(["-n", "6", "127.0.0.1"]);
+        let started = tokio::time::Instant::now();
+        run_tree_kill_windows(999_999, slow).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(3),
+            "限时 3s 必须走满（超时分支命中），实际 {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "超时后必须放弃等待而非等慢命令跑完（≈5s），实际 {elapsed:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn tree_kill_command_completes_normally_within_budget() {
+        // 正常路径对照：真实 taskkill（目标为已退出的短命进程，退出码不论）
+        // 必须在 3s 限时内完成——spawn_blocking 通道与状态机闭合。
+        let mut shortlived = std::process::Command::new("cmd")
+            .args(["/c", "exit", "0"])
+            .spawn()
+            .expect("短命进程可 spawn");
+        let pid = shortlived.id();
+        let _ = shortlived.wait();
+
+        let started = tokio::time::Instant::now();
+        run_tree_kill_windows(pid, tree_kill_command(pid)).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "正常 taskkill 必须在限时内完成"
         );
     }
 }

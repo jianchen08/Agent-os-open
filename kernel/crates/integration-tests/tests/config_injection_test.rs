@@ -45,9 +45,7 @@ for line in sys.stdin:
         continue
     method = req.get("method", "")
     if "id" not in req:
-        if method == "notifications/on_config_change":
-            write_result({"event": "config_change", "received_config": req.get("params", {}).get("config"), "timestamp": time.time()})
-        elif method == "notifications/initialized":
+        if method == "notifications/initialized":
             pass
         continue
     if method == "initialize":
@@ -195,6 +193,8 @@ impl PluginLoader for MockLoader {
 
 fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: id.to_string(),
         name: format!("Test {}", id),
         description: None,

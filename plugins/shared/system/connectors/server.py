@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """连接器服务 MCP 服务端——纯接口适配层。
 
-老代码从 0.1 src/connectors/ 原封不动复制到本目录（平铺），
-本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
+本目录为实现模块（平铺），本文件只做接口适配：
+调用同目录实现模块，通过 MCP SDK 暴露为工具。
 
 [来源: docs/working/module_migration_plan.md §六 P2 connectors]
 """
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-# 直接导入同目录老代码（文件就在旁边，通过 sys.path 可见）
-from agentos_plugin_sdk.adapter_config import get_adapter_status_summary
-from degradation import DegradationManager
-from registry import ConnectorRegistry
+bootstrap_plugin(__file__)  # 插件目录（degradation/registry 等平铺模块）入 sys.path
 
-from agentos_plugin_sdk import AgentOSPlugin
+from degradation import DegradationManager  # noqa: E402
+from registry import ConnectorRegistry  # noqa: E402
+from connector_types import ActionResult, ConnectorAction  # noqa: E402
+
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk.adapter_config import get_adapter_status_summary  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("connectors_service")
@@ -199,6 +199,62 @@ async def connector_get_adapter_status() -> dict[str, Any]:
     except Exception as e:
         logger.error("获取适配器状态失败: %s", e)
         return {"success": False, "error": str(e)}
+
+
+@plugin.tool(
+    name="connector.execute",
+    schema={
+        "type": "object",
+        "properties": {
+            "action_type": {
+                "type": "string",
+                "description": "操作类型（如 open_file/open_folder）",
+            },
+            "parameters": {
+                "type": "object",
+                "description": "操作参数",
+                "default": {},
+            },
+        },
+        "required": ["action_type"],
+    },
+    description="Execute an action via the best connected connector (routes by action type & priority)",
+)
+async def connector_execute(
+    action_type: str,
+    parameters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """按动作类型路由最佳连接器并执行（无降级回退的原始执行面）。
+
+    无已连接连接器支持该动作时返回 ``no_connector`` 标记——调用方据自身
+    契约决定降级路径（如 workspace 的 open_folder 走系统文件管理器兜底）。
+    与 connector.degrade 的区别：本服务不做本地降级，如实上报路由/执行结果。
+    """
+    if _registry is None:
+        return {"success": False, "error": "服务未初始化"}
+
+    connector = _registry.get_best_connector_for(action_type)
+    if connector is None:
+        return {
+            "success": False,
+            "no_connector": True,
+            "error": f"没有已连接的连接器支持动作: {action_type}",
+        }
+
+    action = ConnectorAction(
+        action_type=action_type,
+        parameters=parameters or {},
+    )
+    result: ActionResult = await connector.execute_action(action)
+    response: dict[str, Any] = {
+        "success": result.success,
+        "connector_type": connector.connector_type,
+    }
+    if result.data is not None:
+        response["data"] = result.data
+    if result.error:
+        response["error"] = result.error
+    return response
 
 
 @plugin.tool(

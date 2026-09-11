@@ -40,7 +40,6 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
-    // 将错误日志上报给错误追踪系统
     captureException(error, {
       component: 'ErrorBoundary',
       componentStack: errorInfo.componentStack,

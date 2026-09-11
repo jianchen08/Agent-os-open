@@ -2,13 +2,12 @@
 /**
  * 失败消息渲染测试（2026-08-22 错误透传收口）。
  *
- * stream_error 标记 status=error 且无内容的 assistant 消息此前走
- * "空内容隐藏"逻辑整块消失——用户看到消息凭空消失；
- * 本次失败/中断消息强制渲染错误态文案。
+ * status=error 且无内容的 assistant 消息不得走"空内容隐藏"逻辑整块消失
+ * （用户会看到消息凭空消失）；失败/中断消息强制渲染错误态文案。
  */
-import { render, screen } from '@testing-library/react'
-import { renderWithProviders } from '@/test/renderWithProviders'
+import { screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import { MessageItem } from '../MessageItem'
 import type { Message } from '@/types/models'
 

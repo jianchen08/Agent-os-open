@@ -1,29 +1,33 @@
 /** @feature FP-0.2.四 前端Schema | @ci frontend-test */
 /**
- * DebugExecutionRecordsPage「清空全部」按钮行为测试
+ * DebugExecutionRecordsPage「清空全部」按钮行为测试（trace 视图）
  *
- * 2026-08-24 clear-all stub 做实配套：验证 confirm 二次确认、API 调用、
- * 成功后批量失效受影响缓存（执行记录/会话/任务/LLM 快照等）、
- * 失败时后端 detail 透传展示（409 运行中管道等）。
+ * 验证 confirm 二次确认、API 调用、成功后批量失效受影响缓存
+ * （执行记录/管道 trace 与 state/会话/任务/LLM 快照等）、失败时后端
+ * detail 透传展示（409 运行中管道等）。trace 数据面行为在
+ * DebugSessionsPage.test.tsx 的执行 Trace 视图用例中覆盖。
  */
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import * as api from '@/services/api/executionRecords'
 import { queryKeys } from '@/services/query/queryKeys'
 import { renderWithProviders, createTestQueryClient } from '@/test/renderWithProviders'
+import { DebugExecutionRecordsPage } from '../DebugExecutionRecordsPage'
 
+// mock 整个 API 模块（vi.mock 提升到文件顶部，import 位置不影响生效）
 vi.mock('@/services/api/executionRecords', () => ({
   getExecutionRecordsSessions: vi.fn(),
   getExecutionRecords: vi.fn(),
   clearAllExecutionRecords: vi.fn(),
 }))
-
-import * as api from '@/services/api/executionRecords'
-import { DebugExecutionRecordsPage } from '../DebugExecutionRecordsPage'
+vi.mock('@/services/api/pipelineDiagnostics', () => ({
+  getPipelineTraces: vi.fn(),
+  getPipelineStateFull: vi.fn(),
+}))
 
 const mockGetSessions = vi.mocked(api.getExecutionRecordsSessions)
-const mockGetRecords = vi.mocked(api.getExecutionRecords)
 const mockClearAll = vi.mocked(api.clearAllExecutionRecords)
 
 function mockConfirm(ret: boolean) {
@@ -33,20 +37,21 @@ function mockConfirm(ret: boolean) {
 beforeEach(() => {
   vi.clearAllMocks()
   mockGetSessions.mockResolvedValue({ sessions: [], total: 0 })
-  mockGetRecords.mockResolvedValue({ records: [], total: 0, session_id: null })
 })
 
 describe('DebugExecutionRecordsPage 清空全部', () => {
   it('渲染清空按钮（桌面与面板 embedded 共用组件）', async () => {
     renderWithProviders(<DebugExecutionRecordsPage />)
     expect(screen.getByRole('button', { name: /清空全部/ })).toBeInTheDocument()
-    await waitFor(() => expect(mockGetRecords).toHaveBeenCalled())
+    // 未选管道：引导态出现且不请求 trace
+    await waitFor(() => {
+      expect(screen.getByText(/选择一个管道/)).toBeInTheDocument()
+    })
   })
 
   it('embedded 面板模式同样渲染清空按钮（PageShell embedded 下 actions 工具行）', async () => {
     renderWithProviders(<DebugExecutionRecordsPage embedded />)
     expect(screen.getByRole('button', { name: /清空全部/ })).toBeInTheDocument()
-    await waitFor(() => expect(mockGetRecords).toHaveBeenCalled())
   })
 
   it('confirm 取消时不调用清理 API', async () => {
@@ -79,8 +84,10 @@ describe('DebugExecutionRecordsPage 清空全部', () => {
     await waitFor(() => {
       expect(screen.getByText(/已清理 11 条/)).toBeInTheDocument()
     })
-    // 执行记录（前缀失效：覆盖全部会话分条）+ 会话 + 任务 + LLM 快照 + 聊天会话
+    // 执行记录（前缀失效：覆盖全部会话分条）+ 管道 trace/state + 会话 + 任务 + LLM 快照
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.executionRecordsPrefix })
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.pipelineTracesPrefix })
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.pipelineStateFullPrefix })
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.debugSessions })
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.debugTasks })
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: queryKeys.llmPayloadDiagPrefix })

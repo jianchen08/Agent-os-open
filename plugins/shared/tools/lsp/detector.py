@@ -90,7 +90,6 @@ class IDEDetector:
                     if not proc_name:
                         continue
 
-                    # 检查是否匹配已知 IDE
                     for ide_type, names in IDEDetector.PROCESS_NAMES.items():
                         if proc_name in names:
                             return IDEInfo(

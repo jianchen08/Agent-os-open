@@ -2,7 +2,7 @@
 """MCP 服务与 skills 冒烟测试——独立于插件矩阵的第三类资产。
 
 覆盖：
-1. mcp-servers/ 下 3 个 Python MCP 服务端（bing-search / demo-tools / llm-sidecar）：
+1. mcp-servers/ 下 2 个 Python MCP 服务端（bing-search / demo-tools）：
    子进程语法编译 + mcp.json 清单校验；
 2. mcp-servers/web-search-mcp（Node）：package.json / mcp.json / 源码目录存在性
    （npm 单测需 node_modules，由仓库外 npm test 执行，见 web-search-mcp/tests）；
@@ -27,7 +27,6 @@ SKILLS_DIR = ROOT / "skills"
 PYTHON_MCP_SERVERS = [
     MCP_DIR / "bing-search",
     MCP_DIR / "demo-tools",
-    MCP_DIR / "llm-sidecar",
 ]
 
 
@@ -62,13 +61,6 @@ def test_python_mcp_server_loadable(server_dir: Path) -> None:
             for arg in spec.get("args", []):
                 p = server_dir / arg
                 assert p.exists(), f"{server_dir.name}: {name} 引用不存在的文件 {arg}"
-
-
-def test_llm_sidecar_extra_scripts_valid() -> None:
-    """llm-sidecar 的 litellm_proxy.py 也应语法合法。"""
-    proxy = MCP_DIR / "llm-sidecar" / "litellm_proxy.py"
-    assert proxy.exists()
-    _compile_check(proxy)
 
 
 def test_web_search_mcp_node_project_structure() -> None:

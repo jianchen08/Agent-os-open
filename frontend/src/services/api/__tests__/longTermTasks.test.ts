@@ -10,7 +10,6 @@
  * 防止回退到 /api/v1/tasks（内核无路由 → 404 复发）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
 // Mock apiClient（外部依赖），捕获实际请求 URL
 // longTermTasks.ts 使用命名导入 `import { apiClient } from '@/services/api/client'`，
 // 故 mock 需同时提供 default 与 apiClient 命名导出。
@@ -18,7 +17,6 @@ const getMock = vi.fn()
 const patchMock = vi.fn()
 const postMock = vi.fn()
 const deleteMock = vi.fn()
-
 vi.mock('../client', () => {
   const mockClient = {
     get: (...args: unknown[]) => getMock(...args),
@@ -28,7 +26,6 @@ vi.mock('../client', () => {
   }
   return { default: mockClient, apiClient: mockClient }
 })
-
 import * as longTermTaskApi from '@/services/api/longTermTasks'
 
 describe('longTermTasks API 端点路径（4c 迁移：/ext/task_service/tasks）', () => {

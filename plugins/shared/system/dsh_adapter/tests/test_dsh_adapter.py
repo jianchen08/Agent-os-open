@@ -366,6 +366,45 @@ class TestBridgeProtocol:
         assert out["success"] is False
         assert "missing" in out["error"]
 
+    def test_unconfigured_repo_root_fails_visible_with_env_hint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """未配置仓库根（无参/无 env）：fail-visible 且文案指明需设的环境变量名。
+
+        E2 修复回归：曾硬编码机器特定缺省路径，未配置机器静默指向不存在目录。
+        """
+        import bridge as bridge_mod  # noqa: PLC0415
+
+        runtime_dir = tmp_path / "runtime"
+        runtime_dir.mkdir()
+        (runtime_dir / "dsh-rpc-bridge.mjs").write_text("// stub\n", encoding="utf-8")
+        monkeypatch.setattr(bridge_mod, "_RUNTIME_SCRIPT", runtime_dir / "dsh-rpc-bridge.mjs")
+        monkeypatch.delenv("AGENTOS_DSH_REPO_ROOT", raising=False)
+        b = DshRuntimeBridge()
+        out = asyncio.run(b.call_tool("read", {}))
+        assert out["success"] is False
+        assert "AGENTOS_DSH_REPO_ROOT" in (out.get("error") or "")
+
+    def test_repo_root_resolved_from_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """显式参数缺省时从 AGENTOS_DSH_REPO_ROOT 解析（env 配置路径回归）。"""
+        import bridge as bridge_mod  # noqa: PLC0415
+
+        repo = tmp_path / "env-repo"
+        repo.mkdir()
+        monkeypatch.setenv("AGENTOS_DSH_REPO_ROOT", str(repo))
+        b = DshRuntimeBridge()
+        assert b._repo_root == str(repo)  # noqa: SLF001 — 配置解析契约直读内部委派字段
+
+    def test_explicit_repo_root_overrides_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """显式参数优先于环境变量（解析序契约）。"""
+        monkeypatch.setenv("AGENTOS_DSH_REPO_ROOT", str(tmp_path / "from-env"))
+        b = DshRuntimeBridge(repo_root=str(tmp_path / "explicit"))
+        assert b._repo_root == str(tmp_path / "explicit")  # noqa: SLF001
+
     def test_shutdown_terminates_process(self, mock_bridge: DshRuntimeBridge):
         async def scenario() -> None:
             await mock_bridge.initialize()

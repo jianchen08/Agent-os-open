@@ -18,7 +18,7 @@ _remount_and_retry_exec 的编排逻辑与 post-exec 钩子的触发条件。
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from isolation_types import (
+from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,

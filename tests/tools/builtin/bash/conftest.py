@@ -18,6 +18,11 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _BASH_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "bash"
 
+# 收集期提升声明：tests/conftest.py 的 pytest_collect_file 在每个测试文件
+# 导入前把 bash 目录推到 sys.path[0]（平铺 `from tool import BashTool` 的
+# 解析不再受先行收集目录的 sys.path 残留影响）。
+_PLUGIN_SOURCE_DIRS = [str(_BASH_DIR)]
+
 # bash 插件目录下的平铺模块名（与其它工具插件可能同名，需在切换时清理缓存）
 _AMBIGUOUS_MODULES = {
     "tool",

@@ -81,21 +81,3 @@ export interface VotingSession {
   }
 }
 
-/** 投票请求 */
-export interface SubmitVoteRequest {
-  /** 投票 ID */
-  votingId: string
-  /** 选中的方案 ID 列表 */
-  selectedOptionIds: string[]
-  /** 投票理由 */
-  reason?: string
-}
-
-/** 投票响应 */
-export interface SubmitVoteResponse {
-  success: boolean
-  /** 更新后的投票会话 */
-  voting: VotingSession
-  /** 错误信息 */
-  error?: string
-}

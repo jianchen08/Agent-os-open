@@ -389,6 +389,27 @@ impl PluginLoaderImpl {
             }
         }
 
+        // ── state.reads 读面声明格式校验（schema 收录阶段）：`messages_tail:N`
+        // 条目要求 N 为正整数；非法条目 warn + 忽略该条目（不拒载——读面
+        // 声明单条错误只影响该插件的投喂范围，warn 不拒载与既有校验风格
+        // 一致）。键名 / `messages` 形态由文档约定，本阶段不校验；合法条目
+        // 原样透传到运行时 manifest 视图（投喂消费由后续任务接入）。──
+        if let Some(state) = manifest.state.as_mut() {
+            state.reads.retain(|entry| {
+                let valid = match entry.strip_prefix("messages_tail:") {
+                    Some(n) => n.parse::<u64>().is_ok_and(|n| n > 0),
+                    None => true,
+                };
+                if !valid {
+                    warn!(
+                        "Ignoring invalid state.reads entry {:?} in plugin {}: messages_tail:N requires N to be a positive integer",
+                        entry, manifest.id
+                    );
+                }
+                valid
+            });
+        }
+
         // ── GAP-4：env 声明自动生成——mcp 端点引用的 ${VAR}（无默认值语法）
         // 即视为 env 配置面，内核自动生成 config_files[target=env] 声明
         // （合并进既有 env 条目或新建），设置页据此提供 key 入口；插件只写
@@ -653,7 +674,6 @@ impl PluginLoader for PluginLoaderImpl {
         &self,
         plugin_id: &str,
     ) -> Result<LoadedPlugin, agentos_core::types::PluginError> {
-        // 检查是否已加载
         {
             let loaded = self.loaded.read();
             if let Some(plugin) = loaded.get(plugin_id) {
@@ -686,7 +706,6 @@ impl PluginLoader for PluginLoaderImpl {
             loaded_at: Some(chrono::Utc::now()),
         };
 
-        // 更新缓存
         {
             let mut loaded = self.loaded.write();
             loaded.insert(plugin_id.to_string(), loaded_plugin.clone());
@@ -747,23 +766,50 @@ impl PluginLoader for PluginLoaderImpl {
 
         let mut config_map = serde_json::Map::new();
 
-        self.collect_yaml_configs(config_root, &mut config_map)
-            .map_err(|e| {
-                let code = match &e {
-                    LoaderError::Io { .. } => "CONFIG_IO_ERROR",
-                    LoaderError::ManifestParse { .. } => "CONFIG_PARSE_ERROR",
-                    _ => "CONFIG_LOAD_FAILED",
-                };
-                agentos_core::types::PluginError {
-                    message: format!(
-                        "Failed to load config from {}: {}",
-                        config_root.display(),
-                        e
-                    ),
-                    code: Some(code.to_string()),
-                    source: Some("plugin-loader".to_string()),
-                }
+        // 递归扫描经 agentos-core::config_scan 共用骨架；单文件读失败传播、
+        // 解析失败告警跳过——full_config 只是中间字典，真正注入靠
+        // config_files[].path 精确定位，一个无关文件（如模板文档）解析失败
+        // 不该连累全部插件收不到配置。
+        let mut load_file = |path: &Path| -> Result<Option<serde_json::Value>, LoaderError> {
+            let content = std::fs::read_to_string(path).map_err(|e| LoaderError::Io {
+                message: format!("Failed to read config file {}: {}", path.display(), e),
             })?;
+            // YAML → JSON Value（serde_yaml 直接反序列化到 serde_json::Value）。
+            match serde_yaml::from_str(&content) {
+                Ok(v) => Ok(Some(v)),
+                Err(e) => {
+                    warn!("Skipping unparseable config file {}: {}", path.display(), e);
+                    Ok(None)
+                }
+            }
+        };
+        let mut read_dir_error = |dir: &Path, e: std::io::Error| -> LoaderError {
+            LoaderError::Io {
+                message: format!("Failed to read config dir {}: {}", dir.display(), e),
+            }
+        };
+        agentos_core::config_scan::collect_yaml_dir(
+            config_root,
+            &mut config_map,
+            &mut load_file,
+            &mut read_dir_error,
+        )
+        .map_err(|e| {
+            let code = match &e {
+                LoaderError::Io { .. } => "CONFIG_IO_ERROR",
+                LoaderError::ManifestParse { .. } => "CONFIG_PARSE_ERROR",
+                _ => "CONFIG_LOAD_FAILED",
+            };
+            agentos_core::types::PluginError {
+                message: format!(
+                    "Failed to load config from {}: {}",
+                    config_root.display(),
+                    e
+                ),
+                code: Some(code.to_string()),
+                source: Some("plugin-loader".to_string()),
+            }
+        })?;
 
         let config_keys: Vec<String> = config_map.keys().cloned().collect();
         info!(
@@ -842,88 +888,6 @@ impl PluginLoaderImpl {
             .iter()
             .filter_map(|(id, path)| path.parent().map(|p| (id.clone(), p.to_path_buf())))
             .collect()
-    }
-
-    /// 递归扫描目录下的所有 YAML 文件，解析并合并到 config_map。
-    ///
-    /// 文件名（不含 `.yaml`/`.yml` 扩展名）作为 key，
-    /// 文件内容解析后的 JSON Value 作为 value。
-    /// 子目录名也会作为嵌套 key 被收录（子目录下的文件合并到该 key 对应的子对象中）。
-    ///
-    /// **这是插件配置注入的唯一权威路径**（invoker → sidecar）。
-    /// 注意与 config crate 的 `ConfigLoader::load_all`（非递归、仅顶层、
-    /// 不在注入路径上）和 0.1 `src/config/loader.py::load_all`（同样非递归、
-    /// 服务于 0.1 自身）区分——后两者是镜像移植 / 旧路径，不要用于注入。
-    #[allow(clippy::only_used_in_recursion)]
-    fn collect_yaml_configs(
-        &self,
-        dir: &Path,
-        config_map: &mut serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), LoaderError> {
-        let entries = std::fs::read_dir(dir).map_err(|e| LoaderError::Io {
-            message: format!("Failed to read config dir {}: {}", dir.display(), e),
-        })?;
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-
-            if path.is_dir() {
-                // 递归处理子目录
-                let dir_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                let mut sub_map = serde_json::Map::new();
-                self.collect_yaml_configs(&path, &mut sub_map)?;
-
-                if !sub_map.is_empty() {
-                    config_map.insert(dir_name, serde_json::Value::Object(sub_map));
-                }
-            } else if path.is_file() {
-                // 跳过隐藏文件(`.` 前缀)——Unix 惯例隐藏文件是元数据/文档,
-                // 不是常规配置。真实用例:.agent_template_spec.yaml 是 Agent 配置
-                // 规范文档(含 {placeholder}: 占位符 key),不是可执行配置。
-                let is_hidden = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().starts_with('.'))
-                    .unwrap_or(false);
-                if is_hidden {
-                    continue;
-                }
-
-                // 只处理 .yaml 和 .yml 文件
-                let ext = path.extension().map(|e| e.to_string_lossy().to_string());
-                if ext.as_deref() != Some("yaml") && ext.as_deref() != Some("yml") {
-                    continue;
-                }
-
-                let stem = path
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                let content = std::fs::read_to_string(&path).map_err(|e| LoaderError::Io {
-                    message: format!("Failed to read config file {}: {}", path.display(), e),
-                })?;
-
-                // YAML → JSON Value（serde_yaml 直接反序列化到 serde_json::Value）。
-                // 单个文件解析失败时跳过该文件并 warn,不让整体 load_config 失败——
-                // full_config 只是中间字典,真正注入靠 config_files[].path 精确定位;
-                // 一个无关文件(如模板文档)解析失败不该连累全部插件收不到配置。
-                let yaml_value: serde_json::Value = match serde_yaml::from_str(&content) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!("Skipping unparseable config file {}: {}", path.display(), e);
-                        continue;
-                    }
-                };
-
-                config_map.insert(stem, yaml_value);
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -1144,10 +1108,9 @@ mod tests {
         fn exit(&self, _span: &tracing::Id) {}
     }
 
-    /// Phase 1 契约定型：manifest 未知字段从"静默忽略"改为
-    /// `deny_unknown_fields` 拒绝——历史遗留 `capabilities.resources`（结构已删）
-    /// 是 82 个真实插件曾携带的死声明，扫描后已全量清除；本测试断言未知字段
-    /// 现在**拒绝**（fail-closed），不再容忍"声明了却不生效"。
+    /// manifest 未知字段 `deny_unknown_fields` 拒绝（fail-closed，不容忍
+    /// "声明了却不生效"——如已删除的 `capabilities.resources` 结构字段）。
+    /// 本测试断言携带未知字段的 manifest 被拒绝。
     #[test]
     fn test_manifest_with_unknown_field_is_rejected() {
         let manifest_json = r#"{
@@ -1180,14 +1143,9 @@ mod tests {
     /// 语料级校验（Phase 1 契约真实性回归）：真实仓库全部 plugin.json 必须毫发
     /// 无伤通过严格反序列化（`deny_unknown_fields`）+ 必填字段校验。
     ///
-    /// 这是"校验器不要在真实数据上空转"的持续闸门——它第一次在真实语料上运行时
-    /// 抓到的硬伤（已全量迁移）：
-    ///
-    ///   - 38 个插件顶层 `description`：struct 无此字段，serde 静默丢弃 → 现已入 struct；
-    ///   - 82 个插件 `capabilities.resources`：结构已删的遗留字段 → 已清除；
-    ///   - approval 的 `capabilities_required`：非契约字段 → 已清除。
-    ///
-    /// 若此后熟悉语料出现未知字段/缺必填，本测试即红灯（校验器真实生效）。
+    /// 这是"校验器不要在真实数据上空转"的持续闸门——语料出现未知字段或缺
+    /// 必填（如顶层 `description` 未入 struct、`capabilities.resources` 这类
+    /// 非契约字段）即红灯（校验器真实生效）。
     #[test]
     fn real_corpus_all_manifests_pass_strict_parsing() {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1196,7 +1154,7 @@ mod tests {
         let mut walk = Vec::new();
         fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             // 跳过第三方/运行时产物目录：管理面只管插件声明，node_modules 下也有
-            // 大量 widget_demo/dsh 依赖的 plugin.json（非本仓插件）。
+            // 大量第三方依赖自带的 plugin.json（非本仓插件）。
             const SKIP: &[&str] = &[
                 "node_modules",
                 ".venv",
@@ -1320,6 +1278,8 @@ mod tests {
     fn test_manifest_validation_valid() {
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
         let manifest = PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: "test".to_string(),
             name: "Test".to_string(),
             description: None,
@@ -1362,6 +1322,8 @@ mod tests {
 
         fn base_manifest(id: &str) -> PluginManifest {
             PluginManifest {
+                force_include_tools: Vec::new(),
+                state: None,
                 id: id.to_string(),
                 name: "Single Truth".to_string(),
                 description: None,
@@ -1454,6 +1416,8 @@ mod tests {
     fn test_manifest_validation_steps_empty_name_rejected() {
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
         let mut manifest = PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: "steps_bad".to_string(),
             name: "Steps Bad".to_string(),
             description: None,
@@ -1506,6 +1470,8 @@ mod tests {
     fn test_manifest_validation_steps_duplicate_name_rejected() {
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
         let mut manifest = PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: "steps_dup".to_string(),
             name: "Steps Dup".to_string(),
             description: None,
@@ -1567,6 +1533,8 @@ mod tests {
     fn test_manifest_validation_steps_valid_ok() {
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
         let mut manifest = PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: "steps_ok".to_string(),
             name: "Steps Ok".to_string(),
             description: None,
@@ -1649,6 +1617,8 @@ mod tests {
     fn test_manifest_validation_missing_id() {
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
         let manifest = PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: String::new(),
             name: "Test".to_string(),
             description: None,
@@ -1687,6 +1657,8 @@ mod tests {
         // ADR ⑥: 组合插件 entry 可为空
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
         let manifest = PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: "composite_test".to_string(),
             name: "Composite".to_string(),
             description: None,
@@ -1854,6 +1826,8 @@ mod tests {
         // ADR ⑦: requires_content 字段
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
         let manifest = PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: "memory_read".to_string(),
             name: "Memory Read".to_string(),
             description: None,
@@ -2577,6 +2551,89 @@ mod tests {
                 .any(|f| f.target.as_deref() == Some("env")),
             "带默认值的引用不应生成声明"
         );
+    }
+
+    // ── state.reads 读面声明（schema 收录阶段）：合法透传 / 非法告警忽略 ──
+
+    fn state_reads_manifest_json(reads_entries: &str) -> String {
+        format!(
+            r#"{{"id": "reads_plugin", "name": "Reads", "version": "1.0.0",
+            "plugin_type": "tool", "language": "external", "host_type": "sidecar",
+            "entry": "mcp:external", "capabilities": {{}}, "requires_services": [],
+            "permissions": {{}}, "priority": 30,
+            "state": {{"volatile_keys": ["k.volatile"], "reads": [{reads_entries}]}}}}"#
+        )
+    }
+
+    /// 三种合法形态（键名 / `messages` 全量 / `messages_tail:N`）解析成功并
+    /// 原样透传到运行时 manifest 视图。
+    #[test]
+    fn test_state_reads_valid_entries_pass_through() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let mut manifest: PluginManifest = serde_json::from_str(&state_reads_manifest_json(
+            r#""task.status", "messages", "messages_tail:50""#,
+        ))
+        .unwrap();
+        let r = loader.validate_manifest_internal(&mut manifest, Path::new("(test)"));
+        assert!(r.is_ok(), "合法 reads 条目应通过校验：{r:?}");
+        assert_eq!(
+            manifest.state.as_ref().unwrap().reads,
+            vec!["task.status", "messages", "messages_tail:50"],
+            "合法条目应原样透传（不增不删不改写）"
+        );
+    }
+
+    /// `messages_tail:N` 格式非法（N 非正整数）→ G2 装载告警并忽略该条目
+    /// （warn 不拒载），同 manifest 其余合法条目不受影响。
+    #[test]
+    fn test_state_reads_invalid_messages_tail_warns_and_ignored() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let mut manifest: PluginManifest = serde_json::from_str(&state_reads_manifest_json(
+            r#""task.status", "messages_tail:x", "messages_tail:0", "messages_tail:", "messages_tail:1.5", "messages_tail:50""#,
+        ))
+        .unwrap();
+        // warn 走 always-enabled 测试订阅者包裹（默认无订阅者时 warn! 文案
+        // 不求值）；断言仍是语义结果（不拒载 + 非法条目被忽略），不断言日志
+        let r = tracing::subscriber::with_default(AlwaysSubscriber, || {
+            loader.validate_manifest_internal(&mut manifest, Path::new("(test)"))
+        });
+        assert!(
+            r.is_ok(),
+            "非法 messages_tail 条目应告警忽略而非拒载：{r:?}"
+        );
+        assert_eq!(
+            manifest.state.as_ref().unwrap().reads,
+            vec!["task.status", "messages_tail:50"],
+            "非法条目（非数字/零/空/非整数）被忽略，合法邻居条目保留"
+        );
+    }
+
+    /// 向后兼容：旧 manifest 的 state 段无 reads（或整段无 state）→ 校验全绿，
+    /// reads 缺省为空。
+    #[test]
+    fn test_state_reads_absent_backward_compat() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let legacy_state = r#"{"id": "legacy_state", "name": "L", "version": "1.0.0",
+            "plugin_type": "tool", "language": "external", "host_type": "sidecar",
+            "entry": "mcp:external", "capabilities": {},
+            "state": {"volatile_keys": ["k.volatile"]}}"#;
+        let mut m1: PluginManifest = serde_json::from_str(legacy_state).unwrap();
+        assert!(loader
+            .validate_manifest_internal(&mut m1, Path::new("(test)"))
+            .is_ok());
+        assert!(
+            m1.state.as_ref().unwrap().reads.is_empty(),
+            "旧 state 段（只有 volatile_keys）reads 缺省为空"
+        );
+
+        let no_state = r#"{"id": "no_state", "name": "N", "version": "1.0.0",
+            "plugin_type": "tool", "language": "external", "host_type": "sidecar",
+            "entry": "mcp:external", "capabilities": {}}"#;
+        let mut m2: PluginManifest = serde_json::from_str(no_state).unwrap();
+        assert!(loader
+            .validate_manifest_internal(&mut m2, Path::new("(test)"))
+            .is_ok());
+        assert!(m2.state.is_none(), "无 state 段不受影响");
     }
 
     /// 契约闸门 2.5：native 产物预检——artifact 缺失 → 加载期明确报错（不是拖到

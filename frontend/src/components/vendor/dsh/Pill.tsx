@@ -6,9 +6,9 @@
  */
 // Pill: small rounded label chip (view switcher tabs, filters, badges).
 
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
 import clsx from 'clsx'
 import css from './Pill.module.css'
+import type { ButtonHTMLAttributes, ReactNode } from 'react'
 
 /**
  * Render a pill chip. Interactive when onClick is supplied (renders a button);

@@ -7,31 +7,24 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from functools import lru_cache
 
-# 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _this_dir)
-_shared_dir = os.path.join(_this_dir, "..", "..", "..")
-sys.path.insert(0, _shared_dir)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+_paths = bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
+
 # pipeline/input 目录：plugin.py 压缩预算配置经 context_window_guard.plugin 复用
-# （兄弟插件互相导入的路径前提；缺它则单实现收敛的 import 不可达）
-_input_dir = os.path.dirname(_this_dir)
-if _input_dir not in sys.path:
-    sys.path.insert(0, _input_dir)
+# （兄弟插件互相导入的路径前提；缺它则单实现收敛的 import 不可达——组根不随
+# bootstrap 注入，见 ADR 2026-09-08-plugin-bootstrap-sink 决策 1）
+if _paths.group_root not in sys.path:
+    sys.path.insert(0, _paths.group_root)
 
 from plugin import PromptBuildPlugin, set_memory_backend  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
-# hindsight_memory 插件目录（wiring.py 所在处）加入 sys.path
-_HINDSIGHT_MEMORY_DIR = os.path.join(_shared_dir, "system", "hindsight_memory")
-if _HINDSIGHT_MEMORY_DIR not in sys.path:
-    sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
-
-from wiring import build_memory_backend  # noqa: E402
+from wiring import build_memory_backend  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("prompt_build_pipeline")

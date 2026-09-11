@@ -24,8 +24,8 @@ from backend import HindsightBackend, get_memory_backend  # noqa: E402
 
 
 def _invoke_params(mock: AsyncMock) -> dict[str, Any]:
-    """取首次 invoke 调用的 params 断言参数装配。"""
-    method, params = mock.call_args.args
+    """取首次 invoke 调用的 params 断言参数装配（第三位 timeout 属传输面不在此断言）。"""
+    method, params = mock.call_args.args[:2]
     assert method == "tool-executor.invoke"
     assert params["plugin_id"] == "hindsight_memory_service"
     return params

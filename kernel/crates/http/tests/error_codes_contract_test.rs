@@ -90,6 +90,15 @@ fn api_error_truth() -> Vec<(ApiError, &'static str, &'static str, bool)> {
             false,
         ),
         (
+            ApiError::TooManyRequests {
+                message: "m".into(),
+                retry_after_secs: 60,
+            },
+            "TOO_MANY_REQUESTS",
+            "kernel",
+            true,
+        ),
+        (
             ApiError::Internal {
                 message: "m".into(),
             },
@@ -124,6 +133,7 @@ fn status_of(err: &ApiError) -> StatusCode {
         ApiError::NotFound { .. } => StatusCode::NOT_FOUND,
         ApiError::Conflict { .. } => StatusCode::CONFLICT,
         ApiError::UnprocessableEntity { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        ApiError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
         ApiError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         ApiError::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         ApiError::WebSocket { .. } => StatusCode::INTERNAL_SERVER_ERROR,

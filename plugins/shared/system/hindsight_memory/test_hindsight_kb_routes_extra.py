@@ -18,7 +18,6 @@ mock 仅限外部依赖（hindsight client / 文件系统错误注入）；元�
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,7 +36,8 @@ if str(_PLUGIN_DIR) not in sys.path:
 def _load_module(name: str, mod_name: str, file: str) -> Any:
     path = _PLUGIN_DIR / file
     spec = importlib.util.spec_from_file_location(mod_name, path)
-    assert spec is not None and spec.loader is not None, f"Cannot load {file}"
+    assert spec is not None, f"Cannot load {file}"
+    assert spec.loader is not None, f"Cannot load {file}"
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -60,11 +60,10 @@ def _run(coro: Any) -> Any:
 
 
 @pytest.fixture
-def kb(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
+def kb(tmp_path: Path) -> Any:
     module = _load_module("kb_extra", "hindsight_kb_extra_test", "knowledge_base.py")
     module.set_data_dir(str(tmp_path / "kb"))
     module.set_client(None)
-    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
     return module
 
 
@@ -172,13 +171,12 @@ class TestKbUploadEdges:
         assert result["chunks_imported"] == 1
         assert kb.get_item(result["item_id"])["chunk_count"] == 1
 
-    def test_uploads_path_fallback_on_resolve_error(self, kb: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """uploads_path 解析失败 → 回退插件 data/kb/uploads（不炸）。"""
+    def test_uploads_path_fallback_on_resolve_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """未覆盖数据根时 uploads_path 解析失败 → 回退插件 data/kb/uploads（不炸）。"""
+        module = _load_module("kb_fallback", "hindsight_kb_fallback_test", "knowledge_base.py")
         monkeypatch.setitem(sys.modules, "uploads_path", None)
 
-        resolved = kb._resolve_kb_uploads_dir()
-
-        assert resolved == str(tmp_path / "kb" / "uploads")
+        assert module._resolve_kb_uploads_dir() == str(_PLUGIN_DIR / "data" / "kb" / "uploads")
 
 
 class TestKbSearchEdges:

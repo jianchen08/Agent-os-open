@@ -6,7 +6,7 @@
 - AC-07-2: MCP 服务端(initialize/tools/list/tools/call/resources/read/notifications)
 - AC-07-3: 依赖注入句柄可用
 - AC-07-4: 30 行内封装工具
-- AC-07-5: 生命周期钩子(on_load/on_unload/on_config_change)
+- AC-07-5: 生命周期钩子(on_load/on_unload)
 """
 
 from __future__ import annotations
@@ -530,15 +530,6 @@ class TestLifecycleHooks:
 
         assert "on_unload" in plugin._lifecycle_handlers
 
-    def test_on_config_change_decorator(self) -> None:
-        plugin = AgentOSPlugin("test")
-
-        @plugin.on_config_change
-        async def handle_config(params: dict) -> None:
-            pass
-
-        assert "on_config_change" in plugin._lifecycle_handlers
-
     def test_on_lifecycle_direct(self) -> None:
         plugin = AgentOSPlugin("test")
 
@@ -574,22 +565,3 @@ class TestLifecycleHooks:
         assert len(received) == 2
         assert received[0] == {"step": 1}
         assert received[1] == {"step": 2}
-
-    @pytest.mark.asyncio
-    async def test_async_lifecycle_handler(self) -> None:
-        """async 生命周期 handler 也应被正确调用。"""
-        plugin = AgentOSPlugin("test")
-        called: list[str] = []
-
-        @plugin.on_config_change
-        async def handle_config(params: dict) -> None:
-            called.append("config_changed")
-
-        server = McpServer(
-            plugin._tools,
-            plugin._resources,
-            plugin._lifecycle_handlers,
-        )
-
-        await server._handle_notification("notifications/on_config_change", {"new_config": {}})
-        assert called == ["config_changed"]

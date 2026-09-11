@@ -32,20 +32,30 @@ if str(_PLUGIN_DIR) not in sys.path:
 def _load_server() -> Any:
     """动态加载 server.py（先逐出裸名 plugin/tool，防跨测试劫持）。
 
-    server.py 顶层 `from tool import WebTool` 走 sys.modules 缓存——共跑车
-    道里其他插件目录的 tool.py 会占住裸名，不逐出则加载到错误实现。
+    handler 经 server._load_web_tool() 的 impl 模块（唯一名
+    web_operate_tool_impl）取 WebTool——打桩须落在该模块上，
+    裸名 ``tool`` 槽位与 handler 已解耦。
     """
     mod_name = "web_ext_server_test"
     if mod_name in sys.modules:
         del sys.modules[mod_name]
     sys.modules.pop("plugin", None)
     sys.modules.pop("tool", None)
+    sys.modules.pop("web_operate_tool_impl", None)
     spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "server.py")
     assert spec is not None and spec.loader is not None, "Cannot load server.py"
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _impl_tool_mod(server: Any) -> Any:
+    """handler 实际使用的 tool.py impl 模块（loader 幂等触发后读唯一名注册位）。"""
+    server._load_web_tool()
+    impl = sys.modules.get("web_operate_tool_impl")
+    assert impl is not None, "server loader 未注册 web_operate_tool_impl"
+    return impl
 
 
 def _run(coro: Any) -> Any:
@@ -103,7 +113,7 @@ class TestServer:
 
     def test_web_operate_success(self, monkeypatch) -> None:
         mod = _load_server()
-        import tool as tool_mod  # server.py 内 `from tool import WebTool` 解析到的同一模块
+        tool_mod = _impl_tool_mod(mod)
 
         client = _FakeAsyncClient(_FakeResponse(b'{"ok": true}'))
         monkeypatch.setattr(tool_mod.httpx, "AsyncClient", lambda **kw: client)
@@ -116,9 +126,55 @@ class TestServer:
 
     def test_web_operate_failure(self, monkeypatch) -> None:
         mod = _load_server()
-        import tool as tool_mod
+        tool_mod = _impl_tool_mod(mod)
 
         monkeypatch.setattr(tool_mod, "resolve_hostname_ips", lambda host: (None, "无法解析域名: nope"))
 
         out = _run(mod.web_operate(action="get", url="http://nope.invalid/"))
         assert out == {"error": "URL 安全检查失败: SSRF 防护：域名解析失败: 无法解析域名: nope"}
+
+
+class TestCohostShadowing:
+    """合宿平铺下裸名 ``tool`` 槽位被异成员占据时，handler 仍取本目录实现。
+
+    邻成员（task_evaluate 等）exec 期绑定后占据 sys.modules["tool"]，静息态
+    槽位是异成员模块——server loader 必须按显式路径命中本目录 tool.py。
+    decoy 常驻/不常驻两组输入；另断言缓存幂等（二次取用同一类）。
+    """
+
+    _IMPL_KEY = "web_operate_tool_impl"
+
+    @staticmethod
+    def _plant_decoy() -> Any:
+        import types
+
+        decoy = types.ModuleType("tool")
+
+        class _ForeignWebTool:  # 异成员同名类：命中即错
+            pass
+
+        decoy.WebTool = _ForeignWebTool
+        sys.modules["tool"] = decoy
+        return decoy
+
+    @pytest.mark.parametrize("decoy_resident", [True, False])
+    def test_loader_resolves_local_impl(self, decoy_resident: bool) -> None:
+        saved_tool = sys.modules.get("tool")
+        saved_impl = sys.modules.get(self._IMPL_KEY)
+        try:
+            server = _load_server()
+            decoy = self._plant_decoy() if decoy_resident else None
+
+            cls = server._load_web_tool()
+            assert cls.__module__ == self._IMPL_KEY
+            if decoy is not None:
+                assert cls is not decoy.WebTool
+            assert hasattr(cls, "execute")
+            # 缓存幂等：二次取用同一类（不重复 exec tool.py）
+            assert server._load_web_tool() is cls
+        finally:
+            sys.modules.pop(self._IMPL_KEY, None)
+            sys.modules.pop("tool", None)
+            for restored in (saved_tool, saved_impl):
+                if restored is not None:
+                    sys.modules[restored.__name__] = restored

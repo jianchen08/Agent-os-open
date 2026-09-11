@@ -7,19 +7,17 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from functools import lru_cache
 
-# 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _this_dir)
-_shared_dir = os.path.join(_this_dir, "..", "..", "..")
-sys.path.insert(0, _shared_dir)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-from plugin import ToolSchemaValidator  # noqa: E402
+_paths = bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
+
+from plugin import ToolSchemaValidator, set_capability_caller  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+
+from wiring import make_capability_caller  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("tool_schema_validator_pipeline")
@@ -34,8 +32,15 @@ def get_instance() -> ToolSchemaValidator:
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
-    """Initialize tool_schema_validator plugin."""
+    """Initialize tool_schema_validator plugin + 注入能力调用器。"""
     get_instance()  # 启动时预热，保持原 on_load 构造时机
+    caller = make_capability_caller(plugin)
+    if caller:
+        set_capability_caller(caller)
+    else:
+        logger.warning(
+            "[tool_schema_validator] 能力调用器未注入，截断检测降级为不可修复口径"
+        )
 
 
 @plugin.on_unload

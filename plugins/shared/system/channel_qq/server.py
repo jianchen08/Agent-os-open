@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """QQ Channel MCP 服务端——纯接口适配层。
 
-老代码从 0.1 src/channels/qq/ 原封不动复制到本目录（平铺），
-本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
+本目录为通道实现模块（平铺），本文件只做接口适配：
+调用同目录实现模块，通过 MCP SDK 暴露为工具。
 
 [来源: docs/working/module_migration_plan.md §5.2]
 """
@@ -16,8 +16,8 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(__file__))
 
 # 渠道共享包 channel_common（input_adapter/output_adapter/base_combo_adapter 单一事实源）。
-# 路径纪律：这三个模块名是通用名（各渠道目录历史上各有一份、现由
-# scripts/check_channel_copy_guard.py 禁止复制回潮），同进程 sys.path 按目录顺序解析，
+# 路径纪律：这三个模块名是通用名（各渠道目录不得持有同名副本，
+# scripts/check_channel_copy_guard.py 执法），同进程 sys.path 按目录顺序解析，
 # 本目录 insert(0) 会反过来遮蔽共享包——所以共享包只允许 append 追加。
 # 完整背景见 docs/working/渠道合流C1C2与CLI插件化方案_20260819.md §三。
 if (_cc := os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "channel_common"))) not in sys.path and os.path.isdir(_cc):
@@ -38,10 +38,16 @@ async def _on_load(params: dict[str, Any]) -> None:
     """Initialize QQ channel adapter on load."""
     global _adapter
     config = plugin.get_config()
+    access_token = str(config.get("access_token", "") or "")
+    if not access_token.strip():
+        # fail-fast：未配置 access_token 时反向 WS 鉴权拒绝所有 OneBot 连接，
+        # 拒绝装载交宿主按失败处理重试，而非带空凭据空转。
+        raise RuntimeError("channel_qq 缺少必填配置: access_token")
     _adapter = QQAdapter(
-        ws_host=config.get("ws_host", "0.0.0.0"),
+        ws_host=config.get("ws_host", "127.0.0.1"),
         ws_port=int(config.get("ws_port", 8080)),
         http_api_url=config.get("http_api_url", "http://127.0.0.1:5700"),
+        access_token=access_token,
     )
     logger.info("QQ channel adapter initialized")
 

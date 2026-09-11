@@ -19,20 +19,34 @@
 import asyncio
 import datetime
 import inspect
+import json
+import locale
 import logging
 import os
+import signal
 import subprocess
 import threading
 import time
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any, cast
 
 from .types import TriggerConfig, TriggerStatus, TriggerType
 
 logger = logging.getLogger(__name__)
 
+# POSIX 终止信号：SIGKILL（Windows 无此常量，getattr 兜底常值 9；仅 POSIX
+# 分支运行期触达）。
+_POSIX_SIGKILL = getattr(signal, "SIGKILL", 9)
 
 _TRIGGER_CHECK_INTERVAL = 5.0
+
+# 触发器注册表在目标管道 state 中的键前缀（task.* 是 pipeline-state.update
+# 写面的任务域白名单前缀；每触发器一键，覆盖写免读改写竞态）。
+TRIGGER_STATE_KEY_PREFIX = "task.trigger.registry."
+
+# 工作线程落 state 的阻塞等待上限（触发频度 ≥ 间隔秒级，远低于此）。
+_STATE_WRITE_TIMEOUT = 10.0
 
 
 class TriggerManager:
@@ -70,8 +84,9 @@ class TriggerManager:
         # loop 内直接调度的注入任务（http REST 手动触发路径），持引用防 GC 取消。
         self._loop_tasks: set[asyncio.Task[Any]] = set()
 
-        # 0.2 sidecar 注入器：经内核 chat.send_message capability 投递触发消息并跑管道。
-        # server.py on_load 时注入；为 None 时回退 0.1 进程内 pipeline.message_bus。
+        # sidecar 注入器：经内核 chat.send_message capability 投递触发消息并跑管道。
+        # server.py on_load 时注入；为 None 时进程内回退不可用
+        # （pipeline.message_bus 已删，注入时显式记录错误后放弃）。
         self._injector: Callable[..., Any] | None = None
 
         # GAP-2 CONDITION：state 聚合行提供者（server.py on_load 注入，经内核
@@ -79,6 +94,12 @@ class TriggerManager:
         # 返回 list[dict]（扁平点号键行，如 {"pipeline_id": ..., "task.status": ...}），
         # 可为 sync 或 async 可调用。None = 桥未就绪（条件触发器无法求值）。
         self._state_provider: Callable[..., Any] | None = None
+
+        # P25 state 权威持久化写面（server.py on_load 注入，经内核
+        # pipeline-state.update capability 写目标管道 state）。约定签名：
+        # ``async def writer(pipeline_id: str, fields: dict[str, Any]) -> None``。
+        # None = 桥未就绪（内存注册仍成立，重启后退化为进程内注册表）。
+        self._state_writer: Callable[..., Any] | None = None
 
         # GAP-2 EVENT：域事件桥就绪标记（server.py on_load 注册 on_domain_event
         # 处理器后置 True——manifest 声明 domain_event hook 内核才会推送）。
@@ -125,6 +146,8 @@ class TriggerManager:
 
         self._triggers[config.trigger_id] = config
 
+        self.persist(config)
+
         logger.info(
             f"注册触发器: {config.trigger_id} - {config.name} "
             f"(type={config.trigger_type.value}, max_fires={config.max_fires}, "
@@ -151,6 +174,9 @@ class TriggerManager:
         """
 
         if trigger_id in self._triggers:
+            # 写面无键删除语义：注销以 CANCELLED 终态落 state（重灌跳过终态）
+            self._triggers[trigger_id].status = TriggerStatus.CANCELLED
+            self.persist(self._triggers[trigger_id])
             del self._triggers[trigger_id]
 
             logger.info(f"注销触发器: {trigger_id}")
@@ -210,6 +236,8 @@ class TriggerManager:
 
             if self._is_max_fires_reached(trigger):
                 trigger.status = TriggerStatus.FIRED
+
+            self.persist(trigger)
 
             logger.debug(f"事件触发器触发: {trigger.trigger_id} (事件: {event_name}, 第 {trigger.fire_count} 次)")
 
@@ -285,6 +313,8 @@ class TriggerManager:
                 if self._is_max_fires_reached(trigger):
                     trigger.status = TriggerStatus.FIRED
 
+                self.persist(trigger)
+
                 logger.info(
                     f"条件触发器触发(边沿): {trigger.trigger_id} (表达式: {trigger.condition_expression})"
                 )
@@ -347,6 +377,8 @@ class TriggerManager:
 
                 if self._is_max_fires_reached(trigger):
                     trigger.status = TriggerStatus.FIRED
+
+                self.persist(trigger)
 
                 logger.debug(
                     f"触发器触发: {trigger.trigger_id} (type={trigger.trigger_type.value}, 第 {trigger.fire_count} 次)"
@@ -452,6 +484,8 @@ class TriggerManager:
         if trigger.status == TriggerStatus.FIRED:
             trigger.status = TriggerStatus.ACTIVE
 
+        self.persist(trigger)
+
         logger.info(
             f"更新触发器: {trigger_id} - "
             f"max_fires={max_fires}, max_time={max_time_seconds}s, "
@@ -491,6 +525,8 @@ class TriggerManager:
 
         trigger.status = TriggerStatus.CANCELLED
 
+        self.persist(trigger)
+
         return True
 
     def fire_manually(self, trigger_id: str) -> bool:
@@ -503,6 +539,7 @@ class TriggerManager:
         if trigger is None:
             return False
         trigger.fire_count += 1
+        self.persist(trigger)
         self._inject_trigger_message(trigger)
         return True
 
@@ -565,6 +602,170 @@ class TriggerManager:
     def is_state_provider_ready(self) -> bool:
         """CONDITION 求值桥是否就绪（state provider 已注入）。"""
         return self._state_provider is not None
+
+    def set_state_writer(self, writer: Callable[..., Any]) -> None:
+        """注入 state 权威持久化写面（P25：注册表落目标管道 state）。
+
+        约定签名：``async def writer(pipeline_id: str, fields: dict[str, Any]) -> None``；
+        生产形态为内核 ``pipeline-state.update`` capability（server.py on_load
+        接线，任务域 ``task.*`` 键白名单）。写面未注入时注册表退化为纯内存
+        （重启后丢失，注册期 warning 留痕）。
+
+        Args:
+            writer: state 写面协程工厂。
+
+        """
+        self._state_writer = writer
+        logger.info("[TriggerManager] state 持久化写面已设置 (pipeline-state.update)")
+
+    def persist(self, config: TriggerConfig) -> None:
+        """触发器配置同步落目标管道 state（权威持久层，覆盖写单键）。
+
+        state 是权威层（pipeline_state 表跨 sidecar 重启/迁移/回收），内存
+        注册表是运行缓存：register/cancel/update_max_fires/fire 计数变更后
+        调用本方法保持两侧一致。写面未接通或写失败时内存注册仍成立（运行
+        真值），降级留 error 痕迹——重启后该触发器退回上次持久化值。
+        sync/async 上下文自适应：已在事件循环内（tool/REST 主循环）调度不
+        阻塞；工作线程（检查循环）经 run_coroutine_threadsafe 等待落盘。
+
+        Args:
+            config: 待持久化的触发器配置。
+
+        """
+        writer = self._state_writer
+        if writer is None:
+            return
+        pipeline_id = config.pipeline_id
+        if not pipeline_id:
+            return
+        try:
+            fields = {f"{TRIGGER_STATE_KEY_PREFIX}{config.trigger_id}": config.to_state_dict()}
+        except Exception as e:
+            logger.error(
+                "[TriggerManager] 触发器序列化失败，state 未落: trigger=%s error=%s",
+                config.trigger_id,
+                e,
+            )
+            return
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        if running is not None:
+            # 已在事件循环内：阻塞等待会同循环自锁，调度后台任务（完成时留痕）
+            def _on_state_write_done(task: asyncio.Task[Any]) -> None:
+                self._loop_tasks.discard(task)
+                if not task.cancelled() and task.exception() is not None:
+                    logger.error(
+                        "[TriggerManager] 触发器 state 落盘异常: trigger=%s error=%s",
+                        config.trigger_id,
+                        task.exception(),
+                    )
+
+            task = running.create_task(writer(pipeline_id, fields))
+            self._loop_tasks.add(task)
+            task.add_done_callback(_on_state_write_done)
+            return
+
+        loop = self._main_loop
+        if loop is None or loop.is_closed():
+            logger.warning(
+                "[TriggerManager] 主事件循环不可用，state 暂缓落盘: trigger=%s",
+                config.trigger_id,
+            )
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                writer(pipeline_id, fields), loop
+            ).result(timeout=_STATE_WRITE_TIMEOUT)
+        except Exception as e:
+            logger.error(
+                "[TriggerManager] 触发器 state 落盘失败（内存注册仍成立，重启后退回"
+                "上次持久化值）: trigger=%s pipeline=%s error=%s",
+                config.trigger_id,
+                pipeline_id,
+                e,
+            )
+
+    async def load_from_state(self) -> int:
+        """从管道 state 全量重灌触发器注册表（on_load / 初始化时调用）。
+
+        扫描 pipeline-state.list 聚合行的 ``task.trigger.registry.*`` 键：
+        行存在即目标管道仍有活键 → 灌入；终态（CANCELLED/FIRED/EXPIRED）
+        不灌（不复活死触发器，随管道清理天然 GC——残留字段与管道 state 同
+        生共死，无独立删除面）；state 值为 JSON 字符串（跨边界序列化形态）
+        或腐败值时按统一读取契约还原/跳过留痕。重灌以 state 为权威整体替换
+        内存注册表（含清理已消失管道的陈旧内存项）。
+
+        Returns:
+            灌入的触发器数量。
+
+        Raises:
+            RuntimeError: state 聚合读面未注入（fail-visible，不静默空灌）。
+
+        """
+        rows = await self.collect_state_rows()
+
+        restored: dict[str, TriggerConfig] = {}
+        for row in rows:
+            pipeline_id = str(row.get("pipeline_id") or "")
+            if not pipeline_id:
+                continue
+            for key, value in row.items():
+                if not key.startswith(TRIGGER_STATE_KEY_PREFIX):
+                    continue
+                data = self._coerce_state_value(value)
+                if data is None:
+                    logger.warning(
+                        "[TriggerManager] 触发器 state 字段形态非法，跳过: pipeline=%s key=%s",
+                        pipeline_id,
+                        key,
+                    )
+                    continue
+                try:
+                    cfg = TriggerConfig.from_state_dict(data)
+                except Exception as e:
+                    logger.warning(
+                        "[TriggerManager] 触发器 state 反序列化失败，跳过: pipeline=%s key=%s error=%s",
+                        pipeline_id,
+                        key,
+                        e,
+                    )
+                    continue
+                if not cfg.trigger_id:
+                    continue
+                cfg.pipeline_id = pipeline_id  # 存储管道即权威目标管道
+                if cfg.status in (TriggerStatus.CANCELLED, TriggerStatus.FIRED, TriggerStatus.EXPIRED):
+                    continue
+                restored[cfg.trigger_id] = cfg
+
+        self._triggers = restored
+        logger.info(
+            "[TriggerManager] state 重灌完成: %d 个触发器（扫描 %d 行）",
+            len(restored),
+            len(rows),
+        )
+        return len(restored)
+
+    @staticmethod
+    def _coerce_state_value(value: Any) -> dict[str, Any] | None:
+        """state 字段值 → dict（原生 dict 直收；JSON 字符串还原；其余 None）。
+
+        与 plugins/shared/state_fields.py 的统一读取契约同构（本插件不依赖
+        plugins/shared 包路径，就地最小实现）。
+        """
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip().startswith("{"):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+        return None
 
     def set_event_bridge_ready(self) -> None:
         """标记域事件桥就绪（server.py 注册 on_domain_event 处理器后调用）。
@@ -774,12 +975,24 @@ class TriggerManager:
 
     # ── 触发器动作（action/action_params 通用机制） ─────────────────────
     #
-    # 触发后的动作由 trigger.action 决定（默认 ""/inject = 注入消息唤醒管道；
-    # "command" = 经系统 shell 执行命令）。action_params：
-    #   command  : {"command": str, "timeout_ms": int(默认 10000), "cwd"?: str}
-    # 命令执行 fire-and-forget（daemon 线程），超时杀进程树，绝不阻塞触发
-    # 主流程；触发上下文经环境变量传递（AGENTOS_TRIGGER_*），不拼进 shell
-    # 字符串（防注入）。
+    # 触发后的动作由 trigger.action 决定："notify"（含缺省 ""）= 注入消息唤醒
+    # 管道；"command" = 参数列表执行宿主命令（shell=False，元字符不经 shell
+    # 二次解析）。command 动作的 action_params：
+    #   {"cmd": list[str], "timeout_ms": int(默认 10000), "cwd"?: str}
+    # 注册写入面（trigger_setup 工具）对 command 动作另有 human-interaction
+    # 审批闸；本执行器只消费已注册配置。执行 fire-and-forget（daemon 线程），
+    # 超时杀进程树，绝不阻塞触发主流程；触发上下文经环境变量传递
+    # （AGENTOS_TRIGGER_*），不拼进命令字符串（防注入）。
+    # 执行留痕：stdout/stderr 全文落 logs/triggers/<id>_<时间>_<次数>.log
+    # （bash 插件 logs/ 落盘同款范式），摘要（命令/退出码/耗时/输出尾部）
+    # 进 trigger.metadata["command_executions"]（既有 REST triggers 读面
+    # 序列化 metadata，可查）。旧 shell 字符串格式（action_params["command"]:
+    # str）显式报停：不执行、拒绝原因留痕——不允许静默失效，也不允许经
+    # shell 兜底执行（元字符二次解析的注入面不得回流）。
+
+    # metadata 执行历史上限与单条输出摘要长度（防 metadata 无界膨胀）
+    _AUDIT_HISTORY_LIMIT = 5
+    _AUDIT_TEXT_LIMIT = 2000
 
     def _command_env(
         self,
@@ -806,7 +1019,11 @@ class TriggerManager:
 
     @staticmethod
     def _kill_process_tree(proc: subprocess.Popen) -> None:
-        """超时杀进程树（Windows taskkill /T /F；POSIX kill）。"""
+        """超时杀进程树，平台对称：Windows taskkill /T /F；POSIX killpg 整组。
+
+        失败留痕（残留进程可排查）；POSIX 已退出（ProcessLookupError）=
+        终止目标已达成，不算失败。
+        """
         if os.name == "nt":
             try:
                 subprocess.run(
@@ -814,47 +1031,185 @@ class TriggerManager:
                     capture_output=True,
                     timeout=10,
                 )
-            except Exception:  # noqa: BLE001 - 杀进程失败仅记录
-                pass
+            except Exception as exc:  # noqa: BLE001 - 杀进程失败仅记录
+                logger.warning("[TriggerManager] taskkill 终止进程树失败（可能残留进程）| pid=%s | error=%s", proc.pid, exc)
         else:
+            # spawn 时 start_new_session ⇒ 子进程自成一进程组（pgid == pid），
+            # killpg 整组收掉含孙进程——单 proc.kill() 会把孙进程留成孤儿。
             try:
-                proc.kill()
-            except OSError:
-                pass
+                os.killpg(proc.pid, _POSIX_SIGKILL)
+            except ProcessLookupError:
+                pass  # 进程组已退出，终止目标已达成
+            except OSError as exc:
+                logger.warning("[TriggerManager] killpg 终止进程组失败（可能残留进程）| pid=%s | error=%s", proc.pid, exc)
+
+    @staticmethod
+    def _decode_output(data: bytes | None) -> str:
+        """子进程输出解码：UTF-8 优先，回退系统首选编码，坏字节替换。
+
+        不用 text=True（其编码随平台漂移，跨端兼容已立卡）；按字节捕获后
+        显式解码，保证 Windows 中文环境下输出可读。
+        """
+        if not data:
+            return ""
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        try:
+            return data.decode(locale.getpreferredencoding(False), errors="replace")
+        except (LookupError, TypeError, ValueError):
+            return data.decode("utf-8", errors="replace")
+
+    @classmethod
+    def _cap_text(cls, text: str) -> str:
+        """metadata 摘要截尾（输出语义多在尾部）；全文在审计日志文件。"""
+        if len(text) <= cls._AUDIT_TEXT_LIMIT:
+            return text
+        return "\n[已截断，全文见审计日志文件]\n" + text[-cls._AUDIT_TEXT_LIMIT:]
+
+    def _refuse_execution(self, trigger: TriggerConfig, cmd: Any, reason: str) -> None:
+        """拒绝执行的留痕（旧格式报停/参数形状非法/启动失败），不启动任何进程。"""
+        self._record_execution(trigger, {
+            "fired_at": datetime.datetime.now(datetime.UTC).isoformat(),
+            "cmd": cmd,
+            "exit_code": None,
+            "timed_out": False,
+            "duration_ms": 0,
+            "refused": True,
+            "reason": reason,
+        })
+        logger.error(
+            "[TriggerManager] command 动作拒绝执行: trigger=%s cmd=%r reason=%s",
+            trigger.trigger_id,
+            cmd,
+            reason,
+        )
+
+    def _record_execution(self, trigger: TriggerConfig, record: dict[str, Any]) -> None:
+        """执行留痕进 metadata（有界历史，最新在前）+ 结构化日志。
+
+        trigger.metadata 经既有 REST triggers list/get 面序列化，执行记录
+        由该读面消费，不新增查询端点。
+        """
+        history = list(trigger.metadata.get("command_executions") or [])
+        history.insert(0, record)
+        trigger.metadata["command_executions"] = history[: self._AUDIT_HISTORY_LIMIT]
+        trigger.metadata["last_command_execution"] = record
+        logger.info(
+            "[TriggerManager] command 动作执行留痕: trigger=%s cmd=%s exit_code=%s "
+            "timed_out=%s duration_ms=%s refused=%s",
+            trigger.trigger_id,
+            record.get("cmd"),
+            record.get("exit_code"),
+            record.get("timed_out"),
+            record.get("duration_ms"),
+            record.get("refused", False),
+        )
+
+    def _write_execution_log(
+        self,
+        trigger: TriggerConfig,
+        record: dict[str, Any],
+        stdout_full: str,
+        stderr_full: str,
+    ) -> str:
+        """stdout/stderr 全文落审计日志文件，返回路径串（落盘失败返回空串，
+        不阻断执行主流程——metadata 摘要留痕不受影响）。"""
+        try:
+            log_dir = Path("logs") / "triggers"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            stamp = record["fired_at"].replace("-", "").replace(":", "")
+            path = log_dir / f"{trigger.trigger_id}_{stamp}_{trigger.fire_count}.log"
+            header = (
+                f"# Trigger: {trigger.trigger_id} ({trigger.name})\n"
+                f"# Fired at: {record['fired_at']}\n"
+                f"# Command: {json.dumps(record['cmd'], ensure_ascii=False)}\n"
+                f"# Exit code: {record['exit_code']}\n"
+                f"# Timed out: {record['timed_out']}\n"
+                f"# Duration ms: {record['duration_ms']}\n"
+            )
+            path.write_text(
+                header
+                + "\n# ── stdout ──\n" + stdout_full
+                + "\n# ── stderr ──\n" + stderr_full,
+                encoding="utf-8",
+            )
+            return str(path)
+        except OSError as e:
+            logger.warning(
+                "[TriggerManager] 审计日志落盘失败（摘要留痕不受影响）: trigger=%s error=%s",
+                trigger.trigger_id,
+                e,
+            )
+            return ""
 
     def _run_command(self, trigger: TriggerConfig, event_name: str | None, event_data: dict[str, Any] | None) -> None:
-        """daemon 线程执行命令动作（fire-and-forget：失败/超时仅记录）。"""
+        """daemon 线程执行命令动作（fire-and-forget：失败/超时留痕不重试）。"""
         params = trigger.action_params or {}
-        command = str(params.get("command") or "").strip()
-        if not command:
-            logger.error("[TriggerManager] command 动作缺 command: trigger=%s", trigger.trigger_id)
+        cmd = params.get("cmd")
+        if cmd is None:
+            legacy = params.get("command")
+            if isinstance(legacy, str) and legacy.strip():
+                self._refuse_execution(
+                    trigger,
+                    legacy,
+                    "旧格式为 shell 字符串命令，已停用（shell 执行面已移除）；"
+                    "请改为 cmd 参数列表并重新注册",
+                )
+                return
+            self._refuse_execution(trigger, cmd, "command 动作缺 cmd 参数列表")
+            return
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(c, str) and c.strip() for c in cmd):
+            self._refuse_execution(trigger, cmd, "cmd 必须是非空字符串参数列表")
             return
         timeout_ms = int(params.get("timeout_ms") or 10000)
         env = self._command_env(trigger, event_name, event_data)
         cwd = params.get("cwd")
+        fired_at = datetime.datetime.now(datetime.UTC).isoformat()
+        started = time.monotonic()
         try:
             proc = subprocess.Popen(
-                command,
-                shell=True,
+                cmd,
+                shell=False,
                 env=env,
                 cwd=str(cwd) if cwd else None,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                # POSIX 下子进程自成一 session/进程组（pgid == pid）：超时
+                # killpg 才能整组收掉（含孙进程）；Windows 不支持，传 False
+                # （Windows 分支走 taskkill /T 按父子关系遍历）。
+                start_new_session=(os.name == "posix"),
             )
         except OSError as e:
-            logger.error("[TriggerManager] command 动作启动失败: trigger=%s error=%s", trigger.trigger_id, e)
+            self._refuse_execution(trigger, cmd, f"启动失败: {e}")
             return
+        timed_out = False
         try:
-            proc.wait(timeout=timeout_ms / 1000)
+            out_bytes, err_bytes = proc.communicate(timeout=timeout_ms / 1000)
         except subprocess.TimeoutExpired:
+            timed_out = True
             self._kill_process_tree(proc)
-            logger.warning(
-                "[TriggerManager] command 动作超时已终止: trigger=%s timeout_ms=%d",
-                trigger.trigger_id,
-                timeout_ms,
-            )
-        except Exception as e:  # noqa: BLE001 - 等待失败仅记录
-            logger.warning("[TriggerManager] command 动作等待异常: trigger=%s error=%s", trigger.trigger_id, e)
+            try:
+                out_bytes, err_bytes = proc.communicate(timeout=5)
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                out_bytes, err_bytes = b"", b""
+        except Exception as e:  # noqa: BLE001 - 等待失败仅留痕
+            self._refuse_execution(trigger, cmd, f"等待异常: {e}")
+            return
+        record: dict[str, Any] = {
+            "fired_at": fired_at,
+            "cmd": cmd,
+            "exit_code": proc.returncode,
+            "timed_out": timed_out,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "stdout": self._cap_text(self._decode_output(out_bytes)),
+            "stderr": self._cap_text(self._decode_output(err_bytes)),
+        }
+        stdout_full = self._decode_output(out_bytes)
+        stderr_full = self._decode_output(err_bytes)
+        record["log_file"] = self._write_execution_log(trigger, record, stdout_full, stderr_full)
+        self._record_execution(trigger, record)
 
     def _dispatch_trigger_action(
         self,
@@ -863,7 +1218,7 @@ class TriggerManager:
         event_data: dict[str, Any] | None = None,
     ) -> bool:
         """分发触发器动作。command → daemon 线程执行并返回 True（已处理）；
-        ""/inject → 返回 False（调用方走注入消息路径）。"""
+        notify（含缺省 ""）→ 返回 False（调用方走注入消息路径）。"""
         action = (trigger.action or "").strip()
         if action == "command":
             threading.Thread(
@@ -877,10 +1232,9 @@ class TriggerManager:
     def _inject_trigger_message(self, trigger: TriggerConfig) -> None:
         """触发器到期后把消息注入所属管道（唤醒 agent 跑一轮）。
 
-        0.2 sidecar：经注入器（``self._injector``）调内核 ``chat.send_message`` capability，
+        经注入器（``self._injector``）调内核 ``chat.send_message`` capability，
         复用前端 WS 派发路径（dispatch_user_input → process_via_engine），agent 处理后流式回复。
-        0.1 进程内：回退 ``pipeline.message_bus.send_pipeline_message``（仅 cli 等进程内场景；
-        0.2 下该模块已删，注入器未设置时会显式报错）。
+        注入器未设置时记录错误并放弃本轮注入（0.2 需 set_injector）。
 
         Args:
             trigger: 已触发的触发器配置。
@@ -935,86 +1289,19 @@ class TriggerManager:
                 )
             return
 
-        # ── 0.1 进程内回退（pipeline.message_bus 在 0.2 已删） ──
-        try:
-            from pipeline.message_bus import send_pipeline_message  # noqa: PLC0415
-            from pipeline.message_types import MessageType, PipelineMessage  # noqa: PLC0415
-        except ImportError as e:
-            logger.error(
-                "[TriggerManager] 注入器未设置且 pipeline.message_bus 不可用（0.2 需 set_injector）: %s",
-                e,
-            )
-            return
-
-        _output_sink = None
-
-        try:
-            from pipeline.registry import get_engine_registry  # noqa: PLC0415
-
-            _reg = get_engine_registry()
-
-            _entry = _reg.get(trigger.pipeline_id)
-
-            if _entry and _entry.bridge:
-                _output_sink = _entry.bridge.output_sink
-
-            if _output_sink is None:
-                from pipeline.message_bus import _create_sink  # noqa: PLC0415
-
-                _output_sink = _create_sink(trigger.pipeline_id)
-
-        except Exception:
-            pass
-
-        _trig_msg = PipelineMessage(
-            type=MessageType.CHAT,
-            content=fire_info,
-            pipeline_id=trigger.pipeline_id,
-            metadata={"source": "trigger", "trigger_id": trigger.trigger_id},
+        logger.error(
+            "[TriggerManager] 注入器未设置，放弃本轮注入（0.2 需 set_injector）: "
+            "pipeline=%s trigger=%s",
+            trigger.pipeline_id,
+            trigger.trigger_id,
         )
-
-        future = asyncio.run_coroutine_threadsafe(
-            send_pipeline_message(
-                _trig_msg,
-                output_sink=_output_sink,
-            ),
-            loop,
-        )
-
-        try:
-            result = future.result(timeout=30)
-
-            if result.success:
-                logger.info(
-                    "[TriggerManager] 消息已注入: pipeline=%s method=%s trigger=%s fire_count=%d",
-                    trigger.pipeline_id,
-                    result.method,
-                    trigger.trigger_id,
-                    trigger.fire_count,
-                )
-
-            else:
-                logger.warning(
-                    "[TriggerManager] 消息注入失败: pipeline=%s trigger=%s error=%s",
-                    trigger.pipeline_id,
-                    trigger.trigger_id,
-                    result.error,
-                )
-
-        except Exception as e:
-            logger.error(
-                "[TriggerManager] 消息注入异常: pipeline=%s trigger=%s error=%s",
-                trigger.pipeline_id,
-                trigger.trigger_id,
-                e,
-            )
 
     async def handle_domain_event(self, event_name: str, event_data: dict[str, Any]) -> list[str]:
         """域事件桥入口（GAP-2 EVENT 接线）：评估 + 注入。
 
         server.py 的 ``on_domain_event`` 生命周期处理器收到内核推送的域事件
         （run 终态派生的 ``task_completed`` / ``task_failed`` 等）后调用本方法：
-        ``evaluate_event`` 匹配触发器（实现已存在，此前无人调用），命中后经
+        ``evaluate_event`` 匹配触发器，命中后经
         注入器直接投递（async 上下文，无需 run_coroutine_threadsafe）。
 
         子任务自动通知（GAP-1）：任务事件携带 ``parent_pipeline_id`` 时，
@@ -1097,7 +1384,7 @@ class TriggerManager:
         系统会自动通知你并恢复执行"的承诺。任务系统零触发代码：注册逻辑
         收敛在统一触发服务（triggers_ext），事件本身携带父锚点即触发。
 
-        通知内容与 0.1 task_notifier 同款富文本：标题（task.goal）、失败原因
+        通知内容为富文本：标题（task.goal）、失败原因
         （task.error）、重试计数（task.eval_total_calls）、评估结论
         （task.eval_summary）、上下文使用率（track.llm_usage + context_window）
         ——由 tasks 插件事件派生时从 state 摘要行带出，缺键空串兜底。
@@ -1121,7 +1408,7 @@ class TriggerManager:
         # 拒绝（-32603 缺少 user_id）。
         user_id = str(event_data.get("user_id") or "")
 
-        # 上下文使用率（0.1 同款遥测提示；缺数据不拼）
+        # 上下文使用率（遥测提示；缺数据不拼）
         context_usage_text = ""
         cu = event_data.get("context_usage")
         if isinstance(cu, dict):
@@ -1312,8 +1599,11 @@ class TriggerManager:
 
                         return False
 
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as exc:
+                    logger.debug(
+                        "[TriggerManager] register_time 不可解析，max_time 上限失效（按未达上限继续）| trigger=%s raw=%s error=%s",
+                        trigger.trigger_id, register_time_str, exc,
+                    )
 
         return True
 

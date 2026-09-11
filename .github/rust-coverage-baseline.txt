@@ -6,4 +6,9 @@
 # floor(实测)+1——下一个整数百分比（85.49→86 式、恰为整数→再 +1），只替换
 # 数值行保留归因注释；随本批 commit 留归因，CI job 内的写入随 job 丢弃，
 # 以仓库提交为准。只许升不许降。
-rust_line_coverage=90.0
+# rust_line_coverage=90.0 → 92.0（2026-09-11 覆盖率补测批）：
+# 本地 cargo llvm-cov 全仓实测 91.22%（workspace 除 integration-tests，
+# 75598/82876），floor+1=92（棘轮公式）。整体验收闸挂起期内手动收紧，
+# 恢复执法后按同公式复核。本轮 Rust 未补新测试，增量来自既有车道波动
+# 与并行修复批；下一批目标 = routes.rs/capability_router.rs/invoker.rs。
+rust_line_coverage=92.0

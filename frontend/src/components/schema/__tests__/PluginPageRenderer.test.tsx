@@ -13,13 +13,13 @@
  */
 
 import { render, screen, act } from '@testing-library/react'
-import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import React from 'react'
+import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { PluginPageRenderer } from '../PluginPageRenderer'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 
 function makePage(overrides: Partial<PageDeclaration> = {}): PageDeclaration {
   return { type: 'pages', id: 'p1', space: 'workspace', ...overrides } as PageDeclaration

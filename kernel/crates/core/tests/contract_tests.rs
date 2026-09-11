@@ -113,6 +113,8 @@ fn make_test_manifest(
     requires_content: Option<u32>,
 ) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "test_plugin".to_string(),
         name: "Test Plugin".to_string(),
         description: None,
@@ -193,9 +195,6 @@ impl StorageBackend for MockStorageBackend {
         Ok(vec![1, 2, 3])
     }
     async fn append_trace(&self, _entry: TraceEntry) -> Result<(), StorageError> {
-        Ok(())
-    }
-    async fn create_branch(&self, _branch: Branch) -> Result<(), StorageError> {
         Ok(())
     }
     async fn update_run_status(
@@ -284,6 +283,15 @@ impl StorageBackend for MockStorageBackend {
     async fn update_last_login(&self, _user_id: &str) -> Result<(), StorageError> {
         Ok(())
     }
+    async fn update_user_password(
+        &self,
+        _user_id: &str,
+        _password_hash: &str,
+        _must_change_password: bool,
+    ) -> Result<bool, agentos_core::types::StorageError> {
+        unreachable!("NullStorage 不提供口令更新")
+    }
+
     async fn delete_user(&self, _user_id: &str) -> Result<bool, StorageError> {
         Ok(false)
     }
@@ -308,8 +316,9 @@ fn test_content_loader_debug_clone() {
 #[test]
 fn test_plugin_context_with_content_loader() {
     let loader = make_test_content_loader();
+    let state = json!({"key": "value"});
     let ctx = PluginContext::new(
-        json!({"key": "value"}),
+        &state,
         json!({}),
         TenantContext::new("tenant_001", "session_001"),
         Uuid::new_v4(),
@@ -412,54 +421,6 @@ fn test_patch_type_variants() {
     assert_eq!(variants.len(), 5);
     let json_str = serde_json::to_string(&PatchType::Rollback).unwrap();
     assert_eq!(json_str, "\"rollback\"");
-}
-
-#[test]
-fn test_blob_record_serialization() {
-    let record = BlobRecord {
-        blob_id: "blob_001".to_string(),
-        mime_type: "text/plain".to_string(),
-        size_bytes: 100,
-        created_at: "2026-07-14T00:00:00Z".to_string(),
-    };
-    let json_str = serde_json::to_string(&record).unwrap();
-    assert!(json_str.contains("blob_001"));
-    assert!(json_str.contains("text/plain"));
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// ADR ⑤: 多分支模型
-// ═══════════════════════════════════════════════════════════════════
-
-#[test]
-fn test_branch_model_rollback() {
-    let branch = Branch {
-        branch_id: "main.rollback.001".to_string(),
-        run_id: "run_001".to_string(),
-        parent_branch: Some("main".to_string()),
-        parent_seq: Some(1),
-        created_at: "2026-07-14T00:00:00Z".to_string(),
-    };
-    let json_str = serde_json::to_string(&branch).unwrap();
-    assert!(json_str.contains("main.rollback.001"));
-    assert!(json_str.contains("parent_branch"));
-    assert!(json_str.contains("parent_seq"));
-    let deserialized: Branch = serde_json::from_str(&json_str).unwrap();
-    assert_eq!(deserialized.parent_branch, Some("main".to_string()));
-    assert_eq!(deserialized.parent_seq, Some(1));
-}
-
-#[test]
-fn test_branch_model_root_branch() {
-    let branch = Branch {
-        branch_id: "main".to_string(),
-        run_id: "run_001".to_string(),
-        parent_branch: None,
-        parent_seq: None,
-        created_at: "2026-07-14T00:00:00Z".to_string(),
-    };
-    assert!(branch.parent_branch.is_none());
-    assert!(branch.parent_seq.is_none());
 }
 
 // ═══════════════════════════════════════════════════════════════════

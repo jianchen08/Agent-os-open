@@ -10,10 +10,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { useBudgetStatus } from '@/hooks/useCostControl'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import type { BudgetStatusResponse } from '@/services/api/costControl'
 import { cn } from '@/lib/utils'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import type { BudgetStatusResponse } from '@/services/api/costControl'
 
 /** 告警项 */
 export interface AlertBannerItem {
@@ -184,19 +184,19 @@ function deriveBudgetAlert(status: BudgetStatusResponse | null): AlertBannerItem
 export function useLayoutAlerts(): AlertBannerItem[] {
   const connectionStatus = useLayoutModeStore((s) => s.connectionStatus)
   const pendingInteractions = useLayoutModeStore((s) => s.pendingInteractions)
-  const { budgetStatus, refetch } = useBudgetStatus()
+  const { budgetStatus, refetch: refreshBudget } = useBudgetStatus()
 
   // cost_update 事件到达时复查预算状态（事件驱动，免轮询）；
   // 失败静默——告警以最后一次已知状态为准
   useEffect(() => {
     const refetchBudget = () => {
-      refetch().catch(() => undefined)
+      refreshBudget().catch(() => undefined)
     }
     globalWS.subscribe(WS_SERVER_EVENTS.COST_UPDATE, refetchBudget)
     return () => {
       globalWS.unsubscribe(WS_SERVER_EVENTS.COST_UPDATE, refetchBudget)
     }
-  }, [refetch])
+  }, [refreshBudget])
 
   return useMemo(() => {
     const items: AlertBannerItem[] = []

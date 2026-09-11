@@ -8,8 +8,8 @@ defaults:
   first_token_timeout: 120
   stream_idle_timeout: 180
   tiers:
-    large: glm-5.3-flash
-    medium: glm-5.3-flash
+    large: deepseek-v4.1-flash
+    medium: minimax-m3
     small: minimax-m3
 embeddings: {}
 models:
@@ -191,6 +191,25 @@ models:
       - image/gif
       - image/webp
       max_image_size: 20971520
+  deepseek-v4.1-flash:
+    provider: ollama-oline
+    model_name: deepseek-v4.1-flash
+    display_name: deepseek-v4.1-flash
+    context_window: 1000000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 100000
+      top_p: 1
+      reasoning_effort: max
+    multimodal:
+      supports_image: true
+      supported_image_types:
+      - image/jpeg
+      - image/png
+      - image/gif
+      - image/webp
+      max_image_size: 20971520
 providers:
   anthropic:
     api_base: https://api.anthropic.com
@@ -243,6 +262,9 @@ providers:
         reasoning_effort: low
       medium:
         reasoning_effort: medium
+      "off":
+        thinking:
+          type: disabled
     type: deepseek
   doubao:
     api_base: https://ark.cn-beijing.volces.com/api/v3
@@ -316,6 +338,9 @@ providers:
       medium:
         thinking:
           type: adaptive
+      "off":
+        thinking:
+          type: disabled
     type: minimax
   mistral:
     api_base: https://api.mistral.ai/v1
@@ -486,6 +511,10 @@ providers:
       medium:
         thinking:
           type: enabled
+      "off":
+        thinking:
+          type: disabled
+        reasoning_effort: none
     type: zai
   zhipu_coding:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
@@ -505,4 +534,23 @@ providers:
       medium:
         thinking:
           type: enabled
+      "off":
+        thinking:
+          type: disabled
+        reasoning_effort: none
     type: zai
+  ollama-oline:
+    type: openai
+    api_base: https://ollama.com/v1
+    keys:
+    - id: ollama-oline_main
+      api_key: ${OLLAMA-OLINE_API_KEY}
+    thinking_strength_params:
+      high:
+        reasoning_effort: high
+      low:
+        reasoning_effort: low
+      medium:
+        reasoning_effort: medium
+      "off":
+        reasoning_effort: none

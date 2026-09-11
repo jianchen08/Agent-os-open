@@ -2,8 +2,6 @@
 from tests._pipeline_plugin_path import add_plugin_dir
 
 add_plugin_dir("input", "security_check")
-from typing import Any
-
 import plugin as sc_mod  # noqa: E402
 
 """security_check 审批闸门回归测试。
@@ -25,10 +23,14 @@ import plugin as sc_mod  # noqa: E402
 不仅是返回值。
 """
 
-from unittest.mock import AsyncMock
-
 import pytest
 from pipeline.plugin import PluginContext
+
+from tests._security_check_harness import (
+    make_tool_ctx,
+    unwire_approval_cap,
+    wire_approval_cap,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -37,58 +39,21 @@ pytestmark = pytest.mark.unit
 def _restore_cap_routing():
     """每个测试结束后摘除显式注入的审批通道，恢复按 plugin 引用自动解析。"""
     yield
-    sc_mod.set_human_interaction_cap(None)
+    unwire_approval_cap(sc_mod)
 
 
 def _approval_svc(sequence: list[dict]):
-    """构造假 human-interaction capability 并经公开装配缝注入，按 sequence 返回审批结果。
+    """假 human-interaction capability（共享替身）按 sequence 回放审批结果。
 
-    审批请求经 capability 调用（sc_mod.set_human_interaction_cap 显式注入 →
-    hi_cap.call("create_choice"/"wait_for_choice")），本 helper 模拟该服务形状。
-    每次 wait_for_choice 消费 sequence 中一项，用于模拟多轮审批。
-
-    Args:
-        sequence: 审批结果列表，每项形如 {"selected_option": "approved_once"}
-
-    Returns:
-        (cap, create_call_count) —— cap 为假 capability 对象，
-        create_call_count 为 create_choice 次数的可观测计数器。
+    每次 wait_for_choice 消费 sequence 中一项；返回 (cap, counter)，
+    counter.calls 为 create_choice 次数（审批发起次数的可观测计数）。
     """
-    it = iter(sequence)
-    counter = [0]
-
-    async def _call(name: str, params: dict, **kwargs: Any):
-        if name == "create_choice":
-            counter[0] += 1
-            return {"request_id": f"req-{counter[0]}"}
-        if name == "wait_for_choice":
-            try:
-                return next(it)
-            except StopIteration as e:
-                raise AssertionError("审批被发起次数超出预期 sequence") from e
-        raise AssertionError(f"unexpected cap.call: {name}")
-
-    class _Counter:
-        @property
-        def calls(self) -> int:
-            return counter[0]
-
-    cap = AsyncMock()
-    cap.call.side_effect = _call  # 与 permission_modes 同款：side_effect 挂在 .call 属性上
-    sc_mod.set_human_interaction_cap(cap)
-    return cap, _Counter()
+    return wire_approval_cap(sc_mod, sequence)
 
 
 def _ctx_for(tool_name: str, command: str, *, provider: str = "host") -> PluginContext:
     """构造一个危险工具执行的 PluginContext（host 模式、非白名单命令）。"""
-    return PluginContext(
-        state={
-            "core_type": "tool_execute",
-            "raw_tool_calls": [{"name": tool_name, "args": {"command": command}}],
-            "execution_contexts": [{"provider": provider, "tool_name": tool_name}],
-        },
-        _services={},
-    )
+    return make_tool_ctx(tool_name, {"command": command}, provider=provider)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -123,7 +88,7 @@ class TestPerRoundApproval:
 
         # 第二轮：危险命令 B（不同路径）—— 关键：必须再次审批
         ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/b")
-        r2 = await plugin.execute(ctx2)
+        await plugin.execute(ctx2)
         assert create.calls == 2, (
             f"第二轮危险命令必须再次触发审批，但 create_choice_request 只被调用 {create.calls} 次"
         )
@@ -321,3 +286,29 @@ class TestLabelBasedSelection:
         )
         assert "用户拒绝" in decision.get("reason", ""), "reason 应体现用户拒绝"
         assert not plugin._approved_signatures, "denied 绝不记忆指纹"
+
+    @pytest.mark.asyncio
+    async def test_denied_never_whitelists_command(self):
+        """拒绝后同命令再次调用 → 仍要重新审批（拒绝不产生免批指纹，行为级）。
+
+        与 test_label_denied_soft_blocks 的内部状态断言互补：这里断可观察
+        行为——denied 之后的同命令调用必须再次发起审批，而不是被放行。
+        """
+        SecurityCheckPlugin = sc_mod.SecurityCheckPlugin
+
+        cap, create = _approval_svc([
+            {"selected_option": "拒绝执行"},
+            {"selected_option": "拒绝执行"},
+        ])
+
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
+
+        ctx1 = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        r1 = await plugin.execute(ctx1)
+        assert create.calls == 1
+        assert "soft_block" in r1.state_updates.get("security.decision", {}).get("reason", "")
+
+        # 同命令第二轮：拒绝没有记忆指纹 → 必须再次发起审批
+        ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
+        await plugin.execute(ctx2)
+        assert create.calls == 2, "denied 后同命令必须重新审批（不得免批放行）"

@@ -11,7 +11,7 @@
 3. _load_env_file_keys / _apply_llm_env（环境变量装配）；
 4. _ensure_memory_backend 懒注入（成功缓存/失败降级）；
 5. on_load：既有服务复用、子进程 spawn（health 轮询）、venv 缺失降级；
-6. on_unload：aclose/close 清理、terminate/kill 兜底。
+6. on_unload：aclose/close 清理、进程树整棵终止（真实树 + 失败清单留痕）。
 
 mock 仅限外部依赖（hindsight client/子进程/网络/环境）；存储逻辑走真实实现。
 
@@ -478,40 +478,101 @@ class TestGetDocumentsToolBranches:
 
 
 # ═══════════════════════════════════════════════════════════
-# 环境装配：_load_env_file_keys / _apply_llm_env
+# 环境装配：_load_env_file / _apply_llm_env
 # ═══════════════════════════════════════════════════════════
 
 
-def _patch_this_dir(srv: Any, monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
-    """把 _THIS_DIR 指到 root/a/b/c/hindsight_memory（.env 置于 root）。
+def _patch_this_dir(srv: Any, monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
+    """把 _THIS_DIR 指到 root/a/b/c/hindsight_memory（项目根=上溯 4 级=root）。
 
-    server._load_env_file_keys 自 _THIS_DIR 上溯 4 级定位项目根——
+    server 的 .env / config/models/llm.yaml / plugin.json 均自 _THIS_DIR 定位——
     真实布局 plugins/shared/system/hindsight_memory（4 层）↔ 测试用 3 层中间目录。
+    返回插件目录（manifest 写入用）。
     """
     target = root / "a" / "b" / "c" / "hindsight_memory"
     target.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(srv, "_THIS_DIR", str(target))
+    return target
 
 
-class TestLoadEnvFileKeys:
-    def test_extracts_target_keys(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """.env 读取：只取 ZHIPU/SILICONFLOW key，引号剥离，注释/无关行跳过。"""
+_LLM_YAML = """\
+defaults:
+  chat: m-chat
+  embedding: m-embed
+models:
+  m-chat:
+    api_base: https://chat.example/v1
+    model_name: ChatM
+    provider: pchat
+  m-big:
+    api_base: https://big.example/v1
+    model_name: BigM
+    provider: pbig
+  m-alt:
+    api_base: https://alt.example/v1
+    model_name: AltM
+    provider: palt
+  m-embed:
+    api_base: https://embed.example/v1
+    model_name: EmbedM
+    provider: pembed
+providers:
+  pchat:
+    type: openai
+    keys:
+      - api_key: "${CHAT_KEY}"
+  pbig:
+    type: openai
+    keys:
+      - api_key: "${BIG_KEY}"
+  palt:
+    type: anthropic
+    keys:
+      - api_key: "${ALT_KEY}"
+  pembed:
+    type: openai
+    keys:
+      - api_key: "${EMBED_KEY}"
+"""
+
+
+def _make_root(
+    tmp_path: Path,
+    *,
+    llm_yaml: str | None = _LLM_YAML,
+    env_text: str | None = None,
+    manifest: dict | None = None,
+) -> None:
+    """构造假项目根：llm.yaml / .env / 插件 manifest 按需落位。"""
+    if llm_yaml is not None:
+        (tmp_path / "config" / "models").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "config" / "models" / "llm.yaml").write_text(llm_yaml, encoding="utf-8")
+    if env_text is not None:
+        (tmp_path / ".env").write_text(env_text, encoding="utf-8")
+    if manifest is not None:
+        (tmp_path / "a" / "b" / "c" / "hindsight_memory" / "plugin.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+
+
+class TestLoadEnvFile:
+    def test_parses_all_keys(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """.env 全量解析：引号剥离，注释/无等号行跳过。"""
         (tmp_path / ".env").write_text(
             "# comment\n"
-            "OTHER_KEY=ignored\n"
-            "ZHIPU_API_KEY=zk-123\n"
-            "SILICONFLOW_API_KEY='sf-456'\n"
+            "FOO_KEY=foo-123\n"
+            "BAR_KEY='bar-456'\n"
             "NO_EQUALS_LINE\n",
             encoding="utf-8",
         )
         _patch_this_dir(srv, monkeypatch, tmp_path)
 
-        assert srv._load_env_file_keys() == {"ZHIPU_API_KEY": "zk-123", "SILICONFLOW_API_KEY": "sf-456"}
+        assert srv._load_env_file() == {"FOO_KEY": "foo-123", "BAR_KEY": "bar-456"}
 
     def test_missing_env_file_returns_empty(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """无 .env → 空 dict（不炸；调用方继续降级）。"""
         _patch_this_dir(srv, monkeypatch, tmp_path)
-        assert srv._load_env_file_keys() == {}
+        assert srv._load_env_file() == {}
 
 
 class TestApplyLlmEnv:
@@ -524,58 +585,158 @@ class TestApplyLlmEnv:
             "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL",
             "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY",
             "HINDSIGHT_API_RERANKER_PROVIDER",
+            "CHAT_KEY", "EMBED_KEY", "ALT_KEY",
         ):
             monkeypatch.delenv(key, raising=False)
 
-    def test_sets_defaults_and_wires_keys(self, srv: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """环境无配置时：LLM/embedding 默认值写入 + 已有 key 接线。"""
+    def test_maps_system_defaults(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """无显式配置：LLM/嵌入按 defaults.chat/embedding 映射，${VAR} 经 .env 解析。"""
         self._clear_hindsight_env(monkeypatch)
-        monkeypatch.setenv("ZHIPU_API_KEY", "zk")
-        monkeypatch.setenv("SILICONFLOW_API_KEY", "sf")
+        _patch_this_dir(srv, monkeypatch, tmp_path)
+        _make_root(tmp_path, env_text="CHAT_KEY=ck\nEMBED_KEY=ek\n")
 
         srv._apply_llm_env()
 
         assert os.environ["HINDSIGHT_API_LLM_PROVIDER"] == "openai"
-        assert os.environ["HINDSIGHT_API_LLM_MODEL"] == "glm-5.2"
-        assert os.environ["HINDSIGHT_API_LLM_API_KEY"] == "zk"
+        assert os.environ["HINDSIGHT_API_LLM_BASE_URL"] == "https://chat.example/v1"
+        assert os.environ["HINDSIGHT_API_LLM_MODEL"] == "ChatM"
+        assert os.environ["HINDSIGHT_API_LLM_API_KEY"] == "ck"
         assert os.environ["HINDSIGHT_API_EMBEDDINGS_PROVIDER"] == "openai"
-        assert os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"] == "BAAI/bge-m3"
-        assert os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] == "sf"
+        assert os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL"] == "https://embed.example/v1"
+        assert os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"] == "EmbedM"
+        assert os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] == "ek"
         assert os.environ["HINDSIGHT_API_RERANKER_PROVIDER"] == "rrf"
 
-    def test_preserves_existing_config(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """已有显式配置不被覆盖；无 key 时 API key 键不产生。"""
+    def test_manifest_field_overrides_system_default(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """插件配置字段非空时优先于系统默认；两段互不影响。"""
         self._clear_hindsight_env(monkeypatch)
-        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
-        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
-        # 指向无 .env 的空目录：避免读到仓库真实 .env 的 key
-        _patch_this_dir(srv, monkeypatch, tmp_path / "noenv")
+        _patch_this_dir(srv, monkeypatch, tmp_path)
+        _make_root(
+            tmp_path,
+            env_text="BIG_KEY=bk\nEMBED_KEY=ek\n",
+            manifest={"config_files": [{"fields": [{"name": "llm_model", "default": "m-big"}]}]},
+        )
+
+        srv._apply_llm_env()
+
+        assert os.environ["HINDSIGHT_API_LLM_BASE_URL"] == "https://big.example/v1"
+        assert os.environ["HINDSIGHT_API_LLM_MODEL"] == "BigM"
+        assert os.environ["HINDSIGHT_API_LLM_API_KEY"] == "bk"
+        assert os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"] == "EmbedM"
+
+    def test_explicit_env_wins(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """显式 HINDSIGHT_API_* 逐键最高优先（逃生口）。"""
+        self._clear_hindsight_env(monkeypatch)
+        _patch_this_dir(srv, monkeypatch, tmp_path)
+        _make_root(tmp_path, env_text="CHAT_KEY=ck\n")
         monkeypatch.setenv("HINDSIGHT_API_LLM_MODEL", "custom-model")
-        monkeypatch.setenv("HINDSIGHT_API_RERANKER_PROVIDER", "bge-reranker")
 
         srv._apply_llm_env()
 
         assert os.environ["HINDSIGHT_API_LLM_MODEL"] == "custom-model"
-        assert os.environ["HINDSIGHT_API_RERANKER_PROVIDER"] == "bge-reranker"
-        assert "HINDSIGHT_API_LLM_API_KEY" not in os.environ
-        assert "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY" not in os.environ
+        assert os.environ["HINDSIGHT_API_LLM_BASE_URL"] == "https://chat.example/v1"
 
-    def test_env_file_keys_fallback(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """进程 env 缺 key 时从 .env 补读（sidecar 自足）。"""
+    def test_missing_key_leaves_api_key_unset(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """key 未配置：端点/模型照注入，API key 键不产生（调用期才失败）。"""
         self._clear_hindsight_env(monkeypatch)
-        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
-        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
-        (tmp_path / ".env").write_text(
-            "ZHIPU_API_KEY=zk-file\nSILICONFLOW_API_KEY=sf-file\n", encoding="utf-8"
-        )
         _patch_this_dir(srv, monkeypatch, tmp_path)
+        _make_root(tmp_path)  # 无 .env
 
         srv._apply_llm_env()
 
-        assert os.environ["ZHIPU_API_KEY"] == "zk-file"
-        assert os.environ["SILICONFLOW_API_KEY"] == "sf-file"
-        assert os.environ["HINDSIGHT_API_LLM_API_KEY"] == "zk-file"
-        assert os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] == "sf-file"
+        assert os.environ["HINDSIGHT_API_LLM_BASE_URL"] == "https://chat.example/v1"
+        assert "HINDSIGHT_API_LLM_API_KEY" not in os.environ
+        assert os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"] == "EmbedM"
+        assert "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY" not in os.environ
+
+    def test_unknown_model_id_skips_section(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """配置了 llm.yaml 不存在的模型 id：该段整体跳过，另一段照常。"""
+        self._clear_hindsight_env(monkeypatch)
+        _patch_this_dir(srv, monkeypatch, tmp_path)
+        _make_root(
+            tmp_path,
+            env_text="EMBED_KEY=ek\n",
+            manifest={"config_files": [{"fields": [{"name": "llm_model", "default": "ghost"}]}]},
+        )
+
+        srv._apply_llm_env()
+
+        assert "HINDSIGHT_API_LLM_PROVIDER" not in os.environ
+        assert "HINDSIGHT_API_LLM_MODEL" not in os.environ
+        assert os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"] == "EmbedM"
+
+    def test_non_openai_provider_skipped(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """provider type 非 OpenAI 兼容（anthropic/gemini）：警告并跳过该段。"""
+        self._clear_hindsight_env(monkeypatch)
+        _patch_this_dir(srv, monkeypatch, tmp_path)
+        _make_root(
+            tmp_path,
+            env_text="ALT_KEY=ak\n",
+            manifest={"config_files": [{"fields": [{"name": "llm_model", "default": "m-alt"}]}]},
+        )
+
+        srv._apply_llm_env()
+
+        assert "HINDSIGHT_API_LLM_BASE_URL" not in os.environ
+        assert "HINDSIGHT_API_LLM_API_KEY" not in os.environ
+
+    def test_provider_level_api_base_fallback(
+        self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """api_base 只配在 provider 条目（模型条目缺省）：回退取 provider 值。
+
+        与主 LLM 路径同口径（llm/_config_models.py）：模型条目优先、provider
+        回退。缺失回退会让 BASE_URL 空注入，客户端回落公网默认端点。
+        """
+        self._clear_hindsight_env(monkeypatch)
+        _patch_this_dir(srv, monkeypatch, tmp_path)
+        _make_root(
+            tmp_path,
+            llm_yaml=_LLM_YAML.replace(
+                "  m-big:\n    api_base: https://big.example/v1\n",
+                "  m-big:\n",
+            ).replace(
+                "  pbig:\n    type: openai\n",
+                "  pbig:\n    api_base: https://big-provider.example/v1\n    type: openai\n",
+            ),
+            env_text="BIG_KEY=bk\n",
+            manifest={"config_files": [{"fields": [{"name": "llm_model", "default": "m-big"}]}]},
+        )
+
+        srv._apply_llm_env()
+
+        assert os.environ["HINDSIGHT_API_LLM_BASE_URL"] == "https://big-provider.example/v1"
+
+    def test_model_level_api_base_wins_over_provider(
+        self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """两处都有 api_base：模型条目优先（provider 值仅回退）。"""
+        self._clear_hindsight_env(monkeypatch)
+        _patch_this_dir(srv, monkeypatch, tmp_path)
+        _make_root(
+            tmp_path,
+            llm_yaml=_LLM_YAML.replace(
+                "  pchat:\n    type: openai\n",
+                "  pchat:\n    api_base: https://chat-provider.example/v1\n    type: openai\n",
+            ),
+            env_text="CHAT_KEY=ck\n",
+        )
+
+        srv._apply_llm_env()
+
+        assert os.environ["HINDSIGHT_API_LLM_BASE_URL"] == "https://chat.example/v1"
+
+    def test_missing_llm_yaml_degrades(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """无 llm.yaml：LLM/嵌入段不注入、不炸，reranker 兜底照常。"""
+        self._clear_hindsight_env(monkeypatch)
+        _patch_this_dir(srv, monkeypatch, tmp_path)
+        _make_root(tmp_path, llm_yaml=None)
+
+        srv._apply_llm_env()
+
+        assert "HINDSIGHT_API_LLM_MODEL" not in os.environ
+        assert "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL" not in os.environ
+        assert os.environ["HINDSIGHT_API_RERANKER_PROVIDER"] == "rrf"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -691,6 +852,8 @@ class TestOnLoad:
         monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=_flaky_urlopen))
         proc = MagicMock()
         proc.pid = 4242
+        # stderr 排空线程读 readline：立即 EOF（b""）让 daemon 线程即时退出
+        proc.stderr.readline.return_value = b""
         monkeypatch.setattr(subprocess, "Popen", MagicMock(return_value=proc))
         # 轮询 sleep 1s/次 → 测试中置零（外部时序依赖）
         monkeypatch.setattr("asyncio.sleep", AsyncMock())
@@ -701,50 +864,74 @@ class TestOnLoad:
         venv_python = str(_PLUGIN_DIR / ".venv-hindsight" / "Scripts" / "python.exe")
         assert popen_args == [venv_python, "-m", "hindsight_api.main", "--port", "18420", "--host", "127.0.0.1"]
         assert subprocess.Popen.call_args.kwargs["stdout"] == subprocess.DEVNULL
+        # stderr 走 PIPE：由父侧排空线程写轮转日志（fd 直交子进程则轮转永不触发）
+        assert subprocess.Popen.call_args.kwargs["stderr"] == subprocess.PIPE
         assert srv._api_process is proc
         assert srv._client is client
         client.acreate_bank.assert_awaited_once()
-        # stderr 落盘文件可诊断（append 模式）
-        stderr_file = subprocess.Popen.call_args.kwargs["stderr"]
-        assert stderr_file.mode == "ab"
 
-    def test_wait_ready_closes_stderr_handle_on_success(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """就绪即返回 → 父进程侧 stderr 句柄关闭（子进程自持副本不受影响）。"""
+    def test_stderr_rotation_handler_config(self, srv: Any, tmp_path: Path) -> None:
+        """轮转 handler 配置生效：10MB × 3 备份（D3）。"""
+        from logging.handlers import RotatingFileHandler
+
+        handler = srv._build_stderr_handler(str(tmp_path / "s.log"))
+        try:
+            assert isinstance(handler, RotatingFileHandler)
+            assert handler.maxBytes == 10 * 1024 * 1024
+            assert handler.backupCount == 3
+        finally:
+            handler.close()
+
+    def test_stderr_drain_writes_child_output_to_file(self, srv: Any, tmp_path: Path) -> None:
+        """排空线程把子进程 stderr 行写进落盘日志（父侧独占写面）。"""
+        import io
+        import time as _time
+
+        log_path = tmp_path / "stderr.log"
+        stream = io.BytesIO(b"uvicorn running\npanic: pg0 failed\n")
+        proc = SimpleNamespace(stderr=stream)
+        srv._spawn_stderr_drain(proc, str(log_path))
+
+        deadline = _time.monotonic() + 5.0
+        while _time.monotonic() < deadline:
+            if log_path.exists() and "pg0 failed" in log_path.read_text(encoding="utf-8"):
+                break
+            _time.sleep(0.02)
+        content = log_path.read_text(encoding="utf-8")
+        assert "uvicorn running" in content
+        assert "panic: pg0 failed" in content
+
+    def test_wait_ready_success_returns_without_handle(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """就绪即返回（stderr 句柄已不归本函数管——排空线程独占写面）。"""
         monkeypatch.setattr(urllib.request, "urlopen", MagicMock(return_value=_FakeResponse()))
         monkeypatch.setattr("asyncio.sleep", AsyncMock())
-        log = tmp_path / "s.log"
-        fh = open(log, "ab")
-        _run(srv._wait_api_ready("http://127.0.0.1:18420", SimpleNamespace(poll=lambda: None), fh, str(log)))
-        assert fh.closed
+        _run(srv._wait_api_ready(
+            "http://127.0.0.1:18420", SimpleNamespace(poll=lambda: None), str(tmp_path / "s.log")
+        ))
 
-    def test_wait_ready_closes_stderr_handle_on_timeout(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """60s 未就绪超时抛错 → 句柄同样关闭（泄漏面收口，S15）。"""
+    def test_wait_ready_timeout_raises(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """60s 未就绪超时抛错（sleep 已置零，60 轮即时跑完）。"""
         monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=ConnectionError("down")))
         monkeypatch.setattr("asyncio.sleep", AsyncMock())
-        log = tmp_path / "s.log"
-        fh = open(log, "ab")
         with pytest.raises(RuntimeError, match="60s 内未就绪"):
             _run(srv._wait_api_ready(
                 "http://127.0.0.1:18420",
                 SimpleNamespace(poll=lambda: None, returncode=None),
-                fh, str(log),
+                str(tmp_path / "s.log"),
             ))
-        assert fh.closed
 
-    def test_wait_ready_closes_stderr_handle_on_crash_and_tails_log(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """子进程提前退出 → 抛错带 stderr tail，句柄关闭。"""
+    def test_wait_ready_crash_tails_log(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """子进程提前退出 → 抛错带 stderr tail（轮转日志逐条 flush，可直读）。"""
         log = tmp_path / "s.log"
         log.write_bytes(b"panic-trace-" * 100)
         monkeypatch.setattr(urllib.request, "urlopen", MagicMock(side_effect=ConnectionError("down")))
         monkeypatch.setattr("asyncio.sleep", AsyncMock())
         proc = SimpleNamespace(poll=lambda: 1, returncode=1)
-        fh = open(log, "ab")
         with pytest.raises(RuntimeError) as ei:
-            _run(srv._wait_api_ready("http://127.0.0.1:18420", proc, fh, str(log)))
+            _run(srv._wait_api_ready("http://127.0.0.1:18420", proc, str(log)))
         assert "code=1" in str(ei.value)
         assert "stderr_tail" in str(ei.value)
         assert "panic-trace" in str(ei.value)
-        assert fh.closed
 
     def test_missing_venv_degrades(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         """venv python 缺失 → 初始化失败降级（_client=None + 告警），不崩。"""
@@ -761,20 +948,55 @@ class TestOnLoad:
         assert any("初始化失败" in r.getMessage() for r in caplog.records)
 
 class TestOnUnload:
-    def test_closes_client_and_terminates_process(self, srv: Any) -> None:
-        """正常清理：aclose await + 子进程 terminate/wait。"""
+    def test_closes_client_and_kills_process_tree(self, srv: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """正常清理：aclose await + 杀树件按 pid 清树。"""
+        killed: list[int] = []
+
+        def _fake_kill(pid: int) -> list[str]:
+            killed.append(pid)
+            return []
+
+        monkeypatch.setattr(srv, "kill_process_tree", _fake_kill)
         client = MagicMock()
         client.aclose = AsyncMock(return_value=None)
         srv._client = client
-        proc = MagicMock()
+        proc = SimpleNamespace(pid=4242)
         srv._api_process = proc
 
         _run(srv._on_unload({}))
 
         client.aclose.assert_awaited_once()
-        proc.terminate.assert_called_once()
-        proc.wait.assert_called_once_with(timeout=10)
+        assert killed == [4242]
         assert srv._client is None
+        assert srv._api_process is None
+
+    def test_unload_kills_real_process_tree(self, srv: Any) -> None:
+        """真实子进程树：on_unload 后父子进程全清（terminate 单进程留孤儿
+        的旧实现清不掉孙进程——杀树件整棵收敛）。"""
+        import subprocess as _sub
+        import sys as _sys
+        import time as _time
+
+        import psutil
+
+        parent = _sub.Popen(
+            [_sys.executable, "-c",
+             "import subprocess, sys\n"
+             "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+             "exec('import time; time.sleep(30)')\n"],
+            stdout=_sub.DEVNULL, stderr=_sub.DEVNULL,
+        )
+        try:
+            srv._api_process = parent
+            _run(srv._on_unload({}))
+
+            deadline = _time.monotonic() + 5.0
+            while _time.monotonic() < deadline and psutil.pid_exists(parent.pid):
+                _time.sleep(0.05)
+            assert psutil.pid_exists(parent.pid) is False, "子进程未退出"
+        finally:
+            if psutil.pid_exists(parent.pid):
+                parent.kill()
         assert srv._api_process is None
 
     def test_sync_close_fallback(self, srv: Any) -> None:
@@ -788,21 +1010,22 @@ class TestOnUnload:
         client.close.assert_called_once()
         assert srv._client is None
 
-    def test_cleanup_errors_still_clear_state(self, srv: Any, caplog: pytest.LogCaptureFixture) -> None:
-        """aclose 抛错 + terminate 抛错 → 告警但状态仍清空（kill 兜底）。"""
+    def test_client_error_and_tree_failure_still_clear_state(
+        self, srv: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """aclose 抛错 + 杀树返回失败清单 → 告警但状态仍清空（失败不吞不抛）。"""
         client = MagicMock()
         client.aclose = AsyncMock(side_effect=RuntimeError("close failed"))
         srv._client = client
-        proc = MagicMock()
-        proc.terminate.side_effect = RuntimeError("term failed")
-        srv._api_process = proc
+        srv._api_process = SimpleNamespace(pid=4242)
+        monkeypatch.setattr(srv, "kill_process_tree", lambda pid: [f"pid={pid} kill 失败: injected"])
 
         with caplog.at_level(logging.WARNING):
             _run(srv._on_unload({}))
 
-        proc.kill.assert_called_once()
         assert srv._client is None
         assert srv._api_process is None
+        assert any("进程树清理失败" in r.getMessage() for r in caplog.records)
         assert any("on_unload" in r.getMessage() for r in caplog.records)
 
     def test_unload_with_nothing_attached(self, srv: Any) -> None:

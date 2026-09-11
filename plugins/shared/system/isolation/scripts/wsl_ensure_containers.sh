@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WSL native docker 模式：启动项目容器并做真实状态校验。
-# 容器编排（container_orchestrator.py）与手动运维共用。
+# 容器布局与手动运维共用。
 #
 # 退出码约定：
 #   0  redis + frontend 均已 running
@@ -202,7 +202,7 @@ if [ "$rc" -ne 0 ]; then
     # 命中以下任一特征，均说明 docker/containerd/runc 三方状态不一致，
     # 根源是上次容器停止时有线程以 D 状态卡在内核，旧 cgroup/task/state 永远清不掉。
     # 用户态无法自愈，必须 wsl --shutdown 重启内核。
-    # 分类 grep 读落地的 $COMPOSE_OUT（历史版本这里读的是从未赋值的 $out，分类永远不命中）
+    # 分类 grep 读 $COMPOSE_OUT——compose 输出经 run_with_idle_timeout 的 tee 持续落地到该文件
     if grep -qiE 'cgroup is not empty|failed to create (task|shim task|shim)|container with given ID already exists|task .* already exists' "${COMPOSE_OUT:-/dev/null}" 2>/dev/null; then
         echo ""
         echo "[FATAL] Docker/containerd/runc 状态不一致：无法为容器创建任务。"

@@ -6,14 +6,12 @@
  * run 取 started_at 最新）、mapStatesToRecord 索引、缓存读写与失效。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 const { mockGetQueryData, mockSetQueryData, mockInvalidate, mockFetchQuery } = vi.hoisted(() => ({
   mockGetQueryData: vi.fn(),
   mockSetQueryData: vi.fn(),
   mockInvalidate: vi.fn(),
   mockFetchQuery: vi.fn(),
 }))
-
 vi.mock('@/services/query/queryClient', () => ({
   queryClient: {
     getQueryData: mockGetQueryData,
@@ -22,14 +20,12 @@ vi.mock('@/services/query/queryClient', () => ({
     fetchQuery: mockFetchQuery,
   },
 }))
-
 vi.mock('@/services/query/queryKeys', () => ({
   queryKeys: {
     pipelineRuns: ['pipeline-runs'],
     pipelineStates: ['pipeline-states'],
   },
 }))
-
 import {
   mapRunsToRecord,
   readPipelineRuns,

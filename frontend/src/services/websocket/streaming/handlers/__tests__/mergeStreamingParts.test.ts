@@ -25,7 +25,7 @@ describe('mergeStreamingParts', () => {
 
     const { parts } = mergeStreamingParts(localParts, serverParts, '最终回复', '')
 
-    // ★ 回归锚：server 的最终文本必须保留（此前本地有 tool_call 即整体丢弃 server）
+    // ★ 回归锚：server 的最终文本必须保留（本地有 tool_call 也不得整体丢弃 server）
     expect(parts.some((p: any) => p.type === 'text' && p.content === '最终回复')).toBe(true)
     // server 的 thinking 保留
     expect(parts.some((p: any) => p.type === 'thinking' && p.content === '第一轮思考')).toBe(true)

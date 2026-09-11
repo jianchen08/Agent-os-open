@@ -37,8 +37,8 @@ export type ContributionType =
   | 'settingsPanels'   // 插件配置面板
   | 'widgets'          // 预置 widget 注册
 
-/** 页面目标空间（contributes.pages[].space） */
-export type PageSpace = 'settings' | 'workspace' | 'chat' | 'floating' | 'dock' | 'fullscreen'
+/** 页面目标空间（contributes.pages[].space；debug_center 为调试中心 hub 专属组台空间） */
+export type PageSpace = 'settings' | 'workspace' | 'chat' | 'floating' | 'dock' | 'fullscreen' | 'debug_center'
 
 /** 页面栏位（contributes.pages[].slot；activity-bar 为旧 viewsContainers 归一化专用） */
 export type PageSlot =
@@ -185,6 +185,8 @@ export interface WidgetDeclaration {
   type: string
   /** 目标渲染空间 */
   space?: string
+  /** 组台分组（widget_stage 空间内按组渲染 tab；缺省归入「概览」组） */
+  group?: string
   /** 触发时机 */
   trigger?: string
   /** 排序权重（槽位内多声明裁决：小者胜；缺省 1000） */
@@ -360,6 +362,7 @@ export class ContributionRegistry {
           id: w.id as string,
           type: w.type as string,
           space: w.space as string | undefined,
+          group: w.group as string | undefined,
           trigger: w.trigger as string | undefined,
           order: typeof w.order === 'number' ? w.order : undefined,
           props: w.props as Record<string, unknown> | undefined,

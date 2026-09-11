@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
 """multimodal_preprocessor input pipeline plugin MCP 服务端——纯接口适配层。
 
-老代码从 src/plugins/shared/input/multimodal_preprocessor/plugin.py 原封不动复制到本目录，
-本文件只做接口适配：通过 MCP SDK 暴露为工具。
+本目录为实现模块，本文件只做接口适配：通过 MCP SDK 暴露为工具。
 """
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from functools import lru_cache
 
-# 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _this_dir)
-_shared_dir = os.path.join(_this_dir, "..", "..", "..")
-sys.path.insert(0, _shared_dir)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
 
 from plugin import MultimodalPreprocessor  # noqa: E402
 

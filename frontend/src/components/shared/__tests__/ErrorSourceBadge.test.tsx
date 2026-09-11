@@ -3,8 +3,8 @@
  * ErrorSourceBadge 来源标签（config/error_codes.json sources.enum 单一真值源）：
  * 五种来源渲染对应文案；未知来源兜底「未知」灰标（旧后端兼容）。
  */
-import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import { describe, it, expect } from 'vitest'
 import { ErrorSourceBadge } from '../ErrorSourceBadge'
 
 describe('ErrorSourceBadge 来源标签（2026-08-26）', () => {

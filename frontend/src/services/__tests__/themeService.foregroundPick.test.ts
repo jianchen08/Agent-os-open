@@ -2,16 +2,16 @@
 /**
  * themeService — 语义前景黑白择优计算测试
  *
- * 真实缺陷：--primary-foreground 曾取 bubble.user_text（对着气泡底调的值），
- * 压在 colors.primary 上在 5/7 主题对比度 2.2~3.5（pixel-art 2.23 接近隐形）；
- * --secondary/accent-foreground 取 text.primary 同样跨槽位撞色。改为按底色
- * 黑白择优后，用性质断言兜底：任何主题、任何语义槽位，算出的前景对其底色
+ * 契约：--primary-foreground 不取固定槽位色（如 bubble.user_text——对着气泡底
+ * 调的值，压在 colors.primary 上对比度仅 2.2~3.5，pixel-art 2.23 接近隐形），
+ * --secondary/accent-foreground 取 text.primary 同样跨槽位撞色——前景必须按
+ * 底色黑白择优，并用性质断言兜底：任何主题、任何语义槽位，算出的前景对其底色
  * 对比度必须 ≥ 4.5（AA 正文）。
  */
 
 import { describe, it, expect } from 'vitest'
-import { compileThemeVariables } from '@/services/themeService'
 import { presetThemes } from '@/config/themes'
+import { compileThemeVariables } from '@/services/themeService'
 
 function parseVars(cssVars: string): Record<string, string> {
   const out: Record<string, string> = {}

@@ -7,9 +7,10 @@
  * 深色主题观感沿用）。分发按代码块底色实际亮度判深浅，与主题 category 解耦：
  * high-contrast 属 special 族但 input 是深底，必须拿深色调色板。
  *
- * 真实缺陷背景：语法字色曾是组件内 oneDark 静态调色板（为深底 hsl(220,13%,18%)
- * 调的），浅色主题 --code-bg 取 input 近白底后，字符串绿约 2.0:1、数字橙约
- * 2.5:1，且主题层防撞色强制（contrastPick）够不到组件内联样式。
+ * 契约背景：内嵌组件级静态调色板（如为深底 hsl(220,13%,18%) 调的 oneDark）
+ * 在浅色主题 --code-bg 取 input 近白底后对比度崩坏（字符串绿约 2.0:1、数字橙
+ * 约 2.5:1），且主题层防撞色强制（contrastPick）够不到组件内联样式——故语法
+ * 字色必须由主题层同源分发。
  */
 
 import { describe, it, expect } from 'vitest'

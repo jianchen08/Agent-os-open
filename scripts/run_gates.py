@@ -333,6 +333,9 @@ GATES: list[Gate] = [
         env=_PLUGINS_ENV,
     ),
     Gate(
+        # 按 marker 全量收集（-m timing tests/）：全仓所有 @pytest.mark.timing
+        # 用例唯一归本闸，普通车道（plugins-coverage/heavy 经 MARKER_FILTER）
+        # 与 e2e 车道（e2e.yml）以 -m "not timing" 排除，避免时序用例重复跑。
         id="timing-gate",
         label="时序不变量（-m timing，独立阻塞）",
         domain="plugins",
@@ -345,8 +348,7 @@ GATES: list[Gate] = [
             "pytest",
             "-m",
             "timing",
-            "tests/test_isolation_docker_timeout.py",
-            "tests/suites/core/test_pipeline_stability.py",
+            "tests/",
         ),
         env=_PLUGINS_ENV,
     ),
@@ -411,6 +413,15 @@ GATES: list[Gate] = [
             r"^frontend/src/main\.tsx$",
         ),
         needs=("frontend-coverage",),
+    ),
+    Gate(
+        id="frontend-any-baseline",
+        label="any 基线棘轮（只减不增）+ >1000 行文件冻结",
+        domain="frontend",
+        # 纯扫描零依赖（批次F 2026-09-08）：any 存量消化另行立项，本闸防增；
+        # 巨型文件拆分裁定为单独立项分批（第三/四轮扫描），冻结基线即管控机制。
+        command=(sys.executable, "scripts/check_frontend_any_baseline.py"),
+        fast=True,
     ),
     Gate(
         id="frontend-e2e-smoke",

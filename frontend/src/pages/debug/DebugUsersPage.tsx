@@ -30,7 +30,6 @@ export function DebugUsersPage({ embedded }: { embedded?: boolean } = {}) {
   return (
     <PageShell
       title="用户调试"
-      backHref="/debug"
       embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {users.length} 个用户</span>}
     >

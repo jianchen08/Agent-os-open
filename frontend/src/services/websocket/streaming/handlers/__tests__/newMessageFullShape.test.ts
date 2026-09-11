@@ -13,6 +13,9 @@
  *   3. 流式中断（本地无内容）时 data.message 兜底填充完整形态
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type * as sessionMod from '@/services/api/session'
+import type * as handlersMod from '@/services/websocket/streaming/handlers'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -25,7 +28,7 @@ vi.mock('@/utils/logger', () => ({
 }))
 
 vi.mock('@/services/api/session', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/services/api/session')>()
+  const actual = await importOriginal<sessionMod>()
   return {
     ...actual,
     getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),

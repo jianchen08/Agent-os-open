@@ -9,8 +9,8 @@
  */
 import { describe, it, expect } from 'vitest'
 import { buildFragmentsFromParts } from '@/components/chat/hooks/useMessageRender'
-import type { Message } from '@/types/models'
 import type { MessagePart } from '@/types/messageParts'
+import type { Message } from '@/types/models'
 
 const BASE_MSG: Message = {
   id: 'msg-test-001',

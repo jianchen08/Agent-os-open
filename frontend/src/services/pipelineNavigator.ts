@@ -96,7 +96,7 @@ export async function navigateToPipeline(
     taskId?: string
     status?: string
     /** 归属会话提示（血缘 lineage.origin_session_id）：自环子任务管道
-     *  （pipeline_sessions 落 thread=自身 id）不在任何会话 pipelineIds 里，
+     *  （thread_id=自身 id）不在任何会话 pipelineIds 里，
      *  三级查找必然落空，内存缓存还可能是事件到达时按当时活跃会话误挂的错值。
      *  调用方经血缘解析出真实归属会话后传入；提示会话在列表中时优先于一切推断。 */
     fallbackSessionId?: string

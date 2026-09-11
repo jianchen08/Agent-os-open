@@ -12,6 +12,7 @@ server.py 经 importlib 显式路径 + 唯一模块名加载；加载前逐出�
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -142,13 +143,100 @@ class TestOnLoad:
 
 class TestRun:
     def test_run_starts_server(self, server_mod: Any) -> None:
-        """run() 创建插件并调用其阻塞 run() 入口（验证接线）。"""
+        """run() 启动模块级 plugin 的阻塞入口（验证接线）。"""
         started: list[str] = []
 
         class _FakePlugin:
             def run(self) -> None:
                 started.append("started")
 
-        with patch.object(server_mod, "create_plugin", return_value=_FakePlugin()):
+        with patch.object(server_mod, "plugin", _FakePlugin()):
             assert server_mod.run() is None  # run() 无返回值，副作用是启动 MCP 服务
         assert started == ["started"]
+
+
+class TestCohostContract:
+    """合宿 light 组契约：host.py getattr(module, "plugin") 直接取用模块级实例。
+
+    实例必须暴露且已在装载期携带全量工具（CohostServer 聚合 plugin._tools）；
+    邻成员持有的同名裸名模块（system_tools decoy）不得遮蔽本成员的 handler。
+    """
+
+    def test_module_level_plugin_exposed_with_tools(self, server_mod: Any) -> None:
+        """exec 期即暴露 AgentOSPlugin 实例且携带 2 工具；create_plugin 幂等同实例。"""
+        from agentos_plugin_sdk import AgentOSPlugin
+
+        assert isinstance(server_mod.plugin, AgentOSPlugin)
+        assert set(server_mod.plugin._tools.keys()) == {"yaml_validate", "read_execution_detail"}
+        assert server_mod.create_plugin() is server_mod.plugin
+        # 装载期注册与工厂注册是同一 handler（无第二份注册）
+        assert server_mod.plugin._tools["yaml_validate"].handler is server_mod.yaml_validate
+
+    @staticmethod
+    def _make_neighbor_member(tmp_path: Any) -> Path:
+        """构造邻成员桩：持有同名 system_tools decoy + 模块级 plugin 实例。"""
+        neighbor_dir = tmp_path / "neighbor_member"
+        neighbor_dir.mkdir()
+        (neighbor_dir / "system_tools.py").write_text(
+            "async def yaml_validate(**kwargs):\n"
+            "    return {'decoy': True}\n",
+            encoding="utf-8",
+        )
+        (neighbor_dir / "server.py").write_text(
+            "import system_tools\n"
+            "from agentos_plugin_sdk import AgentOSPlugin\n"
+            "\n"
+            "plugin = AgentOSPlugin('cohost_shadow_neighbor')\n"
+            "plugin.register_tool('yaml_validate', {'type': 'object'}, system_tools.yaml_validate, 'decoy')\n",
+            encoding="utf-8",
+        )
+        return neighbor_dir
+
+    @staticmethod
+    def _member_loader() -> Any:
+        host_path = _PLUGIN_DIR.parents[1] / "_host" / "host.py"
+        host_spec = importlib.util.spec_from_file_location(
+            "simple_cohost_host_under_test", host_path
+        )
+        assert host_spec is not None
+        assert host_spec.loader is not None
+        host_mod = importlib.util.module_from_spec(host_spec)
+        host_spec.loader.exec_module(host_mod)
+        return host_mod._MemberLoader()
+
+    @pytest.mark.parametrize("order", ["neighbor_first", "simple_first"])
+    def test_host_loader_returns_fully_loaded_plugin(self, tmp_path: Any, order: str) -> None:
+        """真实 _MemberLoader 端到端：无论装载序，simple 都暴露带全量工具的
+        plugin 实例，且 handler 是本目录实现（decoy 不遮蔽）。
+
+        两种装载序 = 两组有区分度输入：邻成员先装载时其 decoy 曾占据
+        system_tools 裸名槽位（随宿主恢复逻辑回写）；simple 先装载时 handler
+        绑定先于 decoy 进入进程——两条路径都不得影响 plugin 上已冻结的绑定。
+        """
+        # 真实宿主进程里静息态裸名模块都属某成员（装载前必被摘除）；测试进程
+        # 里对齐该不变式：先逐出本测试可见的 system_tools 残留，decoy 才能真实进场。
+        popped = {name: sys.modules.pop(name) for name in ("system_tools",) if name in sys.modules}
+        try:
+            neighbor_dir = self._make_neighbor_member(tmp_path)
+            loader = self._member_loader()
+            if order == "neighbor_first":
+                neighbor_plugin = loader.load("cohost_shadow_neighbor", neighbor_dir)
+                plugin = loader.load("simple_tools", _PLUGIN_DIR)
+                assert neighbor_plugin._tools["yaml_validate"].handler.__module__ == "system_tools"
+            else:
+                plugin = loader.load("simple_tools", _PLUGIN_DIR)
+                loader.load("cohost_shadow_neighbor", neighbor_dir)
+
+            assert set(plugin._tools.keys()) == {"yaml_validate", "read_execution_detail"}
+            handler = plugin._tools["yaml_validate"].handler
+            # 行为区分：本目录实现走真实校验语义（content 缺失 → valid=False），
+            # decoy 恒返回 {'decoy': True}
+            result = asyncio.run(handler(content="", schema_type="generic"))
+            assert result["valid"] is False
+            assert "decoy" not in result
+        finally:
+            for name in ("system_tools",):
+                sys.modules.pop(name, None)
+            sys.modules.update(popped)
+            for name in [n for n in sys.modules if n.startswith("_cohost_member_")]:
+                sys.modules.pop(name, None)

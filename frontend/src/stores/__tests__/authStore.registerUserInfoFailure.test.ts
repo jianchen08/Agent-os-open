@@ -4,12 +4,10 @@
  * 不伪造 id:'unknown' 用户写 localStorage，置错误要求重新登录。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 const { registerMock, getCurrentUserMock } = vi.hoisted(() => ({
   registerMock: vi.fn(),
   getCurrentUserMock: vi.fn(),
 }))
-
 vi.mock('@/services/api/auth', () => ({
   login: vi.fn(),
   register: registerMock,
@@ -27,9 +25,8 @@ vi.mock('@/services/modules/GrowthLoop', () => ({
   initializeGrowthLoop: vi.fn().mockResolvedValue(undefined),
   refreshPluginContributions: vi.fn().mockResolvedValue(undefined),
 }))
-
-import { useAuthStore } from '@/stores/authStore'
 import { STORAGE_KEYS } from '@/constants/storage'
+import { useAuthStore } from '@/stores/authStore'
 
 describe('register：获取用户信息失败不伪造 unknown 用户（FE12）', () => {
   beforeEach(() => {

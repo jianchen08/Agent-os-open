@@ -145,7 +145,7 @@ class QQAdapter(BaseComboAdapter):
 
     def __init__(
         self,
-        ws_host: str = "0.0.0.0",
+        ws_host: str = "127.0.0.1",
         ws_port: int = 8080,
         http_api_url: str = "http://127.0.0.1:5700",
         **kwargs: Any,
@@ -153,10 +153,10 @@ class QQAdapter(BaseComboAdapter):
         """初始化 QQ 通道适配器。
 
         Args:
-            ws_host: WebSocket 服务端监听地址
+            ws_host: WebSocket 服务端监听地址（默认只绑回环）
             ws_port: WebSocket 服务端监听端口
             http_api_url: OneBot HTTP API 地址
-            **kwargs: 传递给 OneBotClient 的额外参数
+            **kwargs: 传递给 OneBotClient 的额外参数（含 access_token）
         """
         self.stream_client = OneBotClient(
             ws_host=ws_host,

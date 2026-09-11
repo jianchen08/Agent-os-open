@@ -251,3 +251,47 @@ class TestExecute:
         new = result.state_updates[StateKeys.TOOL_RESULTS][0]
         # mask 被插入到嵌套字段中
         assert "***" in new["config"]
+
+    @pytest.mark.asyncio
+    async def test_多令牌族全部脱敏且标记检测(self) -> None:
+        """execute 级行为：GitHub/Slack/AWS/字段型密钥各令牌族均被脱敏。
+
+        各族样本与脱敏后结果经公开入口 execute 构造与断言（TestStringSanitization
+        在 _sanitize_string 级逐族钉正则；本用例钉"工具结果进管道后各族都被处理"
+        这一可观察行为）。
+        """
+        from plugin import SensitiveChecker
+
+        c = SensitiveChecker()
+        gh_token = "ghp_" + "a" * 36
+        slack_token = "xoxb-123456789012-abcdefgh"
+        aws_key = "AKIA" + "A" * 16
+        results = [
+            f"token={gh_token}",
+            f"slack {slack_token} end",
+            f"aws {aws_key}",
+            "pwd=abc",
+        ]
+        result = await c.execute(_ctx(results))
+
+        assert result.state_updates.get("sensitive_detected") is True
+        new_results = result.state_updates[StateKeys.TOOL_RESULTS]
+        joined = str(new_results)
+        for secret in (gh_token, slack_token, aws_key):
+            assert secret not in joined, f"令牌未被脱敏: {secret[:8]}..."
+        mask_hits = sum(str(item).count("***") for item in new_results)
+        assert mask_hits >= 4, "四个敏感样本都应被掩码"
+
+    @pytest.mark.asyncio
+    async def test_自定义mask配置端到端生效(self) -> None:
+        """自定义 mask 经 config 传入 → 脱敏产物使用该 mask（非默认 ***）。"""
+        from plugin import SensitiveChecker
+
+        c = SensitiveChecker(config={"mask": "[REDACTED]"})
+        result = await c.execute(_ctx(["key is sk-abcdefghijklmnopqrstuvwxyz"]))
+
+        assert result.state_updates.get("sensitive_detected") is True
+        new_results = result.state_updates[StateKeys.TOOL_RESULTS]
+        assert "[REDACTED]" in new_results[0]
+        assert "***" not in new_results[0]
+        assert "sk-abcdefghij" not in new_results[0]

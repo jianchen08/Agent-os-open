@@ -9,6 +9,7 @@
  * 本测试 mock getMessages（API 层）让 fetchMessages 真实跑 appendMessages。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 // mock apiClient.get（网络层），让 getMessages + fetchMessages + initFromAPI/appendMessages 全部真实跑
@@ -64,7 +65,7 @@ function makeMsg(id: string, seq: number, overrides: Partial<Message> = {}): Mes
 }
 
 describe('双游标补漏完整路径', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   beforeEach(async () => {
     vi.clearAllMocks()

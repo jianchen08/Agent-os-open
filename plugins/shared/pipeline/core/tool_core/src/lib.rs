@@ -54,7 +54,7 @@ impl PipelinePlugin for ToolCore {
     fn execute(&self, ectx: &ExecContext) -> Result<&str, &str> {
         let state = ectx.ctx.state_value();
         // 执行主流程（返回 state_updates HashMap）。
-        let updates = run(&state, ectx.host);
+        let updates = run(&state, &ectx.ctx.config_value(), ectx.host);
         let buf = unsafe { &mut *self.out_buf.get() };
         // Err 分支同契约（2026-09-02 收口）：序列化错误也写自持缓冲借 &str——
         // 旧 `?` 上抛 `format!` 的 String（dll 堆）交内核 drop = 跨堆 free UB。
@@ -80,7 +80,94 @@ pub extern "C" fn agentos_plugin_create() -> *mut () {
 /// 执行工具调用核心流程（对齐 plugin.py:609-1050）。
 ///
 /// 返回 state_updates HashMap。
-fn run(state: &Value, host: Option<&dyn HostServices>) -> HashMap<String, Value> {
+/// 工具输出超长截断（2026-09-09 用户裁定）：头尾保留 + 中部省略标记。
+/// 全文经 `_full_tool_results` 交 tool_cache_writer 写缓存；LLM/前端要全文
+/// 重发同一调用即可命中缓存取回（缓存 TTL 内），无需新基建。
+const TOOL_OUTPUT_MAX_CHARS: usize = 16 * 1024;
+const TOOL_OUTPUT_HEAD_CHARS: usize = 12 * 1024;
+const TOOL_OUTPUT_TAIL_CHARS: usize = 2 * 1024;
+
+/// 截断参数（manifest config_files → config/system/tool_core_config.yaml 的
+/// `tool_output` 命名空间；缺省用此处默认值）。
+#[derive(Debug, Clone, Copy)]
+struct ToolOutputLimits {
+    max_chars: usize,
+    head_chars: usize,
+    tail_chars: usize,
+}
+
+impl Default for ToolOutputLimits {
+    fn default() -> Self {
+        Self {
+            max_chars: TOOL_OUTPUT_MAX_CHARS,
+            head_chars: TOOL_OUTPUT_HEAD_CHARS,
+            tail_chars: TOOL_OUTPUT_TAIL_CHARS,
+        }
+    }
+}
+
+impl ToolOutputLimits {
+    fn from_config(config: &Value) -> Self {
+        let ns = config.get("tool_output");
+        let get = |k: &str, d: usize| {
+            ns.and_then(|n| n.get(k))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(d)
+        };
+        Self {
+            max_chars: get("max_chars", TOOL_OUTPUT_MAX_CHARS),
+            head_chars: get("head_chars", TOOL_OUTPUT_HEAD_CHARS),
+            tail_chars: get("tail_chars", TOOL_OUTPUT_TAIL_CHARS),
+        }
+    }
+}
+
+fn truncate_tool_output(text: &str, lim: &ToolOutputLimits) -> String {
+    let total = text.chars().count();
+    if total <= lim.max_chars {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(lim.head_chars).collect();
+    let tail: String = text
+        .chars()
+        .skip(total.saturating_sub(lim.tail_chars))
+        .collect();
+    let omitted = total - lim.head_chars - lim.tail_chars;
+    format!(
+        "{head}\n…[工具输出已截断：省略 {omitted} 字符；完整结果已缓存，重发同一工具调用即可取回]…\n{tail}"
+    )
+}
+
+/// 深拷贝并截断 data 中的超长字符串（消息/事件/TOOL_RESULTS 展示用）。
+fn truncated_clone(r: &ToolResult, lim: &ToolOutputLimits) -> ToolResult {
+    let mut c = r.clone();
+    c.data = truncate_value_strings(c.data, lim);
+    c
+}
+
+fn truncate_value_strings(v: Value, lim: &ToolOutputLimits) -> Value {
+    match v {
+        Value::String(s) => {
+            if s.chars().count() > lim.max_chars {
+                truncate_tool_output(&s, lim).into()
+            } else {
+                Value::String(s)
+            }
+        }
+        Value::Array(a) => Value::Array(
+            a.into_iter().map(|v| truncate_value_strings(v, lim)).collect(),
+        ),
+        Value::Object(o) => Value::Object(
+            o.into_iter()
+                .map(|(k, val)| (k, truncate_value_strings(val, lim)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn run(state: &Value, config: &Value, host: Option<&dyn HostServices>) -> HashMap<String, Value> {
     let tool_calls_raw = state.get(StateKey::RAW_TOOL_CALLS).and_then(|v| v.as_array());
 
     let tool_calls_raw = match tool_calls_raw {
@@ -96,6 +183,7 @@ fn run(state: &Value, host: Option<&dyn HostServices>) -> HashMap<String, Value>
         }
     };
 
+    let limits = ToolOutputLimits::from_config(config);
     let mut results: Vec<ToolResult> = Vec::with_capacity(tool_calls_raw.len());
     let mut last_result_text = String::new();
 
@@ -111,16 +199,16 @@ fn run(state: &Value, host: Option<&dyn HostServices>) -> HashMap<String, Value>
 
         // 拦截检查（对齐 plugin.py:698 _check_tool_blocked）。
         if let Some(blocked) = types::check_tool_blocked(&tc.name, state) {
-            emit_tool_event(host, state, "tool_start", &tc, None);
-            emit_tool_event(host, state, "tool_result", &tc, Some(&blocked));
+            emit_tool_event(host, state, "tool_start", &tc, None, &limits);
+            emit_tool_event(host, state, "tool_result", &tc, Some(&blocked), &limits);
             last_result_text = format!("Error: {}", blocked.error.as_deref().unwrap_or("unknown"));
             results.push(blocked);
             continue;
         }
 
         // 执行工具（经 host 调内核 tool-executor.invoke）。
-        let result = execute_single_tool(&tc, host, state);
-        last_result_text = result_text_for(&result);
+        let result = execute_single_tool(&tc, host, state, &limits);
+        last_result_text = result_text_for(&result, &limits);
         results.push(result);
     }
 
@@ -131,16 +219,25 @@ fn run(state: &Value, host: Option<&dyn HostServices>) -> HashMap<String, Value>
         .and_then(|v| v.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
-    let current_messages = messages::rebuild(state, tool_calls_raw, &results);
 
-    // 多模态图片收集 + 注入（对齐 plugin.py:861-963）。
+    // 全文留档：tool_cache_writer 据此写缓存全文（2026-09-09 用户裁定）。
+    // 展示面（messages/TOOL_RESULTS/事件/RAW_RESULT）用截断版——LLM 要全文
+    // 重发同一调用命中缓存即得。
+    let full_results = results.clone();
+    let display: Vec<ToolResult> = results.iter().map(|r| truncated_clone(r, &limits)).collect();
+
+    let current_messages = messages::rebuild(state, tool_calls_raw, &display);
+
+    // 多模态图片收集 + 注入（对齐 plugin.py:861-963）——读全文结果
+    // （截断可能丢 base64 图片，图片必须存活）。
     let (current_messages, _mm_emitted) =
-        messages::inject_multimodal(state, current_messages, &results, host);
+        messages::inject_multimodal(state, current_messages, &full_results, host);
 
     // state_updates 组装（对齐 plugin.py:1019-1050）。
     let mut updates: HashMap<String, Value> = HashMap::new();
-    updates.insert(StateKey::TOOL_RESULTS.into(), json!(results));
-    updates.insert(StateKey::RAW_RESULT.into(), Value::String(last_result_text));
+    updates.insert("_full_tool_results".into(), json!(full_results));
+    updates.insert(StateKey::TOOL_RESULTS.into(), json!(display));
+    updates.insert(StateKey::RAW_RESULT.into(), Value::String(truncate_tool_output(&last_result_text, &limits)));
     updates.insert(StateKey::RAW_TOOL_CALLS.into(), json!([]));
     updates.insert("_executed_tool_calls".into(), json!(tool_calls_raw));
     // op-based：只 emit 新增消息的 set op（无 seq → 引擎分配递增 seq + 落 message_slots）。
@@ -161,9 +258,14 @@ fn run(state: &Value, host: Option<&dyn HostServices>) -> HashMap<String, Value>
 ///
 /// 经 host 调内核 `tool-executor.invoke`，内核反查 tool_name → plugin_id
 /// 调对应工具 sidecar，返回 ToolExecutionResult。发 tool_start/tool_result 事件。
-fn execute_single_tool(tc: &ToolCall, host: Option<&dyn HostServices>, state: &Value) -> ToolResult {
+fn execute_single_tool(
+    tc: &ToolCall,
+    host: Option<&dyn HostServices>,
+    state: &Value,
+    limits: &ToolOutputLimits,
+) -> ToolResult {
     // 发 tool_start 事件（host 为 None 时 emit 内部跳过）。
-    emit_tool_event(host, state, "tool_start", tc, None);
+    emit_tool_event(host, state, "tool_start", tc, None, limits);
 
     let start = std::time::Instant::now();
 
@@ -210,7 +312,7 @@ fn execute_single_tool(tc: &ToolCall, host: Option<&dyn HostServices>, state: &V
     }
 
     // 发 tool_result 事件。
-    emit_tool_event(host, state, "tool_result", tc, Some(&result));
+    emit_tool_event(host, state, "tool_result", tc, Some(&result), limits);
     result
 }
 
@@ -405,16 +507,33 @@ fn collect_side_effects(state: &Value, results: &[ToolResult], updates: &mut Has
 }
 
 /// 取工具结果的预览文本（用于 raw_result，对齐 plugin.py last_result_text）。
-fn result_text_for(r: &ToolResult) -> String {
+fn result_text_for(r: &ToolResult, limits: &ToolOutputLimits) -> String {
     if r.success {
         let preview = if r.data.is_object() {
-            messages::serialize_for_content(&r.data).unwrap_or_else(|_| r.data.to_string())
+            truncate_tool_output(
+                &messages::serialize_for_content(&r.data).unwrap_or_else(|_| r.data.to_string()),
+                limits,
+            )
         } else {
             r.data.to_string()
         };
         preview.chars().take(200).collect()
     } else {
         format!("Error: {}", r.error.as_deref().unwrap_or("unknown"))
+    }
+}
+
+/// 流式契约降级（streaming.json tool_result.error 要求 string）：进入流式
+/// 载荷前把结构化 error 转串——对象优先取 message 字段；无 message 则整体
+/// JSON 串化兜底；string 原样。完整原始结构由调用方留插件日志供排障。
+fn error_to_contract_string(err: &Value) -> String {
+    match err {
+        Value::String(s) => s.clone(),
+        Value::Object(map) => match map.get("message").and_then(|v| v.as_str()) {
+            Some(message) => message.to_string(),
+            None => err.to_string(),
+        },
+        other => other.to_string(),
     }
 }
 
@@ -427,6 +546,7 @@ fn emit_tool_event(
     kind: &str,
     tc: &ToolCall,
     result: Option<&ToolResult>,
+    limits: &ToolOutputLimits,
 ) {
     let Some(host) = host else {
         return;
@@ -451,32 +571,46 @@ fn emit_tool_event(
     if kind == "tool_start" {
         payload.insert("args".into(), tc.args.clone());
     } else if let Some(r) = result {
-        // result 为全量结果文本（冷热一致性契约）：与持久化 content 同源——
-        // 成功 = serialize_for_content 全文，失败 = "Error: {error}"（对齐
-        // messages.rs:110）。不再截断 200 字符，前端实时与刷新后读到的文本一致。
+        // result 为展示版结果文本（冷热一致性契约）：与持久化 content 同源——
+        // 成功 = serialize_for_content（超长截断，全文在 tool_cache），
+        // 失败 = "Error: {error}"（对齐 messages.rs:110）。
         let result_text = if r.success {
-            messages::serialize_for_content(&r.data).unwrap_or_else(|_| r.data.to_string())
+            truncate_tool_output(
+                &messages::serialize_for_content(&r.data).unwrap_or_else(|_| r.data.to_string()),
+                limits,
+            )
         } else {
             format!("Error: {}", r.error.as_deref().unwrap_or("unknown"))
         };
         payload.insert("result".into(), Value::String(result_text));
-        payload.insert("result_data".into(), r.data.clone());
+        // 契约 result_data 要 object（streaming.json）：失败路径 data 为 Null、
+        // 工具也可返回标量/数组——非对象进载荷会被契约网关 fail-closed 整事件
+        // 丢弃，省略该字段（结果全文仍在 result）。
+        if r.data.is_object() {
+            payload.insert("result_data".into(), r.data.clone());
+        }
         payload.insert("success".into(), Value::Bool(r.success));
         payload.insert("duration_ms".into(), json!((r.duration_ms * 10.0).round() / 10.0));
         if let Some(err) = &r.error {
-            // 统一错误信封（单一真值源 config/error_codes.json）：前端按
-            // source 渲染来源标签、按 retryable 驱动重试。持久化 envelope
-            // （messages.rs）保持字符串，REST 历史消息契约不变。
+            // 统一错误信封（单一真值源 config/error_codes.json）。流式契约
+            // （streaming.json）error 要 string，信封对象会被契约网关 fail-closed
+            // 整事件丢弃（agent 收不到错误详情）——降级为 string 进载荷：
+            // message 优先，完整信封留插件日志（stderr → 内核日志）供排障。
+            // 持久化 envelope（messages.rs）不受影响，REST 历史消息契约不变。
+            let envelope = json!({
+                "code": "TOOL_EXEC_FAILED",
+                "message": err,
+                "source": "plugin",
+                "retryable": false,
+                "details": null,
+                "request_id": null,
+            });
+            // 原始 envelope 结构留日志（stderr 直出；错误正文已经
+            // error_to_contract_string 串化进 payload，此处为排查保真底稿）。
+            eprintln!("pipeline_tool_core tool_result error envelope: {envelope}");
             payload.insert(
                 "error".into(),
-                json!({
-                    "code": "TOOL_EXEC_FAILED",
-                    "message": err,
-                    "source": "plugin",
-                    "retryable": false,
-                    "details": null,
-                    "request_id": null,
-                }),
+                Value::String(error_to_contract_string(&envelope)),
             );
         }
     }
@@ -536,11 +670,12 @@ mod tests {
         }
     }
 
-    /// 统一错误模型：tool_result 失败事件的 error 为信封对象
-    /// （code=TOOL_EXEC_FAILED, source=plugin, retryable=false），
-    /// 前端据此渲染来源标签；成功事件不带 error 字段。
+    /// 流式契约（config/kernel_capabilities/streaming.json tool_result）：
+    /// error 类型为 string。对象载荷会被内核流式契约网关 fail-closed 整事件
+    /// 丢弃（失败时 agent 收不到错误详情）——失败事件 error 必须是 string
+    /// 且保留原始错误信息。
     #[test]
-    fn test_emit_tool_event_failure_error_envelope() {
+    fn test_emit_tool_event_failure_error_is_contract_string() {
         let host = CapturingHost {
             last_params: std::sync::Mutex::new(None),
         };
@@ -556,18 +691,91 @@ mod tests {
         };
         let result = ToolResult::failed("bash_execute", "command not found", 1.5);
 
-        emit_tool_event(Some(&host), &state, "tool_result", &tc, Some(&result));
+        emit_tool_event(Some(&host), &state, "tool_result", &tc, Some(&result), &ToolOutputLimits::default());
 
         let params: Value =
             serde_json::from_str(host.last_params.lock().unwrap().as_deref().unwrap()).unwrap();
         let payload = &params["payload"];
         assert_eq!(payload["success"], false);
-        assert_eq!(payload["error"]["code"], "TOOL_EXEC_FAILED");
-        assert_eq!(payload["error"]["message"], "command not found");
-        assert_eq!(payload["error"]["source"], "plugin");
-        assert_eq!(payload["error"]["retryable"], false);
-        assert!(payload["error"]["details"].is_null());
-        assert!(payload["error"]["request_id"].is_null());
+        assert!(payload["error"].is_string(), "error 必须是 string：{payload}");
+        assert!(payload["error"].as_str().unwrap().contains("command not found"));
+    }
+
+    /// 失败路径 data 为 Null：result_data 契约要 object，null 载荷会被网关
+    /// 在 error 修复后继续以 result_data 违规拒掉整个事件——非对象必须缺席。
+    #[test]
+    fn test_emit_tool_event_failure_omits_null_result_data() {
+        let host = CapturingHost {
+            last_params: std::sync::Mutex::new(None),
+        };
+        let state = json!({
+            "session_id": "sess-1",
+            "pipeline_id": "pipe-1",
+            "message_id": "msg-1",
+        });
+        let tc = ToolCall {
+            name: "bash_execute".into(),
+            args: json!({"command": "echo hi"}),
+            call_id: Some("call_abc".into()),
+        };
+        let result = ToolResult::failed("bash_execute", "command not found", 1.5);
+
+        emit_tool_event(Some(&host), &state, "tool_result", &tc, Some(&result), &ToolOutputLimits::default());
+
+        let params: Value =
+            serde_json::from_str(host.last_params.lock().unwrap().as_deref().unwrap()).unwrap();
+        let payload = &params["payload"];
+        assert!(payload.get("result_data").is_none());
+        // 结果全文仍在 result（string）里，信息不丢。
+        assert_eq!(payload["result"], "Error: command not found");
+    }
+
+    /// 成功但数据为标量（工具可返回纯业务数据非对象）：result_data 省略，
+    /// 载荷不产生 object 违规；result 全文保留。
+    #[test]
+    fn test_emit_tool_event_success_scalar_data_omits_result_data() {
+        let host = CapturingHost {
+            last_params: std::sync::Mutex::new(None),
+        };
+        let state = json!({
+            "session_id": "sess-1",
+            "pipeline_id": "pipe-1",
+            "message_id": "msg-1",
+        });
+        let tc = ToolCall {
+            name: "file_read".into(),
+            args: json!({"path": "a.txt"}),
+            call_id: Some("call_s1".into()),
+        };
+        let result = ToolResult::succeeded("file_read", json!("plain text"), 0.5);
+
+        emit_tool_event(Some(&host), &state, "tool_result", &tc, Some(&result), &ToolOutputLimits::default());
+
+        let params: Value =
+            serde_json::from_str(host.last_params.lock().unwrap().as_deref().unwrap()).unwrap();
+        let payload = &params["payload"];
+        assert_eq!(payload["success"], true);
+        assert!(payload.get("result_data").is_none());
+        assert!(payload["result"].is_string());
+    }
+
+    /// 结构化降级（进入流式载荷前）：对象优先取 message 字段转 string；
+    /// 无 message 的对象整体 JSON 串化兜底；string 原样透传。
+    #[test]
+    fn test_error_to_contract_string_downgrade() {
+        // message 优先。
+        let with_message = json!({"code": "X", "message": "boom detail", "retryable": false});
+        assert_eq!(error_to_contract_string(&with_message), "boom detail");
+        // 无 message → JSON 兜底。
+        let no_message = json!({"code": "X", "retryable": false});
+        let downgraded = error_to_contract_string(&no_message);
+        assert!(downgraded.contains("\"code\""));
+        assert!(downgraded.contains("\"X\""));
+        // string 原样。
+        assert_eq!(error_to_contract_string(&json!("raw error")), "raw error");
+        // 非 string 的 message 字段 → JSON 兜底（不丢结构）。
+        let non_string_message = json!({"message": 42});
+        assert!(error_to_contract_string(&non_string_message).contains("42"));
     }
 
     /// 成功路径不带 error 字段（前端按 success=true 渲染成功态）。
@@ -588,7 +796,7 @@ mod tests {
         };
         let result = ToolResult::succeeded("bash_execute", json!({"status": "ok"}), 0.5);
 
-        emit_tool_event(Some(&host), &state, "tool_result", &tc, Some(&result));
+        emit_tool_event(Some(&host), &state, "tool_result", &tc, Some(&result), &ToolOutputLimits::default());
 
         let params: Value =
             serde_json::from_str(host.last_params.lock().unwrap().as_deref().unwrap()).unwrap();
@@ -741,5 +949,125 @@ mod tests {
             "security.decision": {"allowed": true, "reason": "ok"},
         });
         assert!(types::check_tool_blocked("file_write", &allowed).is_none());
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+
+    // 契约字面值（用户裁定 2026-09-09：>16K 触发，头 12K 尾 2K）。
+    // 断言一律用字面值而非实现常量——实现常量漂移时测试必须红，
+    // 断言引用被测常量会与实现同步漂移沦为同义反复。
+    const CONTRACT_MAX: usize = 16_384;
+    const CONTRACT_HEAD: usize = 12_288;
+    const CONTRACT_TAIL: usize = 2_048;
+
+    fn parse_omitted(out: &str) -> usize {
+        let start = out.find("省略 ").expect("标记含省略数") + "省略 ".len();
+        let end = start + out[start..].find(" 字符").expect("省略数后随单位");
+        out[start..end].parse().expect("省略数为十进制整数")
+    }
+
+    #[test]
+    fn short_output_untouched() {
+        assert_eq!(truncate_tool_output("hello", &ToolOutputLimits::default()), "hello");
+    }
+
+    /// 边界对：恰好 16384 不触发（闭区间阈值），16385 即触发。
+    /// 省略数契约 = total − head − tail（max 只做触发判断）。
+    #[test]
+    fn boundary_at_max_chars_untouched_one_over_truncates() {
+        let lim = ToolOutputLimits::default();
+        let exact = "x".repeat(CONTRACT_MAX);
+        assert_eq!(
+            truncate_tool_output(&exact, &lim),
+            exact,
+            "恰好契约上限 16384 不触发截断"
+        );
+        for over_by in [1usize, 100] {
+            let over = "x".repeat(CONTRACT_MAX + over_by);
+            let out = truncate_tool_output(&over, &lim);
+            assert!(out.contains("工具输出已截断"), "超契约上限 {} 字符即触发", over_by);
+            assert_eq!(
+                parse_omitted(&out),
+                CONTRACT_MAX + over_by - CONTRACT_HEAD - CONTRACT_TAIL,
+                "省略数 = total − head − tail（超限 {} 组）", over_by
+            );
+            assert!(out.starts_with('x') && out.ends_with('x'), "头尾保留");
+        }
+    }
+
+    #[test]
+    fn long_output_keeps_head_tail_and_marker() {
+        let big = format!("{}中间内容{}", "a".repeat(20_000), "b".repeat(20_000));
+        let total = big.chars().count();
+        let out = truncate_tool_output(&big, &ToolOutputLimits::default());
+        assert!(out.chars().count() <= CONTRACT_MAX + 200, "截断后不超契约上限+标记");
+        assert!(out.contains("工具输出已截断"), "含截断标记");
+        assert!(out.starts_with('a'), "保留头部");
+        assert!(out.ends_with('b'), "保留尾部");
+        // 头/尾精确性（非仅首尾字符）：保留段与输入前 12288 / 后 2048
+        // 字符逐字符一致——锚定契约值本身。
+        let out_chars: Vec<char> = out.chars().collect();
+        let head: String = out_chars[..CONTRACT_HEAD].iter().collect();
+        assert_eq!(
+            head,
+            big.chars().take(CONTRACT_HEAD).collect::<String>(),
+            "头部保留段 = 输入前 12288 字符"
+        );
+        let tail: String = out_chars[out_chars.len() - CONTRACT_TAIL..].iter().collect();
+        assert_eq!(
+            tail,
+            big.chars().skip(total - CONTRACT_TAIL).collect::<String>(),
+            "尾部保留段 = 输入后 2048 字符"
+        );
+        // 标记内省略数字自洽：omitted == total − head − tail（性质断言）。
+        assert_eq!(
+            parse_omitted(&out),
+            total - CONTRACT_HEAD - CONTRACT_TAIL,
+            "省略数自洽"
+        );
+    }
+
+    #[test]
+    fn truncated_clone_caps_long_strings_and_keeps_error() {
+        let r = ToolResult {
+            tool_name: "t".into(),
+            success: true,
+            error: None,
+            data: serde_json::json!({"big": "x".repeat(50_000), "small": "ok"}),
+            metadata: None,
+            duration_ms: 1.0,
+        };
+        let d = truncated_clone(&r, &ToolOutputLimits::default());
+        let s = d.data["big"].as_str().unwrap();
+        assert!(s.contains("工具输出已截断"), "长字符串被截断");
+        assert_eq!(d.data["small"], "ok", "短字段不动");
+        assert_eq!(r.data["big"], "x".repeat(50_000), "原结果不受影响（全文留档）");
+    }
+
+    /// 数组嵌套分支：数组元素内的超长字符串同样截断、短元素不动、
+    /// 原结果不受影响（truncate_value_strings 的 Array 递归面）。
+    #[test]
+    fn truncated_clone_handles_nested_arrays() {
+        let long = "z".repeat(CONTRACT_MAX + 1);
+        let r = ToolResult {
+            tool_name: "t".into(),
+            success: true,
+            error: None,
+            data: serde_json::json!({"items": [long, "ok"]}),
+            metadata: None,
+            duration_ms: 1.0,
+        };
+        let d = truncated_clone(&r, &ToolOutputLimits::default());
+        let item0 = d.data["items"][0].as_str().unwrap();
+        assert!(item0.contains("工具输出已截断"), "数组内长字符串被截断");
+        assert_eq!(d.data["items"][1], "ok", "数组内短元素不动");
+        assert_eq!(
+            r.data["items"][0].as_str().unwrap().len(),
+            CONTRACT_MAX + 1,
+            "原结果不受影响"
+        );
     }
 }

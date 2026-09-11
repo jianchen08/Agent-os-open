@@ -63,6 +63,7 @@ class TestFeishuOutputAdapter:
             "ended": True,
         }
         await adapter.send(state)
+        # FeishuStreamClient 是对外部飞书平台的边界：一条结果恰发一条消息（交互即契约）
         client.send_message.assert_called_once()
         call_args = client.send_message.call_args
         assert call_args[0][0] == "ou_test"
@@ -91,6 +92,7 @@ class TestFeishuOutputAdapter:
             "_channel_user_id": "ou_test",
         }
         await adapter.send(state)
+        # 错误信息必须送达用户（外部边界交互即契约）
         client.send_message.assert_called_once()
         assert "Something went wrong" in client.send_message.call_args[0][1]
 
@@ -131,6 +133,7 @@ class TestFeishuAdapter:
         adapter.stream_client.connect = AsyncMock()
         adapter.stream_client.start_receive_loop = AsyncMock()
         await adapter.start()
+        # start 的对外行为就是与平台建立一次连接（外部边界交互即契约）
         adapter.stream_client.connect.assert_called_once()
 
     @pytest.mark.asyncio
@@ -139,6 +142,7 @@ class TestFeishuAdapter:
         adapter = FeishuAdapter(app_id="test_id", app_secret="test_secret")
         adapter.stream_client.disconnect = AsyncMock()
         await adapter.stop()
+        # stop 的对外行为就是断开与平台的连接（外部边界交互即契约）
         adapter.stream_client.disconnect.assert_called_once()
 
     def test_channel_type(self) -> None:

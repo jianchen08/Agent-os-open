@@ -1,0 +1,39 @@
+# MCP Bridge 网关配置（通用 MCP-over-HTTP 网关：认证/白名单/审计/会话管理）
+#
+# 上游在 upstreams 下声明（每上游 = stdio 启动命令 + 工具白名单 + 域名策略），
+# 新增上游改配置即可，不改网关代码。浏览器 MCP（@playwright/mcp）是第一个上游。
+#
+# token：进程环境变量 AGENTOS_BRIDGE_TOKEN（auth.token_env 可改名）。
+# 未配置时网关拒绝一切调用（fail-closed）。
+
+bind: 0.0.0.0
+port: 8765
+
+auth:
+  token_env: AGENTOS_BRIDGE_TOKEN
+
+# 审计 JSONL 目录（空字符串关闭）。文件：logs/mcp-bridge/audit-YYYYMMDD.jsonl
+audit_dir: logs/mcp-bridge
+
+# 会话空闲回收（秒）：(上游, 会话) 无调用超此阈值后整树杀上游进程。
+session_idle_timeout_secs: 300
+
+upstreams:
+  browser:
+    # @playwright/mcp：headless 一次性浏览器实例（每会话独立，无登录态）。
+    command: npx
+    args: ["-y", "@playwright/mcp", "--headless"]
+    # 工具白名单：仅放行声明的浏览器工具。
+    tools:
+      - browser_navigate
+      - browser_snapshot
+      - browser_click
+      - browser_type
+      - browser_take_screenshot
+      - browser_console_messages
+    max_args_bytes: 262144
+    domain_policy:
+      url_arg_names: ["url"]
+      blocked_domains: []
+      allowed_domains: null # null = 不设白名单，黑名单+私网拦截兜底
+      allow_private_addresses: false

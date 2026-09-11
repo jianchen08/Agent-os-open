@@ -14,6 +14,15 @@
 #   - pg0-embedded 0.15.1（[embedded-db] extra，零外部 PostgreSQL）
 #
 # 重建：uv venv .venv-hindsight --python 3.12 && uv pip install -r requirements.txt
+#       && uv pip uninstall claude-agent-sdk -p .venv-hindsight/Scripts/python.exe
 # （其余传递依赖由 resolver 自由解析，与原 venv 的逐包对照记录见迁移方案 §十二）
+#
+# claude-agent-sdk 剪除（2026-09-07，-240MB）：它是 hindsight-api 的传递依赖，但
+# _bundled/claude.exe（Claude Code CLI）仅 claude_code LLM provider 使用；本部署
+# provider=openai 直连智谱兼容端点（server.py 注入 HINDSIGHT_API_LLM_PROVIDER），
+# 该包全为惰性导入、卸载后 hindsight_api.main 启动链导入已冒烟验证。重建后必须
+# 重跑剪除步，否则上游依赖解析会装回 240MB 的 claude.exe。
+# litellm 不可同法剪除：main→api/http.py:177（模块级）→engine/providers/__init__
+# （顶层）→litellm_llm.py:23（顶层）为启动必经导入链，卸载即启动崩。
 hindsight-api-slim[embedded-db]==0.9.1
 fastmcp==3.4.7

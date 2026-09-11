@@ -13,7 +13,7 @@ description: '端到端验证+修复编排者。在所有执行任务完成后�
 agent_type: orchestrator
 category: task
 level: L2
-model_tier: large
+model_tier: medium
 system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}

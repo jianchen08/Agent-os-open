@@ -12,11 +12,27 @@
  * - 上下文用量指示器允许收缩（min-w-0，内部截断）
  */
 
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ChatInput } from '../ChatInput'
+const getModelsMock = vi.fn()
+vi.mock('@/services/api/config', () => ({
+  getModels: (...args: unknown[]) => getModelsMock(...args),
+}))
+// 本文件用例只走 staticModel 展示路径：模型注册表/states 两个数据源保持挂起，
+// 避免测试结束后异步 resolve 触发 act() 告警噪声
+getModelsMock.mockImplementation(() => new Promise(() => {}))
+const fetchStatesMock = vi.fn()
+vi.mock('@/services/api/pipelines', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/api/pipelines')>()),
+  fetchPipelineStates: (...args: unknown[]) => fetchStatesMock(...args),
+}))
+// 本文件用例只走 staticModel 展示路径：states 查询保持挂起，避免测试结束后
+// 异步 resolve 触发 act() 告警噪声
+fetchStatesMock.mockImplementation(() => new Promise(() => {}))
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { renderWithProviders as render } from '@/test/renderWithProviders'
+import { ChatInput } from '../ChatInput'
 
 vi.mock('@/hooks/useModelCapabilities', () => ({
   useModelCapabilities: () => ({
@@ -104,8 +120,6 @@ function renderInput() {
       enableFileUpload
       enableDragDrop
       modelName="deepseek-v3"
-      currentTokenUsage={4000}
-      maxTokens={10000}
       enableThinkingMode
     />,
   )

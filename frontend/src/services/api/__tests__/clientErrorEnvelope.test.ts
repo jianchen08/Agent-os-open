@@ -3,8 +3,8 @@
  * API 客户端内核错误信封解析测试（2026-08-22 错误透传收口）
  *
  * 内核统一信封 {error: {code, message}}（kernel/crates/http/src/error.rs）：
- * 拦截器此前不解析 error.code 字段、message 落 axios 通用文本；
- * 本次改为对象形态优先提取业务文案 + 信封 code 优先。
+ * 拦截器按对象形态优先提取业务文案 + 信封 code 优先（不解析信封时 message
+ * 会落 axios 通用文本、code 丢失）。
  *
  * 测试方式：mock axios.create 捕获 response 拦截器的 error handler，
  * 手动构造带信封/不带信封的错误，断言 reportError 收到的 message/code。
@@ -147,5 +147,24 @@ describe('client.ts 内核错误信封 {error:{code,message}} 解析（2026-08-2
     const [message, options] = reportErrorMock.mock.calls[0] as [string, { code?: string }]
     expect(message).toBe('校验失败')
     expect(options.code).toBe('422')
+  })
+
+  it('reject 的必须是 Error 实例，message 携带信封业务文案（2026-09-10 登录页只显示「登录失败」回归）', async () => {
+    const handler = getResponseErrorHandler()
+    const rejected = await handler(
+      makeError(400, '/api/v1/auth/login', {
+        error: { code: 'BAD_REQUEST', message: '用户名或密码错误' },
+      }),
+    ).then(
+      () => {
+        throw new Error('应当 reject')
+      },
+      (e: unknown) => e,
+    )
+    // 全仓消费方惯用 `error instanceof Error ? error.message : 兜底文案`，
+    // 普通对象会退化成兜底文案（具体原因只进控制台不上 UI）
+    expect(rejected).toBeInstanceOf(Error)
+    expect((rejected as Error).message).toBe('用户名或密码错误')
+    expect((rejected as { code?: string }).code).toBe('BAD_REQUEST')
   })
 })

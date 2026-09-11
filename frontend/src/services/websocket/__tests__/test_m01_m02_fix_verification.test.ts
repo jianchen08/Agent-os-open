@@ -11,7 +11,6 @@
  * 模拟"后端发事件 → 前端 handler 处理 → 用户看到通知/消息变化"的真实链路。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 // ── 用 vi.hoisted 定义所有 mock 函数，确保 vi.mock 工厂能安全引用 ──
 const mocks = vi.hoisted(() => {
   const pipelineMethods = {
@@ -28,7 +27,7 @@ const mocks = vi.hoisted(() => {
     activePipelineId: null as string | null,
     // handleStreamEnd → pipelineRegistryStore.applyStreamStatus 反查归属会话时读取：
     // 新管道不在 registry.runs 中时用 pipelineSessionMap / pipelines 反查（F3 修复：
-    // 此前缺这两个字段，applyStreamStatus 内 pipelineSessionMap[pipelineId] 抛 TypeError）
+    // 缺这两个字段时 applyStreamStatus 内 pipelineSessionMap[pipelineId] 会抛 TypeError）
     pipelineSessionMap: {} as Record<string, string>,
     pipelines: {} as Record<string, { sessionId?: string }>,
   }
@@ -40,7 +39,6 @@ const mocks = vi.hoisted(() => {
     applyStreamStatus: vi.fn(),
   }
 })
-
 // ── Mock 所有 handler 依赖的 store / logger ──
 vi.mock('@/stores/pipelineMessageStore', () => ({
   usePipelineMessageStore: { getState: () => mocks.pipelineMethods },
@@ -69,7 +67,6 @@ vi.mock('@/stores/pipelineRegistryStore', () => ({
     getState: () => ({ applyStreamStatus: mocks.applyStreamStatus }),
   },
 }))
-
 // ── 导入被测 handler（真实 router.ts / utils.ts，依赖已被 mock）──
 import { handleStreamEnd, handlePipelineRoundFinished } from '../streaming/handlers'
 

@@ -1,0 +1,114 @@
+{
+  "id": "eval_probe",
+  "name": "Eval Probe Tools",
+  "description": "评测探针工具（故意失败 case 载体：超时/参数错，评测任务专用）",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "eval_sleep",
+        "description": "评测探针：睡眠指定秒数后返回。本工具声明 5 秒超时（timeout_ms），请求睡眠超过 5 秒必然触发内核 CAPABILITY_TIMEOUT——用于评测「工具超时」失败 case 的错误传播与自愈链路，非评测场景请勿调用。",
+        "render": {
+          "card": "form",
+          "title": "评测探针·睡眠"
+        },
+        "timeout_ms": 5000,
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "seconds"
+          ],
+          "properties": {
+            "seconds": {
+              "type": "number",
+              "description": "睡眠秒数（0-3600）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "slept_seconds"
+          ],
+          "properties": {
+            "slept_seconds": {
+              "type": "number",
+              "description": "实际睡眠秒数"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "eval_echo",
+        "description": "评测探针：回显注册邮箱。query 必须是 <name>@eval-probe.local 邮箱形态，否则拒绝（valid=false 并提示格式）——用于评测「参数错」失败 case 的错误反馈与自愈重试链路。",
+        "render": {
+          "card": "form",
+          "title": "评测探针·回显"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "query"
+          ],
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "待回显的注册邮箱（必须 <name>@eval-probe.local 形态）",
+              "minLength": 1
+            },
+            "uppercase": {
+              "type": "boolean",
+              "description": "回显是否转大写，默认 false"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "echo",
+            "valid"
+          ],
+          "properties": {
+            "echo": {
+              "type": "string"
+            },
+            "valid": {
+              "type": "boolean",
+              "description": "query 是否通过格式校验"
+            },
+            "message": {
+              "type": "string",
+              "description": "校验失败时的格式提示"
+            }
+          }
+        }
+      },
+      {
+        "name": "eval_broken",
+        "description": "评测探针：无条件失败的死循环熔断验收工具（治理方案 D2）——任何调用都抛错，供验收失败熔断在连败阈值处终止管道。非评测场景请勿调用。",
+        "render": {
+          "card": "form",
+          "title": "评测探针·必失败"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "host_group": "light"
+}

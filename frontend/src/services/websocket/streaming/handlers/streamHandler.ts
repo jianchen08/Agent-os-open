@@ -9,9 +9,7 @@ import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessa
 import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { loggers } from '@/utils/logger'
-
 import { isPipelineRelevant, resolvePipelineId } from '../router'
-
 import { clearBlockStateForMessage, flushBlockBuffers } from './blockHandler'
 import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
 
@@ -277,8 +275,8 @@ export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确
 /** 处理 run 级收尾事件（pipeline_round_finished）——生成态的唯一成功终止信号。
  *
  * 引擎逐轮发射 stream_end（一轮 = 一条消息），轮收尾不代表整次执行结束：
- * 多轮执行的工具轮间曾在此误判，导致执行中发送分支失效（乐观气泡与待发
- * 队列同屏互斥破坏）。stream_end 只收尾当轮消息；终止生成态改由本事件承载，
+ * stream_end 只收尾当轮消息，不得据此终止生成态——工具轮间误终止会让执行中
+ * 发送分支失效（乐观气泡与待发队列同屏互斥破坏）。终止生成态由本事件承载，
  * 失败路径 stream_error 已先行终止（此处再终止幂等）。
  */
 export function handlePipelineRoundFinished(eventData: any) {

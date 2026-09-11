@@ -2,8 +2,8 @@
  * 流式事件路由解析
  */
 
-import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 
 /**
  * 解析事件的 pipeline_id

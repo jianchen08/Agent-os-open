@@ -7,11 +7,10 @@
  * 自身只保留 createRootTask 提交派生（project_id 可选挂靠，任务必选执行 Agent）。
  */
 import { render } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
-
-import { CreateTaskFormModal } from '../CreateTaskFormModal'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createProject, createRootTask } from '@/services/api/tasks'
+import { CreateTaskFormModal } from '../CreateTaskFormModal'
 
 vi.mock('@/services/api/tasks', () => ({
   createProject: vi.fn(),

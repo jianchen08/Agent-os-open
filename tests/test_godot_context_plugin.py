@@ -315,7 +315,8 @@ def _decode_http(resp: dict) -> dict:
     return json.loads(base64.b64decode(resp["data"]["body"]).decode("utf-8"))
 
 
-def _http(method: str, path: str, raw_body: str = "", query: dict | None = None) -> dict:
+def _http(method: str, path: str, raw_body: str = "", query: dict | None = None,
+          headers: dict | None = None) -> dict:
     kw: dict[str, object] = {
         "path": path,
         "method": method,
@@ -324,11 +325,13 @@ def _http(method: str, path: str, raw_body: str = "", query: dict | None = None)
     }
     if query is not None:
         kw["query"] = query
+    if headers is not None:
+        kw["headers"] = headers
     return asyncio.run(server_mod.http_handle(**kw))
 
 
 def test_http_push_base64_body_accepted():
-    """内核真机形态（raw_body=base64(JSON)）的选中推送被接受，快照可见——回归：曾直接 json.loads(base64 串) 恒 400。"""
+    """内核真机形态（raw_body=base64(JSON)）的选中推送被接受，快照可见——推送体按 base64(JSON) 解码，按裸 JSON 文本解析会 400。"""
     server_mod.set_emitter(None)
     _fresh_instance()
 
@@ -484,3 +487,49 @@ def test_http_delete_clears_selection():
     # 同签名心跳不恢复（抑制生效，经 http 层全链路）
     _http("POST", _PUSH_PATH, raw_body=_b64_body({**_selection_payload(), "type": "heartbeat"}))
     assert _decode_http(_http("GET", _PUSH_PATH))["items"] == []
+
+
+# ── S4：共享密钥门控（GODOT_CONTEXT_SHARED_SECRET 设置后匿名推送 403）──
+
+
+def test_http_push_with_secret_required_missing_header_forbidden(monkeypatch):
+    """设置共享密钥后，无 X-Godot-Secret 头的匿名推送必须 403（选中内容会
+    并入下一条用户消息进 LLM 上下文，匿名伪造 = 提示词注入原语）。"""
+    monkeypatch.setenv("GODOT_CONTEXT_SHARED_SECRET", "s3cret")
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    resp = _http("POST", _PUSH_PATH, raw_body=_b64_body(_selection_payload()))
+    assert resp["data"]["status"] == 403
+    assert _decode_http(_http("GET", _PUSH_PATH))["items"] == [], "被拒推送不得进快照"
+
+
+def test_http_push_with_secret_wrong_and_correct_header(monkeypatch):
+    monkeypatch.setenv("GODOT_CONTEXT_SHARED_SECRET", "s3cret")
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    wrong = _http(
+        "POST", _PUSH_PATH,
+        raw_body=_b64_body(_selection_payload()),
+        headers={"X-Godot-Secret": "nope"},
+    )
+    assert wrong["data"]["status"] == 403
+
+    ok = _http(
+        "POST", _PUSH_PATH,
+        raw_body=_b64_body(_selection_payload()),
+        headers={"x-godot-secret": "s3cret"},
+    )
+    assert ok["data"]["status"] == 200
+    assert _decode_http(_http("GET", _PUSH_PATH))["items"][0]["name"] == "Player"
+
+
+def test_http_push_without_secret_env_unchanged(monkeypatch):
+    """未设置环境变量 = 既有豁免形态（ADR 2026-09-11），行为零变化。"""
+    monkeypatch.delenv("GODOT_CONTEXT_SHARED_SECRET", raising=False)
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    resp = _http("POST", _PUSH_PATH, raw_body=_b64_body(_selection_payload()))
+    assert resp["data"]["status"] == 200

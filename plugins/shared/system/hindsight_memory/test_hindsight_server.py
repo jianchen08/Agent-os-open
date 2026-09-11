@@ -51,7 +51,8 @@ def _load_module() -> Any:
     mod_name = "hindsight_memory_server_test"
     plugin_path = _PLUGIN_DIR / "server.py"
     spec = importlib.util.spec_from_file_location(mod_name, plugin_path)
-    assert spec is not None and spec.loader is not None, "Cannot load server.py"
+    assert spec is not None, "Cannot load server.py"
+    assert spec.loader is not None, "Cannot load server.py"
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -115,7 +116,8 @@ class TestPluginManifest:
         assert data["host_type"] == "sidecar"
         # invoke 入口（entry 字段，python server.py 形式）
         entry = data.get("entry") or data.get("invoke", {}).get("entry")
-        assert entry and "server.py" in entry, "entry must reference server.py"
+        assert entry, "entry must reference server.py"
+        assert "server.py" in entry, "entry must reference server.py"
 
         # capabilities.services 至少声明 5 个服务方法（D.6 槽位拆分）
         tool_names = [t["name"] for t in data.get("capabilities", {}).get("services", [])]
@@ -1095,6 +1097,11 @@ def test_http_kb_upload_dispatch_multipart():
         assert payload["message"] == "文件上传成功"
         assert payload["chunks_imported"] >= 1
         assert client.aretain.call_count == payload["chunks_imported"]
+        # 源文件与元数据同根（set_data_dir 一次覆盖语义；夹具不泄真实 data/）
+        saved = kb._load_meta()
+        source_file = Path(saved["items"][0]["source_file"])
+        assert source_file.is_relative_to(Path(kb._KB_DATA_DIR))
+        assert source_file.exists()
     finally:
         srv._client = None
         kb.set_client(None)

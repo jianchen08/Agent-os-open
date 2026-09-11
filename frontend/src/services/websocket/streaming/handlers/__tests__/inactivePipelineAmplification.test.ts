@@ -14,7 +14,7 @@
  * 关注判据（待实现）：
  *  - 是当前 activePipelineId
  *  - 在 agentTabStore.tabs 里有对应 tab（用户打开了标签页）
- *  - 已在 pipelineStore.pipelines 注册（用户曾交互）
+ *  - 已在 pipelineStore.pipelines 注册（用户交互过）
  *
  * 判据：
  *  - 不过滤时 store 写入 ≈ 事件数（每个 chunk 都写）

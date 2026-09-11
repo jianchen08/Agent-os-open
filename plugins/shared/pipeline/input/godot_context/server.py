@@ -9,16 +9,18 @@
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
-import sys
 
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _this_dir)
-_shared_dir = os.path.join(_this_dir, "..", "..", "..")
-sys.path.insert(0, _shared_dir)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
+bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
+
+from http_json import (  # noqa: E402
+    decode_body as _decode_body_common,
+    json_response as _json_response_body,
+    ok as _ok,
+)
 from plugin import GodotContextPlugin, set_emitter  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin, FrontendEmitter  # noqa: E402
@@ -89,44 +91,19 @@ async def execute(state: dict, config: dict | None = None) -> dict:
 
 
 def _json_response(payload: dict, status: int = 200) -> dict:
-    """内核期望的 HttpHandleResponse：body 须 base64（dispatcher 无条件解码）。"""
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    return {
-        "success": True,
-        "data": {
-            "status": status,
-            "headers": {"Content-Type": "application/json; charset=utf-8"},
-            "body": base64.b64encode(body).decode("ascii"),
-            "body_encoding": "base64",
-        },
-    }
+    """本插件响应直接带 ToolExecutionResult 信封（ok 包 HttpHandleResponse，
+    body base64——公共 json_response 产物再包一层 success/data）。"""
+    return _ok(_json_response_body(payload, status))
 
 
 def _decode_body(raw_body: str) -> dict:
     """解码 http.handle 的 raw_body（内核 dispatcher 恒 base64 编码；兼容明文）为 dict。
 
-    解码探测：先按 base64 试解，解出内容以 { / [ 开头才判定为编码体，
-    否则原样当作明文 JSON——base64.alphabet 之外的明文（含空白）必然在
-    这里落入 pass 分支，属正常路径而非吞错。非法 JSON 最终由下方
-    json.loads 转 ValueError（调用方转 400）。
+    解码探测与非法 JSON 处置走公共 decode_body；strict_object=True：顶层非
+    object（数组/标量）显式抛 ValueError（调用方转 400），比公共默认（归一
+    空体走缺参路径）更严——本面端点均为单对象 body 契约。
     """
-    if not raw_body:
-        return {}
-    decoded = raw_body
-    try:
-        attempt = base64.b64decode(raw_body).decode("utf-8")
-        if attempt.lstrip().startswith(("{", "[")):
-            decoded = attempt
-    except (ValueError, UnicodeDecodeError):
-        # 非 base64 载荷（明文直传的调用方）→ 保持原文交给 json.loads 判定
-        pass
-    try:
-        parsed = json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON body: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("JSON body must be an object")
-    return parsed
+    return _decode_body_common(raw_body, strict_object=True)
 
 
 async def _fetch_preview(index: int) -> bytes | None:
@@ -186,6 +163,20 @@ async def http_handle(
             payload = _decode_body(raw_body)
         except ValueError:
             return _json_response({"error": "invalid json"}, status=400)
+        # 共享密钥校验（S4，ADR 2026-09-11 豁免的匿名写面的补偿控制）：
+        # 设置 GODOT_CONTEXT_SHARED_SECRET 后，推送必须携带
+        # X-Godot-Secret 头（Godot 宿主插件侧同步配置）；未设置该环境变量时
+        # 行为不变（编辑器无法携带 token 的既有豁免形态）。匿名伪造选中内容
+        # 即注入下一条用户消息进 LLM 上下文，部署暴露内核端口时必须启用。
+        secret = os.environ.get("GODOT_CONTEXT_SHARED_SECRET", "")
+        if secret:
+            supplied = ""
+            for k, v in (headers or {}).items():
+                if isinstance(k, str) and k.lower() == "x-godot-secret":
+                    supplied = str(v)
+                    break
+            if supplied != secret:
+                return _json_response({"error": "forbidden"}, status=403)
         result = await inst.handle_push(payload)
         return _json_response(result)
 

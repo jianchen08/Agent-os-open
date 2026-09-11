@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-
+import { apiClient } from '@/services/api/client'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 
 // 皮肤合并 css / hooks 走插件通道拉取——mock 网络层，返回值由用例控制
@@ -24,7 +24,6 @@ import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 vi.mock('@/services/api/client', () => ({
   apiClient: { get: vi.fn() },
 }))
-import { apiClient } from '@/services/api/client'
 const fetchMock = apiClient.get as unknown as ReturnType<typeof vi.fn>
 
 const MIKU_THEME = {

@@ -287,6 +287,7 @@ class TestLogSecurity:
 
     @_NEEDS_BASH
     @pytest.mark.asyncio
+    @pytest.mark.timing
     async def test_input_masked_in_log(self, bash_server_module, bash_handler):
         """发送给进程的敏感输入（含 password）在日志中被掩码。"""
         tool = bash_server_module._get_tool()

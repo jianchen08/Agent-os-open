@@ -18,14 +18,14 @@
  */
 
 import { useEffect, useMemo } from 'react'
-import { cn } from '@/lib/utils'
 import { EventWatchBox } from '@/components/schema/EventWatchBox'
 import { RefreshBox, type RefreshDecl } from '@/components/schema/RefreshBox'
+import { cn } from '@/lib/utils'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { resolveDeclaredWidgets } from '@/services/schema/widgetChain'
 import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
-import type { WidgetComponent } from '@/services/schema/WidgetRegistry'
 import type { FormEventWatch } from '@/services/schema/formEventBus'
+import type { WidgetComponent } from '@/services/schema/WidgetRegistry'
 import type { ReactNode } from 'react'
 
 export interface DeclaredWidgetLayerProps {

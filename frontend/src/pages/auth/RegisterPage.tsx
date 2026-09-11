@@ -45,7 +45,6 @@ export function RegisterPage() {
     }
   }, [isAuthenticated, navigate])
 
-  // 清除错误
   useEffect(() => {
     return () => {
       clearError()
@@ -60,6 +59,11 @@ export function RegisterPage() {
       case 'username':
         if (!username.trim()) return '用户名不能为空'
         if (username.length < 3) return '用户名至少3个字符'
+        // 与后端注册白名单对齐（agentos_http::auth is_valid_username）：
+        // username 进入 `:` 分隔的 token 载荷，越界字符会导致账户会话异常
+        if (username.length > 64 || !/^[a-zA-Z0-9._@-]+$/.test(username)) {
+          return '用户名仅支持字母、数字、下划线、点、连字符和 @，不超过64个字符'
+        }
         return undefined
       case 'email':
         if (!email.trim()) return '邮箱不能为空'

@@ -55,6 +55,14 @@ pub enum ApiError {
     #[error("unprocessable entity: {message}")]
     UnprocessableEntity { message: String },
 
+    /// 429 Too Many Requests——限流拒绝（登录失败滑动窗口 / 注册限频）。
+    /// `retry_after_secs` 写入 Retry-After 响应头，调用方据此退避。
+    #[error("too many requests: {message}")]
+    TooManyRequests {
+        message: String,
+        retry_after_secs: u64,
+    },
+
     #[error("internal error: {message}")]
     Internal { message: String },
 
@@ -76,6 +84,7 @@ impl ApiError {
             ApiError::NotFound { .. } => "RESOURCE_NOT_FOUND",
             ApiError::Conflict { .. } => "CONFLICT",
             ApiError::UnprocessableEntity { .. } => "UNPROCESSABLE_ENTITY",
+            ApiError::TooManyRequests { .. } => "TOO_MANY_REQUESTS",
             ApiError::Internal { .. } => "INTERNAL_ERROR",
             ApiError::ServiceUnavailable { .. } => "SERVICE_UNAVAILABLE",
             ApiError::WebSocket { .. } => "WEBSOCKET_ERROR",
@@ -90,7 +99,9 @@ impl ApiError {
     pub fn retryable(&self) -> bool {
         matches!(
             self,
-            ApiError::Internal { .. } | ApiError::ServiceUnavailable { .. }
+            ApiError::Internal { .. }
+                | ApiError::ServiceUnavailable { .. }
+                | ApiError::TooManyRequests { .. }
         )
     }
 
@@ -102,6 +113,7 @@ impl ApiError {
             | ApiError::NotFound { message }
             | ApiError::Conflict { message }
             | ApiError::UnprocessableEntity { message }
+            | ApiError::TooManyRequests { message, .. }
             | ApiError::Internal { message }
             | ApiError::ServiceUnavailable { message }
             | ApiError::WebSocket { message } => message,
@@ -111,6 +123,8 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        use axum::http::header;
+
         let status = match &self {
             ApiError::BadRequest { .. } => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
@@ -118,10 +132,22 @@ impl IntoResponse for ApiError {
             ApiError::NotFound { .. } => StatusCode::NOT_FOUND,
             ApiError::Conflict { .. } => StatusCode::CONFLICT,
             ApiError::UnprocessableEntity { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::WebSocket { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
+
+        let mut response_headers: Vec<(header::HeaderName, String)> = Vec::new();
+        if let ApiError::TooManyRequests {
+            retry_after_secs, ..
+        } = &self
+        {
+            response_headers.push((
+                header::HeaderName::from_static("retry-after"),
+                retry_after_secs.to_string(),
+            ));
+        }
 
         // 内部错误细节（IO 报错含路径、底层库错误串等）原文透传不脱敏，
         // 同时完整保留在服务端 tracing（target: "api-error"）供定位。
@@ -145,6 +171,12 @@ impl IntoResponse for ApiError {
             }
         }));
 
-        (status, body).into_response()
+        let mut response = (status, body).into_response();
+        for (name, value) in response_headers {
+            if let Ok(v) = axum::http::HeaderValue::from_str(&value) {
+                response.headers_mut().insert(name, v);
+            }
+        }
+        response
     }
 }

@@ -19,17 +19,16 @@ import { StatusBadge } from '@/components/shared/StatusBadge'
 import { getAgents } from '@/services/api/agents'
 import type { AgentResponse } from '@/services/api/agents'
 
-/** agent_type → 中文标签 */
-const AGENT_TYPE_LABELS: Record<string, string> = {
-  main: '主控',
-  sub: '子代理',
-  atomic: '原子',
+/** 页面 props：页声明（contributes.pages /agents）随页签下发 */
+export interface AgentManagerPageProps {
+  /** agent_type → 展示标签（agent_manager 页声明 props，前端零域词表） */
+  typeLabels?: Record<string, string>
 }
 
 /**
  * Agent 管理页面组件（agent_manager 插件页面承载）
  */
-export function AgentManagerPage() {
+export function AgentManagerPage({ typeLabels }: AgentManagerPageProps = {}) {
   const [agents, setAgents] = useState<AgentResponse[]>([])
   const [total, setTotal] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
@@ -99,14 +98,16 @@ export function AgentManagerPage() {
         />
       )}
 
-      {/* Agent 卡片列表 */}
+      {/* Agent 卡片列表（容器查询：工作区面板宽度驱动列数。视口断点在分栏
+          布局下会强推 3 列——~510px 面板每卡仅 ~150px，标题截断成单字） */}
       {!isLoading && !error && agents.length > 0 && (
-        <div
-          className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3"
-          role="list"
-          aria-live="polite"
-          aria-label="智能体列表"
-        >
+        <div className="@container">
+          <div
+            className="grid grid-cols-1 gap-4 @2xl:grid-cols-2 @5xl:grid-cols-3"
+            role="list"
+            aria-live="polite"
+            aria-label="智能体列表"
+          >
           {agents.map((agent) => (
             <div
               key={agent.id}
@@ -137,7 +138,7 @@ export function AgentManagerPage() {
               </p>
               <div className="flex flex-wrap gap-1.5 text-xs">
                 <span className="bg-accent/30 rounded px-1.5 py-0.5">
-                  {AGENT_TYPE_LABELS[agent.agent_type] ?? agent.agent_type}
+                  {typeLabels?.[agent.agent_type] ?? agent.agent_type}
                 </span>
                 {agent.level && (
                   <span className="bg-accent/30 rounded px-1.5 py-0.5">{agent.level}</span>
@@ -198,6 +199,7 @@ export function AgentManagerPage() {
               )}
             </div>
           ))}
+          </div>
         </div>
       )}
 

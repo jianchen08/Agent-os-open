@@ -9,16 +9,12 @@
  * - removeAllPluginStyles / syncPluginStyles：以注册表为权威清理
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Mock } from 'vitest'
-
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiClient } from '@/services/api/client'
-
 // ── Mock 外部依赖 ──
 vi.mock('@/services/api/client', () => ({
   apiClient: { get: vi.fn() },
 }))
-
 import {
   sanitizeCss,
   scopeCss,
@@ -27,6 +23,7 @@ import {
   syncPluginStyles,
 } from '@/services/pluginStyles'
 import type { ClientStyleDeclaration } from '@/services/schema/ContributionRegistry'
+import type { Mock } from 'vitest'
 
 const apiGet = apiClient.get as unknown as Mock
 

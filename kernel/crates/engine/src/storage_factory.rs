@@ -30,7 +30,7 @@
 //!     sqlite:
 //!       path: agentos_kernel.db  # 相对项目根；":memory:" = 内存库
 //!   ```
-//! 3. 默认：sqlite + 项目根 `agentos_kernel.db`（与 driver 化之前行为逐位一致）。
+//! 3. 默认：sqlite + 项目根 `agentos_kernel.db`。
 //!
 //! 文件不存在 = 未配置（走默认）；文件存在但损坏（读失败/YAML 解析失败）=
 //! [`resolve_storage_config`] 返回 `Err` 拒绝启动——数据正确性优先，
@@ -87,13 +87,24 @@ struct SqliteSection {
 
 /// 归一存储配置：环境变量 > config/storage.yaml > 默认。
 ///
-/// `project_root` 用于相对 path 的基准与默认路径推导（config_root 的父目录，
-/// 与 driver 化之前的推导逻辑一致）。
+/// `project_root` 用于相对 path 的基准与默认路径推导（config_root 的父目录）。
+/// 相对 sqlite path（env 或 yaml）统一**锚定项目根**解析并绝对化——内核与
+/// Python 读侧（plugins/shared/kernel_db.py）同规则，两端 CWD 不同也读写同库；
+/// 绝对路径与 `:memory:` 原样保留。
 ///
 /// 文件不存在 = 未配置（走默认 sqlite）；文件存在但读取/YAML 解析失败 = `Err`
 /// （数据正确性优先：坏配置可能让读写落到错误 driver/路径，拒绝启动而非静默默认）。
 pub fn resolve_storage_config(config_root: &Path) -> Result<StorageConfig, StorageError> {
-    let project_root: PathBuf = config_root
+    // config_root 相对时先按进程 CWD 绝对化——project_root 必须是绝对基准，
+    // 相对 db path 锚定后才与 CWD 无关。
+    let config_root_abs = if config_root.is_absolute() {
+        config_root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(config_root))
+            .unwrap_or_else(|_| config_root.to_path_buf())
+    };
+    let project_root: PathBuf = config_root_abs
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -127,6 +138,7 @@ pub fn resolve_storage_config(config_root: &Path) -> Result<StorageConfig, Stora
 
     let sqlite_path = env_path
         .or(sqlite_section.path.filter(|s| !s.is_empty()))
+        .map(|p| anchor_db_path(&p, &project_root))
         .unwrap_or_else(|| {
             project_root
                 .join("agentos_kernel.db")
@@ -138,6 +150,26 @@ pub fn resolve_storage_config(config_root: &Path) -> Result<StorageConfig, Stora
         driver,
         sqlite_path,
     })
+}
+
+/// 相对 db path 锚定项目根解析（与 plugins/shared/kernel_db.py 同规则）：
+/// 绝对路径与 `:memory:` 别名原样保留；相对路径 join 项目根后绝对化。
+/// 双端（内核开库 / 插件读侧）同规则 ⇒ 两端 CWD 不同也指向同一物理库。
+fn anchor_db_path(path: &str, project_root: &Path) -> String {
+    let candidate = Path::new(path);
+    if path == ":memory:" || candidate.is_absolute() {
+        return path.to_string();
+    }
+    let anchored = project_root.join(candidate);
+    if anchored.is_absolute() {
+        anchored.to_string_lossy().to_string()
+    } else {
+        // project_root 本身相对（config_root 相对且 CWD 不可得）：按 CWD 兜底绝对化
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(anchored).to_string_lossy().to_string(),
+            Err(_) => anchored.to_string_lossy().to_string(),
+        }
+    }
 }
 
 /// 打开存储。
@@ -177,11 +209,16 @@ pub fn open_storage(cfg: &StorageConfig) -> Result<StorageHandles, StorageError>
 mod tests {
     use super::*;
 
+    /// 环境变量互斥锁：同二进制并行测试线程间 set/remove 与读取的竞态防护。
+    /// 所有读 `AGENTOS_DB_PATH` 的测试（直接或经 resolve_storage_config）持锁。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// 默认配置：无文件无环境变量 → sqlite + 项目根 agentos_kernel.db。
     #[test]
     fn resolve_defaults_to_sqlite_file() {
         // 环境变量在测试进程可能被其它用例设置——此处只断言 driver 默认逻辑
         // 在无 env 时的行为（CI 单测进程通常干净；本地有 env 时跳过断言）。
+        let _guard = ENV_LOCK.lock().unwrap();
         if std::env::var(ENV_STORAGE_DRIVER).is_ok() || std::env::var(ENV_DB_PATH).is_ok() {
             return;
         }
@@ -197,6 +234,7 @@ mod tests {
     /// 文件不存在（空 config 目录）→ Ok 且默认 sqlite。
     #[test]
     fn resolve_missing_file_is_ok_with_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
         if std::env::var(ENV_STORAGE_DRIVER).is_ok() || std::env::var(ENV_DB_PATH).is_ok() {
             return;
         }
@@ -284,5 +322,69 @@ storage:
         let msg = format!("{}", err);
         assert!(msg.contains("unknown storage driver"), "got: {msg}");
         assert!(msg.contains("postgres"), "留桩 driver 应点名: {msg}");
+    }
+
+    /// env 相对路径 → 锚定项目根解析并绝对化（与 Python 读侧 kernel_db.py
+    /// 同规则：两端 CWD 不同也指向同一物理库）。
+    #[test]
+    fn env_relative_db_path_anchors_to_project_root() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_root = dir.path().join("config");
+        std::fs::create_dir_all(&config_root).unwrap();
+        std::env::set_var(ENV_DB_PATH, "data/sub/rel.db");
+        let cfg = resolve_storage_config(&config_root).expect("resolve ok");
+        std::env::remove_var(ENV_DB_PATH);
+        assert_eq!(
+            Path::new(&cfg.sqlite_path),
+            dir.path().join("data/sub/rel.db")
+        );
+        assert!(Path::new(&cfg.sqlite_path).is_absolute(), "解析后绝对化");
+    }
+
+    /// yaml 相对路径 → 同样锚定项目根（env 未设置时）。
+    #[test]
+    fn yaml_relative_db_path_anchors_to_project_root() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(ENV_DB_PATH);
+        let dir = tempfile::tempdir().unwrap();
+        let config_root = dir.path().join("config");
+        std::fs::create_dir_all(&config_root).unwrap();
+        std::fs::write(
+            config_root.join(STORAGE_CONFIG_FILE),
+            "storage:\n  driver: sqlite\n  sqlite:\n    path: custom/rel.db\n",
+        )
+        .unwrap();
+        let cfg = resolve_storage_config(&config_root).expect("resolve ok");
+        assert_eq!(cfg.driver, "sqlite");
+        assert_eq!(
+            Path::new(&cfg.sqlite_path),
+            dir.path().join("custom/rel.db")
+        );
+    }
+
+    /// env 绝对路径原样保留（不重锚定）。
+    #[test]
+    fn env_absolute_db_path_passthrough() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_root = dir.path().join("config");
+        std::fs::create_dir_all(&config_root).unwrap();
+        let abs = dir.path().join("elsewhere.db");
+        std::env::set_var(ENV_DB_PATH, &abs);
+        let cfg = resolve_storage_config(&config_root).expect("resolve ok");
+        std::env::remove_var(ENV_DB_PATH);
+        assert_eq!(Path::new(&cfg.sqlite_path), abs);
+    }
+
+    /// env `:memory:` 别名原样保留（不参与锚定）。
+    #[test]
+    fn env_memory_alias_passthrough() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var(ENV_DB_PATH, ":memory:");
+        let cfg = resolve_storage_config(dir.path()).expect("resolve ok");
+        std::env::remove_var(ENV_DB_PATH);
+        assert_eq!(cfg.sqlite_path, ":memory:");
     }
 }

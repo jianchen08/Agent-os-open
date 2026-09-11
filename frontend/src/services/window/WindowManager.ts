@@ -20,9 +20,9 @@
  */
 
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import type { FloatingWindowInstance } from '@/types/layout'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import type { ElectronOpenWindowOptions } from '@/types/electron'
+import type { FloatingWindowInstance } from '@/types/layout'
 
 /** 浮窗基础 z-index（位于布局容器 z:50 之上，确保浮窗始终可见） */
 const FLOATING_BASE_Z = 1000

@@ -4,6 +4,7 @@
  * 统一的活动卡片组件，用于渲染工具调用、任务创建、任务阶段等所有活动
  */
 
+import { useEffect, useRef, useState } from 'react'
 import {
   Ban,
   Check,
@@ -21,17 +22,16 @@ import {
   Wrench,
   XCircle,
 } from '@/assets/icons'
-import { useEffect, useRef, useState } from 'react'
 import { TextDiffView } from '@/components/approval'
+import { FormWidget } from '@/components/schema/widgets/FormWidget'
 import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
 import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
-import { FormWidget } from '@/components/schema/widgets/FormWidget'
 import { DiffBlock, ReadBlock, SearchBlock, TerminalBlock, WebBlock } from '@/components/vendor/dsh'
 import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/types/activity'
-import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import { useConfirmDialog } from '@/utils/confirm'
+import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import type {
   ActivityAction,
   ActivityCardProps,

@@ -23,7 +23,6 @@ dispatcher 调度的标准插件 HTTP 面模式，与 agent_manager/task_form �
 """
 from __future__ import annotations
 
-import base64
 import logging
 import os
 import sys
@@ -43,6 +42,7 @@ from http_json import (  # noqa: E402
     json_response as _json_response,
     ok as _ok,
 )
+from kernel_token import decode_kernel_token as _decode_kernel_token  # noqa: E402
 from task_birth import TaskBirthError  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -189,29 +189,8 @@ def _pydantic_to_dict(obj: Any) -> Any:
 
 
 # ════════════════════════════════════════════════════════════
-# caller 身份解析（内核 0.2 开发期 token）
+# caller 身份解析（内核 0.2 开发期 token；解码公共实现在 kernel_token）
 # ════════════════════════════════════════════════════════════
-
-
-def _decode_kernel_token(token: str) -> tuple[str, str, int] | None:
-    """解码内核 0.2 开发期 token（base64_nopad("access:{user_id}:{username}:{exp}")）。
-
-    与 kernel http/src/auth.rs decode_token 同构（agent_manager 同款实现）；
-    无效/过期返回 None。
-    """
-    try:
-        padded = token.strip() + "=" * (-len(token.strip()) % 4)
-        payload = base64.b64decode(padded, validate=False).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        return None
-    parts = payload.split(":", 3)
-    if len(parts) != 4:
-        return None
-    try:
-        exp = int(parts[3])
-    except ValueError:
-        return None
-    return parts[1], parts[2], exp
 
 
 def _resolve_caller(headers: dict[str, str] | None) -> dict[str, Any]:
@@ -297,20 +276,38 @@ def _task_to_response(t: dict[str, Any]) -> TaskResponse:
 # 能力访问（测试可 monkeypatch）
 # ════════════════════════════════════════════════════════════
 
+# 正门注入的本插件 AgentOSPlugin 实例（server.py 顶层接线）。合宿模式下
+# __main__ 是 host.py、无 plugin 全局，独占路径失效——注入路径为主通道。
+_plugin_instance: Any = None
+
+
+def set_plugin_instance(instance: Any | None) -> None:
+    """注入本插件 AgentOSPlugin 实例；传 None 清除（回到独占探测路径）。"""
+    global _plugin_instance  # noqa: PLW0603
+    _plugin_instance = instance
+
 
 def _capability(name: str) -> Any:
-    """取内核能力句柄（走 __main__ 的 AgentOSPlugin 实例；未注入时抛 KeyError）。
+    """取内核能力句柄（正门注入实例优先，独占 ``__main__.plugin`` 兜底）。
 
-    本插件由 ``python server.py`` 启动，SDK 注入 capabilities 的实例是
-    ``__main__.plugin``；``import server`` 会重新执行 server.py 顶层并新建
-    第二个空 AgentOSPlugin（capabilities 永远为空），故直接取 ``__main__``。
+    独占模式下本插件由 ``python server.py`` 启动，SDK 注入 capabilities 的
+    实例是 ``__main__.plugin``；``import server`` 会重新执行 server.py 顶层
+    并新建第二个空 AgentOSPlugin（capabilities 永远为空），故独占路径直接
+    取 ``__main__``。合宿模式下 ``__main__`` 是 host.py（无 plugin 全局），
+    由 server.py 顶层经 :func:`set_plugin_instance` 正门注入成员实例。
     测试可 monkeypatch 本函数（test_tasks_plugin 既有做法）。
     """
-    try:
-        import __main__  # noqa: PLC0415
+    instance: Any = _plugin_instance
+    if instance is None:
+        try:
+            import __main__  # noqa: PLC0415
 
-        return __main__.plugin.get_capability(name)  # type: ignore[attr-defined]
-    except Exception as exc:  # noqa: BLE001
+            instance = __main__.plugin  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — 路径失效统一报未注入
+            raise KeyError(f"capability not injected: {name}") from exc
+    try:
+        return instance.get_capability(name)
+    except Exception as exc:  # noqa: BLE001 — 保持既有 KeyError 契约
         raise KeyError(f"capability not injected: {name}") from exc
 
 
@@ -328,12 +325,50 @@ async def _suspend_task_pipeline(task_id: str) -> bool:
         return False
 
 
+async def _read_task_status(task_id: str) -> str | None:
+    """读任务管道的 task.status 投影（恢复链仲裁依据）。
+
+    读面故障（能力缺席/调用失败）→ None：仲裁降级放行（恢复链是主路径，
+    投影读失败不得拦死恢复；分歧场景由启动调和兜底）。
+    """
+    try:
+        handle = _capability("pipeline-state")
+        rows = await handle.call("list", {})
+        if not isinstance(rows, list):
+            return None
+        row = next(
+            (
+                r
+                for r in rows
+                if isinstance(r, dict) and str(r.get("pipeline_id") or "") == task_id
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        return str(row.get("task.status") or "") or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[tasks http] 投影读面故障，恢复仲裁降级放行 | task_id=%s | err=%s", task_id, exc)
+        return None
+
+
 async def _resume_task_pipeline(task_id: str, user_id: str = "") -> bool:
-    """恢复任务 = resume_pipeline（内核按 run 状态簿记或拉起续跑轮）。"""
+    """恢复任务 = resume_pipeline（内核按 run 状态簿记或拉起续跑轮）。
+
+    携带终态键复位 overlay（B13①，defd5b555"恢复重置"同族）：恢复投影
+    （registry 快照/checkpoint/pipeline_state 表）可能残留上一 run 的
+    task.status 终态，stop_check 缓存路径会在续跑轮第一轮即收束。内核对
+    overlay 只做不透明透传并在恢复合并之后应用（显式派发指令 > 恢复基线）。
+    """
     try:
         handle = _capability("pipeline-executor")
         resp = await handle.call(
-            "resume_pipeline", {"pipeline_id": task_id, "user_id": user_id}
+            "resume_pipeline",
+            {
+                "pipeline_id": task_id,
+                "user_id": user_id,
+                "state_overlay": {"task.status": "running", "task_status": "running"},
+            },
         )
         return bool(resp and resp.get("run_id") is not None)
     except Exception as exc:  # noqa: BLE001
@@ -467,7 +502,7 @@ async def list_tasks(
 
 
 async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
-    """从管道 state 聚合组装任务字典（GAP-1 统一：task = pipeline）。
+    r"""从管道 state 聚合组装任务字典（GAP-1 统一：task = pipeline）。
 
     两类任务（语义区分）：
     - **task.owned.\<id\>.\***：提交者管道自持的任务（容器任务等"只登记不执行"，
@@ -555,7 +590,13 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
                     "parent_task_id": None,
                     "metadata": {
                         "session_id": _session_anchor(row),
-                        "submitted_by": str(fields.get("submitted_by") or ""),
+                        # 用户归属继承宿主行 task.submitted_by（get_task 归属闸
+                        # 按用户比对；owned.submitted_by 是系统登记标记如
+                        # review_system，非用户身份）
+                        "submitted_by": (
+                            str(row.get("task.submitted_by") or "")
+                            or str(fields.get("submitted_by") or "")
+                        ),
                         "workspace": str(fields.get("workspace") or ""),
                     },
                     "created_at": str(fields.get("created_at") or ""),
@@ -776,13 +817,48 @@ async def create_root_task(
     return _task_to_response({"id": task_id, "title": body.title, "status": "pending"})
 
 
+def _task_owner_id(row: dict[str, Any]) -> str:
+    """任务归属权威字段值（用户 id）：task.submitted_by。
+
+    task_submit 出生协议把提交者 user_id 一次写全进出生 state
+    （plugins/shared/task_birth.py，无降级路径）；登记型任务（task.owned.*）
+    的用户归属继承宿主行 task.submitted_by（owned.submitted_by 是系统登记
+    标记如 review_system，非用户身份），见 _list_tasks_from_state。
+    """
+    return str((row.get("metadata") or {}).get("submitted_by") or "")
+
+
+def _assert_task_ownership(row: dict[str, Any], _user: dict[str, Any] | None) -> None:
+    """任务归属闸：请求方与任务归属不一致 → 404（防存在性探测）。
+
+    caller 未认证 / 与归属不一致时与"任务不存在"同响应形状，不可区分；
+    任务侧缺归属元数据（存量数据）fail-closed 拒绝并在消息中说明原因，
+    不做放行式降级（回填属运行时操作）。
+    """
+    sub = str(_current_user(_user).get("sub") or "")
+    owner = _task_owner_id(row)
+    if not owner:
+        raise APIError(
+            status_code=404,
+            error_code="API_NOTF_2004",
+            message="任务归属元数据缺失（task.submitted_by），拒绝访问；存量任务需回填归属后可达",
+        )
+    if not sub or sub != owner:
+        raise APIError(
+            status_code=404,
+            error_code="API_NOTF_2004",
+            message="任务不存在或已被删除",
+        )
+
+
 async def get_task(
     task_id: str,
     _user: dict[str, Any] | None = None,
 ) -> TaskResponse:
     """获取指定任务的详情（state 单一真值，无 YAML 兜底）。
 
-    读法与 list/update 同源：state 聚合行命中即出口，未命中 404。
+    读法与 list/update 同源：state 聚合行命中即出口，未命中 404；
+    命中后过归属闸（_assert_task_ownership，_user 真消费）。
     """
     row = await _get_task_row_from_state(task_id)
     if row is None:
@@ -791,6 +867,8 @@ async def get_task(
             error_code="API_NOTF_2004",
             message="任务不存在或已被删除",
         )
+
+    _assert_task_ownership(row, _user)
 
     return _task_to_response(row)
 
@@ -970,6 +1048,17 @@ async def resume_task(
     _user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """恢复指定暂停的任务（resume_pipeline 按管道簿记或拉起续跑轮）。"""
+
+    # U13 恢复链前置仲裁（域界定 §二.5）：投影 completed → 拒绝。幽灵 running
+    # （收尾写失败后 runs 残留 running）会让 resume_pipeline 幂等空转却返回
+    # run_id——假成功；任务域按投影终态证据识破并给用户明确报错。
+    task_status = await _read_task_status(task_id)
+    if task_status == "completed":
+        raise APIError(
+            status_code=409,
+            error_code="API_STATE_2009",
+            message=f"任务已完成，无需恢复: {task_id}",
+        )
 
     # 恢复 = resume_pipeline（内核续跑派发，state 由快照恢复，无需透传）；
     # task_submitted 恒 False（旧字段仅保留响应形状）
@@ -1598,7 +1687,7 @@ async def _route_tasks_collection(
 
 
 # /{task_id}/{action} 路由说明：submit/pause/resume/cancel 为 (method,action)
-# 分发表成员；evaluate 退役恒 410 在表前单列；cancel 需请求体故取 raw_body。
+# 分发表成员；evaluate 端点恒 410（评估只走 task_evaluate 工具）；cancel 需请求体故取 raw_body。
 
 
 async def _route_task_actions(
@@ -1606,9 +1695,8 @@ async def _route_task_actions(
 ) -> dict[str, Any] | None:
     """派发 /{task_id}/{action} 二段路径，未命中返回 None。"""
     if action == "evaluate" and method == "POST":
-        # 0.2 评估闸门已插件化：评估由 task_evaluate 工具承载
-        # （plugins/shared/tools/task_evaluate），本端点退役恒 410，
-        # 明确报错替代旧"评估引擎不可用"降级假成功。
+        # 评估由 task_evaluate 工具承载（plugins/shared/tools/task_evaluate），
+        # 本 HTTP 端点恒 410 指路，不提供评估能力。
         raise APIError(
             status_code=410,
             error_code="API_GONE_2006",

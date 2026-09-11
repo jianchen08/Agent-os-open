@@ -90,7 +90,7 @@ describe('ChatContainer pipelineMessages equality 函数', () => {
   })
 
   describe('BUG 回归: a.length !== b.length 时 return true 的错误', () => {
-    it('旧版 return true 会导致新消息不渲染', () => {
+    it('equalityFn 对长度不同的数组必须返回 false（返回 true 会阻止新消息渲染）', () => {
       const buggyFn = (a: any[], b: any[]): boolean => {
         if (a === b) return true
         if (!Array.isArray(a) || !Array.isArray(b)) return false

@@ -42,9 +42,7 @@ config/
 │   ├── cost_control.yaml
 │   ├── long_term_task.yaml
 │   ├── plugin_allowlist.yaml
-│   ├── plugin_roots.yaml
-│   ├── spill_config.yaml
-│   └── widget_demo.yaml
+│   └── spill_config.yaml
 ├── evaluation/                 # 评估配置
 │   ├── evaluation_metrics.yaml   # 评估指标
 │   └── cost_control.yaml         # 成本控制

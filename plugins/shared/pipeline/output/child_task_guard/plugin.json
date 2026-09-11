@@ -20,5 +20,14 @@
   "priority": 50,
   "granted_capabilities": [
     "pipeline-state"
-  ]
+  ],
+  "state": {
+    "reads": [
+      "core_type",
+      "iteration",
+      "pipeline_id",
+      "raw_tool_calls",
+      "task.id"
+    ]
+  }
 }

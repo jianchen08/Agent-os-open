@@ -13,7 +13,7 @@ description: '功能验证专家，负责以用户真实使用场景为核心验
 agent_type: system
 category: system
 level: L3
-model_tier: large
+model_tier: medium
 tags:
 - evaluation
 - function_verifier

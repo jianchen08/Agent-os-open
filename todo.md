@@ -1,0 +1,4 @@
+- [x] 确认 config/agents 目录存在，列出所有 .yaml 文件
+- [x] 读取每个 yaml 文件并统计行数
+- [x] 写入 eval_stats.json
+- [ ] 调用 task_evaluate 评估

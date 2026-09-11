@@ -15,7 +15,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Awaitable
+from typing import Any, Protocol
 
 
 class CapabilityHandle:
@@ -118,6 +119,44 @@ STANDARD_CAPABILITIES = [
     "frontend",
 ]
 
+# capability_caller 约定：接收**完整** wire method（如 ``tool-executor.invoke``）
+# 或短方法名均可（见 bind_capability_caller 的前缀剥离）；timeout 可选，
+# 传 None = SDK 默认 30s。
+class CapabilityCaller(Protocol):
+    """capability_caller 协议：``await caller(method, params[, timeout])``。"""
+
+    def __call__(
+        self,
+        method: str,
+        params: dict[str, Any],
+        timeout: float | None = ...,
+    ) -> Awaitable[Any]: ...
+
+
+def bind_capability_caller(handle: CapabilityHandle, cap_name: str) -> CapabilityCaller:
+    """绑定能力句柄与命名空间，构造 async caller ``(method, params, timeout=None) -> Any``。
+
+    caller 剥掉已含的能力前缀后转交 ``handle.call``，避免句柄再拼成双命名空间
+    （如 ``tool-executor.tool-executor.invoke``）；未带前缀的方法原样透传。
+
+    闭包通过函数参数绑定 cap_name，规避 B023（循环变量绑定）。
+
+    Args:
+        handle: CapabilityHandle 实例（其 call 会拼接 ``f"{cap}.{method}"``）
+        cap_name: 能力命名空间（如 "tool-executor"）
+
+    Returns:
+        async caller；timeout 透传 :meth:`CapabilityHandle.call`
+        （None = SDK 默认 30s，长等待语义的调用方须显式传大值）。
+    """
+    prefix = f"{cap_name}."
+
+    async def _call(method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
+        stripped = method[len(prefix):] if method.startswith(prefix) else method
+        return await handle.call(stripped, params, timeout)
+
+    return _call
+
 
 class FrontendEmitter:
     """frontend.emit capability 的高层封装（ADR §3.5，task_observability 前置）。
@@ -128,8 +167,7 @@ class FrontendEmitter:
     现有前端事件一致：{type, data, sequence}）。
 
     与 event-bus.emit 的分工：event-bus 承载流式 chunk（llm_core 逐字推送），
-    frontend.emit 承载低频观测/进度事件（cost_update / tool_progress /
-    termination_status）。
+    frontend.emit 承载低频观测/进度事件（cost_update / tool_progress）。
 
     推送失败（通道关闭、内核未实现等）静默降级——可观测性出口绝不阻断
     插件主流程。
@@ -159,7 +197,7 @@ class FrontendEmitter:
         """推送一次性事件到前端（fire-and-forget，异常静默）。
 
         Args:
-            event: 事件名（如 cost_update / tool_progress / termination_status）。
+            event: 事件名（如 cost_update / tool_progress）。
             payload: 事件数据。须携带前端路由键（thread_id/pipeline_id，
                 工具类事件另需 message_id/call_id），缺失会被内核丢弃。
         """

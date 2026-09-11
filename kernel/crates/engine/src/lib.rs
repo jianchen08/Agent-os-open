@@ -19,7 +19,6 @@ pub mod compiler;
 pub mod condition;
 pub mod metrics;
 pub mod pipeline_loop;
-pub mod replay;
 pub mod round_events;
 pub mod storage_factory;
 pub mod store;

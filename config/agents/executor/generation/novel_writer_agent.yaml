@@ -22,7 +22,7 @@ description: 'AI写小说团队五层流水线中的正文写作Agent（Layer 4�
 agent_type: specialized
 category: generation
 level: L3
-model_tier: large
+model_tier: medium
 system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}

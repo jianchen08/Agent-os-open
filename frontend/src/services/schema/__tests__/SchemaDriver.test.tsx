@@ -13,16 +13,14 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import apiClient from '@/services/api/client'
+import { SchemaDriver } from '../SchemaDriver'
 import type { UIInputFormField } from '@/types/schema'
 
 // ── Mock API client ──
 vi.mock('@/services/api/client', () => ({
   default: { get: vi.fn() },
 }))
-
-import apiClient from '@/services/api/client'
-
-import { SchemaDriver } from '../SchemaDriver'
 
 /**
  * 提交动作：模拟表单 submit 事件（等价于用户点击 type=submit 按钮在真实浏览器

@@ -9,8 +9,8 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useContextKeys } from '@/stores/contextKeysStore'
 import { evaluateWhen } from '@/services/schema/whenExpression'
+import { useContextKeys } from '@/stores/contextKeysStore'
 
 describe('ContextKeysStore — 基础读写', () => {
   beforeEach(() => {

@@ -13,13 +13,14 @@
  * staleTime 统一 60_000：调试/监控类数据允许分钟级陈旧，后台静默刷新。
  */
 
-import { useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useEffect, useRef } from 'react'
 import { fetchDbTables } from '@/services/api/dbAdmin'
 import { getEvaluationMetrics } from '@/services/api/evaluationMetrics'
-import { getExecutionRecords, getExecutionRecordsSessions } from '@/services/api/executionRecords'
+import { getExecutionRecordsSessions } from '@/services/api/executionRecords'
 import { getPayloadDiagList } from '@/services/api/llmPayload'
 import { getTaskList } from '@/services/api/monitoring'
+import { getPipelineStateFull, getPipelineTraces } from '@/services/api/pipelineDiagnostics'
 import { getUsers } from '@/services/api/users'
 import { queryKeys } from '@/services/query/queryKeys'
 
@@ -70,15 +71,22 @@ export function useDebugSessionsQuery() {
   })
 }
 
-/** ── 执行记录（按会话分条缓存：sessionId 变 = 缓存条目变） ── */
-export function useExecutionRecordsQuery(sessionId?: string) {
+/** ── 管道诊断：step 级 trace 时间线（按管道分条；未选管道不发起请求） ── */
+export function usePipelineTracesQuery(pipelineId?: string) {
   return useQuery({
-    queryKey: queryKeys.executionRecords(sessionId),
-    queryFn: () =>
-      getExecutionRecords({
-        session_id: sessionId || undefined,
-        limit: 50,
-      }),
+    queryKey: queryKeys.pipelineTraces(pipelineId ?? ''),
+    queryFn: () => getPipelineTraces({ pipeline_id: pipelineId as string }),
+    enabled: !!pipelineId,
+    staleTime: DEBUG_STALE_TIME,
+  })
+}
+
+/** ── 管道诊断：state 全字段 + runs（按管道分条；未选管道不发起请求） ── */
+export function usePipelineStateFullQuery(pipelineId?: string) {
+  return useQuery({
+    queryKey: queryKeys.pipelineStateFull(pipelineId ?? ''),
+    queryFn: () => getPipelineStateFull(pipelineId as string),
+    enabled: !!pipelineId,
     staleTime: DEBUG_STALE_TIME,
   })
 }

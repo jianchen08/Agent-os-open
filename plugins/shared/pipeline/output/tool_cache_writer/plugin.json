@@ -17,5 +17,28 @@
     ]
   },
   "permissions": {},
-  "priority": 25
+  "priority": 25,
+  "config_files": [
+    {
+      "id": "tool_cache_writer",
+      "label": "工具缓存写入配置",
+      "fields": [
+        {
+          "name": "per_pipeline_max",
+          "label": "每管道全文留存条数",
+          "type": "number",
+          "default": 1
+        }
+      ]
+    }
+  ],
+  "state": {
+    "reads": [
+      "_executed_tool_calls",
+      "_full_tool_results",
+      "pipeline_id",
+      "user_id",
+      "session_id"
+    ]
+  }
 }

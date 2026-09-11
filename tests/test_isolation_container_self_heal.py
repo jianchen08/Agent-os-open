@@ -13,7 +13,7 @@ import tests._isolation_path  # noqa: F401
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from isolation_types import (
+from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,
@@ -148,6 +148,10 @@ async def test_create_environment_error_when_start_always_fails(tmp_path):
 
 # ---------------------------------------------------------------------------
 # 3. IsolationManager._find_existing_container：不误信 created 异常态
+#
+# 说明：docker SDK 的 container 对象是与外部 docker daemon 的边界（外部依赖）。
+# 下文对 container.start/remove 的调用断言，断的是自愈动作在外部系统上的
+# 可观察副作用（坏容器被删、created 容器被拉起），属契约本身而非内部实现。
 # ---------------------------------------------------------------------------
 
 
@@ -311,9 +315,9 @@ async def test_execute_rebuilds_when_container_not_ready():
     )
 
     assert result.success is True
-    # 重建过一次
-    assert manager.get_or_create_environment.call_count == 2
-    # 用重建后的新 env 执行，而非卡死的旧 env
+    # 重建至多一次：由 get_or_create_environment 的 side_effect 列表结构性约束
+    # （第三次获取环境会 StopIteration 使用例变红）。重建的可观察结果即
+    # 下方断言——操作落在重建后的新 env 上，而非卡死的旧 env。
     provider.execute_in_environment.assert_called_once_with(
         "cua-ws-new", {"type": "command", "command": "ls"},
     )
@@ -339,8 +343,8 @@ async def test_execute_no_rebuild_when_healthy():
     )
 
     assert result.success is True
-    # 未重建
-    assert manager.get_or_create_environment.call_count == 1
+    # 未重建：健康 env 不被销毁（env 被销毁即意味着进入了重建路径）
+    provider.destroy_environment.assert_not_called()
     provider.execute_in_environment.assert_called_once_with(
         "cua-ws", {"type": "command", "command": "ls"},
     )
@@ -394,9 +398,8 @@ async def test_execute_rebuilds_on_setns_namespace_desync():
     )
 
     assert result.success is True
-    # 重建过一次（get_or_create_environment 被调 2 次：初次 + 重建）
-    assert manager.get_or_create_environment.call_count == 2
-    # 销毁过脱节的旧 env
+    # 重建至多一次由 side_effect 列表结构性约束（同 test_execute_rebuilds_when_container_not_ready）。
+    # 自愈动作的可观察副作用：脱节旧 env 被销毁、重试落在新 env 上、结果带恢复标记。
     provider.destroy_environment.assert_called_once_with("cua-ws", success=False)
     # 重试在新环境上执行
     second_call_args = provider.execute_in_environment.call_args_list[1]
@@ -434,8 +437,7 @@ async def test_no_rebuild_on_normal_command_failure():
     )
 
     assert result.success is False
-    # 未重建
-    assert manager.get_or_create_environment.call_count == 1
+    # 未重建：普通命令失败不销毁环境（destroy 被调即进入重建路径）
     provider.destroy_environment.assert_not_called()
     assert result.metadata.get("namespace_desync_recovered") is not True
 
@@ -453,7 +455,9 @@ async def test_setns_no_rebuild_loop_when_destroy_fails():
 
     dead_env = _make_env(env_id="cua-ws")
     provider.get_environment_status = AsyncMock(return_value=EnvironmentStatus.READY)
-    manager.get_or_create_environment = AsyncMock(return_value=dead_env)
+    # side_effect 只给一个 env：若 destroy 失败后仍尝试重建（再次获取环境），
+    # 列表耗尽抛 StopIteration 使用例变红——「不空转重建」由结构约束。
+    manager.get_or_create_environment = AsyncMock(side_effect=[dead_env])
     manager._environments["cua-ws"] = dead_env
     provider.execute_in_environment = AsyncMock(
         return_value=ExecutionResult(
@@ -469,8 +473,6 @@ async def test_setns_no_rebuild_loop_when_destroy_fails():
     )
 
     assert result.success is False
-    # destroy 失败 → 不进重建（不空转），get_or_create 只调一次（初次）
-    assert manager.get_or_create_environment.call_count == 1
     # 明确标记：坏容器删不掉，需重启 docker
     assert result.metadata.get("namespace_desync_unremovable") is True
 
@@ -500,7 +502,7 @@ async def test_destroy_environment_honest_on_rm_failure():
     provider._run_cmd = fake_run
 
     # 注册一个 env 让 destroy 能找到它
-    from isolation_types import IsolationContext
+    from agentos_plugin_sdk.isolation_types import IsolationContext
     env = IsolationEnvironment(
         env_id="cua-ws",
         level=IsolationLevel.CONTAINER,
@@ -527,7 +529,7 @@ async def test_destroy_environment_true_on_rm_success():
     provider = DockerProvider()
     provider._run_cmd = _make_run_cmd(rm_rc=0)[0]
 
-    from isolation_types import IsolationContext
+    from agentos_plugin_sdk.isolation_types import IsolationContext
     env = IsolationEnvironment(
         env_id="cua-ws",
         level=IsolationLevel.CONTAINER,

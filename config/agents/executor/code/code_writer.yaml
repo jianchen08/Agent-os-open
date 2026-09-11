@@ -9,7 +9,7 @@ description: '代码编写专家，负责根据需求编写高质量代码、进
 agent_type: atomic
 category: code
 level: L3
-model_tier: large
+model_tier: medium
 plugins:
   disabled: []
   enabled:

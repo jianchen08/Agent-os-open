@@ -407,12 +407,13 @@ class TestOpModeEmission:
     覆盖四个场景：压缩 / 裁剪 / 窗口清理 / 未触发。
     """
 
-    def test_compress_emits_set_null_and_set_modify_ops(self) -> None:
-        """压缩场景：被删消息 set(seq, null)；被 standardize 改写的幸存消息
-        set(seq, 新内容)；未动消息无 op。
+    def test_compress_emits_set_null_ops_only(self) -> None:
+        """压缩场景：被删消息 set(seq, null)；幸存消息原样保留（不改写不重复 op）。
 
         mock service.compress_messages 返回压缩子集（删 seq 2,3），
-        其中幸存的 seq4 assistant 带非标准 tool_calls（会被 normalizer 改写）。
+        其中幸存的 seq4 assistant 带非标准 tool_calls——写回标准化已上移
+        llm_service 标准化唯一关卡（2026-09-06 T7），guard 不再复制判定语义，
+        幸存消息原样落 state，无额外 op。
         """
         mod = _load_plugin_module()
         mod._memory_backend = None
@@ -462,21 +463,13 @@ class TestOpModeEmission:
         # 被删 seq 2,3 → set(seq, null)
         assert ops[2] == {"op": "set", "seq": 2, "msg": None}
         assert ops[3] == {"op": "set", "seq": 3, "msg": None}
-        # 幸存但被 standardize 改写的 seq4 → set(seq, 新内容)，新内容含标准 tool_calls
-        assert 4 in ops
-        assert ops[4]["op"] == "set"
-        new_msg = ops[4]["msg"]
-        assert new_msg is not None
-        assert new_msg["role"] == "assistant"
-        tc = new_msg["tool_calls"][0]
-        assert tc["type"] == "function"
-        assert isinstance(tc["function"], dict)
-        assert tc["function"]["name"] == "search"
-        assert tc["id"].startswith("call_")
+        # 幸存 seq4 原样保留（含非标准 tool_calls——标准化由 llm_service 唯一
+        # 关卡负责），guard 不改写 → 无 op
+        assert 4 not in ops
         # 未动的 seq1（system）无 op
         assert 1 not in ops
         # 不应有多余 op
-        assert set(ops.keys()) == {2, 3, 4}
+        assert set(ops.keys()) == {2, 3}
 
     def test_trim_emits_set_null_for_dropped_seqs(self) -> None:
         """裁剪场景（_trim_covered_messages）：dropped 的 seq 都是 set(seq, null)。

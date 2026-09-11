@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import os
-import sys
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+# extra 显式注入任务域依赖面：system/tasks（平铺模块权威位，tool.py 内
+# 懒加载的 `from service_access import …` / `from task_types import …`
+# 解析到此）+ system/（tasks 包目录，`from tasks.service import …` 限定
+# 导入要求）。
+_paths = bootstrap_plugin(__file__, extra=(os.path.join("system", "tasks"), "system"))
 
 # 任务领域模块以 plugins/shared/system/tasks/ 为权威（0.2 平铺模块：service_access /
 # task_types / agents_types …）。将其注入 sys.path 以便 tool.py 内懒加载的
@@ -14,12 +19,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 # 另需 system/ 入列——service_access.get_task_service() 内部用
 # `from tasks.service import TaskService` 限定导入（M3 防误解析）。
 # 跨插件共享类型走 SDK（agentos_plugin_sdk，pip 安装）。
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
-_TASKS_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system', 'tasks')
-_SYSTEM_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system')
-for _d in (_TASKS_DIR, _SYSTEM_DIR):
-    if os.path.isdir(_d):
-        sys.path.insert(0, _d)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 

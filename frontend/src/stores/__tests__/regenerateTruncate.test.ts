@@ -7,6 +7,7 @@
  *  - findLastUserMessageId：返回最后一条 user 消息（重新生成缺省目标）。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 vi.mock('@/utils/logger', () => ({
@@ -30,7 +31,7 @@ const PIPELINE_ID = 'pipe-reg-001'
 const SESSION_ID = 'sess-reg-001'
 
 describe('truncateMessagesAfter / findLastUserMessageId（重新生成/回退乐观截断）', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   const makeMsg = (id: string, role: Message['role'], seq: number, overrides: Partial<Message> = {}): Message => ({
     id,

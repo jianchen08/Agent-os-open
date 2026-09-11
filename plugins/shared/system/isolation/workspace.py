@@ -3,7 +3,6 @@
 
 暴露接口：
 - resolve_workspace()：统一解析任务的工作空间路径
-- resolve_workspace_chain()：递归解析任务工作空间（支持多层嵌套）
 - get_workspace_config_root()：从配置文件读取工作空间根目录
 - get_workspace_base_dir()：统一解析工作空间基目录（配置驱动，绝对路径）
 - find_project_root()：定位仓库根（不硬编码父目录层数）
@@ -167,13 +166,12 @@ def _load_isolation_config() -> dict:
 def get_workspace_config_root() -> str:
     """从配置文件读取工作空间根目录，读取失败则返回默认值
 
-    语义（对齐 _workspace_git_ops._get_workspace_root 与 0.1 契约）：返回的
-    workspace.root 是**基目录**——支持绝对路径（如 D:/myproject）与相对路径
-    （**相对项目根**，如 .ai_workspaces），不是项目根下的子目录名本身。
+    语义：返回的 workspace.root 是**基目录**——支持绝对路径（如 D:/myproject）
+    与相对路径（**相对项目根**，如 .ai_workspaces），不是项目根下的子目录名本身。
     调用方（resolve_workspace / validate_workspace_path / _task_cleanup）以
     字符串使用：绝对路径原样使用，相对路径需自行拼项目根（服务层经
     get_workspace_base_dir() 统一完成）。读取失败返回缺省 ".ai_workspaces"
-    （配置缺失时的默认**相对**值，与历史行为一致）。
+    （配置缺失时的默认**相对**值）。
     """
     config = _load_isolation_config()
     root = config.get("workspace", {}).get("root")
@@ -370,57 +368,3 @@ def resolve_workspace(  # noqa: PLR0911
             return task_workspace
         return f"{parent_resolved_workspace}/{task_workspace}"
     return f"{parent_resolved_workspace}/{task_id}"
-
-
-async def resolve_workspace_chain(
-    task_id: str,
-    task_workspace: str | None,
-    session,
-    nesting_mode: str = "nested",
-) -> str:
-    """递归解析任务工作空间路径（支持多层嵌套）
-
-    沿 parent_task_id 链递归到根任务，逐层构建完整工作空间路径，避免只追溯一层时
-    三层及以上嵌套子任务的父任务被当作根任务解析、丢失祖先链信息，导致孙任务
-    工作空间与子任务平级而非嵌套。
-
-    Args:
-        task_id: 当前任务 ID
-        task_workspace: 当前任务 DB 中的 workspace 字段
-        session: 数据库会话（AsyncSession）
-        nesting_mode: 子任务嵌套模式，"nested" 创建独立子目录，"shared" 共享父目录
-
-    Returns:
-        解析后的工作空间路径字符串
-    """
-    try:
-        from db.models import Task  # noqa: PLC0415
-    except ImportError:
-        # 0.2 架构下 Task ORM 模型不在 src.db（kernel 用 SQLite 四表），
-        # 此函数当前无外部调用者；保留接口，降级为基础解析。
-        logger.debug(
-            "[resolve_workspace_chain] db.models.Task 不可用，降级基础解析 | task_id=%s",
-            task_id,
-        )
-        return resolve_workspace(task_id, task_workspace)
-
-    task = await session.get(Task, task_id)
-    if not task:
-        logger.warning(f"[resolve_workspace_chain] 任务不存在，使用基础解析 | task_id={task_id}")
-        return resolve_workspace(task_id, task_workspace)
-
-    if not task.parent_task_id:
-        return resolve_workspace(task_id, task_workspace)
-
-    parent_workspace = await resolve_workspace_chain(
-        task_id=task.parent_task_id,
-        task_workspace=None,
-        session=session,
-        nesting_mode=nesting_mode,
-    )
-    return resolve_workspace(
-        task_id,
-        task_workspace,
-        parent_resolved_workspace=parent_workspace,
-        nesting_mode=nesting_mode,
-    )

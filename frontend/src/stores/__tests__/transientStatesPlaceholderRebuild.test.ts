@@ -18,6 +18,7 @@
  *   4. 无 transient_states → 行为与现状完全一致（回归保护）。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 const { mockGetMessages } = vi.hoisted(() => ({ mockGetMessages: vi.fn() }))
@@ -61,7 +62,7 @@ function chunkState(messageId: string, text: string, extra: Record<string, unkno
 }
 
 describe('transient_states 流式占位重建', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   beforeEach(async () => {
     vi.clearAllMocks()

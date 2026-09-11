@@ -98,10 +98,10 @@ impl RoundInvoker {
 
 #[async_trait]
 impl PluginInvoker for RoundInvoker {
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         plugin_id: &str,
-        _ctx: &PluginContext,
+        _ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError> {
         self.calls.lock().unwrap().push(plugin_id.to_string());
         let count = self
@@ -230,6 +230,8 @@ fn two_round_config() -> PipelineConfig {
             run_on_error: false,
         }],
         checkpoint: agentos_core::types::CheckpointConfig::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     }
 }
 
@@ -333,9 +335,9 @@ async fn test_round_events_fire_per_iteration() {
 #[tokio::test]
 async fn test_tool_iteration_reuses_open_round() {
     // DSL 交替形态回归（用户复现的「尾部整段重复工具卡」根因锚）：
-    // LLM 迭代 → 工具迭代（core_plugin=pipeline_tool_core）→ LLM 迭代。
-    // 断言：只有 2 个轮次（LLM 回合），工具迭代不新开轮——工具事件挂打开轮
-    // 消息（其 id 与 LLM 轮 new_message 的 toolCalls 卡片同键，不重复建卡）。
+    // LLM 迭代 → 工具迭代（core_type=tool_execute，core_plugin=pipeline_tool_core）
+    // → LLM 迭代。断言：只有 2 个轮次（LLM 回合），工具迭代不新开轮——工具事件
+    // 挂打开轮消息（其 id 与 LLM 轮 new_message 的 toolCalls 卡片同键，不重复建卡）。
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     let recorder = Arc::new(Recorder::new());
     // invoker 按调用序：llm#1 带工具，tool#1 出工具结果，llm#2 纯文本
@@ -353,10 +355,10 @@ async fn test_tool_iteration_reuses_open_round() {
     }
     #[async_trait]
     impl PluginInvoker for AltInvoker {
-        async fn invoke_pipeline_plugin(
+        async fn invoke_pipeline_plugin<'a>(
             &self,
             plugin_id: &str,
-            ctx: &PluginContext,
+            ctx: &PluginContext<'a>,
         ) -> Result<PluginResult, PluginError> {
             self.calls.lock().unwrap().push(plugin_id.to_string());
             if plugin_id == "pipeline_tool_core" {
@@ -484,21 +486,23 @@ async fn test_tool_iteration_reuses_open_round() {
                         when: "raw_tool_calls != [] and raw_tool_calls != None".into(),
                         then: RouteAction {
                             next: RouteNext::Loop,
-                            set: HashMap::from([(
-                                "core_plugin".to_string(),
-                                json!("pipeline_tool_core"),
-                            )]),
+                            // 生产接线（autonomous.yaml post 路由）：set 同时写
+                            // core_type 形态标志与 core_plugin 插件选择——引擎
+                            // 开轮决策只读 core_type，零插件 id 知识。
+                            set: HashMap::from([
+                                ("core_plugin".to_string(), json!("pipeline_tool_core")),
+                                ("core_type".to_string(), json!("tool_execute")),
+                            ]),
                         },
                     },
                     Route {
-                        when: "raw_tool_calls == [] and core_plugin == \"pipeline_tool_core\""
-                            .into(),
+                        when: "raw_tool_calls == [] and core_type == \"tool_execute\"".into(),
                         then: RouteAction {
                             next: RouteNext::Loop,
-                            set: HashMap::from([(
-                                "core_plugin".to_string(),
-                                json!("pipeline_llm_core"),
-                            )]),
+                            set: HashMap::from([
+                                ("core_plugin".to_string(), json!("pipeline_llm_core")),
+                                ("core_type".to_string(), json!("llm_call")),
+                            ]),
                         },
                     },
                     Route {
@@ -516,6 +520,8 @@ async fn test_tool_iteration_reuses_open_round() {
             run_on_error: false,
         }],
         checkpoint: agentos_core::types::CheckpointConfig::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let compiled =
         compile_pipeline(&config, &Default::default(), executor.plugin_ids()).expect("compile ok");
@@ -570,6 +576,230 @@ async fn test_tool_iteration_reuses_open_round() {
     assert_eq!(
         invoker.tool_iter_message_id.lock().unwrap().as_deref(),
         Some(starts[0].message_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn test_tool_iteration_semantic_flag_with_custom_core_plugin() {
+    // P1-1（F1+F3 去特判）：引擎迭代形态只读 core_type 语义标志（llm_call |
+    // tool_execute），不比对插件 id——换 core 器官实现（自定义 id）后工具迭代
+    // 仍沿用打开轮 message_id、LLM 迭代仍新开轮（轮次语义与插件名解耦）。
+    let store = Arc::new(SqliteStore::open_memory().unwrap());
+    let recorder = Arc::new(Recorder::new());
+    // 自定义 core 插件：id 不是内核已知约定值，语义完全由 core_type 声明承载
+    const CUSTOM_LLM: &str = "custom_llm_engine";
+    const CUSTOM_TOOL: &str = "custom_tool_engine";
+    struct CustomInvoker {
+        calls: Mutex<Vec<String>>,
+        tool_iter_message_id: Mutex<Option<String>>,
+    }
+    impl CustomInvoker {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                tool_iter_message_id: Mutex::new(None),
+            }
+        }
+    }
+    #[async_trait]
+    impl PluginInvoker for CustomInvoker {
+        async fn invoke_pipeline_plugin<'a>(
+            &self,
+            plugin_id: &str,
+            ctx: &PluginContext<'a>,
+        ) -> Result<PluginResult, PluginError> {
+            self.calls.lock().unwrap().push(plugin_id.to_string());
+            if plugin_id == CUSTOM_TOOL {
+                let mid = ctx
+                    .state
+                    .get("message_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                *self.tool_iter_message_id.lock().unwrap() = mid;
+            }
+            let count = self
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.as_str() == plugin_id)
+                .count();
+            match plugin_id {
+                CUSTOM_LLM => {
+                    if count == 1 {
+                        Ok(PluginResult {
+                            state_updates: HashMap::from([
+                                (
+                                    "messages".to_string(),
+                                    json!({
+                                        "_ops": [{
+                                            "op": "set",
+                                            "msg": {
+                                                "role": "assistant",
+                                                "content": "自定义引擎第一轮",
+                                                "tool_calls": [
+                                                    { "id": "call_c1", "name": "file_read", "arguments": "{}" }
+                                                ],
+                                            },
+                                        }]
+                                    }),
+                                ),
+                                ("raw_result".to_string(), json!("自定义引擎第一轮")),
+                                (
+                                    "raw_tool_calls".to_string(),
+                                    json!([{ "type": "function", "id": "call_c1", "name": "file_read", "arguments": "{}" }]),
+                                ),
+                            ]),
+                            ..Default::default()
+                        })
+                    } else {
+                        Ok(PluginResult {
+                            state_updates: HashMap::from([
+                                (
+                                    "messages".to_string(),
+                                    json!({
+                                        "_ops": [{ "op": "set", "msg": { "role": "assistant", "content": "自定义引擎第二轮" } }]
+                                    }),
+                                ),
+                                ("raw_result".to_string(), json!("自定义引擎第二轮")),
+                                ("raw_tool_calls".to_string(), json!([])),
+                            ]),
+                            ..Default::default()
+                        })
+                    }
+                }
+                CUSTOM_TOOL => Ok(PluginResult {
+                    state_updates: HashMap::from([
+                        (
+                            "messages".to_string(),
+                            json!({
+                                "_ops": [{ "op": "set", "msg": { "role": "tool", "content": "工具结果", "tool_call_id": "call_c1" } }]
+                            }),
+                        ),
+                        ("raw_result".to_string(), json!("工具结果")),
+                        ("raw_tool_calls".to_string(), json!([])),
+                    ]),
+                    ..Default::default()
+                }),
+                _ => Ok(PluginResult::default()),
+            }
+        }
+        async fn invoke_tool(
+            &self,
+            _plugin_id: &str,
+            _tool_name: &str,
+            _inputs: &serde_json::Value,
+        ) -> Result<ToolExecutionResult, PluginError> {
+            Ok(ToolExecutionResult::success(serde_json::Value::Null))
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            _hook: agentos_core::traits::LifecycleHook,
+            _context: &agentos_core::traits::HookContext,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
+    let invoker = Arc::new(CustomInvoker::new());
+    let invoker2 = invoker.clone();
+    let store_dyn: Arc<dyn StorageBackend> = store;
+    let executor = PipelineExecutor::new(
+        invoker2 as Arc<dyn PluginInvoker>,
+        Path::new(".").to_path_buf(),
+        agentos_core::types::TenantContext::new("tenant_test", "session_test"),
+        vec![CUSTOM_LLM.to_string(), CUSTOM_TOOL.to_string()],
+        store_dyn,
+        "run_custom_rounds",
+        "main",
+    )
+    .with_round_events(recorder.clone());
+
+    // 路由 set 只写语义标志 core_type；core_plugin 仅承载动态步骤的插件选择
+    let config = PipelineConfig {
+        name: "round_custom".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "core".into(),
+                steps: vec![StepItem::Bare("{{state.core_plugin}}".into())],
+                when: None,
+                context: HashMap::new(),
+                routes: vec![
+                    Route {
+                        when: "raw_tool_calls != [] and raw_tool_calls != None".into(),
+                        then: RouteAction {
+                            next: RouteNext::Loop,
+                            set: HashMap::from([
+                                ("core_plugin".to_string(), json!(CUSTOM_TOOL)),
+                                ("core_type".to_string(), json!("tool_execute")),
+                            ]),
+                        },
+                    },
+                    Route {
+                        when: "raw_tool_calls == [] and core_type == \"tool_execute\"".into(),
+                        then: RouteAction {
+                            next: RouteNext::Loop,
+                            set: HashMap::from([
+                                ("core_plugin".to_string(), json!(CUSTOM_LLM)),
+                                ("core_type".to_string(), json!("llm_call")),
+                            ]),
+                        },
+                    },
+                    Route {
+                        when: "True".into(),
+                        then: RouteAction {
+                            next: RouteNext::End,
+                            set: HashMap::new(),
+                        },
+                    },
+                ],
+                loop_config: None,
+            }],
+            while_cond: Some("True".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: agentos_core::types::CheckpointConfig::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    let compiled =
+        compile_pipeline(&config, &Default::default(), executor.plugin_ids()).expect("compile ok");
+
+    let final_state = executor
+        .run_compiled(
+            &compiled,
+            json!({
+                "pipeline_id": "p_custom_rounds",
+                "message": "hi",
+                "core_plugin": CUSTOM_LLM,
+                "core_type": "llm_call",
+                "ended": false,
+                "suspended": false,
+                "session_id": "thread-custom",
+                "messages": [{ "role": "user", "content": "hi", "seq": 0 }],
+            }),
+        )
+        .await
+        .expect("run ok");
+
+    let starts = recorder.starts();
+    let ends = recorder.ends();
+    // LLM/工具/LLM 三次迭代只开 2 个轮次（工具迭代沿用打开轮，自定义 id 语义不变）
+    assert_eq!(starts.len(), 2, "自定义 core 插件下工具迭代仍应沿用打开轮");
+    assert_eq!(ends.len(), 2);
+    assert_ne!(starts[0].message_id, starts[1].message_id);
+    // 工具迭代执行时的 state.message_id == 第一轮 id（沿用打开轮，不新开轮）
+    assert_eq!(
+        invoker.tool_iter_message_id.lock().unwrap().as_deref(),
+        Some(starts[0].message_id.as_str())
+    );
+    // 第二轮是新开的 LLM 轮（打开轮推进），最终 state 落在第二轮 id
+    assert_eq!(
+        final_state.get("message_id").and_then(|v| v.as_str()),
+        Some(starts[1].message_id.as_str())
     );
 }
 

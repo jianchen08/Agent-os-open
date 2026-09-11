@@ -11,8 +11,8 @@
 import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 import { requestWithRetry } from '@/utils/retry'
-import type { RetryOptions } from '@/utils/retry'
 import type { RenderingSpaceType } from '@/types/schema'
+import type { RetryOptions } from '@/utils/retry'
 
 /** 插件声明的单个 UI Widget 配置 */
 export interface PluginUiWidget {

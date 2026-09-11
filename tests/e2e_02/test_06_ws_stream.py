@@ -6,7 +6,7 @@ E2E 测试：WS 流式全链路（FP-0.2.〇 串行循环）
   连接 ws://localhost:9100/ws/chat?token=<token>&version=1
     → connection_confirmation（连接/鉴权确认）
   → 发 user_input
-    → stream_start → termination_status → thinking_start/chunk/end
+    → stream_start → thinking_start/chunk/end
       → stream_chunk → cost_update → new_message → stream_end
   断言：事件序列包含 stream_start 与 stream_end（中间类型宽松匹配），
   stream_chunk 行数 > 0 且累计文本非空（真实 LLM 流式产出）。

@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { PageShell } from '@/components/shared/PageShell'
 import { useDbTablesQuery } from '@/hooks/queries/useDebugQueries'
+import { useAuthStore } from '@/stores/authStore'
 import * as authApi from '@/services/api/auth'
 import * as dbAdmin from '@/services/api/dbAdmin'
 import type { ColumnInfo, DbQueryResult, DbTableInfo } from '@/services/api/dbAdmin'
@@ -76,7 +77,11 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
   const [sqlError, setSqlError] = useState<string | null>(null)
   const [isSqlRunning, setIsSqlRunning] = useState(false)
 
-  /** admin 守卫：调 /api/v1/auth/me 判断角色（后端 403 兜底，auth 域不动） */
+  /** admin 守卫：调 /api/v1/auth/me 判断角色（后端 403 兜底，auth 域不动）。
+   *  依赖 token：守卫随登录态变化重查——匿名时打开本页后再登录 admin 的同一
+   *  挂载实例（工作区 tab 不重挂），角色必须从"无权限"即时翻正，而不是粘到
+   *  刷新页面。 */
+  const authToken = useAuthStore((s) => s.token)
   useEffect(() => {
     let cancelled = false
     authApi
@@ -90,7 +95,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [authToken])
 
   /** 表列表（query 化）：admin 守卫通过前不发请求；staleTime 窗口内重挂零请求 */
   const tablesQuery = useDbTablesQuery({ enabled: isAdmin === true })
@@ -293,7 +298,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
   // admin 守卫
   if (isAdmin === false) {
     return (
-      <PageShell title="数据库管理" backHref="/debug" embedded={embedded}>
+      <PageShell title="数据库管理" embedded={embedded}>
         <div className="flex h-full items-center justify-center">
           <div className="bg-destructive/10 text-destructive rounded-lg px-6 py-4 text-sm">
             无权限访问数据库管理页面（需要 admin 角色）
@@ -306,7 +311,6 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
   return (
     <PageShell
       title="数据库管理"
-      backHref="/debug"
       embedded={embedded}
       actions={
         <span className="text-muted-foreground text-xs">

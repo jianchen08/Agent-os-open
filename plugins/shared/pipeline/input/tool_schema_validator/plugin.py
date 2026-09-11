@@ -23,12 +23,64 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
+
+# 能力调用器（server.py on_load 经 wiring.make_capability_caller 注入）：
+# 截断检测的 JSON 修复走 llm_service 的 llm.repair_json 能力——
+# repair_json_string 单一真值源在 llm_service._message_normalizer，跨插件
+# 共享经能力面收敛（2026-09-06 T7 裁定），不再 import 他插件模块。未注入
+# （单元测试/能力缺失）→ 修复不可用，截断检测按"无法修复"返回 None。
+CapabilityCaller = Callable[[str, dict[str, Any], float | None], Any]
+
+_capability_caller: CapabilityCaller | None = None
+
+
+def set_capability_caller(caller: CapabilityCaller | None) -> None:
+    """注入能力调用句柄（async fn `(method, params, timeout) -> Any`）。
+
+    Args:
+        caller: 能力调用 async 函数；传 None 清空
+    """
+    global _capability_caller
+    _capability_caller = caller
+
+
+async def _repair_json_string(text: str) -> str | None:
+    """经 llm_service 的 llm.repair_json 能力修复残缺 JSON。
+
+    返回修复后字符串；调用器未注入 / 能力调用失败 / 不可修复 → None
+    （与修复函数返回 None 的既有语义一致）。
+    """
+    caller = _capability_caller
+    if caller is None:
+        return None
+    params = {
+        "tool_name": "llm.repair_json",
+        "plugin_id": "llm_service",
+        "args": {"text": text},
+    }
+    try:
+        envelope = await caller("tool-executor.invoke", params, None)
+    except Exception as exc:
+        logger.warning("[tool_schema_validator] llm.repair_json 调用失败（按不可修复降级）: %s", exc)
+        return None
+    if not isinstance(envelope, dict) or not envelope.get("success"):
+        logger.warning(
+            "[tool_schema_validator] llm.repair_json 信封异常（按不可修复降级）: %r",
+            envelope,
+        )
+        return None
+    data = envelope.get("data")
+    if not isinstance(data, dict):
+        return None
+    repaired = data.get("repaired")
+    return repaired if isinstance(repaired, str) else None
 
 
 def _extract_json_top_keys(s: str) -> list[str]:
@@ -165,7 +217,7 @@ class ToolSchemaValidator(IInputPlugin):
             # 导致下游 repair_json_string 丢弃尾部不完整的字段。
             # 在此处提前检测，将诊断信息作为 tool result 注入 messages，
             # 让 LLM 立即知道哪些字段丢失并重试。
-            truncation_result = self._check_args_truncation(args, tool_name)
+            truncation_result = await self._check_args_truncation(args, tool_name)
             if truncation_result:
                 # 将截断诊断作为 tool result 消息注入对话历史，
                 # 模拟工具已执行并返回截断错误，LLM 可据此重试
@@ -406,7 +458,7 @@ class ToolSchemaValidator(IInputPlugin):
 
         return value
 
-    def _check_args_truncation(  # noqa: PLR0911
+    async def _check_args_truncation(  # noqa: PLR0911
         self,
         args: Any,
         tool_name: str,
@@ -414,12 +466,12 @@ class ToolSchemaValidator(IInputPlugin):
         """检测 arguments JSON 是否被截断。
 
         当 LLM 生成的 tool_call arguments 字符串不完整时，
-        repair_json_string 会补全括号并丢弃尾部不完整的字段。
+        llm.repair_json 能力会补全括号并丢弃尾部不完整的字段。
         本方法在输入阶段检测这种情况，返回精确诊断错误。
 
         检测逻辑：
         1. args 是字符串且无法直接 json.loads → 可能被截断
-        2. 尝试 repair_json_string 修复
+        2. 经 llm.repair_json 能力尝试修复
         3. 比较修复前后的顶层 key，找出丢失的字段
         4. 有字段丢失 → 返回截断错误
 
@@ -440,13 +492,9 @@ class ToolSchemaValidator(IInputPlugin):
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # 尝试修复。经 pipeline 命名空间包解析（plugins/shared 在 sys.path）；
-        # 原 ``plugins.core...`` 路径不存在。
-        from pipeline.core.llm_core._message_normalizer import (  # noqa: PLC0415
-            repair_json_string,
-        )
-
-        repaired = repair_json_string(args)
+        # 尝试修复（经 llm_service 的 llm.repair_json 能力；能力不可用 /
+        # 无法修复均返回 None → 不是截断场景，交给 tool_core 处理）
+        repaired = await _repair_json_string(args)
         if repaired is None:
             # 完全无法修复 → 不是截断场景，交给 tool_core 处理
             return None

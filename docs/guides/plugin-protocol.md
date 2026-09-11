@@ -2,7 +2,7 @@
 
 > 面向**想给灵汐 AgentOS 0.2 开发一个新插件**的开发者。读完本文，你应能在 1 小时内发布第一个可被内核加载的插件。
 >
-> 本文是 0.2 架构（Rust 内核 + Python sidecar + YAML 配置）的统一插件协议说明。整体架构见 [ARCHITECTURE.md](../ARCHITECTURE.md)，分篇上手教程见 [开发指南索引](README.md)。
+> 本文是 0.2 架构（Rust 内核 + Python sidecar + YAML 配置）的统一插件协议说明。历史方案记录见 [working/_archive_0.2_migration/0.2_rust_plugin_solution.md](../working/_archive_0.2_migration/0.2_rust_plugin_solution.md)，整体架构见 [ARCHITECTURE.md](../ARCHITECTURE.md)，分篇上手教程见 [开发指南索引](README.md)。
 
 ---
 
@@ -462,7 +462,7 @@ for _name, tdef in collect_tools(__main__).items():  # 扫描模块级 @tool
 
 ### 生命周期钩子
 
-SDK 为常用钩子提供了专用**装饰器**（`on_load` / `on_unload` / `on_config_change`）；其它钩子用 `on_lifecycle(event, handler)` 普通方法注册：
+SDK 为常用钩子提供了专用**装饰器**（`on_load` / `on_unload`）；其它钩子用 `on_lifecycle(event, handler)` 普通方法注册：
 
 ```python
 @plugin.on_load
@@ -473,11 +473,6 @@ async def on_load(params: dict) -> None:
 @plugin.on_unload
 async def on_unload() -> None:
     # 释放资源
-    ...
-
-@plugin.on_config_change
-async def on_config_change(config: dict) -> None:
-    # 响应配置热更新
     ...
 
 # 其它钩子（on_pipeline_start / on_pipeline_end / on_error）：
@@ -512,35 +507,35 @@ if __name__ == "__main__":
 
 ## 附录 A：manifest 覆盖现状统计
 
-> 数据基于 `plugins/shared/` 全量扫描（97 个 `plugin.json`），核对日期 2026-09。
+> 数据基于 `plugins/shared/` 全量扫描（86 个 `plugin.json`），核对日期 2026-09。
 > 数量随插件增删会漂移，以本表口径（git 跟踪 manifest 全量解析）自行复测为准。
 
 **按目录类别：**
 
 | 类别 | 目录位置 | 数量 |
 |------|----------|------|
-| pipeline / input | `plugins/shared/pipeline/input/` | 22 |
+| pipeline / input | `plugins/shared/pipeline/input/` | 17 |
 | pipeline / core | `plugins/shared/pipeline/core/` | 2 |
-| pipeline / output | `plugins/shared/pipeline/output/` | 14 |
-| shared 根下直挂（db_admin / metrics_admin / native_test / user_admin） | `plugins/shared/<name>/` | 4 |
-| system（含连接器/通道/系统服务） | `plugins/shared/system/` | 29 |
-| tools | `plugins/shared/tools/`（18 个顶层插件 + `external_mcp/` 下 8 个预置接入清单） | 26 |
-| **合计** | | **97** |
+| pipeline / output | `plugins/shared/pipeline/output/` | 12 |
+| shared 根下直挂（db_admin / metrics_admin / user_admin） | `plugins/shared/<name>/` | 3 |
+| system（含连接器/通道/系统服务） | `plugins/shared/system/` | 25 |
+| tools | `plugins/shared/tools/`（19 个顶层插件 + `external_mcp/` 下 8 个预置接入清单） | 27 |
+| **合计** | | **86** |
 
 **按 `plugin_type`：**
 
 | plugin_type | 数量 |
 |-------------|------|
-| `pipeline` | 39 |
-| `system` | 28 |
-| `tool` | 30 |
+| `pipeline` | 31 |
+| `system` | 24 |
+| `tool` | 31 |
 
 **按 `host_type`：**
 
 | host_type | 数量 |
 |-----------|------|
-| `sidecar` | 93 |
-| `in_process`（Rust cdylib） | 4（`pipeline_tool_core` / `pipeline_sensitive_checker` / `pipeline_spill_guard` / `native_test`） |
+| `sidecar` | 83 |
+| `in_process`（Rust cdylib） | 3（`pipeline_tool_core` / `pipeline_sensitive_checker` / `pipeline_spill_guard`） |
 
 **关键内部模块覆盖确认：**
 
@@ -549,8 +544,8 @@ if __name__ == "__main__":
 | 连接器（connectors） | `connectors_service`（聚合） | `plugins/shared/system/connectors/plugin.json` | ✅ |
 | 通道（channel_*） | 5 个（cli/dingtalk/feishu/qq/wecom） | 5 个 | ✅ 全覆盖（`channel_api` 已整体退役，ADR 2026-08-21 插件自持 http_endpoints；`channel_gateway` 不再是独立插件） |
 | Agent（scene） | `scene_service` | `plugins/shared/system/scene/plugin.json` | ✅ |
-| 工具（tools） | 18 个顶层 + 8 个 external_mcp 预置接入 | 26 个 | ✅ 全覆盖（`external_mcp/` 本身是聚合目录，manifest 在其 8 个子目录里） |
-| 系统服务 | memory/llm/approval/evaluation/... | 29 个 | ✅ |
+| 工具（tools） | 19 个顶层 + 8 个 external_mcp 预置接入 | 27 个 | ✅ 全覆盖（`external_mcp/` 本身是聚合目录，manifest 在其 8 个子目录里） |
+| 系统服务 | memory/llm/approval/evaluation/... | 25 个 | ✅ |
 | 内置工具聚合 sidecar（builtin_tools） | 1 个（8 个工具的 MCP 聚合） | 1 | ✅ |
 
 **结论**：全部应独立加载的内部模块均已收敛到 `plugin.json` 协议（含原 `builtin_tools`、`artifacts` 两处历史缺口已补齐 manifest）。

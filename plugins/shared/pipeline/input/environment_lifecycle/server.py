@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from functools import lru_cache
+from typing import Any
 
-# 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _this_dir)
-_shared_dir = os.path.join(_this_dir, "..", "..", "..")
-sys.path.insert(0, _shared_dir)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-from plugin import EnvironmentLifecyclePlugin  # noqa: E402
+bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
+
+from plugin import EnvironmentLifecyclePlugin, set_destroy_caller  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk.capability import bind_capability_caller  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("environment_lifecycle_pipeline")
+
+# 系统插件工具不在 LLM 工具注册表，tool-executor.invoke 反查必失败，
+# 显式带 plugin_id 直达（同 hindsight.recall 惯例）。
+_ISOLATION_PLUGIN_ID = "isolation_service"
 
 
 @lru_cache(maxsize=1)
@@ -30,8 +32,27 @@ def get_instance() -> EnvironmentLifecyclePlugin:
 
 @plugin.on_load
 async def _on_load(params: dict) -> None:
-    """Initialize environment_lifecycle plugin."""
+    """Initialize environment_lifecycle plugin + 注入销毁调用方。"""
     get_instance()
+    try:
+        handle = plugin.get_capability("tool-executor")
+    except KeyError:
+        handle = None
+    if handle is None:
+        logger.warning(
+            "[environment_lifecycle_pipeline] tool-executor 能力未注入，exit 环境销毁降级不可用"
+        )
+        set_destroy_caller(None)
+        return
+    invoke = bind_capability_caller(handle, "tool-executor")
+
+    async def _destroy_caller(tool_name: str, args: dict) -> Any:
+        return await invoke(
+            "tool-executor.invoke",
+            {"tool_name": tool_name, "plugin_id": _ISOLATION_PLUGIN_ID, "args": args},
+        )
+
+    set_destroy_caller(_destroy_caller)
 
 
 @plugin.on_unload

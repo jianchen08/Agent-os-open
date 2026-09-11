@@ -24,7 +24,29 @@
               "description": "任意消息（将原样回声）"
             }
           },
-          "required": ["message"]
+          "required": [
+            "message"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "plugin_id": {
+              "type": "string"
+            },
+            "echo": {
+              "type": "string",
+              "description": "原样回声的消息"
+            },
+            "alive": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "plugin_id",
+            "echo",
+            "alive"
+          ]
         }
       },
       {
@@ -33,12 +55,24 @@
         "input_schema": {
           "type": "object",
           "properties": {
-            "path": {"type": "string"},
-            "method": {"type": "string"},
-            "plugin_id": {"type": "string"},
-            "raw_body": {"type": "string"},
-            "headers": {"type": "object"},
-            "query": {"type": "object"}
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
           }
         }
       }

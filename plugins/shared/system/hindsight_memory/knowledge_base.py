@@ -15,9 +15,10 @@
 设计要点：
 - 韧性对齐本插件 server.py：hindsight client 未初始化时所有端点降级不崩溃
   （check 端点如实报告 available=false）。
-- 元数据仓为插件本地 JSON（``data/kb/kb_meta.json``，模块级 ``_kb_data_dir()``
-  可被测试 monkeypatch / env ``HINDSIGHT_KB_DATA_DIR`` 覆盖）；原子写
-  （临时文件 + os.replace），损坏时按空仓重建（只读路径永不炸）。
+- 元数据仓为插件本地 JSON（``data/kb/kb_meta.json``，``set_data_dir`` /
+  env ``HINDSIGHT_KB_DATA_DIR`` 可覆盖数据根；覆盖态下上传源文件与元数据
+  同根落盘，测试夹具不泄入真实 data/）；原子写（临时文件 + os.replace），
+  损坏时按空仓重建（只读路径永不炸）。
 - 环规：本模块所有 hindsight client 调用均为 async，且**必须在 MCP 事件循环内
   await**（aiohttp 会话 loop 绑定，另起新循环会炸）——server.py http.handle
   直接 await，不复用 sync 桥。
@@ -45,9 +46,17 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
+import sys
 import uuid
 from typing import Any
+
+# 共享层时间戳公共模块（plugins/shared 平铺，stdlib-only）裸名导入
+# （先例：task_submit/tool.py 的 _SHARED_ROOT 注入）。时间戳是持久化数据
+# 格式契约，属模块级依赖而非现场懒加载。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from time_iso import iso_sort_key, now_iso_utc as _now_iso  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +106,10 @@ _KB_DATA_DIR = os.environ.get("HINDSIGHT_KB_DATA_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "data", "kb"
 )
 
+# KB 数据根覆盖态（set_data_dir / HINDSIGHT_KB_DATA_DIR 生效时为 True）：
+# 覆盖态下上传源文件与元数据同根落盘（_resolve_kb_uploads_dir），夹具不泄入真实 data/
+_KB_DATA_DIR_OVERRIDDEN = bool(os.environ.get("HINDSIGHT_KB_DATA_DIR"))
+
 
 def set_client(client: Any | None) -> None:
     """注入 hindsight HTTP client 引用（server.py 分发时调用；测试直接传 mock）。"""
@@ -105,9 +118,10 @@ def set_client(client: Any | None) -> None:
 
 
 def set_data_dir(data_dir: str) -> None:
-    """覆盖元数据仓目录（测试隔离用）。"""
-    global _KB_DATA_DIR
+    """覆盖 KB 数据根：元数据仓与上传源文件同根落盘（测试隔离用）。"""
+    global _KB_DATA_DIR, _KB_DATA_DIR_OVERRIDDEN
     _KB_DATA_DIR = data_dir
+    _KB_DATA_DIR_OVERRIDDEN = True
 
 
 def _require_client() -> Any:
@@ -136,8 +150,8 @@ def _load_meta() -> dict[str, Any]:
             data = json.load(fh)
         if isinstance(data, dict) and isinstance(data.get("items"), list):
             return data
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("[knowledge_base] 元数据仓缺失或损坏（按空仓处理）: %s | %s", path, exc)
     return _empty_meta()
 
 
@@ -149,9 +163,6 @@ def _save_meta(meta: dict[str, Any]) -> None:
         json.dump(meta, fh, ensure_ascii=False, indent=2)
     os.replace(tmp, _meta_path())  # noqa: PTH105 —— 与仓库 os.* 风格一致
 
-
-def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 # ── 条目结构 ───────────────────────────────────────────────────────────────
@@ -187,7 +198,9 @@ def _chunk_text(text: str, chunk_size: int = _KB_CHUNK_SIZE) -> list[str]:
 def list_items() -> list[dict[str, Any]]:
     """知识库条目列表（按创建时间倒序，前端页面直接消费数组）。"""
     meta = _load_meta()
-    items = sorted(meta.get("items", []), key=lambda it: str(it.get("created_at", "")), reverse=True)
+    # created_at 存在新旧两种格式（iso_sort_key 归一后按真实时刻排序，
+    # 不可解析值回退字符串桶保持相对序稳定）
+    items = sorted(meta.get("items", []), key=lambda it: iso_sort_key(str(it.get("created_at", ""))), reverse=True)
     return [_item_public(it) for it in items]
 
 
@@ -434,8 +447,12 @@ def _auto_tag_from_ext(ext: str) -> str:
 def _resolve_kb_uploads_dir() -> str:
     """KB 源文件落盘目录：uploads 三方对齐（plugins/shared/uploads_path.py）下 kb/ 子目录。
 
-    ``UPLOADS_DIR`` env 覆盖（三方对齐协议原生支持）便于测试注入 tmp 目录。
+    KB 数据根覆盖态（set_data_dir / ``HINDSIGHT_KB_DATA_DIR``）→ ``{data_root}/uploads``，
+    与元数据同根（同一次 set_data_dir 语义，测试夹具不泄入真实 data/）；未覆盖
+    （生产形态）→ ``UPLOADS_DIR`` env / tenant_data_root 缺省解析，行为不变。
     """
+    if _KB_DATA_DIR_OVERRIDDEN:
+        return os.path.join(_KB_DATA_DIR, "uploads")
     try:
         import sys  # noqa: PLC0415
 

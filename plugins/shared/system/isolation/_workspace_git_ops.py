@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from agentos_plugin_sdk.fs_utils import force_rmtree
+
 import contextlib
 import logging
 import os
@@ -14,7 +16,6 @@ import stat
 import subprocess
 import threading
 from pathlib import Path
-from typing import cast
 
 logger = logging.getLogger(__name__)
 
@@ -65,26 +66,6 @@ def _safe_ws_name(project_name: str, task_id: str, name_limit: int = 100) -> str
     if len(safe) > name_limit:
         safe = safe[:name_limit].rstrip("._")
     return f"{safe}__wt_{task_id[:8]}"
-
-
-def _force_rmtree(path: str) -> None:
-    """强制删除目录树，兼容 Windows 下 .git 只读文件。
-
-    Windows 上 git objects 文件为只读属性，shutil.rmtree 默认无法删除。
-    通过 onerror 回调去除只读属性后重试。
-    """
-
-    def _on_error(func, filepath, exc_info):
-        if os.name == "nt":
-            os.chmod(filepath, stat.S_IWRITE)  # noqa: PTH101
-            func(filepath)
-        else:
-            raise  # noqa: PLE0704
-
-    try:
-        shutil.rmtree(path, onerror=_on_error)
-    except OSError:
-        shutil.rmtree(path, onerror=_on_error)
 
 
 class _GitOpsMixin:
@@ -307,7 +288,7 @@ class _GitOpsMixin:
             else:
                 logger.info("[WorkspaceLifecycle] Existing .git is empty/corrupt, removing: %s", git_dir)
                 try:
-                    _force_rmtree(str(git_dir))
+                    force_rmtree(str(git_dir))
                 except OSError as e:
                     logger.warning("[WorkspaceLifecycle] Failed to remove corrupt .git: %s", e)
                     return False

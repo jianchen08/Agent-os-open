@@ -1,0 +1,9 @@
+# 浏览器工具配置（browser_tool 插件经 config_files 注入）
+#
+# bridge 段：MCP Bridge 网关连接参数。bridge_base 是宿主侧直发地址；
+# 容器路径的地址候选由 bridge_client 自行推导（env → host.docker.internal → 网关）。
+
+bridge:
+  bridge_base: http://127.0.0.1:8765
+  upstream: browser
+  timeout_secs: 120

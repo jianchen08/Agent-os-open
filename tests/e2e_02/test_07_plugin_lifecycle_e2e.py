@@ -85,9 +85,9 @@ def _put_json_auth(url: str, token: str, data: dict, timeout: int = 30):
             return e.code, body
 
 
-def _tool_in_face(kernel: str) -> bool:
-    """探针工具是否在 LLM 工具面（GET /api/v1/tools，直连 capability registry）。"""
-    status, body, _ = http_get(f"{kernel}/api/v1/tools", timeout=10)
+def _tool_in_face(kernel: str, token: str) -> bool:
+    """探针工具是否在 LLM 工具面（GET /api/v1/tools 已认证，30d1b0959 后需登录态）。"""
+    status, body, _ = http_get_with_auth(f"{kernel}/api/v1/tools", token, timeout=10)
     if status != 200 or not isinstance(body, dict):
         return False
     return any(
@@ -186,16 +186,16 @@ def test_plugin_install_enable_disable_uninstall_lifecycle(kernel_url, auth_toke
             "启动期 manifest 未含探针插件（boot 应全量注入含 disabled）——"
             "内核启动时探针目录已存在？"
         )
-        if entry.get("enabled") is True or _tool_in_face(kernel):
+        if entry.get("enabled") is True or _tool_in_face(kernel, auth_token):
             _set_enabled(kernel, auth_token, False)
         _wait_until(
-            lambda: not _tool_in_face(kernel), 15, "归零：探针工具应不在工具面"
+            lambda: not _tool_in_face(kernel, auth_token), 15, "归零：探针工具应不在工具面"
         )
 
         # ── Phase 7.1 装载生效：启用 → 工具面 + /ext 双活 ──
         _set_enabled(kernel, auth_token, True)
         _wait_until(
-            lambda: _tool_in_face(kernel),
+            lambda: _tool_in_face(kernel, auth_token),
             60,
             "7.1 装载生效：PUT enabled=true 后工具应进 /api/v1/tools"
             "（含 G2 复核 spawn sidecar，CI 慢机留足冷启动）",
@@ -208,21 +208,21 @@ def test_plugin_install_enable_disable_uninstall_lifecycle(kernel_url, auth_toke
         # ── Phase 7.2 禁用失效：能力即时摘除 ──
         _set_enabled(kernel, auth_token, False)
         _wait_until(
-            lambda: not _tool_in_face(kernel), 15, "7.2 禁用失效：工具应立即消失"
+            lambda: not _tool_in_face(kernel, auth_token), 15, "7.2 禁用失效：工具应立即消失"
         )
         status, body, _ = _echo(kernel, "should-404")
         assert status == 404, f"7.2 /ext 期望 404（路由已摘），实际 {status}: {body}"
 
         # ── Phase 7.3 再启用对称：禁用不丢 manifest，重启用即恢复 ──
         _set_enabled(kernel, auth_token, True)
-        _wait_until(lambda: _tool_in_face(kernel), 60, "7.3 再启用：工具应恢复")
+        _wait_until(lambda: _tool_in_face(kernel, auth_token), 60, "7.3 再启用：工具应恢复")
         status, body, _ = _echo(kernel, "probe-reenable-live")
         assert status == 200, f"7.3 /ext 期望 200: {status} {body}"
         assert body.get("echo") == "probe-reenable-live", f"7.3 /ext 恢复不符: {body}"
 
         # ── Phase 7.4 卸载失效：目录摘除 → watcher P1 双面清 + store 无幽灵 ──
         _set_enabled(kernel, auth_token, False)  # 杀缓存 sidecar，解锁 .venv 文件
-        _wait_until(lambda: not _tool_in_face(kernel), 15, "7.4 前置：先禁用归零")
+        _wait_until(lambda: not _tool_in_face(kernel, auth_token), 15, "7.4 前置：先禁用归零")
         _rename_with_retry(PROBE_DIR, STASH_DIR)
         _nudge_rescan()
         _wait_until(
@@ -231,7 +231,7 @@ def test_plugin_install_enable_disable_uninstall_lifecycle(kernel_url, auth_toke
             "7.4 卸载失效：插件应从 /api/v1/plugins 摘除（store 无幽灵条目；"
             "上限兜住 watcher 60s 轮询周期）",
         )
-        assert not _tool_in_face(kernel), "7.4 卸载后工具不得残留工具面"
+        assert not _tool_in_face(kernel, auth_token), "7.4 卸载后工具不得残留工具面"
         status, _, _ = _echo(kernel, "uninstalled")
         assert status == 404, f"7.4 卸载后 /ext 期望 404，实际 {status}"
         _remove_nudge()
@@ -250,10 +250,10 @@ def test_plugin_install_enable_disable_uninstall_lifecycle(kernel_url, auth_toke
             "7.5 重装：热发现应把 disabled manifest 送回 store（列表可见且 enabled=false；"
             "上限兜住 watcher 60s 轮询周期）",
         )
-        assert not _tool_in_face(kernel), "7.5 重装后未启用，工具不得先出现"
+        assert not _tool_in_face(kernel, auth_token), "7.5 重装后未启用，工具不得先出现"
         _set_enabled(kernel, auth_token, True)
         _wait_until(
-            lambda: _tool_in_face(kernel),
+            lambda: _tool_in_face(kernel, auth_token),
             60,
             "7.5 重装启用：PUT enabled=true 应真注册（热发现的 disabled manifest "
             "必须入 store 并被启用）",

@@ -48,7 +48,9 @@ export async function getEvaluationMetrics(params?: {
 }): Promise<{ metrics: EvaluationMetric[]; total: number }> {
   const response = await apiClient.get<EvaluationMetricsListResponse>(
     API_ENDPOINTS.EVALUATION.METRICS,
-    { params },
+    // 可选端点（评估服务未启用时 404 属预期，调试页自身已降级）：
+    // 请求级显式标记，拦截器静默其 404，不做 URL 猜测
+    { params, optional: true },
   )
   // 后端评估服务保证 metric 字段全量返回（category/usage_count/success_count/
   // created_at 恒存在，见 plugins/shared/system/evaluation/server.py 的列表组装），

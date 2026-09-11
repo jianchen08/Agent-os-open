@@ -7,7 +7,9 @@
   "host_type": "sidecar",
   "entry": "python server.py",
   "invoke_entry": "isolation_guard.execute",
-  "persistent_fields": ["isolation.container_name"],
+  "persistent_fields": [
+    "isolation.container_name"
+  ],
   "capabilities": {
     "tools": [],
     "route_signals": [],
@@ -17,5 +19,16 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "state": {
+    "reads": [
+      "agent_level",
+      "core_type",
+      "execution_context",
+      "plugin_configs",
+      "raw_tool_calls",
+      "task.id",
+      "workspace"
+    ]
+  }
 }

@@ -4,11 +4,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { Loader2 } from '@/assets/icons'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
-import { useModelContextInfo } from '@/hooks/useModelContextInfo'
+import { usePipelineRunsQuery } from '@/hooks/queries/usePipelineRunsQuery'
+import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { getDefaults, getLLMConfig, type LLMDefaults } from '@/services/api/config'
 import { switchThinkingMode } from '@/services/api/thinkingMode'
 import { useAgentTabStore } from '@/stores/agentTabStore'
-import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -23,9 +23,8 @@ import {
   STRENGTH_TO_ENABLE,
   type ThinkingStrength,
 } from '@/types/thinkingMode'
-import { resolveModelDisplayName } from '@/utils/modelName'
 import { mainPipelineIdOf } from '@/utils/mappers'
-import { readSessions } from '@/hooks/queries/useSessionsQuery'
+import { resolveModelDisplayName } from '@/utils/modelName'
 import { findModelParams, mapParamsToStrength } from '@/utils/thinkingStrength'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
@@ -238,11 +237,18 @@ export const ChatContainer = ({
   /** 当前标签对应管道是否正在流式输出。
    *  双来源收紧：只用 activeTab.pipelineRunId 单一来源（与发送侧
    *  ChatInput 同款正例）——不再 fallback store 级 activePipelineId，Tab 数据损坏
-   *  时宁可不显示生成态也不串到别的管道。 */
+   *  时宁可不显示生成态也不串到别的管道。
+   *  runs 快照兜底（用户裁定 2026-09-11 恢复正常逻辑）：刷新页面/重进会话时
+   *  流式事件不会重放，run 若在工具执行间隙（无实时 chunk）会隐形运行——
+   *  生成态再并上 runs 快照的 running 真值（30s 轮询 + WS 增量同源），
+   *  停止按钮/输入框禁用据此恢复。 */
   const currentTabPipelineId = activeTab?.pipelineRunId || ''
-  const effectiveIsGenerating = usePipelineMessageStore(
+  const streamingActive = usePipelineMessageStore(
     (s) => (currentTabPipelineId ? (s.streamingState[currentTabPipelineId]?.isStreaming ?? false) : false),
   )
+  const { data: runsSnapshot = {} } = usePipelineRunsQuery()
+  const effectiveIsGenerating =
+    streamingActive || runsSnapshot[currentTabPipelineId]?.status === 'running'
 
   /**
    * 待定位消息 → MessageList 消费目标：仅当跳转目标管道正是当前激活管道时透传。
@@ -254,14 +260,6 @@ export const ChatContainer = ({
     [messageJump, currentTabPipelineId],
   )
 
-
-  /** 根据当前模型名获取动态 context_window 模型无效时 contextWindow=0，使下游进度条（maxTokens>0 才渲染）不显示假数据。 */
-  const { contextWindow: modelContextWindow } = useModelContextInfo(effectiveModelName)
-
-  /** 从 contextUsageStore 获取当前活跃管道的 token 使用量 每个管道（pipelineId）独立维护自己的 usage 数据。 */
-  const currentPipelineId = currentTabPipelineId || ''
-  const pipelineUsage = useContextUsageStore((s) => s.usageByPipeline[currentPipelineId])
-  const effectiveTokenUsage = pipelineUsage?.promptTokens ?? 0
 
   /** 思考强度：显式设置（标签记忆）优先；未设置时从当前管道模型参数反向映射
    *  （新会话/切标签自动应用管道实际档位），映射不出回退默认。 */
@@ -297,10 +295,6 @@ export const ChatContainer = ({
     },
     [setThinkingStrength, effectiveModelName],
   )
-
-  /** 最终的 maxTokens 和 currentTokenUsage */
-  const effectiveMaxTokens = modelContextWindow
-  const effectiveTokenCount = effectiveTokenUsage
 
   /**
    * 统一消息源：保留所有消息（含 tool）——渲染层 MessageList 的
@@ -401,7 +395,6 @@ export const ChatContainer = ({
         tabId={activeTabId || sessionId}
         messages={filteredMessages}
         isGenerating={effectiveIsGenerating}
-        modelName={effectiveModelName}
         className="flex-1"
         hasMore={hasMoreMessages}
         isLoadingMore={isLoadingMoreMessages}
@@ -442,7 +435,7 @@ export const ChatContainer = ({
           disabled={isSubTabFinished}
           isGenerating={effectiveIsGenerating}
           onSendMessage={(params) => {
-            if (isSubTabFinished) return
+            if (isSubTabFinished) return false
             // 管道 ID 单一来源：当前标签的 pipelineRunId（主标签=后端回填的主管道
             // ID，子标签=sub_agent_created 事件下发的子管道 ID）。
             // 主标签兜底：对话框预建会话在缓存重拉/事件回填竞态下 pipelineRunId
@@ -453,19 +446,31 @@ export const ChatContainer = ({
               const session = readSessions().find((s) => s.id === sessionId)
               pid = (session && mainPipelineIdOf(session)) || ''
             }
-            if (!pid) return
-            onSendMessage({ ...params, pipelineId: pid })
+            if (!pid) {
+              // 未受理显式提示 + 返回 false：ChatInput 保留输入与草稿（不再静默丢消息）
+              if (isSubTabActive) {
+                notifyDegradedOnce('chat-subtab-send-unsupported', {
+                  title: '子任务标签不支持发送',
+                  message: '请在主管道标签发送消息',
+                })
+              } else {
+                useNotificationStore.getState().addNotification({
+                  title: '会话管道未就绪',
+                  message: '会话管道未就绪，请稍候重试',
+                  priority: 'normal',
+                  category: 'error',
+                  isBlocking: false,
+                  autoDismissMs: 6000,
+                  sourceLabel: '前端',
+                })
+              }
+              return false
+            }
+            return onSendMessage({ ...params, pipelineId: pid })
           }}
           onStopGenerate={onStopGenerate}
           enableThinkingMode={true}
           modelName={effectiveModelName}
-          currentTokenUsage={effectiveTokenCount}
-          maxTokens={effectiveMaxTokens}
-          totalTokens={pipelineUsage?.totalTokens ?? 0}
-          completionTokens={pipelineUsage?.completionTokens ?? 0}
-          cumulative={pipelineUsage?.cumulative}
-          cachedTokens={pipelineUsage?.cachedTokens ?? 0}
-          hitRatio={pipelineUsage?.hitRatio ?? 0}
           thinkingStrength={activeThinkingStrength}
           onThinkingStrengthChange={handleThinkingStrengthChange}
         />

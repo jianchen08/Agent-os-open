@@ -11,8 +11,8 @@
   EvaluationExecutor）就地重建于同目录 _eval_core.py；
 - 任务领域类型（TaskStatus）以 plugins/shared/system/tasks/ 平铺模块为权威
   （server.py 注入 sys.path）；
-- 0.1 infrastructure.service_provider 已废弃 → 模块级 _get_service_provider()
-  shim（get 返回 None，调用方均有降级守卫）；
+- 服务获取面 = 模块级 _get_service_provider() shim（get 返回 None，
+  调用方均有降级守卫）；
 - 评估执行器由外部注入（构造参数 executor=...，duck-typing）：未注入时评估
   路径返回 EVAL_ENGINE_UNAVAILABLE，不静默空转。
 """
@@ -20,10 +20,10 @@
 import asyncio
 import contextlib
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
 import state_fields
+from time_iso import now_iso_utc as _now_iso  # 共享时间戳单点（task.ended_at 落 state）
 import worktree_merge
 from _eval_core import sanitize_eval_paths
 from task_types import TaskModel, TaskStatus
@@ -88,17 +88,16 @@ def set_default_executor(executor: Any) -> None:
     _default_executor = executor
 
 
-def _now_iso() -> str:
-    """当前 UTC 时间 ISO 串（task.ended_at 落 state 用，与内核 chrono 同格式）。"""
-    return datetime.now(UTC).isoformat()
 
-
-async def _write_task_state(task_id: str, fields: dict[str, Any]) -> None:
+async def _write_task_state(task_id: str, fields: dict[str, Any]) -> bool:
     """把任务域字段写入管道 state 单一真值（GAP-1：task.id == pipeline_id）。
 
     任务状态由任务域插件裁决写入（pipeline-state update capability），内核
-    不再回写 task.status。写面未注入（None）时静默降级——YAML 镜像仍由
-    task_service 维护，state 保持出生值 pending。
+    不再回写 task.status。写失败不阻断调用方主流程（仅日志），但返回值
+    如实回告是否落账——持久化承重的调用点（终态回写/重试计数）必须检查。
+
+    Returns:
+        True = 已写入写面；False = 写面未注入或写入失败（未落账）
     """
     writer = _get_state_writer()
     if writer is None:
@@ -107,7 +106,7 @@ async def _write_task_state(task_id: str, fields: dict[str, Any]) -> None:
             task_id,
             sorted(fields),
         )
-        return
+        return False
     try:
         await writer(task_id, fields)
     except Exception as exc:  # noqa: BLE001 — 写面失败不阻断评估主流程
@@ -117,9 +116,13 @@ async def _write_task_state(task_id: str, fields: dict[str, Any]) -> None:
             sorted(fields),
             exc,
         )
+        return False
+    return True
 
 _DEFAULT_MAX_RETRIES = 3
-_DEFAULT_EVAL_TIMEOUT = 1200.0
+# 语义评估 = 等评估子管道全程（多轮 LLM），管道级预算 1800s，与 manifest
+# mcp.request_timeout_secs 对齐（内核面死线不得小于此值，否则先被内核掐断）
+_DEFAULT_EVAL_TIMEOUT = 1800.0
 _DEFAULT_MAX_EVAL_CALLS = 15
 # ws_meta 读取失败类合并门控的重试上限（耗尽判死，与评估重试同构）
 _MERGE_GATE_MAX_FAILURES = 3
@@ -131,7 +134,7 @@ _VALID_AUTO_COMPLETE_STATUSES = {TaskStatus.RUNNING, TaskStatus.EVALUATING}
 class _ServiceProviderShim:
     """0.2 服务提供者适配：get(key) 返回 0.2 等价或 None（文档化降级）。
 
-    0.1 的 infrastructure.service_provider 已废弃（src/ 已归档）。0.2 sidecar
+    0.2 sidecar
     无 agent_registry / tool_registry / execution_record_storage 等价单例 →
     统一返回 None，调用方均有降级守卫（如 _register_eval_pipelines 跳过管道
     注册）。worktree 合并门控已不在此列：0.2 改经 worktree_merge 共享模块
@@ -143,7 +146,7 @@ class _ServiceProviderShim:
 
 
 def _get_service_provider() -> Any:
-    """0.2 服务提供者获取（FP-MIGR：替代已废弃的 infrastructure.service_provider）。"""
+    """服务提供者获取（未注入时 get 返回 None，调用方降级）。"""
     return _ServiceProviderShim()
 
 
@@ -905,6 +908,12 @@ class TaskEvaluateTool(BuiltinTool):
                 )
             except Exception as e:
                 logger.error("[TaskEvaluate] 恢复失败状态为完成失败: %s", e)
+                # 终态回写失败不得返回与成功同值（task 实际仍 failed）
+                return create_failure_result(
+                    error=f"恢复失败状态为完成失败: {e}",
+                    error_code="RECOVER_TO_COMPLETED_FAILED",
+                    metadata={"task_failed": True},
+                )
         else:
             # worktree 合并门控（0.1 判定）：worktree 模式 completed 前先合并，
             # 合并成功才变更状态，失败则标记为 failed。合并是同步 git 子进程
@@ -926,13 +935,27 @@ class TaskEvaluateTool(BuiltinTool):
                     if task.metadata is None:
                         task.metadata = {}
                     task.metadata["merge_gate_failures"] = gate_failures
-                    try:
-                        await _write_task_state(
-                            str(task.id),
-                            {"task.merge_gate_failures": gate_failures},
+                    gate_persisted = await _write_task_state(
+                        str(task.id),
+                        {"task.merge_gate_failures": gate_failures},
+                    )
+                    if not gate_persisted:
+                        # 计数未持久化 → 重试计数永不递增（可无限重试），不得返回
+                        # 重试信令；返回不可重试错误并在 metadata 明示未落账。
+                        logger.error(
+                            "[TaskEvaluate] merge_gate_failures 落 state 失败，返回不可重试错误: task_id=%s",
+                            task.id,
                         )
-                    except Exception as e:
-                        logger.error("[TaskEvaluate] merge_gate_failures 落 state 失败: %s", e)
+                        return create_failure_result(
+                            error=(
+                                f"合并门控重试计数未持久化（state 写面失败），已拒绝继续重试: {merge_error}"
+                            ),
+                            error_code="MERGE_GATE_STATE_WRITE_FAILED",
+                            metadata={
+                                "merge_gate_failures": gate_failures,
+                                "gate_state_persisted": False,
+                            },
+                        )
                     if gate_failures < _MERGE_GATE_MAX_FAILURES:
                         logger.warning(
                             "[TaskEvaluate] 工作区元数据未就绪（合并门控第 %d/%d 次），返回重试不判死: task_id=%s",
@@ -952,13 +975,14 @@ class TaskEvaluateTool(BuiltinTool):
                     task.id,
                     merge_error,
                 )
+                state_persisted = False
                 try:
                     eval_data = self._build_result_data(eval_result)
                     eval_data["overall_passed"] = False
                     eval_data["merge_failure"] = merge_error
                     eval_data["summary"] = f"评估指标已通过，但完成前工作区门控失败: {merge_error}"
                     await task_service.complete_evaluation(task.id, passed=False, result=eval_data)
-                    await _write_task_state(
+                    state_persisted = await _write_task_state(
                         task.id,
                         {
                             "task.status": "failed",
@@ -970,9 +994,21 @@ class TaskEvaluateTool(BuiltinTool):
                     )
                 except Exception as e:
                     logger.error("[TaskEvaluate] complete_evaluation(passed=False) 失败: %s", e)
+                    # 兜底：任务域终态写失败时仍尝试把 failed 落 state，
+                    # 避免 task 永久停留在非 failed 态（状态不落账）
+                    state_persisted = await _write_task_state(
+                        task.id,
+                        {
+                            "task.status": "failed",
+                            "task.ended_at": _now_iso(),
+                            "task.eval_summary": submitted_summary
+                            or self._build_rich_summary(eval_result),
+                            "task.error": merge_error,
+                        },
+                    )
                 return create_failure_result(
                     error=merge_error,
-                    metadata={"task_failed": True},
+                    metadata={"task_failed": True, "state_persisted": state_persisted},
                 )
             try:
                 eval_data = self._build_result_data(eval_result)
@@ -1008,8 +1044,8 @@ class TaskEvaluateTool(BuiltinTool):
         ws_meta 数据源（0.2 适配）：从管道 state 聚合行解析（task.metadata 兜底）；
         合并 git 机制经 worktree_merge 共享模块原样执行（同步 git 子进程串，
         asyncio.to_thread 丢线程池——不冻主事件循环，合并锁跨线程有效）。
-        0.1 的跨进程 ServiceProvider 获取不复存在，也无"服务不可用跳过"分支：
-        ws_meta 读不到 = 门控失败（worktree 产物不能静默丢失）。
+        无"服务不可用跳过"分支：ws_meta 读不到 = 门控失败
+        （worktree 产物不能静默丢失）。
 
         Returns:
             None 表示合并成功或不需要合并（plain/shared 模式），
@@ -1445,7 +1481,7 @@ class TaskEvaluateTool(BuiltinTool):
         """根据任务元数据获取评估超时时间（秒）。
 
         优先使用 task.metadata.eval_timeout（允许单个任务自定义），
-        默认 _DEFAULT_EVAL_TIMEOUT（300秒）。
+        默认 _DEFAULT_EVAL_TIMEOUT。
         """
         metadata = task.metadata if task.metadata else {}
         custom_timeout = metadata.get("eval_timeout")

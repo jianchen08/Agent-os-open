@@ -40,6 +40,7 @@ else:
 MemoryTool = _tool_mod.MemoryTool
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk.capability import bind_capability_caller  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("memory_tool")
@@ -62,28 +63,7 @@ def _make_capability_caller() -> Any | None:
         handle = plugin.get_capability("tool-executor")
     except KeyError:
         return None
-    return _bind_caller(handle, "tool-executor")
-
-
-def _bind_caller(handle: Any, cap_name: str) -> Any:
-    """绑定能力句柄与命名空间，构造 async caller `(method, params) -> Any`。
-
-    闭包通过函数参数绑定，规避 B023（循环变量绑定）。
-
-    Args:
-        handle: CapabilityHandle 实例（其 call 会拼接 ``f"{cap}.{method}"``）
-        cap_name: 能力命名空间（如 "tool-executor"）
-
-    Returns:
-        async caller：剥掉 memory_backend 已含的能力前缀后转交 handle.call
-    """
-    prefix = f"{cap_name}."
-
-    async def _call(method: str, params: dict[str, Any]) -> Any:
-        stripped = method[len(prefix):] if method.startswith(prefix) else method
-        return await handle.call(stripped, params)
-
-    return _call
+    return bind_capability_caller(handle, "tool-executor")
 
 
 def _build_memory_backend() -> Any | None:

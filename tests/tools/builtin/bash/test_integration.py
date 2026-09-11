@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """Bash 工具集成测试 — 真实 subprocess 端到端验证。
 
 覆盖：

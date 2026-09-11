@@ -10,6 +10,7 @@
  * - 二进制文档（docx/xlsx）：前端无法解析，走 binary 提示
  */
 
+import { toast } from 'sonner'
 import { registerFileEditor } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 
@@ -47,16 +48,20 @@ export async function openAttachment(target: AttachmentOpenTarget): Promise<void
   }
 
   const isMedia = MEDIA_EXTENSIONS.test(name)
-  // 图片/PDF 靠 url 渲染；文本/代码需 fetch 内容
+  // 图片/PDF 靠 url 渲染；文本/代码需 fetch 内容。
+  // fetch 失败显式 toast 告知（显式失败优于静默空内容）；Tab 仍打开，
+  // 内容留空由 CodeEditor/FilePreview 显示占位，url 兜底渲染。
   let content = ''
   if (!isMedia) {
     try {
       const resp = await fetch(url)
       if (resp.ok) {
         content = await resp.text()
+      } else {
+        toast.error(`附件 "${name}" 加载失败（HTTP ${resp.status}）`)
       }
     } catch {
-      // 二进制或网络失败：留空，CodeEditor/FilePreview 会显示占位
+      toast.error(`附件 "${name}" 加载失败，请检查网络或附件是否可用`)
     }
   }
 

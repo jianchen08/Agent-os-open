@@ -11,7 +11,6 @@ add_plugin_dir("input", "model_prompt_adapter")
 
 import asyncio  # noqa: E402
 import re  # noqa: E402
-from pathlib import Path  # noqa: E402
 
 import plugin as mpa_plugin  # noqa: E402
 from pipeline.plugin import PluginContext  # noqa: E402
@@ -199,17 +198,15 @@ def test_first_matching_rule_wins():
 
 
 def test_shipped_rules_yaml_structure():
-    """仓库自带 rules.yaml 可加载，deepseek-v4-pro 规则结构完整。
+    """仓库自带 rules.yaml 经公开入口（缺省构造→execute）加载命中，结构完整。
 
     防止规则文件被改坏（示例丢失/字段漂移）导致静默失效。
     """
-    rules_path = Path(mpa_plugin.__file__).resolve().parent / "rules.yaml"
-    rules = mpa_plugin.load_rules_from(rules_path)
-    assert rules, "rules.yaml 应至少含一条规则"
-
-    ds = next(r for r in rules if "deepseek" in str(r.get("when", {}).get("model_id", "")))
-    inject = ds.get("inject") or []
-    assert len(inject) == 2
+    p = mpa_plugin.ModelPromptAdapterPlugin(config={})  # 缺省加载插件目录 rules.yaml
+    result = _run(p, {"model_id": "deepseek-v4-pro", "messages": []})
+    ops = result.state_updates["messages"]["_ops"]
+    assert len(ops) == 2, "rules.yaml 应至少含 deepseek-v4-pro 命中规则且注入两条"
+    inject = [op["msg"] for op in ops]
     assert inject[0]["role"] == "user"
     assert inject[1]["role"] == "assistant"
     # 思维链示例风格断言（从 DSH 完整环境 v4-pro 实跑 rc 改写，

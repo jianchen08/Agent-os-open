@@ -51,8 +51,8 @@ export interface PluginValidationResult {
   get valid(): boolean
 }
 
-/** 页面目标空间（与 ContributionRegistry.PageSpace 一致，封闭集合） */
-const PAGE_SPACES = new Set(['settings', 'workspace', 'chat', 'floating', 'dock', 'fullscreen'])
+/** 页面目标空间（与 ContributionRegistry.PageSpace 一致，封闭集合；debug_center 为调试中心 hub 专属组台空间） */
+const PAGE_SPACES = new Set(['settings', 'workspace', 'chat', 'floating', 'dock', 'fullscreen', 'debug_center'])
 
 /** 字段 type 词汇表（与 types/schema.ts UIInputFormField.type 一致） */
 const FIELD_TYPES = new Set([
@@ -244,8 +244,8 @@ export function validatePluginDeclaration(
     }
     if (!nonEmptyString(w.id)) errors.push(`${ctx} 缺 id`)
     if (!nonEmptyString(w.type)) errors.push(`${ctx} 缺 type（无法路由到 widget 渲染）`)
-    // 自定义 space 属合法扩展（widget_demo 用 widget-demo/agent-studio 等自定义空间），
-    // 未知时 SchemaRouter 落回默认空间——记 warning 不报 error
+    // 自定义 space 属合法扩展（插件可自带 space 名）——未知 space 时
+    // SchemaRouter 落回默认空间，记 warning 不报 error
     if (w.space !== undefined && !nonEmptyString(w.space)) {
       warnings.push(`${ctx} id=${String(w.id)} space 非字符串`)
     }

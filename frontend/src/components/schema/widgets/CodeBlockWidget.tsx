@@ -122,14 +122,12 @@ function highlightCode(
       type: 'plain' | 'keyword' | 'string' | 'comment' | 'number'
     }> = []
 
-    // 注释检测
     const trimmedLine = line.trimStart()
     if (trimmedLine.startsWith('//') || trimmedLine.startsWith('#')) {
       tokens.push({ text: line, type: 'comment' })
       return tokens
     }
 
-    // 使用简单的正则拆分
     const regex =
       /(\/\/.*$|#.*$)|(["'`])(?:(?!\2|\\).|\\.)*\2|(\b\d+(?:\.\d+)?\b)|(\b\w+\b)/g
 
@@ -137,7 +135,6 @@ function highlightCode(
     let match: RegExpExecArray | null
 
     while ((match = regex.exec(line)) !== null) {
-      // 添加匹配之前的普通文本
       if (match.index > lastIndex) {
         tokens.push({ text: line.slice(lastIndex, match.index), type: 'plain' })
       }
@@ -155,14 +152,12 @@ function highlightCode(
           tokens.push({ text: word, type: 'plain' })
         }
       } else {
-        // 字符串
         tokens.push({ text: fullMatch, type: 'string' })
       }
 
       lastIndex = match.index + fullMatch.length
     }
 
-    // 添加剩余文本
     if (lastIndex < line.length) {
       tokens.push({ text: line.slice(lastIndex), type: 'plain' })
     }

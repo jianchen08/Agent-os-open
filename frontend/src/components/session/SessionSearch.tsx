@@ -5,8 +5,8 @@
  * 无搜索范围选择控件。输入由父组件（Sidebar）防抖调用后端搜索 API，本组件为受控展示。
  */
 
-import { Search, X } from '@/assets/icons'
 import { memo, useCallback, useRef } from 'react'
+import { Search, X } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 
 interface SessionSearchProps {

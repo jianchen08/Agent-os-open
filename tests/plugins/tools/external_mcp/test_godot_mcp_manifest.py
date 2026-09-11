@@ -1,17 +1,24 @@
 # @feature: FP-0.2.一 插件协议 | @ci: python-coverage
 # @feature: scan批B 安全三修复 | @vision: V2 可观测 | @ci: python-coverage
-"""godot_mcp 外部 MCP 插件 manifest 契约测试（scan批B #3）。
+"""godot_mcp 插件 manifest 契约测试。
 
-锁定两件事：
+0919e823e 起 external MCP 改造为 Python 工具代理：manifest 无 mcp.endpoint
+（stdio 会话由 tool.py 的 _ServeProxy 按需驱动），机器本地值不再走
+endpoint.env ${VAR} 占位注入，机器级配置只剩 GODOT_MCP_BIN 环境变量名
+（tool.py 运行时读取；缺失/非法时调用即失败并指名变量，该行为由插件自带
+test_godot_run.py::TestGodotRunExecute 锁定，此处不重复）。旧契约中的
+GODOT_PROJECT_DIR 注入已随 workspace 路由裁定（2026-09-03）从契约移除。
+
+本文件锁定 manifest 自身契约：
 1. 机器本地路径不得入库——manifest 全文不允许出现盘符绝对路径；
-   二进制与 demo 工程一律经 endpoint.env 的 ${VAR} 占位注入
-   （内核 resolve_env_placeholders 解析：进程 env → .env overlay，
-   缺失时 spawn 早失败并指名变量）。
-2. 接线形态：command 为 PATH 可解析的 "python" 引导（外部 stdio 分支
-   不设 working_dir，不能依赖插件目录相对路径），bootstrap 显式消费
-   GODOT_MCP_BIN / GODOT_PROJECT_DIR。
+2. Python 工具代理接线形态——tool 型 manifest，sidecar + 相对 entry
+   （spawn 以插件目录为锚，不依赖机器本地路径）；
+3. 工具契约——capabilities.tools 声明 godot_run 且带 input/output schema；
+4. 机器本地二进制只以环境变量名（GODOT_MCP_BIN）出现在 manifest，
+   无 ${VAR} 占位残留。
 
-[来源: docs/working/规则驱动全仓扫描报告_20260827.md tools Should Fix #11]
+[来源: docs/working/规则驱动全仓扫描报告_20260827.md tools Should Fix #11；
+ 契约形态随 0919e823e（Python 工具代理）更新]
 """
 
 from __future__ import annotations
@@ -31,16 +38,14 @@ _MANIFEST = (
 
 
 @pytest.fixture(scope="module")
-def manifest_text() -> str:
-    # 解析后重新序列化：契约针对数据本身，不锁排版/转写细节。
-    return json.dumps(json.loads(_MANIFEST.read_text(encoding="utf-8")), ensure_ascii=False)
+def manifest() -> dict:
+    return json.loads(_MANIFEST.read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")
-def endpoint(manifest_text: str) -> dict:
-    mcp = json.loads(manifest_text).get("mcp") or {}
-    assert mcp.get("transport") == "stdio"
-    return mcp.get("endpoint") or {}
+def manifest_text(manifest: dict) -> str:
+    # 重新序列化：契约针对数据本身，不锁排版/转写细节。
+    return json.dumps(manifest, ensure_ascii=False)
 
 
 def test_no_machine_absolute_paths(manifest_text: str) -> None:
@@ -49,44 +54,33 @@ def test_no_machine_absolute_paths(manifest_text: str) -> None:
     assert not drives, f"发现机器本地绝对路径入库: {drives}"
 
 
-def test_command_is_path_resolvable_python(endpoint: dict) -> None:
-    """外部 stdio 分支无 working_dir → command 必须是 PATH 可解析的 python。"""
-    assert endpoint["command"] == "python"
-    args = endpoint["args"]
-    assert args[:1] == ["-c"], "引导脚本应内联于 -c（无工作目录锚点可用）"
+def test_declares_python_tool_proxy(manifest: dict) -> None:
+    """接线形态：Python 工具代理（sidecar + 相对 entry）。
+
+    entry 相对插件目录锚定，不依赖机器本地路径——承接旧契约"spawn 引导
+    不得依赖插件目录之外的本机锚点"。
+    """
+    assert manifest["plugin_type"] == "tool"
+    assert manifest["language"] == "python"
+    assert manifest["host_type"] == "sidecar"
+    parts = manifest["entry"].split()
+    assert parts[0] == "python", "entry 必须以 python 解释器引导"
+    assert parts[-1] == "server.py", "entry 必须指向插件内相对入口脚本"
 
 
-def test_endpoint_env_placeholders_declared(endpoint: dict) -> None:
-    """两个机器本地值必须经 ${VAR} 声明，由内核解析与缺失早失败。"""
-    env = endpoint.get("env") or {}
-    assert env.get("GODOT_MCP_BIN") == "${GODOT_MCP_BIN}"
-    assert env.get("GODOT_PROJECT_DIR") == "${GODOT_PROJECT_DIR}"
+def test_tool_declaration_contract(manifest: dict) -> None:
+    """工具契约：声明 godot_run，input/output schema 齐备，method 必填。"""
+    tools = manifest["capabilities"]["tools"]
+    names = [t.get("name") for t in tools]
+    assert "godot_run" in names, f"必须声明 godot_run 工具: {names}"
+    tool = next(t for t in tools if t["name"] == "godot_run")
+    assert isinstance(tool.get("input_schema"), dict)
+    assert isinstance(tool.get("output_schema"), dict)
+    assert "method" in tool["input_schema"].get("required", [])
 
 
-def test_bootstrap_consumes_injected_env(endpoint: dict) -> None:
-    """引导脚本显式消费两个注入变量并透传 serve 参数给二进制。"""
-    script = next(a for a in endpoint["args"] if a != "-c")
-    assert "GODOT_MCP_BIN" in script
-    assert "GODOT_PROJECT_DIR" in script
-    assert "serve" in script
-    assert "--typed=false" in script
-    assert "--project" in script
-
-
-@pytest.mark.parametrize("missing", ["GODOT_MCP_BIN", "GODOT_PROJECT_DIR"])
-def test_bootstrap_requires_both_envs(monkeypatch, missing) -> None:
-    """攻击面输入对照：任一注入缺失，引导立即失败（不静默降级半配置启动）。"""
-    endpoint = json.loads(_MANIFEST.read_text(encoding="utf-8"))["mcp"]["endpoint"]
-    script = next(a for a in endpoint["args"] if a != "-c")
-    monkeypatch.setenv("GODOT_MCP_BIN", "/fake/godot-mcp")
-    monkeypatch.setenv("GODOT_PROJECT_DIR", "/fake/project")
-    monkeypatch.delenv(missing, raising=False)
-
-    import subprocess
-    import sys as _sys
-
-    proc = subprocess.run(
-        [_sys.executable, "-c", script], capture_output=True, text=True, check=False
-    )
-    assert proc.returncode != 0, f"缺失 {missing} 时必须失败"
-    assert missing in (proc.stderr + proc.stdout)
+def test_machine_local_bin_by_env_name_only(manifest_text: str) -> None:
+    """机器本地二进制位置只以环境变量名出现（tool.py 运行时读取），
+    不经 manifest 注入、不留 ${VAR} 占位残留。"""
+    assert "GODOT_MCP_BIN" in manifest_text, "部署环境变量名必须在 manifest 可见"
+    assert "${" not in manifest_text, "endpoint.env ${VAR} 注入已随 Python 代理形态移除"

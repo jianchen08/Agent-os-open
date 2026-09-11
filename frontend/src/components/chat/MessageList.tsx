@@ -63,7 +63,6 @@ export interface ExtendedMessageListProps extends MessageListProps {
 export const MessageList = ({
   messages,
   isGenerating = false,
-  modelName,
   className = '',
   hasMore = false,
   isLoadingMore = false,
@@ -176,7 +175,6 @@ export const MessageList = ({
             message={message}
             isLast={isLast}
             isGenerating={isGenerating && isLast}
-            modelName={modelName}
             searchQuery={searchQuery}
             taskId={taskId}
             onEdit={onEdit}
@@ -188,7 +186,6 @@ export const MessageList = ({
     },
     [
       isGenerating,
-      modelName,
       searchQuery,
       taskId,
       onEdit,
@@ -333,6 +330,11 @@ export const MessageList = ({
       pinToBottom()
       if (ticks >= 24) window.clearInterval(intervalId) // 1.2s 后停止
     }, 50)
+    // 卸载即清：deps 含 messages.length，流式期间每次长度变化都会新建一个
+    // interval，无清理会在卸载/重建风暴下叠加并发操作已卸载组件。
+    return () => {
+      window.clearInterval(intervalId)
+    }
   }, [messages.length, tabId, pinToBottom])
 
   /**

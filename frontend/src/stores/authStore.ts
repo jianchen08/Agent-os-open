@@ -8,8 +8,8 @@
 
 import { create } from 'zustand'
 import { STORAGE_KEYS } from '../constants/storage'
+import { queryClient } from '../services/query/queryClient'
 import * as authApi from '../services/api/auth'
-import { registerAuthExpiredCallback } from '../services/authCallbacks'
 import {
   getAccessToken,
   getRefreshTokenValue,
@@ -18,10 +18,12 @@ import {
   isExpired,
   isAuthFailureFromError,
   refresh,
+  scrubLegacyTokenStorages,
   startAutoRefresh,
   stopAutoRefresh,
   onTokenChanged,
 } from '../services/auth/tokenLifecycle'
+import { registerAuthExpiredCallback } from '../services/authCallbacks'
 import type { LoginResponse, RefreshResponse, UserInfoResponse } from '../types/api'
 import type { User } from '../types/models'
 
@@ -34,6 +36,8 @@ interface AuthState {
   refreshTokenValue: string | null
   /** 是否已认证 */
   isAuthenticated: boolean
+  /** 首登强制改密（D1-4）：播种账号 login 响应携带，改密成功后清除 */
+  mustChangePassword: boolean
   /** 是否正在加载 */
   isLoading: boolean
   /** 是否正在初始化认证状态 */
@@ -50,6 +54,8 @@ interface AuthState {
   initializeAuth: () => Promise<void>
   /** 获取当前用户信息 */
   fetchCurrentUser: () => Promise<void>
+  /** 修改口令（验旧→写新哈希→吊销其他会话；响应携带新 token 对） */
+  changePassword: (oldPassword: string, newPassword: string) => Promise<void>
   /** 清除错误 */
   clearError: () => void
 }
@@ -108,14 +114,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   token: null,
   refreshTokenValue: null,
   isAuthenticated: false,
+  mustChangePassword: false,
   isLoading: false,
   isInitializing: true, // 初始状态为true，表示正在初始化
   error: null,
 
   /** 登录 调用后端 POST /api/v1/auth/login 端点进行认证。 */
   login: async (username, password) => {
-    // 验证输入
-    if (!username || !password) {
+      if (!username || !password) {
       throw new Error('用户名和密码不能为空')
     }
 
@@ -128,10 +134,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         token: response.access_token,
         refreshTokenValue: response.refresh_token,
         isAuthenticated: true,
+        mustChangePassword: response.must_change_password === true,
         isLoading: false,
         error: null,
       })
       await persistSessionAndLoadUser(response, set, '登录')
+
+      // 认证态翻转即清空全部查询缓存：登录前已挂载的 query（sessions 等）
+      // 以旧身份拉取的数据对新用户不可见即弃（invalidate 的重拉失败时旧数据
+      // 仍滞留展示——同标签页 admin→注册新用户实测泄露旧会话列表，深度测试
+      // 2026-09-11 晚）。removeQueries 移除后活动观察者立即以新身份重拉。
+      // 登录失败不走到这里，不触发清空。
+      queryClient.removeQueries()
 
       // 登录成功后 await restartGrowthLoop 确保模块就绪
       try {
@@ -149,8 +163,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   /** 注册 调用后端 POST /api/v1/auth/register 端点创建账户。 */
   register: async (username, password, email) => {
-    // 验证输入
-    if (!username || !password) {
+      if (!username || !password) {
       throw new Error('用户名和密码不能为空')
     }
     if (!email) {
@@ -167,10 +180,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         token: response.access_token,
         refreshTokenValue: response.refresh_token,
         isAuthenticated: true,
+        mustChangePassword: response.must_change_password === true,
         isLoading: false,
         error: null,
       })
       await persistSessionAndLoadUser(response, set, '注册')
+
+      // 认证态翻转即清空全部查询缓存（同 login：注册即登录）
+      queryClient.removeQueries()
 
       // 注册成功后 await restartGrowthLoop 确保模块就绪
       try {
@@ -207,7 +224,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // 这些状态会在 sessionListStore.fetchSessions 恢复时被使用，
     // 让重登后自动回到退出前的会话。
     // 注：会话被主动删除时由 sessionListStore 单独清理此 key（合理）。
-    // localStorage.removeItem(STORAGE_KEYS.LAST_ACTIVE_SESSION) // ← 不再删除
     localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
 
     set({
@@ -215,49 +231,42 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       token: null,
       refreshTokenValue: null,
       isAuthenticated: false,
+      mustChangePassword: false,
       error: null,
     })
   },
 
-  /** 初始化认证状态（从localStorage恢复）：令牌有效性判定与恢复刷新全部经 tokenLifecycle。 */
+  /** 修改口令：成功后落新 token 对并清除强制改密标记。 */
+  changePassword: async (oldPassword, newPassword) => {
+    const response = await authApi.changePassword(oldPassword, newPassword)
+    setTokens(
+      response.access_token,
+      response.refresh_token ?? getRefreshTokenValue() ?? '',
+      response.expires_in,
+    )
+    startAutoRefresh()
+    set({
+      token: response.access_token,
+      refreshTokenValue: response.refresh_token ?? getRefreshTokenValue(),
+      mustChangePassword: false,
+      error: null,
+    })
+  },
+
+  /**
+   * 初始化认证状态：令牌有效性判定与恢复刷新全部经 tokenLifecycle。
+   * D12-7 后 access token 仅存内存——页面刷新后恒走 refresh 轮换链路恢复；
+   * 同页 store 重建（内存 token 仍有效）则直接恢复，不白耗一次轮换。
+   */
   initializeAuth: async () => {
     try {
-      const storedToken = getAccessToken()
-      const storedRefreshToken = getRefreshTokenValue()
+      // 升级残留清擦：localStorage 不允许留任何 token（D12-7 验收）
+      scrubLegacyTokenStorages()
       const storedUser = localStorage.getItem(STORAGE_KEYS.AUTH_USER)
 
-      if (storedToken) {
-        if (isExpired()) {
-          // Token 已过期，尝试刷新
-          if (storedRefreshToken) {
-            try {
-              await refresh()
-              // 刷新成功，获取用户信息；成功后标记已认证，触发
-              // initializeGrowthLoop() 重建工作区标签。
-              await get().fetchCurrentUser()
-              set({ isAuthenticated: true, isInitializing: false })
-              return
-            } catch (refreshError) {
-              if (isAuthFailureFromError(refreshError)) {
-                // refresh_token 真正失效，登出
-                await get().logout()
-                set({ isInitializing: false })
-                return
-              }
-              // 暂时性故障（网络/超时/5xx）：保留旧 token，不登出，
-              // 让用户停留在未认证状态，网络恢复后可继续使用旧会话状态。
-              // 不设置 isAuthenticated=true（旧 token 已过期），但保留工作区状态。
-              set({ isInitializing: false })
-              return
-            }
-          }
-          // 没有 refresh_token，清除所有数据
-          await get().logout()
-          set({ isInitializing: false })
-          return
-        }
-
-        // Token 未过期，恢复认证状态
+      const memoryToken = getAccessToken()
+      if (memoryToken && !isExpired()) {
+        // 内存 token 仍有效（同页重建）：直接恢复认证状态
         let user: User | null = null
         if (storedUser) {
           try {
@@ -266,30 +275,51 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             // 解析失败，使用 null
           }
         }
-
         set({
           user,
-          token: storedToken,
-          refreshTokenValue: storedRefreshToken,
+          token: memoryToken,
+          refreshTokenValue: getRefreshTokenValue(),
           isAuthenticated: true,
           isInitializing: false,
         })
-
-        // 恢复后安排主动刷新（页面刷新恢复的 token 同样需要续期）
+        // 恢复后安排主动刷新
         startAutoRefresh()
-
         // 异步获取最新用户信息
         get()
           .fetchCurrentUser()
           .catch(() => {
             // 获取失败，静默处理
           })
-      } else {
-        // 没有存储的token，初始化完成
-        set({ isInitializing: false })
+        return
       }
+
+      const storedRefreshToken = getRefreshTokenValue()
+      if (storedRefreshToken) {
+        // 页面刷新恢复：refresh 轮换换取新 token 对
+        try {
+          await refresh()
+          // fetchCurrentUser 经 me 带回首登改密标记（D1-4）
+          await get().fetchCurrentUser()
+          set({ isAuthenticated: true, isInitializing: false })
+          return
+        } catch (refreshError) {
+          if (isAuthFailureFromError(refreshError)) {
+            // refresh_token 真正失效，登出
+            await get().logout()
+            set({ isInitializing: false })
+            return
+          }
+          // 暂时性故障（网络/超时/5xx）：保留凭据，不登出，
+          // 让用户停留在未认证状态，网络恢复后可继续恢复。
+          set({ isInitializing: false })
+          return
+        }
+      }
+
+      // 没有任何可恢复凭据，初始化完成
+      set({ isInitializing: false })
     } catch (_error) {
-      // localStorage不可用或其他错误，安全降级
+      // 存储不可用或其他错误，安全降级
       set({ isInitializing: false })
     }
   },
@@ -302,7 +332,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // 持久化用户信息
     localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user))
 
-    set({ user })
+    // 首登改密标记以 me 为统一出口（登录/刷新/恢复各路径都会走到这里）
+    set({ user, mustChangePassword: userInfo.must_change_password === true })
   },
 
   /** 清除错误 */

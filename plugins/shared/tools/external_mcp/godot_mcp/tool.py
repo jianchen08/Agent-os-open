@@ -7,6 +7,12 @@ workspace 及其祖先的 project.godot > git worktree 还原主工程（编辑�
 `godot-mcp-go serve --typed=false --project <dir>` 子进程（MCP over stdio，
 addon WebSocket 端口经工程内发现文件自动发现），进程按工程缓存复用，
 死进程下次调用自动重建。机器级 env 只剩 GODOT_MCP_BIN（二进制位置）。
+
+端口钉扎（2026-09-05）：spawn 前读工程内 discovery 文件
+（<project>/.godot/godot-mcp.json，addon 写入实际端口+pid），端口有效且
+pid 存活时显式传 --port。serve 端"discovery 读不到回退 9080"是并行工程
+wrong_editor 互撞的根（本工程编辑器未开时撞上别的工程编辑器），钉死后
+该路径不复存在；stale discovery（pid 已死）视同编辑器未开走自动拉起。
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ _INIT_TIMEOUT_SECONDS = 20.0
 _CALL_TIMEOUT_SECONDS = 90.0  # serve 自身单次调用默认 60s，客户端留余量
 _AUTOSTART_WAIT_SECONDS = 120.0  # 编辑器冷启动（含首次导入工程）探活预算
 _AUTOSTART_POLL_INTERVAL = 4.0
+_DISCOVERY_REL = (".godot", "godot-mcp.json")
 
 # 描述三段式：这是啥 / 命令怎么写（带实例）/ 常用命令清单。
 # 纪律性内容（自动拉起细节、3D bounds 锚定、引用语义、接入自愈）在
@@ -105,9 +112,59 @@ _GODOT_RUN_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
-def _serve_argv(bin_path: str, project_dir: Path) -> list[str]:
-    """serve 子进程 argv（测试接缝：假 serve 替换本函数）。"""
-    return [bin_path, "serve", "--typed=false", "--project", str(project_dir)]
+def _serve_argv(bin_path: str, project_dir: Path, port: int | None = None) -> list[str]:
+    """serve 子进程 argv（测试接缝：假 serve 替换本函数）。
+
+    port 来自工程 discovery 文件时显式钉死（serve --port）：禁用其
+    "discovery 读不到回退 9080" 的回退路径。
+    """
+    argv = [bin_path, "serve", "--typed=false", "--project", str(project_dir)]
+    if port is not None:
+        argv += ["--port", str(port)]
+    return argv
+
+
+def _pid_alive(pid: int) -> bool:
+    """进程存活探测（discovery 验活）：Windows OpenProcess / POSIX kill 0。"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        SYNCHRONIZE = 0x00100000
+        handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _discovery_port(project_dir: Path) -> int | None:
+    """读工程内 discovery 文件的 addon 端口；文件缺失或 pid 已死（stale）返回 None。
+
+    addon（websocket_server.gd）绑定的实际端口写在这里，9080 只是候选起点；
+    pid 必须存活才可信——crash 残留的 stale 文件会把客户端指向已被别的
+    工程编辑器抢占的端口。返回 None 时上层走编辑器未开路径（自动拉起）。
+    """
+    path = project_dir.joinpath(*_DISCOVERY_REL)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    port = data.get("port")
+    if not isinstance(port, int) or not 0 < port <= 65535:
+        return None
+    pid = data.get("pid")
+    if not isinstance(pid, int) or not _pid_alive(pid):
+        return None
+    return port
 
 
 class _EditorUnreachable(Exception):
@@ -128,6 +185,8 @@ def _editor_status(bin_path: str, project_dir: Path) -> str | None:
             [bin_path, "status", "--project", str(project_dir)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -235,7 +294,8 @@ class _ServeProxy:
         self._tool_name = "godot_run"
 
     async def _start(self) -> None:
-        argv = _serve_argv(self._bin_path, self._project_dir)
+        port = _discovery_port(self._project_dir)
+        argv = _serve_argv(self._bin_path, self._project_dir, port)
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
@@ -247,6 +307,20 @@ class _ServeProxy:
 
     def _alive(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
+
+    async def _terminate_serve(self) -> None:
+        """终止当前 serve 子进程：下次调用按最新 discovery 端口重建（探活循环专用）。
+
+        必须等进程真正退出（wait 落 returncode）——terminate 是异步生效的，
+        立刻复用会拿到已关闭的管道。
+        """
+        if self._proc is not None and self._proc.returncode is None:
+            try:
+                self._proc.terminate()
+                await asyncio.wait_for(self._proc.wait(), timeout=2.0)
+            except (ProcessLookupError, asyncio.TimeoutError):
+                pass
+        self._proc = None
 
     async def _send(self, payload: dict[str, Any]) -> None:
         assert self._proc is not None and self._proc.stdin is not None
@@ -330,10 +404,16 @@ class _ServeProxy:
             except ValueError:
                 parsed = None
         # 不可达判定只认结构化标记 editor_unreachable（二进制的 verdict 键名），
-        # 禁用裸 "unreachable" 子串——工程路径含该词会误判（单测实证）
+        # 禁用裸 "unreachable" 子串——工程路径含该词会误判（单测实证）。
+        # wrong_editor（端口上应答的是别的工程：discovery 缺失/过期时 serve 回退
+        # 端口撞上别的工程编辑器）同样触发不可达自愈，但只认 JSON 键值痕迹
+        # （上游 isError 文本内嵌 {"wrong_editor":true,...}）——裸词与工程路径
+        # 相撞会误判（探针实证：临时目录名含该词样）。
+        lowered = text.lower()
         unreachable = (
-            isinstance(parsed, dict) and "editor_unreachable" in parsed
-        ) or ("editor_unreachable" in text.lower())
+            isinstance(parsed, dict)
+            and ("editor_unreachable" in parsed or "wrong_editor" in parsed)
+        ) or ("editor_unreachable" in lowered) or ('"wrong_editor":true' in lowered)
         if unreachable:
             raise _EditorUnreachable(text or "editor unreachable")
         if result.get("isError"):
@@ -369,12 +449,15 @@ class _ServeProxy:
         deadline = loop.time() + _AUTOSTART_WAIT_SECONDS
         while loop.time() < deadline:
             await asyncio.sleep(_AUTOSTART_POLL_INTERVAL)
-            try:
-                async with self._lock:
+            async with self._lock:
+                # 每轮重建 serve 重读 discovery 端口：编辑器拉起后 discovery
+                # 文件才出现，钉死端口必须跟随之更新（否则永远探活失败）。
+                await self._terminate_serve()
+                try:
                     await self._call_once({"method": "engine.version", "params": {}})
-                return
-            except (_EditorUnreachable, OSError, TimeoutError, asyncio.TimeoutError):
-                continue
+                    return
+                except (_EditorUnreachable, OSError, TimeoutError, asyncio.TimeoutError):
+                    continue
         raise TimeoutError(
             f"自动启动编辑器后探活超时（{_AUTOSTART_WAIT_SECONDS}s）。"
             f"首次不可达原因: {first_error}"

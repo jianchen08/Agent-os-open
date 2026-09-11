@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 const logCalls: string[] = []
@@ -34,7 +35,7 @@ const PIPELINE_ID = '39ef1314a7b9'
 const SESSION_ID = 'sess-test-1'
 
 describe('发送消息没有输出 bug 复现', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   let _seq = 0
   const nextSeq = () => ++_seq

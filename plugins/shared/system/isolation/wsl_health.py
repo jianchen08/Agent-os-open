@@ -72,6 +72,9 @@ def probe_wsl_alive(timeout: int = _PROBE_TIMEOUT) -> ProbeResult:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout + 10,
                 check=False,
         )
         rc = result.returncode
@@ -122,6 +125,9 @@ def check_wsl_kernel_health(wsl_dir: str) -> ProbeResult:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=40,
                 check=False,
         )
         rc = result.returncode
@@ -174,6 +180,9 @@ def ensure_dockerd(wsl_dir: str) -> ProbeResult:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_DAEMON_TIMEOUT + 10,
                 check=False,
         )
         rc = result.returncode
@@ -210,6 +219,9 @@ def get_wsl_ip() -> str | None:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
                 check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -229,8 +241,39 @@ def get_wsl_ip() -> str | None:
 _ENGINE_ENSURE_COOLDOWN = 30.0
 # 上一次真正拉起/等待的单调时钟（模块级：跨插件实例共享，防多实例风暴）
 _last_engine_ensure: float = 0.0
-# Windows 隐藏窗口标志（sidecar 拉起 wsl.exe 时不闪控制台）
-_CREATE_NO_WINDOW = 0x08000000
+# 保活会话句柄（模块级强引用）：Popen 句柄即弃既触发 GC ResourceWarning，
+# 又让插件卸载时无从终止 sleep infinity 残留——拉起者负责终止
+# （terminate_keepalive，isolation 插件 on_unload 调用）。
+_keepalive_proc: "subprocess.Popen[bytes] | None" = None
+# Windows 隐藏窗口标志（sidecar 拉起 wsl.exe 时不闪控制台）。POSIX 必须为 0：
+# subprocess 对非零 creationflags 抛 ValueError（Windows-only 参数），写死会使
+# Linux 上所有带此标志的探测整体不可用。平台门控在定义处一处收口（对齐
+# external_mcp/godot_mcp/tool.py 先例），调用点零改动。
+_CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+def terminate_keepalive() -> None:
+    """终止保活会话并清空句柄（幂等；isolation 插件 on_unload 调用）。
+
+    保活会话（wsl.exe sleep infinity）自本函数起与插件生命周期绑定：
+    插件卸载即终止，防 sidecar 卸载后常驻进程永久残留。terminate 失败
+    升级 kill；kill 也失败仅告警（进程可能已自行退出，无安全后果）。
+    """
+    global _keepalive_proc
+    proc = _keepalive_proc
+    _keepalive_proc = None
+    if proc is None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+        logger.info("[wsl_health] 保活会话已终止")
+    except Exception as e:
+        logger.warning("[wsl_health] 保活会话 terminate 失败，升级 kill | error=%s", e)
+        try:
+            proc.kill()
+        except OSError as kill_err:
+            logger.warning("[wsl_health] 保活会话 kill 失败（可能已退出）| error=%s", kill_err)
 
 
 def is_docker_reachable(timeout: float = 5.0) -> bool:
@@ -240,6 +283,8 @@ def is_docker_reachable(timeout: float = 5.0) -> bool:
             ["docker", "version", "--format", "{{.Server.Version}}"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             creationflags=_CREATE_NO_WINDOW,
         )
@@ -263,6 +308,8 @@ def _keepalive_running() -> bool:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             creationflags=_CREATE_NO_WINDOW,
         )
@@ -286,7 +333,11 @@ def ensure_docker_engine(timeout: float = 30.0) -> bool:
     - 保活会话已存在 → 只等待 daemon 就绪（dockerd 由 WSL systemd 随 VM 启动）；
     - 无保活会话 → detached 拉起一个持有 VM 后等待就绪。
 
-    返回最终可达性；阻塞最长 timeout 秒（Windows 专用：wsl.exe/powershell，
+    平台门控：保活会话（wsl.exe）与 PowerShell 探测是 Windows-only 语义
+    （wsl.exe 持有 WSL2 VM 防空闲回收）；Linux 原生 docker 无 VM 回收问题，
+    自愈环节短路跳过，可达性检测走 is_docker_reachable 即可。
+
+    返回最终可达性；Windows 上阻塞最长 timeout 秒（wsl.exe/powershell，
     与模块既有函数同假设；调用方应放线程池或依赖冷却保证低成本）。
     """
     global _last_engine_ensure
@@ -297,10 +348,17 @@ def ensure_docker_engine(timeout: float = 30.0) -> bool:
         logger.info("[wsl_health] 引擎自愈冷却中，跳过拉起")
         return False
     _last_engine_ensure = now
+    if os.name != "nt":
+        # Linux 无 WSL 保活可做：daemon 未起属 systemd 等显式故障，直接回
+        # 当前可达性（powershell/wsl.exe 在 Linux 上不存在， subprocess 必然抛错）
+        logger.info("[wsl_health] 非 Windows 平台，跳过 WSL 保活自愈，走 docker 可达性")
+        return is_docker_reachable(timeout=timeout)
     if _keepalive_running():
         logger.info("[wsl_health] 保活会话存在但 docker 不可达，等待 daemon 就绪")
     else:
-        subprocess.Popen(
+        # 保活会话有意常驻（持有 WSL VM），不设超时；VM 回收由会话生命周期自洽
+        global _keepalive_proc
+        _keepalive_proc = subprocess.Popen(
             ["wsl.exe", "-d", _WSL_DISTRO, "--exec", "/bin/sh", "-c", "sleep infinity"],
             creationflags=_CREATE_NO_WINDOW,
         )
@@ -352,6 +410,7 @@ def setup_port_forward(
                 f"Start-Process cmd -Verb RunAs -Wait -ArgumentList '/c','{portproxy_bat}'",
             ],
             capture_output=True,
+            timeout=120,
                 check=False,
         )
         # 验证 portproxy 是否设置成功
@@ -359,6 +418,9 @@ def setup_port_forward(
             ["netsh", "interface", "portproxy", "show", "v4tov4"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
                 check=False,
         )
         return frontend_port in verify.stdout

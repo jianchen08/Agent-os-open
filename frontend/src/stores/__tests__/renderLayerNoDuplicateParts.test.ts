@@ -8,6 +8,7 @@
  * 覆盖：后端返回拆分 record → map+merge → store 最终消息 → 每条消息的 text parts 无重复
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 
 // mock apiClient（网络层），让 mapBackendMessageToMessage + mergeConsecutiveAssistantMessages 真实跑
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
@@ -33,7 +34,7 @@ const PIPELINE_ID = 'pipe-render-001'
 const THREAD_ID = 'thread-render-001'
 
 describe('渲染层防线：store 最终 parts 无重复 text', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   beforeEach(async () => {
     vi.clearAllMocks()

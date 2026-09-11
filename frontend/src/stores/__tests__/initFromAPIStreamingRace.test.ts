@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 vi.mock('@/utils/logger', () => ({
@@ -23,7 +24,7 @@ const MESSAGE_ID = 'msg_a37d345d'
 const SESSION_ID = 'sess-test'
 
 describe('initFromAPI 吃掉 streaming 消息', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   const msg = (id: string, seq: number, overrides: Partial<Message> = {}): Message => ({
     id,

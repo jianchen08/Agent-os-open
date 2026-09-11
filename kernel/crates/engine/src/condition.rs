@@ -1,4 +1,4 @@
-//! 安全条件表达式解析器（0.1 `src/pipeline/condition_parser.py` 的 Rust 移植）。
+//! 安全条件表达式解析器（插件侧 triggers_ext/triggers/condition_parser.py 为其 Python 回移实现）。
 //!
 //! 替换 eval() 用于路由条件的求值。支持比较操作、布尔逻辑和 state 字段访问，
 //! 不使用任何动态求值，杜绝代码注入风险。
@@ -10,13 +10,19 @@
 //!     raw_tool_calls != []                            — 变量 != 空列表
 //!     text_only == true and no_new_input == true      — and 逻辑
 //!
-//! 保留 0.1 已有的扩展语法：
+//! 扩展语法：
 //!     or / not
 //!     == / != / > / < / >= / <=
+//!     算术 + - * /（数字运算，* / 高于 + -，括号分组；任一操作数非数字或
+//!     除零 → Null + warn 留痕，fail-soft 条件判假不炸管道）
+//!     内建函数调用 name(args...)——标识符后紧跟 '(' 即函数形态，否则维持
+//!     路径访问语义。内建表仅通用语言设施（len），零领域知识（一切皆插件：
+//!     领域估算公式写在管道 when 表达式里，引擎只负责求值）；未知函数名
+//!     求值 = Null + warn（fail-soft）
 //!     点链访问 a.b.c（嵌套 dict.get）
 //!     字面量：字符串（单/双引号）、数字、True/False/None、列表 [...]
 //!
-//! 优先级（低到高）：or < and < not < comparison < primary
+//! 优先级（低到高）：or < and < not < comparison < + - < * / < primary
 //!
 //! ## 两段式（G10 加载期编译）
 //!
@@ -49,6 +55,16 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    /// 算术（+ - * /，左结合；* / 优先级高于 + -）。数字运算：任一操作数
+    /// 求值结果非数字或除零 → Null + warn（fail-soft，见 [`arith`]）。
+    Arith {
+        op: &'static str,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    /// 内建函数调用（标识符后紧跟 '('）。分派见 [`call_native`]：内建表仅
+    /// 通用语言设施（len），未知函数名 → Null + warn（fail-soft）。
+    Fn { name: String, args: Vec<Expr> },
 }
 
 /// 路径访问的一步：点字段或下标。
@@ -62,7 +78,7 @@ pub enum PathStep {
 
 /// 解析条件表达式为 AST。
 ///
-/// - `Ok(None)`：空串 / 纯空白——恒真（与 0.1 一致，无条件）。
+/// - `Ok(None)`：空串 / 纯空白——恒真（无条件）。
 /// - `Ok(Some(expr))`：可求值的表达式。
 /// - `Err(msg)`：语法错误（带位置提示）——调用方应在加载期暴露，勿静默吞掉。
 pub fn parse_condition(condition: &str) -> Result<Option<Expr>, String> {
@@ -93,23 +109,37 @@ fn eval_value(expr: &Expr, state: &Value) -> Value {
         Expr::Literal(v) => v.clone(),
         Expr::List(items) => Value::Array(items.iter().map(|e| eval_value(e, state)).collect()),
         Expr::Path { root, steps } => {
-            // 平键优先：本仓 state 惯例是平铺点键（插件 state_updates 经
-            // set_key 平插 "task.status"/"router.duplicate_back_llm"，不拆
-            // 点）——全 Field 链先按平键整体查一次；未命中再走点链嵌套
-            // 解析（嵌套写入方兼容不变）。含 Index 下标的链无平键形态，
-            // 直接走嵌套解析。
+            // 平键优先（含前缀平键）：本仓 state 惯例是平铺点键（插件 state_updates
+            // 经 set_key 平插 "task.status"/"router.duplicate_back_llm"，不拆
+            // 点）——全 Field 链先按逐段前缀拼平键查：任一前缀命中即以**剩余
+            // steps 嵌套下钻**（生产形态：track.llm_usage 是平键持 dict，
+            // last_input_tokens 是其内层字段——整链平铺或前段平铺都要命中）。
+            // 未命中再走点链嵌套解析（嵌套写入方兼容不变）。含 Index 下标的链
+            // 无平键形态，直接走嵌套解析。
             let all_fields = steps.iter().all(|s| matches!(s, PathStep::Field(_)));
             if all_fields && !steps.is_empty() {
-                let mut flat = root.clone();
-                for s in steps {
-                    if let PathStep::Field(f) = s {
-                        flat.push('.');
-                        flat.push_str(f);
-                    }
-                }
                 if let Some(obj) = state.as_object() {
-                    if let Some(v) = obj.get(&flat) {
-                        return v.clone();
+                    let mut prefix = root.clone();
+                    for (i, s) in steps.iter().enumerate() {
+                        let PathStep::Field(f) = s else {
+                            unreachable!("all_fields 已排除 Index");
+                        };
+                        prefix.push('.');
+                        prefix.push_str(f);
+                        if let Some(v) = obj.get(&prefix) {
+                            // 前缀命中（最短优先，平键优先于嵌套）：剩余 steps 下钻
+                            let mut v = v.clone();
+                            for step in &steps[i + 1..] {
+                                v = match step {
+                                    PathStep::Field(f) => get_field(&v, f),
+                                    PathStep::Index(key) => {
+                                        let k = eval_value(key, state);
+                                        get_index(&v, &k)
+                                    }
+                                };
+                            }
+                            return v;
+                        }
                     }
                 }
             }
@@ -127,7 +157,7 @@ fn eval_value(expr: &Expr, state: &Value) -> Value {
         }
         Expr::Not(inner) => Value::Bool(!value_truthy(&eval_value(inner, state))),
         Expr::And(l, r) => {
-            // 短路：左侧为假直接出 false（与 0.1 一致，右侧不求值）
+            // 短路：左侧为假直接出 false（右侧不求值）
             let lv = eval_value(l, state);
             if !value_truthy(&lv) {
                 Value::Bool(false)
@@ -148,6 +178,15 @@ fn eval_value(expr: &Expr, state: &Value) -> Value {
             let r = eval_value(right, state);
             Value::Bool(compare(&l, op, &r))
         }
+        Expr::Arith { op, left, right } => {
+            let l = eval_value(left, state);
+            let r = eval_value(right, state);
+            arith(op, &l, &r)
+        }
+        Expr::Fn { name, args } => {
+            let arg_values: Vec<Value> = args.iter().map(|a| eval_value(a, state)).collect();
+            call_native(name, &arg_values)
+        }
     }
 }
 
@@ -161,7 +200,7 @@ enum TokKind {
     Number,   // 123 / 1.5
     Bool,     // True / False / None
     Keyword,  // and / or / not
-    Op,       // == / != / > / < / >= / <=
+    Op,       // 比较运算符 == / != / > / < / >= / <= 与算术 + - * /
     Dot,      // .
     Ident,    // 标识符
     LBracket, // [
@@ -182,157 +221,160 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, String> {
     let chars: Vec<char> = expr.chars().collect();
     let mut tokens = Vec::new();
     let mut i = 0;
-    let n = chars.len();
-
-    while i < n {
+    while i < chars.len() {
         let c = chars[i];
-
-        // 跳过空白
+        // 按 token 类别分派到扫描器（返回 token 与消耗后的下一游标）
         if c.is_whitespace() {
             i += 1;
-            continue;
-        }
-
-        // 字符串字面量（单/双引号）
-        if c == '\'' || c == '"' {
-            let quote = c;
-            let start = i + 1;
-            i += 1;
-            while i < n && chars[i] != quote {
-                i += 1;
-            }
-            if i >= n {
-                return Err(format!("Unterminated string literal at position {}", start));
-            }
-            // chars[start..i] 即引号内内容
-            let body: String = chars[start..i].iter().collect();
-            i += 1; // 消耗结束引号
-            tokens.push(Token {
-                kind: TokKind::String,
-                value: body,
-            });
-            continue;
-        }
-
-        // 数字字面量（含可选小数）；负号这里不特殊处理，交给上下文（与 0.1 一致：-?\d+\.?\d*）
-        // 0.1 用正则把 -? 算进数字，但那会吞掉 "a - 1" 中的 "-1"。这里只解析无符号数字，保持简单与安全。
-        if c.is_ascii_digit() {
-            let start = i;
-            while i < n && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i < n && chars[i] == '.' {
-                i += 1;
-                while i < n && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            let body: String = chars[start..i].iter().collect();
-            tokens.push(Token {
-                kind: TokKind::Number,
-                value: body,
-            });
-            continue;
-        }
-
-        // 标识符 / 关键字 / 布尔字面量
-        if c.is_ascii_alphabetic() || c == '_' {
-            let start = i;
-            while i < n && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
-            // 大小写不敏感地识别布尔/None 字面量与逻辑关键字（对齐 JSON 的 true/false 与
-            // 0.1 的 True/False/None；default.yaml 实际出现小写 true）。
-            match word.to_lowercase().as_str() {
-                "true" | "false" | "none" => tokens.push(Token {
-                    kind: TokKind::Bool,
-                    value: word.to_lowercase(),
-                }),
-                "and" | "or" | "not" => tokens.push(Token {
-                    kind: TokKind::Keyword,
-                    value: word.to_lowercase(),
-                }),
-                _ => tokens.push(Token {
-                    kind: TokKind::Ident,
-                    value: word,
-                }),
-            }
-            continue;
-        }
-
-        // 比较运算符（多字符优先）
-        if c == '=' || c == '!' || c == '<' || c == '>' {
-            if i + 1 < n && chars[i + 1] == '=' {
-                let op: String = format!("{}=", c);
-                i += 2;
-                tokens.push(Token {
-                    kind: TokKind::Op,
-                    value: op,
-                });
-                continue;
-            }
-            if c == '=' {
-                return Err(format!("Unexpected '=' at position {}", i));
-            }
-            // <, > 单字符
-            tokens.push(Token {
-                kind: TokKind::Op,
-                value: c.to_string(),
-            });
-            i += 1;
-            continue;
-        }
-
-        // 单字符 token
-        match c {
-            '.' => {
-                tokens.push(Token {
-                    kind: TokKind::Dot,
-                    value: c.to_string(),
-                });
-                i += 1;
-            }
-            '[' => {
-                tokens.push(Token {
-                    kind: TokKind::LBracket,
-                    value: c.to_string(),
-                });
-                i += 1;
-            }
-            ']' => {
-                tokens.push(Token {
-                    kind: TokKind::RBracket,
-                    value: c.to_string(),
-                });
-                i += 1;
-            }
-            '(' => {
-                tokens.push(Token {
-                    kind: TokKind::LParen,
-                    value: c.to_string(),
-                });
-                i += 1;
-            }
-            ')' => {
-                tokens.push(Token {
-                    kind: TokKind::RParen,
-                    value: c.to_string(),
-                });
-                i += 1;
-            }
-            ',' => {
-                tokens.push(Token {
-                    kind: TokKind::Comma,
-                    value: c.to_string(),
-                });
-                i += 1;
-            }
-            _ => return Err(format!("Unexpected character '{}' at position {}", c, i)),
+        } else if c == '\'' || c == '"' {
+            let (tok, next) = scan_string(&chars, i)?;
+            tokens.push(tok);
+            i = next;
+        } else if c.is_ascii_digit() {
+            let (tok, next) = scan_number(&chars, i);
+            tokens.push(tok);
+            i = next;
+        } else if c.is_ascii_alphabetic() || c == '_' {
+            let (tok, next) = scan_word(&chars, i);
+            tokens.push(tok);
+            i = next;
+        } else if matches!(c, '=' | '!' | '<' | '>' | '+' | '-' | '*' | '/') {
+            let (tok, next) = scan_operator(&chars, i)?;
+            tokens.push(tok);
+            i = next;
+        } else {
+            let (tok, next) = scan_single(&chars, i)?;
+            tokens.push(tok);
+            i = next;
         }
     }
-
     Ok(tokens)
+}
+
+/// 字符串字面量（单/双引号）。`i` 停在起始引号上，返回 token 与结束引号后的游标。
+fn scan_string(chars: &[char], i: usize) -> Result<(Token, usize), String> {
+    let n = chars.len();
+    let quote = chars[i];
+    let start = i + 1;
+    let mut j = i + 1;
+    while j < n && chars[j] != quote {
+        j += 1;
+    }
+    if j >= n {
+        return Err(format!("Unterminated string literal at position {}", start));
+    }
+    // chars[start..j] 即引号内内容
+    let body: String = chars[start..j].iter().collect();
+    Ok((
+        Token {
+            kind: TokKind::String,
+            value: body,
+        },
+        j + 1, // 消耗结束引号
+    ))
+}
+
+/// 数字字面量（含可选小数）；负号不特殊处理，交给上下文：只解析无符号数字，
+/// 避免 "a - 1" 中的 "-1" 被误吞为数字。返回 token 与数字后的游标。
+fn scan_number(chars: &[char], i: usize) -> (Token, usize) {
+    let n = chars.len();
+    let start = i;
+    let mut j = i;
+    while j < n && chars[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j < n && chars[j] == '.' {
+        j += 1;
+        while j < n && chars[j].is_ascii_digit() {
+            j += 1;
+        }
+    }
+    let body: String = chars[start..j].iter().collect();
+    (
+        Token {
+            kind: TokKind::Number,
+            value: body,
+        },
+        j,
+    )
+}
+
+/// 标识符 / 关键字 / 布尔字面量。返回 token 与单词后的游标。
+fn scan_word(chars: &[char], i: usize) -> (Token, usize) {
+    let n = chars.len();
+    let start = i;
+    let mut j = i;
+    while j < n && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+        j += 1;
+    }
+    let word: String = chars[start..j].iter().collect();
+    // 大小写不敏感地识别布尔/None 字面量与逻辑关键字（对齐 JSON 的 true/false
+    // 与 Python 风格 True/False/None；default.yaml 实际出现小写 true）。
+    let tok = match word.to_lowercase().as_str() {
+        "true" | "false" | "none" => Token {
+            kind: TokKind::Bool,
+            value: word.to_lowercase(),
+        },
+        "and" | "or" | "not" => Token {
+            kind: TokKind::Keyword,
+            value: word.to_lowercase(),
+        },
+        _ => Token {
+            kind: TokKind::Ident,
+            value: word,
+        },
+    };
+    (tok, j)
+}
+
+/// 运算符（比较 ==/!=/>/</>=/<= + 算术 + - * /；多字符优先，两字符形式
+/// 仅比较运算符有）。`i` 停在运算符首字符，返回 token 与下一游标。
+fn scan_operator(chars: &[char], i: usize) -> Result<(Token, usize), String> {
+    let n = chars.len();
+    let c = chars[i];
+    let may_be_two_char = matches!(c, '=' | '!' | '<' | '>');
+    if may_be_two_char && i + 1 < n && chars[i + 1] == '=' {
+        let op: String = format!("{}=", c);
+        return Ok((
+            Token {
+                kind: TokKind::Op,
+                value: op,
+            },
+            i + 2,
+        ));
+    }
+    if c == '=' {
+        return Err(format!("Unexpected '=' at position {}", i));
+    }
+    // <, >, +, -, *, / 单字符
+    Ok((
+        Token {
+            kind: TokKind::Op,
+            value: c.to_string(),
+        },
+        i + 1,
+    ))
+}
+
+/// 单字符 token（`.` `[` `]` `(` `)` `,`）。返回 token 与下一游标。
+fn scan_single(chars: &[char], i: usize) -> Result<(Token, usize), String> {
+    let c = chars[i];
+    let kind = match c {
+        '.' => TokKind::Dot,
+        '[' => TokKind::LBracket,
+        ']' => TokKind::RBracket,
+        '(' => TokKind::LParen,
+        ')' => TokKind::RParen,
+        ',' => TokKind::Comma,
+        _ => return Err(format!("Unexpected character '{}' at position {}", c, i)),
+    };
+    Ok((
+        Token {
+            kind,
+            value: c.to_string(),
+        },
+        i + 1,
+    ))
 }
 
 // ===========================================================================
@@ -415,11 +457,12 @@ impl Parser {
         self.parse_comparison()
     }
 
-    /// 比较表达式：primary OP primary。
-    /// 注意：当 primary 后没有比较运算符时返回左侧表达式（与 0.1 一致，
-    /// 上层用布尔折算判定），不能因为 peek() 返回 None 就视为解析失败。
+    /// 比较表达式：additive OP additive（算术绑定比比较紧，
+    /// `a + b > c` 即 `(a + b) > c`）。
+    /// 注意：当左侧后没有比较运算符时返回左侧表达式（上层用布尔折算判定），
+    /// 不能因为 peek() 返回 None 就视为解析失败。
     fn parse_comparison(&mut self) -> Result<Expr, String> {
-        let left = self.parse_primary()?;
+        let left = self.parse_additive()?;
         let tok = match self.peek() {
             Some(t) => t.clone(),
             None => return Ok(left),
@@ -430,7 +473,7 @@ impl Parser {
                 .advance()
                 .ok_or_else(|| format!("position {}: 比较运算符后表达式意外结束", self.pos))?
                 .value;
-            let right = self.parse_primary()?;
+            let right = self.parse_additive()?;
             let op: &'static str = match op.as_str() {
                 "==" => "==",
                 "!=" => "!=",
@@ -448,6 +491,44 @@ impl Parser {
         }
 
         // 非比较运算符：返回左侧表达式（用于上层做布尔判定）
+        Ok(left)
+    }
+
+    /// 加减表达式（左结合）：a + b - c ...
+    fn parse_additive(&mut self) -> Result<Expr, String> {
+        self.parse_arith_level(classify_additive, Self::parse_multiplicative)
+    }
+
+    /// 乘除表达式（左结合）：a * b / c ...
+    fn parse_multiplicative(&mut self) -> Result<Expr, String> {
+        self.parse_arith_level(classify_multiplicative, Self::parse_primary)
+    }
+
+    /// 算术二元层（+ - 与 * / 两层共用骨架）：classify 把 token 值归入本层
+    /// 运算符（None = 不属于本层，交回上层循环），operand 为本层操作数解析。
+    fn parse_arith_level(
+        &mut self,
+        classify: fn(&str) -> Option<&'static str>,
+        operand: fn(&mut Self) -> Result<Expr, String>,
+    ) -> Result<Expr, String> {
+        let mut left = operand(self)?;
+        while let Some(Token {
+            kind: TokKind::Op,
+            value,
+        }) = self.peek()
+        {
+            let op = match classify(value) {
+                Some(op) => op,
+                None => break,
+            };
+            self.advance();
+            let right = operand(self)?;
+            left = Expr::Arith {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
         Ok(left)
     }
 
@@ -498,10 +579,24 @@ impl Parser {
             return Ok(inner);
         }
 
-        // 标识符：state 路径（root + 点链 / 下标）
+        // 标识符：state 路径（root + 点链 / 下标）或函数调用
         if tok.kind == TokKind::Ident {
             self.advance();
             let root = tok.value;
+
+            // 函数调用形态：标识符后紧跟 '('。tokenizer 产 Ident 与 LParen
+            // 两个独立 token（括号分组/路径访问语义不变），在此合并识别。
+            if matches!(
+                self.peek(),
+                Some(Token {
+                    kind: TokKind::LParen,
+                    ..
+                })
+            ) {
+                let args = self.parse_call_args()?;
+                return Ok(Expr::Fn { name: root, args });
+            }
+
             let mut steps = Vec::new();
 
             while let Some(next) = self.peek() {
@@ -592,6 +687,66 @@ impl Parser {
             }
         }
     }
+
+    /// 解析函数调用参数表（游标停在 '(' 上）：空参 '()' 或逗号分隔的
+    /// 表达式表，以 ')' 闭合。参数走 parse_or（与括号分组同级，任意表达式）。
+    fn parse_call_args(&mut self) -> Result<Vec<Expr>, String> {
+        self.advance(); // 消耗 (
+        let mut args = Vec::new();
+        if matches!(
+            self.peek(),
+            Some(Token {
+                kind: TokKind::RParen,
+                ..
+            })
+        ) {
+            self.advance();
+            return Ok(args);
+        }
+        loop {
+            args.push(self.parse_or()?);
+            match self.peek() {
+                Some(Token {
+                    kind: TokKind::Comma,
+                    ..
+                }) => {
+                    self.advance();
+                }
+                Some(Token {
+                    kind: TokKind::RParen,
+                    ..
+                }) => {
+                    self.advance();
+                    return Ok(args);
+                }
+                Some(Token { value, .. }) => {
+                    return Err(format!(
+                        "position {}: 参数表内意外的 token '{value}'（期望 ',' 或 ')'）",
+                        self.pos
+                    ))
+                }
+                None => return Err(format!("position {}: 参数表未闭合", self.pos)),
+            }
+        }
+    }
+}
+
+/// 加减层运算符归类。
+fn classify_additive(s: &str) -> Option<&'static str> {
+    match s {
+        "+" => Some("+"),
+        "-" => Some("-"),
+        _ => None,
+    }
+}
+
+/// 乘除层运算符归类。
+fn classify_multiplicative(s: &str) -> Option<&'static str> {
+    match s {
+        "*" => Some("*"),
+        "/" => Some("/"),
+        _ => None,
+    }
 }
 
 // ===========================================================================
@@ -635,7 +790,7 @@ fn parse_number_literal(s: &str) -> Value {
 }
 
 /// 顶层标识符取值：从 state（serde_json::Value）读取 key。
-/// 与 0.1 _resolve_name 对齐：name 存在则取值，不存在返回 Null。
+/// name 存在则取值，不存在返回 Null。
 fn resolve_name(state: &Value, name: &str) -> Value {
     if let Some(obj) = state.as_object() {
         if let Some(v) = obj.get(name) {
@@ -667,6 +822,69 @@ fn get_index(value: &Value, key: &Value) -> Value {
             Value::Null
         }
         _ => Value::Null,
+    }
+}
+
+/// 算术运算：数字 × 数字 → 数字（整数值落 i64，与整型字面量 == 相等可比）。
+/// 任一操作数非数字（Null/bool/字符串等）或除零 → Null + warn 一次
+/// （fail-soft：条件判假，不炸管道）。
+fn arith(op: &str, l: &Value, r: &Value) -> Value {
+    let (x, y) = match (l.as_f64(), r.as_f64()) {
+        (Some(x), Some(y)) => (x, y),
+        _ => {
+            tracing::warn!(op, ?l, ?r, "条件 DSL 算术操作数非数字，fail-soft 返回 Null");
+            return Value::Null;
+        }
+    };
+    let result = match op {
+        "+" => x + y,
+        "-" => x - y,
+        "*" => x * y,
+        "/" if y == 0.0 => {
+            tracing::warn!(op, ?l, ?r, "条件 DSL 除零，fail-soft 返回 Null");
+            return Value::Null;
+        }
+        "/" => x / y,
+        // 不可达：parser 只经 classify_* 产四则 op
+        _ => return Value::Null,
+    };
+    number_value(result)
+}
+
+/// f64 → JSON 数值：整数值落 i64，其余落浮点；非有限（NaN/∞，四则溢出）
+/// → Null（fail-soft）。
+fn number_value(f: f64) -> Value {
+    if f.is_finite() && f.fract() == 0.0 && f.abs() <= i64::MAX as f64 {
+        return Value::from(f as i64);
+    }
+    serde_json::Number::from_f64(f)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
+
+// ===========================================================================
+// 内建函数（Expr::Fn 分派）——仅通用语言设施，零领域知识（一切皆插件公理）
+// ===========================================================================
+
+/// 内建函数分派：len(x) → 数组元素数 / 字符串字符数。参数个数不符或
+/// 未知函数名 → Null + warn 一次（fail-soft：条件判假，不炸管道）。
+fn call_native(name: &str, args: &[Value]) -> Value {
+    match name {
+        "len" => match args {
+            [Value::Array(a)] => Value::from(a.len()),
+            [Value::String(s)] => Value::from(s.chars().count()),
+            _ => {
+                tracing::warn!(
+                    function = name,
+                    "条件 DSL len() 参数个数不符或非数组/字符串，fail-soft 返回 Null"
+                );
+                Value::Null
+            }
+        },
+        other => {
+            tracing::warn!(function = other, "条件 DSL 未知函数，fail-soft 返回 Null");
+            Value::Null
+        }
     }
 }
 
@@ -803,6 +1021,46 @@ mod tests {
     }
 
     #[test]
+    fn test_flat_prefix_key_then_nested_descend() {
+        // 前缀平键（生产形态：track.llm_usage 是平键持 dict，last_input_tokens
+        // 是其内层字段）——整链平铺查不到时逐段前缀命中并以剩余 steps 下钻。
+        // 无此回退时该路径解析为 Null，压缩粗门公式恒假（W2a 实测踩坑）。
+        let state = json!({ "track.llm_usage": { "last_input_tokens": 78000 } });
+        assert!(eval_condition(
+            "track.llm_usage.last_input_tokens == 78000",
+            &state
+        ));
+        assert!(eval_condition(
+            "track.llm_usage.last_input_tokens > 77999",
+            &state
+        ));
+        assert!(!eval_condition(
+            "track.llm_usage.last_input_tokens == none",
+            &state
+        ));
+        // 内层字段缺失 → Null（== none 为真，冷启动兜底支依赖此语义）
+        let no_field = json!({ "track.llm_usage": {} });
+        assert!(eval_condition(
+            "track.llm_usage.last_input_tokens == none",
+            &no_field
+        ));
+        // 完全没有 track 键 → Null
+        assert!(eval_condition(
+            "track.llm_usage.last_input_tokens == none",
+            &json!({})
+        ));
+        // 前缀平键优先于嵌套：两形态同场，平键（最短前缀）获胜
+        let both = json!({
+            "track.llm_usage": { "last_input_tokens": 1 },
+            "track": { "llm_usage": { "last_input_tokens": 2 } }
+        });
+        assert!(eval_condition(
+            "track.llm_usage.last_input_tokens == 1",
+            &both
+        ));
+    }
+
+    #[test]
     fn test_dot_chain_false() {
         let state = json!({ "pause_guard": { "checked": { "paused": false } } });
         assert!(!eval_condition(
@@ -811,7 +1069,7 @@ mod tests {
         ));
     }
 
-    // ---- 扩展语法（0.1 已有，保留扩展性）----
+    // ---- 扩展语法 ----
 
     #[test]
     fn test_and() {
@@ -867,7 +1125,7 @@ mod tests {
 
     #[test]
     fn test_empty_condition_is_true() {
-        // 与 0.1 一致：空表达式 → true
+        // 空表达式 → true
         assert!(eval_condition("", &json!({})));
         assert!(eval_condition("   ", &json!({})));
     }
@@ -926,5 +1184,250 @@ mod tests {
         let state = json!({ "xs": [1, 2, 3] });
         assert!(eval_condition("xs == [1, 2, 3]", &state));
         assert!(!eval_condition("xs == [1, 2]", &state));
+    }
+
+    // ---- 算术（+ - * /）----
+
+    #[test]
+    fn test_arith_precedence_and_parens() {
+        // * / 高于 + -；括号分组改序；左结合；整数值与整型字面量 == 可比
+        assert!(eval_condition("2 + 3 * 4 == 14", &json!({})));
+        assert!(eval_condition("(2 + 3) * 4 == 20", &json!({})));
+        assert!(eval_condition("10 - 2 - 3 == 5", &json!({})));
+        assert!(eval_condition("8 / 4 == 2", &json!({})));
+        assert!(eval_condition("7 / 2 == 3.5", &json!({})));
+        // 区分度反向输入：优先级若错（(2+3)*4 语义）会得 20；右结合会得 11
+        assert!(!eval_condition("2 + 3 * 4 == 20", &json!({})));
+        assert!(!eval_condition("10 - 2 - 3 == 11", &json!({})));
+    }
+
+    #[test]
+    fn test_arith_minus_is_binary_operator() {
+        // '-' 是二元运算符不是数字符号：a - 1 不把 -1 吞成字面量
+        assert!(eval_condition("a - 1 == 4", &json!({ "a": 5 })));
+        assert!(eval_condition("a-1 == 4", &json!({ "a": 5 })));
+    }
+
+    #[test]
+    fn test_arith_paths_in_formula() {
+        // 路径（嵌套/平键两形态）参与运算：track.a + track.b * 2 > x，真假两侧
+        let nested = json!({ "track": { "a": 1000, "b": 400 }, "x": 1799 });
+        assert!(eval_condition("track.a + track.b * 2 > x", &nested)); // 1800 > 1799
+        let flat = json!({ "track.a": 1000, "track.b": 400, "x": 1801 });
+        assert!(!eval_condition("track.a + track.b * 2 > x", &flat)); // 1800 > 1801 假
+    }
+
+    #[test]
+    fn test_arith_context_gate_formula() {
+        // 目标用法（压缩粗门）：估算公式整体写在管道 when 里，引擎只负责求值
+        let cond = "track.llm_usage.last_input_tokens + (track.messages_chars - track.messages_chars_at_llm) * 2.0 > 150000";
+        let below = json!({
+            "track.llm_usage.last_input_tokens": 100000,
+            "track.messages_chars": 12000,
+            "track.messages_chars_at_llm": 8000,
+        }); // 100000 + 4000×2 = 108000
+        assert!(!eval_condition(cond, &below));
+        let above = json!({
+            "track.llm_usage.last_input_tokens": 100000,
+            "track.messages_chars": 60000,
+            "track.messages_chars_at_llm": 8000,
+        }); // 100000 + 52000×2 = 204000
+        assert!(eval_condition(cond, &above));
+    }
+
+    #[test]
+    fn test_context_gate_percentage_formula_production() {
+        // W2a 生产公式（autonomous.yaml pipeline_context_window_guard 项级 when，
+        // 百分比阈值改道后形态）：占用比 =（上次 input_tokens + 字符增量×2.0）
+        // ÷ 模型窗口 > 0.6，or 冷启动兜底（无 token 锚且消息 > 40）。
+        // state 用**生产形态**（track.llm_usage 平键持 dict——前缀平键解析）。
+        let cond = "(track.llm_usage.last_input_tokens + (track.messages_chars - track.messages_chars_at_llm) * 2.0) / track.model_context_window > 0.6 or (track.llm_usage.last_input_tokens == none and len(messages) > 40)";
+        let base = json!({
+            "track.llm_usage": {"last_input_tokens": 78000},
+            "track.messages_chars": 59000,
+            "track.messages_chars_at_llm": 8000,
+            "track.model_context_window": 200000,
+            "messages": [ {"role": "user", "content": "hi"} ],
+        }); // (78000+102000)/200000 = 0.9 > 0.6 → 真
+        assert!(eval_condition(cond, &base));
+        // 单调性质：窗口放大（其余不变）→ 占用比下降，跨过 0.6 翻假
+        let mut wide = base.clone();
+        wide["track.model_context_window"] = json!(300000);
+        assert!(!eval_condition(cond, &wide)); // 180000/300000 = 0.6 不大于 0.6
+                                               // 字符增量趋零 → 回落到纯 last_input 占用比
+        let fresh = json!({
+            "track.llm_usage": {"last_input_tokens": 60000},
+            "track.messages_chars": 9000,
+            "track.messages_chars_at_llm": 9000,
+            "track.model_context_window": 200000,
+            "messages": [ {"role": "user", "content": "hi"} ],
+        });
+        assert!(!eval_condition(cond, &fresh)); // 0.3 ≤ 0.6
+                                                // 窗口 0（llm_core 未解析到 context_window 时写 0）→ 除零 fail-soft
+                                                // 判假——公式支安全关闭，只剩冷启动兜底支
+        let zero_window = json!({
+            "track.llm_usage": {"last_input_tokens": 78000},
+            "track.messages_chars": 59000,
+            "track.messages_chars_at_llm": 8000,
+            "track.model_context_window": 0,
+            "messages": [ {"role": "user", "content": "hi"} ],
+        });
+        assert!(!eval_condition(cond, &zero_window));
+        // 冷启动兜底：无 token 锚 + 41 条消息 → 真（放行 guard 精确判定）
+        let cold_msgs: Vec<serde_json::Value> = (0..41)
+            .map(|i| json!({"seq": i, "role": "user", "content": format!("m{i}")}))
+            .collect();
+        let cold = json!({"messages": cold_msgs});
+        assert!(eval_condition(cond, &cold));
+        // 区分度反向：无锚但消息少 → 两支均假
+        let cold_small = json!({"messages": [ {"role": "user", "content": "hi"} ]});
+        assert!(!eval_condition(cond, &cold_small));
+    }
+
+    #[test]
+    fn test_arith_non_numeric_fail_soft() {
+        // 任一操作数非数字（字符串/Null/bool）→ Null：判假，不 panic
+        assert!(!eval_condition("'a' + 1", &json!({})));
+        assert!(!eval_condition("missing + 1 > 0", &json!({})));
+        assert!(!eval_condition("flag + 1 > 0", &json!({ "flag": true })));
+        // 性质：Null 结果对全部比较运算符（两侧任一位置）均判假
+        for cond in [
+            "'a' + 1 > 0",
+            "'a' + 1 < 0",
+            "'a' + 1 >= 0",
+            "'a' + 1 <= 0",
+            "'a' + 1 == 0",
+            "0 > 'a' + 1",
+        ] {
+            assert!(!eval_condition(cond, &json!({})), "{cond}");
+        }
+    }
+
+    #[test]
+    fn test_arith_division_by_zero() {
+        // 除零（整数 0 / 浮点 0.0 / state 键）→ Null + warn，判假不炸
+        assert!(!eval_condition("1 / 0 > 0", &json!({})));
+        assert!(!eval_condition("1 / 0.0 > 0", &json!({})));
+        assert!(!eval_condition("n / d > 0", &json!({ "n": 10, "d": 0 })));
+        // 正常除法不受影响
+        assert!(eval_condition("n / d == 2.5", &json!({ "n": 5, "d": 2 })));
+    }
+
+    #[test]
+    fn test_arith_monotonic() {
+        // 性质：a + b 与 a * 2 随 a 严格单调递增（b 固定，a 多档递增）
+        let mut prev_sum = f64::NEG_INFINITY;
+        let mut prev_double = f64::NEG_INFINITY;
+        for a in [0, 1, 5, 100] {
+            let state = json!({ "a": a, "b": 7 });
+            let sum = eval_value(&parse_condition("a + b").unwrap().unwrap(), &state)
+                .as_f64()
+                .unwrap();
+            let double = eval_value(&parse_condition("a * 2").unwrap().unwrap(), &state)
+                .as_f64()
+                .unwrap();
+            assert!(sum > prev_sum);
+            assert!(double > prev_double);
+            prev_sum = sum;
+            prev_double = double;
+        }
+    }
+
+    #[test]
+    fn test_arith_combined_with_logic_and_compare() {
+        // 算术嵌进既有 and/or/not 与比较（not 作用于整个比较，算术先折算）
+        let state = json!({ "n": 5, "m": 2 });
+        assert!(eval_condition("n * m == 10 and n - m > 2", &state));
+        assert!(!eval_condition("n * m == 11 or not n + m > 6", &state));
+    }
+
+    // ---- 内建函数（Expr::Fn：通用语言设施）----
+
+    #[test]
+    fn test_fn_len_semantics() {
+        // len：数组元素数 / 字符串字符数；真假两侧 + 两档长度（性质：等于实际长度）
+        let state = json!({ "messages": [ {}, {}, {} ], "name": "abc" });
+        assert!(eval_condition("len(messages) == 3", &state));
+        assert!(eval_condition("len(name) == 3", &state));
+        assert!(!eval_condition("len(messages) == 2", &state));
+        assert!(eval_condition("len(xs) == 2", &json!({ "xs": [1, 2] })));
+        assert!(eval_condition(
+            "len(xs) == 5",
+            &json!({ "xs": [1, 2, 3, 4, 5] })
+        ));
+        // len 结果参与算术与比较
+        assert!(eval_condition("len(xs) * 2 == 4", &json!({ "xs": [1, 2] })));
+        assert!(eval_condition("len(xs) >= 2", &json!({ "xs": [1, 2] })));
+        assert!(!eval_condition("len(xs) >= 2", &json!({ "xs": [1] })));
+    }
+
+    #[test]
+    fn test_fn_len_fail_soft() {
+        // 参数非数组/字符串、个数不符（空参/多参）、键缺失 → Null 判假不炸
+        assert!(!eval_condition("len(n) > 0", &json!({ "n": 5 })));
+        assert!(!eval_condition("len() > 0", &json!({})));
+        assert!(!eval_condition(
+            "len(a, b) > 0",
+            &json!({ "a": [], "b": [] })
+        ));
+        assert!(!eval_condition("len(missing) > 0", &json!({})));
+    }
+
+    #[test]
+    fn test_fn_parse_forms() {
+        // 解析形态：空参 / 多参 / 嵌套调用（参数表机制）
+        assert_eq!(
+            parse_condition("f()").unwrap().unwrap(),
+            Expr::Fn {
+                name: "f".into(),
+                args: vec![]
+            }
+        );
+        assert_eq!(
+            parse_condition("f(x, 's')").unwrap().unwrap(),
+            Expr::Fn {
+                name: "f".into(),
+                args: vec![
+                    Expr::Path {
+                        root: "x".into(),
+                        steps: vec![]
+                    },
+                    Expr::Literal(Value::from("s")),
+                ],
+            }
+        );
+        assert_eq!(
+            parse_condition("f(g())").unwrap().unwrap(),
+            Expr::Fn {
+                name: "f".into(),
+                args: vec![Expr::Fn {
+                    name: "g".into(),
+                    args: vec![]
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn test_fn_parse_errors() {
+        // 参数表未闭合 / 尾随逗号 / 空位：加载期报语法错误，不静默
+        for src in ["f(a", "f(a,)", "f(,"] {
+            assert!(parse_condition(src).is_err(), "{src}");
+        }
+    }
+
+    #[test]
+    fn test_fn_unknown_fail_soft() {
+        // 未知函数名（含嵌套）→ Null（fail-soft 判假）不 panic
+        assert!(!eval_condition("no_such_fn()", &json!({})));
+        assert!(!eval_condition("no_such_fn() > 0", &json!({})));
+        assert!(!eval_condition("f(g()) > 0", &json!({})));
+        // 同名裸标识符（无 '('）维持路径访问语义
+        assert!(eval_condition(
+            "no_such_fn > 3",
+            &json!({ "no_such_fn": 5 })
+        ));
+        // 函数形态不破坏括号分组与列表字面量：len([1, 2]) + 1 = 3，×2 = 6
+        assert!(eval_condition("(len([1, 2]) + 1) * 2 == 6", &json!({})));
     }
 }

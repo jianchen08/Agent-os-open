@@ -24,18 +24,15 @@ import type { LucideIcon } from '@/assets/icons'
 
 /** 语义别名 → 图标组件（多别名指向同一图标，覆盖常见命名） */
 const ICON_MAP: Record<string, LucideIcon> = {
-  // 文件类
   file: FileText,
   file_read: FileText,
   read: FileText,
   edit: FileEdit,
   file_write: FileEdit,
   write: FileEdit,
-  // 终端
   terminal: Terminal,
   bash: Terminal,
   shell: Terminal,
-  // 网络
   globe: Globe,
   web: Globe,
   search: Globe,
@@ -46,7 +43,6 @@ const ICON_MAP: Record<string, LucideIcon> = {
   target: Target,
   task: Target,
   submit: Target,
-  // 通用
   copy: Copy,
   // 控件类（FormWidget compact 等槽位控件复用本表解析声明 icon 字符串）
   brain: Brain,

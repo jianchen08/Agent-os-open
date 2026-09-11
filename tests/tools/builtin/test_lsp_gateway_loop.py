@@ -27,7 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "plugins" / "shared" / "tools" / "lsp"))
 
-from gateway import LSPGateway  # noqa: E402
+import gateway as lsp_gateway  # noqa: E402
 
 # 用平台无关的绝对路径构造 file URI（Windows 上 /tmp 不是绝对路径）
 _TMPDIR = Path(__file__).resolve().parent
@@ -96,10 +96,16 @@ class FakeLSPClient:
 
 @pytest.fixture
 def gateway(monkeypatch):
-    """构造一个用 FakeLSPClient 替换真实 client 的 gateway 并初始化。"""
+    """构造一个用 FakeLSPClient 替换真实 client 的 gateway 并初始化。
+
+    补丁打在模块级绑定的 ``lsp_gateway`` 对象上（而非 "gateway.LSPClient"
+    字符串路径）：字符串路径在 fixture 期重新 import "gateway"，同进程
+    多目录收集时该名已被逐出/重绑定，补丁会落到新模块实例而 ``gw``
+    仍由旧实例的类构造，补丁因此落空。
+    """
     FakeLSPClient.instances.clear()
-    monkeypatch.setattr("gateway.LSPClient", FakeLSPClient)
-    gw = LSPGateway()
+    monkeypatch.setattr(lsp_gateway, "LSPClient", FakeLSPClient)
+    gw = lsp_gateway.LSPGateway()
     asyncio.run(gw.initialize())
     yield gw
     asyncio.run(gw.shutdown())

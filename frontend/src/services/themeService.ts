@@ -215,7 +215,6 @@ function pushComponentVars(vars: string[], { config }: CompileCtx): void {
     const btnRadius = styleRadiusMap[config.components.button.style] || '0.5rem'
     vars.push(`--btn-radius: ${btnRadius}`)
 
-    // 阴影
     if (config.components.button.shadow) {
       vars.push(`--btn-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1)`)
       vars.push(`--btn-shadow-hover: 0 6px 10px -1px rgba(0, 0, 0, 0.15)`)
@@ -224,7 +223,6 @@ function pushComponentVars(vars: string[], { config }: CompileCtx): void {
       vars.push(`--btn-shadow-hover: none`)
     }
 
-    // 悬停效果
     vars.push(`--btn-hover-effect: ${config.components.button.hoverEffect}`)
   }
 
@@ -414,7 +412,6 @@ function pushDeepSpaceBridgeVars(vars: string[], { config, hoverOverlay }: Compi
   // 使全部既有引用零改动接入主题系统；引擎未运行时仍回落 CSS 静态定义。
   const c2 = config.colors
   const map: Record<string, string> = {
-    // 文字
     '--ds-text-primary': c2.text.primary,
     '--ds-text-secondary': c2.text.secondary,
     '--ds-text-muted': c2.text.muted,
@@ -424,11 +421,9 @@ function pushDeepSpaceBridgeVars(vars: string[], { config, hoverOverlay }: Compi
     '--ds-bg-panel': c2.background.card,
     '--ds-bg-elevated': c2.background.elevated,
     '--ds-bg-hover': hoverOverlay,
-    // 边框
     '--ds-border-subtle': c2.border.default,
     '--ds-border-active': c2.border.active,
     '--ds-border-strong': c2.border.hover,
-    // 强调色
     '--ds-accent-primary': c2.primary,
     '--ds-accent-ai': c2.accent,
     '--ds-accent-blue': c2.secondary,
@@ -679,7 +674,6 @@ export function applyTheme(config: ThemeConfig): void {
     }
   })
 
-  // 应用背景样式
   if (config.backgrounds?.main) {
     if (config.backgrounds.main.type === 'gradient') {
       root.style.setProperty('--bg-main-gradient', config.backgrounds.main.value)
@@ -761,7 +755,7 @@ export function applyPluginThemeVars(theme: PluginTheme): void {
 }
 
 /**
- * 为插件主题派生预览色（ThemePanel/主题卡片色块用）
+ * 为插件主题派生预览色（ThemePopover/主题卡片色块用）
  *
  * 优先取插件声明的 --ds-* 变量（accent-primary/bg-canvas/bg-panel/text-primary/
  * accent-ai），缺省回退其 base 主题（dark/light 预设）的预览色。
@@ -847,7 +841,6 @@ export function validateThemeConfig(config: unknown): { valid: boolean; errors?:
 
   const theme = config as Partial<ThemeConfig>
 
-  // 检查必需字段
   if (!theme.id || typeof theme.id !== 'string') {
     errors.push('缺少或无效的 id 字段')
   }
@@ -859,7 +852,6 @@ export function validateThemeConfig(config: unknown): { valid: boolean; errors?:
   if (!theme.colors || typeof theme.colors !== 'object') {
     errors.push('缺少或无效的 colors 字段')
   } else {
-    // 检查必需的颜色字段
     const requiredColorFields = ['primary', 'secondary', 'accent', 'background', 'text', 'border']
     for (const field of requiredColorFields) {
       if (!(field in theme.colors)) {

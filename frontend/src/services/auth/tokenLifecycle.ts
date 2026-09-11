@@ -11,6 +11,11 @@
  * 依赖方向（防静态环）：authStore/client/GlobalWebSocket/useRealtimeEvents →
  * 本模块（静态）；本模块 → services/api/auth（动态 import，因为 auth.ts →
  * client.ts 会与本模块静态互指，与 client.ts 引 authStore 的避环手法同因）。
+ *
+ * 存储面（D12-7）：access token 与过期时刻仅存内存（XSS/供应链读不到持久化
+ * 副本）；refresh token 存 sessionStorage（标签页会话级，关页即清）+ 服务端
+ * 单次轮换（每次刷新作废旧值，服务端可吊销）。localStorage 零 token 残留：
+ * 升级前版本的 localStorage 令牌键在初始化/登出时清擦。
  */
 
 import { STORAGE_KEYS } from '@/constants/storage'
@@ -33,20 +38,33 @@ export function isAuthFailureFromError(error: unknown): boolean {
 }
 
 // ──────────────────────────────────────────────
-// 存取（唯一入口；收编 tokenManager/authStorage/散落的直接 localStorage 读写）
+// 存取（唯一入口）：access/过期时刻仅内存；refresh 仅 sessionStorage；
+// localStorage 不落任何 token（升级残留经 scrubLegacyTokenStorages 清擦）
 // ──────────────────────────────────────────────
 
-export function getAccessToken(): string | null {
+/** access token（内存持有，进程/页面生命周期） */
+let memoryAccessToken: string | null = null
+/** access token 过期时刻（毫秒时间戳，内存持有） */
+let memoryAccessTokenExpiry: number | null = null
+
+/** 清擦升级前版本残留在 localStorage 的令牌键（D12-7：localStorage 零 token） */
+export function scrubLegacyTokenStorages(): void {
   try {
-    return localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)
+    localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
+    localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+    localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
   } catch {
-    return null
+    // localStorage 不可用（隐私模式等）：本就无残留可清
   }
+}
+
+export function getAccessToken(): string | null {
+  return memoryAccessToken
 }
 
 export function getRefreshTokenValue(): string | null {
   try {
-    return localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+    return sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
   } catch {
     return null
   }
@@ -54,17 +72,26 @@ export function getRefreshTokenValue(): string | null {
 
 /** 写入令牌三件套（access/refresh/过期时刻）。expires_in 单位为秒。 */
 export function setTokens(accessToken: string, refreshToken: string, expiresIn: number): void {
-  const expiryTime = Date.now() + expiresIn * 1000
-  localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, accessToken)
-  localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, refreshToken)
-  localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, expiryTime.toString())
+  memoryAccessToken = accessToken
+  memoryAccessTokenExpiry = Date.now() + expiresIn * 1000
+  try {
+    sessionStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, refreshToken)
+  } catch {
+    // sessionStorage 不可用：refresh 链路将按无凭据处理（下次操作需重登），
+    // access token 本轮仍有效，不阻塞当前会话
+  }
   notifyTokenChanged()
 }
 
 export function clearTokens(): void {
-  localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
-  localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
-  localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
+  memoryAccessToken = null
+  memoryAccessTokenExpiry = null
+  try {
+    sessionStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+  } catch {
+    // 同上：不可用时无残留可清
+  }
+  scrubLegacyTokenStorages()
   notifyTokenChanged()
 }
 
@@ -73,15 +100,8 @@ export function clearTokens(): void {
 // ──────────────────────────────────────────────
 
 export function isExpired(): boolean {
-  try {
-    const storedExpiry = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
-    if (!storedExpiry) return true // 没有过期时间记录，视为已过期
-    const expiryTime = parseInt(storedExpiry, 10)
-    if (isNaN(expiryTime)) return true
-    return Date.now() > expiryTime
-  } catch {
-    return true
-  }
+  if (memoryAccessTokenExpiry === null) return true // 没有过期时间记录，视为已过期
+  return Date.now() > memoryAccessTokenExpiry
 }
 
 // ──────────────────────────────────────────────
@@ -97,7 +117,18 @@ export async function refresh(): Promise<void> {
   }
 
   refreshInFlight = (async () => {
-    const currentRefreshToken = getRefreshTokenValue()
+    // 读 refresh token：区分「无 token」（未登录/已登出的正常流程）与「读取
+    // 抛异常」（sessionStorage 存储故障）。宽松读（getRefreshTokenValue）把两者
+    // 同判 null，存储故障会被下方误标 authNoCredentials 走登出——存储故障呈现
+    // 为被登出。故障分支不当作已登出：error 日志（提示存储异常）后按瞬时失败
+    // 上抛（不带 authNoCredentials），现态保留，调度器按退避重试。
+    let currentRefreshToken: string | null
+    try {
+      currentRefreshToken = sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+    } catch (error) {
+      console.error('[tokenLifecycle] refresh token 读取失败（存储异常，保留现态不登出）:', error)
+      throw new Error('令牌存储读取失败', { cause: error })
+    }
 
     if (!currentRefreshToken) {
       // 确定性认证失败（无凭据）：带标记抛出，isAuthFailureFromError 据此走
@@ -112,16 +143,14 @@ export async function refresh(): Promise<void> {
       const authApi = await import('@/services/api/auth')
       const response = await authApi.refreshToken(currentRefreshToken)
 
-      localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, response.access_token)
-      localStorage.setItem(
-        STORAGE_KEYS.ACCESS_TOKEN_EXPIRY,
-        String(Date.now() + response.expires_in * 1000),
-      )
-      // 如果返回了新的 refresh_token，也更新它（后端现为无状态不轮换，防御性保留）
-      if (response.refresh_token) {
-        localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, response.refresh_token)
+      // 后端契约恒轮换返回新 refresh token；缺失视为刷新失败（旧值已被
+      // 服务端作废，无凭据可落），避免留下无 refresh 凭据的"半会话"静默耗尽
+      if (!response.refresh_token) {
+        throw new Error('刷新响应缺少轮换的新 refresh token')
       }
-      notifyTokenChanged()
+      // D12-7 单次轮换：服务端已作废请求所用的旧值，必须落新值；
+      // 旧值续用会被服务端 401（已消费 jti）
+      setTokens(response.access_token, response.refresh_token, response.expires_in)
 
       // 刷新成功后重新调度主动续期（新的 expires_in）
       startAutoRefresh()
@@ -192,11 +221,8 @@ export function startAutoRefresh(): void {
     clearTimeout(tokenRefreshTimer)
     tokenRefreshTimer = null
   }
-  const storedExpiry = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
-  if (!storedExpiry) return
-  const expiryTime = parseInt(storedExpiry, 10)
-  if (isNaN(expiryTime)) return
-  const remainingMs = expiryTime - Date.now()
+  if (memoryAccessTokenExpiry === null) return
+  const remainingMs = memoryAccessTokenExpiry - Date.now()
   if (remainingMs <= 0) return // 已过期，由反应式路径处理
   const delay = Math.max(1000, Math.min(remainingMs / 2, TOKEN_REFRESH_MAX_LEAD_MS))
   refreshRetryCount = 0

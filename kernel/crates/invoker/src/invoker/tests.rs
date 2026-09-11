@@ -3,7 +3,8 @@
 
 use super::*;
 use agentos_core::traits::{
-    LoadedPlugin, McpConfig, McpEndpoint, McpTransport, PluginManifest, PluginStatus,
+    LoadedPlugin, McpConfig, McpEndpoint, McpTransport, PluginLifecycle, PluginManifest,
+    PluginStatus,
 };
 use agentos_core::types::TenantContext;
 use serde_json::json;
@@ -92,6 +93,8 @@ impl PluginLoader for MockLoader {
 #[allow(dead_code)]
 fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: id.to_string(),
         name: format!("Test {}", id),
         description: None,
@@ -133,6 +136,8 @@ fn make_light_manifest(id: &str, entry: &str) -> PluginManifest {
 
 fn make_inprocess_manifest(id: &str) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: id.to_string(),
         name: format!("Test {}", id),
         description: None,
@@ -200,8 +205,9 @@ async fn test_invoke_inprocess_without_loader_errors() {
     loader.add_manifest(make_inprocess_manifest("rust_plugin"));
 
     let invoker = PluginInvokerImpl::new(loader);
+    let state = json!({});
     let ctx = PluginContext::new(
-        json!({}),
+        &state,
         json!({}),
         TenantContext::new("t1", "s1"),
         Uuid::new_v4(),
@@ -249,9 +255,9 @@ async fn fully_wired_invoker_for_e2e() -> PluginInvokerImpl {
     PluginInvokerImpl::new(loader).set_native_loader(native_loader)
 }
 
-fn make_e2e_ctx() -> PluginContext {
+fn make_e2e_ctx(state: &serde_json::Value) -> PluginContext<'_> {
     PluginContext::new(
-        json!({}),
+        state,
         json!({}),
         TenantContext::new("t1", "s1"),
         Uuid::new_v4(),
@@ -333,15 +339,16 @@ async fn e2e_native_plugins_load_and_execute() {
     invoker.set_router(router);
 
     // tool_core 原生插件（带 raw_tool_calls 触发执行路径）。
+    let ctx_tool_state = json!({
+        "raw_tool_calls": [
+            {"name": "bash_execute", "id": "call_test1", "args": {"command": "echo agentos-native-ok"}}
+        ],
+        "messages": [],
+        "session_id": "test-session",
+        "pipeline_id": "test-pipeline",
+    });
     let ctx_tool = PluginContext::new(
-        json!({
-            "raw_tool_calls": [
-                {"name": "bash_execute", "id": "call_test1", "args": {"command": "echo agentos-native-ok"}}
-            ],
-            "messages": [],
-            "session_id": "test-session",
-            "pipeline_id": "test-pipeline",
-        }),
+        &ctx_tool_state,
         json!({}),
         TenantContext::new("t1", "s1"),
         Uuid::new_v4(),
@@ -420,7 +427,8 @@ async fn e2e_native_inprocess_plugin_executes() {
         return;
     }
     let invoker = fully_wired_invoker_for_e2e().await;
-    let ctx = make_e2e_ctx();
+    let state = json!({});
+    let ctx = make_e2e_ctx(&state);
     let result = invoker.invoke_pipeline_plugin("native_test", &ctx).await;
     assert!(
         result.is_ok(),
@@ -478,8 +486,9 @@ async fn e2e_native_tool_call_via_execute() {
 async fn test_invoke_nonexistent_plugin() {
     let loader = Arc::new(MockLoader::new());
     let invoker = PluginInvokerImpl::new(loader);
+    let state = json!({});
     let ctx = PluginContext::new(
-        json!({}),
+        &state,
         json!({}),
         TenantContext::new("t1", "s1"),
         Uuid::new_v4(),
@@ -515,6 +524,8 @@ async fn test_lifecycle_hook_composite_skipped() {
     // ADR ⑥: 组合插件不需要生命周期钩子
     let loader = Arc::new(MockLoader::new());
     let manifest = PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "composite_test".to_string(),
         name: "Composite".to_string(),
         description: None,
@@ -553,13 +564,6 @@ async fn test_lifecycle_hook_composite_skipped() {
         .send_lifecycle_hook("composite_test", LifecycleHook::OnLoad, &ctx)
         .await;
     assert!(result.is_ok()); // 组合插件直接返回 Ok
-}
-
-#[tokio::test]
-async fn test_check_health_not_connected() {
-    let loader = Arc::new(MockLoader::new());
-    let invoker = PluginInvokerImpl::new(loader);
-    assert!(!invoker.check_health("nonexistent").await);
 }
 
 #[tokio::test]
@@ -994,6 +998,462 @@ async fn test_kill_sidecar_if_any_kills_cached_and_noop_when_absent() {
     invoker.kill_sidecar_if_any("victim").await;
 }
 
+/// python 可执行名（Windows 为 python，其余为 python3）。
+fn python_exe() -> &'static str {
+    #[cfg(windows)]
+    {
+        "python"
+    }
+    #[cfg(not(windows))]
+    {
+        "python3"
+    }
+}
+
+/// python 是否可用（不可用时响亮失败——本组用例依赖真实 python 替身进程）。
+fn assert_python_available() {
+    let ok = std::process::Command::new(python_exe())
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    assert!(ok, "python 不可用——假死评估用例依赖真实 python 替身进程");
+}
+
+/// 测试用环境变量守卫：设置并在 Drop 时恢复原值（panic 安全，不污染并行测试）。
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+#[tokio::test]
+async fn force_unload_completes_bounded_while_read_lock_held() {
+    // 锁结构回归：外部调用方持有 client 读锁期间触发 force_unload
+    // （respawn/崩溃恢复路径的锁形态），必须限时完成——unload 段（取写锁 →
+    // on_unload → kill）限时 2s，读锁被在飞调用持有时放弃 kill（kill_on_drop
+    // 兜底）照常完成驱逐与记账。修复前该结构 = 写锁无超时 + 同任务持读锁
+    // 等写锁 → 永久悬挂（请求卡死、GC 单循环瘫痪）。
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    let live = spawn_long_lived_stdio_client().await;
+    assert!(live.is_alive().await, "前置：长驻假 sidecar 必须存活");
+    let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+    invoker
+        .mcp_clients
+        .write()
+        .insert("plugin:victim".to_string(), Arc::clone(&live_arc));
+
+    // 模拟 attempt_sidecar_pipeline 失败分支的持锁形态：读锁存活期间 unload。
+    let reader = live_arc.read().await;
+    let started = tokio::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        invoker.force_unload_impl("victim"),
+    )
+    .await;
+    drop(reader);
+
+    assert!(
+        outcome.is_ok(),
+        "持读锁期间 force_unload 必须限时完成（自等写锁 = 永久悬挂）"
+    );
+    let unload_result = outcome.expect("timeout 已排除");
+    assert!(
+        unload_result.is_ok(),
+        "放弃 kill 后卸载状态机必须照常收敛: {:?}",
+        unload_result.err()
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= std::time::Duration::from_secs(2),
+        "写锁被持有必须等满 2s 限时（超时保护生效），实际 {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "unload 不得在读锁争用下悬挂，实际 {elapsed:?}"
+    );
+    assert!(
+        invoker.mcp_clients.read().get("plugin:victim").is_none(),
+        "unload 后缓存条目必须驱逐（下次调用 respawn 新实例）"
+    );
+    // 显式回收残留进程（读锁已释放，写锁立即可得）：Windows 上 kill_on_drop
+    // 只杀 cmd 包装进程不杀 ping 孙进程，弃置会让替身占满其自然生命周期。
+    live_arc
+        .write()
+        .await
+        .kill()
+        .await
+        .expect("残留进程显式回收");
+    assert!(
+        !live_arc.read().await.is_alive().await,
+        "显式回收后进程必须终止"
+    );
+}
+
+#[tokio::test]
+async fn frozen_sidecar_evaluation_then_unlocked_force_unload_kills_process() {
+    // 假死评估接缝回归（与 attempt_sidecar_pipeline 失败分支同构的锁序列）：
+    // 读锁内完成判定+取证（evaluate_frozen_sidecar 只需 &client），随后释放
+    // 读锁再触发 force_unload——限时完成且进程真实被杀、缓存驱逐。
+    // 评估只做判定与取证、绝不在调用方读锁存活时执行回收（自等写锁死锁）。
+    assert_python_available();
+
+    // 心跳行 #HB 1000（UNIX 毫秒 ≈ 1970）→ heartbeat_age 恒超 30s 阈值，
+    // 进程本身存活（sleep 60s）= 「活着但事件循环假死」的确定性替身。
+    let script =
+        "import sys, time\nsys.stderr.write('#HB 1000\\n'); sys.stderr.flush()\ntime.sleep(60)\n";
+    let mut client = McpClient::new_stdio(
+        python_exe(),
+        vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+    );
+    client.connect().await.expect("假死替身可连接");
+    assert!(client.is_alive().await, "前置：进程存活（非真死）");
+    let live_arc = Arc::new(tokio::sync::RwLock::new(client));
+
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    invoker
+        .mcp_clients
+        .write()
+        .insert("plugin:frozen".to_string(), Arc::clone(&live_arc));
+
+    // py-spy 注入为必然缺失的二进制：取证降级告警跳过（判定链其余环节照常
+    // 走到，且不拖慢测试）。
+    let _spy = EnvVarGuard::set("AGENTOS_PY_SPY_BIN", "definitely_not_py_spy_xyz");
+
+    // 等 stderr 读循环记录心跳（connect 返回与记录之间无同步点）。
+    let guard = live_arc.read().await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while guard.heartbeat_age_secs().is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "替身心跳未被记录（#HB 协议契约）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let frozen = invoker
+        .evaluate_frozen_sidecar(&guard, "frozen", "call failed: synthetic")
+        .await;
+    assert!(frozen, "心跳停跳超阈值必须判定假死（应触发 force_unload）");
+    drop(guard);
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        invoker.force_unload_impl("frozen"),
+    )
+    .await
+    .expect("释放读锁后 force_unload 必须限时完成")
+    .expect("unload 收敛成功");
+    assert!(
+        !live_arc.read().await.is_alive().await,
+        "假死自愈必须真实 kill 宿主进程"
+    );
+    assert!(
+        invoker.mcp_clients.read().get("plugin:frozen").is_none(),
+        "unload 后缓存条目必须驱逐（下次调用 respawn 干净实例）"
+    );
+}
+
+#[tokio::test]
+async fn frozen_evaluation_skips_when_heartbeat_absent_or_fresh() {
+    // 判定门两分支：从未上报心跳（旧版本 sidecar / HTTP transport）不判假死；
+    // 心跳新鲜（事件循环活着）不判假死——只有停跳超阈值才触发自愈。
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+
+    // ① 无心跳：未连接 stdio 客户端，last_heartbeat_ms 恒 0 → None。
+    let silent = McpClient::new_stdio("cat", vec![]);
+    assert!(
+        !invoker
+            .evaluate_frozen_sidecar(&silent, "no_hb", "call failed")
+            .await,
+        "无心跳数据不得判定假死（平滑兼容分支）"
+    );
+
+    // ② 心跳新鲜：替身启动即上报当前时刻（age ≈ 0s < 30s 阈值）。
+    assert_python_available();
+    let script = "import sys,time\nsys.stderr.write('#HB %d\\n' % int(time.time()*1000)); sys.stderr.flush()\ntime.sleep(60)\n";
+    let mut client = McpClient::new_stdio(
+        python_exe(),
+        vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+    );
+    client.connect().await.expect("替身可连接");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while client.heartbeat_age_secs().is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "替身心跳未被记录（#HB 协议契约）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        !invoker
+            .evaluate_frozen_sidecar(&client, "fresh_hb", "call failed")
+            .await,
+        "心跳新鲜不得判定假死（协议/工具错误走既有语义）"
+    );
+}
+
+#[tokio::test]
+async fn frozen_evaluation_circuit_breaker_and_pidless_dump_degrade_to_no_unload() {
+    // 熔断分支：10 分钟窗口内已假死 respawn 满 3 次 → 停手只取证，返回
+    // false（不触发 force_unload，防循环重启掩盖根因）。同程覆盖取证降级：
+    // 客户端已无子进程（pid None）→ 取证跳过告警，判定链不 panic 不阻断。
+    assert_python_available();
+    let _spy = EnvVarGuard::set("AGENTOS_PY_SPY_BIN", "definitely_not_py_spy_xyz");
+
+    // 假死替身：记录陈旧心跳后 kill（pid None 语义），heartbeat_age 仍超阈值。
+    let script =
+        "import sys, time\nsys.stderr.write('#HB 1000\\n'); sys.stderr.flush()\ntime.sleep(60)\n";
+    let mut client = McpClient::new_stdio(
+        python_exe(),
+        vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+    );
+    client.connect().await.expect("替身可连接");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while client.heartbeat_age_secs().is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "替身心跳未被记录（#HB 协议契约）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    client.kill().await.expect("kill 释放子进程");
+    assert!(
+        client.pid().await.is_none(),
+        "前置：无子进程（取证降级路径）"
+    );
+
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    invoker.freeze_respawns.write().insert(
+        "frozen_cb".to_string(),
+        vec![Instant::now(), Instant::now(), Instant::now()],
+    );
+
+    assert!(
+        !invoker
+            .evaluate_frozen_sidecar(&client, "frozen_cb", "call failed")
+            .await,
+        "熔断窗口超限必须停手（返回 false，不再触发 force_unload）"
+    );
+}
+
+#[tokio::test]
+async fn idle_gc_pass_completes_bounded_while_read_lock_held() {
+    // GC 写锁超时回归：宿主空闲超期但在飞调用方持读锁时，GC pass 必须限时
+    // 完成而非悬挂——unload 段 2s 超时后放弃 kill（kill_on_drop 兜底），
+    // 驱逐与记账照常收敛。修复前无超时写锁 = GC 单循环在长流宿主上等数小时
+    // （全局空闲回收瘫痪）。
+    let loader = Arc::new(MockLoader::new());
+    loader.add_manifest(make_light_manifest("gc_a", "python server.py"));
+    loader.add_manifest(make_light_manifest("gc_b", "python server.py"));
+    let invoker = PluginInvokerImpl::new(loader);
+
+    invoker.resolve_host_key(&make_light_manifest("gc_a", "python server.py"));
+    invoker.resolve_host_key(&make_light_manifest("gc_b", "python server.py"));
+    let host_key = "group:light:1".to_string();
+    let live = spawn_long_lived_stdio_client().await;
+    assert!(live.is_alive().await, "前置：长驻假 sidecar 必须存活");
+    let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(host_key.clone(), Arc::clone(&live_arc));
+    invoker.touch_last_used(&host_key);
+    // 回写旧时间戳：空闲 400s > 默认阈值 300s
+    invoker
+        .last_used
+        .write()
+        .insert(host_key.clone(), Instant::now() - Duration::from_secs(400));
+
+    // 在飞调用方持读锁期间跑 GC pass：限时完成 + 超时保护生效 + 驱逐收敛。
+    let reader = live_arc.read().await;
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        invoker.run_idle_gc_pass(),
+    )
+    .await
+    .expect("持读锁期间 GC pass 必须限时完成（无超时写锁 = 永久悬挂）");
+    drop(reader);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(2),
+        "写锁被持有必须等满 2s 限时（超时保护生效），实际 {elapsed:?}"
+    );
+    assert!(
+        invoker.mcp_clients.read().get(&host_key).is_none(),
+        "回收即清空：mcp_clients 条目必须移除"
+    );
+    assert!(
+        invoker.last_used.read().get(&host_key).is_none(),
+        "回收即清空：last_used 条目必须移除"
+    );
+    assert!(
+        live_arc.read().await.is_alive().await,
+        "kill 已因写锁超时放弃：在飞期间进程不被打断（kill_on_drop 在最后一个 Arc 释放时兜底）"
+    );
+    // 显式回收残留进程（读锁已释放，写锁立即可得）：Windows 上 kill_on_drop
+    // 只杀 cmd 包装进程不杀 ping 孙进程，弃置会让替身占满其自然生命周期。
+    live_arc
+        .write()
+        .await
+        .kill()
+        .await
+        .expect("残留进程显式回收");
+    assert!(
+        !live_arc.read().await.is_alive().await,
+        "显式回收后进程必须终止"
+    );
+}
+
+#[tokio::test]
+async fn list_plugin_tools_returns_bounded_error_while_read_lock_held() {
+    // G2 回收写锁超时回归：本次新 spawn 的宿主在校验后回收（kill）时，写锁
+    // 被并发在飞调用方持有时必须限时返回明确错误，而非无限悬挂。宿主是合法
+    // 已初始化实例：缓存条目保留，后续调用照常复用。
+    use std::sync::Mutex as StdMutex;
+
+    fn subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        hay.windows(needle.len()).position(|w| w == needle)
+    }
+    fn content_length(headers: &[u8]) -> usize {
+        String::from_utf8_lossy(headers)
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    // 本地 mock HTTP MCP（环回，出网守卫默认放行）：tools/list 响应延迟
+    // 400ms，为并发持锁任务留出确定性抢占窗口；连接内支持 keep-alive 多请求
+    // （reqwest 连接池复用：initialize / on_load / tools/list 同连接）。
+    async fn spawn_delayed_mock(tools_list_delay: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    loop {
+                        let mut data = Vec::new();
+                        let mut tmp = [0u8; 4096];
+                        loop {
+                            match sock.read(&mut tmp).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => {
+                                    data.extend_from_slice(&tmp[..n]);
+                                    if let Some(hdr_end) = subseq(&data, b"\r\n\r\n") {
+                                        let cl = content_length(&data[..hdr_end]);
+                                        if data.len() >= hdr_end + 4 + cl {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let payload = if data.windows(10).any(|w| w == b"tools/list") {
+                            tokio::time::sleep(tools_list_delay).await;
+                            r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#.to_string()
+                        } else {
+                            r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#.to_string()
+                        };
+                        let out = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        );
+                        if sock.write_all(out.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    let url = spawn_delayed_mock(Duration::from_millis(400)).await;
+    let loader = Arc::new(MockLoader::new());
+    let manifest = make_http_manifest("g2_contended", &url);
+    loader.add_manifest(manifest.clone());
+    let invoker = Arc::new(PluginInvokerImpl::new(loader));
+
+    // 并发持锁任务：缓存条目（HTTP 客户端，get_or_create 插入）一出现即持
+    // 读锁并保持到测试尾——模拟并发在飞调用。
+    let stop = Arc::new(StdMutex::new(false));
+    let holder = {
+        let invoker = Arc::clone(&invoker);
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            loop {
+                let arc = invoker
+                    .mcp_clients
+                    .read()
+                    .get("plugin:g2_contended")
+                    .cloned();
+                if let Some(arc) = arc {
+                    let _guard = arc.read().await;
+                    while !*stop.lock().unwrap() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+    };
+
+    let started = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        invoker.list_plugin_tools("g2_contended"),
+    )
+    .await
+    .expect("持读锁期间 list_plugin_tools 必须限时返回（无超时写锁 = 永久悬挂）");
+    let elapsed = started.elapsed();
+
+    let err = result.expect_err("写锁被持有：回收 kill 必须超时报错而非悬挂");
+    assert_eq!(
+        err.code.as_deref(),
+        Some("HOST_RECLAIM_TIMEOUT"),
+        "必须是明确的回收超时错误: {err}"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(2),
+        "写锁被持有必须等满 2s 限时（超时保护生效），实际 {elapsed:?}"
+    );
+    assert!(
+        invoker
+            .mcp_clients
+            .read()
+            .get("plugin:g2_contended")
+            .is_some(),
+        "超时放弃回收：宿主是合法已初始化实例，缓存条目保留供后续调用复用"
+    );
+    *stop.lock().unwrap() = true;
+    assert!(holder.await.expect("持锁任务正常退出"));
+}
+
 // ── B2：native 工具调用返回归一单元测试 ──
 
 #[test]
@@ -1192,6 +1652,8 @@ fn test_extract_mcp_content_missing_content_field() {
 /// 辅助：构造一个 sidecar pipeline manifest（用于 invoke_entry 缺失测试）。
 fn make_pipeline_sidecar_manifest(id: &str, invoke_entry: Option<&str>) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: id.to_string(),
         name: format!("Test {}", id),
         description: None,
@@ -1234,8 +1696,9 @@ async fn test_invoke_pipeline_plugin_missing_invoke_entry_returns_error() {
     loader.add_manifest(make_pipeline_sidecar_manifest("bad_pipeline", None));
 
     let invoker = PluginInvokerImpl::new(loader);
+    let state = json!({});
     let ctx = PluginContext::new(
-        json!({}),
+        &state,
         json!({}),
         TenantContext::new("t1", "s1"),
         Uuid::new_v4(),
@@ -1262,6 +1725,65 @@ async fn test_invoke_pipeline_plugin_missing_invoke_entry_returns_error() {
     );
 }
 
+/// W2b：sidecar 路径 state.reads 切片投喂的调用面覆盖。
+///
+/// 注入未连接的 HTTP 客户端进缓存（HTTP transport 不判死，fast path 直复用，
+/// 无需真实服务端），invoke_pipeline_plugin 走到 arguments_json 构造（含
+/// state_feed_payload 切片组装，声明/未声明两分支）后 call_tool_raw 对
+/// 不可达端口失败——MCP_CALL_FAILED 证明构造段已执行且不 panic。
+#[tokio::test]
+async fn test_sidecar_pipeline_state_reads_slice_reaches_arguments_construction() {
+    for (plugin_id, with_reads) in [("slice_declared", true), ("slice_undeclared", false)] {
+        let loader = Arc::new(MockLoader::new());
+        let mut manifest = make_http_manifest(plugin_id, "http://127.0.0.1:9/mcp");
+        manifest.plugin_type = PluginType::Pipeline;
+        manifest.invoke_entry = Some(format!("{plugin_id}.execute"));
+        if with_reads {
+            manifest.state = Some(agentos_core::traits::StateDeclaration {
+                reads: vec!["messages_tail:1".to_string(), "task.status".to_string()],
+                ..Default::default()
+            });
+        }
+        loader.add_manifest(manifest);
+        let invoker = PluginInvokerImpl::new(loader);
+        // 注入未连接 HTTP 客户端（与连接后同构：child 恒 None → 不判死）。
+        invoker.mcp_clients.write().insert(
+            format!("plugin:{plugin_id}"),
+            Arc::new(tokio::sync::RwLock::new(McpClient::new_http(
+                "http://127.0.0.1:9/mcp",
+                HashMap::new(),
+                None,
+            ))),
+        );
+
+        let state = json!({
+            "messages": [{"role": "user"}, {"role": "assistant"}],
+            "task.status": "running",
+            "pipeline_id": "p-1",
+            "undeclared_big": "should-not-panic-either-way",
+        });
+        let ctx = PluginContext::new(
+            &state,
+            json!({}),
+            TenantContext::new("t1", "s1"),
+            Uuid::new_v4(),
+            agentos_core::types::ContentLoader::new(
+                std::sync::Arc::new(MockStorage),
+                "run1".to_string(),
+                "main".to_string(),
+            ),
+        );
+
+        let result = invoker.invoke_pipeline_plugin(plugin_id, &ctx).await;
+        let err = result.expect_err("不可达 HTTP 端点必须失败");
+        assert_eq!(
+            err.code.as_deref(),
+            Some("MCP_CALL_FAILED"),
+            "{plugin_id}: 应到达 arguments 构造后在 call_tool_raw 失败，got: {err:?}"
+        );
+    }
+}
+
 // Mock StorageBackend for test context
 struct MockStorage;
 
@@ -1283,12 +1805,6 @@ impl agentos_core::traits::StorageBackend for MockStorage {
     async fn append_trace(
         &self,
         _entry: agentos_core::types::TraceEntry,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
-    }
-    async fn create_branch(
-        &self,
-        _branch: agentos_core::types::Branch,
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
@@ -1399,6 +1915,16 @@ impl agentos_core::traits::StorageBackend for MockStorage {
     ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError> {
         Ok(Vec::new())
     }
+    async fn update_user_password(
+        &self,
+        _user_id: &str,
+        _password_hash: &str,
+        _must_change_password: bool,
+    ) -> Result<bool, agentos_core::types::StorageError> {
+        Err(agentos_core::types::StorageError::NotFound(
+            "mock".to_string(),
+        ))
+    }
     async fn update_last_login(
         &self,
         _user_id: &str,
@@ -1484,20 +2010,6 @@ fn test_touch_last_used_records_activity() {
     // 再次 touch 同一插件应更新（不新增）
     invoker.touch_last_used("plugin_a");
     assert_eq!(invoker.last_used.read().len(), 2, "重复 touch 不应新增条目");
-}
-
-#[tokio::test]
-async fn test_unload_if_idle_unloaded_sidecar_returns_true() {
-    // 对已 force_unload（不在 mcp_clients）的插件，unload_if_idle 内部走 force_unload_impl
-    // 路径，对未加载的返回 Ok → true。
-    let loader = Arc::new(MockLoader::new());
-    let invoker = PluginInvokerImpl::new(loader);
-    // 未加载任何 sidecar，unload_if_idle 应走 force_unload_impl（Ok）→ true
-    let unloaded = invoker.unload_if_idle("never_loaded").await;
-    assert!(
-        unloaded,
-        "未加载插件的 unload_if_idle 应返回 true（软卸载幂等成功）"
-    );
 }
 
 #[tokio::test]
@@ -1811,8 +2323,9 @@ async fn test_invoke_pipeline_sidecar_spawn_failure_returns_mcp_connect_failed()
     loader.add_manifest(m);
 
     let invoker = PluginInvokerImpl::new(loader);
+    let state = json!({});
     let ctx = PluginContext::new(
-        json!({}),
+        &state,
         json!({}),
         TenantContext::new("t1", "s1"),
         Uuid::new_v4(),
@@ -1972,17 +2485,6 @@ async fn test_invoke_native_tool_bad_artifact_errors() {
         .unwrap_err();
     // resolve_artifact 双查后前置报 NOT_FOUND（比拖到 dlopen 的 LOAD_FAILED 更可读）
     assert_eq!(err.code.as_deref(), Some("NATIVE_ARTIFACT_NOT_FOUND"));
-}
-
-// ── unload_if_idle 各 host_type 分支 ──
-
-#[tokio::test]
-async fn test_unload_if_idle_inprocess_false() {
-    // InProcess（rust cdylib）：dlclose 限制，永不软卸载 → false
-    let loader = Arc::new(MockLoader::new());
-    loader.add_manifest(make_inprocess_manifest("native_idle"));
-    let invoker = PluginInvokerImpl::new(loader);
-    assert!(!invoker.unload_if_idle("native_idle").await);
 }
 
 // ── idle_timeout_secs_sync 优先级链 ──
@@ -2248,6 +2750,81 @@ async fn test_idle_gc_reclaims_whole_host_and_frees_slots() {
     assert!(
         invoker.light_packing.read().assignments.is_empty(),
         "回收即清空：分配表内该宿主全部成员条目必须释放"
+    );
+}
+
+#[tokio::test]
+async fn test_force_unload_after_idle_reclaim_spares_recycled_slot_new_host() {
+    // B15-R1 回归锚（watcher 代码指纹 evict × idle 回收交互）：宿主被 idle GC
+    // 回收（分配表清空、槽位复用）后，**被回收老成员**的代码指纹 evict
+    // （force_unload）不得误杀复用该槽位的新宿主——驱逐按分配表定位宿主，
+    // 无分配条目 = 无宿主可杀；正例对照：evict 现任成员杀其宿主且不回收装箱。
+    let loader = Arc::new(MockLoader::new());
+    loader.add_manifest(make_light_manifest("old_m", "python server.py"));
+    loader.add_manifest(make_light_manifest("new_n", "python server.py"));
+    let invoker = PluginInvokerImpl::new(loader);
+
+    // ① 老成员 old_m 装箱 group:light:1，宿主已 spawn（假进程入缓存）+ 记账
+    invoker.resolve_host_key(&make_light_manifest("old_m", "python server.py"));
+    let host_key = "group:light:1".to_string();
+    let host_m = Arc::new(tokio::sync::RwLock::new(
+        spawn_long_lived_stdio_client().await,
+    ));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(host_key.clone(), Arc::clone(&host_m));
+    invoker.touch_last_used(&host_key);
+
+    // ② idle GC 回收：进程 kill + 分配表清空（槽位可复用）
+    invoker
+        .last_used
+        .write()
+        .insert(host_key.clone(), Instant::now() - Duration::from_secs(400));
+    invoker.run_idle_gc_pass().await;
+    assert!(
+        !host_m.read().await.is_alive().await,
+        "前置：空闲宿主已被 GC 回收"
+    );
+    assert!(invoker.light_packing.read().assignments.is_empty());
+
+    // ③ 新成员 new_n 装箱进复用的 group:light:1 并 spawn 新宿主
+    let assigned = invoker.resolve_host_key(&make_light_manifest("new_n", "python server.py"));
+    assert_eq!(assigned, host_key, "前置：新成员复用被回收槽位");
+    let host_n = Arc::new(tokio::sync::RwLock::new(
+        spawn_long_lived_stdio_client().await,
+    ));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(host_key.clone(), Arc::clone(&host_n));
+    invoker.touch_last_used(&host_key);
+
+    // ④ evict 被回收老成员 old_m：无分配条目 → 无宿主可杀 → 新宿主安然无恙
+    invoker.force_unload_impl("old_m").await.unwrap();
+    assert!(
+        host_n.read().await.is_alive().await,
+        "evict 被回收成员不得误杀复用槽位的新宿主"
+    );
+    assert!(
+        invoker.mcp_clients.read().contains_key(&host_key),
+        "新宿主缓存条目保持存活"
+    );
+
+    // ⑤ 正例对照：evict 现任成员 new_n → 其宿主被杀，装箱保留（respawn 按表重建）
+    invoker.force_unload_impl("new_n").await.unwrap();
+    assert!(
+        !host_n.read().await.is_alive().await,
+        "evict 现任成员必须 kill 其宿主进程"
+    );
+    assert!(!invoker.mcp_clients.read().contains_key(&host_key));
+    assert!(
+        invoker
+            .light_packing
+            .read()
+            .assignments
+            .contains_key("new_n"),
+        "evict（force_unload）不回收装箱分配——respawn 按表重建成员集"
     );
 }
 
@@ -2726,7 +3303,8 @@ async fn test_force_unload_light_kills_host_keeps_assignments() {
 
 #[tokio::test]
 async fn test_unload_if_idle_light_reclaims_assignments() {
-    // unload_if_idle（idle 语境）对 light 成员：整组回收 + 槽位释放（分配表清空）。
+    // idle 语境回收（unload_host reclaim=true）对 light 成员：整组回收 + 槽位释放
+    // （分配表清空）——与 idle GC（run_idle_gc_pass）同一调用形态。
     let loader = Arc::new(MockLoader::new());
     let manifest_a = make_light_manifest("guard_a", "python server.py");
     loader.add_manifest(manifest_a.clone());
@@ -2740,8 +3318,10 @@ async fn test_unload_if_idle_light_reclaims_assignments() {
         .write()
         .insert(host_key.clone(), Arc::clone(&live_arc));
 
-    let unloaded = invoker.unload_if_idle("guard_a").await;
-    assert!(unloaded, "sidecar 插件 idle 卸载应返回 true");
+    invoker
+        .unload_host(&host_key, true)
+        .await
+        .expect("sidecar 插件 idle 卸载应成功");
     assert!(!live_arc.read().await.is_alive().await);
     assert!(
         invoker.light_packing.read().assignments.is_empty(),
@@ -2782,29 +3362,6 @@ async fn test_existing_host_key_for_light_unassigned_is_none() {
         Some("plugin:ghost".to_string()),
         "无 manifest 时保守按独占兜底（命中缓存即生效）"
     );
-}
-
-#[tokio::test]
-async fn test_check_health_light_via_host_process() {
-    // check_health 宿主粒度：light 成员健康 = 所在宿主进程存活；无宿主 → false。
-    let loader = Arc::new(MockLoader::new());
-    let light = make_light_manifest("guard_a", "python server.py");
-    loader.add_manifest(light.clone());
-    let invoker = PluginInvokerImpl::new(loader);
-
-    // 未 spawn：无宿主缓存 → false
-    invoker.resolve_host_key(&light);
-    assert!(!invoker.check_health("guard_a").await);
-
-    // 宿主进程存活 → true
-    let host_key = "group:light:1".to_string();
-    let live = spawn_long_lived_stdio_client().await;
-    let live_arc = Arc::new(tokio::sync::RwLock::new(live));
-    invoker
-        .mcp_clients
-        .write()
-        .insert(host_key, Arc::clone(&live_arc));
-    assert!(invoker.check_health("guard_a").await);
 }
 
 /// warmup_sidecar：native（InProcess）无进程模型 → no-op Ok，不触发加载/缓存。
@@ -3002,8 +3559,7 @@ async fn test_idle_gc_exempts_keep_warm_host_group() {
 
 #[tokio::test]
 async fn test_explicit_unload_still_works_on_keep_warm_host() {
-    // 豁免只约束 idle GC 的自动回收；显式卸载（unload_if_idle/force_unload）
-    // 不受预热常驻约束。
+    // 豁免只约束 idle GC 的自动回收；显式卸载（force_unload）不受预热常驻约束。
     let loader = Arc::new(MockLoader::new());
     loader.add_manifest(make_light_manifest("warm_c", "python server.py"));
     let invoker = PluginInvokerImpl::new(loader);
@@ -3021,10 +3577,10 @@ async fn test_explicit_unload_still_works_on_keep_warm_host() {
         .warmup_sidecar(&make_light_manifest("warm_c", "python server.py"))
         .await;
 
-    assert!(
-        invoker.unload_if_idle("warm_c").await,
-        "显式卸载不受预热常驻豁免约束"
-    );
+    invoker
+        .force_unload_impl("warm_c")
+        .await
+        .expect("显式卸载不受预热常驻豁免约束");
     assert!(!live.read().await.is_alive().await);
 }
 
@@ -3344,4 +3900,499 @@ fn test_group_grants_follows_live_packing_no_stale_snapshot() {
             "tool-surface".to_string()
         ])
     );
+}
+
+#[tokio::test]
+async fn test_run_freeze_dump_writes_report_with_fake_spy() {
+    // 冻结取证契约：假 py-spy 替身（外部进程是可替身依赖）——产物落盘、
+    // 文件名带 plugin/pid、正文含元信息头与替身 stdout。
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join(if cfg!(windows) {
+        "fake-spy.cmd"
+    } else {
+        "fake-spy"
+    });
+    if cfg!(windows) {
+        std::fs::write(&fake, "@echo off\r\necho Thread 0x1 (idle): run_loop\r\n").unwrap();
+    } else {
+        std::fs::write(&fake, "#!/bin/sh\necho 'Thread 0x1 (idle): run_loop'\n").unwrap();
+    }
+    let out_dir = dir.path().join("dumps");
+    let got = PluginInvokerImpl::run_freeze_dump(
+        fake.to_str().unwrap(),
+        "llm_service",
+        4242,
+        42,
+        &out_dir,
+        10,
+    )
+    .await;
+    let path = got.expect("假 spy 成功应返回产物路径");
+    let name = path.file_name().unwrap().to_string_lossy().to_string();
+    assert!(
+        name.starts_with("llm_service_") && name.ends_with("_pid4242.txt"),
+        "产物名: {name}"
+    );
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(body.contains("# plugin: llm_service"), "元信息头缺失");
+    assert!(body.contains("# pid: 4242"));
+    assert!(body.contains("# heartbeat_stale_secs: 42"));
+    assert!(body.contains("run_loop"), "应包含替身 py-spy 的 stdout");
+}
+
+#[tokio::test]
+async fn test_run_freeze_dump_missing_spy_degrades_to_none() {
+    // 尽力而为契约：spy 二进制不存在 → None（降级告警），不 panic 不长阻塞，
+    // 调用点随后照常 force_unload 自愈。
+    let dir = tempfile::tempdir().unwrap();
+    let got = PluginInvokerImpl::run_freeze_dump(
+        "no-such-py-spy-binary-xyz",
+        "llm_service",
+        1,
+        31,
+        dir.path(),
+        10,
+    )
+    .await;
+    assert!(got.is_none(), "spy 缺失应降级返回 None");
+}
+
+#[tokio::test]
+async fn test_run_freeze_dump_timeout_degrades_to_none() {
+    // 挂死 spy（超过 timeout 不退出）→ None 降级，不留产物（回收硬时限优先）。
+    let dir = tempfile::tempdir().unwrap();
+    let slow = dir.path().join(if cfg!(windows) {
+        "slow-spy.cmd"
+    } else {
+        "slow-spy"
+    });
+    if cfg!(windows) {
+        std::fs::write(&slow, "@echo off\r\nping -n 30 127.0.0.1 >nul\r\n").unwrap();
+    } else {
+        std::fs::write(&slow, "#!/bin/sh\nsleep 30\n").unwrap();
+    }
+    let got = PluginInvokerImpl::run_freeze_dump(
+        slow.to_str().unwrap(),
+        "llm_service",
+        7,
+        35,
+        dir.path(),
+        1,
+    )
+    .await;
+    assert!(got.is_none(), "超时应降级返回 None");
+    let leftover: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains("llm_service"))
+        .collect();
+    assert!(leftover.is_empty(), "超时不得残留半截产物: {leftover:?}");
+}
+
+// ── P12：in-flight 门 + 声明式调用超时（ADR 2026-09-07）──────────────────
+
+use agentos_core::traits::default_capability_timeout_ms;
+
+/// 带 lifecycle 阈值声明的 sidecar manifest（threshold 确定性：不读环境变量）。
+fn make_p12_manifest(id: &str, idle_timeout_secs: u64) -> PluginManifest {
+    let mut m = make_sidecar_manifest(id, "python server.py");
+    m.lifecycle = Some(PluginLifecycle {
+        idle_timeout_secs: Some(idle_timeout_secs),
+    });
+    m
+}
+
+/// 把宿主 last_used 回拨（伪造空闲超期）。
+fn backdate_idle(invoker: &PluginInvokerImpl, host_key: &str, secs: u64) {
+    invoker.last_used.write().insert(
+        host_key.to_string(),
+        Instant::now() - Duration::from_secs(secs),
+    );
+}
+
+#[tokio::test]
+async fn test_p12_idle_gc_skips_host_with_inflight_calls() {
+    // in-flight>0 且空闲超期 → 不回收（宿主键条目保留 = unload_host 未执行）
+    let loader = Arc::new(MockLoader::new());
+    loader.add_manifest(make_p12_manifest("p12a", 300));
+    let invoker = PluginInvokerImpl::new(loader);
+    let host_key = "plugin:p12a";
+    backdate_idle(&invoker, host_key, 400);
+
+    let _guard = invoker.enter_inflight(host_key);
+    assert_eq!(invoker.host_inflight(host_key), 1);
+
+    invoker.run_idle_gc_pass().await;
+
+    assert!(
+        invoker.last_used.read().contains_key(host_key),
+        "in-flight>0 时超阈值宿主不得被回收"
+    );
+}
+
+#[tokio::test]
+async fn test_p12_idle_gc_unloads_host_after_calls_settle() {
+    // 同宿主计数归零后，超阈值 → 正常回收（last_used 条目被 unload_host 清除）
+    let loader = Arc::new(MockLoader::new());
+    loader.add_manifest(make_p12_manifest("p12b", 300));
+    let invoker = PluginInvokerImpl::new(loader);
+    let host_key = "plugin:p12b";
+    backdate_idle(&invoker, host_key, 400);
+
+    {
+        let _guard = invoker.enter_inflight(host_key);
+        assert_eq!(invoker.host_inflight(host_key), 1);
+    } // guard drop → 计数回落
+    assert_eq!(invoker.host_inflight(host_key), 0, "调用结束计数必须归零");
+
+    invoker.run_idle_gc_pass().await;
+
+    assert!(
+        !invoker.last_used.read().contains_key(host_key),
+        "计数归零后超阈值宿主应被正常回收"
+    );
+    assert_eq!(
+        invoker.host_inflight(host_key),
+        0,
+        "回收清理后计数条目不残留"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_p12_capability_timeout_returns_structured_error() {
+    // fake clock（tokio paused time）：到点前不完成，到点返回 CAPABILITY_TIMEOUT
+    let mut fut = Box::pin(with_capability_timeout::<()>(
+        Some(5_000),
+        "p12_plugin",
+        "p12_tool",
+        std::future::pending(),
+    ));
+    tokio::select! {
+        _ = fut.as_mut() => panic!("超时点前不应完成"),
+        _ = tokio::time::advance(Duration::from_millis(4_999)) => {}
+    }
+    let err = fut.await.unwrap_err();
+    assert_eq!(err.code.as_deref(), Some("CAPABILITY_TIMEOUT"));
+    assert!(err.message.contains("p12_plugin"), "message 须含插件 id");
+    assert!(err.message.contains("p12_tool"), "message 须含工具名");
+    assert!(
+        err.message.contains("5000ms"),
+        "message 须含时长: {}",
+        err.message
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_p12_capability_timeout_settles_inflight_count() {
+    // 超时放弃内层 future → 内层持有的 in-flight guard 随 drop 回落
+    let loader = Arc::new(MockLoader::new());
+    let invoker = PluginInvokerImpl::new(loader);
+    let host_key = "plugin:p12c";
+
+    // 模拟 attempt_sidecar_* 内部形态：guard 持于内层 future，调用 pend。
+    let mut fut = Box::pin(with_capability_timeout(Some(1_000), "p12c", "t", async {
+        let _guard = invoker.enter_inflight(host_key);
+        std::future::pending::<Result<(), PluginError>>().await
+    }));
+    tokio::select! {
+        _ = fut.as_mut() => panic!("超时点前不应完成"),
+        _ = tokio::time::advance(Duration::from_millis(999)) => {}
+    }
+    assert_eq!(
+        invoker.host_inflight(host_key),
+        1,
+        "超时点前调用在飞，计数必须在悬"
+    );
+
+    drop(fut); // 超时放弃内层 future（与 tokio::time::timeout 到点行为同构）
+    assert_eq!(
+        invoker.host_inflight(host_key),
+        0,
+        "超时放弃内层 future 后计数必须回落"
+    );
+}
+
+#[test]
+fn test_p12_tool_timeout_ms_precedence() {
+    // ① 工具声明生效
+    let mut m = make_sidecar_manifest("p12d", "python server.py");
+    m.capabilities.tools = vec![p12_tool_cap("t", Some(123_456))];
+    m.mcp = Some(McpConfig {
+        transport: McpTransport::Stdio,
+        endpoint: None,
+        idle_timeout_secs: 300,
+        protocol_version: "2025-06-18".to_string(),
+        request_timeout_secs: Some(9),
+    });
+    assert_eq!(tool_timeout_ms(&m, "t"), Some(123_456), "工具声明值生效");
+
+    // ② 未声明工具 → 插件级 request_timeout_secs 兜底（秒→毫秒）
+    let mut m2 = make_sidecar_manifest("p12e", "python server.py");
+    m2.capabilities.tools = vec![p12_tool_cap("t", None)];
+    m2.mcp = Some(McpConfig {
+        transport: McpTransport::Stdio,
+        endpoint: None,
+        idle_timeout_secs: 300,
+        protocol_version: "2025-06-18".to_string(),
+        request_timeout_secs: Some(1_800),
+    });
+    assert_eq!(
+        tool_timeout_ms(&m2, "t"),
+        Some(1_800_000),
+        "插件级声明兜底（秒→毫秒）"
+    );
+
+    // ③ 全未声明 → 内核默认 300_000ms
+    let m3 = make_sidecar_manifest("p12f", "python server.py");
+    assert_eq!(
+        tool_timeout_ms(&m3, "nope"),
+        Some(default_capability_timeout_ms())
+    );
+
+    // ④ Some(0) = 显式豁免
+    let mut m4 = make_sidecar_manifest("p12g", "python server.py");
+    m4.capabilities.tools = vec![p12_tool_cap("t", Some(0))];
+    assert_eq!(tool_timeout_ms(&m4, "t"), None, "Some(0) = 豁免总时长超时");
+
+    // ⑤ 按工具名隔离：未命中声明的工具走兜底，不吃别的工具的声明
+    let mut m5 = make_sidecar_manifest("p12h", "python server.py");
+    m5.capabilities.tools = vec![p12_tool_cap("fast", Some(1_000))];
+    assert_eq!(
+        tool_timeout_ms(&m5, "other"),
+        Some(default_capability_timeout_ms())
+    );
+}
+
+/// P12 测试用 ToolCapability 构造（其余字段 None 缺省形态）。
+fn p12_tool_cap(name: &str, timeout_ms: Option<u64>) -> agentos_core::traits::ToolCapability {
+    agentos_core::traits::ToolCapability {
+        name: name.to_string(),
+        description: None,
+        input_schema: None,
+        output_schema: None,
+        category: None,
+        ui: None,
+        render: None,
+        smoke: None,
+        timeout_ms,
+    }
+}
+
+#[test]
+fn test_p12_manifest_timeout_ms_serde_roundtrip() {
+    // 声明值经真实 serde 面生效（序列化出口 + 反序列化入口）
+    let mut m = make_sidecar_manifest("p12i", "python server.py");
+    m.capabilities.tools = vec![p12_tool_cap("t", Some(60_000))];
+    let v = serde_json::to_value(&m).unwrap();
+    assert_eq!(v["capabilities"]["tools"][0]["timeout_ms"], 60_000);
+    let round: PluginManifest = serde_json::from_value(v).unwrap();
+    assert_eq!(round.capabilities.tools[0].timeout_ms, Some(60_000));
+
+    // 存量 manifest 无该字段 → serde default 解析为 None（字段只增不删，兼容）
+    let mut m2 = make_sidecar_manifest("p12j", "python server.py");
+    m2.capabilities.tools = vec![p12_tool_cap("t", None)];
+    let v2 = serde_json::to_value(&m2).unwrap();
+    assert!(
+        v2["capabilities"]["tools"][0].get("timeout_ms").is_none(),
+        "None 不序列化（skip_serializing_if）"
+    );
+    let round2: PluginManifest = serde_json::from_value(v2).unwrap();
+    assert_eq!(round2.capabilities.tools[0].timeout_ms, None);
+}
+
+#[tokio::test]
+async fn test_p12_capability_timeout_none_is_passthrough() {
+    // 豁免（None）：不包界——内层 future 正常完成，语义零改变
+    let result =
+        with_capability_timeout(None, "p12k", "t", async { Ok::<(), PluginError>(()) }).await;
+    assert!(result.is_ok(), "豁免路径透传内层结果");
+}
+
+// ── P22：in-flight 计数下沉统一入口（补 79cb1dc72 漏斗盲区，ADR 2026-09-07）──
+
+/// llm_service 形态的 System sidecar manifest：工具声明为空（服务式工具经
+/// tool-executor 反向调用）、`mcp.request_timeout_secs` 自声明流式等待界。
+fn make_p22_llm_shape_manifest(id: &str) -> PluginManifest {
+    let mut m = make_sidecar_manifest(id, "python server.py");
+    m.plugin_type = PluginType::System;
+    m.mcp = Some(McpConfig {
+        transport: McpTransport::Stdio,
+        endpoint: None,
+        idle_timeout_secs: 300,
+        protocol_version: "2025-06-18".to_string(),
+        request_timeout_secs: Some(3600),
+    });
+    m
+}
+
+#[tokio::test]
+async fn test_p22_system_direct_call_blocks_reclaim_at_unified_entry() {
+    // System 插件（服务式直调形态，llm_service 同构）调用进行中：统一入口
+    // 计数 >0 → 超阈值 GC 走 skipped 路径不回收；计数回落 → 正常回收。
+    let loader = Arc::new(MockLoader::new());
+    let m = make_p22_llm_shape_manifest("llm_like");
+    let host_key = solo_host_key(&m.id);
+    loader.add_manifest(m.clone());
+    let invoker = PluginInvokerImpl::new(loader);
+
+    // 统一入口计入（与 invoke_pipeline_plugin/invoke_tool Sidecar 分支同代码）
+    assert_eq!(tool_timeout_ms(&m, "llm.complete_stream"), Some(3_600_000));
+    let (counted_key, guard) = invoker.enter_sidecar_inflight(&m);
+    assert_eq!(counted_key, host_key, "System 独占宿主键 = solo_host_key");
+    assert_eq!(invoker.host_inflight(&host_key), 1);
+
+    backdate_idle(&invoker, &host_key, 400);
+    invoker.run_idle_gc_pass().await;
+    assert!(
+        invoker.last_used.read().contains_key(&host_key),
+        "流式直调进行中（计数=1）超阈值宿主必须走 skipped 路径不回收"
+    );
+
+    drop(guard); // 流结束/断连 → RAII 回落
+    assert_eq!(invoker.host_inflight(&host_key), 0, "流结束后计数必须归零");
+    invoker.run_idle_gc_pass().await;
+    assert!(
+        !invoker.last_used.read().contains_key(&host_key),
+        "计数归零后超阈值宿主应被正常回收"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_p22_streaming_call_count_spans_whole_stream() {
+    // 流式调用全生命周期计数（19:09 / 07:57 两次卡死的关键窗口）：流进行中
+    // （跨多个 GC 周期）计数悬置不回落、回收被拦截；流完全结束才回落。
+    // fake clock：tokio paused time 驱动超时界；空闲判定由注入的 backdate
+    // （std Instant 直改）驱动——无零延迟 mock。
+    let loader = Arc::new(MockLoader::new());
+    let m = make_p22_llm_shape_manifest("llm_stream");
+    let host_key = solo_host_key(&m.id);
+    loader.add_manifest(m.clone());
+    let invoker = Arc::new(PluginInvokerImpl::new(loader));
+
+    let (stream_end_tx, stream_end_rx) = tokio::sync::oneshot::channel::<()>();
+    let call = tokio::spawn({
+        let invoker = Arc::clone(&invoker);
+        let m = m.clone();
+        async move {
+            // 统一入口形态：内核超时包界（插件自声明 3600s）内持 guard，
+            // MCP 响应在流完全结束才返回（oneshot 模拟流生命周期）。
+            with_capability_timeout(
+                tool_timeout_ms(&m, "llm.complete_stream"),
+                &m.id,
+                "llm.complete_stream",
+                async {
+                    let (_key, _guard) = invoker.enter_sidecar_inflight(&m);
+                    let _stream_alive = stream_end_rx.await;
+                    Ok(())
+                },
+            )
+            .await
+        }
+    });
+
+    // 流建立（推进假时钟等 guard 出现，非零延迟）
+    for _ in 0..1000 {
+        tokio::time::advance(Duration::from_millis(1)).await;
+        if invoker.host_inflight(&host_key) == 1 {
+            break;
+        }
+    }
+    assert_eq!(
+        invoker.host_inflight(&host_key),
+        1,
+        "流式调用建立后计数必须悬置"
+    );
+
+    // 流进行中跨多个 GC 周期（空闲已超阈值）：每个周期都走 skipped 不回收
+    for cycle in 0..3 {
+        backdate_idle(&invoker, &host_key, 400 + cycle * 30);
+        invoker.run_idle_gc_pass().await;
+        assert!(
+            invoker.last_used.read().contains_key(&host_key),
+            "流进行中第 {} 个 GC 周期不得回收宿主",
+            cycle + 1
+        );
+        tokio::time::advance(Duration::from_secs(30)).await;
+    }
+
+    // 流完全结束 → guard 随 future drop 回落 → GC 正常回收
+    stream_end_tx.send(()).ok();
+    call.await.unwrap().unwrap();
+    assert_eq!(
+        invoker.host_inflight(&host_key),
+        0,
+        "流完全结束后计数必须回落"
+    );
+    backdate_idle(&invoker, &host_key, 400);
+    invoker.run_idle_gc_pass().await;
+    assert!(
+        !invoker.last_used.read().contains_key(&host_key),
+        "流结束后超阈值宿主应被正常回收"
+    );
+}
+
+// ── D3：freeze 取证 dump 保留上限（写入时清扫只留最新 10 份）──────────────
+
+#[test]
+fn sweep_freeze_dump_dir_keeps_latest_n_deletes_oldest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("freeze_dumps");
+    std::fs::create_dir_all(&dir).unwrap();
+    // 12 份 dump，写时间逐份 +60s 排开（显式 set_modified，不依赖写盘时戳精度）
+    let base = std::time::SystemTime::now();
+    for i in 0..12u64 {
+        let p = dir.join(format!("pluginA_{:012}_pid1.txt", 1_000_000 + i));
+        std::fs::write(&p, "dump").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_modified(base + std::time::Duration::from_secs(i * 60))
+            .unwrap();
+    }
+    // 对照插件：同样参与总上限竞争（跨插件共用一个总上限）
+    let p_other = dir.join("pluginB_000000000000_pid2.txt");
+    std::fs::write(&p_other, "dump").unwrap();
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&p_other)
+        .unwrap();
+    f.set_modified(base - std::time::Duration::from_secs(3600))
+        .unwrap();
+
+    super::PluginInvokerImpl::sweep_freeze_dump_dir(&dir, 10);
+
+    let mut remaining: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    remaining.sort();
+    assert_eq!(remaining.len(), 10, "清扫后必须恰好剩 10 份: {remaining:?}");
+    // 最旧的 3 份（pluginB + pluginA 前两份）被删，最新 10 份保留
+    assert!(
+        !remaining.contains(&"pluginB_000000000000_pid2.txt".to_string()),
+        "最旧文件必须被清扫: {remaining:?}"
+    );
+    assert!(
+        remaining.contains(&"pluginA_000001000011_pid1.txt".to_string()),
+        "最新一份必须保留: {remaining:?}"
+    );
+    // 幂等：再扫一次无变化（性质断言）
+    super::PluginInvokerImpl::sweep_freeze_dump_dir(&dir, 10);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 10, "重复清扫幂等");
+}
+
+#[test]
+fn sweep_freeze_dump_dir_noop_under_limit_or_missing_dir() {
+    // 未超限：一个都不删
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("freeze_dumps");
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..3u64 {
+        std::fs::write(dir.join(format!("d_{i}.txt")), "dump").unwrap();
+    }
+    super::PluginInvokerImpl::sweep_freeze_dump_dir(&dir, 10);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3, "未超限零删除");
+
+    // 目录不存在：静默返回不 panic
+    super::PluginInvokerImpl::sweep_freeze_dump_dir(&tmp.path().join("nope"), 10);
 }

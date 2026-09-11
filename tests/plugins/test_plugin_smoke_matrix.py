@@ -60,6 +60,11 @@ def _venv_python(plugin_dir: Path) -> str | None:
     return None
 
 
+# 渠道插件凭据护栏（channel_* server.py on_load fail-fast）：空凭据拒载，
+# 探针（无凭据环境）下这四插件的 on_load 预期为点名缺失配置的 RuntimeError。
+_CREDENTIAL_GUARDED_PLUGINS = {"channel_dingtalk", "channel_feishu", "channel_qq", "channel_wecom"}
+
+
 # ────────────────────────────────────────────────────────────
 # 插件目录发现
 # ────────────────────────────────────────────────────────────
@@ -185,7 +190,7 @@ def _run_probe(plugin_dir: Path, invoke: dict | None = None) -> dict:
 
 # ────────────────────────────────────────────────────────────
 # 安全工具调用清单：只调用无网络/无 LLM/无副作用的纯工具
-# 键为插件相对路径（插件名会撞车：system/cost_control vs pipeline/input/cost_control 等）
+# 键为插件相对路径（唯一映射插件目录）
 # ────────────────────────────────────────────────────────────
 
 def _safe_invocations(plugin_dir: Path, tmp_path: Path) -> dict:
@@ -241,7 +246,7 @@ def test_plugin_loads_and_executes(plugin_dir: Path, tmp_path: Path) -> None:
     )
 
     # 声明式插件（capabilities.tools 空 + contributes 前端声明，如 debug_center
-    # 纯页面路由、visual_customization_demo 纯主题包）：零工具是**契约本身**，
+    # 纯页面路由）：零工具是**契约本身**，
     # 不适用"至少注册 1 个工具"断言——只验加载 + 生命周期。声明了 tools 的
     # 插件注册数为零仍是红灯。
     meta = _plugin_meta(plugin_dir)
@@ -252,9 +257,15 @@ def test_plugin_loads_and_executes(plugin_dir: Path, tmp_path: Path) -> None:
     if not declarative:
         assert len(tools) >= 1, f"插件 {plugin_dir.name} 未注册任何工具"
 
-    assert report.get("lifecycle_on_load") is True, (
-        f"插件 {plugin_dir.name} on_load 失败: {report.get('lifecycle_on_load_error')}"
-    )
+    # 凭据护栏渠道（fail-fast 契约）：探针环境不注入渠道凭据，on_load 拒载并
+    # 点名缺失配置即契约正确行为；加载、工具注册与 on_unload 仍须全部正常。
+    if plugin_dir.name in _CREDENTIAL_GUARDED_PLUGINS and report.get("lifecycle_on_load") is not True:
+        err = str(report.get("lifecycle_on_load_error") or "")
+        assert "缺少必填配置" in err, f"插件 {plugin_dir.name} on_load 失败: {err}"
+    else:
+        assert report.get("lifecycle_on_load") is True, (
+            f"插件 {plugin_dir.name} on_load 失败: {report.get('lifecycle_on_load_error')}"
+        )
     assert report.get("lifecycle_on_unload") is True, (
         f"插件 {plugin_dir.name} on_unload 失败: {report.get('lifecycle_on_unload_error')}"
     )

@@ -15,10 +15,10 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
+import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
-import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { renderWithProviders } from '@/test/renderWithProviders'
 
 vi.mock('@/services/api/tasks', () => ({
@@ -112,7 +112,7 @@ const seed = vi.hoisted(() => {
       parent_task_id: 'mainPipe',
     },
   ]
-  /** 子任务带工作空间场景（0.1 对齐：任务节点"打开工作空间"按钮数据链） */
+  /** 子任务带工作空间场景（任务节点"打开工作空间"按钮数据链） */
   const WS_TASKS: Record<string, unknown>[] = [
     {
       id: 'mainPipe',
@@ -191,7 +191,7 @@ const seed = vi.hoisted(() => {
   }
   /** 会话主管道缺席场景：主管道 run 被快照过滤后条目集里没有会话根，
    *  threadTop 回退线程组最早任务条目。契约：树与列表同源同量，建树环节
-   *  不得丢条目（此前最早任务自挂自身，整族从树里静默消失） */
+   *  不得丢条目（最早任务自挂自身会让整族从树里静默消失） */
   const ORPHAN_THREAD_RUNS: Record<string, unknown> = {
     ghost: {
       pipeline_id: 'ghost13009006',
@@ -410,7 +410,7 @@ describe('PipelineManagerWidget', () => {
     const chevron = (await screen.findAllByText('会话 th-1'))[0].closest('div')?.querySelector('button')
     expect(chevron).toBeDefined()
     fireEvent.click(chevron!)
-    // 主管道条目（kind=session）+ 子任务条目行都渲染（此前子任务整体丢失）
+    // 主管道条目（kind=session）+ 子任务条目行都渲染（子任务不得整体丢失）
     expect((await screen.findAllByText('子任务A')).length).toBeGreaterThanOrEqual(1)
     // 子任务条目行带缩进（depth>0，挂主管道条目下而非顶层平铺）
     const subtaskRow = (await screen.findAllByText('子任务A')).find((el) =>
@@ -429,7 +429,7 @@ describe('PipelineManagerWidget', () => {
     expect((await screen.findAllByText('陨石躲避')).length).toBe(1)
     expect(screen.getAllByText('通道实测').length).toBe(1)
     expect(screen.getAllByText('会话 th-ghost').length).toBe(1)
-    // 展开最早任务行：同线程兄弟全部在树中（此前整族消失）
+    // 展开最早任务行：同线程兄弟全部在树中（整族不得消失）
     const chevron = screen.getAllByText('陨石躲避')[0].closest('div')?.querySelector('button')
     fireEvent.click(chevron!)
     expect((await screen.findAllByText('工具链自检')).length).toBe(1)
@@ -459,7 +459,7 @@ describe('PipelineManagerWidget', () => {
     expect(indented).toBe(true)
   })
 
-  it('任务条目行渲染打开工作空间按钮并开 workspace 文件树标签（0.1 对齐）', async () => {
+  it('任务条目行渲染打开工作空间按钮并开 workspace 文件树标签', async () => {
     seed.mockUseAllTasksQuery.mockReturnValue({ data: seed.WS_TASKS })
     renderWithProviders(<PipelineManagerWidget />)
     // 树默认收起：先点父任务条目行首 chevron 展开，子任务条目行才渲染

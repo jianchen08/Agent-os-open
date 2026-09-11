@@ -30,8 +30,8 @@
 //! HeaderMap 后复用拆分前的 `resolve_request_user` + `require_read_role` /
 //! `require_admin_role`（与 api 管理面同一实现）。角色/租户解析、租户隔离
 //! 注入全部留在内核——插件无法伪造 `_user_role`/`_tenant_id`（不接收这类参数）。
-//! manifest 的 `http_endpoints[].auth: "admin"` 目前是声明性字段，内核
-//! dispatcher 不执行它（见交付报告鉴权说明），实际执行点在本 handler。
+//! manifest 的 `http_endpoints[].auth: "admin"` 由内核 dispatcher 执行（W3-2/D2
+//! 第一刀），本 handler 内再校验一次（纵深防御，语义一致）。
 //!
 //! ## 响应信封
 //!
@@ -382,6 +382,7 @@ fn api_error_parts(e: &ApiError) -> (u16, String) {
         ApiError::NotFound { message } => (404, message.clone()),
         ApiError::Conflict { message } => (409, message.clone()),
         ApiError::UnprocessableEntity { message } => (422, message.clone()),
+        ApiError::TooManyRequests { message, .. } => (429, message.clone()),
         ApiError::Internal { message } | ApiError::WebSocket { message } => (500, message.clone()),
         ApiError::ServiceUnavailable { message } => (503, message.clone()),
     }
@@ -742,6 +743,7 @@ mod tests {
             role: "user".to_string(),
             tenant_id: "default".to_string(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
+            must_change_password: false,
         };
         let mut params = json!({});
         params["_authorization"] = json!(format!(

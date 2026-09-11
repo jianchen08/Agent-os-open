@@ -2,6 +2,8 @@
  * chat_card form 块 + actions on_click 协议测试（widget 化 T2/T3）
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { commandDispatcher } from '@/services/schema/commandDispatcher'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import {
   interpretChatCard,
   type ChatCardDeclaration,
@@ -11,7 +13,6 @@ import {
   registerGlobalImagePreviewCallback,
   registerGlobalOpenFileCallback,
 } from '@/utils/toolCardRegistry'
-import { commandDispatcher } from '@/services/schema/commandDispatcher'
 
 const ctx = (over: Partial<ToolCallContext> = {}): ToolCallContext => ({
   args: { path: '/tmp/a.txt', content: 'hello' },
@@ -23,6 +24,12 @@ beforeEach(() => {
   registerGlobalOpenFileCallback(null as never)
   registerGlobalImagePreviewCallback(null)
   vi.restoreAllMocks()
+})
+
+afterEach(() => {
+  // open_url 测试经 stubGlobal 换 window.open——不 unstub 会泄漏到后续用例，
+  // 污染其他用例 spy 的调用历史（负断言 not.toHaveBeenCalled 误报）
+  vi.unstubAllGlobals()
 })
 
 describe('T2：form 块翻译', () => {
@@ -130,8 +137,9 @@ describe('T3：actions on_click 协议接线', () => {
     expect(writeText).toHaveBeenCalledWith('line1\nline2')
   })
 
-  it('run_action：commandDispatcher.executeCommand（value=命令 id，args 透传）', () => {
+  it('run_action：commandDispatcher.executeCommand（value=命令 id，args 透传；仅限已声明命令）', () => {
     const exec = vi.spyOn(commandDispatcher, 'executeCommand').mockResolvedValue()
+    contributionRegistry.register({ type: 'commands', id: 'deploy.restart', title: '重启' })
     const out = interpretChatCard(
       {
         actions: [
@@ -175,5 +183,92 @@ describe('T3：actions on_click 协议接线', () => {
       ctx(),
     )
     expect(out.actions[0].confirmMessage).toBe('确认复制？')
+  })
+})
+
+describe('U9：on_click 白名单（open_url 协议 / run_action 声明命令）', () => {
+  it('open_url：http/https 绝对地址与应用内相对路径放行，点击 window.open 原样打开', () => {
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const urls = [
+      'https://example.com/docs?page=1',
+      'http://localhost:5173/settings',
+      '/workspace/files/a.txt',
+      './relative/page',
+    ]
+    const out = interpretChatCard(
+      {
+        actions: urls.map((u, i) => ({ id: `u${i}`, label: u, onClick: { action: 'open_url', value: u } })),
+      },
+      ctx(),
+    )
+    urls.forEach((u, i) => {
+      expect(out.actions[i].disabled).toBe(false)
+      out.actions[i].onClick!()
+      expect(openSpy).toHaveBeenCalledWith(u, '_blank', 'noopener,noreferrer')
+    })
+  })
+
+  it('open_url：javascript:/data:/file:/vbscript: 等危险协议一律拒绝（按钮禁用，window.open 不触发；协议大小写不豁免）', () => {
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const urls = [
+      'javascript:alert(1)',
+      'JaVaScRiPt:alert(2)',
+      'data:text/html;base64,PHNjcmlwdD4=',
+      'file:///C:/Windows/System32',
+      'vbscript:msgbox(1)',
+    ]
+    const out = interpretChatCard(
+      {
+        actions: urls.map((u, i) => ({ id: `u${i}`, label: u, onClick: { action: 'open_url', value: u } })),
+      },
+      ctx(),
+    )
+    for (const [i, a] of out.actions.entries()) {
+      expect(a.disabled, urls[i]).toBe(true)
+      expect(a.onClick, urls[i]).toBeUndefined()
+    }
+    expect(openSpy).not.toHaveBeenCalled()
+  })
+
+  it('run_action：contributionRegistry 已声明的命令放行（多命令逐一执行）', () => {
+    const exec = vi.spyOn(commandDispatcher, 'executeCommand').mockResolvedValue()
+    contributionRegistry.register({ type: 'commands', id: 'cost.showReport', title: '成本报告' })
+    contributionRegistry.register({ type: 'commands', id: 'deploy.restart', title: '重启' })
+    const out = interpretChatCard(
+      {
+        actions: [
+          { id: 'a', label: '报告', onClick: { action: 'run_action', value: 'cost.showReport', args: { range: '7d' } } },
+          { id: 'b', label: '重启', onClick: { action: 'run_action', value: 'deploy.restart' } },
+        ],
+      },
+      ctx(),
+    )
+    expect(out.actions[0].disabled).toBe(false)
+    out.actions[0].onClick!()
+    expect(exec).toHaveBeenCalledWith('cost.showReport', { range: '7d' })
+    expect(out.actions[1].disabled).toBe(false)
+    out.actions[1].onClick!()
+    expect(exec).toHaveBeenCalledWith('deploy.restart', undefined)
+  })
+
+  it('run_action：未声明命令拒绝（按钮禁用 + console.warn），executeCommand 不被调用', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const exec = vi.spyOn(commandDispatcher, 'executeCommand').mockResolvedValue()
+    // 同卡片混排：已声明 + 未声明，只有未声明被拒
+    contributionRegistry.register({ type: 'commands', id: 'deploy.restart', title: '重启' })
+    const out = interpretChatCard(
+      {
+        actions: [
+          { id: 'a', label: '重启', onClick: { action: 'run_action', value: 'deploy.restart' } },
+          { id: 'b', label: '幽灵命令', onClick: { action: 'run_action', value: 'ghost.notDeclared' } },
+        ],
+      },
+      ctx(),
+    )
+    expect(out.actions[0].disabled).toBe(false)
+    expect(out.actions[1].disabled).toBe(true)
+    expect(out.actions[1].onClick).toBeUndefined()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('ghost.notDeclared'))
+    expect(exec).not.toHaveBeenCalledWith('ghost.notDeclared', undefined)
   })
 })

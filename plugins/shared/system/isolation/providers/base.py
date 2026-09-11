@@ -9,7 +9,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-from isolation_types import (
+from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,

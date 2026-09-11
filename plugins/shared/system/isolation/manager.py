@@ -18,7 +18,7 @@ from decider import IsolationDecider, IsolationUnrecoverableError
 from providers.base import IsolationProvider
 from providers.docker_provider import DockerProvider
 from providers.host_provider import HostProvider
-from isolation_types import (
+from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,
@@ -151,6 +151,15 @@ def _create_providers_from_config(
     return providers
 
 
+def _prune_task_done(task: "asyncio.Task[None]") -> None:
+    """prune 后台任务的完成回调：取消属正常收尾，其余异常必须留痕。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("[IsolationManager] 镜像清理后台任务异常退出: %s", exc, exc_info=exc)
+
+
 class IsolationManager:
     """隔离环境管理器
 
@@ -248,6 +257,8 @@ class IsolationManager:
         # 达 _MAX_ENV_FAILURES 抛 IsolationUnrecoverableError 熔断。
         self._ws_env_fail_counts: dict[str, int] = {}
         self._running = False
+        # 启动期 fire-and-forget 的 prune 后台任务引用（异常经完成回调留痕）
+        self._prune_task: asyncio.Task[None] | None = None
 
     async def start(self):
         """启动管理器"""
@@ -263,7 +274,9 @@ class IsolationManager:
         # 施加全局持锁重操作（image/builder prune 会遍历所有镜像层），
         # 加剧 WSL2 后端的 ext4.vhdx 锁死与 daemon 假死风险。
         if self._should_prune():
-            asyncio.ensure_future(self._prune_docker_images())
+            # 引用保存 + 完成回调：prune 失败不再静默丢失（error 级留痕）。
+            self._prune_task = asyncio.ensure_future(self._prune_docker_images())
+            self._prune_task.add_done_callback(_prune_task_done)
         else:
             logger.debug("[IsolationManager] 跳过镜像清理（距上次不足 24h）")
 
@@ -1503,11 +1516,10 @@ class IsolationManager:
     ) -> IsolationEnvironment:
         """执行前确保容器健康；异常态(created/exited/dead)时透明重建。
 
-        DockerProvider.create_environment 曾丢弃 docker start 返回值，start 失败
-        （WSL2 挂载脏路径）后容器卡在 created，却被标记 READY，导致后续 docker
-        exec 报 "container is not running"。此处用 docker inspect 复核真实状态，
-        非 READY 即销毁重建，对调用方透明。重建走 get_or_create_environment →
-        create_environment（已含 start 失败删除+重试）。
+        docker start 失败（如 WSL2 挂载脏路径）可能留下卡在 created 的容器，
+        后续 docker exec 会报 "container is not running"。此处用 docker inspect
+        复核真实状态，非 READY 即销毁重建，对调用方透明。重建走
+        get_or_create_environment → create_environment（已含 start 失败删除+重试）。
 
         单次调用最多重建一次：重建返回的新 env 不再二次检查，直接交付执行；
         重建失败返回原 env，执行将以错误告终，不形成循环。

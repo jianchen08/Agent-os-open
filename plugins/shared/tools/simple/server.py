@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""简单工具 MCP 服务端——将 2 个简单工具封装为 MCP 服务。
-
-从 0.1 src/tools/builtin/ 迁移，提取核心逻辑为纯函数注册。
+"""简单工具 MCP 服务端——将 2 个简单工具封装为 MCP 服务（核心逻辑为纯函数注册）。
 """
 
 from __future__ import annotations
@@ -24,11 +22,15 @@ from system_tools import (
     yaml_validate,
 )
 
+# 合宿 light 组契约：server.py 必须暴露模块级 plugin 实例（host.py
+# getattr(module, "plugin")，缺失即成员装载失败 fail-fast 拖垮整组）；
+# 工具注册必须在装载期完成——CohostServer 聚合 plugin._tools，注册留在
+# 独立运行入口则合宿下成员零工具。
+plugin = AgentOSPlugin("simple_tools")
+
 
 def create_plugin() -> AgentOSPlugin:
-    """创建包含全部 2 个简单工具的 AgentOSPlugin 实例。"""
-    plugin = AgentOSPlugin("simple_tools")
-
+    """注册工具与 on_load 接线（幂等；供独立运行与测试复用）。"""
     plugin.register_tool("yaml_validate", YAML_VALIDATE_SCHEMA, yaml_validate, "YAML 校验")
     plugin.register_tool(
         "read_execution_detail",
@@ -69,9 +71,14 @@ def create_plugin() -> AgentOSPlugin:
     return plugin
 
 
+# 装载期注册：模块级 plugin 即携带全部工具（对齐 memory/task_evaluate 的
+# 模块级实例形态；register_tool/on_load 均为覆盖语义，重复调用幂等）。
+create_plugin()
+
+
 def run() -> None:
     """启动 MCP 服务端。"""
-    create_plugin().run()
+    plugin.run()
 
 
 TOOL_REGISTRY = {

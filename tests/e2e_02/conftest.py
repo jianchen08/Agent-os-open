@@ -53,8 +53,9 @@ def chromium_bin():
 
 @pytest.fixture(scope="session")
 def auth_token():
-    """登录 admin/admin12345 获取 access_token（session 级复用，仅依赖内核）。
+    """以 admin 登录获取 access_token（session 级复用，仅依赖内核）。
 
+    口令经环境变量 AGENTOS_ADMIN_PASSWORD 注入（与内核播种/重置同源）。
     供审批闭环 / 管道 chat / WS 流式等需要登录态的 e2e 测试使用。
     """
     from e2e_helpers import login_admin

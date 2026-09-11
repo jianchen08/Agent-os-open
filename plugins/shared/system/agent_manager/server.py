@@ -25,12 +25,10 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import logging
 import os
 import re
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -38,23 +36,21 @@ from typing import Any
 import yaml
 
 from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("agent_manager")
 
-sys.path.insert(0, os.path.dirname(__file__))
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
 
-# http.handle 响应封装（内核 HttpHandleResponse/ToolExecutionResult 样板）：
-# 公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
-_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _SHARED_ROOT not in sys.path:
-    sys.path.insert(0, _SHARED_ROOT)
 from http_json import (  # noqa: E402
     decode_body as _decode_body,
     error as _error,
     json_response as _json_response,
     ok as _ok,
 )
+from atomic_io import atomic_write_text as _atomic_write_text  # noqa: E402
+from kernel_token import decode_kernel_token as _decode_kernel_token  # noqa: E402
 
 # ── 目录定位：AGENTOS_CONFIG_ROOT（内核启动写入，sidecar 继承进程环境）优先；
 #    回退 __file__ 上溯项目根（与 context_build/task_form 同款防御）。──
@@ -167,8 +163,13 @@ def compute_etag(raw: str) -> str:
 # ══ 业务语义（routes.rs agents_handler / get / put 逐项对齐）══
 
 
-def list_agents(agent_type: str | None = None) -> dict[str, Any]:
-    """扫描 config/agents/**/*.yaml → {items, total}（agent_type 过滤）。"""
+def list_agents(agent_type: str | None = None, search: str | None = None) -> dict[str, Any]:
+    """扫描 config/agents/**/*.yaml → {items, total}（agent_type 过滤 + search 子串过滤）。
+
+    search 对 name/config_id/description 做大小写不敏感子串匹配；空白串视为
+    不过滤（对齐前端搜索框清空场景）。
+    """
+    needle = (search or "").strip().lower()
     items: list[dict[str, Any]] = []
     for path in collect_yaml_files(_agents_dir()):
         try:
@@ -187,11 +188,17 @@ def list_agents(agent_type: str | None = None) -> dict[str, Any]:
         )
         if not config_id:
             continue
+        name = str(parsed.get("name") or config_id)
+        description = str(parsed.get("description") or "")
+        if needle and needle not in (
+            name.lower() + "\n" + config_id.lower() + "\n" + description.lower()
+        ):
+            continue
         items.append({
             "id": config_id,
             "config_id": config_id,
-            "name": str(parsed.get("name") or config_id),
-            "description": str(parsed.get("description") or ""),
+            "name": name,
+            "description": description,
             "agent_type": at,
             "status": "active",
             "model": str(parsed.get("model") or parsed.get("model_tier") or ""),
@@ -287,11 +294,12 @@ def put_agent_config(agent_id: str, body: dict[str, Any]) -> tuple[int, dict[str
             "error": f"ETag mismatch: current={current_etag}, given={if_match!r}"
         }
 
-    # 先备份原文件（同目录，内核 with_extension("yaml.bak") 同构：<stem>.yaml.bak），再写新内容。
+    # 先备份原文件（同目录，内核 with_extension("yaml.bak") 同构：<stem>.yaml.bak），
+    # 再以原子替换写入新内容（write_text 直写有崩溃窗口 = agent 配置截断）。
     backup = path.with_suffix(".yaml.bak")
     try:
         backup.write_text(raw, encoding="utf-8")
-        path.write_text(new_yaml, encoding="utf-8")
+        _atomic_write_text(path, new_yaml)
     except OSError as exc:
         return 500, {"error": f"write agent config {path}: {exc}"}
     return 200, {
@@ -303,26 +311,6 @@ def put_agent_config(agent_id: str, body: dict[str, Any]) -> tuple[int, dict[str
 
 
 # ══ PUT 鉴权（内核 0.2 token 自持检查，write_surface_auth 的 /ext 等价）══
-
-
-def _decode_kernel_token(token: str) -> tuple[str, str, int] | None:
-    """解码内核 0.2 开发期 token（base64_nopad("access:{user_id}:{username}:{exp}")）。
-
-    与 kernel http/src/auth.rs decode_token 同构；无效/过期返回 None。
-    """
-    try:
-        padded = token.strip() + "=" * (-len(token.strip()) % 4)
-        payload = base64.b64decode(padded, validate=False).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        return None
-    parts = payload.split(":", 3)
-    if len(parts) != 4:
-        return None
-    try:
-        exp = int(parts[3])
-    except ValueError:
-        return None
-    return parts[1], parts[2], exp
 
 
 def _require_admin(headers: dict[str, str] | None) -> tuple[int, str] | None:
@@ -385,7 +373,7 @@ async def http_handle(
 
         if path == "/ext/agent_manager/agents" and method == "GET":
             agent_type = q.get("agent_type") or None
-            return _ok(_json_response(list_agents(agent_type)))
+            return _ok(_json_response(list_agents(agent_type, search=q.get("search"))))
 
         if path == "/ext/agent_manager/agents/schema" and method == "GET":
             return _ok(_json_response({"fields": AGENT_SCHEMA_FIELDS}))
@@ -439,7 +427,9 @@ async def agent_get(agent_id: str = "") -> dict[str, Any]:
         return {"found": False, "config": None}
     try:
         parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError) as exc:
+        # 配置存在但不可读/损坏：对外与 not-found 同形（契约不变），留痕供排查
+        logger.warning("[agent_manager] agent 配置读取失败（按 not-found 返回）| agent_id=%s path=%s error=%s", agent_id, path, exc)
         return {"found": False, "config": None}
     if not isinstance(parsed, dict):
         parsed = {}

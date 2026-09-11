@@ -35,7 +35,8 @@ class PauseGuardPlugin(IInputPlugin):
     如果暂停则产出 wait 路由信号使管道挂起。
 
     优先级：5（最先执行，在 context_build 之前）
-    检查失败不影响管道运行。
+    task_service 未接线时降级为不暂停；tasks.types 不可用时异常上抛
+    fail-closed（守卫无法评估即阻断本步）。
 
     Attributes:
         _config: 插件配置字典
@@ -91,12 +92,10 @@ class PauseGuardPlugin(IInputPlugin):
         if not self._enabled:
             return {"pause_guard.checked": {"paused": False, "reason": "disabled"}}
 
-        # 获取关联任务 ID
         task_id = ctx.state.get(StateKeys.TASK_ID, "")
         if not task_id:
             return {"pause_guard.checked": {"paused": False, "reason": "no task_id"}}
 
-        # 获取 TaskService
         try:
             task_service = ctx.get_service("task_service")
         except KeyError:
@@ -116,7 +115,10 @@ class PauseGuardPlugin(IInputPlugin):
         if task is None:
             return {"pause_guard.checked": {"paused": False, "reason": "task not found"}}
 
-        # 检查任务是否暂停（挂起经状态键表达，引擎轮边界消费）
+        # 检查任务是否暂停（挂起经状态键表达，引擎轮边界消费）。
+        # tasks.types 懒加载失败（任务域插件被移除/部署残缺）→ fail-closed：
+        # 暂停守卫无法评估即异常上抛阻断本步，禁止降级为「不暂停」放行
+        # （放行会让本应挂起的任务继续执行）。
         from tasks.types import TaskStatus  # noqa: PLC0415
 
         if task.status == TaskStatus.STOPPED:

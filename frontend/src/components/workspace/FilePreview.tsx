@@ -7,12 +7,12 @@
  * @module components/workspace/FilePreview
  */
 
-import { FileQuestion, Download, ZoomIn, ZoomOut, RotateCw } from '@/assets/icons'
-import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { useCallback, useMemo, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { FileQuestion, Download, ZoomIn, ZoomOut, RotateCw } from '@/assets/icons'
 import { codeHighlightStyle } from '@/components/shared/markdown/codeHighlightStyle'
 import { cn } from '@/lib/utils'
+import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 
 /** 图片扩展名集合 */
 const IMAGE_EXTENSIONS = new Set([

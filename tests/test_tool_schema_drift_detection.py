@@ -51,8 +51,7 @@ def test_drift_warns_on_missing_tool_ids(caplog):
         # 内核过滤结果缺 task_manage（被 G2 净化的同款场景）
         [_schema("file_read"), _schema("task_submit")]
     )
-    # caller 挂实例（2026-09-02 合宿撕裂修复后收敛自 server.py get_instance()，
-    # 模块级 set_capability_caller 已随旧实现退役）——实例本地注入即自洽。
+    # caller 经实例本地注入（plugin.set_capability_caller）即自洽。
     plugin = tool_schema_mod.ToolSchemaPlugin(config={})
     plugin.set_capability_caller(caller)
     state = {"tool_ids": ["file_read", "task_manage", "task_submit"]}

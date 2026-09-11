@@ -17,12 +17,13 @@ import { loadRenderIntents } from '@/utils/dshRenderIntent'
 import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
+import type * as toolCardRegistryMod from '@/utils/toolCardRegistry'
 
 vi.mock('@/components/approval', () => ({ TextDiffView: () => null }))
 vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({ MarkdownRenderer: () => null }))
 // 部分 mock：保留 enhanceActivityWithToolConfig 真实实现，仅替换全局文件打开回调
 vi.mock('@/utils/toolCardRegistry', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/utils/toolCardRegistry')>()
+  const actual = await importOriginal<toolCardRegistryMod>()
   return { ...actual, getGlobalOpenFileCallback: () => () => {} }
 })
 

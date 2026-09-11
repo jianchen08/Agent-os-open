@@ -14,6 +14,7 @@
  * 本组件不再按 category 硬编码渲染分支。
  */
 
+import { useCallback } from 'react'
 import {
   AlertCircle,
   AlertTriangle,
@@ -23,13 +24,12 @@ import {
   Loader2,
   X,
 } from '@/assets/icons'
-import { useCallback } from 'react'
-import { Button } from '@/components/ui/button'
 import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
+import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { PRIORITY_STYLES } from '@/types/notification'
 import { resolveNotificationLayout } from '@/utils/notificationModes'
-import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import type {
   NotificationAction,
   NotificationItem as NotificationItemType,

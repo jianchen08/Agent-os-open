@@ -65,9 +65,9 @@ function formatDateString(date: Date): string {
  * @param format - 格式类型
  * @returns 格式化后的日期字符串
  */
-function formatDate(
+export function formatDate(
   dateString: string,
-  format: 'full' | 'date' | 'time' | 'relative' = 'full',
+  format: 'full' | 'datetime' | 'date' | 'time' | 'relative' = 'full',
 ): string {
   const date = parseUTCTimestamp(dateString)
 
@@ -84,6 +84,16 @@ function formatDate(
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
+      })
+
+    // 日期 + 时:分（无秒）：媒体/图片等创建时间展示粒度
+    case 'datetime':
+      return date.toLocaleDateString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
       })
 
     case 'date':

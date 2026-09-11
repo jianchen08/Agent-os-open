@@ -10,6 +10,7 @@
  * safeSet/safeGet），因此下列断言走的是「内存降级」路径，仍能验证业务不变性。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 vi.mock('@/utils/logger', () => ({
@@ -33,7 +34,7 @@ const PIPELINE_ID = '204ecb54c76e000000000000'
 const SESSION_ID = 'sess-quota-test'
 
 describe('persist 超配额时 store 行为', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   const makeMsg = (id: string, seq: number): Message => ({
     id,

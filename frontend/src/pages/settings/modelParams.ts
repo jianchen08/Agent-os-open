@@ -21,6 +21,14 @@ export type CustomParam = { key: string; value: string }
 
 export type StrengthLevelDraft = { thinkingType: string; effort: string }
 
+/**
+ * 思考强度档位允许写入的参数键（前端写入面单一出口）。与 llm_core
+ * resolve_thinking_strength_params 的 _THINKING_STRENGTH_ALLOWED 白名单
+ * 对账（源码扫描契约闸：__tests__/modelParams.contract.test.ts）——后端
+ * 扩/删键时契约测试变红，镜像漂移在此显式暴露而非静默丢键。
+ */
+export const STRENGTH_PARAM_KEYS = ['thinking', 'reasoning_effort'] as const
+
 export type ModalityDraft = { enabled: boolean; types: string; maxSizeMb: string }
 
 export interface ModelParamsDraft {
@@ -36,13 +44,29 @@ export interface ModelParamsDraft {
   customParams: CustomParam[]
   customKey: string
   customValue: string
-  strength: Record<'high' | 'medium' | 'low', StrengthLevelDraft>
+  /** 键 = 思考强度档位（档位词汇由 llm_service 预置声明下发） */
+  strength: Record<string, StrengthLevelDraft>
   multimodal: Record<'image' | 'audio' | 'video', ModalityDraft>
 }
 
 const MB = 1024 * 1024
 
-const STRENGTH_LEVELS = ['high', 'medium', 'low'] as const
+/**
+ * 最大输出默认值（新添加模型、且无从得知真实上限时）。
+ *
+ * 4096 对推理模型过低：一轮 max 档思考就能耗尽输出预算，正文一字未出
+ * （历史事故见 commit 633fc8f1f）。上限事实可得时（litellm 注册表经
+ * /remote-models 下发）以事实为准，此值只作兜底。
+ */
+export const DEFAULT_MAX_TOKENS = 32768
+
+/**
+ * 思考强度档位缺省词汇。真值由 llm_service /ext 预置端点声明下发
+ * （thinking_strength.levels，与 llm_core 过滤白名单对账）——组件/页面
+ * 接收声明值传入；本缺省仅供类型缺省与测试兜底。
+ * 须覆盖聊天页全部档位（含 off）：清单缺档位会在保存时静默删除该档映射。
+ */
+export const DEFAULT_STRENGTH_LEVELS: readonly string[] = ['high', 'medium', 'low', 'off']
 const MODALITIES = ['image', 'audio', 'video'] as const
 
 /** 勾选多模态时的类型清单默认值（与 multimodal 插件/asr 支持的 MIME 对齐） */
@@ -65,12 +89,16 @@ export const parseCustomValue = (v: string): unknown => {
   return v
 }
 
-/** 空草稿（新添加模型的起点） */
-export function emptyModelParamsDraft(): ModelParamsDraft {
+/** 空草稿（新添加模型的起点；levels = 声明下发的思考强度档位） */
+export function emptyModelParamsDraft(
+  levels: readonly string[] = DEFAULT_STRENGTH_LEVELS,
+): ModelParamsDraft {
+  const strength: Record<string, StrengthLevelDraft> = {}
+  for (const level of levels) strength[level] = { thinkingType: '', effort: '' }
   return {
     contextWindow: '',
     temperature: 0.7,
-    maxTokens: 4096,
+    maxTokens: DEFAULT_MAX_TOKENS,
     topP: 1,
     reasoningModel: false,
     thinkingType: '',
@@ -78,11 +106,7 @@ export function emptyModelParamsDraft(): ModelParamsDraft {
     customParams: [],
     customKey: '',
     customValue: '',
-    strength: {
-      high: { thinkingType: '', effort: '' },
-      medium: { thinkingType: '', effort: '' },
-      low: { thinkingType: '', effort: '' },
-    },
+    strength,
     multimodal: {
       image: { enabled: false, types: STANDARD_TYPES.image, maxSizeMb: DEFAULT_MAX_MB.image },
       audio: { enabled: false, types: STANDARD_TYPES.audio, maxSizeMb: DEFAULT_MAX_MB.audio },
@@ -91,9 +115,38 @@ export function emptyModelParamsDraft(): ModelParamsDraft {
   }
 }
 
-/** 已有模型条目 → 草稿（模型行「参数」面板回显） */
-export function draftFromModel(model: ModelConfig | undefined): ModelParamsDraft {
-  const draft = emptyModelParamsDraft()
+/**
+ * 远端模型条目 → 添加载荷（拉取模型对话框的"添加"路径）。
+ *
+ * 上限事实由 /remote-models 经 litellm 注册表下发（厂商 /models 端点不返回
+ * 上下文与输出上限）：context_window 与 max_tokens 有事实用事实；无事实时
+ * max_tokens 落 DEFAULT_MAX_TOKENS 兜底（不用 4096——推理模型一轮思考即耗尽）。
+ */
+export function buildRemoteModelFields(model: {
+  context_window?: number
+  max_output_tokens?: number
+}): Partial<ModelConfig> {
+  const fields: Partial<ModelConfig> = {}
+  if (typeof model.context_window === 'number' && model.context_window > 0) {
+    fields.context_window = model.context_window
+  }
+  fields.default_params = {
+    temperature: 0.7,
+    max_tokens:
+      typeof model.max_output_tokens === 'number' && model.max_output_tokens > 0
+        ? model.max_output_tokens
+        : DEFAULT_MAX_TOKENS,
+    top_p: 1,
+  }
+  return fields
+}
+
+/** 已有模型条目 → 草稿（模型行「参数」面板回显；levels = 声明下发的思考强度档位） */
+export function draftFromModel(
+  model: ModelConfig | undefined,
+  levels: readonly string[] = DEFAULT_STRENGTH_LEVELS,
+): ModelParamsDraft {
+  const draft = emptyModelParamsDraft(levels)
   if (!model) return draft
   const params = (model.default_params ?? {}) as Record<string, unknown>
   if (model.context_window != null) draft.contextWindow = String(model.context_window)
@@ -105,7 +158,7 @@ export function draftFromModel(model: ModelConfig | undefined): ModelParamsDraft
   draft.effort = typeof params.reasoning_effort === 'string' ? params.reasoning_effort : ''
 
   const strength = model.thinking_strength_params
-  for (const level of STRENGTH_LEVELS) {
+  for (const level of Object.keys(draft.strength)) {
     const lv = strength?.[level]
     draft.strength[level].thinkingType =
       (lv?.thinking as { type?: string } | undefined)?.type ?? ''
@@ -154,8 +207,8 @@ export function buildModelFields(
   fields.default_params = nextParams
 
   const strengthOut: Record<string, Record<string, unknown>> = {}
-  for (const level of STRENGTH_LEVELS) {
-    const lv = draft.strength[level]
+  for (const [level, lv] of Object.entries(draft.strength)) {
+    // 写入键集合 = STRENGTH_PARAM_KEYS（llm_core 白名单镜像，契约测试对账）
     const entry: Record<string, unknown> = {}
     if (lv.thinkingType) entry.thinking = { type: lv.thinkingType }
     if (lv.effort) entry.reasoning_effort = lv.effort

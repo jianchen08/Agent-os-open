@@ -42,11 +42,23 @@ form_urlencoded.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 日志文件轮转（bin agentos-kernel）：daily 滚动写 logs/kernel.log.YYYY-MM-DD，
+# 与 stdout 层双写（supervisor 重定向行为不变）。
+tracing-appender = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
 # 全局分配器（Windows 段堆并发高水位滞留修复，ADR 2026-08-31-mimalloc-global-allocator）
 mimalloc.workspace = true
 libmimalloc-sys.workspace = true
+
+# 内存水位监控（bin agentos-kernel）：Private Bytes 直读（K32GetProcessMemoryInfo）。
+# 仅 FFI 声明零运行时开销，且为本仓依赖图既有传递依赖（Cargo.lock 0.52.0），零新增下载。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

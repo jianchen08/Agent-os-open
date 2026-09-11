@@ -15,6 +15,8 @@
 use std::fs;
 use std::sync::Arc;
 
+const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
+
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
 use agentos_core::traits::{
@@ -56,6 +58,8 @@ async fn app_with_deps() -> (
     .unwrap();
 
     let manifest = PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "llm_service".to_string(),
         name: "llm_service".to_string(),
         description: None,
@@ -101,12 +105,13 @@ async fn app_with_deps() -> (
         .create_user(&agentos_core::types::UserRecord {
             user_id: "00000000-0000-0000-0000-000000000001".to_string(),
             username: "admin".to_string(),
-            password: "admin12345".to_string(),
+            password: agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap(),
             email: Some("admin@agentos.dev".to_string()),
             role: "admin".to_string(),
             tenant_id: "default".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             last_login_at: None,
+            must_change_password: false,
         })
         .await
         .unwrap();
@@ -126,7 +131,7 @@ async fn admin_token(app: &axum::Router) -> String {
                 .uri("/api/v1/auth/login")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({"username": "admin", "password": "admin12345"}).to_string(),
+                    json!({"username": "admin", "password": SEED_ADMIN_PW}).to_string(),
                 ))
                 .unwrap(),
         )

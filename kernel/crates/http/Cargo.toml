@@ -10,6 +10,11 @@ description = "AgentOS 内核 HTTP 共享基础 — 统一错误信封 + 用户�
 agentos-core.workspace = true
 axum = { version = "0.8" }
 base64 = "0.22"
+argon2.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+rand_core.workspace = true
+uuid.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -52,14 +52,12 @@ class LSPClient:
     async def start(self) -> bool:
         """启动 LSP 服务器"""
         try:
-            # 检查服务器是否已安装
             if not self.is_server_installed(self.server_info.command):
                 logger.error(
                     f"LSP 服务器未安装: {self.server_info.name} (命令 '{self.server_info.command}' 不在 PATH 中)"
                 )
                 return False
 
-            # 启动 LSP 服务器进程
             self.process = await asyncio.create_subprocess_exec(
                 self.server_info.command,
                 *self.server_info.args,
@@ -69,7 +67,6 @@ class LSPClient:
                 env=self.server_info.env,
             )
 
-            # 初始化 LSP 会话
             await self._initialize()
             self.initialized = True
             logger.info(f"LSP 服务器已启动: {self.server_info.name}")
@@ -124,7 +121,6 @@ class LSPClient:
         if response.error:
             raise Exception(f"初始化失败: {response.error}")
 
-        # 发送 initialized 通知
         await self._send_notification("initialized", {})
 
     async def _shutdown(self):
@@ -136,7 +132,6 @@ class LSPClient:
         )
         await self._send_request(request)
 
-        # 发送 exit 通知
         await self._send_notification("exit", {})
 
     async def go_to_definition(
@@ -158,7 +153,6 @@ class LSPClient:
         if response.error:
             raise Exception(f"获取定义失败: {response.error}")
 
-        # 解析结果
         result = response.result
         if not result:
             return []
@@ -214,7 +208,6 @@ class LSPClient:
 
         response = await self._send_request(request)
         if response.error:
-            # 如果不支持 diagnostic 方法，返回空列表
             return []
 
         result = response.result
@@ -293,15 +286,12 @@ class LSPClient:
         if not self.process or not self.process.stdin:
             raise Exception("LSP 服务器未连接")
 
-        # 序列化请求
         request_str = json.dumps(request.dict(), ensure_ascii=False)
         message = f"Content-Length: {len(request_str.encode('utf-8'))}\r\n\r\n{request_str}"
 
-        # 发送请求
         self.process.stdin.write(message.encode("utf-8"))
         await self.process.stdin.drain()
 
-        # 读取响应
         response_str = await self._read_message()
         response_data = json.loads(response_str)
 
@@ -329,7 +319,6 @@ class LSPClient:
         if not self.process or not self.process.stdout:
             raise Exception("LSP 服务器未连接")
 
-        # 读取 headers
         headers: dict[str, str] = {}
         while True:
             line = await self.process.stdout.readline()
@@ -345,7 +334,6 @@ class LSPClient:
                 key, value = text.split(":", 1)
                 headers[key.strip()] = value.strip()
 
-        # 读取 body
         content_length = int(headers.get("Content-Length", 0))
         if content_length == 0:
             return ""

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """容器隔离系统 MCP 服务端——纯接口适配层。
 
-老代码从 0.1 src/isolation/ 原封不动复制到本目录（平铺），
-本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
+本目录为实现模块（平铺），本文件只做接口适配：
+调用同目录实现模块，通过 MCP SDK 暴露为工具。
 
 [来源: docs/working/module_migration_plan.md §4.2]
 """
@@ -18,16 +18,17 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(__file__))
 
 from checkpoint import CheckpointManager
-from isolation_types import (
+import wsl_health
+from agentos_plugin_sdk.isolation_types import (
     IsolationLevel,
     OperationType,
     TaskType,
 )
 
-# 直接导入同目录的老代码（文件就在旁边，不需要额外路径前缀）
+# 直接导入同目录实现模块（文件就在旁边，不需要额外路径前缀）
 from manager import IsolationManager, extract_providers_config
-from permission_checker import PermissionChecker
-from permission_policy import PermissionPolicyManager
+from agentos_plugin_sdk.permission_checker import PermissionChecker
+from agentos_plugin_sdk.permission_policy import PermissionPolicyManager
 
 from agentos_plugin_sdk import AgentOSPlugin
 
@@ -105,13 +106,27 @@ async def _watch_config_reload() -> None:
 @plugin.on_unload
 async def _on_unload(params: dict[str, Any]) -> None:
     """停止隔离管理器。"""
-    global _manager, _checkpoint_mgr, _permission_checker
+    global _manager, _checkpoint_mgr, _permission_checker, _config_watcher_task
+
+    # 停配置 watcher：cancel + 收敛等待——不取消则 while True 轮询任务在
+    # 卸载后仍常驻事件循环（持旧 manager 引用，纯泄漏）。
+    watcher = _config_watcher_task
+    _config_watcher_task = None
+    if watcher is not None and not watcher.done():
+        watcher.cancel()
+        try:
+            await watcher
+        except asyncio.CancelledError:
+            pass  # cancel() 的预期收敛路径
 
     if _manager:
         await _manager.stop()
         _manager = None
     _checkpoint_mgr = None
     _permission_checker = None
+
+    # 终止 WSL 保活会话（拉起者负责终止，防 sleep infinity 常驻残留）
+    wsl_health.terminate_keepalive()
 
     logger.info("[isolation] 隔离服务已停止")
 

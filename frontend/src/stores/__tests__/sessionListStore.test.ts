@@ -9,10 +9,19 @@
  * - autoRenameSessionIfNeeded 自动重命名逻辑
  * - setActiveSession 空ID与不存在ID的防护
  * - copySession 正常复制与不存在会话错误
+ * - deleteSession 先 API 后清本地（API 失败本地数据原封 + 失败提示）
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as sessionListStoreMod from '../sessionListStore'
+import type * as useSessionsQueryMod from '@/hooks/queries/useSessionsQuery'
+import type * as queryClientMod from '@/services/query/queryClient'
+import type * as queryKeysMod from '@/services/query/queryKeys'
+import type * as agentTabStoreMod from '@/stores/agentTabStore'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
+import type * as sessionStoreMod from '@/stores/sessionStore'
 import type { Session } from '@/types/models'
+import type * as modelsMod from '@/types/models'
 
 // ── Mock 所有外部依赖 ──
 const mockGetSessions = vi.fn()
@@ -83,11 +92,13 @@ vi.mock('@/stores/layoutModeStore', () => ({
 
 const mockRegisterPipeline = vi.fn()
 const mockActivatePipeline = vi.fn()
+const mockStopStreaming = vi.fn()
 vi.mock('@/stores/pipelineMessageStore', () => ({
   usePipelineMessageStore: {
     getState: () => ({
       registerPipeline: mockRegisterPipeline,
       activatePipeline: mockActivatePipeline,
+      stopStreaming: mockStopStreaming,
       fetchMessages: vi.fn(),
       isStreaming: vi.fn(),
       getMessages: vi.fn(() => []),
@@ -127,7 +138,7 @@ vi.mock('@/services/websocket/GlobalWebSocket', () => ({
 }))
 
 /** 创建测试用 Session 对象 */
-function makeSession(overrides: Partial<import('@/types/models').Session> = {}) {
+function makeSession(overrides: Partial<modelsMod.Session> = {}) {
   return {
     id: 'sess-001',
     title: '灵汐',
@@ -139,15 +150,15 @@ function makeSession(overrides: Partial<import('@/types/models').Session> = {}) 
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...overrides,
-  } as import('@/types/models').Session
+  } as modelsMod.Session
 }
 
 describe('sessionListStore', () => {
-  let useSessionListStore: typeof import('../sessionListStore').useSessionListStore
-  let useSessionStore: typeof import('@/stores/sessionStore').useSessionStore
-  let queryClient: typeof import('@/services/query/queryClient')['queryClient']
-  let queryKeys: typeof import('@/services/query/queryKeys')['queryKeys']
-  let readSessions: typeof import('@/hooks/queries/useSessionsQuery')['readSessions']
+  let useSessionListStore: sessionListStoreMod.useSessionListStore
+  let useSessionStore: sessionStoreMod.useSessionStore
+  let queryClient: queryClientMod['queryClient']
+  let queryKeys: queryKeysMod['queryKeys']
+  let readSessions: useSessionsQueryMod['readSessions']
 
   /** 播种会话列表到 query cache（sessions 数据源已 query 化） */
   function seedSessions(sessions: Session[]): void {
@@ -179,6 +190,14 @@ describe('sessionListStore', () => {
     mockSetLastActiveSession.mockReset()
     mockRegisterPipeline.mockReset()
     mockActivatePipeline.mockReset()
+    mockStopStreaming.mockReset()
+    // vi.resetModules 不重置 mock 注册表：vi.mock 工厂内的 vi.fn()（setState/
+    // sendCancel）跨测试共享同一实例，需手动清调用记录，防止上一用例的清理链
+    // 调用泄入下一用例的「未发生」断言
+    const pipelineStoreMock = await import('@/stores/pipelineMessageStore')
+    vi.mocked(pipelineStoreMock.usePipelineMessageStore.setState).mockClear()
+    const wsMock = await import('@/services/websocket/GlobalWebSocket')
+    vi.mocked(wsMock.globalWS.sendCancel).mockClear()
   })
 
   // ── searchSessions ──
@@ -624,6 +643,75 @@ describe('sessionListStore', () => {
       expect(saveCurrentTabs).not.toHaveBeenCalled()
 
       useAgentTabStore.getState = origGetState
+    })
+  })
+
+  // ── deleteSession：先 API 后清本地（失败可恢复）──
+
+  describe('deleteSession', () => {
+    it('API 成功 → 删除成立后执行完整清理链（取消信号/清管道数据/清缓存/清选中态）', async () => {
+      const sessions = [makeSession({ id: 's-del' })]
+      seedSessions(sessions)
+      useSessionStore.setState(() => ({ activeSessionId: 's-del', deletingSessionIds: new Set<string>() }))
+      mockDeleteSessionApi.mockResolvedValue(undefined)
+
+      const { usePipelineMessageStore } = await import('@/stores/pipelineMessageStore')
+      const { globalWS } = await import('@/services/websocket/GlobalWebSocket')
+      // 播种该会话名下管道（取消信号/停流按 pipelineSessionMap 派生管道逐个发）
+      const origGetState = usePipelineMessageStore.getState
+      usePipelineMessageStore.getState = () => ({
+        ...origGetState(),
+        pipelineSessionMap: { 'pipe-del': 's-del' },
+      })
+
+      await useSessionListStore.getState().deleteSession('s-del')
+
+      expect(mockDeleteSessionApi).toHaveBeenCalledWith('s-del')
+      // 删除成立后才发取消信号（随消息取消在途流）+ 停流
+      expect(globalWS.sendCancel).toHaveBeenCalledWith('s-del', '会话已删除', 'pipe-del')
+      expect(mockStopStreaming).toHaveBeenCalledWith('pipe-del')
+      expect(mockStopStreaming).toHaveBeenCalledWith('s-del') // 会话 ID 兜底主管道
+      expect(usePipelineMessageStore.setState).toHaveBeenCalled()
+
+      usePipelineMessageStore.getState = origGetState
+      // 会话已从列表缓存移除
+      expect(readSessions().some((s) => s.id === 's-del')).toBe(false)
+      // 删除的就是活跃会话 → 选中态清空、deleting 标记移除
+      expect(useSessionStore.getState().activeSessionId).toBeNull()
+      expect(useSessionStore.getState().deletingSessionIds.has('s-del')).toBe(false)
+    })
+
+    it('API 失败 → 本地数据原封不动（列表/选中态保留，清理链未执行）+ 用户可见失败提示', async () => {
+      const sessions = [
+        makeSession({ id: 's-keep', title: '要保留的会话' }),
+        makeSession({ id: 's-other' }),
+      ]
+      seedSessions(sessions)
+      useSessionStore.setState(() => ({ activeSessionId: 's-keep', deletingSessionIds: new Set<string>() }))
+      mockDeleteSessionApi.mockRejectedValue(new Error('后端 500'))
+
+      const { usePipelineMessageStore } = await import('@/stores/pipelineMessageStore')
+      const { globalWS } = await import('@/services/websocket/GlobalWebSocket')
+      const { useNotificationStore } = await import('@/stores/notificationStore')
+
+      await expect(
+        useSessionListStore.getState().deleteSession('s-keep'),
+      ).rejects.toThrow('后端 500')
+
+      // 本地数据原封：目标会话与其他会话都还在列表缓存
+      expect(readSessions().some((s) => s.id === 's-keep')).toBe(true)
+      expect(readSessions()).toHaveLength(2)
+      // 清理链未执行：无取消信号、无管道数据清理
+      expect(globalWS.sendCancel).not.toHaveBeenCalled()
+      expect(usePipelineMessageStore.setState).not.toHaveBeenCalled()
+      // 选中态未被动
+      expect(useSessionStore.getState().activeSessionId).toBe('s-keep')
+      // deleting 标记已移除（用户可直接重试）
+      expect(useSessionStore.getState().deletingSessionIds.has('s-keep')).toBe(false)
+      // 用户可见失败提示
+      expect(
+        useNotificationStore.getState().notifications.some((n) => n.title === '删除失败，数据未变'),
+      ).toBe(true)
     })
   })
 

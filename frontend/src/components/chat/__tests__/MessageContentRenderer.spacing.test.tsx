@@ -7,12 +7,13 @@
  * - 所有 fragment 类型（thinking/text/tool_call）都应有包裹 div 作为 space-y-3 的直接子元素
  */
 
-import { describe, it, expect, vi } from 'vitest'
 import { render } from '@testing-library/react'
 import React from 'react'
+import { describe, it, expect, vi } from 'vitest'
+import { MessageContentRenderer } from '../MessageContentRenderer'
 import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
-import type { MessageToolCall, ThinkingContent } from '@/types/models'
 import type { ActivityData } from '@/types/activity'
+import type { MessageToolCall, ThinkingContent } from '@/types/models'
 
 // Mock MarkdownRenderer
 vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
@@ -52,7 +53,6 @@ vi.mock('@/utils/toolCardRegistry', () => ({
   enhanceActivityWithToolConfig: (activity: ActivityData) => activity,
 }))
 
-import { MessageContentRenderer } from '../MessageContentRenderer'
 
 /** 构造合法的 ThinkingContent */
 function makeThinking(content: string): ThinkingContent {

@@ -4,20 +4,12 @@
  * 去掉原页 h-screen，改为 h-full，便于作为 WorkspacePanel 内容。
  */
 
-import { cn } from '@/lib/utils'
-import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { AgentManagerPage } from '@/components/agent/AgentManagerPage'
-import { MemoryPage } from '@/pages/memory/MemoryPage'
-import { SettingsHubWidget } from './SettingsHubWidget'
+import { cn } from '@/lib/utils'
 import { PipelineManagerWidget } from './PipelineManagerWidget'
+import { SettingsHubWidget } from './SettingsHubWidget'
 
-type PanelKind =
-  | 'settings_hub'
-  | 'plugins_panel'
-  | 'agents_panel'
-  | 'memory_panel'
-  | 'workspace_explorer'
-  | 'pipeline_manager'
+type PanelKind = 'settings_hub' | 'agents_panel' | 'pipeline_manager'
 
 /**
  * 统一工作区面板宿主
@@ -36,15 +28,11 @@ function renderPanel(kind: PanelKind | string, props: Record<string, unknown>) {
   switch (kind) {
     case 'settings_hub':
       return <SettingsHubWidget {...props} />
-    case 'plugins_panel':
-      return <PluginsSettingsPage />
     // agent_manager 插件页面承载（原 AgentsPage 退役，能力浏览
-    // 并入 plugins_panel——ToolsPage/tools_panel 同批摘除）
+    // 并入设置中枢「插件注册表」——plugins_panel 独立面板同批撤）；
+    // props 透传（页声明 props 如 typeLabels 随页签下发）
     case 'agents_panel':
-      return <AgentManagerPage />
-    case 'memory_panel':
-      return <MemoryPage />
-    case 'workspace_explorer':
+      return <AgentManagerPage {...props} />
     case 'pipeline_manager':
       return <PipelineManagerPanel />
     default:
@@ -64,15 +52,9 @@ function renderPanel(kind: PanelKind | string, props: Record<string, unknown>) {
 export function SettingsHubPanel(props: Record<string, unknown>) {
   return <PanelHostWidget {...props} panel="settings_hub" />
 }
-export function PluginsPanel(props: Record<string, unknown>) {
-  return <PanelHostWidget {...props} panel="plugins_panel" />
-}
 /** agent_manager 插件页面（agents_panel）：承接原 AgentsPanel 注册名 */
 export function AgentsPanel(props: Record<string, unknown>) {
   return <PanelHostWidget {...props} panel="agents_panel" />
-}
-export function MemoryPanel(props: Record<string, unknown>) {
-  return <PanelHostWidget {...props} panel="memory_panel" />
 }
 /** 任务/管道管理面板：右侧面板直接展示（无标题栏包裹），
  *  统一管道管理视图：执行中的管道（任务/会话）实时状态 + 任务树组合。

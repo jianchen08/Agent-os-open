@@ -16,8 +16,13 @@ dependencies = [
     "rich>=13.0",
     "aiohttp>=3.9",
     "watchdog>=3.0",
-    "litellm>=1.96.2",
-    "pydantic>=2.0",
+    # 下三条 next-major 上界（2026-09-11 第七波，最小刀只封高漂移风险项，
+    # 不做全量封顶）：litellm 0.x→1.x 曾全量破坏性重写且 minor 也常破；
+    # pydantic 1→2 为生态最著名破坏性迁移、3 在路上；Pillow 历代大版本
+    # 惯例移除弃用 API（如 10 删 Image.ANTIALIAS）。与 weekly pip-audit
+    # 互补：审计抓已知 CVE，上界抓大版本破坏性升级。
+    "litellm>=1.96.2,<2",
+    "pydantic>=2.0,<3",
     "pydantic-settings>=2.0",
     "python-lsp-server>=1.14.0",
     "cryptography>=42.0",
@@ -25,7 +30,7 @@ dependencies = [
     "httpx>=0.27",
     "sqlalchemy>=2.0",
     "python-dotenv>=1.2.2",
-    "Pillow>=10.0",
+    "Pillow>=10.0,<13",
     # Windows 无系统 IANA 时区库，zoneinfo（prompt_build 动态变量时间注入等）
     # 缺 tzdata 会静默回退 UTC；Linux 走系统库不受影响。
     "tzdata>=2024.1; sys_platform == 'win32'",

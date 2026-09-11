@@ -26,27 +26,27 @@ import json
 import logging
 import os
 import sys
-from typing import TYPE_CHECKING, Any, BinaryIO
+from typing import TYPE_CHECKING, Any
+
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
 if TYPE_CHECKING:
     import subprocess
 
-# 本地模块可达性：插件目录加入 sys.path（与 memory/server.py 同款做法）
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
+# 本地模块可达性（插件目录）+ 共享层自举（http_json 经 plugins/shared/ 裸名导入）。
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.path
+# 测试接缝：test_hindsight_server_lifecycle monkeypatch 此名定位隔离根，
+# 测试接缝：test_hindsight_server_lifecycle monkeypatch 此名定位隔离根，
+# 路径消费统一走 _THIS_DIR（勿内联为 _paths.plugin_dir）。
+_THIS_DIR = _paths.plugin_dir
 
-# http.handle 响应封装 + multipart 解析（内核 HttpHandleResponse/ToolExecutionResult
-# 样板）：公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
-_SHARED_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
-if _SHARED_ROOT not in sys.path:
-    sys.path.insert(0, _SHARED_ROOT)
 from http_json import (  # noqa: E402
     decode_body as _decode_body,
     json_response as _json_response,
     ok as _ok,
     parse_multipart as _parse_multipart,
 )
+from proc_tree import kill_process_tree  # noqa: E402  （共享根经 bootstrap 入 path）
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
@@ -450,8 +450,7 @@ async def hindsight_summarize(
 ) -> dict[str, Any]:
     """摘要注入：recall 检索相关记忆 → reflect 反思整合 → 返回摘要文本。
 
-    供 memory_read 的 SUMMARY 注入经 tool-executor.invoke 跨进程调用；
-    失败返回降级 dict（含 error），不抛异常。
+    经 tool-executor.invoke 跨进程调用；失败返回降级 dict（含 error），不抛异常。
     """
     if _client is None:
         return _degrade_dict("summarize")
@@ -600,7 +599,8 @@ async def _resolve_unit_document_id(bank_id: str, memory_id: str) -> str | None:
         return None
     try:
         unit = await getter(bank_id=bank_id, memory_id=memory_id)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — 解析失败按"不可解析"降级，删除面照常诚实失败
+        logger.debug("[hindsight] unit 文档 id 解析失败（按不可解析处理）| bank=%s memory=%s error=%s", bank_id, memory_id, exc)
         return None
     if hasattr(unit, "model_dump"):
         unit = unit.model_dump()
@@ -820,17 +820,20 @@ async def hindsight_get_documents(
 # ═══════════════════════════════════════════════════════════
 
 
-def _load_env_file_keys() -> dict[str, str]:
-    """从项目根 .env 直读所需 key（sidecar 自足，不依赖内核 env 覆盖）。
+def _project_root() -> str:
+    """插件目录 plugins/shared/system/hindsight_memory → 项目根上溯 4 级。"""
+    return os.path.abspath(os.path.join(_THIS_DIR, "..", "..", "..", ".."))
 
-    invoker 的 env_delta_overlay 可能未把 ZHIPU/SILICONFLOW key 泡进 sidecar
-    进程环境（实测 memory 曾因 key 缺失报 hindsight not initialized）；
-    此处仅补读取，不改写任何内核/全局配置，未找到 key 返回空继续（health
-    server 照起，向量写入时才失败）。
+
+def _load_env_file() -> dict[str, str]:
+    """从项目根 .env 直读全量 key=value（sidecar 自足，不依赖内核 env 覆盖）。
+
+    供应商 key 解析链（_resolve_env_ref）：进程环境优先，.env 兜底——invoker 的
+    env_delta_overlay 不保证把供应商 key 泡进 sidecar 进程环境。此处仅补读取，
+    不改写任何内核/全局配置，未找到 key 返回空继续（health server 照起，
+    向量写入时才失败）。
     """
-    # 插件目录 plugins/shared/system/hindsight_memory → 项目根上溯 4 级
-    root = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", "..", ".."))
-    env_path = os.path.join(root, ".env")
+    env_path = os.path.join(_project_root(), ".env")
     out: dict[str, str] = {}
     try:
         with open(env_path, encoding="utf-8") as f:
@@ -839,12 +842,91 @@ def _load_env_file_keys() -> dict[str, str]:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, _, v = line.partition("=")
-                k, v = k.strip(), v.strip().strip('"').strip("'")
-                if k in ("ZHIPU_API_KEY", "SILICONFLOW_API_KEY"):
-                    out[k] = v
-    except OSError:
-        pass
+                out[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError as exc:
+        logger.debug("[hindsight] .env 读取失败（按无附加配置处理）| path=%s error=%s", env_path, exc)
     return out
+
+
+def _load_llm_yaml() -> dict[str, Any] | None:
+    """读系统模型注册真值 config/models/llm.yaml（LLM 设置页写回的单一真值）。
+
+    缺失/损坏返回 None，调用方按段降级（不阻塞启动）。
+    """
+    import yaml  # noqa: PLC0415  # SDK 传递依赖，插件 venv 必有
+
+    try:
+        with open(
+            os.path.join(_project_root(), "config", "models", "llm.yaml"), encoding="utf-8"
+        ) as f:
+            data = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning(
+            "[hindsight] llm.yaml 读取失败（按段降级，本段返回 None）: %s | %s",
+            os.path.join(_project_root(), "config", "models", "llm.yaml"),
+            exc,
+        )
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _resolve_env_ref(ref: str, env_file: dict[str, str]) -> str:
+    """解析 ``${VAR}`` 凭证引用：进程 env 优先，项目根 .env 兜底；非引用式原样返回。"""
+    if ref.startswith("${") and ref.endswith("}"):
+        var = ref[2:-1]
+        return os.environ.get(var) or env_file.get(var, "")
+    return ref
+
+
+def _resolve_model_endpoint(
+    model_id: str, llm_cfg: dict[str, Any], env_file: dict[str, str]
+) -> tuple[str, str, str, str] | None:
+    """llm.yaml 模型 id → (api_base, model_name, 已解析 key, provider type)。
+
+    解析链 models[id] → providers[entry.provider]（keys[0].api_key 为 ${VAR}
+    引用）；id 或 provider 条目缺失返回 None。api_base 与主 LLM 路径同口径
+    （llm/_config_models.py）：模型条目优先，provider 条目回退——只配在
+    provider 上的端点（如 ollama-oline）否则解析为空串。
+    """
+    entry = (llm_cfg.get("models") or {}).get(model_id)
+    provider = (llm_cfg.get("providers") or {}).get(str((entry or {}).get("provider")))
+    if not isinstance(entry, dict) or not isinstance(provider, dict):
+        return None
+    keys = provider.get("keys") or []
+    key_ref = str(keys[0].get("api_key", "")) if keys and isinstance(keys[0], dict) else ""
+    return (
+        str(entry.get("api_base", "") or provider.get("api_base", "")),
+        str(entry.get("model_name", "")),
+        _resolve_env_ref(key_ref, env_file),
+        str(provider.get("type", "")),
+    )
+
+
+def _manifest_model_config() -> dict[str, str]:
+    """读本插件 manifest 内联配置字段（config_files[].fields 的 name→default）。
+
+    单一真值裁定（2026-09-02）：字段值内联于 manifest，设置页保存写回本文件；
+    manifest 变更经 watcher 触发 respawn，下次进程启动即读到新值。
+    """
+    try:
+        with open(os.path.join(_THIS_DIR, "plugin.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        # 配置缺省有内置兜底，不阻断启动；但缺配置与"无配置字段"必须可区分排查
+        logger.warning("plugin.json 读取失败，配置字段回退内置默认 | error=%s", e)
+        return {}
+    out: dict[str, str] = {}
+    for entry in manifest.get("config_files") or []:
+        for field in entry.get("fields") or []:
+            name = field.get("name")
+            if name:
+                out[str(name)] = str(field.get("default") or "")
+    return out
+
+
+# 非 OpenAI 兼容端点的 provider type（协议不同，openai provider 直连必失败）。
+# zai/minimax 等 type 虽非 "openai"，端点实测 OpenAI 兼容（探针 2026-09-07）。
+_NON_OPENAI_PROVIDER_TYPES = frozenset({"anthropic", "gemini"})
 
 
 def _apply_llm_env() -> None:
@@ -852,48 +934,91 @@ def _apply_llm_env() -> None:
 
     注意:hindsight-api 用的是 HINDSIGHT_API_ 前缀(不是 HINDSIGHT_)。
 
-    默认配置:
-      - LLM(事实抽取/反思):GLM glm-5.2 @ 智谱 OpenAI 兼容端点(复用 ZHIPU_API_KEY)
-      - Embedding(向量检索):BAAI/bge-m3 @ 硅基流动(免费, 国内直连, OpenAI 兼容)
-        → 用 SILICONFLOW_API_KEY(用户需在 .env 配置)
-      - Reranker:rrf(Reciprocal Rank Fusion, 无需下载模型, 避免 HF 被墙)
+    配置真值 = 系统 LLM 注册（config/models/llm.yaml）+ 本插件配置字段选型
+    （ADR 2026-09-07-hindsight-llm-follow-system）。每段独立解析，优先级：
+
+      显式 HINDSIGHT_API_* env（逃生口，逐键最高优先）
+        > 本插件配置 llm_model / embedding_model（非空时）
+        > 系统默认 defaults.chat / defaults.embedding
+
+    provider type 为 anthropic/gemini（非 OpenAI 兼容端点）时警告并跳过该段；
+    缺 llm.yaml / 模型 id 无效 / key 未配置均警告不阻塞（health server 照起，
+    调用期才失败）。Reranker 固定 rrf（Reciprocal Rank Fusion，无需下载模型，
+    避免 HF 被墙）。
     """
-    file_keys = _load_env_file_keys()
-    if not os.environ.get("ZHIPU_API_KEY") and file_keys.get("ZHIPU_API_KEY"):
-        os.environ["ZHIPU_API_KEY"] = file_keys["ZHIPU_API_KEY"]
-    if not os.environ.get("SILICONFLOW_API_KEY") and file_keys.get("SILICONFLOW_API_KEY"):
-        os.environ["SILICONFLOW_API_KEY"] = file_keys["SILICONFLOW_API_KEY"]
-    # ── LLM(GLM, 复用智谱 key)──
-    llm_defaults = {
-        "HINDSIGHT_API_LLM_PROVIDER": "openai",
-        "HINDSIGHT_API_LLM_BASE_URL": "https://open.bigmodel.cn/api/coding/paas/v4/",
-        "HINDSIGHT_API_LLM_MODEL": "glm-5.2",
-    }
-    for key, default in llm_defaults.items():
-        if not os.environ.get(key):
-            os.environ[key] = default
-    zhipu_key = os.environ.get("ZHIPU_API_KEY", "")
-    if zhipu_key and not os.environ.get("HINDSIGHT_API_LLM_API_KEY"):
-        os.environ["HINDSIGHT_API_LLM_API_KEY"] = zhipu_key
-
-    # ── Embedding(硅基流动 bge-m3, 免费)──
-    # 硅基流动是 OpenAI 兼容端点, Hindsight 的 openai provider 直连
-    # 注意:
-    # - model 名的 env 是 _OPENAI_MODEL(不是 _MODEL)
-    # - bge-m3 固定 1024 维, 不传 dimensions 参数(SiliconFlow 传 dimensions 会 400)
-    emb_defaults = {
-        "HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai",
-        "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL": "https://api.siliconflow.cn/v1/",
-        "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL": "BAAI/bge-m3",
-    }
-    for key, default in emb_defaults.items():
-        if not os.environ.get(key):
-            os.environ[key] = default
-    sf_key = os.environ.get("SILICONFLOW_API_KEY", "")
-    if sf_key and not os.environ.get("HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"):
-        os.environ["HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"] = sf_key
-
-    # ── Reranker(rrf, 无需模型, 避免 HF 下载)──
+    log = logging.getLogger(__name__)
+    env_file = _load_env_file()
+    llm_cfg = _load_llm_yaml()
+    if llm_cfg is None:
+        log.warning(
+            "hindsight 配置: config/models/llm.yaml 缺失或损坏，LLM/嵌入段不注入"
+            "（可用 HINDSIGHT_API_* 显式指定）"
+        )
+    else:
+        defaults = llm_cfg.get("defaults") or {}
+        model_cfg = _manifest_model_config()
+        sections = (
+            (
+                "LLM",
+                "llm_model",
+                "chat",
+                {
+                    "HINDSIGHT_API_LLM_PROVIDER": "openai",
+                    "HINDSIGHT_API_LLM_BASE_URL": "{api_base}",
+                    "HINDSIGHT_API_LLM_MODEL": "{model_name}",
+                    "HINDSIGHT_API_LLM_API_KEY": "{api_key}",
+                },
+            ),
+            (
+                "Embedding",
+                "embedding_model",
+                "embedding",
+                {
+                    "HINDSIGHT_API_EMBEDDINGS_PROVIDER": "openai",
+                    "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL": "{api_base}",
+                    "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL": "{model_name}",
+                    "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY": "{api_key}",
+                },
+            ),
+        )
+        for section, cfg_field, sys_default, envs in sections:
+            chosen = (
+                model_cfg.get(cfg_field, "").strip()
+                or str(defaults.get(sys_default) or "").strip()
+            )
+            resolved = (
+                _resolve_model_endpoint(chosen, llm_cfg, env_file) if chosen else None
+            )
+            if resolved is None:
+                if chosen:
+                    log.warning(
+                        "hindsight %s段: 模型 id %r 在 llm.yaml 无条目，跳过注入",
+                        section,
+                        chosen,
+                    )
+                continue
+            api_base, model_name, api_key, provider_type = resolved
+            if provider_type in _NON_OPENAI_PROVIDER_TYPES:
+                log.warning(
+                    "hindsight %s段: 模型 %s 的 provider type=%r 非 OpenAI 兼容端点，跳过注入",
+                    section,
+                    chosen,
+                    provider_type,
+                )
+                continue
+            if not api_base:
+                log.warning(
+                    "hindsight %s段: 模型 %s 的 api_base 在模型条目与 provider 条目均为空，"
+                    "BASE_URL 不注入——OpenAI 兼容客户端将回落公网默认端点，调用期必失败",
+                    section,
+                    chosen,
+                )
+            for env_key, tpl in envs.items():
+                if os.environ.get(env_key):
+                    continue
+                value = {"{api_base}": api_base, "{model_name}": model_name, "{api_key}": api_key}.get(tpl, tpl)
+                if value:
+                    os.environ[env_key] = value
     if not os.environ.get("HINDSIGHT_API_RERANKER_PROVIDER"):
         os.environ["HINDSIGHT_API_RERANKER_PROVIDER"] = "rrf"
 
@@ -909,10 +1034,66 @@ def _hindsight_api_up(base_url: str) -> bool:
         return False
 
 
-def _start_api_server(port: int, data_dir: str) -> tuple[subprocess.Popen[bytes], BinaryIO, str]:
+# hindsight-api stderr 轮转上限（10MB × 3 备份）：uvicorn/pg0 日志无界
+# 追加是磁盘泄漏面，经父侧排空线程 + RotatingFileHandler 收敛。
+_STDERR_ROTATE_MAX_BYTES = 10 * 1024 * 1024
+_STDERR_ROTATE_BACKUP_COUNT = 3
+
+
+def _build_stderr_handler(log_path: str) -> Any:
+    """构造 hindsight-api stderr 轮转 handler（10MB × 3 备份）。
+
+    单独成函数便于测试断言轮转配置（maxBytes/backupCount）生效。
+    """
+    from logging.handlers import RotatingFileHandler  # noqa: PLC0415
+
+    handler = RotatingFileHandler(
+        log_path,
+        maxBytes=_STDERR_ROTATE_MAX_BYTES,
+        backupCount=_STDERR_ROTATE_BACKUP_COUNT,
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    return handler
+
+
+def _spawn_stderr_drain(process: Any, stderr_path: str) -> None:
+    """排空子进程 stderr → 父进程侧 RotatingFileHandler（daemon 线程）。
+
+    为什么不把文件 fd 直接交给子进程：子进程持 fd 自写完全绕过父进程
+    handler，轮转永不触发、磁盘无界。PIPE + 父侧排空线程是轮转约束
+    真实生效的唯一形态；handler 逐条 flush，崩溃 tail 诊断照常可用。
+    """
+    drain_logger = logging.getLogger("hindsight_api.stderr")
+    drain_logger.setLevel(logging.INFO)
+    drain_logger.propagate = False
+
+    def _drain() -> None:
+        handler = _build_stderr_handler(stderr_path)
+        drain_logger.addHandler(handler)
+        try:
+            stream = process.stderr
+            if stream is not None:
+                for raw in iter(stream.readline, b""):
+                    text = raw.decode("utf-8", errors="replace").rstrip()
+                    if text:
+                        drain_logger.info("%s", text)
+        except Exception as e:  # noqa: BLE001 — 排空线程自终止，失败留痕
+            drain_logger.warning("stderr 排空异常终止: %s", e)
+        finally:
+            drain_logger.removeHandler(handler)
+            handler.close()
+
+    import threading  # noqa: PLC0415
+
+    threading.Thread(target=_drain, name="hindsight-stderr-drain", daemon=True).start()
+
+
+def _start_api_server(port: int, data_dir: str) -> tuple[subprocess.Popen[bytes], str]:
     """以 hindsight 专用 venv 启动 hindsight-api 子进程。
 
-    返回 (进程句柄, stderr 文件句柄, stderr 落盘路径)；venv python 缺失时抛 RuntimeError。
+    返回 (进程句柄, stderr 落盘路径)；venv python 缺失时抛 RuntimeError。
+    stderr 走 PIPE 由父侧排空线程写入轮转日志（10MB×3），不再交 fd 给子
+    进程（自写绕过 handler → 轮转失效、磁盘无界）。
     """
     import subprocess  # noqa: PLC0415
 
@@ -937,66 +1118,59 @@ def _start_api_server(port: int, data_dir: str) -> tuple[subprocess.Popen[bytes]
         )
         raise RuntimeError("hindsight venv 未初始化")
     # 子进程 stderr 落盘不 DEVNULL：stderr 进 DEVNULL 会令崩溃原因
-    # 完全不可诊断。追加写 data 目录，崩溃时带 tail 进错误消息；父进程侧
-    # 句柄由 _wait_api_ready 在终态统一关闭（子进程自持 fd 副本继续写）。
+    # 完全不可诊断。PIPE → 父侧排空线程写轮转日志，崩溃时带 tail 进错误
+    # 消息（handler 逐条 flush，tail 读取无延迟窗口）。
     _stderr_path = os.path.join(data_dir, "hindsight_api_stderr.log")
-    _stderr_file = open(_stderr_path, "ab")
     process = subprocess.Popen(
         [_venv_python, "-m", "hindsight_api.main",
          "--port", str(port), "--host", "127.0.0.1"],
         stdout=subprocess.DEVNULL,
-        stderr=_stderr_file,
+        stderr=subprocess.PIPE,
         env=os.environ.copy(),
     )
+    _spawn_stderr_drain(process, _stderr_path)
     logger.info(
         "[hindsight] hindsight-api 子进程已启动 PID=%s port=%s stderr_log=%s",
         process.pid, port, _stderr_path,
     )
-    return process, _stderr_file, _stderr_path
+    return process, _stderr_path
 
 
 async def _wait_api_ready(
     base_url: str,
     process: subprocess.Popen[bytes],
-    stderr_file: BinaryIO,
     stderr_path: str,
 ) -> None:
     """轮询 /health 直至就绪（最多 60s）；子进程提前退出则带 stderr tail 抛错。
 
-    任一终态（就绪/超时/崩溃）关闭父进程侧 stderr 句柄——句柄不跨调用
-    存续；子进程持有自身 fd 副本，关闭不影响其继续向日志落盘。
+    stderr 由父侧排空线程写轮转日志（逐条 flush），崩溃 tail 直接读落盘
+    路径；本函数不持有任何文件句柄。
     """
     import asyncio as _aio  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
 
-    try:
-        for _attempt in range(60):
-            await _aio.sleep(1)
-            try:
-                with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
-                    if resp.status == 200:
-                        logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
-                        break
-            except Exception:
-                # 检查子进程是否已退出：带上 stderr tail（落盘日志最后 800
-                # 字符）——崩溃原因可见，不再只有裸 exit code。
-                if process.poll() is not None:
-                    _tail = ""
-                    try:
-                        stderr_file.flush()
-                        with open(stderr_path, "rb") as _f:
-                            _raw = _f.read()
-                        _tail = _raw[-800:].decode("utf-8", errors="replace")
-                    except Exception:  # noqa: BLE001
-                        pass
-                    raise RuntimeError(
-                        f"hindsight-api 子进程已退出 code={process.returncode}"
-                        f" stderr_tail={_tail!r}"
-                    )
-        else:
-            raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
-    finally:
-        stderr_file.close()
+    for _attempt in range(60):
+        await _aio.sleep(1)
+        try:
+            with urllib.request.urlopen(f"{base_url}/health", timeout=2) as resp:
+                if resp.status == 200:
+                    logger.info("[hindsight] 服务器就绪 (attempt=%d)", _attempt + 1)
+                    return
+        except Exception:
+            # 检查子进程是否已退出：带上 stderr tail（落盘日志最后 800
+            # 字符）——崩溃原因可见，不再只有裸 exit code。
+            if process.poll() is not None:
+                _tail = ""
+                try:
+                    with open(stderr_path, "rb") as _f:
+                        _tail = _f.read()[-800:].decode("utf-8", errors="replace")
+                except Exception:  # noqa: BLE001
+                    pass
+                raise RuntimeError(
+                    f"hindsight-api 子进程已退出 code={process.returncode}"
+                    f" stderr_tail={_tail!r}"
+                )
+    raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
 
 
 @plugin.on_load
@@ -1044,11 +1218,10 @@ async def _on_load(params: dict[str, Any]) -> None:
         if _hindsight_api_up(base_url):
             logger.info("[hindsight] 复用既有 hindsight-api 服务 %s", base_url)
         else:
-            _api_process, _stderr_file, _stderr_path = _start_api_server(port, data_dir)
-            await _wait_api_ready(base_url, _api_process, _stderr_file, _stderr_path)
+            _api_process, _stderr_path = _start_api_server(port, data_dir)
+            await _wait_api_ready(base_url, _api_process, _stderr_path)
 
-        # 创建 HTTP 客户端
-        from hindsight_client import Hindsight  # type: ignore
+        from hindsight_client import Hindsight  # type: ignore  # 第三方 hindsight_client 无类型 stub
 
         _client = Hindsight(base_url=base_url)
 
@@ -1086,19 +1259,18 @@ async def _on_unload(params: dict[str, Any]) -> None:
             logger.warning("[hindsight] on_unload client 清理失败 | error=%s", e)
         finally:
             _client = None
-    # 终止 hindsight-api 子进程
+    # 终止 hindsight-api 子进程树：pg0 嵌入式 PG 与 uvicorn 的 helper 进程
+    # 可能以子进程形态残留，terminate 单进程会留孤儿——共享杀树件整棵清
+    # （失败清单非空 = 有残留，warn 留痕可排查）。
     if _api_process is not None:
-        try:
-            _api_process.terminate()
-            _api_process.wait(timeout=10)
-        except Exception as e:
-            logger.warning("[hindsight] on_unload 终止 api 子进程失败 | error=%s", e)
-            try:
-                _api_process.kill()
-            except Exception:
-                pass
-        finally:
-            _api_process = None
+        failures = kill_process_tree(_api_process.pid)
+        if failures:
+            logger.warning(
+                "[hindsight] on_unload 进程树清理失败（可能残留进程） | pid=%s | failures=%s",
+                _api_process.pid,
+                failures,
+            )
+        _api_process = None
 
 
 

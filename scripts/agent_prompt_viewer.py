@@ -259,8 +259,8 @@ def _safe_static_item_summary(item: dict | str, state: dict) -> dict:
                         continue
                     try:
                         parts.append(f"<{child.stem}>\n{child.read_text(encoding='utf-8')}\n</{child.stem}>")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("目录注入跳过不可读文件 %s: %s", child, e)
                 if parts:
                     file_content = f'<files dir="{raw_path}">\n' + "\n".join(parts) + "\n</files>"
         except Exception as e:
@@ -311,8 +311,12 @@ def _worker_main() -> None:
     try:
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(
+            f"[agent-prompt-viewer] stdout/stderr UTF-8 重包装未生效（{exc}），"
+            "输出含 GBK 外字符时可能抛 UnicodeEncodeError",
+            file=sys.stderr,
+        )
 
     # 收集 Python 启动时（-I 隔离前）的标准库路径
     # -I 模式启动时 sys.path 只剩 stdlib 路径，不含 site-packages
@@ -528,11 +532,15 @@ def _build_inject_map(system_message, yaml_data):
                             if p >= 0:
                                 total += len(fc2)
                                 if sp < 0: sp = p
-                        except: pass
+                        except OSError as exc:
+                            # 单个文件不可读只跳过该文件并留痕，不阻断其余文件扫描
+                            logger.warning("跳过不可读文件 %s: %s", f2, exc)
                 if sp >= 0:
                     inject_map.append({"name": str(raw_path).rstrip("/"), "path": raw_path,
                         "start": sp, "end": sp + total, "size": total})
-        except: pass
+        except OSError as exc:
+            # 单个引用路径解析/读取失败只跳过该路径并留痕，不影响其余注入点
+            logger.warning("跳过不可读路径引用 %s: %s", raw_path, exc)
     inject_map.sort(key=lambda x: x["start"])
     return inject_map
 

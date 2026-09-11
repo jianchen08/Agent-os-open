@@ -21,17 +21,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-# 包路径导入（human.models / human.service 等）需要 tools 目录在 sys.path
-_TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _TOOLS_DIR not in sys.path:
-    sys.path.insert(0, _TOOLS_DIR)
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.path
+
+# 包路径导入（human.models / human.service 等）需要 tools 目录在 sys.path——
+# 组根不随 bootstrap 注入（ADR 2026-09-08-plugin-bootstrap-sink 决策 1）
+if _paths.group_root not in sys.path:
+    sys.path.insert(0, _paths.group_root)
 
 from human.interfaces import IInteractionNotifier  # noqa: E402
 from human.models import InteractionMode, Priority, ResponseType  # noqa: E402
@@ -378,6 +379,7 @@ async def _do_choice(
         agent_id=pipeline_id,
         pipeline_id=pipeline_id,
         file_paths=_resolved_file_paths(kwargs),
+        user_id=kwargs.get("user_id") or None,
     )
     response = await _service.wait_for_choice(rid, timeout=timeout)
     result: dict[str, Any] = {"status": "completed", "response_type": response.get("response_type")}
@@ -465,6 +467,10 @@ async def interaction_send_notification(
             "questions": {"type": "array", "items": {"type": "string"}},
             "timeout_seconds": {"type": "integer", "default": 86400},
             "priority": {"type": "string", "enum": ["low", "normal", "high", "critical"], "default": "normal"},
+            "user_id": {
+                "type": "string",
+                "description": "创建者用户（param_inject/调用方服务端注入，用于审批归属归因）",
+            },
         },
         "required": ["session_id", "thread_id", "tab_id", "title"],
     },
@@ -473,7 +479,7 @@ async def interaction_send_notification(
 async def interaction_create_choice(
     session_id: str, thread_id: str, tab_id: str, title: str, description: str = "",
     options: list[dict[str, Any]] | None = None, questions: list[str] | None = None,
-    timeout_seconds: int = 86400, priority: str = "normal",
+    timeout_seconds: int = 86400, priority: str = "normal", user_id: str = "",
 ) -> dict[str, Any]:
     if _service is None:
         return {"error": "service not initialized"}
@@ -481,6 +487,7 @@ async def interaction_create_choice(
         session_id=session_id, thread_id=thread_id, tab_id=tab_id, title=title,
         description=description, options=options, questions=questions,
         timeout_seconds=timeout_seconds, priority=Priority(priority),
+        user_id=user_id or None,
     )
     return {"request_id": rid, "status": "pending"}
 
@@ -512,24 +519,24 @@ async def interaction_wait_for_choice(request_id: str, timeout: float = 86400) -
         "type": "object",
         "properties": {
             "request_id": {"type": "string"},
-            "response_type": {"type": "string", "description": "approved/denied/answered/timeout/cancelled"},
-            "selected_option": {"type": "string"},
-            "answers": {"type": "array", "items": {"type": "string"}},
-            "feedback": {"type": "string"},
+            "response": {
+                "type": "object",
+                "description": "前端应答载荷原样透传（response_type/selected_option/answers/feedback 契约由本插件自持）",
+            },
         },
-        "required": ["request_id", "response_type"],
+        "required": ["request_id", "response"],
     },
     description="提交交互响应（前端用户操作经内核转发到此，唤醒 wait_for_choice）",
 )
-async def interaction_respond(
-    request_id: str, response_type: str, selected_option: str | None = None,
-    answers: list[str] | None = None, feedback: str | None = None,
-) -> dict[str, Any]:
+async def interaction_respond(request_id: str, response: dict[str, Any]) -> dict[str, Any]:
     if _service is None:
         return {"error": "service not initialized"}
     success = await _service.submit_response(
-        request_id=request_id, response_type=response_type,
-        selected_option=selected_option, answers=answers, feedback=feedback,
+        request_id=request_id,
+        response_type=response.get("response_type", "answered"),
+        selected_option=response.get("selected_option"),
+        answers=response.get("answers"),
+        feedback=response.get("feedback"),
     )
     return {"ok": success, "request_id": request_id, "status": "submitted" if success else "not_found"}
 

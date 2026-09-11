@@ -6,14 +6,22 @@
 //!
 //! [来源: docs/working/adr_engine_design.md §4.2]
 
-/// per-run 易变键：checkpoint 瘦身与冷恢复合并共同跳过的键集（GAP-3）。
+/// 内核自有 per-run 易变键：checkpoint 瘦身与冷恢复合并跳过的内核侧键集（GAP-3）。
 ///
 /// 这些键属于"本轮运行"而非"管道累计状态"——残留会在恢复时覆盖下一轮的
 /// 新输入（重启后旧 user 消息被重放消费）。内核恢复侧（api server.rs）经
 /// lib.rs 再导出消费同一份，双侧语义单一来源。
 ///
-/// `ended` 与 `suspended` 同属 per-run 终止标志：post 阶段每轮写
-/// `ended=true`（pipeline_track），若残留进下一轮 initial_state，引擎
+/// 插件语义的 per-run 键（tool_schemas/conversation_mode/thinking_strength/
+/// core_type/core_plugin 等）**不在本表**——由插件 manifest `state.volatile_keys`
+/// 声明（P1-4 声明化）。checkpoint 落档剥离集 = 本表 ∪ 声明键并集：api 收集
+/// 全部 manifest 声明，经 `StorageBackend::set_declared_volatile_keys` 注入
+/// store，与内核自有键在同一剥离点（save_checkpoint）消费；恢复合并侧
+/// （api merge_recovered_scalars）消费同一并集跳过。新插件引入 per-run 键
+/// 零内核改动，与 persistent_fields 声明化对称。
+///
+/// `ended` 与 `suspended` 同属 per-run 终止标志：post 阶段每轮由追踪插件写
+/// `ended=true`，若残留进下一轮 initial_state，引擎
 /// `execute_steps`/`execute_body` 见 ended 即短路——冷恢复（registry 丢失）
 /// 后 run 秒终 completed、LLM 一次请求都不发。
 ///
@@ -36,41 +44,68 @@ pub const VOLATILE_RUN_KEYS: &[&str] = &[
     "run_status",
     "should_stop",
     "router.stop_reason",
-    "thinking_strength",
     "_assistant_id_assigned",
     "_pending_message_ops",
-    // agent_id 历史上是每轮派发注入键；2026-08-31 起执行身份 = 管道 state
-    // 持久键 agent.id（出生方经 state 透传，context_build/工具面消费），派发
-    // 不再注入。保留拦截旧 checkpoint/轨迹恢复把残留 agent_id 带回 state。
+    // agent_id 非派发注入键：执行身份 = 管道 state 持久键 agent.id（出生方经
+    // state 透传，context_build/工具面消费），派发不注入。保留拦截——
+    // 旧 checkpoint/轨迹恢复会把残留 agent_id 带回 state。
     "agent_id",
-    // tool_schemas 是每轮 prepare 链 tool_schema 插件经内核 tool-surface
-    // capability 拉取的 LLM 工具面，只对本轮 LLM 调用有效——跨轮持久=整树
-    // schema 滞留内存/checkpoint（90 工具 62KB 声明被反复持有放大）。下一轮
-    // prepare 重新拉取，persist 前剥离即可。
-    "tool_schemas",
-    // conversation_mode 是交互挂起轮的对话等待态（human_interaction 返回
-    // conversation_mode=true → post 链置 suspended 停泊）。新消息到达 = 用户
-    // 已响应，新一轮应从非对话态开始直接运行——残留会让 llm_core 继续空轮
-    // （"在等用户输入"语义）且 post 链再次置 suspended，管道永久"消息中断"
-    // （2026-09-02 真机实证：交互挂起后所有后续 run 空转，冷/热恢复双残留）。
-    // core_type/core_plugin 同属本轮执行态（stage_build_initial_state 每轮
-    // 显式种 llm_call 初始值，恢复合并不得用上轮 tool_execute 覆盖）。
-    "conversation_mode",
-    "core_type",
-    "core_plugin",
+    // 「终态未落库」补偿标记（B5）：update_run_status 重试耗尽后的观测键，
+    // 只做 G8 排空兜底的补写识别面——残留进下一轮 state 无意义且误导消费方。
+    "terminal_persist_failed",
 ];
 
 use std::sync::Arc;
 
 use agentos_core::traits::{MessageQueryOpts, SessionListFilter, StorageBackend};
 use agentos_core::types::{
-    Branch, MessageRecord, PatchType, PendingInputRecord, PendingInputSource, PipelineRunInfo,
-    RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry, UserRecord,
+    MessageRecord, PatchType, PendingInputRecord, PendingInputSource, PipelineRunInfo, RunRecord,
+    RunStatus, SessionRecord, StorageError, TraceEntry, UserRecord,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
+
+/// SQLite schema 版本（PRAGMA user_version）。结构变更新增 MIGRATIONS 条目并递增。
+const SCHEMA_VERSION: i64 = 1;
+
+/// consumed_refresh_jtis 行保留窗口（秒）：与 refresh token 有效期上限对齐
+/// （api auth REFRESH_TOKEN_TTL_SECS = 7 天）——token 本身过期后，其消费
+/// 记录不再有吊销意义，消费写入时顺手清理窗口外旧行，表不无界增长。
+const CONSUMED_REFRESH_JTI_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// traces 保留天数默认值（ADR 2026-09-11）：traces 每 step 追加一行、blobs
+/// 内容寻址去重且不随消息/管道删除级联清理，无保留机制两表无界增长。
+/// `AGENTOS_TRACE_RETENTION_DAYS` 可覆盖；0 = 禁用清扫。
+pub const TRACE_RETENTION_DAYS_DEFAULT: u64 = 90;
+
+/// 保留天数钳制上限（≈100 年）：env 误配超大值时把 cutoff 钳在 DateTime
+/// 值域内，清扫任务不因 cutoff 计算溢出而 panic。
+const TRACE_RETENTION_DAYS_MAX: u64 = 36_500;
+
+/// traces 保留天数：`AGENTOS_TRACE_RETENTION_DAYS` > 默认
+/// [`TRACE_RETENTION_DAYS_DEFAULT`]。解析失败回落默认（清扫是家政不是正确性
+/// 路径，误配不阻断启动，与 `AGENTOS_MAX_CONCURRENT_RUNS` 同规）；0 = 禁用
+/// （接线侧据此不启动清扫任务）；超出 [`TRACE_RETENTION_DAYS_MAX`] 按上限钳制。
+pub fn trace_retention_days() -> u64 {
+    std::env::var("AGENTOS_TRACE_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(TRACE_RETENTION_DAYS_DEFAULT)
+        .min(TRACE_RETENTION_DAYS_MAX)
+}
+
+/// 单条迁移函数类型：把 schema 从版本 i 升到 i+1。
+type MigrationFn = fn(&Connection) -> Result<(), StorageError>;
+
+/// 有序迁移链：MIGRATIONS[i] 把 schema 从版本 i 升到 i+1。
+///
+/// v1 基线 = init() 的 DDL + 幂等迁移集（建表 IF NOT EXISTS / 补列存在性守护 /
+/// 退役表 DROP，对 0.2 全期存量库幂等）。后续结构变更：追加 (描述, fn) 条目并
+/// 递增 SCHEMA_VERSION；open 时只跑 user_version 之后的条目。数据库版本号高于
+/// 本内核认知 = 新版本内核写出，显式拒绝（不猜、不静默降级——fail-closed）。
+const MIGRATIONS: &[(&str, MigrationFn)] = &[];
 
 /// SQLite 四表 DDL（建表脚本）
 const DDL: &str = "
@@ -98,6 +133,9 @@ CREATE TABLE IF NOT EXISTS traces (
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_traces_branch_seq ON traces(branch_id, seq_in_branch);
+-- 轨迹热查询按 run_id 集合 + tenant 过滤（get_step_traces_by_thread 经
+-- message_slots 反查 run_id 集合后扫 traces），无此索引时该路径全表扫描。
+CREATE INDEX IF NOT EXISTS idx_traces_run_tenant ON traces(run_id, tenant_id);
 CREATE TABLE IF NOT EXISTS blobs (
     blob_id    TEXT PRIMARY KEY,
     mime_type  TEXT NOT NULL,
@@ -134,7 +172,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_tenant ON sessions(tenant_id, updated_at DESC);
 -- 域6：users（0.5.0 完整用户系统的最小持久化地基）。
 -- 一用户一租户：tenant_id = user_id（admin 种子 = 'default'）。username 跨租户全局唯一。
--- 密码明文（DEBT: 0.5.0 替换为哈希）。
+-- password 存 argon2id 哈希（PHC 字符串）；存量明文行由内核启动迁移哈希化回写。
 CREATE TABLE IF NOT EXISTS users (
     user_id       TEXT PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
@@ -143,7 +181,8 @@ CREATE TABLE IF NOT EXISTS users (
     role          TEXT NOT NULL DEFAULT 'user',
     tenant_id     TEXT NOT NULL DEFAULT 'default',
     created_at    TEXT NOT NULL,
-    last_login_at TEXT
+    last_login_at TEXT,
+    must_change_password INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
 -- 域7：pipeline_sessions（会话↔管道映射）。
@@ -226,12 +265,53 @@ CREATE TABLE IF NOT EXISTS pipeline_pending_inputs (
 );
 CREATE INDEX IF NOT EXISTS idx_pending_pipeline
     ON pipeline_pending_inputs(tenant_id, pipeline_id, created_at, id);
+-- consumed_refresh_jtis：refresh token 单次轮换消费账本（api auth D12）。
+-- 跨进程重启持久判已消费（进程内记录重启即清，已消费 token 会复活）；
+-- 行保留窗口 = refresh token 有效期上限 7 天（api auth REFRESH_TOKEN_TTL_SECS），
+-- 消费写入时顺手清理窗口外旧行。
+CREATE TABLE IF NOT EXISTS consumed_refresh_jtis (
+    jti         TEXT PRIMARY KEY,
+    consumed_at INTEGER NOT NULL
+);
 ";
 
-/// 零兼容：检测 message_slots 旧 schema（含内容列，如 content_preview）并 DROP 重建。
+/// 退役表迁移处置：存在且有行 → `ALTER TABLE ... RENAME TO <name>_retired_<yyyymmddHHMMSS>`
+/// 留档保全并 error 留痕（数据保全优先于自动清理——退役即盲删会把存量数据随升级
+/// 静默抹掉，人工确认无用后再清理 _retired_ 表）；不存在或空表 → DROP（db_admin
+/// 表清单与后端读写一一对应的既有契约不变）。
+fn retire_table_preserve_rows(conn: &Connection, name: &str) -> Result<(), StorageError> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)?;
+    if !exists {
+        return Ok(());
+    }
+    let rows: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {name}"), [], |r| r.get(0))?;
+    if rows == 0 {
+        conn.execute(&format!("DROP TABLE {name}"), [])?;
+        return Ok(());
+    }
+    let ts = chrono::Utc::now().format("%Y%m%d%H%M%S");
+    let renamed = format!("{name}_retired_{ts}");
+    conn.execute(&format!("ALTER TABLE {name} RENAME TO {renamed}"), [])?;
+    error!(
+        table = name,
+        rows = rows,
+        renamed = %renamed,
+        "退役表含数据：已改名保全，不自动删除；确认无用后可人工 DROP 该 _retired_ 表"
+    );
+    Ok(())
+}
+
+/// 零兼容：检测 message_slots 旧 schema（含内容列，如 content_preview）并整表撤位重建。
 ///
 /// 任务 7 收敛后 slots 是纯索引表；旧库的宽表（含 role/content_preview/tool_calls_json
-/// 等内容列）数据格式不再支持——按零兼容原则直接丢弃（承诺过"清库重跑"），不写迁移。
+/// 等内容列）数据格式不再支持——旧宽表经 [`retire_table_preserve_rows`] 处置（有行改名
+/// `_retired_<ts>` 留档、空表 DROP），再按现行 DDL 重建纯索引表。
 fn migrate_drop_legacy_message_slots(conn: &Connection) -> Result<(), StorageError> {
     // 行级读取失败必须显式留痕：filter_map(.ok()) 会把失败行静默丢掉，
     // 可能让残留旧列逃过检测、误判"无旧列"而跳过重建。
@@ -249,8 +329,8 @@ fn migrate_drop_legacy_message_slots(conn: &Connection) -> Result<(), StorageErr
         }
     }
     if has_legacy_col {
-        warn!("message_slots 含旧内容列（零兼容），DROP 重建——旧槽位数据被丢弃");
-        conn.execute("DROP TABLE message_slots", [])?;
+        retire_table_preserve_rows(conn, "message_slots")?;
+        warn!("message_slots 含旧内容列（零兼容），已按保全策略撤位并按现行 DDL 重建");
         conn.execute_batch(DDL)?;
     }
     Ok(())
@@ -266,6 +346,22 @@ fn migrate_add_run_pipeline_id(conn: &Connection) -> Result<(), StorageError> {
         .query_row([], |row| row.get::<_, i64>(0))?;
     if has == 0 {
         conn.execute("ALTER TABLE runs ADD COLUMN pipeline_id TEXT", [])?;
+    }
+    Ok(())
+}
+
+/// 为旧库（无 must_change_password 列的 users 表）补加该列。幂等：列已存在时跳过。
+fn migrate_add_users_must_change_password(conn: &Connection) -> Result<(), StorageError> {
+    let has = conn
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='must_change_password'",
+        )?
+        .query_row([], |row| row.get::<_, i64>(0))?;
+    if has == 0 {
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -307,11 +403,19 @@ fn migrate_add_tenant_id(conn: &Connection) -> Result<(), StorageError> {
 ///
 /// 使用 `rusqlite::Connection`（线程安全包装在 `Arc<Mutex>` 中）。
 /// 支持 WAL 模式以提高并发读写性能。
-/// Clone 语义：浅拷 Arc<Mutex<Connection>>，多个 clone 共享同一连接。
-/// spawn_blocking 转发 trait 方法时需要（'self' 借用无法 move 进闭包）。
+/// Clone 语义：浅拷 Arc 字段，多个 clone 共享同一连接与同一 DB 线程池。
+/// DB 线程池派发转发 trait 方法时需要（'self' 借用无法 move 进闭包）。
 #[derive(Clone)]
 pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
+    /// 固定长命 DB 工作线程池：async 面的阻塞调用统一派发到此执行（见
+    /// [`DedicatedDbPool`]）——固定线程持续复用 per-thread 堆，避免阻塞池
+    /// 短命线程换手导致的堆废弃滞留。
+    pool: Arc<DedicatedDbPool>,
+    /// 插件声明 per-run 易变键并集（P1-4 声明化）：checkpoint 落档剥离集 =
+    /// 内核自有键（VOLATILE_RUN_KEYS）∪ 本集。经 `set_declared_volatile_keys`
+    /// 注入（api 从 manifest 声明收集，随派发刷新），缺省空集。
+    declared_volatile_keys: Arc<parking_lot::RwLock<std::collections::HashSet<String>>>,
 }
 
 /// 判断 StorageError 是否为 SQLite 损坏类错误（可自愈重建）。
@@ -468,17 +572,20 @@ fn extract_content_string(msg: &serde_json::Value) -> String {
 
 /// 备份损坏的 SQLite 文件（含 -wal/-shm 伴生文件）为 `<src>.corrupt-<ts>`，保留现场供排查。
 ///
+/// 返回本次备份的路径前缀 `<path>.corrupt-<ts>`（fail-closed 错误信息据此指引现场位置）。
+///
 /// 注意：WAL 模式下损坏可能落在 -wal/-shm 伴生文件中，因此三个文件一起处理。
-/// 备份失败（如文件系统权限异常）不在这里阻断——后续重建 open_inner 若仍失败，
-/// 错误会正常传播给调用方，不会假装自愈成功。
-fn backup_corrupt_files(path: &str) {
+/// 个别文件备份失败只 warn 不阻断——现场能保多少保多少，open 侧无论备份成败
+/// 都会在默认路径 fail-closed 拒启，不会在无现场的情况下继续。
+fn backup_corrupt_files(path: &str) -> String {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| format!("{}.{}", d.as_secs(), d.subsec_nanos()))
         .unwrap_or_else(|_| "unknown".to_string());
+    let prefix = format!("{path}.corrupt-{ts}");
     for suffix in ["", "-wal", "-shm"] {
         let src = format!("{path}{suffix}");
-        let dst = format!("{src}.corrupt-{ts}");
+        let dst = format!("{prefix}{suffix}");
         if std::path::Path::new(&src).exists() {
             match std::fs::rename(&src, &dst) {
                 Ok(()) => warn!(
@@ -489,11 +596,12 @@ fn backup_corrupt_files(path: &str) {
                 Err(e) => warn!(
                     from = %src,
                     error = %e,
-                    "损坏的 SQLite 文件备份失败（继续尝试重建）"
+                    "损坏的 SQLite 文件备份失败（现场不完整，启动仍将中止）"
                 ),
             }
         }
     }
+    prefix
 }
 
 /// 解析 traces.patch_type 字符串为 PatchType。
@@ -518,24 +626,73 @@ fn parse_patch_type(patch_type: &str, plugin_id: &str) -> PatchType {
     }
 }
 
+/// runs.status 文本 → RunStatus：未知值 warn 留痕后按 Running 处理（读取
+/// 路径不可 fail，但写入方新增状态必须登记——与 parse_patch_type 同标准）。
+fn parse_run_status(status: &str, run_id: &str) -> RunStatus {
+    match status {
+        "running" => RunStatus::Running,
+        "suspended" => RunStatus::Suspended,
+        "completed" => RunStatus::Completed,
+        "failed" => RunStatus::Failed,
+        "cancelled" => RunStatus::Cancelled,
+        _ => {
+            warn!(
+                run_id = %run_id,
+                status = %status,
+                "runs 出现未知 status，按 Running 处理（写入方新增状态需登记）",
+            );
+            RunStatus::Running
+        }
+    }
+}
+
+/// runs.metadata JSON 文本 → Option<Value>：损坏 JSON warn 留痕后按缺失处理，
+/// 不与"无 metadata"静默混同（审批挂起凭据 pending_interaction_request_id
+/// 落在此列，静默丢弃会让挂起恢复链查不到 run 且无任何痕迹）。
+fn parse_run_metadata(metadata_str: Option<String>, run_id: &str) -> Option<serde_json::Value> {
+    let raw = metadata_str?;
+    match serde_json::from_str(&raw) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            warn!(
+                run_id = %run_id,
+                error = %e,
+                "runs metadata JSON 损坏，按缺失处理（挂起恢复凭据可能丢失）",
+            );
+            None
+        }
+    }
+}
+
 impl SqliteStore {
-    /// 在指定路径创建 SQLite 数据库并初始化四表。
+    /// 在指定路径创建 SQLite 数据库并初始化表结构。
     ///
-    /// 损坏自愈：若打开/初始化失败且错误为 SQLite 损坏类（malformed / not a database /
-    /// corrupt / file is encrypted，如进程异常退出或磁盘故障留下的坏库），自动将损坏文件
-    /// （含 -wal/-shm 伴生文件）备份为 `<path>.corrupt-<ts>` 保留现场，然后重建空库继续
-    /// 启动——避免 kernel 因单次库损坏直接崩溃退出。
+    /// 损坏 fail-closed：打开/初始化失败且错误为 SQLite 损坏类（malformed / not a
+    /// database / corrupt / file is encrypted，如进程异常退出或磁盘故障留下的坏库）时，
+    /// 先把损坏文件（含 -wal/-shm 伴生文件）备份为 `<path>.corrupt-<ts>` 保留现场，
+    /// 然后返回明确错误中止启动——库内是 runs/traces/messages 等审计型账本，默认
+    /// 静默清零重建属高危操作。环境变量 `AGENTOS_DB_AUTO_REBUILD=1` 显式选择自动
+    /// 重建：备份后重建空库继续启动（原数据只在 .corrupt-* 备份中）。
     /// 其他错误（权限、IO 等）原样传播，不做静默降级。
     pub fn open(path: &str) -> Result<Self, StorageError> {
         match Self::open_inner(path) {
             Ok(store) => Ok(store),
             Err(e) if is_corruption_error(&e) => {
+                let backup_prefix = backup_corrupt_files(path);
+                if std::env::var("AGENTOS_DB_AUTO_REBUILD").ok().as_deref() != Some("1") {
+                    return Err(StorageError::Database(format!(
+                        "SQLite 数据库损坏，已备份现场并中止启动（默认 fail-closed，不自动重建空库——\
+                         审计账本静默清零属高危）。损坏文件备份于 {backup_prefix}*.corrupt-*。\
+                         恢复指引：离线排查该备份并恢复数据；确认可弃数据后设 \
+                         AGENTOS_DB_AUTO_REBUILD=1 重启，将自动重建空库继续。库路径：{path}。\
+                         原始错误：{e}"
+                    )));
+                }
                 warn!(
                     path = %path,
                     error = %e,
-                    "SQLite 数据库损坏，自动备份并重建新库（原数据保留在 .corrupt-* 备份中）"
+                    "SQLite 数据库损坏，AGENTOS_DB_AUTO_REBUILD=1：自动备份并重建新库（原数据保留在 .corrupt-* 备份中）"
                 );
-                backup_corrupt_files(path);
                 Self::open_inner(path)
             }
             Err(e) => Err(e),
@@ -547,6 +704,8 @@ impl SqliteStore {
         Self::init(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            pool: Arc::new(DedicatedDbPool::spawn()?),
+            declared_volatile_keys: Arc::new(parking_lot::RwLock::new(Default::default())),
         })
     }
 
@@ -556,40 +715,61 @@ impl SqliteStore {
         Self::init(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            pool: Arc::new(DedicatedDbPool::spawn()?),
+            declared_volatile_keys: Arc::new(parking_lot::RwLock::new(Default::default())),
         })
     }
 
     fn init(conn: &Connection) -> Result<(), StorageError> {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-        // 0.1 投影表退役（不留两套真值）：执行记录/会话消耗账本
+        // H9 迁移链：user_version 是版本权威。高于本内核认知 = 新版本内核写出，
+        // 继续写会静默破坏不认识的 schema——显式拒绝（fail-closed，不猜）。
+        let current_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        // 投影表退役（不留两套真值）：执行记录/会话消耗账本
         // 由 messages 真值派生读路径替代（调试中心执行记录/LLM 请求页），记忆面归
         // hindsight 自持存储；dynamic_tools 同样退役——动态注册的工具是 state 域
         // 数据不落内核（跨重启由插件自持 state/config 重建）。
-        // 四表零生产者；必须在 DDL 之前 DROP——存量残留表结构与现行 DDL 的
-        // CREATE INDEX 不兼容会直接炸 init。
+        // 四表零生产者；必须在 DDL 之前处置——存量残留表结构与现行 DDL 的
+        // CREATE INDEX 不兼容会直接炸 init。处置带保全：有行改名 `_retired_<ts>`
+        // 留档（error 留痕，人工清理），空表 DROP。
         for retired in [
             "execution_records",
             "pipeline_run_summaries",
             "memory",
             "dynamic_tools",
         ] {
-            conn.execute(&format!("DROP TABLE IF EXISTS {retired}"), [])?;
+            retire_table_preserve_rows(conn, retired)?;
         }
         conn.execute_batch(DDL)?;
         migrate_drop_legacy_message_slots(conn)?;
         // 零兼容：0.2 消息真值 = message_slots ⨝ blobs（见文件头注释），旧 messages
-        // 投影表已退役。存量库会残留建不建都不管的空表，DROP 掉以保证 db_admin
-        // 表清单与后端实际读写一一对应。
-        conn.execute("DROP TABLE IF EXISTS messages", [])?;
+        // 投影表已退役。存量库残留的该表按保全策略处置（有行改名 `_retired_<ts>`
+        // 留档、空表 DROP），保证 db_admin 表清单与后端实际读写一一对应。
+        retire_table_preserve_rows(conn, "messages")?;
         migrate_add_tenant_id(conn)?;
         migrate_add_run_pipeline_id(conn)?;
-        info!("SQLite four-table store initialized");
+        migrate_add_users_must_change_password(conn)?;
+        if current_version > SCHEMA_VERSION {
+            return Err(StorageError::Database(format!(
+                "数据库 schema 版本 {} 高于本内核支持的 {}（由更新版本的内核写出）——拒绝打开以防止静默破坏；请升级内核或迁移数据",
+                current_version, SCHEMA_VERSION
+            )));
+        }
+        for (name, migrate) in MIGRATIONS.iter().skip(current_version.max(0) as usize) {
+            migrate(conn)?;
+            info!("SQLite schema migrated: {}", name);
+        }
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        info!("SQLite four-table store initialized (schema v{SCHEMA_VERSION})");
         Ok(())
     }
 
     // ── runs 表操作 ──────────────────────────────────────────
 
     /// 创建运行实例。
+    ///
+    /// runs 行与 branches main 行同一事务落库：各自 autocommit 时进程在两条
+    /// INSERT 之间被截断会留下无分支的 run（轨迹读路径按分支定位，半态不可恢复）。
     pub fn create_run(
         &self,
         run_id: &str,
@@ -598,6 +778,34 @@ impl SqliteStore {
     ) -> Result<(), StorageError> {
         let conn = self.conn.lock();
         let now = chrono::Utc::now().to_rfc3339();
+        if let Err(e) = conn.execute_batch("BEGIN") {
+            return Err(StorageError::Database(format!("begin tx: {e}")));
+        }
+        let result = Self::create_run_in_tx(&conn, run_id, config_hash, tenant_id, &now);
+        match result {
+            Ok(()) => {
+                if let Err(e) = conn.execute_batch("COMMIT") {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(StorageError::Database(format!("commit tx: {e}")));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// 事务体：runs + branches main 两行写入（调用方负责 BEGIN/COMMIT/ROLLBACK，
+    /// 语义对齐 apply_messages_ops_in_tx：出错整批回滚，不残留部分写入）。
+    fn create_run_in_tx(
+        conn: &Connection,
+        run_id: &str,
+        config_hash: &str,
+        tenant_id: &str,
+        now: &str,
+    ) -> Result<(), StorageError> {
         conn.execute(
             "INSERT INTO runs (run_id, config_hash, status, tenant_id, created_at, current_branch, current_seq) VALUES (?1, ?2, 'running', ?3, ?4, 'main', 0)",
             rusqlite::params![run_id, config_hash, tenant_id, now],
@@ -626,13 +834,15 @@ impl SqliteStore {
     /// 启动时清扫孤儿 run（B2）：进程上次崩溃留下的 `status='running'` 的 run
     /// 标记为 `failed` 并补 `ended_at`（未补过才补），让历史/会话状态不悬空。
     /// 已结束（completed/failed/suspended）的 run 不受影响。返回被清扫的行数。
-    pub fn reap_orphan_runs(&self, tenant_id: &str) -> Result<u64, StorageError> {
+    /// 全租户清扫：注册用户一用户一租户，按租户过滤会让非 default 租户的
+    /// 孤儿 run 永远卡 running——清扫是崩溃家政，不属于任何租户的数据边界。
+    pub fn reap_orphan_runs(&self) -> Result<u64, StorageError> {
         let conn = self.conn.lock();
         let now = chrono::Utc::now().to_rfc3339();
         let rows = conn.execute(
             "UPDATE runs SET status = 'failed', ended_at = COALESCE(ended_at, ?1) \
-             WHERE status = 'running' AND tenant_id = ?2",
-            rusqlite::params![now, tenant_id],
+             WHERE status = 'running'",
+            rusqlite::params![now],
         )?;
         Ok(rows as u64)
     }
@@ -641,7 +851,7 @@ impl SqliteStore {
     ///
     /// 用于 approval/human_interaction 插件 suspend run 时写入
     /// `pending_interaction_request_id` + `suspend_branch_id` + `suspend_seq`，
-    /// 后续 `find_suspended_run_by_request_id` 按此查找并还原 SuspendHandle。
+    /// 后续 `find_suspended_run_by_request_id` 按此查找并还原 resume 凭据。
     pub fn set_run_metadata(
         &self,
         run_id: &str,
@@ -733,7 +943,7 @@ impl SqliteStore {
     /// runs × message_slots × pipeline_sessions 三表联结：
     /// run → pipeline 映射经 message_slots.run_id（op-based 落槽时写入），pipeline → 会话
     /// 经 pipeline_sessions。消耗账本真值在 state 的 track.total_tokens
-    /// （0.1 的 pipeline_run_summaries 投影已退役）。
+    /// （pipeline_run_summaries 投影已退役）。
     /// 无消息槽的 run（旧引擎 start_run 占位/孤儿）被过滤——只呈现真实执行的管道。
     /// 按 started_at（created_at）倒序；`status` 传 None 返回全部状态；limit 由调用方给。
     pub fn list_pipelines_inner(
@@ -1164,6 +1374,49 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// upsert 一批 state 标量字段到 pipeline_state 表（B6 批量事务版）。
+    ///
+    /// 单事务包 N 个 upsert：任一失败整体回滚（全成才 commit）——消灭
+    /// 「逐键独立 autocommit，首键失败 = DB 半套，重启后旧值复活」的
+    /// 部分写入面。覆盖语义与单键版一致（无脑覆盖最新值）。
+    pub fn upsert_state_fields(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
+        match Self::upsert_state_fields_tx(&tx, pipeline_id, tenant_id, fields) {
+            Ok(()) => tx
+                .commit()
+                .map(|_| ())
+                .map_err(|e| StorageError::Database(format!("commit: {e}"))),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// [`Self::upsert_state_fields`] 的事务体（tx 由调用方开启并提交/回滚）。
+    fn upsert_state_fields_tx(
+        tx: &rusqlite::Transaction<'_>,
+        pipeline_id: &str,
+        tenant_id: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        for (key, value) in fields {
+            let value_json =
+                serde_json::to_string(value).expect("serde_json Value serialization is infallible");
+            tx.execute(
+                "INSERT INTO pipeline_state (pipeline_id, field_key, field_value, tenant_id, updated_at)                  VALUES (?1,?2,?3,?4,?5)                  ON CONFLICT(pipeline_id, field_key, tenant_id) DO UPDATE SET field_value=?3, updated_at=?5",
+                rusqlite::params![pipeline_id, key, value_json, tenant_id, now],
+            )?;
+        }
+        Ok(())
+    }
+
     /// 读出某 pipeline 的全部持久化标量字段（冷启动重建用）。
     pub fn load_pipeline_state(
         &self,
@@ -1492,6 +1745,11 @@ impl SqliteStore {
     /// message_slots 表（实时投影），checkpoint 只留标量字段 + `ckpt_max_seq`
     /// 水位（当时队列的最大槽位号），冷启动 messages 直读表、零回放。
     /// 全文冗余消除：messages 全文不进 checkpoint，避免整份 state 逐 run 重复抄写。
+    ///
+    /// per-run 易变键剥离（GAP-3）：剥离集 = 内核自有键（VOLATILE_RUN_KEYS）
+    /// ∪ 插件声明键（P1-4 声明化，经 `set_declared_volatile_keys` 注入）——
+    /// 剥离在落档点单点消费，任何经本 store 的 checkpoint 写入（含直连
+    /// trait 的嵌入方）都不得携带 per-run 键。
     pub fn save_checkpoint(
         &self,
         pipeline_id: &str,
@@ -1501,10 +1759,11 @@ impl SqliteStore {
     ) -> Result<(), StorageError> {
         let conn = self.conn.lock();
         let checkpoint_id = format!("cp_{}_{}", pipeline_id, step_no);
-        // 瘦身副本：剥离 messages + 易变 per-run 键，写 ckpt_max_seq 水位（原 state 不动）。
-        // 易变键（GAP-3）：message/input/message_id/suspended 等属于"本轮运行"，
-        // 不是管道累计状态——若残留，冷恢复时会覆盖下一轮的新输入，重启后
-        // 旧 user 消息被重放消费。
+        // 瘦身副本：剥离 messages + 易变 per-run 键（内核自有 ∪ 插件声明），
+        // 写 ckpt_max_seq 水位（原 state 不动）。易变键（GAP-3）：
+        // message/input/message_id/suspended 等属于"本轮运行"，不是管道累计
+        // 状态——若残留，冷恢复时会覆盖下一轮的新输入，重启后旧 user 消息
+        // 被重放消费。
         let mut slim = state.clone();
         if let Some(obj) = slim.as_object_mut() {
             let max_seq = obj
@@ -1520,6 +1779,9 @@ impl SqliteStore {
             obj.remove("messages");
             for k in VOLATILE_RUN_KEYS {
                 obj.remove(*k);
+            }
+            for k in self.declared_volatile_keys.read().iter() {
+                obj.remove(k.as_str());
             }
             obj.insert("ckpt_max_seq".to_string(), serde_json::json!(max_seq));
         }
@@ -1633,11 +1895,11 @@ impl SqliteStore {
         Ok((Some(blob_id), "text/plain"))
     }
 
-    // ── 域2：session 标签夹内部方法（对齐 0.1 SessionModel）──────────────
+    // ── 域2：session 标签夹内部方法 ──────────────
     // tenant_id 从 task_local 取。pipeline_ids / metadata 以 JSON 文本存储。
 
     /// upsert 会话（存在则更新，不存在则插入）。
-    /// tenant_id 由调用方在 spawn_blocking 前解析（task_local 不跨 spawn_blocking）。
+    /// tenant_id 由调用方在派发到 DB 线程池前解析（task_local 不跨池线程）。
     fn upsert_session_inner(
         &self,
         session: &SessionRecord,
@@ -1688,7 +1950,7 @@ impl SqliteStore {
     /// 自环绑定不属于任何会话），整组交给 [`Self::delete_pipelines_cascade`]
     /// 清理，最后删 sessions 行。返回实际删除的 pipeline_id 清单（调用方逐出
     /// 内存 state 注册表用）。无记录时同样返回 Ok(vec![])（幂等）。
-    /// tenant_id 由调用方在 spawn_blocking 前解析。单次事务包裹，失败回滚。
+    /// tenant_id 由调用方在派发到 DB 线程池前解析。单次事务包裹，失败回滚。
     fn delete_session_inner(
         &self,
         thread_id: &str,
@@ -1824,7 +2086,7 @@ impl SqliteStore {
 
     /// 写入 pipeline↔session 映射（幂等：INSERT OR IGNORE）。
     /// 在 persist_run_start 时调用，确保每个管道（主管道/子管道）都记录所属会话。
-    /// tenant_id 由调用方在 spawn_blocking 前解析。
+    /// tenant_id 由调用方在派发到 DB 线程池前解析。
     fn link_pipeline_session_inner(
         &self,
         pipeline_id: &str,
@@ -1848,7 +2110,7 @@ impl SqliteStore {
     }
 
     /// 查询某会话下的全部 pipeline_id（主管道 + 子管道）。
-    /// tenant_id 由调用方在 spawn_blocking 前解析。
+    /// tenant_id 由调用方在派发到 DB 线程池前解析。
     fn list_pipeline_ids_by_thread_inner(
         &self,
         thread_id: &str,
@@ -1888,7 +2150,7 @@ impl SqliteStore {
         }
     }
 
-    /// 按 thread_id 取单个会话。tenant_id 由调用方在 spawn_blocking 前解析。
+    /// 按 thread_id 取单个会话。tenant_id 由调用方在派发到 DB 线程池前解析。
     fn get_session_inner(
         &self,
         thread_id: &str,
@@ -1909,7 +2171,7 @@ impl SqliteStore {
     }
 
     /// 列会话（可选按 session_type 过滤，按 updated_at 倒序）。
-    /// tenant_id 由调用方在 spawn_blocking 前解析（task_local 不跨 spawn_blocking）。
+    /// tenant_id 由调用方在派发到 DB 线程池前解析（task_local 不跨池线程）。
     fn list_sessions_inner(
         &self,
         filter: &SessionListFilter,
@@ -1994,8 +2256,8 @@ impl SqliteStore {
     fn create_user_inner(&self, user: &UserRecord) -> Result<(), StorageError> {
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT INTO users (user_id, username, password, email, role, tenant_id, created_at, last_login_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO users (user_id, username, password, email, role, tenant_id, created_at, last_login_at, must_change_password)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 user.user_id,
                 user.username,
@@ -2005,6 +2267,7 @@ impl SqliteStore {
                 user.tenant_id,
                 user.created_at,
                 user.last_login_at,
+                user.must_change_password,
             ],
         )?;
         Ok(())
@@ -2017,7 +2280,7 @@ impl SqliteStore {
     fn get_user_by_id_inner(&self, user_id: &str) -> Result<Option<UserRecord>, StorageError> {
         let conn = self.conn.lock();
         let row = conn.query_row(
-            "SELECT user_id, username, password, email, role, tenant_id, created_at, last_login_at
+            "SELECT user_id, username, password, email, role, tenant_id, created_at, last_login_at, must_change_password
              FROM users WHERE user_id = ?1",
             rusqlite::params![user_id],
             Self::row_to_user,
@@ -2036,7 +2299,7 @@ impl SqliteStore {
     ) -> Result<Option<UserRecord>, StorageError> {
         let conn = self.conn.lock();
         let row = conn.query_row(
-            "SELECT user_id, username, password, email, role, tenant_id, created_at, last_login_at
+            "SELECT user_id, username, password, email, role, tenant_id, created_at, last_login_at, must_change_password
              FROM users WHERE username = ?1",
             rusqlite::params![username],
             Self::row_to_user,
@@ -2052,7 +2315,7 @@ impl SqliteStore {
     fn list_users_inner(&self) -> Result<Vec<UserRecord>, StorageError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT user_id, username, password, email, role, tenant_id, created_at, last_login_at
+            "SELECT user_id, username, password, email, role, tenant_id, created_at, last_login_at, must_change_password
                  FROM users ORDER BY created_at ASC",
         )?;
         let users = stmt.query_map([], Self::row_to_user)?;
@@ -2071,6 +2334,21 @@ impl SqliteStore {
             rusqlite::params![now, user_id],
         )?;
         Ok(())
+    }
+
+    /// 更新口令哈希与首登改密标记。返回是否存在该行。
+    fn update_user_password_inner(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        must_change_password: bool,
+    ) -> Result<bool, StorageError> {
+        let conn = self.conn.lock();
+        let affected = conn.execute(
+            "UPDATE users SET password = ?1, must_change_password = ?2 WHERE user_id = ?3",
+            rusqlite::params![password_hash, must_change_password, user_id],
+        )?;
+        Ok(affected > 0)
     }
 
     /// 删除用户。返回是否删除了行。
@@ -2094,6 +2372,7 @@ impl SqliteStore {
             tenant_id: row.get(5)?,
             created_at: row.get(6)?,
             last_login_at: row.get(7)?,
+            must_change_password: row.get(8)?,
         })
     }
 
@@ -2102,7 +2381,7 @@ impl SqliteStore {
     /// 经 pipeline_sessions 映射表按 thread_id 找到全部 pipeline_id → 这些 pipeline 产生
     /// 的 run_id → 对应 traces。只返回 step 级轨迹（plugin_id 为配置 step id，不以
     /// `pipeline_` 前缀的旧插件级轨迹被忽略），按 created_at 升序以便按序 merge 回放。
-    /// tenant_id 由调用方在 spawn_blocking 前解析。
+    /// tenant_id 由调用方在派发到 DB 线程池前解析。
     fn get_step_traces_by_thread_inner(
         &self,
         thread_id: &str,
@@ -2177,6 +2456,202 @@ impl SqliteStore {
             .map_err(StorageError::from)
     }
 
+    // ── runs/traces/blobs 热路径同步体 ─────────────────────────
+    //
+    // 以下六个同步体只该由 [`SqliteStore::blocking`] 在专用 DB 线程池内执行
+    // （trait 面 async 包装统一派发）：在 tokio worker 上直接 conn.lock() 会与
+    // 池内长事务竞争同一把连接锁，长查询期间可拖住 runtime worker 造成饥饿。
+    // task_local 租户只在调用方 task 存在，由 async 包装在派发前读取后随闭包带入。
+
+    fn get_run_inner(&self, run_id: &str, tenant_id: &str) -> Result<RunRecord, StorageError> {
+        let conn = self.conn.lock();
+        let row = conn.query_row(
+            "SELECT run_id, config_hash, status, tenant_id, created_at, ended_at, current_branch, current_seq, metadata FROM runs WHERE run_id = ?1 AND tenant_id = ?2",
+            rusqlite::params![run_id, tenant_id],
+            |row| {
+                let status_str: String = row.get(2)?;
+                let metadata_str: Option<String> = row.get(8)?;
+                Ok(RunRecord {
+                    run_id: row.get(0)?,
+                    config_hash: row.get(1)?,
+                    status: parse_run_status(&status_str, run_id),
+                    tenant_id: row.get(3)?,
+                    created_at: row.get(4)?,
+                    ended_at: row.get(5)?,
+                    current_branch: row.get(6)?,
+                    current_seq: row.get::<_, i64>(7)? as u32,
+                    metadata: parse_run_metadata(metadata_str, run_id),
+                })
+            },
+        );
+        match row {
+            Ok(r) => Ok(r),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                Err(StorageError::NotFound(format!("run not found: {}", run_id)))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn set_run_pipeline_inner(&self, run_id: &str, pipeline_id: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE runs SET pipeline_id = ?1 WHERE run_id = ?2",
+            rusqlite::params![pipeline_id, run_id],
+        )?;
+        Ok(())
+    }
+
+    fn list_runs_by_pipeline_inner(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<RunRecord>, StorageError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT run_id, config_hash, status, tenant_id, created_at, ended_at, current_branch, current_seq, metadata FROM runs WHERE pipeline_id = ?1 AND tenant_id = ?2 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pipeline_id, tenant_id], |row| {
+            let status_str: String = row.get(2)?;
+            let metadata_str: Option<String> = row.get(8)?;
+            let run_id: String = row.get(0)?;
+            Ok(RunRecord {
+                run_id: run_id.clone(),
+                config_hash: row.get(1)?,
+                status: parse_run_status(&status_str, &run_id),
+                tenant_id: row.get(3)?,
+                created_at: row.get(4)?,
+                ended_at: row.get(5)?,
+                current_branch: row.get(6)?,
+                current_seq: row.get(7)?,
+                metadata: parse_run_metadata(metadata_str, &run_id),
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn get_blob_inner(&self, blob_id: &str) -> Result<Vec<u8>, StorageError> {
+        let conn = self.conn.lock();
+        let row = conn.query_row(
+            "SELECT data FROM blobs WHERE blob_id = ?1",
+            rusqlite::params![blob_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        );
+        match row {
+            Ok(data) => Ok(data),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(StorageError::NotFound(format!(
+                "blob not found: {}",
+                blob_id
+            ))),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn append_trace_inner(&self, entry: TraceEntry, tenant_id: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        let patch_type_str = match entry.patch_type {
+            PatchType::StateUpdate => "state_update",
+            PatchType::RouteSignal => "route_signal",
+            PatchType::Error => "error",
+            PatchType::Lifecycle => "lifecycle",
+            PatchType::Rollback => "rollback",
+        };
+        let patch_data_str = serde_json::to_string(&entry.patch_data)
+            .expect("serde_json Value serialization is infallible");
+        conn.execute(
+            "INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                entry.trace_id,
+                entry.run_id,
+                entry.branch_id,
+                entry.seq_in_branch,
+                entry.plugin_id,
+                patch_type_str,
+                patch_data_str,
+                tenant_id,
+                entry.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn update_run_status_inner(
+        &self,
+        run_id: &str,
+        tenant_id: &str,
+        status: RunStatus,
+        current_branch: Option<&str>,
+        current_seq: Option<u32>,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock();
+        let status_str = match status {
+            RunStatus::Running => "running",
+            RunStatus::Suspended => "suspended",
+            RunStatus::Completed => "completed",
+            RunStatus::Failed => "failed",
+            RunStatus::Cancelled => "cancelled",
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+
+        match (current_branch, current_seq) {
+            (Some(branch), Some(seq)) => {
+                let ended = if matches!(
+                    status,
+                    RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+                ) {
+                    Some(now.as_str())
+                } else {
+                    None
+                };
+                conn.execute(
+                    "UPDATE runs SET status = ?1, current_branch = ?2, current_seq = ?3, ended_at = COALESCE(?4, ended_at) WHERE run_id = ?5 AND tenant_id = ?6",
+                    rusqlite::params![status_str, branch, seq as i64, ended, run_id, tenant_id],
+                )?;
+            }
+            (None, None) => {
+                let ended = if matches!(
+                    status,
+                    RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+                ) {
+                    Some(now.as_str())
+                } else {
+                    None
+                };
+                conn.execute(
+                    "UPDATE runs SET status = ?1, ended_at = COALESCE(?2, ended_at) WHERE run_id = ?3 AND tenant_id = ?4",
+                    rusqlite::params![status_str, ended, run_id, tenant_id],
+                )?;
+            }
+            _ => {
+                return Err(StorageError::Database(
+                    "current_branch and current_seq must both be Some or both be None".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// 消费 refresh token jti（api auth D12 单次轮换的持久账本，跨重启判已消费）。
+    ///
+    /// 返回 true = 首次消费（token 有效）；false = 已消费过（旧值复用，调用方拒绝）。
+    /// 写入时顺手清理保留窗口（`CONSUMED_REFRESH_JTI_TTL_SECS`，与 refresh token
+    /// 有效期上限对齐）外的旧行。经 [`SqliteStore::with_conn`] 同步执行——消费点
+    /// 是低频路径（每 token 至多一次），不入 DB 线程池。
+    pub fn consume_refresh_jti(&self, jti: &str) -> Result<bool, StorageError> {
+        self.with_conn(|conn| {
+            let now = chrono::Utc::now().timestamp();
+            conn.execute(
+                "DELETE FROM consumed_refresh_jtis WHERE consumed_at < ?1",
+                rusqlite::params![now - CONSUMED_REFRESH_JTI_TTL_SECS as i64],
+            )?;
+            let inserted = conn.execute(
+                "INSERT OR IGNORE INTO consumed_refresh_jtis (jti, consumed_at) VALUES (?1, ?2)",
+                rusqlite::params![jti, now],
+            )?;
+            Ok(inserted == 1)
+        })
+    }
+
     /// 在锁内执行任意 SQLite 操作（统一数据接口 `/api/v1/db/*` 专用）。
     ///
     /// 暴露只读的 `&Connection` 给上层做表驱动动态访问（`sqlite_master` /
@@ -2189,21 +2664,82 @@ impl SqliteStore {
         f(&conn)
     }
 
-    /// spawn_blocking 统一包装：参数先转为 owned 再随闭包移入阻塞线程池，
-    /// 同步 `_inner` 方法在池内拿 `&SqliteStore` 执行。
+    /// 统一阻塞执行包装：参数先转为 owned 再随闭包移入固定长命 DB 线程池，
+    /// 同步 `_inner` 方法在池内拿 `&SqliteStore` 执行，async 侧 await oneshot 回执。
     ///
-    /// SqliteStore 用同步 rusqlite，trait 面 async 包装必须走线程池避免阻塞
-    /// async runtime；join 失败（阻塞任务 panic / 被取消）统一经 [`join_err`]
-    /// 映射为 [`StorageError`]。闭包内的同名词方法解析遵循固有方法优先。
+    /// SqliteStore 用同步 rusqlite，trait 面 async 包装必须把阻塞调用移出
+    /// async runtime 线程。用固定线程池而非阻塞池短命线程：每轮每查询换手
+    /// 线程会让 mimalloc per-thread 堆随线程废弃滞留（空闲即销毁重建），
+    /// 分配密集负载下内存随换手次数增长——固定线程复用同一堆，换手归零。
+    /// 闭包内的同名词方法解析遵循固有方法优先。
     async fn blocking<F, T>(&self, f: F) -> Result<T, StorageError>
     where
         F: FnOnce(&Self) -> Result<T, StorageError> + Send + 'static,
         T: Send + 'static,
     {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || f(&this))
-            .await
-            .map_err(join_err)?
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        self.pool.dispatch(Box::new(move || {
+            // 发送失败 = 调用侧 future 已被 drop（取消）：结果就地丢弃，
+            // 与阻塞池任务完成后调用方不再等待的既有语义一致。
+            let _ = ack_tx.send(f(&this));
+        }))?;
+        // 回执缺失 = 任务在产出结果前消亡（任务 panic 已被池隔离为 warn 留痕，
+        // 展开时丢弃回执通道）——映射为错误，不让调用方悬挂。
+        ack_rx.await.map_err(|_| {
+            StorageError::Database(
+                "db pool task ended without a receipt (task panicked)".to_string(),
+            )
+        })?
+    }
+
+    // ── 保留策略：traces 保留期 + blobs 孤儿清扫（ADR 2026-09-11）────────
+    //
+    // 账本域离线家政：traces 保留窗口外的行、不被 message_slots 引用的孤儿
+    // blob，批量 DELETE 周期回收（内核启动后清一次 + 每 6h，接线见
+    // agentos-kernel）。与 delete_pipelines_cascade（删除热路径）刻意分离——
+    // blobs 是内容寻址去重存储，逐次删除时判定引用归属等于热路径写放大，
+    // 孤儿统一留待清扫周期廉价回收。保留天数见 [`trace_retention_days`]。
+
+    /// 删除 created_at 早于 cutoff 的 traces 行，返回删除行数（0 = 无过期行）。
+    ///
+    /// created_at 由写入方统一以 `chrono::Utc::now().to_rfc3339()`（UTC
+    /// RFC3339）落库，cutoff 同格式化后字典序 = 时间序，无需日期解析函数。
+    /// 单条 DELETE 自成原子事务；traces 无 created_at 索引（热路径写免维护），
+    /// 清扫是周期批处理，全表扫描代价可接受。
+    pub async fn purge_traces_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, StorageError> {
+        let cutoff = cutoff.to_rfc3339();
+        self.blocking(move |this| {
+            let conn = this.conn.lock();
+            let deleted = conn.execute(
+                "DELETE FROM traces WHERE created_at < ?1",
+                rusqlite::params![cutoff],
+            )?;
+            Ok(deleted as u64)
+        })
+        .await
+    }
+
+    /// 清扫孤儿 blobs：删除不被任何 message_slots 行引用的 blob，返回删除行数。
+    ///
+    /// blobs 唯一引用方 = message_slots.blob_id（消息全文内容寻址去重存储，
+    /// 全仓写入点均在消息持久化路径），NOT EXISTS 反查无回指即孤儿；槽位
+    /// blob_id 可空，空值不构成引用（NULL 比较不命中）。单条 DELETE 自成
+    /// 原子事务。
+    pub async fn purge_orphan_blobs(&self) -> Result<u64, StorageError> {
+        self.blocking(move |this| {
+            let conn = this.conn.lock();
+            let deleted = conn.execute(
+                "DELETE FROM blobs WHERE NOT EXISTS \
+                 (SELECT 1 FROM message_slots WHERE message_slots.blob_id = blobs.blob_id)",
+                [],
+            )?;
+            Ok(deleted as u64)
+        })
+        .await
     }
 }
 
@@ -2331,59 +2867,131 @@ fn run_ids_of_pipelines(
     Ok(out)
 }
 
-/// spawn_blocking join 失败（阻塞任务 panic / 被取消）→ [`StorageError`] 的统一转换。
-/// [`SqliteStore::blocking`]（spawn_blocking 转发固有同步方法）共用。
-fn join_err(e: tokio::task::JoinError) -> StorageError {
-    StorageError::Database(format!("join error: {e}"))
+/// 池任务：自带回执通道的闭包（调用侧 [`SqliteStore::blocking`] 打包 oneshot
+/// Sender，闭包执行完把结果发回 async 侧）。
+type DbJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// 多工作线程共享的任务队列接收端（取任务串行化，执行在锁外）。
+type DbJobQueue = Mutex<std::sync::mpsc::Receiver<DbJob>>;
+
+/// 工作线程主循环：从共享队列竞争取任务执行，直到队列关闭且排空。
+fn db_pool_worker_loop(queue: Arc<DbJobQueue>) {
+    loop {
+        // 锁只护取任务；Guard 在语句末释放，任务执行不持锁。
+        let job = queue.lock().recv();
+        match job {
+            Ok(job) => {
+                // panic 隔离：单个任务 panic 不许打死长命线程（池容量恒定，
+                // 与原阻塞池 per-task 隔离等价）；回执通道随展开丢弃，
+                // async 侧据此收到错误而非悬挂。
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+                    warn!("db pool task panicked; worker thread survives");
+                }
+            }
+            // 发送端全部关闭（池已 Drop）且队列已排空：长命线程自然退出。
+            Err(_) => break,
+        }
+    }
+}
+
+/// 固定长命 DB 工作线程池（SqliteStore 的专属执行域）。
+///
+/// 为什么固定线程：async 面的同步 rusqlite 调用若经阻塞池（spawn_blocking）
+/// 执行，每轮每查询可能落在不同短命线程上——池空闲即销毁线程、新任务再建，
+/// mimalloc 的 per-thread 堆随线程废弃滞留不归还，分配密集负载下内存随线程
+/// 换手次数增长（同负载背靠背轮次 3 倍实证）。固定 4 条长命线程 + 任务队列：
+/// 线程与 store 同寿命，per-thread 堆持续复用不废弃，线程换手归零。
+///
+/// 生命周期契约：
+/// - 随 [`SqliteStore`] 创建而启动，clone 共享同一池（Arc 计数）；
+/// - 随最后一份 store 消亡（本池 Drop → 发送端关闭）而关停——std mpsc 保证
+///   工作线程先排空已入队任务再退出，关停不丢任务；
+/// - 线程 detach、不 join：任务闭包本身持有 store clone（含本池 Arc），最后
+///   一份 Arc 可能在工作线程上随闭包 Drop，此时 join 自身会死锁。
+struct DedicatedDbPool {
+    /// 任务队列发送端（有界）。Drop 本字段即触发关停（channel 关闭 → 线程
+    /// 排空后退出）。
+    tx: std::sync::mpsc::SyncSender<DbJob>,
+    /// 队列满触发背压（dispatch 阻塞）的累计次数：过载可观测，不静默。
+    blocked_dispatches: std::sync::atomic::AtomicU64,
+}
+
+impl DedicatedDbPool {
+    /// 长命工作线程数。单连接在 Mutex 后串行执行，多线程用于并行派发与
+    /// 抗个别任务阻塞（维持与原阻塞池相当的并发上限）。
+    const WORKER_THREADS: usize = 4;
+
+    /// 队列容量（有界）：DB 过载时 dispatch 阻塞等待（背压传导到调用方），
+    /// 不再无界积压闭包——待执行任务内存上限恒为容量 × 单闭包大小。
+    const QUEUE_CAPACITY: usize = 1024;
+
+    fn spawn() -> Result<Self, StorageError> {
+        Self::spawn_with(Self::WORKER_THREADS, Self::QUEUE_CAPACITY)
+    }
+
+    /// 以指定线程数/队列容量启动（生产用 [`Self::spawn`] 常量；测试注入
+    /// 小容量以确定性触发背压路径）。
+    fn spawn_with(worker_threads: usize, queue_capacity: usize) -> Result<Self, StorageError> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<DbJob>(queue_capacity);
+        let queue = Arc::new(DbJobQueue::new(rx));
+        for i in 0..worker_threads {
+            let queue = Arc::clone(&queue);
+            std::thread::Builder::new()
+                .name(format!("agentos-db-pool-{i}"))
+                .spawn(move || db_pool_worker_loop(queue))
+                .map_err(|e| StorageError::Database(format!("spawn db pool worker: {e}")))?;
+        }
+        Ok(Self {
+            tx,
+            blocked_dispatches: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// 入队一个任务。队列满即阻塞派发方（背压，warn 计数留痕不静默）；
+    /// 池已关停（Drop）后拒绝并返回错误，不再接受新任务。
+    fn dispatch(&self, job: DbJob) -> Result<(), StorageError> {
+        match self.tx.try_send(job) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(job)) => {
+                let blocked = self
+                    .blocked_dispatches
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                warn!(
+                    blocked_dispatches = blocked,
+                    "db queue full; dispatch blocking (backpressure)"
+                );
+                self.tx.send(job).map_err(|_| {
+                    StorageError::Database("db worker pool shut down; task rejected".to_string())
+                })
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(StorageError::Database(
+                "db worker pool shut down; task rejected".to_string(),
+            )),
+        }
+    }
 }
 
 #[async_trait]
 impl StorageBackend for SqliteStore {
+    // 热路径六方法（get_run/set_run_pipeline/list_runs_by_pipeline/get_blob/
+    // append_trace/update_run_status）统一经 blocking() 派发专用 DB 线程池，
+    // 不在 tokio worker 上直接 conn.lock()（同步体见固有 impl 的 *_inner）。
+
     async fn get_run(&self, run_id: &str) -> Result<RunRecord, StorageError> {
+        // task_local 租户只在调用方 task 存在（池线程无 task_local）：
+        // 必须在派发前读取，随闭包带入池内。
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let conn = self.conn.lock();
-        let row = conn.query_row(
-            "SELECT run_id, config_hash, status, tenant_id, created_at, ended_at, current_branch, current_seq, metadata FROM runs WHERE run_id = ?1 AND tenant_id = ?2",
-            rusqlite::params![run_id, tenant_id],
-            |row| {
-                let status_str: String = row.get(2)?;
-                let metadata_str: Option<String> = row.get(8)?;
-                Ok(RunRecord {
-                    run_id: row.get(0)?,
-                    config_hash: row.get(1)?,
-                    status: match status_str.as_str() {
-                        "running" => RunStatus::Running,
-                        "suspended" => RunStatus::Suspended,
-                        "completed" => RunStatus::Completed,
-                        "failed" => RunStatus::Failed,
-                        "cancelled" => RunStatus::Cancelled,
-                        _ => RunStatus::Running,
-                    },
-                    tenant_id: row.get(3)?,
-                    created_at: row.get(4)?,
-                    ended_at: row.get(5)?,
-                    current_branch: row.get(6)?,
-                    current_seq: row.get::<_, i64>(7)? as u32,
-                    metadata: metadata_str
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                })
-            },
-        );
-        match row {
-            Ok(r) => Ok(r),
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                Err(StorageError::NotFound(format!("run not found: {}", run_id)))
-            }
-            Err(e) => Err(e.into()),
-        }
+        let run_id = run_id.to_string();
+        self.blocking(move |this| this.get_run_inner(&run_id, &tenant_id))
+            .await
     }
+
     async fn set_run_pipeline(&self, run_id: &str, pipeline_id: &str) -> Result<(), StorageError> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE runs SET pipeline_id = ?1 WHERE run_id = ?2",
-            rusqlite::params![pipeline_id, run_id],
-        )?;
-        Ok(())
+        let run_id = run_id.to_string();
+        let pipeline_id = pipeline_id.to_string();
+        self.blocking(move |this| this.set_run_pipeline_inner(&run_id, &pipeline_id))
+            .await
     }
 
     /// 管道运行快照列表（trait 面）：委托 list_pipelines_inner（同 HTTP /pipelines/runs）。
@@ -2401,33 +3009,10 @@ impl StorageBackend for SqliteStore {
         pipeline_id: &str,
         tenant_id: &str,
     ) -> Result<Vec<RunRecord>, StorageError> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT run_id, config_hash, status, tenant_id, created_at, ended_at, current_branch, current_seq, metadata FROM runs WHERE pipeline_id = ?1 AND tenant_id = ?2 ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![pipeline_id, tenant_id], |row| {
-            let status_str: String = row.get(2)?;
-            let metadata_str: Option<String> = row.get(8)?;
-            Ok(RunRecord {
-                run_id: row.get(0)?,
-                config_hash: row.get(1)?,
-                status: match status_str.as_str() {
-                    "running" => RunStatus::Running,
-                    "suspended" => RunStatus::Suspended,
-                    "completed" => RunStatus::Completed,
-                    "failed" => RunStatus::Failed,
-                    "cancelled" => RunStatus::Cancelled,
-                    _ => RunStatus::Running,
-                },
-                tenant_id: row.get(3)?,
-                created_at: row.get(4)?,
-                ended_at: row.get(5)?,
-                current_branch: row.get(6)?,
-                current_seq: row.get(7)?,
-                metadata: metadata_str.and_then(|s| serde_json::from_str(&s).ok()),
-            })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        self.blocking(move |this| this.list_runs_by_pipeline_inner(&pipeline_id, &tenant_id))
+            .await
     }
 
     async fn get_messages_by_pipeline(
@@ -2442,66 +3027,15 @@ impl StorageBackend for SqliteStore {
     }
 
     async fn get_blob(&self, blob_id: &str) -> Result<Vec<u8>, StorageError> {
-        let conn = self.conn.lock();
-        let row = conn.query_row(
-            "SELECT data FROM blobs WHERE blob_id = ?1",
-            rusqlite::params![blob_id],
-            |row| row.get::<_, Vec<u8>>(0),
-        );
-        match row {
-            Ok(data) => Ok(data),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Err(StorageError::NotFound(format!(
-                "blob not found: {}",
-                blob_id
-            ))),
-            Err(e) => Err(e.into()),
-        }
+        let blob_id = blob_id.to_string();
+        self.blocking(move |this| this.get_blob_inner(&blob_id))
+            .await
     }
 
     async fn append_trace(&self, entry: TraceEntry) -> Result<(), StorageError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let conn = self.conn.lock();
-        let patch_type_str = match entry.patch_type {
-            PatchType::StateUpdate => "state_update",
-            PatchType::RouteSignal => "route_signal",
-            PatchType::Error => "error",
-            PatchType::Lifecycle => "lifecycle",
-            PatchType::Rollback => "rollback",
-        };
-        let patch_data_str = serde_json::to_string(&entry.patch_data)
-            .expect("serde_json Value serialization is infallible");
-        conn.execute(
-            "INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![
-                entry.trace_id,
-                entry.run_id,
-                entry.branch_id,
-                entry.seq_in_branch,
-                entry.plugin_id,
-                patch_type_str,
-                patch_data_str,
-                tenant_id,
-                entry.created_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    async fn create_branch(&self, branch: Branch) -> Result<(), StorageError> {
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO branches (branch_id, run_id, parent_branch, parent_seq, tenant_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                branch.branch_id,
-                branch.run_id,
-                branch.parent_branch,
-                branch.parent_seq.map(|s| s as i64),
-                tenant_id,
-                branch.created_at,
-            ],
-        )?;
-        Ok(())
+        self.blocking(move |this| this.append_trace_inner(entry, &tenant_id))
+            .await
     }
 
     async fn update_run_status(
@@ -2511,53 +3045,21 @@ impl StorageBackend for SqliteStore {
         current_branch: Option<&str>,
         current_seq: Option<u32>,
     ) -> Result<(), StorageError> {
+        // task_local 租户只在调用方 task 存在（池线程无 task_local）：
+        // 必须在派发前读取，随闭包带入池内。
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let conn = self.conn.lock();
-        let status_str = match status {
-            RunStatus::Running => "running",
-            RunStatus::Suspended => "suspended",
-            RunStatus::Completed => "completed",
-            RunStatus::Failed => "failed",
-            RunStatus::Cancelled => "cancelled",
-        };
-        let now = chrono::Utc::now().to_rfc3339();
-
-        match (current_branch, current_seq) {
-            (Some(branch), Some(seq)) => {
-                let ended = if matches!(
-                    status,
-                    RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
-                ) {
-                    Some(now.as_str())
-                } else {
-                    None
-                };
-                conn.execute(
-                    "UPDATE runs SET status = ?1, current_branch = ?2, current_seq = ?3, ended_at = COALESCE(?4, ended_at) WHERE run_id = ?5 AND tenant_id = ?6",
-                    rusqlite::params![status_str, branch, seq as i64, ended, run_id, tenant_id],
-                )?;
-            }
-            (None, None) => {
-                let ended = if matches!(
-                    status,
-                    RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
-                ) {
-                    Some(now.as_str())
-                } else {
-                    None
-                };
-                conn.execute(
-                    "UPDATE runs SET status = ?1, ended_at = COALESCE(?2, ended_at) WHERE run_id = ?3 AND tenant_id = ?4",
-                    rusqlite::params![status_str, ended, run_id, tenant_id],
-                )?;
-            }
-            _ => {
-                return Err(StorageError::Database(
-                    "current_branch and current_seq must both be Some or both be None".to_string(),
-                ));
-            }
-        }
-        Ok(())
+        let run_id = run_id.to_string();
+        let current_branch = current_branch.map(str::to_string);
+        self.blocking(move |this| {
+            this.update_run_status_inner(
+                &run_id,
+                &tenant_id,
+                status,
+                current_branch.as_deref(),
+                current_seq,
+            )
+        })
+        .await
     }
 
     // 以下 trait 方法直接转发到固有 impl 的同名方法，
@@ -2583,7 +3085,7 @@ impl StorageBackend for SqliteStore {
             .await
     }
 
-    // ── 域10：分层持久化投影（trait async 包装，spawn_blocking + task_local tenant）──
+    // ── 域10：分层持久化投影（trait async 包装，DB 线程池派发 + task_local tenant）──
 
     async fn apply_messages_ops_to_table(
         &self,
@@ -2613,6 +3115,19 @@ impl StorageBackend for SqliteStore {
             .await
     }
 
+    async fn upsert_state_fields(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let pipeline_id = pipeline_id.to_string();
+        let tenant_id = tenant_id.to_string();
+        let fields = fields.clone();
+        self.blocking(move |this| this.upsert_state_fields(&pipeline_id, &tenant_id, &fields))
+            .await
+    }
+
     async fn load_pipeline_state(
         &self,
         pipeline_id: &str,
@@ -2622,6 +3137,10 @@ impl StorageBackend for SqliteStore {
         let tenant_id = tenant_id.to_string();
         self.blocking(move |this| this.load_pipeline_state(&pipeline_id, &tenant_id))
             .await
+    }
+
+    fn set_declared_volatile_keys(&self, keys: &[String]) {
+        *self.declared_volatile_keys.write() = keys.iter().cloned().collect();
     }
 
     async fn save_checkpoint(
@@ -2747,8 +3266,8 @@ impl StorageBackend for SqliteStore {
             .await
     }
 
-    // ── 域2：session 标签夹 CRUD（对齐 0.1 SessionModel）──────────────
-    // 注意：tenant_id 必须在 spawn_blocking 之前解析——tokio::task_local 不跨 spawn_blocking。
+    // ── 域2：session 标签夹 CRUD ──────────────
+    // 注意：tenant_id 必须在派发到 DB 线程池之前解析——tokio::task_local 不跨池线程。
     async fn create_session(&self, session: &SessionRecord) -> Result<(), StorageError> {
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
         let session = session.clone();
@@ -2852,7 +3371,7 @@ impl StorageBackend for SqliteStore {
 
     // ── 域6：users async wrapper（0.5.0 最小持久化地基）──────────────
     // 注意：get_user_by_username / list_users 跨租户查询，不解析 task_local tenant。
-    // get_user_by_id 按 tenant 隔离（与消息/会话一致，task_local 在 spawn_blocking 前解析）。
+    // get_user_by_id 按 tenant 隔离（与消息/会话一致，task_local 在派发前解析）。
 
     async fn create_user(&self, user: &UserRecord) -> Result<(), StorageError> {
         let user = user.clone();
@@ -2887,6 +3406,20 @@ impl StorageBackend for SqliteStore {
             .await
     }
 
+    async fn update_user_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        must_change_password: bool,
+    ) -> Result<bool, StorageError> {
+        let user_id = user_id.to_string();
+        let password_hash = password_hash.to_string();
+        self.blocking(move |this| {
+            this.update_user_password_inner(&user_id, &password_hash, must_change_password)
+        })
+        .await
+    }
+
     async fn delete_user(&self, user_id: &str) -> Result<bool, StorageError> {
         let user_id = user_id.to_string();
         self.blocking(move |this| this.delete_user_inner(&user_id))
@@ -2899,6 +3432,50 @@ mod tests {
     use super::*;
     use agentos_core::types::TenantContext;
     use serde_json::json;
+
+    #[test]
+    fn test_open_memory_stamps_schema_version() {
+        let store = SqliteStore::open_memory().unwrap();
+        let v: i64 = store
+            .conn
+            .lock()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION, "打开即盖版本章");
+    }
+
+    #[test]
+    fn test_open_rejects_database_from_newer_kernel() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("newer.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch("PRAGMA user_version = 99;").unwrap();
+        }
+        let err = match SqliteStore::open(db_path.to_str().unwrap()) {
+            Err(e) => e,
+            Ok(_) => panic!("新版本库必须被拒绝打开"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("schema 版本") && msg.contains("99"),
+            "必须显式拒绝新版本库并带版本号: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_open_file_store_idempotent_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy.db");
+        SqliteStore::open(db_path.to_str().unwrap()).unwrap();
+        let store = SqliteStore::open(db_path.to_str().unwrap()).unwrap();
+        let v: i64 = store
+            .conn
+            .lock()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION, "重开幂等，版本章不被回退");
+    }
 
     #[test]
     fn test_parse_patch_type_unknown_degrades_to_state_update() {
@@ -2922,6 +3499,40 @@ mod tests {
         assert_eq!(
             parse_patch_type("unknown_future_type", "tool_1"),
             PatchType::StateUpdate
+        );
+    }
+
+    #[test]
+    fn test_parse_run_status_known_and_unknown() {
+        // 已知值逐一映射；未知值按 Running 处理（读取路径不可 fail）但契约
+        // 是 warn 留痕（写入方新增状态必须登记），与 parse_patch_type 同标准。
+        assert_eq!(parse_run_status("running", "r1"), RunStatus::Running);
+        assert_eq!(parse_run_status("suspended", "r1"), RunStatus::Suspended);
+        assert_eq!(parse_run_status("completed", "r1"), RunStatus::Completed);
+        assert_eq!(parse_run_status("failed", "r1"), RunStatus::Failed);
+        assert_eq!(parse_run_status("cancelled", "r1"), RunStatus::Cancelled);
+        assert_eq!(
+            parse_run_status("unknown_future_status", "r1"),
+            RunStatus::Running
+        );
+    }
+
+    #[test]
+    fn test_parse_run_metadata_valid_corrupt_and_absent() {
+        // 合法 JSON 原样解析；缺失(None)与损坏 JSON 同落 None，但损坏必须
+        // warn 留痕——审批挂起凭据静默消失会让恢复链查不到 run 且无痕迹。
+        let ok = parse_run_metadata(Some("{\"k\":1}".to_string()), "r1").expect("合法 JSON 应解析");
+        assert_eq!(ok["k"], 1);
+        assert!(parse_run_metadata(None, "r1").is_none(), "缺失按 None");
+        assert!(
+            parse_run_metadata(Some("{not-json".to_string()), "r1").is_none(),
+            "损坏 JSON 按缺失处理（warn 留痕）"
+        );
+        // JSON null 合法解析为 Value::Null：消费面 m.get(...) 对 Null 同样取不到键，
+        // 与缺失同效，无需特判。
+        assert_eq!(
+            parse_run_metadata(Some("null".to_string()), "r1"),
+            Some(serde_json::Value::Null)
         );
     }
 
@@ -3356,30 +3967,35 @@ mod tests {
         );
     }
 
-    /// 回归测试：损坏的 SQLite 文件不应导致 kernel 启动崩溃（issue: kernel 启动后 /health 不响应）。
+    /// 损坏库 open 的双相契约（单测内串行验证，env 变量进程级共享不可并行）：
     ///
-    /// 背景：`.kernel_02.log` 末行 `Error: Database("database disk image is malformed")` ——
-    /// 进程异常退出/磁盘故障可能留下损坏的 agentos_kernel.db，`SqliteStore::open()` 直接
-    /// 返回 Err，main 传播退出，/health 永远不响应，启动脚本 60s 轮询超时。
-    ///
-    /// 期望行为：open 检测到损坏类错误时自愈——备份损坏文件保留现场，重建空库返回 Ok，
-    /// 新库可正常读写（create_run / get_run）。
+    /// 默认 fail-closed：先备份现场（.corrupt-*），再返回明确错误中止启动——
+    /// 错误信息必须含备份路径与恢复指引，绝不静默重建空库继续跑；
+    /// 设 AGENTOS_DB_AUTO_REBUILD=1：备份现场后重建空库继续，新库可正常读写。
     #[tokio::test]
-    async fn test_open_corrupt_db_self_heals() {
+    async fn test_open_corrupt_db_fail_closed_by_default_and_rebuild_optin() {
         // 模拟损坏的 SQLite 文件：文件头不是 "SQLite format 3"（进程崩溃/磁盘异常场景）
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("agentos_kernel.db");
         std::fs::write(&db_path, vec![0xDE_u8; 8192]).unwrap();
 
-        // open 不应报错退出，而应自愈：返回 Ok 且新库可正常读写
-        let store = SqliteStore::open(db_path.to_str().unwrap()).unwrap();
-        store
-            .create_run("run_self_heal", "hash_abc", "default")
-            .unwrap();
-        let run = store.get_run("run_self_heal").await.unwrap();
-        assert_eq!(run.run_id, "run_self_heal");
+        // ── 相位一：默认 fail-closed ──
+        std::env::remove_var("AGENTOS_DB_AUTO_REBUILD");
+        let err = match SqliteStore::open(db_path.to_str().unwrap()) {
+            Err(e) => e,
+            Ok(_) => panic!("默认路径损坏库必须 fail-closed 拒绝打开"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains(".corrupt-"),
+            "错误信息必须含备份现场路径前缀: {msg}"
+        );
+        assert!(
+            msg.contains("AGENTOS_DB_AUTO_REBUILD"),
+            "错误信息必须含恢复指引（重建开关）: {msg}"
+        );
 
-        // 损坏文件应被备份保留现场（agentos_kernel.db.corrupt-*），便于人工排查
+        // 损坏文件应被备份保留现场（agentos_kernel.db.corrupt-*），且原路径已撤位
         let backup_names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -3391,6 +4007,53 @@ mod tests {
             "损坏文件应被备份保留现场，实际: {:?}",
             backup_names
         );
+
+        // ── 相位二：显式选择自动重建（AGENTOS_DB_AUTO_REBUILD=1）──
+        std::env::set_var("AGENTOS_DB_AUTO_REBUILD", "1");
+        let store = SqliteStore::open(db_path.to_str().unwrap()).unwrap();
+        std::env::remove_var("AGENTOS_DB_AUTO_REBUILD");
+
+        store
+            .create_run("run_self_heal", "hash_abc", "default")
+            .unwrap();
+        let run = store.get_run("run_self_heal").await.unwrap();
+        assert_eq!(run.run_id, "run_self_heal");
+    }
+
+    /// create_run 事务体契约：在调用方事务内 runs 与 branches main 两行同时可见，
+    /// 回滚则两行俱灭——证明两行写在同一事务、不存在 autocommit 半态窗口。
+    #[test]
+    fn test_create_run_in_tx_writes_run_and_branch_atomically() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(DDL).unwrap();
+
+        conn.execute_batch("BEGIN").unwrap();
+        SqliteStore::create_run_in_tx(
+            &conn,
+            "run_tx",
+            "hash_1",
+            "tenant-1",
+            "2026-09-11T00:00:00+00:00",
+        )
+        .unwrap();
+        let counts: (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM runs), (SELECT COUNT(*) FROM branches)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 1), "事务内两行必须同时可见");
+
+        conn.execute_batch("ROLLBACK").unwrap();
+        let counts_after: (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM runs), (SELECT COUNT(*) FROM branches)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts_after, (0, 0), "回滚必须两行俱灭（同一事务写入）");
     }
 
     /// 正常库不应被误备份重建（自愈只针对损坏场景，健康库原样打开）。
@@ -3747,7 +4410,7 @@ mod tests {
     }
 
     /// 验证 session CRUD + pipeline_ids JSON 持久化 + upsert 更新。
-    /// 对齐 0.1 SessionModel：会话是聚合管道引用的标签夹。
+    /// 会话是聚合管道引用的标签夹。
     #[tokio::test]
     async fn test_session_crud_and_pipeline_ids() {
         use agentos_core::traits::SessionListFilter;
@@ -3778,7 +4441,7 @@ mod tests {
         assert_eq!(got.active_pipeline_id.as_deref(), Some("pid_main"));
         assert_eq!(got.metadata.as_ref().unwrap()["pinned"], true);
 
-        // upsert 更新：追加子管道 pid_sub，但 active 不动（对齐 0.1 set_active=False）
+        // upsert 更新：追加子管道 pid_sub，但 active 不动（不翻转既有 active 标记）
         let mut s1b = got.clone();
         s1b.pipeline_ids.push("pid_sub".to_string());
         s1b.updated_at = chrono::Utc::now().to_rfc3339();
@@ -4039,7 +4702,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_append_trace_and_replay() {
+    async fn test_append_trace_reads_back_in_seq_order() {
         let store = SqliteStore::open_memory().unwrap();
         store.create_run("run_5", "hash", "default").unwrap();
 
@@ -4075,21 +4738,6 @@ mod tests {
         assert_eq!(rows[2].0, "plugin_2");
         let patch_1: serde_json::Value = serde_json::from_str(&rows[1].1).unwrap();
         assert_eq!(patch_1["key"], "value_1");
-    }
-
-    #[tokio::test]
-    async fn test_create_branch() {
-        let store = SqliteStore::open_memory().unwrap();
-        store.create_run("run_6", "hash", "default").unwrap();
-
-        let branch = Branch {
-            branch_id: "main.rollback.001".to_string(),
-            run_id: "run_6".to_string(),
-            parent_branch: Some("main".to_string()),
-            parent_seq: Some(1),
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
-        store.create_branch(branch).await.unwrap();
     }
 
     /// P0-5 关键验收：跨租户隔离。
@@ -4459,10 +5107,12 @@ mod tests {
     async fn checkpoint_strips_control_state_keys_including_should_stop() {
         // 控制状态键契约：should_stop/ended/suspended/router.stop_reason 同属
         // per-run 控制键（署名与终止请求同写同消），checkpoint 瘦身剥离——
-        // 冷恢复不得复活上一 run 的终止请求与署名。
-        // conversation_mode/core_type/core_plugin 同属本轮执行态：交互挂起轮
-        // 残留 conversation_mode=true 会让新消息轮继续空转（2026-09-02 真机
-        // 实证），恢复合并/冷恢复均须跳过。
+        // 冷恢复不得复活上一 run 的终止请求与署名。本测试裸 store（未注入
+        // 声明键）只验内核自有键；插件语义 per-run 键
+        // （conversation_mode/core_type/core_plugin 等）由 manifest
+        // state.volatile_keys 声明、经 set_declared_volatile_keys 注入后与
+        // 内核自有键在同一剥离点剥离
+        // （见 pipeline_loop::tests::run_end_checkpoint_strips_declared_volatile_keys）。
         let store = SqliteStore::open_memory().unwrap();
         store
             .save_checkpoint(
@@ -4474,10 +5124,7 @@ mod tests {
                     "should_stop": true,
                     "ended": true,
                     "suspended": true,
-                    "router.stop_reason": "budget_exhausted",
-                    "conversation_mode": true,
-                    "core_type": "tool_execute",
-                    "core_plugin": "pipeline_tool_core"
+                    "router.stop_reason": "budget_exhausted"
                 }),
             )
             .unwrap();
@@ -4485,15 +5132,7 @@ mod tests {
             .load_latest_checkpoint("pipe_ctrl", "default")
             .unwrap()
             .unwrap();
-        for key in [
-            "should_stop",
-            "ended",
-            "suspended",
-            "router.stop_reason",
-            "conversation_mode",
-            "core_type",
-            "core_plugin",
-        ] {
+        for key in ["should_stop", "ended", "suspended", "router.stop_reason"] {
             assert!(state.get(key).is_none(), "{key} 不得残留进 checkpoint");
         }
         assert_eq!(state["task.status"], json!("running"), "持久键不受瘦身影响");
@@ -4525,5 +5164,213 @@ mod tests {
         let (v, reason) = decode_slot_message(Some("b_ok"), Some(br#"{"role":"user"}"#));
         assert_eq!(v["role"], json!("user"));
         assert!(reason.is_none());
+    }
+
+    // ── DedicatedDbPool：固定长命 DB 线程池行为契约 ──
+
+    /// 并发 50 任务全部完成且结果正确：池不丢任务、不串结果。
+    /// 载荷两组有区分度（短文本 / 4KB+ 长文本），性质断言 = 50 个互异内容
+    /// 恰好得到 50 个互异 blob_id 且逐一回读一致。
+    #[tokio::test]
+    async fn db_pool_concurrent_50_tasks_all_complete_and_correct() {
+        let store = Arc::new(SqliteStore::open_memory().unwrap());
+        let mut handles = Vec::new();
+        for i in 0..50u32 {
+            let store = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                let (data, mime) = if i % 2 == 0 {
+                    (format!("payload-{i}").into_bytes(), "text/plain")
+                } else {
+                    (vec![b'x'; 4096 + i as usize], "application/octet-stream")
+                };
+                // 全限定调用：固有同名同步 store_blob 会遮蔽 trait 的 async 版本
+                let blob_id =
+                    <SqliteStore as StorageBackend>::store_blob(&store, &data, mime).await?;
+                Ok::<_, StorageError>((blob_id, data))
+            }));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for h in handles {
+            let (blob_id, data) = h.await.unwrap().unwrap();
+            let roundtrip = store.get_blob(&blob_id).await.unwrap();
+            assert_eq!(roundtrip, data, "回读内容必须与写入一致");
+            assert!(seen.insert(blob_id), "blob_id 不得重复（任务串结果）");
+        }
+        assert_eq!(seen.len(), 50, "50 个互异内容必须全部落库，无任务丢失");
+    }
+
+    /// 关停语义：池 Drop（发送端关闭）后，已入队任务必须先排空再让线程退出
+    /// ——关停不丢任务（8 任务 > 4 线程，必然存在入队未执行的任务）。
+    #[test]
+    fn db_pool_shutdown_drains_queued_jobs_without_loss() {
+        let pool = DedicatedDbPool::spawn().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<usize>();
+        for i in 0..8usize {
+            let done_tx = done_tx.clone();
+            pool.dispatch(Box::new(move || {
+                let _ = done_tx.send(i);
+            }))
+            .unwrap();
+        }
+        drop(done_tx);
+        drop(pool);
+        // iter() 在通道关闭且排空后结束：每个任务闭包持有 done_tx 的一个 clone，
+        // 全部执行完（clone 随闭包释放）iter 才收尾——collect 完成即"全部执行完"。
+        let mut got: Vec<usize> = done_rx.iter().collect();
+        got.sort_unstable();
+        assert_eq!(got, (0..8).collect::<Vec<_>>(), "关停不得丢任务");
+    }
+
+    /// 关停后不再接受：通道断连（池 Drop 后发送端消亡的等价状态）时 dispatch
+    /// 返回错误而非静默入队丢失。
+    #[test]
+    fn db_pool_dispatch_rejected_after_shutdown() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<DbJob>(1);
+        drop(rx);
+        let pool = DedicatedDbPool {
+            tx,
+            blocked_dispatches: std::sync::atomic::AtomicU64::new(0),
+        };
+        let err = pool.dispatch(Box::new(|| {})).unwrap_err();
+        assert!(matches!(err, StorageError::Database(_)));
+        assert!(
+            err.to_string().contains("shut down"),
+            "拒绝信息须可诊断: {err}"
+        );
+    }
+
+    /// 背压契约：队列打满后 dispatch 必须阻塞等待（不再无界积压），消费
+    /// 恢复后阻塞的 dispatch 返回、任务全部执行。单 worker + 容量 1 注入，
+    /// gate 门控 worker 占位，使"队列满"成为确定性状态（非 sleep 竞速）。
+    #[test]
+    fn db_pool_dispatch_backpressures_when_full_then_recovers() {
+        let pool = std::sync::Arc::new(DedicatedDbPool::spawn_with(1, 1).unwrap());
+        let executed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // job1：占住唯一 worker，等 gate 放行——期间队列无法被消费。
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let gate_rx = std::sync::Arc::new(parking_lot::Mutex::new(gate_rx));
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let executed1 = std::sync::Arc::clone(&executed);
+        pool.dispatch(Box::new(move || {
+            let _ = started_tx.send(());
+            let _ = gate_rx.lock().recv();
+            executed1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }))
+        .unwrap();
+        started_rx
+            .recv()
+            .expect("worker 应开始执行 job1 并停在 gate");
+
+        // job2：占满唯一队列槽位。
+        let executed2 = std::sync::Arc::clone(&executed);
+        pool.dispatch(Box::new(move || {
+            executed2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }))
+        .unwrap();
+
+        // job3：队列满 → dispatch 必须阻塞，在独立线程派发。
+        let pool3 = std::sync::Arc::clone(&pool);
+        let executed3 = std::sync::Arc::clone(&executed);
+        let dispatcher = std::thread::spawn(move || {
+            pool3
+                .dispatch(Box::new(move || {
+                    executed3.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }))
+                .expect("恢复消费后阻塞的 dispatch 必须成功入队");
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !dispatcher.is_finished(),
+            "队列满时 dispatch 必须阻塞（背压），不得立即返回"
+        );
+        assert_eq!(
+            executed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "背压未解除前不得有任何任务执行"
+        );
+
+        // 放行 job1 → worker 依次消费 job2、job3，阻塞的 dispatch 返回。
+        drop(gate_tx);
+        dispatcher.join().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while executed.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "放行后任务须全部执行完（恢复消费），实际: {}",
+                executed.load(std::sync::atomic::Ordering::SeqCst)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            pool.blocked_dispatches
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "一次满载派发必须累计一次背压计数（可观测不静默）"
+        );
+    }
+
+    /// 任务 panic 必须映射为错误（不悬挂调用方），且长命线程不被打死——
+    /// 后续任务仍正常完成。
+    #[tokio::test]
+    async fn db_pool_task_panic_maps_to_error_and_pool_survives() {
+        let store = SqliteStore::open_memory().unwrap();
+        let r: Result<(), StorageError> = store
+            .blocking(|_this| -> Result<(), StorageError> { panic!("boom") })
+            .await;
+        assert!(
+            matches!(r, Err(StorageError::Database(_))),
+            "panic 必须映射为 StorageError，实际: {r:?}"
+        );
+        let ok: Result<u32, StorageError> = store.blocking(|_this| Ok(7)).await;
+        assert_eq!(ok.unwrap(), 7, "panic 后池必须仍然可用");
+    }
+
+    // ── B6：pipeline-state 批量事务 upsert（all-or-nothing）─────────────
+
+    #[test]
+    fn upsert_state_fields_batch_is_all_or_nothing() {
+        let store = SqliteStore::open_memory().unwrap();
+        // 中键注入失败：触发器对 field_key = 'b' 的插入 RAISE(ABORT)
+        store
+            .with_conn::<(), String>(|conn| {
+                conn.execute(
+                    "CREATE TRIGGER fail_b BEFORE INSERT ON pipeline_state                      WHEN NEW.field_key = 'b' BEGIN SELECT RAISE(ABORT, 'injected mid-key failure'); END;",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let mut fields = serde_json::Map::new();
+        fields.insert("a".to_string(), serde_json::json!(1));
+        fields.insert("b".to_string(), serde_json::json!(2));
+        fields.insert("c".to_string(), serde_json::json!(3));
+        let r = store.upsert_state_fields("pipe_tx", "default", &fields);
+        assert!(
+            matches!(r, Err(StorageError::Database(ref m)) if m.contains("injected")),
+            "中键失败必须整体报错，实际 {r:?}"
+        );
+        let loaded = store
+            .load_pipeline_state("pipe_tx", "default")
+            .expect("读回成功");
+        assert!(
+            loaded.is_empty(),
+            "all-or-nothing：中键失败后不得有部分写入，实际 {loaded:?}"
+        );
+
+        // 对照组（第二组输入）：无触发器管道批量 3 键全落
+        let mut ok_fields = serde_json::Map::new();
+        ok_fields.insert("x".to_string(), serde_json::json!("1"));
+        ok_fields.insert("y".to_string(), serde_json::json!("2"));
+        store
+            .upsert_state_fields("pipe_ok", "default", &ok_fields)
+            .expect("无故障批量写应成功");
+        let loaded = store
+            .load_pipeline_state("pipe_ok", "default")
+            .expect("读回成功");
+        assert_eq!(loaded.len(), 2, "批量成功路径键数完整: {loaded:?}");
+        assert_eq!(loaded.get("x"), Some(&serde_json::json!("1")));
     }
 }

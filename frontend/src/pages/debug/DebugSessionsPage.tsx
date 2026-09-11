@@ -27,7 +27,6 @@ export function DebugSessionsPage({ embedded }: { embedded?: boolean } = {}) {
   return (
     <PageShell
       title="调试会话"
-      backHref="/debug"
       embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {total} 个会话</span>}
     >

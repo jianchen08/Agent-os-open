@@ -45,7 +45,7 @@ fn endpoint(method: &str, path: &str) -> HttpEndpoint {
         route_id: "r".to_string(),
         method: method.to_string(),
         path: path.to_string(),
-        auth: "none".to_string(),
+        auth: Some("none".to_string()),
         handler_capability: "http.handle".to_string(),
         timeout_ms: None,
         max_concurrency: None,
@@ -55,6 +55,8 @@ fn endpoint(method: &str, path: &str) -> HttpEndpoint {
 
 fn manifest_with_endpoint(plugin_id: &str, method: &str, path: &str) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: plugin_id.to_string(),
         name: plugin_id.to_string(),
         description: None,

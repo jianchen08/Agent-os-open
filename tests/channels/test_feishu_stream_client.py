@@ -526,7 +526,7 @@ class TestConnectDisconnect:
     async def test_connect_success_path(self, monkeypatch) -> None:
         client = _make_client(max_retries=2)
         session = _fake_session()
-        monkeypatch.setattr(_stream_client_mod.aiohttp, "ClientSession", lambda: session)
+        monkeypatch.setattr(_stream_client_mod.aiohttp, "ClientSession", lambda **_kwargs: session)
         client._ensure_token = AsyncMock()
         client._get_endpoint = AsyncMock(return_value="wss://stream.feishu.cn/ws")
         ws = MagicMock()
@@ -557,7 +557,7 @@ class TestConnectDisconnect:
         client = _make_client(max_retries=2, base_delay=0.01)
         session = _fake_session()
         session.post.return_value = _fake_response({"data": {}})  # 端点为空
-        monkeypatch.setattr(_stream_client_mod.aiohttp, "ClientSession", lambda: session)
+        monkeypatch.setattr(_stream_client_mod.aiohttp, "ClientSession", lambda **_kwargs: session)
         client._ensure_token = AsyncMock()
 
         sleeps: list[float] = []
@@ -570,7 +570,8 @@ class TestConnectDisconnect:
         monkeypatch.setattr(_stream_client_mod.asyncio, "sleep", _fake_sleep)
 
         await client.connect()
-        # 2 次尝试各发起 1 次端点请求；仅第 1 次失败后退避
+        # 2 次尝试各发起 1 次端点请求；仅第 1 次失败后退避。
+        # session.post 是对外部飞书 API 的网络边界：重试预算内的请求次数即重连契约。
         assert session.post.call_count == 2
         assert sleeps == [0.01]
         assert client.is_connected is False

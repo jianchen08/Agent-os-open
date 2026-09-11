@@ -318,7 +318,7 @@ test('checkout flow', async ({ page }) => {
 | [reference/python-patterns.md](reference/python-patterns.md) | Python-specific: pytest-playwright, sync/async |
 | [reference/java-patterns.md](reference/java-patterns.md) | Java-specific: Maven, JUnit, Gradle |
 | [reference/csharp-patterns.md](reference/csharp-patterns.md) | C#-specific: NUnit, MSTest, .NET config |
-| [../shared/testmu-cloud-reference.md](../shared/testmu-cloud-reference.md) | Full device catalog, capabilities, geo-location |
+| [../shared/testmu-cloud-reference.md](reference/cloud-integration.md) | Full device catalog, capabilities, geo-location |
 
 ## Advanced Playbook
 

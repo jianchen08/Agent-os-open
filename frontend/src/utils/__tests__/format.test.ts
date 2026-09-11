@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import { formatFileSize, formatNumber, formatTimestamp, parseUTCTimestamp } from '@/utils/format'
+import { formatDate, formatFileSize, formatNumber, formatTimestamp, parseUTCTimestamp } from '@/utils/format'
 
 describe('parseUTCTimestamp - UTC 时间戳解析', () => {
   it('带 Z 后缀的时间戳直接解析', () => {
@@ -57,6 +57,22 @@ describe('formatNumber - 数字千分位', () => {
 
   it('小数保留原样', () => {
     expect(formatNumber(1234.5)).toBe('1,234.5')
+  })
+})
+
+describe('formatDate - 日期时间格式化', () => {
+  it('datetime 粒度为 日期 时:分（无秒，媒体创建时间口径）', () => {
+    expect(formatDate('2026-01-01T12:34:56Z', 'datetime')).toMatch(
+      /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/,
+    )
+  })
+
+  it('full 粒度含秒（与 datetime 区分）', () => {
+    expect(formatDate('2026-01-01T12:34:56Z', 'full')).toMatch(/\d{2}:\d{2}:\d{2}/)
+  })
+
+  it('无效日期串 → 占位文案而非抛错', () => {
+    expect(formatDate('not-a-date', 'datetime')).toBe('无效日期')
   })
 })
 

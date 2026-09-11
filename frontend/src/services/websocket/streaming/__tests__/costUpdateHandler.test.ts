@@ -9,10 +9,12 @@
  *    + 会话级命中率趋势（cacheHistory）
  * 5. 命中率骤降（如 95% → 50%）→ 通知提示一次，恢复后可再次提示
  */
-import { describe, it, expect, beforeEach } from 'vitest'
-import { handleCostUpdate } from '../lifecycleHandlers'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { queryClient } from '@/services/query/queryClient'
+import { queryKeys } from '@/services/query/queryKeys'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
+import { handleCostUpdate } from '../lifecycleHandlers'
 
 /** 构造带 cache 维度的 cost_update 事件 */
 function cacheEvent(pipelineId: string, ratio: number, cached: number, input: number) {
@@ -165,6 +167,33 @@ describe('handleCostUpdate', () => {
       handleCostUpdate(cacheEvent('pipe-slow', 0.95, 9500, 10000))
       handleCostUpdate(cacheEvent('pipe-slow', 0.75, 7500, 10000))
       expect(useNotificationStore.getState().notifications).toHaveLength(0)
+    })
+  })
+
+  describe('pipelineStates 失效化（轮末刷新信号）', () => {
+    afterEach(() => {
+      queryClient.removeQueries({ queryKey: queryKeys.pipelineStates })
+    })
+
+    it('有效轮末事件 → pipelineStates query 失效化（指示器从 state 重拉刚落盘的用量）', () => {
+      queryClient.setQueryData(queryKeys.pipelineStates, {})
+      expect(queryClient.getQueryState(queryKeys.pipelineStates)?.isInvalidated).toBe(false)
+
+      handleCostUpdate({
+        type: 'cost_update',
+        data: { pipeline_id: 'pipe-inv', total_tokens: 100, input_tokens: 80, output_tokens: 20 },
+      })
+      expect(queryClient.getQueryState(queryKeys.pipelineStates)?.isInvalidated).toBe(true)
+    })
+
+    it('0 值残留事件不触发失效化（tool_execute 轮 state 未变化，无需重拉）', () => {
+      queryClient.setQueryData(queryKeys.pipelineStates, {})
+
+      handleCostUpdate({
+        type: 'cost_update',
+        data: { pipeline_id: 'pipe-noop', total_tokens: 0, input_tokens: 0, output_tokens: 0 },
+      })
+      expect(queryClient.getQueryState(queryKeys.pipelineStates)?.isInvalidated).toBe(false)
     })
   })
 })

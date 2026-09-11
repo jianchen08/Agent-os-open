@@ -17,5 +17,13 @@
     ]
   },
   "permissions": {},
-  "priority": 6
+  "priority": 6,
+  "state": {
+    "reads": [
+      "current_phase",
+      "environment_basis",
+      "execution_context",
+      "task.id"
+    ]
+  }
 }

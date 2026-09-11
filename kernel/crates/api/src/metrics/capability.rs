@@ -23,8 +23,8 @@
 //! 进 params 的 `_authorization` 字段；本 handler 在内核侧重建 HeaderMap
 //! 后走 `resolve_request_user`，要求 admin 或 viewer 角色（读面；拆分前
 //! /api/v1/metrics 无鉴权，插件面收敛为角色读——能力出内核必须带门）。
-//! manifest 的 `http_endpoints[].auth: "admin"` 是声明性字段，实际执行
-//! 点在本 handler。
+//! manifest 的 `http_endpoints[].auth: "admin"` 由内核 dispatcher 执行（W3-2/D2
+//! 第一刀），本 handler 内再校验一次（纵深防御，语义一致）。
 //!
 //! ## 响应信封（与 db-admin 一致）
 //!
@@ -215,6 +215,7 @@ fn api_error_parts(e: &ApiError) -> (u16, String) {
         ApiError::NotFound { message } => (404, message.clone()),
         ApiError::Conflict { message } => (409, message.clone()),
         ApiError::UnprocessableEntity { message } => (422, message.clone()),
+        ApiError::TooManyRequests { message, .. } => (429, message.clone()),
         ApiError::Internal { message } | ApiError::WebSocket { message } => (500, message.clone()),
         ApiError::ServiceUnavailable { message } => (503, message.clone()),
     }

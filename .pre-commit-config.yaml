@@ -1,6 +1,7 @@
 # ============================================================
 # pre-commit 配置（REQ-13）
 # 集成 ruff（lint+format）+ mypy（类型检查）+ 基础文件检查
+#   + gitleaks 密钥扫描（官方 hook，--staged 增量拦截）
 # ============================================================
 #
 # 使用方式：
@@ -60,8 +61,7 @@ repos:
 
       - id: check-json
         name: 验证 JSON 语法
-        # config/media_workflows/ 是 {{占位符}} 模板文件,非合法 JSON(设计如此)
-        exclude: ^(\.vscode/.*|node_modules/.*|package-lock\.json|config/media_workflows/.*)
+        exclude: ^(\.vscode/.*|node_modules/.*|package-lock\.json)
 
       - id: check-merge-conflict
         name: 检测未解决的合并冲突标记
@@ -84,7 +84,23 @@ repos:
         name: 防止意外提交私钥
 
   # ============================================================
-  # 2. Ruff（lint + format）+ 3. mypy —— repo: local + language: system
+  # 2. gitleaks 密钥扫描（官方 hook，2026-09-11 第七波建制项）
+  #    entry 固定为 gitleaks git --pre-commit --staged：只扫本次暂存
+  #    内容（增量，无历史噪音；历史存量由 CI secret-scan job +
+  #    .github/gitleaks-baseline.json 兜底，新增命中即红）。
+  #    放行规则单点在 .gitleaks.toml（env 占位符 + 测试 fixture 哑 key，
+  #    按路径+字面精确圈定，勿过宽放行）。
+  #    language: golang → pre-commit 首次运行用本机 Go 工具链构建
+  #    gitleaks（需 go 在 PATH；无 Go 机器可 SKIP=gitleaks 提交，
+  #    CI 全量执法兜底）。
+  # ============================================================
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+
+  # ============================================================
+  # 3. Ruff（lint + format）+ 4. mypy —— repo: local + language: system
   # 工具取 PATH 上的 ruff/mypy（本机全局 ruff 0.15.20 与项目 uv 工具链
   # 同版；mypy 本机/CI 均 2.1.0，插件域 2.2.0 由 plugins-mypy-baseline
   # 门禁单独治理，此差一档为既定现状）。不依赖 github.com 拉取 hook

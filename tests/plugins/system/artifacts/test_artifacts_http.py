@@ -210,6 +210,47 @@ class TestUpload:
         assert body["media_type"] == "document"
         assert body["url"].endswith(".pdf")
 
+    def test_upload_audio_media_type(self, server: Any, storage_dirs: tuple[str, str]) -> None:
+        """audio/* 上传 → media_type=audio（/uploads URL 服务面按扩展名回源）。"""
+        raw, content_type = _multipart(filename="note.mp3", content_type="audio/mp3")
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/upload",
+                method="POST",
+                raw_body=raw,
+                headers={"content-type": content_type},
+            )
+        )
+        assert status == 200
+        assert body["media_type"] == "audio"
+        assert body["url"].endswith(".mp3")
+
+    def test_upload_without_uploads_dir_lands_in_default_tenant_root(
+        self, server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """UPLOADS_DIR 未设 → 上传落多租户数据根 data/default/uploads。
+
+        _get_uploads_dir 的默认租户回退在 http 面的可观察行为：文件真实落盘
+        到 AGENTOS_DATA_DIR 隔离出的 default 租户上传目录。
+        """
+        monkeypatch.delenv("UPLOADS_DIR", raising=False)
+        monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path))
+
+        raw, content_type = _multipart()
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/artifacts/upload",
+                method="POST",
+                raw_body=raw,
+                headers={"content-type": content_type},
+            )
+        )
+        assert status == 200
+        assert (tmp_path / "default" / "uploads" / f"{body['file_id']}.png").exists()
+        assert body["url"] == f"/uploads/{body['file_id']}.png"
+
 
 # ═══════════════════════════════════════════════════════════
 # 2. 制品集合（list / create）

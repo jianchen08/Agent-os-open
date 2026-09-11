@@ -5,7 +5,7 @@ description: '深度研究编排Agent，负责对复杂问题进行系统性研�
 agent_type: orchestrator
 category: analysis
 level: L2
-model_tier: large
+model_tier: medium
 system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}

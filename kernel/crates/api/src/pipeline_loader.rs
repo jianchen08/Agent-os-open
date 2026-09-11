@@ -128,10 +128,27 @@ struct PipelineFile {
     loop_bodies: Vec<LoopBodyFile>,
     #[serde(default)]
     checkpoint: CheckpointConfig,
+    /// 管道级初始 state 缺省（P1-1 声明化）：顶层 `initial_state:` map，
+    /// 归一进 [`PipelineConfig::initial_state`]，执行首轮前种入。
+    #[serde(default)]
+    initial_state: HashMap<String, serde_json::Value>,
+    /// 主轮循环轮数硬上限（顶层 `max_rounds:`，ADR 2026-09-11-engine-loop-cap）：
+    /// 归一进 [`PipelineConfig::max_rounds`]；缺省 None = 引擎缺省 200。
+    #[serde(default)]
+    max_rounds: Option<usize>,
 }
 
 impl PipelineFile {
     /// 归一为内部 [`PipelineConfig`]（`next`/`while` → `exit_routes`/`while_cond`）。
+    ///
+    /// 隐性技术债务显性标注（ADR 2026-09-09-kernel-dead-layer-adjudication，
+    /// 裁决=③级未接线保留）——**hooks 丢弃点**：本函数经
+    /// [`Self::to_internal_with_hooks`] 解析出 hooks 声明后按 `(cfg, _)` 丢弃，
+    /// 生产加载（server.rs `load_and_compile`）不消费 hooks：
+    /// - 妥协内容：hooks ③级命中未接线，yaml 声明解析后即弃（不报错不告警）；
+    /// - 升级触发条件：管道配置出现 `hooks:` 声明或步骤服务跨插件编排需求——
+    ///   生产入口切到 [`load_pipeline_with_hooks`] 消费本函数第二返回值；
+    /// - 时间上限：0.3 主线排期评审——无接线需求则连 hooks 解析一起删。
     #[allow(clippy::wrong_self_convention)] // 消费型转换（File 结构一次性归一到内部类型）
     fn to_internal(self) -> Result<PipelineConfig, PipelineLoadError> {
         self.to_internal_with_hooks().map(|(cfg, _)| cfg)
@@ -165,6 +182,8 @@ impl PipelineFile {
                 name: self.name,
                 loop_bodies,
                 checkpoint: self.checkpoint,
+                initial_state: self.initial_state,
+                max_rounds: self.max_rounds,
             },
             PipelineHooks {
                 body_hooks,
@@ -349,6 +368,8 @@ pub fn load_pipeline_config(config_root: &Path) -> Result<PipelineConfig, Pipeli
             name: "default".to_string(),
             loop_bodies: Vec::new(),
             checkpoint: Default::default(),
+            initial_state: HashMap::new(),
+            max_rounds: None,
         });
     }
     let raw = std::fs::read_to_string(&path)
@@ -365,6 +386,9 @@ pub fn load_pipeline_config(config_root: &Path) -> Result<PipelineConfig, Pipeli
 /// hooks 聚合（body 级 + step 级复合键），供编译期
 /// [`agentos_engine::compiler::compile_pipeline_with_hooks`] 消费。
 /// 文件缺失时返回默认配置 + 空 hooks（与 [`load_pipeline_config`] 降级一致）。
+///
+/// 现状：③级未接线——生产加载走 [`load_pipeline_config`]，本函数仅测试
+/// 消费（ADR 2026-09-09-kernel-dead-layer-adjudication，随整链接线或删除）。
 pub fn load_pipeline_with_hooks(
     config_root: &Path,
 ) -> Result<(PipelineConfig, PipelineHooks), PipelineLoadError> {
@@ -379,6 +403,8 @@ pub fn load_pipeline_with_hooks(
                 name: "default".to_string(),
                 loop_bodies: Vec::new(),
                 checkpoint: Default::default(),
+                initial_state: HashMap::new(),
+                max_rounds: None,
             },
             PipelineHooks::default(),
         ));
@@ -810,6 +836,8 @@ loop_bodies:
                 run_on_error: false,
             }],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         }
     }
 
@@ -857,6 +885,8 @@ loop_bodies:
                 },
             ],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         };
         let lib = StepLibrary::default();
         let plugin_ids = HashSet::new();
@@ -927,6 +957,8 @@ loop_bodies:
                 run_on_error: false,
             }],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         };
         let lib = StepLibrary::default();
         let plugin_ids = HashSet::new();
@@ -1160,6 +1192,29 @@ loop_bodies:
                 .iter()
                 .any(|s| s.name() == "{{state.core_plugin}}"),
             "core 步骤应保留动态 core_plugin 项"
+        );
+        // W2a 压缩粗门：prepare 的 context_window_guard 为带 when 的门控项，
+        // 公式（百分比阈值）经 condition DSL 编译期可解析（加载面断言；语义
+        // 真假两侧由 engine 测试锁定）
+        let prepare = main
+            .steps
+            .iter()
+            .find(|s| s.id == "prepare")
+            .expect("prepare step");
+        let guard_when = prepare
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                StepItem::Gated { name, when, .. } if name == "pipeline_context_window_guard" => {
+                    when.clone()
+                }
+                _ => None,
+            })
+            .expect("context_window_guard 应为带 when 的门控项");
+        assert!(guard_when.contains("track.messages_chars"));
+        assert!(
+            agentos_engine::condition::parse_condition(&guard_when).is_ok(),
+            "粗门公式应通过 condition DSL 编译：{guard_when}"
         );
         // steps 库可加载
         let lib = load_step_library(&root).expect("steps 库应能加载");

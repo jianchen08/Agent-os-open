@@ -2,7 +2,7 @@
 /**
  * 小型 API 服务测试（ASR / 全局搜索 / Payload 诊断 / 评估指标）
  *
- * 覆盖四个此前无测试的端点封装：
+ * 覆盖四个端点封装：
  * - asr.transcribeAudio：multipart 上传、503 静默降级 null、其余错误抛出
  * - search.searchGlobal：查询参数透传 + requestWithRetry 包装
  * - llmPayload：payload 快照列表 / 单文件读取
@@ -184,6 +184,8 @@ describe('评估指标 API - evaluationMetrics', () => {
     expect(result.metrics[1]).toBe(resp.metrics[1])
     expect(apiClient.get).toHaveBeenCalledWith('/ext/evaluation_service/metrics', {
       params: { skip: 0, limit: 20 },
+      // 可选端点请求级标记（P2-2）：评估服务未启用时 404 静默
+      optional: true,
     })
   })
 })

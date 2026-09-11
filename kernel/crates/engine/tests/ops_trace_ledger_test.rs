@@ -149,10 +149,10 @@ impl MockInvoker {
 
 #[async_trait]
 impl PluginInvoker for MockInvoker {
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         plugin_id: &str,
-        _ctx: &PluginContext,
+        _ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError> {
         Ok(self
             .results
@@ -253,6 +253,8 @@ fn make_engine_config() -> PipelineConfig {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     }
 }
 

@@ -17,23 +17,33 @@ REM  Env vars:
 REM    AGENTOS_KERNEL_PORT   kernel port    (default 9100)
 REM    AGENTOS_FRONTEND_PORT frontend port  (default 6390, avoids container_22404's 5289/5290/6290)
 REM
-REM  [Supervision note / 剩余项清仓批次 A2] Two supervisors may coexist:
-REM    1. This script wires run_kernel_supervised.bat (G8 lifecycle supervisor):
-REM       respawns kernel ONLY on exit code 75 (restart-as-unload); any other
-REM       exit stops the supervisor honestly (crashes are not masked).
-REM    2. An external session supervisor .zcode_tmp_kernel_supervisor.sh
-REM       (repo root, held by a prior ZCode session background task; writes
-REM       .kernel_supervisor.log / .vite_supervised.log) polls port 9100 every
-REM       5s and restarts the kernel whenever it is down, plus vite every 10
-REM       cycles. It therefore masks honest stops (e.g. the taskkill below and
-REM       non-75 exits) - if the kernel "keeps coming back" after stopping it,
-REM       that loop is the owner; stop it (kill its bash process / remove the
-REM       script) or expect it to re-launch the kernel within ~5s.
+REM  [Supervision note] The kernel is supervised by run_kernel_supervised.bat
+REM  (G8 lifecycle supervisor, wired in step 3 below): exit code 75
+REM  (restart-as-unload) respawns after 1s with no counting; any other exit
+REM  code auto-respawns with exponential backoff (5s/15s/45s cap) and stops
+REM  after AGENTOS_SUPERVISOR_MAX_CONSECUTIVE_FAILS consecutive failures
+REM  (default 5, circuit break); a run of at least
+REM  AGENTOS_SUPERVISOR_STABLE_SECS (default 60s) resets the failure streak.
+REM  Every exit/respawn/backoff/circuit-break is appended to
+REM  .kernel_supervisor.log in the repo root - that file is the post-mortem
+REM  record. The former external session supervisor
+REM  (.zcode_tmp_kernel_supervisor.sh, a prior ZCode session's background
+REM  task) is retired and gone: unexpected-death recovery is owned by the
+REM  supervisor loop itself.
 REM  ============================================================
 setlocal EnableDelayedExpansion
 
 cd /d "%~dp0"
 set "PROJECT_ROOT=%cd%"
+
+REM 2026-09-07 fix: when run from Git Bash, GNU coreutils in Git's PATH shadow
+REM Windows commands -- `timeout /t 1` hits GNU syntax and fails with "invalid
+REM time interval '/t'", so the health-poll loop spins instantly and aborts
+REM before the kernel is up. Prepend System32 so native commands win; behavior
+REM is identical for double-click and Git Bash entry points.
+REM NOTE: keep comments in this file ASCII-only -- cmd parses the batch in a
+REM legacy codepage and non-ASCII text can be misread into executable fragments.
+set "PATH=%SystemRoot%\System32;%SystemRoot%;%PATH%"
 set "KERNEL_DIR=%PROJECT_ROOT%\kernel"
 set "FRONTEND_DIR=%PROJECT_ROOT%\frontend"
 set "KERNEL_BIN=%KERNEL_DIR%\target\release\agentos-kernel.exe"
@@ -84,7 +94,8 @@ if not errorlevel 1 (
 
 REM Wait until the exe is actually replaceable, not a blind 3s sleep:
 REM after taskkill the image handle can linger a few seconds (AV scan / WER),
-REM and the external supervisor may even re-launch it (see note above).
+REM and a still-running G8 supervisor from a previous launch may even
+REM re-launch it via its exit-75 path (see note above).
 REM A rename round-trip proves the lock is really gone before cargo touches it.
 call :WaitExeUnlock "%KERNEL_BIN%"
 echo [OK] Old instances stopped.
@@ -110,9 +121,10 @@ if "%NO_BUILD%"=="1" (
     echo [OK] Kernel build succeeded.
 )
 
-REM 同源守卫：native cdylib 与内核源码异源编译会让 tool 派发点位 SIGSEGV
-REM （2026-09-01/08-31 两次实证）。--build 会先自动重编缺失/过期的 cdylib
-REM （新克隆首次运行即靠这一步补齐产物），仍过不了才中止。
+REM Same-origin guard: native cdylibs built from sources other than the
+REM kernel make tool dispatch sites SIGSEGV (proven twice, 2026-09-01/08-31).
+REM --build re-auto-builds missing/stale cdylibs first (a fresh clone gets
+REM its artifacts from this step on first run); abort only if it still fails.
 echo [1.5/4] Syncing native cdylibs with kernel (--build)...
 python "%PROJECT_ROOT%\scripts\check_native_artifacts_sync.py" --build
 if errorlevel 1 (
@@ -138,8 +150,9 @@ if errorlevel 1 (
     exit /b 1
 )
 set "VENV_CREATED=0"
-REM 插件目录三种子布局：system|tools/<name>（两层）、pipeline/<phase>/<name>（三层）、
-REM shared/<name> 顶层（db_admin 等）；逐个无 .venv 才 uv sync（幂等跳过）
+REM Three plugin dir layouts: system|tools/<name> (two levels),
+REM pipeline/<phase>/<name> (three levels), shared/<name> top level
+REM (db_admin etc.); uv sync only when .venv missing (idempotent skip).
 for %%A in (system tools) do (
     for /d %%B in ("%PROJECT_ROOT%\plugins\shared\%%A\*") do (
         if exist "%%B\plugin.json" if exist "%%B\pyproject.toml" if not exist "%%B\.venv" (
@@ -188,12 +201,18 @@ echo [3/4] Starting kernel on port :%AGENTOS_KERNEL_PORT%...
 set "AGENTOS_KERNEL_HOST=0.0.0.0"
 set "AGENTOS_PLUGINS_DIR=%PROJECT_ROOT%\plugins\shared"
 set "AGENTOS_CONFIG_ROOT=%PROJECT_ROOT%\config"
+REM 2026-09-07 P12 note: idle-unload no longer needs a raised threshold --
+REM the kernel now guards reclamation with an in-flight call counter
+REM (79cb1dc72), so a busy plugin is never unloaded mid-call. Default 300s
+REM reclaims truly idle sidecars promptly; override via env if needed.
+if not defined AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS set "AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS=300"
 
 set "KERNEL_LOG=%PROJECT_ROOT%\.kernel_02.log"
-REM G8 supervisor: respawn kernel on exit code 75 (POST /api/v1/system/restart,
-REM and watcher auto-restart on cdylib plugin set change - A3).
-REM NOTE (A2): an external session supervisor (.zcode_tmp_kernel_supervisor.sh)
-REM may ALSO relaunch the kernel within ~5s of any stop - see header note.
+REM G8 supervisor: exit 75 (POST /api/v1/system/restart, watcher cdylib
+REM set change - A3) respawns after 1s; other exit codes auto-respawn with
+REM exponential backoff and circuit-break after N consecutive failures
+REM (default 5); every event is appended to .kernel_supervisor.log in the
+REM repo root.
 start "AgentOS Kernel" /B cmd /c ""%PROJECT_ROOT%\run_kernel_supervised.bat" "%KERNEL_BIN%" "%KERNEL_LOG%""
 
 echo        Waiting for kernel (poll /health up to 60s)...
@@ -205,7 +224,7 @@ for /l %%i in (1,1,60) do (
             set "KERNEL_READY=1"
             echo [OK] Kernel ready.
         ) else (
-            timeout /t 1 /nobreak >nul
+            ping -n 2 127.0.0.1 >nul
         )
     )
 )
@@ -256,8 +275,10 @@ if not exist "%FRONTEND_DIR%\node_modules\.bin\vite.cmd" (
 
 pushd "%FRONTEND_DIR%"
 REM --yes: if local vite still missing, npx auto-downloads without prompt.
-REM 127.0.0.1 而非 localhost：Windows 下 localhost 先解析 IPv6(::1)，内核仅监听 IPv4，
-REM 逐请求多一次 ::1 失败回退（部分防火墙为静默丢弃时表现为首屏/WS 连接慢数秒）。
+REM 127.0.0.1 instead of localhost: on Windows localhost resolves to IPv6
+REM (::1) first while the kernel listens on IPv4 only, so each request pays
+REM an extra ::1 failure fallback (with silent-drop firewalls this shows up
+REM as seconds of slow first paint / WS connect).
 start "AgentOS Frontend" /B cmd /c "set VITE_PROXY_TARGET=http://127.0.0.1:%AGENTOS_KERNEL_PORT%&& npx --yes vite --host 0.0.0.0 --port %AGENTOS_FRONTEND_PORT%"
 popd
 
@@ -270,7 +291,7 @@ for /l %%i in (1,1,30) do (
             set "FRONTEND_READY=1"
             echo [OK] Frontend ready.
         ) else (
-            timeout /t 1 /nobreak >nul
+            ping -n 2 127.0.0.1 >nul
         )
     )
 )
@@ -334,5 +355,5 @@ if !WEU_N! GEQ 15 (
     echo        [WARN] exe still locked after 15s - cargo build may fail with os error 5
     goto :eof
 )
-timeout /t 1 /nobreak >nul
+ping -n 2 127.0.0.1 >nul
 goto :WaitExeUnlockLoop

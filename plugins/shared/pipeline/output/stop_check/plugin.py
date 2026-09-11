@@ -164,7 +164,15 @@ class StopCheckPlugin(IOutputPlugin):
         if self._check_task_status:
             task_status = await self._check_task_terminal_status(ctx)
             if task_status:
-                logger.info("[%s] Task terminal status detected: %s", self.name, task_status)
+                # 判定源打点（B13① 诊断）：cached = ctx.state 缓存键命中，
+                # aggregated = state 聚合实时读——残留终态定位依据。
+                source = "cached" if self._cached_terminal_hit(ctx) else "aggregated"
+                logger.info(
+                    "[%s] Task terminal status detected: %s (source=%s)",
+                    self.name,
+                    task_status,
+                    source,
+                )
                 # 终态收束三键一次写全（state_updates 带内平铺键，SDK 契约）：
                 # - ended=true：引擎循环在本轮末立即 break（任务终态当轮停止，
                 #   不允许空转——用户裁定）
@@ -178,7 +186,7 @@ class StopCheckPlugin(IOutputPlugin):
 
         # 无触发轮：复位陈旧署名（router.stop_reason 跨 run 非易失，上一 run
         # 的署名不得影响本 run 终态映射）。终止在途（should_stop/ended 已置位）
-        # 不得复位——同轮更早写方（termination_advisor/cost_control/task_reminder）
+        # 不得复位——同轮更早写方（task_reminder）
         # 刚落的署名是 run 收尾映射终态的唯一依据，抹掉会把失败误标为完成。
         if ctx.state.get(StateKeys.SHOULD_STOP) or ctx.state.get("ended"):
             return {}
@@ -259,6 +267,13 @@ class StopCheckPlugin(IOutputPlugin):
     def set_state_reader(self, reader: Any) -> None:
         """注入 state 聚合读取器（server.py on_load 经单例调用）。"""
         set_state_reader(reader)
+
+    def _cached_terminal_hit(self, ctx: PluginContext) -> bool:
+        """ctx.state 缓存键（task_status/task.status）是否命中终态（诊断打点用）。"""
+        for key in ("task_status", "task.status"):
+            if ctx.state.get(key, "") in self._TERMINAL_STATUSES:
+                return True
+        return False
 
     async def _check_task_terminal_status(self, ctx: PluginContext) -> str:
         """检查任务是否已到达终态（取消/删除/完成/失败）。

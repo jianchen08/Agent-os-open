@@ -122,6 +122,8 @@ mod tests {
 
     fn manifest(id: &str, host_type: HostType) -> PluginManifest {
         PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: id.to_string(),
             name: format!("Test {id}"),
             description: None,
@@ -172,6 +174,8 @@ mod tests {
                 run_on_error: false,
             }],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         };
         let plugin_ids: HashSet<String> = [plugin].iter().map(|s| s.to_string()).collect();
         agentos_engine::compiler::compile_pipeline(
@@ -212,6 +216,8 @@ mod tests {
                 run_on_error: false,
             }],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         };
         let pipeline = agentos_engine::compiler::compile_pipeline(
             &config,

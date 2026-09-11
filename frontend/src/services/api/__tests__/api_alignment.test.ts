@@ -7,16 +7,13 @@
  * - F11: fetchLongTermTasks 不发送后端不支持的参数
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
-
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // ============================================================================
 // 收尾闸（channel_api 退役批次 5）：前端 /ext/channel_api 零命中 + 常量层不手写 /ext
 // ============================================================================
-
 const FRONTEND_SRC = path.resolve(__dirname, '../../..')
-
 describe('收尾闸 - channel_api 退役（批次 5）', () => {
   it('frontend/src 生产代码零命中 "ext/channel_api"（排除生成物与测试）', () => {
     const offenders: string[] = []
@@ -39,14 +36,12 @@ describe('收尾闸 - channel_api 退役（批次 5）', () => {
     walk(FRONTEND_SRC)
     expect(offenders).toEqual([])
   })
-
   it('constants/api.ts 不再手写 /ext/ 字符串字面量（插件端点一律经生成物投影）', () => {
     const text = fs.readFileSync(path.resolve(FRONTEND_SRC, 'constants/api.ts'), 'utf-8')
     const extLiterals = [...text.matchAll(/['"`]\/ext\//g)]
     expect(extLiterals.map((m) => m.index)).toEqual([])
   })
 })
-
 // 用 vi.hoisted 创建 mock 函数，确保在 vi.mock 提升时可用
 const { mockGet, mockPost, mockPatch, mockPut, mockDelete } = vi.hoisted(() => ({
   mockGet: vi.fn(),
@@ -55,7 +50,6 @@ const { mockGet, mockPost, mockPatch, mockPut, mockDelete } = vi.hoisted(() => (
   mockPut: vi.fn(),
   mockDelete: vi.fn(),
 }))
-
 // Mock client 模块 — 同时提供 default 和 { apiClient } 命名导出
 // tasks.ts 使用 import apiClient (default)，longTermTasks.ts 使用 import { apiClient }
 vi.mock('../client', () => ({
@@ -74,9 +68,8 @@ vi.mock('../client', () => ({
     delete: mockDelete,
   },
 }))
-
-import * as taskApi from '@/services/api/tasks'
 import * as longTermTasksApi from '@/services/api/longTermTasks'
+import * as taskApi from '@/services/api/tasks'
 
 // ============================================================================
 // F10: longTermTasks HTTP 方法测试

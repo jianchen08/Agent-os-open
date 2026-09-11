@@ -53,7 +53,11 @@ class TestExecuteToolEntry:
         resp = await srv.execute(
             state={"task.status": "pending", "iteration": 1, "raw_tool_calls": [], "raw_result": ""},
         )
-        assert resp == {"state_updates": {"task.status": "running"}}
+        # llm_call 轮（create_initial_state 补 core_type）经包装层幂等推进产出基线
+        assert resp == {"state_updates": {
+            "task.status": "running",
+            "reminder_seen_result_fp": "da39a3ee5e6b4b0d3255bfef95601890afd80709",  # sha1("")
+        }}
 
     async def test_output_result_expands_state_updates(self) -> None:
         """L2 纯文本无子任务 → OutputResult 展开 state_updates（回 LLM 经状态键）。"""

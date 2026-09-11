@@ -1,13 +1,15 @@
 /** GlobalWebSocket 单元测试 测试全局 WebSocket 服务的重连参数、状态转换、心跳机制。 */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type * as globalWebSocketMod from '../GlobalWebSocket'
 
 // ── Mock 依赖 ──
 
-// Mock buildGlobalWebSocketUrl
-vi.mock('@/constants/websocket', () => ({
-  buildGlobalWebSocketUrl: (token: string) =>
-    `ws://localhost:8988/ws/chat?token=${token}&version=3.0.0`,
+// Mock wsTicket（WS 一次性票据签发端点，真实实现走 apiClient 网络请求）：
+// 默认成功签发，个别用例用 mockRejectedValueOnce 覆写失败路径
+const mockFetchWsTicket = vi.fn(async () => 'mock-ws-ticket')
+vi.mock('@/services/auth/wsTicket', () => ({
+  fetchWsTicket: mockFetchWsTicket,
 }))
 
 // Mock useLayoutModeStore
@@ -88,8 +90,8 @@ class MockWebSocket {
 // ── 导入被测模块 ──
 
 // 必须在 mock 设置之后导入
-let GlobalWebSocketService: typeof import('../GlobalWebSocket').default.constructor
-let ConnectionStatus: typeof import('../GlobalWebSocket').ConnectionStatus
+let GlobalWebSocketService: globalWebSocketMod.default.constructor
+let ConnectionStatus: globalWebSocketMod.ConnectionStatus
 
 beforeEach(async () => {
   // 清空实例列表
@@ -117,10 +119,6 @@ async function createService(): Promise<{
   vi.resetModules()
 
   vi.stubGlobal('WebSocket', MockWebSocket)
-  vi.doMock('@/constants/websocket', () => ({
-    buildGlobalWebSocketUrl: (token: string) =>
-      `ws://localhost:8988/ws/chat?token=${token}&version=3.0.0`,
-  }))
   vi.doMock('@/stores/layoutModeStore', () => ({
     useLayoutModeStore: {
       getState: () => ({
@@ -171,6 +169,7 @@ describe('GlobalWebSocketService', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     mockUpdateConnectionStatus.mockClear()
+    mockFetchWsTicket.mockClear()
   })
 
   afterEach(() => {
@@ -187,7 +186,7 @@ describe('GlobalWebSocketService', () => {
 
       connect('test-token')
       // connect 内部有 50ms 延迟才真正创建 WS
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
 
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
@@ -200,13 +199,13 @@ describe('GlobalWebSocketService', () => {
       expect(service.status).toBe('reconnecting')
 
       // 推进时间少于 4 秒，不应重连
-      vi.advanceTimersByTime(3999)
+      await vi.advanceTimersByTimeAsync(3999)
 
       // 推进到 4 秒，connect 应被再次调用
-      vi.advanceTimersByTime(1)
+      await vi.advanceTimersByTimeAsync(1)
 
       // 4秒后应触发重连（connect 内部又有 50ms 延迟）
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
 
       // 应创建了新的 WS 实例
       expect(instances.length).toBeGreaterThanOrEqual(2)
@@ -218,7 +217,7 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -227,25 +226,25 @@ describe('GlobalWebSocketService', () => {
       expect(service.status).toBe('reconnecting')
 
       // 推进到 4s 触发重连
-      vi.advanceTimersByTime(4000 + 100)
+      await vi.advanceTimersByTimeAsync(4000 + 100)
       const ws2 = getLatestWs()!
       expect(ws2).not.toBe(ws)
 
       // 第 2 次连接失败
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       simulateClose(ws2, 1006, 'error')
 
       // 推进到 8s (BASE_DELAY * 2^1)
-      vi.advanceTimersByTime(8000 + 100)
+      await vi.advanceTimersByTimeAsync(8000 + 100)
       const ws3 = getLatestWs()!
       expect(ws3).not.toBe(ws2)
 
       // 第 3 次连接失败
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       simulateClose(ws3, 1006, 'error')
 
       // 推进到 16s (BASE_DELAY * 2^2)
-      vi.advanceTimersByTime(16000 + 100)
+      await vi.advanceTimersByTimeAsync(16000 + 100)
       const ws4 = getLatestWs()!
       expect(ws4).not.toBe(ws3)
 
@@ -256,7 +255,7 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -267,7 +266,7 @@ describe('GlobalWebSocketService', () => {
       // 模拟多次重连失败，每次推进 61s（超过最大延迟 60s）
       // 验证经过多次失败后仍能持续重连（不放弃）
       for (let i = 0; i < 15; i++) {
-        vi.advanceTimersByTime(61000)
+        await vi.advanceTimersByTimeAsync(61000)
         const latest = getLatestWs()!
         // 模拟连接立即失败
         if (latest && latest.onclose) {
@@ -305,7 +304,7 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
 
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
@@ -318,7 +317,7 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -333,7 +332,7 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -350,7 +349,7 @@ describe('GlobalWebSocketService', () => {
       service.subscribe('kicked_by_replacement', onKicked)
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -364,7 +363,7 @@ describe('GlobalWebSocketService', () => {
       // 恢复连接（模拟）后队列已清空：connect 重建 + open 后 flush 无消息可发
       service._kickedByReplacement = false // 测试直接复位以验证队列确实已空
       service.connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws2 = getLatestWs()!
       simulateSuccessfulOpen(ws2)
       const sent = ws2.send.mock.calls.some((call: string[]) => {
@@ -379,7 +378,7 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -399,7 +398,7 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -416,7 +415,7 @@ describe('GlobalWebSocketService', () => {
       service.subscribe('kicked_by_replacement', onKicked)
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -446,7 +445,7 @@ describe('GlobalWebSocketService', () => {
       // 2. connecting
       connect('test-token')
       expect(service.status).toBe('connecting')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
 
       // 3. connected
       let ws = getLatestWs()!
@@ -458,7 +457,7 @@ describe('GlobalWebSocketService', () => {
       expect(service.status).toBe('reconnecting')
 
       // 5. 重连成功 → connected
-      vi.advanceTimersByTime(4000 + 100) // 等待重连延迟
+      await vi.advanceTimersByTimeAsync(4000 + 100) // 等待重连延迟
       ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
       expect(service.status).toBe('connected')
@@ -470,7 +469,7 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -479,8 +478,165 @@ describe('GlobalWebSocketService', () => {
 
       // 推进大量时间，不应创建新的 WS
       const instanceCountBefore = instances.length
-      vi.advanceTimersByTime(120000)
+      await vi.advanceTimersByTimeAsync(120000)
       expect(instances.length).toBe(instanceCountBefore)
+    })
+
+    it('disconnect 后再次 connect 应能重新建立连接（登出重登 WS 复活）', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      connect('test-token')
+      await vi.advanceTimersByTimeAsync(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+      expect(service.status).toBe('connected')
+
+      // 登出：disconnect 置 _disposed
+      disconnect()
+      expect((service as unknown as { _disposed: boolean })._disposed).toBe(true)
+
+      // SPA 内重新登录：connect 复位 _disposed，连接照常建立
+      connect('test-token-2')
+      expect(service.status).toBe('connecting')
+      await vi.advanceTimersByTimeAsync(100)
+
+      const ws2 = getLatestWs()!
+      expect(ws2).not.toBe(ws)
+      simulateSuccessfulOpen(ws2)
+      expect(service.status).toBe('connected')
+
+      disconnect()
+    })
+
+    it('connected 状态下 token 轮换：不拆连接（无 close），状态保持 connected', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      connect('token-a')
+      await vi.advanceTimersByTimeAsync(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      // token 续期后 router effect 用新 token 调 connect
+      connect('token-b')
+
+      expect(service.status).toBe('connected')
+      expect(ws.close).not.toHaveBeenCalled()
+      // 连接未被替换：仍是同一个 WS 实例
+      expect(instances[instances.length - 1]).toBe(ws)
+
+      disconnect()
+    })
+
+    it('connected 期间轮换的新 token 用于断线重连', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      connect('token-a')
+      await vi.advanceTimersByTimeAsync(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+
+      // token 轮换：只更新内部 token，不拆连接
+      connect('token-b')
+      expect(service.status).toBe('connected')
+
+      // 断线 → 自动重连：票据单次消费，必须重新取票（轮换后的 token 由
+      // apiClient 随取票请求统一携带），握手 URL 携带新票据且不含 token
+      simulateClose(ws, 1006, 'network')
+      await vi.advanceTimersByTimeAsync(4000 + 100)
+
+      const ws2 = getLatestWs()!
+      expect(ws2).not.toBe(ws)
+      expect(mockFetchWsTicket).toHaveBeenCalledTimes(2)
+      expect(ws2.url).toContain('ticket=mock-ws-ticket')
+      expect(ws2.url).not.toContain('token=')
+
+      disconnect()
+    })
+
+    it('connecting 状态下收到不同 token：拆开在途连接换新 token 重连', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      connect('token-a')
+      // 取票在途窗口内换 token：旧取票流程作废，不产生孤儿连接
+      connect('token-b')
+      await vi.advanceTimersByTimeAsync(100)
+
+      // 仅一个 WS 实例：被取代的取票流程拿到票后自我作废
+      expect(instances.length).toBe(1)
+      const ws = instances[0]
+      expect(ws.url).toContain('ticket=mock-ws-ticket')
+      expect(ws.url).not.toContain('token=')
+      simulateSuccessfulOpen(ws)
+      expect(service.status).toBe('connected')
+
+      disconnect()
+    })
+  })
+
+  // ──────────────────────────────────────────────
+  // 2b. WS 一次性票据（POST /api/v1/ws-ticket → ?ticket= 握手）
+  // ──────────────────────────────────────────────
+  describe('WS 一次性票据', () => {
+    it('取票成功：握手 URL 携带 ticket 且不含 token', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      connect('test-token')
+      await vi.advanceTimersByTimeAsync(100)
+
+      expect(mockFetchWsTicket).toHaveBeenCalledTimes(1)
+      const ws = getLatestWs()!
+      expect(ws.url).toContain('ticket=mock-ws-ticket')
+      expect(ws.url).not.toContain('token=')
+      simulateSuccessfulOpen(ws)
+      expect(service.status).toBe('connected')
+
+      disconnect()
+    })
+
+    it('取票 401：不建连，先刷新 token 再退避重连（不回退 token 直连）', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+      mockFetchWsTicket.mockRejectedValueOnce(Object.assign(new Error('未认证'), { code: '401' }))
+
+      connect('test-token')
+      await vi.advanceTimersByTimeAsync(100)
+
+      // 取票失败：未创建任何 WS 连接，进入重连退避
+      expect(instances.length).toBe(0)
+      expect(service.status).toBe('reconnecting')
+
+      // 退避到点：认证拒绝路径先刷新 token（与 4001 掉线同路径），再重新取票建连
+      await vi.advanceTimersByTimeAsync(4000 + 100)
+      expect(mockRefresh).toHaveBeenCalled()
+      expect(instances.length).toBe(1)
+      const ws = getLatestWs()!
+      expect(ws.url).toContain('ticket=mock-ws-ticket')
+      simulateSuccessfulOpen(ws)
+      expect(service.status).toBe('connected')
+
+      disconnect()
+    })
+
+    it('断线重连重新取票（票据单次消费，每次连接独立取票）', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      connect('test-token')
+      await vi.advanceTimersByTimeAsync(100)
+      const ws = getLatestWs()!
+      simulateSuccessfulOpen(ws)
+      expect(mockFetchWsTicket).toHaveBeenCalledTimes(1)
+
+      simulateClose(ws, 1006, 'network')
+      await vi.advanceTimersByTimeAsync(4000 + 100)
+
+      const ws2 = getLatestWs()!
+      expect(ws2).not.toBe(ws)
+      expect(mockFetchWsTicket).toHaveBeenCalledTimes(2)
+      expect(ws2.url).toContain('ticket=mock-ws-ticket')
+      expect(service.status).not.toBe('connected')
+      simulateSuccessfulOpen(ws2)
+      expect(service.status).toBe('connected')
+
+      disconnect()
     })
   })
 
@@ -492,12 +648,12 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
       // 推进 30 秒触发心跳
-      vi.advanceTimersByTime(30000)
+      await vi.advanceTimersByTimeAsync(30000)
 
       // ws.send 应被调用来发送心跳
       expect(ws.send).toHaveBeenCalled()
@@ -515,12 +671,12 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
       // 触发心跳发送
-      vi.advanceTimersByTime(30000)
+      await vi.advanceTimersByTimeAsync(30000)
 
       // 模拟收到 heartbeat_ack
       if (ws.onmessage) {
@@ -528,7 +684,7 @@ describe('GlobalWebSocketService', () => {
       }
 
       // 推进到超时时间（30s），因为已经清除了超时，不应关闭连接
-      vi.advanceTimersByTime(30000)
+      await vi.advanceTimersByTimeAsync(30000)
 
       // 连接应仍然存在（ws.close 未因超时被调用）
       expect(service.status).toBe('connected')
@@ -540,12 +696,12 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
       // 触发心跳发送（30s interval 触发）
-      vi.advanceTimersByTime(30000)
+      await vi.advanceTimersByTimeAsync(30000)
 
       // 验证心跳已发送
       const heartbeatSent = ws.send.mock.calls.some((call: string[]) => {
@@ -563,7 +719,7 @@ describe('GlobalWebSocketService', () => {
       expect(service.status).toBe('reconnecting')
 
       // 推进时间验证重连会创建新的 WebSocket
-      vi.advanceTimersByTime(4000 + 100)
+      await vi.advanceTimersByTimeAsync(4000 + 100)
       expect(instances.length).toBeGreaterThanOrEqual(2)
 
       disconnect()
@@ -576,22 +732,22 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
       // 推进 30s → 心跳发出，超时定时器启动（45s 后到期）
-      vi.advanceTimersByTime(30000)
+      await vi.advanceTimersByTimeAsync(30000)
       const closeCallsBefore = ws.close.mock.calls.length
 
       // 再推进 10s（累计距心跳发送 10s，距超时还有 5s）→ 模拟 ack 稍慢但仍在容错内
-      vi.advanceTimersByTime(10000)
+      await vi.advanceTimersByTimeAsync(10000)
       if (ws.onmessage) {
         ws.onmessage({ data: JSON.stringify({ type: 'heartbeat_ack' }) })
       }
 
       // ack 清除超时后，再推进超过原 30s 阈值（验证旧 30s 零容错已不复存在）
-      vi.advanceTimersByTime(35000)
+      await vi.advanceTimersByTimeAsync(35000)
 
       // 容错窗口内收到 ack：连接不应因心跳超时被关闭
       expect(service.status).toBe('connected')
@@ -614,7 +770,7 @@ describe('GlobalWebSocketService', () => {
       service.subscribe('_status', statusHandler)
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -631,7 +787,7 @@ describe('GlobalWebSocketService', () => {
       service.subscribe('reconnected', reconnectedHandler)
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       let ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -640,7 +796,7 @@ describe('GlobalWebSocketService', () => {
 
       // 断开并重连
       simulateClose(ws, 1006, 'error')
-      vi.advanceTimersByTime(4000 + 100)
+      await vi.advanceTimersByTimeAsync(4000 + 100)
       ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -659,7 +815,7 @@ describe('GlobalWebSocketService', () => {
       connect('test-token')
       // connect 后状态为 connecting，但 _status 事件还没触发（在 onopen 和 onclose 中触发）
 
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -687,7 +843,7 @@ describe('GlobalWebSocketService', () => {
 
       // 之后连接成功，消息应被发出
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -713,7 +869,7 @@ describe('GlobalWebSocketService', () => {
       })
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -736,7 +892,7 @@ describe('GlobalWebSocketService', () => {
       })
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -759,11 +915,11 @@ describe('GlobalWebSocketService', () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       expect(service.status).toBe('connecting')
 
       // 推进到 15 秒（CONNECTION_TIMEOUT）
-      vi.advanceTimersByTime(15000)
+      await vi.advanceTimersByTimeAsync(15000)
 
       // 应触发超时重连
       expect(service.status).toBe('reconnecting')
@@ -780,7 +936,7 @@ describe('GlobalWebSocketService', () => {
     async function setupConnected() {
       const { service, connect, getLatestWs, disconnect } = await createService()
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
       return { service, ws, disconnect }
@@ -865,7 +1021,7 @@ describe('GlobalWebSocketService', () => {
     async function setupConnected() {
       const { service, connect, getLatestWs, disconnect } = await createService()
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
       return { service, ws, disconnect }
@@ -930,7 +1086,7 @@ describe('GlobalWebSocketService', () => {
       service.sendRegenerate('thread-3', { pipelineId: 'pipe-z' })
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -951,7 +1107,7 @@ describe('GlobalWebSocketService', () => {
       const { connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -966,7 +1122,7 @@ describe('GlobalWebSocketService', () => {
       const { connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -984,7 +1140,7 @@ describe('GlobalWebSocketService', () => {
       const { connect, getLatestWs, disconnect } = await createService()
 
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -1016,11 +1172,11 @@ describe('GlobalWebSocketService', () => {
       expect(onTimeout).not.toHaveBeenCalled()
 
       // TTL 前一毫秒：仍无事件
-      vi.advanceTimersByTime(20000 - 1)
+      await vi.advanceTimersByTimeAsync(20000 - 1)
       expect(onTimeout).not.toHaveBeenCalled()
 
       // TTL 到点：广播 + 队列剔除
-      vi.advanceTimersByTime(1)
+      await vi.advanceTimersByTimeAsync(1)
       expect(onTimeout).toHaveBeenCalledTimes(1)
       const payload = onTimeout.mock.calls[0][0]
       expect(payload.data).toMatchObject({
@@ -1045,7 +1201,7 @@ describe('GlobalWebSocketService', () => {
 
       // TTL 内恢复连接：connect → open → _flushQueue 发出
       connect('test-token')
-      vi.advanceTimersByTime(100)
+      await vi.advanceTimersByTimeAsync(100)
       const ws = getLatestWs()!
       simulateSuccessfulOpen(ws)
 
@@ -1059,7 +1215,7 @@ describe('GlobalWebSocketService', () => {
       expect(sent).toBe(true)
 
       // 推进远超 TTL：定时器已被 flush 撤销，无超时广播
-      vi.advanceTimersByTime(60000)
+      await vi.advanceTimersByTimeAsync(60000)
       expect(onTimeout).not.toHaveBeenCalled()
 
       disconnect()
@@ -1072,7 +1228,7 @@ describe('GlobalWebSocketService', () => {
 
       service.sendUserInput('thread-1', 'x', { clientMessageId: 'cmid-3' })
       disconnect()
-      vi.advanceTimersByTime(60000)
+      await vi.advanceTimersByTimeAsync(60000)
       expect(onTimeout).not.toHaveBeenCalled()
     })
   })

@@ -26,5 +26,11 @@
       "path": "config/system/spill_config.yaml",
       "label": "spill_guard 兜底策略与存储配置"
     }
-  ]
+  ],
+  "force_include_tools": [
+    "spill_retrieve"
+  ],
+  "state": {
+    "reads": []
+  }
 }

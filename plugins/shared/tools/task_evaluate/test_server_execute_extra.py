@@ -141,11 +141,11 @@ class TestServerAssembly:
         return module
 
     def test_on_load_injects_default_executor(self, monkeypatch: Any) -> None:
-        server_mod = self._load_server()
-        # 用本测试进程内唯一别名加载 tool，避免与 server._on_load 的 `import tool` 槽位冲突
+        # 生产中 server.py exec 期由合宿 loader 裸名遮蔽窗口担保 `tool` 解析到
+        # 本插件目录；测试进程内以槽位预置等价模拟，使 server 绑定该别名实例
         tool_mod = _load_tool()
-        # 直接把 tool 槽位指向该别名模块，使 on_load 的 `import tool as tool_mod` 命中同一实例
         monkeypatch.setitem(sys.modules, "tool", tool_mod)
+        server_mod = self._load_server()
         before = tool_mod._default_executor
         try:
             asyncio.run(server_mod._on_load({}))
@@ -168,8 +168,10 @@ class TestServerAssembly:
 
         fake_mod = types.ModuleType("tool")
         fake_mod.TaskEvaluateTool = _FakeTool
-        monkeypatch.setitem(sys.modules, "tool", fake_mod)
         server_mod = self._load_server()
+        # handler 消费 server 模块 exec 期绑定的 tool_mod（生产由合宿 loader
+        # 遮蔽窗口担保指向本插件）；测试以模块属性替换注入替身
+        monkeypatch.setattr(server_mod, "tool_mod", fake_mod)
         out = await server_mod.task_evaluate(action="auto_complete", task_id="t1")
         # 9de6b56f6 起 server 返回完整 ToolExecutionResult 信封（metadata 携带
         # result=completed/task_failed 等副作用信号，剥成裸 output 会丢评估证据）
@@ -718,26 +720,67 @@ class TestExecuteExtraPaths:
 class TestEdgeBranches:
     @pytest.mark.asyncio
     async def test_recover_to_completed_exception_surfaces(self, mod: Any, service: Any, monkeypatch: Any) -> None:
-        """FAILED 任务恢复完成时 recover_to_completed 异常 → 记录日志，结果仍成功。"""
+        """FAILED 任务恢复完成时 recover_to_completed 异常 → 显式失败结果（不谎报成功）。"""
         task = await _new_task(service)
         task.status = TaskStatus.FAILED
         service._storage.save(task)
         tool, _ = _inject_tool(mod, monkeypatch, service)
         monkeypatch.setattr(service, "recover_to_completed", AsyncMock(side_effect=RuntimeError("recover failed")))
         out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
-        # 恢复失败不阻断成功结果（评估已通过）
-        assert out.success is True
+        # 终态回写失败不得返回与成功同值（task 实际仍 failed）
+        assert out.success is False
+        assert "恢复失败状态为完成失败" in out.error
+        assert out.metadata.get("task_failed") is True
+
+    @pytest.mark.asyncio
+    async def test_merge_gate_retry_persists_counter(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """ws_meta 读取失败首遇 → 计数持久化并返回 MERGE_GATE_RETRY（不判死）。"""
+        task = await _new_task(service)
+        tool, state_writer = _inject_tool(
+            mod, monkeypatch, service, merge_result="ws_meta 读取失败: meta not ready"
+        )
+        out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
+        assert out.success is False
+        assert out.error_code == "MERGE_GATE_RETRY"
+        assert task.metadata["merge_gate_failures"] == 1
+        assert state_writer.await_args.args[1]["task.merge_gate_failures"] == 1
+
+    @pytest.mark.asyncio
+    async def test_merge_gate_counter_not_persisted_rejects_retry(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """merge_gate_failures 落 state 失败 → 不可重试错误，明示计数未持久化（防无限重试）。"""
+        task = await _new_task(service)
+        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="ws_meta 读取失败: meta not ready")
+        monkeypatch.setattr(mod, "_state_writer", AsyncMock(side_effect=RuntimeError("state down")))
+        out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
+        assert out.success is False
+        assert out.error_code == "MERGE_GATE_STATE_WRITE_FAILED"
+        assert "未持久化" in out.error
+        assert out.metadata.get("gate_state_persisted") is False
 
     @pytest.mark.asyncio
     async def test_merge_fail_complete_evaluation_exception(self, mod: Any, service: Any, monkeypatch: Any) -> None:
-        """合并失败标记 failed 时 complete_evaluation(passed=False) 异常 → 降级返回。"""
+        """complete_evaluation(passed=False) 异常 → 兜底落 state 并在 metadata 回告落账情况。"""
         task = await _new_task(service)
-        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="worktree 合并失败: merge boom")
-        monkeypatch.setattr(service, "complete_evaluation", AsyncMock(side_effect=RuntimeError("storage down")))
+        tool, state_writer = _inject_tool(mod, monkeypatch, service, merge_result="worktree 合并失败: merge boom")
         monkeypatch.setattr(service, "complete_evaluation", AsyncMock(side_effect=RuntimeError("storage down")))
         out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
         assert out.success is False
         assert "worktree 合并失败" in out.error
+        # 兜底 _write_task_state 成功 → metadata 明示 failed 终态已落账
+        assert out.metadata.get("state_persisted") is True
+        assert state_writer.await_args.args[1]["task.status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_merge_fail_state_fallback_also_fails_discloses(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """complete_evaluation 与兜底 state 写入双失败 → metadata 明示状态未落账。"""
+        task = await _new_task(service)
+        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="worktree 合并失败: merge boom")
+        monkeypatch.setattr(service, "complete_evaluation", AsyncMock(side_effect=RuntimeError("storage down")))
+        monkeypatch.setattr(mod, "_state_writer", AsyncMock(side_effect=RuntimeError("state down")))
+        out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
+        assert out.success is False
+        assert "worktree 合并失败" in out.error
+        assert out.metadata.get("state_persisted") is False
 
     @pytest.mark.asyncio
     async def test_retry_counts_non_dict_normalized(self, mod: Any, service: Any, monkeypatch: Any) -> None:
@@ -962,3 +1005,63 @@ class TestServerClosures:
             assert "不存在" in result.results[0].message
         finally:
             tool_mod.set_default_executor(None)
+
+    @pytest.mark.asyncio
+    async def test_on_load_wires_own_tool_module_not_foreign_slot(
+        self, monkeypatch: Any
+    ) -> None:
+        """合宿裸名槽位串扰回归：on_load 只装配本插件 tool 模块。
+
+        合宿宿主静息态下 sys.modules["tool"] 可能是其他成员的 tool 模块；
+        on_load 若运行期 `import tool` 会命中异成员模块（AttributeError 或
+        错误装配）。契约：on_load 装配的本插件 tool 模块与 exec 期裸名槽位
+        解析结果同源，异成员槽位模块不被触碰。
+        """
+        # 裸名槽位预置为本插件 tool.py（loader 在成员 exec 期交付的同源实例）
+        own_tool = importlib.import_module("tool")
+        assert own_tool.__file__ is not None and str(_TE_DIR) in str(own_tool.__file__)
+
+        server_mod = self._fresh_server()
+
+        # exec 之后、on_load 之前槽位被异成员模块占据（合宿静息态形态）
+        foreign = types.ModuleType("tool")
+        foreign.set_state_reader = lambda reader: None  # 有读面无写面（同生产故障形态）
+        monkeypatch.setitem(sys.modules, "tool", foreign)
+
+        await server_mod._on_load({})
+
+        assert own_tool._default_executor is not None, "on_load 应装配本插件 tool 模块"
+        assert getattr(foreign, "_state_reader", None) is None, "异成员槽位模块不得被读面装配触碰"
+        assert getattr(foreign, "_default_executor", None) is None, "异成员槽位模块不得被执行器装配触碰"
+
+    @pytest.mark.asyncio
+    async def test_tool_handler_uses_bound_tool_module_not_foreign_slot(
+        self, monkeypatch: Any
+    ) -> None:
+        """工具调用路径同源回归：handler 从 exec 期绑定模块取 TaskEvaluateTool。
+
+        合宿静息态裸名槽位是异成员 tool 模块（无 TaskEvaluateTool）——运行期
+        `from tool import TaskEvaluateTool` 曾在此 ImportError（生产日志
+        "cannot import name 'TaskEvaluateTool' from 'tool'"）。
+        """
+        server_mod = self._fresh_server()
+
+        captured: list[dict[str, Any]] = []
+
+        class _FakeTool:
+            async def execute(self, inputs: dict[str, Any]) -> Any:
+                captured.append(inputs)
+                return types.SimpleNamespace(success=True, output={"routed": "own"})
+
+        # 本插件 tool 模块挂替身（验证 handler 路由到它）
+        own_tool = importlib.import_module("tool")
+        monkeypatch.setattr(own_tool, "TaskEvaluateTool", _FakeTool)
+
+        # 异成员槽位在场（无 TaskEvaluateTool，同生产故障形态）
+        foreign = types.ModuleType("tool")
+        monkeypatch.setitem(sys.modules, "tool", foreign)
+
+        out = await server_mod.task_evaluate(action="auto_complete", task_id="t9")
+
+        assert out == {"routed": "own"}, "handler 应路由到本插件 tool 模块"
+        assert captured == [{"action": "auto_complete", "task_id": "t9"}]

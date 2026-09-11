@@ -1,0 +1,3 @@
+# 前端 any 基线（frontend/src 生产码 ': any'/'as any' 命中行数，只减不增）。
+# 见 scripts/check_frontend_any_baseline.py；下调后 commit 留归因。
+frontend_any=125

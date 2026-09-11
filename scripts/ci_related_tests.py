@@ -7,6 +7,8 @@
   config/**、.env.example、docker-compose.yml → tests/ 内引用文件基名的测试
   mcp-servers/<名>/**、skills/<名>/** → tests/ 内引用目录名的测试
   tests/** 自身 → 直接收选
+  根目录运维脚本 *.bat/*.sh/*.ps1 → tests/test_startup_scripts_fix.py（静态契约）
+    + 对变更的根目录 .sh 做 bash -n 语法检查（不经 pytest）
 全量车道（kernel / pipeline / SDK）的变更不适用本车道：打印说明后退出 0
 （那类变更由 full / python_full 车道全量覆盖，见 ci_changed_areas.py）。
 """
@@ -20,7 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ci_common import PLUGINS_ENV, ROOT, diff_names, resolve_changed_files
+from ci_common import PLUGINS_ENV, ROOT, ROOT_OPS_SUFFIXES, diff_names, resolve_changed_files
 
 TESTS_DIR = ROOT / "tests"
 # 泛匹配保险丝：内容 grep 命中超过该数视为 id 过于通用，只保留文件名级匹配。
@@ -99,6 +101,13 @@ def select_tests(changed: list[str]) -> tuple[list[Path], list[str]]:
     plugin_roots: dict[Path, set[str]] = {}
     needles: set[str] = set()
 
+    # 根目录运维脚本（*.bat/*.sh/*.ps1）→ 启动链路静态契约测试；
+    # .sh 另做 bash -n 语法检查（main() 内独立执行，不经 pytest）。
+    root_ops = [f for f in changed if "/" not in f and f.endswith(ROOT_OPS_SUFFIXES)]
+    if root_ops:
+        selected.add(TESTS_DIR / "test_startup_scripts_fix.py")
+        notes.append(f"根目录运维脚本 {len(root_ops)} 个 → test_startup_scripts_fix.py（静态契约）")
+
     for f in changed:
         if f.startswith(("plugins/shared/system/", "plugins/shared/tools/")):
             root = _plugin_root(f)
@@ -137,6 +146,39 @@ def select_tests(changed: list[str]) -> tuple[list[Path], list[str]]:
     return sorted(selected), notes
 
 
+def _bash_syntax_check(changed: list[str], dry_run: bool = False) -> int:
+    """对变更的根目录 .sh 做 bash -n 语法检查（只解析不执行）。
+
+    返回 0 = 全部通过；1 = 任一脚本语法错误（fail-loud，不让坏语法进主干）。
+    dry_run 只打印将执行的检查，不实际运行（与 pytest 的 dry-run 语义一致）。
+    """
+    failed = 0
+    for f in changed:
+        if "/" in f or not f.endswith(".sh"):
+            continue
+        if dry_run:
+            print(f"[related-tests] dry-run: bash -n {f}")
+            continue
+        # 相对路径 + cwd=ROOT：Windows 下 bash 可能是 Git Bash 或 WSL bash
+        # （后者只见 /mnt 挂载，绝对 Windows 路径不可见），相对路径双兼容且
+        # Linux CI 天然可用；f 来自 git diff 的 / 分隔路径，无需再归一。
+        proc = subprocess.run(
+            ["bash", "-n", f],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if proc.returncode != 0:
+            print(f"[related-tests] bash -n 语法检查失败: {f}\n{proc.stderr}")
+            failed = 1
+        else:
+            print(f"[related-tests] bash -n 通过: {f}")
+    return failed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="变更关联测试选择与执行")
     parser.add_argument("--base", help="基线分支/提交（默认 GITHUB_BASE_REF / push 口径）")
@@ -165,6 +207,11 @@ def main() -> int:
             "本车道不适用（由 full/python_full 全量覆盖），放行"
         )
         return 0
+
+    # .sh 语法检查先于 pytest（语法坏 → 直接红，不靠测试间接暴露）
+    rc = _bash_syntax_check(changed, dry_run=args.dry_run)
+    if rc != 0:
+        return rc
 
     selected, notes = select_tests(changed)
     if not selected:

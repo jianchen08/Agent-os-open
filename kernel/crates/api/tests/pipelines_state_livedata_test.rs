@@ -7,6 +7,8 @@
 //! 缺失键（内存已有键不覆盖——pipeline-state.update 热路径双写内存+表）。
 use std::sync::Arc;
 
+const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
+
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
 use axum::body::Body;
@@ -21,12 +23,13 @@ async fn seed_admin(store: &agentos_engine::SqliteStore) {
     let admin = agentos_core::types::UserRecord {
         user_id: "00000000-0000-0000-0000-000000000001".to_string(),
         username: "admin".to_string(),
-        password: "admin12345".to_string(),
+        password: agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap(),
         email: Some("admin@agentos.dev".to_string()),
         role: "admin".to_string(),
         tenant_id: agentos_http::auth::DEFAULT_TENANT_ID.to_string(),
         created_at: now,
         last_login_at: None,
+        must_change_password: false,
     };
     let _ = store.create_user(&admin).await; // 已有则忽略错误
 }
@@ -40,7 +43,7 @@ async fn admin_token(app: &axum::Router) -> String {
                 .uri("/api/v1/auth/login")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({"username": "admin", "password": "admin12345"}).to_string(),
+                    json!({"username": "admin", "password": SEED_ADMIN_PW}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -55,6 +58,8 @@ async fn admin_token(app: &axum::Router) -> String {
 fn llm_manifest() -> agentos_core::traits::PluginManifest {
     use agentos_core::traits::{HostType, PluginManifest, PluginType};
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "pipeline_llm_core".to_string(),
         name: "pipeline_llm_core".to_string(),
         description: None,

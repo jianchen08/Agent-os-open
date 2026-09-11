@@ -1,8 +1,14 @@
 /** 全局单连接 WebSocket 服务 设计原则： */
 
-import { buildGlobalWebSocketUrl } from '@/constants/websocket'
-import { triggerAuthExpired } from '@/services/authCallbacks'
+import {
+  buildGlobalWebSocketUrl,
+  WS_LOCAL_EVENTS,
+  WS_SERVER_EVENTS,
+  WebSocketErrorCode,
+} from '@/constants/websocket'
+import { fetchWsTicket } from '@/services/auth/wsTicket'
 import { isAuthFailureFromError, isExpired, refresh, getAccessToken } from '@/services/auth/tokenLifecycle'
+import { triggerAuthExpired } from '@/services/authCallbacks'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { loggers } from '@/utils/logger'
 
@@ -87,6 +93,13 @@ class GlobalWebSocketService {
    *  「从未连接」≠「断开」，连接状态映射据此区分首连中与真断开（不出误导横幅）。 */
   private _hasAttemptedConnect = false
 
+  /**
+   * 连接代次号：connect 每次实际发起时递增。取票是异步窗口，期间可能被新
+   * connect（换 token 重连）或 disconnect 取代——旧流程拿到票后据此自我作废，
+   * 不产生孤儿连接（无代次校验时会双建连/互相覆盖连接超时计时器）。
+   */
+  private _connectSeq = 0
+
   get hasAttemptedConnect(): boolean {
     return this._hasAttemptedConnect
   }
@@ -96,10 +109,16 @@ class GlobalWebSocketService {
     return this._kickedByReplacement
   }
 
-  /** 建立全局 WS 连接（登录后调用一次） */
+  /**
+   * 建立全局 WS 连接（登录后调用一次）。token 仅用于取票的认证状态与同 token
+   * 去重/轮换记账：握手 URL 不携带 token，由 _doConnect 先取一次性票据再连。
+   */
   connect(token: string): void {
     this._hasAttemptedConnect = true
-    if (this._disposed) return
+    // connect 是「新会话开始」语义：复位登出置位的 _disposed。登出到下一次
+    // connect 之间没有任何调用点（token 为 null 不触发 connect），复位不会
+    // 引发幽灵重连；onclose / _scheduleReconnect 的 _disposed 守卫保持不变。
+    this._disposed = false
     // 正在等 token 刷新重连时，拒绝外部 connect（通常是用过期 token 的抢占调用）。
     // 否则会 _clearTimers 清掉 refresh 退避、用过期 token 硬连 → 4001 死循环，
     // refresh 永远执行不到。refresh 流程会在回调里自行 connect(新token)。
@@ -113,7 +132,14 @@ class GlobalWebSocketService {
       _wsLogger.debug('[GlobalWS] 本页被新连接替换(code=4000)，跳过自动重连（刷新页面可恢复）')
       return
     }
-    if (this._status === 'connected' && this._token === token) return
+    if (this._status === 'connected') {
+      if (this._token === token) return
+      // 已连接时 token 轮换（主动续期/刷新）只记录新 token 供下次重连使用：
+      // 连接本身不依赖 token 存活，拆掉健康连接重建会让流式传输中断
+      // （last_sequence 补漏只是断线兜底，不构成拆连接的理由）。
+      this._token = token
+      return
+    }
     if (this._status === 'connecting' && this._token === token) return
 
     this._token = token
@@ -129,15 +155,42 @@ class GlobalWebSocketService {
       this.ws = null
     }
 
-    this._doConnect()
+    this._connectSeq++
+    void this._doConnect()
   }
 
-  /** 实际建立 WebSocket 连接 */
-  private _doConnect(): void {
+  /**
+   * 实际建立 WebSocket 连接：先 POST /api/v1/ws-ticket 取一次性票据，再用
+   * ?ticket= 握手。取票失败（网络/401）不回退 token 直连，走既有重连退避；
+   * 认证类失败与 4001 掉线同路径——先刷新 token，重连时再取新票。票据单次
+   * 消费，重连（含 token 轮换后的重连）每次重新取票，不缓存复用。
+   */
+  private async _doConnect(): Promise<void> {
     if (this._disposed || this._status !== 'connecting') return
+    const seq = this._connectSeq
+
+    let ticket: string
+    try {
+      ticket = await fetchWsTicket()
+    } catch (err) {
+      // 取票 await 期间被新 connect 取代或已登出：本轮作废，不进入重连
+      if (this._disposed || this._status !== 'connecting' || seq !== this._connectSeq) return
+      // apiClient 统一错误信封：code 为 HTTP 状态字符串（401/403=认证拒绝）
+      const status = (err as { code?: string } | null)?.code
+      const authRejected = status === '401' || status === '403' || isExpired()
+      _wsLogger.warn(
+        '[GlobalWS] WS 票据获取失败（%s），进入重连退避: %s',
+        authRejected ? '认证拒绝' : '非认证失败',
+        err instanceof Error ? err.message : String(err),
+      )
+      this._scheduleReconnect(authRejected)
+      return
+    }
+    // 取到票后再校验一次：await 窗口内被新 connect 取代 / 登出则丢弃本票
+    if (this._disposed || this._status !== 'connecting' || seq !== this._connectSeq) return
 
     // 断线重连时带上 last_sequence，让后端重放断线期间的消息
-    const url = buildGlobalWebSocketUrl(this._token, this._lastSequence > 0 ? this._lastSequence : undefined)
+    const url = buildGlobalWebSocketUrl({ ticket }, this._lastSequence > 0 ? this._lastSequence : undefined)
     _wsLogger.debug('[GlobalWS] connecting to %s (last_sequence=%d)', url.substring(0, 60), this._lastSequence)
     this.ws = new WebSocket(url)
 
@@ -175,7 +228,7 @@ class GlobalWebSocketService {
       this._emit('_status', { status: 'connected' })
       this._emit('connect', { status: 'connected' })
       if (isReconnect) {
-        this._emit('reconnected', { status: 'connected' })
+        this._emit(WS_LOCAL_EVENTS.RECONNECTED, { status: 'connected' })
       }
       useLayoutModeStore.getState().updateConnectionStatus({
         state: 'connected',
@@ -186,7 +239,7 @@ class GlobalWebSocketService {
     this.ws.onmessage = (event: MessageEvent) => {
       try {
         const data = JSON.parse(event.data)
-        if (data.type === 'heartbeat_ack') {
+        if (data.type === WS_SERVER_EVENTS.HEARTBEAT) {
           this._handleHeartbeatAck()
         }
         // 追踪 last_sequence：从消息中提取 sequence 字段，更新最大已知序号。
@@ -243,7 +296,7 @@ class GlobalWebSocketService {
       this._emit('_status', { status: 'disconnected', code: event.code, reason: event.reason })
       useLayoutModeStore.getState().updateConnectionStatus({ state: 'disconnected' })
 
-      if (event.code === 4000) {
+      if (event.code === WebSocketErrorCode.CONNECTION_REPLACED) {
         this._handleKickedByReplacement()
         return
       }
@@ -355,8 +408,8 @@ class GlobalWebSocketService {
         USER_INPUT_QUEUE_TTL_MS,
         cmid.slice(0, 8),
       )
-      this._emit('user_input_send_timeout', {
-        type: 'user_input_send_timeout',
+      this._emit(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, {
+        type: WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT,
         data: {
           thread_id: dropped.thread_id,
           pipeline_id: dropped.pipeline_id,
@@ -481,7 +534,7 @@ class GlobalWebSocketService {
       && (queued as any).client_message_id === (msg as any).client_message_id
     )
     if (isDuplicate) {
-      console.info(
+      _wsLogger.info(
         '[GlobalWS] 去重: 跳过重复入队 type=%s thread_id=%s',
         msg.type,
         (msg.thread_id as string)?.slice(0, 12),
@@ -517,7 +570,12 @@ class GlobalWebSocketService {
     const handlers = this._handlers.get(event)
     if (handlers) {
       for (const h of handlers) {
-        try { h(data) } catch { /* handler 异常不影响其他 handler */ }
+        try {
+          h(data)
+        } catch (e) {
+          // handler 异常不影响其他 handler，但零留痕会让“订阅了却没触发”无从排查
+          _wsLogger.debug('[GlobalWS] handler 异常 event=%s error=%s', event, e)
+        }
       }
     }
   }
@@ -592,9 +650,9 @@ class GlobalWebSocketService {
     this._queue = []
     this._userInputTimers.forEach((timer) => clearTimeout(timer))
     this._userInputTimers.clear()
-    console.info('[GlobalWS] 被新连接替换，跳过重连')
-    this._emit('kicked_by_replacement', {
-      type: 'kicked_by_replacement',
+    _wsLogger.info('[GlobalWS] 被新连接替换，跳过重连')
+    this._emit(WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT, {
+      type: WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT,
       data: { reason: '本页连接已被同账号的其他页面替换' },
     })
   }
@@ -611,7 +669,7 @@ class GlobalWebSocketService {
     let delay: number
     if (this._reconnectAttempts >= RECONNECT_MAX_RETRIES) {
       delay = RECONNECT_MAX_DELAY
-      console.info('[GlobalWS] 超过最大重连次数，改为 %dms 间隔持续重连', delay)
+      _wsLogger.info('[GlobalWS] 超过最大重连次数，改为 %dms 间隔持续重连', delay)
     } else {
       delay = Math.min(
         RECONNECT_BASE_DELAY * Math.pow(2, this._reconnectAttempts),
@@ -619,7 +677,7 @@ class GlobalWebSocketService {
       )
     }
     this._reconnectAttempts++
-    console.info('[GlobalWS] %dms 后重连（第 %d 次, authRejected=%s）', delay, this._reconnectAttempts, authRejected)
+    _wsLogger.info('[GlobalWS] %dms 后重连（第 %d 次, authRejected=%s）', delay, this._reconnectAttempts, authRejected)
     // 认证拒绝需先 refresh：置标志，防止退避期间外部 connect(oldToken) 打断 refresh
     if (authRejected) {
       this._refreshingForReconnect = true

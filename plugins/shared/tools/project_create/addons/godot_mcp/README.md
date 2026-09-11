@@ -6,7 +6,7 @@ them, and verify the result. The addon hosts two local servers inside the runnin
 
 - a WebSocket server on `127.0.0.1`, first free port in 9080 to 9095, which the `godot-mcp` command
   line tool connects to;
-- a streamable-HTTP MCP endpoint at `POST /mcp` on `127.0.0.1`, first free port in 9100 to 9115,
+- a streamable-HTTP MCP endpoint at `POST /mcp` on `127.0.0.1`, first free port in 9116 to 9131,
   which an HTTP-capable MCP client connects to directly with no extra process running.
 
 Both enter the same workflow. Structured commands cover scenes, nodes, GDScript and C#, spatial

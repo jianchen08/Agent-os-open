@@ -6,12 +6,11 @@
 2. on_task_start：复用已有 meta / 子任务共享父空间 / 根任务分发 + skills 复制；
 3. _start_root_task：inherit 复用 / plain 直接目录 / 无显式 workspace 降级 plain /
    非 git 项目根降级 plain / worktree 建立全流程；
-4. _persist_ws_meta / restore_ws_meta / cleanup_workspace。
+4. _persist_ws_meta / restore_ws_meta。
 """
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -31,7 +30,8 @@ def _load_mod() -> Any:
     if mod_name in sys.modules:
         del sys.modules[mod_name]
     spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "workspace_lifecycle.py")
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -84,7 +84,6 @@ def _make_manager(
 
 def _git_init(repo: Path, branch: str = "main") -> None:
     repo.mkdir(parents=True, exist_ok=True)
-    m = _MOD.__dict__.get("_GIT_HELPER")
     import subprocess
 
     subprocess.run(["git", "init", "-b", branch, str(repo)], check=True, capture_output=True, text=True)
@@ -128,7 +127,6 @@ class TestSubtask:
     def test_worktree_mode_shares_parent_path(self, tmp_path: Path) -> None:
         parent_ws = tmp_path / "parent_ws"
         parent_ws.mkdir()
-        parent = _FakeTask("p1", parent_task_id=None)
         tree = _FakeTree({"sub1": _FakeTask("sub1", parent_task_id="p1")})
         meta_store = {"p1": {"path": str(parent_ws), "project_root": str(parent_ws)}}
         m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", tasks=tree._tasks, meta_store=meta_store)
@@ -341,34 +339,6 @@ class TestMetaPersist:
         m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", meta_store={"t1": {"path": "/keep"}})
         m.restore_ws_meta("t1")  # store 已有 → 不覆盖
         assert m._ws_meta_store["t1"]["path"] == "/keep"
-
-
-class TestCleanup:
-    def test_cleanup_no_meta(self, tmp_path: Path) -> None:
-        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
-        r = m.cleanup_workspace("ghost")
-        assert r == {"worktree_removed": False, "branch_deleted": False, "dir_removed": False}
-
-    def test_cleanup_plain_keeps_dir(self, tmp_path: Path) -> None:
-        ws = tmp_path / "plain_ws"
-        ws.mkdir()
-        meta_store = {"t1": {"mode": "plain", "path": str(ws)}}
-        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", meta_store=meta_store)
-        r = m.cleanup_workspace("t1")
-        assert r["worktree_removed"] is False
-        assert ws.exists()
-        assert "t1" not in m._ws_meta_store
-
-    def test_cleanup_worktree(self, tmp_path: Path) -> None:
-        repo = tmp_path / "repo"
-        _git_init(repo)
-        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
-        meta = m._start_root_task("r1", str(repo), {"task_id": "r1", "_has_explicit_workspace": True})
-        ws_dir = Path(meta["path"])
-        assert ws_dir.exists()
-        r = m.cleanup_workspace("r1")
-        assert r["worktree_removed"] is True
-        assert r["branch_deleted"] is True
 
 
 # ═══════════════════════════════════════════════════════════

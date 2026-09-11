@@ -105,6 +105,16 @@ class TestLifecycle:
         with pytest.raises(RuntimeError):
             srv._get_service()
 
+    def test_on_load_injects_frontdoor_instance_into_service_access(self, srv: Any) -> None:
+        """on_load 后 service_access.get_task_service() 即正门实例（同进程单例）；
+        on_unload 清除注入，克隆通道不再持有失效对象。"""
+        import service_access
+
+        frontdoor = srv._get_service()
+        assert service_access.get_task_service() is frontdoor
+        asyncio.run(srv._on_unload({}))
+        assert service_access.get_task_service() is not frontdoor
+
 
 class TestCreateGet:
     def test_create_returns_shape_and_get_roundtrip(self, srv: Any) -> None:

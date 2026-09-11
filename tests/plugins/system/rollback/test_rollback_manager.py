@@ -1,9 +1,9 @@
 # @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-coverage
-"""RollbackManager 单元测试——内存模式（无 DB session）下的核心逻辑。
+"""RollbackManager 单元测试——内存模式下的核心逻辑。
 
 覆盖：检查点 CRUD、操作日志记录与序号、回滚执行（按 steps / 按 checkpoint）、
 ReverserRegistry 路由、FileReverser 逆操作（用 tmp_path 真实文件）。
-不触及任何数据库/网络——manager 在 session=None 时纯内存。
+不触及任何数据库/网络——manager 纯内存。
 """
 
 from __future__ import annotations
@@ -23,10 +23,10 @@ pytestmark = pytest.mark.unit
 
 
 def _make_manager() -> Any:
-    """构造内存模式 RollbackManager（无 DB session）。"""
+    """构造内存模式 RollbackManager。"""
     from manager import RollbackManager
 
-    return RollbackManager(session=None)
+    return RollbackManager()
 
 
 def _make_manager_with_fake_reverser(reverser: Any) -> Any:
@@ -40,7 +40,7 @@ def _make_manager_with_fake_reverser(reverser: Any) -> Any:
     reg._tool_mapping = {}
     for tool in reverser.supported_tools:
         reg._tool_mapping[tool] = reverser.name
-    return RollbackManager(session=None, reverser_registry=reg)
+    return RollbackManager(reverser_registry=reg)
 
 
 class _FakeReverser:
@@ -364,6 +364,8 @@ class TestRollbackExecution:
 
         result = await mgr.rollback(task_id="t1", steps=1)
 
+        # 注入的逆操作器是外部协作边界：1 步回滚恰触发一次 reverse
+        # （异常不重试）即步数语义的契约。
         assert call_count == 1
         assert result.failed_count == 1
         assert result.success is False

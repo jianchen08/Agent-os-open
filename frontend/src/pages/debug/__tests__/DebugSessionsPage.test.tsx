@@ -6,23 +6,28 @@
  * 需确认前端组件的数据获取→状态更新→表格渲染链路完整。
  */
 import { screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import * as api from '@/services/api/executionRecords'
+import * as diag from '@/services/api/pipelineDiagnostics'
 import { renderWithProviders } from '@/test/renderWithProviders'
+import { DebugExecutionRecordsPage } from '../DebugExecutionRecordsPage'
+import { DebugSessionsPage } from '../DebugSessionsPage'
 
-// mock 整个 executionRecords API 模块
+// mock 整个 API 模块（vi.mock 提升到文件顶部， import 位置不影响生效）
 vi.mock('@/services/api/executionRecords', () => ({
   getExecutionRecordsSessions: vi.fn(),
   getExecutionRecords: vi.fn(),
   clearAllExecutionRecords: vi.fn(),
 }))
-
-import { DebugExecutionRecordsPage } from '../DebugExecutionRecordsPage'
-import { DebugSessionsPage } from '../DebugSessionsPage'
-import * as api from '@/services/api/executionRecords'
+vi.mock('@/services/api/pipelineDiagnostics', () => ({
+  getPipelineTraces: vi.fn(),
+  getPipelineStateFull: vi.fn(),
+}))
 
 const mockGetSessions = vi.mocked(api.getExecutionRecordsSessions)
-const mockGetRecords = vi.mocked(api.getExecutionRecords)
+const mockGetTraces = vi.mocked(diag.getPipelineTraces)
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -83,20 +88,16 @@ describe('DebugSessionsPage', () => {
   })
 })
 
-describe('DebugExecutionRecordsPage', () => {
-  it('加载成功后渲染记录表格', async () => {
-    mockGetSessions.mockResolvedValue({ sessions: [], total: 0 })
-    mockGetRecords.mockResolvedValue({
-      records: [
+describe('DebugExecutionRecordsPage（执行 Trace 视图）', () => {
+  it('未选管道时显示引导态且不请求 trace', async () => {
+    mockGetSessions.mockResolvedValue({
+      sessions: [
         {
-          id: 'abc123def456',
-          session_id: '504f14e3d403',
-          record_type: 'ai',
-          status: 'completed',
-          depth: 3,
-          sequence: 7,
-          message_data: {},
-          created_at: '2026-07-01T10:00:00',
+          id: 'pipe-1',
+          title: '任务会话',
+          created_at: '2026-09-08T10:00:00',
+          updated_at: '2026-09-08T10:00:00',
+          record_count: 3,
         },
       ],
       total: 1,
@@ -105,12 +106,71 @@ describe('DebugExecutionRecordsPage', () => {
     renderWithProviders(<DebugExecutionRecordsPage />)
 
     await waitFor(() => {
-      expect(screen.getByText('共 1 条')).toBeInTheDocument()
+      expect(screen.getByText(/选择一个管道/)).toBeInTheDocument()
+    })
+    expect(mockGetTraces).not.toHaveBeenCalled()
+  })
+
+  it('选中管道后加载 trace 并按插件/轮次/错误渲染', async () => {
+    const user = userEvent.setup()
+    mockGetSessions.mockResolvedValue({
+      sessions: [
+        {
+          id: 'pipe-1',
+          title: '任务会话',
+          created_at: '2026-09-08T10:00:00',
+          updated_at: '2026-09-08T10:00:00',
+          record_count: 3,
+        },
+      ],
+      total: 1,
+    })
+    mockGetTraces.mockResolvedValue({
+      pipeline_id: 'pipe-1',
+      total: 3,
+      traces: [
+        {
+          trace_id: 't1', run_id: 'r1', seq: 1, plugin_id: 'context_build',
+          patch_type: 'state_update', created_at: '2026-09-08T10:00:01Z',
+          iteration: null, summary: '加载 agent 配置', llm_usage: null,
+          error: null, tool_call_count: 0, patch_data: {},
+        },
+        {
+          trace_id: 't2', run_id: 'r1', seq: 2, plugin_id: 'llm_core',
+          patch_type: 'state_update', created_at: '2026-09-08T10:00:02Z',
+          iteration: 1, summary: '回复内容', llm_usage: {
+            input_tokens: 100, output_tokens: 20, total_tokens: 120,
+            cached_tokens: 0, model: 'MiniMax-M3',
+          },
+          error: null, tool_call_count: 1, patch_data: { iteration: 1 },
+        },
+        {
+          trace_id: 't3', run_id: 'r1', seq: 3, plugin_id: 'llm_core',
+          patch_type: 'error', created_at: '2026-09-08T10:00:03Z',
+          iteration: 2, summary: null,
+          llm_usage: null, error: 'CAPABILITY_TIMEOUT after 5000ms',
+          tool_call_count: 0, patch_data: { raw_error: 'CAPABILITY_TIMEOUT after 5000ms' },
+        },
+      ],
     })
 
-    // 记录 ID 渲染（移动端卡片 + 桌面端表格两处）
-    expect(screen.getAllByText('abc123def456').length).toBeGreaterThan(0)
-    // 不显示空状态
-    expect(screen.queryByText('暂无数据')).not.toBeInTheDocument()
+    renderWithProviders(<DebugExecutionRecordsPage />)
+
+    // 选中管道（下拉切换 = 换缓存条目，触发 trace 请求）
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: /任务会话|评测会话/ })).toBeInTheDocument()
+    })
+    await user.selectOptions(screen.getByRole('combobox'), 'pipe-1')
+
+    // 步数统计 + 插件徽章 + 轮次分组 + 错误呈现
+    await waitFor(() => {
+      expect(screen.getByText('共 3 步')).toBeInTheDocument()
+    })
+    expect(screen.getAllByText('llm_core').length).toBeGreaterThan(0)
+    // 错误文本在错误块与展开 patch 的 JSON 里各出现一次
+    expect(screen.getAllByText(/CAPABILITY_TIMEOUT/).length).toBeGreaterThan(0)
+    // 「轮 1」在分组标题与行内徽章各出现一次
+    expect(screen.getAllByText('轮 1').length).toBeGreaterThan(0)
+    expect(screen.getByText(/前置 \/ 后置步/)).toBeInTheDocument()
   })
 })

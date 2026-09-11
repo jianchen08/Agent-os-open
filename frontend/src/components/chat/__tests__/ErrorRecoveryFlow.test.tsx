@@ -17,7 +17,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ActivityCard from '@/components/chat/ActivityCard'
 import { useRealtimeEvents } from '@/hooks/useRealtimeEvents'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import type { ActivityData, ActivityStatus } from '@/types/activity'
+import type { ActivityData } from '@/types/activity'
 
 // ---------------------------------------------------------------------------
 //  Mock: lucide-react
@@ -85,7 +85,7 @@ vi.mock('@/types/activity', async (importOriginal) => {
 
 // ---------------------------------------------------------------------------
 //  Mock: GlobalWebSocket（真实订阅面：useRealtimeEvents 经 globalWS 订阅）
-//  此前 mock 的是无人 import 的 WebSocketService（mock 空气），事件从未触达真实 hook。
+//  mock 必须落在被测链路实际 import 的模块上——mock 无人 import 的模块（mock 空气）事件不会触达真实 hook。
 // ---------------------------------------------------------------------------
 const listeners: Record<string, Set<(...args: any[]) => void>> = {}
 

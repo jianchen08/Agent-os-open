@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """SUMMARY_ERROR 竞态回归测试。
 
 生产 bug：execute("echo alive") 报 "无法获取进程摘要"。

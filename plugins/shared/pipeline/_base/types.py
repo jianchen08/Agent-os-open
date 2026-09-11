@@ -43,14 +43,6 @@ class StateKeys:
     ATTACHMENTS = "attachments"
 
 
-class ErrorPolicy(Enum):
-    """0.2 运行时唯一错误策略：瞬态错误重试（见 invoker with_transparent_recovery）；
-    其余错误决策上抛编排层（引擎统一 warn + 继续，跳过/终止由路由表/step 决定）。
-    """
-
-    RETRY = "retry"
-
-
 # 任务"活跃"状态全集（与 tasks.types.TaskStatus 枚举语义对齐：未到终态且
 # 未停摆）：pending / running / evaluating。任务域插件（task_reminder 活跃
 # 子任务判定、child_task_guard 挂起判定等）统一引用此常量，禁止各自散定义。

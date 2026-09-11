@@ -23,12 +23,20 @@ resolve_request_user 执行（插件无法伪造角色，信任锚点在内核�
 from __future__ import annotations
 
 import base64
-import json
 import logging
 from typing import Any
 from urllib.parse import unquote
 
 from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
+
+from http_json import (  # noqa: E402
+    json_response as _json_response,
+    ok as _ok,
+    protocol_error as _error,
+)
 
 plugin = AgentOSPlugin("metrics_admin")
 logger = logging.getLogger(__name__)
@@ -50,31 +58,13 @@ def _response(payload_b64: str, status: int, content_type: str) -> dict[str, Any
     }
 
 
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    body = json.dumps(payload, default=str, ensure_ascii=False)
-    return _response(
-        base64.b64encode(body.encode("utf-8")).decode("ascii"),
-        status,
-        "application/json; charset=utf-8",
-    )
-
-
 def _text_response(text: str, status: int = 200) -> dict[str, Any]:
+    """prometheus exposition 文本面（text/plain，非 JSON，http_json 不覆盖）。"""
     return _response(
         base64.b64encode(text.encode("utf-8")).decode("ascii"),
         status,
         "text/plain; charset=utf-8; version=0.0.4",
     )
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
-    return {"success": True, "data": data}
-
-
-def _error(status: int, message: str) -> dict[str, Any]:
-    """错误响应（对齐 ApiError 的 {"error": {code, message}} 形状）。"""
-    return _ok(_json_response({"error": {"code": str(status), "message": message}}, status))
 
 
 def _authorization(headers: dict[str, str] | None) -> str:
@@ -154,7 +144,7 @@ async def http_handle(
     del plugin_id, raw_body  # 只读面：无 body 消费；dispatcher 已路由到本插件
     cap_method = _route(path)
     if cap_method is None:
-        return _error(404, f"metrics_admin: no route for {method} {path}")
+        return _error(f"metrics_admin: no route for {method} {path}", 404)
 
     params: dict[str, Any] = _query_params(query) if cap_method == "query" else {}
     params["_authorization"] = _authorization(headers)
@@ -163,13 +153,13 @@ async def http_handle(
         cap = plugin.get_capability(_CAPABILITY)
         envelope = await cap.call(cap_method, params)
     except KeyError:
-        return _error(502, f"{_CAPABILITY} capability not injected (kernel handshake pending)")
+        return _error(f"{_CAPABILITY} capability not injected (kernel handshake pending)", 502)
     except Exception as exc:  # noqa: BLE001 —— capability 调用失败统一 502
         logger.warning("metrics_admin http.handle: capability %s failed: %s", cap_method, exc)
-        return _error(502, f"metrics-admin capability call failed: {exc}")
+        return _error(f"metrics-admin capability call failed: {exc}", 502)
 
     if not isinstance(envelope, dict):
-        return _error(502, f"metrics-admin capability returned non-dict envelope: {type(envelope)}")
+        return _error(f"metrics-admin capability returned non-dict envelope: {type(envelope)}", 502)
     status = int(envelope.get("status", 200))
     if not 200 <= status < 300:
         err = envelope.get("error") or {}

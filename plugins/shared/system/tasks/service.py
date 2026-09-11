@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -64,7 +62,12 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
         old_status: str,
         new_status: str,
     ) -> None:
-        """通知所有注册的回调函数任务状态已变更，并通过 WebSocket 推送事件。"""
+        """通知所有注册的回调函数任务状态已变更。
+
+        前端感知任务状态的现状契约：终态经 events.py 派生的
+        task_completed/task_failed 域事件（event-bus）；中间状态变更
+        （running/stopped 等）无前端通知，消费方以 state 聚合读面为准。
+        """
         logger.debug("state change: %s -> %s | task=%s", old_status, new_status, task_id[:12] if task_id else "")
 
         for cb in self._state_callbacks:
@@ -72,33 +75,3 @@ class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
                 await cb(task_id, old_status, new_status)
             except Exception as exc:
                 logger.warning("state callback 执行失败（不影响状态转换主流程）: %s", exc)
-
-        # 非阻塞推送 task_status_changed WebSocket 事件
-        self._push_status_change_ws(task_id, old_status, new_status)
-
-    def _push_status_change_ws(
-        self,
-        task_id: str,
-        old_status: str,
-        new_status: str,
-    ) -> None:
-        """通过 MessageBus 推送任务状态变更 WebSocket 事件（fire-and-forget）。"""
-        with contextlib.suppress(RuntimeError):
-            asyncio.create_task(
-                self._do_push_status_change_ws(task_id, old_status, new_status),
-            )
-
-    async def _do_push_status_change_ws(
-        self,
-        task_id: str,
-        old_status: str,
-        new_status: str,
-    ) -> None:
-        """状态变更直推路径（保持退役，空实现）。
-
-        0.2 前端感知任务状态的现状契约：终态经 events.py 派生的
-        task_completed/task_failed 域事件（event-bus）；中间状态变更
-        （running/stopped 等）无前端通知，消费方以 state 聚合读面为准。
-        0.1 的 ws_interaction_notifier 已随 infrastructure 层退役。
-        """
-        return

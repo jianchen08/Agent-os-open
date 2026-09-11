@@ -91,7 +91,11 @@ class FeishuStreamClient:
         获取 tenant_access_token → 获取 WebSocket endpoint → 建立连接 → 开始接收循环。
         """
         self._running = True
-        self._session = aiohttp.ClientSession()
+        # 显式超时契约：total 只约束 HTTP 请求面（token/endpoint/消息 POST），
+        # WS 升级完成后 aiohttp 重置读超时、不受 total 影响（长连接收循环
+        # 不被误杀）；缺省会继承库默认 total=300s，故障请求挂起 5 分钟不可感知。
+        timeout = aiohttp.ClientTimeout(total=30)
+        self._session = aiohttp.ClientSession(timeout=timeout)
 
         await self._ensure_token()
 

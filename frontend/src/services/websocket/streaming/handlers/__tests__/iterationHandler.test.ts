@@ -11,23 +11,19 @@
  * 5. 事件不影响 store（无任何副作用）
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 const mockDebug = vi.hoisted(() => vi.fn())
 const mockWarn = vi.hoisted(() => vi.fn())
-
 vi.mock('@/utils/logger', () => ({
   loggers: {
     websocket: { debug: mockDebug, info: vi.fn(), warn: mockWarn, error: vi.fn() },
   },
 }))
-
 vi.mock('../router', () => ({
   resolvePipelineId: (data: any) => {
     const pid = data?.data?.pipeline_id ?? data?.pipeline_id
     return typeof pid === 'string' && pid.length > 0 ? pid : null
   },
 }))
-
 import { handleIteration } from '../iterationHandler'
 
 describe('handleIteration 迭代事件（日志性质，不写 store）', () => {

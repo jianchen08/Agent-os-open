@@ -68,6 +68,52 @@ def test_on_load_preheats_instance(monkeypatch: pytest.MonkeyPatch) -> None:
     assert server.get_instance() is not None
 
 
+def test_on_load_injects_destroy_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """on_load：tool-executor 能力在 → 注入销毁调用方（经正门 invoke 带 plugin_id）。"""
+    server = _load_server()
+    monkeypatch.setattr(server.plugin, "get_config", lambda: {})
+    captured: dict = {}
+
+    class _FakeHandle:
+        async def call(self, method: str, params: dict, timeout: float | None = None) -> Any:
+            captured["method"] = method
+            captured["params"] = params
+            return {"destroyed": True}
+
+    def _get_capability(name: str) -> Any:
+        if name == "tool-executor":
+            return _FakeHandle()
+        raise KeyError(name)
+
+    monkeypatch.setattr(server.plugin, "get_capability", _get_capability)
+    injected: list[Any] = []
+    monkeypatch.setattr(server, "set_destroy_caller", lambda c: injected.append(c))
+    _run(server._on_load({}))
+    assert len(injected) == 1
+    # 注入的 caller 路由到 isolation_service 正门（显式 plugin_id + 工具名）；
+    # bind_capability_caller 剥掉能力前缀后交句柄（句柄负责拼 "tool-executor."）
+    _run(injected[0]("isolation.destroy_env", {"task_id": "t-1"}))
+    assert captured["method"] == "invoke"
+    assert captured["params"]["plugin_id"] == "isolation_service"
+    assert captured["params"]["tool_name"] == "isolation.destroy_env"
+    assert captured["params"]["args"] == {"task_id": "t-1"}
+
+
+def test_on_load_degrades_without_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+    """on_load：tool-executor 能力缺失 → 注入 None（降级，不崩溃）。"""
+    server = _load_server()
+    monkeypatch.setattr(server.plugin, "get_config", lambda: {})
+
+    def _missing(name: str) -> Any:
+        raise KeyError(name)
+
+    monkeypatch.setattr(server.plugin, "get_capability", _missing)
+    injected: list[Any] = []
+    monkeypatch.setattr(server, "set_destroy_caller", lambda c: injected.append(c))
+    _run(server._on_load({}))
+    assert injected == [None]
+
+
 def test_on_unload_clears_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _load_server()
     monkeypatch.setattr(server.plugin, "get_config", lambda: {})

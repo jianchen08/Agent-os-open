@@ -15,8 +15,8 @@
  * @param embedded 嵌入设置主页右侧面板时为 true（去掉独立全屏头）
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Code, Eye, Loader2 } from '@/assets/icons'
 import { ConfigObject } from '@/components/config/PluginConfigEditor'
 import { PipelineFlowEditor } from '@/components/pipeline/PipelineFlowEditor'
@@ -28,9 +28,6 @@ import {
   savePipelineConfig,
 } from '@/services/api/pipelineConfig'
 import { fetchPipelinePluginCatalog } from '@/services/api/pipelines'
-import { queryClient } from '@/services/query/queryClient'
-import { queryKeys } from '@/services/query/queryKeys'
-import { shouldDisableConfigSave } from '@/utils/configEditorGuard'
 import {
   deleteAtPath,
   insertAtPath,
@@ -38,6 +35,9 @@ import {
   moveArrayItem,
   setAtPath,
 } from '@/services/pipeline/model'
+import { queryClient } from '@/services/query/queryClient'
+import { queryKeys } from '@/services/query/queryKeys'
+import { shouldDisableConfigSave } from '@/utils/configEditorGuard'
 import type { PipelinePluginCatalogEntry } from '@/services/api/pipelines'
 import type { Path, PipelineEditorOps } from '@/services/pipeline/model'
 

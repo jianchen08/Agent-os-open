@@ -12,10 +12,14 @@
  * 注意：fake timers 下禁用 RTL waitFor（其自动推进会反复触发 refetchInterval，
  * 计数断言永不满足）——统一用 act + advanceTimersByTimeAsync 手动 flush。
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
-import type { ReactNode } from 'react'
 import { QueryClientProvider } from '@tanstack/react-query'
+import { renderHook, act } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type * as useLongTermTasksQueryMod from '../useLongTermTasksQuery'
+import type * as useRealtimeEventsMod from '@/hooks/useRealtimeEvents'
+import type * as queryClientMod from '@/services/query/queryClient'
+import type * as queryKeysMod from '@/services/query/queryKeys'
+import type { ReactNode } from 'react'
 
 // ---- Mocks ----
 
@@ -55,10 +59,10 @@ async function flushTimers(ms = 0) {
 }
 
 // ---- 被测模块（动态 import 拿模块单例，与 queryClient 单例同源） ----
-let queryClient: typeof import('@/services/query/queryClient')['queryClient']
-let queryKeys: typeof import('@/services/query/queryKeys')['queryKeys']
-let useLongTermTasksQuery: typeof import('../useLongTermTasksQuery')['useLongTermTasksQuery']
-let useRealtimeEvents: typeof import('@/hooks/useRealtimeEvents')['useRealtimeEvents']
+let queryClient: queryClientMod['queryClient']
+let queryKeys: queryKeysMod['queryKeys']
+let useLongTermTasksQuery: useLongTermTasksQueryMod['useLongTermTasksQuery']
+let useRealtimeEvents: useRealtimeEventsMod['useRealtimeEvents']
 
 function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>

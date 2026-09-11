@@ -122,5 +122,10 @@
     "evaluation.of_task",
     "evaluation.metric_id",
     "evaluation.detected_result"
-  ]
+  ],
+  "mcp": {
+    "transport": "stdio",
+    "request_timeout_secs": 1800
+  },
+  "host_group": "light"
 }

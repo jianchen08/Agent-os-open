@@ -20,7 +20,6 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useNotificationStore } from '@/stores/notificationStore'
-
 const { mockPipelineStore, mockTabStore, mockSessionListStore, mockSessionStore } = vi.hoisted(
   () => ({
     mockPipelineStore: {
@@ -46,23 +45,18 @@ const { mockPipelineStore, mockTabStore, mockSessionListStore, mockSessionStore 
     },
   }),
 )
-
 vi.mock('@/stores/pipelineMessageStore', () => ({
   usePipelineMessageStore: { getState: () => mockPipelineStore },
 }))
-
 vi.mock('@/stores/agentTabStore', () => ({
   useAgentTabStore: { getState: () => mockTabStore },
 }))
-
 vi.mock('@/stores/sessionStore', () => ({
   useSessionStore: { getState: () => mockSessionStore },
 }))
-
 vi.mock('@/stores/sessionListStore', () => ({
   useSessionListStore: { getState: () => mockSessionListStore },
 }))
-
 // readSessions 由 mock 控制；forceReloadSessions 模拟"强制重拉并写回缓存"：
 // 首次调用时把 fetchedSessions 灌入 mockSessions（即 query cache），
 // 之后的 readSessions 就能读到——与真实 forceReloadSessions 语义一致
@@ -78,11 +72,9 @@ vi.mock('@/hooks/queries/useSessionsQuery', () => ({
     return mockSessions
   },
 }))
-
 vi.mock('@/utils/logger', () => ({
   loggers: { websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } },
 }))
-
 import { findPipelineLocation, navigateToPipeline } from '../pipelineNavigator'
 
 const SESSION_A = 'session-a'
@@ -221,12 +213,14 @@ describe('navigateToPipeline - 全局导航', () => {
     expect(mockTabStore.switchToTab).toHaveBeenCalledWith('tab-a')
   })
 
-  it('找不到管道归属 → 上报通知（含原因与 pipelineId，高优先级自动弹面板）并返回 false', async () => {
+  it('找不到管道归属 → 上报高优通知（含原因与 pipelineId）但不弹抽屉，返回 false', async () => {
+    // 契约更新（GUI 黑盒测试 2026-09-11）：瞬态 toast 类通知（isBlocking:false +
+    // autoDismissMs）不再自动弹全屏抽屉——曾致通知自动消失后空抽屉持续遮挡整页。
     mockSessionStore.activeSessionId = SESSION_A
     const ok = await navigateToPipeline('pipe-nowhere')
     expect(ok).toBe(false)
     const { notifications, isPanelOpen } = useNotificationStore.getState()
-    expect(isPanelOpen).toBe(true)
+    expect(isPanelOpen).toBe(false)
     expect(
       notifications.some(
         (n) =>

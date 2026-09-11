@@ -8,8 +8,8 @@
  * 关联 ADR §3.5'（内核统一配置驱动推送）。
  */
 import { useEffect } from 'react'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { adaptWidgetEvent } from '@/services/websocket/MessageAdapter'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
 import { loggers } from '@/utils/logger'

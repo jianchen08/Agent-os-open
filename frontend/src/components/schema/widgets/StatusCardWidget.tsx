@@ -14,8 +14,8 @@
 
 import React from 'react'
 import { AlertCircle, CheckCircle2, Clock, Loader2, PauseCircle, XCircle } from '@/assets/icons'
-import { useWidgetEventStore } from '@/stores/widgetEventStore'
 import { DataWidgetStatus, useDataWidget } from '@/services/schema/dataWidget'
+import { useWidgetEventStore } from '@/stores/widgetEventStore'
 
 // ═════════════════════════════════════════════════════════════════
 // metric 形态（原 StatusCardWidget）

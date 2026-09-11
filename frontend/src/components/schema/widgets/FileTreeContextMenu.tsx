@@ -7,6 +7,7 @@
  * @module FileTreeContextMenu
  */
 
+import React, { useState, useCallback, useEffect, useRef } from 'react'
 import {
   Plus,
   Trash2,
@@ -16,7 +17,6 @@ import {
   Folder,
   X,
 } from '@/assets/icons'
-import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { useWorkspaceStore } from '@/stores/workspaceStore'
 
 /** 上下文菜单上下文数据 */

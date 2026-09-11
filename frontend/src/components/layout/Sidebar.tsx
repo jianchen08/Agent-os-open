@@ -16,6 +16,7 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Bell, ChatIcon, ChatActiveIcon, Loader2, Plus, User, X } from '@/assets/icons'
+import { ChangePasswordForm } from '@/components/auth/ChangePasswordForm'
 import { LoginModal } from '@/components/auth/LoginModal'
 import { NotificationCenter } from '@/components/chat/NotificationCenter'
 import { PluginStatusItems } from '@/components/layout/StatusItems'
@@ -23,6 +24,7 @@ import { ThemeButton } from '@/components/layout/ThemeButton'
 import { SessionEditModal, type SessionFormOptions } from '@/components/session/SessionEditModal'
 import { SessionList } from '@/components/session/SessionList'
 import { SessionSearch } from '@/components/session/SessionSearch'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,6 +36,7 @@ import {
 import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
 import { cn } from '@/lib/utils'
 import { searchGlobal, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
+import { performLogout } from '@/services/auth/logout'
 import { reportError, ErrorSeverity, ErrorType } from '@/services/errorReporting'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { evaluateWhen } from '@/services/schema/whenExpression'
@@ -109,7 +112,6 @@ const SIDEBAR_STYLES = {
  * - 新增: 移动端响应式支持，带遮罩层和关闭按钮
  */
 export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
-  const navigate = useNavigate()
   const [searchKeyword, setSearchKeyword] = useState('')
   /** 后端搜索结果（防抖调用 monitoring 插件 search） */
   const [searchResults, setSearchResults] = useState<{
@@ -150,10 +152,15 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     )
   }, [contribTick, user])
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
-  const logout = useAuthStore((s) => s.logout)
+  const navigate = useNavigate()
+  /** 登出走统一编排（WS/流式清理+logout+跳转），与 router.tsx 的 onLogout 同源 */
+  const handleLogout = useCallback(() => {
+    void performLogout(navigate)
+  }, [navigate])
 
   // 弹窗式登录框状态（点菜单里的"登录"才打开）
   const [loginModalOpen, setLoginModalOpen] = useState(false)
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false)
 
   // 会话列表（query 化）：缓存秒开 + 后台静默刷新；仅在无缓存冷加载时显示 loading
   const { data: sessions = [], isPending: isSessionsPending } = useSessionsQuery()
@@ -424,10 +431,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     (entry: PageDeclaration) => {
       setActiveView(entry.id)
       if (entry.path && typeof entry.path === 'string') {
-        const opened = openWorkspacePanelByPath(entry.path)
-        if (!opened && entry.path.startsWith('/')) {
-          navigate(entry.path)
-        }
+        // 声明页一律经 opener 解析；解析失败由 opener 显式报错，不做 navigate
+        // 兜底（未声明路径落 '*' 通配只会静默回首页，P0-1）
+        openWorkspacePanelByPath(entry.path)
       } else if (entry.widget) {
         openWorkspacePanel({
           id: `ws-plugin-${entry.id}`,
@@ -451,7 +457,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       }
       if (isMobile) setSidebarCollapsed(true)
     },
-    [isMobile, navigate, setSidebarCollapsed],
+    [isMobile, setSidebarCollapsed],
   )
 
   const handleSessionsClick = useCallback(() => {
@@ -619,9 +625,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                         切换账号
                       </DropdownMenuItem>
                       <DropdownMenuItem
-                        onClick={() => {
-                          logout()
-                        }}
+                        onClick={handleLogout}
                         className="text-destructive focus:text-destructive"
                       >
                         退出登录
@@ -632,7 +636,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   <DropdownMenuItem onClick={() => openWorkspacePanelByPath('/settings')}>
                     设置
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => navigate('/monitoring')}>监控</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => openWorkspacePanelByPath('/monitoring')}>
+                    监控
+                  </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() => openWorkspacePanelByPath('/tasks')}
                     data-testid="sidebar-user-menu-tasks"
@@ -870,15 +876,19 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                     {isAuthenticated && (
                       <>
                         <DropdownMenuItem
+                          onClick={() => setChangePasswordOpen(true)}
+                          data-testid="sidebar-user-menu-change-password"
+                        >
+                          修改密码
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
                           onClick={() => setLoginModalOpen(true)}
                           data-testid="sidebar-user-menu-switch"
                         >
                           切换账号
                         </DropdownMenuItem>
                         <DropdownMenuItem
-                          onClick={() => {
-                            logout()
-                          }}
+                          onClick={handleLogout}
                           className="text-destructive focus:text-destructive"
                           data-testid="sidebar-user-menu-logout"
                         >
@@ -894,7 +904,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                       设置
                     </DropdownMenuItem>
                     <DropdownMenuItem
-                      onClick={() => navigate('/monitoring')}
+                      onClick={() => openWorkspacePanelByPath('/monitoring')}
                       data-testid="sidebar-user-menu-monitoring"
                     >
                       监控
@@ -933,6 +943,16 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
 
       {/* 弹窗式登录框：点击底栏用户区域即弹出（不跳转页面） */}
       <LoginModal open={loginModalOpen} onClose={() => setLoginModalOpen(false)} />
+
+      {/* 账户设置·修改口令（D1-3）：成功后自动关闭 */}
+      <Dialog open={changePasswordOpen} onOpenChange={setChangePasswordOpen}>
+        <DialogContent className="sm:max-w-md" data-testid="change-password-dialog">
+          <DialogHeader>
+            <DialogTitle>修改密码</DialogTitle>
+          </DialogHeader>
+          <ChangePasswordForm onSuccess={() => setChangePasswordOpen(false)} />
+        </DialogContent>
+      </Dialog>
 
       <SessionEditModal
         mode={modal?.mode || 'create'}

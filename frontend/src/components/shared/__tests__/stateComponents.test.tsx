@@ -1,14 +1,13 @@
 // @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
- * 轻量展示组件测试：EmptyState / ErrorState / Pagination
+ * 轻量展示组件测试：EmptyState / ErrorState
  *
  * 纯 props→渲染，无外部依赖。
  */
-import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
+import { describe, it, expect, vi } from 'vitest'
 import { EmptyState } from '@/components/shared/EmptyState'
 import { ErrorState } from '@/components/shared/ErrorState'
-import { Pagination } from '@/components/shared/Pagination'
 import type { LucideIcon } from '@/assets/icons'
 
 const FakeIcon = (() => null) as unknown as LucideIcon
@@ -60,48 +59,5 @@ describe('ErrorState', () => {
   it('center 变体无 onRetry → 不显示重试按钮', () => {
     render(<ErrorState message="仅提示" variant="center" />)
     expect(screen.queryByRole('button', { name: '重试' })).toBeNull()
-  })
-})
-
-describe('Pagination', () => {
-  it('显示 current/totalPages；中间页两按钮均可用', () => {
-    const onChange = vi.fn()
-    render(<Pagination current={2} total={50} pageSize={10} onChange={onChange} />)
-    expect(screen.getByText('2 / 5')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '上一页' }))
-    expect(onChange).toHaveBeenCalledWith(1)
-    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
-    expect(onChange).toHaveBeenCalledWith(3)
-  })
-
-  it('首页时上一页禁用；末页时下一页禁用', () => {
-    const onChange = vi.fn()
-    const { rerender } = render(<Pagination current={1} total={100} onChange={onChange} />)
-    expect(screen.getByRole('button', { name: '上一页' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
-    expect(onChange).toHaveBeenCalledWith(2)
-
-    rerender(<Pagination current={5} total={100} onChange={onChange} />)
-    expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled()
-  })
-
-  it('禁用态点击不触发 onChange', () => {
-    const onChange = vi.fn()
-    render(<Pagination current={1} total={10} onChange={onChange} />)
-    fireEvent.click(screen.getByRole('button', { name: '上一页' }))
-    expect(onChange).not.toHaveBeenCalled()
-  })
-
-  it('total 为 0 → totalPages 兜底为 1，仅显示 1 / 1', () => {
-    const onChange = vi.fn()
-    render(<Pagination current={1} total={0} onChange={onChange} />)
-    expect(screen.getByText('1 / 1')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '上一页' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled()
-  })
-
-  it('非整除 total → 向上取整（total=5, pageSize=2 → 3 页）', () => {
-    render(<Pagination current={2} total={5} pageSize={2} onChange={vi.fn()} />)
-    expect(screen.getByText('2 / 3')).toBeInTheDocument()
   })
 })

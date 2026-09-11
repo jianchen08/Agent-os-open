@@ -159,6 +159,8 @@ def _read_docker_host_resources() -> tuple[float, int] | None:
             ["docker", "info", "--format", "{{.MemTotal}} {{.NCPU}}"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
         )
         if result.returncode != 0:

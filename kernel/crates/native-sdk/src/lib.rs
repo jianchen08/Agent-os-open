@@ -59,7 +59,7 @@ pub trait HostServices: Send + Sync {
     ///
     /// 返回 `Ok(result_json)`（借用绑定 `&self` 生命周期）或 `Err(error_msg)`。
     ///
-    /// # 跨分配器契约（2026-09-01 两方向都不能省；2026-09-02 收口 Err 分支）
+    /// # 跨分配器契约（两方向都不能省，含 Err 分支）
     ///
     /// exe 与 cdylib 的全局分配器可能不同（mi exe × 系统堆 dll），**任何跨边界的
     /// 所有权转移都是跨堆 free UB**。协议：
@@ -69,8 +69,7 @@ pub trait HostServices: Send + Sync {
     ///   dll **立即**解析（转 Value/拷贝），不存引用、不释放——下次同 host 调用
     ///   会覆盖缓冲。`&str` 生命周期与 `&self` 绑定，借用检查强制消费内完成。
     /// - **Err 分支同契约**：错误消息同样写 exe 自持缓冲借 `&str` 返回，禁止
-    ///   返回 `String`（此前 `Err(String)` 把 exe 堆 String 交 dll 侧 drop =
-    ///   反方向跨堆 free UB，2026-09-02 真机 SIGSEGV 实测）。
+    ///   返回 `String`——exe 堆 String 交 dll 侧 drop = 反方向跨堆 free UB。
     fn call_capability(
         &self,
         capability: &str,
@@ -94,19 +93,22 @@ pub trait PipelinePlugin: Send + Sync {
     /// - 返回 `Ok(state_updates_json)`（借用绑定 `&self` 生命周期）或
     ///   `Err(error_msg)`。
     ///
-    /// # 跨分配器契约（2026-09-01，与 `HostServices` 对称；2026-09-02 收口 Err 分支）
+    /// # 跨分配器契约（与 `HostServices` 对称，含 Err 分支）
     ///
     /// **跨边界零所有权转移（含 Err 分支）**：调用方（内核）对返回串**立即拷贝**
     /// （转 Value/落 state），不存引用、不释放——缓冲由 dll 分配与释放（dll 堆），
-    /// 借用生命周期与 `&self` 绑定。禁止返回 `String`（exe drop = 跨堆 free UB，
-    /// 2026-09-01 差分实验 10/15 复现真机段错误）；**`Err` 分支同样禁止返回
-    /// `String`**——此前 `Err(String)` 把 dll 堆 String 交 exe 侧 drop =
-    /// 正向跨堆 free UB（2026-09-02 真机 5 连 SIGSEGV 定案：spill_guard 每轮
-    /// output 出错即同秒崩，崩溃点 mimalloc segmap 查询）。错误消息写实现方
-    /// 自持缓冲、借 `&str` 返回。
+    /// 借用生命周期与 `&self` 绑定。禁止返回 `String`（exe drop = 跨堆 free UB）；
+    /// **`Err` 分支同样禁止返回 `String`**——dll 堆 String 交 exe 侧 drop =
+    /// 正向跨堆 free UB。错误消息写实现方自持缓冲、借 `&str` 返回。
     ///
-    /// 插件实现惯例：把 JSON 存进 `&self` 的内部缓冲字段（`Mutex<String>`，
-    /// execute 在 blocking 线程串行调用），返回其 `&str`。
+    /// 插件实现惯例：把 JSON 存进 `&self` 的内部缓冲字段（`Mutex<String>` 或
+    /// `UnsafeCell<String>`），返回其 `&str`。
+    ///
+    /// # 串行契约（loader 强制）
+    ///
+    /// 同一实例的 execute 由内核 loader 串行调用（`NativePlugin.exec_lock`
+    /// 强制，调用与返回串拷贝全程持锁）——非线程安全的自持缓冲在此前提下无
+    /// 并发写面；插件自身无需再加锁，但也不得依赖多实例/多线程并发。
     fn execute(&self, ectx: &ExecContext) -> Result<&str, &str>;
 }
 
@@ -313,8 +315,8 @@ mod tests {
     impl PipelinePlugin for DummyPlugin {
         fn execute(&self, _ectx: &ExecContext) -> Result<&str, &str> {
             // 对称借用协议：结果存 &self 内部缓冲，返回其 &str（dll 侧持有）。
-            // SAFETY: execute 由 loader 在 blocking 线程串行调用（见 trait 契约），
-            // &self 期间无并发写者；内部缓冲借出 &str 且调用方同步消费。
+            // SAFETY: execute 由 loader 保证同实例串行（exec_lock 强制，见 trait
+            // 契约），&self 期间无并发写者；内部缓冲借出 &str 且调用方同步消费。
             let buf = unsafe { &mut *self.buf.get() };
             buf.clear();
             buf.push_str(r#"{"ok":true}"#);
@@ -322,7 +324,8 @@ mod tests {
         }
     }
 
-    // SAFETY: execute 契约=blocking 线程串行（见 trait 契约），UnsafeCell 无并发写。
+    // SAFETY: execute 契约=同实例串行（loader exec_lock 强制，见 trait 契约），
+    // UnsafeCell 无并发写。
     unsafe impl Sync for DummyPlugin {}
 
     #[test]
@@ -355,7 +358,8 @@ mod tests {
                 }
             }
         }
-        // SAFETY: 同 DummyPlugin（blocking 线程串行，&self 独占期写读不重叠）。
+        // SAFETY: 同 DummyPlugin（loader 保证同实例 execute 串行——exec_lock
+        // 强制，&self 独占期写读不重叠）。
         unsafe impl Sync for ErrorPlugin {}
         impl PipelinePlugin for ErrorPlugin {
             fn execute(&self, _ectx: &ExecContext) -> Result<&str, &str> {

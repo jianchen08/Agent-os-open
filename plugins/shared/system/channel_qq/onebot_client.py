@@ -21,6 +21,7 @@ https://github.com/botuniverse/onebot-11
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -51,25 +52,30 @@ class OneBotClient:
 
     def __init__(
         self,
-        ws_host: str = "0.0.0.0",
+        ws_host: str = "127.0.0.1",
         ws_port: int = 8080,
         http_api_url: str = "http://127.0.0.1:5700",
         *,
+        access_token: str = "",
         max_retries: int = 5,
         base_delay: float = 1.0,
     ) -> None:
         """初始化 OneBot 客户端。
 
         Args:
-            ws_host: WebSocket 服务端监听地址
+            ws_host: WebSocket 服务端监听地址（默认只绑回环，不暴露到所有网卡）
             ws_port: WebSocket 服务端监听端口
             http_api_url: OneBot HTTP API 地址
+            access_token: OneBot access_token 鉴权令牌。空值 = fail-closed
+                （拒绝所有反向 WS 连接并告警）——监听面无鉴权等于任意网络
+                可达者可伪装 OneBot 实例注入消息事件，宁拒连不放行
             max_retries: 最大重连次数
             base_delay: 重连基础延迟（秒）
         """
         self._ws_host = ws_host
         self._ws_port = ws_port
         self._http_api_url = http_api_url.rstrip("/")
+        self._access_token = access_token
         self._max_retries = max_retries
         self._base_delay = base_delay
 
@@ -229,17 +235,52 @@ class OneBotClient:
 
     # ── WebSocket 处理 ──────────────────────────────────────
 
-    async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
+    def _verify_access_token(self, request: web.Request) -> bool:
+        """校验 OneBot access_token（fail-closed）。
+
+        OneBot v11 约定 token 经 ``Authorization: Bearer <token>`` 头或
+        ``access_token`` 查询参数携带（go-cqhttp 两种方式均支持）。
+        未配置 token 时拒绝所有连接——鉴权缺位 = 任意网络可达者可伪装
+        OneBot 实例注入消息事件，宁可拒连告警也不放行。
+
+        Returns:
+            True=凭据匹配；False=拒绝（未配置/缺席/不符）。
+        """
+        expected = self._access_token
+        if not expected:
+            logger.warning(
+                "OneBot WS connection rejected: no access_token configured "
+                "(fail-closed) from %s — set access_token in channel_qq plugin config",
+                request.remote,
+            )
+            return False
+        provided = ""
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            provided = auth[len("Bearer "):].strip()
+        if not provided:
+            provided = str(request.query.get("access_token", ""))
+        return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+    async def _ws_handler(self, request: web.Request) -> web.StreamResponse:
         """处理 WebSocket 连接。
 
         当 go-cqhttp 连接到我们的 WS 服务端时触发。
+        连接建立前先校验 access_token，凭据无效直接 401 拒绝（不升级为 WS）。
 
         Args:
             request: aiohttp 请求对象
 
         Returns:
-            WebSocket 响应
+            WebSocket 响应；鉴权失败时返回 401 文本响应
         """
+        if not self._verify_access_token(request):
+            logger.warning(
+                "OneBot WS connection rejected: invalid access_token from %s",
+                request.remote,
+            )
+            return web.Response(status=401, text="invalid access_token")
+
         ws = web.WebSocketResponse()
         await ws.prepare(request)
 

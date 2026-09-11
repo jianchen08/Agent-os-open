@@ -473,12 +473,14 @@ pub async fn update_session_handler(
 /// 级联删除该会话下全部管道（主管道 + 子任务管道，经 pipeline_sessions 映射表按
 /// thread_id 定位）的 messages / execution_records / traces / branches /
 /// pipeline_run_summaries / runs，最后清映射表与 sessions 行。blobs 不删（内容寻址去重）。
-/// store 不可用或无记录仍返回 200（幂等，对齐 REST 删除语义）。
+/// 落库失败 → 503 统一错误信封（B1：删除未成立不得 `deleted:true` 假成功，
+/// 域事件与成功响应只在删除已成立的 Ok 路径发出）；store 未配置或无记录仍
+/// 返回 200（幂等，对齐 REST 删除语义）。
 pub async fn delete_session_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Json<Value> {
+) -> Result<Json<Value>, ApiError> {
     if let Some(store) = state.store.as_ref() {
         // 多租户：级联删除按 task_local tenant 过滤，需在请求租户 scope 内执行。
         // scope 缺失时（task_local 未设 → current_or_default("default")），
@@ -503,11 +505,17 @@ pub async fn delete_session_handler(
         })
         .await;
         if let Err(e) = del_result {
-            tracing::warn!(thread_id = %id, error = %e, "delete_session 落库失败（仍返回 200）");
+            // B1：删除未落库 = 数据原封未动，必须让前端能据状态码区分
+            // 「已删除」与「根本没删进去」（对齐同文件 list_sessions 的
+            // 503 存储故障语义），不发 session.deleted、不回 deleted:true。
+            tracing::error!(thread_id = %id, error = %e, "delete_session 落库失败");
+            return Err(ApiError::ServiceUnavailable {
+                message: format!("删除会话失败（数据未删除）: {e}"),
+            });
         }
     }
 
-    // 域事件插座：session.deleted（语义：删除请求已受理；级联清理见 store）。
+    // 域事件插座：session.deleted（语义：删除已成立；级联清理见 store）。
     crate::plugin_lifecycle::broadcast_domain_event(
         &state,
         "session.deleted",
@@ -515,7 +523,7 @@ pub async fn delete_session_handler(
     )
     .await;
 
-    Json(json!({ "thread_id": id, "deleted": true }))
+    Ok(Json(json!({ "thread_id": id, "deleted": true })))
 }
 
 /// GET /api/v1/sessions/{id}/messages — 按管道查询历史消息（消息层自治查询）。
@@ -751,7 +759,7 @@ pub async fn sessions_schema_handler(State(state): State<AppState>) -> Json<Valu
             continue;
         };
         for f in list {
-            // 只收带 name 的合法声明项，与 channel_api _collect_plugin_thread_fields 对齐
+            // 只收带 name 的合法声明项（无 name 的声明不构成字段）
             if f.get("name").and_then(|n| n.as_str()).is_some() {
                 fields.push(f.clone());
             }
@@ -773,6 +781,8 @@ mod agent_binding_tests {
 
     use super::*;
     use agentos_core::traits::StorageBackend;
+
+    const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -789,12 +799,13 @@ mod agent_binding_tests {
             .create_user(&agentos_core::types::UserRecord {
                 user_id: ADMIN_USER_ID.to_string(),
                 username: "admin".to_string(),
-                password: "admin12345".to_string(),
+                password: agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap(),
                 email: Some("admin@agentos.dev".to_string()),
                 role: "admin".to_string(),
                 tenant_id: "default".to_string(),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 last_login_at: None,
+                must_change_password: false,
             })
             .await
             .unwrap();
@@ -816,7 +827,7 @@ mod agent_binding_tests {
                     .uri("/api/v1/auth/login")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        json!({"username": "admin", "password": "admin12345"}).to_string(),
+                        json!({"username": "admin", "password": SEED_ADMIN_PW}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -1046,12 +1057,6 @@ mod sessions_list_tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             unreachable!("list_sessions 错误路径不应触碰其他存储方法")
         }
-        async fn create_branch(
-            &self,
-            _branch: agentos_core::types::Branch,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
-        }
         async fn update_run_status(
             &self,
             _run_id: &str,
@@ -1155,6 +1160,14 @@ mod sessions_list_tests {
             _user_id: &str,
         ) -> Result<(), agentos_core::types::StorageError> {
             unreachable!("list_sessions 错误路径不应触碰其他存储方法")
+        }
+        async fn update_user_password(
+            &self,
+            _user_id: &str,
+            _password_hash: &str,
+            _must_change_password: bool,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            unreachable!("mock 不提供口令更新")
         }
         async fn delete_user(
             &self,
@@ -1301,5 +1314,371 @@ mod transient_states_query_tests {
         .unwrap();
         let states = resp.0["transient_states"].as_array().unwrap();
         assert!(states.is_empty(), "无中间态时为空数组而非缺字段");
+    }
+}
+
+#[cfg(test)]
+mod delete_session_tests {
+    //! B1：删除会话落库失败 → 503 统一错误信封，不再 `deleted:true` 假成功；
+    //! `session.deleted` 域事件只在删除成立的 Ok 路径发出。
+
+    use super::*;
+    use crate::routes::AppState;
+    use agentos_core::traits::{
+        HookContext, HostType, LifecycleHook, ManifestCapabilities, PluginInvoker, PluginManifest,
+        PluginType, StorageBackend,
+    };
+    use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    /// delete_session 恒故障的存储 mock。其余必需方法以 unreachable! 桩实现——
+    /// 错误路径若意外耦合其他存储调用会在此炸出（比静默成功更诚实）。
+    struct ErrDeleteStore;
+
+    #[async_trait::async_trait]
+    impl StorageBackend for ErrDeleteStore {
+        async fn delete_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            Err(agentos_core::types::StorageError::Database(
+                "injected delete_session failure".to_string(),
+            ))
+        }
+        async fn get_run(
+            &self,
+            _run_id: &str,
+        ) -> Result<agentos_core::types::RunRecord, agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _opts: agentos_core::traits::MessageQueryOpts,
+        ) -> Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn get_blob(
+            &self,
+            _blob_id: &str,
+        ) -> Result<Vec<u8>, agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn append_trace(
+            &self,
+            _entry: agentos_core::types::TraceEntry,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn update_run_status(
+            &self,
+            _run_id: &str,
+            _status: agentos_core::types::RunStatus,
+            _branch: Option<&str>,
+            _seq: Option<u32>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn create_run(
+            &self,
+            _run_id: &str,
+            _config_hash: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn store_blob(
+            &self,
+            _data: &[u8],
+            _mime_type: &str,
+        ) -> Result<String, agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn create_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn get_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn list_sessions(
+            &self,
+            _filter: agentos_core::traits::SessionListFilter,
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn update_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn link_pipeline_session(
+            &self,
+            _pipeline_id: &str,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn get_step_traces_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn create_user(
+            &self,
+            _user: &agentos_core::types::UserRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn get_user_by_id(
+            &self,
+            _user_id: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn get_user_by_username(
+            &self,
+            _username: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn list_users(
+            &self,
+        ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn update_last_login(
+            &self,
+            _user_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+        async fn update_user_password(
+            &self,
+            _user_id: &str,
+            _password_hash: &str,
+            _must_change_password: bool,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            unreachable!("mock 不提供口令更新")
+        }
+        async fn delete_user(
+            &self,
+            _user_id: &str,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            unreachable!("delete_session 错误路径不应触碰其他存储方法")
+        }
+    }
+
+    /// 记录 send_lifecycle_hook 调用的 mock invoker（invoke_* 本测试不可达）。
+    struct RecordingInvoker {
+        hooks: Mutex<Vec<String>>, // 事件名
+    }
+
+    #[async_trait::async_trait]
+    impl PluginInvoker for RecordingInvoker {
+        async fn invoke_pipeline_plugin<'a>(
+            &self,
+            _plugin_id: &str,
+            _ctx: &PluginContext<'a>,
+        ) -> Result<PluginResult, PluginError> {
+            unimplemented!("域事件测试不触达")
+        }
+        async fn invoke_tool(
+            &self,
+            _plugin_id: &str,
+            _tool_name: &str,
+            _inputs: &serde_json::Value,
+        ) -> Result<ToolExecutionResult, PluginError> {
+            unimplemented!("域事件测试不触达")
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            hook: LifecycleHook,
+            context: &HookContext,
+        ) -> Result<(), PluginError> {
+            assert_eq!(hook, LifecycleHook::DomainEvent);
+            let event = context
+                .get("event")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            self.hooks.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    fn domain_manifest(id: &str) -> PluginManifest {
+        PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::System,
+            pipeline_role: None,
+            language: "python".to_string(),
+            host_type: HostType::Sidecar,
+            host_group: None,
+            entry: "python server.py".to_string(),
+            capabilities: ManifestCapabilities {
+                lifecycle_hooks: vec![LifecycleHook::DomainEvent],
+                ..Default::default()
+            },
+            requires_services: vec![],
+            permissions: Default::default(),
+            priority: 100,
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            granted_capabilities: vec![],
+            requires_content: None,
+            invoke_entry: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            persistent_fields: vec![],
+            export_fields: vec![],
+            provides: None,
+        }
+    }
+
+    async fn wait_for_hooks(invoker: &RecordingInvoker) -> Vec<String> {
+        // 点对点是 fire-and-forget spawn：轮询等任务落地
+        for _ in 0..200 {
+            if !invoker.hooks.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        std::mem::take(&mut *invoker.hooks.lock().unwrap())
+    }
+
+    #[tokio::test]
+    async fn db_failure_returns_5xx_and_emits_no_event() {
+        let invoker = Arc::new(RecordingInvoker {
+            hooks: Mutex::new(Vec::new()),
+        });
+        let mut state = AppState::new();
+        state.store = Some(Arc::new(ErrDeleteStore) as Arc<dyn StorageBackend>);
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![domain_manifest("p_dom")]));
+        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(HashSet::from([
+            "p_dom".to_string()
+        ])));
+        state.invoker = Some(invoker.clone() as Arc<dyn PluginInvoker>);
+
+        let resp = delete_session_handler(State(state), HeaderMap::new(), Path("t1".into())).await;
+
+        match resp {
+            Ok(body) => panic!("落库失败不得 deleted:true 假成功，实际 {:?}", body.0),
+            Err(e) => {
+                assert!(
+                    matches!(e, ApiError::ServiceUnavailable { .. }),
+                    "落库失败应映射 503，实际 {e:?}"
+                );
+                assert!(!e.message().is_empty(), "对外文案非空");
+            }
+        }
+        let got = wait_for_hooks(&invoker).await;
+        assert!(
+            !got.iter().any(|ev| ev == "session.deleted"),
+            "删除未成立不得发 session.deleted，实际 {got:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn success_path_returns_deleted_true_and_emits_event_once() {
+        let invoker = Arc::new(RecordingInvoker {
+            hooks: Mutex::new(Vec::new()),
+        });
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        store
+            .create_session(&agentos_core::types::SessionRecord {
+                thread_id: "t-ok".to_string(),
+                title: Some("s".to_string()),
+                intent: None,
+                current_state: "active".to_string(),
+                agent_id: None,
+                active_pipeline_id: None,
+                pipeline_ids: vec![],
+                metadata: Some(serde_json::json!({})),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                last_active_at: None,
+            })
+            .await
+            .unwrap();
+        let mut state = AppState::new();
+        state.store = Some(store.clone() as Arc<dyn StorageBackend>);
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![domain_manifest("p_dom")]));
+        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(HashSet::from([
+            "p_dom".to_string()
+        ])));
+        state.invoker = Some(invoker.clone() as Arc<dyn PluginInvoker>);
+
+        let resp = delete_session_handler(State(state), HeaderMap::new(), Path("t-ok".into()))
+            .await
+            .expect("正常删除应成功");
+
+        assert_eq!(resp.0["deleted"], json!(true));
+        assert_eq!(resp.0["thread_id"], json!("t-ok"));
+        let got = wait_for_hooks(&invoker).await;
+        assert_eq!(
+            got,
+            vec!["session.deleted".to_string()],
+            "删除成立恰好发一次 session.deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_session_is_idempotent_success() {
+        // 幂等语义（会话不存在 = 成功）由 store 既有行为保留：无记录仍 200 deleted:true
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let mut state = AppState::new();
+        state.store = Some(store as Arc<dyn StorageBackend>);
+        let resp = delete_session_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("t-never-existed".into()),
+        )
+        .await
+        .expect("无记录删除属幂等成功");
+        assert_eq!(resp.0["deleted"], json!(true));
     }
 }

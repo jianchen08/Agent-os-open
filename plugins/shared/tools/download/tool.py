@@ -90,11 +90,9 @@ def _extract_filename_from_headers(headers: httpx.Headers) -> str | None:
     cd = headers.get("content-disposition", "")
     if not cd:
         return None
-    # 尝试 filename*= (RFC 5987)
     match = re.search(r"filename\*=(?:UTF-8|utf-8)?''(.+?)(?:;|$)", cd)
     if match:
         return _sanitize_filename(unquote(match.group(1)))
-    # 尝试 filename=
     match = re.search(r'filename="?(.+?)"?(?:;|$)', cd)
     if match:
         return _sanitize_filename(match.group(1))
@@ -513,12 +511,10 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
                         )
                         resp.raise_for_status()
 
-                        # 写入分片临时文件
                         with open(part_file, "wb") as f:
                             async for chunk in resp.aiter_bytes(CHUNK_SIZE):
                                 f.write(chunk)
 
-                        # 验证分片大小
                         actual_size = part_file.stat().st_size
                         expected_size = end - start + 1
                         if actual_size != expected_size:
@@ -595,8 +591,9 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
         if temp_path.exists() and content_length > 0:
             resume_from = temp_path.stat().st_size
             if resume_from >= content_length:
-                # 文件已完整，直接重命名
-                temp_path.rename(final_path)
+                # 文件已完整，直接落位（os.replace 统一覆盖语义：Windows 目标
+                # 已存在时 rename 必败而 POSIX 静默覆盖——跨平台行为分裂）
+                os.replace(temp_path, final_path)
                 return {"path": final_path, "size": content_length, "segments": 1}
 
         for attempt in range(1, max_retries + 1):
@@ -629,8 +626,7 @@ class DownloadTool(WorkspaceAwareMixin, BuiltinTool):
 
                         f.write(chunk)
 
-                # 重命名为最终文件名
-                temp_path.rename(final_path)
+                os.replace(temp_path, final_path)  # 覆盖语义跨平台统一（见上）
 
                 actual_size = final_path.stat().st_size
                 logger.info(f"下载完成: {final_path} ({_format_size(actual_size)})")

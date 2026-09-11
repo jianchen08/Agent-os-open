@@ -12,21 +12,19 @@ import time
 from pathlib import Path
 from typing import Any
 
-# git ops / merge ops 以平铺混入模块承载（与本文件同目录，导入即生效）：
-# WorkspaceLifecycleManager = _GitOpsMixin + _MergeOpsMixin + 本文件的启动/持久化/清理。
-from _workspace_git_ops import _force_rmtree, _GitOpsMixin, _safe_ws_name  # noqa: E402
-from _workspace_merge_ops import _MergeOpsMixin  # noqa: E402
+# git ops 以平铺混入模块承载（与本文件同目录，导入即生效）：
+# WorkspaceLifecycleManager = _GitOpsMixin + 本文件的启动/持久化/清理。
+from _workspace_git_ops import _GitOpsMixin, _safe_ws_name  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "WorkspaceLifecycleManager",
     "_safe_ws_name",
-    "_force_rmtree",
 ]
 
 
-class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
+class WorkspaceLifecycleManager(_GitOpsMixin):
     """工作空间统一生命周期管理器"""
 
     def __init__(self, resource_merge: Any, config: dict[str, Any], task_tree: Any, ws_meta_store: Any, base_path: str):
@@ -98,8 +96,8 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
           父链坐标为权威。解析顺序：① 出生契约继承（lineage.parent_ws_meta，
           task_submit 提交时随出生 state 写全——无时序窗口）；② 父链聚合
           查找（task_tree ws_meta，补继承缺失的场景）。两者皆缺 = 坐标
-          不可知，显式报错——静默回退入参目录曾致同会话子任务工作空间
-          漂移（2026-08-29 诊断：六连败独立目录 vs 两成共享会话目录）。
+          不可知，显式报错，不回退入参目录（静默回退会让同会话子任务
+          工作空间漂移）。
         """
         if (
             task_data.get("_has_explicit_workspace")
@@ -328,9 +326,8 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
             )
             return meta
 
-        # 显式 plain 空目录分支（条件保持与历史实现逐字一致：plain 在上方已全部
-        # 返回，本分支仅在 (plain, 无显式) 组合可及性下保留原语句序）——
-        # 现行可达语义：非 plain 的无显式任务走 worktree 路径而非此处
+        # 显式 plain 空目录分支：plain 组合在上方已全部返回，此处仅承接
+        # (plain, 无显式)；非 plain 的无显式任务走 worktree 路径不经过此处
         if _ws_mode == "plain" and not has_explicit_workspace:
             ws_base = self._get_workspace_root()
             plain_path = ws_base / task_id
@@ -547,42 +544,3 @@ class WorkspaceLifecycleManager(_GitOpsMixin, _MergeOpsMixin):
         except Exception as e:
             logger.warning("[WorkspaceLifecycle] restore_ws_meta 失败: task_id=%s, error=%s", task_id, e)
 
-    # ── 工作空间清理 ──────────────────────────────────────────
-
-    def cleanup_workspace(self, task_id: str) -> dict[str, Any]:
-        """清理单个任务关联的工作空间（worktree/分支/目录），不递归子任务"""
-        self.restore_ws_meta(task_id)
-        meta = self._ws_meta_store.get(task_id)
-        if not meta:
-            return {"worktree_removed": False, "branch_deleted": False, "dir_removed": False}
-
-        mode = meta.get("mode", "")
-        workspace = meta.get("path", "")
-        result: dict[str, Any] = {"worktree_removed": False, "branch_deleted": False, "dir_removed": False}
-
-        if mode == "worktree":
-            project_root = Path(meta.get("project_root", "")).resolve()
-            branch = meta.get("branch", "")
-            ws_path = Path(workspace).resolve()
-            if project_root.exists():
-                if ws_path.exists():
-                    rc, _, _ = self._run_git("worktree", "remove", str(ws_path), "--force", cwd=project_root)
-                    result["worktree_removed"] = rc == 0
-                if branch:
-                    rc, _, _ = self._run_git("branch", "-D", branch, cwd=project_root)
-                    result["branch_deleted"] = rc == 0
-            if ws_path.exists() and "__wt_" in ws_path.name:
-                try:
-                    _force_rmtree(str(ws_path))
-                    result["dir_removed"] = True
-                except OSError as e:
-                    logger.warning("[WorkspaceLifecycle] cleanup_workspace rmtree 失败: %s, %s", workspace, e)
-        elif mode == "plain":
-            ws_path = Path(workspace)
-            if not ws_path.is_absolute():
-                ws_path = ws_path.resolve()
-            logger.debug("[WorkspaceLifecycle] plain 模式保留工作空间目录: %s", ws_path)
-
-        self._ws_meta_store.pop(task_id, None)
-        logger.debug("[WorkspaceLifecycle] cleanup_workspace: task_id=%s, mode=%s, result=%s", task_id, mode, result)
-        return result

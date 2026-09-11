@@ -12,8 +12,8 @@
  */
 
 import { useQuery } from '@tanstack/react-query'
-import { TASK_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import apiClient from '@/services/api/client'
+import { TASK_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { queryKeys } from '@/services/query/queryKeys'
 
 /** 任务列表响应结构（task_service 插件 list_tasks 返回格式） */

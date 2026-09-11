@@ -80,5 +80,6 @@
       "max_concurrency": 8,
       "description": "项目选项 {value:id,label:title}（共享 project_registry 登记行）"
     }
-  ]
+  ],
+  "host_group": "light"
 }

@@ -1,24 +1,19 @@
-"""媒体 Provider 核心类型（0.2 自包含版）。
-
-0.1 的 ``tools.media`` 包（归档于 reference/0.1_src/tools/media/，src/ 已删）
-在 0.2 未迁移，本模块就地重建 image/tts/video/music 四个生成工具共用的
-最小类型面（对应 0.1 的 base.py / fallback.py / provider_registry.py）：
+"""媒体 Provider 核心类型（image/tts/video/music 四生成工具共用的类型面）。
 
 - ``MediaType``：媒体类型枚举
-- ``FallbackStrategy`` / ``ProviderChain``：Fallback 链（最小可用实现，
-  按序尝试每个 Provider，全部失败抛 RuntimeError——语义与 0.1 对齐）
-- ``MediaProviderRegistry``：注册表类型面（0.1 完整实现未迁移；运行时实例
-  由外部注入，duck-typing，本类仅用于类型注解与空默认行为）
+- ``MediaType``：媒体类型枚举
+- ``FallbackStrategy`` / ``ProviderChain``：Fallback 链（按序尝试每个
+  Provider，全部失败抛 RuntimeError）
+- ``MediaProviderRegistry``：注册表类型面（运行时实例由外部注入，
+  duck-typing，本类仅用于类型注解与空默认行为）
 - ``ProviderUnavailable`` / ``MediaResult`` / ``MediaProviderClient``：
-  F-MEDIA-2 新增——provider 依赖迁移：0.1 的 infrastructure.service_provider
-  （全局服务注册表）已删，0.2 等价机制是**经 tool-executor capability 调用
-  后端服务**（参考 hindsight_memory/memory_backend.py 的 HindsightBackend：
-  capability_caller 注入 + tool-executor.invoke 模式）。
+  provider 依赖经 tool-executor capability 调用后端服务
+  （capability_caller 注入 + tool-executor.invoke 模式）。
 
 0.2 媒体服务契约（F-MEDIA-2，本模块为权威定义）：
 - 调用方式：``tool-executor.invoke``（params 形如 ``{"tool_name": ..., "args": ...}``）
 - 服务名：``media.generate``（约定名——由媒体生成后端服务插件提供；
-  0.2 尚未实现时内核返回 ``{"success": false, "error": "tool execution failed: ..."}``
+  服务未实现/不可达时调用返回 ``{"success": false, "error": ...}``
   → 本类抛 ``ProviderUnavailable``，调用方明确得知服务未配置/不可达）
 - args 形态：``{media_type: "image"|"tts"|"video"|"music", prompt|text: 主内容,
   provider?: 指定 provider, ...生成参数}``
@@ -51,9 +46,9 @@ CapabilityCaller = Callable[[str, dict[str, Any]], Awaitable[Any]]
 class ProviderUnavailable(Exception):
     """媒体 Provider/后端服务不可用（F-MEDIA-2 显式错误）。
 
-    与 0.1 的「Provider 未配置返回空/提示」的静默降级相反：调用方未注入
-    capability_caller，或经 tool-executor.invoke 调用后端服务失败（服务未
-    配置/不可达/返回失败）时抛出，让调用方明确知道服务不可用。
+    调用方未注入 capability_caller，或经 tool-executor.invoke 调用后端
+    服务失败（服务未配置/不可达/返回失败）时抛出——不做静默降级，
+    让调用方明确知道服务不可用。
     """
 
 
@@ -90,10 +85,9 @@ class MediaResult:
 class MediaProviderClient:
     """媒体生成后端客户端——经 tool-executor capability 调用后端服务。
 
-    F-MEDIA-2：0.1 的 provider 调用走进程内 service_provider 注册表直调；
-    0.2 改为经 tool-executor.invoke 调用约定服务 ``media.generate``
-    （契约见模块 docstring）。与 HindsightBackend（memory_backend.py）同款
-    模式：唯一外部依赖是注入的 capability_caller，构造时传入，便于测试 mock。
+    经 tool-executor.invoke 调用约定服务 ``media.generate``（契约见模块
+    docstring）。与 HindsightBackend（memory_backend.py）同款模式：唯一
+    外部依赖是注入的 capability_caller，构造时传入，便于测试 mock。
 
     与 ProviderChain 语义的关键区别：调用失败**不降级空转**——抛
     ``ProviderUnavailable`` 显式错误（产品决定：迁移依赖而非优雅降级）。

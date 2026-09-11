@@ -16,6 +16,36 @@
       "on_unload"
     ]
   },
+  "export_fields": [
+    "tool_results"
+  ],
+  "state": {
+    "volatile_keys": [
+      "cache_hit",
+      "raw_tool_calls",
+      "tool_results"
+    ],
+    "reads": [
+      "raw_tool_calls",
+      "pipeline_id",
+      "user_id",
+      "session_id"
+    ]
+  },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "config_files": [
+    {
+      "id": "tool_cache",
+      "label": "工具缓存配置",
+      "fields": [
+        {
+          "name": "per_pipeline_max",
+          "label": "每管道全文留存条数",
+          "type": "number",
+          "default": 1
+        }
+      ]
+    }
+  ]
 }

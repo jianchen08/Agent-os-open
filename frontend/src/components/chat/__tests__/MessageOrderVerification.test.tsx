@@ -13,18 +13,18 @@
  * 7. 空 parts 处理
  */
 
-import { act, renderHook } from '@testing-library/react'
+import { renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useMessageRender } from '@/components/chat/hooks/useMessageRender'
 import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
-import type { Message, MessageToolCall } from '@/types/models'
 import type { MessagePart } from '@/types/messageParts'
+import type { Message, MessageToolCall } from '@/types/models'
 
 // ---------------------------------------------------------------------------
 //  Mock: activityConverter（useMessageRender 内部依赖）
 // ---------------------------------------------------------------------------
 vi.mock('@/utils/activityConverter', () => ({
-  buildDefaultActions: (tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
+  buildDefaultActions: (_tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
 
   toolCallToActivity: (toolCall: MessageToolCall) => ({
     type: 'tool_call',

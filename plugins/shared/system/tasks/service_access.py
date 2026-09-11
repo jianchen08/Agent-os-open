@@ -3,9 +3,16 @@
 插件自包含实例化 TaskService（mixin _task_cleanup/_task_crud/_task_state 已
 在本插件包内）；event_bus 是装饰性（赋值后从不读取），event_bus=None 安全。
 
+实例来源两级：`set_task_service` 注入的**正门实例**（tasks/server.py on_load
+以插件配置构造后注入，同进程 co-host 消费方与其共享同一单例）优先；无注入
+时（消费方独立 sidecar，正门不在本进程）零参自建——data_dir=None 由
+TaskStorage 解析两级（TASKS_STORAGE_DIR env → 多租户根 data/{tenant}/tasks），
+与正门 data_dir 未配置时同链路。
+
 公共接口：
-- get_task_service() -> Any: 获取 TaskService 实例（进程内单例，懒加载）
+- get_task_service() -> Any: 获取 TaskService 实例（注入优先，其次懒加载单例）
 - get_project_registry() -> Any: 获取项目登记簿（进程内单例，懒加载）
+- set_task_service(instance) -> None: 注入/清除（None）正门实例（tasks 正门接线用）
 - reset_singletons() -> None: 清空单例（测试隔离用）
 """
 
@@ -23,15 +30,23 @@ if _SHARED_ROOT not in sys.path:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["get_task_service", "get_project_registry", "reset_singletons"]
+__all__ = ["get_task_service", "get_project_registry", "set_task_service", "reset_singletons"]
 
 # 进程内单例（懒加载缓存）。
 _task_service_instance: Any = None
 _project_registry_instance: Any = None
+# 正门注入实例（tasks/server.py on_load 接线；优先于懒加载单例）。
+_injected_task_service: Any = None
+
+
+def set_task_service(instance: Any | None) -> None:
+    """注入正门 TaskService 实例；传 None 清除注入（回到懒构建通道）。"""
+    global _injected_task_service  # noqa: PLW0603
+    _injected_task_service = instance
 
 
 def get_task_service() -> Any:
-    """获取 TaskService 实例（进程内单例，懒加载）。
+    """获取 TaskService 实例（正门注入优先，其次懒加载单例）。
 
     插件自包含：直接实例化 tasks.service.TaskService（mixin 已在本包）。
     event_bus=None（装饰性，从不读取）。
@@ -40,6 +55,8 @@ def get_task_service() -> Any:
         TaskService 实例，初始化失败时返回 None
     """
     global _task_service_instance  # noqa: PLW0603
+    if _injected_task_service is not None:
+        return _injected_task_service
     if _task_service_instance is not None:
         return _task_service_instance
     try:
@@ -81,6 +98,7 @@ def get_project_registry() -> Any:
 
 def reset_singletons() -> None:
     """清空进程内单例（测试隔离用）。"""
-    global _task_service_instance, _project_registry_instance  # noqa: PLW0603
+    global _task_service_instance, _project_registry_instance, _injected_task_service  # noqa: PLW0603
     _task_service_instance = None
     _project_registry_instance = None
+    _injected_task_service = None

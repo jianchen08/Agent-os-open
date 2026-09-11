@@ -5,10 +5,10 @@
  * 用于侧边栏用户区:未登录点击 → 弹出本框;已登录可在用户菜单里"切换账号"再次弹出。
  */
 
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Modal } from '@/components/ui/Modal'
 import { useEffect, useRef, useState } from 'react'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { useAuthStore } from '@/stores/authStore'
 
 interface FormErrors {
@@ -43,7 +43,6 @@ export function LoginModal({ open, onClose }: LoginModalProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, open])
 
-  // 打开时清除上次错误
   useEffect(() => {
     if (open) {
       clearError()
@@ -92,66 +91,91 @@ export function LoginModal({ open, onClose }: LoginModalProps) {
   }
 
   return (
-    <Modal open={open} onClose={handleClose} title="登录" maxWidth="sm" showClose>
-      <form onSubmit={handleSubmit} className="space-y-4" data-testid="login-modal-form">
-        {/* 全局错误提示 */}
-        {error && (
-          <div
-            className="bg-destructive/10 text-destructive rounded-lg p-2.5 text-sm"
-            data-testid="login-modal-error"
-          >
-            {error}
-          </div>
-        )}
+    // 原 ui/Modal（maxWidth="sm"）迁移：width=24rem 等价 max-w-sm 面板宽度；
+    // DialogContent 已内建「外点不关」（对齐 Modal closeOnBackdropClick 缺省 false）
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) handleClose()
+      }}
+    >
+      <DialogContent width="24rem">
+        <DialogHeader className="border-b pb-6">
+          <DialogTitle>登录</DialogTitle>
+        </DialogHeader>
+        <div className="p-6">
+          <form onSubmit={handleSubmit} className="space-y-4" data-testid="login-modal-form">
+            {/* 全局错误提示 */}
+            {error && (
+              <div
+                className="bg-destructive/10 text-destructive rounded-lg p-2.5 text-sm"
+                data-testid="login-modal-error"
+              >
+                {error}
+              </div>
+            )}
 
-        {/* 用户名 */}
-        <div className="space-y-1.5">
-          <label htmlFor="login-modal-username" className="text-foreground block text-sm font-medium">
-            用户名 <span className="text-destructive">*</span>
-          </label>
-          <Input
-            id="login-modal-username"
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="请输入用户名"
-            disabled={isLoading}
-            aria-invalid={!!formErrors.username}
-            data-testid="login-modal-username"
-            className="h-9"
-            autoFocus
-          />
-          {formErrors.username && (
-            <p className="text-destructive text-xs">{formErrors.username}</p>
-          )}
+            {/* 用户名 */}
+            <div className="space-y-1.5">
+              <label
+                htmlFor="login-modal-username"
+                className="text-foreground block text-sm font-medium"
+              >
+                用户名 <span className="text-destructive">*</span>
+              </label>
+              <Input
+                id="login-modal-username"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="请输入用户名"
+                disabled={isLoading}
+                aria-invalid={!!formErrors.username}
+                data-testid="login-modal-username"
+                className="h-9"
+                autoFocus
+              />
+              {formErrors.username && (
+                <p className="text-destructive text-xs">{formErrors.username}</p>
+              )}
+            </div>
+
+            {/* 密码 */}
+            <div className="space-y-1.5">
+              <label
+                htmlFor="login-modal-password"
+                className="text-foreground block text-sm font-medium"
+              >
+                密码 <span className="text-destructive">*</span>
+              </label>
+              <Input
+                id="login-modal-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="请输入密码"
+                disabled={isLoading}
+                aria-invalid={!!formErrors.password}
+                data-testid="login-modal-password"
+                className="h-9"
+              />
+              {formErrors.password && (
+                <p className="text-destructive text-xs">{formErrors.password}</p>
+              )}
+            </div>
+
+            <Button
+              type="submit"
+              className="h-9 w-full"
+              disabled={isLoading}
+              data-testid="login-modal-submit"
+            >
+              {isLoading ? '登录中...' : '登录'}
+            </Button>
+          </form>
         </div>
-
-        {/* 密码 */}
-        <div className="space-y-1.5">
-          <label htmlFor="login-modal-password" className="text-foreground block text-sm font-medium">
-            密码 <span className="text-destructive">*</span>
-          </label>
-          <Input
-            id="login-modal-password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="请输入密码"
-            disabled={isLoading}
-            aria-invalid={!!formErrors.password}
-            data-testid="login-modal-password"
-            className="h-9"
-          />
-          {formErrors.password && (
-            <p className="text-destructive text-xs">{formErrors.password}</p>
-          )}
-        </div>
-
-        <Button type="submit" className="h-9 w-full" disabled={isLoading} data-testid="login-modal-submit">
-          {isLoading ? '登录中...' : '登录'}
-        </Button>
-      </form>
-    </Modal>
+      </DialogContent>
+    </Dialog>
   )
 }
 

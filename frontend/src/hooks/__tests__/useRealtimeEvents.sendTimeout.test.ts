@@ -4,20 +4,18 @@
  * user_input_send_timeout 透传链（2026-08-21 用户裁决：任何错误都必须让用户看见）：
  * WS 断线期间发送的消息排队超 TTL 被撤回时，UI 层必须——撤除对应"思考中"占位
  * 气泡、停止该管道流式态、原位置插入 system 错误消息、通知中心高优告警。
- * 此前行为是气泡无限转、刷新后凭空消失、零提示。
  *
  * 2026-08-22 单一消息数组（ADR）：乐观 user 在主数组（status='sending'），超时
  * 将其标记 failed（消息保留、位置不丢、可重试复用 cmid 幂等重发），同刻插入
  * system 错误气泡——不再有 pending 区（已退役）。
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { renderHook } from '@testing-library/react'
-
+import { describe, it, expect, beforeEach } from 'vitest'
 // useRealtimeEvents 订阅真实 globalWS 单例；对 store 的副作用用真实 store 断言
 import { useRealtimeEvents } from '@/hooks/useRealtimeEvents'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 
 const PIPELINE_ID = 'pipe-send-timeout-1'
 const CMID = 'cmid-abc'

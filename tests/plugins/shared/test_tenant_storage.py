@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -68,11 +67,11 @@ def _import_from(module: str, src_dir: Path, pop: tuple[str, ...] = ()) -> Any:
 
 
 def _make_task_storage(**kwargs: Any) -> Any:
-    # pop 仅限确有跨插件同名冲突的裸名（storage/enum_utils）。task_types /
+    # pop 仅限确有跨插件同名冲突的裸名（storage）。task_types /
     # agents_types 全仓唯一（tasks 目录），逐出重导只会制造同源双模块——
     # TaskStatus 枚举身份断裂会让 task_manage 等后置测试的状态相等判断失效
     # （合并跑「单文件绿合并红」串扰根因之一），故不逐出。
-    storage = _import_from("storage", _TASKS_DIR, pop=("storage", "enum_utils"))
+    storage = _import_from("storage", _TASKS_DIR, pop=("storage",))
     return storage.TaskStorage(**kwargs)
 
 
@@ -141,6 +140,42 @@ class TestTaskStorageTenantAware:
         # 文件确实落在 A 的目录下，B 的目录下不存在
         assert (tmp_path / "tenantA" / "tasks" / "tree_task-a" / "task-a.yaml").exists()
         assert not (tmp_path / "tenantB" / "tasks" / "tree_task-a" / "task-a.yaml").exists()
+
+
+class TestTaskStorageTenantBehavior:
+    """行为级：未传租户/env 覆盖经 save 落位可观察（不读私有 _data_dir）。
+
+    上类在 _data_dir 级钉构造优先级；本类把同一契约抬到 save/get 公开入口：
+    数据真实落位即契约。
+    """
+
+    def test_no_tenant_saves_under_default(self, tmp_path, monkeypatch):
+        """未传 tenant_id → 任务保存到 default 租户目录。"""
+        monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path))
+        monkeypatch.delenv("TASKS_STORAGE_DIR", raising=False)
+
+        task_types = _import_from("task_types", _TASKS_DIR, pop=("enum_utils",))
+        task = task_types.TaskModel(id="task-def", title="default 租户任务")
+
+        _make_task_storage().save(task)
+
+        assert (tmp_path / "default" / "tasks" / "tree_task-def" / "task-def.yaml").exists()
+        # 经公开 get 可读回（同租户语义）
+        assert _make_task_storage().get("task-def") is not None
+
+    def test_env_tasks_storage_dir_redirects_saves(self, tmp_path, monkeypatch):
+        """TASKS_STORAGE_DIR 覆盖租户默认 → 保存真实落 env 目录。"""
+        monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path))
+        env_dir = tmp_path / "env_storage"
+        monkeypatch.setenv("TASKS_STORAGE_DIR", str(env_dir))
+
+        task_types = _import_from("task_types", _TASKS_DIR, pop=("enum_utils",))
+        task = task_types.TaskModel(id="task-env", title="env 目录任务")
+
+        _make_task_storage(tenant_id="tenantA").save(task)
+
+        assert (env_dir / "tree_task-env" / "task-env.yaml").exists()
+        assert not (tmp_path / "tenantA" / "tasks").exists(), "env 覆盖后不得落租户目录"
 
 
 # ============================================================
@@ -222,7 +257,7 @@ class TestScenePersistenceTenantAware:
 
 
 # ============================================================
-# shared/uploads_path.resolve_uploads_dir（channel_api 退役后的新家）
+# shared/uploads_path.resolve_uploads_dir（uploads 路径解析的现役归属）
 # ============================================================
 
 

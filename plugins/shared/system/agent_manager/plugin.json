@@ -7,9 +7,6 @@
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
-  "lifecycle": {
-    "idle_timeout_secs": 0
-  },
   "capabilities": {
     "tools": [],
     "route_signals": [],
@@ -98,7 +95,7 @@
       "route_id": "agent_manager_list",
       "method": "GET",
       "path": "/ext/agent_manager/agents",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
@@ -108,7 +105,7 @@
       "route_id": "agent_manager_schema",
       "method": "GET",
       "path": "/ext/agent_manager/agents/schema",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
@@ -118,7 +115,7 @@
       "route_id": "agent_manager_get_config",
       "method": "GET",
       "path": "/ext/agent_manager/agents/{id}/config",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
@@ -146,8 +143,16 @@
         "order": 30,
         "path": "/agents",
         "widget": "agents_panel",
-        "description": "Agent 配置管理（浏览+编辑一体，数据源 /ext/agent_manager/agents——承接原 AgentsPage）"
+        "props": {
+          "typeLabels": {
+            "main": "主控",
+            "sub": "子代理",
+            "atomic": "原子"
+          }
+        },
+        "description": "Agent 配置管理（浏览+编辑一体，数据源 /ext/agent_manager/agents——承接原 AgentsPage；typeLabels 随页声明下发，前端零域词表）"
       }
     ]
-  }
+  },
+  "host_group": "light"
 }

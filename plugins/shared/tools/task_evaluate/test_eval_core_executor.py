@@ -150,18 +150,28 @@ class TestSanitizeEvalPaths:
         # POSIX 相对 cwd 产出 ../.. 前缀（home/u 被层级消化）——断言兼容两形
         assert ("home/u/f.txt" in s or "u/f.txt" in s) and "var/log/x" in s
 
-    def test_cross_drive_win_path_valueerror_degrade(self, core: Any) -> None:
-        """跨盘符相对化抛 ValueError → 原样保留（不炸评估调用）。
+    def test_cross_drive_win_path_valueerror_masked(self, core: Any) -> None:
+        """跨盘符相对化抛 ValueError → 打掩码，不静默放行宿主绝对路径。
 
-        ValueError 只在 Windows 主机（os.path=ntpath 跨盘符）抛出；POSIX 上
-        relpath 对该串恒成功（反斜杠是文件名字符）。平台无关契约 = 不抛异常
-        且不把 Windows 盘符路径再交给 posix 二次相对化（win 分支命中后短路）。
+        ValueError 只在 Windows 主机（os.path=ntpath 跨盘符）抛出：掩码替代
+        原路径；POSIX 上 relpath 对该串恒成功（反斜杠是文件名字符）走正常
+        相对化。平台无关契约 = 不抛异常且宿主盘符路径不外泄。
         """
         s = core.sanitize_eval_paths(r"x E:\tmp\leaked.txt y")
         assert s.startswith("x ")
         assert s.endswith(" y")
-        assert "E:" in s
-        assert "leaked.txt" in s
+        assert "E:" not in s, f"宿主盘符路径泄漏: {s!r}"
+
+    def test_relpath_failure_masks_instead_of_leak(self, core: Any, monkeypatch: Any) -> None:
+        """relpath 故意失败 → 掩码替代，脱敏 fail-safe 不放行原绝对路径。"""
+
+        def _boom(_p: Any) -> str:
+            raise ValueError("relpath unavailable")
+
+        monkeypatch.setattr(core.os.path, "relpath", _boom)
+        s = core.sanitize_eval_paths("log: /tmp/leaked.txt done")
+        assert "/tmp/leaked" not in s
+        assert "<abs-path-masked>" in s
 
     def test_same_drive_win_path_relativized(self, core: Any, monkeypatch: Any) -> None:
         """同盘符 Windows 绝对路径成功相对化（relpath 成功分支）。"""
@@ -174,14 +184,15 @@ class TestSanitizeEvalPaths:
         assert s.startswith("x ") and s.endswith(" y")
 
     def test_posix_relpath_valueerror_degrade(self, core: Any, monkeypatch: Any) -> None:
-        """posix 相对化抛 ValueError → 原样保留（不炸评估调用）。"""
+        """posix 相对化抛 ValueError → 掩码替代（脱敏 fail-safe，不放行原绝对路径）。"""
 
         def _boom(path: str, start: str | None = None) -> str:
             raise ValueError("cross device")
 
         monkeypatch.setattr(core.os.path, "relpath", _boom)
         s = core.sanitize_eval_paths("p /tmp/x.txt q")
-        assert s == "p /tmp/x.txt q"
+        assert "/tmp/x.txt" not in s
+        assert "<abs-path-masked>" in s
 
     def test_nested_structs_recursed(self, core: Any) -> None:
         out = core.sanitize_eval_paths({"p1": ["/tmp/leaked.txt", 42], "p2": {"k": "/home/u/f.txt"}})

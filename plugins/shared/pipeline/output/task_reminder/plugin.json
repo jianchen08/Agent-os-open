@@ -18,7 +18,9 @@
   "persistent_fields": [
     "task.status",
     "evaluate_reminder_count",
+    "evaluate_reminder_run",
     "eval_tool_only_count",
+    "reminder_seen_result_fp",
     "evaluation.detected_result"
   ],
   "permissions": {},
@@ -28,5 +30,30 @@
     "evaluation.detected_result",
     "task.status",
     "task.ended_at"
-  ]
+  ],
+  "state": {
+    "reads": [
+      "_plugin_errors",
+      "acceptance_criteria",
+      "agent_level",
+      "conversation_mode",
+      "core_type",
+      "eval_tool_only_count",
+      "evaluate_reminder_count",
+      "evaluation.detected_result",
+      "iteration",
+      "llm_empty_exhausted",
+      "max_reminders",
+      "messages_tail:50",
+      "plugin_configs",
+      "raw_result",
+      "raw_tool_calls",
+      "reject_count",
+      "reject_reason",
+      "run_started_at",
+      "submitted_task_ids",
+      "task.id",
+      "task.status"
+    ]
+  }
 }

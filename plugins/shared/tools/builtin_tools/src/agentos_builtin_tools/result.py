@@ -1,4 +1,4 @@
-"""工具结果类型——与 0.1 ToolResult 结构对齐。
+"""工具结果类型。
 
 [来源: src/core/results/tool.py ToolExecutionResult]
 """
@@ -13,7 +13,7 @@ from typing import Any
 class ToolResult:
     """工具执行结果。
 
-    与 0.1 的 ToolResult 结构对齐：
+    字段：
     - success: 是否成功
     - output: 输出数据
     - error: 错误信息（success=False 时有值）

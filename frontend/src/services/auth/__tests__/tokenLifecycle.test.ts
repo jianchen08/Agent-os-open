@@ -3,42 +3,47 @@
  * @feature 认证可靠性（token 生命周期单一职责模块） | @ci frontend-test
  *
  * tokenLifecycle 是 token 存取/过期判定/互斥刷新/主动续期调度/认证失效分类的
- * 唯一实现（2026-08-21 架构收口）。本文件合并迁移三组既有语义：
- * - AC-8 TTL 边界不变量（原 authStoreTokenExpiry.test.ts，isExpired 平移）
- * - 主动续期链退避重试不断链（原 authStoreRefreshRetry.test.ts，startAutoRefresh 平移）
- * - 无凭据确定性认证失败（原 authNoCredentials.test.ts 的核心分支）
+ * 唯一实现（2026-08-21 架构收口；2026-09-05 D12-7 存储面重排：access 仅内存、
+ * refresh 仅 sessionStorage、localStorage 零 token 残留）。本文件覆盖：
+ * - AC-8 TTL 边界不变量（isExpired 平移）
+ * - 存取唯一入口 + 存储面不变量（localStorage 零 token、refresh 会话级）
+ * - 单次轮换（刷新后旧 refresh 被服务端作废，新值必须落位）
+ * - 主动续期链退避重试不断链
+ * - 无凭据确定性认证失败
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-
 const mockApiRefreshToken = vi.fn()
 const mockGetCurrentUser = vi.fn()
-
 vi.mock('@/services/api/auth', () => ({
   login: vi.fn(),
   register: vi.fn(),
   refreshToken: (...args: unknown[]) => mockApiRefreshToken(...args),
   getCurrentUser: () => mockGetCurrentUser(),
   logout: vi.fn(),
+  changePassword: vi.fn(),
 }))
-
+import { STORAGE_KEYS } from '@/constants/storage'
 import {
   getAccessToken,
+  getRefreshTokenValue,
   setTokens,
   clearTokens,
   isExpired,
   isAuthFailureFromError,
   refresh,
+  scrubLegacyTokenStorages,
   ensureFreshToken,
   startAutoRefresh,
   stopAutoRefresh,
 } from '@/services/auth/tokenLifecycle'
-import { STORAGE_KEYS } from '@/constants/storage'
 
 const BASE_TIME = new Date('2026-01-01T00:00:00Z').getTime()
 
 describe('tokenLifecycle: TTL 边界不变量 (isExpired)', () => {
   beforeEach(() => {
+    sessionStorage.clear()
     localStorage.clear()
+    clearTokens()
     vi.useFakeTimers()
     vi.setSystemTime(BASE_TIME)
   })
@@ -49,58 +54,120 @@ describe('tokenLifecycle: TTL 边界不变量 (isExpired)', () => {
   })
 
   it('TTL 边界前（刚签发）应未过期 → false', () => {
-    localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, String(BASE_TIME + 10_000))
+    setTokens('at-1', 'rt-1', 10)
     expect(isExpired()).toBe(false)
   })
 
   it('临近边界（9s，TTL 内最后 1s）仍未过期 → false', () => {
-    localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, String(BASE_TIME + 10_000))
+    setTokens('at-1', 'rt-1', 10)
     vi.advanceTimersByTime(9_000)
     expect(isExpired()).toBe(false)
   })
 
   it('越过边界应判定过期 → true', () => {
-    localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, String(BASE_TIME + 10_000))
+    setTokens('at-1', 'rt-1', 10)
     vi.advanceTimersByTime(10_001)
     expect(isExpired()).toBe(true)
   })
 
-  it('无过期时间记录 / 格式非法均视为已过期 → true', () => {
+  it('无过期时间记录（未签发/已清除）视为已过期 → true', () => {
     expect(isExpired()).toBe(true)
-    localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, 'not-a-number')
+    clearTokens()
     expect(isExpired()).toBe(true)
   })
 })
 
-describe('tokenLifecycle: 存取唯一入口 (setTokens/clearTokens)', () => {
+describe('tokenLifecycle: 存储面不变量（D12-7）', () => {
   beforeEach(() => {
     localStorage.clear()
+    sessionStorage.clear()
+    clearTokens()
   })
 
-  it('setTokens 写三件套（access/refresh/expiry 按 expires_in 计算）', () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(BASE_TIME)
+  it('access token 仅内存持有：setTokens 后 localStorage 无 access token', () => {
     setTokens('at-1', 'rt-1', 100)
     expect(getAccessToken()).toBe('at-1')
-    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBe('rt-1')
-    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)).toBe(
-      String(BASE_TIME + 100_000),
-    )
+    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)).toBeNull()
+  })
+
+  it('refresh token 仅存 sessionStorage：localStorage 无 refresh token', () => {
+    setTokens('at-1', 'rt-1', 100)
+    expect(getRefreshTokenValue()).toBe('rt-1')
+    expect(sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBe('rt-1')
+    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
+  })
+
+  it('localStorage 零 token 残留（登录→登出全周期）', () => {
+    setTokens('at-1', 'rt-1', 100)
+    clearTokens()
+    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)).toBeNull()
+    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
+    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)).toBeNull()
+    expect(getAccessToken()).toBeNull()
+    expect(getRefreshTokenValue()).toBeNull()
+  })
+
+  it('升级残留清擦：升级前遗留在 localStorage 的 token 被 scrub 清除', () => {
+    // 模拟升级前版本写入 localStorage 的令牌三件套
+    localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, 'legacy-at')
+    localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, 'legacy-rt')
+    localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, '9999999999999')
+    scrubLegacyTokenStorages()
+    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)).toBeNull()
+    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
+    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)).toBeNull()
+  })
+
+  it('clearTokens 同时清 sessionStorage 的 refresh token（logout 清双侧）', () => {
+    setTokens('at-1', 'rt-1', 100)
+    clearTokens()
+    expect(sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
+  })
+})
+
+describe('tokenLifecycle: 单次轮换（D12-7 refresh 出新值落位）', () => {
+  beforeEach(() => {
+    sessionStorage.clear()
+    localStorage.clear()
+    clearTokens()
+    mockApiRefreshToken.mockReset()
+    vi.useFakeTimers()
+    vi.setSystemTime(BASE_TIME)
+  })
+
+  afterEach(() => {
+    stopAutoRefresh()
     vi.useRealTimers()
   })
 
-  it('clearTokens 清空三件套', () => {
-    setTokens('at-1', 'rt-1', 100)
-    clearTokens()
-    expect(getAccessToken()).toBeNull()
-    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
-    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)).toBeNull()
+  it('refresh 成功后新 refresh token 必须落 sessionStorage（旧值已服务端作废）', async () => {
+    setTokens('at-1', 'rt-1', 1)
+    vi.advanceTimersByTime(2_000)
+    mockApiRefreshToken.mockResolvedValue({
+      access_token: 'at-2',
+      refresh_token: 'rt-2',
+      expires_in: 60,
+    })
+    await refresh()
+    expect(mockApiRefreshToken).toHaveBeenCalledWith('rt-1')
+    expect(getRefreshTokenValue()).toBe('rt-2')
+    expect(getAccessToken()).toBe('at-2')
+  })
+
+  it('刷新响应缺失轮换新值 → 视为失败抛错（不落半会话凭据）', async () => {
+    setTokens('at-1', 'rt-1', 1)
+    vi.advanceTimersByTime(2_000)
+    mockApiRefreshToken.mockResolvedValue({ access_token: 'at-2', expires_in: 60 })
+    // 缺失轮换新值按刷新失败处理（外层统一包装为「令牌刷新失败」）
+    await expect(refresh()).rejects.toThrow('令牌刷新失败')
   })
 })
 
 describe('tokenLifecycle: 无凭据确定性认证失败', () => {
   beforeEach(() => {
+    sessionStorage.clear()
     localStorage.clear()
+    clearTokens()
     mockApiRefreshToken.mockReset()
   })
 
@@ -123,11 +190,64 @@ describe('tokenLifecycle: 无凭据确定性认证失败', () => {
     expect(isAuthFailureFromError(new Error('network glitch'))).toBe(false)
   })
 
-  it('localStorage 有 refresh_token 时不走无凭据分支（打到 API）', async () => {
-    localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, 'rt-1')
+  it('sessionStorage 有 refresh_token 时不走无凭据分支（打到 API）', async () => {
+    setTokens('at-1', 'rt-1', 100)
     mockApiRefreshToken.mockRejectedValue(new Error('Network Error'))
     await expect(refresh()).rejects.toThrow('令牌刷新失败')
     expect(mockApiRefreshToken).toHaveBeenCalledWith('rt-1')
+  })
+})
+
+describe('tokenLifecycle: 存储读故障 ≠ 无凭据（存储故障不呈现为被登出）', () => {
+  beforeEach(() => {
+    sessionStorage.clear()
+    localStorage.clear()
+    clearTokens()
+    mockApiRefreshToken.mockReset()
+    vi.useFakeTimers()
+    vi.setSystemTime(BASE_TIME)
+  })
+
+  afterEach(() => {
+    stopAutoRefresh()
+    vi.useRealTimers()
+  })
+
+  it('读 token 抛异常（存储故障）→ error 日志 + 按瞬时失败上抛（无 authNoCredentials）+ 现态保留', async () => {
+    setTokens('at-live', 'rt-live', 100)
+    // 异步推进：让定时器触发的在飞 refresh（单飞互斥占位）先落定，
+    // 否则下方 refresh() 复用在飞 promise，存储故障分支不会执行
+    await vi.advanceTimersByTimeAsync(101_000)
+    // 钉实例而非 Storage.prototype：jsdom 下原型级 spy 不保证拦到 sessionStorage
+    // 实例读取；实例自有属性遮蔽原型，任意环境确定性触发存储故障分支
+    const getItemSpy = vi.spyOn(sessionStorage, 'getItem').mockImplementation(() => {
+      throw new Error('sessionStorage unavailable')
+    })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      let caught: unknown = null
+      try {
+        await refresh()
+        expect.unreachable('存储故障应上抛')
+      } catch (e) {
+        caught = e
+      }
+      // 不当作已登出：错误不带 authNoCredentials → 分类为非认证失败
+      // （调度器按瞬时故障退避重试，不触发 triggerAuthExpired）
+      expect(isAuthFailureFromError(caught)).toBe(false)
+      // 存储异常以 error 日志显式呈现
+      expect(errorSpy).toHaveBeenCalled()
+      // 现态保留：内存 access token 未被清
+      expect(getAccessToken()).toBe('at-live')
+    } finally {
+      getItemSpy.mockRestore()
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('无 token（sessionStorage 空）→ 保持无凭据确定性失败（登出路径回归）', async () => {
+    await expect(refresh()).rejects.toMatchObject({ authNoCredentials: true })
+    expect(isAuthFailureFromError(await refresh().catch((e) => e))).toBe(true)
   })
 })
 
@@ -135,7 +255,9 @@ describe('tokenLifecycle: 主动续期链退避重试、不断链', () => {
   const TTL_S = 100 // 100s TTL → 首次续期调度在 50s（min(TTL/2, 5min)）
 
   beforeEach(() => {
+    sessionStorage.clear()
     localStorage.clear()
+    clearTokens()
     mockApiRefreshToken.mockReset()
     vi.useFakeTimers()
     vi.setSystemTime(BASE_TIME)
@@ -156,7 +278,7 @@ describe('tokenLifecycle: 主动续期链退避重试、不断链', () => {
       .mockResolvedValue({ access_token: 'at-3', refresh_token: 'rt-3', expires_in: TTL_S }) // 第 3 次起：成功（验证链持续）
 
     // 到首次续期点（50s）：第 1 次失败
-    await vi.advanceTimersByTimeAsync(TTL_S * 1000 / 2)
+    await vi.advanceTimersByTimeAsync((TTL_S * 1000) / 2)
     expect(mockApiRefreshToken).toHaveBeenCalledTimes(1)
 
     // 退避 30s 内不重试
@@ -168,10 +290,10 @@ describe('tokenLifecycle: 主动续期链退避重试、不断链', () => {
     expect(mockApiRefreshToken).toHaveBeenCalledTimes(2)
 
     // 新 TTL 的续期点触发第 3 次 → 链在持续
-    await vi.advanceTimersByTimeAsync(TTL_S * 1000 / 2)
+    await vi.advanceTimersByTimeAsync((TTL_S * 1000) / 2)
     expect(mockApiRefreshToken).toHaveBeenCalledTimes(3)
 
-    // 新 token 已落盘
+    // 新 token 已落内存
     expect(getAccessToken()).toBe('at-3')
   })
 
@@ -184,7 +306,7 @@ describe('tokenLifecycle: 主动续期链退避重试、不断链', () => {
     )
 
     // 到续期点：401 → 认证失败 → 不重试
-    await vi.advanceTimersByTimeAsync(TTL_S * 1000 / 2)
+    await vi.advanceTimersByTimeAsync((TTL_S * 1000) / 2)
     expect(mockApiRefreshToken).toHaveBeenCalledTimes(1)
 
     // 远超退避窗口后仍只有 1 次调用（链已停，交反应式路径登出）
@@ -195,7 +317,9 @@ describe('tokenLifecycle: 主动续期链退避重试、不断链', () => {
 
 describe('tokenLifecycle: ensureFreshToken（用前保证新鲜）', () => {
   beforeEach(() => {
+    sessionStorage.clear()
     localStorage.clear()
+    clearTokens()
     mockApiRefreshToken.mockReset()
     vi.useFakeTimers()
     vi.setSystemTime(BASE_TIME)
@@ -216,7 +340,9 @@ describe('tokenLifecycle: ensureFreshToken（用前保证新鲜）', () => {
     setTokens('at-stale', 'rt-1', 1)
     vi.advanceTimersByTime(2_000) // 越过过期点
     mockApiRefreshToken.mockResolvedValue({
-      access_token: 'at-new', refresh_token: 'rt-2', expires_in: 60,
+      access_token: 'at-new',
+      refresh_token: 'rt-2',
+      expires_in: 60,
     })
     await expect(ensureFreshToken()).resolves.toBe('at-new')
   })

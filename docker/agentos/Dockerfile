@@ -74,6 +74,10 @@ RUN ln -sf /usr/local/bin/python3 /usr/local/bin/python
 # 4. 浏览器自动化(system-issue #3)：playwright。chromium 浏览器本体在下一层装。
 ARG PY_MIRROR="https://mirrors.aliyun.com/pypi/simple/"
 ARG PY_TRUSTED="mirrors.aliyun.com"
+# Python 包清单单源（ARG）：下方三个镜像回退分支共用，防列表三份手抄漂移。
+# 值内不带引号——RUN 里 ${PIP_PKGS} 无引号展开按空格切词，`>=` 在展开结果中
+# 不再被 shell 当重定向符解析，与逐个加引号传给 pip 的 argv 完全等价。
+ARG PIP_PKGS="pyyaml>=6.0 pytest>=8.0 pytest-asyncio>=0.21 ruff>=0.4.0 pydantic>=2.0 rich>=13.0 httpx>=0.27.0 aiohttp>=3.9 watchdog>=3.0 litellm>=1.0 simpleeval>=1.0 python-lsp-server>=1.14.0 fastapi>=0.110 uvicorn>=0.27 starlette>=0.36 playwright>=1.40"
 # 注意：pip 层故意不加 --mount=type=cache。实测 BuildKit 的 cache 挂载到
 # /root/.cache/pip 会导致 pip 26.x 在 python:3.11-slim 里 Segmentation fault
 # （解析依赖阶段崩溃，16s 即 exit 139）。去掉 cache mount 后正常构建成功。
@@ -90,29 +94,12 @@ RUN \
         -i https://pypi.tuna.tsinghua.edu.cn/simple/ --trusted-host pypi.tuna.tsinghua.edu.cn \
         || python -m pip install --upgrade pip) \
     && pip install --no-cache-dir \
-        -i ${PY_MIRROR} --trusted-host ${PY_TRUSTED} \
-        "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" \
-        "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
-        "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
-        "python-lsp-server>=1.14.0" \
-        "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \
-        "playwright>=1.40" \
+        -i ${PY_MIRROR} --trusted-host ${PY_TRUSTED} ${PIP_PKGS} \
     || pip install --no-cache-dir \
         -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
         --trusted-host pypi.tuna.tsinghua.edu.cn \
-        "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" \
-        "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
-        "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
-        "python-lsp-server>=1.14.0" \
-        "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \
-        "playwright>=1.40" \
-    || pip install --no-cache-dir \
-        "pyyaml>=6.0" "pytest>=8.0" "pytest-asyncio>=0.21" "ruff>=0.4.0" \
-        "pydantic>=2.0" "rich>=13.0" "httpx>=0.27.0" \
-        "aiohttp>=3.9" "watchdog>=3.0" "litellm>=1.0" "simpleeval>=1.0" \
-        "python-lsp-server>=1.14.0" \
-        "fastapi>=0.110" "uvicorn>=0.27" "starlette>=0.36" \
-        "playwright>=1.40"
+        ${PIP_PKGS} \
+    || pip install --no-cache-dir ${PIP_PKGS}
 
 # 安装 Playwright 浏览器(system-issue #3)
 # 让 agent 在容器内直接跑 e2e 测试（npx playwright / python -m pytest）。

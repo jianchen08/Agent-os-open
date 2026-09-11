@@ -18,7 +18,7 @@
 - [项目简介](#-项目简介) · [演示视频](#-演示视频) · [核心亮点](#-核心亮点) · [项目规模](#-项目规模)
 - [快速开始](#-快速开始)（[Windows](#方式一windows-一键启动推荐) / [Linux·macOS](#方式二linux--macos-一键启动) / [手动开发](#方式三手动开发模式)）
 - [多实例配置](#跨设备--多实例配置说明)
-- [文档导航](#-文档导航) · [版本演进与双历史线](#-版本演进与双历史线) · [镜像仓库](#-镜像仓库)
+- [文档导航](#-文档导航) · [镜像仓库](#-镜像仓库)
 - [贡献](#-贡献) · [安全策略](#-安全策略) · [开源协议](#-开源协议)
 
 ---
@@ -163,8 +163,8 @@ hindsight 记忆插件承载：对话经验自动沉淀（retain）、按需检�
 :: 1. 配置环境变量
 copy .env.example .env
 ::    编辑 .env，填入 LLM API Key（参考 config/models/llm.yaml）
-::    建议同时设置 DEFAULT_ADMIN_PASSWORD（admin 初始密码；未设置时使用内置默认
-::    admin/admin12345——公开值，仅建议本机体验用，且暂无改密端点）
+::    建议同时设置 AGENTOS_ADMIN_PASSWORD（admin 初始口令；未设置时首启生成随机口令
+::    并仅打印一次到控制台——无硬编码默认口令，首登会要求修改口令）
 
 :: 2.（可选）配置 WSL2 + docker-ce 环境（bash 容器隔离等高风险执行路径使用；已配置可跳过）
 install_native_docker.bat
@@ -186,8 +186,8 @@ stop_web_02.bat   （或按端口结束进程，见脚本末尾提示）
 # 1. 配置环境变量
 cp .env.example .env
 # 编辑 .env，填入 LLM API Key
-# 建议同时设置 DEFAULT_ADMIN_PASSWORD（admin 初始密码；未设置时使用内置默认
-# admin/admin12345——公开值，仅建议本机体验用，且暂无改密端点）
+# 建议同时设置 AGENTOS_ADMIN_PASSWORD（admin 初始口令；未设置时首启生成随机口令
+# 并仅打印一次到控制台——无硬编码默认口令，首登会要求修改口令
 
 # 2. 启动（编译 Rust 内核 + 启动内核 :9100 / 前端 :6390；检测到 Docker 时顺带拉起 Redis 容器）
 #    启动/停止请用 start_web_02.sh / stop_web_02.sh
@@ -269,22 +269,6 @@ npm run dev    # 前端开发服务器运行在 http://localhost:6390（反代�
 | [SECURITY.md](SECURITY.md) | 安全策略与漏洞上报 |
 | [AUTHORS.md](AUTHORS.md) | 贡献者名单 |
 | [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) | 第三方依赖许可证清单 |
-
----
-
-## 🧬 版本演进与双历史线
-
-本仓保留两条**相互独立**的历史线：
-
-| 历史线 | 分支 | 世代 | 说明 |
-|---|---|---|---|
-| 现役线 | `main` | **0.2** —— Rust 微内核 + Python 插件 + React 前端 | 当前开发主线，架构详见 [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| 存档线 | `legacy/0.1` | **0.1** —— Python 应用（`src/` 布局，`run.py` 启动） | 2026-04 → 2026-08 的 0.1 世代完整历史，已冻结，仅作演进回溯 |
-
-0.1 → 0.2 是一次**架构换代**而非渐进重构：执行基座由 Python 应用重写为 Rust 微内核
-（`kernel/`），业务能力（LLM、记忆、评估、审批、触发器等）全部下沉为可热装载的插件
-（`plugins/`），一切皆插件。两条历史线各自独立成链、互不连通——`main` 不是
-`legacy/0.1` 的延续提交，而是新执行基座上的全新起点。
 
 ---
 

@@ -36,17 +36,13 @@ plugins:
     enabled: false
   channel_qq:
     enabled: false
-  demo_widget_plugin:
-    enabled: false
   simple_tools:
     enabled: true
   design_generate_mcp:
     enabled: false
-  feature_matrix_plugin:
-    enabled: false
-  visual_customization_demo:
-    enabled: false
-  widget_demo:
+  browser_tool:
+    enabled: true
+  browser_test_mcp:
     enabled: false
   task_form:
     enabled: true
@@ -70,19 +66,9 @@ plugins:
     enabled: true
   trigger_setup_tool:
     enabled: true
-  pipeline_memory_read:
-    enabled: false
-  pipeline_knowledge_inject:
-    enabled: false
-  pipeline_cost_control:
-    enabled: false
-  pipeline_termination_advisor:
-    enabled: false
-  pipeline_tool_context:
-    enabled: false
-  pipeline_stuck_detector:
-    enabled: false
   pipeline_context_window_guard:
     enabled: true
+  langchain_hub_search:
+    enabled: false
 defaults:
   enabled: true

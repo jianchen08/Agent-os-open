@@ -17,29 +17,9 @@ export const ROUTES = {
   // /tools、/agents 无独立路由页（agent_manager 插件化）：
   // 智能体页面由 agent_manager 插件 contributes.pages 声明（path=/agents，
   // 经 openWorkspacePanelByPath 解析）；能力浏览并入设置中枢「插件注册表」。
-  /** 管理员页面 */
-  ADMIN: '/admin',
-  /** 记忆页面 */
-  MEMORY: '/memory',
-  /** 知识库页面 */
-  KNOWLEDGE_BASE: '/knowledge-base',
-  /** 调试页面 */
-  DEBUG: {
-    /** 调试中心入口 */
-    ROOT: '/debug',
-    /** 执行记录 */
-    EXECUTION_RECORDS: '/debug/execution-records',
-    /** 会话 */
-    SESSIONS: '/debug/sessions',
-    /** 任务 */
-    TASKS: '/debug/tasks',
-    /** 评估指标 */
-    EVALUATION_METRICS: '/debug/evaluation-metrics',
-    /** 用户 */
-    USERS: '/debug/users',
-    /** 数据库管理（统一数据接口 /api/v1/db/*） */
-    DB: '/debug/db',
-    /** LLM 请求快照（最近发送给大模型的真实请求体） */
-    LLM_PAYLOAD: '/debug/llm-payload',
-  },
+  // /admin 路由已退役：用户管理 = user_admin 插件声明页（widget_stage 组台）。
+  // /memory、/knowledge-base 路由已退役：hindsight_memory 插件声明页
+  // （/p/memory、/p/knowledge_base 经通配路由全页渲染）。
+  // /debug 路由族已退役：调试中心 = debug_center 插件声明页（debug_center_hub
+  // 工作区面板内嵌九个子页），无独立路由。
 } as const

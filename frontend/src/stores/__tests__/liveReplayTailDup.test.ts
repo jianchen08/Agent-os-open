@@ -8,7 +8,6 @@
  * 3 个 LLM 轮次、2 个工具执行、7 个 stream_end 的实时流）。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 vi.mock('@/utils/logger', () => ({
   loggers: {
     sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -18,11 +17,10 @@ vi.mock('@/utils/logger', () => ({
   },
   createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
 }))
-
-import eventsRaw from './__fixtures__/live_events.json'
-import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import * as handlers from '@/services/websocket/streaming/handlers'
+import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
+import eventsRaw from './__fixtures__/live_events.json'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 

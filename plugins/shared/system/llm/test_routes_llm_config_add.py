@@ -22,6 +22,11 @@ import yaml
 pytestmark = pytest.mark.unit
 
 _DIR = Path(__file__).resolve().parent
+# routes_llm_config 依赖 plugins/shared 根的共享模块（atomic_io 等），一并入 path
+_SHARED_DIR = _DIR.parents[1]
+for _p in (str(_DIR), str(_SHARED_DIR)):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 
 @pytest.fixture
@@ -129,3 +134,118 @@ def test_non_dict_models_body_rejected(rlc: Any, llm_yaml: Path) -> None:
         rlc.add_model({"models": ["glm-5.2"]})
 
     assert exc_info.value.status_code == 400
+
+
+# ─────────── 拉取模型上限事实（litellm 注册表，厂商 /models 不返回） ───────────
+
+def test_lookup_model_limits_returns_registry_facts(
+    rlc: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """litellm 注册表有该模型 → 返回真实 context_window 与 max_output_tokens。
+
+    厂商 /models 端点只返回 id/object/owned_by，上限事实只能来自注册表；
+    这些数字随后写进模型的 context_window / max_tokens（不再发明 4096）。
+
+    注册表条目显式桩定：同进程先前装载 llm server.py 时会置
+    LITELLM_LOCAL_MODEL_COST_MAP=true，litellm 由此改用本地备份地图——
+    新模型（如 zai/glm-5.2）是否收录随 litellm 版本/地图形态漂移，断言
+    真实数据会时序性翻车；本用例锁的是查表接线语义，不是 litellm 数据。
+    """
+    import litellm
+
+    monkeypatch.setitem(litellm.model_cost, "zai/glm-5.2", {
+        "max_input_tokens": 1_000_000,
+        "max_output_tokens": 128_000,
+    })
+    limits = rlc._lookup_model_limits("zai", "glm-5.2")
+
+    assert limits["context_window"] == 1_000_000
+    assert limits["max_output_tokens"] == 128_000
+
+
+def test_lookup_model_limits_unknown_model_returns_empty(rlc: Any) -> None:
+    """注册表无该模型 → 空 dict（调用方走保守默认，不发明数字）。"""
+    assert rlc._lookup_model_limits("openai", "no-such-model-xyz") == {}
+    assert rlc._lookup_model_limits("", "glm-5.2") == {}
+    assert rlc._lookup_model_limits("zai", "") == {}
+
+
+def test_lookup_model_limits_no_cross_vendor_suffix_match(rlc: Any) -> None:
+    """不做后缀模糊匹配：同名模型在不同厂商上限不同，套用他人上限即失真。
+
+    ollama 的 glm-5.2 在注册表里没有 openai/ 前缀条目——不得退化成命中
+    dashscope/glm-5.2 或 zai/glm-5.2（那是别的厂商的事实）。
+    """
+    assert rlc._lookup_model_limits("openai", "glm-5.2") == {}
+
+
+def test_lookup_model_limits_registry_failure_degrades_to_empty(
+    rlc: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """注册表读取异常 → 空 dict 且不抛出（拉取列表不因查上限失败而整体失败）。"""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _boom(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "litellm":
+            raise RuntimeError("registry unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _boom)
+
+    assert rlc._lookup_model_limits("zai", "glm-5.2") == {}
+
+
+def test_get_remote_models_attaches_registry_limits(
+    rlc: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """端点接线闸：拉取列表逐条附上限事实（删掉接线即红）。
+
+    厂商 /models 只返回 id/object/owned_by；端点须把 litellm 注册表的
+    context_window / max_output_tokens 一并下发，否则前端添加模型时只能
+    发明 4096（本函数存在的唯一理由）。
+
+    注册表条目显式桩定（同 test_lookup_model_limits_returns_registry_facts）：
+    进程内地图形态随 llm server 装载与否漂移，接线闸只锁端点→查表→下发链路。
+    """
+    import httpx
+    import litellm
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "data": [
+                    {"id": "glm-5.2", "object": "model", "owned_by": "z-ai"},
+                    {"id": "unknown-model-xyz", "object": "model", "owned_by": "z-ai"},
+                ]
+            }
+
+    monkeypatch.setattr(rlc, "_read_yaml", lambda _p: {
+        "providers": {
+            "zhipu_coding": {
+                "type": "zai",
+                "api_base": "https://example.invalid/v4",
+                "keys": [{"api_key": "sk-test"}],
+            }
+        }
+    })
+    monkeypatch.setattr(rlc, "_resolve_env_value", lambda v: v)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    monkeypatch.setitem(litellm.model_cost, "zai/glm-5.2", {
+        "max_input_tokens": 1_000_000,
+        "max_output_tokens": 128_000,
+    })
+
+    payload = rlc.get_remote_models("zhipu_coding")
+    by_id = {m["id"]: m for m in payload["models"]}
+
+    # 注册表有该模型 → 事实随条目下发
+    assert by_id["glm-5.2"]["context_window"] == 1_000_000
+    assert by_id["glm-5.2"]["max_output_tokens"] == 128_000
+    # 注册表无该模型 → 无事实键（前端走保守兜底，不发明数字）
+    assert "context_window" not in by_id["unknown-model-xyz"]
+    assert "max_output_tokens" not in by_id["unknown-model-xyz"]

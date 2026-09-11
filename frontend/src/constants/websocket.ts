@@ -44,17 +44,32 @@ const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || deriveWsUrl(API_BASE_URL
 const PROTOCOL_VERSION = '3.0.0'
 
 /**
+ * WS 握手凭据参数。
+ *
+ * 生产路径：`ticket`（POST /api/v1/ws-ticket 签发的一次性票据，单次消费 60s TTL）。
+ * 兼容路径：`token`（JWT 直连；内核 ?token= 路径并存保留，供测试/外部脚本使用，
+ * 前端生产流程不再传 token）。两者同时给出时 ticket 优先。
+ */
+export interface WsHandshakeAuth {
+  ticket?: string
+  token?: string
+}
+
+/**
  * 构建全局 WebSocket 连接 URL（不带 thread_id）
  *
  * 用于 GlobalWebSocketService 建立 /ws/chat 全局连接。
  * 断线重连时传入 last_sequence 让后端重放断线期间的消息。
  *
- * @param token - JWT访问令牌
+ * @param auth - 握手凭据（ticket 优先；token 为兼容路径）
  * @param lastSequence - 断线前已确认的最大消息序号（可选，用于断线补漏）
  * @returns 完整的 WebSocket URL
  */
-export const buildGlobalWebSocketUrl = (token: string, lastSequence?: number): string => {
-  const base = `${WS_BASE_URL}/ws/chat?token=${encodeURIComponent(token)}&version=${encodeURIComponent(PROTOCOL_VERSION)}`
+export const buildGlobalWebSocketUrl = (auth: WsHandshakeAuth, lastSequence?: number): string => {
+  const credential = auth.ticket
+    ? `ticket=${encodeURIComponent(auth.ticket)}`
+    : `token=${encodeURIComponent(auth.token ?? '')}`
+  const base = `${WS_BASE_URL}/ws/chat?${credential}&version=${encodeURIComponent(PROTOCOL_VERSION)}`
   if (lastSequence != null && lastSequence > 0) {
     return `${base}&last_sequence=${lastSequence}`
   }
@@ -62,59 +77,39 @@ export const buildGlobalWebSocketUrl = (token: string, lastSequence?: number): s
 }
 
 /**
- * WebSocket服务端事件类型
+ * WebSocket服务端事件类型（前端侧单一真值表）
  *
- * 对应后端发送的事件类型
+ * 收录原则（P2-3 单一真值源）：只收录后端（内核 ws_session/capability_router/
+ * chat_send_handler 事件族 + 插件 event-bus.emit 全集）有发射源的事件名；
+ * 与内核的对账由 wsEventNames.contract.test 机械执行（内核改名/删事件即红）。
+ * 旧流式事件名已退役（LLM 流式服务契约 2026-08-26 定稿，DSH 8 事件协议）：
+ * stream_chunk / thinking_start / thinking_chunk / thinking_end / stream_keepalive
+ * 后端 llm_service 不再发射；前端 handler 对应删除（不留兼容层）。
  */
 export const WS_SERVER_EVENTS = {
-  // ⚠️ 无发射源事件名（类型面保留，勿新增订阅）：后端 kernel ws_session.rs /
-  // capability_router.rs 事件族 + 插件 event-bus.emit 全集（2026-08 核查）不含：
-  // state_change / error / execution_start / execution_progress / execution_done /
-  // execution_cancelled / execution_output / sub_agent_created /
-  // sub_agent_waiting_input / sub_agent_completed / system_notification /
-  // schema_updated。
-  // 另：task_status_update / task_status_changed 当前后端推送路径静默忽略
-  // （tasks/service.py 待 SDK frontend.emit 落地后恢复），订阅暂保留。
-  // 旧流式事件名已退役（LLM 流式服务契约 2026-08-26 定稿，DSH 8 事件协议）：
-  // stream_chunk / thinking_start / thinking_chunk / thinking_end / stream_keepalive
-  // 后端 llm_service 不再发射；前端 handler 对应删除（不留兼容层）。
   /** 连接确认 */
   CONNECTION_CONFIRMATION: 'connection_confirmation',
-  /** 状态变更 */
-  STATE_CHANGE: 'state_change',
   /** 任务完成 */
   TASK_COMPLETED: 'task_completed',
   /** 任务取消 */
   TASK_CANCELLED: 'task_cancelled',
-  /** 任务状态实时更新 */
+  /** 任务状态实时更新（后端推送路径暂静默跳过，待 SDK frontend.emit 落地恢复） */
   TASK_STATUS_UPDATE: 'task_status_update',
-  /** 任务状态变更（实时推送） */
+  /** 任务状态变更（实时推送，同上待后端恢复） */
   TASK_STATUS_CHANGED: 'task_status_changed',
   /** 任务删除 */
   TASK_DELETED: 'task_deleted',
-  /** 错误 */
-  ERROR: 'error',
   /** 心跳响应（后端发送 heartbeat_ack） */
   HEARTBEAT: 'heartbeat_ack',
-  /** 新消息 - 需求 10.3 */
+  /** 新消息 */
   NEW_MESSAGE: 'new_message',
-  /** 节点状态更新 - 需求 10.4 */
-  NODE_STATUS_UPDATE: 'node_status_update',
-  /** 审批请求 */
-  APPROVAL_REQUEST: 'approval_request',
-  /** 执行状态更新 - 需求 8.2 */
-  EXECUTION_STATUS_UPDATE: 'execution_status_update',
-  /** 子 Agent 输入请求 - 需求 1.3 */
-  SUB_AGENT_INPUT_REQUEST: 'sub_agent_input_request',
-  /** 执行事件（节点执行完成） - 需求 7.2 */
-  EXECUTION_EVENT: 'execution_event',
   /** 流式输出开始 */
   STREAM_START: 'stream_start',
   /** 流式块开始（LLM 流式 8 事件协议：index=块索引，block_type=text/reasoning/tool-call） */
   BLOCK_START: 'block_start',
   /** 正文增量（LLM 流式 8 事件协议：按块索引归组追加） */
   TEXT_DELTA: 'text_delta',
-  /** 思考增量（LLM 流式 8 事件协议：取代 thinking_start/chunk/end，思考块起止由 block_start/block_end 表达） */
+  /** 思考增量（LLM 流式 8 事件协议：思考块起止由 block_start/block_end 表达） */
   REASONING_DELTA: 'reasoning_delta',
   /** 工具调用增量（LLM 流式 8 事件协议：arguments_delta 原始 JSON 串按块索引累积） */
   TOOL_CALL_DELTA: 'tool_call_delta',
@@ -124,7 +119,7 @@ export const WS_SERVER_EVENTS = {
   USAGE_EVENT: 'usage',
   /** 流式终结（LLM 流式 8 事件协议：reason=stop/length/tool_calls/error；断流由调用方补发 error） */
   FINISH: 'finish',
-  /** 流式保活（LLM 流式 8 事件协议：超时探活，无业务载荷） */
+  /** 流式保活（LLM 流式 8 事件协议：超时探活，无业务载荷，前端无订阅消费面） */
   KEEPALIVE: 'keepalive',
   /** 流式输出结束（轮级：一轮 = 一条消息，不代表整次执行结束） */
   STREAM_END: 'stream_end',
@@ -138,56 +133,22 @@ export const WS_SERVER_EVENTS = {
   TOOL_START: 'tool_start',
   /** 工具调用结果（管道流式事件） */
   TOOL_RESULT: 'tool_result',
-  /** 工作流步骤更新 - 需求 3.2 */
-  WORKFLOW_STEP_UPDATE: 'workflow_step_update',
-  /** 执行开始（统一工具/Agent/工作流执行） */
-  EXECUTION_START: 'execution_start',
-  /** 执行进度更新 */
-  EXECUTION_PROGRESS: 'execution_progress',
-  /** 执行完成 */
-  EXECUTION_DONE: 'execution_done',
-  /** 执行取消 */
-  EXECUTION_CANCELLED: 'execution_cancelled',
-  /** 执行输出（中间输出） */
-  EXECUTION_OUTPUT: 'execution_output',
-  /** 执行控制响应 - 需求 5.1, 5.2, 5.3 */
-  EXECUTION_CONTROL_RESPONSE: 'execution_control_response',
-  /** Agent 消息注入响应 */
-  AGENT_INJECT_RESPONSE: 'agent_inject_response',
+  /** 工具执行进度（bash 等长任务执行中的 stdout 增量，task_observability 任务 2） */
+  TOOL_PROGRESS: 'tool_progress',
   /** 人类交互超时提醒 */
   INTERACTION_TIMEOUT_REMINDER: 'interaction_timeout_reminder',
   /** 人类交互请求 */
   INTERACTION_REQUEST: 'interaction_request',
-  /** 消息变更 - PostgreSQL LISTEN/NOTIFY */
-  MESSAGE_CHANGE: 'MESSAGE_CHANGE',
-  /** 子 Agent 创建 - Phase 5 */
-  SUB_AGENT_CREATED: 'sub_agent_created',
-  /** 子 Agent 等待输入 - Phase 5 */
-  SUB_AGENT_WAITING_INPUT: 'sub_agent_waiting_input',
-  /** 子 Agent 完成 - Phase 5 */
-  SUB_AGENT_COMPLETED: 'sub_agent_completed',
-  /** 系统通知（任务完成/失败等，通过统一流式路径发送） */
+  /** 系统通知（chat.send_message 后台派发失败补报，统一错误模型） */
   SYSTEM_NOTIFICATION: 'system_notification',
-  /** Agent 层级变更 - Phase 5 */
-  AGENT_LEVEL_CHANGED: 'agent_level_changed',
-  /** Schema 更新（模块 Schema 变更推送） */
-  SCHEMA_UPDATED: 'schema_updated',
-  /** 迭代开始 */
-  ITERATION_START: 'iteration_start',
-  /** 迭代结束 */
-  ITERATION_END: 'iteration_end',
-  /** 会话更新（新建/删除/修改会话时推送） */
-  SESSION_UPDATE: 'session_update',
-  /** 成本更新（Token 用量变化时推送） */
-  COST_UPDATE: 'cost_update',
-  /** 终止评估更新（termination_advisor 每轮推送剩余预算+收敛信号，task_observability 1c） */
-  TERMINATION_STATUS: 'termination_status',
-  /** 工具执行进度（bash 等长任务执行中的 stdout 增量，task_observability 任务 2） */
-  TOOL_PROGRESS: 'tool_progress',
-  /** 管道已接收到消息 */
-  PIPELINE_RECEIVED: 'pipeline_received',
   /** 迭代事件（管道引擎迭代开始/结束） */
   ITERATION: 'iteration',
+  /** 会话成本更新（Token 用量变化时推送） */
+  COST_UPDATE: 'cost_update',
+  /** pending 输入队列同步（ADR-2026-08-26：入队/消费/修改/删除时推全量列表） */
+  PENDING_INPUTS_CHANGED: 'pending_inputs_changed',
+  /** 上下文压缩彻底失败（context_window_guard 经 frontend.emit 透传，按故障周期去重） */
+  COMPRESSION_FAILED: 'compression_failed',
   /** 需要全量重新同步（断线重连后后端告知 last_sequence 过期） */
   RESYNC_REQUIRED: 'resync_required',
   /** widget 事件（内核 PluginWidgetBroadcaster 周期快照 + 插件 widget 交互，ADR §3.5'） */
@@ -197,463 +158,27 @@ export const WS_SERVER_EVENTS = {
 } as const
 
 /**
- * WebSocket客户端消息类型
- *
- * 对应前端发送给后端的消息类型
+ * 前端本地服务事件（GlobalWebSocket 连接服务自有事件总线，非后端 WS 事件名）。
+ * 发射端 = services/websocket/GlobalWebSocket；订阅端 = useRealtimeEvents /
+ * streaming/index。与 WS_SERVER_EVENTS 分表，避免把本地事件误当后端协议。
  */
-const WS_CLIENT_MESSAGES = {
-  /** 用户输入 */
-  USER_INPUT: 'user_input',
-  /** 审批决策 */
-  APPROVAL: 'approval',
-  /** 心跳 */
-  HEARTBEAT: 'heartbeat',
-  /** 取消任务 */
-  CANCEL: 'cancel',
-  /** 用户输入响应（响应子 Agent 的输入请求）- 需求 1.3 */
-  USER_INPUT_RESPONSE: 'user_input_response',
-  /** 重新生成（截断到目标 user 消息后重跑）：缺省 user_message_id = 最后一条 user */
-  REGENERATE: 'regenerate',
+export const WS_LOCAL_EVENTS = {
+  /** 连接（重）建立：streaming/useRealtimeEvents 据此做断线补漏 */
+  RECONNECTED: 'reconnected',
+  /** 排队 user_input 超 TTL 未送达（撤占位气泡 + 原位错误消息） */
+  USER_INPUT_SEND_TIMEOUT: 'user_input_send_timeout',
+  /** 被同账号新连接替换（B10 单连接踢旧，Close code=4000，不自动重连） */
+  KICKED_BY_REPLACEMENT: 'kicked_by_replacement',
 } as const
 
 /**
- * 审批决策常量（单一事实来源）
- */
-export const APPROVAL_DECISIONS = {
-  /** 批准 */
-  APPROVE: 'approve',
-  /** 拒绝 */
-  REJECT: 'reject',
-  /** 修改后批准 */
-  MODIFY: 'modify',
-} as const
-
-/** 审批决策类型（从 APPROVAL_DECISIONS 派生，避免同值漂移） */
-export type ApprovalDecisionType = (typeof APPROVAL_DECISIONS)[keyof typeof APPROVAL_DECISIONS]
-
-/**
- * WebSocket事件类型
- */
-export type WebSocketServerEventType = (typeof WS_SERVER_EVENTS)[keyof typeof WS_SERVER_EVENTS]
-
-export type WebSocketClientMessageType =
-  (typeof WS_CLIENT_MESSAGES)[keyof typeof WS_CLIENT_MESSAGES]
-
-/**
- * WebSocket错误码枚举
+ * WebSocket关闭码（仅收录后端实际发送的应用层关闭码）
  *
- * 与后端WebSocket错误码保持一致，用于统一错误处理和重试策略
+ * CONNECTION_REPLACED 对齐内核 CLOSE_CODE_KICKED = 4000
+ * （kernel/crates/session/src/auth.rs，B10 单连接踢旧）；前端据 4000 置位
+ * 防重连标记，避免 A/B 双客户端互踢循环。
  */
 export enum WebSocketErrorCode {
-  // 认证相关 (1000-1999)
-  /** 认证失败 */
-  AUTH_FAILED = 1001,
-  /** 令牌过期 */
-  TOKEN_EXPIRED = 1002,
-  /** 连接数超限 */
-  CONNECTION_LIMIT = 1003,
-
-  // 网络相关 (2000-2999)
-  /** 连接丢失 */
-  CONNECTION_LOST = 2001,
-  /** 连接超时 */
-  TIMEOUT = 2002,
-  /** 服务端不可达 */
-  UNREACHABLE = 2003,
-
-  // 服务端相关 (3000-3999)
-  /** 服务端内部错误 */
-  SERVER_ERROR = 3001,
-  /** 请求频率限制 */
-  RATE_LIMITED = 3002,
-  /** 服务维护中 */
-  MAINTENANCE = 3003,
-
-  // 消息相关 (4000-4999)
-  /** 消息过大 */
-  MESSAGE_TOO_LARGE = 4001,
-  /** 消息格式无效 */
-  INVALID_FORMAT = 4002,
-  /** 不支持的消息类型 */
-  UNSUPPORTED_TYPE = 4003,
-  /** 连接被新连接替换（不应重连） */
-  CONNECTION_REPLACED = 4004,
-}
-
-/**
- * WebSocket消息接口定义
- */
-
-/** 文件附件类型 */
-export interface FileAttachment {
-  /** 文件ID */
-  file_id: string
-  /** 原始文件名 */
-  filename: string
-  /** MIME类型 */
-  mime_type: string
-  /** 文件类型（image/document）- 可选，服务端可根据 mime_type 推断 */
-  file_type?: 'image' | 'document'
-  /** Base64编码的文件内容 - 可选，已上传的文件不需要 */
-  base64_data?: string
-}
-
-/** 用户输入消息 */
-export interface UserInputMessage {
-  type: typeof WS_CLIENT_MESSAGES.USER_INPUT
-  content: string
-  /** 文件附件列表（可选） */
-  attachments?: FileAttachment[]
-  /** 父执行记录 ID（子 Agent 标签发消息时传递） */
-  parent_record_id?: string
-}
-
-/** 审批消息 */
-export interface ApprovalMessage {
-  type: typeof WS_CLIENT_MESSAGES.APPROVAL
-  decision: ApprovalDecisionType
-  reason?: string
-  modifications?: Record<string, unknown>
-}
-
-/** 心跳消息 */
-export interface HeartbeatMessage {
-  type: typeof WS_CLIENT_MESSAGES.HEARTBEAT
-  timestamp: number
-}
-
-/** 取消消息 */
-export interface CancelMessage {
-  type: typeof WS_CLIENT_MESSAGES.CANCEL
-  reason?: string
-}
-
-/** 用户输入响应消息（响应子 Agent 的输入请求）- 需求 1.3 */
-export interface UserInputResponseMessage {
-  type: typeof WS_CLIENT_MESSAGES.USER_INPUT_RESPONSE
-  /** 执行 ID */
-  execution_id: string
-  /** 用户响应内容（与后端 response 字段对应） */
-  response: string
-}
-
-/** 重新生成消息：截断到目标 user 消息后重跑（后端路由 + 截断 + 重放） */
-export interface RegenerateMessage {
-  type: typeof WS_CLIENT_MESSAGES.REGENERATE
-  /** 会话 ID */
-  thread_id: string
-  /** 管道 ID（重跑目标管道） */
-  pipeline_id?: string
-  /** 目标 user 消息 ID（缺省 = 最后一条 user 消息） */
-  user_message_id?: string
-  /** 编辑重发：改写目标 user 消息内容后重跑 */
-  new_content?: string
-}
-
-/** 客户端消息联合类型 */
-export type WebSocketClientMessage =
-  | UserInputMessage
-  | ApprovalMessage
-  | HeartbeatMessage
-  | CancelMessage
-  | UserInputResponseMessage
-  | RegenerateMessage
-
-/** 状态变更事件 */
-export interface StateChangeEvent {
-  type: typeof WS_SERVER_EVENTS.STATE_CHANGE
-  previous_state: string
-  current_state: string
-  thread_id: string
-}
-
-/** 任务完成事件 */
-export interface TaskCompletedEvent {
-  type: typeof WS_SERVER_EVENTS.TASK_COMPLETED
-  result: unknown
-  thread_id: string
-}
-
-/** 任务取消事件 */
-export interface TaskCancelledEvent {
-  type: typeof WS_SERVER_EVENTS.TASK_CANCELLED
-  reason: string
-  thread_id: string
-}
-
-/** 错误事件 */
-export interface ErrorEvent {
-  type: typeof WS_SERVER_EVENTS.ERROR
-  error_code: string
-  message: string
-  thread_id: string
-}
-
-/** 连接确认事件 */
-export interface ConnectionConfirmationEvent {
-  type: typeof WS_SERVER_EVENTS.CONNECTION_CONFIRMATION
-  connection_id: string
-  thread_id: string
-  /** 服务端协商后的协议版本 */
-  version?: string
-}
-
-/** 工作流步骤更新事件 - 需求 3.2 */
-export interface WorkflowStepUpdateEvent {
-  type: typeof WS_SERVER_EVENTS.WORKFLOW_STEP_UPDATE
-  /** 执行 ID */
-  execution_id: string
-  /** 步骤 ID */
-  step_id: string
-  /** 步骤名称 */
-  step_name: string
-  /** 步骤状态 */
-  status: string
-  /** 步骤输出 */
-  output?: Record<string, unknown>
-  /** 线程 ID */
-  thread_id?: string
-}
-
-/** 执行开始事件（统一工具/Agent/工作流） */
-export interface ExecutionStartEvent {
-  type: typeof WS_SERVER_EVENTS.EXECUTION_START
-  /** 执行 ID */
-  execution_id: string
-  /** 执行类型 */
-  execution_type: 'tool' | 'agent' | 'workflow'
-  /** 名称 */
-  name: string
-  /** 描述 */
-  description?: string
-  /** 父执行 ID（嵌套时使用） */
-  parent_id?: string
-  /** 输入参数 */
-  input?: Record<string, unknown>
-  /** 元数据 */
-  metadata?: Record<string, unknown>
-  /** 线程 ID */
-  thread_id?: string
-}
-
-/** 执行进度事件 */
-export interface ExecutionProgressEvent {
-  type: typeof WS_SERVER_EVENTS.EXECUTION_PROGRESS
-  /** 执行 ID */
-  execution_id: string
-  /** 进度百分比 (0-100) */
-  progress: number
-  /** 当前步骤描述 */
-  current_step?: string
-  /** 进度消息 */
-  message?: string
-  /** 线程 ID */
-  thread_id?: string
-}
-
-/** 执行完成事件 */
-export interface ExecutionDoneEvent {
-  type: typeof WS_SERVER_EVENTS.EXECUTION_DONE
-  /** 执行 ID */
-  execution_id: string
-  /** 是否成功 */
-  success: boolean
-  /** 输出结果 */
-  output?: Record<string, unknown>
-  /** 错误信息 */
-  error?: string
-  /** 耗时（毫秒） */
-  duration_ms?: number
-  /** 执行摘要 */
-  summary?: string
-  /** 线程 ID */
-  thread_id?: string
-}
-
-/** 执行取消事件 */
-export interface ExecutionCancelledEvent {
-  type: typeof WS_SERVER_EVENTS.EXECUTION_CANCELLED
-  /** 执行 ID */
-  execution_id: string
-  /** 取消原因 */
-  reason: string
-  /** 取消者 */
-  cancelled_by?: 'user' | 'system' | 'timeout'
-  /** 线程 ID */
-  thread_id?: string
-}
-
-/** 执行输出事件（中间输出） */
-export interface ExecutionOutputEvent {
-  type: typeof WS_SERVER_EVENTS.EXECUTION_OUTPUT
-  /** 执行 ID */
-  execution_id: string
-  /** 新增的输出内容 */
-  output: string
-  /** true=追加, false=替换 */
-  append: boolean
-  /** 时间戳 */
-  timestamp: string
-  /** 线程 ID */
-  thread_id?: string
-}
-
-/** 执行控制响应事件 - 需求 5.1, 5.2, 5.3 */
-export interface ExecutionControlResponseEvent {
-  type: typeof WS_SERVER_EVENTS.EXECUTION_CONTROL_RESPONSE
-  /** 执行 ID */
-  execution_id: string
-  /** 执行的动作 */
-  action: 'pause' | 'resume' | 'cancel' | 'rollback'
-  /** 是否成功 */
-  success: boolean
-  /** 响应消息 */
-  message: string
-  /** 新状态 */
-  new_status?: 'running' | 'suspended' | 'cancelled' | 'completed' | 'failed'
-  /** 线程 ID */
-  thread_id?: string
-}
-
-/** Agent 消息注入响应事件 */
-export interface AgentInjectResponseEvent {
-  type: typeof WS_SERVER_EVENTS.AGENT_INJECT_RESPONSE
-  /** 执行 ID */
-  execution_id: string
-  /** Agent ID */
-  agent_id: string
-  /** 是否成功 */
-  success: boolean
-  /** 响应消息 */
-  message: string
-  /** 线程 ID */
-  thread_id?: string
-}
-
-/** Schema 更新事件（模块 Schema 变更推送） */
-export interface SchemaUpdatedEvent {
-  type: typeof WS_SERVER_EVENTS.SCHEMA_UPDATED
-  module_id: string
-  schema_version: string
-  changes: string[]
-  thread_id?: string
-}
-
-/** 迭代开始事件 */
-export interface IterationStartEvent {
-  type: typeof WS_SERVER_EVENTS.ITERATION_START
-  iteration_id: string
-  iteration_type: string
-  description?: string
-  thread_id?: string
-}
-
-/** 迭代结束事件 */
-export interface IterationEndEvent {
-  type: typeof WS_SERVER_EVENTS.ITERATION_END
-  iteration_id: string
-  success: boolean
-  result?: Record<string, unknown>
-  thread_id?: string
-}
-
-/** 服务端事件联合类型 */
-export type WebSocketServerEvent =
-  | StateChangeEvent
-  | TaskCompletedEvent
-  | TaskCancelledEvent
-  | ErrorEvent
-  | ConnectionConfirmationEvent
-  | WorkflowStepUpdateEvent
-  | ExecutionStartEvent
-  | ExecutionProgressEvent
-  | ExecutionDoneEvent
-  | ExecutionCancelledEvent
-  | ExecutionOutputEvent
-  | ExecutionControlResponseEvent
-  | AgentInjectResponseEvent
-  | SchemaUpdatedEvent
-  | IterationStartEvent
-  | IterationEndEvent
-  | SubAgentCreatedEvent
-  | SubAgentWaitingInputEvent
-  | SubAgentCompletedEvent
-  | AgentLevelChangedEvent
-
-/** 子 Agent 创建事件 - Phase 5 */
-export interface SubAgentCreatedEvent {
-  type: typeof WS_SERVER_EVENTS.SUB_AGENT_CREATED
-  /** 子 Agent ID */
-  agentId: string
-  /** 子 Agent 名称 */
-  agentName: string
-  /** Agent 层级 */
-  agentLevel: 1 | 2 | 3
-  /** 父 Agent ID */
-  parentAgentId: string
-  /** 关联任务 ID */
-  taskId?: string
-  /** Agent 路径 */
-  path?: string[]
-  /** 线程 ID */
-  thread_id?: string
-  /** 会话 ID */
-  sessionId?: string
-}
-
-/** 子 Agent 等待输入事件 - Phase 5 */
-export interface SubAgentWaitingInputEvent {
-  type: typeof WS_SERVER_EVENTS.SUB_AGENT_WAITING_INPUT
-  /** 子 Agent ID */
-  agentId: string
-  /** 子 Agent 名称 */
-  agentName: string
-  /** Agent 层级 */
-  agentLevel: 1 | 2 | 3
-  /** 关联任务 ID */
-  taskId?: string
-  /** 输入提示 */
-  prompt?: string
-  /** 线程 ID */
-  thread_id?: string
-  /** 会话 ID */
-  sessionId?: string
-}
-
-/** 子 Agent 完成事件 - Phase 5 */
-export interface SubAgentCompletedEvent {
-  type: typeof WS_SERVER_EVENTS.SUB_AGENT_COMPLETED
-  /** 子 Agent ID */
-  agentId: string
-  /** 子 Agent 名称 */
-  agentName: string
-  /** Agent 层级 */
-  agentLevel: 1 | 2 | 3
-  /** 关联任务 ID */
-  taskId?: string
-  /** 执行结果摘要 */
-  summary?: string
-  /** 是否成功 */
-  success: boolean
-  /** 线程 ID */
-  thread_id?: string
-  /** 会话 ID */
-  sessionId?: string
-}
-
-/** Agent 层级变更事件 - Phase 5 */
-export interface AgentLevelChangedEvent {
-  type: typeof WS_SERVER_EVENTS.AGENT_LEVEL_CHANGED
-  /** Agent ID */
-  agentId: string
-  /** 旧层级 */
-  oldLevel: 1 | 2 | 3
-  /** 新层级 */
-  newLevel: 1 | 2 | 3
-  /** 变更原因 */
-  reason?: string
-  /** 线程 ID */
-  thread_id?: string
-  /** 会话 ID */
-  sessionId?: string
+  /** 连接被新连接替换（内核踢旧两段式：kicked 文本帧先于 Close(4000)） */
+  CONNECTION_REPLACED = 4000,
 }

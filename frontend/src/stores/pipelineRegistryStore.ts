@@ -17,11 +17,11 @@
  */
 
 import { create } from 'zustand'
-import { usePipelineMessageStore } from './pipelineMessageStore'
 import {
   readPipelineRuns,
   updatePipelineRunsCache,
 } from '@/hooks/queries/usePipelineRunsQuery'
+import { usePipelineMessageStore } from './pipelineMessageStore'
 import type { PipelineRunInfo, PipelineStatus } from '@/types/pipeline'
 
 interface PipelineRegistryState {

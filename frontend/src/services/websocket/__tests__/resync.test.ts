@@ -14,6 +14,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import type * as resyncMod from '../resync'
 
 // ── Mock 依赖（vi.hoisted 保证 resetModules 后 mock 状态仍稳定共享） ──
 
@@ -68,7 +69,7 @@ function emitServerEvent(event: string, data: unknown): void {
 }
 
 /** 重置模块注册表后动态导入，获取干净的 resync 模块状态 */
-async function loadResync(): Promise<typeof import('../resync')> {
+async function loadResync(): Promise<resyncMod> {
   vi.resetModules()
   return await import('../resync')
 }

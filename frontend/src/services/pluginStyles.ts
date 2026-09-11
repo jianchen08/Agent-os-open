@@ -19,8 +19,8 @@
  */
 
 import { apiClient } from '@/services/api/client'
-import { loggers } from '@/utils/logger'
 import { extUrl } from '@/services/api/extRoute'
+import { loggers } from '@/utils/logger'
 import type { ClientStyleDeclaration } from '@/services/schema/ContributionRegistry'
 
 /** <style> 唯一标识属性（值形如 "{pluginId}:{styleId}"，同步时比对用） */

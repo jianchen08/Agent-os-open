@@ -9,6 +9,7 @@
  *  - 异常传播：底层 fetchMessages 失败 → { ok:false, error }
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 // mock apiClient.get（网络层）
@@ -54,7 +55,7 @@ function makeMsg(id: string, seq: number, overrides: Partial<Message> = {}): Mes
 }
 
 describe('loadPipelineMessages 统一加载入口', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -334,5 +335,142 @@ describe('loadPipelineMessages 统一加载入口', () => {
     // 指纹去重：不出现重复气泡（每个 sequence 只有一条）
     expect(sequences.length).toBe(new Set(sequences).size)
     expect(store.getBottomCursor(PIPELINE_ID)).toBe(4)
+  })
+})
+
+// ============================================================
+// fetchMessages 同管道 abort 语义
+// ============================================================
+describe('fetchMessages 同管道请求取消', () => {
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    vi.resetModules()
+    const mod = await import('@/stores/pipelineMessageStore')
+    usePipelineMessageStore = mod.usePipelineMessageStore
+    usePipelineMessageStore.setState({
+      messagesByPipeline: {},
+      pipelines: {},
+      pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID },
+      streamingState: {},
+      activePipelineId: null,
+      topCursorsByPipeline: {},
+      bottomCursorsByPipeline: {},
+      hasMoreOlderByPipeline: {},
+      isLoadingOlderByPipeline: {},
+      reconciledByPipeline: {},
+    })
+  })
+
+  it('同 id 连续两次 fetch：第一次以取消收场且不写状态，第二次权威落库', async () => {
+    const store = usePipelineMessageStore.getState()
+    // 第一次请求挂起（在途）
+    let resolveFirst!: (v: unknown) => void
+    mockGet.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveFirst = resolve }),
+    )
+    const firstPromise = store.fetchMessages(PIPELINE_ID, { threadId: THREAD_ID })
+
+    // 第二次同 id 请求（新快照：seq 1-2）
+    setApiRecords([
+      { id: 'u1', sequence: 1, role: 'user', content: '新问题', timestamp: '2026-01-01T00:00:00Z' },
+      { id: 'a1', sequence: 2, role: 'assistant', content: '新回复', timestamp: '2026-01-01T00:00:01Z' },
+    ])
+    const secondPromise = store.fetchMessages(PIPELINE_ID, { threadId: THREAD_ID })
+    await secondPromise
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(2)
+
+    // 第一次的响应迟到：promise 静默收场（取消语义，不 reject），陈旧结果不写状态
+    resolveFirst({
+      data: {
+        messages: [
+          { id: 'stale-1', sequence: 1, role: 'user', content: '旧问题', timestamp: '2026-01-01T00:00:00Z' },
+          { id: 'stale-2', sequence: 2, role: 'assistant', content: '旧回复', timestamp: '2026-01-01T00:00:01Z' },
+          { id: 'stale-3', sequence: 3, role: 'assistant', content: '旧回复2', timestamp: '2026-01-01T00:00:02Z' },
+        ],
+        total: 3,
+        has_more: false,
+      },
+    })
+    await expect(firstPromise).resolves.toBeUndefined()
+    // 状态仍为第二次请求的权威结果：无陈旧消息、无重复、游标正确
+    const msgs = store.getMessages(PIPELINE_ID)
+    expect(msgs).toHaveLength(2)
+    expect(msgs.every((m) => !m.id.startsWith('stale-'))).toBe(true)
+    expect(store.getBottomCursor(PIPELINE_ID)).toBe(2)
+  })
+
+  it('被取消的向上翻页不残留 loading 标记，翻页请求可继续发起', async () => {
+    const store = usePipelineMessageStore.getState()
+    store.initFromAPI(PIPELINE_ID, [
+      makeMsg('u1', 1, { role: 'user', content: 'q' }),
+      makeMsg('a1', 2, { content: 'a' }),
+    ])
+
+    // 第一次向上翻页挂起
+    let resolveFirst!: (v: unknown) => void
+    mockGet.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveFirst = resolve }),
+    )
+    const firstPromise = store.fetchMessages(PIPELINE_ID, { threadId: THREAD_ID, before_sequence: 1 })
+    expect(usePipelineMessageStore.getState().isLoadingOlderByPipeline[PIPELINE_ID]).toBe(true)
+
+    // 第二次向上翻页取消第一次：loading 标记由新请求重新持有
+    setApiRecords(
+      [{ id: 'a0', sequence: 0, role: 'assistant', content: 'a0', timestamp: '2026-01-01T00:00:00Z' }],
+      false,
+    )
+    await store.fetchMessages(PIPELINE_ID, { threadId: THREAD_ID, before_sequence: 1 })
+    expect(usePipelineMessageStore.getState().isLoadingOlderByPipeline[PIPELINE_ID]).toBe(false)
+    expect(store.getMessages(PIPELINE_ID).map((m) => m.sequence)).toEqual([0, 1, 2])
+
+    // 第一次迟到的翻页结果不写入（不产生重复/乱序）
+    resolveFirst({
+      data: {
+        messages: [
+          { id: 'stale-0', sequence: 0, role: 'assistant', content: '旧a0', timestamp: '2026-01-01T00:00:00Z' },
+        ],
+        total: 1,
+        has_more: true,
+      },
+    })
+    await expect(firstPromise).resolves.toBeUndefined()
+    expect(store.getMessages(PIPELINE_ID).map((m) => m.sequence)).toEqual([0, 1, 2])
+    // has_more 不被迟到结果回滚为 true
+    expect(store.hasMoreOlder(PIPELINE_ID)).toBe(false)
+  })
+
+  it('不同管道互不取消：A 管道在途请求不受 B 管道新请求影响', async () => {
+    const store = usePipelineMessageStore.getState()
+    const PIPELINE_B = 'pipe-load-002'
+    usePipelineMessageStore.setState({
+      pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID, [PIPELINE_B]: 'thread-load-002' },
+    })
+
+    let resolveA!: (v: unknown) => void
+    mockGet.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveA = resolve }),
+    )
+    const promiseA = store.fetchMessages(PIPELINE_ID, { threadId: THREAD_ID })
+
+    setApiRecords([
+      { id: 'b1', sequence: 1, role: 'user', content: 'b', timestamp: '2026-01-01T00:00:00Z' },
+    ])
+    await store.fetchMessages(PIPELINE_B, { threadId: 'thread-load-002' })
+
+    resolveA({
+      data: {
+        messages: [
+          { id: 'a1', sequence: 1, role: 'user', content: 'a', timestamp: '2026-01-01T00:00:00Z' },
+        ],
+        total: 1,
+        has_more: false,
+      },
+    })
+    // A 未被 B 取消：正常写入
+    await promiseA
+    expect(store.getMessages(PIPELINE_ID).map((m) => m.id)).toEqual(['a1'])
+    expect(store.getMessages(PIPELINE_B).map((m) => m.id)).toEqual(['b1'])
   })
 })

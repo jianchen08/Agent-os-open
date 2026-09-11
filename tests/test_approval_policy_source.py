@@ -26,9 +26,9 @@ from approval import (
     ApprovalDecisionEngine,
     classify_tool_safety,
 )
-from isolation_types import IsolationLevel
+from agentos_plugin_sdk.isolation_types import IsolationLevel
 from pipeline.plugin import PluginContext
-from policy import IsolationPolicyLoader, ToolIsolationPolicy
+from agentos_plugin_sdk.isolation_policy import IsolationPolicyLoader, ToolIsolationPolicy
 
 # ═══════════════════════════════════════════════════════════════
 # 辅助：构造带指定 execution 的 policy

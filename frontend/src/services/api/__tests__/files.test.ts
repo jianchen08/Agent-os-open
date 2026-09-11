@@ -6,7 +6,7 @@
  * 2. 图片/音频/视频按模型多模态能力校验
  */
 
-/* eslint-disable import-x/order */
+ 
 import { describe, expect, it } from 'vitest'
 import { validateFile } from '@/services/api/files'
 import type { ModelCapabilities } from '@/types/capabilities'

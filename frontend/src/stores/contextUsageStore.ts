@@ -1,10 +1,14 @@
 /**
  * 上下文使用量 Store
  *
- * 保存每个管道（pipeline）最新的 usage 数据，供 ChatInput 的进度条显示使用。
- * 数据来源：stream_end WebSocket 事件中的 usage 字段 + cost_update 事件
- * （track 插件推送的单轮值/累计值，task_observability 1a/1b）。
- * 每个管道独立维护自己的 usage、模型名和 context_window。
+ * 保存每个管道（pipeline）最新的 usage 数据。数据来源：stream_end WebSocket
+ * 事件中的 usage 字段 + cost_update 事件（track 插件推送的单轮值/累计值，
+ * task_observability 1a/1b）。每个管道独立维护自己的 usage、模型名和
+ * context_window。
+ *
+ * 消费方：任务管理页管道条目 liveUsage、cache 命中率骤降检测。
+ * 输入框上下文指示器不消费本 store——其数据从管道 state 读
+ * （ContextUsageWidget ← pipelineStates query，事件失效化刷新）。
  *
  * cache 维度（task_observability 1b）：cachedTokens/missedTokens/hitRatio 为
  * 本轮单轮值；cumulative 为管道累计；cacheHistory 为会话级命中率趋势

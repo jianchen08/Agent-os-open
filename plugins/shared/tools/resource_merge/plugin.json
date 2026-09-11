@@ -177,5 +177,6 @@
     ]
   },
   "permissions": {},
-  "priority": 20
+  "priority": 20,
+  "host_group": "light"
 }

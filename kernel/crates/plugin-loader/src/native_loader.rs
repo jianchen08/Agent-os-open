@@ -46,6 +46,11 @@ pub struct NativePlugin {
     /// 分配器 free = UB（堆损坏→随机 SIGSEGV，2026-08-31 真机实测）。生命周期
     /// 与 `_lib` 同契约：进程级单例，物理回收随进程退出由 OS 完成。
     instance: &'static dyn PipelinePlugin,
+    /// 同实例 execute 串行化锁：第三方插件的自持返回缓冲（如 UnsafeCell<String>，
+    /// 借 `&str` 给调用方同步拷贝）非并发安全——invoker 每调用独立 spawn_blocking，
+    /// 并发 `&mut` 别名写是 UB。execute（含返回串拷贝）全程持锁强制串行。
+    /// parking_lot：无中毒问题（插件 panic 被 catch_unwind 收敛在锁内）。
+    exec_lock: parking_lot::Mutex<()>,
     /// 保留原始双重 Box 裸指针（当前契约=永不释放；外层 Box 分配在 dll 侧，
     /// 跨分配器 free=UB——见 native-sdk box_from_raw 契约）。
     #[allow(dead_code)]
@@ -56,14 +61,17 @@ pub struct NativePlugin {
 
 /// 原生插件加载器：管理 cdylib 句柄，按 plugin_id 分发调用。
 ///
-/// 线程安全（内部 RwLock）。trait 对象 `execute(&self)` 不可变，多线程并发调用安全。
+/// 线程安全（内部 RwLock）。`load` 在写锁内完成缓存检查+插入（single-flight，
+/// 并发首载不会双 dlopen）；`execute` 经 [`NativePlugin.exec_lock`] 保证同实例
+/// 串行（第三方插件缓冲非并发安全，锁强制）。
 pub struct NativePluginLoader {
     /// plugin_id → 已加载插件。
     loaded: RwLock<HashMap<String, Arc<NativePlugin>>>,
 }
 
-// SAFETY(契约级)：instance 为进程级单例、execute 不可变派发；raw 永不解引用、
-// 永不释放。与原 Box<dyn P> 版线程模型一致（Arc 缓存并发调用依赖 P 的 Sync 语义）。
+// SAFETY(契约级)：instance 为进程级单例；raw 永不解引用、永不释放。并发安全
+// 由 exec_lock 承担——execute（含返回串拷贝）全程持锁，UnsafeCell 缓冲无并发
+// 写面；其余字段只读。
 unsafe impl Send for NativePlugin {}
 unsafe impl Sync for NativePlugin {}
 
@@ -82,18 +90,21 @@ impl NativePluginLoader {
     }
 
     /// 加载（或复用已加载的）原生插件。
+    ///
+    /// 写锁内完成 check+insert（single-flight）：并发首载同一 plugin_id 只会
+    /// dlopen 一次，全部调用方拿到同一实例——冷路径串行可接受，防双实例泄漏。
+    /// 同 id 换产物（path 不同）时在锁内替换（G8 热重载语义不变）。
     pub fn load(&self, plugin_id: &str, path: &Path) -> Result<Arc<NativePlugin>, PluginError> {
-        // 先检查缓存
-        if let Some(p) = self.loaded.read().get(plugin_id) {
+        let mut loaded = self.loaded.write();
+        if let Some(p) = loaded.get(plugin_id) {
             if p.path == path {
                 return Ok(Arc::clone(p));
             }
         }
         let plugin = Self::load_inner(path)?;
         let arc = Arc::new(plugin);
-        self.loaded
-            .write()
-            .insert(plugin_id.to_string(), Arc::clone(&arc));
+        loaded.insert(plugin_id.to_string(), Arc::clone(&arc));
+        drop(loaded);
         debug!(plugin_id = plugin_id, path = ?path, "Native plugin loaded (direct trait object)");
         Ok(arc)
     }
@@ -145,6 +156,7 @@ impl NativePluginLoader {
         Ok(NativePlugin {
             _lib: std::mem::ManuallyDrop::new(lib),
             instance,
+            exec_lock: parking_lot::Mutex::new(()),
             raw: ptr,
             path: path.to_path_buf(),
         })
@@ -153,6 +165,10 @@ impl NativePluginLoader {
     /// 调用插件的 execute（直接 trait 对象派发）。
     ///
     /// 返回 state_updates 的 JSON 字符串。`host` 为 None 时插件降级（不调 capability）。
+    ///
+    /// 同实例串行：execute 调用与**返回串拷贝**全程持 [`NativePlugin.exec_lock`]
+    /// （插件的 &str 借用其自持缓冲，拷贝完成前另一线程不得再进 execute 覆盖
+    /// 缓冲——invoker 每调用独立 spawn_blocking，锁是并发安全的前提）。
     pub fn execute(
         &self,
         plugin_id: &str,
@@ -182,6 +198,7 @@ impl NativePluginLoader {
             ctx: ctx.clone(),
             host,
         };
+        let exec_lock = plugin.exec_lock.lock();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             plugin.instance.execute(&ectx).map(str::to_string)
         }))
@@ -189,7 +206,9 @@ impl NativePluginLoader {
             message: format!("native plugin '{}' panicked during execute", plugin_id),
             code: Some("NATIVE_PLUGIN_PANICKED".to_string()),
             source: Some("native-loader".to_string()),
-        })?;
+        });
+        drop(exec_lock);
+        let result = result?;
 
         match result {
             Ok(state_updates_json) => Ok(state_updates_json),

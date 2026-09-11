@@ -3,127 +3,18 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { getMessages as apiGetMessages } from '@/services/api/session'
-import type { TransientStateEntry } from '@/services/api/session'
-import { loggers } from '@/utils/logger'
-import { indexedDbStorage } from '@/utils/indexedDbStorage'
 import { useContextKeys } from '@/stores/contextKeysStore'
+import { trimMessagesForPersistence } from '@/stores/pipelineMessagePersistence'
 // retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
-import type { Message } from '@/types/models'
-import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 import { decideClaim } from '@/streaming/claim'
+import { indexedDbStorage } from '@/utils/indexedDbStorage'
+import { loggers } from '@/utils/logger'
 import { compareMessages } from '@/utils/messageOrder'
+import type { TransientStateEntry } from '@/services/api/session'
+import type { MessagePart, ToolCallPart } from '@/types/messageParts'
+import type { Message } from '@/types/models'
 
 const logger = loggers.sessionStore
-
-/**
- * 每个管道持久化的最大消息条数（IndexedDB 容量充裕，250 给单会话充足历史缓存）。
- * 内存上限 MAX_MESSAGES_PER_PIPELINE_IN_MEMORY=300 始终 ≥ 此值，避免「内存裁掉但还想落盘」的矛盾。
- */
-const PERSIST_MAX_MESSAGES_PER_PIPELINE = 250
-
-/**
- * 持久化数据的总体积上限（100 MB）。
- * IndexedDB 容量充裕，但仍需上限防止无限增长吃满用户磁盘。
- * 超过时按 LRU 淘汰最不活跃的管道（见 trimMessagesForPersistence），内存数据不动，
- * 被淘汰管道刷新后从 API 重载。
- */
-const PERSIST_MAX_TOTAL_BYTES = 100 * 1024 * 1024
-
-/** 导出供测试断言用（生产代码不应依赖具体数值） */
-export const _PERSIST_LIMITS = {
-  maxMessagesPerPipeline: PERSIST_MAX_MESSAGES_PER_PIPELINE,
-  maxTotalBytes: PERSIST_MAX_TOTAL_BYTES,
-} as const
-
-
-/** 裁剪每个 pipeline 的消息列表，仅保留最近 N 条用于持久化 */
-function trimMessagesByCount(
-  messagesByPipeline: Record<string, Message[]>,
-): Record<string, Message[]> {
-  const result: Record<string, Message[]> = {}
-  for (const [pipelineId, msgs] of Object.entries(messagesByPipeline)) {
-    if (!msgs || msgs.length === 0) continue
-    // 按 sequence 排序后取最后 N 条（sequence 大=新）
-    const sorted = [...msgs].sort(compareMessages)
-    result[pipelineId] =
-      sorted.length > PERSIST_MAX_MESSAGES_PER_PIPELINE
-        ? sorted.slice(-PERSIST_MAX_MESSAGES_PER_PIPELINE)
-        : sorted
-  }
-  return result
-}
-
-/**
- * 计算持久化对象的字节体积（UTF-16 近似，与 localStorage 配额口径一致，足够用于阈值判断）。
- * 逐管道累加，避免一次性 stringify 整个大对象造成额外开销。
- */
-function estimatePersistedBytes(messagesByPipeline: Record<string, Message[]>): number {
-  let total = 0
-  for (const msgs of Object.values(messagesByPipeline)) {
-    if (!msgs || msgs.length === 0) continue
-    total += JSON.stringify(msgs).length
-  }
-  return total
-}
-
-/**
- * 获取管道最近活跃时间：取该管道最新一条消息的 timestamp。
- * 无消息或无时间戳返回 0（视为最不活跃，优先淘汰）。
- */
-function pipelineLastActiveAt(msgs: Message[] | undefined): number {
-  if (!msgs || msgs.length === 0) return 0
-  let latest = 0
-  for (const m of msgs) {
-    const t = new Date(m.timestamp).getTime()
-    if (!Number.isNaN(t) && t > latest) latest = t
-  }
-  return latest
-}
-
-/**
- * 持久化前的完整裁剪：先按单管道条数裁剪，再按全局总体积 LRU 淘汰最不活跃管道。
- *
- * LRU 排序规则：
- * 1. activePipelineId 始终排首位（绝不淘汰当前活跃管道）；
- * 2. 其余按最近活跃时间（最新消息 timestamp）降序，越久未活跃越靠后越先淘汰；
- * 3. 体积未超 PERSIST_MAX_TOTAL_BYTES 时原样返回（全留）。
- *
- * 注意：仅影响落盘数据，内存中的 messagesByPipeline 不受影响；
- * 被淘汰管道刷新后由 API 冷启动重新加载。
- */
-export function trimMessagesForPersistence(
-  messagesByPipeline: Record<string, Message[]>,
-  activePipelineId: string | null,
-): Record<string, Message[]> {
-  const byCount = trimMessagesByCount(messagesByPipeline)
-
-  if (estimatePersistedBytes(byCount) <= PERSIST_MAX_TOTAL_BYTES) {
-    return byCount
-  }
-
-  // 体积超限：按活跃度升序排列（最不活跃在前，优先淘汰），活跃管道始终保留
-  const ranked = Object.entries(byCount).sort((a, b) => {
-    // 活跃管道强制排最后（最不易被淘汰）
-    if (a[0] === activePipelineId) return 1
-    if (b[0] === activePipelineId) return -1
-    return pipelineLastActiveAt(a[1]) - pipelineLastActiveAt(b[1])
-  })
-
-  // 从最不活跃的开始淘汰，直到总体积降到阈值内
-  const kept: Record<string, Message[]> = {}
-  let bytes = 0
-  // 倒序取（活跃度高的先入选），保证先保留最活跃的
-  for (let i = ranked.length - 1; i >= 0; i--) {
-    const [pid, msgs] = ranked[i]
-    const size = JSON.stringify(msgs).length
-    // 活跃管道无论是否超限都保留；其余管道加入后若导致超限则跳过（淘汰）
-    if (pid === activePipelineId || bytes + size <= PERSIST_MAX_TOTAL_BYTES) {
-      kept[pid] = msgs
-      bytes += size
-    }
-  }
-  return kept
-}
 
 /** 单个管道在「内存」中保留的最大消息条数 与 PERSIST_MAX_MESSAGES_PER_PIPELINE（仅持久化裁剪）不同：内存里的 */
 const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 2000
@@ -140,8 +31,14 @@ function capMessagesForMemory(msgs: Message[]): Message[] {
   return [...msgs].sort(compareMessages).slice(-MAX_MESSAGES_PER_PIPELINE_IN_MEMORY)
 }
 
-/** 并发去重：跟踪正在进行的 fetch 请求，避免同一 pipelineId 重复请求 */
-const _fetchingPipelines = new Map<string, Promise<void>>()
+/**
+ * 每管道在途 fetch 的取消令牌：同管道新请求发起即 abort 旧请求——切换会话/
+ * 重复进入同一管道时，在途旧响应被作废，不再有覆盖新状态的机会（旧机制靠
+ * initFromAPI 90s 保鲜窗启发式防覆盖，此处为显式取消）。被 abort 的请求以
+ * 取消语义静默收场：不写状态、不上抛（上层把失败一律当故障通知用户，
+ * 取消不是故障，不得误报）。
+ */
+const _fetchAbortControllers = new Map<string, AbortController>()
 
 /** 刷新后后台全量对账去重（同一管道只对账一次；流式结束前的对账推迟） */
 const _reconcilingPipelines = new Set<string>()
@@ -150,21 +47,37 @@ const _reconcilingPipelines = new Set<string>()
  * 刷新后后台静默全量对账（auto 首次进入且本地有 IndexedDB 缓存时，
  * 页面立即用缓存渲染（秒开），全量 API 对账放后台执行——initFromAPI 权威替换
  * 能修正刷新前流式断线留下的空洞/残影（增量补漏 after_sequence 拉不到已加载
- * 区间内的缺失消息）。对账无变化时对 UI 零影响；失败静默（缓存已渲染，下次
- * 进入/WS 重连重试）。流式进行中跳过——init 全量替换会清流式占位。
+ * 区间内的缺失消息）。对账无变化时对 UI 零影响。失败不再静默：缓存与 DB
+ * 的分叉（空洞/残影）无人修正会永久留存——warn 后借既有 fetchMessages 全量
+ * 重拉一次，重拉仍失败保留缓存现状待下次进入/WS 重连重试（fetchMessages
+ * 自带失败日志）。流式进行中跳过——init 全量替换会清流式占位。
  */
 async function reconcileFromAPI(pipelineId: string, threadId: string): Promise<void> {
   if (_reconcilingPipelines.has(pipelineId)) return
   const store = usePipelineMessageStore.getState()
   if (store.isStreaming(pipelineId)) return
   _reconcilingPipelines.add(pipelineId)
-  try {
+  const reconcileOnce = async (): Promise<void> => {
     await store.fetchMessages(pipelineId, { threadId })
     usePipelineMessageStore.setState((s) => ({
       reconciledByPipeline: { ...s.reconciledByPipeline, [pipelineId]: true },
     }))
-  } catch {
-    // 静默失败：缓存已渲染，待下次触发重试
+  }
+  try {
+    await reconcileOnce()
+  } catch (error) {
+    const err = error as { status?: number; code?: string; message?: string }
+    const errInfo = err?.status ?? err?.code ?? err?.message ?? String(error)
+    logger.warn(
+      '[pipelineMessageStore.reconcileFromAPI] 全量对账失败，强制重拉一次: pipelineId=%s err=%s',
+      pipelineId,
+      errInfo,
+    )
+    try {
+      await reconcileOnce()
+    } catch {
+      // 重拉仍失败：保留缓存现状，待下次进入/WS 重连重试（fetchMessages 已有失败日志）
+    }
   } finally {
     _reconcilingPipelines.delete(pipelineId)
   }
@@ -1101,19 +1014,29 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     pipelineId: string,
     options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
   ) => {
-    // 并发去重：按方向区分 key，避免向上翻页和向下补漏互相阻塞
-    const dedupeKey = options?.before_sequence !== undefined
-      ? `${pipelineId}::older`
-      : options?.after_sequence !== undefined
-        ? `${pipelineId}::newer`
-        : `${pipelineId}::init`
-    const existingFetch = _fetchingPipelines.get(dedupeKey)
-    if (existingFetch) {
-      return existingFetch
+    // 同管道新请求发起 = 旧请求作废：abort 在途旧请求并让出占位（同管道
+    // 任意时刻至多一个在途 fetch，取代即取消）。
+    const previousController = _fetchAbortControllers.get(pipelineId)
+    if (previousController) {
+      previousController.abort()
+      _fetchAbortControllers.delete(pipelineId)
+      // 被取消的「加载更早」立即让出 loading 标记（新请求若同为翻页，下方会重新置位）
+      set((state) => {
+        if (!state.isLoadingOlderByPipeline[pipelineId]) return state
+        return {
+          isLoadingOlderByPipeline: {
+            ...state.isLoadingOlderByPipeline,
+            [pipelineId]: false,
+          },
+        }
+      })
     }
 
+    const controller = new AbortController()
+    _fetchAbortControllers.set(pipelineId, controller)
+
     const fetchPromise = (async () => {
-      // 加载更早消息时，先设置 loading 状态（防重复请求 + 显示加载指示器）
+      // 加载更早消息时设置 loading 状态（显示加载指示器）
       if (options?.before_sequence !== undefined) {
         set((state) => ({
           isLoadingOlderByPipeline: {
@@ -1142,6 +1065,11 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           after_sequence: options?.after_sequence,
           pipelineRunId: pipelineId,
         })
+
+        // 等待响应期间被同管道新请求 abort：本请求已作废，静默返回不写状态。
+        // 旧响应的快照/游标相对新请求已过期，写入会让旧数据回滚新权威状态；
+        // 取消是预期语义而非故障，不上抛（上层把失败一律当故障通知用户）。
+        if (controller.signal.aborted) return
 
         const rawMessages: Message[] = apiResult.messages || []
         // 后端 MessageQueryBuilder 已确保只返回当前版本消息，前端无需按 parentId 过滤。
@@ -1179,6 +1107,9 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           }
         }
       } catch (err: any) {
+        // abort 收场（含底层请求因取消而失败）：取消是预期语义而非故障，
+        // 静默返回——不走失败日志、不上抛（上层把失败一律当故障通知用户）
+        if (controller.signal.aborted) return
         const status = err?.response?.status ?? err?.status
         if (status === 404) {
           logger.debug('[pipelineMessageStore.fetchMessages] 管道消息暂不可用 (404): pipelineId=%s', pipelineId)
@@ -1195,26 +1126,27 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         // 不在此处吞异常，否则所有调用方的 catch/then 分支永远拿不到错误。
         throw err
       } finally {
-        _fetchingPipelines.delete(dedupeKey)
-        // 重置「加载更早」的 loading 标记，避免残留 true 时用户滚动到顶部后「加载更多」完全失效。
-        if (options?.before_sequence !== undefined) {
-          set((state) => {
-            if (state.isLoadingOlderByPipeline[pipelineId]) {
-              return {
-                isLoadingOlderByPipeline: {
-                  ...state.isLoadingOlderByPipeline,
-                  [pipelineId]: false,
-                },
+        // 身份守卫：被取代的请求不清理取代者的令牌、不动其 loading 标记
+        // （被取消者的标记已在取代点复位）
+        if (_fetchAbortControllers.get(pipelineId) === controller) {
+          _fetchAbortControllers.delete(pipelineId)
+          // 重置「加载更早」的 loading 标记，避免残留 true 时用户滚动到顶部后「加载更多」完全失效。
+          if (options?.before_sequence !== undefined) {
+            set((state) => {
+              if (state.isLoadingOlderByPipeline[pipelineId]) {
+                return {
+                  isLoadingOlderByPipeline: {
+                    ...state.isLoadingOlderByPipeline,
+                    [pipelineId]: false,
+                  },
+                }
               }
-            }
-            return state
-          })
+              return state
+            })
+          }
         }
       }
     })()
-
-    // 记录正在进行的请求
-    _fetchingPipelines.set(dedupeKey, fetchPromise)
 
     return fetchPromise
   },

@@ -15,7 +15,7 @@ import asyncio
 import logging
 from typing import Any
 
-from enum_utils import safe_enum_value
+from agentos_plugin_sdk.enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ACTIVE_TASK_STATUSES
 
@@ -161,29 +161,26 @@ class ChildTaskGuard(IOutputPlugin):
                     ):
                         seen_ids.add(str(row.get("pipeline_id") or ""))
         else:
-            # 回退（读面未注入）：旧 task_service 路径（兼容存量）
+            # 回退（读面未注入）：旧 task_service 路径（兼容存量）。
+            # fail-closed（对齐 security_check 纪律）：查询异常上抛阻断
+            # 管道步——吞掉异常按「无活跃子任务」放行会让父管道在仍有
+            # 活跃子任务时提前终止。
             task_service = self._get_task_service(ctx)
             if task_service is not None:
                 if pipeline_id:
-                    try:
-                        from tasks.types import TaskStatus as TS  # noqa: N817,PLC0415
+                    from tasks.types import TaskStatus as TS  # noqa: N817,PLC0415
 
-                        for status_val in (TS.RUNNING, TS.PENDING, TS.EVALUATING):
-                            for t in task_service.list_by_status(status_val):
-                                if getattr(t, "parent_pipeline_id", None) == pipeline_id:
-                                    seen_ids.add(t.id)
-                    except Exception as exc:
-                        logger.warning("ChildTaskGuard: list_by_status query failed: %s", exc)
+                    for status_val in (TS.RUNNING, TS.PENDING, TS.EVALUATING):
+                        for t in task_service.list_by_status(status_val):
+                            if getattr(t, "parent_pipeline_id", None) == pipeline_id:
+                                seen_ids.add(t.id)
 
                 if task_id:
-                    try:
-                        subtasks = task_service.list_subtasks(task_id)
-                        for st in subtasks:
-                            status = safe_enum_value(st.status)
-                            if status in active_statuses:
-                                seen_ids.add(st.id)
-                    except Exception as exc:
-                        logger.warning("ChildTaskGuard: list_subtasks failed: %s", exc)
+                    subtasks = task_service.list_subtasks(task_id)
+                    for st in subtasks:
+                        status = safe_enum_value(st.status)
+                        if status in active_statuses:
+                            seen_ids.add(st.id)
 
         if seen_ids:
             return True, list(seen_ids)
@@ -223,6 +220,12 @@ class ChildTaskGuard(IOutputPlugin):
         except KeyError:
             pass
 
-        from tasks.service_access import get_task_service  # noqa: PLC0415
+        # tasks.service_access 懒加载失败（任务域插件被移除/部署残缺）→
+        # 显式降级为 None（本方法"不可用时返回 None"契约），不裸抛中断管道步。
+        try:
+            from tasks.service_access import get_task_service  # noqa: PLC0415
+        except ImportError as exc:
+            logger.warning("ChildTaskGuard: tasks.service_access 不可用: %s", exc)
+            return None
 
         return get_task_service()

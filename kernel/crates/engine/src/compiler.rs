@@ -71,6 +71,13 @@ pub struct CompiledPipeline {
     /// hooks 装载表（服务化提案 §3.6）：管道 YAML 的 hooks 声明编译产物，
     /// 运行时按 (作用域, 事件) 查表直派。空 = 未声明任何钩子（发射点零开销）。
     pub step_hooks: Vec<HookEntry>,
+    /// 管道配置声明的初始 state 缺省（P1-1 声明驱动缺省）：执行首轮前种入的
+    /// 标量键值（api 层消费；键已存在时不覆盖——本轮值优先）。
+    pub initial_state: Vec<(String, serde_json::Value)>,
+    /// 主轮循环轮数硬上限（管道 YAML `max_rounds:` 声明，ADR
+    /// 2026-09-11-engine-loop-cap）：`None` = 未声明，api 层不注入，executor
+    /// 用缺省 200；`Some(0)` 透传给 executor 由 run 入口报错拒绝。
+    pub max_rounds: Option<usize>,
     steps: Vec<CompiledStep>,
     step_index: HashMap<String, usize>,
 }
@@ -185,6 +192,11 @@ impl StepServiceIndex {
 
 /// 聚合全部启用插件 manifests 构建步骤服务索引（服务化提案 §3.2/§3.3）。
 ///
+/// 现状：③级未接线——生产加载入口（server.rs `load_and_compile`）未消费本
+/// 索引，调用方仅测试（ADR 2026-09-09-kernel-dead-layer-adjudication：
+/// 妥协=hooks/步骤服务命中不可达；触发=步骤服务跨插件编排需求；上限=0.3
+/// 排期评审，无需求即随整链删除）。
+///
 /// 规则：
 /// - **显式条目**：`capabilities.steps[].name` → `{plugin_id, method: Some(name)}`
 ///   （method 存步骤 name 本身——SDK 侧按 name 分发，不发明 type 字段）；
@@ -274,6 +286,9 @@ pub struct HookFile {
 }
 
 /// 编译 hooks 声明为装载表（服务化提案 §3.6 编译期装载表）。
+///
+/// 现状：③级未接线——生产编译入口恒传空 hooks（ADR
+/// 2026-09-09-kernel-dead-layer-adjudication，随整链接线或删除）。
 ///
 /// - `run` 解析：`<插件id>.<method>` 点号前缀为插件 id、后缀为 method；
 ///   裸插件名 = method None（默认 execute 入口）；
@@ -453,6 +468,10 @@ pub fn compile_pipeline(
 
 /// 编译管道 + hooks 装载表 + 步骤服务接线（服务化提案 §3.6/§3.2 接线入口）。
 ///
+/// 现状：③级未接线——生产加载走 [`compile_pipeline`]（index=None、空
+/// hooks），本入口仅测试消费（ADR 2026-09-09-kernel-dead-layer-adjudication：
+/// 触发=管道配置出现 hooks 声明或步骤服务编排需求；上限=0.3 排期评审）。
+///
 /// 在 [`compile_pipeline`] 基础上附加 hooks 编译与四级命中：`body_hooks` /
 /// `step_hooks` 为各作用域已反序列化的 hooks 声明（api 层 yaml 结构归一后传入，
 /// 键为循环体 id / `"<body id>:<step id>"` 复合键）。未声明 hooks 时传空切片，
@@ -630,6 +649,12 @@ impl Compiler<'_> {
             checkpoint: config.checkpoint.clone(),
             config_hash: pipeline_config_hash(config),
             step_hooks: Vec::new(),
+            initial_state: config
+                .initial_state
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            max_rounds: config.max_rounds,
             steps: self.steps,
             step_index: self.step_index,
         })
@@ -886,6 +911,8 @@ mod tests {
     /// 构造测试 manifest（默认单入口纯步骤插件形状：无 tools/services/steps）。
     fn manifest(id: &str) -> PluginManifest {
         PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: id.to_string(),
             name: format!("Test {id}"),
             description: None,
@@ -960,6 +987,8 @@ mod tests {
                 run_on_error: false,
             }],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         }
     }
 
@@ -1152,6 +1181,8 @@ mod tests {
             name: "p".into(),
             loop_bodies: vec![body.clone()],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         };
         let compiled =
             compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
@@ -1164,6 +1195,8 @@ mod tests {
             name: "p".into(),
             loop_bodies: vec![body],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         };
         let compiled2 =
             compile_pipeline(&config2, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
@@ -1260,6 +1293,8 @@ mod tests {
             name: "p".into(),
             loop_bodies: vec![body.clone()],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         };
         let err =
             compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).unwrap_err();
@@ -1271,6 +1306,8 @@ mod tests {
             name: "p".into(),
             loop_bodies: vec![body],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         };
         assert!(compile_pipeline(&config2, &StepLibrary::default(), &plugins(&["alpha"])).is_ok());
     }
@@ -1331,6 +1368,8 @@ mod tests {
                 },
             ],
             checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
         };
         assert!(compile_pipeline(&config, &StepLibrary::default(), &plugins(&[])).is_ok());
     }
@@ -1451,6 +1490,7 @@ mod tests {
                 ui: None,
                 render: None,
                 smoke: None,
+                timeout_ms: None,
             }]),
         );
         let index = build_step_service_index(&[composite]).expect("复合体不阻断索引构建");
@@ -1481,6 +1521,7 @@ mod tests {
                     ui: None,
                     render: None,
                     smoke: None,
+                    timeout_ms: None,
                 }],
                 ..Default::default()
             },
@@ -1664,6 +1705,7 @@ mod tests {
                     ui: None,
                     render: None,
                     smoke: None,
+                    timeout_ms: None,
                 }],
                 ..Default::default()
             },
@@ -1744,6 +1786,7 @@ mod tests {
                 ui: None,
                 render: None,
                 smoke: None,
+                timeout_ms: None,
             }]),
         );
         let index = build_step_service_index(&[composite]).expect("复合体不阻断索引构建");

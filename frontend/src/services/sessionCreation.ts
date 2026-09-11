@@ -9,8 +9,8 @@
 import { createProject } from '@/services/api/tasks'
 import { reportError, ErrorSeverity, ErrorType } from '@/services/errorReporting'
 import { useSessionListStore } from '@/stores/sessionListStore'
-import type { Session } from '@/types'
 import type { SessionFormOptions } from '@/components/session/SessionEditModal'
+import type { Session } from '@/types'
 
 /**
  * 会话目录 → 项目登记：保存会话时若声明了工作空间目录（source_path），

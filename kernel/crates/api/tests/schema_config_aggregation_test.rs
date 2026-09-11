@@ -11,8 +11,22 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
+/// schema 已纳入管理面读鉴权：无 store 场景（AppState::new()）用脚手架 admin token。
+fn scaffold_admin_bearer() -> String {
+    let admin = agentos_http::auth::default_users()
+        .into_iter()
+        .next()
+        .unwrap();
+    format!(
+        "Bearer {}",
+        agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &admin, 3600)
+    )
+}
+
 fn manifest(plugin_id: &str, files: Vec<ConfigFileMapping>) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: plugin_id.to_string(),
         name: plugin_id.to_string(),
         description: None,
@@ -92,6 +106,7 @@ async fn test_schema_aggregates_plugin_config_files() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/schema")
+                .header("authorization", scaffold_admin_bearer())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -182,6 +197,7 @@ async fn test_schema_hides_inject_only_config_files() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/schema")
+                .header("authorization", scaffold_admin_bearer())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -226,7 +242,7 @@ async fn test_schema_routes_from_registry() {
         route_id: "cb".to_string(),
         method: "POST".to_string(),
         path: "/ext/p1/cb".to_string(),
-        auth: "none".to_string(),
+        auth: Some("none".to_string()),
         handler_capability: "http.handle".to_string(),
         timeout_ms: None,
         max_concurrency: None,
@@ -241,7 +257,7 @@ async fn test_schema_routes_from_registry() {
         route_id: "aa".to_string(),
         method: "GET".to_string(),
         path: "/ext/p1/aa".to_string(),
-        auth: "none".to_string(),
+        auth: Some("none".to_string()),
         handler_capability: "http.handle".to_string(),
         timeout_ms: None,
         max_concurrency: None,
@@ -255,6 +271,7 @@ async fn test_schema_routes_from_registry() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/schema")
+                .header("authorization", scaffold_admin_bearer())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -286,6 +303,7 @@ async fn test_schema_routes_empty_without_registry() {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/schema")
+                .header("authorization", scaffold_admin_bearer())
                 .body(Body::empty())
                 .unwrap(),
         )

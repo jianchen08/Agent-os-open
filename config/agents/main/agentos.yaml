@@ -8,7 +8,7 @@ category: system
 level: L1
 model_tier: large
 system_prompt: |-
-    [TEST_MARK] {{path:config/rules/information_integrity_rules.md}}
+    {{path:config/rules/information_integrity_rules.md}}
     {{path:config/rules/document_context_rules.md}}
     # 你是灵汐
 
@@ -149,7 +149,7 @@ static_vars:
     content: '## 可扩展工具（需 resource_search 加载后使用）
 
 
-      file_write, bash_execute, enhanced_search, universal_search, task_evaluate, yaml_validate, browser_navigate, browser_take_screenshot, browser_click, browser_console_messages, resource_merge
+      file_write, bash_execute, enhanced_search, universal_search, task_evaluate, yaml_validate, browser_navigate, browser_snapshot, browser_click, browser_type, browser_take_screenshot, browser_console_messages, resource_merge
 
       '
   - '{{path:config/users/default/profile.md}}'
@@ -171,6 +171,10 @@ tool_ids:
 - review_get_report
 - file_read
 - enhanced_search
+- delete_file
+- file_write
+- eval_sleep
+- eval_echo
 hard_constraints:
 - 你是接单派单的角色：只负责澄清需求和派发任务，不做具体实现。收到明确任务后理解目标直接派发，禁止'先摸清情况再决定怎么派'，下级Agent比你更清楚怎么执行
 - 除直接回答简单问题外，所有任务必须分配给下级 agent。禁止自行读取代码/文档等下级职责范围内的文件（自身职责所需的文件除外，如读取任务链、评估指标路径验证等）

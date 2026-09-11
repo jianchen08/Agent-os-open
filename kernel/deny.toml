@@ -30,14 +30,22 @@ git-fetch-with-cli = true
 # （2026-08-27 批次 A 第 2 条完成，见 [bans] multiple-versions 收紧）。
 ignore = [
     # idna 0.5.0（经 url 2.5.2 → reqwest 传递）：Punycode 标签掩码漏洞。
-    # 修复需 url ≥2.5.4（idna ≥1.0.3），属 reqwest 依赖面升级，随依赖
-    # 例行升级处理（非本仓直接依赖，无安全利用面——本仓不做 host 比较
-    # 权限检查）；升级完成后移除本条。
-    { id = "RUSTSEC-2024-0421", reason = "idna 0.5.0 via url 2.5.2 (reqwest 传递依赖)；修复需 url>=2.5.4，随依赖例行升级处理，升级后移除" },
+    # 2026-09-06 波 4 尝试升级：url 2.5.4~2.5.8 + idna 1.0.3/1.1.0 均不可行——
+    # idna 1.x 修复链钉 idna_adapter >=1.2（rustc >=1.86）且 icu 2.3 需 rustc 1.88，
+    # 本仓 rust-toolchain 钉 1.85（deny 0.20.x 亦依赖 1.85 兼容），升级被 MSRV 钉死；
+    # url 2.5.4 之后全部解析到 idna 1.x，无法停在 0.5 修复版。保留 allow 至
+    # rustc 升级后清理（届时 url 例行升 2.5.8+ 一并移除本条）。
+    { id = "RUSTSEC-2024-0421", reason = "idna 0.5.0 via url 2.5.2 (reqwest 传递依赖)；修复链 idna>=1.x 需 rustc>=1.86（icu 2.3 需 1.88），本仓钉 1.85 无法编译，随 rustc 升级处理，升级后移除" },
     # instant 0.1.13（经 notify-types → notify 7 传递）：unmaintained，
     # 作者推荐 web-time。notify 7 上游未跟进，无安全风险（仅维护状态），
     # 随 notify 升级或依赖面调整处理；处理完成后移除本条。
     { id = "RUSTSEC-2024-0384", reason = "instant 0.1.13 via notify-types (notify 7 传递依赖)；unmaintained 无安全风险，随 notify 升级处理，升级后移除" },
+    # time 0.3.36（经 tracing-appender 传递）：RFC 2822 解析深递归栈耗尽（DoS）。
+    # 2026-09-12 实测：补丁版 0.3.47 声明 rustc 1.88，cargo check 在本仓钉定的
+    # 1.85 下直接拒绝编译（0.3.36→0.3.47 升级被 MSRV 钉死）；且本仓 time 仅经
+    # tracing-appender 做日志日期格式化，不消费用户 RFC 2822 解析输入，实际
+    # 暴露面不存在。随 rustc 升级一并升 time 后移除本条。
+    { id = "RUSTSEC-2026-0009", reason = "time 0.3.36 via tracing-appender 传递依赖；补丁版 0.3.47 需 rustc 1.88（本仓钉 1.85 无法编译），且仅用日期格式化不用 RFC 2822 解析，实际暴露不存在，随 rustc 升级处理，升级后移除" },
 ]
 
 [licenses]

@@ -200,5 +200,10 @@
     ]
   },
   "permissions": {},
-  "priority": 25
+  "priority": 25,
+  "mcp": {
+    "transport": "stdio",
+    "request_timeout_secs": 360
+  },
+  "host_group": "light"
 }

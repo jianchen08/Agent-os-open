@@ -1,7 +1,8 @@
 # @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
 """isolation 插件（权限检查器）单元测试。
 
-覆盖（对齐 plugins/shared/system/isolation/permission_checker.py）：
+覆盖（对齐 SDK agentos_plugin_sdk.permission_checker，isolation/download
+共享单一真值源）：
 1. check_read_permission：NONE/PROJECT/WORKSPACE/CUSTOM 四种范围
 2. check_write_permission：NONE/PROJECT/WORKSPACE（allow_outside / require_checkpoint /
    allowed_operations）/CUSTOM + 便捷函数（dict 策略转换）
@@ -12,44 +13,21 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.unit
-
-_PLUGIN_DIR = Path(__file__).resolve().parent  # plugins/shared/system/isolation/
-if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
-
-
-def _load_checker() -> Any:
-    mod_name = "isolation_permission_checker_test"
-    if mod_name in sys.modules:
-        del sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "permission_checker.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_MOD = _load_checker()
-PermissionChecker = _MOD.PermissionChecker
-check_write_permission = _MOD.check_write_permission
-
-# permission_policy 经 sys.path 正常导入（与 permission_checker 同目录）
-from permission_policy import (  # noqa: E402
+from agentos_plugin_sdk.permission_checker import PermissionChecker, check_write_permission
+from agentos_plugin_sdk.permission_policy import (
     PermissionPolicyType,
     PermissionScope,
     ReadPermission,
     WorkspacePermissionPolicy,
     WritePermission,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def _policy(
@@ -188,6 +166,66 @@ class TestWritePermission:
 
 
 # ═══════════════════════════════════════════════════════════
+# CUSTOM 范围兄弟目录绕过（前缀比较必须带路径分隔符）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestCustomScopeSiblingBypass:
+    """custom 配 …/ws 时 …/ws-evil 不得因字符串前缀命中放行。
+
+    allow_outside=false / CUSTOM 白名单语义对兄弟目录必须成立：
+    界内路径与 custom 目录本身放行，兄弟目录前缀拒绝（真实临时目录验证）。
+    """
+
+    @pytest.fixture
+    def ws_root(self, tmp_path: Path) -> Path:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (tmp_path / "ws-evil").mkdir()
+        return ws
+
+    def _read_policy(self, custom_path: str) -> WorkspacePermissionPolicy:
+        return WorkspacePermissionPolicy(
+            name="c",
+            policy_type=PermissionPolicyType.DEFAULT,
+            read=ReadPermission(scope=PermissionScope.CUSTOM, custom_paths=[custom_path]),
+            write=WritePermission(scope=PermissionScope.WORKSPACE),
+        )
+
+    def _write_policy(self, custom_path: str) -> WorkspacePermissionPolicy:
+        return WorkspacePermissionPolicy(
+            name="c",
+            policy_type=PermissionPolicyType.DEFAULT,
+            read=ReadPermission(scope=PermissionScope.PROJECT),
+            write=WritePermission(scope=PermissionScope.CUSTOM, custom_paths=[custom_path]),
+        )
+
+    def test_read_sibling_dir_denied(self, tmp_path: Path, ws_root: Path) -> None:
+        checker = PermissionChecker(project_root=str(tmp_path))
+        policy = self._read_policy(str(ws_root))
+        ok, _ = checker.check_read_permission(str(ws_root / "x.py"), None, policy)
+        assert ok is True
+        evil, msg = checker.check_read_permission(str(tmp_path / "ws-evil" / "x.py"), None, policy)
+        assert evil is False and "自定义路径" in msg
+
+    def test_write_sibling_dir_denied(self, tmp_path: Path, ws_root: Path) -> None:
+        checker = PermissionChecker(project_root=str(tmp_path))
+        policy = self._write_policy(str(ws_root))
+        ok, _ = checker.check_write_permission(str(ws_root / "x.py"), None, policy)
+        assert ok is True
+        evil, _ = checker.check_write_permission(str(tmp_path / "ws-evil" / "x.py"), None, policy)
+        assert evil is False
+
+    def test_custom_dir_itself_allowed(self, tmp_path: Path, ws_root: Path) -> None:
+        """路径恰为 custom 目录本身时放行（与 _is_path_inside 等值放行同语义）。"""
+        checker = PermissionChecker(project_root=str(tmp_path))
+        ok, _ = checker.check_read_permission(str(ws_root), None, self._read_policy(str(ws_root)))
+        assert ok is True
+        ok2, _ = checker.check_write_permission(str(ws_root), None, self._write_policy(str(ws_root)))
+        assert ok2 is True
+
+
+# ═══════════════════════════════════════════════════════════
 # 路径工具 + 便捷函数
 # ═══════════════════════════════════════════════════════════
 
@@ -204,7 +242,7 @@ class TestPathUtils:
         checker = PermissionChecker(project_root=".")
         monkeypatch.setattr(checker, "_normalize_path", lambda p: (_ for _ in ()).throw(OSError("boom")))
         ok, msg = checker.is_path_in_workspace("x.py", "ws")
-        assert ok is False and "路径检查失败" in msg
+        assert ok is False and msg is not None and "路径检查失败" in msg
 
     def test_resolve_path(self) -> None:
         import os

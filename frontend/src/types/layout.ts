@@ -103,15 +103,6 @@ export interface LayoutConfig {
   zIndex: ZIndexConfig
 }
 
-/** 解析后的布局值 */
-export interface ResolvedLayout {
-  sidebar: { width: number; minWidth: number; maxWidth: number }
-  chatPanel: { width: number; minWidth: number }
-  workspacePanel: { width: number; minWidth: number }
-  floatingWindow: { width: number; height: number }
-  dockBar: { height: number }
-}
-
 /** 悬浮窗实例 */
 export interface FloatingWindowInstance {
   id: string
@@ -155,8 +146,3 @@ export interface DockItem {
   onClick: () => void
 }
 
-/** 渲染空间类型 */
-export type RenderingSpace = 'chat' | 'workspace' | 'floating' | 'dock' | 'fullscreen'
-
-/** 视口断点类型 */
-export type ViewportBreakpoint = 'mobile' | 'tablet' | 'desktop' | 'widescreen'

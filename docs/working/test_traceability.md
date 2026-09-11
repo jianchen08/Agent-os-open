@@ -140,7 +140,7 @@ CI (.github/workflows/ci.yml — 测试跑 + 覆盖率门禁 + 追溯校验)
 ## 五、表 D — 覆盖率门禁目标(对照 testing_rules §3)
 
 testing_rules §3 规定:P0 核心业务 100% 分支 / P1 公共服务工具 90% / P2 一般业务 80% / P3 异常边界关键路径。
-**门禁状态(2026-08-13,阶段 2 完工):三语言 `--cov-fail-under`/thresholds 全部就位(N3 收口)**——Python `--cov-fail-under=50`、前端 vitest thresholds=1、Rust `rust-coverage` job(起手 55),均"从现状起步、只升不降、分功能点独立阈值"。起手下限为保守地板,CI 跑出实测基线后逐级上调向 P 级目标推;现状列由 coverage 报告自动回填。
+**门禁状态(2026-08-13,阶段 2 完工):三语言 `--cov-fail-under`/thresholds 全部就位(N3 收口)**——Python `--cov-fail-under=50`、前端 vitest thresholds=1、Rust `rust-coverage` job(起手 55),均"从现状起步、只升不降、分功能点独立阈值"。起手下限为保守地板,CI 跑出实测基线后逐级上调向 P 级目标推;现状列由 `scripts/sync_coverage_to_matrix.py` 从 coverage 报告自动回填(见 `docs/coverage_report.md`)。
 
 | 功能点 ID | 模块 | P 级 | 目标 line% | 现状 line% | 差距 | 起手下限(阶段2) |
 |----------|------|------|-----------|-----------|------|----------------|

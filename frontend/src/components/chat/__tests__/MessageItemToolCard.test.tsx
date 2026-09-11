@@ -12,11 +12,11 @@
  * 4. 旧 UI 退役：无状态药丸文本、无裸时长字符串
  * 5. 统一增强管线：声明 render 的工具拿到人性化标题/subtitle/打开文件入口
  */
-import { fireEvent, render, screen } from '@testing-library/react'
-import { renderWithProviders } from '@/test/renderWithProviders'
+import { fireEvent, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MessageItem } from '../MessageItem'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import { loadRenderIntents } from '@/utils/dshRenderIntent'
+import { MessageItem } from '../MessageItem'
 import type { Message } from '@/types/models'
 
 // ============================================================

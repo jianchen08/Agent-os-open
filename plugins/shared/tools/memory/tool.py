@@ -1,6 +1,5 @@
-"""记忆工具（0.2 重写版）。
+"""记忆工具。
 
-0.1 的记忆服务（memory.service.MemoryService）已在 0.2 中删除，本模块改为
 注入式记忆后端（端口形状：add / search / delete / import_document，全部
 async；生产实现在同目录 backend.py——经 tool-executor.invoke 调 hindsight）。
 Tool / ToolExecutionResult / 枚举 / 结果工厂均从 ``agentos_plugin_sdk`` 导入

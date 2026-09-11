@@ -4,10 +4,10 @@
  * 显示思考过程的组件，支持步骤列表和流式内容
  */
 
-import { ChevronDown, ChevronRight, Loader2, CheckCircle2, Clock, XCircle } from '@/assets/icons'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { cn } from '@/lib/utils'
+import { ChevronDown, ChevronRight, Loader2, CheckCircle2, Clock, XCircle } from '@/assets/icons'
 import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
+import { cn } from '@/lib/utils'
 import type { ThinkingContent, ThinkingStep } from '@/types/models'
 import type { FC } from 'react'
 

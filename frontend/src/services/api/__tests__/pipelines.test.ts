@@ -9,16 +9,12 @@
  *
  * 测试策略：mock axios 客户端（服务解析逻辑真实运行）。
  */
-
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-
 const mockGet = vi.fn()
-
 vi.mock('@/services/api/client', () => ({
   apiClient: { get: (...args: unknown[]) => mockGet(...args) },
   default: { get: (...args: unknown[]) => mockGet(...args) },
 }))
-
 import { fetchPipelinePluginCatalog } from '../pipelines'
 
 function mockResponses(catalog: unknown[], plugins: unknown[]) {

@@ -313,7 +313,7 @@ class ReviewService:
                 if review and review.status in (ReviewStatus.PENDING, ReviewStatus.IN_REVIEW):
                     await self._handle_timeout(review_id)
             except asyncio.CancelledError:
-                pass
+                raise  # 服务关停取消本任务——保持取消语义，不当异常吞
             except Exception as e:
                 logger.error("[ReviewService] 超时处理失败 | error=%s", e)
 

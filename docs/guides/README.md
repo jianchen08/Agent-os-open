@@ -44,15 +44,14 @@
 | [ci-cd-guide.md](ci-cd-guide.md) | 测试与 CI 手册 |
 | [ai-coding-spec.md](ai-coding-spec.md) | AI 辅助编程总纲（编码纪律） |
 
-## 关键设计决策（公开面导读）
+## 关键 ADR
 
-完整 ADR 决策记录（背景/决策/被否方案/影响）属内部过程区，公开面收敛于以下文档：
-
-- `docs/guides/plugin-protocol.md` — 双执行路径、按需加载、sidecar 进程模型
-- `docs/guides/plugin-development.md` — cdylib 技术路线、两轨终态、`requires_services` 依赖语义
-- `docs/ARCHITECTURE.md` — task = pipeline state 单一真值、能力→插件对照
-- `docs/guides/pipeline-configuration.md` — 管道装配与状态流转
-- `plugins/shared/tools/external_mcp/` — 外部工具统一协议（MCP 优先）的实现面
+- `docs/decisions/2026-07-13-sidecar-process-model.md` — 双执行路径、按需加载、进程模型宪法
+- `docs/decisions/2026-07-24-plugin-runtime-cdylib-wasmtime.md` — cdylib 技术路线（abi_stable 被否）
+- `docs/decisions/2026-08-15-plugin-two-track-and-cordis-mechanisms.md` — 两轨终态 + wasm 关闭 + G8/G10
+- `docs/decisions/2026-08-18-plugin-dependency-package.md` — `requires_services` 语义
+- `docs/decisions/2026-05-14-external-tool-unified-protocol.md` — 外部工具 MCP 优先
+- `docs/decisions/2026-08-23-task-chain-state-model-fixes.md` — task = pipeline state 单一真值
 
 ## 示例插件速查
 
@@ -66,6 +65,6 @@
 | native 插件（cdylib） | `plugins/shared/pipeline/output/sensitive_checker/`、`plugins/shared/pipeline/core/tool_core/` |
 | native 契约与测试插件 | `kernel/crates/native-sdk/`、`kernel/crates/native-sdk-test-plugin/` |
 | 外部 MCP（HTTP 远程 / 本地命令） | `plugins/shared/tools/external_mcp/mcp_registry/`、`.../omnisearch/` |
-| 插件主题（contributes.themes） | `plugins/shared/system/visual_customization_demo/` |
+| 插件主题（contributes.themes） | `plugins/shared/system/dsh_adapter/`（16 款主题声明） |
 | 插件皮肤（skin + hooks + 三端点） | `plugins/shared/system/dsh_adapter/`（含递送层参考实现） |
 | 前端预设主题 | `frontend/src/config/themes/presets/moe-soft.ts` + `frontend/src/config/themes/index.ts` |

@@ -38,9 +38,9 @@ def parse_failures(output: str) -> int:
     for m in re.finditer(r"test result: .*?(\d+) failed", output):
         failed_count += int(m.group(1))
     if failed_count == 0:
-        m = re.search(r"(\d+) test(?:s)? failed", output)
-        if m:
-            failed_count = int(m.group(1))
+        m2 = re.search(r"(\d+) test(?:s)? failed", output)
+        if m2:
+            failed_count = int(m2.group(1))
     if failed_count == 0 and ("error[" in output or "error:" in output):
         # 编译失败（非测试失败，但 CI 应红）
         failed_count = max(failed_count, 1)
@@ -55,6 +55,8 @@ def run_cargo_test() -> tuple[int, str]:
             cwd=str(KERNEL_DIR),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=600,
             check=False,
         )

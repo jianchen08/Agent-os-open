@@ -1,13 +1,13 @@
 /** 代码编辑器组件 在工作区面板中提供带语法高亮的代码编辑功能。 */
 
-import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw, Quote } from '@/assets/icons'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw, Quote } from '@/assets/icons'
 import { codeHighlightStyle } from '@/components/shared/markdown/codeHighlightStyle'
-import { LobeChatMarkdown } from '../chat/LobeChatMarkdown'
 import { cn } from '@/lib/utils'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import { subscribeFileChange, unsubscribeFileChange } from '@/stores/fileEditorRegistry'
+import { LobeChatMarkdown } from '../chat/LobeChatMarkdown'
 
 /** Markdown 扩展名集合 */
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown'])

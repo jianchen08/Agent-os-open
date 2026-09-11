@@ -42,6 +42,8 @@ impl agentos_session::EventSink for FrameSink {
 /// 最小 PluginManifest（对齐 e2e_path_coverage_test 的 manifest_base）。
 fn manifest_base(plugin_id: &str) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: plugin_id.to_string(),
         name: plugin_id.to_string(),
         description: None,
@@ -78,10 +80,10 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
 struct OkInvoker;
 #[async_trait::async_trait]
 impl agentos_core::traits::PluginInvoker for OkInvoker {
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         _plugin_id: &str,
-        ctx: &PluginContext,
+        ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, agentos_core::types::PluginError> {
         let history = ctx
             .state
@@ -133,10 +135,10 @@ impl agentos_core::traits::PluginInvoker for OkInvoker {
 struct SilentInvoker;
 #[async_trait::async_trait]
 impl agentos_core::traits::PluginInvoker for SilentInvoker {
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         _plugin_id: &str,
-        _ctx: &PluginContext,
+        _ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, agentos_core::types::PluginError> {
         Ok(PluginResult::default())
     }
@@ -208,6 +210,8 @@ fn make_engine_state(
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     });
     state.step_library = Arc::new(agentos_core::types::StepLibrary::default());
     state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest_base(
@@ -412,6 +416,36 @@ async fn endpoint_update_emits_pending_inputs_changed() {
     // 造 store + 一条 pending + pipeline↔thread 映射 + session
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
+    // pending-inputs 已纳入管道域鉴权（PUT=写面 admin）：播种 admin 并铸同源 token
+    const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
+    let hash = agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap();
+    let _ = store_dyn
+        .create_user(&agentos_core::types::UserRecord {
+            user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            username: "admin".to_string(),
+            password: hash.clone(),
+            email: None,
+            role: "admin".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_login_at: None,
+            must_change_password: false,
+        })
+        .await;
+    let admin = agentos_http::auth::BuiltInUser {
+        id: "00000000-0000-0000-0000-000000000001".to_string(),
+        username: "admin".to_string(),
+        password: hash,
+        email: String::new(),
+        role: "admin".to_string(),
+        tenant_id: "default".to_string(),
+        created_at: String::new(),
+        must_change_password: false,
+    };
+    let bearer = format!(
+        "Bearer {}",
+        agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &admin, 3600)
+    );
     let pid = "pipe-evt-1";
     store_dyn
         .enqueue_pending_input(
@@ -463,6 +497,7 @@ async fn endpoint_update_emits_pending_inputs_changed() {
                 .method("PUT")
                 .uri(format!("/api/v1/pipelines/{pid}/pending-inputs/p_evt_1"))
                 .header("content-type", "application/json")
+                .header("authorization", &bearer)
                 .body(Body::from(r#"{"content":"新内容"}"#))
                 .unwrap(),
         )
@@ -478,4 +513,129 @@ async fn endpoint_update_emits_pending_inputs_changed() {
     let parsed: serde_json::Value = serde_json::from_str(evt).unwrap();
     assert_eq!(parsed["data"]["action"], "updated");
     assert_eq!(parsed["data"]["items"][0]["content"], "新内容");
+}
+
+/// 条件入队（ADR-2026-09-11）：链空闲 → 直跑本轮，全程无 enqueued/consumed 帧、
+/// 队列表保持空——前端乐观气泡与待处理队列条由此互斥（杜绝"聊天+待处理"同屏）。
+#[tokio::test]
+async fn dispatch_idle_chain_runs_direct_without_pending_frames() {
+    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let coord = Arc::new(SessionCoordinator::new());
+    let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+    coord.register(
+        "u1",
+        Arc::new(FrameSink {
+            frames: frames.clone(),
+        }),
+    );
+    coord.register_thread("thread-idle-1", "u1");
+    seed_session_with_pipeline(&store, "thread-idle-1", "pipe-idle-1").await;
+    let state = make_engine_state(store.clone(), Arc::new(OkInvoker), coord, false);
+
+    let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
+    use agentos_session::router::PipelineDispatcher;
+    dispatcher
+        .dispatch_user_input(
+            "thread-idle-1",
+            "u1",
+            "直跑探针",
+            "",
+            "",
+            None,
+            None,
+            "agentos",
+            "cmid-idle-1",
+            PendingInputSource::User,
+        )
+        .await
+        .unwrap();
+
+    // 消息正常执行（流式契约事件照常）
+    wait_for_frame(&frames, "\"type\":\"new_message\"").await;
+    let all = frames.lock().unwrap();
+    assert!(
+        !all.iter().any(|f| f.contains("pending_inputs_changed")),
+        "链空直跑不得发任何 pending_inputs_changed 帧（队列条零闪现）"
+    );
+    let rows = store.list_pending_inputs("default", "pipe-idle-1").unwrap();
+    assert!(rows.is_empty(), "直跑路径不得在队列表留下条目");
+}
+
+/// 条件入队：链忙 → 持久化入队推 enqueued 帧（表有条目），占链释放后消费循环
+/// 接管推 consumed 帧且表清空——队列条语义 = 真正等待中的消息。
+#[tokio::test]
+async fn dispatch_busy_chain_enqueues_then_consumes_after_release() {
+    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let coord = Arc::new(SessionCoordinator::new());
+    let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+    coord.register(
+        "u1",
+        Arc::new(FrameSink {
+            frames: frames.clone(),
+        }),
+    );
+    coord.register_thread("thread-busy-1", "u1");
+    seed_session_with_pipeline(&store, "thread-busy-1", "pipe-busy-1").await;
+    let state = make_engine_state(store.clone(), Arc::new(OkInvoker), coord, false);
+
+    // 占链：同管道挂起任务（模拟上一条消息仍在执行）。
+    let release = Arc::new(tokio::sync::Notify::new());
+    let release_wait = Arc::clone(&release);
+    agentos_api::run_chain::RunChainRegistry::global().enqueue("pipe-busy-1", "u1", async move {
+        let _ = release_wait.notified().await;
+    });
+
+    let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
+    use agentos_session::router::PipelineDispatcher;
+    dispatcher
+        .dispatch_user_input(
+            "thread-busy-1",
+            "u1",
+            "排队探针",
+            "",
+            "",
+            None,
+            None,
+            "agentos",
+            "cmid-busy-1",
+            PendingInputSource::User,
+        )
+        .await
+        .unwrap();
+
+    // 链忙：入队事件先行（队列条出现），表有条目；直跑未发生（无 new_message）。
+    wait_for_frame(&frames, "pending_inputs_changed").await;
+    {
+        let all = frames.lock().unwrap();
+        let evt = all
+            .iter()
+            .find(|f| f.contains("pending_inputs_changed"))
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(evt).unwrap();
+        assert_eq!(parsed["data"]["action"], "enqueued");
+        assert_eq!(parsed["data"]["items"][0]["content"], "排队探针");
+        assert!(
+            !all.iter().any(|f| f.contains("\"type\":\"new_message\"")),
+            "链忙期间消息不得提前执行"
+        );
+    }
+    let rows = store.list_pending_inputs("default", "pipe-busy-1").unwrap();
+    assert_eq!(rows.len(), 1, "链忙时消息必须留在队列表");
+
+    // 释放占链：消费循环接管 → consumed 帧 + 表清空 + 消息执行。
+    release.notify_one();
+    wait_for_frame(&frames, "\"type\":\"new_message\"").await;
+    let all = frames.lock().unwrap();
+    let consumed = all
+        .iter()
+        .find(|f| f.contains("pending_inputs_changed") && f.contains("\"consumed\""))
+        .expect("释放后应推 consumed 帧");
+    let parsed: serde_json::Value = serde_json::from_str(consumed).unwrap();
+    assert_eq!(
+        parsed["data"]["items"].as_array().unwrap().len(),
+        0,
+        "consumed 后队列空"
+    );
+    let rows = store.list_pending_inputs("default", "pipe-busy-1").unwrap();
+    assert!(rows.is_empty(), "消费后队列表必须清空");
 }

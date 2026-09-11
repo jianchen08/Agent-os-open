@@ -11,6 +11,7 @@
  *   任务节点层——子任务/子管道直挂该条目行下，只一个层级
  */
 
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Ban,
@@ -38,13 +39,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import apiClient from '@/services/api/client'
-import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
 import { invalidateLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
 import { usePipelineRunsQuery, usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
 import { useSessionsQuery, readSessions, ensureSessionsLoaded } from '@/hooks/queries/useSessionsQuery'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import apiClient from '@/services/api/client'
+import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
+import { mapStateInfoToViewModel, type PipelineStateEntryViewModel } from '@/services/api/pipelines'
 import { deleteProject, fetchProjects, pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { useAgentTabStore } from '@/stores/agentTabStore'
@@ -52,6 +53,11 @@ import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
+import { entryDurationMs, formatDuration } from '@/types/activity'
+import {
+  taskStatusLabel,
+  taskStatusToPipelineStatus,
+} from '@/types/taskStatus'
 import type { PipelineStatus, PipelineViewEntry } from '@/types/pipeline'
 import type { AgentTab } from '@/types/task'
 
@@ -59,45 +65,22 @@ import type { AgentTab } from '@/types/task'
 // 辅助
 // ═════════════════════════════════════════════════════════════════
 
-/** 内核实际状态（run_status）→ 管道运行状态（词汇与 RunStatus 五态一致）。
- *  非五态词汇（缺省/旧 checkpoint 数据无该键）返回 null，由调用方回退推断。 */
-function runStatusToPipelineStatus(runStatus: string | undefined): PipelineStatus | null {
-  switch (runStatus) {
-    case 'running':
-    case 'suspended':
-    case 'completed':
-    case 'failed':
-    case 'cancelled':
-      return runStatus
-    default:
-      return null
-  }
-}
 
-/** 任务状态 → 管道运行状态映射（对齐 RunStatus 语义） */
-function taskStatusToPipelineStatus(taskStatus: string | undefined): PipelineStatus | null {
-  switch (taskStatus) {
-    case 'pending':
+/** 管道运行视图态 → Agent 标签页状态（未知落 'unknown'，不猜 running） */
+function pipelineStatusToTabStatus(status: PipelineStatus): AgentTab['status'] {
+  switch (status) {
     case 'running':
-    case 'evaluating':
-    case 'planning':
       return 'running'
-    case 'stopped':
-    case 'suspended':
-    case 'blocked':
-    case 'paused':
-      return 'suspended'
     case 'completed':
       return 'completed'
     case 'failed':
-    case 'timeout':
       return 'failed'
+    case 'suspended':
     case 'cancelled':
-    case 'canceled':
-      // 绑定语义对齐：任务取消 → 运行取消（非失败）
-      return 'cancelled'
-    default:
-      return null
+      // 已暂停/已取消 = 停在那里等待用户
+      return 'waiting_input'
+    case 'unknown':
+      return 'unknown'
   }
 }
 
@@ -108,35 +91,6 @@ function taskPipelineId(task: Record<string, unknown>): string | undefined {
   const meta = task.metadata as Record<string, unknown> | undefined
   const metaRaw = meta?.pipeline_run_id ?? meta?.pipelineRunId
   return typeof metaRaw === 'string' && metaRaw ? metaRaw : undefined
-}
-
-/** 从 state 摘要提取工作区坐标（R3：任务域镜像 task.ws_meta 优先——任务管道
- *  的裸 ws_meta 会被会话工作区投影污染成会话目录；ws_meta.path 次之，
- *  workspace 标量回退。project_root 是源根，不用于关联） */
-function stateWorkspacePath(
-  s:
-    | {
-        'task.ws_meta'?: { path?: string }
-        ws_meta?: { path?: string }
-        workspace?: string
-      }
-    | undefined,
-): string | undefined {
-  if (!s) return undefined
-  const p = s['task.ws_meta']?.path ?? s.ws_meta?.path ?? s.workspace
-  return typeof p === 'string' && p ? p : undefined
-}
-
-/** 格式化耗时（ms → "3m 20s" / "1h 2m" / "45s"） */
-export function formatDuration(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined || isNaN(ms) || ms < 0) return '--'
-  const totalSec = Math.floor(ms / 1000)
-  if (totalSec < 60) return `${totalSec}s`
-  const m = Math.floor(totalSec / 60)
-  const s = totalSec % 60
-  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`
-  const h = Math.floor(m / 60)
-  return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
 }
 
 /** 提取条目的 token 展示值（实时 usage 优先，回退 summaries 汇总） */
@@ -157,34 +111,9 @@ const PIPELINE_STATUS_LABELS: Record<string, string> = {
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',
+  unknown: '未知',
 }
 
-/**
- * 任务域状态 → 展示文案（两态模型：任务条目的第二态，与运行态分离展示）。
- * 权威词汇 = tasks 插件 TaskStatus 七态；衍生值（删除/待评估等）一并覆盖，
- * 未知值回退原串。
- */
-const TASK_STATUS_LABELS: Record<string, string> = {
-  pending: '待执行',
-  running: '运行中',
-  evaluating: '评估中',
-  planning: '规划中',
-  stopped: '已暂停',
-  paused: '已暂停',
-  suspended: '已暂停',
-  blocked: '已阻塞',
-  completed: '已完成',
-  failed: '已失败',
-  timeout: '已超时',
-  cancelled: '已取消',
-  canceled: '已取消',
-  deleted: '已删除',
-  pending_evaluation: '待评估',
-}
-
-function taskStatusLabel(status: string): string {
-  return TASK_STATUS_LABELS[status] ?? status
-}
 
 /** 状态 → 图标 + 颜色 */
 function statusIcon(status: string): { icon: React.ReactNode; color: string; label: string } {
@@ -194,6 +123,7 @@ function statusIcon(status: string): { icon: React.ReactNode; color: string; lab
     completed: { icon: <CheckCircle2 className="h-4 w-4" />, color: 'text-status-success' },
     failed: { icon: <XCircle className="h-4 w-4" />, color: 'text-status-error' },
     cancelled: { icon: <Ban className="h-4 w-4" />, color: 'text-muted-foreground' },
+    unknown: { icon: <CircleDot className="h-4 w-4" />, color: 'text-status-pending' },
   }
   const conf = map[status] ?? { icon: <CircleDot className="h-4 w-4" />, color: 'text-status-pending' }
   return { icon: conf.icon, color: conf.color, label: PIPELINE_STATUS_LABELS[status] ?? status }
@@ -225,6 +155,11 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
 
   /** 管道条目派生：注册表快照 + 任务列表（含管道 ID 的任务）合并，按开始时间倒序 */
   const pipelineEntries: PipelineViewEntry[] = useMemo(() => {
+    // state 摘要 → 视图模型（扁平键名/三源状态推断收敛在适配层，组件只消费视图）
+    const stateViews: Record<string, PipelineStateEntryViewModel> = {}
+    for (const st of Object.values(registryStates)) {
+      stateViews[st.pipeline_id] = mapStateInfoToViewModel(st)
+    }
     // 任务 → 管道 ID 映射（判定任务类型 + 取任务名/进度；全量任务）
     const taskByPipeline = new Map<string, Record<string, unknown>>()
     for (const task of allTasks) {
@@ -246,8 +181,8 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       const task = run.pipeline_id ? taskByPipeline.get(run.pipeline_id) : undefined
       const session = run.thread_id ? sessionById.get(run.thread_id) : undefined
       const live = run.pipeline_id ? usageByPipeline[run.pipeline_id] : undefined
-      // 内核 state 摘要（phase/迭代真值；runs 覆盖的管道也可能有 state 补充）
-      const st = run.pipeline_id ? registryStates[run.pipeline_id] : undefined
+      // 内核 state 摘要视图（phase/迭代真值；runs 覆盖的管道也可能有 state 补充）
+      const st = run.pipeline_id ? stateViews[run.pipeline_id] : undefined
       const kind = task ? 'task' : 'session'
       const name =
         (task ? String(task.title ?? '') : '')
@@ -261,7 +196,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         threadId: run.thread_id,
         // 血缘根会话（自环子任务管道的 thread_id=自身 id 不在会话列表，
         // 真实归属用户会话由血缘键承载）
-        originSessionId: st?.state['lineage.origin_session_id'],
+        originSessionId: st?.originSessionId,
         status: run.status,
         startedAt: run.started_at,
         endedAt: run.ended_at,
@@ -274,7 +209,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         // 任务工作空间路径（R3：state 真值优先 ws_meta.path/workspace，任务
         // metadata 镜像回退；非任务条目也走 state 通道）
         workspacePath:
-          stateWorkspacePath(st?.state)
+          st?.workspacePath
           ?? (task
             ? String(
                 (task.metadata as { ws_meta?: { path?: string } } | undefined)?.ws_meta?.path
@@ -287,15 +222,13 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
             ? Number((task?.progress as Record<string, unknown>).progressPercent)
             : undefined,
         totalTokens: run.total_tokens ?? null,
-        currentPhase: st?.state.current_phase,
-        messageCount: st?.state.message_count,
+        currentPhase: st?.currentPhase,
+        messageCount: st?.messageCount,
         // 原始状态与 state 真值（不被 4 态映射吞掉——evaluating/planning 等细态可见）
         taskStatus: task ? String(task.status ?? '') || undefined : undefined,
-        stateStatus: st
-          ? String(st.state['task.status'] ?? '') || undefined
-          : undefined,
-        stateEnded: st?.state.ended === true ? true : undefined,
-        rawError: st?.state.raw_error ?? undefined,
+        stateStatus: st?.taskStatus,
+        stateEnded: st?.ended,
+        rawError: st?.rawError,
         liveUsage: live
           ? {
               promptTokens: live.promptTokens,
@@ -313,9 +246,10 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       if (seen.has(pid)) continue
       seen.add(pid)
       const taskStatus = String(task.status ?? '')
-      // 未知状态不再丢弃：保留条目，4 态映射兜底 running，原始状态在行内展示
-      const mapped = taskStatusToPipelineStatus(taskStatus) ?? 'running'
-      const st = registryStates[pid]
+      // 未知状态不再丢弃也不再猜 running：保留条目落 'unknown' 视图态，
+      // 原始状态在行内展示（词表归一与告警见 types/taskStatus）
+      const mapped = taskStatusToPipelineStatus(taskStatus)
+      const st = stateViews[pid]
       const timestamps = task.timestamps as Record<string, unknown> | undefined
       const startedAt =
         (timestamps?.startedAt as string | undefined)
@@ -327,7 +261,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         pipelineId: pid,
         runId: pid,
         threadId: String(task.threadId ?? task.thread_id ?? '') || undefined,
-        originSessionId: st?.state['lineage.origin_session_id'],
+        originSessionId: st?.originSessionId,
         status: mapped,
         startedAt,
         endedAt: completedAt,
@@ -337,7 +271,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         taskId: String(task.id),
         sessionTitle: undefined,
         workspacePath:
-          stateWorkspacePath(st?.state)
+          st?.workspacePath
           ?? (String(
             (task.metadata as { ws_meta?: { path?: string } } | undefined)?.ws_meta?.path
             || task.workspace
@@ -349,51 +283,47 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
             : undefined,
         totalTokens: null,
         taskStatus: taskStatus || undefined,
-        currentPhase: st?.state.current_phase,
-        messageCount: st?.state.message_count,
-        stateStatus: st
-          ? String(st.state['task.status'] ?? '') || undefined
-          : undefined,
-        stateEnded: st?.state.ended === true ? true : undefined,
-        rawError: st?.state.raw_error ?? undefined,
+        currentPhase: st?.currentPhase,
+        messageCount: st?.messageCount,
+        stateStatus: st?.taskStatus,
+        stateEnded: st?.ended,
+        rawError: st?.rawError,
       })
     }
 
     // 3) 内核 state 独有条目：registry runs 未覆盖的管道（如重启后仅存在于
-    //    checkpoint 的历史管道）——直接从 state 摘要生成节点（会话/阶段/迭代真值）
-    for (const st of Object.values(registryStates)) {
-      if (seen.has(st.pipeline_id)) continue
-      seen.add(st.pipeline_id)
-      const s = st.state
-      const session = st.thread_id ? sessionById.get(st.thread_id) : undefined
-      // 实际状态内核持有（run_status 五态直映，轮中=running 不失真）；旧
-      // checkpoint 数据无该键时回退 ended/raw_error 推断
-      const mapped: PipelineStatus =
-        runStatusToPipelineStatus(s.run_status)
-        ?? (s.raw_error ? 'failed' : s.ended ? 'completed' : 'running')
+    //    checkpoint 的历史管道）——直接从 state 视图生成节点（会话/阶段/迭代真值；
+    //    归一状态由适配层单一出口给出，旧 checkpoint 数据回退推断不失真）
+    for (const st of Object.values(stateViews)) {
+      if (seen.has(st.pipelineId)) continue
+      seen.add(st.pipelineId)
+      const session = st.threadId ? sessionById.get(st.threadId) : undefined
       entries.push({
-        key: st.pipeline_id,
-        pipelineId: st.pipeline_id,
-        runId: st.pipeline_id,
-        threadId: st.thread_id,
-        originSessionId: s['lineage.origin_session_id'],
-        status: mapped,
-        startedAt: new Date(0).toISOString(),
+        key: st.pipelineId,
+        pipelineId: st.pipelineId,
+        runId: st.pipelineId,
+        threadId: st.threadId,
+        originSessionId: st.originSessionId,
+        status: st.status,
+        // state 独有条目无启动时间真值：置空串（未知），耗时列按 '--' 展示。
+        // 禁止发明 epoch-0 占位——endedAt - epoch0 会算出 56 年级假耗时
+        // （GUI 黑盒测试 2026-09-11：stress2-10 已完成却显示 496969h 9m）。
+        startedAt: '',
         kind: 'session',
         name:
           (session ? session.title : '')
-          || s.display_name
-          || s.name
-          || (st.thread_id ? `会话 ${st.thread_id.slice(0, 8)}` : st.pipeline_id.slice(0, 12)),
+          || st.displayName
+          || st.name
+          || (st.threadId ? `会话 ${st.threadId.slice(0, 8)}` : st.pipelineId.slice(0, 12)),
         sessionTitle: session ? session.title : undefined,
-        currentPhase: s.current_phase,
-        messageCount: s.message_count,
-        stateStatus: String(s['task.status'] ?? '') || undefined,
-        stateEnded: s.ended === true ? true : undefined,
-        rawError: s.raw_error ?? undefined,
+        currentPhase: st.currentPhase,
+        messageCount: st.messageCount,
+        stateStatus: st.taskStatus,
+        stateEnded: st.ended,
+        rawError: st.rawError,
         // 工作区坐标（state 真值：ws_meta.path/workspace；替代旧
         // metadata.execution_context.source_path 推断）
-        workspacePath: stateWorkspacePath(s),
+        workspacePath: st.workspacePath,
         totalTokens: null,
       })
     }
@@ -705,10 +635,12 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         return
       }
     }
-    // 归属会话解析：threadId 命中会话列表为第一真值。子任务管道出生落
-    // pipeline_sessions 自环映射（thread=自身 id，sessions 表无行）——runs API
-    // 联结出的 thread_id 不会命中会话列表，真实归属会话经血缘
-    // origin_session_id 兜底（出生写面真值，指向根用户会话）。
+    // 归属会话解析：threadId 命中会话列表为第一真值。自环子任务管道
+    // （thread_id=自身 id）不在任何会话成员列表里——runs 读面联结出的
+    // thread_id 不会命中会话列表，真实归属会话经血缘 origin_session_id
+    // 兜底（出生写面真值，指向根用户会话）。
+    // 待办（解耦方案 P2-6）：内核 runs/state 响应直接携带归属会话字段后，
+    // 删除本兜底分支。
     const sessionsNow = readSessions()
     let owningSessionId: string | undefined
     let ownsViaLineage = false
@@ -769,7 +701,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       parentRecordId: pipelineId,
       agentLevel: 2,
       taskId: entry.taskId,
-      status: (entry.status ?? 'running') as AgentTab['status'],
+      status: pipelineStatusToTabStatus(entry.status),
       setActive: true,
       pipelineId,
     })
@@ -1351,9 +1283,7 @@ function EntryRow({
   ) => void
 }) {
   const status = statusIcon(entry.status)
-  const durationMs = entry.endedAt
-    ? new Date(entry.endedAt).getTime() - new Date(entry.startedAt).getTime()
-    : nowMs - new Date(entry.startedAt).getTime()
+  const durationMs = entryDurationMs(entry, nowMs)
   const tokenTotal = entryTokenTotal(entry)
 
   return (
@@ -1680,9 +1610,7 @@ function PipelineTable({
         <tbody>
           {entries.map((entry) => {
             const status = statusIcon(entry.status)
-            const durationMs = entry.endedAt
-              ? new Date(entry.endedAt).getTime() - new Date(entry.startedAt).getTime()
-              : nowMs - new Date(entry.startedAt).getTime()
+            const durationMs = entryDurationMs(entry, nowMs)
             const tokenTotal = entryTokenTotal(entry)
             return (
               <React.Fragment key={entry.key}>

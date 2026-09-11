@@ -1,6 +1,9 @@
 """增强搜索工具——代码/文件内容搜索。
 
 核心业务逻辑从 0.1 src/tools/builtin/enhanced_search/ 迁移。
+
+工作空间约束与其他文件工具同规（fs_tools 单源）：路径解析/边界校验/
+凭据黑名单全部复用 fs_tools，本模块不自持第二套判定。
 """
 
 from __future__ import annotations
@@ -10,6 +13,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from agentos_builtin_tools.fs_tools import (
+    _check_workspace_path,
+    _sensitive_file_reason,
+)
 from agentos_builtin_tools.result import ToolResult
 
 ENHANCED_SEARCH_SCHEMA: dict[str, Any] = {
@@ -47,22 +54,23 @@ async def enhanced_search(
     workspace: str | None = None,
     project_root: str | None = None,
 ) -> ToolResult:
-    """搜索文件内容或文件名（相对路径以注入根锚定；无注入报错）。"""
+    """搜索文件内容或文件名（相对路径以注入根锚定；无注入报错）。
+
+    双闸与其他文件工具同源（fs_tools）：① 路径边界 fail-closed（根外绝对
+    路径/``..`` 逃逸拒绝、/workspace 挂载点重映射）；② 目标路径自身命中
+    凭据黑名单（.env/私钥等）直接拒绝。
+    """
     import fnmatch
 
     flags = 0 if case_sensitive else re.IGNORECASE
     pattern = re.compile(query if use_regex else re.escape(query), flags)
 
-    root_str = project_root or workspace
-    if not root_str:
-        return ToolResult.failure_result(
-            f"workspace/project_root 未注入，无法锚定搜索路径（相对路径禁止以进程 cwd 解析）：{path}"
-        )
-    root = Path(root_str).resolve()
-    if path == "/workspace" or path.startswith("/workspace/"):
-        path = str(root) + path[len("/workspace"):]
-    target = Path(path)
-    search_path = target.resolve() if target.is_absolute() else (root / target).resolve()
+    allowed, reason, resolved = _check_workspace_path(
+        path, workspace, project_root, operation="search"
+    )
+    if not allowed or resolved is None:
+        return ToolResult.failure_result(reason)
+    search_path = Path(resolved)
     if not search_path.exists():
         return ToolResult.failure_result(f"Path not found: {path}")
 
@@ -81,9 +89,14 @@ async def enhanced_search(
                 for fname in files:
                     if not fnmatch.fnmatch(fname, file_pattern):
                         continue
+                    file_path = Path(root) / fname
+                    # 凭据类文件不进结果（遍历场景跳过而非整体失败：walk 会
+                    # 顺路碰到 .env，跳过才符合"搜索不回传凭据"）
+                    if _sensitive_file_reason(file_path.resolve()) is not None:
+                        continue
                     if pattern.search(fname):
                         results.append({
-                            "file_path": str(Path(root) / fname),
+                            "file_path": str(file_path),
                             "line_number": 0,
                             "content": fname,
                             "context_before": [],
@@ -96,6 +109,8 @@ async def enhanced_search(
                     if not fnmatch.fnmatch(fname, file_pattern):
                         continue
                     file_path = Path(root) / fname
+                    if _sensitive_file_reason(file_path.resolve()) is not None:
+                        continue
                     try:
                         content = file_path.read_text("utf-8", errors="replace")
                     except OSError:

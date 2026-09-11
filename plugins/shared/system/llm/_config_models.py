@@ -4,7 +4,9 @@
 - ``server.py::_on_load`` 调 ``set_config(config)`` 注入内核下发的配置；
 - ``router_factory._ensure_provider_type_map_loaded`` 和
   ``adapter.KeyPoolAdapter._route_call`` 调 ``get_model_config_loader()``
-  拿到一个与 0.1 ``ModelConfigLoader`` 接口兼容的 loader（暴露 ``_load_llm_data``）。
+  拿配置 loader（暴露 ``_load_llm_data``）；
+- ``pipeline/core/llm_core/plugin.py`` 经 ``get_model_config_loader()``
+  消费 ``get_llm_core_config`` / ``resolve_tier`` / ``get_default_chat_model``。
 
 配置结构（P1：manifest ``config_files`` 映射，按 id 命名空间合并后注入）::
 
@@ -17,10 +19,13 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # 模块级配置存储（由 set_config 注入，进程内单例）
 _config: dict[str, Any] = {}
@@ -46,7 +51,12 @@ def _resolve_project_root() -> Path | None:
 
 
 def _env_file_vars() -> dict[str, str]:
-    """读取项目根 .env（mtime 缓存）。空行/注释跳过。"""
+    """读取项目根 .env（mtime 缓存）。空行/注释跳过。
+
+    FileNotFoundError（无 .env）属正常形态静默返回；其余 OSError（文件被占/
+    权限等）warn 带 path 与异常摘要——静默空表会让 key 缺失只在远端 401 暴露，
+    根因必须可观测。
+    """
     global _env_cache  # noqa: PLW0603
     root = _resolve_project_root()
     if root is None:
@@ -54,7 +64,10 @@ def _env_file_vars() -> dict[str, str]:
     env_path = root / ".env"
     try:
         mtime = env_path.stat().st_mtime
-    except OSError:
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logger.warning(".env 读取失败（mtime 探测），按无变量处理 | path=%s | error=%s", env_path, exc)
         return {}
     if _env_cache and _env_cache[0] == mtime:
         return _env_cache[1]
@@ -66,7 +79,10 @@ def _env_file_vars() -> dict[str, str]:
                 continue
             key, _, value = stripped.partition("=")
             result[key.strip()] = value.strip().strip('"')
-    except OSError:
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logger.warning(".env 读取失败，按无变量处理 | path=%s | error=%s", env_path, exc)
         return {}
     _env_cache = (mtime, result)
     return result
@@ -127,19 +143,22 @@ def get_config() -> dict[str, Any]:
 
 
 def get_model_config_loader() -> ModelConfigLoaderShim:
-    """返回一个与 0.1 ``ModelConfigLoader`` 接口兼容的 loader 实例。
+    """返回基于当前注入配置的 loader 实例。
 
-    loader 暴露 ``_load_llm_data()``，返回当前注入配置中的 ``llm`` 命名空间节。
+    消费方：router_factory / adapter（``_load_llm_data()``，返回当前注入
+    配置中的 ``llm`` 命名空间节）与 llm_core（``get_llm_core_config`` /
+    ``resolve_tier`` / ``get_default_chat_model``）。
     """
     return ModelConfigLoaderShim(_config)
 
 
 class ModelConfigLoaderShim:
-    """模拟 0.1 ``ModelConfigLoader`` 接口，数据来自注入配置。
+    """基于注入配置的模型配置 loader。
 
     ``router_factory.build_router`` / ``build_adapter`` 及
     ``adapter.KeyPoolAdapter._route_call`` 调用 ``_load_llm_data()``
-    获取 ``llm.yaml`` 解析后的字典。
+    获取 ``llm.yaml`` 解析后的字典；llm_core 消费
+    ``get_llm_core_config`` / ``resolve_tier`` / ``get_default_chat_model``。
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -179,8 +198,8 @@ class ModelConfigLoaderShim:
     def get_model_config(self, model_id: str) -> dict[str, Any] | None:
         """根据 model_id 从 ``llm.yaml`` 的 models 段取模型配置。
 
-        与 0.1 ``ModelConfigLoader.get_model_config`` 对齐（仅 LLM models，
-        sidecar 场景不做 embedding 回退——LLMCore 不会用 embedding）。
+        仅查 LLM models（sidecar 场景不做 embedding
+        回退——LLMCore 不会用 embedding）。
         """
         models = self._load_llm_data().get("models", {})
         hit = self._case_insensitive_lookup(models, model_id)
@@ -195,8 +214,7 @@ class ModelConfigLoaderShim:
     def resolve_tier(self, tier: str) -> str:
         """从 ``llm.yaml`` defaults.tiers 解析 tier 为 model_id。
 
-        与 0.1 ``plugin_resolver.resolve_tier`` 对齐：tier(large/medium/small)
-        → defaults.tiers[tier] → model_id。
+        tier(large/medium/small) → defaults.tiers[tier] → model_id。
         """
         if not tier:
             return ""
@@ -208,7 +226,7 @@ class ModelConfigLoaderShim:
         return self._load_llm_data().get("defaults", {}).get("chat", "")
 
     def get_llm_core_config(self, model_id: str) -> dict[str, Any] | None:
-        """获取 LLMCore 所需格式的模型配置（与 0.1 ``ModelConfigLoader`` 对齐）。
+        """获取 LLMCore 消费格式的模型配置（llm_core/plugin.py 经此取数）。
 
         合并 model_conf + provider_conf，产出扁平的
         provider/model_name/api_base/api_key/default_params/context_window/
@@ -231,7 +249,7 @@ class ModelConfigLoaderShim:
         api_base = model_conf.get("api_base", "") or provider_conf.get("api_base", "")
         # 模型条目 default_params 原样透传：未配置即空 dict——不发明兜底值
         # （参数缺省由 llm.complete_stream 按 llm.yaml 回填，缺即不发，
-        # 上游按模型自身默认运行；2026-09-03 用户裁定退役 0.7/4096 内联兜底）
+        # 上游按模型自身默认运行）
         default_params = model_conf.get("default_params", {})
         # 模型级思考强度手填映射（models.<id>.thinking_strength_params）：
         # 不同模型的 think 参数不一致（DeepSeek reasoning_effort / MiniMax adaptive

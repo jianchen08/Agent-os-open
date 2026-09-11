@@ -11,14 +11,14 @@
 // path header with its `lineNumber: line` rows, the group collapsible) or a
 // flat glob path list. Both shapes flatten to one list of rows the height cap
 // slices head/tail over, and neither soft-wraps: a long match line or path
-// scrolls horizontally instead of folding. Geometry mirrors CodeBlock and
-// TerminalBlock so a search card reads as one family with them.
+// scrolls horizontally instead of folding. Geometry mirrors TerminalBlock
+// so a search card reads as one family with it.
 
-import { useCallback, useState, type ReactNode } from 'react'
 import clsx from 'clsx'
+import { useCallback, useState, type ReactNode } from 'react'
 import { headTailCap } from './head-tail-cap.ts'
-import { useCopyFeedback } from './use-copy-feedback.ts'
 import css from './SearchBlock.module.css'
+import { useCopyFeedback } from './use-copy-feedback.ts'
 
 /**
  * Result rows shown before the height cap collapses the middle. Matches

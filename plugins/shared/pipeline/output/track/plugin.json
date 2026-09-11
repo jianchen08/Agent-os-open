@@ -27,5 +27,21 @@
     "track.total_tokens",
     "track.execution_stats",
     "track.llm_usage"
-  ]
+  ],
+  "state": {
+    "reads": [
+      "core_type",
+      "iteration",
+      "llm_model",
+      "llm_provider",
+      "llm_usage",
+      "message_id",
+      "messages_tail:5",
+      "model",
+      "pipeline_id",
+      "run_started_at",
+      "session_id",
+      "track.llm_usage"
+    ]
+  }
 }

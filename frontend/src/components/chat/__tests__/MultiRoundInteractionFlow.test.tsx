@@ -10,19 +10,16 @@
  * 4. 混合内容顺序：多轮交互中消息渲染顺序正确（text → tool_call → interaction → text）
  */
 
-import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import React from 'react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InteractionCard } from '@/components/chat/InteractionCard'
 import { useInteractionHandler } from '@/hooks/useInteractionHandler'
 import { useRealtimeEvents } from '@/hooks/useRealtimeEvents'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import {
-  createExecutionStartEvent,
-  createExecutionDoneEvent,
-  createInteractionRequestEvent,
   createMockMessage,
   createTextPart,
   createToolCallPart,
@@ -108,7 +105,7 @@ vi.mock('@/components/ui/button', () => ({
 // ---------------------------------------------------------------------------
 //  Mock: GlobalWebSocket（真实订阅面：globalWS.subscribe/unsubscribe + send 族）
 //  useRealtimeEvents / useInteractionHandler 均通过 globalWS 订阅事件；
-//  此前 mock 的是无人 import 的 WebSocketService（mock 空气），事件从未触达真实 hook。
+//  mock 必须落在被测链路实际 import 的模块上——mock 无人 import 的模块（mock 空气）事件不会触达真实 hook。
 // ---------------------------------------------------------------------------
 const listeners: Record<string, Set<(...args: any[]) => void>> = {}
 

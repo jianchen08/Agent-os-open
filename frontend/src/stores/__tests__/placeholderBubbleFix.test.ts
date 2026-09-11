@@ -17,6 +17,8 @@
  *      后续 chunk 按 realMsgId 落到同一条消息。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as utilsMod2 from '@/services/websocket/streaming/handlers/utils'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 // Mock logger
@@ -46,8 +48,8 @@ const PLACEHOLDER_ID = 'placeholder_test-uuid-001'
 const REAL_MESSAGE_ID = 'msg-real-from-backend-001'
 
 describe('Bug 2: 发送消息瞬间应立即出现"思考中"占位气泡', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
-  let ensureStreamingPlaceholder: typeof import('@/services/websocket/streaming/handlers/utils').ensureStreamingPlaceholder
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
+  let ensureStreamingPlaceholder: utilsMod2.ensureStreamingPlaceholder
 
   beforeEach(async () => {
     vi.resetModules()

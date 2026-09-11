@@ -42,7 +42,6 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/test_system_plugins.py",
     "plugins/shared/system/llm/",
     "plugins/shared/system/tasks/",
-    "plugins/shared/system/test_migration_batch3.py",
     "plugins/shared/pipeline/input/environment_lifecycle/",
     "plugins/shared/pipeline/input/level_guard/",
     "plugins/shared/pipeline/input/multimodal_preprocessor/",
@@ -53,7 +52,6 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/tools/lsp/",
     "plugins/shared/tools/task_evaluate/",
     "plugins/shared/tools/web_ext/",
-    "plugins/shared/tools/tests/",
     "plugins/shared/tools/builtin_tools/tests/",
     "plugins/shared/system/dsh_adapter/tests/",
     "tests/plugins/",
@@ -112,12 +110,9 @@ BASE_TEST_PATHS: list[str] = [
     # 散目录不在车道 → context_window_guard/security_check/isolation/
     # hindsight_memory 等模块虽有进程内测试但车道不收集，覆盖率长期失真。
     "plugins/shared/pipeline/input/context_window_guard/",
-    "plugins/shared/pipeline/input/knowledge_inject/",
-    "plugins/shared/pipeline/input/memory_read/",
     "plugins/shared/pipeline/input/prompt_build/",
     "plugins/shared/pipeline/input/security_check/",
     "plugins/shared/pipeline/output/child_task_guard/tests/",
-    "plugins/shared/pipeline/output/experience_consolidator/",
     "plugins/shared/pipeline/output/task_reminder/",
     "plugins/shared/pipeline/output/tool_cache_writer/",
     "plugins/shared/system/agent_manager/",
@@ -128,7 +123,6 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/system/isolation/",
     "plugins/shared/system/scene/",
     "plugins/shared/system/task_form/",
-    "plugins/shared/system/widget_demo/",
     "plugins/shared/system/workspace/",
     "plugins/shared/system/hindsight_memory/",
     "plugins/shared/system/review/test_review_persistence.py",
@@ -142,12 +136,9 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_llm_core_thinking_strength.py",
     "tests/test_llm_adapter_call_streaming.py",
     "tests/test_model_prompt_adapter_plugin.py",
-    "tests/test_pipeline_llm_core_payload_diag.py",
-    "tests/test_llm_core_providers.py",
     "tests/test_pipeline_tool_calls_standardization_imports.py",
     "tests/test_track_missed_tokens.py",
     "tests/test_track_run_started_at_elapsed.py",
-    "tests/test_merge_verify_fix.py",
     "tests/test_workspace_lifecycle_mode.py",
     "tests/test_workspace_git_exclude.py",
     "tests/test_lifecycle_plugins.py",
@@ -166,8 +157,6 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_context_build_dynamic_vars.py",
     "tests/test_context_build_runtime_params.py",
     "tests/test_duplicate_check_merge.py",
-    "tests/test_fix_20260422_context_overflow.py",
-    "tests/test_frontend_event_stream.py",
     "tests/test_godot_context_plugin.py",
     "tests/test_host_mode_security.py",
     "tests/test_isolation_docker_recheck.py",
@@ -176,7 +165,6 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_isolation_namespace_desync.py",
     "tests/test_isolation_workspace_mount.py",
     "tests/test_new_project_e2e.py",
-    "tests/test_notification_panel.py",
     "tests/test_port_config.py",
     "tests/test_process_watchdog.py",
     "tests/test_scene.py",
@@ -190,7 +178,6 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_startup_env_adaptation.py",
     "tests/test_startup_scripts_fix.py",
     "tests/test_tool_block_not_end_pipeline.py",
-    "tests/test_tool_context_plugin.py",
     "tests/test_tool_schema_drift_detection.py",
     "tests/test_tool_schema_validator.py",
     "tests/test_track_cache_anomaly.py",
@@ -200,10 +187,9 @@ BASE_TEST_PATHS: list[str] = [
     "tests/tools/builtin/",
 ]
 
-# 外部依赖 marker 过滤（requires_api/requires_redis/requires_db/requires_bwrap
-# 标记已清理——全仓零使用；过滤表达式为空，两侧 gate 的 -m 参数与无过滤
-# 等价，保留该参数形态以防未来新增外部依赖标记时单点加回）。
-MARKER_FILTER = ""
+# 车道 marker 过滤：@pytest.mark.timing 用例唯一归 timing-gate（独立 stage，
+# §9.4），本文件两条车道（插桩/免插桩）一律排除，避免时序用例重复跑。
+MARKER_FILTER = "not timing"
 
 
 @dataclass(frozen=True)
@@ -225,8 +211,8 @@ EXEMPT_SUITES: list[ExemptSuite] = [
     ExemptSuite(
         path="tests/plugins/test_plugin_smoke_matrix.py",
         profile=(
-            "94 插件全量冒烟矩阵：85 个 Python sidecar 插件逐个以子进程加载"
-            "（cwd=插件目录，与生产 sidecar 语义一致）+ 8 external_mcp + 1 native，"
+            "全插件冒烟矩阵：全部 Python sidecar 插件逐个以子进程加载"
+            "（cwd=插件目录，与生产 sidecar 语义一致）+ external_mcp + native，"
             "每个参数化用例一次 Python 子进程启动 + 插件全量 import"
         ),
         measured_in_process=(

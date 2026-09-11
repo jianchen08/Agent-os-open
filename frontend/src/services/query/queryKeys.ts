@@ -19,6 +19,8 @@ export const queryKeys = {
   pipelineConfig: (name: string) => ['pipeline-config', name] as const,
   /** LLM 服务配置 */
   llmConfig: ['llm-config'] as const,
+  /** LLM 配置面预置声明（provider 分组/常用类型/思考强度白名单，插件下发） */
+  llmPresets: ['llm-presets'] as const,
   /** 调试中心：任务列表 */
   debugTasks: ['debug', 'tasks'] as const,
   /** 调试中心：会话列表 */
@@ -27,6 +29,11 @@ export const queryKeys = {
   executionRecords: (sessionId?: string) => ['debug', 'execution-records', sessionId ?? 'all'] as const,
   /** 调试中心：执行记录全部分条的前缀（清空全部后批量失效用） */
   executionRecordsPrefix: ['debug', 'execution-records'] as const,
+  /** 调试中心：管道诊断（trace 时间线 / state 全字段，按管道分条） */
+  pipelineTraces: (pipelineId: string) => ['debug', 'pipeline-traces', pipelineId] as const,
+  pipelineStateFull: (pipelineId: string) => ['debug', 'pipeline-state', pipelineId] as const,
+  pipelineTracesPrefix: ['debug', 'pipeline-traces'] as const,
+  pipelineStateFullPrefix: ['debug', 'pipeline-state'] as const,
   /** 调试中心：LLM 请求诊断列表（按页分条） */
   llmPayloadDiag: (page: number) => ['debug', 'llm-payload', page] as const,
   /** 调试中心：LLM 请求诊断全部分条的前缀（清空全部后批量失效用） */
@@ -43,10 +50,6 @@ export const queryKeys = {
   memoryStats: ['memory', 'stats'] as const,
   /** 知识库：文件列表 */
   kbFiles: ['knowledge-base', 'files'] as const,
-  /** 管理页：用户列表 */
-  adminUsers: ['admin', 'users'] as const,
-  /** 管理页：用户统计 */
-  adminUserStats: ['admin', 'user-stats'] as const,
   /** 长期任务列表（GET /ext/task_service/tasks，客户端过滤 long-term 标签） */
   longTermTasks: ['long-term-tasks'] as const,
   /** 管道管理面板全量任务列表（GET /ext/task_service/tasks 全量不过滤，任务节点/任务管道判定权威源） */

@@ -9,6 +9,7 @@
  * vi.resetModules() + 动态导入取全新模块实例（交互监听也随模块重建）。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type * as audioNotificationMod from '@/utils/audioNotification'
 
 /** 假 AudioContext：记录创建的节点与连接 */
 function makeFakeAudioContext() {
@@ -41,7 +42,7 @@ function makeFakeAudioContext() {
   return { ctx, nodes }
 }
 
-let playNotificationSound: typeof import('@/utils/audioNotification').playNotificationSound
+let playNotificationSound: audioNotificationMod.playNotificationSound
 
 describe('playNotificationSound', () => {
   let originalAudioContext: any

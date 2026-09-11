@@ -25,8 +25,8 @@ def _extract_encrypt(xml_str: str) -> str:
         encrypt_node = root.find("Encrypt")
         if encrypt_node is not None and encrypt_node.text:
             return encrypt_node.text
-    except ET.ParseError:
-        pass
+    except ET.ParseError as exc:
+        logger.warning("[channel_wecom] 加密消息 XML 解析失败（返回空串）: %s", exc)
     return ""
 
 

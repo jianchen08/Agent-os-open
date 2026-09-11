@@ -10,8 +10,8 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { compileThemeVariables } from '@/services/themeService'
 import { deepSpaceTheme, darkTheme } from '@/config/themes'
+import { compileThemeVariables } from '@/services/themeService'
 
 function parseVars(cssVars: string): Record<string, string> {
   const out: Record<string, string> = {}

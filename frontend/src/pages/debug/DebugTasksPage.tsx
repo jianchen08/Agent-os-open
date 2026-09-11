@@ -6,53 +6,36 @@ import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { useDebugTasksQuery } from '@/hooks/queries/useDebugQueries'
 import { resumeTask } from '@/services/api/tasks'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { useDebugTasksQuery } from '@/hooks/queries/useDebugQueries'
+import { TASK_STATUSES, normalizeTaskStatus, taskStatusLabel } from '@/types/taskStatus'
 
-/** 任务状态选项 */
+/** 任务状态选项（从任务状态词表单一真值源派生，旧值经 normalize 折叠） */
 const STATUS_OPTIONS = [
   { value: '', label: '全部状态' },
-  { value: 'pending', label: '等待中' },
-  { value: 'running', label: '运行中' },
-  { value: 'suspended', label: '已暂停' },
-  { value: 'completed', label: '已完成' },
-  { value: 'failed', label: '失败' },
-  { value: 'cancelled', label: '已取消' },
+  ...TASK_STATUSES.map((s) => ({ value: s, label: taskStatusLabel(s) })),
 ]
 
-/** 获取任务状态样式 */
+/** 获取任务状态样式（键经词表归一，旧值自动折叠到七态样式） */
 function getTaskStatusStyle(status: string): string {
-  switch (status) {
+  switch (normalizeTaskStatus(status)) {
     case 'completed':
       return 'bg-status-success/10 text-status-success'
     case 'running':
+    case 'evaluating':
       return 'bg-status-info/10 text-status-info'
     case 'failed':
+    case 'timeout':
       return 'bg-status-error/10 text-status-error'
     case 'pending':
       return 'bg-status-warning/10 text-status-warning'
-    case 'suspended':
+    case 'stopped':
       return 'bg-status-warning/10 text-status-warning dark:bg-status-warning/20'
-    case 'cancelled':
-      return 'bg-status-pending/10 text-status-pending'
     default:
       return 'bg-status-pending/10 text-status-pending'
-  }
-}
-
-/** 获取任务状态的中文标签 */
-function getTaskStatusLabel(status: string): string {
-  switch (status) {
-    case 'pending': return '等待中'
-    case 'running': return '运行中'
-    case 'suspended': return '已暂停'
-    case 'completed': return '已完成'
-    case 'failed': return '失败'
-    case 'cancelled': return '已取消'
-    default: return status
   }
 }
 
@@ -119,7 +102,6 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
   return (
     <PageShell
       title="调试任务"
-      backHref="/debug"
       embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {total} 个任务</span>}
     >
@@ -196,7 +178,7 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
                           <span
                             className={`rounded-full px-2 py-0.5 text-xs transition-colors duration-300 ${getTaskStatusStyle(task.status)}`}
                           >
-                            {getTaskStatusLabel(task.status)}
+                            {taskStatusLabel(task.status)}
                           </span>
                         </td>
                         <td className="text-muted-foreground max-w-[110px] truncate px-4 py-2 text-xs">

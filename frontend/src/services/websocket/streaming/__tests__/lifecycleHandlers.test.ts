@@ -10,9 +10,7 @@
  * 4. 无 streaming 管道 → 不补漏、不弹警告
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 // ── Mock 依赖 ──
-
 const { mockStore, mockAddNotification } = vi.hoisted(() => ({
   mockStore: {
     streamingState: {},
@@ -24,32 +22,26 @@ const { mockStore, mockAddNotification } = vi.hoisted(() => ({
   },
   mockAddNotification: vi.fn(),
 }))
-
 vi.mock('@/stores/pipelineMessageStore', () => ({
   usePipelineMessageStore: { getState: () => mockStore },
 }))
-
 vi.mock('@/stores/notificationStore', () => ({
   useNotificationStore: { getState: () => ({ addNotification: mockAddNotification }) },
 }))
-
 vi.mock('@/utils/logger', () => ({
   loggers: {
     sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   },
 }))
-
 vi.mock('../handlers/utils', () => ({
   terminatePipeline: vi.fn(),
 }))
-
 vi.mock('../router', () => ({
   resolvePipelineId: vi.fn(),
 }))
-
-import { handleReconnected } from '../lifecycleHandlers'
 import { terminatePipeline } from '../handlers/utils'
+import { handleReconnected } from '../lifecycleHandlers'
 
 const STREAMING_PIPELINE = 'pipe-streaming-001'
 const THREAD_ID = 'thread-001'

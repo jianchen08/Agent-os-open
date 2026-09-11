@@ -13,9 +13,9 @@ import tests._isolation_path  # noqa: F401  注入 isolation 插件目录到 sys
 """
 import pytest
 from decider import IsolationDecider, IsolationError
-from isolation_types import IsolationLevel
-from permission_checker import PermissionChecker, check_write_permission
-from permission_policy import (
+from agentos_plugin_sdk.isolation_types import IsolationLevel
+from agentos_plugin_sdk.permission_checker import PermissionChecker, check_write_permission
+from agentos_plugin_sdk.permission_policy import (
     PermissionPolicyManager,
     PermissionPolicyType,
     PermissionScope,
@@ -23,7 +23,7 @@ from permission_policy import (
     WorkspacePermissionPolicy,
     WritePermission,
 )
-from policy import IsolationPolicyLoader, ToolIsolationPolicy
+from agentos_plugin_sdk.isolation_policy import IsolationPolicyLoader, ToolIsolationPolicy
 
 pytestmark = pytest.mark.unit
 
@@ -361,7 +361,7 @@ class TestIsolationTypes:
         assert IsolationLevel.HOST == "non_isolated"
 
     def test_isolation_environment_defaults(self):
-        from isolation_types import IsolationContext, IsolationEnvironment, TaskType
+        from agentos_plugin_sdk.isolation_types import IsolationContext, IsolationEnvironment, TaskType
 
         ctx = IsolationContext(task_id="test", task_type=TaskType.ATOMIC)
         env = IsolationEnvironment(
@@ -375,7 +375,7 @@ class TestIsolationTypes:
         assert env.status == "ready"
 
     def test_execution_result(self):
-        from isolation_types import ExecutionResult
+        from agentos_plugin_sdk.isolation_types import ExecutionResult
 
         result = ExecutionResult(success=True, output="done")
         d = result.to_dict()

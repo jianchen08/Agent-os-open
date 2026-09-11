@@ -1,8 +1,8 @@
 /**
  * 刷新对账竞态防护测试（回归）。
  *
- * 背景：pipelineMessageStore 曾持久化 hasMoreOlderByPipeline 但不持久化
- * reconciledByPipeline/prependedCountByPipeline，语义割裂。刷新后 hasMoreOlder=true
+ * 背景：若只持久化 hasMoreOlderByPipeline 而不持久化
+ * reconciledByPipeline/prependedCountByPipeline，语义割裂：刷新后 hasMoreOlder=true
  * （快照）但 reconciled=false → init（全量替换）跑的同时，virtuoso 的 increaseViewportBy
  * 触发 startReached → onLoadMore 看到 hasMoreOlder=true 放行 → older 并发，导致
  * prepend 的历史被 init 全量覆盖丢失或重复加载。
@@ -10,11 +10,12 @@
  * 现行防护契约（实现演进后）：
  *  1. merge 重置 reconciledByPipeline（刷新=全量重新对账）；bottomCursor 等运行时
  *     状态以默认值为准。prependedCountByPipeline 字段已从 store 删除。
- *  2. fetchMessages 并发去重按「方向」区分 key（init/newer/older 互不阻塞——
- *     older 的 prepend 与 init 的全量替换均按 sequence 排序合并，方向间并发安全）；
- *     同方向并发去重：复用同一 in-flight promise，不重复发网络请求。
+ *  2. fetchMessages 同管道取消语义：新请求发起即 abort 在途旧请求（方向间、
+ *     同方向均不并存——迟到响应按取消静默收场，不写状态；旧「按方向去重复用
+ *     in-flight promise」契约已被取代，取代者的响应才是权威结果）。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 // mock apiClient.get（网络层）——断言调用次数
@@ -53,16 +54,8 @@ function makeMsg(id: string, seq: number): Message {
   } as Message
 }
 
-/**
- * 构造一个「永不 resolve」的 init 请求 promise，让 init 保持「进行中」状态，
- * 从而测试「init 进行中时 older 是否被拒绝」。
- */
-function neverResolvingGet() {
-  return new Promise(() => {}) as Promise<any>
-}
-
 describe('刷新对账竞态：init/older 并发防护', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -83,10 +76,16 @@ describe('刷新对账竞态：init/older 并发防护', () => {
     })
   })
 
-  it('init 进行中时，older 按方向去重不互相阻塞；同方向并发复用同一请求', async () => {
-    // 让 init 请求挂起（永不 resolve），保持 init 进行中
-    mockGet.mockImplementationOnce(neverResolvingGet)
-    // older 请求正常返回 1 条更早消息
+  it('older 发起即取消在途 init；同方向重复请求以新代旧，迟到响应不写状态', async () => {
+    // init 请求挂起（可手动迟到 resolve，模拟慢全量读）
+    let resolveInit!: (v: unknown) => void
+    mockGet.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveInit = resolve }),
+    )
+    // older 两次请求（第一次将被第二次取代）各自正常返回
+    mockGet.mockResolvedValueOnce({
+      data: { messages: [makeMsg('m0', 0)], total: 1, has_more: false },
+    })
     mockGet.mockResolvedValueOnce({
       data: { messages: [makeMsg('m0', 0)], total: 1, has_more: false },
     })
@@ -95,7 +94,7 @@ describe('刷新对账竞态：init/older 并发防护', () => {
     const initPromise = usePipelineMessageStore.getState().fetchMessages(PIPELINE_ID, { threadId: THREAD_ID })
     initPromise.catch(() => {})
 
-    // init 进行中发起 older（before_sequence=10）与并发重复 older
+    // init 进行中发起 older（before_sequence=10），再发起并发重复 older
     const olderPromise1 = usePipelineMessageStore.getState().fetchMessages(PIPELINE_ID, {
       threadId: THREAD_ID,
       before_sequence: 10,
@@ -107,15 +106,36 @@ describe('刷新对账竞态：init/older 并发防护', () => {
 
     await Promise.all([olderPromise1, olderPromise2])
 
-    // 同方向去重：older 只发 1 次网络请求；方向间不阻塞：init 1 次 + older 1 次
-    expect(mockGet).toHaveBeenCalledTimes(2)
+    // 同管道取代即取消：init 1 次 + older 两次（第一次被第二次取消），不互相阻塞
+    expect(mockGet).toHaveBeenCalledTimes(3)
     const initCallParams = mockGet.mock.calls[0][1].params || {}
     expect(initCallParams).toMatchObject({ pipeline_run_id: PIPELINE_ID })
     // 确认第一次是 init（无 before_sequence）
     expect(initCallParams).not.toHaveProperty('before_sequence')
-    // 第二次是 older（带 before_sequence）
+    // 后两次是 older（带 before_sequence）
     const olderCallParams = mockGet.mock.calls[1][1].params || {}
     expect(olderCallParams).toMatchObject({ before_sequence: 10, pipeline_run_id: PIPELINE_ID })
+    expect(mockGet.mock.calls[2][1].params || {}).toMatchObject({ before_sequence: 10 })
+
+    // 取代者（older2）的权威结果已落库
+    expect(
+      usePipelineMessageStore.getState().getMessages(PIPELINE_ID).map((m) => m.sequence),
+    ).toEqual([0])
+
+    // init 的响应迟到（全量 3 条 + has_more=true）：按取消静默收场，不覆盖已建立状态
+    resolveInit({
+      data: {
+        messages: [makeMsg('m1', 1), makeMsg('m2', 2), makeMsg('m3', 3)],
+        total: 3,
+        has_more: true,
+      },
+    })
+    await expect(initPromise).resolves.toBeUndefined()
+    expect(
+      usePipelineMessageStore.getState().getMessages(PIPELINE_ID).map((m) => m.sequence),
+    ).toEqual([0])
+    // hasMoreOlder 不被迟到结果回滚为 true
+    expect(usePipelineMessageStore.getState().hasMoreOlderByPipeline[PIPELINE_ID]).toBe(false)
   })
 
   it('init 完成后，older 请求正常放行', async () => {

@@ -13,9 +13,9 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { createTolerantStorage } from '@/utils/tolerantStorage'
-import * as longTermTaskApi from '@/services/api/longTermTasks'
 import { updateLongTermTasksCache } from '@/hooks/queries/useLongTermTasksQuery'
+import * as longTermTaskApi from '@/services/api/longTermTasks'
+import { createTolerantStorage } from '@/utils/tolerantStorage'
 import type { Task } from '@/types/task'
 
 /** API 错误响应类型 */
@@ -65,7 +65,6 @@ interface LongTermTaskActions {
 export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActions>()(
   persist(
     (set) => ({
-      // 初始状态
       activeTaskId: null,
 
       /** 切换自动执行开关 */
@@ -110,7 +109,8 @@ export const useLongTermTaskStore = create<LongTermTaskState & LongTermTaskActio
           const responseData = await longTermTaskApi.cancelLongTermTask(taskId, reason)
           updateLongTermTasksCache((prev) =>
             prev.map((task) =>
-              task.id === taskId ? { ...task, ...responseData, status: 'cancelled' as const } : task
+              // 后端 cancel_task 落 TaskStatus.STOPPED（旧 cancelled 已并入 stopped）
+              task.id === taskId ? { ...task, ...responseData, status: 'stopped' as const } : task
             ),
           )
         } catch (error) {

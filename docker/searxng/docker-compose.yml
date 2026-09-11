@@ -15,7 +15,8 @@ services:
       - SEARXNG_BASE_URL=http://localhost:8080/
       # SearXNG 必须有非默认的 secret_key，否则 worker 拒绝启动。
       # 容器 entrypoint 会用此值覆盖 settings.yml 里的 ultrasecretkey。
-      - SEARXNG_SECRET=webgate-searxng-secret-2026-fix
+      # 密钥经环境变量注入，未设置即拒绝启动（:?err），禁止字面量入库。
+      - SEARXNG_SECRET=${SEARXNG_SECRET:?err}
       - UWSGI_WORKERS=2
     volumes:
       # 挂载自定义配置：开启 JSON 格式 + 启用 baidu/bing/sogou + 禁用被阻断引擎

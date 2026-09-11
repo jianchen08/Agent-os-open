@@ -7,12 +7,12 @@
  * jsdom 支持构造 KeyboardEvent 并 dispatch，故真实模拟键盘。
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { renderHook } from '@testing-library/react'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useExtensionShortcuts } from '@/hooks/useExtensionShortcuts'
-import { ShortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { CommandDispatcher } from '@/services/schema/commandDispatcher'
 import { ContributionRegistry } from '@/services/schema/ContributionRegistry'
+import { ShortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { useContextKeys } from '@/stores/contextKeysStore'
 
 function fireKey(opts: KeyboardEventInit): void {

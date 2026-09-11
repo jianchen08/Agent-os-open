@@ -8,10 +8,10 @@
 - _get_active_children：
     - 主路径（state 聚合读）：pipeline_id 空时跳过主路径；scheduled/evaluating 计入
     - 回退路径（读面未注入 + task_service）：list_by_status 匹配 parent_pipeline_id；
-      查询异常 → warning 留痕不中断
+      查询异常 → fail-closed 上抛
     - 回退路径 + task_id：list_subtasks 匹配（TaskStatus 枚举 + 字符串值两种形态）；
       safe_enum_value 提取枚举原始值
-    - list_subtasks 异常 → warning 留痕
+    - list_subtasks 异常 → fail-closed 上抛
 - _read_state_rows：未注入 None / sync 行 / async 行 / 非 list 返回 / 非 dict 行过滤 /
   读取异常 → warning 降级 None
 - _get_task_service：ctx 优先、ctx 缺失回退 service_access、service_access 不可用 → None
@@ -57,14 +57,9 @@ _TASKS_PKG.types = _TASKS_TYPES
 sys.modules["tasks"] = _TASKS_PKG
 sys.modules["tasks.types"] = _TASKS_TYPES
 
-# 本地 enum_utils 以唯一模块名显式加载——裸名 `from enum_utils import` 会被
-# sys.path 上先序的 tasks/ 目录同名模块抢走（代码相同但覆盖面错文件）。
-_ENUM_UTILS_MOD = "child_task_guard_enum_utils_real"
-spec = importlib.util.spec_from_file_location(_ENUM_UTILS_MOD, _PLUGIN_DIR / "enum_utils.py")
-assert spec is not None and spec.loader is not None
-_ENUM_UTILS = importlib.util.module_from_spec(spec)
-sys.modules[_ENUM_UTILS_MOD] = _ENUM_UTILS
-spec.loader.exec_module(_ENUM_UTILS)
+# enum_utils 已沉 SDK（agentos_plugin_sdk.enum_utils 单一真值源），直连导入；
+# 插件 plugin.py 与本测试取同一 SDK 模块对象，不再依赖本地副本。
+from agentos_plugin_sdk.enum_utils import safe_enum_value as _safe_enum_value  # noqa: E402
 
 
 def _load_plugin() -> Any:
@@ -271,16 +266,14 @@ class TestActiveChildrenMainPath:
         assert set(ids) == {"c1", "c2"}
         assert "other" not in ids
 
-    def test_fallback_list_by_status_exception_warns(self, caplog: Any) -> None:
-        """list_by_status 查询异常 → warning 留痕，不中断，走 task_id 分支。"""
+    def test_fallback_list_by_status_exception_raises(self) -> None:
+        """list_by_status 查询异常 → fail-closed 上抛，不按「无活跃子任务」放行。"""
         svc = _TaskService(subtasks=[_Task("c1", TS.RUNNING)])
         svc.list_by_status = lambda status: (_ for _ in ()).throw(RuntimeError("db down"))  # type: ignore[method-assign]
         guard = ChildTaskGuard(config={})
         ctx = _make_ctx(state={}, services={"task_service": svc})
-        with caplog.at_level(logging.WARNING):
-            has_active, ids = _run(guard._get_active_children("p", "parent-task", ctx))
-        assert (has_active, ids) == (True, ["c1"])
-        assert any("list_by_status query failed" in r.getMessage() for r in caplog.records)
+        with pytest.raises(RuntimeError, match="db down"):
+            _run(guard._get_active_children("p", "parent-task", ctx))
 
     def test_fallback_no_task_service_returns_false(self) -> None:
         """读面与 task_service 均不可用 → (False, []) 不崩。"""
@@ -325,16 +318,14 @@ class TestActiveChildrenTaskIdBranch:
         assert has_active is True
         assert set(ids) == {"c1", "c2"}  # seen_ids 是 set，顺序依赖哈希随机化
 
-    def test_subtasks_exception_warns(self, caplog: Any) -> None:
-        """list_subtasks 异常 → warning 留痕，不中断。"""
+    def test_subtasks_exception_raises(self) -> None:
+        """list_subtasks 异常 → fail-closed 上抛，不按「无活跃子任务」放行。"""
         svc = _TaskService()
         svc.list_subtasks = lambda pid: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[assignment]
         guard = ChildTaskGuard(config={})
         ctx = _make_ctx(state={}, services={"task_service": svc})
-        with caplog.at_level(logging.WARNING):
-            has_active, ids = _run(guard._get_active_children("", "parent-task", ctx))
-        assert (has_active, ids) == (False, [])
-        assert any("list_subtasks failed" in r.getMessage() for r in caplog.records)
+        with pytest.raises(RuntimeError, match="boom"):
+            _run(guard._get_active_children("", "parent-task", ctx))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -453,12 +444,12 @@ class TestGetTaskService:
 class TestSafeEnumValue:
     def test_enum_member_extracts_value(self) -> None:
         """枚举成员 → 返回原始值。"""
-        assert _ENUM_UTILS.safe_enum_value(TS.RUNNING) == "running"
+        assert _safe_enum_value(TS.RUNNING) == "running"
 
     def test_non_enum_passthrough(self) -> None:
         """非枚举对象 → 原样返回（性质断言：返回值恒等于入参）。"""
         for value in ["running", 42, None, ["x"]]:
-            assert _ENUM_UTILS.safe_enum_value(value) is value
+            assert _safe_enum_value(value) is value
 
 
 # ═══════════════════════════════════════════════════════════

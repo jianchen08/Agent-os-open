@@ -1,7 +1,8 @@
 /** @feature FP-0.2.可观测性 工具卡片执行时长格式化 @ci frontend-test */
 /**
  * formatDuration 位数收敛单测：后端 duration_ms 为 f64 浮点（tool_core
- * ToolResult.duration_ms），<1s 取整毫秒、10s 内 1 位小数秒、更长取整秒。
+ * ToolResult.duration_ms），<1s 取整毫秒、10s 内 1 位小数秒、更长取整秒；
+ * null/undefined 兜底 '--'（管道耗时缺失态，原 PipelineManagerWidget 本地版并入）。
  */
 import { describe, expect, it } from 'vitest'
 import { formatDuration } from '../activity'
@@ -25,5 +26,15 @@ describe('formatDuration（浮点 duration_ms 位数收敛）', () => {
     expect(formatDuration(120000)).toBe('2m')
     expect(formatDuration(Number.NaN)).toBe('0ms')
     expect(formatDuration(-5)).toBe('0ms')
+  })
+
+  it('小时级拆分 h + m（不输出 125m 式累计分钟）', () => {
+    expect(formatDuration(3600000)).toBe('1h')
+    expect(formatDuration(7260000)).toBe('2h 1m')
+  })
+
+  it('耗时缺失（null/undefined）兜底 --，不伪造 0 值', () => {
+    expect(formatDuration(null)).toBe('--')
+    expect(formatDuration(undefined)).toBe('--')
   })
 })

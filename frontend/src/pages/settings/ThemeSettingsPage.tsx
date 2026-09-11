@@ -18,7 +18,7 @@ import type { ThemeInfo } from '@/types/theme'
 export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const { currentThemeId, mode, setTheme, setMode, resolvedTheme, availableThemes, refreshThemes } =
     useThemeStore()
-  // 与 ThemePanel 同源：优先 store 聚合列表（预设 + 插件贡献 + 用户自定义），
+  // 与 ThemePopover 同源：优先 store 聚合列表（预设 + 插件贡献 + 用户自定义），
   // store 未初始化时回退静态 themeList（避免首帧空白）。
   const themes = availableThemes.length > 0 ? availableThemes : themeList
 

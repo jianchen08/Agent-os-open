@@ -168,8 +168,18 @@ def http_delete_auth(url, token=None, timeout=10):
 # ============================================================
 # 登录 / 会话 / WS 地址 工具（新增 e2e 测试复用）
 # ============================================================
-def login_admin(username="admin", password="admin12345", timeout=10):
-    """登录默认管理员，返回 access_token；登录失败抛 RuntimeError。"""
+def login_admin(username="admin", password=None, timeout=10):
+    """登录默认管理员，返回 access_token；登录失败抛 RuntimeError。
+
+    口令经环境变量 AGENTOS_ADMIN_PASSWORD 注入（内核播种/重置同一变量），
+    未设置即失败——e2e 不携带任何硬编码凭据。
+    """
+    if password is None:
+        password = os.environ.get("AGENTOS_ADMIN_PASSWORD")
+        if not password:
+            raise RuntimeError(
+                "e2e 登录需要环境变量 AGENTOS_ADMIN_PASSWORD（与内核播种同源）"
+            )
     status, body, _ = http_post_json(
         f"{KERNEL_URL}/api/v1/auth/login",
         {"username": username, "password": password},

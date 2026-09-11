@@ -17,11 +17,15 @@
  * - initFromAPI 后：非飞行中 localOnly 丢弃；飞行中（占位/乐观 user）保留
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type * as handlersMod from '@/services/websocket/streaming/handlers'
+import type * as streamHandlerMod from '@/services/websocket/streaming/handlers/streamHandler'
+import type * as lifecycleHandlersMod from '@/services/websocket/streaming/lifecycleHandlers'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 // ── mock 外部依赖（与 multiturnOrderE2E / fix_duplicate_ai_repro 对齐）──
 vi.mock('@/utils/activityConverter', () => ({
-  buildDefaultActions: (tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
+  buildDefaultActions: (_tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
 
   toolCallToActivity: (toolCall: any) => ({
     type: 'tool_call',
@@ -57,10 +61,10 @@ vi.mock('@/utils/retry', () => ({
 const PIPELINE_ID = 'pid_order_a000000000'
 const THREAD_ID = 'tid_order_b000000000'
 
-let pipelineStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
-let handlers: typeof import('@/services/websocket/streaming/handlers')
-let handleSystemNotification: typeof import('@/services/websocket/streaming/lifecycleHandlers').handleSystemNotification
-let flushStreamChunkBuffer: typeof import('@/services/websocket/streaming/handlers/streamHandler').flushStreamChunkBuffer
+let pipelineStore: pipelineMessageStoreMod.usePipelineMessageStore
+let handlers: handlersMod
+let handleSystemNotification: lifecycleHandlersMod.handleSystemNotification
+let flushStreamChunkBuffer: streamHandlerMod.flushStreamChunkBuffer
 
 /** 构造一条最小可用消息 */
 function makeMsg(id: string, overrides: Partial<Message>): Message {

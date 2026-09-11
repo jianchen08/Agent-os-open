@@ -1,9 +1,7 @@
 /** 工具调用事件处理器（start / result） 仅使用 parts[] 统一路径，已移除旧 toolCalls / contentBlocks 兼容代码。 */
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
-
 import { resolvePipelineId } from '../router'
-
 import { flushStreamChunkBuffer } from './streamHandler'
 import { ensureStreamingPlaceholder, extractMessageId, extractThreadId } from './utils'
 

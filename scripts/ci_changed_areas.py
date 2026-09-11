@@ -3,7 +3,8 @@
 车道模型（2026-09-04 CI 分档改造）：
   full        内核 / CI 工作流 / 门禁脚本变更 → 全量（Rust + Python + 前端全跑）
   python_full 核心面（pipeline 管道插件 / SDK / 依赖锁）→ 全量 Python 车道
-  related     非核心插件（system/tools）/ 配置 / 测试面 → 仅变更关联的单元+集成测试
+  related     非核心插件（system/tools）/ 配置 / 测试面 / 根目录运维脚本
+              （*.bat/*.sh/*.ps1 → 静态契约测试 + .sh 语法检查）→ 仅变更关联的单元+集成测试
   frontend / electron / endpoints   独立叠加车道（endpoints 为廉价一致性闸）
 
 重车道互斥瀑布：full > python_full > related（一档命中即覆盖低档，
@@ -17,7 +18,7 @@ import argparse
 import os
 import sys
 
-from ci_common import diff_names, resolve_changed_files
+from ci_common import ROOT_OPS_SUFFIXES, diff_names, resolve_changed_files
 
 # ── 车道判定的路径规则（前缀 / 精确文件）──────────────────────────────
 FULL_PREFIXES = ("kernel/", ".github/workflows/", "scripts/")
@@ -73,10 +74,16 @@ def _is_doc(f: str) -> bool:
     return f.endswith(DOC_SUFFIXES) or f.startswith("docs/") or f in DOC_FILES
 
 
+def _is_root_ops_script(f: str) -> bool:
+    """根目录运维脚本（*.bat/*.sh/*.ps1，路径不含 /）。子目录脚本不属此类：
+    scripts/ 归 FULL 车道，插件内 .sh 随其所属面判定。"""
+    return "/" not in f and f.endswith(ROOT_OPS_SUFFIXES)
+
+
 def compute_lanes(files: list[str]) -> dict[str, bool]:
     full = _hits(files, FULL_PREFIXES, FULL_FILES)
     python_core = _hits(files, PYTHON_CORE_PREFIXES, PYTHON_CORE_FILES)
-    related_sources = _hits(files, RELATED_PREFIXES, RELATED_FILES)
+    related_sources = _hits(files, RELATED_PREFIXES, RELATED_FILES) or any(_is_root_ops_script(f) for f in files)
     return {
         "full": full,
         "python_full": full or python_core,

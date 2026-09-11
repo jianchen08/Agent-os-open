@@ -43,3 +43,22 @@
 - `netstat -ltnp`：同上（备选）
 - `ps aux`：查看进程（确认 server 是否真的在跑）
 - `curl http://127.0.0.1:<端口>/`：容器内自测 server 是否可达
+
+## 容器→宿主服务通路（MCP Bridge 网关，ADR 2026-09-10）
+
+浏览器等工具的调用在隔离任务下由**容器内发起**（沙箱内 MCP Client），
+目标是宿主机上的 MCP Bridge 网关（`scripts/start_bridge.bat`，默认 8765）。
+容器侧通路已由 docker_provider 自动注入，无需手工配置：
+
+- **地址候选**（bridge_client 静默自试，顺序）：
+  1. `AGENTOS_BRIDGE_URL` 环境变量（docker create 时 `-e` 注入：config
+     `bridge_url` > 宿主 env > WSL `ip route` 网关探测）
+  2. `http://host.docker.internal:8765`（docker_provider 已注入
+     `--add-host=host.docker.internal:host-gateway`，WSL 原生 docker 也可解析）
+  3. WSL 网关 IP（如 `http://172.20.0.1:8765`）
+- **认证**：`AGENTOS_BRIDGE_TOKEN`（docker create 时注入）；未配置时
+  Bridge 拒绝一切调用（fail-closed）。
+- **反模式**：容器内探 Bridge 写 `localhost:8765` —— 那是容器自己的
+  loopback，连不到宿主（同上核心原则）。
+- 审计：每次调用落 `logs/mcp-bridge/audit-YYYYMMDD.jsonl`（caller 字段
+  host|sandbox 标识执行域）。

@@ -18,9 +18,8 @@
 import { render, screen } from '@testing-library/react'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-
-import { DigitalHumanWidget } from '../DigitalHumanWidget'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
+import { DigitalHumanWidget } from '../DigitalHumanWidget'
 
 describe('DigitalHumanWidget — 占位基础设施', () => {
   beforeEach(() => {

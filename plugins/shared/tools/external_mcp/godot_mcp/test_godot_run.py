@@ -59,8 +59,11 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setenv("GODOT_MCP_BIN", sys.executable)
     monkeypatch.setenv("FAKE_SPAWN_FILE", str(spawn_file))
 
-    def _fake_argv(bin_path: str, project_dir: Path) -> list[str]:
-        return [sys.executable, str(fake), "--project", str(project_dir)]
+    def _fake_argv(bin_path: str, project_dir: Path, port: int | None = None) -> list[str]:
+        argv = [sys.executable, str(fake), "--project", str(project_dir)]
+        if port is not None:
+            argv += ["--port", str(port)]
+        return argv
 
     monkeypatch.setattr(mod, "_serve_argv", _fake_argv)
     monkeypatch.setattr(mod, "_PROXIES", {})
@@ -197,31 +200,32 @@ class TestGodotRunExecute:
         assert "workspace" not in definition.input_schema.get("properties", {})
 
 
+@pytest.fixture
+def autostart_env(
+    env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """自动拉起环境：假 serve 首调不可达、status 脚本化、拉起只记录不真启。"""
+    mod = _load_module()
+    calls_file = env["tmp"] / "calls.log"
+    calls_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("FAKE_UNREACHABLE_FIRST", "1")
+    monkeypatch.setenv("FAKE_CALLS_FILE", str(calls_file))
+    monkeypatch.setenv("GODOT_EDITOR_BIN", sys.executable)
+    monkeypatch.setattr(mod, "_AUTOSTART_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(mod, "_AUTOSTART_WAIT_SECONDS", 3.0)
+    monkeypatch.setattr(mod, "_LAUNCHED_PROJECTS", set())
+    launched: list[list[str]] = []
+
+    def _fake_launch(argv: list[str]) -> None:
+        launched.append(argv)
+
+    monkeypatch.setattr(mod, "_launch_editor_process", _fake_launch)
+    monkeypatch.setattr(mod, "_editor_status", lambda bin_path, project: "closed")
+    return {**env, "calls_file": calls_file, "launched": launched}
+
+
 class TestEditorAutostart:
     """编辑器未开自动拉起：status 确认 closed/崩溃恢复才拉、探活后重试、严禁第二实例。"""
-
-    @pytest.fixture
-    def autostart_env(
-        self, env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-    ) -> dict[str, Any]:
-        """自动拉起环境：假 serve 首调不可达、status 脚本化、拉起只记录不真启。"""
-        mod = _load_module()
-        calls_file = env["tmp"] / "calls.log"
-        calls_file.write_text("", encoding="utf-8")
-        monkeypatch.setenv("FAKE_UNREACHABLE_FIRST", "1")
-        monkeypatch.setenv("FAKE_CALLS_FILE", str(calls_file))
-        monkeypatch.setenv("GODOT_EDITOR_BIN", sys.executable)
-        monkeypatch.setattr(mod, "_AUTOSTART_POLL_INTERVAL", 0.05)
-        monkeypatch.setattr(mod, "_AUTOSTART_WAIT_SECONDS", 3.0)
-        monkeypatch.setattr(mod, "_LAUNCHED_PROJECTS", set())
-        launched: list[list[str]] = []
-
-        def _fake_launch(argv: list[str]) -> None:
-            launched.append(argv)
-
-        monkeypatch.setattr(mod, "_launch_editor_process", _fake_launch)
-        monkeypatch.setattr(mod, "_editor_status", lambda bin_path, project: "closed")
-        return {**env, "calls_file": calls_file, "launched": launched}
 
     async def test_unreachable_autostarts_and_retries(
         self, autostart_env: dict[str, Any]
@@ -299,3 +303,99 @@ class TestEditorAutostart:
         assert not r.success
         assert "超时" in r.error
         assert len(autostart_env["launched"]) == 1
+
+
+class TestPortDiscovery:
+    """端口钉扎：discovery 活端口显式 --port 直连，stale（pid 死）不钉走自动拉起，
+    wrong_editor 归入不可达语义可自愈——并行工程各自端口，回退 9080 路径根除。"""
+
+    def _write_discovery(self, proj: Path, port: int, pid: int) -> None:
+        (proj / ".godot").mkdir(parents=True, exist_ok=True)
+        (proj / ".godot" / "godot-mcp.json").write_text(
+            json.dumps({"port": port, "pid": pid, "project_path": str(proj)}),
+            encoding="utf-8",
+        )
+
+    def test_pid_alive_contract(self) -> None:
+        """验活契约：当前进程活、超大 pid/非正 pid 死。"""
+        mod = _load_module()
+        assert mod._pid_alive(os.getpid())
+        assert not mod._pid_alive(2**30)
+        assert not mod._pid_alive(0)
+        assert not mod._pid_alive(-1)
+
+    async def test_live_discovery_pins_port(self, env: dict[str, Any]) -> None:
+        """discovery 存在且 pid 存活：spawn argv 携带 --port（禁用 serve 端 9080 回退）。"""
+        proj = env["tmp"] / "projP"
+        proj.mkdir()
+        (proj / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+        self._write_discovery(proj, 9093, os.getpid())
+        r = await _tool().execute({"method": "project.info", "workspace": str(proj)})
+        assert r.success, r.error
+        spawns = [
+            json.loads(line)
+            for line in env["spawn_file"].read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        assert len(spawns) == 1
+        assert "--port" in spawns[0] and "9093" in spawns[0]
+
+    async def test_stale_discovery_does_not_pin(self, env: dict[str, Any]) -> None:
+        """discovery 的 pid 已死（crash 残留）：不钉端口，视同编辑器未开。"""
+        proj = env["tmp"] / "projQ"
+        proj.mkdir()
+        (proj / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+        self._write_discovery(proj, 9093, 2**30)  # 必然不存在的 pid
+        r = await _tool().execute({"method": "project.info", "workspace": str(proj)})
+        assert r.success, r.error
+        spawns = [
+            json.loads(line)
+            for line in env["spawn_file"].read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        assert len(spawns) == 1
+        assert "--port" not in spawns[0]
+
+    async def test_wrong_editor_autostarts_and_recovers(
+        self, autostart_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """wrong_editor（端口上应答的是别的工程）→ 拉起本工程编辑器 → 重试成功。
+
+        工程名刻意含 "wrong_editor" 字样：判定只认内嵌 JSON 的
+        "wrong_editor":true 键值，裸词与工程路径相撞不得误判正常应答。
+        """
+        mod = _load_module()
+        monkeypatch.delenv("FAKE_UNREACHABLE_FIRST")
+        monkeypatch.setenv("FAKE_WRONG_EDITOR_FIRST", "1")
+        monkeypatch.setattr(mod, "_editor_status", lambda bin_path, project: "closed")
+        proj = autostart_env["tmp"] / "wrong_editor_proj"
+        proj.mkdir()
+        (proj / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+        r = await _tool().execute({"method": "scene.tree", "workspace": str(proj)})
+        assert r.success, r.error
+        assert r.output["method"] == "scene.tree"
+        assert len(autostart_env["launched"]) == 1
+
+    async def test_autostart_rebuild_picks_up_new_discovery(
+        self, autostart_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """探活循环重建 serve：编辑器拉起后 discovery 出现，重建的 spawn 携带其端口。"""
+        mod = _load_module()
+        proj = autostart_env["tmp"] / "projS"
+        proj.mkdir()
+        (proj / "project.godot").write_text("config_version=5\n", encoding="utf-8")
+
+        def _fake_launch(argv: list[str]) -> None:
+            autostart_env["launched"].append(argv)
+            self._write_discovery(proj, 9091, os.getpid())
+
+        monkeypatch.setattr(mod, "_launch_editor_process", _fake_launch)
+        r = await _tool().execute({"method": "scene.tree", "workspace": str(proj)})
+        assert r.success, r.error
+        spawns = [
+            json.loads(line)
+            for line in autostart_env["spawn_file"].read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        assert len(spawns) >= 2  # 首撞 + 探活重建
+        assert "--port" in spawns[-1] and "9091" in spawns[-1]

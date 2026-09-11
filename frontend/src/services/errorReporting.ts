@@ -133,7 +133,6 @@ class ErrorReportingService {
   }
 }
 
-// 创建单例实例
 const errorReportingService = new ErrorReportingService()
 
 /**
@@ -161,8 +160,8 @@ export function captureException(error: Error, context?: ErrorContext): void {
  * 全局异常监听（统一错误模型：source=frontend）。
  * 补 ErrorBoundary 之外的异步异常盲区——组件崩溃由根 ErrorBoundary 兜底，
  * 但 window.onerror / unhandledrejection 覆盖的异步异常（事件回调/定时器/
- * 未 await 的 Promise 链）不经过组件树，此前只落 console 无用户提示。
- * 统一走 reportError：通知中心可见 + 来源标签「前端」。
+ * 未 await 的 Promise 链）不经过组件树，不经 reportError 时只落 console
+ * 无用户提示。统一走 reportError：通知中心可见 + 来源标签「前端」。
  */
 export function installGlobalErrorListeners(): void {
   window.addEventListener('error', (event) => {

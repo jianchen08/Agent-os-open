@@ -36,9 +36,10 @@ if errorlevel 1 (
 )
 echo [OK] Ubuntu installed
 
-REM 名字在列表里 != 发行版可用:注册表条目可能还在,但它指向的
-REM ext4.vhdx 文件可能已被删除/移动/损坏。此时 wsl --shutdown 无法修复
-REM (虚拟磁盘文件已丢失),必须 unregister + 重装。真实启动验证 + 自愈。
+REM A name in the list != a usable distro: the registry entry may survive
+REM while the ext4.vhdx it points to was deleted/moved/corrupted. In that
+REM state wsl --shutdown cannot fix it (the virtual disk is gone);
+REM unregister + reinstall is required. Real boot verification + self-heal.
 :ubuntu_boot_probe
 echo [INFO] Verifying Ubuntu actually boots...
 set "BOOT_ERR=%TEMP%\wsl_alive_probe.err"
@@ -46,14 +47,17 @@ if exist "%BOOT_ERR%" del "%BOOT_ERR%"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_alive_probe.ps1" -Timeout 20 >nul 2>&1
 set "BOOT_RC=!errorlevel!"
 if "!BOOT_RC!"=="0" goto :ubuntu_boot_ok
-REM rc=2 = probe 检测到 stderr 含磁盘丢失特征(wsl.exe 自身却返回 0),直接自愈。
+REM rc=2 = probe detected disk-loss signatures in stderr (while wsl.exe
+REM itself returned 0); go straight to self-heal.
 if "!BOOT_RC!"=="2" goto :ubuntu_self_heal
 
-REM rc=0/2 之外:读 wsl 的 stderr,区分"磁盘丢失/损坏"与"临时死锁/超时"。
+REM Other than rc=0/2: read wsl's stderr to tell "disk lost/corrupted"
+REM apart from "transient deadlock/timeout".
 findstr /i /c:"MountDisk" /c:"ERROR_FILE_NOT_FOUND" /c:"0x80070002" "%BOOT_ERR%" >nul 2>&1
 if not errorlevel 1 goto :ubuntu_self_heal
 
-REM 非磁盘丢失(可能死锁超时 rc=124 或其它):shutdown 后重探一次。
+REM Not a disk loss (likely deadlock timeout rc=124 or other): shutdown,
+REM then re-probe once.
 echo [WARN] Ubuntu boot abnormal (rc=!BOOT_RC!), retrying after wsl --shutdown...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_shutdown.ps1" -Timeout 15 >nul 2>&1
 ping -n 9 127.0.0.1 >nul
@@ -89,7 +93,8 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-REM 新装发行版确认可引导:可引导则就地继续配置 docker,否则提示重启后重跑。
+REM Confirm the freshly installed distro actually boots: if it boots,
+REM continue configuring docker in place; otherwise ask for a reboot+rerun.
 if exist "%BOOT_ERR%" del "%BOOT_ERR%"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wsl_alive_probe.ps1" -Timeout 30 >nul 2>&1
 set "BOOT_RC=!errorlevel!"
@@ -131,7 +136,7 @@ if not errorlevel 1 (
     echo.
     echo [INFO] systemd enabled. Restarting WSL to apply...
     wsl --shutdown
-    timeout /t 5 /nobreak >nul
+    ping -n 6 127.0.0.1 >nul
     echo [INFO] Re-running install script...
     wsl -d Ubuntu -u root -- rm -f /tmp/wsl_docker_restart.marker 2>nul
     goto run_wsl_install
@@ -154,7 +159,7 @@ exit /b 1
 REM === 3. Get WSL IP and set DOCKER_HOST (NAT mode, IP may change) ===
 echo.
 echo [3/5] Get WSL IP and configure DOCKER_HOST...
-REM hostname -I 第一个 token 就是 eth0 的 172.x IP
+REM The first token of hostname -I is the eth0 172.x IP
 for /f "tokens=1 delims= " %%i in ('wsl -d Ubuntu -u root -- bash -c "hostname -I 2>/dev/null" 2^>nul') do (
     set "WSL_IP=%%i"
 )
@@ -191,7 +196,7 @@ for /l %%i in (1,1,15) do (
         if not errorlevel 1 (
             set "VERIFY_OK=1"
         )
-        if "!VERIFY_OK!"=="0" timeout /t 3 /nobreak >nul
+        if "!VERIFY_OK!"=="0" ping -n 4 127.0.0.1 >nul
     )
 )
 

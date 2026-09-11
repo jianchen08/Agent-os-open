@@ -19,6 +19,8 @@ State 命名空间：
     - router.repetitive_count : 输出内容重复计数（跨迭代）
     - router.duplicate_intercepts : 拦截总次数
     - router.last_response : 上一次 LLM 响应摘要
+    - router.tool_fail_streak : {tool: 连续失败次数}（失败熔断，tool_execute 轮判定）
+    - router.tool_fail_banned : 已被失败熔断摘除（禁用）的工具清单
 
 消息修改一律经 state_updates["messages"]={"_ops":[...]} 回传——引擎 merge 只认
 slot ops（set 缺 seq=append / set(seq,msg)=modify / set(seq,null)=delete），
@@ -91,6 +93,11 @@ class DuplicateCheckPlugin(IOutputPlugin):
         self._hard_limit_intercepts = self._config.get("hard_limit_intercepts", 4)
         self._similarity_threshold = self._config.get("similarity_threshold", 0.9)
         self._signature_window_size = self._config.get("signature_window_size", 8)
+        # 失败熔断（ADR 2026-09-09）：同工具连续失败 ≥threshold 摘除工具面逼收尾，
+        # ≥hard_limit 终止管道。阈值依据：合法自愈实测 1-2 次内成功，5 给 2.5 倍裕度。
+        self._fail_break_threshold = self._config.get("fail_break_threshold", 5)
+        self._fail_break_hard_limit = self._config.get("fail_break_hard_limit", 8)
+        self._fail_breaker_exempt_tools = self._config.get("fail_breaker_exempt_tools", []) or []
 
     @property
     def name(self) -> str:
@@ -144,6 +151,13 @@ class DuplicateCheckPlugin(IOutputPlugin):
         # 若在 tool_execute 阶段触发，工具结果文本会被误判为"输出重复"，
         # 并在 tool 消息后追加提示，打断 assistant(tool_calls)→tool 序列。
         core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
+
+        # 失败熔断（ADR 2026-09-09）：tool_execute 轮 tool_results 刚产出，是
+        # 连败计数的判定时机。触发熔断时独占本轮输出（摘工具面/终止），否则
+        # 保持既有语义（tool 轮不做重复判定）。
+        if core_type == "tool_execute":
+            return self._check_tool_failures(ctx)
+
         if core_type != "llm_call":
             return {}
 
@@ -171,6 +185,87 @@ class DuplicateCheckPlugin(IOutputPlugin):
         if repetitive_count > 0:
             return self._handle_repetitive_output(ctx, updates, repetitive_count)
 
+        return updates
+
+    def _check_tool_failures(self, ctx: PluginContext) -> dict[str, Any]:
+        """失败熔断（ADR 2026-09-09）：同工具连续失败 ≥ 阈值摘工具面逼收尾，
+        ≥ 硬上限终止管道（stop_reason=tool_fail_loop）。
+
+        连败计数与参数无关——失败循环无法靠改参数（递增序号/换措辞）洗白，
+        补上签名级重复检测被绕过的缺口。成功即清零（自愈不受伤害）。
+
+        State 命名空间：
+            - router.tool_fail_streak : {tool: 连续失败次数}
+            - router.tool_fail_banned : 已摘除（禁用）的工具清单
+
+        Returns:
+            状态更新字典；无失败结果时返回空（不动既有状态）
+        """
+        results = ctx.state.get(StateKeys.TOOL_RESULTS, [])
+        if not results:
+            return {}
+
+        streaks: dict[str, int] = dict(ctx.state.get("router.tool_fail_streak", {}) or {})
+        banned: list[str] = list(ctx.state.get("router.tool_fail_banned", []) or [])
+        changed = False
+        hard_hit: str | None = None
+
+        for res in results:
+            if not isinstance(res, dict):
+                continue
+            tool = res.get("tool_name") or ""
+            if not tool or tool in self._fail_breaker_exempt_tools:
+                continue
+            if res.get("success") is True:
+                if streaks.pop(tool, None) is not None:
+                    changed = True
+                continue
+            # success=False / 缺失均按失败计；结构化业务失败（success=True 但
+            # data.valid=false 等）不算——那是 LLM 可自愈的正常反馈
+            streaks[tool] = streaks.get(tool, 0) + 1
+            changed = True
+            if streaks[tool] >= self._fail_break_hard_limit:
+                hard_hit = tool
+
+        if not changed:
+            return {}
+
+        updates: dict[str, Any] = {"router.tool_fail_streak": streaks}
+
+        if hard_hit is not None:
+            return self._terminate_pipeline(
+                ctx,
+                updates,
+                f"工具 {hard_hit} 连续失败 {streaks[hard_hit]} 次（失败熔断）",
+                ctx.state.get("router.duplicate_intercepts", 0),
+                message=(
+                    "抱歉，执行过程中依赖的工具持续失败，已触发失败熔断，无法继续完成当前任务。"
+                    "请提供更多指示或调整任务要求后重试。"
+                ),
+                stop_reason="tool_fail_loop",
+            )
+
+        newly_banned = [
+            t for t, c in streaks.items()
+            if c >= self._fail_break_threshold and t not in banned
+        ]
+        if newly_banned:
+            updates["router.tool_fail_banned"] = banned + newly_banned
+            tool_ids = ctx.state.get("tool_ids")
+            if isinstance(tool_ids, list):
+                updates["tool_ids"] = [t for t in tool_ids if t not in newly_banned]
+            warning = (
+                f"{'、'.join(newly_banned)} 已连续失败 {self._fail_break_threshold} 次并被禁用"
+                f"（后续调用将被拒绝）。请勿再尝试调用它，直接基于已有信息收尾任务，"
+                f"并向用户如实报告失败情况。"
+            )
+            self._inject_warning(ctx, updates, warning)
+            logger.warning(
+                "[%s] Tool fail breaker tripped | banned=%s streaks=%s",
+                self.name,
+                newly_banned,
+                {t: c for t, c in streaks.items() if t in newly_banned},
+            )
         return updates
 
     def _handle_duplicate_tool_calls(
@@ -284,6 +379,8 @@ class DuplicateCheckPlugin(IOutputPlugin):
         updates: dict[str, Any],
         desc: str,
         intercepts: int,
+        message: str | None = None,
+        stop_reason: str = "duplicate_loop",
     ) -> dict[str, Any]:
         """终止管道，主 agent 注入用户通知，子 agent 直接终止。
 
@@ -292,6 +389,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
             updates: 已有的状态更新字典
             desc: 重复描述
             intercepts: 当前拦截次数
+            message: 主 agent 的用户通知文案（缺省 = 重复死循环文案）
 
         Returns:
             包含终止路由信号的更新字典
@@ -302,7 +400,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
         if is_main:
             # 终止通知是给用户的自然语言收尾，append assistant 消息（不并入末尾消息）
             updates["messages"] = {
-                "_ops": [{"op": "set", "msg": {"role": "assistant", "content": _MAIN_AGENT_TERMINATE_MSG}}]
+                "_ops": [{"op": "set", "msg": {"role": "assistant", "content": message or _MAIN_AGENT_TERMINATE_MSG}}]
             }
             logger.warning(
                 "[%s] Pipeline terminating (main agent) | intercepts=%d desc=%s",
@@ -319,7 +417,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
             )
 
         updates[StateKeys.SHOULD_STOP] = True
-        updates["router.stop_reason"] = "duplicate_loop"
+        updates["router.stop_reason"] = stop_reason
         return updates
 
     def _build_hint(self, count: int, tool_desc: str) -> str:

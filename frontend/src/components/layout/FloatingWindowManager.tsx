@@ -4,7 +4,7 @@
  * 管理多个悬浮窗实例，支持拖拽、调整大小和 z-index 层级管理
  */
 
-import React, { useState, useCallback } from 'react'
+import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { renderPageContent } from '@/components/schema/PageRenderer'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
@@ -97,6 +97,17 @@ export function FloatingWindowManager({
     startPosX: number
     startPosY: number
   } | null>(null)
+  /** 当前拖拽的 document 监听清理函数（mouseUp 移除；卸载兜底移除） */
+  const dragCleanupRef = useRef<(() => void) | null>(null)
+
+  // 拖拽监听挂在 document 上：组件在拖拽中卸载（如窗口被关闭）时必须移除，
+  // 否则泄漏的全局 mousemove 持续驱动 onUpdateWindow
+  useEffect(() => {
+    return () => {
+      dragCleanupRef.current?.()
+      dragCleanupRef.current = null
+    }
+  }, [])
 
   /**
    * 处理悬浮窗拖拽开始
@@ -125,13 +136,17 @@ export function FloatingWindowManager({
       }
 
       const handleUp = () => {
-        document.removeEventListener('mousemove', handleMove)
-        document.removeEventListener('mouseup', handleUp)
+        dragCleanupRef.current?.()
+        dragCleanupRef.current = null
         setDragState(null)
       }
 
       document.addEventListener('mousemove', handleMove)
       document.addEventListener('mouseup', handleUp)
+      dragCleanupRef.current = () => {
+        document.removeEventListener('mousemove', handleMove)
+        document.removeEventListener('mouseup', handleUp)
+      }
     },
     [windows, onUpdateWindow],
   )

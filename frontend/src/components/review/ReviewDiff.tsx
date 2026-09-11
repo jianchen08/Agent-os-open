@@ -5,8 +5,8 @@
  * 高亮变更部分：新增绿色、删除红色、未变灰底。
  */
 
-import { Columns2, Rows3 } from '@/assets/icons'
 import { useMemo, useState } from 'react'
+import { Columns2, Rows3 } from '@/assets/icons'
 import type { DiffLine, DiffLineType } from '@/types/review'
 
 export interface ReviewDiffProps {

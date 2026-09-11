@@ -31,14 +31,15 @@ _SHARED_ROOT = str(Path(__file__).resolve().parents[2])
 sys.path.insert(0, _SHARED_ROOT)
 from task_birth import TaskBirthError, birth_task_pipeline  # noqa: E402
 import state_fields  # noqa: E402 — plugins/shared 平铺模块（ws_meta 还原）
+from time_iso import now_iso_utc as _now_iso  # noqa: E402 — 共享时间戳单点
 
 logger = logging.getLogger(__name__)
 
 # ── 服务提供者解析 ──
 #
 # 内核能力经 sidecar 注入，服务解析统一走 _get_service_provider：
-# - task_worker：已退役（0.1 执行驱动）；任务执行经 chat.send_message
-#   创建管道（GAP-1 统一：task = pipeline，run 终态回写任务状态）。
+# - task_worker：不提供——任务执行经 chat.send_message 创建管道
+#   （GAP-1 统一：task = pipeline，run 终态回写任务状态）。
 # - agent_registry：由 agent_manager 插件提供——
 #   server.py on_load 经 tool-executor（显式 plugin_id=agent_manager）注入
 #   _agent_registry_lookup（async agent_id -> config dict | None）；未注入/
@@ -48,14 +49,14 @@ logger = logging.getLogger(__name__)
 # 测试可 monkeypatch 模块级 _get_service_provider / set_agent_registry_lookup。
 
 class _ServiceProviderShim:
-    """0.2 服务提供者适配：get(key) 返回 0.2 等价或 None（文档化降级）。"""
+    """服务提供者适配：get(key) 返回等价服务或 None（文档化降级）。"""
 
     def get(self, key: str) -> Any:
         # agent_registry 经 set_agent_registry_lookup 注入的查询钩子承接
         # （_get_agent_config_from_registry 直取 _agent_registry_lookup，
-        # 此处不再返回 0.1 式同步 registry 对象）。
+        # 此处不提供同步 registry 对象）。
         # workspace_lifecycle_manager / execution_record_storage
-        # 0.2 sidecar 无等价实例：调用方已有降级守卫。
+        # sidecar 无等价实例：调用方已有降级守卫。
         return None
 
 
@@ -107,12 +108,6 @@ def _get_chat_sender() -> Any:
     """获取 chat.send_message 派发器（None = 未注入，测试可 monkeypatch）。"""
     return _chat_sender
 
-
-def _now_iso() -> str:
-    """当前时间 ISO 串（任务登记时间戳）。"""
-    from datetime import datetime, timezone  # noqa: PLC0415
-
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _short_id(full_id: str) -> str:
@@ -242,8 +237,8 @@ def _load_metric_definitions() -> dict[str, dict[str, Any]]:
 def _get_valid_metric_ids() -> set[str] | None:
     """获取所有合法的评估指标 ID 集合。
 
-    0.2 评估指标的真相来源是 config/evaluation/evaluation_metrics.yaml
-    （evaluation 插件同款读取；不再依赖已删除的 0.1 evaluation.loader.MetricLoader）。
+    评估指标的真相来源是 config/evaluation/evaluation_metrics.yaml
+    （evaluation 插件同款读取）。
     用于在提交期校验 LLM 传入的 acceptance_criteria key 是否为真实存在的指标 ID，
     避免「把 pass_threshold 等 value 子字段误填为指标 ID」导致评估期反复
     METRIC_NOT_FOUND。
@@ -387,26 +382,24 @@ def _normalize_description(value: Any) -> str:
     return str(value)
 
 
-# ── 派发指令构建（0.1 _build_full_task_input 的 0.2 移植）──
+# ── 派发指令构建 ──
 #
-# 0.1 在 task_worker 侧把描述/验收标准/工作空间提示/路径规则/待办工作法
-# 拼成完整输入注入下级。0.2 提交即派发（chat.send_message create 分支），
-# 该职责落到 task_submit 派发消息。逐段对照：
-# - 描述：0.1「\n\n详细描述：」→ 0.2 派发消息「\n任务描述：」（保留现形）；
-# - 重试纠正信息：0.1 metadata.retry_message → 0.2 由 task_manage continue
-#   注入消息承载（无重复构建）；
+# task_submit 提交即派发（chat.send_message create 分支），把描述/验收标准/
+# 工作空间提示/路径规则/待办工作法拼成完整输入注入下级：
+# - 描述：派发消息「\n任务描述：」段；
+# - 重试纠正信息：由 task_manage continue 注入消息承载（此处不重复构建）；
 # - 评估指标详情 / 工作空间模式提示 / 路径使用规则 / 进度跟踪工作法：
-#   0.2 此前缺失，本次按 0.2 yaml/拓扑口径移植。
+#   按 evaluation_metrics.yaml 字段与拓扑口径展开。
 
 _EVALUATION_PROMPT_HEADER = "评估指标详情（你的产出将被以下标准评估）："
 
 
 def _build_evaluation_criteria_prompt(acceptance_criteria: dict[str, Any]) -> str:
-    """按指标定义展开验收标准为可读的评估说明文本（0.1 同职移植）。
+    """按指标定义展开验收标准为可读的评估说明文本。
 
-    0.2 指标定义（evaluation_metrics.yaml）字段与 0.1 MetricLoader 模型不同：
-    只有 name/description/evaluator_type/input_schema，没有 expect/is_red_line
-    等判定字段——按 0.2 字段展开（说明 + 评估参数），判定逻辑归 task_evaluate。
+    指标定义（evaluation_metrics.yaml）只有 name/description/evaluator_type/
+    input_schema，没有 expect/is_red_line 等判定字段——按现有字段展开
+    （说明 + 评估参数），判定逻辑归 task_evaluate。
 
     Returns:
         格式化后的评估指标说明文本；无验收标准/定义缺失/加载失败 → 空串。
@@ -435,11 +428,10 @@ def _build_evaluation_criteria_prompt(acceptance_criteria: dict[str, Any]) -> st
 
 
 def _build_workspace_guidance(ec: dict[str, Any]) -> str:
-    """按 execution_context 工作空间声明生成场景提示与路径规则（0.1 同职移植）。
+    """按 execution_context 工作空间声明生成场景提示与路径规则。
 
     - 显式 workspace：worktree=源项目隔离副本（改完自动合并回源）/ plain=直接
-      操作目标目录；0.1 的 shared 态（父任务空间）在 0.2 由子任务继承表达，
-      不单独提示；
+      操作目标目录；shared 态（父任务空间）由子任务继承表达，不单独提示；
     - 无显式 workspace：任务在默认隔离目录执行（工作空间根/{task_id}）。
     系统自动管理路径，下级只用相对路径。
     """
@@ -465,7 +457,7 @@ def _build_workspace_guidance(ec: dict[str, Any]) -> str:
 
 
 def _build_task_progress_method() -> str:
-    """待办工作法提示（0.1 同职移植）：把执行过程展开成可见待办清单推进。"""
+    """待办工作法提示：把执行过程展开成可见待办清单推进。"""
     return (
         "\n\n进度跟踪工作法（把你的执行过程展开成可见的待办，方便跟进）："
         "\n1. 把你 system_prompt 执行流程的每一步，按顺序展开成 `- [ ]` 待办清单"
@@ -1260,8 +1252,7 @@ class TaskSubmitTool(BuiltinTool):
         # 工作空间坐标只读源任务自身两路：ws_meta（init 写 state 后回写
         # registry 有延迟窗口）→ task.ws_meta（pipeline-state.update 镜像，
         # registry 热路径可能跳过）。lineage.parent_ws_meta 是父链坐标而非源
-        # 任务自身坐标，不得作为继承结果——曾把继承路径静默漂移到父会话目录
-        # （2026-08-30 诊断：同参三次提交，第 3 次合并目标漂到会话工作区）。
+        # 任务自身坐标，不得作为继承结果（否则继承路径会静默漂移到父会话目录）。
         # 两路全空 fail-closed 拒绝，引导 agent 重提。
         old_ws_meta = state_fields.as_dict(row.get("ws_meta"), field="ws_meta")
         if not isinstance(old_ws_meta, dict) or not old_ws_meta:
@@ -1722,9 +1713,8 @@ class TaskSubmitTool(BuiltinTool):
     ) -> dict[str, Any]:
         """结构化 execution_context（GAP-1 统一：随派发透传，不写 YAML metadata）。
 
-        对齐 0.1 执行语义（task_executor）：任务默认隔离执行——
-        - isolation 默认 isolated（0.1 coordinator.default_level；显式
-          isolation_level 优先）。
+        任务默认隔离执行——
+        - isolation 默认 isolated（显式 isolation_level 优先）。
         - workspace 声明语义：无显式 workspace（含 workspace_mode 未选）时
           mode 留空——执行管道落「工作空间根/{task_id}」默认目录（plain 拓扑，
           workspace_lifecycle._bootstrap 的 mode 缺省 plain）。worktree 拓扑
@@ -2116,7 +2106,7 @@ class TaskSubmitTool(BuiltinTool):
             return None
         if not isinstance(config, dict):
             return None
-        # 0.1 调用方期待属性访问（.level/.is_active）——轻量命名空间适配
+        # 调用方期待属性访问（.level/.is_active）——轻量命名空间适配
         return SimpleNamespace(
             level=config.get("level", ""),
             is_active=config.get("is_active", True),

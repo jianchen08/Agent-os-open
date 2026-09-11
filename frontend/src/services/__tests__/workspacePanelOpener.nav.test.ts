@@ -8,7 +8,6 @@
  * 3. openWorkspacePanelByPath：TOP_NAV_PANELS 精确命中 / 前缀命中（/settings/xxx）/ 未命中 false
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 const { mockLayoutStore, mockUIStore } = vi.hoisted(() => ({
   mockLayoutStore: {
     workspaceTabs: [],
@@ -20,7 +19,6 @@ const { mockLayoutStore, mockUIStore } = vi.hoisted(() => ({
     setWorkspaceCollapsed: vi.fn(),
   },
 }))
-
 vi.mock('@/stores/layoutModeStore', () => ({
   useLayoutModeStore: {
     getState: () => mockLayoutStore,
@@ -30,17 +28,14 @@ vi.mock('@/stores/layoutModeStore', () => ({
     },
   },
 }))
-
 vi.mock('@/stores/uiStore', () => ({
   useUIStore: { getState: () => mockUIStore },
 }))
-
 vi.mock('@/services/schema/ContributionRegistry', () => ({
   contributionRegistry: {
     getPages: () => [],
   },
 }))
-
 import {
   TOP_NAV_PANELS,
   openWorkspacePanel,
@@ -57,13 +52,13 @@ describe('openWorkspacePanel', () => {
   })
 
   it('不存在 → 构造 tab 并 addWorkspaceTab（isActive=true，isPinned 缺省 false）', () => {
-    openWorkspacePanel(TOP_NAV_PANELS['/tasks'])
+    openWorkspacePanel(TOP_NAV_PANELS['/settings'])
     expect(mockLayoutStore.addWorkspaceTab).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: 'ws-panel-tasks',
+        id: 'ws-panel-settings',
         isActive: true,
         isPinned: false,
-        moduleId: '__panel_tasks__',
+        moduleId: '__panel_settings__',
       }),
     )
     expect(mockLayoutStore.setActiveTab).not.toHaveBeenCalled()
@@ -78,12 +73,12 @@ describe('openWorkspacePanel', () => {
 
   it('工作区已折叠 → 打开面板时自动展开', () => {
     mockUIStore.workspaceCollapsed = true
-    openWorkspacePanel(TOP_NAV_PANELS['/tasks'])
+    openWorkspacePanel(TOP_NAV_PANELS['/settings'])
     expect(mockUIStore.setWorkspaceCollapsed).toHaveBeenCalledWith(false)
   })
 
   it('工作区未折叠 → 不调用 setWorkspaceCollapsed', () => {
-    openWorkspacePanel(TOP_NAV_PANELS['/tasks'])
+    openWorkspacePanel(TOP_NAV_PANELS['/settings'])
     expect(mockUIStore.setWorkspaceCollapsed).not.toHaveBeenCalled()
   })
 })
@@ -95,16 +90,17 @@ describe('openWorkspacePanelByPath', () => {
   })
 
   it('TOP_NAV_PANELS 精确命中 → 打开并返回 true', () => {
-    expect(openWorkspacePanelByPath('/tasks')).toBe(true)
+    expect(openWorkspacePanelByPath('/settings')).toBe(true)
     expect(mockLayoutStore.addWorkspaceTab).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'ws-panel-tasks' }),
+      expect.objectContaining({ id: 'ws-panel-settings' }),
     )
   })
 
-  it('前缀命中（/settings/plugins 子路径）→ 打开最长匹配前缀面板', () => {
+  it('前缀命中（/settings 子路径）→ 打开最长匹配前缀面板', () => {
+    // 独立 plugins_panel 条目已撤：/settings/plugins/* 落 /settings 前缀（设置中枢）
     expect(openWorkspacePanelByPath('/settings/plugins/llm')).toBe(true)
     expect(mockLayoutStore.addWorkspaceTab).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'ws-panel-plugins' }),
+      expect.objectContaining({ id: 'ws-panel-settings' }),
     )
   })
 

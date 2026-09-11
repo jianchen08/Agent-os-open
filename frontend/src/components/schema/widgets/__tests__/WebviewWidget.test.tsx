@@ -18,10 +18,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Mock } from 'vitest'
-
 import { apiClient } from '@/services/api/client'
-
 // ── Mock 外部依赖 ──
 vi.mock('@/services/api/client', () => ({
   apiClient: {
@@ -29,8 +26,8 @@ vi.mock('@/services/api/client', () => ({
     post: vi.fn(),
   },
 }))
-
 import { WebviewWidget } from '../WebviewWidget'
+import type { Mock } from 'vitest'
 
 const apiGet = apiClient.get as unknown as Mock
 const apiPost = apiClient.post as unknown as Mock
@@ -132,7 +129,7 @@ describe('WebviewWidget — 上行消息路由', () => {
     const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
     const downSpy = vi.spyOn(iframe.contentWindow!, 'postMessage')
 
-    // 曾可直接借 Bearer 调任意内核端点（如 /api/v1/xxx / 他插件 /ext/other/...）
+    // 越权面锁定：iframe 内不得借 Bearer 直调任意内核端点（如 /api/v1/xxx / 他插件 /ext/other/...）
     postUp('/api/v1/admin/pipelines', { x: 1 })
 
     await waitFor(() => {

@@ -73,6 +73,9 @@ export default {
           "3": "hsl(var(--chart-3))",
           "4": "hsl(var(--chart-4))",
           "5": "hsl(var(--chart-5))",
+          "6": "hsl(var(--chart-6))",
+          "7": "hsl(var(--chart-7))",
+          "8": "hsl(var(--chart-8))",
         },
         // === Deep Space 主题色 ===
         // 状态色：rgb 三元组 + <alpha-value>，使 /10 /80 等透明度修饰真实生效

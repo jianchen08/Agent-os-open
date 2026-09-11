@@ -10,9 +10,9 @@
 
 import { render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DeclaredWidgetLayer } from '../DeclaredWidgetLayer'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { DeclaredWidgetLayer } from '../DeclaredWidgetLayer'
 import type { WidgetComponent } from '@/services/schema/WidgetRegistry'
 
 const Stub: WidgetComponent = (props: { label?: string }) => (

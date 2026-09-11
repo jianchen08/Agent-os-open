@@ -6,17 +6,14 @@
  * getSchema 端点调用（含重试包装）。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
 vi.mock('../client', () => ({
   default: { get: mockGet },
 }))
-
 vi.mock('@/utils/retry', () => ({
   requestWithRetry: async (fn: () => any, _opts?: unknown) => fn(),
   isRetryableError: vi.fn().mockReturnValue(false),
 }))
-
 import { getSchema, getWidgetsForPlugin } from '@/services/api/schema'
 
 describe('getWidgetsForPlugin - ui_schema 提取', () => {

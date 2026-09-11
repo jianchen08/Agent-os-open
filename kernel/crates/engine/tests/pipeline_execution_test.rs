@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
-    Branch, LoopBody, MessageRecord, PipelineConfig, PipelineStep, PluginContext, PluginError,
+    LoopBody, MessageRecord, PipelineConfig, PipelineStep, PluginContext, PluginError,
     PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepItem, StepLibrary,
     ToolExecutionResult, TraceEntry,
 };
@@ -53,10 +53,10 @@ impl MockInvoker {
 
 #[async_trait]
 impl PluginInvoker for MockInvoker {
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         plugin_id: &str,
-        _ctx: &PluginContext,
+        _ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError> {
         self.calls.lock().unwrap().push(plugin_id.to_string());
         Ok(self
@@ -108,12 +108,6 @@ impl StorageBackend for NullStorage {
     async fn append_trace(
         &self,
         _entry: TraceEntry,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
-    }
-    async fn create_branch(
-        &self,
-        _branch: Branch,
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
@@ -223,6 +217,15 @@ impl StorageBackend for NullStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
+    async fn update_user_password(
+        &self,
+        _user_id: &str,
+        _password_hash: &str,
+        _must_change_password: bool,
+    ) -> Result<bool, agentos_core::types::StorageError> {
+        unreachable!("NullStorage 不提供口令更新")
+    }
+
     async fn delete_user(&self, _user_id: &str) -> Result<bool, agentos_core::types::StorageError> {
         Ok(false)
     }
@@ -305,6 +308,8 @@ fn make_engine_config() -> PipelineConfig {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     }
 }
 
@@ -658,6 +663,8 @@ async fn test_while_cond_drives_body_loop() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let executor = make_executor(Arc::clone(&invoker), &["counter"]);
     let final_state = executor
@@ -705,6 +712,8 @@ async fn test_while_cond_false_after_state_change_exits() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let executor = make_executor(Arc::clone(&invoker), &["flipper"]);
     let final_state = executor

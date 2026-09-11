@@ -88,7 +88,7 @@ class TestFileRead:
 
     @pytest.mark.asyncio
     async def test_read_nonexistent(self, tmp_path: Path) -> None:
-        result = await file_read("/nonexistent/path/xyz.txt", workspace=str(tmp_path))
+        result = await file_read(str(tmp_path / "nonexistent xyz.txt"), workspace=str(tmp_path))
         assert not result.success
         assert "not found" in result.error.lower()
 

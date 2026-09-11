@@ -1,8 +1,8 @@
 /**
  * 思考强度 ↔ 管道模型参数映射工具
  *
- * 正向（用户选强度 → 参数）：STRENGTH_TO_PARAMS（types/thinkingMode.ts），
- * 随 user_input 透传给后端 llm_core 路由。
+ * 正向（用户选强度 → 参数）：档位随 user_input 透传给后端 llm_core，
+ * 由 llm.yaml 的 thinking_strength_params 解析为厂商参数（本侧不映射）。
  *
  * 反向（管道参数 → 强度）：新会话/切换管道标签时，用户未显式设置过强度时，
  * 从对应管道模型的 default_params 反向推断强度档位（mapParamsToStrength），

@@ -2,7 +2,8 @@
 
 在管道 output 阶段（工具执行完成之后）读取 tool_core 的调用快照
 （``_executed_tool_calls``）+ 执行结果（``tool_results``），
-将成功的结果写入 tool_cache（input 阶段）共享的模块级单例缓存。
+将成功的结果写入 tool_cache（input 阶段）共享的模块级单例缓存
+（agentos_plugin_sdk.tool_result_cache，两端同源导入）。
 
 接通 tool_cache 的写入断路：tool_cache.put() 原本无调用方，
 本插件是它的生产调用方。下一轮 LLM 若再次产出相同工具调用，
@@ -14,7 +15,7 @@ tool_core 执行时把执行前的调用列表快照写入 ``_executed_tool_call
 本插件以它为写入源（与结果按下标配对）。
 
 依赖关系：
-    - 与 tool_cache（input）共享 _GLOBAL_CACHE（模块级单例字典）
+    - 与 tool_cache（input）共享 SDK tool_result_cache 单例缓存字典
     - exclude_tools 中的有副作用工具（bash/file_write 等）不写缓存
     - 失败的工具调用（result 含 error）不写缓存
 
@@ -26,6 +27,8 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+
+from agentos_plugin_sdk.tool_result_cache import ToolResultCache, namespace_from_state
 
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import StateKeys
@@ -87,36 +90,23 @@ class ToolCacheWriter(IOutputPlugin):
         if not self._enabled:
             return OutputResult()
 
-        tool_results = ctx.state.get(StateKeys.TOOL_RESULTS, [])
-        # 工具调用快照：tool_core（Rust）执行后清空 raw_tool_calls，
-        # 执行前的调用列表在 _executed_tool_calls（lib.rs:107）。
+        tool_results = ctx.state.get("_full_tool_results") or ctx.state.get(
+            StateKeys.TOOL_RESULTS, []
+        )
+        pipeline_id = ctx.state.get("pipeline_id", "")
+        # 全文优先：tool_core 留档 _full_tool_results 是缓存真值源——
+        # state 的 TOOL_RESULTS 已是截断展示版（2026-09-09 用户裁定），
+        # 缓存必须存全文，LLM 重发同一调用才能取回完整结果。
         executed_calls = ctx.state.get("_executed_tool_calls", [])
 
         if not tool_results or not executed_calls:
             return OutputResult()
 
-        # 延迟导入 tool_cache（input 端），复用其模块级单例缓存 + put 逻辑
-        # 注意：input/tool_cache/plugin.py 和本文件都叫 plugin.py，会冲突，
-        # 用 importlib 从绝对路径加载 input 端模块，避免 sys.path 名字污染
-        import importlib.util
-        import os
-
-        _tool_cache_plugin_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "..", "input", "tool_cache", "plugin.py",
-        )
-        _spec = importlib.util.spec_from_file_location(
-            "tool_cache_input_plugin", _tool_cache_plugin_path
-        )
-        if _spec is None or _spec.loader is None:
-            logger.warning("[%s] cannot load tool_cache plugin, skip write", self.name)
-            return OutputResult()
-        _tool_cache_mod = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_tool_cache_mod)
-        ToolCache = _tool_cache_mod.ToolCache
-
-        # 用本插件配置构造一个 ToolCache 实例，复用其 put 逻辑（含 exclude 判断）
-        cache = ToolCache(config=self._config)
+        # 用本插件配置构造缓存核（SDK 单源），写端 put / 排除判定同 input 端
+        cache = ToolResultCache(self._config)
+        # 身份隔离维度与 input 查询端同源（namespace_from_state 读同一组
+        # pipeline state 身份键），写入条目按 pipeline/user/session 隔离。
+        namespace = namespace_from_state(ctx.state)
 
         written = 0
         skipped_exclude = 0
@@ -134,11 +124,11 @@ class ToolCacheWriter(IOutputPlugin):
                 continue
 
             tool_name = tool_call.get("name", "")
-            if cache._is_excluded(tool_name):
+            if cache.is_excluded(tool_name):
                 skipped_exclude += 1
                 continue
 
-            cache.put(tool_call, result)
+            cache.put(tool_call, result, pipeline_id=pipeline_id, namespace=namespace)
             written += 1
 
         if written or skipped_exclude or skipped_error:

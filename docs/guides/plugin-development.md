@@ -73,7 +73,7 @@ plugins/shared/pipeline/<role>/<name>/
    plugins:
      simple_tools:
        enabled: true
-     widget_demo:
+     rollback_service:
        enabled: false
    ```
 2. **能力注册**：`capabilities.tools[]` 转成 ToolDescriptor 进 CapabilityRegistry。external MCP 工具缺 `input_schema` 直接拒注册（内置工具缺则 `{}` 补注册 + warn）。

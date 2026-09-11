@@ -566,7 +566,7 @@ class PromptBuildPlugin(IInputPlugin):
             return None
         return root / rel_path
 
-    async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:  # noqa: PLR0912
+    async def _resolve_placeholder(self, ctx: PluginContext, placeholder_content: str) -> str:
         """解析单个 {{占位符}} 并返回替换内容。
 
         将占位符语法转换为兼容的 var_def 字典，复用 _resolve_single_var_content。
@@ -586,43 +586,9 @@ class PromptBuildPlugin(IInputPlugin):
             # 是任务/会话工作区（工具读写面），提示词语义要的是前者。
             pr = self._system_root()
             return str(pr) if pr else ""
-        elif var_type == "path":
-            var_def = {"type": "path", "name": "path", "path": params["path"]}
-        elif var_type == "content":
-            var_def = {"type": "content", "name": "content", "content": params["content"]}
-        elif var_type == "timestamp":
-            var_def = {"type": "timestamp", "name": "timestamp", "format": params.get("format", "%Y-%m-%d %H:%M:%S")}
-        elif var_type == "session":
-            var_def = {"type": "session", "name": "session"}
-        elif var_type == "retrieval":
-            var_def = {
-                "type": "retrieval",
-                "name": "retrieval",
-                "tags": params.get("tags", "").split(","),
-                "top_k": int(params.get("top_k", 5)),
-                "inject_type": params.get("inject_type", "full"),
-            }
-        elif var_type == "vector":
-            var_def = {
-                "type": "path",
-                "name": "vector",
-                "path": params.get("path", ""),
-                "mode": "vector",
-                "top_k": int(params.get("top_k", 5)),
-            }
-        elif var_type == "hybrid":
-            var_def = {
-                "type": "retrieval",
-                "name": "hybrid",
-                "tags": params.get("tags", "").split(","),
-                "top_k": int(params.get("top_k", 5)),
-                "mode": "hybrid",
-            }
-        elif var_type == "routed":
-            var_def = {"type": "routed", "name": "routed", "route_key": params.get("route_key", "")}
-            routes = {k: v for k, v in params.items() if k != "route_key"}
-            var_def["routes"] = routes
-        else:
+
+        var_def = self._placeholder_var_def(var_type, params)
+        if var_def is None:
             # 未识别占位符（拼错/格式错）不能静默消失——配置作者需要留痕定位
             logger.warning(
                 "[%s] 未识别的占位符，已替换为空串（检查拼写/格式）| placeholder={{%s}}",
@@ -633,6 +599,56 @@ class PromptBuildPlugin(IInputPlugin):
 
         session_id = ctx.state.get("context.session_id", "")
         return await self._resolve_single_var_content(ctx, var_def, session_id)
+
+    @staticmethod
+    def _placeholder_var_def(var_type: str, params: dict[str, Any]) -> dict[str, Any] | None:
+        """把占位符语法映射为 var_def 字典；未识别类型返回 None。
+
+        Args:
+            var_type: 占位符类型（path/content/timestamp/session/retrieval/
+                vector/hybrid/routed）
+            params: 占位符参数
+
+        Returns:
+            var_def 字典；类型未识别返回 None
+        """
+        if var_type == "path":
+            return {"type": "path", "name": "path", "path": params["path"]}
+        if var_type == "content":
+            return {"type": "content", "name": "content", "content": params["content"]}
+        if var_type == "timestamp":
+            return {"type": "timestamp", "name": "timestamp", "format": params.get("format", "%Y-%m-%d %H:%M:%S")}
+        if var_type == "session":
+            return {"type": "session", "name": "session"}
+        if var_type == "retrieval":
+            return {
+                "type": "retrieval",
+                "name": "retrieval",
+                "tags": params.get("tags", "").split(","),
+                "top_k": int(params.get("top_k", 5)),
+                "inject_type": params.get("inject_type", "full"),
+            }
+        if var_type == "vector":
+            return {
+                "type": "path",
+                "name": "vector",
+                "path": params.get("path", ""),
+                "mode": "vector",
+                "top_k": int(params.get("top_k", 5)),
+            }
+        if var_type == "hybrid":
+            return {
+                "type": "retrieval",
+                "name": "hybrid",
+                "tags": params.get("tags", "").split(","),
+                "top_k": int(params.get("top_k", 5)),
+                "mode": "hybrid",
+            }
+        if var_type == "routed":
+            var_def = {"type": "routed", "name": "routed", "route_key": params.get("route_key", "")}
+            var_def["routes"] = {k: v for k, v in params.items() if k != "route_key"}
+            return var_def
+        return None
 
     async def _resolve_placeholders(self, ctx: PluginContext, text: str) -> str:
         """替换文本中的所有 {{占位符}} 为实际内容。
@@ -950,7 +966,7 @@ class PromptBuildPlugin(IInputPlugin):
             return "true" if value else "false"
         return str(value)
 
-    async def _build_dynamic_vars(self, ctx: PluginContext) -> dict[str, str] | None:  # noqa: PLR0912,PLR0915
+    async def _build_dynamic_vars(self, ctx: PluginContext) -> dict[str, str] | None:
         """构建动态变量消息。
 
         产出完整的消息 dict（含 role/name/content），
@@ -982,49 +998,10 @@ class PromptBuildPlugin(IInputPlugin):
             agent_name = ctx.state.get("context.agent_name", "")
 
             for item in dynamic_vars_def:
-                # 字符串形式：占位符语法，如 "{{timestamp}}" 或 "{{session}}"
-                if isinstance(item, str):
-                    content = await self._resolve_placeholders(ctx, item)
-                    if content:
-                        parts.append(content)
-                    continue
+                part = await self._resolve_dynamic_var(ctx, item, now, suffix, session_id, agent_name)
+                if part:
+                    parts.append(part)
 
-                # dict 形式：配置语法（向后兼容）
-                if not isinstance(item, dict):
-                    continue
-                var_def = item
-                if not var_def.get("enabled", True):
-                    continue
-
-                var_type = var_def.get("type", "")
-                var_name = var_def.get("name", var_type)
-
-                if var_type == "placeholder":
-                    placeholder_text = var_def.get("name", "")
-                    if placeholder_text:
-                        content = await self._resolve_placeholders(ctx, placeholder_text)
-                        if content:
-                            parts.append(content)
-                    continue
-
-                if var_type == "timestamp":
-                    fmt = var_def.get("format", "%Y-%m-%d %H:%M:%S")
-                    parts.append(f"- {var_name}: {now.strftime(fmt)} {suffix}")
-                elif var_type == "session":
-                    parts.append(f"- {var_name}: {session_id}")
-                elif var_type == "agent":
-                    parts.append(f"- {var_name}: {agent_name}")
-                elif var_type == "model":
-                    model_info = ctx.state.get("llm_model", "")
-                    parts.append(f"- {var_name}: {model_info}")
-                elif var_type in ("reference", "content", "inline", ""):
-                    content = var_def.get("content", "")
-                    if content:
-                        parts.append(f"- {var_name}: {content}")
-                elif var_type == "routed":
-                    content = await self._resolve_routed_var(ctx, var_def)
-                    if content:
-                        parts.append(f"- {var_name}: {content}")
         # 零兜底：未声明（agent 配置与插件默认皆无）→ 无动态变量。
         # 需要环境事实由配置声明（类型系统已支持 timestamp/session/agent/
         # model/placeholder）；身份信息属 system prompt（persona）职责，
@@ -1040,3 +1017,59 @@ class PromptBuildPlugin(IInputPlugin):
             "role": "user",
             "content": content,
         }
+
+    async def _resolve_dynamic_var(
+        self,
+        ctx: PluginContext,
+        item: Any,
+        now: Any,
+        suffix: str,
+        session_id: str,
+        agent_name: str,
+    ) -> str:
+        """解析单条动态变量声明为一行注入文本。
+
+        Args:
+            ctx: 插件执行上下文
+            item: 声明条目（字符串=占位符语法；dict=配置语法）
+            now: 配置时区当前时间（timestamp 格式化用）
+            suffix: 时区后缀
+            session_id: 会话 id（session 变量取值）
+            agent_name: agent 名（agent 变量取值）
+
+        Returns:
+            一行注入文本；不注入时返回空串
+        """
+        # 字符串形式：占位符语法，如 "{{timestamp}}" 或 "{{session}}"
+        if isinstance(item, str):
+            return await self._resolve_placeholders(ctx, item)
+
+        # dict 形式：配置语法
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            return ""
+
+        var_type = item.get("type", "")
+        var_name = item.get("name", var_type)
+
+        if var_type == "placeholder":
+            placeholder_text = item.get("name", "")
+            if not placeholder_text:
+                return ""
+            return await self._resolve_placeholders(ctx, placeholder_text)
+
+        if var_type == "timestamp":
+            fmt = item.get("format", "%Y-%m-%d %H:%M:%S")
+            return f"- {var_name}: {now.strftime(fmt)} {suffix}"
+        if var_type == "session":
+            return f"- {var_name}: {session_id}"
+        if var_type == "agent":
+            return f"- {var_name}: {agent_name}"
+        if var_type == "model":
+            return f"- {var_name}: {ctx.state.get('llm_model', '')}"
+        if var_type in ("reference", "content", "inline", ""):
+            content = item.get("content", "")
+            return f"- {var_name}: {content}" if content else ""
+        if var_type == "routed":
+            content = await self._resolve_routed_var(ctx, item)
+            return f"- {var_name}: {content}" if content else ""
+        return ""

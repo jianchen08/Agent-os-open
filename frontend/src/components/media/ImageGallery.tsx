@@ -30,6 +30,7 @@
  * ```
  */
 
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import {
   ChevronLeft,
   ChevronRight,
@@ -38,10 +39,9 @@ import {
   Info,
   X,
 } from '@/assets/icons'
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
+import { formatDate } from '@/utils/format'
 
-// 缩放范围
 const MIN_SCALE = 0.5
 const MAX_SCALE = 5
 const SCALE_STEP = 0.2
@@ -79,27 +79,6 @@ export interface ImageGalleryProps {
 }
 
 /**
- * 格式化日期为可读字符串。
- *
- * @param isoString - ISO 日期字符串
- * @returns 格式化后的日期字符串
- */
-function formatDate(isoString: string): string {
-  try {
-    const date = new Date(isoString)
-    return date.toLocaleDateString('zh-CN', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  } catch {
-    return isoString
-  }
-}
-
-/**
  * 图像画廊组件
  *
  * 以网格布局展示图像，支持 Lightbox 大图查看、
@@ -109,8 +88,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
   ({ images, className = '', columns = 3 }) => {
     const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
     const [showInfo, setShowInfo] = useState(false)
-    // 缩放和平移状态
-    const [scale, setScale] = useState(1)
+      const [scale, setScale] = useState(1)
     const [translate, setTranslate] = useState({ x: 0, y: 0 })
     const isDragging = useRef(false)
     const dragStart = useRef({ x: 0, y: 0 })
@@ -241,7 +219,6 @@ export const ImageGallery = memo<ImageGalleryProps>(
       []
     )
 
-    // 空状态
     if (images.length === 0) {
       return (
         <div
@@ -256,8 +233,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
       )
     }
 
-    // 动态网格列样式
-    const gridColsClass =
+      const gridColsClass =
       columns === 2
         ? 'grid-cols-1 sm:grid-cols-2'
         : columns === 4
@@ -327,7 +303,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                     className="mt-1 block text-xs text-[var(--muted-foreground)]/60"
                     dateTime={image.createdAt}
                   >
-                    {formatDate(image.createdAt)}
+                    {formatDate(image.createdAt, 'datetime')}
                   </time>
                 )}
               </div>
@@ -422,7 +398,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                       <span>种子: {currentImage.seed}</span>
                     )}
                     {currentImage.createdAt && (
-                      <span>{formatDate(currentImage.createdAt)}</span>
+                      <span>{formatDate(currentImage.createdAt, 'datetime')}</span>
                     )}
                     <span>
                       {(lightboxIndex ?? 0) + 1} / {images.length}

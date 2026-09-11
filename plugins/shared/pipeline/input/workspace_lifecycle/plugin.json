@@ -63,5 +63,19 @@
     "workspace",
     "ws_meta",
     "task.ws_meta"
-  ]
+  ],
+  "state": {
+    "reads": [
+      "current_phase",
+      "execution_context",
+      "lineage.parent_pipeline_id",
+      "lineage.parent_ws_meta",
+      "pipeline_id",
+      "session_id",
+      "task.id",
+      "task.ws_meta",
+      "workspace",
+      "ws_meta"
+    ]
+  }
 }

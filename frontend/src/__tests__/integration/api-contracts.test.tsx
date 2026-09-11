@@ -27,17 +27,14 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Mock } from 'vitest'
-
-// 真实 apiClient（axios 单例）—— 服务模块导入的是同一个实例，spy 在此对象上即生效。
+import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import apiClient from '@/services/api/client'
-
+// 真实 apiClient（axios 单例）—— 服务模块导入的是同一个实例，spy 在此对象上即生效。
 // 真实服务模块（不 mock）
 import { initializeGrowthLoop } from '@/services/modules/GrowthLoop'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
-
+import type { Mock } from 'vitest'
 // ── spyOn 工具：在每个用例前重置 ──
 let getSpy: Mock
 let postSpy: Mock

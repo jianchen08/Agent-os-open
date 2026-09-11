@@ -32,7 +32,7 @@ def add_plugin_dir(category: str, name: str) -> None:
 
     Args:
         category: "input" | "output" | "core"
-        name: 插件目录名（如 "tool_context"、"track"、"security_check"）
+        name: 插件目录名（如 "context_build"、"track"、"security_check"）
     """
     d = str(_PIPELINE_DIR / category / name)
     # 总是把目标目录置于 sys.path 最前（即使已存在，也要确保它在 position 0，

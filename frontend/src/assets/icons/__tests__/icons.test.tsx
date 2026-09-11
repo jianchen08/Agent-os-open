@@ -7,12 +7,12 @@
  * - AC-3: Star 图标必须渲染为五角星（而非人形 PersonIcon）。
  * - AC-4: 未收藏星标为灰色描边（fill-none + stroke），已收藏为金色实心。
  *
- * 背景：person.tsx 曾漏改 fill-rule/stroke-width；index.ts 曾将 Star 错误映射到
- * PersonIcon（人形），导致会话列表星标显示为人形。本测试防止同类问题复发。
+ * 背景：会话列表星标场景——SVG 属性非驼峰会触发 React Invalid DOM property
+ * 警告，Star 语义映射错会让人形图标顶替星标。本测试防止同类问题复发。
  */
-import { render } from '@testing-library/react'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { render } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import {
   Bot,
@@ -103,8 +103,8 @@ describe('Star 图标渲染（AC-3 回归：星标必须显示为星星而非人
 })
 
 describe('重设计图标语义正确性（2026-08 图标重设计回归）', () => {
-  // 背景：index.ts 曾将多个语义别名指向同一图形（如 CheckIcon as Play/Save/Square），
-  // 导致「删除显示 X、播放显示对勾、加载显示时钟」等不直观现象。
+  // 契约：多个语义别名不得指向同一图形（如 CheckIcon as Play/Save/Square，
+  // 会导致「删除显示 X、播放显示对勾、加载显示时钟」等语义错位）。
   // 本组测试断言：每个语义别名渲染的 SVG 图形符合业界惯例（lucide/antd 语义）。
 
   it('Play 渲染为三角形（播放键），而非对勾', () => {

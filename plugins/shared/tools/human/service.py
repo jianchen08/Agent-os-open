@@ -623,8 +623,8 @@ class HumanInteractionService(IHumanInteractionService):
                     request_id,
                     thread_id,
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 — 单请求取消失败不阻断其余清理
+                logger.debug("[HumanInteraction] 取消 pending 请求失败（继续其余清理）| request_id=%s | error=%s", request_id, exc)
         return cancelled
 
     async def get_request(self, request_id: str) -> dict[str, Any] | None:

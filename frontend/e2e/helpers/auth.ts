@@ -25,10 +25,16 @@ export const TEST_USER = {
 } as const;
 
 /** 管理员用户：会话创建等写面端点要求 admin 角色（write_surface_auth），
- *  普通测试用户 POST /api/v1/sessions 恒 403——登录就绪需建会话的旅程用此账号。 */
+ *  普通测试用户 POST /api/v1/sessions 恒 403——登录就绪需建会话的旅程用此账号。
+ *  口令经环境变量 AGENTOS_ADMIN_PASSWORD 注入（与内核播种/重置同源），
+ *  未设置即抛错——e2e 不携带任何硬编码凭据。 */
 export const ADMIN_USER = {
   username: 'admin',
-  password: 'admin12345',
+  get password(): string {
+    const pw = process.env.AGENTOS_ADMIN_PASSWORD
+    if (!pw) throw new Error('e2e 登录需要环境变量 AGENTOS_ADMIN_PASSWORD（与内核播种同源）')
+    return pw
+  },
   email: 'admin@agentos.local',
 } as const;
 

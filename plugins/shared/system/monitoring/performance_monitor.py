@@ -402,7 +402,8 @@ class PerformanceMonitor:
                 # 使用 run_coroutine_threadsafe 如果在线程中
                 return {}
             return loop.run_until_complete(self._get_stats_async())
-        except RuntimeError:
+        except RuntimeError as exc:
+            logger.debug("get_current_stats 无可用事件循环（返回空统计）: %s", exc)
             return {}
 
     async def _get_stats_async(self) -> dict[str, Any]:
@@ -412,8 +413,8 @@ class PerformanceMonitor:
             system_metrics = await self.get_system_metrics()
             stats["cpu"] = {"usage": system_metrics.cpu_usage}
             stats["memory"] = {"usage": system_metrics.memory_usage}
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — 部分统计缺省（其余维度照常返回）
+            logger.debug("system 维度统计获取失败（返回部分统计）: %s", exc)
 
         # 响应时间统计
         if hasattr(self, "_response_times") and self._response_times:

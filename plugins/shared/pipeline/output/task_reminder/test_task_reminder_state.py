@@ -50,6 +50,16 @@ def _ctx(state: dict[str, Any]) -> PluginContext:
     return PluginContext(state=state, config={})
 
 
+_FP_KEY = _mod._RESULT_FP_KEY
+
+
+def _assert_only_baseline(result: Any, msg: str = "") -> None:
+    """skip 类轮断言：除产出基线记账（execute 包装层在 llm_call 轮幂等推进）
+    外零评判副作用。"""
+    extra = set(result.state_updates) - {_FP_KEY}
+    assert not extra, f"{msg} 实际写出评判键: {extra}"
+
+
 def _base_task_state(**over: Any) -> dict[str, Any]:
     """0.2 任务管道 state 基线（引擎/task 派发注入的键）。"""
     base = {
@@ -71,9 +81,13 @@ class TestTaskIdFromState:
         """职责边界（2026-08-24）：任务提交后出生值 pending 由任务域插件推进
         running（内核不再回写任务状态）——任何轮次都推进，幂等。"""
         reminder = TaskReminder(config={})
-        ctx = _ctx(_base_task_state(**{"task.status": "pending"}))
+        state = _base_task_state(**{"task.status": "pending"})
+        ctx = _ctx(state)
         result = await reminder.execute(ctx)
-        assert result.state_updates == {"task.status": "running"}, (
+        assert result.state_updates == {
+            "task.status": "running",
+            _FP_KEY: TaskReminder._result_fingerprint(state.get("raw_result")),
+        }, (
             "pending 应推进为 running，实际 %r" % (result.state_updates,)
         )
         assert "ended" not in result.state_updates and "suspended" not in result.state_updates, "推进不改变路由"
@@ -99,7 +113,7 @@ class TestTaskIdFromState:
             }
         )
         result = await reminder.execute(ctx)
-        assert not result.state_updates, "会话管道不应触发提醒"
+        _assert_only_baseline(result, "会话管道不应触发提醒")
 
 
 class TestAgentLevelSkip:
@@ -108,7 +122,7 @@ class TestAgentLevelSkip:
         reminder = TaskReminder(config={})
         ctx = _ctx(_base_task_state(**{"agent_level": "L1"}))
         result = await reminder.execute(ctx)
-        assert not result.state_updates, "L1 调度层不触发 reminder"
+        _assert_only_baseline(result, "L1 调度层不触发 reminder")
 
     async def test_l2_executor_triggers_on_plain_text(self) -> None:
         """L2 执行者纯文本输出且无活跃子任务 → 注入提醒。"""
@@ -135,7 +149,7 @@ class TestActiveChildrenFromState:
             )
         )
         result = await reminder.execute(ctx)
-        assert not result.state_updates, "有活跃子任务不触发提醒"
+        _assert_only_baseline(result, "有活跃子任务不触发提醒")
 
     async def test_no_submitted_task_ids_triggers_reminder(self) -> None:
         """无活跃子任务标记 → 正常提醒。"""
@@ -195,4 +209,4 @@ class TestEmptyResponseExhausted:
         reminder = TaskReminder(config={})
         ctx = _ctx(_base_task_state(**{"raw_result": ""}))
         result = await reminder.execute(ctx)
-        assert not result.state_updates
+        _assert_only_baseline(result, "空回复未耗尽仅 skip 不裁决")

@@ -1,5 +1,6 @@
 /** pipelineMessageStore 测试 - 消息去重、状态同步、initFromAPI 合并 验证： */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 vi.mock('@/utils/logger', () => ({
@@ -9,7 +10,7 @@ vi.mock('@/utils/logger', () => ({
 }))
 
 describe('pipelineMessageStore', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   let _seq = 0
   const makeMsg = (id: string, content = '', overrides: Partial<Message> = {}): Message => ({

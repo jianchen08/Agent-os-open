@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,8 @@ class TestHistory:
         assert mon.get_metrics_history("nope") == []
 
     def test_record_and_trim(self, mon: pm.PerformanceMonitor) -> None:
+        # _record_metrics 是各监控类型唯一的写面（公开 record_* 只覆盖计数器），
+        # 容量阈值亦无公开配置口——以最小注入面锁定环形裁剪行为。
         mon._max_history_size = 2
         for i in range(4):
             metrics = pm.SystemMetrics(cpu_usage=i, memory_usage=0, disk_usage=0, network_sent=0, network_recv=0)
@@ -152,57 +155,93 @@ class TestAlerts:
         mon.get_task_metrics = _task  # type: ignore[method-assign]
 
     def test_thresholds_fire_callback(self, mon: pm.PerformanceMonitor) -> None:
-        self._craft(mon)
         received: list[pm.PerformanceAlert] = []
 
         async def cb(alert: pm.PerformanceAlert) -> None:
             received.append(alert)
 
-        mon._alert_callback = cb
-        asyncio.run(mon.detect_bottlenecks())
+        # 告警回调走公开构造参数注入
+        target = pm.PerformanceMonitor(alert_callback=cb)
+        self._craft(target)
+        asyncio.run(target.detect_bottlenecks())
         assert received, "高指标应触发至少一条告警"
 
     def test_callback_exception_swallowed(self, mon: pm.PerformanceMonitor, caplog: pytest.LogCaptureFixture) -> None:
-        self._craft(mon)
-
         async def bad_cb(alert: pm.PerformanceAlert) -> None:
             raise RuntimeError("callback boom")
 
-        mon._alert_callback = bad_cb
-        asyncio.run(mon.detect_bottlenecks())  # 不得抛出
+        target = pm.PerformanceMonitor(alert_callback=bad_cb)
+        self._craft(target)
+        asyncio.run(target.detect_bottlenecks())  # 不得抛出
         assert any("告警回调执行失败" in r.message for r in caplog.records)
 
 
 class TestResponseTimeContext:
+    @pytest.mark.timing
     def test_records_elapsed(self, mon: pm.PerformanceMonitor) -> None:
+        """计时上下文经公开统计面入账：恰记 1 条且耗时非负。"""
+
         async def scenario() -> None:
             async with mon.measure_response_time():
                 await asyncio.sleep(0.01)
 
-        asyncio.run(scenario())
-        assert mon._response_times and mon._response_times[-1] >= 0
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(scenario())
+            stats = mon.get_current_stats()
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+        assert stats["response_time"]["count"] == 1
+        assert stats["response_time"]["min"] >= 0
 
     def test_trim_to_1000(self, mon: pm.PerformanceMonitor) -> None:
-        mon._response_times = [float(i) for i in range(1005)]
-        ctx = pm.ResponseTimeContext(mon)
-        ctx.start_time = 0.0
+        """环形裁剪公开面：>1000 次计时后统计 count 封顶 1000，且值域非负。"""
 
         async def scenario() -> None:
-            await ctx.__aenter__()
-            await ctx.__aexit__(None, None, None)
+            for _ in range(1005):
+                async with mon.measure_response_time():
+                    pass
 
-        asyncio.run(scenario())
-        assert len(mon._response_times) == 1000
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(scenario())
+            stats = mon.get_current_stats()
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+        assert stats["response_time"]["count"] == 1000
+        assert stats["response_time"]["min"] >= 0
 
 
 class TestStartStop:
-    def test_start_monitoring_then_stop(self, mon: pm.PerformanceMonitor) -> None:
+    @pytest.mark.timing
+    def test_start_monitoring_then_stop(self) -> None:
+        """监控循环生命周期（公开面）：运行期告警链路真实评估触发，停止后归于安静。"""
+        alerts: list[pm.PerformanceAlert] = []
+        mon = pm.PerformanceMonitor(alert_callback=alerts.append)
+        # 公开 record 通道灌注高耗时/高错误率 → 循环一旦评估必触发告警
+        mon.record_llm_request_start()
+        for _ in range(10):
+            mon.record_llm_request(response_time=9.0, error=True)
+
         async def scenario() -> None:
             await mon.start_monitoring(interval=5)
-            assert mon._monitor_task is not None
-            assert mon._response_times == []
-            await asyncio.sleep(0.15)  # 允许监控循环跑一轮
+            deadline = time.monotonic() + 5
+            while not alerts and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert alerts, "监控循环运行期应真实评估并触发告警"
             await mon.stop_monitoring()
-            assert mon._monitor_task is None
+            stopped_at = len(alerts)
+            await asyncio.sleep(0.2)  # 宽限窗口：证明停止后不再有新告警（有界）
+            assert len(alerts) == stopped_at
 
-        asyncio.run(scenario())
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(scenario())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()

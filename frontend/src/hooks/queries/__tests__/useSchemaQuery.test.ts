@@ -8,6 +8,9 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as useSchemaQueryMod from '../useSchemaQuery'
+import type * as queryClientMod from '@/services/query/queryClient'
+import type * as queryKeysMod from '@/services/query/queryKeys'
 
 const mockGetSchema = vi.fn()
 
@@ -16,10 +19,10 @@ vi.mock('@/services/api/schema', () => ({
 }))
 
 describe('useSchemaQuery helpers', () => {
-  let fetchSchemaCached: typeof import('../useSchemaQuery')['fetchSchemaCached']
-  let invalidateSchemaCache: typeof import('../useSchemaQuery')['invalidateSchemaCache']
-  let queryClient: typeof import('@/services/query/queryClient')['queryClient']
-  let queryKeys: typeof import('@/services/query/queryKeys')['queryKeys']
+  let fetchSchemaCached: useSchemaQueryMod['fetchSchemaCached']
+  let invalidateSchemaCache: useSchemaQueryMod['invalidateSchemaCache']
+  let queryClient: queryClientMod['queryClient']
+  let queryKeys: queryKeysMod['queryKeys']
 
   beforeEach(async () => {
     vi.resetModules()

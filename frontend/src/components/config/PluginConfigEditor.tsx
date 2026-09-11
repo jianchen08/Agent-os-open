@@ -9,8 +9,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Loader2, Plus, Trash2 } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { toast } from '@/components/ui/sonner'
 import {
   Dialog,
   DialogContent,
@@ -18,6 +16,8 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { toast } from '@/components/ui/sonner'
 import {
   getPluginConfigFile,
   savePluginConfigFile,
@@ -26,12 +26,12 @@ import {
 } from '@/services/api/pluginConfig'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { RjsfForm } from '@/services/schema/RjsfForm'
+import { shouldDisableConfigSave } from '@/utils/configEditorGuard'
 import {
   buildInitialValues,
   mergeFormValues,
   toFormFields,
 } from '@/utils/configFormFields'
-import { shouldDisableConfigSave } from '@/utils/configEditorGuard'
 
 export interface PluginConfigEditorProps {
   pluginId: string

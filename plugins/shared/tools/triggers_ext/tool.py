@@ -5,13 +5,21 @@
 周期触发和定时触发到期后，TriggerManager 的后台检查循环会通过管道的
 inject_message 接口唤醒挂起的管道，注入预设消息。
 
+触发动作（trigger_action）两档：
+- notify（默认）：注入 message 唤醒管道，安全动作免审批；
+- command：以参数列表（cmd 形态，不经 shell 解析）执行宿主命令，写入时经
+  human-interaction 审批闸（fail-closed：通道不可用/拒绝/超时一律不落库）。
+
 暴露接口：
 - get_tool_definition() -> Tool：工具定义
 - TriggerSetupTool：触发器设置工具类
+- set_capability_provider()：注入审批闸的 capability provider（server.py 接线）
 """
 
+import json
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -39,6 +47,26 @@ from agentos_plugin_sdk import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 审批闸能力接入：server.py on_load 注入 capability provider（按名取内核能力
+# 句柄，如 security_check 的 _get_human_interaction_cap 范式），工具模块不反向
+# 依赖 SDK 插件实例。None = 审批通道未接入 → command 动作 fail-closed 拒绝。
+_capability_provider: Callable[[str], Any] | None = None
+
+# command 动作审批选项（id 稳定供代码消费、label 供前端按钮；无"同命令免批"
+# ——指纹记忆归 security_check 管道层，本闸不重复造记忆面）。
+_COMMAND_APPROVAL_OPTIONS: list[dict[str, str]] = [
+    {"id": "approved_once", "label": "批准注册执行"},
+    {"id": "denied", "label": "拒绝"},
+]
+_COMMAND_APPROVAL_LABEL_TO_ID = {opt["label"]: opt["id"] for opt in _COMMAND_APPROVAL_OPTIONS}
+_COMMAND_APPROVAL_IDS = {opt["id"] for opt in _COMMAND_APPROVAL_OPTIONS}
+
+
+def set_capability_provider(provider: Callable[[str], Any] | None) -> None:
+    """注入/复位审批闸的 capability provider（server.py on_load/on_unload 接线）。"""
+    global _capability_provider  # noqa: PLW0603
+    _capability_provider = provider
 
 
 class TriggerSetupTool(BuiltinTool):
@@ -106,6 +134,8 @@ class TriggerSetupTool(BuiltinTool):
                 "支持延迟触发、定时触发、周期触发、事件触发和条件触发五种类型。"
                 "支持通过 action=update 更新已有触发器的次数，多个任务可共用同一触发器。"
                 "支持通过 action=cancel 取消已设置的触发器。"
+                "触发动作默认 notify（注入消息，免审批）；command（执行宿主命令）"
+                "需要用户审批后才会注册。"
             ),
             input_schema={
                 "type": "object",
@@ -179,6 +209,33 @@ class TriggerSetupTool(BuiltinTool):
                         "type": "string",
                         "description": "条件表达式（trigger_type=condition 时必填），如: task_status == 'pending'",
                     },
+                    "trigger_action": {
+                        "type": "string",
+                        "enum": ["notify", "command"],
+                        "description": (
+                            "触发动作: notify=注入 message 唤醒管道（默认，免审批），"
+                            "command=以参数列表执行宿主命令（需用户审批后才注册）"
+                        ),
+                    },
+                    "command": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": (
+                            "命令参数列表（trigger_action=command 时必填）：首个元素为"
+                            "可执行文件路径，其余为字面参数，不经 shell 解析"
+                            "（'echo hi' 这类 shell 字符串无效）"
+                        ),
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "command 动作超时毫秒数（默认 10000），超时杀进程树",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "command 动作工作目录（可选）",
+                    },
                     "name": {
                         "type": "string",
                         "description": "触发器名称（可选），便于识别",
@@ -216,6 +273,18 @@ class TriggerSetupTool(BuiltinTool):
         """执行触发器设置或取消"""
         action = inputs.get("action", "setup")
         pipeline_id = inputs.get("pipeline_id")
+
+        # shell 字符串形态（action=command + action_params.command，如 dsh_adapter
+        # translate_hooks_config 产出）已停用；不静默降级为 notify（触发意图会静默丢失）。
+        if action not in ("setup", "cancel", "update"):
+            return create_failure_result(
+                error=(
+                    f"不支持的操作类型 action={action}（可选 setup/cancel/update）。"
+                    "触发命令执行请用 trigger_action=command + command 参数列表"
+                    "（旧 action=command + action_params.command shell 字符串格式已停用）"
+                ),
+                error_code="INVALID_ACTION",
+            )
 
         if action == "cancel":
             return await self._cancel_trigger(inputs, pipeline_id)
@@ -260,17 +329,23 @@ class TriggerSetupTool(BuiltinTool):
                 error_code="TRIGGER_LIMIT_EXCEEDED",
             )
 
+        # 动作模板解析 + command 审批闸（在类型分派前单点完成：拒绝的
+        # command 不落库不执行，任何触发类型都无绕过面）
+        action, action_params, action_error = await self._resolve_action_template(inputs, pipeline_id)
+        if action_error is not None:
+            return action_error
+
         try:
             if trigger_type == "delay":
-                return await self._setup_delay_trigger(inputs, execution_id, pipeline_id, message)
+                return await self._setup_delay_trigger(inputs, execution_id, pipeline_id, message, action, action_params)
             if trigger_type == "schedule":
-                return await self._setup_schedule_trigger(inputs, execution_id, pipeline_id, message)
+                return await self._setup_schedule_trigger(inputs, execution_id, pipeline_id, message, action, action_params)
             if trigger_type == "interval":
-                return await self._setup_interval_trigger(inputs, execution_id, pipeline_id, message)
+                return await self._setup_interval_trigger(inputs, execution_id, pipeline_id, message, action, action_params)
             if trigger_type == "event":
-                return await self._setup_event_trigger(inputs, execution_id, pipeline_id, message)
+                return await self._setup_event_trigger(inputs, execution_id, pipeline_id, message, action, action_params)
             if trigger_type == "condition":
-                return await self._setup_condition_trigger(inputs, execution_id, pipeline_id, message)
+                return await self._setup_condition_trigger(inputs, execution_id, pipeline_id, message, action, action_params)
             return create_failure_result(
                 error=f"不支持的触发类型: {trigger_type}",
                 error_code="INVALID_TRIGGER_TYPE",
@@ -282,6 +357,127 @@ class TriggerSetupTool(BuiltinTool):
                 error=f"设置触发器失败: {str(e)}",
                 error_code="TRIGGER_SETUP_FAILED",
             )
+
+    async def _resolve_action_template(
+        self,
+        inputs: dict[str, Any],
+        pipeline_id: str | None,
+    ) -> tuple[str, dict[str, Any], ToolExecutionResult | None]:
+        """解析触发动作模板（trigger_action: notify|command）。
+
+        notify 免审批直接通过；command 校验 cmd 参数列表形状后接
+        human-interaction 审批闸（fail-closed：通道不可用/拒绝/超时一律不落库）。
+
+        Returns:
+            (action, action_params, 错误结果)；错误结果非 None 时前两项无意义。
+        """
+        trigger_action = inputs.get("trigger_action") or "notify"
+        if trigger_action == "notify":
+            return "notify", {}, None
+        if trigger_action != "command":
+            return "", {}, create_failure_result(
+                error=f"不支持的 trigger_action: {trigger_action}（可选 notify/command）",
+                error_code="INVALID_TRIGGER_ACTION",
+            )
+
+        cmd = inputs.get("command")
+        if (
+            not isinstance(cmd, list)
+            or not cmd
+            or not all(isinstance(c, str) and c.strip() for c in cmd)
+        ):
+            return "", {}, create_failure_result(
+                error="command 动作需要非空字符串参数列表（cmd 形态，不经 shell 解析；"
+                "shell 字符串请拆为 argv，或改用 notify 动作）",
+                error_code="INVALID_COMMAND",
+            )
+
+        approved, reason = await self._gate_command_approval(
+            cmd, pipeline_id, user_id=str(inputs.get("user_id") or ""))
+        if not approved:
+            return "", {}, create_failure_result(
+                error=reason,
+                error_code="COMMAND_APPROVAL_DENIED",
+            )
+
+        action_params: dict[str, Any] = {
+            "cmd": cmd,
+            "timeout_ms": int(inputs.get("timeout_ms") or 10000),
+        }
+        cwd = inputs.get("cwd")
+        if cwd:
+            action_params["cwd"] = str(cwd)
+        return "command", action_params, None
+
+    async def _gate_command_approval(
+        self, cmd: list[str], pipeline_id: str | None, user_id: str = ""
+    ) -> tuple[bool, str]:
+        """command 动作审批闸：经 human-interaction 弹审批，等待用户裁决。
+
+        与 security_check 的参数级危险判定同构（参数命中 command 类动作即危险），
+        但闸门放在工具写入面——触发器命令到期在宿主侧执行，任务隔离容器拦不住
+        它，逐管道的安全检查覆盖不到隔离任务。审批为注册时单次裁决（approve-once），
+        到期执行不再重复审批。
+
+        fail-closed：审批通道不可用/请求创建失败/等待超时/取消/拒绝 → 一律拒绝。
+
+        Returns:
+            (是否批准, 拒绝原因)；批准时原因为空串。
+        """
+        provider = _capability_provider
+        if provider is None:
+            return False, "审批通道未接入（capability provider 未注入），command 动作拒绝注册"
+        try:
+            hi = provider("human-interaction")
+        except (KeyError, AttributeError):
+            hi = None
+        if hi is None:
+            return False, "human-interaction 审批能力不可用，command 动作拒绝注册"
+
+        session_id = pipeline_id or ""
+        description = (
+            "触发器到期将以参数列表执行以下宿主命令（不经 shell 解析）：\n"
+            + json.dumps(cmd, ensure_ascii=False)
+        )
+        try:
+            create_res = await hi.call("create_choice", {
+                "session_id": session_id,
+                "thread_id": session_id,
+                "tab_id": "",
+                "title": "触发器命令审批",
+                "description": description,
+                "options": list(_COMMAND_APPROVAL_OPTIONS),
+                "priority": "high",
+                "timeout_seconds": 86400,
+                # 归属归因（M2）：记录创建者用户，审批面归属校验据此放行本人。
+                "user_id": user_id,
+            })
+            if not isinstance(create_res, dict) or create_res.get("error"):
+                raise RuntimeError(f"create_choice failed: {create_res}")
+            request_id = str(create_res.get("request_id", ""))
+            wait_res = await hi.call(
+                "wait_for_choice",
+                {"request_id": request_id, "timeout": 86400},
+                # 长等待语义：内核按本插件 manifest mcp.request_timeout_secs 等待，
+                # 此参数仅 SDK 侧提示（与 security_check 审批链同构）。
+                timeout=86500.0,
+            )
+        except Exception as e:
+            return False, f"command 动作审批未完成（{e}），已拒绝注册"
+
+        if not isinstance(wait_res, dict) or wait_res.get("error"):
+            err = wait_res.get("error") if isinstance(wait_res, dict) else wait_res
+            return False, f"command 动作审批未通过（{err}），已拒绝注册"
+
+        raw_selected = wait_res.get("selected_option", "")
+        # 前端传 label、自动路径传 id，两者都归一到 id（security_check 同款）
+        resolved = _COMMAND_APPROVAL_LABEL_TO_ID.get(raw_selected) or (
+            raw_selected if raw_selected in _COMMAND_APPROVAL_IDS else ""
+        )
+        if resolved == "approved_once":
+            logger.info("[TriggerSetupTool] command 动作获批准 | pipeline=%s cmd=%s", pipeline_id, cmd)
+            return True, ""
+        return False, f"command 动作审批被拒绝（{raw_selected or '未选择'}），未注册"
 
     async def _update_trigger(
         self,
@@ -440,6 +636,8 @@ class TriggerSetupTool(BuiltinTool):
         execution_id: str,
         pipeline_id: str | None,
         message: str,
+        action: str,
+        action_params: dict[str, Any],
     ) -> ToolExecutionResult:
         """设置延迟触发器"""
         delay_seconds = inputs.get("delay_seconds")
@@ -471,6 +669,8 @@ class TriggerSetupTool(BuiltinTool):
             delay_seconds=float(delay_seconds),
             max_fires=1,
             message=message,
+            action=action,
+            action_params=action_params,
             pipeline_id=pipeline_id,
             metadata={
                 "execution_id": execution_id,
@@ -502,6 +702,8 @@ class TriggerSetupTool(BuiltinTool):
         execution_id: str,
         pipeline_id: str | None,
         message: str,
+        action: str,
+        action_params: dict[str, Any],
     ) -> ToolExecutionResult:
         """设置定时触发器"""
         schedule_time_str = inputs.get("schedule_time")
@@ -556,6 +758,8 @@ class TriggerSetupTool(BuiltinTool):
             scheduled_at=schedule_time_utc,
             max_fires=1,
             message=message,
+            action=action,
+            action_params=action_params,
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
@@ -588,6 +792,8 @@ class TriggerSetupTool(BuiltinTool):
         execution_id: str,
         pipeline_id: str | None,
         message: str,
+        action: str,
+        action_params: dict[str, Any],
     ) -> ToolExecutionResult:
         """设置周期触发器"""
         interval_str = inputs.get("interval")
@@ -634,6 +840,8 @@ class TriggerSetupTool(BuiltinTool):
             max_fires=max_count,
             max_time_seconds=max_time_seconds,
             message=message,
+            action=action,
+            action_params=action_params,
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
@@ -678,6 +886,8 @@ class TriggerSetupTool(BuiltinTool):
         execution_id: str,
         pipeline_id: str | None,
         message: str,
+        action: str,
+        action_params: dict[str, Any],
     ) -> ToolExecutionResult:
         """设置事件触发器"""
         event_type = inputs.get("event_type")
@@ -701,6 +911,8 @@ class TriggerSetupTool(BuiltinTool):
             event_name=event_type,
             max_fires=max_count,
             message=message,
+            action=action,
+            action_params=action_params,
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
@@ -748,6 +960,8 @@ class TriggerSetupTool(BuiltinTool):
         execution_id: str,
         pipeline_id: str | None,
         message: str,
+        action: str,
+        action_params: dict[str, Any],
     ) -> ToolExecutionResult:
         """设置条件触发器"""
         condition = inputs.get("condition")
@@ -771,6 +985,8 @@ class TriggerSetupTool(BuiltinTool):
             condition_expression=condition,
             max_fires=max_count,
             message=message,
+            action=action,
+            action_params=action_params,
             pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,

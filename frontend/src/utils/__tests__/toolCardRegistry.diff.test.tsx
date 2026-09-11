@@ -14,11 +14,11 @@
  * /api/v1/schema 装载）——本测试模拟 schema 装载后走真实 enhance 级联。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { loadChatCardDeclarations, clearChatCardDeclarations } from '@/utils/chatCardInterpreter'
+import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
-import { loadChatCardDeclarations, clearChatCardDeclarations } from '@/utils/chatCardInterpreter'
 import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
-import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 
 /** file_write 卡片声明（与插件 plugin.json 的 ui.chat_card 保持一致的镜像）。 */
 const FILE_WRITE_DECL: ChatCardDeclaration = {

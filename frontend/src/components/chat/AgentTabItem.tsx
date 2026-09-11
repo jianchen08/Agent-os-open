@@ -12,11 +12,7 @@
 import { X } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import type { AgentLevel } from '@/types/models'
-
-/**
- * Agent Tab 状态
- */
-export type AgentTabStatus = 'running' | 'waiting_input' | 'completed' | 'failed'
+import type { AgentTabStatus } from '@/types/task'
 
 /**
  * Agent Tab 数据接口
@@ -62,6 +58,8 @@ const getStatusIcon = (status: AgentTabStatus) => {
       return '\uD83D\uDCAC'
     case 'failed':
       return '\u2715'
+    case 'unknown':
+      return '\uFF1F'
     default:
       return '\u25CF'
   }

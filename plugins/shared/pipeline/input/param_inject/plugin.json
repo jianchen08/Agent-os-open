@@ -16,6 +16,29 @@
       "on_unload"
     ]
   },
+  "export_fields": [
+    "raw_tool_calls"
+  ],
+  "state": {
+    "volatile_keys": [
+      "raw_tool_calls",
+      "tool.params_injected"
+    ],
+    "reads": [
+      "agent_config_id",
+      "agent_level",
+      "core_type",
+      "isolation_level",
+      "pipeline_id",
+      "project_root",
+      "raw_tool_calls",
+      "session_id",
+      "task.id",
+      "user_id",
+      "workspace",
+      "ws_meta"
+    ]
+  },
   "permissions": {},
   "priority": 50
 }

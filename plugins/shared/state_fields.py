@@ -2,7 +2,7 @@
 
 背景（2026-08-28 管道 b8b92a56ad72 实测四问题）：state 结构化字段
 （ws_meta / task.acceptance_criteria / track.llm_usage / security.decision /
-termination_advisor.status / evaluation.detected_result 等）的生命周期跨三个
+router.stop_reason / evaluation.detected_result 等）的生命周期跨三个
 边界——引擎内存（原生 dict）→ 持久层 TEXT（serde_json::to_string 序列化）→
 消费端（内核读路径有 from_str 还原，插件经 pipeline-state.list 能力拿到
 serde Value 透传也为原生）。

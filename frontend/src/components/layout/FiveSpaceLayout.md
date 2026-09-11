@@ -62,7 +62,7 @@ useLayoutModeStore → workspaceTabs / floatingWindows / connectionStatus
 | `FloatingWindowManager.tsx` | 浮动窗口 |
 | `FullscreenOverlay.tsx` | 全屏覆盖 |
 | `ConnectionStatusIndicator.tsx` | 连接指示（可被 StatusBar 复用） |
-| `ThemeButton.tsx` / `ThemePanel.tsx` | 主题切换 |
+| `ThemeButton.tsx` / `ThemePopover.tsx` | 主题切换 |
 | `index.ts` | 模块导出 |
 
 ### 对外接口

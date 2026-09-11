@@ -114,7 +114,8 @@
   "priority": 50,
   "requires_content": 5,
   "granted_capabilities": [
-    "pipeline-state"
+    "pipeline-state",
+    "tool-executor"
   ],
   "http_endpoints": [
     {
@@ -232,5 +233,6 @@
     "task.parent_project_id",
     "ws_meta",
     "task.ws_meta"
-  ]
+  ],
+  "host_group": "light"
 }

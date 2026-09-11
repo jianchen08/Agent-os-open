@@ -420,6 +420,22 @@ class TestImageReviewer:
         assert result.is_valid is False
         assert any("无法识别的图片文件" in e for e in result.errors)
 
+    def test_review_unreadable_format_flagged(self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """图片能打开但格式读不出（format 为空）→ 无效 + 明确错误（不静默放行）。"""
+        monkeypatch.setattr(
+            media_reviewer,
+            "Image",
+            types.SimpleNamespace(
+                open=lambda _p: types.SimpleNamespace(
+                    format=None, size=(64, 48), load=lambda: None, getexif=lambda: {}
+                )
+            ),
+        )
+        p = _write_file(tmp_path, "a.png")
+        result = ImageReviewer.review(p)
+        assert result.is_valid is False
+        assert any("无法识别图片格式" in e for e in result.errors)
+
     def test_review_missing_file_raises(self) -> None:
         with pytest.raises(FileNotFoundError):
             ImageReviewer.review("no.png")

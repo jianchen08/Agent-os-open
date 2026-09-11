@@ -8,9 +8,7 @@
  *
  * 测试策略：Mock 仅传输层（apiClient / axios），被测服务本身及其解析逻辑真实运行。
  */
-
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-
 // Mock 传输层（axios 实例），仅拦截 HTTP，不替代被测服务的解析逻辑。
 vi.mock('@/services/api/client', () => ({
   default: {
@@ -18,7 +16,6 @@ vi.mock('@/services/api/client', () => ({
     put: vi.fn(),
   },
 }))
-
 import apiClient from '@/services/api/client'
 import {
   getPluginConfigs,

@@ -10,9 +10,21 @@
 //!
 //! 环境变量：
 //! - AGENTOS_KERNEL_PORT：监听端口（默认 9100）
-//! - AGENTOS_KERNEL_HOST：监听地址（默认 0.0.0.0）
+//! - AGENTOS_BIND：监听地址（默认 127.0.0.1；显式设 0.0.0.0 开启外网可达，
+//!   AGENTOS_KERNEL_HOST 为过渡期别名，弃用中）
+//! - AGENTOS_ADMIN_PASSWORD：内置 admin 口令（未设置时首启生成随机口令并打印
+//!   一次；对已存在的 admin 设置不同口令即重置）
+//! - AGENTOS_TOKEN_SECRET：token 签名密钥（未设置时进程随机，重启即全量失效）
 //! - AGENTOS_PLUGINS_DIR：内置插件根目录（默认 plugins/shared）
 //! - AGENTOS_USER_PLUGINS_DIR：用户插件根目录（默认 OS 标准目录 agentos/plugins）
+//! - AGENTOS_MAX_BLOCKING_THREADS：tokio 阻塞池上限（默认 512 = tokio 原生默认）
+//! - AGENTOS_THREAD_STACK_KIB：线程栈大小 KiB（默认 2048 = tokio 默认 2MiB）
+//! - AGENTOS_MEM_WATERMARK_MB：水位自愈阈值 MB（**默认关闭**——2026-09-10
+//!   用户裁定水位重启不得默认触发；显式正值才启用排空重启自愈）
+//! - AGENTOS_MEM_WATERMARK_MIN：水位需持续的分钟数（启用时默认 10）
+//! - AGENTOS_TRACE_RETENTION_DAYS：traces 保留天数（默认 90；0 = 禁用清扫；
+//!   超出上限按上限钳制，解析失败回落默认）——traces 过期行与孤儿 blob 由
+//!   保留清扫周期回收（启动清一次 + 每 6h）
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -29,46 +41,90 @@ use agentos_plugin_loader::{CapabilityRegistryImpl, NativePluginLoader, PluginLo
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*};
 
-/// 管理员初始密码来源：`DEFAULT_ADMIN_PASSWORD` 环境变量优先，未设置时回退内置
-/// 默认值。内置默认值是公开信息，仅保证开箱可登录，不能作为生产凭据。
-fn resolve_admin_password() -> String {
-    std::env::var("DEFAULT_ADMIN_PASSWORD").unwrap_or_else(|_| "admin12345".to_string())
+/// 管理员初始口令来源（D1）：
+/// - 环境变量 `AGENTOS_ADMIN_PASSWORD` 非空 → 显式指定；
+/// - 未设置 → 生成随机口令（128 bit uuid 对），仅在首次播种时打印一次到控制台。
+///
+/// 不存在任何硬编码默认口令。
+fn resolve_admin_password() -> (String, bool) {
+    match std::env::var("AGENTOS_ADMIN_PASSWORD") {
+        Ok(p) if !p.trim().is_empty() => (p, false),
+        _ => {
+            let random = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            (random, true)
+        }
+    }
 }
 
-/// 播种内置 admin 用户（首次启动插入，已存在则跳过）。
+/// 播种内置 admin 用户（首次启动插入，已存在则跳过；显式环境变量可重置）。
 ///
-/// 0.5.0 最小持久化地基：auth 由硬编码占位改为查 DB，启动时确保 admin 存在。
 /// tenant_id = "default"（与多租户隔离地基的默认租户一致），保证旧数据
 /// （0.5.0 前以 default 写入的会话/消息）仍归 admin 可见。
+///
+/// D1：口令 argon2id 哈希落库，播种账号 `must_change_password = true`
+/// （login 响应携带标记，前端拦截强制改密）。对已存在的 admin，若
+/// `AGENTOS_ADMIN_PASSWORD` 与当前口令不符即重置（操作员恢复通道：
+/// 迁移失败/口令遗失时设置该变量重启）。
 async fn seed_admin_user(store: Arc<dyn agentos_core::traits::StorageBackend>) {
     const ADMIN_ID: &str = "00000000-0000-0000-0000-000000000001";
+    let (password, generated) = resolve_admin_password();
     match store.get_user_by_id(ADMIN_ID).await {
-        Ok(Some(_)) => {
-            // admin 已存在（非首次启动），跳过
+        Ok(Some(existing)) => {
+            // admin 已存在。环境变量提供且与当前口令不符 → 显式重置。
+            if !generated && !agentos_http::auth::verify_password(&password, &existing.password) {
+                let password_hash =
+                    agentos_http::auth::hash_password(&password).unwrap_or_else(|e| {
+                        panic!("AGENTOS_ADMIN_PASSWORD 重置口令哈希失败（fail-closed）: {e}")
+                    });
+                match store
+                    .update_user_password(ADMIN_ID, &password_hash, false)
+                    .await
+                {
+                    Ok(true) => warn!(
+                        target: "agentos-kernel",
+                        "已按 AGENTOS_ADMIN_PASSWORD 重置内置 admin 口令（旧会话全部失效）"
+                    ),
+                    Ok(false) => {
+                        warn!(target: "agentos-kernel", "重置 admin 口令失败：用户行不存在")
+                    }
+                    Err(e) => warn!(target: "agentos-kernel", error = %e, "重置 admin 口令失败"),
+                }
+            }
         }
         Ok(None) => {
             // 首次启动：插入 admin 种子用户。
             // get_user_by_id 按 task_local tenant（此处为空→default）查，admin 的
             // tenant_id 正是 default，所以 None 表示确实没播过种。
+            let password_hash = agentos_http::auth::hash_password(&password)
+                .unwrap_or_else(|e| panic!("播种口令哈希失败（fail-closed）: {e}"));
             let now = chrono::Utc::now().to_rfc3339();
             let admin = UserRecord {
                 user_id: ADMIN_ID.to_string(),
                 username: "admin".to_string(),
-                password: resolve_admin_password(), // 明文（DEBT: 0.5.0 哈希）
+                password: password_hash,
                 email: Some("admin@agentos.dev".to_string()),
                 role: "admin".to_string(),
                 tenant_id: "default".to_string(),
                 created_at: now,
                 last_login_at: None,
+                must_change_password: true,
             };
             match store.create_user(&admin).await {
                 Ok(()) => {
-                    if std::env::var("DEFAULT_ADMIN_PASSWORD").is_err() {
-                        warn!(target: "agentos-kernel",
-                            "已播种内置 admin 用户 (tenant=default)，使用内置默认密码（公开值）——首次登录前请在 .env 设置 DEFAULT_ADMIN_PASSWORD")
+                    if generated {
+                        // 随机口令仅首启打印一次（控制台直出，不经日志管线过滤）
+                        println!("============================================================");
+                        println!("  已播种内置 admin 用户 (tenant=default)");
+                        println!("  本次初始口令（仅此一次显示，请立即登录并修改）:");
+                        println!("    {password}");
+                        println!("============================================================");
                     } else {
                         info!(target: "agentos-kernel",
-                            "已播种内置 admin 用户 (tenant=default)，初始密码取自 DEFAULT_ADMIN_PASSWORD")
+                            "已播种内置 admin 用户 (tenant=default)，初始口令取自 AGENTOS_ADMIN_PASSWORD")
                     }
                 }
                 Err(e) => {
@@ -82,14 +138,115 @@ async fn seed_admin_user(store: Arc<dyn agentos_core::traits::StorageBackend>) {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// 启动迁移：存量明文口令行 argon2id 哈希化回写（D1-2）。
+///
+/// 判据：password 列非 `$argon2` 前缀即视为待迁移明文。任一行哈希或回写失败
+/// → Err 拒绝启动（fail-closed，不留明文兼容路径）——操作员按提示设置
+/// `AGENTOS_ADMIN_PASSWORD` 重启重置，或修复库后重试。
+async fn migrate_plaintext_passwords(
+    store: Arc<dyn agentos_core::traits::StorageBackend>,
+) -> Result<(), String> {
+    let users = store
+        .list_users()
+        .await
+        .map_err(|e| format!("迁移前读取用户表失败: {e}"))?;
+    let mut migrated = 0usize;
+    for u in users {
+        if agentos_http::auth::is_password_hash(&u.password) {
+            continue;
+        }
+        let password_hash = agentos_http::auth::hash_password(&u.password)?;
+        let updated = store
+            .update_user_password(&u.user_id, &password_hash, u.must_change_password)
+            .await
+            .map_err(|e| format!("用户 {} 口令哈希回写失败: {e}", u.username))?;
+        if !updated {
+            return Err(format!("用户 {} 口令回写未命中（行消失？）", u.username));
+        }
+        migrated += 1;
+        warn!(
+            target: "agentos-kernel",
+            user = %u.username,
+            "存量明文口令已哈希化回写（D1 启动迁移）"
+        );
+    }
+    if migrated > 0 {
+        info!(target: "agentos-kernel", migrated, "明文口令迁移完成");
+    }
+    Ok(())
+}
+
+/// 解析监听地址（D12）：默认 127.0.0.1，仅本机可达；
+/// `AGENTOS_BIND=0.0.0.0` 显式开启外网可达（打印绑定面告警）。
+/// `AGENTOS_KERNEL_HOST` 为弃用中的过渡别名。
+fn resolve_bind_host() -> String {
+    match std::env::var("AGENTOS_BIND") {
+        Ok(h) if !h.trim().is_empty() => h,
+        _ => match std::env::var("AGENTOS_KERNEL_HOST") {
+            Ok(h) if !h.trim().is_empty() => {
+                warn!(
+                    target: "agentos-kernel",
+                    "AGENTOS_KERNEL_HOST 已弃用，请改用 AGENTOS_BIND（本进程按其值继续启动）"
+                );
+                h
+            }
+            _ => "127.0.0.1".to_string(),
+        },
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 线程治理：#[tokio::main] 宏暴露不了 max_blocking_threads / thread_stack_size，
+    // 手动构建等价 multi-thread runtime（enable_all = 宏默认；worker_threads 不设
+    // = 核数，同为宏默认）。启动逻辑顺序不变（原 main 体整体移入 async_main）。
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(resolve_max_blocking_threads())
+        .thread_stack_size(resolve_thread_stack_size())
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // 全局分配器（mimalloc + purge_delay=0）：必须在任何分配前安装。
     // Windows 段堆并发高水位滞留修复（ADR 2026-08-31-mimalloc-global-allocator）。
     agentos_api::allocator::install_global_allocator();
 
-    // 初始化日志
+    // 日志双写初始化：stdout 层原样保留（supervisor 追加重定向如 .kernel_02.log
+    // 行为不变）；文件层经 tracing-appender daily 轮转写 logs/kernel.log.YYYY-MM-DD
+    // （相对进程工作目录，无上限追加重定向的治理面）。文件层构建失败（只读盘/
+    // 无目录权限）不阻断启动：显式 eprintln 后降级 stdout 单写（文件面是诊断
+    // 双写，非关键路径）。
+    let (file_layer, log_guard) = match tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("kernel.log")
+        // D3：保留上限 30 份——daily 轮转无限累积会让 logs/ 目录随运行时长
+        // 无界增长（长期驻留内核的磁盘治理面）。
+        .max_log_files(30)
+        .build("logs")
+    {
+        Ok(appender) => {
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            (
+                Some(
+                    fmt::layer()
+                        .with_target(false)
+                        .with_ansi(false)
+                        .with_writer(writer),
+                ),
+                Some(guard),
+            )
+        }
+        Err(e) => {
+            eprintln!("[boot] 日志文件轮转初始化失败（仅 stdout 日志可用）: {e}");
+            (None, None)
+        }
+    };
+    // guard 必须活到进程退出（提前丢 guard = 缓冲日志丢失），绑定在 async_main 帧
+    let _log_guard = log_guard;
+
     tracing_subscriber::registry()
+        .with(file_layer)
         .with(fmt::layer().with_target(false))
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -97,13 +254,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let host = std::env::var("AGENTOS_KERNEL_HOST").unwrap_or_else(|_| "0.0.0.0".into());
+    let host = resolve_bind_host();
     let port: u16 = std::env::var("AGENTOS_KERNEL_PORT")
         .unwrap_or_else(|_| "9100".into())
         .parse()
         .unwrap_or(9100);
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+    if !addr.ip().is_loopback() {
+        warn!(
+            target: "agentos-kernel",
+            bind = %addr,
+            "内核绑定在非回环地址：HTTP/WS API 外网可达。仅限可信网络部署"
+        );
+    }
 
     info!(target: "agentos-kernel", "========================================");
     info!(target: "agentos-kernel", "  AgentOS 0.2 内核启动");
@@ -441,10 +605,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (store, sqlite_db) = agentos_engine::storage_factory::open_storage(&storage_cfg)?;
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
 
-    // 播种内置 admin 用户（0.5.0 最小持久化地基）。
-    // 首次启动时若 users 表无 admin，插入（admin/admin12345/tenant=default）。
-    // 之后 login/me/register 均查 DB；进程重启用户不丢。幂等：已存在则跳过。
+    // 播种内置 admin 用户（0.5.0 最小持久化地基）：argon2 哈希落库 +
+    // must_change_password=true；存量明文口令行启动迁移哈希化（D1，fail-closed）。
     seed_admin_user(store.clone()).await;
+    if let Err(e) = migrate_plaintext_passwords(store.clone()).await {
+        eprintln!(
+            "[boot] 明文口令迁移失败，拒绝启动: {e}\n\
+             处置：设置 AGENTOS_ADMIN_PASSWORD=<新口令> 重启（重置 admin 口令），或修复存储后重试"
+        );
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+        return Err(Box::<dyn std::error::Error>::from(format!(
+            "plaintext password migration failed at boot: {e}"
+        )));
+    }
 
     // B2：启动时清扫孤儿 run——上次进程崩溃留下的 status='running' 的 run
     // 标记为 failed + 补 ended_at（persist_run_end 未执行的真实表现；不清扫会永远卡
@@ -452,9 +625,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // B2 清扫是 SQLite 专有路径（reap_orphan_runs 固有方法）——非 SQLite driver
     // 跳过（孤儿 run 清扫属启动家政，跳过不影响正确性，仅留状态悬空到下次 sqlite 起时清）。
     if let Some(sqlite) = sqlite_db.as_ref() {
-        let reaped = sqlite.reap_orphan_runs("default").unwrap_or(0);
+        let reaped = sqlite.reap_orphan_runs().unwrap_or(0);
         if reaped > 0 {
             warn!(target: "agentos-kernel", reaped = reaped, "启动清扫孤儿 run（标记为 failed）");
+        }
+    }
+
+    // traces/blobs 保留清扫（ADR 2026-09-11）：traces 按
+    // AGENTOS_TRACE_RETENTION_DAYS（默认 90，0 = 禁用）保留窗口滚动清除，
+    // 孤儿 blob（不被 message_slots 引用）同步回收——无保留机制两表无界增长。
+    // purge SQL 与保留期解析在 engine store 侧，此处只接线：interval 首 tick
+    // 立即到期 = 启动清一次 + 之后每 6h；关停随 runtime drop 自然退出。
+    // 单轮失败 warn 留痕、下周期重试（家政失败不阻断内核）。
+    if let Some(sqlite) = sqlite_db.clone() {
+        let retention_days = agentos_engine::store::trace_retention_days();
+        if retention_days == 0 {
+            info!(
+                target: "agentos-kernel",
+                "traces/blobs 保留清扫禁用（AGENTOS_TRACE_RETENTION_DAYS=0）"
+            );
+        } else {
+            info!(
+                target: "agentos-kernel",
+                retention_days,
+                "traces/blobs 保留清扫启用（启动清一次 + 每 6h 周期）"
+            );
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    // retention_days 经 trace_retention_days 钳制（≤36_500 天），
+                    // cutoff 必在 DateTime 值域内。
+                    let cutoff = chrono::Utc::now()
+                        - chrono::Duration::seconds(retention_days as i64 * 86_400);
+                    match sqlite.purge_traces_older_than(cutoff).await {
+                        Ok(0) => {}
+                        Ok(purged) => {
+                            info!(target: "agentos-kernel", purged, "trace 保留清扫完成")
+                        }
+                        Err(e) => warn!(
+                            target: "agentos-kernel",
+                            error = %e,
+                            "trace 保留清扫失败（下周期重试）"
+                        ),
+                    }
+                    match sqlite.purge_orphan_blobs().await {
+                        Ok(0) => {}
+                        Ok(purged) => {
+                            info!(target: "agentos-kernel", purged, "孤儿 blob 清扫完成")
+                        }
+                        Err(e) => warn!(
+                            target: "agentos-kernel",
+                            error = %e,
+                            "孤儿 blob 清扫失败（下周期重试）"
+                        ),
+                    }
+                }
+            });
         }
     }
 
@@ -647,7 +875,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // M5：动态 capability handler 注册表 + McpBridge。
     // 扫描已启用 manifest 的 provides.capabilities，注册成 handler；
     // McpBridge 把 capability 调用转发到对应 sidecar 插件的工具。
-    // 这让 human-interaction 等插件自注册的 namespace 经 reader loop → router →
+    // 这让交互等插件自注册的 namespace 经 reader loop → router →
     // handler → bridge → invoker.invoke_tool → sidecar 完成闭环。
     // 路由完全从 manifest provides.capabilities 声明派生（含 tool_prefix），
     // 内核零硬编码——新插件声明 provides 即自动注册，无需改内核。
@@ -837,6 +1065,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
+    // 强制注入工具声明查询闭包（P1-5 声明化）：tool-surface 过滤时收集全部
+    // 插件 manifest force_include_tools 并集（如 spill_guard 声明 spill_retrieve）。
+    // 锁被占用（热重载写中）时按无声明降级——零强制注入，不阻塞读面。
+    let force_include_tools_lookup: agentos_api::capability_router::ForceIncludeToolsLookupFn = {
+        let manifests_for_forced = manifests_shared.clone();
+        Arc::new(move || {
+            manifests_for_forced
+                .try_read()
+                .map(|guard| {
+                    guard
+                        .iter()
+                        .flat_map(|m| m.force_include_tools.iter().cloned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    };
+
     // 管道恢复派发闭包（resume_pipeline 续跑拉起）：经 EngineDispatcher 走与
     // 聊天/催促同一条派发链。dispatcher 构造晚于 router（AppState 之后，见下方
     // chat handler 注册块），经 OnceLock 槽位二阶段接线——未 set 前调用报
@@ -850,12 +1096,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline_resumer: agentos_api::capability_router::PipelineResumerFn = {
         let slot = resume_dispatcher_slot.clone();
         Arc::new(
-            move |pipeline_id: String, thread_id: String, user_id: String| {
+            move |pipeline_id: String,
+                  thread_id: String,
+                  user_id: String,
+                  state_overlay: Option<serde_json::Value>| {
                 let slot = slot.clone();
                 Box::pin(async move {
                     let dispatcher = slot
                         .get()
                         .ok_or_else(|| "恢复派发通道未就绪（dispatcher 尚未装配）".to_string())?;
+                    // 调用方 overlay（如任务域清 task.status 终态键）不透明透传，
+                    // 并入 _skip_user_append（续跑轮恒不落 user 消息）。
+                    let mut overlay = state_overlay.unwrap_or_else(|| serde_json::json!({}));
+                    if let Some(obj) = overlay.as_object_mut() {
+                        obj.insert("_skip_user_append".into(), serde_json::json!(true));
+                    }
                     dispatcher
                         .dispatch_user_input(
                             &thread_id,
@@ -864,7 +1119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &pipeline_id,
                             "",
                             None,
-                            Some(&serde_json::json!({"_skip_user_append": true})),
+                            Some(&overlay),
                             "",
                             "",
                             agentos_core::types::PendingInputSource::Trigger,
@@ -889,8 +1144,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_domain_broadcaster(domain_broadcaster)
         .with_streaming_declaration_lookup(streaming_declaration_lookup)
         .with_export_fields_lookup(export_fields_lookup)
+        .with_force_include_tools_lookup(force_include_tools_lookup)
         .with_pipeline_resumer(pipeline_resumer)
         .with_capability_contracts(capability_contracts.clone());
+    // SQLite 固有面：suspend/resume 挂起凭据读写（审批挂起恢复链写侧）。
+    if let Some(sqlite) = sqlite_db.as_ref() {
+        router_builder = router_builder.with_sqlite(sqlite.clone());
+    }
     // AGENTOS_GRANTS_STRICT=1：未声明 granted_capabilities 的插件反向调用一律
     // 拒绝（fail-closed）。启动期读取——开关随进程生效，不随插件热发现翻转。
     if std::env::var("AGENTOS_GRANTS_STRICT").as_deref() == Ok("1") {
@@ -984,7 +1244,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // G10：加载期编译。when 语法错误 / 引用不存在的 step 或插件 / composite
     // 引用环——不阻断启动：warn 留痕，运行时热重载路径（server.rs
     // maybe_reload_compiled_pipeline）在每次请求前重新加载+编译，配置修复后
-    // 自动生效；修复前 chat 走空管道降级（与"缺省配置下内核可启动"一致）。
+    // 自动生效；编译产物缺失/失败期间 chat 走空管道降级（与"缺省配置下内核
+    // 可启动"一致）。
     match agentos_api::server::load_and_compile(&config_root, &plugin_ids) {
         Ok(compiled) => {
             // boot 后台预热：管道引用的 sidecar 宿主提前 spawn 进缓存，消除
@@ -1092,7 +1353,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_metrics(metrics_aggregator.clone())
         // M1：注册账本 + widget 绑定表（disable 结构性收回）
         .with_plugin_scopes(plugin_scopes.clone())
-        .with_widget_bindings(Arc::clone(&widget_bindings_shared));
+        .with_widget_bindings(Arc::clone(&widget_bindings_shared))
+        // 闸2·观测：boot 期 G2 校验结果与 /plugins/contract-status 面板同账本
+        // （boot upsert 的 not_covered/derived 行落同一 Arc 实例，面板可见）。
+        .with_contract_states(contract_states.clone());
     // P2：启用会话内核（WS 握手鉴权 + 连接注册 + 入站路由 + 断线重放）。
     // 复用 router 已持有的 session_coord（流式 chunk 推送与 WS 出站共享同一 SessionCoordinator）。
     let state = state.enable_session_with(session_coord);
@@ -1250,13 +1514,202 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 运行期 PUT enabled 的写盘结果，卸载→重装按旧快照会把已禁用插件重新
         // 注册（运行期禁用被静默撤销）。
         .with_profile_reload(config_root.clone())
+        // 闸2·观测：热发现校验结果收口进同一账本（新插件契约状态写入，
+        // 与 boot/validate-all 面板数据同源）。
+        .with_contract_states(contract_states.clone())
         .spawn();
         info!(target: "agentos-kernel", "Plugin hot-discover watcher spawned (notify + polling fallback; cdylib change -> G8 auto-restart)");
+    }
+
+    // 内存维护（2026-09-09 零页普查：旧进程 860MB Private 中 557MB 为全零页）：
+    // purge_delay=0 只归还"整体变空的页"，多 arena 成长后空块散布在各页内，
+    // 需周期性 mi_collect 强制扫描收缩空闲 arena。
+    // M1 测量面：同一循环内每 60s 采集 mimalloc 统计快照打日志（先采样后
+    // collect——collect 会收缩 committed，若先 collect 再采样会掩盖滞留自然值），
+    // 增量判活增长 vs 滞留由消费方对两次快照相减（mimalloc 无增量 delta API）。
+    // collect 保持原 300s 节奏（含启动首拍即 collect：ticks 1,6,11…）。
+    // 注意：libmimalloc-sys release 构建下 MI_STAT=0，malloc 计量面
+    // （live_mb/allocs）恒 0，可信信号是 committed/rss/commit/purged——
+    // 见 agentos_api::allocator::MemStats 文档。
+    {
+        let mut maint = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut ticks: u64 = 0;
+        tokio::spawn(async move {
+            loop {
+                maint.tick().await;
+                ticks += 1;
+                let stats = agentos_api::allocator::snapshot_stats();
+                info!(
+                    target: "agentos-kernel",
+                    committed_mb = stats.committed_bytes.map(|b| b / (1024 * 1024)),
+                    rss_mb = stats.process_rss_bytes.map(|b| b / (1024 * 1024)),
+                    commit_mb = stats.process_commit_bytes.map(|b| b / (1024 * 1024)),
+                    purged_mb = stats.purged_bytes.map(|b| b / (1024 * 1024)),
+                    reserved_mb = stats.reserved_bytes.map(|b| b / (1024 * 1024)),
+                    abandoned_pages = stats.abandoned_pages,
+                    live_mb = stats.in_use_bytes.map(|b| b / (1024 * 1024)),
+                    allocs = stats.total_allocs,
+                    "mimalloc stats snapshot"
+                );
+                if ticks % 5 == 1 {
+                    unsafe { libmimalloc_sys::mi_collect(true) };
+                }
+            }
+        });
+    }
+
+    // 内存水位监控（可选自愈兜底，**默认关闭**——2026-09-10 用户裁定：水位
+    // 重启可能打断正常业务）：显式设置 AGENTOS_MEM_WATERMARK_MB 为正值才启用；
+    // 启用后每 60s 采样自身 Private Bytes，连续 N 次超阈值 → 走与 G8 cdylib
+    // 重启相同的 drain_and_exit75 排空路径（exit 75，监督脚本拉起新进程）。
+    // AGENTOS_MEM_WATERMARK_MIN=持续分钟数（默认 10；采样间隔固定 60s）。
+    {
+        let watermark_db = state.db.clone();
+        let watermark_invoker = state.invoker.clone();
+        tokio::spawn(async move {
+            const SAMPLE_INTERVAL_SECS: u64 = 60;
+            let Some((threshold_mb, sustain_minutes)) = resolve_watermark_config() else {
+                info!(
+                    target: "agentos-kernel",
+                    "内存水位监控默认关闭（不会触发重启）；显式设置 AGENTOS_MEM_WATERMARK_MB=<MB> 可启用自愈"
+                );
+                return;
+            };
+            let consecutive = ((sustain_minutes * 60) / SAMPLE_INTERVAL_SECS).max(1) as usize;
+            info!(
+                target: "agentos-kernel",
+                threshold_mb,
+                consecutive,
+                sample_interval_secs = SAMPLE_INTERVAL_SECS,
+                "内存水位监控已启动（持续超限即排空重启自愈）"
+            );
+            let mut recent: Vec<u64> = Vec::with_capacity(consecutive);
+            let mut tick =
+                tokio::time::interval(std::time::Duration::from_secs(SAMPLE_INTERVAL_SECS));
+            loop {
+                tick.tick().await;
+                let Some(usage_bytes) = sample_private_bytes() else {
+                    continue; // 采样不可用（非 Windows/API 失败）：缺数不判，绝不误自愈
+                };
+                recent.push(usage_bytes / (1024 * 1024));
+                // 滑动窗口只留判定所需样本，长运行监控自身不积内存
+                let keep_from = recent.len().saturating_sub(consecutive);
+                recent.drain(..keep_from);
+                if watermark_breach(&recent, threshold_mb, consecutive) {
+                    warn!(
+                        target: "agentos-kernel",
+                        threshold_mb,
+                        consecutive,
+                        latest_mb = recent.last().copied().unwrap_or(0),
+                        "内存水位持续超限（自愈）：排空在途 runs 后 exit 75，监督脚本拉起新进程"
+                    );
+                    agentos_api::routes::drain_and_exit75(
+                        watermark_db.as_ref(),
+                        watermark_invoker.clone(),
+                        "memory watermark self-heal: private bytes 持续超阈值",
+                    )
+                    .await;
+                    // 逃生门（AGENTOS_DISABLE_SELF_EXIT=1）下 drain 只排空不退出：
+                    // 停止本监控，避免每 60s 重复排空；进程交人工处置。
+                    break;
+                }
+            }
+        });
     }
 
     start_server(addr, state).await?;
 
     Ok(())
+}
+
+/// 阻塞池上限（线程治理）：tokio 默认 512 且按需增长。默认值取 512 = tokio
+/// 原生默认——b18a11312 曾默认 16，实测 30+ sidecar 并发阻塞调用（SQLite
+/// state 读写等）排队饿死，`pipeline-state.list` 60s 超时成片失败（2026-09-09
+/// 真机实证）。`AGENTOS_MAX_BLOCKING_THREADS` 可调；未设置/解析失败/非正值
+/// 回落默认 512。
+fn resolve_max_blocking_threads() -> usize {
+    std::env::var("AGENTOS_MAX_BLOCKING_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(512)
+}
+
+/// 线程栈大小（线程治理，KiB 单位）：默认 2048 KiB = tokio 默认 2MiB（行为不变，
+/// 长运行可调小压缩虚拟内存预留）。`AGENTOS_THREAD_STACK_KIB` 未设置/解析失败/
+/// 非正值回落默认。
+fn resolve_thread_stack_size() -> usize {
+    std::env::var("AGENTOS_THREAD_STACK_KIB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&kib| kib > 0)
+        .map(|kib| kib * 1024)
+        .unwrap_or(2048 * 1024)
+}
+
+/// 水位自愈配置（MB 阈值, 持续分钟数）。**默认关闭**（2026-09-10 用户裁定：
+/// 水位重启可能打断正常业务，不得默认触发）——显式设置 `AGENTOS_MEM_WATERMARK_MB`
+/// 为正值才启用；未设置 / 0 / 非法值 = 不启动监控。`AGENTOS_MEM_WATERMARK_MIN`
+/// 仅在启用时生效（默认 10 分钟）。
+fn resolve_watermark_config() -> Option<(u64, u64)> {
+    let threshold_mb = std::env::var("AGENTOS_MEM_WATERMARK_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)?;
+    let sustain_minutes = std::env::var("AGENTOS_MEM_WATERMARK_MIN")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(10);
+    Some((threshold_mb, sustain_minutes))
+}
+
+/// 水位判定（纯函数）：最近 `consecutive` 个采样全部**严格大于** `threshold_mb`
+/// 才判突破（瞬时尖峰不触发，恰好等于阈值不算超）。样本不足 `consecutive`
+/// 个一律不判（含 `consecutive == 0` 防御）。
+fn watermark_breach(samples: &[u64], threshold_mb: u64, consecutive: usize) -> bool {
+    if consecutive == 0 || samples.len() < consecutive {
+        return false;
+    }
+    samples[samples.len() - consecutive..]
+        .iter()
+        .all(|&mb| mb > threshold_mb)
+}
+
+/// 采样当前进程 Private Bytes（字节）。经 windows-sys 的 K32GetProcessMemoryInfo
+/// 读 PROCESS_MEMORY_COUNTERS_EX.PrivateUsage（commit charge，与任务管理器
+/// "提交大小"同口径）。取舍：该 crate 仅 FFI 声明零运行时开销，且已是本仓依赖图
+/// 既有传递依赖（Cargo.lock 0.52.0，零新增下载）；否决了每 60s spawn powershell
+/// Get-Process 的替代方案（进程启动秒级开销 + 依赖 powershell 在 PATH）。
+#[cfg(windows)]
+fn sample_private_bytes() -> Option<u64> {
+    use std::mem::zeroed;
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let mut counters: PROCESS_MEMORY_COUNTERS_EX = unsafe { zeroed() };
+    counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+    // K32GetProcessMemoryInfo 收基类指针；cb 声明为 EX 尺寸时 Windows 会补填
+    // 尾部扩展字段 PrivateUsage（ProcessStatus API 契约）。
+    let ok = unsafe {
+        K32GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS,
+            counters.cb,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(counters.PrivateUsage as u64)
+}
+
+/// 非 Windows 平台无采样实现：恒 None（监控诚实缺数，不判突破、不自愈）。
+#[cfg(not(windows))]
+fn sample_private_bytes() -> Option<u64> {
+    None
 }
 
 /// 解析用户插件根目录（可写，第三方插件安装位置）。
@@ -1358,19 +1811,43 @@ pub(crate) fn build_plugin_loader(
 mod tests {
     use super::*;
 
-    /// 管理员初始密码解析：DEFAULT_ADMIN_PASSWORD 设置时优先生效，未设置回退内置默认。
-    /// 两个分支串在一个测试内执行：环境变量是进程全局态，拆两个测试会互相竞争。
+    /// 管理员初始口令解析（D1）：AGENTOS_ADMIN_PASSWORD 设置时原样生效；
+    /// 未设置时生成随机口令——绝不等于任何硬编码值，且每次生成互不相同
+    /// （性质断言）。两个分支串在一个测试内执行：环境变量是进程全局态，
+    /// 拆两个测试会互相竞争。
     #[test]
-    fn admin_password_env_overrides_builtin_default() {
-        std::env::remove_var("DEFAULT_ADMIN_PASSWORD");
-        assert_eq!(resolve_admin_password(), "admin12345");
-        assert!(
-            resolve_admin_password().len() >= 8,
-            "回退默认密码须满足最小长度契约"
+    fn admin_password_env_overrides_and_random_fallback() {
+        std::env::remove_var("AGENTOS_ADMIN_PASSWORD");
+        let (random1, generated1) = resolve_admin_password();
+        let (random2, generated2) = resolve_admin_password();
+        assert!(generated1 && generated2, "未设置环境变量必须走随机生成");
+        assert!(random1.len() >= 24, "随机口令须满足长度下限（128 bit hex）");
+        assert_ne!(random1, random2, "两次生成必须互不相同（随机性）");
+        std::env::set_var("AGENTOS_ADMIN_PASSWORD", "custom-secret-pw");
+        let (explicit, generated) = resolve_admin_password();
+        assert!(!generated, "显式环境变量不算生成");
+        assert_eq!(explicit, "custom-secret-pw");
+        std::env::remove_var("AGENTOS_ADMIN_PASSWORD");
+    }
+
+    /// 监听地址解析（D12）：默认 127.0.0.1；AGENTOS_BIND 显式生效；
+    /// 弃用别名 AGENTOS_KERNEL_HOST 过渡期仍被采纳。
+    #[test]
+    fn bind_host_default_is_loopback() {
+        for k in ["AGENTOS_BIND", "AGENTOS_KERNEL_HOST"] {
+            std::env::remove_var(k);
+        }
+        assert_eq!(resolve_bind_host(), "127.0.0.1", "默认必须绑定回环地址");
+        std::env::set_var("AGENTOS_BIND", "0.0.0.0");
+        assert_eq!(
+            resolve_bind_host(),
+            "0.0.0.0",
+            "AGENTOS_BIND 显式开启外网可达"
         );
-        std::env::set_var("DEFAULT_ADMIN_PASSWORD", "custom-secret-pw");
-        assert_eq!(resolve_admin_password(), "custom-secret-pw");
-        std::env::remove_var("DEFAULT_ADMIN_PASSWORD");
+        std::env::remove_var("AGENTOS_BIND");
+        std::env::set_var("AGENTOS_KERNEL_HOST", "192.168.1.9");
+        assert_eq!(resolve_bind_host(), "192.168.1.9", "弃用别名过渡期生效");
+        std::env::remove_var("AGENTOS_KERNEL_HOST");
     }
 
     /// P0-1：build_plugin_loader 接入 config_root 后，load_config 返回非空（含 models 节）。
@@ -1419,5 +1896,81 @@ mod tests {
         );
         let llm = models.get("llm").and_then(|v| v.as_object()).unwrap();
         assert!(llm.contains_key("providers"), "llm.yaml 内容应含 providers");
+    }
+
+    /// 线程治理可调项：未设置 → 默认（blocking 16、栈 2048KiB = tokio 默认
+    /// 2MiB）；显式设置生效（KiB → 字节换算）；非法/非正值回落默认。环境变量
+    /// 是进程全局态，分支串在一个测试内执行（同文件既有测试同款约定）。
+    #[test]
+    fn thread_governance_env_defaults_and_overrides() {
+        std::env::remove_var("AGENTOS_MAX_BLOCKING_THREADS");
+        std::env::remove_var("AGENTOS_THREAD_STACK_KIB");
+        assert_eq!(resolve_max_blocking_threads(), 512);
+        assert_eq!(resolve_thread_stack_size(), 2048 * 1024);
+
+        std::env::set_var("AGENTOS_MAX_BLOCKING_THREADS", "32");
+        std::env::set_var("AGENTOS_THREAD_STACK_KIB", "512");
+        assert_eq!(resolve_max_blocking_threads(), 32);
+        assert_eq!(resolve_thread_stack_size(), 512 * 1024);
+
+        std::env::set_var("AGENTOS_MAX_BLOCKING_THREADS", "not-a-number");
+        std::env::set_var("AGENTOS_THREAD_STACK_KIB", "0");
+        assert_eq!(resolve_max_blocking_threads(), 512, "非法值回落默认");
+        assert_eq!(resolve_thread_stack_size(), 2048 * 1024, "非正值回落默认");
+
+        std::env::remove_var("AGENTOS_MAX_BLOCKING_THREADS");
+        std::env::remove_var("AGENTOS_THREAD_STACK_KIB");
+    }
+
+    /// 水位配置：**默认 None（关闭）**；显式正值启用；0/非法值=关闭；
+    /// 启用时 _MIN 缺省 10。环境变量进程全局态，分支串单测试执行。
+    #[test]
+    fn watermark_env_defaults_and_overrides() {
+        std::env::remove_var("AGENTOS_MEM_WATERMARK_MB");
+        std::env::remove_var("AGENTOS_MEM_WATERMARK_MIN");
+        assert_eq!(resolve_watermark_config(), None, "未设置=默认关闭");
+
+        std::env::set_var("AGENTOS_MEM_WATERMARK_MB", "500");
+        std::env::set_var("AGENTOS_MEM_WATERMARK_MIN", "3");
+        assert_eq!(resolve_watermark_config(), Some((500, 3)));
+
+        // _MIN 未设/非法/非正：启用状态下回落默认 10（一维非法不拖累另一维）
+        std::env::remove_var("AGENTOS_MEM_WATERMARK_MIN");
+        assert_eq!(resolve_watermark_config(), Some((500, 10)));
+
+        std::env::set_var("AGENTOS_MEM_WATERMARK_MB", "0");
+        std::env::set_var("AGENTOS_MEM_WATERMARK_MIN", "0");
+        assert_eq!(resolve_watermark_config(), None, "0=显式关闭");
+
+        std::env::set_var("AGENTOS_MEM_WATERMARK_MB", "bogus");
+        assert_eq!(resolve_watermark_config(), None, "非法值=关闭");
+
+        std::env::remove_var("AGENTOS_MEM_WATERMARK_MB");
+        std::env::remove_var("AGENTOS_MEM_WATERMARK_MIN");
+    }
+
+    /// 水位判定（纯函数）三组：正常（低于阈值不触发）、临界（恰等于阈值不算
+    /// "超"；单次尖峰后回落不触发——连续性被打断）、持续超限（连续窗口全超
+    /// 触发）。另覆盖：长样本只看最近 consecutive 个（性质：判定只依赖尾部
+    /// 窗口）、样本不足不判、阈值升高翻转结果。
+    #[test]
+    fn watermark_breach_requires_sustained_strict_exceedance() {
+        // 正常：全部低于阈值
+        assert!(!watermark_breach(&[100, 200, 299], 300, 3));
+        // 临界：恰好等于阈值不算超（严格大于）
+        assert!(!watermark_breach(&[300, 300, 300], 300, 3));
+        // 临界：尖峰后回落，连续性打断不触发（回落落在尾部窗口内）
+        assert!(!watermark_breach(&[400, 400, 200, 400, 400], 300, 3));
+        // 持续超限：恰好 consecutive 个全超 → 触发
+        assert!(watermark_breach(&[301, 500, 900], 300, 3));
+        // 性质：判定只依赖尾部 consecutive 窗口——前缀任意不影响结果
+        assert!(watermark_breach(&[200, 301, 500, 900], 300, 3));
+        assert!(!watermark_breach(&[900, 900, 900, 900, 200], 300, 3));
+        // 样本不足 consecutive 个不判
+        assert!(!watermark_breach(&[900], 300, 3));
+        // consecutive = 0 防御（不判）
+        assert!(!watermark_breach(&[900, 900], 300, 0));
+        // 阈值升高翻转结果（单调性）
+        assert!(!watermark_breach(&[301, 500, 900], 900, 3));
     }
 }

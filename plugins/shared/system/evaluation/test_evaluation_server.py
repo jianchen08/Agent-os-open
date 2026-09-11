@@ -145,6 +145,30 @@ class TestEvaluationRun:
         missing = asyncio.run(srv.get_result("eval_nonexistent"))
         assert missing["error"] == "evaluation not found"
 
+    def test_results_bounded_storage_stamps_ts_and_read_face_unchanged(
+        self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """D2 接入：_results 经 BoundedDict 收敛——写入条目带 ts，get 读取面不变。"""
+        from bounded_dict import BoundedDict
+
+        srv = _load_server_module(monkeypatch, metrics_root)
+        assert isinstance(srv._results, BoundedDict)
+        f = tmp_path / "b.txt"
+        f.write_text("", encoding="utf-8")
+        summary = asyncio.run(
+            srv.evaluation_run(
+                task_id="t-bd",
+                metrics=[{"metric_id": "m", "type": "file_check", "params": {"path": str(f)}}],
+            )
+        )
+        stored = srv._results[summary["eval_id"]]
+        assert isinstance(stored["ts"], float) and stored["ts"] > 0
+        # 读取面零变化：get_result 返回完整 summary（含原有字段）
+        got = asyncio.run(srv.get_result(summary["eval_id"]))
+        assert got["task_id"] == "t-bd"
+        assert got["all_passed"] is True
+        assert got["results"] == summary["results"]
+
 
 def _decode_body(envelope: dict[str, Any]) -> tuple[int, Any]:
     assert envelope["success"] is True

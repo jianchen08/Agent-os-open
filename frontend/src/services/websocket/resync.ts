@@ -32,8 +32,8 @@
 
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { loggers } from '@/utils/logger'
-import { adaptWidgetEvent } from './MessageAdapter'
 import { globalWS } from './GlobalWebSocket'
+import { adaptWidgetEvent } from './MessageAdapter'
 
 const _wsLogger = loggers.websocket
 

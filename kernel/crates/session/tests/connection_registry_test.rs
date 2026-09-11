@@ -27,6 +27,29 @@ impl MockSink {
     }
 }
 
+/// 发送恒失败的 sink：构造 broadcast 死连接清理路径。
+struct FailingSink {
+    id: u64,
+}
+
+impl FailingSink {
+    fn new() -> Arc<Self> {
+        Arc::new(FailingSink {
+            id: NEXT_ID.fetch_add(1, Ordering::SeqCst),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl EventSink for FailingSink {
+    async fn send_text(&self, _text: &str) -> bool {
+        false
+    }
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
 #[async_trait::async_trait]
 impl EventSink for MockSink {
     async fn send_text(&self, text: &str) -> bool {
@@ -179,4 +202,115 @@ async fn broadcast_delivers_to_all_connections() {
     assert_eq!(count, 2, "应投递给所有活跃连接");
     assert_eq!(sent_a.lock().unwrap()[0], "announce");
     assert_eq!(sent_b.lock().unwrap()[0], "announce");
+}
+
+/// 为 user 注册覆盖三张映射的 thread 条目。
+fn register_thread_triple(registry: &ConnectionRegistry, thread_id: &str, user_id: &str) {
+    registry.register_thread(thread_id, user_id);
+    registry.register_thread_pipeline(thread_id, "pipe-1");
+    registry.register_thread_agent(thread_id, "agent-1");
+}
+
+fn assert_thread_triple_gone(registry: &ConnectionRegistry, thread_id: &str) {
+    assert_eq!(
+        registry.get_user_for_thread(thread_id),
+        None,
+        "注销后 thread→user 条目应清除"
+    );
+    assert_eq!(
+        registry.get_pipeline_for_thread(thread_id),
+        None,
+        "注销后 thread→pipeline 条目应清除"
+    );
+    assert_eq!(
+        registry.get_agent_for_thread(thread_id),
+        None,
+        "注销后 thread→agent 条目应清除"
+    );
+}
+
+#[tokio::test]
+async fn unregister_purges_all_thread_maps_of_that_connection() {
+    let registry = ConnectionRegistry::new();
+    let (sink, _) = MockSink::new();
+    registry.register("user-A", sink.clone());
+    register_thread_triple(&registry, "thread-1", "user-A");
+    register_thread_triple(&registry, "thread-2", "user-A");
+
+    registry.unregister("user-A", sink.id());
+
+    assert!(registry.get_by_user("user-A").is_none());
+    assert_thread_triple_gone(&registry, "thread-1");
+    assert_thread_triple_gone(&registry, "thread-2");
+    assert!(
+        registry.list_threads().is_empty(),
+        "该连接名下条目清除后列表应为空（无历史残留）"
+    );
+}
+
+#[tokio::test]
+async fn unregister_keeps_other_users_thread_maps() {
+    // 多连接共享注册表：映射按 thread 归属 user 唯一，注销 user-A 不得
+    // 波及 user-B 名下条目。
+    let registry = ConnectionRegistry::new();
+    let (sink_a, _) = MockSink::new();
+    let (sink_b, _) = MockSink::new();
+    registry.register("user-A", sink_a.clone());
+    registry.register("user-B", sink_b.clone());
+    register_thread_triple(&registry, "thread-a", "user-A");
+    register_thread_triple(&registry, "thread-b", "user-B");
+
+    registry.unregister("user-A", sink_a.id());
+
+    assert_thread_triple_gone(&registry, "thread-a");
+    assert_eq!(
+        registry.get_user_for_thread("thread-b"),
+        Some("user-B".to_string()),
+        "其他连接名下条目不得误删"
+    );
+    assert_eq!(
+        registry.get_pipeline_for_thread("thread-b"),
+        Some("pipe-1".to_string())
+    );
+}
+
+#[tokio::test]
+async fn stale_unregister_keeps_thread_maps_of_new_connection() {
+    // 旧连接的 finally 块注销（已被新连接替换）不得清除映射条目
+    let registry = ConnectionRegistry::new();
+    let (old_sink, _) = MockSink::new();
+    let (new_sink, _) = MockSink::new();
+    registry.register("user-A", old_sink.clone());
+    registry.register("user-A", new_sink.clone());
+    register_thread_triple(&registry, "thread-1", "user-A");
+
+    registry.unregister("user-A", old_sink.id());
+
+    assert!(registry.get_by_user("user-A").is_some(), "新连接仍在");
+    assert_eq!(
+        registry.get_user_for_thread("thread-1"),
+        Some("user-A".to_string()),
+        "被替换连接的注销不得清除映射"
+    );
+}
+
+#[tokio::test]
+async fn broadcast_dead_connection_purges_thread_maps() {
+    // broadcast 清理发送失败的连接 = 注销语义：thread 映射同步清除
+    let registry = ConnectionRegistry::new();
+    registry.register("user-A", FailingSink::new());
+    let (sink_ok, _) = MockSink::new();
+    registry.register("user-B", sink_ok);
+    register_thread_triple(&registry, "thread-a", "user-A");
+    register_thread_triple(&registry, "thread-b", "user-B");
+
+    let delivered = registry.broadcast("announce").await;
+    assert_eq!(delivered, 1, "死连接不计入投递成功");
+    assert!(registry.get_by_user("user-A").is_none(), "死连接被清理");
+    assert_thread_triple_gone(&registry, "thread-a");
+    assert_eq!(
+        registry.get_user_for_thread("thread-b"),
+        Some("user-B".to_string()),
+        "存活连接名下条目不受影响"
+    );
 }

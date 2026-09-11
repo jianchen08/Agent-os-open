@@ -3,8 +3,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { FullscreenIcon, FullscreenExitIcon, FolderTree } from '@/assets/icons'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import type { WorkspaceTab } from '@/types/layout'
 
 /** 工作区面板属性 */

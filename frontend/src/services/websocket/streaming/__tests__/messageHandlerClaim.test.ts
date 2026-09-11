@@ -7,10 +7,10 @@
  * 不消失、id 不迁移」。
  */
 import { describe, it, expect, beforeEach } from 'vitest'
-import { handleNewMessage } from '../handlers/messageHandler'
-import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
+import { handleNewMessage } from '../handlers/messageHandler'
 
 const PIPELINE = 'c1b2c3d4e5f64789abcdef0123456789'
 const THREAD = 'thread-1'

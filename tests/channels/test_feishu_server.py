@@ -23,7 +23,7 @@ _CC_DIR = _FEISHU_DIR.parent / "channel_common"
 
 # 与 server.py 顶层 import 冲突的同名平铺模块
 _EVICT = {
-    "server", "adapter", "stream_client", "card_builder",
+    "server", "adapter", "stream_client",
     "input_adapter", "output_adapter", "base_combo_adapter", "pipeline_types",
 }
 
@@ -124,6 +124,23 @@ class TestFeishuServerLifecycle:
         r = await load_feishu_server.feishu_send_message("u1", "hi")
         assert "not initialized" not in r["error"]
         assert "not connected" in r["error"]
+
+    @pytest.mark.parametrize(
+        ("config", "missing_key"),
+        [
+            ({}, "app_id"),
+            ({"app_id": "cli_x", "app_secret": "   "}, "app_secret"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_empty_credential_rejects_load(
+        self, load_feishu_server, monkeypatch, config, missing_key
+    ) -> None:
+        """空凭据拒载（fail-fast）：点名缺失配置，adapter 不构造。"""
+        monkeypatch.setattr(load_feishu_server.plugin, "get_config", lambda: config)
+        with pytest.raises(RuntimeError, match=missing_key):
+            await load_feishu_server._on_load({})
+        assert load_feishu_server._adapter is None
 
     @pytest.mark.asyncio
     async def test_on_unload_stops_adapter(self, load_feishu_server) -> None:

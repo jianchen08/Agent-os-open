@@ -20,7 +20,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from isolation_types import (
+from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     IsolationContext,
     IsolationEnvironment,
@@ -100,6 +100,8 @@ async def test_concurrent_same_workspace_creates_once():
         ),
     )
 
+    # provider 是外部 docker 边界：同 workspace 恰好一次 create_environment
+    # （一个容器）即防竞态契约的外部可观察面。
     assert call_count == 1, f"create_environment 应只调用一次，实际 {call_count} 次（竞态未修复）"
     # 两个任务拿到同一个 env_id
     assert results[0].env_id == results[1].env_id

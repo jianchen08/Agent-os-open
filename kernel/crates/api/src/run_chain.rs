@@ -141,6 +141,51 @@ impl RunChainRegistry {
         });
         map.insert(key, ChainEntry { gen, handle: task });
     }
+
+    /// 原子"链空闲即直跑"（ADR-2026-09-11 条件入队）：在链表锁临界区内判断——
+    /// 链空闲则 spawn `fut` 占链并返回 true；链忙返回 false，调用方改走持久化
+    /// 入队路径。判定与占链同临界区，两个并发派发不会都拿到"空链"并行直跑。
+    ///
+    /// `fut` 尾部必须自行 pop pending 队列（收走占链竞态窗口内入队的消息），
+    /// FIFO 由"直跑先占链、后续 enqueue 排在其后"保证。
+    ///
+    /// # Arguments
+    /// 与 [`Self::enqueue`] 同语义：同 key 串行、跨 key 并行、gate 按活跃优先放行。
+    pub fn try_enqueue_direct<F>(
+        self: &Arc<Self>,
+        pipeline_key: &str,
+        user_id: &str,
+        fut: F,
+    ) -> bool
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if pipeline_key.is_empty() {
+            tokio::spawn(fut);
+            return true;
+        }
+        let rank = self.priority_rank(user_id, pipeline_key);
+        let registry = Arc::clone(self);
+        let key = pipeline_key.to_string();
+        let mut map = self.chains.lock();
+        if map.contains_key(&key) {
+            return false;
+        }
+        // 链空闲：占链 spawn（同 enqueue 机制，gen 从 0 起、无前序）。
+        let gen = 0u64;
+        let task_key = key.clone();
+        let task = tokio::spawn(async move {
+            let _guard = registry.gate.acquire(rank).await;
+            fut.await;
+            // 自清理同 enqueue：panic 时跳过，残留由下一次 enqueue 覆盖。
+            let mut map = registry.chains.lock();
+            if map.get(&task_key).map(|entry| entry.gen) == Some(gen) {
+                map.remove(&task_key);
+            }
+        });
+        map.insert(key, ChainEntry { gen, handle: task });
+        true
+    }
 }
 
 /// 全局并发闸门——limit=0 不限流；设限时按 (优先级, 到达序) 放行。
@@ -339,6 +384,74 @@ mod tests {
     async fn empty_key_bypasses_chain() {
         let reg = RunChainRegistry::new(0);
         reg.enqueue("", "", async {});
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(reg.active_chain_count(), 0, "空 key 不入链");
+    }
+
+    // ── try_enqueue_direct：链空闲原子直跑（ADR-2026-09-11 条件入队）──
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn try_direct_on_idle_chain_claims_and_runs() {
+        let reg = RunChainRegistry::new(0);
+        let log: Log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log2 = Arc::clone(&log);
+        let ran = reg.try_enqueue_direct("p1", "", async move {
+            log2.lock().push(7);
+        });
+        assert!(ran, "链空闲时必须直跑");
+        wait_drained(&reg).await;
+        assert_eq!(*log.lock(), vec![7], "直跑任务必须被执行");
+        assert_eq!(reg.active_chain_count(), 0, "跑完必须自清理占链");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn try_direct_on_busy_chain_returns_false_and_leaves_chain_intact() {
+        let reg = RunChainRegistry::new(0);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let holder_wait = Arc::clone(&release);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let started_wait = Arc::clone(&started);
+        let log: Log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log_holder = Arc::clone(&log);
+        reg.enqueue("p1", "", async move {
+            started_wait.notify_one();
+            let _ = holder_wait.notified().await;
+            log_holder.lock().push(1);
+        });
+        started.notified().await; // 占链任务已进入 fut（链非空）
+        let ran = reg.try_enqueue_direct("p1", "", async {});
+        assert!(!ran, "链忙时必须拒绝直跑交由调用方入队");
+        // 链条目未被直跑破坏：释放占链任务后照常执行并排空。
+        release.notify_one();
+        wait_drained(&reg).await;
+        assert_eq!(*log.lock(), vec![1], "原链任务必须不受直跑尝试影响");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn direct_then_enqueue_keeps_fifo_order() {
+        let reg = RunChainRegistry::new(0);
+        let log: Log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        // T1 直跑占链（慢任务）。
+        let log1 = Arc::clone(&log);
+        let ran = reg.try_enqueue_direct("p1", "", async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            log1.lock().push(0);
+        });
+        assert!(ran);
+        // 竞态窗口内 T2 走普通 enqueue：必须排在直跑之后（先到先跑）。
+        let log2 = Arc::clone(&log);
+        reg.enqueue("p1", "", async move {
+            log2.lock().push(1);
+        });
+        wait_drained(&reg).await;
+        assert_eq!(*log.lock(), vec![0, 1], "直跑先占链，后入队必须在其后 FIFO");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn empty_key_try_direct_bypasses_chain() {
+        let reg = RunChainRegistry::new(0);
+        let ran = reg.try_enqueue_direct("", "", async {});
+        assert!(ran, "空 key 无串行维度，照旧直跑");
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(reg.active_chain_count(), 0, "空 key 不入链");
     }

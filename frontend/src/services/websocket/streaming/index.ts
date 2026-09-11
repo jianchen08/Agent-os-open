@@ -1,8 +1,7 @@
 /** 全局流式事件服务（管道 ID 路由版本） 核心设计原则： */
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { WS_LOCAL_EVENTS, WS_SERVER_EVENTS } from '@/constants/websocket'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { loggers } from '@/utils/logger'
-
 import {
   handleBlockEnd,
   handleBlockStart,
@@ -26,7 +25,6 @@ import {
   handleCostUpdate,
   handleReconnected,
   handleSystemNotification,
-  handleTerminationStatus,
 } from './lifecycleHandlers'
 import { isPipelineRelevant, resolvePipelineId } from './router'
 
@@ -92,7 +90,6 @@ export function initStreamingEvents(): void {
   // 上游存活，前端无消费面（事件名透传到达时无订阅即静默）。
 
   _handlers[WS_SERVER_EVENTS.COST_UPDATE] = _logWrap(WS_SERVER_EVENTS.COST_UPDATE, handleCostUpdate)
-  _handlers[WS_SERVER_EVENTS.TERMINATION_STATUS] = _logWrap(WS_SERVER_EVENTS.TERMINATION_STATUS, handleTerminationStatus)
   // 2026-08-26 接线：后端 chat.send_message 后台派发失败经此补报
   // （统一错误模型：假成功显式化），前端渲染 system 错误气泡。
   _handlers[WS_SERVER_EVENTS.SYSTEM_NOTIFICATION] = _logWrap(
@@ -112,8 +109,8 @@ export function initStreamingEvents(): void {
   }
 
   // WS 重连后对正在 streaming 的管道调用 fetchMessages 做断线补漏
-  _handlers['reconnected'] = handleReconnected
-  globalWS.subscribe('reconnected', _handlers['reconnected'])
+  _handlers[WS_LOCAL_EVENTS.RECONNECTED] = handleReconnected
+  globalWS.subscribe(WS_LOCAL_EVENTS.RECONNECTED, _handlers[WS_LOCAL_EVENTS.RECONNECTED])
 }
 
 /** 销毁全局流式事件处理器 */

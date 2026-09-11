@@ -1,5 +1,6 @@
 /** 消息项组件 显示单条消息，支持用户消息和 AI 消息的不同样式 */
 
+import { memo, useEffect, useRef, useState } from 'react'
 import {
   AlertCircleIcon as AlertCircle,
   Bell,
@@ -13,29 +14,55 @@ import {
   Sparkles,
   User,
 } from '@/assets/icons'
-import { memo, useEffect, useRef, useState } from 'react'
-import ActivityCard from './ActivityCard'
-import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
-import { ImageGallery } from '@/components/media/ImageGallery'
 import { LobeChatMarkdown } from '@/components/chat/LobeChatMarkdown'
+import { ImageGallery } from '@/components/media/ImageGallery'
+import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
-import { ErrorType, reportError } from '@/services/errorReporting'
-import { openAttachment } from '@/services/attachmentOpener'
-import { useInteractionStore } from '@/stores/interactionStore'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
+import { cn } from '@/lib/utils'
+import { openAttachment } from '@/services/attachmentOpener'
+import { ErrorType, reportError } from '@/services/errorReporting'
+import { useInteractionStore } from '@/stores/interactionStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
-import { formatTimestamp } from '@/utils/format'
 import { toolCallToActivity } from '@/utils/activityConverter'
+import { formatTimestamp } from '@/utils/format'
 import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
+import ActivityCard from './ActivityCard'
 import useMessageRender from './hooks/useMessageRender'
 import { MessageActions } from './MessageActions'
 import MessageContentRenderer from './MessageContentRenderer'
 import { parseReferenceMessage, ReferenceChip } from './ReferenceChip'
 import type { MessageItemProps } from './types'
 import type { MessageToolCall } from '@/types/models'
+
+/** tool 消息状态 → ActivityStatus 映射（streaming 与 running 同义） */
+const TOOL_STATUS_MAP: Record<string, MessageToolCall['status']> = {
+  completed: 'completed',
+  failed: 'failed',
+  running: 'running',
+  streaming: 'running',
+  pending: 'pending',
+  cancelled: 'cancelled',
+}
+
+/** 已警告过的未知状态值（同一未知值只警告一次，长消息流不刷屏） */
+const warnedUnknownToolStatuses = new Set<string>()
+
+/**
+ * 解析 tool 消息状态：未知值不猜 completed（未知 ≠ 成功），
+ * 归入 pending 并 console.warn 提示词表外的新状态。
+ */
+function resolveToolStatus(raw: string): MessageToolCall['status'] {
+  const mapped = TOOL_STATUS_MAP[raw]
+  if (mapped) return mapped
+  if (!warnedUnknownToolStatuses.has(raw)) {
+    warnedUnknownToolStatuses.add(raw)
+    console.warn(`[MessageItem] 未知工具消息状态 "${raw}"，按 pending 渲染`)
+  }
+  return 'pending'
+}
 
 /** 消息编辑组件 */
 interface MessageEditorProps {
@@ -129,7 +156,6 @@ export const MessageItem = memo(function MessageItem({
   onEdit,
   onRegenerate,
   onRollbackTo,
-  modelName,
   className = '',
   searchQuery,
   taskId,
@@ -214,21 +240,12 @@ export const MessageItem = memo(function MessageItem({
     const toolError: unknown = message.toolError || message.metadata?.error
     const durationMs: unknown = message.durationMs || message.metadata?.duration_ms
 
-    const statusMap: Record<string, MessageToolCall['status']> = {
-      completed: 'completed',
-      failed: 'failed',
-      running: 'running',
-      streaming: 'running',
-      pending: 'pending',
-      cancelled: 'cancelled',
-    }
-
     const activity = toolCallToActivity(
       {
         call_id: message.toolCallId || message.id,
         tool_name: toolName,
         tool_args: (message.metadata?.args as Record<string, unknown> | undefined) ?? {},
-        status: statusMap[toolStatus] ?? 'completed',
+        status: resolveToolStatus(toolStatus),
         result: toolResult,
         resultData: message.toolResultData,
         error: typeof toolError === 'string' ? toolError : undefined,
@@ -324,9 +341,6 @@ export const MessageItem = memo(function MessageItem({
           </div>
         ) : (
           <>
-            {isAssistant && modelName && (
-              <div className="text-muted-foreground mb-1 px-1 text-xs">{modelName}</div>
-            )}
             {/* 空内容消息跳过气泡渲染 */}
             {(() => {
               const bubbleStyle = {
@@ -396,7 +410,8 @@ export const MessageItem = memo(function MessageItem({
               }
 
               if (isUser) {
-                // 插件注入的 Godot 引用消息（<reference source="godot">）：渲染为引用卡片行而非普通气泡
+                // 插件注入的引用消息（<reference source="...">）：渲染为引用卡片行而非普通气泡。
+                // 协议源无关（ADR 2026-09-10）：source 从内容解析，任何插件域的引用都可渲染
                 const refParsed = parseReferenceMessage(renderContext.displayContent || message.content)
                 if (refParsed && refParsed.items.length > 0) {
                   return (
@@ -406,12 +421,12 @@ export const MessageItem = memo(function MessageItem({
                       data-reference-source={refParsed.source}
                     >
                       <span className="text-muted-foreground shrink-0 text-[11px]">
-                        Godot 引用{refParsed.scene ? ` · ${refParsed.scene}` : ''}
+                        {refParsed.source} 引用{refParsed.scene ? ` · ${refParsed.scene}` : ''}
                       </span>
                       {refParsed.items.map((it) => (
                         <ReferenceChip
                           key={it.path}
-                          data={{ kind: 'godot-node', title: it.name, subtitle: `${it.type} @ ${it.path}` }}
+                          data={{ kind: `${refParsed.source}-node`, title: it.name, subtitle: `${it.type} @ ${it.path}` }}
                         />
                       ))}
                     </div>

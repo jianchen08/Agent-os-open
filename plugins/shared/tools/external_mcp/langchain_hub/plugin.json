@@ -1,7 +1,7 @@
 {
   "id": "langchain_hub_search",
   "name": "LangChain Hub Search",
-  "description": "LangChain Hub / LangSmith 平台适配器，搜索提示词模板和工具",
+  "description": "LangChain Hub / LangSmith 平台适配器，搜索提示词模板和工具\n\n[工具契约注] 「langchain_hub_search」的 output_schema 由远端 MCP 供给（MCP tools/list 运行时返回；output 形状由上游服务定义），plugin.json 不静态声明，仅保留 LLM 调用所需的 input_schema。",
   "version": "1.0.0",
   "plugin_type": "tool",
   "language": "external",

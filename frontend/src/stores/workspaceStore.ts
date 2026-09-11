@@ -2,9 +2,6 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { createTolerantStorage } from '@/utils/tolerantStorage'
-import type { Artifact } from '@/types/artifact'
-import type { Workspace, FileTreeNode } from '@/types/workspace'
 import {
   createEntry as apiCreateEntry,
   deleteEntry as apiDeleteEntry,
@@ -17,6 +14,9 @@ import {
   type FileTreeNodePayload,
   type ArtifactPayload,
 } from '@/services/api/workspaces'
+import { createTolerantStorage } from '@/utils/tolerantStorage'
+import type { Artifact } from '@/types/artifact'
+import type { Workspace, FileTreeNode } from '@/types/workspace'
 
 interface WorkspaceState {
   /** 以 container_task_id 为 key 的工作空间缓存 */
@@ -97,8 +97,7 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
     try {
       const { tree } = await apiGetFileTree(containerTaskId)
       const normalized = tree.map(_normalizeFileTreeNode)
-      // 更新缓存中的文件树
-      set((state) => {
+        set((state) => {
         const ws = state.workspaces[containerTaskId]
         if (ws) {
           return {

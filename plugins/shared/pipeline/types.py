@@ -4,7 +4,6 @@
 """
 from ._base.types import *  # noqa: F401, F403
 from ._base.types import (  # noqa: F401
-    ErrorPolicy,
     StateKeys,
     TargetType,
     create_initial_state,

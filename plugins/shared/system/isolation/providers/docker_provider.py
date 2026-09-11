@@ -3,12 +3,13 @@
 import asyncio
 import json
 import logging
+import os
 import shlex
 import shutil
 from datetime import UTC, datetime
 from typing import Any, ClassVar, cast
 
-from isolation_types import (
+from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,
@@ -558,6 +559,20 @@ class DockerProvider(IsolationProvider):
         # 见 __init__ 中 self._publish_ports 的说明。
         for port_spec in self._publish_ports:
             args.extend(["-p", str(port_spec)])
+        # Bridge 通路（沙箱内 MCP Client → 宿主 MCP Bridge 网关）：
+        # - --add-host 显式注入 host.docker.internal→host-gateway（WSL 原生
+        #   docker 非 Docker Desktop 时不会自动注入该特殊域名）。
+        # - AGENTOS_BRIDGE_URL/TOKEN 注入环境变量：bridge_client 容器路径
+        #   首选 env 地址（免探测）。token 缺失时容器内调用报清晰错误
+        #   （bridge_client._resolve_token 的提示），不静默降级。
+        if self._network_mode != "host":
+            args.extend(["--add-host", "host.docker.internal:host-gateway"])
+        bridge_url = self._bridge_url_for_container()
+        if bridge_url:
+            args.extend(["-e", f"AGENTOS_BRIDGE_URL={bridge_url}"])
+        bridge_token = os.environ.get("AGENTOS_BRIDGE_TOKEN", "")
+        if bridge_token:
+            args.extend(["-e", f"AGENTOS_BRIDGE_TOKEN={bridge_token}"])
         args += [
             "-i",
             "-t",
@@ -583,6 +598,51 @@ class DockerProvider(IsolationProvider):
         args.extend(["sh", "-c", "tail -f /dev/null"])
 
         return args
+
+    def _bridge_url_for_container(self) -> str:
+        """容器内可达的 MCP Bridge 地址（AGENTOS_BRIDGE_URL 注入值）。
+
+        优先级：配置 bridge_url（config 声明，权威）> AGENTOS_BRIDGE_URL
+        环境变量（宿主 sidecar 继承）> WSL 网关探测（ip route default，
+        与 wsl_ensure_containers.sh 同法）。均不可得返回空——不注入该 env，
+        bridge_client 容器路径回退 host.docker.internal 候选（已由
+        --add-host 保证可解析）。
+
+        Returns:
+            形如 http://<ip>:8765 的地址，或空串。
+        """
+        configured = self._config.get("bridge_url") or os.environ.get("AGENTOS_BRIDGE_URL") or ""
+        if configured:
+            return str(configured)
+        gateway = self._detect_host_gateway_ip()
+        if gateway:
+            return f"http://{gateway}:8765"
+        return ""
+
+    @staticmethod
+    def _detect_host_gateway_ip() -> str:
+        """WSL 场景宿主 IP 探测（ip route default 网关 = Windows 宿主地址）。
+
+        仅 WSL 原生 docker 需要显式 IP（非 Docker Desktop 时容器内
+        host.docker.internal 不被自动解析）；探测失败返回空串不阻塞容器创建。
+        """
+        import platform  # noqa: PLC0415
+
+        if platform.system() != "Linux":
+            return ""
+        try:
+            proc = os.popen("ip route show default 2>/dev/null")
+            line = proc.read().strip()
+            proc.close()
+            # 形如 "default via 172.20.0.1 eth0" —— 取 via 后的网关地址
+            fields = line.split()
+            if "default" in fields:
+                idx = fields.index("default")
+                if fields[idx + 1 : idx + 2] == ["via"] and len(fields) > idx + 2:
+                    return fields[idx + 2]
+            return ""
+        except OSError:
+            return ""
 
     # runc 命名空间脱节（setns failure）的特征标记（小写匹配）。
     # 命中任一即判定为容器命名空间已死（可 destroy+recreate 后重试自愈）。
@@ -641,10 +701,9 @@ class DockerProvider(IsolationProvider):
     async def _ensure_image(self) -> None:
         """确保镜像存在：本地有就用，没有则自动构建（优先），再不行才 pull。
 
-        与旧实现的关键差异：
         1. 构建优先于拉取——agentos:latest 是本地构建镜像（不在 Docker Hub），
-           旧版 docker pull 是死代码；改用 docker build + BuildKit 缓存复用本机已下载的包。
-        2. 构建失败必须 raise，不再 except 吞掉——让 manager.py 的熔断器
+           docker build 经 BuildKit 缓存复用本机已下载的包。
+        2. 构建失败必须 raise——让 manager.py 的熔断器
            （连续 _MAX_ENV_FAILURES 次抛 IsolationUnrecoverableError）接管，
            避免无限 next_llm 空转（每轮白等 docker create 30s × core retry 3 次 ≈ 4min）。
         3. 加锁 + 二次检查，防多协程并发触发构建。
@@ -712,12 +771,12 @@ class DockerProvider(IsolationProvider):
 
         超时处理策略：只杀本地 docker exec 客户端进程，绝不在容器内做进程组杀。
 
-        历史教训：曾在容器内用 setsid 包裹 + `kill -9 -- -PGID` 整组杀来防孤儿，
-        但实测在 WSL2 + runc 1.3.6 + cgroup v2 环境下，整组 SIGKILL 会砸进 containerd
-        shim 的 freeze/kill/exit-event 窗口，导致 shim 丢失退出事件 → 容器 runc 状态
-        永久脱节（"did not receive an exit event"）→ setns 全部失败。整组杀不是救星，
-        反而是 runc 卡死的直接触发因素。故撤掉，回到只杀本地客户端的最小干预策略。
-        容器内残留进程由 --pids-limit 兜住，坏掉的容器由 setns 自愈（检测+重建）处理。
+        约束（运行环境 WSL2 + runc 1.3.6 + cgroup v2）：容器内整组 SIGKILL
+        （setsid 包裹 + `kill -9 -- -PGID`）会砸进 containerd shim 的
+        freeze/kill/exit-event 窗口，shim 丢失退出事件 → 容器 runc 状态
+        永久脱节（"did not receive an exit event"）→ setns 全部失败。
+        容器内残留进程由 --pids-limit 兜住，坏掉的容器由 setns 自愈
+        （检测+重建）处理。
 
         显式捕获 subprocess.TimeoutExpired 与 TimeoutError（前者继承 SubprocessError
         而非 TimeoutError，单捕 TimeoutError 接不住、会误报"执行命令失败"）。

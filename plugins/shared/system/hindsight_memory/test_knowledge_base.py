@@ -69,12 +69,11 @@ def _recall_response(chunks: list[dict[str, Any]]) -> MagicMock:
 
 
 @pytest.fixture
-def kb(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """加载模块并隔离数据目录 + 上传目录（UPLOADS_DIR env → tmp）。"""
+def kb(tmp_path: Path) -> Any:
+    """加载模块并隔离 KB 数据根（set_data_dir → tmp；源文件与元数据同根落 tmp）。"""
     module = _load_module()
     module.set_data_dir(str(tmp_path / "kb"))
     module.set_client(None)
-    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
     return module
 
 
@@ -176,9 +175,64 @@ class TestUpload:
         with pytest.raises(kb.KBError) as ei:
             _run(kb.upload_document("a.md", b"some text"))
         assert ei.value.status_code == 500
-        kb_dir = tmp_path / "uploads" / "kb"
+        kb_dir = tmp_path / "kb" / "uploads"
+        assert kb_dir.is_dir(), "落盘目录应随上传在 KB 数据根下创建"
         assert not any(kb_dir.glob("*.md")), "ingest 失败必须回滚落盘文件"
         assert not (tmp_path / "kb" / "kb_meta.json").exists()
+
+
+# ═══════════════════════════════════════════════════════════
+# KB 数据根重定向语义（set_data_dir 一次覆盖，源文件与元数据同根）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestUploadsDirAlignment:
+    def test_set_data_dir_redirects_source_files_to_meta_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """仅 set_data_dir（不动 UPLOADS_DIR）→ 源文件落 {data_root}/uploads，真实 data/ 无新增。"""
+        module = _load_module()
+        module.set_data_dir(str(tmp_path / "kb"))
+        module.set_client(None)
+        monkeypatch.delenv("UPLOADS_DIR", raising=False)
+        client = MagicMock()
+        client.aretain = AsyncMock(side_effect=lambda **kw: _retain_result(f"c{kw['metadata']['kb_chunk_index']}"))
+        client.acreate_bank = AsyncMock(return_value=None)
+        module.set_client(client)
+
+        repo_kb_dir = _PLUGIN_DIR.parents[3] / "data" / "default" / "uploads" / "kb"
+        before = sorted(p.name for p in repo_kb_dir.iterdir()) if repo_kb_dir.is_dir() else None
+
+        result = _run(module.upload_document("doc.md", "正文内容".encode(), "text/markdown"))
+
+        assert result["message"] == "文件上传成功"
+        saved = json.loads((tmp_path / "kb" / "kb_meta.json").read_text(encoding="utf-8"))
+        source_file = Path(saved["items"][0]["source_file"])
+        assert source_file == tmp_path / "kb" / "uploads" / f"{result['item_id']}.md"
+        assert source_file.exists()
+
+        after = sorted(p.name for p in repo_kb_dir.iterdir()) if repo_kb_dir.is_dir() else None
+        assert after == before, "真实 data/default/uploads/kb 不得新增夹具文件"
+
+    def test_uploads_resolution_unchanged_without_data_root_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """未覆盖 KB 数据根（生产形态）→ 仍走 uploads 三方对齐（UPLOADS_DIR env / tenant_data_root）。"""
+        module = _load_module()
+        monkeypatch.delenv("HINDSIGHT_KB_DATA_DIR", raising=False)
+
+        monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
+        assert module._resolve_kb_uploads_dir() == str(tmp_path / "uploads" / "kb")
+
+        monkeypatch.delenv("UPLOADS_DIR")
+        monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path / "data"))
+        assert module._resolve_kb_uploads_dir() == str(tmp_path / "data" / "default" / "uploads" / "kb")
+
+    def test_env_override_at_import_aligns_uploads(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """HINDSIGHT_KB_DATA_DIR 导入态覆盖 → 源文件与元数据同根。"""
+        monkeypatch.setenv("HINDSIGHT_KB_DATA_DIR", str(tmp_path / "kbroot"))
+        module = _load_module()
+        assert module._resolve_kb_uploads_dir() == str(tmp_path / "kbroot" / "uploads")
 
 
 # ═══════════════════════════════════════════════════════════

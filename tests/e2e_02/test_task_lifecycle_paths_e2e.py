@@ -69,7 +69,10 @@ pytestmark = [
 ]
 
 # 轮询/等待窗口（秒）
-_BOOT_WAIT_SECONDS = 300
+# _BOOT_WAIT_SECONDS：健康轮询窗口，就绪即返回（仅真挂起时等满）。
+# 2026-09-09 实测（Windows 开发机、94 插件全矩阵 sidecar boot）健康就绪
+# ≈400s——300s 是插件矩阵扩容前定的值，届时全矩阵 boot 稳定 <300s。
+_BOOT_WAIT_SECONDS = 600
 _TERMINAL_WAIT_SECONDS = 360
 _WAKE_WAIT_SECONDS = 300
 _POLL_INTERVAL_SECONDS = 3
@@ -123,7 +126,7 @@ class StubKernel:
     def token(self) -> str:
         status, body, _ = http_post_json(
             f"{self.url}/api/v1/auth/login",
-            {"username": "admin", "password": "admin12345"},
+            {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]},
             timeout=15,
         )
         if status != 200 or not isinstance(body, dict) or not body.get("access_token"):
@@ -443,6 +446,7 @@ def _wait_task_terminal(
     assert terminal is not None, (
         f"任务 {task_id} 在 {timeout}s 内未达终态，状态序列 {seen}（疑似无限循环）"
     )
+    # 诊断：暂留——路径矩阵任一场景失败时，按状态序列与评估指纹定位卡点
     print(f"[matrix] task={task_id} 状态序列: {seen}")
     print(
         f"[matrix] task={task_id} 诊断指纹: reminders={terminal.get('evaluate_reminder_count')} "
@@ -1313,6 +1317,7 @@ class TestS1StopDuringRun:
     """S1 运行中 stop_generation → 感知中断 → 循环有界停止（不无限执行）。"""
 
     @pytest.mark.timeout(420)
+    @pytest.mark.timing
     def test_stop_generation_stops_running_task(
         self, stub_kernel, matrix_token, stub_llm
     ):
@@ -1639,7 +1644,8 @@ class TestCompletionRateBatch:
                 f"{stub_llm.request_count(marker)}（marker 串台/注入失败？）"
             )
 
-        # 5. 逐任务核验报告（每个任务的真实终态与观测序列）
+        # 5. 逐任务核验报告（每个任务的真实终态与观测序列）。
+        # 诊断：暂留——8 并发场景任一失败时按终态/序列/轮数定位具体场景
         print(f"[rate] 完成率 {rate:.0%}（{len(completed)}/{total}）")
         for tid, marker in task_ids.items():
             print(

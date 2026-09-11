@@ -1,8 +1,8 @@
 # @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
 """工具缓存写入断路接通的单测。
 
-验证 tool_cache（input）和 tool_cache_writer（output）共享模块级单例缓存，
-写入断路被接通：
+验证 tool_cache（input）和 tool_cache_writer（output）共享 SDK
+tool_result_cache 单例缓存，写入断路被接通：
     1. writer 写入后，cache 能命中（跳过执行）
     2. exclude_tools 中的有副作用工具不写缓存
     3. 失败的工具调用（result 含 error）不写缓存
@@ -10,7 +10,8 @@
     5. TTL 过期后不命中
     6. max_size 超限时 LRU 淘汰
 
-不依赖 src/ 或 plugins.input 旧路径，通过 sys.path 注入直接导入本地 plugin 模块。
+通过 sys.path 注入直接导入本地 plugin 模块；共享缓存直接从
+agentos_plugin_sdk.tool_result_cache 访问。
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+from agentos_plugin_sdk.tool_result_cache import ToolResultCache, make_cache_key
 
 # 复制 server.py 的 sys.path 机制
 _THIS_DIR = str(Path(__file__).resolve().parent)
@@ -41,14 +44,15 @@ if _SHARED_DIR not in sys.path:
 import importlib.util  # noqa: E402
 
 # input 端 plugin.py 由 _fresh_tool_cache 在测试执行时点 fresh 加载
-# （见下方测试辅助段注释——收集期绑定会随 pipeline 包实例更替失效）。
+# （收集期绑定会随 pipeline 包实例更替失效）。
 _INPUT_TOOL_CACHE_PLUGIN = str(Path(_INPUT_TOOL_CACHE_DIR) / "plugin.py")
 
 # 本目录 plugin.py 也用 importlib 加载（避免 'plugin' 名字污染）
 _writer_spec = importlib.util.spec_from_file_location(
     "tool_cache_writer_plugin", str(Path(_THIS_DIR) / "plugin.py")
 )
-assert _writer_spec is not None and _writer_spec.loader is not None
+assert _writer_spec is not None, "writer plugin.py spec 可解析"
+assert _writer_spec.loader is not None, "writer spec 含 loader"
 _writer_mod = importlib.util.module_from_spec(_writer_spec)
 _writer_spec.loader.exec_module(_writer_mod)
 ToolCacheWriter = _writer_mod.ToolCacheWriter
@@ -56,24 +60,14 @@ from pipeline.plugin import PluginContext  # noqa: E402
 from pipeline.types import StateKeys  # noqa: E402
 
 # ── 测试辅助 ──
-# 车道中央裸名逐出机制（tests/plugins conftest）会在会话中重建 `pipeline`
-# 包实例，而 tool_cache 的全局缓存挂在 pipeline 包属性上、writer.execute
-# 每次执行都 fresh 加载 input 端并绑定【当时】的实例。因此涉及缓存的
-# 断言/清空一律按运行期当前实例解析（收集期模块级绑定会指向被换掉的
-# 旧实例，造成 len==0 假失败或"不缓存"断言恒过的假绿）。
-
-
-def _pkg_now():
-    """运行期当前的 pipeline 包实例。"""
-    import pipeline
-
-    if not hasattr(pipeline, "_tool_result_cache"):
-        pipeline._tool_result_cache = {}
-    return pipeline
+# 共享单例缓存在 SDK 模块上（sys.modules 去重保证同一字典），测试隔离
+# 直接清空该字典。
 
 
 def _cache_now() -> dict:
-    return _pkg_now()._tool_result_cache
+    from agentos_plugin_sdk import tool_result_cache as _trc
+
+    return _trc.global_cache()
 
 
 def _fresh_tool_cache(config: dict):
@@ -81,7 +75,8 @@ def _fresh_tool_cache(config: dict):
     spec = importlib.util.spec_from_file_location(
         "tool_cache_fresh_test", _INPUT_TOOL_CACHE_PLUGIN
     )
-    assert spec is not None and spec.loader is not None
+    assert spec is not None, "input tool_cache plugin.py spec 可解析"
+    assert spec.loader is not None, "input spec 含 loader"
     mod = importlib.util.module_from_spec(spec)
     sys.modules["tool_cache_fresh_test"] = mod
     spec.loader.exec_module(mod)
@@ -218,20 +213,29 @@ async def test_failed_tool_call_not_cached() -> None:
 # ══════════════════════════════════════════════════
 
 
-def test_global_cache_shared_across_instances() -> None:
-    """多个 ToolCache 实例共享同一份全局缓存。"""
+@pytest.mark.asyncio
+async def test_global_cache_shared_across_instances() -> None:
+    """多个缓存核实例共享同一份全局缓存。"""
     clear_cache()
-    cache1 = _fresh_tool_cache(config={})
-    cache2 = _fresh_tool_cache(config={})
+    core1 = ToolResultCache(config={})
+    core2 = ToolResultCache(config={})
+    cache = _fresh_tool_cache(config={})
 
-    # cache1 写入（file_read 已排除，用纯查询工具验证共享性）
-    cache1.put({"name": "web_search", "args": {"query": "agentos"}}, "data1")
+    # core1 写入（file_read 已排除，用纯查询工具验证共享性）
+    core1.put({"name": "web_search", "args": {"query": "agentos"}}, "data1")
 
-    # cache2 应能读到（同一份全局缓存）
-    g = _cache_now()
-    assert len(g) == 1
-    # 验证 cache2 实例也能通过 _is_excluded 等方法访问共享状态
-    assert cache2._is_excluded("bash_execute") is True
+    # core2 与 input 端插件应看到同一份全局缓存
+    assert len(_cache_now()) == 1
+    assert core2.is_excluded("bash_execute") is True
+    hit, result = core2.get(make_cache_key({"name": "web_search", "args": {"query": "agentos"}}))
+    assert hit is True
+    assert result == "data1"
+    # input 端插件实例经同一缓存命中
+    ctx = PluginContext(
+        state={StateKeys.RAW_TOOL_CALLS: [{"name": "web_search", "arguments": '{"query": "agentos"}'}]},
+    )
+    res = await cache.execute(ctx)
+    assert res.state_updates.get("cache_hit") is True
 
 
 # ══════════════════════════════════════════════════
@@ -384,4 +388,174 @@ async def test_cache_hit_appends_tool_result_messages() -> None:
     assert msg["tool_call_id"] == "call_abc"
     assert msg["tool_result"]["tool_name"] == "web_search"
     assert msg["tool_result"]["success"] is True
+    assert result.skip_remaining is True
+
+
+def test_per_pipeline_max_evicts_oldest_full_result():
+    """per_pipeline_max=1：同管道第二条全文入缓存时逐出第一条（用户裁定：一管道一条）。"""
+    from agentos_plugin_sdk.tool_result_cache import ToolResultCache, make_cache_key
+
+    cache = ToolResultCache({
+        "enabled": True,
+        "default_ttl": 300,
+        "max_size": 100,
+        "per_pipeline_max": 1,
+    })
+    tc1 = {"name": "doc_search", "arguments": "{\"q\": \"a\"}"}
+    tc2 = {"name": "doc_search", "arguments": "{\"q\": \"b\"}"}
+
+    cache.put(tc1, {"content": "全文一"}, pipeline_id="pipe_1")
+    assert cache.get(make_cache_key(tc1))[0] is True, "第一条在（未超限）"
+
+    cache.put(tc2, {"content": "全文二"}, pipeline_id="pipe_1")
+    assert cache.get(make_cache_key(tc1))[0] is False, "同管道超限逐出最旧"
+    hit, result = cache.get(make_cache_key(tc2))
+    assert hit, "最新一条存活"
+    assert result == {"content": "全文二"}, "最新一条内容正确"
+
+    # 不同管道互不挤占
+    tc3 = {"name": "doc_search", "arguments": "{\"q\": \"c\"}"}
+    cache.put(tc3, {"content": "全文三"}, pipeline_id="pipe_2")
+    assert cache.get(make_cache_key(tc2))[0] is True, "pipe_2 入场不影响 pipe_1 现有条目"
+
+
+def test_per_pipeline_max_two_keeps_two_newest_fifo():
+    """per_pipeline_max=2：四连写滚动逐出写入序最旧、任意时刻存活恰为最新 2 条。
+
+    max=1 下任何逐出策略结果相同；max=2 多条存活才能区分"按写入序逐最旧"
+    （FIFO 契约）与 LRU/逐最新等策略。
+    """
+    from agentos_plugin_sdk.tool_result_cache import ToolResultCache, make_cache_key
+
+    cache = ToolResultCache({
+        "enabled": True,
+        "default_ttl": 300,
+        "max_size": 100,
+        "per_pipeline_max": 2,
+    })
+    tcs = [{"name": "doc_search", "arguments": f'{{"q": "{i}"}}'} for i in range(4)]
+
+    for i in (0, 1):
+        cache.put(tcs[i], {"n": i}, pipeline_id="pipe_x")
+    assert all(cache.get(make_cache_key(tcs[i]))[0] for i in (0, 1)), "未超限全在"
+
+    cache.put(tcs[2], {"n": 2}, pipeline_id="pipe_x")
+    assert cache.get(make_cache_key(tcs[0]))[0] is False, "超限逐出写入序最旧(#0)"
+    assert cache.get(make_cache_key(tcs[1]))[0] is True, "#1 仍存活"
+    assert cache.get(make_cache_key(tcs[2]))[0] is True, "#2 存活"
+
+    # 中途触碰过 #1（上面 get 更新访问序）后再写入 #3：仍逐 #1——
+    # 逐出按写入序而非访问序（与 get 的 LRU 触碰解耦）。
+    cache.put(tcs[3], {"n": 3}, pipeline_id="pipe_x")
+    assert cache.get(make_cache_key(tcs[1]))[0] is False, "被触碰过的 #1 仍按写入序逐出"
+    alive = [i for i in range(4) if cache.get(make_cache_key(tcs[i]))[0]]
+    assert alive == [2, 3], "任意时刻存活恰为最新 per_pipeline_max 条（封顶性质）"
+
+
+def test_per_pipeline_eviction_spares_key_held_by_other_pipeline():
+    """同一 tool_call 被两条管道先后写入：一条管道超限逐出该键时，
+    另一管道仍持有 → 全局条目必须存活（共享键防御分支）。"""
+    from agentos_plugin_sdk.tool_result_cache import ToolResultCache, make_cache_key
+
+    cache = ToolResultCache({
+        "enabled": True,
+        "default_ttl": 300,
+        "max_size": 100,
+        "per_pipeline_max": 1,
+    })
+    shared = {"name": "doc_search", "arguments": "{\"q\": \"shared\"}"}
+    cache.put(shared, {"v": 1}, pipeline_id="p1")
+    cache.put(shared, {"v": 2}, pipeline_id="p2")  # 同 cache_key，p1/p2 各持一条目序
+    hit, result = cache.get(make_cache_key(shared))
+    assert hit, "同键后写覆盖，两管道均持有该键"
+    assert result == {"v": 2}, "同键后写覆盖：读到最新值"
+
+    other = {"name": "doc_search", "arguments": "{\"q\": \"other\"}"}
+    cache.put(other, {"v": 3}, pipeline_id="p1")  # p1 超限，逐出的恰是共享键
+    hit, result = cache.get(make_cache_key(shared))
+    assert hit, "p1 逐出共享键但 p2 仍持有 → 条目不得删除"
+    assert result == {"v": 2}, "共享键内容不被误删后重写"
+    hit, result = cache.get(make_cache_key(other))
+    assert hit, "p1 最新条存活"
+    assert result == {"v": 3}, "p1 最新条内容正确"
+
+
+# ══════════════════════════════════════════════════
+# 8. namespace 身份隔离：跨会话同参调用不互命中
+# ══════════════════════════════════════════════════
+
+
+_IDENTITY_A = {"pipeline_id": "pipe_aaa", "user_id": "user_a", "session_id": "sess_a"}
+_IDENTITY_B = {"pipeline_id": "pipe_bbb", "user_id": "user_b", "session_id": "sess_b"}
+
+
+def _identity_ctx(identity: dict, executed_calls: list[dict], tool_results: list) -> PluginContext:
+    """带身份键的 writer 上下文（写端 namespace 与 state 身份键同源）。"""
+    return PluginContext(
+        state={
+            **identity,
+            "_executed_tool_calls": executed_calls,
+            StateKeys.TOOL_RESULTS: tool_results,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "result_payload"),
+    [
+        ("memory_retrieve", '{"query": "登录密码规则"}', {"content": "用户A的私有记忆"}),
+        ("memory_list", '{}', {"items": ["只有A能看的列表"]}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_cross_identity_same_args_never_hit(tool_name: str, arguments: str, result_payload: dict) -> None:
+    """用户 B 同参调用不得命中用户 A 写入的缓存条目（真实执行不跳过）。"""
+    clear_cache()
+    writer = ToolCacheWriter(config={})
+    cache = _fresh_tool_cache(config={})
+
+    call = [{"name": tool_name, "arguments": arguments}]
+    await writer.execute(_identity_ctx(_IDENTITY_A, call, [result_payload]))
+    assert len(_cache_now()) == 1, "写入端正常落一条（带身份维度）"
+
+    ctx_b = PluginContext(
+        state={**_IDENTITY_B, StateKeys.RAW_TOOL_CALLS: [{"name": tool_name, "arguments": arguments}]},
+    )
+    result = await cache.execute(ctx_b)
+    assert result.state_updates.get("cache_hit") is not True, "跨身份不得命中"
+    assert not result.skip_remaining, "跨身份不得跳过真实执行"
+
+
+@pytest.mark.asyncio
+async def test_same_identity_hits() -> None:
+    """同身份同参调用正常命中（隔离不误伤本会话复用）。"""
+    clear_cache()
+    writer = ToolCacheWriter(config={})
+    cache = _fresh_tool_cache(config={})
+
+    call = [{"name": "memory_retrieve", "arguments": '{"query": "偏好"}'}]
+    await writer.execute(_identity_ctx(_IDENTITY_A, call, [{"content": "A的记忆"}]))
+
+    ctx_a2 = PluginContext(
+        state={**_IDENTITY_A, StateKeys.RAW_TOOL_CALLS: [{"name": "memory_retrieve", "arguments": '{"query": "偏好"}'}]},
+    )
+    result = await cache.execute(ctx_a2)
+    assert result.state_updates.get("cache_hit") is True
+    assert result.state_updates.get(StateKeys.TOOL_RESULTS) == [{"content": "A的记忆"}]
+    assert result.skip_remaining is True
+
+
+@pytest.mark.asyncio
+async def test_no_identity_keys_legacy_hit() -> None:
+    """state 无任何身份键时退化为旧键语义（None namespace）读写互通。"""
+    clear_cache()
+    writer = ToolCacheWriter(config={})
+    cache = _fresh_tool_cache(config={})
+
+    call = [{"name": "web_search", "arguments": '{"query": "legacy"}'}]
+    await writer.execute(_identity_ctx({}, call, [{"content": "legacy data"}]))
+
+    ctx = PluginContext(state={StateKeys.RAW_TOOL_CALLS: call})
+    result = await cache.execute(ctx)
+    assert result.state_updates.get("cache_hit") is True, "无身份键保持旧命中行为"
     assert result.skip_remaining is True

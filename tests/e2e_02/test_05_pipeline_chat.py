@@ -3,7 +3,7 @@
 E2E 测试：管道 chat 全链路（FP-0.2.〇 串行循环）
 
 验证 REST 管道 chat 端到端链路（仅依赖运行中的内核 :9100，不依赖前端）：
-  1. 登录（admin/admin12345）→ 创建会话（POST /api/v1/sessions）→
+  1. 登录（admin，口令经 AGENTOS_ADMIN_PASSWORD 注入）→ 创建会话（POST /api/v1/sessions）→
      POST /api/v1/chat {message, session_id} → 200，content 非空
      （真实 LLM 回复，灵汐 L1 自我介绍），type=message / session_id 透传。
   2. GET /api/v1/sessions/{thread_id}/messages 确认消息已持久化

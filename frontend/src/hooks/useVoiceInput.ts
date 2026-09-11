@@ -8,7 +8,6 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Dispatch, SetStateAction } from 'react'
 import { transcribeAudio } from '@/services/api/asr'
 import type {
   SpeechRecognitionConstructor,
@@ -20,6 +19,7 @@ import type {
   VoiceInputError,
   VoiceInputState,
 } from '@/types/voiceInput'
+import type { Dispatch, SetStateAction } from 'react'
 
 /**
  * 获取 SpeechRecognition 构造函数
@@ -200,8 +200,7 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     setTranscript('')
     setState('transcribing')
 
-    // 启动录音计时器
-    startDurationTimer(durationTimerRef, setRecordingDuration)
+      startDurationTimer(durationTimerRef, setRecordingDuration)
     setRecordingDuration(0)
 
     try {
@@ -382,7 +381,6 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     setState('idle')
   }, [cleanup])
 
-  // 组件卸载时清理资源
   useEffect(() => {
     return () => {
       cleanup()

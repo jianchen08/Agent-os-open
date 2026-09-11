@@ -30,7 +30,7 @@ const _DIRECT_SERVER_SETTING := "godot_mcp/runtime/direct_server"
 ## Streamable-HTTP MCP endpoint (mcp_http_server.gd), a sibling transport to the
 ## WebSocket server so an HTTP MCP client reaches the editor with no Go process.
 ## _MCP_HTTP_SETTING enables it (default true); _HTTP_PORT_SETTING pins its port
-## (0 = auto in 9100-9115); _HTTP_TYPED_SETTING toggles typed tools (default true;
+## (0 = auto in 9116-9131); _HTTP_TYPED_SETTING toggles typed tools (default true;
 ## false = only godot_run, for tool-limited clients). All three follow the same
 ## non-dirtying set_initial_value pattern as the WS port setting.
 const _MCP_HTTP_SETTING := "godot_mcp/network/mcp_http"
@@ -189,7 +189,7 @@ func _register_settings() -> void:
 	})
 	ProjectSettings.set_as_basic(_MCP_HTTP_SETTING, true)
 
-	# HTTP port (0 = auto-pick a free port in 9100-9115), same non-dirtying rules
+	# HTTP port (0 = auto-pick a free port in 9116-9131), same non-dirtying rules
 	# as the WS port setting.
 	if not ProjectSettings.has_setting(_HTTP_PORT_SETTING):
 		ProjectSettings.set_setting(_HTTP_PORT_SETTING, 0)
@@ -198,7 +198,7 @@ func _register_settings() -> void:
 		"name": _HTTP_PORT_SETTING,
 		"type": TYPE_INT,
 		"hint": PROPERTY_HINT_RANGE,
-		"hint_string": "0,65535,1",  # 0 = auto-pick a free port in 9100-9115
+		"hint_string": "0,65535,1",  # 0 = auto-pick a free port in 9116-9131
 	})
 	ProjectSettings.set_as_basic(_HTTP_PORT_SETTING, true)
 

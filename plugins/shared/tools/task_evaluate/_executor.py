@@ -44,9 +44,11 @@ ChatSend = Callable[[dict[str, Any]], Any]
 StateRows = Callable[[], Any]
 
 # agent 型指标回收轮询间隔与内部回收上限（调用方 _get_eval_timeout 另有
-# asyncio.wait_for 包裹，两者取先到）
+# asyncio.wait_for 包裹，两者取先到）。语义评估 = 等整个评估子管道跑完
+# （多轮 LLM，300-700s/轮），回收上限给管道级 1500s；外层默认 1800s
+# （_DEFAULT_EVAL_TIMEOUT），内核面死线由 manifest mcp.request_timeout_secs=1800 承接
 _POLL_INTERVAL_S = 2.0
-_AGENT_RECOVER_TIMEOUT_S = 600.0
+_AGENT_RECOVER_TIMEOUT_S = 1500.0
 
 # 评估者 agent（config/agents/system/evaluator_agent.yaml，L3 语义评估专家）
 _EVALUATOR_AGENT_ID = "evaluator_agent"
@@ -241,6 +243,11 @@ class PipelineEvaluationExecutor:
             "agent_id": _EVALUATOR_AGENT_ID,
             "execution_context": execution_context,
             "state": {
+                # 执行身份（task_birth.py:95 出生协议同款）：agent_id 只进派发
+                # 簿记不进 run 身份，缺此键 context_build 会静默回退默认主 agent
+                # （L1）→ task_reminder 的 L1 早退门短路 → evaluation.detected_result
+                # 永不落库 → 本工具轮询超时（B12 根因②）
+                "agent.id": _EVALUATOR_AGENT_ID,
                 # 血缘扁平键（有父形式）：父 = 被评估任务管道
                 "lineage.parent_pipeline_id": task_id,
                 "lineage.origin_session_id": origin_session,

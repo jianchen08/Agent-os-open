@@ -17,5 +17,13 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "state": {
+    "reads": [
+      "_tool_definitions",
+      "messages_tail:10",
+      "output_truncated",
+      "raw_tool_calls"
+    ]
+  }
 }

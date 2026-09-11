@@ -2,15 +2,13 @@
  * DSH vendor 组件渲染冒烟测试（task_dsh_plugin_adapter 任务 3）。
  *
  * 验证移植组件在灵汐环境（jsdom + dsh-tokens.css 经 vite 注入）可挂载渲染：
- * 六张卡 + Pill/StateDot 各出关键 DOM 锚点；CSS Modules 类名注入由 Vite
+ * 五张卡 + Pill/StateDot 各出关键 DOM 锚点；CSS Modules 类名注入由 Vite
  * 测试管线保证（.module.css import 不抛即通过）。
  */
-import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
 import {
-  CodeBlock,
   DiffBlock,
-  JsonTree,
   Pill,
   ReadBlock,
   SearchBlock,
@@ -142,26 +140,6 @@ describe('WebBlock', () => {
   it('javascript: URL 不落 href（安全白名单）', () => {
     render(<WebBlock kind="fetch" url="javascript:alert(1)" statusCode={200} truncated={false} />)
     expect(screen.queryByRole('link')).toBeNull()
-  })
-})
-
-describe('JsonTree', () => {
-  it('渲染顶层展开 + 原始值着色', () => {
-    render(<JsonTree data={{ name: 'x', count: 2, ok: true }} />)
-    expect(screen.getByText('name:')).toBeTruthy()
-    expect(screen.getByText('"x"')).toBeTruthy()
-    expect(screen.getByText('2')).toBeTruthy()
-    expect(screen.getByText('true')).toBeTruthy()
-  })
-})
-
-describe('CodeBlock', () => {
-  it('渲染语言横幅 + 代码体', () => {
-    const { container } = render(<CodeBlock code={'const a = 1\n'} lang="ts" />)
-    expect(screen.getByText('ts')).toBeTruthy()
-    // Prism 把代码切成多个 token span，用整体文本断言
-    expect(container.textContent).toContain('const')
-    expect(container.textContent).toContain('1')
   })
 })
 

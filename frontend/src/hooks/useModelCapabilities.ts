@@ -58,7 +58,6 @@ function computeInputCapabilities(capabilities: ModelCapabilities | null): Input
   if (supportsAudio) acceptedTypes.push(...supportedAudioTypes)
   if (supportsVideo) acceptedTypes.push(...supportedVideoTypes)
 
-  // 能力标签
   const capabilityTags: string[] = []
   if (supportsImage) capabilityTags.push('图片')
   if (supportsAudio) capabilityTags.push('音频')
@@ -91,7 +90,6 @@ export function useModelCapabilities(modelName: string | undefined) {
   const lastModelNameRef = useRef<string | undefined>(undefined)
 
   useEffect(() => {
-    // 无效模型名称时清空能力
     if (!modelName || modelName === 'unknown') {
       setCapabilities(null)
       setLoading(false)
@@ -100,14 +98,12 @@ export function useModelCapabilities(modelName: string | undefined) {
       return
     }
 
-    // 相同模型名称不重复请求
     if (modelName === lastModelNameRef.current) {
       return
     }
 
     lastModelNameRef.current = modelName
 
-    // 检查缓存
     const cached = capabilitiesCache.get(modelName)
     if (cached) {
       setCapabilities(cached)
@@ -116,14 +112,12 @@ export function useModelCapabilities(modelName: string | undefined) {
       return
     }
 
-    // 发起请求
     setLoading(true)
     setError(null)
 
     getModelCapabilities(modelName)
       .then((response) => {
         const transformed = transformCapabilities(response as unknown as Record<string, unknown>)
-        // 更新缓存
         capabilitiesCache.set(modelName, transformed)
         setCapabilities(transformed)
       })
@@ -136,7 +130,6 @@ export function useModelCapabilities(modelName: string | undefined) {
       })
   }, [modelName])
 
-  // 计算输入能力配置
   const inputCapabilities: InputCapabilities = useMemo(() => {
     return computeInputCapabilities(capabilities)
   }, [capabilities])

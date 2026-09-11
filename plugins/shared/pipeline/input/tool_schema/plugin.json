@@ -20,5 +20,13 @@
   "priority": 50,
   "granted_capabilities": [
     "tool-surface"
-  ]
+  ],
+  "state": {
+    "volatile_keys": [
+      "tool_schemas"
+    ],
+    "reads": [
+      "tool_ids"
+    ]
+  }
 }

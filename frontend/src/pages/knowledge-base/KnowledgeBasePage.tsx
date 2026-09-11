@@ -23,37 +23,35 @@ import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import { API_ENDPOINTS } from '@/constants/api'
-import apiClient from '@/services/api/client'
 import {
   invalidateKnowledgeBaseCache,
   useKnowledgeBaseQuery,
 } from '@/hooks/queries/useKnowledgeBaseQuery'
+import apiClient from '@/services/api/client'
 import { formatFileSize } from '@/utils/format'
 
 /**
  * 知识库管理页面组件
  */
 export function KnowledgeBasePage() {
-  const [actionMessage, setActionMessage] = useState<string | null>(null)
+  const [actionMessage, setActionMessage] = useState<{
+    text: string
+    ok: boolean
+  } | null>(null)
 
-  // 分类筛选
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
 
-  // 上传状态
   const [isUploading, setIsUploading] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // 创建分类模态框
   const [showCategoryModal, setShowCategoryModal] = useState(false)
   const [newCategoryName, setNewCategoryName] = useState('')
   const [isCreatingCategory, setIsCreatingCategory] = useState(false)
 
-  // 删除确认
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
-  // 删除分类确认
   const [confirmDeleteCategory, setConfirmDeleteCategory] = useState<string | null>(null)
 
   // 全部数据（query 化）：staleTime 窗口内重挂零请求；写操作后 invalidate
@@ -88,15 +86,17 @@ export function KnowledgeBasePage() {
           headers: { 'Content-Type': 'multipart/form-data' },
         })
       }
-      setActionMessage(
-        files.length === 1
-          ? `文件 "${files[0].name}" 上传成功`
-          : `${files.length} 个文件上传成功`,
-      )
+      setActionMessage({
+        text:
+          files.length === 1
+            ? `文件 "${files[0].name}" 上传成功`
+            : `${files.length} 个文件上传成功`,
+        ok: true,
+      })
       invalidateKnowledgeBaseCache()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '上传失败'
-      setActionMessage(message)
+      setActionMessage({ text: message, ok: false })
     } finally {
       setIsUploading(false)
     }
@@ -135,12 +135,12 @@ export function KnowledgeBasePage() {
     setActionMessage(null)
     try {
       await apiClient.delete(API_ENDPOINTS.KNOWLEDGE_BASE.DELETE(id))
-      setActionMessage(`"${name}" 已删除`)
+      setActionMessage({ text: `"${name}" 已删除`, ok: true })
       setConfirmDeleteId(null)
       invalidateKnowledgeBaseCache()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '删除失败'
-      setActionMessage(message)
+      setActionMessage({ text: message, ok: false })
     } finally {
       setDeletingId(null)
     }
@@ -157,13 +157,13 @@ export function KnowledgeBasePage() {
       await apiClient.post(API_ENDPOINTS.KNOWLEDGE_BASE.CREATE_CATEGORY, {
         name: newCategoryName.trim(),
       })
-      setActionMessage(`分类 "${newCategoryName.trim()}" 创建成功`)
+      setActionMessage({ text: `分类 "${newCategoryName.trim()}" 创建成功`, ok: true })
       setNewCategoryName('')
       setShowCategoryModal(false)
       invalidateKnowledgeBaseCache()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '创建分类失败'
-      setActionMessage(message)
+      setActionMessage({ text: message, ok: false })
     } finally {
       setIsCreatingCategory(false)
     }
@@ -179,7 +179,7 @@ export function KnowledgeBasePage() {
     setActionMessage(null)
     try {
       await apiClient.delete(API_ENDPOINTS.KNOWLEDGE_BASE.DELETE_CATEGORY(name))
-      setActionMessage(`分类 "${name}" 已删除`)
+      setActionMessage({ text: `分类 "${name}" 已删除`, ok: true })
       setConfirmDeleteCategory(null)
       if (selectedCategory === name) {
         setSelectedCategory(null)
@@ -187,7 +187,7 @@ export function KnowledgeBasePage() {
       invalidateKnowledgeBaseCache()
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : '删除分类失败'
-      setActionMessage(message)
+      setActionMessage({ text: message, ok: false })
     }
   }
 
@@ -363,13 +363,15 @@ export function KnowledgeBasePage() {
           {/* 操作结果提示 */}
           {actionMessage && (
             <div
+              role="status"
+              data-ok={actionMessage.ok}
               className={`rounded-lg p-3 text-sm ${
-                actionMessage.includes('失败')
-                  ? 'bg-destructive/10 text-destructive'
-                  : 'bg-status-success/10 text-status-success'
+                actionMessage.ok
+                  ? 'bg-status-success/10 text-status-success'
+                  : 'bg-destructive/10 text-destructive'
               }`}
             >
-              {actionMessage}
+              {actionMessage.text}
             </div>
           )}
 

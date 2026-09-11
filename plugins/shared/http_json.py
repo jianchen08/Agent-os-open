@@ -67,11 +67,13 @@ def protocol_error(message: str, status: int) -> dict[str, Any]:
     return ok(json_response({"error": {"code": str(status), "message": message}}, status))
 
 
-def decode_body(raw_body: str) -> dict[str, Any]:
+def decode_body(raw_body: str, *, strict_object: bool = False) -> dict[str, Any]:
     """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。
 
-    非 dict 顶层 JSON（数组/标量）不符合请求体契约 → 返回 ``{}``（交由
-    调用方走缺参错误路径），不透传非 dict 值。
+    非 dict 顶层 JSON（数组/标量）不符合请求体契约 → 默认返回 ``{}``（交由
+    调用方走缺参错误路径），不透传非 dict 值；``strict_object=True``（如
+    godot_context 写面）改为抛 ValueError("JSON body must be an object")，
+    由调用方转 400。
     """
     if not raw_body:
         return {}
@@ -86,7 +88,11 @@ def decode_body(raw_body: str) -> dict[str, Any]:
         parsed = json.loads(decoded) if decoded.strip() else {}
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON body: {exc}") from exc
-    return parsed if isinstance(parsed, dict) else {}
+    if not isinstance(parsed, dict):
+        if strict_object:
+            raise ValueError("JSON body must be an object")
+        return {}
+    return parsed
 
 
 def parse_multipart(content_type: str, body_bytes: bytes) -> dict[str, Any]:

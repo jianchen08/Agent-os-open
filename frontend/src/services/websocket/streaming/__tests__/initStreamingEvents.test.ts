@@ -11,13 +11,11 @@
  * 6. destroy 反注册全部并清空；reinit = destroy + init
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-
 const { mockSubscribe, mockUnsubscribe, mockHandlers } = vi.hoisted(() => ({
   mockSubscribe: vi.fn(),
   mockUnsubscribe: vi.fn(),
   mockHandlers: new Map<string, (data: any) => void>(),
 }))
-
 vi.mock('@/services/websocket/GlobalWebSocket', () => ({
   globalWS: {
     subscribe: (event: string, handler: (data: any) => void) => {
@@ -30,24 +28,20 @@ vi.mock('@/services/websocket/GlobalWebSocket', () => ({
     },
   },
 }))
-
 const mockLogger = vi.hoisted(() => ({
   debug: vi.fn(),
   info: vi.fn(),
   warn: vi.fn(),
   error: vi.fn(),
 }))
-
 vi.mock('@/utils/logger', () => ({
   loggers: {
     websocket: mockLogger,
     sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   },
 }))
-
 // 各 handler 的观测替身：把"事件是否透传到业务 handler"记录到数组
 const invoked = vi.hoisted(() => ({ calls: [] as string[] }))
-
 vi.mock('../handlers', () => ({
   handleBlockEnd: () => { invoked.calls.push('block_end') },
   handleBlockStart: () => { invoked.calls.push('block_start') },
@@ -67,14 +61,11 @@ vi.mock('../handlers', () => ({
   handleUsage: () => { invoked.calls.push('usage') },
   handleIteration: () => { invoked.calls.push('iteration') },
 }))
-
 vi.mock('../lifecycleHandlers', () => ({
   handleCostUpdate: () => { invoked.calls.push('cost_update') },
   handleReconnected: () => { invoked.calls.push('reconnected') },
   handleSystemNotification: () => { invoked.calls.push('system_notification') },
-  handleTerminationStatus: () => { invoked.calls.push('termination_status') },
 }))
-
 vi.mock('../router', () => ({
   isPipelineRelevant: (pid: string) => pid === 'pipe-relevant' || !pid,
   resolvePipelineId: (data: any) => {
@@ -82,7 +73,6 @@ vi.mock('../router', () => ({
     return typeof pid === 'string' && pid.length > 0 ? pid : null
   },
 }))
-
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 
 describe('initStreamingEvents 全局流式事件接线', () => {
@@ -131,7 +121,6 @@ describe('initStreamingEvents 全局流式事件接线', () => {
       WS_SERVER_EVENTS.TOOL_PROGRESS,
       WS_SERVER_EVENTS.ITERATION,
       WS_SERVER_EVENTS.COST_UPDATE,
-      WS_SERVER_EVENTS.TERMINATION_STATUS,
       WS_SERVER_EVENTS.SYSTEM_NOTIFICATION,
       'reconnected',
     ]
@@ -161,10 +150,8 @@ describe('initStreamingEvents 全局流式事件接线', () => {
     mod.initStreamingEvents()
 
     mockHandlers.get(WS_SERVER_EVENTS.ITERATION)!({ iteration: 2, max_iterations: 5 })
-    mockHandlers.get(WS_SERVER_EVENTS.TERMINATION_STATUS)!({ data: {} })
 
     expect(invoked.calls).toContain('iteration')
-    expect(invoked.calls).toContain('termination_status')
   })
 
   it('高频增量事件（text/reasoning/tool_call_delta、keepalive）不写事件日志', async () => {

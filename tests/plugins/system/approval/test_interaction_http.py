@@ -8,8 +8,8 @@
 4. POST approve / deny —— submit_response(approved/denied) → status 回显 + feedback
 5. POST cancel —— cancel_request(reason) → cancelled
 6. POST viewed —— human sidecar 无 viewed 工具，确认应答（viewed: True）
-7. tool-executor 代理链路 —— invoke 载荷（tool_name/args）+ 信封解包 + 86500 超时
-8. tool-executor 未注入降级 —— pending 空 / 变更类 success False（前端契约不破坏）
+7. human-interaction 桥代理链路 —— 转发载荷（method/params）+ 86500 传输超时
+8. human-interaction 能力缺失降级 —— pending 空 / 变更类 success False（前端契约不破坏）
 9. 404 未知路由 / 非法 JSON body 边界
 """
 
@@ -58,8 +58,24 @@ def _run(coro: Any) -> Any:
         loop.close()
 
 
-def _call(server: Any, path: str, method: str = "GET", raw_body: str = "") -> dict[str, Any]:
-    return _run(server.http_handle(path=path, method=method, raw_body=raw_body))
+# 内核已认证 /ext 分发注入的身份头（http_dispatcher：X-AgentOS-Tenant/User/Role）。
+# approve/deny 归属校验只信这组头；归属不可归因（无创建链路记录）时仅 admin
+# 可决策——本文件无创建链路，决策请求按 admin 已认证分发装配。
+_ADMIN_HEADERS = {
+    "x-agentos-tenant": "t-default",
+    "x-agentos-user": "u-admin",
+    "x-agentos-role": "admin",
+}
+
+
+def _call(server: Any, path: str, method: str = "GET", raw_body: str = "",
+          headers: dict[str, str] | None = None) -> dict[str, Any]:
+    # 默认装配内核已认证分发的身份头（M2 后交互面全端点过归属守卫，缺头即
+    # 403/空集——那是负例专项（test_approval_ownership.py）的职责，本文件的
+    # 路由/代理契约测试一律按已认证分发形态驱动。
+    if headers is None:
+        headers = _ADMIN_HEADERS
+    return _run(server.http_handle(path=path, method=method, raw_body=raw_body, headers=headers))
 
 
 def _decode(result: dict[str, Any]) -> tuple[int, Any]:
@@ -225,7 +241,7 @@ def test_approve(server: Any) -> None:
 
     status, body = _decode(_call(
         server, "/ext/approval_service/interaction/r1/approve", "POST",
-        raw_body=_b64(json.dumps({"feedback": "同意"})),
+        raw_body=_b64(json.dumps({"feedback": "同意"})), headers=_ADMIN_HEADERS,
     ))
 
     assert status == 200
@@ -241,7 +257,8 @@ def test_deny(server: Any) -> None:
     _inject_service(server, svc)
 
     status, body = _decode(_call(
-        server, "/ext/approval_service/interaction/r1/deny", "POST", raw_body=_b64("{}"),
+        server, "/ext/approval_service/interaction/r1/deny", "POST",
+        raw_body=_b64("{}"), headers=_ADMIN_HEADERS,
     ))
 
     assert status == 200
@@ -255,7 +272,8 @@ def test_approve_degraded_false(server: Any) -> None:
     server._get_human_interaction_service = lambda: None
 
     status, body = _decode(_call(
-        server, "/ext/approval_service/interaction/r1/approve", "POST", raw_body=_b64("{}"),
+        server, "/ext/approval_service/interaction/r1/approve", "POST",
+        raw_body=_b64("{}"), headers=_ADMIN_HEADERS,
     ))
 
     assert status == 200
@@ -293,82 +311,61 @@ def test_viewed_acknowledgement(server: Any) -> None:
     assert svc.viewed == ["r1"]
 
 
-# ── tool-executor 代理链路（真实代理 + fake capability）────────────────────
+# ── human-interaction 桥代理链路（真实代理 + fake capability 桥）────────────
 
 
-class FakeToolExecutor:
-    """fake tool-executor capability：记录 invoke 载荷、按工具名返回信封。"""
+class FakeBridge:
+    """fake human-interaction capability 桥：记录转发调用、按方法名回放预设结果。"""
 
-    def __init__(self, responses: dict[str, Any], calls: list[tuple[dict[str, Any], float | None]]) -> None:
-        self._responses = responses
-        self._calls = calls
+    def __init__(self, results: dict[str, Any] | None = None) -> None:
+        self._results = results or {}
+        self.calls: list[tuple[str, dict[str, Any], float | None]] = []
 
     async def call(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
-        assert method == "invoke"
-        self._calls.append((params, timeout))
-        tool = params.get("tool_name")
-        return self._responses.get(tool, {})
+        self.calls.append((method, params, timeout))
+        return self._results.get(method, {})
 
 
-def test_proxy_pending_via_tool_executor(server: Any) -> None:
-    calls: list[tuple[dict[str, Any], float | None]] = []
-    executor = FakeToolExecutor({
-        # 平铺形态（内核 capability 结果直接平铺——approval.create_choice 等
-        # 既有消费方均按平铺 key 读取）
-        "interaction.get_pending": {"requests": [{"id": "r1"}], "count": 1},
-    }, calls)
-    server.plugin._capabilities["tool-executor"] = executor
+def _inject_bridge(server: Any, bridge: FakeBridge) -> None:
+    """把 fake 桥挂为 human-interaction 能力（走真实 _get_human_interaction_service 链路）。"""
+    server.plugin.get_capability = lambda *_a: bridge
+
+
+def test_proxy_pending_via_bridge(server: Any) -> None:
+    bridge = FakeBridge({"get_pending": {"requests": [{"id": "r1"}], "count": 1}})
+    _inject_bridge(server, bridge)
 
     status, body = _decode(_call(server, "/ext/approval_service/interaction/pending"))
 
     assert status == 200
     assert body == {"items": [{"id": "r1"}], "total": 1}
-    params, timeout = calls[0]
-    assert params["tool_name"] == "interaction.get_pending"
-    assert params["args"] == {"session_id": None, "limit": 50}
-    assert timeout == 86500.0  # 长等待超时（对齐 wait_for_choice 业务超时）
+    method, params, timeout = bridge.calls[0]
+    assert method == "get_pending"
+    assert params == {"session_id": None, "limit": 50}
+    assert timeout == 86500.0  # 长传输超时（SDK 默认 30s 会误断审批交互面）
 
 
-def test_proxy_unwrap_data_envelope(server: Any) -> None:
-    """data 包裹形态也能解包（源 routes_missing 原序会读空，随迁时修正）。"""
-    executor = FakeToolExecutor({
-        "interaction.get_pending": {"data": {"requests": [{"id": "r1"}], "count": 1}},
-    }, [])
-    server.plugin._capabilities["tool-executor"] = executor
-
-    status, body = _decode(_call(server, "/ext/approval_service/interaction/pending"))
-
-    assert status == 200
-    assert body == {"items": [{"id": "r1"}], "total": 1}
-
-
-def test_proxy_approve_via_tool_executor(server: Any) -> None:
-    calls: list[tuple[dict[str, Any], float | None]] = []
-    executor = FakeToolExecutor({
-        "interaction.respond": {"ok": True, "request_id": "r1", "status": "submitted"},
-    }, calls)
-    server.plugin._capabilities["tool-executor"] = executor
+def test_proxy_approve_via_bridge(server: Any) -> None:
+    bridge = FakeBridge({"respond": {"ok": True, "request_id": "r1", "status": "submitted"}})
+    _inject_bridge(server, bridge)
 
     status, body = _decode(_call(
-        server, "/ext/approval_service/interaction/r1/approve", "POST", raw_body=_b64("{}"),
+        server, "/ext/approval_service/interaction/r1/approve", "POST",
+        raw_body=_b64("{}"), headers=_ADMIN_HEADERS,
     ))
 
     assert status == 200
     assert body["success"] is True
-    params, _ = calls[0]
-    assert params["tool_name"] == "interaction.respond"
-    args = params["args"]
-    assert args["request_id"] == "r1"
-    assert args["response_type"] == "approved"
-    assert args["selected_option"] == "approve"
+    method, params, _ = bridge.calls[0]
+    assert method == "respond"
+    assert params["request_id"] == "r1"
+    assert params["response"]["response_type"] == "approved"
+    assert params["response"]["selected_option"] == "approve"
 
 
-def test_proxy_cancel_via_tool_executor(server: Any) -> None:
-    calls: list[tuple[dict[str, Any], float | None]] = []
-    executor = FakeToolExecutor({
-        "interaction.cancel": {"data": {"ok": True, "request_id": "r1", "status": "cancelled"}},
-    }, calls)
-    server.plugin._capabilities["tool-executor"] = executor
+def test_proxy_cancel_via_bridge(server: Any) -> None:
+    bridge = FakeBridge({"cancel": {"ok": True, "request_id": "r1", "status": "cancelled"}})
+    _inject_bridge(server, bridge)
 
     status, body = _decode(_call(
         server, "/ext/approval_service/interaction/r1/cancel", "POST",
@@ -377,20 +374,19 @@ def test_proxy_cancel_via_tool_executor(server: Any) -> None:
 
     assert status == 200
     assert body["status"] == "cancelled"
-    params, _ = calls[0]
-    assert params["tool_name"] == "interaction.cancel"
-    assert params["args"] == {"request_id": "r1", "reason": "x"}
+    method, params, _ = bridge.calls[0]
+    assert method == "cancel"
+    assert params == {"request_id": "r1", "reason": "x"}
 
 
 def test_proxy_tool_error_is_false(server: Any) -> None:
-    """工具返回 error 信封 → 变更类端点 success False（转发失败不崩）。"""
-    executor = FakeToolExecutor({
-        "interaction.respond": {"error": "service not initialized"},
-    }, [])
-    server.plugin._capabilities["tool-executor"] = executor
+    """桥回 error 信封 → RuntimeError 收敛 → 变更类端点 success False（转发失败不崩）。"""
+    bridge = FakeBridge({"respond": {"error": "service not initialized"}})
+    _inject_bridge(server, bridge)
 
     status, body = _decode(_call(
-        server, "/ext/approval_service/interaction/r1/approve", "POST", raw_body=_b64("{}"),
+        server, "/ext/approval_service/interaction/r1/approve", "POST",
+        raw_body=_b64("{}"), headers=_ADMIN_HEADERS,
     ))
 
     assert status == 200
@@ -400,42 +396,22 @@ def test_proxy_tool_error_is_false(server: Any) -> None:
 # ── 边界 ──────────────────────────────────────────────────────────────────
 
 
-def test_proxy_unknown_method_raises(server: Any) -> None:
-    """代理不支持的方法名 → RuntimeError（无对应工具）。"""
-    proxy = server._HumanInteractionCapabilityProxy(lambda *a, **k: {})
-
-    with pytest.raises(RuntimeError, match="无对应工具"):
-        _run(proxy._call("viewed", {"request_id": "r1"}))
-
-
 def test_proxy_respond_non_dict_body(server: Any) -> None:
     """respond 收到非 dict body → 空 inner → 默认 answered 形状转发。"""
+    bridge = FakeBridge({"respond": {"ok": True, "request_id": "r1"}})
 
-    class _Exec:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, Any]] = []
-
-        async def call(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
-            self.calls.append(params)
-            return {"ok": True, "request_id": "r1"}
-
-    exec_ = _Exec()
-    proxy = server._HumanInteractionCapabilityProxy(exec_.call)
-
-    result = _run(proxy.respond("r1", "not-a-dict"))
+    result = _run(server._HumanInteractionCapabilityProxy(bridge).respond("r1", "not-a-dict"))
 
     assert result is True
-    args = exec_.calls[0]["args"]
-    assert args["response_type"] == "answered"
-    assert args["selected_option"] is None
+    _, params, _ = bridge.calls[0]
+    assert params["response"]["response_type"] == "answered"
+    assert params["response"]["selected_option"] is None
 
 
 def test_proxy_non_dict_result_raises_500(server: Any) -> None:
-    """executor 返回非 dict（如字符串）→ RuntimeError → http 500（响应可解析）。"""
-    executor = FakeToolExecutor({
-        "interaction.get_pending": "oops-not-a-dict",
-    }, [])
-    server.plugin._capabilities["tool-executor"] = executor
+    """桥返回非 dict（如字符串）→ AttributeError → http 500（响应可解析）。"""
+    bridge = FakeBridge({"get_pending": "oops-not-a-dict"})
+    _inject_bridge(server, bridge)
 
     status, body = _decode(_call(server, "/ext/approval_service/interaction/pending"))
 
@@ -443,15 +419,16 @@ def test_proxy_non_dict_result_raises_500(server: Any) -> None:
     assert "internal server error" in body["error"]
 
 
-def test_degraded_via_missing_tool_executor(server: Any) -> None:
-    """plugin 无 tool-executor 注入 → 真实 _get_human_interaction_service 降级
+def test_degraded_via_missing_capability(server: Any) -> None:
+    """plugin 无 human-interaction 能力 → 真实 _get_human_interaction_service 降级
     （不 monkeypatch 函数本体，验证 except 分支 + 空 pending 语义）。"""
     status, body = _decode(_call(server, "/ext/approval_service/interaction/pending"))
 
     assert status == 200
     assert body == {"items": [], "total": 0}
 
-    status, body = _decode(_call(server, "/ext/approval_service/interaction/r1/approve", "POST"))
+    status, body = _decode(_call(
+        server, "/ext/approval_service/interaction/r1/approve", "POST", headers=_ADMIN_HEADERS))
     assert status == 200
     assert body["success"] is False
 
@@ -475,14 +452,12 @@ def test_get_request_matches_by_request_id_key(server: Any) -> None:
     assert body["id"] == "id-only"
 
 
-def test_proxy_get_detail_via_tool_executor(server: Any) -> None:
-    """真实代理 get_request（pending 过滤匹配）经 tool-executor 链路。"""
-    executor = FakeToolExecutor({
-        "interaction.get_pending": {
-            "requests": [{"request_id": "r-x", "session_id": "s"}], "count": 1,
-        },
-    }, [])
-    server.plugin._capabilities["tool-executor"] = executor
+def test_proxy_get_detail_via_bridge(server: Any) -> None:
+    """真实代理 get_request（pending 过滤匹配）经 human-interaction 桥链路。"""
+    bridge = FakeBridge({
+        "get_pending": {"requests": [{"request_id": "r-x", "session_id": "s"}], "count": 1},
+    })
+    _inject_bridge(server, bridge)
 
     status, body = _decode(_call(server, "/ext/approval_service/interaction/r-x"))
 
@@ -493,13 +468,10 @@ def test_proxy_get_detail_via_tool_executor(server: Any) -> None:
     assert status == 404
 
 
-def test_proxy_respond_via_tool_executor(server: Any) -> None:
-    """真实代理 respond（嵌套 unwrap）→ interaction.respond 载荷。"""
-    calls: list[tuple[dict[str, Any], float | None]] = []
-    executor = FakeToolExecutor({
-        "interaction.respond": {"ok": True, "request_id": "r1", "status": "submitted"},
-    }, calls)
-    server.plugin._capabilities["tool-executor"] = executor
+def test_proxy_respond_via_bridge(server: Any) -> None:
+    """真实代理 respond（嵌套 unwrap）→ (request_id, response) 透传载荷。"""
+    bridge = FakeBridge({"respond": {"ok": True, "request_id": "r1", "status": "submitted"}})
+    _inject_bridge(server, bridge)
 
     status, body = _decode(_call(
         server, "/ext/approval_service/interaction/response", "POST",
@@ -511,19 +483,21 @@ def test_proxy_respond_via_tool_executor(server: Any) -> None:
 
     assert status == 200
     assert body == {"success": True}
-    args = calls[0][0]["args"]
-    assert args["request_id"] == "r1"
-    assert args["response_type"] == "answered"
-    assert args["selected_option"] == "opt"
-    assert args["feedback"] == "f"
+    method, params, _ = bridge.calls[0]
+    assert method == "respond"
+    assert params["request_id"] == "r1"
+    assert params["response"] == {
+        "response_type": "answered",
+        "selected_option": "opt",
+        "answers": None,
+        "feedback": "f",
+    }
 
 
 def test_proxy_cancel_tool_error_false(server: Any) -> None:
-    """interaction.cancel 工具返回 error → 取消转发失败 → success False（448-450 分支）。"""
-    executor = FakeToolExecutor({
-        "interaction.cancel": {"error": "request not found"},
-    }, [])
-    server.plugin._capabilities["tool-executor"] = executor
+    """cancel 桥回 error → 取消转发失败 → success False。"""
+    bridge = FakeBridge({"cancel": {"error": "request not found"}})
+    _inject_bridge(server, bridge)
 
     status, body = _decode(_call(
         server, "/ext/approval_service/interaction/r1/cancel", "POST", raw_body=_b64("{}"),
@@ -533,16 +507,16 @@ def test_proxy_cancel_tool_error_false(server: Any) -> None:
     assert body == {"success": False, "request_id": "r1", "status": "cancelled"}
 
 
-def test_proxy_viewed_via_tool_executor(server: Any) -> None:
-    """viewed 端点经真实代理：确认应答（human sidecar 无 viewed 工具，不落库）。"""
-    executor = FakeToolExecutor({}, [])
-    server.plugin._capabilities["tool-executor"] = executor
+def test_proxy_viewed_via_bridge(server: Any) -> None:
+    """viewed 端点经真实代理：确认应答（human sidecar 无 viewed 方法，不落库不转发）。"""
+    bridge = FakeBridge()
+    _inject_bridge(server, bridge)
 
     status, body = _decode(_call(server, "/ext/approval_service/interaction/r1/viewed", "POST"))
 
     assert status == 200
     assert body == {"success": True, "request_id": "r1", "viewed": True}
-    assert executor._calls == []  # 无工具调用（确认应答）
+    assert bridge.calls == []  # 无桥调用（确认应答）
 
 
 def test_response_degraded_false(server: Any) -> None:

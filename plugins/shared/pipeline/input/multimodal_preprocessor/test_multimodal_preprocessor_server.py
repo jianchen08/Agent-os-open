@@ -5,9 +5,12 @@
 （PluginResult → state_updates 序列化、dict 直通、skip_remaining
 透传、create_initial_state 合并）。
 
-server.py 以唯一模块名动态加载（importlib 显式路径），加载前逐出裸名
-``plugin`` 防兄弟插件目录串扰；``plugin.get_config`` 为 SDK 外部依赖，
-以 monkeypatch 注入配置。
+server.py 以唯一模块名动态加载（importlib 显式路径）；裸名 ``plugin``
+加载前钉到本目录 plugin.py、加载后还原——单进程聚合跑多个插件目录测试时
+sys.path 首位可能是兄弟插件目录（如 llm_core 测试的模块级前插），仅逐出会让
+``from plugin import MultimodalPreprocessor`` 重解析到兄弟模块（本仓逐出纪律：
+还原到原值防身份分裂）。``plugin.get_config`` 为 SDK 外部依赖，以 monkeypatch
+注入配置。
 """
 
 from __future__ import annotations
@@ -29,14 +32,30 @@ def _load_server() -> ModuleType:
     """唯一名动态加载 server.py（每次新建，隔离模块级状态）。"""
     name = "_mm_preprocessor_server_ut"
     sys.modules.pop(name, None)
-    sys.modules.pop("plugin", None)
-    spec = importlib.util.spec_from_file_location(name, _SERVER_PATH)
-    assert spec is not None
-    assert spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    _saved_plugin = sys.modules.pop("plugin", None)
+    try:
+        # 裸名 plugin 钉到本目录 plugin.py（防兄弟插件目录 sys.path 串扰）
+        plugin_spec = importlib.util.spec_from_file_location(
+            "plugin", Path(__file__).resolve().parent / "plugin.py"
+        )
+        assert plugin_spec is not None and plugin_spec.loader is not None
+        plugin_mod = importlib.util.module_from_spec(plugin_spec)
+        sys.modules["plugin"] = plugin_mod
+        plugin_spec.loader.exec_module(plugin_mod)
+
+        spec = importlib.util.spec_from_file_location(name, _SERVER_PATH)
+        assert spec is not None
+        assert spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        # 还原 plugin 槽位到原值（逐出到空会让后续测试重解析出身份分裂的新实例）
+        if _saved_plugin is not None:
+            sys.modules["plugin"] = _saved_plugin
+        else:
+            sys.modules.pop("plugin", None)
 
 
 def _run(coro: Any) -> Any:

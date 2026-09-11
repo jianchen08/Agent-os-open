@@ -29,6 +29,7 @@ from e2e_helpers import (
     KERNEL_URL,
     create_session,
     http_get,
+    http_get_with_auth,
     http_post_json_auth,
     ws_chat_url,
 )
@@ -59,9 +60,9 @@ def _find_agent(schema_body, agent_id):
 class TestApprovalSchema:
     """1. Schema 聚合端点声明审批面板（确定性主断言，不依赖 LLM）。"""
 
-    def test_schema_contains_approval_service_with_ui_schema(self, kernel_url):
-        """GET /api/v1/schema 应返回 approval_service 且其 ui_schema 非空。"""
-        status, body, _ = http_get(f"{kernel_url}/api/v1/schema", timeout=10)
+    def test_schema_contains_approval_service_with_ui_schema(self, kernel_url, auth_token):
+        """GET /api/v1/schema（已认证）应返回 approval_service 且其 ui_schema 非空。"""
+        status, body, _ = http_get_with_auth(f"{kernel_url}/api/v1/schema", auth_token, timeout=10)
         assert status == 200, f"期望 200，实际 {status}"
         agent = _find_agent(body, "approval_service")
         assert agent is not None, (
@@ -71,10 +72,10 @@ class TestApprovalSchema:
             f"approval_service.ui_schema 应为 dict，实际 {type(agent.get('ui_schema'))}"
         )
 
-    def test_approval_panel_widget_fullscreen_on_event(self, kernel_url):
+    def test_approval_panel_widget_fullscreen_on_event(self, kernel_url, auth_token):
         """approval_service 的 ui_schema 应声明 approval_panel：
         space=fullscreen、trigger=on_event:approval.created（全屏审批浮层）。"""
-        status, body, _ = http_get(f"{kernel_url}/api/v1/schema", timeout=10)
+        status, body, _ = http_get_with_auth(f"{kernel_url}/api/v1/schema", auth_token, timeout=10)
         assert status == 200, f"期望 200，实际 {status}"
         agent = _find_agent(body, "approval_service")
         assert agent is not None, "schema.agents 缺少 approval_service"

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """评估系统 MCP 服务端。
 
-强制门控+按指标审查功能与 0.1 等价。
-核心业务逻辑参考 0.1 src/evaluation/engine.py。
+职责：强制门控 + 按指标审查。
 
 [来源: docs/tasks/task_10_system_plugins.md AC-09-3]
 """
@@ -10,7 +9,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import time
 import uuid
 from typing import Any
@@ -18,19 +16,18 @@ from typing import Any
 import yaml
 
 from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
 plugin = AgentOSPlugin("evaluation_service")
 
-# http.handle 响应封装（内核 HttpHandleResponse/ToolExecutionResult 样板）：
-# 公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
-_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _SHARED_ROOT not in sys.path:
-    sys.path.insert(0, _SHARED_ROOT)
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
+
 from http_json import (  # noqa: E402
     error as _error,
     json_response as _json_response,
     ok as _ok,
 )
+from bounded_dict import BoundedDict  # noqa: E402
 
 # ── HTTP 端点（http.handle）—— 前端 /ext/evaluation_service/metrics 入口 ──────
 # 内核 http_dispatcher 透传：dispatcher 把 HttpHandleRequest（method/path/raw_body/
@@ -119,7 +116,10 @@ def _metric_to_response(raw: dict[str, Any]) -> dict[str, Any]:
         "updated_at": None,
     }
 
-_results: dict[str, dict[str, Any]] = {}
+# 评估结果存储：eval_id -> summary dict。有界（TTL 24h / MAX 1024，写时清扫
+# 过期+超限逐最旧，条目带 ts）：长驻 sidecar 只插不删即随历史评估线性泄漏，
+# 经共享件 BoundedDict 收敛（读取面零变化，条目多一个 ts 字段）。
+_results: BoundedDict = BoundedDict()
 
 # 内置指标注册表
 _metric_registry: dict[str, dict[str, Any]] = {

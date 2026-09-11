@@ -107,6 +107,33 @@ class TestList:
         assert out["total"] == 1
         assert out["items"][0]["id"] == "agentos"
 
+    def test_list_search_matches_name_id_and_description(self, server: Any) -> None:
+        """search 参数按 name/config_id/description 子串过滤（大小写不敏感）。"""
+        by_name = server.list_agents(search="灵汐")
+        assert {i["id"] for i in by_name["items"]} == {"agentos"}
+        by_id = server.list_agents(search="GENERAL_AGENT")
+        assert {i["id"] for i in by_id["items"]} == {"general_agent_agent"}
+        by_desc = server.list_agents(search="执行任务")
+        assert {i["id"] for i in by_desc["items"]} == {"general_agent_agent"}
+
+    def test_list_search_no_hit_returns_empty_not_all(self, server: Any) -> None:
+        """无命中必须返回空集，而非退化为全量（过滤失效即搜索永真）。"""
+        out = server.list_agents(search="zzz-nonexistent")
+        assert out == {"items": [], "total": 0}
+
+    def test_list_search_empty_keyword_returns_all(self, server: Any) -> None:
+        out = server.list_agents(search="  ")
+        assert out["total"] == 2
+
+    def test_http_get_agents_passes_search_through(self, server: Any) -> None:
+        result = _run_handle(
+            server, "GET", "/ext/agent_manager/agents", query={"search": "灵汐"}
+        )
+        status, body = _decode_http(result)
+        assert status == 200
+        assert body["total"] == 1
+        assert body["items"][0]["id"] == "agentos"
+
     def test_list_skips_empty_config_id(self, server: Any, tmp_path: Path) -> None:
         (tmp_path / "config" / "agents" / "main" / "no_id.yaml").write_text(
             "name: 无ID\n", encoding="utf-8"

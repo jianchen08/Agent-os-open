@@ -198,7 +198,6 @@ class WidgetRegistry {
    * @returns 可用的 React 组件或 undefined（表外 / 候选全缺）
    */
   findFallback(type: string): WidgetComponent | undefined {
-    // 1. 精确匹配
     const direct = this.entries.get(type)
     if (direct) return direct.component
 

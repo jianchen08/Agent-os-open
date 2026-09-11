@@ -61,7 +61,6 @@ def _make_service() -> MagicMock:
     svc.pause_task = AsyncMock()
     svc.delete_task = AsyncMock()
     svc.list_subtasks.return_value = []
-    svc._cleanup_subtask_worktrees = AsyncMock(return_value={})
     return svc
 
 

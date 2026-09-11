@@ -1,64 +1,54 @@
-# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: none-local
+# @feature: FP-0.2.〇 管道引擎 | @ci: none-local
 """isolation 插件（隔离策略加载器）单元测试。
 
-覆盖（对齐 plugins/shared/system/isolation/policy.py）：
-1. _default_policy_path：定位仓库根 config/isolation/isolation_policy.yaml
+覆盖（对齐 SDK agentos_plugin_sdk.isolation_policy，三插件共享单一真值源）：
+1. default_policy_path：定位仓库根 config/isolation/isolation_policy.yaml
    （AGENTOS_CONFIG_ROOT 优先，回退祖先目录查找，不硬编码父目录层数）
 2. IsolationPolicyLoader：config_center 不可用时文件回退加载真实策略
    （bash_execute 应命中 tools 精确匹配 → isolated/command_in_container）
 3. 路径找不到时降级默认策略（不 panic）
-
-测试不依赖真实内核——直接加载 policy.py 与同目录 isolation_types.py。
 """
 
 from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from agentos_plugin_sdk.isolation_policy import (
+    DEFAULT_POLICY_PATH,
+    IsolationPolicyLoader,
+    ToolIsolationPolicy,
+    default_policy_path,
+)
+
 pytestmark = pytest.mark.unit
 
 _PLUGIN_DIR = Path(__file__).resolve().parent  # plugins/shared/system/isolation/
-if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
 
 # 仓库根 = 插件目录向上 4 层（plugins/shared/system/isolation → 仓库根）
 _REPO_ROOT = _PLUGIN_DIR.parents[3]
 _POLICY_FILE = _REPO_ROOT / "config" / "isolation" / "isolation_policy.yaml"
 
 
-def _load_policy() -> Any:
-    mod_name = "isolation_policy_test"
-    if mod_name in sys.modules:
-        del sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "policy.py")
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_MOD = _load_policy()
-_default_policy_path = _MOD._default_policy_path
-IsolationPolicyLoader = _MOD.IsolationPolicyLoader
-
-
 class TestDefaultPolicyPath:
     def test_resolves_to_repo_root_policy_file(self) -> None:
         """定位函数返回的路径存在且指向仓库根 config/isolation/isolation_policy.yaml。"""
-        path = _default_policy_path()
+        path = default_policy_path()
         assert path.exists(), f"策略文件不存在: {path}"
         assert path == _POLICY_FILE, f"期望 {_POLICY_FILE}，实际 {path}"
 
+    def test_module_default_constant_matches_resolver(self) -> None:
+        """DEFAULT_POLICY_PATH 与 default_policy_path() 锚点解析一致（loader 默认路径来源）。"""
+        assert DEFAULT_POLICY_PATH == default_policy_path()
+
     def test_ancestor_walk_not_hardcoded(self) -> None:
         """路径通过祖先目录查找得到（不依赖固定父目录层数）。"""
-        path = _default_policy_path()
+        path = default_policy_path()
         # 仓库根是包含 config/isolation/isolation_policy.yaml 的祖先目录
         assert _REPO_ROOT in path.parents
         assert path.parent == _REPO_ROOT / "config" / "isolation"
@@ -66,40 +56,52 @@ class TestDefaultPolicyPath:
     def test_env_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """AGENTOS_CONFIG_ROOT 指向的配置根优先于祖先目录推导。"""
         monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(_REPO_ROOT / "config"))
-        path = _default_policy_path()
+        path = default_policy_path()
         assert path == _POLICY_FILE
         assert path.exists()
 
     def test_env_override_missing_file_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """AGENTOS_CONFIG_ROOT 指向的路径不存在时回退祖先目录查找。"""
         monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(_REPO_ROOT / "nonexistent-config-root"))
-        path = _default_policy_path()
+        path = default_policy_path()
         assert path == _POLICY_FILE
         assert path.exists()
+
+    def test_env_override_alt_root_beats_ancestor_probe(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """锚点解析：env 根含自有 isolation/isolation_policy.yaml 时，即使祖先探测
+        也能命中仓库根策略，仍以 env 根为准（部署布局覆盖仓库布局）。"""
+        alt_root = tmp_path / "alt-config"
+        (alt_root / "isolation").mkdir(parents=True)
+        alt_policy = alt_root / "isolation" / "isolation_policy.yaml"
+        alt_policy.write_text("default: {isolation: non_isolated}\n", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(alt_root))
+        assert default_policy_path() == alt_policy
 
     def test_no_ancestor_found_returns_fallback_without_panic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """任何祖先目录都找不到时返回推导路径（加载失败走默认策略降级，不 panic）。"""
         monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(_REPO_ROOT / "nonexistent-config-root"))
-        # 模拟 policy.py 位于无 config/isolation 祖先的目录：用临时目录重新加载模块
-        import tempfile
-
+        # 模拟模块位于无 config/isolation 祖先的目录：把 SDK 策略模块文件复制到
+        # 临时目录重新加载（isolation_types 经包名导入，不依赖同目录文件）
         with tempfile.TemporaryDirectory() as tmp:
-            fake_plugin_dir = Path(tmp) / "plugins" / "shared" / "system" / "isolation"
-            fake_plugin_dir.mkdir(parents=True)
-            # 复制 policy.py 与 isolation_types.py 到临时目录（保持相对导入可用）
-            for src in (_PLUGIN_DIR / "policy.py", _PLUGIN_DIR / "isolation_types.py"):
-                (fake_plugin_dir / src.name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            fake_dir = Path(tmp) / "somewhere" / "else"
+            fake_dir.mkdir(parents=True)
+            policy_module = sys.modules["agentos_plugin_sdk.isolation_policy"]
+            assert policy_module.__file__ is not None, "SDK isolation_policy 必须来自真实文件"
+            sdk_policy_file = Path(policy_module.__file__)
+            (fake_dir / "isolation_policy.py").write_text(
+                sdk_policy_file.read_text(encoding="utf-8"), encoding="utf-8"
+            )
 
             mod_name = "isolation_policy_fallback_test"
             if mod_name in sys.modules:
                 del sys.modules[mod_name]
-            spec = importlib.util.spec_from_file_location(mod_name, fake_plugin_dir / "policy.py")
+            spec = importlib.util.spec_from_file_location(mod_name, fake_dir / "isolation_policy.py")
             assert spec is not None
             assert spec.loader is not None
             module = importlib.util.module_from_spec(spec)
             sys.modules[mod_name] = module
             spec.loader.exec_module(module)
-            path = module._default_policy_path()
+            path = module.default_policy_path()
             # 不 panic，返回推导路径（不存在也允许——调用方降级默认策略）
             assert isinstance(path, Path)
             assert not path.exists()
@@ -162,6 +164,13 @@ categories:
         assert p.checkpoint is True
         assert p.approval is True
         assert p.disk_quota == "512m"
+
+    def test_policy_dataclass_defaults(self) -> None:
+        """ToolIsolationPolicy 默认值 = 容器隔离兜底。"""
+        p = ToolIsolationPolicy()
+        assert p.isolation.value == "isolated"
+        assert p.execution == "command_in_container"
+        assert p.checkpoint is False and p.approval is False
 
     def test_priority_tool_over_category_and_default(self, tmp_yaml: Path) -> None:
         loader = IsolationPolicyLoader(config_path=str(tmp_yaml))

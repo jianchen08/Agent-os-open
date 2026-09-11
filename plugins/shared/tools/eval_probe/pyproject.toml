@@ -1,0 +1,13 @@
+[project]
+name = "agentos-plugin-eval-probe"
+version = "1.0.0"
+description = "Lingxi AgentOS 0.2 plugin — eval_probe（评测探针工具，故意失败 case 载体）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../../sdk", editable = true }

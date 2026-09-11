@@ -6,8 +6,8 @@
  */
 
 import { create } from 'zustand'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { WebSocketStatus } from '@/constants/websocket'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 
 interface SessionState {
   activeSessionId: string | null

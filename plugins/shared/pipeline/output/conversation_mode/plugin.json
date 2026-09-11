@@ -17,5 +17,13 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "state": {
+    "volatile_keys": [
+      "conversation_mode"
+    ],
+    "reads": [
+      "tool_results"
+    ]
+  }
 }

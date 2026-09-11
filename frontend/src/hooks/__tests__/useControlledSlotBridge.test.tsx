@@ -5,12 +5,11 @@
  * useControlledSlotBridge 返回的 overrideProps 只作用于目标 slotId，注入
  * value/onChange/extra；任意宿主（非 chat-input）都能经钩子控制声明组件。
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
-
-import { controlledFieldOf, useControlledSlotBridge } from '@/hooks/useControlledSlotBridge'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
+import { controlledFieldOf, useControlledSlotBridge } from '@/hooks/useControlledSlotBridge'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'

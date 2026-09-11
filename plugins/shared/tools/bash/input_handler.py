@@ -56,7 +56,6 @@ class InputHandler:
 
         for keyword in self.SENSITIVE_KEYWORDS:
             if keyword in input_lower:
-                # 返回掩码版本
                 masked = "*" * len(input_text)
                 return True, masked
 
@@ -64,11 +63,9 @@ class InputHandler:
 
     def validate_input(self, input_text: str) -> tuple[bool, str | None]:
         """验证输入有效性"""
-        # 检查长度
         if len(input_text) > self.MAX_INPUT_LENGTH:
             return False, f"输入长度超过限制（最大{self.MAX_INPUT_LENGTH}字符）"
 
-        # 检查禁止字符
         for char in self.FORBIDDEN_CHARS:
             if char in input_text:
                 return False, "输入包含禁止字符"
@@ -83,12 +80,10 @@ class InputHandler:
 
     def process(self, input_text: str, add_newline: bool = True) -> tuple[bool, str | None, str]:
         """处理输入（完整流程）"""
-        # 验证
         is_valid, error = self.validate_input(input_text)
         if not is_valid:
             return False, error, ""
 
-        # 格式化
         formatted = self.format_input(input_text, add_newline)
 
         return True, None, formatted

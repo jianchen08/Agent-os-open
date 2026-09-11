@@ -9,7 +9,7 @@
 
 GAP-1 轮询扩展（复盘管道经 chat.send_message 起 review_agent 管道）：
 - get_report 经 pipeline-state.list 能力查复盘管道状态，
-  管道真实完成才落 completed（不再"启动即 completed（乐观，空 lessons）"）
+  管道真实完成才落 completed（不预落乐观终态）
 - 管道失败落 failed；进行中/查询失败保持 running（不崩）
 
 唯一外部依赖是注入的 IMemoryBackend（用 AsyncMock 替身）与 fake pipeline
@@ -124,6 +124,24 @@ class TestStoreReportInMemory:
         entry = mod._reports["review-2"]
         assert entry["status"] == "completed"
         assert entry.get("lessons") == ["l1"]
+
+    async def test_reports_bounded_storage_stamps_ts(
+        self, mod: Any, mock_backend: AsyncMock
+    ) -> None:
+        """D2 接入：_reports 经 BoundedDict 收敛——报告条目带 ts，读取面零变化。"""
+        from bounded_dict import BoundedDict
+
+        mod.set_memory_backend(mock_backend)
+        await mod.store_report("review-bd", {"task_id": "t-bd", "lessons": ["l"]})
+
+        assert isinstance(mod._reports, BoundedDict)
+        entry = mod._reports["review-bd"]
+        assert isinstance(entry["ts"], float) and entry["ts"] > 0
+        # 读取面零变化：get_report 照常返回完整报告（ts 之外字段不动）
+        got = await mod.get_report("review-bd")
+        assert got["status"] == "completed"
+        assert got["task_id"] == "t-bd"
+        assert got["lessons"] == ["l"]
 
 
 # ═══════════════════════════════════════════════════════════

@@ -84,6 +84,8 @@ docker_watchdog_dumps/
 src/logs/
 # 根目录 logs/ 是运行时日志/截图/诊断产物，不入库
 /logs/
+# 内核进程运行日志同理（kernel/logs/ 曾混入 git add -A 近乎入库）
+kernel/logs/
 # llm_core payload 诊断落盘（默认关闭；开启时改写系统 tempfile，但历史/误开仍可能在此产生）
 plugins/shared/pipeline/core/llm_core/logs/
 **/logs/payload_diag/
@@ -161,6 +163,12 @@ target_diag/
 
 # 内核数据库清空前的自动备份（db-admin clear 方法写盘）
 agentos_kernel.db.clear-backup-*
+# 数据库清空/重建前的整库备份副本（pre-clean 自动备份，不入库）
+*.pre-clean-backup
+# 内存压力采样落盘（mem_stress 诊断脚本输出，可随时再生）
+.mem_stress_samples.jsonl
+# eval_bench 评测报告产物（run_eval.py 可再生）
+scripts/eval_bench/reports/
 
 # ─── Rust 编译中间产物（仅保留 release 二进制）───
 # Cargo 构建缓存目录：体积大、可随时 cargo build 再生，绝不入库。
@@ -219,5 +227,11 @@ kernel/schema_tmp.json
 # ─── 再生产物(脚本可随时再生,不入库)───
 docs/agent_prompts_viewer.html
 
-# 提交信息卫生闸的本地敏感词表（真实凭据字面量），永不入库
-scripts/.commit_msg_sensitive_words.local
+# ─── Electron 发布打包产物（数百 MB，electron-builder 可再生，不入库）───
+/release/
+/release_manual/
+
+# ─── 日志轮转 locked 后缀产物（*.log 罩不住 .log.locked-YYYYMMDD 变体，不入库）───
+*.log.locked-*
+# 根目录演示字幕副本（与 docs/working/demo-video-subtitles-godot-bridge.srt 逐字节相同，规范留档在其处）
+/Godot段字幕.srt

@@ -20,7 +20,7 @@
    ``base`` 默认为仓库 ``config/users/``（可经 env ``AGENTOS_CONFIG_USERS_DIR`` 或显式
    参数覆盖）。
 
-capability 调用模式（参考 hindsight_memory/wiring.py 的 ``_bind_caller``）：
+capability 调用模式（绑定闭包用 SDK ``bind_capability_caller``）：
 - SDK ``CapabilityHandle.call(method, params)`` 会拼成 wire method ``f"{cap}.{method}"``
   （见 plugin.py:237-242）。
 - 因此 ``capability_caller`` 约定为 **tenant-context 绑定的 async caller**，接收**短**
@@ -28,8 +28,7 @@ capability 调用模式（参考 hindsight_memory/wiring.py 的 ``_bind_caller``
 - ``get_current_tenant_id`` 调 ``capability_caller("get", {})``，期待返回
   ``{"tenant_id": "...", "session_id": "..."}``（内核契约固定形状，不符即抛错）。
 
-[来源: docs/test_traceability.md FP-0.2.八 / V4；plugins/sdk/.../capability.py（tenant-context 为标准能力）；
- plugins/shared/system/hindsight_memory/wiring.py（_bind_caller 范本）]
+[来源: docs/test_traceability.md FP-0.2.八 / V4；plugins/sdk/.../capability.py（tenant-context 为标准能力）]
 """
 
 from __future__ import annotations
@@ -40,6 +39,8 @@ import shutil
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+
+from agentos_plugin_sdk.capability import CapabilityCaller, bind_capability_caller
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +56,7 @@ DATA_BASE_ENV = "AGENTOS_DATA_DIR"
 # config/users 覆盖层 base 解析的 env 覆盖键（测试/部署可重定向配置根）。
 CONFIG_USERS_BASE_ENV = "AGENTOS_CONFIG_USERS_DIR"
 
-# capability_caller 类型：(method: str, params: dict) -> Awaitable[Any]
-CapabilityCaller = Callable[[str, dict[str, Any]], Awaitable[Any]]
+
 
 
 # ═══════════════════════════════════════════════════════════
@@ -147,24 +147,6 @@ def tenant_config_dir(
 # ═══════════════════════════════════════════════════════════
 
 
-def _bind_caller(handle: Any, cap_name: str) -> CapabilityCaller:
-    """绑定 capability 句柄与命名空间，构造 async caller `(method, params) -> Any`。
-
-    与 hindsight_memory/wiring.py 的 ``_bind_caller`` 同款：caller 接收**完整** wire
-    method（如 ``tenant-context.get``），剥掉已含的能力前缀后转交 ``handle.call``，
-    避免 ``handle.call`` 再拼成双命名空间（``tenant-context.tenant-context.get``）。
-
-    闭包通过函数参数绑定 cap_name，规避 B023（循环变量绑定）。
-    """
-    prefix = f"{cap_name}."
-
-    async def _call(method: str, params: dict[str, Any]) -> Any:
-        stripped = method[len(prefix):] if method.startswith(prefix) else method
-        return await handle.call(stripped, params)
-
-    return _call
-
-
 def make_tenant_context_caller(plugin: Any) -> CapabilityCaller | None:
     """从插件实例构造 tenant-context 绑定的 capability_caller。
 
@@ -183,7 +165,7 @@ def make_tenant_context_caller(plugin: Any) -> CapabilityCaller | None:
             "将回退 default"
         )
         return None
-    return _bind_caller(handle, TENANT_CONTEXT_CAPABILITY)
+    return bind_capability_caller(handle, TENANT_CONTEXT_CAPABILITY)
 
 
 def _extract_tenant_id(result: Any) -> str:

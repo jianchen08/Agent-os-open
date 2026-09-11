@@ -89,14 +89,11 @@ export class ThemeStorageService {
     const themes = this.getUserThemes()
     const index = themes.findIndex((t) => t.id === theme.id)
 
-    // 更新时间
     theme.updatedAt = new Date().toISOString()
 
     if (index >= 0) {
-      // 更新现有主题
       themes[index] = theme
     } else {
-      // 添加新主题
       if (!theme.createdAt) {
         theme.createdAt = new Date().toISOString()
       }
@@ -143,15 +140,12 @@ export class ThemeStorageService {
   static importTheme(configJson: string): UserThemeConfig {
     const config = JSON.parse(configJson) as UserThemeConfig
 
-    // 验证必需字段
     if (!config.id || !config.name || !config.basedOn) {
       throw new Error('主题配置无效：缺少必需字段')
     }
 
-    // 检查是否已存在同名主题
     const existing = this.getUserTheme(config.id)
     if (existing) {
-      // 更新现有主题
       config.updatedAt = new Date().toISOString()
       config.createdAt = existing.createdAt
     }

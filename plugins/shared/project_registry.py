@@ -105,14 +105,20 @@ class ProjectRegistry:
                 project = ProjectModel(**data)
                 self._projects[project.id] = project
             except Exception as exc:  # noqa: BLE001 — 单文件损坏不阻断其余登记加载
-                logger.warning("加载项目登记文件失败: %s — %s", yaml_file, exc)
+                # error 级留痕（非 warning）：损坏登记行静默消失 = 项目脱离账本，
+                # 必须可被日志告警捕获（写入面已原子化，新损坏属异常态）
+                logger.error("加载项目登记文件失败（该行跳过，账本缺行可见）: %s — %s", yaml_file, exc)
 
     def _persist(self, project: ProjectModel) -> None:
+        # 原子写：先写临时文件再 os.replace——项目登记是唯一持久化账本，
+        # 写中途崩溃留下的截断 YAML 会在下次启动被跳过 = 项目行静默消失。
         file_path = self._data_dir / f"{project.id}.yaml"
-        file_path.write_text(
+        tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+        tmp_path.write_text(
             yaml.safe_dump(asdict(project), default_flow_style=False, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
+        tmp_path.replace(file_path)
 
     def save(self, project: ProjectModel) -> ProjectModel:
         """保存登记行（新建与更新统一入口）。"""
@@ -186,6 +192,11 @@ def project_root_of_tree() -> Path:
     对齐 isolation/workspace.py find_project_root：AGENTOS_CONFIG_ROOT 优先
     （内核启动时把它发布到进程环境，指向 <project_root>/config——其父目录
     即项目根；e2e/多环境部署布局无关）；回退从本文件向上找 config/ 祖先。
+
+    Raises:
+        RuntimeError: 探针全失（无 AGENTOS_CONFIG_ROOT 且祖先链无 config/
+            目录）——fail-closed：静默兜底会把工作空间基目录落进插件树，
+            产生插件树内 .ai_workspaces 残留。
     """
     env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
     if env_root:
@@ -195,7 +206,10 @@ def project_root_of_tree() -> Path:
     for ancestor in Path(__file__).resolve().parents:
         if (ancestor / "config").is_dir():
             return ancestor
-    return Path(__file__).resolve().parent.parent
+    raise RuntimeError(
+        "无法定位项目根（含 config/ 目录）：请设置 AGENTOS_CONFIG_ROOT"
+        "（指向 <project_root>/config）或检查部署布局完整性"
+    )
 
 
 def workspace_base_dir() -> Path:
@@ -241,7 +255,13 @@ def ensure_project_folder(title: str, explicit_path: str = "") -> str:
     target.mkdir(parents=True, exist_ok=True)
     if not (target / ".git").exists():
         result = subprocess.run(
-            ["git", "init"], cwd=str(target), capture_output=True, text=True, timeout=60
+            ["git", "init"],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
         )
         if result.returncode != 0:
             raise RuntimeError(f"git init 失败（项目文件夹已建于 {target}）: {result.stderr.strip()}")

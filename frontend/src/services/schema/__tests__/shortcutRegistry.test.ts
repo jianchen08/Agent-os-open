@@ -8,9 +8,9 @@
  * 故直接测 normalizeKey + shouldFire + matchKey 的纯逻辑。
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { ShortcutRegistry, normalizeKey } from '@/services/schema/shortcutRegistry'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { ContributionRegistry } from '@/services/schema/ContributionRegistry'
+import { ShortcutRegistry, normalizeKey } from '@/services/schema/shortcutRegistry'
 import { useContextKeys } from '@/stores/contextKeysStore'
 
 describe('normalizeKey — 键序列归一化', () => {

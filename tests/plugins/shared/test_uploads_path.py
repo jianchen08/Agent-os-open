@@ -24,11 +24,17 @@ if str(_SHARED_DIR) not in sys.path:
 from uploads_path import resolve_uploads_dir, resolve_uploads_url  # noqa: E402
 
 
-def test_default_dir_is_tenant_data_root():
-    # 无 env 覆盖：落 data/default/uploads（与内核静态服务硬编码一致）
+def test_default_dir_is_tenant_data_root(tmp_path, monkeypatch):
+    # 缺省解析 = tenant_data_root(default, "uploads")。tenant_data_root 自动
+    # mkdir，数据根须重定向 tmp，裸跑不得写真实 data/（与 test_tenant_data
+    # 既有 AGENTOS_DATA_DIR 写法对齐）。
+    monkeypatch.delenv("UPLOADS_DIR", raising=False)
+    monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path))
     d = resolve_uploads_dir()
-    assert d == Path("data/default/uploads") or d.is_absolute()
-    assert d.parts[-3:] == ("data", "default", "uploads") or d.parts[-2:] == ("default", "uploads")
+    assert d.is_absolute()
+    assert d.parts[-2:] == ("default", "uploads")
+    assert d.is_relative_to(tmp_path)
+    assert d.is_dir()  # 自动 mkdir 落在重定向根内
 
 
 def test_env_override_wins(tmp_path, monkeypatch):
@@ -38,8 +44,18 @@ def test_env_override_wins(tmp_path, monkeypatch):
 
 def test_explicit_tenant_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("UPLOADS_DIR", raising=False)
+    # 数据根重定向 tmp：tenant_data_root 自动 mkdir，裸跑不得写真实 data/
+    monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path))
+    real_tenant_dir = _REPO_ROOT / "data" / "tenant_x"
+    before = sorted(p.name for p in real_tenant_dir.iterdir()) if real_tenant_dir.is_dir() else None
+
     d = resolve_uploads_dir("tenant_x")
+
     assert "tenant_x" in d.parts
+    assert d.is_relative_to(tmp_path)  # 产物落重定向根
+    assert d.is_dir()  # 自动 mkdir 生效于 tmp
+    after = sorted(p.name for p in real_tenant_dir.iterdir()) if real_tenant_dir.is_dir() else None
+    assert after == before  # 真实 data/ 无新增
 
 
 def test_resolve_uploads_url_joins_env_dir(tmp_path, monkeypatch):

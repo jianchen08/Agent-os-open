@@ -55,6 +55,14 @@
       "description": "ApiError::UnprocessableEntity"
     },
     {
+      "code": "TOO_MANY_REQUESTS",
+      "http_status": 429,
+      "source": "kernel",
+      "retryable": true,
+      "message": "请求过于频繁，请稍后重试",
+      "description": "ApiError::TooManyRequests——限流拒绝（登录失败滑动窗口/注册限频），响应携带 Retry-After 头"
+    },
+    {
       "code": "INTERNAL_ERROR",
       "http_status": 500,
       "source": "kernel",

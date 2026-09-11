@@ -96,6 +96,78 @@ class TestCollectTokenUsage:
         assert result["total_tokens"] == 20
 
 
+    def test_token_usage_series_shape_same_source_as_rows(
+        self, server_module, monkeypatch, tmp_path
+    ) -> None:
+        """chart 消费面：labels/datasets 与 rows 同源同值（widget 化图表形状）。"""
+        import json
+        import sqlite3
+
+        db_path = tmp_path / "kernel.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE traces (patch_data TEXT)")
+        rows = [
+            {"llm_usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10, "model": "m-a"}},
+            {"llm_usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10, "model": "m-b"}},
+        ]
+        conn.executemany(
+            "INSERT INTO traces (patch_data) VALUES (?)", [(json.dumps(r),) for r in rows]
+        )
+        conn.commit()
+        conn.close()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(db_path))
+
+        result = server_module._collect_token_usage()
+        assert result["labels"] == ["m-a", "m-b"]
+        assert [d["label"] for d in result["datasets"]] == ["输入 Tokens", "输出 Tokens"]
+        assert result["datasets"][0]["data"] == [7.0, 5.0]
+        assert result["datasets"][1]["data"] == [3.0, 5.0]
+        # 同源同值：datasets 数据 = rows 各列（防两套真值漂移）
+        assert result["datasets"][0]["data"] == [r["input_tokens"] for r in result["rows"]]
+
+
+class TestTokenUsageByTimeSeries:
+    """/ext/monitoring/token-usage/by-time：表格 {columns,rows} 与图表 {labels,datasets} 两形态。"""
+
+    def _seed_db(self, tmp_path):
+        import json
+        import sqlite3
+
+        db_path = tmp_path / "kernel.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE traces (patch_data TEXT, created_at TEXT)")
+        data = [
+            ({"llm_usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}}, "2026-09-09T10:00:00Z"),
+            ({"llm_usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10}}, "2026-09-10T11:00:00Z"),
+        ]
+        conn.executemany(
+            "INSERT INTO traces (patch_data, created_at) VALUES (?, ?)",
+            [(json.dumps(r), ts) for r, ts in data],
+        )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_by_time_series_same_source_as_rows(self, server_module, monkeypatch, tmp_path) -> None:
+        db_path = self._seed_db(tmp_path)
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(db_path))
+
+        result = server_module._collect_token_usage_by_time()
+        by_day = {r["date"]: r for r in result["rows"]}
+        assert set(result["labels"]) == set(by_day)
+        # 同源同值：每日 datasets 输入 = rows 输入
+        inp = dict(zip(result["labels"], result["datasets"][0]["data"]))
+        for day, row in by_day.items():
+            assert inp[day] == row["input_tokens"]
+
+    def test_by_time_no_db_degrades_empty_series(self, server_module, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(tmp_path / "absent.db"))
+        result = server_module._collect_token_usage_by_time()
+        assert result["rows"] == []
+        assert result["labels"] == []
+        assert result["datasets"][0]["data"] == []
+
+
 # ============================================================
 # 兼容性：只调 end 不调 start（存量调用方）
 # ============================================================

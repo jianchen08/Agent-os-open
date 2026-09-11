@@ -1,4 +1,4 @@
-"""内核只读能力桥：execution/sessions/agent-calls/search 域 handler 的真实数据入口。
+"""内核只读能力桥：execution/sessions/search 域 handler 的真实数据入口。
 
 数据源 = 内核能力（messages.list / pipeline-runs.list / db-admin.table_query），
 不消费 stub 数据。provider 闭包由 monitoring server.py 的 _on_load 注入
@@ -115,6 +115,45 @@ class ClearExecutionDataError(Exception):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
         self.status = status
+
+
+async def list_traces(pipeline_id: str) -> list[dict[str, Any]]:
+    """按 pipeline_id 直查单管道 step 级轨迹（traces.list_by_pipeline，seq 升序）。
+
+    行字段（TraceEntry）：trace_id/run_id/branch_id/seq_in_branch/plugin_id/
+    patch_type/patch_data（PluginResult JSON）/created_at。绑真会话的任务管道
+    旧读面（按 thread_id）查不到，此读面绕开会话映射直查。
+    """
+    return _rows(await _call("traces", pipeline_id=pipeline_id))
+
+
+async def list_runs_by_pipeline(pipeline_id: str) -> list[dict[str, Any]]:
+    """按 pipeline_id 列该管道全部 run（pipeline-runs.list_by_pipeline）。
+
+    行字段（PipelineRunInfo）：run_id/pipeline_id/thread_id/status/started_at/
+    ended_at/total_tokens/total_seconds。
+    """
+    return _rows(await _call("runs-by-pipeline", pipeline_id=pipeline_id))
+
+
+async def query_table(
+    table: str,
+    filter: list[str] | None = None,
+    sort: str = "",
+    limit: int = 500,
+) -> dict[str, Any]:
+    """db-admin.table_query 只读桥（filter 语法 col:op:value，op ∈ eq/ne/gt/lt/contains）。
+
+    Returns:
+        内核 body：``{table, total, limit, offset, rows}``；能力不可用降级空 dict。
+    """
+    params: dict[str, Any] = {"table": table, "limit": int(limit)}
+    if filter:
+        params["filter"] = [str(f) for f in filter]
+    if sort:
+        params["sort"] = sort
+    body = _unwrap(await _call("db-admin-query", **params))
+    return body if isinstance(body, dict) else {}
 
 
 async def clear_execution_data(authorization: str = "") -> dict[str, Any]:

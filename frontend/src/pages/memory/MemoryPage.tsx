@@ -9,8 +9,8 @@ import { Brain, Inbox, Search } from '@/assets/icons'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
-import { searchHindsight, getSemanticMemory } from '@/services/api/memory'
 import { MEMORY_EPISODES_PAGE_SIZE, useMemoryEpisodesQuery, useMemoryStatsQuery } from '@/hooks/queries/useMemoryQueries'
+import { searchHindsight, getSemanticMemory } from '@/services/api/memory'
 import type { SemanticKnowledge, MemoryItem } from '@/services/api/memory'
 
 /** Tab 类型 */
@@ -26,10 +26,8 @@ export function MemoryPage() {
   // 情景记忆分页（页码进 queryKey：翻页 = 换缓存条目）
   const [episodesPage, setEpisodesPage] = useState(1)
 
-  // 语义记忆
   const [semantics, setSemantics] = useState<SemanticKnowledge[]>([])
 
-  // 搜索
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<MemoryItem[]>([])
   const [searchTotal, setSearchTotal] = useState(0)

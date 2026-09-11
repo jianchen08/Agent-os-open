@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import os
-import sys
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+# extra 显式注入任务域依赖面：system/tasks（平铺模块权威位，tool.py 顶部
+# `from service import …` / `from task_types import …` 解析到此）+ system/
+# （service_access.get_task_service() 内部 `from tasks.service import …`
+# 限定导入要求 tasks 包目录在搜索路径上）。
+_paths = bootstrap_plugin(__file__, extra=(os.path.join("system", "tasks"), "system"))
 
 # 任务领域模块以 plugins/shared/system/tasks/ 为权威（0.2 平铺模块：service /
 # state_machine / task_types / agents_types / service_access …）。将其注入
@@ -14,22 +19,20 @@ sys.path.insert(0, os.path.dirname(__file__))
 # 直接解析到该权威位置。另需 system/ 入列——service_access.get_task_service()
 # 内部用 `from tasks.service import TaskService` 限定导入（M3 防误解析），
 # 要求 `tasks` 包所在目录（system/）也在搜索路径上。跨插件共享类型走 SDK。
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
-_TASKS_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system', 'tasks')
-_SYSTEM_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system')
-_SHARED_ROOT = os.path.join(_PROJECT_ROOT, 'plugins', 'shared')
-for _d in (_TASKS_DIR, _SYSTEM_DIR, _SHARED_ROOT):
-    if os.path.isdir(_d):
-        sys.path.insert(0, _d)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+
+# 本插件 tool 模块在 exec 期绑定（不得改为 on_load 期/handler 内 `import tool`
+# 懒加载）：合宿静息态下裸名 `tool` 槽位是其他成员的同名模块（task_evaluate
+# 等成员在 exec 期绑定后占据槽位），运行期 import 会命中异成员模块；exec 期
+# 处于宿主 loader 的裸名遮蔽保护窗口（异成员模块已摘除、自身目录在 sys.path
+# 首位），解析结果必为本插件 tool.py。
+import tool as tool_mod  # noqa: E402
 
 plugin = AgentOSPlugin("task_manage_tool")
 @plugin.on_load
 async def _on_load(_params: dict[str, Any]) -> None:
     """sidecar 启动：注入 chat / pipeline-state / pipeline-executor 能力（GAP-1 统一）。"""
-    import tool as tool_mod  # noqa: PLC0415
-
     async def _chat(params: dict[str, Any]) -> dict[str, Any]:
         handle = plugin.get_capability("chat")
         return await handle.call("send_message", params)
@@ -176,9 +179,7 @@ async def _on_load(_params: dict[str, Any]) -> None:
 )
 async def task_manage(**kwargs: dict[str, Any]) -> dict[str, Any]:
     """任务管理。"""
-    from tool import TaskTool  # noqa: PLC0415
-
-    task_tool = TaskTool()
+    task_tool = tool_mod.TaskTool()
     result = await task_tool.execute(kwargs)
     if result.success:
         # output 类型是 T | None：成功但无输出载荷 → 空 dict（契约仍是 object）

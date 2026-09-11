@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
+
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
 use axum::body::Body;
@@ -35,12 +37,13 @@ async fn seed_admin(store: &agentos_engine::SqliteStore) {
     let admin = agentos_core::types::UserRecord {
         user_id: "00000000-0000-0000-0000-000000000001".to_string(),
         username: "admin".to_string(),
-        password: "admin12345".to_string(),
+        password: agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap(),
         email: Some("admin@agentos.dev".to_string()),
         role: "admin".to_string(),
         tenant_id: agentos_http::auth::DEFAULT_TENANT_ID.to_string(),
         created_at: now,
         last_login_at: None,
+        must_change_password: false,
     };
     let _ = store.create_user(&admin).await; // 已有则忽略错误
 }
@@ -55,7 +58,7 @@ async fn admin_token(router: &axum::Router) -> String {
                 .uri("/api/v1/auth/login")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({"username": "admin", "password": "admin12345"}).to_string(),
+                    json!({"username": "admin", "password": SEED_ADMIN_PW}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -141,7 +144,14 @@ async fn no_store_falls_back_to_memory_registry() {
         session.registry().register_thread("mem-thread-1", "u1");
     }
     let router = build_router(state);
-    let token = admin_token(&router).await;
+    // D1 后无 store 登录 fail-closed——直接铸造脚手架 admin 签名 token
+    //（本测试考察 sessions 出口回退，不考察登录通道）。
+    let admin = agentos_http::auth::default_users()
+        .into_iter()
+        .next()
+        .unwrap();
+    let token =
+        agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &admin, 3600);
 
     let (status, body) = list_sessions(&router, &token).await;
     assert_eq!(status, StatusCode::OK);

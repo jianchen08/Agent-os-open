@@ -69,7 +69,13 @@ def _run(coro: Any) -> Any:
 
 
 def _call(server: Any, **kwargs: Any) -> dict[str, Any]:
-    """同步调用 http.handle（测试侧统一 asyncio 跑）。"""
+    """同步调用 http.handle（测试侧统一 asyncio 跑）。
+
+    默认装配内核已认证分发的租户身份头（M3 后 sessions/search 域按
+    X-AgentOS-Tenant 过滤，缺头 403/空集是负例，不在本文件契约内）。
+    """
+    headers = kwargs.setdefault("headers", {})
+    headers.setdefault("x-agentos-tenant", "t-default")
     return _run(server.http_handle(**kwargs))
 
 
@@ -556,7 +562,12 @@ class _FakeCapabilityHandle:
 
 
 def test_on_load_injects_kernel_reads_providers(server: Any, kr: Any) -> None:
-    """_on_load 经 get_capability 注入六个 provider（与 channel_api 同构）。"""
+    """_on_load 经 get_capability 注入内核读 provider（域 handler 数据入口）。
+
+    断言已知读面 provider 名单全部注册（子集断言，不锁总量——后续新增
+    provider 不破坏本测试，漏注入任一已知读面即红）；可调用性以真实调用
+    收敛验证（service-registry 信封 → kernel_reads._rows）。
+    """
     caps: dict[str, Any] = {
         "service-registry": _FakeCapabilityHandle(lambda m, p: []),
         "pipeline-state": _FakeCapabilityHandle([]),
@@ -568,10 +579,11 @@ def test_on_load_injects_kernel_reads_providers(server: Any, kr: Any) -> None:
 
     _run(server._on_load({}))
 
-    assert sorted(kr._PROVIDERS) == [
-        "db-admin-clear", "messages", "metrics-admin-list", "metrics-admin-query",
-        "pipeline-runs", "pipeline-state",
-    ]
+    assert {
+        "pipeline-runs", "messages", "pipeline-state", "traces",
+        "runs-by-pipeline", "db-admin-query", "db-admin-clear",
+        "metrics-admin-list", "metrics-admin-query",
+    } <= set(kr._PROVIDERS)
     # 注入的 provider 可真实调用（service-registry 信封 → kernel_reads._rows 收敛）
     rows = _run(kr.list_pipeline_runs())
     assert rows == []

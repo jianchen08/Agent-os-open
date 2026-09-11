@@ -18,6 +18,8 @@
 
 use std::sync::Arc;
 
+const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
+
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
 use agentos_core::traits::StorageBackend;
@@ -43,12 +45,13 @@ async fn handler_setup() -> (
         .create_user(&agentos_core::types::UserRecord {
             user_id: "00000000-0000-0000-0000-000000000001".to_string(),
             username: "admin".to_string(),
-            password: "admin12345".to_string(),
+            password: agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap(),
             email: Some("admin@agentos.dev".to_string()),
             role: "admin".to_string(),
             tenant_id: "default".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             last_login_at: None,
+            must_change_password: false,
         })
         .await
         .unwrap();
@@ -79,7 +82,7 @@ async fn admin_token(router: &Router) -> String {
                 .uri("/api/v1/auth/login")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({"username": "admin", "password": "admin12345"}).to_string(),
+                    json!({"username": "admin", "password": SEED_ADMIN_PW}).to_string(),
                 ))
                 .unwrap(),
         )

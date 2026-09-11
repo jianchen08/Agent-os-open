@@ -8,8 +8,9 @@
  * 零 store/service 依赖，完全由 props 驱动。
  */
 
-import { ArrowRight, Check, Loader2, MessageSquare, X } from '@/assets/icons'
 import { useState } from 'react'
+import { ArrowRight, Check, Loader2, MessageSquare, X } from '@/assets/icons'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -18,9 +19,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
-import type { InteractionOption, PendingInteraction } from '@/stores/interactionStore'
 import { resolveInteractionLayout } from '@/utils/interactionModes'
+import type { InteractionOption, PendingInteraction } from '@/stores/interactionStore'
 
 export interface InteractionCardProps {
   interaction: PendingInteraction

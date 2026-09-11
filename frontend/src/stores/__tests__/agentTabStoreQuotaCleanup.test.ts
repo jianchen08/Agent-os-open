@@ -11,6 +11,7 @@
  * 验证触发 saveCurrentTabs 后 pipeline-messages 被清理。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type * as agentTabStoreMod from '@/stores/agentTabStore'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -43,7 +44,7 @@ vi.mock('@/stores/sessionStore', () => ({
 }))
 
 describe('AgentTabStore 配额降级清理', () => {
-  let useAgentTabStore: typeof import('@/stores/agentTabStore').useAgentTabStore
+  let useAgentTabStore: agentTabStoreMod.useAgentTabStore
 
   beforeEach(async () => {
     localStorage.clear()

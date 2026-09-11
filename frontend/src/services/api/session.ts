@@ -3,10 +3,10 @@
 import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 import { mapThreadToSession, type ThreadStateResponse } from '@/utils/mappers'
-import { requestWithRetry } from '@/utils/retry'
-import type { Message, MessageToolCall, Session } from '@/types/models'
-import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 import { checkIsSystemMessage } from '@/utils/messageType'
+import { requestWithRetry } from '@/utils/retry'
+import type { MessagePart, ToolCallPart } from '@/types/messageParts'
+import type { Message, MessageToolCall, Session, ToolCallStatus } from '@/types/models'
 import type { RetryOptions } from '@/utils/retry'
 
 /** 线程创建表单字段（插件 contributes.thread_fields 聚合声明） */
@@ -108,11 +108,11 @@ export interface BackendMessageResponse {
   toolName?: string
   toolArgs?: Record<string, unknown>
   toolResult?: unknown
-  /** 工具结果 envelope 的结构化数据（后端 tool_result_json.data 投影）。
+  /** 工具结果 envelope 的结构化数据（result_data 契约字段投影）。
    *  与流式 tool_result 事件的 result_data 同源——冷热路径数据结构一致的关键字段，
    *  工具卡片刷新后仍能渲染 +/- 徽标与结构化 diff。 */
   toolResultData?: unknown
-  /** 工具执行耗时（后端 tool_result_json.duration_ms 投影）。 */
+  /** 工具执行耗时（result envelope duration_ms 字段投影）。 */
   toolDurationMs?: number
   /** 工具执行所在容器任务 ID（envelope metadata.container_task_id 投影）。 */
   containerTaskId?: string
@@ -172,7 +172,7 @@ function buildToolResultMessage(
     // 旧路径放在 toolResult 字段。这里取 toolResult，为空则用 content 兜底，
     // 保证 merge 函数能把结果注入 assistant 的 tool_call part（ActivityCard 显示）。
     toolResult: backendMessage.toolResult ?? backendMessage.content,
-    // 结构化结果 envelope（tool_result_json 投影）：与流式 result_data 同源，
+    // 结构化结果 envelope（result_data 投影）：与流式 tool_result 事件同源，
     // merge 时注入 tool_call part 的 resultData。null 归一为 undefined
     // （对齐流式 handler 的 ?? 语义，失败工具双侧均为 undefined）。
     toolResultData: backendMessage.toolResultData ?? undefined,
@@ -183,6 +183,25 @@ function buildToolResultMessage(
     containerTaskId: backendMessage.containerTaskId,
     metadata: backendMessage.metadata,
   } as Message
+}
+
+const TOOL_CALL_STATUSES: readonly string[] = ['pending', 'running', 'completed', 'failed', 'cancelled']
+const warnedUnknownToolCallStatuses = new Set<string>()
+
+/**
+ * 归一持久化 toolCall 状态：后端不填充 per-call status（OpenAI 形态无该字段），
+ * 缺省/未知不猜 completed（未知 ≠ 成功）——落 pending 并 console.warn 一次
+ * （同 MessageItem resolveToolStatus 样板；渲染 state 由 tool 消息权威派生，见
+ * assembleNonToolParts / mergeConsecutiveAssistantMessages）。
+ */
+function normalizeToolCallStatus(raw: unknown): ToolCallStatus {
+  const value = typeof raw === 'string' ? raw : ''
+  if (TOOL_CALL_STATUSES.includes(value)) return value as ToolCallStatus
+  if (value && !warnedUnknownToolCallStatuses.has(value)) {
+    warnedUnknownToolCallStatuses.add(value)
+    console.warn(`[session] 未知工具调用状态 "${value}"，按 pending 渲染`)
+  }
+  return 'pending'
 }
 
 /** 持久化 toolCalls 子项归一：兼容 ToolCallItem 与 OpenAI 双格式 → 前端 MessageToolCall */
@@ -206,7 +225,7 @@ function normalizePersistedToolCalls(
       call_id: (tc.callId || tc.id || '') as string,
       tool_name: (tc.toolName || fn.name || '') as string,
       tool_args: toolArgs as Record<string, unknown>,
-      status: (tc.status || 'completed') as 'pending' | 'running' | 'completed' | 'failed',
+      status: normalizeToolCallStatus(tc.status),
       result: tc.result,
       resultData: tc.resultData,
       error: tc.error as string | undefined,

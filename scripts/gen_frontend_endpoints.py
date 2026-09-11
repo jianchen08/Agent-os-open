@@ -9,10 +9,6 @@
   scripts/check_frontend_endpoints_sync.py（CI 两道闸：重新生成 diff 空 +
   手写 /ext/ 字面量只减不增）。
 
-跳过说明：channel_api 插件本身整体待退役（逐域拆除，最终整插件删除），
-其 166 个端点**不生成**——它们不存在于终态，前端消费方随各批次
-迁移/删除。
-
 用法：
     python scripts/gen_frontend_endpoints.py            # 写默认输出文件
     python scripts/gen_frontend_endpoints.py --output X # 自定义输出（漂移闸用）
@@ -30,10 +26,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PLUGINS_DIR = ROOT / "plugins"
 DEFAULT_OUTPUT = ROOT / "frontend" / "src" / "services" / "api" / "endpoints.generated.ts"
-
-# channel_api 整体退役中（见 docs/working/channel_api插件拆迁方案_20260821.md），
-# 其端点不投影进生成物；整插件删除后本名单自然失效。
-SKIP_PLUGIN_IDS = {"channel_api"}
 
 # 遍历时排除的目录（.venv 等重型目录不可进）
 EXCLUDE_DIRS = {"__pycache__", "node_modules"}
@@ -101,15 +93,12 @@ def render_ts(plugin_groups: list[tuple[str, str, list[dict]]]) -> str:
 
 
 def collect() -> list[tuple[str, str, list[dict]]]:
-    """扫描全部 manifest，剔除待退役插件，返回按插件 id 排序的 [(id, name, endpoints)]。"""
+    """扫描全部 manifest，返回按插件 id 排序的 [(id, name, endpoints)]。"""
     groups: dict[str, tuple[str, list[dict]]] = {}
     for path, manifest in iter_plugin_manifests():
         plugin_id = manifest.get("id")
         if not plugin_id:
             print(f"[gen-endpoints] ⚠️ {path}: 无 id 字段，跳过", file=sys.stderr)
-            continue
-        if plugin_id in SKIP_PLUGIN_IDS:
-            print(f"[gen-endpoints] 跳过待退役插件 {plugin_id}（{path}）", file=sys.stderr)
             continue
         endpoints = manifest.get("http_endpoints")
         if not endpoints:
@@ -131,7 +120,7 @@ def main() -> int:
     output.write_text(text, encoding="utf-8")
     print(
         f"[gen-endpoints] 已生成 {output}：{len(groups)} 个插件 / {total} 个端点"
-        f"（channel_api 及其余 {len(SKIP_PLUGIN_IDS) - 1} 个待退役插件不生成）"
+
     )
     return 0
 

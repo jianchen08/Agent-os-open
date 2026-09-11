@@ -7,19 +7,47 @@
   "host_type": "sidecar",
   "entry": "python server.py",
   "invoke_entry": "llm_core.execute",
+  "mcp": {
+    "transport": "stdio",
+    "request_timeout_secs": 900
+  },
   "capabilities": {
     "tools": [],
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load",
       "on_unload"
-    ]
+    ],
+    "streaming": {
+      "conduit": true
+    }
   },
   "permissions": {},
   "priority": 50,
   "persistent_fields": [
     "llm_model"
   ],
+  "state": {
+    "volatile_keys": [
+      "thinking_strength",
+      "core_type",
+      "core_plugin"
+    ],
+    "reads": [
+      "messages",
+      "system_message",
+      "compression_messages",
+      "multimodal_content",
+      "prompt.dynamic_vars",
+      "tool_schemas",
+      "plugin_configs",
+      "model_id",
+      "streaming",
+      "thinking_strength",
+      "llm_empty_streak",
+      "iteration"
+    ]
+  },
   "granted_capabilities": [
     "tool-executor"
   ],
@@ -100,14 +128,7 @@
       {
         "id": "context_usage",
         "type": "context_usage",
-        "space": "chat-input",
-        "props": {
-          "datasourceUri": "/api/v1/pipelines/state",
-          "refresh": {
-            "type": "poll",
-            "intervalSeconds": 15
-          }
-        }
+        "space": "chat-input"
       }
     ]
   },

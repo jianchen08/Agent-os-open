@@ -2,6 +2,7 @@
 # bash_execute 工具独立配置文件
 # 来源参考：config/tools/builtin_tools_config.yaml（已含完整定义）
 # 本文件为工具独立声明，便于按工具维度管理与查阅
+# 只读副本：以 config/tools/builtin_tools_config.yaml 为唯一事实源，本文件不参与运行时加载
 
 name: bash_execute
 description: 执行 Shell 命令，支持长时间运行进程和交互式输入。不要手动 nohup/setsid/disown/行尾&（本工具自带后台执行，手动后台化会使进程脱离管理）。危险命令（rm -rf /、format、dd if= 等）会被拦截。

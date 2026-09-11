@@ -1,106 +1,114 @@
 /**
- * 调试执行记录页面（query 化：双 useQuery 缓存 SWR，重挂零请求）
+ * 调试执行 Trace 页面（query 化：双 useQuery 缓存 SWR，重挂零请求）
  *
- * 展示执行记录列表，支持按会话过滤；「清空全部」一键清理所有执行记录与
- * 轨迹（内核 9 表 + LLM 请求快照文件，users 保留，自动备份）。
+ * 以「管道」为坐标展示 step 级执行轨迹（traces 表投影：插件名/patch 类型/
+ * 轮次/摘要/token/错误，可展开原始 patch_data），按轮次分组渲染；
+ * 支持按管道过滤；「清空全部」一键清理所有执行记录与轨迹。
  */
 
 import { useQueryClient } from '@tanstack/react-query'
-import { useState, useCallback, Fragment } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
-import { useDebugSessionsQuery, useExecutionRecordsQuery } from '@/hooks/queries/useDebugQueries'
 import {
-  clearAllExecutionRecords,
-  type ExecutionRecord,
-} from '@/services/api/executionRecords'
+  useDebugSessionsQuery,
+  usePipelineTracesQuery,
+} from '@/hooks/queries/useDebugQueries'
+import { clearAllExecutionRecords } from '@/services/api/executionRecords'
 import { queryKeys } from '@/services/query/queryKeys'
+import type { PipelineTraceRow } from '@/services/api/pipelineDiagnostics'
 
-/**
- * 获取记录状态样式
- */
-function getRecordStatusStyle(status?: string): string {
-  switch (status) {
-    case 'completed':
-      return 'bg-status-success/10 text-status-success'
-    case 'running':
-      return 'bg-status-info/10 text-status-info'
-    case 'failed':
+/** patch 类型徽章配色（error/rollback 醒目，其余中性） */
+function getPatchTypeStyle(patchType: string): string {
+  switch (patchType) {
+    case 'error':
       return 'bg-status-error/10 text-status-error'
-    case 'pending':
+    case 'rollback':
       return 'bg-status-warning/10 text-status-warning'
     default:
-      return 'bg-status-pending/10 text-status-pending'
+      return 'bg-accent/40 text-muted-foreground'
   }
 }
 
-/**
- * 从 message_data 提取纯文本内容（content 可能是 string 或分段数组）
- */
-function extractContentText(messageData: Record<string, unknown> | undefined): string {
-  const content = messageData?.content
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') return part
-        if (part && typeof part === 'object' && 'text' in (part as Record<string, unknown>)) {
-          return String((part as Record<string, unknown>).text)
-        }
-        return ''
-      })
-      .filter(Boolean)
-      .join('\n')
-  }
-  return ''
-}
-
-/**
- * 消息快照展开面板：渲染拼装后的消息内容（全文/工具调用/思考/错误）
- */
-function MessageSnapshotDetail({ record }: { record: ExecutionRecord }) {
-  const md = record.message_data as Record<string, unknown> | undefined
-  const content = extractContentText(md)
-  const toolCalls = md?.tool_calls as Array<Record<string, any>> | null | undefined
-  const reasoning = md?.reasoning_content as string | null | undefined
-  const toolError = md?.error as string | null | undefined
-  const toolCallId = md?.tool_call_id as string | null | undefined
-
+/** 单条 trace 行：插件/类型/摘要/token/错误 + 可展开原始 patch */
+function TraceRow({ trace }: { trace: PipelineTraceRow }) {
+  const usage = trace.llm_usage
   return (
-    <div className="mt-2 space-y-2 rounded-lg bg-accent/20 p-3 text-xs">
-      {toolCallId && (
-        <div className="text-muted-foreground font-mono">tool_call_id: {toolCallId}</div>
-      )}
-      {content && (
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 font-mono">
-          {content}
-        </pre>
-      )}
-      {toolCalls && toolCalls.length > 0 && (
-        <div className="space-y-1">
-          <div className="text-muted-foreground">工具调用（{toolCalls.length}）：</div>
-          {toolCalls.map((tc, i) => (
-            <div key={tc.id ?? i} className="bg-background rounded p-2 font-mono break-all">
-              {tc.function?.name ?? tc.name ?? `call-${i}`}
-              {tc.function?.arguments && (
-                <span className="text-muted-foreground"> {String(tc.function.arguments).slice(0, 300)}</span>
-              )}
-            </div>
-          ))}
+    <div className="rounded-lg border p-2">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="font-mono text-muted-foreground">#{trace.seq ?? '?'}</span>
+        <span className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-primary">
+          {trace.plugin_id}
+        </span>
+        <span className={`rounded px-1.5 py-0.5 ${getPatchTypeStyle(trace.patch_type)}`}>
+          {trace.patch_type}
+        </span>
+        {trace.iteration != null && (
+          <span className="text-muted-foreground">轮 {trace.iteration}</span>
+        )}
+        {trace.tool_call_count > 0 && (
+          <span className="text-muted-foreground">工具 ×{trace.tool_call_count}</span>
+        )}
+        {usage && (usage.total_tokens != null || usage.model) && (
+          <span className="text-muted-foreground">
+            {/* 数字字段可缺（空 LLM 轮只带归属键）：缺数不渲染 token 段，不猜 0 */}
+            {usage.total_tokens != null
+              ? `${usage.total_tokens.toLocaleString()} tok${usage.model ? ` · ${usage.model}` : ''}`
+              : usage.model}
+          </span>
+        )}
+        <span className="ml-auto text-muted-foreground">
+          {trace.created_at ? new Date(trace.created_at).toLocaleTimeString() : ''}
+        </span>
+      </div>
+      {trace.error && (
+        <div className="mt-1 rounded bg-status-error/10 p-1.5 text-xs text-status-error break-all">
+          {trace.error.length > 300 ? `${trace.error.slice(0, 300)}…` : trace.error}
         </div>
       )}
-      {reasoning && (
-        <details>
-          <summary className="text-muted-foreground cursor-pointer">思考过程（{reasoning.length} 字符）</summary>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 font-mono">
-            {reasoning}
-          </pre>
-        </details>
+      {trace.summary && (
+        <div className="text-muted-foreground mt-1 text-xs break-all">
+          {trace.summary.length > 200 ? `${trace.summary.slice(0, 200)}…` : trace.summary}
+        </div>
       )}
-      {toolError && (
-        <div className="rounded bg-status-error/10 p-2 text-status-error break-all">{toolError}</div>
-      )}
+      <details className="mt-1">
+        <summary className="text-muted-foreground cursor-pointer text-xs">原始 patch</summary>
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-background p-2 font-mono text-xs">
+          {JSON.stringify(trace.patch_data, null, 2)}
+        </pre>
+      </details>
+    </div>
+  )
+}
+
+/** trace 时间线：按轮次分组（iteration 缺失的步归「前置 / 后置步」组） */
+function TraceTimeline({ traces }: { traces: PipelineTraceRow[] }) {
+  const groups = useMemo(() => {
+    const map = new Map<string, PipelineTraceRow[]>()
+    for (const t of traces) {
+      const key = t.iteration != null ? `轮 ${t.iteration}` : '前置 / 后置步'
+      const bucket = map.get(key)
+      if (bucket) bucket.push(t)
+      else map.set(key, [t])
+    }
+    return Array.from(map.entries())
+  }, [traces])
+
+  return (
+    <div className="space-y-3">
+      {groups.map(([label, rows]) => (
+        <div key={label}>
+          <div className="text-muted-foreground mb-1 border-b pb-1 text-xs font-medium">
+            {label}
+          </div>
+          <div className="space-y-2">
+            {rows.map((t) => (
+              <TraceRow key={t.trace_id} trace={t} />
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -117,37 +125,31 @@ function extractClearError(e: unknown): string {
 }
 
 /**
- * 调试执行记录页面组件
+ * 调试执行 Trace 页面组件
  *
- * 后端已接内核消息快照（message_slots⨝blobs 读时重建），
- * message_data 携带全文/tool_calls/reasoning——本页展开渲染拼装后的消息内容。
+ * 数据面 = /ext/monitoring/traces（step 级轨迹投影）；会话下拉的 id 即管道 id
+ * （execution sessions 读面的 session 坐标本就是 pipeline_id），选中即查该管道轨迹。
  */
 export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } = {}) {
-  const [selectedSession, setSelectedSession] = useState<string>('')
-  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [selectedPipeline, setSelectedPipeline] = useState<string>('')
   const [clearing, setClearing] = useState(false)
   const [clearMessage, setClearMessage] = useState<string | null>(null)
   const [clearError, setClearError] = useState<string | null>(null)
   const queryClient = useQueryClient()
 
-  // 会话列表 + 执行记录（query 化）：sessionId 进 key，切换过滤 = 换缓存条目
+  // 管道列表 + 选中管道的 trace 时间线（query 化）：管道 id 进 key，切换 = 换缓存条目
   const sessionsQuery = useDebugSessionsQuery()
-  const sessions = sessionsQuery.data?.sessions ?? []
-  const recordsQuery = useExecutionRecordsQuery(selectedSession || undefined)
-  const records = recordsQuery.data?.records ?? []
-  const total = recordsQuery.data?.total ?? 0
+  const pipelines = sessionsQuery.data?.sessions ?? []
+  const tracesQuery = usePipelineTracesQuery(selectedPipeline || undefined)
+  const traces = tracesQuery.data?.traces ?? []
+  const total = tracesQuery.data?.total ?? 0
   // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
-  const isLoading = recordsQuery.isPending && !recordsQuery.data
-  const error = recordsQuery.isError
-    ? recordsQuery.error instanceof Error
-      ? recordsQuery.error.message
-      : '获取执行记录失败'
+  const isLoading = tracesQuery.isPending && !tracesQuery.data && !!selectedPipeline
+  const error = tracesQuery.isError
+    ? tracesQuery.error instanceof Error
+      ? tracesQuery.error.message
+      : '获取执行轨迹失败'
     : null
-
-  /** 切换会话过滤 */
-  const handleSessionChange = (sessionId: string) => {
-    setSelectedSession(sessionId)
-  }
 
   /** 清空全部执行记录与轨迹（confirm 二次确认；成功后失效受影响缓存） */
   const handleClearAll = useCallback(async () => {
@@ -170,10 +172,12 @@ export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } =
           (result.payload_files_deleted ? `、${result.payload_files_deleted} 个 LLM 请求快照` : '') +
           (result.backup_path ? '（已自动备份）' : ''),
       )
-      setSelectedSession('')
+      setSelectedPipeline('')
       // 失效所有数据源为执行数据的缓存（前缀失效覆盖分条 key）
       for (const key of [
         queryKeys.executionRecordsPrefix,
+        queryKeys.pipelineTracesPrefix,
+        queryKeys.pipelineStateFullPrefix,
         queryKeys.debugSessions,
         queryKeys.debugTasks,
         queryKeys.llmPayloadDiagPrefix,
@@ -194,12 +198,13 @@ export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } =
 
   return (
     <PageShell
-      title="执行记录"
-      backHref="/debug"
+      title="执行 Trace"
       embedded={embedded}
       actions={
         <span className="flex items-center gap-3">
-          <span className="text-muted-foreground text-xs">共 {total} 条</span>
+          {selectedPipeline && (
+            <span className="text-muted-foreground text-xs">共 {total} 步</span>
+          )}
           <button
             onClick={handleClearAll}
             disabled={clearing}
@@ -210,17 +215,16 @@ export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } =
         </span>
       }
     >
-      {/* 会话过滤 */}
+      {/* 管道过滤 */}
       <select
-        value={selectedSession}
-        onChange={(e) => handleSessionChange(e.target.value)}
+        value={selectedPipeline}
+        onChange={(e) => setSelectedPipeline(e.target.value)}
         className="bg-background rounded-lg border px-3 py-1.5 text-sm"
       >
-        <option value="">全部会话</option>
-        {sessions.map((s) => (
-          <option key={s.id} value={s.id}>
-            {s.title || s.id}
-            {s.record_count != null ? ` (${s.record_count} 条)` : ''}
+        <option value="">选择管道查看执行轨迹</option>
+        {pipelines.map((p) => (
+          <option key={p.id} value={p.id}>
+            {(p.title || p.id) + (p.record_count != null ? ` (${p.record_count} 条消息)` : '')}
           </option>
         ))}
       </select>
@@ -233,6 +237,13 @@ export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } =
       )}
       {clearError && <ErrorState message={clearError} />}
 
+      {/* 未选择管道的引导态 */}
+      {!selectedPipeline && !clearError && (
+        <div className="text-muted-foreground py-12 text-center text-sm">
+          从上方选择一个管道，查看它的 step 级执行轨迹（插件 / 轮次 / token / 错误）。
+        </div>
+      )}
+
       {/* 加载状态 */}
       {isLoading && <LoadingState />}
 
@@ -240,114 +251,14 @@ export function DebugExecutionRecordsPage({ embedded }: { embedded?: boolean } =
       {error && <ErrorState message={error} />}
 
       {/* 空状态 */}
-      {!isLoading && !error && records.length === 0 && (
-        <div className="text-muted-foreground py-12 text-center">暂无数据</div>
+      {selectedPipeline && !isLoading && !error && traces.length === 0 && (
+        <div className="text-muted-foreground py-12 text-center">该管道暂无轨迹数据</div>
       )}
 
-      {/* 记录列表 */}
-      {!isLoading && !error && records.length > 0 && (
-        <>
-          {/* 移动端卡片视图 */}
-          <div className="space-y-2 md:hidden">
-              {records.map((record) => (
-                <div key={record.id} className="rounded-lg border p-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="max-w-[180px] truncate font-mono text-xs">{record.id}</span>
-                    <span
-                      className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${getRecordStatusStyle(record.status)}`}
-                    >
-                      {record.status || '--'}
-                    </span>
-                  </div>
-                  <div className="text-muted-foreground mt-2 space-y-1 text-xs">
-                    <div>类型：{record.record_type || '--'}</div>
-                    <div>深度：{record.depth ?? '--'}</div>
-                    <div>创建时间：{new Date(record.created_at).toLocaleString()}</div>
-                  </div>
-                  <button
-                    onClick={() => setExpandedId(expandedId === record.id ? null : record.id)}
-                    className="text-primary mt-2 text-xs hover:underline"
-                  >
-                    {expandedId === record.id ? '收起内容' : '展开消息内容'}
-                  </button>
-                  {expandedId === record.id && <MessageSnapshotDetail record={record} />}
-                </div>
-              ))}
-            </div>
-            {/* 桌面端表格视图 */}
-            <div className="hidden md:block overflow-hidden rounded-lg border">
-              <table className="w-full text-sm">
-                <thead className="bg-accent/30">
-                  <tr>
-                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      ID
-                    </th>
-                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      类型
-                    </th>
-                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      内容
-                    </th>
-                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      状态
-                    </th>
-                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      会话
-                    </th>
-                    <th className="text-muted-foreground px-4 py-2 text-left text-xs font-medium">
-                      创建时间
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {records.map((record) => (
-                    <Fragment key={record.id}>
-                      <tr
-                        className="hover:bg-accent/20 border-t cursor-pointer"
-                        onClick={() => setExpandedId(expandedId === record.id ? null : record.id)}
-                      >
-                        <td className="max-w-[160px] truncate px-4 py-2 font-mono text-xs">
-                          {record.id}
-                        </td>
-                        <td className="px-4 py-2 text-xs">{record.record_type || '--'}</td>
-                        <td className="max-w-[320px] truncate px-4 py-2 text-xs">
-                          {extractContentText(record.message_data) || (
-                            <span className="text-muted-foreground">
-                              {(() => {
-                                const toolCalls = (record.message_data as Record<string, unknown> | undefined)?.tool_calls
-                                return Array.isArray(toolCalls) ? `工具调用 ×${toolCalls.length}` : '--'
-                              })()}
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-4 py-2">
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-xs ${getRecordStatusStyle(record.status)}`}
-                          >
-                            {record.status || '--'}
-                          </span>
-                        </td>
-                        <td className="max-w-[120px] truncate px-4 py-2 font-mono text-xs text-muted-foreground">
-                          {record.session_id?.slice(0, 10) || '--'}
-                        </td>
-                        <td className="text-muted-foreground px-4 py-2 text-xs">
-                          {new Date(record.created_at).toLocaleString()}
-                        </td>
-                      </tr>
-                      {expandedId === record.id && (
-                        <tr className="border-t">
-                          <td colSpan={6} className="px-4 py-2">
-                            <MessageSnapshotDetail record={record} />
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
+      {/* trace 时间线 */}
+      {selectedPipeline && !isLoading && !error && traces.length > 0 && (
+        <TraceTimeline traces={traces} />
+      )}
     </PageShell>
   )
 }

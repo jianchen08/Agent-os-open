@@ -11,13 +11,12 @@
  * 思考模式/思考强度映射/多模态/自定义参数），添加时即可一并填写。
  */
 
-import { useState, useEffect, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronDown, Loader2, Plus, RefreshCw, Search, Trash2, X } from '@/assets/icons'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { ChevronDown, Plus, RefreshCw, Trash2 } from '@/assets/icons'
 import { PageShell } from '@/components/shared/PageShell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Modal } from '@/components/ui/Modal'
 import {
   Select,
   SelectContent,
@@ -28,12 +27,11 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { toast } from '@/components/ui/sonner'
-import { queryKeys } from '@/services/query/queryKeys'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import {
   getLLMConfig,
+  getLLMPresets,
   getProviderTypes,
-  getRemoteModels,
   addModel,
   updateModel,
   deleteModel,
@@ -47,9 +45,16 @@ import {
   type RemoteModel,
   type LLMDefaults,
 } from '@/services/api/config'
-import { buildModelFields, draftFromModel, emptyModelParamsDraft } from './modelParams'
+import { queryKeys } from '@/services/query/queryKeys'
+import {
+  buildModelFields,
+  buildRemoteModelFields,
+  draftFromModel,
+  emptyModelParamsDraft,
+  DEFAULT_STRENGTH_LEVELS,
+} from './modelParams'
 import { ModelParamsEditor } from './ModelParamsEditor'
-
+import { FetchModelsModal } from './FetchModelsModal'
 
 /**
  * 从被 reject 的对象中提取后端错误消息。
@@ -60,65 +65,6 @@ import { ModelParamsEditor } from './ModelParamsEditor'
 const getApiMsg = (e: unknown, fallback = '操作失败'): string =>
   (e as { message?: string })?.message ?? fallback
 
-/** 预置提供者分组（与 config/models/llm.yaml 预置清单对应；未列出的归「自定义」组） */
-const PROVIDER_GROUP_DEFS: { label: string; providers: [string, string][] }[] = [
-  {
-    label: '国内',
-    providers: [
-      ['qwen', '通义千问'],
-      ['moonshot', 'Kimi'],
-      ['doubao', '豆包'],
-      ['hunyuan', '混元'],
-      ['qianfan', '千帆'],
-      ['stepfun', '阶跃星辰'],
-      ['spark', '讯飞星火'],
-      ['modelscope', '魔搭'],
-      ['huawei', '华为云 MaaS'],
-      ['deepseek', 'DeepSeek'],
-      ['minimax', 'MiniMax'],
-      ['zhipu', '智谱'],
-      ['zhipu_coding', '智谱 Coding'],
-      ['siliconflow', '硅基流动'],
-    ],
-  },
-  {
-    label: '订阅 / 聚合',
-    providers: [
-      ['opencode', 'OpenCode Zen/Go'],
-      ['openrouter', 'OpenRouter'],
-    ],
-  },
-  {
-    label: '国际',
-    providers: [
-      ['openai', 'OpenAI'],
-      ['anthropic', 'Anthropic'],
-      ['gemini', 'Gemini'],
-      ['xai', 'xAI Grok'],
-      ['mistral', 'Mistral'],
-      ['groq', 'Groq'],
-      ['perplexity', 'Perplexity'],
-      ['cohere', 'Cohere'],
-      ['together', 'Together'],
-      ['fireworks', 'Fireworks'],
-      ['deepinfra', 'DeepInfra'],
-      ['cerebras', 'Cerebras'],
-    ],
-  },
-  {
-    label: '本地 / 测试',
-    providers: [
-      ['ollama', 'Ollama'],
-      ['mock_llm', 'Mock LLM'],
-    ],
-  },
-]
-
-const PRESET_PROVIDER_IDS = new Set(PROVIDER_GROUP_DEFS.flatMap((g) => g.providers.map(([id]) => id)))
-
-/** 常用类型置顶（其余来自 litellm 动态目录 getProviderTypes） */
-const COMMON_PROVIDER_TYPES = ['openai', 'anthropic', 'deepseek', 'zai', 'minimax']
-
 /**
  * LLM 配置页面组件
  */
@@ -128,7 +74,6 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState('providers')
 
-  // 拉取模型对话框的目标提供者
   const [fetchTarget, setFetchTarget] = useState<string | null>(null)
 
   // 默认模型草稿（Tab2「默认模型」段，随 config.defaults 同步）
@@ -147,13 +92,42 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   })
   const [addParams, setAddParams] = useState(emptyModelParamsDraft)
 
-  // 新提供商表单
   const [newProviderId, setNewProviderId] = useState('')
   const [newProviderType, setNewProviderType] = useState('openai')
   const [newProviderApiBase, setNewProviderApiBase] = useState('')
   const [newProviderApiKey, setNewProviderApiKey] = useState('')
   // litellm 动态类型目录（展开自定义提供商表单时懒加载）
-  const [providerTypes, setProviderTypes] = useState<string[]>(COMMON_PROVIDER_TYPES)
+  const [providerTypes, setProviderTypes] = useState<string[]>([])
+  const [providerTypesLoaded, setProviderTypesLoaded] = useState(false)
+
+  // 配置面预置声明（llm_service /ext 端点下发，声明驱动——前端零硬编码词典）：
+  // provider 分组/显示名、常用类型置顶、思考强度档位白名单
+  const presetsQuery = useQuery({
+    queryKey: queryKeys.llmPresets,
+    queryFn: () => getLLMPresets(),
+    staleTime: 5 * 60_000,
+  })
+  const presets = presetsQuery.data
+  const presetProviderIds = useMemo(
+    () => new Set(presets?.provider_groups.flatMap((g) => g.providers.map(([id]) => id)) ?? []),
+    [presets],
+  )
+  const strengthLevels = presets?.thinking_strength.levels ?? DEFAULT_STRENGTH_LEVELS
+
+  // 声明到达前 providerTypes 空表：声明常用类型先落位（懒加载目录未拉时兜底）
+  useEffect(() => {
+    if (presets && !providerTypesLoaded) setProviderTypes(presets.common_provider_types)
+  }, [presets, providerTypesLoaded])
+
+  // 声明到达后把添加表单草稿的档位对齐到声明词汇（草稿初值走缺省档位）
+  useEffect(() => {
+    if (!presets) return
+    setAddParams((prev) => {
+      const levels = presets.thinking_strength.levels
+      if (Object.keys(prev.strength).join(',') === levels.join(',')) return prev
+      return emptyModelParamsDraft(levels)
+    })
+  }, [presets])
 
   // 加载配置（query 化）：重进设置页缓存秒开；apiClient 用绝对 baseURL 绕过
   // Vite 代理；生产环境前后端须同源或后端配置 CORS 头。
@@ -197,8 +171,6 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const modelIds = config ? Object.keys(config.models ?? {}) : []
   const providerIds = config ? Object.keys(config.providers ?? {}) : []
 
-  // 保存默认模型选择
-
   // 保存默认模型选择（chat/embedding/tiers 部分更新，PUT /llm/defaults）
   const handleSaveDefaults = useCallback(async () => {
     try {
@@ -223,7 +195,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       })
       setConfig((prev) => (prev ? { ...prev, models } : prev))
       setNewModelConfig({ provider: '', model_name: '', display_name: '' })
-      setAddParams(emptyModelParamsDraft())
+      setAddParams(emptyModelParamsDraft(strengthLevels))
       if (added_ids[0] !== modelName) {
         toast.success('模型已添加，ID 自动命名以避开其他提供商的同名模型', {
           description: `${modelName} → ${added_ids[0]}`,
@@ -232,9 +204,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     } catch (e) {
       toast.error('添加模型失败', { description: getApiMsg(e, '添加模型失败') })
     }
-  }, [newModelConfig, addParams])
+  }, [newModelConfig, addParams, strengthLevels])
 
-  // 删除模型
   const handleDeleteModel = useCallback(async (modelId: string) => {
     try {
       const models = await deleteModel(modelId)
@@ -299,7 +270,6 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     [config],
   )
 
-  // 添加提供商
   const handleAddProvider = useCallback(async () => {
     if (!newProviderId.trim()) return
     try {
@@ -319,7 +289,6 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     }
   }, [newProviderId, newProviderType, newProviderApiBase, newProviderApiKey])
 
-  // 删除提供商
   const handleDeleteProvider = useCallback(async (providerId: string) => {
     try {
       const providers = await deleteProvider(providerId)
@@ -330,8 +299,10 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   }, [])
 
   // 拉取模型对话框：添加所选（勾选 + 自定义输入）
+  // limits：id → litellm 注册表下发的事实上限（context_window / max_output_tokens）。
+  // 自定义输入的模型名不在拉取列表里 → 无事实，走 DEFAULT_MAX_TOKENS 兜底。
   const handleAddRemoteModels = useCallback(
-    async (providerId: string, modelNames: string[]) => {
+    async (providerId: string, modelNames: string[], limits: Map<string, RemoteModel>) => {
       let lastModels: Record<string, ModelConfig> | null = null
       const failed: string[] = []
       for (const name of modelNames) {
@@ -340,6 +311,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
             provider: providerId,
             model_name: name,
             display_name: name,
+            ...buildRemoteModelFields(limits.get(name) ?? {}),
           })
           lastModels = models
         } catch {
@@ -359,16 +331,32 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   )
 
   // 展开自定义提供商表单时懒加载 litellm 动态类型目录
-  const handleCustomFormToggle = useCallback((open: boolean) => {
-    if (!open || providerTypes.length > COMMON_PROVIDER_TYPES.length) return
-    getProviderTypes()
-      .then(({ types }) => setProviderTypes(types))
-      .catch(() => setProviderTypes(COMMON_PROVIDER_TYPES))
-  }, [providerTypes.length])
+  const handleCustomFormToggle = useCallback(
+    (open: boolean) => {
+      if (!open || providerTypesLoaded) return
+      getProviderTypes()
+        .then(({ types }) => {
+          setProviderTypes(types)
+          setProviderTypesLoaded(true)
+        })
+        .catch(() => {
+          // 目录拉取失败回退声明常用类型（非核心路径，不阻塞表单）
+          if (presets) setProviderTypes(presets.common_provider_types)
+        })
+    },
+    [providerTypesLoaded, presets],
+  )
 
   if (isLoading) {
     return (
-      <PageShell title="模型设置" description="配置大语言模型提供商与模型" embedded={embedded} backHref="/settings" backLabel="设置" maxWidth="max-w-3xl">
+      <PageShell
+        title="模型设置"
+        description="配置大语言模型提供商与模型"
+        embedded={embedded}
+        backHref="/settings"
+        backLabel="设置"
+        maxWidth="max-w-3xl"
+      >
         <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
           <div className="border-primary mr-2 h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
           加载配置...
@@ -378,12 +366,17 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   }
 
   return (
-    <PageShell title="模型设置" description="配置大语言模型提供商与模型" embedded={embedded} mainLabel="模型设置表单">
+    <PageShell
+      title="模型设置"
+      description="配置大语言模型提供商与模型"
+      embedded={embedded}
+      mainLabel="模型设置表单"
+    >
       {loadError && (
-        <div className="mb-4 flex items-center justify-between rounded-lg bg-destructive/10 px-4 py-3">
+        <div className="bg-destructive/10 mb-4 flex items-center justify-between rounded-lg px-4 py-3">
           <div>
-            <p className="text-sm font-medium text-destructive">{loadError}</p>
-            <p className="mt-0.5 text-xs text-destructive/80">
+            <p className="text-destructive text-sm font-medium">{loadError}</p>
+            <p className="text-destructive/80 mt-0.5 text-xs">
               模型列表为空，下拉选项将无可用内容。请重试或检查后端服务是否正常运行。
             </p>
           </div>
@@ -391,7 +384,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
             variant="outline"
             size="sm"
             onClick={() => void configQuery.refetch()}
-            className="ml-4 shrink-0 border-destructive/30 text-destructive hover:bg-destructive/10"
+            className="border-destructive/30 text-destructive hover:bg-destructive/10 ml-4 shrink-0"
           >
             <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
             重试
@@ -421,23 +414,30 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                 // 未配置 Key 的排前面，引导先完成配置
                 const byId = new Map(entries)
                 const sortEntries = (list: [string, ProviderConfig][]) =>
-                  [...list].sort((a, b) => Number(a[1].has_key ?? true) - Number(b[1].has_key ?? true))
+                  [...list].sort(
+                    (a, b) => Number(a[1].has_key ?? true) - Number(b[1].has_key ?? true),
+                  )
+                // 预置分组来自 llm_service 预置声明（声明驱动）；未列出的归「自定义」组
                 const groups = [
-                  ...PROVIDER_GROUP_DEFS.map((g) => ({
+                  ...(presets?.provider_groups ?? []).map((g) => ({
                     label: g.label,
                     nameOf: Object.fromEntries(g.providers) as Record<string, string>,
-                    entries: sortEntries(g.providers.map(([id]) => [id, byId.get(id)!] as [string, ProviderConfig]).filter(([, p]) => p)),
+                    entries: sortEntries(
+                      g.providers
+                        .map(([id]) => [id, byId.get(id)!] as [string, ProviderConfig])
+                        .filter(([, p]) => p),
+                    ),
                   })),
                   {
                     label: '自定义',
                     nameOf: {},
-                    entries: sortEntries(entries.filter(([id]) => !PRESET_PROVIDER_IDS.has(id))),
+                    entries: sortEntries(entries.filter(([id]) => !presetProviderIds.has(id))),
                   },
                 ].filter((g) => g.entries.length > 0)
 
                 return groups.map((group) => (
                   <section key={group.label}>
-                    <h3 className="text-muted-foreground mb-2 text-xs font-semibold uppercase tracking-wide">
+                    <h3 className="text-muted-foreground mb-2 text-xs font-semibold tracking-wide uppercase">
                       {group.label}（{group.entries.length}）
                     </h3>
                     <div className="space-y-3">
@@ -461,7 +461,9 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
 
             {/* 添加自定义提供商 */}
             <div className="mt-2 border-t pt-4">
-              <details onToggle={(e) => handleCustomFormToggle((e.target as HTMLDetailsElement).open)}>
+              <details
+                onToggle={(e) => handleCustomFormToggle((e.target as HTMLDetailsElement).open)}
+              >
                 <summary className="cursor-pointer text-sm font-semibold select-none">
                   添加自定义提供商（类型来自 litellm，升级 litellm 后自动出现新提供者）
                 </summary>
@@ -482,16 +484,20 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                       <SelectContent>
                         <SelectGroup>
                           <SelectLabel>常用</SelectLabel>
-                          {COMMON_PROVIDER_TYPES.map((t) => (
-                            <SelectItem key={t} value={t}>{t}</SelectItem>
+                          {(presets?.common_provider_types ?? []).map((t) => (
+                            <SelectItem key={t} value={t}>
+                              {t}
+                            </SelectItem>
                           ))}
                         </SelectGroup>
                         <SelectGroup>
                           <SelectLabel>litellm 全部（{providerTypes.length}）</SelectLabel>
                           {providerTypes
-                            .filter((t) => !COMMON_PROVIDER_TYPES.includes(t))
+                            .filter((t) => !(presets?.common_provider_types ?? []).includes(t))
                             .map((t) => (
-                              <SelectItem key={t} value={t}>{t}</SelectItem>
+                              <SelectItem key={t} value={t}>
+                                {t}
+                              </SelectItem>
                             ))}
                         </SelectGroup>
                       </SelectContent>
@@ -586,6 +592,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                       key={id}
                       modelId={id}
                       model={config!.models[id]}
+                      strengthLevels={strengthLevels}
                       onDelete={handleDeleteModel}
                       onSaveSettings={handleSaveModelSettings}
                     />
@@ -611,16 +618,16 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                 <FieldRow label="提供商" htmlFor="new-model-provider">
                   <Select
                     value={newModelConfig.provider}
-                    onValueChange={(v) =>
-                      setNewModelConfig((prev) => ({ ...prev, provider: v }))
-                    }
+                    onValueChange={(v) => setNewModelConfig((prev) => ({ ...prev, provider: v }))}
                   >
                     <SelectTrigger id="new-model-provider">
                       <SelectValue placeholder="选择提供商" />
                     </SelectTrigger>
                     <SelectContent>
                       {providerIds.map((id) => (
-                        <SelectItem key={id} value={id}>{id}</SelectItem>
+                        <SelectItem key={id} value={id}>
+                          {id}
+                        </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -636,9 +643,17 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                   />
                 </FieldRow>
                 <div className="rounded-lg border p-3">
-                  <ModelParamsEditor value={addParams} onChange={setAddParams} />
+                  <ModelParamsEditor
+                    value={addParams}
+                    onChange={setAddParams}
+                    levels={strengthLevels}
+                  />
                 </div>
-                <Button size="sm" onClick={handleAddModel} disabled={!newModelConfig.model_name.trim() || !newModelConfig.provider}>
+                <Button
+                  size="sm"
+                  onClick={handleAddModel}
+                  disabled={!newModelConfig.model_name.trim() || !newModelConfig.provider}
+                >
                   添加模型
                 </Button>
               </div>
@@ -691,14 +706,12 @@ function ProviderCard({
     <div className="bg-card space-y-2 rounded-lg border px-4 py-3">
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-sm font-semibold">
-            {displayName ?? providerId}
-          </span>
+          <span className="truncate text-sm font-semibold">{displayName ?? providerId}</span>
           {displayName && (
             <span className="text-muted-foreground truncate font-mono text-xs">{providerId}</span>
           )}
           {provider.type && (
-            <span className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 text-[10px] font-mono">
+            <span className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-mono text-[10px]">
               {provider.type}
             </span>
           )}
@@ -746,7 +759,9 @@ function ProviderCard({
         <div className="space-y-1.5">
           {provider.env_var && (
             <p className="text-muted-foreground text-xs">
-              在 .env 设置 <code className="bg-muted rounded px-1 font-mono">{provider.env_var}</code>，或直接填入：
+              在 .env 设置{' '}
+              <code className="bg-muted rounded px-1 font-mono">{provider.env_var}</code>
+              ，或直接填入：
             </p>
           )}
           <div className="flex items-center gap-2">
@@ -784,7 +799,9 @@ function ProviderCard({
           拉取模型
         </Button>
         <Button size="xs" variant="ghost" onClick={() => setShowAdvanced((v) => !v)}>
-          <ChevronDown className={`mr-1 h-3 w-3 transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
+          <ChevronDown
+            className={`mr-1 h-3 w-3 transition-transform ${showAdvanced ? 'rotate-180' : ''}`}
+          />
           并发设置
         </Button>
       </div>
@@ -822,191 +839,6 @@ function ProviderCard({
   )
 }
 
-/** 拉取模型对话框：远端列表勾选 + 自定义输入，批量写入 llm.yaml */
-function FetchModelsModal({
-  open,
-  providerId,
-  onClose,
-  onAdd,
-}: {
-  open: boolean
-  providerId: string | null
-  onClose: () => void
-  onAdd: (providerId: string, modelNames: string[]) => Promise<void>
-}) {
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [models, setModels] = useState<RemoteModel[]>([])
-  const [search, setSearch] = useState('')
-  const [checked, setChecked] = useState<Set<string>>(new Set())
-  const [customs, setCustoms] = useState<string[]>([])
-  const [customInput, setCustomInput] = useState('')
-  const [adding, setAdding] = useState(false)
-
-  useEffect(() => {
-    if (!open || !providerId) return
-    setLoading(true)
-    setError(null)
-    setModels([])
-    setSearch('')
-    setChecked(new Set())
-    setCustoms([])
-    setCustomInput('')
-    getRemoteModels(providerId)
-      .then(({ models: remote }) => setModels(remote))
-      .catch((e) => setError(getApiMsg(e, '拉取模型列表失败')))
-      .finally(() => setLoading(false))
-  }, [open, providerId])
-
-  const filtered = models.filter((m) => m.id.toLowerCase().includes(search.toLowerCase()))
-  const pendingCount = checked.size + customs.length
-
-  const toggle = (id: string) => {
-    setChecked((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  const addCustom = () => {
-    const v = customInput.trim()
-    if (!v) return
-    if (!customs.includes(v) && !checked.has(v)) setCustoms((prev) => [...prev, v])
-    setCustomInput('')
-  }
-
-  const handleAdd = async () => {
-    if (!providerId || pendingCount === 0) return
-    setAdding(true)
-    try {
-      await onAdd(providerId, [...checked, ...customs])
-      onClose()
-    } finally {
-      setAdding(false)
-    }
-  }
-
-  return (
-    <Modal open={open} onClose={onClose} title={`拉取模型 — ${providerId ?? ''}`} maxWidth="lg">
-      <div className="space-y-3">
-        {loading && (
-          <div className="text-muted-foreground flex items-center justify-center py-8 text-sm">
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            正在从提供者 API 拉取模型列表...
-          </div>
-        )}
-        {error && (
-          <div className="rounded-lg bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
-            {error}
-            <p className="text-muted-foreground mt-1">仍可在下方手动输入模型名添加。</p>
-          </div>
-        )}
-
-        {!loading && !error && (
-          <>
-            <div className="relative">
-              <Search className="text-muted-foreground absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={`搜索 ${models.length} 个模型...`}
-                className="h-8 pl-8 text-xs"
-              />
-            </div>
-            <div className="max-h-64 space-y-1 overflow-y-auto rounded-lg border p-2">
-              {filtered.length === 0 ? (
-                <div className="text-muted-foreground py-4 text-center text-xs">
-                  没有匹配的模型，可在下方手动输入
-                </div>
-              ) : (
-                filtered.map((m) => (
-                  <label
-                    key={m.id}
-                    className="hover:bg-muted/50 flex cursor-pointer items-center gap-2 rounded px-2 py-1"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked.has(m.id)}
-                      onChange={() => toggle(m.id)}
-                      className="border-border h-3.5 w-3.5"
-                    />
-                    <span className="text-xs">{m.id}</span>
-                    {m.owned_by && (
-                      <span className="text-muted-foreground ml-auto text-[10px]">{m.owned_by}</span>
-                    )}
-                  </label>
-                ))
-              )}
-            </div>
-          </>
-        )}
-
-        {/* 自定义输入：列表里没有的模型手动加 */}
-        <div className="space-y-1.5">
-          <div className="flex items-center gap-2">
-            <Input
-              value={customInput}
-              onChange={(e) => setCustomInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  addCustom()
-                }
-              }}
-              placeholder="自定义模型名（回车添加，适用于列表未包含的新模型）"
-              className="h-8 text-xs"
-            />
-            <Button size="xs" variant="outline" onClick={addCustom} disabled={!customInput.trim()}>
-              加入
-            </Button>
-          </div>
-          {customs.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {customs.map((name) => (
-                <span
-                  key={name}
-                  className="bg-muted flex items-center gap-1 rounded px-2 py-0.5 font-mono text-xs"
-                >
-                  {name}
-                  <button
-                    type="button"
-                    onClick={() => setCustoms((prev) => prev.filter((n) => n !== name))}
-                    className="text-muted-foreground hover:text-foreground"
-                    aria-label={`移除 ${name}`}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center justify-end gap-2 border-t pt-3">
-          <span className="text-muted-foreground mr-auto text-xs">
-            待添加 {pendingCount} 个；添加后可在「模型」页展开参数设置上下文/think
-          </span>
-          <Button size="sm" variant="outline" onClick={onClose}>
-            取消
-          </Button>
-          <Button size="sm" onClick={handleAdd} disabled={pendingCount === 0 || adding}>
-            {adding ? (
-              <>
-                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                添加中...
-              </>
-            ) : (
-              `添加所选 (${pendingCount})`
-            )}
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  )
-}
-
 /**
  * 模型行：展示 + 删除 + 模型设置编辑。
  *
@@ -1017,16 +849,19 @@ function FetchModelsModal({
 function ModelRow({
   modelId,
   model,
+  strengthLevels,
   onDelete,
   onSaveSettings,
 }: {
   modelId: string
   model: ModelConfig
+  /** 思考强度档位（llm_service 预置声明下发） */
+  strengthLevels: readonly string[]
   onDelete: (id: string) => void
   onSaveSettings: (id: string, settings: Partial<ModelConfig>) => Promise<void>
 }) {
   const [expanded, setExpanded] = useState(false)
-  const [draft, setDraft] = useState(() => draftFromModel(model))
+  const [draft, setDraft] = useState(() => draftFromModel(model, strengthLevels))
 
   const handleSave = () => {
     onSaveSettings(modelId, buildModelFields(draft, model))
@@ -1042,7 +877,9 @@ function ModelRow({
           </div>
         </div>
         <Button variant="outline" size="xs" onClick={() => setExpanded((v) => !v)}>
-          <ChevronDown className={`mr-1 h-3 w-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+          <ChevronDown
+            className={`mr-1 h-3 w-3 transition-transform ${expanded ? 'rotate-180' : ''}`}
+          />
           参数
         </Button>
         <Button variant="destructive" size="xs" onClick={() => onDelete(modelId)}>
@@ -1051,7 +888,7 @@ function ModelRow({
       </div>
       {expanded && (
         <div className="mt-2 space-y-3 border-t pt-2">
-          <ModelParamsEditor value={draft} onChange={setDraft} />
+          <ModelParamsEditor value={draft} onChange={setDraft} levels={strengthLevels} />
           <div className="flex items-center gap-2">
             <Button size="xs" onClick={handleSave}>
               保存设置
@@ -1093,7 +930,9 @@ function DefaultModelSelect({
         </SelectTrigger>
         <SelectContent>
           {options.map((m) => (
-            <SelectItem key={m} value={m}>{m}</SelectItem>
+            <SelectItem key={m} value={m}>
+              {m}
+            </SelectItem>
           ))}
         </SelectContent>
       </Select>

@@ -3,8 +3,8 @@
  * 功能测试：enhanceActivityWithToolConfig 的 render 声明/数据路由早退分支
  * 补齐条目增强（2026-08-19 修复）。
  *
- * 背景：双路由落地后全量工具走 applyRenderIntent/applyDataDrivenIntent 早退，
- * 该分支此前只设置 details——filePath/onOpenFile 注入与标题人性化被跳过，
+ * 契约：双路由（applyRenderIntent/applyDataDrivenIntent）早退分支同样要完成
+ * 条目增强——只设置 details 会让 filePath/onOpenFile 注入与标题人性化被跳过，
  * 读文件卡片无法打开文件、条目只显示原始工具名。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'

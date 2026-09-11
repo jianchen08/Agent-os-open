@@ -1,7 +1,6 @@
 """安全条件表达式求值器（GAP-2）。
 
-`kernel/crates/engine/src/condition.rs` 的 Python 回移（0.1 ``src/pipeline/
-condition_parser.py`` 已随 0.1 删除，本文件是它在插件侧的权威实现）。
+`kernel/crates/engine/src/condition.rs` 的 Python 回移，本文件是插件侧的权威实现。
 两段式结构：tokenize → 递归下降 parse 成 AST → 对 context 求值，
 不使用任何动态求值（无 eval/exec），杜绝代码注入。
 
@@ -24,7 +23,10 @@ condition_parser.py`` 已随 0.1 删除，本文件是它在插件侧的权威�
 from __future__ import annotations
 
 import enum
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class _TokKind(enum.Enum):
@@ -393,19 +395,22 @@ def eval_compiled(ast: Any, context: dict[str, Any]) -> bool:
 
 
 def parse_condition(expression: str, context: dict[str, Any]) -> bool:
-    """安全求值条件表达式（兼容入口，0.1 同签名）。
+    """安全求值条件表达式（兼容入口）。
 
-    语法/求值异常返回 False（安全兜底，不向调用方抛出）。
+    语法/求值异常返回 False（安全兜底，不向调用方抛出）；留 debug 痕迹
+    供"触发器永不点火"类问题排查。
     """
     try:
         ast = compile_condition(expression)
     except _SyntaxError_:
         return False
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — 安全兜底（契约见 docstring）
+        logger.debug("条件表达式编译异常（按 False 兜底）| expr=%r error=%s", expression[:120], exc)
         return False
     if ast is None:
         return True
     try:
         return eval_compiled(ast, context)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — 安全兜底（契约见 docstring）
+        logger.debug("条件表达式求值异常（按 False 兜底）| expr=%r error=%s", expression[:120], exc)
         return False

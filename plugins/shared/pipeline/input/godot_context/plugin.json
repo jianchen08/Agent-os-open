@@ -62,5 +62,12 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "state": {
+    "reads": [
+      "godot.injected_for",
+      "message_id",
+      "messages_tail:20"
+    ]
+  }
 }

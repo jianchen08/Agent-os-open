@@ -1,0 +1,58 @@
+# LLM 配置面预置声明（llm_service 数据下发，前端设置页唯一来源；解耦方案 P2-5）
+#
+# 新增预置厂商 = 本文件加条目 + config/models/llm.yaml 加 provider 段——前端零改动。
+# 对账闸：thinking_strength.allowed_keys 必须与 llm_core 的
+# _THINKING_STRENGTH_ALLOWED 白名单一致（test_routes_llm_config_presets.py 机械校验）。
+
+# 预置提供者分组（设置页「提供商与密钥」Tab 的卡片分组与显示名；
+# 未列出的 provider 归前端「自定义」组）
+provider_groups:
+  - label: 国内
+    providers:
+      - [qwen, 通义千问]
+      - [moonshot, Kimi]
+      - [doubao, 豆包]
+      - [hunyuan, 混元]
+      - [qianfan, 千帆]
+      - [stepfun, 阶跃星辰]
+      - [spark, 讯飞星火]
+      - [modelscope, 魔搭]
+      - [huawei, 华为云 MaaS]
+      - [deepseek, DeepSeek]
+      - [minimax, MiniMax]
+      - [zhipu, 智谱]
+      - [zhipu_coding, 智谱 Coding]
+      - [siliconflow, 硅基流动]
+  - label: 订阅 / 聚合
+    providers:
+      - [opencode, OpenCode Zen/Go]
+      - [openrouter, OpenRouter]
+  - label: 国际
+    providers:
+      - [openai, OpenAI]
+      - [anthropic, Anthropic]
+      - [gemini, Gemini]
+      - [xai, xAI Grok]
+      - [mistral, Mistral]
+      - [groq, Groq]
+      - [perplexity, Perplexity]
+      - [cohere, Cohere]
+      - [together, Together]
+      - [fireworks, Fireworks]
+      - [deepinfra, DeepInfra]
+      - [cerebras, Cerebras]
+  - label: 本地 / 测试
+    providers:
+      - [ollama, Ollama]
+      - [mock_llm, Mock LLM]
+
+# 「添加自定义提供商」类型下拉的常用置顶（完整清单动态来自 litellm provider-types 端点）
+common_provider_types: [openai, anthropic, deepseek, zai, minimax]
+
+# 思考强度映射编辑白名单：levels = 档位词汇（聊天页思考强度档）；
+# allowed_keys = 允许按档位覆盖的模型参数键（执行端过滤在 llm_core）
+# levels 必须覆盖聊天页全部档位（含 off）：设置页按本清单重写
+# thinking_strength_params，清单缺档位会在保存时静默删除该档映射。
+thinking_strength:
+  levels: [high, medium, low, "off"]
+  allowed_keys: [thinking, reasoning_effort]

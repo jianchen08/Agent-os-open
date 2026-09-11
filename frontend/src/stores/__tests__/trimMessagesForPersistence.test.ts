@@ -8,7 +8,7 @@
  * 内存数据不受影响（本函数只控制落盘裁剪）。
  */
 import { describe, it, expect } from 'vitest'
-import { trimMessagesForPersistence, _PERSIST_LIMITS } from '@/stores/pipelineMessageStore'
+import { trimMessagesForPersistence, _PERSIST_LIMITS } from '@/stores/pipelineMessagePersistence'
 import type { Message } from '@/types/models'
 
 const makeMsg = (id: string, seq: number, ts: string, content = 'x'): Message => ({

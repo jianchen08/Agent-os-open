@@ -26,7 +26,7 @@ import {
 // ============================================================
 
 vi.mock('@/utils/activityConverter', () => ({
-  buildDefaultActions: (tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
+  buildDefaultActions: (_tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
 
   toolCallToActivity: (toolCall: Record<string, unknown>) => ({
     type: 'tool_call',

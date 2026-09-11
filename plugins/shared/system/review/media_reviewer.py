@@ -354,6 +354,7 @@ class VideoReviewer:
         video_stem = Path(file_path).stem
         extracted_paths: list[str] = []
 
+        container = None
         try:
             container = av.open(file_path)
             stream = container.streams.video[0]
@@ -381,8 +382,6 @@ class VideoReviewer:
                     frame_index += 1
                     target_pts = current_time + interval_seconds
 
-            container.close()
-
         except Exception as exc:
             logger.error(
                 "[VideoReviewer] 关键帧提取失败 | path=%s | error=%s",
@@ -390,6 +389,10 @@ class VideoReviewer:
                 exc,
             )
             raise
+        finally:
+            # 解码中途抛错也必须关闭容器（句柄迟至 GC 是资源泄漏面）
+            if container is not None:
+                container.close()
 
         return extracted_paths
 
@@ -496,7 +499,6 @@ class VideoReviewer:
         try:
             video_streams = container.streams.video
             if not video_streams:
-                container.close()
                 return None
 
             stream = video_streams[0]
@@ -523,8 +525,6 @@ class VideoReviewer:
             # 编解码器
             codec = stream.codec_context.name if stream.codec_context else ""
 
-            container.close()
-
             return {
                 "format": fmt,
                 "duration_seconds": round(duration, 4),
@@ -536,5 +536,6 @@ class VideoReviewer:
 
         except Exception as exc:
             logger.warning("[VideoReviewer] 元数据提取异常 | path=%s | error=%s", file_path, exc)
-            container.close()
             return None
+        finally:
+            container.close()

@@ -11,8 +11,8 @@
 
 import logging
 
-from isolation_types import IsolationLevel
-from policy import IsolationPolicyLoader, ToolIsolationPolicy
+from agentos_plugin_sdk.isolation_types import IsolationLevel
+from agentos_plugin_sdk.isolation_policy import IsolationPolicyLoader, ToolIsolationPolicy
 
 logger = logging.getLogger(__name__)
 

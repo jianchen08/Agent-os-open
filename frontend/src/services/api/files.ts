@@ -121,7 +121,6 @@ const TEXT_FILE_EXTENSIONS = new Set([
   '.txt', '.md', '.markdown', '.log', '.csv', '.tsv',
   '.json', '.yaml', '.yml', '.toml', '.xml', '.ini', '.cfg', '.conf',
   '.properties', '.env', '.svg',
-  // 代码文件
   '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.kt', '.go', '.rs',
   '.c', '.cpp', '.h', '.hpp', '.cs', '.rb', '.php', '.swift', '.dart',
   '.sh', '.bash', '.bat', '.ps1', '.sql', '.r', '.lua', '.pl',
@@ -212,7 +211,6 @@ export function validateFile(
       return { valid: false, error: `不支持的视频类型: ${file.type}` }
     }
 
-    // 大小限制
     const maxSize = isImage
       ? capabilities.maxImageSize
       : isAudio

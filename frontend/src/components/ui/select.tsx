@@ -1,7 +1,7 @@
 import * as SelectPrimitive from '@radix-ui/react-select'
+import * as React from 'react'
 import { CheckIcon, ChevronDownIcon } from '@/assets/icons'
 import { ChevronUp } from '@/assets/icons' // 暂缺 Deep Space v2 图标
-import * as React from 'react'
 import { cn } from '@/lib/utils'
 
 const Select = SelectPrimitive.Root

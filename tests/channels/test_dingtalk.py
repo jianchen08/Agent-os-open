@@ -89,6 +89,8 @@ class TestDingTalkOutputAdapter:
             "ended": True,
         }
         await adapter.send(state)
+        # DingTalkStreamClient 是对外部钉钉平台的边界：一条结果恰发一条消息
+        # （含收件人与正文）即输出适配器的契约，交互本身就是行为。
         client.send_message.assert_called_once()
         call_args = client.send_message.call_args
         assert call_args[0][0] == "user_dt_1"
@@ -104,6 +106,7 @@ class TestDingTalkOutputAdapter:
             "_channel_user_id": "user_dt_1",
         }
         await adapter.send(state)
+        # 错误信息必须送达用户（外部边界交互即契约）
         client.send_message.assert_called_once()
         assert "Something went wrong" in client.send_message.call_args[0][1]
 
@@ -233,6 +236,7 @@ class TestDingTalkStreamClient:
 
         await client.send_message("user_dt_1", "Hello")
 
+        # aiohttp session 是对外部钉钉 API 的网络边界：一次请求 + 报文格式即契约
         mock_session.post.assert_called_once()
         call_args = mock_session.post.call_args
         url = call_args[0][0]
@@ -559,11 +563,13 @@ class TestDingTalkStreamLoop:
         fake_session = MagicMock()
         fake_session.ws_connect = AsyncMock(side_effect=OSError("conn refused"))
         # connect() 内部 aiohttp.ClientSession() 新建真实会话——monkeypatch 工厂
-        monkeypatch.setattr(sc.aiohttp, "ClientSession", lambda: fake_session)
+        monkeypatch.setattr(sc.aiohttp, "ClientSession", lambda **_kwargs: fake_session)
         client._get_endpoint = AsyncMock(return_value="wss://fake")
         await client.connect()  # 重试耗尽后正常退出
         # 重试耗尽的公共可观察面：从未连接成功；连接尝试次数与 max_retries 一致
         assert client.is_connected is False
+        # ws_connect 是对外部网络的连接尝试：尝试次数与 max_retries 一致
+        # （重试耗尽必重连满 max_retries 次）即重连策略的外部可观察契约。
         assert fake_session.ws_connect.call_count == 2
 
 
@@ -675,11 +681,12 @@ class TestDingTalkConnectPath:
         client._ensure_token = AsyncMock()
         fake_session = MagicMock()
         fake_session.ws_connect = AsyncMock(return_value=_FakeWs([]))
-        monkeypatch.setattr(sc.aiohttp, "ClientSession", lambda: fake_session)
+        monkeypatch.setattr(sc.aiohttp, "ClientSession", lambda **_kwargs: fake_session)
         # 第一次循环端点成功；第二次端点空 → RuntimeError → 重试耗尽退出 while
         client._get_endpoint = AsyncMock(side_effect=["wss://fake", ""])
         client._receive_loop = AsyncMock()  # 直接返回，避免真实迭代
         await client.connect()
+        # 连接成功恰建立一条外部 WebSocket 连接（网络边界交互即契约）
         assert fake_session.ws_connect.call_count == 1
         client._receive_loop.assert_awaited_once()
 
@@ -691,7 +698,7 @@ class TestDingTalkConnectPath:
         client._ensure_token = AsyncMock()
         fake_session = MagicMock()
         fake_session.ws_connect = AsyncMock()
-        monkeypatch.setattr(sc.aiohttp, "ClientSession", lambda: fake_session)
+        monkeypatch.setattr(sc.aiohttp, "ClientSession", lambda **_kwargs: fake_session)
         client._get_endpoint = AsyncMock(return_value="")  # 端点为空 → RuntimeError
         await client.connect()
         assert fake_session.ws_connect.call_count == 0  # 端点失败不尝试连接

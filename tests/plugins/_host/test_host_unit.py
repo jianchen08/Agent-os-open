@@ -36,7 +36,12 @@ def _make_member_plugin(plugin_name: str, tool_name: str = "echo") -> AgentOSPlu
 
 
 class TestWatchdogStallSecs:
-    """AGENTOS_HOST_WATCHDOG_SECS 解析：合法覆盖默认，非法/非正回退 30s。"""
+    """AGENTOS_HOST_WATCHDOG_SECS 解析：合法覆盖默认，非法/非正回退 30s。
+
+    解析函数是宿主引导期纯函数（注入 env dict、无 IO）；其行为效果已由
+    TestLoopWatchdog 的 fake clock 参数化用例（30.0 与 0.5 两档阈值）承载，
+    此处锁定解析规则本身（可枚举输入 parametrize + 回退性质）。
+    """
 
     @pytest.mark.parametrize(
         ("raw", "expected"),
@@ -53,7 +58,11 @@ class TestWatchdogStallSecs:
 
 
 class TestLoopWatchdog:
-    """watchdog 线程：心跳停滞超阈值自杀（exit_fn(1)），健康打点不触发。"""
+    """watchdog 线程：心跳停滞超阈值自杀（exit_fn(1)），健康打点不触发。
+
+    生产侧即以 clock/exit_fn 注入点暴露（§6.4 fake clock 铁律的承载面）；
+    断言的是自杀/不自杀的可观察结果，非线程内部状态。
+    """
 
     @pytest.mark.parametrize("stall_secs", [30.0, 0.5])
     def test_fires_when_heartbeat_stalled(self, stall_secs: float) -> None:
@@ -125,7 +134,12 @@ class TestLoopWatchdog:
 
 
 class TestMemberDiscovery:
-    """成员 id → 插件目录定位：manifest id 优先、目录名兜底、形态过滤。"""
+    """成员 id → 插件目录定位：manifest id 优先、目录名兜底、形态过滤。
+
+    定位映射的精确断言（谁命中谁）无法经 main 公开面区分——解析失败与
+    加载失败在 main 上同为 rc=1；故仅「可解析性」用例走 main 公开面，
+    命中映射用例保留扫描/解析两函数的直接断言。
+    """
 
     def test_manifest_id_takes_precedence_over_dir_name(self, make_member) -> None:
         """manifest id 命中优先于目录名命中（内核以 manifest id 标识插件）。"""
@@ -141,13 +155,15 @@ class TestMemberDiscovery:
         by_manifest, by_dir = host._scan_plugin_dirs(member_dir.parents[2])
         assert host._resolve_member_dir("plain", by_manifest, by_dir) == member_dir
 
-    def test_dirs_without_server_py_ignored(self, shared_tree: Path) -> None:
-        """无 server.py 的目录（原生/cdylib 形态）不进入索引。"""
+    def test_dirs_without_server_py_ignored(self, shared_tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """无 server.py 的目录（原生/cdylib 形态）不进入索引：
+        经公开入口 main 的可观察结果 = 成员解析失败 fail-fast（rc=1）。"""
         native_dir = shared_tree / "pipeline" / "core" / "native_only"
         native_dir.mkdir(parents=True)
         (native_dir / "plugin.json").write_text('{"id": "native_only"}', encoding="utf-8")
-        by_manifest, by_dir = host._scan_plugin_dirs(shared_tree)
-        assert host._resolve_member_dir("native_only", by_manifest, by_dir) is None
+        rc = host.main(["--group", "light", "--slot", "1", "--members", "native_only"], shared_root=shared_tree)
+        assert rc == 1
+        assert "native_only" in capsys.readouterr().err
 
     def test_corrupt_manifest_resolvable_by_dir_name(self, shared_tree: Path) -> None:
         """损坏的 plugin.json 不阻塞扫描，目录名索引仍可命中。"""
@@ -158,7 +174,7 @@ class TestMemberDiscovery:
         by_manifest, by_dir = host._scan_plugin_dirs(shared_tree)
         assert host._resolve_member_dir("corrupt", by_manifest, by_dir) == broken_dir
 
-    def test_venv_and_node_modules_pruned_from_scan(self, shared_tree: Path) -> None:
+    def test_venv_and_node_modules_pruned_from_scan(self, shared_tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """重型目录（.venv/node_modules/__pycache__）不进扫描索引。
 
         真实 plugins/shared 下每插件带 .venv、dsh_adapter 带 node_modules peer
@@ -177,13 +193,14 @@ class TestMemberDiscovery:
         (venv_plugin / "node_modules" / "plugin.json").write_text(
             '{"id": "fake_nested2"}', encoding="utf-8"
         )
-        by_manifest, by_dir = host._scan_plugin_dirs(shared_tree)
-        assert host._resolve_member_dir("venv_holder", by_manifest, by_dir) == venv_plugin
-        assert host._resolve_member_dir("fake_nested", by_manifest, by_dir) is None
-        assert host._resolve_member_dir("fake_nested2", by_manifest, by_dir) is None
+        # 剪枝的公开可观察面：嵌套 id 经 main 解析失败 fail-fast（rc=1）
+        for nested_id in ("fake_nested", "fake_nested2"):
+            rc = host.main(["--group", "light", "--slot", "1", "--members", nested_id], shared_root=shared_tree)
+            assert rc == 1
+            assert nested_id in capsys.readouterr().err
 
     def test_symlink_dir_not_followed(self, shared_tree: Path) -> None:
-        """符号链接目录不进入扫描（junction 循环剪链：rglob 曾实测卡死）。"""
+        """符号链接目录不进入扫描——目录遍历必须剪枝，junction 循环不得使遍历不终止。"""
         if not hasattr(os, "symlink"):
             pytest.skip("平台无 symlink")
         outside = shared_tree.parent / "outside_repo"
@@ -196,8 +213,10 @@ class TestMemberDiscovery:
             os.symlink(outside, link_dir / "linked", target_is_directory=True)
         except OSError:
             pytest.skip("symlink 创建失败（Windows 权限）")
-        by_manifest, by_dir = host._scan_plugin_dirs(shared_tree)
-        assert host._resolve_member_dir("outside_id", by_manifest, by_dir) is None
+        # 不跟随的公开可观察面：链接内 id 经 main 解析失败 fail-fast（rc=1）
+        rc = host.main(["--group", "light", "--slot", "1", "--members", "outside_id"], shared_root=shared_tree)
+        assert rc == 1
+        assert "outside_id" in capsys.readouterr().err
 
 
 # ── 成员加载与 fail-fast ─────────────────────────────────

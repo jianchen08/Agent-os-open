@@ -6,6 +6,7 @@
 - FAKE_CALLS_FILE：tools/call 次数追加记录（每次一行 "call"）
 - FAKE_UNREACHABLE_FIRST=1：第 1 次 tools/call 返回 editor_unreachable（isError）
 - FAKE_ALWAYS_UNREACHABLE=1：所有 tools/call 恒返回 editor_unreachable
+- FAKE_WRONG_EDITOR_FIRST=1：第 1 次 tools/call 返回 wrong_editor（isError）
 异常不落进程：单消息处理失败记 FAKE_SPAWN_FILE.err 并回 JSON-RPC 内部错误。
 """
 
@@ -23,7 +24,14 @@ def _log_err(context: str) -> None:
         f.write("=== " + context + " ===\n" + traceback.format_exc())
 
 
-def _handle(raw: str, project: str, unreachable_first: bool, always_unreachable: bool, calls_file: str) -> dict | None:
+def _handle(
+    raw: str,
+    project: str,
+    unreachable_first: bool,
+    always_unreachable: bool,
+    wrong_editor_first: bool,
+    calls_file: str,
+) -> dict | None:
     msg = json.loads(raw)
     if "id" not in msg:
         return None
@@ -52,7 +60,34 @@ def _handle(raw: str, project: str, unreachable_first: bool, always_unreachable:
             with open(calls_file, encoding="utf-8") as f:
                 nth = len(f.read().splitlines())
         a = (msg.get("params") or {}).get("arguments") or {}
-        if (unreachable_first and nth == 1) or always_unreachable:
+        if unreachable_first and nth == 1:
+            return {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {
+                    "content": [{"type": "text", "text": "editor_unreachable: no editor running"}],
+                    "isError": True,
+                },
+            }
+        if wrong_editor_first and nth == 1:
+            return {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "godot command failed: {\"wrong_editor\":true,"
+                                "\"verdict\":\"the editor on the discovered port serves a"
+                                " different project\"}"
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                },
+            }
+        if always_unreachable:
             return {
                 "jsonrpc": "2.0",
                 "id": rid,
@@ -82,13 +117,16 @@ def _run() -> None:
     project = args[args.index("--project") + 1] if "--project" in args else ""
     unreachable_first = bool(os.environ.get("FAKE_UNREACHABLE_FIRST"))
     always_unreachable = bool(os.environ.get("FAKE_ALWAYS_UNREACHABLE"))
+    wrong_editor_first = bool(os.environ.get("FAKE_WRONG_EDITOR_FIRST"))
     calls_file = os.environ.get("FAKE_CALLS_FILE") or ""
     for raw in sys.stdin:
         raw = raw.strip()
         if not raw:
             continue
         try:
-            resp = _handle(raw, project, unreachable_first, always_unreachable, calls_file)
+            resp = _handle(
+                raw, project, unreachable_first, always_unreachable, wrong_editor_first, calls_file
+            )
         except BaseException:
             _log_err("handling message")
             resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": "fake crashed"}}

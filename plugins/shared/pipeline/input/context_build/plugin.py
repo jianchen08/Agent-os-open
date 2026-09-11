@@ -172,9 +172,16 @@ class ContextBuildPlugin(IInputPlugin):
         #    agent yaml（执行身份是管道 state 的一部分：出生方经 chat.send_message
         #    state 透传落库，热启动在内存 state、冷启动在 DB——派发不携带身份；
         #    缺省主 agent 由本消费面自持）。最终回退插件配置默认。
-        agent_cfg = self._load_agent_config(
-            str(ctx.state.get("agent.id", "") or "") or "agentos"
-        )
+        agent_id_key = str(ctx.state.get("agent.id", "") or "")
+        if not agent_id_key and ctx.state.get("lineage.parent_pipeline_id"):
+            # 有父血缘却无身份 = 出生方漏透传 agent.id，静默降级默认主 agent
+            # 会让 L1 早退门旁路评估闸门/层级语义全错（B12 根因②）——显式告警
+            logger.warning(
+                "[context_build] state 有 lineage.* 但缺 agent.id，回退默认主 agent"
+                "（出生方应按 task_birth 协议透传 agent.id）| pipeline=%s",
+                ctx.state.get("task.id", ""),
+            )
+        agent_cfg = self._load_agent_config(agent_id_key or "agentos")
         updates["context.system_prompt"] = (
             ctx.state.get("system_prompt", "")
             or str(agent_cfg.get("system_prompt", "") or "")

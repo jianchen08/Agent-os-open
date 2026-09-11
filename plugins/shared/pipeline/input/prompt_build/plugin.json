@@ -17,5 +17,19 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "state": {
+    "reads": [
+      "context.agent_name",
+      "context.constraints_text",
+      "context.dynamic_vars",
+      "context.session_id",
+      "context.static_vars",
+      "context.system_prompt",
+      "context_window",
+      "llm_model",
+      "prompt.tool_descriptions",
+      "user_id"
+    ]
+  }
 }

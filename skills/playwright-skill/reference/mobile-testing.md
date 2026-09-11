@@ -170,4 +170,4 @@ await page.touchscreen.tap(200, 300);
 await page.getByText('Footer').scrollIntoViewIfNeeded();
 ```
 
-For full device catalogs, see [../shared/testmu-cloud-reference.md](../../shared/testmu-cloud-reference.md).
+For full device catalogs, see [../shared/testmu-cloud-reference.md](./cloud-integration.md).

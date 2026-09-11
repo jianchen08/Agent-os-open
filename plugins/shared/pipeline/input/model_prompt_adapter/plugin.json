@@ -27,5 +27,12 @@
     ]
   },
   "permissions": {},
-  "priority": 55
+  "priority": 55,
+  "state": {
+    "reads": [
+      "messages_tail:5",
+      "model_id",
+      "model_tier"
+    ]
+  }
 }

@@ -6,17 +6,20 @@
  * endpoint 模式 extraBody 附加字段。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
-
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { FormWidget } from '../FormWidget'
 
 const apiGet = vi.fn()
+const apiPost = vi.fn()
 const apiRequest = vi.fn()
 vi.mock('@/services/api/client', () => ({
   default: Object.assign(
     (...args: unknown[]) => apiRequest(...args),
-    { get: (...args: unknown[]) => apiGet(...args) },
+    {
+      get: (...args: unknown[]) => apiGet(...args),
+      post: (...args: unknown[]) => apiPost(...args),
+    },
   ),
 }))
 vi.mock('@/components/ui/sonner', () => ({
@@ -27,6 +30,7 @@ const submitForm = () => fireEvent.submit(document.querySelector('form')!)
 
 beforeEach(() => {
   apiGet.mockReset()
+  apiPost.mockReset()
   apiRequest.mockReset()
 })
 
@@ -114,8 +118,7 @@ describe('T12：modal 壳模式（吸收 CreateTaskModal）', () => {
 
 describe('T12：endpoint 模式 extraBody', () => {
   it('POST 体含 extraBody 附加字段（如 thread_id）', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ switched: true }) })
-    vi.stubGlobal('fetch', fetchMock)
+    apiPost.mockResolvedValue({ data: { switched: true } })
     render(
       <FormWidget
         fields={[{ name: 'title', type: 'input', label: '标题' }]}
@@ -126,11 +129,10 @@ describe('T12：endpoint 模式 extraBody', () => {
     )
     fireEvent.change(screen.getByLabelText('标题'), { target: { value: 'T' } })
     submitForm()
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    await waitFor(() => expect(apiPost).toHaveBeenCalled())
+    const body = apiPost.mock.calls[0][1] as Record<string, unknown>
     expect(body.thread_id).toBe('sess-1')
     expect(body.title).toBe('T')
     expect(body.pipeline_id).toEqual(expect.any(String))
-    vi.unstubAllGlobals()
   })
 })

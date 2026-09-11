@@ -14,10 +14,9 @@ approval 不自建 request 结构；仅在创建审批后发一条 ``approval.cr
 
 HTTP 面（interaction 域 7 端点）：
 - 源 routes_missing.py interaction_router 的端点在本插件 http.handle 的
-  /ext/approval_service/interaction/**，经 tool-executor 能力代理
-  human_interaction_tool（granted_capabilities 声明 tool-executor）——
-  代理（_HumanInteractionCapabilityProxy）直达 human sidecar
-  真实单例的 interaction.get_pending / interaction.respond 工具。
+  /ext/approval_service/interaction/**，经 human-interaction capability 桥
+  （manifest provides 声明的命名空间路由）直达 human sidecar 真实单例的
+  interaction.get_pending / interaction.respond / interaction.cancel。
 - 鉴权：http_endpoints 声明 auth=user（声明性；内核 dispatcher 鉴权面与
   其余插件一致）。
 
@@ -34,15 +33,23 @@ HTTP 面（interaction 域 7 端点）：
 
 from __future__ import annotations
 
-import base64
-import json
 import logging
 import os
 import time
-from collections.abc import Callable
 from typing import Any
 
 from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+bootstrap_plugin(__file__)  # plugins/shared 根（http_json）入 sys.path
+
+# http.handle 响应封装走公共实现（plugins/shared/http_json.py），调用点零改名。
+from http_json import (  # noqa: E402
+    decode_body as _decode_body,
+    json_response as _json_response,
+    ok as _ok,
+)
+from kernel_db import kernel_db_path as _kernel_db_path  # noqa: E402 — 内核库路径共享真值源
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("approval_service")
@@ -51,10 +58,192 @@ plugin = AgentOSPlugin("approval_service")
 # 仅存恢复管道所需的最小信息（交互状态由 human-interaction 插件管）。
 _suspended: dict[str, dict[str, Any]] = {}
 
-# 审批终态决断：request_id → {approved: bool, reason: str}
+# 审批归属：request_id → {"tenant": 归属租户, "user": 创建者用户}
+# 创建时记录（tenant 取内核 runs 表按 run_id 权威解析，user 取 param_inject
+# 注入的创建者用户），approve/deny 时与内核注入的请求身份头比对——他租户或
+# 同租户非创建者非 admin 一律 403。等待窗口结束（wait 收敛）即清除。
+_ownership: dict[str, dict[str, str]] = {}
+
+# 内核在 /ext 已认证分发时注入的身份头（agentos-api http_dispatcher），
+# 插件侧归属校验只信这组头，不自行解析 token（HMAC 密钥不出内核）。
+_TENANT_HEADER = "x-agentos-tenant"
+_USER_HEADER = "x-agentos-user"
+_ROLE_HEADER = "x-agentos-role"
+
+
+def _header_value(headers: dict[str, str] | None, name: str) -> str:
+    """取入站请求头值（内核 header key 已小写，大小写防御）。"""
+    for k, v in (headers or {}).items():
+        if isinstance(k, str) and k.lower() == name and v:
+            return v
+    return ""
+
+
+def _lookup_run_tenant(run_id: str) -> str:
+    """按 run_id 查内核 runs 表得到归属租户（权威锚，LLM 不可伪造）。
+
+    库不可用 / run 不存在 → 空串（不可归因，approve/deny 侧按 admin-only 收口）。
+    """
+    if not run_id:
+        return ""
+    import sqlite3
+
+    try:
+        db_path = _kernel_db_path()
+        if not db_path.is_file():
+            return ""
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT tenant_id FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.warning("[approval] runs 租户查询失败 | run_id=%s | err=%s", run_id, exc)
+        return ""
+    return str(row[0]) if row else ""
+
+
+def _record_ownership(request_id: str, run_id: str, user_id: str | None) -> None:
+    """创建审批时记录归属：tenant 自 runs 表权威解析，user 取注入的创建者。"""
+    _ownership[request_id] = {
+        "tenant": _lookup_run_tenant(run_id or ""),
+        "user": user_id or "",
+    }
+
+
+def _record_owner(request: dict[str, Any]) -> dict[str, str]:
+    """从 human 侧请求记录归因归属：优先 _ownership（审批创建时记录），
+    回退记录内创建者 user_id（一用户一租户：user_id 即归属租户）。"""
+    rid = str(request.get("id") or request.get("request_id") or "")
+    owner = _ownership.get(rid)
+    if owner and owner.get("tenant"):
+        return dict(owner)
+    msg_data = request.get("message_data") or {}
+    uid = str(msg_data.get("user_id") or "")
+    if uid:
+        return {"tenant": uid, "user": uid}
+    return {"tenant": "", "user": ""}
+
+
+async def _resolve_owner(service: Any, request_id: str) -> dict[str, str]:
+    """归属解析：_ownership 优先，缺失时取 human 侧请求记录归因。
+
+    human.create_choice 直建的交互（security_check/triggers_ext/LLM 工具）
+    不经审批创建链路，_ownership 无记录——创建者 user_id 由创建方服务端
+    注入记录（param_inject/state，LLM 不可伪造），归属校验据此放行本人。
+    记录也取不到（请求已收敛/服务降级）→ 不可归因，决策面按 admin-only 收口。
+    """
+    owner = _ownership.get(request_id)
+    if owner and owner.get("tenant"):
+        return dict(owner)
+    if service is not None:
+        try:
+            record = await service.get_request(request_id)
+        except Exception:  # noqa: BLE001 —— 归因失败按不可归因处理
+            record = None
+        if isinstance(record, dict):
+            return _record_owner(record)
+    return {"tenant": "", "user": ""}
+
+
+async def _ownership_denied(
+    service: Any,
+    request_id: str,
+    headers: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    """交互面守卫一步化：非 admin 先做记录归因回退再校验，admin 免归因直判。
+
+    归因探测（get_request）是一次 human 侧能力往返，admin 无论归属与否都
+    放行，省一次往返；记录归因仅供创建者本人的请求过闸。
+    """
+    fallback = None
+    if _header_value(headers, _ROLE_HEADER) != "admin":
+        fallback = await _resolve_owner(service, request_id)
+    return _decision_denied(headers, request_id, fallback_owner=fallback)
+
+
+def _decision_denied(
+    headers: dict[str, str] | None,
+    request_id: str,
+    fallback_owner: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """交互面归属校验：放行返回 None，拒绝返回 403 响应（fail-closed）。
+
+    适用于全部决策/响应类端点（approve/deny/response/cancel/viewed/detail）——
+    它们与 approve/deny 走同一决策面，等权路径不得绕过守卫。
+
+    规则：
+    - 请求缺 X-AgentOS-Tenant 身份头（非内核已认证分发）→ 拒绝；
+    - 归属租户已知：同租户且（创建者本人或 admin 角色方可决策；
+    - 归属不可归因（无 run 锚/无记录/查询失败）：仅 admin 可决策（运维可恢复，
+      避免审批永久卡死）。
+    """
+    requester_tenant = _header_value(headers, _TENANT_HEADER)
+    if not requester_tenant:
+        logger.warning(
+            "[approval] 决策请求缺租户身份头，拒绝 | request_id=%s", request_id
+        )
+        return _ok(_json_response({"detail": "缺少租户身份，拒绝决策"}, 403))
+    owner = _ownership.get(request_id)
+    if not (owner and owner.get("tenant")) and fallback_owner:
+        owner = fallback_owner
+    owner_tenant = owner.get("tenant", "") if owner else ""
+    owner_user = owner.get("user", "") if owner else ""
+    attributed = bool(owner_tenant)
+    requester_user = _header_value(headers, _USER_HEADER)
+    requester_role = _header_value(headers, _ROLE_HEADER)
+    # admin：同租户放行；归属不可归因（无 run 锚/查询失败）时放行——
+    # 运维可恢复，避免审批永久卡死。
+    if requester_role == "admin" and (not attributed or requester_tenant == owner_tenant):
+        return None
+    if not attributed:
+        return _ok(
+            _json_response({"detail": "审批归属不可归因，仅 admin 可决策"}, 403)
+        )
+    # 同租户且（创建者本人或 admin）：创建者未知（创建链路无 user_id）时
+    # 同租户放行——一用户一租户模型下同租户即归属人。
+    if requester_tenant == owner_tenant and (
+        not owner_user or requester_user == owner_user or requester_role == "admin"
+    ):
+        return None
+    logger.warning(
+        "[approval] 决策越权拒绝 | request_id=%s | requester_tenant=%s | owner_tenant=%s",
+        request_id,
+        requester_tenant,
+        owner_tenant,
+    )
+    return _ok(_json_response({"detail": "无权决策该审批"}, 403))
+
+# 审批终态决断：request_id → {approved: bool, reason: str, ts: float}
 # create_choice 的 wait 路径（超时/异常/正常）收敛后在此记录终态，
 # 供后续 submit/查询返回明确结果（杜绝"超时后 submit 又尝试恢复"的歧义）。
 _decisions: dict[str, dict[str, Any]] = {}
+
+# 硬上限：异常灌写下兜底逐出最旧（TTL 之外的第二道界）。
+_DECISIONS_MAX_ENTRIES = 4096
+
+
+def _record_decision(request_id: str, decision: dict[str, Any]) -> None:
+    """记录终态决策并顺带淘汰过期条目（S14：长驻 sidecar 内无界增长治理）。
+
+    决策条目只服务"wait 收敛后 submit 重读终态"的短窗口，永不淘汰即
+    随历史请求线性泄漏。每次写入做一次 TTL 清扫（条目量小，代价可忽略），
+    清扫后仍超硬上限则按 ts 逐出最旧。
+    """
+    now = time.time()
+    expired = [k for k, v in _decisions.items() if now - v.get("ts", 0) > _DECISIONS_TTL_SECONDS]
+    for k in expired:
+        _decisions.pop(k, None)
+    while len(_decisions) >= _DECISIONS_MAX_ENTRIES:
+        oldest = min(_decisions.items(), key=lambda kv: kv[1].get("ts", 0), default=None)
+        if oldest is None:
+            break
+        _decisions.pop(oldest[0], None)
+    entry = dict(decision)
+    entry["ts"] = now
+    _decisions[request_id] = entry
 
 
 def _read_default_timeout() -> float:
@@ -72,6 +261,10 @@ def _read_default_timeout() -> float:
 
 
 DEFAULT_TIMEOUT_SECONDS: float = _read_default_timeout()
+
+# 终态决策重读窗口（秒）：等待窗口内 submit 必可重读终态；窗口外提交返回
+# "无挂起审批"本就是正确语义。TTL = 2×默认审批超时（含配置放大量）。
+_DECISIONS_TTL_SECONDS = max(86400.0, DEFAULT_TIMEOUT_SECONDS) * 2
 
 
 def _get_cap(name: str) -> Any | None:
@@ -183,6 +376,10 @@ def _classify_reject(wait_res: dict[str, Any]) -> str:
             "title": {"type": "string"},
             "options": {"type": "array", "items": {"type": "string"}},
             "run_id": {"type": "string", "description": "管道运行 ID（用于挂起管道）"},
+            "user_id": {
+                "type": "string",
+                "description": "创建者用户（param_inject 服务端权威注入，LLM 无需填写）",
+            },
             "timeout": {
                 "type": "number",
                 "default": DEFAULT_TIMEOUT_SECONDS,
@@ -198,6 +395,7 @@ async def create_choice(
     title: str,
     options: list[str],
     run_id: str | None = None,
+    user_id: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """创建选择审批——交互委托 human-interaction，approval 只管管道挂起/恢复。
@@ -205,6 +403,13 @@ async def create_choice(
     超时语义（F-APPROVAL-1）：审批等待超时/异常 = **拒绝**——
     不恢复管道、记录拒绝状态（``_decisions``），不再"超时即恢复放行"。
     无论正常/超时/异常，挂起句柄都在 finally 清理，杜绝句柄泄漏导致管道挂死。
+
+    归属：创建时记录 (tenant, creator)——tenant 按 run_id 查内核 runs 表权威
+    解析，creator 取 param_inject 注入的 user_id；approve/deny HTTP 端点据此
+    做同租户 +（创建者本人或 admin）校验。等待窗口收敛即清除记录。
+
+    恢复失败语义：resume 调用失败时管道仍挂起，返回 ``resume_failed``
+    并保持挂起记录（不落 approved 决策），可经 approval.submit 重试。
     """
     hi = _get_cap("human-interaction")
     if hi is None:
@@ -224,6 +429,10 @@ async def create_choice(
     if not isinstance(create_res, dict) or create_res.get("error"):
         return {"error": f"create_choice failed: {create_res}"}
     request_id = create_res.get("request_id", "")
+
+    # 归属记录先行于等待窗口：approve/deny 在 wait 期间到达，需据此校验
+    # （窗口收敛后随 _suspended 一并清除）。
+    _record_ownership(request_id, run_id or "", user_id)
 
     # 通知前端全屏审批浮层（SchemaFullscreenHost）；fire-and-forget，失败不阻塞。
     await _emit_approval_created(request_id=request_id, title=title, options=options, run_id=run_id)
@@ -257,10 +466,12 @@ async def create_choice(
     finally:
         # 杜绝句柄泄漏：无论成功/超时/异常，挂起句柄必须清理
         _suspended.pop(request_id, None)
+        # 等待窗口收敛：approve/deny 决策面关闭，归属记录一并清除
+        _ownership.pop(request_id, None)
 
     # 超时/异常 = 拒绝：记录拒绝状态，不恢复管道
     if rejected_reason is not None:
-        _decisions[request_id] = {"approved": False, "reason": rejected_reason}
+        _record_decision(request_id, {"approved": False, "reason": rejected_reason, "resumed": False})
         logger.info(
             "[approval] rejected (no resume) | id=%s | reason=%s", request_id, rejected_reason
         )
@@ -271,17 +482,40 @@ async def create_choice(
             "resumed": False,
         }
 
-    # 第四步：正常路径——恢复管道（行为不变，回归护栏）
-    resumed = False
-    if suspend_handle is not None:
-        resumed = await _resume_pipeline(suspend_handle, request_id, selected)
+    # 第四步：正常路径——恢复管道。恢复失败不得记 approved+resolved（管道仍
+    # 挂起）：重新武装挂起记录供 submit 重试，返回显式 resume_failed。
+    if suspend_handle is None:
+        # 未传 run_id：纯交互决断，无管道语义
+        _record_decision(request_id, {"approved": True, "reason": "resolved", "resumed": False})
+        return {
+            "request_id": request_id,
+            "status": "resolved",
+            "selected_option": selected,
+            "resumed": False,
+        }
 
-    _decisions[request_id] = {"approved": True, "reason": "resolved"}
+    resumed = await _resume_pipeline(suspend_handle, request_id, selected)
+    if resumed:
+        _record_decision(request_id, {"approved": True, "reason": "resolved", "resumed": True})
+        return {
+            "request_id": request_id,
+            "status": "resolved",
+            "selected_option": selected,
+            "resumed": True,
+        }
+
+    _suspended[request_id] = {
+        "suspend_handle": suspend_handle,
+        "run_id": run_id,
+        "created_at": time.time(),
+    }
+    logger.warning("[approval] resume failed after choice; kept suspended | id=%s", request_id)
     return {
         "request_id": request_id,
-        "status": "resolved",
+        "status": "resume_failed",
         "selected_option": selected,
-        "resumed": resumed,
+        "resumed": False,
+        "reason": "管道恢复失败，审批保持挂起（可经 submit 重试）",
     }
 
 
@@ -316,7 +550,7 @@ async def submit(request_id: str, result: str) -> dict[str, Any]:
             "status": "resolved" if prior["approved"] else "rejected",
             "approved": prior["approved"],
             "reason": prior.get("reason"),
-            "resumed": prior["approved"],
+            "resumed": prior["resumed"],
         }
 
     record = _suspended.get(request_id)
@@ -324,14 +558,28 @@ async def submit(request_id: str, result: str) -> dict[str, Any]:
         return {"error": "no suspended approval for this request_id", "request_id": request_id}
 
     handle = record.get("suspend_handle")
-    resumed = False
-    if handle is not None:
-        resumed = await _resume_pipeline(handle, request_id, result)
+    if handle is None:
+        # 无句柄：无管道可恢复，直接落已决断终态
+        _suspended.pop(request_id, None)
+        _record_decision(request_id, {"approved": True, "reason": "submitted", "resumed": False})
+        logger.info("[approval] submitted (no handle) | id=%s", request_id)
+        return {"request_id": request_id, "status": "resolved", "result": result, "resumed": False}
+
+    # 恢复失败保持挂起态（不落 approved 决策），可再次 submit 重试
+    resumed = await _resume_pipeline(handle, request_id, result)
+    if not resumed:
+        logger.warning("[approval] submit resume failed; kept suspended | id=%s", request_id)
+        return {
+            "request_id": request_id,
+            "status": "resume_failed",
+            "resumed": False,
+            "reason": "管道恢复失败，审批保持挂起（可重新 submit 重试）",
+        }
 
     _suspended.pop(request_id, None)
-    _decisions[request_id] = {"approved": True, "reason": "submitted"}
-    logger.info("[approval] submitted | id=%s | resumed=%s", request_id, resumed)
-    return {"request_id": request_id, "status": "resolved", "result": result, "resumed": resumed}
+    _record_decision(request_id, {"approved": True, "reason": "submitted", "resumed": True})
+    logger.info("[approval] submitted | id=%s | resumed=True", request_id)
+    return {"request_id": request_id, "status": "resolved", "result": result, "resumed": True}
 
 
 @plugin.on_load
@@ -346,47 +594,32 @@ async def _on_unload(params: dict[str, Any]) -> None:
 
 # ── HTTP 端点（http.handle）：interaction 域 ─────────────────────────────
 # 前端 /ext/approval_service/interaction/**（原 /ext/channel_api/interaction/**，
-# 源 routes_missing.py interaction_router 7 路由）。经 tool-executor 代理
-# human_interaction_tool 真实单例。
+# 源 routes_missing.py interaction_router 7 路由）。经 human-interaction 桥
+# 转发 human sidecar 真实单例。
 
 
 class _HumanInteractionCapabilityProxy:
-    """经内核 tool-executor 调 human_interaction_tool sidecar 的真实服务实例。
+    """经 human-interaction capability 桥调 human sidecar 的真实服务实例。
 
     sidecar 进程隔离下 import human.service 拿到的是本进程全新空实例
     （_requests 恒空、Event 表为空）——真实交互数据在 human_interaction_tool
-    进程。经标准能力 tool-executor.invoke 调用该插件的
-    interaction.* 工具（作用于真实单例）。
+    进程。经 human-interaction capability（manifest provides 声明的命名空间桥，
+    内核按声明路由到目标插件）转发到 interaction.get_pending/respond/cancel，
+    作用于真实单例。
     """
 
-    _TOOL_METHODS = {
-        "get_pending": "interaction.get_pending",
-        "respond": "interaction.respond",
-        "cancel": "interaction.cancel",
-    }
-
-    def __init__(self, executor_call: Callable[[str, dict[str, Any]], Any]) -> None:
-        self._executor_call = executor_call
+    def __init__(self, hi: Any) -> None:
+        self._hi = hi
 
     async def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        tool = self._TOOL_METHODS.get(method)
-        if not tool:
-            raise RuntimeError(f"human-interaction.{method} 无对应工具")
-        res = await self._executor_call("invoke", {"tool_name": tool, "args": params})
-        # invoke 返回形状自适应：工具结果可能直接平铺，也可能包在 data/result 里。
-        # 注意候选顺序：先解包 data/result 信封再回退原值（源 routes_missing 原序
-        # 是 res 先命中——任何 dict 信封都会被当作终值返回，包在 data/result 里的
-        # 结果读不到；现序保证两种形态都正确，平铺结果零行为变化）。
-        for candidate in (
-            res.get("data") if isinstance(res, dict) and "data" in res else None,
-            res.get("result") if isinstance(res, dict) and "result" in res else None,
-            res,
-        ):
-            if isinstance(candidate, dict):
-                if candidate.get("error"):
-                    raise RuntimeError(f"{tool} 失败: {candidate['error']}")
-                return candidate
-        raise RuntimeError(f"{tool} 返回无法解析: {type(res).__name__}")
+        # 方法名直通桥（tool_prefix=interaction 由 human manifest provides 声明，
+        # 桥拼 interaction.<method> 调 sidecar）。统一显式传大传输超时：审批
+        # 交互面请求不因 SDK 默认 30s 误断，实际时长由 human 服务 enforce
+        # （与源 routes_missing 原语义一致）。
+        res = await self._hi.call(method, params, timeout=86500.0)
+        if isinstance(res, dict) and res.get("error"):
+            raise RuntimeError(f"interaction.{method} 失败: {res['error']}")
+        return res
 
     async def get_pending_requests(
         self,
@@ -429,12 +662,16 @@ class _HumanInteractionCapabilityProxy:
         user_id: str | None = None,
     ) -> bool:
         try:
+            # response 载荷对齐 human 侧 interaction.respond 的 (request_id,
+            # response) 透传形态：应答键由本侧组装，契约由 human 服务自持。
             res = await self._call("respond", {
                 "request_id": request_id,
-                "response_type": response_type,
-                "selected_option": selected_option,
-                "answers": answers,
-                "feedback": feedback,
+                "response": {
+                    "response_type": response_type,
+                    "selected_option": selected_option,
+                    "answers": answers,
+                    "feedback": feedback,
+                },
             })
         except RuntimeError as exc:
             logger.warning("[approval] 交互响应转发失败 | request_id=%s | err=%s", request_id, exc)
@@ -464,62 +701,19 @@ class _HumanInteractionCapabilityProxy:
 
 
 def _get_human_interaction_service() -> Any | None:
-    """经内核 tool-executor 转发到 human sidecar 真实实例；通道不可用降级 None。
+    """经 human-interaction capability 桥转发到 human sidecar 真实实例；桥不可用降级 None。
 
     降级语义（对齐原空实例回退的可观察面）：pending 恒空、审批响应返回 False、
     详情 404——不崩 handler，前端轮询契约不破坏。
     """
     try:
-        executor = plugin.get_capability("tool-executor")
-
-        async def _executor_call(method: str, params: dict[str, Any]) -> Any:
-            # 审批等待（wait_for_choice 业务超时 86400）经 security_check →
-            # human sidecar 全链长等待：SDK 默认 30s 会先于用户操作掐断；显式
-            # 传大值，实际超时由 human 服务 enforce（与 route_missing 原语义一致）
-            return await executor.call(method, params, timeout=86500.0)
-
-        return _HumanInteractionCapabilityProxy(_executor_call)
+        return _HumanInteractionCapabilityProxy(plugin.get_capability("human-interaction"))
     except (KeyError, AttributeError):
         logger.warning(
-            "[approval] tool-executor 能力不可用，human-interaction HTTP 面降级"
+            "[approval] human-interaction capability 不可用，interaction HTTP 面降级"
             "（pending 恒空，审批响应不可用）"
         )
         return None
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """把 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
-    return {"success": True, "data": data}
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 → JSON dict；空 body 返回 {}）。"""
-    if not raw_body:
-        return {}
-    decoded = raw_body
-    try:
-        candidate = base64.b64decode(raw_body).decode("utf-8")
-        if candidate.lstrip().startswith(("{", "[")):
-            decoded = candidate
-    except Exception:  # noqa: BLE001  # pragma: no cover —— b64decode(validate=False) 对任意串几乎不抛
-        pass
-    try:
-        parsed = json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON body: {exc}") from exc
-    return parsed if isinstance(parsed, dict) else {}
 
 
 _INTERACTION_PREFIX = "/ext/approval_service/interaction"
@@ -533,27 +727,57 @@ def _interaction_not_found(path: str) -> dict[str, Any]:
 async def _route_submit_response(
     service: Any,
     raw_body: str,
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """POST /response：提交交互响应。
 
     body.response.* 嵌套或扁平两种形态均落 request_id 判定；服务未注入降级
-    ``{"success": False}``。
+    ``{"success": False}``。归属校验先行于响应副作用：/response 与 approve/deny
+    走同一决策面（service.respond → submit_response），等权路径不得绕过守卫。
     """
     body = _decode_body(raw_body)
     if not body or "request_id" not in body:
         return _ok(_json_response({"detail": "缺少 request_id"}, 400))
+    rid = str(body["request_id"])
     if service is None:
         return _ok(_json_response({"success": False}))
-    result = await service.respond(body["request_id"], body)
+    denied = await _ownership_denied(service, rid, headers)
+    if denied is not None:
+        return denied
+    result = await service.respond(rid, body)
     return _ok(_json_response({"success": result}))
 
 
-async def _route_list_pending(service: Any) -> dict[str, Any]:
-    """GET /pending：待处理请求列表；服务未注入降级空列表。"""
+async def _route_list_pending(
+    service: Any,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """GET /pending：待处理请求列表（按请求者租户过滤）。
+
+    过滤规则与决策面同源：admin 角色可见全部（运维面）；其余已认证用户只见
+    归属本租户的请求；缺租户身份头一律空集（fail-closed——绝不全量兜底，
+    否则列表退化为跨租户交互枚举）。
+    """
     if service is None:
         return _ok(_json_response({"items": [], "total": 0}))
     requests = await service.get_pending_requests()
-    return _ok(_json_response({"items": requests, "total": len(requests)}))
+    requester_tenant = _header_value(headers, _TENANT_HEADER)
+    requester_role = _header_value(headers, _ROLE_HEADER)
+    if requester_role == "admin":
+        visible = requests
+    else:
+        if not requester_tenant:
+            return _ok(_json_response({"items": [], "total": 0}))
+        visible = [
+            r for r in requests
+            if _header_tenant_matches(_record_owner(r), requester_tenant)
+        ]
+    return _ok(_json_response({"items": visible, "total": len(visible)}))
+
+
+def _header_tenant_matches(owner: dict[str, str], requester_tenant: str) -> bool:
+    """归属租户与请求者租户比对：不可归因一律 False（fail-closed）。"""
+    return bool(owner.get("tenant")) and owner.get("tenant") == requester_tenant
 
 
 def _match_request_route(sub: str) -> tuple[str, str] | None:
@@ -577,20 +801,30 @@ async def _dispatch_request_action(
     action: str,
     method: str,
     raw_body: str,
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """执行 /{request_id} 系列端点；路由命中但方法不符或动作未知返回 None（调用方统一 404）。"""
     if action == "detail":
-        # GET /{rid}：交互请求详情；不存在与服务未注入同形 404
+        # GET /{rid}：交互请求详情；不存在与服务未注入同形 404。
+        # 归属校验先行于记录读取（_ownership 命中即可判，记录仅作归因回退）。
         if method != "GET":
             return None
         if service is None:
             return _ok(_json_response({"detail": "交互请求不存在"}, 404))
+        denied = await _ownership_denied(service, rid, headers)
+        if denied is not None:
+            return denied
         record = await service.get_request(rid)
         if not record:
             return _ok(_json_response({"detail": "交互请求不存在"}, 404))
         return _ok(_json_response(record))
 
     if action in ("approve", "deny") and method == "POST":
+        # 归属校验先行于任何决策副作用：同租户且（创建者本人或 admin），
+        # 他租户/他人非 admin 一律 403（规则见 _decision_denied）。
+        denied = _decision_denied(headers, rid)
+        if denied is not None:
+            return denied
         if service is None:
             return _ok(_json_response({
                 "success": False,
@@ -611,6 +845,11 @@ async def _dispatch_request_action(
         }))
 
     if action == "cancel" and method == "POST":
+        # 归属校验：取消同样作用于他人可见的交互状态，与决策面同守卫
+        if service is not None:
+            denied = await _ownership_denied(service, rid, headers)
+            if denied is not None:
+                return denied
         if service is None:
             return _ok(_json_response({
                 "success": False,
@@ -629,7 +868,11 @@ async def _dispatch_request_action(
         }))
 
     if action == "viewed" and method == "POST":
-        # viewed 不消费 body（标记已读无参数）
+        # viewed 不消费 body（标记已读无参数）；归属校验同决策面
+        if service is not None:
+            denied = await _ownership_denied(service, rid, headers)
+            if denied is not None:
+                return denied
         if service is None:
             return _ok(_json_response({
                 "success": False,
@@ -651,16 +894,17 @@ async def _route_interaction_subroute(
     sub: str,
     method: str,
     raw_body: str,
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """按 sub 路径依次匹配 interaction 域 7 条路由；无一命中返回 None（调用方统一 404）。"""
     if sub == "/response" and method == "POST":
-        return await _route_submit_response(service, raw_body)
+        return await _route_submit_response(service, raw_body, headers)
     if sub == "/pending" and method == "GET":
-        return await _route_list_pending(service)
+        return await _route_list_pending(service, headers)
     request_match = _match_request_route(sub)
     if request_match is not None:
         rid, action = request_match
-        return await _dispatch_request_action(service, rid, action, method, raw_body)
+        return await _dispatch_request_action(service, rid, action, method, raw_body, headers)
     return None
 
 
@@ -690,9 +934,11 @@ async def http_handle(
     """interaction 域分发：/ext/approval_service/interaction/**（7 路由）。
 
     响应形态对齐源 routes_missing.interaction_router（success/request_id/status
-    字段 + 404 {"detail": ...}）。tool-executor 未注入时降级空 pending/False 响应。
+    字段 + 404 {"detail": ...}）。human-interaction 桥不可用时降级空 pending/False 响应。
+    headers 携带内核注入的身份头（X-AgentOS-Tenant/User/Role），approve/deny
+    归属校验据此判定。
     """
-    del plugin_id, headers, query
+    del plugin_id, query
 
     if not path.startswith(_INTERACTION_PREFIX):
         return _interaction_not_found(path)
@@ -700,7 +946,7 @@ async def http_handle(
     service = _get_human_interaction_service()
 
     try:
-        routed = await _route_interaction_subroute(service, sub, method, raw_body)
+        routed = await _route_interaction_subroute(service, sub, method, raw_body, headers)
         if routed is not None:
             return routed
         logger.warning("http.handle: no route for sub=%s method=%s", sub, method)

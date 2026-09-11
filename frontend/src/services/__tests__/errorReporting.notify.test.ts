@@ -10,14 +10,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const { addNotificationMock } = vi.hoisted(() => ({
   addNotificationMock: vi.fn(),
 }))
-
 // mock notificationStore：捕获 addNotification 调用
 vi.mock('../../stores/notificationStore', () => ({
   useNotificationStore: {
     getState: () => ({ addNotification: addNotificationMock }),
   },
 }))
-
 // 重新导入模块（mock 提升生效）
 import { reportError, captureException, ErrorType, ErrorSeverity } from '../errorReporting'
 import * as errorReportingModule from '../errorReporting'

@@ -22,8 +22,7 @@ import pytest
 
 PLUGINS_BASE = Path(__file__).resolve().parent.parent.parent / "plugins" / "shared" / "system"
 
-# channel_api 已随退役方案物理删除（2026-08-21 六批次落地），不再列入；
-# channel_gateway 已随 2026-08-27 清理批删除（0.1 遗留统一网关，零消费者）
+# 现役通道插件全量枚举（与 plugins/shared/system/channel_* 一一对应）
 CHANNELS = [
     "channel_dingtalk",
     "channel_feishu",
@@ -121,7 +120,7 @@ class TestAdapterClasses:
             # Clear cached modules to avoid cross-test pollution
             keys_to_clear = [
                 k for k in sys.modules
-                if k in (module, "adapter", "stream_client", "card_builder", "crypto",
+                if k in (module, "adapter", "stream_client", "crypto",
                          "helpers", "output_adapter", "_base_output_adapter",
                          "onebot_client", "input_adapter", "base_combo_adapter",
                          "pipeline_types")
@@ -150,13 +149,6 @@ class TestAdapterClasses:
         assert hasattr(mod, "FeishuAdapter")
         assert hasattr(mod, "FeishuInputAdapter")
         assert hasattr(mod, "FeishuOutputAdapter")
-
-    def test_feishu_card_builder_importable(self) -> None:
-        """CardBuilder 可导入且有预置模板。"""
-        mod = self._import_from_channel("channel_feishu", "card_builder")
-        assert hasattr(mod, "CardBuilder")
-        card = mod.CardBuilder.build_text_card("Test", "Content")
-        assert "elements" in card
 
     def test_wecom_adapter_importable(self) -> None:
         """WeComAdapter 可导入且包含关键方法。"""

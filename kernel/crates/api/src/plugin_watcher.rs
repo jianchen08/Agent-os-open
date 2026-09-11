@@ -382,6 +382,12 @@ async fn run_smoke(
 /// 可能瞬态死亡——重试即过；真漂移走"比对出不一致"路径不受影响。
 const G2_OBSERVE_RETRY_BACKOFF_MS: [u64; 2] = [300, 1000];
 
+/// 动态 MCP 观测连击熔断上限：同一插件连续 N 轮 sync 补观测仍失败（spawn/
+/// tools-list 不可用）即暂停逐轮重观测。远端不可达的 external MCP 此前每轮
+/// sync 都重观测，失败记录无限堆积（2026-09-09 minidump 归因：860MB 内核驻留
+/// 的最大单一来源）。编辑 plugin.json（声明指纹变化）或导入成功即重置。
+const DYNAMIC_IMPORT_MAX_CONSECUTIVE_FAILS: u32 = 5;
+
 /// 一行接入（2026-09-03 用户裁定）判定：external MCP 允许零工具声明——
 /// 空声明 = 观测即声明，采信握手 `tools/list` 全量导入（多工具服务免抄
 /// schema）；声明非空的 external MCP 仍走静态 drift 对照，行为不变。
@@ -469,6 +475,7 @@ pub async fn g2_verify_and_sanitize(
                         ui: None,
                         render: None,
                         smoke: None,
+                        timeout_ms: None,
                     })
                     .collect();
                 info!(
@@ -687,6 +694,7 @@ pub async fn sync_once_with_store(
     manifests_store: Option<&ManifestsStore>,
     known_manifest_hashes: &mut HashMap<String, u64>,
     known_code_hashes: &mut HashMap<String, u64>,
+    known_obs_fail_streaks: &mut HashMap<String, u32>,
     code_dirs: Option<&std::sync::Arc<CodeDirResolver>>,
     enablement: Option<&PluginEnablement>,
     contract_states: Option<&crate::contract::ContractLedger>,
@@ -730,6 +738,82 @@ pub async fn sync_once_with_store(
         .collect();
     uninstalled.sort();
 
+    // 新插件注册闸 + G2 安装期校验（分段见 sync_gate_register_new）。
+    let (filtered, drifted_plugins, dependency_rejected) = sync_gate_register_new(
+        invoker,
+        &service_surface,
+        kept_refs,
+        known_ids,
+        known_manifest_hashes,
+        known_code_hashes,
+        code_dirs,
+        contract_states,
+    )
+    .await;
+    let mut report = apply_discovered_plugins(&filtered, known_ids, registry, scopes);
+    report.drifted_plugins = drifted_plugins;
+    report.skipped_disabled = skipped_disabled;
+    report.dependency_rejected = dependency_rejected;
+    report.cdylib_change = cdylib_change;
+
+    // 卸载语义执行（分段见 sync_apply_uninstall）。
+    let cascade_uninstalled = sync_apply_uninstall(
+        scopes,
+        &filtered,
+        &pre_registered,
+        uninstalled,
+        known_ids,
+        known_manifest_hashes,
+        known_code_hashes,
+        manifests_store,
+        &mut report,
+    )
+    .await;
+
+    // GAP-6 既有插件变更复验（分段见 sync_reverify_changed）。
+    let changed_plugin_ids = sync_reverify_changed(
+        invoker,
+        registry,
+        scopes,
+        &filtered,
+        &pre_registered,
+        &cascade_uninstalled,
+        known_manifest_hashes,
+        known_code_hashes,
+        known_obs_fail_streaks,
+        code_dirs,
+        contract_states,
+        manifests_store,
+        &mut report,
+    )
+    .await;
+
+    // 基线补齐 + store 合并（分段见 sync_merge_store_tail）。
+    sync_merge_store_tail(
+        &filtered,
+        &all,
+        &report.new_plugin_ids,
+        known_manifest_hashes,
+        manifests_store,
+    )
+    .await;
+    report.changed_plugin_ids = changed_plugin_ids;
+    Ok(report)
+}
+
+/// 新发现插件的注册闸 + G2 安装期一致性校验：依赖面不满足拒注册（fail-closed）、
+/// 漂移工具剔除、声明/代码指纹落基线。返回（过滤后注册集, drifted, dependency_rejected）。
+#[allow(clippy::too_many_arguments)]
+async fn sync_gate_register_new(
+    invoker: &dyn PluginInvoker,
+    service_surface: &ServiceSurface,
+    kept_refs: Vec<&PluginManifest>,
+    known_ids: &HashSet<String>,
+    known_manifest_hashes: &mut HashMap<String, u64>,
+    known_code_hashes: &mut HashMap<String, u64>,
+    code_dirs: Option<&std::sync::Arc<CodeDirResolver>>,
+    contract_states: Option<&crate::contract::ContractLedger>,
+) -> (Vec<PluginManifest>, Vec<String>, Vec<String>) {
     // G2 安装期一致性校验（公共化 g2_verify_and_sanitize）：对新发现的 tool 插件
     // spawn → tools/list → 对照声明。漂移工具的贡献拒绝注册，其余能力照常；
     // 观测失败（重试后仍 spawn/list 失败）保留声明注册。
@@ -806,12 +890,23 @@ pub async fn sync_once_with_store(
         known_code_hashes.insert(m.id.clone(), current_code_fp(code_dirs, m));
         filtered.push(outcome.manifest);
     }
-    let mut report = apply_discovered_plugins(&filtered, known_ids, registry, scopes);
-    report.drifted_plugins = drifted_plugins;
-    report.skipped_disabled = skipped_disabled;
-    report.dependency_rejected = dependency_rejected;
-    report.cdylib_change = cdylib_change;
+    (filtered, drifted_plugins, dependency_rejected)
+}
 
+/// 卸载语义执行：目录消失插件摘能力 + 依赖者连带（fail-closed），并同步摘除
+/// 账本/指纹基线与共享 store 条目。返回 cascade_uninstalled（连带摘除集）。
+#[allow(clippy::too_many_arguments)]
+async fn sync_apply_uninstall(
+    scopes: &PluginScopeRegistry,
+    filtered: &[PluginManifest],
+    pre_registered: &HashSet<String>,
+    uninstalled: Vec<String>,
+    known_ids: &mut HashSet<String>,
+    known_manifest_hashes: &mut HashMap<String, u64>,
+    known_code_hashes: &mut HashMap<String, u64>,
+    manifests_store: Option<&ManifestsStore>,
+    report: &mut SyncReport,
+) -> Vec<String> {
     // ── 卸载语义（P1）执行：目录消失 → 摘除能力 + 依赖者连带（fail-closed） ──
     let mut cascade_uninstalled: Vec<String> = Vec::new();
     if !uninstalled.is_empty() {
@@ -822,8 +917,8 @@ pub async fn sync_once_with_store(
         // → 一并摘下（fail-closed：目录仍在，服务提供者回归后下轮自动重注册）。
         // 本轮新注册插件已在主循环过依赖闸（服务面已不含被卸载提供者）→ 不在此列；
         // InProcess 归 A3 重建，跳过。
-        let remaining_surface = ServiceSurface::from_manifests(&filtered);
-        for m in &filtered {
+        let remaining_surface = ServiceSurface::from_manifests(filtered);
+        for m in filtered {
             if m.host_type == HostType::InProcess
                 || !pre_registered.contains(&m.id)
                 || m.requires_services.is_empty()
@@ -860,22 +955,49 @@ pub async fn sync_once_with_store(
         report.uninstalled = uninstalled.clone();
         report.cascade_uninstalled = cascade_uninstalled.clone();
     }
+    cascade_uninstalled
+}
 
-    // ── GAP-6：既有插件声明/实现变更 → 复验 + 重注册 ────────────────────
+/// GAP-6 既有插件变更复验：声明/代码指纹任一变化 → 驱逐宿主 + G2 复验 +
+/// 重注册（执行段见 sync_reverify_apply）。返回 changed_plugin_ids。
+#[allow(clippy::too_many_arguments)]
+async fn sync_reverify_changed(
+    invoker: &dyn PluginInvoker,
+    registry: &Arc<CapabilityRegistryImpl>,
+    scopes: &PluginScopeRegistry,
+    filtered: &[PluginManifest],
+    pre_registered: &HashSet<String>,
+    cascade_uninstalled: &[String],
+    known_manifest_hashes: &mut HashMap<String, u64>,
+    known_code_hashes: &mut HashMap<String, u64>,
+    known_obs_fail_streaks: &mut HashMap<String, u32>,
+    code_dirs: Option<&std::sync::Arc<CodeDirResolver>>,
+    contract_states: Option<&crate::contract::ContractLedger>,
+    manifests_store: Option<&ManifestsStore>,
+    report: &mut SyncReport,
+) -> Vec<String> {
+    // ── GAP-6：既有插件声明/实现变更 → 复验 + 重注册 + 宿主驱逐 ────────────
     // 声明指纹 = 磁盘 manifest 序列化内容哈希（纯内容比对，与 mtime 无关）；
     // 代码指纹 = 插件源码/配置 mtime 指纹（与 invoker respawn 判据同源，
-    // compute_plugin_fingerprint）。任一变化即触发重注册：
-    // - G2 适用插件（sidecar 且声明 tools/services）先 g2_verify_and_sanitize
-    //   再按结果重注册——manifest 编辑不得绕过 G2 把已净化剔除的工具复活；
-    //   仅代码变化（实现修复）同样复验，工具恢复无需等 manifest 再改或重启；
+    // compute_plugin_fingerprint）。任一变化即触发复验：
+    // - 代码指纹比对覆盖**全量 sidecar**（B15-R1）：零工具/零服务的 light 管道
+    //   插件不再被排除——其 .py 变更在轮询周期内即被看见，无需等调用时拉取；
+    // - 检测到代码变化即驱逐宿主（force_unload 语义：kill 进程 + 清缓存/
+    //   指纹/last_used，不回收装箱分配），下个调用者按磁盘现码重建——零调用
+    //   期间也保证"下一个调用者拿到新代码"；
+    // - G2 适用插件（sidecar 且声明 tools/services）先驱逐再 g2_verify_and_sanitize
+    //   （复验观测的是新代码），再按结果重注册——manifest 编辑不得绕过 G2 把
+    //   已净化剔除的工具复活；仅代码变化（实现修复）同样复验，工具恢复无需等
+    //   manifest 再改或重启；
     // - 非 G2 插件维持"声明变更即重注册"（G2 对其本就 no-op）。
-    // in_process(cdylib) 插件不在此列——代码变更走 A3 优雅重启路径整体重建。
+    // in_process(cdylib) 插件不在此列（循环头部已排除）——代码变更走 A3 优雅
+    // 重启路径整体重建。
     // 复验对象 = 本轮 sync **开始前**已登记且未被本轮卸载的插件：主循环刚注册
     // 的新插件已落声明基线，若在此按净化 manifest 重判会把基线覆写成净化指纹
     // （下轮 raw 声明必判"变更"→ 被剔工具复活）。
     let cascade_set: HashSet<String> = cascade_uninstalled.iter().cloned().collect();
     let mut changed_plugin_ids: Vec<String> = Vec::new();
-    for m in &filtered {
+    for m in filtered {
         if !pre_registered.contains(&m.id)
             || cascade_set.contains(&m.id)
             || m.host_type == HostType::InProcess
@@ -888,117 +1010,214 @@ pub async fn sync_once_with_store(
         // （第三方服务的工具集变更本就不在本地指纹内）。导入成功后条件即失效，
         // 不再逐轮重观测。须在无基线分支之前算：boot 后首轮 sync 只建基线，
         // 不提前 hoist 会把导入推迟到第二轮。
+        // 观测连击熔断：连续 DYNAMIC_IMPORT_MAX_CONSECUTIVE_FAILS 轮补观测仍
+        // 失败即暂停逐轮重观测——远端不可达的 external MCP 每轮重观测只会无限
+        // 堆失败记录。声明指纹变化（用户编辑 plugin.json）重置预算。
         let dynamic_import =
             is_dynamic_mcp(m) && !registry.list_tools().iter().any(|t| t.plugin_id == m.id);
         let decl_changed = match known_manifest_hashes.get(&m.id) {
             Some(old_fp) => *old_fp != fp,
             None => {
-                // 无基线（boot 注册/升级前）：建基线不动作，避免首轮误重注册
+                // 无基线（boot 注册/升级前）：建基线不动作，避免首轮误重注册；
+                // 基线重建等同重新装机 → 观测失败预算一并重置。
                 known_manifest_hashes.insert(m.id.clone(), fp);
                 known_code_hashes.insert(m.id.clone(), current_code_fp(code_dirs, m));
+                known_obs_fail_streaks.remove(&m.id);
                 if !dynamic_import {
                     continue;
                 }
                 false
             }
         };
+        if decl_changed {
+            known_obs_fail_streaks.remove(&m.id);
+        } else if dynamic_import
+            && known_obs_fail_streaks.get(&m.id).copied().unwrap_or(0)
+                >= DYNAMIC_IMPORT_MAX_CONSECUTIVE_FAILS
+        {
+            continue;
+        }
+        // B15-R1：代码指纹比对覆盖全量 sidecar（本循环已排除 InProcess——cdylib
+        // 代码变更归 A3 优雅重启路径）。零工具/零服务的 light 管道插件全家不再
+        // 被 g2_applicable 闸排除在推送式检测外：.py 变更对 watcher 可见。
         let g2_applicable = m.host_type == HostType::Sidecar
             && (!m.capabilities.tools.is_empty() || !m.capabilities.services.is_empty());
-        let cur_code_fp = if g2_applicable {
-            current_code_fp(code_dirs, m)
-        } else {
-            0
-        };
-        let code_changed = g2_applicable
-            && known_code_hashes
-                .get(&m.id)
-                .is_some_and(|old| cur_code_fp != *old);
+        let cur_code_fp = current_code_fp(code_dirs, m);
+        let code_changed = known_code_hashes
+            .get(&m.id)
+            .is_some_and(|old| cur_code_fp != *old);
         if !decl_changed && !code_changed && !dynamic_import {
             continue;
         }
-        let (tools, http_routes) = if g2_applicable || dynamic_import {
-            let outcome = g2_verify_and_sanitize(invoker, m.clone()).await;
-            if let Some(ledger) = contract_states {
-                ledger.upsert(crate::contract::PluginContractState::derived(
-                    m,
-                    true,
-                    Some(&outcome),
-                ));
-            }
-            if outcome.drift {
-                if outcome.rejected_tools.is_empty() {
-                    // 仅 undeclared（实际多暴露）——不拒绝注册，但记录
+        sync_reverify_apply(
+            invoker,
+            registry,
+            scopes,
+            m,
+            known_code_hashes,
+            decl_changed,
+            code_changed,
+            dynamic_import,
+            g2_applicable,
+            cur_code_fp,
+            contract_states,
+            manifests_store,
+            report,
+        )
+        .await;
+        // 观测连击记账：动态 MCP 补观测后注册面仍零工具 = 本轮失败 → 连击 +1
+        // （达上限仅在跨越时告警一次，避免逐轮刷日志）；观测导入成功 → 清零。
+        if dynamic_import {
+            let imported = registry.list_tools().iter().any(|t| t.plugin_id == m.id);
+            if imported {
+                known_obs_fail_streaks.remove(&m.id);
+            } else {
+                let s = known_obs_fail_streaks.entry(m.id.clone()).or_insert(0);
+                *s += 1;
+                if *s == DYNAMIC_IMPORT_MAX_CONSECUTIVE_FAILS {
                     warn!(
                         target: "plugin_watcher",
                         plugin = %m.id,
-                        "G2 复验：插件存在未声明暴露的工具（不拒绝注册）"
+                        fails = *s,
+                        "动态 MCP 连续观测失败达上限：暂停逐轮补观测（编辑 plugin.json 重置）"
                     );
-                } else {
-                    warn!(
-                        target: "plugin_watcher",
-                        plugin = %m.id,
-                        rejected = ?outcome.rejected_tools,
-                        decl_changed,
-                        code_changed,
-                        "G2 复验：声明与实现漂移，剔除漂移工具后重注册（其余能力照常）"
-                    );
-                    report.drifted_plugins.push(m.id.clone());
                 }
             }
-            if outcome.spawn_failed {
-                warn!(
-                    target: "plugin_watcher",
-                    plugin = %m.id,
-                    "G2 复验观测失败（重试后仍 spawn/上报不可用）——按声明重注册，账本标记校验未完成，待复验"
-                );
-            }
-            crate::plugin_lifecycle::reenable_plugin_capabilities(
-                &outcome.manifest,
-                registry,
-                scopes,
-            )
-        } else {
-            crate::plugin_lifecycle::reenable_plugin_capabilities(m, registry, scopes)
-        };
-        // 共享 store（AppState.manifests）落**磁盘声明**（未净化）——净化版只存于
-        // 注册面/账本；若净化版覆盖 store，enable 热路径读到空工具声明→永远复验
-        // 无物→剔除死锁（08-31 实测 task_manage/memory disable-enable 救不回）。
-        if let Some(store) = manifests_store {
-            let mut guard = store.write().await;
-            match guard.iter_mut().find(|x| x.id == m.id) {
-                Some(slot) => *slot = m.clone(),
-                None => guard.push(m.clone()),
-            }
         }
-        info!(
-            target: "plugin_watcher",
-            plugin = %m.id,
-            tools, http_routes,
-            decl_changed, code_changed,
-            "插件变更已复验重注册（无需重启内核）"
-        );
         changed_plugin_ids.push(m.id.clone());
         // 基线一律落**声明**指纹与当前代码指纹——净化版指纹会让下轮 raw 声明
         // 必判"变更"，复验退化为每轮重注册（且复活被剔工具）。
         known_manifest_hashes.insert(m.id.clone(), fp);
         known_code_hashes.insert(m.id.clone(), cur_code_fp);
     }
+    changed_plugin_ids
+}
+
+/// 复验执行段：代码变更驱逐宿主（force_unload）→ G2 复验/声明重注册 →
+/// 共享 store 落磁盘声明（未净化，防 enable 热路径剔除死锁）。
+#[allow(clippy::too_many_arguments)]
+async fn sync_reverify_apply(
+    invoker: &dyn PluginInvoker,
+    registry: &Arc<CapabilityRegistryImpl>,
+    scopes: &PluginScopeRegistry,
+    m: &PluginManifest,
+    known_code_hashes: &HashMap<String, u64>,
+    decl_changed: bool,
+    code_changed: bool,
+    dynamic_import: bool,
+    g2_applicable: bool,
+    cur_code_fp: u64,
+    contract_states: Option<&crate::contract::ContractLedger>,
+    manifests_store: Option<&ManifestsStore>,
+    report: &mut SyncReport,
+) {
+    // B15-R1：代码变化 → 驱逐宿主（force_unload 语义：kill 进程 + 清缓存/
+    // 指纹/last_used，不回收装箱分配——respawn 按分配表重建成员集）。下个
+    // 调用者按磁盘现码重建，零调用期间也保证"下一个调用者拿到新代码"；
+    // g2 插件的进程侧新代码不再依赖复验通道隐式触发调用时拉取检测。
+    // best-effort：驱逐失败只 warn——调用时拉取检测仍在兜底，下次调用
+    // is_host_stale 会按指纹差 respawn。
+    if code_changed {
+        let old_fp = known_code_hashes.get(&m.id).copied();
+        match invoker.force_unload(&m.id).await {
+            Ok(()) => info!(
+                target: "plugin_watcher",
+                plugin = %m.id,
+                old_fp = ?old_fp,
+                new_fp = cur_code_fp,
+                "代码变更已驱逐宿主（无需调用触发），下次调用按新码重建"
+            ),
+            Err(e) => warn!(
+                target: "plugin_watcher",
+                plugin = %m.id,
+                error = %e.message,
+                "宿主驱逐失败（调用时拉取检测兜底）"
+            ),
+        }
+    }
+    let (tools, http_routes) = if g2_applicable || dynamic_import {
+        let outcome = g2_verify_and_sanitize(invoker, m.clone()).await;
+        if let Some(ledger) = contract_states {
+            ledger.upsert(crate::contract::PluginContractState::derived(
+                m,
+                true,
+                Some(&outcome),
+            ));
+        }
+        if outcome.drift {
+            if outcome.rejected_tools.is_empty() {
+                // 仅 undeclared（实际多暴露）——不拒绝注册，但记录
+                warn!(
+                    target: "plugin_watcher",
+                    plugin = %m.id,
+                    "G2 复验：插件存在未声明暴露的工具（不拒绝注册）"
+                );
+            } else {
+                warn!(
+                    target: "plugin_watcher",
+                    plugin = %m.id,
+                    rejected = ?outcome.rejected_tools,
+                    decl_changed,
+                    code_changed,
+                    "G2 复验：声明与实现漂移，剔除漂移工具后重注册（其余能力照常）"
+                );
+                report.drifted_plugins.push(m.id.clone());
+            }
+        }
+        if outcome.spawn_failed {
+            warn!(
+                target: "plugin_watcher",
+                plugin = %m.id,
+                "G2 复验观测失败（重试后仍 spawn/上报不可用）——按声明重注册，账本标记校验未完成，待复验"
+            );
+        }
+        crate::plugin_lifecycle::reenable_plugin_capabilities(&outcome.manifest, registry, scopes)
+    } else {
+        crate::plugin_lifecycle::reenable_plugin_capabilities(m, registry, scopes)
+    };
+    // 共享 store（AppState.manifests）落**磁盘声明**（未净化）——净化版只存于
+    // 注册面/账本；若净化版覆盖 store，enable 热路径读到空工具声明→永远复验
+    // 无物→剔除死锁（08-31 实测 task_manage/memory disable-enable 救不回）。
+    if let Some(store) = manifests_store {
+        let mut guard = store.write().await;
+        match guard.iter_mut().find(|x| x.id == m.id) {
+            Some(slot) => *slot = m.clone(),
+            None => guard.push(m.clone()),
+        }
+    }
+    info!(
+        target: "plugin_watcher",
+        plugin = %m.id,
+        tools, http_routes,
+        decl_changed, code_changed,
+        "插件变更已复验重注册（无需重启内核）"
+    );
+}
+
+/// 收尾：新注册插件指纹基线补齐（or_insert 不覆盖）+ 共享 store 增量合并
+/// （磁盘发现全集语义：filtered 净化版 + disabled/依赖被拒原始声明）。
+async fn sync_merge_store_tail(
+    filtered: &[PluginManifest],
+    all: &[PluginManifest],
+    new_plugin_ids: &[String],
+    known_manifest_hashes: &mut HashMap<String, u64>,
+    manifests_store: Option<&ManifestsStore>,
+) {
     // 新注册插件建立指纹基线（下轮起参与变更检测）。G2 适用插件已在主循环以
     // 声明（raw）指纹落基线——此处 or_insert 只补无工具插件等未落基线者，
     // 不覆盖（filtered 里的净化版指纹一旦落库，下轮必误判变更）。
-    for id in &report.new_plugin_ids {
+    for id in new_plugin_ids {
         if let Some(m) = filtered.iter().find(|x| &x.id == id) {
             known_manifest_hashes
                 .entry(id.clone())
                 .or_insert_with(|| manifest_fingerprint(m));
         }
     }
-    report.changed_plugin_ids = changed_plugin_ids;
     // 增量合并新插件 manifest 进共享 store（AppState.manifests），保证状态列表 /
     // re-enable 重注册 / actions 命令查找与注册表一致。幂等：按 id 去重。
     if let Some(store) = manifests_store {
         let mut guard = store.write().await;
-        for m in &filtered {
+        for m in filtered {
             if !guard.iter().any(|x| x.id == m.id) {
                 guard.push(m.clone());
             }
@@ -1011,7 +1230,7 @@ pub async fn sync_once_with_store(
         // enabled 条目不覆盖（保留上方合并的 G2 净化版）；disabled 条目内容变更时
         // 刷新（防后续启用拿到过期 manifest）。
         let filtered_ids: HashSet<&str> = filtered.iter().map(|m| m.id.as_str()).collect();
-        for m in &all {
+        for m in all {
             if filtered_ids.contains(m.id.as_str()) {
                 continue;
             }
@@ -1021,7 +1240,6 @@ pub async fn sync_once_with_store(
             }
         }
     }
-    Ok(report)
 }
 
 /// 运行时插件自动发现器（notify watch + 轮询兜底，二选一或并存均可）。
@@ -1044,6 +1262,10 @@ pub struct PluginWatcher {
     /// 已知插件上次复验时的代码指纹（consumer 独占）：变化即触发 G2 复验——
     /// sidecar 实现修复不改 manifest，恢复只能靠代码指纹判定。
     known_code_hashes: HashMap<String, u64>,
+    /// 动态 MCP 观测连击（plugin_id → 连续失败轮数）：达
+    /// [`DYNAMIC_IMPORT_MAX_CONSECUTIVE_FAILS`] 暂停逐轮补观测；声明指纹变化
+    /// 或导入成功即重置（2026-09-09 熔断，防远端不可达插件无限堆失败记录）。
+    known_obs_fail_streaks: HashMap<String, u32>,
     /// 插件源码目录解析器（bin 装配注入）。None = 不做代码指纹复验（测试）。
     code_dirs: Option<std::sync::Arc<CodeDirResolver>>,
     /// A3：InProcess 插件 id 已知集合（None = 未建基线，首轮 sync 建立）。
@@ -1090,6 +1312,7 @@ impl PluginWatcher {
             known_ids: initial_ids,
             known_manifest_hashes: HashMap::new(),
             known_code_hashes: HashMap::new(),
+            known_obs_fail_streaks: HashMap::new(),
             code_dirs: None,
             known_cdylib: None,
             restart_hook: None,
@@ -1111,8 +1334,8 @@ impl PluginWatcher {
     }
 
     /// 注入插件源码目录解析器（生产装配传 `PluginInvokerImpl::plugin_source_dir`）：
-    /// 已知插件代码指纹变化即触发 G2 复验（实现修复后工具恢复，无需等 manifest
-    /// 再改或重启）。不注入 = 仅声明指纹驱动复验（测试/旧行为）。
+    /// 全量 sidecar 代码指纹变化即驱逐宿主 + G2 插件复验（实现修复后工具恢复，
+    /// 无需等 manifest 再改或重启）。不注入 = 仅声明指纹驱动复验（测试/旧行为）。
     pub fn with_code_dir_resolver(mut self, resolver: std::sync::Arc<CodeDirResolver>) -> Self {
         self.code_dirs = Some(resolver);
         self
@@ -1202,6 +1425,7 @@ impl PluginWatcher {
             known_ids,
             known_manifest_hashes,
             known_code_hashes,
+            known_obs_fail_streaks,
             code_dirs,
             known_cdylib,
             restart_hook,
@@ -1248,6 +1472,7 @@ impl PluginWatcher {
             let mut known = known_ids;
             let mut known_hashes = known_manifest_hashes;
             let mut known_code = known_code_hashes;
+            let mut known_obs_fail = known_obs_fail_streaks;
             let mut known_cdylib = known_cdylib;
 
             loop {
@@ -1276,6 +1501,7 @@ impl PluginWatcher {
                     manifests_store.as_ref(),
                     &mut known_hashes,
                     &mut known_code,
+                    &mut known_obs_fail,
                     code_dirs.as_ref(),
                     effective_enablement.as_ref(),
                     contract_states.as_deref(),
@@ -1326,8 +1552,8 @@ impl PluginWatcher {
 /// 判定 notify 事件是否值得触发一次插件重扫：只关心 plugin.json 的 增/改
 /// （GAP-6 manifest 变更重注册主路径）与**新目录创建**（新插件根）。
 /// 其余文件（插件源码、llm_core/logs/payload_diag 等运行时产物、编辑器临时
-/// 文件）不触发——watcher 只看 manifest 声明；sidecar 代码变更由 invoker 的
-/// respawn 指纹判定，不走这里。
+/// 文件）不触发——源码文件变更由轮询的代码指纹比对发现（变化即驱逐宿主，
+/// 见 GAP-6 块），不走 notify。
 fn notify_event_relevant(kind: notify::EventKind, paths: &[std::path::PathBuf]) -> bool {
     match kind {
         notify::EventKind::Create(notify::event::CreateKind::Folder) => true,

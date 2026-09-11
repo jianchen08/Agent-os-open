@@ -10,19 +10,19 @@
  */
 
 import { act, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   SchemaFullscreenHost,
   parseEventTrigger,
   collectFullscreenEventDeclarations,
   toSchemaEventItem,
 } from '@/components/schema/SchemaFullscreenHost'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
 import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
 
 // 副作用：把真实 widget 组件注册进 WidgetRegistry 单例（review_document 等），
 // 让「声明 → 实现」链路在测试里真实解析。
-import { initializeWidgets } from '@/services/schema/registerWidgets'
 
 // globalWS：捕获订阅 handler，测试内手动触发；send 方法记调用
 const handlers = new Map<string, (raw: Record<string, unknown>) => void>()

@@ -5,24 +5,19 @@
  * 插件贡献（pages/导航/命令/卡片）整体消失时用户有可见指示。
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-
 const mocks = vi.hoisted(() => ({
   getSchema: vi.fn(),
 }))
-
 vi.mock('@/services/api/schema', () => ({
   getSchema: mocks.getSchema,
 }))
-
 vi.mock('@/services/websocket/resync', () => ({
   initResyncOnSchema: vi.fn(),
   disposeResyncOnSchema: vi.fn(),
 }))
-
 vi.mock('@/services/dshAdapter', () => ({
   loadDshAdapterContributions: vi.fn().mockResolvedValue(undefined),
 }))
-
 import { refreshPluginContributions } from '@/services/modules/GrowthLoop'
 import { useNotificationStore } from '@/stores/notificationStore'
 

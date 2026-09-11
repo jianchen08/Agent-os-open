@@ -57,6 +57,7 @@ class TestDingTalkOutputAdapter:
             "ended": True,
         }
         await adapter.send(state)
+        # DingTalkStreamClient 是对外部钉钉平台的边界：一条结果恰发一条消息（交互即契约）
         client.send_message.assert_called_once()
         call_args = client.send_message.call_args
         assert call_args[0][0] == "user_dt_1"
@@ -90,6 +91,7 @@ class TestDingTalkAdapter:
         adapter.stream_client.connect = AsyncMock()
         adapter.stream_client.start_receive_loop = AsyncMock()
         await adapter.start()
+        # start 的对外行为就是与平台建立一次连接（外部边界交互即契约）
         adapter.stream_client.connect.assert_called_once()
 
     @pytest.mark.asyncio
@@ -98,6 +100,7 @@ class TestDingTalkAdapter:
         adapter = DingTalkAdapter(client_id="test_id", client_secret="test_secret")
         adapter.stream_client.disconnect = AsyncMock()
         await adapter.stop()
+        # stop 的对外行为就是断开与平台的连接（外部边界交互即契约）
         adapter.stream_client.disconnect.assert_called_once()
 
     def test_channel_type(self) -> None:

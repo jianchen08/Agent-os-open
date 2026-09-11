@@ -10,7 +10,8 @@ workspaces 域 11 端点经 ``http.handle`` 按 path 分发（协议与
 agent_manager/monitoring 同款），plugin.json ``http_endpoints`` 声明
 （/ext/workspace_service/workspaces/**）。
 - ``_resolve_workspace_path`` 走 tasks.service_access（自包含）。
-- ``_get_connector_registry`` 进程内直接实例化 ConnectorRegistry 单例。
+- ``connector.execute`` 经 tool-executor 正门消费（_on_load 绑定调用方；
+  显式 plugin_id=connectors_service，系统插件工具不在 LLM 注册表反查必失败）。
 - pipeline-state state 聚合读取器在 ``_on_load`` 经 granted_capabilities
   注入（回退 task_service 只读镜像语义）。
 """
@@ -21,27 +22,29 @@ import logging
 import os
 import subprocess
 import sys
+import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
-_SYSTEM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _SYSTEM_DIR not in sys.path:
-    sys.path.insert(0, _SYSTEM_DIR)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-# http.handle 响应封装（内核 HttpHandleResponse/ToolExecutionResult 样板）：
-# 公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
-_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _SHARED_ROOT not in sys.path:
-    sys.path.insert(0, _SHARED_ROOT)
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
+
+# system/ 根：本文件懒加载的 `from tasks.service_access import …`（tasks 包）
+# 解析前提——组根不随 bootstrap 注入（ADR 2026-09-08-plugin-bootstrap-sink 决策 1）
+if _paths.group_root not in sys.path:
+    sys.path.insert(0, _paths.group_root)
+
 from http_json import (  # noqa: E402
     decode_body as _decode_body,
     error as _error,
     json_response as _json_response,
     ok as _ok,
 )
+from kernel_token import decode_kernel_token as _decode_kernel_token  # noqa: E402
 
-# 直接导入同目录老代码
+# 同目录平铺实现模块（workspace_service 等）
 from workspace_service import (  # noqa: E402
     WorkspaceService,
     get_workspace_service,
@@ -50,17 +53,61 @@ from workspace_service import (  # noqa: E402
 )
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk.capability import bind_capability_caller  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("workspace_service")
 
 _service: WorkspaceService | None = None
 
+# connector.execute 正门调用方（_on_load 经 tool-executor 句柄绑定；
+# None = 能力未授予，IDE 打开面如实降级不谎报连接器状态）。
+_CONNECTORS_PLUGIN_ID = "connectors_service"
+_connector_caller: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None
+
+
+# ══ caller 身份解析与归属闸（U6；tasks/agent_manager 同款 token 解析） ══
+
+
+class WorkspaceAccessDenied(Exception):
+    """工作空间归属闸拒绝（HTTP 404）。
+
+    触发：caller 未认证 / 与目标任务归属不一致 / 目标缺归属元数据
+    （fail-closed）。message 直接面向 HTTP 响应体。
+    """
+
+
+# 防存在性探测统一话术：未认证与归属不一致不可区分，也不泄露目标是否存在。
+_DENIED_MESSAGE = "工作空间不存在或无权访问"
+# 缺归属元数据是数据完整性问题而非保密问题：按仓规 fail-closed 拒绝并说明原因。
+_MISSING_OWNER_MESSAGE = (
+    "目标任务归属元数据缺失（task.submitted_by），拒绝访问；存量数据需回填归属后可达"
+)
+
+
+def _resolve_caller(headers: dict[str, str] | None) -> dict[str, Any]:
+    """从请求头解析可信 caller 身份（sub/username）。无/无效 token → {}。"""
+    authz = ""
+    for k, v in (headers or {}).items():
+        if isinstance(k, str) and k.lower() == "authorization" and v:
+            authz = str(v)
+            break
+    token = authz[7:] if authz.lower().startswith("bearer ") else ""
+    if not token:
+        return {}
+    decoded = _decode_kernel_token(token)
+    if decoded is None:
+        return {}
+    user_id, username, exp = decoded
+    if int(time.time()) >= exp:
+        return {}
+    return {"sub": user_id, "username": username}
+
 
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
-    """初始化工作空间服务 + 注入 state 聚合读取器。"""
-    global _service
+    """初始化工作空间服务 + 注入 state 聚合读取器 + 绑定连接器正门调用方。"""
+    global _service, _connector_caller
     _service = get_workspace_service()
     # GAP-1 统一：注入 state 聚合读取器（父链/子链读面；能力未授予/未就绪时
     # 降级回退 task_service 只读镜像）。
@@ -74,14 +121,38 @@ async def _on_load(params: dict[str, Any]) -> None:
         set_state_reader(_read_state_rows)
     except Exception as exc:  # noqa: BLE001 — 注入失败降级（回退路径）
         logger.warning("[workspace] pipeline-state 读面注入失败（回退 task_service 镜像）: %s", exc)
+    # connector.execute 正门：经 tool-executor 直达 connectors_service（系统插件
+    # 工具不在 LLM 注册表，显式 plugin_id 直达，同 hindsight.recall / isolation
+    # .destroy_env 惯例）。能力未授予时保持 None，IDE 打开面如实降级。
+    try:
+        te_handle = plugin.get_capability("tool-executor")
+        invoke = bind_capability_caller(te_handle, "tool-executor")
+
+        async def _execute_connector_action(
+            action_type: str, parameters: dict[str, Any]
+        ) -> dict[str, Any]:
+            return await invoke(
+                "tool-executor.invoke",
+                {
+                    "tool_name": "connector.execute",
+                    "plugin_id": _CONNECTORS_PLUGIN_ID,
+                    "args": {"action_type": action_type, "parameters": parameters},
+                },
+            )
+
+        _connector_caller = _execute_connector_action
+    except KeyError:
+        _connector_caller = None
+        logger.warning("[workspace] tool-executor 能力未授予，IDE 连接器正门不可用")
     logger.info("工作空间服务已加载")
 
 
 @plugin.on_unload
 async def _on_unload(params: dict[str, Any]) -> None:
     """清理工作空间服务资源。"""
-    global _service
+    global _service, _connector_caller
     _service = None
+    _connector_caller = None
     logger.info("工作空间服务已卸载")
 
 
@@ -101,29 +172,6 @@ def _get_project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent.parent.parent
 
 
-_connector_registry: Any = None
-
-
-def _get_connector_registry() -> Any:
-    """获取全局 ConnectorRegistry 进程内单例。
-
-    自包含：直接实例化（infrastructure.service_provider 在 0.2 已不存在，
-    属死 import）。connectors 包内部用平铺兄弟导入
-    （``from connector_types import ...``），需 connectors/ 目录本身在
-    sys.path 上——这里自举补入（与 tasks/service_access 把 tasks/ 补入
-    sys.path 同款模式）。
-    """
-    global _connector_registry  # noqa: PLW0603
-    if _connector_registry is None:
-        _conn_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "connectors"))
-        if _conn_dir not in sys.path:
-            sys.path.insert(0, _conn_dir)
-        from connectors.registry import ConnectorRegistry  # noqa: PLC0415
-
-        _connector_registry = ConnectorRegistry()
-    return _connector_registry
-
-
 async def open_file_in_ide(body: dict[str, Any]) -> dict[str, Any]:
     """在 IDE 中打开指定文件（body: file_path/line/column）。"""
     file_path = body.get("file_path", "")
@@ -137,41 +185,20 @@ async def open_file_in_ide(body: dict[str, Any]) -> dict[str, Any]:
     line = body.get("line")
     column = body.get("column")
 
-    registry = _get_connector_registry()
-    connector = registry.get_best_connector_for("open_file")
-
-    if connector is None:
-        return {
-            "success": False,
-            "message": "当前没有可用的 IDE 连接器，请确保 VSCode 扩展已启动并连接",
-            "file_path": file_path,
-        }
-
-    from connectors.connector_types import ConnectorAction  # noqa: PLC0415
-
     params: dict[str, Any] = {"file_path": file_path}
     if line is not None:
         params["line"] = line
     if column is not None:
         params["column"] = column
 
-    action = ConnectorAction(
-        action_type="open_file",
-        parameters=params,
-    )
-    try:
-        result = await connector.execute_action(action)
-        if result.success:
-            return {
-                "success": True,
-                "message": f"已在 {connector.connector_type} 中打开文件: {file_path}",
-                "file_path": file_path,
-            }
+    if _connector_caller is None:
         return {
             "success": False,
-            "message": f"连接器执行失败: {result.error}",
+            "message": "IDE 连接器服务不可用（tool-executor 能力未授予）",
             "file_path": file_path,
         }
+    try:
+        result = await _connector_caller("open_file", params)
     except Exception as e:  # noqa: BLE001
         logger.warning("通过连接器打开文件失败: %s", e)
         return {
@@ -179,6 +206,23 @@ async def open_file_in_ide(body: dict[str, Any]) -> dict[str, Any]:
             "message": f"打开文件失败: {e}",
             "file_path": file_path,
         }
+    if result.get("no_connector"):
+        return {
+            "success": False,
+            "message": "当前没有可用的 IDE 连接器，请确保 VSCode 扩展已启动并连接",
+            "file_path": file_path,
+        }
+    if result.get("success"):
+        return {
+            "success": True,
+            "message": f"已在 {result.get('connector_type', '')} 中打开文件: {file_path}",
+            "file_path": file_path,
+        }
+    return {
+        "success": False,
+        "message": f"连接器执行失败: {result.get('error', '')}",
+        "file_path": file_path,
+    }
 
 
 async def get_workspace(container_task_id: str) -> dict[str, Any]:
@@ -194,14 +238,14 @@ async def get_workspace_artifacts(container_task_id: str) -> dict[str, Any]:
     return await service.list_artifacts_by_workspace(container_task_id)
 
 
-async def get_file_tree(container_task_id: str) -> dict[str, Any]:
+async def get_file_tree(container_task_id: str, caller: dict[str, Any] | None = None) -> dict[str, Any]:
     """获取工作空间的文件目录树（无工作区/目录缺失如实报错，不折叠成空树）。
 
     ``workspace_status`` 业务状态字段（200 信封内携带，前端据此渲染可读错误
     而非"暂无数据"空态）：``no_workspace``（无坐标）/ ``dir_missing``（坐标在
-    目录不在）；正常时字段缺省。
+    目录不在）；正常时字段缺省。归属闸见 _resolve_workspace_path。
     """
-    workspace_path = await _resolve_workspace_path(container_task_id)
+    workspace_path = await _resolve_workspace_path(container_task_id, caller)
     if not workspace_path:
         return {
             "tree": [],
@@ -218,18 +262,38 @@ async def get_file_tree(container_task_id: str) -> dict[str, Any]:
     return await service.get_file_tree(container_task_id, base_path=workspace_path)
 
 
-async def get_file_content(container_task_id: str, path: str) -> dict[str, Any]:
+async def get_file_content(
+    container_task_id: str, path: str, caller: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """读取指定文件的内容。
 
     优先通过 container_task_id 解析工作空间根路径（兼容文件树点击场景），
     解析失败时直接按传入的路径读取（兼容交互场景的绝对路径）。
     """
-    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    workspace_path_str = await _resolve_workspace_path(container_task_id, caller)
     raw_path = Path(path)
     project_root = _get_project_root()
 
     if raw_path.is_absolute():
         full_path = raw_path.resolve()
+        # 绝对路径与相对路径同受边界守卫（豁免不对称 = 任意文件读）：
+        # 有工作空间以工作空间为界，无工作空间以项目根为界，越界显式拒绝。
+        boundary = Path(workspace_path_str).resolve() if workspace_path_str else project_root
+        if not full_path.is_relative_to(boundary):
+            # 唯一界外放行 = 已合并 worktree 死路径重定位：重定位锚定 state
+            # 的 worktree 元数据（登记过的副本前缀 → project_root），非用户
+            # 可控豁免；无命中或目标不存在仍拒绝。
+            remapped = await get_workspace_service().resolve_merged_worktree_target(
+                str(full_path)
+            )
+            if remapped and Path(remapped).is_file():
+                logger.info("已合并 worktree 路径重定位 | %s -> %s", full_path, remapped)
+                full_path = Path(remapped)
+            else:
+                return {
+                    "success": False,
+                    "message": "路径超出工作空间范围",
+                }
     elif workspace_path_str:
         workspace_root = Path(workspace_path_str).resolve()
         full_path = (workspace_root / path).resolve()
@@ -293,18 +357,21 @@ async def save_file_content(
     container_task_id: str,
     path: str,
     body: dict[str, Any] | None = None,
+    caller: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """保存文件内容到工作空间。"""
     if body is None:
         body = {}
     content = body.get("content", "")
-    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    workspace_path_str = await _resolve_workspace_path(container_task_id, caller)
     if not workspace_path_str:
         return {"success": False, "message": "未找到工作空间路径"}
 
     workspace_path = Path(workspace_path_str).resolve()
     full_path = (workspace_path / path).resolve()
-    if not str(full_path).startswith(str(workspace_path)):
+    # is_relative_to 要求真实路径包含关系：字符串前缀比较会把兄弟目录
+    # （workspace=…/ws 时 …/ws-backup）误判为界内
+    if not full_path.is_relative_to(workspace_path):
         return {"success": False, "message": "路径超出工作空间范围"}
 
     MAX_SIZE = 10 * 1024 * 1024  # noqa: N806
@@ -328,12 +395,15 @@ async def save_file_content(
 def _validate_path_in_workspace(workspace_path: Path, rel_path: str) -> Path | None:
     """验证相对路径在工作空间范围内，防止路径穿越攻击。"""
     full_path = (workspace_path / rel_path).resolve()
-    if not str(full_path).startswith(str(workspace_path)):
+    # is_relative_to 防穿越：字符串前缀比较放行兄弟目录（…/ws vs …/ws-backup）
+    if not full_path.is_relative_to(workspace_path):
         return None
     return full_path
 
 
-async def create_entry(container_task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+async def create_entry(
+    container_task_id: str, body: dict[str, Any], caller: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """在工作空间中创建文件或文件夹（body: path/type）。"""
     path = body.get("path", "")
     entry_type = body.get("type", "")
@@ -344,7 +414,7 @@ async def create_entry(container_task_id: str, body: dict[str, Any]) -> dict[str
     if entry_type not in ("file", "directory"):
         return {"success": False, "message": "type 参数必须为 file 或 directory"}
 
-    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    workspace_path_str = await _resolve_workspace_path(container_task_id, caller)
     if not workspace_path_str:
         return {"success": False, "message": "未找到工作空间路径"}
 
@@ -369,12 +439,14 @@ async def create_entry(container_task_id: str, body: dict[str, Any]) -> dict[str
         return {"success": False, "message": f"创建失败: {e}"}
 
 
-async def delete_entry(container_task_id: str, path: str) -> dict[str, Any]:
+async def delete_entry(
+    container_task_id: str, path: str, caller: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """删除工作空间中的文件或文件夹。"""
     if not path:
         return {"success": False, "message": "path 参数不能为空"}
 
-    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    workspace_path_str = await _resolve_workspace_path(container_task_id, caller)
     if not workspace_path_str:
         return {"success": False, "message": "未找到工作空间路径"}
 
@@ -404,7 +476,9 @@ async def delete_entry(container_task_id: str, path: str) -> dict[str, Any]:
         return {"success": False, "message": f"删除失败: {e}"}
 
 
-async def rename_entry(container_task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+async def rename_entry(
+    container_task_id: str, body: dict[str, Any], caller: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """重命名工作空间中的文件或文件夹（body: old_path/new_name）。"""
     old_path = body.get("old_path", "")
     new_name = body.get("new_name", "")
@@ -418,7 +492,7 @@ async def rename_entry(container_task_id: str, body: dict[str, Any]) -> dict[str
     if "/" in new_name or "\\" in new_name:
         return {"success": False, "message": "new_name 不能包含路径分隔符"}
 
-    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    workspace_path_str = await _resolve_workspace_path(container_task_id, caller)
     if not workspace_path_str:
         return {"success": False, "message": "未找到工作空间路径"}
 
@@ -432,9 +506,9 @@ async def rename_entry(container_task_id: str, body: dict[str, Any]) -> dict[str
 
     # 计算新路径：在同一个目录下替换文件/目录名
     full_new_path = (full_old_path.parent / new_name).resolve()
-    # 确保新路径也在工作空间范围内（resolve 后再比较——new_name 为 `..` 等
-    # 单段特殊名时字符串前缀比较会漏判）
-    if not str(full_new_path).startswith(str(workspace_path)):
+    # 确保新路径也在工作空间范围内（resolve 后再比较——is_relative_to
+    # 判真实包含关系，new_name 为 `..` 等单段特殊名时同样被拦）
+    if not full_new_path.is_relative_to(workspace_path):
         return {"success": False, "message": "目标路径超出工作空间范围"}
 
     if full_new_path.exists():
@@ -456,7 +530,9 @@ async def rename_entry(container_task_id: str, body: dict[str, Any]) -> dict[str
         return {"success": False, "message": f"重命名失败: {e}"}
 
 
-async def move_entry(container_task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+async def move_entry(
+    container_task_id: str, body: dict[str, Any], caller: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """移动工作空间中的文件或文件夹到指定目录（body: source_path/destination_dir）。"""
     source_path = body.get("source_path", "")
     destination_dir = body.get("destination_dir", "")
@@ -466,7 +542,7 @@ async def move_entry(container_task_id: str, body: dict[str, Any]) -> dict[str, 
     if not destination_dir:
         return {"success": False, "message": "destination_dir 参数不能为空"}
 
-    workspace_path_str = await _resolve_workspace_path(container_task_id)
+    workspace_path_str = await _resolve_workspace_path(container_task_id, caller)
     if not workspace_path_str:
         return {"success": False, "message": "未找到工作空间路径"}
 
@@ -493,8 +569,8 @@ async def move_entry(container_task_id: str, body: dict[str, Any]) -> dict[str, 
     if dest_full_path.exists():
         return {"success": False, "message": f"目标位置已存在同名文件: {full_source.name}"}
 
-    # 确保目标路径在工作空间内
-    if not str(dest_full_path).startswith(str(workspace_path)):
+    # 确保目标路径在工作空间内（is_relative_to 判真实包含关系）
+    if not dest_full_path.is_relative_to(workspace_path):
         return {"success": False, "message": "目标路径超出工作空间范围"}
 
     new_rel_path = str(Path(destination_dir) / full_source.name)
@@ -514,10 +590,12 @@ async def move_entry(container_task_id: str, body: dict[str, Any]) -> dict[str, 
         return {"success": False, "message": f"移动失败: {e}"}
 
 
-async def open_workspace_in_ide(container_task_id: str) -> dict[str, Any]:
+async def open_workspace_in_ide(
+    container_task_id: str, caller: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """在 IDE 中打开指定任务的工作空间目录。"""
     # 1. 从任务 metadata 中获取工作空间路径
-    workspace_path = await _resolve_workspace_path(container_task_id)
+    workspace_path = await _resolve_workspace_path(container_task_id, caller)
     if not workspace_path:
         return {
             "success": False,
@@ -529,11 +607,33 @@ async def open_workspace_in_ide(container_task_id: str) -> dict[str, Any]:
     # 连接器（VSCode 扩展）和系统文件管理器运行在宿主机上，需要宿主机路径
     host_path = _container_to_host_path(workspace_path)
 
-    # 2. 查找支持 open_folder 能力的活跃连接器
-    registry = _get_connector_registry()
-    connector = registry.get_best_connector_for("open_folder")
+    # 2. 查找支持 open_folder 能力的活跃连接器（connector.execute 正门）
+    if _connector_caller is None:
+        # tool-executor 能力未授予 → 连接器正门不可用，同走文件管理器兜底
+        opened = _open_in_system_file_manager(workspace_path)
+        if opened:
+            return {
+                "success": True,
+                "message": "已在系统文件管理器中打开工作空间",
+                "path": host_path,
+            }
+        return {
+            "success": False,
+            "message": "IDE 连接器服务不可用（tool-executor 能力未授予），且无法启动系统文件管理器",
+            "path": host_path,
+        }
 
-    if connector is None:
+    try:
+        result = await _connector_caller("open_folder", {"path": host_path})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("通过连接器打开工作空间失败: %s", e)
+        return {
+            "success": False,
+            "message": f"打开工作空间失败: {e}",
+            "path": host_path,
+        }
+
+    if result.get("no_connector"):
         # 无 IDE 连接器时，fallback 到系统文件管理器
         # 注意：_open_in_system_file_manager 在容器内运行，必须用容器路径
         opened = _open_in_system_file_manager(workspace_path)
@@ -551,33 +651,17 @@ async def open_workspace_in_ide(container_task_id: str) -> dict[str, Any]:
             "path": host_path,
         }
 
-    # 3. 通过连接器发送 open_folder 操作
-    from connectors.connector_types import ConnectorAction  # noqa: PLC0415
-
-    action = ConnectorAction(
-        action_type="open_folder",
-        parameters={"path": host_path},
-    )
-    try:
-        result = await connector.execute_action(action)
-        if result.success:
-            return {
-                "success": True,
-                "message": f"已在 {connector.connector_type} 中打开工作空间",
-                "path": host_path,
-            }
+    if result.get("success"):
         return {
-            "success": False,
-            "message": f"连接器执行失败: {result.error}",
+            "success": True,
+            "message": f"已在 {result.get('connector_type', '')} 中打开工作空间",
             "path": host_path,
         }
-    except Exception as e:  # noqa: BLE001
-        logger.warning("通过连接器打开工作空间失败: %s", e)
-        return {
-            "success": False,
-            "message": f"打开工作空间失败: {e}",
-            "path": host_path,
-        }
+    return {
+        "success": False,
+        "message": f"连接器执行失败: {result.get('error', '')}",
+        "path": host_path,
+    }
 
 
 def _container_to_host_path(container_path: str) -> str:
@@ -589,16 +673,27 @@ def _container_to_host_path(container_path: str) -> str:
     return container_path
 
 
-async def _resolve_workspace_path(container_task_id: str) -> str | None:
-    """解析工作空间路径（三层通道，先登记后 state 真值再 task_service 镜像）。
+async def _resolve_workspace_path(
+    container_task_id: str, caller: dict[str, Any] | None = None
+) -> str | None:
+    """解析工作空间路径（四通道，先登记后 state 真值再 task_service 镜像）
+    并施加归属闸（U6）。
 
-    1. ``_local`` 特例 → 项目根；
-    2. 项目登记通道：id 命中登记行 → 项目文件夹（project = 文件夹+登记，
-       ADR 2026-08-27）；
-    3. state 聚合行（pipeline-state 读面）：按 pipeline_id 取 ``ws_meta.path``
-       / ``workspace``——任务管道（worktree 副本/plain 目录）走此通道；
-    4. TaskService 任务 metadata.ws_meta.path（镜像回退）。
+    归属闸：请求方与目标任务归属不一致 → WorkspaceAccessDenied（404，防
+    存在性探测）；目标缺归属元数据 fail-closed 拒绝并说明原因（存量回填属
+    运行时操作）；caller 未认证一律拒绝。各通道归属权威字段：
+    1. ``_local`` 特例 → 项目根（部署级共享本地工作区，无单任务归属，
+       要求认证 caller）；
+    2. 项目登记通道：ProjectModel.submitted_by；
+    3. state 聚合行（pipeline-state 读面）：行 ``task.submitted_by``
+       （task_submit 出生协议写全）；
+    4. TaskService 任务镜像：metadata.user_id（task_submit 落账）。
+    全通道未命中维持既有 None（无工作区坐标）语义。
     """
+    sub = str((caller or {}).get("sub") or "")
+    if not sub:
+        raise WorkspaceAccessDenied(_DENIED_MESSAGE)
+
     # 特殊处理 _local 工作空间
     if container_task_id == "_local":
         return str(_get_project_root())
@@ -612,7 +707,10 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
 
         project_path = load_project_paths().get(container_task_id)
         if project_path:
+            _assert_project_ownership(container_task_id, sub)
             return project_path
+    except WorkspaceAccessDenied:
+        raise
     except Exception as exc:  # noqa: BLE001 — 登记通道失败不阻断后续通道
         logger.warning(
             "项目登记通道解析失败 | container_task_id=%s err=%s",
@@ -620,10 +718,15 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
             exc,
         )
 
-    # state 聚合行通道（任务管道的 state 真值也覆盖——task = pipeline）
+    # state 聚合行通道（任务管道的 state 真值也覆盖——task = pipeline）；
+    # 路径与归属同行读出（单次读取，避免二次读行归属错位）
     service = get_workspace_service()
-    state_path = await service.resolve_workspace_from_state(container_task_id)
+    state_path, owner = await service.resolve_workspace_from_state(container_task_id)
     if state_path:
+        if not owner:
+            raise WorkspaceAccessDenied(_MISSING_OWNER_MESSAGE)
+        if owner != sub:
+            raise WorkspaceAccessDenied(_DENIED_MESSAGE)
         return state_path
 
     try:
@@ -640,10 +743,18 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
             return None
 
         _metadata = getattr(task, "metadata", None) or {}
+        # 归属闸（镜像通道）：task_submit _build_metadata 落账的 user_id
+        owner = str(_metadata.get("user_id") or "")
+        if not owner:
+            raise WorkspaceAccessDenied(_MISSING_OWNER_MESSAGE)
+        if owner != sub:
+            raise WorkspaceAccessDenied(_DENIED_MESSAGE)
         _ws_meta = _metadata.get("ws_meta", {}) or {}
         # 与 state 通道同口径：worktree 副本已删（合并清理）→ project_root
         return resolve_meta_workspace_path(_ws_meta) if isinstance(_ws_meta, dict) else None
 
+    except WorkspaceAccessDenied:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "解析工作空间路径失败 | container_task_id=%s err=%s",
@@ -652,6 +763,20 @@ async def _resolve_workspace_path(container_task_id: str) -> str | None:
             exc_info=True,
         )
         return None
+
+
+def _assert_project_ownership(project_id: str, sub: str) -> None:
+    """项目登记通道归属闸：ProjectModel.submitted_by（project_create 落账）
+    与请求方比对；登记行缺归属 → fail-closed。"""
+    from tasks.service_access import get_project_registry  # noqa: PLC0415
+
+    registry = get_project_registry()
+    project = registry.get(project_id) if registry is not None else None
+    owner = str(getattr(project, "submitted_by", "") or "") if project is not None else ""
+    if not owner:
+        raise WorkspaceAccessDenied(_MISSING_OWNER_MESSAGE)
+    if owner != sub:
+        raise WorkspaceAccessDenied(_DENIED_MESSAGE)
 
 
 def _open_in_system_file_manager(directory_path: str) -> bool:
@@ -710,10 +835,12 @@ async def http_handle(
     """按 path 分发到 workspaces 域 11 端点（语义对齐原 /ext/channel_api/workspaces/**）。
 
     业务函数全 async、全 dict body；path-param {container_task_id}；
-    file-content/entries 用 query(path=)。认证由 http_endpoints auth=user 声明
-    （dispatcher 层），handler 不读 _user。
+    file-content/entries 用 query(path=)。端点鉴权由 http_endpoints auth=user
+    声明（dispatcher 层）；handler 另从 Authorization 头解析 caller 身份供
+    工作空间归属闸（_resolve_workspace_path，U6 垂直隔离）消费。
     """
     try:
+        caller = _resolve_caller(headers)
         q = query or {}
 
         # POST /open-file（body: file_path/line/column）
@@ -732,13 +859,14 @@ async def http_handle(
                 if action == "artifacts" and method == "GET":
                     return _ok(_json_response(await get_workspace_artifacts(cid)))
                 if action == "file-tree" and method == "GET":
-                    return _ok(_json_response(await get_file_tree(cid)))
+                    return _ok(_json_response(await get_file_tree(cid, caller)))
                 if action == "file-content" and method == "GET":
                     return _ok(
                         _json_response(
                             await get_file_content(
                                 cid,
                                 path=q.get("path", ""),
+                                caller=caller,
                             )
                         )
                     )
@@ -750,32 +878,36 @@ async def http_handle(
                                 cid,
                                 path=q.get("path", ""),
                                 body=body,
+                                caller=caller,
                             )
                         )
                     )
                 if action == "create-entry" and method == "POST":
                     body = _decode_body(raw_body) or {}
-                    return _ok(_json_response(await create_entry(cid, body)))
+                    return _ok(_json_response(await create_entry(cid, body, caller)))
                 if action == "entries" and method == "DELETE":
                     return _ok(
                         _json_response(
                             await delete_entry(
                                 cid,
                                 path=q.get("path", ""),
+                                caller=caller,
                             )
                         )
                     )
                 if action == "rename-entry" and method == "POST":
                     body = _decode_body(raw_body) or {}
-                    return _ok(_json_response(await rename_entry(cid, body)))
+                    return _ok(_json_response(await rename_entry(cid, body, caller)))
                 if action == "move-entry" and method == "POST":
                     body = _decode_body(raw_body) or {}
-                    return _ok(_json_response(await move_entry(cid, body)))
+                    return _ok(_json_response(await move_entry(cid, body, caller)))
                 if action == "open" and method == "POST":
-                    return _ok(_json_response(await open_workspace_in_ide(cid)))
+                    return _ok(_json_response(await open_workspace_in_ide(cid, caller)))
 
         logger.warning("workspaces http.handle: no route for path=%s method=%s", path, method)
         return _ok(_json_response({"error": "not found", "path": path}, 404))
+    except WorkspaceAccessDenied as exc:
+        return _ok(_json_response({"error": str(exc)}, 404))
     except Exception as exc:  # noqa: BLE001
         logger.exception("workspaces http.handle failed: %s", exc)
         return _error(f"workspace service error: {exc}", 500)

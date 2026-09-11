@@ -81,17 +81,24 @@
               "description": "路由到的项目类型（未路由为空串）"
             },
             "init": {
-              "type": ["object", "null"],
+              "type": [
+                "object",
+                "null"
+              ],
               "description": "出生初始化执行明细（未路由为 null）",
               "properties": {
                 "addons_installed": {
                   "type": "array",
-                  "items": { "type": "string" },
+                  "items": {
+                    "type": "string"
+                  },
                   "description": "本次新装的宿主插件名"
                 },
                 "addons_present": {
                   "type": "array",
-                  "items": { "type": "string" },
+                  "items": {
+                    "type": "string"
+                  },
                   "description": "已就位未重复安装的插件名"
                 },
                 "project_file_created": {
@@ -100,7 +107,9 @@
                 },
                 "enabled_added": {
                   "type": "array",
-                  "items": { "type": "string" },
+                  "items": {
+                    "type": "string"
+                  },
                   "description": "本次新增的启用条目"
                 },
                 "committed": {
@@ -120,5 +129,6 @@
   },
   "permissions": {},
   "priority": 10,
-  "granted_capabilities": []
+  "granted_capabilities": [],
+  "host_group": "light"
 }

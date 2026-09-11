@@ -6,11 +6,19 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 from uuid import uuid4
+
+# 共享层时间戳公共模块（plugins/shared 平铺，stdlib-only）裸名导入
+# （先例：task_submit/tool.py 的 _SHARED_ROOT 注入）。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from time_iso import now_iso_utc as _now_iso  # noqa: E402
 
 
 class ReviewStatus(str, Enum):
@@ -28,11 +36,6 @@ class ReviewStatus(str, Enum):
 def _new_id() -> str:
     """生成唯一标识（UUID hex 前 12 位）。"""
     return uuid4().hex[:12]
-
-
-def _now_iso() -> str:
-    """返回当前 UTC 时间的 ISO 8601 字符串。"""
-    return datetime.now(UTC).isoformat()
 
 
 @dataclass

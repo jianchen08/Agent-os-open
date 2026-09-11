@@ -15,6 +15,9 @@
 import { renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useMessageRender } from '@/components/chat/hooks/useMessageRender'
+import type * as handlersMod from '@/services/websocket/streaming/handlers'
+import type * as streamHandlerMod from '@/services/websocket/streaming/handlers/streamHandler'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 // ── mock apiClient（网络层），保留真实的 map + merge ──
@@ -22,7 +25,7 @@ const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
 vi.mock('@/services/api/client', () => ({ default: { get: mockGet } }))
 
 vi.mock('@/utils/activityConverter', () => ({
-  buildDefaultActions: (tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
+  buildDefaultActions: (_tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
 
   toolCallToActivity: (tc: any) => ({
     type: 'tool_call', id: tc.callId ?? tc.call_id,
@@ -51,9 +54,9 @@ vi.mock('@/utils/retry', () => ({
 const PIPELINE_ID = 'pipe-merge-001'
 const THREAD_ID = 'thread-merge-001'
 
-let pipelineStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
-let handlers: typeof import('@/services/websocket/streaming/handlers')
-let flushStreamChunkBuffer: typeof import('@/services/websocket/streaming/handlers/streamHandler').flushStreamChunkBuffer
+let pipelineStore: pipelineMessageStoreMod.usePipelineMessageStore
+let handlers: handlersMod
+let flushStreamChunkBuffer: streamHandlerMod.flushStreamChunkBuffer
 
 /** part sequence 计数器（模拟后端 _next_part_seq） */
 let _partSeq = 0

@@ -14,6 +14,8 @@
  * stream_end），断言最终 parts 的顺序与逻辑顺序一致。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as handlersMod from '@/services/websocket/streaming/handlers'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -58,15 +60,15 @@ function makeEvent(eventType: string, data: Record<string, any>) {
 }
 
 describe('思考过程渲染顺序：流式 reasoning + text 的 part 顺序', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
-  let handleStreamStart: typeof import('@/services/websocket/streaming/handlers').handleStreamStart
-  let handleTextDelta: typeof import('@/services/websocket/streaming/handlers').handleTextDelta
-  let handleStreamEnd: typeof import('@/services/websocket/streaming/handlers').handleStreamEnd
-  let handleBlockStart: typeof import('@/services/websocket/streaming/handlers').handleBlockStart
-  let handleBlockEnd: typeof import('@/services/websocket/streaming/handlers').handleBlockEnd
-  let handleReasoningDelta: typeof import('@/services/websocket/streaming/handlers').handleReasoningDelta
-  let handleToolCallDelta: typeof import('@/services/websocket/streaming/handlers').handleToolCallDelta
-  let handleToolStart: typeof import('@/services/websocket/streaming/handlers').handleToolStart
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
+  let handleStreamStart: handlersMod.handleStreamStart
+  let handleTextDelta: handlersMod.handleTextDelta
+  let handleStreamEnd: handlersMod.handleStreamEnd
+  let handleBlockStart: handlersMod.handleBlockStart
+  let handleBlockEnd: handlersMod.handleBlockEnd
+  let handleReasoningDelta: handlersMod.handleReasoningDelta
+  let handleToolCallDelta: handlersMod.handleToolCallDelta
+  let handleToolStart: handlersMod.handleToolStart
 
   beforeEach(async () => {
     vi.resetModules()

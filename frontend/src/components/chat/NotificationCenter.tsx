@@ -15,9 +15,10 @@
  * 原始 overflow 值。
  */
 
-import { Bell, BellOff, ChevronDown, ChevronRight, X } from '@/assets/icons'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
+import { Bell, BellOff, ChevronDown, ChevronRight, X } from '@/assets/icons'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -31,7 +32,6 @@ import { cn } from '@/lib/utils'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { PRIORITY_STYLES } from '@/types/notification'
-import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { resolveNotificationLayout } from '@/utils/notificationModes'
 import { NotificationItemComponent } from './NotificationItem'
 import type { NotificationAction, NotificationItem, NotificationPriority } from '@/types/notification'

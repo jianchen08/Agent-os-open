@@ -34,7 +34,8 @@ export interface NotificationModeDecl {
  * 内置默认件（五分类兼容层）：插件未声明时兜底，声明后可覆盖。
  * 与 human_interaction_tool 的 ui.notification_modes 声明保持同构。
  */
-const DEFAULT_CATEGORY_DECLS: Record<string, NotificationModeDecl> = {
+/** 内置默认件表（导出仅供契约测试与 manifest 声明对账；运行时行为不变） */
+export const DEFAULT_CATEGORY_DECLS: Record<string, NotificationModeDecl> = {
   progress: { category: 'progress', features: ['status', 'message', 'progress'], icon: 'loader' },
   alert: { category: 'alert', features: ['status', 'message', 'actions'], icon: 'alert-triangle' },
   info: { category: 'info', features: ['status', 'message'], icon: 'info' },

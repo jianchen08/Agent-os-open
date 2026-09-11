@@ -43,7 +43,7 @@ export const myTheme: ThemeConfig = {
 
 ## 2. 插件主题（contributes.themes）
 
-任何插件可在 manifest 声明主题包——纯 CSS 变量键值对，无 JS 执行。真实示例 `plugins/shared/system/visual_customization_demo/plugin.json`：
+任何插件可在 manifest 声明主题包——纯 CSS 变量键值对，无 JS 执行。声明形如：
 
 ```jsonc
 "contributes": {

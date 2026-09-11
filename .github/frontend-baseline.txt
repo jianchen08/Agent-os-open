@@ -1,10 +1,10 @@
 # 前端测试基线（vitest 失败数/eslint 错误数只减不增；
 # 覆盖率%只升不降。见 scripts/check_frontend_baseline.py）
+# vitest_coverage_pct 72.54→73.11（同批最终实测复核，含 MemoryPage 补测）
+# 前值：69.33→72.54（2026-09-11 覆盖率补测批）：Node20 本地全量
+# 实测（2592+ 测试绿）。增量来源 = useVoiceInput 0%→全覆盖 + VotingPanel
+# 主链补测（提交 30d0810de/d276c07c4）。下一批目标 = FileTreeWidget/
+# ChatInput/PluginConfigEditor/CodeEditor 等缺口头部。
 vitest_failures=0
 eslint_errors=0
-vitest_coverage_pct=59.99
-# 2026-08-27 收紧（气泡/主题修复批触发，触碰即清）：
-#   - vitest_coverage_pct 59.00 → 59.99：本地 Windows Node25 全量实测
-#     （themeService --bubble-link 发射 + 三预设修值 + 新测试车道）。
-#   - 同批修 check_frontend_baseline 覆盖率维度误杀：校准兑现(>1)后"已校准+缺数据=fail-loud"未区分调用面，lint 车道/本地裸跑恒红——
-#     维度启用收窄到提供 --vitest-file 的调用面（tests/gates 回归钉 5 例）。
+vitest_coverage_pct=73.11

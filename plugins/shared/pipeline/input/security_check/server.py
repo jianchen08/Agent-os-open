@@ -7,23 +7,20 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from functools import lru_cache
 
-# 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _this_dir)
-_shared_dir = os.path.join(_this_dir, "..", "..", "..")
-sys.path.insert(0, _shared_dir)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
 
 from plugin import (  # noqa: E402
+    _PERMISSION_MODES,
     PERMISSION_MODES,
     SecurityCheckPlugin,
-    _PERMISSION_MODES,
     _load_permission_modes,
     _save_permission_modes,
     _set_plugin_ref,
+    set_frontend_emit,
 )
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
@@ -46,6 +43,25 @@ async def _on_load(params: dict) -> None:
     """Initialize security_check plugin."""
     get_instance()  # 预热：注入 plugin 引用 + 构建单例（保持原 on_load 构造时机）
     _load_permission_modes()  # 加载权限模式持久化表
+    # 前端一次性事件通道（安全规则降级提示用；内核内置能力，缺失只降级日志）
+    try:
+        frontend_handle = plugin.get_capability("frontend")
+    except KeyError:
+        frontend_handle = None
+    if frontend_handle is not None:
+
+        async def _frontend_emit(event: str, payload: dict, thread_id: str) -> None:
+            await frontend_handle.call(
+                "emit",
+                {"event": event, "payload": payload, "thread_id": thread_id},
+            )
+
+        set_frontend_emit(_frontend_emit)
+    else:
+        set_frontend_emit(None)
+        logger.warning(
+            "[security_check_pipeline] frontend 能力未注入，安全规则降级提示不推前端"
+        )
 
 
 @plugin.on_unload
@@ -119,12 +135,13 @@ def _mode_warning(mode: str) -> str:
     return warnings.get(mode, "")
 
 
-async def _confirm_switch(session_id: str, mode: str) -> bool:
+async def _confirm_switch(session_id: str, mode: str, user_id: str = "") -> bool:
     """经 human-interaction 弹审批窗确认高风险模式切换。
 
     Args:
         session_id: 真实会话 id（thread_id）——前端审批 UI 按会话过滤订阅，
             传 pipeline_id 会导致审批窗不显示、确认永远超时。
+        user_id: 发起切换的用户（审批归属归因，归属校验据此放行本人）。
 
     Returns:
         True=用户确认；False=取消/超时/交互服务不可用。
@@ -143,6 +160,7 @@ async def _confirm_switch(session_id: str, mode: str) -> bool:
             "description": f"将要切换到「{mode}」模式。\n{_mode_warning(mode)}",
             "options": _switch_options(),
             "priority": "high",
+            "user_id": user_id,
         })
         if not isinstance(create_res, dict) or create_res.get("error"):
             raise RuntimeError(f"create_choice failed: {create_res}")
@@ -201,8 +219,8 @@ async def http_handle(path: str, method: str, plugin_id: str = "", raw_body: str
         else:
             try:
                 body = {k: v for k, v in query}  # type: ignore[misc]
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 — query 异形按缺参走 GET 读取路径
+                logger.debug("[security_check] GET query 解析失败（按缺参处理）| path=%s | error=%s", path_norm, exc)
         return await _get_permission_mode(body)
 
     return _http_response(404, {"error": "not found"})
@@ -249,6 +267,7 @@ async def _switch_permission_mode(body: dict) -> dict:
         confirmed = await _confirm_switch(
             str(body.get("session_id") or key),
             mode,
+            user_id=str(body.get("user_id") or ""),
         )
         if not confirmed:
             return _http_response(

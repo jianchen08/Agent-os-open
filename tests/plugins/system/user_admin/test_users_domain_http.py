@@ -186,7 +186,13 @@ def test_users_stats_counts(server: Any) -> None:
     status, body = _decode(_call(server, "/ext/user_admin/users/stats"))
 
     assert status == 200
-    assert body == {"total_users": 2, "active_users": 2, "admin_count": 1}
+    # 平键真值 + metrics 卡片形状（status_card 消费面）两形态同源
+    assert body["total_users"] == 2
+    assert body["active_users"] == 2
+    assert body["admin_count"] == 1
+    assert [(m["title"], m["value"]) for m in body["metrics"]] == [
+        ("总用户数", 2), ("活跃用户", 2), ("管理员", 1),
+    ]
     assert calls[0][1]["limit"] == 500
 
 
@@ -194,7 +200,10 @@ def test_users_stats_degrades_empty(server: Any) -> None:
     status, body = _decode(_call(server, "/ext/user_admin/users/stats"))
 
     assert status == 200
-    assert body == {"total_users": 0, "active_users": 0, "admin_count": 0}
+    assert body["total_users"] == 0
+    assert body["active_users"] == 0
+    assert body["admin_count"] == 0
+    assert [m["value"] for m in body["metrics"]] == [0, 0, 0]
 
 
 # ── PUT /users/{id}/role（db-admin 真实写）────────────────────────────────
@@ -387,7 +396,12 @@ def test_stats_active_count_excludes_inactive(server: Any) -> None:
     status, body = _decode(_call(server, "/ext/user_admin/users/stats"))
 
     assert status == 200
-    assert body == {"total_users": 3, "active_users": 2, "admin_count": 1}
+    assert body["total_users"] == 3
+    assert body["active_users"] == 2  # inactive 不计入活跃
+    assert body["admin_count"] == 1
+    assert [(m["title"], m["value"]) for m in body["metrics"]] == [
+        ("总用户数", 3), ("活跃用户", 2), ("管理员", 1),
+    ]
 
 
 def test_status_tool_reports_injection(server: Any) -> None:

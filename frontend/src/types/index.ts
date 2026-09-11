@@ -5,5 +5,4 @@
  * 其余类型已改为从各自模块直连导入。
  */
 
-// 导出模型类型
 export type { Session } from './models'

@@ -42,7 +42,6 @@ _AMBIGUOUS_MODULES = {
     "output_adapter",
     "pipeline_types",
     "stream_client",
-    "card_builder",
     # helpers：wecom/qq 两通道目录各有 helpers.py，跨通道先入缓存会互相命中
     "helpers",
     # workspace：跨目录同名（tasks/workspace.py、isolation/workspace.py 模块
@@ -83,6 +82,5 @@ def use_channel(channel: str) -> None:
             sys.path.remove(_s)
 
 
-# channel_api 于 2026-08-21 整体退役；channels.api 命名空间兼容注册
-# 与 routes_* 懒加载跳过清单（collect_ignore_glob）随其删除。
+# 现役通道插件全部需要收集，无排除项。
 collect_ignore_glob: list[str] = []

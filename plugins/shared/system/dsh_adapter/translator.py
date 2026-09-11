@@ -18,12 +18,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 DSH_SOURCE_COMMIT = "141eb6fef83422698aef7a981029e843e8161534"
 DSH_SOURCE_VERSION = "0.1.0-rc.8"
@@ -90,8 +93,8 @@ def classify_dsh_plugin(root: str | Path) -> dict[str, Any]:
         try:
             decl = json.loads(dsh_plugin_json.read_text(encoding="utf-8"))
             entry_inject = decl.get("entry", {}).get("inject", []) if isinstance(decl.get("entry"), dict) else []
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.debug("dsh.plugin.json 解析失败（entry.inject 声明丢失，正则扫描面不受影响）| path=%s | error=%s", dsh_plugin_json, exc)
     if service_names or entry_inject:
         kinds["service"] = {
             "names": service_names,
@@ -464,7 +467,10 @@ def load_plugin_config() -> dict[str, Any]:
     try:
         with open(cfg_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning(
+            "[dsh_adapter] 配置读取失败，fail-open 全部插件按默认启用: %s | %s", cfg_path, exc
+        )
         return {}
     plugins = data.get("plugins", {}) if isinstance(data, dict) else {}
     return plugins if isinstance(plugins, dict) else {}

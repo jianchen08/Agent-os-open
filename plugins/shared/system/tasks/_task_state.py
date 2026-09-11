@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from enum_utils import safe_enum_value
+from agentos_plugin_sdk.enum_utils import safe_enum_value
 from state_machine import (
     _TASK_TRANSITIONS,
     InvalidTransitionError,

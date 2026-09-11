@@ -18,11 +18,11 @@
  * 渲染逻辑全部委托 renderPageContent（与 PageRenderer 共用，widget/schema/dock 分发一致）。
  */
 
-import type { ReactNode } from 'react'
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { renderPageContent } from './PageRenderer'
+import type { ReactNode } from 'react'
 
 /** 404 占位：pageId 在 contributionRegistry 中未注册（且 schema 已加载完） */
 function NotFound({ pageId }: { pageId: string }): ReactNode {

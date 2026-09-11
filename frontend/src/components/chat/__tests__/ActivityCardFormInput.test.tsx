@@ -18,8 +18,12 @@ vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
   MarkdownRenderer: () => null,
 }))
 
-const fetchMock = vi.fn()
-vi.stubGlobal('fetch', fetchMock)
+// mock 网络层（apiClient）：FormWidget endpoint 提交经 apiClient（P2-4 认证/刷新链）
+const apiPost = vi.fn()
+vi.mock('@/services/api/client', () => ({
+  apiClient: { post: (...args: unknown[]) => apiPost(...args) },
+  default: { post: (...args: unknown[]) => apiPost(...args) },
+}))
 
 function makeActivity(overrides: Partial<ActivityData> = {}): ActivityData {
   return {
@@ -39,12 +43,12 @@ const formBlock = (content: Record<string, unknown>) => ({
 })
 
 beforeEach(() => {
-  fetchMock.mockReset()
+  apiPost.mockReset()
 })
 
 describe('T2：form 块 → FormWidget（交互形态）', () => {
   it('formFields + endpoint 渲染可交互表单，可输入并提交（POST 带 pipeline_id）', async () => {
-    fetchMock.mockResolvedValue({ json: async () => ({ switched: true }) })
+    apiPost.mockResolvedValue({ data: { switched: true } })
     const activity = makeActivity({
       details: [
         formBlock({
@@ -62,11 +66,10 @@ describe('T2：form 块 → FormWidget（交互形态）', () => {
     expect(screen.getByRole('button', { name: '确认部署' })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('副本数'), { target: { value: '3' } })
     fireEvent.submit(document.querySelector('form')!)
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    const [url, init] = fetchMock.mock.calls[0]
+    await vi.waitFor(() => expect(apiPost).toHaveBeenCalled())
+    const [url, body] = apiPost.mock.calls[0]
     expect(url).toBe('/ext/deploy/confirm')
-    expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body)).toMatchObject({ replicas: 3, pipeline_id: expect.any(String) })
+    expect(body).toMatchObject({ replicas: 3, pipeline_id: expect.any(String) })
   })
 })
 

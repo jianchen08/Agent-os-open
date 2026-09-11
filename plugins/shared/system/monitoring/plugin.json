@@ -126,7 +126,7 @@
       "route_id": "mon_system_metrics",
       "method": "GET",
       "path": "/ext/monitoring/system/metrics",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
@@ -136,7 +136,7 @@
       "route_id": "mon_task_statistics",
       "method": "GET",
       "path": "/ext/monitoring/tasks/statistics",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
@@ -146,7 +146,7 @@
       "route_id": "mon_tasks",
       "method": "GET",
       "path": "/ext/monitoring/tasks",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
@@ -156,7 +156,7 @@
       "route_id": "mon_token_usage",
       "method": "GET",
       "path": "/ext/monitoring/token-usage",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
@@ -166,7 +166,7 @@
       "route_id": "mon_token_usage_by_time",
       "method": "GET",
       "path": "/ext/monitoring/token-usage/by-time",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
@@ -176,7 +176,7 @@
       "route_id": "mon_cache_stats",
       "method": "GET",
       "path": "/ext/monitoring/cache-stats",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
@@ -186,7 +186,7 @@
       "route_id": "mon_payload_diag_list",
       "method": "GET",
       "path": "/ext/monitoring/payload-diag",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
@@ -196,7 +196,7 @@
       "route_id": "mon_payload_diag_get",
       "method": "GET",
       "path": "/ext/monitoring/payload-diag/file",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
@@ -206,7 +206,7 @@
       "route_id": "mon_tool_calls",
       "method": "GET",
       "path": "/ext/monitoring/tool-calls",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 8000,
       "max_concurrency": 4,
@@ -216,7 +216,7 @@
       "route_id": "mon_payload_diag_page",
       "method": "GET",
       "path": "/ext/monitoring/page/payload-diag",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
@@ -226,7 +226,7 @@
       "route_id": "mon_tool_calls_page",
       "method": "GET",
       "path": "/ext/monitoring/page/tool-calls",
-      "auth": "none",
+      "auth": "user",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
@@ -323,36 +323,6 @@
       "description": "sessions 域：上下文 Token 用量（估算，query: parent_execution_record_id）"
     },
     {
-      "route_id": "mon_agent_calls_list",
-      "method": "GET",
-      "path": "/ext/monitoring/agent-calls",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "agent-calls 域（批次3 接真）：Agent 调用记录列表（一次 run = 一次调用）"
-    },
-    {
-      "route_id": "mon_agent_calls_statistics",
-      "method": "GET",
-      "path": "/ext/monitoring/agent-calls/statistics",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "agent-calls 域：调用统计（调用数/成功率/平均耗时）"
-    },
-    {
-      "route_id": "mon_agent_call_get",
-      "method": "GET",
-      "path": "/ext/monitoring/agent-calls/{execution_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "agent-calls 域：调用记录详情（run 快照 + 最近消息）"
-    },
-    {
       "route_id": "mon_search_global",
       "method": "GET",
       "path": "/ext/monitoring/search",
@@ -371,6 +341,36 @@
       "timeout_ms": 5000,
       "max_concurrency": 8,
       "description": "插件运行态（metrics-admin 读面桥）：每插件进程 gauge（alive/pid/RSS/uptime/上次崩溃）+ lifecycle 加载/报错计数（留存窗口累计）"
+    },
+    {
+      "route_id": "mon_traces_by_pipeline",
+      "method": "GET",
+      "path": "/ext/monitoring/traces",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "管道诊断域：step 级执行轨迹时间线（query: pipeline_id 必填/limit，summary+llm_usage+error 轻量投影，patch_data 原样随行）"
+    },
+    {
+      "route_id": "mon_pipeline_state_full",
+      "method": "GET",
+      "path": "/ext/monitoring/pipeline-state",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "管道诊断域：单管道 state 全字段（query: pipeline_id 必填，pipeline_state 表全键 + runs 列表 + 摘要行）"
+    },
+    {
+      "route_id": "mon_orphan_runs",
+      "method": "GET",
+      "path": "/ext/monitoring/orphans",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "孤儿管道观测：running 且时长超阈值（min_minutes，默认10）的候选清单按时长倒序（人工 cancel 决策用，不自动终止）"
     }
   ],
   "ui_schema": {
@@ -392,7 +392,8 @@
           "variant": "metric",
           "icon": "🖥️",
           "description": "CPU 使用率（psutil 实时）"
-        }
+        },
+        "group": "资源"
       },
       {
         "id": "resource_mem",
@@ -410,7 +411,8 @@
           "variant": "metric",
           "icon": "🧠",
           "description": "内存占用（psutil 实时）"
-        }
+        },
+        "group": "资源"
       },
       {
         "id": "resource_disk",
@@ -428,7 +430,8 @@
           "variant": "metric",
           "icon": "💾",
           "description": "磁盘占用（psutil 实时）"
-        }
+        },
+        "group": "资源"
       },
       {
         "id": "token_card",
@@ -447,13 +450,14 @@
           "variant": "metric",
           "icon": "🔤",
           "description": "跨运行累计 LLM Tokens（traces 账本）"
-        }
+        },
+        "group": "用量与成本"
       },
       {
         "id": "plugin_error_card",
         "type": "status_card",
         "space": "monitoring",
-        "order": 45,
+        "order": 52,
         "props": {
           "title": "插件报错",
           "label": "插件报错次数",
@@ -466,6 +470,23 @@
           "variant": "metric",
           "icon": "⚠️",
           "description": "插件 OnError 事件累计（内核聚合器留存窗口，滚动约2小时）"
+        },
+        "group": "插件"
+      },
+      {
+        "id": "token_by_model_chart",
+        "type": "chart",
+        "space": "monitoring",
+        "group": "用量与成本",
+        "order": 42,
+        "props": {
+          "title": "Token 按模型",
+          "chartType": "bar",
+          "datasourceUri": "/ext/monitoring/token-usage",
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 60
+          }
         }
       },
       {
@@ -477,12 +498,30 @@
           "title": "Token 按模型统计",
           "datasourceUri": "/ext/monitoring/token-usage",
           "columns": [
-            { "key": "icon", "label": "图标" },
-            { "key": "model", "label": "模型" },
-            { "key": "requests", "label": "调用次数" },
-            { "key": "input_tokens", "label": "输入 Tokens" },
-            { "key": "output_tokens", "label": "输出 Tokens" },
-            { "key": "total_tokens", "label": "合计 Tokens" }
+            {
+              "key": "icon",
+              "label": "图标"
+            },
+            {
+              "key": "model",
+              "label": "模型"
+            },
+            {
+              "key": "requests",
+              "label": "调用次数"
+            },
+            {
+              "key": "input_tokens",
+              "label": "输入 Tokens"
+            },
+            {
+              "key": "output_tokens",
+              "label": "输出 Tokens"
+            },
+            {
+              "key": "total_tokens",
+              "label": "合计 Tokens"
+            }
           ],
           "pageSize": 10,
           "refresh": {
@@ -490,6 +529,23 @@
             "intervalSeconds": 60
           },
           "description": "跨运行 LLM Tokens 按模型细分（traces 账本，图标按 provider 映射；早期无模型归属的轨迹归入「未记录模型」）"
+        },
+        "group": "用量与成本"
+      },
+      {
+        "id": "token_by_time_chart",
+        "type": "chart",
+        "space": "monitoring",
+        "group": "用量与成本",
+        "order": 45,
+        "props": {
+          "title": "Token 按日趋势",
+          "chartType": "line",
+          "datasourceUri": "/ext/monitoring/token-usage/by-time",
+          "refresh": {
+            "type": "poll",
+            "intervalSeconds": 60
+          }
         }
       },
       {
@@ -501,11 +557,26 @@
           "title": "Token 按时间统计",
           "datasourceUri": "/ext/monitoring/token-usage/by-time",
           "columns": [
-            { "key": "date", "label": "日期 (UTC)" },
-            { "key": "requests", "label": "调用次数" },
-            { "key": "input_tokens", "label": "输入 Tokens" },
-            { "key": "output_tokens", "label": "输出 Tokens" },
-            { "key": "total_tokens", "label": "合计 Tokens" }
+            {
+              "key": "date",
+              "label": "日期 (UTC)"
+            },
+            {
+              "key": "requests",
+              "label": "调用次数"
+            },
+            {
+              "key": "input_tokens",
+              "label": "输入 Tokens"
+            },
+            {
+              "key": "output_tokens",
+              "label": "输出 Tokens"
+            },
+            {
+              "key": "total_tokens",
+              "label": "合计 Tokens"
+            }
           ],
           "pageSize": 10,
           "refresh": {
@@ -513,7 +584,8 @@
             "intervalSeconds": 60
           },
           "description": "跨运行 LLM Tokens 按日（UTC）细分（traces 账本）"
-        }
+        },
+        "group": "用量与成本"
       },
       {
         "id": "tasks_table",
@@ -528,7 +600,8 @@
             "type": "poll",
             "intervalSeconds": 30
           }
-        }
+        },
+        "group": "任务"
       },
       {
         "id": "plugins_runtime_table",
@@ -544,7 +617,8 @@
             "intervalSeconds": 30
           },
           "description": "每插件进程态（内核 10s 轮询代采）：状态/PID/内存/运行时长/上次崩溃；lazy 未 spawn 的插件不占行"
-        }
+        },
+        "group": "插件"
       }
     ]
   },
@@ -595,5 +669,6 @@
         }
       }
     ]
-  }
+  },
+  "host_group": "light"
 }

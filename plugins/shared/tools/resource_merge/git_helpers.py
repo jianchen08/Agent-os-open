@@ -14,8 +14,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
-# 0.2 迁移（FP-MIGR / F-MIGR-2）：0.1 的 tools.types 已删除 → 结果类型面走
-# agentos_plugin_sdk（ToolExecutionResult / create_failure_result / create_success_result）。
+# 结果类型面走 agentos_plugin_sdk（ToolExecutionResult / create_failure_result /
+# create_success_result）。
 from agentos_plugin_sdk import (
     ToolExecutionResult,
     create_failure_result,
@@ -280,7 +280,6 @@ class GitHelpers:
                     error_code="GIT_ADD_FAILED",
                 )
 
-            # 检查是否有变更需要提交
             return_code, status_output, _ = await self.run_git(
                 "status",
                 "--porcelain",
@@ -308,7 +307,6 @@ class GitHelpers:
                     error_code="GIT_COMMIT_FAILED",
                 )
 
-            # 获取 commit hash
             return_code, commit_hash, _ = await self.run_git(
                 "rev-parse",
                 "HEAD",
@@ -473,7 +471,6 @@ class GitHelpers:
             if error:
                 return error
 
-            # 检查是否正在合并中
             return_code, stdout, _ = await self.run_git(
                 "rev-parse",
                 "--verify",

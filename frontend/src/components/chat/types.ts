@@ -2,7 +2,6 @@
  * 消息系统组件类型定义
  */
 
-import type { CumulativeUsage } from '@/stores/contextUsageStore'
 import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
 
 /**
@@ -49,6 +48,13 @@ export interface ChatInputState {
 }
 
 /**
+ * 发送回调受理协议：回调返回是否受理本次发送。
+ * - false = 未受理（管道未就绪/子标签不支持等）：输入侧保留输入与草稿；
+ * - true / void = 受理（void 兼容既有只发不回的回调），输入侧清空。
+ */
+export type SendMessageReceipt = boolean | void
+
+/**
  * 消息发送参数
  */
 export interface SendMessageParams {
@@ -72,8 +78,8 @@ export interface ChatContainerProps {
   sessionId: string
   /** 是否正在加载 */
   isLoading?: boolean
-  /** 发送消息回调 */
-  onSendMessage: (params: SendMessageParams) => Promise<void>
+  /** 发送消息回调；返回是否受理（false=未受理，ChatInput 保留输入与草稿） */
+  onSendMessage: (params: SendMessageParams) => SendMessageReceipt
   /** 停止生成回调 */
   onStopGenerate?: () => void
   /** 自定义类名 */
@@ -100,8 +106,6 @@ export interface MessageListProps {
   messages: Message[]
   /** 是否正在生成回复 */
   isGenerating?: boolean
-  /** 模型名称 */
-  modelName?: string
   /** 自定义类名 */
   className?: string
   /** 是否还有更多历史消息 */
@@ -136,8 +140,6 @@ export interface MessageItemProps {
   isLast?: boolean
   /** 是否正在生成 */
   isGenerating?: boolean
-  /** 模型名称 */
-  modelName?: string
   /** 自定义类名 */
   className?: string
   /** 搜索查询（用于高亮显示） */
@@ -204,8 +206,8 @@ export interface ChatInputProps {
   isGenerating?: boolean
   /** 执行状态（用于 smart 模式） */
   executionState?: ExecutionState
-  /** 发送消息回调 */
-  onSendMessage: (params: SendMessageParams) => void
+  /** 发送消息回调；返回是否受理（false=未受理，保留输入与草稿不清空） */
+  onSendMessage: (params: SendMessageParams) => SendMessageReceipt
   /** 停止生成回调 */
   onStopGenerate?: () => void
   /** 是否启用文件上传 */
@@ -214,26 +216,12 @@ export interface ChatInputProps {
   enableDragDrop?: boolean
   /** 模型名称（用于文件上传） */
   modelName?: string
-  /** 当前 Token 使用量（prompt tokens） */
-  currentTokenUsage?: number
-  /** 最大 Token 限制 */
-  maxTokens?: number
-  /** 上一轮总 tokens */
-  totalTokens?: number
-  /** 上一轮输出 tokens（用量浮窗明细） */
-  completionTokens?: number
-  /** 该管道累计 token 消耗（用量浮窗明细） */
-  cumulative?: CumulativeUsage
   /** 是否启用思考模式切换 */
   enableThinkingMode?: boolean
   /** 当前思考强度（off/low/medium/high；随消息传给后端 llm_core 路由模型参数） */
   thinkingStrength?: 'off' | 'low' | 'medium' | 'high'
   /** 切换思考强度回调（调用方负责本地记忆 + 后端覆盖） */
   onThinkingStrengthChange?: (strength: 'off' | 'low' | 'medium' | 'high') => void
-  /** 本轮缓存命中 token（悬停 title 详情用） */
-  cachedTokens?: number
-  /** 本轮缓存命中率 0-1（悬停 title 详情用） */
-  hitRatio?: number
   /** 自定义类名 */
   className?: string
   /** 草稿保存的 key（通常是 tabId 或 sessionId），切换 Tab 时保留未发送文本 */

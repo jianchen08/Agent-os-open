@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+logger = logging.getLogger(__name__)
+
 # 跨插件共享类型走 SDK（agentos_plugin_sdk，pip 安装）。
 # 触发器领域代码（triggers/）为本工具自有子包，位于本工具目录下，由上方
-# sys.path 注入解析。不再依赖 0.1 兼容 shim。
+# sys.path 注入解析。
 
 from http_api import handle_http_dispatch  # noqa: E402
-from tool import TriggerSetupTool  # noqa: E402
+from tool import TriggerSetupTool, set_capability_provider  # noqa: E402
 from triggers.manager import get_trigger_manager  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
@@ -63,27 +66,56 @@ def _make_state_provider() -> Any:
     return _provide
 
 
+def _make_state_writer() -> Any:
+    """构造触发器注册表持久化写面（P25：state 是权威持久层）。
+
+    经内核 ``pipeline-state`` capability 的 update 方法把触发器配置写到目标
+    管道 state（``task.trigger.registry.<trigger_id>`` 扁平键，任务域白名单
+    前缀）——pipeline_state 表跨 sidecar 重启/迁移/回收存活，管道清理时随
+    state 天然 GC。能力句柄懒解析（协程内 get_capability），与 injector /
+    state provider 同款。
+    """
+
+    async def _write(pipeline_id: str, fields: dict[str, Any]) -> None:
+        handle = plugin.get_capability("pipeline-state")
+        await handle.call("update", {"pipeline_id": pipeline_id, "fields": fields})
+
+    return _write
+
+
 @plugin.on_load
 async def _on_load(_params: dict[str, Any]) -> None:
-    """sidecar 启动（主事件循环内）：接通触发检查循环 + 注入器 + 双桥。
+    """sidecar 启动（主事件循环内）：接通触发检查循环 + 注入器 + 双桥 + 审批闸。
 
     1. set_main_loop 注入运行循环 → 触发器到期可调度；
     2. 注入器经内核 chat capability 投递触发消息；
     3. state provider 注入 → CONDITION 触发器有了求值上下文（state 聚合轮询）；
     4. 域事件桥就绪标记 → manifest 声明 domain_event hook + 下方
-       ``_on_domain_event`` 处理器注册后，内核终态事件可达 evaluate_event。
+       ``_on_domain_event`` 处理器注册后，内核终态事件可达 evaluate_event；
+    5. capability provider 注入 → trigger_setup 写入 command 类动作时经
+       human-interaction 审批闸（manifest granted_capabilities 须含 human-interaction）；
+    6. state 写面注入 + 全量重灌 → sidecar 重启/迁移/回收后从管道 state
+       恢复触发器注册表（P25 根治 P21/P24 内存态丢失）。
     """
     mgr = get_trigger_manager()
     mgr.set_main_loop(asyncio.get_running_loop())
     mgr.set_injector(_make_trigger_injector())
     mgr.set_state_provider(_make_state_provider())
+    mgr.set_state_writer(_make_state_writer())
     mgr.set_event_bridge_ready()
+    set_capability_provider(plugin.get_capability)
+    try:
+        restored = await mgr.load_from_state()
+        logger.info("[triggers_ext] state 触发器重灌完成: %d 个", restored)
+    except Exception as exc:  # noqa: BLE001 - 重灌失败不阻断启动，本轮以空注册表运行
+        logger.error("[triggers_ext] 触发器 state 重灌失败（本轮以空注册表运行）: %s", exc)
     mgr.start_check_loop()
 
 
 @plugin.on_unload
 async def _on_unload(_params: dict[str, Any]) -> None:
-    """sidecar 卸载：停止后台检查线程。"""
+    """sidecar 卸载：停止后台检查线程 + 复位审批闸能力接入。"""
+    set_capability_provider(None)
     get_trigger_manager().stop_check_loop()
 
 

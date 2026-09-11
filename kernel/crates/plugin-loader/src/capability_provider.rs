@@ -1,7 +1,7 @@
 //! 把 plugin manifest 的 provides.capabilities 注册成 CapabilityHandler。
 //!
-//! 当一个插件声明 `provides.capabilities`（如 `human_interaction_service` 声明
-//! `human-interaction`），本模块在 loader 扫描后把这些声明注册进
+//! 当一个插件声明 `provides.capabilities`（如交互插件声明
+//! 交互 namespace），本模块在 loader 扫描后把这些声明注册进
 //! [`CapabilityHandlerRegistry`]，使该 namespace 自动出现在：
 //! - 反向调用白名单（reader loop 的 `parse_capability_method_with`）；
 //! - initialize 握手声明（sidecar SDK 据此创建 CapabilityHandle）；
@@ -39,7 +39,7 @@ pub trait CapabilityBridge: Send + Sync {
     ///
     /// Args:
     /// - `plugin_id`: 提供capability 的插件 manifest id；
-    /// - `namespace`: capability namespace（如 `human-interaction`）；
+    /// - `namespace`: capability namespace（如交互插件承载的交互 namespace）；
     /// - `method`: method 名（如 `create_choice`）；
     /// - `params`: JSON-RPC params。
     async fn forward(
@@ -156,7 +156,7 @@ pub fn register_provided_capabilities(
 pub struct CapabilityRoute {
     /// 提供该 capability 的插件 manifest id。
     pub plugin_id: String,
-    /// 工具名前缀（如 namespace=`human-interaction` 对应 sidecar 工具前缀 `interaction`）。
+    /// 工具名前缀（如交互 namespace 对应 sidecar 工具前缀 `interaction`）。
     /// bridge 把 `<namespace>.<method>` 映射成 `<tool_prefix>.<method>` 调用 sidecar。
     pub tool_prefix: String,
 }
@@ -271,6 +271,8 @@ mod tests {
 
     fn make_manifest(id: &str, provides: Option<ProvidesCapabilities>) -> PluginManifest {
         PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: id.to_string(),
             name: id.to_string(),
             description: None,
@@ -310,6 +312,7 @@ mod tests {
             "human_interaction_service",
             Some(ProvidesCapabilities {
                 capabilities: vec![ProvidedCapability {
+                    protocol_roles: Vec::new(),
                     namespace: "human-interaction".to_string(),
                     methods: vec!["create_choice".to_string(), "wait_for_choice".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
@@ -335,6 +338,7 @@ mod tests {
                 "with_provides",
                 Some(ProvidesCapabilities {
                     capabilities: vec![ProvidedCapability {
+                        protocol_roles: Vec::new(),
                         namespace: "my-cap".to_string(),
                         methods: vec!["do".to_string()],
                         host: ProvidedCapabilityHost::InProcess,
@@ -358,6 +362,7 @@ mod tests {
             "p1",
             Some(ProvidesCapabilities {
                 capabilities: vec![ProvidedCapability {
+                    protocol_roles: Vec::new(),
                     namespace: "ns1".to_string(),
                     methods: vec!["create_choice".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
@@ -384,6 +389,7 @@ mod tests {
             "p1",
             Some(ProvidesCapabilities {
                 capabilities: vec![ProvidedCapability {
+                    protocol_roles: Vec::new(),
                     namespace: "ns1".to_string(),
                     methods: vec!["create_choice".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
@@ -439,6 +445,7 @@ mod tests {
             "human_interaction_service",
             Some(ProvidesCapabilities {
                 capabilities: vec![ProvidedCapability {
+                    protocol_roles: Vec::new(),
                     namespace: "human-interaction".to_string(),
                     methods: vec!["create_choice".to_string(), "wait_for_choice".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
@@ -479,6 +486,7 @@ mod tests {
             "p1",
             Some(ProvidesCapabilities {
                 capabilities: vec![ProvidedCapability {
+                    protocol_roles: Vec::new(),
                     namespace: "ns1".to_string(),
                     methods: vec!["allowed".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
@@ -505,6 +513,7 @@ mod tests {
             "p1",
             Some(ProvidesCapabilities {
                 capabilities: vec![ProvidedCapability {
+                    protocol_roles: Vec::new(),
                     namespace: "dynamic-from-manifest".to_string(),
                     methods: vec!["m1".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
@@ -532,10 +541,10 @@ mod tests {
 
     #[async_trait]
     impl PluginInvoker for MockInvoker {
-        async fn invoke_pipeline_plugin(
+        async fn invoke_pipeline_plugin<'a>(
             &self,
             _: &str,
-            _: &PluginContext,
+            _: &PluginContext<'a>,
         ) -> Result<PluginResult, PluginError> {
             unreachable!("McpBridge 不调 invoke_pipeline_plugin")
         }
@@ -562,7 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mcp_bridge_forwards_to_invoker() {
-        // bridge 收到 (human-interaction, create_choice, params) 后，
+        // bridge 收到 (交互 namespace, create_choice, params) 后，
         // 应查路由表得到 (human_interaction_service, interaction.create_choice)，
         // 调 invoker.invoke_tool 并返回 data。
         let invoker = Arc::new(MockInvoker {
@@ -648,6 +657,7 @@ mod tests {
             "my_service",
             Some(ProvidesCapabilities {
                 capabilities: vec![ProvidedCapability {
+                    protocol_roles: Vec::new(),
                     namespace: "my-cap".to_string(),
                     methods: vec!["do".to_string()],
                     host: ProvidedCapabilityHost::InProcess,
@@ -677,6 +687,7 @@ mod tests {
             "human_interaction_tool",
             Some(ProvidesCapabilities {
                 capabilities: vec![ProvidedCapability {
+                    protocol_roles: Vec::new(),
                     namespace: "human-interaction".to_string(),
                     methods: vec!["create_choice".to_string()],
                     host: ProvidedCapabilityHost::Sidecar,

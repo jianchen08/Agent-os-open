@@ -23,10 +23,13 @@ OUT = os.path.join(
 
 def _token():
     user = os.environ.get("E2E_PARITY_USERNAME")
+    password = os.environ.get("E2E_PARITY_PASSWORD")
     if user:
+        if not password:
+            raise SystemExit("E2E_PARITY_PASSWORD not set: default credential literals were removed (W3-1 follow-up)")
         status, body, _ = http_post_json(
             f"{KERNEL_URL}/api/v1/auth/login",
-            {"username": user, "password": os.environ.get("E2E_PARITY_PASSWORD", "parity12345")},
+            {"username": user, "password": password},
             timeout=10,
         )
         if status == 200 and body.get("access_token"):

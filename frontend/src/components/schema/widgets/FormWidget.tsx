@@ -36,6 +36,12 @@ import { useCallback, useEffect, useState } from 'react'
 import { Check, ChevronDown } from '@/assets/icons'
 import { SessionEditModal, type SessionFormOptions } from '@/components/session/SessionEditModal'
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -43,25 +49,18 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
+import { toast } from '@/components/ui/sonner'
+import { cn } from '@/lib/utils'
 import apiClient from '@/services/api/client'
+import { emitFormEvent } from '@/services/schema/formEventBus'
 import { RjsfForm } from '@/services/schema/RjsfForm'
 import { parseYamlObject, serializeYaml } from '@/services/schema/yaml'
 import { createSessionWithProject } from '@/services/sessionCreation'
-import { cn } from '@/lib/utils'
+import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useAgentTabStore } from '@/stores/agentTabStore'
-import { useAuthStore } from '@/stores/authStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { toast } from '@/components/ui/sonner'
 import { resolveChatCardIcon } from '@/utils/chatCardIconRegistry'
-import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
-import { emitFormEvent } from '@/services/schema/formEventBus'
 import type { UIInputFormField } from '@/types/schema'
 
 /**
@@ -114,9 +113,6 @@ export function FormWidget(props: Record<string, unknown>) {
   const onChange = props.onChange as ((data: Record<string, unknown>) => void) | undefined
   const pipelineId = useActivePipelineId()
   const sessionId = useSessionStore((s) => s.activeSessionId)
-  // endpoint 直连走裸 fetch（不走 apiClient 拦截链），auth:user 的 /ext 端点
-  // 须自带 Bearer 凭据——缺头的请求会被内核 401 拒绝
-  const token = useAuthStore((s) => s.token)
   // 回读端点（可选）：挂载时 + 提交成功后 GET 查询当前值并刷新选择器显示。
   // 用于"切换端点的当前值不在表单初值里"的声明式选择器（如权限模式——
   // 值存后端 _PERMISSION_MODES 表，前端无初值来源，不回读则恒显示默认档）。
@@ -126,13 +122,12 @@ export function FormWidget(props: Record<string, unknown>) {
   const readBack = useCallback(async () => {
     if (!readbackUri || !pipelineId) return
     try {
-      const query = `?pipeline_id=${encodeURIComponent(pipelineId)}${
-        sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ''
-      }`
-      const resp = await fetch(`${readbackUri}${query}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      })
-      const data = (await resp.json()) as { mode?: string; error?: string }
+      const resp = await apiClient.get<{ mode?: string; error?: string }>(
+        `${readbackUri}?pipeline_id=${encodeURIComponent(pipelineId)}${
+          sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ''
+        }`,
+      )
+      const data = resp.data
       if (data.error) throw new Error(data.error)
       if (typeof data.mode === 'string' && data.mode !== '') {
         setBackValue(data.mode)
@@ -141,8 +136,7 @@ export function FormWidget(props: Record<string, unknown>) {
       // 回读失败保留占位显示（currentValue 缺省回退 field.default），不阻断交互
       console.warn('[FormWidget] readback failed:', readbackUri, err instanceof Error ? err.message : err)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readbackUri])
+  }, [readbackUri, pipelineId, sessionId])
 
   // ── datasource 模式（widget 化 T12）──
   const fieldsUri = props.fieldsUri as string | undefined
@@ -304,21 +298,21 @@ export function FormWidget(props: Record<string, unknown>) {
       setStatus('submitting')
       setStatusText('提交中…（高风险操作可能弹出审批窗等待确认）')
       try {
-        const resp = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({ pipeline_id: pipelineId, session_id: sessionId ?? '', ...(extraBody ?? {}), ...values }),
-        })
-        const data = (await resp.json()) as {
+        // endpoint 直连统一走 apiClient（认证头注入 + 401 刷新链，auth:user
+        // 的 /ext 端点缺头会被内核 401 拒绝）；4xx/5xx 由拦截器 reject
+        const resp = await apiClient.post<{
           switched?: boolean
           unchanged?: boolean
           reason?: string
           error?: string
           message?: string
-        }
+        }>(endpoint, {
+          pipeline_id: pipelineId,
+          session_id: sessionId ?? '',
+          ...(extraBody ?? {}),
+          ...values,
+        })
+        const data = resp.data
         // endpoint 响应协议：error/reason = 失败；unchanged=true = 无变更（仅
         // 权限模式等切换端点用）；其余一律视为成功（通用表单端点的成功
         // 响应体是创建/更新对象，无 switched 字段）
@@ -494,7 +488,7 @@ function ModalShell({
       onClose?.()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [closeOnSuccess])
+  }, [closeOnSuccess, open])
 
   return (
     <>

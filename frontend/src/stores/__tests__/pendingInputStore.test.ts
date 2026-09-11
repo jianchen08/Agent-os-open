@@ -5,8 +5,8 @@
  * 编辑态清理（条目消失时）。
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { usePendingInputStore } from '@/stores/pendingInputStore'
 import * as api from '@/services/api/pipelines'
+import { usePendingInputStore } from '@/stores/pendingInputStore'
 
 vi.mock('@/services/api/pipelines', async (importOriginal) => {
   const actual = await importOriginal<typeof api>()

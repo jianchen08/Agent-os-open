@@ -62,14 +62,17 @@ struct MockInvoker {
     invoke_tool_fail: bool,
     /// 冒烟 invoke_tool 的调用计数（断言未声明 smoke 的工具不被冒烟）。
     invoke_calls: std::sync::atomic::AtomicUsize,
+    /// B15-R1：force_unload（宿主驱逐）调用记录（plugin_id 按序）——watcher
+    /// 检测到代码变更后"驱逐宿主"这一可观察副作用的落点。
+    force_unloads: std::sync::Mutex<Vec<String>>,
 }
 
 #[async_trait]
 impl PluginInvoker for MockInvoker {
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         _plugin_id: &str,
-        _ctx: &PluginContext,
+        _ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError> {
         unimplemented!("sync 不走 invoke 路径")
     }
@@ -126,6 +129,13 @@ impl PluginInvoker for MockInvoker {
             .cloned()
             .unwrap_or(serde_json::json!({ "tools": [] })))
     }
+    async fn force_unload(&self, plugin_id: &str) -> Result<(), PluginError> {
+        self.force_unloads
+            .lock()
+            .unwrap()
+            .push(plugin_id.to_string());
+        Ok(())
+    }
 }
 
 impl MockInvoker {
@@ -150,6 +160,7 @@ impl MockInvoker {
             list_calls: std::sync::atomic::AtomicUsize::new(0),
             invoke_tool_fail: false,
             invoke_calls: std::sync::atomic::AtomicUsize::new(0),
+            force_unloads: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -170,6 +181,7 @@ async fn sync_once_discovers_and_applies() {
         &mut known,
         &mut None,
         None,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -199,6 +211,7 @@ async fn sync_once_idempotent_across_calls() {
         None,
         &mut HashMap::new(),
         &mut HashMap::new(),
+        &mut HashMap::new(),
         None,
         None,
         None,
@@ -213,6 +226,7 @@ async fn sync_once_idempotent_across_calls() {
         &mut known,
         &mut None,
         None,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -235,6 +249,7 @@ async fn sync_once_propagates_discover_error() {
         list_calls: std::sync::atomic::AtomicUsize::new(0),
         invoke_tool_fail: false,
         invoke_calls: std::sync::atomic::AtomicUsize::new(0),
+        force_unloads: std::sync::Mutex::new(Vec::new()),
     };
     let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
     let scopes = PluginScopeRegistry::new();
@@ -246,6 +261,7 @@ async fn sync_once_propagates_discover_error() {
         &mut known,
         &mut None,
         None,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -352,6 +368,7 @@ async fn sync_once_consistent_plugin_registers_all_tools() {
         None,
         &mut HashMap::new(),
         &mut HashMap::new(),
+        &mut HashMap::new(),
         None,
         None,
         None,
@@ -382,6 +399,7 @@ async fn sync_once_drifted_tool_is_rejected_from_registration() {
         &mut known,
         &mut None,
         None,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -426,6 +444,7 @@ async fn sync_once_verify_failure_does_not_block_install() {
         None,
         &mut HashMap::new(),
         &mut HashMap::new(),
+        &mut HashMap::new(),
         None,
         None,
         None,
@@ -458,6 +477,7 @@ async fn sync_once_verify_failure_lenient_keeps_tools() {
         &mut known,
         &mut None,
         None,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -530,6 +550,7 @@ async fn sync_once_with_explicit_baseline_detects_addition() {
         &mut known,
         &mut known_cdylib,
         None,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -656,6 +677,7 @@ async fn sync_reregisters_plugin_on_manifest_change() {
         Some(&store),
         &mut hashes,
         &mut HashMap::new(),
+        &mut HashMap::new(),
         None,
         None,
         None,
@@ -674,6 +696,7 @@ async fn sync_reregisters_plugin_on_manifest_change() {
         &mut None,
         Some(&store),
         &mut hashes,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         None,
         None,
@@ -708,6 +731,7 @@ async fn sync_reregisters_plugin_on_manifest_change() {
         Some(&store),
         &mut hashes,
         &mut HashMap::new(),
+        &mut HashMap::new(),
         None,
         None,
         None,
@@ -736,6 +760,7 @@ async fn sync_http_endpoints_refreshed_on_change() {
         None,
         &mut hashes,
         &mut HashMap::new(),
+        &mut HashMap::new(),
         None,
         None,
         None,
@@ -756,6 +781,7 @@ async fn sync_http_endpoints_refreshed_on_change() {
         &mut None,
         None,
         &mut hashes,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         None,
         None,
@@ -1113,6 +1139,7 @@ async fn sync_skips_disabled_plugin_in_hot_discovery() {
         None,
         &mut HashMap::new(),
         &mut HashMap::new(),
+        &mut HashMap::new(),
         None,
         Some(&enablement),
         None,
@@ -1166,6 +1193,7 @@ async fn sync_disabled_plugin_manifest_still_enters_store() {
         Some(&store),
         &mut HashMap::new(),
         &mut HashMap::new(),
+        &mut HashMap::new(),
         None,
         Some(&enablement),
         None,
@@ -1217,6 +1245,7 @@ async fn sync_uninstalls_store_only_disabled_plugin() {
         Some(&store),
         &mut HashMap::new(),
         &mut HashMap::new(),
+        &mut HashMap::new(),
         None,
         Some(&enablement),
         None,
@@ -1236,6 +1265,7 @@ async fn sync_uninstalls_store_only_disabled_plugin() {
         &mut known,
         &mut None,
         Some(&store),
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -1267,6 +1297,7 @@ async fn sync_rejects_new_plugin_with_missing_required_dep() {
         &mut known,
         &mut None,
         None,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -1310,6 +1341,7 @@ async fn sync_uninstalls_removed_plugin_and_cascades_dependents() {
             None,
             &mut HashMap::new(),
             &mut HashMap::new(),
+            &mut HashMap::new(),
             None,
             None,
             None,
@@ -1331,6 +1363,7 @@ async fn sync_uninstalls_removed_plugin_and_cascades_dependents() {
         &mut known,
         &mut None,
         None,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -1356,6 +1389,7 @@ async fn sync_uninstalls_removed_plugin_and_cascades_dependents() {
         &mut known,
         &mut None,
         None,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -1387,6 +1421,7 @@ async fn sync_uninstall_isolated_plugin_leaves_others() {
         None,
         &mut HashMap::new(),
         &mut HashMap::new(),
+        &mut HashMap::new(),
         None,
         None,
         None,
@@ -1404,6 +1439,7 @@ async fn sync_uninstall_isolated_plugin_leaves_others() {
         &mut known,
         &mut None,
         None,
+        &mut HashMap::new(),
         &mut HashMap::new(),
         &mut HashMap::new(),
         None,
@@ -1576,6 +1612,7 @@ async fn sync_next_round_does_not_resurrect_sanitized_tool() {
         Some(&store),
         &mut hashes,
         &mut code_hashes,
+        &mut HashMap::new(),
         None,
         None,
         Some(&ledger),
@@ -1598,6 +1635,7 @@ async fn sync_next_round_does_not_resurrect_sanitized_tool() {
         Some(&store),
         &mut hashes,
         &mut code_hashes,
+        &mut HashMap::new(),
         None,
         None,
         Some(&ledger),
@@ -1643,6 +1681,7 @@ async fn sync_next_round_does_not_resurrect_sanitized_tool() {
         Some(&store),
         &mut hashes,
         &mut code_hashes,
+        &mut HashMap::new(),
         None,
         None,
         Some(&ledger),
@@ -1699,6 +1738,7 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
         None,
         &mut hashes,
         &mut code_hashes,
+        &mut HashMap::new(),
         Some(&resolver),
         None,
         Some(&ledger),
@@ -1707,6 +1747,10 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
     .unwrap();
     assert_eq!(r1.drifted_plugins, vec!["fix1".to_string()]);
     assert!(registry_arc.get_tool("t2").is_none(), "t2 首轮被净化剔除");
+    assert!(
+        inv1.force_unloads.lock().unwrap().is_empty(),
+        "基线轮零驱逐"
+    );
 
     // 次轮：实现修复（上报恢复 t1+t2），manifest 未动，仅代码指纹变化
     *stage.write() = dir_new.path().to_path_buf();
@@ -1720,6 +1764,7 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
         None,
         &mut hashes,
         &mut code_hashes,
+        &mut HashMap::new(),
         Some(&resolver),
         None,
         Some(&ledger),
@@ -1730,6 +1775,11 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
         r2.changed_plugin_ids,
         vec!["fix1".to_string()],
         "代码指纹变化须触发复验重注册"
+    );
+    assert_eq!(
+        *inv2.force_unloads.lock().unwrap(),
+        vec!["fix1".to_string()],
+        "B15-R1：g2 插件代码变更同样驱逐宿主（进程侧新代码不依赖调用时 pull）"
     );
     assert!(
         registry_arc.get_tool("t2").is_some(),
@@ -1753,6 +1803,7 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
         None,
         &mut hashes,
         &mut code_hashes,
+        &mut HashMap::new(),
         Some(&resolver),
         None,
         Some(&ledger),
@@ -1760,6 +1811,11 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
     .await
     .unwrap();
     assert!(r3.changed_plugin_ids.is_empty(), "未变更不得重注册");
+    assert_eq!(
+        inv2.force_unloads.lock().unwrap().len(),
+        1,
+        "未编辑周期零重复驱逐"
+    );
 }
 
 /// 代码指纹解析缺省臂：无解析器 / 解析不到目录 → 指纹恒 0（复验退化为仅声明
@@ -1793,6 +1849,7 @@ async fn sync_boot_plugin_first_sync_establishes_baseline_without_action() {
         None,
         &mut hashes,
         &mut code_hashes,
+        &mut HashMap::new(),
         None,
         None,
         None,
@@ -1814,6 +1871,7 @@ async fn sync_boot_plugin_first_sync_establishes_baseline_without_action() {
         None,
         &mut hashes,
         &mut code_hashes,
+        &mut HashMap::new(),
         None,
         None,
         None,
@@ -1833,6 +1891,7 @@ async fn sync_boot_plugin_first_sync_establishes_baseline_without_action() {
         None,
         &mut hashes,
         &mut code_hashes,
+        &mut HashMap::new(),
         None,
         None,
         None,
@@ -1842,4 +1901,314 @@ async fn sync_boot_plugin_first_sync_establishes_baseline_without_action() {
     assert_eq!(r3.changed_plugin_ids, vec!["boot1".to_string()]);
     assert!(registry_arc.get_tool("t2").is_some(), "新声明工具注册");
     assert!(registry_arc.get_tool("t").is_none(), "旧声明工具摘除");
+}
+
+// ── B15-R1：代码指纹检测覆盖全量 sidecar，变化即驱逐宿主 ──────────────────
+
+/// 零工具 light 合宿成员（pipeline 插件形态）——B15 失灵人群：
+/// `capabilities` 空，此前被 g2_applicable 闸排除在代码指纹检测外。
+fn mk_manifest_light_pipeline(id: &str) -> PluginManifest {
+    let v = json!({
+        "id": id, "name": id, "version": "1.0.0",
+        "plugin_type": "pipeline", "language": "python",
+        "host_type": "sidecar", "entry": "python plugin.py",
+        "host_group": "light",
+        "invoke_entry": "execute",
+        "capabilities": {},
+    });
+    serde_json::from_value(v).expect("valid manifest")
+}
+
+/// B15-R1 行为锚（报告 §四 R1 / §六 复现的进程内形态）：
+/// 零工具 light 成员 .py 修改 → **无需任何调用** → 一个轮询周期（sync）内
+/// 指纹变化 → 宿主被驱逐（下个调用者按新码重建）；未编辑周期零驱逐
+/// （回归红线：防指纹抖动引发 respawn 风暴）。
+#[tokio::test]
+async fn sync_evicts_zero_tool_light_sidecar_on_code_change() {
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    // boot 已注册形态（生产：watcher 以 boot manifests 为 initial_ids 启动）——
+    // 首轮 sync 走 GAP-6 无基线臂建基线，此后每轮比对。
+    let mut known: HashSet<String> = ["conv_mode".to_string()].into_iter().collect();
+    let mut hashes = HashMap::new();
+    let mut code_hashes = HashMap::new();
+
+    // 两份指纹必然相异的"代码"（不同文件名，免 mtime 粒度抖动），stage 切换
+    // 模拟 .py 编辑；真实目录 + 真实指纹函数（关键路径不走 mock）。
+    let dir_v1 = tempfile::tempdir().unwrap();
+    std::fs::write(dir_v1.path().join("impl_v1.py"), b"v1").unwrap();
+    let dir_v2 = tempfile::tempdir().unwrap();
+    std::fs::write(dir_v2.path().join("impl_v2.py"), b"v2").unwrap();
+    let stage = Arc::new(parking_lot::RwLock::new(dir_v1.path().to_path_buf()));
+    let resolver: Arc<CodeDirResolver> = {
+        let stage = stage.clone();
+        Arc::new(move |_id: &str| Some(stage.read().clone()))
+    };
+
+    let m = mk_manifest_light_pipeline("conv_mode");
+
+    // 轮询周期 1：基线轮——建基线，零驱逐
+    let inv1 = MockInvoker::new(vec![m.clone()]);
+    let r1 = sync_once_with_store(
+        &inv1,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        Some(&resolver),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(r1.changed_plugin_ids.is_empty(), "基线轮只建基线不动作");
+    assert!(
+        inv1.force_unloads.lock().unwrap().is_empty(),
+        "基线轮零驱逐"
+    );
+
+    // 轮询周期 2：.py 编辑落地（stage → v2），期间**零调用**
+    *stage.write() = dir_v2.path().to_path_buf();
+    let inv2 = MockInvoker::new(vec![m.clone()]);
+    sync_once_with_store(
+        &inv2,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        Some(&resolver),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *inv2.force_unloads.lock().unwrap(),
+        vec!["conv_mode".to_string()],
+        "零调用下代码变更必须驱逐宿主（下个调用者拿新代码）"
+    );
+    assert_eq!(
+        inv2.list_calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "零工具插件不得触发 G2 探测（检测全程零调用）"
+    );
+    assert_eq!(
+        inv2.invoke_calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "检测全程零工具调用"
+    );
+
+    // 轮询周期 3：代码不再变——零驱逐（幂等，不重复 respawn）
+    let inv3 = MockInvoker::new(vec![m]);
+    let r3 = sync_once_with_store(
+        &inv3,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        Some(&resolver),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        inv3.force_unloads.lock().unwrap().is_empty(),
+        "未编辑周期零误驱逐（防 respawn 风暴）"
+    );
+    assert!(r3.changed_plugin_ids.is_empty(), "未编辑周期零重注册");
+}
+
+/// 有界等待谓词成立（真实 tokio 时钟，10ms 步长轮询）——时序断言禁零延迟 mock。
+async fn wait_until(deadline: Duration, mut pred: impl FnMut() -> bool) {
+    let start = std::time::Instant::now();
+    while !pred() {
+        assert!(
+            start.elapsed() < deadline,
+            "等待谓词超时（{}ms）：时序不变量被破坏",
+            deadline.as_millis()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// B15-R1 端到端（报告 §六 复现的轮询周期形态）：零工具 light 成员 .py 修改
+/// → 不发任何调用 → watcher **轮询周期内**驱逐宿主；随后未编辑周期零重复驱逐。
+/// 真实 tokio 时钟 + 可注入扫描周期（50ms 轮询 / 10ms 防抖）断言时序不变量。
+#[tokio::test]
+async fn watcher_poll_cycle_evicts_zero_tool_light_member_without_any_call() {
+    let plugins_dir = tempfile::tempdir().unwrap();
+    let dir_v1 = tempfile::tempdir().unwrap();
+    std::fs::write(dir_v1.path().join("impl_v1.py"), b"v1").unwrap();
+    let dir_v2 = tempfile::tempdir().unwrap();
+    std::fs::write(dir_v2.path().join("impl_v2.py"), b"v2").unwrap();
+    let stage = Arc::new(parking_lot::RwLock::new(dir_v1.path().to_path_buf()));
+    let resolver: Arc<CodeDirResolver> = {
+        let stage = stage.clone();
+        Arc::new(move |_id: &str| Some(stage.read().clone()))
+    };
+
+    let invoker = Arc::new(MockInvoker::new(vec![mk_manifest_light_pipeline(
+        "conv_mode",
+    )]));
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let handle = PluginWatcher::new(
+        plugins_dir.path().to_path_buf(),
+        invoker.clone(),
+        registry_arc,
+        HashSet::from(["conv_mode".to_string()]), // boot 已注册
+    )
+    .with_code_dir_resolver(resolver)
+    .with_debounce(Duration::from_millis(10))
+    .with_poll_interval(Duration::from_millis(50))
+    .spawn();
+
+    // 不变量 ①：基线轮（首个轮询周期）完成 → 零驱逐
+    wait_until(Duration::from_secs(5), || {
+        handle.sync_count.load(std::sync::atomic::Ordering::Relaxed) >= 1
+    })
+    .await;
+    assert!(
+        invoker.force_unloads.lock().unwrap().is_empty(),
+        "基线轮零驱逐"
+    );
+
+    // 不变量 ②：编辑 .py（stage → v2）→ 零调用 → 有界轮询周期内驱逐
+    *stage.write() = dir_v2.path().to_path_buf();
+    wait_until(Duration::from_secs(5), || {
+        !invoker.force_unloads.lock().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(
+        invoker.force_unloads.lock().unwrap().as_slice(),
+        ["conv_mode".to_string()],
+        "轮询周期内必须驱逐宿主（无需任何调用）"
+    );
+    assert_eq!(
+        invoker
+            .list_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "检测全程零 G2 探测调用"
+    );
+    assert_eq!(
+        invoker
+            .invoke_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "检测全程零工具调用"
+    );
+
+    // 不变量 ③：继续轮询 ≥2 个完整周期（代码不变）→ 不重复驱逐
+    let cycles_at_evict = handle.sync_count.load(std::sync::atomic::Ordering::Relaxed);
+    wait_until(Duration::from_secs(5), || {
+        handle.sync_count.load(std::sync::atomic::Ordering::Relaxed) >= cycles_at_evict + 2
+    })
+    .await;
+    assert_eq!(
+        invoker.force_unloads.lock().unwrap().len(),
+        1,
+        "未编辑周期零重复驱逐（防 respawn 风暴）"
+    );
+}
+
+#[tokio::test]
+async fn dynamic_import_fuse_stops_reobservation_after_max_fails() {
+    // 远端不可达的 external MCP：观测永远失败。连击达
+    // DYNAMIC_IMPORT_MAX_CONSECUTIVE_FAILS 后 sync 不再触发补观测
+    // （list_plugin_tools 零新增调用）；编辑 plugin.json（声明指纹变化）
+    // 重置预算后恢复一轮观测。
+    let mut m = mk_manifest("hub", "tool", &[], false);
+    m.entry = "mcp:external".to_string();
+    let mut invoker = MockInvoker::new(vec![m.clone()]);
+    invoker.list_tools_fail = true;
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+    let mut known = HashSet::new();
+    let mut hashes = HashMap::new();
+    let mut obs_fail = HashMap::new();
+    let calls = |inv: &MockInvoker| inv.list_calls.load(std::sync::atomic::Ordering::Relaxed);
+
+    // 第 1 轮走新插件注册闸（失败不计连击）；第 2..=6 轮走 GAP-6 补观测，
+    // 每轮失败连击 +1，第 6 轮末达上限 5。
+    for _ in 0..6 {
+        sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            None,
+            &mut hashes,
+            &mut HashMap::new(),
+            &mut obs_fail,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(obs_fail.get("hub"), Some(&5), "连击记账达熔断上限");
+    let calls_at_fuse = calls(&invoker);
+
+    // 熔断生效：后续 sync 零观测调用（不再 spawn 尝试）
+    sync_once_with_store(
+        &invoker,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut HashMap::new(),
+        &mut obs_fail,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        calls(&invoker),
+        calls_at_fuse,
+        "熔断后零观测调用（不再 spawn 尝试）"
+    );
+
+    // 编辑 plugin.json（声明指纹变化）→ 预算重置，恢复一轮观测并重新记账
+    m.version = "1.0.1".to_string();
+    invoker.manifests = vec![m];
+    sync_once_with_store(
+        &invoker,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut HashMap::new(),
+        &mut obs_fail,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        calls(&invoker) > calls_at_fuse,
+        "声明变更重置预算后恢复观测"
+    );
+    assert_eq!(obs_fail.get("hub"), Some(&1), "重置后连击从 1 重计");
 }

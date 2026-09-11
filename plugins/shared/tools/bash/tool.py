@@ -12,8 +12,8 @@ SecurityChecker 的正则黑名单只拦**不可逆灾难**（rm -rf /、mkfs、
 手滑即无法挽回的操作），**不是安全边界**。curl | sh 这类"危险但合法"的
 模式不在此层硬拦，而是降级为 warning + 管道层审批。真正的控制是**隔离**。
 
-0.2 架构下本工具作为独立 sidecar 进程运行（MCP stdio），
-与 0.1 src 树零依赖；隔离决策由内核统一处理，本工具只负责执行命令。
+本工具作为独立 sidecar 进程运行（MCP stdio），不依赖 src 树；
+隔离决策由内核统一处理，本工具只负责执行命令。
 
 进程生命周期：
 - 本模块被 server.py 以**模块级单例**持有——所有 MCP 调用共享同一个
@@ -35,7 +35,7 @@ from typing import Any, ClassVar
 
 from bash_types import BashAction
 from input_handler import InputHandler
-from process_manager import ProcessManager
+from process_manager import ProcessLogReadError, ProcessManager
 from result_types import (
     ToolResult,
     create_failure_result,
@@ -165,7 +165,6 @@ class SecurityChecker:
     def __init__(self, allowed_commands: list[str] | None = None):
         """初始化安全检查器"""
         self.allowed_commands = set(allowed_commands) if allowed_commands else None
-        # 预编译正则表达式以提高性能
         self._compiled_dangerous = [re.compile(p, re.IGNORECASE) for p in self.DANGEROUS_PATTERNS]
         self._compiled_background = [re.compile(p, re.IGNORECASE) for p in self.BACKGROUND_PATTERNS]
 
@@ -180,18 +179,15 @@ class SecurityChecker:
         """
         cmd_stripped = command.strip()
 
-        # 检查危险命令（使用正则表达式）
         for pattern, compiled in zip(self.DANGEROUS_PATTERNS, self._compiled_dangerous, strict=True):
             if compiled.search(cmd_stripped):
                 return False, False, f"命令包含危险操作: {pattern}"
 
-        # 检查白名单
         if self.allowed_commands is not None:
             base_cmd = cmd_stripped.split()[0] if cmd_stripped else ""
             if base_cmd not in self.allowed_commands:
                 return False, False, f"命令不在允许列表中: {base_cmd}"
 
-        # 检查需要警告的命令（保持简单字符串匹配）
         cmd_lower = cmd_stripped.lower()
         for pattern in self.CAUTION_PATTERNS:
             if pattern.lower() in cmd_lower:
@@ -405,8 +401,8 @@ class BashTool(WorkspaceAwareMixin):
         pid: int,
         caller_owner: str | None,
         proc_owner: str | None,
-    ) -> tuple[bool, str | None]:
-        """pid 级操作的 owner 校验。
+    ) -> tuple[bool, str]:
+        """pid 级操作的 owner 校验（拒绝分支 err 非空，放行分支 err 为空串）。
 
         严格语义（防跨会话越权/劫持）：
         - 双方身份一致 → 放行
@@ -414,7 +410,7 @@ class BashTool(WorkspaceAwareMixin):
         - 其余（身份缺失/不匹配）→ 拒绝
         """
         if caller_owner is None and proc_owner is None:
-            return True, None
+            return True, ""
         if caller_owner is None:
             return False, f"进程 {pid} 属于已标识会话，无身份调用被拒绝（PROCESS_FORBIDDEN）"
         if proc_owner is None:
@@ -424,7 +420,7 @@ class BashTool(WorkspaceAwareMixin):
                 f"进程 {pid} 属于其他会话，越权操作被拒绝（PROCESS_FORBIDDEN，"
                 f"caller={caller_owner!r} vs owner={proc_owner!r}）"
             )
-        return True, None
+        return True, ""
 
     # ── 主入口 ───────────────────────────────────────────────────
 
@@ -453,6 +449,19 @@ class BashTool(WorkspaceAwareMixin):
                 error_code="INVALID_ACTION",
             )
 
+        # pid 入口收口：pid 声明 integer 但 SDK 无 schema 强制，非整型输入
+        # （路径穿越串等）会拼进磁盘日志名 bash_<pid>.log，构成任意 .log
+        # 读取原语——统一在此整型化，非整型即参数错误（空值仍由各 handler
+        # 的 MISSING_PID 分支报错，契约不变）
+        if action != BashAction.EXECUTE and inputs.get("pid"):
+            try:
+                inputs["pid"] = int(inputs["pid"])
+            except (TypeError, ValueError):
+                return create_failure_result(
+                    error=f"pid 必须为整数，实际为: {inputs.get('pid')!r}",
+                    error_code="INVALID_PID",
+                )
+
         if action == BashAction.EXECUTE and on_output is not None:
             return await self._handle_execute(inputs, on_output=on_output)
         return await handler(inputs)
@@ -472,7 +481,7 @@ class BashTool(WorkspaceAwareMixin):
         # 容器内执行已有独立的安全边界，反引号等 shell 特性是正常行为。
         # 注意：is_isolated 只信 _container_id（isolation_guard 服务端注入，
         # 且 param_inject 已剥离 LLM 夹带的下划线键）——不信任 _isolation_provider
-        # 之类的声明式标记（历史版本允许其跳过黑名单，属提示注入伪造面）。
+        # 之类的声明式标记（声明式标记可被 LLM 伪造，不构成隔离凭据）。
         warning = None
         container_id = inputs.get("_container_id")
         is_isolated = bool(container_id)
@@ -546,18 +555,15 @@ class BashTool(WorkspaceAwareMixin):
                 on_output=on_output,
             )
 
-            # 等待进程完成或超时
             start_time = time.time()
 
             while True:
                 # 检查进程状态（需要在超时检查前获取 proc_info，以便使用 proc_info.start_time）
                 proc_info = self.process_manager.get_process_info(pid)
 
-                # 检查是否超时
                 elapsed = time.time() - start_time
 
                 if elapsed >= timeout:
-                    # 触发回调机制
                     summary = self.process_manager.get_summary(pid)
 
                     if summary:
@@ -571,7 +577,7 @@ class BashTool(WorkspaceAwareMixin):
                         )
                         running_data["elapsed"] = round(
                             time.time() - proc_info.start_time, 1
-                        )
+                        ) if proc_info is not None else None
                         return create_success_result(
                             data=running_data,
                             metadata={
@@ -640,14 +646,20 @@ class BashTool(WorkspaceAwareMixin):
             )
 
         caller_owner = self._owner_from_inputs(inputs)
-        timeout = inputs.get("timeout", self.timeout)
+        # 等待时长与 execute 路径同规收口（MAX_TIMEOUT），防止超长阻塞占用 sidecar
+        timeout = min(inputs.get("timeout", self.timeout), self.MAX_TIMEOUT)
 
-        # 获取进程信息
         proc_info = self.process_manager.get_process_info(pid)
         if not proc_info:
             # 进程已被即时清理（completed 后 _on_output_task_done 触发）。
             # 降级走磁盘日志——先校验 owner（磁盘日志头 # Owner:）。
-            file_data = self.process_manager.read_log_by_pid(pid)
+            try:
+                file_data = self.process_manager.read_log_by_pid(pid)
+            except ProcessLogReadError as e:
+                return create_failure_result(
+                    error=f"日志文件读取失败（IO 错误）：{e}",
+                    error_code="LOG_FILE_IO_ERROR",
+                )
             if file_data is not None:
                 ok, err = self._check_owner(pid, caller_owner, file_data.get("owner"))
                 if not ok:
@@ -729,7 +741,6 @@ class BashTool(WorkspaceAwareMixin):
                     metadata={"action": "continue"},
                 )
 
-            # 检查状态
             proc_info = self.process_manager.get_process_info(pid)
             if not proc_info or proc_info.status != "running":
                 break
@@ -797,7 +808,6 @@ class BashTool(WorkspaceAwareMixin):
                 error_code="TERMINATE_FAILED",
             )
 
-        # 获取最终摘要
         summary = self.process_manager.get_summary(pid)
 
         return create_success_result(
@@ -903,7 +913,13 @@ class BashTool(WorkspaceAwareMixin):
             )
 
         # 路径2：进程已清 → 按 pid 算文件名读磁盘
-        file_data = self.process_manager.read_log_by_pid(pid)
+        try:
+            file_data = self.process_manager.read_log_by_pid(pid)
+        except ProcessLogReadError as e:
+            return create_failure_result(
+                error=f"日志文件读取失败（IO 错误）：{e}",
+                error_code="LOG_FILE_IO_ERROR",
+            )
         if file_data is None:
             return create_failure_result(
                 error=(

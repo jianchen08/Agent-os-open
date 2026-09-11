@@ -12,7 +12,6 @@ import { act, renderHook } from '@testing-library/react'
 import React from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-
 // globalWS：记录 sendInteractionResponse 调用，不建真实连接
 const sendSpy = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
 vi.mock('@/services/websocket/GlobalWebSocket', () => ({
@@ -22,24 +21,20 @@ vi.mock('@/services/websocket/GlobalWebSocket', () => ({
     sendInteractionResponse: sendSpy,
   },
 }))
-
 vi.mock('@/utils/audioNotification', () => ({
   playNotificationSound: vi.fn().mockResolvedValue(undefined),
 }))
-
 // 恢复接口返回空列表；sessionStore mock 出"别的活跃会话"以证明不被兜底
 vi.mock('@/services/api/client', () => ({
   default: {
     get: vi.fn(async () => ({ data: { items: [], total: 0 } })),
   },
 }))
-
 vi.mock('@/stores/sessionStore', () => ({
   useSessionStore: {
     getState: () => ({ activeSessionId: 'active-other-session' }),
   },
 }))
-
 import { useInteractionHandler } from '@/hooks/useInteractionHandler'
 import { useInteractionStore } from '@/stores/interactionStore'
 import type { PendingInteraction } from '@/stores/interactionStore'

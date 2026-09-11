@@ -21,12 +21,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from enum_utils import safe_enum_value
+from agentos_plugin_sdk.enum_utils import safe_enum_value
 from task_types import TaskModel, TaskStatus
 
 # 多租户数据根咽喉点（plugins/shared/tenant_data.py）。本文件位于
 # plugins/shared/system/tasks/storage.py，上溯 2 级到 plugins/shared/。
-# 参考 hindsight_memory/wiring.py 的 sys.path 自举模式。
+# 参考 plugins/shared/wiring.py 的 sys.path 自举模式。
 _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
@@ -117,7 +117,9 @@ class TaskStorage:
             task = self._dict_to_task(data)
             self._tasks[task.id] = task
         except Exception as exc:
-            logger.warning("加载任务文件失败: %s — %s", yaml_file, exc)
+            # error 级留痕（非 warning）：损坏任务行静默消失 = 任务/子树脱离账本，
+            # 必须可被日志告警捕获（写入面已原子化，新损坏属异常态）
+            logger.error("加载任务文件失败（该行跳过，账本缺行可见）: %s — %s", yaml_file, exc)
 
     def _find_root_id(self, task: TaskModel) -> str:
         """查找任务所属的根任务ID。
@@ -209,10 +211,14 @@ class TaskStorage:
         if file_path is None:
             return
         data = self._task_to_dict(task)
-        file_path.write_text(
+        # 原子写：先写临时文件再 os.replace——任务 YAML 是任务域持久化账本，
+        # 写中途崩溃留下的截断文件会在加载时被跳过 = 任务行静默消失、子树脱离。
+        tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+        tmp_path.write_text(
             yaml.safe_dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False, indent=2),
             encoding="utf-8",
         )
+        tmp_path.replace(file_path)
 
     @staticmethod
     def _task_to_dict(task: TaskModel) -> dict[str, Any]:

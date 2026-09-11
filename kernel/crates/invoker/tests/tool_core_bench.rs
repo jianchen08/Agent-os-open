@@ -74,12 +74,6 @@ impl agentos_core::traits::StorageBackend for NullStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn create_branch(
-        &self,
-        _branch: agentos_core::types::Branch,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
-    }
     async fn update_run_status(
         &self,
         _run_id: &str,
@@ -179,6 +173,16 @@ impl agentos_core::traits::StorageBackend for NullStorage {
     ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError> {
         Ok(Vec::new())
     }
+    async fn update_user_password(
+        &self,
+        _user_id: &str,
+        _password_hash: &str,
+        _must_change_password: bool,
+    ) -> Result<bool, agentos_core::types::StorageError> {
+        Err(agentos_core::types::StorageError::NotFound(
+            "null".to_string(),
+        ))
+    }
     async fn update_last_login(
         &self,
         _user_id: &str,
@@ -257,7 +261,7 @@ fn build_state(target_bytes: usize) -> (Value, usize) {
     (s, size)
 }
 
-fn make_ctx(state: Value) -> PluginContext {
+fn make_ctx(state: &Value) -> PluginContext<'_> {
     PluginContext::new(
         state,
         json!({}),
@@ -337,7 +341,7 @@ async fn bench_native_tool_core() {
     header();
     for &(target, n_iters) in TIERS.iter() {
         let (state, size) = build_state(target);
-        let ctx = make_ctx(state);
+        let ctx = make_ctx(&state);
 
         // 首调含 cdylib 加载——单独计为冷启动。
         let cold_start = Instant::now();
@@ -376,7 +380,7 @@ async fn bench_native_tool_core() {
         "id": "call_bench1",
         "args": {"command": "echo bench-ok"},
     }]);
-    let ctx = make_ctx(state);
+    let ctx = make_ctx(&state);
     invoker
         .invoke_pipeline_plugin("pipeline_tool_core", &ctx)
         .await
@@ -417,7 +421,7 @@ async fn bench_sidecar_channel() {
     invoker.set_router(Arc::new(BenchRouter));
 
     let (state, size0) = build_state(TIERS[0].0);
-    let ctx = make_ctx(state);
+    let ctx = make_ctx(&state);
 
     // 冷启动：首次 invoke 含 spawn python + initialize 握手（秒级）——单独计时。
     let cold_start = Instant::now();
@@ -462,7 +466,7 @@ async fn bench_sidecar_channel() {
     // 100KB / 1MB 档。
     for &(target, n_iters) in TIERS.iter().skip(1) {
         let (state, size) = build_state(target);
-        let ctx = make_ctx(state);
+        let ctx = make_ctx(&state);
         for _ in 0..3 {
             invoker
                 .invoke_pipeline_plugin("pipeline_level_guard", &ctx)

@@ -98,7 +98,17 @@ pub fn write_env_updates(
     }
     let tmp_path = env_path.with_extension("env.tmp");
     std::fs::write(&tmp_path, text.as_bytes()).map_err(|e| format!("write .env tmp: {e}"))?;
-    std::fs::rename(&tmp_path, env_path).map_err(|e| format!("rename .env: {e}"))?;
+    if let Err(e) = std::fs::rename(&tmp_path, env_path) {
+        // rename 失败 best-effort 清 tmp（D7：不留 .tmp 残骸）
+        if let Err(cleanup_err) = std::fs::remove_file(&tmp_path) {
+            tracing::warn!(
+                target = %tmp_path.display(),
+                error = %cleanup_err,
+                "清理 .env.tmp 残骸失败"
+            );
+        }
+        return Err(format!("rename .env: {e}"));
+    }
     Ok(())
 }
 
@@ -264,5 +274,24 @@ pub(crate) mod tests {
         std::env::remove_var("AGENTOS_CONFIG_ROOT");
         assert!(project_env_path().is_none());
         assert!(env_delta_overlay().is_empty());
+    }
+
+    #[test]
+    fn write_env_updates_rename_failure_cleans_tmp() {
+        // D7：rename 失败（.env 目标被同名目录占位模拟占用）→ Err 且 .env.tmp 被清理
+        let _guard = TEST_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let occupied = tmp.path().join(".env");
+        std::fs::create_dir_all(&occupied).unwrap();
+        let err = write_env_updates(&occupied, &[("A".to_string(), "1".to_string())]).unwrap_err();
+        assert!(err.contains("rename"), "rename 失败应带原因: {err}");
+        assert!(
+            !tmp.path().join(".env.tmp").exists(),
+            "rename 失败后 .env.tmp 残骸必须被清理"
+        );
+        // 成功路径回归：正常目标原子写入
+        let ok = tmp.path().join("ok.env");
+        write_env_updates(&ok, &[("B".to_string(), "2".to_string())]).unwrap();
+        assert!(ok.exists());
     }
 }

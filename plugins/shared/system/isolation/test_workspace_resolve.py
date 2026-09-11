@@ -6,9 +6,7 @@
    （nested 嵌套 / shared 共享 / 绝对路径 / 已含父前缀 / 已含 root 前缀）；
 2. validate_workspace_path：空串、磁盘根目录（Windows/Unix）、系统危险目录、
    配置工作空间根目录、正常路径通过；
-3. _is_absolute_path：Windows 盘符 / Unix 根 / 相对路径；
-4. resolve_workspace_chain：db.models 不可用降级、任务不存在、父链递归、
-   根任务直接解析。
+3. _is_absolute_path：Windows 盘符 / Unix 根 / 相对路径。
 
 测试不依赖真实内核——直接加载 workspace.py，DB 用假 session 对象。
 """
@@ -45,7 +43,6 @@ _MOD = _load_ws()
 resolve_workspace = _MOD.resolve_workspace
 validate_workspace_path = _MOD.validate_workspace_path
 _is_absolute_path = _MOD._is_absolute_path
-resolve_workspace_chain = _MOD.resolve_workspace_chain
 
 
 class TestResolveWorkspaceRootTask:
@@ -176,74 +173,3 @@ class TestIsAbsolutePath:
     def test_relative_false(self) -> None:
         assert _is_absolute_path("relative/path") is False
         assert _is_absolute_path("") is False
-
-
-class _FakeSession:
-    """假 DB session：按 id 返回 Task 或 None。"""
-
-    def __init__(self, tasks: dict[str, Any]) -> None:
-        self._tasks = tasks
-
-    async def get(self, model: Any, task_id: str) -> Any:
-        return self._tasks.get(task_id)
-
-
-class _FakeTask:
-    def __init__(self, parent_task_id: str | None) -> None:
-        self.parent_task_id = parent_task_id
-
-
-class TestResolveWorkspaceChain:
-    async def test_no_db_models_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # db.models 导入失败 → 降级基础解析
-        import builtins
-
-        real_import = builtins.__import__
-
-        def _fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
-            if name == "db.models":
-                raise ImportError("no db.models")
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", _fake_import)
-        monkeypatch.setattr(_MOD, "get_workspace_config_root", lambda: "/data/ws")
-        assert await resolve_workspace_chain("t1", None, session=None) == "/data/ws/t1"
-
-    async def test_task_not_found_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_MOD, "get_workspace_config_root", lambda: "/data/ws")
-        assert await resolve_workspace_chain("ghost", None, session=_FakeSession({})) == "/data/ws/ghost"
-
-    async def test_root_task_resolves_directly(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(_MOD, "get_workspace_config_root", lambda: "/data/ws")
-        session = _FakeSession({"t1": _FakeTask(parent_task_id=None)})
-        assert await resolve_workspace_chain("t1", None, session) == "/data/ws/t1"
-
-    async def test_nested_task_walks_parent_chain(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import builtins
-        import types
-
-        real_import = builtins.__import__
-
-        # 注入假 db.models（0.2 下真实不存在,降级分支已在 test_no_db_models_falls_back 覆盖）
-        fake_db = types.ModuleType("db")
-        fake_db_models = types.ModuleType("db.models")
-        fake_db_models.Task = object
-        fake_db.models = fake_db_models
-
-        def _fake_import2(name: str, *args: Any, **kwargs: Any) -> Any:
-            if name == "db.models":
-                return fake_db_models
-            if name == "db":
-                return fake_db
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", _fake_import2)
-        monkeypatch.setattr(_MOD, "get_workspace_config_root", lambda: "/data/ws")
-        session = _FakeSession(
-            {
-                "root": _FakeTask(parent_task_id=None),
-                "child": _FakeTask(parent_task_id="root"),
-                "grand": _FakeTask(parent_task_id="child"),
-            }
-        )
-        assert await resolve_workspace_chain("grand", None, session) == "/data/ws/root/child/grand"

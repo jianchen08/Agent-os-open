@@ -2,15 +2,21 @@
  * 富交互形态 widget 测试（widget 化 G5：wizard / sortable_list / inline_edit）
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
-
-import { WizardWidget } from '../WizardWidget'
-import { SortableListWidget } from '../SortableListWidget'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InlineEditWidget } from '../InlineEditWidget'
+import { SortableListWidget } from '../SortableListWidget'
+import { WizardWidget } from '../WizardWidget'
 
 vi.mock('@/components/ui/sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn() },
+}))
+
+// mock 网络层（apiClient）：wizard 末步 endpoint 提交经 apiClient（认证/刷新链）
+const mockPost = vi.fn()
+vi.mock('@/services/api/client', () => ({
+  apiClient: { post: (...args: unknown[]) => mockPost(...args) },
+  default: { post: (...args: unknown[]) => mockPost(...args) },
 }))
 
 const submit = () => fireEvent.submit(document.querySelector('form')!)
@@ -27,8 +33,7 @@ describe('wizard 多步表单', () => {
   ]
 
   it('分步渲染、跨步累积、末步提交全量值', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ task_id: 't-1' }) })
-    vi.stubGlobal('fetch', fetchMock)
+    mockPost.mockResolvedValue({ data: { task_id: 't-1' } })
     render(
       <WizardWidget
         steps={steps}
@@ -47,11 +52,25 @@ describe('wizard 多步表单', () => {
     fireEvent.change(screen.getByLabelText('工作空间'), { target: { value: 'ws-prod' } })
     submit()
 
-    // 末步提交：全量累积值 + pipeline_id
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    const [url, init] = fetchMock.mock.calls[0]
+    // 末步提交：全量累积值 + pipeline_id（经 apiClient.post）
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1))
+    const [url, body] = mockPost.mock.calls[0]
     expect(url).toBe('/ext/tasks/root')
-    expect(JSON.parse(init.body)).toMatchObject({ title: 'T1', workspace: 'ws-prod', pipeline_id: expect.any(String) })
+    expect(body).toMatchObject({ title: 'T1', workspace: 'ws-prod', pipeline_id: expect.any(String) })
+  })
+
+  it('endpoint 响应 error 字段 → toast 失败（成功 toast 不出现）', async () => {
+    const { toast } = await import('@/components/ui/sonner')
+    mockPost.mockResolvedValue({ data: { error: '名称冲突' } })
+    render(<WizardWidget steps={steps} endpoint="/ext/tasks/root" />)
+    // 走完全部步骤（跨步校验通过后才有末步提交）
+    fireEvent.change(screen.getByLabelText('标题'), { target: { value: 'T1' } })
+    submit()
+    await waitFor(() => expect(screen.getByText('2. 执行环境')).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('工作空间'), { target: { value: 'ws' } })
+    submit()
+    await waitFor(() => expect(toast.error).toHaveBeenCalled())
+    expect(mockPost).toHaveBeenCalledTimes(1)
   })
 })
 

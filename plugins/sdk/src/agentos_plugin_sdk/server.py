@@ -9,7 +9,7 @@
   观察原始 params（pydantic 校验前，自定义字段不受模型约束），回调
   ``on_initialize`` 完成 CapabilityHandle 注入。
 - **生命周期通知**：内核以自定义通知 ``notifications/<hook>`` 推送生命周期事件
-  （on_load / on_unload / on_config_change / on_pipeline_start / on_pipeline_end /
+  （on_load / on_unload / on_pipeline_start / on_pipeline_end /
   on_error），经 ``add_notification_handler`` 注册分发。params 为任意 JSON
   （config / tags），从 ``ctx.params`` 原始 mapping 读取。
 - **反向 capability 调用**：插件通过 KernelChannel 持连接级 ``Outbound`` 通道，
@@ -555,7 +555,6 @@ class McpServer:
         event_map = {
             "notifications/on_load": LifecycleEvent.ON_LOAD,
             "notifications/on_unload": LifecycleEvent.ON_UNLOAD,
-            "notifications/on_config_change": LifecycleEvent.ON_CONFIG_CHANGE,
             "notifications/on_pipeline_start": LifecycleEvent.ON_PIPELINE_START,
             "notifications/on_pipeline_end": LifecycleEvent.ON_PIPELINE_END,
             "notifications/on_error": LifecycleEvent.ON_ERROR,

@@ -23,7 +23,6 @@ class LifecycleEvent(StrEnum):
 
     ON_LOAD = "on_load"
     ON_UNLOAD = "on_unload"
-    ON_CONFIG_CHANGE = "on_config_change"
     ON_PIPELINE_START = "on_pipeline_start"
     ON_PIPELINE_END = "on_pipeline_end"
     ON_ERROR = "on_error"

@@ -65,7 +65,12 @@ impl ToolFailureTracker for ConsecutiveFailureTracker {
         success: bool,
         error_sample: &str,
     ) -> Option<ToolFailureAlert> {
-        let mut map = self.inner.lock().unwrap();
+        // C5：条目级 remove/entry 计数无跨条目不变量，锁中毒恢复安全
+        //（与 panic 扩散相比是明确更优语义）。
+        let mut map = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if success {
             map.remove(tool_name);
             return None;

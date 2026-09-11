@@ -29,6 +29,7 @@ pub mod session_routes;
 pub mod sidecar_warmup;
 pub mod tools;
 pub mod ws_session;
+pub mod ws_ticket;
 
 pub use capability_router::KernelCapabilityRouter;
 pub use pipeline_loader::{load_pipeline_config, load_step_library, validate_no_name_conflicts};

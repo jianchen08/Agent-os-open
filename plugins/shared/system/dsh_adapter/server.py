@@ -131,6 +131,39 @@ def get_bridge() -> Any:
     return _get_bridge()
 
 
+def _anchor_to_workspace(
+    path: str,
+    workspace: str | None,
+    project_root: str | None,
+) -> str | None:
+    """工作区边界锚定（范式同 builtin_tools fs_tools 的 _check_workspace_path）。
+
+    相对路径以根（project_root 优先，回退 workspace）解析，绝对路径必须落在
+    根内；无注入锚点或越界返回 None（调用方 fail-closed 拒绝）——不做 cwd
+    兜底，否则路径直通 Node 桥构成宿主任意读。workspace/project_root 为
+    param_inject 运行时注入的服务端权威值，不出现在 LLM schema。
+    """
+    root_str = project_root or workspace
+    if not root_str:
+        return None
+    root = Path(root_str).resolve()
+    target = Path(path)
+    resolved = target.resolve() if target.is_absolute() else (root / target).resolve()
+    if not resolved.is_relative_to(root):
+        return None
+    return str(resolved)
+
+
+def _bridge_deny(path: str) -> dict[str, Any]:
+    """越界拒绝信封：与 bridge.call_tool 失败返回同构（success=False 走失败结果）。"""
+    return {
+        "success": False,
+        "data": None,
+        "error": f"path '{path}' 超出工作空间边界（未注入 workspace/project_root 或越界），已拒绝",
+        "duration_ms": 0.0,
+    }
+
+
 @plugin.tool(
     name="dsh_read",
     schema={
@@ -165,8 +198,17 @@ def get_bridge() -> Any:
         "bindings": {"path": "result.path", "lines": "result.lines", "totalLines": "result.totalLines"},
     },
 )
-async def dsh_read(file_path: str, offset: int | None = None, limit: int | None = None) -> dict[str, Any]:
-    args: dict[str, Any] = {"file_path": file_path}
+async def dsh_read(
+    file_path: str,
+    offset: int | None = None,
+    limit: int | None = None,
+    workspace: str | None = None,
+    project_root: str | None = None,
+) -> dict[str, Any]:
+    anchored = _anchor_to_workspace(file_path, workspace, project_root)
+    if anchored is None:
+        return _bridge_deny(file_path)
+    args: dict[str, Any] = {"file_path": anchored}
     if offset is not None:
         args["offset"] = offset
     if limit is not None:
@@ -195,10 +237,17 @@ async def dsh_read(file_path: str, offset: int | None = None, limit: int | None 
     },
     render={"card": "search", "bindings": {"paths": "result.paths"}},
 )
-async def dsh_glob(pattern: str, path: str | None = None) -> dict[str, Any]:
-    args: dict[str, Any] = {"pattern": pattern}
-    if path is not None:
-        args["path"] = path
+async def dsh_glob(
+    pattern: str,
+    path: str | None = None,
+    workspace: str | None = None,
+    project_root: str | None = None,
+) -> dict[str, Any]:
+    # 缺省 path = 以工作空间根为搜索目录（桥的缺省 cwd 语义不可达）
+    anchored = _anchor_to_workspace(path if path is not None else ".", workspace, project_root)
+    if anchored is None:
+        return _bridge_deny(path if path is not None else pattern)
+    args: dict[str, Any] = {"pattern": pattern, "path": anchored}
     return await get_bridge().call_tool("glob", args)
 
 

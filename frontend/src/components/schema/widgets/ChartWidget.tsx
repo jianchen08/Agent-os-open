@@ -54,16 +54,16 @@ interface ChartConfig {
   height?: number | string
 }
 
-/** 预置颜色方案 */
+/** 预置颜色方案——引用 design-tokens.css 的 --chart-* 分类色板（8 槽） */
 const PALETTE = [
-  '#3b82f6', // blue-500
-  '#ef4444', // red-500
-  '#22c55e', // green-500
-  '#f59e0b', // amber-500
-  '#8b5cf6', // violet-500
-  '#06b6d4', // cyan-500
-  '#ec4899', // pink-500
-  '#14b8a6', // teal-500
+  'hsl(var(--chart-1))',
+  'hsl(var(--chart-2))',
+  'hsl(var(--chart-3))',
+  'hsl(var(--chart-4))',
+  'hsl(var(--chart-5))',
+  'hsl(var(--chart-6))',
+  'hsl(var(--chart-7))',
+  'hsl(var(--chart-8))',
 ]
 
 /**

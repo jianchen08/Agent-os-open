@@ -88,11 +88,11 @@ pub struct MessageIdNamespace {
     pub description: String,
 }
 
-/// 引擎管道家族（LLM 路径的器官插件）：内核经引擎 state 把签发的 `a_` id 下发给
-/// 它们，故它们合法携带 a_ 命名空间（其余插件一律 p_）。清单与
-/// plugins/shared/pipeline/core/{llm_core,tool_core}/plugin.json 的 id 一致性由
-/// 本模块机械闸测试锁定（插件改名即红）。
-pub(crate) const ENGINE_CONDUIT_PLUGINS: &[&str] = &["pipeline_llm_core", "pipeline_tool_core"];
+// 引擎管道家族（LLM 路径的器官插件）：内核经引擎 state 把签发的 `a_` id 下发给
+// 它们，故它们合法携带 a_ 命名空间（其余插件一律 p_）。P1-2 声明化后器官身份
+// 由各插件 manifest `capabilities.streaming.conduit: true` 声明（llm_core/
+// tool_core plugin.json），执法逻辑按声明遍历——内核不再持有插件 id 名单。
+// 与 manifest 的同步性由本模块机械闸测试锁定（删声明即红）。
 
 /// 单个能力方法的契约。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,11 +245,17 @@ pub fn find_spec<'a>(
 ///    合法携带内核签发的 a_，其余插件强制 p_，内核内部调用放行）；
 /// ③ thread_id——emit_event 按 thread 单播，缺路由键无法投递。
 /// Err(原因) = 丢弃 + 告警（调用方保持 Ok(dropped) 语义，不炸 RPC）。
+/// Err(原因) = 丢弃 + 告警（调用方保持 Ok(dropped) 语义，不炸 RPC）。
+///
+/// `conduit_check`：引擎管道器官判定（P1-2 声明化）——由调用方从插件 manifest
+/// `capabilities.streaming.conduit` 声明解析（api 装配闭包传声明查询；测试传
+/// 判定 stub）。未声明 conduit 的插件一律走 p_ 命名空间执法（fail-closed）。
 pub fn validate_streaming_event(
     contracts: &[KernelCapabilityContract],
     event_name: &str,
     payload: &Value,
     plugin_id: Option<&str>,
+    conduit_check: &dyn Fn(&str) -> bool,
 ) -> Result<(), String> {
     let Some(spec) = find_spec(contracts, "streaming", event_name) else {
         return Ok(()); // 非契约事件（interaction_*/透传族）不归本闸
@@ -263,7 +269,7 @@ pub fn validate_streaming_event(
         .get("message_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    enforce_message_id_namespace(contracts, message_id, plugin_id, event_name)?;
+    enforce_message_id_namespace(contracts, message_id, plugin_id, event_name, conduit_check)?;
 
     // ③ thread_id 投递路由键（契约 required 已声明，此处显式兜底——
     // emit_event 按 thread 单播，无键必丢，与其发一个不可达事件不如显式拒绝）。
@@ -279,13 +285,15 @@ pub fn validate_streaming_event(
 
 /// message_id 命名空间执法（按 streaming.json `x-message-id-namespaces` 真值源）：
 /// - 内核内部调用（plugin_id=None，如 ws_session dispatch）→ 放行（id 由内核签发）；
-/// - 引擎管道家族（llm_core/tool_core，内核经 state 下发 a_ id）→ 必须 a_ 命名空间；
+/// - 引擎管道器官（`conduit_check` 命中——插件 manifest capabilities.streaming
+///   声明 conduit 的回环插件，内核经 state 下发 a_ id）→ 必须 a_ 命名空间；
 /// - 其余插件 → 必须 p_ 命名空间（结构性杜绝与 a_/mc_/乐观裸 uuid 冲突）。
 fn enforce_message_id_namespace(
     contracts: &[KernelCapabilityContract],
     message_id: &str,
     plugin_id: Option<&str>,
     event_name: &str,
+    conduit_check: &dyn Fn(&str) -> bool,
 ) -> Result<(), String> {
     let Some(spaces) = contracts
         .iter()
@@ -300,7 +308,7 @@ fn enforce_message_id_namespace(
     if message_id.is_empty() {
         return Err("缺 message_id（精确寻址键）".to_string());
     }
-    let (want_owner, why) = if ENGINE_CONDUIT_PLUGINS.contains(&pid) {
+    let (want_owner, why) = if conduit_check(pid) {
         (
             "kernel",
             format!("引擎管道插件 {pid} 只能携带内核签发的 a_ id"),
@@ -367,8 +375,20 @@ pub fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), S
     let Some(obj) = schema.as_object() else {
         return Ok(()); // schema 非对象 = 无定义 = 宽泛
     };
+    // 各 schema 关键字独立生效，按关键字分派（定义没写的就不查）
+    validate_type_decl(obj, value, path)?;
+    validate_enum_decl(obj, value, path)?;
+    validate_string_constraints(obj, value, path)?;
+    validate_object_constraints(obj, value, path)?;
+    Ok(())
+}
 
-    // type：L1 类型档
+/// type：L1 类型档。
+fn validate_type_decl(
+    obj: &serde_json::Map<String, Value>,
+    value: &Value,
+    path: &str,
+) -> Result<(), String> {
     if let Some(t) = obj.get("type").and_then(|v| v.as_str()) {
         let ok = match t {
             "object" => value.is_object(),
@@ -391,15 +411,29 @@ pub fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), S
             ));
         }
     }
+    Ok(())
+}
 
-    // enum：值必须命中枚举之一
+/// enum：值必须命中枚举之一。
+fn validate_enum_decl(
+    obj: &serde_json::Map<String, Value>,
+    value: &Value,
+    path: &str,
+) -> Result<(), String> {
     if let Some(allowed) = obj.get("enum").and_then(|v| v.as_array()) {
         if !allowed.is_empty() && !allowed.contains(value) {
             return Err(format!("{path}: 值 {value} 不在契约枚举 {allowed:?} 内"));
         }
     }
+    Ok(())
+}
 
-    // string 形态：pattern（L3 形态档）+ minLength
+/// string 形态：pattern（L3 形态档）+ minLength。
+fn validate_string_constraints(
+    obj: &serde_json::Map<String, Value>,
+    value: &Value,
+    path: &str,
+) -> Result<(), String> {
     if let Some(s) = value.as_str() {
         if let Some(pattern) = obj.get("pattern").and_then(|v| v.as_str()) {
             let re = regex::Regex::new(pattern).map_err(|e| {
@@ -415,20 +449,21 @@ pub fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), S
             }
         }
     }
+    Ok(())
+}
 
-    // object：required / propertyNames / additionalProperties 闭包 / properties 递归。
-    // 各关键字独立生效（properties 未声明不影响 propertyNames/required 执行——
-    // 定义详细到什么程度就校验到什么程度）。
+/// object：required / propertyNames / additionalProperties 闭包 / properties 递归。
+/// 各关键字独立生效（properties 未声明不影响 propertyNames/required 执行——
+/// 定义详细到什么程度就校验到什么程度）。
+fn validate_object_constraints(
+    obj: &serde_json::Map<String, Value>,
+    value: &Value,
+    path: &str,
+) -> Result<(), String> {
     if let Some(map) = value.as_object() {
         let props = obj.get("properties").and_then(|v| v.as_object());
         if let Some(req) = obj.get("required").and_then(|v| v.as_array()) {
-            for r in req {
-                if let Some(name) = r.as_str() {
-                    if !map.contains_key(name) {
-                        return Err(format!("{path}: 缺少契约必填参数 {name}"));
-                    }
-                }
-            }
+            validate_required(map, req, path)?;
         }
         // 键名约束：propertyNames 子 schema 作用于每个键（字符串值）
         if let Some(pn) = obj.get("propertyNames") {
@@ -459,7 +494,22 @@ pub fn validate_value(schema: &Value, value: &Value, path: &str) -> Result<(), S
             }
         }
     }
+    Ok(())
+}
 
+/// required：契约声明的必填键逐个核对存在性。
+fn validate_required(
+    map: &serde_json::Map<String, Value>,
+    req: &[Value],
+    path: &str,
+) -> Result<(), String> {
+    for r in req {
+        if let Some(name) = r.as_str() {
+            if !map.contains_key(name) {
+                return Err(format!("{path}: 缺少契约必填参数 {name}"));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -919,8 +969,18 @@ mod tests {
 
     // ── 流式协议机械闸（streaming.json ↔ 网关执法一致性） ──────────────
     // 闸 4（配置↔代码）：真实 streaming.json 必须可装载、含 10 事件、命名空间
-    // 四条目（a_/mc_/p_/裸 uuid）、p_ 为唯一 owner=plugin 条目。插件改名即红
-    // （ENGINE_CONDUIT_PLUGINS 与 plugin.json 漂移）。
+    // 四条目（a_/mc_/p_/裸 uuid）、p_ 为唯一 owner=plugin 条目。引擎管道器官
+    // 身份由 plugin.json 的 capabilities.streaming.conduit 声明锁定（下方机械闸）。
+
+    /// 无 conduit 声明的插件（普通流式插件执法形态）。
+    fn no_conduit(_pid: &str) -> bool {
+        false
+    }
+
+    /// 引擎管道器官声明形态（模拟 llm_core/tool_core manifest conduit=true）。
+    fn conduit_ids(pid: &str) -> bool {
+        pid == "pipeline_llm_core" || pid == "pipeline_tool_core"
+    }
 
     fn streaming_contracts() -> Vec<KernelCapabilityContract> {
         let contracts =
@@ -989,14 +1049,12 @@ mod tests {
             .expect("tool_core/plugin.json 必须存在"),
         )
         .expect("tool_core/plugin.json 必须可解析");
-        assert!(
-            ENGINE_CONDUIT_PLUGINS.contains(&llm_manifest["id"].as_str().unwrap_or("")),
-            "ENGINE_CONDUIT_PLUGINS 与 llm_core 插件 id 漂移"
-        );
-        assert!(
-            ENGINE_CONDUIT_PLUGINS.contains(&tool_manifest["id"].as_str().unwrap_or("")),
-            "ENGINE_CONDUIT_PLUGINS 与 tool_core 插件 id 漂移"
-        );
+        for (manifest, tag) in [(&llm_manifest, "llm_core"), (&tool_manifest, "tool_core")] {
+            assert_eq!(
+                manifest["capabilities"]["streaming"]["conduit"], serde_json::json!(true),
+                "{tag} plugin.json 须声明 capabilities.streaming.conduit=true（引擎管道器官身份声明化，缺声明即失去 a_ 命名空间豁免）"
+            );
+        }
     }
 
     #[test]
@@ -1023,6 +1081,7 @@ mod tests {
                     "thread_id": "thread-1",
                 }),
                 Some("my_streamer"),
+                &no_conduit,
             )
             .expect_err(why);
             assert!(err.contains("p_"), "实际: {err}");
@@ -1042,6 +1101,7 @@ mod tests {
                 "persist": false,
             }),
             Some("my_streamer"),
+            &no_conduit,
         )
         .expect("插件 p_ 命名空间应放行");
     }
@@ -1060,6 +1120,7 @@ mod tests {
                 "thread_id": "thread-1",
             }),
             Some("pipeline_llm_core"),
+            &conduit_ids,
         )
         .expect("llm_core 携带内核签发的 a_ id 应放行");
         // 但引擎管道家族用 p_ 也拒绝（a_ 是内核签发坐标，不得自造）
@@ -1073,6 +1134,7 @@ mod tests {
                 "thread_id": "thread-1",
             }),
             Some("pipeline_llm_core"),
+            &conduit_ids,
         )
         .expect_err("llm_core 不得自造 p_ id");
         assert!(err.contains("a_"), "实际: {err}");
@@ -1091,6 +1153,7 @@ mod tests {
                 "thread_id": "thread-1",
             }),
             None,
+            &no_conduit,
         )
         .expect("内核内部调用应放行");
     }
@@ -1108,6 +1171,7 @@ mod tests {
                 "thread_id": "thread-1",
             }),
             Some("my_streamer"),
+            &no_conduit,
         )
         .expect_err("stream_chunk 缺 content 必须红");
         assert!(err.contains("content"), "实际: {err}");
@@ -1117,6 +1181,7 @@ mod tests {
             "interaction_request",
             &json!({"request_id": "r1"}),
             Some("my_streamer"),
+            &no_conduit,
         )
         .expect("非契约事件应宽泛放行");
     }
@@ -1130,6 +1195,7 @@ mod tests {
             "stream_unknown",
             &json!({"pipeline_id": "x", "message_id": "p_x", "thread_id": "t"}),
             Some("my_streamer"),
+            &no_conduit,
         )
         .expect("未声明事件应宽泛放行（契约没写就不查）");
     }

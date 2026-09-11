@@ -12,16 +12,17 @@
 
 import { act, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
-import type { BudgetStatusResponse } from '@/services/api/costControl'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { AlertBanner, useLayoutAlerts, type AlertBannerItem } from '../AlertBanner'
+import type { BudgetStatusResponse } from '@/services/api/costControl'
+import type * as costControlMod from '@/services/api/costControl'
 
 // useLayoutAlerts 的 budget 源是 cost_control getBudgetStatus（经 useBudgetStatus）。
 // mock 掉网络层，用可变 holder 控制各用例的 alert_level。
 const mockBudget = vi.hoisted(
-  () => ({ current: null as import('@/services/api/costControl').BudgetStatusResponse | null }),
+  () => ({ current: null as costControlMod.BudgetStatusResponse | null }),
 )
 vi.mock('@/services/api/costControl', () => ({
   getBudgetStatus: async () => mockBudget.current,

@@ -8,14 +8,15 @@
  * 其 setItem/getItem/removeItem 即 zustand 适配器接口（name, value 两参）。
  * setItem 走节流（trailing 合并），需推进定时器（PERSIST_THROTTLE_MS=1000）后读取。
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fakeIndexedDB from 'fake-indexeddb'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type * as indexedDbStorageMod from '@/utils/indexedDbStorage'
 
 // 注入 fake IndexedDB 到 globalThis，让 idb-keyval 在 jsdom 下走真实 IndexedDB 路径
 ;(globalThis as any).indexedDB = fakeIndexedDB
 
 describe('indexedDbStorage', () => {
-  let indexedDbStorage: NonNullable<ReturnType<typeof import('@/utils/indexedDbStorage')['indexedDbStorage']>>
+  let indexedDbStorage: NonNullable<ReturnType<indexedDbStorageMod['indexedDbStorage']>>
 
   beforeEach(async () => {
     vi.resetModules()

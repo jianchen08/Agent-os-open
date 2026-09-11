@@ -11,11 +11,10 @@
  * 气泡 parts 序列必须保持 [text, tool, text, tool, ...] 逐轮交错。
  */
 import { describe, it, expect, beforeEach } from 'vitest'
-
 import { mapBackendMessageToMessage, mergeConsecutiveAssistantMessages } from '@/services/api/session'
+import fixtureRaw from './__fixtures__/real_round_messages.json'
 import type { Message } from '@/types/models'
 
-import fixtureRaw from './__fixtures__/real_round_messages.json'
 
 const THREAD_ID = 'thread-eadf8db3e117'
 

@@ -32,7 +32,7 @@ fn endpoint(route_id: &str, method: &str, path: &str) -> HttpEndpoint {
         route_id: route_id.to_string(),
         method: method.to_string(),
         path: path.to_string(),
-        auth: "none".to_string(),
+        auth: Some("none".to_string()),
         handler_capability: "http.handle".to_string(),
         timeout_ms: None,
         max_concurrency: None,
@@ -505,6 +505,8 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
 
     // 两个 manifest：一个合法，一个越界（path 不在命名空间）
     let good = PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "good".to_string(),
         name: "Good".to_string(),
         description: None,
@@ -536,6 +538,8 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         provides: None,
     };
     let bad = PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "bad".to_string(),
         name: "Bad".to_string(),
         description: None,

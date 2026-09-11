@@ -12,7 +12,8 @@
  * - 切换会话双游标路径：init → 补漏 → 最终无重复
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import type { Message, MessagePart } from '@/types/messageParts'
+import { getMessages } from '@/services/api/session'
+import type { MessagePart } from '@/types/messageParts'
 
 // mock apiClient（网络层），保留真实的 mapBackendMessageToMessage + mergeConsecutiveAssistantMessages
 // session.ts 用 `import apiClient from '@/services/api/client'`（default import）
@@ -36,8 +37,6 @@ vi.mock('@/utils/retry', () => ({
   retry: (fn: () => any) => fn(),
   isRetryableError: vi.fn().mockReturnValue(false),
 }))
-
-import { getMessages } from '@/services/api/session'
 
 /** 设置 apiClient.get 的返回数据 */
 function setApiMessages(messages: any[], has_more = false) {

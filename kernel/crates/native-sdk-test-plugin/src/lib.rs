@@ -11,10 +11,10 @@ use std::collections::HashMap;
 use agentos_native_sdk::{plugin_into_raw, ExecContext, PipelinePlugin};
 
 /// 测试插件：回显 state + 标记 processed_by。
-/// 测试插件：回显 state + 标记 processed_by。
 ///
 /// 跨分配器契约：execute 结果存自持缓冲（dll 堆）借 `&str` 给内核，不返回
-/// String（内核 drop = 跨堆 free UB）。blocking 线程串行调用。
+/// String（内核 drop = 跨堆 free UB）。串行性由 loader 保证（同实例 execute
+/// 全程持 exec_lock，含返回串拷贝）。
 pub struct TestPlugin {
     out_buf: std::cell::UnsafeCell<String>,
 }
@@ -81,8 +81,9 @@ impl PipelinePlugin for TestPlugin {
     }
 }
 
-// SAFETY: out_buf 仅在 execute（blocking 线程串行，单实例不重入）的 &self 独占
-// 借用期写入；借出的 &str 由调用方同步拷贝消费，无并发写面。
+// SAFETY: out_buf 仅在 execute（loader 保证同实例串行——exec_lock 强制，
+// 单实例不重入）的 &self 独占借用期写入；借出的 &str 由调用方持锁同步拷贝
+// 消费，无并发写面。
 unsafe impl Send for TestPlugin {}
 unsafe impl Sync for TestPlugin {}
 

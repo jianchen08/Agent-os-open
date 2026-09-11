@@ -12,20 +12,17 @@
  */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import { renderWithProviders } from '@/test/renderWithProviders'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
-
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { renderWithProviders } from '@/test/renderWithProviders'
 // ── Mock 外部依赖 ──
 const mockGetSchema = vi.hoisted(() => vi.fn().mockResolvedValue({}))
-
 vi.mock('@/services/api/schema', () => ({
   getSchema: mockGetSchema,
 }))
-
 vi.mock('@/pages/settings/PipelineSettingsPage', () => ({
   PipelineSettingsPage: ({ embedded }: { embedded?: boolean }) => (
     <div data-testid="pipeline-page" data-embedded={embedded ? 'true' : 'false'}>
@@ -33,15 +30,12 @@ vi.mock('@/pages/settings/PipelineSettingsPage', () => ({
     </div>
   ),
 }))
-
 vi.mock('@/pages/settings/ThemeSettingsPage', () => ({
   ThemeSettingsPage: () => <div data-testid="theme-page" />,
 }))
-
 vi.mock('@/pages/settings/PluginsSettingsPage', () => ({
   PluginsSettingsPage: () => <div data-testid="plugins-page" />,
 }))
-
 vi.mock('@/components/config/PluginConfigEditor', () => ({
   PluginConfigEditor: ({ pluginId, fileId }: { pluginId?: string; fileId?: string }) => (
     <div data-testid="plugin-config-editor">
@@ -49,7 +43,6 @@ vi.mock('@/components/config/PluginConfigEditor', () => ({
     </div>
   ),
 }))
-
 vi.mock('@/pages/settings/LlmSettingsPage', () => ({
   LlmSettingsPage: ({ embedded }: { embedded?: boolean }) => (
     <div data-testid="llm-settings-widget" data-embedded={embedded ? 'true' : 'false'}>
@@ -57,7 +50,6 @@ vi.mock('@/pages/settings/LlmSettingsPage', () => ({
     </div>
   ),
 }))
-
 import { SettingsHubWidget } from '../SettingsHubWidget'
 
 describe('SettingsHubWidget — 管道配置入口', () => {

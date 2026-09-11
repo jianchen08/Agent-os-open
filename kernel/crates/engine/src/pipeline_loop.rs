@@ -28,8 +28,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use tracing::{debug, error, warn};
+
+use agentos_hooks::{EventTarget, HookEventBus, LifecycleEvent};
 
 use agentos_core::traits::{PluginInvoker, StorageBackend};
 use agentos_core::types::{
@@ -41,6 +44,18 @@ use crate::compiler::{
 };
 use crate::condition::eval_expr;
 use crate::template::{render_template, render_value};
+
+/// 轮数硬上限缺省值（引擎层兜底，见 [`PipelineExecutor::with_max_rounds`]）。
+const DEFAULT_MAX_ROUNDS: usize = 200;
+
+/// 持久化失败重试退避序列（毫秒）：失败后再试 2 次，仍失败则错误上抛。
+const PERSIST_RETRY_BACKOFF_MS: &[u64] = &[100, 300];
+
+/// 「终态未落库」补偿标记键（B5）：update_run_status 重试耗尽后 best-effort
+/// 写入 pipeline_state 表，让 G8 重启排空兜底能按 run_id 精准识别补写，
+/// 而非只靠长期 running 异常扫描。内核自有 per-run 键（VOLATILE_RUN_KEYS
+/// 剥离集内）——只做观测面，不进 checkpoint、不回流下一轮 state。
+const TERMINAL_PERSIST_FAILED_KEY: &str = "terminal_persist_failed";
 
 /// 配置驱动的管道执行器。
 ///
@@ -78,6 +93,10 @@ pub struct PipelineExecutor {
     /// execute_step_impl 在 step 开头清空，persist_step_trace 在 step 末尾取走落 traces。
     /// 轨迹因此是插件声明的**实录**，不做 diff 推断。Mutex：&self 内部可变。
     ops_ledger: parking_lot::Mutex<Vec<serde_json::Value>>,
+    /// step 顶层键首触实录：key → 写前旧值（None = step 内新增键）。
+    /// 与 ops_ledger 同边界清空/消费，替代 step 前 state 全量克隆算 diff
+    /// （内核内 state 只借用不克隆；克隆仅存在于内核→进程边界的序列化点）。
+    step_key_journal: parking_lot::Mutex<HashMap<String, Option<serde_json::Value>>>,
     /// 声明了 `on_pipeline_end` 生命周期钩子的插件 id（manifest 收集）。
     ///
     /// run 结束时逐个 best-effort 分发 [`LifecycleHook::OnPipelineEnd`]（HookContext
@@ -89,6 +108,13 @@ pub struct PipelineExecutor {
     round_events: Option<Arc<dyn crate::round_events::RoundEvents>>,
     /// 轮次序号（per-run 从 1 递增，fetch_add 后取 1 基）。
     round_counter: AtomicI64,
+    /// 生命周期事件总线（观察路径）：run 开始/结束广播 OnPipelineStart/OnPipelineEnd
+    /// 给审计/指标等订阅者。None = 零开销（未接线不发射）。
+    hook_bus: Option<Arc<HookEventBus>>,
+    /// 轮数硬上限（per-run 全部循环体的 while 轮累计）：while 条件恒真且终止
+    /// 检查插件持续失败时的引擎层兜底，超限按 fail-closed 终止 run。0 = 非法
+    /// 配置（run 入口报错拒绝）；缺省 [`DEFAULT_MAX_ROUNDS`]。
+    max_rounds: usize,
 }
 
 impl PipelineExecutor {
@@ -123,10 +149,34 @@ impl PipelineExecutor {
             steps_since_checkpoint: AtomicI64::new(0),
             total_step_no: AtomicI64::new(0),
             ops_ledger: parking_lot::Mutex::new(Vec::new()),
+            step_key_journal: parking_lot::Mutex::new(HashMap::new()),
             pipeline_end_hooks: Vec::new(),
             round_events: None,
             round_counter: AtomicI64::new(0),
+            hook_bus: None,
+            max_rounds: DEFAULT_MAX_ROUNDS,
         }
+    }
+
+    /// 注入轮数硬上限（per-run 全部循环体的 while 轮累计）。
+    ///
+    /// while 条件恒真且终止检查插件持续失败（插件错误统一 warn+continue）时，
+    /// 主轮循环失去插件侧终止信号——引擎层硬上限是最后的兜底：超限按
+    /// fail-closed 终止 run（显式错误，非静默 break）。`0` 非法（run 入口
+    /// 报错拒绝，禁止"无限轮"配置）；不调用用缺省 [`DEFAULT_MAX_ROUNDS`]。
+    pub fn with_max_rounds(mut self, max_rounds: usize) -> Self {
+        self.max_rounds = max_rounds;
+        self
+    }
+
+    /// 注入生命周期事件总线（观察路径）。
+    ///
+    /// run 开始/结束时把 OnPipelineStart/OnPipelineEnd 广播给订阅者（审计日志 /
+    /// `lifecycle.pipeline_*_total` 指标）——点对点钩子分发（权威路径）不变，
+    /// 总线只承载观察。None（不调用）零开销不发射。
+    pub fn with_hook_bus(mut self, bus: Option<Arc<HookEventBus>>) -> Self {
+        self.hook_bus = bus;
+        self
     }
 
     /// 注入声明了 `on_pipeline_end` 钩子的插件 id 集合（spill_guard 清理通道）。
@@ -190,14 +240,27 @@ impl PipelineExecutor {
     ) -> Result<serde_json::Value, EngineError> {
         // 监控 M2：pipeline 执行次数 + 耗时（监控设计 §三 通道1）
         let run_start = std::time::Instant::now();
+        // 轮数硬上限非法值检查（fail-closed）：0 = 无限轮，拒绝执行。
+        if self.max_rounds == 0 {
+            return Err(EngineError::Config {
+                message: "max_rounds=0 非法（0 = 无限轮已被禁用；须为正整数）".to_string(),
+            });
+        }
         let mut state = initial_state;
         ensure_object(&mut state);
-        // 默认设 ended=false（如未设）
+        // 窗口账残留清零：跨轮复用 executor 时，上一轮死于窗口之间（Err 提前
+        // 返回）的未冲洗 journal/实录不得混入本轮 run_init 轨迹。
+        self.step_key_journal.lock().clear();
+        self.ops_ledger.lock().clear();
+        // 起始基线写入同样进轨迹（凡 state 变更必可追溯，ADR 2026-09-11）：
+        // 首 run 为新增键；挂起恢复后的续 run 里 run_started_at 覆盖写是真实变更。
         if !key_present(&state, "ended") {
+            self.journal_top_key(&state, "ended");
             set_key(&mut state, "ended", serde_json::Value::Bool(false));
         }
         // 控制状态键契约（ADR 2026-08-30）：run 起始墙钟，track 等插件的耗时
         // 锚点。每 run 覆盖写；挂起恢复后的新 run 从恢复点重算。
+        self.journal_top_key(&state, "run_started_at");
         set_key(
             &mut state,
             "run_started_at",
@@ -208,15 +271,24 @@ impl PipelineExecutor {
         if key_present(&state, "_plugin_errors") {
             set_key(&mut state, "_plugin_errors", serde_json::json!([]));
         }
+        // run 边界窗口：起始基线写入进轨迹（凡 state 变更必可追溯）；失败经
+        // 统一落库核重试，耗尽即上抛使 run 失败（轨迹缺失段不可对账重建）。
+        self.append_window_trace("run_init", &state).await?;
 
         // ADR ②③：引擎独占落库。run 开始时建 runs 记录 + 落 user 消息。
         // 失败只 warn 不阻断执行（持久化不应让管道跑不通）。
         self.persist_run_start(&mut state, &compiled.config_hash)
             .await;
 
+        // 观察路径：run 开始广播 OnPipelineStart（审计/`lifecycle.pipeline_start_total`）。
+        self.emit_pipeline_lifecycle(agentos_core::traits::LifecycleHook::OnPipelineStart, &state)
+            .await;
+
         // ── 多循环体执行 ──
         // 转移死循环防护：Phase 跳转/循环体数上限的乘积保险。
         let max_guard = compiled.bodies.len().saturating_mul(4).max(16);
+        // 轮数硬上限计数（per-run：全部循环体的 while 轮累计）。
+        let mut rounds_used: usize = 0;
         let mut idx: usize = 0;
         let mut guard: usize = 0;
         while idx < compiled.bodies.len() {
@@ -231,11 +303,14 @@ impl PipelineExecutor {
                 break;
             }
             // 插件可读 state["current_phase"] 按循环体分发（如 workspace_lifecycle）
+            self.journal_top_key(&state, "current_phase");
             set_key(&mut state, "current_phase", serde_json::json!(body.id));
+            // 体入口窗口：current_phase 切换进轨迹（凡 state 变更必可追溯）。
+            self.append_window_trace("body_enter", &state).await?;
             // 收尾语义：管道已 ended 时，run_on_error 循环体仍照常执行（忽略 ended）
             let ignore_ended = truthy_flag(&state, "ended") && body.run_on_error;
             let iterations = self
-                .execute_body(body, &mut state, compiled, ignore_ended)
+                .execute_body(body, &mut state, compiled, ignore_ended, &mut rounds_used)
                 .await?;
             // 监控 M2：迭代轮数（仅 loop 模式计，按循环体累计）
             if iterations > 0 {
@@ -251,7 +326,9 @@ impl PipelineExecutor {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
             {
-                // 消费一次性的 next_phase（不残留到 checkpoint/state）
+                // 消费一次性的 next_phase（不残留到 checkpoint/state）；消费删除
+                // 亦是变更，journal 定格旧值供 body_route 窗口记 null 标记。
+                self.journal_top_key(&state, "next_phase");
                 if let Some(obj) = state.as_object_mut() {
                     obj.remove("next_phase");
                 }
@@ -264,9 +341,11 @@ impl PipelineExecutor {
                     }
                 }
             } else if !body.exit_routes.is_empty() && !truthy_flag(&state, "suspended") {
-                if let Some(matched) = apply_routes(&body.exit_routes, &mut state) {
+                if let Some(matched) = self.apply_routes(&body.exit_routes, &mut state) {
                     // apply_routes 的 Phase 分支会写 state.next_phase；此处已消费
                     // 返回值完成转移，立即移除，防止残留导致下一循环体结束时复跳。
+                    // 消费删除同样 journal 定格（body_route 窗口记 null 标记）。
+                    self.journal_top_key(&state, "next_phase");
                     if let Some(obj) = state.as_object_mut() {
                         obj.remove("next_phase");
                     }
@@ -286,6 +365,10 @@ impl PipelineExecutor {
                     }
                 }
             }
+            // 体间转移窗口：exit_routes 写入（apply_routes 内部首触实录）、
+            // next_phase 消费删除、execute_body 轮边界的 should_stop→ended 折算
+            // 统一在此落轨迹（此前体间变更不落任何轨迹）。
+            self.append_window_trace("body_route", &state).await?;
             if stop {
                 break;
             }
@@ -304,10 +387,20 @@ impl PipelineExecutor {
         // 写回 state——checkpoint / registry 快照 / runs 表三处同词汇同源，
         // 可观测性只读这一个字段。
         let terminal = agentos_core::types::RunStatus::from_control_state(&state);
+        self.journal_top_key(&state, "run_status");
         if let Some(obj) = state.as_object_mut() {
             obj.insert("run_status".into(), serde_json::json!(terminal));
         }
+        // run 收尾窗口：终态折算写入进轨迹；失败经统一落库核重试，耗尽即上抛
+        // （与 run_init 同一严格口径，不允许 warn+计数软降级）。
+        self.append_window_trace("run_finalize", &state).await?;
         self.persist_run_end(&state).await;
+
+        // 观察路径：run 结束广播 OnPipelineEnd（审计/`lifecycle.pipeline_end_total`）。
+        // 与点对点 end 钩子同边界——引擎 Err 提前返回的 run 不发（api 层 run.failed
+        // 域事件承载该终态观测）。
+        self.emit_pipeline_lifecycle(agentos_core::traits::LifecycleHook::OnPipelineEnd, &state)
+            .await;
 
         // on_pipeline_end 钩子分发（spill_guard 原文清理等）：run 结束后逐个
         // best-effort 通知（HookContext 带 pipeline_id/run_id 标签；sidecar 未活
@@ -323,26 +416,35 @@ impl PipelineExecutor {
     /// （`suspended`）始终终止执行（等待恢复，不跑收尾）。
     ///
     /// 返回迭代轮数（仅 loop 模式计；单次执行返回 0，对齐旧"仅 loop 计迭代"）。
-    /// Err = step 级跳转护栏触发（见 [`Self::execute_steps`]），向上传播终止 run。
+    /// Err = step 级跳转护栏触发（见 [`Self::execute_steps`]）或轮数硬上限超限，
+    /// 向上传播终止 run。
+    ///
+    /// `rounds_used`：per-run 已执行 while 轮累计（跨循环体共享），达
+    /// `max_rounds` 时 fail-closed 报错——while 条件恒真且终止检查插件持续
+    /// 失败（插件错误统一 warn+continue，不终止循环）时的引擎层兜底。
     async fn execute_body(
         &self,
         body: &CompiledBody,
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
+        rounds_used: &mut usize,
     ) -> Result<i32, EngineError> {
         let mut iteration: i32 = 0;
         // 打开轮（LLM 回合）生命周期：轮次 = 一次 LLM 调用 + 其后紧跟的工具迭代
-        // 链（同一回合）。DSL 契约：post 路由按 core_plugin 决定下一迭代的插件
-        // （pipeline_llm_core ↔ pipeline_tool_core 交替）——工具迭代不产生
-        // assistant 消息，沿用打开轮的 message_id（tool_core 工具事件按 state
+        // 链（同一回合）。DSL 契约：post 路由写 core_type 语义标志决定下一迭代
+        // 形态（llm_call ↔ tool_execute 交替；core_plugin 只承载动态步骤的插件
+        // 选择，由管道配置声明，引擎零插件 id 知识）——工具迭代不产生
+        // assistant 消息，沿用打开轮的 message_id（tool 工具事件按 state
         // 的当前轮 id 寻址，与 LLM 轮 new_message 的 toolCalls 同卡位），
         // 不开新轮、不发 stream_start。若按迭代开轮，工具卡会被建到独立的
         // 工具轮占位消息上，与 LLM 轮的卡片重复（用户反馈的「尾部整段重复
         // 工具卡」根因，2026-08-27）。
         let mut open_round: Option<(i64, String, crate::round_events::RoundStart)> = None;
-        // G10 单轨：循环模式 = while_cond 存在（编译期已归一）；迭代上限不在
-        // 引擎层表达——生产阀门是 stop_check 按 Agent 配置 max_iterations 兜底
+        // G10 单轨：循环模式 = while_cond 存在（编译期已归一）。正常终止信号
+        // 是插件写的 state 标志（stop_check/ended）；插件错误统一 warn+continue
+        // 不终止循环——引擎层另设轮数硬上限（max_rounds）兜底，防 while 恒真
+        // 时 CPU/LLM 费用无限燃烧。
         let looping = body.looping;
         if looping {
             loop {
@@ -360,16 +462,28 @@ impl PipelineExecutor {
                         break;
                     }
                 }
+                // 轮数硬上限（fail-closed）：超限报错终止 run，非静默 break。
+                if *rounds_used >= self.max_rounds {
+                    return Err(EngineError::Other {
+                        message: format!(
+                            "轮数超限：run 已执行 {} 轮达上限 {}（max_rounds），循环体 '{}' 的 while 条件疑似恒真；按 fail-closed 终止 run",
+                            rounds_used, self.max_rounds, body.id
+                        ),
+                    });
+                }
+                *rounds_used += 1;
                 iteration += 1;
                 // checkpoint 计数在 persist_step_trace 里按「配置 step」推进
                 // （每执行一个配置 step +1，达 interval_steps 落档），此处不再按轮计数。
                 let assistant_before = count_role(state, "assistant");
-                // 先判迭代类型（post 路由写入的契约），再决定开轮/续轮：
+                // 先判迭代形态（post 路由写入的语义契约核心契约），再决定开轮/续轮：
                 // 工具迭代沿用打开轮（tool 事件挂 LLM 轮消息）；LLM/其它迭代
                 // 一律新开轮——先续后判会让下一次 LLM 迭代误沿上一轮的 id
                 // （工具卡重复建到 LLM 轮消息的根因，2026-08-27 真机复现）。
-                let next_is_tool =
-                    state_str(state, "core_plugin").as_deref() == Some("pipeline_tool_core");
+                // 形态标志 = core_type（llm_call | tool_execute）：管道配置
+                // post 路由按 DSL 写它决定下一迭代形态，换 core 插件实现
+                // （自定义插件 id）轮次语义不变——引擎零插件 id 知识。
+                let next_is_tool = state_str(state, "core_type").as_deref() == Some("tool_execute");
                 let (round_index, round_id, round_start) = if next_is_tool {
                     if let Some((ri, rid, rs)) = open_round.take() {
                         if let Some(obj) = state.as_object_mut() {
@@ -405,6 +519,7 @@ impl PipelineExecutor {
                 // 照跑）；终止原因由写方随 router.stop_reason 署名，run 收尾
                 // 按署名映射终态。
                 if truthy_flag(state, "should_stop") && !truthy_flag(state, "ended") {
+                    self.journal_top_key(state, "ended");
                     set_key(state, "ended", serde_json::Value::Bool(true));
                 }
                 if truthy_flag(state, "suspended") {
@@ -483,6 +598,34 @@ impl PipelineExecutor {
         }
     }
 
+    /// 向生命周期事件总线广播管道级事件（观察路径，best-effort、非阻塞）。
+    ///
+    /// 目标 = [`EventTarget::Pipeline`]（pipeline_id），上下文带 pipeline_id/run_id
+    /// 标签（与点对点 end 钩子的 HookContext 同源）。未注入总线时零操作。
+    async fn emit_pipeline_lifecycle(
+        &self,
+        hook: agentos_core::traits::LifecycleHook,
+        state: &serde_json::Value,
+    ) {
+        let Some(bus) = self.hook_bus.as_ref() else {
+            return;
+        };
+        let pipeline_id = state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut ctx = agentos_core::traits::HookContext::new();
+        ctx.set("pipeline_id", serde_json::json!(pipeline_id));
+        ctx.set("run_id", serde_json::json!(self.run_id));
+        bus.emit(LifecycleEvent {
+            hook,
+            ctx,
+            target: EventTarget::Pipeline(pipeline_id),
+            ts: SystemTime::now(),
+        });
+    }
+
     /// 向声明 `on_pipeline_end` 的插件分发管道结束钩子（best-effort）。
     async fn dispatch_pipeline_end_hooks(&self, state: &serde_json::Value) {
         if self.pipeline_end_hooks.is_empty() {
@@ -548,7 +691,7 @@ impl PipelineExecutor {
             }
             let routed = self
                 .execute_step(step, body_id, state, compiled, ignore_ended)
-                .await;
+                .await?;
             // G10：step 级 Step 跳转（真跳转）——目标下标在本循环体内查找
             if let Some(RouteNext::Step(id)) = routed {
                 if let Some(j) = steps.iter().position(|s| s.id == id) {
@@ -596,7 +739,9 @@ impl PipelineExecutor {
         state: &'a mut serde_json::Value,
         compiled: &'a CompiledPipeline,
         ignore_ended: bool,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<RouteNext>> + Send + 'a>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<RouteNext>, EngineError>> + Send + 'a>,
+    > {
         Box::pin(self.execute_step_impl(step, body_id, state, compiled, ignore_ended))
     }
 
@@ -607,13 +752,12 @@ impl PipelineExecutor {
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
-    ) -> Option<RouteNext> {
-        // 0. 快照 step 执行前的 state，用于事后算 diff 落 step 级轨迹。
-        //    轨迹颗粒度 = 配置 step（prepare/core/post 等），不钻插件。
-        //    patch_data 含本 step 期间所有顶层 key 变更；messages 走 ops 实录（见 ops_ledger）。
-        let state_before = state.clone();
-        // 清空本 step 的 messages 实录缓冲（step 边界，防跨 step 泄漏）
+    ) -> Result<Option<RouteNext>, EngineError> {
+        // step 边界清空实录缓冲（messages ops 与顶层键 journal 同点位）。
+        // 轨迹颗粒度 = 配置 step（prepare/core/post 等），不钻插件。
+        // patch_data 含本 step 期间所有顶层 key 变更；messages 走 ops 实录（见 ops_ledger）。
         self.ops_ledger.lock().clear();
+        self.step_key_journal.lock().clear();
 
         // B 区登记挂点（ADR 2026-08-27 §2.2）：step 进入时登记 message→step
         // 归属（流式窗口 = 本 step invoke 期间），守卫在 step 收尾自动清除。
@@ -638,6 +782,7 @@ impl PipelineExecutor {
         );
         if let Some(obj) = rendered.as_object() {
             for (k, v) in obj {
+                self.journal_top_key(state, k);
                 set_key(state, k, v.clone());
             }
         }
@@ -645,6 +790,17 @@ impl PipelineExecutor {
         // 2. step 自带 loop_config：循环执行列表项
         if let Some(loop_cfg) = &step.loop_config {
             if loop_cfg.enabled {
+                // max_iterations 契约：>0 = 迭代上限；-1 = 无限（缺省）。
+                // 0 在 `max_iters > 0` 旧语义下等价无限轮，属非法配置——fail-closed
+                // 报错，不静默按无限处理。
+                if loop_cfg.max_iterations == 0 {
+                    return Err(EngineError::Other {
+                        message: format!(
+                            "step '{}' 的 loop_config.max_iterations=0 非法（0 = 无限循环已被禁用；>0 = 上限，-1 = 无限）",
+                            step.id
+                        ),
+                    });
+                }
                 let max_iters = loop_cfg.max_iterations;
                 let mut i: i32 = 0;
                 loop {
@@ -659,10 +815,10 @@ impl PipelineExecutor {
                         break;
                     }
                     self.execute_step_inner(step, body_id, state, compiled, ignore_ended)
-                        .await;
+                        .await?;
                     // 循环体里也应用路由（及时结束/挂起）
                     if !step.routes.is_empty() {
-                        apply_routes(&step.routes, state);
+                        self.apply_routes(&step.routes, state);
                     }
                     if truthy_flag(state, "suspended") {
                         break;
@@ -672,8 +828,8 @@ impl PipelineExecutor {
                     }
                 }
                 // 循环 step 执行完，落 step 级轨迹后返回（循环内路由不参与跳转）
-                self.persist_step_trace(&step.id, &compiled.checkpoint, &state_before, state)
-                    .await;
+                self.persist_step_trace(&step.id, &compiled.checkpoint, state)
+                    .await?;
                 // hooks 同步边界分发（收尾）：step_end 两档作用域（与下方非循环
                 // 分支同一收尾路径，循环 step 不缺席）
                 self.dispatch_boundary_hooks(
@@ -683,24 +839,24 @@ impl PipelineExecutor {
                     "step_end",
                 )
                 .await;
-                return None;
+                return Ok(None);
             }
         }
 
         // 3. 非循环：直接执行
         self.execute_step_inner(step, body_id, state, compiled, ignore_ended)
-            .await;
+            .await?;
 
         // 4. 路由处理：返回命中结果（Step 跳转由 execute_steps 消费）
         let routed = if !step.routes.is_empty() {
-            apply_routes(&step.routes, state)
+            self.apply_routes(&step.routes, state)
         } else {
             None
         };
 
         // 5. 落 step 级轨迹（非循环分支）
-        self.persist_step_trace(&step.id, &compiled.checkpoint, &state_before, state)
-            .await;
+        self.persist_step_trace(&step.id, &compiled.checkpoint, state)
+            .await?;
 
         // hooks 同步边界分发（收尾）：step 结束时分发 "step_end"；钩子返回
         // `{"decision":"terminate"}` → 置 ended=true（与引擎既有 ended 语义
@@ -712,7 +868,7 @@ impl PipelineExecutor {
             "step_end",
         )
         .await;
-        routed
+        Ok(routed)
     }
 
     /// hooks 同步边界分发（服务化提案 §3.6 同步边界事件）。
@@ -731,6 +887,10 @@ impl PipelineExecutor {
     ///
     /// 空表短路：无任何命中（step_hooks 空或作用域不匹配）直接返回——
     /// 无钩子配置的主干零开销（§3.6 空集短路）。
+    ///
+    /// 现状：生产编译产物 step_hooks 恒空（加载入口未接 hooks，ADR
+    /// 2026-09-09-kernel-dead-layer-adjudication）——本分发点当前运行时不命中，
+    /// 接线后自动生效。
     async fn dispatch_boundary_hooks(
         &self,
         compiled: &CompiledPipeline,
@@ -771,7 +931,7 @@ impl PipelineExecutor {
             let config =
                 serde_json::json!({ "_pipe_hook": { "event": event, "payload": payload } });
             let hook_ctx = PluginContext::new(
-                state.clone(),
+                &*state,
                 config,
                 self.default_tenant.clone(),
                 uuid::Uuid::nil(),
@@ -816,37 +976,117 @@ impl PipelineExecutor {
         }
         if terminated {
             warn!(event = %event, step = %step_id, "hook decision terminate——置 ended=true 终止当前循环体");
+            self.journal_top_key(state, "ended");
             set_key(state, "ended", serde_json::Value::Bool(true));
         }
     }
 
-    /// 落 step 级轨迹：对比 step 执行前后的 state，把变更的顶层 key 聚合为一条
-    /// patch_data，plugin_id = step.id。
-    ///
-    /// **messages 走实录**（ops 即轨迹）：本 step 内插件 emit 的 ops 在
-    /// merge_and_project 时已降级为指纹实录累积到 `ops_ledger`，此处取走拼进
-    /// patch_data——轨迹记录的是"插件声明过什么"，不是 diff 推断。
-    ///
-    /// **字段过滤**：已投影到 messages 表的原文字段（raw_result/raw_thinking/
-    /// raw_tool_calls）不进 trace——全文真值在 blobs/messages 表，trace 只存指纹。
-    /// system_message 保留（追踪提示词演变，state_diff 已去重，仅在变化时记录）。
-    /// diff 与实录均为空（step 无产出）则不落轨迹。
+    /// 落 step 级轨迹：checkpoint 计步 + 窗口轨迹落库 + 分层投影的 step 入口。
+    /// diff/实录/字段过滤语义见 [`Self::append_window_trace`]。
     ///
     /// **每执行一个配置 step 必调本函数**（组级 when 跳过的 step 在 execute_steps
     /// 直接 continue，不进本函数）——checkpoint 按步计数即在此推进
     /// （[`Self::count_step_and_maybe_checkpoint`]），保证"实际执行的 step"才计步。
+    /// 顶层键首触实录（写前调用）：step 内首次触碰某键时定格其旧值，
+    /// 供 [`Self::append_window_trace`] 算 diff——内核内 state 借用不克隆，
+    /// 实录体积 ∝ 实际变更面而非 state 体积。
+    fn journal_top_key(&self, state: &serde_json::Value, key: &str) {
+        let mut journal = self.step_key_journal.lock();
+        journal
+            .entry(key.to_string())
+            .or_insert_with(|| state.get(key).cloned());
+    }
+
+    /// 维护平铺键 `track.messages_chars`（W2a 上下文估算账本）：messages ops
+    /// 应用后按 delta 增量推进；键缺失/为 0 且 messages 非空时全量重算一次
+    /// （冷启动兜底——恢复/旧会话无账可依时宁可重算不可漏账）。
+    ///
+    /// 单位与一致性基准见 [`message_content_bytes`]（紧凑 JSON UTF-8 字节，
+    /// 剔除 seq）。写入走 journal + set_key（进 step 轨迹，检查点/回放同源）。
+    fn maintain_messages_chars(&self, state: &mut serde_json::Value, delta: i64) {
+        let existing = state.get("track.messages_chars").and_then(|v| v.as_i64());
+        let nonempty = state
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty());
+        let new_val = match existing {
+            Some(c) if c > 0 => c + delta,
+            // 冷启动兜底：无账且消息非空 → 全量重算（messages 空 → 保持缺失）
+            _ if nonempty => messages_chars_total(state),
+            _ => return,
+        };
+        if existing == Some(new_val) {
+            return; // 无变化不写（省一次 journal/diff）
+        }
+        self.journal_top_key(state, "track.messages_chars");
+        set_key(
+            state,
+            "track.messages_chars",
+            serde_json::Value::from(new_val),
+        );
+    }
+
+    /// 持久化写失败重试：失败后再试 2 次（退避 [`PERSIST_RETRY_BACKOFF_MS`]，
+    /// 真实 sleep），仍失败则把最后一次错误上抛——持久化失败不允许静默丢段
+    /// （DB 写失败时内存前进 = 重启后缺失段永久丢失且无对账，任务域禁止降级）。
+    /// 每次失败计 `persist_failures_total` 指标并 warn 留痕。
+    async fn retry_persist<T, F, Fut>(
+        &self,
+        what: &str,
+        mut attempt: F,
+    ) -> Result<T, agentos_core::types::StorageError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, agentos_core::types::StorageError>>,
+    {
+        let mut last_err: Option<agentos_core::types::StorageError> = None;
+        for try_no in 0..=PERSIST_RETRY_BACKOFF_MS.len() {
+            match attempt().await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    warn!(target_op = %what, attempt = try_no + 1, error = %e, "持久化失败");
+                    self.metrics.inc_persist_failure();
+                    if let Some(backoff_ms) = PERSIST_RETRY_BACKOFF_MS.get(try_no) {
+                        tokio::time::sleep(Duration::from_millis(*backoff_ms)).await;
+                    } else {
+                        last_err = Some(e);
+                    }
+                }
+            }
+        }
+        Err(last_err.expect("retry loop runs at least once"))
+    }
+
     async fn persist_step_trace(
         &self,
         step_id: &str,
         ckpt: &agentos_core::types::CheckpointConfig,
-        state_before: &serde_json::Value,
         state_after: &serde_json::Value,
-    ) {
+    ) -> Result<(), EngineError> {
         // checkpoint 按配置 step 计数（在轨迹入口统一推进，含无产出 step——
         // 无产出也消耗了一步；0/禁用 + pipeline_id 为空时内部跳过）。
         self.count_step_and_maybe_checkpoint(ckpt, state_after)
             .await;
-        let mut diff = state_diff(state_before, state_after);
+        self.append_window_trace(step_id, state_after).await?;
+        // 分层持久化投影：累计标量字段用 state_after 的完整值 upsert（覆盖最新
+        // 值）。无产出 step 也投影（messages 原文已在 merge 时实时落表）。
+        self.project_state_snapshot(state_after).await
+    }
+
+    /// 轨迹窗口落库核（step 窗口与引擎窗口共用）：取走 journal 算 diff（滤
+    /// 已投影冗余键）→ 取走 messages 实录拼 patch_data → diff 与实录均空跳过
+    /// （窗口无产出）→ append_trace。
+    ///
+    /// 凡 state 变更必可追溯（ADR 2026-09-11）：`window_id` 即轨迹的 plugin_id
+    /// ——step.id，或引擎窗口 run_init / body_enter / body_route / run_finalize。
+    /// checkpoint 计步与分层投影不在此（step 专属，见 persist_step_trace）。
+    async fn append_window_trace(
+        &self,
+        window_id: &str,
+        state_after: &serde_json::Value,
+    ) -> Result<(), EngineError> {
+        let journal = std::mem::take(&mut *self.step_key_journal.lock());
+        let mut diff = state_diff_from_journal(&journal, state_after);
 
         // 过滤已投影到 messages 表的冗余字段（原文不进 trace，全文在 blobs）
         const REDUNDANT_KEYS: &[&str] = &[
@@ -860,7 +1100,8 @@ impl PipelineExecutor {
             }
         }
 
-        // 取走本 step 的 messages 实录，拼进 patch_data
+        // 取走本窗口的 messages 实录，拼进 patch_data。引擎窗口无插件运行、
+        // 实录恒空——统一取走防残留串窗（跨窗口误归因）。
         let ledger: Vec<serde_json::Value> = std::mem::take(&mut *self.ops_ledger.lock());
         if !ledger.is_empty() {
             if let Some(obj) = diff.as_object_mut() {
@@ -868,15 +1109,10 @@ impl PipelineExecutor {
             }
         }
 
-        // diff 与实录均为空则跳过（step 无产出）
+        // diff 与实录均为空则跳过（窗口无产出）
         if diff.as_object().is_none_or(|o| o.is_empty()) {
-            // 仍需投影累计标量字段（messages 原文已在 merge 时实时落表）
-            self.project_state_snapshot(state_after).await;
-            return;
+            return Ok(());
         }
-
-        // 分层持久化投影：累计标量字段用 state_after 的完整值 upsert（覆盖最新值）。
-        self.project_state_snapshot(state_after).await;
 
         use agentos_core::types::{PatchType, TraceEntry};
         let entry = TraceEntry {
@@ -884,15 +1120,18 @@ impl PipelineExecutor {
             run_id: self.run_id.clone(),
             branch_id: self.branch_id.clone(),
             seq_in_branch: 0,
-            plugin_id: step_id.to_string(),
+            plugin_id: window_id.to_string(),
             patch_type: PatchType::StateUpdate,
             patch_data: diff,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
-        if let Err(e) = self.store.append_trace(entry).await {
-            warn!(step = %step_id, error = %e, "persist_step_trace 失败");
-            self.metrics.inc_persist_failure();
-        }
+        // 轨迹落库：失败重试后仍失败 = 上抛终止 run（trace 缺失段不可对账重建）。
+        self.retry_persist("append_trace", || {
+            let entry = entry.clone();
+            async move { self.store.append_trace(entry).await }
+        })
+        .await?;
+        Ok(())
     }
 
     /// 从完整 state 投影到业务表（messages + 声明的累计字段）。
@@ -900,29 +1139,30 @@ impl PipelineExecutor {
     /// 在 persist_step_trace 内调用（每个配置 step 后），用 state 的当前完整值投影。
     /// project_messages 内部按索引增量对齐（幂等），upsert_state_field 覆盖最新值。
     /// pipeline_id 为空（测试/首轮未注入）时跳过。
-    async fn project_state_snapshot(&self, state: &serde_json::Value) {
+    ///
+    /// 投影写失败重试后仍失败 = Err 上抛（调用方终止 run）——投影缺失段
+    /// 重启后不可对账，禁止静默降级。
+    async fn project_state_snapshot(&self, state: &serde_json::Value) -> Result<(), EngineError> {
         let pipeline_id = state
             .get("pipeline_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if pipeline_id.is_empty() {
-            return;
+            return Ok(());
         }
         let tenant_id = self.default_tenant.tenant_id.clone();
         // messages 不在此投影——op 模型下 merge 时已实时落 message_slots（一次 apply）。
-        // 声明的累计标量字段投影
+        // 此处只投影 persistent_fields 声明的累计标量字段（声明即契约，逐键 upsert）。
         for key in &self.persistent_fields {
             if let Some(v) = state.get(key) {
-                if let Err(e) = self
-                    .store
-                    .upsert_state_field(pipeline_id, &tenant_id, key, v)
-                    .await
-                {
-                    warn!(key = %key, error = %e, "upsert_state_field 失败（继续）");
-                    self.metrics.inc_persist_failure();
-                }
+                self.retry_persist("upsert_state_field", || {
+                    self.store
+                        .upsert_state_field(pipeline_id, &tenant_id, key, v)
+                })
+                .await?;
             }
         }
+        Ok(())
     }
 
     /// 执行已编译列表项（G10：引用已在加载期解析为三类——插件 / composite / 动态模板）。
@@ -937,7 +1177,7 @@ impl PipelineExecutor {
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
-    ) {
+    ) -> Result<(), EngineError> {
         for item in &step.items {
             if truthy_flag(state, "suspended") {
                 break;
@@ -969,7 +1209,7 @@ impl PipelineExecutor {
                         }
                     };
                     self.execute_step(&target, body_id, state, compiled, ignore_ended)
-                        .await;
+                        .await?;
                 }
                 // 静态命中插件（per-plugin inputs 经 config 通道传给插件，
                 // 不 merge 进 state、不落 trace；具名步骤服务经 _step_method
@@ -993,7 +1233,7 @@ impl PipelineExecutor {
                     if let Some(target) = compiled.find_step(&resolved) {
                         let target = target.clone();
                         self.execute_step(&target, body_id, state, compiled, ignore_ended)
-                            .await;
+                            .await?;
                     } else if self.lookup_plugin(&resolved) {
                         // 动态点无静态 inputs/method（模板运行时才定），传空
                         if self
@@ -1012,6 +1252,7 @@ impl PipelineExecutor {
                 }
             }
         }
+        Ok(())
     }
 
     /// 调用原子插件并 merge state_updates；返回 true = 应跳过同组后续
@@ -1036,10 +1277,7 @@ impl PipelineExecutor {
         inputs: &HashMap<String, serde_json::Value>,
         state: &mut serde_json::Value,
     ) -> bool {
-        match self
-            .invoke_plugin(plugin_id, method, inputs, state.clone())
-            .await
-        {
+        match self.invoke_plugin(plugin_id, method, inputs, &*state).await {
             Ok(result) => {
                 if result.error.is_none() {
                     // merge state_updates（轨迹在 step 级统一落，不钻插件）
@@ -1083,12 +1321,15 @@ impl PipelineExecutor {
     ///
     /// `method`：具名步骤服务时 config 注入约定字段 `_step_method`（与 inputs
     /// 同对象共存，SDK 侧按名分发；None = 默认 execute 入口零改动）。
+    ///
+    /// `state` 为借用：invoke 期间引擎不写 state（结果在返回后 merge），
+    /// 消除每步整包深拷。
     async fn invoke_plugin(
         &self,
         plugin_id: &str,
         method: Option<&str>,
         inputs: &HashMap<String, serde_json::Value>,
-        state: serde_json::Value,
+        state: &serde_json::Value,
     ) -> Result<PluginResult, PluginError> {
         // 监控 M2：step 命中（每 invoke 一次 = 命中一个 step 的插件）
         self.metrics.inc_step_hit();
@@ -1113,19 +1354,16 @@ impl PipelineExecutor {
             content_loader,
         );
         // 监控 M2：LLM/工具调用次数 + 耗时（调度层视角 = invoke 前后差，
-        // 监控设计 §补引擎调度层）。按 plugin_id 启发式分类：
-        // - 含 "llm" → LLM 调用
-        // - 含 "tool" → 工具调用
-        // - 其他 → 不计 LLM/tool（如 context_build/condition 等编排插件）
-        let is_llm = plugin_id.to_lowercase().contains("llm");
-        let is_tool = plugin_id.to_lowercase().contains("tool");
+        // 监控设计 §补引擎调度层）。类别按显式映射表登记
+        // （plugin_metrics_class），未收录 id = Other 不计（编排类插件）。
+        let class = plugin_metrics_class(plugin_id);
         let invoke_start = std::time::Instant::now();
         let result = self.invoker.invoke_pipeline_plugin(plugin_id, &ctx).await;
         let elapsed = invoke_start.elapsed().as_micros() as u64;
-        if is_llm {
-            self.metrics.inc_llm_call(elapsed);
-        } else if is_tool {
-            self.metrics.inc_tool_call(elapsed);
+        match class {
+            PluginMetricsClass::Llm => self.metrics.inc_llm_call(elapsed),
+            PluginMetricsClass::Tool => self.metrics.inc_tool_call(elapsed),
+            PluginMetricsClass::Other => {}
         }
         result
     }
@@ -1174,8 +1412,7 @@ impl PipelineExecutor {
         }
 
         // pipeline_id 从 state 读（stage_build_initial_state 注入，前端创建会话
-        // 时生成、每轮回传）。它是消息层查询主键（对齐 0.1 pipeline_run_id），
-        // 适配"通过 state 通路执行持久化"。
+        // 时生成、每轮回传）。它是消息层查询主键，适配"通过 state 通路执行持久化"。
         let pipeline_id = state
             .get("pipeline_id")
             .and_then(|v| v.as_str())
@@ -1231,6 +1468,7 @@ impl PipelineExecutor {
     /// llm_core step 的 merge_and_project 中投影到 messages 表（含 tool_calls）。
     /// 分层持久化：投影是"merge state_updates 时同步落库"，不延迟到 run 结束。
     async fn persist_run_end(&self, final_state: &serde_json::Value) {
+        let tenant_id = self.default_tenant.tenant_id.clone();
         // 收尾 checkpoint：run 结束时无条件落一份最终态快照（最终态是重建的最佳基线）。
         // 这样重建时能直接从本 run 最终 state 接着跑，不必回放整轮 traces。
         // checkpoint_id 用 step_no 锚点，同 step 重放幂等。
@@ -1240,14 +1478,24 @@ impl PipelineExecutor {
             .unwrap_or("");
         if !pipeline_id.is_empty() {
             let step_no = self.total_step_no.load(Ordering::SeqCst);
-            let tenant_id = self.default_tenant.tenant_id.clone();
+            // B5：收尾快照走 retry_persist（对齐 append_trace 同一标准）——
+            // 最终态缺席 = 重建退化为整轮 traces 回放，重试耗尽 error 强观测。
             if let Err(e) = self
-                .store
-                .save_checkpoint(pipeline_id, &tenant_id, step_no, final_state)
+                .retry_persist("save_checkpoint", || {
+                    let tenant_id = tenant_id.clone();
+                    async move {
+                        self.store
+                            .save_checkpoint(pipeline_id, &tenant_id, step_no, final_state)
+                            .await
+                    }
+                })
                 .await
             {
-                warn!(pipeline_id = %pipeline_id, error = %e, "收尾 save_checkpoint 失败（继续执行）");
-                self.metrics.inc_persist_failure();
+                error!(
+                    pipeline_id = %pipeline_id,
+                    error = %e,
+                    "收尾 save_checkpoint 重试耗尽：最终态快照未落库"
+                );
             }
             // run 收尾整管道兜底清理（ADR 2026-08-27 §2.2 生命周期）：
             // 中断/异常路径若在插件侧直接收尾（半截组装发生在 llm_core sidecar，
@@ -1261,19 +1509,68 @@ impl PipelineExecutor {
         // 与域事件派生（api derive_run_terminal_events）共用，两处不得各持一套词汇。
         let final_status = agentos_core::types::RunStatus::from_control_state(final_state);
         if let Err(e) = self
-            .store
-            .update_run_status(&self.run_id, final_status.clone(), None, None)
+            .retry_persist("update_run_status", || {
+                let status = final_status.clone();
+                async move {
+                    self.store
+                        .update_run_status(&self.run_id, status, None, None)
+                        .await
+                }
+            })
             .await
         {
-            warn!(run_id = %self.run_id, error = %e, "update_run_status({final_status:?}) 失败");
-            self.metrics.inc_persist_failure();
+            // B5：终态落库重试耗尽——run 行滞留 running，G8 优雅重启排空会把
+            // 已结束的 run 误标 suspended（当可恢复挂起）、崩溃清扫会误标 failed。
+            // 终态点已无法终止 run（run 已结束），重试 + 显式补偿标记是该点位
+            // 的最正确语义：error 强观测 + 写「终态未落库」标记供重启排空精准补写。
+            error!(
+                run_id = %self.run_id,
+                pipeline_id = %pipeline_id,
+                intended_status = ?final_status,
+                error = %e,
+                "update_run_status 重试耗尽：run 终态未落库"
+            );
+            if !pipeline_id.is_empty() {
+                self.write_terminal_persist_failed_marker(pipeline_id, &tenant_id, &final_status)
+                    .await;
+            }
+        }
+    }
+
+    /// B5：「终态未落库」补偿标记（best-effort 单次，不重试——retry_persist
+    /// 的重试窗口已耗尽，再失败只能靠长期 running 异常扫描兜底）。
+    /// 写 [`TERMINAL_PERSIST_FAILED_KEY`] → pipeline_state 表，值为
+    /// {run_id, intended_status, failed_at}；消费方按 run_id 匹配当前卡
+    /// running 的 run，不匹配即陈旧标记（该管道后续 run 已正常收尾，可清）。
+    async fn write_terminal_persist_failed_marker(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        intended_status: &agentos_core::types::RunStatus,
+    ) {
+        let marker = serde_json::json!({
+            "run_id": self.run_id,
+            "intended_status": intended_status,
+            "failed_at": chrono::Utc::now().to_rfc3339(),
+        });
+        if let Err(e) = self
+            .store
+            .upsert_state_field(pipeline_id, tenant_id, TERMINAL_PERSIST_FAILED_KEY, &marker)
+            .await
+        {
+            error!(
+                run_id = %self.run_id,
+                pipeline_id = %pipeline_id,
+                error = %e,
+                "终态未落库补偿标记写入失败"
+            );
         }
     }
 
     /// merge 插件 state_updates 进 state（纯内存合并）。
     ///
     /// messages **只接受 op 声明**（`{_ops:[set/insert]}`）→ "一次 apply" 到内存、
-    /// 表、实录三落点。全量数组形式零兼容：收到即 warn 丢弃——改队列
+    /// 表、实录、字符记账四落点。全量数组形式零兼容：收到即 warn 丢弃——改队列
     /// 必须走 ops，声明式契约由所有插件（llm_core/tool_core/context_window_guard）履行。
     async fn merge_and_project(
         &self,
@@ -1296,6 +1593,8 @@ impl PipelineExecutor {
                             o
                         })
                         .collect();
+                    // W2a 记账：old 侧字节须读应用前数组——先算 delta 再 apply。
+                    let chars_delta = messages_ops_chars_delta(state, &ops_owned);
                     match apply_messages_op_update(
                         state,
                         self.store.as_ref(),
@@ -1319,6 +1618,9 @@ impl PipelineExecutor {
                             self.metrics.inc_persist_failure();
                         }
                     }
+                    // 记账对齐**内存**数组：apply 内内存先变、表侧失败才返 Err，
+                    // Ok/Err 均推进（表侧丢失语义与 ops 实录缺席同款降级，见上方 warn）。
+                    self.maintain_messages_chars(state, chars_delta);
                 } else {
                     warn!("messages 更新未携带 _ops（全量数组已退役，零兼容），该更新被忽略");
                 }
@@ -1331,6 +1633,7 @@ impl PipelineExecutor {
                 warn!(key = %k, "插件试图写内核持有的 run_status，该更新被忽略");
                 continue;
             }
+            self.journal_top_key(state, k);
             set_key(state, k, v.clone());
         }
     }
@@ -1463,6 +1766,58 @@ impl PipelineExecutor {
             self.steps_since_checkpoint.store(0, Ordering::SeqCst);
         }
     }
+
+    /// 应用转移分支：按 YAML 顺序匹配第一个 `when` 为真的分支，执行其 `then`。
+    ///
+    /// 匹配后立即 `break`（priority 由 YAML 顺序体现）。返回命中的 `RouteNext`
+    /// （克隆），供调用方（循环体转移决策 / step 级跳转）使用。
+    /// `when` 已在加载期编译为 AST（G10）：None = 恒真短路，其余只求值零解析。
+    ///
+    /// 路由命中应用（set 字段 + 终止/挂起/相位转移控制键）。写顶层键前统一
+    /// 走首触实录（step 窗口内的路由写进本 step 轨迹；循环体出口路由在
+    /// step 窗口外，journal 由下一 step 边界清空，与旧全量 diff 语义一致
+    /// ——体间变更不落任何 step 轨迹）。
+    fn apply_routes(
+        &self,
+        routes: &[CompiledRoute],
+        state: &mut serde_json::Value,
+    ) -> Option<RouteNext> {
+        for route in routes {
+            let matched = match &route.when {
+                None => true,
+                Some(cond) => eval_expr(cond, state),
+            };
+            if matched {
+                // set 字段
+                for (k, v) in &route.set {
+                    self.journal_top_key(state, k);
+                    set_key(state, k, v.clone());
+                }
+                match &route.next {
+                    RouteNext::Loop => { /* 继续，外层 while 会循环 */ }
+                    RouteNext::End => {
+                        self.journal_top_key(state, "ended");
+                        set_key(state, "ended", serde_json::Value::Bool(true));
+                    }
+                    RouteNext::Wait => {
+                        self.journal_top_key(state, "suspended");
+                        set_key(state, "suspended", serde_json::Value::Bool(true));
+                    }
+                    // Step 真跳转由 execute_steps 消费返回值完成（G10 新 DSL "回头"语义）；
+                    // 此处不写 state.next_step。
+                    RouteNext::Step(_id) => {}
+                    RouteNext::Phase(id) => {
+                        // 转移到指定循环体：记到 state.next_phase（run() 在循环体
+                        // 结束时消费；step 级路由设置后在本循环体结束时生效）
+                        self.journal_top_key(state, "next_phase");
+                        set_key(state, "next_phase", serde_json::Value::String(id.clone()));
+                    }
+                }
+                return Some(route.next.clone());
+            }
+        }
+        None
+    }
 }
 
 // ── 路由处理 ──────────────────────────────────────────────────
@@ -1502,45 +1857,6 @@ impl Drop for StepBindingGuard {
             None => reg.clear_message_binding(&self.tenant_id, &self.pipeline_id, &self.message_id),
         }
     }
-}
-
-/// 应用转移分支：按 YAML 顺序匹配第一个 `when` 为真的分支，执行其 `then`。
-///
-/// 匹配后立即 `break`（priority 由 YAML 顺序体现）。返回命中的 `RouteNext`
-/// （克隆），供调用方（循环体转移决策 / step 级跳转）使用。
-/// `when` 已在加载期编译为 AST（G10）：None = 恒真短路，其余只求值零解析。
-fn apply_routes(routes: &[CompiledRoute], state: &mut serde_json::Value) -> Option<RouteNext> {
-    for route in routes {
-        let matched = match &route.when {
-            None => true,
-            Some(cond) => eval_expr(cond, state),
-        };
-        if matched {
-            // set 字段
-            for (k, v) in &route.set {
-                set_key(state, k, v.clone());
-            }
-            match &route.next {
-                RouteNext::Loop => { /* 继续，外层 while 会循环 */ }
-                RouteNext::End => {
-                    set_key(state, "ended", serde_json::Value::Bool(true));
-                }
-                RouteNext::Wait => {
-                    set_key(state, "suspended", serde_json::Value::Bool(true));
-                }
-                // Step 真跳转由 execute_steps 消费返回值完成（G10 新 DSL "回头"语义）；
-                // 此处不写 state.next_step。
-                RouteNext::Step(_id) => {}
-                RouteNext::Phase(id) => {
-                    // 转移到指定循环体：记到 state.next_phase（run() 在循环体
-                    // 结束时消费；step 级路由设置后在本循环体结束时生效）
-                    set_key(state, "next_phase", serde_json::Value::String(id.clone()));
-                }
-            }
-            return Some(route.next.clone());
-        }
-    }
-    None
 }
 
 // ── state 操作工具 ─────────────────────────────────────────────
@@ -1634,27 +1950,42 @@ fn last_role(state: &serde_json::Value, role: &str) -> Option<serde_json::Value>
 /// - 新增的 key：纳入 diff
 /// - 值变化的 key：纳入 diff（after 的值）
 /// - 值相同的 key：跳过
+/// - 键被移除：记 null（RFC 7396 Merge-Patch 语义，回放端 merge_patch 以 null
+///   执行删除）——审计账本要求删除可追溯；首触即不存在的（step 内净增净删）
+///   净无变化，不记
 ///
 /// 非顶层（深层）变更按整体替换（不递归细粒度 diff），对齐 step 级快照语义。
 /// messages **不参与 diff**——它走 ops 实录（ops_ledger，插件声明、指纹降级），
 /// 全量数组 diff 推断不适用（零兼容）。
-fn state_diff(before: &serde_json::Value, after: &serde_json::Value) -> serde_json::Value {
-    let before_obj = before.as_object();
+/// step 顶层键首触实录：记录写前旧值（首触即定格——后续同键再写不覆盖，
+/// diff 只关心 step 边界前后的变化）。调用方在写 state 前调用。
+fn state_diff_from_journal(
+    journal: &HashMap<String, Option<serde_json::Value>>,
+    after: &serde_json::Value,
+) -> serde_json::Value {
     let after_obj = match after.as_object() {
         Some(o) => o,
         None => return serde_json::Value::Object(Default::default()),
     };
     let mut diff = serde_json::Map::new();
-    for (k, v_after) in after_obj {
+    for (k, old) in journal {
         if k == "messages" {
             continue; // 轨迹由 ops_ledger 实录提供，diff 不推断
         }
         if k == "_plugin_errors" {
             continue; // 引擎内部键（插件错误收集），不进 trace——回放重建时由 run 开头清空重建
         }
-        let changed = match before_obj.and_then(|b| b.get(k)) {
-            Some(v_before) => v_before != v_after,
-            None => true, // 新增 key
+        let Some(v_after) = after_obj.get(k) else {
+            // 键被移除：首触已有旧值 → 记 null（merge_patch 语义的删除标记）；
+            // 首触即不存在 → step 内净无此键，无可记变化。
+            if old.is_some() {
+                diff.insert(k.clone(), serde_json::Value::Null);
+            }
+            continue;
+        };
+        let changed = match old {
+            Some(v_old) => v_old != v_after,
+            None => true, // step 内新增 key
         };
         if changed {
             diff.insert(k.clone(), v_after.clone());
@@ -1736,6 +2067,131 @@ pub fn apply_slot_ops_to_array(arr: &mut Vec<serde_json::Value>, ops: &[serde_js
             _ => {}
         }
     }
+}
+
+// ── track.messages_chars 记账（W2a 上下文估算账本）─────────────────
+//
+// `track.messages_chars` = state["messages"] 全体消息的紧凑 JSON UTF-8 字节
+// 总和，是管道 YAML 压缩粗门公式的字符账本。引擎在此增量维护（每 op O(1)，
+// insert 顺延为 O(n) 但现网零使用），领域公式写在管道 when 里——引擎零领域知识。
+
+/// 单条消息的度量单位：**剔除 seq 后**的紧凑 JSON UTF-8 字节数
+/// （`serde_json::to_string(msg).len()`）。
+///
+/// seq 是引擎分配的槽位元数据而非消息内容：insert op 顺延后段 seq、append
+/// 分配新 seq 都不改内容字节——剔除后增量记账与全量重算（[`messages_chars_total`]）
+/// 严格一致，两侧共用本函数为唯一定义。
+fn message_content_bytes(msg: &serde_json::Value) -> i64 {
+    let stripped;
+    let m = match msg {
+        serde_json::Value::Object(o) if o.contains_key("seq") => {
+            let mut c = o.clone();
+            c.remove("seq");
+            stripped = serde_json::Value::Object(c);
+            &stripped
+        }
+        _ => msg,
+    };
+    serde_json::to_string(m)
+        .map(|s| s.len() as i64)
+        .unwrap_or(0)
+}
+
+/// 全量重算：messages 全体消息的字节总和（冷启动兜底值 + 一致性性质基准）。
+fn messages_chars_total(state: &serde_json::Value) -> i64 {
+    state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().map(message_content_bytes).sum())
+        .unwrap_or(0)
+}
+
+/// 计算一组 messages ops 对字节总和的增量。**必须在 ops 应用前调用**
+/// （old 侧读应用前数组）；同批多 op 按序回放（后序 op 的旧值含前序 op 的
+/// 效果），与 `apply_messages_op_update` 对同一批的顺序应用一致。
+///
+/// 增量规则（单位见 [`message_content_bytes`]，seq 剔除口径下 insert 顺延零成本）：
+/// - `set` + msg 对象：seq 处有旧消息 → `new - old`；无旧消息（含引擎分配
+///   seq 的 append）→ `+new`
+/// - `set` + msg=null/缺省（delete）：`-old`（无旧消息为 no-op）
+/// - `insert`：`+new`
+fn messages_ops_chars_delta(state: &serde_json::Value, ops: &[serde_json::Value]) -> i64 {
+    // 旧值视角 = seq → 内容字节
+    let mut seq_bytes: HashMap<i64, i64> = HashMap::new();
+    if let Some(arr) = state.get("messages").and_then(|v| v.as_array()) {
+        for m in arr {
+            if let Some(seq) = m.get("seq").and_then(|s| s.as_i64()) {
+                seq_bytes.insert(seq, message_content_bytes(m));
+            }
+        }
+    }
+    // 与 apply_messages_op_update 同规则推进 max_seq（无 seq 的 set = append
+    // 分配 max+1，显式 seq 推进 max）——同批视角一致。
+    let mut max_seq = seq_bytes.keys().copied().max().unwrap_or(-1);
+    let mut delta: i64 = 0;
+    for op in ops {
+        let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+        match kind {
+            "set" => match op.get("seq").and_then(|v| v.as_i64()) {
+                None => {
+                    // append：引擎分配 max+1。resolve 的 max 不看 insert 的 at——
+                    // 同批 insert 顺延可把元素挪进该槽位，此时 apply 实为**替换**
+                    // （同 seq 替换内容），delta 须扣旧值；纯新槽位 old=0 自然退化为 +new。
+                    max_seq += 1;
+                    if let Some(msg) = op.get("msg").filter(|m| m.is_object()) {
+                        let new = message_content_bytes(msg);
+                        let old = seq_bytes.get(&max_seq).copied().unwrap_or(0);
+                        delta += new - old;
+                        seq_bytes.insert(max_seq, new);
+                    }
+                    // msg=null 的 append 在 apply 侧为 no-op（分配 seq 无元素可删）——不计
+                }
+                Some(seq) => {
+                    if seq > max_seq {
+                        max_seq = seq;
+                    }
+                    let old = seq_bytes.get(&seq).copied().unwrap_or(0);
+                    match op.get("msg") {
+                        Some(msg) if msg.is_object() => {
+                            let new = message_content_bytes(msg);
+                            delta += new - old;
+                            seq_bytes.insert(seq, new);
+                        }
+                        _ => {
+                            delta -= old;
+                            seq_bytes.remove(&seq);
+                        }
+                    }
+                }
+            },
+            "insert" => {
+                let Some(at) = op.get("at").and_then(|v| v.as_i64()) else {
+                    continue;
+                };
+                // 后段顺延：seq>=at 的键 +1（内容字节不变，仅键移动）
+                let shifted: Vec<(i64, i64)> = seq_bytes
+                    .iter()
+                    .filter(|(s, _)| **s >= at)
+                    .map(|(s, b)| (*s, *b))
+                    .collect();
+                for (s, _) in &shifted {
+                    seq_bytes.remove(s);
+                }
+                for (s, b) in shifted {
+                    seq_bytes.insert(s + 1, b);
+                }
+                if let Some(msg) = op.get("msg") {
+                    let new = message_content_bytes(msg);
+                    delta += new;
+                    seq_bytes.insert(at, new);
+                }
+                // 注意：不推进 max_seq——apply 的 resolve 只按 seq 字段推进
+                // （insert 的 at 不参与），同批视角必须与之一致。
+            }
+            _ => {}
+        }
+    }
+    delta
 }
 
 /// "一次 apply"：把插件 emit 的 messages op **同时**应用到内存 state 与 DB 表。
@@ -1955,9 +2411,121 @@ pub(crate) fn op_ledger_entry(op: &serde_json::Value) -> Option<serde_json::Valu
     }
 }
 
+/// 监控 M2 插件指标类别（词表，替代已废的 plugin_id 子串猜测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginMetricsClass {
+    /// LLM 调用：计入 `llm_calls_total` / `llm_calls_micros`。
+    Llm,
+    /// 工具调用：计入 `tool_calls_total` / `tool_calls_micros`。
+    Tool,
+    /// 其他编排/服务插件：不计入 LLM/tool 指标。
+    Other,
+}
+
+/// 插件 id → 指标类别显式映射（监控分类词表，非行为特判——分类结果只进
+/// metrics，不影响任何执行路径）。
+///
+/// 契约：
+/// - 键 = plugin.json 的 `id` 精确匹配（不做大小写归一、不做子串猜测）；
+/// - 覆盖现存承载 LLM/tool 调用语义的插件全集，未收录 id 一律 `Other`；
+/// - 新插件若承载 LLM/tool 调用语义须在此登记，漏登 = 指标少计（可观测
+///   债务），不构成行为故障；分类基线由
+///   `test_plugin_metrics_class_locked_to_current_plugin_set` 锁定。
+const METRICS_PLUGIN_CLASS: &[(&str, PluginMetricsClass)] = &[
+    // LLM 调用面
+    ("llm_service", PluginMetricsClass::Llm),
+    ("pipeline_llm_core", PluginMetricsClass::Llm),
+    // 工具调用面（管道工具核 + 工具插件）
+    ("agentos-builtin-tools", PluginMetricsClass::Tool),
+    ("bash_tool", PluginMetricsClass::Tool),
+    ("download_tool", PluginMetricsClass::Tool),
+    ("human_interaction_tool", PluginMetricsClass::Tool),
+    ("media_tools", PluginMetricsClass::Tool),
+    ("memory_tool", PluginMetricsClass::Tool),
+    ("pipeline_tool_cache", PluginMetricsClass::Tool),
+    ("pipeline_tool_cache_writer", PluginMetricsClass::Tool),
+    ("pipeline_tool_core", PluginMetricsClass::Tool),
+    ("pipeline_tool_schema", PluginMetricsClass::Tool),
+    ("pipeline_tool_schema_validator", PluginMetricsClass::Tool),
+    ("project_create_tool", PluginMetricsClass::Tool),
+    ("resource_merge_tool", PluginMetricsClass::Tool),
+    ("resource_search_tool", PluginMetricsClass::Tool),
+    ("simple_tools", PluginMetricsClass::Tool),
+    ("spill_retrieve_tool", PluginMetricsClass::Tool),
+    ("task_evaluate_tool", PluginMetricsClass::Tool),
+    ("task_manage_tool", PluginMetricsClass::Tool),
+    ("task_submit_tool", PluginMetricsClass::Tool),
+    ("trigger_setup_tool", PluginMetricsClass::Tool),
+    ("web_operate_tool", PluginMetricsClass::Tool),
+];
+
+/// 按显式映射表分类插件 id（未收录 → `Other`）。
+fn plugin_metrics_class(plugin_id: &str) -> PluginMetricsClass {
+    METRICS_PLUGIN_CLASS
+        .iter()
+        .find(|(id, _)| *id == plugin_id)
+        .map(|(_, class)| *class)
+        .unwrap_or(PluginMetricsClass::Other)
+}
+
 // ═════════════════════════════════════════════════════════════════
 // 单元测试
 // ═════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod state_diff_journal_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// journal diff 语义边界三态：变更/新增入选；写回原值与未触碰键、被移除键、
+    /// messages/_plugin_errors 一律不进 diff（与旧全量 diff 行为逐条对齐）。
+    #[test]
+    fn diff_from_journal_semantics() {
+        let mut journal = HashMap::new();
+        journal.insert("a".to_string(), Some(json!(1))); // 写回原值 → 排除
+        journal.insert("b".to_string(), Some(json!(2))); // 变更 → 入选
+        journal.insert("c".to_string(), None); // step 内新增 → 入选
+        journal.insert("d".to_string(), Some(json!(4))); // 键被移除 → null 入选
+        journal.insert("messages".to_string(), Some(json!([]))); // 排除键
+        journal.insert("_plugin_errors".to_string(), None); // 排除键
+        let after = json!({
+            "a": 1,      // 未变
+            "b": 3,      // 变更
+            "c": 5,      // 新增
+            "e": 9,      // 未触碰（不在 journal）→ 排除
+        });
+        let diff = state_diff_from_journal(&journal, &after);
+        assert_eq!(diff, json!({"b": 3, "c": 5, "d": null}));
+    }
+
+    /// after 非 Object（防御路径）：diff 为空对象。
+    #[test]
+    fn diff_from_journal_non_object_after_is_empty() {
+        let mut journal = HashMap::new();
+        journal.insert("a".to_string(), Some(json!(1)));
+        assert_eq!(state_diff_from_journal(&journal, &json!("str")), json!({}));
+    }
+
+    /// 键被移除的性质断言：diff 应用到 step 前状态须能重建 after 的键集——
+    /// 「首触存在、after 缺失」产出 null 删除标记；「首触即不存在、after 亦无」
+    /// 是 step 内净增净删，净无变化，不得产出任何标记。
+    #[test]
+    fn diff_from_journal_removal_keyset_roundtrip() {
+        // 删除可追溯：before 有 x → diff 记 null；消费方按 null 删 x 后键集与 after 一致。
+        let mut journal = HashMap::new();
+        journal.insert("x".to_string(), Some(json!({"n": 1})));
+        journal.insert("keep".to_string(), Some(json!(1)));
+        let after = json!({"keep": 2});
+        let diff = state_diff_from_journal(&journal, &after);
+        assert_eq!(diff, json!({"x": null, "keep": 2}));
+
+        // 净增净删不记：首触时 x 不存在（None），after 亦无 x → diff 不含 x。
+        let mut journal = HashMap::new();
+        journal.insert("x".to_string(), None);
+        let diff = state_diff_from_journal(&journal, &json!({}));
+        assert!(diff.as_object().is_some_and(|o| o.is_empty()));
+    }
+}
 
 #[cfg(test)]
 mod tests;

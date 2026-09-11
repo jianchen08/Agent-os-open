@@ -24,8 +24,10 @@ var command_router: Node
 ## <project>/.godot/godot-mcp.json keeps an accurate http_port.
 var ws_server: Node = null
 
-const DEFAULT_PORT := 9100
-const PORT_RANGE := 16                        # scan DEFAULT_PORT .. DEFAULT_PORT+PORT_RANGE-1 (9100-9115)
+const DEFAULT_PORT := 9116
+const PORT_RANGE := 16                        # scan DEFAULT_PORT .. DEFAULT_PORT+PORT_RANGE-1 (9116-9131)
+                                              # 不得覆盖 9100：那是内核端口；Windows 下 127.0.0.1 特定绑定
+                                              # 可叠在内核 0.0.0.0 通配绑定上，把 localhost 流量整个截走
 const BIND_ADDRESS := "127.0.0.1"
 const MAX_BODY := 16 * 1024 * 1024            # cap a request body (matches the addon's 16MB buffers)
 const MAX_PEERS := 16                          # cap concurrent clients to bound memory

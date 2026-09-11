@@ -79,5 +79,19 @@
   "permissions": {},
   "plugin_type": "pipeline",
   "priority": 50,
+  "state": {
+    "reads": [
+      "messages",
+      "system_message",
+      "context_window",
+      "context_guard.trigger_ratio",
+      "llm_usage",
+      "track.llm_usage",
+      "_tracked_msg_count",
+      "on_chunk",
+      "user_id",
+      "context.session_id"
+    ]
+  },
   "version": "1.0.0"
 }

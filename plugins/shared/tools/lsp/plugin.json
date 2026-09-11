@@ -65,6 +65,12 @@
               "type": "integer"
             }
           }
+        },
+        "render": {
+          "card": "table",
+          "bindings": {
+            "items": "result.locations"
+          }
         }
       },
       {
@@ -122,6 +128,12 @@
             "count": {
               "type": "integer"
             }
+          }
+        },
+        "render": {
+          "card": "table",
+          "bindings": {
+            "items": "result.references"
           }
         }
       },
@@ -184,6 +196,12 @@
               "type": "integer"
             }
           }
+        },
+        "render": {
+          "card": "table",
+          "bindings": {
+            "items": "result.diagnostics"
+          }
         }
       },
       {
@@ -234,6 +252,9 @@
               "type": "integer"
             }
           }
+        },
+        "render": {
+          "card": "file"
         }
       }
     ],

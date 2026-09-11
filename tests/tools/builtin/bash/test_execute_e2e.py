@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """execute 端到端测试 —— 真实链路，不 mock start_process。
 
 为什么需要这组测试：之前的 execute 测试全 mock 掉了 start_process/get_summary，

@@ -4,13 +4,10 @@
  */
 import { renderHook, waitFor } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 const getModelCapabilitiesMock = vi.fn()
-
 vi.mock('@/services/api/files', () => ({
   getModelCapabilities: (...args: unknown[]) => getModelCapabilitiesMock(...args),
 }))
-
 import { useModelCapabilities, clearCapabilitiesCache } from '../useModelCapabilities'
 
 const fullCapabilities = {

@@ -17,5 +17,11 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "state": {
+    "reads": [
+      "_tool_definitions",
+      "injected_param_check_done"
+    ]
+  }
 }

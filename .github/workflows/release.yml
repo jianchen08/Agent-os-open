@@ -11,7 +11,8 @@
 #
 # 产物：
 #   - Python sdist + wheel（python -m build 产出，dist/）
-#   - kernel 二进制（release 构建，Linux x86_64 tar.gz）
+#   - kernel 二进制（release 构建，Linux x86_64 tar.gz + Windows x86_64 zip）
+#   - Linux 产物入 Release 前先冒烟（临时库启动内核，curl /health 断言 200）
 #   - 全部归档到 GitHub Release（softprops/action-gh-release）
 #
 # 权限：contents: write（创建 Release）；id-token 预留 pypi Trusted
@@ -45,10 +46,39 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # ── Windows 产物（编译通过 + 产物存在即可；无 smoke）─────────────────
+  # build（Linux）needs 本 job：Windows zip 经 artifact 汇入同一个 Release。
+  build-windows:
+    name: Build Windows kernel binary
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build kernel binary (release)
+        working-directory: kernel
+        run: |
+          rustup show
+          cargo +stable build --release --bin agentos-kernel
+
+      - name: Package kernel binary (zip)
+        run: |
+          mkdir release-assets
+          cp kernel/target/release/agentos-kernel.exe release-assets/
+          Compress-Archive -Path release-assets/agentos-kernel.exe `
+            -DestinationPath release-assets/agentos-kernel-windows-x86_64.zip
+          ls release-assets/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kernel-windows
+          path: release-assets/agentos-kernel-windows-x86_64.zip
+          if-no-files-found: error
+
   # ── 构建发布产物 ──────────────────────────────────────────
   build:
     name: Build release artifacts
     runs-on: ubuntu-latest
+    needs: build-windows
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -90,6 +120,39 @@ jobs:
             -C release-assets agentos-kernel
           ls -la release-assets/
 
+      # 冒烟验证：发布二进制必须能真实启动并服务 /health（200）。
+      # AGENTOS_DB_PATH 指向临时目录（不动仓库数据）；默认绑定 127.0.0.1；
+      # 插件 sidecar 缺 venv 只会 G2 观测降级（非致命），不阻塞 /health。
+      - name: Smoke test kernel binary (/health -> 200)
+        run: |
+          SMOKE_DIR=$(mktemp -d)
+          AGENTOS_DB_PATH="$SMOKE_DIR/smoke.db" AGENTOS_KERNEL_PORT=9117 \
+            ./kernel/target/release/agentos-kernel > /tmp/kernel-smoke.log 2>&1 &
+          KERNEL_PID=$!
+          code=000
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9117/health || true)
+            [ "$code" = "200" ] && break
+            # 进程已退出还等就是白等：立即失败并带日志
+            if ! kill -0 "$KERNEL_PID" 2>/dev/null; then break; fi
+            sleep 2
+          done
+          kill "$KERNEL_PID" 2>/dev/null || true
+          wait "$KERNEL_PID" 2>/dev/null || true
+          if [ "$code" != "200" ]; then
+            echo "===== kernel-smoke.log tail ====="
+            tail -60 /tmp/kernel-smoke.log
+            echo "::error::kernel smoke failed: /health 未在超时内返回 200（最后一次 HTTP $code）"
+            exit 1
+          fi
+          echo "[smoke] /health -> 200 OK"
+
+      # Windows 产物（zip）经 artifact 汇入同一 release-assets 目录
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: kernel-windows
+          path: release-assets
+
       # TODO(0.2.0+)：pypi 发布（需确认 agent-os 包名可用性 + 配置
       # pypa/gh-action-pypi-publish Trusted Publishing）：
       #   - uses: pypa/gh-action-pypi-publish@release/v1
@@ -107,3 +170,4 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
             release-assets/*.tar.gz
+            release-assets/*.zip

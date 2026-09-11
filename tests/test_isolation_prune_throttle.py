@@ -121,17 +121,16 @@ async def test_start_triggers_prune_when_overdue(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_docker_concurrency_limited_by_semaphore():
-    """并发 _run_cmd 调用数不超过 max_docker_concurrency（默认 4）。"""
-    provider = DockerProvider(config={"max_docker_concurrency": 3})
+async def _measure_peak_docker_concurrency(provider: DockerProvider, n_calls: int) -> int:
+    """并发发起 n_calls 次 _run_cmd，返回 docker 调用层观测到的峰值并发。
 
+    subprocess.run 是与外部 docker daemon 的边界：替换为带 50ms 真实耗时
+    的桩制造重叠窗口。峰值并发即限流信号量的可观察行为——配置的
+    max_docker_concurrency 生效与否只看这个峰值，不看内部属性。
+    """
     current_concurrent = 0
     peak_concurrent = 0
 
-    import subprocess as real_sp
-
-    # 用一个会记录并发数的假 _sp.run 替代真实 docker 调用
     class FakeResult:
         returncode = 0
         stdout = b""
@@ -145,23 +144,42 @@ async def test_docker_concurrency_limited_by_semaphore():
         current_concurrent -= 1
         return FakeResult()
 
-    # monkeypatch subprocess.run
-    import providers.docker_provider as dp_mod
+    import subprocess as real_sp
+
     original_run = real_sp.run
     real_sp.run = fake_run
     try:
-        # 启动 10 个并发命令，验证峰值并发不超过 3
-        await asyncio.gather(*[provider._run_cmd(["docker", "version"]) for _ in range(10)])
+        await asyncio.gather(
+            *[provider._run_cmd(["docker", "version"]) for _ in range(n_calls)],
+        )
     finally:
         real_sp.run = original_run
+
+    return peak_concurrent
+
+
+@pytest.mark.asyncio
+async def test_docker_concurrency_limited_by_semaphore():
+    """并发 _run_cmd 调用数不超过 max_docker_concurrency（config=3）。"""
+    provider = DockerProvider(config={"max_docker_concurrency": 3})
+
+    peak_concurrent = await _measure_peak_docker_concurrency(provider, 10)
 
     assert peak_concurrent <= 3, f"并发数 {peak_concurrent} 超过上限 3"
     assert peak_concurrent >= 2, "信号量未真正限流（应有重叠）"
 
 
-def test_docker_concurrency_configurable():
-    """max_docker_concurrency 可经 config 配置。"""
+@pytest.mark.asyncio
+async def test_docker_concurrency_configurable():
+    """默认并发上限为 4（第 5 个并发调用被限流）；config 调高后真实生效。"""
+    # 默认配置：10 个并发调用，峰值不得超过默认上限 4
     p_default = DockerProvider()
+    peak_default = await _measure_peak_docker_concurrency(p_default, 10)
+    assert peak_default <= 4, f"默认配置下并发数 {peak_default} 超过默认上限 4"
+
+    # 调高到 8：12 个并发调用，峰值既不超过 8，也确实超过默认上限 4
+    # （后者证明配置被真实消费，而非固定 4）
     p_custom = DockerProvider(config={"max_docker_concurrency": 8})
-    assert p_default._max_docker_concurrency == 4
-    assert p_custom._max_docker_concurrency == 8
+    peak_custom = await _measure_peak_docker_concurrency(p_custom, 12)
+    assert peak_custom <= 8, f"自定义配置下并发数 {peak_custom} 超过上限 8"
+    assert peak_custom > 4, f"调高配置未生效（峰值 {peak_custom} 未超过默认 4）"

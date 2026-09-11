@@ -85,7 +85,6 @@ export const useVotingStore = create<VotingState>()((set, get) => ({
       return { success: false, error: '投票已关闭' }
     }
 
-    // 多选验证
     if (!session.allowMultiple && selectedOptionIds.length > 1) {
       return { success: false, error: '此投票不支持多选' }
     }
@@ -94,7 +93,6 @@ export const useVotingStore = create<VotingState>()((set, get) => ({
       return { success: false, error: `最多选择 ${session.maxSelections} 个方案` }
     }
 
-    // 理由验证
     if (session.requireReason && !reason?.trim()) {
       return { success: false, error: '请填写投票理由' }
     }
@@ -107,7 +105,6 @@ export const useVotingStore = create<VotingState>()((set, get) => ({
       return { success: false, error: '包含无效的方案 ID' }
     }
 
-    // 更新投票数据
     set((state) => ({
       votingSessions: state.votingSessions.map((v) => {
         if (v.id !== votingId) return v

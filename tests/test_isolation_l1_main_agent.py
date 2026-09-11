@@ -28,7 +28,7 @@ ensure_stdlib_module("types")
 from types import SimpleNamespace  # noqa: E402
 
 import pytest  # noqa: E402
-from isolation_types import IsolationLevel  # noqa: E402
+from agentos_plugin_sdk.isolation_types import IsolationLevel  # noqa: E402
 
 import tests._isolation_path  # noqa: F401
 

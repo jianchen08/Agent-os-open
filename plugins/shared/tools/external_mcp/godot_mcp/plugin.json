@@ -40,6 +40,9 @@
         "output_schema": {
           "type": "object",
           "description": "命令结果对象：成功时含命令各自的数据字段；编辑器不可达时含 editor_unreachable/verdict/status.message 恢复指引"
+        },
+        "render": {
+          "card": "generic"
         }
       }
     ]

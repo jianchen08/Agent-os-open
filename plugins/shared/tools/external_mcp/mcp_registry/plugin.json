@@ -1,7 +1,7 @@
 {
   "id": "mcp_registry_search",
   "name": "MCP Registry Search",
-  "description": "MCP Registry 搜索 MCP 工具",
+  "description": "MCP Registry 搜索 MCP 工具\n\n[工具契约注] 「mcp_registry_search」的 output_schema 由远端 MCP 供给（MCP tools/list 运行时返回；output 形状由上游服务定义），plugin.json 不静态声明，仅保留 LLM 调用所需的 input_schema。",
   "version": "1.0.0",
   "plugin_type": "tool",
   "language": "external",

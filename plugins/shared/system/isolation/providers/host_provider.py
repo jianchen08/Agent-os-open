@@ -10,11 +10,12 @@ import asyncio
 import logging
 import os
 import platform
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from isolation_types import (
+from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
     IsolationContext,
@@ -22,6 +23,14 @@ from isolation_types import (
     IsolationLevel,
 )
 from providers.base import IsolationProvider
+
+# 共享根（proc_tree 等共享裸模块所在）显式入 sys.path：本插件不经
+# bootstrap_plugin 引导（server.py 只注入插件目录），实现模块自持解析。
+_SHARED_ROOT = str(Path(__file__).resolve().parents[3])
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+
+from proc_tree import kill_process_tree  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -174,13 +183,24 @@ class HostProvider(IsolationProvider):
                 )
 
             except TimeoutError:
-                # 超时，终止进程
-                try:
-                    process.kill()
-                    await process.wait()
-                except Exception:
-                    pass
-
+                # 超时终止整棵进程树（子进程随之清理，不留孤儿）；杀失败
+                # 不吞——告警 + 失败清单回填错误消息，残留进程对调用方可见。
+                failures = kill_process_tree(process.pid)
+                if failures:
+                    logger.warning(
+                        "[HostProvider] 命令超时后进程树清理失败 | pid=%s | failures=%s",
+                        process.pid,
+                        failures,
+                    )
+                    return ExecutionResult(
+                        success=False,
+                        output=None,
+                        error=(
+                            f"命令执行超时（{timeout}秒）；"
+                            f"进程树清理失败: {'; '.join(failures)}"
+                        ),
+                    )
+                await process.wait()  # 树已终止：回收 asyncio 子进程资源
                 return ExecutionResult(
                     success=False,
                     output=None,

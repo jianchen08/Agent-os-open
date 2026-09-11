@@ -16,7 +16,7 @@ fn make_endpoint(route_id: &str, method: &str, path: &str) -> HttpEndpoint {
         route_id: route_id.to_string(),
         method: method.to_string(),
         path: path.to_string(),
-        auth: "none".to_string(),
+        auth: Some("none".to_string()),
         handler_capability: "http.handle".to_string(),
         timeout_ms: None,
         max_concurrency: None,

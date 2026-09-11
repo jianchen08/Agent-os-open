@@ -20,6 +20,7 @@ docs/working/插件合宿进程模型优化方案_20260826.md §4.3）：
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any
@@ -28,6 +29,8 @@ from agentos_plugin_sdk._logging import setup_sidecar_logging
 from agentos_plugin_sdk.plugin import AgentOSPlugin
 from agentos_plugin_sdk.server import KernelChannel, McpServer
 from agentos_plugin_sdk.types import ResourceDef, ToolDef
+
+logger = logging.getLogger(__name__)
 
 
 class CohostServer:
@@ -92,21 +95,32 @@ class CohostServer:
         return resources
 
     def _aggregate_lifecycle_handlers(self) -> dict[str, Callable[..., Any]]:
-        """成员生命周期钩子 → 每事件一个扇出 handler。"""
-        handlers_by_event: dict[str, list[Callable[..., Any]]] = {}
-        for plugin in self._members.values():
+        """成员生命周期钩子 → 每事件一个扇出 handler（携带成员标识用于隔离留痕）。"""
+        handlers_by_event: dict[str, list[tuple[str, Callable[..., Any]]]] = {}
+        for plugin_id, plugin in self._members.items():
             for event, handler in plugin._lifecycle_handlers.items():
-                handlers_by_event.setdefault(event, []).append(handler)
+                handlers_by_event.setdefault(event, []).append((plugin_id, handler))
         return {event: self._make_fan_out_handler(handlers) for event, handlers in handlers_by_event.items()}
 
-    def _make_fan_out_handler(self, handlers: list[Callable[..., Any]]) -> Callable[..., Any]:
-        """构造单事件扇出：同步/异步 handler 按成员注册顺序执行。"""
+    def _make_fan_out_handler(self, handlers: list[tuple[str, Callable[..., Any]]]) -> Callable[..., Any]:
+        """构造单事件扇出：同步/异步 handler 按成员注册顺序执行。
+
+        生命周期通知是广播语义：单成员 handler 异常就地隔离留痕（含成员
+        标识与堆栈）并继续，不中断其余成员的投递——任一成员的生命周期
+        装配失败不得使排在它之后的成员失去 on_load 接线。
+        """
 
         async def _fan_out(params: dict[str, Any]) -> None:
-            for handler in handlers:
-                result = handler(dict(params))
-                if asyncio.iscoroutine(result):
-                    await result
+            for plugin_id, handler in handlers:
+                try:
+                    result = handler(dict(params))
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    logger.exception(
+                        "[cohost] 成员生命周期 handler 异常（已隔离，不影响其余成员）: plugin=%s",
+                        plugin_id,
+                    )
 
         return _fan_out
 

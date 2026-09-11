@@ -1,52 +1,97 @@
 /**
- * WidgetStage — 声明 widget 演示台宿主（widget_demo 插件的舞台）。
+ * WidgetStage — 声明 widget 组台宿主（contributes.pages 声明 {widget:
+ * 'widget_stage', props: {space}} 的渲染目标，monitoring /monitoring 页、
+ * trigger_setup_tool /triggers 页等复用）。
  *
- * 渲染指定 space 的全部声明 widget（DeclaredWidgetLayer 附加式），并演示
- * G4 受控双向绑定桥：对声明 id 匹配的控件注入 value/onChange（宿主状态
- * 持有），覆盖 compact 受控（demo_controlled）、拖拽排序（demo_sortable）、
- * 内联编辑（demo_inline）三种形态——证明受控桥在非 chat-input 空间通用。
- *
- * 通用性：任何插件都可声明 contributes.pages {widget: 'widget_stage',
- * props: {space: 'xxx'}} 把一组声明 widget 摆到一个工作区页里。
+ * 分组（2026-09-10）：声明带 `group` 时按组渲染 tab（组序 = 组员最小 order，
+ * 未分组声明归入「概览」组）；无任何分组声明的空间保持平铺（兼容两件小页）。
+ * 组内渲染委托 DeclaredWidgetLayer（声明 props 透传 + watch/refresh 联动）。
  */
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
-import { useControlledSlotBridge } from '@/hooks/useControlledSlotBridge'
+import { cn } from '@/lib/utils'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
+
+/** 未分组声明的归并组名 */
+const DEFAULT_GROUP = '概览'
+
+interface WidgetGroup {
+  name: string
+  members: WidgetDeclaration[]
+}
 
 export function WidgetStage(props: Record<string, unknown>) {
   const space = (props.space as string) ?? 'widget-stage'
-  // 宿主受控状态（G4 桥的三个演示目标）
-  const [mode, setMode] = useState('medium')
-  const [sortableItems, setSortableItems] = useState<string[]>(['alpha', 'beta', 'gamma'])
-  const [inlineValue, setInlineValue] = useState('点击编辑我')
 
-  const controlledBridge = useControlledSlotBridge('demo_controlled', {
-    field: 'strength',
-    get: () => mode,
-    set: (_f, v) => setMode(v as string),
-  })
+  // registry 由 GrowthLoop 全局装载（登录后初始化 + schema_updated 刷新），
+  // 轮询条目数捕获迟到的装载结果（与侧栏/调试中心同模式）
+  const [contribTick, setContribTick] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const n = contributionRegistry.getAllWidgets().filter((d) => !d.space || d.space === space).length
+      setContribTick((prev) => (prev === n ? prev : n))
+    }, 1500)
+    return () => window.clearInterval(id)
+  }, [space])
 
-  // 多声明分派：受控桥 + sortable/inline 的受控注入（同一 overrideProps 机制）
-  const overrideProps = (declaration: WidgetDeclaration) => {
-    const bridged = controlledBridge(declaration)
-    if (bridged) return bridged
-    if (declaration.id === 'demo_sortable') {
-      return {
-        items: sortableItems,
-        onChange: (items: Array<{ label: string; value: string }>) =>
-          setSortableItems(items.map((i) => String(i.value ?? i.label))),
-      }
+  const groups = useMemo<WidgetGroup[]>(() => {
+    void contribTick
+    const inSpace = contributionRegistry
+      .getAllWidgets()
+      .filter((d) => !d.space || d.space === space)
+    if (inSpace.length === 0) return []
+    const byGroup = new Map<string, WidgetDeclaration[]>()
+    for (const d of inSpace) {
+      const name = d.group ?? DEFAULT_GROUP
+      const list = byGroup.get(name) ?? []
+      list.push(d)
+      byGroup.set(name, list)
     }
-    if (declaration.id === 'demo_inline') {
-      return { value: inlineValue, onChange: (v: string) => setInlineValue(v) }
-    }
-    return undefined
-  }
+    // 组序 = 组员最小 order（缺省 1000）；组内按 order 升序
+    return [...byGroup.entries()]
+      .map(([name, members]) => ({
+        name,
+        minOrder: Math.min(...members.map((m) => m.order ?? 1000)),
+        members: [...members].sort((a, b) => (a.order ?? 1000) - (b.order ?? 1000)),
+      }))
+      .sort((a, b) => a.minOrder - b.minOrder)
+      .map(({ name, members }) => ({ name, members }))
+  }, [contribTick, space])
+
+  const grouped = groups.length > 1 || (groups.length === 1 && groups[0].name !== DEFAULT_GROUP)
+  const [activeGroup, setActiveGroup] = useState<string | null>(null)
+  const active = grouped ? (groups.find((g) => g.name === activeGroup) ?? groups[0]) : null
 
   return (
-    <div className="space-y-4 p-3" data-testid="widget-stage">
-      <DeclaredWidgetLayer space={space} overrideProps={overrideProps} />
+    <div className="flex h-full min-h-0 flex-col" data-testid="widget-stage">
+      {grouped && (
+        <div className="flex flex-wrap gap-1 border-b px-2 py-1.5">
+          {groups.map((g) => (
+            <button
+              key={g.name}
+              type="button"
+              onClick={() => setActiveGroup(g.name)}
+              data-testid={`widget-stage-tab-${g.name}`}
+              className={cn(
+                'rounded-md px-2.5 py-1 text-xs transition-colors',
+                active?.name === g.name
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:bg-accent/50',
+              )}
+            >
+              {g.name}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="min-h-0 flex-1 space-y-4 overflow-auto p-3">
+        {active ? (
+          <DeclaredWidgetLayer space={space} declarations={active.members} />
+        ) : (
+          <DeclaredWidgetLayer space={space} />
+        )}
+      </div>
     </div>
   )
 }

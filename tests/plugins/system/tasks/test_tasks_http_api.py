@@ -413,10 +413,13 @@ class TestTasksEndpoints:
                                        hub: _FakeCapabilityHub) -> None:
         """详情与列表同源：state 行命中 200，未命中 404（无 YAML 兜底）。"""
         _seed_state(hub, [_state_row("pipe-detail-1", "详情", "completed")])
-        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe-detail-1")
+        headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe-detail-1",
+                           headers=headers)
         assert resp["status"] == 200
         assert resp["payload"]["title"] == "详情"
-        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/missing-1")
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/missing-1",
+                           headers=headers)
         assert resp["status"] == 404
 
     async def test_delete_task(self, monkeypatch: pytest.MonkeyPatch,
@@ -499,6 +502,31 @@ class TestTasksEndpoints:
         assert resp["status"] == 200
         assert resp["payload"]["resumed_count"] == 1
 
+    async def test_resume_task_rejects_completed_projection(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
+        """U13 恢复链前置仲裁：投影 completed → 409 拒绝。
+
+        幽灵 running（收尾写失败后 runs 残留 running）会让 resume_pipeline
+        幂等空转（dispatched=false）却返回 run_id——假成功。任务域按投影终态
+        证据识破（谁持证据谁裁决，域界定 §二.5），给用户明确报错而非静默空转。
+        """
+        hub._responses["pipeline-executor"] = {"resume_pipeline": {"run_id": "r-ghost"}}
+        _seed_state(hub, [{"pipeline_id": "t-1", "task.id": "t-1", "task.status": "completed"}])
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/t-1/resume", "POST")
+        assert resp["status"] == 409
+        # 拒绝即不派发（runs 侧幽灵 running 不被触碰；句柄懒创建，零调用时不存在）
+        executor_calls = getattr(hub.handles.get("pipeline-executor"), "calls", [])
+        assert not any(m == "resume_pipeline" for m, _ in executor_calls)
+
+    async def test_resume_task_ignores_arbitration_when_state_unreadable(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
+        # 防过度修复：投影读面故障（能力缺席/读失败）不拦恢复链——降级放行原语义
+        hub._responses["pipeline-executor"] = {"resume_pipeline": {"run_id": "r-2"}}
+        hub._responses["pipeline-state"] = {}
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/t-1/resume", "POST")
+        assert resp["status"] == 200
+        assert resp["payload"]["resumed_count"] == 1
+
     async def test_resume_task_passes_caller_user_to_kernel(
             self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
         # 恢复续跑轮的租户/归属解析依赖调用方 user——resume_pipeline 调用
@@ -511,6 +539,24 @@ class TestTasksEndpoints:
         calls = [(m, pr) for m, pr in hub.handles["pipeline-executor"].calls
                  if m == "resume_pipeline"]
         assert calls[0][1]["user_id"] == "u-9"
+
+    async def test_resume_task_carries_terminal_state_reset_overlay(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
+        """B13①：resume 续跑派发必须携带终态键复位 overlay。
+
+        恢复投影（registry 快照/checkpoint/pipeline_state 表）残留上一 run 的
+        task.status=failed 时，stop_check 缓存路径第一轮即收束（任务无法重提）。
+        复位语义归任务域（defd5b555 恢复重置同族）——resume_pipeline 调用带
+        state_overlay，内核装配在恢复合并之后应用（overlay 优先于恢复基线）。
+        """
+        hub._responses["pipeline-executor"] = {"resume_pipeline": {"run_id": "r-10"}}
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/t-1/resume", "POST")
+        assert resp["status"] == 200
+        calls = [(m, pr) for m, pr in hub.handles["pipeline-executor"].calls
+                 if m == "resume_pipeline"]
+        overlay = calls[0][1]["state_overlay"]
+        assert overlay["task.status"] == "running"
+        assert overlay["task_status"] == "running"
 
     async def test_pause_task_no_run_404(self, monkeypatch: pytest.MonkeyPatch,
                                          hub: _FakeCapabilityHub) -> None:
@@ -586,6 +632,102 @@ class TestTasksEndpoints:
         resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/debug/all",
                            query={"session_id": "s"})
         assert resp["payload"]["total"] == 2
+
+
+# ═══════════════════════════════════════════════════════════
+# 3.5 任务归属闸（U6：get_task 真消费 caller）
+# ═══════════════════════════════════════════════════════════
+
+class TestTaskOwnershipGate:
+    """get_task 归属闸：请求方与任务归属（task.submitted_by，出生契约写全）
+    不一致 → 404 且与"任务不存在"同响应形状（防存在性探测）；
+    任务侧缺归属元数据 fail-closed 拒绝并说明原因（存量回填属运行时操作）。"""
+
+    @pytest.mark.parametrize(("owner_uid", "task_id"), [
+        ("u-1", "pipe-detail-1"),
+        ("u-7", "pipe-of-u7"),
+    ], ids=["owner-u1", "owner-u7"])
+    async def test_get_task_owner_allowed(self, monkeypatch: pytest.MonkeyPatch,
+                                          hub: _FakeCapabilityHub,
+                                          owner_uid: str, task_id: str) -> None:
+        """归属一致放行：提交者本人读自己的任务 → 200。"""
+        _seed_state(hub, [
+            _state_row("pipe-detail-1", "u1的任务", "completed"),
+            _state_row("pipe-of-u7", "u7的任务", "running",
+                       **{"task.submitted_by": "u-7"}),
+        ])
+        headers = {"Authorization": f"Bearer {_make_token(owner_uid)}"}
+        resp = await _http(monkeypatch, hub, f"/ext/task_service/tasks/{task_id}",
+                           headers=headers)
+        assert resp["status"] == 200
+        assert resp["payload"]["id"] == task_id
+
+    @pytest.mark.parametrize("reader_uid", ["u-2", "someone-else"],
+                             ids=["other-registered-user", "other-uid-shape"])
+    async def test_get_task_cross_user_denied_404(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub,
+            reader_uid: str) -> None:
+        """用户 A 建任务、用户 B 上下文读 → 404，且响应与"任务不存在"完全同形
+        （防存在性探测：状态码/错误码/消息均不可区分）。"""
+        _seed_state(hub, [_state_row("pipe-a-task", "A的任务", "running")])
+        not_found = await _http(monkeypatch, hub, "/ext/task_service/tasks/missing-x",
+                                headers={"Authorization": f"Bearer {_make_token(reader_uid)}"})
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe-a-task",
+                           headers={"Authorization": f"Bearer {_make_token(reader_uid)}"})
+        assert resp["status"] == 404
+        assert resp["payload"] == not_found["payload"]
+
+    async def test_get_task_anonymous_denied(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
+        """无/无效 token 的匿名请求 → 404（无法确立归属一致性，fail-closed）。"""
+        _seed_state(hub, [_state_row("pipe-a-task", "A的任务", "running")])
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe-a-task")
+        assert resp["status"] == 404
+        expired = base64.b64encode(b"access:u-1:x:1").decode("ascii").rstrip("=")
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe-a-task",
+                           headers={"Authorization": f"Bearer {expired}"})
+        assert resp["status"] == 404
+
+    @pytest.mark.parametrize("caller_uid", ["u-1", "u-2"],
+                             ids=["self-named-caller", "other-caller"])
+    async def test_get_task_missing_ownership_fail_closed(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub,
+            caller_uid: str) -> None:
+        """存量任务缺归属元数据 → 一律 404 fail-closed，错误信息说明原因
+        （不做"匿名放行"式降级；回填属运行时操作）。"""
+        row = _state_row("pipe-legacy", "无归属存量任务", "completed")
+        del row["task.submitted_by"]
+        _seed_state(hub, [row])
+        headers = {"Authorization": f"Bearer {_make_token(caller_uid)}"} if caller_uid else None
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe-legacy",
+                           headers=headers)
+        assert resp["status"] == 404
+        assert "归属" in resp["payload"]["detail"]
+
+    async def test_get_task_owned_task_inherits_host_owner(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
+        """登记型任务（task.owned.*，宿主管道自持）用户归属继承宿主行
+        task.submitted_by：宿主提交者可读，其他用户 404（owned.submitted_by
+        是系统登记标记如 review_system，不参与归属比对）。"""
+        _seed_state(hub, [{
+            "pipeline_id": "host-pipe-1",
+            "task.goal": "宿主任务",
+            "task.status": "running",
+            "task.submitted_by": "u-1",
+            "task.owned.c1d2e3f4a5b6.title": "复盘 task-9",
+            "task.owned.c1d2e3f4a5b6.status": "running",
+            "task.owned.c1d2e3f4a5b6.submitted_by": "review_system",
+            "thread_id": "host-pipe-1",
+        }])
+        owner_headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        resp = await _http(monkeypatch, hub,
+                           "/ext/task_service/tasks/c1d2e3f4a5b6", headers=owner_headers)
+        assert resp["status"] == 200
+        assert resp["payload"]["id"] == "c1d2e3f4a5b6"
+        other_headers = {"Authorization": f"Bearer {_make_token('u-2')}"}
+        resp = await _http(monkeypatch, hub,
+                           "/ext/task_service/tasks/c1d2e3f4a5b6", headers=other_headers)
+        assert resp["status"] == 404
 
 
 # ═══════════════════════════════════════════════════════════
@@ -999,50 +1141,50 @@ class TestEdgeAndDegradedBranches:
 
     # ── 响应协议/身份解析辅助 ──
 
-    def test_http_exc_response_uses_detail_attr(self) -> None:
-        import http_api
+    async def test_http_exc_response_uses_detail_attr(self, monkeypatch: pytest.MonkeyPatch,
+                                                      hub: _FakeCapabilityHub) -> None:
+        """异常→响应信封经公开面断言：业务异常的 status/detail 原样成 body。"""
+        _seed_state(hub, [_state_row("pipe-run", "运行中任务", "running")])
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe-run/submit", "POST")
+        assert resp["status"] == 400
+        assert "不允许提交" in resp["payload"]["detail"]
 
-        class _Err(Exception):
-            status_code = 418
-            detail = "teapot-required"
+    async def test_decode_kernel_token_malformed(self, monkeypatch: pytest.MonkeyPatch,
+                                                 hub: _FakeCapabilityHub) -> None:
+        """畸形 token（非 base64/缺段/非法时间戳）→ 公开面一律 fail-closed 404。"""
+        _seed_state(hub, [_state_row("pipe-a-task", "A的任务", "running")])
+        for token in (
+            "!!!not-base64!!!",
+            base64.b64encode(b"access:user:n").decode("ascii"),
+            base64.b64encode(b"access:user:n:notnum").decode("ascii"),
+        ):
+            resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe-a-task",
+                               headers={"Authorization": f"Bearer {token}"})
+            assert resp["status"] == 404, token
 
-        out = http_api._http_exc_response(_Err())
-        payload = json.loads(base64.b64decode(out["data"]["body"]).decode("utf-8"))
-        assert payload == {"detail": "teapot-required"}
-        assert out["data"]["status"] == 418
-
-    def test_decode_kernel_token_malformed(self) -> None:
-        import http_api
-
-        assert http_api._decode_kernel_token("!!!not-base64!!!") is None
-        short = base64.b64encode(b"access:user:n").decode("ascii")
-        assert http_api._decode_kernel_token(short) is None
-        badexp = base64.b64encode(b"access:user:n:notnum").decode("ascii")
-        assert http_api._decode_kernel_token(badexp) is None
-
-    def test_resolve_caller_edge(self) -> None:
-        import http_api
-
-        assert http_api._resolve_caller(None) == {}
-        assert http_api._resolve_caller({"X-Header": "1"}) == {}
+    async def test_resolve_caller_edge(self, monkeypatch: pytest.MonkeyPatch,
+                                       hub: _FakeCapabilityHub) -> None:
+        """无 Authorization / 非鉴权头 / 过期 token → 公开面 fail-closed 404。"""
+        _seed_state(hub, [_state_row("pipe-a-task", "A的任务", "running")])
+        path = "/ext/task_service/tasks/pipe-a-task"
+        resp = await _http(monkeypatch, hub, path)
+        assert resp["status"] == 404
+        resp = await _http(monkeypatch, hub, path, headers={"X-Header": "1"})
+        assert resp["status"] == 404
         expired = base64.b64encode(b"access:u:name:1").decode("ascii").rstrip("=")
-        assert http_api._resolve_caller({"Authorization": f"Bearer {expired}"}) == {}
+        resp = await _http(monkeypatch, hub, path,
+                           headers={"Authorization": f"Bearer {expired}"})
+        assert resp["status"] == 404
 
-    def test_capability_not_injected_raises_keyerror(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import types
-
-        import http_api
-
-        fake = types.ModuleType("server")
-
-        class _Plugin:
-            def get_capability(self, name: str) -> Any:
-                raise LookupError(name)
-
-        fake.plugin = _Plugin()  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "server", fake)
-        with pytest.raises(KeyError):
-            http_api._capability("pipeline-state")
+    async def test_capability_not_injected_surfaces_error(self, monkeypatch: pytest.MonkeyPatch,
+                                                          hub: _FakeCapabilityHub) -> None:
+        """能力未注入（chat 缺失）→ 公开面不静默：submit 以 500 显式失败。"""
+        _seed_state(hub, [_state_row("pipe-sub-x", "待提交任务", "pending")])
+        hub.handles.pop("chat", None)
+        headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe-sub-x/submit",
+                           "POST", headers=headers)
+        assert resp["status"] == 500
 
     # ── 能力缺失/下游故障降级 ──
 
@@ -1310,30 +1452,41 @@ class TestCoverageRemainingBranches:
 
     async def test_submit_event_inject_mode_branches(
             self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
-        """注入模式（重跑）分支：带描述 kickoff / 响应缺 id / chat 缺失显式报错。"""
+        """注入模式（重跑）分支经公开 submit 路由：
+        kickoff 携带任务标识 / 响应缺 id 如实 queued。"""
+        headers = {"Authorization": f"Bearer {_make_token('u-1')}"}
+        # 注入模式：kickoff 消息携带标题与任务 ID，任务进入 pending（已生效）
+        _seed_state(hub, [_state_row("t-1", "重跑任务", "pending")])
+        hub._responses["chat"] = {"send_message": {"pipeline_id": "t-1"}}
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/t-1/submit",
+                           "POST", headers=headers)
+        assert resp["status"] == 200
+        assert resp["payload"]["status"] == "pending"
+        kickoff = hub.handles["chat"].calls[0][1]["message"]
+        assert "重跑任务" in kickoff
+        assert "t-1" in kickoff
+        # chat 响应缺 pipeline_id → 提交未生效，响应如实 queued
+        hub.handles.pop("chat", None)
+        hub._responses["chat"] = {"send_message": {}}
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/t-1/submit",
+                           "POST", headers=headers)
+        assert resp["status"] == 200
+        assert resp["payload"]["status"] == "queued"
+
+    async def test_submit_event_description_kickoff_format(
+            self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
+        """描述拼装分支保留直调：公开 submit 路由不传 description，
+        该分支无公开输入可达——此处锁定内部编排器的 kickoff 拼装格式。"""
         import http_api
-        from task_birth import TaskBirthError
 
         _install(monkeypatch, hub)
         hub._responses["chat"] = {"send_message": {"pipeline_id": "t-1"}}
-        # 注入模式带描述
         pid = await http_api._submit_task_event(
             title="t", description="注入描述", task_id="t-1",
         )
         assert pid == "t-1"
         kickoff = hub.handles["chat"].calls[0][1]["message"]
         assert "注入描述" in kickoff
-        # chat 响应缺 pipeline_id → 空串（提交未生效）；pop 缓存句柄换响应代际
-        hub.handles.pop("chat", None)
-        hub._responses["chat"] = {"send_message": {}}
-        assert await http_api._submit_task_event(title="t", task_id="t-1") == ""
-        # chat 能力缺失（_capability KeyError）→ TaskBirthError（不降级不吞）
-        def _missing(name: str) -> Any:
-            raise KeyError(name)
-
-        monkeypatch.setattr(http_api, "_capability", _missing)
-        with pytest.raises(TaskBirthError):
-            await http_api._submit_task_event(title="t", task_id="t-1")
 
     async def test_direct_handler_dict_body_compat(self, monkeypatch: pytest.MonkeyPatch,
                                                    hub: _FakeCapabilityHub) -> None:

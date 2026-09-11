@@ -83,10 +83,16 @@ def test_unevaluated_statuses_derive_nothing():
         assert out == [], f"task.status={status!r} 不得派生"
 
 
-def test_failed_run_derives_task_failed_regardless_of_status():
-    for status in ["running", "completed", "pending"]:
+def test_failed_run_derives_task_failed_respecting_terminal_evidence():
+    # 终态证据仲裁（U13 域界定 §二）：未决投影照常派生 task_failed（kill 方
+    # 未随写的对账面）；completed/cancelled 是终态证据——投影权威，不派生
+    #（否则对账把 completed 覆写为 failed，把 runs 侧分歧复制到投影侧）
+    for status in ["running", "pending", "pending_evaluation", ""]:
         out = events.derive_task_terminal_events("run.failed", _task_row(status))
-        assert _names(out) == ["task_failed"]
+        assert _names(out) == ["task_failed"], f"task.status={status!r} 应派生"
+    for status in ["completed", "cancelled"]:
+        out = events.derive_task_terminal_events("run.failed", _task_row(status))
+        assert out == [], f"task.status={status!r} 终态证据不得被 failed 推翻"
 
 
 def test_run_suspended_and_other_events_never_derive():
@@ -177,6 +183,148 @@ def test_handle_bus_failure_does_not_raise():
     assert emitted == 0, "发射失败计 0（异常已留日志）"
 
 
+# ── 终态 state 载荷（ADR 2026-09-11：内核随事件交出 state，订阅方零回查）──
+
+
+class _NoListStateCap:
+    """载荷路径下不应触达 list 的 state 能力 fake（触达即断言失败）。"""
+
+    async def call(self, method, params):
+        raise AssertionError(f"载荷在场时不得回查 state（收到 {method}）")
+
+
+def test_handle_prefers_event_payload_over_lookup():
+    """载荷在场：直接派生，且不触达 pipeline-state.list（零回查契约）。"""
+    payload = _task_row("completed")
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed",
+            {"pipeline_id": "pipe_t1", "state": payload},
+            _NoListStateCap(),
+            bus,
+        )
+    )
+    assert emitted == 1
+    tags = bus.calls[0][1]["tags"]
+    assert tags["task_id"] == "pipe_t1"
+    # 父锚点从载荷带出——摘要白名单不再参与，这是断链修复的直接断言
+    assert tags["parent_pipeline_id"] == "pipe_parent"
+
+
+def test_handle_payload_carries_parent_anchor_filtered_from_summary():
+    """回归防护：载荷里的 lineage 键即使不在摘要出口声明内也必须可达。
+
+    断链实况（2026-09-11）：lineage.parent_pipeline_id 不在任何 manifest
+    export_fields 内 → 摘要行恒缺该键 → 父锚点空串 → 通知与挂号清除双双静默
+    短路。载荷路径不经白名单，该键必须原样带出。
+    """
+    payload = {
+        "pipeline_id": "pipe_child",
+        "task.id": "pipe_child",
+        "task.goal": "子任务",
+        "task.status": "completed",
+        "task.submitted_by": "admin",
+        "lineage.parent_pipeline_id": "pipe_parent",
+        "lineage.origin_session_id": "thread-1",
+        "lineage.parent_ws_meta": {"mode": "plain", "path": "/ws"},
+    }
+    bus = _FakeBusCap()
+    asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed",
+            {"pipeline_id": "pipe_child", "state": payload},
+            _NoListStateCap(),
+            bus,
+        )
+    )
+    tags = bus.calls[0][1]["tags"]
+    assert tags["parent_pipeline_id"] == "pipe_parent"
+    assert tags["user_id"] == "admin"
+
+
+def test_handle_falls_back_to_lookup_when_payload_absent():
+    """载荷缺席（旧内核 / 合成事件）：回退 list 回查，兼容不破。"""
+    rows = [_task_row("completed")]
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed", {"pipeline_id": "pipe_t1"}, _FakeStateCap(rows), bus
+        )
+    )
+    assert emitted == 1
+    assert bus.calls[0][1]["tags"]["parent_pipeline_id"] == "pipe_parent"
+
+
+def test_handle_rejects_mismatched_payload_pipeline_id():
+    """载荷坐标与事件坐标错配 → 拒绝载荷、退回回查（不按错行派生）。"""
+    rows = [_task_row("completed")]
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed",
+            {
+                "pipeline_id": "pipe_t1",
+                "state": {"pipeline_id": "other_pipe", "task.status": "failed"},
+            },
+            _FakeStateCap(rows),
+            bus,
+        )
+    )
+    # 回查命中 pipe_t1（completed），不采纳错配载荷的 failed
+    assert emitted == 1
+    assert bus.calls[0][1]["event"] == "task_completed"
+
+
+def test_handle_non_dict_payload_falls_back():
+    """载荷形状非法（非 dict）→ 回退回查。"""
+    rows = [_task_row("completed")]
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed",
+            {"pipeline_id": "pipe_t1", "state": "not-a-dict"},
+            _FakeStateCap(rows),
+            bus,
+        )
+    )
+    assert emitted == 1
+
+
+def test_lookup_failure_returns_none_without_raising():
+    """回查读面故障：降级为不派生，不裸抛（留痕在 _lookup_state_row）。"""
+
+    class _BoomCap:
+        async def call(self, method, params):
+            raise RuntimeError("state read down")
+
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed", {"pipeline_id": "pipe_t1"}, _BoomCap(), bus
+        )
+    )
+    assert emitted == 0
+    assert bus.calls == []
+
+
+def test_lookup_non_list_response_derives_nothing():
+    """回查返回非 list（形状异常）→ 不派生，不裸抛。"""
+
+    class _BadShapeCap:
+        async def call(self, method, params):
+            return {"unexpected": "envelope"}
+
+    bus = _FakeBusCap()
+    emitted = asyncio.run(
+        events.handle_run_terminal_event(
+            "run.completed", {"pipeline_id": "pipe_t1"}, _BadShapeCap(), bus
+        )
+    )
+    assert emitted == 0
+    assert bus.calls == []
+
+
 # ── 子任务挂号键清除（ADR 2026-08-28-task-closure-three-signal-gate 信号③）──
 
 
@@ -228,7 +376,9 @@ def test_run_failed_skips_reconcile_when_state_already_failed():
     rows = [_task_row("failed")]
     cap = _RecordingStateCap(rows)
     asyncio.run(
-        events.handle_run_terminal_event("run.failed", {"pipeline_id": "pipe_t1"}, cap, bus := _FakeBusCap())
+        events.handle_run_terminal_event(
+            "run.failed", {"pipeline_id": "pipe_t1"}, cap, _FakeBusCap()
+        )
     )
     assert all(u["fields"] != {"task.status": "failed"} for u in cap.updates), (
         "state 已终态不得重复写"

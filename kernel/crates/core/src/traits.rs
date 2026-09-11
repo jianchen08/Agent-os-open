@@ -20,8 +20,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Branch, MessageRecord, PendingInputRecord, PipelineRunInfo, PluginContext, PluginError,
-    PluginResult, RouteType, RunRecord, RunStatus, SessionRecord, StorageError, ToolCategory,
+    MessageRecord, PendingInputRecord, PipelineRunInfo, PluginContext, PluginError, PluginResult,
+    RouteType, RunRecord, RunStatus, SessionRecord, StorageError, ToolCategory,
     ToolExecutionResult, ToolSource, TraceEntry, UserRecord,
 };
 
@@ -73,10 +73,13 @@ pub trait PluginInvoker: Send + Sync {
     /// 内核根据插件的 `host_type` 字段选择调用路径：
     /// - InProcess: 直接调 agentos_native_sdk::PipelinePlugin::execute
     /// - Sidecar: rmcp tools/call("execute", {state, config})
-    async fn invoke_pipeline_plugin(
+    ///
+    /// ctx.state 为借用（生命周期在方法泛型位，trait object 兼容）：管道步骤
+    /// 串行 await，invoke 期间引擎不写 state。
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         plugin_id: &str,
-        ctx: &PluginContext,
+        ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError>;
 
     /// 调用工具插件执行。
@@ -419,6 +422,24 @@ pub struct PluginLifecycle {
     pub idle_timeout_secs: Option<u64>,
 }
 
+/// 插件 state 声明（P1-4 声明化）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateDeclaration {
+    /// 本插件引入的 per-run 易变 state 键（checkpoint 瘦身与恢复合并跳过）。
+    /// 内核收集全部插件声明并集，与内核自有运行域键（engine VOLATILE_RUN_KEYS
+    /// 内置部分）一同参与剥离——新增 per-run 键零内核改动，与 persistent_fields
+    /// 声明化对称。未声明 = 无插件易变键。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volatile_keys: Vec<String>,
+    /// state 读面声明（切片投喂的声明位）：插件执行需要内核投喂的 state 切片。
+    /// 条目三种合法形态（文档约定）：键名（如 `task.status`）/ `messages`（全量）/
+    /// `messages_tail:N`（最近 N 条，N 为正整数；装载期格式校验，非法条目
+    /// 告警忽略）。当前仅 schema 收录与装载校验——投喂消费由后续任务接入。
+    /// 空 = 无读面声明。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<String>,
+}
+
 /// 已解析的插件 Manifest（运行时表示）。
 ///
 /// **ADR ⑦ 新增**：`requires_content` 字段声明插件需要的最近消息条数，
@@ -464,6 +485,17 @@ pub struct PluginManifest {
     /// messages 是系统字段（引擎固定投影），不在此列。空 = 该插件无累计字段需持久化。
     #[serde(default)]
     pub persistent_fields: Vec<String>,
+    /// state 声明（P1-4）：本插件的 per-run 易变键（`state.volatile_keys`）。
+    /// 内核收集并集参与 checkpoint 瘦身与恢复合并跳过，与 persistent_fields
+    /// 声明化对称。None = 无 state 声明。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<StateDeclaration>,
+    /// 工具面强制注入声明（P1-5）：本插件要求无视 agent `tool_ids` 白名单、
+    /// 只要注册即注入 LLM 工具面的工具 id 集合（如 spill_guard 声明
+    /// `["spill_retrieve"]`——大输出取回兜底链路）。内核收集全部插件声明
+    /// 并集参与 tool-surface 过滤；空 = 无强制注入要求。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub force_include_tools: Vec<String>,
     /// state 出口声明：插件声明允许经 state 摘要出口（GET /pipelines/state 与
     /// pipeline-state.list）的 state 字段；支持 `前缀.*` 通配（如 `task.owned.*`）。
     /// 内核结构基线键（pipeline_id/session_id 等引擎/出生契约自有键）不在此列，
@@ -561,8 +593,8 @@ pub struct PluginManifest {
     /// - initialize 握手声明（sidecar SDK 据此创建 CapabilityHandle）；
     /// - 路由表（`CapabilityHandlerRegistry::route`）。
     ///
-    /// 典型用例：`human_interaction_service` 声明 provides `human-interaction`，
-    /// `human` tool 插件通过 `get_capability("human-interaction")` 反向调用，
+    /// 典型用例：交互插件声明 provides 交互 namespace，
+    /// 另一个 tool 插件通过 `get_capability(<交互 namespace>)` 反向调用，
     /// 状态留在主进程唯一一份 service 上，链路闭合。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provides: Option<ProvidesCapabilities>,
@@ -582,10 +614,24 @@ pub struct ProvidesCapabilities {
     pub capabilities: Vec<ProvidedCapability>,
 }
 
+/// 内核协议面服务角色（provides 声明驱动路由锚点，P1-3）。
+///
+/// 内核协议端点（如 /api/v1/interaction/response 与 WS interaction_response）
+/// 按**角色**查找提供者，不点名 namespace——任意插件声明同角色即接管端点后端
+/// （热替换语义与 namespace 一致）。method 须同时出现在该 capability 的
+/// methods 清单内（ProvidedCapabilityHandler 白名单校验）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtocolRole {
+    /// 角色名（kebab-case）。现有角色：`interaction-respond`（交互应答端点后端）。
+    pub role: String,
+    /// 该角色绑定的 method（如 `respond`）。
+    pub method: String,
+}
+
 /// 单个 capability namespace 贡献声明。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProvidedCapability {
-    /// capability namespace（如 `human-interaction`），全内核唯一。
+    /// capability namespace（如交互插件的 `interaction-respond` 承载 namespace），全内核唯一。
     /// 多个插件声明同一 namespace 时，loader 按插件 priority 决定胜出者
     ///（与 http_endpoints 的冲突检测不同——capability 允许热替换）。
     pub namespace: String,
@@ -598,15 +644,17 @@ pub struct ProvidedCapability {
     /// sidecar 工具名前缀（host=sidecar 时生效）。
     ///
     /// McpBridge 把 `<namespace>.<method>` 映射成 `<tool_prefix>.<method>`
-    /// 调 invoker.invoke_tool。例如 namespace=`human-interaction`、tool_prefix=
-    /// `interaction` 时，`human-interaction.create_choice` →
-    /// `interaction.create_choice`。
+    /// 调 invoker.invoke_tool。例如 namespace 连字符转下划线缺省派生工具前缀，
+    /// `<ns>.create_choice` → `<ns_derived>.create_choice`。
     ///
-    /// 缺省时从 namespace 派生（连字符转下划线：`human-interaction` →
-    /// `human_interaction`）。工具名前缀与 namespace 不一致时必须显式声明，
+    /// 缺省时从 namespace 派生（连字符转下划线）。工具名前缀与 namespace 不一致时必须显式声明，
     /// 否则 McpBridge 路由会拼出错误的工具名。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_prefix: Option<String>,
+    /// 本 namespace 承载的内核协议面角色（P1-3 声明化）。
+    /// 空 = 不承载内核协议端点（纯插件间能力）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocol_roles: Vec<ProtocolRole>,
 }
 
 /// capability 贡献的路由方式。
@@ -649,9 +697,15 @@ pub struct HttpEndpoint {
     pub method: String,
     /// 完整路径，必须落在 `/ext/{plugin_id}/**` 命名空间下（注册期校验）。
     pub path: String,
-    /// 鉴权模式：`none`（webhook 验签自管）/ `user`（内核 JWT）/ `admin`。
-    #[serde(deserialize_with = "deserialize_http_auth")]
-    pub auth: String,
+    /// 鉴权模式（D2 第一刀起由内核 dispatcher 执行，语义见上模块注释与
+    /// `deserialize_http_auth`）：
+    /// - `Some("user")`：与 /api/v1 同一 token 校验（resolve_request_user）；
+    /// - `Some("admin")`：同上 + admin 角色；
+    /// - `Some("none")`：显式匿名白名单（webhook 验签自管等），全方法放行；
+    /// - `None`（manifest 缺省）：无声明——写面（非 GET）默认拒绝 401
+    ///   （fail-closed），读面（GET）放行 + warn 计数（第二刀收紧的数据源）。
+    #[serde(default, deserialize_with = "deserialize_http_auth")]
+    pub auth: Option<String>,
     /// 处理该端点的 capability 名（统一 `http.handle`）。
     pub handler_capability: String,
     /// 单请求超时上限（毫秒），默认 30000（附录 E.1.3）。
@@ -665,14 +719,18 @@ pub struct HttpEndpoint {
     pub description: Option<String>,
 }
 
-/// 校验 HttpEndpoint.auth 仅接受 none/user/admin（ADR §3.3 auth 枚举）。
-fn deserialize_http_auth<'de, D>(deserializer: D) -> Result<String, D::Error>
+/// 校验 HttpEndpoint.auth 仅接受 none/user/admin（ADR §3.3 auth 枚举）；
+/// 字段缺省反序列化为 `None`（无声明，dispatcher 按 fail-closed 语义处理）。
+fn deserialize_http_auth<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
+    let raw = match Option::<String>::deserialize(deserializer)? {
+        None => return Ok(None),
+        Some(raw) => raw,
+    };
     match raw.as_str() {
-        "none" | "user" | "admin" => Ok(raw),
+        "none" | "user" | "admin" => Ok(Some(raw)),
         other => Err(serde::de::Error::custom(format!(
             "invalid http_endpoint auth '{other}': must be one of none/user/admin"
         ))),
@@ -860,6 +918,13 @@ pub struct ManifestCapabilities {
 /// 流式能力声明（capabilities.streaming，文档见 docs/guides/streaming-protocol.md）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingCapability {
+    /// 引擎管道器官声明（P1-2 声明化）：本插件是内核 LLM 路径的执行器官，
+    /// 内核经 engine state 下发签发的 a_ message_id（回环消费）。
+    /// 声明 true 豁免"capabilities.streaming 须声明 events 清单"的发射闸，
+    /// 且 message_id 命名空间执法按 kernel owner（a_）而非 plugin owner（p_）。
+    /// 缺省 false = 普通流式插件（fail-closed：未声明此位的插件不豁免）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conduit: bool,
     /// 插件实际发射的事件类型清单（缺省 = streaming.json 契约的全部事件均可发射）。
     /// G2 校验器对照插件实现实际发射的事件做一致性检查。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1021,6 +1086,23 @@ pub struct ToolCapability {
     /// 副作用敏感/需要真实参数的能力由插件显式声明后才会被冒烟，避免注册期误伤。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smoke: Option<bool>,
+    /// 非流式调用的总时长超时（毫秒，ADR 2026-09-07 P12）。取值优先级：
+    /// 工具声明 > 插件级 `mcp.request_timeout_secs` > 内核默认
+    /// [`default_capability_timeout_ms`]（300_000ms）。
+    /// `Some(0)` = 显式豁免总时长超时（长等待/流式类工具；对齐
+    /// `lifecycle.idle_timeout_secs: Some(0)` 的 0 哨兵惯例）。
+    /// `None` = 未声明，按优先级兜底。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// 非流式 capability 调用的内核默认总时长超时（毫秒）：300s。
+///
+/// 插件未做任何时长声明（工具级 `timeout_ms` / 插件级
+/// `mcp.request_timeout_secs` 均缺省）时的兜底界——悬挂调用 bounded，
+/// 不再无限等待（ADR 2026-09-07 P12）。
+pub fn default_capability_timeout_ms() -> u64 {
+    300_000
 }
 
 /// Manifest 权限声明。
@@ -1068,7 +1150,7 @@ pub struct McpConfig {
     pub protocol_version: String,
     /// 单次工具调用的响应等待超时（秒）。`None` = 内核默认 300s。
     ///
-    /// 长等待业务（human-interaction.wait_for_choice 等用户响应，业务超时可达
+    /// 长等待业务（交互插件 wait_for_choice 等用户响应，业务超时可达
     /// 24h）必须显式声明，否则内核 MCP client 300s 兜底会先于用户操作掐断调用
     /// （审批请求被 -32001 超时作废后引擎重试弹窗循环）。security_check 的 SDK
     /// 侧 timeout 参数仅作提示，内核不读。
@@ -1275,9 +1357,6 @@ pub trait StorageBackend: Send + Sync {
     /// 追加一条状态变更日志到 traces 表（Append-Only，ADR ③）。
     async fn append_trace(&self, entry: TraceEntry) -> Result<(), StorageError>;
 
-    /// 创建新分支（ADR ⑤：回滚 = 创建新分支 + 正向重放 Patch）。
-    async fn create_branch(&self, branch: Branch) -> Result<(), StorageError>;
-
     /// 更新运行实例状态。
     async fn update_run_status(
         &self,
@@ -1325,6 +1404,25 @@ pub trait StorageBackend: Send + Sync {
         Ok(())
     }
 
+    /// upsert 一批 state 标量字段到 pipeline_state 表（B6 批量接口）。
+    ///
+    /// 默认实现退化为逐键调用 [`Self::upsert_state_field`]（只覆盖单键的
+    /// 实现者零改动）；SqliteStore 覆盖为单事务全量 upsert——任一失败整体
+    /// 回滚（全成才 commit），保证调用方「DB 批量成功 → 再写内存」写序下
+    /// 无「DB 半套」部分写入面。既有单键接口保持不动（其他调用点不改）。
+    async fn upsert_state_fields(
+        &self,
+        pipeline_id: &str,
+        tenant_id: &str,
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        for (key, value) in fields {
+            self.upsert_state_field(pipeline_id, tenant_id, key, value)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// 读出某 pipeline 全部持久化标量字段（冷启动重建喂回 state 用）。
     async fn load_pipeline_state(
         &self,
@@ -1333,6 +1431,12 @@ pub trait StorageBackend: Send + Sync {
     ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
         Ok(std::collections::HashMap::new())
     }
+
+    /// 注入插件声明的 per-run 易变键并集（P1-4 声明化）：checkpoint 落档剥离集 =
+    /// 内核自有键（store 内置）∪ 本集。生产侧由 api 从全部插件 manifest
+    /// `state.volatile_keys` 声明收集并集后注入，与恢复合并侧消费同一并集。
+    /// 缺省空集（不剥任何声明键）；后写覆盖（manifest 热重载后随下一次派发刷新）。
+    fn set_declared_volatile_keys(&self, _keys: &[String]) {}
 
     /// 保存全量 state checkpoint（每 N 步留档，O(1) 重建基线）。
     async fn save_checkpoint(
@@ -1551,6 +1655,15 @@ pub trait StorageBackend: Send + Sync {
     /// 更新最近登录时间（登录成功后调）。
     async fn update_last_login(&self, user_id: &str) -> Result<(), StorageError>;
 
+    /// 更新口令哈希与首登改密标记（D1：改密端点/启动明文迁移共用）。
+    /// `password_hash` 必须已是 argon2id 哈希（调用方负责）；不存在返回 false。
+    async fn update_user_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        must_change_password: bool,
+    ) -> Result<bool, StorageError>;
+
     /// 删除用户。不存在返回 false。
     async fn delete_user(&self, user_id: &str) -> Result<bool, StorageError>;
 }
@@ -1665,6 +1778,61 @@ mod tests {
         assert_eq!(s, s2, "roundtrip 后序列化产物应逐字节一致");
     }
 
+    /// state.reads 读面声明契约：三种合法形态（键名 / `messages` 全量 /
+    /// `messages_tail:N`）解析并保留；roundtrip 幂等；空 reads 不序列化输出。
+    #[test]
+    fn state_declaration_reads_serde_roundtrip() {
+        let json = serde_json::json!({
+            "id": "p", "name": "p", "version": "1", "plugin_type": "tool",
+            "language": "python", "host_type": "sidecar", "entry": "python s.py",
+            "capabilities": {},
+            "state": {
+                "volatile_keys": ["mood.notes"],
+                "reads": ["task.status", "messages", "messages_tail:50"]
+            }
+        });
+        let m: PluginManifest =
+            serde_json::from_value(json).expect("含 reads 的 manifest 应可解析");
+        let state = m.state.as_ref().expect("state 段应存在");
+        assert_eq!(
+            state.reads,
+            vec![
+                "task.status".to_string(),
+                "messages".to_string(),
+                "messages_tail:50".to_string()
+            ],
+            "三种合法形态原样收录"
+        );
+
+        // roundtrip：序列化产物可重新解析且逐字节一致（reads 保留）
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(
+            s.contains("messages_tail:50"),
+            "序列化应保留 reads 条目: {s}"
+        );
+        let m2: PluginManifest = serde_json::from_str(&s).expect("序列化产物应可重新解析");
+        assert_eq!(m2.state.as_ref().unwrap().reads, state.reads);
+        let s2 = serde_json::to_string(&m2).unwrap();
+        assert_eq!(s, s2, "roundtrip 后序列化产物应逐字节一致");
+
+        // 空 reads 不序列化输出（与既有字段风格一致）；旧 state 段
+        //（只有 volatile_keys）→ reads 缺省为空
+        let legacy = serde_json::json!({
+            "id": "p", "name": "p", "version": "1", "plugin_type": "tool",
+            "language": "python", "host_type": "sidecar", "entry": "python s.py",
+            "capabilities": {},
+            "state": {"volatile_keys": ["k"]}
+        });
+        let m3: PluginManifest =
+            serde_json::from_value(legacy).expect("旧 state 段（无 reads）应可解析");
+        assert!(
+            m3.state.as_ref().unwrap().reads.is_empty(),
+            "缺省 reads = 空（向后兼容）"
+        );
+        let s3 = serde_json::to_string(&m3.state.as_ref().unwrap()).unwrap();
+        assert!(!s3.contains("reads"), "空 reads 不应序列化输出: {s3}");
+    }
+
     /// 向后兼容：旧 manifest 无 capabilities.steps 键 → 反序列化成功且 steps 为空
     /// （serde(default) 兜底，存量 25+ 管道插件零迁移）。
     #[test]
@@ -1698,10 +1866,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PluginInvoker for BareInvoker {
-        async fn invoke_pipeline_plugin(
+        async fn invoke_pipeline_plugin<'a>(
             &self,
             _plugin_id: &str,
-            _ctx: &PluginContext,
+            _ctx: &PluginContext<'a>,
         ) -> Result<PluginResult, PluginError> {
             unreachable!("默认面测试不调用")
         }
@@ -1753,9 +1921,6 @@ mod tests {
             unreachable!("默认面测试不调用")
         }
         async fn append_trace(&self, _entry: TraceEntry) -> Result<(), StorageError> {
-            unreachable!("默认面测试不调用")
-        }
-        async fn create_branch(&self, _branch: Branch) -> Result<(), StorageError> {
             unreachable!("默认面测试不调用")
         }
         async fn update_run_status(
@@ -1837,6 +2002,14 @@ mod tests {
             unreachable!("默认面测试不调用")
         }
         async fn update_last_login(&self, _user_id: &str) -> Result<(), StorageError> {
+            unreachable!("默认面测试不调用")
+        }
+        async fn update_user_password(
+            &self,
+            _user_id: &str,
+            _password_hash: &str,
+            _must_change_password: bool,
+        ) -> Result<bool, StorageError> {
             unreachable!("默认面测试不调用")
         }
         async fn delete_user(&self, _user_id: &str) -> Result<bool, StorageError> {

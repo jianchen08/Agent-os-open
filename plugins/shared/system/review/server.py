@@ -28,33 +28,21 @@ import base64
 import json
 import logging
 import os
-import sys
 import tempfile
 import time
 import uuid
 from typing import Any
 
 from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-# hindsight_memory 插件目录（wiring.py 所在处）加入 sys.path
-_HINDSIGHT_MEMORY_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "hindsight_memory"))
-if _HINDSIGHT_MEMORY_DIR not in sys.path:
-    sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
 
-# http.handle 响应封装 + multipart 解析（内核 HttpHandleResponse/ToolExecutionResult
-# 样板）：公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
 # `_error` = protocol_error：本插件上传面协议级错误契约（success:true 包
 # HTTP status + 结构化错误体），与 error 的扁平失败信封不同。
-_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _SHARED_ROOT not in sys.path:
-    sys.path.insert(0, _SHARED_ROOT)
-# 审批域（状态机 + 媒体审阅在本插件包内）：平铺导入（与 workspace_service
-# 同款惯例）。sidecar 以插件目录为 cwd 天然可解析；进程内装载（测试直载
-# server.py）无此 cwd，须自举本目录。
-_PLUGIN_DIR = os.path.abspath(os.path.dirname(__file__))
-if _PLUGIN_DIR not in sys.path:
-    sys.path.insert(0, _PLUGIN_DIR)
 import media_review_service  # noqa: E402
+from bounded_dict import BoundedDict  # noqa: E402
+from time_iso import now_iso_utc as _now_iso  # noqa: E402
 from http_json import (  # noqa: E402
     decode_body as _decode_body,
     json_response as _json_response,
@@ -63,7 +51,7 @@ from http_json import (  # noqa: E402
     protocol_error as _error,
 )
 from review_service import get_review_service  # noqa: E402
-from wiring import build_memory_backend  # noqa: E402
+from wiring import build_memory_backend  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 logger = logging.getLogger(__name__)
 
@@ -77,14 +65,9 @@ _REVIEW_SOURCE = "tool_review"
 # 复盘报告存储：review_id -> report dict
 # report 含 status: pending(子管道已起,报告未回写) / running(子管道进行中) /
 # completed(子管道真实完成,报告已落) / failed(子管道失败)
-_reports: dict[str, dict[str, Any]] = {}
-
-
-def _now_iso() -> str:
-    """当前时间 ISO 串（复盘管道登记时间戳）。"""
-    from datetime import datetime, timezone  # noqa: PLC0415
-
-    return datetime.now(timezone.utc).isoformat()
+# 有界（TTL 24h / MAX 1024，写时清扫过期+超限逐最旧，条目带 ts）：
+# 长驻 sidecar 只插不删即随历史请求线性泄漏，经共享件 BoundedDict 收敛。
+_reports: BoundedDict = BoundedDict()
 
 # 长期记忆后端（IMemoryBackend），用于把复盘报告持久化到 Hindsight，供跨会话检索/注入。
 # 由插件宿主在加载时注入；未注入时 store_report 仅写内存 _reports（降级，不崩）。
@@ -104,15 +87,9 @@ def set_memory_backend(backend: Any) -> None:
 async def store_report(review_id: str, report: dict[str, Any]) -> None:
     """内部方法：回写 review_agent 子管道产出的报告。
 
-    触发时机：review_agent 子管道跑完，通过 memory.store 工具或 event-bus 完成事件
-    回调本方法（事件监听接线留 TODO）。当前由 get_report 按需查询 / 外部调用方直接
-    注入。不暴露为 MCP 工具（内部 API）。
-
-    落库策略：
-    - 内存：始终写 ``_reports[review_id]``，供 get_report 立即轮询。
-    - 长期记忆：若 ``_memory_backend`` 已注入，调用 ``backend.add`` 把整份报告
-      （JSON）落到 Hindsight，memory_type=``review``，tags 含 ``review_id:<id>`` 与
-      ``review_report``，source=``review_agent``，供后续会话检索/注入。
+    现状契约：报告写进程内存 ``_reports``（与降级报告同仓），供 get_report
+    读取；``set_memory_backend`` 是测试注缝，注入后旁路落 Hindsight（生产
+    无注入方，生产仅内存）。不暴露为 MCP 工具（内部 API）。
 
     Args:
         review_id: trigger 阶段分配的复盘 ID。
@@ -334,9 +311,9 @@ async def trigger_review(
     artifacts_l = artifacts or []
     metrics_l = metrics or {}
 
-    # ── GAP-1：深度复盘经 chat.send_message 起 review_agent 管道；
-    # 不再"启动即 completed（乐观，空 lessons）"；降级兜底语义见
-    # _dispatch_review_pipeline / _local_degrade_report。──
+    # ── 深度复盘经 chat.send_message 起 review_agent 管道；trigger 端点
+    # 只报 running/degraded 两种状态，completed 由管道产出经 store_report
+    # 回写；降级兜底语义见 _dispatch_review_pipeline / _local_degrade_report。──
     running = await _dispatch_review_pipeline(review_id, task_id, summary, artifacts_l, metrics_l)
     if running is not None:
         return running

@@ -9,12 +9,12 @@
  * - 方案详情展开/折叠
  */
 
-import { BarChart3, Check, ChevronDown, ChevronUp, Clock, MessageSquare, Send, ThumbsUp } from '@/assets/icons'
 import { useCallback, useMemo, useState } from 'react'
+import { BarChart3, Check, ChevronDown, ChevronUp, Clock, MessageSquare, Send, ThumbsUp } from '@/assets/icons'
+import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { useVotingStore } from '@/stores/votingStore'
-import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import type { VotingOption, VotingSession } from '@/types/voting'
 
 /** 单个方案卡片 */
@@ -234,7 +234,6 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
     setSelectedIds(new Set())
   }, [selectedIds, reason, submitVote, voting.id])
 
-  // 格式化截止时间
   const deadlineStr = voting.deadline
     ? new Date(voting.deadline).toLocaleString('zh-CN', {
         month: 'short',

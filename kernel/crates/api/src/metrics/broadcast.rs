@@ -4,7 +4,7 @@
 //! ```jsonc
 //! { "type":"widget_event",
 //!   "data":{ "widget_id":"metrics_tick", "event":"tick",
-//!            "data":{ "kernel.session.connections": 42, ... } },
+//!            "data":{ "kernel.session.event_bus_push_total": 42, ... } },
 //!   "sequence": 99 }
 //! ```
 //!
@@ -22,7 +22,6 @@ use super::counters::KernelCounters;
 ///
 /// 命中其中任一前缀的 series 才进 widget_event data。
 pub const BROADCAST_PREFIXES: &[&str] = &[
-    "kernel.session.connections",
     "kernel.session.event_bus",
     "kernel.api.dispatcher",
     "kernel.engine.llm",
@@ -144,11 +143,8 @@ mod tests {
             None,
             None,
         );
-        // 命中：kernel.session.connections（来自 kernel_counters）
-        let kc = KernelCounters::new();
-        let conn = kc.register_gauge("session.connections", Labels::new());
-        conn.set(42);
         // 命中：kernel.engine.llm_calls（来自 kernel_counters）
+        let kc = KernelCounters::new();
         let llm = kc.register_counter("engine.llm_calls_total", Labels::new());
         llm.inc(5);
         // 不命中：kernel.engine.step_hits（不在白名单）
@@ -165,7 +161,6 @@ mod tests {
             !obj.contains_key("p1.some_business"),
             "non-whitelisted should be excluded"
         );
-        assert_eq!(obj["kernel.session.connections"], 42);
         assert_eq!(obj["kernel.engine.llm_calls_total"], 5);
         assert!(
             !obj.contains_key("kernel.engine.step_hits_total"),
@@ -182,7 +177,6 @@ mod tests {
 
     #[test]
     fn test_matches_prefix() {
-        assert!(matches_prefix("kernel.session.connections"));
         assert!(matches_prefix("kernel.session.event_bus_push_total"));
         assert!(matches_prefix("kernel.api.dispatcher_errors"));
         assert!(matches_prefix("kernel.engine.llm_calls_total"));
@@ -190,5 +184,9 @@ mod tests {
         assert!(matches_prefix("p1.process.alive"));
         assert!(!matches_prefix("p1.tokens_used"));
         assert!(!matches_prefix("kernel.engine.step_hits_total"));
+        assert!(
+            !matches_prefix("kernel.session.connections"),
+            "gauge 面已移除，白名单不再含 session.connections"
+        );
     }
 }

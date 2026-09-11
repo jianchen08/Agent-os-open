@@ -1,13 +1,12 @@
-/** 生命周期事件处理器（WS重连补漏 / 系统通知 / 用量更新 / 终止评估） 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。
+/** 生命周期事件处理器（WS重连补漏 / 系统通知 / 用量更新） 从 initStreamingEvents 中提取的独立处理器函数，降低 index.ts 复杂度。
  *
  * 2026-08 清理：handleStateChange（state_change 事件）已删除——后端无该事件发射源。
  */
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useTerminationStore } from '@/stores/terminationStore'
+import { invalidatePipelineStates } from '@/hooks/queries/usePipelineRunsQuery'
 import { loggers } from '@/utils/logger'
-
 import { terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'
 
@@ -184,18 +183,6 @@ export function handleSystemNotification(eventData: any): void {
     pipelineId.slice(0, 12), content.slice(0, 40),
   )
 
-  // ★ 诊断：notification 到达时的 store 状态（INFO 级别确保可见）
-  const _diagBefore = pipelineStore.getMessages(pipelineId)
-  const _diagLast = _diagBefore[_diagBefore.length - 1]
-  loggers.websocket.info(
-    '[NOTIF-ARRIVE] total=%d last=[%s/%s/%s] seq=%s',
-    _diagBefore.length,
-    _diagLast?.role ?? 'null',
-    _diagLast?.status ?? 'null',
-    (_diagLast?.id ?? '').slice(0, 10),
-    data?.sequence ?? 'none',
-  )
-
   pipelineStore.addMessage(pipelineId, {
     // id 用后端 record_id（== track 落库 record_id），刷新后 API 返回同 id，
     // isCoveredByApi 按 id 去重，不再产生「流式气泡 + API 记录」两条。
@@ -233,7 +220,11 @@ export function handleSystemNotification(eventData: any): void {
  * payload = { pipeline_id, total_tokens, input_tokens, output_tokens,
  * cached_tokens, missed_tokens, cache_hit_ratio, cumulative.* }，
  * 均为本轮 API 返回的单轮值（cumulative 为管道累计）。进度条据此按
- * pipeline 实时刷新；cache 维度供 CostDashboardWidget 展示命中率与趋势。
+ * pipeline 实时刷新；cache 维度（命中率/趋势）供上下文用量展示消费。
+ *
+ * 事件同时是 pipelineStates query 的轮末刷新信号：track 插件与本推送
+ * 同点把 track.llm_usage 写入管道 state，输入框指示器从 state 读数
+ * （数据不走本事件承载），失效化让 query 立即重拉拿到刚落盘的用量。
  */
 
 /** cache 命中率骤降检测阈值：降幅 ≥30pp 且当前 <70% 视为异常 */
@@ -292,24 +283,5 @@ export function handleCostUpdate(eventData: any): void {
   if (typeof data?.cache_hit_ratio === 'number' && prevUsage) {
     checkCacheDrop(pipelineId, prevUsage.hitRatio, data.cache_hit_ratio)
   }
-}
-
-/**
- * 处理 TERMINATION_STATUS 事件（task_observability 1c）：
- * termination_advisor Input 插件每轮推送的主动终止评估，
- * 写入 terminationStore（「剩余预算」+「收敛信号」指示器数据源）。
- */
-export function handleTerminationStatus(eventData: any): void {
-  const pipelineId = resolvePipelineId(eventData)
-  if (!pipelineId) return
-  const data = eventData?.data || eventData
-  useTerminationStore.getState().updateStatus(pipelineId, {
-    convergence: data?.convergence ?? 'converging',
-    shouldStop: Boolean(data?.should_stop),
-    stopReason: data?.stop_reason ?? '',
-    remainingBudgetPercent:
-      typeof data?.remaining_budget_percent === 'number' ? data.remaining_budget_percent : null,
-    iteration: Number(data?.iteration) || 0,
-    elapsedS: Number(data?.elapsed_s) || 0,
-  })
+  invalidatePipelineStates()
 }

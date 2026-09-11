@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """日志文件名 pid 派生测试。
 
 文件名固定为 bash_<pid>.log：进程结束后 read_log 凭 pid 即可定位日志。

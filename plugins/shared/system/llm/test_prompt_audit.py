@@ -33,6 +33,12 @@ def adapter_mod(monkeypatch, tmp_path):
     for mod_name in list(sys.modules):
         if mod_name == "provider_adapters" or mod_name.startswith("provider_adapters."):
             del sys.modules[mod_name]
+    # 解析锁定：本插件目录置 sys.path[0]——车道共跑方（multimodal 等同名
+    # adapter.py 目录）在采集期即可能占住前位，模块级 insert 挡不住
+    _s = str(_PLUGIN_DIR)
+    while _s in sys.path:
+        sys.path.remove(_s)
+    sys.path.insert(0, _s)
     import adapter  # noqa: PLC0415
 
     return importlib.reload(adapter)

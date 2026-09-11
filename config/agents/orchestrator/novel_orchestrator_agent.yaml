@@ -5,7 +5,7 @@ description: '小说创作编排Agent，负责编排长篇小说的完整创作�
 agent_type: orchestrator
 category: creative
 level: L2
-model_tier: large
+model_tier: medium
 system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}

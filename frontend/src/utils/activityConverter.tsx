@@ -83,7 +83,6 @@ export function toolCallToActivity(
   const details: ActivityDetailBlock[] = []
 
   if (options?.includeDetails !== false) {
-    // 参数区块
     details.push({
       id: 'args',
       label: '参数',
@@ -93,7 +92,6 @@ export function toolCallToActivity(
       defaultExpanded: false,
     })
 
-    // 结果区块
     if (toolCall.result !== undefined && toolCall.result !== null) {
       details.push({
         id: 'result',
@@ -105,7 +103,6 @@ export function toolCallToActivity(
       })
     }
 
-    // 中间输出区块
     if (toolCall.partialOutput && toolCall.partialOutput.length > 0) {
       details.push({
         id: 'output',

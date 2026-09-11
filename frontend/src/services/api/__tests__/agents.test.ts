@@ -5,7 +5,6 @@
  * getAgent/createAgent/updateAgent/deleteAgent/getDefaultAgent 指向
  * 后端不存在的端点，已删除（2026-08 清理，详见 services/api/agents.ts 头注释）。
  */
-
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getAgents } from '@/services/api/agents'
 // Mock axios
@@ -14,7 +13,6 @@ vi.mock('../client', () => ({
     get: vi.fn(),
   },
 }))
-
 import apiClient from '@/services/api/client'
 
 describe('Agent API', () => {

@@ -9,10 +9,11 @@
  *
  * 初始化（initGodotSelection）：订阅 thread + 拉取当前快照 + 挂 WS 事件监听（幂等，仅首次挂）。
  */
+import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import apiClient from '@/services/api/client'
 import { PIPELINE_GODOT_CONTEXT_ENDPOINTS } from '@/services/api/endpoints.generated'
+import { ErrorSeverity, ErrorType, reportError } from '@/services/errorReporting'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
 
 export interface GodotSelectionItem {
   name: string
@@ -83,11 +84,28 @@ function hookWsEvents(): void {
     if (currentThread) void initGodotSelection(currentThread)
   })
   // 低频重申订阅：sidecar 重载（插件热更新等）会清空其内存订阅表且无前端可感知
-  // 信号——30s 重发一次 subscribe（幂等微请求），页面自愈无需手动刷新
+  // 信号——30s 重发一次 subscribe（幂等微请求），页面自愈无需手动刷新。
+  // 非核心失败不阻断自愈循环，但禁静默：经统一错误上报链给降级提示；
+  // 连续失败期间只报一次（episode 去重，恢复成功重置），避免 30s 刷屏。
+  let resubscribeFailing = false
   window.setInterval(() => {
-    if (currentThread) {
-      apiClient.post(ENDPOINTS.subscribe, { thread_id: currentThread }).catch(() => {})
-    }
+    if (!currentThread) return
+    apiClient
+      .post(ENDPOINTS.subscribe, { thread_id: currentThread })
+      .then(() => {
+        resubscribeFailing = false
+      })
+      .catch(() => {
+        if (resubscribeFailing) return
+        resubscribeFailing = true
+        reportError('Godot 选中引用订阅失败，实时镜像可能停更（每 30s 自动重试恢复）', {
+          type: ErrorType.NETWORK,
+          severity: ErrorSeverity.WARNING,
+          component: 'selectionBridge',
+          action: 'selection_subscribe_retry',
+          source: 'frontend',
+        })
+      })
   }, 30_000)
   globalWS.subscribe(WS_SERVER_EVENTS.GODOT_SELECTION_CHANGED, (payload: unknown) => {
     const data = (payload as { data?: GodotSelectionState & { thread_id?: string } })?.data

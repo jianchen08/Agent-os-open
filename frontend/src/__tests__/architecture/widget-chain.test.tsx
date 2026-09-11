@@ -16,8 +16,8 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { resolveDeclaredWidgets } from '@/services/schema/widgetChain'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import type { WidgetComponent } from '@/services/schema/WidgetRegistry'
 
 afterEach(() => {

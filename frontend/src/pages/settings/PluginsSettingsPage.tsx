@@ -32,6 +32,7 @@ import {
 import { parseContractStatus, type PluginContractStatus } from '@/components/debug/ContractStatusPanel'
 import { PageShell } from '@/components/shared/PageShell'
 import { toast } from '@/components/ui/sonner'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 import { refreshPluginContributions } from '@/services/modules/GrowthLoop'
 import { queryClient } from '@/services/query/queryClient'
@@ -130,11 +131,11 @@ export function PluginsSettingsPage() {
   const pluginsQuery = useQuery({
     queryKey: queryKeys.plugins,
     queryFn: async () => {
-      const res = await apiClient.get<PluginStatus[]>('/api/v1/plugins')
+      const res = await apiClient.get<PluginStatus[]>(API_ENDPOINTS.PLUGINS.LIST)
       // 能力面与插件面同拉（读失败不阻断插件列表——能力区降级空）
       let tools: ToolCapability[] = []
       try {
-        const schema = await apiClient.get<{ tools?: ToolCapability[] }>('/api/v1/schema')
+        const schema = await apiClient.get<{ tools?: ToolCapability[] }>(API_ENDPOINTS.SCHEMA.GET)
         tools = Array.isArray(schema.data?.tools) ? schema.data.tools : []
       } catch {
         tools = []
@@ -143,7 +144,7 @@ export function PluginsSettingsPage() {
       // 读失败不阻断插件列表——标示降级为不显示）
       let contract: PluginContractStatus[] = []
       try {
-        const cs = await apiClient.get<unknown>('/api/v1/plugins/contract-status')
+        const cs = await apiClient.get<unknown>(API_ENDPOINTS.PLUGINS.CONTRACT_STATUS)
         contract = parseContractStatus(cs.data)
       } catch {
         contract = []
@@ -168,7 +169,7 @@ export function PluginsSettingsPage() {
     setTogglingId(pluginId)
     try {
       const res = await apiClient.put<{ success: boolean; message?: string; error?: string }>(
-        `/api/v1/plugins/${pluginId}/enabled`,
+        API_ENDPOINTS.PLUGINS.ENABLED(pluginId),
         { enabled: !currentEnabled },
       )
       if (res.data.success) {

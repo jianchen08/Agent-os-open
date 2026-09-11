@@ -20,6 +20,8 @@ use agentos_plugin_loader::{CapabilityRegistryImpl, PluginScopeRegistry};
 
 fn manifest(plugin_id: &str, plugin_type: PluginType, host_type: HostType) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: plugin_id.to_string(),
         name: plugin_id.to_string(),
         description: None,
@@ -62,6 +64,7 @@ fn tool_cap(name: &str) -> ToolCapability {
         ui: None,
         render: None,
         smoke: None,
+        timeout_ms: None,
     }
 }
 
@@ -169,7 +172,7 @@ fn webhook_ep(plugin_id: &str) -> HttpEndpoint {
         route_id: "webhook".to_string(),
         method: "POST".to_string(),
         path: format!("/ext/{plugin_id}/webhook"),
-        auth: "none".to_string(),
+        auth: Some("none".to_string()),
         handler_capability: "http.handle".to_string(),
         timeout_ms: None,
         max_concurrency: None,

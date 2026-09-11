@@ -12,10 +12,12 @@
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useUIStore } from '@/stores/uiStore'
-import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { FiveSpaceLayout } from '../FiveSpaceLayout'
+import type * as costControlMod from '@/services/api/costControl'
+import type * as workspacePanelOpenerMod from '@/services/workspacePanelOpener'
 
 // CodeEditor 依赖链包含 @lobehub/ui（fluent-emoji ESM 目录导入在 vitest 不解析），
 // 布局测试不关心编辑器本体，mock 掉（同 MessageContentRenderer.spacing.test 手法）
@@ -26,7 +28,7 @@ vi.mock('@/components/workspace/CodeEditor', () => ({
 // budget 告警源：useLayoutAlerts → useBudgetStatus → cost_control getBudgetStatus，
 // mock 网络层控制 alert_level；默认 null（无预算告警，不影响其余用例）
 const mockBudget = vi.hoisted(
-  () => ({ current: null as import('@/services/api/costControl').BudgetStatusResponse | null }),
+  () => ({ current: null as costControlMod.BudgetStatusResponse | null }),
 )
 vi.mock('@/services/api/costControl', () => ({
   getBudgetStatus: async () => mockBudget.current,
@@ -34,7 +36,7 @@ vi.mock('@/services/api/costControl', () => ({
 
 // 跳转动作 spy：仅替换 openWorkspacePanelByPath（其余导出保持原实现）
 vi.mock('@/services/workspacePanelOpener', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/services/workspacePanelOpener')>()),
+  ...(await importOriginal<workspacePanelOpenerMod>()),
   openWorkspacePanelByPath: vi.fn(() => true),
 }))
 
@@ -174,7 +176,7 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     act(() => {
       fireEvent.pointerMove(window, { clientX: 700 }) // 向右拖回：缩窄到 30%
     })
-    // 回归锁定：clamp 曾加在原始光标比上（≤0.5），右半区拖动恒 0.5=拖不动
+    // 回归锁定：clamp 必须作用于归一化比例——作用于原始光标比时右半区拖动恒 0.5（拖不动）
     expect(useUIStore.getState().workspacePanelRatio).toBeCloseTo(0.3)
     expect(panel.style.width).toBe('360px') // 1000×0.3=300 → min 360 兜底
     fireEvent.pointerUp(window)
@@ -284,8 +286,8 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     await act(async () => {
       fireEvent.click(banner)
     })
-    // 成本看板已声明化（cost_control contributes.pages path /cost）——直达工作区页签
-    expect(openWorkspacePanelByPath).toHaveBeenCalledWith('/cost')
+    // 成本卡并入监控页（独立 /cost 页已撤）——预算告警直达监控页签
+    expect(openWorkspacePanelByPath).toHaveBeenCalledWith('/monitoring')
   })
 })
 

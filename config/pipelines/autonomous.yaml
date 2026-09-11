@@ -20,7 +20,16 @@ loop_bodies:
     - pipeline_model_prompt_adapter
     - pipeline_godot_context
     - pipeline_prompt_build
-    - pipeline_context_window_guard
+    # W2a 上下文压缩粗门（引擎只算术，零领域知识）：占用比 =（上次真实
+    # input_tokens + 自锚以来字符增量 × 2.0）÷ 模型窗口。口径：token ≈ 紧凑
+    # JSON 字节/2（中文保守偏高）；窗口经 track.model_context_window 由
+    # llm_core 随 usage 写入。阈值 0.6 与 context_window_guard 的
+    # compress_trigger_ratio 缺省（manifest fields.default）同源语义，系数/
+    # 阈值均为本 YAML 配置域可调。窗口 0（未解析到）→ 除零 fail-soft 判假，
+    # 仅剩冷启动兜底支。冷启动兜底：无 token 锚（从未调用 LLM）且消息多
+    # （>40）也放行 guard 做精确判定。
+    - name: pipeline_context_window_guard
+      when: '(track.llm_usage.last_input_tokens + (track.messages_chars - track.messages_chars_at_llm) * 2.0) / track.model_context_window > 0.6 or (track.llm_usage.last_input_tokens == none and len(messages) > 40)'
     - pipeline_tool_schema_validator
     - pipeline_isolation_guard
     - pipeline_level_guard
@@ -73,11 +82,11 @@ loop_bodies:
     - pipeline_track
     - pipeline_task_reminder
     - pipeline_stop_check
+    - pipeline_duplicate_check
     - pipeline_tool_cache_writer
     - pipeline_conversation_mode
     - pipeline_sensitive_checker
     - pipeline_result_format
-    - pipeline_duplicate_check
   while: 'True'
 - id: exit
   run_on_error: true
@@ -87,3 +96,9 @@ loop_bodies:
     - pipeline_workspace_lifecycle
     - pipeline_environment_lifecycle
 name: autonomous
+# P1-1 声明驱动缺省：core 器官执行态开轮缺省（post 路由每轮按 DSL 重写）。
+# core_type 是引擎迭代形态语义标志（llm_call | tool_execute）；core_plugin 是
+# 动态核心步骤的插件选择——两者由管道配置声明，内核零插件 id 知识。
+initial_state:
+  core_plugin: pipeline_llm_core
+  core_type: llm_call

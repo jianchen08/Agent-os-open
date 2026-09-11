@@ -6,6 +6,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type * as selectionBridgeMod from '@/services/godot/selectionBridge'
+import type * as notificationStoreMod from '@/stores/notificationStore'
 
 const postMock = vi.fn()
 const getMock = vi.fn()
@@ -27,7 +29,7 @@ vi.mock('@/services/websocket/GlobalWebSocket', () => ({
   },
 }))
 
-type Bridge = typeof import('@/services/godot/selectionBridge')
+type Bridge = selectionBridgeMod
 
 let bridge: Bridge
 
@@ -150,5 +152,62 @@ describe('selectionBridge 清除引用', () => {
 
     expect(ok).toBe(false)
     expect(bridge.getGodotSelection().items).toHaveLength(1)
+  })
+})
+
+describe('selectionBridge 周期重申订阅失败上报（U23：非核心失败显式降级提示）', () => {
+  let useNotificationStore: notificationStoreMod['useNotificationStore']
+
+  beforeEach(async () => {
+    // 与 bridge 同一模块注册表取 store（resetModules 后二者共享同一实例）
+    ;({ useNotificationStore } = await import('@/stores/notificationStore'))
+    useNotificationStore.setState({ notifications: [] })
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('30s 重申 POST 失败 → 经错误上报链进通知中心（不再静默吞掉）', async () => {
+    postMock.mockRejectedValue(new Error('down'))
+    await bridge.initGodotSelection('t1')
+    useNotificationStore.setState({ notifications: [] })
+
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    const messages = useNotificationStore.getState().notifications.map((n) => n.message)
+    expect(messages.some((m) => m.includes('订阅失败'))).toBe(true)
+  })
+
+  it('连续失败只提示一次（30s 循环不刷屏）；恢复成功后再失败可再次提示', async () => {
+    // 通知中心 autoDismiss 会在推进窗口内移除旧通知，故按「新增次数」断言 episode 语义
+    let added = 0
+    const unsubscribe = useNotificationStore.subscribe((s, prev) => {
+      if (s.notifications.length > prev.notifications.length) added++
+    })
+    postMock.mockRejectedValue(new Error('down'))
+    await bridge.initGodotSelection('t1')
+
+    await vi.advanceTimersByTimeAsync(90_000) // 3 连败 → 仅首败提示
+    expect(added).toBe(1)
+
+    postMock.mockResolvedValue({}) // 恢复成功 → episode 重置
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(added).toBe(1)
+
+    postMock.mockRejectedValue(new Error('down')) // 再次失败 → 新 episode
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(added).toBe(2)
+    unsubscribe()
+  })
+
+  it('重申成功 → 零降级提示', async () => {
+    await bridge.initGodotSelection('t1')
+    useNotificationStore.setState({ notifications: [] })
+
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(useNotificationStore.getState().notifications).toHaveLength(0)
   })
 })

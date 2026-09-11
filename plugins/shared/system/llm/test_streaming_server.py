@@ -453,9 +453,8 @@ class TestCompleteStream:
     def test_thinking_param_passthrough_to_adapter(self) -> None:
         """llm.yaml default_params 的 thinking 经 kwargs 透传 → adapter 收到。
 
-        此前 server 调 adapter.completion 只显式传固定形参，adaptive thinking
-        配置被丢弃——MiniMax-M3 只能按模型默认思考预算运行（2026-08-30 实测
-        2870 tokens 即配置未生效的模型默认行为）。
+        server 调 adapter.completion 时 default_params 整体随 kwargs 透传，
+        adaptive thinking 配置在 adapter 侧生效（漏传即退化为模型默认思考预算）。
         """
         mod = _load_server()
         bus = FakeBus()
@@ -696,6 +695,39 @@ class TestCancelPolling:
         # 兜底 finish 已发（消费端终止等待）
         events = [p["event"] for _, p in bus.emits]
         assert events == ["finish"]
+
+    def test_run_precheck_failure_continues_best_effort(self) -> None:
+        """起手检查通道故障（get_run_status 抛错）→ 按未取消继续，LLM 调用照常。
+
+        取消感知是增强能力，检查通道故障不阻断流式主流程（best-effort 契约）。
+        """
+
+        class _BrokenRunStatus:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, Any]]] = []
+
+            async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+                self.calls.append((method, params))
+                raise RuntimeError("poll channel down")
+
+        mod = _load_server()
+        bus = FakeBus()
+        run_status = _BrokenRunStatus()
+        _inject(mod, "event-bus", bus)
+        _inject(mod, "pipeline-executor", run_status)
+        adapter = FakeAdapter(chunks=[_text("ok")])
+        mod._adapter = adapter
+
+        result = _run(
+            mod.llm_complete_stream(
+                model="glm-5.2",
+                messages=[{"role": "user", "content": "hi"}],
+                run_id="run-abc",
+            )
+        )
+        assert result["status"] == "streamed"
+        assert adapter.calls, "起手检查失败不应跳过 LLM 调用"
+        assert run_status.calls[0][0] == "get_run_status"
 
     def test_run_polling_disabled_without_run_id(self) -> None:
         """无 run_id → 不启动轮询（域门控），正常流式返回。"""

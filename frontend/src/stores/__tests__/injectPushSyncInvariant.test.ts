@@ -18,11 +18,15 @@
  * 修复后：consume 在 LLM 之前 emit_finish 分割，通知排在新流之前。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type * as handlersMod from '@/services/websocket/streaming/handlers'
+import type * as streamHandlerMod from '@/services/websocket/streaming/handlers/streamHandler'
+import type * as lifecycleHandlersMod from '@/services/websocket/streaming/lifecycleHandlers'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 // ── mock 外部依赖（与 messageOrderWithNotifications 对齐）──
 vi.mock('@/utils/activityConverter', () => ({
-  buildDefaultActions: (tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
+  buildDefaultActions: (_tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
 
   toolCallToActivity: (toolCall: any) => ({
     type: 'tool_call',
@@ -58,10 +62,10 @@ vi.mock('@/utils/retry', () => ({
 const PIPELINE_ID = 'pid_inject_sync_aaaa'
 const THREAD_ID = 'tid_inject_sync_bbbb'
 
-let pipelineStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
-let handlers: typeof import('@/services/websocket/streaming/handlers')
-let handleSystemNotification: typeof import('@/services/websocket/streaming/lifecycleHandlers').handleSystemNotification
-let flushStreamChunkBuffer: typeof import('@/services/websocket/streaming/handlers/streamHandler').flushStreamChunkBuffer
+let pipelineStore: pipelineMessageStoreMod.usePipelineMessageStore
+let handlers: handlersMod
+let handleSystemNotification: lifecycleHandlersMod.handleSystemNotification
+let flushStreamChunkBuffer: streamHandlerMod.flushStreamChunkBuffer
 
 function makeMsg(id: string, overrides: Partial<Message>): Message {
   return {

@@ -15,6 +15,7 @@
  * 用户可见，只进日志视同未发现）。
  */
 import { useEffect, useState } from 'react'
+import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
 
 /** G2 净化证据（后端 SanitizeEvidence，ADR 2026-08-28 决策2：净化留痕用户可见） */
@@ -88,7 +89,7 @@ export function ContractStatusPanel() {
     let cancelled = false
     setState('loading')
     apiClient
-      .get('/api/v1/plugins/contract-status')
+      .get(API_ENDPOINTS.PLUGINS.CONTRACT_STATUS)
       .then((resp) => {
         if (cancelled) return
         const list = parseContractStatus(resp.data)

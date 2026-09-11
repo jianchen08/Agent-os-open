@@ -3,7 +3,7 @@
 //!
 //! 填补 contract_tests.rs 中的验证缺口：
 //! - 场景3：Composite × Sidecar 组合缺失
-//! - 场景5：MessageRecord/TraceEntry/BlobRecord 序列化往返（serialize → deserialize → 比较）
+//! - 场景5：MessageRecord/TraceEntry 序列化往返（serialize → deserialize → 比较）
 //! - 场景10：CompositeStep 序列化需验证 outputs 字段存在
 
 use serde_json::json;
@@ -45,6 +45,8 @@ fn make_test_manifest(
     requires_content: Option<u32>,
 ) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "test_plugin".to_string(),
         name: "Test Plugin".to_string(),
         description: None,
@@ -77,7 +79,7 @@ fn make_test_manifest(
     }
 }
 
-// ── 场景5补充：MessageRecord/TraceEntry/BlobRecord 序列化往返 ──
+// ── 场景5补充：MessageRecord/TraceEntry 序列化往返 ──
 
 #[test]
 fn test_message_record_roundtrip() {
@@ -187,22 +189,6 @@ fn test_trace_entry_roundtrip_all_patch_types() {
         let deserialized: TraceEntry = serde_json::from_str(&json_str).unwrap();
         assert_eq!(deserialized.patch_type, *pt);
     }
-}
-
-#[test]
-fn test_blob_record_roundtrip() {
-    let original = BlobRecord {
-        blob_id: "blob_001".to_string(),
-        mime_type: "text/plain".to_string(),
-        size_bytes: 100,
-        created_at: "2026-07-14T00:00:00Z".to_string(),
-    };
-    let json_str = serde_json::to_string(&original).unwrap();
-    let deserialized: BlobRecord = serde_json::from_str(&json_str).unwrap();
-    assert_eq!(deserialized.blob_id, original.blob_id);
-    assert_eq!(deserialized.mime_type, original.mime_type);
-    assert_eq!(deserialized.size_bytes, original.size_bytes);
-    assert_eq!(deserialized.created_at, original.created_at);
 }
 
 // ── 场景1补充：HookContext 完整用户旅程（串联验证） ──────────────

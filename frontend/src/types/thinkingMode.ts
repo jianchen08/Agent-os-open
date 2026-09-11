@@ -19,11 +19,11 @@ export const STRENGTH_TO_ENABLE: Record<ThinkingStrength, boolean> = {
 }
 
 /**
- * 强度 → 思考参数映射（随消息传给后端 llm_core 路由；模型级配置
- * thinking_strength_params 优先，本表为兜底基线）。
- * 决策：只覆盖思考相关参数（reasoning_effort）；
- * temperature/max_tokens 等采样参数不随强度变化（始终用模型 default_params）。
- * off → 不覆盖（保持 llm.yaml default_params 现状）。
+ * 强度 → 思考参数映射（历史表，当前无消费方）。
+ *
+ * 实际路由在后端：档位随 user_input 透传到 llm_core，由 llm.yaml 的
+ * providers/models 级 thinking_strength_params 解析（厂商事实唯一落点，
+ * 见 ADR 2026-09-03）。本表保留仅供类型引用，值不代表线上生效结果。
  */
 export const STRENGTH_TO_PARAMS: Record<
   ThinkingStrength,
@@ -48,53 +48,3 @@ export interface ThinkingModeState {
   error?: string
 }
 
-export interface ThinkingModeConfig {
-  /** 模型名称 */
-  modelName: string
-  /** 显示名称 */
-  displayName: string
-  /** 思考模式类型 */
-  thinkingType: ThinkingModeType
-  /** 基础模型 */
-  baseModel: string
-  /** 思考模型 */
-  thinkingModel: string
-  /** 是否为同一模型 */
-  isSameModel: boolean
-  /** 是否支持推理强度 */
-  supportsReasoningEffort: boolean
-  /** 描述 */
-  description: string
-  /** 切换描述 */
-  switchDescription: string
-}
-
-export interface ThinkingModeSwitchOptions {
-  /** 当前模型 */
-  currentModel: string
-  /** 是否启用思考模式 */
-  enableThinking: boolean
-  /** 任务类型（可选） */
-  taskType?: string
-  /** 复杂度（可选） */
-  complexity?: string
-}
-
-export interface ThinkingModeRecommendationItem {
-  /** 模型名称 */
-  modelName: string
-  /** 显示名称 */
-  displayName: string
-  /** 思考模式类型 */
-  thinkingType: ThinkingModeType
-  /** 适合度评分 */
-  suitabilityScore: number
-  /** 最优参数 */
-  optimalParams: Record<string, any>
-  /** 最适合的场景 */
-  bestFor: string[]
-  /** 使用建议 */
-  tips: string[]
-  /** 成本估算 */
-  costEstimate: string
-}

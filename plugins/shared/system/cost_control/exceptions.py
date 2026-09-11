@@ -1,8 +1,6 @@
 """
-核心异常基类 + Cost Control 模块异常定义
-
-从 0.1 src/core/exceptions/base.py 和 src/core/exceptions/cost_control.py 合并提取。
-异常层次结构保持不变，仅合并到单文件以适配平铺目录结构。
+核心异常基类 + Cost Control 模块异常定义（单文件平铺：BaseAppException 基类在前，
+CostControl 异常族继承其后）。
 """
 
 import logging

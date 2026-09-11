@@ -16,6 +16,7 @@ from tests._pipeline_plugin_path import add_plugin_dir
 
 add_plugin_dir("input", "tool_schema_validator")
 
+import plugin as _tsv_plugin_mod  # noqa: E402  模块级捕获：测试内 re-import 会被裸名逐出干扰
 from typing import Any
 
 import pytest
@@ -398,3 +399,75 @@ class TestObjectArrayParseFailureKeepsOriginal:
         assert len(calls) == 1, "合法字符串化 JSON 应转换后放行"
         assert calls[0]["args"]["options"] == {"a": 1}
         assert calls[0]["args"]["tags"] == [1, 2]
+
+
+# ─────────────────── JSON 修复能力通道（llm.repair_json 收敛点）───────────────────
+
+
+class _StubRepairCaller:
+    """可编程能力调用替身：模拟 tool-executor 传输与信封形态。"""
+
+    def __init__(
+        self,
+        *,
+        envelope: Any = None,
+        exc: Exception | None = None,
+        repaired: Any = '{"goal": "x"}',
+    ) -> None:
+        self._envelope = envelope
+        self._exc = exc
+        self._repaired = repaired
+
+    async def __call__(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:  # noqa: ARG002
+        if self._exc is not None:
+            raise self._exc
+        if self._envelope is not None:
+            return self._envelope
+        return {"success": True, "data": {"repaired": self._repaired}, "error": None}
+
+
+class TestRepairCapabilityChannel:
+    """_repair_json_string 经 llm.repair_json 能力：降级分支恒返回 None。"""
+
+    @pytest.mark.asyncio
+    async def test_no_caller_returns_none(self, monkeypatch: Any) -> None:
+        """能力调用器未注入 → None（截断检测按不可修复降级）。"""
+        p = _make_plugin()
+        monkeypatch.setitem(
+            p._check_args_truncation.__globals__, "_capability_caller", None
+        )
+        assert await _tsv_plugin_mod._repair_json_string('{"goal": "x"') is None
+
+    @pytest.mark.asyncio
+    async def test_caller_exception_returns_none(self, monkeypatch: Any) -> None:
+        """能力调用失败（通道故障）→ None，不向验证主流程传播。"""
+        p = _make_plugin()
+        monkeypatch.setitem(
+            p._check_args_truncation.__globals__,
+            "_capability_caller",
+            _StubRepairCaller(exc=RuntimeError("bus down")),
+        )
+        assert await _tsv_plugin_mod._repair_json_string('{"goal": "x"') is None
+
+    @pytest.mark.asyncio
+    async def test_failure_envelope_returns_none(self, monkeypatch: Any) -> None:
+        """success=false 信封 → None。"""
+        p = _make_plugin()
+        monkeypatch.setitem(
+            p._check_args_truncation.__globals__,
+            "_capability_caller",
+            _StubRepairCaller(envelope={"success": False, "data": None, "error": "down"}),
+        )
+        assert await _tsv_plugin_mod._repair_json_string('{"goal": "x"') is None
+
+    @pytest.mark.asyncio
+    async def test_truncation_detected_via_capability(self, monkeypatch: Any) -> None:
+        """真实通道形态：桩替身返回修复结果 → 截断被识别并报告丢失字段。"""
+        p = _make_plugin()
+        monkeypatch.setitem(
+            p._check_args_truncation.__globals__, "_capability_caller", _StubRepairCaller()
+        )
+        result = await p._check_args_truncation('{"goal": "x", "steps": ["a",', "my_tool")
+        assert result is not None
+        assert result["truncated"] is True
+        assert "steps" in result["lost_keys"]

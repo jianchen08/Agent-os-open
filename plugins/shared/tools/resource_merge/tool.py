@@ -8,7 +8,6 @@
 - get_tool_definition() -> Tool：获取工具定义
 - ResourceMergeTool：资源合并与回滚工具类
 
-0.2 迁移（FP-MIGR / F-MIGR-2）：0.1 的 tools.builtin.base / tools.types 已删除 →
 顶层类型走 agentos_plugin_sdk（BuiltinTool / Tool / ToolCategory / ToolLevel /
 ToolExecutionResult / ToolSource / create_failure_result / create_success_result）；
 GitHelpers 走本目录平铺模块 git_helpers.py（同目录 sys.path 注入解析）。
@@ -169,7 +168,6 @@ class ResourceMergeTool(BuiltinTool):
                 error_code="MISSING_WORKSPACE",
             )
 
-        # 解析 workspace 路径
         workspace = self._resolve_path(workspace_str)
 
         # 分派到对应的 action 处理方法
@@ -485,7 +483,6 @@ class ResourceMergeTool(BuiltinTool):
                     error_code="GIT_ADD_FAILED",
                 )
 
-            # 检查是否有变更需要提交
             return_code, status_output, _ = await self._git_helpers.run_git(
                 "status",
                 "--porcelain",

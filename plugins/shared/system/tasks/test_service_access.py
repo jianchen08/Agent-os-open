@@ -65,6 +65,7 @@ class TestGetTaskService:
         import service_access
 
         monkeypatch.setattr(service_access, "_task_service_instance", None)
+        monkeypatch.setattr(service_access, "_injected_task_service", None)
         first = service_access.get_task_service()
         assert first is not None
         second = service_access.get_task_service()
@@ -74,9 +75,40 @@ class TestGetTaskService:
         import service_access
 
         monkeypatch.setattr(service_access, "_task_service_instance", None)
+        monkeypatch.setattr(service_access, "_injected_task_service", None)
 
         def boom() -> Any:
             raise RuntimeError("init failed")
 
         monkeypatch.setitem(sys.modules, "service", type("S", (), {"TaskService": boom})())
         assert service_access.get_task_service() is None
+
+    def test_injected_instance_wins_over_lazy_construction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """正门注入（tasks server.py on_load）优先：同进程消费方拿到的
+        是带插件配置的front-door实例，而非零参自建克隆。"""
+        import service_access
+
+        monkeypatch.setattr(service_access, "_task_service_instance", None)
+        monkeypatch.setattr(service_access, "_injected_task_service", None)
+
+        sentinel = object()
+        service_access.set_task_service(sentinel)
+        try:
+            assert service_access.get_task_service() is sentinel
+        finally:
+            service_access.set_task_service(None)
+        # 注入清除后回到懒构建通道（返回 TaskService 实例，非哨兵）
+        fallback = service_access.get_task_service()
+        assert fallback is not None
+        assert fallback is not sentinel
+
+    def test_reset_singletons_clears_injected_instance(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import service_access
+
+        monkeypatch.setattr(service_access, "_task_service_instance", None)
+        monkeypatch.setattr(service_access, "_injected_task_service", None)
+
+        sentinel = object()
+        service_access.set_task_service(sentinel)
+        service_access.reset_singletons()
+        assert service_access.get_task_service() is not sentinel

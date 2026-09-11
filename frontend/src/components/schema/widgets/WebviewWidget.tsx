@@ -24,11 +24,12 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { FileWarning } from '@/assets/icons'
+import { API_ENDPOINTS } from '@/constants/api'
 import { apiClient } from '@/services/api/client'
-import { useWidgetEventStore } from '@/stores/widgetEventStore'
-import { buildWebviewMessage, validateWebviewEvent } from '@/utils/postMessageSecurity'
-import { loggers } from '@/utils/logger'
 import { EXT_ROUTE, extUrl } from '@/services/api/extRoute'
+import { useWidgetEventStore } from '@/stores/widgetEventStore'
+import { loggers } from '@/utils/logger'
+import { buildWebviewMessage, validateWebviewEvent } from '@/utils/postMessageSecurity'
 
 /** Webview widget 渲染指令 props（由 RenderingEngine 从 contributes.widgets 注入） */
 export interface WebviewWidgetProps {
@@ -174,7 +175,7 @@ export function WebviewWidget({
               : await apiClient.get(msg.method)
         } else {
           // action 约定：复用 command transport 同一端点（带 Bearer token）
-          res = await apiClient.post('/api/v1/actions/execute', {
+          res = await apiClient.post(API_ENDPOINTS.ACTIONS.EXECUTE, {
             action: msg.method,
             args: msg.params,
           })

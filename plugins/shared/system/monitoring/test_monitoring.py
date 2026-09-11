@@ -31,6 +31,11 @@ pytestmark = pytest.mark.unit
 _PLUGIN_DIR = Path(__file__).resolve().parent
 if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
+# routes_search 等模块在调用期 import 共享根的 kernel_db（生产环境平铺 sys.path
+# 含 shared 根）：单文件直跑时无其他用例代为注入，这里自锚定，不依赖跨用例污染。
+_SHARED_ROOT = _PLUGIN_DIR.parent.parent
+if str(_SHARED_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SHARED_ROOT))
 
 
 @pytest.fixture(autouse=True)
@@ -125,6 +130,44 @@ def _run(coro: Any) -> Any:
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+class TestCollectStateTasksStatus:
+    """任务列表状态映射：引擎把 run_status 写进 state 基线（单一运行状态真值），
+    task 域键（task.status）缺席的管道（如聊天会话）必须回退 run_status，
+    而非恒显 unknown（GUI 黑盒测试 2026-09-11：调试-任务状态列全 unknown）。"""
+
+    def test_status_falls_back_to_kernel_run_status(self, monkeypatch) -> None:
+        mod = _load_server()
+
+        class _FakeHandle:
+            async def call(self, _name: str, _params: dict) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "pipeline_id": "p-1",
+                        "thread_id": "thread-1",
+                        "run_status": "completed",
+                        "current_phase": "exit",
+                        "track.total_tokens": 125648,
+                    },
+                    {"pipeline_id": "p-2", "thread_id": "thread-2", "task.status": "running"},
+                    {"pipeline_id": "p-3", "thread_id": "thread-3"},
+                ]
+
+        class _FakePlugin:
+            def get_capability(self, _cap: str) -> _FakeHandle:
+                return _FakeHandle()
+
+        monkeypatch.setattr(mod, "plugin", _FakePlugin())
+        items = _run(mod._collect_state_tasks())
+        by_id = {i["pipeline_id"]: i for i in items}
+        # task.* 缺席 → 回退内核 run_status；run_status 字段同源（非 router.stop_reason）
+        assert by_id["p-1"]["status"] == "completed"
+        assert by_id["p-1"]["run_status"] == "completed"
+        # task.* 存在时优先
+        assert by_id["p-2"]["status"] == "running"
+        # 双双缺席 → unknown（诚实状态机，不猜）
+        assert by_id["p-3"]["status"] == "unknown"
 
 
 def _make_module_with_monitor() -> tuple[Any, FakePerformanceMonitor]:
@@ -412,25 +455,65 @@ class TestPayloadDiag:
 
 
 def _make_kernel_db(tmp_path: Path) -> Path:
+    """内核 traces 表真实落库形态（引擎 persist_step_trace）：
+
+    plugin_id = 配置 step id（core/prepare/...），工具结果数组在
+    patch_data.tool_results（tool_core 结果经 state diff 落 trace）。
+    另造两行负控制：
+    - plugin_id='pipeline_tool_core' 但无 tool_results 键（llm 形态 diff）——
+      证明查询按内容谓词而非 plugin_id 选择；
+    - plugin_id='prepare' 携带其他键——无 tool_results 不入选。
+    租户分布：tr-1/tr-2（工具行）在 tenant-a，tr-3/tr-4 在 tenant-b——
+    租户过滤测试的互斥可见性前提。
+    """
     db_path = tmp_path / "agentos_kernel.db"
     conn = sqlite3.connect(db_path)
-    conn.execute("CREATE TABLE traces (trace_id TEXT, run_id TEXT, created_at TEXT, plugin_id TEXT, patch_data TEXT)")
+    conn.execute("CREATE TABLE traces (trace_id TEXT, run_id TEXT, created_at TEXT, plugin_id TEXT, patch_data TEXT, tenant_id TEXT)")
     conn.execute(
-        "INSERT INTO traces VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO traces VALUES (?, ?, ?, ?, ?, ?)",
         (
             "tr-1",
             "run-1",
             "2026-01-01T00:00:00",
-            "pipeline_tool_core",
+            "core",
             json.dumps(
                 {
+                    "_executed_tool_calls": [{"name": "bash_execute"}, {"name": "file_write"}],
                     "tool_results": [
-                        {"tool_name": "bash_execute", "success": 1, "duration_ms": 50},
-                        {"tool_name": "file_write", "success": 0, "error": "denied", "duration_ms": 2500},
-                    ]
+                        {"tool_name": "bash_execute", "success": True, "data": {"ok": 1}, "duration_ms": 50.0},
+                        {
+                            "tool_name": "file_write",
+                            "success": False,
+                            "error": "denied",
+                            "data": None,
+                            "duration_ms": 2500.0,
+                        },
+                    ],
                 }
             ),
+            "tenant-a",
         ),
+    )
+    conn.execute(
+        "INSERT INTO traces VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "tr-2",
+            "run-1",
+            "2026-01-01T00:01:00",
+            "core",
+            json.dumps({"tool_results": [{"tool_name": "file_read", "success": True, "data": "x", "duration_ms": 3.0}]}),
+            "tenant-a",
+        ),
+    )
+    # 负控制①：插件 id 恰为 pipeline_tool_core 但 patch_data 无 tool_results。
+    conn.execute(
+        "INSERT INTO traces VALUES (?, ?, ?, ?, ?, ?)",
+        ("tr-3", "run-2", "2026-01-01T00:02:00", "pipeline_tool_core", json.dumps({"raw_result": "你好"}), "tenant-b"),
+    )
+    # 负控制②：普通 step 行，无工具结果。
+    conn.execute(
+        "INSERT INTO traces VALUES (?, ?, ?, ?, ?, ?)",
+        ("tr-4", "run-2", "2026-01-01T00:03:00", "prepare", json.dumps({"tool_schemas_count": 41}), "tenant-b"),
     )
     conn.commit()
     conn.close()
@@ -441,33 +524,62 @@ class TestToolCalls:
     def test_query_tool_calls_all(self, tmp_path: Path, monkeypatch) -> None:
         mod = _load_server()
         monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_kernel_db(tmp_path)))
-        result = mod._query_tool_calls({})
-        assert result["total"] == 2
+        result = mod._query_tool_calls({}, "tenant-a")
+        # tenant-a 两行 tool-carrying step 轨迹共 3 条结果；负控制两行（含
+        # plugin_id 恰为 pipeline_tool_core 的行）均不入选——内容谓词，与
+        # plugin_id 无关。
+        assert result["total"] == 3
+        assert {i["tool_name"] for i in result["items"]} == {"bash_execute", "file_write", "file_read"}
 
     def test_query_tool_calls_filters(self, tmp_path: Path, monkeypatch) -> None:
         mod = _load_server()
         monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_kernel_db(tmp_path)))
         # 按工具名
-        by_tool = mod._query_tool_calls({"tool_name": "bash_execute"})
+        by_tool = mod._query_tool_calls({"tool_name": "bash_execute"}, "tenant-a")
         assert by_tool["total"] == 1 and by_tool["items"][0]["tool_name"] == "bash_execute"
         # 按状态 error
-        by_status = mod._query_tool_calls({"status": "error"})
+        by_status = mod._query_tool_calls({"status": "error"}, "tenant-a")
         assert by_status["total"] == 1 and by_status["items"][0]["success"] == 0
+        assert by_status["items"][0]["error"] == "denied"
         # 按最小耗时
-        by_dur = mod._query_tool_calls({"min_duration": "1000"})
+        by_dur = mod._query_tool_calls({"min_duration": "1000"}, "tenant-a")
         assert by_dur["total"] == 1 and by_dur["items"][0]["tool_name"] == "file_write"
         # 非法 min_duration：忽略过滤条件（修复后：不追加 SQL 占位符、
         # 查询正常返回全部结果，不再因绑定数不匹配报错）
-        ok = mod._query_tool_calls({"min_duration": "abc"})
-        assert ok["total"] == 2
+        ok = mod._query_tool_calls({"min_duration": "abc"}, "tenant-a")
+        assert ok["total"] == 3
         # limit 钳制
-        clamped = mod._query_tool_calls({"limit": "999"})
-        assert clamped["total"] == 2
+        clamped = mod._query_tool_calls({"limit": "999"}, "tenant-a")
+        assert clamped["total"] == 3
+
+    def test_query_tool_calls_tenant_isolation(self, tmp_path: Path, monkeypatch) -> None:
+        """两租户数据互不可见：tenant-b 的行（含无工具结果的负控制）对
+        tenant-a 查询不可见，反之亦然。"""
+        mod = _load_server()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_kernel_db(tmp_path)))
+        a = mod._query_tool_calls({}, "tenant-a")
+        assert a["total"] == 3
+        assert all(i["run_id"] == "run-1" for i in a["items"])
+        # tenant-b 的 traces 行 patch_data 无 tool_results → 工具查询恒空；
+        # 租户互斥由 tenant-a 查不到 tenant-b 的 run-2 行证明。
+        b = mod._query_tool_calls({}, "tenant-b")
+        assert b["items"] == [] and b["total"] == 0
+        # 租户不存在 → 空集（查询域内无该租户数据）
+        ghost = mod._query_tool_calls({}, "tenant-ghost")
+        assert ghost["items"] == [] and ghost["total"] == 0
+
+    def test_query_tool_calls_missing_tenant_fails_closed(self, tmp_path: Path, monkeypatch) -> None:
+        """身份头缺失（空租户）→ 空集而非全量查询（fail-closed，防跨租户泄露）。"""
+        mod = _load_server()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_kernel_db(tmp_path)))
+        result = mod._query_tool_calls({}, "")
+        assert result["items"] == [] and result["total"] == 0
+        assert "tenant" in result["error"]
 
     def test_query_tool_calls_db_missing(self, tmp_path: Path, monkeypatch) -> None:
         mod = _load_server()
         monkeypatch.setenv("AGENTOS_DB_PATH", str(tmp_path / "nonexistent.db"))
-        result = mod._query_tool_calls({})
+        result = mod._query_tool_calls({}, "tenant-a")
         assert result["items"] == [] and "not found" in result["error"]
 
     def test_query_tool_calls_db_error(self, tmp_path: Path, monkeypatch) -> None:
@@ -480,11 +592,24 @@ class TestToolCalls:
         assert result["items"] == [] and result["error"]
 
     def test_tool_calls_route(self, tmp_path: Path, monkeypatch) -> None:
+        """http.handle 路由把内核注入的 x-agentos-tenant 头传给租户过滤查询。"""
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_kernel_db(tmp_path)))
+        resp = _run(mod.http_handle(
+            path="/ext/monitoring/tool-calls",
+            method="GET",
+            headers={"x-agentos-tenant": "tenant-a"},
+        ))
+        payload = _decode_body(resp)
+        assert payload["total"] == 3
+
+    def test_tool_calls_route_missing_tenant_fails_closed(self, tmp_path: Path, monkeypatch) -> None:
+        """无身份头（非内核认证分发）→ 空集而非全量（fail-closed）。"""
         mod, _ = _make_module_with_monitor()
         monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_kernel_db(tmp_path)))
         resp = _run(mod.http_handle(path="/ext/monitoring/tool-calls", method="GET"))
         payload = _decode_body(resp)
-        assert payload["total"] == 2
+        assert payload["items"] == [] and payload["total"] == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -741,3 +866,113 @@ class TestTokenUsageByTime:
         body = _decode_body(resp)
         assert body["columns"][0]["key"] == "date"
         assert len(body["rows"]) == 3
+
+
+# ═══════════════════════════════════════════════════════════
+# M3：search/sessions 域租户过滤（fail-closed，与 tool-calls 域同纪律）
+# ═══════════════════════════════════════════════════════════
+
+
+def _make_runs_for_search(tmp_path: Path) -> Path:
+    """runs 表两租户各一管道，驱动 _tenant_pipeline_ids 的可见集判定。"""
+    db_path = tmp_path / "agentos_kernel.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, pipeline_id TEXT, tenant_id TEXT, created_at TEXT)"
+    )
+    conn.execute("INSERT INTO runs VALUES ('r-1', 'p-tenant-a', 'tenant-a', '2026-01-01T00:00:00')")
+    conn.execute("INSERT INTO runs VALUES ('r-2', 'p-tenant-b', 'tenant-b', '2026-01-02T00:00:00')")
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _make_sessions_for_search(tmp_path: Path) -> Path:
+    """sessions 表两租户各一同名会话（真实标题源）+ runs 表供消息域可见集。"""
+    db_path = tmp_path / "agentos_kernel.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, pipeline_id TEXT, tenant_id TEXT, created_at TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE sessions (thread_id TEXT PRIMARY KEY, title TEXT, tenant_id TEXT, "
+        "last_active_at TEXT, updated_at TEXT)"
+    )
+    conn.execute("INSERT INTO runs VALUES ('r-a', 'p-tenant-a', 'tenant-a', '2026-01-01T00:00:00')")
+    conn.execute("INSERT INTO runs VALUES ('r-b', 'p-tenant-b', 'tenant-b', '2026-01-02T00:00:00')")
+    conn.execute(
+        "INSERT INTO sessions VALUES ('thread-a', 'stress2-19 租户甲会话', 'tenant-a', "
+        "'2026-01-03T00:00:00', '2026-01-03T00:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO sessions VALUES ('thread-b', 'stress2-19 租户乙会话', 'tenant-b', "
+        "'2026-01-03T00:00:00', '2026-01-03T00:00:00')"
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+class TestSearchTenantFilter:
+    def _load_search(self) -> Any:
+        mod_name = "routes_search_tenant_test"
+        if mod_name in sys.modules:
+            del sys.modules[mod_name]
+        spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "routes_search.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_tenant_pipeline_ids_scoped_to_tenant(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_runs_for_search(tmp_path)))
+        mod = self._load_search()
+        assert mod._tenant_pipeline_ids("tenant-a") == {"p-tenant-a"}
+        assert mod._tenant_pipeline_ids("tenant-b") == {"p-tenant-b"}
+        assert mod._tenant_pipeline_ids("tenant-nobody") == set()
+
+    def test_search_missing_tenant_is_empty_not_full(self, tmp_path: Path, monkeypatch) -> None:
+        # fail-closed：缺身份头返回空集，绝不退化全量搜索（跨租户消息正文泄露面）
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_runs_for_search(tmp_path)))
+        mod = self._load_search()
+        result = asyncio.run(mod.search(q="秘密", type="all", limit=20, tenant_id=""))
+        assert result["sessions"] == [] and result["messages"] == []
+
+    def test_search_filters_hits_by_tenant_pipelines(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv(
+            "AGENTOS_DB_PATH", str(_make_sessions_for_search(tmp_path))
+        )
+        mod = self._load_search()
+        mine = asyncio.run(mod.search(q="会话", type="session", limit=20, tenant_id="tenant-a"))
+        assert [s["id"] for s in mine["sessions"]] == ["thread-a"]
+        theirs = asyncio.run(mod.search(q="会话", type="session", limit=20, tenant_id="tenant-b"))
+        assert [s["id"] for s in theirs["sessions"]] == ["thread-b"]
+
+    def test_session_search_hits_sessions_table_scoped_to_tenant(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """会话标题搜索命中 sessions 表（真实标题源），命中 id=thread_id 且按租户隔离。"""
+        monkeypatch.setenv(
+            "AGENTOS_DB_PATH", str(_make_sessions_for_search(tmp_path))
+        )
+        mod = self._load_search()
+        mine = asyncio.run(
+            mod.search(q="stress2-19", type="session", limit=20, tenant_id="tenant-a")
+        )
+        assert [s["id"] for s in mine["sessions"]] == ["thread-a"]
+        assert "stress2-19" in mine["sessions"][0]["title"]
+        theirs = asyncio.run(
+            mod.search(q="stress2-19", type="session", limit=20, tenant_id="tenant-b")
+        )
+        assert [s["id"] for s in theirs["sessions"]] == ["thread-b"]
+
+    def test_session_search_title_no_hit_returns_empty(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv(
+            "AGENTOS_DB_PATH", str(_make_sessions_for_search(tmp_path))
+        )
+        mod = self._load_search()
+        none = asyncio.run(
+            mod.search(q="zzz-nonexistent", type="session", limit=20, tenant_id="tenant-a")
+        )
+        assert none["sessions"] == []

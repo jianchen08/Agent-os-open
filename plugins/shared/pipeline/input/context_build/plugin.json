@@ -19,16 +19,33 @@
   "priority": 50,
   "export_fields": [
     "task.id",
-    "lineage.parent_pipeline_id",
-    "lineage.origin_session_id",
-    "lineage.root",
-    "lineage.origin.kind",
-    "lineage.origin.source",
-    "display_name",
-    "name",
-    "tags"
+    "tool_ids",
+    "context.*",
+    "model_tier",
+    "max_iterations",
+    "max_reminders",
+    "timeout_seconds",
+    "agent_level"
   ],
   "persistent_fields": [
-    "task.id"
-  ]
+    "task.id",
+    "model_tier",
+    "max_iterations",
+    "max_reminders",
+    "timeout_seconds",
+    "agent_level"
+  ],
+  "description": "\n\n[state 出口口径] 本插件真实产出键 = task.id / tool_ids / context.*（含 extra_context 与 agent 配置运行时键）；lineage.* 仅读（出生写面在 task_birth 出生 state，经 chat_send_handler/task_submit 一次写全），display_name/name/tags 取自 agent 配置非本插件写入。",
+  "state": {
+    "reads": [
+      "agent.id",
+      "core_type",
+      "iteration",
+      "lineage.parent_pipeline_id",
+      "pipeline_id",
+      "session_id",
+      "system_prompt",
+      "task.id"
+    ]
+  }
 }

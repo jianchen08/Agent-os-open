@@ -144,7 +144,7 @@ const sampleCatalog = [
   },
 ]
 
-/** 0.1 扁平格式（非 0.2，用于自动落源码视图断言） */
+/** 扁平格式样例（非现行嵌套 schema，用于断言设置页自动回落源码视图） */
 const sampleV1 = {
   name: 'agentos_agent',
   task_worker: { pipeline_timeout: 7200 },

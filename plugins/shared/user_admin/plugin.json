@@ -28,6 +28,102 @@
     "user-admin",
     "db-admin"
   ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "admin",
+        "title": "用户管理",
+        "icon": "👥",
+        "space": "workspace",
+        "slot": "activity-bar",
+        "order": 15,
+        "path": "/admin",
+        "widget": "widget_stage",
+        "when": "user.role == 'admin'",
+        "props": {
+          "space": "admin"
+        },
+        "description": "用户管理（widget 化：统计卡+用户表声明组台，数据源 user_admin http_endpoints）"
+      }
+    ]
+  },
+  "ui_schema": {
+    "widgets": [
+      {
+        "id": "user_stats_card",
+        "type": "status_card",
+        "space": "admin",
+        "order": 10,
+        "props": {
+          "title": "用户统计",
+          "datasourceUri": "/ext/user_admin/users/stats"
+        }
+      },
+      {
+        "id": "users_table",
+        "type": "table",
+        "space": "admin",
+        "order": 20,
+        "props": {
+          "title": "用户列表",
+          "datasourceUri": "/ext/user_admin/users",
+          "pageSize": 20,
+          "columns": [
+            {
+              "key": "username",
+              "label": "用户名"
+            },
+            {
+              "key": "email",
+              "label": "邮箱"
+            },
+            {
+              "key": "role",
+              "label": "角色"
+            },
+            {
+              "key": "is_active",
+              "label": "活跃"
+            },
+            {
+              "key": "created_at",
+              "label": "创建时间"
+            },
+            {
+              "key": "last_login_at",
+              "label": "最近登录"
+            }
+          ],
+          "rowActions": [
+            {
+              "key": "disable",
+              "label": "禁用",
+              "method": "PUT",
+              "url": "/ext/user_admin/users/{id}/active?is_active=false",
+              "when": {
+                "key": "is_active",
+                "equals": true
+              },
+              "confirm": "确认禁用该用户？",
+              "variant": "destructive",
+              "successText": "已禁用"
+            },
+            {
+              "key": "enable",
+              "label": "启用",
+              "method": "PUT",
+              "url": "/ext/user_admin/users/{id}/active?is_active=true",
+              "when": {
+                "key": "is_active",
+                "equals": false
+              },
+              "successText": "已启用"
+            }
+          ]
+        }
+      }
+    ]
+  },
   "http_endpoints": [
     {
       "route_id": "users",
@@ -75,11 +171,11 @@
       "route_id": "user_role_update_put",
       "method": "PUT",
       "path": "/ext/user_admin/users/{user_id}/role",
-      "auth": "user",
+      "auth": "admin",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
-      "description": "改用户角色（body: {role: admin|user}；db-admin.table_update_row 凭证透传，内核 admin 写校验；PATCH 同路径仍走 user-admin capability 自保护面——原 PUT /ext/channel_api/users/{user_id}/role）"
+      "description": "改用户角色（body: {role: admin|user}；与 PATCH 同路径对齐 admin 声明，dispatcher 层 admin 强制 + db-admin.table_update_row 凭证透传内核 admin 写校验双层纵深；PATCH 同路径仍走 user-admin capability 自保护面——原 PUT /ext/channel_api/users/{user_id}/role）"
     },
     {
       "route_id": "user_active_update",

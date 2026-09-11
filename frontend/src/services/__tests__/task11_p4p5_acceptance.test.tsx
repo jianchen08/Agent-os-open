@@ -12,8 +12,9 @@
  * 不改前端代码即出现入口——内核聚合已就绪（6f242bc2），前端只读 schema 渲染。
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import React from 'react'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   CommandPalette,
   ContextMenuItems,
@@ -25,7 +26,6 @@ import { ContributionRegistry, contributionRegistry } from '@/services/schema/Co
 import { ShortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { evaluateWhen } from '@/services/schema/whenExpression'
 import { useContextKeys } from '@/stores/contextKeysStore'
-import React from 'react'
 
 /**
  * 测试插件 manifest（模拟内核聚合后的 schema 输出）
@@ -225,14 +225,11 @@ describe('task_11 P4/P5 验收：插件声明 contributes 后前端自动出现�
       expect(fs.existsSync(topNavPath)).toBe(false)
     })
 
-    it('layout/index.ts 不再导出 TopNav/NAV_ITEMS/isNavItemActive', async () => {
+    it('layout/index.ts 已整体删除（死 barrel，TopNav 导出无从存在）', async () => {
       const fs = await import('node:fs')
       const path = await import('node:path')
       const indexPath = path.resolve(__dirname, '../../components/layout/index.ts')
-      const content = fs.readFileSync(indexPath, 'utf-8')
-      expect(content).not.toContain('TopNav')
-      expect(content).not.toContain('NAV_ITEMS')
-      expect(content).not.toContain('isNavItemActive')
+      expect(fs.existsSync(indexPath)).toBe(false)
     })
 
     it('contributionRegistry 单例可用（基线修复后）', () => {

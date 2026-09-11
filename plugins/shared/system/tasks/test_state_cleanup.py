@@ -11,9 +11,9 @@
 5. recover_to_completed / reset_to_pending；
 6. 清理：_cancel_pipeline（executor 未注入/挂起/异常）、_is_child_of_container、
    _cleanup_pipeline_file（空/未注入/删除成功/异常）、_cascade_cleanup_subtasks
-   （无后代/管道数据/工作空间/记录删除）、soft_delete_container 任务不存在、
+   （无后代/管道数据/容器/记录删除/工作区豁免）、soft_delete_container 任务不存在、
    hard_delete_task 任务不存在、_cleanup_task_resources 隔离管理器路径、
-   _remove_worktree（gitdir 文件 + 分支删除 + 失败留痕）。
+   删除链不删工作区（产物保全契约，2026-09-05）。
 
 外部依赖 mock 边界：isolation.manager / pipeline.registry /
 pipeline-executor·frontend 跨进程 capability（经 set_cleanup_capabilities
@@ -903,61 +903,30 @@ class TestCleanupHelpers:
         await svc.bind_pipeline_run(child.id, "pipe-child")
 
         monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=True))
-        async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
-            return {"workspace_cleaned": True, "errors": []}
+
+        async def _fake_cleanup(task_id: str) -> dict[str, Any]:
+            return {"container_destroyed": True, "errors": []}
 
         monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
         stats = await svc._cascade_cleanup_subtasks(parent.id)
         assert stats["subtasks_deleted"] == 1
         assert stats["pipeline_files_cleaned"] == 1
-        assert stats["workspaces_cleaned"] == 1
+        assert stats["containers_destroyed"] == 1
         assert svc.get_task(child.id) is None
 
     @pytest.mark.asyncio
-    async def test_cascade_cleanup_skip_workspace(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        parent = await svc.create_task(title="父2")
-        child = await svc.create_task(
-            title="子2", parent_task_id=parent.id,
-            metadata={"workspace": "ws-same"},
-        )
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
-        stats = await svc._cascade_cleanup_subtasks(
-            parent.id, skip_workspace=True, container_workspace="ws-same",
-        )
-        assert stats["subtasks_deleted"] == 1
-        assert stats["workspaces_cleaned"] == 0
-
-    @pytest.mark.asyncio
-    async def test_cascade_cleanup_same_workspace_skipped(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """子任务 workspace 与容器相同 → 跳过清理。"""
-        parent = await svc.create_task(title="父3")
-        child = await svc.create_task(
-            title="子3", parent_task_id=parent.id,
-            metadata={"workspace": "ws-shared"},
-        )
-        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
-        stats = await svc._cascade_cleanup_subtasks(
-            parent.id, skip_workspace=False, container_workspace="ws-shared",
-        )
-        assert stats["subtasks_deleted"] == 1
-        assert stats["workspaces_cleaned"] == 0
-
-    @pytest.mark.asyncio
-    async def test_cascade_cleanup_cleanup_exception(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_cascade_cleanup_container_error_non_fatal(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         parent = await svc.create_task(title="父4")
-        child = await svc.create_task(
-            title="子4", parent_task_id=parent.id,
-            metadata={"workspace": "ws-child4"},
-        )
+        child = await svc.create_task(title="子4", parent_task_id=parent.id)
         monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
 
-        async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
+        async def _fake_cleanup(task_id: str) -> dict[str, Any]:
             raise RuntimeError("cleanup crash")
 
         monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
         stats = await svc._cascade_cleanup_subtasks(parent.id)
         assert stats["subtasks_deleted"] == 1  # 记录仍删除
-        assert any("工作空间清理失败" in e for e in stats["errors"])
+        assert any("容器清理失败" in e for e in stats["errors"])
 
     @pytest.mark.asyncio
     async def test_cascade_cleanup_hard_delete_exception(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -984,6 +953,32 @@ class TestCleanupHelpers:
         assert stats["subtasks_deleted"] == 0
 
     @pytest.mark.asyncio
+    async def test_cascade_cleanup_never_touches_workspace(
+        self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """产物保全契约（2026-09-05）：级联删除不删工作区——目录与产物原样保留。"""
+        parent = await svc.create_task(title="父7")
+        ws_dir = tmp_path / "ws-child7"
+        ws_dir.mkdir()
+        (ws_dir / "artifact.txt").write_text("keep me", encoding="utf-8")
+        child = await svc.create_task(
+            title="子7", parent_task_id=parent.id,
+            metadata={"workspace": str(ws_dir)},
+        )
+        monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
+
+        def boom() -> Any:
+            raise RuntimeError("no isolation")
+
+        _install_fake_package(
+            monkeypatch, "isolation.manager", type("IM", (), {"get_isolation_manager": boom})()
+        )
+        stats = await svc._cascade_cleanup_subtasks(parent.id)
+        assert stats["subtasks_deleted"] == 1
+        assert ws_dir.exists(), "级联删除不得删除工作区目录"
+        assert (ws_dir / "artifact.txt").read_text(encoding="utf-8") == "keep me"
+
+    @pytest.mark.asyncio
     async def test_hard_delete_task_missing(self, svc: Any) -> None:
         result = await svc.hard_delete_task("missing")
         assert "error" in result
@@ -994,15 +989,15 @@ class TestCleanupHelpers:
     ) -> None:
         """硬删除带子任务：级联清理 + 管道数据 + task_deleted 前端通知。"""
         parent = await svc.create_task(
-            title="父", metadata={"user_id": "u-1", "workspace": "ws-parent"},
+            title="父", metadata={"user_id": "u-1"},
         )
         child = await svc.create_task(title="子", parent_task_id=parent.id)
         await svc.bind_pipeline_run(parent.id, "pipe-parent")
 
         monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=True))
 
-        async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
-            return {"workspace_cleaned": True, "errors": []}
+        async def _fake_cleanup(task_id: str) -> dict[str, Any]:
+            return {"container_destroyed": True, "errors": []}
 
         monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
         emitted: list[tuple[str, dict]] = []
@@ -1036,8 +1031,8 @@ class TestCleanupHelpers:
         task = await svc.create_task(title="无通道")
         monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
 
-        async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
-            return {"workspace_cleaned": True, "errors": []}
+        async def _fake_cleanup(task_id: str) -> dict[str, Any]:
+            return {"container_destroyed": True, "errors": []}
 
         monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
 
@@ -1067,8 +1062,8 @@ class TestCleanupHelpers:
         task = await svc.create_task(title="通知炸", metadata={"user_id": "u-2"})
         monkeypatch.setattr(svc, "_cleanup_pipeline_file", AsyncMock(return_value=False))
 
-        async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
-            return {"workspace_cleaned": True, "errors": []}
+        async def _fake_cleanup(task_id: str) -> dict[str, Any]:
+            return {"container_destroyed": True, "errors": []}
 
         monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
 
@@ -1081,107 +1076,10 @@ class TestCleanupHelpers:
         assert result["deleted"] is True  # 通知失败不阻断删除
 
     @pytest.mark.asyncio
-    async def test_cleanup_subtask_worktrees_empty(self, svc: Any) -> None:
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container"},
-        )
-        result = await svc._cleanup_subtask_worktrees(container, [])
-        assert result["total_subtasks"] == 0
-        assert result["cleaned_count"] == 0
-
-    @pytest.mark.asyncio
-    async def test_cleanup_subtask_worktrees_skips_no_workspace(self, svc: Any) -> None:
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container"},
-        )
-        child = await svc.create_task(title="无工作空间", parent_task_id=container.id)
-        result = await svc._cleanup_subtask_worktrees(container, [child])
-        assert result["skipped_count"] == 1
-        assert result["cleaned_count"] == 0
-
-    @pytest.mark.asyncio
-    async def test_cleanup_subtask_worktrees_skips_same_workspace(self, svc: Any) -> None:
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container", "workspace": "ws-shared"},
-        )
-        child = await svc.create_task(
-            title="同工作空间", parent_task_id=container.id, metadata={"workspace": "ws-shared"},
-        )
-        result = await svc._cleanup_subtask_worktrees(container, [child])
-        assert result["skipped_count"] == 1
-
-    @pytest.mark.asyncio
-    async def test_cleanup_subtask_worktrees_fallback_path(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """子任务 worktree 清理走 _cleanup_task_resources 路径。"""
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container", "workspace": "ws-container"},
-        )
-        child = await svc.create_task(
-            title="子", parent_task_id=container.id, metadata={"workspace": "ws-child"},
-        )
-
-        async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
-            return {"workspace_cleaned": True, "errors": []}
-
-        monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
-        result = await svc._cleanup_subtask_worktrees(container, [child])
-        assert result["cleaned_count"] == 1
-
-    @pytest.mark.asyncio
-    async def test_cleanup_subtask_worktrees_fallback_errors(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container", "workspace": "ws-container"},
-        )
-        child = await svc.create_task(
-            title="子", parent_task_id=container.id, metadata={"workspace": "ws-child"},
-        )
-
-        async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
-            return {"workspace_cleaned": False, "errors": ["boom"]}
-
-        monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
-        result = await svc._cleanup_subtask_worktrees(container, [child])
-        assert result["error_count"] == 1
-        assert any("子任务" in e for e in result["errors"])
-
-    @pytest.mark.asyncio
-    async def test_cleanup_subtask_worktrees_fallback_skipped(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container", "workspace": "ws-container"},
-        )
-        child = await svc.create_task(
-            title="子", parent_task_id=container.id, metadata={"workspace": "ws-child"},
-        )
-
-        async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
-            return {"workspace_cleaned": False, "errors": []}
-
-        monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
-        result = await svc._cleanup_subtask_worktrees(container, [child])
-        assert result["skipped_count"] == 1
-
-    @pytest.mark.asyncio
-    async def test_cleanup_subtask_worktrees_exception(self, svc: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        container = await svc.create_task(
-            title="容器", metadata={"task_scope": "container", "workspace": "ws-container"},
-        )
-        child = await svc.create_task(
-            title="子", parent_task_id=container.id, metadata={"workspace": "ws-child"},
-        )
-
-        async def _fake_cleanup(task_id: str, workspace: str | None) -> dict[str, Any]:
-            raise RuntimeError("cleanup crash")
-
-        monkeypatch.setattr(svc, "_cleanup_task_resources", _fake_cleanup)
-        result = await svc._cleanup_subtask_worktrees(container, [child])
-        assert result["error_count"] == 1
-        assert any("子任务" in e for e in result["errors"])
-
-    @pytest.mark.asyncio
     async def test_cleanup_task_resources_isolation_path(
         self, svc: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """隔离管理器路径：destroy_by_task_id 成功 + lifecycle 不可用回退。"""
+        """隔离管理器路径：destroy_by_task_id 成功，仅容器面。"""
         destroyed: list[str] = []
 
         class FakeManager:
@@ -1194,24 +1092,19 @@ class TestCleanupHelpers:
         _install_fake_package(
             monkeypatch, "isolation.manager", type("IM", (), {"get_isolation_manager": _get_manager})()
         )
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: type("P", (), {"get": lambda self2, k: None})()})(),
-        )
-        result = await svc._cleanup_task_resources("t-1", workspace=None)
+        result = await svc._cleanup_task_resources("t-1")
         assert destroyed == ["t-1"]
         assert result["container_destroyed"] is True
-        assert result["workspace_cleaned"] is False
+        assert result["errors"] == []
 
     @pytest.mark.asyncio
-    async def test_cleanup_task_resources_workspace_rmtree(
+    async def test_cleanup_task_resources_never_touches_workspace(
         self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """lifecycle 不可用 + 无隔离管理器 → 回退目录删除（安全路径校验）。"""
-        ws_dir = tmp_path / "ws-1"
+        """产物保全契约（2026-09-05）：删除链不删工作区——容器销毁失败也不触碰目录。"""
+        ws_dir = tmp_path / "ws-keep"
         ws_dir.mkdir()
-        (ws_dir / "f.txt").write_text("x", encoding="utf-8")
+        (ws_dir / "artifact.txt").write_text("keep me", encoding="utf-8")
 
         def boom() -> Any:
             raise RuntimeError("no isolation")
@@ -1219,337 +1112,8 @@ class TestCleanupHelpers:
         _install_fake_package(
             monkeypatch, "isolation.manager", type("IM", (), {"get_isolation_manager": boom})()
         )
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: type("P", (), {"get": lambda self2, k: None})()})(),
-        )
-        _install_fake_package(
-            monkeypatch,
-            "isolation.workspace",
-            type("W", (), {"get_workspace_config_root": lambda self: str(tmp_path)})(),
-        )
-        result = await svc._cleanup_task_resources("t-2", workspace=str(ws_dir))
-        assert result["workspace_cleaned"] is True
-        assert not ws_dir.exists()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_task_resources_rejects_outside_root(
-        self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        outside = tmp_path.parent / "outside-ws"
-        outside.mkdir(exist_ok=True)
-
-        def boom() -> Any:
-            raise RuntimeError("no isolation")
-
-        _install_fake_package(
-            monkeypatch, "isolation.manager", type("IM", (), {"get_isolation_manager": boom})()
-        )
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: type("P", (), {"get": lambda self2, k: None})()})(),
-        )
-        _install_fake_package(
-            monkeypatch,
-            "isolation.workspace",
-            type("W", (), {"get_workspace_config_root": lambda self: str(tmp_path)})(),
-        )
-        result = await svc._cleanup_task_resources("t-3", workspace=str(outside))
-        assert result["workspace_cleaned"] is False
-        assert any("安全拦截" in e for e in result["errors"])
-        assert outside.exists()  # 未删除
-
-    @pytest.mark.asyncio
-    async def test_cleanup_task_resources_relative_workspace(
-        self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """相对 workspace 拼配置根后删除。"""
-        ws_dir = tmp_path / "ws-rel"
-        ws_dir.mkdir()
-
-        def boom() -> Any:
-            raise RuntimeError("no isolation")
-
-        _install_fake_package(
-            monkeypatch, "isolation.manager", type("IM", (), {"get_isolation_manager": boom})()
-        )
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: type("P", (), {"get": lambda self2, k: None})()})(),
-        )
-        _install_fake_package(
-            monkeypatch,
-            "isolation.workspace",
-            type("W", (), {"get_workspace_config_root": lambda self: str(tmp_path)})(),
-        )
-        result = await svc._cleanup_task_resources("t-4", workspace="ws-rel")
-        assert result["workspace_cleaned"] is True
-        assert not ws_dir.exists()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_task_resources_workspace_missing(
-        self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        def boom() -> Any:
-            raise RuntimeError("no isolation")
-
-        _install_fake_package(
-            monkeypatch, "isolation.manager", type("IM", (), {"get_isolation_manager": boom})()
-        )
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: type("P", (), {"get": lambda self2, k: None})()})(),
-        )
-        _install_fake_package(
-            monkeypatch,
-            "isolation.workspace",
-            type("W", (), {"get_workspace_config_root": lambda self: str(tmp_path)})(),
-        )
-        result = await svc._cleanup_task_resources("t-5", workspace="ws-not-exist")
-        assert result["workspace_cleaned"] is False
-
-    @pytest.mark.asyncio
-    async def test_cleanup_task_resources_direct_delete_path(
-        self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """工作空间清理直接走目录删除（无 lifecycle 中间层，不读 provider）。"""
-        ws_dir = tmp_path / "ws-direct"
-        ws_dir.mkdir()
-
-        class RefusingProvider:
-            def get(self, key: str) -> Any:
-                raise AssertionError("provider 路径已退役，不应被消费")
-
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: RefusingProvider()})(),
-        )
-        _install_fake_package(
-            monkeypatch,
-            "isolation.workspace",
-            type("W", (), {"get_workspace_config_root": lambda self: str(tmp_path)})(),
-        )
-        result = await svc._cleanup_task_resources("t-6", workspace=str(ws_dir))
-        assert result["workspace_cleaned"] is True
-        assert not ws_dir.exists()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_task_resources_lifecycle_exception_falls_back(
-        self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """lifecycle 抛异常 → 回退目录删除。"""
-        ws_dir = tmp_path / "ws-fb"
-        ws_dir.mkdir()
-
-        class FakeLifecycle:
-            def restore_ws_meta(self, task_id: str) -> None:
-                raise RuntimeError("lifecycle down")
-
-            def cleanup_workspace(self, task_id: str) -> bool:
-                raise RuntimeError("lifecycle down")
-
-        class FakeProvider:
-            def get(self, key: str) -> Any:
-                return FakeLifecycle() if key == "workspace_lifecycle_manager" else None
-
-        def boom() -> Any:
-            raise RuntimeError("no isolation")
-
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: FakeProvider()})(),
-        )
-        _install_fake_package(
-            monkeypatch, "isolation.manager", type("IM", (), {"get_isolation_manager": boom})()
-        )
-        _install_fake_package(
-            monkeypatch,
-            "isolation.workspace",
-            type("W", (), {"get_workspace_config_root": lambda self: str(tmp_path)})(),
-        )
-        result = await svc._cleanup_task_resources("t-7", workspace=str(ws_dir))
-        assert result["workspace_cleaned"] is True
-        assert not ws_dir.exists()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_task_resources_worktree_file(
-        self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """回退路径命中 .git 文件 → 走 _remove_worktree。"""
-        ws_dir = tmp_path / "ws-wt"
-        ws_dir.mkdir()
-        (ws_dir / ".git").write_text("gitdir: /nonexistent/wt", encoding="utf-8")
-
-        def boom() -> Any:
-            raise RuntimeError("no isolation")
-
-        _install_fake_package(
-            monkeypatch, "isolation.manager", type("IM", (), {"get_isolation_manager": boom})()
-        )
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: type("P", (), {"get": lambda self2, k: None})()})(),
-        )
-        _install_fake_package(
-            monkeypatch,
-            "isolation.workspace",
-            type("W", (), {"get_workspace_config_root": lambda self: str(tmp_path)})(),
-        )
-        removed: list[Path] = []
-        monkeypatch.setattr(svc, "_remove_worktree", lambda p, r: removed.append(p))
-        result = await svc._cleanup_task_resources("t-8", workspace=str(ws_dir))
-        assert removed == [ws_dir]
-        assert result["workspace_cleaned"] is False  # _remove_worktree 未置位
-
-    @pytest.mark.asyncio
-    async def test_cleanup_task_resources_rmtree_exception(
-        self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        ws_dir = tmp_path / "ws-err"
-        ws_dir.mkdir()
-
-        def boom() -> Any:
-            raise RuntimeError("no isolation")
-
-        _install_fake_package(
-            monkeypatch, "isolation.manager", type("IM", (), {"get_isolation_manager": boom})()
-        )
-        _install_fake_package(
-            monkeypatch,
-            "infrastructure.service_provider",
-            type("SP", (), {"get_service_provider": lambda self: type("P", (), {"get": lambda self2, k: None})()})(),
-        )
-        _install_fake_package(
-            monkeypatch,
-            "isolation.workspace",
-            type("W", (), {"get_workspace_config_root": lambda self: str(tmp_path)})(),
-        )
-        monkeypatch.setattr("shutil.rmtree", lambda p: (_ for _ in ()).throw(PermissionError("locked")))
-        result = await svc._cleanup_task_resources("t-9", workspace=str(ws_dir))
-        assert result["workspace_cleaned"] is False
-        assert any("清理工作空间失败" in e for e in result["errors"])
-
-    def test_remove_worktree_gitdir_file(self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """worktree .git 为文件（gitdir: 指向）→ 反查分支 + remove + 删分支。"""
-        ws = tmp_path / "wt"
-        ws.mkdir()
-        gitdir = tmp_path / "main" / ".git" / "worktrees" / "wt"
-        gitdir.mkdir(parents=True)
-        (ws / ".git").write_text(f"gitdir: {gitdir.as_posix()}", encoding="utf-8")
-
-        calls: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **kwargs: Any) -> Any:
-            calls.append(cmd)
-            if cmd[1] == "rev-parse":
-                return type("R", (), {"returncode": 0, "stdout": "task/abc\n", "stderr": ""})()
-            if cmd[1] == "worktree":
-                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-            if cmd[1] == "branch":
-                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-            raise AssertionError(f"unexpected cmd: {cmd}")
-
-        monkeypatch.setattr("subprocess.run", fake_run)
-        results: dict[str, Any] = {}
-        svc._remove_worktree(ws, results)
-        assert results["workspace_cleaned"] is True
-        assert any(c[1] == "branch" and c[2] == "-D" and c[3] == "task/abc" for c in calls)
-
-    def test_remove_worktree_branch_delete_failure(self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        ws = tmp_path / "wt2"
-        ws.mkdir()
-        (ws / ".git").write_text("gitdir: /nonexistent/gitdir", encoding="utf-8")
-
-        def fake_run(cmd: list[str], **kwargs: Any) -> Any:
-            if cmd[1] == "rev-parse":
-                return type("R", (), {"returncode": 0, "stdout": "task/keep\n", "stderr": ""})()
-            if cmd[1] == "worktree":
-                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-            if cmd[1] == "branch":
-                return type("R", (), {"returncode": 1, "stdout": "", "stderr": "branch not found"})()
-            raise AssertionError(f"unexpected cmd: {cmd}")
-
-        monkeypatch.setattr("subprocess.run", fake_run)
-        results: dict[str, Any] = {"errors": []}
-        svc._remove_worktree(ws, results)
-        assert results["workspace_cleaned"] is True
-        assert any("删除分支失败" in e for e in results["errors"])
-
-    def test_remove_worktree_worktree_remove_failure(self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        ws = tmp_path / "wt3"
-        ws.mkdir()
-        (ws / ".git").write_text("gitdir: /nonexistent/gitdir3", encoding="utf-8")
-
-        def fake_run(cmd: list[str], **kwargs: Any) -> Any:
-            if cmd[1] == "rev-parse":
-                return type("R", (), {"returncode": 0, "stdout": "HEAD\n", "stderr": ""})()
-            raise type("CPE", (Exception,), {})("git worktree remove failed")
-
-        monkeypatch.setattr("subprocess.run", fake_run)
-        results: dict[str, Any] = {"errors": []}
-        svc._remove_worktree(ws, results)
-        assert "workspace_cleaned" not in results or results["workspace_cleaned"] is False
-        assert len(results["errors"]) >= 1
-
-    def test_remove_worktree_called_process_error(self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """git worktree remove 抛 CalledProcessError → 错误留痕。"""
-        import subprocess
-
-        ws = tmp_path / "wt5"
-        ws.mkdir()
-        (ws / ".git").write_text("gitdir: /nonexistent/gitdir5", encoding="utf-8")
-
-        def fake_run(cmd: list[str], **kwargs: Any) -> Any:
-            if cmd[1] == "rev-parse":
-                return type("R", (), {"returncode": 0, "stdout": "task/x\n", "stderr": ""})()
-            raise subprocess.CalledProcessError(1, cmd, stderr="fatal: not a worktree")
-
-        monkeypatch.setattr("subprocess.run", fake_run)
-        results: dict[str, Any] = {"errors": []}
-        svc._remove_worktree(ws, results)
-        assert any("git worktree remove 失败" in e for e in results["errors"])
-
-    def test_remove_worktree_plain_git_dir(self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """.git 文件内容非 gitdir 声明 → main_repo 取 workspace 父目录。"""
-        ws = tmp_path / "wt6"
-        ws.mkdir()
-        (ws / ".git").write_text("not a gitdir pointer", encoding="utf-8")
-
-        def fake_run(cmd: list[str], **kwargs: Any) -> Any:
-            if cmd[1] == "rev-parse":
-                return type("R", (), {"returncode": 0, "stdout": "task/y\n", "stderr": ""})()
-            if cmd[1] == "worktree":
-                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-            if cmd[1] == "branch":
-                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-            raise AssertionError(f"unexpected cmd: {cmd}")
-
-        monkeypatch.setattr("subprocess.run", fake_run)
-        results: dict[str, Any] = {"errors": []}
-        svc._remove_worktree(ws, results)
-        assert results["workspace_cleaned"] is True
-
-    def test_remove_worktree_detached_head_skips_branch(self, svc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        ws = tmp_path / "wt4"
-        ws.mkdir()
-        (ws / ".git").write_text("gitdir: /nonexistent/gitdir4", encoding="utf-8")
-
-        def fake_run(cmd: list[str], **kwargs: Any) -> Any:
-            if cmd[1] == "rev-parse":
-                return type("R", (), {"returncode": 0, "stdout": "HEAD\n", "stderr": ""})()
-            if cmd[1] == "worktree":
-                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
-            raise AssertionError(f"unexpected cmd: {cmd}")
-
-        monkeypatch.setattr("subprocess.run", fake_run)
-        results: dict[str, Any] = {"errors": []}
-        svc._remove_worktree(ws, results)
-        assert results["workspace_cleaned"] is True
-        assert results["errors"] == []  # detached HEAD 无分支可删，无错误
+        result = await svc._cleanup_task_resources("t-2")
+        assert result["container_destroyed"] is False
+        assert any("清理隔离环境失败" in e for e in result["errors"])
+        assert ws_dir.exists(), "删除链不得删除工作区目录"
+        assert (ws_dir / "artifact.txt").read_text(encoding="utf-8") == "keep me"

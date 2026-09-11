@@ -10,12 +10,11 @@
  * 创建表单字段 = trigger_setup 工具入参（trigger_type/message/pipeline_id…），
  * pipeline_id 选项拉 /ext/trigger_setup_tool/pipelines。
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import fs from 'node:fs'
 import path from 'node:path'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
-
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { WidgetStage } from '@/components/schema/widgets/WidgetStage'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
@@ -23,11 +22,15 @@ import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 
 const apiGet = vi.fn()
+const apiPost = vi.fn()
 const apiCall = vi.fn()
 vi.mock('@/services/api/client', () => ({
   default: Object.assign(
     (...args: unknown[]) => apiCall(...args),
-    { get: (...args: unknown[]) => apiGet(...args) },
+    {
+      get: (...args: unknown[]) => apiGet(...args),
+      post: (...args: unknown[]) => apiPost(...args),
+    },
   ),
 }))
 vi.mock('@/components/ui/sonner', () => ({
@@ -184,8 +187,7 @@ describe('trigger_setup_tool 触发器声明（B1）', () => {
   })
 
   it('创建表单：填消息提交（类型预选首项）→ 切类型再提交（body=工具入参契约）', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ ok: true }) })
-    vi.stubGlobal('fetch', fetchMock)
+    apiPost.mockResolvedValue({ data: { ok: true } })
     apiGet.mockResolvedValue({ data: { columns: [], rows: [] } })
     render(<WidgetStage space="triggers" />)
 
@@ -194,8 +196,8 @@ describe('trigger_setup_tool 触发器声明（B1）', () => {
     fireEvent.change(await screen.findByLabelText('触发消息'), { target: { value: '检查任务状态' } })
     fireEvent.change(screen.getByLabelText('延迟秒数'), { target: { value: '60' } })
     fireEvent.submit((screen.getByLabelText('触发消息') as HTMLElement).closest('form')!)
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
-    let body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    await waitFor(() => expect(apiPost).toHaveBeenCalled())
+    const body = apiPost.mock.calls[0][1] as Record<string, unknown>
     expect(body).toMatchObject({ trigger_type: 'delay', message: '检查任务状态', delay_seconds: 60 })
 
     // 切类型（antd Select：mouseDown 展开 → 点选项）→ 提交体跟随切换；
@@ -205,25 +207,21 @@ describe('trigger_setup_tool 触发器声明（B1）', () => {
     fireEvent.click(screen.getByText('周期（按间隔重复）'))
     fireEvent.change(screen.getByLabelText('周期间隔'), { target: { value: '5m' } })
     fireEvent.submit((screen.getByLabelText('触发消息') as HTMLElement).closest('form')!)
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(2))
-    const [url, init] = fetchMock.mock.calls[1]
+    await waitFor(() => expect(apiPost.mock.calls.length).toBe(2))
+    const [url, body2] = apiPost.mock.calls[1]
     expect(url).toBe('/ext/trigger_setup_tool/triggers')
-    body = JSON.parse((init as RequestInit).body as string)
-    expect(body).toMatchObject({ trigger_type: 'interval', message: '检查任务状态', interval: '5m' })
-    vi.unstubAllGlobals()
+    expect(body2).toMatchObject({ trigger_type: 'interval', message: '检查任务状态', interval: '5m' })
   })
 
   it('条件必填提醒：类型=延迟缺延迟秒数 → 提交被拦且字段级提示可见', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ ok: true }) })
-    vi.stubGlobal('fetch', fetchMock)
+    apiPost.mockResolvedValue({ data: { ok: true } })
     apiGet.mockResolvedValue({ data: { columns: [], rows: [] } })
     render(<WidgetStage space="triggers" />)
 
     fireEvent.change(await screen.findByLabelText('触发消息'), { target: { value: '检查任务状态' } })
     fireEvent.submit((screen.getByLabelText('触发消息') as HTMLElement).closest('form')!)
     expect(await screen.findByText('延迟秒数不能为空')).toBeInTheDocument()
-    expect(fetchMock).not.toHaveBeenCalled()
-    vi.unstubAllGlobals()
+    expect(apiPost).not.toHaveBeenCalled()
   })
 
   it('无激活管道 → 创建表单提供「新建会话」入口，模态框保存走 createSession 流', async () => {

@@ -43,6 +43,7 @@ from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
+from time_iso import now_iso_utc as _now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +54,6 @@ LLMCallFn = Callable[[str | list[dict[str, Any]]], Awaitable[str]]
 # SDK 默认 CAPABILITY_CALL_TIMEOUT_S=30s 面向短调用，不传会先于压缩完成被掐断。
 CapabilityCaller = Callable[[str, dict[str, Any], float | None], Awaitable[Any]]
 
-
-def _now_iso() -> str:
-    """当前时刻 ISO8601（UTC，带时区）——压缩块引用元数据的落块时间。"""
-    from datetime import UTC, datetime  # noqa: PLC0415
-
-    return datetime.now(UTC).isoformat()
 
 # 压缩摘要注入提示
 _COMPRESSION_NOTICE = (
@@ -752,8 +747,10 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         唯一新增输入（DSH summarizer 方案）。
 
         Args:
-            messages: 待压缩消息（孤儿 tool result 摘除后进 fork，不
-                _format_messages 压扁；state 原列表不被修改）
+            messages: 待压缩消息（原样进 fork，不 _format_messages 压扁；
+                state 原列表不被修改。孤儿 tool result 由 llm_service 在
+                llm.complete_stream 入口的标准化唯一关卡统一摘除，此处
+                不再复制判定语义）
             system_message: 执行时系统消息（dict 或 str；None 跳过）
             prior_blocks: 序列中既有的压缩块消息（None/空跳过）
 
@@ -772,41 +769,9 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
             if isinstance(pb, dict) and pb.get("content"):
                 fork.append(self._render_fork_message(pb))
 
-        # 孤儿 tool result 摘除：state 历史遗留的孤儿（cancelled/failed run
-        # 留下，或更早压缩块吞掉 assistant 后残留）进 fork 载荷会被 MiniMax
-        # 严格校验拒 400（tool result's tool id not found 2013）。判定语义与
-        # 执行路径 llm_core normalizer Phase A 一致。state 原消息不动——
-        # 执行请求的清理由 llm_core normalizer 负责，此处只管压缩请求。
-        expecting_ids: set[str] = set()
-        dropped_orphans = 0
         for m in messages:
-            if not isinstance(m, dict):
-                continue
-            role = m.get("role")
-            if role == "assistant":
-                if m.get("tool_calls"):
-                    expecting_ids = {
-                        tc.get("id") for tc in m["tool_calls"] if tc.get("id")
-                    }
-                else:
-                    expecting_ids = set()
+            if isinstance(m, dict):
                 fork.append(self._render_fork_message(m))
-            elif role == "tool":
-                tc_id = m.get("tool_call_id")
-                if tc_id and tc_id in expecting_ids:
-                    expecting_ids.discard(tc_id)
-                    fork.append(self._render_fork_message(m))
-                else:
-                    dropped_orphans += 1
-            else:
-                if role in ("user", "system"):
-                    expecting_ids = set()
-                fork.append(self._render_fork_message(m))
-        if dropped_orphans:
-            logger.warning(
-                "[ContextCompressor] fork 载荷摘除 %d 条孤儿 tool result（无配对 assistant tool_calls）",
-                dropped_orphans,
-            )
 
         fork.append({"role": "user", "content": self.COMPACTION_INSTRUCTION})
         return fork
@@ -1787,8 +1752,8 @@ class ContextWindowGuardPlugin(IInputPlugin):
         模拟 prompt_build 的拼接逻辑：
         system 消息 + L1 压缩块 + STATE_SNAPSHOT + recent 消息
 
-        Step 4 修复：压缩块来源由 ctx.get_service("chunk_service") 改为
-        模块级 _memory_backend（Hindsight/capability），无 backend 时早退返回 -1。
+        压缩块经模块级 _memory_backend（Hindsight/capability）读取，
+        无 backend 时早退返回 -1。
 
         Returns:
             估算 token 数，无法估算时返回 -1
@@ -2039,7 +2004,6 @@ class ContextWindowGuardPlugin(IInputPlugin):
                     }
                 )
 
-        # 调用压缩
         logger.info("[%s] 开始调用 compress_messages ...", self.name)
         try:
             # fork 上下文：执行时 system + 消息流（含既有压缩块消息——它们
@@ -2079,10 +2043,9 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 compressed_tokens,
             )
             self._compress_fail_notified = False
-            # 压缩只搬运消息不格式化，会原样保留历史段里的 raw 格式 tool_calls，
-            # 写回 state 前强制标准化为 OpenAI API 格式，否则上游报"工具类型不能为空"。
-            # standardize 返回被改写的消息下标，外层据此 emit set(seq, 新内容) ops。
-            changed_indices = self._standardize_tool_calls(compressed)
+            # 压缩写回不再做 tool_calls 标准化：raw 格式经压缩原样落 state，
+            # 由 llm_service 在 llm.complete_stream 入口的标准化唯一关卡
+            # 统一修复（2026-09-06 T7 裁定，调用侧不复制判定语义）。
             post_compress_count = sum(1 for m in compressed if m.get("role") != "system")
             self._tracked_msg_count = post_compress_count
             ctx.state["_tracked_msg_count"] = post_compress_count
@@ -2108,12 +2071,6 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 if isinstance(seq, int) and seq in block_seqs:
                     continue
                 ops.append({"op": "set", "seq": seq, "msg": None})
-            # 幸存但被 standardize 改写的消息 set(seq, 新内容)
-            for idx in changed_indices:
-                m = compressed[idx]
-                seq = m.get("seq")
-                if isinstance(seq, int):
-                    ops.append({"op": "set", "seq": seq, "msg": m})
 
             return PluginResult(
                 state_updates={
@@ -2186,37 +2143,6 @@ class ContextWindowGuardPlugin(IInputPlugin):
     # 辅助方法
     # ------------------------------------------------------------------
 
-    def _standardize_tool_calls(self, messages: list[dict[str, Any]]) -> list[int]:
-        """压缩写回前把 tool_calls 标准化为 OpenAI API 格式。
-
-        委托给 normalizer 的公共入口 standardize_tool_calls_in_messages
-        （纯函数全量修复，同步配对的 tool result）。延迟 import 避免
-        input 插件模块加载期耦合 core 插件模块。
-
-        异常策略：只容忍 messages 数据形态引发的运行期错误（不阻塞写回）；
-        ImportError 等编程/配置错误必须上抛——历史上用空泛 ``except Exception``
-        吞掉了断裂 import（``plugins.core`` 不存在），使标准化静默失效三轮审查未觉。
-
-        Returns:
-            被改写的消息下标列表（用于对这些槽位 emit 增量 set(seq, 新内容) op）；
-            标准化失败时返回空列表（不阻塞写回）。
-        """
-        try:
-            # 经 pipeline 命名空间包解析（plugins/shared 在 sys.path）。
-            # 原 ``plugins.core.llm_core._message_normalizer`` 路径不存在。
-            from pipeline.core.llm_core._message_normalizer import (  # noqa: PLC0415
-                standardize_tool_calls_in_messages,
-            )
-
-            return standardize_tool_calls_in_messages(messages)
-        except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
-            logger.warning(
-                "[%s] tool_calls 标准化失败（不阻塞写回）: %s",
-                self.name,
-                exc,
-            )
-            return []
-
     async def _trim_covered_messages(  # noqa: PLR0911
         self,
         ctx: PluginContext,
@@ -2224,8 +2150,8 @@ class ContextWindowGuardPlugin(IInputPlugin):
     ) -> list[dict[str, Any]]:
         """裁剪被已有压缩块覆盖的旧消息（重启场景）。
 
-        Step 4 修复：压缩块来源由 ctx.get_service("chunk_service") 改为
-        模块级 _memory_backend，无 backend 时原样返回。
+        压缩块经模块级 _memory_backend 读取（capability 注入），
+        无 backend 时原样返回。
 
         裁剪逻辑：逐条按消息自带 seq 过滤，保留 system 消息 + 非系统消息
         中 seq > max_end 的部分。max_end 取自压缩块的 sequence_end。
@@ -2316,7 +2242,7 @@ class ContextWindowGuardPlugin(IInputPlugin):
     ) -> list[dict[str, Any]] | None:
         """检测 context_window 是否变化，变化时清理旧压缩摘要。
 
-        Step 4 修复：压缩块来源由 chunk_service 改为 _memory_backend，
+        压缩块经模块级 _memory_backend 读取（capability 注入），
         无 backend 时直接返回 None。
 
         Args:
@@ -2425,11 +2351,8 @@ class ContextWindowGuardPlugin(IInputPlugin):
     ):
         """获取 CompressionService 实例（基于模块级注入的 backend + capability）。
 
-        Step 4 修复：
-        - 老版 line 629 的 ``from memory.memory_context_service import`` 在
-          try/except 之外，0.2 中 memory 模块不存在直接 ImportError。
-        - 现改为：用模块级 _memory_backend / _capability_caller 构造本地
-          CompressionService；无 backend/capability 时返回 None（早退）。
+        用模块级 _memory_backend / _capability_caller 构造本地
+        CompressionService；无 backend/capability 时返回 None（早退）。
 
         Args:
             ctx: 插件执行上下文（用于读取 context_window）
@@ -2497,8 +2420,8 @@ class ContextWindowGuardPlugin(IInputPlugin):
     def _setup_service(self, ctx: PluginContext, service, context_window: int) -> None:
         """将运行时上下文注入到 service（pipeline/session/user/window）。
 
-        Step 4 修复：不再注入 chunk_service/memory_service/llm_core（0.2 已去），
-        改用 CompressionService.setup 的轻量接口。
+        经 CompressionService.setup 的轻量接口注入（pipeline/session/
+        user/window）；chunk/memory/llm 服务不经此注入。
         """
         pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
         session_id = ctx.state.get("context.session_id", "")

@@ -91,5 +91,6 @@
       "path": "config/tools/web/web_operate.yaml",
       "label": "网页操作配置"
     }
-  ]
+  ],
+  "host_group": "light"
 }

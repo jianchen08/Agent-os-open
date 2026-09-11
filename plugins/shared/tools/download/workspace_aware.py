@@ -59,7 +59,7 @@ class WorkspaceAwareMixin(_BaseWorkspaceAwareMixin):
         """
         if cls._policy_manager is None:
             try:
-                from permission_policy import PermissionPolicyManager  # noqa: PLC0415
+                from agentos_plugin_sdk.permission_policy import PermissionPolicyManager  # noqa: PLC0415
 
                 cls._policy_manager = PermissionPolicyManager()
             except Exception as e:
@@ -104,7 +104,7 @@ class WorkspaceAwareMixin(_BaseWorkspaceAwareMixin):
         policy = policy_manager.get_policy(policy_name)
 
         try:
-            from permission_checker import PermissionChecker  # noqa: PLC0415
+            from agentos_plugin_sdk.permission_checker import PermissionChecker  # noqa: PLC0415
 
             checker = PermissionChecker(str(project_root))
 

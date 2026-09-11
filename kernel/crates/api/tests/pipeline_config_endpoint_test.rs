@@ -17,23 +17,16 @@ use tower::ServiceExt;
 
 /// 登录内置 admin（无 store 时回退内置用户表）返回 access_token。
 async fn admin_token(app: &axum::Router) -> String {
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(axum::http::Method::POST)
-                .uri("/api/v1/auth/login")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({"username": "admin", "password": "admin12345"}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
+    // D1 后无 store 登录 fail-closed（脚手架表不可登录）——直接铸造脚手架
+    // admin 的签名 token；无 store 时 token 校验走内置脚手架表，被测端点
+    // （actions/pipeline-config/plugin-config/e2e 覆盖/ws-kick/sessions 注册表）
+    // 语义不受登录通道影响。
+    let _ = app;
+    let admin = agentos_http::auth::default_users()
+        .into_iter()
+        .next()
         .unwrap();
-    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-    let v: Value = serde_json::from_slice(&body).unwrap();
-    v["access_token"].as_str().unwrap().to_string()
+    agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &admin, 3600)
 }
 
 /// 在临时 config/pipelines/ 下写一份 default.yaml（G10 文件 DSL 格式）。

@@ -10,6 +10,7 @@
 
 import json
 import os
+import re
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -19,11 +20,15 @@ from pydantic import BaseModel
 
 # 多租户数据根咽喉点（plugins/shared/tenant_data.py）。本文件位于
 # plugins/shared/system/multimodal/storage.py，上溯 2 级到 plugins/shared/。
-# 参考 hindsight_memory/wiring.py 的 sys.path 自举模式。
+# 参考 plugins/shared/wiring.py 的 sys.path 自举模式。
 _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
 from tenant_data import DEFAULT_TENANT, tenant_data_root  # noqa: E402
+
+# file_id 格式契约：12 位小写十六进制（uuid.uuid4().hex[:12]）。file_id 直接
+# 拼进元数据文件名，格式校验是路径拼接前的强制闸（fail-closed）。
+_FILE_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 
 
 class IFileStorage(ABC):
@@ -120,8 +125,8 @@ class DiskFileStorage(IFileStorage):
 
     Example:
     >>> storage = DiskFileStorage(base_dir="./data/uploads")
-    >>> await storage.save("file-123", attachment_info)
-    >>> attachment = await storage.load("file-123")
+    >>> await storage.save("a1b2c3d4e5f6", attachment_info)
+    >>> attachment = await storage.load("a1b2c3d4e5f6")
     """
 
     def __init__(
@@ -160,9 +165,19 @@ class DiskFileStorage(IFileStorage):
     def _meta_path(self, file_id: str) -> Path:
         """获取文件元数据路径。
 
-        file_id 由上传端生成（``uuid.uuid4().hex[:12]``，纯十六进制），非外部
-        可控输入，不做防御校验。
+        file_id 契约：``uuid.uuid4().hex[:12]`` 生成的 12 位小写十六进制
+        （artifacts 上传端为生产生成点）。file_id 可经工具参数与 HTTP 面
+        到达，且直接参与磁盘文件名拼接，故一律先做格式校验（fail-closed）：
+        不合法输入抛 StorageError，防路径穿越与任意文件名写面。
+
+        Raises:
+            StorageError: file_id 不满足 12 位小写十六进制格式
         """
+        if not _FILE_ID_PATTERN.match(file_id):
+            raise StorageError(
+                f"非法 file_id（须为 12 位小写十六进制）: {file_id!r}",
+                file_id=file_id,
+            )
         return self._base_dir / f"{file_id}.json"
 
     async def save(self, file_id: str, data: Any) -> None:

@@ -44,6 +44,11 @@ pub struct KernelCapabilityRouter {
     /// execution-records/summaries/memory 存储，M1 落地、M2 接通 capability）。
     /// None = 不支持 service-registry（存储未注入）。
     store: Option<Arc<dyn StorageBackend>>,
+    /// SQLite 固有面句柄（runs.metadata 挂起凭据读写）：suspend/resume 接线
+    /// `pending_interaction_request_id`（S7 恢复链写侧）。set_run_metadata 是
+    /// SqliteStore 固有方法不在 StorageBackend trait 上，trait 对象触及不到。
+    /// None = 挂起凭据不落库（resume-by-request 查不到 run，其余语义不变）。
+    sqlite: Option<Arc<agentos_engine::SqliteStore>>,
     /// 动态 capability handler 注册表（M2/M4）——插件通过 manifest provides.capabilities
     /// 注册的 namespace 在这里路由。handle() 先查这里，miss 再走下方 match。
     /// None = 不支持插件自注册能力（仅内核内置能力可用）。
@@ -74,6 +79,8 @@ pub struct KernelCapabilityRouter {
     /// 流式声明查询器（ADR 2026-08-22 流式协议）：(plugin_id) → capabilities.streaming
     /// 声明。None = 未装配 → 声明闸放行（兼容旧装配/测试）。装配后未声明即拒。
     streaming_declaration_lookup: Option<StreamingDeclarationLookupFn>,
+    /// 强制注入工具声明并集查询（P1-5 声明化，见 [`ForceIncludeToolsLookupFn`]）。
+    force_include_tools_lookup: Option<ForceIncludeToolsLookupFn>,
     /// 工具连续失败告警器：同一工具名在调用侧连续返回
     /// success=false（参数校验失败/执行错误）达到阈值即告警——把"同一工具
     /// 连续 N 次失败"这个信号汇总成一条可操作的告警，避免空转无人察觉。
@@ -92,18 +99,21 @@ pub type ExportFieldsLookupFn = Arc<dyn Fn() -> ExportFields + Send + Sync>;
 
 pub use crate::routes::ExportFields;
 
-/// 管道恢复派发闭包：(pipeline_id, thread_id, user_id) → 拉起一轮续跑。
+/// 管道恢复派发闭包：(pipeline_id, thread_id, user_id, state_overlay) → 拉起一轮续跑。
 ///
 /// 实现方经 `EngineDispatcher::dispatch_user_input` 走与聊天/催促同一条派发链
 /// （pending 入队 → RunChain FIFO → process_via_engine → stage_recover_history
 /// 快照恢复），空 content + `_skip_user_append` overlay = 不落 user 消息、
-/// 纯按快照续跑。生产装配在 agentos-kernel（dispatcher 构造晚于 router，
-/// 经 OnceLock 槽位二阶段接线）；None = 恢复派发不可用（仅簿记降级）。
+/// 纯按快照续跑。`state_overlay` 为调用方的可选状态复位指令（如任务域 resume
+/// 链清 task.status 终态键），本闭包**不透明透传**，与 `_skip_user_append` 合并
+/// 后随派发生效（内核零任务域知识）。生产装配在 agentos-kernel（dispatcher
+/// 构造晚于 router，经 OnceLock 槽位二阶段接线）；None = 恢复派发不可用（仅簿记降级）。
 pub type PipelineResumerFn = Arc<
     dyn Fn(
             String,
             String,
             String,
+            Option<serde_json::Value>,
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
         + Send
@@ -120,6 +130,11 @@ pub type DomainBroadcaster = Arc<dyn Fn(&str, Vec<(String, serde_json::Value)>) 
 pub type StreamingDeclarationLookupFn =
     Arc<dyn Fn(&str) -> Option<agentos_core::traits::StreamingCapability> + Send + Sync>;
 
+/// 强制注入工具声明查询闭包（P1-5 声明化）：() → 全部插件 manifest
+/// `force_include_tools` 声明的并集（tool-surface 过滤时无视 tool_ids 注入）。
+/// None/空 = 无声明，零强制注入（fail-closed）。
+pub type ForceIncludeToolsLookupFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 /// G3：动态工具注册器闭包。
 ///
 /// (plugin_id, ToolDescriptor) → Ok(())。实现方负责 enablement 闸、
@@ -135,6 +150,151 @@ pub type DynamicToolRegistrar =
 pub type GrantsLookupFn = Arc<dyn Fn(&str) -> Option<Vec<String>> + Send + Sync>;
 
 impl KernelCapabilityRouter {
+    /// G6 授权单点校验：所有反向 capability 调用（sidecar JSON-RPC / native
+    /// HostServices）都经过本方法——在此一处校验 granted_capabilities 白名单，
+    /// 两轨同判同一拒绝语义。_plugin_id 是 invoker 注入的信任锚点（插件不可伪造）。
+    /// 判定：声明非空 = 白名单制，namespace 不在名单内即拒绝；未声明走开关——
+    /// 默认全授予（存量插件零迁移），AGENTOS_GRANTS_STRICT=1（装配方经
+    /// with_grants_strict 置位）时未声明 = 拒绝（fail-closed，新插件必须显式
+    /// 声明）。粒度 = namespace（§八.2 待评审项，现取粗粒度，
+    /// capability.method 级细化留 G3 信封评审一并定）。
+    async fn check_grant(&self, capability: &str, params: &Value) -> Result<(), McpError> {
+        if let (Some(lookup), Some(pid)) = (
+            self.grants_lookup.as_ref(),
+            params.get("_plugin_id").and_then(|v| v.as_str()),
+        ) {
+            match lookup(pid) {
+                Some(grants) => {
+                    if !grants.iter().any(|g| g == capability) {
+                        warn!(
+                            target: "capability_router",
+                            plugin = pid,
+                            capability = capability,
+                            "G6 授权拒绝：capability 不在 granted_capabilities 白名单"
+                        );
+                        return Err(McpError::Protocol {
+                            message: format!(
+                                "capability '{}' not granted to plugin '{}' (granted_capabilities)",
+                                capability, pid
+                            ),
+                        });
+                    }
+                }
+                // 未声明 granted_capabilities：strict = 拒绝（fail-closed），
+                // 非 strict = 默认全授予（存量兼容）
+                None if self.grants_strict => {
+                    warn!(
+                        target: "capability_router",
+                        plugin = pid,
+                        capability = capability,
+                        "G6 授权拒绝（strict）：插件未声明 granted_capabilities"
+                    );
+                    return Err(McpError::Protocol {
+                        message: format!(
+                            "capability '{}' not granted to plugin '{}': no granted_capabilities declared (AGENTOS_GRANTS_STRICT=1)",
+                            capability, pid
+                        ),
+                    });
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// 兜底：未注册/未实现的 capability.method（logger/config-reader 已作为
+    /// 死能力从两端 STANDARD_CAPABILITIES 删除，残余调用会落到这里）。
+    fn unhandled(&self, capability: &str, method: &str, params: &Value) -> Result<Value, McpError> {
+        warn!(
+            "unhandled capability call: {}.{} (params={})",
+            capability, method, params
+        );
+        Err(McpError::Protocol {
+            message: format!("capability method not implemented: {capability}.{method}"),
+        })
+    }
+
+    /// pipeline-executor 域：runs 表状态簿记（审批挂起/恢复、复盘轮询、
+    /// 任务删除）；新引擎执行流由 state.suspended 插件机制控制，此处仅
+    /// 同步 runs 表状态供查询/恢复语义。None = 未命中（落兜底）。
+    async fn dispatch_pipeline_executor(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Option<Result<Value, McpError>> {
+        match method {
+            "suspend" => Some(self.handle_pipeline_executor_suspend(params.clone()).await),
+            "resume" => Some(self.handle_pipeline_executor_resume(params.clone()).await),
+            // GAP-1 统一：按管道挂起/恢复（task_manage stop/resume 映射）
+            "suspend_pipeline" => Some(
+                self.handle_pipeline_executor_suspend_pipeline(params.clone())
+                    .await,
+            ),
+            "resume_pipeline" => Some(
+                self.handle_pipeline_executor_resume_pipeline(params.clone())
+                    .await,
+            ),
+            "get_run_status" => Some(
+                self.handle_pipeline_executor_get_run_status(params.clone())
+                    .await,
+            ),
+            "delete_pipeline" => Some(
+                self.handle_pipeline_executor_delete_pipeline(params.clone())
+                    .await,
+            ),
+            _ => None,
+        }
+    }
+
+    /// event-bus.emit：发事件/通知，流式 chunk 推送的核心出口。
+    /// sidecar（如 llm_core）每生成一个 chunk 就 notify 一次 event-bus.emit，
+    /// 内核收到后调 session.emit_event 把 chunk 推到前端 WS。
+    async fn dispatch_event_bus(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Option<Result<Value, McpError>> {
+        match method {
+            "emit" => Some(self.handle_event_bus_emit(params.clone()).await),
+            // 域事件发射（ADR 2026-08-28 事件下沉底座）：插件向域事件总线发
+            // 事件（观察总线 + domain_event 订阅插件点对点）。G6 信封闸（granted
+            // 含 "event-bus"）由 handle() 单点覆盖。
+            "emit_domain" => Some(self.handle_event_bus_emit_domain(params.clone()).await),
+            _ => None,
+        }
+    }
+
+    /// pipeline-state：state 聚合读面（GAP-2 CONDITION 求值上下文）与任务域
+    /// 写面（update 仅允许 task.* 前缀键）。
+    async fn dispatch_pipeline_state(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Option<Result<Value, McpError>> {
+        match method {
+            "list" => Some(self.handle_pipeline_state_list().await),
+            "update" => Some(self.handle_pipeline_state_update(params.clone()).await),
+            _ => None,
+        }
+    }
+
+    /// transient：插件中间态内存寄存器（ADR 2026-08-27，方案 §2.3）。
+    /// 中间态不落库、引擎内存持有、用完即清；插件 manifest 声明
+    /// capabilities.transient_state 即接入（复用声明→校验闸）。
+    async fn dispatch_transient(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Option<Result<Value, McpError>> {
+        match method {
+            "set" => Some(self.handle_transient_set(params.clone()).await),
+            "get" => Some(self.handle_transient_get(params.clone()).await),
+            "list" => Some(self.handle_transient_list(params.clone()).await),
+            "clear" => Some(self.handle_transient_clear(params.clone()).await),
+            _ => None,
+        }
+    }
+
     /// 创建带指标聚合器的路由器（生产用，启用 metrics.record 反向调用）。
     pub fn with_metrics(metrics: MetricsAggregator) -> Self {
         Self {
@@ -143,6 +303,7 @@ impl KernelCapabilityRouter {
             registry: None,
             session: None,
             store: None,
+            sqlite: None,
             handler_registry: None,
             grants_lookup: None,
             grants_strict: false,
@@ -150,6 +311,7 @@ impl KernelCapabilityRouter {
             domain_broadcaster: None,
             capability_contracts: None,
             streaming_declaration_lookup: None,
+            force_include_tools_lookup: None,
             tool_failure_tracker: None,
             export_fields_lookup: None,
             pipeline_resumer: None,
@@ -188,6 +350,12 @@ impl KernelCapabilityRouter {
         lookup: StreamingDeclarationLookupFn,
     ) -> Self {
         self.streaming_declaration_lookup = Some(lookup);
+        self
+    }
+
+    /// 注入强制注入工具声明查询（P1-5 声明化）。
+    pub fn with_force_include_tools_lookup(mut self, lookup: ForceIncludeToolsLookupFn) -> Self {
+        self.force_include_tools_lookup = Some(lookup);
         self
     }
 
@@ -252,10 +420,16 @@ impl KernelCapabilityRouter {
         self
     }
 
+    /// 注入 SQLite 固有面句柄（启用 suspend/resume 挂起凭据读写，见 struct 注释）。
+    pub fn with_sqlite(mut self, db: Arc<agentos_engine::SqliteStore>) -> Self {
+        self.sqlite = Some(db);
+        self
+    }
+
     /// 注入动态 capability handler 注册表（M2/M4）。
     ///
     /// 启用后，handle() 先查注册表（插件自注册的 namespace 在这里路由），
-    /// miss 再走内置 match（内核自带能力）。这让 `human-interaction` 等插件
+    /// miss 再走内置 match（内核自带能力）。这让交互等插件
     /// 声明的 namespace 不需修改内置 match 即可被路由。
     pub fn with_handler_registry(
         mut self,
@@ -274,54 +448,8 @@ impl CapabilityRouter for KernelCapabilityRouter {
         method: &str,
         params: Value,
     ) -> Result<Value, McpError> {
-        // G6 授权单点校验：所有反向 capability 调用（sidecar JSON-RPC / native
-        // HostServices）都经过本方法——在此一处校验 granted_capabilities 白名单，
-        // 两轨同判同一拒绝语义。_plugin_id 是 invoker 注入的信任锚点（插件不可伪造）。
-        // 判定：声明非空 = 白名单制，namespace 不在名单内即拒绝；未声明走开关——
-        // 默认全授予（存量插件零迁移），AGENTOS_GRANTS_STRICT=1（装配方经
-        // with_grants_strict 置位）时未声明 = 拒绝（fail-closed，新插件必须显式
-        // 声明）。粒度 = namespace（§八.2 待评审项，现取粗粒度，
-        // capability.method 级细化留 G3 信封评审一并定）。
-        if let (Some(lookup), Some(pid)) = (
-            self.grants_lookup.as_ref(),
-            params.get("_plugin_id").and_then(|v| v.as_str()),
-        ) {
-            match lookup(pid) {
-                Some(grants) => {
-                    if !grants.iter().any(|g| g == capability) {
-                        warn!(
-                            target: "capability_router",
-                            plugin = pid,
-                            capability = capability,
-                            "G6 授权拒绝：capability 不在 granted_capabilities 白名单"
-                        );
-                        return Err(McpError::Protocol {
-                            message: format!(
-                                "capability '{}' not granted to plugin '{}' (granted_capabilities)",
-                                capability, pid
-                            ),
-                        });
-                    }
-                }
-                // 未声明 granted_capabilities：strict = 拒绝（fail-closed），
-                // 非 strict = 默认全授予（存量兼容）
-                None if self.grants_strict => {
-                    warn!(
-                        target: "capability_router",
-                        plugin = pid,
-                        capability = capability,
-                        "G6 授权拒绝（strict）：插件未声明 granted_capabilities"
-                    );
-                    return Err(McpError::Protocol {
-                        message: format!(
-                            "capability '{}' not granted to plugin '{}': no granted_capabilities declared (AGENTOS_GRANTS_STRICT=1)",
-                            capability, pid
-                        ),
-                    });
-                }
-                None => {}
-            }
-        }
+        // G6 授权单点校验（语义见 check_grant）。
+        self.check_grant(capability, &params).await?;
         // 定义驱动入口校验：契约声明了 (capability, method)
         // 时按 input_schema 逐条执行（required/类型/pattern 形态/enum/闭包参数面），
         // 未声明即宽泛放行——定义详细到什么程度，就校验到什么程度。这是"相同
@@ -331,47 +459,27 @@ impl CapabilityRouter for KernelCapabilityRouter {
             crate::kernel_capabilities::validate_params(contracts, capability, method, &params)?;
         }
         // 先查动态 handler 注册表（M2/M4：插件自注册的 namespace 在这里路由）。
-        // 命中则委托，不再走下方内置 match。这让 human-interaction 等插件能力
+        // 命中则委托，不再走下方内置 match。这让交互等插件能力
         // 不需修改内置 match 即可被路由。
         if let Some(reg) = &self.handler_registry {
             if reg.has_namespace(capability) {
                 return reg.route(capability, method, params).await;
             }
         }
-        // 内置能力分派：(capability, method) 精确对位一行委托到同文件域处理器
-        // （handle_service_registry 先例）；语义、错误文案与派发集合与拆分前一致，
-        // 未列出的组合仍落兜底臂。
+        // 内置能力分派：按 namespace 归组（多臂域抽 dispatch_*，见各函数）；
+        // 未列出的组合仍落兜底臂（unhandled）。
         match (capability, method) {
-            // ── pipeline-executor 域：runs 表状态簿记（审批挂起/恢复、复盘轮询、
-            // 任务删除）；新引擎执行流由 state.suspended 插件机制控制，此处仅
-            // 同步 runs 表状态供查询/恢复语义 ──
-            ("pipeline-executor", "suspend") => self.handle_pipeline_executor_suspend(params).await,
-            ("pipeline-executor", "resume") => self.handle_pipeline_executor_resume(params).await,
-            // GAP-1 统一：按管道挂起/恢复（task_manage stop/resume 映射）
-            ("pipeline-executor", "suspend_pipeline") => {
-                self.handle_pipeline_executor_suspend_pipeline(params).await
-            }
-            ("pipeline-executor", "resume_pipeline") => {
-                self.handle_pipeline_executor_resume_pipeline(params).await
-            }
-            ("pipeline-executor", "get_run_status") => {
-                self.handle_pipeline_executor_get_run_status(params).await
-            }
-            ("pipeline-executor", "delete_pipeline") => {
-                self.handle_pipeline_executor_delete_pipeline(params).await
-            }
-
-            // ── event-bus.emit：发事件/通知，流式 chunk 推送的核心出口。
-            // sidecar（如 llm_core）每生成一个 chunk 就 notify 一次 event-bus.emit，
-            // 内核收到后调 session.emit_event 把 chunk 推到前端 WS。 ──
-            ("event-bus", "emit") => self.handle_event_bus_emit(params).await,
-            // 域事件发射（ADR 2026-08-28 事件下沉底座）：插件向域事件总线发
-            // 事件（观察总线 + domain_event 订阅插件点对点）。G6 信封闸（granted
-            // 含 "event-bus"）由 handle() 单点覆盖。
-            ("event-bus", "emit_domain") => self.handle_event_bus_emit_domain(params).await,
+            ("pipeline-executor", m) => self
+                .dispatch_pipeline_executor(m, &params)
+                .await
+                .unwrap_or_else(|| self.unhandled(capability, method, &params)),
+            ("event-bus", m) => self
+                .dispatch_event_bus(m, &params)
+                .await
+                .unwrap_or_else(|| self.unhandled(capability, method, &params)),
 
             // ── frontend.emit：插件 → 内核 → 前端一次性事件出口（ADR §3.5）。
-            // 承载低频观测/进度事件（cost_update/tool_progress/termination_status）；
+            // 承载低频观测/进度事件（cost_update/tool_progress）；
             // 分工：event-bus 承载 llm_core 流式 chunk，frontend.emit 承载一次性观测。──
             ("frontend", "emit") => self.handle_frontend_emit(params).await,
 
@@ -397,21 +505,17 @@ impl CapabilityRouter for KernelCapabilityRouter {
             // method 形如 `<域>.<op>`（如 execution-records.list / memory.create）。
             // 经此 capability，插件统一访问内核 execution_records / pipeline_run_summaries
             // / memory 三表（M1 落地），不再各自持有进程内 ServiceProvider/store。
-            ("service-registry", method) => self.handle_service_registry(method, params).await,
+            ("service-registry", m) => self.handle_service_registry(m, params).await,
 
-            // ── pipeline-state：state 聚合读面（GAP-2 CONDITION 求值上下文）──
-            ("pipeline-state", "list") => self.handle_pipeline_state_list().await,
+            ("pipeline-state", m) => self
+                .dispatch_pipeline_state(m, &params)
+                .await
+                .unwrap_or_else(|| self.unhandled(capability, method, &params)),
 
-            // ── pipeline-state.update：任务域写面（仅允许 task.* 前缀键）──
-            ("pipeline-state", "update") => self.handle_pipeline_state_update(params).await,
-
-            // ── transient：插件中间态内存寄存器（ADR 2026-08-27，方案 §2.3）──
-            // 中间态不落库、引擎内存持有、用完即清；插件 manifest 声明
-            // capabilities.transient_state 即接入（复用声明→校验闸）。
-            ("transient", "set") => self.handle_transient_set(params).await,
-            ("transient", "get") => self.handle_transient_get(params).await,
-            ("transient", "list") => self.handle_transient_list(params).await,
-            ("transient", "clear") => self.handle_transient_clear(params).await,
+            ("transient", m) => self
+                .dispatch_transient(m, &params)
+                .await
+                .unwrap_or_else(|| self.unhandled(capability, method, &params)),
 
             // ── tenant-context：多租户上下文查询（F-TENANT-B-KERNEL）──
             // Python 侧 `plugins/shared/tenant_data.py` 经此能力取当前租户决定数据根；
@@ -424,17 +528,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 }))
             }
 
-            // 兜底：未注册/未实现的 capability.method（logger/config-reader 已作为
-            // 死能力从两端 STANDARD_CAPABILITIES 删除，残余调用会落到这里）。
-            (cap, m) => {
-                warn!(
-                    "unhandled capability call: {}.{} (params={})",
-                    cap, m, params
-                );
-                Err(McpError::Protocol {
-                    message: format!("capability method not implemented: {cap}.{m}"),
-                })
-            }
+            (cap, m) => self.unhandled(cap, m, &params),
         }
     }
 
@@ -459,24 +553,15 @@ impl CapabilityRouter for KernelCapabilityRouter {
 }
 
 impl KernelCapabilityRouter {
-    /// 框架级强制工具：无视 agent `tool_ids`，只要 registry 里存在就注入。
-    ///
-    /// 这些工具的存在是**无害**的（LLM 不会无缘无故调——需要具体参数引导），但对
-    /// 框架兜底闭环**必需**。例如 `spill_retrieve`：spill_guard 把大输出替换为
-    /// 摘要 + "调用 spill_retrieve(tool_call_id=...) 取回" 引导，若 agent 的
-    /// tool_ids 未列此工具，LLM 工具列表里没有它的 schema，原文就永远取不回——
-    /// 兜底链路断裂。它与 spill_guard 配套安装（要么都装要么都不装），故"registry
-    /// 存在 = 已安装"即可作为注入判据，无需读 pipeline 配置做条件联动。
-    const FRAMEWORK_ALWAYS_INCLUDE_TOOLS: &[&str] = &["spill_retrieve"];
-
     /// tool-surface.schemas：按 tool_ids 白名单过滤能力注册表，返回 OpenAI
     /// function-calling schema 列表 + 工具输出契约。调用方（tool_schema 管道
     /// 插件）把结果写进 state["tool_schemas"]/["tool_output_contracts"]。
     ///
     /// 过滤语义：
-    /// - 白名单命中 + 框架强制工具（`FRAMEWORK_ALWAYS_INCLUDE_TOOLS`，无视
-    ///   白名单）注入；空白名单 = agent 声明零工具，仅框架强制工具返回；
-    ///   白名单条目等于插件 id 时该插件全部工具注入（一行接入配法）；
+    /// - 白名单命中 + 强制注入集合（全部插件 manifest `force_include_tools`
+    ///   声明并集，无视白名单）注入；空白名单 = agent 声明零工具，仅强制
+    ///   注入集合返回；白名单条目等于插件 id 时该插件全部工具注入（一行
+    ///   接入配法）；
     /// - input_schema 非 object 的工具不注入（LLM 严格校验 parameters 是
     ///   object；注册路径已对缺 schema 工具按 {} 补注册，本过滤只拦注册后
     ///   被改写成非 object 的极端形态）；
@@ -498,6 +583,14 @@ impl KernelCapabilityRouter {
                     .collect()
             })
             .unwrap_or_default();
+        // P1-5 声明化：强制注入集合 = 全部插件 manifest force_include_tools
+        // 声明并集（各插件声明各自需强制注入的工具名）；未装配/空声明 = 零
+        // 强制注入（fail-closed，内核零框架工具名单）。
+        let force_include: std::collections::HashSet<String> = self
+            .force_include_tools_lookup
+            .as_ref()
+            .map(|lookup| lookup().into_iter().collect())
+            .unwrap_or_default();
         let all_tools = registry.list_tools();
         // tool_ids 条目等于插件 id → 该插件全部工具入面（一行接入的 agent 侧
         // 配法：白名单写插件名即透出其全部工具，动态导入的多工具 MCP 免逐个
@@ -509,7 +602,7 @@ impl KernelCapabilityRouter {
             .filter(|t| {
                 wanted.contains(&t.name)
                     || wanted_plugin_ids.contains(t.plugin_id.as_str())
-                    || Self::FRAMEWORK_ALWAYS_INCLUDE_TOOLS.contains(&t.name.as_str())
+                    || force_include.contains(&t.name)
             })
             .filter(|t| t.input_schema.is_object())
             .map(|t| {
@@ -692,6 +785,29 @@ impl KernelCapabilityRouter {
             .map_err(|e| McpError::Protocol {
                 message: format!("suspend 失败: {e}"),
             })?;
+        // 挂起凭据落库（审批挂起恢复链写侧）：approval 插件 suspend 时携带
+        // 交互 request_id（形参名 approval_id 兼容），落 runs.metadata 供
+        // interaction_response 按 request_id 反查唤醒（find_suspended_run_by_request_id）。
+        // 现有读面在 metadata 缺失时按"无凭据"跳过，故失败降级 warn 不回滚挂起。
+        let request_id = params
+            .get("request_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| params.get("approval_id").and_then(|v| v.as_str()))
+            .filter(|s| !s.is_empty());
+        if let (Some(db), Some(req_id)) = (self.sqlite.as_ref(), request_id) {
+            let mut meta = run.metadata.clone().unwrap_or_else(|| json!({}));
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("pending_interaction_request_id".to_string(), json!(req_id));
+            }
+            if let Err(e) = db.set_run_metadata(run_id, &meta) {
+                tracing::warn!(
+                    run_id = %run_id,
+                    request_id = %req_id,
+                    error = %e,
+                    "suspend 落挂起凭据失败（interaction_response 将反查不到此 run）"
+                );
+            }
+        }
         // 返回完整 handle，sidecar resume 时需回传全部字段
         Ok(json!({
             "status": "suspended",
@@ -703,7 +819,7 @@ impl KernelCapabilityRouter {
 
     /// pipeline-executor.resume：按 run_id 恢复为 Running。
     async fn handle_pipeline_executor_resume(&self, params: Value) -> Result<Value, McpError> {
-        // resume 需要完整的 SuspendHandle（run_id + branch_id + seq）。
+        // resume 凭据 = suspend 返回的完整 handle JSON（run_id + branch_id + seq）。
         // sidecar 在 suspend 时拿到 handle，resume 时回传完整字段。
         let run_id = params
             .get("run_id")
@@ -720,6 +836,25 @@ impl KernelCapabilityRouter {
             .map_err(|e| McpError::Protocol {
                 message: format!("resume 失败: {e}"),
             })?;
+        // 恢复即清挂起凭据：陈旧 pending_interaction_request_id 留在 metadata
+        // 会让后续按凭据的反查误判该 run 仍在等审批。
+        if let Some(db) = self.sqlite.as_ref() {
+            if let Ok(run) = db.get_run(run_id).await {
+                if let Some(mut meta) = run.metadata {
+                    if let Some(obj) = meta.as_object_mut() {
+                        if obj.remove("pending_interaction_request_id").is_some() {
+                            if let Err(e) = db.set_run_metadata(run_id, &meta) {
+                                tracing::warn!(
+                                    run_id = %run_id,
+                                    error = %e,
+                                    "resume 清挂起凭据失败（凭据残留）"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Ok(json!({"status": "resumed", "run_id": run_id}))
     }
 
@@ -794,6 +929,12 @@ impl KernelCapabilityRouter {
                 message: "resume_pipeline 缺少 pipeline_id 参数".to_string(),
             })?;
         let user_id = params.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+        // 可选状态复位指令（B13①：任务域 resume 链清 task.status 终态键）——
+        // 不透明透传给续跑派发，随派发 overlay 在恢复合并之后应用。
+        let state_overlay = params
+            .get("state_overlay")
+            .filter(|v| v.is_object())
+            .cloned();
         let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
             message: "resume_pipeline disabled: kernel store not injected".to_string(),
         })?;
@@ -883,11 +1024,16 @@ impl KernelCapabilityRouter {
                 "dispatched": false,
             }));
         };
-        resumer(pipeline_id.to_string(), thread_id, user_id.to_string())
-            .await
-            .map_err(|e| McpError::Protocol {
-                message: format!("resume_pipeline 续跑派发失败: {e}"),
-            })?;
+        resumer(
+            pipeline_id.to_string(),
+            thread_id,
+            user_id.to_string(),
+            state_overlay,
+        )
+        .await
+        .map_err(|e| McpError::Protocol {
+            message: format!("resume_pipeline 续跑派发失败: {e}"),
+        })?;
         Ok(json!({
             "status": "resumed",
             "pipeline_id": pipeline_id,
@@ -1037,15 +1183,16 @@ impl KernelCapabilityRouter {
         // 契约族未声明该事件 = 不归本闸（None 放行进分族）。
         crate::kernel_capabilities::find_spec(contracts, "streaming", event_name)?;
         // 声明闸（ADR 2026-08-22）：插件须声明 capabilities.streaming 才能发射
-        // 流式事件；未声明即拒（fail-closed）。引擎管道家族（llm_core/tool_core）
-        // 是内核 LLM 路径的器官，豁免——它们携带内核签发的 a_ id，命名空间执法见下。
+        // 流式事件；未声明即拒（fail-closed）。引擎管道器官（manifest 声明
+        // capabilities.streaming.conduit 的回环插件）豁免发射闸——它们携带内核
+        // 签发的 a_ id，命名空间执法按声明走 kernel owner。
         if let Some(pid) = plugin_id {
-            let is_conduit = crate::kernel_capabilities::ENGINE_CONDUIT_PLUGINS.contains(&pid);
+            let declared = self
+                .streaming_declaration_lookup
+                .as_ref()
+                .and_then(|lookup| lookup(pid));
+            let is_conduit = declared.as_ref().is_some_and(|d| d.conduit);
             if !is_conduit {
-                let declared = self
-                    .streaming_declaration_lookup
-                    .as_ref()
-                    .and_then(|lookup| lookup(pid));
                 let Some(decl) = declared else {
                     tracing::warn!(
                         target: "capability:event-bus",
@@ -1077,8 +1224,20 @@ impl KernelCapabilityRouter {
                 }
             }
         }
+        // P1-2 声明化：器官判定从 manifest capabilities.streaming.conduit 读
+        //（lookup 未装配时按无声明处理，fail-closed）。
+        let conduit_check = |pid: &str| {
+            self.streaming_declaration_lookup
+                .as_ref()
+                .and_then(|lookup| lookup(pid))
+                .is_some_and(|d| d.conduit)
+        };
         if let Err(reason) = crate::kernel_capabilities::validate_streaming_event(
-            contracts, event_name, payload, plugin_id,
+            contracts,
+            event_name,
+            payload,
+            plugin_id,
+            &conduit_check,
         ) {
             tracing::warn!(
                 target: "capability:event-bus",
@@ -1328,7 +1487,7 @@ impl KernelCapabilityRouter {
     }
 
     /// 交互事件族（interaction_request/cancelled/timeout/conversation_start 等）：
-    /// human-interaction 插件上报，前端 useInteractionHandler 渲染交互卡片/
+    /// 交互插件上报，前端 useInteractionHandler 渲染交互卡片/
     /// 全局浮层表单。与工具族一致整体透传 payload，补 _threadId 路由键。
     async fn try_route_interaction_family(
         &self,
@@ -1843,7 +2002,25 @@ impl KernelCapabilityRouter {
             for (pid, idx) in &memory_row_idx {
                 let fields = match store.load_pipeline_state(pid, &tenant_id).await {
                     Ok(f) => f,
-                    Err(_) => continue,
+                    Err(e) => {
+                        // 补齐失败必须可观测：内存行将缺任务域键，下游 worktree
+                        // 合并门控会把缺键当"ws_meta 读取失败"误判——warn 留痕 +
+                        // 聚合器计数（metrics-admin 读面可查），继续处理其余行。
+                        warn!(pipeline_id = %pid, error = %e,
+                              "pipeline_state DB 补齐失败，内存行将缺任务域键");
+                        if let Some(agg) = &self.metrics {
+                            agg.record(
+                                "kernel",
+                                "pipeline_state.backfill_errors_total",
+                                MetricType::Counter,
+                                1.0,
+                                &Labels::new(),
+                                None,
+                                None,
+                            );
+                        }
+                        continue;
+                    }
                 };
                 let Some(obj) = rows.get_mut(*idx).and_then(|r| r.as_object_mut()) else {
                     continue;
@@ -1919,7 +2096,19 @@ impl KernelCapabilityRouter {
             }
         }
         let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        // ① 热路径：内存 registry（未注册则跳过——冷管道由表行兜底）
+        // ① 冷路径先行（B6 写序倒置：DB 权威、内存是缓存）——批量事务 upsert
+        //    （upsert_state_fields）全成才 commit，任一失败整体回滚且内存不留
+        //    新值，消灭「内存新值 + DB 半套」的分代态（首键失败重启后旧值复活）。
+        if let Some(store) = &self.store {
+            store
+                .upsert_state_fields(pipeline_id, &tenant_id, fields)
+                .await
+                .map_err(|e| McpError::Protocol {
+                    message: format!("pipeline-state.update 持久化失败: {e}"),
+                })?;
+        }
+        // ② 热路径：内存 registry（未注册则跳过——冷管道由表行兜底）。
+        // DB 批量成功后才写内存；store 缺席（无持久化装配）时内存即唯一落点。
         let registry = agentos_session::pipeline_state_registry::global_registry();
         if let Some(entry) = registry.get(&tenant_id, pipeline_id) {
             let mut e = entry.write();
@@ -1927,17 +2116,6 @@ impl KernelCapabilityRouter {
                 for (k, v) in fields {
                     obj.insert(k.clone(), v.clone());
                 }
-            }
-        }
-        // ② 冷路径：pipeline_state 表（重启后冷恢复读它）
-        if let Some(store) = &self.store {
-            for (k, v) in fields {
-                store
-                    .upsert_state_field(pipeline_id, &tenant_id, k, v)
-                    .await
-                    .map_err(|e| McpError::Protocol {
-                        message: format!("pipeline-state.update 持久化失败: {e}"),
-                    })?;
             }
         }
         Ok(json!({"status": "updated", "pipeline_id": pipeline_id}))
@@ -2137,10 +2315,10 @@ mod tool_failure_alert_tests {
     struct FailingInvoker;
     #[async_trait::async_trait]
     impl agentos_core::traits::PluginInvoker for FailingInvoker {
-        async fn invoke_pipeline_plugin(
+        async fn invoke_pipeline_plugin<'a>(
             &self,
             _plugin_id: &str,
-            _ctx: &agentos_core::types::PluginContext,
+            _ctx: &agentos_core::types::PluginContext<'a>,
         ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
             Err(agentos_core::types::PluginError {
                 message: "n/a".into(),

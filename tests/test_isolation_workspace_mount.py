@@ -12,7 +12,7 @@ import tests._isolation_path  # noqa: F401
 涉及模块：src/isolation/providers/docker_provider.py
 """
 import pytest
-from isolation_types import (
+from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     IsolationContext,
     TaskType,

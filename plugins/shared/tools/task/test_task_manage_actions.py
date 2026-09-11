@@ -305,15 +305,17 @@ async def test_continue_stopped_with_message_marks_injected(tool: TaskTool, svc:
 
 
 async def test_continue_stopped_resume_executor_raises(tool: TaskTool, svc: Any, caplog) -> None:
-    """resume_pipeline 抛异常 → warning 留痕，仍返回恢复成功。"""
+    """resume_pipeline 抛异常 → 显式失败（不谎报 resumed=True/RUNNING）。"""
     task = await _make_task(svc)
     await svc.pause_task(task.id)
     _set_exec(AsyncMock(side_effect=RuntimeError("pipe down")))
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.ERROR):
         result = await tool.execute(
             {"action": "continue", "task_id": task.id, "parent_agent_level": 1}
         )
-    assert result.success, result.error
+    assert result.success is False
+    assert "resume_pipeline 失败" in result.error
+    assert result.metadata.get("resumed") is False
     assert any("resume_pipeline 失败" in r.getMessage() for r in caplog.records)
 
 

@@ -8,7 +8,7 @@
 //! ## 为什么需要注册表
 //!
 //! 集中式 `match (capability, method)` 分派下，新增一个能力 namespace
-//! （如 `human-interaction`）要同时改：
+//! （如交互 namespace）要同时改：
 //! 1. `STANDARD_CAPABILITIES` 白名单常量；
 //! 2. `build_declared_capabilities` 声明；
 //! 3. `handle` 的 match 分支。
@@ -32,7 +32,7 @@ use crate::error::McpError;
 
 /// 单个 capability namespace 的处理者。
 ///
-/// 每个 handler 负责一个 namespace（如 `"metrics"` / `"human-interaction"`），
+/// 每个 handler 负责一个 namespace（如 `"metrics"` / 交互插件 namespace），
 /// 处理该 namespace 下所有 method 的反向调用。实现方持有真实内核服务句柄。
 #[async_trait]
 pub trait CapabilityHandler: Send + Sync {

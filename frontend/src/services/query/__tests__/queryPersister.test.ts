@@ -6,15 +6,16 @@
  * removeClient 清空、持久化失败静默降级不抛异常（隐私模式/配额耗尽场景）。
  * 刷新后缓存秒开依赖本层正确性。
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { QueryClient, hydrate } from '@tanstack/react-query'
 import { persistQueryClientSave } from '@tanstack/react-query-persist-client'
 import fakeIndexedDB from 'fake-indexeddb'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as queryPersisterMod from '@/services/query/queryPersister'
 
 ;(globalThis as { indexedDB?: unknown }).indexedDB = fakeIndexedDB
 
 describe('queryPersister', () => {
-  let queryPersister: typeof import('@/services/query/queryPersister')['queryPersister']
+  let queryPersister: queryPersisterMod['queryPersister']
 
   beforeEach(async () => {
     vi.resetModules()

@@ -15,6 +15,20 @@
       "on_unload"
     ]
   },
+  "export_fields": [
+    "security.level_decision"
+  ],
+  "state": {
+    "volatile_keys": [
+      "security.level_decision"
+    ],
+    "reads": [
+      "agent_level",
+      "core_type",
+      "raw_tool_calls",
+      "tool_ids"
+    ]
+  },
   "permissions": {},
   "priority": 50,
   "host_group": "light"

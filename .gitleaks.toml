@@ -1,0 +1,68 @@
+# ============================================================
+# .gitleaks.toml — 密钥扫描配置（gitleaks v8.28+）
+# ============================================================
+#
+# 分层防线（2026-09-11 第七波建制项）：
+#   1. pre-commit 官方 hook（--staged）拦截本次提交内容；
+#   2. CI secret-scan job 全仓全历史扫描（gitleaks detect），
+#      存量命中（0.1 时代遗留/已删文件/文档样例）走
+#      .github/gitleaks-baseline.json 基线 —— 只有【新增】命中才红。
+#
+# 本文件只放行两类可证明非密钥的字面量，按路径+字面精确圈定，
+# 不做过宽放行；历史存量一律不在此放行（基线兜底，待清理后缩基线）。
+#
+# 注意：extend.useDefault 保留 gitleaks 全部内置规则；下方 allowlist
+# 对所有规则生效（含默认规则）。修改前先跑：
+#   gitleaks detect --source . --redact --baseline-path .github/gitleaks-baseline.json
+# 确认仍为 0 命中再合入。
+
+[extend]
+useDefault = true
+
+# ── 精确放行清单（paths + regexes 同时满足才放行）────────────────────
+[[allowlists]]
+description = "环境变量占位符：${VAR} 字面引用不构成可用密钥（config/tests/文档通用写法，实证样本 config/models/llm.yaml api_key: ${DEEPSEEK_API_KEY}）"
+regexes = [
+  '''\$\{[A-Z][A-Z0-9_]*\}''',
+]
+
+[[allowlists]]
+description = "config_safety_test B2 掩码自测：断言掩码逻辑用的哑 key（abcdef 顺字面量，非真实密钥）"
+paths = [
+  '''^kernel/crates/api/tests/config_safety_test\.rs$''',
+]
+regexes = [
+  '''sk-abcdef1234567890''',
+]
+
+[[allowlists]]
+description = "sensitive_checker 脱敏自测：Rust 源内嵌测试断言 + Python 测试用的哑 key（abcdef 顺字面量，用于验证脱敏正则本身）"
+paths = [
+  '''^plugins/shared/pipeline/output/sensitive_checker/src/lib\.rs$''',
+  '''^tests/plugins/output/sensitive_checker/test_sensitive_checker\.py$''',
+]
+regexes = [
+  '''sk-abcdef1234567890''',
+  '''sk-abcdefghijklmnopqrstuvwxyz''',
+]
+
+[[allowlists]]
+description = "llm 脱敏/写入语义测试：掩码与 llm.yaml 写入路径断言用的哑 key（plain-key/live-0123 均为可读占位形态）"
+paths = [
+  '''^plugins/shared/system/llm/test_prompt_audit\.py$''',
+  '''^tests/plugins/system/llm/test_llm_http\.py$''',
+]
+regexes = [
+  '''sk-abcdef1234567890xyz''',
+  '''sk-plain-key-12345678''',
+  '''sk-live-0123456789abcdef''',
+]
+
+[[allowlists]]
+description = "key_pool 测试：KeySlot 构造辅助 _slot() 的哑 key（sk-test 前缀顺字面量，非真实密钥）"
+paths = [
+  '''^plugins/shared/system/llm/test_key_pool\.py$''',
+]
+regexes = [
+  '''sk-test-1234567890''',
+]

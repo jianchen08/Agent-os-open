@@ -1,25 +1,26 @@
 /** 自生长闭环集成 连接模块管理器、Schema 注册表、WebSocket 推送和组件注册 */
 
-import apiClient from '@/services/api/client'
+import { API_ENDPOINTS } from '@/constants/api'
 import { fetchSchemaCached, invalidateSchemaCache } from '@/hooks/queries/useSchemaQuery'
+import apiClient from '@/services/api/client'
+import { loadDshAdapterContributions } from '@/services/dshAdapter'
+import { validatePluginDeclaration } from '@/services/pluginDeclarationValidate'
 import { syncPluginStyles, removeAllPluginStyles } from '@/services/pluginStyles'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { shortcutRegistry } from '@/services/schema/shortcutRegistry'
+import { disposeResyncOnSchema, initResyncOnSchema } from '@/services/websocket/resync'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useThemeStore } from '@/stores/themeStore'
-import { loggers } from '@/utils/logger'
 import { loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
-import { disposeResyncOnSchema, initResyncOnSchema } from '@/services/websocket/resync'
-import { loadDshAdapterContributions } from '@/services/dshAdapter'
 import { loadRenderIntents } from '@/utils/dshRenderIntent'
-import { loadOutputSchemas } from '@/utils/outputSchemaView'
 import { loadInteractionModes } from '@/utils/interactionModes'
+import { loggers } from '@/utils/logger'
 import { loadNotificationModes } from '@/utils/notificationModes'
+import { loadOutputSchemas } from '@/utils/outputSchemaView'
 import { loadViewModes } from '@/utils/viewModeRoutes'
-import { validatePluginDeclaration } from '@/services/pluginDeclarationValidate'
 import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
 
 /** 初始化自生长闭环 1. 注册所有预置组件 */
@@ -28,7 +29,7 @@ export async function initializeGrowthLoop(): Promise<void> {
 
   // Step 0: 注入命令内核 transport（命令面板/快捷键/菜单 → 内核 capability 出口）
   commandDispatcher.setTransport(async (commandId, args) => {
-    await apiClient.post('/api/v1/actions/execute', { action: commandId, args })
+    await apiClient.post(API_ENDPOINTS.ACTIONS.EXECUTE, { action: commandId, args })
   })
 
   // Step 1: 注册预置组件
@@ -82,7 +83,7 @@ async function reloadContributionRegistry(): Promise<void> {
       (schema as { tools?: Array<{ ui?: { notification_modes?: unknown } }> }).tools ?? [],
     )
     // 审批视图模式声明（widget 化 T10）：review_service 的 tools[].ui.view_modes
-    // 装载（view_mode→widget 路由，ApprovalRouter 声明驱动查找）
+    // 装载（view_mode→widget 声明注册表，路由方按名解析）
     loadViewModes(
       (schema as { tools?: Array<{ ui?: { view_modes?: unknown } }> }).tools ?? [],
     )

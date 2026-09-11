@@ -1,10 +1,15 @@
 /**
  * 模型参数编辑器（受控组件）：添加模型表单与模型行「参数」面板共用。
  * 草稿类型与序列化见 ./modelParams（draftFromModel / buildModelFields）。
+ * 思考强度档位由 llm_service 预置声明下发（levels prop，缺省走内置兜底词汇）。
  */
-import type { ModalityDraft, ModelParamsDraft, StrengthLevelDraft } from './modelParams'
+import {
+  DEFAULT_STRENGTH_LEVELS,
+  type ModalityDraft,
+  type ModelParamsDraft,
+  type StrengthLevelDraft,
+} from './modelParams'
 
-const STRENGTH_LEVELS = ['high', 'medium', 'low'] as const
 const MODALITIES = ['image', 'audio', 'video'] as const
 
 const THINKING_TYPE_OPTIONS: [string, string][] = [
@@ -18,10 +23,11 @@ const EFFORT_OPTIONS: [string, string][] = [
   ['high', 'high'],
   ['max', 'max'],
 ]
-const LEVEL_LABELS: Record<'high' | 'medium' | 'low', string> = {
+const LEVEL_LABELS: Record<string, string> = {
   high: '高',
   medium: '中',
   low: '低',
+  off: '关',
 }
 
 function ParamSelect({
@@ -61,13 +67,19 @@ function ParamSelect({
 export function ModelParamsEditor({
   value,
   onChange,
+  levels = DEFAULT_STRENGTH_LEVELS,
 }: {
   value: ModelParamsDraft
   onChange: (next: ModelParamsDraft) => void
+  /** 思考强度档位（llm_service 预置声明下发；缺省兜底词汇） */
+  levels?: readonly string[]
 }) {
   const set = (patch: Partial<ModelParamsDraft>) => onChange({ ...value, ...patch })
-  const setLevel = (level: 'high' | 'medium' | 'low', patch: Partial<StrengthLevelDraft>) =>
+  const setLevel = (level: string, patch: Partial<StrengthLevelDraft>) =>
     set({ strength: { ...value.strength, [level]: { ...value.strength[level], ...patch } } })
+  // 声明档位可能晚于草稿创建到达：缺失档位按空草稿读取（写入时补键）
+  const levelDraft = (level: string): StrengthLevelDraft =>
+    value.strength[level] ?? { thinkingType: '', effort: '' }
   const setModality = (m: 'image' | 'audio' | 'video', patch: Partial<ModalityDraft>) =>
     set({ multimodal: { ...value.multimodal, [m]: { ...value.multimodal[m], ...patch } } })
 
@@ -182,30 +194,31 @@ export function ModelParamsEditor({
         </div>
       </div>
 
-      {/* 思考强度映射：聊天页档位 → 该模型参数（留空回退内置默认表） */}
+      {/* 思考强度映射：聊天页档位 → 该模型参数（留空=该档位不覆盖，用模型默认参数） */}
       <div>
         <h4 className="text-muted-foreground mb-1.5 text-[10px] font-semibold uppercase tracking-wide">
           思考强度映射
         </h4>
         <p className="text-muted-foreground mb-1.5 text-[10px] leading-relaxed">
-          聊天页思考强度 高/中/低 → 本模型参数；留空=该档位用内置默认（推理力度 low/medium/high）。
-          DeepSeek 类模型填推理力度，GLM/MiniMax 类填思考模式。
+          聊天页思考强度 关/低/中/高 → 本模型参数；留空=该档位不覆盖（用模型默认参数）。
+          DeepSeek 类模型填推理力度，GLM/MiniMax 类填思考模式；关闭档填关闭形态
+          （推理力度 none 或思考模式 disabled），否则模型默认的思考开启会照常生效。
         </p>
         <div className="space-y-1.5">
-          {STRENGTH_LEVELS.map((level) => (
+          {levels.map((level) => (
             <div key={level} className="flex flex-wrap items-center gap-2">
-              <span className="text-muted-foreground w-6 text-xs">{LEVEL_LABELS[level]}</span>
+              <span className="text-muted-foreground w-6 text-xs">{LEVEL_LABELS[level] ?? level}</span>
               <ParamSelect
-                ariaLabel={`思考模式（${LEVEL_LABELS[level]}）`}
-                value={value.strength[level].thinkingType}
-                emptyLabel="内置默认"
+                ariaLabel={`思考模式（${LEVEL_LABELS[level] ?? level}）`}
+                value={levelDraft(level).thinkingType}
+                emptyLabel="不覆盖"
                 options={THINKING_TYPE_OPTIONS}
                 onChange={(v) => setLevel(level, { thinkingType: v })}
               />
               <ParamSelect
-                ariaLabel={`推理力度（${LEVEL_LABELS[level]}）`}
-                value={value.strength[level].effort}
-                emptyLabel="内置默认"
+                ariaLabel={`推理力度（${LEVEL_LABELS[level] ?? level}）`}
+                value={levelDraft(level).effort}
+                emptyLabel="不覆盖"
                 options={EFFORT_OPTIONS}
                 onChange={(v) => setLevel(level, { effort: v })}
               />

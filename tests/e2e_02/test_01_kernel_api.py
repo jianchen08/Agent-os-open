@@ -49,30 +49,32 @@ class TestKernelApiHealth:
 class TestKernelApiSchema:
     """1.2 Schema 聚合端点。"""
 
-    def test_schema_returns_200(self, kernel_url):
-        """测试: GET /api/v1/schema 应返回 200。"""
-        status, body, _ = http_get(f"{kernel_url}/api/v1/schema")
+    def test_schema_returns_200(self, kernel_url, auth_token):
+        """测试: GET /api/v1/schema（已认证）应返回 200。
+
+        30d1b0959 匿名读面收口后 schema 需登录态，用例跟随现行契约。"""
+        status, body, _ = http_get_with_auth(f"{kernel_url}/api/v1/schema", auth_token)
         assert status == 200, f"期望 200，实际 {status}"
 
-    def test_schema_has_agents_field(self, kernel_url):
+    def test_schema_has_agents_field(self, kernel_url, auth_token):
         """测试: /api/v1/schema 响应包含 agents 字段。"""
-        status, body, _ = http_get(f"{kernel_url}/api/v1/schema")
+        status, body, _ = http_get_with_auth(f"{kernel_url}/api/v1/schema", auth_token)
         assert isinstance(body, dict), "响应应为 dict"
         assert "agents" in body, "缺少 agents 字段"
 
-    def test_schema_has_pipelines_field(self, kernel_url):
+    def test_schema_has_pipelines_field(self, kernel_url, auth_token):
         """测试: /api/v1/schema 响应包含 pipelines 字段。"""
-        status, body, _ = http_get(f"{kernel_url}/api/v1/schema")
+        status, body, _ = http_get_with_auth(f"{kernel_url}/api/v1/schema", auth_token)
         assert "pipelines" in body, "缺少 pipelines 字段"
 
-    def test_schema_has_tools_field(self, kernel_url):
+    def test_schema_has_tools_field(self, kernel_url, auth_token):
         """测试: /api/v1/schema 响应包含 tools 字段。"""
-        status, body, _ = http_get(f"{kernel_url}/api/v1/schema")
+        status, body, _ = http_get_with_auth(f"{kernel_url}/api/v1/schema", auth_token)
         assert "tools" in body, "缺少 tools 字段"
 
-    def test_schema_has_routes_field(self, kernel_url):
+    def test_schema_has_routes_field(self, kernel_url, auth_token):
         """测试: /api/v1/schema 响应包含 routes 字段。"""
-        status, body, _ = http_get(f"{kernel_url}/api/v1/schema")
+        status, body, _ = http_get_with_auth(f"{kernel_url}/api/v1/schema", auth_token)
         assert "routes" in body, "缺少 routes 字段"
 
 
@@ -109,14 +111,14 @@ class TestKernelApiAgents:
 class TestKernelApiPipelines:
     """1.4 Pipelines 列表端点。"""
 
-    def test_pipelines_returns_200(self, kernel_url):
-        """测试: GET /api/v1/pipelines 应返回 200。"""
-        status, body, _ = http_get(f"{kernel_url}/api/v1/pipelines")
+    def test_pipelines_returns_200(self, kernel_url, auth_token):
+        """测试: GET /api/v1/pipelines（已认证）应返回 200。"""
+        status, body, _ = http_get_with_auth(f"{kernel_url}/api/v1/pipelines", auth_token)
         assert status == 200, f"期望 200，实际 {status}"
 
-    def test_pipelines_returns_json_array(self, kernel_url):
+    def test_pipelines_returns_json_array(self, kernel_url, auth_token):
         """测试: /api/v1/pipelines 返回 JSON 数组。"""
-        status, body, _ = http_get(f"{kernel_url}/api/v1/pipelines")
+        status, body, _ = http_get_with_auth(f"{kernel_url}/api/v1/pipelines", auth_token)
         assert isinstance(body, list), f"响应应为 list，实际 {type(body)}"
 
 

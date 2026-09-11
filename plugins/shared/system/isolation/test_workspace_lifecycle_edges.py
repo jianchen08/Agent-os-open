@@ -9,8 +9,6 @@
 - _start_root_task：容器空间（有提交 / 无提交 / 分支守卫拒绝 auto-save）、
   容器父任务缺失报错、显式新目录 git init、已有 .git 无提交、项目根分支守卫；
 - _persist_ws_meta：无运行循环调度 / 任务树异常 / save_task 协程失败；
-- restore_ws_meta 异常；cleanup_workspace：残留 worktree 目录强删 / rmtree 失败 /
-  plain 相对路径。
 
 git 操作用 tmp 目录真实执行（唯一外部依赖为 git 子进程）。
 """
@@ -372,44 +370,3 @@ class TestMetaPersistEdges:
 
 
 # ═══════════════════════════════════════════════════════════
-# cleanup 边缘
-# ═══════════════════════════════════════════════════════════
-
-
-class TestCleanupEdges:
-    def test_cleanup_worktree_removes_leftover_dir(self, tmp_path: Path) -> None:
-        """worktree 目录名含 __wt_ 且 project_root 不可用 → 强删目录。"""
-        ws_dir = tmp_path / "proj__wt_abc1234"
-        ws_dir.mkdir()
-        meta_store = {"t1": {"mode": "worktree", "path": str(ws_dir), "branch": "b1", "project_root": str(tmp_path / "no_such_repo")}}
-        m = _make_manager(tmp_path, tmp_path / "wsroot", meta_store=meta_store)
-        r = m.cleanup_workspace("t1")
-        assert r["worktree_removed"] is False
-        assert r["branch_deleted"] is False
-        assert r["dir_removed"] is True
-        assert not ws_dir.exists()
-        assert "t1" not in m._ws_meta_store
-
-    def test_cleanup_rmtree_failure_warns(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        ws_dir = tmp_path / "proj__wt_9"
-        ws_dir.mkdir()
-        meta = {"mode": "worktree", "path": str(ws_dir), "branch": "b1", "project_root": str(tmp_path / "no_such_repo")}
-        m = _make_manager(tmp_path, tmp_path / "wsroot", meta_store={"t1": meta})
-
-        def fail_rmtree(path: str) -> None:
-            raise OSError("locked")
-
-        monkeypatch.setattr(_MOD, "_force_rmtree", fail_rmtree)
-        with caplog.at_level(logging.WARNING):
-            r = m.cleanup_workspace("t1")
-        assert r["dir_removed"] is False
-        assert "rmtree 失败" in caplog.text
-
-    def test_cleanup_plain_relative_path(self, tmp_path: Path) -> None:
-        """plain 模式相对路径 → resolve 后保留目录。"""
-        m = _make_manager(tmp_path, tmp_path / "wsroot", meta_store={"t1": {"mode": "plain", "path": "rel_ws"}})
-        r = m.cleanup_workspace("t1")
-        assert r == {"worktree_removed": False, "branch_deleted": False, "dir_removed": False}
-        assert "t1" not in m._ws_meta_store

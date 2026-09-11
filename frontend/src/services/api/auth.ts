@@ -13,6 +13,7 @@ import type {
   RegisterRequest,
   RefreshRequest,
   LogoutRequest,
+  ChangePasswordRequest,
 } from '../../types/api'
 import type { RetryOptions } from '../../utils/retry'
 
@@ -146,6 +147,34 @@ export async function logout(
 export async function getCurrentUser(options: RetryOptions = {}): Promise<UserInfoResponse> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<UserInfoResponse>(API_ENDPOINTS.AUTH.ME)
+    return response.data
+  }, options)
+}
+
+/**
+ * 修改口令：验旧口令 → 服务端写新哈希并吊销其他会话。
+ * 成功响应携带新 token 对（当前会话无感续期），调用方负责落库。
+ */
+export async function changePassword(
+  oldPassword: string,
+  newPassword: string,
+  options: RetryOptions = {},
+): Promise<LoginResponse> {
+  if (!oldPassword) {
+    throw new ValidationError('旧口令不能为空')
+  }
+  validatePassword(newPassword)
+
+  const requestData: ChangePasswordRequest = {
+    old_password: oldPassword,
+    new_password: newPassword,
+  }
+
+  return requestWithRetry(async () => {
+    const response = await apiClient.post<LoginResponse>(
+      API_ENDPOINTS.AUTH.CHANGE_PASSWORD,
+      requestData,
+    )
     return response.data
   }, options)
 }

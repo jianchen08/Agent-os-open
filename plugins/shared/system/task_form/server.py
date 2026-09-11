@@ -17,22 +17,22 @@ ToolExecutionResult{success,data}，data 为 HttpHandleResponse{status,headers,b
 
 from __future__ import annotations
 
+import logging
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+logger = logging.getLogger(__name__)
 
 plugin = AgentOSPlugin("task_form")
 
 # 共享层（http_json / project_registry）入 sys.path。
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-_SHARED_DIR = os.path.join(_PROJECT_ROOT, "plugins", "shared")
-if os.path.isdir(_SHARED_DIR):
-    sys.path.insert(0, _SHARED_DIR)
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.path
 
 # http.handle 响应封装走公共实现（plugins/shared/http_json.py），调用点零改名。
 # noqa: E402 —— 共享层自举后才能导入。
@@ -68,7 +68,8 @@ def _load_form_fields() -> list[dict[str, Any]]:
     try:
         with open(yaml_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning("[task_form] 表单声明读取失败（返回空字段表）: %s | %s", yaml_path, exc)
         return []
     if not isinstance(data, dict):
         return []

@@ -6,9 +6,11 @@
  * 三组件 datasourceUri 接线（无 uri 时零行为变化）。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
-
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
+import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
+import { TableWidget } from '@/components/schema/widgets/TableWidget'
 import {
   normalizeDataPayload,
   normalizeRows,
@@ -16,9 +18,6 @@ import {
   normalizeScalar,
   useDataWidget,
 } from '@/services/schema/dataWidget'
-import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
-import { TableWidget } from '@/components/schema/widgets/TableWidget'
-import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 
 const apiGet = vi.fn()
 const apiCall = vi.fn()
@@ -241,7 +240,6 @@ describe('组件接线（datasourceUri）', () => {
 })
 
 // ── A1c：WS 事件驱动数据源 ─────────────────────────────────
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
 
 describe('A1c：WS 事件驱动数据源', () => {
   beforeEach(() => {

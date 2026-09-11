@@ -19,7 +19,7 @@ from scene.models import Scene
 
 # 多租户数据根咽喉点（plugins/shared/tenant_data.py）。本文件位于
 # plugins/shared/system/scene/persistence.py，上溯 2 级到 plugins/shared/。
-# 参考 hindsight_memory/wiring.py 的 sys.path 自举模式。
+# 参考 plugins/shared/wiring.py 的 sys.path 自举模式。
 _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)

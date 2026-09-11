@@ -6,28 +6,21 @@
 2. init：无 execution_context / 非 dict → 跳过
 3. init：execution_context 无 isolation 声明 → 跳过
 4. init：isolation level 非法/缺失 → 跳过
-5. init：level=isolated/non_isolated 且服务可用 → 基线 resolved=True + service_ready=True
-6. init：服务实例化失败降级 → 基线仍写入，service_ready=False
-7. init：服务调用参数透传（config_path 传入 IsolationManager）——真实隔离包路径
-8. exit：无 environment_basis → 零产出
-9. exit：有基线但无 task_id（主会话）→ environment_released=True，不销毁
-10. exit：manager 不可用 → environment_released=False
-11. exit：销毁成功 → environment_released=True，任务身份取自 state[task.id]
-12. exit：销毁抛异常 → 留痕不阻断，environment_released=False
+5. init：销毁调用方已注入 → 基线 resolved=True + service_ready=True
+6. init：调用方未注入（能力缺失降级）→ 基线仍写入，service_ready=False
+7. exit：无 environment_basis → 零产出
+8. exit：有基线但无 task_id（主会话）→ environment_released=True，不调销毁
+9. exit：调用方未注入 → environment_released=False
+10. exit：销毁成功 → environment_released=True，isolation.destroy_env
+    收到 state[task.id]（且不再有旧路径"协程未 await、销毁从未执行"问题）
+11. exit：调用抛异常 → 留痕不阻断，environment_released=False
+12. exit：返回 {"error": ...}（destroy_env 业务失败约定）→ 留痕不阻断，
+    environment_released=False
 13. main 循环体 → 零产出
 
-[疑似产品 bug，2026-08-26 现状断言]：`_release` 经 `ctx_await` 在
-`run_in_executor` 线程池里执行 `manager.destroy_by_task_id`，而真实
-`IsolationManager.destroy_by_task_id` 是 **async** 方法——线程池回调只负责
-「调用」得到未 await 的协程对象，无人 await。可观察结果：exit 时销毁**从未
-真正执行**，且 `environment_released` 恒为 True（协程泄漏产生 RuntimeWarning，
-仅真实销毁中抛出的异常可能被留痕）。本文件按现状断言（destroy 记录为空），
-修复属产品职责。
-
-IsolationManager 为外部依赖：真实模块在 plugins/shared/system/isolation/，
-构造/销毁需容器与配置中心，属外部子系统——以模块级假实现注入
-（sys.modules 替换 `isolation.manager` 包路径），内部插件逻辑真实执行。
-__init__ 阶段不落盘，写日志可中断（测试内随测试日志可见）。
+销毁调用方为外部依赖：真实链路经 tool-executor.invoke 直达 isolation_service
+sidecar（容器销毁、daemon 交互均为外部子系统）——以假 async caller 注入，
+插件内部分发/降级/留痕逻辑真实执行。
 
 [来源: plugins/shared/pipeline/input/environment_lifecycle/plugin.py]
 """
@@ -55,50 +48,27 @@ if _SHARED_DIR not in sys.path:
 from pipeline.plugin import PluginContext, PluginResult  # noqa: E402
 
 
-class _FakeIsolationManager:
-    """记录构造/销毁调用的假 IsolationManager（duck-typed）。"""
+class _FakeDestroyCaller:
+    """记录销毁调用的假 caller；可注入异常与业务错误返回。"""
 
-    instances: list["_FakeIsolationManager"] = []
+    def __init__(
+        self,
+        result: Any = None,
+        exc: Exception | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.result = result
+        self.exc = exc
 
-    def __init__(self, config_path: str | None = None) -> None:
-        self.config_path = config_path
-        self.destroyed: list[tuple[str, bool]] = []
-        _FakeIsolationManager.instances.append(self)
-
-    async def destroy_by_task_id(self, task_id: str, success: bool = True) -> None:
-        self.destroyed.append((task_id, success))
-
-
-def _install_fake_isolation() -> None:
-    """注入假 isolation.manager 模块，锁住真实系统插件导入。
-
-    覆写 sys.modules["isolation"/"isolation.manager"]——由 autouse fixture
-    _restore_isolation_modules 在每用例后还原原条目，否则共跑车里后续
-    真 isolation 测试（isolation_guard/container_landing 等）全部被毒化。
-    """
-    fake_pkg = type(sys)("isolation")
-    fake_mod = type(sys)("isolation.manager")
-    fake_mod.IsolationManager = _FakeIsolationManager
-    sys.modules["isolation"] = fake_pkg
-    sys.modules["isolation.manager"] = fake_mod
-
-
-@pytest.fixture(autouse=True)
-def _restore_isolation_modules():
-    """还原被 _install_fake_isolation 覆写的 isolation 模块槽位。"""
-    saved = {n: sys.modules.get(n) for n in ("isolation", "isolation.manager")}
-    try:
-        yield
-    finally:
-        for n in ("isolation.manager", "isolation"):
-            sys.modules.pop(n, None)
-            mod = saved.get(n)
-            if mod is not None:
-                sys.modules[n] = mod
+    async def __call__(self, tool_name: str, args: dict[str, Any]) -> Any:
+        self.calls.append((tool_name, dict(args)))
+        if self.exc is not None:
+            raise self.exc
+        return self.result
 
 
 def _load_plugin() -> Any:
-    """唯一名动态加载 plugin.py（每次新建，隔离模块级状态）。"""
+    """唯一名动态加载 plugin.py（每次新建，隔离模块级 _destroy_caller 状态）。"""
     name = "_env_lc_plugin_ut"
     sys.modules.pop(name, None)
     spec = importlib.util.spec_from_file_location(name, _PLUGIN_DIR / "plugin.py")
@@ -203,59 +173,28 @@ def test_init_skips_on_invalid_isolation_level(bad_level: Any) -> None:
 @pytest.mark.parametrize("level", ["isolated", "non_isolated"])
 def test_init_resolves_basis_with_service_ready(level: str) -> None:
     mod = _load_plugin()
-    _install_fake_isolation()
-    _FakeIsolationManager.instances.clear()
+    mod.set_destroy_caller(_FakeDestroyCaller())
     plugin = mod.EnvironmentLifecyclePlugin()
     state = {"current_phase": "init", "execution_context": {"isolation": {"level": level}}}
     updates = _updates(_run(plugin.execute(_make_ctx(state))))
-    basis = updates["environment_basis"]
-    assert basis == {"level": level, "resolved": True, "service_ready": True}
-    assert len(_FakeIsolationManager.instances) == 1
-    assert _FakeIsolationManager.instances[0].config_path is None
+    assert updates["environment_basis"] == {
+        "level": level,
+        "resolved": True,
+        "service_ready": True,
+    }
 
 
-def test_init_degrades_when_service_instantiation_fails() -> None:
+def test_init_degrades_without_destroy_caller() -> None:
+    """调用方未注入（tool-executor 能力缺失）→ 基线仍写入，service_ready=False。"""
     mod = _load_plugin()
-
-    class _Boom:
-        def __init__(self, config_path: str | None = None) -> None:
-            raise RuntimeError("backend down")
-
-    _install_fake_isolation()
-    fake_manager = sys.modules["isolation.manager"]
-    original = fake_manager.IsolationManager
-    fake_manager.IsolationManager = _Boom  # type: ignore[attr-defined]
-    try:
-        plugin = mod.EnvironmentLifecyclePlugin()
-        state = {"current_phase": "init", "execution_context": {"isolation": {"level": "isolated"}}}
-        updates = _updates(_run(plugin.execute(_make_ctx(state))))
-        basis = updates["environment_basis"]
-        assert basis == {"level": "isolated", "resolved": True, "service_ready": False}
-        assert plugin._manager is None
-    finally:
-        fake_manager.IsolationManager = original
-
-
-def test_init_config_path_forwarded_to_manager() -> None:
-    mod = _load_plugin()
-    _install_fake_isolation()
-    _FakeIsolationManager.instances.clear()
-    plugin = mod.EnvironmentLifecyclePlugin(config={"config_path": "isolation/isolation_config.yaml"})
-    state = {"current_phase": "init", "execution_context": {"isolation": {"level": "isolated"}}}
-    _updates(_run(plugin.execute(_make_ctx(state))))
-    assert _FakeIsolationManager.instances[0].config_path == "isolation/isolation_config.yaml"
-
-
-def test_init_manager_lazy_single_instance() -> None:
-    mod = _load_plugin()
-    _install_fake_isolation()
-    _FakeIsolationManager.instances.clear()
     plugin = mod.EnvironmentLifecyclePlugin()
-    state_a = {"current_phase": "init", "execution_context": {"isolation": {"level": "isolated"}}}
-    state_b = {"current_phase": "init", "execution_context": {"isolation": {"level": "non_isolated"}}}
-    _run(plugin.execute(_make_ctx(state_a)))
-    _run(plugin.execute(_make_ctx(state_b)))
-    assert len(_FakeIsolationManager.instances) == 1
+    state = {"current_phase": "init", "execution_context": {"isolation": {"level": "isolated"}}}
+    updates = _updates(_run(plugin.execute(_make_ctx(state))))
+    assert updates["environment_basis"] == {
+        "level": "isolated",
+        "resolved": True,
+        "service_ready": False,
+    }
 
 
 # ── exit：环境释放 ──────────────────────────────────────────
@@ -270,19 +209,31 @@ def test_exit_skips_without_environment_basis() -> None:
 
 def test_exit_no_task_id_marks_released_without_destroy() -> None:
     mod = _load_plugin()
-    _install_fake_isolation()
-    _FakeIsolationManager.instances.clear()
+    caller = _FakeDestroyCaller()
+    mod.set_destroy_caller(caller)
     plugin = mod.EnvironmentLifecyclePlugin()
     state = {"current_phase": "exit", "environment_basis": {"level": "isolated", "resolved": True}}
     updates = _updates(_run(plugin.execute(_make_ctx(state))))
     assert updates == {"environment_released": True}
-    assert _FakeIsolationManager.instances == []  # 主会话不销毁
+    assert caller.calls == []  # 主会话不销毁
+
+
+def test_exit_caller_missing_marks_not_released() -> None:
+    mod = _load_plugin()
+    plugin = mod.EnvironmentLifecyclePlugin()
+    state = {
+        "current_phase": "exit",
+        "environment_basis": {"level": "isolated", "resolved": True},
+        "task.id": "task-9",
+    }
+    updates = _updates(_run(plugin.execute(_make_ctx(state))))
+    assert updates == {"environment_released": False}
 
 
 def test_exit_destroys_environment_on_task_id() -> None:
     mod = _load_plugin()
-    _install_fake_isolation()
-    _FakeIsolationManager.instances.clear()
+    caller = _FakeDestroyCaller(result={"destroyed": True, "task_id": "task-42"})
+    mod.set_destroy_caller(caller)
     plugin = mod.EnvironmentLifecyclePlugin()
     state = {
         "current_phase": "exit",
@@ -291,68 +242,31 @@ def test_exit_destroys_environment_on_task_id() -> None:
     }
     updates = _updates(_run(plugin.execute(_make_ctx(state))))
     assert updates == {"environment_released": True}
-    # 现状断言（疑似产品 bug，见模块 docstring）：ctx_await 在线程池里调用
-    # async destroy_by_task_id，协程从未被 await，销毁实际未执行。
-    assert _FakeIsolationManager.instances[0].destroyed == []
+    # 销毁真实发生：正门工具名 + 任务身份取自 state["task.id"]
+    assert caller.calls == [("isolation.destroy_env", {"task_id": "task-42"})]
 
 
-def test_exit_task_dot_id_key_accepted() -> None:
+@pytest.mark.parametrize("task_id", ["task-7", "p-abc-123"])
+def test_exit_task_identity_from_flat_state_key(task_id: str) -> None:
+    """任务身份一律取扁平键 task.id（0.2 任务身份 = pipeline_id）。"""
     mod = _load_plugin()
-    _install_fake_isolation()
-    _FakeIsolationManager.instances.clear()
+    caller = _FakeDestroyCaller(result={"destroyed": True})
+    mod.set_destroy_caller(caller)
     plugin = mod.EnvironmentLifecyclePlugin()
     state = {
         "current_phase": "exit",
         "environment_basis": {"level": "isolated", "resolved": True},
-        "task.id": "task-7",
+        "task.id": task_id,
     }
-    _run(plugin.execute(_make_ctx(state)))
-    # 现状断言：与 test_exit_destroys_environment_on_task_id 相同（销毁未执行）
-    assert _FakeIsolationManager.instances[0].destroyed == []
+    _updates(_run(plugin.execute(_make_ctx(state))))
+    assert caller.calls == [("isolation.destroy_env", {"task_id": task_id})]
 
 
-def test_exit_manager_unavailable_marks_not_released() -> None:
+def test_exit_caller_raises_keeps_mark_not_released() -> None:
+    """调用抛异常 → 留痕不阻断，environment_released=False。"""
     mod = _load_plugin()
-
-    class _NoneManager:
-        def __init__(self, config_path: str | None = None) -> None:
-            raise RuntimeError("no backend")
-
-    _install_fake_isolation()
-    fake_manager = sys.modules["isolation.manager"]
-    original = fake_manager.IsolationManager
-    fake_manager.IsolationManager = _NoneManager  # type: ignore[attr-defined]
-    try:
-        plugin = mod.EnvironmentLifecyclePlugin()
-        state = {
-            "current_phase": "exit",
-            "environment_basis": {"level": "isolated", "resolved": True},
-            "task.id": "task-9",
-        }
-        updates = _updates(_run(plugin.execute(_make_ctx(state))))
-        assert updates == {"environment_released": False}
-    finally:
-        fake_manager.IsolationManager = original
-
-
-def test_exit_destroy_failure_keeps_mark_not_released() -> None:
-    mod = _load_plugin()
-    _install_fake_isolation()
-
-    class _FailingManager:
-        """同步抛错实现——覆盖 ctx_await 线程池内异常留痕分支（164-170 行）。"""
-
-        instances: list["_FailingManager"] = []
-
-        def __init__(self, config_path: str | None = None) -> None:
-            self.called = 0
-            _FailingManager.instances.append(self)
-
-        def destroy_by_task_id(self, task_id: str, success: bool = True) -> None:
-            self.called += 1
-            raise ConnectionError("daemon unreachable")
-
-    sys.modules["isolation.manager"].IsolationManager = _FailingManager  # type: ignore[attr-defined]
+    caller = _FakeDestroyCaller(exc=ConnectionError("daemon unreachable"))
+    mod.set_destroy_caller(caller)
     plugin = mod.EnvironmentLifecyclePlugin()
     state = {
         "current_phase": "exit",
@@ -361,4 +275,20 @@ def test_exit_destroy_failure_keeps_mark_not_released() -> None:
     }
     updates = _updates(_run(plugin.execute(_make_ctx(state))))
     assert updates == {"environment_released": False}
-    assert _FailingManager.instances[0].called == 1
+    assert len(caller.calls) == 1
+
+
+def test_exit_error_payload_keeps_mark_not_released() -> None:
+    """destroy_env 业务失败以 {"error": ...} 返回 → 留痕不阻断，released=False。"""
+    mod = _load_plugin()
+    caller = _FakeDestroyCaller(result={"error": "隔离服务未初始化"})
+    mod.set_destroy_caller(caller)
+    plugin = mod.EnvironmentLifecyclePlugin()
+    state = {
+        "current_phase": "exit",
+        "environment_basis": {"level": "isolated", "resolved": True},
+        "task.id": "task-2",
+    }
+    updates = _updates(_run(plugin.execute(_make_ctx(state))))
+    assert updates == {"environment_released": False}
+    assert len(caller.calls) == 1

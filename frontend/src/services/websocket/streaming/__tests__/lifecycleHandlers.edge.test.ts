@@ -10,7 +10,6 @@
  * 5. handleCostUpdate：命中率恢复 ≥70% → 解除 alert 状态，可再次提示
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 const { mockStore, mockAddNotification } = vi.hoisted(() => ({
   mockStore: {
     streamingState: {},
@@ -22,29 +21,23 @@ const { mockStore, mockAddNotification } = vi.hoisted(() => ({
   },
   mockAddNotification: vi.fn(),
 }))
-
 vi.mock('@/stores/pipelineMessageStore', () => ({
   usePipelineMessageStore: { getState: () => mockStore },
 }))
-
 vi.mock('@/stores/notificationStore', () => ({
   useNotificationStore: { getState: () => ({ addNotification: mockAddNotification }) },
 }))
-
 vi.mock('@/utils/logger', () => ({
   loggers: {
     sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   },
 }))
-
 vi.mock('../handlers/utils', () => ({
   terminatePipeline: vi.fn(),
 }))
-
 /** contextUsageStore mock 用的分桶存储（handleCostUpdate 测试） */
 let usageMap: Record<string, any> = {}
-
 import { handleReconnected } from '../lifecycleHandlers'
 
 const STREAMING_PIPELINE = 'pipe-edge-001'

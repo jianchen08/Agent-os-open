@@ -155,6 +155,39 @@ fn run_status_from_control_state_mapping() {
 }
 
 #[test]
+fn run_status_failed_vocabulary_maps_exhaustively() {
+    // Failed 词表穷举（单点 FAILED_STOP_REASONS）：词表内每个署名必须映射
+    // Failed——含失败熔断硬终止署名 tool_fail_loop（ADR 2026-09-09）；新增
+    // 词进表即被本测试覆盖。词表外已知署名各归其位，不得被一刀切误标。
+    for reason in RunStatus::FAILED_STOP_REASONS {
+        assert_eq!(
+            RunStatus::from_control_state(&json!({ "router.stop_reason": reason })),
+            RunStatus::Failed,
+            "Failed 词表署名 {reason} 必须映射 Failed"
+        );
+    }
+    // 性质断言（防一刀切）：词表外署名一律非 Failed，且正常收束/取消类
+    // 署名的既有映射不漂移
+    let outside_cases = [
+        ("task_completed", RunStatus::Completed),
+        ("task_evaluate_completed", RunStatus::Completed),
+        ("user_requested", RunStatus::Cancelled),
+        ("task_cancelled", RunStatus::Cancelled),
+        ("task_deleted", RunStatus::Cancelled),
+        ("", RunStatus::Completed),
+    ];
+    for (reason, expected) in outside_cases {
+        let mapped = RunStatus::from_control_state(&json!({ "router.stop_reason": reason }));
+        assert_eq!(mapped, expected, "词表外署名 {reason} 既有映射漂移");
+        assert_ne!(
+            mapped,
+            RunStatus::Failed,
+            "词表外署名 {reason} 被误标 Failed"
+        );
+    }
+}
+
+#[test]
 fn patch_type_snake_case_serde() {
     assert_eq!(
         serde_json::to_string(&PatchType::StateUpdate).unwrap(),

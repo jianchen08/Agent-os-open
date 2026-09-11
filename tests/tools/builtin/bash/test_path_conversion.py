@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """Bash 工具 Windows 路径转 WSL 路径单元测试。
 
 测试覆盖：

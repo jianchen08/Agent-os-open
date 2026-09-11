@@ -1,3 +1,7 @@
+# ⚠️ 门禁挂起中（run_gates.py plugins-coverage 内 --skip，2026-09-01 就地裁定）
+# ——下方数值不代表当前执法线；插桩度量与 coverage.xml 产出照常，
+# 恢复 = run_gates.py 去掉 --skip（详见 scripts/run_gates.py 内注释）。
+#
 # Python 插件整体行覆盖率基线（line%，只升不降，
 # 见 scripts/check_python_coverage_baseline.py；数据源 plugins-coverage gate
 # 产出的 coverage.xml line-rate，未取整口径）。
@@ -16,7 +20,20 @@
 # 留归因；CI job 内的写入随 job 丢弃，以仓库提交为准。
 # 不得定在实测之下保绿——首定 46.50（实测 47.48-1）违背该规则，同日纠正
 # 为 48.00（= floor(47.48)+1）。
-python_line_coverage=87.00
+# 收紧（2026-09-11 覆盖率补测批）：棘轮 87→90——插桩车道全量实测 89.20%
+# （30045/33683，7143 测试绿），floor+1=90（棘轮公式）。增量来源 = 本批三件
+# 补测：key_pool 49%→98%、router_factory 26.5%→98%、wsl_health 38%→100%
+#（提交 e3e949923/b0cad33db）。整体验收闸挂起期内手动收紧，恢复执法后按
+# 同公式复核。下一批目标 = llm/adapter、bash/process_manager、
+# isolation/_workspace_git_ops、monitoring/server。
+python_line_coverage=90.00
+
+# 收紧（2026-09-10 补记归因；87.00 引入提交 82c10b5b1，2026-08-27）：棘轮
+# 83→87——全绿跑实测 86.02（0 失败，357s），floor+1=87（自动棘轮写入）；
+# 增量 = tools/task 99/simple 100/ws_lifecycle 98/level_guard+env_lifecycle
+# 100/hindsight 98/渠道 feishu+common 100 六批 + 三条串扰修复上车道；当日
+# 累计 74.68→86.02（+11.34pp）。本文件当时未留归因段（仅 commit message
+# 持有），2026-09-10 依 git log -S 回溯补记；数值不改。
 
 # 收紧（2026-08-25，批次F 存量绿灯测试接线）：本地实测 69.64%（全车道
 # 2870→3461 测试，+591）。来源：plugins/shared 23 个目录/文件的进程内存量

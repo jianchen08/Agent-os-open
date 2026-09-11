@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::compiler::{compile_pipeline, HookFile};
+use crate::SqliteStore;
 use agentos_core::traits::{
     HostType, ManifestCapabilities, PluginManifest, PluginType, StepCapability, ToolCapability,
 };
@@ -15,7 +16,7 @@ use std::sync::Mutex;
 
 use agentos_core::traits::StorageBackend;
 use agentos_core::types::{
-    Branch, CheckpointConfig, MessageRecord, RunRecord, RunStatus, ToolExecutionResult, TraceEntry,
+    CheckpointConfig, MessageRecord, RunRecord, RunStatus, ToolExecutionResult, TraceEntry,
 };
 
 // ── 测试基础设施 ──────────────────────────────────────────
@@ -69,10 +70,10 @@ impl MockInvoker {
 
 #[async_trait]
 impl PluginInvoker for MockInvoker {
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         plugin_id: &str,
-        ctx: &PluginContext,
+        ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError> {
         // 计数
         *self
@@ -125,7 +126,7 @@ impl PluginInvoker for MockInvoker {
 /// 默认 trait 实现为 no-op，这里显式 override 以便观察按步计数触发时机）。
 struct NullStorage {
     checkpoints: Mutex<Vec<i64>>,
-    traces: Mutex<usize>,
+    trace_plugin_ids: Mutex<Vec<String>>,
     /// true 时 set_run_pipeline 返回 Err（persist_run_start 持久化故障注入）。
     fail_set_run_pipeline: std::sync::atomic::AtomicBool,
     /// 收到的 update_run_status 终态序列（终态映射表测试读取）。
@@ -136,7 +137,7 @@ impl Default for NullStorage {
     fn default() -> Self {
         Self {
             checkpoints: Mutex::new(Vec::new()),
-            traces: Mutex::new(0),
+            trace_plugin_ids: Mutex::new(Vec::new()),
             fail_set_run_pipeline: std::sync::atomic::AtomicBool::new(false),
             run_statuses: Mutex::new(Vec::new()),
         }
@@ -153,9 +154,21 @@ impl NullStorage {
         self.checkpoints.lock().unwrap().len()
     }
 
-    /// 收到的 append_trace 次数（项级 when 跳过 / 无产出 step 不落 trace 测试用）。
-    fn trace_count(&self) -> usize {
-        *self.traces.lock().unwrap()
+    /// step 窗口轨迹的 plugin_id 序列（排除引擎窗口 run_init/body_enter/
+    /// body_route/run_finalize）——「无产出 step 不落 trace」断言用。
+    fn step_trace_plugin_ids(&self) -> Vec<String> {
+        self.trace_plugin_ids
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|id| {
+                !matches!(
+                    id.as_str(),
+                    "run_init" | "body_enter" | "body_route" | "run_finalize"
+                )
+            })
+            .cloned()
+            .collect()
     }
 
     /// 收到的 run 终态（update_run_status 调用序）。
@@ -196,9 +209,9 @@ impl StorageBackend for NullStorage {
     }
     async fn append_trace(
         &self,
-        _entry: TraceEntry,
+        entry: TraceEntry,
     ) -> Result<(), agentos_core::types::StorageError> {
-        *self.traces.lock().unwrap() += 1;
+        self.trace_plugin_ids.lock().unwrap().push(entry.plugin_id);
         Ok(())
     }
     async fn save_checkpoint(
@@ -209,12 +222,6 @@ impl StorageBackend for NullStorage {
         _state: &serde_json::Value,
     ) -> Result<(), agentos_core::types::StorageError> {
         self.checkpoints.lock().unwrap().push(step_no);
-        Ok(())
-    }
-    async fn create_branch(
-        &self,
-        _branch: Branch,
-    ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
     async fn update_run_status(
@@ -328,6 +335,14 @@ impl StorageBackend for NullStorage {
     async fn delete_user(&self, _user_id: &str) -> Result<bool, agentos_core::types::StorageError> {
         Ok(false)
     }
+    async fn update_user_password(
+        &self,
+        _user_id: &str,
+        _password_hash: &str,
+        _must_change_password: bool,
+    ) -> Result<bool, agentos_core::types::StorageError> {
+        Ok(false)
+    }
 }
 
 /// 测试夹具：构造一个 PipelineExecutor + MockInvoker（可拿引用设置结果）。
@@ -414,6 +429,8 @@ fn gated_body(steps: Vec<StepItem>) -> PipelineConfig {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     }
 }
 
@@ -551,8 +568,11 @@ async fn step_item_inputs_reach_plugin_via_config_without_state_or_trace() {
     assert!(final_state.get("inputs").is_none());
     assert!(final_state.get("mode").is_none());
     assert!(final_state.get("limit").is_none());
-    // 插件无产出 + inputs 不进 diff → 0 trace
-    assert_eq!(fixture.store.trace_count(), 0, "inputs 不得产生轨迹");
+    // 插件无产出 + inputs 不进 diff → 无 step 窗口轨迹（引擎窗口另计）
+    assert!(
+        fixture.store.step_trace_plugin_ids().is_empty(),
+        "inputs 不得产生 step 轨迹"
+    );
 }
 
 // ── checkpoint 按「配置 step」计数（组级 when 跳过的 step 不计）─────
@@ -576,6 +596,8 @@ async fn checkpoint_counts_configured_steps_group_skipped_excluded() {
             exit_routes: vec![],
             run_on_error: false,
         }],
+        initial_state: HashMap::new(),
+        max_rounds: None,
         checkpoint: CheckpointConfig {
             enabled: true,
             interval_steps: 2,
@@ -633,6 +655,8 @@ async fn checkpoint_counts_steps_across_loop_rounds_not_rounds() {
             exit_routes: vec![],
             run_on_error: false,
         }],
+        initial_state: HashMap::new(),
+        max_rounds: None,
         checkpoint: CheckpointConfig {
             enabled: true,
             interval_steps: 4,
@@ -677,10 +701,9 @@ async fn when_gate_skipped_item_leaves_no_trace_and_no_call() {
         .await;
     assert_eq!(fixture.invoker.call_count("a"), 0, "when=False 零调用");
     assert!(final_state.get("a_val").is_none());
-    assert_eq!(
-        fixture.store.trace_count(),
-        0,
-        "整 step 被 when 门架空 → 不落 trace"
+    assert!(
+        fixture.store.step_trace_plugin_ids().is_empty(),
+        "整 step 被 when 门架空 → 不落 step 轨迹"
     );
 }
 
@@ -696,10 +719,10 @@ struct CountingInvoker {
 
 #[async_trait]
 impl PluginInvoker for CountingInvoker {
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         _plugin_id: &str,
-        _ctx: &PluginContext,
+        _ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError> {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let mut updates = HashMap::new();
@@ -755,10 +778,10 @@ struct SequenceInvoker {
 
 #[async_trait]
 impl PluginInvoker for SequenceInvoker {
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         _plugin_id: &str,
-        _ctx: &PluginContext,
+        _ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError> {
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
         let updates = self.results.get(n).cloned().unwrap_or_default();
@@ -811,6 +834,8 @@ async fn test_single_step_atomic() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let library = StepLibrary::default();
     let final_state = fixture.run(&config, &library, json!({})).await;
@@ -864,6 +889,8 @@ async fn test_composite_step() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let mut library = StepLibrary::default();
     library
@@ -915,6 +942,8 @@ async fn test_composite_step_double_trigger_semantics() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let _ = fixture
         .run(&config, &StepLibrary::default(), json!({}))
@@ -947,6 +976,8 @@ async fn test_step_library() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let mut library = StepLibrary::default();
     library.steps.insert(
@@ -980,6 +1011,8 @@ async fn test_loop() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = executor
         .run_compiled(
@@ -1055,6 +1088,8 @@ async fn test_routes_wait() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = fixture
         .run(&config, &StepLibrary::default(), json!({}))
@@ -1082,6 +1117,8 @@ async fn test_unknown_reference_fails_compilation() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let err = compile_pipeline(
         &config,
@@ -1182,6 +1219,8 @@ async fn test_skip_remaining() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = fixture
         .run(&config, &StepLibrary::default(), json!({}))
@@ -1234,6 +1273,8 @@ async fn test_plugin_error_continues() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = fixture
         .run(&config, &StepLibrary::default(), json!({}))
@@ -1276,6 +1317,8 @@ async fn test_plugin_error_continues_with_code() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = fixture
         .run(&config, &StepLibrary::default(), json!({}))
@@ -1311,6 +1354,8 @@ async fn test_invoker_error_collected() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = fixture
         .run(&config, &StepLibrary::default(), json!({}))
@@ -1346,6 +1391,8 @@ async fn test_suspended_stops_loop() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = executor
         .run_compiled(
@@ -1393,6 +1440,8 @@ async fn test_dynamic_plugin_name() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = fixture
         .run(
@@ -1422,6 +1471,8 @@ async fn test_non_object_initial_state_becomes_object() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = fixture
         .run(&config, &StepLibrary::default(), serde_json::Value::Null)
@@ -1471,6 +1522,8 @@ async fn test_route_step_jumps_to_target_step() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = fixture
         .run(&config, &StepLibrary::default(), json!({}))
@@ -1518,6 +1571,8 @@ async fn test_step_route_self_jump_guard_errors() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let result = executor
         .run_compiled(
@@ -1572,6 +1627,8 @@ async fn test_step_level_loop() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let state = executor
         .run_compiled(
@@ -1625,8 +1682,9 @@ async fn test_loop_does_not_inject_agent_config_per_iteration() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
-
     // initial_state 只有 agent_id，没有 system_prompt/custom
     let initial = json!({"agent_id": "reload_test"});
 
@@ -1885,6 +1943,8 @@ fn routed_loop_body(steps: Vec<StepItem>) -> PipelineConfig {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     }
 }
 
@@ -2071,6 +2131,8 @@ fn step_binding_guard_nested_override_restores_outer() {
 /// 测试 manifest（单入口纯步骤插件形状：无 tools/services/steps，隐式默认注册）。
 fn test_manifest(id: &str) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: id.to_string(),
         name: format!("Test {id}"),
         description: None,
@@ -2114,6 +2176,7 @@ fn tool_cap(name: &str) -> ToolCapability {
         ui: None,
         render: None,
         smoke: None,
+        timeout_ms: None,
     }
 }
 
@@ -2154,6 +2217,8 @@ async fn named_step_service_reaches_plugin_via_step_method_config() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let compiled = crate::compiler::compile_pipeline_with_hooks(
         &config,
@@ -2206,6 +2271,8 @@ async fn composite_direct_reference_fails_compilation() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let err = crate::compiler::compile_pipeline_with_hooks(
         &config,
@@ -2280,6 +2347,8 @@ async fn step_level_hook_receives_start_and_end_once() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let compiled = compiled_with_hooks(
         &fixture,
@@ -2330,6 +2399,8 @@ async fn body_level_hook_fires_for_every_step_in_body() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let compiled = compiled_with_hooks(
         &fixture,
@@ -2380,6 +2451,8 @@ async fn hook_terminate_decision_ends_loop_body() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let compiled = compiled_with_hooks(
         &fixture,
@@ -2422,6 +2495,8 @@ async fn hook_dispatch_failure_does_not_block_main_flow() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let compiled = compiled_with_hooks(
         &fixture,
@@ -2459,6 +2534,8 @@ async fn no_hooks_yields_zero_dispatch() {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
     let compiled = compiled_with_hooks(&fixture, &config, &[], &[]);
     fixture
@@ -2488,6 +2565,8 @@ fn always_loop_body(plugin: &str) -> PipelineConfig {
             run_on_error: false,
         }],
         checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     }
 }
 
@@ -2714,4 +2793,747 @@ async fn merge_drops_run_status_plugin_write() {
         .merge_and_project(&mut state, &updates(&[("ended", json!(true))]))
         .await;
     assert_eq!(state["ended"], json!(true), "预期层控制键照常合并");
+}
+
+// ── P1-4 声明化 volatile 键：checkpoint 快照对比 ─────────────────────
+
+/// checkpoint 剥离集 = 内核自有键（store 内置）∪ 插件声明键（manifest
+/// `state.volatile_keys` 声明并集，经 StorageBackend::set_declared_volatile_keys
+/// 注入 store），与收窄前内核单表全集行为逐键对账：两类键都不得残留进快照，
+/// 持久键照常落档。
+#[tokio::test]
+async fn run_end_checkpoint_strips_declared_volatile_keys() {
+    let sqlite = Arc::new(SqliteStore::open_memory().unwrap());
+    // 声明键并集注入（生产侧 api 在 stage_execute 从 manifest 声明收集后传入）。
+    sqlite.set_declared_volatile_keys(&[
+        "thinking_strength".to_string(),
+        "tool_schemas".to_string(),
+        "conversation_mode".to_string(),
+        "core_type".to_string(),
+        "core_plugin".to_string(),
+    ]);
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let invoker: Arc<dyn PluginInvoker> = Arc::new(MockInvoker::new());
+    let executor = PipelineExecutor::new(
+        invoker,
+        PathBuf::from("."),
+        TenantContext::new("default", "s"),
+        std::iter::empty::<String>(),
+        store,
+        "r_decl",
+        "b_decl",
+    );
+    let final_state = json!({
+        "pipeline_id": "pipe_decl",
+        "task.status": "running",
+        // 内核自有键（store 内置剥离）
+        "ended": true,
+        "suspended": true,
+        "run_id": "old-run",
+        "should_stop": true,
+        "router.stop_reason": "budget_exhausted",
+        // 插件声明键（executor 注入剥离）
+        "conversation_mode": true,
+        "tool_schemas": [{"name": "x"}],
+        "thinking_strength": "high",
+        "core_type": "tool_execute",
+        "core_plugin": "custom_core_engine",
+    });
+    executor.persist_run_end(&final_state).await;
+    let latest = sqlite
+        .load_latest_checkpoint("pipe_decl", "default")
+        .unwrap()
+        .expect("run 收尾必落 checkpoint");
+    let (_, state) = latest;
+    for key in [
+        "ended",
+        "suspended",
+        "run_id",
+        "should_stop",
+        "router.stop_reason",
+        "conversation_mode",
+        "tool_schemas",
+        "thinking_strength",
+        "core_type",
+        "core_plugin",
+    ] {
+        assert!(state.get(key).is_none(), "易变键 {key} 不得残留进快照");
+    }
+    // 持久键照常落档（快照瘦身不吞管道累计状态）
+    assert_eq!(state["task.status"], "running");
+}
+
+/// 未声明插件键不受剥离影响（声明什么剥什么，缺省零干预）：裸 store
+/// 未注入声明键集，conversation_mode 照常落档。
+#[tokio::test]
+async fn run_end_checkpoint_keeps_keys_without_declaration() {
+    let sqlite = Arc::new(SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let invoker: Arc<dyn PluginInvoker> = Arc::new(MockInvoker::new());
+    let executor = PipelineExecutor::new(
+        invoker,
+        PathBuf::from("."),
+        TenantContext::new("default", "s"),
+        std::iter::empty::<String>(),
+        store,
+        "r_keep",
+        "b_keep",
+    );
+    let final_state = json!({
+        "pipeline_id": "pipe_keep",
+        "task.status": "running",
+        "conversation_mode": true,
+    });
+    executor.persist_run_end(&final_state).await;
+    let (_, state) = sqlite
+        .load_latest_checkpoint("pipe_keep", "default")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        state["conversation_mode"], true,
+        "未声明键不剥离（fail-open 仅对声明面）"
+    );
+    assert_eq!(state["task.status"], "running");
+}
+
+// ── 监控 M2 分类词表：显式映射替代子串猜测（基线锁定）──────────────
+
+/// 基线锁定：`plugin_metrics_class` 对现存插件集的分类结果与原子串启发
+/// （2026-09 基线：含 "llm"→Llm；含 "tool"→Tool；其余→Other）完全一致。
+/// 期望值逐条显式写死（非测试内重算启发式），表内条目被误删即变红。
+#[test]
+fn test_plugin_metrics_class_locked_to_current_plugin_set() {
+    // LLM 调用面（现存全集）
+    for id in ["llm_service", "pipeline_llm_core"] {
+        assert_eq!(
+            plugin_metrics_class(id),
+            PluginMetricsClass::Llm,
+            "{id} 必须分类为 Llm（现存插件集基线）"
+        );
+    }
+    // 工具调用面（现存全集）
+    for id in [
+        "agentos-builtin-tools",
+        "bash_tool",
+        "download_tool",
+        "human_interaction_tool",
+        "media_tools",
+        "memory_tool",
+        "pipeline_tool_cache",
+        "pipeline_tool_cache_writer",
+        "pipeline_tool_core",
+        "pipeline_tool_schema",
+        "pipeline_tool_schema_validator",
+        "project_create_tool",
+        "resource_merge_tool",
+        "resource_search_tool",
+        "simple_tools",
+        "spill_retrieve_tool",
+        "task_evaluate_tool",
+        "task_manage_tool",
+        "task_submit_tool",
+        "trigger_setup_tool",
+        "web_operate_tool",
+    ] {
+        assert_eq!(
+            plugin_metrics_class(id),
+            PluginMetricsClass::Tool,
+            "{id} 必须分类为 Tool（现存插件集基线）"
+        );
+    }
+    // 编排/服务面 = Other（不计 LLM/tool；样例覆盖管道输入输出编排、系统服务、
+    // 诊断面，含与词表前缀相近的条目如 pipeline_tool_schema 的近邻
+    // pipeline_context_window_guard）
+    for id in [
+        "pipeline_context_build",
+        "pipeline_context_window_guard",
+        "pipeline_prompt_build",
+        "pipeline_stop_check",
+        "pipeline_task_reminder",
+        "pipeline_multimodal_preprocessor",
+        "condition",
+        "db_admin",
+        "task_service",
+        "isolation_service",
+        "monitoring",
+        "debug_center",
+        "user_admin",
+    ] {
+        assert_eq!(
+            plugin_metrics_class(id),
+            PluginMetricsClass::Other,
+            "{id} 必须分类为 Other（编排/服务插件不计 LLM/tool 指标）"
+        );
+    }
+    // 性质：未登记 id 一律 Other（分类全函数、缺省语义）
+    for id in ["", "unknown_plugin", "LLM_SERVICE", "my_toolbox_plugin"] {
+        assert_eq!(
+            plugin_metrics_class(id),
+            PluginMetricsClass::Other,
+            "未登记 id {id:?} 必须为 Other（大小写敏感、精确匹配）"
+        );
+    }
+}
+
+/// 词表自身契约：键不重复；不含显式 Other 条目（Other 是缺省，不是登记项）。
+#[test]
+fn test_metrics_class_table_has_no_duplicate_or_other_entries() {
+    let mut keys: Vec<&str> = METRICS_PLUGIN_CLASS.iter().map(|(id, _)| *id).collect();
+    keys.sort_unstable();
+    let count = keys.len();
+    keys.dedup();
+    assert_eq!(
+        keys.len(),
+        count,
+        "METRICS_PLUGIN_CLASS 键不得重复：{keys:?}"
+    );
+    assert!(
+        METRICS_PLUGIN_CLASS
+            .iter()
+            .all(|(_, class)| *class != PluginMetricsClass::Other),
+        "Other 是缺省分类，不得显式登记进表"
+    );
+}
+
+// ── 生命周期事件总线（观察路径）：run 开始/结束进总线 ──────────────
+// （自 tests/pipeline_lifecycle_bus_test.rs 平移：llvm-cov 不为集成测试目标
+// 产出 SF 段，diff coverage 门禁对 scope 内新增测试文件 fail-loud；内联
+// #[cfg(test)] 模块在度量面内，且为本仓 engine 测试主流形态。）
+
+/// 总线测试夹具：executor 注入 HookEventBus（None = 未接线对照组）。
+fn make_bus_executor(bus: Option<Arc<HookEventBus>>, run_id: &str) -> PipelineExecutor {
+    let invoker = Arc::new(MockInvoker::new());
+    let store: Arc<dyn StorageBackend> = Arc::new(NullStorage::default());
+    PipelineExecutor::new(
+        invoker as Arc<dyn PluginInvoker>,
+        PathBuf::from("."),
+        TenantContext::new("tenant_test", "session_test"),
+        ["pipeline_dummy"].iter().map(|s| s.to_string()),
+        store,
+        run_id,
+        "main",
+    )
+    .with_hook_bus(bus)
+}
+
+/// 单循环体单 step 最小管道。
+fn lifecycle_bus_config() -> PipelineConfig {
+    PipelineConfig {
+        name: "lifecycle_bus".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("only", "pipeline_dummy")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: HashMap::new(),
+        max_rounds: None,
+    }
+}
+
+/// 正常完成：恰收 OnPipelineStart → OnPipelineEnd 各一次，目标与标签正确。
+#[tokio::test]
+async fn lifecycle_bus_run_emits_start_and_end() {
+    let bus = Arc::new(HookEventBus::new(16));
+    let mut rx = bus.subscribe();
+    let executor = make_bus_executor(Some(bus.clone()), "run_bus_ok");
+    let compiled = compile_pipeline(
+        &lifecycle_bus_config(),
+        &StepLibrary::default(),
+        &executor.plugin_ids,
+    )
+    .expect("compile should succeed");
+    executor
+        .run_compiled(&compiled, json!({"pipeline_id": "pipe-xyz"}))
+        .await
+        .expect("run should succeed");
+
+    let start = rx.recv().await.expect("start event");
+    assert_eq!(
+        start.hook,
+        agentos_core::traits::LifecycleHook::OnPipelineStart
+    );
+    assert_eq!(
+        start.ctx.get("pipeline_id").and_then(|v| v.as_str()),
+        Some("pipe-xyz"),
+        "start 事件带 pipeline_id 标签"
+    );
+    assert_eq!(
+        start.ctx.get("run_id").and_then(|v| v.as_str()),
+        Some("run_bus_ok"),
+        "start 事件带 run_id 标签"
+    );
+    assert!(
+        matches!(start.target, EventTarget::Pipeline(ref p) if p == "pipe-xyz"),
+        "start 目标 = Pipeline(pipeline_id)"
+    );
+
+    let end = rx.recv().await.expect("end event");
+    assert_eq!(end.hook, agentos_core::traits::LifecycleHook::OnPipelineEnd);
+    assert_eq!(
+        end.ctx.get("pipeline_id").and_then(|v| v.as_str()),
+        Some("pipe-xyz")
+    );
+    assert!(
+        matches!(end.target, EventTarget::Pipeline(ref p) if p == "pipe-xyz"),
+        "end 目标 = Pipeline(pipeline_id)"
+    );
+
+    // 恰好两次（不多发）。
+    let extra = rx.try_recv().err();
+    assert!(
+        matches!(
+            extra,
+            Some(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "run 只应发 start+end 两个事件"
+    );
+}
+
+/// 挂起提前跳出循环体的 run 仍发 start+end（与 persist_run_end 同边界）。
+#[tokio::test]
+async fn lifecycle_bus_suspended_run_still_emits_both() {
+    let bus = Arc::new(HookEventBus::new(16));
+    let mut rx = bus.subscribe();
+    let executor = make_bus_executor(Some(bus.clone()), "run_bus_susp");
+    let compiled = compile_pipeline(
+        &lifecycle_bus_config(),
+        &StepLibrary::default(),
+        &executor.plugin_ids,
+    )
+    .expect("compile should succeed");
+    let final_state = executor
+        .run_compiled(
+            &compiled,
+            json!({"pipeline_id": "pipe-susp", "suspended": true}),
+        )
+        .await
+        .expect("run should succeed");
+    assert_eq!(
+        final_state.get("suspended").and_then(|v| v.as_bool()),
+        Some(true),
+        "挂起状态保留"
+    );
+
+    let start = rx.recv().await.expect("start event");
+    let end = rx.recv().await.expect("end event");
+    assert_eq!(
+        start.hook,
+        agentos_core::traits::LifecycleHook::OnPipelineStart
+    );
+    assert_eq!(end.hook, agentos_core::traits::LifecycleHook::OnPipelineEnd);
+    assert_eq!(
+        end.ctx.get("pipeline_id").and_then(|v| v.as_str()),
+        Some("pipe-susp")
+    );
+}
+
+/// 引擎 Err 的 run 只发 start（与点对点 end 钩子同边界；失败终态由 api 层
+/// run.failed 域事件承载）。
+#[tokio::test]
+async fn lifecycle_bus_engine_err_emits_start_only() {
+    let bus = Arc::new(HookEventBus::new(16));
+    let mut rx = bus.subscribe();
+    let executor = make_bus_executor(Some(bus.clone()), "run_bus_err");
+    let compiled = compile_pipeline(
+        &lifecycle_bus_config(),
+        &StepLibrary::default(),
+        &executor.plugin_ids,
+    )
+    .expect("compile should succeed");
+    // next_phase 指向不存在的循环体 → 循环体转移护栏触发 Err。
+    let result = executor
+        .run_compiled(
+            &compiled,
+            json!({"pipeline_id": "pipe-err", "next_phase": "ghost"}),
+        )
+        .await;
+    assert!(result.is_err(), "路由到不存在的循环体应 Err");
+
+    let start = rx.recv().await.expect("start event");
+    assert_eq!(
+        start.hook,
+        agentos_core::traits::LifecycleHook::OnPipelineStart
+    );
+    let next = rx.try_recv().err();
+    assert!(
+        matches!(
+            next,
+            Some(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "Err 的 run 不发 OnPipelineEnd"
+    );
+}
+
+/// 未注入总线零行为破坏：run 正常完成、不 panic。
+#[tokio::test]
+async fn lifecycle_bus_none_wired_run_ok() {
+    let executor = make_bus_executor(None, "run_bus_none");
+    let compiled = compile_pipeline(
+        &lifecycle_bus_config(),
+        &StepLibrary::default(),
+        &executor.plugin_ids,
+    )
+    .expect("compile should succeed");
+    let final_state = executor
+        .run_compiled(&compiled, json!({"pipeline_id": "pipe-none"}))
+        .await
+        .expect("run should succeed");
+    assert!(final_state.get("pipeline_id").is_some());
+}
+
+/// 事件形态契约锚点：ctx 标签恰含 pipeline_id/run_id（审计与指标订阅者
+/// 按标签关联 run 的解析契约）。
+#[tokio::test]
+async fn lifecycle_bus_event_tags_are_subscriber_contract() {
+    let bus = Arc::new(HookEventBus::new(16));
+    let mut rx = bus.subscribe();
+    let executor = make_bus_executor(Some(bus.clone()), "run_bus_shape");
+    let compiled = compile_pipeline(
+        &lifecycle_bus_config(),
+        &StepLibrary::default(),
+        &executor.plugin_ids,
+    )
+    .expect("compile should succeed");
+    executor
+        .run_compiled(&compiled, json!({"pipeline_id": "pipe-shape"}))
+        .await
+        .expect("run should succeed");
+
+    let ev: LifecycleEvent = rx.recv().await.expect("start event");
+    let tags: Vec<String> = ev.ctx.tags().iter().map(|(k, _)| k.clone()).collect();
+    assert!(tags.contains(&"pipeline_id".to_string()));
+    assert!(tags.contains(&"run_id".to_string()));
+}
+
+// ── track.messages_chars 记账（W2a 上下文估算账本）─────────────────
+
+/// 测试侧独立口径基准：Σ 剔除 seq 的紧凑 JSON 字节（与引擎定义同契约、
+/// 独立实现——防记账实现自证）。
+fn oracle_messages_chars(state: &serde_json::Value) -> i64 {
+    state["messages"]
+        .as_array()
+        .expect("messages 应为数组")
+        .iter()
+        .map(|m| {
+            let mut c = m.clone();
+            if let Some(o) = c.as_object_mut() {
+                o.remove("seq");
+            }
+            serde_json::to_string(&c).unwrap().len() as i64
+        })
+        .sum()
+}
+
+/// messages 更新构造（op 声明形态）。
+fn messages_update(ops: Vec<serde_json::Value>) -> HashMap<String, serde_json::Value> {
+    let mut m = HashMap::new();
+    m.insert("messages".to_string(), json!({ "_ops": ops }));
+    m
+}
+
+/// 三态增量记账：append(+new) → set 替换(new-old) → set 删除(-old)，
+/// 逐步断言精确字节值（字面断言）与全量基准一致性（性质断言）。
+#[tokio::test]
+async fn messages_chars_incremental_append_replace_delete() {
+    let fixture = Fixture::build(&[]);
+    let msg_a = json!({"role": "user", "content": "你好世界"});
+    let msg_b = json!({"role": "assistant", "content": "answer"});
+    let msg_c = json!({"role": "user", "content": "replacement"});
+    let bytes = |m: &serde_json::Value| serde_json::to_string(m).unwrap().len() as i64;
+    let mut state = json!({});
+
+    // 批 1：两个 append（无 seq，引擎分配 0/1）
+    fixture
+        .executor
+        .merge_and_project(
+            &mut state,
+            &messages_update(vec![
+                json!({"op": "set", "msg": msg_a}),
+                json!({"op": "set", "msg": msg_b}),
+            ]),
+        )
+        .await;
+    assert_eq!(
+        state["track.messages_chars"],
+        json!(bytes(&msg_a) + bytes(&msg_b))
+    );
+    assert_eq!(
+        state["track.messages_chars"],
+        json!(oracle_messages_chars(&state))
+    );
+
+    // 批 2：set(seq=0) 替换 A → delta = bytes(C) - bytes(A)
+    fixture
+        .executor
+        .merge_and_project(
+            &mut state,
+            &messages_update(vec![json!({"op": "set", "seq": 0, "msg": msg_c})]),
+        )
+        .await;
+    assert_eq!(
+        state["track.messages_chars"],
+        json!(bytes(&msg_b) + bytes(&msg_c)),
+        "替换后 = 幸存 B + 新 C"
+    );
+    assert_eq!(
+        state["track.messages_chars"],
+        json!(oracle_messages_chars(&state))
+    );
+
+    // 批 3：set(seq=0, null) 删除 C → delta = -bytes(C)
+    fixture
+        .executor
+        .merge_and_project(
+            &mut state,
+            &messages_update(vec![json!({"op": "set", "seq": 0, "msg": null})]),
+        )
+        .await;
+    assert_eq!(state["track.messages_chars"], json!(bytes(&msg_b)));
+    assert_eq!(
+        state["track.messages_chars"],
+        json!(oracle_messages_chars(&state))
+    );
+    assert_eq!(state["messages"].as_array().unwrap().len(), 1);
+}
+
+/// 冷启动兜底：账本缺失且 messages 非空 → 首次 merge 全量重算（含存量消息）；
+/// messages 恒空则保持键缺失。
+#[tokio::test]
+async fn messages_chars_cold_start_recompute() {
+    let fixture = Fixture::build(&[]);
+    let mut state = json!({
+        // 恢复出的历史（自带 seq）——无 track.messages_chars
+        "messages": [
+            {"seq": 0, "role": "user", "content": "历史问题"},
+            {"seq": 1, "role": "assistant", "content": "历史回答"},
+        ],
+    });
+    let msg_new = json!({"role": "user", "content": "新消息"});
+    fixture
+        .executor
+        .merge_and_project(
+            &mut state,
+            &messages_update(vec![json!({"op": "set", "msg": msg_new})]),
+        )
+        .await;
+    assert_eq!(
+        state["track.messages_chars"],
+        json!(oracle_messages_chars(&state)),
+        "冷启动全量重算 = 存量 + 新增"
+    );
+
+    // messages 恒空（无 messages 键 + 空 ops）→ 键保持缺失
+    let mut empty_state = json!({});
+    fixture
+        .executor
+        .merge_and_project(&mut empty_state, &messages_update(vec![]))
+        .await;
+    assert!(
+        empty_state.get("track.messages_chars").is_none(),
+        "空消息无账可记，保持键缺失"
+    );
+}
+
+/// 性质：多批混合 ops（append/替换/删除/insert 顺延/同批同 seq 连写）累计记账
+/// 与全量重算逐步一致（确定性伪随机序列，含中文与变长内容）。
+#[tokio::test]
+async fn messages_chars_multi_batch_accumulation_matches_recompute() {
+    let fixture = Fixture::build(&[]);
+    let mut state = json!({});
+    let mut seed: u64 = 0x9E3779B97F4A7C15;
+    let mut next_rand = move || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize
+    };
+    let mut msg_no = 0usize;
+    let make_msg = |no: usize| json!({"role": "user", "content": format!("内容-{no}-中文-padding-{}", no * 37)});
+
+    for round in 0..12usize {
+        let seqs: Vec<i64> = state["messages"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.get("seq").and_then(|s| s.as_i64()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut ops: Vec<serde_json::Value> = Vec::new();
+        for _ in 0..1 + next_rand() % 3 {
+            let pick = next_rand() % 5;
+            match pick {
+                0 => {
+                    // append
+                    ops.push(json!({"op": "set", "msg": make_msg(msg_no)}));
+                    msg_no += 1;
+                }
+                1 if !seqs.is_empty() => {
+                    // 替换既有 seq（可能替换到本批刚写的消息——同批视角回放）
+                    let seq = seqs[next_rand() % seqs.len()];
+                    ops.push(json!({"op": "set", "seq": seq, "msg": make_msg(msg_no)}));
+                    msg_no += 1;
+                }
+                2 if !seqs.is_empty() => {
+                    // 删除既有 seq
+                    let seq = seqs[next_rand() % seqs.len()];
+                    ops.push(json!({"op": "set", "seq": seq, "msg": null}));
+                }
+                3 => {
+                    // insert（后段 seq 顺延；字节口径剔除 seq 故内容字节不变）
+                    let at = (next_rand() % (seqs.len() + 1)) as i64;
+                    ops.push(json!({"op": "insert", "at": at, "msg": make_msg(msg_no)}));
+                    msg_no += 1;
+                }
+                _ => {
+                    // 同批同 seq 连写两次（顺序回放：后序 old 含前序效果）
+                    if !seqs.is_empty() {
+                        let seq = seqs[next_rand() % seqs.len()];
+                        ops.push(json!({"op": "set", "seq": seq, "msg": make_msg(msg_no)}));
+                        msg_no += 1;
+                        ops.push(json!({"op": "set", "seq": seq, "msg": make_msg(msg_no)}));
+                        msg_no += 1;
+                    }
+                }
+            }
+        }
+        if ops.is_empty() {
+            continue; // 该轮无可用 op（空数组起步的保护分支）
+        }
+        fixture
+            .executor
+            .merge_and_project(&mut state, &messages_update(ops))
+            .await;
+        assert_eq!(
+            state["track.messages_chars"],
+            json!(oracle_messages_chars(&state)),
+            "第 {round} 轮后累计记账 == 全量重算"
+        );
+    }
+    // 性质收尾：最终数组非平凡（混合序列确实发生了增删改）
+    assert!(state["messages"].as_array().unwrap().len() >= 3);
+}
+
+/// 全管道接线：插件经 run_compiled 回写 messages ops 后，最终 state 携带
+/// track.messages_chars（invoke → merge_and_project 全链）。
+#[tokio::test]
+async fn messages_chars_booked_in_full_pipeline_run() {
+    let fixture = Fixture::build(&["emitter"]);
+    fixture.invoker.set_result(
+        "emitter",
+        PluginResult {
+            state_updates: messages_update(vec![
+                json!({"op": "set", "msg": {"role": "assistant", "content": "回复"}}),
+            ]),
+            ..Default::default()
+        },
+    );
+    let final_state = fixture
+        .run(
+            &gated_body(vec![StepItem::Bare("emitter".into())]),
+            &StepLibrary::default(),
+            json!({}),
+        )
+        .await;
+    assert_eq!(
+        final_state["track.messages_chars"],
+        json!(oracle_messages_chars(&final_state))
+    );
+}
+
+// ── W2a 压缩粗门公式（autonomous.yaml pipeline_context_window_guard 项级 when）──
+
+/// 生产公式（与 config/pipelines/autonomous.yaml 保持同文）：占用比 =
+/// （上次真实 input_tokens + 自上次调用以来的字符增量 × 2.0）÷ 模型上下文窗口，
+/// 超过 0.6（guard compress_trigger_ratio 缺省同源）放行精确判定；冷启动兜底 =
+/// 无 token 锚且消息多也放行 guard 做精确判定。
+const CONTEXT_GATE_WHEN: &str = "(track.llm_usage.last_input_tokens + (track.messages_chars - track.messages_chars_at_llm) * 2.0) / track.model_context_window > 0.6 or (track.llm_usage.last_input_tokens == none and len(messages) > 40)";
+
+/// 公式门真假两侧 + 冷启动兜底侧：项级 when 对 state 求值决定 guard 是否执行。
+#[tokio::test]
+async fn context_gate_formula_when_controls_guard_item() {
+    let gate = || StepItem::Gated {
+        name: "guard".into(),
+        when: Some(CONTEXT_GATE_WHEN.into()),
+        inputs: HashMap::new(),
+    };
+    let config = gated_body(vec![gate()]);
+
+    // 低于阈值：(60000 + 1000*2)/128000 = 0.484 ≤ 0.6 → guard 零调用
+    // （state 形态对齐生产：track.llm_usage 为平键持 dict——前缀平键解析命中）
+    let below = Fixture::build(&["guard"]);
+    below
+        .run(
+            &config,
+            &StepLibrary::default(),
+            json!({
+                "track.llm_usage": {"last_input_tokens": 60000},
+                "track.messages_chars": 9000,
+                "track.messages_chars_at_llm": 8000,
+                "track.model_context_window": 128000,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+    assert_eq!(
+        below.invoker.call_count("guard"),
+        0,
+        "占用比低于阈值跳过 guard"
+    );
+
+    // 超过阈值：(78000 + 51000*2)/128000 = 1.41 > 0.6 → guard 放行
+    let above = Fixture::build(&["guard"]);
+    above
+        .run(
+            &config,
+            &StepLibrary::default(),
+            json!({
+                "track.llm_usage": {"last_input_tokens": 78000},
+                "track.messages_chars": 59000,
+                "track.messages_chars_at_llm": 8000,
+                "track.model_context_window": 128000,
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        )
+        .await;
+    assert_eq!(
+        above.invoker.call_count("guard"),
+        1,
+        "占用比超阈值放行 guard"
+    );
+
+    // 冷启动兜底：无 token 锚（公式支 fail-soft 判假）且消息 41 条 → 放行精确判定
+    let cold = Fixture::build(&["guard"]);
+    let msgs: Vec<serde_json::Value> = (0..41)
+        .map(|i| json!({"seq": i, "role": "user", "content": format!("m{i}")}))
+        .collect();
+    cold.run(
+        &config,
+        &StepLibrary::default(),
+        json!({"messages": msgs, "track.messages_chars": 4100}),
+    )
+    .await;
+    assert_eq!(
+        cold.invoker.call_count("guard"),
+        1,
+        "无锚且消息多时兜底放行"
+    );
+
+    // 区分度反向：无锚但消息不多（≤40）→ 两个析取支均假 → 跳过
+    let cold_small = Fixture::build(&["guard"]);
+    cold_small
+        .run(
+            &config,
+            &StepLibrary::default(),
+            json!({"messages": [{"role": "user", "content": "hi"}]}),
+        )
+        .await;
+    assert_eq!(
+        cold_small.invoker.call_count("guard"),
+        0,
+        "无锚且消息少不兜底"
+    );
 }

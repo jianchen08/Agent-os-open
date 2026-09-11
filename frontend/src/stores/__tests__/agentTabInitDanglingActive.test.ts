@@ -9,6 +9,10 @@
  * 消息桶错显）。无可激活管道（活跃 Tab 无 pipelineRunId）时清空残值而非保留。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as queryClientMod from '@/services/query/queryClient'
+import type * as queryKeysMod from '@/services/query/queryKeys'
+import type * as agentTabStoreMod from '@/stores/agentTabStore'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Session } from '@/types/models'
 import type { AgentTab } from '@/types/task'
 
@@ -105,7 +109,7 @@ describe('AgentTabStore initSessionTabs 悬空 activeTabId 恢复', () => {
     messagesByPipeline: Record<string, unknown[]>
     activePipelineId: string | null
   }
-  let useAgentTabStore: typeof import('@/stores/agentTabStore').useAgentTabStore
+  let useAgentTabStore: agentTabStoreMod.useAgentTabStore
   let pipelineMock: PipelineMockState
   let seedSessions: (sessions: Session[]) => void
 

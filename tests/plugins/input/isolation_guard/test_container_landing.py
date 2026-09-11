@@ -16,7 +16,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from isolation_types import IsolationLevel
+from agentos_plugin_sdk.isolation_types import IsolationLevel
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 
@@ -29,13 +29,26 @@ pytestmark = pytest.mark.unit
 
 
 def _make_guard(docker_available: bool = True) -> Any:
-    """构造 IsolationGuard，decider 对任意工具返回 CONTAINER 策略。"""
+    """构造 IsolationGuard，decider 按真实 policy 语义返回隔离级别。
+
+    bash_execute → CONTAINER（策略真值）；browser_* → CONTAINER（Bridge 模式
+    沙箱内发起）；其余工具（file_read/file_write 等）→ HOST（容器内没有工具
+    代码，isolation_policy.yaml 真值即 non_isolated）。
+    """
     from plugin import IsolationGuard
 
     guard = IsolationGuard(config={"docker_available": docker_available})
-    mock_policy = MagicMock()
-    mock_policy.isolation = IsolationLevel.CONTAINER
-    guard._decider.resolve = MagicMock(return_value=mock_policy)
+
+    def _resolve(tool_name: str, category: Any = None) -> Any:
+        mock = MagicMock()
+        if tool_name in ("bash_execute", "browser_navigate", "browser_snapshot", "browser_click",
+                         "browser_type", "browser_take_screenshot", "browser_console_messages"):
+            mock.isolation = IsolationLevel.CONTAINER
+        else:
+            mock.isolation = IsolationLevel.HOST
+        return mock
+
+    guard._decider.resolve = MagicMock(side_effect=_resolve)
     guard._get_task_metadata = MagicMock(return_value={})
     return guard
 

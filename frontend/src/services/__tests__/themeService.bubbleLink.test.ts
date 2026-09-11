@@ -8,9 +8,8 @@
  */
 
 import { describe, expect, it } from 'vitest'
-
-import { compileThemeVariables } from '../themeService'
 import { presetThemes } from '@/config/themes'
+import { compileThemeVariables } from '../themeService'
 
 const REL_LUM_CACHE = new Map<string, number>()
 

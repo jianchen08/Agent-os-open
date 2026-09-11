@@ -7,8 +7,8 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { getEditorForFile } from '@/config/fileEditors'
-import { safeLoadLayout, DEFAULT_LAYOUT_CONFIG } from '@/services/layout/resolver'
 import { registerAuthExpiredCallback, triggerAuthExpired } from '@/services/authCallbacks'
+import { safeLoadLayout, DEFAULT_LAYOUT_CONFIG } from '@/services/layout/resolver'
 
 describe('getEditorForFile - 扩展名到编辑器映射', () => {
   it('常见扩展名映射到文本编辑器/图片查看器/HTML 预览', () => {

@@ -1,12 +1,12 @@
 /**
- * 用户管理 API 服务
+ * 用户域 API 服务
  *
  * 暴露接口：
- * - getUsers(skip, limit): 获取用户列表
- * - getUserStats(): 获取用户统计
- * - createUser(data): 创建用户（含 email 可选字段）
- * - updateUserActiveStatus(userId, isActive): 更新用户激活状态
- * - deleteUser(userId): 删除用户
+ * - getUsers(skip, limit): 获取用户列表（调试中心用户子页消费）
+ *
+ * 用户管理页（统计/启停/删除）已 widget 化为 user_admin 插件声明页
+ * （/admin widget_stage 组台，行操作直连 /ext/user_admin 端点），
+ * 前端不再持有该域的交互函数。
  */
 
 import { API_ENDPOINTS } from '@/constants/api'
@@ -23,19 +23,6 @@ export interface User {
   last_login_at?: string
 }
 
-export interface UserStats {
-  total_users: number
-  active_users: number
-  admin_count: number
-}
-
-export interface CreateUserRequest {
-  username: string
-  password: string
-  email?: string
-  role?: 'admin' | 'user'
-}
-
 export async function getUsers(skip: number = 0, limit: number = 100): Promise<User[]> {
   try {
     const response = await apiClient.get<User[]>(API_ENDPOINTS.USERS.LIST, {
@@ -47,71 +34,6 @@ export async function getUsers(skip: number = 0, limit: number = 100): Promise<U
       type: ErrorType.VALIDATION,
       severity: ErrorSeverity.ERROR,
       code: 'GET_USERS_FAILED',
-        })
-    throw error
-  }
-}
-
-export async function getUserStats(): Promise<UserStats> {
-  try {
-    const response = await apiClient.get<UserStats>(API_ENDPOINTS.USERS.STATS)
-    return response.data
-  } catch (error) {
-    reportError('获取用户统计失败', {
-      type: ErrorType.VALIDATION,
-      severity: ErrorSeverity.ERROR,
-      code: 'GET_STATS_FAILED',
-        })
-    throw error
-  }
-}
-
-export async function createUser(data: CreateUserRequest): Promise<User> {
-  try {
-    const response = await apiClient.post<User>(API_ENDPOINTS.USERS.CREATE, null, {
-      params: {
-        username: data.username,
-        password: data.password,
-        email: data.email || '',
-        role: data.role || 'user',
-      },
-    })
-    return response.data
-  } catch (error) {
-    reportError('创建用户失败', {
-      type: ErrorType.VALIDATION,
-      severity: ErrorSeverity.ERROR,
-      code: 'CREATE_USER_FAILED',
-        })
-    throw error
-  }
-}
-
-export async function updateUserActiveStatus(userId: string, isActive: boolean): Promise<User> {
-  try {
-    const response = await apiClient.put<User>(API_ENDPOINTS.USERS.UPDATE_ACTIVE(userId), null, {
-      params: { is_active: isActive },
-    })
-    return response.data
-  } catch (error) {
-    reportError('更新用户状态失败', {
-      type: ErrorType.VALIDATION,
-      severity: ErrorSeverity.ERROR,
-      code: 'UPDATE_STATUS_FAILED',
-        })
-    throw error
-  }
-}
-
-export async function deleteUser(userId: string): Promise<{ message: string }> {
-  try {
-    const response = await apiClient.delete<{ message: string }>(API_ENDPOINTS.USERS.DELETE(userId))
-    return response.data
-  } catch (error) {
-    reportError('删除用户失败', {
-      type: ErrorType.VALIDATION,
-      severity: ErrorSeverity.ERROR,
-      code: 'DELETE_USER_FAILED',
         })
     throw error
   }

@@ -1,3 +1,4 @@
+schema_version: 1
 # DSH 插件适配器配置：DSH 插件装载管理
 #
 # 适配器自动装载 dsh_plugins/ 下含 package.json 的 DSH 插件包目录。

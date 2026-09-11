@@ -43,7 +43,13 @@ def _run(cmd: list[str], cwd: Path, timeout: int = 300) -> dict[str, Any]:
     """跑 uv 子进程；异常/非零退出 → 带 error 返回（fail-closed，不抛链上崩溃）。"""
     try:
         proc = subprocess.run(
-            cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout
+            cmd,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
         )
     except FileNotFoundError:
         return {

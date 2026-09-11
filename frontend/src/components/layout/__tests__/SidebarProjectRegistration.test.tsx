@@ -16,24 +16,26 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Sidebar } from '@/components/layout/Sidebar'
-import { createProject } from '@/services/api/tasks'
 import { getThreadSchema } from '@/services/api/session'
+import { createProject } from '@/services/api/tasks'
 import { reportError } from '@/services/errorReporting'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { createTestQueryClient, renderWithProviders } from '@/test/renderWithProviders'
 import type { ThreadField } from '@/services/api/session'
+import type * as sessionMod from '@/services/api/session'
+import type * as errorReportingMod from '@/services/errorReporting'
 
 vi.mock('@/services/api/tasks', () => ({
   createProject: vi.fn(),
 }))
 
 vi.mock('@/services/errorReporting', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/services/errorReporting')>()
+  const actual = await importOriginal<errorReportingMod>()
   return { ...actual, reportError: vi.fn() }
 })
 
 vi.mock('@/services/api/session', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/services/api/session')>()
+  const actual = await importOriginal<sessionMod>()
   return {
     ...actual,
     getSessions: vi.fn().mockResolvedValue([]),

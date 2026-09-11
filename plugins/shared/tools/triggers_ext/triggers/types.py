@@ -11,7 +11,7 @@
 
 import datetime
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from typing import Any
 
@@ -142,8 +142,10 @@ class TriggerConfig:
         event_name: 事件名称（EVENT 类型使用）。
         event_filter: 事件数据过滤条件（EVENT 类型使用）。
         condition_expression: Python 布尔表达式（CONDITION 类型使用）。
-        action: 触发后执行的动作标识。
-        action_params: 动作参数。
+        action: 触发动作："notify"（含缺省 ""）= 注入 message 唤醒管道；
+            "command" = 参数列表执行宿主命令（写入面另有审批闸）。
+        action_params: 动作参数。command 动作：{"cmd": [argv...], "timeout_ms": int,
+            "cwd"?: str}。
         max_fires: 最大触发次数，0 表示无限。
         max_time_seconds: 最长运行时间（秒），0 表示无限。
         fire_count: 已触发次数。
@@ -174,7 +176,10 @@ class TriggerConfig:
     condition_expression: str = ""
 
     # 通用参数
+    # action：触发动作模板。"notify"（含缺省 ""）= 注入 message 唤醒管道；
+    # "command" = 参数列表执行宿主命令（shell=False，写入面另有审批闸）。
     action: str = ""
+    # command 动作参数：{"cmd": list[str], "timeout_ms": int, "cwd"?: str}
     action_params: dict[str, Any] = field(default_factory=dict)
     max_fires: int = 1
     max_time_seconds: float = 0.0
@@ -185,3 +190,31 @@ class TriggerConfig:
     message: str = ""
     pipeline_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_state_dict(self) -> dict[str, Any]:
+        """TriggerConfig → JSON 安全 dict（state 持久化与 REST 序列化共用形态）。
+
+        Enum 转 value、datetime 转 ISO 串；容器字段 None 兜底为 {}。
+        """
+        d = asdict(self)
+        d["trigger_type"] = self.trigger_type.value
+        d["status"] = self.status.value
+        if self.scheduled_at is not None:
+            d["scheduled_at"] = self.scheduled_at.isoformat()
+        for key in ("event_filter", "action_params", "metadata"):
+            if d.get(key) is None:
+                d[key] = {}
+        return d
+
+    @classmethod
+    def from_state_dict(cls, data: dict[str, Any]) -> "TriggerConfig":
+        """to_state_dict 逆变换（未知键忽略——向前兼容新版写入的扩展字段）。"""
+        known = {f.name for f in fields(cls)}
+        payload = {k: v for k, v in data.items() if k in known}
+        if payload.get("trigger_type") is not None:
+            payload["trigger_type"] = TriggerType(payload["trigger_type"])
+        if payload.get("status") is not None:
+            payload["status"] = TriggerStatus(payload["status"])
+        if isinstance(payload.get("scheduled_at"), str):
+            payload["scheduled_at"] = datetime.datetime.fromisoformat(payload["scheduled_at"])
+        return cls(**payload)

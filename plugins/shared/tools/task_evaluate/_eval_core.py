@@ -1,16 +1,13 @@
-"""评估核心类型（0.2 自包含版）。
+"""评估核心类型（自包含版）。
 
-0.1 的 ``evaluation.types`` / ``evaluation.executor``（归档于
-reference/0.1_src/evaluation/，src/ 已删）在 0.2 未迁移为可平铺导入模块——
-执行面由本目录 ``_executor.py`` 的 ``PipelineEvaluationExecutor`` 真实承载
+执行面由本目录 ``_executor.py`` 的 ``PipelineEvaluationExecutor`` 承载
 （tool 型本地执行 + agent 型派评估子管道继承任务工作区）；
-evaluation_service 插件保留指标注册表/HTTP 读面（执行面已收编，不再双头）。
-本模块就地重建 task_evaluate 工具所需的最小类型面（仿 media/_media_core.py
-的「0.2 自包含 + 类型面 + 注入 duck-typing」模式）：
+evaluation_service 插件保留指标注册表/HTTP 读面（执行面收编于此，不双头）。
+本模块提供 task_evaluate 工具所需的最小类型面（仿 media/_media_core.py 的
+「自包含 + 类型面 + 注入 duck-typing」模式）：
 
-- ``MetricResult`` / ``EvaluationResult``：评估结果数据类（字段与 0.1 对齐）
-- ``sanitize_eval_paths``：递归脱敏绝对路径（语义与 0.1 对齐，防止服务器
-  内部路径信息泄漏）
+- ``MetricResult`` / ``EvaluationResult``：评估结果数据类
+- ``sanitize_eval_paths``：递归脱敏绝对路径（防止服务器内部路径信息泄漏）
 
 本模块自包含（仅标准库），由 task_evaluate 插件目录以平铺模块方式导入。
 """
@@ -62,12 +59,13 @@ def sanitize_eval_paths(data: Any) -> Any:  # noqa: PLR0912
                 rel = os.path.relpath(abs_path).replace("\\", "/")
                 result = result.replace(abs_path, rel)
             except ValueError:
-                pass
+                # 跨盘（abs 盘符 != cwd 盘符）无法相对化：打掩码而非静默放行宿主绝对路径
+                result = result.replace(abs_path, "<abs-path-masked>")
         if win_drive_hits:
             # Windows 盘符路径已相对化（E:\x → E:/x 形态），其中 /home|/tmp 等
-            # 段不是 POSIX 绝对路径（前缀 E: 在前），不得再被 posix 分支二次
-            # 相对化——两轮替换互相打架曾产出 E:../../../../../tmp/x 混合体。
-            # 二次脱敏只服务纯 posix 输入：win 分支命中后直接返回。
+            # 段不是 POSIX 绝对路径（前缀 E: 在前），若再进 posix 分支会被二次
+            # 相对化，产出 E:../../… 混合体。二次脱敏只服务纯 posix 输入：
+            # win 分支命中后直接返回。
             return result
         posix_abs_pattern = re.compile(r"/(?:home|root|opt|var|tmp|usr)/[^\s\"']*")
         if posix_abs_pattern.search(result):
@@ -77,14 +75,15 @@ def sanitize_eval_paths(data: Any) -> Any:  # noqa: PLR0912
                     rel = os.path.relpath(abs_path).replace("\\", "/")
                     result = result.replace(abs_path, rel)
                 except ValueError:
-                    pass
+                    # 相对化失败（如 symlink 根越界）→ 打掩码而非静默放行
+                    result = result.replace(abs_path, "<abs-path-masked>")
         return result
     return data
 
 
 @dataclass
 class MetricResult:
-    """单个指标的评估结果（字段与 0.1 evaluation.types.MetricResult 对齐）。
+    """单个指标的评估结果。
 
     Attributes:
         metric_id: 对应的指标 ID
@@ -111,7 +110,7 @@ class MetricResult:
 
 @dataclass
 class EvaluationResult:
-    """一次评估的完整结果（字段与 0.1 evaluation.types.EvaluationResult 对齐）。
+    """一次评估的完整结果。
 
     Attributes:
         task_id: 关联的任务 ID
@@ -126,7 +125,7 @@ class EvaluationResult:
     summary: str = ""
 
     def compute_overall(self) -> None:
-        """根据各指标结果计算综合判定（与 0.1 语义对齐）。"""
+        """根据各指标结果计算综合判定。"""
         if not self.results:
             self.overall_passed = False
             self.summary = "无评估指标"

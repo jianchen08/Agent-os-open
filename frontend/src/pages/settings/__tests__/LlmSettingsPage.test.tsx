@@ -18,9 +18,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { toast } from '@/components/ui/sonner'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { LlmSettingsPage } from '../LlmSettingsPage'
+import { DEFAULT_MAX_TOKENS } from '../modelParams'
 
 // ── Mock API 层 ──
 const mockGetLLMConfig = vi.fn()
+const mockGetLLMPresets = vi.fn()
 const mockGetDefaults = vi.fn()
 const mockGetProviderTypes = vi.fn()
 const mockGetRemoteModels = vi.fn()
@@ -30,6 +32,7 @@ const mockUpdateModel = vi.fn()
 
 vi.mock('@/services/api/config', () => ({
   getLLMConfig: (...args: unknown[]) => mockGetLLMConfig(...args),
+  getLLMPresets: (...args: unknown[]) => mockGetLLMPresets(...args),
   getDefaults: (...args: unknown[]) => mockGetDefaults(...args),
   getProviderTypes: (...args: unknown[]) => mockGetProviderTypes(...args),
   getRemoteModels: (...args: unknown[]) => mockGetRemoteModels(...args),
@@ -88,8 +91,11 @@ vi.mock('@/components/ui/select', async () => {
   }
 })
 
-vi.mock('@/components/ui/Modal', () => ({
-  Modal: ({ open, children }: any) => (open ? <div role="dialog">{children}</div> : null),
+vi.mock('@/components/ui/dialog', () => ({
+  Dialog: ({ open, children }: any) => (open ? <div role="dialog">{children}</div> : null),
+  DialogContent: ({ children }: any) => <div>{children}</div>,
+  DialogHeader: ({ children }: any) => <div>{children}</div>,
+  DialogTitle: ({ children }: any) => <div>{children}</div>,
 }))
 
 /** 样例 LLM 配置：预置提供者（已配/未配）+ 自定义 + 一个模型 */
@@ -130,8 +136,23 @@ const sampleLLMConfig = {
 
 const sampleDefaults = { chat: 'deepseek-v4-flash', embedding: '', tiers: {} }
 
+// 预置声明样例（llm_service /ext 端点下发；分组与显示名全部来自声明）：
+// 声明外的 provider（myproxy）落「自定义」组
+const samplePresets = {
+  provider_groups: [
+    { label: '国内', providers: [['qwen', '通义千问']] },
+    { label: '国际', providers: [['openai', 'OpenAI']] },
+  ],
+  common_provider_types: ['openai'],
+  thinking_strength: {
+    levels: ['high', 'medium', 'low'],
+    allowed_keys: ['thinking', 'reasoning_effort'],
+  },
+}
+
 async function renderLoaded() {
   mockGetLLMConfig.mockResolvedValue(sampleLLMConfig)
+  mockGetLLMPresets.mockResolvedValue(samplePresets)
   mockGetDefaults.mockResolvedValue(sampleDefaults)
   mockGetProviderTypes.mockResolvedValue({ types: ['openai', 'anthropic', 'zai'] })
   renderWithProviders(<LlmSettingsPage />)
@@ -231,15 +252,70 @@ describe('LlmSettingsPage', () => {
 
     await waitFor(() => {
       expect(mockAddModel).toHaveBeenCalledTimes(2)
+      // 远端列表模型带 litellm 事实上限时按事实写入
       expect(mockAddModel).toHaveBeenCalledWith('gpt-5.1-mini', {
         provider: 'openai',
         model_name: 'gpt-5.1-mini',
         display_name: 'gpt-5.1-mini',
+        default_params: {
+          temperature: 0.7,
+          max_tokens: DEFAULT_MAX_TOKENS,
+          top_p: 1,
+        },
       })
+      // 自定义模型不在远端列表里（无事实）→ 同样走兜底而非 4096
       expect(mockAddModel).toHaveBeenCalledWith('gpt-6-preview', {
         provider: 'openai',
         model_name: 'gpt-6-preview',
         display_name: 'gpt-6-preview',
+        default_params: {
+          temperature: 0.7,
+          max_tokens: DEFAULT_MAX_TOKENS,
+          top_p: 1,
+        },
+      })
+    })
+  })
+
+  it('拉取添加：远端下发上限事实 → context_window 与 max_tokens 按事实写入', async () => {
+    await renderLoaded()
+    mockGetRemoteModels.mockResolvedValue({
+      provider: 'openai',
+      models: [
+        {
+          id: 'glm-5.2',
+          owned_by: 'z-ai',
+          context_window: 1000000,
+          max_output_tokens: 128000,
+        },
+      ],
+    })
+    mockAddModel.mockResolvedValue({
+      models: { ...sampleLLMConfig.models },
+      added_ids: ['glm-5.2'],
+    })
+
+    const masked = screen.getByText('Key: sk-1********abcd')
+    const card = masked.closest('div[class*="space-y-2"]') as HTMLElement
+    fireEvent.click(within(card).getByRole('button', { name: /拉取模型/ }))
+    await waitFor(() => {
+      expect(screen.getByText('glm-5.2')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('glm-5.2'))
+    fireEvent.click(screen.getByRole('button', { name: /添加所选/ }))
+
+    await waitFor(() => {
+      expect(mockAddModel).toHaveBeenCalledWith('glm-5.2', {
+        provider: 'openai',
+        model_name: 'glm-5.2',
+        display_name: 'glm-5.2',
+        context_window: 1000000,
+        default_params: {
+          temperature: 0.7,
+          max_tokens: 128000,
+          top_p: 1,
+        },
       })
     })
   })
@@ -339,7 +415,7 @@ describe('LlmSettingsPage', () => {
         reasoning_model: false,
         default_params: {
           temperature: 0.7,
-          max_tokens: 4096,
+          max_tokens: DEFAULT_MAX_TOKENS,
           top_p: 1,
           thinking: { type: 'enabled' },
         },

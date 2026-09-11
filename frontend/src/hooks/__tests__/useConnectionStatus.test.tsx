@@ -17,13 +17,11 @@
  */
 import { renderHook } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 const wsState = {
   status: 'disconnected' as string,
   hasAttemptedConnect: false,
   handlers: new Map<string, Set<(d: unknown) => void>>(),
 }
-
 vi.mock('@/services/websocket/GlobalWebSocket', () => ({
   globalWS: {
     get status() {
@@ -41,9 +39,8 @@ vi.mock('@/services/websocket/GlobalWebSocket', () => ({
     }),
   },
 }))
-
-import { useConnectionStatus } from '../useConnectionStatus'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useConnectionStatus } from '../useConnectionStatus'
 
 describe('useConnectionStatus 首连状态映射', () => {
   beforeEach(() => {
@@ -84,7 +81,7 @@ describe('useConnectionStatus 首连状态映射', () => {
     expect(useLayoutModeStore.getState().connectionStatus.state).toBe('connected')
   })
 
-  it('曾经连过之后的断开：状态为 disconnected（真断开仍要出横幅）', () => {
+  it('有过连接后的断开：状态为 disconnected（真断开仍要出横幅）', () => {
     wsState.status = 'disconnected'
     wsState.hasAttemptedConnect = true
     renderHook(() => useConnectionStatus())

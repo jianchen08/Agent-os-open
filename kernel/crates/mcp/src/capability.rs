@@ -13,7 +13,7 @@
 //! | event-bus | emit | 发事件/通知前端 |
 //! | metrics | record | 插件上报指标（record_metric，监控设计 §三 通道2） |
 //! | service-registry | <storage 域>.* | 插件访问内核共享基础设施（M2：execution-records/summaries/memory 存储，基础设施下沉内核） |
-//! | frontend | emit | 插件 → 内核 → 前端一次性事件推送（ADR §3.5，task_observability：cost_update/tool_progress/termination_status） |
+//! | frontend | emit | 插件 → 内核 → 前端一次性事件推送（ADR §3.5，task_observability：cost_update/tool_progress） |
 //!
 //! [来源: ROADMAP.md 审批闭环/复盘调管道/event-bus 三项业务的前置地基]
 //! [来源: docs/working/重要设计/插件监控与指标机制设计.md §三 通道2]
@@ -99,9 +99,9 @@ pub trait CapabilityRouter: Send + Sync {
 /// 需要修改 `STANDARD_CAPABILITIES` 常量。
 ///
 /// Args:
-/// - `method`: 待解析的 JSON-RPC method（如 `"human-interaction.create_choice"`）；
-/// - `known_namespaces`: 当前已注册的 namespace 列表（如 `["pipeline-executor",
-///   "human-interaction"]`），通常来自 `CapabilityHandlerRegistry::namespaces()`。
+/// - `method`: 待解析的 JSON-RPC method（如 `"<namespace>.<method>"`）；
+/// - `known_namespaces`: 当前已注册的 namespace 列表（如
+///   `["pipeline-executor", ...]`），通常来自 `CapabilityHandlerRegistry::namespaces()`。
 ///
 /// Returns:
 /// - `Some((namespace, method))`: 解析成功，namespace 在白名单且 method 含 `.`；

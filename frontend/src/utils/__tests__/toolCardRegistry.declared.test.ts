@@ -10,10 +10,10 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { clearChatCardDeclarations, loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
-import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
 import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
+import type { ChatCardDeclaration } from '@/utils/chatCardInterpreter'
 
 afterEach(() => clearChatCardDeclarations())
 

@@ -35,7 +35,10 @@ use crate::pipeline_loader::{load_pipeline_config, load_step_library, validate_n
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
-use crate::auth::{login_handler, logout_handler, me_handler, refresh_handler, register_handler};
+use crate::auth::{
+    change_password_handler, login_handler, logout_handler, me_handler, refresh_handler,
+    register_handler,
+};
 use crate::routes::{
     actions_execute_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag,
     health_handler, metrics_prometheus_handler, pending_inputs_clear_handler,
@@ -43,7 +46,8 @@ use crate::routes::{
     pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
     plugins_contract_status_handler, plugins_set_enabled_handler, plugins_status_handler,
     put_pipeline_config_handler, put_plugin_config_handler, schema_handler, serve_upload_handler,
-    system_restart_handler, tools_handler, validate_all_plugins_handler, AppState,
+    system_memstats_handler, system_restart_handler, tools_handler, validate_all_plugins_handler,
+    AppState,
 };
 use crate::session_routes::{
     create_session_handler, delete_session_handler, list_session_messages_handler,
@@ -157,6 +161,9 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/system/restart",
             axum::routing::post(system_restart_handler),
         )
+        // M1 测量面：mimalloc 分配器统计快照（内核自有只读诊断端点，
+        // 鉴权走 write_surface_auth 白名单读面）
+        .route("/api/v1/system/memstats", get(system_memstats_handler))
         .route(
             "/api/v1/plugins/{id}/enabled",
             axum::routing::put(plugins_set_enabled_handler),
@@ -169,6 +176,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/metrics", get(metrics_prometheus_handler))
         // AC-06-4: WebSocket 端点（前端写死连 /ws/chat，0.1 路径格式）。
         .route("/ws/chat", get(ws_handler))
+        // WS 一次性票据签发（auth user）：前端先 POST 换 60s 单次消费 ticket，
+        // 再以 ?ticket= 握手——token 不再进 URL query（?token= 兼容保留）。
+        .route(
+            "/api/v1/ws-ticket",
+            post(crate::ws_ticket::issue_ticket_handler),
+        )
         // 消息发送端点（REST fallback for WS）
         .route("/api/v1/chat", post(chat_handler))
         // 人类交互响应端点——前端用户操作经此提交，内核转发到交互插件的 interaction.respond
@@ -181,7 +194,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/auth/me", get(me_handler))
         .route("/api/v1/auth/refresh", post(refresh_handler))
         .route("/api/v1/auth/logout", post(logout_handler))
-        .route("/api/v1/auth/register", post(register_handler));
+        .route("/api/v1/auth/register", post(register_handler))
+        .route(
+            "/api/v1/auth/change-password",
+            post(change_password_handler),
+        );
     // 统一通用数据接口（task_01）已迁移为 boot-plugin（第一刀）：
     // /api/v1/db/* 的 axum nest 已摘除——SQL 能力层在 agentos-db-admin crate 的
     // capability handler（agentos-kernel.rs 注册 db-admin namespace），HTTP 面在
@@ -201,19 +218,26 @@ pub fn build_router(state: AppState) -> Router {
         .layer(from_fn(cors_middleware))
 }
 
-/// F-API-1：配置写入面 + 会话/插件生命周期鉴权中间件。
+/// F-API-1：配置写入面 + 会话/插件生命周期/管道域读面鉴权中间件。
 ///
 /// 按路径白名单 + method 区分：写面（POST/PUT/PATCH/DELETE）→ require_surface_role
 /// （admin）；读面（GET）→ require_surface_role（admin/viewer）。白名单覆盖：
 /// - `/api/v1/sessions*`（会话 CRUD）
 /// - `/api/v1/plugins*`（status/enabled/config；注意 /api/v1/plugins 裸路径也需鉴权）
+/// - `/api/v1/system/restart`、`/api/v1/system/memstats`（读面：分配器统计快照）
 /// - `/api/v1/actions/execute`、`/api/v1/interaction/response`
-/// - `PUT /api/v1/config/pipelines/{name}`
-/// - `POST /api/v1/chat`（0.2 收紧：原来放行匿名——消息触发管道执行/落库，
-///   属写面语义，未鉴权等于任意人可驱动执行与消耗算力）
+/// - `/api/v1/chat`（写面：消息触发管道执行/落库，未鉴权等于任意人
+///   可驱动执行与消耗算力）
+/// - `/api/v1/pipelines*`（管道域读端点：列表/runs/state/pending-inputs——
+///   管道运行数据含会话内容与执行轨迹，缺省匿名=任意人可读）
+/// - `/api/v1/tools`、`/api/v1/schema`（工具面与配置聚合读端点）
+/// - `/api/v1/config/pipelines/{name}`（GET 读 + PUT 写，写面原有）
+/// - `/metrics`（Prometheus 导出：指标含用量数据，抓取方需带 token）
+/// - `/api/v1/ws-ticket`（特例：任意已认证用户可签发，不做角色门——见下方分支）
 ///
-/// 其余路径放行（/health、/api/v1/auth/*、/ws、/api/v1/db/* 等；agent 配置写面
-/// 已插件化——/ext/agent_manager 的 PUT admin 闸由插件自持，见 2026-08-20 ADR）。
+/// 其余路径放行（/health、/api/v1/auth/*、/uploads/*、/ws、/api/v1/db/* 等；
+/// agent 配置写面已插件化——/ext/agent_manager 的 PUT admin 闸由插件自持，
+/// 见 2026-08-20 ADR）。
 async fn write_surface_auth(
     State(state): State<AppState>,
     req: Request,
@@ -222,13 +246,25 @@ async fn write_surface_auth(
     let path = req.uri().path();
     let method = req.method().clone();
 
+    // WS 票据签发：任意已认证用户（user/admin 均可），不做角色区分——
+    // 票据只是本人 WS 握手凭证（单次消费 + 60s TTL），非管理面写操作。
+    if path == "/api/v1/ws-ticket" {
+        agentos_http::auth::resolve_request_user(state.store.as_ref(), req.headers()).await?;
+        return Ok(next.run(req).await);
+    }
+
     let needs_auth = path.starts_with("/api/v1/sessions")
         || path.starts_with("/api/v1/plugins")
+        || path.starts_with("/api/v1/pipelines")
+        || path.starts_with("/api/v1/config/pipelines/")
         || path == "/api/v1/system/restart"
+        || path == "/api/v1/system/memstats"
         || path == "/api/v1/actions/execute"
         || path == "/api/v1/interaction/response"
         || path == "/api/v1/chat"
-        || (path.starts_with("/api/v1/config/pipelines/") && method == Method::PUT);
+        || path == "/api/v1/schema"
+        || path == "/api/v1/tools"
+        || path == "/metrics";
 
     if !needs_auth {
         return Ok(next.run(req).await);
@@ -274,7 +310,9 @@ async fn require_surface_role(
 }
 
 /// CORS 中间件：拦截 OPTIONS 预检（返回 204 + CORS 头），并给所有响应注入 CORS 头。
-/// 反射请求 Origin（开发友好，支持任意 localhost/自定义前端源），允许凭据。
+/// 反射请求 Origin（开发友好，支持任意 localhost/自定义前端源）。凭据策略：
+/// 内核认证走 Authorization Bearer 头（非 cookie），本地开发源不回
+/// Allow-Credentials；显式配置的生产白名单源保留凭据放行。
 async fn cors_middleware(req: Request, next: Next) -> Response {
     let origin = req
         .headers()
@@ -346,19 +384,27 @@ fn is_origin_allowed(origin: &str) -> bool {
     false
 }
 
-/// 注入 CORS 响应头。仅当 origin 被白名单放行时才反射 Origin 并允许凭据——
-/// 反射任意 Origin + Allow-Credentials 会让任意站点带凭据跨域调用内核 API。
-/// 其余头（Methods/Headers/Max-Age）固定。
+/// 注入 CORS 响应头。仅当 origin 被放行时才反射 Origin；Allow-Credentials 只给
+/// 显式配置的生产白名单源（`AGENTOS_CORS_ORIGINS`）——本地开发源反射但不带凭据头。
+/// 内核认证走 Authorization Bearer 头（前端 apiClient 注入，不依赖 cookie），
+/// 本地源去掉凭据头不影响任何合法调用，同时消除「反射任意 localhost 源 +
+/// Allow-Credentials」被恶意本地页面带凭据跨域调用的面。其余头固定。
 fn apply_cors_headers(headers: &mut HeaderMap, origin: Option<&str>) {
     if let Some(o) = origin {
         if is_origin_allowed(o) {
             if let Ok(v) = HeaderValue::from_str(o) {
                 headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
             }
-            headers.insert(
-                header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
-                HeaderValue::from_static("true"),
-            );
+            // 凭据放行仅限显式生产白名单（本地源反射不附带）。
+            let explicit_allowlisted = std::env::var("AGENTOS_CORS_ORIGINS")
+                .map(|raw| raw.split(',').map(str::trim).any(|e| e == o))
+                .unwrap_or(false);
+            if explicit_allowlisted {
+                headers.insert(
+                    header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+                    HeaderValue::from_static("true"),
+                );
+            }
         }
     }
     headers.insert(
@@ -394,30 +440,52 @@ async fn ws_handler(
         warn!("WS 连接被拒：AppState 未装配 inbound_router（仅测试构造会走到）");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let token = params.get("token").cloned();
+    // 握手凭证二选一：?ticket=（一次性票据，前端主路径）或 ?token=
+    // （外部脚本 send.py 等既有消费方，兼容保留）。票据优先——单次消费语义
+    // 下先消费票据；无效/过期票据与无效 token 同以 4001 拒绝。
+    let auth = match params.get("ticket").cloned() {
+        Some(ticket) => match state.ws_tickets.consume(&ticket) {
+            Some((user_id, username)) => {
+                agentos_session::auth::HandshakeAuth::Ok { user_id, username }
+            }
+            None => agentos_session::auth::HandshakeAuth::Rejected {
+                code: 4001,
+                reason: "WS 票据无效、已使用或已过期".to_string(),
+            },
+        },
+        None => {
+            let token = params.get("token").cloned();
+            crate::ws_session::authenticate(token.as_deref())
+        }
+    };
     // B3：前端重连时上报 last_sequence（全局 watermark），用于首个 thread 注册时回放断线期间事件。
     let last_sequence = params
         .get("last_sequence")
         .and_then(|s| s.parse::<u64>().ok());
-    ws.on_upgrade(move |socket| run_p2_ws_session(socket, session, router, token, last_sequence))
+    let ws_store = state.store.clone();
+    ws.on_upgrade(move |socket| {
+        run_p2_ws_session_authed(socket, session, router, auth, last_sequence, ws_store)
+    })
 }
 
 /// P2 内核化 WS 会话包装：握手鉴权 + 会话运行 + 拒绝时 accept+close。
-async fn run_p2_ws_session(
+async fn run_p2_ws_session_authed(
     socket: WebSocket,
     session: Arc<agentos_session::SessionCoordinator>,
     router: Arc<agentos_session::router::InboundRouter>,
-    token: Option<String>,
+    auth: agentos_session::auth::HandshakeAuth,
     last_sequence: Option<u64>,
+    store: Option<std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
 ) {
     let mut user_id = None;
-    let (code, reason) = crate::ws_session::run_ws_session(
+    let (code, reason) = crate::ws_session::run_ws_session_with_auth(
         socket,
         session,
         router,
-        token.as_deref(),
+        auth,
         &mut user_id,
         last_sequence,
+        store,
     )
     .await;
     if code != 1000 {
@@ -456,9 +524,6 @@ pub(crate) async fn request_tenant_ctx(
 //
 // 降级条件：AppState 缺少 invoker / store / project_root（典型为测试或老式构造）
 // 时走 echo-fallback，标注降级原因。
-
-/// 默认核心管道插件 id（提取为常量，便于发现与替换）。
-const DEFAULT_CORE_PLUGIN: &str = "pipeline_llm_core";
 
 // 冷路径回放从该 pipeline 的 step 级轨迹按序 merge 重建完整 state（含 messages），
 // 不再特化只读 messages 表——轨迹颗粒度即恢复边界。
@@ -642,6 +707,17 @@ async fn maybe_reload_compiled_pipeline(
 ///
 /// 任一步失败返回 Err（含上下文）——启动期调用方据此 panic 拒绝启动，
 /// 热重载调用方据此保留旧产物。
+///
+/// 隐性技术债务显性标注（ADR 2026-09-09-kernel-dead-layer-adjudication，
+/// 裁决=③级未接线保留）：
+/// - 妥协内容：本入口走 `compile_pipeline`（无 hooks 无步骤服务索引）——
+///   hooks/步骤服务接线编译链（`load_pipeline_with_hooks` →
+///   `compile_pipeline_with_hooks`）已建成但未接线，yaml 声明的 hooks 在
+///   `to_internal` 丢弃、运行时 `hooks_for` 恒空表短路、③级命中不可达；
+/// - 升级触发条件：管道配置出现 `hooks:` 声明，或步骤服务跨插件编排
+///   需求立项——届时本入口切换到 with_hooks 装配（单点改动）；
+/// - 时间上限：0.3 主线排期评审——届时确认无接线需求则执行删除分支
+///   （拆除整链，回退纯 `compile_pipeline` 形态）。
 pub fn load_and_compile(
     config_root: &std::path::Path,
     plugin_ids: &std::collections::HashSet<String>,
@@ -680,6 +756,7 @@ fn empty_compiled() -> Arc<agentos_engine::compiler::CompiledPipeline> {
 /// - `plugin_errors`：本轮管道执行中插件失败（result.error / invoker Err）的
 ///   收集（引擎 warn+继续的假成功显式化）——WS 路径发射 plugin_error 事件
 ///   弹前端通知；HTTP 路径无消费面（REST chat 同步返回，错误进日志）。
+#[derive(Debug)]
 pub(crate) struct EngineOutcome {
     pub content: String,
     pub final_assistant: Option<serde_json::Value>,
@@ -779,8 +856,7 @@ async fn process_via_engine_inner(
     // run 的两个消费面（state 轮询锚 vs runs 表落库）共享一个 uuid。
     let run_id = uuid::Uuid::new_v4().to_string();
 
-    // 1/1a/1a2/1a3. 初始 state 构造（含会话级/任务级 execution_context 注入 +
-    // 自由 state overlay）。
+    // 1/1a/1a2. 初始 state 构造（含会话级/任务级 execution_context 注入）。
     let initial_state = stage_build_initial_state(
         state,
         &store,
@@ -791,7 +867,6 @@ async fn process_via_engine_inner(
         user_id,
         thinking_strength,
         execution_context,
-        state_overlay,
         &run_id,
     )
     .await;
@@ -805,7 +880,20 @@ async fn process_via_engine_inner(
         .and_then(|o| o.get("_skip_user_append"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let initial_state = stage_recover_history(
+    // P1-4 声明化：收集全部插件 manifest `state.volatile_keys` 声明并集，
+    // 与内核自有键同语义参与恢复合并跳过（checkpoint 落档剥离侧由
+    // stage_execute 将同一并集注入 store 消费）。
+    let declared_volatile: std::collections::HashSet<String> = state
+        .manifests
+        .read()
+        .await
+        .iter()
+        .filter_map(|m| m.state.as_ref())
+        .flat_map(|s| s.volatile_keys.iter().cloned())
+        .collect();
+    // B3：user 消息落库失败（重试耗尽）在此上抛终止本轮发送——不进入引擎执行，
+    // failed outcome 经既有 WS 错误通道（run_pipeline_round → stream_error）回显。
+    let initial_state = match stage_recover_history(
         initial_state,
         &store,
         message,
@@ -813,8 +901,14 @@ async fn process_via_engine_inner(
         &tenant_id,
         client_message_id,
         skip_user_append,
+        state_overlay,
+        &declared_volatile,
     )
-    .await;
+    .await
+    {
+        Ok(s) => s,
+        Err(outcome) => return outcome,
+    };
 
     // 2a. 实际状态轮中可见（2026-09-03 双状态裁定）：上一轮 final_state 若滞留
     //     registry，轮中可观测性（/pipelines/state）会读到陈旧终态——「显示已
@@ -855,8 +949,10 @@ async fn process_via_engine_inner(
         thread_id,
         agent_id,
     );
-    // GAP-2：run 终态域事件（completed/suspended）——state 带 task.* 时派生
-    // task_completed（EVENT 触发器输入源）。fire-and-forget，不影响响应。
+    // GAP-2：run 终态域事件——内核只派生 run.* 终态事件（failed/suspended/
+    // cancelled/completed，见 derive_run_terminal_events）；task_completed/
+    // task_failed 由 task_service 插件订阅 run.* 后按任务域语义派生（ADR
+    // 2026-08-28 事件下沉）。fire-and-forget，不影响响应。
     // 注：任务状态（task.status/ended_at）由任务域插件裁决写入（task_evaluate
     // 评估终态经 pipeline-state.update 落 state），内核只广播 run 终态事件，
     // 不写任务状态（职责边界：内核只管管道运行域，任务状态由任务域插件裁决）。
@@ -878,6 +974,11 @@ async fn process_via_engine_inner(
 /// 任务域事件（task_completed/task_failed）由 task_service 插件订阅本组
 /// run.* 事件后按任务域语义派生（ADR 2026-08-28 事件下沉：裁决词汇
 /// task.status 值与 task.* 键面归插件，内核零知识）。
+///
+/// 载荷（ADR 2026-09-11）：终态事件随带该管道的 state 对象（`state` 标签），
+/// 订阅方据此零回查派生任务域语义。内核只转发不挑选——不理解 `task.*`/
+/// `lineage.*` 的语义，与零知识约束不冲突（约束的是不得**判定**任务域词汇，
+/// 非不得**转发**插件域数据）。大字段经 [`terminal_event_state_payload`] 剥离。
 fn derive_run_terminal_events(
     final_state: &serde_json::Value,
     failed: bool,
@@ -893,6 +994,10 @@ fn derive_run_terminal_events(
     let run_tags = vec![
         ("pipeline_id".to_string(), pipeline_id),
         ("thread_id".to_string(), thread_id),
+        (
+            "state".to_string(),
+            terminal_event_state_payload(final_state),
+        ),
     ];
     let mut events: Vec<(&'static str, Vec<(String, serde_json::Value)>)> = Vec::new();
     if failed {
@@ -911,6 +1016,40 @@ fn derive_run_terminal_events(
     events
 }
 
+/// 终态事件 state 载荷的剥离集：订阅方零消费的引擎/内核大字段。
+///
+/// 剔除项与理由（ADR 2026-09-11）：
+/// - `messages`：全历史，单管道最有分量的常驻结构（事件载荷会到 MB 级）；
+/// - `tool_schemas`：每轮 prepare 链重新拉取的 LLM 工具面，跨轮无意义
+///   （与 `stage_finalize` 常驻快照剥离同款）；
+/// - `raw_result` / `raw_thinking` / `raw_tool_calls`：引擎原始投影，
+///   订阅方消费的是插件域键而非引擎通道键；
+/// - `_` 前缀：引擎私有中间键（`_executed_tool_calls` 等）。
+///
+/// 实测剥离后终态标量载荷约 1.8 KB（最大单键 642 字节）。
+const TERMINAL_EVENT_STATE_STRIP: &[&str] = &[
+    "messages",
+    "tool_schemas",
+    "raw_result",
+    "raw_thinking",
+    "raw_tool_calls",
+];
+
+/// 构造终态事件的 state 载荷（剥离大字段后的对象；非对象输入返回空对象）。
+fn terminal_event_state_payload(final_state: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = final_state.as_object() else {
+        return serde_json::Value::Object(serde_json::Map::new());
+    };
+    let mut out = serde_json::Map::with_capacity(obj.len());
+    for (k, v) in obj {
+        if TERMINAL_EVENT_STATE_STRIP.contains(&k.as_str()) || k.starts_with('_') {
+            continue;
+        }
+        out.insert(k.clone(), v.clone());
+    }
+    serde_json::Value::Object(out)
+}
+
 /// 广播 run 终态域事件（GAP-2：fire-and-forget，不阻塞引擎出口）。
 async fn emit_run_terminal_domain_events(
     state: &AppState,
@@ -919,6 +1058,47 @@ async fn emit_run_terminal_domain_events(
 ) {
     for (name, tags) in derive_run_terminal_events(terminal_state, failed) {
         crate::plugin_lifecycle::broadcast_domain_event(state, name, tags).await;
+    }
+    // 刀3（2026-09-09 内存驻留归因）：run 终态（非 suspended）注销该管道的
+    // 热路径 state 缓存——final_state（含 messages 全历史）是单管道最有分量
+    // 的常驻结构，且 remove() 此前在生产零调用，已终态管道的状态跨轮永久
+    // 驻留（4788 条 pipeline_state 的内存镜像）。热缓存只为续跑服务：下轮
+    // 冷启动经 persist_run_end 收尾 checkpoint + traces/message_slots 重建
+    // （server.rs 冷路径，见 get_or_init 未命中分支）。suspended（停泊/
+    // 审批挂起）保留热态，恢复路径零重建。
+    let status = agentos_core::types::RunStatus::from_control_state(terminal_state);
+    if status != agentos_core::types::RunStatus::Suspended {
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        let pipeline_id = terminal_state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !pipeline_id.is_empty() {
+            // 注销热缓存前把 run_status 落表（内核自有键，观测真值）：checkpoint
+            // 落档按 VOLATILE 剥离 run_status，注销后内存副本也无——list 视图的
+            // checkpoint 兜底行将永远读不到终态（评测判稳/前端观测断链，2026-09-10
+            // 压测实证）。表行单字段 upsert，随兜底行合并出口；下轮起点注入
+            // running 覆盖，无复活风险。
+            if let Some(store) = state.store.as_ref() {
+                if let Err(e) = store
+                    .upsert_state_field(
+                        pipeline_id,
+                        &tenant_id,
+                        "run_status",
+                        &serde_json::json!(status),
+                    )
+                    .await
+                {
+                    warn!(
+                        pipeline_id = %pipeline_id,
+                        error = %e,
+                        "终态 run_status 落表失败（观测兜底缺失，不影响执行）"
+                    );
+                }
+            }
+            agentos_session::pipeline_state_registry::global_registry()
+                .remove(&tenant_id, pipeline_id);
+        }
     }
 }
 
@@ -957,11 +1137,15 @@ fn set_execution_context_path(
     cur.insert(parts[parts.len() - 1].to_string(), value);
 }
 
-/// 阶段 1/1a/1a2/1a3：构造初始 state（含会话级/任务级 execution_context 注入 +
-/// 自由 state overlay 合并）。
+/// 阶段 1/1a/1a2：构造初始 state（含会话级/任务级 execution_context 注入）。
 ///
-/// core_plugin 默认值可被 agent 配置（config/agents/<id>.yaml 的 core_plugin 字段）
-/// 覆盖——见 load_agent_config_into_state。避免在内核硬编码具体插件 id。
+/// core 器官执行态缺省（core_type 语义标志 + core_plugin 插件选择）不在本函数
+/// 种入——P1-1 声明化后由管道配置 `initial_state:` 声明、stage_execute
+/// 消费编译产物补种（内核零插件 id 知识）；agent 配置加载已移出内核
+/// （内核不读 config/agents/**，语义由管道输入插件 context_build 按执行上下文
+/// 键自持），管道配置步骤经 state 写面按步覆盖 core_type/core_plugin
+/// （config/pipelines/autonomous.yaml）。自由 state overlay 在恢复合并之后
+/// 应用（stage_recover_history）。
 // 技术债（同上）：多参阶段函数，收尾时统一收敛参数结构体。
 #[allow(clippy::too_many_arguments)]
 async fn stage_build_initial_state(
@@ -974,7 +1158,6 @@ async fn stage_build_initial_state(
     user_id: &str,
     thinking_strength: &str,
     execution_context: Option<&serde_json::Value>,
-    state_overlay: Option<&serde_json::Value>,
     run_id: &str,
 ) -> serde_json::Value {
     let mut initial_state = serde_json::json!({
@@ -984,8 +1167,6 @@ async fn stage_build_initial_state(
         // （出生方经 chat.send_message state 透传落库），随本函数之后的热恢复
         // （registry）/冷恢复（pipeline_state 表）进入 state，供 context_build
         // 等插件消费面读取——缺省主 agent 由消费面自持，派发不再携带/注入身份。
-        "core_type": "llm_call",
-        "core_plugin": DEFAULT_CORE_PLUGIN,
         "ended": false,
         "suspended": false,
         // 实际状态（内核持有，2026-09-03 双状态裁定）：run 生命周期唯一真值，
@@ -1091,13 +1272,10 @@ async fn stage_build_initial_state(
         }
     }
 
-    // 1a3. 自由 state overlay（GAP-1：chat.send_message 的 state 参数 + 引擎
-    // 写入的 lineage 扁平键）：在 execution_context 合并点（1a/1a2）之后并入
-    // 顶层扁平键——任务域 task.* 出生即入 state，消费方（task_evaluate /
-    // child_task_guard / 任务树聚合）从 state 直读。
-    if let Some(overlay) = state_overlay {
-        apply_state_overlay(&mut initial_state, overlay);
-    }
+    // 1a3（自由 state overlay）已移至 stage_recover_history 恢复合并之后应用
+    // （B13① 域界定，ADR 2026-09-06）：恢复基线（registry 快照/checkpoint/
+    // pipeline_state 表）合并会覆盖写已存在键，overlay 先应用会被残留值回写
+    // 污染——显式派发指令必须优先于持久化基线。
 
     initial_state
 }
@@ -1132,10 +1310,14 @@ fn apply_state_overlay(initial_state: &mut serde_json::Value, overlay: &serde_js
 /// 并入 initial_state 顶层扁平键，两条路径共用同一合并语义。
 ///
 /// 跳过三类键：`messages`（队列真值由热/冷路径独立装配，不在此恢复）；内部
-/// 下划线键与 [`agentos_engine::VOLATILE_RUN_KEYS`]（per-run 指令与锚点/终止
-/// 标志——快照残留会顶掉本轮新输入，旧 run_id 会顶掉取消轮询新锚，GAP-3 与
-/// 批次 D 重跑标志同源）。
-fn merge_recovered_scalars(initial_state: &mut serde_json::Value, source: &serde_json::Value) {
+/// 下划线键、内核自有 per-run 键 [`agentos_engine::VOLATILE_RUN_KEYS`] 与插件
+/// `state.volatile_keys` 声明键（per-run 指令与锚点/终止标志——快照残留会顶掉
+/// 本轮新输入，旧 run_id 会顶掉取消轮询新锚，GAP-3 与批次 D 重跑标志同源）。
+fn merge_recovered_scalars(
+    initial_state: &mut serde_json::Value,
+    source: &serde_json::Value,
+    declared_volatile: &std::collections::HashSet<String>,
+) {
     let Some(src_obj) = source.as_object() else {
         return;
     };
@@ -1146,7 +1328,8 @@ fn merge_recovered_scalars(initial_state: &mut serde_json::Value, source: &serde
         if k == "messages" || k.starts_with('_') {
             continue;
         }
-        if agentos_engine::VOLATILE_RUN_KEYS.contains(&k.as_str()) {
+        if agentos_engine::VOLATILE_RUN_KEYS.contains(&k.as_str()) || declared_volatile.contains(k)
+        {
             continue;
         }
         init_obj.insert(k.clone(), v.clone());
@@ -1159,9 +1342,21 @@ mod merge_recovered_scalars_tests {
 
     /// 2026-09-02 裁定：新消息到达 = 用户已响应交互，新一轮应从非对话态开始
     /// 直接运行——上轮挂起轮的对话/执行态（conversation_mode/core_type/
-    /// core_plugin 及终止标志）不得经恢复合并复活。
+    /// core_plugin 及终止标志）不得经恢复合并复活。P1-4 后插件语义键经
+    /// `state.volatile_keys` 声明进 declared_volatile（模拟 llm_core/human
+    /// 插件声明的并集），内核自有键仍走 VOLATILE_RUN_KEYS。
     #[test]
     fn skips_volatile_run_keys_including_conversation_state() {
+        let declared: std::collections::HashSet<String> = [
+            "thinking_strength",
+            "tool_schemas",
+            "conversation_mode",
+            "core_type",
+            "core_plugin",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let mut initial = serde_json::json!({
             "message": "新消息",
             "run_id": "new-run",
@@ -1183,7 +1378,7 @@ mod merge_recovered_scalars_tests {
             "run_status": "completed",
             "run_id": "old-run",
         });
-        merge_recovered_scalars(&mut initial, &source);
+        merge_recovered_scalars(&mut initial, &source, &declared);
         // 持久键照常恢复
         assert_eq!(initial["task.id"], "t1");
         assert_eq!(initial["workspace"], "/ws");
@@ -1206,9 +1401,25 @@ mod merge_recovered_scalars_tests {
     fn merges_persistent_scalars() {
         let mut initial = serde_json::json!({"message": "m"});
         let source = serde_json::json!({"task.id": "t9", "track.total_tokens": 42});
-        merge_recovered_scalars(&mut initial, &source);
+        merge_recovered_scalars(&mut initial, &source, &Default::default());
         assert_eq!(initial["task.id"], "t9");
         assert_eq!(initial["track.total_tokens"], 42);
+    }
+
+    /// P1-4 声明化：恢复源残留的插件声明键同样不得复活（合并跳过声明键），
+    /// 未声明键照常合并——跳过范围随声明增减。
+    #[test]
+    fn skips_declared_volatile_keys_from_plugins() {
+        let declared: std::collections::HashSet<String> =
+            ["tool_schemas"].into_iter().map(String::from).collect();
+        let mut initial = serde_json::json!({"message": "m"});
+        let source = serde_json::json!({"tool_schemas": [{"name": "x"}], "task.id": "t2"});
+        merge_recovered_scalars(&mut initial, &source, &declared);
+        assert!(
+            initial.get("tool_schemas").is_none(),
+            "声明键属 per-run 工具面，跨轮残留 = schema 滞留"
+        );
+        assert_eq!(initial["task.id"], "t2");
     }
 }
 
@@ -1326,7 +1537,9 @@ async fn stage_recover_history(
     tenant_id: &str,
     client_message_id: &str,
     skip_user_append: bool,
-) -> serde_json::Value {
+    state_overlay: Option<&serde_json::Value>,
+    declared_volatile: &std::collections::HashSet<String>,
+) -> Result<serde_json::Value, EngineOutcome> {
     let mut history_prefix: Vec<serde_json::Value> = Vec::new();
     let mut history_loaded = false;
     let registry = agentos_session::global_registry();
@@ -1340,116 +1553,192 @@ async fn stage_recover_history(
             history_prefix = msgs.clone();
             history_loaded = true;
         }
-        merge_recovered_scalars(&mut initial_state, &entry.state);
+        merge_recovered_scalars(&mut initial_state, &entry.state, declared_volatile);
     }
     if !history_loaded {
-        // 冷路径（零兼容重排）：
-        // ① checkpoint 只提供**标量基线**——messages 一律不消费（load 后剥离丢弃），
-        //    无论新旧格式（任务 5 瘦身后新 checkpoint 本就不含 messages）。
-        // ② 无 checkpoint → traces 回放**标量字段**（merge_patch 跳过 messages）。
-        // ③ pipeline_state 表补充累计标量（每 step upsert 最新值）。
-        // ④ messages 从 message_slots 表直读（消息队列持久真值，零回放）。
-        let mut recovered: serde_json::Value = serde_json::json!({});
-        let mut ckpt_hit = false;
-        if !effective_pipeline_id.is_empty() {
-            match store
-                .load_latest_checkpoint(effective_pipeline_id, tenant_id)
-                .await
-            {
-                Ok(Some((_step_no, ckpt_state))) => {
-                    recovered = ckpt_state;
-                    // 队列真值在表：checkpoint 的 messages 剥离丢弃（新旧格式一律）
-                    if let Some(rec_obj) = recovered.as_object_mut() {
-                        rec_obj.remove("messages");
-                    }
-                    ckpt_hit = true;
-                    debug!(
-                        pipeline_id = %effective_pipeline_id,
-                        "冷启动从 checkpoint 恢复标量基线（messages 走表读）"
-                    );
-                }
-                Ok(None) => {
-                    // 无 checkpoint：正常冷启动路径，走 traces 回放
-                }
-                Err(e) => {
-                    // checkpoint 读失败不等同无 checkpoint：降级走 traces 回放时留痕，
-                    // 避免静默丢标量基线（错误是数据读失败，不是记录不存在）。
-                    error!(
-                        pipeline_id = %effective_pipeline_id,
-                        error = %e,
-                        "load_latest_checkpoint 冷恢复失败，降级 traces 回放"
-                    );
-                }
-            }
-        }
-        if !ckpt_hit {
-            // 只回放本管道自己的轨迹。thread 全量回放会把同会话其它管道
-            // （父会话/兄弟子任务）的控制态（conversation_mode/core_type/router.*）
-            // 种进本管道初始 state——曾致新子任务第 0 轮即被对话挂起路由误挂
-            // （2026-08-30 管道身份裁定：执行态恢复只认 pipeline_id）。
-            match store
-                .get_step_traces_by_pipeline(effective_pipeline_id, tenant_id)
-                .await
-            {
-                Ok(step_traces) => {
-                    for entry in &step_traces {
-                        merge_patch(&mut recovered, &entry.patch_data);
-                    }
-                }
-                Err(e) => {
-                    // 持久化恢复失败：bug 信号（内存丢 + DB 也读不到），显式 error 暴露。
-                    error!(
-                        pipeline_id = %effective_pipeline_id,
-                        error = %e,
-                        "get_step_traces_by_pipeline 回放失败"
-                    );
-                }
-            }
-        }
-        // 累计标量字段以 pipeline_state 为准（每 step upsert 最新值），
-        // 重建后插件能在正确基线上自然累加，不归零。
-        if !effective_pipeline_id.is_empty() {
-            match store
-                .load_pipeline_state(effective_pipeline_id, tenant_id)
-                .await
-            {
-                Ok(state_fields) => {
-                    if let Some(rec_obj) = recovered.as_object_mut() {
-                        for (k, v) in &state_fields {
-                            rec_obj.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        pipeline_id = %effective_pipeline_id,
-                        error = %e,
-                        "load_pipeline_state 冷恢复失败（标量基线可能不完整）"
-                    );
-                }
-            }
-        }
-        // messages 直读 message_slots（零回放；元素自带稳定 seq）
-        if !effective_pipeline_id.is_empty() {
-            match store
-                .load_message_history(effective_pipeline_id, tenant_id)
-                .await
-            {
-                Ok(msgs) => history_prefix = msgs,
-                Err(e) => {
-                    error!(
-                        pipeline_id = %effective_pipeline_id,
-                        error = %e,
-                        "load_message_history 冷恢复失败（对话历史可能不完整）"
-                    );
-                }
-            }
-        }
-        // 标量字段注入 state——跳过规则见 merge_recovered_scalars（GAP-3：
-        // message/input/suspended 等 per-run 键残留会顶掉本轮新输入，重启后
-        // 旧 user 消息被重放消费；_skip_user_append 等下划线键泄漏会吞消息）。
-        merge_recovered_scalars(&mut initial_state, &recovered);
+        let (state, prefix) = recover_cold_history(
+            initial_state,
+            store,
+            effective_pipeline_id,
+            tenant_id,
+            declared_volatile,
+        )
+        .await;
+        initial_state = state;
+        history_prefix = prefix;
     }
+    // 派发 overlay 在恢复合并之后应用（B13① 域界定，ADR 2026-09-06）：overlay
+    // 是调用方的显式派发指令（如任务域 resume 链清 task.status 终态键），必须
+    // 优先于恢复基线——先应用会被热/冷恢复源（registry 快照/checkpoint/
+    // pipeline_state 表）的残留值覆盖写回。保留字与 lineage.* 保护不变
+    // （apply_state_overlay 纵深防御）。
+    if let Some(overlay) = state_overlay {
+        apply_state_overlay(&mut initial_state, overlay);
+    }
+    seed_history_and_reset_assistant_flag(&mut initial_state, history_prefix);
+    let interrupted_tail = is_interrupted_tail(&initial_state, message, client_message_id);
+    if !interrupted_tail && !skip_user_append {
+        append_user_message(
+            &mut initial_state,
+            store,
+            tenant_id,
+            effective_pipeline_id,
+            message,
+            client_message_id,
+        )
+        .await
+        .map_err(|e| {
+            // B3：重试耗尽仍失败 = 本轮 user 消息未受理（内存侧也不留——
+            // 「内存已注入、实录缺席」的静默分叉窗口消灭在源头）。
+            error!(
+                pipeline_id = %effective_pipeline_id,
+                tenant_id = %tenant_id,
+                error = %e,
+                "user 消息落库重试耗尽，终止本轮发送（不进入引擎执行）"
+            );
+            EngineOutcome {
+                content: format!(
+                    "消息未受理：user 消息落库失败（已重试仍失败），本轮发送已终止，请稍候重试。原因: {e}"
+                ),
+                final_assistant: None,
+                failed: true,
+                degraded: false,
+                plugin_errors: Vec::new(),
+            }
+        })?;
+    }
+    Ok(initial_state)
+}
+
+/// 冷路径恢复（registry 未命中时）：checkpoint/traces/pipeline_state/message_slots
+/// 四源装配标量基线与消息历史，返回（合并标量后的 state, messages 历史前缀）。
+/// ① checkpoint 只提供**标量基线**——messages 一律不消费（load 后剥离丢弃），
+///    无论新旧格式（任务 5 瘦身后新 checkpoint 本就不含 messages）；
+/// ② 无 checkpoint → traces 回放**标量字段**（merge_patch 跳过 messages）；
+/// ③ pipeline_state 表补充累计标量（每 step upsert 最新值）；
+/// ④ messages 从 message_slots 表直读（消息队列持久真值，零回放）。
+async fn recover_cold_history(
+    mut initial_state: serde_json::Value,
+    store: &Arc<dyn StorageBackend>,
+    effective_pipeline_id: &str,
+    tenant_id: &str,
+    declared_volatile: &std::collections::HashSet<String>,
+) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let mut history_prefix: Vec<serde_json::Value> = Vec::new();
+    // 冷路径（零兼容重排）：
+    // ① checkpoint 只提供**标量基线**——messages 一律不消费（load 后剥离丢弃），
+    //    无论新旧格式（任务 5 瘦身后新 checkpoint 本就不含 messages）。
+    // ② 无 checkpoint → traces 回放**标量字段**（merge_patch 跳过 messages）。
+    // ③ pipeline_state 表补充累计标量（每 step upsert 最新值）。
+    // ④ messages 从 message_slots 表直读（消息队列持久真值，零回放）。
+    let mut recovered: serde_json::Value = serde_json::json!({});
+    let mut ckpt_hit = false;
+    if !effective_pipeline_id.is_empty() {
+        match store
+            .load_latest_checkpoint(effective_pipeline_id, tenant_id)
+            .await
+        {
+            Ok(Some((_step_no, ckpt_state))) => {
+                recovered = ckpt_state;
+                // 队列真值在表：checkpoint 的 messages 剥离丢弃（新旧格式一律）
+                if let Some(rec_obj) = recovered.as_object_mut() {
+                    rec_obj.remove("messages");
+                }
+                ckpt_hit = true;
+                debug!(
+                    pipeline_id = %effective_pipeline_id,
+                    "冷启动从 checkpoint 恢复标量基线（messages 走表读）"
+                );
+            }
+            Ok(None) => {
+                // 无 checkpoint：正常冷启动路径，走 traces 回放
+            }
+            Err(e) => {
+                // checkpoint 读失败不等同无 checkpoint：降级走 traces 回放时留痕，
+                // 避免静默丢标量基线（错误是数据读失败，不是记录不存在）。
+                error!(
+                    pipeline_id = %effective_pipeline_id,
+                    error = %e,
+                    "load_latest_checkpoint 冷恢复失败，降级 traces 回放"
+                );
+            }
+        }
+    }
+    if !ckpt_hit {
+        // 只回放本管道自己的轨迹。thread 全量回放会把同会话其它管道
+        // （父会话/兄弟子任务）的控制态（conversation_mode/core_type/router.*）
+        // 种进本管道初始 state——曾致新子任务第 0 轮即被对话挂起路由误挂
+        // （2026-08-30 管道身份裁定：执行态恢复只认 pipeline_id）。
+        match store
+            .get_step_traces_by_pipeline(effective_pipeline_id, tenant_id)
+            .await
+        {
+            Ok(step_traces) => {
+                for entry in &step_traces {
+                    merge_patch(&mut recovered, &entry.patch_data);
+                }
+            }
+            Err(e) => {
+                // 持久化恢复失败：bug 信号（内存丢 + DB 也读不到），显式 error 暴露。
+                error!(
+                    pipeline_id = %effective_pipeline_id,
+                    error = %e,
+                    "get_step_traces_by_pipeline 回放失败"
+                );
+            }
+        }
+    }
+    // 累计标量字段以 pipeline_state 为准（每 step upsert 最新值），
+    // 重建后插件能在正确基线上自然累加，不归零。
+    if !effective_pipeline_id.is_empty() {
+        match store
+            .load_pipeline_state(effective_pipeline_id, tenant_id)
+            .await
+        {
+            Ok(state_fields) => {
+                if let Some(rec_obj) = recovered.as_object_mut() {
+                    for (k, v) in &state_fields {
+                        rec_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            Err(e) => {
+                error!(
+                    pipeline_id = %effective_pipeline_id,
+                    error = %e,
+                    "load_pipeline_state 冷恢复失败（标量基线可能不完整）"
+                );
+            }
+        }
+    }
+    // messages 直读 message_slots（零回放；元素自带稳定 seq）
+    if !effective_pipeline_id.is_empty() {
+        match store
+            .load_message_history(effective_pipeline_id, tenant_id)
+            .await
+        {
+            Ok(msgs) => history_prefix = msgs,
+            Err(e) => {
+                error!(
+                    pipeline_id = %effective_pipeline_id,
+                    error = %e,
+                    "load_message_history 冷恢复失败（对话历史可能不完整）"
+                );
+            }
+        }
+    }
+    // 标量字段注入 state——跳过规则见 merge_recovered_scalars（GAP-3：
+    // message/input/suspended 等 per-run 键残留会顶掉本轮新输入，重启后
+    // 旧 user 消息被重放消费；_skip_user_append 等下划线键泄漏会吞消息）。
+    merge_recovered_scalars(&mut initial_state, &recovered, declared_volatile);
+    (initial_state, history_prefix)
+}
+
+/// messages 塞回 state + A1 复位标志（行为契约注释随代码平移保留）。
+fn seed_history_and_reset_assistant_flag(
+    initial_state: &mut serde_json::Value,
+    history_prefix: Vec<serde_json::Value>,
+) {
     // messages 塞回 state（热路径元素自带 seq；冷路径表读也已带 seq——零兼容，
     // 不做缺 seq 补位、不做客户端 history 兜底）
     if let Some(obj) = initial_state.as_object_mut() {
@@ -1466,13 +1755,21 @@ async fn stage_recover_history(
             serde_json::json!(false),
         );
     }
+}
+
+/// GAP-3 中断重放幂等判定（ADR 2026-08-21 契约注释随代码平移保留，见函数体）。
+fn is_interrupted_tail(
+    initial_state: &serde_json::Value,
+    message: &str,
+    client_message_id: &str,
+) -> bool {
     // GAP-3：中断重放幂等——上一次尝试若已把本轮 user 消息落槽（重启/崩溃
     // 截断 run，无 assistant 跟随），恢复出的 history 尾部就是它；再 append 会
     // 重复落槽+重复消费。判定按幂等键裁决
     // （ADR 2026-08-21）：cmid 在场时只有「同 cmid」才算同一次发送的重派（吞）；
     // cmid 不同 = 真发了两条（绝不吞）。无 cmid
     // 的路径（触发器注入/旧客户端）维持同文判定。
-    let interrupted_tail = initial_state
+    initial_state
         .get("messages")
         .and_then(|v| v.as_array())
         .and_then(|msgs| msgs.last())
@@ -1489,36 +1786,89 @@ async fn stage_recover_history(
                 .and_then(|m| m.get("client_message_id"))
                 .and_then(|v| v.as_str())
                 == Some(client_message_id)
-        });
+        })
+}
+
+/// user 消息落库重试退避序列（对齐引擎侧 PERSIST_RETRY_BACKOFF_MS 范式：
+/// 失败后再试 2 次、真实退避 100/300ms，共 3 次尝试）。
+const USER_APPEND_RETRY_BACKOFF_MS: &[u64] = &[100, 300];
+
+/// 本轮 user 消息 append 落库（ADR 2026-08-21 / ops 即轨迹契约注释随代码平移保留）。
+/// B3：落库失败先重试（瞬时 DB 抖动不打断对话），重试耗尽仍失败上抛给调用方
+/// 终止本轮发送——会话面裁定"DB 故障不得假成功"，禁止"内存已注入、实录缺席"
+/// 的静默分叉（重启后消息从历史消失且无对账锚点）。
+async fn append_user_message(
+    initial_state: &mut serde_json::Value,
+    store: &Arc<dyn StorageBackend>,
+    tenant_id: &str,
+    effective_pipeline_id: &str,
+    message: &str,
+    client_message_id: &str,
+) -> Result<(), agentos_core::types::StorageError> {
     // user 经 append op(无 seq → 引擎分配 next seq)+ 落 message_slots。
     // 指纹实录塞 _pending_message_ops（内部字段）：executor.persist_run_start 落一条
     // user_input 轨迹后移除——首轮 user 由此进入审计/回放范围（ops 即轨迹）。
     // cmid 非空时随 metadata 落库（compute_message_id 纳入 metadata 参与 hash：
     // 同内容多次发送 record_id 各自唯一，顺带消除重复内容同 id 碰撞）。
-    if !interrupted_tail && !skip_user_append {
-        let mut user_msg = serde_json::json!({"role":"user","content":message});
-        if !client_message_id.is_empty() {
-            user_msg["metadata"] = serde_json::json!({"client_message_id": client_message_id});
-        }
-        if let Ok(user_ledger) = agentos_engine::apply_messages_op_update(
-            &mut initial_state,
+    let mut user_msg = serde_json::json!({"role":"user","content":message});
+    if !client_message_id.is_empty() {
+        user_msg["metadata"] = serde_json::json!({"client_message_id": client_message_id});
+    }
+    let ops = [serde_json::json!({"op":"set","msg":user_msg})];
+    // apply_messages_op_update 先改内存后落表：每次重试前按快照还原内存，
+    // 防失败重试把同一条 user 消息双写进 messages。
+    let messages_snapshot = initial_state.get("messages").cloned();
+
+    let mut last_err: Option<agentos_core::types::StorageError> = None;
+    for try_no in 0..=USER_APPEND_RETRY_BACKOFF_MS.len() {
+        match agentos_engine::apply_messages_op_update(
+            initial_state,
             store.as_ref(),
             tenant_id,
-            &[serde_json::json!({"op":"set","msg":user_msg})],
+            &ops,
         )
         .await
         {
-            if !user_ledger.is_empty() {
+            Ok(user_ledger) if !user_ledger.is_empty() => {
                 if let Some(obj) = initial_state.as_object_mut() {
                     obj.insert(
                         "_pending_message_ops".to_string(),
                         serde_json::Value::Array(user_ledger),
                     );
                 }
+                return Ok(());
+            }
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                warn!(
+                    target_op = "append_user_message",
+                    attempt = try_no + 1,
+                    pipeline_id = %effective_pipeline_id,
+                    tenant_id = %tenant_id,
+                    error = %e,
+                    "user 消息落库失败"
+                );
+                // apply 先改内存后落表：每次失败（含最后一次）都按快照还原内存，
+                // 保证出口处内存与落库一致——失败不留半条消息。
+                if let Some(obj) = initial_state.as_object_mut() {
+                    match &messages_snapshot {
+                        Some(snapshot) => {
+                            obj.insert("messages".to_string(), snapshot.clone());
+                        }
+                        None => {
+                            obj.remove("messages");
+                        }
+                    }
+                }
+                if let Some(backoff_ms) = USER_APPEND_RETRY_BACKOFF_MS.get(try_no) {
+                    tokio::time::sleep(Duration::from_millis(*backoff_ms)).await;
+                } else {
+                    last_err = Some(e);
+                }
             }
         }
     }
-    initial_state
+    Err(last_err.expect("retry loop runs at least once"))
 }
 
 /// 阶段 3：构造 PipelineExecutor 并执行 initial_state，返回 final_state。
@@ -1574,7 +1924,35 @@ async fn stage_execute(
     // ── Pull 热加载（在 project_root 被 move 给 executor 之前算出 config_root）──
     let config_root = project_root.join("config");
     let compiled = maybe_reload_compiled_pipeline(state, &config_root).await;
+    // P1-1 core 器官缺省声明化：管道配置 `initial_state:` 声明的键值在开轮前
+    // 补种（缺省只补缺，已有值不覆盖——本轮/调用方值优先）。core_type 是纯
+    // 语义迭代形态标志，未声明时以 llm_call 作语义缺省；core_plugin 缺省由
+    // 配置声明（使用动态核心步骤的管道必须声明，内核零插件 id 知识）。
+    let mut initial_state = initial_state;
+    if let Some(obj) = initial_state.as_object_mut() {
+        for (k, v) in &compiled.initial_state {
+            if !obj.contains_key(k) {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        if !obj.contains_key("core_type") {
+            obj.insert("core_type".into(), serde_json::json!("llm_call"));
+        }
+    }
     let known_ids = live_plugin_ids(state).await;
+    // P1-4 声明化：收集全部插件 manifest `state.volatile_keys` 声明并集注入
+    // store（StorageBackend::set_declared_volatile_keys），checkpoint 落档时
+    // 与内核自有键在同一剥离点（save_checkpoint）剥离；恢复合并侧
+    // （stage_build_initial_state）消费同一并集跳过。
+    let declared_volatile: Vec<String> = state
+        .manifests
+        .read()
+        .await
+        .iter()
+        .filter_map(|m| m.state.as_ref())
+        .flat_map(|s| s.volatile_keys.iter().cloned())
+        .collect();
+    store.set_declared_volatile_keys(&declared_volatile);
     let executor = agentos_engine::PipelineExecutor::new(
         invoker,
         project_root,
@@ -1609,7 +1987,18 @@ async fn stage_execute(
                     .contains(&agentos_core::traits::LifecycleHook::OnPipelineEnd)
             })
             .map(|m| m.id.clone()),
-    );
+    )
+    // 生命周期事件总线（观察路径）：run 开始/结束广播 OnPipelineStart/OnPipelineEnd
+    // 给审计/指标订阅者。进程级单例（agentos-kernel 启动期 set_global 注册；
+    // 未注册 None = 不发射，与域事件发射点同一降级语义）。
+    .with_hook_bus(agentos_hooks::global());
+    // 轮数硬上限接线（管道 YAML `max_rounds:` → 编译产物 → executor，ADR
+    // 2026-09-11-engine-loop-cap）：None = 不注入（引擎缺省 200，旧 YAML 行为
+    // 不变）；Some(0) 注入后由 run 入口 EngineError::Config 拒绝（零执行）。
+    let executor = match compiled.max_rounds {
+        Some(n) => executor.with_max_rounds(n),
+        None => executor,
+    };
     // 轮次观察点（None = 未接线）：chat 会话路径逐轮发流式事件。
     let executor = if let Some(ev) = round_events {
         executor.with_round_events(ev)
@@ -1622,11 +2011,9 @@ async fn stage_execute(
     info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
 
     // GAP-2：防御网路径的失败事件标签预捕获（run_compiled 会 move initial_state）。
-    let failed_emit_state = serde_json::json!({
-        "pipeline_id": initial_state.get("pipeline_id").cloned().unwrap_or(serde_json::Value::Null),
-        "session_id": initial_state.get("session_id").cloned().unwrap_or(serde_json::Value::Null),
-        "task.id": initial_state.get("task.id").cloned().unwrap_or(serde_json::Value::Null),
-    });
+    // 载荷复用终态剥离集——初始 state 携带出生契约键（task.*/lineage.*），
+    // 订阅方据此派生失败通知；messages 等大字段已剥离，克隆成本 KB 级。
+    let failed_emit_state = terminal_event_state_payload(&initial_state);
 
     // run 启动域事件：回合开始时广播 run.started，触发器（EVENT）与生命周期
     // 订阅者据此感知回合边界。标签与 run 终态事件同构（run_id/pipeline_id/
@@ -1875,14 +2262,35 @@ async fn chat_handler(
             message: format!("chat 派发失败: {e}"),
         });
     }
-    // 消费任务 panic（rx 关闭）时给出明确错误而非挂死等待。
-    let outcome = rx.await.unwrap_or_else(|_| EngineOutcome {
-        content: "[engine task terminated unexpectedly]".to_string(),
-        final_assistant: None,
-        failed: true,
-        degraded: false,
-        plugin_errors: Vec::new(),
-    });
+    // 消费任务 panic（rx 关闭）时给出明确错误而非挂死等待；等待整体带超时
+    // 兜底：消费循环若因出队错误等场景未通知 waiter（残留队列通知也失败），
+    // 无超时即 HTTP 请求无限挂死 + waiter 条目泄漏。上限取 600s——远大于
+    // 健康轮次的生成窗口，只兜结构性挂死，不充当业务超时。
+    const HTTP_CHAT_WAIT_TIMEOUT_SECS: u64 = 600;
+    let outcome = match tokio::time::timeout(
+        std::time::Duration::from_secs(HTTP_CHAT_WAIT_TIMEOUT_SECS),
+        rx,
+    )
+    .await
+    {
+        Ok(outcome) => outcome.unwrap_or_else(|_| EngineOutcome {
+            content: "[engine task terminated unexpectedly]".to_string(),
+            final_assistant: None,
+            failed: true,
+            degraded: false,
+            plugin_errors: Vec::new(),
+        }),
+        Err(_) => {
+            // 超时自清理 waiter（防条目泄漏；事后到达的 notify 因条目已删
+            // 变为 no-op），对客户端显式 500 而非无限挂死。
+            crate::ws_session::remove_outcome_waiter(&cmid);
+            return Err(ApiError::Internal {
+                message: format!(
+                    "chat 同步等待超时（{HTTP_CHAT_WAIT_TIMEOUT_SECS}s）：消费任务未在期限内回传结果"
+                ),
+            });
+        }
+    };
 
     let response = WsResponse {
         r#type: "message".to_string(),
@@ -1896,12 +2304,35 @@ async fn chat_handler(
     Ok(axum::Json(response))
 }
 
+/// 交互应答提供者解析（P1-3 声明驱动）：遍历插件 manifests，找
+/// `provides.capabilities[].protocol_roles` 含 `interaction-respond` 的
+/// (namespace, method)。内核不点名交互插件 id——任意插件声明同角色即接管
+/// 应答端点后端（与 capability namespace 的热替换语义一致）；无声明 → None
+/// （调用方 fail-closed 显式失败，不猜测路由目标）。
+pub(crate) fn resolve_interaction_responder(
+    manifests: &[agentos_core::traits::PluginManifest],
+) -> Option<(String, String)> {
+    for m in manifests {
+        let Some(provides) = &m.provides else {
+            continue;
+        };
+        for cap in &provides.capabilities {
+            for role in &cap.protocol_roles {
+                if role.role == "interaction-respond" {
+                    return Some((cap.namespace.clone(), role.method.clone()));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// 人类交互响应端点——前端用户操作（选择选项/拒绝/取消）经此提交。
 ///
-/// 交互应答转发（服务角色解析，ADR 2026-08-28）：经 capability_handlers 按
-/// namespace "human-interaction" 路由到 responds 声明方（McpBridge 从 provides
-/// 声明派生 plugin_id + tool_prefix），唤醒 wait_for_choice 阻塞中的请求。
-/// 内核不点名插件 id/工具名——换交互插件或改工具名内核零改动。
+/// 交互应答转发（P1-3 声明驱动）：路由目标 (namespace, method) 从插件
+/// provides 声明的 `interaction-respond` 协议角色解析；应答载荷**原样透传**
+/// （`{request_id, response: <body>}` 信封），载荷键契约（response_type 等）
+/// 由交互插件自持——内核零载荷知识。
 async fn interaction_response_handler(
     State(state): State<AppState>,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -1922,15 +2353,20 @@ async fn interaction_response_handler(
         ));
     };
 
+    let manifests = state.manifests.read().await.clone();
+    let Some((namespace, method)) = resolve_interaction_responder(&manifests) else {
+        return Ok(axum::Json(serde_json::json!({
+            "success": false,
+            "error": "no plugin declares the interaction-respond protocol role"
+        })));
+    };
+
     let inputs = serde_json::json!({
         "request_id": request_id,
-        "response_type": body.get("response_type").and_then(|v| v.as_str()).unwrap_or("answered"),
-        "selected_option": body.get("selected_option").and_then(|v| v.as_str()),
-        "answers": body.get("answers"),
-        "feedback": body.get("feedback").and_then(|v| v.as_str()),
+        "response": body,
     });
 
-    match registry.route("human-interaction", "respond", inputs).await {
+    match registry.route(&namespace, &method, inputs).await {
         Ok(data) => Ok(axum::Json(serde_json::json!({
             "success": true,
             "request_id": request_id,

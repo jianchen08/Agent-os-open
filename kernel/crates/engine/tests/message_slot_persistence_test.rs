@@ -13,7 +13,7 @@
 //!
 //! 这些断言共同证明 B1（两套 seq 写入器导致的 seq 冲突）在新模型下不复存在。
 
-use agentos_core::traits::MessageQueryOpts;
+use agentos_core::traits::{MessageQueryOpts, StorageBackend};
 use agentos_core::types::MessageRecord;
 use agentos_engine::SqliteStore;
 use serde_json::json;
@@ -504,9 +504,14 @@ fn test_apply_ops_all_slots_have_blob() {
 /// thinking_strength/_assistant_id_assigned/_pending_message_ops）——这些属于
 /// "本轮运行"而非"管道累计状态"，写进 checkpoint 只会在恢复时覆盖下一轮的
 /// 新输入（重启后旧 user 消息被重放消费）。累计标量（track.*/task.* 等）保留。
+///
+/// 剥离集 = 内核自有键（store 内置表）∪ 插件声明键（P1-4 声明化）：本测试按
+/// 生产接线注入声明键并集（thinking_strength 由 llm_core manifest 声明、api
+/// 经 StorageBackend::set_declared_volatile_keys 注入），在落档点单点验证。
 #[test]
 fn test_save_checkpoint_strips_volatile_run_keys() {
     let store = agentos_engine::SqliteStore::open_memory().unwrap();
+    store.set_declared_volatile_keys(&["thinking_strength".to_string()]);
     let state = serde_json::json!({
         "pipeline_id": "p1",
         "message": "旧轮消息",

@@ -5,6 +5,8 @@
  * 不 mock pipelineStore，验证消息在 store 中的完整生命周期
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as handlersMod from '@/services/websocket/streaming/handlers'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -41,11 +43,11 @@ vi.mock('@/utils/retry', () => ({
 }))
 
 describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
-  let pipelineStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
-  let handleStreamStart: typeof import('@/services/websocket/streaming/handlers').handleStreamStart
-  let handleStreamEnd: typeof import('@/services/websocket/streaming/handlers').handleStreamEnd
-  let handleNewMessage: typeof import('@/services/websocket/streaming/handlers').handleNewMessage
-  let handleTextDelta: typeof import('@/services/websocket/streaming/handlers').handleTextDelta
+  let pipelineStore: pipelineMessageStoreMod.usePipelineMessageStore
+  let handleStreamStart: handlersMod.handleStreamStart
+  let handleStreamEnd: handlersMod.handleStreamEnd
+  let handleNewMessage: handlersMod.handleNewMessage
+  let handleTextDelta: handlersMod.handleTextDelta
 
   const PIPELINE_ID = '39ef1314a7b9000000000000'
   const MESSAGE_ID = 'msg_a37d345d00000000'

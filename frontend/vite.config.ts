@@ -39,6 +39,16 @@ export default defineConfig(({ mode }) => {
       // 6390：避开 container_22404 的 5289/5290/6290。CLI 通过 --port 覆盖；此处为 vite 默认。
       port: 6390,
       strictPort: false,
+      // dev 安全头：与 nginx.conf 生产 CSP 同基线（含 script-src 'unsafe-inline'：
+      // 生产侧是 WebviewWidget srcDoc 内联脚本所必需，dev 侧另有 React Refresh
+      // preamble 与 HMR 内联脚本）。差异仅在于 dev 无 nginx 的 always/继承语义。
+      headers: {
+        'Content-Security-Policy':
+          "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; frame-src 'self' blob: data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'SAMEORIGIN',
+        'Referrer-Policy': 'strict-origin-when-cross-origin',
+      },
       proxy: {
         '/api': {
           target: apiTarget,

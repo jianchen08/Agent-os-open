@@ -189,7 +189,6 @@ class WeComAdapter(BaseComboAdapter):
         Returns:
             解密后的消息内容（用于验证）或空字符串
         """
-        # 解析 XML 获取加密内容
         encrypt_content = _extract_encrypt(body)
 
         # 验证签名

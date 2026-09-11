@@ -1,7 +1,7 @@
 /** useRealtimeEvents Hook 订阅实时 WebSocket 事件并路由到 layout mode store 进行展示。 */
 
 import { useEffect } from 'react'
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { WS_LOCAL_EVENTS, WS_SERVER_EVENTS } from '@/constants/websocket'
 import {
   readLongTermTasks,
   updateLongTermTasksCache,
@@ -11,10 +11,10 @@ import {
   invalidatePipelineRuns,
   invalidatePipelineStates,
 } from '@/hooks/queries/usePipelineRunsQuery'
-import { invalidateSessions } from '@/hooks/queries/useSessionsQuery'
-import { readSessions } from '@/hooks/queries/useSessionsQuery'
+import { invalidateSessions, readSessions  } from '@/hooks/queries/useSessionsQuery'
 import * as tokenLifecycle from '@/services/auth/tokenLifecycle'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { useChatInputStore } from '@/stores/chatInputStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -60,8 +60,8 @@ export function useRealtimeEvents(): void {
       if (!mainPipelineId) return
 
       // 走 backfill（after_sequence 尾部游标读）而非 init（全量替换）：
-      // 0.2 消息在 SQLite（message_slots+blobs），游标分页已下推 SQL——backfill
-      // 是 O(增量窗口) 的索引查询，重连补漏秒级；init 全量替换会丢弃刷新前
+      // 0.2 消息分页契约由内核持读面（游标已下推存储层）——backfill
+      // 是 O(增量窗口) 的查询，重连补漏秒级；init 全量替换会丢弃刷新前
       // 的一切本地状态，重连场景不需要。
       usePipelineMessageStore
         .getState()
@@ -143,7 +143,7 @@ export function useRealtimeEvents(): void {
     // Subscribe to all events
 
     // WebSocket lifecycle（仅重连时补漏，首次连接由 setActiveSession 负责加载）
-    globalWS.subscribe('reconnected', handleWsReconnect)
+    globalWS.subscribe(WS_LOCAL_EVENTS.RECONNECTED, handleWsReconnect)
 
     // Task lifecycle events
     // （task_status_update / task_status_changed 当前后端推送路径静默跳过、
@@ -203,22 +203,36 @@ export function useRealtimeEvents(): void {
         sourceLabel: '前端',
       })
     }
-    globalWS.subscribe('user_input_send_timeout', handleUserInputSendTimeout)
+    globalWS.subscribe(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, handleUserInputSendTimeout)
 
     /**
      * pending 输入队列同步（ADR-2026-08-26）：内核入队/消费/修改/删除时推送
      * 全量列表，前端据此刷新队列条（执行中发送的消息在等待窗口内可见可管理）。
+     * action="returned"（用户裁定 2026-09-11）：停止生成时内核同步清队列并把
+     * 退回条目随事件发还——回填输入框（追加语义，保留已有草稿）+ 清空队列条。
      */
     const handlePendingInputsChanged = (eventData: {
-      data?: { pipeline_id?: string; items?: unknown[] }
+      data?: { pipeline_id?: string; action?: string; items?: unknown[] }
     }) => {
       const data = eventData?.data
       const pipelineId = data?.pipeline_id
       if (!pipelineId) return
       const items = (data?.items ?? []) as import('@/services/api/pipelines').PendingInputItem[]
+      if (data?.action === 'returned') {
+        // 只回填用户消息：trigger/task/system 来源的条目（如子任务完成通知）
+        // 不是用户输入，退回输入框只会刷屏——丢弃（内核已一并出队）
+        const contents = items
+          .filter((item) => item.source === 'user')
+          .map((item) => item.content)
+          .filter((c): c is string => Boolean(c))
+          .join('\n')
+        if (contents) useChatInputStore.getState().requestInsert(contents)
+        usePendingInputStore.getState().syncFromEvent(pipelineId, [])
+        return
+      }
       usePendingInputStore.getState().syncFromEvent(pipelineId, items)
     }
-    globalWS.subscribe('pending_inputs_changed', handlePendingInputsChanged)
+    globalWS.subscribe(WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED, handlePendingInputsChanged)
 
     /**
      * 上下文压缩彻底失败（context_window_guard 经 frontend.emit 透传）：
@@ -239,7 +253,7 @@ export function useRealtimeEvents(): void {
         sourceLabel: '上下文压缩',
       })
     }
-    globalWS.subscribe('compression_failed', handleCompressionFailed)
+    globalWS.subscribe(WS_SERVER_EVENTS.COMPRESSION_FAILED, handleCompressionFailed)
 
     /**
      * 被同账号新连接替换（B10 单连接踢旧，code=4000）：本页已永久失联且不再
@@ -257,7 +271,7 @@ export function useRealtimeEvents(): void {
         sourceLabel: '前端',
       })
     }
-    globalWS.subscribe('kicked_by_replacement', handleKickedByReplacement)
+    globalWS.subscribe(WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT, handleKickedByReplacement)
 
     // visibility 回前台主动重连：浏览器后台时节流 setInterval 心跳 + uvicorn ws_ping_timeout
     // 会掐断连接，但 onclose 可能在标签页冻结期间被延迟。回前台时主动检测：连接已断则重连，
@@ -291,16 +305,17 @@ export function useRealtimeEvents(): void {
 
     return () => {
       // WebSocket lifecycle
-      globalWS.unsubscribe('reconnected', handleWsReconnect)
+      globalWS.unsubscribe(WS_LOCAL_EVENTS.RECONNECTED, handleWsReconnect)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
 
       // Task lifecycle events
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted)
-      globalWS.unsubscribe('user_input_send_timeout', handleUserInputSendTimeout)
-      globalWS.unsubscribe('pending_inputs_changed', handlePendingInputsChanged)
-      globalWS.unsubscribe('kicked_by_replacement', handleKickedByReplacement)
+      globalWS.unsubscribe(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, handleUserInputSendTimeout)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED, handlePendingInputsChanged)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.COMPRESSION_FAILED, handleCompressionFailed)
+      globalWS.unsubscribe(WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT, handleKickedByReplacement)
     }
   }, [bumpWorkspaceDataVersion])
 }

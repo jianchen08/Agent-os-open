@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """成本控制 MCP 服务端——纯接口适配层。
 
-老代码从 0.1 src/cost_control/ 原封不动复制到本目录（平铺），
-本文件只做接口适配：调用老代码逻辑，通过 MCP SDK 暴露为工具。
+本目录为实现模块（平铺），本文件只做接口适配：
+调用同目录实现模块，通过 MCP SDK 暴露为工具。
 
 config/cost-control 域：
 新增 /ext/cost_control/config/cost-control GET/PUT —— 成本控制 **YAML 配置
@@ -15,10 +15,8 @@ routes_config.py 的 cost-control 段（_DEFAULT_COST_CONTROL 兜底 + 全文覆
 """
 from __future__ import annotations
 
-import base64
 import copy
 import datetime
-import json
 import logging
 import os
 import sys
@@ -28,18 +26,28 @@ from typing import Any
 
 import yaml
 
-sys.path.insert(0, os.path.dirname(__file__))  # 让同目录老代码的导入可用
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-from budget_manager import (
+_paths = bootstrap_plugin(__file__)  # 插件目录（budget_manager 等平铺模块）+ plugins/shared 根（kernel_db/http_json）入 sys.path
+
+from budget_manager import (  # noqa: E402
     BudgetAlert,
     BudgetManager,
     BudgetStatus,
     reset_budget_manager,
 )
-from exceptions import BudgetExceededException, QuotaExhaustedException
+from exceptions import BudgetExceededException, QuotaExhaustedException  # noqa: E402
+from config import CostControlConfig, get_cost_control_config  # noqa: E402
+from kernel_db import kernel_db_path  # noqa: E402
+import traces_usage  # noqa: E402 — traces llm_usage 聚合 SQL 单点（与 monitoring 同源）
+from http_json import (  # noqa: E402 — HTTP 响应封装公共实现，调用点零改名
+    decode_body as _decode_body,
+    error as _error,
+    json_response as _json_response,
+    ok as _ok,
+)
 
-from agentos_plugin_sdk import AgentOSPlugin
-from config import CostControlConfig, get_cost_control_config
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("cost_control")
@@ -66,44 +74,11 @@ def _serialize_status(status: BudgetStatus) -> dict[str, Any]:
     return data
 
 
-def _traces_daily_tokens() -> int:
-    """从 traces 表聚合当日 LLM token 用量（G5 账本替代源，同源同量）。
-
-    BudgetManager 内存账本无上游 record_usage（管道 track 走 record_metric，
-    不写此账本），今日消耗取 traces.patch_data.llm_usage（llm_core 每轮
-    落库的单轮用量，created_at 当日累计）——与 monitoring token-usage 同源。
-    DB 缺失降级 0（与 monitoring 同策略）。预算/限额语义仍由 BudgetManager
-    内存持有（check_budget/record_usage 的预留-兑付逻辑保留）。
-    """
-    import sqlite3
-
-    db_path = _resolve_project_root() / "agentos_kernel.db"
-    if not db_path.is_file():
-        return 0
-    try:
-        conn = sqlite3.connect(str(db_path))
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT COALESCE(SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), 0)"
-                " FROM traces"
-                " WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
-                "   AND substr(created_at, 1, 10) = date('now')"
-            )
-            row = cur.fetchone()
-            return int(row[0]) if row else 0
-        finally:
-            conn.close()
-    except sqlite3.Error as exc:  # noqa: BLE001 — 查询失败降级 0（契约不破坏）
-        logger.warning("[cost_control] traces 当日用量聚合失败（降级 0）: %s", exc)
-        return 0
-
-
 def _trace_stats_dict() -> dict[str, Any]:
     """从 traces 聚合全部用量（今日/本月/按模型/明细），供统计与报表。"""
     import sqlite3
 
-    db_path = _resolve_project_root() / "agentos_kernel.db"
+    db_path = kernel_db_path()
     stats: dict[str, Any] = {
         "daily": 0,
         "monthly": 0,
@@ -116,16 +91,7 @@ def _trace_stats_dict() -> dict[str, Any]:
     try:
         conn = sqlite3.connect(str(db_path))
         try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT json_extract(patch_data, '$.llm_usage.input_tokens'),"
-                "       json_extract(patch_data, '$.llm_usage.output_tokens'),"
-                "       json_extract(patch_data, '$.llm_usage.total_tokens'),"
-                "       json_extract(patch_data, '$.llm_model'),"
-                "       created_at"
-                " FROM traces WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
-            )
-            rows = cur.fetchall()
+            rows = traces_usage.fetch_usage_rows(conn)
             for inp, out, total, model, created_at in rows:
                 total = int(total) if total is not None else 0
                 stats["total"] += total
@@ -380,50 +346,12 @@ def _read_cost_control_yaml() -> dict[str, Any]:
 
 
 def _write_cost_control_yaml(data: dict[str, Any]) -> None:
-    """全文覆写成本控制 YAML（写整文件）。"""
+    """全文覆写成本控制 YAML（原子写：临时文件 + os.replace，中断不留半文件）。"""
     _COST_CONTROL_YAML.parent.mkdir(parents=True, exist_ok=True)
-    with open(_COST_CONTROL_YAML, "w", encoding="utf-8") as f:
+    tmp_path = _COST_CONTROL_YAML.with_suffix(".yaml.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         yaml.dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """把任意 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
-    return {"success": True, "data": data}
-
-
-def _error(message: str, status: int = 503) -> dict[str, Any]:
-    """错误响应：{success:false, error}。503 表示 sidecar 未就绪。"""
-    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 → JSON dict；空 body 返回 {}）。"""
-    if not raw_body:
-        return {}
-    decoded = raw_body
-    try:
-        candidate = base64.b64decode(raw_body).decode("utf-8")
-        if candidate.lstrip().startswith(("{", "[")):
-            decoded = candidate
-    except Exception:  # noqa: BLE001 —— 非 base64 明文 body 直接按 JSON 解
-        pass
-    try:
-        parsed = json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON body: {exc}") from exc
-    return parsed if isinstance(parsed, dict) else {}
+    os.replace(tmp_path, _COST_CONTROL_YAML)
 
 
 def _reshape_usage_statistics(raw: dict[str, Any]) -> dict[str, Any]:
@@ -442,30 +370,13 @@ def _reshape_usage_statistics(raw: dict[str, Any]) -> dict[str, Any]:
 
     import sqlite3
 
-    db_path = _resolve_project_root() / "agentos_kernel.db"
+    db_path = kernel_db_path()
     if db_path.is_file():
         try:
             conn = sqlite3.connect(str(db_path))
             try:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT COALESCE(SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), 0)"
-                    " FROM traces"
-                    " WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
-                    "   AND substr(created_at, 1, 10) = date('now')"
-                )
-                row = cur.fetchone()
-                if row:
-                    daily_tokens = int(row[0])
-                cur.execute(
-                    "SELECT COALESCE(SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), 0)"
-                    " FROM traces"
-                    " WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
-                    "   AND substr(created_at, 1, 7) = strftime('%Y-%m', 'now')"
-                )
-                row = cur.fetchone()
-                if row:
-                    monthly_tokens = int(row[0])
+                daily_tokens = traces_usage.sum_total_tokens_daily(conn)
+                monthly_tokens = traces_usage.sum_total_tokens_monthly(conn)
             finally:
                 conn.close()
         except sqlite3.Error as exc:  # noqa: BLE001 — 查询失败保留 manager 账本值

@@ -23,7 +23,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _RUNTIME_SCRIPT = Path(__file__).parent / "runtime" / "dsh-rpc-bridge.mjs"
-_DEFAULT_REPO_ROOT = r"D:\reference_repos\deepseek-harness-rc8"
+_REPO_ROOT_ENV = "AGENTOS_DSH_REPO_ROOT"
 _DEFAULT_CWD = os.getcwd()
 
 _JSONRPC_PARSE_ERROR = -32700
@@ -32,6 +32,18 @@ _JSONRPC_INTERNAL = -32000
 
 class BridgeUnavailableError(RuntimeError):
     """DSH runtime 不可用（未配置仓库 / Node 缺失 / 启动失败）。"""
+
+
+def _background_task_done(label: str, task: asyncio.Task[None]) -> None:
+    """fire-and-forget 后台任务的完成回调：异常必须留痕，禁静默丢失。
+
+    取消属正常收尾（teardown 路径）；其余异常以 error 级日志可见。
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("[dsh-bridge] 后台任务 %s 异常退出: %s", label, exc, exc_info=exc)
 
 
 class DshRuntimeBridge:
@@ -45,7 +57,9 @@ class DshRuntimeBridge:
         boot_timeout_s: float = 60.0,
         extra_plugins_dir: str | None = None,
     ) -> None:
-        self._repo_root = repo_root or os.environ.get("AGENTOS_DSH_REPO_ROOT") or _DEFAULT_REPO_ROOT
+        # repo_root 解析序：显式参数 > 环境变量；不再有机器特定硬编码缺省——
+        # 未配置时 _ensure_proc fail-visible（BridgeUnavailableError 指明需设的 env）。
+        self._repo_root = repo_root or os.environ.get(_REPO_ROOT_ENV, "")
         self._cwd = cwd or _DEFAULT_CWD
         self._call_timeout_s = call_timeout_s
         self._boot_timeout_s = boot_timeout_s
@@ -54,6 +68,7 @@ class DshRuntimeBridge:
         self._id_counter = 0
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._server_tools: list[dict[str, Any]] | None = None
 
@@ -67,10 +82,15 @@ class DshRuntimeBridge:
         await self._teardown(quiet=True)
         if not _RUNTIME_SCRIPT.is_file():
             raise BridgeUnavailableError(f"dsh runtime script missing: {_RUNTIME_SCRIPT}")
+        if not self._repo_root:
+            raise BridgeUnavailableError(
+                f"DSH 仓库根未配置：需设置环境变量 {_REPO_ROOT_ENV} 指向已构建的 "
+                "deepseek-harness checkout（或在构造 DshRuntimeBridge 时显式传入 repo_root）"
+            )
         if not Path(self._repo_root).is_dir():
             raise BridgeUnavailableError(
                 f"DSH repo root not found: {self._repo_root} "
-                "(set AGENTOS_DSH_REPO_ROOT to a built deepseek-harness checkout)"
+                f"(set {_REPO_ROOT_ENV} to a built deepseek-harness checkout)"
             )
         env = {**os.environ, "AGENTOS_DSH_REPO_ROOT": self._repo_root}
         if self._extra_plugins_dir:
@@ -85,20 +105,26 @@ class DshRuntimeBridge:
         )
         self._reader_task = asyncio.create_task(self._read_loop())
         # 后台排空 stderr（Node 侧日志），避免管道写满阻塞子进程。
-        asyncio.create_task(self._drain_stderr())
+        # 引用保存 + 完成回调：异常经回调留痕，任务不再无引用静默丢失。
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
+        self._stderr_task.add_done_callback(
+            lambda t: _background_task_done("drain_stderr", t)
+        )
         return self._proc
 
     async def _drain_stderr(self) -> None:
+        """后台排空子进程 stderr（Node 侧日志转 debug）。
+
+        不在此吞异常：任何失败（含流读取错误）直接传播，经任务完成回调
+        ``_background_task_done`` 以 error 级留痕。
+        """
         proc = self._proc
         if proc is None or proc.stderr is None:
             return
-        try:
-            async for line in proc.stderr:
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    logger.debug("[dsh-bridge] %s", text)
-        except Exception:  # noqa: BLE001 - 排空任务的任何失败都只影响日志
-            pass
+        async for line in proc.stderr:
+            text = line.decode("utf-8", errors="replace").rstrip()
+            if text:
+                logger.debug("[dsh-bridge] %s", text)
 
     async def _read_loop(self) -> None:
         proc = self._proc
@@ -119,7 +145,7 @@ class DshRuntimeBridge:
                 except ValueError:
                     logger.warning("[dsh-bridge] bad frame: %s", text[:120])
                     continue
-                fut = self._pending.pop(frame.get("id"), None)  # type: ignore[arg-type]
+                fut = self._pending.pop(frame.get("id"), None)  # type: ignore[arg-type]  # frame.get 返回 Any，pop 键型按 str 收窄
                 if fut is not None and not fut.done():
                     fut.set_result(frame)
         finally:
@@ -134,9 +160,20 @@ class DshRuntimeBridge:
             self._reader_task.cancel()
             try:
                 await self._reader_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+            except asyncio.CancelledError:
+                pass  # 上行刚 cancel() 本任务，等到的就是取消——teardown 预期路径
+            except Exception:  # noqa: BLE001
+                logger.exception("[dsh-bridge] reader task raised during teardown")
             self._reader_task = None
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except asyncio.CancelledError:
+                pass  # 上行刚 cancel() 本任务，等到的就是取消——teardown 预期路径
+            except Exception:  # noqa: BLE001
+                logger.exception("[dsh-bridge] stderr task raised during teardown")
+            self._stderr_task = None
         if self._proc is not None:
             if self._proc.returncode is None:
                 self._proc.kill()

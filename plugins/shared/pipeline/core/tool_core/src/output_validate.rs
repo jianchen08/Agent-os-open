@@ -3,8 +3,8 @@
 //! prepare 链的 tool_schema 插件经内核 tool-surface capability 把
 //! `tool_output_contracts`（tool_name → {schema, render}）写入 state。
 //! tool_core 执行工具成功后按
-//! `schema` 校验返回值——这是 output_schema 的第一个消费端：此前该字段全链路
-//! 零消费（41 工具仅 3 个填写，声明无意义）。
+//! `schema` 校验返回值——这是 output_schema 声明的第一个消费端
+//! （声明必须有消费端才有约束意义）。
 //!
 //! 实现为**常用子集**校验器（不引 jsonschema 全量 crate——输出契约当前只用到
 //! 这些关键字，DSH defineTool 的 output.schema 同样限于此子集）：

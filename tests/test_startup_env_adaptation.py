@@ -149,8 +149,7 @@ class TestWslProjectDirDynamic:
 
 # ---------------------------------------------------------------------------
 # 4.6 宿主端口参数化（支持多实例共存，不互相冲突）
-# 0.2 compose 仅承载 Redis（b72c0eb00 裁撤 frontend 容器），前端/反代端口
-# 参数化断言随之退役，仅存 Redis 侧。
+# 0.2 compose 仅承载 Redis，端口参数化断言只覆盖 Redis 侧。
 # ---------------------------------------------------------------------------
 class TestPortParameterization:
     """验证宿主端口已参数化（${VAR:-default}），多实例设不同 env 即可隔离。
@@ -188,8 +187,8 @@ class TestInstallScriptsPortability:
             "install_wsl_docker.sh 挂载测试应动态推导项目路径（dirname/pwd）"
         )
 
-    # install.sh 已随 0.1 废弃脚本清理批删除（89eaa72a），
-    # 其 redis 健康检查用例随之退役；install_wsl_docker.sh 用例保留。
+    # 启动脚本现役面 = install_wsl_docker.sh（install.sh 已不存在），
+    # redis 健康检查断言由其用例承载。
 
 
 # ---------------------------------------------------------------------------

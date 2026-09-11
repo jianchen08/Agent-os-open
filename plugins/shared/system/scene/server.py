@@ -14,27 +14,25 @@ plugin.json ``http_endpoints`` 声明（/ext/scene_service/scenes/**）；
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
-_SYSTEM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _SYSTEM_DIR not in sys.path:
-    sys.path.insert(0, _SYSTEM_DIR)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-# http.handle 响应封装（内核 HttpHandleResponse/ToolExecutionResult 样板）：
-# 公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
-_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _SHARED_ROOT not in sys.path:
-    sys.path.insert(0, _SHARED_ROOT)
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
+
+# system/ 根：本目录作为 `scene` 包被导入（scene.manager / scene.templates）的
+# 路径前提——组根不随 bootstrap 注入（ADR 2026-09-08-plugin-bootstrap-sink 决策 1）
+if _paths.group_root not in sys.path:
+    sys.path.insert(0, _paths.group_root)
+
 from http_json import (  # noqa: E402
     decode_body as _decode_body,
     json_response as _json_response,
     ok as _ok,
 )
 
-# 直接导入同目录老代码（sys.path 自举后导入——E402 依 workspace 迁移同款）
+# 同目录 `scene` 包（sys.path 自举后导入）
 from scene.manager import SceneManager  # noqa: E402
 from scene.templates import list_templates  # noqa: E402
 

@@ -27,7 +27,7 @@ import shlex
 from unittest.mock import AsyncMock
 
 import pytest
-from isolation_types import ExecutionResult
+from agentos_plugin_sdk.isolation_types import ExecutionResult
 from providers.docker_provider import DockerProvider
 
 

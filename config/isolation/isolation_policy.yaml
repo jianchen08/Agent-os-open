@@ -54,6 +54,31 @@ tools:
     isolation: non_isolated
     execution: host_direct
 
+  # --- 浏览器操作类（经 MCP Bridge 网关，沙箱内发起）---
+  # 隔离任务：isolation_guard 注入 _container_id → 工具 sidecar 经 docker exec
+  # 在容器内发起 MCP 调用（沙箱内 MCP Client → 宿主 Bridge → Playwright）。
+  # 审批由 Bridge 侧治理层（token/白名单/域名）承担，非隔离降级路径才弹审批
+  # （execution 用 browser_mcp 标记，不进 security_check 的 command_in_container
+  # 全量审批轨道——浏览器调用不执行任意命令）。
+  browser_navigate:
+    isolation: isolated
+    execution: browser_mcp
+  browser_snapshot:
+    isolation: isolated
+    execution: browser_mcp
+  browser_click:
+    isolation: isolated
+    execution: browser_mcp
+  browser_type:
+    isolation: isolated
+    execution: browser_mcp
+  browser_take_screenshot:
+    isolation: isolated
+    execution: browser_mcp
+  browser_console_messages:
+    isolation: isolated
+    execution: browser_mcp
+
 # ============================================
 # 分类级规则（匹配不到具体工具名时，按分类兜底）
 # ============================================

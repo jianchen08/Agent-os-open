@@ -830,10 +830,16 @@ pub fn output_schema_error(decl: &serde_json::Value) -> Option<String> {
     None
 }
 
-/// 注册闸：`provides.capabilities` 公告的每个方法必须有**已声明**的工具
+/// 注册闸：`provides.capabilities` 公告的每个方法必须有**已声明**的承载面
 /// （`{tool_prefix}.{method}`；tool_prefix 缺省 = namespace 的 '-'→'_'）。
 ///
-/// 若方法公告了但对应工具未声明 → 消费者可见 `namespace.method` 却调不到 =
+/// 两轴均可回铺（对齐 [`agentos_core::traits::ManifestCapabilities`] 声明面）：
+/// - **tools 轴**（`capabilities.tools[].name`）：进 LLM 面，声明即注册；
+/// - **services 轴**（`capabilities.services[].name`，全点名）：不进 LLM 面，
+///   经既有通道调用（provides 命名空间 / tool-executor 显式 plugin_id 等），
+///   wire 协议不变（MCP tools/call，ADR D.3）。
+///
+/// 若方法公告了但两轴都未声明 → 消费者可见 `namespace.method` 却调不到 =
 /// **"服务声明了但没注册"**（fail-closed）。G2 另外查"已声明 vs 实际暴露"，
 /// 这里查"公告 vs 已声明"，两层合起来才保证公告的服务真能调。
 ///
@@ -842,12 +848,13 @@ pub fn provides_methods_unbacked(m: &agentos_core::traits::PluginManifest) -> Ve
     let Some(provides) = &m.provides else {
         return Vec::new();
     };
-    let declared_tools: std::collections::HashSet<&str> = m
+    let mut declared: std::collections::HashSet<&str> = m
         .capabilities
         .tools
         .iter()
         .map(|t| t.name.as_str())
         .collect();
+    declared.extend(m.capabilities.services.iter().map(|s| s.name.as_str()));
     let mut out = Vec::new();
     for cap in &provides.capabilities {
         let prefix = cap
@@ -856,7 +863,7 @@ pub fn provides_methods_unbacked(m: &agentos_core::traits::PluginManifest) -> Ve
             .unwrap_or_else(|| cap.namespace.replace('-', "_"));
         for method in &cap.methods {
             let expected = format!("{prefix}.{method}");
-            if !declared_tools.contains(expected.as_str()) {
+            if !declared.contains(expected.as_str()) {
                 out.push(expected);
             }
         }
@@ -1173,7 +1180,7 @@ mod tests {
             route_id: format!("r_{path}"),
             method: method.to_string(),
             path: path.to_string(),
-            auth: "none".to_string(),
+            auth: Some("none".to_string()),
             handler_capability: "http.handle".to_string(),
             timeout_ms: None,
             max_concurrency: None,
@@ -1218,7 +1225,7 @@ mod tests {
             route_id: format!("r_{path}"),
             method: method.to_string(),
             path: path.to_string(),
-            auth: "none".to_string(),
+            auth: Some("none".to_string()),
             handler_capability: "http.handle".to_string(),
             timeout_ms: None,
             max_concurrency: None,
@@ -1312,7 +1319,7 @@ mod tests {
             route_id: format!("{}-{}", plugin_id, suffix),
             method: "GET".to_string(),
             path: format!("/ext/{}/{}", plugin_id, suffix),
-            auth: "none".to_string(),
+            auth: Some("none".to_string()),
             handler_capability: "http.handle".to_string(),
             timeout_ms: None,
             max_concurrency: None,
@@ -1430,6 +1437,8 @@ mod tests {
     fn make_manifest_for_sort(id: &str) -> agentos_core::traits::PluginManifest {
         use agentos_core::traits::{HostType, PluginManifest, PluginType};
         PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: id.to_string(),
             name: format!("P {}", id),
             description: None,
@@ -1592,7 +1601,7 @@ mod tests {
         );
     }
 
-    // ── provides 服务注册检查（公告的方法必须有已声明工具） ──────────────
+    // ── provides 服务注册检查（公告的方法必须有已声明承载面：tools/services 两轴）──
 
     #[test]
     fn provides_methods_unbacked_detects_dead_advertisement() {
@@ -1626,5 +1635,34 @@ mod tests {
         });
         let m: agentos_core::traits::PluginManifest = serde_json::from_value(v).unwrap();
         assert!(provides_methods_unbacked(&m).is_empty());
+    }
+
+    #[test]
+    fn provides_methods_backed_by_services_axis_is_clean() {
+        // services 轴回铺（human 插件现行形态）：interaction.* 声明在
+        // capabilities.services（全点名），provides 以 tool_prefix+method 公告
+        // ——公告与声明对得上即 clean，不再误报"未注册"。
+        let v = json!({
+            "id": "svc", "name": "S", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": {
+                "tools": [ {"name": "human_interaction", "description": "d"} ],
+                "services": [
+                    {"name": "interaction.send_notification", "description": "d"},
+                    {"name": "interaction.create_choice", "description": "d"}
+                ]
+            },
+            "provides": { "capabilities": [ {
+                "namespace": "human-interaction", "tool_prefix": "interaction",
+                "methods": ["send_notification", "create_choice", "respond"]
+            } ] }
+        });
+        let m: agentos_core::traits::PluginManifest = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            provides_methods_unbacked(&m),
+            vec!["interaction.respond".to_string()],
+            "services 轴已回铺的方法 clean；两轴都未声明的仍要抓出"
+        );
     }
 }

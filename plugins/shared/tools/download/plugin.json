@@ -63,6 +63,41 @@
             "url",
             "save_path"
           ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": {
+              "type": "boolean"
+            },
+            "path": {
+              "type": "string",
+              "description": "下载产物落盘路径"
+            },
+            "size": {
+              "type": "integer",
+              "description": "文件字节数"
+            },
+            "duration": {
+              "type": "number",
+              "description": "下载耗时（秒）"
+            },
+            "avg_speed": {
+              "type": "string",
+              "description": "平均速度（人类可读，如 1.2 MB/s）"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "success",
+            "path",
+            "size"
+          ]
         }
       }
     ],
@@ -72,5 +107,6 @@
     ]
   },
   "permissions": {},
-  "priority": 30
+  "priority": 30,
+  "host_group": "light"
 }

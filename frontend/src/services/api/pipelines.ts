@@ -69,6 +69,7 @@ export interface PipelineStateSummary {
   'task.status'?: string
   'task.id'?: string
   'task.ended_at'?: string
+  'task.ws_meta'?: { path?: string }
   'lineage.parent_pipeline_id'?: string
   // 血缘根会话（task_submit 出生写面）：自环子任务管道（thread=自身 id）的
   // 真实归属用户会话，任务管理面板跨会话跳转的定位锚点
@@ -97,6 +98,98 @@ export interface PipelineStateInfo {
   /** memory=内存常驻（当前活跃）/ checkpoint=DB 冷数据兜底 */
   source: 'memory' | 'checkpoint'
   state: PipelineStateSummary
+}
+
+// ── state 摘要视图模型适配层（解耦方案 P2-1，仿 mapThreadToSession 样板）──
+//
+// 内核的扁平点号键（task.status / lineage.origin_session_id / track.llm_usage）
+// 与 run_status/ended/raw_error 三源状态推断只允许出现在本文件；组件层一律
+// 消费下方视图模型——插件 export_fields 键名改动只需改这里的映射单点。
+
+/** 管道 state 摘要视图模型（组件层唯一消费面，不含任何内核原始键名） */
+export interface PipelineStateViewModel {
+  /** 归一运行状态（单一状态出口：run_status 直映，缺省回退三源推断） */
+  status: PipelineStatus
+  /** 循环体阶段（init/main/exit…，多循环体真值） */
+  currentPhase?: string
+  /** 消息条数（迭代轮次的粗粒度指标） */
+  messageCount?: number
+  /** 任务域状态原值（evaluating/planning 等细态不被运行态吞掉） */
+  taskStatus?: string
+  /** 血缘根会话：自环子任务管道（thread=自身 id）的真实归属用户会话 */
+  originSessionId?: string
+  /** 工作区坐标（任务域镜像 task.ws_meta 优先，防会话工作区投影污染） */
+  workspacePath?: string
+  /** 实际运行模型名（llm_core 每轮写入） */
+  llmModel?: string
+  /** 管道上下文窗口上限（用量指示器圆环分母真值） */
+  contextWindow?: number
+  /** LLM token 用量（track 插件跨轮累加） */
+  llmUsage?: PipelineLlmUsage
+  /** state 是否已结束（详情面展示用；状态推断走 status 单一出口） */
+  ended?: boolean
+  /** state 原始错误（详情面展示用） */
+  rawError?: string
+  /** 管道显示名（display_name，state 独有条目的命名来源之一） */
+  displayName?: string
+  /** 管道名（name，display_name 缺席时的命名回退） */
+  name?: string
+}
+
+/** 管道 state 条目视图模型（摘要视图 + 条目级坐标 pipeline_id/thread_id） */
+export interface PipelineStateEntryViewModel extends PipelineStateViewModel {
+  pipelineId: string
+  threadId?: string
+}
+
+/**
+ * 归一运行状态（单一状态出口）：内核 run_status 五态直映（轮中=running 不失
+ * 真）；旧 checkpoint 数据无该键或词汇未知时回退 raw_error→failed /
+ * ended→completed / running 推断。内核新增状态词汇时前端不崩、走推断兜底。
+ */
+export function resolvePipelineRunStatus(summary: PipelineStateSummary): PipelineStatus {
+  const rs = summary.run_status
+  if (rs === 'running' || rs === 'suspended' || rs === 'completed' || rs === 'failed' || rs === 'cancelled') {
+    return rs
+  }
+  if (summary.raw_error) return 'failed'
+  if (summary.ended === true) return 'completed'
+  return 'running'
+}
+
+/** 非空串 → 原值，空串/缺失 → undefined（不伪造空值语义） */
+function nonEmpty(value: string | null | undefined): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/** state 摘要（内核扁平键）→ 视图模型（键名映射单点） */
+export function mapStateSummaryToViewModel(summary: PipelineStateSummary): PipelineStateViewModel {
+  const wsPath =
+    summary['task.ws_meta']?.path ?? summary.ws_meta?.path ?? summary.workspace
+  return {
+    status: resolvePipelineRunStatus(summary),
+    currentPhase: summary.current_phase,
+    messageCount: summary.message_count,
+    taskStatus: nonEmpty(summary['task.status']),
+    originSessionId: nonEmpty(summary['lineage.origin_session_id']),
+    workspacePath: nonEmpty(wsPath),
+    llmModel: nonEmpty(summary.llm_model),
+    contextWindow: typeof summary.context_window === 'number' ? summary.context_window : undefined,
+    llmUsage: summary['track.llm_usage'],
+    ended: summary.ended === true ? true : undefined,
+    rawError: summary.raw_error ?? undefined,
+    displayName: nonEmpty(summary.display_name),
+    name: nonEmpty(summary.name),
+  }
+}
+
+/** state 条目（含 pipeline_id/thread_id 坐标）→ 条目视图模型 */
+export function mapStateInfoToViewModel(info: PipelineStateInfo): PipelineStateEntryViewModel {
+  return {
+    pipelineId: info.pipeline_id,
+    threadId: info.thread_id,
+    ...mapStateSummaryToViewModel(info.state),
+  }
 }
 
 /** 管道 state 摘要列表响应 */
@@ -206,7 +299,7 @@ export interface PendingInputsResponse {
 /** 拉取某管道的待处理输入队列（FIFO 序） */
 export async function fetchPendingInputs(pipelineId: string): Promise<PendingInputItem[]> {
   const response = await apiClient.get<PendingInputsResponse>(
-    `${API_ENDPOINTS.PIPELINES.RUNS.replace('/runs', '')}/${pipelineId}/pending-inputs`,
+    API_ENDPOINTS.PIPELINES.PENDING_INPUTS(pipelineId),
   )
   return response.data.items ?? []
 }
@@ -218,21 +311,17 @@ export async function updatePendingInput(
   content: string,
 ): Promise<void> {
   await apiClient.put(
-    `${API_ENDPOINTS.PIPELINES.RUNS.replace('/runs', '')}/${pipelineId}/pending-inputs/${inputId}`,
+    API_ENDPOINTS.PIPELINES.PENDING_INPUT(pipelineId, inputId),
     { content },
   )
 }
 
 /** 删除单条 pending 输入 */
 export async function deletePendingInput(pipelineId: string, inputId: string): Promise<void> {
-  await apiClient.delete(
-    `${API_ENDPOINTS.PIPELINES.RUNS.replace('/runs', '')}/${pipelineId}/pending-inputs/${inputId}`,
-  )
+  await apiClient.delete(API_ENDPOINTS.PIPELINES.PENDING_INPUT(pipelineId, inputId))
 }
 
 /** 清空某管道全部 pending 输入 */
 export async function clearPendingInputs(pipelineId: string): Promise<void> {
-  await apiClient.delete(
-    `${API_ENDPOINTS.PIPELINES.RUNS.replace('/runs', '')}/${pipelineId}/pending-inputs`,
-  )
+  await apiClient.delete(API_ENDPOINTS.PIPELINES.PENDING_INPUTS(pipelineId))
 }

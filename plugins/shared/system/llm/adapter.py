@@ -130,10 +130,10 @@ def _install_payload_diag_hook() -> None:
                     )
                     while len(_files) > 200:
                         _os.remove(_files.pop(0))
-                except Exception:  # noqa: BLE001
-                    pass
-            except Exception:  # noqa: BLE001
-                pass
+                except Exception as exc:  # noqa: BLE001 —— 清理失败不影响诊断主路径
+                    logger.debug("[payload_diag] 诊断目录轮转清理失败（dir=%s）: %s", _diag_dir, exc)
+            except Exception as exc:  # noqa: BLE001 —— 诊断落盘失败不影响请求主路径
+                logger.debug("[payload_diag] 诊断 body 落盘失败（dir=%s, model=%s）: %s", _diag_dir, model, exc)
 
         # patch 所有 provider transformation 类的 transform_request / async_transform_request。
         # 扫描 litellm.llms 下各 provider 的 chat transformation 模块（openai/deepseek/...），
@@ -196,7 +196,10 @@ def _install_payload_diag_hook() -> None:
         logger.warning("[payload_diag] 拦截钩子安装失败: %s", e)
 
 
-_install_payload_diag_hook()
+# 缓存诊断默认关闭：仅当 AGENTOS_PAYLOAD_DIAG=1 时才安装钩子——避免每次请求
+# 在 INFO 级打印全量 payload（字节级日志放大；生产开启会造成 stderr 洪峰与噪音）。
+if os.getenv("AGENTOS_PAYLOAD_DIAG", "") == "1":
+    _install_payload_diag_hook()
 # === 缓存诊断结束 ===
 
 _diag_logger = logging.getLogger(__name__ + "._diag")
@@ -844,7 +847,6 @@ class _BaseLiteLLMAdapter:
                     len(result_text or ""),
                 )
 
-        # 解析 usage 信息
         usage: dict[str, Any] | None = None
         if hasattr(response, "usage") and response.usage:
             _prompt_details = getattr(response.usage, "prompt_tokens_details", None)
@@ -1439,8 +1441,14 @@ class _BaseLiteLLMAdapter:
                         finish,
                         state.recv_tc_count,
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            # 尽力而为的观察面：结构异常吞掉但留痕（chunk 序号 + 摘要），防静默失明
+            _stream_logger.debug(
+                "[STREAM][RECV] #%d 观察异常（不影响流处理）: %s: %s",
+                state.recv_seq,
+                type(exc).__name__,
+                exc,
+            )
 
     def _build_streaming_response(self, state: _StreamState) -> LLMResponse:
         """拼接累积片段、核算速度统计，构造最终 LLMResponse。"""
@@ -1923,11 +1931,10 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
 
         # ★ litellm.acompletion 在独立线程 + 独立事件循环中运行，流式迭代也
         # 在该线程完成，chunk 经线程安全队列送回主循环：
-        # - litellm 内部同步阻塞（冻结自己的线程）不再影响主事件循环 → 其他管道
-        #   永不陪葬（生产 17:05:34 全进程 0 日志 36 分钟的根因）
+        # - litellm 内部同步阻塞（冻结自己的线程）不影响主事件循环；
         # - CustomStreamWrapper 绑定 worker loop，主循环直接 await 会报
-        #   "attached to a different loop"（生产 20:33:59 MidStreamFallbackError）
-        #   → 主循环只从 queue.Queue 取 chunk，彻底避免跨 loop
+        #   "attached to a different loop" → 主循环只从 queue.Queue 取 chunk，
+        #   彻底避免跨 loop；
         # - 主协程轮询 threading.Event（OS 层事件，到点必然置位/超时，不依赖
         #   任何事件循环调度），超时抛 TimeoutError 透传
         import queue  # noqa: PLC0415

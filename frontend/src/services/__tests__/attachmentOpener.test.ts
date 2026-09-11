@@ -14,6 +14,12 @@ import { openAttachment } from '@/services/attachmentOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { getFileEditorData } from '@/stores/fileEditorRegistry'
 
+// mock sonner（外部 toast 库）：断言失败对用户可感知（错误 toast 弹出）
+const toastErrorMock = vi.fn()
+vi.mock('sonner', () => ({
+  toast: { error: (...args: unknown[]) => toastErrorMock(...args) },
+}))
+
 // Mock fetch
 const fetchMock = vi.fn()
 global.fetch = fetchMock as unknown as typeof fetch
@@ -21,6 +27,7 @@ global.fetch = fetchMock as unknown as typeof fetch
 describe('openAttachment', () => {
   beforeEach(() => {
     fetchMock.mockReset()
+    toastErrorMock.mockClear()
     // 重置 layout store
     useLayoutModeStore.setState({ workspaceTabs: [], activeTabId: null, visitedTabIds: [] })
   })
@@ -71,7 +78,7 @@ describe('openAttachment', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('fetch 失败时不抛异常，content 留空', async () => {
+  it('fetch 网络失败：不抛异常、content 留空，且用户收到错误 toast', async () => {
     fetchMock.mockRejectedValueOnce(new Error('network'))
 
     await expect(
@@ -80,6 +87,18 @@ describe('openAttachment', () => {
 
     const data = getFileEditorData('attach-f5')
     expect(data?.content).toBe('')
+    expect(toastErrorMock).toHaveBeenCalledTimes(1)
+    expect(String(toastErrorMock.mock.calls[0][0])).toContain('b.txt')
+  })
+
+  it('fetch 返回非 2xx：用户收到错误 toast，content 留空', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 404 })
+
+    await openAttachment({ id: 'f5b', name: 'missing.txt', url: '/uploads/missing.txt' })
+
+    expect(toastErrorMock).toHaveBeenCalledTimes(1)
+    expect(String(toastErrorMock.mock.calls[0][0])).toContain('404')
+    expect(getFileEditorData('attach-f5b')?.content).toBe('')
   })
 
   it('Tab 使用 __file_editor__ moduleId 并激活', async () => {

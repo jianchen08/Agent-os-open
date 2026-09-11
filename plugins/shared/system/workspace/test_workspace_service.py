@@ -29,17 +29,23 @@ if str(_SYSTEM_DIR) not in sys.path:
 
 
 def _load_workspace_modules() -> dict[str, Any]:
-    """以真实包名加载 workspace.{models,workspace_service} 并注册 sys.modules。"""
+    """以裸名加载本目录 {models,workspace_service}（与运行时平铺 import 同构）。
+
+    workspace_service 内部 `from models import ...` 依赖插件目录在 sys.path——
+    与 server.py 的 bootstrap_plugin 注入同构；全名 workspace.models 在合宿
+    平铺环境被非包同名模块遮蔽（装载失败根因），不得回退。
+    """
+    if str(_PLUGIN_DIR) not in sys.path:
+        sys.path.insert(0, str(_PLUGIN_DIR))
     out: dict[str, Any] = {}
     for name in ("models", "workspace_service"):
-        mod_name = f"workspace.{name}"
-        if mod_name in sys.modules:
-            out[name] = sys.modules[mod_name]
+        if name in sys.modules:
+            out[name] = sys.modules[name]
             continue
-        spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / f"{name}.py")
+        spec = importlib.util.spec_from_file_location(name, _PLUGIN_DIR / f"{name}.py")
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
-        sys.modules[mod_name] = module
+        sys.modules[name] = module
         spec.loader.exec_module(module)
         out[name] = module
     return out
@@ -288,10 +294,26 @@ def _reset_state_reader() -> None:
 
 
 class TestResolveWorkspaceFromState:
+    """resolve_workspace_from_state 返回 (workspace_path, owner_sub) 元组。"""
+
     def test_reader_not_injected_returns_none(self) -> None:
         _reset_state_reader()
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) is None
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "")
+
+    def test_row_owner_submitted_by_returned(self) -> None:
+        """同行 task.submitted_by 随坐标同源返回（归属闸权威字段）。"""
+        rows = [
+            {
+                "pipeline_id": "p1",
+                "workspace": "D:/ws/owned",
+                "task.submitted_by": "user-a",
+            }
+        ]
+        _MODS["workspace_service"].set_state_reader(lambda: rows)
+        svc = WorkspaceService()
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/owned", "user-a")
+        _reset_state_reader()
 
     def test_row_ws_meta_path_wins_over_project_root(self) -> None:
         """命中行取 ws_meta.path（worktree 坐标），不取 project_root。"""
@@ -304,28 +326,28 @@ class TestResolveWorkspaceFromState:
         ]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == "D:/ws/worktree-1"
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/worktree-1", "")
         _reset_state_reader()
 
     def test_row_workspace_scalar_fallback(self) -> None:
         rows = [{"pipeline_id": "p1", "workspace": "D:/ws/plain"}]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == "D:/ws/plain"
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/plain", "")
         _reset_state_reader()
 
     def test_row_hit_without_workspace_keys_returns_none(self) -> None:
         rows = [{"pipeline_id": "p1", "task.status": "running"}]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) is None
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "")
         _reset_state_reader()
 
     def test_no_matching_row_returns_none(self) -> None:
         rows = [{"pipeline_id": "p2", "workspace": "D:/ws/p2"}]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) is None
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "")
         _reset_state_reader()
 
     def test_async_reader_supported(self) -> None:
@@ -336,7 +358,7 @@ class TestResolveWorkspaceFromState:
 
         _MODS["workspace_service"].set_state_reader(_read)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == "D:/ws/async"
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/async", "")
         _reset_state_reader()
 
     def test_reader_exception_returns_none(self) -> None:
@@ -345,7 +367,7 @@ class TestResolveWorkspaceFromState:
 
         _MODS["workspace_service"].set_state_reader(_boom)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) is None
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "")
         _reset_state_reader()
 
     def test_task_pipeline_prefers_task_ws_meta_and_relocates_merged_worktree(
@@ -375,7 +397,7 @@ class TestResolveWorkspaceFromState:
         ]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == str(project)
+        assert _run(svc.resolve_workspace_from_state("p1")) == (str(project), "")
         _reset_state_reader()
 
     def test_task_pipeline_worktree_alive_returns_worktree_path(self, tmp_path: Path) -> None:
@@ -397,7 +419,7 @@ class TestResolveWorkspaceFromState:
         ]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == str(wt)
+        assert _run(svc.resolve_workspace_from_state("p1")) == (str(wt), "")
         _reset_state_reader()
 
     def test_session_pipeline_without_task_mirror_keeps_ws_meta(self, tmp_path: Path) -> None:
@@ -412,7 +434,7 @@ class TestResolveWorkspaceFromState:
         ]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == str(session_dir)
+        assert _run(svc.resolve_workspace_from_state("p1")) == (str(session_dir), "")
         _reset_state_reader()
 
 
@@ -674,7 +696,7 @@ class TestServerGetFileTreeStatus:
         state_mod.set_state_reader(None)
         _inject_task_service(_FakeTaskService())  # 任务查无 → None
 
-        result = _run(server_mod.get_file_tree("ghost-task"))
+        result = _run(server_mod.get_file_tree("ghost-task", caller={"sub": "user-a"}))
         assert result["workspace_status"] == "no_workspace"
         assert result["tree"] == []
         assert "无工作区" in result["error"]
@@ -684,9 +706,17 @@ class TestServerGetFileTreeStatus:
         server_mod = _load_workspace_server()
         state_mod = _server_state_mod(server_mod)
         missing = "D:/ws/definitely-missing-20260824"
-        state_mod.set_state_reader(lambda: [{"pipeline_id": "p1", "workspace": missing}])
+        state_mod.set_state_reader(
+            lambda: [
+                {
+                    "pipeline_id": "p1",
+                    "workspace": missing,
+                    "task.submitted_by": "user-a",
+                }
+            ]
+        )
 
-        result = _run(server_mod.get_file_tree("p1"))
+        result = _run(server_mod.get_file_tree("p1", caller={"sub": "user-a"}))
         assert result["workspace_status"] == "dir_missing"
         assert missing in result["error"]
         state_mod.set_state_reader(None)
@@ -696,9 +726,17 @@ class TestServerGetFileTreeStatus:
         (tmp_path / "hello.txt").write_text("hi", encoding="utf-8")
         server_mod = _load_workspace_server()
         state_mod = _server_state_mod(server_mod)
-        state_mod.set_state_reader(lambda: [{"pipeline_id": "p1", "workspace": str(tmp_path)}])
+        state_mod.set_state_reader(
+            lambda: [
+                {
+                    "pipeline_id": "p1",
+                    "workspace": str(tmp_path),
+                    "task.submitted_by": "user-a",
+                }
+            ]
+        )
 
-        result = _run(server_mod.get_file_tree("p1"))
+        result = _run(server_mod.get_file_tree("p1", caller={"sub": "user-a"}))
         assert "workspace_status" not in result
         names = [n.get("name") for n in result["tree"]]
         assert "hello.txt" in names
@@ -711,12 +749,103 @@ class TestServerGetFileTreeStatus:
         state_mod = _server_state_mod(server_mod)
         state_mod.set_state_reader(None)
         task_svc = _FakeTaskService()
-        task_svc.tasks["t1"] = _FakeTask("t1", metadata={"ws_meta": {"path": str(tmp_path)}})
+        task_svc.tasks["t1"] = _FakeTask(
+            "t1", metadata={"ws_meta": {"path": str(tmp_path)}, "user_id": "user-a"}
+        )
         _inject_task_service(task_svc)
 
-        result = _run(server_mod.get_file_tree("t1"))
+        result = _run(server_mod.get_file_tree("t1", caller={"sub": "user-a"}))
         assert "workspace_status" not in result
         assert result["tree"], "应扫描到回退通道的工作区文件"
+
+
+class TestWorkspaceOwnershipGate:
+    """U6 归属闸：未认证 / 跨任务归属 → WorkspaceAccessDenied（404 语义）。"""
+
+    def _make_server_with_row(self, tmp_path: Path, submitted_by: str) -> Any:
+        (tmp_path / "hello.txt").write_text("hi", encoding="utf-8")
+        server_mod = _load_workspace_server()
+        state_mod = _server_state_mod(server_mod)
+        row: dict[str, Any] = {"pipeline_id": "p1", "workspace": str(tmp_path)}
+        if submitted_by:
+            row["task.submitted_by"] = submitted_by
+        state_mod.set_state_reader(lambda: [row])
+        return server_mod
+
+    def test_unauthenticated_caller_denied(self, tmp_path: Path) -> None:
+        """caller 缺失 / 无 sub → 一律拒绝（防存在性探测）。"""
+        server_mod = self._make_server_with_row(tmp_path, "user-a")
+        try:
+            with pytest.raises(server_mod.WorkspaceAccessDenied):
+                _run(server_mod.get_file_tree("p1"))
+            with pytest.raises(server_mod.WorkspaceAccessDenied):
+                _run(server_mod.get_file_tree("p1", caller={"sub": ""}))
+        finally:
+            _server_state_mod(server_mod).set_state_reader(None)
+
+    def test_cross_owner_denied(self, tmp_path: Path) -> None:
+        """归属不一致 → 拒绝；行缺归属元数据 → fail-closed 拒绝。"""
+        server_mod = self._make_server_with_row(tmp_path, "user-a")
+        try:
+            with pytest.raises(server_mod.WorkspaceAccessDenied):
+                _run(server_mod.get_file_tree("p1", caller={"sub": "user-b"}))
+
+            no_owner_mod = self._make_server_with_row(tmp_path, "")
+            with pytest.raises(no_owner_mod.WorkspaceAccessDenied):
+                _run(no_owner_mod.get_file_tree("p1", caller={"sub": "user-a"}))
+        finally:
+            _server_state_mod(server_mod).set_state_reader(None)
+
+
+class TestResolveCallerTokenFormats:
+    """内核 token 自解析兼容性（GUI 黑盒测试 2026-09-11）。
+
+    30d1b0959 起登录 token 追加 HMAC 签名尾巴（exp 后还有两段），旧
+    split(":", 3) 解析恒败 → caller 恒空 → 文件预览等归属闸端点全量 404。
+    """
+
+    @staticmethod
+    def _token(payload: str) -> str:
+        import base64
+
+        return base64.b64encode(payload.encode("utf-8")).decode("ascii")
+
+    def test_legacy_4part_token_resolves(self) -> None:
+        server_mod = _load_workspace_server()
+        caller = server_mod._resolve_caller(
+            {"authorization": "Bearer " + self._token("access:user-1:admin:9999999999")}
+        )
+        assert caller == {"sub": "user-1", "username": "admin"}
+
+    def test_hmac_signed_token_resolves(self) -> None:
+        """新格式（30d1b0959 后实测形态）：base64(payload).base64(signature)
+        两段式带点号——payload 内 exp 后还有 :hmac:sign 两段。点号必须先切掉，
+        否则签名段混入解码会破坏 UTF-8（GUI 实测文件预览全量 404 的根因）。"""
+        import base64
+
+        server_mod = _load_workspace_server()
+        payload = self._token(
+            "access:user-1:admin:9999999999:8a7228c9b9d7484bb1ecf53682af04d0:6d0f0536"
+        )
+        signature = base64.b64encode(b"fake-signature-bytes").decode("ascii")
+        token = payload + "." + signature
+        caller = server_mod._resolve_caller({"authorization": "Bearer " + token})
+        assert caller == {"sub": "user-1", "username": "admin"}
+
+    def test_expired_signed_token_rejected(self) -> None:
+        server_mod = _load_workspace_server()
+        caller = server_mod._resolve_caller(
+            {
+                "authorization": "Bearer "
+                + self._token("access:user-1:admin:1:deadbeef:cafe")
+            }
+        )
+        assert caller == {}
+
+    def test_garbage_token_rejected(self) -> None:
+        server_mod = _load_workspace_server()
+        assert server_mod._resolve_caller({"authorization": "Bearer !!!notb64"}) == {}
+        assert server_mod._resolve_caller({"authorization": "Bearer " + self._token("x")}) == {}
 
 
 # ═══════════════════════════════════════════════════════════

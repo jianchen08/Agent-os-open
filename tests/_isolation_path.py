@@ -4,8 +4,8 @@
 （from manager import ...）。本模块由各 isolation 测试在顶部 import 一次以注入路径。
 
 注意：0.1 的 isolation.types 在 0.2 重命名为 isolation_types。
-0.1 的 isolation.providers.bwrap_provider 与 isolation._workspace_git_ops /
-_workspace_merge_ops 在 0.2 已移除（未迁移），相关测试应删除而非重写。
+0.1 的 isolation.providers.bwrap_provider 在 0.2 已移除（未迁移），
+相关测试应删除而非重写。
 """
 
 from __future__ import annotations

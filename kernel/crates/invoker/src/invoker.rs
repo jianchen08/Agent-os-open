@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -263,7 +264,7 @@ impl CapabilityRouter for PluginScopedRouter {
     }
 
     /// 委托给 inner——让 inner（KernelCapabilityRouter）的动态 namespace
-    /// （含 handler_registry 注册的 human-interaction 等）透传到 initialize 声明。
+    /// （含 handler_registry 注册的交互等 namespace）透传到 initialize 声明。
     /// 不覆盖的话走 trait 默认实现，只返回静态 STANDARD_CAPABILITIES，
     /// sidecar 拿不到插件自注册 namespace 的 CapabilityHandle。
     fn known_namespaces(&self) -> Vec<String> {
@@ -320,7 +321,6 @@ fn is_plain_python_command(command: &str) -> bool {
 ///
 /// 如果 `isError` 为 true 或解析失败，返回包含错误信息的 JSON 对象。
 fn extract_mcp_content(mcp_result: &serde_json::Value) -> serde_json::Value {
-    // 检查 isError 标志
     if mcp_result
         .get("isError")
         .and_then(|v| v.as_bool())
@@ -543,7 +543,19 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
         let cap = capability.to_string();
         let mth = method.to_string();
         // G6：注入 _plugin_id 信任锚点（插件侧参数不可覆盖——已存在时以内核注入为准）。
-        let mut params: Value = serde_json::from_str(params_json).unwrap_or(Value::Null);
+        // 入参非合法 JSON = 插件侧调用缺陷，早失败回传根因，不得静默降级为 Null 续跑。
+        let mut params: Value = match serde_json::from_str(params_json) {
+            Ok(v) => v,
+            Err(e) => {
+                let buf = unsafe { &mut *self.err_buf.get() };
+                buf.clear();
+                buf.push_str(&format!(
+                    "capability {}.{} params JSON invalid: {e}",
+                    capability, method
+                ));
+                return Err(buf.as_str());
+            }
+        };
         if let Value::Object(ref mut map) = params {
             map.insert(
                 "_plugin_id".to_string(),
@@ -599,6 +611,74 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
 /// tokio RwLock 护连接本身的并发读（一次 execute 持读锁全程）。
 type SharedMcpClient = Arc<tokio::sync::RwLock<McpClient>>;
 
+/// capability 调用 in-flight guard（RAII）：构造时计数已 +1，`Drop` 时 -1。
+///
+/// 成功/失败/超时（上层 `tokio::time::timeout` 放弃内层 future）/panic 任何退出
+/// 路径都随 future drop 走 `Drop`，计数必然回落（ADR 2026-09-07 P12）。
+struct InflightGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// 工具调用的有效总时长超时（毫秒）；`None` = 显式豁免（P12，ADR 2026-09-07）。
+///
+/// 优先级：工具声明 `capabilities.tools[].timeout_ms` > 插件级
+/// `mcp.request_timeout_secs`（既有声明，秒→毫秒）> 内核默认
+/// [`agentos_core::traits::default_capability_timeout_ms`]。插件级声明兜底
+/// 保证长等待插件（human 审批 90000s 等）既有声明继续生效，不被 300s 默认
+/// 掐断；工具声明 `Some(0)` 为 0 哨兵豁免（对齐 `lifecycle.idle_timeout_secs`）。
+fn tool_timeout_ms(manifest: &PluginManifest, tool_name: &str) -> Option<u64> {
+    let declared = manifest
+        .capabilities
+        .tools
+        .iter()
+        .find(|t| t.name == tool_name)
+        .and_then(|t| t.timeout_ms);
+    match declared {
+        Some(0) => None,
+        Some(ms) => Some(ms),
+        None => Some(
+            manifest
+                .mcp
+                .as_ref()
+                .and_then(|m| m.request_timeout_secs)
+                .map(|secs| secs.saturating_mul(1000))
+                .unwrap_or_else(agentos_core::traits::default_capability_timeout_ms),
+        ),
+    }
+}
+
+/// 非流式 capability 调用的总时长超时包装（P12，ADR 2026-09-07）。
+///
+/// `timeout_ms` 为 `None` 直接透传（豁免）；否则到点放弃内层 future——
+/// 其持有的 in-flight guard 随 drop 回落——并返回结构化 `CAPABILITY_TIMEOUT`
+/// （message 含插件 id、工具名与时长毫秒数）。
+async fn with_capability_timeout<T>(
+    timeout_ms: Option<u64>,
+    plugin_id: &str,
+    tool_name: &str,
+    fut: impl std::future::Future<Output = Result<T, PluginError>>,
+) -> Result<T, PluginError> {
+    let Some(ms) = timeout_ms else {
+        return fut.await;
+    };
+    match tokio::time::timeout(Duration::from_millis(ms), fut).await {
+        Ok(result) => result,
+        Err(_) => Err(PluginError {
+            message: format!(
+                "capability call timed out after {ms}ms: plugin '{plugin_id}' tool '{tool_name}'"
+            ),
+            code: Some("CAPABILITY_TIMEOUT".to_string()),
+            source: Some("plugin-invoker".to_string()),
+        }),
+    }
+}
+
 /// PluginInvoker 实现。
 ///
 /// 管理插件实例和 MCP 客户端连接，按 host_type 透明分发调用。
@@ -646,6 +726,11 @@ pub struct PluginInvokerImpl {
     /// 都空闲（即宿主键条目超时）。每次 get_or_create_mcp_client 命中/创建时
     /// 刷新；后台 GC 据此判定是否空闲超时。
     last_used: RwLock<HashMap<String, Instant>>,
+    /// 假死 respawn 熔断账本 {宿主键: Vec<respawn 时刻>}（进程治理三信号模型）。
+    ///
+    /// 10 分钟窗口内 ≥3 次假死 respawn 则停手只告警——防循环重启掩盖根因
+    /// （同构 K8s CrashLoopBackOff 退避语义）。窗口滑出后自然解除。
+    freeze_respawns: RwLock<HashMap<String, Vec<Instant>>>,
     /// 宿主进程 spawn 时刻（监控 M3 进程态轮询的 uptime 源；同宿主键 respawn 覆盖写，
     /// 驱逐不清理——宿主键集合有界 `plugin:{id}`/`group:light:{n}`，快照按
     /// mcp_clients 键取值，陈旧条目无副作用）。
@@ -669,6 +754,17 @@ pub struct PluginInvokerImpl {
     /// 集合只增（boot 预热一次定型）；`AGENTOS_DISABLE_SIDECAR_WARMUP=1` 时
     /// 预热不运行、集合恒空，回到纯懒加载 + 全量 GC。
     keep_warm_plugins: RwLock<std::collections::HashSet<String>>,
+    /// 宿主 in-flight capability 调用计数 {宿主键: 原子计数}（P12/P22，ADR 2026-09-07）。
+    ///
+    /// sidecar 统一调用入口（`invoke_pipeline_plugin` / `invoke_tool` 的 Sidecar
+    /// 分支，覆盖管道步骤、tool-executor 反向调用含 llm_service 流式、http.handle
+    /// 分发）+1（RAII [`InflightGuard`]，Drop -1；成功/失败/超时/流式中断随
+    /// future drop 必然回落），空闲 GC 判定以 `inflight == 0` 为前置门——调用
+    /// 进行中的宿主不被回收。流式调用的 MCP 响应在流完全结束/断连才返回，
+    /// 计数即覆盖整个流生命周期。条目与 `mcp_clients` 同生命周期：
+    /// [`Self::unload_host`] 清理；调用先于卸载重建条目也无碍（guard 持 Arc
+    /// 克隆，减数不依赖条目存活）。
+    inflight_calls: RwLock<HashMap<String, Arc<AtomicUsize>>>,
 }
 
 impl PluginInvokerImpl {
@@ -684,10 +780,12 @@ impl PluginInvokerImpl {
             native_loader: None,
             fingerprints: RwLock::new(HashMap::new()),
             last_used: RwLock::new(HashMap::new()),
+            freeze_respawns: RwLock::new(HashMap::new()),
             host_spawned_at: RwLock::new(HashMap::new()),
             light_packing: RwLock::new(LightPacking::default()),
             spawned_members: RwLock::new(HashMap::new()),
             keep_warm_plugins: RwLock::new(std::collections::HashSet::new()),
+            inflight_calls: RwLock::new(HashMap::new()),
         }
     }
 
@@ -797,6 +895,220 @@ impl PluginInvokerImpl {
         // 委托 client 自身状态：stdio 写失败标记 / child 缺失（kill 后残留缓存）
         // / 退出快照 三证据（见 McpClient::is_dead）。HTTP 运输恒 false。
         client.is_dead().await
+    }
+
+    /// 假死判定与取证（进程治理三信号模型的执行端，评估+取证阶段）。
+    ///
+    /// 调用时机：call_tool 失败且进程存活（[`Self::is_dead_sidecar`] 已排除
+    /// 真死亡）。三条件交叉判定假死：
+    /// ① 进程存活（try_wait 无退出——调用方已查）；
+    /// ② 事件循环心跳停跳超过 FREEZE_HEARTBEAT_STALE_SECS（SDK 心跳协程
+    ///    跑在 sidecar 主事件循环，冻结即停跳；从未上报心跳的旧版本 sidecar
+    ///    返回 None → 不判定，平滑兼容）；
+    /// ③ 本次调用失败（调用时机已保证——本函数只在 call_tool Err 分支进入）。
+    ///
+    /// 命中即做冻结取证：判定命中时刻正是冻结窗口，respawn 抹掉现场之前抓
+    /// py-spy 线程栈（熔断停手分支同样抓——反复冻结是最需要现场的时刻）。
+    ///
+    /// 返回 `true` 表示应触发 force_unload 自愈（与 idle-unload 同一回收路径：
+    /// kill 进程树 + 驱逐客户端缓存，下次调用自动 respawn 干净实例），调用
+    /// 本身仍以 MCP_CALL_FAILED 返回交由既有恢复包装器处理。
+    /// 熔断：10 分钟窗口 >= 3 次（FREEZE_RESPAWN_WINDOW_SECS / MAX）停手只
+    /// 取证告警，防循环重启掩盖根因（同构 K8s CrashLoopBackOff）。
+    ///
+    /// 锁契约：本函数只做判定与取证，**不执行 unload**——unload 内部对同一
+    /// client Arc 取写锁（[`Self::unload_host`]），调用方读锁存活时执行 =
+    /// 同任务自等写锁永久悬挂。调用方必须先释放 `client` 读锁再触发回收
+    /// （见 [`Self::attempt_sidecar_pipeline`] 的失败分支）。
+    async fn evaluate_frozen_sidecar(
+        &self,
+        client: &McpClient,
+        plugin_id: &str,
+        call_err_message: &str,
+    ) -> bool {
+        const FREEZE_HEARTBEAT_STALE_SECS: u64 = 30;
+        const FREEZE_RESPAWN_WINDOW_SECS: u64 = 600;
+        const FREEZE_RESPAWN_MAX: usize = 3;
+        const FREEZE_DUMP_TIMEOUT: u64 = 10;
+
+        let Some(age) = client.heartbeat_age_secs() else {
+            return false; // 旧版本 sidecar / HTTP transport：无心跳数据，兼容期不判死
+        };
+        if age <= FREEZE_HEARTBEAT_STALE_SECS {
+            return false; // 心跳新鲜：非假死（协议/工具错误走既有语义）
+        }
+
+        // 熔断检查（滑窗计数）
+        let now = Instant::now();
+        let circuit_broken = {
+            let mut ledger = self.freeze_respawns.write();
+            let entries = ledger.entry(plugin_id.to_string()).or_default();
+            entries.retain(|t| now.duration_since(*t).as_secs() < FREEZE_RESPAWN_WINDOW_SECS);
+            if entries.len() >= FREEZE_RESPAWN_MAX {
+                tracing::error!(
+                    target: "sidecar",
+                    "[{}] 疑似事件循环冻结（心跳停跳 {}s）但 10 分钟内已假死 respawn {} 次，熔断停手——人工介入排查根因",
+                    plugin_id, age, entries.len()
+                );
+                true
+            } else {
+                entries.push(now);
+                false
+            }
+        };
+
+        // 冻结现场取证：判定命中时刻正是冻结窗口，respawn 抹掉现场之前抓
+        // py-spy 线程栈（熔断停手分支同样抓——反复冻结是最需要现场的时刻）。
+        let dump_dir = std::path::PathBuf::from("logs").join("freeze_dumps");
+        let spy_bin = std::env::var("AGENTOS_PY_SPY_BIN").unwrap_or_else(|_| "py-spy".to_string());
+        match client.pid().await {
+            Some(pid) => {
+                Self::run_freeze_dump(
+                    &spy_bin,
+                    plugin_id,
+                    pid,
+                    age,
+                    &dump_dir,
+                    FREEZE_DUMP_TIMEOUT,
+                )
+                .await;
+            }
+            None => {
+                tracing::warn!(target: "sidecar", "[{}] 冻结取证跳过：无进程 pid", plugin_id);
+            }
+        }
+        if circuit_broken {
+            return false;
+        }
+
+        tracing::warn!(
+            target: "sidecar",
+            "[{}] 疑似事件循环冻结：进程存活但心跳停跳 {}s（阈值 {}s），本次调用失败: {} —— Force unload 触发自愈 respawn",
+            plugin_id, age, FREEZE_HEARTBEAT_STALE_SECS, call_err_message
+        );
+        true
+    }
+
+    /// 冻结现场取证：对疑似冻结的 sidecar 进程执行 py-spy dump 抓线程栈。
+    ///
+    /// 产物落 `dir/{plugin_id}_{时间戳}_pid{pid}.txt`（头部带 plugin/pid/
+    /// 心跳停跳时长元信息，正文为 py-spy stdout/stderr）。取证是尽力而为：
+    /// py-spy 缺失/超时只降级告警返回 None，绝不 panic/长阻塞——调用点
+    /// （[`Self::evaluate_frozen_sidecar`]）评估完成后调用方要做 force_unload
+    /// 自愈，回收是硬时限。二进制由调用方解析（默认 PATH 上的 `py-spy`，可用
+    /// `AGENTOS_PY_SPY_BIN` 覆盖，venv 部署 PATH 不含 Scripts 目录的场景）。
+    /// D3：freeze 取证 dump 保留上限（份）——取证场景无法预知何时需要现场，
+    /// 保留最新 10 份 + 写入时顺带清扫，防 logs/freeze_dumps 随冻结次数无界增长。
+    const FREEZE_DUMP_KEEP: usize = 10;
+
+    /// 清扫 freeze 取证目录只留最新 `keep` 份（按文件写时间升序删最旧）。
+    /// 跨插件共用一个总上限（取证无法预知哪个插件需要现场）；best-effort：
+    /// 枚举失败静默返回（目录不存在 = 无可清扫），单个删除失败 warn 留痕继续。
+    fn sweep_freeze_dump_dir(dir: &std::path::Path, keep: usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .filter_map(|e| {
+                let modified = e.metadata().ok()?.modified().ok()?;
+                Some((modified, e.path()))
+            })
+            .collect();
+        if files.len() <= keep {
+            return;
+        }
+        let excess = files.len() - keep;
+        files.sort();
+        for (modified, path) in files.into_iter().take(excess) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(
+                    target: "sidecar",
+                    "freeze 取证清扫失败 {}: {}（mtime {:?}）",
+                    path.display(),
+                    e,
+                    modified
+                );
+            }
+        }
+    }
+
+    async fn run_freeze_dump(
+        spy_bin: &str,
+        plugin_id: &str,
+        pid: u32,
+        heartbeat_age_secs: u64,
+        dir: &std::path::Path,
+        timeout_secs: u64,
+    ) -> Option<std::path::PathBuf> {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::warn!(target: "sidecar", "[{}] 冻结取证目录创建失败: {}（跳过抓取）", plugin_id, e);
+            return None;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = dir.join(format!("{plugin_id}_{stamp}_pid{pid}.txt"));
+        let spawned = tokio::process::Command::new(spy_bin)
+            .args(["dump", "--pid", &pid.to_string()])
+            .output();
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), spawned).await {
+            Ok(Ok(output)) => {
+                let report = format!(
+                    "# sidecar freeze dump\n# plugin: {plugin_id}\n# pid: {pid}\n\
+                     # heartbeat_stale_secs: {heartbeat_age_secs}\n\
+                     # captured_at_unix: {stamp}\n\
+                     # command: {spy_bin} dump --pid {pid}\n\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                match std::fs::write(&path, report) {
+                    Ok(_) => {
+                        tracing::info!(
+                            target: "sidecar",
+                            "[{}] 冻结现场已抓取: {}（py-spy exit={}）",
+                            plugin_id,
+                            path.display(),
+                            output.status
+                        );
+                        // D3：取证 dump 保留上限——写入时顺带清扫只留最新 10 份
+                        Self::sweep_freeze_dump_dir(dir, Self::FREEZE_DUMP_KEEP);
+                        Some(path)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "sidecar",
+                            "[{}] 冻结现场写盘失败 {}: {}",
+                            plugin_id,
+                            path.display(),
+                            e
+                        );
+                        None
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    target: "sidecar",
+                    "[{}] py-spy（{}）启动失败: {}——冻结现场未抓取（安装 py-spy 或设 AGENTOS_PY_SPY_BIN）",
+                    plugin_id,
+                    spy_bin,
+                    e
+                );
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "sidecar",
+                    "[{}] py-spy dump 超时（{}s）——放弃取证继续自愈",
+                    plugin_id,
+                    timeout_secs
+                );
+                None
+            }
+        }
     }
 
     /// B1：错误是否为「sidecar 死亡/传输断开」——可透明恢复类失败。
@@ -911,7 +1223,7 @@ impl PluginInvokerImpl {
         &self,
         plugin_id: &str,
         manifest: &PluginManifest,
-        ctx: &PluginContext,
+        ctx: &PluginContext<'_>,
     ) -> Result<PluginResult, PluginError> {
         // ADR 附录 D③（P6 命名治理）：从 manifest.invoke_entry 取 MCP 入口名
         // （如 "context_build.execute"）。不再回退 capabilities.tools 或字面量
@@ -946,7 +1258,6 @@ impl PluginInvokerImpl {
             });
         }
 
-        // 调用 tools/call
         // _log_ctx：per-request 日志上下文，从 ctx.state 抽取（真实数据所在，
         // 见 server.rs 把 pipeline_id/session_id 写进 state）。SDK 在调 handler
         // 前 LogContext.bind，使 sidecar 日志能带 pipeline_id 关联内核日志。
@@ -957,27 +1268,32 @@ impl PluginInvokerImpl {
             "agent_name": ctx.state.get("agent.id").cloned().unwrap_or(Value::Null),
         });
         // 每调用 config 注入（对齐 native 管道 invoke_native_pipeline）：引擎
-        // 步骤 config 只携带 inputs/_step_method，manifest config_files 注入
-        // 此前仅发生在 initialize 握手——合宿宿主按首触发成员的 manifest 注入
-        // 后同份扇给全员，声明 config_files 的成员（如 context_window_guard）
-        // 从未收到自己的注入（2026-09-02 压缩阈值断链根因）。此处按调用方
-        // manifest 现算注入并与步骤 config 合并。
-        let full_config = self
-            .loader
-            .load_config()
+        // 步骤 config 只携带 inputs/_step_method，config_files 注入按调用方
+        // manifest 现算（shared::injected_config）——合宿宿主不共享注入，
+        // 各成员只收自己的 config_files 命名空间，再与步骤 config 合并。
+        let injected = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
+        let call_config = crate::shared::merge_injected_with_step_config(injected, &ctx.config);
+        // arguments 直接拼 JSON 串（call_tool_raw 原文透传）：state 每步整包
+        // 过境，走中间 Value 树 = 每步多一次全量深拷（json! 宏隐式复制）。
+        // state/config/_log_ctx 各自一遍 to_writer 进同一缓冲，帧语义不变。
+        // state.reads 切片投喂（组装单点 shared.rs）：声明非空 → 白名单控制键
+        // ∪ 声明键切片；未声明 = 全量借用（零拷贝，迁移期默认字节不变）。
+        let state_payload = crate::shared::state_feed_payload(manifest, ctx.state);
+        // M3b：三段序列化直写 client 复用缓冲（闭包借用 state_payload/config/
+        // log_ctx——均活到本调用结束），arguments String 独立分配清零。
+        let result = match client
+            .call_tool_raw_fragments(&mcp_tool_name, |buf| {
+                buf.extend_from_slice(b"{\"state\":");
+                serde_json::to_writer(&mut *buf, &state_payload)?;
+                buf.extend_from_slice(b",\"config\":");
+                serde_json::to_writer(&mut *buf, &call_config)?;
+                buf.extend_from_slice(b",\"_log_ctx\":");
+                serde_json::to_writer(&mut *buf, &log_ctx)?;
+                buf.extend_from_slice(b"}");
+                Ok(())
+            })
             .await
-            .unwrap_or(serde_json::Value::Null);
-        let call_config = crate::shared::merge_injected_with_step_config(
-            crate::shared::build_injected_config(&full_config, manifest),
-            &ctx.config,
-        );
-        let tool_args = serde_json::json!({
-            "state": ctx.state,
-            "config": call_config,
-            "_log_ctx": log_ctx,
-        });
-
-        let result = match client.call_tool(&mcp_tool_name, &tool_args).await {
+        {
             Ok(v) => v,
             Err(e) => {
                 // ② 失败后复查存活：死亡（含在途死亡）→ PLUGIN_CRASHED（可透明恢复）；
@@ -985,6 +1301,30 @@ impl PluginInvokerImpl {
                 //    （call_tool 已把底层错误统一包成 ToolCallFailed，无法按错误
                 //    类型区分崩溃，故用存活复查作权威判定。）
                 let died_mid_call = Self::is_dead_sidecar(&client).await;
+                // ③ 假死复查（进程治理三信号模型）：进程存活但事件循环心跳停跳
+                //    超过阈值 → 事件循环冻结（「活着却不处理任何请求」）。判定
+                //    与取证只需 &client（读锁内完成），命中与否都不在此持锁做
+                //    回收——force_unload 内部对同一 client Arc 取写锁（unload_host），
+                //    读锁存活时执行 = 同任务自等写锁永久悬挂（请求卡死、该宿主
+                //    全部写治理排队、InflightGuard 永不回落致 GC 跳过）。假死时
+                //    调用仍按 MCP_CALL_FAILED 返回（透明恢复包装器按既有语义
+                //    处理重试）。
+                let frozen = !died_mid_call
+                    && self
+                        .evaluate_frozen_sidecar(&client, plugin_id, &e.to_string())
+                        .await;
+                // 评估取证完成，先释放读锁再触发 Force unload（unload 从
+                // mcp_clients 注册表自取 Arc，锁契约见 evaluate_frozen_sidecar）。
+                drop(client);
+                if frozen {
+                    if let Err(unload_err) = self.force_unload_impl(plugin_id).await {
+                        tracing::error!(
+                            target: "sidecar",
+                            "[{}] 假死自愈 Force unload 失败: {}（残留进程待 idle GC 兜底）",
+                            plugin_id, unload_err.message
+                        );
+                    }
+                }
                 return Err(if died_mid_call {
                     PluginError {
                         message: format!("plugin process died mid-call: {}: {}", plugin_id, e),
@@ -1084,7 +1424,7 @@ impl PluginInvokerImpl {
         &self,
         plugin_id: &str,
         manifest: &PluginManifest,
-        ctx: &PluginContext,
+        ctx: &PluginContext<'_>,
     ) -> Result<PluginResult, PluginError> {
         let loader = self.native_loader_or_err(plugin_id)?;
 
@@ -1099,19 +1439,16 @@ impl PluginInvokerImpl {
 
         self.load_native(loader, plugin_id, manifest)?;
 
-        // config 注入（shared::build_injected_config，按 manifest.config_files 命名空间）。
-        let config = crate::shared::build_injected_config(
-            &self
-                .loader
-                .load_config()
-                .await
-                .unwrap_or(serde_json::Value::Null),
-            manifest,
-        );
+        // config 注入（shared::injected_config，按 manifest.config_files 命名空间）。
+        let config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
+
+        // state.reads 切片投喂（与 sidecar 路径同一组装语义，shared.rs 单点）：
+        // 声明非空 → 白名单控制键 ∪ 声明键切片；未声明 = 全量（迁移期默认）。
+        let state_json = crate::shared::pipeline_state_json(manifest, ctx.state);
 
         // 构造 PluginCtx（state/config 用 JSON 字符串；tool_call_json=None = pipeline 语义）。
         let plugin_ctx = agentos_native_sdk::PluginCtx {
-            state_json: serde_json::to_string(&ctx.state).unwrap_or_else(|_| "{}".into()),
+            state_json,
             config_json: serde_json::to_string(&config).unwrap_or_else(|_| "{}".into()),
             tenant_id: ctx.tenant.tenant_id.clone(),
             session_id: ctx.tenant.session_id.clone(),
@@ -1210,15 +1547,8 @@ impl PluginInvokerImpl {
 
         self.load_native(loader, plugin_id, manifest)?;
 
-        // config 注入（shared::build_injected_config，按 manifest.config_files 命名空间）。
-        let config = crate::shared::build_injected_config(
-            &self
-                .loader
-                .load_config()
-                .await
-                .unwrap_or(serde_json::Value::Null),
-            manifest,
-        );
+        // config 注入（shared::injected_config，按 manifest.config_files 命名空间）。
+        let config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
 
         // 构造 PluginCtx：state=inputs（工具入参），tool_call 约定字段表达工具语义。
         // 工具调用无 PluginContext（invoke_tool 不带租户/管道），租户等字段留空——
@@ -1646,7 +1976,7 @@ impl PluginInvokerImpl {
     ///    见 [`Self::build_sidecar_transport_client`]。
     ///
     /// 尾部统一应用插件级调用超时（manifest.mcp.request_timeout_secs）：长等待
-    /// 业务（human-interaction.wait_for_choice 的 24h 审批等）必须显式声明，
+    /// 业务（交互插件 wait_for_choice 的 24h 审批等）必须显式声明，
     /// 否则内核 MCP client 300s 默认兜底先于用户操作掐断调用（-32001 超时 →
     /// 审批作废 → 引擎重试弹窗循环）。
     fn build_mcp_client(
@@ -1714,7 +2044,16 @@ impl PluginInvokerImpl {
         manifest: &PluginManifest,
     ) -> Result<McpClient, PluginError> {
         let ep = cfg.endpoint.as_ref().expect("checked above");
-        let command = ep.command.clone().unwrap_or_default();
+        let command = match ep.command.clone() {
+            Some(c) if !c.is_empty() => c,
+            _ => {
+                return Err(PluginError {
+                    message: format!("插件 {} stdio endpoint 缺 command", manifest.id),
+                    code: Some("MCP_CONFIG_INVALID".to_string()),
+                    source: Some("plugin-invoker".to_string()),
+                })
+            }
+        };
         tracing::info!(
             "[invoker] 插件 {} 走外部 stdio 命令 | command={} {}",
             manifest.id,
@@ -1774,10 +2113,9 @@ impl PluginInvokerImpl {
         // 应用 Capability 路由器（启用 sidecar→内核反向调用通道）。
         // PluginScopedRouter 把连接身份注入每次反向调用的 params（G6 信任锚点 +
         // metrics 命名空间）。身份 = 进程身份：独占 = manifest.id；合宿 = 宿主键
-        // ——合宿进程是一个授权主体，G6 侧按 group_granted_capabilities 归并成员
-        // 白名单判。旧实现锚定"触发本次 spawn 的成员"：身份随每次重生漂移，且
-        // G6 拿该成员的个人白名单判全组调用（首个声明 grants 的成员恰好装箱
-        // 触发 spawn 时全组反调被拒 = 2026-09-03 工具面置空事故根因）。
+        // ——合宿进程是一个授权主体，身份不随成员重生漂移；G6 侧按
+        // group_granted_capabilities 归并成员白名单判，任一成员的个人白名单
+        // 都不作全组调用的判据。
         {
             let router_guard = self.router.read();
             if let Some(router) = router_guard.as_ref() {
@@ -1795,8 +2133,8 @@ impl PluginInvokerImpl {
             c = c.with_working_dir(dir);
         }
 
-        // PYTHONPATH 注入已整体退役：SDK 由 per-plugin venv 的 editable
-        // install 解析，两套解析路径并存是版本不同步事故温床。
+        // PYTHONPATH 不注入：SDK 由 per-plugin venv 的 editable install 解析，
+        // env 注入会形成第二套解析路径（版本不同步事故温床）。
         // 这里只透传日志配置 env（进程级常量，适合走 env；per-request 上下文
         // 走 JSON-RPC）。仅当父进程已设置时透传，否则让 sidecar SDK 用其默认
         // （INFO + stderr）。SDK 启动时读这些 env 调用 setup_logging，使 sidecar
@@ -1830,31 +2168,12 @@ impl PluginInvokerImpl {
             source: Some("plugin-invoker".to_string()),
         })?;
 
-        // initialize 握手（携带插件配置）
-        // 配置加载失败时分级处理：IO 错误（目录不存在等）可降级为空配置；
-        // 解析错误（YAML 语法错误）应报错，让插件启动失败比悄悄降级更安全。
-        let full_config = match self.loader.load_config().await {
-            Ok(config) => config,
-            Err(e) => {
-                if e.code
-                    .as_deref()
-                    .map(|c| c.contains("PARSE"))
-                    .unwrap_or(false)
-                {
-                    return Err(PluginError {
-                        message: format!("Plugin config parse error: {}", e),
-                        code: Some("CONFIG_PARSE_ERROR".to_string()),
-                        source: Some("plugin-invoker".to_string()),
-                    });
-                }
-                warn!("Failed to load plugin config, using empty: {}", e);
-                serde_json::json!({})
-            }
-        };
+        // initialize 握手（携带插件配置）。配置加载分级语义（PARSE 上抛/
+        // IO 降级空配置）由 shared::injected_config 统一承载。
         // 按需注入（ADR §4.3，P6）：只走 config_files 映射；未声明则收空配置。
         // 避免把全系统配置（含其他插件凭证）泄漏给每个 sidecar。
         // 复用 shared::build_injected_config——native/wasm 分支也走同一函数，三家对齐。
-        let config = crate::shared::build_injected_config(&full_config, manifest);
+        let config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
         client.initialize(&config).await.map_err(|e| PluginError {
             message: format!("MCP initialize failed: {}", e),
             code: Some("MCP_INIT_FAILED".to_string()),
@@ -1942,7 +2261,7 @@ impl PluginInvokerImpl {
     /// - external MCP（streamable_http / 外部 stdio command）/ native dll → 不走本函数。
     ///
     /// venv 解释器以**绝对路径**替代裸命令——SDK/第三方依赖由 venv 内 editable
-    /// install 解析（PYTHONPATH 注入已整体退役）。绝对路径含路径分隔符与
+    /// install 解析（不走 PYTHONPATH env）。绝对路径含路径分隔符与
     /// `.`，天然绕过 mcp 侧 `resolve_windows_command` 的 PATHEXT 探测（该函数对
     /// 带分隔符/扩展名的命令原样返回），不会被误解析。
     fn resolve_sidecar_command(
@@ -2302,25 +2621,6 @@ impl PluginInvokerImpl {
         max
     }
 
-    /// 检查插件进程健康状态（宿主粒度：light 成员问健康 = 其所在宿主进程活着）。
-    pub async fn check_health(&self, plugin_id: &str) -> bool {
-        let host_key = match self.existing_host_key_for(plugin_id) {
-            Some(hk) => hk,
-            // 从未分配宿主（未 spawn / InProcess / 非 sidecar）无进程可查。
-            None => return false,
-        };
-        let client_arc = {
-            let clients = self.mcp_clients.read();
-            clients.get(&host_key).cloned()
-        };
-        if let Some(client) = client_arc {
-            let guard = client.read().await;
-            guard.is_alive().await
-        } else {
-            false
-        }
-    }
-
     /// 插件权限声明的前置日志校验（P2-2）。
     ///
     /// 0.2 只做声明 + 日志告警，不做硬 enforce（filesystem/system_calls 留 0.3 沙箱）。
@@ -2369,37 +2669,40 @@ impl PluginInvokerImpl {
             .insert(host_key.to_string(), Instant::now());
     }
 
-    /// 统一软卸载：按 host_type 分流，进程 kill 但 manifest 描述保留（下次调用重新 spawn）。
+    /// 进入一次 capability 调用：宿主 in-flight 计数 +1，返回 RAII guard。
     ///
-    /// - sidecar：卸载插件所在宿主（合宿 = kill 整组；独占 = kill 单进程），
-    ///   并回收分配表槽位（idle 语境 = 槽位释放复用，§4.8「回收即清空」）
-    /// - InProcess（rust 原生 cdylib）：跳过（Windows dlclose 限制），返回 false
-    ///
-    /// 返回 true 表示已卸载，false 表示未卸载（不支持的类型或未加载）。
-    pub async fn unload_if_idle(&self, plugin_id: &str) -> bool {
-        // 先查 manifest 的 host_type（loader 缓存里有）
-        let host_type = {
-            let m = self.loader.load(plugin_id).await;
-            match m {
-                Ok(loaded) => loaded.manifest.host_type,
-                Err(_) => {
-                    // 加载失败也可能意味着已不在——尝试清 sidecar 缓存
-                    return self.unload_plugin_host(plugin_id, true).await.is_ok();
-                }
-            }
+    /// guard drop（成功/失败/超时/panic）时计数 -1（P12，ADR 2026-09-07）。
+    fn enter_inflight(&self, host_key: &str) -> InflightGuard {
+        let counter = {
+            let mut map = self.inflight_calls.write();
+            map.entry(host_key.to_string())
+                .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+                .clone()
         };
+        counter.fetch_add(1, Ordering::SeqCst);
+        InflightGuard { counter }
+    }
 
-        match host_type {
-            HostType::Sidecar => self.unload_plugin_host(plugin_id, true).await.is_ok(),
-            HostType::InProcess => {
-                // rust 原生 cdylib：dlclose 限制，不自动卸载
-                tracing::debug!(
-                    "Skip idle-unload for inprocess plugin {} (dlclose limit)",
-                    plugin_id
-                );
-                false
-            }
-        }
+    /// sidecar 统一入口 in-flight 计入（P22，ADR 2026-09-07）：
+    /// 按 manifest 解析宿主键并 +1，返回 (宿主键, RAII guard)。
+    ///
+    /// [`Self::invoke_pipeline_plugin`] / [`Self::invoke_tool`] 的 Sidecar 分支
+    /// 是所有 sidecar capability 调用的必经点（管道步骤 / tool-executor 反向
+    /// 调用 / http.handle 分发），计数在入口一次持有、覆盖透明恢复全程；
+    /// 单次尝试函数（attempt_sidecar_*）不再各自计数。
+    fn enter_sidecar_inflight(&self, manifest: &PluginManifest) -> (String, InflightGuard) {
+        let host_key = self.resolve_host_key(manifest);
+        let guard = self.enter_inflight(&host_key);
+        (host_key, guard)
+    }
+
+    /// 读取宿主当前 in-flight capability 调用数（空闲 GC 回收门，P12）。
+    fn host_inflight(&self, host_key: &str) -> usize {
+        self.inflight_calls
+            .read()
+            .get(host_key)
+            .map(|c| c.load(Ordering::SeqCst))
+            .unwrap_or(0)
     }
 
     /// 启动后台空闲软卸载 GC 任务。
@@ -2450,7 +2753,7 @@ impl PluginInvokerImpl {
             let members = self.host_members(&host_key);
             // 预热常驻豁免：任一成员属于预热集（boot 管道引用插件）→ 整组不回收。
             // 组语义对称——整组回收是连坐，整组豁免也按成员判定；显式卸载
-            // （force_unload / unload_if_idle）不受此豁免约束。
+            // （force_unload）不受此豁免约束。
             if members
                 .iter()
                 .any(|pid| self.keep_warm_plugins.read().contains(pid))
@@ -2460,6 +2763,21 @@ impl PluginInvokerImpl {
             let threshold = self.host_idle_timeout_secs(&members);
             // threshold == 0 表示宿主持久保活（任一成员声明"永不空闲卸载"），跳过。
             if threshold != 0 && idle_secs > threshold {
+                // in-flight 门（P12，ADR 2026-09-07）：有调用在飞不回收——
+                // touch_last_used 只在取客户端时刷新，长调用执行期间空闲计时
+                // 会虚假超期；此时 kill 宿主 = 打断在飞调用（悬挂/重试风暴根源）。
+                let inflight = self.host_inflight(&host_key);
+                if inflight > 0 {
+                    info!(
+                        host = %host_key,
+                        members = ?members,
+                        inflight = inflight,
+                        idle_secs = idle_secs,
+                        threshold = threshold,
+                        "Host idle-unload skipped: capability calls in flight"
+                    );
+                    continue;
+                }
                 info!(
                     host = %host_key,
                     members = ?members,
@@ -2467,7 +2785,9 @@ impl PluginInvokerImpl {
                     threshold = threshold,
                     "Host idle-unloading (soft): exceeds idle timeout"
                 );
-                let _ = self.unload_host(&host_key, true).await;
+                if let Err(e) = self.unload_host(&host_key, true).await {
+                    warn!("idle GC unload {} failed: {}", host_key, e);
+                }
             }
         }
     }
@@ -2505,12 +2825,12 @@ impl PluginInvokerImpl {
     /// 宿主语义（合宿进程模型 §4.2）：kill 插件所在**宿主**——light 成员连坐整组
     /// （组指纹变化触发整组 respawn 的对称面），独占成员杀单进程。分配表保留
     /// （respawn 按当前表重建成员集，§4.5 第 2 条分配粘性），槽位回收只在
-    /// idle GC 路径（[`Self::unload_if_idle`]）发生。
+    /// idle GC 路径发生。
     pub async fn force_unload_impl(&self, plugin_id: &str) -> Result<(), PluginError> {
         self.unload_plugin_host(plugin_id, false).await
     }
 
-    /// 按插件 id 卸载其宿主（force_unload 与 unload_if_idle 的公共实现）。
+    /// 按插件 id 卸载其宿主（idle GC 与 force_unload 的公共实现）。
     ///
     /// `reclaim_assignments`：idle 语境（GC 回收）为 true——连同清掉分配表内
     /// 该宿主的全部成员条目，槽位释放供后续装箱复用（§4.8「回收即清空」）；
@@ -2527,7 +2847,9 @@ impl PluginInvokerImpl {
                 // 无进程可杀，仅做 loader 侧卸载 + OnUnload 旁路广播（与无缓存路径
                 // 的既有语义对齐）。
                 self.emit_lifecycle_unload(plugin_id);
-                let _ = self.loader.unload(plugin_id).await;
+                if let Err(e) = self.loader.unload(plugin_id).await {
+                    warn!("loader unload {} (no-host path) failed: {}", plugin_id, e);
+                }
                 Ok(())
             }
         }
@@ -2538,6 +2860,9 @@ impl PluginInvokerImpl {
     /// 宿主是进程所有权单位（方案 §〇）：合宿宿主的 kill 连坐全部成员——
     /// OnUnload 旁路广播与 loader.unload 逐成员执行；分配表条目按
     /// `reclaim_assignments` 决定是否释放（见 [`Self::unload_plugin_host`]）。
+    /// kill 段（取写锁 → on_unload → kill）限时 2s：在飞调用持读锁时放弃
+    /// kill 照常完成驱逐与记账（残留进程由 kill_on_drop 兜底），GC 单循环
+    /// 不因单个宿主阻塞。
     async fn unload_host(
         &self,
         host_key: &str,
@@ -2559,22 +2884,47 @@ impl PluginInvokerImpl {
         };
 
         if let Some(client_arc) = client_arc {
-            let mut client = client_arc.write().await;
-            // 镜像 OnLoad 的 notifications/on_load：杀进程之前发 on_unload 给宿主一个
-            // 收尾机会（fire-and-forget，不等响应）。失败仅 warn 不阻断——进程可能已崩溃
-            // 或不响应该通知，该杀仍杀（卸载语义不变）。
-            let _ = client
-                .send_notification("notifications/on_unload", None)
+            // 卸载尾段（取写锁 → on_unload 通知 → kill）限时 2s：长流式调用
+            // 持读锁时，无超时写锁会让 GC 单循环在此等数小时（全局空闲回收
+            // 瘫痪）。超时放弃本次 kill——缓存条目已驱逐、记账清理由下方照常
+            // 完成（下次调用 respawn 新实例），残留进程由 kill_on_drop 在最后
+            // 一个 Arc 释放时兜底终止。先例：shutdown_all / kill_sidecar_if_any
+            // 的逐 kill 2s 超时。
+            let teardown = async {
+                let mut client = client_arc.write().await;
+                // 镜像 OnLoad 的 notifications/on_load：杀进程之前发 on_unload 给宿主一个
+                // 收尾机会（fire-and-forget，不等响应）。失败仅 warn 不阻断——进程可能已崩溃
+                // 或不响应该通知，该杀仍杀（卸载语义不变）。
+                let _ = client
+                    .send_notification("notifications/on_unload", None)
+                    .await
+                    .inspect_err(|e| {
+                        warn!("on_unload notification failed for {}: {}", host_key, e)
+                    });
+                if let Err(e) = client.kill().await {
+                    warn!("Failed to kill host {}: {}", host_key, e);
+                }
+            };
+            if tokio::time::timeout(Duration::from_secs(2), teardown)
                 .await
-                .inspect_err(|e| warn!("on_unload notification failed for {}: {}", host_key, e));
-            if let Err(e) = client.kill().await {
-                warn!("Failed to kill host {}: {}", host_key, e);
+                .is_err()
+            {
+                warn!(
+                    "unload_host: teardown of {} timed out (2s, write lock held by in-flight caller); \
+                     host evicted, residual process left to kill_on_drop backstop",
+                    host_key
+                );
             }
         }
 
         // 也通过 loader 卸载（宿主粒度：合宿组连坐全部成员）
         for member in &members {
-            let _ = self.loader.unload(member).await;
+            if let Err(e) = self.loader.unload(member).await {
+                warn!(
+                    "loader unload {} (host {} teardown) failed: {}",
+                    member, host_key, e
+                );
+            }
         }
 
         // 清除指纹缓存 + last_used（宿主键），下次调用重新计算并 respawn
@@ -2582,6 +2932,9 @@ impl PluginInvokerImpl {
         self.last_used.write().remove(host_key);
         // 清除 spawn 成员集快照（与 mcp_clients 条目同生命周期，见字段注释）
         self.spawned_members.write().remove(host_key);
+        // 清除 in-flight 计数条目（与 mcp_clients 同生命周期；在飞 guard 持有
+        // Arc 克隆，减数不依赖条目存活，见 inflight_calls 字段注释）
+        self.inflight_calls.write().remove(host_key);
 
         // idle GC 回收语境：清分配表内该宿主的全部成员条目——槽位全部释放，
         // 后续新插件装箱时优先复用（§4.5 第 3 条 / §4.8「回收即清空」）。
@@ -2676,10 +3029,10 @@ impl PluginInvoker for PluginInvokerImpl {
     /// 按 manifest 的 host_type 透明分发：
     /// - InProcess: 经 NativePluginLoader 加载 cdylib 并走 C-ABI 调用（JSON 契约）
     /// - Sidecar: 通过 MCP 客户端走 JSON-RPC tools/call
-    async fn invoke_pipeline_plugin(
+    async fn invoke_pipeline_plugin<'a>(
         &self,
         plugin_id: &str,
-        ctx: &PluginContext,
+        ctx: &PluginContext<'a>,
     ) -> Result<PluginResult, PluginError> {
         let loaded = self.loader.load(plugin_id).await?;
         let manifest = &loaded.manifest;
@@ -2690,10 +3043,15 @@ impl PluginInvoker for PluginInvokerImpl {
         let result = match manifest.host_type {
             HostType::InProcess => {
                 // task_11 N2：经 NativePluginLoader 加载 cdylib 并通过 C-ABI 调用。
-                // config 注入与 sidecar 同逻辑（shared::build_plugin_input）——两轨对齐。
+                // config 注入与 sidecar 同源（shared::injected_config）——两轨对齐。
                 self.invoke_native_pipeline(plugin_id, manifest, ctx).await
             }
             HostType::Sidecar => {
+                // in-flight 计入（P22 统一入口）：本 trait 方法是所有 sidecar
+                // pipeline 调用的必经点（引擎管道步骤 / 直调），计数在此 +1，
+                // RAII guard 跨越透明恢复的 respawn+重试全程（成功/失败/超时/
+                // panic 随 future drop 回落），空闲 GC 不得回收本宿主。
+                let _inflight = self.enter_sidecar_inflight(manifest);
                 // B1（M2-reactive 第一刀）：sidecar 死亡透明恢复——单次尝试抽出为
                 // attempt_sidecar_pipeline，死亡判定（PLUGIN_CRASHED）触发
                 // force_unload + respawn + 重试一次（长事务在途调用不被依赖死亡破坏）。
@@ -2733,22 +3091,45 @@ impl PluginInvoker for PluginInvokerImpl {
         // P2-2 插件权限声明前置日志校验（不阻断）
         self.check_permissions(plugin_id, manifest);
 
-        let result = match manifest.host_type {
-            HostType::InProcess => {
-                // task_11 N2：原生工具插件——inputs 作为 state，config 同 pipeline 路径注入。
-                // B2：经 execute 的 tool_call 约定字段表达工具语义（旧 pipeline 插件零破坏）。
-                self.invoke_native_tool(plugin_id, manifest, tool_name, inputs)
-                    .await
-            }
-            HostType::Sidecar => {
-                // B1（M2-reactive 第一刀）：sidecar 死亡透明恢复——与 pipeline 路径同构。
-                self.with_transparent_recovery(plugin_id, || async {
-                    self.attempt_sidecar_tool(plugin_id, manifest, tool_name, inputs)
+        // 非流式调用总时长超时（P12，ADR 2026-09-07）：整体包界（含冷启动
+        // spawn），到点放弃内层 future 返回结构化 CAPABILITY_TIMEOUT，in-flight
+        // 计数随 drop 回落。流式豁免：流式走 invoke_pipeline_plugin（event-bus
+        // 旁路 chunk），该路径不包界——流式语义是长连接，不做总时长熔断。
+        // （P22 勘误：经 tool-executor 反向调用的流式工具如 llm_service
+        // llm.complete_stream 实际也流经本方法——其等待界 = 插件自声明
+        // `mcp.request_timeout_secs`（内核界与传输层界同源同值，行为与 P12 前
+        // 一致）；需要超越插件声明的流式工具经 `timeout_ms: Some(0)` 声明豁免。）
+        let result = with_capability_timeout(
+            tool_timeout_ms(manifest, tool_name),
+            plugin_id,
+            tool_name,
+            async {
+                match manifest.host_type {
+                    HostType::InProcess => {
+                        // task_11 N2：原生工具插件——inputs 作为 state，config 同 pipeline 路径注入。
+                        // B2：经 execute 的 tool_call 约定字段表达工具语义（旧 pipeline 插件零破坏）。
+                        self.invoke_native_tool(plugin_id, manifest, tool_name, inputs)
+                            .await
+                    }
+                    HostType::Sidecar => {
+                        // in-flight 计入（P22 统一入口，包在超时 future 内——超时放弃
+                        // 内层 future 时 guard 随 drop 回落）：本 trait 方法是所有
+                        // sidecar 工具调用的必经点（tool-executor 反向调用含
+                        // llm.complete_stream 流式、http.handle 分发），计数覆盖
+                        // 透明恢复的 respawn+重试全程；流式调用的 MCP 响应在流
+                        // 完全结束才返回，guard 即覆盖整个流生命周期。
+                        let _inflight = self.enter_sidecar_inflight(manifest);
+                        // B1（M2-reactive 第一刀）：sidecar 死亡透明恢复——与 pipeline 路径同构。
+                        self.with_transparent_recovery(plugin_id, || async {
+                            self.attempt_sidecar_tool(plugin_id, manifest, tool_name, inputs)
+                                .await
+                        })
                         .await
-                })
-                .await
-            }
-        };
+                    }
+                }
+            },
+        )
+        .await;
 
         // 旁路广播 OnError：工具插件调用失败即在此中央返回处 emit 一次（审计日志 /
         // `lifecycle.plugin_error_total` 计数）。失败 = Err（进程崩溃/MCP/解析）
@@ -2891,11 +3272,31 @@ impl PluginInvoker for PluginInvokerImpl {
         // 把初始化成果毁掉且孤儿子进程占端口 → 此类插件不 kill，进程交 idle GC
         // 空闲回收。
         if was_new && manifest.capabilities.lifecycle_hooks.is_empty() {
-            if let Err(e) = client.write().await.kill().await {
-                tracing::debug!(
-                    "G2 verify: best-effort kill of freshly spawned host {} failed (idle GC will reap): {e}",
-                    host_key_probe
-                );
+            // 回收 kill（含写锁获取）限时 2s：并发在飞调用持读锁时无超时写锁
+            // 会让本请求无限悬挂。超时 warn 并返回明确错误（缓存条目保留——
+            // 宿主是合法已初始化实例，后续调用照常复用，仅本次未回收）。
+            let kill_fut = async { client.write().await.kill().await };
+            match tokio::time::timeout(Duration::from_secs(2), kill_fut).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::debug!(
+                        "G2 verify: best-effort kill of freshly spawned host {} failed (idle GC will reap): {e}",
+                        host_key_probe
+                    );
+                }
+                Err(_) => {
+                    warn!(
+                        "G2 verify: reclaim kill of freshly spawned host {} timed out (2s), returning error",
+                        host_key_probe
+                    );
+                    return Err(PluginError {
+                        message: format!(
+                            "G2 verify: reclaim kill of freshly spawned host {host_key_probe} timed out (2s) — write lock held by in-flight caller"
+                        ),
+                        code: Some("HOST_RECLAIM_TIMEOUT".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    });
+                }
             }
             self.mcp_clients.write().remove(&host_key_probe);
             // spawn 成员集快照与缓存条目同生命周期：回收即清（下次调用重记）

@@ -16,23 +16,17 @@ import os
 import sys
 from functools import lru_cache
 
-# 设置 sys.path：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
-# + system/llm（复用 _config_models 配置注入桥，与 system/llm/server.py 共享）
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _this_dir)
-# pipeline/core 目录：llm_provider_* 提供者适配插件（deepseek/minimax/keypool）
-# 作为可导入包存在（task_kernel_cleanup_and_split 3a，注册表按模型名懒加载）。
-_core_dir = os.path.join(_this_dir, "..")
-sys.path.insert(1, _core_dir)
-_shared_dir = os.path.join(_this_dir, "..", "..", "..")
-sys.path.insert(0, _shared_dir)
-_system_llm_dir = os.path.join(_shared_dir, "system", "llm")
-sys.path.insert(0, _system_llm_dir)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-# litellm 首次 import 时会同步 fetch GitHub 的 model cost map，在离线/受限网络
-# 下 SSL 握手超时（30s）拖垮 MCP initialize 握手。改用本地 backup 跳过远程
-# fetch（litellm 官方开关，get_model_cost_map 顶部判断此环境变量）。
-os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
+# system/llm：复用 _config_models 配置注入桥（与 system/llm/server.py 共享）。
+_paths = bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
+_system_llm_dir = os.path.join(_paths.shared_root, "system", "llm")
+sys.path.insert(0, _system_llm_dir)
+# 插入顺序即优先序：llm_core 目录必须压过 system/llm——两处均有 adapter.py，
+# 裸名 `import adapter` 必须命中本目录实现（类型/协议归属地），否则会静默
+# 加载 llm_service 的 adapter（其 import litellm，会把 litellm 依赖拖回本
+# 已拆除此依赖的进程）。
+sys.path.insert(0, _paths.plugin_dir)
 
 from plugin import LLMCore  # noqa: E402
 

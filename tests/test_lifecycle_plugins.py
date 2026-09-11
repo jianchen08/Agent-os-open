@@ -76,13 +76,18 @@ async def test_workspace_init_resolves_from_execution_context(plugins):
 
 
 @pytest.mark.asyncio
-async def test_workspace_init_idempotent(plugins):
-    """init：state 已有 workspace 时跳过（恢复/复用幂等）。"""
+async def test_workspace_init_idempotent(plugins, tmp_path):
+    """init：state 已有 workspace 且目录真实存在时跳过（恢复/复用幂等）。
+
+    目录缺失不跳过（落空即重建，598b4ad4 空壳防护）——见 rebuild 用例。
+    """
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir(parents=True)
     result = await plugins["ws"].execute(
         plugins["ctx_factory"](
             {
                 "current_phase": "init",
-                "workspace": "already_set",
+                "workspace": str(ws_dir),
                 "execution_context": {
                     "workspace": {"source_path": "D:/proj/x", "mode": "worktree"}
                 },
@@ -90,6 +95,43 @@ async def test_workspace_init_idempotent(plugins):
         )
     )
     assert result.state_updates == {}, "已有 workspace 不应重复解析"
+
+
+@pytest.mark.asyncio
+async def test_workspace_init_rebuilds_when_workspace_dir_missing(plugins):
+    """init：state 有 workspace 键但目录不存在 → 不跳过，落空即重建（空壳防护）。
+
+    续跑轮踩在被外部清理的空壳上曾致产出丢失——重建语义由本用例钉住。
+    用全新插件实例（隔离 _get_manager 缓存等实例态，防污染同模块后续用例）。
+    """
+    ws_mod = plugins["ws_mod"]
+    ws = ws_mod.WorkspaceLifecyclePlugin()
+
+    class _OkManager:
+        def on_task_start(self, task_id: str, workspace: str, task_data: dict) -> dict:
+            return {"mode": "plain", "path": workspace, "task_id": task_id}
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _OkManager())
+        result = await ws.execute(
+            plugins["ctx_factory"](
+                {
+                    "current_phase": "init",
+                    "task.id": "task_rebuild_1",
+                    "workspace": "D:/nonexistent/ghost-ws",
+                    "execution_context": {
+                        "workspace": {"source_path": "D:/nonexistent/ghost-ws", "mode": "plain"}
+                    },
+                }
+            )
+        )
+    finally:
+        monkeypatch.undo()
+    assert result.error is None
+    assert result.state_updates.get("workspace") == "D:/nonexistent/ghost-ws", (
+        "目录缺失必须走重建路径重新落 workspace，而非静默跳过"
+    )
 
 
 @pytest.mark.asyncio
@@ -143,8 +185,6 @@ async def test_workspace_init_main_session_syncs_skills_via_manager(
     plugins, monkeypatch, tmp_path,
 ) -> None:
     """init：manager 可用时 skills 同步到会话工作区根（复制源 = 项目根 skills/）。"""
-    import shutil
-
     import tests._isolation_path  # noqa: F401
     import isolation.workspace as ws_mod
     from isolation.workspace_lifecycle import WorkspaceLifecycleManager
@@ -180,7 +220,6 @@ async def test_workspace_init_main_session_syncs_skills_via_manager(
         )
     )
     assert synced.read_text(encoding="utf-8") == "demo"
-    assert shutil
 
 
 async def test_workspace_init_main_session_degrades_without_manager(plugins, monkeypatch, tmp_path):
@@ -202,10 +241,12 @@ async def test_workspace_init_main_session_degrades_without_manager(plugins, mon
     assert not (ws_dir / "skills").exists()
 
 
-async def test_workspace_init_main_session_project_root_idempotent(plugins):
-    """init：主会话 state 已有 workspace 时不重复解析（顶部幂等短路）。"""
+async def test_workspace_init_main_session_project_root_idempotent(plugins, tmp_path):
+    """init：主会话 state 已有 workspace（目录真实存在）时不重复解析（顶部幂等短路）。"""
+    ws_dir = tmp_path / "already" / "set"
+    ws_dir.mkdir(parents=True)
     result = await plugins["ws"].execute(
-        plugins["ctx_factory"]({"current_phase": "init", "workspace": "D:/already/set"})
+        plugins["ctx_factory"]({"current_phase": "init", "workspace": str(ws_dir)})
     )
     assert result.state_updates == {}
 
@@ -300,7 +341,7 @@ async def test_workspace_init_task_mirror_failure_not_blocking(plugins, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_workspace_skip_branch_mirrors_inherited_ws_meta(plugins, monkeypatch):
+async def test_workspace_skip_branch_mirrors_inherited_ws_meta(plugins, monkeypatch, tmp_path):
     """init 幂等短路（workspace 已就位）也必须补写 task.ws_meta 镜像。
 
     继承型子任务 workspace 由出生契约预置，短路绕过服务创建路径的镜像块；
@@ -309,6 +350,8 @@ async def test_workspace_skip_branch_mirrors_inherited_ws_meta(plugins, monkeypa
     """
     ws_mod = plugins["ws_mod"]
     ws = plugins["ws"]
+    ws_dir = tmp_path / "sessions" / "thread-a"
+    ws_dir.mkdir(parents=True)
 
     writes: list[tuple[str, dict[str, Any]]] = []
 
@@ -322,10 +365,10 @@ async def test_workspace_skip_branch_mirrors_inherited_ws_meta(plugins, monkeypa
                 {
                     "current_phase": "init",
                     "task.id": "task_skip_1",
-                    "workspace": "D:/ws/sessions/thread-a",
+                    "workspace": str(ws_dir),
                     "lineage.parent_ws_meta": {
                         "mode": "plain",
-                        "path": "D:/ws/sessions/thread-a",
+                        "path": str(ws_dir),
                         "session_id": "thread-a",
                     },
                 }
@@ -341,8 +384,8 @@ async def test_workspace_skip_branch_mirrors_inherited_ws_meta(plugins, monkeypa
             {
                 "task.ws_meta": {
                     "mode": "shared",
-                    "path": "D:/ws/sessions/thread-a",
-                    "parent_workspace": "D:/ws/sessions/thread-a",
+                    "path": str(ws_dir),
+                    "parent_workspace": str(ws_dir),
                     "project_root": "",
                 }
             },
@@ -358,10 +401,12 @@ async def test_workspace_skip_branch_mirrors_inherited_ws_meta(plugins, monkeypa
         {"task.id": "task_skip_2"},  # 出生契约无父链坐标：不虚构 plain
     ],
 )
-async def test_workspace_skip_branch_without_coordinates_no_mirror(plugins, monkeypatch, state_extra):
+async def test_workspace_skip_branch_without_coordinates_no_mirror(plugins, monkeypatch, tmp_path, state_extra):
     """无 task 身份或无出生契约坐标 → 不补写镜像（虚构 plain 会误放行真 worktree）。"""
     ws_mod = plugins["ws_mod"]
     ws = plugins["ws"]
+    ws_dir = tmp_path / "wsx"
+    ws_dir.mkdir(parents=True)
 
     writes: list[tuple[str, dict[str, Any]]] = []
 
@@ -372,7 +417,7 @@ async def test_workspace_skip_branch_without_coordinates_no_mirror(plugins, monk
     try:
         result = await ws.execute(
             plugins["ctx_factory"](
-                {"current_phase": "init", "workspace": "D:/ws/x", **state_extra}
+                {"current_phase": "init", "workspace": str(ws_dir), **state_extra}
             )
         )
     finally:
@@ -412,10 +457,12 @@ async def test_workspace_skip_branch_mirror_idempotent_when_present(plugins, mon
 
 
 @pytest.mark.asyncio
-async def test_workspace_skip_branch_mirror_failure_not_blocking(plugins, monkeypatch, caplog):
+async def test_workspace_skip_branch_mirror_failure_not_blocking(plugins, monkeypatch, caplog, tmp_path):
     """短路分支镜像写失败 → ERROR 留痕不阻断（跳过创建本身已成功）。"""
     ws_mod = plugins["ws_mod"]
     ws = plugins["ws"]
+    ws_dir = tmp_path / "wsz"
+    ws_dir.mkdir(parents=True)
 
     async def _boom(pid: str, fields: dict) -> None:
         raise RuntimeError("写面故障")
@@ -428,8 +475,8 @@ async def test_workspace_skip_branch_mirror_failure_not_blocking(plugins, monkey
                     {
                         "current_phase": "init",
                         "task.id": "task_skip_4",
-                        "workspace": "D:/ws/z",
-                        "lineage.parent_ws_meta": {"mode": "plain", "path": "D:/ws/z"},
+                        "workspace": str(ws_dir),
+                        "lineage.parent_ws_meta": {"mode": "plain", "path": str(ws_dir)},
                     }
                 )
             )
@@ -441,10 +488,12 @@ async def test_workspace_skip_branch_mirror_failure_not_blocking(plugins, monkey
 
 
 @pytest.mark.asyncio
-async def test_workspace_skip_branch_mirror_writer_unbound(plugins, monkeypatch, caplog):
+async def test_workspace_skip_branch_mirror_writer_unbound(plugins, monkeypatch, caplog, tmp_path):
     """task_state_writer 未绑定（sidecar 裸插件进程）→ WARNING 留痕，不崩不落键。"""
     ws_mod = plugins["ws_mod"]
     ws = plugins["ws"]
+    ws_dir = tmp_path / "wsw"
+    ws_dir.mkdir(parents=True)
 
     monkeypatch.setattr(ws_mod, "_task_state_writer", None)
     with caplog.at_level("WARNING"):
@@ -453,8 +502,8 @@ async def test_workspace_skip_branch_mirror_writer_unbound(plugins, monkeypatch,
                 {
                     "current_phase": "init",
                     "task.id": "task_skip_5",
-                    "workspace": "D:/ws/w",
-                    "lineage.parent_ws_meta": {"mode": "plain", "path": "D:/ws/w"},
+                    "workspace": str(ws_dir),
+                    "lineage.parent_ws_meta": {"mode": "plain", "path": str(ws_dir)},
                 }
             )
         )
@@ -687,7 +736,7 @@ async def test_refresh_state_rows_populates_cache_for_sync_reader(plugins):
     ws_mod.set_state_reader(lambda: [{"pipeline_id": "p1", "task.scope": "container"}])
     try:
         await ws_mod.refresh_state_rows()
-        tree = ws_mod._ExecutionContextTaskTree(plugins["ws"], None)
+        tree = ws_mod._ExecutionContextTaskTree(plugins["ws"])
         rows = tree._read_rows()
         assert rows == [{"pipeline_id": "p1", "task.scope": "container"}]
     finally:
@@ -711,7 +760,7 @@ async def test_refresh_state_rows_awaits_async_reader_no_warning(plugins):
         with warnings.catch_warnings():
             warnings.simplefilter("error")  # RuntimeWarning（coroutine never awaited）即失败
             await ws_mod.refresh_state_rows()
-        tree = ws_mod._ExecutionContextTaskTree(plugins["ws"], None)
+        tree = ws_mod._ExecutionContextTaskTree(plugins["ws"])
         assert tree._read_rows() == [{"pipeline_id": "p2", "lineage.parent_pipeline_id": "p0"}]
     finally:
         ws_mod.set_state_reader(None)
@@ -732,7 +781,7 @@ async def test_read_rows_without_refresh_returns_empty(plugins):
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error")  # 若产生协程必报 RuntimeWarning
-            tree = ws_mod._ExecutionContextTaskTree(plugins["ws"], None)
+            tree = ws_mod._ExecutionContextTaskTree(plugins["ws"])
             assert tree._read_rows() == []
     finally:
         ws_mod.set_state_reader(None)
@@ -808,8 +857,8 @@ async def test_workspace_init_task_inherited_parent_ws_meta_json_string_restored
 
 @pytest.mark.asyncio
 async def test_refresh_state_rows_failure_keeps_cache_and_warns(plugins, monkeypatch, caplog):
-    """聚合读失败：沿用上次快照（不清空）且 WARN 留痕——静默吞掉曾致父链
-    查找失败无从排障（sidecar 重生窗口聚合读失败零日志，2026-08-29）。"""
+    """聚合读失败：沿用上次快照（不清空）且 WARN 留痕——失败必须可观测，
+    否则父链查找失败时无从排障。"""
     import logging as _logging  # noqa: PLC0415
 
     ws_mod = plugins["ws_mod"]

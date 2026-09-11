@@ -12,10 +12,18 @@ isolation_level 是隔离的唯一真相源，由 isolation_guard 归一化后�
 
 from __future__ import annotations
 
+import pytest
+
 from tests._pipeline_plugin_path import add_plugin_dir
+from tests._security_check_harness import (
+    make_tool_ctx,
+    unwire_approval_cap,
+    wire_approval_cap,
+)
 
 add_plugin_dir("input", "security_check")
-from plugin import SecurityCheckPlugin
+import plugin as sc_mod  # noqa: E402
+from plugin import SecurityCheckPlugin  # noqa: E402
 
 
 class TestIsIsolated:
@@ -55,3 +63,54 @@ class TestIsIsolated:
             {"tool_name": "delete_file", "provider": "host", "task_isolated": False},
         ]
         assert plugin._is_isolated(ctxs) is False
+
+
+class TestIsolatedSkipsApprovalEndToEnd:
+    """行为级：task_isolated 经公开入口 execute 放行，审批通道零发起。
+
+    白盒 TestIsIsolated 钉判定函数；这里钉用户可观察行为——隔离任务的
+    危险命令不弹审批直接放行，同命令非隔离/缺字段则必须弹审批。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_cap(self):
+        yield
+        unwire_approval_cap(sc_mod)
+
+    @pytest.mark.asyncio
+    async def test_isolated_dangerous_command_allowed_without_approval(self) -> None:
+        """隔离任务的危险命令 → 放行且审批通道零发起。"""
+        _cap, create = wire_approval_cap(sc_mod, [])  # 空 sequence：任何审批尝试即失败
+
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        ctx = make_tool_ctx("bash_execute", {"command": "rm -rf /tmp/a"}, task_isolated=True)
+
+        result = await plugin.execute(ctx)
+        decision = result.state_updates.get("security.decision", {})
+        assert decision.get("allowed") is True
+        assert "isolated" in decision.get("reason", "")
+        assert create.calls == 0, "隔离任务不得发起审批"
+
+    @pytest.mark.asyncio
+    async def test_non_isolated_same_command_requires_approval(self) -> None:
+        """对照：同一命令 task_isolated=False → 必须发起审批。"""
+        _cap, create = wire_approval_cap(sc_mod, [{"selected_option": "approved_once"}])
+
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        ctx = make_tool_ctx("bash_execute", {"command": "rm -rf /tmp/a"}, task_isolated=False)
+
+        result = await plugin.execute(ctx)
+        assert result.state_updates.get("security.decision", {}).get("allowed") is True
+        assert create.calls == 1, "非隔离任务的危险命令必须审批"
+
+    @pytest.mark.asyncio
+    async def test_missing_task_isolated_flag_is_conservative(self) -> None:
+        """对照：context 缺 task_isolated 字段 → 按未隔离处理（审批兜底）。"""
+        _cap, create = wire_approval_cap(sc_mod, [{"selected_option": "approved_once"}])
+
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        ctx = make_tool_ctx("bash_execute", {"command": "rm -rf /tmp/a"})
+
+        result = await plugin.execute(ctx)
+        assert result.state_updates.get("security.decision", {}).get("allowed") is True
+        assert create.calls == 1, "缺隔离标记必须保守走审批"

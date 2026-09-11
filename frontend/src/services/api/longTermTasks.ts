@@ -1,7 +1,7 @@
 /** 长期任务 API 服务 基于 Task API 实现长期任务功能 */
 
-import { apiClient } from '@/services/api/client'
 import { API_ENDPOINTS } from '@/constants/api'
+import { apiClient } from '@/services/api/client'
 import type { Task, TaskStatus } from '@/types/task'
 
 export interface LongTermTasksResponse {
@@ -39,7 +39,8 @@ export async function fetchLongTermTasks(params?: {
   const response = await apiClient.get<TaskListApiResponse>(`${API_ENDPOINTS.TASKS.LIST}?${queryParams}`)
 
   // 从后端 {items, total} 结构中取出任务列表，再客户端侧过滤长期任务
-  const allTasks = response.data.items
+  // （?? [] 与 pipelines.ts/monitoring.ts 同规：后端非预期形状 200 时不得整链 TypeError）
+  const allTasks = response.data.items ?? []
   const longTermTasks = allTasks.filter((task) => task.tags?.includes('long-term'))
 
   return {

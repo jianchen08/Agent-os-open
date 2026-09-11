@@ -15,11 +15,23 @@ auth=user 已由内核完成，此处只取身份不重复鉴权）。
 """
 from __future__ import annotations
 
-import base64
-import json
+import os
+import sys
 import time
-from dataclasses import asdict
 from typing import Any
+
+# 共享层公共模块（kernel_token/http_json，plugins/shared 平铺）入 sys.path 后
+# 裸名导入（先例：tasks/http_api.py、tenant_data）。
+_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from http_json import (  # noqa: E402
+    decode_body as _decode_body,
+    error as _error,
+    json_response as _json_response,
+    ok as _ok,
+)
+from kernel_token import decode_kernel_token  # noqa: E402
 
 from tool import TriggerSetupTool
 from triggers.manager import get_trigger_manager
@@ -29,55 +41,9 @@ PREFIX = "/ext/trigger_setup_tool/triggers"
 PIPELINES_PATH = "/ext/trigger_setup_tool/pipelines"
 
 
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    return {"success": True, "data": data}
-
-
-def _error(message: str, status: int = 400) -> dict[str, Any]:
-    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 或明文 JSON）为 dict。"""
-    if not raw_body:
-        return {}
-    decoded = raw_body
-    try:
-        attempt = base64.b64decode(raw_body).decode("utf-8")
-        if attempt.lstrip().startswith(("{", "[")):
-            decoded = attempt
-    except (ValueError, UnicodeDecodeError):
-        pass
-    try:
-        parsed = json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON body: {exc}") from exc
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def _serialize(cfg: TriggerConfig) -> dict[str, Any]:
     """TriggerConfig → JSON 安全 dict（Enum 转 value、datetime 转 ISO、空容器兜底）。"""
-    d = asdict(cfg)
-    d["trigger_type"] = cfg.trigger_type.value if hasattr(cfg.trigger_type, "value") else cfg.trigger_type
-    d["status"] = cfg.status.value if hasattr(cfg.status, "value") else cfg.status
-    if cfg.scheduled_at is not None:
-        d["scheduled_at"] = cfg.scheduled_at.isoformat()
-    for key in ("event_filter", "action_params", "metadata"):
-        if d.get(key) is None:
-            d[key] = {}
-    return d
+    return cfg.to_state_dict()
 
 
 def _get_or_404(trigger_id: str) -> tuple[TriggerConfig | None, dict[str, Any] | None]:
@@ -89,10 +55,10 @@ def _get_or_404(trigger_id: str) -> tuple[TriggerConfig | None, dict[str, Any] |
 
 
 def _decode_bearer_user(headers: dict[str, Any] | None) -> str:
-    """从 Authorization Bearer token 解出 user_id；无效/缺失返回空串。
+    """从 Authorization Bearer token 解出 user_id；无效/缺失/过期返回空串。
 
-    内核 0.2 开发期 token 形如 base64_nopad("access:{user_id}:{username}:{exp}")，
-    与 kernel http/src/auth.rs decode_token 同构（agent_manager 自持同款）。
+    解码走公共单点 kernel_token.decode_kernel_token（自解析不验签，鉴权权威
+    在内核 dispatcher；路由 auth=user 已由内核完成，此处只取身份不重复鉴权）。
     """
     authz = ""
     for k, v in (headers or {}).items():
@@ -102,21 +68,13 @@ def _decode_bearer_user(headers: dict[str, Any] | None) -> str:
     token = authz[7:] if authz.lower().startswith("bearer ") else ""
     if not token:
         return ""
-    try:
-        padded = token.strip() + "=" * (-len(token.strip()) % 4)
-        payload = base64.b64decode(padded, validate=False).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
+    decoded = decode_kernel_token(token)
+    if decoded is None:
         return ""
-    parts = payload.split(":", 3)
-    if len(parts) != 4:
-        return ""
-    try:
-        exp = int(parts[3])
-    except ValueError:
-        return ""
+    user_id, _username, exp = decoded
     if int(time.time()) >= exp:
         return ""
-    return parts[1]
+    return user_id
 
 
 # ── 9 个端点 handler ──────────────────────────────────────────────
@@ -207,12 +165,13 @@ async def delete_trigger(trigger_id: str) -> dict[str, Any]:
 
 
 async def set_trigger_status(trigger_id: str, status: TriggerStatus) -> dict[str, Any]:
-    """enable/disable 共用：改进程内配置状态（与取消/到期置态同存储）。"""
+    """enable/disable 共用：改状态并同步落目标管道 state（与注册同存储）。"""
     cfg, err = _get_or_404(trigger_id)
     if err is not None:
         return err
     assert cfg is not None  # _get_or_404 约定：err 为 None 时 cfg 必非 None
     cfg.status = status
+    get_trigger_manager().persist(cfg)
     return _ok(_json_response({"updated": True, "trigger": _serialize(cfg)}))
 
 

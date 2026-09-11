@@ -4,12 +4,12 @@
  * 包含错误边界和路由配置
  */
 
-import { RouterProvider } from 'react-router-dom'
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
+import { RouterProvider } from 'react-router-dom'
 import ErrorBoundary from './components/ErrorBoundary'
+import { ExtensionHost } from './components/extension/ExtensionHost'
 import { Toaster } from './components/ui/sonner'
 import { createRouter } from './router'
-import { ExtensionHost } from './components/extension/ExtensionHost'
 import { queryClient } from './services/query/queryClient'
 import { queryPersister } from './services/query/queryPersister'
 

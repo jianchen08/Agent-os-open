@@ -11,9 +11,9 @@
  */
 
 import React, { useEffect, useState } from 'react'
-import { CommandPalette, ExtensionModalHost, useExtensionModal } from './ExtensionComponents'
 import { useExtensionShortcuts } from '@/hooks/useExtensionShortcuts'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
+import { CommandPalette, ExtensionModalHost, useExtensionModal } from './ExtensionComponents'
 import type { CommandDispatcher } from '@/services/schema/commandDispatcher'
 
 /** 预置 widget 渲染器签名 */

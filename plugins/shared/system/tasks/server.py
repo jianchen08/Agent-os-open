@@ -8,15 +8,12 @@ tasks 域逻辑承载于 service.py（组合 _task_crud/_task_state/_task_cleanu
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
-# 共享层自举（plugins/shared/ —— project_registry 所在，与 storage.py 同模式）。
-_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _SHARED_ROOT not in sys.path:
-    sys.path.insert(0, _SHARED_ROOT)
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+# 共享层自举（plugins/shared/ —— project_registry / state_fields 等共享裸模块所在）。
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.path
 
 # tasks/projects 域 HTTP 面自持。
 # http_api 内部懒 import server.plugin 取能力句柄，此处顶层 import 无环。
@@ -30,6 +27,11 @@ import events as task_events  # noqa: E402,PLC0415
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("task_service")
+
+# 能力句柄正门注入：http_api._capability 在合宿模式下取不到 __main__.plugin
+# （合宿 __main__ 是 host.py，无 plugin 全局），经此注入成员实例；
+# 独占模式下两路径指向同一对象，行为不变。
+http_api.set_plugin_instance(plugin)
 
 _service: TaskService | None = None
 
@@ -69,6 +71,12 @@ async def _on_load(params: dict[str, Any]) -> None:
     # 传 None，由 TaskStorage 解析剩余两级：TASKS_STORAGE_DIR env → 多租户
     # 根 data/{tenant}/tasks（storage.py __init__ 契约）。
     _service = TaskService(data_dir=config.get("data_dir"))
+    # 正门实例注入 service_access：同进程 co-host 消费方
+    # （child_task_guard/workspace/task_reminder 等）经 get_task_service()
+    # 共享本实例，消除"正门带 config / 克隆零参"双实例化分叉。
+    import service_access  # noqa: PLC0415
+
+    service_access.set_task_service(_service)
     # 清理链跨进程能力：pipeline-executor（删任务时停/删管道数据）+
     # frontend（task_deleted 前端通知）。缺 capability 时降级留痕。
     import _task_cleanup  # noqa: PLC0415
@@ -88,7 +96,24 @@ async def _on_load(params: dict[str, Any]) -> None:
     from project_registry import purge_legacy_container_data  # noqa: PLC0415
 
     purge_stats = purge_legacy_container_data(_service.storage)
-    logger.info("TaskService initialized | legacy_purge=%s", purge_stats)
+    # U13 启动调和（域界定 docs/working/U13终态两写域界定_20260906.md §二）：
+    # 内核 reap 把残留 running 一律扫 failed，与投影 completed 冲突的分歧行由
+    # 任务域按投影仲裁（completed 权威补派通知 / 无终态证据对齐 failed）。
+    # 读面故障降级留痕（reconcile_startup 内部处理），不阻断装载。
+    import reconcile  # noqa: PLC0415
+
+    try:
+        state_cap = plugin.get_capability("pipeline-state")
+        runs_cap = plugin.get_capability("service-registry")
+        bus_cap = plugin.get_capability("event-bus")
+        reconciled = await reconcile.reconcile_startup(state_cap, runs_cap, bus_cap)
+    except KeyError as exc:
+        reconciled = []
+        logger.warning("[task_service] 调和能力缺席，启动调和跳过 | err=%s", exc)
+    logger.info(
+        "TaskService initialized | legacy_purge=%s | orphan_reconciled=%d",
+        purge_stats, len(reconciled),
+    )
 
 
 @plugin.on_unload
@@ -96,6 +121,9 @@ async def _on_unload(params: dict[str, Any]) -> None:
     """Cleanup task service on unload."""
     global _service
     _service = None
+    import service_access  # noqa: PLC0415
+
+    service_access.set_task_service(None)
 
 
 # ──────────────────────────────────────────────

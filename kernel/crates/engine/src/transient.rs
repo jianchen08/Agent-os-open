@@ -26,6 +26,7 @@
 //! [来源: docs/working/插件中间态统一管理方案_20260827.md §2.2]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,16 @@ use serde_json::{json, Value};
 
 /// A 区 LRU 上限（键数/进程）。超限逐出 `updated_at` 最老键。
 pub const MAX_KEYS_PER_PROCESS: usize = 1000;
+
+/// A 区字节预算（进程级，近似值）：chunk 键的 blocks.content 携带流式累积
+/// 全文（单值可达百 KB 级），键数上限挡不住"少键大值"。超限按 `updated_at`
+/// 全局最老逐出（与键数 LRU 同序）。2026-09-09 内存驻留归因后补。
+pub const MAX_KEY_BYTES_PER_PROCESS: usize = 64 * 1024 * 1024;
+
+/// chunk 累积缓冲字节预算（进程级，近似值）：每 (tenant,pipeline,message) 一档
+/// 持有 text/thinking 全文缓冲，正常 stream_end/error 即清（[`Self::clear_chunk`]），
+/// 中断/强杀的流到不了清理点——字节预算兜底，超限逐 `last_flush` 最旧档。
+pub const MAX_ACCUM_BYTES_PER_PROCESS: usize = 32 * 1024 * 1024;
 
 /// chunk 累积节流（方案 §2.4）：每 N 个 chunk 或距上次落盘 ≥ 本间隔才真正写
 /// 寄存器一次（写入频率 ~2-5 次/秒，防长流式高频 upsert）。
@@ -60,6 +71,26 @@ pub fn global_registry() -> &'static TransientStateRegistry {
 pub struct TransientEntry {
     pub value: Value,
     pub updated_at: Instant,
+    /// 近似序列化字节数（[`approx_value_bytes`]），供字节预算维护。
+    pub approx_bytes: usize,
+}
+
+/// 近似 Value 序列化字节数（O(n) 递归：字符串按 UTF-8 长度 + 结构开销），
+/// 供字节预算记账——只求量级正确，不做精确序列化。
+fn approx_value_bytes(v: &Value) -> usize {
+    match v {
+        Value::Null => 4,
+        Value::Bool(_) => 5,
+        Value::Number(_) => 8,
+        Value::String(s) => s.len() + 2,
+        Value::Array(a) => a.iter().map(approx_value_bytes).sum::<usize>() + a.len() + 2,
+        Value::Object(o) => {
+            o.iter()
+                .map(|(k, val)| k.len() + 4 + approx_value_bytes(val))
+                .sum::<usize>()
+                + 2
+        }
+    }
 }
 
 /// A 区单管道键集合：key → 条目（按 key 插入序 + updated_at 维护 LRU）。
@@ -102,6 +133,10 @@ pub struct TransientStateRegistry {
     bindings: std::sync::Arc<RwLock<BindingStore>>,
     /// chunk 累积节流档：(tenant,pipeline,message_id) → 累积缓冲（短锁独立）。
     chunk_accum: std::sync::Arc<Mutex<ChunkAccumTable>>,
+    /// A 区近似字节总量记账（[`MAX_KEY_BYTES_PER_PROCESS`] 预算判据）。
+    key_bytes: std::sync::Arc<AtomicUsize>,
+    /// chunk 累积缓冲近似字节总量记账（[`MAX_ACCUM_BYTES_PER_PROCESS`] 判据）。
+    accum_bytes: std::sync::Arc<AtomicUsize>,
 }
 
 impl TransientStateRegistry {
@@ -111,25 +146,34 @@ impl TransientStateRegistry {
             keys: std::sync::Arc::new(RwLock::new(HashMap::new())),
             bindings: std::sync::Arc::new(RwLock::new(HashMap::new())),
             chunk_accum: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            key_bytes: std::sync::Arc::new(AtomicUsize::new(0)),
+            accum_bytes: std::sync::Arc::new(AtomicUsize::new(0)),
         }
     }
 
     // ── A 键值区 ──────────────────────────────────────────────
 
-    /// 写/覆盖一个中间态键。超 LRU 上限时逐出该管道最老键（按 updated_at）。
+    /// 写/覆盖一个中间态键。超 LRU 上限时逐出该管道最老键（按 updated_at）；
+    /// 超 A 区字节预算时按全局 updated_at 最老逐出（跳过刚写入键）。
     pub fn set(&self, tenant_id: &str, pipeline_id: &str, key: &str, value: Value) {
+        let approx = approx_value_bytes(&value);
         let mut keys = self.keys.write();
         let pipe = keys
             .entry((tenant_id.to_string(), pipeline_id.to_string()))
             .or_default();
         let now = Instant::now();
-        pipe.insert(
+        if let Some(old) = pipe.insert(
             key.to_string(),
             TransientEntry {
                 value,
                 updated_at: now,
+                approx_bytes: approx,
             },
-        );
+        ) {
+            self.key_bytes
+                .fetch_sub(old.approx_bytes, Ordering::Relaxed);
+        }
+        self.key_bytes.fetch_add(approx, Ordering::Relaxed);
         if pipe.len() > MAX_KEYS_PER_PROCESS {
             // 逐出 updated_at 最老的键（同刻并列时取最先遍历到的，保证确定性）
             if let Some(oldest_key) = pipe
@@ -137,7 +181,58 @@ impl TransientStateRegistry {
                 .min_by_key(|(_, e)| e.updated_at)
                 .map(|(k, _)| k.clone())
             {
-                pipe.remove(&oldest_key);
+                if let Some(removed) = pipe.remove(&oldest_key) {
+                    self.key_bytes
+                        .fetch_sub(removed.approx_bytes, Ordering::Relaxed);
+                }
+            }
+        }
+        let total = self.key_bytes.load(Ordering::Relaxed);
+        if total > MAX_KEY_BYTES_PER_PROCESS {
+            Self::evict_key_bytes_over(
+                &mut keys,
+                &self.key_bytes,
+                MAX_KEY_BYTES_PER_PROCESS,
+                Some((tenant_id, pipeline_id, key)),
+            );
+        }
+    }
+
+    /// 字节预算逐出（A 区）：按 updated_at 全局最老逐键移除直至预算内；
+    /// `keep` 指定的刚写入键不逐（单值超预算时允许暂时越限，不做饿死写入）。
+    /// 调用方持 keys 写锁。
+    fn evict_key_bytes_over(
+        keys: &mut KeyedStore,
+        key_bytes: &AtomicUsize,
+        budget: usize,
+        keep: Option<(&str, &str, &str)>,
+    ) {
+        let mut total = key_bytes.load(Ordering::Relaxed);
+        let mut all: Vec<((String, String), String, Instant, usize)> = keys
+            .iter()
+            .flat_map(|(pk, pm)| {
+                pm.iter()
+                    .map(move |(k, e)| (pk.clone(), k.clone(), e.updated_at, e.approx_bytes))
+            })
+            .collect();
+        all.sort_by_key(|(_, _, u, _)| *u);
+        for (pk, k, _, bytes) in all {
+            if total <= budget {
+                break;
+            }
+            if let Some((t, p, keep_key)) = keep {
+                if pk.0 == t && pk.1 == p && k == keep_key {
+                    continue;
+                }
+            }
+            if let Some(pm) = keys.get_mut(&pk) {
+                if pm.remove(&k).is_some() {
+                    total = total.saturating_sub(bytes);
+                    key_bytes.fetch_sub(bytes, Ordering::Relaxed);
+                    if pm.is_empty() {
+                        keys.remove(&pk);
+                    }
+                }
             }
         }
     }
@@ -170,7 +265,10 @@ impl TransientStateRegistry {
         let pipe_key = (tenant_id.to_string(), pipeline_id.to_string());
         let mut empty = false;
         if let Some(pipe) = keys.get_mut(&pipe_key) {
-            pipe.remove(key);
+            if let Some(removed) = pipe.remove(key) {
+                self.key_bytes
+                    .fetch_sub(removed.approx_bytes, Ordering::Relaxed);
+            }
             empty = pipe.is_empty();
         }
         if empty {
@@ -286,6 +384,10 @@ impl TransientStateRegistry {
         if !thinking.is_empty() {
             entry.thinking.push_str(thinking);
         }
+        // 字节记账（原子量，锁内自增安全）：中断/强杀的流到不了 clear_chunk
+        // 清理点，预算兜底见 flush 路径的 evict_accum_over_budget。
+        self.accum_bytes
+            .fetch_add(content.len() + thinking.len(), Ordering::Relaxed);
         let due = entry.count >= CHUNK_FLUSH_EVERY
             || now.duration_since(entry.last_flush)
                 >= Duration::from_millis(CHUNK_FLUSH_INTERVAL_MS);
@@ -306,6 +408,9 @@ impl TransientStateRegistry {
         entry.count = 0;
         entry.last_flush = now;
         drop(acc);
+        // 字节预算兜底：中断/强杀的流到不了 clear_chunk 清理点，超限逐
+        // last_flush 最旧档（锁外执行——与 keys 锁无嵌套）。
+        self.evict_accum_over_budget(MAX_ACCUM_BYTES_PER_PROCESS);
         self.set(
             tenant_id,
             pipeline_id,
@@ -323,8 +428,37 @@ impl TransientStateRegistry {
             pipeline_id.to_string(),
             message_id.to_string(),
         );
-        self.chunk_accum.lock().remove(&key);
+        if let Some(removed) = self.chunk_accum.lock().remove(&key) {
+            self.accum_bytes.fetch_sub(
+                removed.text.len() + removed.thinking.len(),
+                Ordering::Relaxed,
+            );
+        }
         self.clear(tenant_id, pipeline_id, &format!("chunk:{message_id}"));
+    }
+
+    /// chunk 累积缓冲字节预算逐出：按 `last_flush` 最旧移除直至预算内
+    /// （调用方不持 chunk_accum 锁）。
+    fn evict_accum_over_budget(&self, budget: usize) {
+        let mut acc = self.chunk_accum.lock();
+        let mut total = self.accum_bytes.load(Ordering::Relaxed);
+        if total <= budget {
+            return;
+        }
+        let mut all: Vec<((String, String, String), Instant, usize)> = acc
+            .iter()
+            .map(|(k, e)| (k.clone(), e.last_flush, e.text.len() + e.thinking.len()))
+            .collect();
+        all.sort_by_key(|(_, f, _)| *f);
+        for (k, _, bytes) in all {
+            if total <= budget {
+                break;
+            }
+            if acc.remove(&k).is_some() {
+                total = total.saturating_sub(bytes);
+                self.accum_bytes.fetch_sub(bytes, Ordering::Relaxed);
+            }
+        }
     }
 
     /// 取该 message 的 chunk 累积快照（中断合并落库的数据源；None = 无累积）。
@@ -357,11 +491,21 @@ impl TransientStateRegistry {
     /// chunk 累积节流档同清（管道级中间态整体作废）。
     pub fn clear_pipeline(&self, tenant_id: &str, pipeline_id: &str) {
         let pipe_key = (tenant_id.to_string(), pipeline_id.to_string());
-        self.keys.write().remove(&pipe_key);
+        if let Some(pipe) = self.keys.write().remove(&pipe_key) {
+            let freed: usize = pipe.values().map(|e| e.approx_bytes).sum();
+            self.key_bytes.fetch_sub(freed, Ordering::Relaxed);
+        }
         self.bindings.write().remove(&pipe_key);
-        self.chunk_accum
-            .lock()
-            .retain(|(t, p, _), _| t != tenant_id || p != pipeline_id);
+        let mut acc = self.chunk_accum.lock();
+        let mut freed = 0usize;
+        acc.retain(|(t, p, _), e| {
+            let keep = t != tenant_id || p != pipeline_id;
+            if !keep {
+                freed += e.text.len() + e.thinking.len();
+            }
+            keep
+        });
+        self.accum_bytes.fetch_sub(freed, Ordering::Relaxed);
     }
 
     /// 清全部两区条目（跨租户；全量执行数据清理时使用）。
@@ -369,6 +513,8 @@ impl TransientStateRegistry {
         self.keys.write().clear();
         self.bindings.write().clear();
         self.chunk_accum.lock().clear();
+        self.key_bytes.store(0, Ordering::Relaxed);
+        self.accum_bytes.store(0, Ordering::Relaxed);
     }
 }
 
@@ -607,5 +753,75 @@ mod tests {
             !reg.accumulate_chunk(TENANT, "pipe_1", "m1", "a", ""),
             "节流档已随管道清除"
         );
+    }
+}
+
+#[cfg(test)]
+mod byte_budget_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// A 区字节预算：全局最老先逐；keep 保护刚写入键（单值超预算允许暂时越限）。
+    #[test]
+    fn key_byte_budget_evicts_globally_oldest_and_protects_fresh_key() {
+        let mut store: KeyedStore = HashMap::new();
+        let counter = AtomicUsize::new(0);
+        let mk = |bytes: usize, age_secs: u64| TransientEntry {
+            value: json!(null),
+            updated_at: Instant::now() - Duration::from_secs(age_secs),
+            approx_bytes: bytes,
+        };
+        store.insert(
+            ("t".to_string(), "p_old".to_string()),
+            HashMap::from([("k_old".to_string(), mk(800, 100))]),
+        );
+        store.insert(
+            ("t".to_string(), "p_new".to_string()),
+            HashMap::from([("k_new".to_string(), mk(300, 0))]),
+        );
+        counter.store(1100, Ordering::Relaxed);
+
+        TransientStateRegistry::evict_key_bytes_over(&mut store, &counter, 1000, None);
+        assert!(
+            store
+                .get(&("t".to_string(), "p_old".to_string()))
+                .is_none_or(|pm| pm.is_empty()),
+            "全局最老（p_old.k_old）先逐"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), 300, "记账同步扣减");
+
+        TransientStateRegistry::evict_key_bytes_over(
+            &mut store,
+            &counter,
+            100,
+            Some(("t", "p_new", "k_new")),
+        );
+        assert!(
+            store.contains_key(&("t".to_string(), "p_new".to_string())),
+            "keep 指定的刚写入键不逐（防饿死写入）"
+        );
+    }
+
+    /// chunk 累积缓冲字节预算：last_flush 最旧档先逐，最新档存活。
+    #[test]
+    fn accum_byte_budget_evicts_oldest_flush() {
+        let reg = TransientStateRegistry::new();
+        let t0 = Instant::now();
+        let big = "x".repeat(600);
+        reg.accumulate_chunk_at("t", "p", "m1", &big, "", t0);
+        reg.accumulate_chunk_at("t", "p", "m2", &big, "", t0 + Duration::from_secs(1));
+        reg.accumulate_chunk_at("t", "p", "m3", &big, "", t0 + Duration::from_secs(2));
+        // 3 × 600B = 1800B，预算 1000 → m1、m2 逐出（last_flush 最旧先逐）
+        reg.evict_accum_over_budget(1000);
+        assert!(
+            reg.take_chunk_snapshot("t", "p", "m1").is_none(),
+            "最旧档逐出"
+        );
+        assert!(reg.take_chunk_snapshot("t", "p", "m2").is_none());
+        assert!(
+            reg.take_chunk_snapshot("t", "p", "m3").is_some(),
+            "最新档存活"
+        );
+        assert_eq!(reg.accum_bytes.load(Ordering::Relaxed), 600, "记账同步扣减");
     }
 }

@@ -168,3 +168,19 @@ class TestHandlerWiring:
         )
 
         assert spy.choice_calls[0]["file_paths"] is None
+
+    async def test_invalid_file_paths_normalized_to_none(
+        self, server_with_spy
+    ) -> None:
+        """非法 file_paths（非列表/纯非字符串项）→ service 收到 None（不抛错）。"""
+        server, spy = server_with_spy
+
+        await server.human_interaction(
+            mode="choice", title="t", options=["ok"], file_paths=42, pipeline_id="p-1",
+        )
+        await server.human_interaction(
+            mode="choice", title="t", options=["ok"], file_paths=[42, None], pipeline_id="p-2",
+        )
+
+        assert spy.choice_calls[0]["file_paths"] is None, "非列表入参应归一为 None"
+        assert spy.choice_calls[1]["file_paths"] is None, "全非法项的列表应归一为 None"

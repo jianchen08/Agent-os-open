@@ -4,6 +4,9 @@
 与 0.1 isolation 侧 tests/test_merge_verify_fix.py 同源互证（机制移植核验）：
 - 真实 git 仓：合并成功落文件+清理、冲突=失败且保留 worktree（冲突不自动解决）、
   删除文件不误判、多 commit 不误判、验证失败重试耗尽；
+- 产物到达验证（2026-09-05 重构）：期望集=合并前 wt 未提交变更 ∪ 分支未并入
+  全量差异，合并后逐项字节级对比；空期望集=平凡成功（执行与否归评估门控）；
+  auto-commit 失败 fail-closed 拒绝清理（曾致空合并假成功——B5 事故根因）；
 - 入口分发：ws_meta 缺失=失败（不静默跳过）、非 worktree 零 git 接触、
   worktree 缺 path 失败；
 - git 命令故障分支（超时/无 git/IO 故障）、合并诊断（缺 project_root/branch、
@@ -201,11 +204,11 @@ class TestRealMerge:
         m = WorktreeMerger()
         calls: list[int] = []
 
-        def _always_fail(workspace: str, project_root: str, ws_meta: dict, merge_result: dict) -> tuple[bool, str]:
+        def _always_fail(workspace: str, project_root: str, pending: dict) -> tuple[bool, str]:
             calls.append(1)
             return False, f"模拟验证失败 call={len(calls)}"
 
-        monkeypatch.setattr(m, "_verify_merge_result", _always_fail)
+        monkeypatch.setattr(m, "_verify_products_arrived", _always_fail)
         err = m.merge_worktree_before_complete("test1", _ws_meta(proj, wt_dir))
         assert isinstance(err, str) and "合并验证失败(重试2次)" in err
         assert len(calls) == 2, f"应恰好重试 2 次，实际 {len(calls)}"
@@ -222,6 +225,55 @@ class TestRealMerge:
         assert m.merge_worktree_before_complete("t1", {"mode": "worktree", "path": "D:/w", "project_root": "D:/s"}) is None
 
 
+    def test_empty_worktree_trivial_success(self, tmp_path: Path) -> None:
+        """空放行裁定（2026-09-05）：wt 干净且分支无独立提交 = 无事可合并，
+        平凡成功并清理；「任务是否该有产物」归评估门控裁决，不归合并。"""
+        proj, wt_dir = _setup_worktree_task(tmp_path)
+        # 回到干净基线：分支与 master 同点、工作区无差异
+        (wt_dir / "hello.txt").write_text("hello", encoding="utf-8")
+        (wt_dir / "new_file.txt").unlink()
+        git("add", "-A", cwd=wt_dir)
+        git("commit", "-m", "revert to baseline", cwd=wt_dir)
+
+        err = worktree_merge.merge_worktree_before_complete("test_empty", _ws_meta(proj, wt_dir))
+        assert err is None, err
+        assert not wt_dir.exists(), "无事可合并时清理照常执行"
+
+    def test_uncommitted_commit_failure_blocks_cleanup(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """auto-commit 失败必须 fail-closed：拒绝合并清理，wt 与分支原样保留。
+
+        （B5 事故根因：静默 None → 空合并假成功 → 清理链全速执行。）
+        """
+        proj, wt_dir = _setup_worktree_task(tmp_path)
+        # 追加未提交产物
+        (wt_dir / "late_product.txt").write_text("uncommitted", encoding="utf-8")
+
+        m = WorktreeMerger()
+        real_run = m._run_git
+
+        def scripted(*args: str, cwd: Path, **kw: Any) -> tuple[int, str, str]:
+            if args[:1] == ("add",) or args[:1] == ("commit",):
+                return (1, "", "simulated index.lock")
+            return real_run(*args, cwd=cwd, **kw)
+
+        monkeypatch.setattr(m, "_run_git", scripted)
+        err = m.merge_worktree_before_complete("test_lock", _ws_meta(proj, wt_dir))
+        assert isinstance(err, str) and "未能提交到分支" in err, err
+        assert wt_dir.exists(), "提交失败必须保留 worktree"
+        assert (wt_dir / "late_product.txt").exists()
+        rc, out, _ = git("rev-parse", "--verify", "task/test1^{commit}", cwd=proj)
+        assert rc == 0, "提交失败必须保留分支"
+
+    def test_content_mismatch_blocks_cleanup(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """产物到达对比为字节级：目标空间内容与 wt 不一致 = 未到达，拒绝清理。"""
+        proj, wt_dir = _setup_worktree_task(tmp_path)
+        m = WorktreeMerger()
+        monkeypatch.setattr(m, "_content_equal", lambda left, right: False)
+        err = m.merge_worktree_before_complete("test_mismatch", _ws_meta(proj, wt_dir))
+        assert isinstance(err, str) and "未到达目标空间" in err, err
+        assert wt_dir.exists(), "验证失败保留 worktree"
+
+
 # ── 合并诊断与安全校验 ───────────────────────────────────────
 
 
@@ -234,7 +286,7 @@ class TestSafeMergeDiagnostics:
         ],
     )
     def test_missing_metadata_is_failure(self, ws_meta: dict, needle: str, tmp_path: Path) -> None:
-        result = WorktreeMerger()._safe_merge(str(tmp_path / "ws"), ws_meta)
+        result = WorktreeMerger()._safe_merge(str(tmp_path / "ws"), ws_meta, {"items": {}, "uncommitted": False})
         assert result["success"] is False and needle in result["error"]
 
     def test_verify_merge_in_main_unmerged_branch_is_false(self, tmp_path: Path) -> None:
@@ -254,28 +306,6 @@ class TestSafeMergeDiagnostics:
         proj = _make_repo(tmp_path)
         assert WorktreeMerger()._verify_merge_in_main("task/no-such-branch", cwd=proj) is False
 
-    def test_missing_branch_diff_files_bad_branch_returns_empty(self, tmp_path: Path) -> None:
-        proj = _make_repo(tmp_path)
-        assert WorktreeMerger()._missing_branch_diff_files("task/no-such-branch", proj) == []
-
-    def test_verify_merge_result_copy_missing_files(self, tmp_path: Path) -> None:
-        proj = _make_repo(tmp_path)
-        merge_result = {"method": "copy", "merged_files": ["hello.txt", "missing_file.txt"]}
-        verified, detail = WorktreeMerger()._verify_merge_result(
-            str(tmp_path / "ws"), str(proj), {"branch": "task/t1"}, merge_result
-        )
-        assert verified is False and "missing_file.txt" in detail
-
-    def test_verify_merge_result_project_root_not_exist(self, tmp_path: Path) -> None:
-        verified, detail = WorktreeMerger()._verify_merge_result(
-            str(tmp_path / "ws"), "D:/nonexistent_repo", {}, {"method": "copy", "merged_files": []}
-        )
-        assert verified is False and "不存在" in detail
-
-
-# ── 清理边界 ────────────────────────────────────────────────
-
-
 class TestCleanupEdges:
     @pytest.mark.skipif(os.name != "nt", reason="Windows 只读属性语义：POSIX unlink 不看文件写位，handler 不触发")
     def test_force_rmtree_chmod_failure_retries_then_raises(self, tmp_path: Path, monkeypatch: Any) -> None:
@@ -292,9 +322,10 @@ class TestCleanupEdges:
         def broken_chmod(p: Any, mode: Any) -> None:
             raise OSError("chmod unavailable")
 
-        monkeypatch.setattr(worktree_merge.os, "chmod", broken_chmod)
+        # force_rmtree 已沉 SDK（agentos_plugin_sdk.fs_utils），接缝为全局 os.chmod
+        monkeypatch.setattr(_os, "chmod", broken_chmod)
         with pytest.raises(OSError):
-            worktree_merge._force_rmtree(str(d))
+            worktree_merge.force_rmtree(str(d))
         monkeypatch.undo()  # 先还原全局 os.chmod，再做只读恢复清理
         _os.chmod(f, _stat.S_IWRITE)
 
@@ -309,7 +340,7 @@ class TestCleanupEdges:
         f = sub / "f.txt"
         f.write_text("x", encoding="utf-8")
         _os.chmod(f, _stat.S_IREAD)
-        worktree_merge._force_rmtree(str(d))
+        worktree_merge.force_rmtree(str(d))
         assert not d.exists()
 
     def test_stale_index_lock_removed(self, tmp_path: Path) -> None:
@@ -428,18 +459,6 @@ class TestGitOpsFailureBranches:
         rc, _, err = WorktreeMerger()._run_git("status", cwd=tmp_path)
         assert rc == -1 and "git 工作目录无效或不存在" in err
 
-    def test_same_name_sibling_exists_oserror_is_false(self, tmp_path: Path) -> None:
-        """parent 存在但不可迭代（文件非目录）→ 模糊匹配安全返回 False。"""
-        blocker = tmp_path / "afile"
-        blocker.write_text("x", encoding="utf-8")
-        target = blocker / "a.txt"  # parent 是文件 → iterdir 抛 NotADirectoryError(OSError)
-        assert WorktreeMerger()._same_name_sibling_exists(target) is False
-
-    def test_first_missing_paths_caps_at_ten(self, tmp_path: Path) -> None:
-        expected = [f"missing_{i}.txt" for i in range(12)]
-        missing = WorktreeMerger()._first_missing_paths(tmp_path, expected)
-        assert len(missing) == 10 and missing[0] == "missing_0.txt"
-        assert WorktreeMerger()._first_missing_paths(tmp_path, []) == []
 
     def test_merge_lock_per_project_root(self) -> None:
         m = WorktreeMerger()
@@ -526,7 +545,7 @@ class TestScriptedGitBranches:
             return (0, "", "")
 
         result = self._merger_with(respond)._safe_merge(
-            str(tmp_path / "ws"), {"project_root": str(tmp_path), "branch": "task/t1"}
+            str(tmp_path / "ws"), {"project_root": str(tmp_path), "branch": "task/t1"}, {"items": {}, "uncommitted": False}
         )
         assert result["success"] is False and "无法获取当前分支" in result["error"]
 
@@ -545,7 +564,7 @@ class TestScriptedGitBranches:
             return (0, "", "")
 
         result = self._merger_with(respond)._safe_merge(
-            str(tmp_path / "ws"), {"project_root": str(tmp_path), "branch": "task/t1"}
+            str(tmp_path / "ws"), {"project_root": str(tmp_path), "branch": "task/t1"}, {"items": {}, "uncommitted": False}
         )
         assert result["success"] is False
         assert "stderr=error: merge aborted by hook" in result["error"]
@@ -558,40 +577,8 @@ class TestScriptedGitBranches:
 
         assert self._merger_with(respond)._verify_merge_in_main("task/t1", cwd=tmp_path) is False
 
-    def test_missing_branch_diff_files_caps_at_ten(self, tmp_path: Path) -> None:
-        files = "\n".join(f"gone_{i}.txt" for i in range(12))
 
-        def respond(args: tuple[str, ...], cwd: Any) -> tuple[int, str, str]:
-            if args[:2] == ("-c", "core.quotepath=false"):
-                return (0, files, "")
-            return (0, "", "")
 
-        missing = self._merger_with(respond)._missing_branch_diff_files("task/t1", tmp_path)
-        assert len(missing) == 10
-        assert set(missing) <= {f"gone_{i}.txt" for i in range(12)}, "缺失项应来自 diff 清单"
-
-    def test_verify_merge_result_commit_graph_failure(self, tmp_path: Path, monkeypatch: Any) -> None:
-        m = WorktreeMerger()
-        monkeypatch.setattr(m, "_verify_merge_in_main", lambda branch, cwd: False)
-        verified, detail = m._verify_merge_result(
-            str(tmp_path / "ws"), str(tmp_path), {"branch": "task/t1"}, {"method": "git_merge"}
-        )
-        assert verified is False and "commit graph 验证失败" in detail
-
-    def test_verify_merge_result_files_missing(self, tmp_path: Path, monkeypatch: Any) -> None:
-        m = WorktreeMerger()
-        monkeypatch.setattr(m, "_verify_merge_in_main", lambda branch, cwd: True)
-
-        def respond(args: tuple[str, ...], cwd: Any) -> tuple[int, str, str]:
-            if args[:2] == ("-c", "core.quotepath=false"):
-                return (0, "gone_a.txt\ngone_b.txt", "")
-            return (0, "", "")
-
-        monkeypatch.setattr(m, "_run_git", lambda *a, **kw: respond(a, kw.get("cwd")))
-        verified, detail = m._verify_merge_result(
-            str(tmp_path / "ws"), str(tmp_path), {"branch": "task/t1"}, {"method": "git_merge"}
-        )
-        assert verified is False and "2 个文件未到达目标" in detail
 
     def test_cleanup_worktree_probe_recovers_repo_root(self, tmp_path: Path) -> None:
         """project_root 缺失但 worktree 是真仓库 → 反查成功并继续清理。"""
@@ -616,12 +603,10 @@ class TestScriptedGitBranches:
         def boom(path: str) -> None:
             raise OSError("locked")
 
-        monkeypatch.setattr(worktree_merge, "_force_rmtree", boom)
+        monkeypatch.setattr(worktree_merge, "force_rmtree", boom)
         WorktreeMerger()._cleanup_worktree(str(ws), {"project_root": str(proj), "branch": ""})
         assert ws.exists(), "清理失败只告警，不静默也不崩溃"
 
-    def test_same_name_sibling_missing_parent_is_false(self, tmp_path: Path) -> None:
-        assert WorktreeMerger()._same_name_sibling_exists(tmp_path / "no_dir" / "a.txt") is False
 
     def test_cleanup_unstaged_changes_only_untracked_returns(self, tmp_path: Path) -> None:
         """仅 untracked（??）不构成 unstaged 修改 → 静默返回。"""

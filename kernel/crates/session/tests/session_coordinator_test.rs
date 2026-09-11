@@ -92,32 +92,15 @@ async fn replay_missed_delivers_buffered_events_to_current_connection() {
 }
 
 #[tokio::test]
-async fn metrics_emit_widget_increments_push_counter() {
+async fn register_tracks_active_connections_in_registry() {
     let coord = SessionCoordinator::default();
-    let (sink, _recv) = MockSink::online();
-    coord.register("user-A", sink);
-    coord.register_thread("thread-1", "user-A");
-    coord
-        .emit_event("thread-1", "widget_event", serde_json::json!({}))
-        .await;
-    let snap = coord.metrics().snapshot();
-    assert_eq!(
-        snap.event_bus_push_total, 1,
-        "emit_event 投递成功应 inc push"
-    );
-    assert_eq!(snap.event_bus_dropped_total, 0);
-}
-
-#[tokio::test]
-async fn metrics_connections_gauge_tracks_registry_size() {
-    let coord = SessionCoordinator::default();
-    assert_eq!(coord.metrics().snapshot().connections, 0);
+    assert_eq!(coord.registry().active_count(), 0);
     let (sink1, _r1) = MockSink::online();
     coord.register("user-A", sink1);
-    assert_eq!(coord.metrics().snapshot().connections, 1);
+    assert_eq!(coord.registry().active_count(), 1);
     let (sink2, _r2) = MockSink::online();
     coord.register("user-B", sink2);
-    assert_eq!(coord.metrics().snapshot().connections, 2);
+    assert_eq!(coord.registry().active_count(), 2);
 }
 
 /// 建连重放（FIX 2026-08-23）：replay_all_for_user 按 watermark 一次性重放

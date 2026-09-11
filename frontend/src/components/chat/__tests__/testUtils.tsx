@@ -12,8 +12,8 @@ import React from 'react'
 import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
 import type { InteractionCardProps } from '@/components/chat/InteractionCard'
 import type { ActivityCardProps, ActivityData  } from '@/types/activity'
-import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { MessagePart, PartState, ToolCallPartState } from '@/types/messageParts'
+import type { Message, MessageToolCall } from '@/types/models'
 import type { RenderOptions } from '@testing-library/react'
 
 // ============================================================

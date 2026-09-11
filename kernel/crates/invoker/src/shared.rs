@@ -3,9 +3,11 @@
 //! 这些逻辑 sidecar / InProcess 都要用，独立成模块避免在 invoker.rs 里
 //! 堆叠，也确保三种插件拿到一致的配置和输入。
 
+use std::borrow::Cow;
+
 use agentos_core::traits::EnvConfigField;
 use agentos_core::traits::{PluginLoader, PluginManifest};
-use agentos_core::types::{PluginContext, PluginError};
+use agentos_core::types::PluginError;
 use serde_json::{json, Value};
 use tracing::warn;
 
@@ -33,28 +35,14 @@ pub async fn injected_config(
                     source: Some("plugin-invoker".to_string()),
                 });
             }
-            warn!("Failed to load plugin config, using empty: {}", e);
+            warn!(
+                "Failed to load plugin config for '{}', using empty: {}",
+                manifest.id, e
+            );
             serde_json::json!({})
         }
     };
     Ok(build_injected_config(&full_config, manifest))
-}
-
-/// 构造带 config_files 注入的 PluginInput JSON（native/sidecar 统一入口）。
-///
-/// config 来自 [`injected_config`]（manifest config_files 命名空间合并）。
-pub async fn build_plugin_input(
-    loader: &dyn PluginLoader,
-    ctx: &PluginContext,
-    manifest: &PluginManifest,
-) -> Result<Value, PluginError> {
-    let config = injected_config(loader, manifest).await?;
-    Ok(serde_json::json!({
-        "state": ctx.state,
-        "config": config,
-        "tenant_id": ctx.tenant.tenant_id,
-        "session_id": ctx.tenant.session_id,
-    }))
 }
 
 /// 把 manifest 注入命名空间与引擎步骤 config 合成 sidecar 管道调用的 config。
@@ -174,6 +162,110 @@ pub fn resolve_config_path<'a>(full_config: &'a Value, path: &str) -> Option<&'a
 /// 「约定字段表达特殊调用」模式）——本设计是该模式的第二次应用。
 pub const STEP_METHOD_KEY: &str = "_step_method";
 
+/// state 切片投喂的控制键白名单（`state.reads` 非空时恒带的小键）。
+///
+/// 管道控制面小键（身份/路由/生命周期信号），体积可忽略；插件按声明切片
+/// 投喂时恒带这些键，免去每个插件逐一声明控制键，插件侧对控制键的读取
+/// 预期也不随读面声明漂移。state 中不存在的白名单键省略（缺省略）。
+pub const STATE_SLICE_CONTROL_KEYS: &[&str] = &[
+    "pipeline_id",
+    "session_id",
+    "thread_id",
+    "message_id",
+    "run_id",
+    "task_id",
+    "workspace",
+    "conversation_mode",
+    "core_type",
+    "core_plugin",
+    "suspended",
+    "ended",
+    "next_phase",
+    "agent.id",
+    "model_tier",
+    "agent_level",
+];
+
+/// manifest `state.reads` 的非空声明视图：`Some(reads)` = 按声明切片投喂；
+/// `None`（无 state 段 / reads 为空）= 全量投喂（迁移期默认，行为零变化）。
+pub fn declared_reads(manifest: &PluginManifest) -> Option<&[String]> {
+    manifest
+        .state
+        .as_ref()
+        .map(|s| s.reads.as_slice())
+        .filter(|r| !r.is_empty())
+}
+
+/// 投喂 state 载荷（sidecar/native 两路共用的单点）：声明非空 → 切片对象
+/// （Owned）；未声明 → 全量 state 借用（Borrowed，零拷贝——迁移期默认，
+/// 行为与开销零变化）。
+pub fn state_feed_payload<'a>(manifest: &PluginManifest, ctx_state: &'a Value) -> Cow<'a, Value> {
+    match declared_reads(manifest) {
+        Some(reads) => Cow::Owned(assemble_state_slice(ctx_state, reads)),
+        None => Cow::Borrowed(ctx_state),
+    }
+}
+
+/// native 路径的投喂 state JSON 串（PluginCtx.state_json）。
+pub fn pipeline_state_json(manifest: &PluginManifest, ctx_state: &Value) -> String {
+    match state_feed_payload(manifest, ctx_state) {
+        Cow::Owned(v) => serde_json::to_string(&v).unwrap_or_else(|_| "{}".into()),
+        Cow::Borrowed(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".into()),
+    }
+}
+
+/// 平键优先的 state 取值（同引擎 Path 求值惯例，engine::condition::eval_value）：
+/// 先按整体平键查（本仓 state 惯例——插件 state_updates 平插 "task.status" 等
+/// 点键，不拆点），未命中再按点链嵌套解析（嵌套写入方兼容不变）。未命中 None。
+fn resolve_state_key<'a>(state: &'a Value, key: &str) -> Option<&'a Value> {
+    if let Some(v) = state.get(key) {
+        return Some(v);
+    }
+    let mut cur = state;
+    for seg in key.split('.') {
+        cur = cur.get(seg)?;
+    }
+    Some(cur)
+}
+
+/// 按目标插件 `state.reads` 声明组装投喂 state 切片（sidecar/native 两路共用）。
+///
+/// 投喂 state = 控制键白名单（恒带，[`STATE_SLICE_CONTROL_KEYS`]）∪ 声明键切片。
+/// 声明条目三形态：
+/// - 键名（含点键）：按 [`resolve_state_key`] 平键优先取值；state 缺该键 →
+///   省略不报错（缺省略契约）。
+/// - `messages`：state["messages"] 数组全量。
+/// - `messages_tail:N`：该数组末尾 N 条（投喂键仍为 `messages`；N ≥ 数组长度 =
+///   全数组；loader 装载期已过滤非法 N，此处解析失败按缺键省略）。
+///
+/// 同键重复声明后者覆盖前者（声明序确定，无歧义）。
+pub fn assemble_state_slice(full_state: &Value, reads: &[String]) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in STATE_SLICE_CONTROL_KEYS {
+        if let Some(v) = resolve_state_key(full_state, key) {
+            out.insert((*key).to_string(), v.clone());
+        }
+    }
+    for entry in reads {
+        if let Some((key, value)) = resolve_read_entry(full_state, entry) {
+            out.insert(key, value);
+        }
+    }
+    Value::Object(out)
+}
+
+/// 解析单条 reads 声明为 (投喂键, 值)；非法/缺键返回 None（调用方省略）。
+fn resolve_read_entry(state: &Value, entry: &str) -> Option<(String, Value)> {
+    if let Some(n) = entry.strip_prefix("messages_tail:") {
+        let n: usize = n.parse().ok()?;
+        let arr = state.get("messages")?.as_array()?;
+        let start = arr.len().saturating_sub(n);
+        return Some(("messages".to_string(), Value::Array(arr[start..].to_vec())));
+    }
+    // 键名形态（含 "messages" 全量——键名直取本身就是数组全量语义）。
+    resolve_state_key(state, entry).map(|v| (entry.to_string(), v.clone()))
+}
+
 /// 构造步骤服务调用的额外 config：在既有 config 对象上设置约定字段
 /// `_step_method`（值为步骤 name），幂等（重复设置覆盖为最新值）。
 ///
@@ -197,12 +289,14 @@ mod tests {
     use super::*;
     use agentos_core::traits::{
         ConfigFileMapping, EnvConfigField, HostType, ManifestCapabilities, ManifestPermissions,
-        PluginType,
+        PluginType, StateDeclaration,
     };
     use serde_json::json;
 
     fn manifest_with_id(id: &str, config_files: Vec<ConfigFileMapping>) -> PluginManifest {
         PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: id.to_string(),
             name: format!("Test {id}"),
             description: None,
@@ -448,5 +542,246 @@ mod tests {
             wrapped_arr.get(STEP_METHOD_KEY),
             Some(&json!("task.remind"))
         );
+    }
+
+    // ── state.reads 切片组装（W2b）──────────────────────────────────
+
+    fn manifest_with_reads(reads: Vec<&str>) -> PluginManifest {
+        let mut m = manifest_with_id("slice_plugin", vec![]);
+        m.state = Some(StateDeclaration {
+            reads: reads.into_iter().map(str::to_string).collect(),
+            ..Default::default()
+        });
+        m
+    }
+
+    /// 声明门控：无 state 段 / 空 reads → None（全量投喂）；非空声明 → Some(条目)。
+    /// 未声明分支的字节等价契约在 [`pipeline_state_json_undeclared_is_full_state_bytes`]。
+    #[test]
+    fn declared_reads_gate_absent_or_empty_is_none() {
+        let no_state = manifest_with_id("p1", vec![]);
+        let empty_state = manifest_with_reads(vec![]);
+        assert!(declared_reads(&no_state).is_none(), "无 state 段 → 全量");
+        assert!(declared_reads(&empty_state).is_none(), "空 reads → 全量");
+        let declared = manifest_with_reads(vec!["messages", "task.status"]);
+        let reads = declared_reads(&declared).expect("非空声明应 Some");
+        assert_eq!(
+            reads,
+            ["messages".to_string(), "task.status".to_string()],
+            "声明条目原样透出"
+        );
+    }
+
+    /// 未声明（无 state 段 / 空 reads）→ 投喂串与全量 state 序列化**字节等价**
+    /// （迁移期行为零变化的契约钉死）；声明非空 → 切片串化。
+    #[test]
+    fn pipeline_state_json_undeclared_is_full_state_bytes() {
+        let full = json!({
+            "messages": [1, 2, 3],
+            "task.status": "running",
+            "unrelated_secret": "must-be-present-when-undeclared"
+        });
+        let no_state = manifest_with_id("p1", vec![]);
+        assert_eq!(
+            pipeline_state_json(&no_state, &full),
+            serde_json::to_string(&full).unwrap(),
+            "无 state 段 → 全量字节等价"
+        );
+        let empty_state = manifest_with_reads(vec![]);
+        assert_eq!(
+            pipeline_state_json(&empty_state, &full),
+            serde_json::to_string(&full).unwrap(),
+            "空 reads → 全量字节等价"
+        );
+
+        // 区分度输入（符号相反）：声明非空 → 未声明键不在投喂串里。
+        let declared = manifest_with_reads(vec!["task.status", "messages"]);
+        let out = pipeline_state_json(&declared, &full);
+        let parsed: Value = serde_json::from_str(&out).expect("投喂串必为合法 JSON");
+        assert_eq!(parsed["task.status"], "running");
+        assert_eq!(parsed["messages"], json!([1, 2, 3]));
+        assert!(
+            !out.contains("unrelated_secret"),
+            "未声明键不得出现在投喂串：{out}"
+        );
+    }
+
+    /// 载荷借用契约：未声明 → Borrowed（零拷贝，指针同一）；声明 → Owned 切片。
+    #[test]
+    fn state_feed_payload_borrowed_when_undeclared_owned_when_declared() {
+        let full = json!({"a": 1, "messages": [1]});
+        let undeclared = manifest_with_id("p", vec![]);
+        match state_feed_payload(&undeclared, &full) {
+            Cow::Borrowed(v) => assert!(std::ptr::eq(v, &full), "未声明必须借用全量"),
+            Cow::Owned(_) => panic!("未声明不得拷贝"),
+        }
+        let declared = manifest_with_reads(vec!["a"]);
+        match state_feed_payload(&declared, &full) {
+            Cow::Owned(v) => assert_eq!(v["a"], 1, "声明 → 切片对象"),
+            Cow::Borrowed(_) => panic!("声明必须组装切片"),
+        }
+    }
+
+    /// 切片命中（两组区分度输入）：声明键 + 白名单控制键进切片、未声明且
+    /// 非白名单的键被排除；messages 全量形态原数组整体进切片。
+    #[test]
+    fn assemble_state_slice_hits_declared_and_whitelist_excludes_rest() {
+        // 组 1：管道控制面小键 + 点键声明 + 大键排除。
+        let state1 = json!({
+            "pipeline_id": "pipe-1",
+            "session_id": "sess-1",
+            "run_id": "run-1",
+            "agent.id": "main",
+            "task.status": "completed",
+            "raw_tool_calls": [{"name": "bash_execute"}],
+            "huge_undeclared": {"blob": "x".repeat(100)},
+        });
+        let fed1 = assemble_state_slice(
+            &state1,
+            &["task.status".to_string(), "raw_tool_calls".to_string()],
+        );
+        assert_eq!(fed1["pipeline_id"], "pipe-1", "白名单键恒带");
+        assert_eq!(fed1["session_id"], "sess-1");
+        assert_eq!(fed1["run_id"], "run-1");
+        assert_eq!(fed1["agent.id"], "main", "白名单点键恒带");
+        assert_eq!(fed1["task.status"], "completed", "声明键命中");
+        assert_eq!(
+            fed1["raw_tool_calls"],
+            json!([{"name": "bash_execute"}]),
+            "声明键命中"
+        );
+        assert!(
+            fed1.get("huge_undeclared").is_none(),
+            "未声明且非白名单的键必须排除：{fed1}"
+        );
+
+        // 性质断言：切片键集 ⊆ 白名单 ∪ 声明键集（信息面收缩不变量）。
+        let declared: std::collections::HashSet<&str> =
+            ["task.status", "raw_tool_calls"].into_iter().collect();
+        let allowed: std::collections::HashSet<&str> = STATE_SLICE_CONTROL_KEYS
+            .iter()
+            .copied()
+            .chain(declared.iter().copied())
+            .collect();
+        for key in fed1.as_object().unwrap().keys() {
+            assert!(allowed.contains(key.as_str()), "切片出现越界键 {key}");
+        }
+
+        // 组 2：符号量级相反的区分度输入——声明面不同（messages 全量 + 另一
+        // 点键），白名单键大面积缺席（缺省略，不造键）。
+        let state2 = json!({
+            "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "tool"}],
+            "model_tier": "heavy",
+            "task.owned.depth": 2,
+        });
+        let fed2 = assemble_state_slice(
+            &state2,
+            &["messages".to_string(), "task.owned.depth".to_string()],
+        );
+        assert_eq!(
+            fed2["messages"],
+            json!([{"role": "user"}, {"role": "assistant"}, {"role": "tool"}]),
+            "messages 全量形态 = 原数组整体"
+        );
+        assert_eq!(fed2["model_tier"], "heavy");
+        assert_eq!(fed2["task.owned.depth"], 2);
+        assert!(
+            fed2.get("pipeline_id").is_none(),
+            "state 缺席的白名单键省略（缺省略，不造键）"
+        );
+    }
+
+    /// tail:N 语义：投喂键仍为 messages、取末尾 N 条；N ≥ 数组长度 = 全数组；
+    /// 单调性质——tail(k) 是 tail(k+1) 的后缀、len(tail(N)) == min(N, len)。
+    #[test]
+    fn assemble_state_slice_messages_tail_semantics_and_monotonicity() {
+        let state = json!({"messages": [0, 1, 2, 3, 4]});
+
+        // 命中：末尾 2 条，键名仍为 messages。
+        let fed_tail2 = assemble_state_slice(&state, &["messages_tail:2".to_string()]);
+        assert_eq!(fed_tail2["messages"], json!([3, 4]));
+
+        // N 大于数组长度 = 全尾（不报错、不缺省略）。
+        let fed_tail99 = assemble_state_slice(&state, &["messages_tail:99".to_string()]);
+        assert_eq!(fed_tail99["messages"], json!([0, 1, 2, 3, 4]));
+
+        // 性质断言（tail 单调性 + 长度律）：k 从 0 到 len，
+        // len(tail(k)) == min(k, len) 且 tail(k) 是 tail(k+1) 的后缀、
+        // 也是全数组的后缀。
+        let full_arr = state["messages"].as_array().unwrap().clone();
+        let len = full_arr.len();
+        let mut prev: Option<Vec<Value>> = None;
+        for k in 1..=(len + 2) {
+            let fed = assemble_state_slice(&state, &[format!("messages_tail:{k}")]);
+            let got = fed["messages"].as_array().unwrap().clone();
+            assert_eq!(got.len(), k.min(len), "len(tail:{k}) == min(k, len)");
+            assert_eq!(
+                got,
+                full_arr[len - got.len()..].to_vec(),
+                "tail:{k} 必须是全数组的后缀"
+            );
+            if let Some(p) = prev {
+                assert_eq!(
+                    got[got.len() - p.len()..].to_vec(),
+                    p,
+                    "tail(k) 是 tail(k+1) 的后缀（单调性）"
+                );
+            }
+            prev = Some(got);
+        }
+    }
+
+    /// 缺省略契约：声明了 state 中不存在的键（含 tail 声明而 messages 缺席/
+    /// 非数组）→ 该键省略不报错；白名单缺席键同样省略。
+    #[test]
+    fn assemble_state_slice_missing_keys_omitted_silently() {
+        let state = json!({
+            "pipeline_id": "pipe-9",
+            "messages": "not-an-array",
+        });
+        let fed = assemble_state_slice(
+            &state,
+            &[
+                "ghost.key".to_string(),
+                "messages_tail:5".to_string(),
+                "another_missing".to_string(),
+            ],
+        );
+        assert_eq!(fed["pipeline_id"], "pipe-9", "存在键照常投喂");
+        assert!(fed.get("ghost.key").is_none(), "不存在键省略");
+        assert!(
+            fed.get("messages").is_none(),
+            "messages 非数组时 tail 声明省略不报错"
+        );
+        assert!(fed.get("session_id").is_none(), "白名单缺席键省略");
+
+        // 区分度输入 2：messages 整键缺席时 messages 全量声明同样省略。
+        let state2 = json!({"pipeline_id": "pipe-10"});
+        let fed2 = assemble_state_slice(&state2, &["messages".to_string()]);
+        assert!(fed2.get("messages").is_none());
+        assert_eq!(fed2["pipeline_id"], "pipe-10");
+    }
+
+    /// 平键优先（同引擎 Path 求值惯例）：点键先按整体平键查，命中即取；
+    /// 平键缺失再按点链嵌套解析（嵌套写入方兼容）。
+    #[test]
+    fn assemble_state_slice_flat_key_first_then_nested_fallback() {
+        // 平键命中：嵌套同路径存在时以平键为准。
+        let state = json!({
+            "task.status": "flat-wins",
+            "task": {"status": "nested-loses", "extra": "only-nested"},
+        });
+        let fed = assemble_state_slice(&state, &["task.status".to_string()]);
+        assert_eq!(fed["task.status"], "flat-wins", "平键优先");
+
+        // 平键缺失 → 点链嵌套解析兜底（平键形态投喂，插件侧平键可读）。
+        let state2 = json!({"agent": {"id": "nested-agent"}});
+        let fed2 = assemble_state_slice(&state2, &["agent.id".to_string()]);
+        assert_eq!(fed2["agent.id"], "nested-agent", "嵌套兜底解析");
+
+        // 两处都无 → 省略。
+        let state3 = json!({"task": {"other": 1}});
+        let fed3 = assemble_state_slice(&state3, &["task.status".to_string()]);
+        assert!(fed3.get("task.status").is_none());
     }
 }

@@ -21,17 +21,13 @@
 //! ## 多租户
 //!
 //! 主键是 `(tenant_id, pipeline_id)`。tenant_id 由调用方传入（从
-//! `agentos_tenant::current()` 取），本 crate 不直接依赖 tenant，保持 session
+//! `agentos_tenant` 取），本 crate 不直接依赖 tenant，保持 session
 //! 层零 tenant 依赖（与 coordinator 一致）。
 //!
-//! ## sequence 内存常驻
-//!
-//! 对齐 0.1 `PipelineEntry.msg_sequence`（`src/pipeline/pipeline_entry.py:42-60`）。
-//! 用 `AtomicU64` 替代 0.1 的 `threading.Lock`，更轻。`init_sequence` 在冷启动时
-//! 从 DB 续接（对齐 0.1 `_resume_entry_sequence`），保证不回退。
+//! 事件序不在此承载：WS 事件 sequence 由 event_bus 的 per-scope 计数器
+//! 统一负责（`EmitScope` 粒度，断线重放按 thread 续读）。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -66,8 +62,6 @@ pub struct PipelineStateEntry {
     pub state: Value,
     pub thread_id: String,
     pub agent_id: String,
-    /// 内存常驻 sequence（对齐 0.1 msg_sequence）。
-    pub msg_sequence: AtomicU64,
     pub updated_at: Instant,
 }
 
@@ -77,7 +71,6 @@ pub struct PipelineStateListing {
     pub pipeline_id: String,
     pub thread_id: String,
     pub agent_id: String,
-    pub msg_sequence: u64,
     pub updated_at: Instant,
 }
 
@@ -117,7 +110,6 @@ impl PipelineStateRegistry {
             state: cold_start_state,
             thread_id: thread_id.to_string(),
             agent_id: agent_id.to_string(),
-            msg_sequence: AtomicU64::new(0),
             updated_at: Instant::now(),
         }));
         entries.insert(key, entry.clone());
@@ -148,25 +140,6 @@ impl PipelineStateRegistry {
             let mut e = entry.write();
             e.state = final_state;
             e.updated_at = Instant::now();
-        }
-    }
-
-    /// 内存常驻 sequence 递增并返回（对齐 0.1 PipelineEntry.next_sequence）。
-    pub fn next_sequence(&self, tenant_id: &str, pipeline_id: &str) -> Option<u64> {
-        let key = (tenant_id.to_string(), pipeline_id.to_string());
-        self.entries
-            .read()
-            .get(&key)
-            .map(|entry| entry.read().msg_sequence.fetch_add(1, Ordering::SeqCst) + 1)
-    }
-
-    /// 冷启动时从 DB 续接 sequence（对齐 0.1 _resume_entry_sequence）。
-    /// 取 max(内存, db_max)，绝不回退。
-    pub fn init_sequence(&self, tenant_id: &str, pipeline_id: &str, db_max_seq: u64) {
-        let key = (tenant_id.to_string(), pipeline_id.to_string());
-        if let Some(entry) = self.entries.read().get(&key).cloned() {
-            let e = entry.read();
-            let _ = e.msg_sequence.fetch_max(db_max_seq, Ordering::SeqCst);
         }
     }
 
@@ -202,7 +175,6 @@ impl PipelineStateRegistry {
                     pipeline_id: pipeline_id.clone(),
                     thread_id: e.thread_id.clone(),
                     agent_id: e.agent_id.clone(),
-                    msg_sequence: e.msg_sequence.load(Ordering::SeqCst),
                     updated_at: e.updated_at,
                 }
             })
@@ -280,33 +252,6 @@ mod tests {
         let msgs = guard.state["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[1]["content"], "a1");
-    }
-
-    #[test]
-    fn test_sequence_monotonic() {
-        let reg = PipelineStateRegistry::new();
-        reg.get_or_init(TENANT, "pipe_4", "t", "a", make_state(&[]));
-        assert_eq!(reg.next_sequence(TENANT, "pipe_4"), Some(1));
-        assert_eq!(reg.next_sequence(TENANT, "pipe_4"), Some(2));
-        assert_eq!(reg.next_sequence(TENANT, "pipe_4"), Some(3));
-        // 未注册的管道返回 None
-        assert_eq!(reg.next_sequence(TENANT, "pipe_unknown"), None);
-    }
-
-    #[test]
-    fn test_init_sequence_from_db_no_regression() {
-        let reg = PipelineStateRegistry::new();
-        reg.get_or_init(TENANT, "pipe_5", "t", "a", make_state(&[]));
-        // 内存已递增到 2
-        reg.next_sequence(TENANT, "pipe_5");
-        reg.next_sequence(TENANT, "pipe_5");
-        // 冷启动续接：DB 已有 10，取 max(内存2, 10)=10，下一次 next=11
-        reg.init_sequence(TENANT, "pipe_5", 10);
-        assert_eq!(
-            reg.next_sequence(TENANT, "pipe_5"),
-            Some(11),
-            "续接后不应回退"
-        );
     }
 
     #[test]

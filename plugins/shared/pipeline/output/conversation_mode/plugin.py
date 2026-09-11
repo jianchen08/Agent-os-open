@@ -62,10 +62,12 @@ class ConversationModeDetector(IOutputPlugin):
         return ["wait"]
 
     async def execute(self, ctx: PluginContext) -> OutputResult:
-        """检测 tool_results 中是否包含对话模式激活信号。
+        """检测 tool_results 中**新增**的对话模式激活信号。
 
-        遍历 tool_results，查找 human_interaction 工具返回的
-        conversation_mode=True 标记；命中则激活状态并挂起管道。
+        只扫描自上次游标以来新增的 tool_results（游标存 state 跨轮推进）：
+        旧标记命中过一次并挂起后，唤醒轮不得因同一历史结果再次挂起——
+        否则唤醒轮的待执行工具调用（如 task_evaluate）被 suspended 丢弃，
+        任务永远无法收官（B13 断链③）。
 
         Args:
             ctx: 插件执行上下文
@@ -74,10 +76,18 @@ class ConversationModeDetector(IOutputPlugin):
             激活时包含 conversation_mode 状态更新和 wait 信号
         """
         tool_results = ctx.state.get(StateKeys.TOOL_RESULTS, [])
-        if not tool_results:
+        if not isinstance(tool_results, list):
             return OutputResult()
 
-        for result in tool_results:
+        seen_key = "conversation_mode.seen_tool_results_len"
+        seen_len = int(ctx.state.get(seen_key, 0) or 0)
+        # 防御：列表收缩（run 重置/截断）时游标对齐现状
+        if seen_len > len(tool_results):
+            seen_len = 0
+        new_results = tool_results[seen_len:]
+
+        activated = False
+        for result in new_results:
             if not isinstance(result, dict):
                 continue
             if result.get("success") is not True:
@@ -88,21 +98,31 @@ class ConversationModeDetector(IOutputPlugin):
                 continue
 
             if self._extract_conversation_flag(data):
-                logger.info(
-                    "[%s] Detected conversation_mode=True in tool_results, activating conversation mode",
-                    self.name,
-                )
-                return OutputResult(
-                    state_updates={
-                        StateKeys.CONVERSATION_MODE: True,
-                        # 挂起经 state.suspended 表达（route_signal 全链零消费，
-                        # 引擎见 suspended 即停轮）；suspended 属 per-run 键，
-                        # 下轮派发自动复位
-                        "suspended": True,
-                    },
-                    skip_remaining=True,
-                )
+                activated = True
+                break
 
+        if activated:
+            logger.info(
+                "[%s] Detected conversation_mode=True in new tool_results (%d new), "
+                "activating conversation mode",
+                self.name,
+                len(new_results),
+            )
+            return OutputResult(
+                state_updates={
+                    StateKeys.CONVERSATION_MODE: True,
+                    # 挂起经 state.suspended 表达（route_signal 全链零消费，
+                    # 引擎见 suspended 即停轮）；suspended 属 per-run 键，
+                    # 下轮派发自动复位
+                    "suspended": True,
+                    seen_key: len(tool_results),
+                },
+                skip_remaining=True,
+            )
+
+        # 未命中也推进游标（防同一历史结果在后续轮被反复重扫命中）
+        if len(tool_results) != seen_len:
+            return OutputResult(state_updates={seen_key: len(tool_results)})
         return OutputResult()
 
     def _extract_conversation_flag(self, data: dict[str, Any]) -> bool:

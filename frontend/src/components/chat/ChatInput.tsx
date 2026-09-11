@@ -21,6 +21,7 @@ import { useVoiceInput } from '@/hooks/useVoiceInput'
 import { cn } from '@/lib/utils'
 import { uploadFile, validateFile } from '@/services/api/files'
 import { ErrorSeverity, ErrorType, reportError } from '@/services/errorReporting'
+import { getReferenceProviders, buildReferenceBlock, type ReferenceSelection } from '@/services/references'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import {
   DEFAULT_THINKING_STRENGTH,
@@ -29,8 +30,7 @@ import {
 } from '@/types/thinkingMode'
 import { formatFileSize } from '@/utils/format'
 import { ChatInputActions } from './ChatInputActions'
-import { ContextUsageIndicator } from './ContextUsageIndicator'
-import { clearGodotSelection, getGodotSelection } from '@/services/godot/selectionBridge'
+import { ContextUsageWidget } from '@/components/schema/widgets/ContextUsageWidget'
 import { VoiceInputButton } from './VoiceInputButton'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
 
@@ -118,13 +118,6 @@ export const ChatInput = ({
   enableFileUpload = true,
   enableDragDrop = true,
   modelName,
-  currentTokenUsage = 0,
-  maxTokens = 0,
-  totalTokens = 0,
-  completionTokens = 0,
-  cumulative,
-  cachedTokens = 0,
-  hitRatio = 0,
   enableThinkingMode = false,
   thinkingStrength: _externalThinkingStrength,
   onThinkingStrengthChange,
@@ -467,19 +460,15 @@ export const ChatInput = ({
       return
     }
 
-    /** Godot 选中引用：随消息拼接发送（同消息渲染），发送即消耗（卡片消失，
-        重新点选物品恢复） */
-    const godotSel = getGodotSelection()
+    /** 引用注入（源无关）：枚举全部引用 provider 的待发引用，随消息拼接发送
+        （同消息渲染），发送即消耗（卡片消失，重新点选恢复） */
+    const pendingRefs = getReferenceProviders()
+      .map((p) => p.getSelection())
+      .filter((sel): sel is ReferenceSelection => !!sel && sel.items.length > 0)
     let content = trimmedText
-    if (godotSel.items.length > 0) {
-      const lines = godotSel.items.map((it) => {
-        let line = `- ${it.name} (${it.type}) @ ${it.path}`
-        if (it.position) line += ` [position=${it.position}]`
-        return line
-      })
-      const scenePath = godotSel.scene?.path ?? ''
-      const refBlock = ['<reference source="godot" scene="' + scenePath + '">', ...lines, '</reference>'].join('\n')
-      content = content + '\n\n' + refBlock
+    for (const ref of pendingRefs) {
+      const block = buildReferenceBlock(ref)
+      if (block) content = content + '\n\n' + block
     }
 
     const allAttachments: Attachment[] = [...attachments]
@@ -504,9 +493,15 @@ export const ChatInput = ({
       thinkingStrength: currentThinkingStrength,
     }
 
-    onSendMessage(params)
-    if (godotSel.items.length > 0) {
-      void clearGodotSelection()
+    // 受理协议：false = 未受理（管道未就绪/子标签不支持等），保留输入、附件、
+    // 草稿与引用供用户重试；true/void（兼容既有只发不回的回调）= 受理，清空。
+    const accepted = onSendMessage(params)
+    if (accepted === false) {
+      return
+    }
+
+    for (const provider of getReferenceProviders()) {
+      void provider.consume?.()
     }
     setText('')
     textRef.current = ''
@@ -886,23 +881,15 @@ export const ChatInput = ({
               />
             )}
 
-            {/* token 用量槽位（chat-input 空间）：前端默认 ContextUsageIndicator
-                （模型名 + 上下文圈型进度 + 紧凑数字；悬停/点击弹出浮窗：
-                上下文用量、本轮明细与该管道累计明细），插件声明 id=context_usage 可覆盖 */}
+            {/* token 用量槽位（chat-input 空间）：默认件 = 插件声明同款
+                ContextUsageWidget（数据从管道 state 读：llm_model /
+                context_window / track.llm_usage，query 缓存共享 + 事件失效化
+                实时刷新），插件声明 id=context_usage 可覆盖声明 props */}
             <DeclaredWidgetLayer
               space="chat-input"
               slotId="context_usage"
-              fallback={ContextUsageIndicator}
-              fallbackProps={{
-                modelName,
-                currentTokenUsage,
-                maxTokens,
-                totalTokens: totalTokens || undefined,
-                completionTokens: completionTokens || undefined,
-                cumulative,
-                cachedTokens: cachedTokens || undefined,
-                hitRatio: hitRatio || undefined,
-              }}
+              fallback={ContextUsageWidget}
+              fallbackProps={{ modelName }}
               className="flex-row items-center"
             />
 

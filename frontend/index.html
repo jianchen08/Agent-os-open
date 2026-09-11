@@ -12,20 +12,9 @@
     <!-- 字体已全部本地化（public/fonts/ + src/styles/fonts.css 的 @font-face），
          不再依赖 Google Fonts CDN：内网/离线环境下像素/圆体主题字体同样生效。
          基础 UI 字体栈回退系统字体（Segoe UI / 微软雅黑 /苹方等）。 -->
-    <script>
-      ;(function () {
-        try {
-          var saved = JSON.parse(localStorage.getItem('theme-storage') || '{}')
-          var id = saved.state && saved.state.currentThemeId
-          // 浅色主题 id 白名单（防首帧闪深色）；未命中默认深色
-          var lightThemes = ['light', 'ocean-breeze', 'pixel-art', 'moe-soft']
-          var isLight = lightThemes.indexOf(id) !== -1
-          if (!isLight) document.documentElement.classList.add('dark')
-        } catch (e) {
-          document.documentElement.classList.add('dark')
-        }
-      })()
-    </script>
+    <!-- 主题预置脚本外置为同源静态文件（head 内无 defer/async，仍同步先于渲染执行）：
+         生产 CSP（nginx.conf）script-src 不放行内联脚本，页面不得残留内联 <script>。 -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

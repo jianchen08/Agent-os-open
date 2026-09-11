@@ -7,8 +7,8 @@
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { InteractionCard } from '../InteractionCard'
 import { loadInteractionModes, resolveInteractionLayout } from '@/utils/interactionModes'
+import { InteractionCard } from '../InteractionCard'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
 vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({

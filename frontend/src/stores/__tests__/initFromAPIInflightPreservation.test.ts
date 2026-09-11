@@ -15,6 +15,7 @@
  * API 权威版（不并存不重复）。游标（top/bottom）仍只按 API 权威消息计算。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 vi.mock('@/utils/logger', () => ({
@@ -32,7 +33,7 @@ const PIPELINE_ID = 'pipe-inflight-1'
 const SESSION_ID = 'sess-inflight-1'
 
 describe('initFromAPI 飞行中消息保留', () => {
-  let usePipelineMessageStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
   const msg = (id: string, seq: number, overrides: Partial<Message> = {}): Message => ({
     id,

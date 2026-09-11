@@ -5,13 +5,13 @@
  * 对齐 interactionModes 的测试语义：声明驱动 + 默认兜底 + 插件可覆盖。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { NotificationItem } from '@/types/notification'
 import {
   clearNotificationModes,
   getNotificationModeDecl,
   loadNotificationModes,
   resolveNotificationLayout,
 } from '@/utils/notificationModes'
+import type { NotificationItem } from '@/types/notification'
 
 function makeNotification(overrides: Partial<NotificationItem> = {}): NotificationItem {
   return {

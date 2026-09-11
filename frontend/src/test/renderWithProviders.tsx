@@ -7,13 +7,13 @@
  * 返回 RTL render 的全部结果，便于直接 screen 查询。
  */
 
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import type { QueryClientConfig } from '@tanstack/react-query'
 import type { RenderOptions, RenderResult } from '@testing-library/react'
 import type { ReactElement, ReactNode } from 'react'
-import { MemoryRouter } from 'react-router-dom'
 import type { MemoryRouterProps } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import type { QueryClientConfig } from '@tanstack/react-query'
 
 export interface RenderWithProvidersOptions extends Omit<RenderOptions, 'wrapper'> {
   /** MemoryRouter 初始路由，默认 ['/'] */

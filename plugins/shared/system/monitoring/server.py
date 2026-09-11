@@ -24,19 +24,26 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime
-import json
 import logging
 import os
-import sys
 from typing import Any
 
 import psutil
 
-sys.path.insert(0, os.path.dirname(__file__))
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-import kernel_reads  # 平铺同目录模块（上方 sys.path 已插插件目录）
+_paths = bootstrap_plugin(__file__)  # 插件目录（kernel_reads 等平铺模块）+ plugins/shared 根入 sys.path
 
-from agentos_plugin_sdk import AgentOSPlugin
+import kernel_reads  # noqa: E402 — 平铺同目录模块（bootstrap 已插插件目录）
+from kernel_db import kernel_db_path as _kernel_db_path  # noqa: E402 — 内核库路径共享真值源
+import traces_usage  # noqa: E402 — traces llm_usage 聚合 SQL 单点（与 cost_control 同源）
+from http_json import (  # noqa: E402 — HTTP 响应封装公共实现，调用点零改名
+    error as _error,
+    json_response as _json_response,
+    ok as _ok,
+)
+
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("monitoring")
@@ -59,7 +66,7 @@ async def _on_load(params: dict[str, Any]) -> None:
     _reporter_task = asyncio.create_task(_report_metrics_loop())
     logger.info("Monitoring service started (record_metric reporter enabled)")
 
-    # 调试中心数据链：execution/sessions/agent-calls/search 域真实数据 =
+    # 调试中心数据链：execution/sessions/search 域真实数据 =
     # 内核只读能力（messages.list / pipeline-runs.list / pipeline-state.list /
     # db-admin.table_query），经 kernel_reads 桥接注入；能力未就绪时
     # handler 降级空载荷（前端契约不破坏）。
@@ -84,6 +91,23 @@ async def _on_load(params: dict[str, Any]) -> None:
             handle = plugin.get_capability("pipeline-state")
             rows = await handle.call("list", {})
             return rows if isinstance(rows, list) else []
+
+        async def _kr_list_traces(pipeline_id: str):
+            handle = plugin.get_capability("service-registry")
+            return await handle.call("traces.list_by_pipeline", {"pipeline_id": pipeline_id})
+
+        async def _kr_list_runs_by_pipeline(pipeline_id: str):
+            handle = plugin.get_capability("service-registry")
+            return await handle.call("pipeline-runs.list_by_pipeline", {"pipeline_id": pipeline_id})
+
+        async def _kr_query_table(table: str, filter: list[str] | None = None, sort: str = "", limit: int = 500):
+            params: dict[str, Any] = {"table": table, "limit": int(limit)}
+            if filter:
+                params["filter"] = filter
+            if sort:
+                params["sort"] = sort
+            handle = plugin.get_capability("db-admin")
+            return await handle.call("table_query", params)
 
         async def _kr_clear_execution_data(authorization: str = ""):
             params: dict[str, Any] = {}
@@ -115,6 +139,9 @@ async def _on_load(params: dict[str, Any]) -> None:
         kernel_reads.set_provider("pipeline-runs", _kr_list_pipeline_runs)
         kernel_reads.set_provider("messages", _kr_list_messages)
         kernel_reads.set_provider("pipeline-state", _kr_list_state_rows)
+        kernel_reads.set_provider("traces", _kr_list_traces)
+        kernel_reads.set_provider("runs-by-pipeline", _kr_list_runs_by_pipeline)
+        kernel_reads.set_provider("db-admin-query", _kr_query_table)
         kernel_reads.set_provider("db-admin-clear", _kr_clear_execution_data)
         kernel_reads.set_provider("metrics-admin-list", _kr_metrics_admin_list)
         kernel_reads.set_provider("metrics-admin-query", _kr_metrics_admin_query)
@@ -178,7 +205,8 @@ async def _report_system_metrics_once() -> None:
         return
     try:
         system = await monitor.get_system_metrics()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — 采样失败本轮放弃（5s 后重试），留痕可排查
+        logger.debug("system metrics 采样失败（本轮跳过）: %s", exc)
         return
     # psutil 采到的 D 类系统资源 → record_metric（gauge，覆盖当前值）
     # 指标名用监控设计 §九 后缀规范（_ratio=百分比、_bytes=字节、_kbytes=速率）
@@ -347,26 +375,6 @@ async def monitoring_update_task_status(
 # 本地累计可能为 0，属已知限制，后续应接内核 metrics 聚合查询）。
 
 
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    return {"success": True, "data": data}
-
-
-def _error(message: str, status: int = 503) -> dict[str, Any]:
-    return {"success": False, "error": message, "data": _json_response({"error": message}, status)}
-
-
 def _collect_system_metrics() -> dict[str, Any]:
     """用 psutil 采集完整系统指标，对齐前端 SystemMetrics 嵌套结构。
 
@@ -435,7 +443,10 @@ async def _collect_state_tasks(status: str | None = None) -> list[dict[str, Any]
     for row in rows:
         if not isinstance(row, dict) or not row.get("pipeline_id"):
             continue
-        st = row.get("task.status") or row.get("status") or "unknown"
+        # 状态链：task 域键优先（任务管道），缺席回退内核 run_status（引擎写的
+        # 运行状态单一真值，state 基线出口）——聊天会话等非任务管道否则恒显
+        # unknown（GUI 黑盒测试 2026-09-11）。双双缺席保持 unknown（不猜）。
+        st = row.get("task.status") or row.get("status") or row.get("run_status") or "unknown"
         if status and st != status:
             continue
         items.append({
@@ -452,7 +463,7 @@ async def _collect_state_tasks(status: str | None = None) -> list[dict[str, Any]
             "suspended": row.get("suspended"),
             "message_count": row.get("message_count"),
             "total_tokens": row.get("track.total_tokens"),
-            "run_status": row.get("router.stop_reason"),
+            "run_status": row.get("run_status"),
             "source": "pipeline_state",
         })
     return items
@@ -503,18 +514,7 @@ def _collect_token_usage() -> dict[str, Any]:
         conn = None
         try:
             conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT COALESCE(json_extract(patch_data, '$.llm_usage.model'), ''),"
-                "       COALESCE(json_extract(patch_data, '$.llm_usage.provider'), ''),"
-                "       SUM(json_extract(patch_data, '$.llm_usage.input_tokens')),"
-                "       SUM(json_extract(patch_data, '$.llm_usage.output_tokens')), "
-                "       SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), "
-                "       COUNT(*)"
-                " FROM traces WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
-                " GROUP BY 1, 2 ORDER BY 5 DESC"
-            )
-            for model, provider, prompt, completion, total, reqs in cur.fetchall():
+            for model, provider, prompt, completion, total, reqs in traces_usage.aggregate_usage_by_model(conn):
                 label = model or "（未记录模型）"
                 rows.append({
                     "icon": _model_icon(model, provider),
@@ -553,6 +553,12 @@ def _collect_token_usage() -> dict[str, Any]:
             {"key": "total_tokens", "label": "合计 Tokens"},
         ],
         "rows": rows,
+        # 图表形状（chart widget series 消费 {labels, datasets}；与 rows 同源同值）
+        "labels": [r["model"] for r in rows],
+        "datasets": [
+            {"label": "输入 Tokens", "data": [r["input_tokens"] for r in rows]},
+            {"label": "输出 Tokens", "data": [r["output_tokens"] for r in rows]},
+        ],
     }
 
 
@@ -561,7 +567,8 @@ def _collect_token_usage_by_time() -> dict[str, Any]:
 
     created_at 为 ISO8601 UTC 文本，`substr(created_at, 1, 10)` 即日期——
     不经 datetime() 解析（纳秒精度 + 时区后缀解析行为版本相关）。
-    表格 widget 消费 {columns, rows}；DB 不可用降级空行。
+    表格 widget 消费 {columns, rows}；chart widget 消费 {labels, datasets}
+    （同源同值）；DB 不可用降级空行。
     """
     import sqlite3
 
@@ -571,17 +578,7 @@ def _collect_token_usage_by_time() -> dict[str, Any]:
         conn = None
         try:
             conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT substr(created_at, 1, 10) AS day,"
-                "       SUM(json_extract(patch_data, '$.llm_usage.input_tokens')),"
-                "       SUM(json_extract(patch_data, '$.llm_usage.output_tokens')), "
-                "       SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), "
-                "       COUNT(*)"
-                " FROM traces WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL"
-                " GROUP BY 1 ORDER BY 1 DESC"
-            )
-            for day, prompt, completion, total, reqs in cur.fetchall():
+            for day, prompt, completion, total, reqs in traces_usage.aggregate_usage_by_day(conn):
                 rows.append({
                     "date": day or "unknown",
                     "requests": int(reqs or 0),
@@ -606,6 +603,12 @@ def _collect_token_usage_by_time() -> dict[str, Any]:
         ],
         "rows": rows,
         "total": len(rows),
+        # 图表形状（chart widget series 消费；与 rows 同源同值）
+        "labels": [r["date"] for r in rows],
+        "datasets": [
+            {"label": "输入 Tokens", "data": [r["input_tokens"] for r in rows]},
+            {"label": "输出 Tokens", "data": [r["output_tokens"] for r in rows]},
+        ],
     }
 
 
@@ -693,7 +696,8 @@ async def http_handle(
         # ── T4：Payload 诊断快照（列目录 + 读单文件）──
         # 数据源：logs/payload_diag/ 下 adapter.py 写的 {ts}_{model}_{hash}_{n}msg.json
         if path == "/ext/monitoring/payload-diag" and method == "GET":
-            return _ok(_json_response({"items": _list_payload_diag(), "total": len(_list_payload_diag())}))
+            _diag_items = _list_payload_diag()  # 单次扫描：total 与 items 同源同快照
+            return _ok(_json_response({"items": _diag_items, "total": len(_diag_items)}))
 
         if path == "/ext/monitoring/payload-diag/file" and method == "GET":
             q = query or {}
@@ -701,9 +705,53 @@ async def http_handle(
             return _ok(_json_response(_read_payload_diag(name)))
 
         # ── T5：工具调用记录（json_each 解包 traces.patch_data.tool_results）──
+        # 租户过滤：内核对已认证 /ext 分发注入 X-AgentOS-Tenant，插件按该头
+        # 过滤 traces（信任锚=内核验签身份，头不可由客户端伪造）。
         if path == "/ext/monitoring/tool-calls" and method == "GET":
             q = query or {}
-            return _ok(_json_response(_query_tool_calls(q)))
+            tenant = _header_value(headers, "x-agentos-tenant")
+            return _ok(_json_response(_query_tool_calls(q, tenant)))
+
+        # ── 管道诊断域：step 级 trace 时间线 + pipeline_state 全字段 ──
+        # （数据经 kernel_reads 能力桥，投影在 pipeline_diagnostics）
+        if path == "/ext/monitoring/traces" and method == "GET":
+            import pipeline_diagnostics  # noqa: PLC0415
+
+            q = query or {}
+            if not q.get("pipeline_id"):
+                return _error("缺少 pipeline_id 参数", 400)
+            try:
+                limit = int(q.get("limit", 200))
+            except (TypeError, ValueError):
+                limit = 200
+            return _ok(_json_response(await pipeline_diagnostics.list_pipeline_traces(
+                pipeline_id=q["pipeline_id"], limit=limit
+            )))
+
+        if path == "/ext/monitoring/pipeline-state" and method == "GET":
+            import pipeline_diagnostics  # noqa: PLC0415
+
+            q = query or {}
+            if not q.get("pipeline_id"):
+                return _error("缺少 pipeline_id 参数", 400)
+            return _ok(_json_response(await pipeline_diagnostics.get_pipeline_state_full(q["pipeline_id"])))
+
+        # ── 孤儿管道观测：running 且时长超阈值的候选清单（人工 cancel 决策用）──
+        if path == "/ext/monitoring/orphans" and method == "GET":
+            import execution_records as er  # noqa: PLC0415
+
+            q = query or {}
+            try:
+                min_minutes = int(q.get("min_minutes", 10))
+            except (TypeError, ValueError):
+                min_minutes = 10
+            try:
+                limit = int(q.get("limit", 50))
+            except (TypeError, ValueError):
+                limit = 50
+            return _ok(_json_response(await er.list_orphan_runs(
+                min_minutes=min_minutes, limit=limit
+            )))
 
         # ── 插件运行态：metrics-admin 读面桥（kernel_reads.plugin_runtime）──
         if path == "/ext/monitoring/plugins" and method == "GET":
@@ -724,15 +772,11 @@ async def http_handle(
 
         # ── sessions token-usage 域 ──
         if path.startswith("/ext/monitoring/sessions"):
-            return await _handle_sessions_domain(path, method, raw_body, query or {})
-
-        # ── agent-calls 域：pipeline-runs/messages 组装调用视图 ──
-        if path.startswith("/ext/monitoring/agent-calls"):
-            return await _handle_agent_calls_domain(path, method, raw_body, query or {})
+            return await _handle_sessions_domain(path, method, raw_body, query or {}, headers or {})
 
         # ── search 域：pipeline-state/messages 全局搜索 ──
         if path.startswith("/ext/monitoring/search"):
-            return await _handle_search_domain(path, method, raw_body, query or {})
+            return await _handle_search_domain(path, method, raw_body, query or {}, headers or {})
 
         logger.warning("http.handle: no route for path=%s method=%s", path, method)
         return _ok(_json_response({"error": "not found", "path": path}, 404))
@@ -742,7 +786,7 @@ async def http_handle(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# execution/records + sessions + agent-calls + search 域分发——路径语义与
+# execution/records + sessions + search 域分发——路径语义与
 # /ext/channel_api/** 原值逐项对齐，数据统一经 kernel_reads 能力桥
 # （provider 由 _on_load 注入）。
 # ════════════════════════════════════════════════════════════════════════════
@@ -764,6 +808,14 @@ def _authorization(headers: dict[str, str] | None) -> str:
     """
     for k, v in (headers or {}).items():
         if isinstance(k, str) and k.lower() == "authorization" and v:
+            return v
+    return ""
+
+
+def _header_value(headers: dict[str, str] | None, name: str) -> str:
+    """取内核注入的身份头值（x-agentos-tenant 等；内核 header key 已小写）。"""
+    for k, v in (headers or {}).items():
+        if isinstance(k, str) and k.lower() == name and v:
             return v
     return ""
 
@@ -832,9 +884,14 @@ async def _handle_execution_domain(
 
 
 async def _handle_sessions_domain(
-    path: str, method: str, raw_body: str, query: dict[str, str]
+    path: str, method: str, raw_body: str, query: dict[str, str],
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """sessions 域分发：/ext/monitoring/sessions/** → token-usage 业务函数。"""
+    """sessions 域分发：/ext/monitoring/sessions/** → token-usage 业务函数。
+
+    租户过滤（M3）：目标管道存在于 runs 表但归属他租户 → 404（不泄露存在性）；
+    未知管道（runs 无行，无数据可泄露）放行，业务函数自然返回空用量。
+    """
     import execution_records as er  # noqa: PLC0415
 
     prefix = "/ext/monitoring/sessions"
@@ -842,12 +899,23 @@ async def _handle_sessions_domain(
         return _ok(_json_response({"error": "not a sessions path", "path": path}, 404))
     sub = path[len(prefix):]  # "/{session_id}/total-token-usage" 等
 
+    tenant = _header_value(headers, "x-agentos-tenant")
+    if not tenant:
+        return _ok(_json_response({"error": "missing tenant identity"}, 403))
+
+    def _owned(session_id: str) -> bool:
+        return not _pipeline_tenant_conflict(session_id, tenant)
+
     try:
         if sub.endswith("/total-token-usage") and method == "GET":
             session_id = sub[1:].rsplit("/total-token-usage", 1)[0]
+            if not _owned(session_id):
+                return _ok(_json_response({"error": "not found", "path": path}, 404))
             return _ok(_json_response(await er.get_session_total_token_usage(session_id)))
         if sub.endswith("/context-token-usage") and method == "GET":
             session_id = sub[1:].rsplit("/context-token-usage", 1)[0]
+            if not _owned(session_id):
+                return _ok(_json_response({"error": "not found", "path": path}, 404))
             parent = query.get("parent_execution_record_id")
             return _ok(_json_response(
                 await er.get_session_context_token_usage(session_id, parent_execution_record_id=parent)
@@ -860,44 +928,15 @@ async def _handle_sessions_domain(
         return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
 
 
-async def _handle_agent_calls_domain(
-    path: str, method: str, raw_body: str, query: dict[str, str]
-) -> dict[str, Any]:
-    """agent-calls 域分发：/ext/monitoring/agent-calls/** → 管道运行聚合业务函数。"""
-    import agent_calls as ac  # noqa: PLC0415
-
-    prefix = "/ext/monitoring/agent-calls"
-    if not path.startswith(prefix):
-        return _ok(_json_response({"error": "not an agent-calls path", "path": path}, 404))
-    sub = path[len(prefix):]  # "" / "/statistics" / "/{execution_id}"
-
-    try:
-        if sub in ("", "/") and method == "GET":
-            return _ok(_json_response(await ac.list_agent_calls(
-                limit=_qint(query, "limit", 50),
-                offset=_qint(query, "offset", 0),
-            )))
-        if sub == "/statistics" and method == "GET":
-            return _ok(_json_response(await ac.get_agent_call_statistics()))
-        if sub.startswith("/") and len(sub) > 1 and method == "GET":
-            exec_id = sub[1:]
-            return _ok(_json_response(await ac.get_agent_call(exec_id)))
-
-        logger.warning("agent-calls http.handle: no route for sub=%s method=%s", sub, method)
-        return _ok(_json_response({"error": "not found", "path": path}, 404))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("agent-calls http.handle 未预期错误: %s", exc, exc_info=True)
-        return _ok(_json_response({"error": "internal server error", "detail": str(exc)}, 500))
-
-
 async def _handle_search_domain(
-    path: str, method: str, raw_body: str, query: dict[str, str]
+    path: str, method: str, raw_body: str, query: dict[str, str],
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """search 域分发：/ext/monitoring/search → 内核搜索业务函数（会话标题+消息内容）。
 
     GET /search?q=xxx&type=all|session|message&limit=20 统一搜索。
     响应形态对齐前端 services/api/search.ts（SearchResponse）。type 非法 → 422
-    （语义同原 APIError VAL_ENUM_7002）。
+    （语义同原 APIError VAL_ENUM_7002）。租户过滤见 routes_search.search（M3）。
     """
     import routes_search as rsearch  # noqa: PLC0415
 
@@ -908,10 +947,12 @@ async def _handle_search_domain(
 
     try:
         if sub in ("", "/") and method == "GET":
+            tenant = _header_value(headers, "x-agentos-tenant")
             return _ok(_json_response(await rsearch.search(
                 q=query.get("q", ""),
                 type=query.get("type", "all"),
                 limit=_qint(query, "limit", 20),
+                tenant_id=tenant,
             )))
 
         logger.warning("search http.handle: no route for sub=%s method=%s", sub, method)
@@ -1068,37 +1109,68 @@ def _read_payload_diag(name: str) -> dict[str, Any]:
 # ── T5：工具调用记录（json_each 解包 traces.patch_data.tool_results）─────
 
 
-def _kernel_db_path() -> str:
-    """返回 kernel SQLite 路径（与 agentos-kernel.rs 的 AGENTOS_DB_PATH 一致）。
+def _pipeline_tenant_conflict(pipeline_id: str, tenant_id: str) -> bool:
+    """True = 管道存在于 runs 表但归属他租户（跨租户访问拒绝的判据）。
 
-    sidecar cwd 会漂移到插件目录（2026-08-19 payload_diag 同源问题），
-    与 _resolve_project_root 同策略：AGENTOS_DB_PATH 优先 + 文件位置向上探测。
+    未知管道（runs 无行）返回 False——无数据可泄露，放行让业务层返回空形态，
+    避免误伤"会话已建但管道尚未跑过"的合法读取。
     """
-    env_path = os.environ.get("AGENTOS_DB_PATH")
-    if env_path:
-        return env_path
-    return os.path.join(_resolve_project_root(), "agentos_kernel.db")
+    import sqlite3
+
+    if not pipeline_id or not tenant_id:
+        return False
+    db_path = _kernel_db_path()
+    if not os.path.isfile(db_path):
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT tenant_id FROM runs WHERE pipeline_id = ? LIMIT 1",
+                (pipeline_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    return bool(row) and str(row[0]) != tenant_id
 
 
-def _query_tool_calls(q: dict[str, str]) -> dict[str, Any]:
-    """从 traces 表查询工具调用记录。
+def _query_tool_calls(q: dict[str, str], tenant_id: str = "") -> dict[str, Any]:
+    """从 traces 表查询工具调用记录（按租户过滤，fail-closed）。
+
+    数据源 = 引擎 persist_step_trace 落的 step 级轨迹：traces.plugin_id 是**配置
+    step id**（如 core/prepare），工具结果数组由 tool_core 的 state_updates 合并
+    进 state 后经引擎 diff 落在 patch_data.tool_results（行级按 json_each 解包）。
+    故按**内容谓词**选择（patch_data 含 tool_results 键），与 plugin_id 无关——
+    按 'pipeline_tool_core' 过滤恒空（插件 id 不落 traces.plugin_id）。
+
+    租户过滤：``tenant_id`` 必须来自内核注入的 X-AgentOS-Tenant 头（已认证
+    租户）；缺失/为空一律返回空集（fail-closed）——绝不全量查询兜底，否则
+    匿名化身份缺失会退化为跨租户泄露。
 
     用 json_each 解包 patch_data.tool_results 数组，支持按 tool_name/status/
     min_duration 筛选。不改 schema，纯查询层。
+    已知粒度局限：patch_data 是 step 末态 diff，同 step 多轮工具迭代只留最后
+    一轮结果（trace 以配置 step 为界）。
 
     Args:
         q: 查询参数（tool_name / status / min_duration / limit）
+        tenant_id: 内核注入的已认证租户（空 = 身份缺失，返回空集）
 
     Returns:
         含 items + total 的字典
     """
     import sqlite3
 
+    if not tenant_id:
+        return {"items": [], "total": 0, "error": "missing tenant identity"}
+
     db_path = _kernel_db_path()
     if not os.path.isfile(db_path):
         return {"items": [], "total": 0, "error": "kernel db not found"}
 
-    limit = min(int(q.get("limit", 50)), 200)
+    limit = min(_qint(q, "limit", 50), 200)
     tool_name_filter = q.get("tool_name", "").strip()
     status_filter = q.get("status", "").strip()  # success / error
     min_duration = q.get("min_duration", "").strip()
@@ -1110,9 +1182,10 @@ def _query_tool_calls(q: dict[str, str]) -> dict[str, Any]:
                json_extract(item.value, '$.error')       AS error,
                json_extract(item.value, '$.duration_ms') AS duration_ms
         FROM traces t, json_each(t.patch_data, '$.tool_results') AS item
-        WHERE t.plugin_id = 'pipeline_tool_core'
+        WHERE json_extract(t.patch_data, '$.tool_results') IS NOT NULL
+          AND t.tenant_id = ?
     """
-    params: list[Any] = []
+    params: list[Any] = [tenant_id]
     if tool_name_filter:
         sql += " AND json_extract(item.value, '$.tool_name') = ?"
         params.append(tool_name_filter)
@@ -1135,9 +1208,11 @@ def _query_tool_calls(q: dict[str, str]) -> dict[str, Any]:
 
     try:
         conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(sql, params).fetchall()
-        conn.close()
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
     except sqlite3.Error as exc:
         return {"items": [], "total": 0, "error": str(exc)}
 

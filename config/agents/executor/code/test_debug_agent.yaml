@@ -13,7 +13,7 @@ description: '测试与调试专家，统一工作流覆盖测试生成、API测
 agent_type: atomic
 category: code
 level: L3
-model_tier: large
+model_tier: medium
 plugins:
   disabled: []
   enabled:

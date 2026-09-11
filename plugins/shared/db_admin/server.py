@@ -26,59 +26,27 @@ query 多值透传：内核 dispatcher 在单值 query 之外透传 ``query_mult
 
 from __future__ import annotations
 
-import base64
-import json
 import logging
 from typing import Any
 from urllib.parse import unquote
 
 from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
+
+from http_json import (  # noqa: E402
+    decode_body as _decode_body,
+    json_response as _json_response,
+    ok as _ok,
+    protocol_error as _error,
+)
 
 plugin = AgentOSPlugin("db_admin")
 logger = logging.getLogger(__name__)
 
 _PREFIX = "/ext/db_admin"
 _CAPABILITY = "db-admin"
-
-
-def _json_response(payload: Any, status: int = 200) -> dict[str, Any]:
-    """把 JSON 可序列化对象包成内核期望的 HttpHandleResponse（body base64）。"""
-    body_str = json.dumps(payload, default=str, ensure_ascii=False)
-    body_b64 = base64.b64encode(body_str.encode("utf-8")).decode("ascii")
-    return {
-        "status": status,
-        "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": body_b64,
-        "body_encoding": "base64",
-    }
-
-
-def _ok(data: Any) -> dict[str, Any]:
-    """成功响应：{success, data}（ToolExecutionResult 契约）。"""
-    return {"success": True, "data": data}
-
-
-def _error(status: int, message: str) -> dict[str, Any]:
-    """错误响应（对齐 ApiError 的 {"error": {code, message}} 形状）。"""
-    return _ok(_json_response({"error": {"code": str(status), "message": message}}, status))
-
-
-def _decode_body(raw_body: str) -> dict[str, Any]:
-    """解码 http.handle 的 raw_body（base64 → JSON dict；空 body 返回 {}）。"""
-    if not raw_body:
-        return {}
-    decoded = raw_body
-    try:
-        candidate = base64.b64decode(raw_body).decode("utf-8")
-        if candidate.lstrip().startswith(("{", "[")):
-            decoded = candidate
-    except Exception:  # noqa: BLE001 —— 非 base64 明文 body 直接按 JSON 解
-        pass
-    try:
-        parsed = json.loads(decoded) if decoded.strip() else {}
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON body: {exc}") from exc
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def _authorization(headers: dict[str, str] | None) -> str:
@@ -215,7 +183,7 @@ async def http_handle(
     del plugin_id  # dispatcher 已路由到本插件，无需再判归属
     routed = _route(path, method)
     if routed is None:
-        return _error(404, f"db_admin: no route for {method} {path}")
+        return _error(f"db_admin: no route for {method} {path}", 404)
     cap_method, path_params = routed
 
     params: dict[str, Any] = dict(path_params)
@@ -227,7 +195,7 @@ async def http_handle(
         try:
             body = _decode_body(raw_body)
         except ValueError as exc:
-            return _error(400, str(exc))
+            return _error(str(exc), 400)
         if cap_method == "table_insert":
             params["row"] = body.get("row")
         elif cap_method == "table_update_row":
@@ -240,13 +208,13 @@ async def http_handle(
         cap = plugin.get_capability(_CAPABILITY)
         envelope = await cap.call(cap_method, params)
     except KeyError:
-        return _error(502, f"{_CAPABILITY} capability not injected (kernel handshake pending)")
+        return _error(f"{_CAPABILITY} capability not injected (kernel handshake pending)", 502)
     except Exception as exc:  # noqa: BLE001 —— capability 调用失败统一 502
         logger.warning("db_admin http.handle: capability %s failed: %s", cap_method, exc)
-        return _error(502, f"db-admin capability call failed: {exc}")
+        return _error(f"db-admin capability call failed: {exc}", 502)
 
     if not isinstance(envelope, dict):
-        return _error(502, f"db-admin capability returned non-dict envelope: {type(envelope)}")
+        return _error(f"db-admin capability returned non-dict envelope: {type(envelope)}", 502)
     status = int(envelope.get("status", 200))
     if 200 <= status < 300:
         payload = envelope.get("body", {})

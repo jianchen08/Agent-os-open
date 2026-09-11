@@ -5,13 +5,17 @@
 1. 生命周期：create_environment（provider_info 平台信息/注册）、destroy_environment
    （存在/不存在/失败告警）、get_environment_status（存在/不存在）；
 2. execute_in_environment 分派：command/file_operation/python_code/不支持类型；
-3. _execute_command：成功/非零退出/超时/空命令/权限拒绝/命令不存在/异常；
+3. _execute_command：成功/非零退出/超时杀树（真实子进程树全清）/
+   杀树失败上报（warn + 错误附失败清单，不吞）/空命令/权限拒绝/
+   命令不存在/异常；
 4. _execute_file_op：read/write/delete/exists/不支持操作/异常；
 5. _execute_python_code：真实 sandbox 成功/空代码/异常；
 6. _check_workspace_permission：workspace 内/外/异常。
 
 隔离策略：isolation_types 用真实模块；sandbox 用真实模块（host 模式已审批受信
-代码路径，无外部依赖）；subprocess 属外部依赖，mock 仅限该处。
+代码路径，无外部依赖）；超时杀树用例走真实短命子进程树（30s 自灭 +
+finally 兜底再清）；create_subprocess_shell 替身仅用于超时清理失败注入
+等无法真实构造的故障场景。
 """
 
 from __future__ import annotations
@@ -22,42 +26,23 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agentos_plugin_sdk.isolation_types import (
+    EnvironmentStatus,
+    ExecutionResult,
+    IsolationContext,
+    IsolationEnvironment,
+    IsolationLevel,
+    OperationType,
+    TaskType,
+)
 import pytest
 
 if TYPE_CHECKING:
-    from plugins.shared.system.isolation.isolation_types import (
-        EnvironmentStatus,
-        ExecutionResult,
-        IsolationContext,
-        IsolationEnvironment,
-        IsolationLevel,
-        OperationType,
-        TaskType,
-    )
     from plugins.shared.system.isolation.providers.host_provider import HostProvider
 
 pytestmark = pytest.mark.unit
 
 _PLUGIN_DIR = Path(__file__).resolve().parent  # plugins/shared/system/isolation/
-
-# ── 真实 isolation_types（纯 dataclass/枚举，无外部依赖） ──
-_isolation_types_mod = importlib.util.spec_from_file_location(
-    "isolation_types", _PLUGIN_DIR / "isolation_types.py"
-)
-assert _isolation_types_mod is not None and _isolation_types_mod.loader is not None
-ISOLATION_TYPES = importlib.util.module_from_spec(_isolation_types_mod)
-sys.modules["isolation_types"] = ISOLATION_TYPES
-_isolation_types_mod.loader.exec_module(ISOLATION_TYPES)
-
-if not TYPE_CHECKING:
-    # 运行期：仍从动态加载的 isolation_types 取真实类（mypy 走上方静态导入）。
-    EnvironmentStatus = ISOLATION_TYPES.EnvironmentStatus
-    ExecutionResult = ISOLATION_TYPES.ExecutionResult
-    IsolationContext = ISOLATION_TYPES.IsolationContext
-    IsolationEnvironment = ISOLATION_TYPES.IsolationEnvironment
-    IsolationLevel = ISOLATION_TYPES.IsolationLevel
-    OperationType = ISOLATION_TYPES.OperationType
-    TaskType = ISOLATION_TYPES.TaskType
 
 
 def _load_mod() -> Any:
@@ -254,66 +239,87 @@ class TestExecuteCommand:
         assert result.success is False
         assert "命令不能为空" in (result.error or "")
 
-    def test_timeout_kills_process(self, tmp_path: Path, monkeypatch: Any) -> None:
+    def test_timeout_kills_real_process_tree(self, tmp_path: Path) -> None:
+        """超时（真实子进程树）：主进程与孙进程全清，只报超时不夹带清理失败。"""
+        import time
+
+        import psutil
+
+        from proc_tree import kill_process_tree as _kill_tree_guard
+
         provider = _provider(tmp_path)
         _run(provider.create_environment(_ctx()))
-        killed: list[bool] = []
+        pid_file = tmp_path / "grandchild.pid"
+        child_script = tmp_path / "sleepy_child.py"
+        child_script.write_text(
+            "import subprocess, sys\n"
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            f"open({str(pid_file)!r}, 'w').write(str(p.pid))\n"
+            "exec('import time; time.sleep(30)')\n",
+            encoding="utf-8",
+        )
+        try:
+            result = _run(
+                provider.execute_in_environment(
+                    "host-t-1",
+                    {
+                        "type": "command",
+                        "command": f'"{sys.executable}" "{child_script}"',
+                        "timeout": 1.0,
+                    },
+                )
+            )
+            assert result.success is False
+            assert "超时" in (result.error or "")
+            assert "进程树清理失败" not in (result.error or "")
+            grand_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            # 树清（含 Windows 终止异步收敛）：孙进程已退出
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and psutil.pid_exists(grand_pid):
+                time.sleep(0.05)
+            assert psutil.pid_exists(grand_pid) is False, "孙进程成孤儿：树未被清"
+        finally:
+            # 兜底再清一遍（修法回退时防 30s 悬挂进程泄漏到后续用例）
+            if pid_file.exists():
+                text = pid_file.read_text(encoding="utf-8").strip()
+                if text.isdigit():
+                    _kill_tree_guard(int(text))
+
+    def test_timeout_cleanup_failure_reported_not_swallowed(
+        self, tmp_path: Path, monkeypatch: Any, caplog: Any
+    ) -> None:
+        """超时后杀树失败：warn 日志 + 错误消息附「进程树清理失败」清单（不吞）。"""
+
+        provider = _provider(tmp_path)
+        _run(provider.create_environment(_ctx()))
 
         class _SlowProc:
             returncode = None
+            pid = 424242
 
             async def communicate(self) -> tuple[bytes, bytes]:
                 await asyncio.sleep(5)
                 return b"", b""
-
-            def kill(self) -> None:
-                killed.append(True)
-
-            async def wait(self) -> None:
-                self.returncode = -9
 
         async def _slow_shell(*args: Any, **kwargs: Any) -> Any:
             return _SlowProc()
 
-        monkeypatch.setattr(
-            "plugins.shared.system.isolation.providers.host_provider.asyncio.create_subprocess_shell", _slow_shell
-        )
-        result = _run(
-            provider.execute_in_environment("host-t-1", {"type": "command", "command": "sleep 5", "timeout": 0.1})
-        )
-        assert result.success is False
-        assert "超时" in (result.error or "")
-        assert killed == [True]
-
-    def test_timeout_kill_failure_still_returns_timeout(self, tmp_path: Path, monkeypatch: Any) -> None:
-        """超时后 kill 自身抛异常：吞掉清理异常，仍返回超时结果（不掩盖主错误）。"""
-        provider = _provider(tmp_path)
-        _run(provider.create_environment(_ctx()))
-
-        class _StubbornProc:
-            returncode = None
-
-            async def communicate(self) -> tuple[bytes, bytes]:
-                await asyncio.sleep(5)
-                return b"", b""
-
-            def kill(self) -> None:
-                raise OSError("kill failed")
-
-            async def wait(self) -> None:
-                self.returncode = -9
-
-        async def _slow_shell(*args: Any, **kwargs: Any) -> Any:
-            return _StubbornProc()
+        def _failing_tree(pid: int) -> list[str]:
+            return [f"pid={pid} kill 失败: injected"]
 
         monkeypatch.setattr(
             "plugins.shared.system.isolation.providers.host_provider.asyncio.create_subprocess_shell", _slow_shell
         )
-        result = _run(
-            provider.execute_in_environment("host-t-1", {"type": "command", "command": "sleep 5", "timeout": 0.1})
-        )
+        monkeypatch.setattr(_MOD, "kill_process_tree", _failing_tree)
+        with caplog.at_level("WARNING", logger="plugins.shared.system.isolation.providers.host_provider"):
+            result = _run(
+                provider.execute_in_environment("host-t-1", {"type": "command", "command": "sleep 5", "timeout": 0.1})
+            )
         assert result.success is False
         assert "超时" in (result.error or "")
+        assert "进程树清理失败" in (result.error or "")
+        assert "injected" in (result.error or "")
+        assert any("进程树清理失败" in r.getMessage() for r in caplog.records)
 
     def test_permission_denied(self, tmp_path: Path, monkeypatch: Any) -> None:
         provider = _provider(tmp_path)

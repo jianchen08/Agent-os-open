@@ -16,6 +16,8 @@
 
 use std::sync::Arc;
 
+const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
+
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
 use agentos_core::traits::StorageBackend as _;
@@ -42,12 +44,13 @@ async fn handler_setup() -> (
         .create_user(&agentos_core::types::UserRecord {
             user_id: "00000000-0000-0000-0000-000000000001".to_string(),
             username: "admin".to_string(),
-            password: "admin12345".to_string(),
+            password: agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap(),
             email: Some("admin@agentos.dev".to_string()),
             role: "admin".to_string(),
             tenant_id: "default".to_string(),
             created_at: now,
             last_login_at: None,
+            must_change_password: false,
         })
         .await
         .unwrap();
@@ -67,7 +70,7 @@ async fn admin_token(router: &Router) -> String {
                 .uri("/api/v1/auth/login")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({"username": "admin", "password": "admin12345"}).to_string(),
+                    json!({"username": "admin", "password": SEED_ADMIN_PW}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -104,11 +107,13 @@ async fn register_user(router: &Router, username: &str) -> (String, String) {
     let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     assert!(status.is_success(), "注册失败: status={status} body={json}");
     let token = json["access_token"].as_str().unwrap().to_string();
-    // token 是无分隔符的整段 base64，载荷 {type}:{user_id}:{username}:{exp}
-    //——解出 user_id（与内核 resolve_request_user 同一格式）。
+    // token = base64(载荷).base64(HMAC 签名)，载荷
+    // {type}:{user_id}:{username}:{exp}:{jti}:{pwv}——解出 user_id
+    // （与内核 resolve_request_user 同一格式）。
     use base64::Engine;
-    let payload = base64::engine::general_purpose::STANDARD_NO_PAD
-        .decode(&token)
+    let (payload_b64, _sig) = token.split_once('.').unwrap();
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
         .unwrap();
     let text = String::from_utf8(payload).unwrap();
     let user_id = text.split(':').nth(1).unwrap().to_string();
@@ -351,8 +356,9 @@ async fn test_self_protection_blocks_delete_role_tenant_on_self() {
     let token = admin_token(&router).await;
     // 从 token 解出 admin 自己的 user_id（与生产 _authorization 解析路径同源）
     use base64::Engine;
-    let payload = base64::engine::general_purpose::STANDARD_NO_PAD
-        .decode(&token)
+    let (payload_b64, _sig) = token.split_once('.').unwrap();
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
         .unwrap();
     let text = String::from_utf8(payload).unwrap();
     let admin_id = text.split(':').nth(1).unwrap().to_string();

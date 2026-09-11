@@ -1,0 +1,62 @@
+# ============================================================
+# 依赖安全审计（weekly）— 灵汐 AgentOS
+# ============================================================
+#
+# 定期（每周一 03:00 UTC）+ 手动触发，审计两条依赖面：
+#   1. python-audit：uv.lock 导出 requirements 后用 pip-audit 查已知漏洞
+#      （PyPI 漏洞库）。审计面 = 全量锁内容（含 dev/extra，--all-extras），
+#      与 CI 安装的事实 pin 同源。
+#   2. frontend-audit：pnpm audit 查 npm 生态已知漏洞，--audit-level=high
+#      起才失败（low/moderate 噪音不阻塞，high/critical 红灯）。
+#
+# 本 workflow 不挂在 all-checks-passed（ci.yml 分支保护门禁）内：周期审计
+# 失败产出修复任务，不阻塞 PR。Python 上界防漂移（pyproject next-major
+# 上界）与本审计互补：审计抓已知 CVE，上界抓大版本破坏性升级。
+
+name: Dependency Audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周一 03:00 UTC（北京时间周一 11:00）
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  python-audit:
+    name: pip-audit (uv.lock 全量)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+
+      - name: Export locked requirements (uv.lock 单一事实源)
+        run: uv export --format requirements-txt --frozen --no-emit-project --all-extras --output-file /tmp/requirements-audit.txt
+
+      - name: Run pip-audit (已知漏洞即非零退出)
+        run: uvx pip-audit --requirement /tmp/requirements-audit.txt --progress-spinner off
+
+  frontend-audit:
+    name: pnpm audit (>=high 阻塞)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Enable pnpm (corepack 按 packageManager 字段解析版本)
+        run: corepack enable && pnpm --version
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      # pnpm audit 直接读 pnpm-lock.yaml，无需 install；全量依赖面（含 dev，
+      # devDependencies 同属供应链），high 及以上致非零退出
+      - name: Run pnpm audit (high/critical 阻塞)
+        run: pnpm audit --audit-level=high

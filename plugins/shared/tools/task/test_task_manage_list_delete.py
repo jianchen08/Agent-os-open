@@ -515,11 +515,8 @@ async def test_elapsed_seconds_calculation(tool: TaskTool, monkeypatch: Any) -> 
     assert TaskTool._calc_elapsed_seconds(done) == 30.0
     assert TaskTool._calc_elapsed_seconds(TaskModel()) is None
     running = TaskModel(started_at="2026-08-25T10:00:00")
-
-    fake_now = dt.datetime(2026, 8, 25, 10, 1, 0)
-    monkeypatch.setattr(
-        "datetime.datetime",
-        type("FakeDT", (), {"now": staticmethod(lambda: fake_now), "fromisoformat": staticmethod(dt.datetime.fromisoformat)}),
+    _set_utc_fake_now(
+        monkeypatch, dt.datetime(2026, 8, 25, 10, 1, 0, tzinfo=dt.timezone.utc)
     )
     assert TaskTool._calc_elapsed_seconds(running) == 60.0
 
@@ -547,6 +544,77 @@ def _set_runs(tool: TaskTool, runs: list[dict[str, Any]] | None) -> None:
         _task_mod.set_runs_reader(AsyncMock(return_value=runs))
 
 
+def _set_utc_fake_now(monkeypatch: Any, fake_now: Any) -> None:
+    """假时钟：now(tz) 忽略时区参数返回固定 aware 时刻（now() 已统一 aware UTC）。"""
+    import datetime as dt
+
+    monkeypatch.setattr(
+        "datetime.datetime",
+        type(
+            "FakeDT",
+            (),
+            {
+                "now": staticmethod(lambda tz=None: fake_now),
+                "fromisoformat": staticmethod(dt.datetime.fromisoformat),
+            },
+        ),
+    )
+
+
+async def test_elapsed_seconds_mixed_tz_inputs(tool: TaskTool, monkeypatch: Any) -> None:
+    """_calc_elapsed_seconds 时区归一：state/DB 时间串 naive/aware 混用不得崩溃。
+
+    内核侧 RFC3339 带偏移（aware），旧数据/local 写入可能不带（naive），
+    混用曾抛 'can't subtract offset-naive and offset-aware datetimes'。
+    """
+    import datetime as dt
+
+    from task_types import TaskModel
+
+    # 混合：aware 起点 + naive 完成时间（补 UTC 后差值不变）
+    mixed = TaskModel(
+        started_at="2026-08-25T10:00:00+00:00", completed_at="2026-08-25T10:00:30"
+    )
+    assert TaskTool._calc_elapsed_seconds(mixed) == 30.0
+    # 混合（反向）：naive 起点 + aware 完成时间
+    mixed_rev = TaskModel(
+        started_at="2026-08-25T10:00:00", completed_at="2026-08-25T10:00:45+00:00"
+    )
+    assert TaskTool._calc_elapsed_seconds(mixed_rev) == 45.0
+    # 纯 aware 完成 + 运行中撞当前时间（崩溃原场景：naive now - aware started）
+    aware_done = TaskModel(
+        started_at="2026-08-25T10:00:00+00:00",
+        completed_at="2026-08-25T10:00:30+00:00",
+    )
+    assert TaskTool._calc_elapsed_seconds(aware_done) == 30.0
+    aware_running = TaskModel(started_at="2026-08-25T10:00:00+00:00")
+    _set_utc_fake_now(
+        monkeypatch, dt.datetime(2026, 8, 25, 10, 1, 0, tzinfo=dt.timezone.utc)
+    )
+    assert TaskTool._calc_elapsed_seconds(aware_running) == 60.0
+
+
+async def test_elapsed_from_runs_mixed_tz_inputs(tool: TaskTool, monkeypatch: Any) -> None:
+    """_calc_elapsed_from_runs 时区归一：run 起点/终点 naive/aware 混用不得崩溃。"""
+    import datetime as dt
+
+    # 混合：aware 起点 + naive 终点（min/max 比较与相减均须归一后成立）
+    _set_runs(
+        tool,
+        [
+            _run("r1", "2026-08-25T10:00:05+00:00", ended_at="2026-08-25T10:01:00"),
+            _run("r2", "2026-08-25T10:00:00", ended_at="2026-08-25T10:00:30+00:00"),
+        ],
+    )
+    assert await tool._calc_elapsed_from_runs("pipe-run") == 60.0
+    # 运行中：aware 起点 + 当前时间（崩溃原场景：naive now - aware created_at）
+    _set_runs(tool, [_run("r1", "2026-08-25T10:00:00+00:00", status="running")])
+    _set_utc_fake_now(
+        monkeypatch, dt.datetime(2026, 8, 25, 10, 2, 0, tzinfo=dt.timezone.utc)
+    )
+    assert await tool._calc_elapsed_from_runs("pipe-run") == 120.0
+
+
 async def test_elapsed_from_runs_completed_diff(tool: TaskTool) -> None:
     """完成态：起点=最早 run created_at，终点=最晚 ended_at，取差值。"""
     _set_runs(
@@ -571,10 +639,8 @@ async def test_elapsed_from_runs_running_uses_now(tool: TaskTool, monkeypatch: A
             _run("r2", "2026-08-25T09:59:00", status="completed", ended_at="2026-08-25T09:59:30"),
         ],
     )
-    fake_now = dt.datetime(2026, 8, 25, 10, 1, 0)
-    monkeypatch.setattr(
-        "datetime.datetime",
-        type("FakeDT", (), {"now": staticmethod(lambda: fake_now), "fromisoformat": staticmethod(dt.datetime.fromisoformat)}),
+    _set_utc_fake_now(
+        monkeypatch, dt.datetime(2026, 8, 25, 10, 1, 0, tzinfo=dt.timezone.utc)
     )
     # 最早起点 09:59:00 → 120s；r1 在跑，不取 ended_at 差值
     assert await tool._calc_elapsed_from_runs("pipe-run") == 120.0

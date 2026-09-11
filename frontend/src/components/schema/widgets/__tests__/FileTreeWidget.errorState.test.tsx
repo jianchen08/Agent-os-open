@@ -9,9 +9,7 @@
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-
 const mockGet = vi.fn()
-
 vi.mock('@/services/api/client', () => ({
   default: { get: (...args: unknown[]) => mockGet(...args) },
 }))
@@ -32,7 +30,6 @@ vi.mock('../CreateTaskFormModal', () => ({
 vi.mock('../FileTreeContextMenu', () => ({
   FileTreeContextMenu: () => null,
 }))
-
 import { FileTreeWidget } from '../FileTreeWidget'
 
 const TREE = [

@@ -114,6 +114,47 @@ describe('DbAdminPage 权限守卫', () => {
     // 非 admin 不应加载表
     expect(mockFetchDbTables).not.toHaveBeenCalled()
   })
+
+  it('登录态变化（匿名→登录 admin）后守卫重查并解除无权限', async () => {
+    // 复现 GUI 黑盒测试 2026-09-11：匿名时打开本页显示无权限，随后在同一挂载
+    // 实例上登录 admin——守卫曾只在挂载时查一次角色，页面粘住"无权限"直到刷新。
+    const { useAuthStore } = await import('@/stores/authStore')
+    mockGetCurrentUser.mockResolvedValue({
+      id: 'user-1',
+      username: 'alice',
+      email: 'alice@test.dev',
+      role: 'user',
+      is_active: true,
+      created_at: '2025-01-01T00:00:00Z',
+      last_login_at: null,
+    })
+
+    renderWithProviders(<DbAdminPage />)
+    await waitFor(() => {
+      expect(screen.getByText(/无权限访问数据库管理页面/)).toBeInTheDocument()
+    })
+
+    // 登录 admin：token 变化应触发守卫重查 /auth/me
+    mockGetCurrentUser.mockResolvedValue({
+      id: 'admin-1',
+      username: 'admin',
+      email: 'admin@test.dev',
+      role: 'admin',
+      is_active: true,
+      created_at: '2025-01-01T00:00:00Z',
+      last_login_at: null,
+    })
+    mockFetchDbTables.mockResolvedValue(sampleTables)
+    mockFetchDbRows.mockResolvedValue(sampleRows)
+    useAuthStore.setState({ token: 'brand-new-token' })
+
+    await waitFor(() => {
+      expect(screen.queryByText(/无权限访问数据库管理页面/)).not.toBeInTheDocument()
+    })
+    await waitFor(() => {
+      expect(screen.getByText('memory')).toBeInTheDocument()
+    })
+  })
 })
 
 describe('DbAdminPage 表列表与数据浏览', () => {

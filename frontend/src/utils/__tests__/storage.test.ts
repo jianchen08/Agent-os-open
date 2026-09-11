@@ -8,9 +8,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { STORAGE_KEYS } from '@/constants/storage'
 import { loggers } from '@/utils/logger'
 import { storage, uiStorage } from '@/utils/storage'
-import { STORAGE_KEYS } from '@/constants/storage'
 
 describe('storage 单例', () => {
   beforeEach(() => {

@@ -134,7 +134,6 @@ describe('MessageList', () => {
   const defaultProps: ExtendedMessageListProps = {
     messages: [],
     isGenerating: false,
-    modelName: 'test-model',
     className: '',
   }
 
@@ -325,13 +324,6 @@ describe('MessageList', () => {
       )
       const listEl = container.querySelector('.custom-class')
       expect(listEl).toBeInTheDocument()
-    })
-
-    it('modelName 传递到 MessageItem', () => {
-      const messages = [makeMessage({ id: 'msg-1' })]
-      render(<MessageList {...defaultProps} messages={messages} modelName="gpt-4" />)
-      // MessageItem mock 渲染了消息内容
-      expect(screen.getByTestId('message-item-msg-1')).toBeInTheDocument()
     })
   })
 

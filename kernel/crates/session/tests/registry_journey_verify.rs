@@ -8,12 +8,11 @@
 //!   步骤1 冷启动注册（首轮消息 → get_or_init）
 //!     → 步骤2 引擎跑完回写 final_state（update_state，模拟一轮对话结束）
 //!     → 步骤3 下一轮热路径复用（重复 get_or_init 返回同一 Arc，读完整历史）
-//!     → 步骤4 sequence 单调递增 + DB 续接不回退（next_sequence / init_sequence）
-//!     → 步骤5 注销清理（remove → contains=false → 重建为冷启动）
-//!     → 步骤6 租户隔离（tenant_a/tenant_b 的 pipe_x 互不可见）
+//!     → 步骤4 注销清理（remove → contains=false → 重建为冷启动）
+//!     → 步骤5 租户隔离（tenant_a/tenant_b 的 pipe_x 互不可见）
 //!
-//! 每一步的输入是上一步的输出（同一 registry、同一 entry Arc、state 内容、
-//! sequence 计数器延续），验证「管道 state 跨轮常驻」这一注册表核心职责。
+//! 每一步的输入是上一步的输出（同一 registry、同一 entry Arc、state 内容延续），
+//! 验证「管道 state 跨轮常驻」这一注册表核心职责。
 //!
 //! 运行：cargo test -p agentos-session --test registry_journey_verify
 
@@ -76,21 +75,7 @@ fn test_user_journey_multi_turn_state_continuity() {
     assert_eq!(msgs[1]["content"], "你好，我是灵汐");
     drop(guard);
 
-    // ── 步骤4：sequence 单调递增 + DB 续接（状态传递：步骤3 的 entry 计数器延续）──
-    assert_eq!(reg.next_sequence(TENANT, "pipe_journey"), Some(1));
-    assert_eq!(reg.next_sequence(TENANT, "pipe_journey"), Some(2));
-    assert_eq!(reg.next_sequence(TENANT, "pipe_journey"), Some(3));
-    // DB 续接：模拟进程重启后从 DB 恢复 max=10，取 max(内存3, 10)=10，下次=11 不回退
-    reg.init_sequence(TENANT, "pipe_journey", 10);
-    assert_eq!(
-        reg.next_sequence(TENANT, "pipe_journey"),
-        Some(11),
-        "续接后不应回退"
-    );
-    // 未注册管道返回 None
-    assert_eq!(reg.next_sequence(TENANT, "pipe_unknown"), None);
-
-    // ── 步骤5：注销清理（状态传递：步骤4 的 entry 被移除，重建为冷启动）──
+    // ── 步骤4：注销清理（状态传递：步骤3 的 entry 被移除，重建为冷启动）──
     reg.remove(TENANT, "pipe_journey");
     assert!(!reg.contains(TENANT, "pipe_journey"));
     let fresh = reg.get_or_init(
@@ -106,7 +91,7 @@ fn test_user_journey_multi_turn_state_continuity() {
         "remove 后重建应为冷启动（fresh state），而非复用旧历史"
     );
 
-    // ── 步骤6：租户隔离（同一 pipeline_id 在不同租户下互不可见）──
+    // ── 步骤5：租户隔离（同一 pipeline_id 在不同租户下互不可见）──
     reg.get_or_init("tenant_a", "pipe_x", "t", "a", make_state(&["a-msg"]));
     assert!(reg.contains("tenant_a", "pipe_x"));
     assert!(

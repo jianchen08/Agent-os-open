@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Moon, Sun } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
-import { ThemePopover } from './ThemePanel'
+import { ThemePopover } from './ThemePopover'
 
 interface ThemeButtonProps {
   /** 额外 class */

@@ -181,6 +181,14 @@
   },
   "permissions": {},
   "priority": 10,
+  "export_fields": [
+    "lineage.parent_pipeline_id",
+    "lineage.origin_session_id",
+    "lineage.parent_ws_meta",
+    "lineage.root",
+    "lineage.origin.kind",
+    "lineage.origin.source"
+  ],
   "granted_capabilities": [
     "chat",
     "tenant-context",

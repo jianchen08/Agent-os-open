@@ -158,9 +158,10 @@ impl ChatSendHandler {
 
         if created {
             // 阶段三（仅创建分支）：pipeline↔thread 映射落库 + 出生字段
-            // 持久化（见 persist_created_pipeline；失败均不阻断派发）。
+            // 持久化（B7：出生字段落库失败整体报错终止本次发送，不进入
+            // 引擎执行；映射失败 warn 由引擎路径补写）。
             self.persist_created_pipeline(&p, &pipeline_id, &thread_id)
-                .await;
+                .await?;
         }
 
         tracing::info!(
@@ -370,7 +371,7 @@ impl ChatSendHandler {
         }
     }
 
-    /// 阶段三（仅创建分支）：先落 pipeline↔thread 映射（F8），再逐键 upsert
+    /// 阶段三（仅创建分支）：先落 pipeline↔thread 映射（F8），再批量 upsert
     /// 出生字段到 pipeline_state 表。
     ///
     /// 映射须先于派发写入，否则 dispatch 内 resolve_pipeline_id_for_thread 校验
@@ -378,16 +379,17 @@ impl ChatSendHandler {
     /// 映射幂等（INSERT OR IGNORE）。出生即落表：引擎 persistent_fields 投影只覆盖
     /// 插件 manifest 声明键（track.* 等），任务域/血缘键不属于任何插件——不在此
     /// 落库则冷读（cold_state_row）无基线、registry 内存丢失后任务面板归属链整行
-    /// 缺失（任务 running 但 state 聚合不出口）。两步失败均 warn 不阻断派发
-    /// （映射引擎路径补写 / 出生字段内存态仍生效）；无 store 构造整体跳过。
+    /// 缺失（任务 running 但 state 聚合不出口）。映射失败 warn 不阻断（引擎路径
+    /// 补写）；出生字段批量 upsert（单事务 all-or-nothing）任一失败整体返回能力
+    /// 调用错误（B7，对齐 task_birth「禁止部分成功」契约）；无 store 构造整体跳过。
     async fn persist_created_pipeline(
         &self,
         p: &SendParams<'_>,
         pipeline_id: &str,
         thread_id: &str,
-    ) {
+    ) -> Result<(), McpError> {
         let Some(store) = self.store.as_ref() else {
-            return;
+            return Ok(());
         };
         let tenant_id = agentos_http::auth::resolve_tenant_id_by_user(Some(store), p.user_id).await;
         if let Err(e) = store
@@ -402,25 +404,29 @@ impl ChatSendHandler {
                 "chat.send_message 创建分支 pipeline↔thread 映射落库失败（引擎路径将补写）"
             );
         }
-        // 出生字段持久化：overlay 全量逐键 upsert（幂等）——调用方经 state
-        // 透传的出生键（task.*/lineage.*/agent.id）创建即落表，冷读归属链
-        // 与续跑身份解析有基线。内核对键语义零知识，只做透传持久化。
+        // 出生字段持久化：overlay 全量批量 upsert（幂等，单事务 all-or-nothing）
+        // ——调用方经 state 透传的出生键（task.*/lineage.*/agent.id）创建即落表，
+        // 冷读归属链与续跑身份解析有基线。内核对键语义零知识，只做透传持久化。
+        // B7：任一失败即整体返回能力调用错误（本段先于引擎执行，失败返回即安全
+        // 终止）——对齐 plugins/shared/task_birth.py「禁止部分成功」契约，禁止
+        // 吞掉后按部分成功继续（冷读丢基线 = 任务面板归属链整行缺失）。
         if let Some(overlay_obj) = p.overlay.as_ref().and_then(|o| o.as_object()) {
-            for (k, v) in overlay_obj {
-                if let Err(e) = store
-                    .upsert_state_field(pipeline_id, &tenant_id, k, v)
-                    .await
-                {
-                    tracing::warn!(
+            store
+                .upsert_state_fields(pipeline_id, &tenant_id, overlay_obj)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
                         target: "capability:chat",
                         pipeline = %pipeline_id,
-                        key = %k,
                         error = %e.to_string(),
-                        "chat.send_message 出生字段持久化失败（内存态仍生效）"
+                        "chat.send_message 出生字段落库失败（终止本次发送，不进入引擎执行）"
                     );
-                }
-            }
+                    McpError::Protocol {
+                        message: format!("chat.send_message 出生字段落库失败: {e}"),
+                    }
+                })?;
         }
+        Ok(())
     }
 
     /// 阶段四：no_dispatch 只写 state 不派发（容器任务等"只登记不执行"的
@@ -1680,5 +1686,252 @@ mod tests {
             "成功派发不应产生通知: {:?}",
             frames.lock().unwrap()
         );
+    }
+
+    // ── B7：出生字段落库失败整体上抛（先于引擎执行，失败返回即安全终止）──
+
+    /// 出生字段批量 upsert 恒故障的存储 mock：link_pipeline_session 正常
+    ///（warn 面）、用户解析面正常回 None（回退 default 租户）、批量出生字段
+    /// 恒失败。其余方法 unreachable 桩（意外耦合即炸出）。
+    struct FailingBirthStore;
+
+    #[async_trait]
+    impl StorageBackend for FailingBirthStore {
+        async fn upsert_state_fields(
+            &self,
+            _pipeline_id: &str,
+            _tenant_id: &str,
+            _fields: &serde_json::Map<String, serde_json::Value>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Err(agentos_core::types::StorageError::Database(
+                "injected birth field failure".to_string(),
+            ))
+        }
+        async fn link_pipeline_session(
+            &self,
+            _pipeline_id: &str,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Ok(())
+        }
+        async fn get_user_by_id(
+            &self,
+            _user_id: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            Ok(None)
+        }
+        async fn get_run(
+            &self,
+            _run_id: &str,
+        ) -> Result<agentos_core::types::RunRecord, agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _opts: agentos_core::traits::MessageQueryOpts,
+        ) -> Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn get_blob(
+            &self,
+            _blob_id: &str,
+        ) -> Result<Vec<u8>, agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn append_trace(
+            &self,
+            _entry: agentos_core::types::TraceEntry,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn update_run_status(
+            &self,
+            _run_id: &str,
+            _status: agentos_core::types::RunStatus,
+            _branch: Option<&str>,
+            _seq: Option<u32>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn create_run(
+            &self,
+            _run_id: &str,
+            _config_hash: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn store_blob(
+            &self,
+            _data: &[u8],
+            _mime_type: &str,
+        ) -> Result<String, agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn create_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn get_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn list_sessions(
+            &self,
+            _filter: agentos_core::traits::SessionListFilter,
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn update_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn delete_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn get_step_traces_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn create_user(
+            &self,
+            _user: &agentos_core::types::UserRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn get_user_by_username(
+            &self,
+            _username: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn list_users(
+            &self,
+        ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn update_last_login(
+            &self,
+            _user_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+        async fn update_user_password(
+            &self,
+            _user_id: &str,
+            _password_hash: &str,
+            _must_change_password: bool,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            unreachable!("mock 不提供口令更新")
+        }
+        async fn delete_user(
+            &self,
+            _user_id: &str,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            unreachable!("出生字段失败路径不应触碰其他存储方法")
+        }
+    }
+
+    #[tokio::test]
+    async fn create_branch_birth_field_failure_aborts_before_dispatch() {
+        // B7 契约（对齐 task_birth「禁止部分成功」）：出生字段落库失败 →
+        // 整体返回能力调用错误，且引擎未启动（派发零调用）——本段先于引擎
+        // 执行，失败返回即安全终止，冷读不再丢出生基线。
+        let d = RecordingDispatcher::shared();
+        let store: Arc<dyn StorageBackend> = Arc::new(FailingBirthStore);
+        let h = ChatSendHandler::with_store(d.clone(), Some(store));
+        let err = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true,
+                    "message": "执行任务「调研」。",
+                    "user_id": "user_birth_fail",
+                    "state": {"task.goal": "调研", "task.status": "pending"},
+                }),
+            )
+            .await
+            .expect_err("出生字段落库失败必须整体报错");
+        assert!(
+            matches!(err, McpError::Protocol { .. }),
+            "应为能力调用协议错误，实际 {err:?}"
+        );
+        assert!(
+            d.calls.lock().unwrap().is_empty(),
+            "出生字段失败不得进入引擎执行（派发零调用）"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_branch_birth_success_still_dispatches_foreground() {
+        // 对照组（第二组输入）：真实 store + 前台创建 → 出生字段落表且正常派发
+        // （批量接口替换后成功路径行为不变）。
+        let d = RecordingDispatcher::shared();
+        let store: Arc<dyn StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
+        let h = ChatSendHandler::with_store(d.clone(), Some(store.clone()));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true,
+                    "message": "前台任务",
+                    "user_id": "user_birth_ok",
+                    "state": {"task.status": "pending", "lineage.parent_pipeline_id": "pipe_p"},
+                }),
+            )
+            .await
+            .expect("出生字段成功应正常创建派发");
+        assert_eq!(res["status"], "created");
+        let pid = res["pipeline_id"].as_str().unwrap().to_string();
+        let fields = store
+            .load_pipeline_state(&pid, "default")
+            .await
+            .expect("出生字段应已落表");
+        assert_eq!(
+            fields.get("task.status"),
+            Some(&serde_json::json!("pending"))
+        );
+        assert_eq!(
+            fields.get("lineage.parent_pipeline_id"),
+            Some(&serde_json::json!("pipe_p"))
+        );
+        assert_eq!(calls(&d).len(), 1, "成功路径前台派发恰好一次");
     }
 }

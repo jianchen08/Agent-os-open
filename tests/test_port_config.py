@@ -16,6 +16,7 @@
   5. 旧端口不再作为服务端口出现
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -167,9 +168,10 @@ class TestNoOldPortsInKeyConfigs:
     def test_no_old_backend_port_as_service(self, rel_path):
         """旧后端端口 8888 不应作为服务端口出现在关键配置中"""
         content = _read_file(rel_path)
-        # 检查 8888 出现在端口上下文中（:8888 或 =8888 或 localhost:8888）
-        port_patterns = [":8888", "8888", "port.*8888"]
-        matches = [p for p in port_patterns if p in content]
+        # 检查 8888 出现在端口上下文中（:8888 / =8888 / port…8888）——
+        # 用 re.search 真正按模式匹配，避免子串 `in` 使正则项永不命中
+        port_patterns = [r":8888", r"=\s*8888", r"port.*8888"]
+        matches = [p for p in port_patterns if re.search(p, content)]
         assert not matches, f"{rel_path} 中仍然包含旧后端端口 8888（匹配模式: {matches}）"
 
     @pytest.mark.parametrize(

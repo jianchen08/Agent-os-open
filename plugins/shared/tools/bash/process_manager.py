@@ -23,12 +23,31 @@ from log_compressor import LogCompressor
 logger = logging.getLogger(__name__)
 
 
+class ProcessLogReadError(RuntimeError):
+    """日志文件存在但读取失败（IO 层故障）。
+
+    与「文件不存在（返回 None）」显式区分：调用方须把读取故障作为
+    LOG_FILE_IO_ERROR 报给上层，不得静默当成"进程不存在/无日志"。
+    """
+
+
 class ProcessManager:
     """进程管理器"""
 
-    def __init__(self, log_dir: Path | None = None):
-        """初始化进程管理器"""
+    def __init__(self, log_dir: Path | None = None, log_delete_grace_seconds: float | None = None):
+        """初始化进程管理器
+
+        Args:
+            log_dir: 命令日志目录（默认 logs/bash）。
+            log_delete_grace_seconds: 正常退出日志的删除宽限窗秒数
+                （默认 300；测试可注入 0 验证删除行为）。
+        """
         self.log_dir = log_dir or Path("logs/bash")
+        self._log_delete_grace_seconds = (
+            self._LOG_DELETE_GRACE_SECONDS_DEFAULT
+            if log_delete_grace_seconds is None
+            else float(log_delete_grace_seconds)
+        )
         try:
             self.log_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -68,6 +87,68 @@ class ProcessManager:
         # 默认内存后端：本地宿主。容器隔离路径会注入 ContainerProcessBackend。
         # 看门狗策略层只依赖 backend.sample_memory()，不关心进程跑在哪。
         self._memory_backend: ProcessBackend | None = None
+        # 正常退出（rc==0）日志的延迟删除队列：[(log_file, 完成时刻)]。
+        # 完成后不能立刻删——execute/continue 的轮询与 _on_output_task_done
+        # 存在竞态，get_summary/read_log_by_pid 的磁盘降级路径以日志为真理源
+        # （test_summary_race 锁定的契约），保留一个宽限窗再删。
+        self._logs_pending_delete: list[tuple[Path, float]] = []
+
+        # 启动时一次性清扫过期命令日志（运行期正常退出已随手清，此处兜历史残留）
+        self._sweep_stale_logs()
+
+    # 命令日志保留上限：>7 天的 bash_*.log 启动时清扫
+    _LOG_SWEEP_MAX_AGE_SECONDS: ClassVar[float] = 7 * 24 * 3600.0
+    # 正常退出日志的删除宽限窗：覆盖 execute 返回后的 read_log/summary 降级读取
+    _LOG_DELETE_GRACE_SECONDS_DEFAULT: ClassVar[float] = 300.0
+
+    def flush_expired_log_deletes(self) -> None:
+        """删除超过宽限窗的正常退出日志（看门狗 tick / shutdown 调用）。
+
+        best-effort：单文件删除失败告警保留，不阻塞其余删除。
+        """
+        if not self._logs_pending_delete:
+            return
+        now = time.monotonic()
+        remaining: list[tuple[Path, float]] = []
+        for log_file, done_at in self._logs_pending_delete:
+            if now - done_at < self._log_delete_grace_seconds:
+                remaining.append((log_file, done_at))
+                continue
+            self._unlink_command_log(log_file)
+        self._logs_pending_delete = remaining
+
+    def _sweep_stale_logs(self) -> None:
+        """清扫 log_dir 下超过保留期（7 天）的 bash_*.log（一次性行，带数量汇总）。
+
+        best-effort：目录不可读/单文件删除失败只告警保留现场，不影响命令执行。
+        """
+        try:
+            candidates = list(self.log_dir.glob("bash_*.log"))
+        except OSError as e:
+            logger.warning(f"启动日志清扫失败（不影响命令执行） | dir={self.log_dir} | error={e}")
+            return
+        if not candidates:
+            return
+        cutoff = time.time() - self._LOG_SWEEP_MAX_AGE_SECONDS
+        removed = 0
+        for log_file in candidates:
+            try:
+                if log_file.is_file() and log_file.stat().st_mtime < cutoff:
+                    log_file.unlink()
+                    removed += 1
+            except OSError as e:
+                logger.warning(f"过期日志删除失败（保留现场） | file={log_file} | error={e}")
+        logger.info(
+            f"启动日志清扫完成 | dir={self.log_dir} | scanned={len(candidates)} "
+            f"| removed={removed} | retention_days={int(self._LOG_SWEEP_MAX_AGE_SECONDS // 86400)}"
+        )
+
+    def _unlink_command_log(self, log_file: Path) -> None:
+        """删除单条命令日志（best-effort：失败告警保留，不吞）。"""
+        try:
+            log_file.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(f"命令日志清理失败（保留现场） | file={log_file} | error={e}")
 
     def _generate_log_filename(self, command: str, pid: int) -> str:
         """生成日志文件名（pid 派生）。
@@ -208,7 +289,8 @@ class ProcessManager:
                     if text and not text.startswith("#"):
                         result.append(text)
                 return result
-        except OSError:
+        except OSError as exc:
+            logger.debug("日志尾部读取失败（摘要按空窗口降级） | file=%s | error=%s", log_file, exc)
             return []
 
     def _ensure_log_dir(self, log_dir: Path) -> Path:
@@ -245,120 +327,156 @@ class ProcessManager:
         on_output: 每行输出的同步回调（task_observability 任务 2——执行中
         进度推送。ProgressReporter.report，自带 1KB/2s 节流；None 时零开销）。
         """
-        effective_log_dir = self._ensure_log_dir(log_dir) if log_dir else self.log_dir
-        # 收到外部 log_dir 时同步 self.log_dir——start_process 写入目录与
-        # read_log_by_pid/get_summary 降级读取必须用同一目录，否则即时清理后
-        # 降级读磁盘找不到文件 → SUMMARY_ERROR（生产 bug 根因）。
-        if log_dir is not None:
-            self.log_dir = effective_log_dir
-
+        effective_log_dir = self._prepare_log_dir(log_dir)
         merged_env = {**os.environ, **(env or {})}
         is_windows = platform.system() == "Windows"
 
-        # ===== 容器路径：docker exec 起进程 =====
         if container_id:
-            # 包装命令让容器内 sh 自己报 pid，并 exec 成用户命令——这样 $$ 报的
-            # pid 就是用户命令本身（单条命令场景，如 cargo build），kill 干净。
-            #
-            # 复合命令（含 &&/;/||/|/() 等）：POSIX exec 只接受一个简单命令，
-            # `exec cmd1 && cmd2` 里 exec 替换为 cmd1 后进程即退出，cmd2 被丢弃
-            # → 后续段输出全部丢失（历史 bug：echo "标签" && ls 只返回标签）。
-            # 故复合命令自动套 `exec sh -c '<cmd>'`（shlex.quote 整条引用，防
-            # double-eval），让控制操作符在内层 sh 全部生效。代价：pid 指向内层 sh
-            # 而非用户命令，kill 后 sh 的子进程可能成孤儿（容器销毁时兜底清理）。
-            # 单条命令保持 `exec <cmd>`，pid 精准、无孤儿，向后兼容。
-            #
-            # working_dir 必须是容器内 POSIX 绝对路径（以 / 开头）。BashTool.get_working_dir
-            # 返回的是宿主 task workspace（如 D:\myproject\xxx），直接传给
-            # `docker exec -w` 会让 OCI 报 "Cwd must be an absolute path" 退 128。
-            # 非 POSIX 绝对路径时强制用容器挂载点 /workspace（IsolationManager 约定）。
-            container_workdir = working_dir if (working_dir and working_dir.startswith("/")) else "/workspace"
-            if self._is_compound_command(command):
-                # set -o pipefail 让管道里任一段失败/被信号杀时，退出码反映真实失败
-                # （而非管道最后一段的成功码）。如 `cmd | grep` 里 cmd 被 OOM SIGKILL，
-                # 旧实现退出码取 grep 的 0 → 工具误报成功。2>/dev/null 兜底：dash/纯 POSIX
-                # sh 不支持 pipefail 选项时不报错中断（bash/ash 支持，容器镜像默认满足）。
-                # 注意：pipefail 只修管道(|)，不修分号序列（cmd1; cmd2 取 cmd2 码）——
-                # 后者是 shell 固有语义，靠 _build_failure_message 的信号提取兜底。
-                wrapped = f"echo $$; exec sh -c {shlex.quote('set -o pipefail 2>/dev/null; ' + command)}"
-            else:
-                wrapped = f"echo $$; exec {command}"
-            process = await asyncio.create_subprocess_exec(
-                "docker",
-                "exec",
-                "-w",
-                container_workdir,
-                container_id,
-                "sh",
-                "-c",
-                wrapped,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.PIPE,
+            pid, log_file = await self._start_container_process(
+                command, working_dir, container_id, owner, effective_log_dir, on_output
             )
-            host_pid = process.pid
-            # 同步读第一行（容器内 sh 的 $$），拿容器内 pid。
-            container_pid = await self._read_container_pid(process)
-            # 先启动 process 拿到 host_pid，再按 pid 派生日志文件名（read_log 靠此规则）。
-            log_file = effective_log_dir / self._generate_log_filename(command, host_pid)
-            self._write_log_header(log_file, command, host_pid, owner=owner)
-            output_task = asyncio.create_task(self._read_output(host_pid, process, log_file, on_output))
-            metadata: dict[str, Any] = {
-                "container_id": container_id,
-                "container_pid": container_pid,
-            }
-            if owner is not None:
-                metadata["owner"] = owner
-            self.active_processes[host_pid] = ProcessInfo(
-                pid=host_pid,
-                command=command,
-                start_time=time.time(),
-                log_file=log_file,
-                process=process,
-                status="running",
-                output_task=output_task,
-                backend=_get_container_backend(container_id),
-                last_access_time=time.time(),
-                metadata=metadata,
-            )
-            self._ensure_watchdog()
-            output_task.add_done_callback(lambda t, p=host_pid: self._on_output_task_done(p, t))  # type: ignore[misc]
-            return host_pid, log_file
+            return pid, log_file
 
-        # ===== 本地路径：原 WSL/Bash/CMD 分支 =====
-        # Shell 检测优先级：
-        # 1. WSL 命令 → _start_wsl_process 直连（use_wsl_direct）
-        # 2. WSL + bash → wsl -e bash -c（避免 MSYS2 的 $VAR 参数转换 bug）
-        # 3. Git Bash → bash -c（MSYS2 bash，有 $VAR 转义问题）
-        # 4. CMD → cmd /c（最后手段，无 Unix shell 能力）
+        # ===== 本地路径：WSL/Bash/CMD 分支 =====
+        command = self._normalize_local_command(command, is_windows)
+        process = await self._spawn_local_process(command, working_dir, merged_env, is_windows)
+        return self._register_process(
+            command, process, effective_log_dir, on_output,
+            owner=owner, backend=_get_local_backend(), metadata=self._local_metadata(owner),
+        )
+
+    def _prepare_log_dir(self, log_dir: Path | None) -> Path:
+        """归一化日志目录；收到外部 log_dir 时同步 self.log_dir——
+        start_process 写入目录与 read_log_by_pid/get_summary 降级读取必须用
+        同一目录，否则即时清理后降级读磁盘找不到文件 → SUMMARY_ERROR
+        （生产 bug 根因）。"""
+        effective_log_dir = self._ensure_log_dir(log_dir) if log_dir else self.log_dir
+        if log_dir is not None:
+            self.log_dir = effective_log_dir
+        return effective_log_dir
+
+    def _local_metadata(self, owner: str | None) -> dict[str, Any]:
+        """本地进程 metadata（owner 供磁盘降级路径越权校验）。"""
+        metadata: dict[str, Any] = {}
+        if owner is not None:
+            metadata["owner"] = owner
+        return metadata
+
+    async def _start_container_process(
+        self,
+        command: str,
+        working_dir: str | None,
+        container_id: str,
+        owner: str | None,
+        effective_log_dir: Path,
+        on_output: Callable[[str], None] | None,
+    ) -> tuple[int, Path]:
+        """容器路径：docker exec 起进程，返回 (宿主句柄 pid, 日志文件)。"""
+        # 包装命令让容器内 sh 自己报 pid，并 exec 成用户命令——这样 $$ 报的
+        # pid 就是用户命令本身（单条命令场景，如 cargo build），kill 干净。
+        #
+        # 复合命令（含 &&/;/||/|/() 等）：POSIX exec 只接受一个简单命令，
+        # `exec cmd1 && cmd2` 里 exec 替换为 cmd1 后进程即退出，cmd2 被丢弃
+        # → 后续段输出全部丢失（如 echo "标签" && ls 只返回标签）。
+        # 故复合命令自动套 `exec sh -c '<cmd>'`（shlex.quote 整条引用，防
+        # double-eval），让控制操作符在内层 sh 全部生效。代价：pid 指向内层 sh
+        # 而非用户命令，kill 后 sh 的子进程可能成孤儿（容器销毁时兜底清理）。
+        # 单条命令保持 `exec <cmd>`，pid 精准、无孤儿，向后兼容。
+        #
+        # working_dir 必须是容器内 POSIX 绝对路径（以 / 开头）。BashTool.get_working_dir
+        # 返回的是宿主 task workspace（如 D:\myproject\xxx），直接传给
+        # `docker exec -w` 会让 OCI 报 "Cwd must be an absolute path" 退 128。
+        # 非 POSIX 绝对路径时强制用容器挂载点 /workspace（IsolationManager 约定）。
+        container_workdir = working_dir if (working_dir and working_dir.startswith("/")) else "/workspace"
+        if self._is_compound_command(command):
+            # set -o pipefail 让管道里任一段失败/被信号杀时，退出码反映真实失败
+            # （而非管道最后一段的成功码）。pipefail 使退出码反映管道内真实失败段；
+            # 2>/dev/null 兜底：dash/纯 POSIX sh 不支持 pipefail 选项时不报错中断
+            # （bash/ash 支持，容器镜像默认满足）。
+            # 注意：pipefail 只修管道(|)，不修分号序列（cmd1; cmd2 取 cmd2 码）——
+            # 后者是 shell 固有语义，靠 _build_failure_message 的信号提取兜底。
+            wrapped = f"echo $$; exec sh -c {shlex.quote('set -o pipefail 2>/dev/null; ' + command)}"
+        else:
+            wrapped = f"echo $$; exec {command}"
+        process = await asyncio.create_subprocess_exec(
+            "docker",
+            "exec",
+            "-w",
+            container_workdir,
+            container_id,
+            "sh",
+            "-c",
+            wrapped,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE,
+        )
+        host_pid = process.pid
+        # 同步读第一行（容器内 sh 的 $$），拿容器内 pid。
+        container_pid = await self._read_container_pid(process)
+        # 先启动 process 拿到 host_pid，再按 pid 派生日志文件名（read_log 靠此规则）。
+        log_file = effective_log_dir / self._generate_log_filename(command, host_pid)
+        self._write_log_header(log_file, command, host_pid, owner=owner)
+        metadata: dict[str, Any] = {
+            "container_id": container_id,
+            "container_pid": container_pid,
+        }
+        if owner is not None:
+            metadata["owner"] = owner
+        return self._register_process(
+            command, process, effective_log_dir, on_output,
+            owner=owner, backend=_get_container_backend(container_id), metadata=metadata,
+        )
+
+    def _normalize_local_command(self, command: str, is_windows: bool) -> str:
+        """WSL 环境下自动将 Windows 路径转换为 WSL 路径（D:\path → /mnt/d/path，
+        可通过 AO_BASH_WSL_PATH_CONVERT=0 关闭）。"""
+        path_convert_enabled = os.environ.get("AO_BASH_WSL_PATH_CONVERT", "1") != "0"
+        if is_windows and path_convert_enabled and (
+            self._is_wsl_command(command) or (shutil.which("wsl") is not None)
+        ):
+            return self._convert_windows_paths_for_wsl(command)
+        return command
+
+    async def _spawn_local_process(
+        self,
+        command: str,
+        working_dir: str | None,
+        merged_env: dict[str, str],
+        is_windows: bool,
+    ) -> asyncio.subprocess.Process:
+        """按后端优先级选择本地 shell 并拉起进程。
+
+        Shell 检测优先级：
+        1. WSL 命令 → _start_wsl_process 直连（use_wsl_direct）
+        2. WSL + bash → wsl -e bash -c（避免 MSYS2 的 $VAR 参数转换 bug）
+        3. Git Bash → bash -c（MSYS2 bash，有 $VAR 转义问题）
+        4. CMD → cmd /c（最后手段，无 Unix shell 能力）
+        5. Linux/POSIX：复合命令用 bash -c（bash 原生支持 pipefail），
+           其余走系统 shell
+
+        MSYS2 bash 会将命令行参数中的 $VAR 展开为空（参数转换 bug），
+        WSL 的 bash 不存在此问题。因此同时可用时优先 WSL。
+        """
         use_bash_msys = is_windows and shutil.which("bash")
         wsl_available = is_windows and shutil.which("wsl")
-        # MSYS2 bash 会将命令行参数中的 $VAR 展开为空（参数转换 bug），
-        # WSL 的 bash 不存在此问题。因此同时可用时优先 WSL。
         use_wsl_bash = is_windows and wsl_available
-
         use_wsl_direct = is_windows and self._is_wsl_command(command)
-
-        # WSL 环境下自动将 Windows 路径转换为 WSL 路径
-        # 将 D:\path 等 Windows 路径自动转换为 /mnt/d/path，可通过 AO_BASH_WSL_PATH_CONVERT=0 关闭
-        path_convert_enabled = os.environ.get("AO_BASH_WSL_PATH_CONVERT", "1") != "0"
-        if path_convert_enabled and (use_wsl_direct or use_wsl_bash):
-            command = self._convert_windows_paths_for_wsl(command)
 
         if use_wsl_direct:
             # WSL 直连
-            process = await self._start_wsl_process(
+            return await self._start_wsl_process(
                 command=command,
                 working_dir=working_dir,
                 env=merged_env,
             )
-        elif use_wsl_bash:
+        if use_wsl_bash:
             # WSL -e bash -c：跳过登录 shell，$VAR 正确展开
             if "LANG" not in merged_env:
                 merged_env["LANG"] = "en_US.UTF-8"
             # 复合命令加 pipefail（bash 原生支持），让管道失败退出码正确冒泡
             effective_cmd = f"set -o pipefail; {command}" if self._is_compound_command(command) else command
-            process = await asyncio.create_subprocess_exec(
+            return await asyncio.create_subprocess_exec(
                 "wsl",
                 "-e",
                 "bash",
@@ -370,13 +488,13 @@ class ProcessManager:
                 cwd=working_dir,
                 env=merged_env,
             )
-        elif use_bash_msys:
+        if use_bash_msys:
             # MSYS2 Git Bash（有 $VAR 参数转换问题，但作为后备）
             if "LANG" not in merged_env:
                 merged_env["LANG"] = "en_US.UTF-8"
             # 复合命令加 pipefail，让管道失败退出码正确冒泡
             effective_cmd = f"set -o pipefail; {command}" if self._is_compound_command(command) else command
-            process = await asyncio.create_subprocess_exec(
+            return await asyncio.create_subprocess_exec(
                 "bash",
                 "-c",
                 effective_cmd,
@@ -386,11 +504,11 @@ class ProcessManager:
                 cwd=working_dir,
                 env=merged_env,
             )
-        elif is_windows:
+        if is_windows:
             # Windows CMD（最后手段，无 Unix shell 能力）：使用 safe_cmd_encode 确保中文路径正确编码
             safe_command = EncodingHandler.safe_cmd_encode(command)
             full_command = f'cmd /c "{safe_command}"'
-            process = await asyncio.create_subprocess_shell(
+            return await asyncio.create_subprocess_shell(
                 full_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -402,9 +520,9 @@ class ProcessManager:
         # 不能走 /bin/sh（Ubuntu 即 dash）—— dash 不支持 `set -o pipefail`，
         # 即使 2>/dev/null 屏蔽报错，set 本身退出码 2 仍会让简单命令异常失败、
         # 输出丢失。bash 在所有 Linux 发行版都可用，与上面 WSL/MSYS 分支语义对齐。
-        elif self._is_compound_command(command) and shutil.which("bash"):
+        if self._is_compound_command(command) and shutil.which("bash"):
             effective_cmd = f"set -o pipefail; {command}"
-            process = await asyncio.create_subprocess_exec(
+            return await asyncio.create_subprocess_exec(
                 "bash",
                 "-c",
                 effective_cmd,
@@ -414,16 +532,27 @@ class ProcessManager:
                 cwd=working_dir,
                 env=merged_env,
             )
-        else:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.PIPE,
-                cwd=working_dir,
-                env=merged_env,
-            )
+        return await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE,
+            cwd=working_dir,
+            env=merged_env,
+        )
 
+    def _register_process(
+        self,
+        command: str,
+        process: asyncio.subprocess.Process,
+        effective_log_dir: Path,
+        on_output: Callable[[str], None] | None,
+        backend: Any,
+        metadata: dict[str, Any],
+        owner: str | None = None,
+    ) -> tuple[int, Path]:
+        """注册已拉起的进程：派生日志文件、启动读取任务、入活跃表、
+        确保看门狗运行。返回 (pid, log_file)。"""
         pid = process.pid
 
         # 先启动 process 拿到 pid，再按 pid 派生日志文件名（read_log 靠此规则）。
@@ -434,12 +563,6 @@ class ProcessManager:
         # 启动日志读取任务并保存引用
         output_task = asyncio.create_task(self._read_output(pid, process, log_file, on_output))
 
-        # 保存进程信息。注入本地后端，使看门狗的单进程内存维度判据生效
-        # （sample_unit_memory 用 psutil 查该进程及其后代 RSS，超阈值按 idle 杀）。
-        # 注：metadata 已在容器分支声明过 dict[str, Any]，此处无需重复注解。
-        metadata = {}
-        if owner is not None:
-            metadata["owner"] = owner
         self.active_processes[pid] = ProcessInfo(
             pid=pid,
             command=command,
@@ -448,7 +571,7 @@ class ProcessManager:
             process=process,
             status="running",
             output_task=output_task,
-            backend=_get_local_backend(),
+            backend=backend,
             last_access_time=time.time(),
             metadata=metadata,
         )
@@ -626,15 +749,12 @@ class ProcessManager:
             read_stream(process.stderr, "[stderr] "),
         )
 
-        # 等待进程结束
         exit_code = await process.wait()
 
-        # 更新进程状态
         if pid in self.active_processes:
             self.active_processes[pid].status = "completed" if exit_code == 0 else "error"
             self.active_processes[pid].exit_code = exit_code
 
-        # 写入结束标记
         self._append_to_log(log_file, f"\n# Process ended with exit code: {exit_code}\n")
 
     def _on_output_task_done(self, pid: int, task: asyncio.Task) -> None:
@@ -645,13 +765,14 @@ class ProcessManager:
         后设置 exit_code/status）。此时立即清理 active_processes 中的内存记录，
         释放内存——不再等惰性 >100 触发（那个机制本来是为 running 进程堆积兜底）。
 
-        日志文件保留在磁盘：read_log 按 pid→文件名规则（bash_<pid>.log）随时可读。
+        日志保留上限：正常退出（rc==0）入宽限删除队列（grace 后由看门狗
+        tick 删除——保留窗覆盖 execute 返回后的 summary/read_log 磁盘降级
+        读取）；非正常退出（error/terminated）保留便于排障；跨会话残留由
+        启动清扫兜底（_sweep_stale_logs）。
         """
-        # 清理任务引用
         if pid in self.active_processes:
             self.active_processes[pid].output_task = None
 
-        # 检查任务是否有异常
         try:
             task.result()
         except asyncio.CancelledError:
@@ -665,9 +786,11 @@ class ProcessManager:
         info = self.active_processes.get(pid)
         if info and info.status in ("completed", "error", "terminated"):
             self.active_processes.pop(pid, None)
+            if info.status == "completed":
+                self._logs_pending_delete.append((info.log_file, time.monotonic()))
             logger.debug(
                 f"进程 {pid} 已结束（status={info.status}），清理内存记录"
-                f"（日志保留：{info.log_file.name}）"
+                + ("" if info.status == "completed" else f"（日志保留：{info.log_file.name}）")
             )
 
     async def send_input(self, pid: int, input_text: str) -> tuple[bool, str | None]:  # noqa: PLR0911
@@ -714,8 +837,8 @@ class ProcessManager:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             with open(log_file, "a", encoding="utf-8", errors="replace") as f:
                 f.write(log_entry)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.debug("输入记录写入失败（不影响命令执行） | file=%s | error=%s", log_file, exc)
 
     async def terminate_process(self, pid: int, force: bool = False) -> tuple[bool, str | None]:
         """终止进程及其整棵进程树。
@@ -907,8 +1030,9 @@ class ProcessManager:
         try:
             with open(log_file, encoding="utf-8", errors="replace") as f:
                 all_lines = [line.rstrip("\n\r") for line in f]
-        except OSError:
-            return None
+        except OSError as e:
+            logger.warning(f"日志文件读取失败（IO） | file={log_file} | error={e}")
+            raise ProcessLogReadError(f"{log_file}: {e}") from e
 
         # 从头部解析 command / owner（# Command: xxx / # Owner: xxx），
         # 供 LogCompressor 推断输出类型 + 磁盘降级路径的越权校验。
@@ -954,7 +1078,6 @@ class ProcessManager:
 
     def _cleanup_if_needed(self):
         """需要时清理（懒惰策略）"""
-        # 设置最大进程数限制
         MAX_PROCESSES = 100  # noqa: N806
 
         if len(self.active_processes) > MAX_PROCESSES:
@@ -1013,6 +1136,8 @@ class ProcessManager:
 
     async def _watchdog_check_once(self) -> None:
         """单次巡检：内存高水位时按 idle 排序杀最闲进程；idle 超时兜底杀。"""
+        # 先删宽限窗到期的正常退出日志（与进程巡检无关，搭车执行）
+        self.flush_expired_log_deletes()
         now = time.time()
         # 快照当前 running 进程（迭代中 kill 会修改字典）
         running = [(pid, info) for pid, info in list(self.active_processes.items()) if info.status == "running"]
@@ -1188,13 +1313,17 @@ class ProcessManager:
         Returns:
             成功终止的进程数
         """
+        # 退出前把宽限窗到期的正常退出日志删掉（未到期的留盘，下次启动清扫兜底）
+        self.flush_expired_log_deletes()
         # 停止看门狗（先停后杀，避免清理过程中被看门狗再次触发）
         if self._watchdog_task is not None and not self._watchdog_task.done():
             self._watchdog_task.cancel()
             try:
                 await self._watchdog_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+            except asyncio.CancelledError:
+                pass  # 上行刚 cancel() 本任务，等到的就是取消——停止流程预期路径
+            except Exception:  # noqa: BLE001
+                logger.exception("watchdog task raised during stop")
             self._watchdog_task = None
 
         pids = [
@@ -1299,14 +1428,12 @@ class ProcessManager:
         if not stripped:
             return ["wsl"]
 
-        # 解析 token 以分离 WSL 标志
         try:
             tokens = shlex.split(stripped)
         except ValueError:
             # 复杂 shell 语法（引号、变量等），整个交给 bash -c，使用 -e 跳过登录 shell
             return ["wsl", "-e", "bash", "-c", stripped]
 
-        # 分离 WSL 自身标志
         wsl_opts: list[str] = []
         cmd_start = 0
         while cmd_start < len(tokens):

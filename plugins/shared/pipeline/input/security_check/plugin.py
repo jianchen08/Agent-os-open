@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import urllib.parse
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from service import (
@@ -61,16 +62,41 @@ def _get_human_interaction_cap() -> Any | None:
         return None
     try:
         return _PLUGIN_REF.get_capability("human-interaction")
-    except (KeyError, AttributeError):
+    except (KeyError, AttributeError) as exc:
+        # 审批闸的能力底座缺失不能无痕：软拦截兜底前留 warn（含解析来源与
+        # 异常摘要），根因（manifest 未声明 / 注入链断）才可观测。
+        logger.warning(
+            "[security_check] human-interaction capability 解析失败，审批通道降级软拦截 | "
+            "source=_PLUGIN_REF.get_capability('human-interaction') | error=%r",
+            exc,
+        )
         return None
+
+
+# 前端一次性事件通道（frontend.emit，内核内置能力）——安全规则降级运行时向
+# 用户推送显式提示（核心安全闸门禁静默降级）。独立于 _PLUGIN_REF（那是
+# human-interaction 形态，调用协议不同）。server.py on_load 注入。
+FrontendEmitFn = Callable[[str, dict[str, Any], str], Awaitable[None]]
+_frontend_emit: FrontendEmitFn | None = None
+
+
+def set_frontend_emit(fn: FrontendEmitFn | None) -> None:
+    """注入前端事件发射函数（async fn `(event, payload, thread_id)`）。
+
+    server.py 在 on_load 时从 ``plugin.get_capability("frontend")`` 构造注入；
+    传 None 清空（未注入时降级提示只留日志，安全检查行为不变）。
+    """
+    global _frontend_emit  # noqa: PLW0603
+    _frontend_emit = fn
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
-from policy import IsolationPolicyLoader
+from agentos_plugin_sdk.isolation_policy import IsolationPolicyLoader
 from sensitive_paths import is_sensitive_path
 
 logger = logging.getLogger(__name__)
 
-# 项目根目录：src/plugins/input/ → 向上 4 级到项目根
+# plugins/shared 根目录（本文件位于 shared/pipeline/input/security_check/，向上 4 级）：
+# 持久化状态放 shared/data/（permission_modes.json）
 _PROJECT_ROOT = os.path.dirname(  # noqa: PTH120
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # noqa: PTH100,PTH120
 )
@@ -245,15 +271,19 @@ class SecurityCheckPlugin(IInputPlugin):
         self._reject_threshold = self._config.get("reject_threshold", 3)
 
         # 加载安全规则
+        self._rules_degraded = False
         self._rules = self._load_rules()
+        # 降级提示每实例只发一次（同一降级周期不刷屏）
+        self._degrade_notice_sent = False
 
         # 危险工具轨道 2 数据源：config_files 注入的 builtin_tools_config
         # （见 _get_dangerous_operations / _parse_dangerous_ops_config）
         self._dangerous_ops_by_tool = self._parse_dangerous_ops_config()
 
-    # P1-7 task_11 债务兜底：ConfigCenter 不可达时内联默认规则（黑名单模式 +
-    # 危险命令关键词），避免"规则空 = 安全闸门失效 = 所有工具都弹审批"、
-    # 任务链路被审批阻塞。与 config/isolation/security_rules.yaml 保持同构。
+    # 注入链失效兜底：内联默认规则（黑名单模式 + 危险命令关键词），避免
+    # "规则空 = 安全闸门失效 = 所有工具都弹审批"、任务链路被审批阻塞。
+    # 与 config/isolation/security_rules.yaml 保持同构；降级时经 execute
+    # 首轮向用户显式提示"安全规则降级运行"（禁静默降级）。
     _DEFAULT_RULES: list[dict[str, Any]] = [
         {
             "name": "dangerous_commands",
@@ -278,13 +308,13 @@ class SecurityCheckPlugin(IInputPlugin):
         1. config 中直接提供的 rules 列表（测试/旧装配缝）
         2. manifest config_files 注入的 security_rules 命名空间
            （plugin.json 声明 config/isolation/security_rules.yaml，内核按 id
-           命名空间合并进 plugin.get_config()）——生产环境唯一真相源
-        3. ConfigCenter 兼容路径（历史装配缝注入场景）
-        4. 内联默认规则
+           命名空间合并进 plugin.get_config()，invoker/build_injected_config
+           按 config_files[].path 精确定位）——YAML 规则在生产生效的唯一入口
+        3. 内联默认规则
 
-        YAML 无 rules 键、数据形状不符或加载异常时一律回退内联默认规则：
+        注入链失效（无任何 rules 可用）时回退内联默认规则并置 _rules_degraded：
         规则缺位 = 安全闸门失效（_match_rules 迭代 None 直接 TypeError），
-        本方法在任何路径下都不允许返回 None。
+        本方法在任何路径下都不允许返回 None；降级经 execute 首轮向用户显式提示。
 
         Returns:
             安全规则列表，每条规则包含 name、tools、params、action、patterns
@@ -293,38 +323,18 @@ class SecurityCheckPlugin(IInputPlugin):
         if "rules" in self._config and self._config["rules"]:
             return self._config["rules"]
 
-        # 注入配置优先：manifest config_files 按 id 命名空间合并进 plugin.get_config()
-        # （invoker/build_injected_config 按 config_files[].path 精确定位）。0.1 的
-        # config.config_center Python 模块已不存在，旧直读路径恒回退内联默认规则
-        # （仅 15 关键词，YAML 的 curl/pip install 等全量规则不生效）——注入路径
-        # 是 YAML 规则在生产生效的唯一入口。
+        # 注入配置：manifest config_files 按 id 命名空间合并进 plugin.get_config()
         injected = self._config.get("security_rules")
         if isinstance(injected, dict):
             yaml_rules = injected.get("rules")
             if yaml_rules:
                 return yaml_rules
 
-        # 兼容路径：通过 ConfigCenter 统一缓存加载（历史装配缝注入场景）。
-        # 注意：ConfigCenter.get() 内部已捕获 yaml.YAMLError 和 IO 错误，
-        # 这里只需兜底防御 ConfigCenter 抛出意外异常（如未初始化）。
-        rules_path = self._config.get("rules_path", "config/isolation/security_rules.yaml")
-        rel = rules_path.replace("config/", "", 1) if rules_path.startswith("config/") else rules_path
-        data: Any = None
-        try:
-            from config.config_center import get_config_center  # noqa: PLC0415
-
-            data = get_config_center().get(rel)
-        except Exception as exc:
-            logger.warning("[%s] Rules file load failed: %s", self.name, exc)
-
-        yaml_rules = data.get("rules") if isinstance(data, dict) else None
-        if yaml_rules:
-            return yaml_rules
-
+        self._rules_degraded = True
         logger.warning(
-            "[%s] No rules found in %s，回退内联默认规则",
+            "[%s] 安全规则降级运行：无可用 YAML 规则（注入链失效），回退内联默认规则（%d 关键词）",
             self.name,
-            rules_path,
+            len(self._DEFAULT_RULES[0]["patterns"]),
         )
         return list(self._DEFAULT_RULES)
 
@@ -352,8 +362,48 @@ class SecurityCheckPlugin(IInputPlugin):
             如果检查不通过，会设置 security.decision 为 blocked。
         """
         # 每轮工具调用独立检查，不可短路（否则审批通过后硬底线被跳过，安全闸门失效）。
+        await self._notify_rules_degraded_once(ctx)
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
+
+    async def _notify_rules_degraded_once(self, ctx: PluginContext) -> None:
+        """安全规则降级运行时向用户推送一次显式提示（禁静默降级）。
+
+        注入链失效（config 无 rules 且 config_files 注入的 security_rules 缺
+        rules 键）时回退内联默认规则——核心安全闸门降级必须有用户感知，
+        经 frontend.emit + warning 日志双通道提示。每实例只推一次（同一降级
+        周期不刷屏）；通道未注入或发射失败只留日志，绝不阻断安全检查。
+        """
+        if not self._rules_degraded or self._degrade_notice_sent:
+            return
+        self._degrade_notice_sent = True
+        emit = _frontend_emit
+        if emit is None:
+            logger.warning(
+                "[%s] frontend.emit 未注入，安全规则降级提示不推前端（仅日志）",
+                self.name,
+            )
+            return
+        thread_id = str(
+            ctx.state.get(StateKeys.SESSION_ID) or ctx.state.get("thread_id") or ""
+        )
+        payload = {
+            "thread_id": thread_id,
+            "pipeline_id": str(ctx.state.get("pipeline_id") or ""),
+            "message": (
+                "安全规则降级运行：安全规则 YAML 加载失败（注入链失效），"
+                "已回退内置精简规则（仅覆盖危险命令关键词），"
+                "建议检查 config/isolation/security_rules.yaml 注入链路。"
+            ),
+        }
+        try:
+            await emit("security_rules_degraded", payload, thread_id)
+        except Exception as exc:  # noqa: BLE001 —— 通知是增强能力，失败不阻断安全检查
+            logger.warning(
+                "[%s] security_rules_degraded 事件推送失败（忽略）: %s",
+                self.name,
+                exc,
+            )
 
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
         """执行安全检查逻辑。
@@ -389,7 +439,6 @@ class SecurityCheckPlugin(IInputPlugin):
         if core_type != "tool_execute":
             return {"security.decision": {"allowed": True, "reason": "not a tool execution"}}
 
-        # 检查工具调用参数
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         if not tool_calls:
             return {"security.decision": {"allowed": True, "reason": "no tool calls to check"}}
@@ -648,7 +697,10 @@ class SecurityCheckPlugin(IInputPlugin):
         hi_cap = _get_human_interaction_cap()
         if hi_cap is None:
             logger.warning("[%s] human-interaction capability not injected; soft-block", self.name)
-            return self._soft_block(ctx, tool_name, "交互服务不可用，已拦截")
+            decision = self._soft_block(ctx, tool_name, "交互服务不可用，已拦截")
+            # 审批闸底座缺失显式落 state（软拦截决策可观测，不再无痕）
+            decision["security.decision"]["approval_channel_missing"] = True
+            return decision
 
         # 提取工具调用的具体参数，显示给用户审批
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
@@ -668,6 +720,9 @@ class SecurityCheckPlugin(IInputPlugin):
                 "description": args_preview,
                 "options": list(_APPROVAL_OPTIONS),
                 "priority": "high",
+                # 归属归因（M2）：记录创建者用户，审批面归属校验据此放行
+                # 创建者本人（一用户一租户：user_id 即归属租户）。
+                "user_id": ctx.state.get("user_id", ""),
             })
             if not isinstance(create_res, dict) or create_res.get("error"):
                 raise RuntimeError(f"create_choice failed: {create_res}")
@@ -1317,6 +1372,10 @@ class SecurityCheckPlugin(IInputPlugin):
         （plugin.json 声明，内核命名空间合并），其次 tool_registry 服务；
         均不可用时回退到只看 policy.execution（保持原有兜底行为）。
 
+        浏览器工具（execution == "browser_mcp"）不进轨道 1：调用经 MCP Bridge
+        网关（token/白名单/域名治理），不执行任意命令，降级到 host 时按轨道 2
+        判定（browser 的参数不在危险操作声明词汇表 → 放行）。
+
         Args:
             ctx: 插件执行上下文
             tool_name: 工具名称
@@ -1325,7 +1384,7 @@ class SecurityCheckPlugin(IInputPlugin):
         Returns:
             是否危险
         """
-        # 轨道 1：命令执行类（policy.execution 判定）
+        # 轨道 1：命令执行类（policy.execution 判定；browser_mcp 经 Bridge 治理，不属此类）
         policy = _policy_loader.resolve(tool_name)
         if policy.execution == "command_in_container":
             return True

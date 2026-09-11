@@ -281,10 +281,8 @@ async def test_l2_child_inherits_project_from_parent_state(tool_module, tmp_path
     """L2 子任务：不传 project_id，系统读父任务 state 行 task.parent_project_id 继承写入。"""
     paths, rows = project_registry_env
     rows.append({"pipeline_id": "parent-task-1", "task.parent_project_id": "proj00112233"})
-    print("DBG_BEFORE_MAKETOOL:", id(tool_module), tool_module._get_state_reader)
     service = FakeTaskService()
     tool, captured = make_tool(tool_module, service)
-    print("DBG_AFTER_MAKETOOL:", tool_module._get_state_reader())
 
     inputs = base_inputs(parent_agent_level=2, task_id="parent-task-1")
     result = await tool.execute(inputs)
@@ -453,7 +451,7 @@ async def test_ordinary_root_task_accepts_all_three(tool_module, tmp_proj):
     assert ec["workspace"]["mode"] == "worktree"
     assert ec["workspace"]["explicit"] is True
     assert ec["isolation"]["level"] == "isolated"
-    # 任务域字段出生即入 state（GAP-1：task=pipeline，YAML metadata 写路径退役）
+    # 任务域字段出生即入 state（task=pipeline，单一真值在 state）
     state = captured["params"]["state"]
     assert state["task.goal"] == "测试任务"
 

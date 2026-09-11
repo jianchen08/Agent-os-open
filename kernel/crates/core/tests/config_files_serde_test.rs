@@ -96,6 +96,8 @@ fn test_config_files_and_invoke_entry_coexist() {
 #[test]
 fn test_empty_config_files_omitted_in_serialization() {
     let manifest = PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "p".to_string(),
         name: "P".to_string(),
         description: None,

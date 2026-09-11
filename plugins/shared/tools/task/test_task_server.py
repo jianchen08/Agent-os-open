@@ -240,3 +240,38 @@ async def test_handler_failure_returns_error_dict() -> None:
     """失败 → 返回 {"error": <错误信息>}（错误码不回传）。"""
     out = await _srv.task_manage(action="get")
     assert out == {"error": "系统错误：parent_agent_level 未注入，无法确定调用者层级"}
+
+
+# ─────────────────────────── 合宿 exec 期绑定 ───────────────────────────
+
+
+class TestCohostExecBinding:
+    """裸名 ``tool`` 槽位被异成员占据时，on_load/handler 仍用 exec 期冻结的本目录绑定。
+
+    合宿静息态下 sys.modules["tool"] 是异成员同名模块（task_evaluate 等成员
+    exec 期绑定后占据槽位）——on_load 期/handler 内懒 import 会命中异成员
+    模块；exec 期绑定在宿主 loader 遮蔽保护窗口内解析，槽位后续状态不影响
+    已冻结引用。decoy 常驻/不常驻两组输入。
+    """
+
+    @pytest.mark.parametrize("decoy_resident", [True, False])
+    async def test_on_load_wiring_lands_on_local_tool_module(self, decoy_resident: bool) -> None:
+        import types
+
+        saved_tool = sys.modules.get("tool")
+        try:
+            if decoy_resident:
+                decoy = types.ModuleType("tool")  # 无 setter 的异成员同名模块：命中即断
+                sys.modules["tool"] = decoy
+
+            await _srv._on_load({})
+
+            # 接线必须落在 exec 期冻结的本目录 tool 模块上（decoy 不截胡）
+            assert _task_mod._chat_sender is not None
+            assert _task_mod._state_reader is not None
+            assert _task_mod._pipeline_executor is not None
+            assert _srv.tool_mod is _task_mod
+        finally:
+            sys.modules.pop("tool", None)
+            if saved_tool is not None:
+                sys.modules["tool"] = saved_tool

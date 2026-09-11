@@ -1,6 +1,6 @@
 # @linxin666/dsh-client-ui-skin-furina
 
-English | [中文]((README.zh.md))
+English | [中文](README.zh.md)
 
 A Furina theme for dsh-web-ui.
 

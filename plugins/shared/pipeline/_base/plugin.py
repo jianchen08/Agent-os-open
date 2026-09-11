@@ -9,11 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-
-if TYPE_CHECKING:
-    from pipeline.plugin_types import PluginTypeSlot
+from typing import Any
 
 
 class IPlugin(ABC):
@@ -22,15 +18,6 @@ class IPlugin(ABC):
     所有管道插件的统一接口，提供名称和优先级属性。
     子类必须实现 execute 方法。
     """
-
-    @classmethod  # noqa: B027
-    def register_types(cls, slots: PluginTypeSlot) -> None:
-        """插件可覆盖此方法，在加载时注册自定义类型/变量。默认空实现。
-
-        Args:
-            slots: 类型插槽实例，通过它注册枚举、常量、状态键等
-        """
-        pass
 
     @property
     @abstractmethod
@@ -122,13 +109,6 @@ class PluginContext:
     state: dict[str, Any]
     config: dict[str, Any] = field(default_factory=dict)
     _services: dict[str, Any] = field(default_factory=dict)
-    plugin_types: PluginTypeSlot = field(default=None)  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.plugin_types is None:
-            from pipeline.plugin_types import PluginTypeSlot  # noqa: PLC0415
-
-            self.plugin_types = PluginTypeSlot()
 
     def get_service(self, name: str) -> Any:
         """按名称获取已注册的服务实例。

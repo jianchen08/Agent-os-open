@@ -13,7 +13,7 @@ routes_config.py llm 段语义 + 新 http.handle 分发层）
 3. LLM 配置写入语义：models/providers 写入 llm.yaml、明文 api_key 落 .env
    并改写 ${VAR} 占位符、mask 值回传剔除、409 重复创建防护、400 必填字段
    校验（不落盘）、404 detail 形态
-4. plugin.json http_endpoints 声明 ↔ 分发路径对齐断言（19 端点、auth=user、
+4. plugin.json http_endpoints 声明 ↔ 分发路径对齐断言（20 端点、auth=user、
    timeout 沿用源值）
 
 外部依赖：_LLM_YAML/_ENV_FILE 均以 tmp_path 重定向（模块全局替换），
@@ -153,12 +153,12 @@ def _b64(payload: Any) -> str:
 # ── manifest ↔ 分发对齐 ───────────────────────────────────────────────
 
 
-def test_manifest_declares_19_http_endpoints() -> None:
-    """plugin.json http_endpoints 声明 19 端点（6 thinking-mode + 13 config/llm）。"""
+def test_manifest_declares_20_http_endpoints() -> None:
+    """plugin.json http_endpoints 声明 20 端点（6 thinking-mode + 14 config/llm，P2-5 加 presets 下发）。"""
     manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
     eps = manifest["http_endpoints"]
     by_id = {e["route_id"]: e for e in eps}
-    assert len(by_id) == 19
+    assert len(by_id) == 20
     # thinking-mode 6
     assert by_id["thinking_mode_health"]["path"] == "/ext/llm_service/thinking-mode/healthz"
     assert by_id["thinking_mode_models_list"]["path"] == "/ext/llm_service/thinking-mode/models"

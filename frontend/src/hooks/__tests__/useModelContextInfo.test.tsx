@@ -4,13 +4,10 @@
  */
 import { renderHook, waitFor } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
 const getModelsMock = vi.fn()
-
 vi.mock('@/services/api/config', () => ({
   getModels: (...args: unknown[]) => getModelsMock(...args),
 }))
-
 import { useModelContextInfo } from '../useModelContextInfo'
 
 describe('useModelContextInfo', () => {

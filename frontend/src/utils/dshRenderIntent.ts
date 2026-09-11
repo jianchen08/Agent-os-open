@@ -357,7 +357,6 @@ export function tablePayload(ctx: RenderContext, intent: ToolRenderIntent): Reco
 
 /** 常用字段名中文化（form 卡 label 翻译）。 */
 const FIELD_LABEL_ZH: Record<string, string> = {
-  // 任务域
   task_id: '任务ID', title: '标题', status: '状态', message: '消息', warning: '警告',
   target_id: '目标Agent', target_type: '目标类型', priority: '优先级', max_retries: '最大重试',
   task_scope: '任务范围', workspace: '工作空间', workspace_mode: '空间拓扑', isolation_level: '隔离级别',

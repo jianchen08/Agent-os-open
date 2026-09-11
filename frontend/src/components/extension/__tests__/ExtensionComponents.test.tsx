@@ -8,8 +8,9 @@
  * 真实渲染被测组件，仅 Mock transport（CommandDispatcher 注入）。
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import React from 'react'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   CommandPalette,
   ContextMenuItems,
@@ -19,7 +20,6 @@ import {
 import { CommandDispatcher } from '@/services/schema/commandDispatcher'
 import { ContributionRegistry } from '@/services/schema/ContributionRegistry'
 import { useContextKeys } from '@/stores/contextKeysStore'
-import React from 'react'
 
 function setupRegistry(contributes: Record<string, unknown[]>): ContributionRegistry {
   const registry = new ContributionRegistry()

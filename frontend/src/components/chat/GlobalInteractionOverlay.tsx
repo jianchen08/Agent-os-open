@@ -6,6 +6,7 @@
  * - 长内容滚动
  * - 最小化为浮动按钮
  * - 全局可见（不依赖当前所在页面）
+ * - 卡片停靠屏幕底部，遮罩仅覆盖卡片所在区域，其余界面可正常查看与操作
  */
 
 import { useCallback, useEffect, useState } from 'react'
@@ -34,7 +35,6 @@ export function GlobalInteractionOverlay() {
   // 过滤出 pending 状态的交互
   const pendingItems = pendingInteractions.filter((i) => i.status === 'pending')
 
-  // 当前显示的交互
   const currentInteraction = pendingItems[currentIndex] || null
 
   // 自动重置索引（当交互数量变化时）
@@ -158,15 +158,15 @@ export function GlobalInteractionOverlay() {
   if (!currentInteraction) return null
 
   return createPortal(
-    <div className="fixed inset-0 z-[10000] flex items-center justify-center pointer-events-none">
-      {/* 背景遮罩（点击关闭） */}
+    <div className="pointer-events-none fixed inset-x-0 bottom-0 z-[10000] flex justify-center">
+      {/* 底部遮罩（仅覆盖卡片所在区域，点击最小化；上方未遮蔽区域可正常查看与操作） */}
       <div
         className="absolute inset-0 bg-[var(--overlay-bg)] pointer-events-auto"
         onClick={toggleMinimized}
       />
 
-      {/* 交互卡片容器 */}
-      <div className="relative z-10 w-full max-w-2xl mx-4 pointer-events-auto">
+      {/* 交互卡片容器（底部停靠） */}
+      <div className="relative z-10 mx-4 mb-4 mt-2 w-full max-w-2xl pointer-events-auto">
         {/* 控制栏 */}
         <div className="flex items-center justify-between mb-2">
           {/* 导航按钮 */}

@@ -11,8 +11,8 @@
  * - 行号 gutter/窗口计数/head-tail 折叠逻辑保持原样。
  */
 
-import { useCallback, useMemo, useState } from 'react'
 import clsx from 'clsx'
+import { useCallback, useMemo, useState } from 'react'
 import { writeClipboard } from './clipboard.ts'
 import css from './ReadBlock.module.css'
 

@@ -17,5 +17,13 @@
     ]
   },
   "permissions": {},
-  "priority": 50
+  "priority": 50,
+  "state": {
+    "reads": [
+      "context_window",
+      "core_type",
+      "messages_tail:50",
+      "tool_results"
+    ]
+  }
 }

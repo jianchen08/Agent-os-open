@@ -23,5 +23,23 @@
   ],
   "granted_capabilities": [
     "pipeline-state"
-  ]
+  ],
+  "persistent_fields": [
+    "task.status"
+  ],
+  "state": {
+    "reads": [
+      "ended",
+      "iteration",
+      "max_iterations",
+      "messages_tail:20",
+      "pipeline_id",
+      "raw_tool_calls",
+      "run_id",
+      "should_stop",
+      "task.id",
+      "timeout_seconds",
+      "tool_results"
+    ]
+  }
 }

@@ -4,9 +4,10 @@
  * VS Code 模型：导航入口不是常驻标签，点击后在 Workspace 打开/激活可关闭页签。
  */
 
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { useUIStore } from '@/stores/uiStore'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useNotificationStore } from '@/stores/notificationStore'
+import { useUIStore } from '@/stores/uiStore'
 import type { WorkspaceTab } from '@/types/layout'
 
 export interface WorkspacePanelSpec {
@@ -33,26 +34,10 @@ export const TOP_NAV_PANELS: Record<string, WorkspacePanelSpec> = {
     icon: 'settings',
     moduleId: '__panel_settings__',
   },
-  '/settings/plugins': {
-    id: 'ws-panel-plugins',
-    title: '插件管理',
-    component: 'plugins_panel',
-    icon: 'plugin',
-    moduleId: '__panel_plugins__',
-  },
-  // 监控面板已声明化（monitoring 插件 contributes.pages 声明，解析顺序 1），
-  // 禁用插件即移除入口；此处不再硬编码。记忆面板声明已摘除（hindsight_memory
-  // 不再贡献侧边栏记忆页）。
-  // 智能体面板同款声明化：agent_manager 插件 contributes.pages
-  // 声明 path=/agents（widget=agents_panel）；ToolsPage/AgentsPage 硬编码入口
-  // 已随页面退役（能力浏览并入 /settings/plugins）。
-  '/tasks': {
-    id: 'ws-panel-tasks',
-    title: '任务管理',
-    component: 'pipeline_manager',
-    icon: 'folder',
-    moduleId: '__panel_tasks__',
-  },
+  // 监控/成本/智能体/任务管理均已声明化（各插件 contributes.pages 按 path
+  // 声明，解析顺序 1），禁用插件即移除入口，此处不再硬编码。
+  // 「插件管理」双入口已收敛：设置中枢内核组 kernel-plugins 渲染同一
+  // PluginsSettingsPage，独立 '/settings/plugins' 面板条目已撤。
 }
 
 /**
@@ -94,6 +79,9 @@ export function openWorkspacePanel(spec: WorkspacePanelSpec): void {
  *    —— 插件页面可经路由/路径直达，在 Workspace 打开可关闭页签
  * 2. 静态内置顶栏面板（TOP_NAV_PANELS）精确匹配
  * 3. 静态内置面板前缀匹配（如 /settings/xxx）
+ *
+ * 解析失败契约：显式报错（error 通知含目标 path），绝不静默——调用方若再
+ * navigate 兜底会落到 '*' 通配 → 回首页，掩盖声明缺失（P0-1）。
  */
 export function openWorkspacePanelByPath(path: string): boolean {
   // 1) 插件页面按 path 直达（component 取 page.widget，未声明 widget 时用 page.id 兜底）
@@ -124,5 +112,14 @@ export function openWorkspacePanelByPath(path: string): boolean {
     openWorkspacePanel(TOP_NAV_PANELS[prefix])
     return true
   }
+  useNotificationStore.getState().addNotification({
+    title: '面板打开失败',
+    message: `路径 ${path} 没有对应的插件页面声明或内置面板，请检查提供该面板的插件是否已启用`,
+    priority: 'high',
+    category: 'error',
+    isBlocking: false,
+    autoDismissMs: 8000,
+    sourceLabel: '工作区',
+  })
   return false
 }

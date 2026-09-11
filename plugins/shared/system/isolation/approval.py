@@ -17,8 +17,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from isolation_types import IsolationLevel
-from policy import ToolIsolationPolicy
+from agentos_plugin_sdk.isolation_types import IsolationLevel
+from agentos_plugin_sdk.isolation_policy import ToolIsolationPolicy
 
 if TYPE_CHECKING:
     # Tool 仅用于类型注解（ApprovalContext.tool 字段）。运行时不 import，
@@ -301,23 +301,27 @@ class ApprovalDecisionEngine:
             return decision
 
         # ── 第 2 层：HOST 模式工具级分类 ──
-        # 以 isolation_policy.yaml 为单一事实源：policy.execution 区分两类工具
+        # 以 isolation_policy.yaml 为单一事实源：policy.execution 区分三类工具
         #   - host_direct          : 宿主机内部 API 工具（task_submit/memory 等）→ 免审批
         #   - command_in_container : 命令执行类（bash_execute 等）→ 降级到 HOST 时需审批
+        #   - browser_mcp          : 浏览器类（经 MCP Bridge 网关 token/白名单/域名治理，
+        #                            不执行任意命令）→ 降级到 HOST 时免审批
         if context.isolation_level == IsolationLevel.HOST:
             execution = context.policy.execution if context.policy else "command_in_container"
 
-            if execution == "host_direct":
-                # 内部 API 工具：直接操作内存/数据库/状态，免审批放行
+            if execution in ("host_direct", "browser_mcp"):
+                # 内部 API 工具：直接操作内存/数据库/状态，免审批放行；
+                # 浏览器工具：Bridge 治理层（token/白名单/域名）承担把关，免审批。
+                label = "host_direct" if execution == "host_direct" else "browser_mcp"
                 decision = ApprovalDecision(
                     requires_approval=False,
                     decision_type="AUTO_APPROVED",
-                    reason=f"HOST 模式内部工具免审批 (host_direct): {context.tool_name}",
+                    reason=f"HOST 模式工具免审批 ({label}): {context.tool_name}",
                     risk_score=0.1,
-                    risk_factors=["HOST_MODE", "HOST_DIRECT_TOOL"],
-                    details={"execution": "host_direct"},
+                    risk_factors=["HOST_MODE", "HOST_DIRECT_TOOL" if label == "host_direct" else "BROWSER_MCP_TOOL"],
+                    details={"execution": label},
                 )
-                logger.debug(f"[ApprovalDecisionEngine] HOST 内部工具免审批 | tool={context.tool_name}")
+                logger.debug(f"[ApprovalDecisionEngine] HOST 工具免审批 | tool={context.tool_name} | execution={label}")
                 return decision
 
             # execution == "command_in_container"：命令执行类降级到 HOST，必须审批

@@ -37,6 +37,43 @@
             "url"
           ],
           "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "打开页面后返回页面快照（accessibility tree 文本）",
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "text",
+                      "image"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "data": {
+                    "type": "string",
+                    "description": "base64 图像数据（type=image 时）"
+                  },
+                  "mimeType": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "required": [
+            "content"
+          ]
+        },
+        "render": {
+          "card": "web"
         }
       },
       {
@@ -86,6 +123,43 @@
             "target"
           ],
           "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "点击后返回页面快照（accessibility tree 文本）",
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "text",
+                      "image"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "data": {
+                    "type": "string",
+                    "description": "base64 图像数据（type=image 时）"
+                  },
+                  "mimeType": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "required": [
+            "content"
+          ]
+        },
+        "render": {
+          "card": "generic"
         }
       },
       {
@@ -134,6 +208,43 @@
             "scale"
           ],
           "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "返回截图（MCP image content，base64）",
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "text",
+                      "image"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "data": {
+                    "type": "string",
+                    "description": "base64 图像数据（type=image 时）"
+                  },
+                  "mimeType": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "required": [
+            "content"
+          ]
+        },
+        "render": {
+          "card": "image"
         }
       },
       {
@@ -167,6 +278,43 @@
             "level"
           ],
           "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "返回控制台消息文本行",
+          "properties": {
+            "content": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "text",
+                      "image"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "data": {
+                    "type": "string",
+                    "description": "base64 图像数据（type=image 时）"
+                  },
+                  "mimeType": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "required": [
+            "content"
+          ]
+        },
+        "render": {
+          "card": "generic"
         }
       }
     ]

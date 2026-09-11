@@ -8,10 +8,13 @@
  *    的缓存命中语义（非组件流程零请求直读）。
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as useSessionsQueryMod from '../useSessionsQuery'
+import type * as queryClientMod from '@/services/query/queryClient'
+import type * as queryKeysMod from '@/services/query/queryKeys'
 import type { ReactNode } from 'react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 const mockGetSessions = vi.fn()
 
@@ -34,13 +37,13 @@ function makeSession(id: string, title: string) {
 }
 
 describe('useSessionsQuery', () => {
-  let useSessionsQuery: typeof import('../useSessionsQuery')['useSessionsQuery']
-  let readSessions: typeof import('../useSessionsQuery')['readSessions']
-  let updateSessionsCache: typeof import('../useSessionsQuery')['updateSessionsCache']
-  let ensureSessionsLoaded: typeof import('../useSessionsQuery')['ensureSessionsLoaded']
-  let forceReloadSessions: typeof import('../useSessionsQuery')['forceReloadSessions']
-  let queryClient: typeof import('@/services/query/queryClient')['queryClient']
-  let queryKeys: typeof import('@/services/query/queryKeys')['queryKeys']
+  let useSessionsQuery: useSessionsQueryMod['useSessionsQuery']
+  let readSessions: useSessionsQueryMod['readSessions']
+  let updateSessionsCache: useSessionsQueryMod['updateSessionsCache']
+  let ensureSessionsLoaded: useSessionsQueryMod['ensureSessionsLoaded']
+  let forceReloadSessions: useSessionsQueryMod['forceReloadSessions']
+  let queryClient: queryClientMod['queryClient']
+  let queryKeys: queryKeysMod['queryKeys']
 
   function wrapper({ children }: { children: ReactNode }) {
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>

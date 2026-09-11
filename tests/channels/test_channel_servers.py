@@ -27,7 +27,7 @@ _CC_DIR = _SYSTEM_DIR / "channel_common"
 _EVICT = {
     "server", "adapter", "helpers", "stream_client", "crypto",
     "onebot_client", "input_adapter", "output_adapter", "base_combo_adapter",
-    "pipeline_types", "card_builder", "message_normalizer",
+    "pipeline_types", "message_normalizer",
 }
 
 
@@ -186,7 +186,7 @@ class TestWeComServer:
 class TestQQServer:
     @pytest.mark.parametrize("load_server", ["qq"], indirect=True)
     async def test_on_load_constructs_adapter(self, load_server, monkeypatch) -> None:
-        monkeypatch.setattr(load_server.plugin, "get_config", lambda: {})
+        monkeypatch.setattr(load_server.plugin, "get_config", lambda: {"access_token": "tok"})
         await load_server._on_load({})
         # 适配器已构造的公共观察面：发送工具报"未连接"而非"未初始化"
         r = await load_server.qq_send_message(1, "hi")
@@ -303,3 +303,39 @@ class TestDingTalkServer:
         load_server._adapter.get_status = lambda: {"type": "dingtalk", "connected": True, "healthy": True}
         r = await load_server.dingtalk_get_status()
         assert r["connected"] is True
+
+
+class TestCredentialFailClosed:
+    """空凭据拒载（fail-fast）：缺哪个配置点名报 RuntimeError，adapter 不构造。"""
+
+    @pytest.mark.parametrize(
+        ("load_server", "config", "missing_key"),
+        [
+            ("wecom", {}, "corp_id"),
+            ("wecom", {"corp_id": "ww1", "secret": "   "}, "secret"),
+            ("qq", {}, "access_token"),
+            ("dingtalk", {}, "client_id"),
+            ("dingtalk", {"client_id": "a"}, "client_secret"),
+        ],
+        indirect=["load_server"],
+    )
+    async def test_empty_credential_rejects_load(self, load_server, monkeypatch, config, missing_key) -> None:
+        monkeypatch.setattr(load_server.plugin, "get_config", lambda: config)
+        with pytest.raises(RuntimeError, match=missing_key):
+            await load_server._on_load({})
+        assert load_server._adapter is None
+
+    @pytest.mark.parametrize(
+        ("load_server", "config"),
+        [
+            ("wecom", {"corp_id": "ww1", "agent_id": 2, "secret": "s", "token": "t",
+                       "encoding_aes_key": "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"}),
+            ("qq", {"access_token": "tok"}),
+            ("dingtalk", {"client_id": "a", "client_secret": "b"}),
+        ],
+        indirect=["load_server"],
+    )
+    async def test_full_credentials_load_constructs_adapter(self, load_server, monkeypatch, config) -> None:
+        monkeypatch.setattr(load_server.plugin, "get_config", lambda: config)
+        await load_server._on_load({})
+        assert load_server._adapter is not None

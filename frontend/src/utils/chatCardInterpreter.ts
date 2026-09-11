@@ -13,6 +13,7 @@
 
 import { toast } from '@/components/ui/sonner'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { getGlobalImagePreviewCallback, getGlobalOpenFileCallback, safeParseResult } from '@/utils/toolCardRegistry'
 import type { ActivityAction, ActivityDetailBlock, DetailContentType } from '@/types/activity'
 import type { ErrorEnvelope } from '@/types/api'
@@ -67,8 +68,10 @@ export interface ChatCardActionDecl {
    * on_click 协议（widget 化 T3 接线）：
    * {action: 'open_file'|'open_url'|'preview_image'|'copy'|'run_action', value,
    *  args?, confirm?}
-   * - value 支持模板（如 "{{result.stdout}}"）；求值缺失/未知协议 → 按钮禁用
-   * - run_action 走 commandDispatcher（POST /api/v1/actions/execute）
+   * - value 支持模板（如 "{{result.stdout}}"）；求值缺失/未知协议/白名单拒绝 → 按钮禁用
+   * - open_url 仅放行 http/https 与应用内相对路径（javascript:/data:/file: 等拒绝）
+   * - run_action 走 commandDispatcher（POST /api/v1/actions/execute），
+   *   仅限 contributionRegistry 已声明注册的命令
    * - confirm 为确认弹窗文案（点击先确认再执行）
    */
   onClick?: {
@@ -384,9 +387,25 @@ export function clearChatCardDeclarations(): void {
 }
 
 /**
+ * open_url 协议白名单：仅放行 http/https 绝对地址与应用内相对路径。
+ * 相对路径经 location.origin 解析后协议落在 http/https；javascript:/data:/file:
+ * 等危险协议解析出的 protocol 不在白名单 → 拒绝（URL 解析失败同样拒绝）。
+ * WHATWG URL 解析前剥离 tab/换行并小写化 protocol，伪造大小写/控制字符绕不过。
+ */
+export function isSafeOpenUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value, window.location.origin).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/**
  * on_click 协议 → 可执行 handler（widget 化 T3）。
  *
- * value 支持模板（renderTemplate）；求值缺失 / 协议缺失 / 未知协议返回
+ * value 支持模板（renderTemplate）；求值缺失 / 协议缺失 / 未知协议 /
+ * 白名单拒绝（open_url 危险协议、run_action 未声明命令）返回
  * null——上层据此禁用按钮（死按钮禁用而非点击报错）。
  */
 function buildActionHandler(
@@ -407,7 +426,7 @@ function buildActionHandler(
       }
     }
     case 'open_url': {
-      if (typeof value !== 'string' || value === '') return null
+      if (typeof value !== 'string' || value === '' || !isSafeOpenUrl(value)) return null
       return () => {
         window.open(value, '_blank', 'noopener,noreferrer')
       }
@@ -432,6 +451,12 @@ function buildActionHandler(
     }
     case 'run_action': {
       if (typeof value !== 'string' || value === '') return null
+      // 白名单：只执行 contributionRegistry 已声明注册的命令（contributes.commands），
+      // 插件卡片声明无法借此触达未注册的任意 capability
+      if (!contributionRegistry.getCommands().some((c) => c.id === value)) {
+        console.warn(`[chat_card] run_action 拒绝未声明命令: ${value}`)
+        return null
+      }
       const args = proto?.args && typeof proto.args === 'object' ? proto.args : undefined
       return () => {
         void commandDispatcher.executeCommand(value, args)

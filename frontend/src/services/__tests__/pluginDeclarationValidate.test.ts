@@ -187,18 +187,18 @@ describe('validatePluginDeclaration 真实语料（校验器在真实数据上�
     // 真实验证面覆盖（校验器跑到了，不是空转）
     expect(declared).toBeGreaterThan(5)
     // 打印采到的问题（vitest 输出可见）
-    // eslint-disable-next-line no-console
+     
     console.log(
       `真实语料: ${files.length} 插件 / ${declared} 含声明 / 面=${JSON.stringify(Object.fromEntries(declKinds))}`,
     )
 
     if (allErrors.length > 0) {
       // 校验器在真实数据上抓到了硬错误 → 显式失败并要求修复
-      // eslint-disable-next-line no-console
+       
       console.log('真实语料硬错误：\n' + allErrors.slice(0, 40).join('\n'))
     }
     if (allWarnings.length > 0) {
-      // eslint-disable-next-line no-console
+       
       console.log('真实语料软警告：\n' + allWarnings.slice(0, 40).join('\n'))
     }
     // 硬错误不允许存在（有=声明不生效，应修 manifest 或改校准）；软警告容忍

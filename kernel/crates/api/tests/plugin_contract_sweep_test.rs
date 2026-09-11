@@ -230,7 +230,7 @@ fn all_plugin_contracts_are_executor_consumable() {
     }
 
     // 棘轮（2026-08-20 L2 补齐后基线：47 插件 / 58 工具，56/58 声明 input_schema
-    // （唯二缺 = widget_demo 死演示工具，无 Python 实现不造伪），53 带参数面 /
+    // （缺声明者为零参哨兵/演示形态，无 Python 实现不造伪），53 带参数面 /
     // 2 空参声明 / 2 带形态 pattern / 88 服务）
     // 2026-08-25 收紧：hot_swap 整目录下线（-1）+ lsp.completion/supported_languages
     // 死工具删声明（-2）→ 带参数面 53→50。

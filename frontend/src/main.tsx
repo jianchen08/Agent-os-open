@@ -98,7 +98,6 @@ async function bootstrap() {
     })
   }
 
-  // 注册全局文件打开回调
   registerGlobalOpenFileCallback(async (filePath: string, containerTaskId?: string) => {
     const result = await openFile(filePath, { containerTaskId })
     if (!result.success) {

@@ -17,6 +17,8 @@ fn manifest_with_ui(
     ui_schema: Option<Value>,
 ) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: plugin_id.to_string(),
         name: plugin_id.to_string(),
         description: None,
@@ -61,6 +63,7 @@ async fn fetch_schema(manifests: Vec<PluginManifest>) -> Value {
         .oneshot(
             Request::builder()
                 .uri("/api/v1/schema")
+                .header("authorization", scaffold_admin_bearer())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -69,6 +72,18 @@ async fn fetch_schema(manifests: Vec<PluginManifest>) -> Value {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
     serde_json::from_slice(&body).unwrap()
+}
+
+/// schema 已纳入管理面读鉴权：无 store 场景（AppState::new()）用脚手架 admin token。
+fn scaffold_admin_bearer() -> String {
+    let admin = agentos_http::auth::default_users()
+        .into_iter()
+        .next()
+        .unwrap();
+    format!(
+        "Bearer {}",
+        agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &admin, 3600)
+    )
 }
 
 #[tokio::test]

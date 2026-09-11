@@ -74,6 +74,22 @@
         }
       },
       {
+        "name": "llm.repair_json",
+        "description": "Attempt to repair a common JSON defect (markdown fence, trailing commas, single quotes, truncation); returns {repaired: string|null}",
+        "input_schema": {
+          "properties": {
+            "text": {
+              "type": "string",
+              "description": "Possibly broken/truncated JSON string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        }
+      },
+      {
         "name": "http.handle",
         "description": "HTTP endpoint handler for /ext/llm_service/** (thinking-mode + config/llm domains, channel_api 拆迁批次 1)",
         "input_schema": {
@@ -257,6 +273,16 @@
       "timeout_ms": 5000,
       "max_concurrency": 8,
       "description": "获取 litellm 支持的提供者类型清单（原 GET /ext/channel_api/config/llm/provider-types 语义）"
+    },
+    {
+      "route_id": "config_llm_presets_get",
+      "method": "GET",
+      "path": "/ext/llm_service/config/llm/presets",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "LLM 配置面预置声明下发（provider 分组/常用类型/思考强度白名单；P2-5 数据下发，前端零硬编码）"
     },
     {
       "route_id": "config_llm_providers_remote_models_get",

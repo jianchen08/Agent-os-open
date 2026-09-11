@@ -1,5 +1,6 @@
 /** 通用树形组件 根据 Schema 渲染树形结构，支持递归嵌套、展开/折叠、状态图标、 */
 
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import {
   ChevronRight,
   FolderOpen,
@@ -21,13 +22,13 @@ import {
   ArrowUpDown,
   Plus,
 } from '@/assets/icons'
-import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react'
+import { Button } from '@/components/ui/button'
 import apiClient from '@/services/api/client'
 import { pauseTask, resumeTask } from '@/services/api/tasks'
-import { Button } from '@/components/ui/button'
-import { CreateTaskFormModal } from './CreateTaskFormModal'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { TASK_STATUSES, normalizeTaskStatus, taskStatusLabel } from '@/types/taskStatus'
+import { CreateTaskFormModal } from './CreateTaskFormModal'
 import {
   FileTreeContextMenu,
   type ContextMenuContext,
@@ -128,36 +129,25 @@ interface TreeWidgetConfig {
   sessionId?: string
 }
 
-/** 默认状态配置映射 */
+/** 默认状态配置映射（键 = 任务状态词表七态；旧值经 normalize 折叠，文案取自单一真值源） */
 const DEFAULT_STATUS_CONFIG: Record<string, StatusConfigItem> = {
-  pending: { icon: 'clock', color: 'text-status-warning', label: '待处理' },
-  completed: { icon: 'check', color: 'text-status-success', label: '已完成' },
-  failed: { icon: 'x-circle', color: 'text-status-error', label: '失败' },
-  blocked: { icon: 'ban', color: 'text-status-running', label: '已阻塞' },
-  suspended: { icon: 'pause', color: 'text-status-pending', label: '已暂停' },
-  planning: { icon: 'clipboard', color: 'text-status-info', label: '规划中' },
-  running: { icon: 'play', color: 'text-status-info', label: '运行中' },
-  paused: { icon: 'pause', color: 'text-status-pending', label: '已暂停' },
+  pending: { icon: 'clock', color: 'text-status-warning', label: taskStatusLabel('pending') },
+  running: { icon: 'play', color: 'text-status-info', label: taskStatusLabel('running') },
+  evaluating: { icon: 'loader', color: 'text-status-info', label: taskStatusLabel('evaluating') },
+  stopped: { icon: 'pause', color: 'text-status-pending', label: taskStatusLabel('stopped') },
+  completed: { icon: 'check', color: 'text-status-success', label: taskStatusLabel('completed') },
+  failed: { icon: 'x-circle', color: 'text-status-error', label: taskStatusLabel('failed') },
+  timeout: { icon: 'x-circle', color: 'text-status-error', label: taskStatusLabel('timeout') },
 }
 
-/** 状态筛选选项（用于任务树状态筛选器） */
+/** 状态筛选选项（用于任务树状态筛选器，从词表单一真值源派生） */
 const STATUS_FILTER_OPTIONS = [
   { value: '', label: '全部' },
-  { value: 'running', label: '运行中' },
-  { value: 'pending', label: '待处理' },
-  { value: 'completed', label: '已完成' },
-  { value: 'failed', label: '失败' },
-  { value: 'paused', label: '已暂停' },
-  { value: 'blocked', label: '已阻塞' },
+  ...TASK_STATUSES.map((s) => ({ value: s, label: taskStatusLabel(s) })),
 ] as const
 
-/** 活跃状态集合（running/pending/evaluating/planning） 用于默认筛选模式，仅显示正在执行的任务 */
-const ACTIVE_STATUSES_FOR_FILTER = new Set([
-  'running',
-  'pending',
-  'evaluating',
-  'planning',
-])
+/** 活跃状态集合（running/pending/evaluating） 用于默认筛选模式，仅显示正在执行的任务 */
+const ACTIVE_STATUSES_FOR_FILTER = new Set(['running', 'pending', 'evaluating'])
 
 /** 递归按状态过滤树节点 过滤策略：保留自身或任意后代匹配状态的节点，保持树状结构不变。 */
 function filterNodesByStatus(
@@ -177,11 +167,10 @@ function filterNodesByStatus(
       ? filterNodesByStatus(children, statusValue, statusField, childrenField)
       : []
 
-    // 判断当前节点状态是否匹配
     const statusMatch =
       statusValue === '__active__'
-        ? ACTIVE_STATUSES_FOR_FILTER.has(nodeStatus)
-        : nodeStatus === statusValue
+        ? ACTIVE_STATUSES_FOR_FILTER.has(normalizeTaskStatus(nodeStatus))
+        : normalizeTaskStatus(nodeStatus) === normalizeTaskStatus(statusValue)
 
     // 自身匹配 或 有匹配的后代 → 保留此节点（保持树结构）
     if (statusMatch || filteredChildren.length > 0) {
@@ -234,7 +223,7 @@ function getStatusIcon(
   status: string,
   config: Record<string, StatusConfigItem>,
 ): { icon: React.ReactNode; color: string; label: string } {
-  const statusConf = config[status]
+  const statusConf = config[normalizeTaskStatus(status)] ?? config[status]
   if (!statusConf) {
     return { icon: <CircleDot className="h-4 w-4" />, color: 'text-status-pending', label: status }
   }
@@ -1155,8 +1144,8 @@ function TreeNode({
   const hasWorkspace = !!wsMode && wsMode !== 'shared' && !!wsPath
 
   /** 当前节点是否启用（由后端任务状态驱动） */
-  const ACTIVE_STATUSES = new Set(['running', 'pending', 'evaluating', 'planning'])
-  const isEnabled = ACTIVE_STATUSES.has(status ?? '')
+  const ACTIVE_STATUSES = new Set(['running', 'pending', 'evaluating'])
+  const isEnabled = ACTIVE_STATUSES.has(normalizeTaskStatus(status))
 
   /** 是否有元信息需要显示第二行 */
   const hasMeta = error && error.trim().length > 0

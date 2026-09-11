@@ -9,24 +9,24 @@
  */
 
 import { create } from 'zustand'
+import { readAgents } from '@/hooks/queries/useAgentsQuery'
+import { readSessions, updateSessionsCache } from '@/hooks/queries/useSessionsQuery'
 import {
   createSession as createSessionApi,
   deleteSession as deleteSessionApi,
   updateSessionAgent as updateSessionAgentApi,
   updateSession as updateSessionApi,
 } from '@/services/api/session'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { clearSessionExecutionOptions } from '@/services/sessionExecutionOptions'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { loggers } from '@/utils/logger'
+import { mainPipelineIdOf } from '@/utils/mappers'
 import { uiStorage, STORAGE_KEYS } from '@/utils/storage'
 import { useAgentStore } from './agentStore'
 import { useAgentTabStore } from './agentTabStore'
 import { useNotificationStore } from './notificationStore'
 import { usePipelineMessageStore } from './pipelineMessageStore'
 import { useSessionStore } from './sessionStore'
-import { readSessions, updateSessionsCache } from '@/hooks/queries/useSessionsQuery'
-import { readAgents } from '@/hooks/queries/useAgentsQuery'
-import { mainPipelineIdOf } from '@/utils/mappers'
 import type { Session } from '@/types/models'
 
 const logger = loggers.sessionStore
@@ -121,99 +121,16 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
     return newSession
   },
 
-  /** 删除会话（含完整清理） */
+  /** 删除会话（含完整清理）：先 API 后清本地——API 失败时本地数据原封不动，可重试 */
   deleteSession: async (id: string) => {
     useSessionStore.setState((state) => ({
       deletingSessionIds: new Set(state.deletingSessionIds).add(id),
     }))
 
     try {
-      // 1. 收集该会话的所有管道ID，逐个发送取消信号
-      const pipelineStore = usePipelineMessageStore.getState()
-      const allPipelineIds = Object.entries(pipelineStore.pipelineSessionMap)
-        .filter(([, sessionId]) => sessionId === id)
-        .map(([pipelineId]) => pipelineId)
-      for (const pid of allPipelineIds) {
-        globalWS.sendCancel(id, '会话已删除', pid)
-      }
-
-      // 2. 查找所有属于该会话的 pipelineId（主管道 + 子管道 + 孙管道）
-      // sessionId 本身也可能是主管道 ID
-      if (!allPipelineIds.includes(id)) {
-        allPipelineIds.push(id)
-      }
-
-      // 3. 停止所有管道的流式传输
-      for (const pipelineId of allPipelineIds) {
-        pipelineStore.stopStreaming(pipelineId)
-      }
-
-      // 4. 清理 pipelineMessageStore 中所有相关管道的数据
-      const {
-        messagesByPipeline: curMessages,
-        pipelines: curPipelines,
-        pipelineSessionMap: curSessionMap,
-        streamingState: curStreaming,
-        topCursorsByPipeline: curTopCursors,
-        bottomCursorsByPipeline: curBottomCursors,
-        hasMoreOlderByPipeline: curHasMore,
-        isLoadingOlderByPipeline: curLoadingMore,
-      } = pipelineStore
-
-      const removeSet = new Set(allPipelineIds)
-      const filterByKey = <T>(record: Record<string, T>): Record<string, T> => {
-        const result: Record<string, T> = {}
-        for (const [key, value] of Object.entries(record)) {
-          if (!removeSet.has(key)) {
-            result[key] = value
-          }
-        }
-        return result
-      }
-
-      usePipelineMessageStore.setState({
-        messagesByPipeline: filterByKey(curMessages),
-        pipelines: filterByKey(curPipelines),
-        pipelineSessionMap: filterByKey(curSessionMap),
-        streamingState: filterByKey(curStreaming),
-        topCursorsByPipeline: filterByKey(curTopCursors),
-        bottomCursorsByPipeline: filterByKey(curBottomCursors),
-        hasMoreOlderByPipeline: filterByKey(curHasMore),
-        isLoadingOlderByPipeline: filterByKey(curLoadingMore),
-      })
-
-      // 5. 清理 agentTabStore（标签页、映射、localStorage）
-      const agentTabStore = useAgentTabStore.getState()
-      if (agentTabStore.currentSessionId === id) {
-        agentTabStore.resetAllTabs()
-        try {
-          localStorage.removeItem(`agent-tabs-${id}`)
-        } catch {
-          // localStorage 清理失败不影响主流程
-        }
-      }
-
-      // 6. 调用后端删除 API
+      // 1. 后端删除先行：失败（网络/5xx）在此拒绝，本地消息/标签页/快照一律
+      // 未动，提示后用户可直接重试
       await deleteSessionApi(id)
-      // 执行选项本地快照随会话删除（残留键会被同名会话覆写，但显式清理更干净）
-      clearSessionExecutionOptions(id)
-
-      // 7. 更新缓存与会话选中态
-      updateSessionsCache((prev) => prev.filter((session) => session.id !== id))
-      useSessionStore.setState((state) => {
-        const newDeletingIds = new Set(state.deletingSessionIds)
-        newDeletingIds.delete(id)
-
-        return {
-          activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
-          deletingSessionIds: newDeletingIds,
-        }
-      })
-
-      // 删除当前活跃会话时清理持久化的会话ID
-      if (!useSessionStore.getState().activeSessionId) {
-        try { localStorage.removeItem(STORAGE_KEYS.LAST_ACTIVE_SESSION) } catch (_e) { /* localStorage 清理失败不影响主流程 */ }
-      }
     } catch (error: any) {
       const errorMessage = error.message || '删除会话失败'
       useSessionStore.setState((state) => {
@@ -221,7 +138,102 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
         newDeletingIds.delete(id)
         return { deletingSessionIds: newDeletingIds }
       })
+      useNotificationStore.getState().addNotification({
+        title: '删除失败，数据未变',
+        message: errorMessage,
+        priority: 'normal',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 5000,
+        sourceLabel: '前端',
+      })
       throw new Error(errorMessage)
+    }
+
+    // 2. 删除已成立才清理本地。取消信号也移到成功后：删除未成立时不需要
+    // 取消在途流，信号移后语义不变。
+    const pipelineStore = usePipelineMessageStore.getState()
+    const allPipelineIds = Object.entries(pipelineStore.pipelineSessionMap)
+      .filter(([, sessionId]) => sessionId === id)
+      .map(([pipelineId]) => pipelineId)
+    for (const pid of allPipelineIds) {
+      globalWS.sendCancel(id, '会话已删除', pid)
+    }
+
+    // 3. 查找所有属于该会话的 pipelineId（主管道 + 子管道 + 孙管道）
+    // sessionId 本身也可能是主管道 ID
+    if (!allPipelineIds.includes(id)) {
+      allPipelineIds.push(id)
+    }
+
+    // 4. 停止所有管道的流式传输
+    for (const pipelineId of allPipelineIds) {
+      pipelineStore.stopStreaming(pipelineId)
+    }
+
+    // 5. 清理 pipelineMessageStore 中所有相关管道的数据
+    const {
+      messagesByPipeline: curMessages,
+      pipelines: curPipelines,
+      pipelineSessionMap: curSessionMap,
+      streamingState: curStreaming,
+      topCursorsByPipeline: curTopCursors,
+      bottomCursorsByPipeline: curBottomCursors,
+      hasMoreOlderByPipeline: curHasMore,
+      isLoadingOlderByPipeline: curLoadingMore,
+    } = pipelineStore
+
+    const removeSet = new Set(allPipelineIds)
+    const filterByKey = <T>(record: Record<string, T>): Record<string, T> => {
+      const result: Record<string, T> = {}
+      for (const [key, value] of Object.entries(record)) {
+        if (!removeSet.has(key)) {
+          result[key] = value
+        }
+      }
+      return result
+    }
+
+    usePipelineMessageStore.setState({
+      messagesByPipeline: filterByKey(curMessages),
+      pipelines: filterByKey(curPipelines),
+      pipelineSessionMap: filterByKey(curSessionMap),
+      streamingState: filterByKey(curStreaming),
+      topCursorsByPipeline: filterByKey(curTopCursors),
+      bottomCursorsByPipeline: filterByKey(curBottomCursors),
+      hasMoreOlderByPipeline: filterByKey(curHasMore),
+      isLoadingOlderByPipeline: filterByKey(curLoadingMore),
+    })
+
+    // 6. 清理 agentTabStore（标签页、映射、localStorage）
+    const agentTabStore = useAgentTabStore.getState()
+    if (agentTabStore.currentSessionId === id) {
+      agentTabStore.resetAllTabs()
+      try {
+        localStorage.removeItem(`agent-tabs-${id}`)
+      } catch {
+        // localStorage 清理失败不影响主流程
+      }
+    }
+
+    // 执行选项本地快照随会话删除（残留键会被同名会话覆写，但显式清理更干净）
+    clearSessionExecutionOptions(id)
+
+    // 7. 更新缓存与会话选中态
+    updateSessionsCache((prev) => prev.filter((session) => session.id !== id))
+    useSessionStore.setState((state) => {
+      const newDeletingIds = new Set(state.deletingSessionIds)
+      newDeletingIds.delete(id)
+
+      return {
+        activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
+        deletingSessionIds: newDeletingIds,
+      }
+    })
+
+    // 删除当前活跃会话时清理持久化的会话ID
+    if (!useSessionStore.getState().activeSessionId) {
+      try { localStorage.removeItem(STORAGE_KEYS.LAST_ACTIVE_SESSION) } catch (_e) { /* localStorage 清理失败不影响主流程 */ }
     }
   },
 

@@ -3,26 +3,29 @@
 from __future__ import annotations
 
 import os
-import sys
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+
+# extra 显式注入任务域依赖面：system/tasks（平铺模块权威位，tool.py 的
+# `from task_types import TaskStatus` / `from service_access import …` 解析
+# 到此）+ system/（tasks 包目录）。评估类型面（_eval_core.py）位于本目录，
+# 已由 bootstrap_plugin 的插件目录注入覆盖。
+_paths = bootstrap_plugin(__file__, extra=(os.path.join("system", "tasks"), "system"))
 
 # 任务领域模块以 plugins/shared/system/tasks/ 为权威（0.2 平铺模块：
 # service_access / task_types / agents_types …）。注入 sys.path 供 tool.py 的
 # `from task_types import TaskStatus` / `from service_access import …` 直接解析。
-# 评估类型面（_eval_core.py）位于本目录，已由上方 sys.path.insert 覆盖。
+# 评估类型面（_eval_core.py）位于本目录，已由 bootstrap_plugin 的插件目录注入覆盖。
 # 跨插件共享类型走 SDK（agentos_plugin_sdk，pip 安装）。
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
-_TASKS_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system', 'tasks')
-_SYSTEM_DIR = os.path.join(_PROJECT_ROOT, 'plugins', 'shared', 'system')
-# 跨插件共享契约模块（state_fields.py 等）位于 plugins/shared/ 根。
-_SHARED_ROOT = os.path.join(_PROJECT_ROOT, 'plugins', 'shared')
-for _d in (_TASKS_DIR, _SYSTEM_DIR, _SHARED_ROOT):
-    if os.path.isdir(_d):
-        sys.path.insert(0, _d)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+
+# 本插件 tool 模块在 exec 期绑定（不得改为 on_load 期 `import tool` 懒加载）：
+# 合宿静息态下裸名 `tool` 槽位可能是其他成员的同名模块，运行期 import 会
+# 命中异成员模块；exec 期处于宿主 loader 的裸名遮蔽保护窗口（异成员模块已
+# 摘除、自身目录在 sys.path 首位），解析结果必为本插件 tool.py。
+import tool as tool_mod  # noqa: E402
 
 plugin = AgentOSPlugin("task_evaluate_tool")
 
@@ -39,7 +42,6 @@ async def _on_load(_params: dict[str, Any]) -> None:
     派评估子管道继承任务工作区）。能力句柄懒解析（协程内 get_capability），
     on_load 早于 capability 注入完成也能在真正派发时拿到。
     """
-    import tool as tool_mod  # noqa: PLC0415
     from _executor import PipelineEvaluationExecutor  # noqa: PLC0415
 
     async def _read_state_rows() -> list[dict[str, Any]]:
@@ -93,9 +95,9 @@ async def _on_load(_params: dict[str, Any]) -> None:
 )
 async def task_evaluate(**kwargs: dict[str, Any]) -> dict[str, Any]:
     """任务评估。"""
-    from tool import TaskEvaluateTool  # noqa: PLC0415
-
-    tool = TaskEvaluateTool()
+    # exec 期绑定的本插件 tool 模块（见文件头说明）——不得改为运行期
+    # `from tool import …`：合宿静息态裸名槽位是其他成员的同名模块
+    tool = tool_mod.TaskEvaluateTool()
     result = await tool.execute(kwargs)
     # 返回完整 ToolExecutionResult 信封（success/output/metadata）：metadata
     # 携带 result=completed / task_failed 等副作用信号，是内核 tool_core

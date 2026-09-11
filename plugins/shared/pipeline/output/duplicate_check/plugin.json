@@ -17,5 +17,25 @@
   },
   "permissions": {},
   "priority": 50,
-  "host_group": "light"
+  "host_group": "light",
+  "state": {
+    "reads": [
+      "agent_level",
+      "core_type",
+      "delegate_depth",
+      "ended",
+      "messages_tail:40",
+      "raw_result",
+      "raw_tool_calls",
+      "router.duplicate_intercepts",
+      "router.last_response",
+      "router.last_response_text",
+      "router.recent_tool_sigs",
+      "router.repetitive_count",
+      "router.tool_fail_banned",
+      "router.tool_fail_streak",
+      "tool_ids",
+      "tool_results"
+    ]
+  }
 }

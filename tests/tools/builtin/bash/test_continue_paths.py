@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """continue 路径测试。
 
 验证两个新增/改动行为：

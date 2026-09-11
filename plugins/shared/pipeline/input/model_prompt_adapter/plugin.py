@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import fnmatch
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -207,10 +206,3 @@ class ModelPromptAdapterPlugin(IInputPlugin):
             out.append(msg)
         return out
 
-
-def load_rules_from(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
-    """独立加载规则文件（供测试/运维校验 rules.yaml 合法性）。"""
-    with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    rules = data.get("rules") or []
-    return [r for r in rules if isinstance(r, dict)] if isinstance(rules, list) else []

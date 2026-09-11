@@ -16,10 +16,12 @@
  * @module RjsfForm
  */
 
-import { useEffect, useMemo, useState } from 'react'
-import { Select, Switch } from 'antd'
 import Form from '@rjsf/antd'
 import validator from '@rjsf/validator-ajv8'
+import { Select, Switch } from 'antd'
+import { useEffect, useMemo, useState } from 'react'
+import apiClient from '@/services/api/client'
+import type { UIInputFormField } from '@/types/schema'
 import type { IChangeEvent } from '@rjsf/core'
 import type {
   ErrorTransformer,
@@ -28,8 +30,6 @@ import type {
   UiSchema,
   WidgetProps,
 } from '@rjsf/utils'
-import apiClient from '@/services/api/client'
-import type { UIInputFormField } from '@/types/schema'
 
 // ============================================================================
 // datasource 工具（原 SchemaDriver 迁入）
@@ -460,7 +460,7 @@ function AsyncSelectWidget(props: WidgetProps) {
       cancelled = true
     }
     // depKey：依赖字段值变化时重拉（模板 URI 变化已体现在 uri 依赖上）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [uri, opts.depKey])
 
   const finalOptions = asyncOptions.length > 0 ? asyncOptions : (opts.fallbackOptions ?? [])

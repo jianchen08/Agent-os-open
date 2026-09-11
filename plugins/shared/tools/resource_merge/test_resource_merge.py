@@ -965,3 +965,105 @@ class TestGitHelpersFailureBranches2:
 
         monkeypatch.setattr(helpers, "run_git", _fail)
         result = _run(helpers.git_merge_abort({}, repo))
+
+
+# ═══════════════════════════════════════════════════════════
+# 合宿裸名遮蔽防护（server.py handler 取实现面）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestCohostShadowing:
+    """合宿平铺下裸名 ``tool`` 槽位被异成员占据时，handler 仍取本目录实现。
+
+    邻成员（task_evaluate 等）exec 期绑定后占据 sys.modules["tool"]，静息态
+    槽位是异成员模块——server loader 必须按显式路径命中本目录 tool.py。
+    decoy 常驻/不常驻两组输入；另断言缓存幂等（二次取用同一类）。
+    """
+
+    _IMPL_KEY = "resource_merge_tool_impl"
+
+    @staticmethod
+    def _load_server() -> Any:
+        mod_name = "resource_merge_server_test"
+        if mod_name in sys.modules:
+            del sys.modules[mod_name]
+        spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "server.py")
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _plant_decoy() -> Any:
+        import types
+
+        decoy = types.ModuleType("tool")
+
+        class _ForeignResourceMergeTool:  # 异成员同名类：命中即错
+            pass
+
+        decoy.ResourceMergeTool = _ForeignResourceMergeTool
+        sys.modules["tool"] = decoy
+        return decoy
+
+    @pytest.mark.parametrize("decoy_resident", [True, False])
+    def test_loader_resolves_local_impl(self, decoy_resident: bool) -> None:
+        saved_tool = sys.modules.get("tool")
+        saved_impl = sys.modules.get(self._IMPL_KEY)
+        saved_gh = sys.modules.get("git_helpers")
+        try:
+            server = self._load_server()
+            decoy = self._plant_decoy() if decoy_resident else None
+
+            cls = server._load_resource_merge_tool()
+            assert cls.__module__ == self._IMPL_KEY
+            if decoy is not None:
+                assert cls is not decoy.ResourceMergeTool
+            assert hasattr(cls, "execute")
+            # 缓存幂等：二次取用同一类（不重复 exec tool.py）
+            assert server._load_resource_merge_tool() is cls
+        finally:
+            sys.modules.pop(self._IMPL_KEY, None)
+            sys.modules.pop("tool", None)
+            for restored in (saved_tool, saved_impl):
+                if restored is not None:
+                    sys.modules[restored.__name__] = restored
+            if saved_gh is None:
+                sys.modules.pop("git_helpers", None)
+
+    @pytest.mark.parametrize(
+        ("bad_params", "expect_marker"),
+        [
+            ({"workspace": "x"}, "action"),
+            ({"action": "git_status"}, "workspace"),
+        ],
+    )
+    @pytest.mark.parametrize("decoy_resident", [True, False])
+    def test_handler_entry_uses_local_impl(
+        self, decoy_resident: bool, bad_params: dict[str, str], expect_marker: str
+    ) -> None:
+        """handler 入口契约：经模块级 loader 取本目录实现执行，失败路径返回
+        {"error": ...}（真实参数校验分支，无 mock）。decoy 占槽时若命中异成员
+        实现，_ForeignResourceMergeTool 无 execute 即当场 AttributeError。"""
+        saved_tool = sys.modules.get("tool")
+        saved_impl = sys.modules.get(self._IMPL_KEY)
+        saved_gh = sys.modules.get("git_helpers")
+        try:
+            server = self._load_server()
+            if decoy_resident:
+                self._plant_decoy()
+
+            result = _run(server.resource_merge(**bad_params))
+            assert isinstance(result, dict)
+            assert "error" in result, "失败路径应返回 error 字段"
+            assert expect_marker in result["error"]
+        finally:
+            sys.modules.pop(self._IMPL_KEY, None)
+            sys.modules.pop("tool", None)
+            for restored in (saved_tool, saved_impl):
+                if restored is not None:
+                    sys.modules[restored.__name__] = restored
+            if saved_gh is None:
+                sys.modules.pop("git_helpers", None)

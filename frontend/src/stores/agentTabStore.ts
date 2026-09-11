@@ -1,7 +1,12 @@
 /** Agent Tab 状态管理 Store 管理 Agent Tab 的状态，支持： */
 
 import { create } from 'zustand'
+import { isNotFoundError } from '@/services/api/client'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { loggers } from '@/utils/logger'
+
+/** 子Tab消息加载日志器（404 竞态窗口 debug 留痕），走会话域日志通道 */
+const tabLogger = loggers.sessionStore
 import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { mainPipelineIdOf } from '@/utils/mappers'
 import type { AgentTab } from '@/types/task'
@@ -839,13 +844,10 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         threadId: state.currentSessionId,
       })
       if (!result.ok) {
-        const error = result.error as any
-        const is404 =
-          error?.response?.status === 404 ||
-          error?.message?.includes('404') ||
-          error?.code === '404'
-        if (is404) {
-          console.debug(
+        const error = result.error as unknown
+        // 404 = 子Tab消息暂不可用（子管道未建/竞态窗口），机器码判定见 client.ts
+        if (isNotFoundError(error)) {
+          tabLogger.debug(
             `[AgentTabStore.loadTabMessages] 子Tab消息暂不可用 (404) | tabId: ${tabId}`,
           )
         } else {

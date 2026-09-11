@@ -3,9 +3,8 @@
 
 合并 image_generate、music_generate、video_generate、tts_generate 四个媒体工具。
 
-F-MEDIA-2（provider 依赖迁移）：0.1 的 infrastructure.service_provider 全局
-注册表已删，媒体 provider 调用改为经 tool-executor capability 调用后端服务
-（与 hindsight_memory/wiring.py 同款模式）：
+媒体 provider 调用经 tool-executor capability 调用后端服务
+（与 plugins/shared/wiring.py 同款模式）：
 - ``_make_capability_caller``：从内核注入的能力句柄构造 capability_caller
   （tool-executor 优先，service-registry 回落；剥掉已含能力前缀——SDK
   CapabilityHandle.call 会拼接 ``f"{cap}.{method}"``，避免
@@ -24,7 +23,8 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk.capability import bind_capability_caller  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -34,27 +34,6 @@ plugin = AgentOSPlugin("media_tools")
 # 能力在 MCP initialize 握手后注入（见 SDK plugin._on_initialize），
 # 因此 caller 在首次工具调用/on_load 时解析；仅成功结果入缓存（未注入时重试）。
 _caller_cache: dict[str, Any] = {}
-
-
-def _bind_caller(handle: Any, cap_name: str) -> Any:
-    """绑定能力句柄与命名空间，构造 async caller `(method, params) -> Any`。
-
-    闭包通过函数参数绑定，规避 B023（循环变量绑定）。
-
-    Args:
-        handle: CapabilityHandle 实例（其 call 会拼接 ``f"{cap}.{method}"``）
-        cap_name: 能力命名空间（如 "tool-executor"）
-
-    Returns:
-        async caller：剥掉已含的能力前缀后转交 handle.call
-    """
-    prefix = f"{cap_name}."
-
-    async def _call(method: str, params: dict[str, Any]) -> Any:
-        stripped = method[len(prefix):] if method.startswith(prefix) else method
-        return await handle.call(stripped, params)
-
-    return _call
 
 
 def _make_capability_caller(plugin_instance: Any) -> Any | None:
@@ -71,7 +50,7 @@ def _make_capability_caller(plugin_instance: Any) -> Any | None:
             handle = plugin_instance.get_capability(cap_name)
         except KeyError:
             continue
-        return _bind_caller(handle, cap_name)
+        return bind_capability_caller(handle, cap_name)
     logger.warning(
         "[media/server] 未注入 tool-executor/service-registry 能力，capability_caller 不可用"
     )

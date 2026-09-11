@@ -115,7 +115,7 @@ describe('认证API', () => {
 
   describe('register - 注册', () => {
     it('应该成功注册并返回token信息', async () => {
-      // 准备mock数据（与后端TokenResponse对齐，注册成功后自动登录）
+      // 准备mock数据（对齐后端注册响应信封：token 字段 + 自动登录语义）
       const mockResponse: RegisterResponse = {
         access_token: 'test-access-token-123',
         refresh_token: 'test-refresh-token-456',

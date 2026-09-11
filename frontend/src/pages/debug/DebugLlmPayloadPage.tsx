@@ -177,7 +177,6 @@ export function DebugLlmPayloadPage({ embedded }: { embedded?: boolean } = {}) {
   return (
     <PageShell
       title="LLM 请求"
-      backHref="/debug"
       embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {total} 个快照</span>}
     >

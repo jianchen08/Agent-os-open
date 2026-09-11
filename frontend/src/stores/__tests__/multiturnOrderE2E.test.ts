@@ -13,11 +13,14 @@
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useMessageRender } from '@/components/chat/hooks/useMessageRender'
+import type * as handlersMod from '@/services/websocket/streaming/handlers'
+import type * as streamHandlerMod from '@/services/websocket/streaming/handlers/streamHandler'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 // ── mock 外部依赖（与 MessageOrderVerification.test.tsx 对齐）──
 vi.mock('@/utils/activityConverter', () => ({
-  buildDefaultActions: (tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
+  buildDefaultActions: (_tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
 
   toolCallToActivity: (toolCall: any) => ({
     type: 'tool_call',
@@ -53,9 +56,9 @@ vi.mock('@/utils/retry', () => ({
 const PIPELINE_ID = 'pid_a00000000000'
 const THREAD_ID = 'tid_b00000000000'
 
-let pipelineStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
-let handlers: typeof import('@/services/websocket/streaming/handlers')
-let flushStreamChunkBuffer: typeof import('@/services/websocket/streaming/handlers/streamHandler').flushStreamChunkBuffer
+let pipelineStore: pipelineMessageStoreMod.usePipelineMessageStore
+let handlers: handlersMod
+let flushStreamChunkBuffer: streamHandlerMod.flushStreamChunkBuffer
 
 /** 构造一个 WS 事件（顶层 + data 双层字段，匹配真实后端 _make_event 形态） */
 /**

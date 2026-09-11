@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import importlib.util
+import json
+import logging
 import os
 import sys
 import threading
@@ -496,8 +498,7 @@ class TestInjectTriggerMessage:
         mgr.stop_check_loop()
 
     def test_fallback_without_injector(self) -> None:
-        """注入器未设置 → 回退 0.1 message_bus 不存在（0.2 已删）→ 记录后返回。"""
-        sys.modules.pop("pipeline.message_bus", None)
+        """注入器未设置 → 记录错误后放弃本轮注入，不抛异常。"""
         with _LoopThread() as lt:
             mgr = TriggerManager()
             mgr.set_main_loop(lt.loop)
@@ -1444,54 +1445,342 @@ class TestServerGAP2Wiring:
 
 
 # ═══════════════════════════════════════════════════════════
-# 触发器动作：action=command（通用命令执行机制）
+# 触发器动作：action=command（参数列表执行 + 审计留痕，U11 加固）
 # ═══════════════════════════════════════════════════════════
+
+_PLUGIN_SOURCE_FILES: list[Path] = [
+    p for p in _PLUGIN_DIR.rglob("*.py")
+    if ".venv" not in p.parts and "__pycache__" not in p.parts and not p.name.startswith("test_")
+]
 
 
 class TestCommandAction:
-    def test_default_action_routes_to_inject(self, tmp_path: Path) -> None:
-        """action 缺省（""）→ 不分发 command，返回 False（调用方走注入）。"""
-        mgr = TriggerManager()
-        trigger = _make_config()
-        assert mgr._dispatch_trigger_action(trigger) is False
+    def test_mechanical_no_shell_in_plugin_source(self) -> None:
+        """机械闸：本插件生产源码 shell 执行面必须归零（U11 收敛为参数列表）。"""
+        offenders = [
+            str(p.relative_to(_PLUGIN_DIR))
+            for p in _PLUGIN_SOURCE_FILES
+            if "shell=True" in p.read_text(encoding="utf-8")
+        ]
+        assert offenders == [], f"shell 执行面残留: {offenders}"
 
-    def test_command_action_writes_file_with_env(self, tmp_path: Path) -> None:
-        """command 动作执行命令；触发上下文经 AGENTOS_TRIGGER_* env 传递。"""
+    def test_default_action_routes_to_inject(self) -> None:
+        """action 为 notify/缺省（""）→ 不分发 command，返回 False（调用方走注入）。"""
+        mgr = TriggerManager()
+        for action in ("", "notify"):
+            assert mgr._dispatch_trigger_action(_make_config(action=action)) is False
+
+    def _wait_for(self, cond: Any, timeout: float = 15.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if cond():
+                return True
+            time.sleep(0.1)
+        return False
+
+    def test_command_action_executes_argv_list_with_env(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """command 动作按参数列表执行（不经 shell）；触发上下文经 AGENTOS_TRIGGER_* env 传递。
+
+        元字符（管道/重定向/分号）必须作为字面参数直达子进程，不得被 shell 二次解释。
+        """
+        monkeypatch.chdir(tmp_path)  # 审计日志落 tmp_path/logs/triggers，不污染仓库
         out = tmp_path / "out.txt"
-        cmd = f'echo "%AGENTOS_TRIGGER_ID%|%AGENTOS_EVENT_NAME%|%AGENTOS_EVENT_TASK_ID%" > "{out}"' if os.name == "nt" \
-            else f'echo "$AGENTOS_TRIGGER_ID|$AGENTOS_EVENT_NAME|$AGENTOS_EVENT_TASK_ID" > "{out}"'
+        code = (
+            "import os;"
+            f"open(r'{out}', 'w').write("
+            "os.environ['AGENTOS_TRIGGER_ID'] + '|'"
+            "+ os.environ.get('AGENTOS_EVENT_NAME', '') + '|'"
+            "+ os.environ.get('AGENTOS_EVENT_TASK_ID', ''))"
+        )
         mgr = TriggerManager()
         trigger = _make_config(
             action="command",
-            action_params={"command": cmd, "timeout_ms": 15000},
+            action_params={"cmd": [sys.executable, "-c", code], "timeout_ms": 15000},
         )
         assert mgr._dispatch_trigger_action(trigger, "task_completed", {"task_id": "t9"}) is True
-        deadline = time.time() + 10
-        while not out.exists() and time.time() < deadline:
-            time.sleep(0.1)
-        assert out.exists(), "command 动作未产出文件"
+        assert self._wait_for(lambda: out.exists()), "command 动作未产出文件"
         content = out.read_text(encoding="utf-8").strip()
         assert "t1|task_completed|t9" in content, content
 
-    def test_command_action_timeout_kills(self, tmp_path: Path) -> None:
-        """超时后命令被终止（timeout_ms 远小于命令耗时）。"""
+    def test_command_action_timeout_kills(self, monkeypatch: Any) -> None:
+        """超时后命令被终止（timeout_ms 远小于命令耗时），且留痕 timed_out=true。"""
         mgr = TriggerManager()
         trigger = _make_config(
             action="command",
-            action_params={"command": "ping -n 30 127.0.0.1" if os.name == "nt" else "sleep 30", "timeout_ms": 300},
+            action_params={"cmd": [sys.executable, "-c", "import time; time.sleep(30)"], "timeout_ms": 300},
         )
         start = time.time()
         assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(
+            lambda: bool(trigger.metadata.get("command_executions"))
+        ), "超时执行未留痕"
+        record = trigger.metadata["command_executions"][0]
+        assert record["timed_out"] is True, record
         # daemon 线程内 wait(timeout) → 超时杀进程树；总耗时远小于命令自身时长
-        time.sleep(1.5)
         elapsed = time.time() - start
         assert elapsed < 10, f"命令未被超时终止: {elapsed:.1f}s"
 
-    def test_domain_event_command_skips_injector(self, tmp_path: Path) -> None:
+    def test_command_action_audit_trail_metadata_and_log_file(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """执行留痕可查：stdout/退出码/耗时/命令落 metadata（REST 面可查）+ 日志文件。"""
+        monkeypatch.chdir(tmp_path)
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={"cmd": [sys.executable, "-c", "print('audit-ok')"], "timeout_ms": 15000},
+        )
+        mgr.register(trigger)
+        assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(
+            lambda: bool(trigger.metadata.get("command_executions"))
+        ), "command 动作未留执行痕迹"
+
+        record = trigger.metadata["command_executions"][0]
+        assert record["cmd"] == [sys.executable, "-c", "print('audit-ok')"], record
+        assert record["exit_code"] == 0, record
+        assert record["timed_out"] is False, record
+        assert isinstance(record["duration_ms"], int) and record["duration_ms"] >= 0, record
+        assert record["fired_at"], record
+        # 日志文件：bash 插件 logs/ 同款落盘范式，stdout 全文可查
+        log_file = Path(record["log_file"])
+        assert log_file.exists(), f"审计日志文件缺失: {log_file}"
+        log_text = log_file.read_text(encoding="utf-8")
+        assert "audit-ok" in log_text
+        # Command 行以 JSON 记录 argv（反斜杠/引号无歧义），解析后须与实际执行的命令一致
+        command_line = next(line for line in log_text.splitlines() if line.startswith("# Command:"))
+        assert json.loads(command_line[len("# Command:"):]) == [sys.executable, "-c", "print('audit-ok')"]
+
+    def test_command_action_audit_captures_nonzero_exit_and_stderr(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """失败执行同样留痕：非零退出码与 stderr 可查（不再双 DEVNULL）。"""
+        monkeypatch.chdir(tmp_path)
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={
+                "cmd": [sys.executable, "-c", "import sys; sys.stderr.write('boom'); sys.exit(3)"],
+                "timeout_ms": 15000,
+            },
+        )
+        assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(lambda: bool(trigger.metadata.get("command_executions")))
+        record = trigger.metadata["command_executions"][0]
+        assert record["exit_code"] == 3, record
+        assert "boom" in record["stderr"], record
+        assert "boom" in Path(record["log_file"]).read_text(encoding="utf-8")
+
+    def test_command_action_audit_history_capped(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """metadata 执行历史有上限（防 metadata 无界膨胀，REST 序列化面可控）。"""
+        monkeypatch.chdir(tmp_path)
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={"cmd": [sys.executable, "-c", "pass"], "timeout_ms": 15000},
+        )
+        for _ in range(8):
+            assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(
+            lambda: len(trigger.metadata.get("command_executions", [])) >= 5
+        )
+        time.sleep(0.5)  # 等剩余 daemon 线程落账
+        assert len(trigger.metadata["command_executions"]) <= 5, trigger.metadata["command_executions"]
+
+    def test_legacy_shell_string_command_explicitly_refused(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """存量 shell 字符串格式显式报停：不执行、不留半执行状态、拒绝原因可查。
+
+        无法迁移的旧配置必须显式失败（不静默失效，也不经 shell 兜底执行）。
+        """
+        monkeypatch.chdir(tmp_path)
+        popen_calls: list[Any] = []
+
+        def _no_popen(*args: Any, **kwargs: Any) -> None:
+            popen_calls.append((args, kwargs))
+            raise AssertionError(f"旧格式不得启动进程: {args}")
+
+        monkeypatch.setattr("subprocess.Popen", _no_popen)
+        sentinel = tmp_path / "should_not_exist.txt"
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={"command": f"echo fired > \"{sentinel}\""},
+        )
+        assert mgr._dispatch_trigger_action(trigger) is True  # 动作被 command 通道消费
+        assert self._wait_for(lambda: bool(trigger.metadata.get("command_executions")))
+        record = trigger.metadata["command_executions"][0]
+        assert record["refused"] is True, record
+        assert "shell" in record["reason"], record
+        assert popen_calls == [], "旧 shell 字符串命令被静默执行"
+        assert not sentinel.exists(), "旧 shell 字符串命令产生了副作用"
+
+    def test_command_action_output_decoded_when_not_utf8(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """子进程输出非 UTF-8 字节 → 显式解码回退（不用 text=True，跨端兼容）。"""
+        monkeypatch.chdir(tmp_path)
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={
+                "cmd": [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes([0xff, 0x41, 0x42]))"],
+                "timeout_ms": 15000,
+            },
+        )
+        assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(lambda: bool(trigger.metadata.get("command_executions")))
+        record = trigger.metadata["command_executions"][0]
+        assert record["exit_code"] == 0, record
+        assert "AB" in record["stdout"], record  # 0x41 0x42 经回退解码保留
+
+    def test_command_action_output_decode_final_fallback(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """首选编码不可名（LookupError）→ utf-8 replace 兜底，不炸 daemon 线程。"""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "triggers.manager.locale.getpreferredencoding", lambda do_setlocale: "not-an-encoding"
+        )
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={
+                "cmd": [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes([0xff, 0x41]))"],
+                "timeout_ms": 15000,
+            },
+        )
+        assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(lambda: bool(trigger.metadata.get("command_executions")))
+        record = trigger.metadata["command_executions"][0]
+        assert record["exit_code"] == 0, record
+        assert "A" in record["stdout"], record
+
+    def test_command_action_audit_metadata_summary_capped_but_log_full(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """超长输出：metadata 摘要截尾（有界），日志文件保留全文。"""
+        monkeypatch.chdir(tmp_path)
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={
+                "cmd": [sys.executable, "-c", "print('x' * 5000)"],
+                "timeout_ms": 15000,
+            },
+        )
+        assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(lambda: bool(trigger.metadata.get("command_executions")))
+        record = trigger.metadata["command_executions"][0]
+        assert "[已截断" in record["stdout"], record
+        assert len(record["stdout"]) < 5000
+        log_text = Path(record["log_file"]).read_text(encoding="utf-8")
+        assert "x" * 100 in log_text  # 全文落日志
+        assert log_text.count("x") >= 5000
+
+    def test_command_action_audit_log_write_failure_does_not_block_record(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """审计日志落盘失败（目录被文件占用）→ 摘要留痕不受影响，log_file 为空串。"""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "logs" / "triggers").write_text("blocker", encoding="utf-8")  # 占位为文件 → mkdir 失败
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={"cmd": [sys.executable, "-c", "print('ok')"], "timeout_ms": 15000},
+        )
+        assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(lambda: bool(trigger.metadata.get("command_executions")))
+        record = trigger.metadata["command_executions"][0]
+        assert record["exit_code"] == 0, record
+        assert record["log_file"] == "", record
+
+    def test_command_action_missing_cmd_params_refused(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """action_params 为空（缺 cmd）→ 显式拒绝留痕，不执行。"""
+        monkeypatch.chdir(tmp_path)
+        mgr = TriggerManager()
+        trigger = _make_config(action="command", action_params={})
+        assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(lambda: bool(trigger.metadata.get("command_executions")))
+        record = trigger.metadata["command_executions"][0]
+        assert record["refused"] is True and "cmd" in record["reason"], record
+
+    def test_command_action_non_list_cmd_refused(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """cmd 非参数列表（字符串/含非字符串项）→ 显式拒绝留痕。"""
+        monkeypatch.chdir(tmp_path)
+        mgr = TriggerManager()
+        for bad in ("echo hi", ["echo", 42], []):
+            trigger = _make_config(action="command", action_params={"cmd": bad})
+            assert mgr._dispatch_trigger_action(trigger) is True
+            assert self._wait_for(
+                lambda t=trigger: bool(t.metadata.get("command_executions"))
+            )
+            record = trigger.metadata["command_executions"][0]
+            assert record["refused"] is True, (bad, record)
+
+    def test_command_action_start_failure_refused(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """可执行文件不存在（OSError）→ 启动失败留痕，不静默丢。"""
+        monkeypatch.chdir(tmp_path)
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={"cmd": ["definitely-not-a-real-binary-xyz"], "timeout_ms": 15000},
+        )
+        assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(lambda: bool(trigger.metadata.get("command_executions")))
+        record = trigger.metadata["command_executions"][0]
+        assert record["refused"] is True and "启动失败" in record["reason"], record
+
+    def test_command_action_wait_failure_refused(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """等待异常（非超时）→ 留痕不炸 daemon 线程（subprocess 为外部依赖，注入故障）。"""
+        monkeypatch.chdir(tmp_path)
+
+        class _BrokenProc:
+            pid = 0
+
+            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+                raise ValueError("pipe exploded")
+
+        monkeypatch.setattr("subprocess.Popen", lambda *a, **k: _BrokenProc())
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={"cmd": [sys.executable, "-c", "pass"], "timeout_ms": 15000},
+        )
+        assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(lambda: bool(trigger.metadata.get("command_executions")))
+        record = trigger.metadata["command_executions"][0]
+        assert record["refused"] is True and "等待异常" in record["reason"], record
+
+    def test_command_action_reap_failure_after_timeout(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """超时杀树后回收输出再失败（防御分支）→ 仍按超时留痕，daemon 线程不炸。
+
+        subprocess 为外部依赖，注入故障（mock 仅限外部依赖）。
+        """
+        import subprocess
+
+        monkeypatch.chdir(tmp_path)
+
+        class _TimeoutThenBrokenProc:
+            pid = 0
+            returncode = None
+
+            def __init__(self) -> None:
+                self._calls = 0
+
+            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+                self._calls += 1
+                if self._calls == 1:
+                    raise subprocess.TimeoutExpired(cmd="broken", timeout=0.3)
+                raise ValueError("reap failed")
+
+        proc = _TimeoutThenBrokenProc()
+        monkeypatch.setattr("subprocess.Popen", lambda *a, **k: proc)
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={"cmd": [sys.executable, "-c", "pass"], "timeout_ms": 300},
+        )
+        assert mgr._dispatch_trigger_action(trigger) is True
+        assert self._wait_for(lambda: bool(trigger.metadata.get("command_executions")))
+        record = trigger.metadata["command_executions"][0]
+        assert record["timed_out"] is True, record
+        assert record["exit_code"] is None, record
+        assert record["stdout"] == "" and record["stderr"] == "", record
+
+    def test_domain_event_command_skips_injector(self, tmp_path: Path, monkeypatch: Any) -> None:
         """handle_domain_event 命中 command 触发器 → 执行命令且不注入消息。"""
+        monkeypatch.chdir(tmp_path)
         injected: list[tuple[str, str]] = []
         out = tmp_path / "ev.txt"
-        cmd = f'echo fired > "{out}"' if os.name != "nt" else f'echo fired > "{out}"'
         mgr = TriggerManager()
         mgr.set_injector(lambda pipeline_id, message, user_id="": injected.append((pipeline_id, message)))
         trigger = _make_config(
@@ -1499,14 +1788,744 @@ class TestCommandAction:
             name="命令触发器",
             event_name="task_completed",
             action="command",
-            action_params={"command": cmd, "timeout_ms": 15000},
+            action_params={"cmd": [sys.executable, "-c", f"open(r'{out}', 'w').write('fired')"], "timeout_ms": 15000},
         )
         mgr.register(trigger)
         fired = _run(mgr.handle_domain_event("task_completed", {"task_id": "t9"}))
         assert fired == ["cmd-ev"]
         assert injected == [], f"command 触发器不应注入消息: {injected}"
-        deadline = time.time() + 10
-        while not out.exists() and time.time() < deadline:
-            time.sleep(0.1)
-        assert out.exists()
+        assert self._wait_for(lambda: out.exists())
         mgr.stop_check_loop()
+
+
+# ═══════════════════════════════════════════════════════════
+# 审批闸：trigger_setup 写入 command 类动作须经 human-interaction 审批
+# （notify 类安全动作免审批；拒绝的 command 不落库不执行）
+# ═══════════════════════════════════════════════════════════
+
+
+class _FakeHiCapability:
+    """human-interaction capability 假件（外部依赖桩：记录请求、回放预设响应）。"""
+
+    def __init__(self, wait_result: dict[str, Any]) -> None:
+        self.wait_result = wait_result
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
+        self.calls.append((method, dict(params)))
+        if method == "create_choice":
+            return {"request_id": "req-1"}
+        if method == "wait_for_choice":
+            return dict(self.wait_result)
+        raise AssertionError(f"unexpected capability method: {method}")
+
+
+class TestTriggerCommandApprovalGate:
+    @pytest.fixture
+    def gate(self, monkeypatch: Any) -> Any:
+        """全新 manager 的 tool 模块 + 可换装的 capability provider。"""
+        mod = _load_tool()
+        fresh = TriggerManager()
+        mod.get_trigger_manager = lambda: fresh
+        holder: dict[str, Any] = {"provider": None}
+        mod.set_capability_provider(lambda name: holder["provider"])
+        yield {"mod": mod, "tool": mod.TriggerSetupTool(), "holder": holder, "manager": fresh}
+        mod.set_capability_provider(None)
+        fresh.stop_check_loop()
+
+    def _argv(self, out: Path) -> list[str]:
+        return [sys.executable, "-c", f"open(r'{out}', 'w').write('ran')"]
+
+    def test_denied_command_not_registered_nor_executed(self, gate: Any, tmp_path: Path) -> None:
+        """危险 command 未获批准：不落库（不注册）、不执行，审批请求确实发出。"""
+        out = tmp_path / "denied.txt"
+        hi = _FakeHiCapability({"response_type": "answered", "selected_option": "denied"})
+        gate["holder"]["provider"] = hi
+        r = _run(gate["tool"].execute({
+            "trigger_type": "delay", "delay_seconds": 60, "message": "m",
+            "pipeline_id": "p1", "trigger_action": "command", "command": self._argv(out),
+        }))
+        assert not r.success, "未批准的 command 触发器被注册"
+        assert "审批" in (r.error or ""), r.error
+        assert len(gate["manager"]._triggers) == 0, "未批准的 command 触发器落库"
+        assert any(m == "create_choice" for m, _ in hi.calls), "审批请求未发起"
+        time.sleep(0.5)
+        assert not out.exists(), "未批准的 command 被执行"
+
+    def test_command_gate_fails_closed_without_capability(self, gate: Any, tmp_path: Path) -> None:
+        """审批通道不可用 → fail-closed 拒绝注册（禁止静默放行）。"""
+        gate["holder"]["provider"] = None
+        r = _run(gate["tool"].execute({
+            "trigger_type": "delay", "delay_seconds": 60, "message": "m",
+            "pipeline_id": "p1", "trigger_action": "command", "command": self._argv(tmp_path / "x.txt"),
+        }))
+        assert not r.success and "审批" in (r.error or ""), r.error
+        assert len(gate["manager"]._triggers) == 0
+
+    @pytest.mark.parametrize("selected", ["approved_once", "批准注册执行"], ids=["id", "label"])
+    def test_approved_command_registers_template(self, gate: Any, selected: str) -> None:
+        """批准后按动作模板落库：action=command + cmd 参数列表。"""
+        hi = _FakeHiCapability({"response_type": "answered", "selected_option": selected})
+        gate["holder"]["provider"] = hi
+        r = _run(gate["tool"].execute({
+            "trigger_type": "delay", "delay_seconds": 60, "message": "m",
+            "pipeline_id": "p1", "trigger_action": "command",
+            "command": [sys.executable, "-c", "print('ok')"],
+        }))
+        assert r.success, r.error
+        assert len(gate["manager"]._triggers) == 1
+        cfg = next(iter(gate["manager"]._triggers.values()))
+        assert cfg.action == "command"
+        assert cfg.action_params["cmd"] == [sys.executable, "-c", "print('ok')"]
+        # 审批描述必须带上命令内容（用户看到的是什么就是什么）
+        create_params = next(p for m, p in hi.calls if m == "create_choice")
+        assert "print('ok')" in create_params["description"], create_params
+
+    def test_approval_wait_timeout_treated_as_denied(self, gate: Any) -> None:
+        """审批等待超时/异常 → 拒绝注册（fail-closed，不落库）。"""
+        hi = _FakeHiCapability({"error": "交互超时: req-1 (超时时间: 86400秒)"})
+        gate["holder"]["provider"] = hi
+        r = _run(gate["tool"].execute({
+            "trigger_type": "delay", "delay_seconds": 60, "message": "m",
+            "pipeline_id": "p1", "trigger_action": "command",
+            "command": [sys.executable, "-c", "print('ok')"],
+        }))
+        assert not r.success, "超时未批复的 command 被注册"
+        assert len(gate["manager"]._triggers) == 0
+
+    def test_notify_action_skips_approval(self, gate: Any) -> None:
+        """notify 类安全动作免审批：不触碰 human-interaction，正常注册。"""
+
+        class _MustNotCall:
+            async def call(self, *args: Any, **kwargs: Any) -> Any:
+                raise AssertionError("notify 动作不应发起审批")
+
+        gate["holder"]["provider"] = _MustNotCall()
+        r = _run(gate["tool"].execute({
+            "trigger_type": "delay", "delay_seconds": 60, "message": "m", "pipeline_id": "p1",
+        }))
+        assert r.success, r.error
+        cfg = next(iter(gate["manager"]._triggers.values()))
+        assert cfg.action == "notify"
+        assert cfg.action_params == {}
+
+    def test_command_shape_validation_before_approval(self, gate: Any) -> None:
+        """command 必须是非空字符串参数列表；形状非法直接拒绝，不发审批。"""
+
+        class _MustNotCall:
+            async def call(self, *args: Any, **kwargs: Any) -> Any:
+                raise AssertionError("形状非法不应发起审批")
+
+        gate["holder"]["provider"] = _MustNotCall()
+        base = {"trigger_type": "delay", "delay_seconds": 60, "message": "m",
+                "pipeline_id": "p1", "trigger_action": "command"}
+        for bad in ("echo hi", [], ["echo", ""], [42], "not-a-list"):
+            r = _run(gate["tool"].execute({**base, "command": bad}))
+            assert not r.success and r.error_code == "INVALID_COMMAND", (bad, r.error)
+
+    def test_approved_command_records_cwd(self, gate: Any) -> None:
+        """cwd 可选参数随模板落库。"""
+        hi = _FakeHiCapability({"response_type": "answered", "selected_option": "approved_once"})
+        gate["holder"]["provider"] = hi
+        r = _run(gate["tool"].execute({
+            "trigger_type": "delay", "delay_seconds": 60, "message": "m", "pipeline_id": "p1",
+            "trigger_action": "command", "command": [sys.executable, "-c", "print('ok')"],
+            "cwd": "somewhere",
+        }))
+        assert r.success, r.error
+        cfg = next(iter(gate["manager"]._triggers.values()))
+        assert cfg.action_params["cwd"] == "somewhere", cfg.action_params
+
+    def test_command_gate_fails_closed_when_provider_not_wired(self, gate: Any) -> None:
+        """provider 未注入（模块级 None）→ fail-closed（区别于 provider 返回 None）。"""
+        gate["mod"].set_capability_provider(None)
+        r = _run(gate["tool"].execute({
+            "trigger_type": "delay", "delay_seconds": 60, "message": "m",
+            "pipeline_id": "p1", "trigger_action": "command",
+            "command": [sys.executable, "-c", "print('ok')"],
+        }))
+        assert not r.success and "审批通道未接入" in (r.error or ""), r.error
+        assert len(gate["manager"]._triggers) == 0
+
+    def test_command_gate_fails_closed_when_capability_missing(self, gate: Any) -> None:
+        """provider 查不到 human-interaction（KeyError）→ fail-closed。"""
+
+        def _raising_provider(name: str) -> Any:
+            raise KeyError(name)
+
+        gate["mod"].set_capability_provider(_raising_provider)
+        r = _run(gate["tool"].execute({
+            "trigger_type": "delay", "delay_seconds": 60, "message": "m",
+            "pipeline_id": "p1", "trigger_action": "command",
+            "command": [sys.executable, "-c", "print('ok')"],
+        }))
+        assert not r.success and "审批能力不可用" in (r.error or ""), r.error
+        assert len(gate["manager"]._triggers) == 0
+
+    @pytest.mark.parametrize("fail_phase", ["create", "create_error", "wait"])
+    def test_command_gate_fails_closed_on_capability_errors(self, gate: Any, fail_phase: str) -> None:
+        """审批请求创建/等待任一环抛错或返回 error dict → 拒绝注册（fail-closed）。"""
+
+        class _BrokenHi:
+            async def call(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
+                if method == "create_choice":
+                    if fail_phase == "create":
+                        raise RuntimeError("capability down")
+                    return {"error": "service not initialized"}
+                if fail_phase == "wait":
+                    raise RuntimeError("bridge closed")
+                return {"request_id": "req-1"}
+
+        gate["holder"]["provider"] = _BrokenHi()
+        r = _run(gate["tool"].execute({
+            "trigger_type": "delay", "delay_seconds": 60, "message": "m",
+            "pipeline_id": "p1", "trigger_action": "command",
+            "command": [sys.executable, "-c", "print('ok')"],
+        }))
+        assert not r.success and "审批" in (r.error or ""), r.error
+        assert len(gate["manager"]._triggers) == 0
+
+    def test_invalid_trigger_action_rejected(self, gate: Any) -> None:
+        r = _run(gate["tool"].execute({
+            "trigger_type": "delay", "delay_seconds": 60, "message": "m",
+            "pipeline_id": "p1", "trigger_action": "magic",
+        }))
+        assert not r.success and r.error_code == "INVALID_TRIGGER_ACTION"
+
+    def test_legacy_shell_string_action_explicitly_rejected(self, gate: Any) -> None:
+        """旧 shell 字符串形态（action=command + action_params.command）显式报停，
+        不静默降级为 notify（存量生产者：dsh_adapter translate_hooks_config）。"""
+        class _MustNotCall:
+            async def call(self, *args: Any, **kwargs: Any) -> Any:
+                raise AssertionError("旧形态不应发起审批")
+
+        gate["holder"]["provider"] = _MustNotCall()
+        r = _run(gate["tool"].execute({
+            "action": "command", "trigger_type": "event", "event_type": "run.completed",
+            "message": "m", "pipeline_id": "p1",
+            "action_params": {"command": "node n.mjs"},
+        }))
+        assert not r.success and r.error_code == "INVALID_ACTION", r.error
+        assert "trigger_action=command" in (r.error or ""), r.error
+        assert len(gate["manager"]._triggers) == 0, "旧形态触发器被静默注册"
+
+
+# ═══════════════════════════════════════════════════════════
+# manifest：审批链接线（human-interaction 授权 + 长等待超时 + schema 同步）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestCommandGateManifest:
+    def _manifest(self) -> dict[str, Any]:
+        import json
+
+        return json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+
+    def test_plugin_json_grants_human_interaction(self) -> None:
+        """审批闸需要反向调用 human-interaction capability（G6 白名单）。"""
+        grants = self._manifest().get("granted_capabilities", [])
+        assert "human-interaction" in grants, grants
+
+    def test_plugin_json_declares_long_wait_mcp_timeout(self) -> None:
+        """审批等待可达 86400s，内核 MCP client 300s 默认会掐断——manifest 须显式声明。"""
+        mcp = self._manifest().get("mcp", {})
+        assert int(mcp.get("request_timeout_secs", 0)) >= 86500, mcp
+
+    def test_plugin_json_input_schema_synced_with_backend(self) -> None:
+        """manifest 内维护的 input_schema 必须与 tool.py 后端定义一致（防漂移）。"""
+        mod = _load_tool()
+        backend = mod.TriggerSetupTool.get_tool_definition().input_schema
+        tools = self._manifest()["capabilities"]["tools"]
+        declared = next(t for t in tools if t["name"] == "trigger_setup")
+        assert declared["input_schema"] == backend
+
+    def test_backend_schema_declares_action_template(self) -> None:
+        mod = _load_tool()
+        props = mod.TriggerSetupTool.get_tool_definition().input_schema["properties"]
+        assert props["trigger_action"]["enum"] == ["notify", "command"]
+        assert props["command"]["type"] == "array" and props["command"]["items"]["type"] == "string"
+
+
+# ═══════════════════════════════════════════════════════════
+# 触发器注册表持久化（P25）：state 是权威持久层，内存注册表是运行缓存。
+# 哪个管道的 state 里有触发器字段，哪个管道就有对应的触发——sidecar
+# 死亡/迁移/回收后 on_load 从 pipeline_state 全量重灌（根治 P21/P24）。
+# ═══════════════════════════════════════════════════════════
+
+_TRIGGER_STATE_PREFIX = "task.trigger.registry."
+
+
+class _FakePipelineState:
+    """内核 pipeline-state capability 假件（update 写面 + list 读面同构）。"""
+
+    def __init__(self) -> None:
+        self._tables: dict[str, dict[str, Any]] = {}
+
+    async def write(self, pipeline_id: str, fields: dict[str, Any]) -> None:
+        """pipeline-state.update 形状（fields 为扁平点号键 → 值）。"""
+        self._tables.setdefault(pipeline_id, {}).update(fields)
+
+    async def list_rows(self) -> list[dict[str, Any]]:
+        """pipeline-state.list 形状（每活管道一行，仅出口 trigger 注册表键）。"""
+        rows = []
+        for pid, fields in self._tables.items():
+            row = {k: v for k, v in fields.items() if k.startswith(_TRIGGER_STATE_PREFIX)}
+            row["pipeline_id"] = pid
+            rows.append(row)
+        return rows
+
+    def drop_pipeline(self, pipeline_id: str) -> None:
+        """模拟管道清理（state 行整行消失——触发器字段天然随之 GC）。"""
+        self._tables.pop(pipeline_id, None)
+
+    def fields_of(self, pipeline_id: str) -> dict[str, Any]:
+        return dict(self._tables.get(pipeline_id, {}))
+
+
+class TestTriggerStatePersistence:
+    def _wired(self, store: _FakePipelineState, *, with_provider: bool = False) -> tuple[_LoopThread, TriggerManager]:
+        """带主循环 + state 写面的 manager（注册等入口从测试线程调，
+        经 run_coroutine_threadsafe 同步落 store，确定性完成）。"""
+        lt = _LoopThread()
+        lt.__enter__()
+        mgr = TriggerManager()
+        mgr.set_main_loop(lt.loop)
+        mgr.set_state_writer(store.write)
+        if with_provider:
+            mgr.set_state_provider(store.list_rows)
+        return lt, mgr
+
+    def test_register_persists_and_new_manager_rehydrates_and_fires(self) -> None:
+        """核心场景：注册同步落 state → 全新实例（sidecar 重启/迁移）重灌 → 15m 周期触发器活到首触发。"""
+        store = _FakePipelineState()
+        lt, mgr1 = self._wired(store)
+        try:
+            past = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=20)).isoformat()
+            scheduled = datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=2)
+            mgr1.register(_make_config(
+                trigger_id="trigger_interval_abc123def456",
+                trigger_type=TriggerType.INTERVAL,
+                interval_seconds=900,
+                max_fires=3,
+                metadata={"register_time": past, "user_id": "u-1"},
+            ))
+            mgr1.register(_make_config(
+                trigger_id="trigger_schedule_abc123def456",
+                trigger_type=TriggerType.SCHEDULED,
+                scheduled_at=scheduled,
+                metadata={"register_time": past},
+            ))
+            # 注册同步落 state：目标管道的 state 出现 trigger.registry 键
+            fields = store.fields_of("pipe-1")
+            assert "task.trigger.registry.trigger_interval_abc123def456" in fields
+            assert "task.trigger.registry.trigger_schedule_abc123def456" in fields
+        finally:
+            mgr1.stop_check_loop()
+        lt.__exit__()
+
+        # 模拟 sidecar 重启：全新 manager 从 state 全量重灌
+        lt2, mgr2 = self._wired(store, with_provider=True)
+        try:
+            assert _run(mgr2.load_from_state()) == 2
+            got = mgr2.get("trigger_interval_abc123def456")
+            assert got is not None
+            assert got.trigger_type == TriggerType.INTERVAL
+            assert got.interval_seconds == 900
+            assert got.max_fires == 3
+            assert got.message == "到点了"
+            assert got.pipeline_id == "pipe-1"
+            assert got.status == TriggerStatus.ACTIVE
+            assert got.metadata.get("register_time") == past
+            # 定时时间 datetime 形态还原（tz aware、时刻相等）
+            got_s = mgr2.get("trigger_schedule_abc123def456")
+            assert got_s is not None
+            assert got_s.scheduled_at is not None
+            assert got_s.scheduled_at.tzinfo is not None
+            assert got_s.scheduled_at == scheduled
+            # 重灌后 check_scheduled 能命中 fire（15m 触发器不再活不到首触发）
+            now = datetime.datetime.now(datetime.UTC)
+            assert mgr2.check_scheduled(now) == ["trigger_interval_abc123def456"]
+            assert got.fire_count == 1
+            # SCHEDULED 未到 → 不触发
+            assert "trigger_schedule_abc123def456" not in mgr2.check_scheduled(now)
+        finally:
+            mgr2.stop_check_loop()
+            lt2.__exit__()
+
+    def test_fire_count_persists_max_semantics_survive_restart(self) -> None:
+        """fire 计数落 state：重启不归零，max_fires 语义跨重启保持。"""
+        store = _FakePipelineState()
+        lt, mgr1 = self._wired(store)
+        tid = "trigger_interval_abc123def456"
+        past = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=20)).isoformat()
+        try:
+            mgr1.register(_make_config(
+                trigger_id=tid,
+                trigger_type=TriggerType.INTERVAL,
+                interval_seconds=900,
+                max_fires=2,
+                metadata={"register_time": past},
+            ))
+            assert mgr1.check_scheduled(datetime.datetime.now(datetime.UTC)) == [tid]
+        finally:
+            mgr1.stop_check_loop()
+        lt.__exit__()
+
+        # 重启后：fire_count == 1（不归零），且紧随其后未到下次间隔（last_fire_time 生效）
+        lt2, mgr2 = self._wired(store, with_provider=True)
+        try:
+            assert _run(mgr2.load_from_state()) == 1
+            got = mgr2.get(tid)
+            assert got is not None
+            assert got.fire_count == 1
+            now = datetime.datetime.now(datetime.UTC)
+            assert mgr2.check_scheduled(now) == [], "重启后 last_fire_time 丢失会立即重复触发"
+            # 间隔过后第 2 次触发 → 达 max_fires → FIRED（写面已接，终态落 state）
+            assert mgr2.check_scheduled(now + datetime.timedelta(seconds=901)) == [tid]
+            assert got.status == TriggerStatus.FIRED
+        finally:
+            mgr2.stop_check_loop()
+        lt2.__exit__()
+
+        # 再次重启：FIRED 终态不灌（不再复活）
+        lt3, mgr3 = self._wired(store, with_provider=True)
+        try:
+            assert _run(mgr3.load_from_state()) == 0
+            assert mgr3.get(tid) is None
+        finally:
+            mgr3.stop_check_loop()
+            lt3.__exit__()
+
+    def test_cancel_persists_and_rehydrated_manager_has_no_trigger(self) -> None:
+        store = _FakePipelineState()
+        lt, mgr1 = self._wired(store)
+        tid = "trigger_delay_abc123def456"
+        try:
+            mgr1.register(_make_config(
+                trigger_id=tid,
+                trigger_type=TriggerType.DELAY,
+                delay_seconds=3600,
+                metadata={"register_time": datetime.datetime.now(datetime.UTC).isoformat()},
+            ))
+            assert mgr1.cancel(tid) is True
+            stored = store.fields_of("pipe-1")[f"task.trigger.registry.{tid}"]
+            assert stored["status"] == "cancelled"
+        finally:
+            mgr1.stop_check_loop()
+        lt.__exit__()
+
+        lt2, mgr2 = self._wired(store, with_provider=True)
+        try:
+            assert _run(mgr2.load_from_state()) == 0
+            assert mgr2.get(tid) is None, "已取消的触发器重灌后不得复活"
+        finally:
+            mgr2.stop_check_loop()
+            lt2.__exit__()
+
+    def test_update_max_fires_persists_reactivation(self) -> None:
+        """FIRED 后 update_max_fires 复活 → state 同步为 ACTIVE + 新上限。"""
+        store = _FakePipelineState()
+        lt, mgr1 = self._wired(store)
+        tid = "trigger_delay_abc123def456"
+        past = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=5)).isoformat()
+        try:
+            mgr1.register(_make_config(
+                trigger_id=tid,
+                trigger_type=TriggerType.DELAY,
+                delay_seconds=10,
+                max_fires=1,
+                metadata={"register_time": past},
+            ))
+            assert mgr1.check_scheduled(datetime.datetime.now(datetime.UTC)) == [tid]
+            assert mgr1.update_max_fires(tid, 3) is True
+            stored = store.fields_of("pipe-1")[f"task.trigger.registry.{tid}"]
+            assert stored["status"] == "active"
+            assert stored["max_fires"] == 3
+        finally:
+            mgr1.stop_check_loop()
+        lt.__exit__()
+
+        lt2, mgr2 = self._wired(store, with_provider=True)
+        try:
+            assert _run(mgr2.load_from_state()) == 1
+            got = mgr2.get(tid)
+            assert got is not None
+            assert got.status == TriggerStatus.ACTIVE
+            assert got.max_fires == 3
+        finally:
+            mgr2.stop_check_loop()
+            lt2.__exit__()
+
+    def test_cleaned_pipeline_skipped_on_rehydrate(self) -> None:
+        """目标管道已清理（state 行消失）→ 重灌跳过；残留字段随管道 state 天然 GC。"""
+        store = _FakePipelineState()
+        lt, mgr1 = self._wired(store)
+        tid = "trigger_interval_abc123def456"
+        try:
+            mgr1.register(_make_config(
+                trigger_id=tid,
+                trigger_type=TriggerType.INTERVAL,
+                interval_seconds=900,
+                metadata={"register_time": datetime.datetime.now(datetime.UTC).isoformat()},
+            ))
+        finally:
+            mgr1.stop_check_loop()
+        lt.__exit__()
+        store.drop_pipeline("pipe-1")
+
+        lt2, mgr2 = self._wired(store, with_provider=True)
+        try:
+            # 内存里预置残留的陈旧触发器（重启前进程态），重灌以 state 为权威替换
+            mgr2._triggers[tid] = _make_config(trigger_id=tid)
+            assert _run(mgr2.load_from_state()) == 0
+            assert mgr2.get(tid) is None, "管道已清理，陈旧触发器不得残留"
+            assert mgr2.list_all() == []
+        finally:
+            mgr2.stop_check_loop()
+            lt2.__exit__()
+
+    def test_load_tolerates_json_string_and_malformed_values(self) -> None:
+        """state 值为 JSON 字符串（跨边界序列化形态）可还原；腐败值跳过不炸。"""
+        store = _FakePipelineState()
+        good = _make_config(
+            trigger_id="trigger_event_abc123def456",
+            trigger_type=TriggerType.EVENT,
+            event_name="task_completed",
+            metadata={"register_time": datetime.datetime.now(datetime.UTC).isoformat()},
+        )
+        good_dict = good.to_state_dict()
+        store._tables["pipe-1"] = {
+            "task.trigger.registry.trigger_event_abc123def456": json.dumps(good_dict),
+            "task.trigger.registry.trigger_broken_000000000001": "not-json{",
+            "task.trigger.registry.trigger_wrong_0000000002": 42,
+        }
+        lt, mgr = self._wired(store, with_provider=True)
+        try:
+            assert _run(mgr.load_from_state()) == 1
+            got = mgr.get("trigger_event_abc123def456")
+            assert got is not None
+            assert got.event_name == "task_completed"
+            assert mgr.get("trigger_broken_000000000001") is None
+            assert mgr.get("trigger_wrong_0000000002") is None
+        finally:
+            mgr.stop_check_loop()
+            lt.__exit__()
+
+    def test_load_without_provider_fails_visible(self) -> None:
+        """state 聚合读面未注入 → 显式报错（不静默空灌）。"""
+        mgr = TriggerManager()
+        with pytest.raises(RuntimeError):
+            _run(mgr.load_from_state())
+
+    def test_register_without_writer_keeps_memory_behavior(self) -> None:
+        """写面未接（桥未就绪/单测形态）→ 注册仍成立（内存运行缓存语义不回归）。"""
+        mgr = TriggerManager()
+        try:
+            cfg = _make_config()
+            mgr.register(cfg)
+            assert mgr.get("t1") is cfg
+        finally:
+            mgr.stop_check_loop()
+
+    def test_writer_failure_degrades_with_log_not_crash(self) -> None:
+        """写面抛错（内核不可达）→ 记录留痕，注册/触发主流程不崩。"""
+        store = _FakePipelineState()
+
+        async def _broken_write(pipeline_id: str, fields: dict[str, Any]) -> None:
+            raise RuntimeError("kernel down")
+
+        lt, mgr = self._wired(store)
+        try:
+            mgr.set_state_writer(_broken_write)
+            cfg = _make_config(trigger_type=TriggerType.DELAY, delay_seconds=1)
+            mgr.register(cfg)  # 不抛异常
+            assert mgr.get("t1") is cfg
+        finally:
+            mgr.stop_check_loop()
+            lt.__exit__()
+
+    def test_plugin_json_exports_trigger_registry_keys(self) -> None:
+        """manifest 须声明 export_fields 出口（pipeline-state.list 才能带回注册表字段）。"""
+        manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+        assert "task.trigger.registry.*" in manifest.get("export_fields", []), manifest.get("export_fields")
+
+
+class TestStatePersistenceWiring:
+    """server.py 接线：state 写面注入 + on_load 全量重灌。"""
+
+    def test_state_writer_calls_pipeline_state_update(self) -> None:
+        server = _load_server()
+
+        class FakeState:
+            def __init__(self) -> None:
+                self.calls: list[tuple] = []
+
+            async def call(self, method: str, params: dict) -> dict:
+                self.calls.append((method, params))
+                return {"status": "updated"}
+
+        cap = FakeState()
+
+        def _get_cap(_name: str) -> FakeState:
+            return cap
+
+        server.plugin.get_capability = _get_cap  # type: ignore[method-assign]
+        writer = server._make_state_writer()
+        _run(writer("p1", {"task.trigger.registry.t1": {"trigger_id": "t1"}}))
+        assert cap.calls == [
+            ("update", {"pipeline_id": "p1", "fields": {"task.trigger.registry.t1": {"trigger_id": "t1"}}})
+        ]
+
+    def test_on_load_injects_state_writer_and_rehydrates(self) -> None:
+        import triggers.manager as manager_mod
+
+        server = _load_server()
+        real_mgr = manager_mod.get_trigger_manager()
+        real_mgr.stop_check_loop()
+        saved = (real_mgr._state_writer, real_mgr._state_provider, real_mgr._event_bridge_ready)
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(server._on_load({}))
+                assert real_mgr._state_writer is not None, "on_load 应注入 state 写面"
+            finally:
+                loop.close()
+        finally:
+            real_mgr._state_writer, real_mgr._state_provider, real_mgr._event_bridge_ready = saved
+            real_mgr.stop_check_loop()
+
+
+class _KillableProc:
+    """带 pid 与可注入 kill 行为的假进程（仅覆盖外部终止边界）。"""
+
+    def __init__(self, pid: int, *, kill_error: Exception | None = None) -> None:
+        self.pid = pid
+        self._kill_error = kill_error
+        self.kill_called = False
+
+    def kill(self) -> None:
+        self.kill_called = True
+        if self._kill_error is not None:
+            raise self._kill_error
+
+
+class TestKillProcessTree:
+    """超时杀进程树平台对称：Windows taskkill /T /F；POSIX killpg 整组。
+    失败必须留痕（pid 上下文），不得静默残留进程。"""
+
+    def test_windows_taskkill_failure_logs_warning(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        import triggers.manager as manager_mod
+
+        def _boom(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("taskkill unavailable")
+
+        monkeypatch.setattr(manager_mod.subprocess, "run", _boom)
+        with caplog.at_level("WARNING", logger=manager_mod.logger.name):
+            TriggerManager._kill_process_tree(_KillableProc(4321))
+        assert any("4321" in rec.message and rec.levelno >= logging.WARNING for rec in caplog.records), caplog.text
+
+    def test_windows_taskkill_success_path_no_warning(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        """Windows 正常路径（taskkill 可用）：无告警（≥2 组区分输入）。"""
+        import triggers.manager as manager_mod
+
+        monkeypatch.setattr(manager_mod.os, "name", "nt")
+        with caplog.at_level("WARNING", logger=manager_mod.logger.name):
+            TriggerManager._kill_process_tree(_KillableProc(4326))
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_posix_uses_killpg_on_whole_group(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """POSIX：killpg(pid, SIGKILL) 整组终止——不再单 proc.kill() 留孤儿孙进程。"""
+        import triggers.manager as manager_mod
+
+        calls: list[tuple[int, Any]] = []
+
+        def _fake_killpg(pid: int, sig: Any) -> None:
+            calls.append((pid, sig))
+
+        monkeypatch.setattr(manager_mod.os, "name", "posix")
+        monkeypatch.setattr(manager_mod.os, "killpg", _fake_killpg, raising=False)
+        proc = _KillableProc(4325)
+
+        TriggerManager._kill_process_tree(proc)
+
+        assert calls == [(4325, manager_mod._POSIX_SIGKILL)]
+        assert proc.kill_called is False, "POSIX 分支应整组 killpg，不得单杀根进程"
+
+    def test_posix_group_already_gone_is_success(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        """POSIX 进程组已退出（ProcessLookupError）= 目标已达成：不告警不抛。"""
+        import triggers.manager as manager_mod
+
+        def _gone(pid: int, sig: Any) -> None:
+            raise ProcessLookupError("no such process")
+
+        monkeypatch.setattr(manager_mod.os, "name", "posix")
+        monkeypatch.setattr(manager_mod.os, "killpg", _gone, raising=False)
+        with caplog.at_level("WARNING", logger=manager_mod.logger.name):
+            TriggerManager._kill_process_tree(_KillableProc(4327))
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_posix_killpg_failure_logs_warning(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        """POSIX killpg 失败（权限等 OSError）：告警带 pid，不吞不抛。"""
+        import triggers.manager as manager_mod
+
+        def _denied(pid: int, sig: Any) -> None:
+            raise OSError("operation not permitted")
+
+        monkeypatch.setattr(manager_mod.os, "name", "posix")
+        monkeypatch.setattr(manager_mod.os, "killpg", _denied, raising=False)
+        with caplog.at_level("WARNING", logger=manager_mod.logger.name):
+            TriggerManager._kill_process_tree(_KillableProc(4322))
+        assert any("4322" in rec.message and rec.levelno >= logging.WARNING for rec in caplog.records), caplog.text
+
+
+class TestCommandSpawnShape:
+    """command 动作 spawn 形态：POSIX 独立进程组（killpg 前提），Windows 关闭。"""
+
+    @pytest.mark.parametrize("platform_name,expected_session", [("nt", False), ("posix", True)])
+    def test_spawn_sets_start_new_session_by_platform(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform_name: str, expected_session: bool
+    ) -> None:
+        """start_new_session 随平台收口：POSIX True（自成进程组）、Windows False。
+
+        Windows 宿主无法真跑 POSIX spawn，按参数形态断言（分支纯参数差异，
+        行为等价性由 TestKillProcessTree 的 killpg 形态断言补足）。以模块级
+        os 垫片钉平台——不能全局改 os.name（Python 3.14 pathlib 构造会跟着
+        平台漂移，PosixPath 在 Windows 宿主直接拒实例化）。
+        """
+        import triggers.manager as manager_mod
+
+        monkeypatch.chdir(tmp_path)  # 审计日志落 tmp，不污染仓库
+        monkeypatch.setattr(
+            manager_mod, "os", types.SimpleNamespace(name=platform_name, environ=dict(os.environ))
+        )
+        captured: dict[str, Any] = {}
+
+        class _FakeProc:
+            pid = 1234
+            returncode = 0
+
+            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+                return b"out", b""
+
+            def kill(self) -> None:
+                pass
+
+        def _fake_popen(cmd: Any, **kwargs: Any) -> Any:
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return _FakeProc()
+
+        monkeypatch.setattr(manager_mod.subprocess, "Popen", _fake_popen)
+        mgr = TriggerManager()
+        trigger = _make_config(
+            action="command",
+            action_params={"cmd": ["echo", "hi"], "timeout_ms": 1000},
+        )
+
+        mgr._run_command(trigger, "evt", {"k": "v"})
+
+        assert captured["kwargs"]["start_new_session"] is expected_session
+        assert captured["kwargs"]["shell"] is False
+        assert captured["cmd"] == ["echo", "hi"]
+        # 执行留痕进 metadata（读面可查）
+        assert trigger.metadata["last_command_execution"]["exit_code"] == 0

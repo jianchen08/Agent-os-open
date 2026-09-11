@@ -1,7 +1,7 @@
 /** 契约状态面板测试（闸2·观测前端，契约校验方案配合） */
 import { render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ContractStatusPanel, contractRedLight, parseContractStatus } from '../ContractStatusPanel'
 
 const apiGet = vi.fn()

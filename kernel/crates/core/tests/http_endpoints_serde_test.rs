@@ -49,7 +49,7 @@ fn test_manifest_deserializes_http_endpoints() {
     assert_eq!(post.route_id, "wecom_callback");
     assert_eq!(post.method, "POST");
     assert_eq!(post.path, "/ext/wecom/callback");
-    assert_eq!(post.auth, "none");
+    assert_eq!(post.auth.as_deref(), Some("none"));
     assert_eq!(post.handler_capability, "http.handle");
     assert_eq!(post.timeout_ms, Some(30000));
     assert_eq!(post.max_concurrency, Some(16));
@@ -87,6 +87,8 @@ fn test_manifest_without_http_endpoints_defaults_empty() {
 #[test]
 fn test_empty_http_endpoints_omitted_in_serialization() {
     let manifest = PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "p".to_string(),
         name: "P".to_string(),
         description: None,
@@ -152,7 +154,7 @@ fn test_http_endpoint_struct_constructible() {
         route_id: "r".to_string(),
         method: "GET".to_string(),
         path: "/ext/p/x".to_string(),
-        auth: "none".to_string(),
+        auth: Some("none".to_string()),
         handler_capability: "http.handle".to_string(),
         timeout_ms: None,
         max_concurrency: None,
@@ -160,4 +162,24 @@ fn test_http_endpoint_struct_constructible() {
     };
     assert_eq!(ep.route_id, "r");
     assert_eq!(ep.method, "GET");
+}
+
+/// auth 字段缺省反序列化为 None（无声明）——dispatcher 据此走 fail-closed 语义。
+#[test]
+fn test_http_endpoint_auth_missing_defaults_to_none_state() {
+    let json = r#"{
+        "id": "p", "name": "P", "version": "1.0.0",
+        "plugin_type": "system", "language": "python",
+        "host_type": "sidecar", "entry": "python server.py", "capabilities": {},
+        "http_endpoints": [
+            {"route_id": "r", "method": "GET", "path": "/ext/p/x",
+             "handler_capability": "http.handle"}
+        ]
+    }"#;
+
+    let manifest: PluginManifest = serde_json::from_str(json).expect("manifest must parse");
+    assert_eq!(
+        manifest.http_endpoints[0].auth, None,
+        "缺省 auth 应反序列化为 None（无声明，区别于显式 none）"
+    );
 }

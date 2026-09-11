@@ -12,9 +12,8 @@
  * 主数组即唯一消息面（无独立 pending 区）——「发送后用户消息消失」结构性不可能。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-
-import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { handleNewMessage } from '@/services/websocket/streaming/handlers'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 
 const PIPELINE_ID = 'pipe-pending-life'
 const THREAD_ID = 'thread-pending-life'

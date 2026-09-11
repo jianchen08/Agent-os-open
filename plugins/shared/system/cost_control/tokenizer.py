@@ -2,7 +2,6 @@
 Token 计数工具
 
 提供文本和消息的 Token 计数功能
-从 0.1 src/core/tokenizer.py 直接复制，无导入适配需求（仅依赖 tiktoken）。
 """
 
 from typing import Any
@@ -17,7 +16,6 @@ class TokenCounter:
     支持多种 Tokenizer，用于计算文本和消息的 Token 数量
     """
 
-    # 模型到编码的映射
     MODEL_ENCODINGS = {
         "gpt-4": "cl100k_base",
         "gpt-4-turbo": "cl100k_base",
@@ -25,7 +23,7 @@ class TokenCounter:
         "gpt-4o-mini": "o200k_base",
         "gpt-3.5-turbo": "cl100k_base",
         "claude": "cl100k_base",
-        "glm": "cl100k_base",  # GLM 模型使用 cl100k_base
+        "glm": "cl100k_base",
         "deepseek": "cl100k_base",
         "default": "cl100k_base",
     }
@@ -40,7 +38,6 @@ class TokenCounter:
         try:
             self.encoding = tiktoken.get_encoding(encoding_name)
         except KeyError:
-            # 如果指定的 encoding 不存在，使用默认的
             self.encoding = tiktoken.encoding_for_model("gpt-4")
 
     def _encoding_for_model(self, model: str) -> str | None:
@@ -71,7 +68,6 @@ class TokenCounter:
             tokens = self.encoding.encode(text)
             return len(tokens)
         except Exception:
-            # 如果编码失败，使用快速估算
             return self.estimate_tokens(text)
 
     def count_messages(self, messages: list[dict[str, Any]], model: str = "gpt-4") -> int:
@@ -85,7 +81,6 @@ class TokenCounter:
         Returns:
             总 Token 数量
         """
-        # 查找匹配的编码（最长前缀优先，见 _encoding_for_model）
         encoding_name = self._encoding_for_model(model)
 
         if encoding_name is None:
@@ -98,8 +93,7 @@ class TokenCounter:
 
         total = 0
 
-        # 每条消息的开销（role, content 等）
-        # 参考 OpenAI 的计算方式
+        # 每条消息的开销（role, content 等），参考 OpenAI 的计算方式
         per_message_tokens = 4  # 每条消息约 4 tokens
         total += len(messages) * per_message_tokens
 
@@ -107,13 +101,11 @@ class TokenCounter:
             role = message.get("role", "")
             content = message.get("content", "")
 
-            # 计算每个字段的 token 数
             if role:
                 total += len(encoding.encode(role))
             if content:
                 total += len(encoding.encode(content))
 
-            # 每个字段的键名也要算
             total += 2  # "role" + ": "
             total += 2  # "content" + ": "
 
@@ -137,11 +129,9 @@ class TokenCounter:
         role = message.get("role", "")
         content = message.get("content", "")
 
-        # 计算每个字段的 token 数
         total += self.count_tokens(role)
         total += self.count_tokens(content)
 
-        # 每个字段的键名
         total += 2  # "role" + ": "
         total += 2  # "content" + ": "
 
@@ -165,16 +155,13 @@ class TokenCounter:
         if not text:
             return 0
 
-        # 统计中文字符
         chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
 
-        # 统计英文字符
         english_chars = sum(1 for c in text if c.isascii() and c.isalpha())
 
         # 其他字符（标点、数字、空格等）
         other_chars = len(text) - chinese_chars - english_chars
 
-        # 估算
         chinese_tokens = chinese_chars / 2  # 中文约 2 字符/token
         english_tokens = english_chars / 4  # 英文约 4 字符/token
         other_tokens = other_chars / 3  # 其他约 3 字符/token
@@ -197,14 +184,11 @@ class TokenCounter:
         if current_tokens <= max_tokens:
             return text
 
-        # 需要截断
         try:
-            # 使用 Tokenizer 精确截断
             tokens = self.encoding.encode(text)
             truncated_tokens = tokens[:max_tokens]
             return self.encoding.decode(truncated_tokens)
         except Exception:
-            # 如果失败，按字符比例截断
             ratio = max_tokens / current_tokens
             target_length = int(len(text) * ratio * 0.9)  # 保留 10% 余量
             return text[:target_length]
@@ -235,15 +219,12 @@ class TokenCounter:
         if current_tokens <= max_tokens:
             return messages
 
-        # 如果要保留首尾，优先处理
         if keep_first > 0 or keep_last > 0:
             result = []
 
-            # 保留前 N 条
             if keep_first > 0:
                 result.extend(messages[:keep_first])
 
-            # 计算中间部分可以保留多少
             first_part = messages[:keep_first] if keep_first > 0 else []
             last_part = messages[-keep_last:] if keep_last > 0 else []
 
@@ -252,7 +233,6 @@ class TokenCounter:
             remaining_tokens = max_tokens - first_tokens - last_tokens
 
             if remaining_tokens > 0:
-                # 从中间截断
                 middle_start = keep_first
                 middle_end = len(messages) - keep_last
                 middle_messages = messages[middle_start:middle_end]
@@ -271,7 +251,6 @@ class TokenCounter:
 
                 result.extend(truncated_middle)
 
-            # 保留后 N 条
             if keep_last > 0:
                 result.extend(messages[-keep_last:])
 

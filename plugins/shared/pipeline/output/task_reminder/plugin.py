@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from enum_utils import safe_enum_value
+from agentos_plugin_sdk.enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ACTIVE_TASK_STATUSES
 
@@ -18,6 +19,17 @@ logger = logging.getLogger(__name__)
 # 标量值无跨边界 JSON 还原问题）；子任务终态事件经 task_service 写 null 清除
 # （pipeline-state.update 无键删除语义，null 即已回执）。
 _PENDING_SUBTASK_PREFIX = "task.subtasks_pending."
+
+# 提醒额度记账键（持久键，声明见 plugin.json persistent_fields）：
+# - reminder_seen_result_fp：上次判定轮 raw_result 的稳定指纹。本轮指纹一致
+#   说明 llm_core 本轮未覆盖写（成功轮必写 raw_result）——残留即失败轮信号①。
+# - evaluate_reminder_run：额度归属 run（值为引擎每 run 覆盖写的
+#   run_started_at）。不一致 = 恢复动作拉起了新 run，额度重置。
+_RESULT_FP_KEY = "reminder_seen_result_fp"
+_RUN_KEY = "evaluate_reminder_run"
+# 失败轮短路标记：execute 包装层消费后摘除，不会进入 state 合并
+# （下划线键被引擎 merge 过滤，双保险）。
+_FAILURE_ROUND_FLAG = "_system_failure_round"
 
 
 class TaskReminder(IOutputPlugin):
@@ -41,10 +53,41 @@ class TaskReminder(IOutputPlugin):
         return self._config.get("priority", 35)
 
     async def execute(self, ctx: PluginContext) -> OutputResult:  # noqa: PLR0911
-        """执行任务评估提醒检测。
+        """执行任务评估提醒检测（包装层：失败轮识别 + 产出基线记账）。
+
+        判定契约：本轮 raw_result 指纹与记账基线一致（llm_core 未覆盖写）
+        且本 run 存在 llm_core 错误条目 → 系统失败轮，短路重试不计额度；
+        其余轮交 `_execute_inner` 三信号判据（ADR
+        2026-08-28-task-closure-three-signal-gate）。产出基线只在 llm_call 轮
+        推进（基线语义 = 最近一次 LLM 产出；失败轮冻结，连续失败按同一基线
+        持续识别）。
+        """
+        state = ctx.state
+        stale_output = self._is_stale_output(state)
+        result = await self._execute_inner(ctx, stale_output=stale_output)
+        updates = result.state_updates
+        if updates.pop(_FAILURE_ROUND_FLAG, False):
+            # 失败轮基线冻结：连续失败轮按同一基线持续识别（不推进）。
+            return result
+        if str(state.get("core_type") or "") != "llm_call":
+            return result
+        new_fp = self._result_fingerprint(state.get("raw_result"))
+        if state.get(_RESULT_FP_KEY) != new_fp:
+            # 基线幂等推进：指纹未变的轮不重写（减少无谓 state diff）。
+            updates[_RESULT_FP_KEY] = new_fp
+        return result
+
+    async def _execute_inner(
+        self,
+        ctx: PluginContext,
+        *,
+        stale_output: bool,
+    ) -> OutputResult:  # noqa: PLR0911
+        """三信号收束判据主体。
 
         收束判据 = 三信号按序短路（ADR 2026-08-28-task-closure-three-signal-gate），
         全部读 state / 对话结构，不解析渲染文本形态：
+        0. 系统失败轮（stale_output）→ 不评判不计额，置续跑标志直接重试；
         1. 本轮有工具调用 → 路由工具执行，不评判；
         2. ``state.task.status == completed``（经 pipeline-state 写面写入的）→
            当轮收束 end——评估成功落库的当轮即收束，提醒根本不注入，
@@ -81,12 +124,34 @@ class TaskReminder(IOutputPlugin):
         # L1（灵汐）的纯文本输出是正常的调度/沟通汇报，不代表"忘了提交评估"。
         # 层级单一真值：顶层 agent_level（context_build 以实际 Agent 层级
         # 无条件覆盖，见 context_build/plugin.py）。reminder 只对叶子执行者有意义。
-        if state.get("agent_level", "") == "L1":
+        # 豁免豁免：评估子管道（plugin_configs.task_reminder.evaluation_mode=true
+        # 派发标记）按构造不是调度层——身份降级（如缺 agent.id 静默回退 L1）时
+        # 此标记比 agent_level 更可信，跳过 L1 早退，否则 detected_result 永不
+        # 落库、task_evaluate 轮询必超时（B12 根因②）。
+        if (
+            state.get("agent_level", "") == "L1"
+            and not self._is_evaluation_mode(state)
+        ):
             logger.debug(
                 "TaskReminder[iter=%s]: skip, L1 调度层不触发 reminder",
                 iteration,
             )
             return OutputResult()
+
+        # ── 系统失败轮：llm_core 本轮未产出（超时/失败轮引擎 warn+继续，
+        #    state 残留上轮 raw_*）。系统瓶颈不是 agent 空转：不计提醒额度、
+        #    不注入提醒（残留文本非本轮产出），置续跑标志驱动重试；基线由
+        #    包装层冻结。连续失败持续豁免（同一基线 + llm_core 错误条目在
+        #    本 run 内持续存在），系统恢复后下一轮有产出即回归正常计额。──
+        if stale_output:
+            logger.warning(
+                "TaskReminder[iter=%s]: llm_core failed round (stale output + "
+                "llm_core error), retrying without consuming reminder budget",
+                iteration,
+            )
+            return OutputResult(
+                state_updates={"_has_new_llm_input": True, _FAILURE_ROUND_FLAG: True},
+            )
 
         raw_tool_calls = state.get("raw_tool_calls", [])
         raw_result = state.get("raw_result", "")
@@ -107,7 +172,7 @@ class TaskReminder(IOutputPlugin):
         # 管道）不可能有该证据，天然跳过。──
         if self._task_completed_in_state(state):
             return self._completed_round_result(
-                state, iteration=iteration, task_id=state.get("task.id"),
+                state, iteration=iteration, task_id=str(state.get("task.id") or ""),
             )
 
         # ── 信号①：本轮有工具调用 → 路由工具执行，不评判（ADR 2026-08-28
@@ -164,7 +229,13 @@ class TaskReminder(IOutputPlugin):
         if gated is not None:
             return gated
 
-        reminder_count = state.get("evaluate_reminder_count", 0)
+        reminder_count, _, run_renewed = self._reminder_budget(state)
+        if run_renewed:
+            logger.info(
+                "TaskReminder[iter=%s][task=%s]: resumed into new run, reminder budget reset",
+                iteration,
+                task_id,
+            )
         if reminder_count >= self._max_reminders:
             return self._reminder_exhausted_result(
                 state, reminder_count=reminder_count, iteration=iteration, task_id=task_id,
@@ -189,6 +260,52 @@ class TaskReminder(IOutputPlugin):
         )
         return OutputResult(state_updates={"task.status": "running"})
 
+    @staticmethod
+    def _result_fingerprint(raw_result: Any) -> str:
+        """raw_result 稳定指纹（sha1——内建 hash 有进程级随机化，跨 respawn
+        后 state 恢复的基线不可对比）。"""
+        return hashlib.sha1(str(raw_result).encode("utf-8", "replace")).hexdigest()
+
+    @classmethod
+    def _is_stale_output(cls, state: dict[str, Any]) -> bool:
+        """失败轮判据：本轮 llm_core 未产出任何内容。
+
+        双条件交叉（单条件皆误判）：
+        ① raw_result 指纹与记账基线（reminder_seen_result_fp）一致——成功轮
+           必覆盖写 raw_result；失败/超时轮引擎统一 warn+继续、state_updates
+           为空，残留上轮值。
+        ② 本 run 存在 llm_core 错误条目（``_plugin_errors``，引擎 run 开头
+           清空）——排除 agent 连轮输出相同文本的正常重复轮（该轮必须正常
+           计额，否则复读即可绕过提醒耗尽兜底）。
+        """
+        fp = cls._result_fingerprint(state.get("raw_result"))
+        if fp != state.get(_RESULT_FP_KEY):
+            return False
+        errors = state.get("_plugin_errors")
+        if not isinstance(errors, list):
+            return False
+        return any(
+            isinstance(e, dict) and str(e.get("plugin_id") or "").endswith("llm_core")
+            for e in errors
+        )
+
+    @staticmethod
+    def _reminder_budget(state: dict[str, Any]) -> tuple[int, str, bool]:
+        """提醒额度现状：``(计数, run_started_at, 是否恢复新 run)``。
+
+        额度按 run 记账（``evaluate_reminder_run`` 记录计数归属的 run）：
+        continue/retry 恢复经 resume_pipeline 拉起新 run，引擎每 run 覆盖写
+        ``run_started_at``——不一致即恢复轮，额度重置为 0（计数随 state 继承
+        会让恢复任务带着残缺额度，轻则提前耗尽重则被耗尽裁决误杀）。
+        ``run_started_at`` 缺失（旧快照/异常态）按同 run 处理，保守不重置。
+        """
+        run_at = str(state.get("run_started_at") or "")
+        counted_run = str(state.get(_RUN_KEY) or "")
+        renewed = bool(run_at) and run_at != counted_run
+        if renewed:
+            return 0, run_at, True
+        return int(state.get("evaluate_reminder_count", 0) or 0), run_at, False
+
     def _eval_no_text_tracking(
         self,
         state: dict[str, Any],
@@ -205,7 +322,9 @@ class TaskReminder(IOutputPlugin):
             return None
 
         task_id = str(state.get("task.id") or "-")
-        tool_only_count = state.get("eval_tool_only_count", 0) + 1
+        _, run_at, run_renewed = self._reminder_budget(state)
+        tool_only_base = 0 if run_renewed else int(state.get("eval_tool_only_count", 0) or 0)
+        tool_only_count = tool_only_base + 1
         if tool_only_count < self._EVAL_TOOL_ONLY_THRESHOLD:
             logger.debug(
                 "TaskReminder[iter=%s][task=%s]: eval no-text count=%d",
@@ -216,10 +335,11 @@ class TaskReminder(IOutputPlugin):
             return OutputResult(
                 state_updates={
                     "eval_tool_only_count": tool_only_count,
+                    "evaluate_reminder_run": run_at,
                 }
             )
 
-        reminder_count = state.get("evaluate_reminder_count", 0)
+        reminder_count, _, _ = self._reminder_budget(state)
         if reminder_count >= self._max_reminders:
             # 提醒已达上限不再注入，仅维持计数。
             logger.debug(
@@ -231,6 +351,7 @@ class TaskReminder(IOutputPlugin):
             return OutputResult(
                 state_updates={
                     "eval_tool_only_count": tool_only_count,
+                    "evaluate_reminder_run": run_at,
                 }
             )
         reminder_message = (
@@ -257,6 +378,7 @@ class TaskReminder(IOutputPlugin):
                 "messages": messages,
                 "evaluate_reminder_count": reminder_count + 1,
                 "eval_tool_only_count": 0,
+                "evaluate_reminder_run": run_at,
                 "_has_new_llm_input": True,
             },
         )
@@ -278,6 +400,11 @@ class TaskReminder(IOutputPlugin):
 
         if self._is_evaluation_mode(state):
             detected = self._detect_evaluation_result_json(raw_text)
+            if detected is None:
+                # 回退：raw_result 是纯在飞键，个别时序路径可能缺席——评估者
+                # 合规输出带 JSON 尾巴，从最后一条 assistant 文本再扫一次，
+                # 防 detected_result 缺席导致 task_evaluate 轮询超时（B12）
+                detected = self._detect_last_assistant_json(state.get("messages", []))
             if detected is not None:
                 logger.info(
                     "TaskReminder[iter=%s][task=%s]: evaluation_result JSON detected, sending end signal",
@@ -505,6 +632,7 @@ class TaskReminder(IOutputPlugin):
             state_updates={
                 "messages": messages,
                 "evaluate_reminder_count": reminder_count + 1,
+                "evaluate_reminder_run": str(state.get("run_started_at") or ""),
                 "_has_new_llm_input": True,
             },
         )
@@ -560,6 +688,22 @@ class TaskReminder(IOutputPlugin):
             if "success" not in parsed and "error" not in parsed:
                 return True
         return False
+
+    @classmethod
+    def _detect_last_assistant_json(cls, messages: list[Any]) -> dict[str, Any] | None:
+        """回退检测：最后一条含文本的 assistant 消息里找 evaluation_result JSON。"""
+        for msg in reversed(messages or []):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            text = str(msg.get("content") or "")
+            if not text.strip():
+                continue
+            detected = cls._detect_evaluation_result_json(text)
+            if detected is not None:
+                return detected
+            # 只看最后一条有文本的 assistant（更早的属旧轮次，不当本轮证据）
+            return None
+        return None
 
     @staticmethod
     def _detect_evaluation_result_json(text: str) -> dict[str, Any] | None:

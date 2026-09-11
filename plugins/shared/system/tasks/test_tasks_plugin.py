@@ -53,10 +53,18 @@ def _isolate_tasks_plugin_modules():
     串扰根因之一。还原后进程回到本文件运行前的模块状态。
     """
     d = str(_PLUGIN_DIR)
+    # 共享根（plugins/shared 平铺模块：state_fields/project_registry 等）——
+    # 对齐生产 sidecar sys.path 形态（自身目录 + shared 根），缺根则
+    # http_api 的 `import state_fields` 裸名导入 ModuleNotFoundError。
+    shared_root = str(_PLUGIN_DIR.parents[1])
     _was_present = d in sys.path
+    _added_shared_root = False
     if d in sys.path:
         sys.path.remove(d)
     sys.path.insert(0, d)
+    if shared_root not in sys.path:
+        sys.path.insert(1, shared_root)
+        _added_shared_root = True
     _evict_names = (
         "task_types",
         "state_machine",
@@ -83,6 +91,8 @@ def _isolate_tasks_plugin_modules():
         sys.path.remove(d)
     if _was_present:
         sys.path.insert(0, d)
+    if _added_shared_root:
+        sys.path.remove(shared_root)
     # 还原逐出前的模块代际（本测试期间重导的同名模块一并回滚）
     for m in _evict_names:
         if m in _evicted:
@@ -787,13 +797,14 @@ class TestGetTaskStateRead:
             "status": "completed",
             "thread_id": "thread-s1",
             "pipeline_run_id": "pipe1abc123",
-            "metadata": {},
+            # U6 归属闸：请求方须与归属（metadata.submitted_by）一致才可达
+            "metadata": {"submitted_by": "u-1"},
         }
         monkeypatch.setattr(
             http_api, "_list_tasks_from_state", self._state_rows([row])
         )
 
-        resp = await http_api.get_task("pipe1abc123")
+        resp = await http_api.get_task("pipe1abc123", _user={"sub": "u-1"})
         assert resp.id == "pipe1abc123"
         assert resp.status == "completed"
         assert resp.thread_id == "thread-s1"

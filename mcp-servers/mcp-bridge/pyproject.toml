@@ -1,0 +1,22 @@
+[project]
+name = "mcp-bridge"
+version = "0.1.0"
+description = "MCP Bridge 网关——沙箱→宿主的通用 MCP-over-HTTP 网关（认证/白名单/审计/会话管理）"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B"]

@@ -2,6 +2,7 @@
  * outputSchemaView 单元测试（widget 化 T4）+ enhance 链接线测试
  */
 import { beforeEach, describe, expect, it } from 'vitest'
+import { addChatCardDeclaration, clearChatCardDeclarations } from '@/utils/chatCardInterpreter'
 import {
   buildOutputSchemaView,
   getOutputSchema,
@@ -11,7 +12,6 @@ import {
   validateOutputSubset,
 } from '@/utils/outputSchemaView'
 import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
-import { addChatCardDeclaration, clearChatCardDeclarations } from '@/utils/chatCardInterpreter'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 

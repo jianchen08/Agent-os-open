@@ -14,6 +14,7 @@ import base64
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from collections.abc import Callable
@@ -26,19 +27,24 @@ _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
 
-from _message_normalizer import (  # noqa: E402
-    _is_valid_tool_call_id,
-    normalize_messages_for_provider,
-)
-
-# LLMResponse/LLMAdapter：响应类型与测试注入适配器协议定义（adapter 模块保留
-# 为类型/响应结构归属地；llm_core 不再直连 LLM API，调用走 llm_service）。
-from adapter import LLMAdapter, LLMResponse  # noqa: E402
+# LLMResponse：聚合响应结构归属地（llm_core 不再直连 LLM API，调用走 llm_service）。
+from adapter import LLMResponse  # noqa: E402
 from pipeline.plugin import ICorePlugin, PluginContext  # noqa: E402
 from pipeline.types import StateKeys  # noqa: E402
 from uploads_path import resolve_uploads_url  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# tool_call id 标准格式契约（call_<hex>）：LLM 返回的 id 统一校验/重写，
+# 与 llm_service normalizer 的 id remap 同一契约、各自插件自持实现
+# （插件自包含，跨插件不 import 模块）。
+_TOOL_CALL_ID_RE = re.compile(r"call_[0-9a-f]+\Z")
+
+
+def _is_valid_tool_call_id(tc_id: Any) -> bool:
+    """检查 tool_call_id 是否符合系统标准格式 call_<hex>。"""
+    return isinstance(tc_id, str) and bool(_TOOL_CALL_ID_RE.fullmatch(tc_id))
+
 
 # ── 能力调用器（LLM 面唯一事实源 = llm_service）────────────────────────
 # llm_core 的 LLM 调用经内核 tool-executor 能力跨进程调 llm.complete_stream
@@ -84,9 +90,14 @@ class PartialStreamOutcome:
 # ── 思考强度 → 模型参数（思考强度全链路）────────────────────────────
 # 前端 user_input 携带 thinking_strength（off/low/medium/high），内核透传注入
 # state；llm_core 在请求构造时按档位覆盖**思考相关参数**（reasoning_effort /
-# thinking），与 default_params 合并后进 kwargs。reasoning_effort 经
-# _provider_registry.apply_pre_send 对 openai/ 前缀 provider 自动挪进 extra_body
-# 透传（DeepSeek 等）。off/缺失 → 不覆盖（保持 llm.yaml default_params 现状）。
+# thinking），与 default_params 合并后进 kwargs。reasoning_effort 的
+# extra_body 透传（DeepSeek 等 OpenAI 兼容中转）由 llm_service adapter 侧
+# 处理。
+#
+# off 是与其他档位同级的档位（不是"跳过覆盖"的哨兵值）：模型默认参数常自带
+# 思考开启（default_params 的 thinking / reasoning_effort），off 若短路成
+# "不覆盖"，用户选「关闭」时默认的开启值原样出站，思考照跑。故 off 走同一条
+# 映射查找——命中该档位即覆盖为厂商的关闭形态，未配置则同其余档位不覆盖。
 #
 # 决策（用户确认）：temperature / max_tokens 等采样参数**不随强度覆盖**——
 # 强度只路由思考参数，采样参数始终用模型 default_params。
@@ -116,7 +127,10 @@ def resolve_thinking_strength_params(
     *,
     provider_params: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """思考强度 → 思考参数覆盖集；off/未知/空/无显式映射 → None（不覆盖）。
+    """思考强度 → 思考参数覆盖集；空/未知/无显式映射 → None（不覆盖）。
+
+    off 与 low/medium/high 同级：同为查表档位，命中即覆盖为厂商关闭形态
+    （映射未配 off 的模型同其余档位不覆盖）。
 
     Args:
         strength: 思考强度档位（off/low/medium/high）
@@ -126,7 +140,7 @@ def resolve_thinking_strength_params(
             thinking_strength_params，经 _config_models 桥接注入）。命中该档位
             → 直接映射（厂商参数即上游真实契约）。
     """
-    if not strength or strength == "off":
+    if not strength:
         return None
     for params in (provider_params, model_params):
         if isinstance(params, dict):
@@ -153,14 +167,12 @@ class LLMCore(ICorePlugin):
         _api_base: API 端点 URL
         _api_key: API 密钥
         _default_params: 默认调用参数（temperature、max_tokens 等）
-        _adapter: 测试注入的进程内适配器（None = 走 llm_service 通道）
     """
 
     def __init__(
         self,
         config: dict[str, Any] | None = None,
         *,
-        adapter: LLMAdapter | None = None,
         router: Any | None = None,
     ) -> None:
         """初始化 LLM Core 插件。
@@ -172,8 +184,6 @@ class LLMCore(ICorePlugin):
                 - api_base: API 端点 URL
                 - api_key: API 密钥
                 - default_params: 默认调用参数（temperature、max_tokens 等）
-            adapter: 测试注入的进程内适配器实例；None = 生产走 llm_service
-                能力通道（server.py on_load 注入 capability caller）
         """
         self._config = config or {}
         self._provider: str = self._config.get("provider", "openai")
@@ -214,14 +224,6 @@ class LLMCore(ICorePlugin):
         # 时跨轮重试，超过上限标记耗尽交 output 步骤裁决任务失败。
         # 每次 execute 由 _apply_runtime_config 按 plugin_configs 覆盖。
         self._max_empty_retries: int = int(self._config.get("max_empty_retries", 2))
-
-        # 构建适配器：llm_core 的 LLM 面唯一事实源 = llm_service 的
-        # llm.complete_stream（经 tool-executor 跨进程调用）；adapter 参数仅
-        # 测试注入用（进程内假实现），None = 走 llm_service 通道。
-        if adapter is not None:
-            self._adapter = adapter
-        else:
-            self._adapter = None
 
     @property
     def name(self) -> str:
@@ -355,7 +357,7 @@ class LLMCore(ICorePlugin):
 
         return get_model_config_loader().get_default_chat_model()
 
-    async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # type: ignore[override]  # noqa: PLR0912,PLR0915
+    async def execute(self, ctx: PluginContext) -> dict[str, Any]:  # type: ignore[override]
         """执行 LLM 调用，返回原始结果。
 
         调用 LLM 后，将 assistant 回复 append 到 messages 中。
@@ -380,6 +382,17 @@ class LLMCore(ICorePlugin):
         messages = self._build_messages(ctx.state)
         streaming = ctx.state.get("streaming", True)
 
+        # W2a 上下文粗门锚：本轮收到的字符账本快照（引擎记的数字，只透传不在
+        # 本侧重算字符；缺失/非数字写 0）。与 usage 同点位写回（见 result 组装），
+        # 保证锚 = 最近一次真实调用时刻的字符值；压缩 fork（context_window_guard
+        # 内部经 memory.compress 调用）不经本点位，不会覆盖锚。
+        chars_snapshot = ctx.state.get("track.messages_chars")
+        messages_chars_at_llm = (
+            chars_snapshot
+            if isinstance(chars_snapshot, (int, float)) and not isinstance(chars_snapshot, bool)
+            else 0
+        )
+
         try:
             response: LLMResponse | PartialStreamOutcome = await self._call_llm(
                 messages, ctx, stream=streaming
@@ -399,99 +412,11 @@ class LLMCore(ICorePlugin):
             # 在写入结果中提示模型续写，避免留下半截文件。
             output_truncated = response.finish_reason == "length"
 
-            llm_usage = None
-            if response.usage:
-                # model/provider 随用量同帧落轨迹（traces 按模型聚合 token 的归属依据；
-                # state.llm_model 是可变当前值，diff 轨迹在模型未变的轮次不落盘）
-                llm_usage = {
-                    "input_tokens": response.usage.get("prompt_tokens", 0),
-                    "output_tokens": response.usage.get("completion_tokens", 0),
-                    "total_tokens": response.usage.get("total_tokens", 0),
-                    "cached_tokens": response.usage.get("cached_tokens", 0),
-                    "model": self._model,
-                    "provider": self._provider,
-                }
+            llm_usage = self._build_usage(response)
+            self._log_success(ctx, response, streaming=streaming)
 
-            logger.info(
-                "[%s] LLM call succeeded (streaming=%s, thinking=%s, text=%s, tool_calls=%d, finish_reason=%s)",
-                self.name,
-                streaming,
-                bool(thinking_text),
-                (result_text or "")[:200],
-                len(tool_calls or []),
-                response.finish_reason,
-            )
-            # 完整响应记录到管道日志（DEBUG 级别）
-            logger.debug(
-                "[%s] LLM full response: text=%d chars, thinking=%d chars, usage=%s",
-                self.name,
-                len(result_text or ""),
-                len(thinking_text or ""),
-                llm_usage,
-            )
-            if tool_calls:
-                for tc in tool_calls:
-                    logger.debug(
-                        "[%s] tool_call: %s(%s)",
-                        self.name,
-                        tc.get("name", "?"),
-                        str(tc.get("args", tc.get("arguments", "")))[:200],
-                    )
-                    # 诊断：arguments repr，定位转义层级（adapter 返回时是否已双重转义）
-                    _tc_args_raw = tc.get("args", tc.get("arguments", ""))
-                    if isinstance(_tc_args_raw, str) and len(_tc_args_raw) > 100:
-                        logger.debug(
-                            "[%s] tool_call arguments repr前80: %s",
-                            self.name,
-                            repr(_tc_args_raw[:80]),
-                        )
+            appended_msg = self._build_assistant_message(result_text, tool_calls, thinking_text)
 
-            # LLMCore 生产的 assistant 回复。新模型(op-based):只 emit 一个 append set op,
-            # 由引擎 apply 到 state["messages"] + message_slots(不再返回全量 history)。
-            appended_msg: dict[str, Any] | None = None
-            if tool_calls:
-                # 将解析后的 id 回写到 raw_tool_calls，供后续 tool_core 使用
-                resolved_ids = self._resolve_tool_call_ids(tool_calls)
-
-                # LLM 返回工具调用 -> append assistant 消息（含 tool_calls）
-                # 统一保留 reasoning_content 到内存（不管 provider）：
-                # 发送给 API 时由 ProviderAdapter 按 provider 决定是否剥离
-                assistant_msg: dict[str, Any] = {
-                    "role": "assistant",
-                    "content": result_text or "",
-                    "tool_calls": [
-                        {
-                            "id": resolved_ids[i],
-                            "type": "function",
-                            "function": {
-                                "name": tc.get("name", ""),
-                                "arguments": tc.get("args", tc.get("arguments", "")),
-                            },
-                        }
-                        for i, tc in enumerate(tool_calls)
-                    ],
-                }
-                if thinking_text:
-                    assistant_msg["reasoning_content"] = thinking_text
-                appended_msg = assistant_msg
-            elif result_text:
-                # LLM 普通文本回复 -> append assistant 消息
-                _plain_msg: dict[str, Any] = {"role": "assistant", "content": result_text}
-                if thinking_text:
-                    _plain_msg["reasoning_content"] = thinking_text
-                appended_msg = _plain_msg
-
-            _pipeline_id = ctx.state.get("pipeline_id", "?")
-            _iteration = ctx.state.get("iteration", -1)
-            logger.debug(
-                "[%s] pipeline=%s iter=%d LLM returned: text=%d chars, tool_calls=%d, thinking=%d chars",
-                self.name,
-                _pipeline_id,
-                _iteration,
-                len(result_text) if result_text else 0,
-                len(tool_calls) if tool_calls else 0,
-                len(thinking_text) if thinking_text else 0,
-            )
             # 仅当产出了 assistant 消息才 emit append op（无文本/无工具调用时不追加）。
             messages_update = (
                 {"_ops": [{"op": "set", "msg": appended_msg}]}
@@ -504,6 +429,11 @@ class LLMCore(ICorePlugin):
                 StateKeys.RAW_TOOL_CALLS: tool_calls,
                 StateKeys.RAW_THINKING: thinking_text,
                 "llm_usage": llm_usage or {},
+                # W2a 粗门供给：字符锚 + 本轮解析到的模型窗口（未配置写 0，缺省
+                # 告警见 __init__/_apply_model_from_state）——窗口事实由本插件按
+                # 实际模型写入 state，管道 when 只做算术，引擎零领域知识。
+                "track.messages_chars_at_llm": messages_chars_at_llm,
+                "track.model_context_window": int(self._context_window or 0),
                 "context_window": self._context_window,
                 "llm_model": self._model,
                 "llm_provider": self._provider,
@@ -512,38 +442,7 @@ class LLMCore(ICorePlugin):
             }
             if messages_update is not None:
                 result["messages"] = messages_update
-            # 空回复重试（用户裁定 2026-08-30）：LLM 偶发"只思考不回答"
-            # （adaptive thinking 下 content 空且无工具调用，实测 MiniMax-M3）。
-            # 跨轮计数：未超限置 _has_new_llm_input 触发 post 路由回 LLM 重试
-            # （输入不变再给一次机会，模型输出有随机性）；超限置
-            # llm_empty_exhausted 交 output 步骤裁决任务终态（直接失败）。
-            # 有产出即复位计数并清续跑标志（防残留标志把后续纯文本轮误路由回
-            # LLM 造成死循环，与 task_reminder 次级证据放行同键语义）。
-            is_empty = not (result_text or "").strip() and not tool_calls
-            if is_empty:
-                streak = int(ctx.state.get("llm_empty_streak", 0) or 0) + 1
-                result["llm_empty_streak"] = streak
-                if streak > self._max_empty_retries:
-                    result["llm_empty_exhausted"] = True
-                    result["_has_new_llm_input"] = False
-                    logger.warning(
-                        "[%s] 空回复重试耗尽（已重试 %d 次）pipeline=%s，交任务域裁决失败",
-                        self.name,
-                        streak - 1,
-                        _pipeline_id,
-                    )
-                else:
-                    result["_has_new_llm_input"] = True
-                    logger.warning(
-                        "[%s] 空回复（无文本无工具调用），第 %d/%d 次重试 pipeline=%s",
-                        self.name,
-                        streak,
-                        self._max_empty_retries,
-                        _pipeline_id,
-                    )
-            else:
-                result["llm_empty_streak"] = 0
-                result["_has_new_llm_input"] = False
+            self._apply_empty_retry_policy(ctx, result, result_text, tool_calls)
             return result
 
         except Exception as exc:
@@ -553,27 +452,170 @@ class LLMCore(ICorePlugin):
                 type(exc).__name__,
                 exc,
             )
-            # 工具调用错误后重置消息配对缓存，确保下次全量扫描
-            exc_msg = str(exc)
-            if "tool_call" in exc_msg.lower() or "tool call" in exc_msg.lower():
-                from _message_normalizer import reset_pairing_cache  # noqa: PLC0415
-
-                # 精确重置当前管道的缓存（pipeline_id 维度隔离后必须带 ID）
-                _pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")
-                reset_pairing_cache(
-                    self._provider,
-                    self.name,
-                    pipeline_id=_pipeline_id,
-                )
-                logger.info(
-                    "[%s] 检测到 tool_call 相关错误，已重置配对缓存 (pipeline=%s)",
-                    self.name,
-                    _pipeline_id or "?",
-                )
             # 流中断/取消的半截落库已由 _call_llm 在返回值路径处理
             # （llm_service partial → PartialStreamOutcome → execute 直接返回）；
             # 此处仅传播未预期异常（建连失败/零累积内容/通道故障）。
+            # 消息面修复由 llm_service 标准化唯一关卡每轮全量幂等执行，
+            # 无调用方缓存需重置。
             raise
+
+    def _build_usage(self, response: LLMResponse) -> dict[str, Any] | None:
+        """从响应构造用量轨迹字典（无用量时返回 None）。
+
+        model/provider 随用量同帧落轨迹（traces 按模型聚合 token 的归属依据；
+        state.llm_model 是可变当前值，diff 轨迹在模型未变的轮次不落盘）。
+        """
+        if not response.usage:
+            return None
+        return {
+            "input_tokens": response.usage.get("prompt_tokens", 0),
+            "output_tokens": response.usage.get("completion_tokens", 0),
+            "total_tokens": response.usage.get("total_tokens", 0),
+            "cached_tokens": response.usage.get("cached_tokens", 0),
+            "model": self._model,
+            "provider": self._provider,
+        }
+
+    def _log_success(
+        self,
+        ctx: PluginContext,
+        response: LLMResponse,
+        streaming: bool,
+    ) -> None:
+        """落成功调用日志（INFO 摘要 + DEBUG 全文与 tool_call 诊断）。"""
+        result_text = response.text
+        tool_calls = response.tool_calls
+        thinking_text = response.thinking_text
+        logger.info(
+            "[%s] LLM call succeeded (streaming=%s, thinking=%s, text=%s, tool_calls=%d, finish_reason=%s)",
+            self.name,
+            streaming,
+            bool(thinking_text),
+            (result_text or "")[:200],
+            len(tool_calls or []),
+            response.finish_reason,
+        )
+        # 完整响应记录到管道日志（DEBUG 级别）
+        logger.debug(
+            "[%s] LLM full response: text=%d chars, thinking=%d chars, usage=%s",
+            self.name,
+            len(result_text or ""),
+            len(thinking_text or ""),
+            self._build_usage(response),
+        )
+        for tc in tool_calls or []:
+            logger.debug(
+                "[%s] tool_call: %s(%s)",
+                self.name,
+                tc.get("name", "?"),
+                str(tc.get("args", tc.get("arguments", "")))[:200],
+            )
+            # 诊断：arguments repr，定位转义层级（adapter 返回时是否已双重转义）
+            _tc_args_raw = tc.get("args", tc.get("arguments", ""))
+            if isinstance(_tc_args_raw, str) and len(_tc_args_raw) > 100:
+                logger.debug(
+                    "[%s] tool_call arguments repr前80: %s",
+                    self.name,
+                    repr(_tc_args_raw[:80]),
+                )
+        logger.debug(
+            "[%s] pipeline=%s iter=%d LLM returned: text=%d chars, tool_calls=%d, thinking=%d chars",
+            self.name,
+            ctx.state.get("pipeline_id", "?"),
+            ctx.state.get("iteration", -1),
+            len(response.text) if response.text else 0,
+            len(response.tool_calls) if response.tool_calls else 0,
+            len(response.thinking_text) if response.thinking_text else 0,
+        )
+
+    def _build_assistant_message(
+        self,
+        result_text: str | None,
+        tool_calls: list[dict[str, Any]],
+        thinking_text: str | None,
+    ) -> dict[str, Any] | None:
+        """构造本轮 assistant 回复消息（append 到 messages）。
+
+        LLMCore 生产的 assistant 回复。新模型(op-based):只 emit 一个 append set op,
+        由引擎 apply 到 state["messages"] + message_slots(不再返回全量 history)。
+        统一保留 reasoning_content 到内存（不管 provider）：发送给 API 时由
+        ProviderAdapter 按 provider 决定是否剥离。
+
+        Returns:
+            assistant 消息 dict；无文本且无工具调用时返回 None
+        """
+        if tool_calls:
+            # 将解析后的 id 回写到 raw_tool_calls，供后续 tool_core 使用
+            resolved_ids = self._resolve_tool_call_ids(tool_calls)
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": result_text or "",
+                "tool_calls": [
+                    {
+                        "id": resolved_ids[i],
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("name", ""),
+                            "arguments": tc.get("args", tc.get("arguments", "")),
+                        },
+                    }
+                    for i, tc in enumerate(tool_calls)
+                ],
+            }
+            if thinking_text:
+                assistant_msg["reasoning_content"] = thinking_text
+            return assistant_msg
+        if result_text:
+            plain_msg: dict[str, Any] = {"role": "assistant", "content": result_text}
+            if thinking_text:
+                plain_msg["reasoning_content"] = thinking_text
+            return plain_msg
+        return None
+
+    def _apply_empty_retry_policy(
+        self,
+        ctx: PluginContext,
+        result: dict[str, Any],
+        result_text: str | None,
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        """按空回复重试策略回填计数与续跑标志（就地修改 result）。
+
+        空回复重试（用户裁定 2026-08-30）：LLM 偶发"只思考不回答"
+        （adaptive thinking 下 content 空且无工具调用，实测 MiniMax-M3）。
+        跨轮计数：未超限置 _has_new_llm_input 触发 post 路由回 LLM 重试
+        （输入不变再给一次机会，模型输出有随机性）；超限置
+        llm_empty_exhausted 交 output 步骤裁决任务终态（直接失败）。
+        有产出即复位计数并清续跑标志（防残留标志把后续纯文本轮误路由回
+        LLM 造成死循环，与 task_reminder 次级证据放行同键语义）。
+        """
+        is_empty = not (result_text or "").strip() and not tool_calls
+        if not is_empty:
+            result["llm_empty_streak"] = 0
+            result["_has_new_llm_input"] = False
+            return
+
+        streak = int(ctx.state.get("llm_empty_streak", 0) or 0) + 1
+        result["llm_empty_streak"] = streak
+        pipeline_id = ctx.state.get("pipeline_id", "?")
+        if streak > self._max_empty_retries:
+            result["llm_empty_exhausted"] = True
+            result["_has_new_llm_input"] = False
+            logger.warning(
+                "[%s] 空回复重试耗尽（已重试 %d 次）pipeline=%s，交任务域裁决失败",
+                self.name,
+                streak - 1,
+                pipeline_id,
+            )
+        else:
+            result["_has_new_llm_input"] = True
+            logger.warning(
+                "[%s] 空回复（无文本无工具调用），第 %d/%d 次重试 pipeline=%s",
+                self.name,
+                streak,
+                self._max_empty_retries,
+                pipeline_id,
+            )
 
     def _resolve_tool_call_ids(self, tool_calls: list[dict[str, Any]]) -> list[str]:
         """解析并标准化 tool_call id，回写到入参列表并返回 id 序列。
@@ -750,8 +792,9 @@ class LLMCore(ICorePlugin):
         - http(s) URL：原样透传（API 直连拉取）；
         - /uploads/ 引用 / 已存在文件的绝对路径：读文件 → base64 data URL；
         - 非 image_url 块（text 等）：原样透传；
-        - 解析失败（文件丢失/过大/读错）：warning + 丢弃该块，不阻断请求
-          （模型收到剩余内容，损失可见）。
+        - 解析失败（文件丢失/过大/读错）：替换为 `[附件 … 解析失败：原因]`
+          占位块，LLM 可见附件缺失说明（2026-09-08 用户裁定：附件解析失败
+          不得静默跳过——后端要报错），不阻断其余内容。
 
         Args:
             blocks: state["multimodal_content"]（None/非列表 → 空结果）
@@ -768,7 +811,7 @@ class LLMCore(ICorePlugin):
                     resolved_blocks.append(block)
                 continue
             url = (block.get("image_url") or {}).get("url", "")
-            data_url = cls._resolve_image_ref(url)
+            data_url, reason = cls._resolve_image_ref(url)
             if data_url:
                 resolved_blocks.append(
                     {"type": "image_url", "image_url": {"url": data_url}}
@@ -777,36 +820,44 @@ class LLMCore(ICorePlugin):
                 resolved_blocks.append(block)
             else:
                 logger.warning(
-                    "[LLMCore] 多模态图片引用解析失败，已丢弃该块: %s", url
+                    "[LLMCore] 多模态图片引用解析失败: %s (%s)", url, reason
+                )
+                resolved_blocks.append(
+                    {
+                        "type": "text",
+                        "text": f"[附件 {url} 解析失败：{reason}]",
+                    }
                 )
         return resolved_blocks
 
     @classmethod
-    def _resolve_image_ref(cls, url: str) -> str:
-        """单条图片引用 → base64 data URL（仅本地引用；http/data 返回空串）。
+    def _resolve_image_ref(cls, url: str) -> tuple[str, str]:
+        """单条图片引用 → (base64 data URL, 失败原因)。
 
         Args:
             url: /uploads/ 引用或本地绝对路径
 
         Returns:
-            data URL；非本地引用、文件不存在、过大或读取失败返回空串
+            成功：(data URL, 空串)。失败：(空串, 非空原因——文件不存在/
+            过大/读取失败)。http/data 引用返回 (空串, 空串)——非本地解析
+            失败，调用方原样透传。
         """
         if not url or url.startswith(("http://", "https://", "data:")):
-            return ""
+            return "", ""
         path = resolve_uploads_url(url)
         if path is None:
             # 绝对路径引用（preprocessor 透传的用户本地路径）
             if not os.path.isabs(url) or not os.path.isfile(url):  # noqa: PTH117
-                return ""
+                return "", "文件不存在"
             path = Path(url)
         try:
             if not path.is_file():
-                return ""
+                return "", "文件不存在"
             if path.stat().st_size > cls._MAX_IMAGE_BYTES:
                 logger.warning(
-                    "[LLMCore] 图片超过 %d 字节上限，跳过: %s", cls._MAX_IMAGE_BYTES, url
+                    "[LLMCore] 图片超过 %d 字节上限: %s", cls._MAX_IMAGE_BYTES, url
                 )
-                return ""
+                return "", f"文件过大（超过 {cls._MAX_IMAGE_BYTES} 字节上限）"
             b64 = base64.b64encode(path.read_bytes()).decode("utf-8")
             ext = path.suffix.lower()
             mime = {
@@ -817,10 +868,10 @@ class LLMCore(ICorePlugin):
                 ".webp": "image/webp",
                 ".svg": "image/svg+xml",
             }.get(ext, "image/png")
-            return f"data:{mime};base64,{b64}"
+            return f"data:{mime};base64,{b64}", ""
         except OSError as exc:
             logger.warning("[LLMCore] 读取图片失败: %s, %s", url, exc)
-            return ""
+            return "", "文件读取失败"
 
     def _build_messages(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         """从管道状态构建 LLM messages 列表。
@@ -909,45 +960,6 @@ class LLMCore(ICorePlugin):
 
         return messages
 
-    def _writeback_cleaned_history(
-        self,
-        state: dict[str, Any],
-        raw_messages: list[dict[str, Any]],
-        cleaned_messages: list[dict[str, Any]],
-    ) -> None:
-        """把 normalize 清理后的历史段写回 state["messages"]。
-
-        _build_messages 拼接顺序为 [system?] + compression* + history* + [dynamic_vars?]。
-        normalize 的配对清理只发生在 history 段（移除孤儿 tool result /
-        未配对 assistant(tool_calls)），不会删除 system/compression/dynamic_vars，
-        因此前缀计数与后缀计数不变，可用偏移量定位历史段。
-
-        Args:
-            state: 管道状态字典
-            raw_messages: normalize 前的完整消息列表
-            cleaned_messages: normalize 后的完整消息列表
-        """
-        prefix_len = 0
-        if state.get("system_message"):
-            prefix_len += 1
-        prefix_len += len(state.get("compression_messages", []))
-
-        suffix_len = 1 if state.get("prompt.dynamic_vars") else 0
-
-        raw_history_len = len(raw_messages) - prefix_len - suffix_len
-        cleaned_history_len = len(cleaned_messages) - prefix_len - suffix_len
-        if cleaned_history_len <= 0 or raw_history_len <= 0:
-            return
-
-        cleaned_history = cleaned_messages[prefix_len : prefix_len + cleaned_history_len]
-        state["messages"] = list(cleaned_history)
-        logger.info(
-            "[%s] normalize 清理写回 state: history %d → %d 条（移除孤儿/未配对消息）",
-            self.name,
-            raw_history_len,
-            cleaned_history_len,
-        )
-
     async def _call_llm(  # noqa: PLR0912
         self,
         messages: list[dict[str, Any]],
@@ -971,25 +983,15 @@ class LLMCore(ICorePlugin):
         Returns:
             成功：LLMResponse；流中断/取消：PartialStreamOutcome
         """
-        normalized_messages = normalize_messages_for_provider(
-            messages,
-            provider=self._provider,
-            name=self.name,
-            pipeline_id=ctx.state.get(StateKeys.PIPELINE_ID, ""),
-        )
-
-        if len(normalized_messages) < len(messages):
-            self._writeback_cleaned_history(ctx.state, messages, normalized_messages)
-
         logger.info(
             "[%s] Sending %d messages to LLM",
             self.name,
-            len(normalized_messages),
+            len(messages),
         )
 
         # 每消息仅输出结构化摘要（角色/长度/预览）到 DEBUG——完整内容已在
         # 管道 state/trace 落库，INFO 全量打印属日志噪音且放大隐私面。
-        for idx, msg in enumerate(normalized_messages):
+        for idx, msg in enumerate(messages):
             role = msg.get("role", "?")
             content = msg.get("content", "")
             name = msg.get("name", "")
@@ -1010,9 +1012,11 @@ class LLMCore(ICorePlugin):
         # 服务调用参数：model 用 yaml key（model_id）做 deployment 匹配，
         # 保证 model_name 重名时（官方与 apigo 同底模）能路由到正确 provider。
         # _model_id 为空（旧 config）时回退到 _model，保持兼容。
+        # 消息标准化（结构/配对/MiniMax）在 llm_service 侧统一执行
+        # （llm.complete_stream 入口唯一关卡），本插件不再做调用方预处理。
         kwargs: dict[str, Any] = {
             "model": self._model_id or self._model,
-            "messages": normalized_messages,
+            "messages": messages,
             **self._default_params,
         }
 
@@ -1021,8 +1025,8 @@ class LLMCore(ICorePlugin):
         # kwargs 显式接收落位（llm_service complete_stream 侧配套）。
         kwargs["agent_level"] = ctx.state.get("agent_level", "L3")
 
-        # 思考强度 → 模型参数覆盖：state.thinking_strength 非空（low/medium/high）
-        # 时覆盖采样参数（与 default_params 合并）；off/缺失不覆盖（现状不变）。
+        # 思考强度 → 模型参数覆盖：state.thinking_strength（off/low/medium/high）
+        # 命中映射即覆盖思考参数（与 default_params 合并）；缺失/未知档位不覆盖。
         # 路由优先级：厂商级映射（provider_thinking_strength_params）> 模型级
         # 手填（thinking_strength_params）；两级都未配置 → 不覆盖（无代码兜底）。
         thinking_strength = str(ctx.state.get("thinking_strength") or "")

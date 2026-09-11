@@ -2,10 +2,11 @@
 """BudgetManager 预算竞态（F-CC-1）测试——check→record 原子预留语义。
 
 意图（WHY）：
-- 并发 LLM 调用（decorators.py @budget_check：check→call→record）若 check 与 record
-  是两次独立加锁，会全部先过 check 再各自 record，per-task/per-session 预算被真实突破。
-  本测试用屏障保证「所有 check 先完成、再统一 record」，钉死不变量：
-  无论多少并发调用，总用量不得超过预算。
+- 并发 LLM 调用（check_budget 工具 → BudgetManager.check_budget，调用后
+  record_usage 工具记账）若 check 与 record 是两次独立加锁，会全部先过 check
+  再各自 record，per-task/per-session 预算被真实突破。本测试用屏障保证
+  「所有 check 先完成、再统一 record」，钉死不变量：无论多少并发调用，
+  总用量不得超过预算。
 - record_usage 必须强制上限：超额时拒绝（raise），而非静默累加——否则漏网的
   调用会永久突破预算。
 - 正常路径：check→record 正常累计、reset 后清零（含预留释放），不被破坏。
@@ -14,9 +15,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import ExitStack
 from datetime import datetime, timedelta
-from unittest.mock import patch
 
 import pytest
 
@@ -182,95 +181,6 @@ async def test_check_record_normal_accumulate_and_reset() -> None:
         await bm.check_budget(estimated_tokens=300, task_id="task_cc_4")
     with pytest.raises(BudgetExceededException):
         await bm.check_budget(estimated_tokens=300, task_id="task_cc_4")
-
-
-# ─────────────────────────────────────────────
-# decorators.py @budget_check 路径
-# ─────────────────────────────────────────────
-
-def _patch_decorator_deps(bm) -> ExitStack:
-    """把装饰器内部的单例与 token 计数换成测试替身（返回 ExitStack 上下文）。"""
-    stack = ExitStack()
-    stack.enter_context(patch("decorators.get_budget_manager", return_value=bm))
-    stack.enter_context(patch("decorators.get_token_counter"))
-    return stack
-
-
-@pytest.mark.asyncio
-async def test_decorator_blocks_call_when_budget_exceeded() -> None:
-    """@budget_check 超限拦截语义保持：check 不过则 LLM 函数不执行。"""
-    from decorators import budget_check
-    from exceptions import BudgetExceededException
-
-    bm = _make_manager()
-    called = False
-
-    with _patch_decorator_deps(bm):
-        @budget_check(estimated_tokens=1500, task_id_param="task_id")
-        async def fake_llm(task_id: str) -> str:
-            nonlocal called
-            called = True
-            return "ok"
-
-        with pytest.raises(BudgetExceededException):
-            await fake_llm(task_id="task_cc_5")
-
-    assert called is False, "预算超限时 LLM 函数不应被执行"
-
-
-@pytest.mark.asyncio
-async def test_decorator_concurrent_calls_never_exceed_task_budget() -> None:
-    """装饰器完整路径（check→call→record）并发下同样不得突破预算。"""
-    from decorators import budget_check
-
-    bm = _make_manager()
-    entered = 0
-    go = asyncio.Event()
-
-    with _patch_decorator_deps(bm):
-        @budget_check(estimated_tokens=PER_CALL, task_id_param="task_id")
-        async def fake_llm(task_id: str) -> str:
-            nonlocal entered
-            entered += 1
-            if entered == N_WORKERS:
-                go.set()
-            try:
-                await asyncio.wait_for(go.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
-                pass
-            return "ok"
-
-        results = await asyncio.gather(
-            *(fake_llm(task_id="task_cc_6") for _ in range(N_WORKERS)),
-            return_exceptions=True,
-        )
-
-    ok = [r for r in results if r == "ok"]
-    status = bm.get_budget_status(task_id="task_cc_6")
-    assert status.used <= TASK_LIMIT, f"装饰器并发路径突破预算: used={status.used}"
-    assert len(ok) <= MAX_ALLOWED, (
-        f"装饰器并发路径 {len(ok)} 个调用全部放行（TOCTOU 复现），最多应 {MAX_ALLOWED} 个"
-    )
-
-
-@pytest.mark.asyncio
-async def test_decorator_releases_reservation_on_call_failure() -> None:
-    """LLM 调用失败时释放预留，避免预算被幽灵占用（回归守护）。"""
-    from decorators import budget_check
-
-    bm = _make_manager()
-
-    with _patch_decorator_deps(bm):
-        @budget_check(estimated_tokens=300, task_id_param="task_id")
-        async def failing_llm(task_id: str) -> str:
-            raise RuntimeError("llm call failed")
-
-        with pytest.raises(RuntimeError):
-            await failing_llm(task_id="task_cc_7")
-
-    # 失败释放后：预留不残留，300×3=900 ≤ 1000 仍可连续通过
-    for _ in range(3):
-        await bm.check_budget(estimated_tokens=300, task_id="task_cc_7")
 
 
 # ─────────────────────────────────────────────

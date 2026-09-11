@@ -28,9 +28,7 @@
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
-
 import { isPipelineRelevant, resolvePipelineId } from '../router'
-
 import { ensureStreamingPlaceholder, extractMessageId, extractThreadId } from './utils'
 
 const _debugLogger = loggers.websocket
@@ -302,11 +300,11 @@ export function handleReasoningDelta(eventData: any) {
 /** 处理工具调用增量事件。
  *
  * 不建 tool_call part：工具卡面的唯一创建方是契约事件 tool_start/tool_result
- * （携带 call_id/args/result/containerTaskId 完整信封）。块协议侧 tool_call 块
- * 曾是第三个创建源——首个 delta 未带 id 时按兜底名 `tool-<index>` 建卡、
- * tool_start 再按 call_id 建卡，同一工具出现两张卡（末端增量还被 new_message
- * 合并当作「基底缺失」补到气泡底部）。增量消费无落点（工具参数以
- * tool_start.args 为准），仅 debug 留痕供排查协议形态。
+ * （携带 call_id/args/result/containerTaskId 完整信封）。tool_call 增量不得
+ * 再建卡——首个 delta 未带 id 时按兜底名 `tool-<index>` 建卡、tool_start 再按
+ * call_id 建卡，同一工具会出现两张卡（末端增量还被 new_message 合并当作
+ * 「基底缺失」补到气泡底部）。增量消费无落点（工具参数以 tool_start.args
+ * 为准），仅 debug 留痕供排查协议形态。
  */
 export function handleToolCallDelta(eventData: any) {
   const p = eventPayload(eventData)

@@ -7,13 +7,11 @@
  * 登记失败不阻断会话创建（会话是主体）。
  */
 import { vi } from 'vitest'
-
 const { createProjectMock, createSessionMock, reportErrorMock } = vi.hoisted(() => ({
   createProjectMock: vi.fn(),
   createSessionMock: vi.fn(),
   reportErrorMock: vi.fn(),
 }))
-
 vi.mock('@/services/api/tasks', () => ({
   createProject: (...args: unknown[]) => createProjectMock(...args),
 }))
@@ -25,7 +23,6 @@ vi.mock('@/services/errorReporting', () => ({
 vi.mock('@/stores/sessionListStore', () => ({
   useSessionListStore: { getState: () => ({ createSession: createSessionMock }) },
 }))
-
 import { createSessionWithProject, registerSessionProject } from '../sessionCreation'
 
 describe('sessionCreation — 会话创建共享流', () => {

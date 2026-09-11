@@ -10,8 +10,8 @@
  * - part 已 done → 忽略迟到进度（结果已定，避免覆盖）
  */
 import { describe, it, expect, beforeEach } from 'vitest'
-import { handleToolProgress } from '../toolHandler'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { handleToolProgress } from '../toolHandler'
 
 const PID = 'pipe-progress'
 const MID = 'msg-progress'

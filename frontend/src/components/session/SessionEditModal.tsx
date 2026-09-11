@@ -27,12 +27,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { RjsfForm } from '@/services/schema/RjsfForm'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
+import { getThreadSchema, type ThreadField } from '@/services/api/session'
+import { RjsfForm } from '@/services/schema/RjsfForm'
+import { loadSessionExecutionOptions as loadSessionSnapshot } from '@/services/sessionExecutionOptions'
 import type { Session } from '@/types'
 import type { UIInputFormField } from '@/types/schema'
-import { getThreadSchema, type ThreadField } from '@/services/api/session'
-import { loadSessionExecutionOptions as loadSessionSnapshot } from '@/services/sessionExecutionOptions'
 
 /** 保存回调携带的插件表单产物 */
 export interface SessionFormOptions {

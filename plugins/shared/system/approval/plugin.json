@@ -166,5 +166,6 @@
       "max_concurrency": 4,
       "description": "标记交互请求已查看（human sidecar 无 viewed 工具，确认应答不落库——原 POST /ext/channel_api/interaction/{request_id}/viewed）"
     }
-  ]
+  ],
+  "host_group": "light"
 }

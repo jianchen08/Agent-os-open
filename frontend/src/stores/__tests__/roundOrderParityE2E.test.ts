@@ -12,6 +12,10 @@
  *    连续性：一轮辅助消息（text→tool→text）合并为单个气泡，不拆不串。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as sessionMod from '@/services/api/session'
+import type * as handlersMod from '@/services/websocket/streaming/handlers'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
+import type * as messageOrderMod from '@/utils/messageOrder'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -30,8 +34,8 @@ describe('逐轮模型顺序对等（后端 seq 序 vs 前端渲染序）', () =
   const MSG2 = 'a_' + '2'.repeat(32)
   const CALL1 = 'call_r1_01'
 
-  let pipelineStore: typeof import('@/stores/pipelineMessageStore').usePipelineMessageStore
-  let handlers: typeof import('@/services/websocket/streaming/handlers')
+  let pipelineStore: pipelineMessageStoreMod.usePipelineMessageStore
+  let handlers: handlersMod
 
   beforeEach(async () => {
     vi.resetModules()

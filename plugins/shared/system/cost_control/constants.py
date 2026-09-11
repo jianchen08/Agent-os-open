@@ -1,7 +1,5 @@
 """
 成本控制相关常量
-
-从 0.1 src/core/constants.py 提取，仅保留 CostControl 部分。
 """
 
 

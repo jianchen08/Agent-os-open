@@ -20,11 +20,12 @@
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/sonner'
-import { RjsfForm } from '@/services/schema/RjsfForm'
+import { apiClient } from '@/services/api/client'
 import { emitFormEvent } from '@/services/schema/formEventBus'
+import { RjsfForm } from '@/services/schema/RjsfForm'
 import { useAgentTabStore } from '@/stores/agentTabStore'
-import type { UIInputFormField } from '@/types/schema'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import type { UIInputFormField } from '@/types/schema'
 
 function extractSteps(steps: unknown): Array<{ title: string; fields: UIInputFormField[] }> {
   if (!Array.isArray(steps)) return []
@@ -89,12 +90,13 @@ export function WizardWidget(props: Record<string, unknown>) {
     setSubmitting(true)
     try {
       if (endpoint) {
-        const resp = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pipeline_id: pipelineId, ...merged }),
-        })
-        const data = (await resp.json()) as { error?: string; reason?: string }
+        // endpoint 直连统一走 apiClient（认证头注入 + 401 刷新链）；4xx/5xx
+        // 由拦截器 reject，错误信息经 ApiError.message 带出
+        const resp = await apiClient.post<{ error?: string; reason?: string }>(
+          endpoint,
+          { pipeline_id: pipelineId, ...merged },
+        )
+        const data = resp.data
         if (data.error || data.reason) throw new Error(data.reason ?? data.error)
       }
       toast.success(successText ?? '提交成功')
@@ -102,7 +104,9 @@ export function WizardWidget(props: Record<string, unknown>) {
       onSaved?.()
     } catch (err) {
       toast.error('提交失败', {
-        description: err instanceof Error ? err.message : String(err),
+        description:
+          (err as { message?: string })?.message
+          ?? (err instanceof Error ? err.message : String(err)),
       })
     } finally {
       setSubmitting(false)

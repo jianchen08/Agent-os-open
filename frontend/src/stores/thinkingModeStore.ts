@@ -5,7 +5,8 @@
  * - 各对话标签（AgentTab）独立记忆思考强度，localStorage 持久化（key: thinking-strength-{tabId}）
  * - 切换标签（activeTabId 变化 = 路由变化）时，useActiveThinkingStrength 自动返回该标签强度，
  *   输入框随路由自动应用（"根据路由自动路由到不同思考强度"）
- * - 强度 → 模型参数映射见 STRENGTH_TO_PARAMS（随消息传给后端 llm_core 路由）
+ * - 强度 → 模型参数映射在后端：档位随消息透传，llm_core 按 llm.yaml
+ *   的 thinking_strength_params 解析（本侧只负责选择与记忆）
  */
 
 import { create } from 'zustand'

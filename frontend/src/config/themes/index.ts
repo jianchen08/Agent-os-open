@@ -43,7 +43,6 @@ export const presetThemes: Record<string, ThemeConfig> = {
  * 用于 UI 展示主题选择器
  */
 export const themeList: ThemeInfo[] = [
-  // 基础主题
   {
     id: 'dark',
     name: '深色主题',
@@ -71,7 +70,6 @@ export const themeList: ThemeInfo[] = [
     },
   },
 
-  // 特殊主题
   {
     id: 'deep-space',
     name: '深空指挥台',
@@ -125,7 +123,6 @@ export const themeList: ThemeInfo[] = [
     },
   },
 
-  // 无障碍主题
   {
     id: 'high-contrast',
     name: '高对比度',

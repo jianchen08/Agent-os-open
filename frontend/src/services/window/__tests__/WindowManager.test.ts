@@ -11,8 +11,8 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { windowManager, WebWindowManager } from '@/services/window/WindowManager'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 
 function makePage(overrides: Partial<PageDeclaration> = {}): PageDeclaration {

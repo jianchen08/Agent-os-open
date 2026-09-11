@@ -1,9 +1,13 @@
 """任务域事件派生（ADR 2026-08-28 事件下沉）。
 
 内核 run 终态只广播运行域 run.* 事件；本模块订阅 run.completed / run.failed，
-经 pipeline-state.list 读该管道最终 state，按任务域语义派生
-task_completed / task_failed 并经 event-bus.emit_domain 发回域事件总线——
-裁决词汇（task.status 值、task.* 键面）归任务域所有者（本插件），内核零知识。
+取该管道的终态 state，按任务域语义派生 task_completed / task_failed 并经
+event-bus.emit_domain 发回域事件总线——裁决词汇（task.status 值、task.* 键面）
+归任务域所有者（本插件），内核零知识。
+
+state 来源（ADR 2026-09-11）：优先取事件自带的 ``state`` 载荷（内核终态把该
+管道 state 随事件交出，剥离 messages/raw_* 等引擎大字段）——零回查，且不受
+``export_fields`` 白名单约束；载荷缺席时回退 pipeline-state.list 回查。
 
 判定语义（与内核原 derive_run_terminal_events 行为逐条对齐）：
 - 任务管道判据 = state 含 ``task.`` 前缀键且不含 ``task.owned.``（后者是
@@ -31,7 +35,11 @@ _TASK_PREFIX = "task."
 _OWNED_PREFIX = "task.owned."
 
 
-def _is_task_state(row: dict[str, Any]) -> bool:
+def is_task_state(row: dict[str, Any]) -> bool:
+    """任务管道判据：含 task.* 自身键且不含 task.owned.* 登记键。
+
+    事件派生（本模块）与启动调和（reconcile）共用的任务管道过滤判据。
+    """
     """任务管道判据：含 task.* 自身键且不含 task.owned.* 登记键。"""
     has_task = False
     for key in row:
@@ -65,6 +73,13 @@ def _context_usage(row: dict[str, Any]) -> dict[str, Any]:
         window = int(window)
         input_tokens = int(usage.get("last_input_tokens", 0) or 0)
     except (TypeError, ValueError):
+        # 遥测值脏数据（非数值形态）：按无遥测处理，但留痕原始值便于追数据源
+        logger.warning(
+            "[events] 上下文用量解析失败（按无遥测处理）: context_window=%r "
+            "last_input_tokens=%r",
+            window,
+            usage.get("last_input_tokens"),
+        )
         return {}
     if window <= 0:
         return {}
@@ -77,14 +92,14 @@ def _context_usage(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def derive_task_terminal_events(
-    event_name: str, row: dict[str, Any]
+    event_name: str, row: dict[str, Any] | None
 ) -> list[tuple[str, dict[str, Any]]]:
     """由 run 终态事件 + state 摘要行派生任务域事件（纯函数，可单测）。
 
     Returns:
         [(event_name, tags)]——空列表 = 该 run 不派生任务域事件。
     """
-    if not isinstance(row, dict) or not _is_task_state(row):
+    if not isinstance(row, dict) or not is_task_state(row):
         return []
     tags = {
         "pipeline_id": _tag(row, "pipeline_id"),
@@ -100,11 +115,17 @@ def derive_task_terminal_events(
         "eval_summary": _tag(row, "task.eval_summary"),
         "context_usage": _context_usage(row),
     }
+    status = str(row.get("task.status") or "")
     if event_name == "run.failed":
+        # 终态证据仲裁（U13 域界定 §二）：投影已持 completed/cancelled → 投影
+        # 权威，不派生 task_failed——否则下方对账把终态覆写为 failed，把 runs
+        # 侧记账分歧复制到投影侧。未决投影（running/pending 等）照常派生 +
+        # 对账补落（kill 方未随写的收口面）。
+        if status in ("completed", "cancelled"):
+            return []
         return [("task_failed", tags)]
     if event_name != "run.completed":
         return []
-    status = str(row.get("task.status") or "")
     if status == "completed":
         return [("task_completed", tags)]
     if status == "failed":
@@ -129,18 +150,73 @@ def pending_registration_clear_fields(tags: dict[str, Any]) -> dict[str, Any] | 
     return {f"task.subtasks_pending.{task_id}": None}
 
 
+def _payload_state(params: dict[str, Any], pipeline_id: str) -> dict[str, Any] | None:
+    """取事件自带的终态 state 载荷（ADR 2026-09-11）。
+
+    内核在 run 终态把该管道 state 随事件交出（剥离 messages/raw_* 等大字段），
+    订阅方据此零回查派生任务域语义。载荷里的 ``pipeline_id`` 须与事件坐标一致
+    ——不一致说明载荷错配（防御性拒绝，退回回查而非按错行派生）。
+
+    Returns:
+        载荷行（含 pipeline_id 补全）；无载荷/形状非法/坐标错配 → None（回退）。
+    """
+    payload = params.get("state")
+    if not isinstance(payload, dict):
+        return None
+    payload_pid = str(payload.get("pipeline_id") or "")
+    if payload_pid and payload_pid != pipeline_id:
+        logger.warning(
+            "[task_service] 终态载荷 pipeline_id 与事件坐标不一致，退回回查 | event=%s payload=%s",
+            pipeline_id,
+            payload_pid,
+        )
+        return None
+    return {**payload, "pipeline_id": pipeline_id}
+
+
+async def _lookup_state_row(
+    pipeline_id: str, state_capability: Any
+) -> dict[str, Any] | None:
+    """回退路径：经 pipeline-state.list 按 pipeline_id 取摘要行。
+
+    仅用于载荷缺席（旧内核 / 合成事件 / 防御网路径）——该读面过 ``export_fields``
+    白名单，未声明的键（如 ``lineage.parent_pipeline_id``）会被静默过滤，
+    故不能作为主路径。读面故障返回 None（调用方按未派生处理）。
+    """
+    try:
+        rows = await state_capability.call("list", {})
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[task_service] state 摘要回查失败（终态载荷缺席时无派生）| pipeline=%s",
+            pipeline_id,
+        )
+        return None
+    if not isinstance(rows, list):
+        return None
+    return next(
+        (r for r in rows if isinstance(r, dict) and str(r.get("pipeline_id") or "") == pipeline_id),
+        None,
+    )
+
+
 async def handle_run_terminal_event(
     event_name: str, params: dict[str, Any], state_capability: Any, bus_capability: Any
 ) -> int:
-    """入口：查 state 摘要 → 派生 → 经 event-bus.emit_domain 发回域总线。
+    """入口：取终态 state → 派生 → 经 event-bus.emit_domain 发回域总线。
+
+    数据来源（ADR 2026-09-11）：优先取事件自带的 ``state`` 载荷（内核终态
+    转发该管道 state，剥离 messages/raw_* 等引擎大字段）——零回查，且不受
+    state 摘要出口白名单约束（``lineage.parent_pipeline_id`` 曾被摘要过滤，
+    致父锚点恒空、通知链静默断）。载荷缺席（旧内核 / 合成事件）时回退
+    ``pipeline-state.list`` 回查，兼容不破。
 
     派生出的任务终态事件同时清除父管道的子任务挂号键（信号③闭环：父管道
     收束等待 → 子任务终态唤醒 + 挂号解除）；清除失败仅告警，不破坏事件派生。
 
     Args:
         event_name: run.completed / run.failed。
-        params: 域事件标签（取 pipeline_id 定位管道）。
-        state_capability: pipeline-state 能力句柄（list 取摘要行 / update 清挂号）。
+        params: 域事件标签（取 pipeline_id 定位管道；state 为终态载荷）。
+        state_capability: pipeline-state 能力句柄（回退回查 / update 清挂号）。
         bus_capability: event-bus 能力句柄（call emit_domain）。
 
     Returns:
@@ -149,13 +225,9 @@ async def handle_run_terminal_event(
     pipeline_id = str(params.get("pipeline_id") or "")
     if not pipeline_id:
         return 0
-    rows = await state_capability.call("list", {})
-    if not isinstance(rows, list):
-        return 0
-    row = next(
-        (r for r in rows if isinstance(r, dict) and str(r.get("pipeline_id") or "") == pipeline_id),
-        None,
-    )
+    row = _payload_state(params, pipeline_id)
+    if row is None:
+        row = await _lookup_state_row(pipeline_id, state_capability)
     if row is None:
         return 0
     emitted = 0

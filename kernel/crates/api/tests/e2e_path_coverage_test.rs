@@ -31,23 +31,16 @@ use tower::ServiceExt;
 
 /// 登录内置 admin（无 store 时回退内置用户表）返回 access_token。
 async fn admin_token(app: &axum::Router) -> String {
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(axum::http::Method::POST)
-                .uri("/api/v1/auth/login")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({"username": "admin", "password": "admin12345"}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
+    // D1 后无 store 登录 fail-closed（脚手架表不可登录）——直接铸造脚手架
+    // admin 的签名 token；无 store 时 token 校验走内置脚手架表，被测端点
+    // （actions/pipeline-config/plugin-config/e2e 覆盖/ws-kick/sessions 注册表）
+    // 语义不受登录通道影响。
+    let _ = app;
+    let admin = agentos_http::auth::default_users()
+        .into_iter()
+        .next()
         .unwrap();
-    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-    let v: Value = serde_json::from_slice(&body).unwrap();
-    v["access_token"].as_str().unwrap().to_string()
+    agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &admin, 3600)
 }
 
 // ── 共享字面量构造 ─────────────────────────────────────────────
@@ -56,6 +49,8 @@ async fn admin_token(app: &axum::Router) -> String {
 /// 基线要求:必须带 `provides: None`(见 core/src/traits.rs:825 注释)。
 fn manifest_base(plugin_id: &str) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: plugin_id.to_string(),
         name: plugin_id.to_string(),
         description: None,
@@ -129,10 +124,12 @@ async fn path_b_schema_contributes_multi_key_passthrough() {
     };
 
     let app = build_router(state);
+    let bearer = format!("Bearer {}", admin_token(&app).await);
     let resp = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/schema")
+                .header("authorization", bearer)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -186,10 +183,12 @@ async fn path_b_disabled_plugin_contributes_not_exported() {
     };
 
     let app = build_router(state);
+    let bearer = format!("Bearer {}", admin_token(&app).await);
     let resp = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/schema")
+                .header("authorization", bearer)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -381,7 +380,7 @@ fn http_endpoint(route_id: &str, method: &str, path: &str) -> HttpEndpoint {
         route_id: route_id.to_string(),
         method: method.to_string(),
         path: path.to_string(),
-        auth: "none".to_string(),
+        auth: Some("none".to_string()),
         handler_capability: "http.handle".to_string(),
         timeout_ms: None,
         max_concurrency: None,
@@ -662,5 +661,93 @@ async fn path_g_plugin_enabled_write_failure_returns_500() {
             .as_str()
             .is_some_and(|m| !m.is_empty() && m != "internal server error"),
         "内部错误原文透传不脱敏: {json}"
+    );
+}
+
+/// B4:profile 原子写（tmp + rename）——rename 失败（目标被目录占位）→ 5xx
+/// 且 `.tmp` 残骸被清理，不留半截 yaml 污染目录。
+#[tokio::test]
+async fn path_g2_plugin_enabled_atomic_write_cleans_tmp_on_rename_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins_dir = tmp.path().join("config").join("plugins");
+    fs::create_dir_all(&plugins_dir).unwrap();
+    // default_profile.yaml 被目录占位：tmp 文件写入成功、rename 必败（占用模拟）
+    fs::create_dir_all(plugins_dir.join("default_profile.yaml")).unwrap();
+
+    let mut state = AppState::new();
+    state.project_root = Some(tmp.path().to_path_buf());
+
+    let app = build_router(state);
+    let token = admin_token(&app).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/plugins/llm_service/enabled")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({"enabled": false})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "rename 失败应 5xx（实际 {}）",
+        resp.status()
+    );
+    assert!(
+        !plugins_dir.join("default_profile.yaml.tmp").exists(),
+        "rename 失败后 .tmp 残骸必须被 best-effort 清理"
+    );
+}
+
+/// B4 回归：正常路径原子写后 profile 内容完整可解析（tmp 已被 rename 消费）。
+#[tokio::test]
+async fn path_g3_plugin_enabled_atomic_write_success_keeps_valid_yaml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins_dir = tmp.path().join("config").join("plugins");
+    fs::create_dir_all(&plugins_dir).unwrap();
+    let profile = plugins_dir.join("default_profile.yaml");
+    fs::write(&profile, "enabled_plugins:\n  - pre_existing\n").unwrap();
+
+    let mut state = AppState::new();
+    state.project_root = Some(tmp.path().to_path_buf());
+
+    let app = build_router(state);
+    let token = admin_token(&app).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/plugins/llm_service/enabled")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&json!({"enabled": true})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "正常写应成功");
+    let raw = fs::read_to_string(&profile).unwrap();
+    let doc: serde_yaml::Value = serde_yaml::from_str(&raw).expect("写后 yaml 必须可解析");
+    assert_eq!(
+        doc["plugins"]["llm_service"]["enabled"],
+        serde_yaml::Value::Bool(true),
+        "新启用状态必须落盘: {doc:?}"
+    );
+    let ids = doc["enabled_plugins"].as_sequence().unwrap();
+    assert!(
+        ids.iter().any(|v| v.as_str() == Some("pre_existing")),
+        "既有启用项不得丢失（原子替换非截断写）"
+    );
+    assert!(
+        !plugins_dir.join("default_profile.yaml.tmp").exists(),
+        "成功路径不得留 .tmp 残骸"
     );
 }

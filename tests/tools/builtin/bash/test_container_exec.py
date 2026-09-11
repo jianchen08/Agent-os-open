@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """容器路径后台执行测试 — TDD 红灯。
 
 覆盖目标：`use_docker=True` 的 bash_execute 也能像本地路径一样

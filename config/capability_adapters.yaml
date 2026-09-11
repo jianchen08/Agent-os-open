@@ -1,11 +1,11 @@
+schema_version: 1
 # ================================================================
 # 能力适配器统一注册配置（连接器注册表）
 # ================================================================
-# 注意：曾存在同名的 config/tools/capability_adapters.yaml（0.1 的 MCP 后端配置，
-# 零消费者，已删除）。本文件是连接器注册表，由 tool_context 插件的
-# adapter_config.py 读取（plugins/shared/pipeline/input/tool_context/）。
+# 本文件是连接器注册表：system/connectors 的 ConfigCenter 经配置中心订阅
+# 本文件，workspace/server.py 进程内实例化 ConnectorRegistry 加载。
 #
-# 本文件定义所有外部连接器的注册信息，供 ConnectorRegistry 加载使用。
+# 本文件定义所有外部连接器的注册信息。
 # 每个适配器包含连接器的类型、优先级、能力列表和 MCP 配置路径。
 #
 # 字段说明：
@@ -78,7 +78,6 @@ adapters:
   # ==============================================================
   # Playwright 浏览器连接器
   # 通过 MCP Server 驱动 Playwright，支持浏览器自动化和页面截图。
-  # MCP 工具映射详情见 config/tools/capability_adapters.yaml
   # ==============================================================
   playwright:
     type: "browser"

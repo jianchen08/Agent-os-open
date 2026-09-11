@@ -6,25 +6,28 @@
  * 接线（端到端：表单 A 提交 → 表单 B watch 自动重载 datasource）。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
 import React from 'react'
-
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
+import { EventWatchBox } from '@/components/schema/EventWatchBox'
+import { FormWidget } from '@/components/schema/widgets/FormWidget'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import {
   emitFormEvent,
   subscribeFormEvent,
 } from '@/services/schema/formEventBus'
-import { EventWatchBox } from '@/components/schema/EventWatchBox'
-import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
-import { FormWidget } from '@/components/schema/widgets/FormWidget'
-import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 
 const apiGet = vi.fn()
+const apiPost = vi.fn()
 const apiRequest = vi.fn()
 vi.mock('@/services/api/client', () => ({
   default: Object.assign(
     (...args: unknown[]) => apiRequest(...args),
-    { get: (...args: unknown[]) => apiGet(...args) },
+    {
+      get: (...args: unknown[]) => apiGet(...args),
+      post: (...args: unknown[]) => apiPost(...args),
+    },
   ),
 }))
 vi.mock('@/components/ui/sonner', () => ({
@@ -128,8 +131,7 @@ function ChildMountSpy({ mountSpy, reloadKey }: { mountSpy: () => void; reloadKe
 
 describe('DeclaredWidgetLayer watch 接线（声明级联动）', () => {
   it('声明 props.watch 的 widget 在事件触发后重挂载（reload-key 递增）', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ task_id: 't-1' }) })
-    vi.stubGlobal('fetch', fetchMock)
+    apiPost.mockResolvedValue({ data: { task_id: 't-1' } })
     contributionRegistry.loadFromSchema({
       agents: [
         {
@@ -175,8 +177,7 @@ describe('DeclaredWidgetLayer watch 接线（声明级联动）', () => {
   })
 
   it('端到端：A 提交 → B(datasource) watch 自动重拉（重新 GET）', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ task_id: 't-1' }) })
-    vi.stubGlobal('fetch', fetchMock)
+    apiPost.mockResolvedValue({ data: { task_id: 't-1' } })
     apiGet.mockImplementation((url: string) =>
       Promise.resolve({
         data:
@@ -249,8 +250,7 @@ describe('G6-b：定时轮询刷新（refresh poll）', () => {
   })
 
   it('声明 refresh 的 widget 定时重拉 datasource（重新 GET）', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => ({ task_id: 't-1' }) })
-    vi.stubGlobal('fetch', fetchMock)
+    apiPost.mockResolvedValue({ data: { task_id: 't-1' } })
     apiGet.mockImplementation((url: string) =>
       Promise.resolve({
         data:

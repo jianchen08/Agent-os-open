@@ -59,6 +59,8 @@ fn test_manifest_without_invoke_entry_defaults_none() {
 #[test]
 fn test_none_invoke_entry_omitted_in_serialization() {
     let manifest = PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "p".to_string(),
         name: "P".to_string(),
         description: None,

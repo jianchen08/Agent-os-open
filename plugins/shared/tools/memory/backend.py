@@ -29,10 +29,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# capability_caller 类型：(method: str, params: dict) -> Awaitable[Any]
-CapabilityCaller = Callable[[str, dict[str, Any]], Awaitable[Any]]
+# capability_caller 类型：(method, params, timeout=None) -> Awaitable[Any]
+CapabilityCaller = Callable[[str, dict[str, Any], float | None], Awaitable[Any]]
 
 _PLUGIN_ID = "hindsight_memory_service"
+
+# 写路径超时（秒）：retain/import 是同步 LLM 抽取（~16s/chunk，大文档分钟级），
+# SDK 默认 30s 死线必掐（B12 收尾超时根因）；内核面对本插件的 MCP 死线由
+# manifest mcp.request_timeout_secs=360 承接，须大于此值。
+_WRITE_TIMEOUT_S = 300.0
 
 
 def _unwrap_envelope(result: Any) -> tuple[dict[str, Any] | None, bool]:
@@ -62,11 +67,17 @@ class HindsightBackend:
     def __init__(self, capability_caller: CapabilityCaller) -> None:
         self._call = capability_caller
 
-    async def _invoke(self, tool_name: str, args: dict[str, Any]) -> Any:
-        """统一 invoke 出口：失败上抛 RuntimeError（上层按各方法分档处理）。"""
+    async def _invoke(
+        self, tool_name: str, args: dict[str, Any], timeout: float | None = None
+    ) -> Any:
+        """统一 invoke 出口：失败上抛 RuntimeError（上层按各方法分档处理）。
+
+        timeout 透传 capability caller（None = SDK 默认 30s）——写路径
+        （retain/import 同步 LLM 抽取）必须传 _WRITE_TIMEOUT_S。
+        """
         params = {"tool_name": tool_name, "plugin_id": _PLUGIN_ID, "args": args}
         try:
-            return await self._call("tool-executor.invoke", params)
+            return await self._call("tool-executor.invoke", params, timeout)
         except Exception as e:
             raise RuntimeError(f"{tool_name} 调用失败: {e}") from e
 
@@ -111,7 +122,7 @@ class HindsightBackend:
         if update_mode:
             args["update_mode"] = update_mode
 
-        raw = await self._invoke("hindsight.retain", args)
+        raw = await self._invoke("hindsight.retain", args, timeout=_WRITE_TIMEOUT_S)
         mapped, degraded = _unwrap_envelope(raw)
         if not isinstance(mapped, dict):
             raise RuntimeError(f"hindsight.retain 返回非预期类型: {type(raw).__name__}")
@@ -236,7 +247,9 @@ class HindsightBackend:
         if name:
             args["knowledge_name"] = name
         try:
-            raw = await self._invoke("hindsight.import_document", args)
+            raw = await self._invoke(
+                "hindsight.import_document", args, timeout=_WRITE_TIMEOUT_S
+            )
         except Exception as e:
             logger.warning(
                 "[HindsightBackend.import_document] 调用失败降级 | error=%s", e

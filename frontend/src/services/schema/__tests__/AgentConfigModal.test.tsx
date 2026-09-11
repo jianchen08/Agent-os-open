@@ -10,6 +10,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { AgentConfigModal } from '@/components/agent/AgentConfigModal'
 import type { UIInputFormField } from '@/types/schema'
 
 // ── Mock API 模块（widget 化 T12：AgentConfigModal 走 FormWidget datasource，
@@ -22,8 +23,6 @@ vi.mock('@/services/api/client', () => ({
     { get: (...args: unknown[]) => apiGet(...args) },
   ),
 }))
-
-import { AgentConfigModal } from '@/components/agent/AgentConfigModal'
 
 /** 模拟后端 GET /ext/agent_manager/agents/schema 返回的 12 字段 */
 const SCHEMA_FIELDS: UIInputFormField[] = [

@@ -4,10 +4,32 @@ import axios, { type AxiosError, type AxiosInstance, type InternalAxiosRequestCo
 import { API_BASE_URL, API_TIMEOUT } from '../../constants/api'
 import { STORAGE_KEYS } from '../../constants/storage'
 import { isRetryableError } from '../../utils/retry'
+import { refresh, getAccessToken, clearTokens, stopAutoRefresh } from '../auth/tokenLifecycle'
 import { triggerAuthExpired } from '../authCallbacks'
 import { reportError, ErrorType, ErrorSeverity } from '../errorReporting'
-import { refresh, getAccessToken, clearTokens, stopAutoRefresh } from '../auth/tokenLifecycle'
 import type { ApiError } from '../../types/api'
+
+// 可选端点请求级标记（axios 配置扩展）：调用服务对"前端会调但后端可能尚未
+// 实现/非核心路径"的请求显式声明，拦截器据此静默其 404——判定由调用方显式
+// 标记，不再做 URL 子串猜测。
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    optional?: boolean
+  }
+}
+
+/**
+ * 404 机器码判定：内核统一信封稳定机器码 `RESOURCE_NOT_FOUND`
+ * （kernel/crates/http/src/error.rs ApiError::NotFound），或 HTTP status /
+ * 状态回退 code 404（拦截器对无信封响应以状态码字符串回填 code）。
+ * 刻意不做 message 文案匹配——文案随版本/语言漂移，机器码是唯一稳定契约。
+ */
+export function isNotFoundError(error: unknown): boolean {
+  const e = error as { response?: { status?: number }; code?: string } | undefined
+  if (!e) return false
+  if (e.response?.status === 404) return true
+  return e.code === 'RESOURCE_NOT_FOUND' || e.code === '404'
+}
 
 // NOTE: token 生命周期（互斥刷新/存取/续期调度）统一由 tokenLifecycle 提供
 // （架构收口）。tokenLifecycle 对本文件的依赖是动态 import
@@ -29,17 +51,14 @@ async function clearAuthAndRedirect(): Promise<void> {
   clearTokens()
   localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
 
-  // 通过回调机制通知 store 清除认证状态
   triggerAuthExpired()
 
-  // 报告认证错误
   reportError('认证已过期，请重新登录', {
     type: ErrorType.AUTHENTICATION,
     severity: ErrorSeverity.WARNING,
     code: '401',
   })
 
-  // 重定向到登录页（如果不在登录页）
   // 注意：window.location.href 是整页刷新，会丢失内存中的 zustand 状态。
   // 此处仅在「真正认证失效」时才到达，故整页刷新可接受。
   if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
@@ -72,7 +91,6 @@ apiClient.interceptors.request.use(
     // token 读取走 tokenLifecycle 唯一入口
     const token = getAccessToken()
 
-    // 如果token存在，添加到请求头
     if (token && config.headers) {
       // 某些请求（如 /auth/refresh）显式声明不带 access token（Authorization 设为空字符串），
       // 拦截器必须尊重这个声明，不覆盖。否则 refresh token 走 body，access token 却通过
@@ -89,7 +107,6 @@ apiClient.interceptors.request.use(
     return config
   },
   (error: AxiosError) => {
-    // 请求错误处理
     return Promise.reject(error)
   },
 )
@@ -97,7 +114,6 @@ apiClient.interceptors.request.use(
 /** 响应拦截器 处理响应错误、token刷新和自动重试 */
 apiClient.interceptors.response.use(
   (response) => {
-    // 成功响应直接返回
     return response
   },
   async (error: AxiosError) => {
@@ -113,7 +129,6 @@ apiClient.interceptors.response.use(
       return Promise.reject(error)
     }
 
-    // 初始化重试计数
     if (originalRequest._retryCount === undefined) {
       originalRequest._retryCount = 0
     }
@@ -169,17 +184,12 @@ apiClient.interceptors.response.use(
     let errorMessage: string
 
     if (typeof responseData === 'string') {
-      // 处理 detail 是纯字符串的情况（例如："error.model_dump(...) - message"）
-      // 提取真实错误消息（在最后一个 " - " 之后）
-      const lastDashIndex = responseData.lastIndexOf(' - ')
-      if (lastDashIndex !== -1) {
-        errorMessage = responseData.substring(lastDashIndex + 3).trim()
-      } else {
-        errorMessage = responseData
-      }
+      errorMessage = responseData
     } else if (typeof responseData?.error === 'object' && responseData?.error !== null) {
-      // 内核统一信封 {error: {code, message}}（kernel/crates/http/src/error.rs）
-      // code 为字符串 HTTP 状态（如 "400"）；message 为业务文案。
+      // 内核统一信封 {error: {code, message, source, retryable}}（单一真值源
+      // kernel/crates/http/src/error.rs + config/error_codes.json）：code 为
+      // 稳定机器码（如 BAD_REQUEST / RESOURCE_NOT_FOUND / INTERNAL_ERROR），
+      // 非 HTTP 状态字符串；message 为业务文案。
       // 对象形态优先级最高——axios 的通用 message 无业务信息。
       if (typeof responseData.error.message === 'string') {
         errorMessage = responseData.error.message
@@ -221,7 +231,6 @@ apiClient.interceptors.response.use(
       details: error.response?.data,
     }
 
-    // 判断是否应该自动重试
     const shouldRetry = isRetryableError(error) && originalRequest._retryCount < 2
 
     if (shouldRetry) {
@@ -238,28 +247,26 @@ apiClient.interceptors.response.use(
         code: apiError.code,
       })
 
-      // 等待后重试
       await new Promise((resolve) => setTimeout(resolve, delayTime))
       return apiClient(originalRequest)
     }
 
-    // 判断是否应该静默处理某些 404 错误
-    // 这些错误通常发生在：
-    // 1. 消息刚创建，数据库还未保存完成
-    // 2. 消息已被删除
-    // 3. 临时消息 ID 更新后，数据库还未更新
-    // 4. 子管道消息尚不存在（子 Agent 未开始执行）
-    const requestUrl = error.config?.url || ''
+    // 404 静默收敛：内核统一信封稳定机器码 RESOURCE_NOT_FOUND（http/error.rs
+    // ApiError::NotFound）。覆盖消息读取的竞态窗口——消息刚创建未落库 / 已被
+    // 删除 / 临时消息 ID 未更新 / 子管道消息尚不存在（子 Agent 未开始执行）。
+    // 判定只认机器码，文案不参与（文案随版本漂移）；业务失败仍经
+    // Promise.reject 交给调用方处理，此处只收敛告警噪音。
     const shouldSilentIgnore =
-      error.response?.status === 404 &&
-      (errorMessage.includes('消息不存在') ||
-        errorMessage.includes('[VALIDATION] 消息不存在') ||
-        errorMessage.includes('不存在') ||
-        requestUrl.includes('/messages'))
+      error.response?.status === 404 && responseData?.error?.code === 'RESOURCE_NOT_FOUND'
+
+    // 必须 reject Error 实例：全仓消费方惯用 `error instanceof Error ? error.message
+    // : 兜底文案` 读取原因，普通对象会让 message 退化为兜底文案（2026-09-10 登录页
+    // 只显示「登录失败」实锤）。附加字段（code/source/retryable/details）随 assign 保留。
+    const rejectWithError = () => Object.assign(new Error(errorMessage), apiError)
 
     if (shouldSilentIgnore) {
       // 静默处理，不上报错误
-      return Promise.reject(apiError)
+      return Promise.reject(rejectWithError())
     }
 
     // 不重试或重试次数已用完，报告错误
@@ -272,20 +279,18 @@ apiClient.interceptors.response.use(
             ? ErrorType.VALIDATION
             : ErrorType.NETWORK
 
-    // 可选端点：前端会调但后端可能尚未实现/非核心路径，404 不上报刷屏
-    // 真实业务失败仍通过 Promise.reject 交给调用方处理
+    // 可选端点：调用服务经请求级 optional 标记显式声明（"前端会调但后端可能
+    // 尚未实现/非核心路径"），404 不上报刷屏；真实业务失败仍通过
+    // Promise.reject 交给调用方处理
     // （floating-chat 已退役——前端改本地实现，无后端调用）
-    const isOptionalEndpoint =
-      requestUrl.includes('/evaluation-metrics') ||
-      requestUrl.includes('/agent-calls') ||
-      requestUrl.includes('/triggers')
+    const isOptionalEndpoint = originalRequest.optional === true
     // datasource 占位护栏已移除（G6-a）：/api/v1/datasource/{*rest} 由内核真实路由接管，
     // 404 即真实未命中（前端 fetchDatasourceOptions 正常注册表兜底空选项）。
 
     if (!isOptionalEndpoint) {
-      // 非可选端点的 404 视为需要排查的异常路径，DEV 下输出 requestUrl 便于快速定位。
+      // 非可选端点的 404 视为需要排查的异常路径，DEV 下输出 URL 便于快速定位。
       if (import.meta.env.DEV && error.response?.status === 404) {
-        console.warn(`[API-404] requestUrl=${requestUrl} status=404`)
+        console.warn(`[API-404] url=${String(originalRequest.url ?? '')} status=404`)
       }
       reportError(apiError.message, {
         type: errorType,
@@ -304,7 +309,7 @@ apiClient.interceptors.response.use(
       })
     }
 
-    return Promise.reject(apiError)
+    return Promise.reject(rejectWithError())
   },
 )
 

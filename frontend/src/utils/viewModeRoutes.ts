@@ -7,7 +7,7 @@
  *
  * 双路由（对齐槽位架构）：插件声明（view_mode→widget 名，widgetRegistry
  * 解析组件）优先——插件声明新 view_mode 即可路由到已注册 widget，前端
- * 路由器零改动；未声明回退内置三视图（前端默认件，ApprovalRouter 直连
+ * 路由器零改动；未声明回退内置三视图（前端默认件，经 widgetRegistry 注册件
  * 组件渲染，不依赖 registry 初始化时序），最终兜底 text_diff。
  */
 

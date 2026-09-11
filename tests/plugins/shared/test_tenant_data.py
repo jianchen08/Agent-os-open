@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -366,3 +365,38 @@ class TestMultimodalStorageTenantAware:
 
         s = DiskFileStorage(tenant_id="tenantA")
         assert s._base_dir == env_dir
+
+
+class TestMultimodalStorageTenantIsolationBehavior:
+    """行为级：租户经公开 save/load API 隔离（文件落位 + 跨租户不可见）。
+
+    上类在 _base_dir 级钉构造；本类钉可观察行为——A 租户保存的附件真实落
+    ``data/{tid}/multimodal``，B 租户实例读不到。
+    """
+
+    def test_tenant_a_save_not_visible_to_tenant_b(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path))
+        monkeypatch.delenv("MULTIMODAL_STORAGE_DIR", raising=False)
+
+        s_a = DiskFileStorage(tenant_id="tenantA")
+        _async_run(s_a.save("a1b2c3d4e5f6", {"name": "a 的附件"}))
+
+        assert (tmp_path / "tenantA" / "multimodal" / "a1b2c3d4e5f6.json").exists()
+
+        s_b = DiskFileStorage(tenant_id="tenantB")
+        assert _async_run(s_b.load("a1b2c3d4e5f6")) is None, (
+            "租户 B 不得读到租户 A 保存的附件"
+        )
+        assert not (tmp_path / "tenantB" / "multimodal").exists() or not (
+            tmp_path / "tenantB" / "multimodal" / "a1b2c3d4e5f6.json"
+        ).exists()
+
+    def test_same_tenant_roundtrip_via_public_api(self, tmp_path, monkeypatch):
+        """同租户 save → load 往返一致（隔离不破坏正常读写）。"""
+        monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path))
+        monkeypatch.delenv("MULTIMODAL_STORAGE_DIR", raising=False)
+
+        s = DiskFileStorage(tenant_id="tenantA")
+        _async_run(s.save("a1b2c3d4e5f6", {"name": "x", "size": 3}))
+        loaded = _async_run(s.load("a1b2c3d4e5f6"))
+        assert loaded == {"name": "x", "size": 3}

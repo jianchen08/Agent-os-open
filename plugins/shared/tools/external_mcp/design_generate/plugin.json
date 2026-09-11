@@ -1,7 +1,7 @@
 {
   "id": "design_generate_mcp",
   "name": "Design Generate (MCP)",
-  "description": "设计生成 MCP 工具，基于 screenshot-to-code",
+  "description": "设计生成 MCP 工具，基于 screenshot-to-code\n\n[工具契约注] 「design_generate」的 output_schema 由远端 MCP 供给（MCP tools/list 运行时返回；output 形状由上游服务定义），plugin.json 不静态声明，仅保留 LLM 调用所需的 input_schema。",
   "version": "1.0.0",
   "plugin_type": "tool",
   "language": "external",

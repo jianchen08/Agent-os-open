@@ -25,6 +25,14 @@ from agentos_plugin_sdk import AgentOSPlugin
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("rollback_service")
 
+# manager/models 在 exec 期绑定（不得 on_load/handler 期懒加载）：合宿静息
+# 态下裸名 `models` 槽位被先装载成员（review/workspace）的同名模块占据，
+# 运行期 import 会命中异成员模块；exec 期处于宿主 loader 的裸名遮蔽保护
+# 窗口（异成员模块已摘除、自身目录在 sys.path 首位），解析结果必为本插件
+# 模块，manager→reversers→models 链条绑定随之冻结。
+from manager import RollbackManager  # noqa: E402
+from models import OperationType  # noqa: E402
+
 # 全局 RollbackManager 实例
 _manager: Any = None
 
@@ -33,8 +41,6 @@ _manager: Any = None
 async def _on_load(params: dict[str, Any]) -> None:
     """Initialize rollback manager on load."""
     global _manager
-    from manager import RollbackManager
-
     _manager = RollbackManager()
     logger.info("Rollback service loaded")
 
@@ -51,8 +57,6 @@ def _ensure_manager() -> Any:
     """获取 manager 实例，如果未初始化则延迟创建。"""
     global _manager
     if _manager is None:
-        from manager import RollbackManager
-
         _manager = RollbackManager()
     return _manager
 
@@ -151,8 +155,6 @@ async def rollback_record_operation(
     Returns:
         Dict with operation_id.
     """
-    from models import OperationType
-
     manager = _ensure_manager()
     op_type = OperationType(operation_type)
     operation_id = await manager.record_operation(

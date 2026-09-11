@@ -14,6 +14,10 @@
  * - 权威主管道缺失时保持原绑定（缺数据不是改绑依据，不置空、不猜位）
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as queryClientMod from '@/services/query/queryClient'
+import type * as queryKeysMod from '@/services/query/queryKeys'
+import type * as agentTabStoreMod from '@/stores/agentTabStore'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Session } from '@/types/models'
 import type { AgentTab } from '@/types/task'
 
@@ -104,7 +108,7 @@ describe('AgentTabStore 激活即重绑', () => {
     pipelines: Record<string, unknown>
     messagesByPipeline: Record<string, unknown[]>
   }
-  let useAgentTabStore: typeof import('@/stores/agentTabStore').useAgentTabStore
+  let useAgentTabStore: agentTabStoreMod.useAgentTabStore
   let pipelineMock: PipelineMockState
   let seedSessions: (sessions: Session[]) => void
 

@@ -84,6 +84,27 @@
         }
       },
       {
+        "name": "connector.execute",
+        "description": "Execute an action via the best connected connector (routes by action type & priority)",
+        "input_schema": {
+          "properties": {
+            "action_type": {
+              "type": "string",
+              "description": "操作类型（如 open_file/open_folder）"
+            },
+            "parameters": {
+              "type": "object",
+              "description": "操作参数",
+              "default": {}
+            }
+          },
+          "required": [
+            "action_type"
+          ],
+          "type": "object"
+        }
+      },
+      {
         "name": "connector.degrade",
         "description": "Execute action with fallback degradation",
         "input_schema": {

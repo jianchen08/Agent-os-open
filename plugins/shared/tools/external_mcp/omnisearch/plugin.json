@@ -1,7 +1,7 @@
 {
   "id": "omnisearch",
   "name": "Omnisearch (MCP)",
-  "description": "聚合搜索 MCP:28+ 源(学术/StackOverflow/GitHub/HackerNews/Wikipedia/HuggingFace/SearXNG)统一为 universal_search 工具(index 广播检索 / full 按 target_id 取全文),自带限流与去重。本地开发接线:指向 D:/myproject/omnisearch-mcp 的 venv,PyPI 发布后可切 uvx。",
+  "description": "聚合搜索 MCP:28+ 源(学术/StackOverflow/GitHub/HackerNews/Wikipedia/HuggingFace/SearXNG)统一为 universal_search 工具(index 广播检索 / full 按 target_id 取全文),自带限流与去重。本地开发接线:指向 D:/myproject/omnisearch-mcp 的 venv,PyPI 发布后可切 uvx。\n\n[工具契约注] 「search_papers、search_stackoverflow、search_github_issues、search_hackernews、search_github_repos、search_wikipedia、search_huggingface」的 output_schema 由远端 MCP 供给（MCP tools/list 运行时返回；output 形状由上游服务定义），plugin.json 不静态声明，仅保留 LLM 调用所需的 input_schema。",
   "version": "0.1.0",
   "plugin_type": "tool",
   "language": "external",
@@ -107,6 +107,9 @@
               "type": "boolean"
             }
           }
+        },
+        "render": {
+          "card": "web"
         }
       },
       {

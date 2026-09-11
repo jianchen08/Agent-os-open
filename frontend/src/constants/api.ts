@@ -26,16 +26,16 @@ import {
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
 /**
- * API端点路径
+ * API端点路径（0.2 内核契约面）
  *
- * 所有端点路径与后端FastAPI路由对齐：
- * - 认证端点：/api/v1/auth/*
- * - 会话端点：/api/v1/sessions/*
- * - 记忆端点：/api/v1/memory/*
- * - 评估端点：/api/v1/evaluation/*
+ * 两类真值源，漂移检测各有其闸：
+ * - 内核自有 /api/v1/* 路由：字面量维护在本文件，与 kernel/crates/api/src/
+ *   server.rs 的 axum 路由表对账（apiEndpoints.contract.test）；
+ * - 插件 /ext/* 端点：一律 import endpoints.generated.ts 生成物投影，
+ *   不手写字面量（[来源: docs/decisions/2026-08-21-channel-api-retire-plugin-owned-http.md]）。
  */
 export const API_ENDPOINTS = {
-  /** 认证相关 - 对应后端 /api/v1/auth/* */
+  /** 认证 - 内核 /api/v1/auth/*（JWT 签发与刷新） */
   AUTH: {
     /** 登录 */
     LOGIN: '/api/v1/auth/login',
@@ -47,6 +47,8 @@ export const API_ENDPOINTS = {
     LOGOUT: '/api/v1/auth/logout',
     /** 获取当前用户信息 */
     ME: '/api/v1/auth/me',
+    /** 修改口令 */
+    CHANGE_PASSWORD: '/api/v1/auth/change-password',
   },
   /** 会话相关 - 对应后端 /api/v1/sessions/*（compat /threads 转正，见 task_kernel_cleanup_and_split 任务 2） */
   SESSIONS: {
@@ -65,17 +67,32 @@ export const API_ENDPOINTS = {
   },
   /** 管道相关 - 运行快照走内核 /api/v1/pipelines/runs（/api/v1/pipelines 为配置清单，勿混用） */
   PIPELINES: {
+    /** 管道域根路径（runs/state/{id}/pending-inputs 等子资源由此派生，勿再字符串手术） */
+    BASE: '/api/v1/pipelines',
     /** 管道运行快照列表（统一管道管理数据源） */
     RUNS: '/api/v1/pipelines/runs',
     /** 管道 state 摘要（内存常驻 + checkpoint 兜底；任务树迭代/阶段真值） */
     STATE: '/api/v1/pipelines/state',
     /** 管道插件清单（id/name/version/role/host_type，管道可视化编辑器的插件目录源） */
     CATALOG: '/api/v1/pipelines',
+    /** 某管道的 pending 输入队列（FIFO，等待窗口内可改/删） */
+    PENDING_INPUTS: (pipelineId: string) => `/api/v1/pipelines/${pipelineId}/pending-inputs`,
+    /** 单条 pending 输入 */
+    PENDING_INPUT: (pipelineId: string, inputId: string) =>
+      `/api/v1/pipelines/${pipelineId}/pending-inputs/${inputId}`,
   },
   /** 插件状态 - 内核 /api/v1/plugins（manifests 派生，含 enabled/config_files） */
   PLUGINS: {
     /** 插件状态列表 */
     LIST: '/api/v1/plugins',
+    /** 契约状态面（ADR 2026-08-28：插件行内"已净化/工具被剔除"标示数据源） */
+    CONTRACT_STATUS: '/api/v1/plugins/contract-status',
+    /** 插件启停（PUT，重启后内核真正生效） */
+    ENABLED: (pluginId: string) => `/api/v1/plugins/${pluginId}/enabled`,
+  },
+  /** 通用动作执行 - 内核 /api/v1/actions/execute（命令面板/快捷键/webview action 共用 transport） */
+  ACTIONS: {
+    EXECUTE: '/api/v1/actions/execute',
   },
   /** 消息相关 - 对应后端 /api/v1/sessions/{id}/messages */
   MESSAGES: {
@@ -108,6 +125,8 @@ export const API_ENDPOINTS = {
     LLM_PROVIDERS: LLM_SERVICE_ENDPOINTS.config_llm_providers_get,
     /** 获取 litellm 支持的提供者类型清单（随 litellm 升级自动更新） */
     LLM_PROVIDER_TYPES: LLM_SERVICE_ENDPOINTS.config_llm_provider_types_get,
+    /** LLM 配置面预置声明（provider 分组/常用类型/思考强度白名单，插件下发） */
+    LLM_PRESETS: LLM_SERVICE_ENDPOINTS.config_llm_presets_get,
     /** 从提供商 API 实时拉取可用模型（需先配置 Key） */
     LLM_REMOTE_MODELS: (providerId: string) =>
       LLM_SERVICE_ENDPOINTS.config_llm_providers_remote_models_get.replace('{provider_id}', providerId),
@@ -140,20 +159,8 @@ export const API_ENDPOINTS = {
   },
   /** 用户管理相关 - user_admin 插件端点（生成物投影，原 channel_api users 域，管理员专用） */
   USERS: {
-    /** 获取用户列表 */
+    /** 获取用户列表（用户管理页已 widget 化，统计/启停经声明行操作与数据源直连端点） */
     LIST: USER_ADMIN_ENDPOINTS.users,
-    /** 获取用户统计 */
-    STATS: USER_ADMIN_ENDPOINTS.users_stats,
-    /** 创建用户 */
-    CREATE: USER_ADMIN_ENDPOINTS.users,
-    /** 更新用户角色 */
-    UPDATE_ROLE: (id: string) =>
-      USER_ADMIN_ENDPOINTS.user_role_update.replace('{user_id}', id),
-    /** 更新用户激活状态 */
-    UPDATE_ACTIVE: (id: string) =>
-      USER_ADMIN_ENDPOINTS.user_active_update.replace('{user_id}', id),
-    /** 删除用户 */
-    DELETE: (id: string) => USER_ADMIN_ENDPOINTS.user_delete.replace('{user_id}', id),
   },
   /** 监控相关 - monitoring 插件端点（生成物投影，已从内核 compat_routes 迁出） */
   MONITORING: {

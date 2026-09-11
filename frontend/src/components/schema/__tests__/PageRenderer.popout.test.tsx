@@ -8,12 +8,12 @@
  * - 点击按钮 → 调用 windowManager.openPopout(page)
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import React from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PageRenderer } from '@/components/schema/PageRenderer'
-import { windowManager } from '@/services/window/WindowManager'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { windowManager } from '@/services/window/WindowManager'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 

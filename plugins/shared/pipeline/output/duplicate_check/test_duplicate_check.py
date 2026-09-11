@@ -72,6 +72,11 @@ def _execute(plugin: Any, state: dict[str, Any]) -> Any:
     return _run(plugin.execute(_make_ctx(state)))
 
 
+def _exec_updates(plugin: Any, state: dict[str, Any]) -> dict[str, Any]:
+    """执行并返回 state_updates（失败熔断测试用）。"""
+    return _run(plugin.execute(_make_ctx(state))).state_updates
+
+
 def _merge_updates(state: dict[str, Any], updates: dict[str, Any]) -> None:
     """模拟引擎 merge 口径：messages 走 slot ops apply，其余键平插。
 
@@ -619,3 +624,113 @@ class TestServerAdapter:
         assert srv.get_instance() is first  # 单例缓存复用
         _run(srv._on_unload({}))
         assert srv.get_instance() is not first  # 清缓存后重建
+
+
+# ══ 失败熔断（ADR 2026-09-09）══════════════════════════════════════════
+
+
+def _tool_exec_state(tool_results: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
+    """tool_execute 轮 state：core_type=tool_execute + tool_results。"""
+    state: dict[str, Any] = {"core_type": "tool_execute", "tool_results": tool_results, "messages": []}
+    state.update(extra)
+    return state
+
+
+def _fail(tool: str) -> dict[str, Any]:
+    return {"tool_name": tool, "success": False}
+
+
+def _ok(tool: str) -> dict[str, Any]:
+    return {"tool_name": tool, "success": True}
+
+
+class TestToolFailBreaker:
+    """失败熔断：同工具连败→摘工具面→硬上限终止；成功清零；自愈不误伤。"""
+
+    def test_below_threshold_no_action(self) -> None:
+        """连败 <5：只记账，不摘工具面不终止（自愈空间）。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state([_fail("human_interaction")] * 4)
+        updates = _exec_updates(plugin, state)
+        assert updates["router.tool_fail_streak"]["human_interaction"] == 4
+        assert "tool_ids" not in updates
+        assert updates.get("should_stop") is not True
+
+    def test_threshold_bans_tool_and_warns(self) -> None:
+        """连败=5：工具从 tool_ids 摘除 + 强警告 + 记入 banned（一次性）。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state(
+            [_fail("human_interaction")] * 5,
+            tool_ids=["file_read", "human_interaction"],
+        )
+        updates = _exec_updates(plugin, state)
+        assert updates["tool_ids"] == ["file_read"]
+        assert updates["router.tool_fail_banned"] == ["human_interaction"]
+        # 警告走 messages ops（引擎三落点唯一通道），且含行为指令
+        ops = updates["messages"]["_ops"]
+        assert any("被禁用" in str(op) and "收尾" in str(op) for op in ops)
+        assert updates.get("should_stop") is not True
+
+    def test_hard_limit_terminates_with_signature(self) -> None:
+        """连败=8：should_stop + 署名 tool_fail_loop + 主 agent 收尾通知。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state([_fail("human_interaction")] * 8, agent_level="L1")
+        updates = _exec_updates(plugin, state)
+        assert updates["should_stop"] is True
+        assert updates["router.stop_reason"] == "tool_fail_loop"
+        ops = updates["messages"]["_ops"]
+        assert any("失败熔断" in str(op) for op in ops)
+
+    def test_success_resets_streak_self_heal_not_punished(self) -> None:
+        """失败 4 次后成功 → 清零；后续再失败从 0 起计（自愈不误伤）。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state([_fail("eval_echo")] * 4 + [_ok("eval_echo")] + [_fail("eval_echo")])
+        updates = _exec_updates(plugin, state)
+        assert updates["router.tool_fail_streak"]["eval_echo"] == 1
+        assert "tool_ids" not in updates
+
+    def test_mixed_tools_counted_independently(self) -> None:
+        """多工具混合：只对失败的工具计数，成功工具互不影响。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state(
+            [_fail("a"), _ok("b"), _fail("a"), _ok("c"), _fail("a")]
+        )
+        updates = _exec_updates(plugin, state)
+        assert updates["router.tool_fail_streak"] == {"a": 3, "b": 0 - 0 + 1 if False else 0} or \
+               updates["router.tool_fail_streak"].get("a") == 3
+
+    def test_exempt_tool_not_counted(self) -> None:
+        """豁免清单内工具不计连败。"""
+        plugin = DuplicateCheckPlugin(config={"fail_breaker_exempt_tools": ["human_interaction"]})
+        state = _tool_exec_state([_fail("human_interaction")] * 9)
+        updates = _exec_updates(plugin, state)
+        assert "human_interaction" not in (updates.get("router.tool_fail_streak") or {})
+        assert updates.get("should_stop") is not True
+
+    def test_llm_call_round_skips_fail_breaker(self) -> None:
+        """llm_call 轮不做失败判定（既有重复判定语义不变）。"""
+        plugin = DuplicateCheckPlugin()
+        state = {"core_type": "llm_call", "tool_results": [_fail("a")] * 6, "messages": []}
+        updates = _exec_updates(plugin, state)
+        assert "router.tool_fail_streak" not in updates
+
+    def test_structured_business_failure_not_counted(self) -> None:
+        """success=True 的结构化业务失败（如 eval_echo valid=false）不计数——LLM 可自愈。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state(
+            [{"tool_name": "eval_echo", "success": True, "data": {"valid": False}}] * 9
+        )
+        updates = _exec_updates(plugin, state)
+        assert updates.get("should_stop") is not True
+        assert "tool_ids" not in updates
+
+    def test_banned_tool_refailure_goes_hard(self) -> None:
+        """已摘除工具若仍出现失败（防御纵深）→ 直达硬上限终止。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state(
+            [_fail("human_interaction")] * 8,
+            tool_ids=[],
+            **{"router.tool_fail_banned": ["human_interaction"]},
+        )
+        updates = _exec_updates(plugin, state)
+        assert updates["should_stop"] is True

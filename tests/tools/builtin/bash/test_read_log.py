@@ -1,3 +1,4 @@
+# @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """read_log 双路径测试。
 
 read_log 应在两种场景都能工作：
@@ -51,6 +52,27 @@ def test_read_log_by_pid_returns_none_when_file_missing(pm, tmp_path):
     """文件不存在时返回 None。"""
     result = pm.read_log_by_pid(99999)
     assert result is None
+
+
+def test_read_log_by_pid_io_error_raises_process_log_read_error(pm, tmp_path, monkeypatch):
+    """日志文件存在但读取失败（IO）→ 上抛 ProcessLogReadError，与「不存在返回 None」区分。"""
+    import builtins
+
+    import process_manager as pm_mod
+
+    _write_log_file(tmp_path / "logs", pid=55501, command="echo hi", content="out\n")
+    monkeypatch.setattr(
+        builtins, "open", lambda *a, **k: (_ for _ in ()).throw(OSError("disk on fire"))
+    )
+    # except 块会 logger.warning：全量车道下 root logger 可能挂着 FileHandler，
+    # 警告自身再触发 open 会顶掉被测异常——静音被测模块 logger，断言只看传播。
+    monkeypatch.setattr(pm_mod.logger, "warning", lambda *a, **k: None)
+    # 类身份无关匹配：全量车道存在平铺模块克隆场景（同文件被二次装载为另一
+    # 模块对象），按类对象匹配会误判 DID NOT raise；契约断言 = RuntimeError 族
+    # + 专用类型名 + 根因消息，语义不减。
+    with pytest.raises(RuntimeError, match="disk on fire") as ei:
+        pm.read_log_by_pid(55501)
+    assert type(ei.value).__name__ == "ProcessLogReadError"
 
 
 def test_read_log_by_pid_reads_content_and_parses_command(pm, tmp_path):

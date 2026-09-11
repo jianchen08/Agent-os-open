@@ -1,14 +1,15 @@
 //! 核心类型定义
 //!
 //! 对应 0.1 的 `pipeline/types.py`。路由经 DSL 条件表达（G10 单轨裁定），
-//! RouteSignal 信号对象已物理退役；控制流由插件写状态键、引擎轮边界消费
+//! 控制流由插件写状态键、引擎轮边界消费
 //! （控制状态键契约 ADR 2026-08-30：RunStatus::from_control_state 终态映射单点）。
 //!
 //! ADR 修订新增（v2.0）：
-//! - SQLite 四表模型类型（ADR ④）：RunRecord / MessageRecord / TraceEntry / BlobRecord
-//! - 多分支模型类型（ADR ⑤）：Branch / RunStatus / PatchType
+//! - SQLite 四表模型类型（ADR ④）：RunRecord / MessageRecord / TraceEntry
+//! - 多分支模型类型（ADR ⑤）：RunStatus / PatchType（分支创建面已随 replay
+//!   补偿写面退役，见 docs/decisions/2026-09-09-kernel-dead-layer-adjudication.md）
 //! - 内容懒加载（ADR ⑦）：ContentLoader
-//! - 引擎结果类型（ADR ①）：StepResult / SuspendHandle / WakeEvent / EngineError
+//! - 引擎结果类型（ADR ①）：StepResult / WakeEvent / EngineError
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -105,12 +106,15 @@ impl std::error::Error for PluginError {}
 /// **ADR ⑦ 改造**：新增 `content_loader` 字段，实现内容懒加载。
 /// `state` 字段不再包含完整消息内容——只存摘要（role、content_preview、blob_id）。
 /// 插件需要完整内容时，通过 `content_loader` 按需从 blobs 表加载。
+///
+/// `state` 为借用引用：管道步骤串行 await，invoke 期间引擎不写 state
+/// （插件结果在返回后 merge），纯借用无并发冲突——消除每步调用的整包深拷。
 #[derive(Clone)]
-pub struct PluginContext {
+pub struct PluginContext<'a> {
     /// 管道当前状态（JSON Value 形式，支持嵌套）
     ///
     /// ADR ⑦：状态摘要（不含完整消息内容），完整内容通过 content_loader 按需加载
-    pub state: serde_json::Value,
+    pub state: &'a serde_json::Value,
     /// 插件配置
     pub config: serde_json::Value,
     /// 当前租户上下文
@@ -127,7 +131,7 @@ pub struct PluginContext {
     pub content_loader: ContentLoader,
 }
 
-impl std::fmt::Debug for PluginContext {
+impl std::fmt::Debug for PluginContext<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PluginContext")
             .field("state", &self.state)
@@ -141,9 +145,9 @@ impl std::fmt::Debug for PluginContext {
     }
 }
 
-impl PluginContext {
+impl<'a> PluginContext<'a> {
     pub fn new(
-        state: serde_json::Value,
+        state: &'a serde_json::Value,
         config: serde_json::Value,
         tenant: TenantContext,
         pipeline_id: Uuid,
@@ -412,6 +416,22 @@ pub enum RunStatus {
 }
 
 impl RunStatus {
+    /// Failed 终态署名词表（`router.stop_reason` 取值）：命中即映射 Failed。
+    /// 单点权威——from_control_state 查此表，词表测试遍历此表防漏词；
+    /// 新增署名只改此表，落库、域事件派生与词表测试同步生效。
+    pub const FAILED_STOP_REASONS: &[&str] = &[
+        "task_failed",
+        "task_evaluate_failed",
+        "max_iterations",
+        "timeout",
+        "budget_exhausted",
+        "elapsed_cap",
+        "iteration_cap",
+        "stalled",
+        "duplicate_loop",
+        "tool_fail_loop",
+    ];
+
     /// run 终态映射（控制状态键契约 ADR 2026-08-30）：挂起优先；其余按
     /// `router.stop_reason` 署名查表——谁写终止谁署名，引擎只查表不猜；
     /// 未署名（含正常收束）→ Completed。引擎落库（update_run_status）与
@@ -433,17 +453,7 @@ impl RunStatus {
             Some("user_requested") | Some("task_cancelled") | Some("task_deleted") => {
                 Self::Cancelled
             }
-            Some(
-                "task_failed"
-                | "task_evaluate_failed"
-                | "max_iterations"
-                | "timeout"
-                | "budget_exhausted"
-                | "elapsed_cap"
-                | "iteration_cap"
-                | "stalled"
-                | "duplicate_loop",
-            ) => Self::Failed,
+            Some(reason) if Self::FAILED_STOP_REASONS.contains(&reason) => Self::Failed,
             _ => Self::Completed,
         }
     }
@@ -483,8 +493,7 @@ pub struct RunRecord {
 /// runs × message_slots × pipeline_sessions 三表联结：
 /// - run → pipeline 映射经 message_slots.run_id（op-based 落槽时写入）；
 /// - pipeline → 会话映射经 pipeline_sessions；
-/// - 消耗账本真值在 state 的 track.total_tokens（0.1 的 pipeline_run_summaries
-///   投影表已退役）。
+/// - 消耗账本真值在 state 的 track.total_tokens（无投影表）。
 ///
 /// 无消息槽的 run（旧引擎 start_run 占位）在查询层被过滤，只呈现真实执行的管道。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -619,20 +628,19 @@ pub struct SessionRecord {
 /// users 表记录——持久化用户（0.5.0 完整用户系统的最小持久化地基）。
 ///
 /// 0.2.0 auth 为硬编码单 admin 占位实现；本次为多租户隔离测试落地最小持久化：
-/// register 真实建用户，login/me/refresh/WS 查 DB。RBAC/JWT 签名/bcrypt 哈希/
-/// 凭据保险库留给 0.5.0（见 auth.rs DEBT 标注 + ROADMAP §0.5）。
+/// register 真实建用户，login/me/refresh/WS 查 DB。RBAC/凭据保险库留给 0.5.0。
 ///
 /// **租户粒度**：一用户一租户——注册时 `tenant_id = user_id`，保证不同用户数据隔离。
 /// admin 种子用户 tenant_id = "default"。
 ///
-/// 密码明文存储（演示环境，DEBT 标注待 0.5.0 替换为哈希）。
+/// `password` 存 argon2id 哈希（D1：明文行由内核启动迁移自动哈希化回写）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserRecord {
     /// 用户 ID（uuid；admin 种子为固定值）
     pub user_id: String,
     /// 用户名（跨租户全局唯一，登录键）
     pub username: String,
-    /// 密码（明文，DEBT: 0.5.0 替换为哈希）
+    /// 密码（argon2id 哈希，PHC 字符串，以 `$argon2` 起始）
     pub password: String,
     /// 邮箱（可空）
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -646,6 +654,9 @@ pub struct UserRecord {
     /// 最近登录时间（可空）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_login_at: Option<String>,
+    /// 首登强制改密标记（D1）：播种账号置 true，改密成功后清除。
+    #[serde(default)]
+    pub must_change_password: bool,
 }
 
 /// traces 表 Patch 类型（traces 表 patch_type 字段）。
@@ -696,81 +707,7 @@ pub struct TraceEntry {
     pub created_at: String,
 }
 
-/// blobs 表记录——不可变原始数据。
-///
-/// 对应 SQLite 四表中的 `blobs` 表。
-///
-/// **关键设计**（ADR ③⑦）：
-/// - **不可变**：只增不改不删
-/// - **内容寻址**：blob_id = 内容哈希，相同内容自动去重
-/// - **懒加载**：messages 表只存 blob_id，引擎按需加载
-///
-/// [来源: docs/working/adr_engine_design.md §4.2 表4]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlobRecord {
-    /// BLOB 唯一 ID（内容哈希）
-    pub blob_id: String,
-    /// MIME 类型（text/plain / application/json / image/png ...）
-    pub mime_type: String,
-    /// 数据大小（字节）
-    pub size_bytes: u64,
-    /// 创建时间（ISO8601）
-    pub created_at: String,
-}
-
-// ── ADR ⑤：多分支模型 ───────────────────────────────────────
-
-/// 分支模型（ADR ⑤）。
-///
-/// 回滚通过创建新分支 + 正向重放 Patch 恢复状态，不删除不逆操作。
-///
-/// **分支模型**：
-/// ```text
-/// 主分支 (branch_id = "main")
-///   seq=1  消息1  Patch1
-///   seq=2  消息2  Patch2
-///   seq=3  消息3  Patch3  ← 发现问题，需要回滚到 seq=1
-///   │
-///   └─ 创建新分支 (branch_id = "main.rollback.001")
-///       parent_branch = "main"
-///       parent_seq = 1                    ← 回滚目标
-///       │ 正向重放 main 分支 seq=1 的 Patch
-///       │ → 恢复状态到 seq=1 的快照
-///       │
-///       seq=1  消息4  Patch4  ← 新的执行从这里开始
-/// ```
-///
-/// [来源: docs/working/adr_engine_design.md §4.3]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Branch {
-    /// 分支唯一 ID（如 "main"、"main.rollback.001"）
-    pub branch_id: String,
-    /// 所属运行实例 ID
-    pub run_id: String,
-    /// 父分支 ID（根分支为 None）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_branch: Option<String>,
-    /// 父分支回滚目标序列号（根分支为 None）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_seq: Option<u32>,
-    /// 创建时间（ISO8601）
-    pub created_at: String,
-}
-
 // ── ADR ①：引擎结果类型 ──────────────────────────────────────
-
-/// 挂起句柄（审批闭环 resume 协议的恢复凭据：保存分支状态，等待外部事件恢复执行）。
-///
-/// [来源: docs/working/adr_engine_design.md §3.3]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SuspendHandle {
-    /// 运行实例 ID
-    pub run_id: String,
-    /// 当前分支 ID
-    pub branch_id: String,
-    /// 当前序列号
-    pub seq: u32,
-}
 
 /// 引擎错误。
 ///
@@ -936,8 +873,8 @@ impl Default for CheckpointConfig {
 /// step 列表项：step id / step 库 id / 插件名的引用，可带可选 when 门。
 ///
 /// YAML 两种形态（untagged，同一字段集）：
-/// - 裸字符串：`- pipeline_tool_schema`（无 when 门，缺省 True）；
-/// - 对象：`- name: pipeline_godot_context` + `when: "state.selected != ''"`。
+/// - 裸字符串：`- <step或插件名>`（无 when 门，缺省 True）；
+/// - 对象：`- name: <step或插件名>` + `when: "state.xxx != ''"`。
 ///
 /// 门语义（G9）：引擎在该项 invoke **前**对 state 求值（复用 `eval_condition`
 /// 安全求值器，与路由 when 同语法同求值器），假则整项跳过（零调用）；
@@ -1037,7 +974,7 @@ pub struct PipelineStep {
 /// - `while_cond` 缺省 → 单次执行（前处理/后处理体，如 init/exit）；
 /// - `while_cond` 存在 → 循环执行，每轮开头求值（同一 `eval_condition` 求值器），
 ///   假则退出循环；`ended` / `suspended` 亦可终止。迭代上限不在管道 DSL 表达——
-///   生产阀门是 post 链 `pipeline_stop_check` 按 Agent 配置 `max_iterations` 兜底；
+///   生产阀门是 post 链终止检查插件按 Agent 配置 `max_iterations` 兜底；
 /// - 循环体结束后的转移：`next` 命中（`RouteNext::Phase`）→ 跳转到指定循环体；
 ///   未命中/未声明 → 默认顺序进入下一个循环体；最后一个循环体结束 = run 结束。
 /// - `run_on_error`：管道提前终止（`ended` / 出错）时仍执行本循环体（收尾语义，
@@ -1078,6 +1015,19 @@ pub struct PipelineConfig {
     /// 供冷启动重建时优先恢复（O(1) 取基线 + 回放其后增量）。
     #[serde(default)]
     pub checkpoint: CheckpointConfig,
+    /// 管道级初始 state 缺省（命令声明驱动缺省：开轮前种入的标量键值）。
+    ///
+    /// 由管道 YAML 顶层 `initial_state:` 声明（如 core 器官执行缺省
+    /// core_plugin/core_type）——内核不预知具体键面，声明什么种什么；
+    /// 已有值不覆盖（本轮值优先），缺省只补缺。
+    #[serde(default)]
+    pub initial_state: HashMap<String, serde_json::Value>,
+    /// 主轮循环轮数硬上限（per-run 全部循环体 while 轮累计，ADR
+    /// 2026-09-11-engine-loop-cap）。由管道 YAML 顶层 `max_rounds:` 声明；
+    /// `None` = 未声明，引擎用缺省 200（旧 YAML 行为不变）。`0` 非法
+    /// （run 入口报错拒绝，0 = 无限轮已被禁用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<usize>,
 }
 
 impl PipelineConfig {
@@ -1119,6 +1069,8 @@ impl PipelineConfig {
                 run_on_error: false,
             }],
             checkpoint: Default::default(),
+            initial_state: HashMap::new(),
+            max_rounds: None,
         }
     }
 }

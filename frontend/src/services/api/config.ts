@@ -66,6 +66,10 @@ export interface RemoteModel {
   id: string
   /** 归属方（可能为空） */
   owned_by: string
+  /** 上下文窗口（litellm 注册表事实；查不到则缺席，不发明数字） */
+  context_window?: number
+  /** 最大输出 tokens（同上；查不到则缺席） */
+  max_output_tokens?: number
 }
 
 export interface LLMDefaults {
@@ -85,6 +89,38 @@ export interface LLMConfigResponse {
 export async function getLLMConfig(options: RetryOptions = {}): Promise<LLMConfigResponse> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<LLMConfigResponse>(API_ENDPOINTS.CONFIG.LLM_GET)
+    return response.data
+  }, options)
+}
+
+/** LLM 配置面预置声明（llm_service 插件下发，前端设置页唯一来源；P2-5） */
+export interface LLMPresetGroup {
+  /** 分组标题（如「国内」「国际」） */
+  label: string
+  /** [provider_id, 显示名] 二元组 */
+  providers: [string, string][]
+}
+
+export interface LLMPresets {
+  provider_groups: LLMPresetGroup[]
+  /** 「添加自定义提供商」类型下拉的常用置顶 */
+  common_provider_types: string[]
+  /** 思考强度映射白名单（levels=档位词汇；allowed_keys=允许覆盖的参数键） */
+  thinking_strength: {
+    levels: string[]
+    allowed_keys: string[]
+  }
+}
+
+/**
+ * 拉取 LLM 配置面预置声明
+ *
+ * 新增预置厂商仅改 llm_service 声明文件（llm_presets.yaml）+ llm.yaml，
+ * 前端零改动。
+ */
+export async function getLLMPresets(options: RetryOptions = {}): Promise<LLMPresets> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.get<LLMPresets>(API_ENDPOINTS.CONFIG.LLM_PRESETS)
     return response.data
   }, options)
 }

@@ -5,16 +5,14 @@
  * 验证：挂载时订阅 WIDGET_EVENT + 解析派发到 widgetEventStore；
  * 无效事件（adaptWidgetEvent 返回 null）不派发；卸载时取消订阅。
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { renderHook } from '@testing-library/react'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
-
 const { mockSubscribe, mockUnsubscribe, mockHandlers } = vi.hoisted(() => ({
   mockSubscribe: vi.fn(),
   mockUnsubscribe: vi.fn(),
   mockHandlers: new Map<string, (data: any) => void>(),
 }))
-
 vi.mock('@/services/websocket/GlobalWebSocket', () => ({
   globalWS: {
     subscribe: (e: string, h: (d: any) => void) => {
@@ -27,7 +25,6 @@ vi.mock('@/services/websocket/GlobalWebSocket', () => ({
     },
   },
 }))
-
 vi.mock('@/services/websocket/MessageAdapter', () => ({
   adaptWidgetEvent: (raw: any) => {
     if (!raw || raw.type !== WS_SERVER_EVENTS.WIDGET_EVENT) return null
@@ -41,16 +38,13 @@ vi.mock('@/services/websocket/MessageAdapter', () => ({
     }
   },
 }))
-
 vi.mock('@/utils/logger', () => ({
   loggers: { websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } },
 }))
-
 const mockDispatch = vi.fn()
 vi.mock('@/stores/widgetEventStore', () => ({
   useWidgetEventStore: (selector: (s: any) => any) => selector({ dispatchWidgetEvent: mockDispatch }),
 }))
-
 import { useWidgetEvents } from '@/hooks/useWidgetEvents'
 
 describe('useWidgetEvents', () => {

@@ -39,8 +39,8 @@ pub fn register_plugin_capabilities(
             //     比对、不回填握手 schema），缺声明 = 注册出 {} = LLM 收到零参数
             //     工具，调用必因缺参被服务端校验拒绝；拒注册直接暴露问题，
             //     不给"盲调工具"留后门。
-            //   - 内置/sidecar 自研（http.handle、*.status 哨兵、widget_demo 演示
-            //     工具）：零参合法（HTTP 处理器/无参状态查询），维持 {} 补注册，
+            //   - 内置/sidecar 自研（http.handle、*.status 哨兵等零参工具）：
+            //     零参合法（HTTP 处理器/无参状态查询），维持 {} 补注册，
             //     仅 warn（K9 既有行为）。
             let is_external_mcp = manifest.entry == "mcp:external";
             if tool_cap.input_schema.is_none() {
@@ -251,10 +251,10 @@ mod domain_event_tests {
 
     #[async_trait::async_trait]
     impl PluginInvoker for RecordingInvoker {
-        async fn invoke_pipeline_plugin(
+        async fn invoke_pipeline_plugin<'a>(
             &self,
             _plugin_id: &str,
-            _ctx: &PluginContext,
+            _ctx: &PluginContext<'a>,
         ) -> Result<PluginResult, PluginError> {
             unimplemented!("域事件测试不触达")
         }
@@ -288,6 +288,8 @@ mod domain_event_tests {
 
     fn manifest(id: &str, declare_domain: bool) -> PluginManifest {
         PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: id.to_string(),
             name: id.to_string(),
             description: None,
@@ -382,6 +384,8 @@ mod external_mcp_schema_gate_tests {
 
     fn manifest_with(entry: &str, tool_input_schema: Option<serde_json::Value>) -> PluginManifest {
         PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
             id: "p_gate".to_string(),
             name: "p_gate".to_string(),
             description: None,
@@ -399,6 +403,7 @@ mod external_mcp_schema_gate_tests {
                     input_schema: tool_input_schema,
                     output_schema: None,
                     smoke: None,
+                    timeout_ms: None,
                     category: Some(ToolCategory::Search),
                     ui: None,
                     render: None,
@@ -463,7 +468,7 @@ mod external_mcp_schema_gate_tests {
 
     #[test]
     fn sidecar_builtin_tool_without_input_schema_still_registered() {
-        // 内置 sidecar 哨兵（http.handle / *.status / widget_demo 演示工具）零参
+        // 内置 sidecar 哨兵（http.handle / *.status 等零参工具）零参
         // 合法——维持 {} 补注册（K9 既有行为），不被新规则误伤
         let mut m2 = manifest_with("plugin:main", None);
         m2.plugin_type = PluginType::System;

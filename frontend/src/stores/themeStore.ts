@@ -8,6 +8,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { themeList } from '@/config/themes'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { applyPluginSkin, clearPluginSkin, isSkinTheme } from '@/services/skinRuntime'
 import {
   getPresetTheme,
   applyTheme as applyThemeToDOM,
@@ -17,7 +18,6 @@ import {
   fetchDynamicThemes,
 } from '@/services/themeService'
 import { ThemeStorageService, mergeTheme } from '@/services/themeStorage'
-import { applyPluginSkin, clearPluginSkin, isSkinTheme } from '@/services/skinRuntime'
 import { loggers } from '@/utils/logger'
 import { createTolerantStorage } from '@/utils/tolerantStorage'
 import type { PluginTheme, ThemeConfig, ThemeInfo, ThemeMode } from '@/types/theme'
@@ -155,7 +155,6 @@ function applyMotionPreferences(root: HTMLElement): void {
 export const useThemeStore = create<ThemeState & ThemeActions>()(
   persist(
     (set, get) => ({
-      // 初始状态
       mode: 'dark',
       currentThemeId: 'dark',
       resolvedTheme: 'dark',
@@ -167,7 +166,6 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
       bubbleAiMode: 'bubble',
       bgImageActive: false,
 
-      // 设置主题模式
       setMode: (mode) => {
         const resolvedTheme = resolveThemeMode(mode)
         const newThemeId = mode === 'system' ? resolvedTheme : mode
@@ -180,13 +178,11 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         }
       },
 
-      // 切换到指定主题
       setTheme: async (themeId) => {
         set({ currentThemeId: themeId, mode: themeId as ThemeMode })
         await get().loadTheme(themeId)
       },
 
-      // 加载主题配置
       loadTheme: async (themeId) => {
         set({ isLoading: true })
         try {
@@ -205,10 +201,8 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
               // 落到下方 pluginTheme 分支。
               ThemeStorageService.deleteUserTheme(themeId)
             } else if (userTheme) {
-              // 加载基础主题
               const baseTheme = getPresetTheme(userTheme.basedOn)
               if (baseTheme) {
-                // 合并用户自定义配置
                 config = mergeTheme(baseTheme, userTheme.customizations)
                 config.id = userTheme.id
                 config.name = userTheme.name
@@ -231,7 +225,6 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
           }
 
           if (config) {
-            // 判断是否为浅色主题
             const resolved = isLightTheme(config) ? 'light' : 'dark'
             set({
               themeConfig: config,
@@ -250,7 +243,6 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
             return
           } else {
             console.error(`无法加载主题: ${themeId}`)
-            // 回退到深色主题
             const fallback = getPresetTheme('dark')
             if (fallback) {
               set({
@@ -264,7 +256,6 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
           }
         } catch (error) {
           console.error('加载主题失败:', error)
-          // 回退到内置主题
           const fallback = getPresetTheme('dark')
           if (fallback) {
             set({
@@ -280,7 +271,6 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         }
       },
 
-      // 加载用户自定义主题
       loadUserThemes: () => {
         // 用户主题会在 updateAvailableThemes 中合并到 availableThemes
         get().updateAvailableThemes()
@@ -301,7 +291,6 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         }
       },
 
-      // 更新可用主题列表
       updateAvailableThemes: () => {
         const userThemes = ThemeStorageService.getUserThemes()
 
@@ -316,7 +305,6 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
           preview: derivePluginThemePreview(t),
         }))
 
-        // 合并预设主题 + 插件主题 + 用户主题
         const allThemes: ThemeInfo[] = [
           ...themeList,
           ...pluginThemes,
@@ -362,7 +350,6 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         }
       },
 
-      // 重置主题
       resetTheme: () => {
         set({
           mode: 'dark',
@@ -376,7 +363,6 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         get().updateAvailableThemes()
       },
 
-      // 应用主题到 DOM
       applyTheme: () => {
         const { themeConfig, activePluginTheme } = get()
         if (!themeConfig) return
@@ -526,14 +512,11 @@ export async function initializeTheme() {
   // 更新可用主题列表（preset + localStorage 用户主题，含上一步加载的动态主题）
   store.updateAvailableThemes()
 
-  // 解析当前主题
   const resolvedTheme = resolveThemeMode(store.mode)
   useThemeStore.setState({ resolvedTheme })
 
-  // 加载主题配置
   await store.loadTheme(store.currentThemeId)
 
-  // 监听系统主题变化
   if (typeof window !== 'undefined') {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
     mediaQuery.addEventListener('change', () => {

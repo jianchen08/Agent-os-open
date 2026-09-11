@@ -1,9 +1,9 @@
 /**
  * ArtifactPreviewWidget 渲染路由测试
  *
- * 背景：此前 code 类型用纯 <pre>（不高亮）、document 类型当纯文本（不渲染 markdown）。
- * 本次复用现有渲染组件：code → CodeBlock（语法高亮）、document → MarkdownRenderer
- * （streamdown markdown）、data → CodeBlock(language='json')。
+ * 渲染路由契约：code → CodeBlock（语法高亮，不得退化为纯 <pre>）、
+ * document → MarkdownRenderer（streamdown markdown，不得当纯文本）、
+ * data → CodeBlock(language='json')。
  *
  * 验证（可观察行为，mock 复用目标以断言被调用）：
  * - AC-1: code 类型 → CodeBlock 以 { code: content, language } 调用并渲染
@@ -14,6 +14,8 @@
 import { render, screen } from '@testing-library/react'
 import React from 'react'
 import { describe, expect, it, vi } from 'vitest'
+import { CodeBlock, MarkdownRenderer } from '@/components/shared/markdown'
+import { ArtifactPreviewWidget } from '../ArtifactPreviewWidget'
 import type { Mock } from 'vitest'
 
 // ── Mock 复用目标（断言「被调用」即可，不验证其内部高亮实现）──
@@ -27,9 +29,6 @@ vi.mock('@/components/shared/markdown', () => ({
     <div data-testid="markdown-mock">{props.content}</div>
   )),
 }))
-
-import { CodeBlock, MarkdownRenderer } from '@/components/shared/markdown'
-import { ArtifactPreviewWidget } from '../ArtifactPreviewWidget'
 
 const CodeBlockMock = CodeBlock as unknown as Mock
 const MarkdownRendererMock = MarkdownRenderer as unknown as Mock

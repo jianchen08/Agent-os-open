@@ -48,7 +48,10 @@ def _mm_path_guard():
     1. 把 multimodal + system 目录推到 sys.path[0:2]；
     2. 重载 storage/mm_types 为本插件版本；
     3. 把测试模块级绑定的类引用替换为新类（懒加载与新断言同源）。
+    执行结束后恢复 sys.path：残留会压住后续测试自己注入的插件目录
+    （tasks/shared 等同名裸名插件按 sys.path 位次解析，被 MM 压住即串扰）。
     """
+    old_path = sys.path[:]
     for _d in (str(_MM_DIR), str(_SYS_DIR)):
         if _d in sys.path:
             sys.path.remove(_d)
@@ -62,6 +65,7 @@ def _mm_path_guard():
     globals()["AttachmentInfo"] = _mm.AttachmentInfo
     globals()["MediaType"] = _mm.MediaType
     yield
+    sys.path[:] = old_path
 
 
 from mm_types import AttachmentInfo, MediaType
@@ -92,6 +96,16 @@ def _async_run(coro):
 def _temp_dir():
     """创建临时目录并返回路径。"""
     return tempfile.mkdtemp(prefix="dsk_test_")
+
+
+# file_id 契约（12 位小写十六进制）下的测试键：字面量保持可读可断言。
+FID_F = "f1f1f1f1f1f1"
+FID_D = "d1d1d1d1d1d1"
+FID_EMPTY = "e0e0e0e0e0e0"
+FID_BIG = "b1b1b1b1b1b1"
+FID_PERSIST = "5e5e5e5e5e5e"
+FID_URL = "8a8a8a8a8a8a"
+FID_ABSENT = "999999999999"  # 格式合法但从未写入
 
 
 # ── fixtures ─────────────────────────────────────────────
@@ -139,8 +153,8 @@ class TestDiskFileStorageSaveLoad:
 
     def test_save_and_load_attachment_info(self, storage, sample_attachment):
         """保存 AttachmentInfo 后加载，应得到等价对象。"""
-        _async_run(storage.save("f1", sample_attachment))
-        loaded = _async_run(storage.load("f1"))
+        _async_run(storage.save(FID_F, sample_attachment))
+        loaded = _async_run(storage.load(FID_F))
 
         assert loaded is not None, "加载不应返回 None"
         assert isinstance(loaded, AttachmentInfo), f"应为 AttachmentInfo，实际 {type(loaded)}"
@@ -154,8 +168,8 @@ class TestDiskFileStorageSaveLoad:
     def test_save_dict_data(self, storage):
         """保存普通 dict 数据。"""
         data = {"file_id": "d1", "custom": "value", "number": 42}
-        _async_run(storage.save("d1", data))
-        loaded = _async_run(storage.load("d1"))
+        _async_run(storage.save(FID_D, data))
+        loaded = _async_run(storage.load(FID_D))
 
         assert loaded is not None
         assert loaded["custom"] == "value"
@@ -163,13 +177,13 @@ class TestDiskFileStorageSaveLoad:
 
     def test_load_nonexistent_returns_none(self, storage):
         """加载不存在的文件应返回 None。"""
-        assert _async_run(storage.load("nonexistent-id")) is None
+        assert _async_run(storage.load(FID_ABSENT)) is None
 
     def test_save_overwrites_existing(self, storage, sample_attachment, sample_video_attachment):
         """同名 file_id 保存会覆盖旧数据。"""
-        _async_run(storage.save("f1", sample_attachment))
-        _async_run(storage.save("f1", sample_video_attachment))
-        loaded = _async_run(storage.load("f1"))
+        _async_run(storage.save(FID_F, sample_attachment))
+        _async_run(storage.save(FID_F, sample_video_attachment))
+        loaded = _async_run(storage.load(FID_F))
 
         assert loaded is not None
         assert loaded.file_id == "vid-001"
@@ -177,8 +191,8 @@ class TestDiskFileStorageSaveLoad:
 
     def test_save_empty_dict(self, storage):
         """保存空 dict。"""
-        _async_run(storage.save("empty", {}))
-        loaded = _async_run(storage.load("empty"))
+        _async_run(storage.save(FID_EMPTY, {}))
+        loaded = _async_run(storage.load(FID_EMPTY))
         assert loaded == {}
 
     def test_save_large_base64_data(self, storage):
@@ -192,21 +206,21 @@ class TestDiskFileStorageSaveLoad:
             media_type=MediaType.IMAGE,
             base64_data=big_data,
         )
-        _async_run(storage.save("big-001", att))
-        loaded = _async_run(storage.load("big-001"))
+        _async_run(storage.save(FID_BIG, att))
+        loaded = _async_run(storage.load(FID_BIG))
         assert loaded is not None
         assert loaded.base64_data == big_data
         assert len(loaded.base64_data) == 100000
 
     def test_save_multiple_files(self, storage, sample_attachment):
         """同时保存多个文件，各自独立加载正确。"""
-        _async_run(storage.save("a1", sample_attachment))
-        _async_run(storage.save("a2", sample_attachment))
-        _async_run(storage.save("a3", {"x": 1}))
+        _async_run(storage.save("a1a1a1a1a1a1", sample_attachment))
+        _async_run(storage.save("a2a2a2a2a2a2", sample_attachment))
+        _async_run(storage.save("a3a3a3a3a3a3", {"x": 1}))
 
-        a1 = _async_run(storage.load("a1"))
-        a2 = _async_run(storage.load("a2"))
-        a3 = _async_run(storage.load("a3"))
+        a1 = _async_run(storage.load("a1a1a1a1a1a1"))
+        a2 = _async_run(storage.load("a2a2a2a2a2a2"))
+        a3 = _async_run(storage.load("a3a3a3a3a3a3"))
 
         assert isinstance(a1, AttachmentInfo)
         assert isinstance(a2, AttachmentInfo)
@@ -223,23 +237,23 @@ class TestDiskFileStorageDelete:
 
     def test_delete_existing_file(self, storage, sample_attachment):
         """删除已存在的文件返回 True，删除后不可访问。"""
-        _async_run(storage.save("f1", sample_attachment))
-        assert _async_run(storage.exists("f1")) is True
+        _async_run(storage.save(FID_F, sample_attachment))
+        assert _async_run(storage.exists(FID_F)) is True
 
-        deleted = _async_run(storage.delete("f1"))
+        deleted = _async_run(storage.delete(FID_F))
         assert deleted is True
-        assert _async_run(storage.exists("f1")) is False
-        assert _async_run(storage.load("f1")) is None
+        assert _async_run(storage.exists(FID_F)) is False
+        assert _async_run(storage.load(FID_F)) is None
 
     def test_delete_nonexistent_returns_false(self, storage):
         """删除不存在的文件返回 False。"""
-        assert _async_run(storage.delete("nonexistent")) is False
+        assert _async_run(storage.delete(FID_ABSENT)) is False
 
     def test_delete_twice_returns_false_second(self, storage, sample_attachment):
         """连续两次删除同一文件，第二次返回 False。"""
-        _async_run(storage.save("f1", sample_attachment))
-        assert _async_run(storage.delete("f1")) is True
-        assert _async_run(storage.delete("f1")) is False
+        _async_run(storage.save(FID_F, sample_attachment))
+        assert _async_run(storage.delete(FID_F)) is True
+        assert _async_run(storage.delete(FID_F)) is False
 
 
 # ============================================================
@@ -251,18 +265,18 @@ class TestDiskFileStorageExists:
 
     def test_exists_after_save(self, storage, sample_attachment):
         """保存后 exists 返回 True。"""
-        _async_run(storage.save("f1", sample_attachment))
-        assert _async_run(storage.exists("f1")) is True
+        _async_run(storage.save(FID_F, sample_attachment))
+        assert _async_run(storage.exists(FID_F)) is True
 
     def test_not_exists_before_save(self, storage):
         """未保存时 exists 返回 False。"""
-        assert _async_run(storage.exists("f1")) is False
+        assert _async_run(storage.exists(FID_F)) is False
 
     def test_not_exists_after_delete(self, storage, sample_attachment):
         """删除后 exists 返回 False。"""
-        _async_run(storage.save("f1", sample_attachment))
-        _async_run(storage.delete("f1"))
-        assert _async_run(storage.exists("f1")) is False
+        _async_run(storage.save(FID_F, sample_attachment))
+        _async_run(storage.delete(FID_F))
+        assert _async_run(storage.exists(FID_F)) is False
 
 
 # ============================================================
@@ -277,11 +291,11 @@ class TestDiskFileStoragePersistence:
         d = _temp_dir()
         try:
             s1 = DiskFileStorage(base_dir=d)
-            _async_run(s1.save("persist-1", sample_attachment))
+            _async_run(s1.save(FID_PERSIST, sample_attachment))
 
             # 模拟重启：创建新实例指向同一目录
             s2 = DiskFileStorage(base_dir=d)
-            loaded = _async_run(s2.load("persist-1"))
+            loaded = _async_run(s2.load(FID_PERSIST))
 
             assert loaded is not None
             assert isinstance(loaded, AttachmentInfo)
@@ -295,9 +309,9 @@ class TestDiskFileStoragePersistence:
         d = _temp_dir()
         try:
             storage = DiskFileStorage(base_dir=d)
-            _async_run(storage.save("f1", sample_attachment))
+            _async_run(storage.save(FID_F, sample_attachment))
 
-            meta_path = Path(d) / "f1.json"
+            meta_path = Path(d) / f"{FID_F}.json"
             assert meta_path.exists(), f"元数据文件不存在: {meta_path}"
             raw = json.loads(meta_path.read_text(encoding="utf-8"))
             assert raw["file_id"] == "test-file-001"
@@ -312,10 +326,10 @@ class TestDiskFileStoragePersistence:
         d = _temp_dir()
         try:
             s1 = DiskFileStorage(base_dir=d)
-            _async_run(s1.save("d1", {"a": 1, "b": "hello"}))
+            _async_run(s1.save(FID_D, {"a": 1, "b": "hello"}))
 
             s2 = DiskFileStorage(base_dir=d)
-            loaded = _async_run(s2.load("d1"))
+            loaded = _async_run(s2.load(FID_D))
 
             assert loaded == {"a": 1, "b": "hello"}
         finally:
@@ -333,17 +347,17 @@ class TestDiskFileStorageErrorHandling:
     def test_unsupported_data_type_raises_error(self, storage):
         """不支持的数据类型（如 int）应抛出 StorageError。"""
         with pytest.raises(StorageError, match="不支持的数据类型"):
-            _async_run(storage.save("f1", 12345))
+            _async_run(storage.save(FID_F, 12345))
 
     def test_unsupported_list_raises_error(self, storage):
         """list 类型应抛出 StorageError。"""
         with pytest.raises(StorageError, match="不支持的数据类型"):
-            _async_run(storage.save("f1", [1, 2, 3]))
+            _async_run(storage.save(FID_F, [1, 2, 3]))
 
     def test_unsupported_string_raises_error(self, storage):
         """普通字符串应抛出 StorageError。"""
         with pytest.raises(StorageError, match="不支持的数据类型"):
-            _async_run(storage.save("f1", "plain string"))
+            _async_run(storage.save(FID_F, "plain string"))
 
     def test_base_dir_auto_created(self):
         """构造时自动创建目录。"""
@@ -379,30 +393,45 @@ class TestDiskFileStorageErrorHandling:
 class TestDiskFileStorageEdgeCases:
     """边界场景测试。"""
 
-    def test_file_id_with_special_chars(self):
-        """file_id 含特殊字符时正常工作（使用合法文件名）。"""
+    def test_file_id_invalid_format_rejected(self):
+        """file_id 不满足 12 位小写十六进制契约 → StorageError 拒绝（fail-closed）。
+
+        file_id 直接拼进元数据文件名，历史 docstring 曾以"非外部可控"为由
+        不设防，但外部 filename 曾流入 file_id——格式闸是路径拼接前的强制校验，
+        含路径穿越/大写/长度漂移/空串在内的不合法输入一律拒绝。
+        """
         d = _temp_dir()
         try:
             s = DiskFileStorage(base_dir=d)
-            data = {"x": 1}
-            fid = "file-with-dashes_and_underscores.123"
-            _async_run(s.save(fid, data))
-            loaded = _async_run(s.load(fid))
-            assert loaded == {"x": 1}
+            for bad in (
+                "f1",  # 长度不足
+                "file-with-dashes",  # 非十六进制字符
+                "ABCDEF123456",  # 大写不在契约内
+                "a1b2c3d4e5f6a",  # 13 位超长
+                "",  # 空串
+                "../../etc/passwd",  # 路径穿越
+                "文件-テスト",  # Unicode
+            ):
+                with pytest.raises(StorageError, match="非法 file_id"):
+                    _async_run(s.save(bad, {"x": 1}))
+                with pytest.raises(StorageError, match="非法 file_id"):
+                    _async_run(s.load(bad))
         finally:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_file_id_with_unicode(self):
-        """file_id 含 Unicode 字符时正常工作。"""
+    def test_file_id_uuid_hex_producer_contract(self):
+        """现状生产契约（uuid.uuid4().hex[:12]）的 file_id 全链路可用。"""
+        import uuid
+
         d = _temp_dir()
         try:
             s = DiskFileStorage(base_dir=d)
-            data = {"name": "中文测试"}
-            fid = "文件-テスト-한국어"
-            _async_run(s.save(fid, data))
+            fid = uuid.uuid4().hex[:12]
+            _async_run(s.save(fid, {"name": "中文测试"}))
             loaded = _async_run(s.load(fid))
             assert loaded == {"name": "中文测试"}
+            assert _async_run(s.exists(fid)) is True
         finally:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
@@ -414,13 +443,13 @@ class TestDiskFileStorageEdgeCases:
             s = DiskFileStorage(base_dir=d)
             async def save_all():
                 for i in range(20):
-                    await s.save(f"concurrent-{i}", {"id": i})
+                    await s.save(f"{i:012x}", {"id": i})
             _async_run(save_all())
 
             for i in range(20):
-                loaded = _async_run(s.load(f"concurrent-{i}"))
+                loaded = _async_run(s.load(f"{i:012x}"))
                 assert loaded == {"id": i}
-                assert _async_run(s.exists(f"concurrent-{i}")) is True
+                assert _async_run(s.exists(f"{i:012x}")) is True
         finally:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
@@ -438,8 +467,8 @@ class TestDiskFileStorageEdgeCases:
                 media_type=MediaType.DOCUMENT,
                 url="https://example.com/doc.pdf",
             )
-            _async_run(s.save("url-001", att))
-            loaded = _async_run(s.load("url-001"))
+            _async_run(s.save(FID_URL, att))
+            loaded = _async_run(s.load(FID_URL))
             assert loaded.url == "https://example.com/doc.pdf"
         finally:
             import shutil

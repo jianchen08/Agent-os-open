@@ -1,8 +1,8 @@
 /**
  * WebSocket 适配器测试 —— widget_event 族（P2 协议）
  *
- * 0.1 Python 内核消息格式适配（adaptIncomingMessage / adaptOutgoingMessage /
- * isRustKernelMessage）已随 0.1 内核退役移除，相关测试同步删除。
+ * MessageAdapter 现有导出仅 widget_event 族解析；消息格式适配面
+ * （adaptIncomingMessage / adaptOutgoingMessage / isRustKernelMessage）不存在。
  */
 
 import { describe, it, expect } from 'vitest'

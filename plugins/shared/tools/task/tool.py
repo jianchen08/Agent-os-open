@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import timezone
 from typing import TYPE_CHECKING, Any
 
 from state_machine import InvalidTransitionError
@@ -31,6 +32,8 @@ from agentos_plugin_sdk import (
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from service import TaskService
 
 import state_fields  # noqa: PLC0415 — plugins/shared 平铺模块
@@ -50,6 +53,17 @@ class StateRowsReadError(RuntimeError):
 def _status_value(status: Any) -> str:
     """状态 → 展示值（TaskStatus 取 .value；枚举漂移保留的原串直通）。"""
     return status.value if hasattr(status, "value") else str(status)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """时区归一：naive 视为 UTC 补 tzinfo，aware 原样返回。
+
+    state/DB 读出的时间串（任务 started_at/completed_at、run created_at/
+    ended_at）带不带偏移取决于写入方（内核 RFC3339 带偏移，旧路径不带），
+    naive/aware 混用会使相减/比较抛 TypeError；凡从 state/DB 读出的时间
+    先经此归一再运算，当前时间统一 datetime.now(timezone.utc)。
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 def _resolve_status_value(raw: str, task_ref: str) -> Any:
@@ -295,14 +309,14 @@ class TaskTool(BuiltinTool):
 
         from datetime import datetime  # noqa: PLC0415
 
-        started = datetime.fromisoformat(task.started_at)
+        started = _as_utc(datetime.fromisoformat(task.started_at))
 
         if task.completed_at:
-            completed = datetime.fromisoformat(task.completed_at)
+            completed = _as_utc(datetime.fromisoformat(task.completed_at))
 
             return (completed - started).total_seconds()
 
-        return (datetime.now() - started).total_seconds()
+        return (datetime.now(timezone.utc) - started).total_seconds()
 
     async def _calc_elapsed_from_runs(self, pipeline_id: str) -> float | None:
         """任务耗时（秒）——state 桥路径：run 记录起点终点直算。
@@ -346,14 +360,14 @@ class TaskTool(BuiltinTool):
             created_raw = str(run.get("created_at") or "")
 
             if created_raw:
-                created_ats.append(datetime.fromisoformat(created_raw))
+                created_ats.append(_as_utc(datetime.fromisoformat(created_raw)))
 
             status = str(run.get("status") or "")
 
             ended_raw = str(run.get("ended_at") or "")
 
             if ended_raw:
-                ended_ats.append(datetime.fromisoformat(ended_raw))
+                ended_ats.append(_as_utc(datetime.fromisoformat(ended_raw)))
             elif status not in ("completed", "failed", "suspended", "cancelled"):
                 all_terminal = False
 
@@ -365,7 +379,7 @@ class TaskTool(BuiltinTool):
         if all_terminal and ended_ats:
             return (max(ended_ats) - started).total_seconds()
 
-        return (datetime.now() - started).total_seconds()
+        return (datetime.now(timezone.utc) - started).total_seconds()
 
     @staticmethod
     def _format_elapsed(seconds: float | None) -> str:
@@ -531,7 +545,7 @@ class TaskTool(BuiltinTool):
         0.2 走 tasks 插件包的 service_access.get_task_service()（M3 自包含实例化，
         进程内单例；server.py 已把 plugins/shared/system/tasks 注入 sys.path）。
         初始化失败返回 None → 转结构化 SERVICE_UNAVAILABLE（execute 的
-        except RuntimeError 捕获），不再依赖已废弃的 0.1 infrastructure 层。
+        except RuntimeError 捕获）。
         """
 
         if self._task_service is not None:
@@ -711,8 +725,6 @@ class TaskTool(BuiltinTool):
                 error=str(e),
                 error_code="SERVICE_UNAVAILABLE",
             )
-
-        # 检查是否使用批量参数
 
         task_ids = inputs.get("task_ids")
 
@@ -1124,7 +1136,7 @@ class TaskTool(BuiltinTool):
                 continue
 
             # P0-3 纵深防御：用统一的 _check_permission 收口越权过滤，
-            # 覆盖既有 ad-hoc 过滤未捕获的边界（如 L2 无 parent_task_id 时的遗留任务）。
+            # L2 无 parent_task_id 的遗留任务也纳入本过滤。
             has_permission, _ = self._check_permission(task, parent_agent_level, inputs)
 
             if not has_permission:
@@ -1352,15 +1364,17 @@ class TaskTool(BuiltinTool):
                     }
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[TaskTool] resume_pipeline 失败: %s", exc)
+                logger.error("[TaskTool] resume_pipeline 失败: %s", exc)
+                # 管道 run 仍挂起，不得谎报 resumed=True/new_status=RUNNING
+                return create_failure_result(
+                    error=f"resume_pipeline 失败，任务保持 {old_status}: {exc}",
+                    error_code="RESUME_PIPELINE_FAILED",
+                    metadata={"task_id": task.id, "resumed": False},
+                )
         logger.info("[TaskTool] resume 完成（resume_pipeline）: task_id=%s", task.id)
 
-        # GAP-1 统一：恢复经 resume_pipeline 直接执行（无需 TaskWorker）。
-        # 复用 retry 场景的 task_data 构造。_execute_background_task 会从
-        # task.pipeline_run_id 取 existing_pipeline_id 复用管道。
-        # 0.2 收尾：pipeline-executor.start_run 占位能力已随旧引擎 AdrEngineImpl
-        # 移除——resume 仅恢复任务状态，任务管道执行由会话对话 /
-        # chat.send_message → PipelineExecutor 驱动。
+        # 恢复经 resume_pipeline 直接执行（无需 TaskWorker），仅恢复任务状态；
+        # 任务管道执行由会话对话 / chat.send_message → PipelineExecutor 驱动。
         logger.info("[TaskTool] resume 完成（仅状态恢复，执行由会话对话驱动）: task_id=%s", task.id)
         execution_warning = None
 

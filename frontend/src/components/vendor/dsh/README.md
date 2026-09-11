@@ -17,7 +17,7 @@ npm registry 已发布 `@deepseek-ai/dsh-client-ui-primitives` /
 npm public 刚起步）。实测结论：**npm 包不能直接进灵汐 bundle**——产物只有
 `lib/index.js` 单文件 bundle，CSS Modules 被 stub 成空对象（零样式），且
 引入 shiki/katex/mdast/anser 重运行时依赖。组件级行为指纹（DiffBlock
-maxLines=16、JsonTree 预览限制 4/5/2、TerminalBlock 状态文案）与锁定
+maxLines=16、TerminalBlock 状态文案）与锁定
 commit 源码一致，vendor 锁定仍准确。下载包的 toolview 清单可经
 `dsh_translate_manifest` 翻译（translator 支持 lib/*.js 产物扫描）。
 
@@ -26,12 +26,10 @@ commit 源码一致，vendor 锁定仍准确。下载包的 toolview 清单可�
 | 组件 | 源文件 | 移植方式 | 剥离/替换的依赖 |
 |------|--------|----------|----------------|
 | DiffBlock | DiffBlock.tsx | 原样 | 无（本就 cordis-free） |
-| JsonTree | JsonTree.tsx | 改造 | Menu 右键菜单 + dsh icons → lucide Check/Copy，单击复制默认项 |
 | ReadBlock | ReadBlock.tsx | 改造 | shiki 高亮 → 纯文本（原组件对未知语言的合法降级路径），接入点集中在 highlightLines() |
 | SearchBlock | SearchBlock.tsx | 原样 | 无 |
 | TerminalBlock | TerminalBlock.tsx | 原样 | 无（ansi.ts 一并移植） |
 | WebBlock | WebBlock.tsx | 改造 | MarkdownText（mdast 增量渲染）→ 灵汐 MarkdownRenderer |
-| CodeBlock | markdown/CodeBlock.tsx | 改造 | shiki → react-syntax-highlighter Prism（灵汐既有依赖） |
 | Pill / StateDot | 同名 | 原样 | 无（TerminalBlock 的依赖） |
 | clipboard / head-tail-cap / use-copy-feedback / ansi | 同名 | 原样 | 无 |
 

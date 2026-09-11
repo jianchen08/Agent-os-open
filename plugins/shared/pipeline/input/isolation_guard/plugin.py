@@ -29,11 +29,10 @@ import logging
 import re
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 from decider import IsolationDecider
-from isolation_types import IsolationLevel
+from agentos_plugin_sdk.isolation_types import IsolationLevel
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
 
@@ -44,14 +43,8 @@ logger = logging.getLogger(__name__)
 _CONTAINER_STATE_KEY = "isolation.container_name"
 
 
-def _ensure_isolation_path() -> None:
-    """把 isolation 插件目录加入 sys.path（IsolationManager 所在）。"""
-    _here = Path(__file__).resolve().parent
-    _system_dir = _here.parents[2] / "system"
-    _iso_dir = _system_dir / "isolation"
-    for _p in (str(_system_dir), str(_iso_dir)):
-        if _p not in sys.path:
-            sys.path.insert(0, _p)
+# isolation 目录 sys.path 注入走共享单源（isolation_path.ensure_isolation_path）。
+from isolation_path import ensure_isolation_path as _ensure_isolation_path
 
 
 class IsolationGuard(IInputPlugin):
@@ -63,12 +56,20 @@ class IsolationGuard(IInputPlugin):
     决策优先级：
     1. task metadata 中的 isolation_level 覆盖
     2. IsolationDecider 基于 isolation_policy.yaml 策略决策
-    3. Docker 不可用时根据策略的 fallback 字段降级
+    3. Docker 不可用（或探测异常致可用性不可验证）时，容器要求型工具
+       拒绝执行（fail-closed，不降级宿主）
 
     优先级：40（在 level_guard 之后，security_check 之前）
     隔离决策失败不应阻断管道。
     """
 
+
+    # Docker 探测三态（_detect_docker 返回值）：available=可用；
+    # absent=明确不可用（CLI 缺失或 daemon 明确回答不可达）；
+    # probe_error=探测异常（超时/权限/瞬态，可用性不可验证，fail-closed）。
+    _PROBE_AVAILABLE = "available"
+    _PROBE_ABSENT = "absent"
+    _PROBE_ERROR = "probe_error"
 
     # Docker 可用性复检冷却窗口（秒）：仅自动检测来源在不可用时按此间隔复检，
     # 避免每次工具调用都 spawn subprocess 探测 daemon。
@@ -91,18 +92,27 @@ class IsolationGuard(IInputPlugin):
         # vs 自动检测（_docker_auto=True，execute 入口按冷却窗口复检）。
         # 区分来源是为了避免：启动那一刻 daemon 假死被永久钉死为 False，
         # 此后即便 daemon 恢复、容器都在跑也无效——必须重启进程才解除。
+        # _docker_probe_error 记录最近一次探测异常（超时/权限等，可用性不可
+        # 验证）：与"明确不可用"分态，容器要求型工具按 fail-closed 拒绝。
+        self._docker_probe_error: str | None = None
         if "docker_available" in self._config:
             self._docker_available = self._config["docker_available"]
             self._docker_auto = False
         else:
             # 启动时真正检测 Docker，不依赖外部注入
-            self._docker_available = self._detect_docker()
+            self._apply_probe_result(self._detect_docker())
             self._docker_auto = True
         # 上次检测时间（自动检测来源按冷却窗口复检用）
         self._docker_checked_at = time.monotonic()
+        if self._docker_probe_error:
+            logger.error(
+                "[%s] Docker 探测异常（可用性不可验证），容器要求型工具将被拒绝 | %s",
+                self.name,
+                self._docker_probe_error,
+            )
         if not self._docker_available:
             logger.warning(
-                "[%s] docker_available=False, tool isolation will be degraded to host execution",
+                "[%s] docker 不可用，容器要求型工具拒绝执行，host 执行上下文标记 isolation_mode=host",
                 self.name,
             )
         self._force_host = self._config.get("force_host", False)
@@ -150,8 +160,16 @@ class IsolationGuard(IInputPlugin):
             logger.warning("[%s] 引擎自愈失败: %s", self.name, exc)
 
     @staticmethod
-    def _detect_docker() -> bool:
-        """同步检测 Docker 是否可用（CLI 存在 + daemon 运行）。
+    def _detect_docker() -> tuple[str, str]:
+        """同步探测 Docker，返回 (三态, 异常摘要)。
+
+        三态区分安全语义（探测故障 ≠ 未安装，超时≠不可达）：
+        - ("available", "")：CLI 存在且 daemon 应答正常；
+        - ("absent", "")：CLI 缺失，或 daemon 明确回答不可达（returncode != 0，
+          探测有确定答案）——按既有"明确不可用"语义处置；
+        - ("probe_error", 异常摘要)：subprocess 异常（超时/权限/瞬态故障），
+          可用性不可验证——容器要求型工具必须 fail-closed 拒绝，
+          不得静默降级宿主执行。
 
         用 subprocess.run 替代 asyncio subprocess，避免 Windows 静默失败。
         timeout 从 15s 降到 3s：daemon 不可达（如 DOCKER_HOST 指向离线地址）时，
@@ -162,7 +180,7 @@ class IsolationGuard(IInputPlugin):
         import subprocess  # noqa: PLC0415
 
         if not shutil.which("docker"):
-            return False
+            return (IsolationGuard._PROBE_ABSENT, "")
         try:
             # 用 docker version 替代 docker info（info 在某些 Docker Desktop 配置下会卡 stdin）
             result = subprocess.run(  # noqa: PLW1510
@@ -170,9 +188,17 @@ class IsolationGuard(IInputPlugin):
                 capture_output=True,
                 timeout=3,
             )
-            return result.returncode == 0
-        except Exception:
-            return False
+        except Exception as exc:
+            return (IsolationGuard._PROBE_ERROR, str(exc))
+        if result.returncode == 0:
+            return (IsolationGuard._PROBE_AVAILABLE, "")
+        return (IsolationGuard._PROBE_ABSENT, "")
+
+    def _apply_probe_result(self, probe: tuple[str, str]) -> None:
+        """把探测结果写回实例状态（available/absent/probe_error 三态归一）。"""
+        status, detail = probe
+        self._docker_available = status == self._PROBE_AVAILABLE
+        self._docker_probe_error = detail if status == self._PROBE_ERROR else None
 
     @property
     def name(self) -> str:
@@ -223,11 +249,22 @@ class IsolationGuard(IInputPlugin):
             now = time.monotonic()
             if now - self._docker_checked_at >= self._RECHECK_COOLDOWN:
                 self._ensure_engine()  # 引擎自愈：先确保引擎存活再探测
-                self._docker_available = self._detect_docker()
+                self._apply_probe_result(self._detect_docker())
                 self._docker_checked_at = now
                 if self._docker_available:
                     logger.info(
                         "[%s] Docker 可用性复检通过，解除 host 降级",
+                        self.name,
+                    )
+                elif self._docker_probe_error:
+                    logger.error(
+                        "[%s] Docker 探测异常（超时/权限等，可用性不可验证），容器要求型工具拒绝执行 | %s",
+                        self.name,
+                        self._docker_probe_error,
+                    )
+                else:
+                    logger.warning(
+                        "[%s] Docker 可用性复检仍不可用，维持拒绝 + host 标记",
                         self.name,
                     )
 
@@ -362,10 +399,10 @@ class IsolationGuard(IInputPlugin):
         if manager is None:
             return None
         try:
-            # 用 isolation.* 命名空间路径 import，避免与插件本地 isolation_types 裸名冲突；
-            # manager 可能被外部注入（测试/降级路径），此处自行确保包路径存在。
+            # isolation_types 已沉 SDK（单一真值源）；manager 可能被外部注入
+            # （测试/降级路径），此处仍需自行确保 isolation 包路径存在。
             _ensure_isolation_path()
-            import isolation.isolation_types as iso_types  # noqa: PLC0415
+            from agentos_plugin_sdk import isolation_types as iso_types  # noqa: PLC0415
 
             task_id = ctx.state.get(StateKeys.TASK_ID) or ""
             env = await manager.get_or_create_environment(
@@ -401,17 +438,20 @@ class IsolationGuard(IInputPlugin):
         docker_tool_names: set[str],
         container_id: str,
     ) -> list[dict[str, Any]] | None:
-        """为 provider=docker 的 bash_execute 调用注入 _container_id。
+        """为决策进容器的工具调用注入 _container_id。
 
         仅在确有注入时返回新 tool_calls 列表（否则返回 None，调用方不覆盖 state）。
-        非 bash 工具不注入（_container_id 仅 bash tool.py 消费）；容器内固定挂载
-        workspace → /workspace，working_dir 未显式指定时补 /workspace。
+        bash_execute 注入后由其 tool.py 走 docker exec 执行命令；browser_* 工具
+        注入后经 bridge_client 在容器内发起 MCP 调用（沙箱内 MCP Client）。
+        非 docker 决策工具不注入；容器内固定挂载 workspace → /workspace，
+        bash 的 working_dir 未显式指定时补 /workspace（browser 工具的 workspace
+        落盘目录由 bridge_client 自行翻译，见容器候选路径）。
         """
         injected_calls: list[dict[str, Any]] = []
         injected = False
         for tc in tool_calls:
             new_tc = dict(tc)
-            if tc.get("name") == "bash_execute" and tc.get("name") in docker_tool_names:
+            if tc.get("name", "") in docker_tool_names:
                 args = new_tc.get("args", new_tc.get("arguments", {}))
                 if isinstance(args, str):
                     import json  # noqa: PLC0415
@@ -424,13 +464,54 @@ class IsolationGuard(IInputPlugin):
                     args = {}
                 args = dict(args)
                 args["_container_id"] = container_id
-                # 容器内固定挂载 /workspace：未显式指定 working_dir 时补容器路径
-                if not args.get("working_dir"):
-                    args["working_dir"] = "/workspace"
+                if tc.get("name") == "bash_execute":
+                    # 容器内固定挂载 /workspace：未显式指定 working_dir 时补容器路径
+                    if not args.get("working_dir"):
+                        args["working_dir"] = "/workspace"
                 new_tc["args"] = args
                 injected = True
             injected_calls.append(new_tc)
         return injected_calls if injected else None
+
+    def _deny_container_required(
+        self,
+        tool_name: str,
+        workspace: str | None,
+        log_hint: str,
+    ) -> dict[str, Any]:
+        """Docker 不可用/探测故障时拒绝容器要求型工具（fail-closed，不降级宿主）。
+
+        probe_error（探测异常，隔离不可验证）与 absent（明确不可用）分态回显：
+        probe_error 的拒绝原因携带探测异常原文——工具结果里的"工具被隔离策略
+        拦截: docker_probe_error: ..."让 LLM 与用户能区分"docker 坏了"与
+        "docker 没装"，而非同判静默拦截。
+        """
+        if self._docker_probe_error:
+            logger.error(
+                "[IsolationGuard] Docker 探测异常，隔离不可验证，拒绝执行 | tool=%s | %s | %s",
+                tool_name,
+                self._docker_probe_error,
+                log_hint,
+            )
+            return self._build_context(
+                tool_name,
+                "denied",
+                f"docker_probe_error: {self._docker_probe_error}",
+                workspace=workspace,
+                blocked=True,
+            )
+        logger.warning(
+            "[IsolationGuard] Docker 不可用，拒绝执行（不降级宿主）| tool=%s | %s",
+            tool_name,
+            log_hint,
+        )
+        return self._build_context(
+            tool_name,
+            "denied",
+            "docker_unavailable_container_required",
+            workspace=workspace,
+            blocked=True,
+        )
 
     def _decide_isolation(
         self,
@@ -523,16 +604,8 @@ class IsolationGuard(IInputPlugin):
                         "l1_main_agent_session_isolated",
                         workspace=metadata_workspace,
                     )
-                logger.warning(
-                    "[IsolationGuard] 主 agent 会话要求容器但 Docker 不可用，拒绝执行 | tool=%s",
-                    tool_name,
-                )
-                return self._build_context(
-                    tool_name,
-                    "denied",
-                    "docker_unavailable_container_required",
-                    workspace=metadata_workspace,
-                    blocked=True,
+                return self._deny_container_required(
+                    tool_name, metadata_workspace, "主 agent 会话要求容器"
                 )
             logger.info(
                 "[IsolationGuard] L1 主 agent bash_execute 路由到 host（无任务工作空间，由 security_check 审批） | tool=%s",
@@ -583,16 +656,8 @@ class IsolationGuard(IInputPlugin):
                         workspace=metadata_workspace,
                     )
                 # Docker 不可用：要求容器即拒绝，不降级到 host
-                logger.warning(
-                    "[IsolationGuard] metadata 要求容器但 Docker 不可用，拒绝执行 | tool=%s",
-                    tool_name,
-                )
-                return self._build_context(
-                    tool_name,
-                    "denied",
-                    "docker_unavailable_container_required",
-                    workspace=metadata_workspace,
-                    blocked=True,
+                return self._deny_container_required(
+                    tool_name, metadata_workspace, "metadata 要求容器"
                 )
             # metadata 强制 host → 降级
             return self._build_context(
@@ -613,16 +678,8 @@ class IsolationGuard(IInputPlugin):
 
         if policy_isolation == IsolationLevel.CONTAINER and not self._docker_available:
             # 要求容器但 Docker 不可用：一律拒绝，不降级
-            logger.warning(
-                "[IsolationGuard] Docker 不可用且工具要求容器隔离，拒绝执行 | tool=%s",
-                tool_name,
-            )
-            return self._build_context(
-                tool_name,
-                "denied",
-                "docker_unavailable_container_required",
-                workspace=metadata_workspace,
-                blocked=True,
+            return self._deny_container_required(
+                tool_name, metadata_workspace, "policy 要求容器"
             )
 
         return self._build_context(
@@ -650,6 +707,8 @@ class IsolationGuard(IInputPlugin):
         self._enabled_by_agent = True
         if "docker_available" in config:
             self._docker_available = config["docker_available"]
+            # 配置显式声明可用性时以配置为准，清掉残留探测异常态
+            self._docker_probe_error = None
         if "force_host" in config:
             self._force_host = config["force_host"]
 
@@ -683,6 +742,9 @@ class IsolationGuard(IInputPlugin):
             context["blocked"] = True
         if workspace:
             context["workspace"] = workspace
+        if provider == "host" and not self._docker_available:
+            # Docker 不可用期间的宿主执行显式标记（降级不再无痕，下游可观测）
+            context["isolation_mode"] = "host"
         return context
 
     def _get_task_metadata(self, ctx: PluginContext) -> dict[str, Any]:

@@ -22,6 +22,8 @@ fn test_manifest(
     config_files: Vec<agentos_core::traits::ConfigFileMapping>,
 ) -> PluginManifest {
     PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: id.to_string(),
         name: id.to_string(),
         description: None,
@@ -207,6 +209,8 @@ fn test_http_endpoints_only_for_enabled() {
 fn test_plugin_status_data_from_manifest() {
     // 插件状态全部从 manifest 元数据派生（不硬编码）
     let manifest = PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "test_plugin".to_string(),
         name: "Test Plugin".to_string(),
         description: None,
@@ -289,6 +293,8 @@ fn test_activation_policy_default_is_lazy() {
 fn test_eager_vs_lazy_distinction() {
     // eager 插件启动期应 Active，lazy 首次调用才 Active
     let manifest_eager = PluginManifest {
+        force_include_tools: Vec::new(),
+        state: None,
         id: "eager_p".to_string(),
         name: "Eager".to_string(),
         description: None,

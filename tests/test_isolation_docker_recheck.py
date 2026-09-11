@@ -43,7 +43,7 @@ sys.path.insert(0, _ISOLATION_GUARD_DIR)
 for _bare in ("plugin", "tool", "models", "service"):
     sys.modules.pop(_bare, None)
 
-from isolation_types import IsolationLevel
+from agentos_plugin_sdk.isolation_types import IsolationLevel
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
 import plugin as plugin_module  # noqa: E402  # 模块对象引用：裸名串扰治理会 evict 后重 import，字符串 patch 会打到新对象
@@ -90,11 +90,11 @@ def _container_policy(plugin):
     plugin._get_or_create_container = AsyncMock(return_value="mock-container-1")
 
 
-def _make_auto_plugin(detected=False):
+def _make_auto_plugin(detected: tuple[str, str] = ("absent", "")):
     """构造走自动检测路径的 IsolationGuard（不传 docker_available 配置）。
 
     Args:
-        detected: __init__ 阶段 _detect_docker 的返回值（模拟启动时的检测结果）
+        detected: __init__ 阶段 _detect_docker 的返回值（三态元组，模拟启动时的探测结果）
 
     自动检测路径的复检会触发引擎自愈（ensure_docker_engine），测试环境不
     真实拉起 WSL/docker，统一 mock 掉。
@@ -111,13 +111,13 @@ def _make_auto_plugin(detected=False):
 
 async def test_auto_detected_false_recovers_after_daemon_up():
     """启动时检测到 False，daemon 恢复后复检写回 True 并解除拦截。"""
-    plugin = _make_auto_plugin(detected=False)
+    plugin = _make_auto_plugin()
     assert plugin._docker_auto is True
     assert plugin._docker_available is False
     _container_policy(plugin)
 
     # 模拟 daemon 恢复：复检返回 True；并越过冷却窗口
-    plugin._detect_docker = MagicMock(return_value=True)
+    plugin._detect_docker = MagicMock(return_value=("available", ""))
     plugin._docker_checked_at = time.monotonic() - 9999
 
     result = await plugin.execute(_make_ctx())
@@ -136,10 +136,10 @@ async def test_auto_detected_false_recovers_after_daemon_up():
 
 async def test_no_recheck_within_cooldown():
     """刚检测过（冷却期内）不应再次探测，避免每次工具调用都 spawn subprocess。"""
-    plugin = _make_auto_plugin(detected=False)
+    plugin = _make_auto_plugin()
     _container_policy(plugin)
 
-    probe = MagicMock(return_value=True)
+    probe = MagicMock(return_value=("available", ""))
     plugin._detect_docker = probe
     plugin._docker_checked_at = time.monotonic()  # 冷却期内
 
@@ -161,7 +161,7 @@ async def test_config_specified_false_never_rechecks():
     assert plugin._docker_auto is False
     _container_policy(plugin)
 
-    probe = MagicMock(return_value=True)
+    probe = MagicMock(return_value=("available", ""))
     plugin._detect_docker = probe
     plugin._docker_checked_at = time.monotonic() - 9999  # 即便越过冷却
 
@@ -179,11 +179,11 @@ async def test_config_specified_false_never_rechecks():
 
 async def test_true_state_does_not_recheck():
     """已检测为 True 时不应复检（避免给 daemon 增加无谓探测负载）。"""
-    plugin = _make_auto_plugin(detected=True)
+    plugin = _make_auto_plugin(detected=("available", ""))
     assert plugin._docker_available is True
     _container_policy(plugin)
 
-    probe = MagicMock(return_value=False)
+    probe = MagicMock(return_value=("absent", ""))
     plugin._detect_docker = probe
     plugin._docker_checked_at = time.monotonic() - 9999
 
@@ -201,21 +201,23 @@ async def test_true_state_does_not_recheck():
 
 async def test_recheck_triggers_engine_self_heal(_fake_wsl_health: types.SimpleNamespace):
     """复检路径先触发引擎自愈（wsl_health.ensure_docker_engine）再探测。"""
-    plugin = _make_auto_plugin(detected=False)
+    plugin = _make_auto_plugin()
     _container_policy(plugin)
-    plugin._detect_docker = MagicMock(return_value=False)  # 复检阶段钉死不可用
+    plugin._detect_docker = MagicMock(return_value=("absent", ""))  # 复检阶段钉死不可用
     plugin._docker_checked_at = time.monotonic() - 9999
 
     await plugin.execute(_make_ctx())
 
+    # wsl_health 是插件对外部 WSL/docker 引擎管理的边界：
+    # 「复检前先触发一次引擎自愈」即该边界上的契约交互。
     _fake_wsl_health.ensure_docker_engine.assert_called_once()
 
 
 async def test_engine_self_heal_error_does_not_break_recheck(_fake_wsl_health: types.SimpleNamespace):
     """自愈抛异常不阻断复检与决策（降级保持，只留日志）。"""
-    plugin = _make_auto_plugin(detected=False)
+    plugin = _make_auto_plugin()
     _container_policy(plugin)
-    plugin._detect_docker = MagicMock(return_value=False)  # 复检仍不可用
+    plugin._detect_docker = MagicMock(return_value=("absent", ""))  # 复检仍不可用
     plugin._docker_checked_at = time.monotonic() - 9999
     _fake_wsl_health.ensure_docker_engine.side_effect = RuntimeError("boom")
 

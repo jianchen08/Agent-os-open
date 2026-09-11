@@ -6,9 +6,9 @@
  * 附件索引随 content 携带（![f](/uploads/x.png)）由此直接渲染成图/链接，
  * 历史回读（内核只存 content）刷新不丢。
  */
-import { render, screen } from '@testing-library/react'
-import { renderWithProviders } from '@/test/renderWithProviders'
+import { screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import { MessageItem } from '../MessageItem'
 import type { Message } from '@/types/models'
 

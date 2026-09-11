@@ -130,8 +130,12 @@ export const useNotificationStore = create<NotificationState>()((set, get) => ({
       const updated = sortNotifications([...state.notifications, newItem])
       const blockingUpdate = checkBlockingNotification(state, newItem)
 
+      // 自动弹层只留给"持久的重要通知"（无 autoDismissMs）：瞬态 toast 类通知
+      // （生产方统一 isBlocking:false + autoDismissMs）若也弹全屏抽屉，抽屉会在
+      // 通知自动消失后变成空屉继续遮挡整页（GUI 黑盒测试 2026-09-11 实测复现）。
       const shouldAutoOpen =
         !state.isPanelOpen &&
+        !newItem.autoDismissMs &&
         (newItem.priority === 'high' || newItem.priority === 'critical')
 
       return {
@@ -167,8 +171,7 @@ export const useNotificationStore = create<NotificationState>()((set, get) => ({
 
     set((state) => {
       const updated = sortNotifications([...state.notifications, ...newItems])
-      // 查找第一个阻塞通知
-      const firstBlocking = newItems.find((n) => n.isBlocking)
+        const firstBlocking = newItems.find((n) => n.isBlocking)
       const blockingUpdate =
         firstBlocking && !state.activeBlockingNotification
           ? { activeBlockingNotification: firstBlocking }

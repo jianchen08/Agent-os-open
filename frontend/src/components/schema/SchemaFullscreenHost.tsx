@@ -20,12 +20,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight } from '@/assets/icons'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { useSessionStore } from '@/stores/sessionStore'
-import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
-import { DeclaredWidgetLayer } from './DeclaredWidgetLayer'
 import { FullscreenOverlay } from '@/components/layout/FullscreenOverlay'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { useSessionStore } from '@/stores/sessionStore'
+import { DeclaredWidgetLayer } from './DeclaredWidgetLayer'
+import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
 
 /** 事件驱动浮层的标准化条目 */
 interface SchemaEventItem {

@@ -58,22 +58,6 @@
  {
   "data": {
    "_threadId": "thread-670b5652-3686-45cb-9525-7faf23a14a33",
-   "convergence": "converging",
-   "elapsed_s": 0.0,
-   "iteration": 0,
-   "message_id": "",
-   "pipeline_id": "71ef2ec93de8",
-   "remaining_budget_percent": 100.0,
-   "should_stop": false,
-   "stop_reason": "",
-   "thread_id": "thread-670b5652-3686-45cb-9525-7faf23a14a33"
-  },
-  "sequence": 6,
-  "type": "termination_status"
- },
- {
-  "data": {
-   "_threadId": "thread-670b5652-3686-45cb-9525-7faf23a14a33",
    "block_type": "reasoning",
    "index": 0,
    "message_id": "a_b69242a45d0b4369ac2cdce1415f62b8",
@@ -1841,22 +1825,6 @@
  {
   "data": {
    "_threadId": "thread-670b5652-3686-45cb-9525-7faf23a14a33",
-   "convergence": "converging",
-   "elapsed_s": 16.8,
-   "iteration": 0,
-   "message_id": "",
-   "pipeline_id": "71ef2ec93de8",
-   "remaining_budget_percent": 100.0,
-   "should_stop": false,
-   "stop_reason": "",
-   "thread_id": "thread-670b5652-3686-45cb-9525-7faf23a14a33"
-  },
-  "sequence": 138,
-  "type": "termination_status"
- },
- {
-  "data": {
-   "_threadId": "thread-670b5652-3686-45cb-9525-7faf23a14a33",
    "args": {
     "parent_agent_level": 1,
     "path": "config/agents/main/agentos.yaml",
@@ -1902,22 +1870,6 @@
   },
   "sequence": 141,
   "type": "stream_start"
- },
- {
-  "data": {
-   "_threadId": "thread-670b5652-3686-45cb-9525-7faf23a14a33",
-   "convergence": "converging",
-   "elapsed_s": 18.8,
-   "iteration": 0,
-   "message_id": "",
-   "pipeline_id": "71ef2ec93de8",
-   "remaining_budget_percent": 100.0,
-   "should_stop": false,
-   "stop_reason": "",
-   "thread_id": "thread-670b5652-3686-45cb-9525-7faf23a14a33"
-  },
-  "sequence": 142,
-  "type": "termination_status"
  },
  {
   "data": {

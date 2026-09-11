@@ -105,6 +105,138 @@ pub fn arena_reserve_kib() -> i64 {
     unsafe { libmimalloc_sys::mi_option_get(MI_OPTION_ARENA_RESERVE) as i64 }
 }
 
+/// mimalloc 分配器统计快照（调用时刻的进程级瞬时值；mimalloc 无增量
+/// delta API，增量由消费方对两次快照相减得到——M1 测量面：先测量后治理）。
+///
+/// 数据源是 `mi_stats_get_json`（mimalloc v3 结构化统计 API，聚合 subprocess
+/// 全部堆），而非解析 `mi_stats_print_out` 的人类可读文本——v3 文本格式已无
+/// v2 的 "allocated … freed …" 汇总行，JSON 给出精确 int64 字节数，无单位
+/// 换算与格式漂移风险。libmimalloc-sys 仅在未启用 `v2` feature 时暴露该
+/// 绑定（本仓未启用；若启用 v2 此处编译期即报错，需同步换解析面）。
+///
+/// ## 字段可用性（release 构建现实，2026-09-10 对 v3.3.2 实测）
+///
+/// libmimalloc-sys 以 `MI_DEBUG=0` 编译 C 源，mimalloc 据此取 `MI_STAT=0`
+/// （v2/v3 同此默认）：**malloc 计量面（in_use/requested/allocs/freed）在
+/// 调用点被编译剔除，恒读 0**；arena/进程面（committed/reserved/purged/
+/// process）由子进程原子量无条件维护，是 release 构建下的可信信号。
+/// `abandoned_pages` 有维护但走线程堆本地计数，仅在线程 collect/退出时
+/// 合并——多线程进程内该值偏低（下界）。
+///
+/// 任一底层字段缺失/解析失败 → 该字段 None（版本差异防御，不 panic）。
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct MemStats {
+    /// 活字节（in-use，含块头/对齐开销）：`malloc_normal.current + malloc_huge.current`。
+    /// 仅 `MI_STAT>0` 构建维护；release 构建恒 0（见上文），活增长请以
+    /// process 面 + committed 联看。
+    pub in_use_bytes: Option<u64>,
+    /// 用户请求字节（不含分配器开销）：`malloc_requested.current`。
+    /// 可用性与 [`MemStats::in_use_bytes`](Self::in_use_bytes) 相同（MI_STAT 门控）。
+    pub requested_bytes: Option<u64>,
+    /// 累计分配次数：`malloc_normal_count + malloc_huge_count`。
+    /// 可用性与 [`MemStats::in_use_bytes`](Self::in_use_bytes) 相同（MI_STAT 门控）。
+    pub total_allocs: Option<u64>,
+    /// 累计释放字节（v3 只统计字节数、无释放次数计数）：
+    /// `(malloc_normal.total + malloc_huge.total) − in_use_bytes`。
+    /// 可用性与 [`MemStats::in_use_bytes`](Self::in_use_bytes) 相同（MI_STAT 门控）。
+    pub freed_bytes: Option<u64>,
+    /// 已向 OS 提交的字节：`committed.current`（子进程原子量，release 可信；
+    /// 滞留治理主指标——purge_delay=0 下该值应随 collect 收缩）。
+    pub committed_bytes: Option<u64>,
+    /// 虚拟地址预留字节：`reserved.current`（arena 预留空洞观测）。
+    pub reserved_bytes: Option<u64>,
+    /// 累计 purge 归还 OS 的字节：`purged`（计数器；purge_delay=0 策略的
+    /// 归还动作量）。
+    pub purged_bytes: Option<u64>,
+    /// abandoned 页数：`pages_abandoned.current`（线程堆遗弃页；有线程堆
+    /// 合并滞后，读数为真实值的下界）。
+    pub abandoned_pages: Option<u64>,
+    /// 进程已提交字节（OS 口径，`process.commit_current`，恒可用）。
+    pub process_commit_bytes: Option<u64>,
+    /// 进程常驻字节（OS 口径，`process.rss_current`，恒可用；Windows 下
+    /// mimalloc 以 commit 近似 RSS）。
+    pub process_rss_bytes: Option<u64>,
+}
+
+/// JSON 快照缓冲容量：v3 JSON 含 malloc/page/chunk 三个 bin 数组（74 bins ×
+/// ~120B × 2 + 标量区，实测 ~20KiB 量级），64KiB 余量充足；溢出时
+/// `mi_stats_get_json` 返回 NULL → 全字段 None（fail-soft，不 panic）。
+const MI_STATS_JSON_BUF_BYTES: usize = 64 * 1024;
+
+/// 采集当前 mimalloc 统计快照（调用时刻；mimalloc 侧聚合 subprocess 全部
+/// 堆，线程堆本地计数存在合并滞后——见 [`MemStats`] 字段说明）。
+///
+/// 采集失败（JSON 写入失败/非 UTF-8/解析失败）→ 全 None 的 [`MemStats`]。
+pub fn snapshot_stats() -> MemStats {
+    let mut buf = vec![0u8; MI_STATS_JSON_BUF_BYTES];
+    // SAFETY: mi_stats_get_json 将 NUL 结尾的 JSON 文本写入调用方缓冲
+    // （容量经 buf_size 显式声明），返回缓冲指针或 NULL（失败）。buf 在
+    // 调用期间存活（同栈帧），mimalloc 不保留该指针。
+    let ptr = unsafe {
+        libmimalloc_sys::mi_stats_get_json(MI_STATS_JSON_BUF_BYTES, buf.as_mut_ptr().cast())
+    };
+    if ptr.is_null() {
+        return MemStats::default();
+    }
+    // SAFETY: 调用成功时 ptr 指向 buf 内 NUL 结尾的 C 字符串。
+    let json = unsafe { core::ffi::CStr::from_ptr(ptr) };
+    mem_stats_from_json(json.to_bytes())
+}
+
+/// 从 mimalloc JSON 统计文本解析 [`MemStats`]（snapshot_stats 的纯解析层）。
+fn mem_stats_from_json(json: &[u8]) -> MemStats {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(json) else {
+        return MemStats::default();
+    };
+    mem_stats_from_value(&v)
+}
+
+/// 读取 count 型字段（`{"total":…,"peak":…,"current":…}`）的指定分量。
+fn stat_component(v: &serde_json::Value, key: &str, field: &str) -> Option<u64> {
+    v.get(key)?.get(field).and_then(serde_json::Value::as_u64)
+}
+
+/// 读取 counter 型字段（裸数字）。
+fn counter_total(v: &serde_json::Value, key: &str) -> Option<u64> {
+    v.get(key).and_then(serde_json::Value::as_u64)
+}
+
+/// 两分量都有才合成（缺一即 None——任一底层字段缺失该派生字段不猜值）。
+fn add_pair(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    a.zip(b).map(|(x, y)| x.saturating_add(y))
+}
+
+fn mem_stats_from_value(v: &serde_json::Value) -> MemStats {
+    let in_use = add_pair(
+        stat_component(v, "malloc_normal", "current"),
+        stat_component(v, "malloc_huge", "current"),
+    );
+    let total = add_pair(
+        stat_component(v, "malloc_normal", "total"),
+        stat_component(v, "malloc_huge", "total"),
+    );
+    MemStats {
+        in_use_bytes: in_use,
+        requested_bytes: stat_component(v, "malloc_requested", "current"),
+        committed_bytes: stat_component(v, "committed", "current"),
+        reserved_bytes: stat_component(v, "reserved", "current"),
+        purged_bytes: counter_total(v, "purged"),
+        total_allocs: add_pair(
+            counter_total(v, "malloc_normal_count"),
+            counter_total(v, "malloc_huge_count"),
+        ),
+        freed_bytes: total.zip(in_use).map(|(t, u)| t.saturating_sub(u)),
+        abandoned_pages: stat_component(v, "pages_abandoned", "current"),
+        // process 段为 OS 口径裸数值（非 {total,peak,current} 对象）
+        process_commit_bytes: v
+            .get("process")
+            .and_then(|p| counter_total(p, "commit_current")),
+        process_rss_bytes: v
+            .get("process")
+            .and_then(|p| counter_total(p, "rss_current")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +288,110 @@ mod tests {
             128 * 1024,
             "install 后 reserve 应为 128MiB"
         );
+    }
+
+    // ── 统计快照（M1 测量面）──
+
+    use serde_json::json;
+
+    /// 构造 mimalloc v3 mi_stats_get_json 输出的样例片段（字段名与
+    /// c_src/mimalloc/v3/include/mimalloc-stats.h 的 MI_STAT_FIELDS 一致，
+    /// process 段为 mi_stats_get_json_from 实打印形状），断言解析器精确解出
+    /// 各字段。
+    #[test]
+    fn parser_extracts_fields_from_v3_json() {
+        let sample = json!({
+            "stat_version": 5,
+            "mimalloc_version": 30302,
+            "process": {
+                "elapsed_msecs": 2, "user_msecs": 0, "system_msecs": 0,
+                "page_faults": 1824,
+                "rss_current": 7184384, "rss_peak": 7184384,
+                "commit_current": 6217728, "commit_peak": 6230016
+            },
+            "reserved": { "total": 134217728, "peak": 134217728, "current": 134217728 },
+            "committed": { "total": 2097152, "peak": 1048576, "current": 786432 },
+            "purged": 65536,
+            "pages_abandoned": { "total": 7, "peak": 5, "current": 2 },
+            "malloc_normal": { "total": 5000, "peak": 1200, "current": 700 },
+            "malloc_huge": { "total": 1000, "peak": 400, "current": 300 },
+            "malloc_requested": { "total": 4800, "peak": 1100, "current": 650 },
+            "malloc_normal_count": 42,
+            "malloc_huge_count": 1,
+        });
+        let s = mem_stats_from_value(&sample);
+        assert_eq!(
+            s.in_use_bytes,
+            Some(700 + 300),
+            "in_use = normal+huge current"
+        );
+        assert_eq!(s.requested_bytes, Some(650));
+        assert_eq!(s.committed_bytes, Some(786432));
+        assert_eq!(s.reserved_bytes, Some(134217728));
+        assert_eq!(s.purged_bytes, Some(65536));
+        assert_eq!(s.total_allocs, Some(43), "allocs = normal+huge counter");
+        assert_eq!(s.freed_bytes, Some(6000 - 1000), "freed = total − in_use");
+        assert_eq!(s.abandoned_pages, Some(2));
+        assert_eq!(s.process_commit_bytes, Some(6217728));
+        assert_eq!(s.process_rss_bytes, Some(7184384));
+    }
+
+    /// 版本差异防御：任一底层字段缺失 → 对应派生字段 None（不猜 0、不 panic）；
+    /// 完全无关的 JSON → 全 None。
+    #[test]
+    fn parser_missing_fields_yield_none() {
+        // 缺 committed / process 段 / huge 系列
+        let partial = json!({
+            "process": { "rss_current": 1000 },
+            "malloc_normal": { "total": 5000, "peak": 1200, "current": 700 },
+            "malloc_normal_count": 42,
+        });
+        let s = mem_stats_from_value(&partial);
+        assert_eq!(s.in_use_bytes, None, "缺 huge 分量则 in_use 不合成");
+        assert_eq!(s.total_allocs, None, "缺 huge 计数则 allocs 不合成");
+        assert_eq!(s.committed_bytes, None);
+        assert_eq!(s.process_commit_bytes, None, "process 段缺该项 → None");
+        assert_eq!(s.process_rss_bytes, Some(1000));
+
+        // 空对象 / 类型不符 → 全 None
+        let empty = mem_stats_from_value(&json!({}));
+        assert_eq!(empty, MemStats::default());
+        let garbage = mem_stats_from_value(&json!({ "committed": "not-a-number" }));
+        assert_eq!(garbage.committed_bytes, None);
+    }
+
+    /// 非 JSON 文本 → 全 None（fail-soft，不 panic）。
+    #[test]
+    fn parser_invalid_text_yields_default() {
+        assert_eq!(mem_stats_from_json(b"not json at all"), MemStats::default());
+    }
+
+    /// 快照可采集且 arena/进程面与真实分配联动：经 mimalloc 自身 API 分配
+    /// 后，committed（子进程原子量，release 构建可信）至少覆盖本笔分配所在
+    /// 页，OS 口径 commit 同样非零。malloc 计量面只断言键存在（release 构建
+    /// MI_STAT=0 下其值为 0，属构建事实而非解析失败——见 MemStats 文档）。
+    /// 测试进程未安装全局分配器，但 mimalloc 统计面与其是否担任全局分配器
+    /// 无关。≥/性质断言不依赖具体数值：并发测试只会使统计更大。
+    #[test]
+    fn snapshot_reflects_direct_mimalloc_allocation() {
+        const SIZE: usize = 4096;
+        // SAFETY: mi_malloc/mi_free 是 mimalloc C API 的常规分配/释放。
+        let p = unsafe { libmimalloc_sys::mi_malloc(SIZE) };
+        assert!(!p.is_null());
+        let s = snapshot_stats();
+        // SAFETY: 释放刚分配的指针。
+        unsafe { libmimalloc_sys::mi_free(p) };
+
+        let committed = s.committed_bytes.expect("v3 JSON 恒含 committed");
+        assert!(committed > 0, "有活分配时 committed 应 > 0");
+        assert!(
+            s.process_commit_bytes
+                .expect("v3 JSON 恒含 process.commit_current")
+                > 0,
+            "OS 口径 commit 应 > 0"
+        );
+        // malloc 面键恒存在（值受 MI_STAT 构建开关影响，不断言数值）
+        assert!(s.in_use_bytes.is_some(), "v3 JSON 恒含 malloc_normal/huge");
+        assert!(s.total_allocs.is_some(), "v3 JSON 恒含 malloc 计数器");
     }
 }

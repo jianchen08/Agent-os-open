@@ -74,6 +74,8 @@ def count_vitest_failures() -> int:
         ["npx", "vitest", "run"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=FRONTEND,
         check=False,
     )
@@ -86,6 +88,8 @@ def count_eslint_errors() -> int:
         ["npm", "run", "lint"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=FRONTEND,
         check=False,
     )

@@ -62,31 +62,14 @@ def _find_plugin_source_dirs(item: pytest.Item) -> list[str]:
 
     返回其声明的源目录列表（str 路径），未找到则返回空列表。
 
-    2026-08-23 修复：改从 pytest pluginmanager 注册表中按 __file__ 定位
-    conftest 模块。原先扫 sys.modules——但**无 __init__.py 的测试目录**下
-    pytest 会把 conftest 以裸名 ``conftest`` 导入，多个此类目录互相顶掉
-    sys.modules['conftest'] 槽位（仅最后一个存活），monitoring/multimodal/
-    isolation_guard 等目录的 conftest 因此查不到 → 钩子静默失效 →
-    裸名串扰复发。pluginmanager 对每个 conftest 模块都有独立注册，
-    不受 sys.modules 命名冲突影响。
+    查找经 pluginmanager 注册表按 __file__ 定位 conftest 模块
+    （见 _bare_module_evict.find_conftest_declared_dirs）。
     """
-    test_dir = os.path.dirname(str(item.fspath))
-    current = test_dir
-    for _ in range(10):  # 最多向上查 10 层
-        conftest_path = os.path.join(current, "conftest.py")
-        if os.path.isfile(conftest_path):
-            for plug in item.config.pluginmanager.get_plugins():
-                plug_file = getattr(plug, "__file__", None)
-                if plug_file and os.path.abspath(plug_file) == os.path.abspath(conftest_path):
-                    dirs = getattr(plug, "_PLUGIN_SOURCE_DIRS", None)
-                    if dirs:
-                        return list(dirs)
-                    break
-        parent = os.path.dirname(current)
-        if parent == current:
-            break
-        current = parent
-    return []
+    from tests.plugins._bare_module_evict import find_conftest_declared_dirs
+
+    return find_conftest_declared_dirs(
+        item.config, os.path.dirname(str(item.fspath)), "_PLUGIN_SOURCE_DIRS"
+    )
 
 
 def _find_plugin_conflict_dirs(item: pytest.Item) -> list[str]:
@@ -96,23 +79,11 @@ def _find_plugin_conflict_dirs(item: pytest.Item) -> list[str]:
     tasks/、isolation/ 之于 system/workspace/ 包），测试期需从 sys.path
     摘除（PathFinder 普通模块优先于 namespace portion）。未声明返回空。
     """
-    test_dir = os.path.dirname(str(item.fspath))
-    current = test_dir
-    for _ in range(10):
-        conftest_path = os.path.join(current, "conftest.py")
-        if os.path.isfile(conftest_path):
-            for plug in item.config.pluginmanager.get_plugins():
-                plug_file = getattr(plug, "__file__", None)
-                if plug_file and os.path.abspath(plug_file) == os.path.abspath(conftest_path):
-                    dirs = getattr(plug, "_PLUGIN_CONFLICT_DIRS", None)
-                    if dirs:
-                        return list(dirs)
-                    break
-        parent = os.path.dirname(current)
-        if parent == current:
-            break
-        current = parent
-    return []
+    from tests.plugins._bare_module_evict import find_conftest_declared_dirs
+
+    return find_conftest_declared_dirs(
+        item.config, os.path.dirname(str(item.fspath)), "_PLUGIN_CONFLICT_DIRS"
+    )
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:

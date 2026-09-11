@@ -16,8 +16,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import type { ElectronWindowAPI, ElectronOpenWindowOptions } from '@/types/electron'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
+import type { ElectronWindowAPI, ElectronOpenWindowOptions } from '@/types/electron'
 
 // 动态导入避免在 mock 设置前触发模块级单例选择（windowManager 的实现选择在模块加载时执行）
 async function importManager() {

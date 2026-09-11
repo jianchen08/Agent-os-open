@@ -316,6 +316,9 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
         // 右侧面板本身就是工作区，顶层标签（任务管理/文件树/设置…）都是其内容，
         // 不再存在名为「工作区」的标签页。从持久化数据中清洗掉。
         tabs = tabs.filter((t) => t.id !== 'ws-panel-workspace')
+        // 迁移（plugins_panel 撤除）：独立「插件管理」面板与设置中枢 kernel-plugins
+        // 双入口收敛，注册名已摘——持久化的旧页签从持久化数据中清洗掉。
+        tabs = tabs.filter((t) => t.id !== 'ws-panel-plugins')
         // 清洗后为空 → 默认激活任务管理标签（面板直接展示任务管理）
         if (tabs.length === 0) {
           tabs = [

@@ -15,7 +15,6 @@ import pytest
 
 from tests import _stdlib_guard
 
-
 # ── 报告输出目录 ──────────────────────────────────────────
 REPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
 
@@ -26,7 +25,6 @@ REPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
 # 模块级导入按自身 sys.path 重新解析。
 _BARE_MODULE_NAMES = {
     "plugin",
-    "plugin_types",
     "models",
     "tool",
     "types",
@@ -36,7 +34,6 @@ _BARE_MODULE_NAMES = {
     "decorators",
     "exceptions",
     "registry",
-    "policy",
     "manager",
     "decider",
     "approval",
@@ -48,10 +45,10 @@ _BARE_MODULE_NAMES = {
     "http_api",
     "interfaces",
     "connector_types",
-    "isolation_types",
     "base",
     "config_mixin",
     "degradation",
+    "policy",
 }
 
 # 名单内与 stdlib 同名的裸名：被插件同名模块劫持时重装 stdlib 本体而非逐出。
@@ -69,13 +66,25 @@ def _is_stdlib_module(mod: object) -> bool:
 
 @pytest.hookimpl(trylast=True)
 def pytest_collect_file(file_path: Path, parent: pytest.Collector) -> pytest.Collector | None:
-    """每个测试文件收集**前**逐出共享裸模块缓存，防止跨插件同名模块互相污染。
+    """每个测试文件收集**前**逐出共享裸模块缓存并把本文件声明的源目录置前。
 
     0.2 架构下各插件目录内是平铺 import（from plugin import ...），
     不同插件的同名模块（plugin/models/policy/storage 等）会互相覆盖
     sys.modules 缓存——后收集的测试 ``from plugin import X`` 会命中
-    先导入的其它插件模块。本钩子在文件收集（含模块导入）前调用，
-    保证每个测试文件的模块级导入都能按自己的 sys.path 解析。
+    先导入的其它插件模块。本钩子在文件收集（含模块导入）前调用：
+
+    1. 逐出共享裸模块缓存，让模块级导入按 sys.path 重新解析；
+    2. 把该文件最近 conftest 声明的 ``_PLUGIN_SOURCE_DIRS`` 推到 sys.path
+       最前（``_PLUGIN_CONFLICT_DIRS`` 摘除）——各 conftest 的模块级
+       insert 在会话启动期按参数顺序全部驻留，仅逐出不控解析顺序，
+       收集期导入会命中"最后加载者"的同名模块（如 ``import server``
+       命中 monitoring 的 server.py）。置前后本文件的模块级导入确定性
+       解析到自己的插件目录。
+
+    置前/摘除跨文件驻留与运行期 pytest_runtest_setup 同款（该钩子同样
+    晋升后不恢复）；同目录文件共享同一 conftest 声明，重复置前幂等，
+    跨目录时后收集者的置前覆盖前者，每个文件的收集期导入都解析到自己
+    声明的源目录。
 
     与 stdlib 同名的裸名（"types"）被劫持时不逐出（逐出 = 下一个
     ``from types import`` 按 sys.path 重解析再炸一次），改为重装 stdlib
@@ -90,6 +99,19 @@ def pytest_collect_file(file_path: Path, parent: pytest.Collector) -> pytest.Col
                 _stdlib_guard.ensure_stdlib_module(name)
             else:
                 sys.modules.pop(name, None)
+        from tests.plugins._bare_module_evict import (
+            demote_conflict_dirs,
+            find_conftest_declared_dirs,
+            promote_source_dirs,
+        )
+
+        test_dir = str(file_path.parent)
+        source_dirs = find_conftest_declared_dirs(parent.config, test_dir, "_PLUGIN_SOURCE_DIRS")
+        if source_dirs:
+            demote_conflict_dirs(
+                find_conftest_declared_dirs(parent.config, test_dir, "_PLUGIN_CONFLICT_DIRS")
+            )
+            promote_source_dirs(source_dirs)
     return None
 
 
@@ -234,154 +256,3 @@ def log_collector():
     collector = LogCollector()
     yield collector
     collector.stop()
-
-
-@pytest.fixture
-def log_context():
-    """提供日志上下文 fixture，自动清理。
-
-    用法::
-
-        def test_with_context(log_context):
-            log_context.bind(request_id="test-req-123")
-            # ... 测试逻辑 ...
-    """
-    from agentos_plugin_sdk.logging import LogContext
-
-    with LogContext.scoped():
-        yield LogContext
-
-
-# ── 公共 Mock Fixtures（分层 conftest 体系） ──────────────────
-
-
-@pytest.fixture
-def mock_redis():
-    """提供内存字典模拟的 Redis 客户端。
-
-    用于替代真实 Redis 连接，所有键值操作在内存中完成。
-    """
-    from unittest.mock import AsyncMock
-
-    data: dict[str, str] = {}
-
-    class _FakeRedis:
-        def __init__(self) -> None:
-            self._data = data
-
-        async def get(self, key: str) -> str | None:
-            return self._data.get(key)
-
-        async def set(self, key: str, value: str, ex: int | None = None) -> None:
-            self._data[key] = value
-
-        async def delete(self, key: str) -> int:
-            return int(self._data.pop(key, None) is not None)
-
-        async def exists(self, key: str) -> bool:
-            return key in self._data
-
-        async def keys(self, pattern: str = "*") -> list[str]:
-            import fnmatch
-
-            return [k for k in self._data if fnmatch.fnmatch(k, pattern)]
-
-        async def flushdb(self) -> None:
-            self._data.clear()
-
-    return _FakeRedis()
-
-
-@pytest.fixture
-def mock_db():
-    """提供内存字典模拟的数据库。
-
-    用于替代真实数据库连接，适合简单 CRUD 测试。
-    """
-    tables: dict[str, list[dict]] = {}
-
-    class _FakeDB:
-        def __init__(self) -> None:
-            self._tables = tables
-
-        def insert(self, table: str, record: dict) -> str:
-            import uuid
-
-            tables.setdefault(table, [])
-            record["_id"] = uuid.uuid4().hex[:12]
-            tables[table].append(record)
-            return record["_id"]
-
-        def find(self, table: str, query: dict | None = None) -> list[dict]:
-            rows = tables.get(table, [])
-            if query is None:
-                return rows
-            return [
-                r for r in rows if all(r.get(k) == v for k, v in query.items())
-            ]
-
-        def find_one(self, table: str, query: dict) -> dict | None:
-            results = self.find(table, query)
-            return results[0] if results else None
-
-        def delete(self, table: str, query: dict) -> int:
-            rows = tables.get(table, [])
-            before = len(rows)
-            tables[table] = [
-                r for r in rows if not all(r.get(k) == v for k, v in query.items())
-            ]
-            return before - len(tables[table])
-
-        def clear(self) -> None:
-            tables.clear()
-
-    return _FakeDB()
-
-
-@pytest.fixture
-def mock_llm():
-    """提供 Mock LLM 客户端，返回预设响应。
-
-    用法::
-
-        def test_pipeline(mock_llm):
-            mock_llm.set_response("这是AI的回复")
-            # 调用使用 mock_llm 的代码
-    """
-    from unittest.mock import AsyncMock
-
-    class _MockLLM:
-        def __init__(self) -> None:
-            self._responses: list[str] = []
-            self._call_count = 0
-            self.call_history: list[dict] = []
-
-        def set_response(self, text: str) -> None:
-            self._responses.append(text)
-
-        async def complete(self, messages: list[dict], **kwargs: object) -> str:
-            self._call_count += 1
-            self.call_history.append({"messages": messages, "kwargs": kwargs})
-            if self._responses:
-                return self._responses.pop(0)
-            return "mock response"
-
-        @property
-        def call_count(self) -> int:
-            return self._call_count
-
-    return _MockLLM()
-
-
-@pytest.fixture
-def temp_workspace(tmp_path):
-    """提供临时工作空间目录，用于文件操作测试。
-
-    基于 pytest 内置 tmp_path，自动创建标准子目录结构。
-    """
-    ws = tmp_path / "workspace"
-    ws.mkdir()
-    (ws / "src").mkdir()
-    (ws / "config").mkdir()
-    (ws / "output").mkdir()
-    return ws

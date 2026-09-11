@@ -27,6 +27,10 @@ from typing import Any
 
 import yaml
 
+# plugins/shared 根已由 server.py bootstrap_plugin 推上 sys.path（http_json 先例），
+# 裸名导入共享原子写助手（关键配置不截断，B4）。
+from atomic_io import atomic_write_text as _atomic_write_text
+
 # DEBT: config 子模块未复制到插件目录。llm_service 是独立 sidecar 进程，
 # config.config_center / config.models 不可导入时为 None，调用处已 null-guard。
 try:
@@ -88,6 +92,10 @@ _CONFIG_MODELS_DIR = _PROJECT_ROOT / "config" / "models"
 _LLM_YAML = _CONFIG_MODELS_DIR / "llm.yaml"
 _ENV_FILE = _PROJECT_ROOT / ".env"
 
+# 配置面预置声明（provider 分组/常用类型/思考强度白名单，前端设置页唯一来源；
+# 解耦方案 P2-5：前端不再复刻该清单，新增厂商仅改声明 + llm.yaml）
+_PRESETS_FILE = Path(__file__).resolve().parent / "llm_presets.yaml"
+
 
 # ---------------------------------------------------------------------------
 # YAML 读写工具
@@ -103,8 +111,12 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 def _write_yaml(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    # llm.yaml 承载 provider key 与路由定义，写中途崩溃不能留截断文件——
+    # 同目录 tmp + os.replace 原子换入（共享助手，全站唯一实现）。
+    _atomic_write_text(
+        path,
+        yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False),
+    )
 
     # 通知 ConfigCenter 重载（best-effort：单例懒加载，失败仅记录不影响写入）
     try:
@@ -135,11 +147,19 @@ _env_file_cache: tuple[float, dict[str, str]] | None = None
 
 def _env_file_vars() -> dict[str, str]:
     """读取项目根 .env（mtime 缓存）。内核只在启动时加载一次 .env，
-    UI 后写入的变量不在进程环境里，需回退读文件才能反映最新状态。"""
+    UI 后写入的变量不在进程环境里，需回退读文件才能反映最新状态。
+
+    FileNotFoundError（无 .env）属正常形态静默返回；其余 OSError（文件被占/
+    权限等）warn 带 path 与异常摘要——静默空表会让 key 缺失只在远端 401
+    暴露，根因必须可观测。
+    """
     global _env_file_cache  # noqa: PLW0603
     try:
         mtime = _ENV_FILE.stat().st_mtime
-    except OSError:
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logger.warning(".env 读取失败（mtime 探测），按无变量处理 | path=%s | error=%s", _ENV_FILE, exc)
         return {}
     if _env_file_cache and _env_file_cache[0] == mtime:
         return _env_file_cache[1]
@@ -286,7 +306,9 @@ def _update_env_var(path: Path, var_name: str, var_value: str) -> None:
         lines.append(f"{var_name}={var_value}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # .env 承载 LLM key 全量，写中途崩溃不能留下截断文件（write_text 直写
+    # = 丢 key 面）——同目录 tmp + os.replace 原子换入（共享助手）。
+    _atomic_write_text(path, "\n".join(lines) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +573,35 @@ def update_provider(provider_id: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"providers": providers}
 
 
+def get_llm_presets() -> dict[str, Any]:
+    """下发 LLM 配置面预置声明（provider 分组/常用类型/思考强度白名单）。
+
+    单一真值源 = 插件目录 llm_presets.yaml（声明驱动，前端零硬编码）：
+    新增预置厂商仅改声明文件 + llm.yaml，前端零改动。声明文件缺失属插件
+    自身损坏，fail-closed 抛错（不回退空清单让前端静默降级成"无预置"）。
+
+    Raises:
+        ConfigAPIError 500: 声明文件缺失/解析失败
+    """
+    if not _PRESETS_FILE.exists():
+        raise ConfigAPIError(
+            status_code=500,
+            detail=f"LLM 预置声明文件缺失: {_PRESETS_FILE.name}",
+        )
+    try:
+        with open(_PRESETS_FILE, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigAPIError(
+            status_code=500, detail=f"LLM 预置声明解析失败: {exc}"
+        ) from exc
+    return {
+        "provider_groups": data.get("provider_groups", []),
+        "common_provider_types": data.get("common_provider_types", []),
+        "thinking_strength": data.get("thinking_strength", {}),
+    }
+
+
 def get_provider_types() -> dict[str, Any]:
     """获取 litellm 支持的提供者类型清单。
 
@@ -633,15 +684,50 @@ def get_remote_models(provider_id: str) -> dict[str, Any]:
     items = payload.get("data") if isinstance(payload, dict) else None
     if items is None and isinstance(payload, dict):
         items = payload.get("models")
-    models: list[dict[str, str]] = []
+    models: list[dict[str, Any]] = []
     if isinstance(items, list):
         for item in items:
             if isinstance(item, dict) and item.get("id"):
-                models.append(
-                    {"id": str(item["id"]), "owned_by": str(item.get("owned_by") or "")}
-                )
+                model_id = str(item["id"])
+                entry: dict[str, Any] = {
+                    "id": model_id,
+                    "owned_by": str(item.get("owned_by") or ""),
+                }
+                entry.update(_lookup_model_limits(ptype, model_id))
+                models.append(entry)
     models.sort(key=lambda m: m["id"])
     return {"provider": provider_id, "models": models}
+
+
+def _lookup_model_limits(provider_type: str, model_id: str) -> dict[str, int]:
+    """litellm 注册表查模型真实上限（context_window / max_output_tokens）。
+
+    厂商 ``/models`` 端点只返回 id/object/owned_by，不携带上下文与输出上限
+    ——上限事实取自 litellm 内置注册表，键为 ``{provider_type}/{model_id}``
+    精确匹配。查不到返回空 dict（调用方用保守默认，不发明数字）。
+
+    不做后缀模糊匹配：同名模型挂在不同厂商下时上限不同（如 ollama 的
+    glm-5.2 与 dashscope 的 glm-5.2），跨厂商套用会把别人的上限当自己的事实。
+    """
+    if not provider_type or not model_id:
+        return {}
+    try:
+        import litellm  # noqa: PLC0415
+
+        info = litellm.model_cost.get(f"{provider_type}/{model_id}")
+    except Exception:  # noqa: BLE001 —— 注册表读取失败按"无事实"降级
+        logger.warning("litellm 模型注册表读取失败，模型 %s 上限未知", model_id, exc_info=True)
+        return {}
+    if not isinstance(info, dict):
+        return {}
+    limits: dict[str, int] = {}
+    context_window = info.get("max_input_tokens")
+    max_output = info.get("max_output_tokens")
+    if isinstance(context_window, int) and context_window > 0:
+        limits["context_window"] = context_window
+    if isinstance(max_output, int) and max_output > 0:
+        limits["max_output_tokens"] = max_output
+    return limits
 
 
 def delete_provider(provider_id: str) -> dict[str, Any]:

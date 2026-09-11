@@ -107,7 +107,10 @@ class TestSignalOneToolCallsRouteToTools:
             tool_results=tool_results,
         )
         result = asyncio.run(reminder.execute(_ctx(state)))
-        assert result.state_updates == {}, "信号①轮零评判零副作用"
+        # 信号①轮零评判零副作用（产出基线记账键除外——包装层幂等推进）
+        assert set(result.state_updates) - {_mod._RESULT_FP_KEY} == set(), (
+            "信号①轮零评判零副作用，实际 %r" % (result.state_updates,)
+        )
         assert "ended" not in result.state_updates and "suspended" not in result.state_updates
 
     def test_mixed_text_and_tool_call_round_routes_to_tools(self) -> None:
@@ -120,7 +123,7 @@ class TestSignalOneToolCallsRouteToTools:
             raw_result="参数已修正，重新派发。",
         )
         result = asyncio.run(reminder.execute(_ctx(state)))
-        assert result.state_updates == {}
+        assert set(result.state_updates) - {_mod._RESULT_FP_KEY} == set()
         assert "evaluate_reminder_count" not in result.state_updates
         assert "messages" not in result.state_updates
 

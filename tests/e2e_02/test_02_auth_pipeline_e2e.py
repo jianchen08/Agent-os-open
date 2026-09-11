@@ -25,6 +25,7 @@ E2E 测试：Auth 登录全链路 + Chat 管道 + 插件工具加载（HTTP API 
     3.3 响应含 type='message', session_id, timestamp 字段
 """
 import json
+import os
 import urllib.error
 import urllib.request
 
@@ -71,7 +72,7 @@ class TestAuthLoginFullChain:
 
     def test_login_success_returns_access_token(self):
         """1.1a 正确凭证登录应返回 access_token 字符串。"""
-        payload = {"username": "admin", "password": "admin12345"}
+        payload = {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]}
         status, body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", payload)
         assert status == 200, f"期望 200，实际 {status}"
         assert isinstance(body, dict), f"响应应为 dict，实际 {type(body)}"
@@ -81,7 +82,7 @@ class TestAuthLoginFullChain:
 
     def test_login_success_returns_refresh_token(self):
         """1.1b 正确凭证登录应返回 refresh_token 字符串。"""
-        payload = {"username": "admin", "password": "admin12345"}
+        payload = {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]}
         status, body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", payload)
         assert status == 200, f"期望 200，实际 {status}"
         assert "refresh_token" in body, "响应缺少 refresh_token 字段"
@@ -90,7 +91,7 @@ class TestAuthLoginFullChain:
 
     def test_login_success_token_type_bearer(self):
         """1.1c 正确凭证登录应返回 token_type='bearer'。"""
-        payload = {"username": "admin", "password": "admin12345"}
+        payload = {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]}
         status, body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", payload)
         assert status == 200
         assert body.get("token_type") == "bearer", \
@@ -98,7 +99,7 @@ class TestAuthLoginFullChain:
 
     def test_login_success_expires_in_1800(self):
         """1.1d 正确凭证登录应返回 expires_in=1800。"""
-        payload = {"username": "admin", "password": "admin12345"}
+        payload = {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]}
         status, body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", payload)
         assert status == 200
         assert body.get("expires_in") == 1800, \
@@ -107,7 +108,7 @@ class TestAuthLoginFullChain:
     def test_me_with_token_returns_admin_user(self):
         """1.2a 用 Bearer token 访问 /auth/me 应返回 username='admin'。"""
         # 先登录获取 token
-        login_payload = {"username": "admin", "password": "admin12345"}
+        login_payload = {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]}
         _, login_body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", login_payload)
         token = login_body["access_token"]
         # 用 token 访问 /auth/me
@@ -119,7 +120,7 @@ class TestAuthLoginFullChain:
 
     def test_me_with_token_returns_admin_role(self):
         """1.2b 用 Bearer token 访问 /auth/me 应返回 role='admin'。"""
-        login_payload = {"username": "admin", "password": "admin12345"}
+        login_payload = {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]}
         _, login_body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", login_payload)
         token = login_body["access_token"]
         status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/auth/me", token=token)
@@ -129,7 +130,7 @@ class TestAuthLoginFullChain:
 
     def test_me_with_token_returns_is_active_true(self):
         """1.2c 用 Bearer token 访问 /auth/me 应返回 is_active=true。"""
-        login_payload = {"username": "admin", "password": "admin12345"}
+        login_payload = {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]}
         _, login_body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", login_payload)
         token = login_body["access_token"]
         status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/auth/me", token=token)
@@ -139,7 +140,7 @@ class TestAuthLoginFullChain:
 
     def test_me_with_token_returns_email(self):
         """1.2d 用 Bearer token 访问 /auth/me 应返回 email='admin@agentos.dev'。"""
-        login_payload = {"username": "admin", "password": "admin12345"}
+        login_payload = {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]}
         _, login_body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", login_payload)
         token = login_body["access_token"]
         status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/auth/me", token=token)
@@ -150,7 +151,7 @@ class TestAuthLoginFullChain:
     def test_refresh_returns_new_access_token(self):
         """1.3 用 refresh_token 刷新应返回新的 access_token。"""
         # 先登录获取 refresh_token
-        login_payload = {"username": "admin", "password": "admin12345"}
+        login_payload = {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]}
         _, login_body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", login_payload)
         refresh_token = login_body["refresh_token"]
         # 刷新令牌
@@ -171,7 +172,7 @@ class TestAuthLoginFullChain:
         因此等待 1.5 秒后再 refresh，确保时间戳不同。
         """
         import time
-        login_payload = {"username": "admin", "password": "admin12345"}
+        login_payload = {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]}
         _, login_body, _ = http_post_json(f"{KERNEL_URL}/api/v1/auth/login", login_payload)
         old_access = login_body["access_token"]
         refresh_token = login_body["refresh_token"]

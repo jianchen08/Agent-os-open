@@ -15,7 +15,7 @@ description: |
 agent_type: orchestrator
 category: task
 level: L2
-model_tier: large
+model_tier: medium
 team:
 - code_reviewer_agent
 - function_verifier_agent

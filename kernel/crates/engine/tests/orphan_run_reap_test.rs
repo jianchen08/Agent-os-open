@@ -21,7 +21,7 @@ async fn reap_marks_orphan_running_as_failed_leaves_others() {
         .await
         .unwrap();
 
-    let reaped = store.reap_orphan_runs("default").expect("reap 应成功");
+    let reaped = store.reap_orphan_runs().expect("reap 应成功");
     assert_eq!(reaped, 1, "只应清扫 1 个 running 孤儿");
 
     let orphan = store.get_run("r_orphan").await.expect("get_run 应成功");
@@ -37,7 +37,35 @@ async fn reap_is_idempotent() {
     // 重复清扫：第二次无 running run，返回 0。
     let store = SqliteStore::open_memory().unwrap();
     store.create_run("r1", "h", "default").unwrap();
-    assert_eq!(store.reap_orphan_runs("default").unwrap(), 1);
-    assert_eq!(store.reap_orphan_runs("default").unwrap(), 0);
-    assert_eq!(store.reap_orphan_runs("default").unwrap(), 0);
+    assert_eq!(store.reap_orphan_runs().unwrap(), 1);
+    assert_eq!(store.reap_orphan_runs().unwrap(), 0);
+    assert_eq!(store.reap_orphan_runs().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn reap_covers_all_tenants_not_only_default() {
+    // 清扫是崩溃家政，不属于任何租户的数据边界：注册用户一用户一租户，
+    // 按租户过滤会让非 default 租户的孤儿 run 永远卡 running（历史/会话
+    // 状态悬空的危害对全部租户成立）。
+    let store = SqliteStore::open_memory().unwrap();
+    store.create_run("r_default", "h", "default").unwrap();
+    store.create_run("r_u123", "h", "u-123").unwrap();
+    store.create_run("r_u456", "h", "u-456").unwrap();
+
+    let reaped = store.reap_orphan_runs().expect("reap 应成功");
+    assert_eq!(reaped, 3, "全租户孤儿 run 都应被清扫");
+
+    for (rid, tenant) in [
+        ("r_default", "default"),
+        ("r_u123", "u-123"),
+        ("r_u456", "u-456"),
+    ] {
+        let run = agentos_tenant::scope(
+            agentos_core::types::TenantContext::new(tenant, "th_reap_all"),
+            async { store.get_run(rid).await.expect("get_run 应成功") },
+        )
+        .await;
+        assert_eq!(run.status, RunStatus::Failed, "{rid} 应被标记 failed");
+        assert!(run.ended_at.is_some(), "{rid} 应补 ended_at");
+    }
 }

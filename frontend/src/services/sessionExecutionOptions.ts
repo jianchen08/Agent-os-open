@@ -24,6 +24,20 @@ function storageKey(threadId: string): string {
   return `${STORAGE_PREFIX}${threadId}`
 }
 
+/** 损坏快照留证：warn（键名 + 原文摘要）+ 改名 .corrupt 后缀（rename 失败不阻断回退） */
+function quarantineCorruptSnapshot(key: string, raw: string, cause: unknown): void {
+  console.warn(
+    `[sessionExecutionOptions] 快照损坏，按无记录回退出生值: key=${key} raw=${raw.slice(0, 80)}`,
+    cause,
+  )
+  try {
+    localStorage.setItem(`${key}.corrupt`, raw)
+    localStorage.removeItem(key)
+  } catch {
+    // 留证失败不影响回退出生值的主流程
+  }
+}
+
 function isSnapshot(value: unknown): value is SessionFieldSnapshot {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return false
@@ -32,17 +46,28 @@ function isSnapshot(value: unknown): value is SessionFieldSnapshot {
   return typeof v.values === 'object' && v.values !== null && !Array.isArray(v.values)
 }
 
-/** 读会话的编辑后快照；无记录返回 null（消费方回退出生值） */
+/** 读会话的编辑后快照；无记录/损坏返回 null（消费方回退出生值），损坏留证 */
 export function loadSessionExecutionOptions(threadId: string): SessionFieldSnapshot | null {
+  const key = storageKey(threadId)
+  let raw: string | null
   try {
-    const raw = localStorage.getItem(storageKey(threadId))
-    if (!raw) return null
-    const parsed: unknown = JSON.parse(raw)
-    return isSnapshot(parsed) ? parsed : null
+    raw = localStorage.getItem(key)
   } catch {
-    // 快照损坏按无记录处理：下次保存会覆写修复
+    // 存储读取失败（隐私模式等）按无记录处理
     return null
   }
+  if (!raw) return null
+
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (isSnapshot(parsed)) return parsed
+  } catch (error) {
+    quarantineCorruptSnapshot(key, raw, error)
+    return null
+  }
+  // 解析成功但结构不符（缺 values 区/数组）：同属损坏，留证后回退
+  quarantineCorruptSnapshot(key, raw, new Error('快照结构不符（缺 values 区或为数组）'))
+  return null
 }
 
 /**

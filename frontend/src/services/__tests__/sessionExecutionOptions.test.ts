@@ -7,7 +7,7 @@
  *   损坏 JSON / 非法形状（缺 values 区、数组）均按无记录处理；
  * - 本层不感知具体字段名——测试数据形状即契约。
  */
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   clearSessionExecutionOptions,
   loadSessionExecutionOptions,
@@ -64,5 +64,35 @@ describe('sessionExecutionOptions 快照存取（v2 整包）', () => {
 
     localStorage.setItem('session-exec-options:th-z', '[1,2,3]')
     expect(loadSessionExecutionOptions('th-z')).toBeNull()
+  })
+
+  it('损坏快照改名 .corrupt 留证后回退（键名+原文摘要 warn，原键移除，不再无声覆写）', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // 解析失败（坏 JSON）
+      localStorage.setItem('session-exec-options:th-bad', '{broken json')
+      expect(loadSessionExecutionOptions('th-bad')).toBeNull()
+      // 留证：原键移除，.corrupt 副本保留原文供取证
+      expect(localStorage.getItem('session-exec-options:th-bad')).toBeNull()
+      expect(localStorage.getItem('session-exec-options:th-bad.corrupt')).toBe('{broken json')
+      // warn 带键名与原文摘要
+      const warnText = warnSpy.mock.calls.map((c) => c.join(' ')).join('\n')
+      expect(warnText).toContain('session-exec-options:th-bad')
+      expect(warnText).toContain('{broken json')
+
+      // 形状不符（解析成功但缺 values 区）同样留证回退
+      localStorage.setItem('session-exec-options:th-shape', '{"foo": 1}')
+      expect(loadSessionExecutionOptions('th-shape')).toBeNull()
+      expect(localStorage.getItem('session-exec-options:th-shape')).toBeNull()
+      expect(localStorage.getItem('session-exec-options:th-shape.corrupt')).toBe('{"foo": 1}')
+
+      // 正常快照读取不产生 .corrupt、不触发 warn
+      saveSessionExecutionOptions('th-ok', { values: { a: '1' } })
+      expect(loadSessionExecutionOptions('th-ok')?.values.a).toBe('1')
+      expect(localStorage.getItem('session-exec-options:th-ok.corrupt')).toBeNull()
+      expect(warnSpy).toHaveBeenCalledTimes(2)
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })

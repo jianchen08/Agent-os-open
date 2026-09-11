@@ -24,18 +24,14 @@ import contextlib
 import functools
 import logging
 import os
-import sys
 import time as _time
 import uuid
 from typing import Any
 
-sys.path.insert(0, os.path.dirname(__file__))
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
-# http.handle 响应封装（内核 HttpHandleResponse/ToolExecutionResult 样板）：
-# 公共实现 plugins/shared/http_json.py，经共享层自举裸名导入。
-_SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _SHARED_ROOT not in sys.path:
-    sys.path.insert(0, _SHARED_ROOT)
+_paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
+
 from _config_models import (  # noqa: E402
     ModelConfigLoaderShim,
     get_config,
@@ -46,7 +42,14 @@ from http_json import (  # noqa: E402
     json_response as _json_response,
     ok as _ok,
 )
+from _message_normalizer import normalize_messages_for_provider  # noqa: E402
 from streaming import StreamTranslator, map_finish_reason  # noqa: E402
+
+# litellm 首次 import 时会同步 fetch GitHub 的 model cost map，在离线/受限网络
+# 下 SSL 握手超时（30s）拖垮 MCP initialize 握手。改用本地 backup 跳过远程
+# fetch（litellm 官方开关，get_model_cost_map 顶部判断此环境变量）。本进程是
+# 全仓唯一 litellm 载体（llm_core 已不依赖 litellm），开关随进程归属落这里。
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
@@ -329,6 +332,153 @@ async def _poll_run_cancel(
             return
 
 
+class _StreamOutbound:
+    """流事件出站管道：chunk 归一化累积 → 事件翻译 → event-bus 推送 → 幂等收尾。
+
+    event-bus 未注入时推送降级（publisher=None）：chunk 仍经翻译器消费，
+    仅不推送（返回值与信封语义不变，调用方不感知通道差异）。
+    """
+
+    def __init__(self, publisher: Any | None, cancel_event: asyncio.Event) -> None:
+        self._publisher = publisher
+        self._translator = StreamTranslator()
+        self._accumulator = _PartialAccumulator()
+        self._cancel_event = cancel_event
+
+    @property
+    def accumulator(self) -> _PartialAccumulator:
+        return self._accumulator
+
+    def has_content(self) -> bool:
+        return self._accumulator.has_content()
+
+    def snapshot(self) -> dict[str, Any]:
+        return self._accumulator.build_snapshot()
+
+    def on_chunk(self, chunk_data: dict[str, Any]) -> str | None:
+        """adapter 归一化 chunk → 累积部分内容 → 翻译 → 入队推送。
+
+        同步闭包（流循环安全调用）。轮询器已感知 run suspended（停止信号）
+        时抛 ``StreamCancelledError`` 中断流消费——异常从 on_chunk 处传播，
+        adapter 的 consume 循环与 finally（aclose/许可释放）照常收尾。
+        """
+        self._accumulator.accumulate(chunk_data)
+        for event in self._translator.translate(chunk_data):
+            if self._publisher is not None:
+                self._publisher.put(event.event, event.payload)
+        if self._cancel_event.is_set():
+            raise StreamCancelledError("run suspended, stream cancelled")
+        return None
+
+    def finalize(self, reason: str, usage: dict[str, Any] | None = None) -> None:
+        """收尾（含断流兜底）：闭块 → usage → finish；finish 幂等保证异常路径
+        补发的 finish{reason:error} 不会与正常路径重复。"""
+        for event in self._translator.finish(reason, usage=usage):
+            if self._publisher is not None:
+                self._publisher.put(event.event, event.payload)
+
+
+async def _run_cancelled_at_start(poll_handle: Any, run_id: str) -> bool:
+    """execute 起手检查：run 已 suspended（停止信号在调用前已落地）→ True。
+
+    检查失败按未取消继续（best-effort）。
+    """
+    try:
+        resp = await poll_handle.call("get_run_status", {"run_id": run_id})
+    except Exception:  # noqa: BLE001 —— 起手检查失败按未取消继续（best-effort）
+        return False
+    return isinstance(resp, dict) and resp.get("status") == "suspended"
+
+
+def _backfill_model_defaults(
+    model: str,
+    temperature: float | None,
+    max_tokens: int | None,
+    kwargs: dict[str, Any],
+) -> tuple[float | None, int | None, dict[str, Any] | None]:
+    """参数回填（单一真值 = llm.yaml models.<id>.default_params）。
+
+    调用方（llm_core/压缩等）只需给模型名；未显式传的参数按模型条目
+    default_params 逐键补齐，显式传参恒优先（setdefault 语义）。模型
+    条目未配置的键不发——不发明兜底值（如 0.7/4096），上游按模型自身
+    默认运行（2026-09-03 用户裁定）。
+
+    Returns:
+        (temperature, max_tokens, model_entry)——回填后的采样参数与模型条目
+        （provider 解析与回填共用一次配置读取）。
+    """
+    model_entry = ModelConfigLoaderShim(get_config()).get_model_config(model)
+    default_params = (
+        model_entry.get("default_params") if isinstance(model_entry, dict) else None
+    )
+    if isinstance(default_params, dict):
+        if temperature is None:
+            temperature = default_params.get("temperature")
+        if max_tokens is None:
+            max_tokens = default_params.get("max_tokens")
+        for dp_key, dp_value in default_params.items():
+            if dp_key not in ("temperature", "max_tokens"):
+                kwargs.setdefault(dp_key, dp_value)
+    return temperature, max_tokens, model_entry
+
+
+def _normalize_inbound_messages(
+    messages: list[dict[str, Any]],
+    model_entry: dict[str, Any] | None,
+    pipeline_id: str,
+    model: str,
+) -> list[dict[str, Any]]:
+    """msg 标准化唯一关卡（adapter 调用前，所有消费方无差别）。
+
+    消息标准化属大模型调用面职责，单一真值源在本服务：结构标准化 +
+    配对校验/孤儿摘除（无状态全量，幂等）+ MiniMax 三阶段。provider 按
+    llm.yaml 模型条目解析；模型不在配置表时按通用段处理（配对校验
+    provider 无关），MiniMax 专有段由 adapter 侧角色兜底最后防线补位。
+    """
+    provider = (
+        str(model_entry.get("provider", "") or "") if isinstance(model_entry, dict) else ""
+    )
+    inbound_count = len(messages)
+    normalized = normalize_messages_for_provider(
+        messages,
+        provider=provider,
+        name="llm_service",
+        pipeline_id=pipeline_id,
+    )
+    if len(normalized) != inbound_count:
+        logger.debug(
+            "[llm] msg normalize: %d → %d 条（孤儿 tool result/未配对 assistant 摘除）provider=%s model=%s",
+            inbound_count,
+            len(normalized),
+            provider,
+            model,
+        )
+    return normalized
+
+
+def _build_call_kwargs(
+    kwargs: dict[str, Any],
+    temperature: float | None,
+    max_tokens: int | None,
+) -> dict[str, Any]:
+    """组装 adapter 调用参数。
+
+    透传 llm_core 经 kwargs 携带的模型参数（llm.yaml default_params
+    的 thinking/reasoning_effort 等）：模型参数必须经 kwargs 全量
+    上送，配置的思考预算才生效。_call_context 是内核路由信封
+    （thread/pipeline/message 键），非模型参数，pop 不外传。
+    回填后仍未设置的采样参数不携带（None 不发给 litellm）——
+    请求里只出现模型条目或调用方显式写过的参数。
+    """
+    kwargs.pop("_call_context", None)
+    call_kwargs: dict[str, Any] = dict(kwargs)
+    if temperature is not None:
+        call_kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        call_kwargs["max_tokens"] = max_tokens
+    return call_kwargs
+
+
 @plugin.tool(
     name="llm.complete_stream",
     schema={
@@ -414,10 +564,6 @@ async def llm_complete_stream(
     except KeyError:
         bus = None
 
-    publisher = _StreamPublisher(bus, envelope) if bus is not None else None
-    translator = StreamTranslator()
-    accumulator = _PartialAccumulator()
-
     # 取消感知（域门控：仅当调用方显式带 run_id 才启用——llm_core 从
     # state.run_id 注入；任务管道/无 run_id 的调用不启动轮询，避免误伤
     # 任务域暂停语义）。轮询器见 suspended 置 cancel_event，on_chunk 在
@@ -427,27 +573,8 @@ async def llm_complete_stream(
     cancel_event = asyncio.Event()
     poll_task: asyncio.Task[None] | None = None
 
-    def _on_chunk(chunk_data: dict[str, Any]) -> str | None:
-        """adapter 归一化 chunk → 累积部分内容 → 翻译 → 入队推送。
-
-        同步闭包（流循环安全调用）。轮询器已感知 run suspended（停止信号）
-        时抛 ``StreamCancelledError`` 中断流消费——异常从 on_chunk 处传播，
-        adapter 的 consume 循环与 finally（aclose/许可释放）照常收尾。
-        """
-        accumulator.accumulate(chunk_data)
-        for event in translator.translate(chunk_data):
-            if publisher is not None:
-                publisher.put(event.event, event.payload)
-        if cancel_event.is_set():
-            raise StreamCancelledError("run suspended, stream cancelled")
-        return None
-
-    # 收尾（含断流兜底）：闭块 → usage → finish；finish 幂等保证异常路径
-    # 补发的 finish{reason:error} 不会与正常路径重复。
-    def _finalize(reason: str, usage: dict[str, Any] | None = None) -> None:
-        for event in translator.finish(reason, usage=usage):
-            if publisher is not None:
-                publisher.put(event.event, event.payload)
+    publisher = _StreamPublisher(bus, envelope) if bus is not None else None
+    outbound = _StreamOutbound(publisher, cancel_event)
 
     if publisher is not None:
         publisher.start()
@@ -459,78 +586,48 @@ async def llm_complete_stream(
             except KeyError:
                 poll_handle = None
             if poll_handle is not None:
-                # execute 起手检查：run 已 suspended（停止信号在调用前已落地）
-                # → 直接返回 interrupted，不起空 LLM 调用。
-                try:
-                    resp = await poll_handle.call("get_run_status", {"run_id": run_id})
-                except Exception:  # noqa: BLE001 —— 起手检查失败按未取消继续（best-effort）
-                    resp = None
-                if isinstance(resp, dict) and resp.get("status") == "suspended":
+                if await _run_cancelled_at_start(poll_handle, run_id):
                     logger.info("[llm] run 起手检查已 suspended，跳过 LLM 调用 run_id=%s", run_id)
-                    _finalize("error")
-                    return _partial_result(stream_id, "interrupted", accumulator.build_snapshot())
+                    outbound.finalize("error")
+                    return _partial_result(stream_id, "interrupted", outbound.snapshot())
                 poll_task = asyncio.create_task(_poll_run_cancel(poll_handle, run_id, cancel_event))
 
-        # 参数回填（单一真值 = llm.yaml models.<id>.default_params）：
-        # 调用方（llm_core/压缩等）只需给模型名；未显式传的参数按模型条目
-        # default_params 逐键补齐，显式传参恒优先（setdefault 语义）。模型
-        # 条目未配置的键不发——不发明兜底值（如 0.7/4096），上游按模型自身
-        # 默认运行（2026-09-03 用户裁定）。放在各 pop 之后：回填只补真实缺席键。
-        model_entry = ModelConfigLoaderShim(get_config()).get_model_config(model)
-        default_params = (
-            model_entry.get("default_params") if isinstance(model_entry, dict) else None
+        temperature, max_tokens, model_entry = _backfill_model_defaults(
+            model, temperature, max_tokens, kwargs
         )
-        if isinstance(default_params, dict):
-            if temperature is None:
-                temperature = default_params.get("temperature")
-            if max_tokens is None:
-                max_tokens = default_params.get("max_tokens")
-            for dp_key, dp_value in default_params.items():
-                if dp_key not in ("temperature", "max_tokens"):
-                    kwargs.setdefault(dp_key, dp_value)
+        messages = _normalize_inbound_messages(
+            messages, model_entry, envelope["pipeline_id"], model
+        )
 
         try:
-            # 透传 llm_core 经 kwargs 携带的模型参数（llm.yaml default_params
-            # 的 thinking/reasoning_effort 等）：先前只显式传固定形参，配置的
-            # adaptive thinking 从未到达上游——MiniMax-M3 只能按模型默认思考
-            # 预算运行（2026-08-30 实测 2870 tokens 即配置未生效的模型默认
-            # 行为，正文偶发为空）。_call_context 是内核路由信封
-            # （thread/pipeline/message 键），非模型参数，pop 不外传。
-            kwargs.pop("_call_context", None)
-            # 回填后仍未设置的采样参数不携带（None 不发给 litellm）——
-            # 请求里只出现模型条目或调用方显式写过的参数。
-            call_kwargs: dict[str, Any] = dict(kwargs)
-            if temperature is not None:
-                call_kwargs["temperature"] = temperature
-            if max_tokens is not None:
-                call_kwargs["max_tokens"] = max_tokens
+            call_kwargs = _build_call_kwargs(kwargs, temperature, max_tokens)
             response = await adapter.completion(
                 model=model,
                 messages=messages,
                 tools=tools,
                 stream=True,
-                on_chunk=_on_chunk,
+                on_chunk=outbound.on_chunk,
                 **call_kwargs,
             )
         except StreamCancelledError:
             # 调用方停止（run suspended → on_chunk 返回 cancel → adapter 中断流）：
             # 半截内容经返回 dict 的 partial 字段交付（取消是预期终止，不传播异常）。
-            _finalize("error")
-            return _partial_result(stream_id, "interrupted", accumulator.build_snapshot())
+            outbound.finalize("error")
+            return _partial_result(stream_id, "interrupted", outbound.snapshot())
         except BaseException as exc:
             # 任务级取消（内核/上层取消本请求）必须原样传播，不得转成业务返回。
             if isinstance(exc, asyncio.CancelledError):
                 raise
             # 断流兜底：finish 前异常（网络/超时/上游错误）→ 补发 finish{reason:error}，
             # 消费端据此终止等待（参考 DSH [DONE] 缺失 = STREAM_CLOSED 语义）。
-            _finalize("error")
+            outbound.finalize("error")
             # 流已开始且累积了内容 → 半截内容经返回 dict 的 partial 字段交付
             # （partial 是返回值的一部分，可跨进程传输；异常属性无法过进程边界）。
             # 流未开始/零累积 → 维持 raise（现状不变，由调用方错误链处理）。
-            if accumulator.has_content():
-                return _partial_result(stream_id, "error", accumulator.build_snapshot(), exc=exc)
+            if outbound.has_content():
+                return _partial_result(stream_id, "error", outbound.snapshot(), exc=exc)
             raise
-        _finalize(
+        outbound.finalize(
             map_finish_reason(getattr(response, "finish_reason", None)),
             usage=getattr(response, "usage", None),
         )
@@ -582,6 +679,40 @@ async def llm_health_check(model: str) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("Health check failed for %s: %s", model, exc)
         return {"healthy": False, "model": model, "error": str(exc)}
+
+
+@plugin.tool(
+    name="llm.repair_json",
+    schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "Possibly broken/truncated JSON string"},
+        },
+        "required": ["text"],
+    },
+    description=(
+        "Attempt to repair a common JSON defect (markdown fence, trailing commas, "
+        "single quotes, truncation). Returns the repaired string, or null when "
+        "unrepairable."
+    ),
+)
+async def llm_repair_json(text: str) -> dict[str, Any]:
+    """JSON 修复能力（llm_service 能力面收敛点）。
+
+    ``repair_json_string`` 的单一真值源在本插件的 ``_message_normalizer``；
+    本服务把该纯函数暴露到能力面，供确需共享的工具函数消费方
+    （param_inject 参数兜底修复 / tool_schema_validator 截断检测——工具
+    arguments 面，不被消息标准化覆盖）经 capability 调用复用。
+
+    Args:
+        text: 可能残缺/带噪声的 JSON 字符串。
+
+    Returns:
+        ``{"repaired": str | None}``——无法修复时 repaired 为 None。
+    """
+    from _message_normalizer import repair_json_string  # noqa: PLC0415
+
+    return {"repaired": repair_json_string(text)}
 
 
 # ══ http.handle 响应封装：公共实现 plugins/shared/http_json.py（文件头已导入）══
@@ -637,6 +768,7 @@ async def _handle_config_llm(path: str, method: str, raw_body: str) -> dict[str,
         ("GET", "/providers"): rlc.get_providers,
         ("POST", "/providers"): functools.partial(rlc.add_provider, _decode_body(raw_body)),
         ("GET", "/provider-types"): rlc.get_provider_types,
+        ("GET", "/presets"): rlc.get_llm_presets,
         ("GET", "/models"): rlc.get_models,
         ("POST", "/models"): functools.partial(rlc.add_model, _decode_body(raw_body)),
         ("GET", "/defaults"): rlc.get_defaults,

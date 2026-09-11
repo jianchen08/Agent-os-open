@@ -10,10 +10,12 @@
  *    （useDebugTasksQuery），同一 staleTime 窗口内同参重挂仍零请求。
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { type QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type * as useDebugQueriesMod from '../useDebugQueries'
+import type * as queryClientMod from '@/services/query/queryClient'
 import type { ReactNode } from 'react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 const mockGetSessions = vi.fn()
 const mockGetPayloadList = vi.fn()
@@ -35,9 +37,9 @@ vi.mock('@/services/api/monitoring', () => ({
 
 describe('useDebugQueries（批次 3 验收）', () => {
   let queryClient: QueryClient
-  let useDebugSessionsQuery: typeof import('../useDebugQueries')['useDebugSessionsQuery']
-  let useLlmPayloadDiagQuery: typeof import('../useDebugQueries')['useLlmPayloadDiagQuery']
-  let useDebugTasksQuery: typeof import('../useDebugQueries')['useDebugTasksQuery']
+  let useDebugSessionsQuery: useDebugQueriesMod['useDebugSessionsQuery']
+  let useLlmPayloadDiagQuery: useDebugQueriesMod['useLlmPayloadDiagQuery']
+  let useDebugTasksQuery: useDebugQueriesMod['useDebugTasksQuery']
 
   function wrapper({ children }: { children: ReactNode }) {
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>

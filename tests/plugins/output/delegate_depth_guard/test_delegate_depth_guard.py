@@ -1,7 +1,7 @@
 # @feature: FP-0.2.〇 管道引擎 | @ci: python-coverage
-"""DelegateDepthGuardPlugin 单元测试——退役后的深度字段初始化行为。
+"""DelegateDepthGuardPlugin 单元测试——深度字段初始化行为。
 
-delegate 路由信号已从引擎协议移除，插件仅保留深度字段首次初始化：
+插件仅承载深度字段首次初始化（delegate 路由不在插件协议内）：
 - 首轮写入 delegate_depth=0 与 max_delegate_depth=默认上限；
 - 已初始化的轮次零副作用（幂等透传）；
 - enabled=False 时不写任何字段。

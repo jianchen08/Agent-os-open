@@ -14,11 +14,36 @@
   "capabilities": {
     "tools": [],
     "route_signals": [],
-    "lifecycle_hooks": []
+    "lifecycle_hooks": [],
+    "streaming": {
+      "conduit": true
+    }
   },
   "permissions": {},
   "priority": 50,
+  "state": {
+    "reads": [
+      "raw_tool_calls",
+      "messages",
+      "raw_thinking",
+      "tool_output_contracts",
+      "tool_output_validation",
+      "security.level_decision",
+      "security.decision",
+      "execution_contexts",
+      "submitted_task_ids",
+      "output_truncated",
+      "llm_supports_vision"
+    ]
+  },
   "lifecycle": {
     "idle_timeout_secs": 0
-  }
+  },
+  "config_files": [
+    {
+      "id": "tool_output",
+      "path": "config/system/tool_core_config.yaml",
+      "label": "tool_core 工具输出截断配置"
+    }
+  ]
 }

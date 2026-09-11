@@ -224,7 +224,9 @@
             }
           }
         }
-      },
+      }
+    ],
+    "services": [
       {
         "name": "interaction.send_notification",
         "description": "发送非阻塞通知（服务能力）",
@@ -420,11 +422,18 @@
           "get_pending"
         ],
         "host": "sidecar",
-        "tool_prefix": "interaction"
+        "tool_prefix": "interaction",
+        "protocol_roles": [
+          {
+            "role": "interaction-respond",
+            "method": "respond"
+          }
+        ]
       }
     ]
   },
   "permissions": {},
   "priority": 15,
-  "activation": "eager"
+  "activation": "eager",
+  "host_group": "light"
 }

@@ -35,8 +35,8 @@ def _load_plugin_under_test() -> ModuleType:
     name = '_llm_core_under_test'
     sys.modules.pop(name, None)
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
@@ -61,7 +61,8 @@ def _png_bytes() -> bytes:
 def test_resolve_uploads_ref_via_env_dir(tmp_path, monkeypatch):
     (tmp_path / "cat.png").write_bytes(_png_bytes())
     monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
-    url = LLMCore._resolve_image_ref("/uploads/cat.png")  # noqa: SLF001
+    url, reason = LLMCore._resolve_image_ref("/uploads/cat.png")  # noqa: SLF001
+    assert reason == ""
     assert url.startswith("data:image/png;base64,")
     payload = url.split(",", 1)[1]
     assert base64.b64decode(payload) == _png_bytes()
@@ -70,26 +71,31 @@ def test_resolve_uploads_ref_via_env_dir(tmp_path, monkeypatch):
 def test_resolve_absolute_path_ref(tmp_path):
     f = tmp_path / "shot.jpg"
     f.write_bytes(_png_bytes())
-    url = LLMCore._resolve_image_ref(str(f))  # noqa: SLF001
+    url, reason = LLMCore._resolve_image_ref(str(f))  # noqa: SLF001
+    assert reason == ""
     assert url.startswith("data:image/jpeg;base64,")
 
 
 def test_http_and_data_urls_return_empty_for_local_resolver():
-    # 非本地引用：本地解析器不处理（调用方按透传分支保留原块）
-    assert LLMCore._resolve_image_ref("https://a.com/x.png") == ""  # noqa: SLF001
-    assert LLMCore._resolve_image_ref("data:image/png;base64,xxx") == ""  # noqa: SLF001
+    # 非本地引用：本地解析器不处理（返回 ("", "")，调用方按透传分支保留原块）
+    assert LLMCore._resolve_image_ref("https://a.com/x.png") == ("", "")  # noqa: SLF001
+    assert LLMCore._resolve_image_ref("data:image/png;base64,xxx") == ("", "")  # noqa: SLF001
 
 
 def test_resolve_missing_file_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
-    assert LLMCore._resolve_image_ref("/uploads/nope.png") == ""  # noqa: SLF001
+    url, reason = LLMCore._resolve_image_ref("/uploads/nope.png")  # noqa: SLF001
+    assert url == ""
+    assert reason == "文件不存在"
 
 
 def test_resolve_oversize_file_returns_empty(tmp_path, monkeypatch):
     big = tmp_path / "big.png"
     big.write_bytes(b"x" * (LLMCore._MAX_IMAGE_BYTES + 1))  # noqa: SLF001
     monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
-    assert LLMCore._resolve_image_ref("/uploads/big.png") == ""  # noqa: SLF001
+    url, reason = LLMCore._resolve_image_ref("/uploads/big.png")  # noqa: SLF001
+    assert url == ""
+    assert "过大" in reason
 
 
 # ── _resolve_multimodal_blocks：块级分派与降级 ────────────────────
@@ -109,15 +115,20 @@ def test_blocks_local_ref_resolved_http_passthrough_text_kept(tmp_path, monkeypa
     assert out[2] == {"type": "text", "text": "说明"}
 
 
-def test_blocks_failed_local_ref_dropped(tmp_path, monkeypatch):
+def test_blocks_failed_local_ref_becomes_placeholder_text(tmp_path, monkeypatch):
+    """解析失败（2026-09-08 裁定）：不静默丢弃 → 占位文本块让 LLM 知晓附件缺失。"""
     monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
     blocks = [
         {"type": "image_url", "image_url": {"url": "/uploads/gone.png"}},
         {"type": "image_url", "image_url": {"url": "https://a.com/y.png"}},
     ]
     out = LLMCore._resolve_multimodal_blocks(blocks)  # noqa: SLF001
-    assert len(out) == 1
-    assert out[0]["image_url"]["url"] == "https://a.com/y.png"
+    assert len(out) == 2
+    assert out[0] == {
+        "type": "text",
+        "text": "[附件 /uploads/gone.png 解析失败：文件不存在]",
+    }
+    assert out[1]["image_url"]["url"] == "https://a.com/y.png"
 
 
 def test_blocks_non_list_input_returns_empty():
