@@ -872,7 +872,8 @@ async fn test_get_or_create_dead_stdio_sidecar_still_detected_and_rebuilt() {
         .write()
         .insert("plugin:stdio_dead".to_string(), Arc::clone(&cached));
 
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    // 条件等待子进程真死（llvm-cov 插桩下 spawn+exit 变慢，固定等待会假失败）
+    wait_until_dead(&cached).await;
 
     let result = invoker.get_or_create_mcp_client(&manifest).await;
 
@@ -894,6 +895,38 @@ async fn test_get_or_create_dead_stdio_sidecar_still_detected_and_rebuilt() {
         result.is_err(),
         "respawn 后 initialize 必然失败（速死命令），不得返回死实例"
     );
+}
+
+/// 条件等待 stdio client 对应子进程真死（try_wait 观察到退出）。
+///
+/// 固定 sleep 等退出在 llvm-cov 插桩下会假失败（插桩使子进程 spawn+exit
+/// 显著变慢）。轮询生产同款判定 [`McpClient::is_dead`]——其 try_wait 在
+/// 观察到退出（Child fuse）后仍稳定返回 true，轮询安全。
+async fn wait_until_dead(client: &tokio::sync::RwLock<McpClient>) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !client.read().await.is_dead().await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "子进程 10s 内未退出（真死前置不成立）"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// kill 后条件等待进程真正退出。
+///
+/// kill 异步生效（TerminateProcess/SIGKILL 到进程消亡有内核侧窗口），
+/// llvm-cov 插桩拉宽该窗口——kill 返回后立即断言 `is_alive()==false` 会
+/// 假失败。轮询至退出，超时按断言失败处理。
+async fn wait_until_killed(client: &tokio::sync::RwLock<McpClient>, why: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while client.read().await.is_alive().await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{why}：kill 后 10s 进程仍未退出"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 /// 构造「长驻不退出」的 stdio 假 sidecar（§3.3 测试辅助）。
@@ -1160,10 +1193,7 @@ async fn frozen_sidecar_evaluation_then_unlocked_force_unload_kills_process() {
     .await
     .expect("释放读锁后 force_unload 必须限时完成")
     .expect("unload 收敛成功");
-    assert!(
-        !live_arc.read().await.is_alive().await,
-        "假死自愈必须真实 kill 宿主进程"
-    );
+    wait_until_killed(&live_arc, "假死自愈必须真实 kill 宿主进程").await;
     assert!(
         invoker.mcp_clients.read().get("plugin:frozen").is_none(),
         "unload 后缓存条目必须驱逐（下次调用 respawn 干净实例）"
@@ -2731,10 +2761,7 @@ async fn test_idle_gc_reclaims_whole_host_and_frees_slots() {
 
     invoker.run_idle_gc_pass().await;
 
-    assert!(
-        !live_arc.read().await.is_alive().await,
-        "整组空闲超时必须 kill 宿主进程"
-    );
+    wait_until_killed(&live_arc, "整组空闲超时必须 kill 宿主进程").await;
     assert!(
         invoker.mcp_clients.read().get(&host_key).is_none(),
         "回收即清空：mcp_clients 条目必须移除"
@@ -2782,10 +2809,7 @@ async fn test_force_unload_after_idle_reclaim_spares_recycled_slot_new_host() {
         .write()
         .insert(host_key.clone(), Instant::now() - Duration::from_secs(400));
     invoker.run_idle_gc_pass().await;
-    assert!(
-        !host_m.read().await.is_alive().await,
-        "前置：空闲宿主已被 GC 回收"
-    );
+    wait_until_killed(&host_m, "前置：空闲宿主已被 GC 回收").await;
     assert!(invoker.light_packing.read().assignments.is_empty());
 
     // ③ 新成员 new_n 装箱进复用的 group:light:1 并 spawn 新宿主
@@ -2813,10 +2837,7 @@ async fn test_force_unload_after_idle_reclaim_spares_recycled_slot_new_host() {
 
     // ⑤ 正例对照：evict 现任成员 new_n → 其宿主被杀，装箱保留（respawn 按表重建）
     invoker.force_unload_impl("new_n").await.unwrap();
-    assert!(
-        !host_n.read().await.is_alive().await,
-        "evict 现任成员必须 kill 其宿主进程"
-    );
+    wait_until_killed(&host_n, "evict 现任成员必须 kill 其宿主进程").await;
     assert!(!invoker.mcp_clients.read().contains_key(&host_key));
     assert!(
         invoker
@@ -3283,10 +3304,7 @@ async fn test_force_unload_light_kills_host_keeps_assignments() {
 
     invoker.force_unload_impl("guard_a").await.unwrap();
 
-    assert!(
-        !live_arc.read().await.is_alive().await,
-        "必须 kill 宿主进程"
-    );
+    wait_until_killed(&live_arc, "必须 kill 宿主进程").await;
     assert!(invoker.mcp_clients.read().get(&host_key).is_none());
     assert!(invoker.last_used.read().get(&host_key).is_none());
     assert!(
@@ -3581,7 +3599,7 @@ async fn test_explicit_unload_still_works_on_keep_warm_host() {
         .force_unload_impl("warm_c")
         .await
         .expect("显式卸载不受预热常驻豁免约束");
-    assert!(!live.read().await.is_alive().await);
+    wait_until_killed(&live, "显式卸载后子进程退出").await;
 }
 
 // ── 监控 M3：宿主进程态快照（host_proc_snapshots） ─────────────────────────

@@ -1,4 +1,4 @@
-// @feature: FP-0.2.引擎 轮数硬上限 | @vision: V1 可观测可干预 | @ci: rust-test
+// @feature: FP-0.2.〇 管道引擎轮数硬上限 | @vision: V1 可观测可干预 | @ci: rust-test
 //! 主循环轮数硬上限（max_rounds，fail-closed）+ DSL step 循环 max_iterations=0
 //! 非法值守卫。
 //!

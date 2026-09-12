@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块统一 manifest 化 | @ci: python-coverage
 # @ci: python-coverage
 """router_factory 构建链契约测试：key 解析 → model_list/fallbacks → Router 单例。
 

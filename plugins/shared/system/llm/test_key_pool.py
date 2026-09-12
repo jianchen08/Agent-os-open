@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 内部模块统一 manifest 化 | @ci: python-coverage
 # @ci: python-coverage
 """key_pool 契约测试：优先级信号量 + KeySlot 限流/配额/错误策略 + KeyPool 选键。
 

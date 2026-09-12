@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /**
  * WidgetStage 测试（widget_stage 声明组台宿主）
  *

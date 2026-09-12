@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 工具插件面 | @ci: python-coverage
 # browser_tool 插件测试——manifest 一致性 / 参数构造 / 双路径传输 / 结果归一。
 #
 # Bridge 与上游 @playwright/mcp 用 stub 替身（真 HTTP server，同 mcp-bridge

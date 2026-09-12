@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 工具插件面 | @ci: python-coverage
 # MCP Bridge 网关测试——upstream 会话管理 / 治理层 / HTTP 全链路。
 #
 # 上游用本目录 stub_upstream.py 替身（真 JSON-RPC stdio server），不依赖

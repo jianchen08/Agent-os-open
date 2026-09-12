@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /** @ci: frontend-test */
 /**
  * thinking 过滤口径对账契约测试（总纲 #13）

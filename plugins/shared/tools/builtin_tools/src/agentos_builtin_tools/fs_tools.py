@@ -1,12 +1,14 @@
 """文件系统工具集合。
 
-包含 file_read / file_write / list_directory / create_directory / copy_file / move_file / delete_file。
+包含 file_read / file_write / list_directory / create_directory /
+copy_file / move_file / delete_file。
 核心业务逻辑从 0.1 src/tools/builtin/ 迁移，外层用 SDK 封装为 MCP 工具。
 
 工作空间约束（punch B5，参考 download/tool.py 的 project_root 前缀校验）：
 - 全部路径参数以 workspace/project_root 为锚：相对路径以根解析，绝对路径
-  越界拒绝——读写同规则 fail-closed，读操作不豁免（越界读 = 任意宿主
-  文件读取原语，曾以 warning 放行，已收口）。
+  越界拒绝——写/删/move/copy 一律 fail-closed；纯读操作（read/search）
+  越界时另有仓库源码区第二锚点（repo_anchor：仓库根内、运行时/产物目录
+  之外可读，ADR 2026-09-12）。
 - 凭据类文件硬拒（与根内外无关）：.env 族（.env.example 豁免）、
   .git-credentials / .netrc、id_rsa/id_dsa/id_ecdsa/id_ed25519、
   *.pem/*.p12/*.pfx/*.jks/*.keystore。泛化后缀 *.key 不拦（工作区内
@@ -17,7 +19,8 @@
   不出现在 LLM schema；工具函数签名必须声明，否则 SDK 分发层按签名
   过滤会把注入值静默丢弃）。
 
-[来源: src/tools/builtin/{file_read,file_write,list_directory,create_directory,copy_file,move_file,delete_file}/tool.py]
+[来源: src/tools/builtin/{file_read,file_write,list_directory,create_directory,
+copy_file,move_file,delete_file}/tool.py]
 """
 
 from __future__ import annotations
@@ -25,12 +28,25 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
 from agentos_builtin_tools.result import ToolResult
 
+# 仓库源码区读取锚（ADR 2026-09-12-read-anchor-repo-source）：本文件位于
+# <repo>/plugins/shared/tools/builtin_tools/src/agentos_builtin_tools/，
+# 上溯 4 级即 plugins/shared（repo_anchor 所在共享根），与 http_json 同款
+# 裸名导入先例。
+_SHARED_ROOT = str(Path(__file__).resolve().parents[4])
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+from repo_anchor import repo_read_verdict  # noqa: E402
+
 logger = logging.getLogger(__name__)
+
+# 纯读操作集合：享受仓库源码区第二锚点（写/删/move/copy 不豁免）。
+_READ_OPERATIONS = frozenset({"read", "search"})
 
 # 大文件不再拒绝（task_spill_guard.md 任务 2）：大输出兜底由 pipeline 的
 # spill_guard 统一负责（原文存档 + 提取 + 定位符），工具只负责"读文件 +
@@ -89,6 +105,9 @@ def _check_workspace_path(
         (是否允许, 拒绝原因, 校验用绝对路径)
         未注入 workspace/project_root 时返回拒绝——相对路径无处锚定，落回
         sidecar cwd 会把插件目录/宿主仓库当工作区读写。
+        纯读操作（read/search）在单根越界时还有第二锚点：仓库源码区
+        （repo_anchor，运行时/产物目录除外，ADR 2026-09-12）；写/删/move
+        无此豁免——仓库源码树仍非 agent 写面。
     """
     root_str = project_root or workspace
     if not root_str:
@@ -103,7 +122,7 @@ def _check_workspace_path(
     # 固定挂载约定），LLM 会沿用该绝对路径调文件工具——宿主侧把 /workspace/
     # 前缀重映射到注入的宿主工作空间，否则写到不存在的宿主绝对路径。
     if path == "/workspace" or path.startswith("/workspace/"):
-        path = str(root) + path[len("/workspace"):]
+        path = str(root) + path[len("/workspace") :]
         logger.info("[fs_tools] 容器挂载点 /workspace 重映射到宿主工作空间 | -> %s", path)
     target = Path(path)
     resolved = target.resolve() if target.is_absolute() else (root / target).resolve()
@@ -113,7 +132,17 @@ def _check_workspace_path(
     try:
         resolved.relative_to(root)
     except ValueError:
-        return False, f"路径 {path} 超出 workspace/project_root（{root}）范围，{operation} 操作被拒绝", str(resolved)
+        if operation in _READ_OPERATIONS:
+            matched, deny_reason = repo_read_verdict(resolved)
+            if matched:
+                if deny_reason is None:
+                    return True, "", str(resolved)
+                return False, deny_reason, str(resolved)
+        return (
+            False,
+            f"路径 {path} 超出 workspace/project_root（{root}）范围，{operation} 操作被拒绝",
+            str(resolved),
+        )
     return True, "", str(resolved)
 
 
@@ -125,8 +154,15 @@ FILE_READ_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "path": {"type": "string", "description": "文件路径（相对路径或绝对路径）"},
-        "start_line": {"type": "integer", "description": "起始行号（从1开始），仅读取指定行范围", "default": 1},
-        "end_line": {"type": "integer", "description": "结束行号（从1开始，包含该行），仅读取指定行范围"},
+        "start_line": {
+            "type": "integer",
+            "description": "起始行号（从1开始），仅读取指定行范围",
+            "default": 1,
+        },
+        "end_line": {
+            "type": "integer",
+            "description": "结束行号（从1开始，包含该行），仅读取指定行范围",
+        },
         "tail": {"type": "integer", "description": "仅读取文件最后 N 行"},
     },
     "required": ["path"],
@@ -160,7 +196,9 @@ async def file_read(
     文件系统，原样回传 agent 视角相对路径将打不开（_local 根解析不到）。
     """
     # 工作空间约束（读路径：根外放行但记录；无注入上下文一律拒绝）
-    allowed, reason, resolved = _check_workspace_path(path, workspace, project_root, operation="read")
+    allowed, reason, resolved = _check_workspace_path(
+        path, workspace, project_root, operation="read"
+    )
     if not allowed:
         return ToolResult.failure_result(reason)
     if resolved is not None:
@@ -222,7 +260,10 @@ FILE_WRITE_SCHEMA: dict[str, Any] = {
             "description": "编辑操作类型",
             "default": "write",
         },
-        "start_line": {"type": "integer", "description": "起始行号（write/insert/delete_lines 使用）"},
+        "start_line": {
+            "type": "integer",
+            "description": "起始行号（write/insert/delete_lines 使用）",
+        },
         "end_line": {"type": "integer", "description": "结束行号（write/delete_lines 使用）"},
         "line": {"type": "integer", "description": "插入位置行号（insert 使用）"},
         "old_str": {"type": "string", "description": "要搜索的原始文本（search_replace 使用）"},
@@ -267,7 +308,9 @@ async def file_write(
     （parents）；search_replace/delete_lines 只改已存在文件，不建目录。
     """
     # 工作空间约束（写路径：根外一律拒绝；相对路径以根锚定后执行）
-    allowed, reason, resolved = _check_workspace_path(path, workspace, project_root, operation="write")
+    allowed, reason, resolved = _check_workspace_path(
+        path, workspace, project_root, operation="write"
+    )
     if not allowed:
         return ToolResult.failure_result(reason)
     if resolved is not None:
@@ -320,7 +363,8 @@ async def file_write(
             count_replace = existing.count(old_str)
             if count_replace == 0:
                 return ToolResult.failure_result(
-                    f"old_str not found in {path}", backup=backup or "",
+                    f"old_str not found in {path}",
+                    backup=backup or "",
                 )
             new_content = existing.replace(old_str, replacement)
             file_path.write_text(new_content, "utf-8")
@@ -401,7 +445,11 @@ LIST_DIRECTORY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "path": {"type": "string", "description": "目录路径（相对路径或绝对路径）"},
-        "include_hidden": {"type": "boolean", "description": "是否包含隐藏文件（以.开头），默认 false", "default": False},
+        "include_hidden": {
+            "type": "boolean",
+            "description": "是否包含隐藏文件（以.开头），默认 false",
+            "default": False,
+        },
         "pattern": {"type": "string", "description": "文件名匹配模式（支持 glob 语法，如 *.py）"},
     },
     "required": ["path"],
@@ -433,7 +481,9 @@ async def list_directory(
     project_root: str | None = None,
 ) -> ToolResult:
     """列出目录的直接子项（相对路径以注入根锚定；无注入报错）。"""
-    allowed, reason, resolved = _check_workspace_path(path, workspace, project_root, operation="read")
+    allowed, reason, resolved = _check_workspace_path(
+        path, workspace, project_root, operation="read"
+    )
     if not allowed:
         return ToolResult.failure_result(reason)
     dir_path = Path(resolved) if resolved is not None else Path(path)
@@ -459,6 +509,7 @@ async def list_directory(
 def _glob_match(name: str, pattern: str) -> bool:
     """简化的 glob 匹配。"""
     import fnmatch
+
     return fnmatch.fnmatch(name, pattern)
 
 
@@ -470,7 +521,11 @@ CREATE_DIRECTORY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "path": {"type": "string", "description": "目录路径"},
-        "parents": {"type": "boolean", "description": "是否创建父目录（默认 true）", "default": True},
+        "parents": {
+            "type": "boolean",
+            "description": "是否创建父目录（默认 true）",
+            "default": True,
+        },
     },
     "required": ["path"],
 }
@@ -483,7 +538,9 @@ async def create_directory(
     project_root: str | None = None,
 ) -> ToolResult:
     """创建目录（幂等：目录已存在直接返回成功；相对路径以注入根锚定）。"""
-    allowed, reason, resolved = _check_workspace_path(path, workspace, project_root, operation="write")
+    allowed, reason, resolved = _check_workspace_path(
+        path, workspace, project_root, operation="write"
+    )
     if not allowed:
         return ToolResult.failure_result(reason)
     dir_path = Path(resolved) if resolved is not None else Path(path)
@@ -506,10 +563,17 @@ COPY_FILE_SCHEMA: dict[str, Any] = {
         "destination": {"type": "string", "description": "目标路径"},
         "copies": {
             "type": "array",
-            "items": {"type": "object", "properties": {"source": {"type": "string"}, "destination": {"type": "string"}}},
+            "items": {
+                "type": "object",
+                "properties": {"source": {"type": "string"}, "destination": {"type": "string"}},
+            },
             "description": "批量复制列表（与 source/destination 二选一）",
         },
-        "overwrite": {"type": "boolean", "description": "是否覆盖已存在的目标（默认 false）", "default": False},
+        "overwrite": {
+            "type": "boolean",
+            "description": "是否覆盖已存在的目标（默认 false）",
+            "default": False,
+        },
     },
     "required": [],
 }
@@ -528,17 +592,24 @@ async def copy_file(
         results: list[dict[str, Any]] = []
         for item in copies:
             r = await copy_file(
-                item["source"], item["destination"],
-                overwrite=overwrite, workspace=workspace, project_root=project_root,
+                item["source"],
+                item["destination"],
+                overwrite=overwrite,
+                workspace=workspace,
+                project_root=project_root,
             )
-            results.append({"source": item["source"], "destination": item["destination"], "success": r.success})
+            results.append(
+                {"source": item["source"], "destination": item["destination"], "success": r.success}
+            )
         return ToolResult.success_result({"results": results})
 
     if not source or not destination:
         return ToolResult.failure_result("source and destination are required (or use copies)")
 
-    for field, value, op in (("source", source, "move"), ("destination", destination, "write")):
-        allowed, reason, resolved = _check_workspace_path(value, workspace, project_root, operation=op)
+    for _field, value, op in (("source", source, "move"), ("destination", destination, "write")):
+        allowed, reason, resolved = _check_workspace_path(
+            value, workspace, project_root, operation=op
+        )
         if not allowed:
             return ToolResult.failure_result(reason)
 
@@ -575,10 +646,17 @@ MOVE_FILE_SCHEMA: dict[str, Any] = {
         "destination": {"type": "string", "description": "目标路径"},
         "moves": {
             "type": "array",
-            "items": {"type": "object", "properties": {"source": {"type": "string"}, "destination": {"type": "string"}}},
+            "items": {
+                "type": "object",
+                "properties": {"source": {"type": "string"}, "destination": {"type": "string"}},
+            },
             "description": "批量移动列表",
         },
-        "overwrite": {"type": "boolean", "description": "是否覆盖已存在的目标（默认 false）", "default": False},
+        "overwrite": {
+            "type": "boolean",
+            "description": "是否覆盖已存在的目标（默认 false）",
+            "default": False,
+        },
     },
     "required": [],
 }
@@ -596,7 +674,9 @@ async def move_file(
     # 工作空间约束：move 同时改动源（移出）与目标（写入），两端都校验；
     # 相对路径以根锚定后执行（校验的路径 = 实际操作的路径）
     if source:
-        allowed, reason, resolved = _check_workspace_path(source, workspace, project_root, operation="move")
+        allowed, reason, resolved = _check_workspace_path(
+            source, workspace, project_root, operation="move"
+        )
         if not allowed:
             return ToolResult.failure_result(reason)
         if resolved is not None:
@@ -614,10 +694,15 @@ async def move_file(
         results: list[dict[str, Any]] = []
         for item in moves:
             r = await move_file(
-                item["source"], item["destination"],
-                overwrite=overwrite, workspace=workspace, project_root=project_root,
+                item["source"],
+                item["destination"],
+                overwrite=overwrite,
+                workspace=workspace,
+                project_root=project_root,
             )
-            results.append({"source": item["source"], "destination": item["destination"], "success": r.success})
+            results.append(
+                {"source": item["source"], "destination": item["destination"], "success": r.success}
+            )
         return ToolResult.success_result({"results": results})
 
     if not source or not destination:
@@ -652,8 +737,16 @@ DELETE_FILE_SCHEMA: dict[str, Any] = {
     "properties": {
         "path": {"type": "string", "description": "要删除的文件或目录路径"},
         "paths": {"type": "array", "items": {"type": "string"}, "description": "批量删除路径列表"},
-        "recursive": {"type": "boolean", "description": "是否递归删除目录（默认 false）", "default": False},
-        "force": {"type": "boolean", "description": "是否强制删除（包括只读文件，默认 false）", "default": False},
+        "recursive": {
+            "type": "boolean",
+            "description": "是否递归删除目录（默认 false）",
+            "default": False,
+        },
+        "force": {
+            "type": "boolean",
+            "description": "是否强制删除（包括只读文件，默认 false）",
+            "default": False,
+        },
     },
     "required": [],
 }
@@ -676,7 +769,9 @@ async def delete_file(
     # 相对路径以根锚定后执行）
     anchored: list[str] = []
     for p in target_paths:
-        allowed, reason, resolved = _check_workspace_path(p, workspace, project_root, operation="delete")
+        allowed, reason, resolved = _check_workspace_path(
+            p, workspace, project_root, operation="delete"
+        )
         if not allowed:
             return ToolResult.failure_result(reason)
         anchored.append(resolved if resolved is not None else p)

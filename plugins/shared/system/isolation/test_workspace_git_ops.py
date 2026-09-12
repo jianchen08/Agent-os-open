@@ -1,3 +1,4 @@
+# @feature: FP-0.2.五 资源治理 | @ci: python-coverage
 # @ci: python-coverage
 """_workspace_git_ops（Git 操作 Mixin）契约测试。
 

@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /**
  * DebugCenterHubWidget 声明组台测试
  *

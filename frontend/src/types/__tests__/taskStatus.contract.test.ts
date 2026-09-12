@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /** @ci: frontend-test */
 /**
  * 任务状态词表契约测试（总纲 #12）

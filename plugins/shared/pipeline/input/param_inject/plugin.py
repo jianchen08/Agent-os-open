@@ -116,33 +116,15 @@ def classify_args_parse_failure(raw: str) -> str:
 
 
 def _resolve_project_root() -> Path | None:
-    """推导 Agent OS 项目根目录。
+    """推导 Agent OS 项目根目录（解析实现统一在 plugins/shared/repo_anchor.py）。
 
-    AGENTOS_CONFIG_ROOT（内核启动发布，指向 <project_root>/config）优先；
-    回退自本文件向上找含 config/isolation 的祖先目录（对齐
-    isolation.workspace.find_project_root 的标记法）。两者皆不可得返回 None，
-    {{project_root}} 模板替换与 project_root 回退注入不生效。
+    AGENTOS_CONFIG_ROOT（内核启动发布）优先、config/isolation 标记法回退的
+    语义与缓存由 repo_anchor.resolve_repo_root 单点承担；返回 None 时
+    {{project_root}} 模板替换与 project_root 回退注入不生效（约定不变）。
     """
-    import os  # noqa: PLC0415
+    import repo_anchor  # noqa: PLC0415
 
-    if _resolve_project_root._cached is not None:
-        return _resolve_project_root._cached
-
-    env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
-    if env_root:
-        p = Path(env_root)
-        if (p / "isolation").is_dir():
-            _resolve_project_root._cached = p.parent
-            return _resolve_project_root._cached
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "config" / "isolation").is_dir():
-            _resolve_project_root._cached = parent
-            return _resolve_project_root._cached
-
-    return None
-
-
-_resolve_project_root._cached: Path | None = None  # type: ignore[misc]
+    return repo_anchor.resolve_repo_root()
 
 
 class ParamInjectPlugin(IInputPlugin):
@@ -309,16 +291,15 @@ class ParamInjectPlugin(IInputPlugin):
             task_id = ctx.state.get(StateKeys.TASK_ID, "")
             if task_id:
                 args["task_id"] = task_id
-            else:
-                # 诊断：state 中无任务身份，说明引擎 state 未携带本任务 ID。
-                # task_submit/task_evaluate 等依赖该注入的工具将无法确定父任务。
-                if tool_name in ("task_submit", "task_evaluate", "task_manage"):
-                    logger.warning(
-                        "[param_inject] task_id 注入失败 | tool=%s | state[task.id]=%r | pipeline_id=%s",
-                        tool_name,
-                        ctx.state.get(StateKeys.TASK_ID),
-                        ctx.state.get(StateKeys.PIPELINE_ID, "")[:12],
-                    )
+            # 诊断：state 中无任务身份，说明引擎 state 未携带本任务 ID。
+            # task_submit/task_evaluate 等依赖该注入的工具将无法确定父任务。
+            elif tool_name in ("task_submit", "task_evaluate", "task_manage"):
+                logger.warning(
+                    "[param_inject] task_id 注入失败 | tool=%s | state[task.id]=%r | pipeline_id=%s",
+                    tool_name,
+                    ctx.state.get(StateKeys.TASK_ID),
+                    ctx.state.get(StateKeys.PIPELINE_ID, "")[:12],
+                )
 
         if "pipeline_id" not in args:
             pipeline_id = ctx.state.get(StateKeys.PIPELINE_ID, "")

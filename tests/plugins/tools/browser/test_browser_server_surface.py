@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 工具插件面 | @ci: python-coverage
 # browser_tool 缺口补测——bridge_client 分支 / server handler 全链。
 #
 # 覆盖：_rpc 状态映射（401/403/502/其他）、直发 HTTPError body 解析、

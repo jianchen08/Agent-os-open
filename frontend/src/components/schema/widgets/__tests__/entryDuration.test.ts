@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /**
  * entryDurationMs 回归（GUI 黑盒测试 2026-09-11）：
  *

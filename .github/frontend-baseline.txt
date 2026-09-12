@@ -1,10 +1,15 @@
 # 前端测试基线（vitest 失败数/eslint 错误数只减不增；
 # 覆盖率%只升不降。见 scripts/check_frontend_baseline.py）
 # vitest_coverage_pct 72.54→73.11（同批最终实测复核，含 MemoryPage 补测）
+# 72.54→73.11→75.66（2026-09-12 覆盖率补测批二）：Node20 本地全量实测
+# （2686 用例全绿）。增量来源 = CodeEditor 12/FileTreeContextMenu 14/
+# RegisterPage 9/FileTreeWidget 9/PluginConfigEditor 8 用例（提交
+# 2b638bf4e/1eae874a5/dc36d55bd）+ ChannelApiDecl 满载时序加固
+# （74206ccbc）。下一批目标 = router.tsx/DbAdminPage/ChartWidget/FiveSpaceLayout。
 # 前值：69.33→72.54（2026-09-11 覆盖率补测批）：Node20 本地全量
 # 实测（2592+ 测试绿）。增量来源 = useVoiceInput 0%→全覆盖 + VotingPanel
 # 主链补测（提交 30d0810de/d276c07c4）。下一批目标 = FileTreeWidget/
 # ChatInput/PluginConfigEditor/CodeEditor 等缺口头部。
 vitest_failures=0
 eslint_errors=0
-vitest_coverage_pct=73.11
+vitest_coverage_pct=75.66

@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /** @ci: frontend-test */
 /**
  * 工具中文名映射表 ↔ 插件 manifest 工具名对账（总纲 #14）。

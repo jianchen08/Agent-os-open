@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /** @ci frontend-test */
 /**
  * VotingPanel 契约测试（0% → 主链覆盖批次）。

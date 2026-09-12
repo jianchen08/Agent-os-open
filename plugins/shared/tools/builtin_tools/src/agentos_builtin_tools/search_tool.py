@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,13 @@ async def enhanced_search(
     search_path = Path(resolved)
     if not search_path.exists():
         return ToolResult.failure_result(f"Path not found: {path}")
+    # 仓库根内遍历剪枝：搜索根本身是仓库根时会顺路走运行时/产物目录
+    # （data/config/logs/.ai_workspaces/.git/.venv 等），walk 循环剔除；
+    # 根在仓库外（普通工作区）时为空集零开销。延迟导入避免与 fs_tools
+    # 的共享根自举产生导入顺序依赖。
+    import repo_anchor  # noqa: PLC0415
+
+    prune = repo_anchor.repo_walk_prune(search_path)
 
     results: list[dict[str, Any]] = []
 
@@ -85,6 +93,8 @@ async def enhanced_search(
         else:
             walk_iter = os_walk_depth(search_path, max_depth)
         for root, dirs, files in walk_iter:
+            if prune:
+                dirs[:] = [d for d in dirs if os.path.normcase(str(Path(root) / d)) not in prune]
             if search_type == "filename":
                 for fname in files:
                     if not fnmatch.fnmatch(fname, file_pattern):
@@ -95,13 +105,15 @@ async def enhanced_search(
                     if _sensitive_file_reason(file_path.resolve()) is not None:
                         continue
                     if pattern.search(fname):
-                        results.append({
-                            "file_path": str(file_path),
-                            "line_number": 0,
-                            "content": fname,
-                            "context_before": [],
-                            "context_after": [],
-                        })
+                        results.append(
+                            {
+                                "file_path": str(file_path),
+                                "line_number": 0,
+                                "content": fname,
+                                "context_before": [],
+                                "context_after": [],
+                            }
+                        )
                         if len(results) >= max_results:
                             return
             else:
@@ -120,13 +132,15 @@ async def enhanced_search(
                         if pattern.search(line):
                             ctx_start = max(0, i - context_lines)
                             ctx_end = min(len(lines), i + context_lines + 1)
-                            results.append({
-                                "file_path": str(file_path),
-                                "line_number": i + 1,
-                                "content": line,
-                                "context_before": lines[ctx_start:i],
-                                "context_after": lines[i + 1 : ctx_end],
-                            })
+                            results.append(
+                                {
+                                    "file_path": str(file_path),
+                                    "line_number": i + 1,
+                                    "content": line,
+                                    "context_before": lines[ctx_start:i],
+                                    "context_after": lines[i + 1 : ctx_end],
+                                }
+                            )
                             if len(results) >= max_results:
                                 return
                     if len(results) >= max_results:

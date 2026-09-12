@@ -1,3 +1,4 @@
+# @feature: FP-0.2.二 工具插件面 | @ci: python-coverage
 # browser_tool 缺口补测 2——防御分支与独立函数（diff coverage 兜底）。
 #
 # 覆盖：_to_tool_result 非 dict content / resource / 坏 base64、

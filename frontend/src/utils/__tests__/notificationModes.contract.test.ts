@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /** @ci: frontend-test */
 /**
  * 通知分类内置默认件 ↔ human 插件 manifest 声明对账（总纲 #14）。

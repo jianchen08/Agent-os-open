@@ -1,4 +1,4 @@
-# @feature: FP-0.2.插件共享库 kernel_db | @vision: V3 可嵌入 | @ci: python-coverage
+# @feature: FP-DB kernel_db | @vision: V3 可嵌入 | @ci: python-coverage
 """kernel_db 库路径解析测试：env 相对路径锚定项目根（与内核 storage_factory
 同规则，两端 CWD 分叉不致读写不同库）+ 绝对路径/:memory: 原样保留 + 缺省兜底。
 """

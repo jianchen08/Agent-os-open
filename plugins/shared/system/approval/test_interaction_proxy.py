@@ -1,3 +1,4 @@
+# @feature: FP-0.2.五 资源治理 | @ci: python-coverage
 """interaction HTTP 面转发行为：human-interaction 桥代理（_HumanInteractionCapabilityProxy）。
 
 行为契约：

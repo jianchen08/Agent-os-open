@@ -27,3 +27,10 @@ _TOOLS_ROOT = os.path.dirname(
 )
 if os.path.isdir(_TOOLS_ROOT) and _TOOLS_ROOT not in sys.path:
     sys.path.insert(0, _TOOLS_ROOT)
+
+# 插件共享根目录（plugins/shared/）——供 test_repo_read_anchor 的
+# ``import repo_anchor`` 收集期解析（fs_tools 的共享根自举发生在导入之后，
+# 单文件收集时不可依赖）。
+_SHARED_ROOT = os.path.dirname(_TOOLS_ROOT)
+if os.path.isdir(_SHARED_ROOT) and _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)

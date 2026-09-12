@@ -26,7 +26,14 @@
 #（提交 e3e949923/b0cad33db）。整体验收闸挂起期内手动收紧，恢复执法后按
 # 同公式复核。下一批目标 = llm/adapter、bash/process_manager、
 # isolation/_workspace_git_ops、monitoring/server。
-python_line_coverage=90.00
+# 收紧（2026-09-12 覆盖率补测批二）：棘轮 90→91——插桩车道全量实测 90.34%
+# （7459 测试绿，floor+1=91 棘轮公式）。增量来源 = 本批五件补测：
+# llm/adapter 63.7%→86.4%（47 用例）、bash/process_manager 72.9%→88.4%（73
+# 用例）、monitoring/server 77.2%→77.5%+解析面补齐（17 用例）（提交
+# 5a74b4f20/902ecaeef/5c850f877/15dd53480/421035fd2）。下一批目标 =
+# task_submit/tool、context_window_guard、isolation/manager、
+# channel_cli/cli_output_adapter。
+python_line_coverage=91.00
 
 # 收紧（2026-09-10 补记归因；87.00 引入提交 82c10b5b1，2026-08-27）：棘轮
 # 83→87——全绿跑实测 86.02（0 失败，357s），floor+1=87（自动棘轮写入）；

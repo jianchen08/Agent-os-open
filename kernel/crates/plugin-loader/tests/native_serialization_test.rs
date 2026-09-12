@@ -1,4 +1,4 @@
-// @feature: FP-0.2.插件加载器 native 并发安全 | @vision: V1 可靠性 | @ci: rust-test
+// @feature: FP-0.2.一 插件协议 native 并发安全 | @vision: V1 可靠性 | @ci: rust-test
 //! native 插件并发安全回归：
 //!
 //! 1. load single-flight：并发首载同一 plugin_id 全部拿到同一实例（无双

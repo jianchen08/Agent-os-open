@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /**
  * AgentManagerPage typeLabels 契约测试（agent_type 展示标签声明下发）
  *

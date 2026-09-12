@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /**
  * hindsight_memory 声明页承接测试（/memory、/knowledge-base 路由退役配套）
  *

@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /**
  * performLogout 统一登出编排测试
  *

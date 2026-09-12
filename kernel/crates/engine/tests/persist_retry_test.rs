@@ -1,4 +1,4 @@
-// @feature: FP-0.2.引擎 持久化重试 | @vision: V1 可观测可干预 | @ci: rust-test
+// @feature: FP-0.2.〇 管道引擎持久化重试 | @vision: V1 可观测可干预 | @ci: rust-test
 //! 持久化失败重试（2 次退避后上抛）：
 //!
 //! 1. append_trace 失败 1 次 → 统一落库核内重试成功，run 正常（性质断言：
@@ -481,11 +481,7 @@ async fn upsert_state_field_fails_three_times_run_fails() {
 
 impl FlakyStorage {
     /// 注入收尾面失败配额：save_checkpoint / update_run_status 各自的连续失败次数。
-    fn with_end_failure_quotas(
-        self,
-        checkpoint_failures: usize,
-        status_failures: usize,
-    ) -> Self {
+    fn with_end_failure_quotas(self, checkpoint_failures: usize, status_failures: usize) -> Self {
         self.checkpoint_failures_remaining
             .store(checkpoint_failures, Ordering::SeqCst);
         self.status_failures_remaining

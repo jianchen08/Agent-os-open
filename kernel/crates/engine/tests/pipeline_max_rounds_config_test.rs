@@ -1,4 +1,4 @@
-// @feature: FP-0.2.引擎 轮数硬上限 | @vision: V1 可观测可干预 | @ci: rust-test
+// @feature: FP-0.2.〇 管道引擎轮数硬上限 | @vision: V1 可观测可干预 | @ci: rust-test
 //! 管道 YAML `max_rounds:` 字段接线（ADR 2026-09-11-engine-loop-cap 归档补记）：
 //! YAML → PipelineConfig → CompiledPipeline → executor 注入全链路。
 //!

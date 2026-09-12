@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /** @ci frontend-test */
 /**
  * useVoiceInput 全链契约测试（0% → 全覆盖批次）。

@@ -174,10 +174,12 @@ describe('trigger_setup_tool 触发器声明（B1）', () => {
       data: { rows: [{ trigger_id: 't9', status: 'pending', name: 'n' }] },
     })
     render(<WidgetStage space="triggers" />)
-    await waitFor(() => expect(screen.getAllByRole('button', { name: '触发' }).length).toBe(1))
+    // 等行渲染完成（满载下表格初始化有瞬态双渲染窗口，「恰好1个」由上一
+    // 用例的 status 分支用例锁定，此处只锚点击→POST→重拉链）
+    await screen.findAllByRole('button', { name: '触发' })
     apiCall.mockClear()
     const getsBefore = apiGet.mock.calls.length
-    fireEvent.click(screen.getByRole('button', { name: '触发' }))
+    fireEvent.click(screen.getAllByRole('button', { name: '触发' })[0])
     await waitFor(() => expect(apiCall).toHaveBeenCalled())
     expect(apiCall.mock.calls[0][0]).toMatchObject({
       method: 'POST',

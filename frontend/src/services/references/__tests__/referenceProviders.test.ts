@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /**
  * 通用引用协议回环测试（ADR 2026-09-10-generic-reference-protocol）
  *

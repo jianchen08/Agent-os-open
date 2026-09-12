@@ -1,3 +1,4 @@
+// @feature FP-T12 前端组件补测
 /**
  * DebugExecutionRecordsPage 局部 llm_usage 渲染回归测试
  *

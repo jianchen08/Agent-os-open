@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件协议 | @ci: rust-test
 //! WS 一次性握手票据（POST /api/v1/ws-ticket → 200 {"ticket","expires_in"}）。
 //!
 //! 契约（前端按此消费）：
