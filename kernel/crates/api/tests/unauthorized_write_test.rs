@@ -32,13 +32,60 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+/// 用户空间隔离 guard（钉 `AGENTOS_USER_*` 到指定根，drop 时恢复 + 放锁）。
+///
+/// 本文件用例走配置写面（pipeline/plugin config PUT），落点已迁用户空间
+/// （ADR 2026-09-13-unified-user-root）：不钉会写到开发机真实用户目录。
+///
+/// 文件内用例默认并行，环境变量进程全局——取锁串行化；guard 持有到用例结束。
+struct UserRootGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl UserRootGuard {
+    fn pin(root: &std::path::Path) -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // unwrap_or_else(into_inner)：测试 panic 污染锁后继续执行——锁只为串行化
+        // 环境变量操作，中毒无并发安全含义，在此 unwrap 会放大成连锁失败。
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            agentos_core::user_space::USER_ROOT_ENV,
+            agentos_core::user_space::USER_CONFIG_DIR_ENV,
+            agentos_core::user_space::USER_DATA_DIR_ENV,
+            agentos_core::user_space::USER_PLUGINS_DIR_ENV,
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, root);
+        for k in &keys[1..] {
+            std::env::remove_var(k);
+        }
+        Self { _lock: lock, saved }
+    }
+}
+
+impl Drop for UserRootGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 /// 构造带内存 store + project_root（pipeline/plugin 配置齐全）的测试 app。
 ///
 /// 布局对齐各端点既有测试夹具：
 /// - config/pipelines/default.yaml（pipeline config PUT 正例）
 /// - config/models/llm.yaml（经 manifest config_files 映射，plugin config PUT 正例）
-async fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
+///
+/// 同时把用户根钉到同一 tmp（配置写落点在用户空间，见 [`UserRootGuard`]），
+/// 并返回 guard：调用方须持有到用例结束。
+async fn app_with_deps() -> (tempfile::TempDir, axum::Router, UserRootGuard) {
     let tmp = tempfile::tempdir().unwrap();
+    let user_guard = UserRootGuard::pin(tmp.path());
 
     let pipe_dir = tmp.path().join("config").join("pipelines");
     fs::create_dir_all(&pipe_dir).unwrap();
@@ -114,7 +161,7 @@ async fn app_with_deps() -> (tempfile::TempDir, axum::Router) {
     state.store = Some(store.clone());
     state.manifests = Arc::new(RwLock::new(vec![manifest]));
     state.project_root = Some(tmp.path().to_path_buf());
-    (tmp, build_router(state))
+    (tmp, build_router(state), user_guard)
 }
 
 /// 登录并返回 access_token（admin 由 app_with_deps 按生产行为播种入库）。
@@ -255,7 +302,7 @@ fn write_surface_cases() -> Vec<(Method, &'static str, Option<Value>)> {
 /// 写面端点：无 token → 401（匿名不得写配置/触发命令/提交交互响应/操纵插件）。
 #[tokio::test]
 async fn test_write_surface_rejects_anonymous_401() {
-    let (_tmp, app) = app_with_deps().await;
+    let (_tmp, app, _g) = app_with_deps().await;
     for (method, uri, payload) in write_surface_cases() {
         let status = send(&app, method, uri, None, payload).await;
         assert_eq!(
@@ -269,7 +316,7 @@ async fn test_write_surface_rejects_anonymous_401() {
 /// 写面端点：普通用户（role=user）→ 403（写面仅 admin）。
 #[tokio::test]
 async fn test_write_surface_rejects_non_admin_403() {
-    let (_tmp, app) = app_with_deps().await;
+    let (_tmp, app, _g) = app_with_deps().await;
     let user = user_token(&app).await;
     for (method, uri, payload) in write_surface_cases() {
         let status = send(&app, method, uri, Some(&user), payload).await;
@@ -285,7 +332,7 @@ async fn test_write_surface_rejects_non_admin_403() {
 /// 无 token → 401；普通用户 → 403（仅 admin/viewer，对齐 db_routes 只读角色）。
 #[tokio::test]
 async fn test_read_surface_requires_auth_401_and_403() {
-    let (_tmp, app) = app_with_deps().await;
+    let (_tmp, app, _g) = app_with_deps().await;
     let user = user_token(&app).await;
     for (method, uri) in [
         (Method::GET, "/api/v1/sessions"),
@@ -310,7 +357,7 @@ async fn test_read_surface_requires_auth_401_and_403() {
 /// admin token → 写面/读面全部放行（正常流程不回归）。
 #[tokio::test]
 async fn test_admin_token_passes_write_and_read() {
-    let (_tmp, app) = app_with_deps().await;
+    let (_tmp, app, _g) = app_with_deps().await;
     let admin = admin_token(&app).await;
 
     // PUT agent config 闸已插件化（/ext/agent_manager，插件自持 admin 检查——

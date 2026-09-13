@@ -1,0 +1,153 @@
+{
+  "id": "eval_harness_service",
+  "name": "Eval Harness Service",
+  "version": "0.2.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "description": "自进化评测面（编排薄层）：题集展开/结果聚合/提案校验与应用/隐藏集保密派发。派发走任务系统、判定走评估闸门、生效走 G2+热重载，不自建任何平行机制。",
+  "permissions": {},
+  "priority": 56,
+  "host_group": "light",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "eval_view_suite",
+        "description": "读题集展开为 task_submit 批次清单（派发由 agent 用自己的 task_submit 执行）",
+        "render": { "card": "form", "title": "评测·题集展开" },
+        "input_schema": {
+          "type": "object",
+          "required": ["suite"],
+          "properties": {
+            "suite": { "type": "string" },
+            "cases": { "type": "string" }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["batches"],
+          "properties": { "batches": { "type": "array", "items": { "type": "object" } } }
+        }
+      },
+      {
+        "name": "eval_summarize",
+        "description": "聚合各 case 任务终态与验收结果出 scorecard（含失败分类，作为复盘插件深分析的预处理）",
+        "render": { "card": "form", "title": "评测·聚合" },
+        "input_schema": {
+          "type": "object",
+          "required": ["mode", "results"],
+          "properties": {
+            "mode": { "type": "string" },
+            "results": { "type": "array", "items": { "type": "object" } }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["passed", "total"],
+          "properties": {
+            "passed": { "type": "number" },
+            "total": { "type": "number" },
+            "delta": { "type": "number" }
+          }
+        }
+      },
+      {
+        "name": "eval_run_heldout",
+        "description": "held-out 隐藏集保密派发：内部经任务系统派发（题面不进 agent 上下文），返回 case↔task 映射；查终态后喂 eval_summarize 聚合",
+        "render": { "card": "form", "title": "评测·隐藏集派发" },
+        "input_schema": {
+          "type": "object",
+          "properties": { "mode": { "type": "string" } }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["dispatched"],
+          "properties": { "dispatched": { "type": "array", "items": { "type": "object" } } }
+        }
+      },
+      {
+        "name": "proposal_submit",
+        "description": "提交物料更改提案（冻结面/白名单/原子性/base 校验，不过即拒）",
+        "render": { "card": "form", "title": "提案·提交" },
+        "input_schema": {
+          "type": "object",
+          "required": ["layer", "target", "change_type", "content", "motivation"],
+          "properties": {
+            "layer": { "type": "string", "enum": ["L1", "L2", "L3"] },
+            "target": { "type": "string" },
+            "change_type": { "type": "string" },
+            "content": { "type": "string" },
+            "motivation": { "type": "string" },
+            "base_hash": { "type": "string" }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["accepted"],
+          "properties": {
+            "accepted": { "type": "boolean" },
+            "proposal_id": { "type": "string" },
+            "violations": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      {
+        "name": "proposal_apply",
+        "description": "应用已受理提案：content 写主仓目标文件（G2+热重载原生生效）并 pathspec commit；应用前复核校验",
+        "render": { "card": "form", "title": "提案·应用" },
+        "input_schema": {
+          "type": "object",
+          "required": ["proposal_id"],
+          "properties": {
+            "proposal_id": { "type": "string" },
+            "message": { "type": "string" }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["applied"],
+          "properties": {
+            "applied": { "type": "boolean" },
+            "commit": { "type": "string" }
+          }
+        }
+      },
+      {
+        "name": "proposal_reject",
+        "description": "驳回提案：删存档、记录原因（失败经验入账）",
+        "render": { "card": "form", "title": "提案·驳回" },
+        "input_schema": {
+          "type": "object",
+          "required": ["proposal_id", "reason"],
+          "properties": {
+            "proposal_id": { "type": "string" },
+            "reason": { "type": "string" }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["ok"],
+          "properties": { "ok": { "type": "boolean" } }
+        }
+      },
+      {
+        "name": "eval_health",
+        "description": "流程健康度：轮次/提案命中率/杠杆账（聚合自 reports/eval 账本）",
+        "render": { "card": "form", "title": "评测·健康度" },
+        "input_schema": { "type": "object", "properties": {} },
+        "output_schema": {
+          "type": "object",
+          "required": ["rounds"],
+          "properties": {
+            "rounds": { "type": "number" },
+            "hit_rate": { "type": "number" }
+          }
+        }
+      }
+    ],
+    "services": [],
+    "route_signals": [],
+    "lifecycle_hooks": ["on_load"]
+  }
+}

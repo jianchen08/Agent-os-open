@@ -15,7 +15,7 @@ import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
-import { loadRenderIntents } from '@/utils/dshRenderIntent'
+import { loadRenderIntents } from '@/utils/renderIntent'
 import { loadInteractionModes } from '@/utils/interactionModes'
 import { loggers } from '@/utils/logger'
 import { loadNotificationModes } from '@/utils/notificationModes'
@@ -87,7 +87,7 @@ async function reloadContributionRegistry(): Promise<void> {
     loadViewModes(
       (schema as { tools?: Array<{ ui?: { view_modes?: unknown } }> }).tools ?? [],
     )
-    // render 意图声明：tools[].render 装载到 dshRenderIntent 注册表（声明路由），
+    // render 意图声明：tools[].render 装载到 renderIntent 注册表（声明路由），
     // 无声明时工具结果按数据形状自动路由（数据路由），均未命中落通用数据渲染
     loadRenderIntents(
       (schema as { tools?: Array<{ name?: string; render?: Record<string, unknown> }> }).tools ?? [],

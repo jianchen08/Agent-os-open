@@ -43,12 +43,17 @@ const KERNEL_RESERVED_SEGMENTS: &[&str] = &[
     "steps",
 ];
 
-/// B1：校验 manifest config_files[].path 解析后的绝对路径安全。
+/// B1：校验 manifest config_files[].path 解析后的绝对路径安全，并解析到
+/// **用户空间优先**的实际落点。
 ///
-/// 规则（ADR §4.3 B1）：
+/// 规则（ADR §4.3 B1 + ADR 2026-09-13-unified-user-root）：
 /// - 把 `mapping_path`（相对项目根，如 `config/models/llm.yaml`）解析为绝对路径；
-/// - canonicalize 后必须落在 `<project_root>/config/` 子树内，禁止 `../` 越界；
-/// - 不得映射内核保留文件（plugin_allowlist / plugin_roots / auth / pipelines / steps）。
+/// - **落点解析走单一解析器**（`user_space::config_write_target`）：用户层存在该
+///   文件时优先用户层，否则 factory——读与写共用本函数，杜绝"写一处、读另一处"
+///   （单真值 ADR 的实证根因）；
+/// - 归一化后必须落在**对应根**的子树内，禁止 `../` 越界与跨根穿透；
+/// - 不得映射内核保留文件（plugin_allowlist / plugin_roots / auth / pipelines / steps），
+///   该 denylist 对两个根同样生效——插件不得借用户层绕开内核保留文件。
 ///
 /// 返回校验通过后的绝对路径。
 ///
@@ -58,6 +63,70 @@ const KERNEL_RESERVED_SEGMENTS: &[&str] = &[
 pub fn validate_config_path(
     project_root: &Path,
     mapping_path: &str,
+) -> Result<PathBuf, ConfigError> {
+    resolve_config_target(project_root, mapping_path, ConfigTargetMode::Read)
+}
+
+/// 落点解析模式：读＝用户层文件存在才用它，写＝一律写用户层。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigTargetMode {
+    /// 读：用户层存在该文件 → 用户层；否则 → factory。
+    Read,
+    /// 写：用户层可用 → 用户层（调用方负责先播种 factory 内容）；否则 → factory。
+    Write,
+}
+
+/// 解析 manifest `config_files[].path` 的落点（读/写同一实现，差异仅参数化）。
+///
+/// 用户空间优先（ADR 2026-09-13-unified-user-root）：
+/// - `Read`：**文件级整体替换**——用户层文件存在即用它，factory 同名文件完全不
+///   参与（不读取、不合并）。用户层目录存在但该文件不存在 ≠ 被接管。
+/// - `Write`：一律写用户层（用户空间不可用时回落 factory）；用户第一次改某配置
+///   时由调用方先播种 factory 内容再写，用户拿到完整文件而非 diff 片段。
+///
+/// 读与写共用本函数是**硬要求**：两侧各自拼路径正是单真值 ADR 的实证根因
+/// （用户值已写盘、插件读到的却是另一份）。
+///
+/// 安全边界（两个根同样生效，插件不得借用户层绕开）：
+/// - `../` 显式拒绝；落点必须在其所属根的子树内（跨根穿透同样拒绝）；
+/// - 内核保留段 denylist 按**相对路径段**判定，与落在哪个根无关。
+///
+/// 解析落点（读/写同一实现，差异仅参数化）并施加内核保留段 denylist。
+///
+/// 插件 manifest `config_files[].path` 专用入口——内核保留文件不得被插件映射。
+///
+/// # Errors
+/// - [`ConfigError::PathOutsideConfigRoot`]：路径越界或跨根穿透。
+/// - [`ConfigError::KernelReservedFile`]：命中 denylist。
+pub fn resolve_config_target(
+    project_root: &Path,
+    mapping_path: &str,
+    mode: ConfigTargetMode,
+) -> Result<PathBuf, ConfigError> {
+    resolve_config_target_inner(project_root, mapping_path, mode, true)
+}
+
+/// 内核自有写面的落点解析：路径安全校验同上，但**不施加保留段 denylist**。
+///
+/// denylist 的语义是「插件不得经 manifest config_files 映射内核调度/鉴权配置」，
+/// 不是「用户不得编辑内核配置」——`PUT /config/pipelines/{name}`、
+/// `PUT /plugins/{id}/enabled` 这类内核自有 UI 写面正是这些文件的**合法**编辑入口
+/// （`pipelines` 与 `plugins` 都在保留清单里）。故内核路由走本入口。
+///
+/// 路径安全（`../` 与跨根穿透）与落点语义与插件入口完全一致，共用同一实现。
+pub fn resolve_kernel_config_target(
+    project_root: &Path,
+    mapping_path: &str,
+    mode: ConfigTargetMode,
+) -> Result<PathBuf, ConfigError> {
+    resolve_config_target_inner(project_root, mapping_path, mode, false)
+}
+
+fn resolve_config_target_inner(
+    project_root: &Path,
+    mapping_path: &str,
+    mode: ConfigTargetMode,
+    enforce_denylist: bool,
 ) -> Result<PathBuf, ConfigError> {
     let normalized = mapping_path.replace('\\', "/");
     // 拒绝显式 ../ 越界（即便 canonicalize 也会随后兜底，这里快速失败给出明确错误）
@@ -76,24 +145,66 @@ pub fn validate_config_path(
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
     let config_root = root.join("config");
-    let target = if normalized.starts_with("config/") || normalized.starts_with("config") {
-        root.join(&normalized)
-    } else {
-        config_root.join(&normalized)
+    // 相对 config 根的路径（manifest 的 path 可带或不带 "config/" 前缀）
+    let rel = normalized
+        .strip_prefix("config/")
+        .unwrap_or(&normalized)
+        .to_string();
+
+    // 用户层落点（用户空间不可用 = None → 一律回落 factory）
+    let user_dir = agentos_core::user_space::user_config_dir();
+    let user_target = user_dir.as_ref().map(|d| d.join(&rel));
+    let factory_target = config_root.join(&rel);
+
+    let (target, bound_root) = match mode {
+        ConfigTargetMode::Read => match user_target {
+            Some(u) if u.is_file() => (u, user_dir),
+            _ => (factory_target, Some(config_root.clone())),
+        },
+        ConfigTargetMode::Write => match user_target {
+            Some(u) => (u, user_dir),
+            None => (factory_target, Some(config_root.clone())),
+        },
     };
 
-    // 校验落在 config/ 子树内（同源派生，组件前缀必一致；../ 已在上面拒绝）
-    if !target.starts_with(&config_root) {
-        return Err(ConfigError::PathOutsideConfigRoot {
-            path: mapping_path.to_string(),
-        });
+    // 边界校验：落在**所属根**的子树内（`../` 已在上拒绝）。
+    //
+    // 两侧同源：目标与边界都由同一个根 `join(rel)` 派生。规范化只用于比较，
+    // **不改变返回的 path 形态**（消费方按普通路径使用，Windows 上 `\\?\` 形态
+    // 会外溢到调用方）。
+    //
+    // 关键：目标文件**尚不存在**时 `canonicalize` 必然失败（写路径首次落盘的常态），
+    // 此时两侧都退回原始拼法比较——若一边规范化（根存在 → 拿到 `\\?\` 形态）而
+    // 另一边回退原始路径，组件前缀不同源，合法落点会被误判"越界"，写入恒 400。
+    if let Some(bound) = bound_root {
+        match target.canonicalize() {
+            Ok(target_canon) => {
+                let bound_cmp = bound.canonicalize().unwrap_or(bound);
+                if !target_canon.starts_with(&bound_cmp) {
+                    return Err(ConfigError::PathOutsideConfigRoot {
+                        path: mapping_path.to_string(),
+                    });
+                }
+            }
+            // 目标不存在：结构上已由「同根 + 无 ../ 的 rel」保证包含，无需再做
+            // 符号链接级判定（不存在的东西无法是链接）。
+            Err(_) => {
+                if !target.starts_with(&bound) {
+                    return Err(ConfigError::PathOutsideConfigRoot {
+                        path: mapping_path.to_string(),
+                    });
+                }
+            }
+        }
     }
 
-    // denylist：相对 config/ 根的任一路径段（含文件 stem）不得命中保留名。
-    // 如 config/system/plugin_allowlist.yaml → 段含 plugin_allowlist → 拒绝；
-    //    config/pipelines/default.yaml → 段含 pipelines → 拒绝。
-    if let Ok(rel) = target.strip_prefix(&config_root) {
-        for seg in rel.iter() {
+    // denylist：按**相对路径段**（含文件 stem）判定，与落在哪个根无关——
+    // 用户层不是绕过内核保留文件的旁路。
+    // 如 system/plugin_allowlist.yaml → 段含 plugin_allowlist → 拒绝；
+    //    pipelines/default.yaml → 段含 pipelines → 拒绝。
+    // （内核自有写面经 resolve_kernel_config_target 走本函数并关闭此闸。）
+    if enforce_denylist {
+        for seg in Path::new(&rel).iter() {
             let s = seg.to_string_lossy();
             let stem = s.split('.').next().unwrap_or(&s);
             if KERNEL_RESERVED_SEGMENTS.iter().any(|r| *r == stem) {
@@ -105,6 +216,46 @@ pub fn validate_config_path(
     }
 
     Ok(target)
+}
+
+/// 写路径落点的播种：目标不存在而 factory 同名文件存在时，把 factory 内容
+/// 复制到用户层目标（copy-on-write 首次接管）。
+///
+/// 返回 `Ok(true)` = 执行了播种。目标已存在（已接管）或 factory 无此文件
+/// （全新配置）时不动作——后者由调用方按既有"PUT 保存将创建文件"语义处理。
+///
+/// 不自动合并漂移：factory 升级新增键而用户文件是旧快照时**绝不静默合并**
+/// （静默合并 = 两处存值），漂移提示属 UI 层职责。
+pub fn seed_user_config_from_factory(
+    project_root: &Path,
+    mapping_path: &str,
+) -> Result<bool, ConfigError> {
+    let normalized = mapping_path.replace('\\', "/");
+    let rel = normalized
+        .strip_prefix("config/")
+        .unwrap_or(&normalized)
+        .to_string();
+    let Some(user_dir) = agentos_core::user_space::user_config_dir() else {
+        return Ok(false);
+    };
+    let factory = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .join("config")
+        .join(&rel);
+    let target = user_dir.join(&rel);
+    if target.is_file() || !factory.is_file() {
+        return Ok(false);
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io {
+            message: format!("seed parent dir failed: {e}"),
+        })?;
+    }
+    std::fs::copy(&factory, &target).map_err(|e| ConfigError::Io {
+        message: format!("seed from factory failed: {e}"),
+    })?;
+    Ok(true)
 }
 
 /// B2（GET 掩码）：递归掩码真实明文 secret 值，**保留 `${ENV_VAR}` 占位符**。
@@ -324,6 +475,93 @@ mod tests {
             ConfigError::PathOutsideConfigRoot {
                 path: "../outside.yaml".to_string()
             }
+        );
+    }
+
+    /// 内核自有写面（`PUT /config/pipelines/{name}`）必须能解析 `pipelines/`：
+    /// 该段在插件映射的 denylist 里，但内核路由正是它的合法编辑入口——若不区分，
+    /// 管道配置页保存恒 422。
+    #[test]
+    fn kernel_target_bypasses_reserved_denylist_but_plugin_target_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = tmp.path().join("factory");
+        std::fs::create_dir_all(factory.join("config")).unwrap();
+        let user = tmp.path().join("user-config");
+        std::fs::create_dir_all(&user).unwrap();
+        let _guard = crate::test_env::pin_user_config_dir(&user);
+
+        // 插件入口：pipelines 命中保留段 → 拒绝
+        assert!(matches!(
+            resolve_config_target(
+                &factory,
+                "config/pipelines/autonomous.yaml",
+                ConfigTargetMode::Read
+            ),
+            Err(ConfigError::KernelReservedFile { .. })
+        ));
+        // 内核入口：同一路径放行，且写落点落在用户层
+        let write_path = resolve_kernel_config_target(
+            &factory,
+            "pipelines/autonomous.yaml",
+            ConfigTargetMode::Write,
+        )
+        .expect("内核自有写面不得被保留段 denylist 挡住");
+        assert_eq!(write_path, user.join("pipelines/autonomous.yaml"));
+
+        // 内核入口仍不放宽路径安全：../ 与跨根穿透继续拒绝
+        assert!(matches!(
+            resolve_kernel_config_target(
+                &factory,
+                "pipelines/../../etc/passwd",
+                ConfigTargetMode::Write
+            ),
+            Err(ConfigError::PathOutsideConfigRoot { .. })
+        ));
+    }
+
+    /// `PUT /plugins/{id}/enabled` 的落点语义：用户层文件已存在（已接管）时读它，
+    /// 未接管时读 factory——否则首次开关的基线是"空 profile"，用户只关一个插件
+    /// 就把 factory 里其他插件的启停整份写没。
+    #[test]
+    fn kernel_profile_target_reads_user_layer_once_taken_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = tmp.path().join("factory");
+        std::fs::create_dir_all(factory.join("config/plugins")).unwrap();
+        std::fs::write(
+            factory.join("config/plugins/default_profile.yaml"),
+            "plugins:\n  a:\n    enabled: true\n  b:\n    enabled: false\n",
+        )
+        .unwrap();
+        let user = tmp.path().join("user-config");
+        std::fs::create_dir_all(&user).unwrap();
+        let _guard = crate::test_env::pin_user_config_dir(&user);
+
+        let rel = "plugins/default_profile.yaml";
+        // 未接管：读回 factory（用户层无此文件）。factory 根经 project_root
+        // canonicalize 派生（既有行为，Windows 上带 \\?\ 前缀），故比较规范化形态。
+        let factory_hit =
+            resolve_kernel_config_target(&factory, rel, ConfigTargetMode::Read).unwrap();
+        assert_eq!(
+            factory_hit.canonicalize().unwrap(),
+            factory.join("config").join(rel).canonicalize().unwrap(),
+            "未接管时读 factory"
+        );
+
+        // 播种后再读：命中用户层整体替换，factory 完全不参与
+        assert!(seed_user_config_from_factory(&factory, rel).unwrap());
+        let seeded = resolve_kernel_config_target(&factory, rel, ConfigTargetMode::Read).unwrap();
+        assert_eq!(seeded, user.join(rel));
+        assert_eq!(
+            std::fs::read_to_string(&seeded).unwrap(),
+            "plugins:\n  a:\n    enabled: true\n  b:\n    enabled: false\n",
+            "播种必须是 factory 的完整内容，用户拿到的不是 diff 片段"
+        );
+        // 幂等：已接管不再播种（不清空用户改动）
+        std::fs::write(&seeded, "plugins:\n  a:\n    enabled: false\n").unwrap();
+        assert!(!seed_user_config_from_factory(&factory, rel).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&seeded).unwrap(),
+            "plugins:\n  a:\n    enabled: false\n"
         );
     }
 }

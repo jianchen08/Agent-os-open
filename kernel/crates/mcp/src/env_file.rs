@@ -15,8 +15,10 @@
 //! 「当前环境值确来自上一次 .env 快照」的场景（即 .env 自身的更新），
 //! 绝不用 .env 值覆盖系统显式设置的环境变量。
 //!
-//! 项目根定位：`AGENTOS_CONFIG_ROOT`（agentos-kernel.rs 启动时写入）
-//! 的父目录；未设置时本模块全部降级为空操作，不比原来差。
+//! `.env` 定位：**用户空间根**（ADR 2026-09-13-unified-user-root，`<USER_ROOT>/.env`）
+//! ——密钥是用户资产，落仓内会处于工作区还原的抹除风险面内；用户空间不可得时
+//! 回落项目根 `.env`（保持旧行为）。读侧 [`project_env_path`] 与写侧
+//! [`env_path_for_root`] 必须同源，否则会出现"写一处、读另一处"的静默分叉。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,21 +31,27 @@ use tracing::debug;
 /// 系统环境）；之后每次调用与快照比对，检测 .env 自身的变更。
 static ENV_SNAPSHOT: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
-/// 项目根 `.env` 路径（AGENTOS_CONFIG_ROOT 的父目录下）。
+/// `.env` 文件路径（用户空间优先，回落项目根；文件须已存在）。
+///
+/// 供 invoker 插件指纹纳入 mtime。项目根经 `AGENTOS_CONFIG_ROOT`
+/// （agentos-kernel.rs 启动时写入）的父目录推导。
 pub fn project_env_path() -> Option<PathBuf> {
     let config_root = std::env::var("AGENTOS_CONFIG_ROOT").ok()?;
     let root = PathBuf::from(config_root);
-    let env_path = root.parent()?.join(".env");
+    let project_root = root.parent()?;
+    let env_path = env_path_for_root(project_root);
     env_path.is_file().then_some(env_path)
 }
 
-/// 指定项目根下的 .env 路径（不要求已存在——写侧用于创建）。
+/// 指定项目根对应的 `.env` 路径（不要求已存在——写侧用于创建）。
 ///
-/// 生产路径与 [`project_env_path`] 同一文件：AGENTOS_CONFIG_ROOT =
-/// `<project_root>/config`，其父目录即项目根。路由层（无 AGENTOS_CONFIG_ROOT
-/// 语义的调用方）经 state.project_root 直接定位，避免测试/多租户场景下
-/// 进程环境变量的竞态。
+/// 落点：**用户空间根 `.env`**（`<USER_ROOT>/.env`）优先；用户空间不可得时
+/// 回落 `<project_root>/.env`。传 `project_root` 而非依赖进程环境，避免
+/// 测试/多租户场景下环境变量的竞态。
 pub fn env_path_for_root(project_root: &std::path::Path) -> std::path::PathBuf {
+    if let Some(user_root) = agentos_core::user_space::user_root() {
+        return user_root.join(".env");
+    }
     project_root.join(".env")
 }
 
@@ -279,7 +287,9 @@ pub(crate) mod tests {
     #[test]
     fn write_env_updates_rename_failure_cleans_tmp() {
         // D7：rename 失败（.env 目标被同名目录占位模拟占用）→ Err 且 .env.tmp 被清理
-        let _guard = TEST_ENV_MUTEX.lock().unwrap();
+        // unwrap_or_else(into_inner)：与其余持锁点同款——测试 panic 污染锁后
+        // 若在此 unwrap 会把「一个用例失败」放大成后续用例连锁失败
+        let _guard = TEST_ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let occupied = tmp.path().join(".env");
         std::fs::create_dir_all(&occupied).unwrap();

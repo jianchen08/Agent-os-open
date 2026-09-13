@@ -23,7 +23,7 @@ import { getFileEditorData } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { toolCallToActivity } from '@/utils/activityConverter'
 import { addChatCardDeclaration, clearChatCardDeclarations } from '@/utils/chatCardInterpreter'
-import { loadRenderIntents } from '@/utils/dshRenderIntent'
+import { loadRenderIntents } from '@/utils/renderIntent'
 import {
   enhanceActivityWithToolConfig,
   registerGlobalOpenFileCallback,

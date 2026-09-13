@@ -23,6 +23,8 @@ import plugin as sc_mod  # noqa: E402
 不仅是返回值。
 """
 
+from unittest.mock import AsyncMock
+
 import pytest
 from pipeline.plugin import PluginContext
 
@@ -312,3 +314,176 @@ class TestLabelBasedSelection:
         ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
         await plugin.execute(ctx2)
         assert create.calls == 2, "denied 后同命令必须重新审批（不得免批放行）"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2026-09-13 覆盖率补测：交互服务异常契约 / 审批描述参数预览 / 字符串参数容错
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestApprovalServiceErrorContract:
+    """wait_for_choice 返回 error dict / 非 dict、create_choice 失败时的处置契约。
+
+    error 文案按关键词转换：denied → 用户拒绝、cancel → 审批取消、
+    timeout → 审批超时；其余一律按审批服务异常。全部走软拦截反馈 LLM。
+    """
+
+    @pytest.mark.parametrize(
+        ("error_msg", "expected_reason_prefix"),
+        [
+            ("user denied this request", "用户拒绝执行"),
+            ("cancelled by user", "审批被取消"),
+            ("timeout after 86400s", "审批超时未响应"),
+            ("quantum flux failure", "审批服务异常"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_wait_error_converted_to_soft_block(
+        self, error_msg: str, expected_reason_prefix: str
+    ) -> None:
+        """wait error 文案关键词决定软拦截原因（denied/cancel/timeout/其他）。"""
+        _cap, create = _approval_svc([{"error": error_msg}])
+
+        plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        result = await plugin.execute(_ctx_for("bash_execute", "rm -rf /tmp/err"))
+
+        assert create.calls == 1
+        decision = result.state_updates["security.decision"]
+        assert expected_reason_prefix in decision.get("reason", ""), (
+            f"error={error_msg!r} 应转换为 {expected_reason_prefix}，实际 {decision!r}"
+        )
+        assert "soft_block" in decision.get("reason", "")
+
+    @pytest.mark.asyncio
+    async def test_wait_non_dict_response_soft_blocks(self) -> None:
+        """wait_for_choice 返回非 dict → 按审批服务异常软拦截。"""
+        # harness 声明为 dict 序列，此处故意传裸字符串以复现非 dict 响应
+        _cap, create = _approval_svc(["not-a-dict"])  # type: ignore[list-item]
+
+        plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        result = await plugin.execute(_ctx_for("bash_execute", "rm -rf /tmp/err"))
+
+        assert create.calls == 1
+        decision = result.state_updates["security.decision"]
+        assert "审批服务异常" in decision.get("reason", "")
+        assert "wait_for_choice returned non-dict" in decision.get("reason", "")
+
+    @pytest.mark.asyncio
+    async def test_create_choice_error_soft_blocks(self) -> None:
+        """create_choice 返回 error dict → 请求未创建即软拦截，不再等待。"""
+
+        class _CreateFailingCap:
+            async def call(self, name: str, params: dict, **kwargs: object) -> object:
+                assert name == "create_choice", f"create 失败后不得再调用 {name}"
+                return {"error": "capacity full"}
+
+        sc_mod.set_human_interaction_cap(_CreateFailingCap())
+
+        plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        result = await plugin.execute(_ctx_for("bash_execute", "rm -rf /tmp/err"))
+
+        decision = result.state_updates["security.decision"]
+        assert "审批服务异常" in decision.get("reason", "")
+        assert "create_choice failed" in decision.get("reason", "")
+
+
+class TestApprovalDescriptionPreview:
+    """审批请求 description 必须携带具体参数预览（含超长截断）。"""
+
+    @pytest.mark.asyncio
+    async def test_description_contains_param_previews_and_truncation(self) -> None:
+        """命令/路径/内容/代码/URL 均入描述，超长段带截断标记。"""
+        requests: list[dict] = []
+
+        async def _call(name: str, params: dict, **kwargs: object) -> object:
+            if name == "create_choice":
+                requests.append(dict(params))
+                return {"request_id": "req-desc-1"}
+            if name == "wait_for_choice":
+                return {"selected_option": "approved_once"}
+            raise AssertionError(f"unexpected cap.call: {name}")
+
+        fake_cap = AsyncMock()
+        fake_cap.call.side_effect = _call
+        sc_mod.set_human_interaction_cap(fake_cap)
+
+        plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        ctx = PluginContext(
+            state={
+                "core_type": "tool_execute",
+                "raw_tool_calls": [{
+                    "name": "bash_execute",
+                    "args": {
+                        "command": "rm -rf " + "c" * 600,
+                        "path": "/tmp/preview.txt",
+                        "content": "x" * 400,
+                        "code": "k" * 400,
+                        "url": "http://example.com/x",
+                    },
+                }],
+                "execution_contexts": [
+                    {"provider": "host", "tool_name": "bash_execute", "task_isolated": False}
+                ],
+            },
+            _services={},
+        )
+        result = await plugin.execute(ctx)
+
+        assert result.state_updates["security.decision"]["reason"] == "approved"
+        assert len(requests) == 1
+        desc = requests[0]["description"]
+        assert "命令:" in desc
+        assert "... (命令过长，已截断)" in desc, ">500 字符命令必须截断"
+        assert "path: /tmp/preview.txt" in desc
+        assert "内容预览:" in desc and "... (内容过长，已截断)" in desc
+        assert "代码预览:" in desc and "... (代码过长，已截断)" in desc
+        assert "URL: http://example.com/x" in desc
+
+
+class TestApprovalFormatsStringArgsToolCalls:
+    """同轮其他工具调用 args 为 JSON 字符串时，审批描述格式化不崩溃。"""
+
+    @pytest.mark.parametrize(
+        "companion_args",
+        [
+            '{"query": "select 1"}',  # 合法 JSON dict
+            "oops-not-json",  # 非法 JSON → 视为空参数
+            '["a", "b"]',  # 合法 JSON 非 dict → 视为空参数
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_companion_string_args_do_not_break_approval(
+        self, companion_args: str
+    ) -> None:
+        requests: list[dict] = []
+
+        async def _call(name: str, params: dict, **kwargs: object) -> object:
+            if name == "create_choice":
+                requests.append(dict(params))
+                return {"request_id": "req-str-args"}
+            if name == "wait_for_choice":
+                return {"selected_option": "approved_once"}
+            raise AssertionError(f"unexpected cap.call: {name}")
+
+        fake_cap = AsyncMock()
+        fake_cap.call.side_effect = _call
+        sc_mod.set_human_interaction_cap(fake_cap)
+
+        plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        ctx = PluginContext(
+            state={
+                "core_type": "tool_execute",
+                "raw_tool_calls": [
+                    {"name": "bash_execute", "args": {"command": "rm -rf /tmp/x"}},
+                    {"name": "helper_tool", "args": companion_args},
+                ],
+                "execution_contexts": [
+                    {"provider": "host", "tool_name": "bash_execute", "task_isolated": False}
+                ],
+            },
+            _services={},
+        )
+        result = await plugin.execute(ctx)
+
+        assert result.state_updates["security.decision"]["reason"] == "approved"
+        assert "工具: helper_tool" in requests[0]["description"]

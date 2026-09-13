@@ -1,0 +1,58 @@
+# 分诊与杠杆规则（复盘插件 review_improvement 消费；B 部类，仅用户可改）
+#
+# 本文件是进化评测原则的数据化形态：三向分诊、机制前置检查、杠杆映射、
+# 防过拟合。改规则 = 改本文件（用户），代码不硬编码。
+
+# ── 机制前置检查（分诊第一道）：症状命中即"不立项" ─────────────────────────
+mechanism_checks:
+  - pattern: ["路径", "工作空间", "产物位置", "产物落点"]
+    ruling: 系统机制已覆盖——任务默认 isolated 自动分配工作空间，评估按 workspace
+      glob 定位产物，指定工作空间走 task_submit 的 workspace 参数
+  - pattern: ["模型太慢", "换个模型"]
+    ruling: 模型选择属配置面，检查 agent yaml model_tier 是否已被使用，未用时机制已覆盖
+  - pattern: ["重启", "重试就好了"]
+    ruling: 瞬时故障走重试与熔断防线，非改进空间
+  - pattern: ["worktree", "工作空间找不到", "找不到文件", "plain 模式"]
+    ruling: 工作空间机制已覆盖——传 workspace+默认隔离=worktree 模式（从该路径
+      所属仓库分化分支副本）；workspace_mode=plain=直接在给定空间干活不分化；
+      不传=默认 isolated 出生自动分配。锚定原则：被测物料在哪，工作空间锚哪；
+      worktree 里缺原空间文件=分化源锚错（如锚进 gitignore 空目录），先查
+      分化源再谈改进
+
+# ── 三向分诊 ────────────────────────────────────────────────────────────────
+triage:
+  # ① 评测自身缺陷（harness 问题）→ 报告用户
+  harness_defect:
+    signals: ["断言口径", "题集配置", "工作空间污染", "preclean"]
+    action: 报告用户，不走提案
+  # ② 被测系统故障（插件 bug/内核断链）→ 修复流程
+  system_fault:
+    signals: ["traceback", "exception", "500", "connection refused", "sidecar"]
+    action: 报告用户走修复流程，不走提案
+  # ③ 真改进空间 → 杠杆映射
+  improvement_space:
+    condition: 上述两类均未命中且失败面可由 A 部类物料改变
+
+# ── behavior_class → 杠杆映射（按 stage） ──────────────────────────────────
+levers:
+  task_failure:
+    stage: execution
+    candidates: [persona, prompt_skeleton, tool_ids]
+  acceptance_miss:
+    stage: execution
+    candidates: [persona, prompt_skeleton, tool_ids, dispatch_guide]
+  orchestration_runaway:
+    stage: orchestration
+    candidates: [pipeline_steps, breaker_params, dispatch_guide]
+  cross_round_amnesia:
+    stage: execution
+    candidates: [persistent_fields, memory_config]
+  approval_chain_miss:
+    stage: evaluation
+    candidates: [approval_rules_yaml]   # 涉安全面：只提案给人工
+
+# ── 噪声与防过拟合 ──────────────────────────────────────────────────────────
+noise_policy: 同因单 case 记噪声（复跑确认后才可立项）；同因 ≥2 case 才系统立项
+anti_overfit:
+  reject_if: 提案内容复现题面文字或期望值
+  require: 新规则表述为通用规则；增益伴随同签名类其他 case 同向变化

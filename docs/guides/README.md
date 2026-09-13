@@ -64,7 +64,7 @@
 | 管道 output 插件 / 评估闸门 | `plugins/shared/pipeline/output/task_reminder/` |
 | native 插件（cdylib） | `plugins/shared/pipeline/output/sensitive_checker/`、`plugins/shared/pipeline/core/tool_core/` |
 | native 契约与测试插件 | `kernel/crates/native-sdk/`、`kernel/crates/native-sdk-test-plugin/` |
-| 外部 MCP（HTTP 远程 / 本地命令） | `plugins/shared/tools/external_mcp/mcp_registry/`、`.../omnisearch/` |
+| 外部 MCP（HTTP 远程 / 本地命令） | `plugins/shared/tools/external_mcp/browser_test/`、`.../omnisearch/` |
 | 插件主题（contributes.themes） | `plugins/shared/system/dsh_adapter/`（16 款主题声明） |
 | 插件皮肤（skin + hooks + 三端点） | `plugins/shared/system/dsh_adapter/`（含递送层参考实现） |
 | 前端预设主题 | `frontend/src/config/themes/presets/moe-soft.ts` + `frontend/src/config/themes/index.ts` |

@@ -126,13 +126,13 @@ async def _on_load(params: dict[str, Any]) -> None:
             return await handle.call("list", params)
 
         async def _kr_metrics_admin_query(
-            authorization: str = "", plugin: str = "", window: str = "24h"
+            authorization: str = "", plugin_id: str = "", window: str = "24h"
         ):
             params: dict[str, Any] = {"window": window}
             if authorization:
                 params["_authorization"] = authorization
-            if plugin:
-                params["plugin"] = plugin
+            if plugin_id:
+                params["plugin"] = plugin_id
             handle = plugin.get_capability("metrics-admin")
             return await handle.call("query", params)
 

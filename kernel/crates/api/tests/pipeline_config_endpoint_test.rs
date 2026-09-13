@@ -30,8 +30,11 @@ async fn admin_token(app: &axum::Router) -> String {
 }
 
 /// 在临时 config/pipelines/ 下写一份 default.yaml（G10 文件 DSL 格式）。
-/// 注意：project_root 语义 = 项目根（config/ 的父目录），
-/// handler 读取 `project_root/config/pipelines/{name}.yaml`（对齐 0.1 白名单）。
+/// 注意：project_root 语义 = 项目根（config/ 的父目录）。
+///
+/// 写路径已迁用户空间（ADR 2026-09-13-unified-user-root）：用户根须与 factory
+/// 钉在同一个 tmp（见 [`make_router`]），否则 PUT 落到开发机真实用户目录、而本文件
+/// 的"磁盘已更新"断言读 factory，恒失败。
 fn write_pipeline(project_root: &std::path::Path) {
     let dir = project_root.join("config").join("pipelines");
     fs::create_dir_all(&dir).unwrap();
@@ -42,11 +45,55 @@ fn write_pipeline(project_root: &std::path::Path) {
     .unwrap();
 }
 
-/// 构造带 project_root 的 AppState + router。
-fn make_router(tmp: &tempfile::TempDir) -> axum::Router {
+/// 用户空间隔离 guard（钉 `AGENTOS_USER_*` 到指定根，drop 时恢复 + 放锁）。
+///
+/// 本文件用例默认并行，环境变量进程全局——一个用例钉桩期间另一个会读到它，
+/// 故取锁串行化；guard 由调用方持有到用例结束。
+struct UserRootGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl UserRootGuard {
+    fn pin(root: &std::path::Path) -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // unwrap_or_else(into_inner)：测试 panic 污染锁后继续执行——锁只为串行化
+        // 环境变量操作，中毒无并发安全含义，在此 unwrap 会放大成连锁失败。
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            agentos_core::user_space::USER_ROOT_ENV,
+            agentos_core::user_space::USER_CONFIG_DIR_ENV,
+            agentos_core::user_space::USER_DATA_DIR_ENV,
+            agentos_core::user_space::USER_PLUGINS_DIR_ENV,
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, root);
+        for k in &keys[1..] {
+            std::env::remove_var(k);
+        }
+        Self { _lock: lock, saved }
+    }
+}
+
+impl Drop for UserRootGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+/// 构造带 project_root 的 AppState + router，并把用户根钉到同一 tmp。
+///
+/// 返回 guard：调用方须持有到用例结束（drop 即恢复环境并放锁）。
+fn make_router(tmp: &tempfile::TempDir) -> (axum::Router, UserRootGuard) {
+    let guard = UserRootGuard::pin(tmp.path());
     let mut state = AppState::new();
     state.project_root = Some(tmp.path().to_path_buf());
-    build_router(state)
+    (build_router(state), guard)
 }
 
 /// GET 存在的管道配置 → 200，返回 data（含 name）+ etag 头。
@@ -55,7 +102,7 @@ async fn test_get_pipeline_config_returns_yaml_content() {
     let tmp = tempfile::tempdir().unwrap();
     write_pipeline(tmp.path());
 
-    let app = make_router(&tmp);
+    let (app, _user_root_guard) = make_router(&tmp);
     let token = admin_token(&app).await;
     let response = app
         .oneshot(
@@ -88,7 +135,7 @@ async fn test_get_pipeline_config_missing_returns_404() {
     let tmp = tempfile::tempdir().unwrap();
     write_pipeline(tmp.path());
 
-    let app = make_router(&tmp);
+    let (app, _user_root_guard) = make_router(&tmp);
     let token = admin_token(&app).await;
     let response = app
         .oneshot(
@@ -110,7 +157,7 @@ async fn test_get_pipeline_config_invalid_name_returns_400() {
     let tmp = tempfile::tempdir().unwrap();
     write_pipeline(tmp.path());
 
-    let app = make_router(&tmp);
+    let (app, _user_root_guard) = make_router(&tmp);
     let token = admin_token(&app).await;
     let response = app
         .oneshot(
@@ -133,7 +180,7 @@ async fn test_put_pipeline_config_writes_atomically() {
     write_pipeline(tmp.path());
 
     // A13：先 GET 拿 etag（If-Match 乐观锁）
-    let app = make_router(&tmp);
+    let (app, _user_root_guard) = make_router(&tmp);
     let token = admin_token(&app).await;
     let get_resp = app
         .clone()
@@ -199,7 +246,7 @@ async fn test_put_pipeline_config_non_mapping_returns_400() {
     let tmp = tempfile::tempdir().unwrap();
     write_pipeline(tmp.path());
 
-    let app = make_router(&tmp);
+    let (app, _user_root_guard) = make_router(&tmp);
     let token = admin_token(&app).await;
     // 先 GET 拿 etag，排除 409 干扰（结构校验先于乐观锁）
     let get_resp = app
@@ -254,7 +301,7 @@ async fn test_put_pipeline_config_without_if_match_returns_409() {
     let tmp = tempfile::tempdir().unwrap();
     write_pipeline(tmp.path());
 
-    let app = make_router(&tmp);
+    let (app, _user_root_guard) = make_router(&tmp);
     let token = admin_token(&app).await;
     let before = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
     let response = app
@@ -286,7 +333,7 @@ async fn test_put_pipeline_config_invalid_name_returns_400() {
     let tmp = tempfile::tempdir().unwrap();
     write_pipeline(tmp.path());
 
-    let app = make_router(&tmp);
+    let (app, _user_root_guard) = make_router(&tmp);
     let token = admin_token(&app).await;
     let body = json!({ "data": { "name": "x" } });
     let response = app
@@ -353,7 +400,7 @@ async fn test_put_pipeline_config_legacy_shape_rejected_400() {
     let tmp = tempfile::tempdir().unwrap();
     write_pipeline(tmp.path());
 
-    let app = make_router(&tmp);
+    let (app, _user_root_guard) = make_router(&tmp);
     let token = admin_token(&app).await;
     let before = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
 
@@ -405,7 +452,7 @@ async fn test_put_pipeline_config_dead_then_forms_rejected_400() {
     let tmp = tempfile::tempdir().unwrap();
     write_pipeline(tmp.path());
 
-    let app = make_router(&tmp);
+    let (app, _user_root_guard) = make_router(&tmp);
     let token = admin_token(&app).await;
     let before = fs::read_to_string(tmp.path().join("config/pipelines/default.yaml")).unwrap();
 
@@ -459,7 +506,7 @@ async fn test_put_pipeline_config_valid_dsl_accepted() {
     let tmp = tempfile::tempdir().unwrap();
     write_pipeline(tmp.path());
 
-    let app = make_router(&tmp);
+    let (app, _user_root_guard) = make_router(&tmp);
     let token = admin_token(&app).await;
     let data = json!({
         "name": "agentos_agent",

@@ -533,3 +533,294 @@ def test_http_push_without_secret_env_unchanged(monkeypatch):
 
     resp = _http("POST", _PUSH_PATH, raw_body=_b64_body(_selection_payload()))
     assert resp["data"]["status"] == 200
+
+
+# ═══════════════════════════════════════════════════════════
+# 服务端适配层（server.py）缺口补测：on_load/on_unload 生命周期、
+# execute 工具两种返回形态、/preview 代理（aiohttp 第三方 SDK 替身）、
+# /subscribe 非法体回退、未知路由 404。
+# ═══════════════════════════════════════════════════════════
+
+import sys  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+# 1x1 PNG 魔数 + 载荷（_fetch_preview 按前 8 字节判定 PNG）
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake-image-payload"
+
+
+class _FakeAiohttp:
+    """aiohttp 最小替身（第三方网络 SDK，mock 边界）：ClientTimeout/ClientSession。
+
+    outcome: ("resp", status, data) 按预设响应；("exc", exc) 在发起请求时抛出。
+    """
+
+    class ClientTimeout:
+        def __init__(self, **kw):
+            self.kw = kw
+
+    def __init__(self, outcome):
+        self._outcome = outcome
+        self.last_request: tuple[str, dict] | None = None
+
+    def ClientSession(self, **kw):  # noqa: N802 —— 符号名对齐 aiohttp.ClientSession
+        mod = self
+
+        class _Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            def get(self, url, params=None):
+                mod.last_request = (url, dict(params or {}))
+                if mod._outcome[0] == "exc":
+                    raise mod._outcome[1]
+                _, resp_status, resp_data = mod._outcome
+
+                class _Resp:
+                    def __init__(self):
+                        self.status = resp_status
+
+                    async def __aenter__(self):
+                        return self
+
+                    async def __aexit__(self, *exc):
+                        return False
+
+                    async def read(self):
+                        return resp_data
+
+                return _Resp()
+
+        return _Session()
+
+
+def _install_fake_aiohttp(monkeypatch, *, status: int = 200, data: bytes = b"", exc: Exception | None = None):
+    fake = _FakeAiohttp(("exc", exc) if exc is not None else ("resp", status, data))
+    monkeypatch.setitem(sys.modules, "aiohttp", fake)
+    return fake
+
+
+# ── 生命周期：on_load 构建单例 + emitter 注入，on_unload 重置 ──
+
+
+def test_on_load_builds_singleton_without_frontend_capability():
+    """单测环境无内核 frontend capability → from_plugin 降级 None（告警路径），
+    单例仍完成懒构建并缓存。"""
+    gc_plugin.set_emitter(None)
+    server_mod._instance = None
+
+    asyncio.run(server_mod._on_load({}))
+
+    inst = server_mod._instance
+    # server.py 自带一份 plugin 模块副本（裸名串扰隔离），用其自己的类断言
+    assert isinstance(inst, server_mod.GodotContextPlugin)
+    assert server_mod.get_instance() is inst  # 同一单例被缓存复用
+
+
+def test_on_load_sets_emitter_when_frontend_capability_available(monkeypatch):
+    """frontend capability 可用 → on_load 把 emitter 注入插件，订阅广播经它转发。"""
+    emitter = FakeEmitter()
+
+    class _FakeFrontendEmitter:
+        @classmethod
+        def from_plugin(cls, _plugin):
+            return emitter
+
+    monkeypatch.setattr(server_mod, "FrontendEmitter", _FakeFrontendEmitter)
+    server_mod._instance = None
+    gc_plugin.set_emitter(None)
+
+    asyncio.run(server_mod._on_load({}))
+
+    inst = server_mod.get_instance()
+    inst.subscribe("tOnLoad")
+    asyncio.run(inst.handle_push(_selection_payload()))
+    assert emitter.calls[-1][0] == "godot_selection_changed"
+    assert emitter.calls[-1][1]["thread_id"] == "tOnLoad"
+
+
+def test_on_unload_resets_singleton():
+    """on_unload 清空单例缓存：下次 get_instance 重建新实例。"""
+    inst = server_mod.get_instance()
+
+    asyncio.run(server_mod._on_unload({}))
+
+    assert server_mod._instance is None
+    assert server_mod.get_instance() is not inst
+
+
+# ── execute 工具：管道注入入口的返回形态适配 ──
+
+
+def test_execute_tool_injects_reference_via_plugin_result():
+    """真实插件 PluginResult → {state_updates} 数据面；无跳过标志不得伪造。"""
+    server_mod.set_emitter(None)
+    p = _fresh_instance()
+    asyncio.run(p.handle_push(_selection_payload()))
+
+    out = asyncio.run(server_mod.execute(
+        state={"message_id": "m1", "messages": [{"role": "user", "content": "hi", "seq": 1}]},
+        config={},
+    ))
+
+    assert out["state_updates"]["godot.injected_for"] == "m1"
+    assert "skip_remaining" not in out
+
+
+def test_execute_tool_no_selection_returns_empty_updates():
+    """无选中 → 空 state_updates；config=None 走缺省 {}。"""
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    out = asyncio.run(server_mod.execute(
+        state={"message_id": "m1", "messages": [{"role": "user", "content": "hi", "seq": 1}]},
+        config=None,
+    ))
+
+    assert out == {"state_updates": {}}
+
+
+def test_execute_tool_dict_result_passthrough():
+    """插件直接返回 dict（已是数据面形态）→ 原样透传不二次包装。"""
+    captured: dict = {}
+
+    class _DictPlugin:
+        async def execute(self, ctx):
+            captured["state"] = ctx.state
+            return {"already": "shaped"}
+
+    server_mod._instance = _DictPlugin()
+
+    out = asyncio.run(server_mod.execute(state={"message_id": "mx"}, config={}))
+
+    assert out == {"already": "shaped"}
+    assert captured["state"]["message_id"] == "mx"  # state 经 create_initial_state 归一并透传
+
+
+def test_execute_tool_skip_remaining_flag_propagates():
+    """PluginResult.skip_remaining=True → 数据面携带 skip_remaining 标志。"""
+
+    class _SkipPlugin:
+        async def execute(self, ctx):
+            return SimpleNamespace(state_updates={"k": "v"}, skip_remaining=True)
+
+    server_mod._instance = _SkipPlugin()
+
+    out = asyncio.run(server_mod.execute(state={}, config={}))
+
+    assert out == {"state_updates": {"k": "v"}, "skip_remaining": True}
+
+
+# ── /preview 代理：_fetch_preview 结果形态 + 路由信封 ──
+
+
+@pytest.mark.parametrize(
+    ("status", "data", "expected"),
+    [
+        (200, _PNG_BYTES, _PNG_BYTES),  # 200 + PNG 魔数 → 返回字节
+        (200, b"junkjunk!", None),  # 200 但非 PNG → None
+        (503, _PNG_BYTES, None),  # 非 200 → None
+    ],
+    ids=["png-ok", "non-png", "non-200"],
+)
+def test_fetch_preview_returns_png_only(monkeypatch, status, data, expected):
+    fake = _install_fake_aiohttp(monkeypatch, status=status, data=data)
+
+    out = asyncio.run(server_mod._fetch_preview(3))
+
+    assert out == expected
+    # 请求形态：代理到 Godot 宿主端点 /selection/preview，index 透传
+    url, params = fake.last_request
+    assert url.endswith("/selection/preview")
+    assert params == {"index": 3}
+
+
+def test_fetch_preview_connection_error_returns_none(monkeypatch):
+    """建连失败（网络异常）→ None，不向上抛。"""
+    _install_fake_aiohttp(monkeypatch, exc=OSError("connect refused"))
+
+    assert asyncio.run(server_mod._fetch_preview(0)) is None
+
+
+_PREVIEW_PATH = "/ext/pipeline_godot_context/preview"
+
+
+def test_http_preview_proxies_png(monkeypatch):
+    """GET /preview 命中 PNG → ToolExecutionResult 信封（200 + base64 body）。"""
+    fake = _install_fake_aiohttp(monkeypatch, status=200, data=_PNG_BYTES)
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    resp = _http("GET", _PREVIEW_PATH, query={"index": "2"})
+
+    assert resp["success"] is True
+    assert resp["data"]["status"] == 200
+    assert resp["data"]["headers"]["Content-Type"] == "image/png"
+    assert resp["data"]["body_encoding"] == "base64"
+    assert base64.b64decode(resp["data"]["body"]) == _PNG_BYTES
+    assert fake.last_request[1] == {"index": 2}  # query 字符串 → int
+
+
+def test_http_preview_unavailable_returns_502(monkeypatch):
+    """预览代理失败 → 502 + error 载荷（域内错误仍走信封）。"""
+    _install_fake_aiohttp(monkeypatch, exc=OSError("godot down"))
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    resp = _http("GET", _PREVIEW_PATH, query={"index": "1"})
+
+    assert resp["data"]["status"] == 502
+    assert _decode_http(resp) == {"error": "preview unavailable"}
+
+
+@pytest.mark.parametrize("query", [{"index": "abc"}, None], ids=["garbage-index", "no-query"])
+def test_http_preview_bad_index_falls_back_to_zero(monkeypatch, query):
+    """非法/缺失 index → 回退 0 继续代理（不 4xx）。"""
+    fake = _install_fake_aiohttp(monkeypatch, status=200, data=_PNG_BYTES)
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    resp = _http("GET", _PREVIEW_PATH, query=query)
+
+    assert resp["success"] is True
+    assert fake.last_request[1] == {"index": 0}
+
+
+# ── /subscribe 非法体回退 + 未知路由 ──
+
+
+@pytest.mark.parametrize(
+    "raw_body",
+    ["not-json", _b64_body([1, 2])],
+    ids=["invalid-json", "non-object-json"],
+)
+def test_http_subscribe_invalid_body_yields_empty_thread(raw_body):
+    """订阅体解码失败 → 按空体回退（不 4xx）：空 thread_id 不新增订阅。"""
+    server_mod.set_emitter(None)
+    p = _fresh_instance()
+    p.subscribe("tKeep")
+
+    resp = _http("POST", _SUB_PATH, raw_body=raw_body)
+
+    assert resp["data"]["status"] == 200
+    assert _decode_http(resp) == {"status": "ok", "threads": 1}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "/ext/pipeline_godot_context/whatever"), ("PATCH", _PUSH_PATH)],
+    ids=["unknown-path", "unknown-method"],
+)
+def test_http_unknown_route_404(method, path):
+    """未匹配路由 → 404，error 携带 method+path 便于定位。"""
+    server_mod.set_emitter(None)
+    _fresh_instance()
+
+    resp = _http(method, path)
+
+    assert resp["data"]["status"] == 404
+    error = _decode_http(resp)["error"]
+    assert method in error
+    assert path in error

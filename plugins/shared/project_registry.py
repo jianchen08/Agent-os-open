@@ -252,7 +252,10 @@ def ensure_project_folder(title: str, explicit_path: str = "") -> str:
         while target.exists() and any(target.iterdir()):
             target = base / f"{_slugify(title)}-{suffix}"
             suffix += 1
-    target.mkdir(parents=True, exist_ok=True)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(f"项目文件夹创建失败（{target}）: {e}") from e
     if not (target / ".git").exists():
         result = subprocess.run(
             ["git", "init"],

@@ -74,8 +74,16 @@ impl PluginEnablement {
     /// - 文件缺失 → 空 profile（全部走默认：enabled=true, lazy。文档化引导默认，保留）；
     /// - 解析失败 → 空 profile + corrupted 标记：显式禁用过的插件不得借"回退默认
     ///   启用"静默复活——保守全禁（is_enabled 恒 false），warn + 启动报告可见。
+    ///
+    /// 落点用户空间优先（ADR 2026-09-13-unified-user-root）：启停开关经
+    /// `PUT /plugins/{id}/enabled` 写到 `<USER_ROOT>/config/plugins/default_profile.yaml`，
+    /// 加载侧读同一份——否则用户关掉的插件重启后又自己回来了。
     pub fn load(config_root: &Path) -> Self {
-        let path = config_root.join("plugins").join("default_profile.yaml");
+        let path = agentos_core::user_space::resolve_config_path(
+            config_root,
+            "plugins/default_profile.yaml",
+        )
+        .unwrap_or_else(|| config_root.join("plugins").join("default_profile.yaml"));
         match std::fs::read_to_string(&path) {
             Ok(raw) => match serde_yaml::from_str::<PluginProfile>(&raw) {
                 Ok(p) => {

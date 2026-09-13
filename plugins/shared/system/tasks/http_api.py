@@ -76,6 +76,7 @@ class TaskRootCreate(BaseModel):
     isolation_level: str = ""  # isolated/non_isolated（空 = 工具侧默认 isolated）
     inherit: dict[str, Any] | None = None
     thread_id: str  # 复用当前会话 → 作 session_id
+    acceptance_criteria: dict[str, Any] | None = None  # 验收标准（task_submit 原生参数透传；评测批派发用）
 
 
 class TaskUpdate(BaseModel):
@@ -518,7 +519,10 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
         handle = _capability("pipeline-state")
         resp = await handle.call("list", {})
     except Exception as exc:  # noqa: BLE001 — 读面降级不崩
-        logger.warning("[tasks http] state 聚合读取失败（任务列表降级为 YAML 面）| err=%s", exc)
+        logger.warning(
+            "[tasks http] state 聚合读取失败（任务列表返回空：state 为任务域唯一数据源，无 YAML 兜底）| err=%s",
+            exc,
+        )
         return None
     # 响应形状：内核 capability_router 的 pipeline-state.list 返回裸数组
     # （workspace/task 工具层同此解析）。
@@ -802,6 +806,8 @@ async def create_root_task(
         inputs["project_id"] = body.project_id
     if body.inherit:
         inputs["inherit"] = body.inherit
+    if body.acceptance_criteria:
+        inputs["acceptance_criteria"] = body.acceptance_criteria
 
     data = await _invoke_task_submit_tool(inputs, _current_user(_user).get("sub", ""))
     task_id = str(data.get("task_id") or data.get("pipeline_id") or "")

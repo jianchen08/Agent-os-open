@@ -246,7 +246,7 @@ async def plugin_runtime(authorization: str = "") -> dict[str, Any]:
     load_total = 0.0
     error_total = 0.0
     query_body = _unwrap(
-        await _call("metrics-admin-query", authorization=authorization, plugin="kernel")
+        await _call("metrics-admin-query", authorization=authorization, plugin_id="kernel")
     )
     metrics = query_body.get("metrics") if isinstance(query_body, dict) else query_body
     for s in _rows(metrics):

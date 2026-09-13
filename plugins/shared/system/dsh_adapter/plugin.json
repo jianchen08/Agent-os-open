@@ -198,16 +198,7 @@
       "source_commit": "141eb6fef83422698aef7a981029e843e8161534",
       "source_version": "0.1.0-rc.8",
       "backend_channel": "node-runtime-bridge",
-      "frontend_channel": "vendor-port + render-intent",
-      "components": [
-        "DiffBlock",
-        "JsonTree",
-        "ReadBlock",
-        "SearchBlock",
-        "TerminalBlock",
-        "WebBlock",
-        "CodeBlock"
-      ],
+      "frontend_channel": "render-intent (native blocks)",
       "out_of_scope": [
         "mcp-tools (external_mcp direct)",
         "conversation/trajectory/subagent ui packages",
@@ -1065,11 +1056,11 @@
       "route_id": "dsh_skin_assets",
       "method": "GET",
       "path": "/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}",
-      "auth": "user",
+      "auth": "none",
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 8,
-      "description": "Serve DSH skin background media assets (v2 contributes.backgroundMedia; image extensions whitelist)"
+      "description": "Serve DSH skin background media assets (v2 contributes.backgroundMedia; image extensions whitelist). auth=none：皮肤图由浏览器原生加载（背景图 CSS url()/hooks 立绘 <img>），无法携带 Authorization 头——与 /uploads 同判例；暴露面由图片扩展名白名单 + resolve 目录约束收敛"
     },
     {
       "route_id": "dsh_skin_merged_css",

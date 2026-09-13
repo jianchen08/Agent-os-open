@@ -1,0 +1,81 @@
+name: external-swe
+mode: coding
+settle_timeout_seconds: 1200
+cases:
+- id: swe_matplotlib_matplo
+  source: swe-bench-verified:matplotlib__matplotlib-24627
+  category: coding
+  target: programming_orchestrator_agent_v2
+  messages:
+  - '以下是开源仓库 matplotlib/matplotlib 的一个真实缺陷报告（SWE-bench Verified 真题 matplotlib__matplotlib-24627）。
+
+
+    cla(), clf() should unset the `.axes` and `.figure` attributes of deparented artists
+
+    mpl2.0b3: Removing an artist from its axes unsets its `.axes` attribute, but clearing
+    the axes does not do so.
+
+
+    ```
+
+    In [11]: f, a = plt.subplots(); l, = a.plot([1, 2]); l.remove(); print(l.axes)
+
+    None
+
+
+    In [12]: f, a = plt.subplots(); l, = a.plot([1, 2]); a.cla(); print(l.axes)
+
+    Axes(0.125,0.11;0.775x0.77)
+
+    ```
+
+
+
+
+    任务：基于缺陷报告写一份缺陷分析报告 swebench_analysis_matplo.md 到当前工作空间，内容包含：1) 你判断缺陷最可能位于该仓库的哪些模块（给出推测路径与理由）；2)
+    复现思路（需要什么环境与最小复现步骤）；3) 修复方向建议。注意：本仓没有该仓库源码，分析基于报告文本推断，不要求真实修复。'
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: swebench_analysis_matplo.md
+        check: not_empty
+  anchor: repo
+- id: swe_scikit_learn_scikit
+  source: swe-bench-verified:scikit-learn__scikit-learn-14141
+  category: coding
+  target: programming_orchestrator_agent_v2
+  messages:
+  - '以下是开源仓库 scikit-learn/scikit-learn 的一个真实缺陷报告（SWE-bench Verified 真题 scikit-learn__scikit-learn-14141）。
+
+
+    Add joblib in show_versions
+
+    joblib should be added to the dependencies listed in show_versions or added to
+    the issue template when sklearn version is > 0.20.
+
+
+
+    任务：基于缺陷报告写一份缺陷分析报告 swebench_analysis_scikit.md 到当前工作空间，内容包含：1) 你判断缺陷最可能位于该仓库的哪些模块（给出推测路径与理由）；2)
+    复现思路（需要什么环境与最小复现步骤）；3) 修复方向建议。注意：本仓没有该仓库源码，分析基于报告文本推断，不要求真实修复。'
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: swebench_analysis_scikit.md
+        check: not_empty
+  anchor: repo
+- id: swe_sympy_sympy-
+  source: swe-bench-verified:sympy__sympy-20916
+  category: coding
+  target: programming_orchestrator_agent_v2
+  messages:
+  - "以下是开源仓库 sympy/sympy 的一个真实缺陷报告（SWE-bench Verified 真题 sympy__sympy-20916）。\n\n\
+    pprint unicode does not format subscripts on Greek letters\nGood:\r\n\r\n[ -t₀⋅w₀\
+    \   -t₁⋅w₀   -t₂⋅w₀]\r\n\r\n\r\nBad:\r\n\r\n[ -t₀⋅ω0   -t₁⋅ω0   -t₂⋅ω0]\r\n\r\n\
+    \r\n\n\n\n任务：基于缺陷报告写一份缺陷分析报告 swebench_analysis_sympy-.md 到当前工作空间，内容包含：1) 你判断缺陷最可能位于该仓库的哪些模块（给出推测路径与理由）；2)\
+    \ 复现思路（需要什么环境与最小复现步骤）；3) 修复方向建议。注意：本仓没有该仓库源码，分析基于报告文本推断，不要求真实修复。"
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: swebench_analysis_sympy-.md
+        check: not_empty
+  anchor: repo

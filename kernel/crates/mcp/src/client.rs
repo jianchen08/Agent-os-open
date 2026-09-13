@@ -333,7 +333,7 @@ impl McpClient {
 
     /// 创建 HTTP transport 客户端
     ///
-    /// `headers`：额外请求头（如 `X-Also-Search`）。`auth`：鉴权配置，其 `value`
+    /// `headers`：额外请求头（如自定义 trace 头）。`auth`：鉴权配置，其 `value`
     /// 可含 `${ENV_VAR}` 占位，在 [`connect`](McpClient::connect) 时解析（查找顺序：
     /// 进程环境 → `.env` overlay；两处均缺失则连接失败早暴露，但
     /// `auth.required == Some(false)` 时跳过该鉴权头照常连接，由服务端 401 说话）。
@@ -743,8 +743,7 @@ impl McpClient {
         }
         // 鉴权头（${ENV_VAR} 解析，查找顺序：进程环境 → .env overlay）。
         // 引用未设置变量时：auth.required 缺省/true → 报错早暴露（不静默放行）；
-        // 显式 false（可选凭据，如 langchain_hub 的 LANGSMITH_API_KEY）→
-        // 跳过该鉴权头照常连接，由服务端 401 说话（GAP-4b）。
+        // 显式 false（可选凭据）→ 跳过该鉴权头照常连接，由服务端 401 说话（GAP-4b）。
         if let Some(a) = auth {
             if a.auth_type != AuthType::None {
                 let optional_auth = a.required == Some(false);
@@ -2263,7 +2262,7 @@ sys.stdin.readline()
             required: None,
         };
         let mut headers = HashMap::new();
-        headers.insert("X-Also-Search".to_string(), "smithery.ai".to_string());
+        headers.insert("X-Trace".to_string(), "sample-origin".to_string());
 
         let mut client = McpClient::new_http(url, headers, Some(auth));
         client.connect().await.unwrap();
@@ -2278,7 +2277,7 @@ sys.stdin.readline()
             "auth header missing: {raw_s}"
         );
         assert!(
-            raw_s.contains("x-also-search: smithery.ai"),
+            raw_s.contains("x-trace: sample-origin"),
             "extra header missing: {raw_s}"
         );
         std::env::remove_var("MCP_TEST_KEY");
@@ -2304,7 +2303,7 @@ sys.stdin.readline()
     #[tokio::test]
     async fn test_http_optional_auth_missing_env_skips_header_and_connects() {
         // required=false + 占位变量缺失 → connect 成功、请求不带该鉴权头
-        // （照常连接，由服务端 401 说话——langchain_hub 场景）
+        // （照常连接，由服务端 401 说话）
         let expected = serde_json::json!({"ok": true});
         let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
 
@@ -2490,10 +2489,10 @@ sys.stdin.readline()
 
     #[test]
     fn test_resolve_placeholders_reads_project_dotenv_file() {
-        // 真实文件依赖的集成路径（GAP-4a 主场景）：临时目录作项目根写 .env，
-        // AGENTOS_CONFIG_ROOT 指向其 config 子目录（project_env_path 取 config
-        // root 的父目录下 .env）。该变量是进程级全局，与 env_file::tests 共享
-        // 互斥锁串行（见 TEST_ENV_MUTEX）。
+        // 真实文件依赖的集成路径（GAP-4a 主场景）：临时目录作用户空间根写 .env
+        // （落点＝<USER_ROOT>/.env，ADR 2026-09-13-unified-user-root），
+        // AGENTOS_CONFIG_ROOT 指向项目根 config 子目录（供 project_root 推导）。
+        // 两个变量都是进程级全局，与 env_file::tests 共享互斥锁串行。
         let _guard = crate::env_file::tests::TEST_ENV_MUTEX
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2503,18 +2502,31 @@ sys.stdin.readline()
         std::fs::create_dir_all(tmp.join("config")).unwrap();
         std::fs::write(tmp.join(".env"), format!("{var}=from_dotenv\n")).unwrap();
 
-        // panic 安全地恢复 AGENTOS_CONFIG_ROOT（断言失败也不能污染其他测试）
-        struct RestoreEnvRoot(Option<String>);
-        impl Drop for RestoreEnvRoot {
+        // panic 安全地恢复两个进程级环境变量（断言失败也不能污染其他测试）
+        struct RestoreEnv {
+            config_root: Option<String>,
+            user_root: Option<String>,
+        }
+        impl Drop for RestoreEnv {
             fn drop(&mut self) {
-                match &self.0 {
+                match &self.config_root {
                     Some(v) => std::env::set_var("AGENTOS_CONFIG_ROOT", v),
                     None => std::env::remove_var("AGENTOS_CONFIG_ROOT"),
                 }
+                match &self.user_root {
+                    Some(v) => std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, v),
+                    None => std::env::remove_var(agentos_core::user_space::USER_ROOT_ENV),
+                }
             }
         }
-        let _restore = RestoreEnvRoot(std::env::var("AGENTOS_CONFIG_ROOT").ok());
+        let _restore = RestoreEnv {
+            config_root: std::env::var("AGENTOS_CONFIG_ROOT").ok(),
+            user_root: std::env::var(agentos_core::user_space::USER_ROOT_ENV).ok(),
+        };
         std::env::set_var("AGENTOS_CONFIG_ROOT", tmp.join("config"));
+        // 钉住用户空间根＝该临时目录：.env 落点在此，且宿主机真实用户目录
+        // 不参与断言（否则本用例会读到本机 %APPDATA% 下的 .env）
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, &tmp);
 
         // 1) 进程环境缺失 → .env overlay 提供值（设置页填 key 免重启生效路径）
         std::env::remove_var(&var);
@@ -2538,8 +2550,8 @@ sys.stdin.readline()
     fn test_manifest_mcp_endpoint_deserialize() {
         // 模拟 external_mcp 插件 plugin.json 的关键字段：endpoint 嵌套在 mcp 下。
         let json = r#"{
-            "id": "external_resource_search",
-            "name": "External Resource Search",
+            "id": "sample_remote_mcp",
+            "name": "Sample Remote MCP",
             "version": "1.0.0",
             "plugin_type": "tool",
             "language": "python",
@@ -2549,9 +2561,9 @@ sys.stdin.readline()
             "mcp": {
                 "transport": "streamable_http",
                 "endpoint": {
-                    "url": "https://registry.modelcontextprotocol.io",
-                    "headers": {"X-Also-Search": "smithery.ai"},
-                    "auth": {"type": "api_key", "header_name": "Authorization", "value": "${RESOURCE_SEARCH_API_KEY}"}
+                    "url": "https://mcp.example.com/mcp",
+                    "headers": {"X-Trace": "sample"},
+                    "auth": {"type": "api_key", "header_name": "Authorization", "value": "${SAMPLE_MCP_API_KEY}"}
                 }
             }
         }"#;
@@ -2562,22 +2574,19 @@ sys.stdin.readline()
             agentos_core::traits::McpTransport::StreamableHttp
         );
         let ep = cfg.endpoint.expect("endpoint should deserialize");
-        assert_eq!(
-            ep.url.as_deref(),
-            Some("https://registry.modelcontextprotocol.io")
-        );
-        assert_eq!(ep.headers.get("X-Also-Search").unwrap(), "smithery.ai");
+        assert_eq!(ep.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert_eq!(ep.headers.get("X-Trace").unwrap(), "sample");
         let auth = ep.auth.expect("auth present");
         assert_eq!(auth.auth_type, AuthType::ApiKey);
         assert_eq!(auth.header_name, "Authorization");
-        assert_eq!(auth.value, "${RESOURCE_SEARCH_API_KEY}");
+        assert_eq!(auth.value, "${SAMPLE_MCP_API_KEY}");
         // 未声明 required → None（按必需处理，保持既有硬失败语义）
         assert_eq!(auth.required, None);
     }
 
     #[test]
     fn test_manifest_auth_required_false_deserialize() {
-        // langchain_hub 风格：auth.required=false 必须能经反序列化到达内核
+        // 可选凭据形态：auth.required=false 必须能经反序列化到达内核
         // 逻辑（GAP-4b：该声明不得被 serde 静默丢弃）
         let json = r#"{
             "id": "langchain_like",
@@ -3607,6 +3616,590 @@ sys.stdin.readline()
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "正常 taskkill 必须在限时内完成"
+        );
+    }
+
+    // ── 覆盖补测：公开 API 契约 / 读循环分支 / connect 注入面 / HTTP 分支 ──
+
+    /// panic 安全的环境变量守卫：drop 时移除测试设置的变量。
+    struct EnvVarGuard(&'static str);
+
+    impl EnvVarGuard {
+        fn set(var: &'static str, value: &str) -> Self {
+            std::env::set_var(var, value);
+            Self(var)
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    /// 轮询等待 stdio sidecar 进程退出（try_wait 观察到终止 = 管道写必失败的前置）。
+    async fn wait_sidecar_exit(client: &McpClient) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !client.is_dead().await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "sidecar 未在 10s 内退出，前置条件不成立"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// 轮询等待 router 累计收到 ≥ min 次调用（反向调用/notification 异步处理）。
+    async fn wait_for_router_calls(
+        calls: &std::sync::Mutex<Vec<(String, String, Value)>>,
+        min: usize,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while calls.lock().unwrap().len() < min {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "等待 router 调用超时"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[test]
+    fn jsonrpc_wire_format_contract() {
+        // 请求帧：params=None 不输出 params 键（newline-delimited 帧型靠 id 区分）
+        let no_params = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: "i1".to_string(),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+        let s = serde_json::to_string(&no_params).unwrap();
+        assert!(!s.contains("params"), "params=None 不应输出: {s}");
+        // 请求帧：params=Some 原样嵌入
+        let with_params = JsonRpcRequest {
+            params: Some(json!({"a": 1})),
+            ..no_params
+        };
+        assert_eq!(
+            serde_json::to_string(&with_params).unwrap(),
+            r#"{"jsonrpc":"2.0","id":"i1","method":"tools/list","params":{"a":1}}"#
+        );
+        // raw 形态：params 为已序列化原文，整帧零解析嵌入（字节级透传）
+        let raw = serde_json::value::RawValue::from_string(r#"{"x":  1, "y":[1,2]}"#.to_string())
+            .unwrap();
+        let raw_req = JsonRpcRequestRaw {
+            jsonrpc: "2.0",
+            id: "i2".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(raw),
+        };
+        let raw_s = serde_json::to_string(&raw_req).unwrap();
+        assert!(
+            raw_s.contains(r#""params":{"x":  1, "y":[1,2]}"#),
+            "raw params 必须原文嵌入: {raw_s}"
+        );
+        let raw_none = JsonRpcRequestRaw {
+            params: None,
+            ..raw_req
+        };
+        assert!(!serde_json::to_string(&raw_none).unwrap().contains("params"));
+        // 响应帧：result-only 与 error-only 两种形态均可解析
+        let r: JsonRpcResponse =
+            serde_json::from_str(r#"{"result":{"a":1},"error":null}"#).unwrap();
+        assert_eq!(r.result.unwrap(), json!({"a": 1}));
+        let e: JsonRpcResponse =
+            serde_json::from_str(r#"{"error":{"code":-32601,"message":"nf"}}"#).unwrap();
+        assert!(e.result.is_none());
+        assert_eq!(e.error.unwrap().code, -32601);
+    }
+
+    #[test]
+    fn heartbeat_age_none_when_no_heartbeat_or_http() {
+        // stdio 且从未收到心跳（ms=0）→ None：旧 sidecar 兼容，不判假死
+        let client = McpClient::new_stdio("cat", vec![]);
+        assert_eq!(client.heartbeat_age_secs(), None);
+        // HTTP transport 无进程语义 → 恒 None
+        let http = McpClient::new_http("http://127.0.0.1:9", HashMap::new(), None);
+        assert_eq!(http.heartbeat_age_secs(), None);
+    }
+
+    #[test]
+    fn outbound_url_guard_rejects_empty_host() {
+        // 无 host 的 URL（file: 等）→ fail-closed
+        assert!(is_outbound_url_allowed("file:///tmp/x").is_err());
+    }
+
+    #[test]
+    fn outbound_url_guard_hostname_resolution_failure_allowed() {
+        // 解析失败的合法主机名 → 放行（无法分类不误伤；300 字符名解析必败，
+        // 免网络依赖且确定性触发 DNS 失败分支）
+        let long_host = format!("http://{}/", "a".repeat(300));
+        assert!(is_outbound_url_allowed(&long_host).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_windows_command_finds_existing_executable() {
+        // PATH×PATHEXT 探测命中：cmd.exe 必在系统目录 → 返回真实存在的全路径
+        let resolved = resolve_windows_command("cmd");
+        assert!(
+            std::path::Path::new(&resolved).is_file(),
+            "cmd 应解析为已存在的可执行文件，实际: {resolved}"
+        );
+        assert!(resolved.to_lowercase().contains("cmd"));
+    }
+
+    #[tokio::test]
+    async fn is_dead_false_while_sidecar_alive() {
+        // 存活证据（try_wait Ok(None)）→ 不判死：判死必须有三态证据之一
+        let mut client = McpClient::new_stdio("cat", vec![]);
+        client.connect().await.unwrap();
+        assert!(client.is_alive().await);
+        assert!(!client.is_dead().await, "存活 sidecar 不得判死");
+        client.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kill_after_natural_exit_clears_state() {
+        // 自然退出后的 kill：不报错、状态清空、判死成立（idle GC/崩溃清理路径）
+        assert!(
+            python_available(),
+            "python 不可用——本用例依赖真实 python sidecar"
+        );
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), "import sys; sys.exit(0)".to_string()],
+        );
+        client.connect().await.unwrap();
+        wait_sidecar_exit(&client).await;
+        assert!(!client.is_alive().await, "已退出进程不得判活");
+        client.kill().await.expect("对已退出进程 kill 应幂等成功");
+        assert!(!client.is_alive().await);
+        assert!(client.is_dead().await);
+    }
+
+    #[tokio::test]
+    async fn list_tools_returns_sidecar_result() {
+        let script = concat!(
+            "import sys, json\n",
+            "for line in sys.stdin:\n",
+            "    m = json.loads(line)\n",
+            "    if 'id' in m:\n",
+            "        r = {'jsonrpc': '2.0', 'id': m['id'], 'result': {'tools': [{'name': 't1'}]}}\n",
+            "        sys.stdout.write(json.dumps(r) + '\\n'); sys.stdout.flush()\n",
+        );
+        let mut client =
+            McpClient::new_stdio(python_exe(), vec!["-u".into(), "-c".into(), script.into()])
+                .with_request_timeout(Duration::from_secs(10));
+        client.connect().await.expect("回显替身可连接");
+        let tools = client.list_tools().await.expect("tools/list 应成功");
+        assert_eq!(tools["tools"][0]["name"], json!("t1"), "result 原样透传");
+        client.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn call_tool_maps_protocol_error_to_tool_call_failed() {
+        assert!(python_available(), "python 不可用");
+        let script = "import sys, json; req=json.loads(sys.stdin.readline()); print(json.dumps({'jsonrpc':'2.0','id':req['id'],'error':{'code':-32000,'message':'tool boom'}}), flush=True)";
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        )
+        .with_request_timeout(Duration::from_secs(10));
+        client.connect().await.unwrap();
+        let err = client.call_tool("search", &json!({})).await.unwrap_err();
+        match err {
+            McpError::ToolCallFailed { tool_name, message } => {
+                assert_eq!(tool_name, "search", "错误必须携带工具名");
+                assert!(message.contains("tool boom"), "{message}");
+            }
+            other => panic!("应映射为 ToolCallFailed，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn call_tool_raw_rejects_invalid_json_arguments() {
+        // 参数校验先于 I/O：未连接的 client 也必须在 RawValue 解析处早失败
+        let client = McpClient::new_stdio("cat", vec![]);
+        let err = client.call_tool_raw("t", "{broken").await.unwrap_err();
+        match err {
+            McpError::ToolCallFailed { tool_name, message } => {
+                assert_eq!(tool_name, "t");
+                assert!(message.contains("非法 JSON"), "实际: {message}");
+            }
+            other => panic!("应为 ToolCallFailed，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn call_tool_raw_fragments_assembles_frame_from_closure() {
+        assert!(python_available(), "python 不可用");
+        let script = concat!(
+            "import sys, json\n",
+            "for line in sys.stdin:\n",
+            "    try: m = json.loads(line)\n",
+            "    except Exception: continue\n",
+            "    if 'id' in m and 'method' in m:\n",
+            "        r = {'jsonrpc': '2.0', 'id': m['id'], 'result': {'echo': m.get('params')}}\n",
+            "        sys.stdout.write(json.dumps(r) + '\\n'); sys.stdout.flush()\n",
+        );
+        let mut client =
+            McpClient::new_stdio(python_exe(), vec!["-u".into(), "-c".into(), script.into()])
+                .with_request_timeout(Duration::from_secs(10));
+        client.connect().await.expect("回显替身可连接");
+        // 闭包直写复用缓冲：arguments 由调用方序列化逻辑产出
+        let result = client
+            .call_tool_raw_fragments("demo", |buf| {
+                serde_json::to_writer(&mut *buf, &json!({"state": {"a": 1}, "config": {"k": "v"}}))
+            })
+            .await
+            .expect("fragments 调用应成功");
+        assert_eq!(result["echo"]["name"], json!("demo"), "工具名正确嵌帧");
+        assert_eq!(result["echo"]["arguments"]["state"]["a"], json!(1));
+        assert_eq!(result["echo"]["arguments"]["config"]["k"], json!("v"));
+        // 与 call_tool（Value 路径）帧语义等价
+        let via_value = client
+            .call_tool("demo", &json!({"state": {"a": 1}, "config": {"k": "v"}}))
+            .await
+            .expect("Value 路径应成功");
+        assert_eq!(result["echo"], via_value["echo"], "两通道帧语义等价");
+    }
+
+    #[tokio::test]
+    async fn call_tool_raw_fragments_closure_error_maps_to_protocol_error() {
+        // 闭包序列化失败 → 组帧阶段早失败（Protocol），不发半帧
+        let client = McpClient::new_stdio("cat", vec![]);
+        let err = client
+            .call_tool_raw_fragments("t", |_| {
+                Err(serde_json::from_str::<Value>("}{").unwrap_err())
+            })
+            .await
+            .unwrap_err();
+        match err {
+            McpError::Protocol { message } => {
+                assert!(message.contains("serialize arguments error"), "{message}");
+            }
+            other => panic!("应为 Protocol（serialize arguments error），实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_call_tool_roundtrip_carries_name_and_arguments() {
+        let expected = json!({"content": [{"type": "text", "text": "hi"}]});
+        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+        let result = client
+            .call_tool("search", &json!({"q": "kernel"}))
+            .await
+            .expect("HTTP tools/call 应成功");
+        assert_eq!(result, expected, "result 原样透传");
+        let raw = String::from_utf8_lossy(&captured.lock().unwrap().clone().unwrap()).to_string();
+        assert!(
+            raw.contains(r#""method":"tools/call""#),
+            "方法应为 tools/call: {raw}"
+        );
+        assert!(raw.contains(r#""name":"search""#), "{raw}");
+        assert!(raw.contains(r#""q":"kernel""#), "arguments 应透传: {raw}");
+    }
+
+    #[tokio::test]
+    async fn http_call_tool_raw_parses_params_then_roundtrips() {
+        // HTTP 通道的 raw 形态回退解析重走 Value 路径：行为与 stdio 一致
+        let expected = json!({"echo": true});
+        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+        let result = client
+            .call_tool_raw("t", r#"{"state":{"a":1}}"#)
+            .await
+            .expect("HTTP raw 调用应成功");
+        assert_eq!(result, expected);
+        let raw = String::from_utf8_lossy(&captured.lock().unwrap().clone().unwrap()).to_string();
+        assert!(
+            raw.contains(r#""arguments":{"state":{"a":1}}"#),
+            "arguments 原文应到边: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_call_tool_raw_rejects_invalid_params_json() {
+        // HTTP 通道 raw 参数校验同样先于网络 I/O
+        let client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), None);
+        let err = client.call_tool_raw("t", "{broken").await.unwrap_err();
+        match err {
+            McpError::ToolCallFailed { tool_name, message } => {
+                assert_eq!(tool_name, "t");
+                assert!(message.contains("非法 JSON"), "实际: {message}");
+            }
+            other => panic!("应为 ToolCallFailed，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_notification_fails_fast_on_dead_pipe() {
+        // sidecar 已退出 → notification 写入必须快速失败为 Transport 写错误
+        assert!(python_available(), "python 不可用");
+        let script = "import sys; sys.exit(1)";
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        );
+        client.connect().await.unwrap();
+        wait_sidecar_exit(&client).await;
+        let err = client
+            .send_notification("notifications/initialized", None)
+            .await
+            .unwrap_err();
+        match err {
+            McpError::Transport { message } => {
+                assert!(message.contains("write"), "应为写错误，实际: {message}");
+            }
+            other => panic!("死管道 notification 应为 Transport 错误，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reader_loop_ignores_response_with_unknown_id() {
+        // 悬空响应（id 不在 pending 表）→ 丢弃不误配对；后续合法响应照常 resolve
+        assert!(python_available(), "python 不可用");
+        let script = concat!(
+            "import sys, json\n",
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': 'stray', 'result': {'x': 1}}) + '\\n'); sys.stdout.flush()\n",
+            "req = json.loads(sys.stdin.readline())\n",
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'ok': True}}) + '\\n'); sys.stdout.flush()\n",
+        );
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        )
+        .with_request_timeout(Duration::from_secs(10));
+        client.connect().await.expect("替身可连接");
+        let value = client
+            .send_request("tools/list", None)
+            .await
+            .expect("悬空响应不得破坏后续请求配对");
+        assert_eq!(value["ok"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn reader_loop_dispatches_notification_to_router() {
+        // 读循环分支3（有 method 无 id）→ 入有序队列 → 工作任务路由到 router
+        assert!(python_available(), "python 不可用");
+        let router = Arc::new(RecordingRouter::new(json!({})));
+        let script = concat!(
+            "import sys, json\n",
+            "req = json.loads(sys.stdin.readline())\n",
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'method': 'event-bus.emit', 'params': {'seq': 1}}) + '\\n')\n",
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'ok': True}}) + '\\n')\n",
+            "sys.stdout.flush()\n",
+            "sys.stdin.readline()\n",
+        );
+        let calls = router.calls.clone();
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        )
+        .with_request_timeout(Duration::from_secs(10))
+        .with_router(router);
+        client.connect().await.expect("替身可连接");
+        let value = client.send_request("tools/list", None).await.unwrap();
+        assert_eq!(value["ok"], json!(true), "同帧响应应照常 resolve");
+        // notification 经队列异步处理：轮询等待最终被消费（派发 ≠ 丢弃）
+        wait_for_router_calls(&calls, 1).await;
+        let got = calls.lock().unwrap();
+        assert_eq!(got[0].0, "event-bus");
+        assert_eq!(got[0].1, "emit");
+        assert_eq!(got[0].2["seq"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn initialize_declares_router_namespaces_and_honors_version_override() {
+        assert!(python_available(), "python 不可用");
+        let script = concat!(
+            "import sys, json\n",
+            "req = json.loads(sys.stdin.readline())\n",
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'echo': req.get('params')}}) + '\\n'); sys.stdout.flush()\n",
+            "sys.stdin.readline()\n",
+        );
+        // router 存在 → 声明其 namespace（initialize 声明与白名单同源）
+        let router = Arc::new(RecordingRouter::new(json!({})));
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        )
+        .with_request_timeout(Duration::from_secs(10))
+        .with_router(router);
+        client.connect().await.unwrap();
+        let init = client.initialize(&json!({"cfg": 1})).await.unwrap();
+        for ns in ["pipeline-executor", "event-bus"] {
+            assert!(
+                init["echo"]["capabilities"].get(ns).is_some(),
+                "router namespace {ns} 必须出现在 initialize 声明里"
+            );
+        }
+        assert_eq!(init["echo"]["protocolVersion"], json!(MCP_PROTOCOL_VERSION));
+        assert_eq!(init["echo"]["config"], json!({"cfg": 1}));
+        client.kill().await.unwrap();
+
+        // 协议版本协商逃生口：环境变量覆盖生效
+        let _guard = EnvVarGuard::set("AGENTOS_MCP_PROTOCOL_VERSION", "1999-01-01");
+        let mut client2 = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        )
+        .with_request_timeout(Duration::from_secs(10));
+        client2.connect().await.unwrap();
+        let init2 = client2.initialize(&json!({})).await.unwrap();
+        assert_eq!(
+            init2["echo"]["protocolVersion"],
+            json!("1999-01-01"),
+            "AGENTOS_MCP_PROTOCOL_VERSION 覆盖必须生效"
+        );
+    }
+
+    #[tokio::test]
+    // 刻意持 std Mutex 跨 await：TEST_ENV_MUTEX 串行化的正是进程全局
+    // AGENTOS_CONFIG_ROOT，必须覆盖 connect 的整个生命周期（测试独占语义）。
+    #[allow(clippy::await_holding_lock)]
+    async fn connect_applies_working_dir_extra_env_and_dotenv_overlay() {
+        // AGENTOS_CONFIG_ROOT / AGENTOS_USER_ROOT 是进程全局，与 env_file
+        // 测试共享互斥锁串行
+        let _env_guard = crate::env_file::tests::TEST_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        assert!(
+            python_available(),
+            "python 不可用——本用例依赖真实 python sidecar"
+        );
+        std::env::remove_var("AGENTOS_MCP_IT_EXTRA");
+        std::env::remove_var("AGENTOS_MCP_IT_DOTENV");
+
+        let workdir = tempfile::tempdir().expect("工作目录临时创建");
+        let envroot = tempfile::tempdir().expect("项目根临时创建");
+        std::fs::create_dir_all(envroot.path().join("config")).unwrap();
+        // .env 落点＝<USER_ROOT>/.env（ADR 2026-09-13-unified-user-root）：
+        // 临时目录同时充当项目根与用户空间根
+        std::fs::write(
+            envroot.path().join(".env"),
+            "AGENTOS_MCP_IT_DOTENV=from_dotenv\n",
+        )
+        .unwrap();
+
+        // panic 安全地恢复两个进程级环境变量
+        struct RestoreConfigRoot {
+            config_root: Option<String>,
+            user_root: Option<String>,
+        }
+        impl Drop for RestoreConfigRoot {
+            fn drop(&mut self) {
+                match &self.config_root {
+                    Some(v) => std::env::set_var("AGENTOS_CONFIG_ROOT", v),
+                    None => std::env::remove_var("AGENTOS_CONFIG_ROOT"),
+                }
+                match &self.user_root {
+                    Some(v) => std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, v),
+                    None => std::env::remove_var(agentos_core::user_space::USER_ROOT_ENV),
+                }
+            }
+        }
+        let _restore = RestoreConfigRoot {
+            config_root: std::env::var("AGENTOS_CONFIG_ROOT").ok(),
+            user_root: std::env::var(agentos_core::user_space::USER_ROOT_ENV).ok(),
+        };
+        std::env::set_var("AGENTOS_CONFIG_ROOT", envroot.path().join("config"));
+        // 钉住用户空间根：不钉会读宿主机真实用户目录下的 .env（断言依赖环境）
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, envroot.path());
+
+        let script = concat!(
+            "import sys, json, os\n",
+            "req = json.loads(sys.stdin.readline())\n",
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'cwd': os.getcwd(), 'extra': os.environ.get('AGENTOS_MCP_IT_EXTRA', ''), 'dotenv': os.environ.get('AGENTOS_MCP_IT_DOTENV', '')}}) + '\\n'); sys.stdout.flush()\n",
+        );
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        )
+        .with_working_dir(workdir.path().to_path_buf())
+        .with_extra_env(vec![(
+            "AGENTOS_MCP_IT_EXTRA".to_string(),
+            "from_extra_env".to_string(),
+        )])
+        .with_request_timeout(Duration::from_secs(10));
+        client.connect().await.expect("替身可连接");
+        let result = client.send_request("probe", None).await.unwrap();
+        // working_dir：子进程 cwd 落在插件目录（相对路径可解析的前提）
+        let dir_name = workdir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let cwd = result["cwd"].as_str().unwrap();
+        assert!(
+            std::path::Path::new(cwd).ends_with(&dir_name),
+            "子进程 cwd 应为 working_dir（{cwd}）"
+        );
+        // extra_env：PYTHONPATH 类注入直达 sidecar
+        assert_eq!(result["extra"], json!("from_extra_env"));
+        // .env 增量叠加：设置页写入的变量免重启直达子进程
+        assert_eq!(result["dotenv"], json!("from_dotenv"));
+    }
+
+    #[tokio::test]
+    async fn http_post_parses_json_without_content_type() {
+        // 无 Content-Type 头的响应：跳过 SSE 探测，plain JSON 照常解析
+        let (url, _) = spawn_raw_http_server(
+            "HTTP/1.1 200 OK\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}",
+        )
+        .await;
+        let mut client = McpClient::new_http(url.clone(), HashMap::new(), None);
+        client.connect().await.unwrap();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: "1".to_string(),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+        let result = client.http_post(&url, &request).await.unwrap();
+        assert_eq!(result["ok"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn http_connect_rejects_invalid_auth_header_value() {
+        // 鉴权值含非法字符（控制字符）→ 构建客户端时早失败（不静默丢头）
+        let auth = agentos_core::traits::EndpointAuth {
+            auth_type: AuthType::ApiKey,
+            header_name: "x-api-key".to_string(),
+            value: "bad\nvalue".to_string(),
+            required: None,
+        };
+        let mut client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), Some(auth));
+        let err = client.connect().await.unwrap_err();
+        assert!(matches!(err, McpError::ConnectionFailed { .. }));
+        assert!(err.to_string().contains("invalid auth header value"));
+    }
+
+    #[tokio::test]
+    async fn http_auth_type_none_skips_auth_header() {
+        // AuthType::None：不解析不注入鉴权头（无鉴权端点显式声明）
+        let expected = json!({"ok": true});
+        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+        let auth = agentos_core::traits::EndpointAuth {
+            auth_type: AuthType::None,
+            header_name: "Authorization".to_string(),
+            value: "ignored-secret".to_string(),
+            required: None,
+        };
+        let mut client = McpClient::new_http(url, HashMap::new(), Some(auth));
+        client.connect().await.unwrap();
+        let result = client.send_request("tools/list", None).await.unwrap();
+        assert_eq!(result, expected);
+        let raw = String::from_utf8_lossy(&captured.lock().unwrap().clone().unwrap())
+            .to_ascii_lowercase();
+        assert!(
+            !raw.contains("authorization:"),
+            "AuthType::None 不应携带鉴权头: {raw}"
         );
     }
 }

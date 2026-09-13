@@ -1,0 +1,33 @@
+# 联调冒烟题集 v4（双指标 file_check+bash_check；语义断言版待 output 注入修复后回归）
+name: smoke
+mode: coding
+settle_timeout_seconds: 900
+cases:
+- id: normal_qa
+  category: normal
+  target: general_agent
+  messages:
+  - 请计算 1+1 等于几，把答案数字写入当前工作空间的文件 eval_answer.txt（文件内容就是答案数字）。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: eval_answer.txt
+        check: contains
+        pattern: '2'
+    bash_check:
+      input_params:
+        command: grep -q "2" eval_answer.txt
+- id: normal_file_ops
+  category: normal
+  target: general_agent
+  messages:
+  - 创建一个文本文件 eval_normal.txt，内容为 eval-ok，创建后读取确认内容无误并汇报文件路径。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: eval_normal.txt
+        check: contains
+        pattern: eval-ok
+    bash_check:
+      input_params:
+        command: grep -q "eval-ok" eval_normal.txt

@@ -3,14 +3,14 @@ concurrency:
   max_concurrent_pipelines: 5
 defaults:
   call_timeout: 600
-  chat: glm-5.2
+  chat: deepseek-v4.1-flash
   embedding: bge-m3
   first_token_timeout: 120
   stream_idle_timeout: 180
   tiers:
     large: deepseek-v4.1-flash
-    medium: minimax-m3
-    small: minimax-m3
+    medium: deepseek-v4.1-flash
+    small: deepseek-v4.1-flash
 embeddings: {}
 models:
   bge-m3:

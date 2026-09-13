@@ -3,20 +3,21 @@
  *
  * 职责（薄层，不引入运行时机制）：
  * 1. 从 /api/v1/schema 的 plugin_contributes 里找 dsh_adapter 插件的贡献块，
- *    读取来源版本记录（DSH commit/版本、通道、组件清单）；
+ *    读取来源版本记录（DSH commit/版本、通道）；
  * 2. 把 contributes.renderers（tool → card）注册进 render 意图注册表——
  *    作为 render 描述符缺失时的兜底通道（正常路径：plugin.json 的
- *    capabilities.tools[].render 经 ToolDescriptor 直达 dshRenderIntent）；
+ *    capabilities.tools[].render 经 ToolDescriptor 直达 renderIntent）；
  * 3. 失败隔离：单条 renderer 注册失败只 warn，不影响其他条目与主流程；
- *    适配器插件禁用 → schema 刷新 → 注册表清空，组件/工具一并下线。
+ *    适配器插件禁用 → schema 刷新 → 注册表清空，卡片/工具一并下线。
  *
- * 组件本体不在此装载——vendor 组件（components/vendor/dsh/）静态编译进
- * 前端，由 ActivityCard 的 dsh:* 分支按 render 意图路由。
+ * 渲染不由本模块提供——card 只是词汇表（read/terminal/search/web…），
+ * 由 renderIntent.ts 映射成原生块字段、ActivityCard 统一渲染；外部插件包
+ * 的视觉形态经翻译进入同一通道，前端不为任何插件写专属组件。
  */
 
 import { getSchema } from '@/services/api/schema'
-import { addRenderIntent, type ToolRenderIntent } from '@/utils/dshRenderIntent'
 import { loggers } from '@/utils/logger'
+import { addRenderIntent, type ToolRenderIntent } from '@/utils/renderIntent'
 
 /** dsh_adapter 插件 contributes.dsh_adapter 块（plugin.json 同构）。 */
 export interface DshAdapterInfo {
@@ -24,7 +25,6 @@ export interface DshAdapterInfo {
   source_version: string
   backend_channel: string
   frontend_channel: string
-  components: string[]
   out_of_scope: string[]
 }
 

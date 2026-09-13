@@ -69,7 +69,10 @@ done
 
 | 变量 | 作用 | 默认 | 来源 |
 |---|---|---|---|
-| `AGENTOS_DB_PATH` | SQLite 库文件路径；`:memory:` = 内存库 | 项目根 `agentos_kernel.db` | `storage_factory.rs`（`ENV_DB_PATH`） |
+| `AGENTOS_USER_ROOT` | **用户空间根**：用户可写资产（插件/配置/数据/密钥）统一住这里，整体位于仓库之外——仓内 `config/`、`data/` 处于工作区还原的抹除风险面内，用户空间不受影响。 | OS 标准数据目录下 `agentos/`（Windows `%APPDATA%`、macOS `~/Library/Application Support`、Linux `$XDG_DATA_HOME`） | `kernel/crates/core/src/user_space.rs`（`user_root`）；ADR `docs/decisions/2026-09-13-unified-user-root.md` |
+| `AGENTOS_USER_CONFIG_DIR` | 用户配置层根（分区覆盖；镜像 factory `config/` 的相对路径） | `<USER_ROOT>/config` | 同上（`user_config_dir`） |
+| `AGENTOS_DATA_DIR` | 用户数据根（多租户树 / uploads / DB 默认位） | `<USER_ROOT>/data` | 同上（`user_data_dir`） |
+| `AGENTOS_DB_PATH` | SQLite 库文件路径；`:memory:` = 内存库 | `<USER_ROOT>/data/agentos_kernel.db`（用户空间不可得时回落项目根） | `storage_factory.rs`（`ENV_DB_PATH`） |
 | `AGENTOS_STORAGE_DRIVER` | 存储驱动：`sqlite` / `memory`（`postgres` 留桩，显式报错） | `sqlite` | `storage_factory.rs`（`ENV_STORAGE_DRIVER`） |
 | `AGENTOS_KERNEL_PORT` | 内核监听端口 | `9100` | `kernel/crates/api/src/bin/agentos-kernel.rs` |
 | `AGENTOS_BIND` | 监听地址；默认仅本机，设 `0.0.0.0` 显式开外网（启动打印告警） | `127.0.0.1` | 同上（`resolve_bind_host`） |
@@ -77,9 +80,9 @@ done
 | `AGENTOS_CORS_ORIGINS` | 生产 CORS 白名单：逗号分隔的**完整 origin**，精确匹配（无子域/前缀模糊） | 未设 = 仅本地源放行 | `kernel/crates/api/src/server.rs`（`origin_matches_allowlist`） |
 | `AGENTOS_TOKEN_SECRET` | token 签名密钥；**未设 = 进程随机，重启即全量会话失效** | 未设（随机） | `kernel/crates/http/src/auth.rs`（`TOKEN_SECRET_ENV`） |
 | `AGENTOS_ADMIN_PASSWORD` | 内置 admin 口令；未设 = 首启生成随机口令并**仅打印一次**，置非空值可重置已有 admin 口令 | 未设（随机） | `bin/agentos-kernel.rs`（`resolve_admin_password`） |
-| `AGENTOS_PLUGINS_DIR` | 内置插件根目录 | `<项目根>/plugins/shared` | 同上 |
-| `AGENTOS_USER_PLUGINS_DIR` | 用户插件根目录（可写，第三方插件安装位） | OS 标准目录 `agentos/plugins` | 同上（`resolve_user_plugins_dir`） |
-| `AGENTOS_CONFIG_ROOT` | 配置根目录 | `<项目根>/config` | 同上 |
+| `AGENTOS_PLUGINS_DIR` | 内置插件根目录（只读） | `<项目根>/plugins/shared` | 同上 |
+| `AGENTOS_USER_PLUGINS_DIR` | 用户插件根目录（可写，第三方插件安装位；同 id 覆盖内置根） | `<USER_ROOT>/plugins` | 同上（`resolve_user_plugins_dir`） |
+| `AGENTOS_CONFIG_ROOT` | 工厂配置根目录（只读基线，用户层优先见上行 `AGENTOS_USER_CONFIG_DIR`） | `<项目根>/config` | 同上 |
 | `AGENTOS_DB_AUTO_REBUILD` | `=1` 显式允许损坏库自动备份后重建空库继续启动；**默认坏库 fail-closed 拒启** | 未设（拒启） | `kernel/crates/engine/src/store.rs`；ADR `docs/decisions/2026-09-11-corrupt-db-fail-closed.md` |
 | `AGENTOS_ALLOW_EMPTY_PLUGINS` | `=1` 插件 discover 失败时以空插件集启动（嵌入式/最小化部署逃生门） | 未设（discover 失败拒启） | `bin/agentos-kernel.rs` |
 | `AGENTOS_GRANTS_STRICT` | `=1` 插件未声明 `granted_capabilities` 时反向能力调用一律拒绝 | 未设（未声明默认全授予） | 同上 |
@@ -99,6 +102,34 @@ done
 > `::1`，内核仅监听 IPv4 时每请求先超时约 2s（见 `.env.example` 内注释）。
 > 开发模式 `pnpm dev`（vite）默认端口 6390（`frontend/vite.config.ts`），
 > 启动脚本/CI 冒烟以 `--port 5188` 覆盖。
+
+### 用户空间（哪些东西不写回仓库）
+
+用户在界面上做的改动默认**落在用户空间**，不覆写仓库里 git 跟踪的工厂文件
+（ADR `docs/decisions/2026-09-13-unified-user-root.md`）：
+
+```text
+<USER_ROOT>/                 # 默认 <OS 数据目录>/agentos
+├── plugins/                 # 用户插件（同 id 覆盖内置根，热发现秒级生效）
+├── config/                  # 用户配置层（镜像工厂 config/ 的相对路径）
+├── data/                    # 运行时数据（多租户树 / uploads / DB）
+└── .env                     # 密钥与环境变量
+```
+
+- **覆盖语义 = 文件级整体替换**：用户层存在某文件时，工厂同路径文件完全不参与
+  （不读取、不合并）——任一时刻一个路径只有一份生效文件。首次编辑某配置时内核
+  先按工厂内容**播种**到用户层，用户拿到完整文件而非 diff 片段。
+- **落用户空间的写面**：`PUT /api/v1/plugins/{id}/config/{file_id}`、
+  `PUT /api/v1/config/pipelines/{name}`、`PUT /api/v1/plugins/{id}/enabled`、
+  设置页的密钥写入（`.env`）。
+- **内核保留文件仍不可由插件映射**：`plugin_allowlist` / `plugin_roots` / `auth` /
+  `pipelines` / `steps` 的 denylist 对用户层与工厂层同样生效；这些文件的**合法编辑
+  入口**只有内核自有的界面写面（管道配置页 / 插件启停），不是插件 manifest 映射。
+- **升级不自动合并**：工厂后续新增的键不会静默并入用户层文件（静默合并 = 两处存值，
+  与单真值 ADR 冲突）；需要新默认值时由用户在界面上重置该文件。
+- **存量安装迁移**：默认库位置已从项目根迁到用户空间。若项目根仍有旧库而当前指向
+  的库不是它，内核启动会打印一条携带迁移命令的告警（**不静默自动迁移**）：
+  `python scripts/migrate_to_user_root.py`（幂等，支持 `--dry-run`）。
 
 ## 四、进程守护
 

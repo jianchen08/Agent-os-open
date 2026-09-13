@@ -6,9 +6,33 @@
 # floor(实测)+1——下一个整数百分比（85.49→86 式、恰为整数→再 +1），只替换
 # 数值行保留归因注释；随本批 commit 留归因，CI job 内的写入随 job 丢弃，
 # 以仓库提交为准。只许升不许降。
-# rust_line_coverage=90.0 → 92.0（2026-09-11 覆盖率补测批）：
+# rust_line_coverage=90.0 → 92.0（2026-09-11 覆盖率补测批；历史注释非真值）：
 # 本地 cargo llvm-cov 全仓实测 91.22%（workspace 除 integration-tests，
 # 75598/82876），floor+1=92（棘轮公式）。整体验收闸挂起期内手动收紧，
 # 恢复执法后按同公式复核。本轮 Rust 未补新测试，增量来自既有车道波动
 # 与并行修复批；下一批目标 = routes.rs/capability_router.rs/invoker.rs。
-rust_line_coverage=92.0
+#
+# 收紧（2026-09-13 覆盖率补测批四）：棘轮 92→93——本地 cargo llvm-cov 全仓
+# 实测 92.81%（5129 缺行/71144，CI gate 同配方；批前同配方实测 90.47，
+# 增量来自本批 api/session_routes+ws_session 43 用例、invoker 18 用例与
+# 并行会话 api/core/mcp 测试模块，提交 22a295778/a10ccbc47/6033bd9d0）。
+# 口径注：批二"91.22%（75598/82876）"分母与现配方（62913→71344 DA 行）
+# 不一致，来源待核；本值以当前 CI gate 配方连测两次自洽为准（90.47→92.81）。
+# 已知：retired_projection_tables_drop_test 两用例仅在 llvm-cov 插桩下红
+# （普通 cargo test 绿），插桩敏感待查。检查器自动棘轮误写注释行的缺陷
+# 本次手工纠正（数值行才是真值）。
+#
+# 收紧（2026-09-13 覆盖率补测批七）：棘轮 93→94——本地 cargo llvm-cov 全仓
+# 实测 93.35%（4931 缺行/74181 DA 行，CI gate 同配方，空闲窗口 0 失败）。
+# 增量来源 = 本批 api crate HTTP 层 65 用例：routes 40（upload/ETag/manifest/
+# actions/pending-inputs/插件配置三形态/管道配置/监管面）、server 14（CORS/
+# 预检/鉴权/WS 握手 503 真实 TCP/交互应答路由）、session_routes 4（消息历史
+# 塑形）、ws_session 3、auth 4（限频/锁号/逐出），提交 b8e4f925c/e53cf5e63/
+# bf43e29a7/5a698f37b/d26b17b67/e37070c62。度量事故注：首测与并行会话车道
+# 抢机，invoker 时序用例（单跑 60s）全量负载 panic 且该 bin profile 被
+# clobber→83.68% 假数（12109 假缺行），空闲重测即回真——llvm-cov 度量必须
+# 独占窗口。剩余缺行 4931 头部 = invoker/tests.rs 测试代码计入分母怪象 +
+# agentos-kernel.rs 装配运行时路径（e2e 车道覆盖，不在本口径）。
+# 下一批目标 = invoker.rs 生产代码 682（tests.rs 5034 属分母怪象）、
+# plugin_check.rs 135、loader.rs 124、store.rs 119。
+rust_line_coverage=94.0

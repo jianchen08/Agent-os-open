@@ -518,23 +518,23 @@ if __name__ == "__main__":
 | pipeline / core | `plugins/shared/pipeline/core/` | 2 |
 | pipeline / output | `plugins/shared/pipeline/output/` | 12 |
 | shared 根下直挂（db_admin / metrics_admin / user_admin） | `plugins/shared/<name>/` | 3 |
-| system（含连接器/通道/系统服务） | `plugins/shared/system/` | 25 |
-| tools | `plugins/shared/tools/`（19 个顶层插件 + `external_mcp/` 下 8 个预置接入清单） | 27 |
-| **合计** | | **86** |
+| system（含连接器/通道/系统服务） | `plugins/shared/system/` | 26 |
+| tools | `plugins/shared/tools/`（20 个顶层插件 + `external_mcp/` 下 4 个预置接入清单） | 24 |
+| **合计** | | **84** |
 
 **按 `plugin_type`：**
 
 | plugin_type | 数量 |
 |-------------|------|
 | `pipeline` | 31 |
-| `system` | 24 |
-| `tool` | 31 |
+| `system` | 25 |
+| `tool` | 28 |
 
 **按 `host_type`：**
 
 | host_type | 数量 |
 |-----------|------|
-| `sidecar` | 83 |
+| `sidecar` | 81 |
 | `in_process`（Rust cdylib） | 3（`pipeline_tool_core` / `pipeline_sensitive_checker` / `pipeline_spill_guard`） |
 
 **关键内部模块覆盖确认：**
@@ -544,7 +544,7 @@ if __name__ == "__main__":
 | 连接器（connectors） | `connectors_service`（聚合） | `plugins/shared/system/connectors/plugin.json` | ✅ |
 | 通道（channel_*） | 5 个（cli/dingtalk/feishu/qq/wecom） | 5 个 | ✅ 全覆盖（`channel_api` 已整体退役，ADR 2026-08-21 插件自持 http_endpoints；`channel_gateway` 不再是独立插件） |
 | Agent（scene） | `scene_service` | `plugins/shared/system/scene/plugin.json` | ✅ |
-| 工具（tools） | 19 个顶层 + 8 个 external_mcp 预置接入 | 27 个 | ✅ 全覆盖（`external_mcp/` 本身是聚合目录，manifest 在其 8 个子目录里） |
+| 工具（tools） | 20 个顶层 + 4 个 external_mcp 预置接入 | 24 个 | ✅ 全覆盖（`external_mcp/` 本身是聚合目录，manifest 在其 4 个子目录里） |
 | 系统服务 | memory/llm/approval/evaluation/... | 25 个 | ✅ |
 | 内置工具聚合 sidecar（builtin_tools） | 1 个（8 个工具的 MCP 聚合） | 1 | ✅ |
 
@@ -561,7 +561,7 @@ if __name__ == "__main__":
 | `plugins/shared/system/connectors/creative/` | `connectors_service` | 创意类连接器实现（comfyui / game_engine / generic） |
 | `plugins/shared/system/connectors/vscode/` | `connectors_service` | VS Code 连接器适配器 |
 | `plugins/shared/pipeline/_base/` | — | 管道插件公共基类 |
-| `plugins/shared/tools/external_mcp/`（目录本身） | — | 预置外部 MCP 接入的聚合目录：manifest 在其 8 个子目录里，目录自身不需要 |
+| `plugins/shared/tools/external_mcp/`（目录本身） | — | 预置外部 MCP 接入的聚合目录：manifest 在其 4 个子目录里，目录自身不需要 |
 | 各插件目录下的 `__pycache__/` | — | Python 缓存，非代码 |
 
 **判断原则**：一个目录是否需要 manifest，取决于它是否要**被内核作为独立插件加载**。如果只是被某个 `server.py` 通过 `import` 引用的实现细节，就不需要——加了反而会被错误地当成新插件发现。

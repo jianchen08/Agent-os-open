@@ -3,10 +3,11 @@
  * @feature 认证可靠性（token 生命周期单一职责模块） | @ci frontend-test
  *
  * tokenLifecycle 是 token 存取/过期判定/互斥刷新/主动续期调度/认证失效分类的
- * 唯一实现（2026-08-21 架构收口；2026-09-05 D12-7 存储面重排：access 仅内存、
- * refresh 仅 sessionStorage、localStorage 零 token 残留）。本文件覆盖：
+ * 唯一实现（2026-08-21 架构收口；存储面 2026-09-05 D12-7 立基、2026-09-13
+ * 用户裁定「体验优先」修订：access 仅内存、refresh 存 localStorage 跨重启
+ * 自动登录、盗用风险由服务端单次轮换/jti 吊销/改密吊销兜底）。本文件覆盖：
  * - AC-8 TTL 边界不变量（isExpired 平移）
- * - 存取唯一入口 + 存储面不变量（localStorage 零 token、refresh 会话级）
+ * - 存取唯一入口 + 存储面不变量（access 零落盘、refresh 持久）
  * - 单次轮换（刷新后旧 refresh 被服务端作废，新值必须落位）
  * - 主动续期链退避重试不断链
  * - 无凭据确定性认证失败
@@ -77,7 +78,7 @@ describe('tokenLifecycle: TTL 边界不变量 (isExpired)', () => {
   })
 })
 
-describe('tokenLifecycle: 存储面不变量（D12-7）', () => {
+describe('tokenLifecycle: 存储面不变量（access 零落盘 / refresh 持久）', () => {
   beforeEach(() => {
     localStorage.clear()
     sessionStorage.clear()
@@ -88,44 +89,48 @@ describe('tokenLifecycle: 存储面不变量（D12-7）', () => {
     setTokens('at-1', 'rt-1', 100)
     expect(getAccessToken()).toBe('at-1')
     expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)).toBeNull()
+    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)).toBeNull()
   })
 
-  it('refresh token 仅存 sessionStorage：localStorage 无 refresh token', () => {
+  it('refresh token 持久存 localStorage（跨浏览器重启自动登录的载体）', () => {
     setTokens('at-1', 'rt-1', 100)
     expect(getRefreshTokenValue()).toBe('rt-1')
-    expect(sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBe('rt-1')
-    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
+    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBe('rt-1')
   })
 
-  it('localStorage 零 token 残留（登录→登出全周期）', () => {
+  it('登出全周期：refresh token 从 localStorage 清除且内存清空', () => {
     setTokens('at-1', 'rt-1', 100)
     clearTokens()
-    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)).toBeNull()
     expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
-    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)).toBeNull()
+    expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)).toBeNull()
     expect(getAccessToken()).toBeNull()
     expect(getRefreshTokenValue()).toBeNull()
   })
 
-  it('升级残留清擦：升级前遗留在 localStorage 的 token 被 scrub 清除', () => {
-    // 模拟升级前版本写入 localStorage 的令牌三件套
+  it('升级残留清擦：access 两键任何版本都非法必清；refresh 键现为合法居所不清', () => {
+    // 模拟更早版本写入 localStorage 的令牌三件套 + D12-7 时代的 sessionStorage 残留
     localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN, 'legacy-at')
     localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, 'legacy-rt')
     localStorage.setItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY, '9999999999999')
+    sessionStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, 'legacy-ss-rt')
     scrubLegacyTokenStorages()
     expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN)).toBeNull()
-    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
     expect(localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)).toBeNull()
+    // refresh token 自 2026-09-13 起持久存 localStorage，scrub 不得清除
+    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBe('legacy-rt')
+    expect(sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
   })
 
-  it('clearTokens 同时清 sessionStorage 的 refresh token（logout 清双侧）', () => {
+  it('clearTokens 清 localStorage 的 refresh token 并顺带清擦残留（logout 清全侧）', () => {
     setTokens('at-1', 'rt-1', 100)
+    sessionStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, 'legacy-ss-rt')
     clearTokens()
+    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
     expect(sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
   })
 })
 
-describe('tokenLifecycle: 单次轮换（D12-7 refresh 出新值落位）', () => {
+describe('tokenLifecycle: 单次轮换（refresh 出新值落位）', () => {
   beforeEach(() => {
     sessionStorage.clear()
     localStorage.clear()
@@ -140,7 +145,7 @@ describe('tokenLifecycle: 单次轮换（D12-7 refresh 出新值落位）', () =
     vi.useRealTimers()
   })
 
-  it('refresh 成功后新 refresh token 必须落 sessionStorage（旧值已服务端作废）', async () => {
+  it('refresh 成功后新 refresh token 必须落 localStorage（旧值已服务端作废）', async () => {
     setTokens('at-1', 'rt-1', 1)
     vi.advanceTimersByTime(2_000)
     mockApiRefreshToken.mockResolvedValue({
@@ -190,7 +195,7 @@ describe('tokenLifecycle: 无凭据确定性认证失败', () => {
     expect(isAuthFailureFromError(new Error('network glitch'))).toBe(false)
   })
 
-  it('sessionStorage 有 refresh_token 时不走无凭据分支（打到 API）', async () => {
+  it('localStorage 有 refresh_token 时不走无凭据分支（打到 API）', async () => {
     setTokens('at-1', 'rt-1', 100)
     mockApiRefreshToken.mockRejectedValue(new Error('Network Error'))
     await expect(refresh()).rejects.toThrow('令牌刷新失败')
@@ -218,10 +223,10 @@ describe('tokenLifecycle: 存储读故障 ≠ 无凭据（存储故障不呈现�
     // 异步推进：让定时器触发的在飞 refresh（单飞互斥占位）先落定，
     // 否则下方 refresh() 复用在飞 promise，存储故障分支不会执行
     await vi.advanceTimersByTimeAsync(101_000)
-    // 钉实例而非 Storage.prototype：jsdom 下原型级 spy 不保证拦到 sessionStorage
+    // 钉实例而非 Storage.prototype：jsdom 下原型级 spy 不保证拦到 localStorage
     // 实例读取；实例自有属性遮蔽原型，任意环境确定性触发存储故障分支
-    const getItemSpy = vi.spyOn(sessionStorage, 'getItem').mockImplementation(() => {
-      throw new Error('sessionStorage unavailable')
+    const getItemSpy = vi.spyOn(localStorage, 'getItem').mockImplementation(() => {
+      throw new Error('localStorage unavailable')
     })
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
@@ -245,7 +250,7 @@ describe('tokenLifecycle: 存储读故障 ≠ 无凭据（存储故障不呈现�
     }
   })
 
-  it('无 token（sessionStorage 空）→ 保持无凭据确定性失败（登出路径回归）', async () => {
+  it('无 token（localStorage 空）→ 保持无凭据确定性失败（登出路径回归）', async () => {
     await expect(refresh()).rejects.toMatchObject({ authNoCredentials: true })
     expect(isAuthFailureFromError(await refresh().catch((e) => e))).toBe(true)
   })

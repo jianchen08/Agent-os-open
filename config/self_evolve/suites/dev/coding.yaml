@@ -1,0 +1,104 @@
+name: coding-v1
+mode: coding
+model: null
+settle_timeout_seconds: 900
+cases:
+- id: swe_fix_proposal
+  source: swe-bench-style
+  category: coding
+  target: programming_orchestrator_agent_v2
+  messages:
+  - 已知缺陷：`plugins/shared/tools/task_submit/tool.py` 的 _validate_required_metric_params
+    函数在 acceptance_criteria 的 input_params 值为非 dict 类型（例如字符串）时，会把它当 None 处理从而漏报缺失参数。任务：读取该文件相关函数，产出一个修复方案文件
+    fix_proposal.md 写入当前工作空间，内容包含：1) 缺陷根因一句话；2) 建议修改的函数名与修改思路（伪代码即可，不要真的改仓库文件）。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: fix_proposal.md
+        check: contains
+        pattern: _validate_required_metric_params
+  anchor: repo
+- id: swe_regression_design
+  source: swe-bench-style
+  category: coding
+  target: programming_orchestrator_agent_v2
+  messages:
+  - 缺陷描述：系统曾存在一个 bug——编辑重发的首轮用户消息因缺 run_id 而被错误拒绝（已修复，提交 546286161，改动位于 kernel/crates/api/src/chat_send_handler.rs）。任务：读取
+    git log -1 546286161 的改动说明，写一个回归测试设计文档 regression_design.md 到当前工作空间：列出至少 3 个应覆盖的测试场景（正常编辑重发/非首轮消息/跨会话重发），每个场景给出输入、期望行为、失败判据。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: regression_design.md
+        check: contains
+        pattern: '546286161'
+  anchor: repo
+- id: local_bug_anatomy
+  source: local-replay
+  category: coding
+  target: programming_orchestrator_agent_v2
+  messages:
+  - 提交 73055d879 修复了『触发器取消按会话放行——主管道漂移不再锁死取消』。请用 git show 查看该提交，用不超过 200 字回答：1) 修复前的缺陷机制是什么；2)
+    修复的关键改动是什么。把回答写入当前工作空间的 bug_anatomy.md。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: bug_anatomy.md
+        check: contains
+        pattern: 73055d879
+  anchor: repo
+- id: tac_policy_lookup
+  source: agentcompany
+  category: coding
+  target: programming_orchestrator_agent_v2
+  messages:
+  - 请读取仓库根的 config/isolation/isolation_policy.yaml，回答：bash_execute 工具的隔离策略是什么（isolation
+    与 execution 字段的值）？把答案以 YAML 形式写入当前工作空间的 policy_answer.yaml，键为 isolation 和 execution。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: policy_answer.yaml
+        check: contains
+        pattern: isolated
+  anchor: repo
+- id: tac_data_aggregate
+  source: agentcompany
+  category: coding
+  target: programming_orchestrator_agent_v2
+  messages:
+  - '请统计当前仓库 plugins/shared 目录下一级子目录的个数（不含 __pycache__），并统计 plugins/shared/system
+    下以字母 c 开头的子目录名列表。把结果写入当前工作空间 dirs_report.json，格式：{"shared_top_dirs": <数字>, "system_c_dirs":
+    ["目录名", ...]}。'
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: dirs_report.json
+        check: contains
+        pattern: system_c_dirs
+  anchor: repo
+- id: longwof_pipeline_doc_chain
+  source: longwof
+  category: coding
+  target: programming_orchestrator_agent_v2
+  messages:
+  - 依次完成三步并全部落在当前工作空间：第一步创建 step1.md，内容为步骤一完成；第二步创建 step2.md，内容必须引用 step1.md 的文件名；第三步创建
+    index.md，内容为两行：第一行是 step1.md 的文件名，第二行是 step2.md 的文件名。三步必须按顺序执行。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: index.md
+        check: contains
+        pattern: step2.md
+- id: longwof_config_diff_report
+  source: longwof
+  category: coding
+  target: programming_orchestrator_agent_v2
+  messages:
+  - 对比 config/agents/main/agentos.yaml 与 config/agents/executor/general_agent.yaml
+    两个文件的 model_tier 字段值，把对比结果写入当前工作空间 tier_compare.md：内容包含两个文件各自的 model_tier 值，以及它们是否相同。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: tier_compare.md
+        check: contains
+        pattern: large
+  anchor: repo

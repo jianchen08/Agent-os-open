@@ -1,7 +1,7 @@
 /**
  * ActivityCard 渲染路由器新增块（table/form）渲染验证
  *
- * 覆盖：渲染路由器（dshRenderIntent）产出的 table 卡（表头+二维数组）与
+ * 覆盖：渲染路由器（renderIntent）产出的 table 卡（表头+二维数组）与
  * form 卡（kv 标量 + 长文本/对象折叠区）落到 ActivityCard 的 DOM。
  */
 import { fireEvent, render, screen } from '@testing-library/react'

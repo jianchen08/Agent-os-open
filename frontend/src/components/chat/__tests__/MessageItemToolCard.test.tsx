@@ -15,7 +15,7 @@
 import { fireEvent, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderWithProviders } from '@/test/renderWithProviders'
-import { loadRenderIntents } from '@/utils/dshRenderIntent'
+import { loadRenderIntents } from '@/utils/renderIntent'
 import { MessageItem } from '../MessageItem'
 import type { Message } from '@/types/models'
 

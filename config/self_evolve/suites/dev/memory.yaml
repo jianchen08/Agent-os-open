@@ -1,0 +1,43 @@
+name: memory-v1
+mode: memory
+settle_timeout_seconds: 900
+cases:
+- id: mem_multiround_three_keys
+  source: longmemeval-l1
+  category: memory
+  target: general_agent
+  messages:
+  - 请记住三个词：ALPHA-11、BRAVO-22、CHARLIE-33。现在只回复『已记住』。
+  - 请在当前工作空间创建 keys.md，内容为三行：one=ALPHA-11、two=BRAVO-22、three=CHARLIE-33。
+  - 请按我刚才给你的顺序，把三个词的完整值写进当前工作空间的 recall.txt（每行一个词，按顺序）。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: recall.txt
+        check: contains
+        pattern: CHARLIE-33
+- id: mem_preference_carry
+  source: longmemeval-l1
+  category: memory
+  target: general_agent
+  messages:
+  - 偏好设定：今后所有你产出的报告类文件，文件名必须以 rpt_ 前缀开头。确认请回复 OK。
+  - 写一份三句话的报告，主题是『本仓库的默认数据库文件名』，按刚才的偏好命名并写入当前工作空间。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: rpt_db_report.md
+        check: not_empty
+- id: mem_experience_reuse
+  source: longmemeval-v2
+  category: memory
+  target: general_agent
+  messages:
+  - 经验记录：在 AgentOS 里查内核工具注册列表用 GET /api/v1/tools（需要 Bearer token）。请把这条经验原样写入当前工作空间的
+    exp_note.md。
+  - 现在按 exp_note.md 里记录的方法实际验证一遍：登录并调用该端点，把返回的工具总数写入当前工作空间的 tool_count.txt（内容只有一个数字）。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: tool_count.txt
+        check: not_empty

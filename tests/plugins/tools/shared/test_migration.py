@@ -141,8 +141,7 @@ class TestExternalMcpPluginJson:
     EXTERNAL_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "external_mcp"
 
     @pytest.mark.parametrize("tool_name", [
-        "browser_test", "design_generate",
-        "mcp_registry", "smithery", "resource_search",
+        "browser_test", "design_generate", "omnisearch",
     ])
     def test_external_mcp_plugin_json(self, tool_name):
         plugin_json_path = self.EXTERNAL_DIR / tool_name / "plugin.json"

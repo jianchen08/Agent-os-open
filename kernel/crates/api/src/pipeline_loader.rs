@@ -351,14 +351,28 @@ impl StepFile {
     }
 }
 
+/// 管道配置文件的生效落点（用户空间优先，回落 factory）。
+///
+/// 内核自己的读侧与 HTTP 写侧必须同源（ADR 2026-09-13-unified-user-root 的单一
+/// 解析器要求）：写侧经 `ConfigTargetMode::Write` 落用户层，读侧若仍拼
+/// `config_root/pipelines/` 就会读到未被接管的 factory 副本。
+pub fn resolve_pipeline_config_path(config_root: &Path, name: &str) -> PathBuf {
+    agentos_core::user_space::resolve_config_path(config_root, &format!("pipelines/{name}"))
+        .unwrap_or_else(|| config_root.join("pipelines").join(name))
+}
+
 /// 加载管道配置（`config/pipelines/autonomous.yaml` → [`PipelineConfig`]）。
 ///
 /// 文件不存在时返回默认配置（`loop.enabled=false`、空 `steps`），不报错——
 /// 让内核在缺省配置下仍能启动（chat 走降级路径）。
 ///
 /// 解析失败则返回 `Err`，错误信息含文件路径与 serde 错误细节。
+///
+/// 落点用户空间优先（ADR 2026-09-13-unified-user-root）：用户在管道配置页保存的
+/// 改动落到 `<USER_ROOT>/config/pipelines/`，内核加载必须读同一份——否则出现
+/// "保存成功、重启后还是旧配置"。
 pub fn load_pipeline_config(config_root: &Path) -> Result<PipelineConfig, PipelineLoadError> {
-    let path = config_root.join("pipelines").join("autonomous.yaml");
+    let path = resolve_pipeline_config_path(config_root, "autonomous.yaml");
     if !path.exists() {
         tracing::warn!(
             "Pipeline config not found at {}, using default (empty loop bodies)",
@@ -392,7 +406,7 @@ pub fn load_pipeline_config(config_root: &Path) -> Result<PipelineConfig, Pipeli
 pub fn load_pipeline_with_hooks(
     config_root: &Path,
 ) -> Result<(PipelineConfig, PipelineHooks), PipelineLoadError> {
-    let path = config_root.join("pipelines").join("autonomous.yaml");
+    let path = resolve_pipeline_config_path(config_root, "autonomous.yaml");
     if !path.exists() {
         tracing::warn!(
             "Pipeline config not found at {}, using default (empty loop bodies)",

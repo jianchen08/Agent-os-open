@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -240,3 +242,221 @@ class TestSwitchThenExecuteE2E:
         assert "soft_block" in decision.get("reason", ""), (
             f"default 模式命中 curl 应走审批链（无交互服务→软拦截），实际={decision.get('reason')!r}"
         )
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2026-09-13 覆盖率补测：server 适配层（on_load/on_unload/execute 工具面、
+# 确认链路失败分支、HTTP 体与 GET query 解析容错）
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestOnLoadLifecycle:
+    """on_load 装配契约：plugin 引用注入 / 前端通道装配 / 单例生命周期。"""
+
+    @pytest.fixture(autouse=True)
+    def _restore_server_globals(self):
+        yield
+        sc_mod._PLUGIN_REF = None
+        sc_mod.set_frontend_emit(None)
+        server_mod.get_instance.cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_on_load_without_frontend_warns_and_wires_plugin_ref(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """frontend 能力缺失 → 降级提示通道置空并留 warning，plugin 引用照常注入。"""
+
+        def _raise(name: str) -> Any:
+            raise KeyError(name)
+
+        monkeypatch.setattr(server_mod.plugin, "get_capability", _raise)
+        with caplog.at_level(logging.WARNING, logger=server_mod.__name__):
+            await server_mod._on_load({})
+
+        assert sc_mod._PLUGIN_REF is server_mod.plugin
+        assert sc_mod._frontend_emit is None
+        assert any("frontend 能力未注入" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_on_load_with_frontend_wires_emit_channel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """frontend 能力在位 → _frontend_emit 经 capability.call('emit', ...) 转发。"""
+        fake = AsyncMock()
+        monkeypatch.setattr(server_mod.plugin, "get_capability", lambda name: fake)
+
+        await server_mod._on_load({})
+
+        assert sc_mod._frontend_emit is not None
+        await sc_mod._frontend_emit("security_rules_degraded", {"k": "v"}, "thread-9")
+        fake.call.assert_awaited_once_with(
+            "emit",
+            {"event": "security_rules_degraded", "payload": {"k": "v"}, "thread_id": "thread-9"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_on_load_builds_cached_plugin_instance(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """on_load 预热：构建 SecurityCheckPlugin 单例并缓存。"""
+
+        def _raise(name: str) -> Any:
+            raise KeyError(name)
+
+        monkeypatch.setattr(server_mod.plugin, "get_capability", _raise)
+        await server_mod._on_load({})
+
+        inst = server_mod.get_instance()
+        assert isinstance(inst, sc_mod.SecurityCheckPlugin)
+        assert server_mod.get_instance.cache_info().currsize == 1
+
+    @pytest.mark.asyncio
+    async def test_on_unload_clears_singleton_cache(self) -> None:
+        """on_unload 清空单例缓存 → 下次 get_instance 重建（配置热更新语义）。"""
+        server_mod.get_instance()
+        assert server_mod.get_instance.cache_info().currsize == 1
+
+        await server_mod._on_unload({})
+
+        assert server_mod.get_instance.cache_info().currsize == 0
+
+
+class TestExecuteToolAdapter:
+    """security_check.execute 工具面：PluginResult → dict 适配契约。"""
+
+    @pytest.mark.asyncio
+    async def test_execute_wraps_plugin_state_updates(self) -> None:
+        """真实插件实例：llm_call 轮免检早退，state_updates 被包装返回。"""
+        server_mod.get_instance.cache_clear()
+        data = await server_mod.execute({"core_type": "llm_call"}, None)
+        assert data["state_updates"]["security.decision"]["reason"] == "not a tool execution"
+
+    @pytest.mark.asyncio
+    async def test_execute_dict_result_passthrough(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """插件返回 dict（Core 插件形态）→ 原样透传不包装。"""
+        fake_inst = SimpleNamespace(execute=AsyncMock(return_value={"raw": {"a": 1}}))
+        monkeypatch.setattr(server_mod, "get_instance", lambda: fake_inst)
+        assert await server_mod.execute({"core_type": "llm_call"}, {}) == {"raw": {"a": 1}}
+
+    @pytest.mark.asyncio
+    async def test_execute_skip_remaining_flag_surfaces(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """skip_remaining=True → 结果显式携带该标记。"""
+        fake_result = SimpleNamespace(state_updates={"k": "v"}, skip_remaining=True)
+        fake_inst = SimpleNamespace(execute=AsyncMock(return_value=fake_result))
+        monkeypatch.setattr(server_mod, "get_instance", lambda: fake_inst)
+        data = await server_mod.execute({"core_type": "llm_call"}, None)
+        assert data == {"state_updates": {"k": "v"}, "skip_remaining": True}
+
+    @pytest.mark.asyncio
+    async def test_execute_omits_skip_flag_when_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """skip_remaining=False → 不产生该键（响应形状稳定）。"""
+        fake_result = SimpleNamespace(state_updates={"k": "v"}, skip_remaining=False)
+        fake_inst = SimpleNamespace(execute=AsyncMock(return_value=fake_result))
+        monkeypatch.setattr(server_mod, "get_instance", lambda: fake_inst)
+        data = await server_mod.execute({"core_type": "llm_call"}, None)
+        assert data == {"state_updates": {"k": "v"}}
+
+
+class TestConfirmSwitchFailureBranches:
+    """高风险模式确认链路的失败分支：create 失败 / wait 响应异常 → 拒绝切换。"""
+
+    @pytest.mark.asyncio
+    async def test_create_choice_error_rejects_switch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """create_choice 返回 error → 确认失败，模式表不变。"""
+        fake = AsyncMock()
+
+        async def _call(name: str, params: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            assert name == "create_choice", f"create 失败后不得再调用 {name}"
+            return {"error": "capacity full"}
+
+        fake.call.side_effect = _call
+        monkeypatch.setattr(server_mod.plugin, "get_capability", lambda name: fake)
+
+        resp = await server_mod.http_handle(**_make_http_post("p1", "auto"))
+        result = _decode(resp)
+        assert result == {"switched": False, "reason": "用户未确认或确认超时", "mode": "default"}
+        assert sc_mod._PERMISSION_MODES.get("p1") is None
+
+    @pytest.mark.asyncio
+    async def test_wait_non_dict_response_rejects_switch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """wait_for_choice 返回非 dict → 确认失败。"""
+        fake = AsyncMock()
+
+        async def _call(name: str, params: dict[str, Any], **kwargs: Any) -> Any:
+            if name == "create_choice":
+                return {"request_id": "r-9"}
+            if name == "wait_for_choice":
+                return "not-a-dict"
+            raise AssertionError(f"unexpected cap.call: {name}")
+
+        fake.call.side_effect = _call
+        monkeypatch.setattr(server_mod.plugin, "get_capability", lambda name: fake)
+
+        resp = await server_mod.http_handle(**_make_http_post("p1", "bypass"))
+        assert _decode(resp)["switched"] is False
+        assert sc_mod._PERMISSION_MODES.get("p1") is None
+
+
+class TestHttpBodyAndQueryParsing:
+    """HTTP 面解析容错：畸形请求体按空体处理；GET query 支持键值对列表。"""
+
+    @pytest.mark.parametrize(
+        "raw_body",
+        [
+            "not-valid-base64!!!",  # base64 解码失败
+            base64.b64encode(b"not-json{{{").decode("ascii"),  # 解码成功但非 JSON
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_malformed_body_treated_as_empty(
+        self, monkeypatch: pytest.MonkeyPatch, raw_body: str
+    ) -> None:
+        """畸形请求体 → 按空体处理 → 缺 pipeline_id 返回 400。"""
+        _mock_hi(monkeypatch, "confirm")
+        resp = await server_mod.http_handle(
+            path="/ext/pipeline_security_check/permission_mode",
+            method="POST",
+            plugin_id="pipeline_security_check",
+            raw_body=raw_body,
+        )
+        assert _decode(resp) == {"error": "pipeline_id required", "switched": False}
+
+    @pytest.mark.asyncio
+    async def test_get_query_as_pair_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """GET query 为 [key, value] 对列表（内核异形形态）→ 正常解析读取。"""
+        _mock_hi(monkeypatch, "confirm")
+        resp = await server_mod.http_handle(
+            path="/ext/pipeline_security_check/permission_mode",
+            method="GET",
+            plugin_id="pipeline_security_check",
+            raw_body="",
+            query=[["pipeline_id", "pq-1"]],
+        )
+        result = _decode(resp)
+        assert result["mode"] == "default"
+        assert "valid_modes" in result
+
+    @pytest.mark.asyncio
+    async def test_get_malformed_query_still_responds_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """query 完全异形（不可迭代解包）→ 按缺参处理，仍返回默认模式。"""
+        _mock_hi(monkeypatch, "confirm")
+        resp = await server_mod.http_handle(
+            path="/ext/pipeline_security_check/permission_mode",
+            method="GET",
+            plugin_id="pipeline_security_check",
+            raw_body="",
+            query="zzzz",
+        )
+        assert _decode(resp)["mode"] == "default"

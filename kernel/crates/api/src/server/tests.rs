@@ -1788,6 +1788,7 @@ async fn test_stage_recover_history_merges_overlay_with_birth_fields() {
         true,
         Some(&overlay),
         &Default::default(),
+        "",
     )
     .await
     .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -2366,6 +2367,59 @@ async fn test_replay_after_interrupt_does_not_duplicate_user_message() {
     assert!(!invoker.seen_states.lock().unwrap().is_empty());
 }
 
+/// 轮首 user 消息槽位必须带 run_id（append op 的 _run_id 落表）：regenerate
+/// 审计锚预检读 message_slots.run_id，NULL 即"目标 user 消息无有效 run_id"
+/// 整轮拒绝——轮首消息（触发新 run 的那条）曾因此全部不可编辑重发/回退。
+#[tokio::test]
+async fn test_user_message_slot_carries_run_id() {
+    let (state, _invoker, _store, sqlite) = make_engine_state();
+    let tenant = TenantContext::new("tenant_runid", "thread_runid");
+    let r = agentos_tenant::scope(
+        tenant,
+        process_via_engine(
+            &state,
+            "审计锚测试消息",
+            "agentos",
+            "pipe_runid",
+            "thread_runid",
+            "o1",
+            "",
+            "",
+            None,
+            None,
+            "",
+        ),
+    )
+    .await;
+    assert!(!r.failed, "首轮发送不应失败: {}", r.content);
+
+    // message_slots 里该 user 消息（seq 0）的 run_id 非空且与 runs 表对齐
+    let slot_run: String = sqlite
+        .with_conn(|c| {
+            c.query_row(
+                "SELECT COALESCE(s.run_id, '') FROM message_slots s \
+                 WHERE s.pipeline_id = 'pipe_runid' AND s.seq = 0 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    let run_row: String = sqlite
+        .with_conn(|c| {
+            c.query_row(
+                "SELECT run_id FROM runs WHERE pipeline_id = 'pipe_runid' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert!(
+        !slot_run.is_empty(),
+        "轮首 user 消息槽位 run_id 不得为空（审计锚）"
+    );
+    assert_eq!(slot_run, run_row, "槽位 run_id 必须与本轮 run 对齐");
+}
+
 /// 正常连续两轮同文消息不受幂等影响：第一轮已消费（assistant 跟随），
 /// 第二轮同文 user 是新输入 → 应正常 append（2 条 user）。
 #[tokio::test]
@@ -2878,6 +2932,7 @@ async fn test_stage_recover_history_stamps_cmid_metadata() {
         false,
         None,
         &Default::default(),
+        "",
     )
     .await
     .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -2902,6 +2957,7 @@ async fn test_stage_recover_history_stamps_cmid_metadata() {
         false,
         None,
         &Default::default(),
+        "",
     )
     .await
     .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -2946,6 +3002,7 @@ async fn test_interrupted_tail_respects_client_message_id() {
             false,
             None,
             &Default::default(),
+            "",
         )
         .await
         .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -3004,6 +3061,7 @@ async fn test_stage_recover_history_skip_user_append() {
             skip,
             None,
             &Default::default(),
+            "",
         )
         .await
         .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -3095,6 +3153,7 @@ async fn test_stage_recover_history_user_append_failure_is_observable() {
         false,
         None,
         &Default::default(),
+        "",
     )
     .await;
 
@@ -3172,6 +3231,7 @@ async fn test_hot_resume_restores_snapshot_scalars() {
         false,
         None,
         &Default::default(),
+        "",
     )
     .await
     .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -3226,6 +3286,7 @@ async fn test_hot_resume_without_scalars_is_noop_merge() {
         false,
         None,
         &Default::default(),
+        "",
     )
     .await
     .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -3627,6 +3688,7 @@ async fn cold_recovery_replays_only_own_pipeline_traces() {
         true,
         None,
         &declared,
+        "",
     )
     .await
     .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -3662,6 +3724,7 @@ async fn cold_recovery_replays_only_own_pipeline_traces() {
         true,
         None,
         &declared,
+        "",
     )
     .await
     .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -3716,6 +3779,7 @@ async fn resume_overlay_reset_survives_hot_path_recovery() {
         true,
         Some(&overlay),
         &Default::default(),
+        "",
     )
     .await
     .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -3762,6 +3826,7 @@ async fn resume_overlay_reset_survives_cold_path_recovery() {
         true,
         Some(&overlay),
         &Default::default(),
+        "",
     )
     .await
     .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -3797,6 +3862,7 @@ async fn recovery_without_overlay_still_restores_persisted_scalars() {
         true,
         None,
         &Default::default(),
+        "",
     )
     .await
     .expect("stage_recover_history 应成功（本测试注入无故障）");
@@ -4297,6 +4363,7 @@ async fn b3_user_append_fails_all_retries_then_err_and_memory_restored() {
         "pipe_b3a",
         "hello",
         "",
+        "test-run-id",
     )
     .await;
 
@@ -4331,6 +4398,7 @@ async fn b3_user_append_recovers_after_transient_failures_without_double_write()
         "pipe_b3b",
         "transient",
         "",
+        "test-run-id",
     )
     .await;
 
@@ -4360,6 +4428,7 @@ async fn b3_user_append_first_try_carries_client_message_id() {
         "pipe_b3c",
         "with-cmid",
         "cm-123",
+        "test-run-id",
     )
     .await;
 
@@ -4397,6 +4466,7 @@ async fn b3_stage_recover_history_maps_persist_failure_to_failed_outcome() {
         false,
         None,
         &std::collections::HashSet::new(),
+        "",
     )
     .await;
 
@@ -4415,5 +4485,2660 @@ async fn b3_stage_recover_history_maps_persist_failure_to_failed_outcome() {
             );
             assert!(store.attempt_count() >= 3, "必须先重试满再上抛");
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 覆盖率补测：routes.rs HTTP 路由层（actions / plugins / plugin+pipeline
+// config / pipelines runs+state / system restart / schema 聚合）。
+// 断行为契约（请求→响应状态码/响应体/落盘副作用），mock 只落在 invoker 边界。
+// ═══════════════════════════════════════════════════════════════════════
+
+mod routes_endpoints_tests {
+    use super::*;
+    use crate::routes::{
+        get_pipeline_config_handler, get_plugin_config_handler, ActionsExecuteRequest, EnabledBody,
+        PipelineConfigUpdateRequest, PluginConfigUpdateRequest,
+    };
+    use agentos_core::traits::{HookContext, LifecycleHook, PluginInvoker, PluginManifest};
+    use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
+    use axum::http::HeaderMap;
+
+    /// 记录 invoke_tool 调用并可注入失败的 invoker（其余方法本组测试不可达）。
+    struct ToolCallInvoker {
+        calls: std::sync::Mutex<Vec<(String, String, serde_json::Value)>>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl PluginInvoker for ToolCallInvoker {
+        async fn invoke_pipeline_plugin<'a>(
+            &self,
+            _plugin_id: &str,
+            _ctx: &PluginContext<'a>,
+        ) -> Result<PluginResult, PluginError> {
+            unimplemented!("actions 测试不触达管道插件调用")
+        }
+        async fn invoke_tool(
+            &self,
+            plugin_id: &str,
+            tool_name: &str,
+            inputs: &serde_json::Value,
+        ) -> Result<ToolExecutionResult, PluginError> {
+            self.calls.lock().unwrap().push((
+                plugin_id.to_string(),
+                tool_name.to_string(),
+                inputs.clone(),
+            ));
+            if self.fail {
+                return Err(PluginError {
+                    message: "sidecar 执行失败".to_string(),
+                    code: None,
+                    source: None,
+                });
+            }
+            Ok(ToolExecutionResult::success(serde_json::json!({
+                "echo": inputs,
+            })))
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            _hook: LifecycleHook,
+            _context: &HookContext,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
+    fn manifest_from_json(v: serde_json::Value) -> PluginManifest {
+        serde_json::from_value(v).expect("valid test manifest")
+    }
+
+    fn base_manifest(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "python server.py",
+            "capabilities": {},
+        })
+    }
+
+    fn bearer_headers() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", scaffold_admin_bearer().parse().unwrap());
+        h
+    }
+
+    // ── POST /api/v1/actions/execute ─────────────────────────────────────
+
+    fn manifest_with_commands(id: &str, commands: serde_json::Value) -> PluginManifest {
+        manifest_from_json(serde_json::json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "python server.py",
+            "contributes": { "commands": commands },
+            "capabilities": {},
+        }))
+    }
+
+    #[tokio::test]
+    async fn actions_execute_blank_action_returns_400() {
+        let state = AppState::new();
+        for action in ["", "   "] {
+            let err = actions_execute_handler(
+                axum::extract::State(state.clone()),
+                axum::Json(ActionsExecuteRequest {
+                    action: action.to_string(),
+                    args: serde_json::json!({}),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, ApiError::BadRequest { .. }),
+                "空 action {action:?} 应 400，实际 {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn actions_execute_unknown_command_returns_404() {
+        let state = AppState::new();
+        let err = actions_execute_handler(
+            axum::extract::State(state),
+            axum::Json(ActionsExecuteRequest {
+                action: "no.such.command".to_string(),
+                args: serde_json::json!({}),
+            }),
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ApiError::NotFound { message } => {
+                assert!(message.contains("no.such.command"), "{message}");
+            }
+            other => panic!("未声明命令应 404，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn actions_execute_declared_command_without_tool_acks() {
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest_with_commands(
+            "cmd_plugin",
+            serde_json::json!([
+                { "id": "cmd.a", "label": "A" },
+                { "id": "cmd.b", "label": "B" }
+            ]),
+        )]));
+
+        for action in ["cmd.a", "cmd.b"] {
+            let resp = actions_execute_handler(
+                axum::extract::State(state.clone()),
+                axum::Json(ActionsExecuteRequest {
+                    action: action.to_string(),
+                    args: serde_json::json!({"k": 1}),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resp.0["success"], serde_json::json!(true));
+            assert_eq!(resp.0["result"]["acknowledged"], serde_json::json!(true));
+            assert_eq!(resp.0["result"]["action"], action);
+            assert_eq!(resp.0["plugin_id"], "cmd_plugin");
+        }
+    }
+
+    #[tokio::test]
+    async fn actions_execute_tool_command_routes_to_invoker() {
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest_with_commands(
+            "tool_plugin",
+            serde_json::json!([{ "id": "cmd.tool", "tool": "my_tool", "label": "T" }]),
+        )]));
+        let invoker = Arc::new(ToolCallInvoker {
+            calls: std::sync::Mutex::new(Vec::new()),
+            fail: false,
+        });
+        state.invoker = Some(invoker.clone() as Arc<dyn PluginInvoker>);
+
+        let resp = actions_execute_handler(
+            axum::extract::State(state),
+            axum::Json(ActionsExecuteRequest {
+                action: "cmd.tool".to_string(),
+                args: serde_json::json!({"n": 7}),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(invoker.calls.lock().unwrap().len(), 1, "恰好一次工具调用");
+        let (pid, tool, args) = invoker.calls.lock().unwrap()[0].clone();
+        assert_eq!(pid, "tool_plugin");
+        assert_eq!(tool, "my_tool");
+        assert_eq!(args, serde_json::json!({"n": 7}));
+        assert_eq!(resp.0["success"], serde_json::json!(true));
+        assert_eq!(resp.0["result"]["echo"]["n"], serde_json::json!(7));
+        assert_eq!(resp.0["plugin_id"], "tool_plugin");
+    }
+
+    #[tokio::test]
+    async fn actions_execute_tool_invoker_error_is_explicit_failure() {
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest_with_commands(
+            "tool_plugin",
+            serde_json::json!([{ "id": "cmd.tool", "tool": "my_tool" }]),
+        )]));
+        let invoker = Arc::new(ToolCallInvoker {
+            calls: std::sync::Mutex::new(Vec::new()),
+            fail: true,
+        });
+        state.invoker = Some(invoker as Arc<dyn PluginInvoker>);
+
+        let resp = actions_execute_handler(
+            axum::extract::State(state),
+            axum::Json(ActionsExecuteRequest {
+                action: "cmd.tool".to_string(),
+                args: serde_json::json!({}),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["success"], serde_json::json!(false));
+        assert!(
+            resp.0["error"]
+                .as_str()
+                .unwrap()
+                .contains("sidecar 执行失败"),
+            "invoker 错误必须显式透出: {}",
+            resp.0["error"]
+        );
+    }
+
+    #[tokio::test]
+    async fn actions_execute_tool_without_invoker_reports_unavailable() {
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest_with_commands(
+            "tool_plugin",
+            serde_json::json!([{ "id": "cmd.tool", "tool": "my_tool" }]),
+        )]));
+        // invoker = None
+
+        let resp = actions_execute_handler(
+            axum::extract::State(state),
+            axum::Json(ActionsExecuteRequest {
+                action: "cmd.tool".to_string(),
+                args: serde_json::json!({}),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["success"], serde_json::json!(false));
+        assert!(
+            resp.0["error"]
+                .as_str()
+                .unwrap()
+                .contains("工具执行器不可用"),
+            "执行器缺席必须明说，不得假成功: {}",
+            resp.0["error"]
+        );
+        assert_eq!(resp.0["plugin_id"], "tool_plugin");
+    }
+
+    // ── GET /api/v1/plugins（状态清单）────────────────────────────────────
+
+    #[tokio::test]
+    async fn plugins_status_projects_manifest_fields() {
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            manifest_from_json(serde_json::json!({
+                "id": "p_sys", "name": "系统插件", "version": "2.0.0",
+                "description": "desc-sys",
+                "plugin_type": "system", "language": "python",
+                "host_type": "in_process", "entry": "x",
+                "activation": "eager",
+                "capabilities": {},
+            })),
+            manifest_from_json(serde_json::json!({
+                "id": "p_tool", "name": "p_tool", "version": "1.0.0",
+                "plugin_type": "tool", "language": "python",
+                "host_type": "sidecar", "entry": "python server.py",
+                "activation": "manual",
+                "contributes": {"commands": []},
+                "http_endpoints": [
+                    {"route_id": "r1", "method": "GET", "path": "/ext/p_tool/x",
+                     "handler_capability": "http.handle"}
+                ],
+                "config_files": [
+                    {"id": "c1", "label": "可见", "path": "config/mine/a.yaml"},
+                    {"id": "c2", "label": "注入专用", "path": "config/mine/b.yaml",
+                     "settings": false}
+                ],
+                "capabilities": {},
+            })),
+            manifest_from_json(serde_json::json!({
+                "id": "p_pipe", "name": "p_pipe", "version": "1.0.0",
+                "plugin_type": "pipeline", "language": "python",
+                "host_type": "sidecar", "entry": "x",
+                "capabilities": {},
+            })),
+        ]));
+        state.enabled_plugin_ids =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+                "p_sys".to_string(),
+            ])));
+
+        let resp = plugins_status_handler(axum::extract::State(state)).await;
+        let items = resp.0.as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        let by_id = |i: &str| items.iter().find(|m| m["plugin_id"] == i).unwrap();
+
+        let sys = by_id("p_sys");
+        assert_eq!(sys["config_type"], "system");
+        assert_eq!(sys["host_type"], "in_process");
+        assert_eq!(sys["activation"], "eager");
+        assert_eq!(sys["enabled"], true);
+        assert_eq!(sys["status"], "active");
+        assert_eq!(sys["name"], "系统插件");
+        assert_eq!(sys["has_contributes"], false);
+        assert_eq!(sys["has_http_endpoints"], false);
+
+        let tool = by_id("p_tool");
+        assert_eq!(tool["config_type"], "tool");
+        assert_eq!(tool["host_type"], "sidecar");
+        assert_eq!(tool["activation"], "manual");
+        assert_eq!(tool["enabled"], false);
+        assert_eq!(tool["status"], "disabled");
+        assert_eq!(tool["has_contributes"], true);
+        assert_eq!(tool["has_http_endpoints"], true);
+        let cfgs = tool["config_files"].as_array().unwrap();
+        assert_eq!(cfgs.len(), 1, "settings:false 注入专用条目不出口");
+        assert_eq!(cfgs[0]["id"], "c1");
+
+        assert_eq!(by_id("p_pipe")["config_type"], "pipeline");
+    }
+
+    // ── GET /api/v1/pipelines（管道插件清单）─────────────────────────────
+
+    #[tokio::test]
+    async fn pipelines_lists_only_pipeline_manifests_with_role_and_host() {
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            manifest_from_json(serde_json::json!({
+                "id": "pl_1", "name": "pl_1", "version": "1.0.0",
+                "plugin_type": "pipeline", "language": "python",
+                "host_type": "sidecar", "entry": "x",
+                "pipeline_role": "input",
+                "capabilities": {},
+            })),
+            manifest_from_json(base_manifest("sys_1")),
+        ]));
+        let resp = pipelines_handler(axum::extract::State(state)).await;
+        let arr = &resp.0;
+        assert_eq!(arr.len(), 1, "只出口 Pipeline 类型清单");
+        assert_eq!(arr[0]["id"], "pl_1");
+        assert_eq!(arr[0]["role"], "input");
+        assert_eq!(arr[0]["host_type"], "sidecar");
+    }
+
+    // ── GET /api/v1/pipelines/runs ───────────────────────────────────────
+
+    async fn seed_run_with_slot(
+        sqlite: &Arc<agentos_engine::SqliteStore>,
+        run_id: &str,
+        pipeline_id: &str,
+        thread_id: &str,
+    ) {
+        use agentos_core::traits::StorageBackend;
+        let dyn_store: Arc<dyn StorageBackend> = sqlite.clone();
+        dyn_store
+            .create_run(run_id, "cfg", "default")
+            .await
+            .unwrap();
+        dyn_store
+            .set_run_pipeline(run_id, pipeline_id)
+            .await
+            .unwrap();
+        sqlite
+            .apply_messages_ops_to_table(
+                pipeline_id,
+                "default",
+                &[serde_json::json!({
+                    "op": "set", "seq": 0,
+                    "msg": {"role": "user", "content": "hi"},
+                    "_run_id": run_id,
+                })],
+            )
+            .unwrap();
+        dyn_store
+            .link_pipeline_session(pipeline_id, thread_id, "default")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pipelines_runs_without_db_returns_404() {
+        let state = AppState::new();
+        let err = pipelines_runs_handler(
+            axum::extract::State(state),
+            axum::extract::Query(std::collections::HashMap::new()),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ApiError::NotFound { .. }),
+            "db 缺席应 404: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipelines_runs_lists_joined_rows_with_status_and_limit_filters() {
+        use agentos_core::traits::StorageBackend;
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        seed_run_with_slot(&sqlite, "run_a", "pipe_a", "thread_a").await;
+        seed_run_with_slot(&sqlite, "run_b", "pipe_b", "thread_b").await;
+        let dyn_store: Arc<dyn StorageBackend> = sqlite.clone();
+        dyn_store
+            .update_run_status(
+                "run_b",
+                agentos_core::types::RunStatus::Completed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut state = AppState::new();
+        state.db = Some(sqlite);
+
+        // 无过滤：两个 run 都出口，行带 pipeline/thread 坐标
+        let resp = pipelines_runs_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(std::collections::HashMap::new()),
+            bearer_headers(),
+        )
+        .await
+        .unwrap();
+        let items = resp.0["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let ids: Vec<&str> = items
+            .iter()
+            .map(|r| r["run_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"run_a") && ids.contains(&"run_b"));
+        let row_a = items.iter().find(|r| r["run_id"] == "run_a").unwrap();
+        assert_eq!(row_a["pipeline_id"], "pipe_a");
+        assert_eq!(row_a["thread_id"], "thread_a");
+        assert_eq!(row_a["status"], "running");
+
+        // status=completed 只剩 run_b
+        let resp = pipelines_runs_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(std::collections::HashMap::from([(
+                "status".to_string(),
+                "completed".to_string(),
+            )])),
+            bearer_headers(),
+        )
+        .await
+        .unwrap();
+        let items = resp.0["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["run_id"], "run_b");
+
+        // limit=1 截断；非法 limit 回退默认（不报错）
+        for (limit_param, expect_len) in [("1", 1), ("not-a-number", 2)] {
+            let resp = pipelines_runs_handler(
+                axum::extract::State(state.clone()),
+                axum::extract::Query(std::collections::HashMap::from([(
+                    "limit".to_string(),
+                    limit_param.to_string(),
+                )])),
+                bearer_headers(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                resp.0["items"].as_array().unwrap().len(),
+                expect_len,
+                "limit={limit_param}"
+            );
+        }
+    }
+
+    // ── GET /api/v1/pipelines/state ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn pipelines_state_merges_memory_db_enrichment_and_cold_fallback() {
+        use agentos_core::traits::StorageBackend;
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let dyn_store: Arc<dyn StorageBackend> = sqlite.clone();
+        let reg = agentos_session::pipeline_state_registry::global_registry();
+
+        let mut state = AppState::new();
+        state.db = Some(sqlite.clone());
+        state.store = Some(dyn_store.clone());
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest_from_json(
+            serde_json::json!({
+                "id": "p_exp", "name": "p_exp", "version": "1.0.0",
+                "plugin_type": "system", "language": "python",
+                "host_type": "sidecar", "entry": "x",
+                "export_fields": ["task.status", "llm_model"],
+                "capabilities": {},
+            }),
+        )]));
+
+        // 全局 registry 是进程级共享（其余测试可能并发登记 default 租户条目），
+        // 这里不断言全局空态，只按本测试唯一 pipeline_id 断言行级行为。
+
+        // ① 内存热行（default 租户）+ ② 表行补齐声明键 llm_model
+        let pid_mem = "pipe_state_mem_cov";
+        reg.get_or_init(
+            "default",
+            pid_mem,
+            "thread_mem",
+            "agentos",
+            serde_json::json!({
+                "pipeline_id": pid_mem,
+                "current_phase": "final",
+                "run_status": "running",
+                "secret_field": "must-not-leak",
+            }),
+        );
+        dyn_store
+            .upsert_state_field(pid_mem, "default", "llm_model", &serde_json::json!("k2"))
+            .await
+            .unwrap();
+
+        // ③ 跨租户内存行不出口
+        reg.get_or_init(
+            "other_tenant",
+            "pipe_state_other_cov",
+            "t",
+            "a",
+            serde_json::json!({"pipeline_id": "pipe_state_other_cov"}),
+        );
+
+        // ④ DB 冷兜底行：checkpoint task.status=pending 被表行 completed 覆盖
+        let pid_cold = "pipe_state_cold_cov";
+        let ckpt = serde_json::json!({"task.status": "pending", "pipeline_id": pid_cold});
+        dyn_store
+            .save_checkpoint(pid_cold, "default", 3, &ckpt)
+            .await
+            .unwrap();
+        dyn_store
+            .upsert_state_field(
+                pid_cold,
+                "default",
+                "task.status",
+                &serde_json::json!("completed"),
+            )
+            .await
+            .unwrap();
+        // 冷行需要 runs × message_slots 联结可见
+        sqlite.create_run("run_cold_cov", "cfg", "default").unwrap();
+        sqlite
+            .apply_messages_ops_to_table(
+                pid_cold,
+                "default",
+                &[serde_json::json!({
+                    "op": "set", "seq": 0,
+                    "msg": {"role": "user", "content": "hi"},
+                    "_run_id": "run_cold_cov",
+                })],
+            )
+            .unwrap();
+        dyn_store
+            .link_pipeline_session(pid_cold, "thread_cold", "default")
+            .await
+            .unwrap();
+
+        let resp = pipelines_state_handler(axum::extract::State(state), bearer_headers())
+            .await
+            .unwrap();
+        let items = resp.0["items"].as_array().unwrap();
+        let by_pid = |p: &str| {
+            items
+                .iter()
+                .find(|i| i["pipeline_id"] == p)
+                .unwrap_or_else(|| panic!("缺 {p} 行: {}", resp.0))
+        };
+
+        let mem = by_pid(pid_mem);
+        assert_eq!(mem["source"], "memory");
+        assert_eq!(mem["thread_id"], "thread_mem");
+        assert_eq!(mem["agent_id"], "agentos");
+        assert_eq!(mem["state"]["run_status"], "running", "基线键出口");
+        assert_eq!(
+            mem["state"]["llm_model"], "k2",
+            "内存缺失的声明键由表行补齐"
+        );
+        assert!(mem["state"].get("secret_field").is_none(), "未声明键不出口");
+
+        let cold = by_pid(pid_cold);
+        assert_eq!(cold["source"], "checkpoint");
+        assert_eq!(cold["thread_id"], "thread_cold");
+        assert_eq!(
+            cold["state"]["task.status"], "completed",
+            "表行最新值覆盖 checkpoint 过期值"
+        );
+
+        assert!(
+            items
+                .iter()
+                .all(|i| i["pipeline_id"] != "pipe_state_other_cov"),
+            "跨租户内存行不得出口"
+        );
+
+        reg.remove("default", pid_mem);
+        reg.remove("other_tenant", "pipe_state_other_cov");
+        reg.remove("default", pid_cold);
+    }
+
+    // ── /api/v1/config/pipelines/{name}（P7 管道配置读写）────────────────
+
+    #[tokio::test]
+    async fn pipeline_config_get_guards_and_etag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _user_space_guard = crate::test_env::pin_user_root(tmp.path());
+        let cfg_dir = tmp.path().join("config").join("pipelines");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("demo.yaml"), "name: demo\nmax_rounds: 5\n").unwrap();
+        std::fs::write(cfg_dir.join("broken.yaml"), "[:not yaml").unwrap();
+
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().to_path_buf());
+
+        // 非法 name（穿越/含点）→ 400
+        for bad in ["../evil", "bad.name"] {
+            let err = get_pipeline_config_with_etag(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(bad.to_string()),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, ApiError::BadRequest { .. }),
+                "非法 name {bad} 应 400，实际 {err:?}"
+            );
+        }
+        // project_root 缺席 → 500
+        let err = get_pipeline_config_with_etag(
+            axum::extract::State(AppState::new()),
+            axum::extract::Path("demo".to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Internal { .. }));
+        // 未知管道 → 404
+        let err = get_pipeline_config_with_etag(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("nope".to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::NotFound { .. }));
+        // 损坏 yaml → 500
+        let err = get_pipeline_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("broken".to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Internal { .. }));
+
+        // 正常读：内容解析 + ETag 响应头
+        let resp = get_pipeline_config_with_etag(
+            axum::extract::State(state),
+            axum::extract::Path("demo".to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(resp.headers().get("etag").is_some(), "ETag 响应头");
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["name"], "demo");
+        assert_eq!(v["data"]["max_rounds"], 5);
+        assert!(!v["etag"].as_str().unwrap().is_empty());
+    }
+
+    fn valid_pipeline_config() -> serde_json::Value {
+        serde_json::json!({
+            "name": "demo",
+            "loop_bodies": [
+                {"id": "main", "steps": [{"id": "llm", "steps": ["mock_llm_core"]}]}
+            ],
+        })
+    }
+
+    #[tokio::test]
+    async fn pipeline_config_put_guards() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _user_space_guard = crate::test_env::pin_user_root(tmp.path());
+        let cfg_dir = tmp.path().join("config").join("pipelines");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("demo.yaml"), "name: demo\n").unwrap();
+
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().to_path_buf());
+        let req = |data: serde_json::Value, if_match: Option<&str>| PipelineConfigUpdateRequest {
+            data,
+            if_match: if_match.map(str::to_string),
+        };
+
+        // 非法 name → 400
+        let err = put_pipeline_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("../evil".to_string()),
+            axum::Json(req(valid_pipeline_config(), None)),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+
+        // data 非映射 → 400，且消息带实际类型名
+        for (data, ty) in [
+            (serde_json::json!([1, 2]), "array"),
+            (serde_json::json!("scalar"), "string"),
+        ] {
+            let err = put_pipeline_config_handler(
+                axum::extract::State(state.clone()),
+                axum::extract::Path("demo".to_string()),
+                axum::Json(req(data, None)),
+            )
+            .await
+            .unwrap_err();
+            match err {
+                ApiError::BadRequest { message } => assert!(message.contains(ty), "{message}"),
+                other => panic!("非映射 data 应 400，实际 {other:?}"),
+            }
+        }
+
+        // G10 DSL 校验失败（旧形态键 routes）→ 400
+        let legacy = serde_json::json!({
+            "name": "demo",
+            "loop_bodies": [{"id": "m", "routes": []}],
+        });
+        let err = put_pipeline_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("demo".to_string()),
+            axum::Json(req(legacy, None)),
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ApiError::BadRequest { message } => {
+                assert!(message.contains("validation failed"), "{message}")
+            }
+            other => panic!("DSL 违例应 400，实际 {other:?}"),
+        }
+
+        // 文件不存在 → 404（PUT 不再隐式创建）
+        let err = put_pipeline_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("ghost".to_string()),
+            axum::Json(req(valid_pipeline_config(), None)),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::NotFound { .. }));
+
+        // If-Match 缺失/不匹配 → 409
+        for if_match in [None, Some("deadbeef")] {
+            let err = put_pipeline_config_handler(
+                axum::extract::State(state.clone()),
+                axum::extract::Path("demo".to_string()),
+                axum::Json(req(valid_pipeline_config(), if_match)),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, ApiError::Conflict { .. }),
+                "If-Match {if_match:?} 应 409，实际 {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_config_put_roundtrip_updates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _user_space_guard = crate::test_env::pin_user_root(tmp.path());
+        let cfg_dir = tmp.path().join("config").join("pipelines");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("demo.yaml"), "name: demo\nmax_rounds: 5\n").unwrap();
+
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().to_path_buf());
+
+        let current = std::fs::read_to_string(cfg_dir.join("demo.yaml")).unwrap();
+        let current_etag = crate::config_service::compute_etag(current.as_bytes());
+        let mut new_config = valid_pipeline_config();
+        new_config["max_rounds"] = serde_json::json!(9);
+
+        let resp = put_pipeline_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("demo".to_string()),
+            axum::Json(PipelineConfigUpdateRequest {
+                data: new_config,
+                if_match: Some(current_etag.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["name"], "demo");
+        let new_etag = resp.0["etag"].as_str().unwrap().to_string();
+        assert!(!new_etag.is_empty(), "新 ETag 非空");
+        assert_ne!(new_etag, current_etag, "写盘后 ETag 必须更新");
+
+        // GET 回读新内容
+        let resp = get_pipeline_config_handler(
+            axum::extract::State(state),
+            axum::extract::Path("demo".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.data["max_rounds"], 9);
+        assert_eq!(resp.etag, new_etag, "GET ETag 与 PUT 返回一致");
+    }
+
+    // ── /api/v1/plugins/{id}/config/{file_id}（插件配置读写）─────────────
+
+    /// env target 条目清单（GAP-4：key 写 .env）。
+    fn env_config_manifest() -> PluginManifest {
+        manifest_from_json(serde_json::json!({
+            "id": "env_plugin", "name": "env_plugin", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "python server.py",
+            "config_files": [{
+                "id": "env_main", "label": "Env Keys", "target": "env",
+                "fields": [
+                    {"name": "FOO_KEY", "label": "Foo", "type": "secret"},
+                    {"name": "BAR_SECRET", "label": "Bar", "type": "secret"}
+                ]
+            }],
+            "capabilities": {},
+        }))
+    }
+
+    #[tokio::test]
+    async fn plugin_config_get_guards_and_env_masked_view() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _user_space_guard = crate::test_env::pin_user_root(tmp.path());
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().to_path_buf());
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![env_config_manifest()]));
+
+        // project_root 缺席 → 500
+        let err = get_plugin_config_with_etag(
+            axum::extract::State(AppState::new()),
+            axum::extract::Path(("env_plugin".to_string(), "env_main".to_string())),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Internal { .. }));
+
+        // 未知插件 / 未知 file_id → 404
+        for (pid, fid) in [("ghost", "env_main"), ("env_plugin", "nope")] {
+            let err = get_plugin_config_with_etag(
+                axum::extract::State(state.clone()),
+                axum::extract::Path((pid.to_string(), fid.to_string())),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, ApiError::NotFound { .. }),
+                "({pid},{fid}) 应 404，实际 {err:?}"
+            );
+        }
+
+        // .env 未写：两字段均未设置 → "" 掩码视图 + ETag
+        let resp = get_plugin_config_with_etag(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("env_plugin".to_string(), "env_main".to_string())),
+        )
+        .await
+        .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["path"], ".env");
+        assert_eq!(v["data"]["FOO_KEY"], "");
+        assert_eq!(v["data"]["BAR_SECRET"], "");
+
+        // 写入 FOO_KEY 后：已设置字段 → "***" 哨兵（has_key 语义）
+        agentos_mcp::env_file::write_env_updates(
+            &agentos_mcp::env_file::env_path_for_root(tmp.path()),
+            &[("FOO_KEY".to_string(), "hello".to_string())],
+        )
+        .unwrap();
+        let resp = get_plugin_config_handler(
+            axum::extract::State(state),
+            axum::extract::Path(("env_plugin".to_string(), "env_main".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.data["FOO_KEY"], "***", "已设置字段只出口哨兵");
+        assert_eq!(resp.data["BAR_SECRET"], "", "未设置字段出口空串");
+    }
+
+    #[tokio::test]
+    async fn plugin_config_put_env_target_guards_and_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _user_space_guard = crate::test_env::pin_user_root(tmp.path());
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().to_path_buf());
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![env_config_manifest()]));
+
+        // 当前掩码视图的 ETag（乐观锁基准）
+        let current = get_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("env_plugin".to_string(), "env_main".to_string())),
+        )
+        .await
+        .unwrap();
+        let current_etag = current.etag.clone();
+
+        let req = |data: serde_json::Value, if_match: Option<String>| PluginConfigUpdateRequest {
+            data,
+            if_match,
+        };
+
+        // 未声明字段 → 400
+        let err = put_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("env_plugin".to_string(), "env_main".to_string())),
+            axum::Json(req(
+                serde_json::json!({"UNDECLARED": "x"}),
+                Some(current_etag.clone()),
+            )),
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ApiError::BadRequest { message } => assert!(message.contains("UNDECLARED")),
+            other => panic!("未声明 env 字段应 400，实际 {other:?}"),
+        }
+
+        // If-Match 缺失 / 不匹配 → 409
+        for if_match in [None, Some("stale".to_string())] {
+            let err = put_plugin_config_handler(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(("env_plugin".to_string(), "env_main".to_string())),
+                axum::Json(req(serde_json::json!({}), if_match)),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, ApiError::Conflict { .. }), "实际 {err:?}");
+        }
+
+        // 正确 If-Match：*** 哨兵保留现值，新值写入 .env
+        let resp = put_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("env_plugin".to_string(), "env_main".to_string())),
+            axum::Json(req(
+                serde_json::json!({"FOO_KEY": "***", "BAR_SECRET": "new-bar"}),
+                Some(current_etag),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["ok"], serde_json::json!(true));
+        assert!(!resp.0["etag"].as_str().unwrap().is_empty());
+
+        let env_path = agentos_mcp::env_file::env_path_for_root(tmp.path());
+        let raw = std::fs::read_to_string(&env_path).unwrap();
+        let parsed = agentos_mcp::env_file::parse_env_text_for_read(&raw);
+        assert_eq!(
+            parsed.get("BAR_SECRET").map(String::as_str),
+            Some("new-bar")
+        );
+        assert!(
+            !parsed.contains_key("FOO_KEY"),
+            "哨兵字段不得写入（保留现值语义）: {raw}"
+        );
+
+        // GET 掩码视图反映新状态
+        let after = get_plugin_config_handler(
+            axum::extract::State(state),
+            axum::extract::Path(("env_plugin".to_string(), "env_main".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(after.data["FOO_KEY"], "");
+        assert_eq!(after.data["BAR_SECRET"], "***");
+    }
+
+    /// 内联形态（path 空）配置：真值 = fields.default，PUT 原地写回 plugin.json。
+    fn inline_plugin_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "inline_plugin", "name": "inline_plugin", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "python server.py",
+            "capabilities": {},
+            "config_files": [{
+                "id": "limits", "label": "Limits", "path": "",
+                "fields": [
+                    {"name": "budgets.l1", "label": "L1", "type": "number",
+                     "default": 0.3},
+                    {"name": "compression.model", "label": "M", "type": "string",
+                     "default": "k2"}
+                ]
+            }],
+        })
+    }
+
+    fn inline_manifest() -> PluginManifest {
+        manifest_from_json(inline_plugin_json())
+    }
+
+    #[tokio::test]
+    async fn plugin_config_inline_put_roundtrip_writes_manifest_and_syncs_memory() {
+        let plugin_dir = tempfile::tempdir().unwrap();
+        let _user_space_guard = crate::test_env::pin_user_root(plugin_dir.path());
+        std::fs::write(
+            plugin_dir.path().join("plugin.json"),
+            serde_json::to_string_pretty(&inline_plugin_json()).unwrap(),
+        )
+        .unwrap();
+        let mut state = AppState::new();
+        // 内联形态入口同样强制 project_root 门（校验先行），真值读写走 plugin_dirs
+        state.project_root = Some(plugin_dir.path().to_path_buf());
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![inline_manifest()]));
+        state.plugin_dirs = Arc::new(std::collections::HashMap::from([(
+            "inline_plugin".to_string(),
+            plugin_dir.path().to_path_buf(),
+        )]));
+
+        // GET 内联视图 = fields.default 组装
+        let current = get_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("inline_plugin".to_string(), "limits".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(current.data["budgets"]["l1"], serde_json::json!(0.3));
+        assert_eq!(current.data["compression"]["model"], "k2");
+        assert_eq!(current.path, "", "内联形态 path 为空");
+        let etag_v1 = current.etag.clone();
+
+        // If-Match 缺失 → 409
+        let err = put_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("inline_plugin".to_string(), "limits".to_string())),
+            axum::Json(PluginConfigUpdateRequest {
+                data: serde_json::json!({"budgets": {"l1": 0.5}}),
+                if_match: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Conflict { .. }));
+
+        // data 非对象 → 400
+        let err = put_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("inline_plugin".to_string(), "limits".to_string())),
+            axum::Json(PluginConfigUpdateRequest {
+                data: serde_json::json!([1]),
+                if_match: Some(etag_v1.clone()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+
+        // 未声明叶路径 fail-closed → 400 点名完整路径
+        let err = put_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("inline_plugin".to_string(), "limits".to_string())),
+            axum::Json(PluginConfigUpdateRequest {
+                data: serde_json::json!({"budgets": {"nonsense": 1}}),
+                if_match: Some(etag_v1.clone()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ApiError::BadRequest { message } => {
+                assert!(message.contains("budgets.nonsense"), "{message}")
+            }
+            other => panic!("未声明叶路径应 400，实际 {other:?}"),
+        }
+
+        // 正确保存：0.3→0.5 + null 清除 compression.model default
+        let resp = put_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("inline_plugin".to_string(), "limits".to_string())),
+            axum::Json(PluginConfigUpdateRequest {
+                data: serde_json::json!(
+                    {"budgets": {"l1": 0.5}, "compression.model": null}
+                ),
+                if_match: Some(etag_v1),
+            }),
+        )
+        .await
+        .unwrap();
+        let etag_v2 = resp.0["etag"].as_str().unwrap().to_string();
+        assert!(!etag_v2.is_empty(), "新 ETag 非空");
+        assert_ne!(etag_v2, current.etag, "保存后 ETag 必须变化");
+
+        // 磁盘 plugin.json 落盘核对
+        let disk: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(plugin_dir.path().join("plugin.json")).unwrap(),
+        )
+        .unwrap();
+        let fields = disk["config_files"][0]["fields"].as_array().unwrap();
+        let l1 = fields.iter().find(|f| f["name"] == "budgets.l1").unwrap();
+        assert_eq!(l1["default"], serde_json::json!(0.5), "新默认值落盘");
+        let model = fields
+            .iter()
+            .find(|f| f["name"] == "compression.model")
+            .unwrap();
+        assert!(
+            model.get("default").is_none(),
+            "null 保存 = 清除 default: {model}"
+        );
+
+        // 内存 manifest 同步：GET 即时反映新值
+        let after = get_plugin_config_handler(
+            axum::extract::State(state),
+            axum::extract::Path(("inline_plugin".to_string(), "limits".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(after.data["budgets"]["l1"], serde_json::json!(0.5));
+        assert!(after.data.get("compression").is_none(), "清除后不再出口");
+        assert_eq!(after.etag, etag_v2);
+    }
+
+    #[tokio::test]
+    async fn plugin_config_inline_put_without_plugin_dir_returns_500() {
+        let plugin_dir = tempfile::tempdir().unwrap();
+        let _user_space_guard = crate::test_env::pin_user_root(plugin_dir.path());
+        let mut state = AppState::new();
+        state.project_root = Some(plugin_dir.path().to_path_buf());
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![inline_manifest()]));
+        // plugin_dirs 空 → 目录映射缺失
+
+        let current = get_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("inline_plugin".to_string(), "limits".to_string())),
+        )
+        .await
+        .unwrap();
+        let err = put_plugin_config_handler(
+            axum::extract::State(state),
+            axum::extract::Path(("inline_plugin".to_string(), "limits".to_string())),
+            axum::Json(PluginConfigUpdateRequest {
+                data: serde_json::json!({"budgets": {"l1": 0.5}}),
+                if_match: Some(current.etag.clone()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ApiError::Internal { .. }),
+            "目录映射缺失应 500，实际 {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_config_referenced_file_masking_and_put_sentinels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _user_space_guard = crate::test_env::pin_user_root(tmp.path());
+        let cfg_dir = tmp.path().join("config").join("mymodels");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("llm.yaml"),
+            "api_key: real_secret\nmodel: gpt-x\nplaceholder: ${MY_VAR}\n",
+        )
+        .unwrap();
+        std::fs::write(cfg_dir.join("broken.yaml"), "[:bad").unwrap();
+
+        let manifest = manifest_from_json(serde_json::json!({
+            "id": "ref_plugin", "name": "ref_plugin", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "python server.py",
+            "config_files": [
+                {"id": "llm", "label": "LLM", "path": "config/mymodels/llm.yaml",
+                 "fields": []},
+                {"id": "absent", "label": "Absent", "path": "config/mymodels/none.yaml",
+                 "fields": []},
+                {"id": "broken", "label": "Broken", "path": "config/mymodels/broken.yaml",
+                 "fields": []}
+            ],
+            "capabilities": {},
+        }));
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().to_path_buf());
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
+
+        // GET 掩码：真实 secret → ****，${VAR} 占位符原样
+        let current = get_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("ref_plugin".to_string(), "llm".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(current.data["api_key"], "****");
+        assert_eq!(current.data["placeholder"], "${MY_VAR}");
+        assert_eq!(current.data["model"], "gpt-x");
+        assert_eq!(current.path, "config/mymodels/llm.yaml");
+        let etag_v1 = current.etag.clone();
+
+        // 引用文件缺失 → 空配置视图（PUT 保存将创建文件）
+        let absent = get_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("ref_plugin".to_string(), "absent".to_string())),
+        )
+        .await
+        .unwrap();
+        assert!(absent.data.as_object().unwrap().is_empty());
+
+        // 损坏 yaml → 500
+        let err = get_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("ref_plugin".to_string(), "broken".to_string())),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Internal { .. }));
+
+        // PUT：If-Match 缺失 → 409
+        let err = put_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("ref_plugin".to_string(), "llm".to_string())),
+            axum::Json(PluginConfigUpdateRequest {
+                data: serde_json::json!({"model": "gpt-5"}),
+                if_match: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Conflict { .. }));
+
+        // PUT：*** 哨兵保留磁盘原 secret，普通字段更新
+        let resp = put_plugin_config_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("ref_plugin".to_string(), "llm".to_string())),
+            axum::Json(PluginConfigUpdateRequest {
+                data: serde_json::json!({"model": "gpt-5", "api_key": "***"}),
+                if_match: Some(etag_v1.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        let etag_v2 = resp.0["etag"].as_str().unwrap().to_string();
+        assert_ne!(etag_v2, etag_v1);
+
+        let disk = std::fs::read_to_string(cfg_dir.join("llm.yaml")).unwrap();
+        assert!(
+            disk.contains("real_secret"),
+            "哨兵字段必须保留磁盘原值: {disk}"
+        );
+        assert!(disk.contains("gpt-5"), "普通字段必须更新: {disk}");
+
+        // GET 新 ETag 与更新视图一致
+        let after = get_plugin_config_handler(
+            axum::extract::State(state),
+            axum::extract::Path(("ref_plugin".to_string(), "llm".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(after.data["model"], "gpt-5");
+        assert_eq!(after.etag, etag_v2);
+    }
+
+    // ── POST /api/v1/plugins/validate-all（registry ↔ 磁盘一致性检出）────
+
+    /// 在目录落一份磁盘 plugin.json。
+    fn write_disk_manifest(dir: &std::path::Path, v: &serde_json::Value) {
+        std::fs::write(
+            dir.join("plugin.json"),
+            serde_json::to_string_pretty(v).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_all_detects_registry_disk_consistency() {
+        let plugin_dir = tempfile::tempdir().unwrap();
+        let registry_manifest = serde_json::json!({
+            "id": "p_disk", "name": "p_disk", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "python server.py",
+            "capabilities": {"tools": [{"name": "t1", "description": "t1"}]},
+        });
+
+        // 无目录映射 → disk_manifest_unreadable（不可读不得静默当绿）
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest_from_json(
+            registry_manifest.clone(),
+        )]));
+        state.invoker = Some(Arc::new(RecordingInvoker {
+            seen: std::sync::Mutex::new(Vec::new()),
+            seen_states: std::sync::Mutex::new(Vec::new()),
+            hooks: std::sync::Mutex::new(Vec::new()),
+            list_tools: std::collections::HashMap::from([(
+                "p_disk".to_string(),
+                serde_json::json!({"tools": [{"name": "t1", "description": "t1"}]}),
+            )]),
+        }) as Arc<dyn PluginInvoker>);
+        let resp = validate_all_plugins_handler(axum::extract::State(state.clone())).await;
+        let reports = resp.0["consistency_reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["status"], "disk_manifest_unreadable");
+        assert_eq!(resp.0["registry_disk_mismatches"], 0);
+
+        // 磁盘一致 → 无 consistency 报告
+        write_disk_manifest(plugin_dir.path(), &registry_manifest);
+        state.plugin_dirs = Arc::new(std::collections::HashMap::from([(
+            "p_disk".to_string(),
+            plugin_dir.path().to_path_buf(),
+        )]));
+        let resp = validate_all_plugins_handler(axum::extract::State(state.clone())).await;
+        assert!(
+            resp.0["consistency_reports"].as_array().unwrap().is_empty(),
+            "一致时不得有差异报告: {}",
+            resp.0
+        );
+        assert_eq!(resp.0["registry_disk_mismatches"], 0);
+        assert_eq!(resp.0["clean"], 1);
+
+        // 磁盘漂移（磁盘多声明一个工具 → 注册表侧 missing_tool）→ mismatch + diffs
+        let mut drifted = registry_manifest.clone();
+        drifted["capabilities"]["tools"] = serde_json::json!([
+            {"name": "t1", "description": "t1"},
+            {"name": "t2_extra", "description": "磁盘新声明，注册表无"}
+        ]);
+        write_disk_manifest(plugin_dir.path(), &drifted);
+        let resp = validate_all_plugins_handler(axum::extract::State(state)).await;
+        assert_eq!(resp.0["registry_disk_mismatches"], 1);
+        let reports = resp.0["consistency_reports"].as_array().unwrap();
+        assert_eq!(reports[0]["status"], "registry_disk_mismatch");
+        assert_eq!(reports[0]["plugin_id"], "p_disk");
+        assert!(
+            !reports[0]["diffs"].as_array().unwrap().is_empty(),
+            "差异明细必须给出"
+        );
+    }
+
+    // ── POST /api/v1/system/restart（G8 排空；测试逃生门禁退出）──────────
+
+    /// 逃生门 RAII：测试期间设 AGENTOS_DISABLE_SELF_EXIT=1，结束恢复原值。
+    /// 环境变量是进程级共享，两个用例标 #[serial] 串行（同 plugin_watcher_test 先例）。
+    struct DisableSelfExit;
+    impl DisableSelfExit {
+        fn set() -> Self {
+            std::env::set_var("AGENTOS_DISABLE_SELF_EXIT", "1");
+            Self
+        }
+    }
+    impl Drop for DisableSelfExit {
+        fn drop(&mut self) {
+            std::env::remove_var("AGENTOS_DISABLE_SELF_EXIT");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn system_restart_drains_running_runs_and_reports_exit_75() {
+        let _guard = DisableSelfExit::set();
+
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        sqlite.create_run("run_g8_cov", "cfg", "default").unwrap();
+        let mut state = AppState::new();
+        state.db = Some(sqlite.clone());
+
+        let resp = system_restart_handler(axum::extract::State(state)).await;
+        assert_eq!(resp.0["success"], serde_json::json!(true));
+        assert_eq!(resp.0["exit_code"], 75);
+        assert_eq!(resp.0["suspended_runs"], 1);
+
+        // 排空副作用：running → suspended
+        let run = sqlite.get_run("run_g8_cov").await.unwrap();
+        assert_eq!(run.status, agentos_core::types::RunStatus::Suspended);
+
+        // 无 db / 无在途 run → suspended_runs 0
+        let resp = system_restart_handler(axum::extract::State(AppState::new())).await;
+        assert_eq!(resp.0["suspended_runs"], 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn drain_and_exit75_counts_suspended_runs_with_db() {
+        let _guard = DisableSelfExit::set();
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        sqlite.create_run("run_drain_1", "cfg", "default").unwrap();
+        sqlite.create_run("run_drain_2", "cfg", "default").unwrap();
+        sqlite
+            .update_run_status(
+                "run_drain_2",
+                agentos_core::types::RunStatus::Completed,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let n = crate::routes::drain_and_exit75(Some(&sqlite), None, "unit-test drain").await;
+        assert_eq!(n, 1, "只排空 running，completed 不动");
+    }
+
+    // ── PUT /api/v1/plugins/{id}/enabled（registry 热更新双向）────────────
+
+    #[tokio::test]
+    async fn set_enabled_hot_reloads_registry_both_directions() {
+        use agentos_core::traits::CapabilityRegistry as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let _user_space_guard = crate::test_env::pin_user_root(tmp.path());
+        let profile_dir = tmp.path().join("config").join("plugins");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+
+        let manifest = manifest_from_json(serde_json::json!({
+            "id": "p_toggle", "name": "p_toggle", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "python server.py",
+            "capabilities": {"tools": [{"name": "t1", "description": "t1"}]},
+            "http_endpoints": [
+                {"route_id": "r1", "method": "GET", "path": "/ext/p_toggle/things",
+                 "handler_capability": "http.handle"}
+            ],
+        }));
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().to_path_buf());
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
+        state.invoker = Some(Arc::new(RecordingInvoker {
+            seen: std::sync::Mutex::new(Vec::new()),
+            seen_states: std::sync::Mutex::new(Vec::new()),
+            hooks: std::sync::Mutex::new(Vec::new()),
+            list_tools: std::collections::HashMap::from([(
+                "p_toggle".to_string(),
+                serde_json::json!({"tools": [{"name": "t1", "description": "t1"}]}),
+            )]),
+        }) as Arc<dyn PluginInvoker>);
+        let registry = Arc::new(agentos_plugin_loader::CapabilityRegistryImpl::new());
+        state.capability_registry = Some(registry.clone());
+
+        // 启用：G2 复核干净 → tools/http_routes 全注册 + 内存 enabled 位翻转
+        let resp = plugins_set_enabled_handler(
+            axum::extract::Path("p_toggle".to_string()),
+            axum::extract::State(state.clone()),
+            axum::Json(EnabledBody { enabled: true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["success"], serde_json::json!(true));
+        assert_eq!(resp.0["restart_required"], serde_json::json!(false));
+        assert_eq!(resp.0["registered"]["tools"], 1);
+        assert_eq!(resp.0["registered"]["http_routes"], 1);
+        assert!(state.enabled_plugin_ids.read().await.contains("p_toggle"));
+        assert_eq!(
+            registry.list_tools().len(),
+            1,
+            "启用的工具必须立即出现在注册表"
+        );
+        assert_eq!(registry.list_http_routes().len(), 1);
+        let profile_raw =
+            std::fs::read_to_string(profile_dir.join("default_profile.yaml")).unwrap();
+        assert!(profile_raw.contains("p_toggle"));
+        assert!(profile_raw.contains("enabled: true"));
+
+        // 禁用：注册即收（tools/http_routes 零残留）+ enabled 位摘除
+        let resp = plugins_set_enabled_handler(
+            axum::extract::Path("p_toggle".to_string()),
+            axum::extract::State(state.clone()),
+            axum::Json(EnabledBody { enabled: false }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["registered"], serde_json::Value::Null);
+        assert!(!state.enabled_plugin_ids.read().await.contains("p_toggle"));
+        assert!(registry.list_tools().is_empty(), "禁用必须结构性收回工具");
+        assert!(registry.list_http_routes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_enabled_without_project_root_returns_500() {
+        let state = AppState::new();
+        let err = plugins_set_enabled_handler(
+            axum::extract::Path("p_x".to_string()),
+            axum::extract::State(state),
+            axum::Json(EnabledBody { enabled: true }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Internal { .. }));
+    }
+
+    #[tokio::test]
+    async fn set_enabled_unreadable_profile_returns_500() {
+        // profile 路径是目录 → 读失败（非 NotFound）→ 500，不写入
+        let tmp = tempfile::tempdir().unwrap();
+        let _user_space_guard = crate::test_env::pin_user_root(tmp.path());
+        let profile_dir = tmp.path().join("config").join("plugins");
+        std::fs::create_dir_all(profile_dir.join("default_profile.yaml")).unwrap();
+
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().to_path_buf());
+        let err = plugins_set_enabled_handler(
+            axum::extract::Path("p_x".to_string()),
+            axum::extract::State(state),
+            axum::Json(EnabledBody { enabled: true }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, ApiError::Internal { .. }),
+            "读失败（权限/目录）应 500，实际 {err:?}"
+        );
+    }
+
+    // ── GET /api/v1/schema（聚合分支）────────────────────────────────────
+
+    #[tokio::test]
+    async fn schema_aggregates_registry_routes_and_manifest_sections() {
+        let registry = Arc::new(agentos_plugin_loader::CapabilityRegistryImpl::new());
+        let endpoint: agentos_core::traits::HttpEndpoint =
+            serde_json::from_value(serde_json::json!({
+                "route_id": "r1", "method": "GET", "path": "/ext/p_ext/things",
+                "handler_capability": "http.handle", "auth": "user"
+            }))
+            .unwrap();
+        // 注册并持有 guard：guard drop 即撤销注册（结构性收回语义），本测试
+        // 内必须保活以让 schema 聚合读到该路由
+        let (_descriptor, _route_guard) = registry
+            .register_http_route_guarded("p_ext", endpoint)
+            .unwrap();
+
+        let mut state = AppState::new();
+        state.capability_registry = Some(registry);
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            manifest_from_json(serde_json::json!({
+                "id": "p_sys_ui", "name": "p_sys_ui", "version": "1.0.0",
+                "plugin_type": "system", "language": "python",
+                "host_type": "sidecar", "entry": "x",
+                "ui_schema": {"widgets": [{"kind": "stat"}]},
+                "config_files": [
+                    {"id": "visible", "label": "V", "path": "config/mine/v.yaml"},
+                    {"id": "hidden", "label": "H", "path": "config/mine/h.yaml",
+                     "settings": false}
+                ],
+                "capabilities": {},
+            })),
+            manifest_from_json(serde_json::json!({
+                "id": "p_pipe_role", "name": "p_pipe_role", "version": "1.0.0",
+                "plugin_type": "pipeline", "language": "python",
+                "host_type": "sidecar", "entry": "x",
+                "pipeline_role": "input",
+                "capabilities": {},
+            })),
+        ]));
+        state.enabled_plugin_ids =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+                "p_sys_ui".to_string(),
+            ])));
+
+        let resp = schema_handler(axum::extract::State(state.clone()), HeaderMap::new()).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 262144)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // routes：注册表数据驱动，{plugin_id: [route…]} 形状
+        let route_entry = &v["routes"]["p_ext"][0];
+        assert_eq!(route_entry["method"], "GET");
+        assert_eq!(route_entry["path"], "/ext/p_ext/things");
+        assert_eq!(route_entry["auth"], "user");
+
+        // agents/pipelines 按 manifest 类型分桶，role/ui_schema 随行
+        assert_eq!(v["agents"].as_array().unwrap().len(), 1);
+        assert_eq!(v["agents"][0]["id"], "p_sys_ui");
+        assert_eq!(v["pipelines"][0]["role"], "input");
+
+        // plugin_configs：settings:false 注入专用条目不出口
+        let cfgs = v["plugin_configs"].as_array().unwrap();
+        assert_eq!(cfgs.len(), 1);
+        let visible = cfgs[0]["config_files"].as_array().unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0]["id"], "visible");
+
+        // plugin_contributes：enabled 的 ui_schema 插件出口；未启用不出
+        let contribs = v["plugin_contributes"].as_array().unwrap();
+        assert_eq!(contribs.len(), 1);
+        assert_eq!(contribs[0]["plugin_id"], "p_sys_ui");
+
+        // 未注入内核契约 → 空数组
+        assert!(v["kernel_capabilities"].as_array().unwrap().is_empty());
+
+        // If-None-Match 多候选（stale, 当前）→ 304（RFC 9110 逗号列表语义）
+        let etag = crate::config_service::compute_etag(&body);
+        let mut inm = HeaderMap::new();
+        inm.insert(
+            "if-none-match",
+            format!("\"stale-1\", {etag}").parse().unwrap(),
+        );
+        let resp2 = schema_handler(axum::extract::State(state), inm).await;
+        assert_eq!(resp2.status(), axum::http::StatusCode::NOT_MODIFIED);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 覆盖率补测：session_routes.rs（会话 CRUD 成功路径 / 消息映射全字段 /
+// 会话 schema 聚合）。断行为契约，存储走真实 SqliteStore。
+// ═══════════════════════════════════════════════════════════════════════
+
+mod session_endpoints_tests {
+    use super::*;
+    use crate::session_routes::MessageListQuery;
+    use agentos_core::traits::StorageBackend;
+    use axum::http::HeaderMap;
+
+    fn bearer_headers() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", scaffold_admin_bearer().parse().unwrap());
+        h
+    }
+
+    fn session_record(
+        thread_id: &str,
+        session_type: &str,
+        pipeline_ids: Vec<String>,
+    ) -> agentos_core::types::SessionRecord {
+        agentos_core::types::SessionRecord {
+            thread_id: thread_id.to_string(),
+            title: Some(format!("标题-{thread_id}")),
+            intent: Some("意图".to_string()),
+            current_state: "active".to_string(),
+            agent_id: Some("agentos".to_string()),
+            active_pipeline_id: pipeline_ids.first().cloned(),
+            pipeline_ids,
+            metadata: Some(serde_json::json!({
+                "session_type": session_type,
+                "pinned": true,
+            })),
+            created_at: "2026-09-01T00:00:00+00:00".to_string(),
+            updated_at: "2026-09-02T00:00:00+00:00".to_string(),
+            last_active_at: None,
+        }
+    }
+
+    // ── GET /api/v1/sessions（DB 成功路径 + 映射表补全）──────────────────
+
+    #[tokio::test]
+    async fn list_sessions_returns_seeded_rows_with_child_pipeline_merge() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let dyn_store: Arc<dyn StorageBackend> = store.clone();
+        dyn_store
+            .create_session(&session_record(
+                "t_main",
+                "main_pipeline",
+                vec!["p_main".into()],
+            ))
+            .await
+            .unwrap();
+        // 子管道映射（link 表）并入 pipeline_ids
+        dyn_store
+            .link_pipeline_session("p_child", "t_main", "default")
+            .await
+            .unwrap();
+        // 非 main_pipeline 会话被 session_type 过滤
+        dyn_store
+            .create_session(&session_record("t_cli", "cli", vec![]))
+            .await
+            .unwrap();
+
+        let mut state = AppState::new();
+        state.store = Some(dyn_store);
+
+        let resp = list_sessions_handler(axum::extract::State(state), bearer_headers())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.0["total"], 1,
+            "非 main_pipeline 会话被过滤: {}",
+            resp.0
+        );
+        let thread = &resp.0["threads"][0];
+        assert_eq!(thread["thread_id"], "t_main");
+        assert_eq!(thread["title"], "标题-t_main");
+        assert_eq!(thread["current_state"], "active");
+        assert_eq!(thread["agent_id"], "agentos");
+        assert_eq!(thread["metadata"]["pinned"], true);
+        let pids: Vec<&str> = thread["pipeline_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        assert!(pids.contains(&"p_main"), "主管道在列: {pids:?}");
+        assert!(pids.contains(&"p_child"), "link 表子管道必须并入: {pids:?}");
+        assert_eq!(thread["active_pipeline_id"], "p_main");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_without_store_falls_back_to_memory_registry() {
+        let mut state = AppState::new();
+        state.session = Some(Arc::new(agentos_session::SessionCoordinator::new()));
+        let registry = state.session.as_ref().unwrap().registry().clone();
+        registry.register_thread("thread-mem-cov", "u-mem");
+        registry.register_thread_pipeline("thread-mem-cov", "pipe-mem");
+
+        let resp = list_sessions_handler(axum::extract::State(state), HeaderMap::new())
+            .await
+            .unwrap();
+        assert_eq!(resp.0["total"], 1);
+        let thread = &resp.0["threads"][0];
+        assert_eq!(thread["thread_id"], "thread-mem-cov");
+        assert_eq!(thread["pipeline_ids"][0], "pipe-mem");
+        assert_eq!(thread["active_pipeline_id"], "pipe-mem");
+        assert_eq!(thread["metadata"]["user_id"], "u-mem");
+    }
+
+    // ── POST /api/v1/sessions（用户解析与 metadata 默认合并）──────────────
+
+    #[tokio::test]
+    async fn create_session_merges_metadata_defaults_and_persists() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let dyn_store: Arc<dyn StorageBackend> = store.clone();
+        let mut state = AppState::new();
+        state.store = Some(dyn_store.clone());
+        state.session = Some(Arc::new(agentos_session::SessionCoordinator::new()));
+
+        // 无 token + body user_id → 显式降级使用 body 值（可伪造，warn 标记）
+        let resp = create_session_handler(
+            axum::extract::State(state.clone()),
+            HeaderMap::new(),
+            axum::Json(serde_json::json!({
+                "title": "T1",
+                "user_id": "body-user",
+                "metadata": {"custom": 1}
+            })),
+        )
+        .await;
+
+        let thread_id = resp.0["thread_id"].as_str().unwrap().to_string();
+        assert_eq!(resp.0["title"], "T1");
+        assert_eq!(resp.0["intent"], "T1", "title 缺 intent 时回退 title");
+        assert_eq!(resp.0["pipeline_ids"].as_array().unwrap().len(), 1);
+        assert_eq!(resp.0["metadata"]["custom"], 1, "body 元数据保留");
+        assert_eq!(
+            resp.0["metadata"]["session_type"], "main_pipeline",
+            "缺失默认必须补齐（列表过滤依赖）"
+        );
+        assert_eq!(resp.0["metadata"]["user_id"], "body-user");
+
+        // 落库核对：双写 sessions 表 + registry 登记
+        let rec = dyn_store.get_session(&thread_id).await.unwrap().unwrap();
+        assert_eq!(rec.title.as_deref(), Some("T1"));
+        assert_eq!(
+            rec.active_pipeline_id.as_deref(),
+            resp.0["active_pipeline_id"].as_str()
+        );
+        let registry = state.session.as_ref().unwrap().registry().clone();
+        assert!(
+            registry.get_pipeline_for_thread(&thread_id).is_some(),
+            "thread→pipeline 注册表必须登记"
+        );
+
+        // 无 body user_id → anonymous 兜底
+        let resp = create_session_handler(
+            axum::extract::State(state),
+            HeaderMap::new(),
+            axum::Json(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(resp.0["title"], serde_json::Value::Null);
+        assert_eq!(resp.0["intent"], serde_json::Value::Null);
+        assert_eq!(
+            resp.0["metadata"]["user_id"], "anonymous",
+            "无 token 无 body 用户 → anonymous"
+        );
+        assert_eq!(
+            resp.0["metadata"]["session_type"], "main_pipeline",
+            "body 无 metadata 也补默认"
+        );
+    }
+
+    // ── PATCH /api/v1/sessions/{id}（重命名）─────────────────────────────
+
+    #[tokio::test]
+    async fn update_session_renames_db_record_and_falls_back_when_absent() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let dyn_store: Arc<dyn StorageBackend> = store.clone();
+        dyn_store
+            .create_session(&session_record(
+                "t_upd",
+                "main_pipeline",
+                vec!["p_upd".into()],
+            ))
+            .await
+            .unwrap();
+        let mut state = AppState::new();
+        state.store = Some(dyn_store.clone());
+        state.session = Some(Arc::new(agentos_session::SessionCoordinator::new()));
+
+        // DB 命中：title/intent 同步更新 + updated_at 前移
+        let resp = update_session_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("t_upd".to_string()),
+            axum::Json(serde_json::json!({"intent": "新名字"})),
+        )
+        .await;
+        assert_eq!(resp.0["thread_id"], "t_upd");
+        assert_eq!(resp.0["title"], "新名字");
+        assert_eq!(resp.0["intent"], "新名字");
+        let rec = dyn_store.get_session("t_upd").await.unwrap().unwrap();
+        assert_eq!(rec.title.as_deref(), Some("新名字"));
+        assert_eq!(rec.intent.as_deref(), Some("新名字"));
+        assert_eq!(
+            rec.updated_at, resp.0["updated_at"],
+            "响应 updated_at 与落库一致"
+        );
+        assert_ne!(rec.updated_at, "2026-09-02T00:00:00+00:00");
+
+        // 无 intent 的 PATCH：只碰 updated_at，title 保持
+        let resp = update_session_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("t_upd".to_string()),
+            axum::Json(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(resp.0["title"], "新名字", "无 intent 不得清标题");
+
+        // DB 未命中：内存回退响应（agent/pipeline 取 registry 已知状态）
+        state
+            .session
+            .as_ref()
+            .unwrap()
+            .registry()
+            .register_thread_agent("t-ghost", "ag_ghost");
+        let resp = update_session_handler(
+            axum::extract::State(state),
+            axum::extract::Path("t-ghost".to_string()),
+            axum::Json(serde_json::json!({"intent": "ghost-name"})),
+        )
+        .await;
+        assert_eq!(resp.0["thread_id"], "t-ghost");
+        assert_eq!(resp.0["title"], "ghost-name");
+        assert_eq!(resp.0["intent"], "ghost-name");
+        assert_eq!(resp.0["agent_id"], "ag_ghost");
+        assert_eq!(resp.0["current_state"], "active");
+    }
+
+    // ── PATCH /api/v1/sessions/{id}/agent（DB 未命中回退）────────────────
+
+    #[tokio::test]
+    async fn update_session_agent_falls_back_to_registry_state_without_db_record() {
+        let mut state = AppState::new();
+        state.session = Some(Arc::new(agentos_session::SessionCoordinator::new()));
+        let registry = state.session.as_ref().unwrap().registry().clone();
+        registry.register_thread_pipeline("t-fb", "p-fb");
+
+        let resp = update_session_agent_handler(
+            axum::extract::State(state),
+            HeaderMap::new(),
+            axum::extract::Path("t-fb".to_string()),
+            axum::Json(serde_json::json!({"agent_id": "ag_fb"})),
+        )
+        .await;
+        assert_eq!(resp.0["agent_id"], "ag_fb");
+        assert_eq!(resp.0["pipeline_ids"][0], "p-fb");
+        assert_eq!(resp.0["active_pipeline_id"], "p-fb");
+        assert_eq!(resp.0["current_state"], "active");
+        // body 缺 agent_id → 默认 agentos
+        let resp = update_session_agent_handler(
+            axum::extract::State(AppState::new()),
+            HeaderMap::new(),
+            axum::extract::Path("t-x".to_string()),
+            axum::Json(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(resp.0["agent_id"], "agentos");
+    }
+
+    // ── GET /api/v1/sessions/{id}/messages（消息映射全字段）───────────────
+
+    fn seed_message_ops(
+        store: &Arc<agentos_engine::SqliteStore>,
+        pipeline_id: &str,
+        ops: &[serde_json::Value],
+    ) {
+        store
+            .apply_messages_ops_to_table(pipeline_id, "default", ops)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_messages_maps_tool_envelope_reasoning_and_metadata() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        store.create_run("run_msgs_cov", "cfg", "default").unwrap();
+        seed_message_ops(
+            &store,
+            "pipe_msgs_cov",
+            &[
+                serde_json::json!({
+                    "op": "set", "seq": 0, "_run_id": "run_msgs_cov",
+                    "msg": {"role": "user", "content": "问题",
+                            "metadata": {"client_message_id": "cmid-1"}}
+                }),
+                serde_json::json!({
+                    "op": "set", "seq": 1, "_run_id": "run_msgs_cov",
+                    "msg": {"role": "assistant", "content": "回答",
+                            "reasoning_content": "思考过程…",
+                            "tool_calls": [
+                                {"id": "c1", "type": "function",
+                                 "function": {"name": "f", "arguments": "{}"}}
+                            ]}
+                }),
+                serde_json::json!({
+                    "op": "set", "seq": 2, "_run_id": "run_msgs_cov",
+                    "msg": {"role": "tool", "content": "结果文本", "tool_call_id": "c1",
+                            "tool_result": {"call_id": "c1", "tool_name": "f",
+                                            "success": false, "error": "boom",
+                                            "data": {"d": 1}, "duration_ms": 12.5,
+                                            "metadata": {"container_task_id": "ct7"}}}
+                }),
+                serde_json::json!({
+                    "op": "set", "seq": 3, "_run_id": "run_msgs_cov",
+                    "msg": {"role": "tool", "content": "Error: 磁盘满"}
+                }),
+            ],
+        );
+
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        state.db = Some(store.clone());
+
+        let resp = list_session_messages_handler(
+            axum::extract::State(state),
+            HeaderMap::new(),
+            axum::extract::Path("pipe_msgs_cov".to_string()),
+            axum::extract::Query(MessageListQuery {
+                pipeline_run_id: Some("pipe_msgs_cov".to_string()),
+                before_sequence: None,
+                after_sequence: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let msgs = resp.0["messages"].as_array().unwrap();
+        assert_eq!(resp.0["total"], 4);
+        assert_eq!(resp.0["has_more"], serde_json::json!(false));
+        let by_seq = |s: u32| {
+            msgs.iter()
+                .find(|m| m["sequence"] == s)
+                .unwrap_or_else(|| panic!("缺 seq={s}"))
+        };
+
+        // user：metadata.client_message_id 原样回显（幂等对账键）
+        let m0 = by_seq(0);
+        assert_eq!(m0["role"], "user");
+        assert_eq!(m0["content"], "问题");
+        assert_eq!(m0["metadata"]["client_message_id"], "cmid-1");
+        assert_eq!(m0["status"], "completed");
+        assert!(m0["id"].is_string());
+        assert!(m0["timestamp"].is_string());
+
+        // assistant：tool_calls 反序列化 + reasoning_content
+        let m1 = by_seq(1);
+        assert_eq!(m1["toolCalls"][0]["id"], "c1");
+        assert_eq!(m1["reasoningContent"], "思考过程…");
+
+        // tool（envelope 失败）：status/error/toolCallId/结构化结果字段
+        let m2 = by_seq(2);
+        assert_eq!(m2["status"], "failed");
+        assert_eq!(m2["error"], "boom");
+        assert_eq!(m2["toolCallId"], "c1");
+        assert_eq!(m2["toolName"], "f");
+        assert_eq!(m2["toolResultData"]["d"], 1);
+        assert_eq!(m2["toolDurationMs"], 12.5);
+        assert_eq!(m2["containerTaskId"], "ct7");
+
+        // tool（content 前缀失败、无 envelope）：状态按前缀判定
+        let m3 = by_seq(3);
+        assert_eq!(m3["status"], "failed");
+        assert_eq!(m3["error"], "磁盘满");
+        assert!(m3.get("toolResultData").is_none());
+
+        // 游标分页：after_sequence=2 + limit=2 → 只剩 seq 3，1 < limit 无更多
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        state.db = Some(store.clone());
+        let resp = list_session_messages_handler(
+            axum::extract::State(state),
+            HeaderMap::new(),
+            axum::extract::Path("pipe_msgs_cov".to_string()),
+            axum::extract::Query(MessageListQuery {
+                pipeline_run_id: Some("pipe_msgs_cov".to_string()),
+                before_sequence: None,
+                after_sequence: Some(2),
+                limit: Some(2),
+            }),
+        )
+        .await
+        .unwrap();
+        let msgs = resp.0["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1, "after_sequence=2 应只剩 seq 3");
+        assert_eq!(msgs[0]["sequence"], 3);
+        assert_eq!(resp.0["has_more"], serde_json::json!(false), "1 < limit 2");
+    }
+
+    #[tokio::test]
+    async fn list_messages_falls_back_to_active_pipeline_and_handles_no_store() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        store.create_run("run_fb_cov", "cfg", "default").unwrap();
+        seed_message_ops(
+            &store,
+            "pipe_active_cov",
+            &[serde_json::json!({
+                "op": "set", "seq": 0, "_run_id": "run_fb_cov",
+                "msg": {"role": "user", "content": "in-active"}
+            })],
+        );
+        let dyn_store: Arc<dyn StorageBackend> = store.clone();
+        dyn_store
+            .create_session(&session_record(
+                "t_fb",
+                "main_pipeline",
+                vec!["pipe_active_cov".into()],
+            ))
+            .await
+            .unwrap();
+
+        // 不带 pipeline_run_id：按会话 active_pipeline_id 解析目标管道
+        let mut state = AppState::new();
+        state.store = Some(dyn_store.clone());
+        state.db = Some(store);
+        let resp = list_session_messages_handler(
+            axum::extract::State(state),
+            HeaderMap::new(),
+            axum::extract::Path("t_fb".to_string()),
+            axum::extract::Query(MessageListQuery {
+                pipeline_run_id: None,
+                before_sequence: None,
+                after_sequence: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let msgs = resp.0["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1, "thread→active_pipeline 回退: {}", resp.0);
+        assert_eq!(msgs[0]["content"], "in-active");
+        assert_eq!(msgs[0]["thread_id"], "t_fb", "回填路径 id 满足前端 mapper");
+
+        // store 未配置 → 空历史形状（不报错）
+        let resp = list_session_messages_handler(
+            axum::extract::State(AppState::new()),
+            HeaderMap::new(),
+            axum::extract::Path("t_any".to_string()),
+            axum::extract::Query(MessageListQuery {
+                pipeline_run_id: None,
+                before_sequence: None,
+                after_sequence: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["messages"].as_array().unwrap().len(), 0);
+        assert_eq!(resp.0["total"], 0);
+        assert_eq!(resp.0["has_more"], serde_json::json!(false));
+    }
+
+    // ── GET /api/v1/sessions/schema（内置 + 插件聚合）────────────────────
+
+    #[tokio::test]
+    async fn sessions_schema_aggregates_enabled_plugin_thread_fields() {
+        let mk = |id: &str, thread_fields: serde_json::Value| {
+            serde_json::from_value::<agentos_core::traits::PluginManifest>(serde_json::json!({
+                "id": id, "name": id, "version": "1.0.0",
+                "plugin_type": "system", "language": "python",
+                "host_type": "sidecar", "entry": "x",
+                "contributes": {"thread_fields": thread_fields},
+                "capabilities": {},
+            }))
+            .unwrap()
+        };
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            mk(
+                "p_iso_on",
+                serde_json::json!([
+                    {"name": "workspace", "label": "工作区", "type": "string"},
+                    {"label": "缺 name 不构成字段"}
+                ]),
+            ),
+            mk("p_iso_off", serde_json::json!([{"name": "off_field"}])),
+        ]));
+        state.enabled_plugin_ids =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+                "p_iso_on".to_string(),
+            ])));
+
+        let resp = sessions_schema_handler(axum::extract::State(state)).await;
+        let fields = resp.0["fields"].as_array().unwrap();
+        let names: Vec<&str> = fields.iter().filter_map(|f| f["name"].as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["title", "intent", "workspace"],
+            "内置字段在前 + 仅 enabled 插件 + 仅带 name 的声明: {names:?}"
+        );
+    }
+}
+
+// ── CORS 中间件 / 鉴权中间件（write_surface_auth）/ WS 入口 503 /
+//    交互应答端点（声明驱动路由）补测 ─────────────────────────────
+
+mod cors_auth_middleware_tests {
+    use super::*;
+
+    fn plain_app() -> axum::Router {
+        crate::server::build_router(AppState::new())
+    }
+
+    async fn send(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Option<String>,
+    ) -> axum::response::Response {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        let req = match body {
+            Some(b) => builder
+                .header("content-type", "application/json")
+                .body(Body::from(b))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
+        app.clone().oneshot(req).await.unwrap()
+    }
+
+    // ── CORS 源判定（纯函数） ──────────────────────────────
+
+    #[test]
+    fn is_local_origin_matches_exact_and_port_forms_only() {
+        for origin in [
+            "http://localhost",
+            "https://localhost",
+            "http://127.0.0.1",
+            "http://127.0.0.1:9100",
+            "https://[::1]",
+            "http://[::1]:5173",
+        ] {
+            assert!(is_local_origin(origin), "{origin} 应判本地源");
+        }
+        for origin in [
+            "http://localhost.evil.com",
+            "https://example.com",
+            "localhost",
+            "",
+        ] {
+            assert!(!is_local_origin(origin), "{origin} 不应判本地源");
+        }
+    }
+
+    #[test]
+    fn origin_matches_allowlist_is_exact_match() {
+        let allow = ["https://app.example.com", "https://b.example.com"];
+        assert!(origin_matches_allowlist("https://app.example.com", &allow));
+        assert!(!origin_matches_allowlist(
+            "https://app.example.com.evil.com",
+            &allow
+        ));
+        assert!(!origin_matches_allowlist("https://c.example.com", &allow));
+        assert!(!origin_matches_allowlist("", &allow));
+    }
+
+    // ── CORS 中间件（oneshot 行为面） ──────────────────────
+
+    #[tokio::test]
+    async fn preflight_options_returns_204_with_cors_headers() {
+        let app = plain_app();
+        let resp = send(
+            &app,
+            "OPTIONS",
+            "/api/v1/chat",
+            &[("origin", "http://localhost:5173")],
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT, "预检拦截 204");
+        let h = resp.headers();
+        assert_eq!(h["access-control-allow-origin"], "http://localhost:5173");
+        assert_eq!(
+            h["access-control-allow-methods"],
+            "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        );
+        assert_eq!(h["access-control-max-age"], "86400");
+        assert!(
+            h.get("access-control-allow-credentials").is_none(),
+            "本地源反射不带凭据头"
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_reflect_allowed_origin_and_deny_unknown() {
+        let app = plain_app();
+        let resp = send(
+            &app,
+            "GET",
+            "/health",
+            &[("origin", "http://127.0.0.1:5173")],
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()["access-control-allow-origin"],
+            "http://127.0.0.1:5173"
+        );
+
+        // 非放行源：响应照常 200，但不反射 origin
+        let resp = send(
+            &app,
+            "GET",
+            "/health",
+            &[("origin", "https://evil.com")],
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_allowlist_origin_gets_credentials() {
+        // 本用例独占操作 AGENTOS_CORS_ORIGINS（进程全局），其余 CORS 用例
+        // 只走本地源判定，不受影响。
+        std::env::set_var("AGENTOS_CORS_ORIGINS", "https://app.example.com");
+        let app = plain_app();
+        let resp = send(
+            &app,
+            "OPTIONS",
+            "/api/v1/chat",
+            &[("origin", "https://app.example.com")],
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let h = resp.headers();
+        assert_eq!(h["access-control-allow-origin"], "https://app.example.com");
+        assert_eq!(
+            h["access-control-allow-credentials"], "true",
+            "显式白名单源带凭据放行"
+        );
+        assert!(is_origin_allowed("https://app.example.com"));
+        assert!(!is_origin_allowed("https://c.example.com"));
+
+        std::env::remove_var("AGENTOS_CORS_ORIGINS");
+        let resp = send(
+            &app,
+            "OPTIONS",
+            "/api/v1/chat",
+            &[("origin", "https://app.example.com")],
+            None,
+        )
+        .await;
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "环境变量移除后白名单失效（仅本地源放行）"
+        );
+    }
+
+    // ── write_surface_auth 白名单面 ────────────────────────
+
+    #[tokio::test]
+    async fn whitelist_paths_reject_anonymous_with_401() {
+        let app = plain_app();
+        for (method, uri) in [
+            ("GET", "/api/v1/plugins"),
+            ("GET", "/api/v1/sessions"),
+            ("GET", "/api/v1/pipelines"),
+            ("GET", "/metrics"),
+            ("GET", "/api/v1/schema"),
+            ("GET", "/api/v1/tools"),
+            ("GET", "/api/v1/system/memstats"),
+        ] {
+            let resp = send(&app, method, uri, &[], None).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} 匿名应 401"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn non_whitelist_paths_pass_anonymous_to_handler() {
+        let app = plain_app();
+        // /health 不在白名单 → 匿名直达 handler（200）
+        let resp = send(&app, "GET", "/health", &[], None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // /uploads 不在白名单 → 匿名直达 handler（无文件 404，而非 401）
+        let resp = send(&app, "GET", "/uploads/pic.png", &[], None).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "匿名 404 证明鉴权跳过"
+        );
+        // /api/v1/auth/login 不在白名单 → 缺 body 422/400 而非 401
+        let resp = send(&app, "POST", "/api/v1/auth/login", &[], None).await;
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED, "auth 面不挂鉴权");
+    }
+
+    /// 内存库播种 admin + viewer 的 app 与两枚 token（同一次哈希绑定）。
+    async fn app_with_admin_and_viewer() -> (axum::Router, String, String) {
+        let store = std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let admin_hash = agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap();
+        let viewer_hash = agentos_http::auth::hash_password("viewer-pw-2026").unwrap();
+        for (uid, name, hash, role) in [
+            (
+                "00000000-0000-0000-0000-000000000001",
+                "admin",
+                admin_hash.clone(),
+                "admin",
+            ),
+            (
+                "00000000-0000-0000-0000-000000000002",
+                "viewer",
+                viewer_hash.clone(),
+                "viewer",
+            ),
+        ] {
+            let _ = StorageBackend::create_user(
+                store.as_ref(),
+                &agentos_core::types::UserRecord {
+                    user_id: uid.to_string(),
+                    username: name.to_string(),
+                    password: hash.clone(),
+                    email: None,
+                    role: role.to_string(),
+                    tenant_id: "default".to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    last_login_at: None,
+                    must_change_password: false,
+                },
+            )
+            .await;
+        }
+        let mint = |uid: &str, name: &str, hash: String, role: &str| {
+            agentos_http::auth::encode_token(
+                agentos_http::auth::TokenType::Access,
+                &agentos_http::auth::BuiltInUser {
+                    id: uid.to_string(),
+                    username: name.to_string(),
+                    password: hash,
+                    email: String::new(),
+                    role: role.to_string(),
+                    tenant_id: "default".to_string(),
+                    created_at: String::new(),
+                    must_change_password: false,
+                },
+                3600,
+            )
+        };
+        let admin_token = mint(
+            "00000000-0000-0000-0000-000000000001",
+            "admin",
+            admin_hash,
+            "admin",
+        );
+        let viewer_token = mint(
+            "00000000-0000-0000-0000-000000000002",
+            "viewer",
+            viewer_hash,
+            "viewer",
+        );
+        let mut state = AppState::new();
+        state.store = Some(store);
+        (
+            crate::server::build_router(state),
+            admin_token,
+            viewer_token,
+        )
+    }
+
+    #[tokio::test]
+    async fn viewer_can_read_but_write_needs_admin() {
+        let (app, admin, viewer) = app_with_admin_and_viewer().await;
+        let bearer = format!("Bearer {viewer}");
+
+        // viewer 读面放行（GET /api/v1/plugins → 200 空清单）
+        let resp = send(
+            &app,
+            "GET",
+            "/api/v1/plugins",
+            &[("authorization", &bearer)],
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "viewer 读面应放行");
+
+        // viewer 写面拒绝（PUT enabled → 403）
+        let resp = send(
+            &app,
+            "PUT",
+            "/api/v1/plugins/some_plugin/enabled",
+            &[("authorization", &bearer)],
+            Some(json!({"enabled": true}).to_string()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer 写面应 403");
+
+        // admin 写面通过鉴权层（project_root 未接线由 handler 报 5xx，非 401/403）
+        let resp = send(
+            &app,
+            "PUT",
+            "/api/v1/plugins/some_plugin/enabled",
+            &[("authorization", &format!("Bearer {admin}"))],
+            Some(json!({"enabled": true}).to_string()),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "admin 写面不应被鉴权层拒绝"
+        );
+        assert_ne!(resp.status(), StatusCode::FORBIDDEN, "admin 写面不应 403");
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_any_authenticated_user_can_issue() {
+        let app = plain_app();
+        // 匿名 → 401
+        let resp = send(&app, "POST", "/api/v1/ws-ticket", &[], None).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // 内置 admin（store None 回退内置表）→ 200 票据
+        let resp = send(
+            &app,
+            "POST",
+            "/api/v1/ws-ticket",
+            &[("authorization", &scaffold_admin_bearer())],
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "已认证用户即可签发票据");
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["ticket"].as_str().is_some(), "响应应含 ticket");
+        assert!(v["expires_in"].as_u64().unwrap_or(0) > 0);
+    }
+
+    // ── WS 入口：session 未装配显式 503 ────────────────────
+    // WebSocketUpgrade 提取器依赖 hyper 注入的 OnUpgrade extension，oneshot
+    // 无传输层不可达——起真实 TCP 服务 + tungstenite 客户端连接（同
+    // tests/ws_ticket_test.rs 构造）。
+
+    /// 起真实 TCP 服务，返回 (本地地址, shutdown 句柄)。
+    async fn spawn_server(state: AppState) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = crate::server::build_router(state);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn ws_handshake_without_session_coordinator_returns_503() {
+        // session 未装配（仅测试构造场景）→ 握手前显式 503，不静默降级
+        let (addr, handle) = spawn_server(AppState::new()).await;
+        let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/chat?token=x"))
+            .await
+            .expect_err("session 未装配握手必须被拒");
+        match err {
+            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "握手拒绝应 503"
+                );
+            }
+            other => panic!("应返回 HTTP 503 拒绝，实际 {other:?}"),
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn ws_handshake_without_inbound_router_returns_503() {
+        // session 已装配但 inbound_router 缺席（半装配态）→ 同样 503
+        let state = AppState {
+            session: Some(Arc::new(agentos_session::SessionCoordinator::new())),
+            inbound_router: None,
+            ..AppState::new()
+        };
+        let (addr, handle) = spawn_server(state).await;
+        let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/chat?token=x"))
+            .await
+            .expect_err("inbound_router 未装配握手必须被拒");
+        match err {
+            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            }
+            other => panic!("应返回 HTTP 503 拒绝，实际 {other:?}"),
+        }
+        handle.abort();
+    }
+
+    // ── 交互应答端点（P1-3 声明驱动路由） ──────────────────
+
+    fn interaction_manifest(namespace: &str) -> agentos_core::traits::PluginManifest {
+        serde_json::from_value(json!({
+            "id": "p_interact", "name": "p_interact", "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "provides": {"capabilities": [{
+                "namespace": namespace,
+                "methods": ["respond"],
+                "protocol_roles": [{"role": "interaction-respond", "method": "respond"}],
+            }]},
+            "capabilities": {},
+        }))
+        .expect("valid manifest")
+    }
+
+    /// 可编程 CapabilityHandler 桩（interaction 路由面）。
+    struct StubCapabilityHandler {
+        ns: String,
+        result: std::sync::Mutex<Option<Result<serde_json::Value, agentos_mcp::McpError>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl agentos_mcp::CapabilityHandler for StubCapabilityHandler {
+        fn namespace(&self) -> &str {
+            &self.ns
+        }
+        async fn handle(
+            &self,
+            _method: &str,
+            _params: serde_json::Value,
+        ) -> Result<serde_json::Value, agentos_mcp::McpError> {
+            self.result
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("handle 不应被调用")
+        }
+    }
+
+    #[test]
+    fn resolve_interaction_responder_finds_declared_role() {
+        let manifests = vec![interaction_manifest("itest")];
+        let hit = resolve_interaction_responder(&manifests)
+            .expect("声明了 interaction-respond 角色应命中");
+        assert_eq!(hit, ("itest".to_string(), "respond".to_string()));
+        // 无 provides → None（fail-closed 不猜路由目标）
+        let bare = vec![
+            serde_json::from_value::<agentos_core::traits::PluginManifest>(json!({
+                "id": "p_bare", "name": "p_bare", "version": "1.0.0",
+                "plugin_type": "system", "language": "python",
+                "host_type": "sidecar", "entry": "x",
+                "capabilities": {},
+            }))
+            .expect("valid manifest"),
+        ];
+        assert!(resolve_interaction_responder(&bare).is_none());
+    }
+
+    #[tokio::test]
+    async fn interaction_response_guards_then_routes() {
+        // 缺 request_id → 显式错误载荷
+        let state = AppState::new();
+        let resp = interaction_response_handler(axum::extract::State(state), axum::Json(json!({})))
+            .await
+            .unwrap();
+        assert_eq!(resp.0["success"], false);
+        assert_eq!(resp.0["error"], "缺少 request_id");
+
+        // capability registry 未装配 → 显式错误
+        let state = AppState::new();
+        let resp = interaction_response_handler(
+            axum::extract::State(state),
+            axum::Json(json!({"request_id": "r1", "choice": 1})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["success"], false);
+        assert!(resp.0["error"]
+            .as_str()
+            .unwrap()
+            .contains("registry not available"));
+
+        // registry 在场但无插件声明角色 → 显式失败不猜路由
+        let mut state = AppState::new();
+        state.capability_handlers = Some(Arc::new(agentos_mcp::CapabilityHandlerRegistry::new()));
+        let resp = interaction_response_handler(
+            axum::extract::State(state),
+            axum::Json(json!({"request_id": "r1"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["success"], false);
+        assert!(resp.0["error"]
+            .as_str()
+            .unwrap()
+            .contains("no plugin declares"));
+
+        // 声明角色 + handler 成功 → success:true + data 透传
+        let mut state = AppState::new();
+        let registry = Arc::new(agentos_mcp::CapabilityHandlerRegistry::new());
+        registry.register(Arc::new(StubCapabilityHandler {
+            ns: "itest".to_string(),
+            result: std::sync::Mutex::new(Some(Ok(json!({"answered": true})))),
+        }));
+        state.capability_handlers = Some(registry);
+        *state.manifests.write().await = vec![interaction_manifest("itest")];
+        let resp = interaction_response_handler(
+            axum::extract::State(state),
+            axum::Json(json!({"request_id": "r2", "response_type": "choice"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["success"], true);
+        assert_eq!(resp.0["request_id"], "r2");
+        assert_eq!(resp.0["data"]["answered"], true);
+
+        // handler 失败 → success:false + 错误透传
+        let mut state = AppState::new();
+        let registry = Arc::new(agentos_mcp::CapabilityHandlerRegistry::new());
+        registry.register(Arc::new(StubCapabilityHandler {
+            ns: "itest".to_string(),
+            result: std::sync::Mutex::new(Some(Err(agentos_mcp::McpError::Protocol {
+                message: "interaction session gone".to_string(),
+            }))),
+        }));
+        state.capability_handlers = Some(registry);
+        *state.manifests.write().await = vec![interaction_manifest("itest")];
+        let resp = interaction_response_handler(
+            axum::extract::State(state),
+            axum::Json(json!({"request_id": "r3"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["success"], false);
+        assert_eq!(resp.0["request_id"], "r3");
+        assert!(resp.0["error"]
+            .as_str()
+            .unwrap()
+            .contains("interaction session gone"));
+    }
+
+    // ── 租户上下文解析（匿名回退 default） ─────────────────
+
+    #[tokio::test]
+    async fn request_tenant_ctx_falls_back_to_default_without_credentials() {
+        let ctx = request_tenant_ctx(None, &HeaderMap::new(), "sess-1").await;
+        assert_eq!(ctx.tenant_id, "default", "无凭证回退默认租户");
+        assert_eq!(ctx.session_id, "sess-1");
     }
 }

@@ -1,0 +1,69 @@
+name: transfer-v1
+mode: coding
+settle_timeout_seconds: 900
+cases:
+- id: normal_file_ops
+  source: baseline-transfer
+  category: normal
+  target: general_agent
+  messages:
+  - 创建一个文本文件 eval_normal.txt，内容为 eval-ok，创建后读取确认内容无误并汇报文件路径。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: eval_normal.txt
+        check: contains
+        pattern: eval-ok
+- id: cap_tool_choice_stats
+  source: baseline-transfer
+  category: capability
+  target: general_agent
+  messages:
+  - '请统计 config/agents 目录（含子目录）下所有 .yaml 文件的个数与文本行数合计，把结果写入当前工作空间 eval_stats.json，格式为
+    {"files": 数字, "total_lines": 数字}。'
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: eval_stats.json
+        check: not_empty
+  anchor: repo
+- id: cap_model_inventory
+  source: baseline-transfer
+  category: capability
+  target: general_agent
+  messages:
+  - '请查看 config/models/llm.yaml，找出所有 provider 为 minimax 的模型，把它们的模型 id 按字母升序写入当前工作空间
+    eval_models.json，格式为 {"models": ["id1", "id2"]}。'
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: eval_models.json
+        check: not_empty
+  anchor: repo
+- id: cap_conflict_resolution
+  source: baseline-transfer
+  category: capability
+  target: general_agent
+  messages:
+  - '请在当前工作空间创建三个文件：db_spec_v1.txt 内容为「数据库端口: 5432」；db_spec_v2.txt 内容为「数据库端口: 6543」；db_readme.txt
+    内容为「说明：db_spec_v1.txt 已废弃，数据库配置以 db_spec_v2.txt 为准」。然后把当前生效的数据库端口写入 effective_port.txt（内容只有一个端口号）。'
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: effective_port.txt
+        check: contains
+        pattern: '6543'
+- id: cap_key_carry_multiround
+  source: baseline-transfer
+  category: capability
+  target: general_agent
+  messages:
+  - 请记住密钥词 ZEBRA-7391，后面我会考你。现在只回复「已记住」。
+  - 请在当前工作空间创建 eval_notes.md，内容为三行：project=LingXi、owner=eval、secret=ZEBRA-7391。然后回答：你记住的密钥词是什么？把它写入当前工作空间
+    recalled_key.txt（内容只有密钥词）。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: recalled_key.txt
+        check: contains
+        pattern: ZEBRA-7391

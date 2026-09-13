@@ -859,6 +859,43 @@ async def _reviews_add_attachments(review_id: str, body: dict[str, Any]) -> dict
 
 
 @plugin.tool(
+    name="review_improvement",
+    schema={
+        "type": "object",
+        "properties": {
+            "cases": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "case_id": {"type": "string"},
+                        "task_status": {"type": "string"},
+                        "criteria": {"type": "object",
+                                     "description": "验收指标名 → 是否通过(bool)"},
+                        "symptom_note": {"type": "string"},
+                        "trajectory_note": {"type": "string"},
+                    },
+                    "required": ["case_id", "task_status", "criteria"],
+                },
+            },
+        },
+        "required": ["cases"],
+    },
+    description=(
+        "复盘改进建议：按分诊规则（config/self_evolve/rules/triage_rules.yaml）"
+        "对失败面做机制前置检查、三向分诊与杠杆映射，产出结构化改进建议。"
+        "评估原则的数据化承载——改原则改 yaml，不改代码。"
+    ),
+)
+async def review_improvement(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    import improvement
+    try:
+        return {"success": True, **improvement.suggest(cases)}
+    except (OSError, ValueError) as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@plugin.tool(
     name="http.handle",
     schema={
         "type": "object",

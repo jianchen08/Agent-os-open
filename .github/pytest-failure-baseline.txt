@@ -3,7 +3,7 @@
 # 对应 run_gates.py 两条 Python 插件测试车道（coverage-exempt-heavy-suites 拆分）：
 #   - plugins-coverage：插桩 gate（豁免名单之外全部插件测试 + 覆盖率地板 44%）
 #   - plugins-heavy   ：免插桩 gate（tests/plugins/test_plugin_smoke_matrix.py，
-#     94 插件子进程冒烟矩阵——实测对父进程覆盖率为零贡献，见
+#     84 插件子进程冒烟矩阵——实测对父进程覆盖率为零贡献，见
 #     docs/working/机械门禁统一入口与覆盖率豁免.md）
 #
 # ⚠️ 严格规则：只能【减】不能【增】。

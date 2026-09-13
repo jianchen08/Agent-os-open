@@ -68,7 +68,5 @@ plugins:
     enabled: true
   pipeline_context_window_guard:
     enabled: true
-  langchain_hub_search:
-    enabled: false
 defaults:
   enabled: true

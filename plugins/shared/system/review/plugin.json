@@ -158,6 +158,45 @@
             }
           }
         }
+      },
+      {
+        "name": "review_improvement",
+        "description": "复盘改进建议：按分诊规则对失败面做机制前置检查/三向分诊/杠杆映射，产出结构化建议（评估原则数据化承载）",
+        "render": {
+          "card": "form",
+          "title": "复盘·改进建议"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "cases"
+          ],
+          "properties": {
+            "cases": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "improvable"
+          ],
+          "properties": {
+            "improvable": {
+              "type": "number"
+            },
+            "suggestions": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
       }
     ],
     "route_signals": [],
@@ -293,5 +332,12 @@
       "description": "reviews 域：为审批添加媒体附件（JSON body: files/auto_review，文件路径非上传；auto_review 触发媒体审阅——原 POST /ext/channel_api/reviews/{review_id}/attachments 语义）"
     }
   ],
-  "host_group": "light"
+  "host_group": "light",
+  "config_files": [
+    {
+      "id": "triage_rules",
+      "path": "config/self_evolve/rules/triage_rules.yaml",
+      "label": "分诊与杠杆规则"
+    }
+  ]
 }

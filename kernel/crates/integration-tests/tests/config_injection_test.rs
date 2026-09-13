@@ -16,6 +16,57 @@ use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// 用户空间隔离 guard：钉 `AGENTOS_USER_*` 到指定根，drop 时恢复 + 放锁。
+///
+/// `load_config` 经用户层覆盖（ADR 2026-09-13-unified-user-root）做**文件级整体
+/// 替换**：开发机 `%APPDATA%/agentos/config/` 下的残留文件会被并入本用例的
+/// `config_root`（实测 `fp1` 断言 2 条却得 4 条）。用例须把用户根钉到一个空目录，
+/// 才能只观察自己写的夹具。
+///
+/// 本文件用例默认并行，环境变量进程全局——取锁串行化；guard 由调用方持有到结束。
+struct UserRootGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl UserRootGuard {
+    /// 钉到一个新建的空目录（无残留 → 覆盖层恒不命中，等价于 factory-only）。
+    fn pin_empty() -> (Self, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        (Self::pin(tmp.path()), tmp)
+    }
+
+    fn pin(root: &std::path::Path) -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // unwrap_or_else(into_inner)：测试 panic 污染锁后继续执行——锁只为串行化
+        // 环境变量操作，中毒无并发安全含义，在此 unwrap 会放大成连锁失败。
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            agentos_core::user_space::USER_ROOT_ENV,
+            agentos_core::user_space::USER_CONFIG_DIR_ENV,
+            agentos_core::user_space::USER_DATA_DIR_ENV,
+            agentos_core::user_space::USER_PLUGINS_DIR_ENV,
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, root);
+        for k in &keys[1..] {
+            std::env::remove_var(k);
+        }
+        Self { _lock: lock, saved }
+    }
+}
+
+impl Drop for UserRootGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 use agentos_core::traits::{
     LoadedPlugin, PluginInvoker, PluginLoader, PluginManifest, PluginStatus, PluginType,
 };
@@ -231,6 +282,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
 
 #[tokio::test]
 async fn fp1_load_config_reads_yaml_files() {
+    let (_user_root_guard, _user_root_tmp) = UserRootGuard::pin_empty();
     let config_dir = tempfile::tempdir().unwrap();
     fs::write(
         config_dir.path().join("memory_storage.yaml"),
@@ -460,6 +512,7 @@ async fn fp3_config_change_triggers_reload() {
 
 #[tokio::test]
 async fn fp4_no_config_root_returns_empty() {
+    let (_user_root_guard, _user_root_tmp) = UserRootGuard::pin_empty();
     let loader = agentos_plugin_loader::PluginLoaderImpl::new("/tmp/nonexistent", None);
     let config = loader.load_config().await.unwrap();
     assert_eq!(config, json!({}));
@@ -467,6 +520,7 @@ async fn fp4_no_config_root_returns_empty() {
 
 #[tokio::test]
 async fn fp4_nonexistent_dir_returns_empty() {
+    let (_user_root_guard, _user_root_tmp) = UserRootGuard::pin_empty();
     let loader = agentos_plugin_loader::PluginLoaderImpl::new("/tmp/nonexistent", None)
         .with_config_root("/tmp/no_such_dir_99999");
     let config = loader.load_config().await.unwrap();

@@ -350,12 +350,16 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "Loaded kernel capability contracts (definition-driven entry validation)"
     );
 
-    // 加载项目根 .env 到进程环境（config_root 的父目录）。
+    // 加载 .env 到进程环境（用户空间优先，回落项目根）。
     // sidecar 子进程默认继承父进程环境变量（tokio Command 无 env_clear），
     // 这样 sidecar 能解析配置里的 ${API_KEY} 等占位符（ADR §4.3 secrets）。
     // 仅设置进程未已有的变量（系统环境变量优先于 .env）。
+    //
+    // 用 mcp::env_file::env_path_for_root 而非自己拼 project_root/.env：
+    // 写侧（设置页填 key）走同一函数，两侧必须同源——否则会出现"key 写进
+    // 用户空间、启动读的还是项目根"这类静默分叉。
     if let Some(project_root) = config_root.parent() {
-        let env_path = project_root.join(".env");
+        let env_path = agentos_mcp::env_file::env_path_for_root(project_root);
         if env_path.is_file() {
             if let Ok(content) = std::fs::read_to_string(&env_path) {
                 let mut loaded = 0usize;
@@ -602,6 +606,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         sqlite_path = %storage_cfg.sqlite_path,
         "Storage driver resolved (config/storage.yaml > env > default sqlite)"
     );
+
+    // 迁移护栏（ADR 2026-09-13-unified-user-root §2.5）：默认库位置从项目根迁到
+    // 用户空间后，存量部署若原样启动会**开出一个全新的空库**——数据没丢，但用户
+    // 看到的是"全没了"，且此后写入都进新库、两边分叉。这里检测该形态并显式告警
+    // 给出迁移命令；**不静默自动迁移**（magic 迁移不可观测，失败/半途中断时状态
+    // 不明——沿用仓内 migrate_legacy_data_to_default 的显式调用裁定）。
+    warn_legacy_db_not_migrated(&storage_cfg, &config_root);
+
     let (store, sqlite_db) = agentos_engine::storage_factory::open_storage(&storage_cfg)?;
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
 
@@ -1714,25 +1726,13 @@ fn sample_private_bytes() -> Option<u64> {
 
 /// 解析用户插件根目录（可写，第三方插件安装位置）。
 ///
-/// 解析优先级：
-/// 1. 环境变量 `AGENTOS_USER_PLUGINS_DIR`（与 `AGENTOS_PLUGINS_DIR` 命名风格一致）
-/// 2. `dirs::data_dir().join("agentos").join("plugins")`
-///    （Win=`%APPDATA%/agentos/plugins`，macOS=`~/Library/Application Support/agentos/plugins`，
-///    Linux=`~/.local/share/agentos/plugins`）
-/// 3. 均不可用则返回 `None`（保持原行为：不启用 user_root）
+/// 解析优先级：`AGENTOS_USER_PLUGINS_DIR` > `<USER_ROOT>/plugins`（默认根按
+/// OS 不同，见 [`agentos_core::user_space::user_root`]）> `None`（不启用 user_root）。
 ///
-/// 注意使用 `dirs::data_dir()` 而非 `data_local_dir()`（后者是 `%LOCALAPPDATA%`，
-/// 不随用户漫游，不适合作为第三方插件安装位置）。
+/// 实现单点在 `agentos_core::user_space`——内核 bin、HTTP 面（config 读写）、
+/// 插件 loader 共用同一份解析，杜绝"三处各拼一次路径"（单真值 ADR 的实证根因）。
 fn resolve_user_plugins_dir() -> Option<PathBuf> {
-    // 1. 环境变量
-    if let Ok(val) = std::env::var("AGENTOS_USER_PLUGINS_DIR") {
-        if !val.trim().is_empty() {
-            return Some(PathBuf::from(val));
-        }
-    }
-
-    // 2. OS 标准目录
-    dirs::data_dir().map(|d| d.join("agentos").join("plugins"))
+    agentos_core::user_space::user_plugins_dir()
 }
 
 /// 递归发现包含 plugin.json 的目录的父目录路径列表。
@@ -1778,6 +1778,56 @@ fn collect_plugin_dirs(dir: &std::path::Path, dirs: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// 迁移护栏：默认库位置迁到用户空间后，存量库仍在项目根时显式告警（不自动迁移）。
+///
+/// 触发条件（三者同时满足才告警，避免误报）：
+/// 1. 本次解析出的库路径**不在**项目根 —— 即已按新默认（用户空间）开库；
+/// 2. 项目根**存在** legacy 库文件；
+/// 3. legacy 库**非空**（排除 0 字节残留——建了库没写过数据的部署无需迁移）。
+///
+/// 不阻断启动：告警 + 指明迁移命令。数据没丢（legacy 文件原样在），用户按提示
+/// 迁移即可；若已在新库产生数据，迁移脚本的合并语义由脚本自己把关。
+fn warn_legacy_db_not_migrated(
+    storage_cfg: &agentos_engine::storage_factory::StorageConfig,
+    config_root: &std::path::Path,
+) {
+    let Some(project_root) = config_root.parent() else {
+        return;
+    };
+    let legacy = project_root.join(agentos_engine::storage_factory::DB_FILENAME);
+    let current = std::path::Path::new(&storage_cfg.sqlite_path);
+
+    // 当前库就在项目根（或 :memory:/非 sqlite）→ 无迁移问题
+    if storage_cfg.driver != "sqlite" || storage_cfg.sqlite_path == ":memory:" {
+        return;
+    }
+    if current.parent().map(|p| p == project_root).unwrap_or(false) {
+        return;
+    }
+    let Ok(meta) = std::fs::metadata(&legacy) else {
+        return; // 无 legacy 库
+    };
+    if meta.len() == 0 {
+        return; // 空库残留，无数据可迁
+    }
+
+    eprintln!(
+        "[boot] 检测到项目根存在存量库 {}（{} 字节），但本次按用户空间默认开库到 {}。\n\
+         \x20     数据未丢失（老库文件原样保留）。两种处置：\n\
+         \x20     ① 迁移存量数据（推荐）：python scripts/migrate_to_user_root.py --dry-run 预览，去掉 --dry-run 执行；\n\
+         \x20     ② 继续用老库：设 AGENTOS_DB_PATH 指向老库路径后重启。",
+        legacy.display(),
+        meta.len(),
+        current.display()
+    );
+    warn!(
+        target: "agentos-kernel",
+        legacy_db = %legacy.display(),
+        current_db = %current.display(),
+        "legacy project-root database detected; user-space default in effect (run scripts/migrate_to_user_root.py)"
+    );
 }
 
 /// 构建插件加载器，并接入配置根目录（task_11 P0-1）。
@@ -1854,10 +1904,58 @@ mod tests {
     ///
     /// 回归保护：若有人移除 `.with_config_root(config_root)`，此测试会失败——
     /// 因为 loader 的 config_root 为 None 时 load_config 恒返回空 `{}`。
+    ///
+    /// 环境变量是进程全局态：读写 `AGENTOS_USER_*` 的用例互斥执行。
+    ///
+    /// 同二进制内 `build_plugin_loader_wires_config_root`（钉桩用户根）与
+    /// `user_plugins_dir_env_first_then_data_dir`（断言分区解析）都读这些变量，
+    /// 并行跑会互相踩（实测整套 workspace 连跑时偶发失败）。
+    fn user_space_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 用户根钉到本用例的 config_dir：`load_config` 经 `apply_user_config_overlay`
+    /// 做**用户层优先整体替换**（ADR 2026-09-13-unified-user-root），若用户层恰好存在
+    /// 同路径文件（开发机的 `%APPDATA%/agentos/config/models/llm.yaml`），factory 的
+    /// 用例夹具会被整个顶掉，断言依赖环境。钉桩保证只读本用例自己写的文件。
     #[tokio::test]
+    // 刻意持 std Mutex 跨 await：锁串行化的正是进程全局 AGENTOS_USER_*，
+    // 必须覆盖 load_config 的整个生命周期（测试独占语义）。
+    #[allow(clippy::await_holding_lock)]
     async fn build_plugin_loader_wires_config_root() {
         let plugins_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
+
+        // 隔离用户空间：本用例自带 config_dir 即用户配置层根，无残留文件
+        struct UserRootGuard {
+            _lock: std::sync::MutexGuard<'static, ()>,
+            root: Option<String>,
+            cfg: Option<String>,
+        }
+        impl Drop for UserRootGuard {
+            fn drop(&mut self) {
+                match self.root.take() {
+                    Some(v) => std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, v),
+                    None => std::env::remove_var(agentos_core::user_space::USER_ROOT_ENV),
+                }
+                match self.cfg.take() {
+                    Some(v) => std::env::set_var(agentos_core::user_space::USER_CONFIG_DIR_ENV, v),
+                    None => std::env::remove_var(agentos_core::user_space::USER_CONFIG_DIR_ENV),
+                }
+            }
+        }
+        let user_root = tempfile::tempdir().unwrap();
+        let _user_guard = UserRootGuard {
+            _lock: user_space_env_lock(),
+            root: std::env::var(agentos_core::user_space::USER_ROOT_ENV).ok(),
+            cfg: std::env::var(agentos_core::user_space::USER_CONFIG_DIR_ENV).ok(),
+        };
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, user_root.path());
+        std::env::set_var(
+            agentos_core::user_space::USER_CONFIG_DIR_ENV,
+            user_root.path().join("config"),
+        );
 
         // 构造与真实 config/ 同构的最小结构：config/models/llm.yaml
         let models_dir = config_dir.path().join("models");
@@ -1972,5 +2070,195 @@ mod tests {
         assert!(!watermark_breach(&[900, 900], 300, 0));
         // 阈值升高翻转结果（单调性）
         assert!(!watermark_breach(&[301, 500, 900], 900, 3));
+    }
+
+    /// 播种与口令迁移（真实 SQLite 内存库，非 mock）：四阶段串行——
+    /// A 首启播种（显式口令）、B 已存在+显式新口令=重置、C 已存在+随机生成
+    /// =不动、D 首启+随机生成=播种并走 banner 分支；迁移三态：明文回写、
+    /// 已哈希跳过、空表直通。环境变量进程全局态，串单测试执行（同文件约定）。
+    #[tokio::test]
+    async fn seed_admin_and_migrate_plaintext_passwords_lifecycle() {
+        use agentos_engine::store::SqliteStore;
+
+        fn fresh_store() -> Arc<dyn agentos_core::traits::StorageBackend> {
+            Arc::new(SqliteStore::open_memory().expect("内存库创建失败"))
+        }
+
+        // ── 迁移：空表直通 ──
+        let store = fresh_store();
+        migrate_plaintext_passwords(store.clone())
+            .await
+            .expect("空表迁移应直通");
+
+        // ── 迁移：明文行哈希化回写；已哈希行跳过 ──
+        let now = chrono::Utc::now().to_rfc3339();
+        let mk_user = |uid: &str, name: &str, pw: String| UserRecord {
+            user_id: uid.to_string(),
+            username: name.to_string(),
+            password: pw,
+            email: None,
+            role: "user".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: now.clone(),
+            last_login_at: None,
+            must_change_password: false,
+        };
+        store
+            .create_user(&mk_user("u-plain", "plain_user", "明文口令".to_string()))
+            .await
+            .expect("建明文用户失败");
+        let hashed = agentos_http::auth::hash_password("已是哈希").unwrap();
+        store
+            .create_user(&mk_user("u-hashed", "hashed_user", hashed))
+            .await
+            .expect("建哈希用户失败");
+        migrate_plaintext_passwords(store.clone())
+            .await
+            .expect("明文迁移不应失败");
+        let migrated = store
+            .get_user_by_id("u-plain")
+            .await
+            .expect("查询失败")
+            .expect("用户行应在");
+        assert!(
+            agentos_http::auth::is_password_hash(&migrated.password),
+            "明文行迁移后必须是哈希"
+        );
+        assert!(
+            agentos_http::auth::verify_password("明文口令", &migrated.password),
+            "迁移哈希须能验出原口令"
+        );
+        let untouched = store
+            .get_user_by_id("u-hashed")
+            .await
+            .expect("查询失败")
+            .expect("用户行应在");
+        assert!(
+            agentos_http::auth::verify_password("已是哈希", &untouched.password),
+            "已哈希行不应被改写"
+        );
+
+        // ── 播种 A：首启 + 显式口令 → 播种 admin（哈希、must_change）──
+        std::env::set_var("AGENTOS_ADMIN_PASSWORD", "seed-phase-pw");
+        let store = fresh_store();
+        seed_admin_user(store.clone()).await;
+        let admin = store
+            .get_user_by_id("00000000-0000-0000-0000-000000000001")
+            .await
+            .expect("查询失败")
+            .expect("首启必须播种 admin");
+        assert_eq!(admin.username, "admin");
+        assert_eq!(admin.tenant_id, "default");
+        assert!(admin.must_change_password, "播种 admin 须标记改密");
+        assert!(
+            agentos_http::auth::verify_password("seed-phase-pw", &admin.password),
+            "播种口令须与环境变量一致"
+        );
+
+        // ── 播种 B：已存在 + 显式新口令 → 重置 ──
+        std::env::set_var("AGENTOS_ADMIN_PASSWORD", "reset-phase-pw");
+        seed_admin_user(store.clone()).await;
+        let admin = store
+            .get_user_by_id("00000000-0000-0000-0000-000000000001")
+            .await
+            .expect("查询失败")
+            .expect("admin 应在");
+        assert!(
+            agentos_http::auth::verify_password("reset-phase-pw", &admin.password),
+            "显式新口令必须重置旧口令"
+        );
+
+        // ── 播种 C：已存在 + 随机生成 → 不重置 ──
+        std::env::remove_var("AGENTOS_ADMIN_PASSWORD");
+        seed_admin_user(store.clone()).await;
+        let admin = store
+            .get_user_by_id("00000000-0000-0000-0000-000000000001")
+            .await
+            .expect("查询失败")
+            .expect("admin 应在");
+        assert!(
+            agentos_http::auth::verify_password("reset-phase-pw", &admin.password),
+            "随机生成口令不得重置既有口令"
+        );
+
+        // ── 播种 D：首启 + 随机生成 → 播种且口令为合法哈希 ──
+        let store = fresh_store();
+        seed_admin_user(store.clone()).await;
+        let admin = store
+            .get_user_by_id("00000000-0000-0000-0000-000000000001")
+            .await
+            .expect("查询失败")
+            .expect("随机首启也必须播种 admin");
+        assert!(
+            agentos_http::auth::is_password_hash(&admin.password),
+            "随机口令同样落哈希"
+        );
+        std::env::remove_var("AGENTOS_ADMIN_PASSWORD");
+    }
+
+    /// 插件根目录发现（真实临时目录）：不存在根=空；二级嵌套 plugin.json 的
+    /// 父目录入列；plugin.yaml 同权；同父多插件去重。
+    #[test]
+    fn discover_plugin_roots_parents_and_dedup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("plugins");
+        // 不存在的根
+        assert!(discover_plugin_roots(&tmp.path().join("nope")).is_empty());
+
+        // 空目录（无任何插件）= 空
+        std::fs::create_dir_all(base.join("empty")).unwrap();
+        assert!(discover_plugin_roots(&base).is_empty());
+
+        // tools/simple/plugin.json（二级嵌套）→ 父目录 tools 入列
+        std::fs::create_dir_all(base.join("tools").join("simple")).unwrap();
+        std::fs::write(base.join("tools").join("simple").join("plugin.json"), "{}").unwrap();
+        // 另一父下 yaml 插件 + 同父第二插件（去重）
+        std::fs::create_dir_all(base.join("sys").join("a")).unwrap();
+        std::fs::create_dir_all(base.join("sys").join("b")).unwrap();
+        std::fs::write(base.join("sys").join("a").join("plugin.yaml"), "{}").unwrap();
+        std::fs::write(base.join("sys").join("b").join("plugin.json"), "{}").unwrap();
+
+        let mut roots = discover_plugin_roots(&base);
+        roots.sort();
+        let expect_tools = base.join("tools").to_string_lossy().to_string();
+        let expect_sys = base.join("sys").to_string_lossy().to_string();
+        assert_eq!(
+            roots,
+            vec![expect_sys, expect_tools],
+            "父目录去重后恰为 tools 与 sys 两个扫描根"
+        );
+    }
+
+    /// 用户插件目录解析：环境变量优先（含空值忽略回落），回落落 OS 数据目录
+    /// 下的 agentos/plugins。
+    #[test]
+    fn user_plugins_dir_env_first_then_data_dir() {
+        // 与 build_plugin_loader_wires_config_root 互斥：同读 AGENTOS_USER_* 进程全局态
+        let _lock = user_space_env_lock();
+        std::env::set_var("AGENTOS_USER_PLUGINS_DIR", "D:/custom/plugins");
+        assert_eq!(
+            resolve_user_plugins_dir(),
+            Some(PathBuf::from("D:/custom/plugins"))
+        );
+
+        // 空白值视同未设置 → 回落 OS 数据目录
+        std::env::set_var("AGENTOS_USER_PLUGINS_DIR", "   ");
+        let fallback = resolve_user_plugins_dir();
+        assert!(fallback.unwrap().to_string_lossy().contains("agentos"));
+
+        std::env::remove_var("AGENTOS_USER_PLUGINS_DIR");
+        assert!(
+            resolve_user_plugins_dir().is_some(),
+            "Windows 下 data_dir 恒可用"
+        );
+    }
+
+    /// 私有内存采样（Windows 真实 API 冒烟）：进程自身采样必然成功且量级
+    /// 合理（> 1MB——测试进程不可能更小）。
+    #[cfg(windows)]
+    #[test]
+    fn sample_private_bytes_returns_plausible_value() {
+        let bytes = sample_private_bytes().expect("进程采样不应失败");
+        assert!(bytes > 1024 * 1024, "采样值量级不合理: {bytes}");
     }
 }

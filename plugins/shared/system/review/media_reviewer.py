@@ -239,12 +239,12 @@ class ImageReviewer:
                     exif_dict[tag_name] = value
 
             # GPS 信息单独提取
-            from PIL.ExifTags import GPSTags  # noqa: PLC0415
+            from PIL.ExifTags import GPSTAGS  # noqa: PLC0415
 
             gps_info = raw_exif.get_ifd(ExifBase.GPSInfo)
             if gps_info:
                 for gps_tag_id, gps_value in gps_info.items():
-                    tag_name = GPSTags.get(gps_tag_id, f"GPS_{gps_tag_id}")
+                    tag_name = GPSTAGS.get(gps_tag_id, f"GPS_{gps_tag_id}")
                     exif_dict[f"GPS_{tag_name}"] = gps_value
 
         except Exception as exc:

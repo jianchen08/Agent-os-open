@@ -255,12 +255,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   /**
    * 初始化认证状态：令牌有效性判定与恢复刷新全部经 tokenLifecycle。
-   * D12-7 后 access token 仅存内存——页面刷新后恒走 refresh 轮换链路恢复；
-   * 同页 store 重建（内存 token 仍有效）则直接恢复，不白耗一次轮换。
+   * access token 仅存内存——页面刷新后恒走 refresh 轮换链路恢复（refresh
+   * token 持久存 localStorage，浏览器重启后仍自动登录）；同页 store 重建
+   * （内存 token 仍有效）则直接恢复，不白耗一次轮换。
    */
   initializeAuth: async () => {
     try {
-      // 升级残留清擦：localStorage 不允许留任何 token（D12-7 验收）
+      // 升级残留清擦：access token 两键与 sessionStorage 的 refresh 键任何
+      // 版本都非法（storage 面现状见 tokenLifecycle 头注）
       scrubLegacyTokenStorages()
       const storedUser = localStorage.getItem(STORAGE_KEYS.AUTH_USER)
 

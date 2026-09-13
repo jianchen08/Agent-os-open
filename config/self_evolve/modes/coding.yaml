@@ -1,0 +1,34 @@
+# 编码模式 profile（B 部类物料：由用户维护；一期由 eval_harness 直读）
+mode: coding
+name: 编码模式
+chain:
+  entry: main
+  expected_path: [main, orchestrator/programming_orchestrator_agent_v2, executor/code]
+  executor_pool: [executor/code, executor/general_agent]
+  entry_override: null
+pipeline_profile:
+  pipeline: autonomous
+  params:
+    case_timeout: 900
+    multimodal: false
+    domain_context: none
+suite:
+  smoke: config/self_evolve/suites/dev/smoke.yaml
+  full: null          # 二期补全 25-30 题
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+  execution_stage:
+    - config/agents/executor/code/
+    - config/agents/executor/general_agent.yaml
+levers:
+  tool_misselect: {execution_stage: [tool_ids, dispatch_guide]}
+  orchestration_runaway: {orchestration_stage: [pipeline_steps, breaker_params]}
+  format_violation: {execution_stage: [persona, prompt_skeleton]}
+  eval_no_settle: {evaluation_stage: [evaluation_params]}
+verifier_families: [pytest_exit, file_assert, test_lane]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 900
+  round_tokens: 2000000
+  proposals_per_session: 3

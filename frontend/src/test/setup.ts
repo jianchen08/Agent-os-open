@@ -4,6 +4,12 @@
  * 配置 testing-library/jest-dom 的自定义匹配器
  */
 import '@testing-library/jest-dom/vitest'
+import { configure } from '@testing-library/react'
+
+// findBy*/waitFor 等待预算：默认 1000ms 在并行车道负载尖峰下会出现整批
+// findBy 同时超时的假红（用例本身顺序无关、单跑全绿）；放宽到 3s 与
+// vitest testTimeout=10000 同量级，只影响失败时的检出延迟。
+configure({ asyncUtilTimeout: 3000 })
 
 // ---------------------------------------------------------------------------
 // localStorage / sessionStorage 内存 shim

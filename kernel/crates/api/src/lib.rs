@@ -27,6 +27,8 @@ pub mod run_chain;
 pub mod server;
 pub mod session_routes;
 pub mod sidecar_warmup;
+#[cfg(test)]
+pub(crate) mod test_env;
 pub mod tools;
 pub mod ws_session;
 pub mod ws_ticket;

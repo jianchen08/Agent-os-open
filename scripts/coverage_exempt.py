@@ -102,6 +102,19 @@ BASE_TEST_PATHS: list[str] = [
     "tests/monitoring/",
     "tests/multimodal/",
     "tests/test_delete_task_cascade_pipeline.py",
+    # 2026-09-13 覆盖率补测批四：task_submit tool 分支面（权限门/项目挂靠/
+    # 继承/workspace 解析/metadata 直调面），缺此条目则新文件不进插桩车道。
+    "tests/test_task_submit_tool_branches.py",
+    # 2026-09-13 覆盖率补测批三：isolation server 适配层（工具面/生命周期/
+    # 配置 watcher），缺此条目则新文件不进插桩车道、server.py 覆盖率失真。
+    "tests/test_isolation_service_server.py",
+    # 2026-09-13 覆盖率补测批七：db_admin server HTTP 面 + rollback reversers
+    # 缺口测试（缺此条目则新文件不进插桩车道、模块覆盖率失真）。
+    "tests/test_db_admin_server_gaps.py",
+    "tests/test_rollback_reversers_gaps.py",
+    "tests/test_browser_tool_gaps.py",
+    "tests/test_bash_tool_gaps.py",
+    "tests/test_llm_core_plugin_gaps.py",
     "tests/tools/test_task_submit_permission_p0.py",
     "tests/tools/test_task_permission_p0.py",
     "tests/tools/test_memory_idor_p0.py",
@@ -185,6 +198,23 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_workspace_frontend.py",
     "tests/test_utils/",
     "tests/tools/builtin/",
+    # 2026-09-13 覆盖率补测批九：cost_control 目录接线（既有并发测试在
+    # tests/plugins/ 下、目录内缺口测试 38 用例车道口径绿后纳入）。
+    "plugins/shared/system/cost_control/",
+    # 2026-09-13 覆盖率补测批九：param_inject 目录接线——既有 test_param_inject.py
+    # 9 用例此前从未进车道（目录不在名单）、车道口径全绿后随缺口测试一并纳入。
+    "plugins/shared/pipeline/input/param_inject/",
+    # 2026-09-14 覆盖率补测批九：context_build 缺口分支补测（config_id 回退/
+    # 缓存失效/非 dict yaml/priority/血缘投影/static_vars 装载/层级覆盖），
+    # 缺此条目则新文件不进插桩车道、plugin.py 覆盖率失真。
+    "tests/test_context_build_gaps.py",
+    # 2026-09-14 覆盖率补测批九：review 缺口测试接线（逐文件登记——目录内
+    # test_review_hindsight_e2e.py 是环境门槛 e2e，不进插桩车道）。
+    "plugins/shared/system/review/test_review_gaps.py",
+    "plugins/shared/system/review/test_improvement.py",
+    # 2026-09-14 覆盖率补测批九：_host/host.py 缺口测试（_host 非插件目录，
+    # 文件自带路径注入不依赖 tests/plugins/_host/conftest）。
+    "tests/test_host_shared_gaps.py",
 ]
 
 # 车道 marker 过滤：@pytest.mark.timing 用例唯一归 timing-gate（独立 stage，

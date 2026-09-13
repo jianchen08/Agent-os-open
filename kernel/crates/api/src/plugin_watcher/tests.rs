@@ -2212,3 +2212,51 @@ async fn dynamic_import_fuse_stops_reobservation_after_max_fails() {
     );
     assert_eq!(obs_fail.get("hub"), Some(&1), "重置后连击从 1 重计");
 }
+
+/// 用户插件根必须进 notify 监听集合（ADR 2026-09-13 §2.3 缺口一）：此前只 watch
+/// 内置根，用户根装卸最坏要等一个 60s 轮询周期，同一台机器上两根待遇不一致。
+#[test]
+fn watch_roots_includes_user_plugin_root() {
+    // 环境变量是进程全局态：与其它读 user-space env 的用例互斥。
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let builtin = std::path::PathBuf::from("/plugins/shared");
+    let original_root = std::env::var(agentos_core::user_space::USER_ROOT_ENV).ok();
+    let original_plugins = std::env::var(agentos_core::user_space::USER_PLUGINS_DIR_ENV).ok();
+    let tmp = tempfile::tempdir().unwrap();
+
+    // ① 用户根可用 → 内置根 + 用户根双监听
+    std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, tmp.path());
+    std::env::remove_var(agentos_core::user_space::USER_PLUGINS_DIR_ENV);
+    let roots = watch_roots(&builtin);
+    assert_eq!(roots.len(), 2, "内置根 + 用户根: {roots:?}");
+    assert!(roots.contains(&builtin));
+    assert!(
+        roots.contains(&tmp.path().join("plugins")),
+        "用户插件根必须在监听集合内: {roots:?}"
+    );
+
+    // ② 分区覆盖生效且不与内置根重复（同路径去重，避免重复 watch）
+    let same_as_builtin = tmp.path().join("shared");
+    std::env::set_var(
+        agentos_core::user_space::USER_PLUGINS_DIR_ENV,
+        &same_as_builtin,
+    );
+    std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, tmp.path());
+    let overlapped = watch_roots(&same_as_builtin);
+    assert_eq!(
+        overlapped.len(),
+        1,
+        "与内置根同路径时应去重: {overlapped:?}"
+    );
+
+    match original_root {
+        Some(v) => std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, v),
+        None => std::env::remove_var(agentos_core::user_space::USER_ROOT_ENV),
+    }
+    match original_plugins {
+        Some(v) => std::env::set_var(agentos_core::user_space::USER_PLUGINS_DIR_ENV, v),
+        None => std::env::remove_var(agentos_core::user_space::USER_PLUGINS_DIR_ENV),
+    }
+}

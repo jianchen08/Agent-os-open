@@ -1,15 +1,84 @@
 # 前端测试基线（vitest 失败数/eslint 错误数只减不增；
 # 覆盖率%只升不降。见 scripts/check_frontend_baseline.py）
-# vitest_coverage_pct 72.54→73.11（同批最终实测复核，含 MemoryPage 补测）
-# 72.54→73.11→75.66（2026-09-12 覆盖率补测批二）：Node20 本地全量实测
+# vitest_coverage_pct 77.18→82.87（2026-09-13 覆盖率补测批四）：Node20 本地
+# 全量实测（全绿，exit 0）。增量来源 = ChatInput 47.5%→99%（46 用例）/
+# FileTreeWidget 67.75%→98.36%（43）/router.tsx 6.75%→40.5%（11，守卫+路由
+# 表，余为内联 HomePage 交互面）/DbAdminPage 35.4%→94.8%（36）/
+# PluginConfigEditor 48.7%→97%（25）/stores 群 agentTab·notification·auth
+# 100%/97.4%/100%（93）/dsh ansi+ansiToJson 双 100% 行（172）。
+# 下一批目标 = FiveSpaceLayout(94)/useInteractionHandler(86)/CodeEditor(77)/
+# PipelineManagerWidget(73)/skinRuntime(69)/LlmSettingsPage(63)/
+# MessageItem(63)/router.tsx 内联 HomePage 交互面(88)。
+# 前值：75.66→77.18（2026-09-13 覆盖率补测批三）：Node20 本地
+# 全量实测（343 文件 2737 用例全绿，+51）。增量来源 = workspaceStore 6%→
+# 全动作+persist 契约 20 用例/themeStore 51.2%→动作面+加载六分支 22 用例/
+# ChartWidget 27.8%→七类型渲染+数据源回退 9 用例（同批三提交）。
+# 下一批目标 = ChatInput(158 缺行)/FileTreeWidget(138)/router.tsx(138)/
+# DbAdminPage(124)/FiveSpaceLayout(94)。
+# 前值：72.54→73.11→75.66（2026-09-12 覆盖率补测批二）：Node20 本地全量实测
 # （2686 用例全绿）。增量来源 = CodeEditor 12/FileTreeContextMenu 14/
 # RegisterPage 9/FileTreeWidget 9/PluginConfigEditor 8 用例（提交
 # 2b638bf4e/1eae874a5/dc36d55bd）+ ChannelApiDecl 满载时序加固
-# （74206ccbc）。下一批目标 = router.tsx/DbAdminPage/ChartWidget/FiveSpaceLayout。
+# （74206ccbc）。
 # 前值：69.33→72.54（2026-09-11 覆盖率补测批）：Node20 本地全量
 # 实测（2592+ 测试绿）。增量来源 = useVoiceInput 0%→全覆盖 + VotingPanel
 # 主链补测（提交 30d0810de/d276c07c4）。下一批目标 = FileTreeWidget/
 # ChatInput/PluginConfigEditor/CodeEditor 等缺口头部。
+# 下一批目标 = ChatInput(158 缺行)/FileTreeWidget(138)/router.tsx(138)/
+# DbAdminPage(124)/FiveSpaceLayout(94)。（批四已清 ChatInput/FileTree/
+# DbAdmin 及 PluginConfig/stores 群，见上）
+# 收紧（2026-09-13 覆盖率补测批五）：82.87→84.40——全量 356 文件 3239 用例
+# 0 失败，行覆盖 84.4%（13009/15412）。增量来源 = 本批三件补测：router.tsx
+# 行覆盖 100%（29 用例 HomePage 回调链：发送 fail-closed/busy 队列/停止兜底/
+# 翻页守卫，提交 66ca492d0）、services/skinRuntime 46.9%→66.2%（19 用例，
+# fail-closed 拒注/代际守卫/槽位预留）、hooks/useInteractionHandler
+# 58.5%→95.2%（28 用例，options 归一化/mode 分流/respond fail-closed）。
+# 下一批目标 = FiveSpaceLayout(88 缺行)/CodeEditor(77)/PipelineManagerWidget(73)/
+# MessageItem(63)/LlmSettingsPage(63)——头部清一色重 UI 组件。
+# 收紧（2026-09-13 覆盖率补测批六）：84.40→86.81——Node20 本地全量实测
+# 361 文件 3346 用例 0 失败（exit 0），行覆盖 86.81%（13380/15412）。增量
+# 来源 = 本批三件补测：FiveSpaceLayout 53.69%→93.1%（37 用例，文件编辑器
+# 轮询/Tab 分发九分支/保存链/文件树/Esc 全屏链，余 14 行为 handleTaskNodeClick
+# 死代码待拍板）、CodeEditor 61.88%→99.5%（19 用例，选中引用浮层全链/dotfile
+# 语言识别/滚动同步，余 1 行不可达）、PipelineManagerWidget 81.23%→99.7%
+#（28 用例，筛选/树分组/复制暂停取消/打开对话五分流/fake clock ticker，余
+# 1 行不可达）（提交 fc9cecdc7 前两件/aca34b5a1）。顺带修复：
+# InteractionHandlerBranches 裸 vi.fn 假红（playNotificationSound 默认
+# resolved，全量负载 6 假红根因，提交 9ba4d8f3f）。
+# 下一批目标 = MessageItem(63)/LlmSettingsPage(63)/ FiveSpaceLayout
+# handleTaskNodeClick 死代码删除（拍板后 +14 行）。
+# 收紧（2026-09-13 覆盖率补测批七）：86.81→89.91——Node20 本地全量实测
+# 370 文件 0 失败（exit 0），行覆盖 89.91%（13857/15412），同批六精确实测
+# 口径落值（非 floor+1 压力线；本文件历来口径如此）。增量来源 = 本批七件
+# 补测：ActivityCard 56→4 缺行（31 用例，余 4 行为 getStatusIcon 死防御
+# 分支）、Sidebar 53→0 全覆盖（26 用例）、NotificationCenter 52→0 全覆盖
+#（29 用例，改用真实 Radix Dialog 触发 onOpenChange/onPointerDownOutside）、
+# DebugTasksPage 48→0 全覆盖（12 用例，顺带修恢复按钮 pending 键不一致真
+# 缺陷：resumingIds 写 task_id 查 id）、themeService 46→5 缺行（36 用例，
+# 余 5 行 fetchDynamicThemes glob 路径疑似产品缺陷待拍板）、useCostControl
+# 45→0 全覆盖（12 用例）、GlobalWebSocket 45→6 缺行（16 用例，余 6 行心跳
+# 超时死代码待拍板）。
+# 下一批目标 = services/api/client(42)/ImageGallery(39)/
+# MessageContentRenderer(37)/session.ts(37)/ChatContainer(31)。
+# 收紧（2026-09-13 覆盖率补测批八）：89.91→89.93——Node20 本地全量实测
+# 371 文件 3532 用例 0 失败（exit 0），行覆盖 89.93%（13861/15412）。增量
+# 来源 = MessageItem 剩余 2 缺行清零、行覆盖 100%（3 用例：pendingInteractions
+# 非空 selector 真实求值等待态/工具卡 chat_card filePathSource→打开按钮→
+# onOpenFile→全局回调全链，提交 5f7a2090c；批六头部目标 MessageItem(63)
+# 经批七七件+本批 3 用例收口）。
+# 批九复测受阻未收紧（2026-09-14 凌晨记录）：批九 FE 补测 15 文件 392 用例
+# 已全绿入仓（单跑/共跑双证），但全量车道五次尝试 1-2 失败未获绿跑，
+# coverage 报告因 vitest reportOnFailure 缺省 false 不产出，基线数值暂不动。
+# 失败源 = 既有测试（52f2737a7 LlmSettingsPage 目录用例为主，ChannelApiDecl
+# 偶发）：Radix SelectContent 懒挂载 × 懒目录 onToggle 链在负载下部分渲染后
+# 整段卸载（组头现而项缺/整段消失双形态，单跑 12/12 与 7 连败双态并存，
+# 原版与加固版同样红=测试自身负载敏感，非批九补测引入）。已做的加固
+# （同笼 waitFor/10s/30s testTimeout）不治本。建议：排查该用例的 details
+# onToggle 异步链与 react-query 重挂载竞争（欲修复先复现：npx vitest run
+# 该文件，当前环境连续失败；02:15 窗口曾单跑全绿，存在时变因素）。
+# 下一批目标（批九已清 15 文件后存量）= themeService 分支、renderIntent
+# 分支、pipelineMessageStore 分支（批九已大幅推进）、skinRuntime 残余 5、
+# GlobalInteractionOverlay 残余 11。
 vitest_failures=0
 eslint_errors=0
-vitest_coverage_pct=75.66
+vitest_coverage_pct=89.93

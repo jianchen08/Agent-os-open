@@ -1093,3 +1093,983 @@ impl StepLibrary {
         self.steps.keys().map(|s| s.as_str()).collect()
     }
 }
+
+// ── 单元测试（serde 往返 / 构造器 / 终态映射 / Display 契约）──────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::{MessageQueryOpts, SessionListFilter};
+
+    /// serde 往返断言：序列化 → 反序列化 → 再序列化逐字节一致（线格式稳定）。
+    fn assert_serde_roundtrip<T>(value: &T)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let text = serde_json::to_string(value).expect("序列化失败");
+        let back: T = serde_json::from_str(&text).expect("反序列化失败");
+        let text2 = serde_json::to_string(&back).expect("再序列化失败");
+        assert_eq!(text2, text, "roundtrip 线格式不一致");
+    }
+
+    /// 畸形输入拒收：目标类型的反序列化必须报错（fail-closed）。
+    fn assert_serde_rejects<T: serde::de::DeserializeOwned + std::fmt::Debug>(raw: &str) {
+        assert!(
+            serde_json::from_str::<T>(raw).is_err(),
+            "畸形输入应被拒收: {raw}"
+        );
+    }
+
+    /// 存储后端替身：仅供 ContentLoader/PluginContext 构造（这些用例零存储调用）。
+    struct NilStore;
+
+    #[async_trait::async_trait]
+    impl StorageBackend for NilStore {
+        async fn get_run(&self, _run_id: &str) -> Result<RunRecord, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _opts: MessageQueryOpts,
+        ) -> Result<Vec<MessageRecord>, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn get_blob(&self, _blob_id: &str) -> Result<Vec<u8>, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn append_trace(&self, _entry: TraceEntry) -> Result<(), StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn update_run_status(
+            &self,
+            _run_id: &str,
+            _status: RunStatus,
+            _current_branch: Option<&str>,
+            _current_seq: Option<u32>,
+        ) -> Result<(), StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn create_run(
+            &self,
+            _run_id: &str,
+            _config_hash: &str,
+            _tenant_id: &str,
+        ) -> Result<(), StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn create_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn get_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Option<SessionRecord>, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn list_sessions(
+            &self,
+            _filter: SessionListFilter,
+        ) -> Result<Vec<SessionRecord>, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn update_session(&self, _session: &SessionRecord) -> Result<(), StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn delete_session(&self, _thread_id: &str) -> Result<Vec<String>, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn link_pipeline_session(
+            &self,
+            _pipeline_id: &str,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<TraceEntry>, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn create_user(&self, _user: &UserRecord) -> Result<(), StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn get_user_by_id(&self, _user_id: &str) -> Result<Option<UserRecord>, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn get_user_by_username(
+            &self,
+            _username: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn list_users(&self) -> Result<Vec<UserRecord>, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn update_last_login(&self, _user_id: &str) -> Result<(), StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn update_user_password(
+            &self,
+            _user_id: &str,
+            _password_hash: &str,
+            _must_change_password: bool,
+        ) -> Result<bool, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+        async fn delete_user(&self, _user_id: &str) -> Result<bool, StorageError> {
+            unreachable!("本用例不触发存储调用")
+        }
+    }
+
+    fn nil_loader() -> ContentLoader {
+        ContentLoader::new(
+            std::sync::Arc::new(NilStore),
+            "run-1".to_string(),
+            "main".to_string(),
+        )
+    }
+
+    // ── 路由信号与插件结果 ────────────────────────────────────────
+
+    #[test]
+    fn route_type_serde_roundtrip_all_variants() {
+        for (value, wire) in [
+            (RouteType::NextLlm, "next_llm"),
+            (RouteType::NextTool, "next_tool"),
+            (RouteType::End, "end"),
+            (RouteType::Wait, "wait"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&value).unwrap(),
+                format!("\"{wire}\"")
+            );
+            let back: RouteType = serde_json::from_str(&format!("\"{wire}\"")).unwrap();
+            assert_eq!(back, value);
+        }
+        assert_serde_rejects::<RouteType>("\"delegate\"");
+        assert_serde_rejects::<RouteType>("\"bogus\"");
+    }
+
+    #[test]
+    fn plugin_result_default_builders_and_serde() {
+        // Default：空更新、不跳过、无错误
+        let empty = PluginResult::default();
+        assert!(empty.state_updates.is_empty());
+        assert!(!empty.skip_remaining);
+        assert!(empty.error.is_none());
+        // 反序列化缺省字段 → 同一 Default 语义
+        let parsed: PluginResult = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.state_updates.len(), 0);
+        assert!(!parsed.skip_remaining);
+
+        // builder：with_state_updates / with_error
+        let mut updates = HashMap::new();
+        updates.insert("k".to_string(), serde_json::json!(42));
+        let with_updates = PluginResult::default().with_state_updates(updates.clone());
+        assert_eq!(with_updates.state_updates, updates);
+        let err = PluginError {
+            message: "boom".into(),
+            code: Some("E1".into()),
+            source: None,
+        };
+        let with_err = PluginResult::default().with_error(err.clone());
+        assert_eq!(with_err.error.as_ref().unwrap().message, "boom");
+
+        // roundtrip 两种形态
+        assert_serde_roundtrip(&with_updates);
+        assert_serde_roundtrip(&with_err);
+    }
+
+    #[test]
+    fn plugin_error_display_and_std_error() {
+        let coded = PluginError {
+            message: "disk full".into(),
+            code: Some("E_IO".into()),
+            source: Some("sqlite".into()),
+        };
+        assert_eq!(coded.to_string(), "[E_IO] disk full");
+        let bare = PluginError {
+            message: "disk full".into(),
+            code: None,
+            source: None,
+        };
+        assert_eq!(bare.to_string(), "disk full");
+        assert_serde_roundtrip(&coded);
+        // std::error::Error trait 实现（编译期即验证 trait 约束）
+        let boxed: Box<dyn std::error::Error> = Box::new(coded);
+        assert!(boxed.to_string().contains("disk full"));
+    }
+
+    #[test]
+    fn plugin_context_and_content_loader_debug() {
+        let state = serde_json::json!({"messages": []});
+        let loader = nil_loader();
+        let ctx = PluginContext::new(
+            &state,
+            serde_json::json!({"model": "gpt"}),
+            TenantContext::new("tenant-a", "sess-1"),
+            uuid::Uuid::new_v4(),
+            loader.clone(),
+        );
+        // new 构造的缺省坐标
+        assert_eq!(ctx.session_id, "");
+        assert_eq!(ctx.task_id, "");
+        assert_eq!(ctx.tenant.tenant_id, "tenant-a");
+        // Debug 面包含关键字段（消费方日志可观测性契约）
+        let dbg = format!("{ctx:?}");
+        for needle in ["PluginContext", "tenant-a", "sess-1", "run-1", "main"] {
+            assert!(dbg.contains(needle), "Debug 缺少 {needle}: {dbg}");
+        }
+        // ContentLoader Clone/Debug：clone 与本体可观测字段一致
+        let loader_dbg = format!("{loader:?}");
+        assert!(loader_dbg.contains("run-1") && loader_dbg.contains("main"));
+        let cloned = loader.clone();
+        assert_eq!(format!("{cloned:?}"), loader_dbg);
+    }
+
+    #[test]
+    fn tenant_context_new_defaults_and_serde() {
+        let ctx = TenantContext::new("t1", "s1");
+        assert_eq!(ctx.tenant_id, "t1");
+        assert_eq!(ctx.session_id, "s1");
+        assert_eq!(ctx.user_id, None);
+        assert_eq!(ctx.role, None);
+        assert!(ctx.permissions.is_empty());
+        assert!(ctx.enabled_plugins.is_empty());
+        assert_eq!(ctx.credential_handle, None);
+
+        // 完整形态 roundtrip
+        let full = TenantContext {
+            tenant_id: "t1".into(),
+            user_id: Some("u1".into()),
+            session_id: "s1".into(),
+            role: Some("admin".into()),
+            permissions: vec!["pipeline:run".into(), "tool:invoke".into()],
+            enabled_plugins: vec!["p1".into()],
+            credential_handle: Some("vault:key1".into()),
+        };
+        assert_serde_roundtrip(&full);
+        // 最小形态：可选字段缺省、permissions/enabled_plugins 缺省空
+        let minimal: TenantContext =
+            serde_json::from_str(r#"{"tenant_id":"t","session_id":"s"}"#).unwrap();
+        assert_eq!(minimal.user_id, None);
+        assert!(minimal.permissions.is_empty());
+        assert!(minimal.enabled_plugins.is_empty());
+        // None 可选字段不序列化输出
+        let s = serde_json::to_string(&ctx).unwrap();
+        assert!(!s.contains("user_id") && !s.contains("role"), "{s}");
+    }
+
+    // ── 工具元信息 ────────────────────────────────────────────────
+
+    #[test]
+    fn tool_category_serde_roundtrip_all_variants() {
+        for (value, wire) in [
+            (ToolCategory::File, "file"),
+            (ToolCategory::FileSystem, "file_system"),
+            (ToolCategory::Search, "search"),
+            (ToolCategory::Web, "web"),
+            (ToolCategory::Memory, "memory"),
+            (ToolCategory::Task, "task"),
+            (ToolCategory::System, "system"),
+            (ToolCategory::Execution, "execution"),
+            (ToolCategory::Analysis, "analysis"),
+            (ToolCategory::Evaluation, "evaluation"),
+            (ToolCategory::Agent, "agent"),
+            (ToolCategory::Monitoring, "monitoring"),
+        ] {
+            let text = serde_json::to_string(&value).unwrap();
+            assert_eq!(text, format!("\"{wire}\""), "{value:?} wire 形态");
+            let back: ToolCategory = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, value);
+        }
+        assert_serde_rejects::<ToolCategory>("\"gpu\"");
+    }
+
+    #[test]
+    fn tool_source_serde_roundtrip_all_variants() {
+        for (value, wire) in [
+            (ToolSource::Builtin, "builtin"),
+            (ToolSource::Mcp, "mcp"),
+            (ToolSource::Custom, "custom"),
+            (ToolSource::Database, "database"),
+            (ToolSource::Dynamic, "dynamic"),
+        ] {
+            let text = serde_json::to_string(&value).unwrap();
+            assert_eq!(text, format!("\"{wire}\""));
+            let back: ToolSource = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, value);
+        }
+        assert_serde_rejects::<ToolSource>("\"hardcoded\"");
+    }
+
+    #[test]
+    fn tool_execution_result_constructors_and_serde() {
+        let ok = ToolExecutionResult::success(serde_json::json!({"rows": [1, 2]}));
+        assert!(ok.success);
+        assert_eq!(ok.data["rows"][1], 2);
+        assert_eq!(ok.error, None);
+        assert_eq!(ok.duration_ms, None);
+        assert_eq!(ok.metadata, None);
+
+        let bad = ToolExecutionResult::failure("timeout after 30s");
+        assert!(!bad.success);
+        assert_eq!(bad.data, serde_json::Value::Null);
+        assert_eq!(bad.error.as_deref(), Some("timeout after 30s"));
+
+        // roundtrip：成功与失败两种形态
+        assert_serde_roundtrip(&ok);
+        assert_serde_roundtrip(&bad);
+        // None 可选字段不序列化；metadata 显式携带时保留（副作用信号载体）
+        let s = serde_json::to_string(&ok).unwrap();
+        assert!(!s.contains("error") && !s.contains("metadata"), "{s}");
+        let with_meta = ToolExecutionResult {
+            metadata: Some(serde_json::json!({"result": "completed"})),
+            duration_ms: Some(120),
+            ..ok.clone()
+        };
+        assert_serde_roundtrip(&with_meta);
+    }
+
+    // ── pending 输入与运行状态 ────────────────────────────────────
+
+    #[test]
+    fn pending_input_source_serde_roundtrip_all_variants() {
+        for (value, wire) in [
+            (PendingInputSource::User, "user"),
+            (PendingInputSource::Trigger, "trigger"),
+            (PendingInputSource::Task, "task"),
+            (PendingInputSource::Http, "http"),
+            (PendingInputSource::System, "system"),
+        ] {
+            let text = serde_json::to_string(&value).unwrap();
+            assert_eq!(text, format!("\"{wire}\""));
+            let back: PendingInputSource = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, value);
+        }
+        assert_serde_rejects::<PendingInputSource>("\"cron\"");
+    }
+
+    fn pending_record(source: PendingInputSource) -> PendingInputRecord {
+        PendingInputRecord {
+            id: "abc123def456".into(),
+            pipeline_id: "p1".into(),
+            tenant_id: "t1".into(),
+            user_id: "u1".into(),
+            content: "hello".into(),
+            thread: "th1".into(),
+            source,
+            agent_id: "main".into(),
+            route_id: "r1".into(),
+            thinking_strength: "low".into(),
+            client_message_id: "cmid-1".into(),
+            execution_context: Some(serde_json::json!({"workspace_mode": "isolated"})),
+            state_overlay: None,
+            created_at: "2026-09-13T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn pending_input_record_serde_roundtrip() {
+        assert_serde_roundtrip(&pending_record(PendingInputSource::User));
+        assert_serde_roundtrip(&pending_record(PendingInputSource::Task));
+    }
+
+    #[test]
+    fn run_status_serde_roundtrip_all_variants() {
+        for (value, wire) in [
+            (RunStatus::Running, "running"),
+            (RunStatus::Suspended, "suspended"),
+            (RunStatus::Completed, "completed"),
+            (RunStatus::Failed, "failed"),
+            (RunStatus::Cancelled, "cancelled"),
+        ] {
+            let text = serde_json::to_string(&value).unwrap();
+            assert_eq!(text, format!("\"{wire}\""));
+            let back: RunStatus = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, value);
+        }
+        assert_serde_rejects::<RunStatus>("\"pending\"");
+    }
+
+    #[test]
+    fn run_status_from_control_state_contract() {
+        // 挂起优先：即使同时带失败署名，suspended=true 也判挂起
+        let suspended = serde_json::json!({"suspended": true, "router.stop_reason": "timeout"});
+        assert_eq!(
+            RunStatus::from_control_state(&suspended),
+            RunStatus::Suspended
+        );
+
+        // 用户主动终止词表 → Cancelled
+        for reason in ["user_requested", "task_cancelled", "task_deleted"] {
+            let state = serde_json::json!({"router.stop_reason": reason});
+            assert_eq!(
+                RunStatus::from_control_state(&state),
+                RunStatus::Cancelled,
+                "{reason} 应映射 Cancelled"
+            );
+        }
+        // 失败署名词表逐词映射 Failed（词表即契约，遍历防漏词）
+        for reason in RunStatus::FAILED_STOP_REASONS {
+            let state = serde_json::json!({"router.stop_reason": reason});
+            assert_eq!(
+                RunStatus::from_control_state(&state),
+                RunStatus::Failed,
+                "{reason} 应映射 Failed"
+            );
+        }
+        // 未署名 / 未知署名 / 空 state → Completed（正常收束）
+        for state in [
+            serde_json::json!({}),
+            serde_json::json!({"router.stop_reason": "task_completed"}),
+            serde_json::json!({"suspended": false, "router.stop_reason": "task_completed"}),
+            serde_json::json!({"suspended": "yes"}),
+        ] {
+            assert_eq!(
+                RunStatus::from_control_state(&state),
+                RunStatus::Completed,
+                "未署名应映射 Completed: {state}"
+            );
+        }
+    }
+
+    // ── 四表模型记录 ──────────────────────────────────────────────
+
+    #[test]
+    fn run_record_serde_roundtrip() {
+        let running = RunRecord {
+            run_id: "r-1".into(),
+            config_hash: "h1".into(),
+            status: RunStatus::Running,
+            tenant_id: "t1".into(),
+            created_at: "2026-09-13T00:00:00Z".into(),
+            ended_at: None,
+            current_branch: "main".into(),
+            current_seq: 3,
+            metadata: Some(serde_json::json!({"agent_id": "main"})),
+        };
+        assert_serde_roundtrip(&running);
+        // ended_at None 不序列化；结束形态携带 ended_at
+        let s = serde_json::to_string(&running).unwrap();
+        assert!(!s.contains("ended_at"), "{s}");
+        let finished = RunRecord {
+            status: RunStatus::Completed,
+            ended_at: Some("2026-09-13T01:00:00Z".into()),
+            ..running
+        };
+        assert_serde_roundtrip(&finished);
+    }
+
+    #[test]
+    fn pipeline_run_info_serde_roundtrip() {
+        let full = PipelineRunInfo {
+            run_id: "r-1".into(),
+            pipeline_id: Some("p-1".into()),
+            thread_id: Some("th-1".into()),
+            status: RunStatus::Failed,
+            started_at: "2026-09-13T00:00:00Z".into(),
+            ended_at: Some("2026-09-13T01:00:00Z".into()),
+        };
+        assert_serde_roundtrip(&full);
+        let bare = PipelineRunInfo {
+            pipeline_id: None,
+            thread_id: None,
+            ended_at: None,
+            ..full
+        };
+        let s = serde_json::to_string(&bare).unwrap();
+        assert!(
+            !s.contains("pipeline_id") && !s.contains("thread_id"),
+            "{s}"
+        );
+        assert_serde_roundtrip(&bare);
+    }
+
+    #[test]
+    fn message_record_serde_roundtrip() {
+        let minimal = MessageRecord {
+            message_id: "m-1".into(),
+            run_id: "r-1".into(),
+            branch_id: "main".into(),
+            seq_in_branch: 0,
+            role: "user".into(),
+            blob_id: None,
+            content_preview: None,
+            created_at: "2026-09-13T00:00:00Z".into(),
+            pipeline_id: None,
+            tool_calls_json: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            status: None,
+            error: None,
+            tool_result_json: None,
+            metadata: None,
+        };
+        assert_serde_roundtrip(&minimal);
+        let full = MessageRecord {
+            role: "assistant".into(),
+            blob_id: Some("b-1".into()),
+            content_preview: Some("hello…".into()),
+            pipeline_id: Some("p-1".into()),
+            tool_calls_json: Some("[]".into()),
+            reasoning_content: Some("thinking".into()),
+            metadata: Some(serde_json::json!({"client_message_id": "cmid-1"})),
+            ..minimal.clone()
+        };
+        assert_serde_roundtrip(&full);
+        // tool 结果消息形态（role=tool 携带配对字段）
+        let tool_msg = MessageRecord {
+            role: "tool".into(),
+            tool_call_id: Some("call-1".into()),
+            status: Some("failed".into()),
+            error: Some("boom".into()),
+            tool_result_json: Some("{\"success\":false}".into()),
+            ..minimal
+        };
+        assert_serde_roundtrip(&tool_msg);
+    }
+
+    #[test]
+    fn session_record_serde_roundtrip() {
+        let full = SessionRecord {
+            thread_id: "th-1".into(),
+            title: Some("demo".into()),
+            intent: Some("answer question".into()),
+            current_state: "active".into(),
+            agent_id: Some("main".into()),
+            active_pipeline_id: Some("p-1".into()),
+            pipeline_ids: vec!["p-1".into(), "p-2".into()],
+            metadata: Some(serde_json::json!({"session_type": "main_pipeline"})),
+            created_at: "2026-09-13T00:00:00Z".into(),
+            updated_at: "2026-09-13T00:10:00Z".into(),
+            last_active_at: Some("2026-09-13T00:10:00Z".into()),
+        };
+        assert_serde_roundtrip(&full);
+        // pipeline_ids 缺省空（旧数据兼容）
+        let parsed: SessionRecord = serde_json::from_str(
+            r#"{"thread_id":"th","current_state":"idle","created_at":"t","updated_at":"t"}"#,
+        )
+        .unwrap();
+        assert!(parsed.pipeline_ids.is_empty());
+        assert_eq!(parsed.current_state, "idle");
+    }
+
+    #[test]
+    fn user_record_serde_roundtrip_and_defaults() {
+        let user = UserRecord {
+            user_id: "u-1".into(),
+            username: "alice".into(),
+            password: "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ".into(),
+            email: Some("a@b.c".into()),
+            role: "admin".into(),
+            tenant_id: "default".into(),
+            created_at: "2026-09-13T00:00:00Z".into(),
+            last_login_at: None,
+            must_change_password: true,
+        };
+        assert_serde_roundtrip(&user);
+        // must_change_password 缺省 false（旧数据零迁移）
+        let legacy: UserRecord = serde_json::from_str(
+            r#"{"user_id":"u","username":"bob","password":"$argon2","role":"user","tenant_id":"u","created_at":"t"}"#,
+        )
+        .unwrap();
+        assert!(!legacy.must_change_password);
+        assert_eq!(legacy.last_login_at, None);
+    }
+
+    #[test]
+    fn patch_type_serde_roundtrip_all_variants() {
+        for (value, wire) in [
+            (PatchType::StateUpdate, "state_update"),
+            (PatchType::RouteSignal, "route_signal"),
+            (PatchType::Error, "error"),
+            (PatchType::Lifecycle, "lifecycle"),
+            (PatchType::Rollback, "rollback"),
+        ] {
+            let text = serde_json::to_string(&value).unwrap();
+            assert_eq!(text, format!("\"{wire}\""));
+            let back: PatchType = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, value);
+        }
+        assert_serde_rejects::<PatchType>("\"merge\"");
+    }
+
+    #[test]
+    fn trace_entry_serde_roundtrip() {
+        let entry = TraceEntry {
+            trace_id: "tr-1".into(),
+            run_id: "r-1".into(),
+            branch_id: "main".into(),
+            seq_in_branch: 7,
+            plugin_id: "llm_core".into(),
+            patch_type: PatchType::StateUpdate,
+            patch_data: serde_json::json!({"state_updates": {"k": 1}}),
+            created_at: "2026-09-13T00:00:00Z".into(),
+        };
+        assert_serde_roundtrip(&entry);
+    }
+
+    // ── 引擎/存储错误 ─────────────────────────────────────────────
+
+    #[test]
+    fn engine_error_display_and_conversions() {
+        let cases: Vec<(EngineError, &str)> = vec![
+            (
+                EngineError::RunNotFound {
+                    run_id: "r-1".into(),
+                },
+                "run not found: r-1",
+            ),
+            (
+                EngineError::InvalidState {
+                    run_id: "r-1".into(),
+                    reason: "already ended".into(),
+                },
+                "run 'r-1' is in invalid state: already ended",
+            ),
+            (
+                EngineError::Storage(StorageError::NotFound("x".into())),
+                "storage error: not found: x",
+            ),
+            (
+                EngineError::Plugin(PluginError {
+                    message: "boom".into(),
+                    code: None,
+                    source: None,
+                }),
+                "plugin error: boom",
+            ),
+            (
+                EngineError::Config {
+                    message: "bad yaml".into(),
+                },
+                "config error: bad yaml",
+            ),
+            (
+                EngineError::Other {
+                    message: "misc".into(),
+                },
+                "engine error: misc",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(&err.to_string(), expected, "{err:?}");
+        }
+        // From 转换：? 传播链契约
+        let from_storage: EngineError = StorageError::Io("disk".into()).into();
+        assert!(matches!(
+            from_storage,
+            EngineError::Storage(StorageError::Io(_))
+        ));
+        let from_plugin: EngineError = PluginError {
+            message: "p".into(),
+            code: None,
+            source: None,
+        }
+        .into();
+        assert!(matches!(from_plugin, EngineError::Plugin(_)));
+    }
+
+    #[test]
+    fn storage_error_display_and_rusqlite_conversion() {
+        let cases: Vec<(StorageError, &str)> = vec![
+            (StorageError::NotFound("r-9".into()), "not found: r-9"),
+            (
+                StorageError::Serialization("bad json".into()),
+                "serialization error: bad json",
+            ),
+            (
+                StorageError::Database("locked".into()),
+                "database error: locked",
+            ),
+            (StorageError::Io("eof".into()), "io error: eof"),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(&err.to_string(), expected, "{err:?}");
+        }
+        // rusqlite::Error 自动转 Database（消息携带原始错误文本）
+        let converted = StorageError::from(rusqlite::Error::InvalidColumnName("col_x".into()));
+        match converted {
+            StorageError::Database(msg) => assert!(msg.contains("col_x"), "{msg}"),
+            other => panic!("应转为 Database，实际 {other:?}"),
+        }
+    }
+
+    // ── 配置驱动的管道配置类型 ────────────────────────────────────
+
+    #[test]
+    fn route_next_serde_roundtrip_all_variants() {
+        // 标量变体：lowercase 线格式
+        for (value, wire) in [
+            (RouteNext::Loop, "loop"),
+            (RouteNext::End, "end"),
+            (RouteNext::Wait, "wait"),
+        ] {
+            let text = serde_json::to_string(&value).unwrap();
+            assert_eq!(text, format!("\"{wire}\""));
+            let back: RouteNext = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, value);
+        }
+        // 带载荷变体：step / phase
+        assert_eq!(
+            serde_json::to_string(&RouteNext::Step("s2".into())).unwrap(),
+            r#"{"step":"s2"}"#
+        );
+        let step: RouteNext = serde_json::from_str(r#"{"step":"s2"}"#).unwrap();
+        assert_eq!(step, RouteNext::Step("s2".into()));
+        assert_eq!(
+            serde_json::to_string(&RouteNext::Phase("exit".into())).unwrap(),
+            r#"{"phase":"exit"}"#
+        );
+        let phase: RouteNext = serde_json::from_str(r#"{"phase":"exit"}"#).unwrap();
+        assert_eq!(phase, RouteNext::Phase("exit".into()));
+        assert_serde_rejects::<RouteNext>("\"jump\"");
+    }
+
+    #[test]
+    fn route_and_action_serde_roundtrip() {
+        let mut set = HashMap::new();
+        set.insert("route".to_string(), serde_json::json!("done"));
+        let route = Route {
+            when: "state.x != ''".into(),
+            then: RouteAction {
+                next: RouteNext::Step("s3".into()),
+                set,
+            },
+        };
+        assert_serde_roundtrip(&route);
+        // set 缺省空 map
+        let parsed: Route =
+            serde_json::from_str(r#"{"when":"True","then":{"next":"end"}}"#).unwrap();
+        assert_eq!(parsed.then.next, RouteNext::End);
+        assert!(parsed.then.set.is_empty());
+        assert_eq!(parsed.when, "True");
+    }
+
+    #[test]
+    fn loop_config_defaults_and_serde() {
+        // Default：关闭 + 无限循环
+        let d = LoopConfig::default();
+        assert!(!d.enabled);
+        assert_eq!(d.max_iterations, -1);
+        // 缺省字段补默认（YAML 只写 enabled 也能解析）
+        let parsed: LoopConfig = serde_json::from_str("{\"enabled\":true}").unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.max_iterations, -1);
+        // 显式安全阀 roundtrip
+        let explicit: LoopConfig =
+            serde_json::from_str("{\"enabled\":true,\"max_iterations\":5}").unwrap();
+        assert_serde_roundtrip(&explicit);
+    }
+
+    #[test]
+    fn checkpoint_config_defaults_and_serde() {
+        let d = CheckpointConfig::default();
+        assert!(d.enabled);
+        assert_eq!(d.interval_steps, 1000);
+        let parsed: CheckpointConfig = serde_json::from_str("{}").unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.interval_steps, 1000);
+        let explicit: CheckpointConfig =
+            serde_json::from_str("{\"enabled\":false,\"interval_steps\":50}").unwrap();
+        assert!(!explicit.enabled);
+        assert_serde_roundtrip(&explicit);
+    }
+
+    #[test]
+    fn step_item_conversions_accessors_and_serde() {
+        // From 转换：&str / String → Bare
+        let bare = StepItem::from("build");
+        assert_eq!(bare, StepItem::Bare("build".into()));
+        let owned = StepItem::from(String::from("build"));
+        assert_eq!(owned, StepItem::Bare("build".into()));
+        // Bare 访问器：无 when、无 inputs
+        assert_eq!(bare.name(), "build");
+        assert_eq!(bare.when(), None);
+        assert!(bare.inputs().is_empty());
+
+        // Gated 访问器
+        let mut inputs = HashMap::new();
+        inputs.insert("q".to_string(), serde_json::json!("rust"));
+        let gated = StepItem::Gated {
+            name: "search".into(),
+            when: Some("state.q != ''".into()),
+            inputs: inputs.clone(),
+        };
+        assert_eq!(gated.name(), "search");
+        assert_eq!(gated.when(), Some("state.q != ''"));
+        assert_eq!(gated.inputs(), inputs);
+
+        // untagged 反序列化：裸串 → Bare；对象 → Gated（缺省 when=None/inputs=空）
+        let b: StepItem = serde_json::from_str("\"build\"").unwrap();
+        assert_eq!(b, StepItem::Bare("build".into()));
+        let g: StepItem = serde_json::from_str(r#"{"name":"search"}"#).unwrap();
+        assert_eq!(
+            g,
+            StepItem::Gated {
+                name: "search".into(),
+                when: None,
+                inputs: HashMap::new()
+            }
+        );
+        assert_serde_roundtrip(&gated);
+    }
+
+    #[test]
+    fn pipeline_step_serde_defaults_and_roundtrip() {
+        let mut context = HashMap::new();
+        context.insert("lang".to_string(), serde_json::json!("rust"));
+        let step = PipelineStep {
+            id: "s1".into(),
+            steps: vec![StepItem::from("build"), StepItem::from("test")],
+            when: Some("state.ready".into()),
+            context: context.clone(),
+            routes: vec![Route {
+                when: "state.x".into(),
+                then: RouteAction {
+                    next: RouteNext::End,
+                    set: HashMap::new(),
+                },
+            }],
+            loop_config: Some(LoopConfig::default()),
+        };
+        assert_serde_roundtrip(&step);
+        // 最小形态：全部缺省字段兜底
+        let minimal: PipelineStep = serde_json::from_str(r#"{"id":"s2"}"#).unwrap();
+        assert!(minimal.steps.is_empty());
+        assert_eq!(minimal.when, None);
+        assert!(minimal.context.is_empty());
+        assert!(minimal.routes.is_empty());
+        assert!(minimal.loop_config.is_none());
+    }
+
+    #[test]
+    fn loop_body_while_rename_serde_roundtrip() {
+        let body = LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "s1".into(),
+                steps: vec![],
+                when: None,
+                context: HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+            while_cond: Some("state.more == true".into()),
+            exit_routes: vec![Route {
+                when: "state.done".into(),
+                then: RouteAction {
+                    next: RouteNext::Phase("exit".into()),
+                    set: HashMap::new(),
+                },
+            }],
+            run_on_error: true,
+        };
+        // YAML 键为 while（Rust 关键字规避），往返保真
+        let text = serde_json::to_string(&body).unwrap();
+        assert!(text.contains(r#""while":"state.more == true""#), "{text}");
+        let back: LoopBody = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            text,
+            "LoopBody roundtrip 线格式不一致"
+        );
+        // while 缺省 None（单次执行体）
+        let plain: LoopBody =
+            serde_json::from_str(r#"{"id":"init","steps":[],"run_on_error":false}"#).unwrap();
+        assert_eq!(plain.while_cond, None);
+        assert!(!plain.run_on_error);
+    }
+
+    #[test]
+    fn pipeline_config_lookup_helpers() {
+        let step_of = |id: &str| PipelineStep {
+            id: id.into(),
+            steps: vec![],
+            when: None,
+            context: HashMap::new(),
+            routes: vec![],
+            loop_config: None,
+        };
+        let config = PipelineConfig {
+            name: "demo".into(),
+            loop_bodies: vec![
+                LoopBody {
+                    id: "init".into(),
+                    steps: vec![step_of("prepare")],
+                    while_cond: None,
+                    exit_routes: vec![],
+                    run_on_error: false,
+                },
+                LoopBody {
+                    id: "main".into(),
+                    steps: vec![step_of("think"), step_of("act")],
+                    while_cond: Some("state.more".into()),
+                    exit_routes: vec![],
+                    run_on_error: false,
+                },
+            ],
+            checkpoint: CheckpointConfig::default(),
+            initial_state: HashMap::new(),
+            max_rounds: Some(50),
+        };
+        // find_step：跨循环体命中① + 未命中
+        assert_eq!(config.find_step("think").unwrap().id, "think");
+        assert_eq!(config.find_step("prepare").unwrap().id, "prepare");
+        assert!(config.find_step("missing").is_none());
+        // step_ids：跨全部循环体聚合
+        assert_eq!(config.step_ids(), vec!["prepare", "think", "act"]);
+        // body_index：命中 + 未命中
+        assert_eq!(config.body_index("main"), Some(1));
+        assert_eq!(config.body_index("exit"), None);
+        // max_rounds 显式声明保留
+        assert_eq!(config.max_rounds, Some(50));
+        // single_body 便捷构造：单 main 体承载全部 steps
+        let single =
+            PipelineConfig::single_body("t", Some("state.more".into()), vec![step_of("s")]);
+        assert_eq!(single.loop_bodies.len(), 1);
+        assert_eq!(single.loop_bodies[0].id, "main");
+        assert_eq!(
+            single.loop_bodies[0].while_cond.as_deref(),
+            Some("state.more")
+        );
+        assert_eq!(single.find_step("s").unwrap().id, "s");
+        assert_eq!(single.max_rounds, None);
+    }
+
+    #[test]
+    fn step_library_find_and_ids() {
+        let step_of = |id: &str| PipelineStep {
+            id: id.into(),
+            steps: vec![],
+            when: None,
+            context: HashMap::new(),
+            routes: vec![],
+            loop_config: None,
+        };
+        let mut lib = StepLibrary::default();
+        assert!(lib.find("any").is_none(), "空库查无");
+        lib.steps.insert("review".into(), step_of("review"));
+        lib.steps.insert("commit".into(), step_of("commit"));
+        assert_eq!(lib.find("review").unwrap().id, "review");
+        assert!(lib.find("nope").is_none());
+        let mut ids = lib.ids();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["commit", "review"]);
+    }
+}

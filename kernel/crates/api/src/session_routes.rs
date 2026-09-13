@@ -10,14 +10,16 @@
 //! 已删死端点：GET /api/v1/sessions/{id}（无生产消费者，见
 //! task_kernel_cleanup_and_split 任务 2 死代码清单）。
 
-use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
-use axum::Json;
+use agentos_http::error::ApiError;
+use axum::{
+    extract::{Path, Query, State},
+    http::HeaderMap,
+    Json,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::routes::AppState;
-use agentos_http::error::ApiError;
 
 // ─── Sessions ─────────────────────────────────────────────────────────────
 
@@ -779,12 +781,12 @@ mod agent_binding_tests {
     //! （持久化真值）。执行面解析（显式 → registry → DB → agentos）由
     //! ws_session::resolve_dispatch_agent 单测覆盖，本模块验证写入面三方落齐。
 
-    use super::*;
     use agentos_core::traits::StorageBackend;
 
+    use super::*;
+
     const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
-    use axum::body::Body;
-    use axum::http::Request;
+    use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
     const ADMIN_USER_ID: &str = "00000000-0000-0000-0000-000000000001";
@@ -1012,9 +1014,10 @@ mod sessions_list_tests {
     //! 2026-08-30 修正），仅 store 未配置（无持久化数据源）时回退内存 registry
     //! （显式兼容语义非吞错）。
 
-    use super::*;
     use agentos_core::traits::StorageBackend;
     use axum::extract::State;
+
+    use super::*;
 
     /// list_sessions 恒故障的存储 mock。其余必需方法以 unreachable! 桩实现——
     /// 错误路径若意外耦合了其他存储调用会在此炸出（比静默 NotFound 更诚实）。
@@ -1322,15 +1325,21 @@ mod delete_session_tests {
     //! B1：删除会话落库失败 → 503 统一错误信封，不再 `deleted:true` 假成功；
     //! `session.deleted` 域事件只在删除成立的 Ok 路径发出。
 
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
+
+    use agentos_core::{
+        traits::{
+            HookContext, HostType, LifecycleHook, ManifestCapabilities, PluginInvoker,
+            PluginManifest, PluginType, StorageBackend,
+        },
+        types::{PluginContext, PluginError, PluginResult, ToolExecutionResult},
+    };
+
     use super::*;
     use crate::routes::AppState;
-    use agentos_core::traits::{
-        HookContext, HostType, LifecycleHook, ManifestCapabilities, PluginInvoker, PluginManifest,
-        PluginType, StorageBackend,
-    };
-    use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
-    use std::collections::HashSet;
-    use std::sync::{Arc, Mutex};
 
     /// delete_session 恒故障的存储 mock。其余必需方法以 unreachable! 桩实现——
     /// 错误路径若意外耦合其他存储调用会在此炸出（比静默成功更诚实）。
@@ -1680,5 +1689,1028 @@ mod delete_session_tests {
         .await
         .expect("无记录删除属幂等成功");
         assert_eq!(resp.0["deleted"], json!(true));
+    }
+}
+
+#[cfg(test)]
+mod sessions_crud_tests {
+    //! 会话 CRUD 处理器补测：create/update 的用户来源仲裁、metadata 默认值合并、
+    //! DB 故障容忍、DB 无记录回退响应，以及消息查询的管道解析/分页分支。
+
+    use std::{collections::HashMap, sync::Mutex};
+
+    use agentos_core::traits::StorageBackend;
+
+    use super::*;
+
+    const ADMIN_USER_ID: &str = "00000000-0000-0000-0000-000000000001";
+    const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
+
+    fn sqlite() -> std::sync::Arc<agentos_engine::SqliteStore> {
+        std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+    }
+
+    fn session_record(
+        thread_id: &str,
+        active_pipeline_id: Option<&str>,
+    ) -> agentos_core::types::SessionRecord {
+        agentos_core::types::SessionRecord {
+            thread_id: thread_id.to_string(),
+            title: None,
+            intent: None,
+            current_state: "active".to_string(),
+            agent_id: None,
+            active_pipeline_id: active_pipeline_id.map(|s| s.to_string()),
+            pipeline_ids: active_pipeline_id
+                .map(|p| vec![p.to_string()])
+                .unwrap_or_default(),
+            metadata: None,
+            created_at: "2026-09-13T00:00:00Z".to_string(),
+            updated_at: "2026-09-13T00:00:00Z".to_string(),
+            last_active_at: None,
+        }
+    }
+
+    async fn seed_admin(store: &agentos_engine::SqliteStore) -> String {
+        let password_hash = agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap();
+        store
+            .create_user(&agentos_core::types::UserRecord {
+                user_id: ADMIN_USER_ID.to_string(),
+                username: "admin".to_string(),
+                password: password_hash.clone(),
+                email: None,
+                role: "admin".to_string(),
+                tenant_id: "default".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                last_login_at: None,
+                must_change_password: false,
+            })
+            .await
+            .unwrap();
+        password_hash
+    }
+
+    /// 铸造内置 admin 的 access token（口令绑定校验要求 token 内嵌哈希与库内
+    /// 存储哈希一致——seed 与铸 token 必须共用同一哈希串，不可各自重算）。
+    fn admin_token(password_hash: &str) -> String {
+        let admin = agentos_http::auth::BuiltInUser {
+            id: ADMIN_USER_ID.to_string(),
+            username: "admin".to_string(),
+            password: password_hash.to_string(),
+            email: String::new(),
+            role: "admin".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: String::new(),
+            must_change_password: false,
+        };
+        agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &admin, 3600)
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        h
+    }
+
+    /// 可配置行为的存储 mock：各被测方法默认返回正常空值，测试按需注入故障。
+    /// 未被任何被测路径触碰的方法以 unreachable! 桩实现（意外耦合即炸出）。
+    struct FlexMock {
+        list_sessions_result: Mutex<
+            Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>,
+        >,
+        pipeline_ids_by_thread:
+            Mutex<HashMap<String, Result<Vec<String>, agentos_core::types::StorageError>>>,
+        get_session_result: Mutex<
+            Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>,
+        >,
+        update_session_result: Mutex<Result<(), agentos_core::types::StorageError>>,
+        create_session_result: Mutex<Result<(), agentos_core::types::StorageError>>,
+        upsert_state_field_result: Mutex<Result<(), agentos_core::types::StorageError>>,
+        get_messages_result: Mutex<
+            Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>,
+        >,
+    }
+
+    impl Default for FlexMock {
+        fn default() -> Self {
+            Self {
+                list_sessions_result: Mutex::new(Ok(Vec::new())),
+                pipeline_ids_by_thread: Mutex::new(HashMap::new()),
+                get_session_result: Mutex::new(Ok(None)),
+                update_session_result: Mutex::new(Ok(())),
+                create_session_result: Mutex::new(Ok(())),
+                upsert_state_field_result: Mutex::new(Ok(())),
+                get_messages_result: Mutex::new(Ok(Vec::new())),
+            }
+        }
+    }
+
+    impl FlexMock {
+        fn with_sessions(
+            sessions: Vec<agentos_core::types::SessionRecord>,
+        ) -> std::sync::Arc<Self> {
+            let mock = Self::default();
+            *mock.list_sessions_result.lock().unwrap() = Ok(sessions);
+            std::sync::Arc::new(mock)
+        }
+
+        fn set_pipeline_ids(
+            &self,
+            thread_id: &str,
+            r: Result<Vec<String>, agentos_core::types::StorageError>,
+        ) {
+            self.pipeline_ids_by_thread
+                .lock()
+                .unwrap()
+                .insert(thread_id.to_string(), r);
+        }
+    }
+
+    type SErr = agentos_core::types::StorageError;
+
+    #[async_trait::async_trait]
+    impl StorageBackend for FlexMock {
+        async fn list_sessions(
+            &self,
+            _filter: agentos_core::traits::SessionListFilter,
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, SErr> {
+            self.list_sessions_result.lock().unwrap().clone()
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<String>, SErr> {
+            match self.pipeline_ids_by_thread.lock().unwrap().get(thread_id) {
+                Some(r) => r.clone(),
+                None => Ok(vec![]),
+            }
+        }
+        async fn get_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Option<agentos_core::types::SessionRecord>, SErr> {
+            self.get_session_result.lock().unwrap().clone()
+        }
+        async fn update_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), SErr> {
+            self.update_session_result.lock().unwrap().clone()
+        }
+        async fn create_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), SErr> {
+            self.create_session_result.lock().unwrap().clone()
+        }
+        async fn upsert_state_field(
+            &self,
+            _pipeline_id: &str,
+            _tenant_id: &str,
+            _key: &str,
+            _value: &serde_json::Value,
+        ) -> Result<(), SErr> {
+            self.upsert_state_field_result.lock().unwrap().clone()
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _opts: agentos_core::traits::MessageQueryOpts,
+        ) -> Result<Vec<agentos_core::types::MessageRecord>, SErr> {
+            self.get_messages_result.lock().unwrap().clone()
+        }
+        async fn get_run(&self, _run_id: &str) -> Result<agentos_core::types::RunRecord, SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn get_blob(&self, _blob_id: &str) -> Result<Vec<u8>, SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn append_trace(&self, _entry: agentos_core::types::TraceEntry) -> Result<(), SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn update_run_status(
+            &self,
+            _run_id: &str,
+            _status: agentos_core::types::RunStatus,
+            _branch: Option<&str>,
+            _seq: Option<u32>,
+        ) -> Result<(), SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn create_run(
+            &self,
+            _run_id: &str,
+            _config_hash: &str,
+            _tenant_id: &str,
+        ) -> Result<(), SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn delete_session(&self, _thread_id: &str) -> Result<Vec<String>, SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn link_pipeline_session(
+            &self,
+            _pipeline_id: &str,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), SErr> {
+            Ok(())
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn create_user(&self, _user: &agentos_core::types::UserRecord) -> Result<(), SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn get_user_by_id(
+            &self,
+            _user_id: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, SErr> {
+            Ok(None)
+        }
+        async fn get_user_by_username(
+            &self,
+            _username: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, SErr> {
+            Ok(None)
+        }
+        async fn list_users(&self) -> Result<Vec<agentos_core::types::UserRecord>, SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn update_last_login(&self, _user_id: &str) -> Result<(), SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+        async fn update_user_password(
+            &self,
+            _user_id: &str,
+            _password_hash: &str,
+            _must_change_password: bool,
+        ) -> Result<bool, SErr> {
+            unreachable!("mock 不提供口令更新")
+        }
+        async fn delete_user(&self, _user_id: &str) -> Result<bool, SErr> {
+            unreachable!("crud 测试路径不应触碰")
+        }
+    }
+
+    fn state_with(store: Option<std::sync::Arc<dyn StorageBackend>>, session: bool) -> AppState {
+        let mut state = AppState::new();
+        state.store = store;
+        if session {
+            state.session = Some(std::sync::Arc::new(
+                agentos_session::SessionCoordinator::new(),
+            ));
+        }
+        state
+    }
+
+    // ── create_session ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_session_falls_intent_back_to_title_and_merges_metadata_defaults() {
+        // 无 token 无 body user_id → anonymous；intent 缺省回落 title；
+        // 自定义 metadata 与默认键合并（session_type/user_id 注入，原字段保留）。
+        let store = sqlite();
+        let state = state_with(
+            Some(store.clone() as std::sync::Arc<dyn StorageBackend>),
+            true,
+        );
+
+        let resp = create_session_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(json!({"title": "会话标题A", "metadata": {"custom": "v"}})),
+        )
+        .await;
+        let body = resp.0;
+        assert_eq!(
+            body["intent"],
+            json!("会话标题A"),
+            "intent 缺省回落 title: {body}"
+        );
+        assert_eq!(body["title"], json!("会话标题A"));
+        assert_eq!(body["agent_id"], json!("agentos"));
+        assert_eq!(body["metadata"]["session_type"], json!("main_pipeline"));
+        assert_eq!(body["metadata"]["user_id"], json!("anonymous"));
+        assert_eq!(
+            body["metadata"]["custom"],
+            json!("v"),
+            "自定义 metadata 键不得被默认值覆盖"
+        );
+        assert_eq!(body["pipeline_ids"].as_array().unwrap().len(), 1);
+        assert_eq!(body["current_state"], json!("active"));
+
+        // 落库真值：metadata 合并结果与 title 持久化（title 非空 → Some）
+        let tid = body["thread_id"].as_str().unwrap().to_string();
+        let rec = store.get_session(&tid).await.unwrap().unwrap();
+        assert_eq!(rec.title.as_deref(), Some("会话标题A"));
+        let meta = rec.metadata.unwrap();
+        assert_eq!(meta["session_type"], json!("main_pipeline"));
+        assert_eq!(meta["user_id"], json!("anonymous"));
+    }
+
+    #[tokio::test]
+    async fn create_session_body_user_id_wins_only_without_token_user() {
+        // A14：token 用户是事件路由权威源；仅无 token 用户时才降级用 body user_id。
+        let store = sqlite();
+        let password_hash = seed_admin(&store).await;
+        let mut state = state_with(
+            Some(store.clone() as std::sync::Arc<dyn StorageBackend>),
+            true,
+        );
+        state.db = Some(store.clone());
+
+        // ① token + body 不一致 → token 赢
+        let resp = create_session_handler(
+            State(state.clone()),
+            bearer(&admin_token(&password_hash)),
+            Json(json!({"user_id": "attacker", "intent": "t"})),
+        )
+        .await;
+        assert_eq!(
+            resp.0["metadata"]["user_id"],
+            json!(ADMIN_USER_ID),
+            "token 用户必须压过 body user_id: {}",
+            resp.0
+        );
+        let tid = resp.0["thread_id"].as_str().unwrap().to_string();
+        let registry = state.session.as_ref().unwrap().registry();
+        assert_eq!(
+            registry.get_user_for_thread(&tid).as_deref(),
+            Some(ADMIN_USER_ID),
+            "thread→user 映射必须按 token 用户登记（WS 事件路由依据）"
+        );
+
+        // ② 无 token + body user_id → 显式降级采用 body 值
+        let resp = create_session_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(json!({"user_id": "u-body", "intent": "t"})),
+        )
+        .await;
+        assert_eq!(resp.0["metadata"]["user_id"], json!("u-body"));
+    }
+
+    #[tokio::test]
+    async fn create_session_empty_agent_id_skips_pipeline_state_binding() {
+        // agent_id 空串 = 未指定：响应原样回显，DB 记录 agent_id 为 None，
+        // 且不写主管道 state（出生绑定只对显式 agent 生效）。
+        let store = sqlite();
+        let mut state = state_with(
+            Some(store.clone() as std::sync::Arc<dyn StorageBackend>),
+            true,
+        );
+        state.db = Some(store.clone());
+
+        let resp = create_session_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(json!({"intent": "t", "agent_id": ""})),
+        )
+        .await;
+        assert_eq!(resp.0["agent_id"], json!(""));
+        let pid = resp.0["active_pipeline_id"].as_str().unwrap().to_string();
+
+        let tid = resp.0["thread_id"].as_str().unwrap().to_string();
+        let rec = store.get_session(&tid).await.unwrap().unwrap();
+        assert!(rec.agent_id.is_none(), "空串 agent_id 不得落库为绑定");
+
+        let fields = store.load_pipeline_state(&pid, "default").unwrap();
+        assert!(
+            !fields.contains_key("agent.id"),
+            "未指定 agent 不得写主管道 state 绑定，实际: {fields:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_session_without_store_still_registers_memory_mappings() {
+        // store 未配置（无持久化数据源）：跳过落库，内存 registry 三映射照常登记
+        // （WS 路由热路径依赖）。
+        let state = state_with(None, true);
+        let resp = create_session_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(json!({"intent": "t", "agent_id": "general_agent"})),
+        )
+        .await;
+        let body = resp.0;
+        let tid = body["thread_id"].as_str().unwrap().to_string();
+        let pid = body["active_pipeline_id"].as_str().unwrap().to_string();
+        let registry = state.session.as_ref().unwrap().registry();
+        assert_eq!(
+            registry.get_pipeline_for_thread(&tid).as_deref(),
+            Some(pid.as_str())
+        );
+        assert_eq!(
+            registry.get_agent_for_thread(&tid).as_deref(),
+            Some("general_agent")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_session_db_failure_returns_response_anyway() {
+        // 落库失败仅 warn 不阻断响应（registry 已登记，WS 路由不受影响）。
+        let mock = std::sync::Arc::new(FlexMock::default());
+        *mock.create_session_result.lock().unwrap() = Err(SErr::Database("injected".into()));
+        let state = state_with(Some(mock as std::sync::Arc<dyn StorageBackend>), true);
+
+        let resp =
+            create_session_handler(State(state), HeaderMap::new(), Json(json!({"intent": "t"})))
+                .await;
+        assert!(
+            resp.0["thread_id"].as_str().is_some(),
+            "落库失败不得吞掉创建响应: {}",
+            resp.0
+        );
+        assert_eq!(resp.0["pipeline_ids"].as_array().unwrap().len(), 1);
+    }
+
+    // ── update_session_agent ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn update_session_agent_defaults_and_falls_back_without_db_record() {
+        // DB 无记录：回退内存构造响应；body 缺 agent_id → 默认 agentos。
+        let store = sqlite();
+        let state = state_with(Some(store as std::sync::Arc<dyn StorageBackend>), true);
+        let registry = state.session.as_ref().unwrap().registry();
+        registry.register_thread("T-fb", ADMIN_USER_ID);
+        registry.register_thread_pipeline("T-fb", "p-fb");
+
+        for (body_agent, expect_agent) in [(None, "agentos"), (Some("custom-x"), "custom-x")] {
+            let body = match body_agent {
+                Some(a) => json!({"agent_id": a}),
+                None => json!({}),
+            };
+            let resp = update_session_agent_handler(
+                State(state.clone()),
+                HeaderMap::new(),
+                Path("T-fb".into()),
+                Json(body),
+            )
+            .await;
+            let b = resp.0;
+            assert_eq!(b["agent_id"], json!(expect_agent), "body: {body_agent:?}");
+            assert_eq!(
+                b["pipeline_ids"],
+                json!(["p-fb"]),
+                "回退响应带 registry 管道"
+            );
+            assert_eq!(b["active_pipeline_id"], json!("p-fb"));
+            assert_eq!(b["title"], Value::Null, "无 DB 记录时 title 为空");
+        }
+    }
+
+    #[tokio::test]
+    async fn update_session_agent_tolerates_pipeline_state_write_failure() {
+        // ③ 主管道 state 写失败仅 warn 不阻断：registry 与 sessions 表仍更新，
+        // 响应返回更新后的会话状态。
+        let mock = std::sync::Arc::new(FlexMock::default());
+        *mock.get_session_result.lock().unwrap() = Ok(Some(session_record("T1", Some("p1"))));
+        *mock.upsert_state_field_result.lock().unwrap() = Err(SErr::Database("injected".into()));
+        let state = state_with(
+            Some(mock.clone() as std::sync::Arc<dyn StorageBackend>),
+            true,
+        );
+        let registry = state.session.as_ref().unwrap().registry().clone();
+
+        let resp = update_session_agent_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("T1".into()),
+            Json(json!({"agent_id": "x-agent"})),
+        )
+        .await;
+        assert_eq!(resp.0["agent_id"], json!("x-agent"));
+        assert_eq!(
+            registry.get_agent_for_thread("T1").as_deref(),
+            Some("x-agent"),
+            "registry 热绑定不受 state 写失败影响"
+        );
+        assert_eq!(
+            resp.0["active_pipeline_id"],
+            json!("p1"),
+            "DB 记录存在时返回完整会话状态"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_session_agent_tolerates_db_update_failure() {
+        // update_session 落库失败仅 warn：响应仍按内存更新值构造。
+        let mock = std::sync::Arc::new(FlexMock::default());
+        *mock.get_session_result.lock().unwrap() = Ok(Some(session_record("T1", None)));
+        *mock.update_session_result.lock().unwrap() = Err(SErr::Database("injected".into()));
+        let state = state_with(Some(mock as std::sync::Arc<dyn StorageBackend>), true);
+
+        let resp = update_session_agent_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("T1".into()),
+            Json(json!({"agent_id": "y-agent"})),
+        )
+        .await;
+        assert_eq!(
+            resp.0["agent_id"],
+            json!("y-agent"),
+            "落库失败不得吞更新响应"
+        );
+    }
+
+    // ── update_session（重命名/更新）───────────────────────────────────────
+
+    #[tokio::test]
+    async fn update_session_persists_title_intent_when_record_exists() {
+        let store = sqlite();
+        store
+            .create_session(&session_record("T-r", Some("p-r")))
+            .await
+            .unwrap();
+        let state = state_with(
+            Some(store.clone() as std::sync::Arc<dyn StorageBackend>),
+            false,
+        );
+
+        // ① 带 intent：title 与 intent 同时更新
+        let resp = update_session_handler(
+            State(state.clone()),
+            Path("T-r".into()),
+            Json(json!({"intent": "新名"})),
+        )
+        .await;
+        assert_eq!(resp.0["title"], json!("新名"));
+        assert_eq!(resp.0["intent"], json!("新名"));
+        let rec = store.get_session("T-r").await.unwrap().unwrap();
+        assert_eq!(rec.title.as_deref(), Some("新名"));
+        assert_eq!(rec.intent.as_deref(), Some("新名"));
+
+        // ② 不带 intent：仅更新 updated_at，title 不动
+        let before = rec.updated_at.clone();
+        let resp = update_session_handler(State(state), Path("T-r".into()), Json(json!({}))).await;
+        assert_eq!(resp.0["title"], json!("新名"), "缺 intent 不得清空既有标题");
+        let rec = store.get_session("T-r").await.unwrap().unwrap();
+        assert_ne!(rec.updated_at, before, "touch 语义：updated_at 刷新");
+    }
+
+    #[tokio::test]
+    async fn update_session_falls_back_to_registry_state_without_db_record() {
+        let store = sqlite();
+        let state = state_with(Some(store as std::sync::Arc<dyn StorageBackend>), true);
+        let registry = state.session.as_ref().unwrap().registry();
+        registry.register_thread("T-fb2", ADMIN_USER_ID);
+        registry.register_thread_pipeline("T-fb2", "p-fb2");
+        registry.register_thread_agent("T-fb2", "a-fb2");
+
+        // ① 带 intent：回退响应携带 registry 已知 agent/管道
+        let resp = update_session_handler(
+            State(state.clone()),
+            Path("T-fb2".into()),
+            Json(json!({"intent": "改名"})),
+        )
+        .await;
+        let b = resp.0;
+        assert_eq!(b["title"], json!("改名"));
+        assert_eq!(b["intent"], json!("改名"));
+        assert_eq!(b["agent_id"], json!("a-fb2"));
+        assert_eq!(b["pipeline_ids"], json!(["p-fb2"]));
+
+        // ② 不带 intent：title/intent 双 null
+        let resp =
+            update_session_handler(State(state), Path("T-fb2".into()), Json(json!({}))).await;
+        assert_eq!(resp.0["title"], Value::Null);
+        assert_eq!(resp.0["intent"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn update_handlers_without_coordinator_return_minimal_fallback() {
+        // store 与 session 均未配置（纯内存兼容模式）：两个 PATCH 均走最小回退，
+        // agent/pipeline 字段为空。
+        let state = state_with(None, false);
+
+        let resp = update_session_handler(
+            State(state.clone()),
+            Path("T".into()),
+            Json(json!({"intent": "x"})),
+        )
+        .await;
+        assert_eq!(resp.0["intent"], json!("x"));
+        assert_eq!(resp.0["agent_id"], Value::Null);
+        assert_eq!(resp.0["pipeline_ids"], json!([]));
+
+        let resp = update_session_agent_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("T".into()),
+            Json(json!({"agent_id": "solo"})),
+        )
+        .await;
+        assert_eq!(resp.0["agent_id"], json!("solo"));
+        assert_eq!(resp.0["pipeline_ids"], json!([]));
+    }
+
+    // ── list_session_messages ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_messages_without_store_returns_empty_page() {
+        let state = state_with(None, false);
+        let resp = list_session_messages_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("T".into()),
+            Query(MessageListQuery {
+                pipeline_run_id: None,
+                before_sequence: None,
+                after_sequence: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["messages"], json!([]));
+        assert_eq!(resp.0["total"], json!(0));
+        assert_eq!(resp.0["has_more"], json!(false));
+    }
+
+    fn seed_messages(
+        store: &std::sync::Arc<agentos_engine::SqliteStore>,
+        pipeline: &str,
+        contents: &[&str],
+    ) {
+        let ops: Vec<serde_json::Value> = contents
+            .iter()
+            .enumerate()
+            .map(|(i, c)| json!({"op": "set", "seq": i, "msg": {"role": "user", "content": c}}))
+            .collect();
+        store
+            .apply_messages_ops_to_table(pipeline, "default", &ops)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_messages_resolves_active_pipeline_by_thread_without_explicit_pid() {
+        // GAP-1：未传 pipeline_run_id 时按会话 active_pipeline_id 查询；
+        // active 缺失/空串 → 回退路径 id（thread_id）。
+        let store = sqlite();
+        store
+            .create_session(&session_record("T-a", Some("pa")))
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session("pa", "T-a", "default")
+            .await
+            .unwrap();
+        seed_messages(&store, "pa", &["active管道消息"]);
+        // active None / 空串两个对照会话（目标管道无消息 → 空）
+        store
+            .create_session(&session_record("T-b", None))
+            .await
+            .unwrap();
+        let mut empty_active = session_record("T-c", Some(""));
+        empty_active.pipeline_ids = vec![];
+        store.create_session(&empty_active).await.unwrap();
+
+        let state = state_with(
+            Some(store.clone() as std::sync::Arc<dyn StorageBackend>),
+            false,
+        );
+        let query = |pid: Option<String>| MessageListQuery {
+            pipeline_run_id: pid,
+            before_sequence: None,
+            after_sequence: None,
+            limit: None,
+        };
+
+        // ① active 管道被采用（thread_id 直查会落空——引擎落库用 resolve 后的管道）
+        let resp = list_session_messages_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path("T-a".into()),
+            Query(query(None)),
+        )
+        .await
+        .unwrap();
+        let msgs = resp.0["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1, "应按 active_pipeline_id=pa 命中: {}", resp.0);
+        assert_eq!(msgs[0]["content"], json!("active管道消息"));
+        assert_eq!(
+            msgs[0]["thread_id"],
+            json!("T-a"),
+            "回填路径 id 供前端 mapper"
+        );
+
+        // ② / ③ active None 与空串：回退路径 id，无消息
+        for tid in ["T-b", "T-c"] {
+            let resp = list_session_messages_handler(
+                State(state.clone()),
+                HeaderMap::new(),
+                Path(tid.to_string()),
+                Query(query(None)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resp.0["total"], json!(0), "tid={tid} 无 active 管道应查空");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_messages_has_more_follows_limit_boundary() {
+        let store = sqlite();
+        seed_messages(&store, "ph", &["m1", "m2", "m3"]);
+        let state = state_with(Some(store as std::sync::Arc<dyn StorageBackend>), false);
+        let query = |limit: Option<usize>| MessageListQuery {
+            pipeline_run_id: Some("ph".into()),
+            before_sequence: None,
+            after_sequence: None,
+            limit,
+        };
+
+        for (limit, expect_total, expect_more) in
+            [(Some(2), 2, true), (Some(5), 3, false), (None, 3, false)]
+        {
+            let resp = list_session_messages_handler(
+                State(state.clone()),
+                HeaderMap::new(),
+                Path("ph".into()),
+                Query(query(limit)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resp.0["total"], json!(expect_total), "limit={limit:?}");
+            assert_eq!(resp.0["has_more"], json!(expect_more), "limit={limit:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_messages_query_failure_returns_503() {
+        let mock = std::sync::Arc::new(FlexMock::default());
+        *mock.get_messages_result.lock().unwrap() = Err(SErr::Database("injected".into()));
+        let state = state_with(Some(mock as std::sync::Arc<dyn StorageBackend>), false);
+
+        let resp = list_session_messages_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("T".into()),
+            Query(MessageListQuery {
+                pipeline_run_id: Some("p-fail".into()),
+                before_sequence: None,
+                after_sequence: None,
+                limit: None,
+            }),
+        )
+        .await;
+        match resp {
+            Ok(body) => panic!("查询故障不得伪装空历史: {:?}", body.0),
+            Err(e) => assert!(matches!(e, ApiError::ServiceUnavailable { .. })),
+        }
+    }
+
+    // ── list_sessions 读面补全 ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_sessions_merges_child_pipeline_ids_and_tolerates_lookup_failure() {
+        // 读面补全（ADR 2026-08-21）：映射表 id 并入 pipeline_ids（保序去重）；
+        // 单个会话的映射查询失败仅 warn，不影响其余会话出口。
+        let mut rec_a = session_record("TA", Some("p1"));
+        rec_a.pipeline_ids = vec!["p1".into()];
+        let mut rec_b = session_record("TB", Some("p1"));
+        rec_b.pipeline_ids = vec!["p1".into()];
+        let mock = FlexMock::with_sessions(vec![rec_a, rec_b]);
+        mock.set_pipeline_ids("TA", Ok(vec!["p2".into(), "p1".into()]));
+        mock.set_pipeline_ids("TB", Err(SErr::Database("injected".into())));
+        let state = state_with(Some(mock as std::sync::Arc<dyn StorageBackend>), false);
+
+        let resp = list_sessions_handler(State(state), HeaderMap::new())
+            .await
+            .unwrap();
+        let threads = resp.0["threads"].as_array().unwrap();
+        assert_eq!(resp.0["total"], json!(2));
+        assert_eq!(
+            threads[0]["pipeline_ids"],
+            json!(["p1", "p2"]),
+            "子管道并入且保序去重（主管道在前）"
+        );
+        assert_eq!(
+            threads[1]["pipeline_ids"],
+            json!(["p1"]),
+            "映射查询失败时会话仍以既有 pipeline_ids 出口"
+        );
+    }
+}
+
+#[cfg(test)]
+mod message_shaping_and_fallback_tests {
+    //! 消息历史响应塑形分支（工具调用/工具结果信封/思考内容/metadata 回显）
+    //! 与 list_sessions 内存 registry 回退、create_session token 仲裁分支补测。
+
+    use std::sync::Arc;
+
+    use agentos_core::traits::StorageBackend;
+
+    use super::*;
+
+    fn sqlite() -> Arc<agentos_engine::SqliteStore> {
+        Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+    }
+
+    fn query(pid: Option<String>) -> Query<MessageListQuery> {
+        Query(MessageListQuery {
+            pipeline_run_id: pid,
+            before_sequence: None,
+            after_sequence: None,
+            limit: None,
+        })
+    }
+
+    fn state_with_store(store: Arc<agentos_engine::SqliteStore>) -> AppState {
+        let mut state = AppState::new();
+        state.store = Some(store as Arc<dyn StorageBackend>);
+        state
+    }
+
+    #[tokio::test]
+    async fn list_messages_shapes_tool_envelope_and_aux_fields() {
+        let store = sqlite();
+        // 三种塑形源：assistant 带工具调用与思考内容；tool 带失败结果信封；
+        // user 带 metadata.client_message_id（幂等对账键）。
+        let ops = vec![
+            json!({"op": "set", "seq": 0, "msg": {
+                "role": "assistant",
+                "content": "我需要查一下",
+                "reasoning_content": "思考中…",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "search", "arguments": "{}"}}
+                ],
+            }}),
+            json!({"op": "set", "seq": 1, "msg": {
+                "role": "tool",
+                "content": "搜索失败",
+                "tool_call_id": "call_1",
+                "tool_result": {
+                    "success": false,
+                    "error": "timeout",
+                    "data": {"diff": 1},
+                    "duration_ms": 123.0,
+                    "tool_name": "search",
+                    "metadata": {"container_task_id": "ct_9"},
+                },
+            }}),
+            json!({"op": "set", "seq": 2, "msg": {
+                "role": "user",
+                "content": "hi",
+                "metadata": {"client_message_id": "cmid_1"},
+            }}),
+        ];
+        store
+            .apply_messages_ops_to_table("pipe_shape", "default", &ops)
+            .unwrap();
+        let state = state_with_store(store);
+
+        let resp = list_session_messages_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("t_any".to_string()),
+            query(Some("pipe_shape".to_string())),
+        )
+        .await
+        .unwrap();
+        let msgs = resp.0["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+
+        // assistant：toolCalls 反序列化为数组 + reasoningContent camelCase
+        let assistant = &msgs[0];
+        assert_eq!(assistant["role"], "assistant");
+        let tool_calls = assistant["toolCalls"].as_array().expect("toolCalls 数组");
+        assert_eq!(tool_calls[0]["id"], "call_1");
+        assert_eq!(assistant["reasoningContent"], "思考中…");
+        assert_eq!(
+            assistant["status"], "completed",
+            "非 tool 消息回退 completed"
+        );
+
+        // tool：失败态还原 + 结构化信封字段（camelCase 对齐前端 mapper）
+        let tool = &msgs[1];
+        assert_eq!(tool["toolCallId"], "call_1");
+        assert_eq!(tool["status"], "failed", "信封 success:false → failed");
+        assert_eq!(tool["error"], "timeout");
+        assert_eq!(tool["toolResultData"]["diff"], json!(1));
+        assert_eq!(tool["toolDurationMs"], json!(123.0));
+        assert_eq!(tool["toolName"], "search");
+        assert_eq!(tool["containerTaskId"], "ct_9");
+
+        // user：metadata 原样回显（前端乐观消息对账去重键）
+        assert_eq!(msgs[2]["metadata"]["client_message_id"], "cmid_1");
+    }
+
+    #[tokio::test]
+    async fn list_messages_tool_success_envelope_has_completed_without_error() {
+        // 第二组输入：信封 success:true → completed 且不带 error 键；
+        // 无信封的 tool 消息（裸文本非 Error: 前缀）→ completed。
+        let store = sqlite();
+        let ops = vec![
+            json!({"op": "set", "seq": 0, "msg": {
+                "role": "tool",
+                "content": "结果正文",
+                "tool_call_id": "call_2",
+                "tool_result": {"success": true, "data": {"rows": 3}},
+            }}),
+            json!({"op": "set", "seq": 1, "msg": {
+                "role": "tool",
+                "content": "旧式纯文本结果",
+            }}),
+        ];
+        store
+            .apply_messages_ops_to_table("pipe_shape_ok", "default", &ops)
+            .unwrap();
+        let state = state_with_store(store);
+
+        let resp = list_session_messages_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("t".to_string()),
+            query(Some("pipe_shape_ok".to_string())),
+        )
+        .await
+        .unwrap();
+        let msgs = resp.0["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["status"], "completed");
+        assert!(msgs[0].get("error").is_none(), "成功结果不得伪造 error");
+        assert_eq!(msgs[0]["toolResultData"]["rows"], json!(3));
+        assert!(
+            msgs[0].get("toolName").is_none(),
+            "信封未声明 tool_name 时不附带该键"
+        );
+        assert_eq!(msgs[1]["status"], "completed", "无信封裸文本回退 completed");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_without_store_falls_back_to_memory_registry() {
+        // store 未配置（兼容场景）+ session 协调器在 → registry 回退：
+        // thread 出口 title=null、metadata 带 user_id、pipeline 映射随注册态。
+        let mut state = AppState::new();
+        let session = Arc::new(agentos_session::SessionCoordinator::new());
+        session.registry().register_thread("thread-mem-fb", "u_fb");
+        session
+            .registry()
+            .register_thread_pipeline("thread-mem-fb", "pipe_fb_1");
+        state.session = Some(session);
+
+        let resp = list_sessions_handler(State(state), HeaderMap::new())
+            .await
+            .unwrap();
+        let threads = resp.0["threads"].as_array().unwrap();
+        assert_eq!(resp.0["total"], json!(1));
+        assert_eq!(threads[0]["thread_id"], "thread-mem-fb");
+        assert_eq!(threads[0]["title"], Value::Null, "registry 回退无标题");
+        assert_eq!(threads[0]["current_state"], "active");
+        assert_eq!(threads[0]["metadata"]["user_id"], "u_fb");
+        assert_eq!(threads[0]["pipeline_ids"], json!(["pipe_fb_1"]));
+        assert_eq!(threads[0]["active_pipeline_id"], "pipe_fb_1");
+    }
+
+    #[tokio::test]
+    async fn create_session_token_user_wins_over_conflicting_body_user() {
+        // token 用户在场且与 body user_id 冲突 → 以 token 用户为事件路由真值
+        // （A14：body user_id 可伪造）。store 未接线走内置 admin 回退。
+        let state = AppState::new();
+        let mut headers = HeaderMap::new();
+        let token = agentos_http::auth::encode_token(
+            agentos_http::auth::TokenType::Access,
+            &agentos_http::auth::BuiltInUser {
+                id: "00000000-0000-0000-0000-000000000001".to_string(),
+                username: "admin".to_string(),
+                password: String::new(),
+                email: String::new(),
+                role: "admin".to_string(),
+                tenant_id: "default".to_string(),
+                created_at: String::new(),
+                must_change_password: false,
+            },
+            3600,
+        );
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+        let resp = create_session_handler(
+            State(state),
+            headers,
+            Json(json!({"user_id": "spoofed_user", "title": "冲突仲裁"})),
+        )
+        .await;
+        assert_eq!(
+            resp.0["metadata"]["user_id"], "00000000-0000-0000-0000-000000000001",
+            "事件路由用户必须取 token 用户 id 而非 body 伪造值"
+        );
+        assert_eq!(resp.0["title"], "冲突仲裁");
+        // 主管道短 id 形状：12 位 hex（与任务管道同格式）
+        let pid = resp.0["active_pipeline_id"].as_str().unwrap();
+        assert_eq!(pid.len(), 12);
+        assert!(pid.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(resp.0["pipeline_ids"], json!([pid]));
     }
 }

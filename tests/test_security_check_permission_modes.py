@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -209,3 +211,153 @@ class TestModePriority:
         _set_pipeline_mode("p1", "bypass")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"}, pipeline_id="p2")))
         assert len(svc.requests) >= 1
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2026-09-13 覆盖率补测：execute 早退分支 / 模式表持久化 / 分流短路放行
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestEarlyExitBranches:
+    """execute 的三类免检早退与 priority 配置读取。"""
+
+    @pytest.mark.asyncio
+    async def test_disabled_plugin_allows_everything(self) -> None:
+        """enabled=False → 直接放行，reason 标注 disabled。"""
+        p = SecurityCheckPlugin(config={"enabled": False})
+        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
+        decision = result.state_updates["security.decision"]
+        assert decision["allowed"] is True
+        assert decision["reason"] == "security check disabled"
+
+    @pytest.mark.asyncio
+    async def test_non_tool_execute_skips_check(self) -> None:
+        """非 tool_execute 核（如 llm_call）→ 免检放行。"""
+        p = _make_plugin()
+        state = _tool_state("bash_execute", {"command": "rm -rf /x"})
+        state[StateKeys.CORE_TYPE] = "llm_call"
+        result = await p.execute(_ctx(state))
+        decision = result.state_updates["security.decision"]
+        assert decision["allowed"] is True
+        assert decision["reason"] == "not a tool execution"
+
+    @pytest.mark.asyncio
+    async def test_empty_tool_calls_skips_check(self) -> None:
+        """tool_execute 但无工具调用 → 免检放行。"""
+        p = _make_plugin()
+        state = {
+            StateKeys.CORE_TYPE: "tool_execute",
+            StateKeys.RAW_TOOL_CALLS: [],
+        }
+        result = await p.execute(_ctx(state))
+        decision = result.state_updates["security.decision"]
+        assert decision["allowed"] is True
+        assert decision["reason"] == "no tool calls to check"
+
+    def test_priority_from_config(self) -> None:
+        """priority 缺省 70，可经 config 覆盖。"""
+        assert SecurityCheckPlugin(config={}).priority == 70
+        assert SecurityCheckPlugin(config={"priority": 99}).priority == 99
+
+
+class TestPermissionModeTablePersistence:
+    """权限模式表持久化：加载过滤未知模式 / 损坏文件容错 / 保存失败留痕。"""
+
+    def test_load_filters_unknown_modes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """持久化文件中未知模式值被过滤，合法模式生效。"""
+        saved = dict(sc_mod._PERMISSION_MODES)
+        try:
+            f = tmp_path / "permission_modes.json"
+            f.write_text(json.dumps({"pa": "bypass", "pb": "zombie_mode"}), encoding="utf-8")
+            monkeypatch.setattr(sc_mod, "_PERMISSION_MODES_FILE", str(f))
+            sc_mod._load_permission_modes()
+            assert sc_mod._PERMISSION_MODES == {"pa": "bypass"}
+        finally:
+            sc_mod._PERMISSION_MODES.clear()
+            sc_mod._PERMISSION_MODES.update(saved)
+
+    def test_load_corrupt_file_keeps_table_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """损坏的持久化文件 → 不清空现有表、留 warning、不阻断。"""
+        saved = dict(sc_mod._PERMISSION_MODES)
+        try:
+            f = tmp_path / "broken.json"
+            f.write_text("{not-json", encoding="utf-8")
+            monkeypatch.setattr(sc_mod, "_PERMISSION_MODES_FILE", str(f))
+            with caplog.at_level(logging.WARNING, logger=sc_mod.__name__):
+                sc_mod._load_permission_modes()
+            assert sc_mod._PERMISSION_MODES == saved
+            assert any("权限模式表加载失败" in r.getMessage() for r in caplog.records)
+        finally:
+            sc_mod._PERMISSION_MODES.clear()
+            sc_mod._PERMISSION_MODES.update(saved)
+
+    def test_save_failure_warns_and_keeps_memory_state(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """持久化目录不可写 → warning 留痕，内存态模式不受影响。"""
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("x", encoding="utf-8")
+        monkeypatch.setattr(sc_mod, "_PERMISSION_MODES_FILE", str(blocker / "permission_modes.json"))
+        sc_mod._PERMISSION_MODES["persist-probe"] = "bypass"
+        try:
+            with caplog.at_level(logging.WARNING, logger=sc_mod.__name__):
+                sc_mod._save_permission_modes()
+            assert sc_mod._PERMISSION_MODES.get("persist-probe") == "bypass"
+            assert any("持久化失败" in r.getMessage() for r in caplog.records)
+        finally:
+            sc_mod._PERMISSION_MODES.pop("persist-probe", None)
+
+
+class TestDispatchShortCircuits:
+    """危险工具分流的短路放行：只读白名单 / allow 规则 / accept_edits 文件类。"""
+
+    @pytest.mark.asyncio
+    async def test_read_only_tool_skips_dangerous_judgment(self) -> None:
+        """file_read 属只读白名单：即使参数命中危险声明也不弹审批。"""
+        svc = _mock_approval()
+        p = _make_plugin()
+        p._dangerous_ops_by_tool["file_read"] = ["read:/data/secret/"]
+        result = await p.execute(_ctx(_tool_state("file_read", {"path": "/data/secret/x"})))
+        assert len(svc.requests) == 0, "只读白名单工具不得发起审批"
+        assert result.state_updates["security.decision"] == {
+            "allowed": True,
+            "reason": "all checks passed",
+        }
+
+    @pytest.mark.asyncio
+    async def test_allow_rule_whitelists_dangerous_tool(self) -> None:
+        """危险工具参数命中 allow 白名单 → 放行且零审批。"""
+        svc = _mock_approval()
+        rules: list[dict[str, Any]] = [{
+            "name": "safe_curl_help",
+            "tools": ["bash_execute"],
+            "params": ["command"],
+            "action": "allow",
+            "patterns": [{"type": "keyword", "value": "curl --help"}],
+        }]
+        p = _make_plugin(rules=rules)
+        result = await p.execute(
+            _ctx(_tool_state("bash_execute", {"command": "curl --help | head"}))
+        )
+        assert len(svc.requests) == 0, "allow 白名单命中不得发起审批"
+        assert result.state_updates["security.decision"]["reason"] == "all checks passed"
+
+    @pytest.mark.asyncio
+    async def test_accept_edits_passes_dangerous_file_tools(self) -> None:
+        """accept_edits 下文件类工具即使参数危险也放行（档位语义）。"""
+        svc = _mock_approval()
+        p = _make_plugin()
+        _set_pipeline_mode("ae-file-branch", "accept_edits")
+        result = await p.execute(
+            _ctx(_tool_state(
+                "file_write",
+                {"path": "/etc/hosts", "content": "x"},
+                pipeline_id="ae-file-branch",
+            ))
+        )
+        assert len(svc.requests) == 0, "accept_edits 下文件类放行不得发起审批"
+        assert result.state_updates["security.decision"]["reason"] == "all checks passed"

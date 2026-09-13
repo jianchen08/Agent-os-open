@@ -29,6 +29,53 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+/// 用户空间隔离 guard：把 `AGENTOS_USER_*` 钉到指定根，drop 时恢复。
+///
+/// 路径 G 的用例用**目录占位** factory 文件来逼出写失败，而写落点已迁用户空间
+/// （ADR 2026-09-13-unified-user-root）——不钉用户根则占位失效、写入照常成功
+/// （200 假绿），且会写到开发机真实用户目录。钉成同一个 tmp 后，占位与断言回到
+/// 同一份落点。
+///
+/// 集成测试各自独立进程，但**本文件用例默认并行**：环境变量进程全局，一个用例
+/// 把目标占位成目录时并行用例会经同一份 env 读到它（实测 g3 报 "seed from factory
+/// failed: 拒绝访问"）。故取锁串行化。
+struct UserRootGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl UserRootGuard {
+    fn pin(root: &std::path::Path) -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // unwrap_or_else(into_inner)：测试 panic 污染锁后继续执行——锁只为串行化
+        // 环境变量操作，中毒无并发安全含义，在此 unwrap 会放大成连锁失败。
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            agentos_core::user_space::USER_ROOT_ENV,
+            agentos_core::user_space::USER_CONFIG_DIR_ENV,
+            agentos_core::user_space::USER_DATA_DIR_ENV,
+            agentos_core::user_space::USER_PLUGINS_DIR_ENV,
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, root);
+        for k in &keys[1..] {
+            std::env::remove_var(k);
+        }
+        Self { _lock: lock, saved }
+    }
+}
+
+impl Drop for UserRootGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 /// 登录内置 admin（无 store 时回退内置用户表）返回 access_token。
 async fn admin_token(app: &axum::Router) -> String {
     // D1 后无 store 登录 fail-closed（脚手架表不可登录）——直接铸造脚手架
@@ -614,6 +661,8 @@ async fn path_f_sessions_schema_aggregates_plugin_thread_fields() {
 #[tokio::test]
 async fn path_g_plugin_enabled_write_failure_returns_500() {
     let tmp = tempfile::tempdir().unwrap();
+    // 用户根钉到同一 tmp：写落点在用户空间，占位/断言须同一份目录（见 UserRootGuard）
+    let _user_root_guard = UserRootGuard::pin(tmp.path());
     let plugins_dir = tmp.path().join("config").join("plugins");
     fs::create_dir_all(&plugins_dir).unwrap();
     // default_profile.yaml 被目录占位:读失败(回退空 profile),写必败
@@ -669,6 +718,8 @@ async fn path_g_plugin_enabled_write_failure_returns_500() {
 #[tokio::test]
 async fn path_g2_plugin_enabled_atomic_write_cleans_tmp_on_rename_failure() {
     let tmp = tempfile::tempdir().unwrap();
+    // 用户根钉到同一 tmp：写落点在用户空间，占位/断言须同一份目录（见 UserRootGuard）
+    let _user_root_guard = UserRootGuard::pin(tmp.path());
     let plugins_dir = tmp.path().join("config").join("plugins");
     fs::create_dir_all(&plugins_dir).unwrap();
     // default_profile.yaml 被目录占位：tmp 文件写入成功、rename 必败（占用模拟）
@@ -709,6 +760,8 @@ async fn path_g2_plugin_enabled_atomic_write_cleans_tmp_on_rename_failure() {
 #[tokio::test]
 async fn path_g3_plugin_enabled_atomic_write_success_keeps_valid_yaml() {
     let tmp = tempfile::tempdir().unwrap();
+    // 用户根钉到同一 tmp：写落点在用户空间，占位/断言须同一份目录（见 UserRootGuard）
+    let _user_root_guard = UserRootGuard::pin(tmp.path());
     let plugins_dir = tmp.path().join("config").join("plugins");
     fs::create_dir_all(&plugins_dir).unwrap();
     let profile = plugins_dir.join("default_profile.yaml");

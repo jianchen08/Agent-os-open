@@ -3351,22 +3351,36 @@ impl PluginInvokerImpl {
         Ok(())
     }
 
-    /// 递归收集插件 roots：从 AGENTOS_PLUGINS_DIR 出发，找所有含 plugin.json 的目录，
-    /// 取其父目录去重作为 discover 的 root_paths（对齐 main 的 discover_plugin_roots）。
+    /// 递归收集插件 roots：从 AGENTOS_PLUGINS_DIR **与用户插件根**出发，找所有含
+    /// plugin.json 的目录，取其父目录去重作为 discover 的 root_paths（对齐 main 的
+    /// discover_plugin_roots）。
+    ///
+    /// 双根都要递归：`scan_root` 只扫一级，`tools/<name>/` 这类二级嵌套靠本函数补
+    /// roots。此前只从内置根出发，用户根里放 `tools/foo/` 布局根本不会被发现
+    /// （ADR 2026-09-13 §2.3 缺口二）；用户根因此被迫只支持平铺。
     fn collect_plugin_roots(&self) -> Vec<String> {
-        let base = match std::env::var("AGENTOS_PLUGINS_DIR") {
-            Ok(d) => d,
-            Err(_) => return Vec::new(),
-        };
-        let base_path = std::path::Path::new(&base);
-        let mut plugin_dirs: Vec<String> = Vec::new();
-        Self::collect_plugin_dirs(base_path, &mut plugin_dirs);
-        // 取父目录去重
+        let mut base_paths: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(d) = std::env::var("AGENTOS_PLUGINS_DIR") {
+            if !d.trim().is_empty() {
+                base_paths.push(std::path::PathBuf::from(d));
+            }
+        }
+        if let Some(user_root) = agentos_core::user_space::user_plugins_dir() {
+            if !base_paths.contains(&user_root) {
+                base_paths.push(user_root);
+            }
+        }
+
         let mut parent_set = std::collections::HashSet::new();
-        for dir in &plugin_dirs {
-            if let Some(parent) = std::path::Path::new(dir).parent() {
-                if let Some(s) = parent.to_str() {
-                    parent_set.insert(s.to_string());
+        for base_path in &base_paths {
+            let mut plugin_dirs: Vec<String> = Vec::new();
+            Self::collect_plugin_dirs(base_path, &mut plugin_dirs);
+            // 取父目录去重
+            for dir in &plugin_dirs {
+                if let Some(parent) = std::path::Path::new(dir).parent() {
+                    if let Some(s) = parent.to_str() {
+                        parent_set.insert(s.to_string());
+                    }
                 }
             }
         }

@@ -17,14 +17,16 @@ config/isolation/security_rules.yaml 读取规则列表，经 config={"rules": .
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
 add_plugin_dir("input", "security_check")
-from plugin import SecurityCheckPlugin
+from plugin import SecurityCheckPlugin  # noqa: E402
 
 # 直接从仓库根读取安全规则，绕开已删除的 config.config_center。
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -119,3 +121,88 @@ class TestMatchRulesAllowPriority:
         plugin = _make_plugin()
         action, _ = plugin._match_rules("bash_execute", {})
         assert action == ""
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2026-09-13 覆盖率补测：工具名漂移模糊匹配 / 非法正则容错
+# ═══════════════════════════════════════════════════════════════
+
+
+def _bash_guard_rule() -> list[dict]:
+    """单条 needs_approval 规则：bash_execute 的 command 含 rm -rf 即命中。"""
+    return [
+        {
+            "name": "bash_guard",
+            "tools": ["bash_execute"],
+            "params": ["command"],
+            "action": "needs_approval",
+            "patterns": [{"type": "keyword", "value": "rm -rf"}],
+        }
+    ]
+
+
+class TestFuzzyToolRuleMatching:
+    """fuzzy_tool_matching 开启时规则 tools 匹配容错 LLM 输出漂移。"""
+
+    @pytest.mark.parametrize(
+        ("tool_name", "fuzzy", "expected_action"),
+        [
+            ("bash_execute", False, "needs_approval"),  # 精确命中（基线）
+            ("bash_execute", True, "needs_approval"),  # 精确命中不受模糊开关影响
+            ("bash-execute", True, "needs_approval"),  # 连字符漂移：规范化后相等
+            ("bash_executex", True, "needs_approval"),  # 单字符漂移：编辑距离 1
+            ("bashexecutexy", True, ""),  # 双字符漂移：距离 2，不误伤无关工具
+            ("bash-execute", False, ""),  # 模糊关闭：漂移绕过规则（该开关的动因）
+        ],
+    )
+    def test_tool_name_drift_match(self, tool_name: str, fuzzy: bool, expected_action: str) -> None:
+        plugin = SecurityCheckPlugin(
+            config={"rules": _bash_guard_rule(), "fuzzy_tool_matching": fuzzy}
+        )
+        action, rule = plugin._match_rules(tool_name, {"command": "rm -rf /tmp/x"})
+        assert action == expected_action
+        if expected_action:
+            assert rule == "bash_guard"
+
+
+class TestInvalidRegexRule:
+    """规则内非法正则不炸匹配引擎：跳过该 pattern，其余照常评估。"""
+
+    def test_invalid_regex_skipped_valid_pattern_still_evaluated(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        rules = [
+            {
+                "name": "bad_then_good",
+                "tools": ["bash_execute"],
+                "params": ["command"],
+                "action": "block",
+                "patterns": [
+                    {"type": "regex", "value": "([unclosed"},
+                    {"type": "keyword", "value": "rm -rf"},
+                ],
+            }
+        ]
+        plugin = SecurityCheckPlugin(config={"rules": rules})
+        with caplog.at_level(logging.WARNING, logger="plugin"):
+            action, rule = plugin._match_rules("bash_execute", {"command": "rm -rf /x"})
+        assert (action, rule) == ("block", "bad_then_good"), "非法正则后的合法 pattern 仍生效"
+        assert any("Invalid regex" in r.getMessage() for r in caplog.records)
+
+    def test_invalid_regex_alone_does_not_match_or_crash(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        rules = [
+            {
+                "name": "only_bad",
+                "tools": ["*"],
+                "params": ["command"],
+                "action": "block",
+                "patterns": [{"type": "regex", "value": "*bad("}],
+            }
+        ]
+        plugin = SecurityCheckPlugin(config={"rules": rules})
+        with caplog.at_level(logging.WARNING, logger="plugin"):
+            action, _ = plugin._match_rules("bash_execute", {"command": "rm -rf /x"})
+        assert action == "", "非法正则按未命中处理，不得拦截"
+        assert any("Invalid regex" in r.getMessage() for r in caplog.records)

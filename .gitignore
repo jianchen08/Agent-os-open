@@ -235,3 +235,6 @@ docs/agent_prompts_viewer.html
 *.log.locked-*
 # 根目录演示字幕副本（与 docs/working/demo-video-subtitles-godot-bridge.srt 逐字节相同，规范留档在其处）
 /Godot段字幕.srt
+
+# GUI 黑盒测试截图产物（web-gui-tester/computer-use 会话产物，不入库）
+gui-test-screenshots/

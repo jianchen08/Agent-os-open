@@ -1,36 +1,29 @@
 # dsh_adapter — DSH 插件适配器
 
-> task_dsh_plugin_adapter。让 DSH 的非 MCP 后端工具（Node runtime 桥接）
-> 与前端视觉组件（vendor 移植 + render 意图路由）在灵汐稳定运行。
+> task_dsh_plugin_adapter。让 DSH 的工具插件与视觉插件在灵汐稳定运行。
 > **DSH 源码零改动**（只读参考 `D:\reference_repos\deepseek-harness-rc8`，
 > commit `141eb6fe` / 0.1.0-rc.8 锁定，MIT 出处见各文件头；2026-08-21 自
 > rc.5 升级，gh api tarball 路线——git 直连 github.com 不通时用
 > `gh api repos/deepseek-ai/deepseek-harness/tarball/<sha>` 拉源码快照，
 > `pnpm install --frozen-lockfile --registry=npmmirror` + `pnpm build:lib:host`）。
 
-## 为什么是 tool 型插件（而非任务书原写的 system 级）
-
-ADR 附录D①：只有 `plugin_type == "tool"` 的 `capabilities.tools` 会注册进
-CapabilityRegistry 暴露给 LLM/tool-executor。适配器的桥接工具必须可达，
-故落位 `plugins/shared/tools/`（system 型的服务性职责由 contributes 承担，
-见 plugin.json `contributes.dsh_adapter`）。
-
 ## 结构
 
 ```
 dsh_adapter/
-├── plugin.json            # 3 工具契约（dsh_read/dsh_glob 带 output_schema+render）+ contributes
-├── server.py              # MCP sidecar 入口（@plugin.tool 注册面）
+├── plugin.json            # 4 工具契约（dsh_read/dsh_glob 带 output_schema+render）+ contributes
+├── server.py              # sidecar 入口（@plugin.tool 注册面 + 皮肤递送端点）
 ├── translator.py          # 清单翻译器（纯函数：DSH 包 → 灵汐注册清单）
 ├── bridge.py              # Node runtime 宿主（spawn/JSON-RPC/超时/惰性boot/重启）
 └── runtime/
     └── dsh-rpc-bridge.mjs # 通道 A fork：boot DSH cordis context，经 stdio 暴露工具
 ```
 
-## 通道 A 工作原理（runtime 改造桥接）
+## 适配面：插件带什么就适配什么
 
-`runtime/dsh-rpc-bridge.mjs` 以**绝对路径导入** DSH 仓库已构建产物
-（`apps/cli/node_modules/@deepseek-ai/*`），boot 最小 cordis context：
+**后端工具**（通道 A）。`runtime/dsh-rpc-bridge.mjs` 以**绝对路径导入** DSH
+仓库已构建产物（`apps/cli/node_modules/@deepseek-ai/*`），boot 最小 cordis
+context：
 
 ```
 SystemPrompt → ToolRuntime(dsh-tools) → LocalFileSystem → SubprocessLocal
@@ -46,15 +39,26 @@ SystemPrompt → ToolRuntime(dsh-tools) → LocalFileSystem → SubprocessLocal
 | `shutdown` | dispose + exit 0 |
 
 **有意跳过 DSH 侧 pre/post-execute 钩子管道**：准入由灵汐
-isolation_guard/security/approval 把关，输出兜底由 tool_core 的
-output_schema 校验 + spill_guard 执行（见 docs/dsh_hook_translation.md）。
+isolation_guard/security/approval 把关，输出兜底由 tool_core 的 output_schema
+校验 + spill_guard 执行（见 docs/working/dsh_hook_translation.md）。
+
+**前端渲染**（声明翻译，非组件移植）。适配器把 DSH 工具包翻译成 `render`
+声明（card 词汇表 read/terminal/search/web/diff…），由灵汐通用渲染通道
+（`frontend/src/utils/renderIntent.ts` → ActivityCard 原生块）渲染。
+**前端不为 DSH 写任何专属组件**——适配器递送"形态声明 + 数据"，渲染能力
+由宿主统一提供，新增 DSH 卡片形态不需要改前端。
+
+**皮肤**（主题声明 + 资产递送）。DSH 皮肤（skin-center 16 款）翻译成
+`contributes.themes` 主题声明（`on_load` 自动同步进 plugin.json），
+CSS / hooks.mjs / 背景资产经 `/ext/dsh_adapter/styles/**` 递送，前端皮肤
+运行时按声明注入——对 DSH 零特判，加皮肤 = 放包进 `dsh_plugins/`。
 
 ### 环境要求
 
 - Node ≥ 20；`AGENTOS_DSH_REPO_ROOT` 指向已构建的 deepseek-harness 仓库
   （默认 `D:\reference_repos\deepseek-harness-rc8`，需含 `apps/cli/node_modules`）
 - DSH 仓库升级 = 重跑 e2e（`AGENTOS_DSH_E2E=1 pytest
-  plugins/shared/tools/tests/test_dsh_adapter.py`）+ 更新 plugin.json 锁定契约
+  plugins/shared/system/dsh_adapter/tests/test_dsh_adapter.py`）+ 更新 plugin.json 锁定契约
 
 ## 闭环验证（output_schema 消费端）
 
@@ -62,8 +66,8 @@ output_schema 校验 + spill_guard 执行（见 docs/dsh_hook_translation.md）�
    bridge → Node DSH `read` 真实执行；
 2. 返回值经 tool_core 按 `output_schema` 校验（fail-closed，违规转错误
    回传 LLM）；
-3. 前端按 `render: {card: "read"}` 路由到 vendor ReadBlock（行号 gutter +
-   窗口计数），`dsh_glob` 路由 SearchBlock。
+3. 前端按 `render: {card: "read"}` 路由到原生行号视图（行号 gutter +
+   窗口计数），`dsh_glob` 路由到原生搜索结果块（路径平铺 + 计数）。
 
 ## 范围外（诚实边界）
 

@@ -27,6 +27,9 @@ ROOT = Path(__file__).resolve().parent.parent
 KERNEL_DIR = ROOT / "kernel"
 BASELINE_FILE = ROOT / ".github" / "rust-coverage-baseline.txt"
 KEY = "rust_line_coverage"
+# 行首锚定：归因注释里的历史数值（"# KEY=90.0 → 92.0"）不是真值，
+# 不得参与读取或改写（2026-09-13 批四实锤的注释毒化缺陷）。
+BASELINE_LINE_RE = re.compile(rf"^{KEY}=([0-9.]+)", re.MULTILINE)
 
 # lcov 行覆盖：每条 "DA:<line>,<count>[,...]" 记一行；count>0 视为已覆盖。
 DA_RE = re.compile(r"^DA:\d+,\d+")
@@ -57,7 +60,7 @@ def parse_lcov_line_pct(lcov_path: Path) -> float | None:
 def read_baseline() -> float:
     if not BASELINE_FILE.exists():
         return 0.0
-    m = re.search(rf"{KEY}=([0-9.]+)", BASELINE_FILE.read_text(encoding="utf-8"))
+    m = BASELINE_LINE_RE.search(BASELINE_FILE.read_text(encoding="utf-8"))
     return float(m.group(1)) if m else 0.0
 
 
@@ -70,8 +73,8 @@ def update_baseline_value(pct: float) -> None:
     """只替换 KEY= 数值行，保留归因注释（旧 write_baseline 整文件重写会抹注释）。"""
     text = BASELINE_FILE.read_text(encoding="utf-8") if BASELINE_FILE.exists() else ""
     new_line = f"{KEY}={pct:.1f}"
-    if re.search(rf"{KEY}=[0-9.]+", text):
-        text = re.sub(rf"{KEY}=[0-9.]+", new_line, text, count=1)
+    if BASELINE_LINE_RE.search(text):
+        text = BASELINE_LINE_RE.sub(new_line, text, count=1)
     else:
         text = (text.rstrip("\n") + "\n" if text else "") + new_line + "\n"
     BASELINE_FILE.write_text(text, encoding="utf-8")

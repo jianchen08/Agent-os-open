@@ -18,6 +18,51 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// 用户空间隔离 guard（钉 `AGENTOS_USER_*` 到指定根，drop 时恢复 + 放锁）。
+///
+/// 配置读写落点已迁用户空间（ADR 2026-09-13-unified-user-root）：用户根须与
+/// factory 钉在同一个 tmp，`tmp/.env` 与 `tmp/config/...` 的写读语义才不变；
+/// 不钉会落到开发机真实用户目录（污染 + 断言依赖环境）。
+///
+/// 本文件用例默认并行，环境变量进程全局——一个用例钉桩期间另一个会读到它，
+/// 故取锁串行化；guard 由调用方持有到用例结束。
+struct UserRootGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl UserRootGuard {
+    fn pin(root: &std::path::Path) -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // unwrap_or_else(into_inner)：测试 panic 污染锁后继续执行——锁只为串行化
+        // 环境变量操作，中毒无并发安全含义，在此 unwrap 会放大成连锁失败。
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            agentos_core::user_space::USER_ROOT_ENV,
+            agentos_core::user_space::USER_CONFIG_DIR_ENV,
+            agentos_core::user_space::USER_DATA_DIR_ENV,
+            agentos_core::user_space::USER_PLUGINS_DIR_ENV,
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, root);
+        for k in &keys[1..] {
+            std::env::remove_var(k);
+        }
+        Self { _lock: lock, saved }
+    }
+}
+
+impl Drop for UserRootGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 /// 登录内置 admin（无 store 时回退内置用户表）返回 access_token。
 async fn admin_token(app: &axum::Router) -> String {
     // D1 后无 store 登录 fail-closed（脚手架表不可登录）——直接铸造脚手架
@@ -177,6 +222,8 @@ async fn test_get_plugin_config_masks_plaintext_secret() {
 #[tokio::test]
 async fn test_put_plugin_config_preserves_env_placeholder_via_sentinel() {
     let tmp = tempfile::tempdir().unwrap();
+    // 写落点＝用户空间（见 UserRootGuard）：用户根与 factory 同钉该 tmp
+    let _user_root_guard = UserRootGuard::pin(tmp.path());
     let config_dir = tmp.path().join("config").join("models");
     fs::create_dir_all(&config_dir).unwrap();
     let llm_path = config_dir.join("llm.yaml");
@@ -341,12 +388,12 @@ fn env_mapping(file_id: &str) -> ConfigFileMapping {
     ConfigFileMapping {
         id: file_id.to_string(),
         path: ".env".to_string(),
-        label: "搜索源密钥".to_string(),
+        label: "环境变量密钥".to_string(),
         target: Some("env".to_string()),
         settings: None,
         fields: vec![
             agentos_core::traits::EnvConfigField {
-                name: "SMITHERY_API_KEY".to_string(),
+                name: "SAMPLE_API_KEY".to_string(),
                 label: "Smithery API Key".to_string(),
                 field_type: "secret".to_string(),
                 required: true,
@@ -354,7 +401,7 @@ fn env_mapping(file_id: &str) -> ConfigFileMapping {
                 extra: None,
             },
             agentos_core::traits::EnvConfigField {
-                name: "LANGSMITH_API_KEY".to_string(),
+                name: "OPTIONAL_API_KEY".to_string(),
                 label: "LangSmith API Key".to_string(),
                 field_type: "secret".to_string(),
                 required: false,
@@ -366,24 +413,26 @@ fn env_mapping(file_id: &str) -> ConfigFileMapping {
 }
 
 /// 构造 app + 注入 manifest（复用上方 harness 的形态）。
-async fn env_app() -> (axum::Router, tempfile::TempDir) {
+async fn env_app() -> (axum::Router, tempfile::TempDir, UserRootGuard) {
     let tmp = tempfile::tempdir().unwrap();
+    // 用户根钉到同一 tmp：.env 落点在用户空间（见 UserRootGuard）。
+    let guard = UserRootGuard::pin(tmp.path());
     let mut state = AppState::new();
     state.project_root = Some(tmp.path().to_path_buf());
     let mut manifests = state.manifests.write().await;
     manifests.push(manifest_with_files(
-        "smithery_search",
+        "sample_env_plugin",
         vec![env_mapping("api_keys")],
     ));
     drop(manifests);
-    (build_router(state), tmp)
+    (build_router(state), tmp, guard)
 }
 
 #[tokio::test]
 async fn test_env_target_get_masks_and_put_writes() {
-    let (app, tmp) = env_app().await;
+    let (app, tmp, _g) = env_app().await;
     let token = admin_token(&app).await;
-    let uri = "/api/v1/plugins/smithery_search/config/api_keys";
+    let uri = "/api/v1/plugins/sample_env_plugin/config/api_keys";
 
     // GET（未设置）：两字段为空串
     let resp = app
@@ -408,10 +457,10 @@ async fn test_env_target_get_masks_and_put_writes() {
         serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 65536).await.unwrap())
             .unwrap();
     assert_eq!(v["path"], ".env");
-    assert_eq!(v["data"]["SMITHERY_API_KEY"], "");
-    assert_eq!(v["data"]["LANGSMITH_API_KEY"], "");
+    assert_eq!(v["data"]["SAMPLE_API_KEY"], "");
+    assert_eq!(v["data"]["OPTIONAL_API_KEY"], "");
 
-    // PUT：写入 smithery key（*** 哨兵跳过 langsmith）
+    // PUT：写入必填字段（*** 哨兵跳过可选字段，不落盘）
     let put = app
         .clone()
         .oneshot(
@@ -424,8 +473,8 @@ async fn test_env_target_get_masks_and_put_writes() {
                     json!({
                         "if_match": etag,
                         "data": {
-                            "SMITHERY_API_KEY": "sk-secret-1",
-                            "LANGSMITH_API_KEY": "***"
+                            "SAMPLE_API_KEY": "sk-secret-1",
+                            "OPTIONAL_API_KEY": "***"
                         }
                     })
                     .to_string(),
@@ -446,11 +495,11 @@ async fn test_env_target_get_masks_and_put_writes() {
     // .env 落盘 + GET 掩码视图翻转
     let env_text = fs::read_to_string(tmp.path().join(".env")).unwrap();
     assert!(
-        env_text.contains("SMITHERY_API_KEY=sk-secret-1"),
+        env_text.contains("SAMPLE_API_KEY=sk-secret-1"),
         "{env_text}"
     );
     assert!(
-        !env_text.contains("LANGSMITH"),
+        !env_text.contains("OPTIONAL_API_KEY"),
         "哨兵字段不写入: {env_text}"
     );
     let resp2 = app
@@ -470,15 +519,15 @@ async fn test_env_target_get_masks_and_put_writes() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(v2["data"]["SMITHERY_API_KEY"], "***");
-    assert_eq!(v2["data"]["LANGSMITH_API_KEY"], "");
+    assert_eq!(v2["data"]["SAMPLE_API_KEY"], "***");
+    assert_eq!(v2["data"]["OPTIONAL_API_KEY"], "");
 }
 
 #[tokio::test]
 async fn test_env_target_etag_conflict_and_undeclared_rejected() {
-    let (app, _tmp) = env_app().await;
+    let (app, _tmp, _g) = env_app().await;
     let token = admin_token(&app).await;
-    let uri = "/api/v1/plugins/smithery_search/config/api_keys";
+    let uri = "/api/v1/plugins/sample_env_plugin/config/api_keys";
 
     // 旧 ETag → 409
     let stale = app
@@ -490,8 +539,7 @@ async fn test_env_target_etag_conflict_and_undeclared_rejected() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
-                    json!({"if_match": "stale-etag", "data": {"SMITHERY_API_KEY": "x"}})
-                        .to_string(),
+                    json!({"if_match": "stale-etag", "data": {"SAMPLE_API_KEY": "x"}}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -697,6 +745,8 @@ async fn test_inline_entry_get_defaults_and_put_writes_manifest() {
 #[tokio::test]
 async fn test_referenced_missing_file_yields_empty_view() {
     let tmp = tempfile::tempdir().unwrap();
+    // 读落点＝用户空间（见 UserRootGuard）：与 factory 同钉该 tmp
+    let _user_root_guard = UserRootGuard::pin(tmp.path());
     let manifest = manifest_with_files(
         "some_plugin",
         vec![ConfigFileMapping {

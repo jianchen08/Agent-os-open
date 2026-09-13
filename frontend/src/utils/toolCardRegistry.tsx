@@ -17,7 +17,7 @@ import {
   deriveGenericSummary,
   getRenderIntent,
   inferRenderIntent,
-} from './dshRenderIntent'
+} from './renderIntent'
 import { buildOutputSchemaView, getOutputSchema } from './outputSchemaView'
 import type { ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
@@ -168,7 +168,7 @@ function enhanceWithDeclarations(
   }
 
   // 声明路由：插件 render 声明（ToolDescriptor.render，schema 装载进
-  // dshRenderIntent 注册表）——工具作者对输出形态的契约，最高优先。
+  // renderIntent 注册表）——工具作者对输出形态的契约，最高优先。
   const rendered = applyRenderIntent(activity, toolCall)
   if (rendered) {
     return applyCardMeta(rendered, activity, toolCall, options)

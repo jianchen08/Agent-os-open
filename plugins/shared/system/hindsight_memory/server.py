@@ -1068,7 +1068,11 @@ def _spawn_stderr_drain(process: Any, stderr_path: str) -> None:
     drain_logger.propagate = False
 
     def _drain() -> None:
-        handler = _build_stderr_handler(stderr_path)
+        try:
+            handler = _build_stderr_handler(stderr_path)
+        except Exception as e:  # noqa: BLE001 — 落盘日志不可建也是排空失败，自终止留痕
+            drain_logger.warning("stderr 排空异常终止: %s", e)
+            return
         drain_logger.addHandler(handler)
         try:
             stream = process.stderr

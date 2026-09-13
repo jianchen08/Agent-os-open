@@ -8,7 +8,7 @@
  * 读文件卡片无法打开文件、条目只显示原始工具名。
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { loadRenderIntents } from '@/utils/dshRenderIntent'
+import { loadRenderIntents } from '@/utils/renderIntent'
 import {
   enhanceActivityWithToolConfig,
   registerGlobalOpenFileCallback,
@@ -143,7 +143,7 @@ describe('功能点：数据路由分支注入条目增强（无声明工具）'
       makeActivity('merge'),
       makeToolCall('merge', { file_path: 'docs/a.md' }, { old_content: 'a', new_content: 'b' }),
     )
-    expect(out.details?.[0]?.contentType).toBe('dsh:diff')
+    expect(out.details?.[0]?.contentType).toBe('diff')
     expect(out.subtitle).toBe('docs/a.md')
     expect(out.filePath).toBe('docs/a.md')
     expect(out.onOpenFile).toBeTypeOf('function')

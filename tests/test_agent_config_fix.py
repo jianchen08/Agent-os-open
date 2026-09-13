@@ -214,7 +214,7 @@ class TestAgentPromptViewerScript:
             [sys.executable, str(SCRIPT_PATH)],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,  # 全量会话后期机器负载高，脚本 3.5MB HTML 生成 120s 会抖动超时
             cwd=str(PROJECT_ROOT),
         )
         type(self).returncode = result.returncode

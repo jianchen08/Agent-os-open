@@ -568,8 +568,10 @@ fn compute_config_fingerprint(config_root: &std::path::Path) -> u64 {
             .unwrap_or(0)
     };
 
-    // autonomous.yaml（核心管道配置）
-    let pipeline_yaml = config_root.join("pipelines").join("autonomous.yaml");
+    // autonomous.yaml（核心管道配置）——取生效落点（用户空间优先）：用户在管道
+    // 配置页保存后指纹必须跟着变，否则热重载永远看不到用户改动。
+    let pipeline_yaml =
+        crate::pipeline_loader::resolve_pipeline_config_path(config_root, "autonomous.yaml");
     hasher.write(b"autonomous:");
     hasher.write_u64(mtime_secs(&pipeline_yaml));
 
@@ -903,6 +905,7 @@ async fn process_via_engine_inner(
         skip_user_append,
         state_overlay,
         &declared_volatile,
+        &run_id,
     )
     .await
     {
@@ -1539,6 +1542,7 @@ async fn stage_recover_history(
     skip_user_append: bool,
     state_overlay: Option<&serde_json::Value>,
     declared_volatile: &std::collections::HashSet<String>,
+    run_id: &str,
 ) -> Result<serde_json::Value, EngineOutcome> {
     let mut history_prefix: Vec<serde_json::Value> = Vec::new();
     let mut history_loaded = false;
@@ -1585,6 +1589,7 @@ async fn stage_recover_history(
             effective_pipeline_id,
             message,
             client_message_id,
+            run_id,
         )
         .await
         .map_err(|e| {
@@ -1804,17 +1809,21 @@ async fn append_user_message(
     effective_pipeline_id: &str,
     message: &str,
     client_message_id: &str,
+    run_id: &str,
 ) -> Result<(), agentos_core::types::StorageError> {
     // user 经 append op(无 seq → 引擎分配 next seq)+ 落 message_slots。
     // 指纹实录塞 _pending_message_ops（内部字段）：executor.persist_run_start 落一条
     // user_input 轨迹后移除——首轮 user 由此进入审计/回放范围（ops 即轨迹）。
     // cmid 非空时随 metadata 落库（compute_message_id 纳入 metadata 参与 hash：
     // 同内容多次发送 record_id 各自唯一，顺带消除重复内容同 id 碰撞）。
+    // _run_id（表侧内部字段，与 assistant 的 _message_id 同模式）：轮首 user 消息
+    // 触发的 run 在 append 时已生成，随 op 落 message_slots.run_id——regenerate
+    // 审计锚预检读它（NULL = 拒绝，轮首消息曾因此全部不可编辑重发/回退）。
     let mut user_msg = serde_json::json!({"role":"user","content":message});
     if !client_message_id.is_empty() {
         user_msg["metadata"] = serde_json::json!({"client_message_id": client_message_id});
     }
-    let ops = [serde_json::json!({"op":"set","msg":user_msg})];
+    let ops = [serde_json::json!({"op":"set","msg":user_msg,"_run_id": run_id})];
     // apply_messages_op_update 先改内存后落表：每次重试前按快照还原内存，
     // 防失败重试把同一条 user 消息双写进 messages。
     let messages_snapshot = initial_state.get("messages").cloned();

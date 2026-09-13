@@ -411,6 +411,26 @@ class TestRustCoverageBaseline:
         assert "# 归因注释" in text
         assert "自动棘轮" in capsys.readouterr().out
 
+    def test_history_comment_with_key_pattern_does_not_poison_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 归因注释里的历史数值（"# rust_line_coverage=90.0 → 92.0"）不得被
+        # 当作真值读取或改写——只有行首数值行参与解析（2026-09-13 批四实锤：
+        # 注释毒化令检查器把基线读成 90.0 并就地改写注释行）。
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(rust_cov, "BASELINE_FILE", bf)
+        bf.write_text(
+            "# rust_line_coverage=10.0 → 20.0（历史批）\n"
+            "# 中间注释\n"
+            "rust_line_coverage=50.0\n",
+            encoding="utf-8",
+        )
+        assert rust_cov.read_baseline() == 50.0
+        rust_cov.update_baseline_value(51.0)
+        text = bf.read_text(encoding="utf-8")
+        assert "# rust_line_coverage=10.0 → 20.0（历史批）" in text
+        assert "rust_line_coverage=51.0\n" in text
+
     def test_below_baseline_fails_untouched(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

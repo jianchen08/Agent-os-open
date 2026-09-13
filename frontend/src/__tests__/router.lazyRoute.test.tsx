@@ -13,13 +13,14 @@
 import { render, screen } from '@testing-library/react'
 import React from 'react'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 // 断掉 router.tsx 静态依赖图的重量链（Sidebar/MessageItem → @lobehub/ui →
 // fluent-emoji，vitest 无法解析其 ESM 目录导入）——被测对象是 LazyRoute 边界
 // 行为，UI 库不在渲染路径上。
 vi.mock('@lobehub/ui', () => ({}))
 vi.mock('@/components/layout/Sidebar', () => ({ Sidebar: () => null }))
 import { LazyRoute } from '../router'
+import { useAuthStore } from '../stores/authStore'
 
 /** 渲染即抛错的子组件（模拟 lazy chunk 加载失败/渲染崩溃） */
 function ThrowingChild(): React.ReactElement {
@@ -31,6 +32,11 @@ function OkChild(): React.ReactElement {
 }
 
 describe('LazyRoute — 路由级 ErrorBoundary（E11）', () => {
+  beforeEach(() => {
+    // LazyRoute 内层是 ProtectedRoute：聚焦边界行为，前置已认证态跳过守卫
+    useAuthStore.setState({ isInitializing: false, isAuthenticated: true })
+  })
+
   it('子组件抛错 → 渲染降级 UI，错误不炸穿调用方', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     expect(() =>

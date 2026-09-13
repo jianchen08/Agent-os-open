@@ -730,7 +730,7 @@ class TestPluginRuntimeRoute:
         assert body["lifecycle"] == {"plugin_load_total": 5, "plugin_error_total": 1}
         # 凭证透传契约（内核 handler 侧做 admin/viewer 角色校验）
         assert seen_list == {"authorization": "Bearer tok"}
-        assert seen_query == {"authorization": "Bearer tok", "plugin": "kernel"}
+        assert seen_query == {"authorization": "Bearer tok", "plugin_id": "kernel"}
         # 中文表头列声明（前端表格零改动渲染）
         assert [c["key"] for c in body["columns"]][:2] == ["plugin_id", "status"]
 

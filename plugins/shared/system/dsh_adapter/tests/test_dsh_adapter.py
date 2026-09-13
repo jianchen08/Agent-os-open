@@ -985,3 +985,17 @@ class TestManifestSkinRoutes:
         assert ("GET", "/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}") in routes
         # themes 自动声明（on_load 幂等同步产物）
         assert len(manifest["contributes"].get("themes", [])) >= 15
+
+    def test_asset_route_is_anonymous_for_native_image_loads(self):
+        """资产路由必须 auth:none——皮肤图由浏览器原生加载（背景图 CSS url()／
+        hooks 立绘 <img>／favicon），这类请求带不了 Authorization 头，声明 user
+        会被内核 /ext 鉴权闸 401，症状即"皮肤配色在、背景图没了"（merged.css /
+        hooks.mjs 走 apiClient 带 Bearer，故只有图坏）。与 /uploads 同判例：
+        暴露面由图片扩展名白名单 + resolve 目录约束收敛。"""
+        manifest = json.loads((PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+        by_path = {e["path"]: e for e in manifest["http_endpoints"]}
+        assets = by_path["/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}"]
+        assert assets["auth"] == "none"
+        # 反面对照：CSS/脚本走 apiClient（带 Bearer），保持 user——收窄而非全开
+        assert by_path["/ext/dsh_adapter/styles/skin/{skin}/merged.css"]["auth"] == "user"
+        assert by_path["/ext/dsh_adapter/styles/skin/{skin}/hooks.mjs"]["auth"] == "user"

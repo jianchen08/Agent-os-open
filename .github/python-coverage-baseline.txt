@@ -30,10 +30,111 @@
 # （7459 测试绿，floor+1=91 棘轮公式）。增量来源 = 本批五件补测：
 # llm/adapter 63.7%→86.4%（47 用例）、bash/process_manager 72.9%→88.4%（73
 # 用例）、monitoring/server 77.2%→77.5%+解析面补齐（17 用例）（提交
-# 5a74b4f20/902ecaeef/5c850f877/15dd53480/421035fd2）。下一批目标 =
+# 5a74b4f20/902ecaeef/5c850f877/421035fd2）。下一批目标 =
 # task_submit/tool、context_window_guard、isolation/manager、
 # channel_cli/cli_output_adapter。
-python_line_coverage=91.00
+#
+# 收紧（2026-09-13 覆盖率补测批三）：棘轮 91→92——插桩车道全量实测 91.20%
+# （31314/34336，7522 测试 0 失败，489s），floor+1=92（棘轮公式）。增量来源 =
+# 本批三件补测：channel_cli/cli_output_adapter 58.6%→100%（+35 用例至 61，
+# 输出面/编码清洗/确认交互全覆盖）、isolation/server 42.5%→100%（+24 用例，
+# 工具面参数翻译/生命周期/配置 watcher）、monitoring/server 车道缺行
+# 122→5（+43 用例，http 路由分发/provider 桥/指标上报，提交 1f8ea7ce6/
+# 35694fc08）。顺带修复：metrics-admin-query 闭包参数遮蔽全局插件实例
+# （plugin_runtime lifecycle 计数被降级静默吞掉恒空）；登记
+# tests/test_isolation_service_server.py 进插桩基集（此前未收集）。
+# 环境配方注：AGENTOS_PAYLOAD_DIAG 保持缺省（=1 会违反
+# test_hook_not_installed_by_default 契约且不改覆盖实测）。
+# 下一批目标 = task_submit/tool(123 缺行)、context_window_guard(114)、
+# isolation/manager(113)、bash/process_manager(93)、security_check(84)。
+#
+# 收紧（2026-09-13 覆盖率补测批四）：棘轮 92→94——插桩车道全量实测
+# 93.19%（32018/34336，8048 测试 0 失败，uv/3.12 口径 598s），floor+1=94
+#（棘轮公式）。增量来源 = 本批八件补测：task_submit/tool 缺行 123→0
+#（102 用例，白名单登记 tests/test_task_submit_tool_branches.py）、
+# context_window_guard 126→3（86 用例，余 3 行为不可达防御分支）、
+# isolation/manager 113→17（49 用例）、bash/process_manager 93→2（61
+# 用例）、security_check 联合车道 84→4（62 用例）、llm/adapter 106→79
+#（36 用例，模块名口径 99% 但官方车道口径仍有余量）。环境配方教训：
+# 官方车道 = uv run --frozen（.venv 3.12）+ PYTHONPATH=plugins;sdk/src，
+# shell 全局 python（3.14）口径不与车道同分布，本批此前手验全走 3.14
+# 系口径偏差（已改用车道口径复验）。
+# 下一批目标 = dsh_adapter/server(84)+translator(80)（并行会话进行中，
+# 勿撞车）、triggers_ext/manager(58)、monitoring/performance_monitor(57)、
+# connectors/server(57)、scene/server(56)、isolation_guard(55)、
+# _workspace_git_ops(54)、memory/tool(51)。
+# 批五复测（2026-09-13，官方 uv 口径）：实测 93.99%（32272/34336，8279 用例
+# 0 失败，564s），floor+1=94 与现基线持平——数值不动。本批增量 = connectors/
+# server 57 缺行清零（11 用例）、scene/server 56→2（15 用例）、security_check
+# 七文件扩充（+894 行）、dsh_adapter 125 用例（批四目标头两件）、task_submit
+# 137/bash 66 用例收尾；另修 agent_prompt_viewer 子进程 120s 超时抖动（→300s）。
+# 下一批目标 = triggers_ext/manager(58)、monitoring/performance_monitor(57)、
+# isolation_guard(55)、_workspace_git_ops(54)、memory/tool(51)、db_admin(50)。
+#
+# 收紧（2026-09-13 覆盖率补测批六，接批五目标清单）：94.00→95.00——插桩车道
+# 全量实测 94.95%（32642/34367，8458 通过 0 失败 57 跳过，uv/3.12 口径
+# 520s），floor+1=95（棘轮公式）。增量来源 = 本批五件补测（207 用例）：
+# memory 三件 tool/server/backend 81%→100%（45 用例，backend 未注入守卫族/
+# 缺参异常翻译/update 原生 vs 降级分流/server 降级链，提交 d42c3dcee）、
+# monitoring/performance_monitor 44 缺行清零 98%（22 用例，监控循环三退出
+# 路径/零间隔防除零/同步兼容三环境分支/健康四档，提交 2e79e3ded）、
+# isolation_guard 77%→98%（27 用例，早退族/复检异常态/force_host 冲突/
+# task_service 三态/server 适配层，提交 3bc6c608b）、
+# isolation/_workspace_git_ops 58 缺行清零 100%（24 用例，锁重试族/init
+# 双败/prune 修复/符号链接分支，提交 74ea2c7f2）、triggers_ext 93%→98%
+#（61 用例，condition_parser 语法错误族/manager 检查循环守卫族/http_api
+# 分发面，提交 efb147d9e）。同刀清偿 mypy 3 错（plugins-mypy-baseline 门禁
+# HEAD 红：await_args 判空×2 + 动态基类 type() 构造×1）。
+# 运行态注：run_gates.py plugins-coverage 仍处 --skip 挂起（执法未恢复），
+# 本实测为手动直跑插桩命令（instrumented_args shlex 引用装配，此前两次
+# 因 -m 空格拆词/工作区漂移 0 收集——复跑务必用 shlex 引用形态）。
+# 下一批目标 = db_admin(50)、worktree_merge(21 缺行)、tasks/http_api(27)、
+# hindsight_memory/server(19)；死代码待拍板 = isolation_guard plugin 672/681、
+# manager 299-301/858-859/889、condition_parser 357。
+#
+# 收紧（2026-09-13 覆盖率补测批七）：95→97——插桩车道全量实测 96.60%
+#（33198/34367，8848 通过 0 失败 57 跳过，uv/3.12 口径 540s，直跑脚本
+# subprocess 列表装配），floor+1=97（棘轮公式）。增量来源 = 本批十四件补测
+#（约 400 用例，556 缺行清偿）：llm 四件 adapter 79→1（45 用例，余 1 行
+# worker 装箱竞态窗口防御分支）/server 36→0（13）/deepseek 26→0（17）/
+# routes_llm_config 23→0（19）、db_admin/server 50→0（42+17）、rollback/
+# reversers 47→0（21）、tool_schema_validator 48→0（+40）、fs_tools 44→0
+#（30）、browser tool+bridge 72→0（41）、bash 30→0（44）、godot_context/
+# server 38→0（+19）、llm_core/plugin 38→0（26）、monitoring/
+# execution_records 37→0（16）。同刀披露：批七新测试文件两处裸名缓存/sys.path
+# 抢位毒化邻位测试（adapter→llm streaming、models→workspace），已改文件内
+# 自清（提交 400f922b6）；中央逐出钩子 trylast 被内建 collect_file 短路属
+# 既存缺陷待拍板（对 plugins/** 树无庇护是 workspace 测试加载器盲信
+# sys.modules 的合流诱因）。
+# 下一批目标 = cost_control/budget_manager(36)、dsh_adapter/bridge(35)、
+# multimodal/asr(30)、approval/server(29)、agent_manager/server(29)、
+# param_inject(28)、tasks/http_api(27)、monitoring/routes_search(26)、
+# context_build(26)、task_evaluate/tool(25)、isolation/workspace(25)。
+#
+# 收紧（2026-09-13 覆盖率补测批九，深夜）：97→99——插桩车道全量实测 98.11%
+#（33865/34518，9336 通过 0 失败 58 跳过，uv/3.12 口径 772s，直跑脚本
+# subprocess 列表装配），floor+1=99（棘轮公式）。增量来源 = 本批 12 群补测
+#（约 290 用例，430 缺行清偿）：cost_control budget_manager+config（38 用例，
+# config 13 缺行清零 100%）、dsh_adapter bridge（19 用例 22 展开，共跑
+# 100%）、multimodal asr/adapter/server（41 用例，asr/adapter 100%）、
+# approval server（36 用例，29 目标清 28 余 1 结构性防御）、agent_manager
+# server（33 用例，共跑 100%）、param_inject（新 29 用例 + 既有 9 用例随
+# 目录首次接线）、review media_reviewer+server（34 用例，45 目标缺行全清，
+# 顺修 GPSTags→GPSTAGS Pillow12 真缺陷=GPS EXIF 提取静默失效）、
+# context_build（36 用例，共跑 100%）、task_evaluate 深分支（22 用例，25 清
+# 23 余 2 死防御）、isolation workspace+workspace_lifecycle（36 用例，
+# workspace 100%）、download tool（21 用例，共跑 100%）、杂件 _host/
+# workspace_service/tasks server（39 用例，workspace_service 100%）。
+# 车道治理三连修（均批九全量车道实锤）：①cli_output_adapter 三处
+# get_terminal_size 桩 INTERNALERROR——pytest 进度写入器在报告窗口调
+# get_terminal_size(fallback=...)，46% 刻度恰落该用例（批三引入，批三~八
+# 全量车道因刻度位置未耦合而侥幸）；②test_media_review 假 PIL sys.modules
+# 裸赋值外泄毒化后续真实 Pillow 测试；③host 缺口测试裸名 plugin 抢注需
+# autouse 前置逐出。并行会话代提 context_build 一提交（8d1770ec2）已对账
+# 认可。下一批目标 = duplicate_check(20)、project_registry(19)、
+# task_reminder(19)、pipeline/workspace_lifecycle(19)、task_form(18)、
+# task/tool(16)、isolation/manager(16)、resource_merge(15)。
+python_line_coverage=99.00
 
 # 收紧（2026-09-10 补记归因；87.00 引入提交 82c10b5b1，2026-08-27）：棘轮
 # 83→87——全绿跑实测 86.02（0 失败，357s），floor+1=87（自动棘轮写入）；

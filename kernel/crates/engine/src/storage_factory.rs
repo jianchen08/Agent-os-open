@@ -30,7 +30,8 @@
 //!     sqlite:
 //!       path: agentos_kernel.db  # 相对项目根；":memory:" = 内存库
 //!   ```
-//! 3. 默认：sqlite + 项目根 `agentos_kernel.db`。
+//! 3. 默认：sqlite + **用户空间数据根** `<USER_ROOT>/data/agentos_kernel.db`
+//!    （ADR 2026-09-13-unified-user-root；用户空间不可得时回落项目根）。
 //!
 //! 文件不存在 = 未配置（走默认）；文件存在但损坏（读失败/YAML 解析失败）=
 //! [`resolve_storage_config`] 返回 `Err` 拒绝启动——数据正确性优先，
@@ -61,6 +62,9 @@ pub const ENV_DB_PATH: &str = "AGENTOS_DB_PATH";
 
 /// config 文件名（config_root 下）。
 const STORAGE_CONFIG_FILE: &str = "storage.yaml";
+
+/// 默认库文件名。位置由 [`resolve_storage_config`] 决定（用户空间数据根优先）。
+pub const DB_FILENAME: &str = "agentos_kernel.db";
 
 /// 解析 storage.yaml 的 storage 节。
 ///
@@ -140,10 +144,14 @@ pub fn resolve_storage_config(config_root: &Path) -> Result<StorageConfig, Stora
         .or(sqlite_section.path.filter(|s| !s.is_empty()))
         .map(|p| anchor_db_path(&p, &project_root))
         .unwrap_or_else(|| {
-            project_root
-                .join("agentos_kernel.db")
-                .to_string_lossy()
-                .to_string()
+            // 默认库文件位置＝用户空间数据根（ADR 2026-09-13-unified-user-root）：
+            // 库存的是用户资产（会话/任务/轨迹），落仓内会处于工作区还原的抹除
+            // 风险面内。用户空间不可得时回落项目根（保持旧行为，不在极端环境下
+            // 把库开到一个取不到的地方）。
+            match agentos_core::user_space::user_data_dir() {
+                Some(data_dir) => data_dir.join(DB_FILENAME).to_string_lossy().to_string(),
+                None => project_root.join(DB_FILENAME).to_string_lossy().to_string(),
+            }
         });
 
     Ok(StorageConfig {
@@ -213,7 +221,11 @@ mod tests {
     /// 所有读 `AGENTOS_DB_PATH` 的测试（直接或经 resolve_storage_config）持锁。
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// 默认配置：无文件无环境变量 → sqlite + 项目根 agentos_kernel.db。
+    /// 默认配置：无文件无环境变量 → sqlite + `agentos_kernel.db`。
+    ///
+    /// 位置断言依赖用户空间解析（ADR 2026-09-13-unified-user-root），故把
+    /// `AGENTOS_USER_ROOT` 钉到临时目录——否则会读宿主机真实用户目录，
+    /// 断言既不确定、又可能被真实环境干扰。
     #[test]
     fn resolve_defaults_to_sqlite_file() {
         // 环境变量在测试进程可能被其它用例设置——此处只断言 driver 默认逻辑
@@ -223,12 +235,29 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
+        let user_root = tempfile::tempdir().unwrap();
+        let original = std::env::var(agentos_core::user_space::USER_ROOT_ENV).ok();
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, user_root.path());
+
         let cfg = resolve_storage_config(dir.path()).expect("无文件应走默认");
+
+        match original {
+            Some(v) => std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, v),
+            None => std::env::remove_var(agentos_core::user_space::USER_ROOT_ENV),
+        }
+
         assert_eq!(cfg.driver, "sqlite");
         assert!(cfg
             .sqlite_path
             .replace('\\', "/")
             .ends_with("agentos_kernel.db"));
+        // 默认库落在用户空间数据根（出仓），不再是项目根
+        let expected = user_root.path().join("data").join(DB_FILENAME);
+        assert_eq!(
+            Path::new(&cfg.sqlite_path),
+            expected,
+            "默认库文件应落用户空间数据根"
+        );
     }
 
     /// 文件不存在（空 config 目录）→ Ok 且默认 sqlite。

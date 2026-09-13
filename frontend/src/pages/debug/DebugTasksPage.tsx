@@ -199,10 +199,10 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
                           {task.status === 'suspended' && task.task_id && (
                             <button
                               onClick={() => handleResume(task.task_id as string)}
-                              disabled={resumingIds.has(task.id)}
+                              disabled={resumingIds.has(task.task_id as string)}
                               className="inline-flex items-center gap-1 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50"
                             >
-                              {resumingIds.has(task.id) ? (
+                              {resumingIds.has(task.task_id as string) ? (
                                 <>
                                   <div className="h-3 w-3 animate-spin rounded-full border border-primary border-t-transparent" />
                                   恢复中...

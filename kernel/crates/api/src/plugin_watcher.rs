@@ -21,7 +21,7 @@
 //! [来源: plugins 热更新调研 / reload-all 端点复用]
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1590,12 +1590,52 @@ fn spawn_notify_watcher(
             return None;
         }
     };
-    if let Err(e) = watcher.watch(&plugins_dir, RecursiveMode::Recursive) {
-        warn!(target: "plugin_watcher", dir = %plugins_dir.display(), error = %e, "notify watch failed; relying on polling fallback");
-        return None;
+
+    // 多根监听：内置插件根 + 用户插件根（用户根的装卸此前只能等 60s 轮询兜底，
+    // 同一台机器上内置根秒级、用户根最坏一分钟——ADR 2026-09-13 §2.3）。
+    // 单根失败不致命：continue 到下一根，轮询仍是兜底可靠性主体。
+    let mut watched = 0usize;
+    for dir in watch_roots(&plugins_dir) {
+        if !dir.is_dir() {
+            // 用户根可能尚未创建（用户从没装过插件）——不建目录（空目录会掩盖
+            // 「无用户插件」语义），仅记日志；用户首次投放时由轮询兜到后即纳入。
+            info!(
+                target: "plugin_watcher",
+                dir = %dir.display(),
+                "notify watch skipped (dir absent; polling fallback covers it)"
+            );
+            continue;
+        }
+        match watcher.watch(&dir, RecursiveMode::Recursive) {
+            Ok(()) => {
+                watched += 1;
+                info!(target: "plugin_watcher", dir = %dir.display(), "notify watcher attached");
+            }
+            Err(e) => {
+                warn!(target: "plugin_watcher", dir = %dir.display(), error = %e, "notify watch failed; relying on polling fallback");
+            }
+        }
     }
-    info!(target: "plugin_watcher", dir = %plugins_dir.display(), "notify watcher attached");
+    if watched == 0 {
+        warn!(target: "plugin_watcher", "no directory watched by notify; polling fallback only");
+    }
     Some(watcher)
+}
+
+/// notify 监听根集合：内置插件根 + 用户插件根（去重；用户根缺失时只有内置根）。
+///
+/// 用户插件根经 `agentos_core::user_space` 解析（与 loader 的 `user_root`、
+/// 配置读写面同一单点）——三处共用一份解析，避免"监听的目录"与"发现的目录"
+/// 分叉（历史上 `AGENTOS_PLUGINS_DIR` 未设时 watcher 与 discover 各推一份 root
+/// 的坑，见 bin 装配注释）。
+fn watch_roots(plugins_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![plugins_dir.to_path_buf()];
+    if let Some(user_plugins) = agentos_core::user_space::user_plugins_dir() {
+        if !roots.contains(&user_plugins) {
+            roots.push(user_plugins);
+        }
+    }
+    roots
 }
 
 /// watcher 后台任务的 handle。

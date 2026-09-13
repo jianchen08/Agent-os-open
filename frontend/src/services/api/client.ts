@@ -4,7 +4,14 @@ import axios, { type AxiosError, type AxiosInstance, type InternalAxiosRequestCo
 import { API_BASE_URL, API_TIMEOUT } from '../../constants/api'
 import { STORAGE_KEYS } from '../../constants/storage'
 import { isRetryableError } from '../../utils/retry'
-import { refresh, getAccessToken, clearTokens, stopAutoRefresh } from '../auth/tokenLifecycle'
+import {
+  refresh,
+  getAccessToken,
+  getRefreshTokenValue,
+  clearTokens,
+  stopAutoRefresh,
+  isAuthFailureFromError,
+} from '../auth/tokenLifecycle'
 import { triggerAuthExpired } from '../authCallbacks'
 import { reportError, ErrorType, ErrorSeverity } from '../errorReporting'
 import type { ApiError } from '../../types/api'
@@ -36,6 +43,17 @@ export function isNotFoundError(error: unknown): boolean {
 // （refresh → services/api/auth → 本文件），因此本文件可静态 import 它，
 // 不构成静态循环依赖。
 
+/** 从 refresh 请求体解析所用的 refresh token（多标签竞争判定用；异常形状返回 null） */
+function parseRefreshTokenFromBody(data: unknown): string | null {
+  try {
+    const body = typeof data === 'string' ? JSON.parse(data) : data
+    const token = (body as { refresh_token?: unknown })?.refresh_token
+    return typeof token === 'string' && token ? token : null
+  } catch {
+    return null
+  }
+}
+
 /** 清除认证状态：停止 growth loop 轮询、清令牌、通知 store 并重定向登录页 */
 async function clearAuthAndRedirect(): Promise<void> {
   try {
@@ -66,16 +84,11 @@ async function clearAuthAndRedirect(): Promise<void> {
   }
 }
 
-/** 判断 token 刷新错误是否为「真正认证失效」 */
-function isDefinitelyAuthFailure(error: unknown): boolean {
-  // axios 错误对象：有 response 且状态码明确为 401/403 → 真认证失效
-  const status = (error as AxiosError)?.response?.status
-  if (status === 401 || status === 403) {
-    return true
-  }
-  // 其余情况（无 response 的网络错误、超时 ERR_NETWORK/ETIMEDOUT、5xx）→ 暂时性故障
-  return false
-}
+// 「真正认证失效」判定统一走 tokenLifecycle.isAuthFailureFromError（单一实现）：
+// 覆盖 401/403（直连或 cause 链）与「无凭据可刷新」的 authNoCredentials 标记。
+// 本文件不再持私有副本——旧副本只看 response.status，无凭据 refresh 失败
+// （无 HTTP 响应）被误判为瞬时网络故障，未登录状态永不跳登录页（2026-09-13
+// 实测复现：重启浏览器后 16 个请求全 401，页面停在主界面纹丝不动）。
 
 const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
@@ -139,9 +152,24 @@ apiClient.interceptors.response.use(
       const isRefreshTokenRequest = originalRequest.url?.includes('/auth/refresh')
 
       if (isRefreshTokenRequest) {
-        // refresh 请求自身 401：refresh_token 真正失效。
-        // 静默处理，不报告错误，直接清除认证状态并重定向。
-        if (isDefinitelyAuthFailure(error)) {
+        // refresh 请求自身 401：refresh_token 真正失效或已被并发轮换消费。
+        // 静默处理，不报告错误。
+        if (isAuthFailureFromError(error)) {
+          // 多标签并发轮换竞争（refresh token 存 localStorage 后标签间共享一条
+          // 轮换链）：本标签与本 tab 轮换前读到的旧值发起请求时，另一标签已用
+          // 同值完成轮换并落了新值 → 服务端按已消费 jti 拒绝本请求（401）。
+          // 此时本地存储已有更新值，用新值重放一次即可续上，绝不按认证失效
+          // 登出（否则多标签开页时输家标签被随机登出）。重放仍 401 时 body 值
+          // 与存储一致，落入下方真失效分支，循环有界。
+          const usedToken = parseRefreshTokenFromBody(originalRequest.data)
+          const currentToken = getRefreshTokenValue()
+          if (usedToken && currentToken && usedToken !== currentToken) {
+            originalRequest.data = JSON.stringify({
+              ...JSON.parse(String(originalRequest.data)),
+              refresh_token: currentToken,
+            })
+            return apiClient(originalRequest)
+          }
           await clearAuthAndRedirect()
         }
         return Promise.reject(error)
@@ -163,9 +191,9 @@ apiClient.interceptors.response.use(
         }
         return apiClient(originalRequest)
       } catch (refreshError) {
-        // 仅当后端明确返回 401/403（真认证失效）才 logout；
-        // 网络错误/超时/5xx 视为暂时性故障，reject 让上层重试，保留旧 token。
-        if (isDefinitelyAuthFailure(refreshError)) {
+        // 真认证失效（401/403/无凭据）才 logout；网络错误/超时/5xx 视为
+        // 暂时性故障，reject 让上层重试，保留旧 token。
+        if (isAuthFailureFromError(refreshError)) {
           await clearAuthAndRedirect()
         } else {
           reportError('网络异常，认证刷新暂时失败，请检查网络后重试', {

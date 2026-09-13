@@ -84,18 +84,15 @@ function isMobileViewport(): boolean {
 function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
   const { isAuthenticated, isInitializing, mustChangePassword } = useAuthStore()
 
-  // 开发/本地模式：直接放行，不跳登录页（便于查看布局效果）
-  // 生产模式仍走正常鉴权。
-  // TODO: 登录入口改为侧边栏（VS Code 式）
-  const devBypass = import.meta.env.DEV
+  // 开发与生产行为一致（2026-09-13 用户裁定）：无 dev 放行旁路——旁路会让
+  // 「未登录却见完整主界面」只在开发可见，等价于把认证回归挡在生产首日。
 
   // 首登强制改密闸（D1-4）：播种账号未改密前拦下所有受保护页面
-  // （独立于 devBypass——初始口令未换，任何模式下都不放行）
   if (isAuthenticated && mustChangePassword) {
     return <ChangePasswordGate />
   }
 
-  if (!devBypass && isInitializing) {
+  if (isInitializing) {
     return (
       <div className="bg-background text-foreground flex min-h-screen items-center justify-center">
         <div className="space-y-2 text-center">
@@ -106,7 +103,7 @@ function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
     )
   }
 
-  if (!devBypass && !isAuthenticated) {
+  if (!isAuthenticated) {
     return <Navigate to={ROUTES.LOGIN} replace />
   }
 

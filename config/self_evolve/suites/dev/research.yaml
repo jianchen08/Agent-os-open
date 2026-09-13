@@ -1,0 +1,59 @@
+name: research-v1
+mode: research
+settle_timeout_seconds: 1200
+cases:
+- id: gaia_style_multihop_local
+  source: gaia-l1
+  category: research
+  target: research_orchestrator_agent
+  messages:
+  - 两步计算题：第一步，读取 config/agents/system/evolution_agent.yaml，数出 tool_ids 列表里有多少个工具 id；第二步，读取
+    config/isolation/isolation_policy.yaml 数出 tools 键下有多少个工具条目。把两个数字相加的和写入当前工作空间 answer.txt（文件内容只有一个数字）。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: answer.txt
+        check: contains
+        pattern: '7'
+  anchor: repo
+- id: gaia_style_cross_file
+  source: gaia-l1
+  category: research
+  target: research_orchestrator_agent
+  messages:
+  - 仓库中 plugins/shared/system/review/improvement.py 与 config/self_evolve/rules/triage_rules.yaml
+    是『规则数据化』的一对实现与配置。请回答：triage_rules.yaml 中 mechanism_checks 一共有几条规则（按顶层列表元素数）？把答案写入当前工作空间
+    mech_count.txt（内容只有一个数字）。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: mech_count.txt
+        check: contains
+        pattern: '3'
+  anchor: repo
+- id: research_compare_summaries
+  source: harnessdev-search
+  category: research
+  target: research_orchestrator_agent
+  messages:
+  - '分别统计 config/pipelines/autonomous.yaml 与 config/pipelines/README.md 各自的行数，把对比写入当前工作空间
+    lines_compare.txt，格式为两行：『autonomous.yaml: <行数>』『README.md: <行数>』。'
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: lines_compare.txt
+        check: contains
+        pattern: autonomous.yaml
+  anchor: repo
+- id: research_web_fact
+  source: gaia-l2
+  category: research
+  target: research_orchestrator_agent
+  messages:
+  - 用联网搜索工具查询：Hugging Face 上 HarnessDev 论文页面（arXiv:2609.01437）显示的 upvote 数。把查询到的数字写入当前工作空间
+    hf_upvotes.txt（内容只有一个数字；若工具不可用，写 unknown 并说明原因）。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: hf_upvotes.txt
+        check: not_empty

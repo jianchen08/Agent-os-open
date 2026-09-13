@@ -36,3 +36,4 @@ pub mod config_scan;
 pub mod ids;
 pub mod traits;
 pub mod types;
+pub mod user_space;

@@ -811,12 +811,23 @@ impl PluginLoader for PluginLoaderImpl {
             }
         })?;
 
+        // 用户配置层叠加（ADR 2026-09-13-unified-user-root）：**文件级整体替换**——
+        // 用户层存在的每个文件整体取代 factory 同路径文件，未被接管的文件仍读
+        // factory。叠加点选在此（full_config 构建处）一处生效：所有走 config_files
+        // 引用形态的插件经 build_injected_config 免费获得用户覆盖。
+        let user_replaced = apply_user_config_overlay(&mut config_map);
+
         let config_keys: Vec<String> = config_map.keys().cloned().collect();
         info!(
-            "Loaded {} config entries from {}: [{}]",
+            "Loaded {} config entries from {}: [{}]{}",
             config_map.len(),
             config_root.display(),
-            config_keys.join(", ")
+            config_keys.join(", "),
+            if user_replaced > 0 {
+                format!(" (+{user_replaced} from user space)")
+            } else {
+                String::new()
+            }
         );
 
         Ok(serde_json::Value::Object(config_map))
@@ -888,6 +899,127 @@ impl PluginLoaderImpl {
             .iter()
             .filter_map(|(id, path)| path.parent().map(|p| (id.clone(), p.to_path_buf())))
             .collect()
+    }
+}
+
+/// 把用户配置层叠加进已加载的 factory `config_map`（ADR 2026-09-13-unified-user-root）。
+///
+/// 语义＝**文件级整体替换**：用户层某个 `.yaml` 存在 ⟹ 其解析值整体取代 factory
+/// 同路径值（不逐字段合并）；用户层目录递归下钻，未被接管的键保持 factory 值。
+/// 这是文件级所有权转移（与插件双根「同 id 用户赢」同构），**不是**被 ADR
+/// 2026-09-02 否决的「出厂默认 + 用户覆盖」字段级两层。
+///
+/// 用户层单文件解析失败 → 告警并**保留 factory 值**（fail-safe：坏的用户文件不该
+/// 让插件静默拿到空配置，与 factory 侧解析失败同款处置）。
+///
+/// **按文件定位接管**（不能按目录整体 replace）：`config/models/llm.yaml` 的键
+/// 路径是 `models.llm`，而同一目录下还有 `embedding.yaml`——若在 `models` 这一层
+/// 整体替换，会连带抹掉未被接管的兄弟文件。故以「文件相对路径 → 键路径
+/// （各级目录名 + stem）」逐文件写入，兄弟键各归各。
+///
+/// 键路径与注入侧 `resolve_config_path`（剥 `config/` 前缀与扩展名后按 `/` 下钻）
+/// 同构，保证"用户层写的文件"与"插件读的键"对得上。
+///
+/// 返回被用户层接管的文件数（日志可观测性——"改了没生效"排查的第一线索）。
+fn apply_user_config_overlay(config_map: &mut serde_json::Map<String, serde_json::Value>) -> usize {
+    let Some(user_root) = agentos_core::user_space::user_config_dir() else {
+        return 0;
+    };
+    if !user_root.is_dir() {
+        return 0;
+    }
+
+    // collect_yaml_dir 的回调能拿到每个文件的绝对路径与解析值——借它走既有
+    // 共用扫描骨架（隐藏文件跳过 / yaml 扩展名过滤 / 目录读取错误映射三处语义
+    // 与 factory 侧完全一致），同时把「文件 → 值」逐条记下来供键路径定位。
+    let mut files: Vec<(std::path::PathBuf, serde_json::Value)> = Vec::new();
+    let mut sink = serde_json::Map::new();
+    let mut load_file = |path: &Path| -> Result<Option<serde_json::Value>, LoaderError> {
+        let content = std::fs::read_to_string(path).map_err(|e| LoaderError::Io {
+            message: format!("Failed to read user config file {}: {}", path.display(), e),
+        })?;
+        match serde_yaml::from_str::<serde_json::Value>(&content) {
+            Ok(v) => {
+                files.push((path.to_path_buf(), v.clone()));
+                Ok(Some(v))
+            }
+            Err(e) => {
+                warn!(
+                    "Skipping unparseable user config file {} (factory value kept): {}",
+                    path.display(),
+                    e
+                );
+                Ok(None)
+            }
+        }
+    };
+    let mut read_dir_error = |dir: &Path, e: std::io::Error| -> LoaderError {
+        LoaderError::Io {
+            message: format!("Failed to read user config dir {}: {}", dir.display(), e),
+        }
+    };
+    if let Err(e) = agentos_core::config_scan::collect_yaml_dir(
+        &user_root,
+        &mut sink,
+        &mut load_file,
+        &mut read_dir_error,
+    ) {
+        warn!(
+            "User config overlay skipped ({}): {}",
+            user_root.display(),
+            e
+        );
+        return 0;
+    }
+
+    let mut replaced = 0usize;
+    for (path, value) in files {
+        let Ok(rel) = path.strip_prefix(&user_root) else {
+            continue;
+        };
+        // 键路径 = 各级目录名 + 文件 stem（如 models/llm.yaml → ["models","llm"]）
+        let mut segments: Vec<String> = rel
+            .iter()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
+        let Some(last) = segments.pop() else { continue };
+        let stem = last
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(&last)
+            .to_string();
+        segments.push(stem);
+        if set_config_leaf(config_map, &segments, value) {
+            replaced += 1;
+        }
+    }
+    replaced
+}
+
+/// 按键路径段写入配置叶（中间层不存在则建空对象）。
+///
+/// 末段直接 **替换**（文件级接管）；中间段是目录层级，仅在缺失时新建——
+/// 既不覆盖 factory 的兄弟键，也不因为用户层某文件存在就清空整棵子树。
+fn set_config_leaf(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    segments: &[String],
+    value: serde_json::Value,
+) -> bool {
+    let Some((head, rest)) = segments.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        map.insert(head.clone(), value);
+        return true;
+    }
+    let entry = map
+        .entry(head.clone())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    match entry {
+        serde_json::Value::Object(child) => set_config_leaf(child, rest, value),
+        // 同名标量挡住了目录层级（用户层文件与 factory 标量键同名）：
+        // 不强行覆盖——保留 factory 值并返回未接管，交由日志层面暴露
+        _ => false,
     }
 }
 
@@ -1937,6 +2069,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_no_config_root_returns_empty() {
+        let _user_space = factory_only_user_space();
         let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
         let config = loader.load_config().await.unwrap();
         assert_eq!(config, serde_json::json!({}));
@@ -1944,6 +2077,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_nonexistent_dir_returns_empty() {
+        let _user_space = factory_only_user_space();
         let loader =
             PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root("/tmp/no_such_dir");
         let config = loader.load_config().await.unwrap();
@@ -1952,6 +2086,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_reads_yaml_files() {
+        let _user_space = factory_only_user_space();
         let config_dir = tempfile::tempdir().unwrap();
 
         // 写入两个 YAML 配置文件
@@ -1984,6 +2119,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_handles_nested_dirs() {
+        let _user_space = factory_only_user_space();
         let config_dir = tempfile::tempdir().unwrap();
         let sub_dir = config_dir.path().join("isolation");
         fs::create_dir_all(&sub_dir).unwrap();
@@ -2020,6 +2156,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_ignores_non_yaml_files() {
+        let _user_space = factory_only_user_space();
         let config_dir = tempfile::tempdir().unwrap();
 
         fs::write(config_dir.path().join("config.yaml"), "key: value\n").unwrap();
@@ -2045,6 +2182,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_yml_extension() {
+        let _user_space = factory_only_user_space();
         let config_dir = tempfile::tempdir().unwrap();
 
         fs::write(config_dir.path().join("short.yml"), "name: test\n").unwrap();
@@ -2061,6 +2199,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_empty_yaml_dir() {
+        let _user_space = factory_only_user_space();
         let config_dir = tempfile::tempdir().unwrap();
         // 空目录
 
@@ -2073,6 +2212,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_deep_nested_dirs() {
+        let _user_space = factory_only_user_space();
         // 深层嵌套（≥ 2 层目录）
         let config_dir = tempfile::tempdir().unwrap();
         let deep_dir = config_dir.path().join("system").join("subsystem");
@@ -2107,6 +2247,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_same_stem_across_dirs() {
+        let _user_space = factory_only_user_space();
         // 同名文件跨目录：根目录和子目录都有同名 yaml
         let config_dir = tempfile::tempdir().unwrap();
         let sub_dir = config_dir.path().join("sub");
@@ -2136,6 +2277,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_empty_subdir_not_collected() {
+        let _user_space = factory_only_user_space();
         // 空子目录不应出现在结果中
         let config_dir = tempfile::tempdir().unwrap();
         let empty_sub = config_dir.path().join("empty_dir");
@@ -2157,6 +2299,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_config_mixed_yaml_and_yml() {
+        let _user_space = factory_only_user_space();
         // 同一目录下同时有 .yaml 和 .yml 文件
         let config_dir = tempfile::tempdir().unwrap();
 
@@ -2184,6 +2327,7 @@ mod tests {
     /// 都收不到配置(实证:0.2 内核启动后管道循环空转,每步 CONFIG_PARSE_ERROR)。
     #[tokio::test]
     async fn test_load_config_skips_unparseable_file_without_failing_others() {
+        let _user_space = factory_only_user_space();
         let config_dir = tempfile::tempdir().unwrap();
 
         // 合法配置
@@ -2205,11 +2349,281 @@ mod tests {
         assert!(!obj.contains_key("bad"), "非法文件应被跳过,不让整体失败");
     }
 
+    /// 用户配置层：**文件级整体替换**（ADR 2026-09-13-unified-user-root）。
+    ///
+    /// 覆盖语义的两组区分度输入：被接管的文件取用户值（整体，不合并 field），
+    /// 未被接管的文件保持 factory 值——后者是关键：用户层同目录存在别的文件时，
+    /// 不得因目录级整体替换而抹掉兄弟文件的 factory 值。
+    #[tokio::test]
+    async fn user_config_overlay_replaces_files_not_directories() {
+        let _lock = user_space_env_lock();
+        let factory = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        // factory: models/llm.yaml + models/embedding.yaml（同目录兄弟文件）
+        fs::create_dir_all(factory.path().join("models")).unwrap();
+        fs::write(
+            factory.path().join("models/llm.yaml"),
+            "model: factory-model\nnested: {a: 1, b: 2}\n",
+        )
+        .unwrap();
+        fs::write(
+            factory.path().join("models/embedding.yaml"),
+            "provider: factory-embed\n",
+        )
+        .unwrap();
+        // 用户层：只接管 llm.yaml
+        fs::create_dir_all(user.path().join("models")).unwrap();
+        fs::write(user.path().join("models/llm.yaml"), "model: user-model\n").unwrap();
+
+        let _g = UserRootGuard::set(user.path());
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(factory.path());
+        let config = loader.load_config().await.unwrap();
+        let models = config.get("models").unwrap().as_object().unwrap();
+
+        // 接管生效：整文件替换（nested 不参与合并，用户文件没有该键就不该有）
+        let llm = models.get("llm").unwrap().as_object().unwrap();
+        assert_eq!(llm.get("model").unwrap().as_str().unwrap(), "user-model");
+        assert!(
+            !llm.contains_key("nested"),
+            "整体替换：factory 的键不得渗进用户文件（合并即两处存值）"
+        );
+        // 兄弟文件不受牵连：未被接管的 embedding 仍读 factory
+        assert_eq!(
+            models
+                .get("embedding")
+                .unwrap()
+                .get("provider")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "factory-embed",
+            "同目录兄弟文件必须保持 factory 值（防目录级整体替换抹掉）"
+        );
+    }
+
+    /// 用户层不存在该文件时不接管；用户层完全没有时读 factory（回落）。
+    #[tokio::test]
+    async fn user_config_overlay_absent_falls_back_to_factory() {
+        let _lock = user_space_env_lock();
+        let factory = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        fs::write(factory.path().join("solo.yaml"), "v: factory\n").unwrap();
+
+        // ① 用户层目录为空
+        let _g = UserRootGuard::set(user.path());
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(factory.path());
+        assert_eq!(
+            loader
+                .load_config()
+                .await
+                .unwrap()
+                .get("solo")
+                .unwrap()
+                .get("v")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "factory"
+        );
+
+        // ② 用户层有其它文件但没接管 solo
+        fs::write(user.path().join("other.yaml"), "v: user\n").unwrap();
+        let loader2 =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(factory.path());
+        let cfg = loader2.load_config().await.unwrap();
+        assert_eq!(
+            cfg.get("solo").unwrap().get("v").unwrap().as_str().unwrap(),
+            "factory",
+            "存在性判定按文件而非目录"
+        );
+        assert_eq!(
+            cfg.get("other")
+                .unwrap()
+                .get("v")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "user"
+        );
+    }
+
+    /// 用户层坏文件 fail-safe：告警跳过并**保留 factory 值**，不让插件静默拿空配置。
+    #[tokio::test]
+    async fn user_config_overlay_bad_file_keeps_factory_value() {
+        let _lock = user_space_env_lock();
+        let factory = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        fs::write(factory.path().join("cfg.yaml"), "v: factory\n").unwrap();
+        fs::write(
+            user.path().join("cfg.yaml"),
+            "input_schema:\n  properties:\n    {placeholder}:\n      type: string\n",
+        )
+        .unwrap();
+
+        let _g = UserRootGuard::set(user.path());
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(factory.path());
+        assert_eq!(
+            loader
+                .load_config()
+                .await
+                .unwrap()
+                .get("cfg")
+                .unwrap()
+                .get("v")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "factory",
+            "坏的用户文件应告警跳过并保留 factory 值"
+        );
+    }
+
+    /// 嵌套目录键路径：`agents/main/agentos.yaml` → 键 `agents.main.agentos`
+    /// （与注入侧 resolve_config_path 按 `/` 下钻同构）。
+    #[tokio::test]
+    async fn user_config_overlay_nested_paths_map_to_key_paths() {
+        let _lock = user_space_env_lock();
+        let factory = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        fs::create_dir_all(factory.path().join("agents/main")).unwrap();
+        fs::write(
+            factory.path().join("agents/main/agentos.yaml"),
+            "n: factory\n",
+        )
+        .unwrap();
+        fs::create_dir_all(user.path().join("agents/main")).unwrap();
+        fs::write(user.path().join("agents/main/agentos.yaml"), "n: user\n").unwrap();
+
+        let _g = UserRootGuard::set(user.path());
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(factory.path());
+        let cfg = loader.load_config().await.unwrap();
+        assert_eq!(
+            cfg["agents"]["main"]["agentos"]["n"].as_str().unwrap(),
+            "user",
+            "嵌套路径应按目录层级映射到键路径"
+        );
+    }
+
+    /// 环境变量是进程全局态：用户空间相关用例互斥执行 + 自动还原。
+    ///
+    /// 可重入（线程内）：用例可能先显式取锁、再由 [`UserRootGuard`] 取一次——
+    /// 裸 `Mutex` 会自锁死。首个持有者记原始环境，最后一个释放时恢复。
+    fn user_space_env_lock() -> UserSpaceEnvGuard {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        thread_local! {
+            static DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        let depth = DEPTH.with(|d| {
+            let v = d.get();
+            d.set(v + 1);
+            v
+        });
+        if depth > 0 {
+            return UserSpaceEnvGuard { _lock: None };
+        }
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        UserSpaceEnvGuard {
+            _lock: Option::Some(lock),
+        }
+    }
+
+    /// [`user_space_env_lock`] 的 guard：最外层持有者 drop 时放锁。
+    struct UserSpaceEnvGuard {
+        _lock: Option<std::sync::MutexGuard<'static, ()>>,
+    }
+
+    impl Drop for UserSpaceEnvGuard {
+        fn drop(&mut self) {
+            thread_local! {
+                static DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+            }
+            DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        }
+    }
+
+    /// 只读 factory 的用例专用：持锁 + 把用户配置层钉到一个**全新空目录**。
+    ///
+    /// `load_config` 会把用户层文件并入结果（ADR 2026-09-13-unified-user-root），
+    /// 故"只断言 factory 内容"的用例必须让用户层为空——否则会读到开发机
+    /// `%APPDATA%/agentos/config/` 的残留（实测断言条数 2 却得 4）。
+    ///
+    /// 返回值须绑定到变量（guard 存活到用例结束）。
+    struct FactoryOnlyUserSpace {
+        _lock: UserSpaceEnvGuard,
+        _tmp: tempfile::TempDir,
+        original_cfg: Option<String>,
+    }
+
+    impl Drop for FactoryOnlyUserSpace {
+        fn drop(&mut self) {
+            match self.original_cfg.take() {
+                Some(v) => {
+                    std::env::set_var(agentos_core::user_space::USER_CONFIG_DIR_ENV, v);
+                }
+                None => std::env::remove_var(agentos_core::user_space::USER_CONFIG_DIR_ENV),
+            }
+        }
+    }
+
+    fn factory_only_user_space() -> FactoryOnlyUserSpace {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = user_space_env_lock();
+        let original_cfg = std::env::var(agentos_core::user_space::USER_CONFIG_DIR_ENV).ok();
+        std::env::set_var(
+            agentos_core::user_space::USER_CONFIG_DIR_ENV,
+            tmp.path().join("user-config"),
+        );
+        FactoryOnlyUserSpace {
+            _lock: lock,
+            _tmp: tmp,
+            original_cfg,
+        }
+    }
+
+    /// 把 `AGENTOS_USER_CONFIG_DIR` 钉到指定目录（Drop 还原），隔离真实用户空间。
+    ///
+    /// 直接钉配置层而非 `USER_ROOT`：测试目录即配置层根，省去 `config/` 中转，
+    /// 且顺带覆盖「分区环境变量覆盖用户根」这条解析路径。
+    ///
+    /// **必须同时持 [`user_space_env_lock`]**：环境变量是进程全局态，本文件用例
+    /// 默认并行——只设不锁时，未钉桩的用例（如 load_config 空目录类）会读到别的
+    /// 用例刚设的值，或读到开发机真实用户目录里的残留配置（实测断言恒非空）。
+    struct UserRootGuard {
+        _lock: UserSpaceEnvGuard,
+        original_cfg: Option<String>,
+    }
+
+    impl UserRootGuard {
+        fn set(config_dir: &Path) -> Self {
+            let lock = user_space_env_lock();
+            let original_cfg = std::env::var(agentos_core::user_space::USER_CONFIG_DIR_ENV).ok();
+            std::env::set_var(agentos_core::user_space::USER_CONFIG_DIR_ENV, config_dir);
+            Self {
+                _lock: lock,
+                original_cfg,
+            }
+        }
+    }
+
+    impl Drop for UserRootGuard {
+        fn drop(&mut self) {
+            match &self.original_cfg {
+                Some(v) => std::env::set_var(agentos_core::user_space::USER_CONFIG_DIR_ENV, v),
+                None => std::env::remove_var(agentos_core::user_space::USER_CONFIG_DIR_ENV),
+            }
+        }
+    }
+
     /// 隐藏文件(以 `.` 开头)不应被当作配置加载——
     /// Unix 惯例隐藏文件是元数据/文档,不是常规配置。
     /// 真实用例:.agent_template_spec.yaml 是 Agent 配置规范文档。
     #[tokio::test]
     async fn test_load_config_skips_hidden_files() {
+        let _user_space = factory_only_user_space();
         let config_dir = tempfile::tempdir().unwrap();
 
         fs::write(config_dir.path().join("visible.yaml"), "key: value\n").unwrap();

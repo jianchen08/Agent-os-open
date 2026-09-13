@@ -36,11 +36,20 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from agentos_plugin_sdk.capability import CapabilityCaller, bind_capability_caller
+
+# 用户空间解析（plugins/shared/user_space.py）与本文件同级，直接上溯 0 级。
+# 参考 uploads_path.py 的 sys.path 自举模式。
+_SHARED_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _SHARED_ROOT not in sys.path:
+    sys.path.insert(0, _SHARED_ROOT)
+
+import user_space  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -65,15 +74,23 @@ CONFIG_USERS_BASE_ENV = "AGENTOS_CONFIG_USERS_DIR"
 
 
 def _default_data_base() -> Path:
-    """数据根 base（``data/`` 目录）。
+    """数据根 base —— 用户空间 ``<USER_ROOT>/data``（ADR 2026-09-13-unified-user-root）。
 
-    优先 env ``AGENTOS_DATA_DIR``；否则仓库根 ``data/``
-    （本文件位于 ``plugins/shared/tenant_data.py``，上溯 2 级到仓库根）。
+    优先 env ``AGENTOS_DATA_DIR``；否则 ``user_space.user_data_dir()``（用户空间根按
+    OS 不同：Win ``%APPDATA%/agentos/data``、macOS ``~/Library/Application
+    Support/agentos/data``、Linux ``~/.local/share/agentos/data``）。
+
+    默认值从**仓库根 ``data/``** 迁到用户空间：仓内数据处于工作区还原的抹除风险面
+    内，用户资产必须出仓（存量数据经 ``scripts/migrate_to_user_root.py`` 迁移）。
+    解析不可得时兜底回落仓库根——保持旧行为，不让插件因取不到根而崩。
     """
     env = os.environ.get(DATA_BASE_ENV)
     if env:
         return Path(env)
-    # parents[0]=shared, parents[1]=plugins, parents[2]=仓库根
+    resolved = user_space.user_data_dir()
+    if resolved is not None:
+        return resolved
+    # parents[0]=shared, parents[1]=plugins, parents[2]=仓库根（极端环境兜底）
     return Path(__file__).resolve().parents[2] / "data"
 
 
@@ -107,6 +124,10 @@ def _default_config_users_base() -> Path:
 
     优先 env ``AGENTOS_CONFIG_USERS_DIR``；否则仓库根 ``config/users/``
     （本文件位于 ``plugins/shared/tenant_data.py``，上溯 2 级到仓库根）。
+
+    仍在仓库内：租户配置轴与用户空间（``<USER_ROOT>/config``）的关系**待 ADR
+    2026-09-13-unified-user-root 的 P2 定案**（候选定位：用户空间＝单机/安装作用域，
+    租户覆盖＝其内的一层子轴）。当前该目录零生产消费方，故不随本刀迁移。
     """
     env = os.environ.get(CONFIG_USERS_BASE_ENV)
     if env:

@@ -110,3 +110,26 @@ categories:
   memory:
     isolation: non_isolated
     execution: host_direct
+
+  # --- 自进化评测面（内部数据服务，宿主直执行）---
+  eval_run_suite:
+    isolation: non_isolated
+    execution: host_direct
+  eval_judge_heldout:
+    isolation: non_isolated
+    execution: host_direct
+  proposal_submit:
+    isolation: non_isolated
+    execution: host_direct
+  proposal_promote:
+    isolation: non_isolated
+    execution: host_direct
+  proposal_reject:
+    isolation: non_isolated
+    execution: host_direct
+  eval_view_signatures:
+    isolation: non_isolated
+    execution: host_direct
+  eval_health_report:
+    isolation: non_isolated
+    execution: host_direct

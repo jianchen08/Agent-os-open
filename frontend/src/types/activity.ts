@@ -43,14 +43,13 @@ export type DetailContentType =
   | 'image' // 图片（path 有效，点击灯箱预览）
   | 'link' // 链接（url 有效，点击外部打开）
   | 'log' // 日志流（等宽滚动区，吸底滚动+滚动锁）
-  // DSH vendor 卡（task_dsh_plugin_adapter 任务 3）：render 意图路由产物，
-  // dshProps 携带 vendor 组件 props（frontend/src/components/vendor/dsh/）。
-  | 'dsh:diff' // DiffBlock（{diffs: {path, oldText, newText}[]}）
-  | 'dsh:read' // ReadBlock（{label, lines, totalLines, lang}）
-  | 'dsh:web' // WebBlock（{kind: search|fetch, ...}）
-  | 'dsh:search' // SearchBlock（{kind: matches|paths, ...}）
-  | 'dsh:terminal' // TerminalBlock（{command, cwd, output, exitCode, running}）
-  // 通用渲染路由器（dshRenderIntent 数据路由/声明产出）：表格式与表单式布局。
+  // render 意图路由产出（renderIntent.ts）：卡片词汇表 → 原生结构化块，
+  // 由 ActivityCard 统一渲染——插件声明形态，前端不为任何插件写专属组件。
+  | 'read' // 文件内容（read.lines 带行号 + 窗口计数）
+  | 'terminal' // 命令与输出（terminal.command/output/exitCode）
+  | 'search' // 搜索结果（search.kind=matches 分组行 | paths 平铺）
+  | 'web' // 联网结果（web.kind=fetch URL+状态码 | search 来源列表）
+  // 通用渲染路由器（renderIntent 数据路由/声明产出）：表格式与表单式布局。
   | 'table' // 表格（table.columns + table.rows 有效）
   // 表单：两形态同词（双路由）——content.formFields 数组 = 可交互表单
   // （chat_card form 块声明，ActivityCard 透传 FormWidget）；否则 kvItems 标量
@@ -99,8 +98,18 @@ export interface ActivityDetailBlock {
   path?: string
   /** 链接地址（仅 contentType='link' 时有效） */
   url?: string
-  /** DSH vendor 卡 props（仅 contentType='dsh:*' 时有效，结构见 dshRenderIntent.ts 各 payload 构造器） */
-  dshProps?: Record<string, unknown>
+  /** 文件内容（仅 contentType='read' 时有效；lines 已带行号） */
+  read?: { lines: { number: number; text: string }[]; totalLines: number; lang?: string }
+  /** 命令与输出（仅 contentType='terminal' 时有效） */
+  terminal?: { command: string; cwd?: string; output: string; exitCode?: number; running: boolean }
+  /** 搜索结果（仅 contentType='search' 时有效，kind 判别两形态） */
+  search?:
+    | { kind: 'paths'; paths: string[]; truncated: boolean; total: number }
+    | { kind: 'matches'; files: { path: string; matches: { lineNumber: number; line: string }[] }[]; truncated: boolean; total: number }
+  /** 联网结果（仅 contentType='web' 时有效，kind 判别两形态） */
+  web?:
+    | { kind: 'fetch'; url: string; statusCode: number; truncated: boolean }
+    | { kind: 'search'; answer?: string; sources: { url: string; title?: string; snippet?: string; publishedAt?: string }[]; truncated: boolean }
 }
 
 /**

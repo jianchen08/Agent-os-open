@@ -240,10 +240,13 @@ def _install_fake_pil(monkeypatch: pytest.MonkeyPatch) -> Any:
         Flash=0x9209,
         GPSInfo=0x8825,
     )
-    exif_tags.GPSTags = {0x0000: "LatitudeRef"}
-    sys.modules["PIL"] = pil_pkg
-    sys.modules["PIL.Image"] = fake_image_mod
-    sys.modules["PIL.ExifTags"] = exif_tags
+    exif_tags.GPSTAGS = {0x0000: "LatitudeRef"}
+    # 经 monkeypatch.setitem 注入：teardown 自动还原。裸赋值会外泄——车道
+    # 共跑下后续依赖真实 Pillow 的测试（本仓 test_review_gaps 等）会读到
+    # 假 PIL 报 "cannot import name 'ImageFile' (unknown location)"。
+    monkeypatch.setitem(sys.modules, "PIL", pil_pkg)
+    monkeypatch.setitem(sys.modules, "PIL.Image", fake_image_mod)
+    monkeypatch.setitem(sys.modules, "PIL.ExifTags", exif_tags)
     # 关键：替换 media_reviewer 已绑定的 Image 属性（真实 Pillow 存在时仅
     # sys.modules 注入不生效——模块级 from-import 已绑定真实对象）
     monkeypatch.setattr(media_reviewer, "Image", fake_image_mod.Image)

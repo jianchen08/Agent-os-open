@@ -1847,4 +1847,128 @@ mod tests {
             "存储故障必须 500，不得伪装成 4xx"
         );
     }
+
+    // ── 进程内限流：注册限频 / 登录窗口滑动与表级逐出 ──
+
+    async fn register_status(app: &axum::Router, username: &str) -> StatusCode {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"username": username, "password": "reg-pw-12345", "email": "u@test.dev"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        resp.status()
+    }
+
+    #[tokio::test]
+    async fn register_rate_limited_after_threshold_returns_429() {
+        let state = AppState::new();
+        {
+            let mut attempts = state.register_attempts.lock();
+            for _ in 0..REGISTER_MAX_ATTEMPTS {
+                attempts.push(std::time::Instant::now());
+            }
+        }
+        let app = crate::server::build_router(state);
+        assert_eq!(
+            register_status(&app, "new_user_1").await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "窗口内尝试达上限后注册必须 429"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_attempts_below_threshold_pass_rate_gate() {
+        // 上限-1 次：限频放行（本次尝试记入窗口），进入后续校验——
+        // 用越界字符集 username 触发 400 而非 429，证明闸门通过。
+        let state = AppState::new();
+        {
+            let mut attempts = state.register_attempts.lock();
+            for _ in 0..REGISTER_MAX_ATTEMPTS - 1 {
+                attempts.push(std::time::Instant::now());
+            }
+        }
+        let app = crate::server::build_router(state);
+        assert_eq!(
+            register_status(&app, "bad charset!").await,
+            StatusCode::BAD_REQUEST,
+            "未达上限应放行限频闸（400 = 字符集校验拒绝）"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_aged_failures_outside_window_do_not_lock() {
+        // 窗口全滑出的历史失败不锁号：≥LOGIN_MAX_FAILURES 条但全部早于
+        // 窗口宽度 → login_rate_check 清空后放行（400 = 凭据错误，非 429）。
+        // 直接经 handler 注入预置状态（build_router 会消费 AppState，无法后注）。
+        let state = AppState::new();
+        let old = std::time::Instant::now()
+            - std::time::Duration::from_secs(LOGIN_FAILURE_WINDOW_SECS + 60);
+        {
+            let mut failures = state.login_failures.lock();
+            failures.insert(
+                "aged_user".to_string(),
+                (0..LOGIN_MAX_FAILURES).map(|_| old).collect(),
+            );
+        }
+        let err = login_handler(
+            axum::extract::State(state.clone()),
+            Json(LoginRequest {
+                username: "aged_user".to_string(),
+                password: "wrong-pw".to_string(),
+            }),
+        )
+        .await
+        .expect_err("错误口令应登录失败");
+        assert!(
+            matches!(err, ApiError::BadRequest { .. }),
+            "窗口外旧失败应放行限流闸（400 = 凭据错误），实际 {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_failures_table_eviction_keeps_bounded() {
+        // 表级有界：条目数达上限后，新用户名登录尝试逐出窗口起点最早的一条
+        //（免认证 DoS 面的内存有界契约）。
+        let state = AppState::new();
+        let now = std::time::Instant::now();
+        {
+            let mut failures = state.login_failures.lock();
+            for i in 0..LOGIN_FAILURES_MAX_ENTRIES {
+                failures.insert(
+                    format!("u{i}"),
+                    vec![now - std::time::Duration::from_secs(i as u64 + 1)],
+                );
+            }
+        }
+        let oldest_key = "u9999"; // 首个失败时刻最早（now - 10000s）
+        let err = login_handler(
+            axum::extract::State(state.clone()),
+            Json(LoginRequest {
+                username: "fresh_user".to_string(),
+                password: "wrong-pw".to_string(),
+            }),
+        )
+        .await
+        .expect_err("错误口令应登录失败");
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+        let failures = state.login_failures.lock();
+        assert!(
+            !failures.contains_key(oldest_key),
+            "最旧条目应被逐出以保持表有界"
+        );
+        assert!(
+            failures.len() < LOGIN_FAILURES_MAX_ENTRIES,
+            "逐出后条目数应低于上限"
+        );
+    }
 }

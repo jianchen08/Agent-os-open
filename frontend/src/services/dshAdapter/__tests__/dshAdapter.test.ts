@@ -2,10 +2,10 @@
  * dshAdapter 前端服务测试（task_dsh_plugin_adapter 任务 2）。
  *
  * mock /api/v1/schema：验证贡献装载、失败隔离、renderers 兜底注册到
- * dshRenderIntent 注册表。
+ * renderIntent 注册表。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { getRenderIntent, loadRenderIntents } from '@/utils/dshRenderIntent'
+import { getRenderIntent, loadRenderIntents } from '@/utils/renderIntent'
 import { loadDshAdapterContributions } from '../index'
 
 vi.mock('@/services/api/schema', () => ({
@@ -31,7 +31,6 @@ describe('loadDshAdapterContributions', () => {
               source_version: '0.1.0-rc.5',
               backend_channel: 'node-runtime-bridge',
               frontend_channel: 'vendor-port + render-intent',
-              components: ['DiffBlock'],
               out_of_scope: [],
             },
             renderers: [

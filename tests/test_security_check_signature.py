@@ -66,3 +66,30 @@ class TestSignaturePaths:
         plugin = SecurityCheckPlugin()
         sig = plugin._make_signature("delete_file", {"paths": []})
         assert sig is None
+
+
+class TestSignatureCodeParam:
+    """code 参数计入指纹（python_execute 类工具的"同代码免批"）。"""
+
+    def test_code_param_produces_signature(self) -> None:
+        """仅 code 参数也能算出指纹（非 None，带工具名前缀）。"""
+        plugin = SecurityCheckPlugin()
+        sig = plugin._make_signature("python_execute", {"code": "print('hi')"})
+        assert sig is not None
+        assert sig.startswith("python_execute:")
+
+    def test_code_whitespace_normalized_same_signature(self) -> None:
+        """code 空白归一化：多余空白不影响指纹（与 command 同规则）。"""
+        plugin = SecurityCheckPlugin()
+        s1 = plugin._make_signature("python_execute", {"code": "print(  'hi' )"})
+        s2 = plugin._make_signature("python_execute", {"code": "print( 'hi' )"})
+        assert s1 is not None and s2 is not None
+        assert s1 == s2
+
+    def test_different_code_different_signature(self) -> None:
+        """代码内容不同 → 指纹不同（精确匹配，不误放行）。"""
+        plugin = SecurityCheckPlugin()
+        s1 = plugin._make_signature("python_execute", {"code": "print('a')"})
+        s2 = plugin._make_signature("python_execute", {"code": "print('b')"})
+        assert s1 is not None and s2 is not None
+        assert s1 != s2

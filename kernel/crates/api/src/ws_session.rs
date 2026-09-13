@@ -6,16 +6,21 @@
 //! - [`run_ws_session`]：握手鉴权 → 注册连接 → 入站路由（user_input/interaction/
 //!   stop/heartbeat）→ 出站通道排空到 socket。断线重连由 SessionCoordinator 统一处理。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-
-use agentos_core::traits::{MessageQueryOpts, StorageBackend};
-use agentos_core::types::{
-    PatchType, PendingInputRecord, PendingInputSource, TenantContext, TraceEntry,
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
 };
-use agentos_session::auth::HandshakeAuth;
-use agentos_session::router::{InboundRouter, PipelineDispatcher, RouteOutcome};
-use agentos_session::{EventSink, SessionCoordinator};
+
+use agentos_core::{
+    traits::{MessageQueryOpts, StorageBackend},
+    types::{PatchType, PendingInputRecord, PendingInputSource, TenantContext, TraceEntry},
+};
+use agentos_http::auth::verify_access_token;
+use agentos_session::{
+    auth::HandshakeAuth,
+    router::{InboundRouter, PipelineDispatcher, RouteOutcome},
+    EventSink, SessionCoordinator,
+};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -23,7 +28,6 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::routes::AppState;
-use agentos_http::auth::verify_access_token;
 
 /// 全局 WS sink id 生成器（连接注册表去重/踢旧用）。
 static SINK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -1755,26 +1759,23 @@ fn message_status_from_blob(fa: &serde_json::Value) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::assistant_authoritative_seq;
-    use super::emit_round_finished_event;
-    use super::find_target_user_seq;
-    use super::message_status_from_blob;
-    use super::resolve_dispatch_agent;
-    use super::resolve_pipeline_id_for_thread;
-    use super::thread_owned_by_user;
-    use super::EngineDispatcher;
-    use super::{notify_outcome_waiter, register_outcome_waiter, remove_outcome_waiter};
-    use super::{WsSink, CLOSE_BACKPRESSURE, CLOSE_KICKED, CLOSE_NONE, WS_OUTBOUND_CAPACITY};
-    use agentos_core::traits::StorageBackend;
-    use agentos_core::traits::{MessageQueryOpts, SessionListFilter};
-    use agentos_core::types::{
-        MessageRecord, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry,
+    use std::sync::{Arc, Mutex};
+
+    use agentos_core::{
+        traits::{MessageQueryOpts, SessionListFilter, StorageBackend},
+        types::{MessageRecord, RunRecord, RunStatus, SessionRecord, StorageError, TraceEntry},
     };
-    use agentos_session::router::PipelineDispatcher;
-    use agentos_session::EventSink;
+    use agentos_session::{router::PipelineDispatcher, EventSink};
     use async_trait::async_trait;
     use serde_json::json;
-    use std::sync::{Arc, Mutex};
+
+    use super::{
+        assistant_authoritative_seq, emit_round_finished_event, find_target_user_seq,
+        message_status_from_blob, notify_outcome_waiter, register_outcome_waiter,
+        remove_outcome_waiter, resolve_dispatch_agent, resolve_pipeline_id_for_thread,
+        thread_owned_by_user, EngineDispatcher, WsSink, CLOSE_BACKPRESSURE, CLOSE_KICKED,
+        CLOSE_NONE, WS_OUTBOUND_CAPACITY,
+    };
 
     /// resolve_pipeline_id_for_thread 行为测试专用 mock：
     /// 只控制 list_pipeline_ids_by_thread（Err / 成员列表）与 get_session（活跃管道），
@@ -1782,6 +1783,13 @@ mod tests {
     struct ResolveMock {
         list_result: Mutex<Result<Vec<String>, StorageError>>,
         session: Mutex<Option<SessionRecord>>,
+        /// get_session 恒故障开关（冷路径解析失败分支测试用，默认 false）。
+        get_session_err: Mutex<bool>,
+        /// pop_pending_input 恒故障开关（pending 消费出队失败分支测试用）。
+        pop_pending_err: Mutex<bool>,
+        /// list_pending_inputs 的返回（默认空列表；可注入故障或预置行）。
+        list_pending_result:
+            Mutex<Result<Vec<agentos_core::types::PendingInputRecord>, StorageError>>,
     }
 
     impl ResolveMock {
@@ -1792,7 +1800,17 @@ mod tests {
             Self {
                 list_result: Mutex::new(list_result),
                 session: Mutex::new(session),
+                get_session_err: Mutex::new(false),
+                pop_pending_err: Mutex::new(false),
+                list_pending_result: Mutex::new(Ok(Vec::new())),
             }
+        }
+
+        /// get_session 恒故障变体（fail-closed / 回退默认分支测试用）。
+        fn new_failing_get_session(list_result: Result<Vec<String>, StorageError>) -> Self {
+            let mock = Self::new(list_result, None);
+            *mock.get_session_err.lock().unwrap() = true;
+            mock
         }
     }
 
@@ -1857,6 +1875,11 @@ mod tests {
             &self,
             _thread_id: &str,
         ) -> Result<Option<SessionRecord>, StorageError> {
+            if *self.get_session_err.lock().unwrap() {
+                return Err(StorageError::Database(
+                    "injected get_session failure".to_string(),
+                ));
+            }
             Ok(self.session.lock().unwrap().clone())
         }
         async fn list_sessions(
@@ -1885,6 +1908,25 @@ mod tests {
             _tenant_id: &str,
         ) -> Result<Vec<String>, StorageError> {
             self.list_result.lock().unwrap().clone()
+        }
+        async fn pop_pending_input(
+            &self,
+            _tenant_id: &str,
+            _pipeline_id: &str,
+        ) -> Result<Option<agentos_core::types::PendingInputRecord>, StorageError> {
+            if *self.pop_pending_err.lock().unwrap() {
+                return Err(StorageError::Database(
+                    "injected pop_pending_input failure".to_string(),
+                ));
+            }
+            Ok(None)
+        }
+        async fn list_pending_inputs(
+            &self,
+            _tenant_id: &str,
+            _pipeline_id: &str,
+        ) -> Result<Vec<agentos_core::types::PendingInputRecord>, StorageError> {
+            self.list_pending_result.lock().unwrap().clone()
         }
         async fn get_step_traces_by_thread(
             &self,
@@ -2780,5 +2822,1656 @@ mod tests {
             CLOSE_KICKED,
             "队列满时 shutdown 仍可达（watch 与帧队列解耦）"
         );
+    }
+
+    // ── 补测：WsSink 关闭通道 / outcome 等待桥命中路径 ─────────────────────
+
+    use agentos_core::traits::PluginManifest;
+    use agentos_session::router::InboundRouter;
+
+    use super::{emit_plugin_error_events, handle_inbound, SessionRoundEvents};
+
+    fn manifest_base(plugin_id: &str) -> PluginManifest {
+        PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
+            id: plugin_id.to_string(),
+            name: plugin_id.to_string(),
+            description: None,
+            version: "1.0.0".to_string(),
+            plugin_type: agentos_core::traits::PluginType::System,
+            pipeline_role: None,
+            language: "python".to_string(),
+            host_type: agentos_core::traits::HostType::Sidecar,
+            host_group: None,
+            entry: "python server.py".to_string(),
+            capabilities: Default::default(),
+            requires_services: vec![],
+            permissions: Default::default(),
+            priority: 100,
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            granted_capabilities: vec![],
+            requires_content: None,
+            invoke_entry: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            persistent_fields: vec![],
+            export_fields: vec![],
+            provides: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_sink_send_text_returns_false_after_receiver_dropped() {
+        // 接收端已 drop（排空任务结束）→ try_send Closed → false（连接判死）。
+        let (sink, rx, mut close_rx) = WsSink::new();
+        drop(rx);
+        assert!(
+            !sink.send_text("after-close").await,
+            "通道已关必须返回 false 而非静默丢帧"
+        );
+        assert_eq!(
+            *close_rx.borrow_and_update(),
+            CLOSE_NONE,
+            "Closed 分支不触发背压关闭信号（连接已死，无需自愈）"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_outcome_waiter_delivers_outcome_on_match() {
+        // 消费循环一轮结束按 cmid 命中等待者：outcome 送达、条目移除。
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<crate::server::EngineOutcome>();
+        let cmid = "http_notify_probe_1".to_string();
+        register_outcome_waiter(cmid.clone(), tx);
+        notify_outcome_waiter(
+            &cmid,
+            crate::server::EngineOutcome {
+                content: "回复内容".to_string(),
+                final_assistant: Some(json!({"role": "assistant", "content": "回复内容"})),
+                failed: false,
+                degraded: false,
+                plugin_errors: Vec::new(),
+            },
+        );
+        let outcome = rx.try_recv().unwrap();
+        assert_eq!(outcome.content, "回复内容");
+        assert!(!outcome.failed);
+        // 通知即移除：二次通知静默 no-op，不得重复送达
+        notify_outcome_waiter(
+            &cmid,
+            crate::server::EngineOutcome {
+                content: "late".to_string(),
+                final_assistant: None,
+                failed: false,
+                degraded: false,
+                plugin_errors: Vec::new(),
+            },
+        );
+        assert!(rx.try_recv().is_err(), "条目已移除，迟到通知不得送达");
+    }
+
+    // ── 补测：plugin_error 事件出口（插件失败可见性）──────────────────────
+
+    #[tokio::test]
+    async fn plugin_error_events_emit_fields_and_defaults() {
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let coord = agentos_session::SessionCoordinator::new();
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        coord.register_thread("thread-pe", "u1");
+
+        let outcome = crate::server::EngineOutcome {
+            content: String::new(),
+            final_assistant: None,
+            failed: false,
+            degraded: false,
+            plugin_errors: vec![
+                json!({"plugin_id": "p1", "code": "TIMEOUT", "message": "超时"}),
+                json!({}), // 缺失字段全部走缺省
+            ],
+        };
+        emit_plugin_error_events(&coord, "thread-pe", "pipe-pe", "a_pe", &outcome).await;
+
+        let captured = frames.lock().unwrap();
+        assert_eq!(captured.len(), 2, "每个插件错误恰好一帧");
+        let first: serde_json::Value = serde_json::from_str(&captured[0]).unwrap();
+        assert_eq!(first["type"], "plugin_error");
+        assert_eq!(first["data"]["plugin_id"], "p1");
+        assert_eq!(first["data"]["error"]["code"], "TIMEOUT");
+        assert_eq!(first["data"]["error"]["message"], "超时");
+        assert_eq!(first["data"]["error"]["source"], "plugin");
+        assert_eq!(first["data"]["error"]["retryable"], false);
+
+        let second: serde_json::Value = serde_json::from_str(&captured[1]).unwrap();
+        assert_eq!(
+            second["data"]["plugin_id"], "unknown",
+            "缺 plugin_id 用 unknown"
+        );
+        assert_eq!(
+            second["data"]["error"]["code"], "PLUGIN_EXEC_FAILED",
+            "缺 code 用缺省（插件失败重跑无意义）"
+        );
+        assert_eq!(second["data"]["error"]["message"], "插件执行失败");
+    }
+
+    // ── 补测：SessionRoundEvents 轮次事件桥接（一轮 = 一条消息）──────────
+
+    async fn frame_types(frames: &Arc<Mutex<Vec<String>>>) -> Vec<(String, serde_json::Value)> {
+        frames
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|f| {
+                serde_json::from_str::<serde_json::Value>(f)
+                    .ok()
+                    .map(|v| (v["type"].as_str().unwrap_or("").to_string(), v))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn session_round_events_full_flow_claims_user_once() {
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let events = SessionRoundEvents::new(coord.clone(), "thread-sr", "pipe-sr", "u1");
+
+        // 轮开始：stream_start + thread/route 双注册（事件单播坐标）
+        agentos_engine::RoundEvents::on_round_start(
+            &events,
+            agentos_engine::RoundStart {
+                round_index: 1,
+                message_id: "a_1".into(),
+                pipeline_id: "pipe-sr".into(),
+                thread_id: "thread-sr".into(),
+            },
+        )
+        .await;
+        let registry = coord.registry();
+        assert_eq!(
+            registry.get_user_for_thread("thread-sr").as_deref(),
+            Some("u1"),
+            "thread 坐标注册（thread→user 反查索引）"
+        );
+        assert_eq!(
+            registry.get_user_for_thread("pipe-sr").as_deref(),
+            Some("u1"),
+            "route 坐标同样注册（触发器注入路径按 pipeline_id 寻址）"
+        );
+
+        // 首个有产出轮次：new_message（含 cmid 认领回传 + user_record）+ stream_end
+        agentos_engine::RoundEvents::on_round_end(
+            &events,
+            agentos_engine::RoundEnd {
+                round_index: 1,
+                message_id: "a_1".into(),
+                pipeline_id: "pipe-sr".into(),
+                thread_id: "thread-sr".into(),
+                assistant: Some(json!({"role": "assistant", "content": "答", "seq": 5})),
+                user_message: Some(json!({
+                    "role": "user", "content": "问", "seq": 4,
+                    "metadata": {"client_message_id": "cm-9"}
+                })),
+            },
+        )
+        .await;
+        {
+            let all = frame_types(&frames).await;
+            let new_msg = all
+                .iter()
+                .find(|(t, _)| t == "new_message")
+                .map(|(_, v)| v.clone())
+                .expect("首轮应有 new_message");
+            assert_eq!(new_msg["data"]["sequence"], 5, "权威 seq 直传");
+            assert_eq!(new_msg["data"]["message"]["role"], "assistant");
+            assert_eq!(new_msg["data"]["message"]["sequence"], 5);
+            assert_eq!(
+                new_msg["data"]["message"]["status"], "completed",
+                "正常消息缺省 completed"
+            );
+            assert_eq!(
+                new_msg["data"]["client_message_id"], "cm-9",
+                "cmid 幂等键随首个有产出轮次回传"
+            );
+            assert_eq!(new_msg["data"]["user_message"]["content"], "问");
+            assert_eq!(new_msg["data"]["user_message"]["sequence"], 4);
+            assert!(
+                new_msg["data"]["user_message"]["id"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty()),
+                "user_record 指纹 id 非空（前端认领键）"
+            );
+            let end = all
+                .iter()
+                .find(|(t, _)| t == "stream_end")
+                .map(|(_, v)| v.clone())
+                .expect("应有 stream_end");
+            assert_eq!(end["data"]["final_sequence"], 5);
+        }
+
+        // 第二轮：user 认领不重复携带（幂等键二次认领多余）
+        frames.lock().unwrap().clear();
+        agentos_engine::RoundEvents::on_round_end(
+            &events,
+            agentos_engine::RoundEnd {
+                round_index: 2,
+                message_id: "a_2".into(),
+                pipeline_id: "pipe-sr".into(),
+                thread_id: "thread-sr".into(),
+                assistant: Some(json!({"role": "assistant", "content": "答2", "seq": 7})),
+                user_message: Some(json!({"role": "user", "content": "问2", "seq": 6})),
+            },
+        )
+        .await;
+        {
+            let all = frame_types(&frames).await;
+            let new_msg = all
+                .iter()
+                .find(|(t, _)| t == "new_message")
+                .map(|(_, v)| v.clone())
+                .expect("第二轮仍有 new_message");
+            assert!(
+                new_msg["data"].get("client_message_id").is_none(),
+                "认领回传仅首个有产出轮次携带: {new_msg}"
+            );
+            assert!(
+                new_msg["data"].get("user_message").is_none(),
+                "user_record 不重复携带"
+            );
+        }
+
+        // 无产出轮次：仅 stream_end（不伪造 new_message、不携带认领）
+        frames.lock().unwrap().clear();
+        agentos_engine::RoundEvents::on_round_end(
+            &events,
+            agentos_engine::RoundEnd {
+                round_index: 3,
+                message_id: "a_3".into(),
+                pipeline_id: "pipe-sr".into(),
+                thread_id: "thread-sr".into(),
+                assistant: None,
+                user_message: Some(json!({"role": "user", "content": "问3"})),
+            },
+        )
+        .await;
+        {
+            let all = frame_types(&frames).await;
+            assert!(
+                !all.iter().any(|(t, _)| t == "new_message"),
+                "无 assistant 产出轮次不得发 new_message"
+            );
+            let end = all
+                .iter()
+                .find(|(t, _)| t == "stream_end")
+                .map(|(_, v)| v.clone())
+                .expect("无产出轮次仍要收尾 stream_end");
+            assert_eq!(end["data"]["final_sequence"], serde_json::Value::Null);
+        }
+    }
+
+    #[tokio::test]
+    async fn session_round_events_seq_missing_yields_null_and_status_passthrough() {
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let events = SessionRoundEvents::new(coord.clone(), "thread-sr2", "pipe-sr2", "u1");
+        coord.register_thread("thread-sr2", "u1");
+
+        // 缺 seq（契约外形态）→ null，不伪造序号；blob 带 status → 原样透传
+        agentos_engine::RoundEvents::on_round_end(
+            &events,
+            agentos_engine::RoundEnd {
+                round_index: 1,
+                message_id: "a_1".into(),
+                pipeline_id: "pipe-sr2".into(),
+                thread_id: "thread-sr2".into(),
+                assistant: Some(json!({
+                    "role": "assistant", "content": "半截", "status": "interrupted"
+                })),
+                user_message: None,
+            },
+        )
+        .await;
+
+        let all = frame_types(&frames).await;
+        let new_msg = all
+            .iter()
+            .find(|(t, _)| t == "new_message")
+            .map(|(_, v)| v.clone())
+            .expect("应有 new_message");
+        assert!(
+            new_msg["data"]["sequence"].is_null(),
+            "缺 seq 必须挂 null（对齐冷恢复零补位契约）: {new_msg}"
+        );
+        assert_eq!(
+            new_msg["data"]["message"]["status"], "interrupted",
+            "中断半截消息 status 从 blob 读取"
+        );
+        let end = all
+            .iter()
+            .find(|(t, _)| t == "stream_end")
+            .map(|(_, v)| v.clone())
+            .expect("应有 stream_end");
+        assert!(end["data"]["final_sequence"].is_null());
+    }
+
+    // ── 补测：管道解析 / agent 解析失败分支 ───────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_pipeline_id_empty_active_pipeline_yields_empty() {
+        // active_pipeline_id 为空串时不得充当执行坐标 → 回退空串（调用方显式处置）
+        let mock = ResolveMock::new(Ok(vec![]), Some(session_record(Some(""))));
+        assert_eq!(resolve(mock, "T1", "").await, "");
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_db_error_falls_back_to_default() {
+        // get_session 读取失败：回退默认 agentos（warn 留痕，不 panic 不阻塞派发）
+        let registry = agentos_session::ConnectionRegistry::new();
+        let mock = ResolveMock::new_failing_get_session(Ok(vec![]));
+        assert_eq!(
+            resolve_agent(Some(&registry), Some(mock), "").await,
+            "agentos",
+            "DB 故障回退默认主 agent"
+        );
+    }
+
+    // ── 补测：dispatch_interaction_response（声明驱动路由 + 挂起 run 唤醒）──
+
+    fn interaction_manifest() -> PluginManifest {
+        use agentos_core::traits::{ProtocolRole, ProvidedCapability, ProvidesCapabilities};
+        let mut m = manifest_base("interaction_plugin");
+        m.provides = Some(ProvidesCapabilities {
+            capabilities: vec![ProvidedCapability {
+                namespace: "interaction-test-ns".to_string(),
+                methods: vec!["respond".to_string()],
+                host: Default::default(),
+                tool_prefix: None,
+                protocol_roles: vec![ProtocolRole {
+                    role: "interaction-respond".to_string(),
+                    method: "respond".to_string(),
+                }],
+            }],
+        });
+        m
+    }
+
+    /// 记录 (method, params) 的 capability handler，可注入失败。
+    struct RecordingHandler {
+        calls: Mutex<Vec<(String, serde_json::Value)>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl agentos_mcp::CapabilityHandler for RecordingHandler {
+        fn namespace(&self) -> &str {
+            "interaction-test-ns"
+        }
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<serde_json::Value, agentos_mcp::McpError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((method.to_string(), params.clone()));
+            if self.fail {
+                return Err(agentos_mcp::McpError::Protocol {
+                    message: "injected handler failure".to_string(),
+                });
+            }
+            Ok(json!({"ok": true}))
+        }
+    }
+
+    fn handler_recorder(
+        fail: bool,
+    ) -> (
+        Arc<RecordingHandler>,
+        agentos_mcp::CapabilityHandlerRegistry,
+    ) {
+        let handler = Arc::new(RecordingHandler {
+            calls: Mutex::new(Vec::new()),
+            fail,
+        });
+        let registry = agentos_mcp::CapabilityHandlerRegistry::new();
+        registry.register(handler.clone());
+        (handler, registry)
+    }
+
+    #[tokio::test]
+    async fn interaction_response_without_declared_role_is_ok_noop() {
+        // 无插件声明 interaction-respond 角色：fail-closed 跳过应答转发，非错误
+        let state = crate::routes::AppState::new();
+        let dispatcher = EngineDispatcher::new(state);
+        dispatcher
+            .dispatch_interaction_response("T1", "req-1", &json!({"response_type": "choice"}))
+            .await
+            .expect("无声明角色属可跳过场景，不得报错");
+    }
+
+    #[tokio::test]
+    async fn interaction_response_without_capability_registry_fails() {
+        // 声明了角色但 capability registry 未注入：应答转发失败 → Err
+        let mut state = crate::routes::AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![interaction_manifest()]));
+        let dispatcher = EngineDispatcher::new(state);
+        let err = dispatcher
+            .dispatch_interaction_response("T1", "req-1", &json!({"response_type": "choice"}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("interaction.respond 失败"),
+            "registry 缺失必须显式失败: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interaction_response_routes_to_handler_and_resumes_suspended_run() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        // 挂起 run + resume 凭据（approval/human_interaction suspend 落库形态）
+        store.create_run("run-s1", "cfg", "default").unwrap();
+        StorageBackend::update_run_status(
+            store.as_ref(),
+            "run-s1",
+            RunStatus::Suspended,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        store
+            .set_run_metadata(
+                "run-s1",
+                &json!({"pending_interaction_request_id": "req-77"}),
+            )
+            .unwrap();
+
+        let (handler, registry) = handler_recorder(false);
+        let mut state = crate::routes::AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![interaction_manifest()]));
+        state.capability_handlers = Some(Arc::new(registry));
+        state.db = Some(store.clone());
+        let dispatcher = EngineDispatcher::new(state);
+
+        dispatcher
+            .dispatch_interaction_response("T1", "req-77", &json!({"response_type": "approve"}))
+            .await
+            .expect("声明角色 + registry + 挂起 run 应成功");
+
+        // (A) 路径：应答按声明路由到 handler（载荷信封原样透传）
+        {
+            let calls = handler.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "恰好一次 capability 调用");
+            assert_eq!(calls[0].0, "respond");
+            assert_eq!(calls[0].1["request_id"], "req-77");
+            assert_eq!(calls[0].1["response"]["response_type"], "approve");
+        }
+
+        // (B) 路径：挂起 run 被 resume（runs 表状态簿记回 Running）
+        let run = StorageBackend::get_run(store.as_ref(), "run-s1")
+            .await
+            .unwrap();
+        assert_eq!(run.status, RunStatus::Running, "suspended run 必须被唤醒");
+    }
+
+    #[tokio::test]
+    async fn interaction_response_handler_failure_returns_err() {
+        // handler 内部失败 → 应答转发失败传播给调用方
+        let (_handler, registry) = handler_recorder(true);
+        let mut state = crate::routes::AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![interaction_manifest()]));
+        state.capability_handlers = Some(Arc::new(registry));
+        let dispatcher = EngineDispatcher::new(state);
+        let err = dispatcher
+            .dispatch_interaction_response("T1", "req-1", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("interaction.respond 失败"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn interaction_response_without_suspended_run_still_ok() {
+        // LLM 直调路径无挂起 run：仅 interaction.respond，不算错误
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let (handler, registry) = handler_recorder(false);
+        let mut state = crate::routes::AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![interaction_manifest()]));
+        state.capability_handlers = Some(Arc::new(registry));
+        state.db = Some(store);
+        let dispatcher = EngineDispatcher::new(state);
+
+        dispatcher
+            .dispatch_interaction_response("T1", "req-miss", &json!({}))
+            .await
+            .expect("无挂起 run 属正常场景");
+        assert_eq!(handler.calls.lock().unwrap().len(), 1, "respond 照常路由");
+    }
+
+    // ── 补测：dispatch_stop 边界（无 store / 无管道 / 队列退回 / 列表故障）──
+
+    #[tokio::test]
+    async fn dispatch_stop_without_store_is_ok() {
+        // 无 store（单测/降级模式）：无可落库的传输信号，幂等成功
+        let dispatcher = EngineDispatcher::new(crate::routes::AppState::new());
+        dispatcher
+            .dispatch_stop("T1", "")
+            .await
+            .expect("无 store 时 stop 幂等成功");
+    }
+
+    #[tokio::test]
+    async fn dispatch_stop_without_locatable_pipeline_is_idempotent() {
+        // 前端未带 pipeline_id 且会话无主管道（无 session 记录）：幂等空转
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+            as Arc<dyn StorageBackend>;
+        stop_running(store, "T-ghost").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dispatch_stop_returns_pending_queue_with_event() {
+        // 用户裁定（2026-09-11）：停止 = 停当前 run + 待处理队列退回输入框
+        // （pending_inputs_changed action=returned 发还前端回填）。
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        store
+            .create_session(&session_record(Some("ps")))
+            .await
+            .unwrap();
+        StorageBackend::link_pipeline_session(store.as_ref(), "ps", "T1", "default")
+            .await
+            .unwrap();
+        store.create_run("run-q1", "cfg", "default").unwrap();
+        StorageBackend::set_run_pipeline(store.as_ref(), "run-q1", "ps")
+            .await
+            .unwrap();
+        let mk_input = |id: &str, content: &str| agentos_core::types::PendingInputRecord {
+            id: id.to_string(),
+            pipeline_id: "ps".to_string(),
+            tenant_id: "default".to_string(),
+            user_id: "u1".to_string(),
+            content: content.to_string(),
+            thread: "T1".to_string(),
+            source: agentos_core::types::PendingInputSource::User,
+            agent_id: String::new(),
+            route_id: "ps".to_string(),
+            thinking_strength: String::new(),
+            client_message_id: String::new(),
+            execution_context: None,
+            state_overlay: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        store
+            .enqueue_pending_input("default", "ps", &mk_input("p_q1", "排队一"))
+            .unwrap();
+        store
+            .enqueue_pending_input("default", "ps", &mk_input("p_q2", "排队二"))
+            .unwrap();
+
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let coord = agentos_session::SessionCoordinator::new();
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        coord.register_thread("T1", "u1");
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone() as Arc<dyn StorageBackend>);
+        state.session = Some(Arc::new(coord));
+        let dispatcher = EngineDispatcher::new(state);
+
+        dispatcher.dispatch_stop("T1", "").await.unwrap();
+
+        // 当前 run 停止（传输信号）
+        let run = StorageBackend::get_run(store.as_ref(), "run-q1")
+            .await
+            .unwrap();
+        assert_eq!(run.status, RunStatus::Suspended);
+        // 队列退回：表清空 + 事件带全部条目发还
+        let rows = store.list_pending_inputs("default", "ps").unwrap();
+        assert!(rows.is_empty(), "排队消息必须退回而非被消费，实际 {rows:?}");
+        let all = frame_types(&frames).await;
+        let evt = all
+            .iter()
+            .find(|(t, _)| t == "pending_inputs_changed")
+            .map(|(_, v)| v.clone())
+            .expect("应发 pending_inputs_changed 退回事件");
+        assert_eq!(evt["data"]["action"], "returned");
+        let items = evt["data"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "两条排队消息全部退回: {evt}");
+        let contents: Vec<&str> = items.iter().filter_map(|i| i["content"].as_str()).collect();
+        assert!(contents.contains(&"排队一") && contents.contains(&"排队二"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_stop_tolerates_pending_list_failure() {
+        // 队列读取失败：跳过退回（warn），stop 本身仍成功
+        let mock = ResolveMock::new(Ok(vec![]), None);
+        *mock.list_pending_result.lock().unwrap() =
+            Err(StorageError::Database("injected".to_string()));
+        let store = Arc::new(mock) as Arc<dyn StorageBackend>;
+        // 前端带 pipeline_id → 停止目标直采，list_runs 走缺省空 → 无 running run；
+        // 随后 list_pending_inputs 注入故障。
+        stop_pipeline(store, "T1", "p-stop-err").await.unwrap();
+    }
+
+    // ── 补测：pending 消费出队失败收口 / 事件列表故障降级 ─────────────────
+
+    #[tokio::test]
+    async fn drain_pending_queue_notifies_waiters_on_pop_failure() {
+        // 消费出队失败：本轮残留条目逐条发 failed outcome（REST chat 同步桥不挂死），
+        // 消费任务退出（队列残留待下轮）。
+        let mock = ResolveMock::new(Ok(vec![]), None);
+        *mock.pop_pending_err.lock().unwrap() = true;
+        *mock.list_pending_result.lock().unwrap() =
+            Ok(vec![agentos_core::types::PendingInputRecord {
+                id: "p_drain_1".to_string(),
+                pipeline_id: "p-drain".to_string(),
+                tenant_id: "default".to_string(),
+                user_id: "u1".to_string(),
+                content: "排队消息".to_string(),
+                thread: "T1".to_string(),
+                source: agentos_core::types::PendingInputSource::User,
+                agent_id: String::new(),
+                route_id: "p-drain".to_string(),
+                thinking_strength: String::new(),
+                client_message_id: "cm-drain-fail-1".to_string(),
+                execution_context: None,
+                state_overlay: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            }]);
+        let store = Arc::new(mock) as Arc<dyn StorageBackend>;
+
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<crate::server::EngineOutcome>();
+        register_outcome_waiter("cm-drain-fail-1".to_string(), tx);
+
+        EngineDispatcher::drain_pending_queue(
+            crate::routes::AppState::new(),
+            agentos_core::types::TenantContext::new("default".to_string(), "T1".to_string()),
+            "T1".to_string(),
+            "p-drain".to_string(),
+            "u1".to_string(),
+            store,
+        )
+        .await;
+
+        let outcome = rx.try_recv().expect("残留条目必须通知失败 outcome 防挂死");
+        assert!(outcome.failed, "出队失败 → failed outcome: {:?}", outcome);
+        assert!(
+            outcome.content.contains("pending 消费出队失败"),
+            "失败原因可追溯: {}",
+            outcome.content
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_pending_inputs_changed_carries_empty_items_on_list_failure() {
+        // 队列列表读取失败：事件照发但 items 为空（warn 留痕，前端同步为空态）
+        let mock = ResolveMock::new(Ok(vec![]), None);
+        *mock.list_pending_result.lock().unwrap() =
+            Err(StorageError::Database("injected".to_string()));
+        let store = Arc::new(mock) as Arc<dyn StorageBackend>;
+
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let coord = agentos_session::SessionCoordinator::new();
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        coord.register_thread("T1", "u1");
+        let mut state = crate::routes::AppState::new();
+        state.session = Some(Arc::new(coord));
+
+        super::emit_pending_inputs_changed(&state, "T1", "p-x", "default", &store, "enqueued")
+            .await;
+
+        let all = frame_types(&frames).await;
+        let evt = all
+            .iter()
+            .find(|(t, _)| t == "pending_inputs_changed")
+            .map(|(_, v)| v.clone())
+            .expect("列表故障时事件仍应发出（items 空态）");
+        assert_eq!(evt["data"]["action"], "enqueued");
+        assert!(
+            evt["data"]["items"].as_array().unwrap().is_empty(),
+            "列表故障不得伪造队列条: {evt}"
+        );
+    }
+
+    // ── 补测：handle_inbound 入站帧处理（解析/归属/心跳/路由错误）─────────
+
+    struct NoopDispatcher;
+
+    #[async_trait]
+    impl PipelineDispatcher for NoopDispatcher {
+        async fn dispatch_user_input(
+            &self,
+            _thread_id: &str,
+            _user_id: &str,
+            _content: &str,
+            _pipeline_id: &str,
+            _thinking_strength: &str,
+            _execution_context: Option<&serde_json::Value>,
+            _state_overlay: Option<&serde_json::Value>,
+            _agent_id: &str,
+            _cmid: &str,
+            _source: agentos_core::types::PendingInputSource,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _thread_id: &str,
+            _request_id: &str,
+            _response: &serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _thread_id: &str, _pipeline_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct ErrUserInputDispatcher;
+
+    #[async_trait]
+    impl PipelineDispatcher for ErrUserInputDispatcher {
+        async fn dispatch_user_input(
+            &self,
+            _thread_id: &str,
+            _user_id: &str,
+            _content: &str,
+            _pipeline_id: &str,
+            _thinking_strength: &str,
+            _execution_context: Option<&serde_json::Value>,
+            _state_overlay: Option<&serde_json::Value>,
+            _agent_id: &str,
+            _cmid: &str,
+            _source: agentos_core::types::PendingInputSource,
+        ) -> Result<(), String> {
+            Err("injected dispatch failure".to_string())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _thread_id: &str,
+            _request_id: &str,
+            _response: &serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _thread_id: &str, _pipeline_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    async fn inbound_frames_after(
+        text: &str,
+        store: Option<&Arc<dyn StorageBackend>>,
+        last_sequence: Option<u64>,
+    ) -> Vec<(String, serde_json::Value)> {
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let router = InboundRouter::new(Arc::new(NoopDispatcher));
+        handle_inbound(
+            text,
+            "u1",
+            &coord,
+            &router,
+            last_sequence,
+            &std::sync::atomic::AtomicBool::new(false),
+            store,
+        )
+        .await;
+        frame_types(&frames).await
+    }
+
+    #[tokio::test]
+    async fn inbound_heartbeat_replies_ack_without_thread_registration() {
+        // 心跳必须回 ack（前端连续收不到 ack 判死断连）；无有效 thread_id 不注册
+        let frames = inbound_frames_after(
+            json!({"type": "heartbeat"}).to_string().as_str(),
+            None,
+            None,
+        )
+        .await;
+        let ack = frames
+            .iter()
+            .find(|(t, _)| t == "heartbeat_ack")
+            .map(|(_, v)| v.clone())
+            .expect("心跳必须回 heartbeat_ack");
+        assert!(
+            ack["data"]["timestamp"].as_str().is_some(),
+            "ack 携带时间戳: {ack}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_empty_thread_id_skips_registration_but_still_ack() {
+        // thread_id 空串不构成注册坐标（注册表不收空键），心跳语义照常
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let router = InboundRouter::new(Arc::new(NoopDispatcher));
+        handle_inbound(
+            json!({"type": "heartbeat", "thread_id": ""})
+                .to_string()
+                .as_str(),
+            "u1",
+            &coord,
+            &router,
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+            None,
+        )
+        .await;
+        assert!(
+            coord.registry().get_user_for_thread("").is_none(),
+            "空 thread_id 不得进注册表"
+        );
+        let all = frame_types(&frames).await;
+        assert!(all.iter().any(|(t, _)| t == "heartbeat_ack"));
+    }
+
+    #[tokio::test]
+    async fn inbound_malformed_json_is_dropped_silently() {
+        // 畸形帧丢弃（限频 warn 可观测）：不 panic、无出站帧、无注册
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let router = InboundRouter::new(Arc::new(NoopDispatcher));
+        handle_inbound(
+            "not-json{{{",
+            "u1",
+            &coord,
+            &router,
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+            None,
+        )
+        .await;
+        assert!(frames.lock().unwrap().is_empty(), "畸形帧不得产生出站帧");
+        assert!(coord.registry().get_user_for_thread("T1").is_none());
+    }
+
+    #[tokio::test]
+    async fn inbound_registers_owned_thread_and_replays_once_per_connection() {
+        // 归属校验放行 → 注册 thread→user；B3 回放每连接仅一次（首个带 thread_id
+        // 的入站消息触发，此后不再重放）。
+        let owned = Arc::new(ResolveMock::new(Ok(vec!["P-1".to_string()]), None))
+            as Arc<dyn StorageBackend>;
+
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let router = InboundRouter::new(Arc::new(NoopDispatcher));
+        let replayed = std::sync::atomic::AtomicBool::new(false);
+        let frame = json!({"type": "user_input", "thread_id": "T-owned", "content": "hi"});
+
+        // 首帧：注册 + （last_sequence>0 时）回放缺失误差
+        handle_inbound(
+            frame.to_string().as_str(),
+            "u1",
+            &coord,
+            &router,
+            Some(7),
+            &replayed,
+            Some(&owned),
+        )
+        .await;
+        assert_eq!(
+            coord.registry().get_user_for_thread("T-owned").as_deref(),
+            Some("u1"),
+            "本租户 thread 注册放行"
+        );
+
+        // 二帧：注册幂等，回放不二次触发（无重复帧、无 panic）
+        handle_inbound(
+            frame.to_string().as_str(),
+            "u1",
+            &coord,
+            &router,
+            Some(7),
+            &replayed,
+            Some(&owned),
+        )
+        .await;
+        assert_eq!(
+            coord.registry().get_user_for_thread("T-owned").as_deref(),
+            Some("u1")
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_rejects_unowned_thread_registration() {
+        // 无管道关联的 thread：不注册（事件单播/回放路由不被外来 thread 劫持）
+        let foreign = Arc::new(ResolveMock::new(Ok(vec![]), None)) as Arc<dyn StorageBackend>;
+        let coord = agentos_session::SessionCoordinator::new();
+        let router = InboundRouter::new(Arc::new(NoopDispatcher));
+        handle_inbound(
+            json!({"type": "user_input", "thread_id": "T-foreign", "content": "hi"})
+                .to_string()
+                .as_str(),
+            "u1",
+            &coord,
+            &router,
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+            Some(&foreign),
+        )
+        .await;
+        assert!(
+            coord.registry().get_user_for_thread("T-foreign").is_none(),
+            "无关联 thread 必须拒绝注册"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_route_error_is_logged_not_fatal() {
+        // 路由错误（分发失败）：warn 留痕，连接不中断、无出站帧
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let router = InboundRouter::new(Arc::new(ErrUserInputDispatcher));
+        handle_inbound(
+            json!({"type": "user_input", "thread_id": "T1", "content": "hi"})
+                .to_string()
+                .as_str(),
+            "u1",
+            &coord,
+            &router,
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+            None,
+        )
+        .await;
+        assert!(frames.lock().unwrap().is_empty(), "路由错误不产出帧");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 覆盖率补测（2026-09-13 冲刺第二批）：握手鉴权矩阵 + WS 会话生命周期
+    // e2e（真实 axum 服务 + tungstenite 客户端）+ 派发链直跑/忙队路径。
+    // mock 仅用于内核边界（dispatcher/存储）；会话收发循环走真实代码路径。
+    // ═══════════════════════════════════════════════════════════════════
+
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    /// 签发合法 access token（HMAC 签名链路与生产同源）。
+    fn mint_access_token(user_id: &str, username: &str) -> String {
+        let user = agentos_http::auth::BuiltInUser {
+            id: user_id.to_string(),
+            username: username.to_string(),
+            password: String::new(),
+            email: String::new(),
+            role: "user".to_string(),
+            tenant_id: agentos_http::auth::DEFAULT_TENANT_ID.to_string(),
+            created_at: "2026-09-13T00:00:00Z".to_string(),
+            must_change_password: false,
+        };
+        agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &user, 3600)
+    }
+
+    #[test]
+    fn authenticate_accepts_valid_access_token() {
+        match super::authenticate(Some(&mint_access_token("u-auth-1", "alice"))) {
+            agentos_session::auth::HandshakeAuth::Ok { user_id, username } => {
+                assert_eq!(user_id, "u-auth-1");
+                assert_eq!(username, "alice");
+            }
+            agentos_session::auth::HandshakeAuth::Rejected { code, reason } => {
+                panic!("有效 access token 应放行，实际拒绝 code={code} reason={reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn authenticate_rejects_missing_garbage_and_refresh_token() {
+        // 缺 token 与垃圾 token：4001 拒绝（区分码见 session::auth 常量）
+        match super::authenticate(None) {
+            agentos_session::auth::HandshakeAuth::Rejected { code, .. } => {
+                assert_eq!(code, agentos_session::auth::REJECT_CODE_NO_TOKEN)
+            }
+            agentos_session::auth::HandshakeAuth::Ok { .. } => panic!("缺失 token 必须拒绝"),
+        }
+        match super::authenticate(Some("garbage-token")) {
+            agentos_session::auth::HandshakeAuth::Rejected { code, .. } => {
+                assert_eq!(code, agentos_session::auth::REJECT_CODE_INVALID_TOKEN)
+            }
+            agentos_session::auth::HandshakeAuth::Ok { .. } => panic!("垃圾 token 必须拒绝"),
+        }
+        // refresh token 不得用于 WS 握手（复用通道降权）
+        let user = agentos_http::auth::BuiltInUser {
+            id: "u-auth-2".to_string(),
+            username: "bob".to_string(),
+            password: String::new(),
+            email: String::new(),
+            role: "user".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: "2026-09-13T00:00:00Z".to_string(),
+            must_change_password: false,
+        };
+        let refresh =
+            agentos_http::auth::encode_token(agentos_http::auth::TokenType::Refresh, &user, 3600);
+        assert!(matches!(
+            super::authenticate(Some(&refresh)),
+            agentos_session::auth::HandshakeAuth::Rejected { .. }
+        ));
+    }
+
+    // ── e2e：真实 axum 服务 + tungstenite 客户端（run_ws_session 全链路）──
+
+    /// 静默分发器：全部 Ok（聚焦会话收发循环而非派发语义）。
+    struct SilentDispatcher;
+    #[async_trait]
+    impl PipelineDispatcher for SilentDispatcher {
+        async fn dispatch_user_input(
+            &self,
+            _thread_id: &str,
+            _user_id: &str,
+            _content: &str,
+            _pipeline_id: &str,
+            _thinking_strength: &str,
+            _execution_context: Option<&serde_json::Value>,
+            _state_overlay: Option<&serde_json::Value>,
+            _agent_id: &str,
+            _cmid: &str,
+            _source: agentos_core::types::PendingInputSource,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _thread_id: &str,
+            _request_id: &str,
+            _response: &serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _thread_id: &str, _pipeline_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn ws_e2e_state(session: Arc<agentos_session::SessionCoordinator>) -> crate::routes::AppState {
+        let mut state = crate::routes::AppState::new();
+        state.session = Some(session);
+        state.inbound_router = Some(Arc::new(InboundRouter::new(Arc::new(SilentDispatcher))));
+        state
+    }
+
+    async fn spawn_ws_server(state: crate::routes::AppState) -> std::net::SocketAddr {
+        let app = crate::server::build_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    type ClientWs = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn ws_connect(url: String) -> ClientWs {
+        let (ws, _resp) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("WS 握手应成功");
+        ws
+    }
+
+    /// 读下一文本帧（JSON）；Close/错误即 panic（label 标注等待目标）。
+    async fn next_text_frame(ws: &mut ClientWs, label: &str) -> serde_json::Value {
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .unwrap_or_else(|_| panic!("5s 内未收到 {label} 帧"))
+                .expect("流未关闭")
+                .expect("帧非错误");
+            match frame {
+                WsMessage::Text(t) => {
+                    return serde_json::from_str(t.as_str()).expect("文本帧应为 JSON")
+                }
+                WsMessage::Close(cf) => panic!("{label}: 意外收到 Close {cf:?}"),
+                _ => continue,
+            }
+        }
+    }
+
+    /// 读下一 Close 帧的状态码（跳过前置文本帧）。
+    async fn next_close_code(ws: &mut ClientWs, label: &str) -> u16 {
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .unwrap_or_else(|_| panic!("5s 内未收到 {label} Close 帧"))
+                .expect("流未关闭")
+                .expect("帧非错误");
+            if let WsMessage::Close(cf) = frame {
+                return cf.map(|c| u16::from(c.code)).unwrap_or(1005);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_confirmation_heartbeat_survives_malformed_and_unregisters_on_close() {
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        let addr = spawn_ws_server(ws_e2e_state(coord.clone())).await;
+        let token = mint_access_token("u-e2e-1", "E2E");
+        let mut ws = ws_connect(format!("ws://{addr}/ws/chat?token={token}")).await;
+
+        // 连接确认信封（首帧）
+        let conf = next_text_frame(&mut ws, "connection_confirmation").await;
+        assert_eq!(conf["type"], "connection_confirmation");
+        assert_eq!(conf["data"]["status"], "connected");
+        assert_eq!(conf["data"]["mode"], "global");
+        assert_eq!(conf["data"]["user_id"], "u-e2e-1");
+
+        // 心跳 → ack
+        ws.send(WsMessage::text(json!({"type": "heartbeat"}).to_string()))
+            .await
+            .unwrap();
+        let ack = next_text_frame(&mut ws, "heartbeat_ack").await;
+        assert_eq!(ack["type"], "heartbeat_ack");
+        assert!(ack["data"]["timestamp"].as_str().is_some());
+
+        // 畸形帧：静默丢弃，连接存活（后续心跳仍有 ack）
+        ws.send(WsMessage::text("{{not json".to_string()))
+            .await
+            .unwrap();
+        ws.send(WsMessage::text(json!({"type": "heartbeat"}).to_string()))
+            .await
+            .unwrap();
+        let ack2 = next_text_frame(&mut ws, "post-malformed heartbeat_ack").await;
+        assert_eq!(ack2["type"], "heartbeat_ack");
+
+        // 客户端关闭 → 服务端收尾注销（registry 无残留）
+        let _ = ws.send(WsMessage::Close(None)).await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if coord.registry().get_by_user("u-e2e-1").is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            coord.registry().get_by_user("u-e2e-1").is_none(),
+            "连接关闭后必须从注册表注销"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_second_connection_kicks_first_with_two_stage_close() {
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        let addr = spawn_ws_server(ws_e2e_state(coord.clone())).await;
+        let token = mint_access_token("u-kick-1", "Kicked");
+        let mut first = ws_connect(format!("ws://{addr}/ws/chat?token={token}")).await;
+        let conf = next_text_frame(&mut first, "first confirmation").await;
+        assert_eq!(conf["type"], "connection_confirmation");
+
+        // 同用户第二连接：踢旧（B10 单连接）
+        let mut second = ws_connect(format!("ws://{addr}/ws/chat?token={token}")).await;
+        let conf2 = next_text_frame(&mut second, "second confirmation").await;
+        assert_eq!(conf2["type"], "connection_confirmation");
+
+        // 旧连接两段式收尾：先应用层 kicked 文本帧，再 Close(4000)
+        let kicked = next_text_frame(&mut first, "kicked text").await;
+        assert_eq!(kicked["type"], "kicked");
+        assert_eq!(kicked["data"]["reason"], "replaced_by_new_connection");
+        let code = next_close_code(&mut first, "kicked close").await;
+        assert_eq!(
+            code,
+            agentos_session::auth::CLOSE_CODE_KICKED,
+            "踢旧 Close 必须带 4000（前端据此跳过重连）"
+        );
+        let _ = second.send(WsMessage::Close(None)).await;
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_path_establishes_session_and_replayed_ticket_rejected() {
+        let state = ws_e2e_state(Arc::new(agentos_session::SessionCoordinator::new()));
+        let ticket = state.ws_tickets.issue("u-ticket-1", "Ticker");
+        let addr = spawn_ws_server(state).await;
+
+        // 有效票据：会话建立（票据消费返回用户身份）
+        let mut ws = ws_connect(format!("ws://{addr}/ws/chat?ticket={ticket}")).await;
+        let conf = next_text_frame(&mut ws, "ticket confirmation").await;
+        assert_eq!(conf["type"], "connection_confirmation");
+        assert_eq!(conf["data"]["user_id"], "u-ticket-1");
+        let _ = ws.send(WsMessage::Close(None)).await;
+
+        // 同票据重放：一次性语义 → 4001 拒绝
+        let mut replay = ws_connect(format!("ws://{addr}/ws/chat?ticket={ticket}")).await;
+        let code = next_close_code(&mut replay, "replayed ticket").await;
+        assert_eq!(code, 4001, "已消费票据重放必须拒绝");
+    }
+
+    #[tokio::test]
+    async fn ws_reconnect_watermark_replays_buffered_events() {
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        // 断线期间：事件照常落重放缓冲（无连接可投递）
+        coord.register_thread("thread-rp", "u-rp-1");
+        coord
+            .emit_event("thread-rp", "new_message", json!({"marker": "rp-1"}))
+            .await;
+        coord
+            .emit_event("thread-rp", "new_message", json!({"marker": "rp-2"}))
+            .await;
+        let addr = spawn_ws_server(ws_e2e_state(coord.clone())).await;
+
+        // 带 watermark 重连：confirmation 先行，随后重放 (last_sequence, floor]
+        let token = mint_access_token("u-rp-1", "Replayer");
+        let mut ws = ws_connect(format!("ws://{addr}/ws/chat?token={token}&last_sequence=1")).await;
+        let conf = next_text_frame(&mut ws, "reconnect confirmation").await;
+        assert_eq!(conf["type"], "connection_confirmation");
+        let replayed = next_text_frame(&mut ws, "replayed event").await;
+        assert_eq!(replayed["type"], "new_message");
+        assert_eq!(
+            replayed["data"]["marker"], "rp-2",
+            "watermark 之后的缓冲事件必须经建连重放送达"
+        );
+        let _ = ws.send(WsMessage::Close(None)).await;
+    }
+
+    // ── dispatch_user_input：无 store 直跑链 / 忙链持久化入队 ──────────────
+
+    #[tokio::test]
+    async fn dispatch_user_input_rejects_when_pipeline_missing_without_store() {
+        // 无 store：无解析依据，前端空 pipeline_id 即协议违约，显式报错
+        let dispatcher = EngineDispatcher::new(crate::routes::AppState::new());
+        let err = dispatcher
+            .dispatch_user_input(
+                "T1",
+                "u1",
+                "hello",
+                "", // pipeline_id 空
+                "",
+                None,
+                None,
+                "",
+                "cm-noop",
+                agentos_core::types::PendingInputSource::User,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("会话无可派发管道"), "实际: {err}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_user_input_direct_chain_notifies_waiter_with_failure_envelope() {
+        // 无 store：消息不经队列直跑（旧行为）。引擎前置依赖缺席 → echo 降级 →
+        // 无 assistant 产出 → NO_ASSISTANT_REPLY stream_error 收尾 + failed outcome
+        // 通知 REST 同步等待者。
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u-dc",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        coord.register_thread("T-dc", "u-dc");
+        let mut state = crate::routes::AppState::new();
+        state.session = Some(coord);
+        let dispatcher = EngineDispatcher::new(state);
+
+        let cmid = format!("cm-dc-{}", uuid::Uuid::new_v4().simple());
+        let (tx, rx) = tokio::sync::oneshot::channel::<crate::server::EngineOutcome>();
+        register_outcome_waiter(cmid.clone(), tx);
+        dispatcher
+            .dispatch_user_input(
+                "T-dc",
+                "u-dc",
+                "hello",
+                "pipe-dc",
+                "",
+                None,
+                None,
+                "",
+                &cmid,
+                agentos_core::types::PendingInputSource::User,
+            )
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .expect("直跑链必须通知等待者")
+            .expect("sender 不应在通知前被 drop");
+        assert!(outcome.failed, "无 assistant 产出的直跑轮次必须 failed");
+        assert!(outcome.final_assistant.is_none());
+
+        // 事件面（notify 前已发射完毕）：stream_error + run 级收尾
+        let all = frame_types(&frames).await;
+        let stream_error = all
+            .iter()
+            .find(|(t, _)| t == "stream_error")
+            .map(|(_, v)| v.clone())
+            .expect("失败轮次必须发 stream_error");
+        assert_eq!(stream_error["data"]["error"]["code"], "NO_ASSISTANT_REPLY");
+        assert_eq!(stream_error["data"]["error"]["source"], "kernel");
+        let finished = all
+            .iter()
+            .find(|(t, _)| t == "pipeline_round_finished")
+            .map(|(_, v)| v.clone())
+            .expect("直跑收尾必须发 pipeline_round_finished");
+        assert_eq!(finished["data"]["failed"], true);
+    }
+
+    #[tokio::test]
+    async fn dispatch_user_input_busy_chain_persists_queue_then_drains() {
+        // 链忙（占链任务阻塞）：消息落持久化队列（不入直跑）→ 放行后消费任务
+        // FIFO 排空队列并通知等待者——条件入队语义（ADR-2026-09-11）。
+        let pipe = format!(
+            "pipe-bq-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite.clone();
+        sqlite
+            .create_session(&session_record(Some(&pipe)))
+            .await
+            .unwrap();
+
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u-bq",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        coord.register_thread("T1", "u-bq");
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone());
+        state.session = Some(coord);
+        let dispatcher = EngineDispatcher::new(state);
+
+        // 占链：barrier 任务挂住管道链
+        let chain = crate::run_chain::RunChainRegistry::global();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        chain.enqueue(&pipe, "u-bq", async move {
+            let _ = release_rx.await;
+        });
+
+        let cmid = format!("cm-bq-{}", uuid::Uuid::new_v4().simple());
+        let (tx, rx) = tokio::sync::oneshot::channel::<crate::server::EngineOutcome>();
+        register_outcome_waiter(cmid.clone(), tx);
+        dispatcher
+            .dispatch_user_input(
+                "T1",
+                "u-bq",
+                "排队消息",
+                "", // 空 → 解析为主管道 pipe（与占链 key 一致）
+                "",
+                None,
+                None,
+                "",
+                &cmid,
+                agentos_core::types::PendingInputSource::User,
+            )
+            .await
+            .unwrap();
+
+        // 忙链 → 持久化入队（轮询等待写入可见）
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let rows = store.list_pending_inputs("default", &pipe).await.unwrap();
+            if rows.len() == 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "忙链派发必须落持久化队列"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // 入队事件先行（前端队列条同步）
+        let enqueued = frame_types(&frames).await;
+        assert!(
+            enqueued
+                .iter()
+                .any(|(t, v)| t == "pending_inputs_changed" && v["data"]["action"] == "enqueued"),
+            "入队必须发 pending_inputs_changed(enqueued): {:?}",
+            enqueued.iter().map(|(t, _)| t).collect::<Vec<_>>()
+        );
+
+        // 放行占链任务 → 链尾 drain 消费队列 → 等待者收到 outcome
+        drop(release_tx);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .expect("排空后必须通知等待者")
+            .expect("sender 不应在通知前被 drop");
+        assert!(outcome.failed, "降级执行轮次必须 failed");
+
+        // 队列清空 + consumed 事件 + run 级收尾
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let rows = store.list_pending_inputs("default", &pipe).await.unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "队列必须被排空");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let all = frame_types(&frames).await;
+        assert!(
+            all.iter()
+                .any(|(t, v)| t == "pending_inputs_changed" && v["data"]["action"] == "consumed"),
+            "消费必须发 pending_inputs_changed(consumed)"
+        );
+        assert!(
+            all.iter().any(|(t, _)| t == "pipeline_round_finished"),
+            "消费轮次必须收尾"
+        );
+    }
+
+    // ── emit_stream_error_event：统一错误信封 ──────────────────────────────
+
+    #[tokio::test]
+    async fn stream_error_event_carries_unified_error_envelope() {
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u-se",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        coord.register_thread("T-se", "u-se");
+        super::emit_stream_error_event(
+            &coord,
+            "T-se",
+            "pipe-se",
+            "a_msg1",
+            "ENGINE_RUN_FAILED",
+            "引擎冒烟",
+        )
+        .await;
+        let all = frame_types(&frames).await;
+        let frame = all
+            .iter()
+            .find(|(t, _)| t == "stream_error")
+            .map(|(_, v)| v.clone())
+            .expect("stream_error 帧必须发出");
+        assert_eq!(frame["data"]["pipeline_id"], "pipe-se");
+        assert_eq!(frame["data"]["message_id"], "a_msg1");
+        assert_eq!(frame["data"]["_threadId"], "T-se");
+        assert_eq!(frame["data"]["error"]["code"], "ENGINE_RUN_FAILED");
+        assert_eq!(frame["data"]["error"]["message"], "引擎冒烟");
+        assert_eq!(frame["data"]["error"]["source"], "kernel");
+        assert_eq!(frame["data"]["error"]["retryable"], true);
+    }
+
+    // ── emit_pending_inputs_changed：成功路径携带 items ────────────────────
+
+    #[tokio::test]
+    async fn pending_inputs_changed_carries_seeded_items() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite.clone();
+        let pipe = format!(
+            "pipe-pin-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        store
+            .enqueue_pending_input(
+                "default",
+                &pipe,
+                &agentos_core::types::PendingInputRecord {
+                    id: "p_pin1".to_string(),
+                    pipeline_id: pipe.clone(),
+                    tenant_id: "default".to_string(),
+                    user_id: "u-pin".to_string(),
+                    content: "排队中".to_string(),
+                    thread: "T-pin".to_string(),
+                    source: agentos_core::types::PendingInputSource::User,
+                    agent_id: String::new(),
+                    route_id: pipe.clone(),
+                    thinking_strength: String::new(),
+                    client_message_id: String::new(),
+                    execution_context: None,
+                    state_overlay: None,
+                    created_at: "2026-09-13T00:00:00Z".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u-pin",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        coord.register_thread("T-pin", "u-pin");
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone());
+        state.session = Some(Arc::new(coord));
+        super::emit_pending_inputs_changed(&state, "T-pin", &pipe, "default", &store, "enqueued")
+            .await;
+
+        let all = frame_types(&frames).await;
+        let frame = all
+            .iter()
+            .find(|(t, _)| t == "pending_inputs_changed")
+            .map(|(_, v)| v.clone())
+            .expect("事件必须发出");
+        assert_eq!(frame["data"]["action"], "enqueued");
+        assert_eq!(frame["data"]["pipeline_id"], pipe);
+        assert_eq!(frame["data"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(frame["data"]["items"][0]["content"], "排队中");
+    }
+
+    // ── 补充分支：plugin_error 零错误空转 / WsSink 关闭与断连通道 ──────
+
+    /// 捕获型 sink（事件帧断言用，同本模块 CapturingSink）。
+    struct EventCapture {
+        frames: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl agentos_session::EventSink for EventCapture {
+        async fn send_text(&self, text: &str) -> bool {
+            self.frames.lock().unwrap().push(text.to_string());
+            true
+        }
+        fn id(&self) -> u64 {
+            99
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_error_zero_errors_emits_nothing() {
+        // 零错误：不发任何帧（plugin_error 是非终止信号，正常收尾路径零噪声）
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(EventCapture {
+                frames: frames.clone(),
+            }),
+        );
+        coord.register_thread("thread-ev-zero", "u1");
+        let outcome = crate::server::EngineOutcome {
+            content: String::new(),
+            final_assistant: None,
+            failed: false,
+            degraded: false,
+            plugin_errors: Vec::new(),
+        };
+        super::emit_plugin_error_events(&coord, "thread-ev-zero", "pipe-ev", "m", &outcome).await;
+        assert!(frames.lock().unwrap().is_empty(), "零错误零帧");
+    }
+
+    #[tokio::test]
+    async fn ws_sink_shutdown_signals_kicked_before_queue_pressure() {
+        // 队列未满时 shutdown → watch 置 kicked（B10 踢旧信号不依赖队列容量）
+        let (sink, _rx, mut close_rx) = WsSink::new();
+        assert!(sink.send_text("normal").await);
+        sink.shutdown();
+        assert_eq!(
+            *close_rx.borrow_and_update(),
+            CLOSE_KICKED,
+            "shutdown 必须置 kicked 关闭信号"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_sink_send_after_receiver_dropped_returns_false() {
+        // 接收端已弃（排空任务退出）→ Closed → false（registry 据此注销连接）
+        let (sink, rx, _close_rx) = WsSink::new();
+        drop(rx);
+        assert!(!sink.send_text("orphan").await, "Closed 通道应投递失败");
     }
 }

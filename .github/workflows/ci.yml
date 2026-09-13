@@ -8,7 +8,7 @@
 #     不存在第二套口径。
 #   - 覆盖率豁免重型套件：插件测试拆两个并行 job——python-coverage（插桩，
 #     覆盖率基线锁自动守护豁免名单）+ python-heavy-suites（免插桩跑
-#     94 插件子进程冒烟矩阵，正确性信号不缩水）。名单单点：
+#     84 插件子进程冒烟矩阵，正确性信号不缩水）。名单单点：
 #     scripts/coverage_exempt.py。
 #
 # 车道分档（2026-09-04）：changes job 按变更面计算车道，重车道按档执行，
@@ -375,7 +375,7 @@ jobs:
   #   3. MCP 服务与 skills 清单校验、tests/channels/、tests/ 顶层回归/安全/时序外的
   #      有价值测试（P0 回归、isolation、security_check、track 契约、process_watchdog）
   # 豁免（scripts/coverage_exempt.py 单一名单点）：
-  #   tests/plugins/test_plugin_smoke_matrix.py——94 插件子进程冒烟矩阵，
+  #   tests/plugins/test_plugin_smoke_matrix.py——84 插件子进程冒烟矩阵，
   #   子进程加载的插件代码父进程 coverage 测不到，插桩纯缴税；
   #   由 python-heavy-suites job 免插桩并排执行，正确性信号不缩水。
   # 阈值守护：fail-under=50 会自动验证豁免名单正确性——若豁免套件实际
@@ -434,8 +434,8 @@ jobs:
         run: python scripts/run_gates.py --filter plugins-coverage-pairing,channel-copy-guard,plugins-coverage,channel-per-file-coverage,plugins-diff-coverage,plugins-mypy-baseline
 
   # ── Python Heavy Suites（免插桩 gate：重型套件并排执行）────────────────
-  # 与 python-coverage 并行（无 needs 依赖）：94 插件（85 sidecar + 8
-  # external_mcp + 1 native）逐个以子进程 sidecar 方式加载、注册校验、
+  # 与 python-coverage 并行（无 needs 依赖）：84 插件（78 sidecar + 3
+  # external_mcp + 3 native）逐个以子进程 sidecar 方式加载、注册校验、
   # 生命周期触发、精选工具真实执行（tests/plugins/plugin_probe.py）。
   # 不加 --cov：子进程执行的插件代码父进程 coverage 本就测不到，
   # 免插桩后整条车道收敛于本 job 与插桩 job 的较慢者，而非两者串行之和。

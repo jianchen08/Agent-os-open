@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -90,3 +91,52 @@ class TestTrack2ParamMatching:
         p = _make_plugin()
         p._dangerous_ops_by_tool = {}
         assert _is_dangerous(p, "file_read", {"path": "/etc/passwd"}) is False
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2026-09-13 覆盖率补测：内置检查非字符串参数容错 / tool_registry 数据源
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestBuiltinCheckNonStringParams:
+    """内置安全检查对非字符串参数值跳过判定（不崩溃、不误报）。"""
+
+    def test_非字符串路径值跳过敏感检查(self) -> None:
+        p = _make_plugin()
+        assert p._check_sensitive_paths({"path": 123}) == ""
+        assert p._check_sensitive_paths({"path": ["a", "b"]}) == ""
+
+    def test_非字符串命令值跳过nul重定向检查(self) -> None:
+        p = _make_plugin()
+        assert p._check_nul_redirect({"command": 123}) == ""
+        assert p._check_nul_redirect({"cmd": None}) == ""
+
+    def test_字符串命令命中nul重定向(self) -> None:
+        p = _make_plugin()
+        assert p._check_nul_redirect({"cmd": "dir >nul"}) != ""
+        assert p._check_nul_redirect({"cmd": "dir > /dev/null"}) == ""
+
+
+class TestRegistryDangerousOpsSource:
+    """轨道 2 数据源回退链：config 注入缺位时经 tool_registry 服务取声明。"""
+
+    def test_注册表查无此工具_不判危险(self) -> None:
+        """注册表无该工具 → 无声明 → 不判危险（不因查无而保守放审批）。"""
+        p = _make_plugin()
+        p._dangerous_ops_by_tool = {}
+        ctx = PluginContext(
+            state={},
+            config={},
+            _services={"tool_registry": SimpleNamespace(get=lambda name: None)},
+        )
+        assert p._is_dangerous_tool(ctx, "mystery_tool", {"command": "rm -rf /x"}) is False
+
+    def test_注册表声明危险操作_判危险(self) -> None:
+        """注册表返回带 dangerous_operations 的工具定义 → 参数命中即危险。"""
+        p = _make_plugin()
+        p._dangerous_ops_by_tool = {}
+        reg = SimpleNamespace(
+            get=lambda name: SimpleNamespace(dangerous_operations=["rm -rf"])
+        )
+        ctx = PluginContext(state={}, config={}, _services={"tool_registry": reg})
+        assert p._is_dangerous_tool(ctx, "mystery_tool", {"command": "rm -rf /x"}) is True

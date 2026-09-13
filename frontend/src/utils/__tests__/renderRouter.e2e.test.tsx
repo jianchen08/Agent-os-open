@@ -13,7 +13,7 @@
 import { render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ActivityCard from '@/components/chat/ActivityCard'
-import { loadRenderIntents } from '@/utils/dshRenderIntent'
+import { loadRenderIntents } from '@/utils/renderIntent'
 import { enhanceActivityWithToolConfig } from '@/utils/toolCardRegistry'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
@@ -116,7 +116,7 @@ describe('声明路由 e2e：task_submit → form 卡（任务表单渲染提交
 })
 
 describe('数据路由 e2e：无声明工具按数据形状渲染（diff 数据 → diff 组件）', () => {
-  it('未声明工具的结果含 old/new 文本对 → 渲染 dsh:diff 块', () => {
+  it('未声明工具的结果含 old/new 文本对 → 渲染 diff 块', () => {
     // 不装载任何声明（cleanRenderIntents 已在 afterEach）
     const activity: ActivityData = {
       type: 'tool_call',
@@ -129,6 +129,6 @@ describe('数据路由 e2e：无声明工具按数据形状渲染（diff 数据 
     }
     const toolCall = makeToolCall('merge', {}, { old_content: 'a', new_content: 'b' })
     const enhanced = enhanceActivityWithToolConfig(activity, toolCall)
-    expect(enhanced.details?.[0]?.contentType).toBe('dsh:diff')
+    expect(enhanced.details?.[0]?.contentType).toBe('diff')
   })
 })

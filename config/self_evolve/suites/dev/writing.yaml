@@ -1,0 +1,44 @@
+name: writing-v1
+mode: writing
+settle_timeout_seconds: 900
+cases:
+- id: write_structured_doc
+  source: harnessdev-writing
+  category: writing
+  target: general_agent
+  messages:
+  - 写一篇约 300 字的短文《论测试左移》，必须包含三个小节标题：『为什么』『怎么做』『边界』，写入当前工作空间 shift_left.md。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: shift_left.md
+        check: contains
+        pattern: 怎么做
+- id: write_constrained_rewrite
+  source: harnessdev-writing
+  category: writing
+  target: general_agent
+  messages:
+  - 读取仓库根 docs/working/Harness层自进化方案_20260913.md 的第 1 至 30 行，把其中关于三篇论文的核心发现改写成不超过
+    150 字的中文摘要，写入当前工作空间 papers_summary.md。摘要中必须出现『递归自我改进』或 'RSI' 字样。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: papers_summary.md
+        check: contains
+        pattern: RSI
+  anchor: repo
+- id: write_readme_from_code
+  source: harnessdev-writing
+  category: writing
+  target: general_agent
+  messages:
+  - 读取 plugins/shared/system/eval_harness/plugin.json，为它写一份面向使用者的中文说明 eval_harness_readme.md
+    到当前工作空间：列出该插件提供的全部工具名（一行为一个），并各配一句话用途说明。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: eval_harness_readme.md
+        check: contains
+        pattern: eval_view_suite
+  anchor: repo

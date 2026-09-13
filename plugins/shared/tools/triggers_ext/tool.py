@@ -578,10 +578,16 @@ class TriggerSetupTool(BuiltinTool):
             )
 
         if pipeline_id and trigger.pipeline_id != pipeline_id:
-            return create_failure_result(
-                error="只能取消当前管道的触发器",
-                error_code="TRIGGER_PIPELINE_MISMATCH",
-            )
+            # 同会话放行：主管道映射随 run 漂移（每轮 run 可能登记新管道），
+            # 用户在同一会话里建的触发器不该因漂移而无法取消——thread 坐标
+            # （创建时存 metadata.session_id）一致即视为同属。
+            trigger_session = str((trigger.metadata or {}).get("session_id") or "")
+            input_session = str(inputs.get("session_id") or "")
+            if not (trigger_session and input_session and trigger_session == input_session):
+                return create_failure_result(
+                    error="只能取消当前管道的触发器",
+                    error_code="TRIGGER_PIPELINE_MISMATCH",
+                )
 
         success = self._manager.cancel(trigger_id)
         if not success:
@@ -671,10 +677,12 @@ class TriggerSetupTool(BuiltinTool):
             message=message,
             action=action,
             action_params=action_params,
-            pipeline_id=pipeline_id,
+            pipeline_id=pipeline_id or "",
             metadata={
                 "execution_id": execution_id,
                 "user_id": inputs.get("user_id", ""),
+                # thread 坐标（同会话内主管道随 run 漂移，cancel 据此放行同会话取消）
+                "session_id": inputs.get("session_id", ""),
             },
         )
 
@@ -764,6 +772,8 @@ class TriggerSetupTool(BuiltinTool):
             metadata={
                 "execution_id": execution_id,
                 "user_id": inputs.get("user_id", ""),
+                # thread 坐标（同会话内主管道随 run 漂移，cancel 据此放行同会话取消）
+                "session_id": inputs.get("session_id", ""),
                 "schedule_time": schedule_time_str,
             },
         )
@@ -846,6 +856,8 @@ class TriggerSetupTool(BuiltinTool):
             metadata={
                 "execution_id": execution_id,
                 "user_id": inputs.get("user_id", ""),
+                # thread 坐标（同会话内主管道随 run 漂移，cancel 据此放行同会话取消）
+                "session_id": inputs.get("session_id", ""),
                 "interval_str": interval_str,
             },
         )
@@ -917,6 +929,8 @@ class TriggerSetupTool(BuiltinTool):
             metadata={
                 "execution_id": execution_id,
                 "user_id": inputs.get("user_id", ""),
+                # thread 坐标（同会话内主管道随 run 漂移，cancel 据此放行同会话取消）
+                "session_id": inputs.get("session_id", ""),
                 "event_type": event_type,
             },
         )
@@ -991,6 +1005,8 @@ class TriggerSetupTool(BuiltinTool):
             metadata={
                 "execution_id": execution_id,
                 "user_id": inputs.get("user_id", ""),
+                # thread 坐标（同会话内主管道随 run 漂移，cancel 据此放行同会话取消）
+                "session_id": inputs.get("session_id", ""),
                 "condition": condition,
             },
         )

@@ -12,10 +12,12 @@
  * 本模块（静态）；本模块 → services/api/auth（动态 import，因为 auth.ts →
  * client.ts 会与本模块静态互指，与 client.ts 引 authStore 的避环手法同因）。
  *
- * 存储面（D12-7）：access token 与过期时刻仅存内存（XSS/供应链读不到持久化
- * 副本）；refresh token 存 sessionStorage（标签页会话级，关页即清）+ 服务端
- * 单次轮换（每次刷新作废旧值，服务端可吊销）。localStorage 零 token 残留：
- * 升级前版本的 localStorage 令牌键在初始化/登出时清擦。
+ * 存储面（2026-09-13 用户裁定「体验优先」，修订 D12-7）：access token 与过期
+ * 时刻仅存内存（XSS/供应链读不到持久化副本）；refresh token 存 localStorage
+ * （跨浏览器重启持久 → 自动登录，与常规网站一致），其盗用风险由服务端单次
+ * 轮换（每次刷新作废旧值）+ jti 登出吊销 + 改密吊销（pwv 绑定）兜底。access
+ * 两键的 localStorage 残留与 D12-7 时代的 sessionStorage refresh 残留在
+ * 初始化/登出时清擦。
  */
 
 import { STORAGE_KEYS } from '@/constants/storage'
@@ -38,8 +40,9 @@ export function isAuthFailureFromError(error: unknown): boolean {
 }
 
 // ──────────────────────────────────────────────
-// 存取（唯一入口）：access/过期时刻仅内存；refresh 仅 sessionStorage；
-// localStorage 不落任何 token（升级残留经 scrubLegacyTokenStorages 清擦）
+// 存取（唯一入口）：access/过期时刻仅内存；refresh 存 localStorage（自动登录）；
+// localStorage 的 access 两键与 sessionStorage 的 refresh 键属升级残留，经
+// scrubLegacyTokenStorages 清擦
 // ──────────────────────────────────────────────
 
 /** access token（内存持有，进程/页面生命周期） */
@@ -47,14 +50,15 @@ let memoryAccessToken: string | null = null
 /** access token 过期时刻（毫秒时间戳，内存持有） */
 let memoryAccessTokenExpiry: number | null = null
 
-/** 清擦升级前版本残留在 localStorage 的令牌键（D12-7：localStorage 零 token） */
+/** 清擦令牌残留：access token 永不落盘（两键任何版本都非法）；
+ *  sessionStorage 的 refresh 键是 D12-7 时代残留（现为 localStorage） */
 export function scrubLegacyTokenStorages(): void {
   try {
     localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN)
-    localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
     localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN_EXPIRY)
+    sessionStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
   } catch {
-    // localStorage 不可用（隐私模式等）：本就无残留可清
+    // 存储不可用（隐私模式等）：本就无残留可清
   }
 }
 
@@ -64,7 +68,7 @@ export function getAccessToken(): string | null {
 
 export function getRefreshTokenValue(): string | null {
   try {
-    return sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+    return localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
   } catch {
     return null
   }
@@ -75,9 +79,9 @@ export function setTokens(accessToken: string, refreshToken: string, expiresIn: 
   memoryAccessToken = accessToken
   memoryAccessTokenExpiry = Date.now() + expiresIn * 1000
   try {
-    sessionStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, refreshToken)
+    localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, refreshToken)
   } catch {
-    // sessionStorage 不可用：refresh 链路将按无凭据处理（下次操作需重登），
+    // localStorage 不可用：refresh 链路将按无凭据处理（重启浏览器后需重登），
     // access token 本轮仍有效，不阻塞当前会话
   }
   notifyTokenChanged()
@@ -87,7 +91,7 @@ export function clearTokens(): void {
   memoryAccessToken = null
   memoryAccessTokenExpiry = null
   try {
-    sessionStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+    localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
   } catch {
     // 同上：不可用时无残留可清
   }
@@ -118,13 +122,13 @@ export async function refresh(): Promise<void> {
 
   refreshInFlight = (async () => {
     // 读 refresh token：区分「无 token」（未登录/已登出的正常流程）与「读取
-    // 抛异常」（sessionStorage 存储故障）。宽松读（getRefreshTokenValue）把两者
+    // 抛异常」（存储故障）。宽松读（getRefreshTokenValue）把两者
     // 同判 null，存储故障会被下方误标 authNoCredentials 走登出——存储故障呈现
     // 为被登出。故障分支不当作已登出：error 日志（提示存储异常）后按瞬时失败
     // 上抛（不带 authNoCredentials），现态保留，调度器按退避重试。
     let currentRefreshToken: string | null
     try {
-      currentRefreshToken = sessionStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+      currentRefreshToken = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
     } catch (error) {
       console.error('[tokenLifecycle] refresh token 读取失败（存储异常，保留现态不登出）:', error)
       throw new Error('令牌存储读取失败', { cause: error })
@@ -148,7 +152,7 @@ export async function refresh(): Promise<void> {
       if (!response.refresh_token) {
         throw new Error('刷新响应缺少轮换的新 refresh token')
       }
-      // D12-7 单次轮换：服务端已作废请求所用的旧值，必须落新值；
+      // 单次轮换：服务端已作废请求所用的旧值，必须落新值；
       // 旧值续用会被服务端 401（已消费 jti）
       setTokens(response.access_token, response.refresh_token, response.expires_in)
 

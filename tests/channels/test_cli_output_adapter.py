@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import io
+import os
+import sys
 
 import pytest
 
@@ -21,6 +23,7 @@ from cli_output_adapter import (  # noqa: E402
     StatusBarRenderer,
     StatusBarState,
     _truncate,
+    sanitize_for_terminal,
 )
 
 # ═══════════════════════════════════════════════════════════
@@ -175,6 +178,338 @@ class TestShowToolCall:
         adapter, buf = self._adapter()
         adapter.show_tool_call("write_file", {"p": 1}, pending=True)
         assert "等待确认" in buf.getvalue()
+
+
+# ═══════════════════════════════════════════════════════════
+# sanitize_for_terminal 编码清洗
+# ═══════════════════════════════════════════════════════════
+
+
+class _FakeStdout:
+    """替身 stdout：只提供 encoding 属性（函数内 import sys 后读 stdout.encoding）。"""
+
+    def __init__(self, encoding: str | None) -> None:
+        self.encoding = encoding
+
+
+class TestSanitizeForTerminal:
+    """按 stdout 实际编码决定是否替换不可编码字符。"""
+
+    def test_utf8_terminal_passes_everything_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "stdout", _FakeStdout("utf-8"))
+        text = "你好 world 😀🎉"
+        assert sanitize_for_terminal(text) == text
+
+    @pytest.mark.parametrize("encoding", ["UTF-8", "cp65001", "utf_8"])
+    def test_utf8_variants_are_normalized_case_insensitive(
+        self, monkeypatch: pytest.MonkeyPatch, encoding: str
+    ) -> None:
+        monkeypatch.setattr(sys, "stdout", _FakeStdout(encoding))
+        text = "emoji 😀 ok"
+        assert sanitize_for_terminal(text) == text
+
+    def test_null_encoding_falls_back_to_utf8(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "stdout", _FakeStdout(None))
+        text = "文本 text"
+        assert sanitize_for_terminal(text) == text
+
+    def test_gbk_encodable_text_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "stdout", _FakeStdout("gbk"))
+        assert sanitize_for_terminal("中文 ascii 123") == "中文 ascii 123"
+
+    def test_gbk_unencodable_chars_replaced_per_char(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "stdout", _FakeStdout("gbk"))
+        result = sanitize_for_terminal("前😀后✅tail")
+        # 性质断言：替换只发生在不可编码字符上，可编码部分原样保留
+        assert result == "前?后?tail"
+        result.encode("gbk")  # 输出必须可在目标编码下落盘
+
+    def test_unknown_encoding_replaces_everything(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "stdout", _FakeStdout("not-a-real-codec"))
+        # 未知编码下任何字符都无法 encode（含 ASCII），逐字符全部替换
+        assert sanitize_for_terminal("abc😀") == "????"
+
+
+# ═══════════════════════════════════════════════════════════
+# send：管道终态三分支（错误/停止/正常 + 流式去重）
+# ═══════════════════════════════════════════════════════════
+
+
+def _make_adapter(width: int = 200) -> tuple[CLIOutputAdapter, io.StringIO]:
+    from rich.console import Console
+
+    buf = io.StringIO()
+    return CLIOutputAdapter(console=Console(file=buf, width=width)), buf
+
+
+class TestSend:
+    """send 按 state 内容选择输出样式。"""
+
+    async def test_error_state_renders_error_panel_and_stops(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send({"error": "boom 失败", "raw_result": "不应输出"})
+        out = buf.getvalue()
+        assert "boom 失败" in out
+        assert "错误" in out
+        assert "不应输出" not in out  # error 分支短路，不再走正常结果
+
+    async def test_should_stop_renders_system_end_message(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send({"should_stop": True, "raw_result": "静默"})
+        out = buf.getvalue()
+        assert "会话结束" in out
+        assert "静默" not in out
+
+    async def test_streamed_mode_suppresses_raw_result(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send({"raw_result": "已在流式回调输出"}, streamed=True)
+        assert buf.getvalue() == ""
+
+    async def test_streamed_mode_still_reports_raw_error(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send({"raw_result": "x", "raw_error": "部分失败警告"}, streamed=True)
+        out = buf.getvalue()
+        assert "部分失败警告" in out
+        assert "警告" in out
+        assert "x" not in out
+
+    async def test_normal_result_printed(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send({"raw_result": "最终结论内容"})
+        assert "最终结论内容" in buf.getvalue()
+
+    async def test_empty_state_prints_nothing(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send({})
+        assert buf.getvalue() == ""
+
+
+# ═══════════════════════════════════════════════════════════
+# send_stream：chunk 类型分派
+# ═══════════════════════════════════════════════════════════
+
+
+class TestSendStream:
+    """send_stream 按 type 分派到对应展示方法。"""
+
+    async def test_empty_token_chunk_is_noop(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send_stream({"type": "token", "text": ""})
+        assert buf.getvalue() == ""
+
+    async def test_error_chunk_rendered(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send_stream({"type": "error", "text": "出错了"})
+        assert "出错了" in buf.getvalue()
+
+    async def test_system_chunk_rendered(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send_stream({"type": "system", "text": "系统通知"})
+        assert "系统通知" in buf.getvalue()
+
+    async def test_tool_call_chunk_dispatches_to_show_tool_call(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send_stream(
+            {"type": "tool_call", "text": "", "tool_name": "read_file", "tool_args": {"path": "/a"}}
+        )
+        out = buf.getvalue()
+        # rich 把 [tool]/[dim] 当标记解析吞掉，可见文本为「调用 name(args)」
+        assert "调用 read_file(" in out
+        assert "path=/a" in out
+
+    async def test_tool_result_chunk_dispatches_to_show_tool_result(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send_stream({"type": "tool_result", "text": "", "tool_name": "t", "result": "完成"})
+        assert "OK" in buf.getvalue()
+        assert "完成" in buf.getvalue()
+
+    async def test_task_chunk_dispatches_to_show_task_notification(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send_stream(
+            {"type": "task", "text": "", "task_action": "created", "task_info": {"task_id": 7, "description": "抓取"}}
+        )
+        out = buf.getvalue()
+        assert "创建任务 #7" in out
+        assert "抓取" in out
+
+    async def test_iteration_chunk_dispatches_to_show_iteration(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send_stream({"type": "iteration", "text": "", "iteration": 3, "max_iterations": 10})
+        assert "迭代 3/10" in buf.getvalue()
+
+    async def test_default_chunk_printed_as_token(self) -> None:
+        adapter, buf = _make_adapter()
+        await adapter.send_stream({"type": "token", "text": "逐字"})
+        assert "逐字" in buf.getvalue()
+
+
+# ═══════════════════════════════════════════════════════════
+# Claude Code 风格展示方法 + 适配器杂项面
+# ═══════════════════════════════════════════════════════════
+
+
+class TestShowMethods:
+    """show_* 家族：输出可观察行为。"""
+
+    def test_show_tool_result_success_with_duration(self) -> None:
+        adapter, buf = _make_adapter()
+        adapter.show_tool_result("t", "ok 结果", success=True, duration_ms=12.4)
+        out = buf.getvalue()
+        assert "OK" in out
+        assert "12ms" in out
+        assert "ok 结果" in out
+
+    def test_show_tool_result_failure_marked_red(self) -> None:
+        adapter, buf = _make_adapter()
+        adapter.show_tool_result("t", "炸了", success=False)
+        out = buf.getvalue()
+        assert "FAIL" in out
+        assert "炸了" in out
+        assert "OK" not in out
+
+    def test_show_tool_result_long_result_truncated_at_100(self) -> None:
+        adapter, buf = _make_adapter()
+        adapter.show_tool_result("t", "y" * 250)
+        out = buf.getvalue()
+        assert "y" * 100 in out
+        assert "y" * 101 not in out
+        assert "..." in out
+
+    def test_show_task_notification_all_actions(self) -> None:
+        adapter, buf = _make_adapter(width=400)
+        for action, marker in (("created", "创建任务 #1"), ("completed", "任务 #1 完成"), ("failed", "任务 #1 失败")):
+            adapter.show_task_notification(action, {"task_id": 1})
+            assert marker in buf.getvalue()
+        # 未知动作走兜底行；task_id 缺失时回退 id 键，再缺失显 ?
+        adapter.show_task_notification("paused", {"id": 9})
+        assert "任务 #9: paused" in buf.getvalue()
+        adapter.show_task_notification("paused", {})
+        assert "任务 #?: paused" in buf.getvalue()
+
+    def test_show_task_notification_desc_fallback_chain(self) -> None:
+        adapter, buf = _make_adapter(width=400)
+        adapter.show_task_notification("created", {"task_id": 2, "title": "标题回退"})
+        assert "标题回退" in buf.getvalue()
+
+    def test_show_iteration(self) -> None:
+        adapter, buf = _make_adapter()
+        adapter.show_iteration(2, 20)
+        assert "迭代 2/20" in buf.getvalue()
+
+    def test_show_system_message_custom_style(self) -> None:
+        adapter, buf = _make_adapter()
+        adapter.show_system_message("维护中", style="yellow")
+        assert "维护中" in buf.getvalue()
+        assert "[系统]" in buf.getvalue()
+
+    def test_show_startup_banner_contains_agent_and_mode(self) -> None:
+        adapter, buf = _make_adapter()
+        adapter.show_startup_banner("灵汐", mode="auto")
+        out = buf.getvalue()
+        assert "灵汐" in out
+        assert "AUTO" in out
+        assert "/help" in out
+
+
+class TestAdapterMisc:
+    """属性面、默认构造、宽度回退与交互确认。"""
+
+    def test_console_property_returns_injected_console(self) -> None:
+        from rich.console import Console
+
+        console = Console(file=io.StringIO(), width=120)
+        assert CLIOutputAdapter(console=console).console is console
+
+    def test_default_construction_uses_detected_or_fallback_width(self) -> None:
+        adapter = CLIOutputAdapter()
+        assert adapter.console.width >= 40  # 探测宽度或回退 80，不产出超窄控制台
+
+    def test_default_construction_survives_terminal_size_error(self) -> None:
+        import shutil
+
+        # 桩必须在测试体内自恢复（try/finally）：pytest 终端进度写入器在本用例
+        # 的报告窗口内会调 get_terminal_size(fallback=...)，monkeypatch 的
+        # teardown 归位晚于该窗口——桩外泄一次即 OSError 炸穿整条车道
+        #（INTERNALERROR，批九两次全量实锤）。
+        original = shutil.get_terminal_size
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError("no tty")
+
+        shutil.get_terminal_size = _boom
+        try:
+            assert CLIOutputAdapter().console.width == 80
+        finally:
+            shutil.get_terminal_size = original
+
+    def test_render_falls_back_to_80_on_narrow_terminal(self) -> None:
+        import shutil
+
+        original = shutil.get_terminal_size
+        shutil.get_terminal_size = lambda *a, **k: os.terminal_size((30, 24))
+        try:
+            renderer = StatusBarRenderer()
+            text = renderer.render()
+        finally:
+            shutil.get_terminal_size = original
+        # 性质断言：宽度回退后整行不超过回退宽度（右侧内容不因过窄被挤没）
+        assert text.cell_len >= 40
+
+    def test_render_falls_back_to_80_on_terminal_size_error(self) -> None:
+        import shutil
+
+        original = shutil.get_terminal_size
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError("no tty")
+
+        shutil.get_terminal_size = _boom
+        try:
+            text = StatusBarRenderer().render().plain
+        finally:
+            shutil.get_terminal_size = original
+        assert "Agent OS" in text
+
+    def test_show_thinking_default_and_toggle(self) -> None:
+        adapter, _buf = _make_adapter()
+        assert adapter.show_thinking is False
+        adapter.show_thinking = True
+        assert adapter.show_thinking is True
+
+    def test_show_processing_returns_status_context_manager(self) -> None:
+        from rich.status import Status
+
+        adapter, buf = _make_adapter()
+        status = adapter.show_processing("运算中")
+        assert isinstance(status, Status)
+        with status:
+            pass  # 可正常进出（rich 内部渲染到注入 console）
+
+    def test_show_tool_confirmation_accept_and_decline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        adapter, buf = _make_adapter(width=400)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+        assert adapter.show_tool_confirmation("write_file", {"p": 1}) == "yes"
+        assert "等待确认" in buf.getvalue()
+
+        monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+        assert adapter.show_tool_confirmation("write_file", {"p": 1}) is None
+
+    @pytest.mark.parametrize("answer", ["no", "s", "skip", "N"])
+    def test_show_tool_confirmation_negative_answers_decline(
+        self, monkeypatch: pytest.MonkeyPatch, answer: str
+    ) -> None:
+        adapter, _buf = _make_adapter(width=400)
+        monkeypatch.setattr("builtins.input", lambda _prompt: answer)
+        assert adapter.show_tool_confirmation("t", {}) is None
+
+    def test_show_tool_confirmation_eof_declines(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        adapter, _buf = _make_adapter(width=400)
+
+        def _eof(_prompt: str) -> str:
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", _eof)
+        assert adapter.show_tool_confirmation("t", {}) is None
 
 
 # ═══════════════════════════════════════════════════════════
