@@ -1,0 +1,17 @@
+[project]
+name = "agentos-plugin-doc-tools"
+version = "1.0.0"
+description = "Lingxi AgentOS 0.2 plugin — doc_tools（文档处理：Markdown↔Word↔PDF 互转 + 文本提取）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+    "markdown-it-py>=3.0",
+    "python-docx>=1.1",
+    "pypdf>=4.0",
+    "reportlab>=4.0",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录（判据 2 案 A）。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../../sdk", editable = true }

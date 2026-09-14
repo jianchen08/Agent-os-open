@@ -2,8 +2,8 @@
 """SQLite 主库快照备份（VACUUM INTO）+ 7 份轮转 + 完整性校验。
 
 与内核 storage 解析同口径（kernel/crates/engine/src/storage_factory.rs）：
-  db 路径 = AGENTOS_DB_PATH 环境变量 > config/storage.yaml sqlite.path > 项目根 agentos_kernel.db；
-  driver  = AGENTOS_STORAGE_DRIVER > config/storage.yaml driver > sqlite。
+  db 路径 = AGENTOS_DB_PATH 环境变量 > config/kernel/storage.yaml sqlite.path > 项目根 agentos_kernel.db；
+  driver  = AGENTOS_STORAGE_DRIVER > config/kernel/storage.yaml driver > sqlite。
 driver 非 sqlite（memory/postgres）时显式报错拒绝——内存库无文件可备份，
 备份不存在的库 = 假安全。快照机制与 db_routes.rs backup_before_clear 同源
 （VACUUM INTO：一致性快照，对运行中的内核安全，不阻塞不改动源库）。
@@ -31,7 +31,7 @@ BACKUP_DIR = ROOT / "data" / "backups"
 DEFAULT_DB_PATH = "agentos_kernel.db"
 ENV_STORAGE_DRIVER = "AGENTOS_STORAGE_DRIVER"
 ENV_DB_PATH = "AGENTOS_DB_PATH"
-STORAGE_YAML = ROOT / "config" / "storage.yaml"
+STORAGE_YAML = ROOT / "config" / "kernel" / "storage.yaml"
 KEEP_SNAPSHOTS = 7
 # 快照命名：<库名>-<UTC 时间戳 YYYYMMDDTHHMMSSmmm>.db（毫秒精度对齐 db_routes.rs 唯一性约定）
 SNAPSHOT_RE = re.compile(r"^.+-(\d{8}T\d{6}\d{3})\.db$")
@@ -42,7 +42,7 @@ class BackupError(RuntimeError):
 
 
 def _read_storage_yaml() -> tuple[str | None, str | None]:
-    """读 config/storage.yaml 的 (driver, sqlite.path)，缺文件/缺节返回 (None, None)。"""
+    """读 config/kernel/storage.yaml 的 (driver, sqlite.path)，缺文件/缺节返回 (None, None)。"""
     if not STORAGE_YAML.exists():
         return None, None
     import yaml
@@ -63,7 +63,7 @@ def resolve_target() -> Path:
     if driver != "sqlite":
         raise BackupError(
             f"driver={driver!r}（{ENV_STORAGE_DRIVER}={env_driver!r}"
-            f"{'' if env_driver else '，来自 config/storage.yaml'}）不是 sqlite，"
+            f"{'' if env_driver else '，来自 config/kernel/storage.yaml'}）不是 sqlite，"
             "本工具只备份 SQLite 文件库——内存库无文件、其他 driver 未落地"
         )
     raw = _env(ENV_DB_PATH) or yaml_path or DEFAULT_DB_PATH

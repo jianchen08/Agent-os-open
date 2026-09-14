@@ -113,4 +113,145 @@ mod tests {
             "audit subscriber should exit after bus closed"
         );
     }
+
+    // ── 日志捕获夹具：审计订阅者的可观察输出就是 tracing 事件，故断言日志文本 ──
+
+    /// 收集事件 `message` 字段的测试订阅者（不引入 tracing-subscriber 依赖）。
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl CapturedLogs {
+        fn messages(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+
+        fn contains(&self, needle: &str) -> bool {
+            self.messages().iter().any(|m| m.contains(needle))
+        }
+    }
+
+    struct MsgVisitor<'a>(&'a mut Option<String>);
+
+    impl tracing::field::Visit for MsgVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                *self.0 = Some(format!("{value:?}"));
+            }
+        }
+    }
+
+    struct LogCapture(CapturedLogs);
+
+    impl tracing::Subscriber for LogCapture {
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            // always：保证 callsite 常开、warn!/info! 的 format args 真实求值。
+            tracing::subscriber::Interest::always()
+        }
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut msg = None;
+            event.record(&mut MsgVisitor(&mut msg));
+            if let Some(m) = msg {
+                self.0 .0.lock().unwrap().push(m);
+            }
+        }
+        fn enter(&self, _span: &tracing::Id) {}
+        fn exit(&self, _span: &tracing::Id) {}
+    }
+
+    /// log_event 的 run_id 分支：上下文带 run_id 时作为独立字段输出，
+    /// 不带时走通用分支。两者都以 "lifecycle event" 落审计日志。
+    #[tokio::test]
+    async fn log_event_emits_with_and_without_run_id() {
+        let logs = CapturedLogs::default();
+        let _guard = tracing::subscriber::set_default(LogCapture(logs.clone()));
+
+        let mut ctx = HookContext::new();
+        ctx.set("run_id", serde_json::json!("run-7"));
+        log_event(&LifecycleEvent {
+            hook: LifecycleHook::OnPipelineStart,
+            ctx,
+            target: EventTarget::Pipeline("pipe-1".into()),
+            ts: SystemTime::now(),
+        });
+        log_event(&LifecycleEvent {
+            hook: LifecycleHook::OnError,
+            ctx: HookContext::new(),
+            target: EventTarget::Plugin("plug-1".into()),
+            ts: SystemTime::now(),
+        });
+
+        let msgs = logs.messages();
+        assert_eq!(msgs.len(), 2, "两个事件各产生一条审计日志: {msgs:?}");
+        assert!(
+            msgs.iter().all(|m| m.contains("lifecycle event")),
+            "审计日志文案固定: {msgs:?}"
+        );
+    }
+
+    /// 慢消费者（容量溢出）触发 Lagged 分支：订阅者记 warn 后继续消费，
+    /// 不 fatal、不退出，后续事件仍被消费——观察层绝不被积压拖垮。
+    #[tokio::test]
+    async fn lagged_subscriber_warns_and_keeps_consuming() {
+        let logs = CapturedLogs::default();
+        let _guard = tracing::subscriber::set_default(LogCapture(logs.clone()));
+
+        let bus = Arc::new(HookEventBus::new(2));
+        let handle = spawn_audit_subscriber(bus.clone());
+        // 不 await：订阅者尚未被调度，通道（容量 2）先被 20 个事件冲爆。
+        for i in 0..20 {
+            bus.emit(LifecycleEvent {
+                hook: LifecycleHook::OnPipelineStart,
+                ctx: HookContext::new(),
+                target: EventTarget::Pipeline(format!("pipe-{i}")),
+                ts: SystemTime::now(),
+            });
+        }
+
+        // 让订阅者跑起来：先撞 Lagged，随后继续消费。
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !handle.is_finished(),
+            "Lagged 不是 fatal：订阅者必须继续运行"
+        );
+        assert!(
+            logs.contains("lagged"),
+            "溢出必须 warn 留痕，实际日志: {:?}",
+            logs.messages()
+        );
+
+        // 溢出后仍能消费新事件（恢复能力）。
+        let before = logs.messages().len();
+        bus.emit(LifecycleEvent {
+            hook: LifecycleHook::OnPipelineEnd,
+            ctx: HookContext::new(),
+            target: EventTarget::Engine,
+            ts: SystemTime::now(),
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            logs.messages().len() > before,
+            "Lagged 恢复后应继续记录事件"
+        );
+
+        drop(bus);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(handle.is_finished(), "总线关闭后订阅者应退出");
+    }
 }

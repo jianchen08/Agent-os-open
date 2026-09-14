@@ -129,6 +129,9 @@ function statusIcon(status: string): { icon: React.ReactNode; color: string; lab
   return { icon: conf.icon, color: conf.color, label: PIPELINE_STATUS_LABELS[status] ?? status }
 }
 
+/** 运行终态集（runs 权威，收束分组；suspended 可恢复不算终态） */
+const TERMINAL_PIPELINE_STATUSES: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled'])
+
 // ═════════════════════════════════════════════════════════════════
 // 主组件
 // ═════════════════════════════════════════════════════════════════
@@ -250,6 +253,11 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       // 原始状态在行内展示（词表归一与告警见 types/taskStatus）
       const mapped = taskStatusToPipelineStatus(taskStatus)
       const st = stateViews[pid]
+      // BUG-2b 终态防御（ADR 2026-09-14）：state 视图已持 runs 权威终态
+      // （冷行 run_status overlay / reap 投影）的行，崩溃遗留的陈旧
+      // task.status 投影不再参与状态归组——终态优先，不再显示为幽灵执行中
+      const status =
+        st && TERMINAL_PIPELINE_STATUSES.has(st.status) ? st.status : mapped
       const timestamps = task.timestamps as Record<string, unknown> | undefined
       const startedAt =
         (timestamps?.startedAt as string | undefined)
@@ -262,7 +270,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         runId: pid,
         threadId: String(task.threadId ?? task.thread_id ?? '') || undefined,
         originSessionId: st?.originSessionId,
-        status: mapped,
+        status,
         startedAt,
         endedAt: completedAt,
         kind: 'task',

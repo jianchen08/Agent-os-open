@@ -227,6 +227,7 @@ async def dispatch_and_collect(
     client_message_id: str,
     on_interaction: Any = None,  # Callable[[dict], str | None] 返回 bot 动作描述
     timeout_s: float = 600,
+    execution_context: dict | None = None,
 ) -> DispatchResult:
     """发送一条 user_input 并收流到终态。
 
@@ -244,7 +245,7 @@ async def dispatch_and_collect(
                 await asyncio.wait_for(ws.recv(), timeout=5)
             except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — 确认帧缺失不阻断
                 pass
-            await ws.send(json.dumps({
+            frame = {
                 "type": "user_input",
                 "thread_id": thread_id,
                 "content": content,
@@ -253,7 +254,12 @@ async def dispatch_and_collect(
                 "enable_thinking": False,
                 "thinking_strength": "",
                 "client_message_id": client_message_id,
-            }))
+            }
+            if execution_context:
+                # 消息级执行上下文（router.route_user_input 原生消费）：
+                # {workspace:{source_path,mode}, isolation:{level}}
+                frame["execution_context"] = execution_context
+            await ws.send(json.dumps(frame))
             deadline = time.monotonic() + timeout_s
             while True:
                 remaining = deadline - time.monotonic()

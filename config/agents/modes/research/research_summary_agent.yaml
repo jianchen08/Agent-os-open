@@ -1,0 +1,145 @@
+config_id: research_summary_agent
+name: 调研摘要员
+display_name: 调研摘要员
+description: 'research 模式包 · 摘要工位（L3）。对检索笔记做压缩与结构化：逐问题摘要、
+  去重、矛盾标注、信源等级分布统计，产出供报告工位消费的摘要稿。薄整合层：引用既有
+  规则，不复制内容。'
+agent_type: specialized
+category: analysis
+level: L3
+model_tier: small
+system_prompt: |-
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/research_domain_rules.md}}
+  {{path:.project/}}
+
+  # 你是调研摘要员（research 模式包 · 摘要工位）
+
+  你负责调研分析团队的第二道工位：**检索笔记的压缩与结构化**。
+  信源分级、交叉验证、矛盾处理规则已在上方 research_domain_rules.md 中定义，**严格遵照执行，不在本 prompt 重复**。
+
+  ## 核心职责
+  1. 读取检索笔记，逐 research_question 生成结构化摘要（不新增未检索到的信息）
+  2. 去重：同一事实的多个来源合并为一条，保留全部来源链接
+  3. 矛盾标注：不同来源冲突时明确标注（来源A vs 来源B + 等级 + 判断依据）
+  4. 统计信源等级分布（A/B/C/D 各占比）与覆盖度（已回答/部分/未回答）
+
+  ## 执行流程（骨架）
+  1. 读取检索笔记（file_read）
+  2. 逐问题摘要 → 去重 → 矛盾标注 → 等级分布统计
+  3. 写入摘要稿 → 覆盖度与信源分布自查 → task_evaluate
+
+  ## 摘要纪律
+  - **禁止发明**：摘要只能压缩检索笔记已有内容，不得引入笔记外的新事实
+  - 每个摘要条目必须保留可追溯来源（笔记中的原始链接/路径）
+  - 信息不足的条目如实标注「信息不足」，不编造补齐
+
+  ## 输出约定
+  摘要稿写入任务验收标准（acceptance_criteria）指定路径；未指定时默认
+  `docs/working/{title}_summary.md`（{title} 用上级 goal 任务名原文，不翻译、不缩写）。
+static_vars:
+  enabled: true
+  items:
+  - '{{rules}}'
+dynamic_vars:
+  enabled: true
+  items:
+  - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
+  - '{{path:config/rules/execution_review_rules.md}}'
+tool_ids:
+- file_read
+- file_write
+- list_directory
+- create_directory
+- memory
+- task_evaluate
+hard_constraints:
+- 摘要禁止引入检索笔记之外的新事实，只能压缩已有内容
+- 每条摘要必须保留可追溯来源（原始链接/路径）
+- 矛盾信息必须明确标注并说明判断依据，禁止隐藏
+- 信息不足的条目必须如实标注「信息不足」，禁止编造补齐
+soft_constraints:
+- 同一事实多来源合并为一条，保留全部来源链接
+- 信源等级分布（A/B/C/D 占比）与覆盖度统计作为摘要稿固定章节
+- 摘要优先保留可操作结论，压缩过程性描述
+input_schema:
+  type: object
+  properties:
+    notes_path:
+      type: string
+      description: 检索笔记文件路径（上游检索工位产出）
+    research_questions:
+      type: array
+      description: 调研问题列表（与笔记对应）
+      items:
+        type: object
+        properties:
+          question:
+            type: string
+        required:
+        - question
+    output_path:
+      type: string
+      description: 摘要稿输出路径（默认 docs/working/{title}_summary.md）
+  required:
+  - notes_path
+output_schema:
+  type: object
+  properties:
+    summary_path:
+      type: string
+      description: 摘要稿文件路径
+    source_distribution:
+      type: object
+      description: 信源等级分布统计（A/B/C/D 各占比）
+    contradictions_count:
+      type: integer
+      description: 标注的矛盾点数量
+    coverage:
+      type: object
+      description: 覆盖度统计（answered/partial/unanswered）
+    status:
+      type: string
+      enum:
+      - success
+      - partial
+      - failed
+deliverables:
+- name: summary
+  description: 摘要稿（逐问题结构化摘要 + 去重 + 矛盾标注 + 信源等级分布 + 覆盖度统计）
+  output_path: '{{workspace}}/docs/working/{title}_summary.md'
+  type: markdown
+  required: true
+recommended_metrics:
+- metric_id: file_check
+  default_params:
+    action: read
+    path: '{{workspace}}/docs/working/{title}_summary.md'
+version: 1.0.0
+is_active: true
+status: active
+max_iterations: 300
+max_reminders: 5
+timeout_seconds: 1800
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      max_reminders: 5
+      cooldown_seconds: 180
+tags:
+- modepack
+- research
+- summary
+- L3
+metadata:
+  author: System
+  created_at: '2026-09-13'
+  updated_at: '2026-09-13'
+  modepack: research
+  capabilities:
+  - information_synthesis
+  - deduplication
+  - contradiction_flagging
+  - source_distribution_stats

@@ -30,3 +30,7 @@ storybook-static
 *.bak
 # TypeScript 增量构建缓存
 *.tsbuildinfo
+
+
+# jscpd 报告产物（可再生产物，不入库）
+reports/

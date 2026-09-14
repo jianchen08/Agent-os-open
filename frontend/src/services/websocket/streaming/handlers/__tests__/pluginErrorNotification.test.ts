@@ -6,7 +6,7 @@
  * plugin_error 事件（非终止信号）：引擎 warn+继续的插件失败（result.error /
  * invoker Err）经 WS 送达——消息本身正常收尾（new_message/stream_end 照常），
  * 此处只弹通知中心（errorSource=plugin），不标记消息失败、不终止管道。
- * 统一错误信封（config/error_codes.json）：code 缺省 PLUGIN_EXEC_FAILED。
+ * 统一错误信封（config/kernel/error_codes.json）：code 缺省 PLUGIN_EXEC_FAILED。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 

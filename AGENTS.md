@@ -52,8 +52,10 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
 - **任务默认隔离执行**：默认工作空间 `workspace/{task_id}` + isolated。
 - **工具面过滤**：LLM 可见工具由 `config/agents/main/agentos.yaml`（及
   `executor/general_agent.yaml`）的 `tool_ids` 白名单控制，新工具记得加入。
-- **权限模式**：5 种权限模式 + 参数级危险判定，纯插件前端（http_endpoints + form compact +
-  human-interaction 确认）。会话隔离由 isolation_guard 容器落地。
+- **权限模式**：4 档权限模式（default/accept_edits/auto/bypass，黑名单制：未命中
+  安全规则的操作任何档位都直接执行，隔离任务的容器内操作从不弹审批）+ 参数级危险
+  判定，纯插件前端（http_endpoints + form compact + human-interaction 确认）。
+  会话隔离由 isolation_guard 容器落地。
 - **插件热发现/热重载全链路**：新建插件目录、修改 plugin.json、改插件 Python 代码
   均由 watcher 自动处理（发现→G2 校验→注册/重注册/respawn），无需 re-enable 或重启；
   cdylib 集合变更走 G8 自动重启（同 id 换产物保守重启）；已知插件面取自共享

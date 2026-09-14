@@ -3207,6 +3207,18 @@ impl PluginInvoker for PluginInvokerImpl {
         Ok(())
     }
 
+    /// 宿主键解析（trait 默认按独占语义返回 plugin_id；此处交真实装箱表）。
+    ///
+    /// light 合宿成员经装箱分配表拿组键（粘性分配，与 spawn 路由同一把尺子），
+    /// 域事件广播据此把同宿主订阅插件去重为一次投递；manifest 缺席按独占
+    /// 语义回退（不抛错——广播是 fire-and-forget 面，缺席成员由 send 侧留痕）。
+    fn host_key_of(&self, plugin_id: &str) -> String {
+        match self.loader.get_manifest(plugin_id) {
+            Some(manifest) => self.resolve_host_key(&manifest),
+            None => plugin_id.to_string(),
+        }
+    }
+
     /// 强制卸载插件（覆盖 trait 默认实现）。
     /// 转发到 force_unload_impl：kill sidecar + 清缓存，下次调用自动 respawn 加载新代码。
     async fn force_unload(&self, plugin_id: &str) -> Result<(), PluginError> {

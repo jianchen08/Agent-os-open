@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -37,9 +38,24 @@ ENHANCED_SEARCH_SCHEMA: dict[str, Any] = {
         "context_lines": {"type": "integer", "description": "上下文行数", "default": 2},
         "max_results": {"type": "integer", "description": "最大结果数", "default": 100},
         "max_depth": {"type": "integer", "description": "最大递归深度", "default": 20},
+        "timeout_seconds": {"type": "number", "description": "遍历墙钟预算（秒），超时返回部分结果", "default": 30.0},
     },
     "required": ["query"],
 }
+
+# 二进制闸预算：NUL 探测只看文件头；命中扫描有界（防大文件全文进正则）。
+_BINARY_SNIFF_BYTES = 64 * 1024
+_BINARY_SCAN_BYTES = 4 * 1024 * 1024
+
+
+def _binary_contains(file_path: Path, pattern: "re.Pattern[str]") -> bool:
+    """二进制文件按字节扫描命中（latin-1 映射保字节，预算内读取）。"""
+    try:
+        with file_path.open("rb") as fh:
+            raw = fh.read(_BINARY_SCAN_BYTES)
+    except OSError:
+        return False
+    return pattern.search(raw.decode("latin-1")) is not None
 
 
 async def enhanced_search(
@@ -52,6 +68,7 @@ async def enhanced_search(
     context_lines: int = 2,
     max_results: int = 100,
     max_depth: int = 20,
+    timeout_seconds: float = 30.0,
     workspace: str | None = None,
     project_root: str | None = None,
 ) -> ToolResult:
@@ -74,6 +91,7 @@ async def enhanced_search(
     search_path = Path(resolved)
     if not search_path.exists():
         return ToolResult.failure_result(f"Path not found: {path}")
+    truncated_reason = ""
     # 仓库根内遍历剪枝：搜索根本身是仓库根时会顺路走运行时/产物目录
     # （data/config/logs/.ai_workspaces/.git/.venv 等），walk 循环剔除；
     # 根在仓库外（普通工作区）时为空集零开销。延迟导入避免与 fs_tools
@@ -85,6 +103,7 @@ async def enhanced_search(
     results: list[dict[str, Any]] = []
 
     def _search_sync() -> None:
+        nonlocal truncated_reason
         # 支持单文件路径：os.walk 对「文件」路径产出空迭代（它只遍历目录条目），
         # 导致指向具体文件时结果恒为空。这里显式把单文件构造成一次遍历，复用下方
         # 既有匹配逻辑（file_path = Path(root) / fname 会还原成该文件路径）。
@@ -92,7 +111,14 @@ async def enhanced_search(
             walk_iter: Any = [(search_path.parent, [], [search_path.name])]
         else:
             walk_iter = os_walk_depth(search_path, max_depth)
+        deadline = time.monotonic() + timeout_seconds
         for root, dirs, files in walk_iter:
+            if time.monotonic() > deadline:
+                # 墙钟预算（D6 同源护栏）：daemon 高压/超大树下限时不无限走，
+                # 返回已达成的部分结果并如实标注截断。
+                nonlocal truncated_reason
+                truncated_reason = f"遍历超时（>{timeout_seconds:.0f}s），结果可能不完整"
+                return
             if prune:
                 dirs[:] = [d for d in dirs if os.path.normcase(str(Path(root) / d)) not in prune]
             if search_type == "filename":
@@ -123,6 +149,32 @@ async def enhanced_search(
                     file_path = Path(root) / fname
                     if _sensitive_file_reason(file_path.resolve()) is not None:
                         continue
+                    # 二进制闸（git 同款 NUL 探测）：二进制不展开内容——此前
+                    # errors="replace" 把二进制吞成替换字符垃圾随命中行回传，
+                    # 单个文件即可撑出 MB 级结果。命中只报路径与体量，细节由
+                    # agent 决定是否 file_read（2026-09-14 用户裁定）。
+                    try:
+                        with file_path.open("rb") as fh:
+                            is_binary = b"\x00" in fh.read(_BINARY_SNIFF_BYTES)
+                    except OSError:
+                        continue
+                    if is_binary:
+                        if _binary_contains(file_path, pattern):
+                            results.append(
+                                {
+                                    "file_path": str(file_path),
+                                    "line_number": 0,
+                                    "content": (
+                                        f"[二进制文件命中，{file_path.stat().st_size} 字节，"
+                                        "内容不展开——需要细节请用 file_read 读取]"
+                                    ),
+                                    "context_before": [],
+                                    "context_after": [],
+                                }
+                            )
+                            if len(results) >= max_results:
+                                return
+                        continue
                     try:
                         content = file_path.read_text("utf-8", errors="replace")
                     except OSError:
@@ -151,7 +203,8 @@ async def enhanced_search(
     return ToolResult.success_result(
         {"results": results},
         count=len(results),
-        truncated=len(results) >= max_results,
+        truncated=len(results) >= max_results or bool(truncated_reason),
+        message=truncated_reason or None,
     )
 
 

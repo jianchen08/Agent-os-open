@@ -7,7 +7,7 @@
  *   1. MessageItem 已用 React.memo 包裹（见 MessageItem.tsx）：历史消息不随流式
  *      重渲染，避免算好的 scrollTop 被新渲染冲掉导致滚动条乱跳。
  *   2. 本组件只保留最小滚动职责：
- *      - 首次进入钉底、切 Tab 缓存/恢复 scrollTop
+ *      - 首次进入钉底、切 Tab 缓存/恢复滚动位置（以距底距离表示，0=底部）
  *      - 用户发消息/流式期间跟随底部
  *      - 到顶触发加载更多
  *   3. 向上加载更多（prepend）的不跳由浏览器原生 CSS `overflow-anchor: auto`
@@ -28,10 +28,16 @@ import type { Message } from '@/types/models'
  * 每个 Tab 的滚动位置缓存
  *
  * 切换 Tab 时 MessageList 因 key 变化被销毁重建（见 ChatContainer 的
- * <MessageList key={activeTabId || sessionId}>），卸载前把 scrollTop 写入这里，
- * 重新挂载时读出恢复。内存级缓存，不跨页面刷新。
+ * <MessageList key={activeTabId || sessionId}>），卸载前把离开时的距底距离写入
+ * 这里，重新挂载时读出恢复。内存级缓存，不跨页面刷新。
+ *
+ * 存距底距离（scrollHeight - scrollTop - clientHeight）而非绝对 scrollTop：
+ * 原点是最新消息所在的底部，未定位时的初值 0 天然等于"钉在底部"——消息尚未
+ * 加载就切走的 Tab 落缓存 0，重进恢复即钉底+跟随，不会像绝对坐标那样 0=顶部；
+ * 且距底距离对两次进入之间的内容高度变化（重建/压缩/图片加载）稳定，恢复以
+ * 最新底部为锚。
  */
-const scrollTopCache = new Map<string, number>()
+const scrollRestoreCache = new Map<string, number>()
 
 /**
  * 消息列表组件属性扩展
@@ -128,7 +134,7 @@ export const MessageList = ({
   const scrollRef = useRef<HTMLDivElement>(null)
   /** 是否在底部附近（距底部 150px 内） */
   const isNearBottom = useRef(true)
-  /** 是否在顶部附近（触发加载更多） */
+  /** 是否进入顶部预载区（距顶一个视口内，提前触发加载更早消息） */
   const isNearTop = useRef(false)
   /**
    * 是否"跟随底部"——决定流式/新内容时是否把视图钉在底部。
@@ -149,11 +155,18 @@ export const MessageList = ({
    */
   const contentRef = useRef<HTMLDivElement>(null)
   /**
-   * 最近一次真实 scrollTop（onScroll 实时记录）。
+   * 最近一次真实 scrollTop（onScroll 实时记录），供 onScroll 方向判定做上一帧参照。
    * 切 Tab 卸载时 React 会先清空消息 DOM（scrollHeight/scrollTop 归 0），
-   * 此时读 DOM 拿到的是垃圾值 0；改读此 ref 拿到用户最后的真实位置。
+   * 此时读 DOM 拿到的是垃圾值 0；程序化设置 scrollTop 不触发 onScroll 的环境
+   * （jsdom）下也需手动同步此 ref。
    */
   const lastScrollTopRef = useRef(0)
+  /**
+   * 最近一次滚动的距底距离（onScroll 实时记录），卸载时写入 scrollRestoreCache。
+   * 与 lastScrollTopRef 同步更新：0=钉在底部，未定位时的初值即合法的"底部"语义
+   * （见 scrollRestoreCache 注释）。
+   */
+  const lastDistanceFromBottomRef = useRef(0)
   /** 定位跳转高亮中的消息 id（CSS 过渡淡出，无定时清除） */
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null)
 
@@ -202,6 +215,7 @@ export const MessageList = ({
       el.scrollTop = el.scrollHeight
       // 程序设置 scrollTop 不触发 onScroll，手动同步缓存用 ref
       lastScrollTopRef.current = el.scrollHeight
+      lastDistanceFromBottomRef.current = 0
     }
   }, [])
 
@@ -226,9 +240,11 @@ export const MessageList = ({
     if (!anchor) return
     const targetTop = Math.max(0, anchor.offsetTop - el.clientHeight / 2)
     requestAnimationFrame(() => {
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = targetTop
+      const cur = scrollRef.current
+      if (cur) {
+        cur.scrollTop = targetTop
         lastScrollTopRef.current = targetTop
+        lastDistanceFromBottomRef.current = cur.scrollHeight - targetTop - cur.clientHeight
       }
     })
     // 高亮标记：CSS 过渡淡出，不需要 JS 定时移除
@@ -257,9 +273,11 @@ export const MessageList = ({
       const distanceFromBottom = scrollHeight - scrollTop - clientHeight
       const prevScrollTop = lastScrollTopRef.current
       isNearBottom.current = distanceFromBottom <= 150
-      isNearTop.current = scrollTop <= 150
+      // 顶部预载区 = 距顶一个视口内：提前加载更早消息而非等撞到顶，连续上翻不撞墙
+      isNearTop.current = scrollTop <= clientHeight
       // 实时记录：卸载时 DOM 内容已被 React 清空（scrollHeight=0），读 DOM 拿到的是 0
       lastScrollTopRef.current = scrollTop
+      lastDistanceFromBottomRef.current = distanceFromBottom
 
       // 视口上移 → 用户翻历史，停止跟随。
       // contentResize observer 与各钉底点内部判断 isFollowingBottom，
@@ -280,6 +298,29 @@ export const MessageList = ({
   )
 
   /**
+   * 预载链式续载：一批更早消息落位（isLoadingMore true→false 边沿）后，若用户仍在
+   * 预载区内且还有更多，自动续载下一批。覆盖"甩到顶后停住"场景——停在顶上没有后续
+   * scroll 事件，仅靠 onScroll 触发只能拉到一批。守卫条数增长：空批（has_more=true
+   * 但 0 条）不续载，防死循环；被 scroll-anchoring 推出预载区则不续载，回到区内由
+   * onScroll 自然再触发。
+   */
+  const prevIsLoadingMore = useRef(false)
+  const lastChainLoadCount = useRef(0)
+  useEffect(() => {
+    const loadCompleted = prevIsLoadingMore.current && !isLoadingMore
+    prevIsLoadingMore.current = isLoadingMore
+    if (
+      loadCompleted &&
+      hasMore &&
+      isNearTop.current &&
+      messages.length > lastChainLoadCount.current
+    ) {
+      lastChainLoadCount.current = messages.length
+      onLoadMore?.()
+    }
+  }, [isLoadingMore, hasMore, messages.length, onLoadMore])
+
+  /**
    * 首次加载：恢复缓存位置或钉到底部
    *
    * 有缓存（之前在此 Tab 翻过历史）→ 恢复并停止跟随；
@@ -298,18 +339,21 @@ export const MessageList = ({
     const el = scrollRef.current
     if (!el) return
 
-    const cached = tabId ? scrollTopCache.get(tabId) : undefined
-    // 缓存恢复：定位到用户离开的位置。不在底部即不跟随（流式内容变化不得把
-    // 视图拉回底部）；滚回底部附近经 onScroll 恢复跟随。
+    const cached = tabId ? scrollRestoreCache.get(tabId) : undefined
+    // 缓存恢复：cached 是离开时的距底距离（0=钉在底部）。定位到距底 cached 处；
+    // 不在底部即不跟随（流式内容变化不得把视图拉回底部）；滚回底部附近经 onScroll
+    // 恢复跟随。距底定位需要实时 scrollHeight，放 rAF 内按已布局 DOM 计算。
     if (cached !== undefined) {
-      const distance = el.scrollHeight - cached - el.clientHeight
-      isNearBottom.current = distance <= 150
-      isFollowingBottom.current = distance <= 150
       requestAnimationFrame(() => {
-        if (scrollRef.current) {
-          scrollRef.current.scrollTop = cached
-          lastScrollTopRef.current = cached
-        }
+        const el = scrollRef.current
+        if (!el) return
+        const targetTop = Math.max(0, el.scrollHeight - el.clientHeight - cached)
+        el.scrollTop = targetTop
+        lastScrollTopRef.current = targetTop
+        const distance = el.scrollHeight - targetTop - el.clientHeight
+        lastDistanceFromBottomRef.current = distance
+        isNearBottom.current = distance <= 150
+        isFollowingBottom.current = distance <= 150
       })
       return
     }
@@ -402,16 +446,18 @@ export const MessageList = ({
   /**
    * 组件卸载时缓存当前滚动位置（供下次切换回来恢复）
    *
-   * 读 onScroll 实时记录的 lastScrollTopRef（用户最后的真实滚动位置），而不读 DOM：
+   * 读 onScroll 实时记录的 lastDistanceFromBottomRef（距底距离，0=底部），而不读 DOM：
    * 切 Tab 卸载时 React 先清空消息 DOM（scrollHeight/scrollTop 归 0），再跑 cleanup，
-   * 此时读 el.scrollTop 拿到的是垃圾值 0，存进缓存会导致切回时恢复到顶部。
+   * 此时读 DOM 全是垃圾值 0。距底距离的初值 0 恰是合法语义"钉在底部"，因此消息
+   * 未加载就切走（从未定位/滚动）落缓存 0，重进恢复即钉底——不会像绝对 scrollTop
+   * 那样把 0 当成"顶部"恢复。
    * effect 运行时（commit 后）闭包捕获 DOM 引用；不在 cleanup 里直接读 ref，
    * 因为卸载时 React 先 detach ref（置 null）再跑 passive effect cleanup。
    */
   useEffect(() => {
     return () => {
       if (tabId) {
-        scrollTopCache.set(tabId, lastScrollTopRef.current)
+        scrollRestoreCache.set(tabId, lastDistanceFromBottomRef.current)
       }
     }
   }, [tabId])

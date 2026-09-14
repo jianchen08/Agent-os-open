@@ -720,12 +720,22 @@ def _fake_start_one(*oks: bool) -> Any:
 
 
 class TestCreateEnvironment:
+    @staticmethod
+    def _fake_start_not_found() -> Any:
+        """D6 前置预检替身：确定性不存在（放行 create 路径）。"""
+
+        async def fake(container_id: str, timeout: float = 15) -> tuple[bool, str]:
+            return False, "Error: No such container: unknown"
+
+        return fake
+
     def test_success(self, tmp_path: Path, monkeypatch: Any) -> None:
         provider = _provider()
         monkeypatch.setattr(provider, "_is_wsl_docker", lambda: False)
         ws = tmp_path / "ws"
         ws.mkdir()
         monkeypatch.setattr(provider, "_ensure_image", _fake_ensure_image())
+        monkeypatch.setattr(provider, "_start_one", self._fake_start_not_found())
         monkeypatch.setattr(provider, "_create_and_start", _fake_create_and_start("abc123", ""))
         # get_environment_status 的 docker inspect 属外部依赖，stub 为 running
         script = _CmdScript([(0, b"running", b"")])
@@ -738,6 +748,56 @@ class TestCreateEnvironment:
         assert env.provider_info["image"] == "agentos:latest"
         # 注册后可查状态
         assert _run(provider.get_environment_status("c1")) == EnvironmentStatus.READY
+
+    def test_adopt_existing_same_name(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """D6 撞名预检收养：同名遗留容器存在时 start 幂等收养，绝不重建。"""
+        provider = _provider()
+        monkeypatch.setattr(provider, "_is_wsl_docker", lambda: False)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        async def fake_start(container_id: str, timeout: float = 15) -> tuple[bool, str]:
+            return True, ""  # running 容器 start=no-op 成功
+
+        monkeypatch.setattr(provider, "_start_one", fake_start)
+        create_calls: list[list[str]] = []
+
+        async def fake_create_and_start(name: str, run_args: list[str]) -> tuple[str, str]:
+            create_calls.append(list(run_args))
+            return "new-id", ""
+
+        monkeypatch.setattr(provider, "_create_and_start", fake_create_and_start)
+        script = _CmdScript([(0, b"old-id\n", b"")])  # inspect 取旧容器 id
+        monkeypatch.setattr(provider, "_run_cmd", script)
+        env = _run(provider.create_environment(_ctx(workspace=str(ws)), "c1"))
+        assert env.env_id == "c1"
+        assert env.status == EnvironmentStatus.READY.value
+        assert env.provider_info["container_id"] == "old-id"
+        assert create_calls == []  # 收养路径绝不重建
+
+    def test_start_unknown_error_skips_create(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """D6 超时语义：存在性未知（daemon 超时）不得推进 create，标记 query_unavailable。"""
+        provider = _provider()
+        monkeypatch.setattr(provider, "_is_wsl_docker", lambda: False)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        async def fake_start(container_id: str, timeout: float = 15) -> tuple[bool, str]:
+            return False, "docker start 异常: timed out"
+
+        monkeypatch.setattr(provider, "_start_one", fake_start)
+        create_calls: list[list[str]] = []
+
+        async def fake_create_and_start(name: str, run_args: list[str]) -> tuple[str, str]:
+            create_calls.append(list(run_args))
+            return "new-id", ""
+
+        monkeypatch.setattr(provider, "_create_and_start", fake_create_and_start)
+        env = _run(provider.create_environment(_ctx(workspace=str(ws)), "c1"))
+        assert env.status == EnvironmentStatus.ERROR.value
+        assert "隔离查询暂不可用" in env.provider_info.get("error", "")
+        assert env.provider_info.get("query_unavailable") is True
+        assert create_calls == []  # 未知不得撞 create
 
     def test_empty_workspace_rejected(self, monkeypatch: Any) -> None:
         provider = _provider()
@@ -757,6 +817,7 @@ class TestCreateEnvironment:
         provider = _provider()
         monkeypatch.setattr(provider, "_is_wsl_docker", lambda: True)
         monkeypatch.setattr(provider, "_ensure_image", _fake_ensure_image())
+        monkeypatch.setattr(provider, "_start_one", self._fake_start_not_found())
         captured: dict[str, Any] = {}
 
         async def fake_create_and_start(name: str, run_args: list[str]) -> tuple[str, str]:
@@ -772,6 +833,7 @@ class TestCreateEnvironment:
     def test_workspace_mount_disabled_skips_validation(self, tmp_path: Path, monkeypatch: Any) -> None:
         provider = _provider({"workspace_mount": False})
         monkeypatch.setattr(provider, "_ensure_image", _fake_ensure_image())
+        monkeypatch.setattr(provider, "_start_one", self._fake_start_not_found())
         monkeypatch.setattr(provider, "_create_and_start", _fake_create_and_start("abc123", ""))
         env = _run(provider.create_environment(_ctx(workspace=None), "c1"))
         assert env.status == EnvironmentStatus.READY.value
@@ -782,10 +844,13 @@ class TestCreateEnvironment:
         ws = tmp_path / "ws"
         ws.mkdir()
         monkeypatch.setattr(provider, "_ensure_image", _fake_ensure_image())
+        monkeypatch.setattr(provider, "_start_one", self._fake_start_not_found())
         monkeypatch.setattr(provider, "_create_and_start", _fake_create_and_start("", "daemon exploded"))
         env = _run(provider.create_environment(_ctx(workspace=str(ws)), "c1"))
         assert env.status == EnvironmentStatus.ERROR.value
         assert "daemon exploded" in env.provider_info.get("error", "")
+        # 确定性创建失败不带 query_unavailable（与存在性未知区分）
+        assert env.provider_info.get("query_unavailable") is None
 
 
 def _fake_ensure_image() -> Any:
@@ -803,8 +868,27 @@ def _fake_create_and_start(cid: str, err: str) -> Any:
 
 
 class TestDestroyEnvironment:
-    def test_unknown_id_idempotent(self) -> None:
-        assert _run(_provider().destroy_environment("docker-nope")) is True
+    def test_unknown_id_rm_by_name_success(self, monkeypatch: Any) -> None:
+        """D6：无内存登记不等于容器不存在——env_id 即容器名，按名强制删除。"""
+        provider = _provider()
+        script = _CmdScript([(0, b"", b"")])
+        monkeypatch.setattr(provider, "_run_cmd", script)
+        assert _run(provider.destroy_environment("c1")) is True
+        assert script.calls[0]["args"] == ["docker", "rm", "-f", "c1"]
+
+    def test_unknown_id_not_found_idempotent(self, monkeypatch: Any) -> None:
+        """D6：按名删除遇 NotFound = 真不存在，幂等成功。"""
+        provider = _provider()
+        script = _CmdScript([(1, b"", b"Error: No such container: c1")])
+        monkeypatch.setattr(provider, "_run_cmd", script)
+        assert _run(provider.destroy_environment("c1")) is True
+
+    def test_unknown_id_rm_failure_keeps_honest(self, monkeypatch: Any) -> None:
+        """D6：按名删除失败（runc 卡死等）如实返回 False，不谎报销毁成功。"""
+        provider = _provider()
+        script = _CmdScript([(1, b"", b"could not kill container")])
+        monkeypatch.setattr(provider, "_run_cmd", script)
+        assert _run(provider.destroy_environment("c1")) is False
 
     def test_no_container_id_pops_record(self) -> None:
         provider = _provider()

@@ -53,6 +53,7 @@ _STUB_KEYS = (
     "providers.base",
     "providers.docker_provider",
     "providers.host_provider",
+    "providers.wsl_native_provider",
     "hardware_profile",
     "tasks",
     "tasks.types",
@@ -143,6 +144,15 @@ def _install_stubs() -> None:
 
     host_mod.HostProvider = HostProvider
     sys.modules["providers.host_provider"] = host_mod
+
+    wsl_mod = types.ModuleType("providers.wsl_native_provider")
+
+    class WslNativeProvider:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._config = kwargs.get("config", {})
+
+    wsl_mod.WslNativeProvider = WslNativeProvider
+    sys.modules["providers.wsl_native_provider"] = wsl_mod
 
     hp = types.ModuleType("hardware_profile")
     hp.get_resource_profile = lambda: {
@@ -513,6 +523,9 @@ class TestInitFallbacks:
         else:
             monkeypatch.setitem(sys.modules, "hardware_profile", None)  # import 即失败
         mod = _load_manager()
+        # 钉 CONTAINER 后端为 docker：仓库真身 isolation_config.yaml 已启用
+        # wsl_native（占 CONTAINER 槽），不钉则真身配置渗入、断言对象漂移。
+        monkeypatch.setattr(mod, "_load_provider_config", lambda: {"docker": {}})
         mgr = mod.IsolationManager()
         assert mgr._resource_profile["tier"] == "low(fallback)"
         assert mgr._resource_profile["max_environments"] == 3
@@ -543,9 +556,9 @@ class TestInitFallbacks:
         self._install_fake_center(
             monkeypatch, seen, {"providers": {"host": {"enabled": False}}}
         )
-        mgr = mod.IsolationManager(config_path=r"config\isolation\isolation_config.yaml")
+        mgr = mod.IsolationManager(config_path=r"config\plugins\isolation\isolation_config.yaml")
         # Windows 反斜杠归一化 + 前缀剥离后才是 ConfigCenter 键
-        assert seen == ["isolation/isolation_config.yaml"]
+        assert seen == ["plugins/isolation/isolation_config.yaml"]
         assert set(mgr._providers) == {IsolationLevel.CONTAINER}
 
     def test_config_path_without_prefix_uses_key_as_is(
@@ -555,8 +568,8 @@ class TestInitFallbacks:
         seen: list[str] = []
         mod = _load_manager()
         self._install_fake_center(monkeypatch, seen, {})
-        mgr = mod.IsolationManager(config_path="isolation/isolation_config.yaml")
-        assert seen == ["isolation/isolation_config.yaml"]
+        mgr = mod.IsolationManager(config_path="plugins/isolation/isolation_config.yaml")
+        assert seen == ["plugins/isolation/isolation_config.yaml"]
         assert set(mgr._providers) == {IsolationLevel.HOST, IsolationLevel.CONTAINER}
 
     def test_config_path_load_failure_boots_with_defaults(
@@ -565,7 +578,7 @@ class TestInitFallbacks:
         """config_path 加载失败 → 告警后走默认配置，管理器仍带双提供者启动。"""
         monkeypatch.setitem(sys.modules, "config.config_center", None)  # import 即失败
         mod = _load_manager()
-        mgr = mod.IsolationManager(config_path="config/isolation/isolation_config.yaml")
+        mgr = mod.IsolationManager(config_path="config/plugins/isolation/isolation_config.yaml")
         assert set(mgr._providers) == {IsolationLevel.HOST, IsolationLevel.CONTAINER}
 
 

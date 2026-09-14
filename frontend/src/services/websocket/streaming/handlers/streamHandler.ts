@@ -208,7 +208,7 @@ export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确
 
   if (!pipelineId) return
 
-  // 统一错误信封（config/error_codes.json）：error 可能为对象（{code, message,
+  // 统一错误信封（config/kernel/error_codes.json）：error 可能为对象（{code, message,
   // source, retryable}）或旧形态字符串——提前提取供消息落元数据与通知渲染。
   const errorMsg = eventData?.data?.error || eventData?.error || '流式响应异常'
   // error 为对象时提取 message 保留具体信息，不再降级成通用文案（错误透传收口）。
@@ -264,7 +264,7 @@ export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确
     priority: 'high',
     category: 'error',
     isBlocking: false,
-    // 统一错误信封来源（config/error_codes.json）：通知中心渲染来源标签
+    // 统一错误信封来源（config/kernel/error_codes.json）：通知中心渲染来源标签
     errorSource:
       typeof errorMsg === 'object' && errorMsg !== null && typeof errorMsg.source === 'string'
         ? errorMsg.source
@@ -298,7 +298,7 @@ export function handlePipelineRoundFinished(eventData: any) {
  * 引擎 warn+继续的插件失败（result.error / invoker Err）经 plugin_error 事件
  * 送达——消息本身正常收尾（new_message/stream_end 照常），此处只弹通知中心
  * （errorSource=plugin），不标记消息失败、不终止管道。统一错误信封
- * （config/error_codes.json）：code 缺省 PLUGIN_EXEC_FAILED，retryable=false。
+ * （config/kernel/error_codes.json）：code 缺省 PLUGIN_EXEC_FAILED，retryable=false。
  */
 export function handlePluginError(eventData: any) {
   const pipelineId = resolvePipelineId(eventData)

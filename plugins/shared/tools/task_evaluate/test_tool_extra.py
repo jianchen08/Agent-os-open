@@ -986,17 +986,25 @@ class TestTaskEvaluateFunc:
     async def test_worktree_merge_gate_failure_marks_failed(
         self, mod: Any, patch_service_access: Any, monkeypatch: Any, tmp_path: Any
     ) -> None:
-        """回归（2026-09-04 裁定）：worktree 合并门控失败 → 任务标记 failed，
-        禁止绕门置完成（产物会留在未合并副本里静默丢失）。"""
+        """回归（2026-09-04 裁定）：worktree 合并门控失败（目录存在且合并真失败，
+        如冲突）→ 任务标记 failed，禁止绕门置完成（产物会留在未合并副本里
+        静默丢失）。2026-09-14 修订：目录缺失场景改为跳过合并（出生落地校验
+        已保证 mode=worktree 必有真目录，缺失=外部清理，见
+        test_worktree_merge_dir_missing_skips）。"""
+        wt_dir = tmp_path / "real_wt"
+        wt_dir.mkdir()
         task = MagicMock()
         task.status = TaskStatus.EVALUATING
-        task.metadata = {"ws_meta": {"mode": "worktree", "path": str(tmp_path / "nope_wt")}}
+        task.metadata = {"ws_meta": {"mode": "worktree", "path": str(wt_dir)}}
         service = MagicMock()
         service.get_task.return_value = task
         service.complete_evaluation = AsyncMock()
         patch_service_access["service"] = service
         state_writer = AsyncMock()
         monkeypatch.setattr(mod, "_state_writer", state_writer)
+        monkeypatch.setattr(
+            mod.worktree_merge, "merge_worktree_before_complete",
+            lambda tid, meta: "worktree 合并失败: conflict files=['a.txt']")
         out = await mod.task_evaluate_func({"action": "auto_complete", "task_id": "t1"})
         assert out["success"] is False
         assert out["error_code"] == "MERGE_GATE_FAILED"
@@ -1006,3 +1014,27 @@ class TestTaskEvaluateFunc:
         assert state_writer.await_count == 1
         assert state_writer.await_args is not None
         assert state_writer.await_args.args[1]["task.status"] == "failed"
+
+    async def test_worktree_merge_dir_missing_skips(
+        self, mod: Any, patch_service_access: Any, monkeypatch: Any, tmp_path: Any
+    ) -> None:
+        """2026-09-14 用户裁定（state 真值）：mode=worktree 但目录缺失 = 外部
+        清理（如批量评测前清理工作空间），合并无从谈起——跳过合并不判死，
+        留 warning 痕迹；不再以 267 目录无效判任务 failed。"""
+        task = MagicMock()
+        task.status = TaskStatus.EVALUATING
+        task.metadata = {"ws_meta": {"mode": "worktree",
+                                     "path": str(tmp_path / "gone_wt")}}
+        service = MagicMock()
+        service.get_task.return_value = task
+        service.complete_evaluation = AsyncMock()
+        patch_service_access["service"] = service
+        state_writer = AsyncMock()
+        monkeypatch.setattr(mod, "_state_writer", state_writer)
+        monkeypatch.setattr(
+            mod.worktree_merge, "merge_worktree_before_complete",
+            lambda tid, meta: None)  # 门控层目录缺失→跳过合并（返回 None）
+        out = await mod.task_evaluate_func({"action": "auto_complete", "task_id": "t2"})
+        assert out["success"] is True
+        assert service.complete_evaluation.await_count == 1
+        assert service.complete_evaluation.call_args.kwargs.get("passed") is True

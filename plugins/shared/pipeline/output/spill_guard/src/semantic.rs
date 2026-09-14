@@ -44,10 +44,15 @@ struct Patterns {
 fn patterns() -> &'static Patterns {
     static P: OnceLock<Patterns> = OnceLock::new();
     P.get_or_init(|| Patterns {
-        warning: [r"(?i)warning:", r"(?i)\bwarn\b", r"(?i)deprecated", r"(?i)obsolete"]
-            .iter()
-            .map(|s| Regex::new(s).expect("warning regex"))
-            .collect(),
+        warning: [
+            r"(?i)warning:",
+            r"(?i)\bwarn\b",
+            r"(?i)deprecated",
+            r"(?i)obsolete",
+        ]
+        .iter()
+        .map(|s| Regex::new(s).expect("warning regex"))
+        .collect(),
         error: [
             r"(?i)error:",
             r"(?i)fatal:",
@@ -101,7 +106,9 @@ pub fn extract(text: &str, max_error_lines: usize, max_line_chars: usize) -> Sem
             let stripped = line.trim();
             let normalized = normalize_error(stripped, p);
             *counts.entry(normalized.clone()).or_insert(0) += 1;
-            display.entry(normalized).or_insert_with(|| clip_line(stripped, max_line_chars));
+            display
+                .entry(normalized)
+                .or_insert_with(|| clip_line(stripped, max_line_chars));
             if !order.contains(&normalize_error(stripped, p)) {
                 order.push(normalize_error(stripped, p));
             }
@@ -113,16 +120,26 @@ pub fn extract(text: &str, max_error_lines: usize, max_line_chars: usize) -> Sem
     for norm in &order {
         let n = counts.get(norm).copied().unwrap_or(1);
         let shown = display.get(norm).cloned().unwrap_or_default();
-        let entry = if n > 1 { format!("{shown} (x{n})") } else { shown };
+        let entry = if n > 1 {
+            format!("{shown} (x{n})")
+        } else {
+            shown
+        };
         out.error_lines.push(entry);
     }
     if out.error_lines.len() > max_error_lines {
-        out.error_lines = out.error_lines.split_off(out.error_lines.len() - max_error_lines);
+        out.error_lines = out
+            .error_lines
+            .split_off(out.error_lines.len() - max_error_lines);
     }
 
     // 进度：从最近 50 行倒序找（对齐 LogCompressor.extract_progress）。
     let lines: Vec<&str> = text.lines().collect();
-    let recent: Vec<&str> = if lines.len() > 50 { lines[lines.len() - 50..].to_vec() } else { lines.clone() };
+    let recent: Vec<&str> = if lines.len() > 50 {
+        lines[lines.len() - 50..].to_vec()
+    } else {
+        lines.clone()
+    };
     for line in recent.iter().rev() {
         if let Some(m) = p.progress.first().and_then(|re| re.captures(line)) {
             out.progress = Some(format!("{}/{}", &m[1], &m[2]));
@@ -168,7 +185,10 @@ pub fn format_block(s: &SemanticSummary, max_line_chars: usize) -> String {
         lines.push(format!("进度: {p}"));
     }
     if !s.latest_message.is_empty() {
-        lines.push(format!("最新: {}", clip_line(&s.latest_message, max_line_chars)));
+        lines.push(format!(
+            "最新: {}",
+            clip_line(&s.latest_message, max_line_chars)
+        ));
     }
     lines.join("\n")
 }
@@ -204,7 +224,8 @@ mod tests {
 
     #[test]
     fn counts_warnings_and_errors_case_insensitive() {
-        let text = "ok line\nWARNING: deprecated api\nError: something failed\nwarn: minor\nFATAL: bad";
+        let text =
+            "ok line\nWARNING: deprecated api\nError: something failed\nwarn: minor\nFATAL: bad";
         let s = extract_default(text);
         assert_eq!(s.warnings, 2, "WARNING:/deprecated + warn:");
         assert_eq!(s.errors, 2, "Error:/failed + FATAL:");
@@ -216,7 +237,10 @@ mod tests {
         let s = extract_default(text);
         assert_eq!(s.errors, 4);
         assert!(s.error_lines.iter().any(|l| l.contains("Killed")));
-        assert!(s.error_lines.iter().any(|l| l.contains("Segmentation fault")));
+        assert!(s
+            .error_lines
+            .iter()
+            .any(|l| l.contains("Segmentation fault")));
     }
 
     #[test]
@@ -224,7 +248,9 @@ mod tests {
         let text = "error: file not found\nerror: file not found\nerror: timeout";
         let s = extract_default(text);
         assert_eq!(s.errors, 3);
-        assert!(s.error_lines.contains(&"error: file not found (x2)".to_string()));
+        assert!(s
+            .error_lines
+            .contains(&"error: file not found (x2)".to_string()));
         assert!(s.error_lines.contains(&"error: timeout".to_string()));
         assert_eq!(s.error_lines.len(), 2);
     }
@@ -255,7 +281,10 @@ mod tests {
         let long_line = format!("error: {}", "x".repeat(500));
         let s = extract_default(&long_line);
         assert_eq!(s.error_lines.len(), 1);
-        assert!(s.error_lines[0].chars().count() <= 200 + 3, "超宽行应截断加省略号");
+        assert!(
+            s.error_lines[0].chars().count() <= 200 + 3,
+            "超宽行应截断加省略号"
+        );
     }
 
     #[test]

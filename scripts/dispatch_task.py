@@ -66,6 +66,49 @@ def create_thread(token: str, title: str) -> str:
     return thread_id
 
 
+TERMINAL_TASK_STATES = {"completed", "failed", "cancelled", "stopped", "timeout"}
+
+
+def check_state(token: str, pipeline_id: str) -> str:
+    """状态门（用户裁定：每步动作前必查，终态即停）。
+
+    权威来源 = 任务服务 GET /ext/task_service/tasks/{id}（有任务检查插件，
+    不手搓 DB 查询）。task.status 永卡 running 是已知收口缺陷（D2），故
+    叠加 run 终态交叉验证：task 终态 或 run 终态 任一成立即 TERMINAL。
+    返回判定：TERMINAL（禁止 nudge/resume，需重派走新任务）/ ACTIONABLE。
+
+    注意（设计口径，用户裁定 2026-09-14）：chat 会话型主管道在任务服务中
+    无条目是**设计本身**（任务检测/评估闸门管任务域，会话管道归会话生命周期），
+    此处 task 查询 404 属预期——会话管道以 run 状态为权威。
+    """
+    task_status, run_status = "?", "?"
+    try:
+        data = _request(f"/ext/task_service/tasks/{pipeline_id}", None, token, method="GET")
+        d = data.get("data") or data
+        task_status = str(d.get("status") or "?")
+    except Exception as exc:
+        task_status = f"查询失败({exc.__class__.__name__})"
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(
+            f"file:{Path(__file__).resolve().parent.parent / 'agentos_kernel.db'}?mode=ro", uri=True
+        )
+        row = conn.execute(
+            "SELECT status FROM runs WHERE pipeline_id=? ORDER BY created_at DESC LIMIT 1",
+            (pipeline_id,),
+        ).fetchone()
+        run_status = row[0] if row else "no-run"
+    except Exception as exc:
+        run_status = f"查询失败({exc.__class__.__name__})"
+    print(f"[gate] {pipeline_id} task={task_status} run={run_status}")
+    if task_status in TERMINAL_TASK_STATES or run_status in TERMINAL_TASK_STATES | {"failed"}:
+        print("[gate] 判定=TERMINAL：禁止 nudge/resume（僵尸状态）；继续推进请重派新任务")
+        return "TERMINAL"
+    print("[gate] 判定=ACTIONABLE")
+    return "ACTIONABLE"
+
+
 def dispatch(token: str, thread_id: str, text: str, wait_seconds: int) -> None:
     from websockets.sync.client import connect
 
@@ -138,6 +181,74 @@ def dispatch_root_task(token: str, title: str, description: str, target_id: str,
     print(f"[ok] task_id={task_id} target={target_id} ws={ws_path or '(default)'}")
 
 
+def ws_drive_task(token: str, title: str, description: str, target_id: str,
+                  thread_id: str | None, ws_path: str, ws_mode: str,
+                  wait_seconds: int, steer: bool = True) -> str:
+    """WS 直驱：建会话 → PATCH 绑定执行者 → user_input 带 execution_context。
+
+    背景：直派与会话链都存在"首轮纯文本应答即终局"假绿（1 次 llm_call 后
+    post ended:true，实锤见 docs/working/batch_20260913/D2 简报）——steer
+    前导强制首轮必须调工具，压该概率。
+    """
+    if steer:
+        description = (
+            "【执行纪律（最高优先，先读这里）】本会话是任务执行会话，不是问答："
+            "你的第一轮回复就必须调用工具（推荐先 list_directory 看仓库结构），"
+            "之后每轮持续调用工具推进，直到产出交付物并 commit。"
+            "纯文本应答会立即触发管道终局——那等于任务失败。\n\n"
+            + description
+        )
+    if thread_id:
+        print(f"[ws] 复用线程 {thread_id}")
+    else:
+        data = _request("/api/v1/sessions", {"title": title, "intent": title}, token)
+        thread_id = data.get("thread_id") or (data.get("data") or {}).get("thread_id")
+        print(f"[ws] 建会话 {thread_id}")
+    _request(f"/api/v1/sessions/{thread_id}/agent", {"agent_id": target_id}, token,
+             method="PATCH")
+    print(f"[ws] 绑定执行者 {target_id}")
+
+    from websockets.sync.client import connect
+
+    ticket = _request("/api/v1/ws-ticket", {}, token)["ticket"]
+    ws_url = BASE.replace("http", "ws", 1) + f"/ws/chat?ticket={ticket}"
+    message = {
+        "type": "user_input",
+        "thread_id": thread_id,
+        "content": description,
+        "pipeline_id": "",
+        "attachments": [],
+        "enable_thinking": False,
+        "thinking_strength": "",
+        "client_message_id": f"zcode-{int(time.time() * 1000)}",
+    }
+    if ws_path:
+        message["execution_context"] = {"workspace": {"source_path": ws_path,
+                                                      "mode": ws_mode or "plain"}}
+    with connect(ws_url, open_timeout=15) as ws:
+        ws.send(json.dumps(message, ensure_ascii=False))
+        print(f"[ws] 已投递（{len(description)} 字），等 {wait_seconds}s 观察受理帧")
+        deadline = time.time() + wait_seconds
+        saw_ack = False
+        while time.time() < deadline:
+            try:
+                raw = ws.recv(timeout=max(1, deadline - time.time()))
+            except TimeoutError:
+                break
+            try:
+                frame = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            ftype = frame.get("type", "")
+            if ftype in ("new_message", "run_started", "reasoning_delta", "text_delta"):
+                saw_ack = True
+                print(f"[ws] 受理确认帧: {ftype}")
+                break
+        if not saw_ack:
+            print("[ws] 未观测到受理帧（管道可能仍在服务端排队/执行）")
+    return thread_id
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="向主 agent 会话派发任务简报")
     parser.add_argument("--list", action="store_true", help="列出现有会话线程")
@@ -152,11 +263,23 @@ def main() -> None:
     parser.add_argument("--task-thread", help="直派模式：任务挂靠 thread_id（合成 id 即可）")
     parser.add_argument("--ws-path", default="", help="直派模式：工作空间 source_path（写仓任务=仓库根）")
     parser.add_argument("--ws-mode", default="", help="直派模式：worktree/plain（写仓任务=plain）")
+    parser.add_argument("--ws-drive", action="store_true",
+                        help="WS 直驱模式：建会话+PATCH 绑执行者+user_input（绕开 tasks/root 直派缺陷）")
+    parser.add_argument("--check", metavar="PIPELINE_ID",
+                        help="状态门：查 task/run 状态并给 TERMINAL/ACTIONABLE 判定（动作前必过）")
     args = parser.parse_args()
 
-    token = _request("/api/v1/auth/login",
-                     {"username": "admin", "password": load_password()})["access_token"]
+    try:
+        token = _request("/api/v1/auth/login",
+                         {"username": "admin", "password": load_password()})
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"[err] 内核不可达（{BASE}）：{exc.reason}\n"
+                         "内核可能在重启/停止中——状态门与派发须等内核健康后执行")
+    token = token["access_token"]
 
+    if args.check:
+        check_state(token, args.check)
+        return
     if args.list:
         list_threads(token)
         return
@@ -165,12 +288,19 @@ def main() -> None:
         return
 
     if args.task_file:
-        if not (args.target and args.task_thread):
-            raise SystemExit("[err] 直派模式需要 --target 与 --task-thread")
-        dispatch_root_task(token, Path(args.task_file).stem,
-                           Path(args.task_file).read_text(encoding="utf-8"),
-                           args.target, args.ac_marker, args.task_thread,
-                           ws_path=args.ws_path, ws_mode=args.ws_mode)
+        if not args.target:
+            raise SystemExit("[err] 需要 --target")
+        title = Path(args.task_file).stem
+        desc = Path(args.task_file).read_text(encoding="utf-8")
+        if args.ws_drive:
+            ws_drive_task(token, title, desc, args.target, args.task_thread,
+                          args.ws_path, args.ws_mode, args.wait_seconds)
+        else:
+            if not args.task_thread:
+                raise SystemExit("[err] 直派模式需要 --task-thread")
+            dispatch_root_task(token, title, desc,
+                               args.target, args.ac_marker, args.task_thread,
+                               ws_path=args.ws_path, ws_mode=args.ws_mode)
         return
 
     if not args.thread:

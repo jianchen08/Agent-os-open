@@ -93,7 +93,7 @@ pub extern "C" fn agentos_plugin_create() -> *mut () {
     plugin_into_raw(SpillGuard::new())
 }
 
-/// spill 配置（config/system/spill_config.yaml 的 `spill` 命名空间）。
+/// spill 配置（config/plugins/pipeline_spill_guard/spill_config.yaml 的 `spill` 命名空间）。
 struct SpillConfig {
     max_inline_bytes: usize,
     /// 预览头部预算占比（0-0.5）。
@@ -130,21 +130,35 @@ impl SpillConfig {
         };
         let head_fraction = frac("head_fraction", 0.35);
         let tail_fraction = frac("tail_fraction", 0.35);
-        let semantic_max_lines =
-            spill.get("semantic_max_lines").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-        let semantic_max_line_chars =
-            spill.get("semantic_max_line_chars").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+        let semantic_max_lines = spill
+            .get("semantic_max_lines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10) as usize;
+        let semantic_max_line_chars = spill
+            .get("semantic_max_line_chars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200) as usize;
         let base_path = spill
             .get("base_path")
             .and_then(|v| v.as_str())
             .unwrap_or("./data/spill");
         let base_path = resolve_base_path(base_path);
-        let compression = spill.get("compression").and_then(|v| v.as_bool()).unwrap_or(true);
-        let compression_level = spill.get("compression_level").and_then(|v| v.as_u64()).unwrap_or(6) as u32;
+        let compression = spill
+            .get("compression")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let compression_level = spill
+            .get("compression_level")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(6) as u32;
         let mut skip_tools: Vec<String> = spill
             .get("skip_tools")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         if !skip_tools.iter().any(|s| s == "spill_retrieve") {
             skip_tools.push("spill_retrieve".into()); // 防 spill_retrieve 自身大输出 → 取回死循环
@@ -176,7 +190,9 @@ fn resolve_base_path(configured: &str) -> PathBuf {
     if p.is_absolute() {
         p
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(p)
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p)
     }
 }
 
@@ -196,11 +212,18 @@ fn run(state: &Value, config: &Value) -> HashMap<String, Value> {
     if results.is_empty() {
         return HashMap::new();
     }
-    let pipeline_id = state.get("pipeline_id").and_then(|v| v.as_str()).unwrap_or("default");
+    let pipeline_id = state
+        .get("pipeline_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
 
     // 本 step 的 tool 消息 = messages 末尾往前数 results.len() 条 role=tool 消息
     // （tool_core 每结果恰追加一条，顺序一致；multimodal user 消息在后不影响反向计数）。
-    let messages = state.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let messages = state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut batch: Vec<&Value> = Vec::with_capacity(results.len());
     for m in messages.iter().rev() {
         if batch.len() >= results.len() {
@@ -212,31 +235,60 @@ fn run(state: &Value, config: &Value) -> HashMap<String, Value> {
     }
     batch.reverse(); // 与 results 同序（正序配对）
 
-    let store = SpillStore::new(cfg.base_path.clone(), cfg.compression, cfg.compression_level);
+    let store = SpillStore::new(
+        cfg.base_path.clone(),
+        cfg.compression,
+        cfg.compression_level,
+    );
     let mut new_results: Vec<Value> = results.clone();
     let mut msg_ops: Vec<Value> = Vec::new();
     let mut spilled_any = false;
+    // _full_tool_results（tool_core 全文留档，2026-09-09 用户裁定）与 tool_results
+    // 同下标对齐。留档原文以 JSON 存档 {call_id}_full，state 留定位符——
+    // 轨迹/快照恒小（此前 208MB 全文随 state 落 core 轨迹行 + checkpoint，
+    // 是 DB 膨胀与 resume 巨型分配的根因）；tool_cache_writer 按定位符回读。
+    let mut full_results: Vec<Value> = state
+        .get("_full_tool_results")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut full_spilled = false;
 
     for (i, result) in results.iter().enumerate() {
         // 只兜底成功结果：失败反馈是纠错信号，吞掉会掩盖真实错误（DSH 同则）。
-        if !result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             continue;
         }
-        let tool_name = result.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+        let tool_name = result
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if cfg.skip_tools.iter().any(|s| s == tool_name) {
             continue;
         }
         // 幂等：已 spill 的结果直接跳过（llm_core 轮次重放等场景）。
-        if result.get("metadata").and_then(|m| m.get("spill")).is_some() {
+        if result
+            .get("metadata")
+            .and_then(|m| m.get("spill"))
+            .is_some()
+        {
             continue;
         }
-        let Some(data) = result.get("data") else { continue };
+        let Some(data) = result.get("data") else {
+            continue;
+        };
         if data.is_null() {
             continue;
         }
 
         // 序列化（与 tool_core messages 内容同源：serde_yaml）后按字节判断。
-        let Ok(text) = serde_yaml::to_string(data) else { continue };
+        let Ok(text) = serde_yaml::to_string(data) else {
+            continue;
+        };
         if text.len() <= cfg.max_inline_bytes {
             continue;
         }
@@ -258,7 +310,10 @@ fn run(state: &Value, config: &Value) -> HashMap<String, Value> {
         let budget = cfg.max_inline_bytes.saturating_sub(notice_reserve);
         let head_bytes = (budget as f64 * cfg.head_fraction) as usize;
         let tail_bytes = (budget as f64 * cfg.tail_fraction) as usize;
-        let mut retainer = TextRetainer::new(TextStrategy::HeadTail { head_bytes, tail_bytes });
+        let mut retainer = TextRetainer::new(TextStrategy::HeadTail {
+            head_bytes,
+            tail_bytes,
+        });
         retainer.push_str(&text);
         let retained: RetainedText = retainer.finish();
         let sem = semantic::extract(&text, cfg.semantic_max_lines, cfg.semantic_max_line_chars);
@@ -279,18 +334,41 @@ fn run(state: &Value, config: &Value) -> HashMap<String, Value> {
         if !metadata.is_object() {
             metadata = json!({});
         }
-        metadata.as_object_mut().expect("metadata ensured object").insert(
-            "spill".into(),
-            json!({
-                "tool_call_id": call_id,
-                "locator": spill_ref.locator,
-                "original_bytes": spill_ref.original_bytes,
-                "compressed": spill_ref.compressed,
-            }),
-        );
+        metadata
+            .as_object_mut()
+            .expect("metadata ensured object")
+            .insert(
+                "spill".into(),
+                json!({
+                    "tool_call_id": call_id,
+                    "locator": spill_ref.locator,
+                    "original_bytes": spill_ref.original_bytes,
+                    "compressed": spill_ref.compressed,
+                }),
+            );
         nr["data"] = Value::String(replacement.clone());
         nr["metadata"] = metadata.clone();
         spilled_any = true;
+
+        // _full_tool_results[i] 定位符化（缺失/越界/已定位 → 跳过；存档失败
+        // 保全文内联，与主结果同 best-effort 语义）。
+        if let Some(full) = full_results.get_mut(i) {
+            if full.is_object() && full.get("__spilled__").is_none() {
+                if let Ok(full_json) = serde_json::to_string(full) {
+                    let full_key = format!("{call_id}_full");
+                    if let Ok(full_ref) = store.save(pipeline_id, &full_key, &full_json) {
+                        *full = json!({
+                            "__spilled__": true,
+                            "tool_call_id": call_id,
+                            "locator": full_ref.locator,
+                            "original_bytes": full_ref.original_bytes,
+                            "compressed": full_ref.compressed,
+                        });
+                        full_spilled = true;
+                    }
+                }
+            }
+        }
 
         // 覆盖对应 tool 消息（显式 seq set op：内存数组 + message_slots 同槽位替换）。
         if let Some(m) = msg {
@@ -306,11 +384,14 @@ fn run(state: &Value, config: &Value) -> HashMap<String, Value> {
         }
     }
 
-    if !spilled_any {
+    if !spilled_any && !full_spilled {
         return HashMap::new();
     }
     let mut updates: HashMap<String, Value> = HashMap::new();
     updates.insert("tool_results".into(), json!(new_results));
+    if full_spilled {
+        updates.insert("_full_tool_results".into(), json!(full_results));
+    }
     if !msg_ops.is_empty() {
         updates.insert("messages".into(), json!({ "_ops": msg_ops }));
     }
@@ -337,7 +418,10 @@ fn build_replacement(
         out.push_str("\n── 预览（头/尾）──\n");
         out.push_str(parts[0]);
         if parts.len() > 1 {
-            out.push_str(&format!("\n\n...[中间 {} 字节已省略]...\n\n", retained.omitted_bytes));
+            out.push_str(&format!(
+                "\n\n...[中间 {} 字节已省略]...\n\n",
+                retained.omitted_bytes
+            ));
             out.push_str(parts[1]);
         }
     }
@@ -496,7 +580,11 @@ mod tests {
         let (r, m) = bash_result("call_big1", &big_output(8));
         let updates = run(&make_state(vec![r], vec![m]), &test_config(dir.path()));
 
-        let new_results = updates.get("tool_results").expect("tool_results 更新").as_array().unwrap();
+        let new_results = updates
+            .get("tool_results")
+            .expect("tool_results 更新")
+            .as_array()
+            .unwrap();
         assert_eq!(new_results.len(), 1);
         let nr = &new_results[0];
         assert_eq!(nr["tool_name"], "bash_execute");
@@ -521,21 +609,36 @@ mod tests {
         );
 
         let store = spill_store::SpillStore::new(dir.path(), false, 6);
-        let original = store.read("pipe-test", "call_big1").expect("spill 原文可读回");
+        let original = store
+            .read("pipe-test", "call_big1")
+            .expect("spill 原文可读回");
         // YAML block literal（|-）保留真实换行（缩进为呈现层细节）：
         // 逐行断言原文完整性。
-        assert!(original.contains("line 000000: some build output here"), "存档含首行原文");
-        assert!(original.contains("line 000127: some build output here"), "存档含末行原文（完整存档）");
+        assert!(
+            original.contains("line 000000: some build output here"),
+            "存档含首行原文"
+        );
+        assert!(
+            original.contains("line 000127: some build output here"),
+            "存档含末行原文（完整存档）"
+        );
     }
 
     #[test]
     fn messages_ops_overwrite_tool_message() {
         let dir = tempfile::tempdir().unwrap();
         let (r, m) = bash_result("call_big2", &big_output(8));
-        let updates = run(&make_state(vec![r], vec![m.clone()]), &test_config(dir.path()));
+        let updates = run(
+            &make_state(vec![r], vec![m.clone()]),
+            &test_config(dir.path()),
+        );
 
-        let ops = updates.get("messages").expect("messages 更新")
-            .get("_ops").and_then(|o| o.as_array()).expect("_ops 数组");
+        let ops = updates
+            .get("messages")
+            .expect("messages 更新")
+            .get("_ops")
+            .and_then(|o| o.as_array())
+            .expect("_ops 数组");
         assert_eq!(ops.len(), 1, "一条 tool 消息一个 set op");
         let op = &ops[0];
         assert_eq!(op["op"], "set");
@@ -546,7 +649,10 @@ mod tests {
         let replacement = updates["tool_results"][0]["data"].as_str().unwrap();
         assert_eq!(msg["content"].as_str().unwrap(), replacement);
         assert_eq!(msg["tool_result"]["data"].as_str().unwrap(), replacement);
-        assert_eq!(msg["tool_result"]["metadata"]["spill"]["tool_call_id"], "call_big2");
+        assert_eq!(
+            msg["tool_result"]["metadata"]["spill"]["tool_call_id"],
+            "call_big2"
+        );
     }
 
     #[test]
@@ -563,7 +669,10 @@ mod tests {
         let (r, m) = bash_result("call_sem", &output);
         let updates = run(&make_state(vec![r], vec![m]), &test_config(dir.path()));
         let replacement = updates["tool_results"][0]["data"].as_str().unwrap();
-        assert!(replacement.contains("compilation failed"), "语义提取的错误行必须在替换文本中");
+        assert!(
+            replacement.contains("compilation failed"),
+            "语义提取的错误行必须在替换文本中"
+        );
         assert!(replacement.contains("错误"));
     }
 
@@ -577,7 +686,10 @@ mod tests {
         let (r, m) = bash_result("call_cn", &output);
         let updates = run(&make_state(vec![r], vec![m]), &test_config(dir.path()));
         let replacement = updates["tool_results"][0]["data"].as_str().unwrap();
-        assert!(!replacement.contains('\u{FFFD}'), "替换文本不得有替换字符：{replacement}");
+        assert!(
+            !replacement.contains('\u{FFFD}'),
+            "替换文本不得有替换字符：{replacement}"
+        );
         assert!(replacement.contains("中文构建日志输出"), "头部中文完整保留");
     }
 
@@ -610,7 +722,10 @@ mod tests {
             "seq": 5,
         });
         let updates = run(
-            &make_state(vec![small_r, big_r, failed], vec![small_m, big_m, failed_msg]),
+            &make_state(
+                vec![small_r, big_r, failed],
+                vec![small_m, big_m, failed_msg],
+            ),
             &test_config(dir.path()),
         );
         let results = updates["tool_results"].as_array().unwrap();
@@ -665,8 +780,95 @@ mod tests {
             },
             "seq": 7,
         });
-        let updates = run(&make_state(vec![result], vec![msg]), &test_config(dir.path()));
+        let updates = run(
+            &make_state(vec![result], vec![msg]),
+            &test_config(dir.path()),
+        );
         assert!(updates.is_empty(), "已 spill 标记 → 跳过（幂等）");
+    }
+
+    #[test]
+    fn full_results_located_when_spilled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r, m) = bash_result("call_big3", &big_output(8));
+        let full = json!({
+            "tool_name": "bash_execute",
+            "success": true,
+            "error": null,
+            "data": {"output": big_output(8)},
+            "metadata": null,
+            "duration_ms": 12.5,
+        });
+        let mut state = make_state(vec![r], vec![m]);
+        state
+            .as_object_mut()
+            .unwrap()
+            .insert("_full_tool_results".into(), json!([full]));
+        let updates = run(&state, &test_config(dir.path()));
+
+        let located = updates["_full_tool_results"][0]
+            .as_object()
+            .expect("定位符对象");
+        assert_eq!(located["__spilled__"], true);
+        assert_eq!(located["tool_call_id"], "call_big3");
+        let locator = located["locator"].as_str().unwrap();
+        assert!(
+            locator.ends_with("call_big3_full"),
+            "定位符指向 _full 存档: {locator}"
+        );
+
+        // 存档可回读且 JSON 结构完整（tool_cache_writer 依赖原样重建 ToolResult）
+        let store = spill_store::SpillStore::new(dir.path(), false, 6);
+        let text = store
+            .read("pipe-test", "call_big3_full")
+            .expect("_full 存档可读");
+        let back: Value = serde_json::from_str(&text).expect("存档必须是合法 JSON");
+        assert_eq!(back["tool_name"], "bash_execute");
+        assert!(
+            back["data"]["output"]
+                .as_str()
+                .unwrap()
+                .starts_with("line 000000"),
+            "全文 data 原样保留"
+        );
+    }
+
+    #[test]
+    fn full_results_absent_key_not_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r, m) = bash_result("call_big4", &big_output(8));
+        let updates = run(&make_state(vec![r], vec![m]), &test_config(dir.path()));
+        assert!(
+            !updates.contains_key("_full_tool_results"),
+            "state 无 _full_tool_results 时不得凭空造键"
+        );
+    }
+
+    #[test]
+    fn full_already_located_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (r, m) = bash_result("call_big5", &big_output(8));
+        let full_marker = json!({
+            "__spilled__": true,
+            "tool_call_id": "call_prev",
+            "locator": "pipe-test/call_prev_full",
+            "original_bytes": 9999,
+            "compressed": false,
+        });
+        let mut state = make_state(vec![r], vec![m]);
+        state
+            .as_object_mut()
+            .unwrap()
+            .insert("_full_tool_results".into(), json!([full_marker.clone()]));
+        let updates = run(&state, &test_config(dir.path()));
+        assert!(
+            !updates.contains_key("_full_tool_results"),
+            "已定位符化的元素无需变更 → 不重复 emit 该键（幂等）"
+        );
+        assert!(
+            updates["tool_results"][0]["metadata"]["spill"].is_object(),
+            "主结果本身仍照常兜底"
+        );
     }
 
     #[test]
@@ -694,7 +896,7 @@ mod tests {
         };
         let guard = SpillGuard::new();
         let out = guard.execute(&ectx).expect("execute ok");
-        let parsed: HashMap<String, Value> = serde_json::from_str(&out).unwrap();
+        let parsed: HashMap<String, Value> = serde_json::from_str(out).unwrap();
         assert!(parsed.contains_key("tool_results"));
     }
 }

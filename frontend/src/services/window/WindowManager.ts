@@ -180,11 +180,27 @@ export function isElectronWindowAvailable(): boolean {
 }
 
 /**
+ * 子窗口深链 URL 形态（按页面源协议分派）：
+ * - app:（打包件自定义协议，见 electron/app-protocol.ts）→ pathname 形态
+ *   `app://bundle/p/<pageId>`——createBrowserRouter 按 pathname 匹配，
+ *   hash 形态在 app:// 下路由不到插件页；
+ * - http(s)（dev Vite server / Web 部署）→ hash 形态 `<origin>/#/p/<pageId>`（现状契约）。
+ *
+ * 纯函数，便于单测（WindowManager.childWindowUrl.test）。
+ */
+export function buildChildWindowUrl(origin: string, protocol: string, pageId: string): string {
+  if (protocol === 'app:') {
+    return `${origin}/p/${pageId}`
+  }
+  return `${origin}/#/p/${pageId}`
+}
+
+/**
  * 把 page + opts 合并为 Electron IPC 的 open 参数。
  *
  * 纯函数（无副作用），便于单测；ElectronWindowManager 内部复用。
  *
- * URL 构造：window.location.origin + '/#/p/' + page.id（深链 hash 路由）。
+ * URL 构造：buildChildWindowUrl（按 location.protocol 分派深链形态）。
  * 默认值与 main.ts 的 createChildWindow 对齐：width 320 / height 480 / frame false。
  */
 function toElectronOpenOptions(
@@ -195,13 +211,11 @@ function toElectronOpenOptions(
   const size = resolveSize(page, opts)
   const position = resolvePosition(size, opts)
   // Vite SPA：构建产物只运行在浏览器/WebView，window 恒存在（无 SSR 分支）
-  const origin = window.location.origin
-
   return {
     // 用 page.id + 计数器作为请求 id（与 main.ts 注册表 key 对齐）；
     // main.ts 在 id 重复时聚焦已有窗口，故即便碰撞也安全
     id: `${page.id}-ewin-${Date.now()}-${++windowSeq}`,
-    url: `${origin}/#/p/${page.id}`,
+    url: buildChildWindowUrl(window.location.origin, window.location.protocol, page.id),
     title: page.title ?? page.id,
     width: size.width,
     height: size.height,

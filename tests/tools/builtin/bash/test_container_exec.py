@@ -506,7 +506,7 @@ async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
     tool = BashTool()
     captured: dict = {}
 
-    async def fake_start_process(command, working_dir=None, env=None, log_dir=None, container_id=None, provider_kind=None, bwrap_pid=None, owner=None, on_output=None):
+    async def fake_start_process(command, working_dir=None, env=None, log_dir=None, container_id=None, provider_kind=None, bwrap_pid=None, owner=None, on_output=None, exec_backend=None):
         captured["command"] = command
         captured["container_id"] = container_id
         # 返回一个立刻完成的假 pid
@@ -580,7 +580,7 @@ async def test_bashtool_execute_with_container_id_skips_security_check(tmp_path)
     tool2 = BashTool()
     start_called: list = []
 
-    async def fake_start_process(command, working_dir=None, env=None, log_dir=None, container_id=None, provider_kind=None, bwrap_pid=None, owner=None, on_output=None):
+    async def fake_start_process(command, working_dir=None, env=None, log_dir=None, container_id=None, provider_kind=None, bwrap_pid=None, owner=None, on_output=None, exec_backend=None):
         start_called.append(command)
         return 1, tmp_path / "fake.log"
 

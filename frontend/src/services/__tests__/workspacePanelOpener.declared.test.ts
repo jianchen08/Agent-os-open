@@ -13,6 +13,7 @@ import {
   TOP_NAV_PANELS,
 } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useUIStore } from '@/stores/uiStore'
 
 /** 以三插件的真实声明形态装载 schema（等价 GrowthLoop → loadFromSchema） */
 function seedSchema(enabled: 'all' | 'none') {
@@ -174,5 +175,50 @@ describe('T11：面板入口声明驱动', () => {
   it('agent_manager 禁用（声明移除）→ /agents 不再命中（不回退硬编码）', () => {
     seedSchema('none')
     expect(openWorkspacePanelByPath('/agents')).toBe(false)
+  })
+
+  it('BUG-11 回归：先注册的无 path 同名页不吞掉 /tasks → 点「打开任务管理」面板展开', () => {
+    // 生产 schema 实况：debug_center（id=tasks，无 path）在 plugin_contributes 中
+    // 先于 task_service（id=tasks，path=/tasks）。裸 id 去重会把后者静默丢弃，
+    // 工作区空态按钮点击后仅弹错误通知、面板永不展开。此处按真实顺序装载。
+    contributionRegistry.loadFromSchema({
+      plugin_contributes: [
+        {
+          plugin_id: 'debug_center',
+          plugin_name: 'Debug Center',
+          contributes: {
+            pages: [{ id: 'tasks', title: '任务', space: 'debug_center', widget: 'debug_tasks' }],
+          },
+        },
+        {
+          plugin_id: 'task_service',
+          plugin_name: 'Task Service',
+          contributes: {
+            pages: [
+              {
+                id: 'tasks',
+                title: '任务管理',
+                icon: 'folder',
+                space: 'workspace',
+                slot: 'tab',
+                path: '/tasks',
+                widget: 'pipeline_manager',
+              },
+            ],
+          },
+        },
+      ],
+      plugin_configs: [],
+    })
+
+    useUIStore.setState({ workspaceCollapsed: true })
+    expect(openWorkspacePanelByPath('/tasks')).toBe(true)
+    const tab = useLayoutModeStore.getState().workspaceTabs.find(
+      (t) => t.component === 'pipeline_manager',
+    )
+    expect(tab).toBeDefined()
+    expect(tab?.moduleId).toBe('__plugin_task_service__')
+    // 面板展开的可观察副产物：折叠态被打开
+    expect(useUIStore.getState().workspaceCollapsed).toBe(false)
   })
 })

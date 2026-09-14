@@ -458,12 +458,12 @@ def _project_root() -> str:
 
 
 def load_plugin_config() -> dict[str, Any]:
-    """读适配器配置（config/dsh_adapter.yaml）的 ``plugins`` 映射。
+    """读适配器配置（config/plugins/dsh_adapter/dsh_adapter.yaml）的 ``plugins`` 映射。
 
     配置是 DSH 插件装载管理：``{包目录名: {enabled: bool}}``。读失败或
     缺文件返回空 dict（语义 = 全部默认启用，不因配置问题阻塞装载）。
     """
-    cfg_path = Path(_project_root()) / "config" / "dsh_adapter.yaml"
+    cfg_path = Path(_project_root()) / "config" / "plugins" / "dsh_adapter" / "dsh_adapter.yaml"
     try:
         with open(cfg_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
@@ -515,7 +515,8 @@ def load_installed_plugins() -> dict[str, Any]:
 # （配色/背景图/基准走主题管线渲染）；DOM 补丁层由前端按择注入通道
 # 原样搬入（merged.css + hooks.mjs，见 server.py 与 dshSkinCss.ts）。
 
-SKIN_CENTER_SKINS_DIR = Path(__file__).parent / "dsh_plugins" / "skin-center" / "skins"
+# 皮肤唯一真值位：skin-center 原生用户皮肤目录（不放插件包内，随插件迁移走会丢）。
+SKIN_CENTER_SKINS_DIR = Path.home() / ".dsh" / "skins"
 
 
 def list_available_skins(base_dir: str | Path | None = None) -> list[str]:
@@ -1205,8 +1206,8 @@ def skins_to_plugin_themes(base_dir: str | Path | None = None) -> list[dict[str,
     """DSH 皮肤 → 灵汐 PluginTheme 声明（contributes.themes 条目）。
 
     dsh_adapter = 特殊皮肤插件：装载的每套皮肤以 contributes.themes 声明，
-    前端既有插件主题通道自动发现/渲染/选择，零前端改动；添加皮肤 = 放包进
-    dsh_plugins（适配器 on_load 自动同步本声明，无需手工翻译或改 manifest）。
+    前端既有插件主题通道自动发现/渲染/选择，零前端改动；添加皮肤 = 放入
+    ~/.dsh/skins（适配器 on_load 自动同步本声明，无需手工翻译或改 manifest）。
 
     条目形态（PluginTheme，types/theme.ts）：
     - id: dsh-skin-<skin>（contributionRegistry 全局键 dsh_adapter:dsh-skin-*）

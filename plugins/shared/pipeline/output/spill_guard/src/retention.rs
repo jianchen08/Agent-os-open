@@ -23,7 +23,10 @@ pub enum TextStrategy {
     /// 留后 max_bytes 字节（需读到流末尾）。
     Tail { max_bytes: usize },
     /// 留稳定头尾、省略中间（需读到流末尾）。
-    HeadTail { head_bytes: usize, tail_bytes: usize },
+    HeadTail {
+        head_bytes: usize,
+        tail_bytes: usize,
+    },
 }
 
 /// 单次 push 的决策反馈。
@@ -60,7 +63,10 @@ impl TextRetainer {
         let (prefix_cap, suffix_cap) = match strategy {
             TextStrategy::Head { max_bytes } => (max_bytes, 0),
             TextStrategy::Tail { max_bytes } => (0, max_bytes),
-            TextStrategy::HeadTail { head_bytes, tail_bytes } => (head_bytes, tail_bytes),
+            TextStrategy::HeadTail {
+                head_bytes,
+                tail_bytes,
+            } => (head_bytes, tail_bytes),
         };
         Self {
             prefix_cap,
@@ -271,10 +277,16 @@ impl<T> ItemRetainer<T> {
         if self.items.len() < self.max_items {
             // 只在未达上限时到达：此前从未丢弃，truncated 恒 false。
             self.items.push(item);
-            return PushDecision { kept: true, truncated: false };
+            return PushDecision {
+                kept: true,
+                truncated: false,
+            };
         }
         self.omitted += 1;
-        PushDecision { kept: false, truncated: true }
+        PushDecision {
+            kept: false,
+            truncated: true,
+        }
     }
 
     pub fn finish(self) -> RetainedItems<T> {
@@ -309,7 +321,10 @@ mod tests {
 
     #[test]
     fn head_tail_short_output_fully_kept() {
-        let mut r = TextRetainer::new(TextStrategy::HeadTail { head_bytes: 8, tail_bytes: 8 });
+        let mut r = TextRetainer::new(TextStrategy::HeadTail {
+            head_bytes: 8,
+            tail_bytes: 8,
+        });
         r.push_str("hello");
         let out = r.finish();
         assert_eq!(out.text, "hello");
@@ -339,7 +354,10 @@ mod tests {
 
     #[test]
     fn head_tail_omits_middle() {
-        let mut r = TextRetainer::new(TextStrategy::HeadTail { head_bytes: 4, tail_bytes: 4 });
+        let mut r = TextRetainer::new(TextStrategy::HeadTail {
+            head_bytes: 4,
+            tail_bytes: 4,
+        });
         r.push_str("0123456789");
         let out = r.finish();
         assert_eq!(out.text, "0123".to_string() + "6789");
@@ -361,9 +379,27 @@ mod tests {
     #[test]
     fn push_decision_flags_progressive_drop() {
         let mut r = TextRetainer::new(TextStrategy::Head { max_bytes: 4 });
-        assert_eq!(r.push_str("ab"), PushDecision { kept: true, truncated: false });
-        assert_eq!(r.push_str("cd"), PushDecision { kept: true, truncated: false });
-        assert_eq!(r.push_str("ef"), PushDecision { kept: false, truncated: true });
+        assert_eq!(
+            r.push_str("ab"),
+            PushDecision {
+                kept: true,
+                truncated: false
+            }
+        );
+        assert_eq!(
+            r.push_str("cd"),
+            PushDecision {
+                kept: true,
+                truncated: false
+            }
+        );
+        assert_eq!(
+            r.push_str("ef"),
+            PushDecision {
+                kept: false,
+                truncated: true
+            }
+        );
     }
 
     #[test]
@@ -387,7 +423,10 @@ mod tests {
 
     #[test]
     fn utf8_head_tail_no_omission_decodes_whole() {
-        let mut r = TextRetainer::new(TextStrategy::HeadTail { head_bytes: 3, tail_bytes: 3 });
+        let mut r = TextRetainer::new(TextStrategy::HeadTail {
+            head_bytes: 3,
+            tail_bytes: 3,
+        });
         r.push_str("中");
         let out = r.finish();
         assert_eq!(out.text, "中");
@@ -407,17 +446,27 @@ mod tests {
     #[test]
     fn utf8_emoji_survives_head_tail() {
         let text = format!("xx{}{}{}yy", "🙂", "🙂", "🙂");
-        let mut r = TextRetainer::new(TextStrategy::HeadTail { head_bytes: 6, tail_bytes: 6 });
+        let mut r = TextRetainer::new(TextStrategy::HeadTail {
+            head_bytes: 6,
+            tail_bytes: 6,
+        });
         r.push_str(&text);
         let out = r.finish();
-        assert!(!out.text.contains('\u{FFFD}'), "emoji 不得被切坏：{:?}", out.text);
+        assert!(
+            !out.text.contains('\u{FFFD}'),
+            "emoji 不得被切坏：{:?}",
+            out.text
+        );
         assert!(out.truncated);
     }
 
     #[test]
     fn streaming_memory_stays_bounded() {
         let chunk = vec![b'a'; 4096];
-        let mut r = TextRetainer::new(TextStrategy::HeadTail { head_bytes: 1024, tail_bytes: 1024 });
+        let mut r = TextRetainer::new(TextStrategy::HeadTail {
+            head_bytes: 1024,
+            tail_bytes: 1024,
+        });
         let mut total = 0usize;
         for _ in 0..256 {
             r.push(&chunk);

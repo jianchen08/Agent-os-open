@@ -26,6 +26,7 @@ copy_file,move_file,delete_file}/tool.py]
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import shutil
 import sys
@@ -175,8 +176,55 @@ FILE_READ_OUTPUT_SCHEMA: dict[str, Any] = {
         "lines": {"type": "integer"},
         "size": {"type": "integer"},
         "content": {"type": "string"},
+        "path": {"type": "string", "description": "图片模态读取时的文件绝对路径"},
+        "mime_type": {"type": "string", "description": "图片模态读取时的 MIME 类型"},
+        "base64_data": {"type": "string", "description": "图片模态读取时的 base64 内容"},
     },
 }
+
+# 图片模态内联上限：对齐平台缺省 multimodal.max_image_size（20MB）。模型级
+# 精确能力（supported_image_types/上限）由 llm 域声明，工具层只做平台级兜底。
+_MAX_IMAGE_EMBED_BYTES = 20 * 1024 * 1024
+
+
+def _sniff_image_mime(head: bytes) -> str | None:
+    """魔数嗅探图片 MIME（模态契约仅声明内容类型，模型支持性由管道闸门判定）。"""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head.startswith(b"BM"):
+        return "image/bmp"
+    return None
+
+
+def _read_binary_by_modality(file_path: Path, head: bytes) -> ToolResult:
+    """二进制按模态分流（2026-09-14 用户裁定）。
+
+    图片模态 → base64_data + mime_type 契约（tool_core inject_multimodal 按
+    state.llm_supports_vision 注图或给文本引导）；非模态二进制维持干净拒绝。
+    """
+    size = file_path.stat().st_size
+    mime = _sniff_image_mime(head)
+    if mime is None:
+        return ToolResult.failure_result(f"Binary file or encoding issue: {file_path}")
+    if size > _MAX_IMAGE_EMBED_BYTES:
+        return ToolResult.failure_result(
+            f"Image too large to inline: {file_path} ({size} bytes, 上限 {_MAX_IMAGE_EMBED_BYTES})"
+        )
+    raw = file_path.read_bytes()
+    return ToolResult.success_result(
+        {
+            "path": str(file_path.resolve()),
+            "mime_type": mime,
+            "base64_data": base64.b64encode(raw).decode("ascii"),
+            "size": size,
+        }
+    )
 
 
 async def file_read(
@@ -212,10 +260,22 @@ async def file_read(
 
     size = file_path.stat().st_size
 
+    # 二进制闸（git 同款 NUL 探测）：NUL 是合法 UTF-8 码点，纯解码异常
+    # 检测不出含 NUL 的二进制——先嗅探文件头再读文本（2026-09-14 用户裁定）。
+    try:
+        with file_path.open("rb") as fh:
+            head = fh.read(64 * 1024)
+    except OSError as e:
+        return ToolResult.failure_result(f"Read error: {e}")
+    if b"\x00" in head:
+        return _read_binary_by_modality(file_path, head)
+
     try:
         content = await asyncio.to_thread(file_path.read_text, "utf-8")
     except UnicodeDecodeError:
-        return ToolResult.failure_result(f"Binary file or encoding issue: {path}")
+        # 无 NUL 的非 UTF-8 内容（如 JPEG）：同样按模态分流——
+        # 图片走 base64 契约，其余维持干净拒绝。
+        return _read_binary_by_modality(file_path, head)
     except OSError as e:
         return ToolResult.failure_result(f"Read error: {e}")
 

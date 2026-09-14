@@ -917,3 +917,213 @@ class TestSignatureAndHelpers:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
+
+
+# ============================================================
+# 路径穿越/敏感路径残余分支（coverage.xml 缺口靶行）
+# ============================================================
+
+
+class TestPathTraversalResolvedBranch:
+    """``_check_path_traversal`` 的 resolve 后判定与编码绕过分支。"""
+
+    def _plugin(self) -> Any:
+        return SecurityCheckPlugin(config={"enabled": True})
+
+    def test_resolved_path_containing_dotdot_is_rejected(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """CWD 自身含 ``..`` 字面量时，相对路径 resolve 后仍带 ``..`` →
+        按解析后穿越拒绝（原始路径无 ``..`` 也拦得住，防 CWD 形态绕过）。"""
+        import os
+
+        weird_cwd = tmp_path / "a..b"
+        weird_cwd.mkdir()
+        monkeypatch.chdir(weird_cwd)
+        try:
+            reason = self._plugin()._check_path_traversal({"path": "sub/file.txt"})
+        finally:
+            os.chdir(str(tmp_path))
+
+        assert "Path traversal in resolved path" in reason
+        assert "sub/file.txt" in reason
+
+    @pytest.mark.parametrize(
+        ("path", "expected_fragment"),
+        [
+            ("a\x00b.png", "Invalid path"),              # NUL 使 stat 失败 → Invalid
+            ("C:/x\x00y.png", "Invalid path"),
+        ],
+    )
+    def test_null_byte_rejected_via_invalid_path(
+        self, path: str, expected_fragment: str,
+    ) -> None:
+        """含 NUL 的路径在 resolve 阶段即失败 → ``Invalid path``（拒绝语义等价，
+        且比解析成功后的 NUL 检查更早触发）。"""
+        reason = self._plugin()._check_path_traversal({"path": path})
+
+        assert expected_fragment in reason
+        assert path.split("\x00")[0] in reason
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("%2e%2e%2fetc%2fpasswd", "Encoded path traversal"),
+            ("%252e%252e%252fetc", "Encoded path traversal"),   # 双重编码
+            ("a%2e%2eb", "Encoded path traversal"),              # 解码出 .. 即命中（编码等同原形）
+            ("a%20b.png", ""),                                    # 良性编码（空格）放行
+            ("100%25.png", ""),                                   # 良性百分号放行
+        ],
+    )
+    def test_encoded_traversal_matrix(self, path: str, expected: str) -> None:
+        """URL 编码/双重编码穿越命中，良性百分号路径放行（不误报）。"""
+        reason = self._plugin()._check_path_traversal({"path": path})
+
+        if expected:
+            assert expected in reason
+        else:
+            assert reason == ""
+
+    @pytest.mark.parametrize(
+        ("path", "expected_hit"),
+        [
+            ("plain/file.txt", False),
+            ("C:/Users/me/proj/a.py", False),
+            ("../escape", True),
+            (chr(46) * 2 + chr(92) + "escape", True),  # 反斜杠形态穿越
+        ],
+    )
+    def test_benign_and_traversal_symmetry(self, path: str, expected_hit: bool) -> None:
+        """良性路径零产出、穿越路径命中（同契约两面，防单向拟合）。"""
+        reason = self._plugin()._check_path_traversal({"path": path})
+
+        assert bool(reason) is expected_hit
+
+    def test_empty_args_yields_empty_reason(self) -> None:
+        """无路径参数 → 空串（不产生误导性拒绝）。"""
+        assert self._plugin()._check_path_traversal({}) == ""
+
+
+class TestDangerousOpsDeclarations:
+    """``_args_hit_dangerous_ops`` 声明形态分派。"""
+
+    def _plugin(self) -> Any:
+        return SecurityCheckPlugin(config={"enabled": True})
+
+    @pytest.mark.parametrize(
+        ("tool_args", "ops", "expected"),
+        [
+            (None, ["rm -rf"], False),                                   # 无参数
+            ({}, ["rm -rf"], False),
+            ({"path": "/etc/passwd"}, ["read:/etc/"], True),             # 路径前缀命中
+            ({"path": "/ETC/passwd"}, ["read:/etc/"], True),             # 大小写不敏感
+            ({"path": "/etc2/passwd"}, ["read:/etc"], True),             # 前缀语义（非目录边界）
+            ({"path": "/tmp/x"}, ["read:/etc/"], False),                 # 前缀不符
+            ({"file_path": "C:/Windows/x"}, ["write:c:\\windows\\"], True),  # 盘符归一
+            ({"path": "relative/x"}, ["read:/etc/"], False),             # 相对路径不匹配
+        ],
+    )
+    def test_operation_path_prefix_declarations(
+        self, tool_args: Any, ops: list[str], expected: bool,
+    ) -> None:
+        """``op:path`` 形态按路径参数前缀匹配（分隔符/大小写归一）。"""
+        assert self._plugin()._args_hit_dangerous_ops(tool_args, ops) is expected
+
+    @pytest.mark.parametrize(
+        ("tool_args", "ops", "expected"),
+        [
+            ({"operation": "delete_lines"}, ["delete_lines:"], True),   # 空模式：操作值等值
+            ({"op": "DELETE_LINES"}, ["delete_lines:"], True),          # 大小写不敏感
+            ({"action": "delete_lines"}, ["delete_lines:"], True),
+            ({"operation": "other"}, ["delete_lines:"], False),
+            ({"path": "delete_lines"}, ["delete_lines:"], False),       # 不看路径参数
+        ],
+    )
+    def test_empty_pattern_matches_operation_value(
+        self, tool_args: Any, ops: list[str], expected: bool,
+    ) -> None:
+        """``op:``（空模式）形态按操作参数值等值匹配。"""
+        assert self._plugin()._args_hit_dangerous_ops(tool_args, ops) is expected
+
+    @pytest.mark.parametrize(
+        ("tool_args", "ops", "expected"),
+        [
+            ({"command": "sudo rm -rf /"}, ["rm -rf"], True),
+            ({"cmd": "RM -RF /"}, ["rm -rf"], True),                    # 大小写不敏感
+            ({"command": "ls -la"}, ["rm -rf"], False),
+            ({"path": "rm -rf"}, ["rm -rf"], False),                    # 裸模式只看 command/cmd
+            ({"command": "echo hi"}, [""], False),                      # 空声明跳过
+        ],
+    )
+    def test_bare_command_substring_match(
+        self, tool_args: Any, ops: list[str], expected: bool,
+    ) -> None:
+        """裸命令形态按 command/cmd 子串匹配（空声明跳过，不误伤全部调用）。"""
+        assert self._plugin()._args_hit_dangerous_ops(tool_args, ops) is expected
+
+    @pytest.mark.parametrize("value", [1, 2.5, "x"])
+    def test_scalar_args_coerced_to_str(self, value: Any) -> None:
+        """标量参数（int/float/str）转字符串参与匹配；容器类型参数剔除。"""
+        p = self._plugin()
+
+        assert p._args_hit_dangerous_ops({"command": value}, [str(value)]) is True
+        assert p._args_hit_dangerous_ops({"command": value, "x": {"a": 1}}, ["nope"]) is False
+
+
+class TestSensitivePathSharedModule:
+    """``sensitive_paths.is_sensitive_path``（插件平铺模块）契约。"""
+
+    def test_empty_path_not_sensitive(self) -> None:
+        """空路径 → (False, "")（无路径即无命中，调用点零分支）。"""
+        import sensitive_paths
+
+        assert sensitive_paths.is_sensitive_path("") == (False, "")
+
+    @pytest.mark.parametrize("path", [None, 0, [], {}])
+    def test_falsy_non_str_path_not_sensitive(self, path: Any) -> None:
+        """假值非字符串 → 同空路径语义（不崩、不误报）。"""
+        import sensitive_paths
+
+        assert sensitive_paths.is_sensitive_path(path) == (False, "")
+
+    def test_resolution_failure_falls_back_to_raw_path(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """resolve 抛 OSError/ValueError（NUL、超长路径等）→ 回落原始串参与匹配
+        （fail-closed：宁可对原文比对，也不静默放行）。"""
+        from pathlib import Path
+
+        import sensitive_paths
+
+        def _boom(self: Any) -> Any:
+            raise ValueError("stat: embedded null character in path")
+
+        monkeypatch.setattr(Path, "resolve", _boom)
+
+        hit, prefix = sensitive_paths.is_sensitive_path("C:/Windows/System32")
+
+        assert hit is True, "回落原文后仍须命中黑名单（Windows 敏感目录）"
+        assert prefix
+
+    @pytest.mark.parametrize(
+        ("path", "expect_hit"),
+        [
+            ("C:/Users/me/proj/a.py", False),
+            ("C:/Windows/System32/drivers", True),
+            ("relative/path/file.txt", False),
+        ],
+    )
+    def test_windows_blacklist_prefix_semantics(self, path: str, expect_hit: bool) -> None:
+        """Windows 黑名单按「相等或前缀 + /」匹配：敏感目录子树命中，良性路径放行。"""
+        import os
+
+        import sensitive_paths
+
+        if os.name != "nt":
+            pytest.skip("Windows 黑名单仅 Windows 生效")
+
+        hit, prefix = sensitive_paths.is_sensitive_path(path)
+
+        assert hit is expect_hit
+        if expect_hit:
+            assert prefix and prefix.startswith("c:/")

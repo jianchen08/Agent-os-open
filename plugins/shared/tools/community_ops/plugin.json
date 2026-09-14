@@ -1,0 +1,177 @@
+{
+  "id": "community_ops_tool",
+  "name": "Community Ops Tool",
+  "description": "社区运营工具：GitHub 开源仓巡检/评论发布 + 社区反馈登记册",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "github_ops",
+        "description": "GitHub 开源仓操作：巡检 issue/PR（list_issues/list_prs/get_issue/repo_stats）与评论发布（create_comment，强制人工审批）。鉴权令牌读环境变量 AGENTOS_GITHUB_TOKEN（回退 GITHUB_TOKEN），未配置时只读可用（匿名限额 60 次/小时）、评论被拒绝。",
+        "render": {
+          "card": "form",
+          "title": "GitHub 社区"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list_issues",
+                "get_issue",
+                "list_prs",
+                "repo_stats",
+                "create_comment"
+              ],
+              "description": "操作类型"
+            },
+            "repo": {
+              "type": "string",
+              "pattern": "^[\\w.-]+/[\\w.-]+$",
+              "description": "仓库（owner/repo），默认 jianchen08/Agent-os-open"
+            },
+            "state": {
+              "type": "string",
+              "enum": ["open", "closed", "all"],
+              "default": "open",
+              "description": "list_issues/list_prs 的状态过滤"
+            },
+            "number": {
+              "type": "integer",
+              "description": "issue 编号（get_issue/create_comment 必填）"
+            },
+            "body": {
+              "type": "string",
+              "minLength": 1,
+              "description": "评论内容（create_comment 必填，Markdown）"
+            },
+            "per_page": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "description": "列表每页条数"
+            }
+          },
+          "required": ["action"]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["success"],
+          "properties": {
+            "success": { "type": "boolean" },
+            "action": { "type": "string" },
+            "items": {
+              "type": "array",
+              "description": "list_issues/list_prs 结果",
+              "items": { "type": "object" }
+            },
+            "issue": { "type": "object", "description": "get_issue 的 issue 本体（含全文 body）" },
+            "comments": {
+              "type": "array",
+              "description": "get_issue 的评论列表",
+              "items": { "type": "object" }
+            },
+            "stats": {
+              "type": "object",
+              "description": "repo_stats 结果（stars/forks/open_issues/watchers/pushed_at）"
+            },
+            "comment_url": { "type": "string", "description": "create_comment 发布的评论链接" }
+          }
+        }
+      },
+      {
+        "name": "feedback_ledger",
+        "description": "社区反馈登记册（JSON 单文件）：append 登记、update_status 推进状态、list 查询。状态：待处置/已回复/已入候选池/已入 ROADMAP/已否决/挂起。路径解析：参数 ledger_path > 环境变量 AGENTOS_COMMUNITY_LEDGER > <cwd>/data/community/feedback_ledger.json。",
+        "render": {
+          "card": "form",
+          "title": "反馈台账"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["append", "update_status", "list"],
+              "description": "操作类型"
+            },
+            "source": {
+              "type": "string",
+              "description": "反馈来源（append 必填），如 github_issue/B站/群聊"
+            },
+            "summary": {
+              "type": "string",
+              "description": "反馈内容摘要（append 必填）"
+            },
+            "category": {
+              "type": "string",
+              "description": "分类（append 可选）：bug_report/feature/咨询/合作/其他"
+            },
+            "link": {
+              "type": "string",
+              "description": "原文链接（append 可选）"
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^FB-\\d{3,}$",
+              "description": "条目编号（update_status 必填）"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "待处置",
+                "已回复",
+                "已入候选池",
+                "已入 ROADMAP",
+                "已否决",
+                "挂起"
+              ],
+              "description": "状态（update_status 必填）"
+            },
+            "note": {
+              "type": "string",
+              "description": "处置备注（update_status 可选，覆盖写）"
+            },
+            "filter_status": {
+              "type": "string",
+              "description": "list 按状态过滤（可选）"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "list 返回条数上限（可选，默认全部）"
+            },
+            "ledger_path": {
+              "type": "string",
+              "description": "登记册文件路径（可选，覆盖默认与环境变量）"
+            }
+          },
+          "required": ["action"]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["success"],
+          "properties": {
+            "success": { "type": "boolean" },
+            "action": { "type": "string" },
+            "entry": { "type": "object", "description": "append/update_status 结果条目" },
+            "entries": {
+              "type": "array",
+              "description": "list 结果",
+              "items": { "type": "object" }
+            },
+            "total": { "type": "integer", "description": "list 过滤后总数" }
+          }
+        }
+      }
+    ]
+  }
+}

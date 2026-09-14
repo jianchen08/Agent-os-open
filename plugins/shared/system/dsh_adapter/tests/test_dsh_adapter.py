@@ -486,19 +486,19 @@ class TestInstalledDshPlugins:
         # 正式贡献面：renderers + 适配器元信息 + pages（皮肤中心页面）+ themes
         # （皮肤 CSS 走 merged.css 端点，manifest 无 client_styles 贡献位）
         assert set(manifest["contributes"].keys()) == {"renderers", "dsh_adapter", "pages", "themes"}
-        # 配置入口：DSH 插件装载管理（config/dsh_adapter.yaml）
+        # 配置入口：DSH 插件装载管理（config/plugins/dsh_adapter/dsh_adapter.yaml）
         assert manifest["config_files"] == [
-            {"id": "dsh_plugins", "path": "config/dsh_adapter.yaml", "label": "DSH 插件配置"}
+            {"id": "dsh_plugins", "path": "config/plugins/dsh_adapter/dsh_adapter.yaml", "label": "DSH 插件配置"}
         ]
 
 
-# ── 配置装载过滤（config/dsh_adapter.yaml：DSH 插件逐包启用/禁用） ─────
+# ── 配置装载过滤（config/plugins/dsh_adapter/dsh_adapter.yaml：DSH 插件逐包启用/禁用） ─────
 
 
 class TestPluginConfigFilter:
     def test_load_plugin_config_parses_plugins_map(self, tmp_path, monkeypatch):
-        cfg_dir = tmp_path / "config"
-        cfg_dir.mkdir()
+        cfg_dir = tmp_path / "config" / "plugins" / "dsh_adapter"
+        cfg_dir.mkdir(parents=True)
         (cfg_dir / "dsh_adapter.yaml").write_text(
             "plugins:\n  my-plugin:\n    enabled: false\n  other-plugin: true\n",
             encoding="utf-8",

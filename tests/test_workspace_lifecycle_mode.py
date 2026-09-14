@@ -85,7 +85,15 @@ def test_root_task_default_mode_is_worktree(manager_cls):
     manager._ensure_git_user = lambda *a, **k: None
     manager._run_git = lambda *a, **k: (0, "ok")
     manager._guard_root_branch = lambda *a, **k: False
-    manager._worktree_add_with_repair = lambda *a, **k: None
+    # 落地校验（2026-09-14）要求 worktree add 后目录真实存在——桩须如实地
+    # 造出目录，否则出生期按幻影路径拒绝（该契约由本桩行为锁定）。
+    import shutil as _shutil
+    from pathlib import Path as _Path
+
+    def _fake_worktree_add(root_path, branch, ws_dir, task_id):
+        _Path(ws_dir).mkdir(parents=True, exist_ok=True)
+
+    manager._worktree_add_with_repair = _fake_worktree_add
     manager._ensure_dir_and_git = lambda *a, **k: None
     meta = manager._start_root_task(
         "task_worktree",
@@ -93,6 +101,8 @@ def test_root_task_default_mode_is_worktree(manager_cls):
         {"_has_explicit_workspace": True},
     )
     assert meta["mode"] == "worktree", "默认拓扑应为 worktree"
+    # 桩真实落了目录，收尾清掉
+    _shutil.rmtree(_Path(meta["path"]), ignore_errors=True)
 
 
 def test_subtask_explicit_plain_mode_shares_host_dir(manager_cls):

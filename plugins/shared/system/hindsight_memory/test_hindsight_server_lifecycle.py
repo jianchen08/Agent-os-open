@@ -485,7 +485,7 @@ class TestGetDocumentsToolBranches:
 def _patch_this_dir(srv: Any, monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
     """把 _THIS_DIR 指到 root/a/b/c/hindsight_memory（项目根=上溯 4 级=root）。
 
-    server 的 .env / config/models/llm.yaml / plugin.json 均自 _THIS_DIR 定位——
+    server 的 .env / config/plugins/llm/llm.yaml / plugin.json 均自 _THIS_DIR 定位——
     真实布局 plugins/shared/system/hindsight_memory（4 层）↔ 测试用 3 层中间目录。
     返回插件目录（manifest 写入用）。
     """
@@ -545,8 +545,8 @@ def _make_root(
 ) -> None:
     """构造假项目根：llm.yaml / .env / 插件 manifest 按需落位。"""
     if llm_yaml is not None:
-        (tmp_path / "config" / "models").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "config" / "models" / "llm.yaml").write_text(llm_yaml, encoding="utf-8")
+        (tmp_path / "config" / "plugins" / "llm").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "config" / "plugins" / "llm" / "llm.yaml").write_text(llm_yaml, encoding="utf-8")
     if env_text is not None:
         (tmp_path / ".env").write_text(env_text, encoding="utf-8")
     if manifest is not None:

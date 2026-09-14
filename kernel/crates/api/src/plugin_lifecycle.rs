@@ -192,6 +192,13 @@ pub async fn broadcast_domain_event_from(
     }
     let enabled = enabled.read().await;
     let manifests = manifests.read().await;
+    // 宿主去重（BUG-7）：合宿进程的生命周期通知是宿主级广播——聚合服务端把
+    // 每条通知扇出给全部声明成员的 handler（P27 ADR 广播语义）。按订阅插件
+    // 逐发会让同宿主 N 个声明成员各收到 N 次通知、每次扇出全成员，handler
+    // 执行 N² 次（子任务完成通知 ×4 根因：task_service 重复派生 + trigger
+    // 注入翻倍）。同宿主只发第一次，扇出保证其余成员各执行一次；独占宿主
+    // 键互异不受影响。
+    let mut notified_hosts: std::collections::HashSet<String> = std::collections::HashSet::new();
     for manifest in manifests.iter() {
         if !enabled.contains(&manifest.id) {
             continue;
@@ -201,6 +208,9 @@ pub async fn broadcast_domain_event_from(
             .lifecycle_hooks
             .contains(&agentos_core::traits::LifecycleHook::DomainEvent)
         {
+            continue;
+        }
+        if !notified_hosts.insert(invoker.host_key_of(&manifest.id)) {
             continue;
         }
         let mut ctx = agentos_core::traits::HookContext::new();
@@ -245,8 +255,11 @@ mod domain_event_tests {
     use std::sync::{Arc, Mutex};
 
     /// 记录 send_lifecycle_hook 调用的 mock invoker（invoke_* 本测试不可达）。
+    /// `hosts` 编排 plugin_id → 宿主键分组（合宿去重用例）；未登记按独占语义
+    /// 回退 plugin_id 本身（与 trait 默认实现同构）。
     struct RecordingInvoker {
         hooks: Mutex<Vec<(String, String)>>, // (plugin_id, event)
+        hosts: std::collections::HashMap<String, String>,
     }
 
     #[async_trait::async_trait]
@@ -283,6 +296,12 @@ mod domain_event_tests {
                 .unwrap()
                 .push((plugin_id.to_string(), event));
             Ok(())
+        }
+        fn host_key_of(&self, plugin_id: &str) -> String {
+            self.hosts
+                .get(plugin_id)
+                .cloned()
+                .unwrap_or_else(|| plugin_id.to_string())
         }
     }
 
@@ -333,6 +352,7 @@ mod domain_event_tests {
     async fn domain_event_reaches_declaring_enabled_plugins_only() {
         let invoker = Arc::new(RecordingInvoker {
             hooks: Mutex::new(Vec::new()),
+            hosts: std::collections::HashMap::new(),
         });
         let mut state = AppState::new();
         // A：声明 + 启用 → 收到；B：未声明 → 不收到；C：声明但禁用 → 不收到
@@ -369,6 +389,159 @@ mod domain_event_tests {
             got,
             vec![("p_a".to_string(), "session.created".to_string())],
             "只投递给声明了 domain_event 且启用的插件"
+        );
+    }
+
+    /// BUG-7 回归：同一合宿宿主内的多个订阅插件只投递一次。
+    ///
+    /// 合宿聚合服务端把每条生命周期通知扇出给全部声明成员的 handler（广播
+    /// 语义，P27 ADR），内核按订阅插件逐发会让每个成员 handler 执行 N 次
+    ///（子任务完成通知 ×4 = 2 次派生 × 每次扇出 ×2 的根因）。
+    #[tokio::test]
+    async fn domain_event_delivered_once_per_host_for_cohosted_subscribers() {
+        let invoker = Arc::new(RecordingInvoker {
+            hooks: Mutex::new(Vec::new()),
+            hosts: std::collections::HashMap::from([
+                ("p_a".to_string(), "group:light:1".to_string()),
+                ("p_c".to_string(), "group:light:1".to_string()),
+            ]),
+        });
+        let mut state = AppState::new();
+        // p_a / p_c 同宿主且都声明 domain_event；p_b 未声明不订阅。
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            manifest("p_a", true),
+            manifest("p_b", false),
+            manifest("p_c", true),
+        ]));
+        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(HashSet::from([
+            "p_a".to_string(),
+            "p_c".to_string(),
+        ])));
+        state.invoker = Some(invoker.clone());
+
+        broadcast_domain_event(&state, "task_completed", vec![]).await;
+
+        for _ in 0..200 {
+            if !invoker.hooks.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let got = invoker.hooks.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![("p_a".to_string(), "task_completed".to_string())],
+            "同宿主订阅插件只投递一次（宿主扇出保证其余成员各收到一次）"
+        );
+    }
+
+    /// 去重不得欠投递：不同宿主的订阅插件各自收到一次。
+    #[tokio::test]
+    async fn domain_event_still_reaches_subscribers_in_distinct_hosts() {
+        let invoker = Arc::new(RecordingInvoker {
+            hooks: Mutex::new(Vec::new()),
+            hosts: std::collections::HashMap::from([
+                ("p_a".to_string(), "group:light:1".to_string()),
+                ("p_c".to_string(), "group:light:2".to_string()),
+            ]),
+        });
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            manifest("p_a", true),
+            manifest("p_c", true),
+        ]));
+        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(HashSet::from([
+            "p_a".to_string(),
+            "p_c".to_string(),
+        ])));
+        state.invoker = Some(invoker.clone());
+
+        broadcast_domain_event(&state, "task_completed", vec![]).await;
+
+        let mut got = Vec::new();
+        for _ in 0..200 {
+            got = invoker.hooks.lock().unwrap().clone();
+            if got.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("p_a".to_string(), "task_completed".to_string()),
+                ("p_c".to_string(), "task_completed".to_string()),
+            ],
+            "异宿主订阅插件各投递一次，去重不得吞投递"
+        );
+    }
+
+    /// 不覆写 `host_key_of` 的裸 mock：钉住 trait 默认实现 = 独占逐发语义
+    /// （无宿主分组知识的 invoker 实现行为不变，键互异不去重）。
+    struct SoloDefaultInvoker {
+        hooks: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PluginInvoker for SoloDefaultInvoker {
+        async fn invoke_pipeline_plugin<'a>(
+            &self,
+            _plugin_id: &str,
+            _ctx: &PluginContext<'a>,
+        ) -> Result<PluginResult, PluginError> {
+            unimplemented!("域事件测试不触达")
+        }
+        async fn invoke_tool(
+            &self,
+            _plugin_id: &str,
+            _tool_name: &str,
+            _inputs: &serde_json::Value,
+        ) -> Result<ToolExecutionResult, PluginError> {
+            unimplemented!("域事件测试不触达")
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            plugin_id: &str,
+            _hook: LifecycleHook,
+            _context: &HookContext,
+        ) -> Result<(), PluginError> {
+            self.hooks.lock().unwrap().push(plugin_id.to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_host_key_keeps_per_plugin_delivery() {
+        let invoker = Arc::new(SoloDefaultInvoker {
+            hooks: Mutex::new(Vec::new()),
+        });
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            manifest("p_a", true),
+            manifest("p_c", true),
+        ]));
+        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(HashSet::from([
+            "p_a".to_string(),
+            "p_c".to_string(),
+        ])));
+        state.invoker = Some(invoker.clone());
+
+        broadcast_domain_event(&state, "task_completed", vec![]).await;
+
+        let mut got = Vec::new();
+        for _ in 0..200 {
+            got = invoker.hooks.lock().unwrap().clone();
+            if got.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["p_a".to_string(), "p_c".to_string()],
+            "默认独占键语义下每个订阅插件各投递一次"
         );
     }
 }

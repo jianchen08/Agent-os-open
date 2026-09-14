@@ -73,6 +73,40 @@ class TestSchemaConsistency:
         assert "path" in schema.get("required", [])
 
 
+class TestManifestSchemaParity:
+    """G2 契约一致性护栏：plugin.json 声明的 input_schema 必须与实现上报
+    （TOOL_REGISTRY）逐字一致——漂移即被内核 G2 净化剔除，工具运行时不可见
+    （BUG-5：enhanced_search 实现加了 timeout_seconds，声明未同步 → 被剔）。
+    """
+
+    def _declared_tools(self) -> dict[str, dict]:
+        manifest_path = Path(__file__).resolve().parent.parent / "plugin.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return {t["name"]: t for t in manifest["capabilities"]["tools"]}
+
+    def test_every_declared_tool_is_registered(self) -> None:
+        declared = self._declared_tools()
+        for name in declared:
+            assert name in TOOL_REGISTRY, (
+                f"{name} 在 plugin.json 声明了但实现未注册（G2 missing 漂移 → 剔除）"
+            )
+
+    def test_registered_schema_matches_declaration_verbatim(self) -> None:
+        declared = self._declared_tools()
+        for name, (schema, _) in TOOL_REGISTRY.items():
+            assert name in declared, f"{name} 实现暴露但未声明（undeclared）"
+            assert schema == declared[name]["input_schema"], (
+                f"{name} 上报 input_schema 与 plugin.json 声明不一致"
+                "（G2 schema_mismatch → 剔除）"
+            )
+
+    def test_parity_is_idempotent_across_manifests(self) -> None:
+        # 性质断言：双向包含（声明集 == 注册集），防止只对齐一半
+        declared = set(self._declared_tools())
+        registered = set(TOOL_REGISTRY)
+        assert declared == registered
+
+
 # ═════════════════════════════════════════════════════════════
 # AC-08-3: 核心逻辑行为等价
 # ═════════════════════════════════════════════════════════════

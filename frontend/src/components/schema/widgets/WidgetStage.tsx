@@ -7,9 +7,10 @@
  * 未分组声明归入「概览」组）；无任何分组声明的空间保持平铺（兼容两件小页）。
  * 组内渲染委托 DeclaredWidgetLayer（声明 props 透传 + watch/refresh 联动）。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { Component, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
 import { cn } from '@/lib/utils'
+import { captureException } from '@/services/errorReporting'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
 
@@ -19,6 +20,65 @@ const DEFAULT_GROUP = '概览'
 interface WidgetGroup {
   name: string
   members: WidgetDeclaration[]
+}
+
+interface GroupErrorBoundaryProps {
+  groupName: string
+  children: ReactNode
+}
+
+interface GroupErrorBoundaryState {
+  error: Error | null
+}
+
+/**
+ * 组级错误边界：组内任一声明 widget 渲染抛异常时降级为组内错误卡片（可重试），
+ * 异常不逃逸出 widget_stage。声明页组（monitoring / triggers 等）的 widget 来自
+ * 插件/agent ui_schema 声明，组件面不受前端冻结契约保护——没有这层隔离时渲染
+ * 异常会炸穿 App 根边界，整页（侧栏/聊天/全部页签）被卸载（BUG-1 白屏的爆炸
+ * 半径形态）。错误经 captureException 落 DEV 控制台，不吞异常。
+ */
+class WidgetGroupErrorBoundary extends Component<GroupErrorBoundaryProps, GroupErrorBoundaryState> {
+  state: GroupErrorBoundaryState = { error: null }
+
+  static getDerivedStateFromError(error: Error): GroupErrorBoundaryState {
+    return { error }
+  }
+
+  componentDidCatch(error: Error): void {
+    captureException(error, {
+      component: 'WidgetStage',
+      action: 'widget_group_render',
+      group: this.props.groupName,
+    })
+  }
+
+  render(): ReactNode {
+    const { error } = this.state
+    if (error) {
+      return (
+        <div
+          data-testid="widget-stage-error"
+          role="alert"
+          className="border-status-error/40 bg-status-error/5 space-y-2 rounded-lg border p-4"
+        >
+          <p className="text-status-error text-sm font-medium">
+            「{this.props.groupName}」组组件渲染出错
+          </p>
+          <p className="text-muted-foreground text-xs">{error.message}</p>
+          <button
+            type="button"
+            data-testid="widget-stage-retry"
+            onClick={() => this.setState({ error: null })}
+            className="border-border text-muted-foreground hover:bg-muted/60 rounded border px-2 py-1 text-xs transition-colors"
+          >
+            重试
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
 }
 
 export function WidgetStage(props: Record<string, unknown>) {
@@ -86,11 +146,14 @@ export function WidgetStage(props: Record<string, unknown>) {
         </div>
       )}
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-3">
-        {active ? (
-          <DeclaredWidgetLayer space={space} declarations={active.members} />
-        ) : (
-          <DeclaredWidgetLayer space={space} />
-        )}
+        {/* key=组名：切组即重挂边界（上一组的错误态不残留到下一组） */}
+        <WidgetGroupErrorBoundary key={active?.name ?? DEFAULT_GROUP} groupName={active?.name ?? DEFAULT_GROUP}>
+          {active ? (
+            <DeclaredWidgetLayer space={space} declarations={active.members} />
+          ) : (
+            <DeclaredWidgetLayer space={space} />
+          )}
+        </WidgetGroupErrorBoundary>
       </div>
     </div>
   )

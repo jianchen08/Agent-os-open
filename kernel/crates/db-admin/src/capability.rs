@@ -845,4 +845,294 @@ mod tests {
 
         registry.clear(); // 全局单例：测试收尾清场
     }
+
+    // ── 未注入 db 的诚实降级（8 method 全覆盖）──
+
+    /// db 未注入 → 每个 method 都报 400「统一数据接口未启用」，不 panic、
+    /// 不静默返回空结果。用无 store 的 state（认证走内置 admin 回退）让
+    /// 鉴权先过，从而精确定位到 db 缺失这一层。
+    #[tokio::test]
+    async fn missing_db_reports_400_for_every_method() {
+        let handler = DbAdminCapabilityHandler::new(None, None);
+        let cases: [(&str, Value); 8] = [
+            ("list_tables", json!({})),
+            ("table_query", json!({ "table": "test_notes" })),
+            ("table_insert", json!({ "table": "test_notes", "row": {} })),
+            (
+                "table_get_row",
+                json!({ "table": "test_notes", "pk_value": "x" }),
+            ),
+            (
+                "table_update_row",
+                json!({ "table": "test_notes", "pk_value": "x", "updates": {} }),
+            ),
+            (
+                "table_delete_row",
+                json!({ "table": "test_notes", "pk_value": "x" }),
+            ),
+            ("execute", json!({ "sql": "SELECT 1" })),
+            ("clear_execution_data", json!({})),
+        ];
+        for (method, params) in cases {
+            let envelope = handler.handle(method, authed(params)).await.unwrap();
+            assert_eq!(envelope["status"], 400, "{method} 缺 db 应 400: {envelope}");
+            assert!(
+                envelope["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("统一数据接口未启用"),
+                "{method} 错误文案应说明原因: {envelope}"
+            );
+        }
+    }
+
+    // ── 必填参数缺失 / 类型不符 → 400 ──
+
+    /// table 参数缺失或非字符串 → 400 且报文点名 table。
+    /// 表驱动覆盖 query/insert/get/update/delete 五条需要 table 的 method。
+    #[tokio::test]
+    async fn missing_table_param_is_bad_request() {
+        let (handler, _store) = handler_with_db();
+        let methods = [
+            "table_query",
+            "table_insert",
+            "table_get_row",
+            "table_update_row",
+            "table_delete_row",
+        ];
+        for method in methods {
+            // 完全缺 table
+            let envelope = handler.handle(method, authed(json!({}))).await.unwrap();
+            assert_eq!(envelope["status"], 400, "{method} 缺 table 应 400");
+            assert!(
+                envelope["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("table"),
+                "{method} 报文应点名 table: {envelope}"
+            );
+
+            // table 存在但非字符串
+            let envelope = handler
+                .handle(method, authed(json!({ "table": 42 })))
+                .await
+                .unwrap();
+            assert_eq!(
+                envelope["status"], 400,
+                "{method} 非字符串 table 应 400: {envelope}"
+            );
+        }
+    }
+
+    /// insert 缺 row / update 缺 updates / execute 缺 sql → 400 且报文点名。
+    #[tokio::test]
+    async fn missing_payload_params_are_bad_request() {
+        let (handler, _store) = handler_with_db();
+
+        let envelope = handler
+            .handle("table_insert", authed(json!({ "table": "test_notes" })))
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 400, "缺 row 应 400: {envelope}");
+        assert!(envelope["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("row"));
+
+        let envelope = handler
+            .handle(
+                "table_update_row",
+                authed(json!({ "table": "test_notes", "pk_value": "x" })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 400, "缺 updates 应 400: {envelope}");
+        assert!(envelope["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("updates"));
+
+        let envelope = handler.handle("execute", authed(json!({}))).await.unwrap();
+        assert_eq!(envelope["status"], 400, "缺 sql 应 400: {envelope}");
+        assert!(envelope["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sql"));
+    }
+
+    // ── list_params 解析：limit/offset/filter/sort 的数字与字符串两形态 ──
+
+    /// limit/offset 接受 JSON 数字与数字字符串两形态（HTTP query 透传为字符串）；
+    /// 非法值忽略（保持 None 语义，不报错、不误设 0）。
+    #[test]
+    fn list_params_accepts_numbers_and_numeric_strings() {
+        let numeric = DbAdminCapabilityHandler::list_params(&json!({ "limit": 25, "offset": 5 }));
+        assert_eq!(numeric.limit, Some(25));
+        assert_eq!(numeric.offset, Some(5));
+
+        let stringly =
+            DbAdminCapabilityHandler::list_params(&json!({ "limit": "30", "offset": "7" }));
+        assert_eq!(stringly.limit, Some(30), "数字字符串应可解析");
+        assert_eq!(stringly.offset, Some(7));
+
+        let invalid = DbAdminCapabilityHandler::list_params(
+            &json!({ "limit": "not-a-number", "offset": true }),
+        );
+        assert_eq!(invalid.limit, None, "非法 limit 应忽略");
+        assert_eq!(invalid.offset, None, "非法 offset 应忽略");
+    }
+
+    /// filter 接受单字符串与字符串数组；数组中的非字符串元素丢弃（不 panic）。
+    #[test]
+    fn list_params_filter_accepts_string_and_array() {
+        let single = DbAdminCapabilityHandler::list_params(&json!({ "filter": "a=1" }));
+        assert_eq!(single.filter, vec!["a=1".to_string()]);
+
+        let multi = DbAdminCapabilityHandler::list_params(&json!({ "filter": ["a=1", "b=2"] }));
+        assert_eq!(multi.filter, vec!["a=1".to_string(), "b=2".to_string()]);
+
+        let mixed = DbAdminCapabilityHandler::list_params(
+            &json!({ "filter": ["ok", 42, null, {"x": 1}, "also-ok"] }),
+        );
+        assert_eq!(
+            mixed.filter,
+            vec!["ok".to_string(), "also-ok".to_string()],
+            "非字符串元素应丢弃: {mixed:?}"
+        );
+
+        let none = DbAdminCapabilityHandler::list_params(&json!({ "filter": 7 }));
+        assert!(none.filter.is_empty(), "非字符串/数组的 filter 忽略");
+    }
+
+    /// sort 仅接受字符串；缺省为 None（调用方默认排序）。
+    #[test]
+    fn list_params_sort_only_from_string() {
+        let s = DbAdminCapabilityHandler::list_params(&json!({ "sort": "created_at:desc" }));
+        assert_eq!(s.sort.as_deref(), Some("created_at:desc"));
+        let none = DbAdminCapabilityHandler::list_params(&json!({ "sort": 123 }));
+        assert_eq!(none.sort, None, "非字符串 sort 忽略");
+        assert_eq!(DbAdminCapabilityHandler::list_params(&json!({})).sort, None);
+    }
+
+    // ── 角色门：viewer 读放行 / 写拒绝 ──
+
+    /// viewer 角色：只读 method 放行，写 method → 403（读写分权的最小验证）。
+    #[tokio::test]
+    async fn viewer_can_read_but_not_write() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        sqlite
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO users (user_id, username, password, role, tenant_id, created_at)
+                     VALUES ('u_view','v','x','viewer','default','2026-01-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+                Ok::<(), String>(())
+            })
+            .unwrap();
+        let handler = DbAdminCapabilityHandler::new(Some(sqlite.clone()), Some(sqlite));
+
+        let viewer = agentos_http::auth::BuiltInUser {
+            id: "u_view".to_string(),
+            username: "v".to_string(),
+            password: "x".to_string(),
+            email: String::new(),
+            role: "viewer".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            must_change_password: false,
+        };
+        let mut params = json!({});
+        params["_authorization"] = json!(format!(
+            "Bearer {}",
+            encode_token(TokenType::Access, &viewer, 3600)
+        ));
+
+        // 只读放行
+        let envelope = handler.handle("list_tables", params.clone()).await.unwrap();
+        assert_eq!(envelope["status"], 200, "viewer 读应放行: {envelope}");
+
+        // 写拒绝
+        let mut write_params = params.clone();
+        write_params["table"] = json!("test_notes");
+        write_params["row"] = json!({"id": "n1", "content": "x", "note_type": "t",
+            "score": 1.0, "tenant_id": "default", "created_at": "2026-01-01T00:00:00Z"});
+        let envelope = handler.handle("table_insert", write_params).await.unwrap();
+        assert_eq!(envelope["status"], 403, "viewer 写应 403: {envelope}");
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("admin"),
+            "403 报文应说明需要 admin: {envelope}"
+        );
+    }
+
+    // ── 未知 method 的报错列出已知清单 ──
+
+    /// 未实现的 method → McpError 且报文列出已知 method 清单（排障友好）。
+    #[tokio::test]
+    async fn unknown_method_error_lists_known_methods() {
+        let (handler, _store) = handler_with_db();
+        let err = handler.handle("table_drop", json!({})).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("table_drop"), "应报出请求的 method: {msg}");
+        assert!(msg.contains("not implemented"), "{msg}");
+        for known in [
+            "list_tables",
+            "table_query",
+            "execute",
+            "clear_execution_data",
+        ] {
+            assert!(msg.contains(known), "报文应列出已知 method {known}: {msg}");
+        }
+    }
+
+    // ── db_routes 辅助函数：list_table_names / get_table_columns ──
+
+    /// 列结构导出：pk / notnull / type 三属性如实反映 DDL，供前端建表视图。
+    #[tokio::test]
+    async fn get_table_columns_reports_pk_notnull_and_types() {
+        let (handler, store) = handler_with_db();
+        let _ = handler;
+
+        let cols = store
+            .with_conn(|conn| crate::db_routes::get_table_columns(conn, "test_notes"))
+            .unwrap();
+        let by_name: std::collections::HashMap<&str, &crate::db_routes::ColumnMeta> =
+            cols.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        assert!(by_name["id"].pk, "id 应标为主键");
+        assert!(!by_name["content"].pk, "content 非主键");
+        assert_eq!(by_name["id"].type_name.to_uppercase(), "TEXT");
+        assert_eq!(by_name["score"].type_name.to_uppercase(), "REAL");
+        // tenant_id / created_at 声明 NOT NULL
+        assert!(by_name["tenant_id"].notnull, "tenant_id 声明 NOT NULL");
+        assert!(by_name["created_at"].notnull, "created_at 声明 NOT NULL");
+
+        // 不存在的表：PRAGMA table_info 对未知表返回空结果集（SQLite 语义），
+        // 故本层返回空列表——表名合法性由消费方（require_str + 白名单/查询失败）把关。
+        let unknown = store
+            .with_conn(|conn| crate::db_routes::get_table_columns(conn, "no_such_table"))
+            .expect("PRAGMA 对未知表不报错");
+        assert!(unknown.is_empty(), "未知表列列表为空: {unknown:?}");
+    }
+
+    /// list_table_names：返回库内表名集合，含投影表；未知库结构不 panic。
+    #[tokio::test]
+    async fn list_table_names_includes_projection_tables() {
+        let (_handler, store) = handler_with_db();
+        let names = store.with_conn(crate::db_routes::list_table_names).unwrap();
+        for expected in ["runs", "traces", "blobs", "sessions", "message_slots"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "应包含投影表 {expected}: {names:?}"
+            );
+        }
+        assert!(
+            names.iter().any(|n| n == "test_notes"),
+            "应包含夹具表: {names:?}"
+        );
+    }
 }

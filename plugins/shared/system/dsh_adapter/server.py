@@ -304,7 +304,7 @@ async def _on_dsh_adapter_load(params: dict) -> None:  # noqa: ARG001
     幂等：生成的 themes 与 manifest 现值一致则不写（避免 watcher 指纹
     抖动循环）；不一致才写回——plugin_watcher 检测 manifest 变化自动
     reenable 重注册，前端主题列表随即出现/移除皮肤主题卡。
-    添加皮肤 = 放包进 dsh_plugins/，本钩子负责翻译成 PluginTheme 声明。
+    添加皮肤 = 放入 ~/.dsh/skins/，本钩子负责翻译成 PluginTheme 声明。
     """
     try:
         from translator import skins_to_plugin_themes

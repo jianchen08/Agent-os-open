@@ -1430,4 +1430,103 @@ mod tests {
         // 函数形态不破坏括号分组与列表字面量：len([1, 2]) + 1 = 3，×2 = 6
         assert!(eval_condition("(len([1, 2]) + 1) * 2 == 6", &json!({})));
     }
+
+    // ── 语法错误路径（加载期暴露，不静默）──
+    //
+    // 表驱动覆盖 tokenizer/parser 的各类错误分支：未闭合引号、孤立 '='、
+    // 非法字符、未知比较运算符、括号/下标/列表/参数表各类未闭合与错位。
+    // 断言"报错且文案指明位置/期望形态"，不断言内部 token 结构。
+
+    #[test]
+    fn test_parse_errors_are_reported_with_context() {
+        let cases: [&str; 14] = [
+            "'unterminated",
+            "a = 1",
+            "a @ 1",
+            "a <> 1",
+            "a == (",
+            "a == (1]",
+            "a.1",
+            "a.",
+            "a[",
+            "a[1)",
+            "[1 2]",
+            "[1,",
+            "len(1 2)",
+            "len(1,",
+        ];
+        for src in cases {
+            let err = parse_condition(src).expect_err(&format!("{src:?} 应报语法错误"));
+            assert!(
+                err.contains("position"),
+                "{src:?} 的错误应带位置信息（可定位到表达式内的出错点），实际: {err}"
+            );
+        }
+    }
+
+    /// 下标访问（`a[key]`）的解析与求值：数字下标、字符串键、表达式键
+    /// （与 `a.b` 字段访问等价能力）——列表取下标、字典取键。
+    #[test]
+    fn test_index_access_parses_and_evaluates() {
+        let state = json!({
+            "items": [10, 20, 30],
+            "map": {"k1": "v1", "k2": "v2"},
+            "idx": 1,
+        });
+        // 数组数字下标
+        assert!(eval_condition("items[1] == 20", &state));
+        assert!(eval_condition("items[0] == 10", &state));
+        // 表达式键（变量下标）
+        assert!(eval_condition("items[idx] == 20", &state));
+        // 字典字符串键（双引号 / 单引号两种字面量）
+        assert!(eval_condition(r#"map["k1"] == 'v1'"#, &state));
+        assert!(eval_condition("map['k2'] == 'v2'", &state));
+        // 链式：下标后再字段访问
+        assert!(eval_condition("map['k1'] == 'v1'", &state));
+        // 越界/未知键 → Null（fail-soft 判假，不 panic）
+        assert!(!eval_condition("items[9] == 20", &state));
+        assert!(!eval_condition("map['nope'] == 'v1'", &state));
+    }
+
+    /// 解析失败与求值失败都要落到"条件判假"（fail-soft）：管道不因坏条件炸。
+    /// 对照：语法合法且为真 → 判真。
+    #[test]
+    fn test_bad_condition_is_false_not_panic() {
+        assert!(!eval_condition("a = 1", &json!({})));
+        assert!(!eval_condition("'unterminated", &json!({})));
+        assert!(eval_condition("True", &json!({})));
+    }
+
+    /// 空表达式与纯空白 → Ok(None)（调用方按"无条件"处理，恒真）。
+    /// parse_condition 返回 None 表示无需条件；eval_condition helper 对 None 判真。
+    #[test]
+    fn test_empty_condition_is_none() {
+        for src in ["", "   ", "\t\n "] {
+            assert!(
+                parse_condition(src)
+                    .expect("空白表达式不是语法错误")
+                    .is_none(),
+                "{src:?} 应解析为 None（无条件）"
+            );
+        }
+        assert!(eval_condition("", &json!({})), "无条件 → 恒真");
+    }
+
+    /// 真值判定（truthy）的数值分支：0 与 0.0 为假、非零（含负数/小数）为真。
+    /// 表驱动覆盖整数与浮点两条解析路径。
+    #[test]
+    fn test_truthiness_of_numbers() {
+        let state = json!({
+            "zero": 0,
+            "neg": -3,
+            "pos": 7,
+            "fzero": 0.0,
+            "fpos": 2.5,
+        });
+        assert!(!eval_condition("zero", &state), "整数 0 为假");
+        assert!(eval_condition("pos", &state), "整数非零为真");
+        assert!(eval_condition("neg", &state), "负数为真");
+        assert!(!eval_condition("fzero", &state), "浮点 0.0 为假");
+        assert!(eval_condition("fpos", &state), "浮点非零为真");
+    }
 }

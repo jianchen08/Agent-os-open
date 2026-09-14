@@ -1291,3 +1291,63 @@ class TestCompressCallFnEnvelopeShape:
         fn = mod._build_compress_llm_call_fn(_caller, model_id="m-1")
         with pytest.raises(RuntimeError, match=needle):
             _run(fn([{"role": "user", "content": "x"}]))
+
+
+# ═══════════════════════════════════════════════════════════
+# _get_memory_service：注入服务优先 / 依赖不全早退 / 构造失败降级
+# ═══════════════════════════════════════════════════════════
+
+
+class TestGetMemoryServiceBranches:
+    """压缩服务构建的三条非 happy path（缺口靶行 2413-2418 及邻接）。"""
+
+    def test_injected_context_service_wins(self) -> None:
+        """ctx 已注入 context_service（老接口兼容）→ 原样返回，不再构建新实例。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = MagicMock()  # 有依赖也不构建——注入实例优先
+        mod._capability_caller = None
+        sentinel = object()
+        ctx = mod._make_minimal_ctx(state={"context_window": 128_000})
+        ctx._services = {"context_service": sentinel}  # type: ignore[attr-defined]
+
+        assert mod.ContextWindowGuardPlugin._get_memory_service(ctx, {}) is sentinel
+
+    def test_no_dependency_returns_none(self) -> None:
+        """无 memory_backend 且无 capability_caller → None（依赖不全早退）。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+        ctx = mod._make_minimal_ctx(state={"context_window": 128_000})
+
+        assert mod.ContextWindowGuardPlugin._get_memory_service(ctx, {}) is None
+
+    def test_construction_failure_degrades_to_none_with_warning(
+        self, caplog: Any,
+    ) -> None:
+        """CompressionService 构造抛异常（context_window 非数值形态）→ warning
+        留痕 + None（压缩停用，主流程不反噬）。"""
+        import logging as _logging
+
+        mod = _load_plugin_module()
+        mod._memory_backend = MagicMock()
+        mod._capability_caller = None
+        ctx = mod._make_minimal_ctx(state={"context_window": "not-a-number"})
+
+        with caplog.at_level(_logging.WARNING):
+            service = mod.ContextWindowGuardPlugin._get_memory_service(ctx, {})
+
+        assert service is None
+        assert any("构造 CompressionService 失败" in r.message for r in caplog.records)
+
+    def test_wrong_typed_budget_config_also_degrades(self) -> None:
+        """注入配置比例非数值（字符串）→ 同降级路径返回 None（同契约另一输入）。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = MagicMock()
+        mod._capability_caller = None
+        ctx = mod._make_minimal_ctx(state={"context_window": 128_000})
+
+        service = mod.ContextWindowGuardPlugin._get_memory_service(
+            ctx, {"budgets": {"l1": "0.1"}}
+        )
+
+        assert service is None

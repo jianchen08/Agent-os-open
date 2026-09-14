@@ -6,6 +6,9 @@ pipeline_state.task.status 投影（谁持证据谁裁决）。断行为不断�
 
 - classify_orphan_run 纯函数断 输入(runs 侧终态, 投影终态) → 调和裁决三值
   （completed 权威 / failed 对齐 / 不裁），参数化 ≥2 组有区分度输入。
+- ADR 2026-09-14 翻案扩规：runs 侧权威终态 × 投影未决 → 裁决收束
+  （completed → completed 补落+补通知；cancelled/failed → failed 对齐）；
+  真最新 run 在飞（running）/可恢复（suspended）不裁。
 - reconcile_startup 断 能力调用 → emit_domain 载荷与投影补落（合成假件只替
   内核能力通道——外部依赖）；healthy 行零调和、多 run 历史取最新不误伤。
 - events 派生仲裁：run.failed + 投影 completed/cancelled 终态证据 → 不派生
@@ -189,12 +192,74 @@ def test_classify_healthy_or_ambiguous_rows_never_touched(mod, run_status: str, 
     assert mod.reconcile.classify_orphan_run(run_status, task_status) is None
 
 
+@pytest.mark.parametrize(
+    ("run_status", "task_status"),
+    [
+        # ADR 2026-09-14 翻案扩规：runs 侧权威终态 completed × 投影未决 →
+        # completed 裁决（run 真做完而收尾投影写丢失；评估闸门对死 run 永不再
+        # 结论，保守不裁 = 幽灵「执行中」永久悬挂——BUG-2b 面板幽灵残留根因）
+        ("completed", "running"),
+        ("completed", "pending"),
+        ("completed", "evaluating"),
+        ("completed", "pending_evaluation"),
+        ("completed", ""),
+    ],
+)
+def test_classify_authoritative_run_completed_adjudicates_completed(
+    mod, run_status: str, task_status: str
+) -> None:
+    assert mod.reconcile.classify_orphan_run(run_status, task_status) == "completed"
+
+
+@pytest.mark.parametrize(
+    ("run_status", "task_status"),
+    [
+        # 用户取消 × 投影未决（取消时投影写丢失）→ failed 对齐（任务域裁决
+        # 词汇无 cancelled，终态归 failed；同 runs failed 分支语义）
+        ("cancelled", "running"),
+        ("cancelled", "pending"),
+        ("cancelled", "evaluating"),
+        ("cancelled", "pending_evaluation"),
+        ("cancelled", ""),
+    ],
+)
+def test_classify_cancelled_run_maps_to_failed(mod, run_status: str, task_status: str) -> None:
+    assert mod.reconcile.classify_orphan_run(run_status, task_status) == "failed"
+
+
+@pytest.mark.parametrize(
+    ("run_status", "task_status"),
+    [
+        # 真最新 run 在飞（running）或可恢复（suspended）× 未决投影 → 不裁
+        #（在飞 run 与幽灵无法单次扫描区分；suspended 等待交互可恢复）
+        ("running", "running"),
+        ("running", "pending"),
+        ("running", ""),
+        ("suspended", "running"),
+        ("suspended", "pending"),
+    ],
+)
+def test_classify_inflight_or_resumable_run_never_adjudicated(
+    mod, run_status: str, task_status: str
+) -> None:
+    assert mod.reconcile.classify_orphan_run(run_status, task_status) is None
+
+
 def test_classify_output_domain_and_authority_invariant(mod) -> None:
-    # 性质断言：裁决值域封闭于 {completed, failed, None}；且 completed 裁决
-    # 必然以投影 completed 为前提（权威不变量——runs 侧任何状态都造不出 completed）
+    # 性质断言：裁决值域封闭于 {completed, failed, None}；completed 裁决来源
+    # 二值封闭——投影 completed 权威（runs failed/suspended）∨ runs 侧权威
+    # completed × 未决投影（ADR 2026-09-14），其余组合造不出 completed
     for run_status in ("running", "suspended", "failed", "completed", "cancelled"):
         for task_status in ("running", "completed", "failed", "stopped", ""):
-            assert mod.reconcile.classify_orphan_run(run_status, task_status) in ("completed", "failed", None)
+            verdict = mod.reconcile.classify_orphan_run(run_status, task_status)
+            assert verdict in ("completed", "failed", None)
+            if verdict == "completed":
+                assert (
+                    task_status == "completed" and run_status in ("failed", "suspended")
+                ) or (
+                    run_status == "completed"
+                    and task_status in ("", "running", "pending", "evaluating", "pending_evaluation")
+                )
     assert mod.reconcile.classify_orphan_run("completed", "completed") != "completed"
 
 
@@ -249,6 +314,63 @@ async def test_reconcile_stop_suspend_scenario_aligns_completed(mod) -> None:
     assert [r["verdict"] for r in reconciled] == ["completed"]
     emitted = [c for c in bus.calls if c[0] == "emit_domain"]
     assert emitted[0][1]["event"] == "task_completed"
+
+
+async def test_reconcile_authoritative_completed_run_backfills_and_notifies(mod) -> None:
+    # BUG-2b 幽灵面（ADR 2026-09-14）：run 真做完（runs 侧权威 completed）而
+    # 收尾投影写丢失（投影停 running）→ 补落 completed + 补派完成通知
+    #（合成事件携带调和后投影 state 载荷，派生链免回查）
+    state, runs_cap, bus = _caps(
+        rows=[_task_row("pipe-k", "running")],
+        runs=[_run("completed", "pipe-k")],
+    )
+    reconciled = await mod.reconcile.reconcile_startup(state, runs_cap, bus)
+    assert [r["verdict"] for r in reconciled] == ["completed"]
+    updates = [c for c in state.calls if c[0] == "update"]
+    assert any(
+        c[1] == {"pipeline_id": "pipe-k", "fields": {"task.status": "completed"}}
+        for c in updates
+    )
+    emitted = [c for c in bus.calls if c[0] == "emit_domain"]
+    assert len(emitted) == 1
+    assert emitted[0][1]["event"] == "task_completed"
+    assert emitted[0][1]["tags"]["task_id"] == "pipe-k"
+
+
+async def test_reconcile_cancelled_run_aligns_failed_projection_and_notifies(mod) -> None:
+    # 用户取消而取消时投影写丢失（投影停 running）→ failed 对齐 + 补派失败通知
+    #（任务域裁决词汇无 cancelled；复用 run.failed 派生+对账+清挂号链）
+    state, runs_cap, bus = _caps(
+        rows=[_task_row("pipe-m", "running")],
+        runs=[_run("cancelled", "pipe-m")],
+    )
+    reconciled = await mod.reconcile.reconcile_startup(state, runs_cap, bus)
+    assert [r["verdict"] for r in reconciled] == ["failed"]
+    emitted = [c for c in bus.calls if c[0] == "emit_domain"]
+    assert len(emitted) == 1
+    assert emitted[0][1]["event"] == "task_failed"
+    updates = [c for c in state.calls if c[0] == "update"]
+    assert any(
+        c[1] == {"pipeline_id": "pipe-m", "fields": {"task.status": "failed"}}
+        for c in updates
+    )
+
+
+async def test_reconcile_skips_pipeline_whose_latest_run_is_inflight(mod) -> None:
+    # 防误伤（终态候选 × 在飞并存，runs completed/cancelled 入候选集后的新
+    # 风险面）：旧 run completed、真最新 run running（续跑中）→ 按真最新 run
+    # 判定，不得把在飞任务误裁成 completed
+    state, runs_cap, bus = _caps(
+        rows=[_task_row("pipe-n", "running")],
+        runs=[
+            _run("completed", "pipe-n", run_id="run-old", created_at="2026-09-06T07:00:00Z"),
+            _run("running", "pipe-n", run_id="run-new", created_at="2026-09-06T09:00:00Z"),
+        ],
+    )
+    reconciled = await mod.reconcile.reconcile_startup(state, runs_cap, bus)
+    assert reconciled == []
+    assert [c for c in bus.calls if c[0] == "emit_domain"] == []
+    assert all(c[0] != "update" for c in state.calls)
 
 
 async def test_reconcile_skips_healthy_rows_silently(mod) -> None:

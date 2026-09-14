@@ -1,0 +1,157 @@
+workspace:
+  # 工作空间基目录（所有 worktree/container/plain 工作区的父目录）。
+  # 相对路径相对项目根解析（隔离插件 get_workspace_base_dir 的代码缺省即
+  # ".ai_workspaces"）；绝对路径原样使用。禁止把开发者本机绝对路径入库。
+  # root 指到仓库内位置时无需手工配 .gitignore：解析本根时系统自动把实际
+  # 路径写入 .git/info/exclude（本地排除，不入库，随 root 改配动态跟随）；
+  # .gitignore 里的 ".ai_workspaces/" 只是缺省值的静态兜底。
+  # 主会话工作区 = {本根}/sessions/{session_id}（workspace_lifecycle 写入）。
+  root: .ai_workspaces
+  nesting_mode: shared
+  large_file_threshold_mb: 50
+  worktree_link_patterns:
+  - assets
+  - node_modules
+  - frontend/node_modules
+  - .env
+  - vendor
+  scenario_detection:
+    auto_detect: true
+  new_project:
+    auto_git_init: true
+  existing_project:
+    default_merge_strategy: git_merge
+    auto_cleanup: true
+    auto_rollback_on_failure: true
+    auto_commit_before_evaluate: true
+  max_eval_retries: 3
+coordinator:
+  enabled: true
+  enable_fallback: false
+  default_level: isolated
+  reuse_environment: true
+  resource_limits:
+    max_environments: 50
+    environment_ttl: 3600
+    default_timeout: 300
+providers:
+  host:
+    enabled: true
+  cua:
+    enabled: true
+    image: agentos:latest
+    # 容器资源配额默认按引擎宿主动态计算（hardware_profile adaptive：
+    # daemon 所在机器，本机即 WSL VM；单容器 = 宿主一半资源 / max_environments，
+    # 按 12/24GB 阈值分 low/mid/high 三档）。本段不写 limits 即用动态值。
+    # 显式 limits 优先于动态值（Rust 开发向：engine 冷编译峰值 ~700MB，
+    # 留余量给全 workspace 并行，配 2g/2.0）；AO_* 环境变量优先级最高。
+    limits:
+      memory: 2g
+      cpus: '2.0'
+    publish_ports: []
+    # 首次需要隔离环境时，若本地无镜像则自动 docker build（默认开）。
+    # BuildKit 缓存(--mount=type=cache)会复用本机已下载的 apt/pip/playwright 包，
+    # 二次构建秒级。关闭后只回退 docker pull（适用于镜像已推到 registry 的场景）。
+    auto_build: true
+    dockerfile_path: docker/agentos/Dockerfile   # 相对仓库根；绝对路径原样使用
+    build_context: .                              # 构建上下文，默认仓库根
+    build_timeout: 1800                           # 秒；首次冷构建 Playwright 慢，缓存命中后秒级
+  # WSL 原生隔离后端（Codex 式：无 Docker 层，环境随进程消亡、结构性无泄漏）。
+  # enabled: true 时占据 CONTAINER 槽位（与 cua 互斥），隔离级别语义不变。
+  # 隔离边界 = WSL VM + 专用 Linux user + 可选 sandbox_cmd 前缀（如 bwrap）；
+  # sandbox_cmd 配置后 provider 会校验首二进制在发行版内存在（缺失 fail-closed）。
+  # 注意：browser_* 工具的容器内 bridge 通路 v1 未覆盖，仍需 cua 后端。
+  wsl_native:
+    enabled: true
+    distro: Ubuntu
+    user: null            # 建议配非特权专用用户；null = 发行版默认用户
+    sandbox_cmd: []       # 例: ["bwrap", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--unshare-net"]
+    # state_dir: .ai_workspaces/wsl_native_envs   # 缺省即此值（相对仓库根）
+policy:
+  enable_fallback: false
+  custom: {}
+permission_policies:
+  default_policy:
+    name: default
+    policy_type: default
+    description: 默认策略：读取整个项目，写入仅限工作目录
+    read:
+      scope: project
+      allow_all: true
+    write:
+      scope: workspace
+      allow_outside: false
+  subtask_policy:
+    name: subtask
+    policy_type: subtask
+    description: 子任务策略：同默认策略
+    read:
+      scope: project
+      allow_all: true
+    write:
+      scope: workspace
+      allow_outside: false
+  system_config_policy:
+    name: system_config
+    policy_type: system_config
+    description: 系统配置策略：修改前需要创建检查点
+    read:
+      scope: project
+      allow_all: true
+    write:
+      scope: workspace
+      allow_outside: false
+      require_checkpoint: true
+      allowed_operations:
+      - create
+      - modify
+  readonly_policy:
+    name: readonly
+    policy_type: readonly
+    description: 只读策略：禁止所有写入操作
+    read:
+      scope: project
+      allow_all: true
+    write:
+      scope: none
+      allow_outside: false
+  special_directories:
+    config/:
+      read:
+        scope: project
+        allow_all: true
+      write:
+        scope: workspace
+        allow_outside: false
+        require_checkpoint: true
+    shared/:
+      read:
+        scope: project
+        allow_all: true
+      write:
+        scope: none
+    templates/:
+      read:
+        scope: project
+        allow_all: true
+      write:
+        scope: none
+  root_task_policy:
+    name: root_task
+    policy_type: default
+    description: 根任务权限策略：可写入整个项目，需要用户确认
+    read:
+      scope: project
+      allow_all: true
+    write:
+      scope: project
+      allow_outside: true
+      require_confirmation: true
+lifecycle:
+  project_ttl: 604800
+  module_ttl: 86400
+  atomic_ttl: 3600
+container_lifecycle:
+  on_shutdown: stop
+  resume_on_startup: true
+  name_prefix: cua-

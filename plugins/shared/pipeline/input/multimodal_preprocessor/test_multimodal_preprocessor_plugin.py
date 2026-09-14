@@ -765,3 +765,156 @@ def test_local_file_to_data_url_read_error_returns_empty(tmp_path, monkeypatch):
 def test_resolve_upload_path_non_uploads_returns_empty():
     pre = MultimodalPreprocessor()
     assert pre._resolve_upload_path("C:/tmp/x.png") == ""
+
+
+# ── _detect_messages_multimodal / _extract_image_refs 缺口分支 ──────────
+
+
+class TestHistoryImageDetectionGaps:
+    """历史图片块收集与引用提取的残余分支（coverage.xml 缺口靶行）。"""
+
+    def _pre(self) -> Any:
+        return MultimodalPreprocessor(config={})
+
+    @pytest.mark.parametrize(
+        ("content", "label"),
+        [
+            ({"text": "x"}, "dict-content"),
+            ("", "empty-str"),
+            (None, "none-content"),
+            (123, "int-content"),
+        ],
+    )
+    def test_non_string_content_skipped(self, content: Any, label: str) -> None:
+        """user 消息 content 非非空字符串（dict/空串/None/数字）→ 跳过该条。"""
+        pre = self._pre()
+        messages = [{"role": "user", "content": content}]
+
+        blocks, seen = pre._detect_messages_multimodal(messages, {})
+
+        assert blocks == [] and seen == {}, f"{label} 不得产生引用块"
+
+    def test_non_user_and_non_dict_messages_skipped(self) -> None:
+        """非 user 角色与非 dict 条目跳过；user 消息照常收集（互不影响）。"""
+        pre = self._pre()
+        messages = [
+            "junk",
+            None,
+            42,
+            {"role": "assistant", "content": "![a](/uploads/a.png)"},
+            {"role": "system", "content": "![s](/uploads/s.png)"},
+            {"role": "user", "content": "![keep](/uploads/keep.png)"},
+        ]
+
+        blocks, seen = pre._detect_messages_multimodal(messages, {})
+
+        assert [b["image_url"]["url"] for b in blocks] == ["/uploads/keep.png"]
+        assert len(seen) == 1
+
+    def test_non_list_messages_returns_empty(self) -> None:
+        """messages 非 list（None/dict/字符串）→ 空结果，不抛。"""
+        pre = self._pre()
+        for messages in (None, {"role": "user"}, "junk", 7):
+            blocks, seen = pre._detect_messages_multimodal(messages, {})
+            assert blocks == [] and seen == {}
+
+    def test_markdown_ref_consumes_span_so_url_not_duplicated(self) -> None:
+        """markdown 图引用与 http URL 同 span → 同 span 不重复建块（去重靠 span）。"""
+        pre = self._pre()
+        text = "![pic](https://cdn.example.com/p.png)"
+        messages = [{"role": "user", "content": text}]
+
+        blocks, _seen = pre._detect_messages_multimodal(messages, {})
+
+        assert len(blocks) == 1, "同一图片不得因两类模式各产一块"
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("纯文本无引用", []),
+            ("![a](/uploads/a.png)", ["/uploads/a.png"]),
+            ("![a](/uploads/a.png) 和 https://x.com/b.jpg", ["/uploads/a.png", "https://x.com/b.jpg"]),
+            # 本地路径模式要求以 / 或盘符起头：裸相对名（d.pdf）不匹配
+            ("看这个 /abs/path/c.jpeg 和 d.pdf", ["/abs/path/c.jpeg"]),
+            ("C:/tmp/e.png", ["C:/tmp/e.png"]),  # 盘符路径形态
+        ],
+    )
+    def test_extract_refs_matrix(self, text: str, expected: list[str]) -> None:
+        """引用提取矩阵：markdown → http → 本地路径三优先级，去重不重复消费 span。"""
+        assert self._pre()._extract_image_refs(text) == expected
+
+    def test_markdown_ref_with_http_url_inside_not_double_counted(self) -> None:
+        """markdown 内嵌 http 图 URL：整 token 先匹配，http 模式不重复取。"""
+        refs = self._pre()._extract_image_refs("![x](https://cdn.example.com/a.png)")
+
+        assert refs == ["https://cdn.example.com/a.png"]
+        assert len(refs) == len(set(refs))
+
+    def test_http_url_span_inside_markdown_token_is_skipped(self) -> None:
+        """markdown 链接文本里含 http 图 URL（span 被整 token 覆盖）→ http 模式
+        跳过该 span，只保留 markdown 的目标（span 去重防止同图两取）。"""
+        text = "![https://cdn.example.com/inner.png](/uploads/outer.png)"
+
+        refs = self._pre()._extract_image_refs(text)
+
+        assert refs == ["/uploads/outer.png"]
+        assert not any("cdn.example.com" in r for r in refs)
+
+    def test_local_path_already_consumed_by_md_not_repeated(self) -> None:
+        """本地路径与前序模式重叠 span → 不重复进 refs（span 去重生效）。"""
+        refs = self._pre()._extract_image_refs("![y](/uploads/mirror.jpg)")
+
+        assert refs.count("/uploads/mirror.jpg") == 1
+
+    def test_seen_entries_overflow_evicts_oldest(self) -> None:
+        """登记集超 _MAX_SEEN_ENTRIES → 逐出最旧条目（防长会话无界增长）。"""
+        pre = self._pre()
+        seen: dict[tuple[str, str], None] = {
+            (f"old-{i}", f"/uploads/old-{i}.png"): None for i in range(pre._MAX_SEEN_ENTRIES)
+        }
+
+        blocks, trimmed = pre._detect_messages_multimodal(
+            [{"role": "user", "content": "![new](/uploads/new.png)"}], seen,
+        )
+
+        assert [b["image_url"]["url"] for b in blocks] == ["/uploads/new.png"]
+        assert len(trimmed) == pre._MAX_SEEN_ENTRIES, "登记集恒有界"
+        assert ("old-0", "/uploads/old-0.png") not in trimmed, "最旧条目被逐出"
+        assert ("new-msg", "/uploads/new.png") in trimmed or any(
+            url == "/uploads/new.png" for _k, url in trimmed
+        )
+
+
+# ── 模块自举行（plugins/shared 入 sys.path）──────────────────────────
+
+
+class TestSharedRootBootstrap:
+    """模块顶部自举行：plugins/shared 不在路径时按文件路径装载会补插。
+
+    触发场景 = 插件经文件路径装载（spec_from_file_location 不依赖 sys.path），
+    随后模块内 ``from uploads_path import`` 要求 shared 在路径上——自举行即兜底。
+    """
+
+    def test_shared_root_reinserted_when_load_by_file_path(self) -> None:
+        import importlib.util as _ilu
+        from pathlib import Path as _Path
+
+        plugin_file = _Path(__file__).resolve().parent / "plugin.py"
+        shared_root = str(_Path(__file__).resolve().parents[3])
+        original = sys.path[:]
+        mod_name = "multimodal_preprocessor_bootstrap_probe"
+        sys.modules.pop(mod_name, None)
+        try:
+            sys.path[:] = [p for p in original if p != shared_root]
+            spec = _ilu.spec_from_file_location(mod_name, str(plugin_file))
+            assert spec is not None and spec.loader is not None
+            mod = _ilu.module_from_spec(spec)
+            sys.modules[mod_name] = mod
+            spec.loader.exec_module(mod)
+
+            assert shared_root in sys.path, "装载必须把 plugins/shared 推回 sys.path"
+            assert hasattr(mod, "MultimodalPreprocessor")
+            assert callable(mod.resolve_uploads_url), "兄弟裸名模块经自举行后可用"
+        finally:
+            sys.path[:] = original
+            sys.modules.pop(mod_name, None)

@@ -735,14 +735,20 @@ export class ContributionRegistry {
   }
 
   /**
-   * 注册页面（按 id 去重，pages 与 pagesByPlugin 同步，按 order 排序）
+   * 注册页面（同插件内按 id 去重，pages 与 pagesByPlugin 同步，按 order 排序）
+   *
+   * 去重键是 pluginId+id 而非裸 id：页面 id 的命名空间归各插件所有，跨插件
+   * 撞名（如 debug_center 与 task_service 都声明 id=tasks）是合法并存，按裸 id
+   * 全局裁决会把后注册插件的页面静默吞掉（BUG-11：/tasks 声明被吞 → 工作区
+   * 空态「打开任务管理」点击落空）。
    */
   private registerPage(page: PageDeclaration): void {
-    if (this.pages.some((p) => p.id === page.id)) return
+    const pid = page.pluginId ?? 'unknown'
+    if ((this.pagesByPlugin.get(pid) ?? []).some((p) => p.id === page.id)) return
+
     this.pages.push(page)
     this.pages.sort((a, b) => (a.order ?? 50) - (b.order ?? 50))
 
-    const pid = page.pluginId ?? 'unknown'
     const list = this.pagesByPlugin.get(pid) ?? []
     list.push(page)
     list.sort((a, b) => (a.order ?? 50) - (b.order ?? 50))

@@ -29,6 +29,11 @@ echo.
 
 set "STOPPED=0"
 
+REM Kill leftover G8 supervisor cmd trees FIRST, else the supervisor
+REM respawns the kernel right after the kills below (any-exit respawn
+REM contract) and the stop does not stick.
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'cmd.exe' -and $_.CommandLine -like '*run_kernel_supervised.bat*' } | ForEach-Object { Write-Host ('       [STOP] killing leftover supervisor tree PID ' + $_.ProcessId); taskkill /F /T /PID $_.ProcessId 2>&1 | Out-Null }"
+
 call :KillPort "%AGENTOS_KERNEL_PORT%" "kernel" && set "STOPPED=1"
 call :KillPort "%AGENTOS_FRONTEND_PORT%" "frontend" && set "STOPPED=1"
 

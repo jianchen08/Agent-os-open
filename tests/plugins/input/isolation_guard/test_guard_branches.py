@@ -48,7 +48,13 @@ def _make_guard(docker_available: bool = True, **config: Any) -> Any:
     """
     from plugin import IsolationGuard
 
-    guard = IsolationGuard(config={"docker_available": docker_available, **config})
+    # 钉 docker 后端：真身配置已启用 wsl_native，不钉则探测目标切到 WSL，
+    # _detect_docker 桩失效（本机 WSL 在位即放行）。
+    guard = IsolationGuard(config={
+        "docker_available": docker_available,
+        "providers": {"wsl_native": {"enabled": False}},
+        **config,
+    })
 
     def _resolve(tool_name: str, category: Any = None) -> Any:
         mock = MagicMock()

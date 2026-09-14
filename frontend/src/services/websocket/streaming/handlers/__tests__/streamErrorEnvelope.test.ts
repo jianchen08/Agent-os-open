@@ -3,7 +3,7 @@
  * handleStreamError 统一错误信封解析（2026-08-26）
  *
  * stream_error 事件的 error 由后端升级为信封对象
- * （config/error_codes.json 单一真值源：{code, message, source, retryable}）：
+ * （config/kernel/error_codes.json 单一真值源：{code, message, source, retryable}）：
  * - 消息落顶层 error 字段（source 渲染来源标签）
  * - 通知中心带 errorSource
  * - 旧形态字符串 error 兼容（不落 error 字段，文案照常展示）

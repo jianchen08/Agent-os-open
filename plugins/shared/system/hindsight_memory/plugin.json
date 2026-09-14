@@ -516,7 +516,7 @@
     {
       "id": "memory_models",
       "label": "记忆服务模型",
-      "description": "记忆服务模型选型：模型 id 取自系统模型注册（config/models/llm.yaml 的 models 键名），凭证自动随该模型的 provider 解析；留空跟随系统默认（对话/嵌入各自的 default）。保存后经 watcher respawn 生效。",
+      "description": "记忆服务模型选型：模型 id 取自系统模型注册（config/plugins/llm/llm.yaml 的 models 键名），凭证自动随该模型的 provider 解析；留空跟随系统默认（对话/嵌入各自的 default）。保存后经 watcher respawn 生效。",
       "fields": [
         {
           "name": "llm_model",

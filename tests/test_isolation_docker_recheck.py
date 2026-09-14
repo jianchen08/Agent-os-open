@@ -101,7 +101,9 @@ def _make_auto_plugin(detected: tuple[str, str] = ("absent", "")):
     """
     with patch("decider.IsolationDecider"), \
          patch.object(IsolationGuard, "_detect_docker", return_value=detected):
-        return IsolationGuard(config={})
+        # 钉 docker 后端：真身 isolation_config.yaml 已启用 wsl_native（探测目标
+        # 会从 docker 切到 WSL，本机 WSL 在位即 True，复检契约无从测起）。
+        return IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}}})
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +159,7 @@ async def test_no_recheck_within_cooldown():
 async def test_config_specified_false_never_rechecks():
     """config 显式指定 docker_available=False 时永不复检，始终拦截。"""
     with patch("decider.IsolationDecider"):
-        plugin = IsolationGuard(config={"docker_available": False})
+        plugin = IsolationGuard(config={"docker_available": False, "providers": {"wsl_native": {"enabled": False}}})
     assert plugin._docker_auto is False
     _container_policy(plugin)
 

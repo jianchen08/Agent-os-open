@@ -91,6 +91,8 @@ static_vars:
 
       - 资源管理：resource_manager_agent
 
+      - 社区运营：community_ops_agent（开源仓巡检/回复/反馈登记）
+
       - 验证：container_verification_agent
 
       - 通用：general_agent

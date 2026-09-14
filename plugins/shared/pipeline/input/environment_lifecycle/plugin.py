@@ -134,8 +134,14 @@ class EnvironmentLifecyclePlugin(IInputPlugin):
         caller = _destroy_caller
         if caller is None:
             return PluginResult(state_updates={"environment_released": False})
+        # state 真值通道：isolation.container_name 是落地时写入的容器名，
+        # 服务重启后内存登记为空也能按名删除（D6：杜绝登记丢失=泄漏）。
+        container_name = state.get("isolation.container_name") or ""
         try:
-            raw = await caller("isolation.destroy_env", {"task_id": task_id})
+            raw = await caller(
+                "isolation.destroy_env",
+                {"task_id": task_id, "container_name": container_name},
+            )
         except Exception as exc:
             logger.warning(
                 "[EnvironmentLifecycle] exit 销毁环境失败（留痕不阻断）| task=%s | error=%s",

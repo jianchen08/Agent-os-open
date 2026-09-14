@@ -9,6 +9,9 @@ import shutil
 from datetime import UTC, datetime
 from typing import Any, ClassVar, cast
 
+from providers.base import IsolationProvider
+from wsl_health import ensure_docker_engine
+
 from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
@@ -16,8 +19,6 @@ from agentos_plugin_sdk.isolation_types import (
     IsolationEnvironment,
     IsolationLevel,
 )
-from providers.base import IsolationProvider
-from wsl_health import ensure_docker_engine
 
 logger = logging.getLogger(__name__)
 
@@ -257,30 +258,66 @@ class DockerProvider(IsolationProvider):
         context: IsolationContext,
         now: datetime,
         error_msg: str,
+        query_unavailable: bool = False,
     ) -> IsolationEnvironment:
         """构造一个错误状态的容器环境并注册。"""
         env_id = f"docker-{context.task_id}"
+        provider_info: dict[str, Any] = {"error": error_msg}
+        if query_unavailable:
+            # 存在性查询未知（非确定性失败）：调用方据此不计入创建失败熔断。
+            provider_info["query_unavailable"] = True
         env = IsolationEnvironment(
             env_id=env_id,
             level=IsolationLevel.CONTAINER,
             provider_type="docker",
             status=EnvironmentStatus.ERROR.value,
             context=context,
-            provider_info={"error": error_msg},
+            provider_info=provider_info,
             created_at=now.isoformat(),
             last_used_at=now.isoformat(),
         )
         self._environments[env_id] = env
         return env
 
+    async def _inspect_as_ready(
+        self,
+        name: str,
+        context: IsolationContext,
+        now: datetime,
+    ) -> IsolationEnvironment:
+        """按名收养：inspect 取容器 id 并构造 READY 环境（env_id=容器名）。"""
+        rc, stdout, _ = await self._run_cmd(
+            ["docker", "inspect", "-f", "{{.Id}}", name], timeout=15
+        )
+        container_id = stdout.decode("utf-8", errors="replace").strip() if rc == 0 else name
+        env = IsolationEnvironment(
+            env_id=name,
+            level=IsolationLevel.CONTAINER,
+            provider_type="docker",
+            status=EnvironmentStatus.READY.value,
+            context=context,
+            provider_info={
+                "container_id": container_id,
+                "container_name": name,
+                "image": self._image,
+                "cpu_limit": self._cpu_limit,
+                "memory_limit": self._memory_limit,
+            },
+            created_at=now.isoformat(),
+            last_used_at=now.isoformat(),
+        )
+        self._environments[name] = env
+        return env
+
     async def create_environment(
         self,
         context: IsolationContext,
-        container_name: str,
+        container_name: str | None = None,
     ) -> IsolationEnvironment:
         """创建 Docker 容器环境。"""
         now = datetime.now(UTC)
-        name = container_name
+        # manager 对 CONTAINER 恒注入 workspace 派生名；缺名兜底仅为类型完备
+        name = container_name if container_name else f"cua-{context.task_id}"
 
         # 工作空间挂载校验：容器隔离的工作空间只能来自任务数据解析出来的路径。
         # 缺失或宿主机路径不存在即为功能错误——拒绝创建无挂载容器，避免命令落到
@@ -322,6 +359,34 @@ class DockerProvider(IsolationProvider):
         # 构建 docker create 命令参数（_build_run_args 已含 IMAGE 与 COMMAND）
         run_args = self._build_run_args(name, context)
 
+        # 撞名预检收养（D6）：容器名由 workspace 确定性派生；docker start 按名
+        # 幂等（running=no-op，created/exited=启动）。同名遗留容器（上一轮/
+        # 服务重启前）在这里直接收养复用，绕开 list 式查找的超时误判——
+        # find 超时被当不存在 → create → daemon Conflict → 熔断（2026-09-13
+        # 实锤 96 次同管道自撞）。
+        try:
+            started, adopt_err = await self._start_one(name)
+        except Exception as exc:  # _run_cmd 超时等异常 = 存在性未知
+            started, adopt_err = False, f"docker start 异常: {exc}"
+        if started:
+            logger.info("[DockerProvider] 收养已有同名容器 | name=%s", name)
+            return await self._inspect_as_ready(name, context, now)
+        if "No such container" not in adopt_err:
+            # 存在性未知（daemon 超时/假死）：不推进 create（防撞可能存在的
+            # 同名容器）、不计入创建失败重试，返回查询不可用由上层软失败。
+            logger.error(
+                "[DockerProvider] 容器存在性查询不可用（防撞名，跳过创建） | name=%s | error=%s",
+                name,
+                adopt_err,
+            )
+            return self._make_error_environment(
+                context,
+                now,
+                f"隔离查询暂不可用，未创建容器（防撞名）: {adopt_err}",
+                query_unavailable=True,
+            )
+        # "No such container" = 确定性不存在 → 正常新建
+
         # 拉取镜像（如果本地不存在）
         await self._ensure_image()
 
@@ -333,7 +398,7 @@ class DockerProvider(IsolationProvider):
 
         # 统一使用 container_name 作为 env_id（由 workspace 决定），
         # 保证同一 workspace 无论容器是否重建，env_id 始终一致。
-        env_id = container_name
+        env_id = name
 
         env = IsolationEnvironment(
             env_id=env_id,
@@ -343,7 +408,7 @@ class DockerProvider(IsolationProvider):
             context=context,
             provider_info={
                 "container_id": container_id,
-                "container_name": container_name,
+                "container_name": name,
                 "image": self._image,
                 "cpu_limit": self._cpu_limit,
                 "memory_limit": self._memory_limit,
@@ -425,7 +490,23 @@ class DockerProvider(IsolationProvider):
         """
         env = self._environments.get(env_id)
         if not env:
-            return True  # 无可销毁记录，视为已成功（幂等）
+            # 内存登记缺失（服务重启后登记为空）不等于容器不存在：env_id 即
+            # 容器名，按名强制删除——NotFound 视为幂等成功，删失败如实 False。
+            # 旧实现此处直接 return True 谎报销毁成功，是容器泄漏（累计 371 个
+            # 运行中容器）的直接来源。
+            rc, _, stderr = await self._run_cmd(["docker", "rm", "-f", env_id], timeout=15)
+            if rc == 0:
+                logger.info("[DockerProvider] 容器已销毁（无登记，按名删除） | id=%s", env_id[:12])
+                return True
+            err_tail = stderr.decode("utf-8", errors="replace")[-200:]
+            if "No such container" in err_tail:
+                return True  # 真不存在，幂等成功
+            logger.warning(
+                "[DockerProvider] 按名销毁失败（docker 里可能仍在） | id=%s | err=%s",
+                env_id[:12],
+                err_tail,
+            )
+            return False
 
         container_id = env.provider_info.get("container_id")
         if not container_id:

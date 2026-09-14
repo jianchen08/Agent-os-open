@@ -29,7 +29,7 @@ if str(_PLUGIN_DIR) not in sys.path:
 
 # 仓库根 = 插件目录向上 4 层（plugins/shared/system/isolation → 仓库根）
 _REPO_ROOT = _PLUGIN_DIR.parents[3]
-_CFG_FILE = _REPO_ROOT / "config" / "isolation" / "isolation_config.yaml"
+_CFG_FILE = _REPO_ROOT / "config" / "plugins" / "isolation" / "isolation_config.yaml"
 
 
 def _load_ws(mod_name: str = "isolation_workspace_root_test", source: Path | None = None) -> Any:
@@ -62,7 +62,7 @@ find_project_root = _MOD.find_project_root
 
 class TestIsolationConfigPath:
     def test_resolves_to_repo_root_config_file(self) -> None:
-        """定位函数返回的路径存在且指向仓库根 config/isolation/isolation_config.yaml。"""
+        """定位函数返回的路径存在且指向仓库根 config/plugins/isolation/isolation_config.yaml。"""
         path = _isolation_config_path()
         assert path.exists(), f"配置文件不存在: {path}"
         assert path == _CFG_FILE, f"期望 {_CFG_FILE}，实际 {path}"
@@ -70,9 +70,9 @@ class TestIsolationConfigPath:
     def test_ancestor_walk_not_hardcoded(self) -> None:
         """路径通过祖先目录查找得到（不依赖固定父目录层数）。"""
         path = _isolation_config_path()
-        # 仓库根是包含 config/isolation/isolation_config.yaml 的祖先目录
+        # 仓库根是包含 config/plugins/isolation/isolation_config.yaml 的祖先目录
         assert _REPO_ROOT in path.parents
-        assert path.parent == _REPO_ROOT / "config" / "isolation"
+        assert path.parent == _REPO_ROOT / "config" / "plugins" / "isolation"
 
     def test_env_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """AGENTOS_CONFIG_ROOT 指向的配置根优先于祖先目录推导。"""
@@ -91,7 +91,7 @@ class TestIsolationConfigPath:
     def test_no_ancestor_found_returns_fallback_without_panic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """任何祖先目录都找不到时返回推导路径（加载失败走缺省回退，不 panic）。"""
         monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(_REPO_ROOT / "nonexistent-config-root"))
-        # 模拟 workspace.py 位于无 config/isolation 祖先的目录：用临时目录重新加载模块
+        # 模拟 workspace.py 位于无 config/plugins/isolation 祖先的目录：用临时目录重新加载模块
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,9 +131,9 @@ class TestWorkspaceConfigRoot:
 
 class TestFindProjectRoot:
     def test_finds_repo_root(self) -> None:
-        """祖先查找定位仓库根（含 config/isolation/ 的祖先目录）。"""
+        """祖先查找定位仓库根（含 config/plugins/isolation/ 的祖先目录）。"""
         root = find_project_root()
-        assert (root / "config" / "isolation" / "isolation_config.yaml").exists()
+        assert (root / "config" / "plugins" / "isolation" / "isolation_config.yaml").exists()
         assert root == _REPO_ROOT, f"期望 {_REPO_ROOT}，实际 {root}"
 
     def test_env_config_root_parent_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:

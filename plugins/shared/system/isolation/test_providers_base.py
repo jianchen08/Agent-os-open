@@ -67,7 +67,7 @@ class _ConcreteProvider(IsolationProvider):
     async def is_available(self) -> tuple[bool, str | None]:
         return self._available
 
-    async def create_environment(self, context: Any) -> Any:
+    async def create_environment(self, context: Any, container_name: str | None = None) -> Any:
         return context
 
     async def destroy_environment(self, env_id: str, success: bool = True) -> bool:

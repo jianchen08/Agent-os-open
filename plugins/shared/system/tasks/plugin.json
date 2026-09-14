@@ -501,7 +501,7 @@
   "config_files": [
     {
       "id": "long_term_task",
-      "path": "config/system/long_term_task.yaml",
+      "path": "config/plugins/tasks/long_term_task.yaml",
       "label": "长期任务配置"
     }
   ],

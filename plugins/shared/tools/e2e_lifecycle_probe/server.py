@@ -2,7 +2,7 @@
 """E2E 生命周期探针插件——装卸载 e2e（tests/e2e_02/test_07_plugin_lifecycle_e2e.py）的功能载体。
 
 刻意最小化：一个回声工具 + 一个 /ext HTTP 端点，无外部依赖、无副作用。
-默认 disabled（config/plugins/default_profile.yaml），e2e 按需启停——
+默认 disabled（config/kernel/default_profile.yaml），e2e 按需启停——
 "功能生效/失效"的判据即本插件的工具与端点在内核面上的可见性与可调用性。
 """
 from __future__ import annotations

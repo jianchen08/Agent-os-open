@@ -661,6 +661,26 @@ impl ServiceSurface {
             }
         }
     }
+
+    /// 反向依赖查询（ADR 2026-09-14-config-ownership §2.4 卸载/禁用提醒的唯一数据源）：
+    /// `provider_id` 提供的服务被哪些插件的 `requires_services` 依赖。
+    /// 返回消费者插件 id（去重、不含自身、保持清单序）。
+    pub fn dependents_of(&self, manifests: &[PluginManifest], provider_id: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for m in manifests {
+            if m.id == provider_id || m.requires_services.is_empty() {
+                continue;
+            }
+            let depends = m
+                .requires_services
+                .iter()
+                .any(|item| self.provider_ids(item).iter().any(|p| p == provider_id));
+            if depends && !out.contains(&m.id) {
+                out.push(m.id.clone());
+            }
+        }
+        out
+    }
 }
 
 /// `ns.method` → (`ns`, `Some(method)`)；`ns` → (`ns`, `None`)。
@@ -980,6 +1000,28 @@ mod tests {
         let app_pos = sorted.iter().position(|m| m.id == "app").unwrap();
         let audit_pos = sorted.iter().position(|m| m.id == "audit").unwrap();
         assert!(audit_pos < app_pos, "audit（提供者）必须先于 app 加载");
+    }
+
+    #[test]
+    fn test_dependents_of_reverse_edge() {
+        // 反向依赖查询（ADR §2.4 提醒数据源）：消费者 → 提供者反查，端点级与角色级各一条。
+        let mut consumer = svc_manifest("consumer", &[]);
+        consumer.requires_services = vec!["audit.write".into()];
+        let mut role_consumer = svc_manifest("role_consumer", &[]);
+        role_consumer.requires_services = vec!["audit".into()];
+        let audit = svc_manifest("audit", &["audit.write"]);
+        let surface = ServiceSurface::from_manifests(&[
+            consumer.clone(),
+            role_consumer.clone(),
+            audit.clone(),
+        ]);
+        let deps = surface.dependents_of(&[consumer, role_consumer, audit], "audit");
+        assert!(deps.contains(&"consumer".to_string()));
+        assert!(deps.contains(&"role_consumer".to_string()));
+        // 无消费者插件 → 空表
+        let lone = svc_manifest("lone", &["lone.x"]);
+        let surface2 = ServiceSurface::from_manifests(&[lone.clone()]);
+        assert!(surface2.dependents_of(&[lone], "lone").is_empty());
     }
 
     #[test]
@@ -1664,5 +1706,212 @@ mod tests {
             vec!["interaction.respond".to_string()],
             "services 轴已回铺的方法 clean；两轴都未声明的仍要抓出"
         );
+    }
+
+    // ── PluginScope / PluginScopeRegistry 诊断面（len/is_empty/plugin_id）──
+
+    /// scope 的 plugin_id 归属 + 登记计数：track 后 len/is_empty 如实反映，
+    /// revoke_all 逐条撤销（len 归零）。
+    #[test]
+    fn plugin_scope_reports_id_and_tracks_guards() {
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let scope = PluginScope::new("scoped_plugin");
+        assert_eq!(scope.plugin_id(), "scoped_plugin");
+        assert!(scope.is_empty(), "未登记时为空");
+
+        let c1 = counter.clone();
+        scope.track(agentos_core::traits::RegistrationGuard::new(move || {
+            c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        assert_eq!(scope.len(), 1);
+        assert!(!scope.is_empty());
+
+        let c2 = counter.clone();
+        scope.track(agentos_core::traits::RegistrationGuard::new(move || {
+            c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        assert_eq!(scope.len(), 2);
+
+        scope.revoke_all();
+        assert!(scope.is_empty(), "revoke_all 后清空");
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "两条登记各撤销一次"
+        );
+    }
+
+    /// scope registry：scope_of 同一 plugin_id 返回同一实例；revoke 后 len 归零；
+    /// 对不存在的 id revoke 是幂等 no-op。
+    #[test]
+    fn scope_registry_len_revoke_and_idempotent() {
+        let reg = PluginScopeRegistry::new();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+
+        let a = reg.scope_of("p_a");
+        let a_again = reg.scope_of("p_a");
+        assert!(Arc::ptr_eq(&a, &a_again), "同 id 应复用同一 scope");
+
+        let revoked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let r = revoked.clone();
+        a.track(agentos_core::traits::RegistrationGuard::new(move || {
+            r.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        reg.scope_of("p_b");
+        assert_eq!(reg.len(), 2);
+
+        reg.revoke("p_a");
+        assert_eq!(reg.len(), 1, "revoke 移除该 scope");
+        assert_eq!(
+            revoked.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "revoke 触发 scope 收回"
+        );
+
+        reg.revoke("never_existed"); // 幂等 no-op
+        assert_eq!(reg.len(), 1);
+    }
+
+    /// PluginScopeRegistry 单参构造（Default 走 new）。
+    #[test]
+    fn scope_registry_default_is_empty() {
+        let reg = PluginScopeRegistry::default();
+        assert!(reg.is_empty());
+    }
+
+    /// CapabilityRegistryImpl 的 Default 走 new（空表）。
+    #[test]
+    fn capability_registry_default_is_empty() {
+        let reg = CapabilityRegistryImpl::default();
+        assert!(reg.list_tools().is_empty());
+        assert!(reg.list_http_routes().is_empty());
+    }
+
+    // ── path_matches_template：空路径归一为 "/" 与空参数段 ──
+
+    /// 空路径 / 纯斜杠路径归一为根 "/"；根模板匹配根请求。
+    #[test]
+    fn path_matches_template_normalizes_empty_to_root() {
+        assert!(path_matches_template("", ""));
+        assert!(path_matches_template("/", ""));
+        assert!(path_matches_template("", "/"));
+        assert!(path_matches_template("///", ""));
+        assert!(!path_matches_template("/", "/x"), "根模板不匹配非根请求");
+    }
+
+    /// 单段参数不得匹配空段（`/a//b` 的中间空段）。
+    #[test]
+    fn path_matches_template_rejects_empty_param_segment() {
+        assert!(
+            !path_matches_template("/a/{id}/b", "/a//b"),
+            "空段不得吃掉单段参数"
+        );
+        assert!(
+            path_matches_template("/a/{id}/b", "/a/7/b"),
+            "对照：非空段匹配"
+        );
+    }
+
+    /// 多段通配的段数下界：模板段比请求多 → 不匹配（通配至少吃 1 段）。
+    #[test]
+    fn path_matches_template_catchall_requires_at_least_one_segment() {
+        assert!(!path_matches_template("/a/{p:path}", "/a"));
+        assert!(path_matches_template("/a/{p:path}", "/a/x"));
+        assert!(path_matches_template("/a/{p:path}", "/a/x/y/z"));
+    }
+
+    // ── first_error_for 的角色级分支 + provider_ids 角色聚合 ──
+
+    /// 角色级 requires_services（无点）：该 ns 下无任何已注册方法 → Unsatisfied，
+    /// detail 指明角色无注册方法。有注册则通过。
+    #[test]
+    fn first_error_for_role_level_requires_registration() {
+        let provider: agentos_core::traits::PluginManifest = serde_json::from_value(json!({
+            "id": "provider", "name": "P", "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": { "services": [ {"name": "audit.write", "description": "d"} ] }
+        }))
+        .unwrap();
+        let surface = ServiceSurface::from_manifests(&[provider]);
+
+        let ok: agentos_core::traits::PluginManifest = serde_json::from_value(json!({
+            "id": "consumer", "name": "C", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": {},
+            "requires_services": ["audit"]
+        }))
+        .unwrap();
+        assert!(
+            surface.first_error_for(&ok).is_none(),
+            "角色有注册方法应满足"
+        );
+
+        let missing: agentos_core::traits::PluginManifest = serde_json::from_value(json!({
+            "id": "consumer2", "name": "C", "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": {},
+            "requires_services": ["ghost_role"]
+        }))
+        .unwrap();
+        match surface.first_error_for(&missing) {
+            Some(ServiceDepError::Unsatisfied {
+                consumer,
+                service,
+                detail,
+            }) => {
+                assert_eq!(consumer, "consumer2");
+                assert_eq!(service, "ghost_role");
+                assert!(
+                    detail.contains("capability role 'ghost_role'"),
+                    "detail 应指明角色: {detail}"
+                );
+            }
+            other => panic!("应报 Unsatisfied，实际 {other:?}"),
+        }
+    }
+
+    /// provider_ids 角色级聚合：把该 ns 下所有端点/角色的提供者去重收集。
+    #[test]
+    fn provider_ids_role_level_collects_and_dedups() {
+        let a: agentos_core::traits::PluginManifest = serde_json::from_value(json!({
+            "id": "prov_a", "name": "A", "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": { "services": [
+                {"name": "audit.write", "description": "d"},
+                {"name": "audit.read", "description": "d"}
+            ] }
+        }))
+        .unwrap();
+        let surface = ServiceSurface::from_manifests(&[a]);
+
+        assert_eq!(surface.provider_ids("audit"), vec!["prov_a".to_string()]);
+        assert_eq!(
+            surface.provider_ids("audit.read"),
+            vec!["prov_a".to_string()]
+        );
+        assert!(surface.provider_ids("nobody").is_empty());
+    }
+
+    /// provider_ids 角色级去重：两个端点、同一提供者，结果不重复。
+    #[test]
+    fn provider_ids_role_level_dedups_repeated_provider() {
+        let v = json!({
+            "id": "dual", "name": "D", "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": { "services": [
+                {"name": "svc.one", "description": "d"},
+                {"name": "svc.two", "description": "d"}
+            ] }
+        });
+        let m: agentos_core::traits::PluginManifest = serde_json::from_value(v).unwrap();
+        let surface = ServiceSurface::from_manifests(&[m]);
+        let ids = surface.provider_ids("svc");
+        assert_eq!(ids, vec!["dual".to_string()], "同一提供者只出现一次");
     }
 }

@@ -143,7 +143,9 @@ def _guard_with_probe(
     monkeypatch.setattr("shutil.which", _which_result(which_found))
     monkeypatch.setattr("subprocess.run", run)
     with patch("decider.IsolationDecider"):
-        return IsolationGuard(config={})
+        # 显式钉 docker 后端：本机仓库 yaml 可能启用 wsl_native，探测分派
+        # 会随之改道，使本文件锁定的 docker 探测语义失真
+        return IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}}})
 
 
 class TestProbeErrorFailClosed:

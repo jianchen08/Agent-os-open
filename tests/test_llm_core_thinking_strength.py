@@ -169,7 +169,7 @@ def test_llm_yaml_carries_vendor_strength_mappings() -> None:
     import yaml
 
     data = yaml.safe_load(
-        (_REPO_ROOT / "config" / "models" / "llm.yaml").read_text(encoding="utf-8")
+        (_REPO_ROOT / "config" / "plugins" / "llm" / "llm.yaml").read_text(encoding="utf-8")
     )
     providers = data["providers"]
     glm_params = {
@@ -205,7 +205,7 @@ def test_llm_yaml_off_gear_is_string_key() -> None:
     import yaml
 
     data = yaml.safe_load(
-        (_REPO_ROOT / "config" / "models" / "llm.yaml").read_text(encoding="utf-8")
+        (_REPO_ROOT / "config" / "plugins" / "llm" / "llm.yaml").read_text(encoding="utf-8")
     )
     for provider_name, mapping in data["providers"].items():
         params = mapping.get("thinking_strength_params")
@@ -227,7 +227,7 @@ def test_every_reasoning_model_resolves_off_override() -> None:
     import yaml
 
     data = yaml.safe_load(
-        (_REPO_ROOT / "config" / "models" / "llm.yaml").read_text(encoding="utf-8")
+        (_REPO_ROOT / "config" / "plugins" / "llm" / "llm.yaml").read_text(encoding="utf-8")
     )
     providers = data["providers"]
     missing: list[str] = []

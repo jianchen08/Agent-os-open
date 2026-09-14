@@ -73,12 +73,12 @@ class TestAgentLevelResetPerPipeline:
         mod = _load_plugin_module()
         plugin = mod.ContextBuildPlugin(config={})
 
-        res_a = _run(plugin.execute(_ctx({"agent_id": "l2coder"})))
+        res_a = _run(plugin.execute(_ctx({"agent.id": "l2coder"})))
         assert res_a.state_updates["context.is_project"] is False, (
             "Agent A 为 L2 叶子执行者，不应标记为项目级"
         )
 
-        res_b = _run(plugin.execute(_ctx({"agent_id": "no-such-agent"})))
+        res_b = _run(plugin.execute(_ctx({"agent.id": "no-such-agent"})))
         assert res_b.state_updates["context.is_project"] is True, (
             f"Agent B 无层级配置应回默认 L1，实际残留: {res_b.state_updates}"
         )
@@ -88,7 +88,7 @@ class TestAgentLevelResetPerPipeline:
         mod = _load_plugin_module()
         plugin = mod.ContextBuildPlugin(config={"agent_level": "L1"})
 
-        res = _run(plugin.execute(_ctx({"agent_id": "l2coder"})))
+        res = _run(plugin.execute(_ctx({"agent.id": "l2coder"})))
         assert res.state_updates["context.agent_name"] == ""
         # 显式插件配置 L1 压过 yaml 的 L2
         assert res.state_updates["context.is_project"] is True

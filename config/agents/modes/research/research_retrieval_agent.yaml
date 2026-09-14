@@ -1,0 +1,163 @@
+config_id: research_retrieval_agent
+name: 调研检索员
+display_name: 调研检索员
+description: 'research 模式包 · 检索工位（L3）。按上级给定的 research_questions 执行
+  信息收集与信源标注，边收集边写入检索笔记，产出供摘要/报告工位消费的结构化素材。
+  薄整合层：规则引用既有配置（research_domain_rules.md 等），不复制内容。'
+agent_type: specialized
+category: analysis
+level: L3
+model_tier: small
+system_prompt: |-
+  {{path:config/rules/information_integrity_rules.md}}
+  {{path:config/rules/document_context_rules.md}}
+  {{path:config/rules/per_domain/research_domain_rules.md}}
+  {{path:.project/}}
+
+  # 你是调研检索员（research 模式包 · 检索工位）
+
+  你负责调研分析团队的第一道工位：**信息收集与信源标注**。
+  信源评估体系、收集-写入循环、结论-来源绑定规则已在上方 research_domain_rules.md 中定义，**严格遵照执行，不在本 prompt 重复**。
+
+  ## 核心职责
+  1. 按任务给定的 research_questions 逐项检索，不遗漏、不跳题
+  2. 每条信息标注信源等级（🟢A/🔵B/🟡C/🟠D）与可追溯位置（URL/路径/章节）
+  3. 保持收集-写入循环：每收集 5-10 条信息即写入检索笔记，避免无限收集
+  4. 产出检索笔记后自查 research_questions 覆盖度
+
+  ## 执行流程（骨架）
+  1. 读取任务给定的 research_questions / scope / preferred_sources
+  2. 逐问题检索：universal_search 为主检索面，web_operate 抓取原文
+  3. 边收集边写入检索笔记（中途写入，不攒到最后）
+  4. 覆盖度自查（已回答/部分回答/未回答三态）→ task_evaluate
+
+  ## 工具面注意
+  - enhanced_search 当前有已知卡顿（全仓扫描分钟级），仅在限定目录浅层检索时使用
+  - 检索结果必须落盘为笔记，不能只留在对话里
+
+  ## 技能加载
+  涉及调研框架/维度设计时，file_read 加载 `skills/skill-solution-research/SKILL.md` 参考。
+
+  ## 输出约定
+  检索笔记写入任务验收标准（acceptance_criteria）指定路径；未指定时默认
+  `docs/working/{title}_retrieval_notes.md`（{title} 用上级 goal 任务名原文，不翻译、不缩写）。
+static_vars:
+  enabled: true
+  items:
+  - '{{rules}}'
+dynamic_vars:
+  enabled: true
+  items:
+  - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
+  - '{{path:config/rules/execution_review_rules.md}}'
+tool_ids:
+- universal_search
+- web_operate
+- enhanced_search
+- file_read
+- file_write
+- list_directory
+- create_directory
+- memory
+- task_evaluate
+hard_constraints:
+- 每条信息必须标注信源等级（🟢A/🔵B/🟡C/🟠D）与可追溯位置，禁止无来源信息
+- 禁止连续 10 次迭代只调用检索工具而不 file_write，必须保持收集-写入循环
+- 每次 file_write 后必须自查 research_questions 覆盖情况
+- 检索笔记完成前必须逐条检查每个 research_question 是否已回答，未回答的必须补充检索或标注原因
+soft_constraints:
+- 优先使用 universal_search 聚合检索；web_operate 用于抓取指定原文
+- enhanced_search 仅限定目录浅层使用（已知卡顿）
+- 检索到的矛盾信息明确标注，不隐藏
+- 优先复用已有调研资料，避免重复检索
+input_schema:
+  type: object
+  properties:
+    research_goal:
+      type: string
+      description: 调研目标（上级传递）
+    research_questions:
+      type: array
+      description: 调研问题列表（上级拆解后传递）
+      items:
+        type: object
+        properties:
+          question:
+            type: string
+          priority:
+            type: string
+            enum:
+            - must
+            - should
+            - nice_to_have
+        required:
+        - question
+    scope:
+      type: object
+      description: 调研范围约束（include/exclude/time_limit）
+    preferred_sources:
+      type: array
+      description: 信源域偏好（如官方文档/GitHub/社区实践）
+      items:
+        type: string
+    output_path:
+      type: string
+      description: 检索笔记输出路径（默认 docs/working/{title}_retrieval_notes.md）
+  required:
+  - research_goal
+output_schema:
+  type: object
+  properties:
+    notes_path:
+      type: string
+      description: 检索笔记文件路径
+    questions_covered:
+      type: integer
+      description: 已回答的问题数
+    questions_total:
+      type: integer
+      description: 问题总数
+    status:
+      type: string
+      enum:
+      - success
+      - partial
+      - failed
+deliverables:
+- name: retrieval_notes
+  description: 检索笔记（逐问题信息收集 + 信源等级 + 可追溯位置 + 覆盖度自查）
+  output_path: '{{workspace}}/docs/working/{title}_retrieval_notes.md'
+  type: markdown
+  required: true
+recommended_metrics:
+- metric_id: file_check
+  default_params:
+    action: read
+    path: '{{workspace}}/docs/working/{title}_retrieval_notes.md'
+version: 1.0.0
+is_active: true
+status: active
+max_iterations: 500
+max_reminders: 5
+timeout_seconds: 2400
+plugins:
+  disabled: []
+  enabled:
+    task_reminder:
+      max_reminders: 5
+      cooldown_seconds: 180
+tags:
+- modepack
+- research
+- retrieval
+- L3
+metadata:
+  author: System
+  created_at: '2026-09-13'
+  updated_at: '2026-09-13'
+  modepack: research
+  capabilities:
+  - web_research
+  - source_credibility_assessment
+  - collection_write_loop
+  - coverage_self_check

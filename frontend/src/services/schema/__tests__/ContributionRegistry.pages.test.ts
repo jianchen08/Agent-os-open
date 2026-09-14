@@ -378,3 +378,51 @@ describe('ContributionRegistry — 旧贡献点直接归一化为 pages', () => 
     expect(registry.getPagesBySpace('dock')).toEqual([])
   })
 })
+
+describe('ContributionRegistry — 跨插件页面 id 冲突（BUG-11 回归）', () => {
+  let registry: ContributionRegistry
+
+  beforeEach(() => {
+    registry = new ContributionRegistry()
+  })
+
+  it('两插件声明同 id 页面 → 都注册；path 直达查询命中带 path 的声明页', () => {
+    // 生产实况（BUG-11）：debug_center 先声明 id=tasks（无 path），task_service 后声明
+    // id=tasks（path=/tasks）。去重若按裸 id 全局裁决，后者被静默吞掉，工作区空态
+    // 「打开任务管理」按钮（openWorkspacePanelByPath('/tasks')）因此永远落空。
+    registry.loadFromSchema(
+      makeSchema({
+        plugin_contributes: [
+          {
+            plugin_id: 'debug_center',
+            contributes: {
+              pages: [{ id: 'tasks', title: '任务', space: 'debug_center', widget: 'debug_tasks' }],
+            },
+          },
+          {
+            plugin_id: 'task_service',
+            contributes: {
+              pages: [
+                {
+                  id: 'tasks',
+                  title: '任务管理',
+                  space: 'workspace',
+                  slot: 'tab',
+                  path: '/tasks',
+                  widget: 'pipeline_manager',
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    )
+
+    const byPath = registry.getPages().find((p) => p.path === '/tasks')
+    expect(byPath).toMatchObject({ pluginId: 'task_service', widget: 'pipeline_manager' })
+    // debug_center 的同名页不受影响
+    expect(registry.getPagesBySpace('debug_center').map((p) => p.id)).toContain('tasks')
+    // getPage 裸 id 查询保持先注册者胜出（既有可观察行为不变）
+    expect(registry.getPage('tasks')?.pluginId).toBe('debug_center')
+  })
+})

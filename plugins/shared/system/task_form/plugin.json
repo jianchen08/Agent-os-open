@@ -1,7 +1,7 @@
 {
   "id": "task_form",
   "name": "Task Form Service",
-  "description": "任务表单声明与取数端点——新建任务表单字段（config/task_form.yaml）+ 执行 Agent/容器任务动态选项（自持服务，channel_api 零追加）",
+  "description": "任务表单声明与取数端点——新建任务表单字段（config/plugins/task_form/task_form.yaml）+ 执行 Agent/容器任务动态选项（自持服务，channel_api 零追加）",
   "version": "1.0.0",
   "plugin_type": "system",
   "language": "python",
@@ -45,7 +45,7 @@
   "config_files": [
     {
       "id": "task_form",
-      "path": "config/task_form.yaml",
+      "path": "config/plugins/task_form/task_form.yaml",
       "label": "新建任务表单声明"
     }
   ],

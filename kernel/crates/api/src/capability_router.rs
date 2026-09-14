@@ -72,7 +72,7 @@ pub struct KernelCapabilityRouter {
     /// 域事件广播闭包（DSH hook 翻译：event-bus.emit 的域事件名单事件同步
     /// 广播，使 approval.created 等触达触发器订阅者）。None = 不广播。
     domain_broadcaster: Option<DomainBroadcaster>,
-    /// 内核能力契约（定义驱动入口校验）：config/kernel_capabilities/
+    /// 内核能力契约（定义驱动入口校验）：config/kernel/kernel_capabilities/
     /// *.json 声明的 input_schema（含 pattern 形态）在本路由入口逐条执行——
     /// G6 授权之后、派发之前。None = 未装配契约 → 宽泛放行（兼容旧装配/测试）。
     capability_contracts: Option<Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>>,
@@ -320,7 +320,7 @@ impl KernelCapabilityRouter {
 
     /// 注入内核能力契约（启用定义驱动入口校验：契约声明了 (namespace, method)
     /// 才按 input_schema 逐条校验——required/类型/pattern 形态/enum/闭包参数面；
-    /// 未声明即宽泛放行）。生产装配自 config/kernel_capabilities/*.json。
+    /// 未声明即宽泛放行）。生产装配自 config/kernel/kernel_capabilities/*.json。
     pub fn with_capability_contracts(
         mut self,
         contracts: Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>,
@@ -2053,10 +2053,32 @@ impl KernelCapabilityRouter {
                 if seen.contains(&pid) {
                     continue;
                 }
-                let Some(merged) = crate::routes::cold_state_row(store, &pid, &tenant_id).await
+                let Some(mut merged) =
+                    crate::routes::merge_cold_state(store, &pid, &tenant_id).await
                 else {
                     continue; // checkpoint 与表行双空的真孤儿不出口（表行可独立兜底）
                 };
+                // BUG-2 幽灵 running：仅当合并行缺 run_status 投影（崩溃/reap 形态）
+                // 才按 runs 表最新 run 的权威状态补齐（fill-if-absent）——插件侧
+                // reconcile/任务读面不再把死管道猜成 running。读面故障降级为不补
+                // （行照常出口，仅缺运行状态键）。
+                // 缺键或显式 null 都视为无投影，走补齐
+                let needs_run_status_overlay = merged.get("run_status").is_none_or(|v| v.is_null());
+                if needs_run_status_overlay {
+                    match store.list_runs_by_pipeline(&pid, &tenant_id).await {
+                        Ok(runs) => {
+                            if let Some(latest) = runs.first() {
+                                crate::routes::overlay_run_status(
+                                    &mut merged,
+                                    Some(crate::routes::run_status_str(&latest.status)),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!(pipeline_id = %pid, error = %e, "冷行最新 run 状态读取失败，run_status 不补齐");
+                        }
+                    }
+                }
                 let mut row = crate::routes::summarize_state(&merged, &export);
                 if let Some(obj) = row.as_object_mut() {
                     obj.insert("pipeline_id".to_string(), json!(pid));

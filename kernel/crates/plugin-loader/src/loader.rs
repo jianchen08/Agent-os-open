@@ -46,7 +46,7 @@ pub struct AllowlistEntry {
 
 /// 插件准入白名单配置。
 ///
-/// 对应 `config/system/plugin_allowlist.yaml`。
+/// 对应 `config/kernel/plugin_allowlist.yaml`。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AllowlistConfig {
     /// 白名单模式（默认 permissive）。
@@ -65,7 +65,7 @@ pub struct AllowlistConfig {
 ///   "not in the allowlist"），内核以零插件面启动而非静默全放行。安全配置
 ///   损坏不得伪装成最宽松默认态。
 ///
-/// 生产接线（build_plugin_loader）把 `config/system/plugin_allowlist.yaml` 从"空挂"
+/// 生产接线（build_plugin_loader）把 `config/kernel/plugin_allowlist.yaml` 从"空挂"
 /// 变成真·准入——permissive=放行 + 条目 sha256 校验（真实语料校准：106 插件
 /// 当前零 sha256 声明、零误伤）；strict=白名单外插件加载失败（fail-closed，与
 /// deny_unknown_fields 一致），由部署方显式启用。
@@ -175,7 +175,7 @@ impl PluginLoaderImpl {
     ///
     /// # Security
     ///
-    /// 白名单应由应用启动代码加载可信配置（如 `config/system/plugin_allowlist.yaml`）
+    /// 白名单应由应用启动代码加载可信配置（如 `config/kernel/plugin_allowlist.yaml`）
     /// 后传入，不应接受来自插件自身的输入。
     pub fn with_allowlist(mut self, allowlist: AllowlistConfig) -> Self {
         self.allowlist = allowlist;
@@ -3164,5 +3164,394 @@ mod tests {
             discovered.is_empty(),
             "strict 空名单下损坏 allowlist 应拒载所有插件（fail-closed）"
         );
+    }
+
+    // ── scan_root 分支补充：YAML manifest / 解析失败跳过 / 校验失败跳过 ──
+
+    /// plugin.yaml 形态：JSON 解析失败后回落 YAML 解析（同一份 discover 路径
+    /// 支持两种 manifest 文件名与两种语法）。
+    #[tokio::test]
+    async fn scan_root_parses_yaml_manifest() {
+        let builtin = tempfile::tempdir().unwrap();
+        let dir = builtin.path().join("yaml_plugin");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("plugin.yaml"),
+            "id: yaml_plugin\nname: YAML Plugin\nversion: 1.0.0\n\
+             plugin_type: tool\nlanguage: python\nhost_type: sidecar\n\
+             entry: python server.py\ncapabilities: {}\n",
+        )
+        .unwrap();
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        let discovered = loader.discover(&[]).await.unwrap();
+        assert_eq!(discovered.len(), 1, "plugin.yaml 应被发现");
+        assert_eq!(discovered[0].id, "yaml_plugin");
+        assert_eq!(discovered[0].name, "YAML Plugin");
+    }
+
+    /// 目录里既无 plugin.json 也无 plugin.yaml → 跳过（不报错、不产出伪条目）。
+    #[tokio::test]
+    async fn scan_root_skips_dir_without_manifest() {
+        let builtin = tempfile::tempdir().unwrap();
+        fs::create_dir_all(builtin.path().join("empty_dir")).unwrap();
+        // 顶层散落文件也不是插件目录（read_dir 只下钻目录）
+        fs::write(builtin.path().join("stray.txt"), "x").unwrap();
+        create_test_plugin_dir(builtin.path(), "real_plugin", "tool");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        let discovered = loader.discover(&[]).await.unwrap();
+        assert_eq!(discovered.len(), 1, "只发现真插件目录");
+        assert_eq!(discovered[0].id, "real_plugin");
+    }
+
+    /// 损坏 manifest（JSON/YAML 双解析失败）→ 跳过该插件但不阻断同 root 其他插件。
+    #[tokio::test]
+    async fn scan_root_skips_unparseable_and_keeps_others() {
+        let builtin = tempfile::tempdir().unwrap();
+        let bad = builtin.path().join("broken_plugin");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join("plugin.json"), "not json {{{").unwrap();
+        create_test_plugin_dir(builtin.path(), "good_plugin", "tool");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        let discovered = loader
+            .discover(&[])
+            .await
+            .expect("损坏插件不应让 discover 失败");
+        assert_eq!(discovered.len(), 1, "坏插件跳过，好插件保留");
+        assert_eq!(discovered[0].id, "good_plugin");
+    }
+
+    /// 校验失败（name 为空）→ 跳过该插件（warn 留痕），同 root 其他插件照常发现。
+    #[tokio::test]
+    async fn scan_root_skips_validation_failure_and_keeps_others() {
+        let builtin = tempfile::tempdir().unwrap();
+        let invalid = builtin.path().join("nameless");
+        fs::create_dir_all(&invalid).unwrap();
+        fs::write(
+            invalid.join("plugin.json"),
+            r#"{
+                "id":"nameless","name":"","version":"1.0.0",
+                "plugin_type":"tool","language":"python","host_type":"sidecar",
+                "entry":"python server.py","capabilities":{}
+            }"#,
+        )
+        .unwrap();
+        create_test_plugin_dir(builtin.path(), "valid_peer", "tool");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        let discovered = loader.discover(&[]).await.unwrap();
+        assert_eq!(discovered.len(), 1, "校验失败插件跳过");
+        assert_eq!(discovered[0].id, "valid_peer");
+    }
+
+    /// 不存在的 root → scan_root 直接返回空（不报 IO 错）——双根扫描里
+    /// builtin root 未部署时的正常路径。
+    #[tokio::test]
+    async fn discover_missing_root_returns_empty_without_error() {
+        let missing = tempfile::tempdir().unwrap().path().join("not_deployed");
+        let loader = PluginLoaderImpl::new(&missing, None);
+        let discovered = loader.discover(&[]).await.expect("不存在的 root 不应报错");
+        assert!(discovered.is_empty());
+    }
+
+    // ── validate_manifest_internal 必填字段逐项（id/name/version/language）──
+
+    /// 逐个必填字段缺失 → 对应 reason（表驱动；entry 校验另有专测）。
+    #[test]
+    fn validate_manifest_reports_each_missing_required_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = {
+            let p = dir.path().join("p.json");
+            fs::write(
+                &p,
+                r#"{
+                    "id":"p","name":"P","version":"1.0.0",
+                    "plugin_type":"tool","language":"python","host_type":"sidecar",
+                    "entry":"python server.py","capabilities":{}
+                }"#,
+            )
+            .unwrap();
+            p
+        };
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let base: PluginManifest =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+
+        type ManifestEdit = fn(&mut PluginManifest);
+        let cases: [(&str, ManifestEdit); 4] = [
+            ("id is required", |m| m.id.clear()),
+            ("name is required", |m| m.name.clear()),
+            ("version is required", |m| m.version.clear()),
+            ("language is required", |m| m.language.clear()),
+        ];
+        for (expected, mutate) in cases {
+            let mut m = base.clone();
+            mutate(&mut m);
+            let err = loader
+                .validate_manifest_internal(&mut m, &manifest_path)
+                .expect_err("缺必填字段应拒绝");
+            let msg = format!("{err:?}");
+            assert!(msg.contains(expected), "应报「{expected}」: {msg}");
+        }
+    }
+
+    /// language 缺失时的 plugin_id 归属：错误应带被拒插件 id（非 "(unknown)"）。
+    /// 对照 id 缺失用例（此时只能报 (unknown)）。
+    #[test]
+    fn validate_manifest_error_carries_plugin_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = {
+            let p = dir.path().join("p.json");
+            fs::write(
+                &p,
+                r#"{
+                    "id":"who_am_i","name":"N","version":"1.0.0",
+                    "plugin_type":"tool","language":"","host_type":"sidecar",
+                    "entry":"python server.py","capabilities":{}
+                }"#,
+            )
+            .unwrap();
+            p
+        };
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let mut m: PluginManifest =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let err = loader
+            .validate_manifest_internal(&mut m, &manifest_path)
+            .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("who_am_i"), "错误应带插件 id: {msg}");
+
+        // id 缺失：无从归属，报 (unknown)
+        let mut no_id = m.clone();
+        no_id.id.clear();
+        let err = loader
+            .validate_manifest_internal(&mut no_id, &manifest_path)
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("(unknown)"),
+            "id 缺失时归属为 (unknown): {err:?}"
+        );
+    }
+
+    /// state.reads 非法条目（messages_tail 非正整数）→ 忽略该条目但整体放行
+    /// （单条声明错误不拒载）；合法条目原样保留。
+    #[test]
+    fn validate_manifest_ignores_invalid_state_reads_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("p.json");
+        fs::write(
+            &manifest_path,
+            r#"{
+                "id":"reads_mix","name":"N","version":"1.0.0",
+                "plugin_type":"tool","language":"python","host_type":"sidecar",
+                "entry":"python server.py","capabilities":{},
+                "state":{"reads":["messages","messages_tail:0","messages_tail:abc","messages_tail:5"]}
+            }"#,
+        )
+        .unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let mut m: PluginManifest =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        loader
+            .validate_manifest_internal(&mut m, &manifest_path)
+            .expect("非法读取条目应被忽略而非拒载");
+
+        let reads = &m.state.as_ref().unwrap().reads;
+        assert!(
+            reads.contains(&"messages".to_string()),
+            "普通键保留: {reads:?}"
+        );
+        assert!(
+            reads.contains(&"messages_tail:5".to_string()),
+            "正整数保留: {reads:?}"
+        );
+        assert!(
+            !reads.iter().any(|r| r.contains(":0") || r.contains(":abc")),
+            "0 与非数字条目应被剔除: {reads:?}"
+        );
+    }
+
+    // ── scan_root 的 IO 错误路径：root 存在但不可读 ──
+
+    /// root 是文件而非目录（read_dir 必然失败）→ LoaderError::Io 上抛，
+    /// 不静默返回空（配置面故障必须可见）。
+    #[tokio::test]
+    async fn scan_root_io_error_is_isolated_to_that_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_dir = dir.path().join("regular_file");
+        fs::write(&not_a_dir, "x").unwrap();
+
+        // 坏根（文件而非目录）与好根并存：坏根读失败只记 warn 不阻断，
+        // 好根插件照常发现——单根失败不得瘫痪整次发现。
+        let good = tempfile::tempdir().unwrap();
+        create_test_plugin_dir(good.path(), "survives_bad_root", "tool");
+
+        let loader = PluginLoaderImpl::new(&not_a_dir, Some(good.path().to_path_buf()));
+        let discovered = loader
+            .discover(&[not_a_dir.to_str().unwrap()])
+            .await
+            .expect("单根读失败不应让 discover 整体失败");
+        assert_eq!(discovered.len(), 1, "好根插件应照常发现");
+        assert_eq!(discovered[0].id, "survives_bad_root");
+    }
+
+    /// root 下某插件目录的 manifest 不可读（Windows 下用目录占位同名路径
+    /// 制造读失败）→ 该 root 扫描报 IO 错（不产出部分结果）。
+    #[tokio::test]
+    async fn scan_root_manifest_read_failure_isolated_to_that_root() {
+        let bad = tempfile::tempdir().unwrap();
+        // plugin.json 位置是目录 → read_to_string 必然失败
+        let plugin_dir = bad.path().join("unreadable_manifest");
+        fs::create_dir_all(plugin_dir.join("plugin.json")).unwrap();
+
+        let good = tempfile::tempdir().unwrap();
+        create_test_plugin_dir(good.path(), "peer_ok", "tool");
+
+        let loader = PluginLoaderImpl::new(bad.path(), Some(good.path().to_path_buf()));
+        let discovered = loader
+            .discover(&[])
+            .await
+            .expect("单根 manifest 读失败不应让 discover 整体失败");
+        assert_eq!(discovered.len(), 1, "用户根插件照常发现");
+        assert_eq!(discovered[0].id, "peer_ok");
+    }
+
+    /// entry 为空且非 composite → 明确拒绝（entry is required）。
+    #[test]
+    fn validate_manifest_non_composite_empty_entry_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("p.json");
+        fs::write(
+            &manifest_path,
+            r#"{
+                "id":"no_entry","name":"N","version":"1.0.0",
+                "plugin_type":"tool","language":"python","host_type":"sidecar",
+                "entry":"","capabilities":{}
+            }"#,
+        )
+        .unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let mut m: PluginManifest =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let err = loader
+            .validate_manifest_internal(&mut m, &manifest_path)
+            .expect_err("非 composite 空 entry 应拒绝");
+        assert!(
+            format!("{err:?}").contains("entry is required for non-composite"),
+            "文案: {err:?}"
+        );
+    }
+
+    /// native 声明但 manifest 路径无父目录 → 明确拒绝（无法解析相对产物路径）。
+    /// 用相对文件名作为 source_path 制造 parent() == Some("") 的边界；
+    /// 空路径 parent 为 None 才触发该分支，故取 `""`。
+    #[test]
+    fn validate_manifest_native_without_parent_dir_rejected() {
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None);
+        let mut m: PluginManifest = serde_json::from_str(
+            r#"{
+                "id":"no_parent","name":"N","version":"1.0.0",
+                "plugin_type":"tool","language":"rust","host_type":"in_process",
+                "entry":"x","capabilities":{},
+                "native":{"artifact":"no_parent"}
+            }"#,
+        )
+        .unwrap();
+        let err = loader
+            .validate_manifest_internal(&mut m, Path::new(""))
+            .expect_err("空 source_path（无父目录）应拒绝 native 预检");
+        assert!(
+            format!("{err:?}").contains("无父目录"),
+            "文案应指明无父目录: {err:?}"
+        );
+    }
+
+    // ── 入口文件哈希提取（read_entry_bytes）的边界分支 ──
+
+    /// entry 为空 → 空字节（等价只哈希 manifest）。
+    #[test]
+    fn read_entry_bytes_empty_entry_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("p.json");
+        fs::write(&manifest_path, "{}").unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let m: PluginManifest = serde_json::from_str(
+            r#"{
+                "id":"e","name":"N","version":"1.0.0","plugin_type":"tool",
+                "language":"python","host_type":"sidecar","entry":"",
+                "capabilities":{}
+            }"#,
+        )
+        .unwrap();
+        assert!(
+            loader
+                .read_entry_bytes(&m, &manifest_path)
+                .unwrap()
+                .is_empty(),
+            "空 entry 无入口文件"
+        );
+    }
+
+    /// entry 末 token 是 flag（`-m`）或文件不存在 → 空字节（不误当文件读）。
+    #[test]
+    fn read_entry_bytes_rejects_flags_and_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("p.json");
+        fs::write(&manifest_path, "{}").unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+
+        for entry in ["python -m", "python -m somemod", "python missing_server.py"] {
+            let m: PluginManifest = serde_json::from_str(&format!(
+                r#"{{
+                    "id":"e","name":"N","version":"1.0.0","plugin_type":"tool",
+                    "language":"python","host_type":"sidecar","entry":"{entry}",
+                    "capabilities":{{}}
+                }}"#
+            ))
+            .unwrap();
+            assert!(
+                loader
+                    .read_entry_bytes(&m, &manifest_path)
+                    .unwrap()
+                    .is_empty(),
+                "entry={entry:?} 不应取到入口文件字节"
+            );
+        }
+    }
+
+    /// 入口文件存在 → 返回其真实字节（sha256 语料需覆盖插件代码本体）。
+    #[test]
+    fn read_entry_bytes_reads_existing_entry_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("plugin.json");
+        fs::write(&manifest_path, "{}").unwrap();
+        fs::write(dir.path().join("server.py"), b"print('hi')").unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let m: PluginManifest = serde_json::from_str(
+            r#"{
+                "id":"e","name":"N","version":"1.0.0","plugin_type":"tool",
+                "language":"python","host_type":"sidecar","entry":"python server.py",
+                "capabilities":{}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            loader.read_entry_bytes(&m, &manifest_path).unwrap(),
+            b"print('hi')",
+            "应读到入口文件字节"
+        );
+    }
+
+    /// 哈希比对：等长不同内容判不等（常量时间比较的差异分支）。
+    /// 长度不同同样判不等。
+    #[test]
+    fn hash_compare_detects_length_and_content_differences() {
+        assert!(!secure_eq("abcd", "abce"), "同长不同内容应不等");
+        assert!(secure_eq("abcd", "abcd"), "自身相等");
+        assert!(!secure_eq("abcd", "abc"), "长度不同应不等");
+        assert!(secure_eq("", ""), "空串相等");
     }
 }

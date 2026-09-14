@@ -88,7 +88,7 @@
   "config_files": [
     {
       "id": "web_operate",
-      "path": "config/tools/web/web_operate.yaml",
+      "path": "config/plugins/web_ext/web_operate.yaml",
       "label": "网页操作配置"
     }
   ],

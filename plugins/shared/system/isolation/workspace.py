@@ -110,11 +110,11 @@ def validate_workspace_path(workspace: str) -> str | None:  # noqa: PLR0911
 
 
 def _isolation_config_path() -> Path:
-    """定位 isolation_config.yaml（仓库根 config/isolation/ 下）。
+    """定位 isolation_config.yaml（仓库根 config/plugins/isolation/ 下）。
 
     优先 AGENTOS_CONFIG_ROOT（内核启动时写入 <project_root>/config 并发布到进程
     环境，sidecar 继承，部署布局无关）；回退从本文件向上查找含
-    config/isolation/isolation_config.yaml 的祖先目录（不硬编码父目录层数）。
+    config/plugins/isolation/isolation_config.yaml 的祖先目录（不硬编码父目录层数）。
     旧链 config.config_center 在 0.2 sidecar venv 不存在（P1-7 延后 P6，
     见 docs/working/p1_7_config_center_migration_checklist.md #7）——直读永远
     失败、get_workspace_config_root() 恒返回缺省 .ai_workspaces，配置
@@ -122,15 +122,15 @@ def _isolation_config_path() -> Path:
     """
     env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
     if env_root:
-        p = Path(env_root) / "isolation" / "isolation_config.yaml"
+        p = Path(env_root) / "plugins" / "isolation" / "isolation_config.yaml"
         if p.exists():
             return p
     for ancestor in Path(__file__).resolve().parents:
-        candidate = ancestor / "config" / "isolation" / "isolation_config.yaml"
+        candidate = ancestor / "config" / "plugins" / "isolation" / "isolation_config.yaml"
         if candidate.exists():
             return candidate
     # 找不到时保持旧行为：返回推导路径（加载失败走缺省 .ai_workspaces，不 panic）
-    return Path(__file__).resolve().parent.parent.parent / "config" / "isolation" / "isolation_config.yaml"
+    return Path(__file__).resolve().parent.parent.parent / "config" / "plugins" / "isolation" / "isolation_config.yaml"
 
 
 def _load_isolation_config() -> dict:
@@ -145,7 +145,7 @@ def _load_isolation_config() -> dict:
         # P1-7 DEBT(task_11): 🔴 高危——workspace 隔离配置直读，迁移前提同 manager #2。
         # 见 docs/working/p1_7_config_center_migration_checklist.md #7，延后 P6。
 
-        config = get_config_center().get("isolation/isolation_config.yaml") or {}
+        config = get_config_center().get("plugins/isolation/isolation_config.yaml") or {}
         if config:
             return config
     except Exception as e:
@@ -181,20 +181,20 @@ def get_workspace_config_root() -> str:
 
 
 def find_project_root() -> Path:
-    """定位仓库根（config/isolation/ 所在祖先目录），不硬编码父目录层数。
+    """定位仓库根（config/plugins/isolation/ 所在祖先目录），不硬编码父目录层数。
 
     对齐 policy._default_policy_path 的祖先查找模式：AGENTOS_CONFIG_ROOT 优先
     （内核启动时把它发布到进程环境，指向 <project_root>/config——其父目录即
-    项目根）；回退从本文件向上找含 config/isolation/ 的祖先目录。找不到时
+    项目根）；回退从本文件向上找含 config/plugins/isolation/ 的祖先目录。找不到时
     回退从本文件按旧 parents[3] 推导（调用方缺省兜底，不 panic）。
     """
     env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
     if env_root:
         p = Path(env_root)
-        if (p / "isolation" / "isolation_config.yaml").is_file():
+        if (p / "plugins" / "isolation" / "isolation_config.yaml").is_file():
             return p.parent
     for ancestor in Path(__file__).resolve().parents:
-        if (ancestor / "config" / "isolation").is_dir():
+        if (ancestor / "config" / "plugins" / "isolation").is_dir():
             return ancestor
     return Path(__file__).resolve().parents[3]
 

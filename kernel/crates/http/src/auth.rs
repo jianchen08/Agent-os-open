@@ -530,6 +530,13 @@ pub fn verify_access_token(token: &str) -> Option<VerifiedUser> {
 mod tests {
     use super::*;
 
+    /// 构造带 Bearer 认证头的 HeaderMap（多处用例共用的测试夹具）。
+    fn mk_headers(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        h
+    }
+
     fn test_user(password: &str) -> BuiltInUser {
         BuiltInUser {
             id: "u-1".to_string(),
@@ -741,5 +748,168 @@ mod tests {
         assert!(authenticate_bearer_user(store, &empty, true).await.is_err());
         let junk = mk_headers("not-a-token");
         assert!(authenticate_bearer_user(store, &junk, false).await.is_err());
+    }
+
+    // ── 载荷结构畸形：段数不足 / 空 jti / 空 pwv ──
+    //
+    // decode_token 在校验签名后按 `:` 六段解析。这些用例用真实密钥重签
+    // 一份畸形载荷，使签名校验通过、只有结构校验拦截——锁"结构门"本身，
+    // 而非签名门（签名门另有专测）。
+
+    /// 用当前进程密钥对任意载荷重签（构造"签名合法但结构畸形"的 token）。
+    fn sign_payload(payload: &str) -> String {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let sig = engine.encode(hmac_sha256(payload));
+        format!("{}.{}", engine.encode(payload.as_bytes()), sig)
+    }
+
+    #[test]
+    fn decode_requires_six_segments() {
+        // 段数不足（5 段，缺 pwv）必须拒绝
+        assert!(
+            decode_token(&sign_payload("access:u-1:alice:9999999999:jti-1")).is_none(),
+            "5 段载荷必须拒绝"
+        );
+        // splitn(6) 语义：第 6 段吸收剩余 `:` 后的内容——pwv 本身可含分隔符，
+        // 段数超过 6 不构成结构错误（签名仍覆盖全载荷）。
+        let t = decode_token(&sign_payload(
+            "access:u-1:alice:9999999999:jti-1:pwv-1:extra",
+        ))
+        .expect("第 6 段吸收剩余，应可解析");
+        assert_eq!(t.jti, "jti-1");
+        assert_eq!(t.pwv, "pwv-1:extra", "pwv 承载剩余段");
+    }
+
+    #[test]
+    fn decode_rejects_empty_jti_or_pwv() {
+        // 空 jti（第 5 段）与空 pwv（第 6 段）：单次轮换/改密吊销依据缺失，必须拒绝
+        assert!(
+            decode_token(&sign_payload("access:u-1:alice:9999999999::pwv-1")).is_none(),
+            "空 jti 必须拒绝"
+        );
+        assert!(
+            decode_token(&sign_payload("access:u-1:alice:9999999999:jti-1:")).is_none(),
+            "空 pwv 必须拒绝"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_non_numeric_exp() {
+        assert!(
+            decode_token(&sign_payload("access:u-1:alice:not-a-number:jti-1:pwv-1")).is_none(),
+            "非数字 exp 必须拒绝"
+        );
+    }
+
+    #[test]
+    fn decode_accepts_wellformed_signed_payload() {
+        // 对照：同法签名但六段齐全 → 解析成功且各段保真
+        let t = decode_token(&sign_payload("refresh:u-9:bob:1234567890:jti-x:pwv-y"))
+            .expect("结构合法且签名正确应解析成功");
+        assert_eq!(t.token_type, "refresh");
+        assert_eq!(t.user_id, "u-9");
+        assert_eq!(t.username, "bob");
+        assert_eq!(t.exp, 1234567890);
+        assert_eq!(t.jti, "jti-x");
+        assert_eq!(t.pwv, "pwv-y");
+        assert!(!t.is_access(), "refresh 前缀不得判为 access");
+    }
+
+    // ── 过期 token 与租户解析降级 ──
+
+    #[test]
+    fn expired_token_is_not_accepted_for_tenant_resolution() {
+        let user = test_user(&hash_password("pw-exp").unwrap());
+        // ttl_secs=0 → exp = now，is_token_expired 判 >= now 即 true
+        let expired = encode_token(TokenType::Access, &user, 0);
+        let t = decode_token(&expired).expect("结构合法");
+        assert!(is_token_expired(t.exp), "ttl=0 的 token 必须视为已过期");
+        // verify_access_token 对过期 token 不得放行
+        assert!(
+            verify_access_token(&expired).is_none(),
+            "过期 token 不得过 WS 鉴权"
+        );
+    }
+
+    /// resolve_request_tenant_id 的四条路径：无头 → default；垃圾 token →
+    /// default；合法且未过期 → 按用户解析（无 store 走内置表）；
+    /// 合法但过期 → default。
+    #[tokio::test]
+    async fn resolve_request_tenant_id_paths() {
+        let store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>> = None;
+
+        // ① 无 Authorization 头
+        assert_eq!(
+            resolve_request_tenant_id(store, &HeaderMap::new()).await,
+            DEFAULT_TENANT_ID
+        );
+
+        // ② 垃圾 token
+        let junk = mk_headers("garbage-token");
+        assert_eq!(
+            resolve_request_tenant_id(store, &junk).await,
+            DEFAULT_TENANT_ID
+        );
+
+        // ③ 合法未过期：内置表用户 → 其 tenant_id
+        let user = default_users().into_iter().next().unwrap();
+        let expect_tenant = user.tenant_id.clone();
+        let good = mk_headers(&encode_token(TokenType::Access, &user, 3600));
+        assert_eq!(
+            resolve_request_tenant_id(store, &good).await,
+            expect_tenant,
+            "合法 token 应按用户解析租户"
+        );
+
+        // ④ 合法但过期 → default
+        let expired = mk_headers(&encode_token(TokenType::Access, &user, 0));
+        assert_eq!(
+            resolve_request_tenant_id(store, &expired).await,
+            DEFAULT_TENANT_ID,
+            "过期 token 不得用于租户解析"
+        );
+    }
+
+    /// resolve_tenant_id_by_user：无 store 且用户不在内置表 → default
+    /// （不 panic，不返回空串）。
+    #[tokio::test]
+    async fn resolve_tenant_id_by_unknown_user_falls_back_to_default() {
+        let store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>> = None;
+        assert_eq!(
+            resolve_tenant_id_by_user(store, "no-such-user").await,
+            DEFAULT_TENANT_ID
+        );
+        assert_eq!(
+            resolve_tenant_id_by_user(store, "").await,
+            DEFAULT_TENANT_ID,
+            "空 user_id 同样回退默认租户"
+        );
+    }
+
+    /// extract_bearer_token：仅认 `Bearer ` 前缀（大小写敏感）；无头/非 UTF-8
+    /// / 其他 scheme 一律 None。
+    #[test]
+    fn extract_bearer_token_requires_exact_prefix() {
+        assert_eq!(
+            extract_bearer_token(&mk_headers("tok-123")).as_deref(),
+            Some("tok-123")
+        );
+        assert!(extract_bearer_token(&HeaderMap::new()).is_none(), "无头");
+
+        // 其他 scheme / 前缀变体（大小写）不得误取
+        for value in [
+            "Basic tok-123",
+            "bearer tok-123",
+            "Token tok-123",
+            "tok-123",
+        ] {
+            let mut h = HeaderMap::new();
+            h.insert("authorization", value.parse().unwrap());
+            assert!(
+                extract_bearer_token(&h).is_none(),
+                "{value:?} 不应被识别为 bearer token"
+            );
+        }
     }
 }

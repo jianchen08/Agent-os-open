@@ -58,7 +58,7 @@ export interface NotificationItem {
   autoDismissMs?: number
   /** 来源标识（如 pipeline_id，用于关联流式事件） */
   sourceId?: string
-  /** 错误来源（统一错误模型 config/error_codes.json sources.enum，渲染来源标签） */
+  /** 错误来源（统一错误模型 config/kernel/error_codes.json sources.enum，渲染来源标签） */
   errorSource?: 'kernel' | 'plugin' | 'llm' | 'infra' | 'frontend'
   /** 人类可读来源（如 Agent 名称/「前端」），渲染来源标签 */
   sourceLabel?: string

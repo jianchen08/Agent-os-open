@@ -484,3 +484,621 @@ async fn dispatcher_failure_returns_error() {
     let outcome = router.route(&msg, "user-A").await;
     assert!(matches!(outcome, RouteOutcome::Error(_)));
 }
+
+// ── interaction_response：缺 thread_id 拒绝、response 整体透传、dispatcher 失败上抛 ──
+
+#[tokio::test]
+async fn interaction_response_missing_thread_id_returns_error() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "interaction_response",
+        "data": {"request_id": "req-1"},
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert!(
+        matches!(outcome, RouteOutcome::Error(_)),
+        "缺 thread_id 应返回 Error"
+    );
+    assert!(
+        dispatcher.interactions.lock().unwrap().is_empty(),
+        "缺 thread_id 不应分发"
+    );
+}
+
+/// response 体（response_type/selected_option/feedback）整体透传：
+/// 交互插件按它唤醒 wait_for_choice，路由层不得裁剪字段。
+#[tokio::test]
+async fn interaction_response_passes_response_body_through() {
+    struct ResponseCapturing;
+    #[async_trait]
+    impl PipelineDispatcher for ResponseCapturing {
+        async fn dispatch_user_input(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&serde_json::Value>,
+            _: Option<&serde_json::Value>,
+            _: &str,
+            _: &str,
+            _: PendingInputSource,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _: &str,
+            _: &str,
+            response: &serde_json::Value,
+        ) -> Result<(), String> {
+            assert_eq!(
+                response["selected_option"], "opt-b",
+                "selected_option 应原样透传"
+            );
+            assert_eq!(response["response_type"], "choice");
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let router = InboundRouter::new(Arc::new(ResponseCapturing));
+    let msg = serde_json::json!({
+        "type": "interaction_response",
+        "thread_id": "thread-1",
+        "data": {
+            "request_id": "req-9",
+            "response": {"response_type": "choice", "selected_option": "opt-b"},
+        },
+    });
+    assert_eq!(router.route(&msg, "user-A").await, RouteOutcome::Handled);
+}
+
+/// 缺 data.response → 空 response（Value::Null）仍分发：审批响应体可选。
+#[tokio::test]
+async fn interaction_response_without_body_dispatches_null() {
+    struct NullBodyChecker;
+    #[async_trait]
+    impl PipelineDispatcher for NullBodyChecker {
+        async fn dispatch_user_input(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&serde_json::Value>,
+            _: Option<&serde_json::Value>,
+            _: &str,
+            _: &str,
+            _: PendingInputSource,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _: &str,
+            _: &str,
+            response: &serde_json::Value,
+        ) -> Result<(), String> {
+            assert!(response.is_null(), "缺响应体时透传 Null");
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let router = InboundRouter::new(Arc::new(NullBodyChecker));
+    let msg = serde_json::json!({
+        "type": "interaction_response",
+        "thread_id": "thread-1",
+        "data": {"request_id": "req-1"},
+    });
+    assert_eq!(router.route(&msg, "user-A").await, RouteOutcome::Handled);
+}
+
+#[tokio::test]
+async fn interaction_response_dispatcher_failure_returns_error() {
+    struct Fail;
+    #[async_trait]
+    impl PipelineDispatcher for Fail {
+        async fn dispatch_user_input(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&serde_json::Value>,
+            _: Option<&serde_json::Value>,
+            _: &str,
+            _: &str,
+            _: PendingInputSource,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<(), String> {
+            Err("interaction 唤醒失败".into())
+        }
+        async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let failing = InboundRouter::new(Arc::new(Fail));
+    let msg = serde_json::json!({
+        "type": "interaction_response",
+        "thread_id": "thread-1",
+        "data": {"request_id": "req-1"},
+    });
+    match failing.route(&msg, "user-A").await {
+        RouteOutcome::Error(e) => assert_eq!(e, "interaction 唤醒失败"),
+        other => panic!("应上抛 dispatcher 错误，实际 {other:?}"),
+    }
+}
+
+// ── stop_generation：缺 thread_id 拒绝、pipeline_id 顶层/data 双位置、失败上抛 ──
+
+#[tokio::test]
+async fn stop_generation_missing_thread_id_returns_error() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({"type": "stop_generation"});
+    let outcome = router.route(&msg, "user-A").await;
+    assert!(matches!(outcome, RouteOutcome::Error(_)));
+    assert!(dispatcher.stops.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stop_generation_reads_pipeline_id_from_data_envelope() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "stop_generation",
+        "thread_id": "thread-1",
+        "data": {"pipeline_id": "p-from-data"},
+    });
+    assert_eq!(router.route(&msg, "user-A").await, RouteOutcome::Handled);
+    let stops = dispatcher.stops.lock().unwrap();
+    assert_eq!(stops[0].1, "p-from-data", "data 信封兜底");
+}
+
+/// 顶层 pipeline_id 与 data 信封并存 → 顶层优先（与 field_or_data 契约一致）。
+#[tokio::test]
+async fn stop_generation_top_level_pipeline_id_wins_over_data() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "stop_generation",
+        "thread_id": "thread-1",
+        "pipeline_id": "p-top",
+        "data": {"pipeline_id": "p-data"},
+    });
+    assert_eq!(router.route(&msg, "user-A").await, RouteOutcome::Handled);
+    assert_eq!(dispatcher.stops.lock().unwrap()[0].1, "p-top");
+}
+
+#[tokio::test]
+async fn stop_generation_dispatcher_failure_returns_error() {
+    struct Fail;
+    #[async_trait]
+    impl PipelineDispatcher for Fail {
+        async fn dispatch_user_input(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&serde_json::Value>,
+            _: Option<&serde_json::Value>,
+            _: &str,
+            _: &str,
+            _: PendingInputSource,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
+            Err("取消失败".into())
+        }
+    }
+    let router = InboundRouter::new(Arc::new(Fail));
+    let msg = serde_json::json!({"type": "stop_generation", "thread_id": "t1"});
+    match router.route(&msg, "user-A").await {
+        RouteOutcome::Error(e) => assert_eq!(e, "取消失败"),
+        other => panic!("应上抛 dispatcher 错误，实际 {other:?}"),
+    }
+}
+
+// ── active_thread_changed：排队优先级键更新（本路由全部分支此前未覆盖）──
+
+/// 记录 active_thread 分发：(user_id, thread_id, pipeline_id)。
+#[derive(Default)]
+struct ActiveThreadRecorder {
+    calls: Arc<Mutex<Vec<(String, String, String)>>>,
+}
+
+#[async_trait]
+impl PipelineDispatcher for ActiveThreadRecorder {
+    async fn dispatch_user_input(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: Option<&serde_json::Value>,
+        _: Option<&serde_json::Value>,
+        _: &str,
+        _: &str,
+        _: PendingInputSource,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn dispatch_interaction_response(
+        &self,
+        _: &str,
+        _: &str,
+        _: &serde_json::Value,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn dispatch_active_thread(
+        &self,
+        user_id: &str,
+        thread_id: &str,
+        pipeline_id: &str,
+    ) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((user_id.into(), thread_id.into(), pipeline_id.into()));
+        Ok(())
+    }
+}
+
+fn active_router() -> (InboundRouter, Arc<ActiveThreadRecorder>) {
+    let d = Arc::new(ActiveThreadRecorder::default());
+    (InboundRouter::new(d.clone()), d)
+}
+
+#[tokio::test]
+async fn active_thread_changed_routes_user_thread_and_pipeline() {
+    let (router, rec) = active_router();
+    let msg = serde_json::json!({
+        "type": "active_thread_changed",
+        "thread_id": "thread-7",
+        "pipeline_id": "p-7",
+    });
+    assert_eq!(router.route(&msg, "user-Z").await, RouteOutcome::Handled);
+    let calls = rec.calls.lock().unwrap();
+    assert_eq!(
+        calls.as_slice(),
+        &[(
+            "user-Z".to_string(),
+            "thread-7".to_string(),
+            "p-7".to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn active_thread_changed_reads_pipeline_id_from_data_envelope() {
+    let (router, rec) = active_router();
+    let msg = serde_json::json!({
+        "type": "active_thread_changed",
+        "thread_id": "thread-8",
+        "data": {"pipeline_id": "p-8"},
+    });
+    assert_eq!(router.route(&msg, "user-Z").await, RouteOutcome::Handled);
+    assert_eq!(rec.calls.lock().unwrap()[0].2, "p-8");
+}
+
+/// pipeline_id 两处皆缺 → 空串（dispatcher 侧回退 thread 主管道）。
+#[tokio::test]
+async fn active_thread_changed_without_pipeline_id_defaults_empty() {
+    let (router, rec) = active_router();
+    let msg = serde_json::json!({
+        "type": "active_thread_changed",
+        "thread_id": "thread-9",
+    });
+    assert_eq!(router.route(&msg, "user-Z").await, RouteOutcome::Handled);
+    assert_eq!(rec.calls.lock().unwrap()[0].2, "", "缺省空串");
+}
+
+#[tokio::test]
+async fn active_thread_changed_missing_thread_id_returns_error() {
+    let (router, rec) = active_router();
+    let msg = serde_json::json!({
+        "type": "active_thread_changed",
+        "pipeline_id": "p",
+    });
+    match router.route(&msg, "user-Z").await {
+        RouteOutcome::Error(e) => assert!(e.contains("thread_id"), "错误文案应指明缺字段: {e}"),
+        other => panic!("缺 thread_id 应 Error，实际 {other:?}"),
+    }
+    assert!(rec.calls.lock().unwrap().is_empty(), "缺字段不应分发");
+}
+
+#[tokio::test]
+async fn active_thread_changed_dispatcher_failure_returns_error() {
+    struct Fail;
+    #[async_trait]
+    impl PipelineDispatcher for Fail {
+        async fn dispatch_user_input(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&serde_json::Value>,
+            _: Option<&serde_json::Value>,
+            _: &str,
+            _: &str,
+            _: PendingInputSource,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_active_thread(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+            Err("活跃管道更新失败".into())
+        }
+    }
+    let router = InboundRouter::new(Arc::new(Fail));
+    let msg = serde_json::json!({"type": "active_thread_changed", "thread_id": "t"});
+    match router.route(&msg, "user-A").await {
+        RouteOutcome::Error(e) => assert_eq!(e, "活跃管道更新失败"),
+        other => panic!("应上抛 dispatcher 错误，实际 {other:?}"),
+    }
+}
+
+/// trait 默认实现（no-op）覆盖：未实现 dispatch_active_thread 的 dispatcher
+/// 收到 active_thread_changed → Handled（旧实现不受新消息类型影响）。
+#[tokio::test]
+async fn active_thread_changed_default_noop_dispatcher_is_handled() {
+    struct NoActiveThread;
+    #[async_trait]
+    impl PipelineDispatcher for NoActiveThread {
+        async fn dispatch_user_input(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&serde_json::Value>,
+            _: Option<&serde_json::Value>,
+            _: &str,
+            _: &str,
+            _: PendingInputSource,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        // dispatch_active_thread 用 trait 默认实现（no-op）
+    }
+    let router = InboundRouter::new(Arc::new(NoActiveThread));
+    let msg = serde_json::json!({
+        "type": "active_thread_changed",
+        "thread_id": "thread-1",
+    });
+    assert_eq!(router.route(&msg, "user-A").await, RouteOutcome::Handled);
+}
+
+// ── 非字符串字段视为缺失（field_or_data 的 as_str 过滤）──
+
+/// thread_id 存在但非字符串 → 与缺失同判（不得拼出一个 "null" 线程）。
+/// 表驱动覆盖四类入站消息。
+#[tokio::test]
+async fn non_string_thread_id_is_treated_as_missing() {
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+        ("user_input", serde_json::json!(123)),
+        ("interaction_response", serde_json::json!({"a": 1})),
+        ("stop_generation", serde_json::json!(true)),
+        ("regenerate", serde_json::json!([])),
+        ("active_thread_changed", serde_json::json!(7.5)),
+    ];
+    let (router, dispatcher) = router();
+    for (msg_type, bad_thread) in cases {
+        let msg = serde_json::json!({"type": msg_type, "thread_id": bad_thread});
+        let outcome = router.route(&msg, "user-A").await;
+        assert!(
+            matches!(outcome, RouteOutcome::Error(_)),
+            "{msg_type} 的非字符串 thread_id 应按缺失处理，实际 {outcome:?}"
+        );
+    }
+    assert!(dispatcher.user_inputs.lock().unwrap().is_empty());
+    assert!(dispatcher.interactions.lock().unwrap().is_empty());
+    assert!(dispatcher.stops.lock().unwrap().is_empty());
+    assert!(dispatcher.regenerates.lock().unwrap().is_empty());
+}
+
+/// 空串 thread_id 与缺失同判（避免建出无名线程）。
+#[tokio::test]
+async fn empty_thread_id_is_rejected() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "",
+        "data": {"content": "hi"},
+    });
+    assert!(matches!(
+        router.route(&msg, "user-A").await,
+        RouteOutcome::Error(_)
+    ));
+    assert!(dispatcher.user_inputs.lock().unwrap().is_empty());
+}
+
+/// user_input 的顶层 content 兜底（前端 GlobalWebSocket.sendUserInput 现状）
+/// 与 data.content 优先（未来标准契约）——表驱动两位置 × 有/无值。
+#[tokio::test]
+async fn user_input_content_falls_back_between_top_level_and_data() {
+    let cases: Vec<(serde_json::Value, &str, &str)> = vec![
+        (
+            serde_json::json!({"content": "top"}),
+            "top",
+            "仅顶层 content",
+        ),
+        (
+            serde_json::json!({"data": {"content": "data"}}),
+            "data",
+            "仅 data.content",
+        ),
+        (
+            serde_json::json!({"content": "top", "data": {"content": "data"}}),
+            "data",
+            "两者并存 → data 优先",
+        ),
+        (serde_json::json!({}), "", "两者皆缺 → 空串"),
+    ];
+    let (router, dispatcher) = router();
+    for (extra, expected, why) in cases {
+        let mut msg = serde_json::json!({"type": "user_input", "thread_id": "thread-1"});
+        if let Some(obj) = extra.as_object() {
+            for (k, v) in obj {
+                msg[k] = v.clone();
+            }
+        }
+        assert_eq!(
+            router.route(&msg, "user-A").await,
+            RouteOutcome::Handled,
+            "{why}"
+        );
+        let inputs = dispatcher.user_inputs.lock().unwrap();
+        assert_eq!(inputs.last().unwrap().2, expected, "{why}");
+    }
+}
+
+/// user_input 的 pipeline_id：顶层优先、data 兜底（分发成功即证明该提取链
+/// 各位置组合均正常；具体取值经 stop_generation 用例断言同一 field_or_data）。
+#[tokio::test]
+async fn user_input_pipeline_id_resolution_order() {
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+        ("top", serde_json::json!("p-top")),
+        ("data-only", serde_json::json!(null)),
+        ("both", serde_json::json!("p-top")),
+    ];
+    let (router, dispatcher) = router();
+    for (label, top) in cases {
+        let mut msg = serde_json::json!({
+            "type": "user_input",
+            "thread_id": "thread-1",
+            "data": {"content": "hi", "pipeline_id": "p-data"},
+        });
+        if !top.is_null() {
+            msg["pipeline_id"] = top;
+        }
+        assert_eq!(
+            router.route(&msg, "user-A").await,
+            RouteOutcome::Handled,
+            "{label} 位置组合应正常分发"
+        );
+        let inputs = dispatcher.user_inputs.lock().unwrap();
+        assert_eq!(inputs.last().unwrap().0, "thread-1");
+    }
+}
+
+/// 非对象 execution_context（数组/字符串/数字）按缺失处理：不得把非法结构
+/// 注入引擎 initial_state。
+#[tokio::test]
+async fn non_object_execution_context_is_ignored() {
+    struct EcRecorder(Arc<Mutex<usize>>);
+    #[async_trait]
+    impl PipelineDispatcher for EcRecorder {
+        async fn dispatch_user_input(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            execution_context: Option<&serde_json::Value>,
+            _: Option<&serde_json::Value>,
+            _: &str,
+            _: &str,
+            _: PendingInputSource,
+        ) -> Result<(), String> {
+            if execution_context.is_some() {
+                *self.0.lock().unwrap() += 1;
+            }
+            Ok(())
+        }
+        async fn dispatch_interaction_response(
+            &self,
+            _: &str,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn dispatch_stop(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let seen = Arc::new(Mutex::new(0usize));
+    let router = InboundRouter::new(Arc::new(EcRecorder(seen.clone())));
+    for bad in [
+        serde_json::json!([1, 2]),
+        serde_json::json!("ec"),
+        serde_json::json!(42),
+    ] {
+        let msg = serde_json::json!({
+            "type": "user_input",
+            "thread_id": "thread-1",
+            "content": "hi",
+            "execution_context": bad,
+        });
+        assert_eq!(router.route(&msg, "user-A").await, RouteOutcome::Handled);
+    }
+    assert_eq!(*seen.lock().unwrap(), 0, "非对象值不得作为执行上下文下发");
+}
+
+/// route_raw 合法 JSON 走通（对照 invalid_json 用例）。
+#[tokio::test]
+async fn route_raw_parses_valid_json() {
+    let (router, dispatcher) = router();
+    let outcome = router
+        .route_raw(
+            r#"{"type":"user_input","thread_id":"t-1","content":"raw"}"#,
+            "user-A",
+        )
+        .await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(inputs[0].2, "raw");
+}

@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from providers.base import IsolationProvider
+
 from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
@@ -22,7 +24,6 @@ from agentos_plugin_sdk.isolation_types import (
     IsolationEnvironment,
     IsolationLevel,
 )
-from providers.base import IsolationProvider
 
 # 共享根（proc_tree 等共享裸模块所在）显式入 sys.path：本插件不经
 # bootstrap_plugin 引导（server.py 只注入插件目录），实现模块自持解析。
@@ -64,8 +65,12 @@ class HostProvider(IsolationProvider):
         """
         return True, None
 
-    async def create_environment(self, context: IsolationContext) -> IsolationEnvironment:
-        """创建虚拟环境"""
+    async def create_environment(
+        self,
+        context: IsolationContext,
+        container_name: str | None = None,
+    ) -> IsolationEnvironment:
+        """创建虚拟环境（host 无命名环境，container_name 忽略）"""
         now = datetime.now(UTC)
 
         env = IsolationEnvironment(

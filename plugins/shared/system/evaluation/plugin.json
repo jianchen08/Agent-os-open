@@ -107,7 +107,7 @@
   "config_files": [
     {
       "id": "evaluation_metrics",
-      "path": "config/evaluation/evaluation_metrics.yaml",
+      "path": "config/plugins/evaluation/evaluation_metrics.yaml",
       "label": "评估指标定义"
     }
   ],

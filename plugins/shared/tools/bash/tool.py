@@ -505,6 +505,10 @@ class BashTool(WorkspaceAwareMixin):
             )
         working_dir = str(wd) if wd else None
         owner = self._owner_from_inputs(inputs)
+        # exec_backend 与 _container_id 同级的服务端注入（isolation_guard）：
+        # 仅容器路径消费；无 _container_id 时不取（声明式标记不构成隔离凭据）
+        raw_exec_backend = inputs.get("_exec_backend") if container_id else None
+        exec_backend = raw_exec_backend if isinstance(raw_exec_backend, dict) else None
 
         return await self._execute_local_unified(
             command=command,
@@ -514,6 +518,7 @@ class BashTool(WorkspaceAwareMixin):
             container_id=container_id,
             owner=owner,
             on_output=on_output,
+            exec_backend=exec_backend,
         )
 
     async def _execute_local_unified(
@@ -525,6 +530,7 @@ class BashTool(WorkspaceAwareMixin):
         container_id: str | None = None,
         owner: str | None = None,
         on_output: Callable[[str], None] | None = None,
+        exec_backend: dict[str, Any] | None = None,
     ) -> ToolResult:
         """
         本地执行命令（统一返回格式）
@@ -553,6 +559,7 @@ class BashTool(WorkspaceAwareMixin):
                 container_id=container_id,
                 owner=owner,
                 on_output=on_output,
+                exec_backend=exec_backend,
             )
 
             start_time = time.time()

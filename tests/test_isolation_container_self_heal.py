@@ -112,13 +112,28 @@ async def test_create_and_start_no_retry_on_first_success():
 
 @pytest.mark.asyncio
 async def test_create_environment_ready_after_retry_success(tmp_path):
-    """start 失败重试成功 → 环境标记 READY（而非误标后卡死）。"""
+    """start 失败重试成功 → 环境标记 READY（而非误标后卡死）。
+
+    D6 收养预检先行：首启前有一次同名 start 探测，须返回「No such container」
+    （确定性不存在）才会放行新建；其后 _create_and_start 内 start 失败一次、
+    rm 重建后成功。
+    """
     provider = DockerProvider()
     ws = tmp_path / "ws"
     ws.mkdir()
     ctx = IsolationContext(task_id="t1", task_type=TaskType.ATOMIC, workspace=str(ws))
 
-    fake_run, _ = _make_run_cmd(start_results=[1, 0])  # 重试成功
+    start_seq = [(1, b"No such container"), (1, b"boom"), (0, b"")]
+
+    async def fake_run(args, timeout=30):
+        sub = args[1]
+        if sub == "create":
+            return 0, b"cid\n", b""
+        if sub == "start":
+            rc, err = start_seq.pop(0)
+            return rc, b"", err
+        return 0, b"", b""
+
     provider._run_cmd = fake_run
     provider._ensure_image = AsyncMock()
 

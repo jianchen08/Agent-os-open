@@ -36,7 +36,7 @@ export interface PluginDeclarationInput {
 }
 
 /** 流式协议事件清单（LLM 流式 8 事件 + 生命周期事件，方案 2026-08-26 定稿；
- * 旧 stream_chunk/thinking_* 已退役）。单一真值源在 config/kernel_capabilities/
+ * 旧 stream_chunk/thinking_* 已退役）。单一真值源在 config/kernel/kernel_capabilities/
  * streaming.json，此处仅人读速览——机械一致性由内核加载器结构校验兜底（事件
  * 不在契约内网关 fail-closed 拒收；前端按本清单确认有 handler 消费）。 */
 const STREAMING_EVENTS = new Set([

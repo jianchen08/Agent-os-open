@@ -51,7 +51,7 @@ fn test_b1_kernel_reserved_file_rejected() {
     )
     .unwrap();
 
-    let err = validate_config_path(tmp.path(), "config/system/plugin_allowlist.yaml").unwrap_err();
+    let err = validate_config_path(tmp.path(), "config/kernel/plugin_allowlist.yaml").unwrap_err();
     assert!(
         matches!(err, ConfigError::KernelReservedFile { .. }),
         "got {err:?}"

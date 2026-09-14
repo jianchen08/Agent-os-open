@@ -132,32 +132,6 @@ class TestYamlValidate:
         assert any("version" in e for e in result["errors"])
 
 
-# ── 外部 MCP plugin.json 校验 ──────────────────────────
-
-
-class TestExternalMcpPluginJson:
-    """验证外部 MCP 工具的 plugin.json 格式（web_search 已被 omnisearch 聚合替代删除）。"""
-
-    EXTERNAL_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "external_mcp"
-
-    @pytest.mark.parametrize("tool_name", [
-        "browser_test", "design_generate", "omnisearch",
-    ])
-    def test_external_mcp_plugin_json(self, tool_name):
-        plugin_json_path = self.EXTERNAL_DIR / tool_name / "plugin.json"
-        assert plugin_json_path.exists(), f"Missing plugin.json for {tool_name}"
-
-        data = json.loads(plugin_json_path.read_text(encoding="utf-8"))
-        assert data["entry"] == "mcp:external", f"{tool_name} should use mcp:external entry"
-        assert "mcp" in data, f"{tool_name} should have mcp config"
-        assert data["mcp"]["transport"] in ("stdio", "streamable_http"), (
-            f"{tool_name} mcp.transport must be stdio or streamable_http"
-        )
-        assert "endpoint" in data["mcp"], f"{tool_name} mcp must have endpoint"
-        assert "capabilities" in data
-        assert len(data["capabilities"]["tools"]) >= 1
-
-
 # ── 复杂工具 plugin.json + server.py 存在性校验 ──────────
 
 

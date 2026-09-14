@@ -69,7 +69,7 @@
   "config_files": [
     {
       "id": "spill",
-      "path": "config/system/spill_config.yaml",
+      "path": "config/plugins/pipeline_spill_guard/spill_config.yaml",
       "label": "spill 存储配置（与 spill_guard 共享）"
     }
   ],

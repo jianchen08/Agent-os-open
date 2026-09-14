@@ -45,7 +45,7 @@ def _load_server_module(monkeypatch: pytest.MonkeyPatch, project_root: Path) -> 
 @pytest.fixture()
 def metrics_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """带汇总 yaml 的项目根。"""
-    cfg = tmp_path / "config" / "evaluation"
+    cfg = tmp_path / "config" / "plugins" / "evaluation"
     cfg.mkdir(parents=True)
     (cfg / "evaluation_metrics.yaml").write_text(
         """
@@ -350,7 +350,7 @@ class TestHttpHandleMetricsReadFailure:
     def test_list_endpoint_real_empty_registry_still_200(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        cfg = tmp_path / "config" / "evaluation"
+        cfg = tmp_path / "config" / "plugins" / "evaluation"
         cfg.mkdir(parents=True)
         (cfg / "evaluation_metrics.yaml").write_text("metrics: []\n", encoding="utf-8")
         srv = _load_server_module(monkeypatch, tmp_path)
@@ -369,7 +369,7 @@ class TestReadFaceHelpers:
         with pytest.raises(OSError):
             srv._load_metrics()
 
-        bad = tmp_path / "config" / "evaluation"
+        bad = tmp_path / "config" / "plugins" / "evaluation"
         bad.mkdir(parents=True)
         (bad / "evaluation_metrics.yaml").write_text("metrics: [ {name: ,", encoding="utf-8")
         with pytest.raises(yaml.YAMLError):
@@ -377,7 +377,7 @@ class TestReadFaceHelpers:
 
     def test_load_metrics_empty_content_is_real_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """解析成功但注册表为空（空 metrics/空文件）→ 返回 []，与损坏可区分。"""
-        cfg = tmp_path / "config" / "evaluation"
+        cfg = tmp_path / "config" / "plugins" / "evaluation"
         cfg.mkdir(parents=True)
         srv = _load_server_module(monkeypatch, tmp_path)
         (cfg / "evaluation_metrics.yaml").write_text("metrics: []\n", encoding="utf-8")

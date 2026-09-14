@@ -100,6 +100,19 @@ pub trait PluginInvoker: Send + Sync {
         context: &HookContext,
     ) -> Result<(), PluginError>;
 
+    /// 解析插件所在宿主的键（生命周期通知的投递单位，BUG-7 宿主去重）。
+    ///
+    /// 合宿（co-host）进程的生命周期通知是宿主级广播：聚合服务端把每条
+    /// `notifications/<hook>` 扇出给全部声明成员的 handler（P27 ADR 广播
+    /// 语义）。内核广播侧若按订阅插件逐发，同宿主 N 个声明成员会收到 N 次
+    /// 通知、每次扇出全成员——handler 执行 N² 次（子任务完成通知 ×4 根因）。
+    /// 广播侧据本键去重：同宿主订阅插件只发一次。
+    /// 默认返回 plugin_id 本身 = 独占宿主语义，无宿主分组知识的实现逐发即
+    /// 恰好一次，行为不变。
+    fn host_key_of(&self, plugin_id: &str) -> String {
+        plugin_id.to_string()
+    }
+
     /// 强制卸载插件（热重载/崩溃恢复用）。
     ///
     /// 对 sidecar：kill 子进程 + 从客户端缓存移除，下次调用自动 respawn 加载最新代码。
@@ -574,7 +587,7 @@ pub struct PluginManifest {
     /// 启用开关（L1 Enabled，安装触发模型 §一）。
     ///
     /// `false` = 已安装但不启用：不进注册表出口（tools/http_routes/contributes 不暴露）。
-    /// 缺省时由 `config/plugins/default_profile.yaml` 决定（未列出走 defaults）。
+    /// 缺省时由 `config/kernel/default_profile.yaml` 决定（未列出走 defaults）。
     /// 这是「运行时是否允许参与系统」的开关，与 PluginStatus（运行态）正交。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
@@ -908,7 +921,7 @@ pub struct ManifestCapabilities {
     #[serde(default)]
     pub lifecycle_hooks: Vec<LifecycleHook>,
     /// 流式事件能力声明（ADR 2026-08-22 流式协议）：插件按
-    /// `config/kernel_capabilities/streaming.json` 发射流式事件（message_id 强制
+    /// `config/kernel/kernel_capabilities/streaming.json` 发射流式事件（message_id 强制
     /// p_ 命名空间，事件/part_types 声明供 G2 校验器对照实现）。未声明 = 网关
     /// 拒绝其流式事件（fail-closed），与当年 resources 的「声明即接入」同构。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2329,6 +2342,29 @@ mod tests {
         let back: HookContext = serde_json::from_str(&text).unwrap();
         assert_eq!(back.get_as::<String>("session_id"), Some("s-1".to_string()));
         assert_eq!(back.get_as::<i64>("iteration"), Some(4));
+    }
+
+    /// HookContext::default() 等价 new()（空上下文）——派生/默认构造路径
+    /// 与显式构造同语义，消费方可互换使用。
+    #[test]
+    fn hook_context_default_equals_new() {
+        let d = HookContext::default();
+        assert!(d.tags().is_empty(), "默认构造应为空标签表");
+        assert!(d.get("any").is_none());
+        assert_eq!(d.get_as::<String>("any"), None);
+        let n = HookContext::new();
+        assert_eq!(d.tags(), n.tags());
+    }
+
+    /// ActivationPolicy 的 Default 是 Lazy（多数 tool/评估/监控插件的默认
+    /// 激活策略）：manifest 未声明时不得默认 Eager。
+    #[test]
+    fn activation_policy_default_is_lazy() {
+        assert_eq!(ActivationPolicy::default(), ActivationPolicy::Lazy);
+        assert_eq!(
+            serde_json::from_str::<ActivationPolicy>("\"lazy\"").unwrap(),
+            ActivationPolicy::Lazy
+        );
     }
 
     #[test]

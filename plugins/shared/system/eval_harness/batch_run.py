@@ -59,6 +59,7 @@ def main():
                 "acceptance_criteria": args.get("acceptance_criteria") or {},
                 "thread_id": f"thread-batch-{b['case_id']}",
                 "workspace": args.get("workspace", ""),
+                "workspace_mode": args.get("workspace_mode", "plain"),
             }
 
             cid = b["case_id"]

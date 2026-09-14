@@ -15,7 +15,7 @@ agent 读写面）。2026-09-12 用户裁定反转该限制的**读侧**：纯�
 
 解析规则（与 param_inject 原实现同源，统一到本模块单点）：
 AGENTOS_CONFIG_ROOT（内核启动发布，指向 <repo>/config）优先；回退自本
-文件向上找含 config/isolation 的祖先目录。两者皆不可得 → 无仓库锚
+文件向上找含 config/kernel 的祖先目录。两者皆不可得 → 无仓库锚
 （行为退回单根，不报错）。
 
 [来源: docs/decisions/2026-09-12-read-anchor-repo-source.md]
@@ -55,16 +55,16 @@ def resolve_repo_root() -> Path | None:
     env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
     if env_root:
         p = Path(env_root)
-        if (p / "isolation").is_dir():
+        if (p / "kernel").is_dir():
             _resolved = p.parent
             _resolved_done = True
             return _resolved
-        if (p / "config" / "isolation").is_dir():
+        if (p / "config" / "kernel").is_dir():
             _resolved = p
             _resolved_done = True
             return _resolved
     for parent in Path(__file__).resolve().parents:
-        if (parent / "config" / "isolation").is_dir():
+        if (parent / "config" / "kernel").is_dir():
             _resolved = parent
             _resolved_done = True
             return _resolved

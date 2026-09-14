@@ -96,8 +96,14 @@ plugins/shared/pipeline/core/llm_core/logs/
 
 # ─── 机密 ───
 .env
+.env.*
+!.env.example
 *.log
 .ports
+
+# ─── 本地散落草稿(不入库,防 sync 误拾取)───
+/answer.txt
+/policy_answer.yaml
 
 # ─── 本地运行/调试产物(防 auto-save 提交混入,不入库)───
 # 启动脚本运行日志及其调试包装脚本

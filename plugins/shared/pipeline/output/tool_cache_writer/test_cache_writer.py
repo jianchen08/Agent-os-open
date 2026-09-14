@@ -16,6 +16,8 @@ agentos_plugin_sdk.tool_result_cache 访问。
 
 from __future__ import annotations
 
+import gzip
+import json
 import sys
 import time
 from pathlib import Path
@@ -559,3 +561,86 @@ async def test_no_identity_keys_legacy_hit() -> None:
     result = await cache.execute(ctx)
     assert result.state_updates.get("cache_hit") is True, "无身份键保持旧命中行为"
     assert result.skip_remaining is True
+
+
+# ══════════════════════════════════════════════════
+# 7. spill 定位符回读（2026-09-14 _full_tool_results 定位符化配套）
+# ══════════════════════════════════════════════════
+
+
+def _write_spill(tmp_path, pipeline_id: str, key: str, text: str, compress: bool) -> Path:
+    """按 spill_store 布局（{base}/{pipeline_id}/{key}）写一个存档文件。"""
+    base = tmp_path / "spill"
+    target = base / pipeline_id / key
+    target.parent.mkdir(parents=True)
+    raw = text.encode("utf-8")
+    if compress:
+        target.write_bytes(gzip.compress(raw))
+    else:
+        target.write_bytes(raw)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_writer_resolves_spilled_locator_to_full_result(tmp_path, monkeypatch) -> None:
+    """__spilled__ 定位符条目：回读 spill 存档（gzip），缓存收到完整 ToolResult。"""
+    clear_cache()
+    full = {
+        "tool_name": "web_search",
+        "success": True,
+        "error": None,
+        "data": {"output": "line 000000: 全文正文\nline 000001: 尾部"},
+        "metadata": None,
+    }
+    base = _write_spill(
+        tmp_path, "pipe-1", "call_x_full", json.dumps(full, ensure_ascii=False), compress=True
+    )
+    monkeypatch.setenv("AGENTOS_SPILL_BASE", str(base))
+    writer = ToolCacheWriter(config={})
+    executed = [{"name": "web_search", "arguments": '{"query": "agentos"}'}]
+    tool_results = [
+        {
+            "__spilled__": True,
+            "tool_call_id": "call_x",
+            "locator": "pipe-1/call_x_full",
+            "original_bytes": 123,
+            "compressed": True,
+        }
+    ]
+    await writer.execute(make_ctx(executed, tool_results))
+
+    entries = list(_cache_now().values())
+    assert len(entries) == 1, "定位符回读成功 → 正常入缓存"
+    assert entries[0][0] == full, "缓存收到的是存档里的完整 ToolResult"
+
+
+@pytest.mark.asyncio
+async def test_writer_skips_when_spill_file_missing(tmp_path, monkeypatch) -> None:
+    """存档缺失：跳过该条且不崩（缓存宁可缺不可存截断版）。"""
+    clear_cache()
+    monkeypatch.setenv("AGENTOS_SPILL_BASE", str(tmp_path / "empty"))
+    writer = ToolCacheWriter(config={})
+    executed = [{"name": "web_search", "arguments": "{}"}]
+    tool_results = [{"__spilled__": True, "locator": "pipe-1/gone_full"}]
+    await writer.execute(make_ctx(executed, tool_results))
+    assert len(_cache_now()) == 0, "回读失败 → 不写缓存"
+
+
+@pytest.mark.asyncio
+async def test_writer_skips_oversize_resolved_result(tmp_path, monkeypatch) -> None:
+    """回读后超单条缓存上限（1MB）：不入缓存，防常驻内存被大结果占据。"""
+    clear_cache()
+    big = {
+        "tool_name": "web_search",
+        "success": True,
+        "error": None,
+        "data": {"output": "x" * 1_100_000},
+        "metadata": None,
+    }
+    base = _write_spill(tmp_path, "pipe-1", "call_big_full", json.dumps(big), compress=False)
+    monkeypatch.setenv("AGENTOS_SPILL_BASE", str(base))
+    writer = ToolCacheWriter(config={})
+    executed = [{"name": "web_search", "arguments": "{}"}]
+    tool_results = [{"__spilled__": True, "locator": "pipe-1/call_big_full"}]
+    await writer.execute(make_ctx(executed, tool_results))
+    assert len(_cache_now()) == 0, "超大结果不入常驻缓存"

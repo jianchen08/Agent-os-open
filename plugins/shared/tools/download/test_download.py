@@ -777,3 +777,73 @@ class TestCohostShadowing:
                     sys.modules[restored.__name__] = restored
             if saved_wa is None:
                 sys.modules.pop("workspace_aware", None)
+
+
+# ═══════════════════════════════════════════════════════════
+# server.py handler 成功分支（result.output 回传，第 75 行）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestHandlerSuccessBranch:
+    """server handler 成功面：真实 HTTP 下载 + 真实落盘，返回 DownloadTool 的
+    成功 output（`server.py:75 return result.output`）。
+
+    handler 内部构造的 DownloadTool 默认 `allow_ssrf_skip=False`，连本地
+    127.0.0.1 会被 SSRF 防护拒绝——测试经模块级缓存缝（`_dl_tool_cls`）注入
+    放行子类；网络与文件系统走真实实现，无替身。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_system_proxy(self, monkeypatch) -> None:
+        """同 TestLocalServerIntegration：强制 trust_env=False 直连本地服务。"""
+        real_client = _MOD.httpx.AsyncClient
+        monkeypatch.setattr(
+            _MOD.httpx, "AsyncClient", lambda **kw: real_client(**{**kw, "trust_env": False})
+        )
+
+    @pytest.fixture()
+    def trusted_server(self, monkeypatch) -> Any:
+        """装载 server.py 并把其模块级实现槽位换成 allow_ssrf_skip=True 子类。"""
+        saved_impl = sys.modules.get(TestCohostShadowing._IMPL_KEY)
+        server = TestCohostShadowing._load_server()
+        real_cls = server._load_download_tool()
+
+        class _TrustedDownloadTool(real_cls):  # type: ignore[misc, valid-type]
+            def __init__(self) -> None:
+                super().__init__(allow_ssrf_skip=True)
+
+        monkeypatch.setattr(server, "_dl_tool_cls", _TrustedDownloadTool)
+        yield server
+        sys.modules.pop(TestCohostShadowing._IMPL_KEY, None)
+        if saved_impl is not None:
+            sys.modules[TestCohostShadowing._IMPL_KEY] = saved_impl
+
+    @pytest.mark.parametrize(
+        ("name", "payload"),
+        [
+            ("report.txt", b"handler success payload\n" * 8),
+            ("blob.bin", bytes(range(256)) * 4),
+        ],
+    )
+    def test_handler_returns_real_download_output(
+        self, tmp_path: Path, trusted_server: Any, name: str, payload: bytes
+    ) -> None:
+        with _LocalServer(tmp_path, {name: payload}) as local:
+            save_dir = tmp_path / "out"
+
+            result = _run(
+                trusted_server.download(
+                    url=local.url(name),
+                    save_path=str(save_dir),
+                    workspace=str(save_dir),
+                )
+            )
+
+        assert isinstance(result, dict)
+        assert result["success"] is True
+        assert result["error"] is None
+        assert result["size"] == len(payload)
+        assert result["path"] == str(save_dir / name)
+        written = save_dir / name
+        assert written.read_bytes() == payload
+        assert not (save_dir / f"{name}.tmp").exists()  # 临时分片已归位/清理

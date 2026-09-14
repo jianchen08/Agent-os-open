@@ -108,7 +108,7 @@ describe('client.ts 内核错误信封 {error:{code,message}} 解析（2026-08-2
     expect(options.code).toBe('ENGINE_FAILED')
   })
 
-  it('统一错误信封 source/retryable 透传（config/error_codes.json 单一真值源）', async () => {
+  it('统一错误信封 source/retryable 透传（config/kernel/error_codes.json 单一真值源）', async () => {
     const handler = getResponseErrorHandler()
     await expect(
       handler(

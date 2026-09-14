@@ -104,6 +104,181 @@ pub fn config_write_target(factory_root: &Path, rel: &str) -> (PathBuf, bool) {
     (factory_root.join(rel_trimmed), false)
 }
 
+// ==== 接管登记（ADR 2026-09-14：单一存在与接管登记） ====
+//
+// 单一存在不变量：任一配置路径，生效文件恰好一份。用户层接管后，出厂侧同路径
+// 文件失效（解析层已保证：resolve 只在用户层无此文件时回落 factory）。登记是
+// 接管的**唯一凭证**——没有它，「恢复出厂」（删用户文件 + 删登记）与「漂移提示」
+// （出厂文件相对接管基线有更新）都无从做起。
+
+use serde::{Deserialize, Serialize};
+use sha2::Digest;
+
+/// 接管登记文件名（位于用户配置层根下，随用户空间整体备份/迁移）。
+pub const OWNERSHIP_LEDGER_FILENAME: &str = ".ownership.json";
+
+/// 一条接管登记：用户层接管的配置路径及其出厂基线。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnershipEntry {
+    /// 相对出厂 config 根的路径（`/` 分隔、无 `config/` 前缀）。
+    pub path: String,
+    /// 接管时出厂文件内容的 SHA-256（hex）；出厂侧无原件（用户全新创建）时为 null。
+    pub seeded_from_sha256: Option<String>,
+    /// 接管时间（RFC 3339）。
+    pub seeded_at: String,
+    /// 接管时的出厂版本（内核构建版本）；不可得时为 null。
+    pub factory_version: Option<String>,
+}
+
+/// 接管登记账本的错误。
+#[derive(Debug, thiserror::Error)]
+pub enum OwnershipLedgerError {
+    #[error("ownership ledger corrupt（不静默重置，请人工修复）: {0}")]
+    Corrupt(String),
+    #[error("ownership ledger io error: {0}")]
+    Io(String),
+    #[error("user space unavailable")]
+    UserSpaceUnavailable,
+}
+
+/// 接管登记文件落点；用户空间不可用时 `None`。
+pub fn ownership_ledger_path() -> Option<PathBuf> {
+    user_config_dir().map(|d| d.join(OWNERSHIP_LEDGER_FILENAME))
+}
+
+/// 内容 SHA-256（hex 小写）。
+pub fn sha256_hex(content: &[u8]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(content);
+    format!("{:x}", hasher.finalize())
+}
+
+/// 规范化相对路径：`\` → `/`、剥 `config/` 前缀；拒绝 `../` 越界。
+fn normalize_rel(rel: &str) -> Result<String, OwnershipLedgerError> {
+    let norm = rel.replace('\\', "/");
+    let trimmed = norm.strip_prefix("config/").unwrap_or(&norm).to_string();
+    if trimmed.contains("../") || trimmed.starts_with('/') {
+        return Err(OwnershipLedgerError::Io(format!(
+            "illegal relative path: {rel}"
+        )));
+    }
+    Ok(trimmed)
+}
+
+/// 读全部接管登记。文件缺失 = 从未接管 → 空表。
+///
+/// 账本损坏返回 [`OwnershipLedgerError::Corrupt`]——**不静默重置**（重置等于
+/// 把全部已接管路径打回"无凭证"状态，恢复出厂/漂移提示整体失灵）。
+pub fn load_ownership_entries() -> Result<Vec<OwnershipEntry>, OwnershipLedgerError> {
+    let Some(path) = ownership_ledger_path() else {
+        return Err(OwnershipLedgerError::UserSpaceUnavailable);
+    };
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| OwnershipLedgerError::Io(format!("{}: {e}", path.display())))?;
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&raw)
+        .map_err(|e| OwnershipLedgerError::Corrupt(format!("{}: {e}", path.display())))
+}
+
+/// 登记（或更新）一条接管：同路径已登记则覆盖基线，否则追加。
+///
+/// 落盘走临时文件 + rename，避免半写账本。
+pub fn register_ownership(
+    rel: &str,
+    seeded_from_sha256: Option<String>,
+    factory_version: Option<String>,
+) -> Result<(), OwnershipLedgerError> {
+    let path = normalize_rel(rel)?;
+    let entry = OwnershipEntry {
+        path,
+        seeded_from_sha256,
+        seeded_at: chrono::Utc::now().to_rfc3339(),
+        factory_version,
+    };
+    let mut entries = load_ownership_entries()?;
+    entries.retain(|e| e.path != entry.path);
+    entries.push(entry);
+    save_ledger(&entries)
+}
+
+/// 删除一条接管登记（恢复出厂的账面侧）。返回是否确有该条目。
+pub fn remove_ownership(rel: &str) -> Result<bool, OwnershipLedgerError> {
+    let path = normalize_rel(rel)?;
+    let mut entries = load_ownership_entries()?;
+    let before = entries.len();
+    entries.retain(|e| e.path != path);
+    if entries.len() == before {
+        return Ok(false);
+    }
+    save_ledger(&entries)?;
+    Ok(true)
+}
+
+fn save_ledger(entries: &[OwnershipEntry]) -> Result<(), OwnershipLedgerError> {
+    let Some(path) = ownership_ledger_path() else {
+        return Err(OwnershipLedgerError::UserSpaceUnavailable);
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| OwnershipLedgerError::Io(format!("{}: {e}", parent.display())))?;
+    }
+    let body = serde_json::to_string_pretty(entries)
+        .map_err(|e| OwnershipLedgerError::Io(format!("serialize: {e}")))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body)
+        .map_err(|e| OwnershipLedgerError::Io(format!("{}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| OwnershipLedgerError::Io(format!("{}: {e}", path.display())))?;
+    Ok(())
+}
+
+/// 漂移核对结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DriftKind {
+    /// 出厂文件与接管基线一致。
+    Current,
+    /// 出厂侧有新版本（哈希 ≠ 基线）——提示用户查看后自行并入，系统绝不合并。
+    Drifted,
+    /// 出厂侧已无此文件（改名/删除）。
+    FactoryMissing,
+    /// 基线未知（存量补登记时取不到出厂原件），只能弱提示。
+    UnknownBaseline,
+}
+
+/// 对全部接管登记做漂移核对（升级后调用，驱动 UI 提示）。
+pub fn check_ownership_drift(
+    factory_root: &Path,
+) -> Result<Vec<(OwnershipEntry, DriftKind)>, OwnershipLedgerError> {
+    let mut out = Vec::new();
+    for entry in load_ownership_entries()? {
+        let factory_file = factory_root.join(&entry.path);
+        let kind = match &entry.seeded_from_sha256 {
+            None => DriftKind::UnknownBaseline,
+            Some(baseline) => {
+                if !factory_file.is_file() {
+                    DriftKind::FactoryMissing
+                } else {
+                    let current = std::fs::read(&factory_file).map_err(|e| {
+                        OwnershipLedgerError::Io(format!("{}: {e}", factory_file.display()))
+                    })?;
+                    if sha256_hex(&current) == *baseline {
+                        DriftKind::Current
+                    } else {
+                        DriftKind::Drifted
+                    }
+                }
+            }
+        };
+        out.push((entry, kind));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +442,119 @@ mod tests {
         assert!(
             !p2.starts_with(&factory),
             "写目标绝不得落在 factory（否则用户改动进仓内，正是本机制要消灭的）"
+        );
+    }
+
+    #[test]
+    fn ownership_register_load_remove_roundtrip() {
+        let _lock = tests_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let (_user, _f) = isolate(tmp.path());
+
+        // 从未接管 = 空表（文件都不存在）
+        assert!(load_ownership_entries().unwrap().is_empty());
+        assert!(
+            !remove_ownership("models/llm.yaml").unwrap(),
+            "删除不存在的条目应报 false"
+        );
+
+        register_ownership(
+            "config/models/llm.yaml",
+            Some("deadbeef".into()),
+            Some("0.2.0".into()),
+        )
+        .unwrap();
+        let entries = load_ownership_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        // rel 规范化：剥 config/ 前缀
+        assert_eq!(entries[0].path, "models/llm.yaml");
+        assert_eq!(entries[0].seeded_from_sha256.as_deref(), Some("deadbeef"));
+        assert!(entries.contains(&entries[0]));
+
+        // 同路径再登记 = 覆盖基线，不重复追加
+        register_ownership("models/llm.yaml", Some("newbase".into()), None).unwrap();
+        let entries = load_ownership_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].seeded_from_sha256.as_deref(), Some("newbase"));
+
+        // 删除 = 恢复出厂的账面侧
+        assert!(remove_ownership("models/llm.yaml").unwrap());
+        assert!(load_ownership_entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ownership_corrupt_ledger_is_err_not_reset() {
+        let _lock = tests_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let (_user, _f) = isolate(tmp.path());
+        let ledger = ownership_ledger_path().unwrap();
+        std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+        std::fs::write(&ledger, "{not json").unwrap();
+
+        assert!(matches!(
+            load_ownership_entries(),
+            Err(OwnershipLedgerError::Corrupt(_))
+        ));
+        assert!(
+            register_ownership("a/b.yaml", None, None).is_err(),
+            "账本损坏时登记必须失败（fail-closed），不得静默重置丢账"
+        );
+        // 原始损坏内容原样保留，交人工处置
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap(), "{not json");
+    }
+
+    #[test]
+    fn ownership_illegal_rel_rejected() {
+        let _lock = tests_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let (_user, _f) = isolate(tmp.path());
+        assert!(register_ownership("../etc/passwd", None, None).is_err());
+        assert!(register_ownership("/abs/path.yaml", None, None).is_err());
+    }
+
+    #[test]
+    fn drift_check_reports_all_four_kinds() {
+        let _lock = tests_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let (_user, factory) = isolate(tmp.path());
+        let content = b"key: v1\n";
+        let baseline = sha256_hex(content);
+
+        // current：出厂文件与基线一致
+        std::fs::create_dir_all(factory.join("a")).unwrap();
+        std::fs::write(factory.join("a/current.yaml"), content).unwrap();
+        std::fs::write(factory.join("a/drifted.yaml"), b"key: v1\n").unwrap();
+        register_ownership("a/current.yaml", Some(baseline.clone()), None).unwrap();
+        register_ownership("a/drifted.yaml", Some(baseline.clone()), None).unwrap();
+        // 漂移：出厂侧换新
+        std::fs::write(factory.join("a/drifted.yaml"), b"key: v2\n").unwrap();
+        // 出厂缺失
+        register_ownership("a/gone.yaml", Some(baseline), None).unwrap();
+        // 基线未知（存量补登记取不到出厂原件）
+        register_ownership("a/unknown.yaml", None, None).unwrap();
+
+        let mut kinds: Vec<(String, DriftKind)> = check_ownership_drift(&factory)
+            .unwrap()
+            .into_iter()
+            .map(|(e, k)| (e.path, k))
+            .collect();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec![
+                ("a/current.yaml".to_string(), DriftKind::Current),
+                ("a/drifted.yaml".to_string(), DriftKind::Drifted),
+                ("a/gone.yaml".to_string(), DriftKind::FactoryMissing),
+                ("a/unknown.yaml".to_string(), DriftKind::UnknownBaseline),
+            ]
+        );
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 

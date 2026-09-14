@@ -8,7 +8,7 @@
 - P0-3：`_config_models` 模块存在且 `set_config` / `get_model_config_loader`
   可正常工作（不再 ModuleNotFoundError）。
 
-测试用真实数据结构（取自 config/models/llm.yaml 的真实顶层键 + config_refs=["models"]
+测试用真实数据结构（取自 config/plugins/llm/llm.yaml 的真实顶层键 + config_refs=["plugins/llm"]
 经 filter_config_by_refs 后的形态），不使用 Mock。
 
 [来源: docs/tasks/task_11_plugin_capability_unification.md P0-2/P0-3]
@@ -53,12 +53,12 @@ def _load_llm_server() -> Any:
 # 真实配置夹具：模拟内核注入给 llm 插件的配置形态。
 #
 # P1 链路（config_files 映射，ADR §4.3 B3 命名空间）：
-#   config/models/llm.yaml → config_files[].id="llm" 映射
-#   config/models/embedding.yaml → config_files[].id="embedding" 映射
+#   config/plugins/llm/llm.yaml → config_files[].id="llm" 映射
+#   config/plugins/llm/embedding.yaml → config_files[].id="embedding" 映射
 #   → invoker build_injected_config 按 id 命名空间合并
 #   → 插件收到 {"llm": <llm.yaml 全文>, "embedding": <embedding.yaml 全文>}
 #
-# 旧 config_refs=["models"] 路径（{models:{llm,embedding}}）已废弃（llm 试点改用 config_files）。
+# 旧 config_refs=["plugins/llm"] 路径（{models:{llm,embedding}}）已废弃（llm 试点改用 config_files）。
 # ────────────────────────────────────────────────────────────
 
 _LLM_YAML_CONTENT = {

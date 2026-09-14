@@ -1,0 +1,8 @@
+# knip/jscpd 基线棘轮（只减不增）——见 scripts/check_knip_jscpd_baseline.py
+# 复跑（Windows 侧 pnpm；WSL native binding 不匹配不可用，与 vite 同口径）：
+#   cd frontend && pnpm exec knip --no-progress
+#   cd frontend && pnpm exec jscpd
+# 首跑基线 2026-09-13（R6v2-close 复跑实测）：knip 118 项发现；jscpd 558 clones（src 扫描面）。
+# 修复存量后用 --init 收紧并 commit 留归因；禁止上调。
+knip_findings=118
+jscpd_clones=558

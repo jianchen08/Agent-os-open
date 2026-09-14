@@ -784,4 +784,298 @@ mod tests {
         let fed3 = assemble_state_slice(&state3, &["task.status".to_string()]);
         assert!(fed3.get("task.status").is_none());
     }
+
+    // ── injected_config 的错误分化：PARSE 上抛、非 PARSE 降级空对象 ──
+
+    /// load_config 报 PARSE 类错误 → 上抛 CONFIG_PARSE_ERROR（配置语法错不可
+    /// 静默降级，插件拿到半吊子配置比拿空配置更危险）。
+    /// 对照：非 PARSE 错误（IO/缺文件）→ warn + 空配置继续。
+    #[tokio::test]
+    async fn injected_config_parse_error_is_raised_others_degrade() {
+        /// 按预设错误码返回失败的 loader 替身。
+        struct FailingLoader(Option<String>);
+
+        #[async_trait::async_trait]
+        impl PluginLoader for FailingLoader {
+            async fn discover(
+                &self,
+                _root_paths: &[&str],
+            ) -> Result<Vec<PluginManifest>, PluginError> {
+                Ok(Vec::new())
+            }
+            fn validate_manifest(&self, _manifest: &PluginManifest) -> Result<(), PluginError> {
+                Ok(())
+            }
+            async fn load(
+                &self,
+                _plugin_id: &str,
+            ) -> Result<agentos_core::traits::LoadedPlugin, PluginError> {
+                unreachable!("本用例不触发 load")
+            }
+            async fn unload(&self, _plugin_id: &str) -> Result<(), PluginError> {
+                Ok(())
+            }
+            fn get_status(&self, _plugin_id: &str) -> agentos_core::traits::PluginStatus {
+                agentos_core::traits::PluginStatus::Discovered
+            }
+            async fn load_config(&self) -> Result<Value, PluginError> {
+                Err(PluginError {
+                    message: "yaml syntax error at line 3".to_string(),
+                    code: self.0.clone(),
+                    source: Some("plugin-loader".to_string()),
+                })
+            }
+        }
+
+        let manifest = manifest_with_id("cfg_err", vec![]);
+
+        // PARSE 类错误：上抛且带 CONFIG_PARSE_ERROR
+        let parse_loader = FailingLoader(Some("CONFIG_PARSE".to_string()));
+        let err = injected_config(&parse_loader, &manifest)
+            .await
+            .expect_err("PARSE 类错误应上抛");
+        assert_eq!(err.code.as_deref(), Some("CONFIG_PARSE_ERROR"));
+        assert!(
+            err.message.contains("yaml syntax error"),
+            "应保留底层错误信息: {}",
+            err.message
+        );
+
+        // 非 PARSE 错误：降级空配置
+        let io_loader = FailingLoader(Some("CONFIG_IO".to_string()));
+        let cfg = injected_config(&io_loader, &manifest)
+            .await
+            .expect("非 PARSE 错误应降级");
+        assert!(cfg.as_object().is_some_and(|o| o.is_empty()));
+
+        // 无 code 的错误同样走降级分支（保守：无法判定为解析错就不上抛）
+        let uncoded = FailingLoader(None);
+        let cfg = injected_config(&uncoded, &manifest)
+            .await
+            .expect("无错误码应降级");
+        assert!(cfg.as_object().is_some_and(|o| o.is_empty()));
+    }
+
+    // ── config_defaults_from_fields 的字段级跳过 ──
+
+    /// 无 `extra` 的字段与无 `default` 键的字段都跳过（不得产出 null 占位）。
+    #[test]
+    fn config_defaults_skips_fields_without_extra_or_default() {
+        let fields = vec![
+            EnvConfigField {
+                name: "no_extra".to_string(),
+                label: "NE".to_string(),
+                field_type: "text".to_string(),
+                required: false,
+                description: None,
+                extra: None,
+            },
+            EnvConfigField {
+                name: "no_default".to_string(),
+                label: "ND".to_string(),
+                field_type: "text".to_string(),
+                required: false,
+                description: None,
+                extra: Some(json!({"placeholder": "x"}).as_object().unwrap().clone()),
+            },
+            EnvConfigField {
+                name: "null_default".to_string(),
+                label: "Nul".to_string(),
+                field_type: "text".to_string(),
+                required: false,
+                description: None,
+                extra: Some(json!({"default": null}).as_object().unwrap().clone()),
+            },
+            EnvConfigField {
+                name: "has_default".to_string(),
+                label: "HD".to_string(),
+                field_type: "text".to_string(),
+                required: false,
+                description: None,
+                extra: Some(json!({"default": "v"}).as_object().unwrap().clone()),
+            },
+        ];
+        let out = config_defaults_from_fields(&fields);
+        assert_eq!(out["has_default"], "v");
+        for skipped in ["no_extra", "no_default", "null_default"] {
+            assert!(
+                out.get(skipped).is_none(),
+                "{skipped} 缺 extra/default 不得产出占位"
+            );
+        }
+        assert_eq!(out.as_object().unwrap().len(), 1, "只有一条真值: {out}");
+    }
+
+    /// 点号路径展开为嵌套 Object；多字段共享前缀时合并（不互相顶掉）。
+    #[test]
+    fn config_defaults_expands_dot_paths_into_nested_object() {
+        let fields = vec![
+            EnvConfigField {
+                name: "context_window.budgets.l1".to_string(),
+                label: "L1".to_string(),
+                field_type: "number".to_string(),
+                required: false,
+                description: None,
+                extra: Some(json!({"default": 0.6}).as_object().unwrap().clone()),
+            },
+            EnvConfigField {
+                name: "context_window.budgets.l2".to_string(),
+                label: "L2".to_string(),
+                field_type: "number".to_string(),
+                required: false,
+                description: None,
+                extra: Some(json!({"default": 0.3}).as_object().unwrap().clone()),
+            },
+            EnvConfigField {
+                name: "context_window.enabled".to_string(),
+                label: "E".to_string(),
+                field_type: "toggle".to_string(),
+                required: false,
+                description: None,
+                extra: Some(json!({"default": true}).as_object().unwrap().clone()),
+            },
+        ];
+        let out = config_defaults_from_fields(&fields);
+        assert_eq!(out["context_window"]["budgets"]["l1"], 0.6);
+        assert_eq!(out["context_window"]["budgets"]["l2"], 0.3);
+        assert_eq!(out["context_window"]["enabled"], true);
+        assert_eq!(
+            out["context_window"]["budgets"].as_object().unwrap().len(),
+            2,
+            "同前缀字段应合并而非相互覆盖: {out}"
+        );
+    }
+
+    // ── build_injected_config 的 env target 与引用形态兜底 ──
+
+    /// env target 条目且引用文件缺失：不得用 fields.default 兜底（密钥无默认
+    /// 语义），保持空 dict。对照：非 env 的引用形态条目兜底为 defaults。
+    #[test]
+    fn build_injected_config_env_target_refuses_default_fallback() {
+        let full = json!({});
+        let env_mapping = ConfigFileMapping {
+            id: "secrets".to_string(),
+            settings: None,
+            path: ".env".to_string(),
+            label: "环境变量".to_string(),
+            target: Some("env".to_string()),
+            fields: vec![EnvConfigField {
+                name: "API_KEY".to_string(),
+                label: "K".to_string(),
+                field_type: "text".to_string(),
+                required: false,
+                description: None,
+                extra: Some(
+                    json!({"default": "must-not-leak"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            }],
+        };
+        let plain_mapping = ConfigFileMapping {
+            id: "plain".to_string(),
+            settings: None,
+            path: "config/plain.yaml".to_string(),
+            label: "Plain".to_string(),
+            target: Some("config".to_string()),
+            fields: vec![EnvConfigField {
+                name: "k".to_string(),
+                label: "K".to_string(),
+                field_type: "text".to_string(),
+                required: false,
+                description: None,
+                extra: Some(
+                    json!({"default": "fallback-value"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            }],
+        };
+        let manifest = manifest_with_id("cfg_env", vec![env_mapping, plain_mapping]);
+
+        let injected = build_injected_config(&full, &manifest);
+        assert!(
+            injected["secrets"]
+                .as_object()
+                .is_some_and(|o| o.is_empty()),
+            "env 条目缺失应保持空 dict（密钥无默认语义）: {injected}"
+        );
+        assert!(
+            injected["secrets"].get("API_KEY").is_none(),
+            "默认值不得进 env 命名空间: {injected}"
+        );
+        assert_eq!(
+            injected["plain"]["k"], "fallback-value",
+            "非 env 引用形态缺失时以 defaults 兜底: {injected}"
+        );
+    }
+
+    /// 内联形态（path 空）：值取 fields.default，不进文件解析。
+    #[test]
+    fn build_injected_config_inline_form_uses_field_defaults() {
+        let full = json!({"inline_ns": {"stale": "should-be-ignored"}});
+        let inline = ConfigFileMapping {
+            id: "inline_ns".to_string(),
+            settings: None,
+            path: String::new(),
+            label: "Inline".to_string(),
+            target: None,
+            fields: vec![EnvConfigField {
+                name: "fresh".to_string(),
+                label: "F".to_string(),
+                field_type: "text".to_string(),
+                required: false,
+                description: None,
+                extra: Some(
+                    json!({"default": "from-manifest"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            }],
+        };
+        let manifest = manifest_with_id("cfg_inline", vec![inline]);
+
+        let injected = build_injected_config(&full, &manifest);
+        assert_eq!(
+            injected["inline_ns"]["fresh"], "from-manifest",
+            "内联形态真值在 manifest: {injected}"
+        );
+        assert!(
+            injected["inline_ns"].get("stale").is_none(),
+            "内联形态不读全量配置（单一真值）: {injected}"
+        );
+    }
+
+    // ── merge_injected_with_step_config：非对象输入的宽容处理 ──
+
+    /// injected 非对象 → 视作空 dict 起步；step_config 非对象 → 不并入任何键。
+    /// 两种非对象输入都不得 panic（合并点必须宽容）。
+    #[test]
+    fn merge_injected_with_step_config_tolerates_non_objects() {
+        // 两侧皆非对象
+        assert_eq!(
+            merge_injected_with_step_config(json!("not-an-object"), &json!(42)),
+            json!({}),
+            "两侧非对象 → 空对象"
+        );
+        // injected 非对象、step 是对象
+        let merged = merge_injected_with_step_config(json!(null), &json!({"a": 1}));
+        assert_eq!(merged, json!({"a": 1}), "step 键应并入");
+        // injected 是对象、step 非对象 → 保留 injected
+        let merged = merge_injected_with_step_config(json!({"keep": 1}), &json!([]));
+        assert_eq!(merged, json!({"keep": 1}), "step 非对象不应清空配置");
+    }
+
+    /// step_config 与 injected 同名键 → step 覆盖（语义确定：后者胜）。
+    #[test]
+    fn merge_injected_with_step_config_step_wins_on_collision() {
+        let injected = json!({"shared": "from-manifest", "only_injected": 1});
+        let step = json!({"shared": "from-step"});
+        let merged = merge_injected_with_step_config(injected, &step);
+        assert_eq!(merged["shared"], "from-step", "step config 覆盖同名键");
+        assert_eq!(merged["only_injected"], 1, "非同名键保留");
+    }
 }

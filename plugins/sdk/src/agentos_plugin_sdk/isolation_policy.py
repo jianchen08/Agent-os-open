@@ -32,20 +32,20 @@ def default_policy_path() -> Path:
 
     优先 AGENTOS_CONFIG_ROOT（内核启动时写入 <project_root>/config 并发布到进程
     环境，sidecar 继承，部署布局无关）；回退从本文件向上查找含
-    config/isolation/isolation_policy.yaml 的祖先目录（不硬编码父目录层数，
+    config/plugins/isolation/isolation_policy.yaml 的祖先目录（不硬编码父目录层数，
     对调用方所处目录深度不敏感）。找不到时返回推导路径（加载失败走默认策略
     降级，不 panic）。
     """
     env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
     if env_root:
-        p = Path(env_root) / "isolation" / "isolation_policy.yaml"
+        p = Path(env_root) / "plugins" / "isolation" / "isolation_policy.yaml"
         if p.exists():
             return p
     for ancestor in Path(__file__).resolve().parents:
-        candidate = ancestor / "config" / "isolation" / "isolation_policy.yaml"
+        candidate = ancestor / "config" / "plugins" / "isolation" / "isolation_policy.yaml"
         if candidate.exists():
             return candidate
-    return Path(__file__).resolve().parent / "config" / "isolation" / "isolation_policy.yaml"
+    return Path(__file__).resolve().parent / "config" / "plugins" / "isolation" / "isolation_policy.yaml"
 
 
 DEFAULT_POLICY_PATH = default_policy_path()

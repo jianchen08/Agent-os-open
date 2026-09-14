@@ -1,0 +1,36 @@
+# coding 模式包清单（manifest）
+# 结构说明：仓内无团队包清单先例（config/ 下无 manifest* 文件；research 包 README 第七节
+# 记录「模式包清单/manifest 契约未定义」），本文件按最简结构交付，契约待复核。
+# 配套说明文档：PACKAGE.md
+package:
+  name: coding
+  display_name: coding 模式包（编码团队）
+  path: config/agents/team/coding
+  version: 1.0.0
+  status: active
+  description: >-
+    编码团队模式包（薄整合层）：PM 拆解派单 → 开发编码自测 → 测试验证 → 评审独立审查；
+    执行流程复用既有执行层配置（programming_orchestrator_agent_v2 / code_writer /
+    test_debug_agent / code_reviewer_agent），本包只承担团队语义。
+  docs: PACKAGE.md
+  roles:
+    - id: coding_pm_agent
+      file: coding_pm_agent.yaml
+      duty: PM——需求拆解/任务派单/执行跟踪/交付验收
+      level: L2
+      model_tier: medium
+    - id: coding_dev_agent
+      file: coding_dev_agent.yaml
+      duty: 开发——按 AC 编码/TDD 自测/交付可运行代码
+      level: L3
+      model_tier: medium
+    - id: coding_test_agent
+      file: coding_test_agent.yaml
+      duty: 测试——测试设计/运行验证/失败调试修复
+      level: L3
+      model_tier: medium
+    - id: coding_review_agent
+      file: coding_review_agent.yaml
+      duty: 评审——独立代码审查/一票否决/AC 符合度判断
+      level: L3
+      model_tier: small

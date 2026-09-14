@@ -1191,9 +1191,20 @@ class TestSingleton:
 
 
 class TestProviderConfig:
-    def test_load_provider_config_fallback_empty(self) -> None:
-        """config_center 不可用 → 返回空配置（不 panic）。"""
+    def test_load_provider_config_fallback_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """config_center 不可用且直读回退失败 → 返回空配置（不 panic）。
+
+        直读回退在仓库内会命中真实 isolation_config.yaml（非空），须显式钉住
+        回退读取失败分支才能断言空兜底。
+        """
         mod = _load_manager()
+
+        def _boom(_path: Any) -> dict[str, Any]:
+            raise OSError("stub: 直读失败")
+
+        monkeypatch.setattr(mod, "_read_providers_from_yaml", _boom)
         assert mod._load_provider_config() == {}
 
     def test_load_provider_config_from_center(self, monkeypatch: pytest.MonkeyPatch) -> None:

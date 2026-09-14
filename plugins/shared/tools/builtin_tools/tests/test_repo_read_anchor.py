@@ -30,7 +30,7 @@ pytestmark = pytest.mark.unit
 def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """构造带 config/isolation 标记的假仓库并钉住解析缓存。"""
     root = tmp_path / "repo"
-    (root / "config" / "isolation").mkdir(parents=True)
+    (root / "config" / "kernel").mkdir(parents=True)
     (root / "kernel" / "src").mkdir(parents=True)
     (root / "kernel" / "src" / "lib.py").write_text("REPO_NEEDLE = 1", encoding="utf-8")
     (root / "docs").mkdir()

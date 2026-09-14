@@ -41,6 +41,15 @@ _SKIP_DIRS = {
 # 已知合法非工具 id 白名单（当前为空，理由见模块 docstring）。
 _KNOWN_NON_TOOL_IDS: frozenset[str] = frozenset()
 
+# 用户空间插件提供的工具 id（ADR 2026-09-14 单一存在：external_mcp 四插件迁
+# %APPDATA%/agentos/plugins，经用户插件根热发现注册，仓内 manifest 不再可见）。
+# agent yaml 保留引用是合法的——生产面（本机用户根）可解析；仓内独立部署不含
+# 这些 id，此处显式登记豁免，新增用户空间 id 须同名追加。
+_USER_SPACE_TOOL_IDS: frozenset[str] = frozenset({
+    "godot_run",        # external_mcp/godot_mcp（godot_expert/godot_orchestrator 消费）
+    "universal_search",  # external_mcp/omnisearch（general/research 系消费）
+})
+
 
 def _pruned_files(base: Path) -> list[Path]:
     found: list[Path] = []
@@ -95,7 +104,7 @@ def test_agent_tool_ids_subset_of_registry(yaml_path: Path) -> None:
     assert isinstance(tool_ids, list), (
         f"tool_ids 应为列表，实为 {type(tool_ids).__name__}"
     )
-    missing = sorted(set(tool_ids) - set(TOOL_REGISTRY) - set(_KNOWN_NON_TOOL_IDS))
+    missing = sorted(set(tool_ids) - set(TOOL_REGISTRY) - set(_KNOWN_NON_TOOL_IDS) - _USER_SPACE_TOOL_IDS)
     assert not missing, (
         f"{yaml_path.relative_to(ROOT).as_posix()} 的 tool_ids 引用了注册表不存在的 id: "
         f"{missing}（生产面 LLM 调用这些 id 必败；修复对应插件 manifest 或修订 tool_ids）"

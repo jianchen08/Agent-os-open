@@ -103,7 +103,7 @@ class TestEntryDispatch:
         assert "ws_meta 读取失败" in err
         assert "worktree 合并失败" not in err
 
-    def test_merge_failure_labeled_with_merge_prefix(self, monkeypatch: Any) -> None:
+    def test_merge_failure_labeled_with_merge_prefix(self, monkeypatch: Any, tmp_path: Any) -> None:
         """git 机制真报错 → 报错带 worktree 合并失败 分类前缀，与读取失败可区分。"""
         m = WorktreeMerger()
         monkeypatch.setattr(
@@ -111,8 +111,11 @@ class TestEntryDispatch:
             "on_eval_passed",
             lambda task_id, workspace, ws_meta: {"success": False, "error": "boom"},
         )
+        # 目录缺失会在入口被 state 真值防御跳过（2026-09-14 裁定），先落真实目录
+        wt = tmp_path / "w"
+        wt.mkdir()
         err = m.merge_worktree_before_complete(
-            "t1", {"mode": "worktree", "path": "D:/w", "project_root": "D:/s"}
+            "t1", {"mode": "worktree", "path": str(wt), "project_root": "D:/s"}
         )
         assert isinstance(err, str)
         assert err.startswith("worktree 合并失败") and "boom" in err
@@ -189,9 +192,12 @@ class TestRealMerge:
         (wt_dir / "x.txt").write_text("x", encoding="utf-8")
         git("add", "-A", cwd=wt_dir)
         git("commit", "-m", "ghost work", cwd=wt_dir)
-        # 分支被外部清理（worktree 仍在，模拟子任务继承的残留元数据）
+        # 分支被外部清理（worktree 仍在，模拟子任务继承的残留元数据）；
+        # 2026-09-14 起 worktree 目录缺失会在入口被跳过（state 真值防御），
+        # 故 remove 后重建目录壳，仅清分支
         git("worktree", "remove", "--force", str(wt_dir), cwd=proj)
         git("branch", "-D", "task/ghost", cwd=proj)
+        wt_dir.mkdir(parents=True, exist_ok=True)
 
         err = worktree_merge.merge_worktree_before_complete(
             "t1", _ws_meta(proj, wt_dir, "task/ghost")
@@ -633,3 +639,36 @@ class TestScriptedGitBranches:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestMissingWorktreeDirSkipsMerge:
+    """2026-09-14 用户裁定（state 真值）：mode=worktree 但目录缺失 = 外部清理，
+    合并无从谈起——跳过合并返回 None（留 warning 痕迹），不以 267 判死任务。
+    出生段配套落地校验（workspace_lifecycle._create_worktree_root）保证
+    mode=worktree 出生必有真目录，故此处缺失只能是后天外部因素。"""
+
+    def test_missing_dir_skips_merge(self) -> None:
+        m = WorktreeMerger()
+
+        def _no_git(*args: str, **kw: Any) -> tuple[int, str, str]:
+            raise AssertionError("目录缺失跳过合并，不应执行任何 git 命令")
+
+        m._run_git = _no_git  # type: ignore[method-assign]
+        phantom = "Z:/definitely/not/here__wt_t12345"
+        r = m.merge_worktree_before_complete(
+            "t1", {"mode": "worktree", "path": phantom,
+                   "branch": "task/t1", "project_root": "Z:/src"})
+        assert r is None
+
+    def test_missing_dir_skip_fires_before_git(self, monkeypatch: Any) -> None:
+        """跳过发生在任何 git 接触之前（现有进程内单例直接直测）。"""
+        m = WorktreeMerger()
+
+        def _no_git(*args: str, **kw: Any) -> tuple[int, str, str]:
+            raise AssertionError("不应执行任何 git 命令")
+
+        monkeypatch.setattr(m, "_run_git", _no_git)
+        r = m.merge_worktree_before_complete(
+            "t2", {"mode": "worktree", "path": "Z:/nope__wt_t2",
+                   "branch": "task/t2", "project_root": "Z:/src"})
+        assert r is None

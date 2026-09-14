@@ -33,8 +33,16 @@ class IsolationProvider(ABC):
         """检查提供者是否可用"""
 
     @abstractmethod
-    async def create_environment(self, context: IsolationContext) -> IsolationEnvironment:
-        """创建隔离环境"""
+    async def create_environment(
+        self,
+        context: IsolationContext,
+        container_name: str | None = None,
+    ) -> IsolationEnvironment:
+        """创建隔离环境。
+
+        container_name：环境名（workspace 确定性派生），由 manager 注入，
+        实现按名幂等收养/复用（D6①）；HOST 等无命名环境的实现忽略该参数。
+        """
 
     @abstractmethod
     async def destroy_environment(self, env_id: str, success: bool = True) -> bool:

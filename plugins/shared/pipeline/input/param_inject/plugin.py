@@ -118,7 +118,7 @@ def classify_args_parse_failure(raw: str) -> str:
 def _resolve_project_root() -> Path | None:
     """推导 Agent OS 项目根目录（解析实现统一在 plugins/shared/repo_anchor.py）。
 
-    AGENTOS_CONFIG_ROOT（内核启动发布）优先、config/isolation 标记法回退的
+    AGENTOS_CONFIG_ROOT（内核启动发布）优先、config/kernel 标记法回退的
     语义与缓存由 repo_anchor.resolve_repo_root 单点承担；返回 None 时
     {{project_root}} 模板替换与 project_root 回退注入不生效（约定不变）。
     """

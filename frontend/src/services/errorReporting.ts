@@ -15,7 +15,7 @@ import type { NotificationPriority } from '../types/notification'
 export interface ErrorContext {
   component?: string
   action?: string
-  /** 错误码（与 config/error_codes.json 对齐） */
+  /** 错误码（与 config/kernel/error_codes.json 对齐） */
   code?: string
   /** 错误来源标签（通知中心渲染；缺省渲染「未知」灰标，见 ErrorSourceBadge） */
   source?: ErrorSource
@@ -122,7 +122,7 @@ class ErrorReportingService {
         priority: options?.priority ?? (isServerError ? 'high' : 'normal'),
         category: 'error',
         isBlocking: false,
-        // 统一错误信封来源（config/error_codes.json）：通知中心渲染来源标签，
+        // 统一错误信封来源（config/kernel/error_codes.json）：通知中心渲染来源标签，
         // 调用方经 context.source 显式传入（client.ts 从 apiError.source 透传）。
         errorSource: context.source as ErrorSource | undefined,
         // 一律自动消失（SERVER 10s / 其余 6s）：瞬时失败（如内核重启窗口）

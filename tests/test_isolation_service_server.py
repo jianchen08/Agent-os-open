@@ -219,7 +219,7 @@ class TestDestroyEnv:
     async def test_destroy_without_target_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stub = _StubManager()
         monkeypatch.setattr(server, "_manager", stub)
-        assert await server.isolation_destroy_env() == {"error": "必须提供 env_id 或 task_id"}
+        assert await server.isolation_destroy_env() == {"error": "必须提供 env_id、task_id 或 container_name"}
         assert stub.calls == []
 
 
@@ -371,7 +371,7 @@ class TestLifecycle:
 # ═══════════════════════════════════════════════════════════
 
 
-_CFG_PATH = _REPO_ROOT / "config" / "isolation" / "isolation_config.yaml"
+_CFG_PATH = _REPO_ROOT / "config" / "plugins" / "isolation" / "isolation_config.yaml"
 
 
 def _gate_sleep(n: int) -> tuple[list[dict[str, asyncio.Event]], object]:
@@ -437,12 +437,20 @@ class TestConfigWatcher:
         real_stat = Path.stat
         flaky = {"n": 0}
 
+        def _norm(path: Path) -> str:
+            # resolve() 产物可能带 \\?\ 前缀，归一后再比对
+            text = str(path)
+            return text[4:] if text.startswith("\\\\?\\") else text
+
         def flaky_stat(self: Path, *a: object, **kw: object):
-            if self == _CFG_PATH and flaky["n"] == 0:
+            if _norm(self) == str(_CFG_PATH) and flaky["n"] == 0:
                 flaky["n"] += 1
                 raise OSError("atomic write window")
             return real_stat(self, *a, **kw)
 
+        # 钉死解析结果：否则全局 stat 拦截会先在解析器内部 exists() 探测时被
+        # 消耗（exists 吞 OSError → 候选判 False → 解析落到兜底路径）。
+        monkeypatch.setattr(server, "_isolation_config_path", lambda: _CFG_PATH)
         monkeypatch.setattr(Path, "stat", flaky_stat)
         monkeypatch.setattr(asyncio, "sleep", _gate_sleep(0)[1])  # 首轮 sleep 即取消
 

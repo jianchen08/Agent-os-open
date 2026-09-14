@@ -6,7 +6,7 @@
 
 config/cost-control 域：
 新增 /ext/cost_control/config/cost-control GET/PUT —— 成本控制 **YAML 配置
-全文**读写（config/system/cost_control.yaml，前端 services/api/config.ts 的
+全文**读写（config/plugins/cost_control/cost_control.yaml，前端 services/api/config.ts 的
 CostControlConfigResponse 嵌套形态消费），与既有 /ext/cost_control/config
 （展平形态，前端 costControl.ts 消费）并存，语义对齐 channel_api
 routes_config.py 的 cost-control 段（_DEFAULT_COST_CONTROL 兜底 + 全文覆写）。
@@ -295,24 +295,24 @@ async def cost_control_reset_session_budget(session_id: str) -> dict[str, Any]:
 
 # ── 成本控制 YAML 配置全文读写（源 channel_api routes_config.py）──
 # 注意与插件内 CostControlConfig（config/cost_control.yaml via config_center，
-# global_budget 字段）不同：本组端点读写 **config/system/cost_control.yaml**
+# global_budget 字段）不同：本组端点读写 **config/plugins/cost_control/cost_control.yaml**
 # （原路径不变，global_config 字段），是前端 settings 页的配置编辑面。
 
 
 def _resolve_project_root() -> Path:
-    """向上查找项目根（含 config/ + config/models/ 的目录）。
+    """向上查找项目根（含 config/ + config/kernel/ 的目录）。
 
     按目录特征探测，不硬编码 parent×N（模块相对项目根的深度随布局变化不可靠）。
     """
     here = Path(__file__).resolve().parent
     for candidate in [here, *here.parents]:
-        if (candidate / "config").is_dir() and (candidate / "config" / "models").is_dir():
+        if (candidate / "config").is_dir() and (candidate / "config" / "kernel").is_dir():
             return candidate
     # 兜底：仓库布局内必有 config/ 探测命中
     return Path(__file__).resolve().parent.parent.parent.parent  # pragma: no cover
 
 
-_COST_CONTROL_YAML = _resolve_project_root() / "config" / "system" / "cost_control.yaml"
+_COST_CONTROL_YAML = _resolve_project_root() / "config" / "plugins" / "cost_control" / "cost_control.yaml"
 
 _DEFAULT_COST_CONTROL: dict[str, Any] = {
     "enabled": True,

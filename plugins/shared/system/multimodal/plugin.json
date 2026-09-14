@@ -138,7 +138,7 @@
   "config_files": [
     {
       "id": "media_providers",
-      "path": "config/models/media_providers.yaml",
+      "path": "config/plugins/multimodal/media_providers.yaml",
       "label": "媒体提供商配置"
     }
   ],

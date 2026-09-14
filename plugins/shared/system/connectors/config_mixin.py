@@ -37,7 +37,7 @@ class ConfigSubscriberMixin:
         class MyConnector(BaseConnector, ConfigSubscriberMixin):
             async def connect(self) -> None:
                 ...
-                self.subscribe_config(config_center, "capability_adapters.yaml")
+                self.subscribe_config(config_center, "config/plugins/connectors/capability_adapters.yaml")
 
             def _on_config_changed(self, event_type, file_path, context):
                 # 重新加载配置
@@ -67,7 +67,7 @@ class ConfigSubscriberMixin:
 
         Args:
             config_center: ConfigCenter 实例
-            path_prefix: 监听的路径前缀，如 "capability_adapters.yaml"
+            path_prefix: 监听的路径前缀，如 "config/plugins/connectors/capability_adapters.yaml"
         """
         self._ensure_config_state()
 

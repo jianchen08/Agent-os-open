@@ -5893,7 +5893,7 @@ mod routes_endpoints_tests {
         use agentos_core::traits::CapabilityRegistry as _;
         let tmp = tempfile::tempdir().unwrap();
         let _user_space_guard = crate::test_env::pin_user_root(tmp.path());
-        let profile_dir = tmp.path().join("config").join("plugins");
+        let profile_dir = tmp.path().join("config").join("kernel");
         std::fs::create_dir_all(&profile_dir).unwrap();
 
         let manifest = manifest_from_json(serde_json::json!({
@@ -5977,7 +5977,7 @@ mod routes_endpoints_tests {
         // profile 路径是目录 → 读失败（非 NotFound）→ 500，不写入
         let tmp = tempfile::tempdir().unwrap();
         let _user_space_guard = crate::test_env::pin_user_root(tmp.path());
-        let profile_dir = tmp.path().join("config").join("plugins");
+        let profile_dir = tmp.path().join("config").join("kernel");
         std::fs::create_dir_all(profile_dir.join("default_profile.yaml")).unwrap();
 
         let mut state = AppState::new();

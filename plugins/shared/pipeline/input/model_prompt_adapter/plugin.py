@@ -98,6 +98,11 @@ class ModelPromptAdapterPlugin(IInputPlugin):
             return []
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            # 顶层非映射（如整份文档写成列表/标量）与"rules 字段非列表"同一
+            # 契约：畸形文档一律透传，不得让构造期抛错打断插件装载。
+            logger.warning("[model_prompt_adapter] 规则文档顶层非映射，透传")
+            return []
         rules = data.get("rules") or []
         if not isinstance(rules, list):
             logger.warning("[model_prompt_adapter] rules 字段非列表，透传")

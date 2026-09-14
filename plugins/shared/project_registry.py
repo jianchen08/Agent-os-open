@@ -176,14 +176,14 @@ def _isolation_config_path() -> Path:
     """定位 isolation_config.yaml（配置文件是共享真值源；workspace.root 同源）。"""
     env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
     if env_root:
-        p = Path(env_root) / "isolation" / "isolation_config.yaml"
+        p = Path(env_root) / "plugins" / "isolation" / "isolation_config.yaml"
         if p.exists():
             return p
     for ancestor in Path(__file__).resolve().parents:
-        candidate = ancestor / "config" / "isolation" / "isolation_config.yaml"
+        candidate = ancestor / "config" / "plugins" / "isolation" / "isolation_config.yaml"
         if candidate.exists():
             return candidate
-    return Path(__file__).resolve().parent.parent / "config" / "isolation" / "isolation_config.yaml"
+    return Path(__file__).resolve().parent.parent / "config" / "plugins" / "isolation" / "isolation_config.yaml"
 
 
 def project_root_of_tree() -> Path:

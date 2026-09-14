@@ -917,4 +917,899 @@ mod tests {
             "恰好等于上限的文件必须正常返回（上限为闭区间）"
         );
     }
+
+    // ── 静态资源路径形态判定（None = 交回 dispatcher 的分支面）──
+
+    /// `try_serve_static_asset` 的非静态形态：非 /ext 前缀 / 缺 plugin 段 /
+    /// 缺 mid 段 / 非 assets / 空 rest / 未声明目录 / 无 web 目录 → 一律 None
+    ///（交回 dispatcher，不吞请求）。
+    #[tokio::test]
+    async fn static_asset_shape_mismatches_return_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dirs = plugin_dirs_with_web(&dir);
+        // 无 web/ 子目录的插件根
+        let bare = tempfile::tempdir().expect("tempdir");
+        let mut with_bare = dirs.clone();
+        with_bare.insert("bare".to_string(), bare.path().to_path_buf());
+
+        let cases = [
+            ("/api/v1/other", "非 /ext 前缀"),
+            ("/ext/", "缺 plugin 段"),
+            ("/ext/p", "缺 mid 段（splitn 只两段）"),
+            ("/ext/p/not-assets/x.js", "非 assets 子路径"),
+            ("/ext/p/assets", "空 rest（目录索引交插件）"),
+            ("/ext/p/assets/", "rest 仅斜杠也视为空"),
+            ("/ext/unknown/assets/x.js", "插件未声明目录"),
+            ("/ext/bare/assets/x.js", "插件无 web/ 子目录"),
+        ];
+        for (path, why) in cases {
+            assert!(
+                try_serve_static_asset(path, &with_bare).await.is_none(),
+                "{why}：应返回 None 交回 dispatcher，path={path}"
+            );
+        }
+    }
+
+    /// `..` 段逃逸与文件不存在：路径形态匹配即由静态分支裁决（Some + 404，
+    /// 不交回 dispatcher——/assets/** 是静态资源命名空间）。
+    #[tokio::test]
+    async fn static_asset_rejects_traversal_and_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dirs = plugin_dirs_with_web(&dir);
+        // plugin.json 在插件根（web/ 之外），逃逸尝试若成功会读到它
+        std::fs::write(dir.path().join("plugin.json"), b"{\"id\":\"p\"}").unwrap();
+
+        let traversal = try_serve_static_asset("/ext/p/assets/../../plugin.json", &dirs)
+            .await
+            .expect("路径形态匹配（含 .. 段）仍归静态分支裁决");
+        assert_eq!(
+            response_status(&traversal),
+            axum::http::StatusCode::NOT_FOUND,
+            ".. 段必须 404，不得逃出 web/ 子树"
+        );
+
+        let missing = try_serve_static_asset("/ext/p/assets/nope.js", &dirs)
+            .await
+            .expect("不存在文件的路径形态仍归静态分支");
+        assert_eq!(response_status(&missing), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// `read_static_asset_capped` 的 IO 失败分支（文件被删/不可读）→ Io 错误。
+    #[test]
+    fn read_static_asset_capped_io_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("gone.bin");
+        assert!(matches!(
+            read_static_asset_capped(&missing),
+            Err(StaticAssetReadError::Io)
+        ));
+        // 超限优先于 IO：先 stat 再读，目录本身 stat 成功但 read 失败 → Io
+        assert!(matches!(
+            read_static_asset_capped(dir.path()),
+            Err(StaticAssetReadError::Io)
+        ));
+    }
+
+    /// `mime_for_extension` 全表 + 大小写不敏感 + 未知回退 octet-stream。
+    #[test]
+    fn mime_for_extension_table_and_fallback() {
+        for (ext, want) in [
+            ("html", "text/html; charset=utf-8"),
+            ("htm", "text/html; charset=utf-8"),
+            ("js", "application/javascript; charset=utf-8"),
+            ("mjs", "application/javascript; charset=utf-8"),
+            ("css", "text/css; charset=utf-8"),
+            ("json", "application/json; charset=utf-8"),
+            ("map", "application/json"),
+            ("txt", "text/plain; charset=utf-8"),
+            ("svg", "image/svg+xml"),
+            ("png", "image/png"),
+            ("woff2", "font/woff2"),
+            ("wasm", "application/wasm"),
+            ("XML", "application/xml; charset=utf-8"),
+        ] {
+            assert_eq!(mime_for_extension(ext), want, "ext={ext}");
+        }
+        for unknown in ["bin", "", "tar.gz", "exe"] {
+            assert_eq!(
+                mime_for_extension(unknown),
+                "application/octet-stream",
+                "未知扩展名 {unknown:?} 回退 octet-stream"
+            );
+        }
+    }
+
+    /// `ext_path_plugin_id`：/ext 前缀提取首段；非 /ext、空段 → None。
+    #[test]
+    fn ext_path_plugin_id_extraction() {
+        assert_eq!(ext_path_plugin_id("/ext/svc/ping"), Some("svc"));
+        assert_eq!(ext_path_plugin_id("/ext/svc"), Some("svc"));
+        assert_eq!(ext_path_plugin_id("/api/v1/ext/svc"), None);
+        assert_eq!(ext_path_plugin_id("/ext/"), None);
+        assert_eq!(ext_path_plugin_id("/ext//ping"), None);
+        assert_eq!(ext_path_plugin_id("/ext"), None);
+    }
+
+    /// `parse_query_multi`：重复 key 保序全量、无 query → 空表。
+    #[test]
+    fn parse_query_multi_preserves_duplicates() {
+        let uri: axum::http::Uri = "/x?a=1&b=2&a=3".parse().unwrap();
+        let m = parse_query_multi(&uri);
+        assert_eq!(m.get("a").unwrap(), &vec!["1".to_string(), "3".to_string()]);
+        assert_eq!(m.get("b").unwrap(), &vec!["2".to_string()]);
+        let bare: axum::http::Uri = "/x".parse().unwrap();
+        assert!(parse_query_multi(&bare).is_empty());
+    }
+
+    /// `header_map_to_hashmap`：key 小写化、多值取首个、非 ASCII 值跳过。
+    #[test]
+    fn header_map_to_hashmap_lowercases_and_first_wins() {
+        use axum::http::{HeaderMap, HeaderValue};
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Custom", HeaderValue::from_static("first"));
+        headers.append("X-Custom", HeaderValue::from_static("second"));
+        let map = header_map_to_hashmap(&headers);
+        assert_eq!(map.get("x-custom").map(String::as_str), Some("first"));
+        assert!(header_map_to_hashmap(&HeaderMap::new()).is_empty());
+    }
+
+    // ── 分发结果 → HTTP 响应的映射（exec_ext_request 的出口面）──
+
+    /// 构造测试用 http_endpoints 声明（auth 显式 none，除用例另行覆写）。
+    fn endpoint(route_id: &str, method: &str, path: &str) -> agentos_core::traits::HttpEndpoint {
+        agentos_core::traits::HttpEndpoint {
+            route_id: route_id.to_string(),
+            method: method.to_string(),
+            path: path.to_string(),
+            auth: Some("none".to_string()),
+            handler_capability: "http.handle".to_string(),
+            timeout_ms: None,
+            max_concurrency: None,
+            description: None,
+        }
+    }
+
+    /// 插件回包状态码越界 / body 非 base64 → 502（上游故障不得静默改 200）。
+    struct BadResponseHandler {
+        bad_status: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpHandleCapability for BadResponseHandler {
+        async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+            Ok(HttpHandleResponse {
+                status: if self.bad_status { 0 } else { 200 },
+                headers: HashMap::new(),
+                body: if self.bad_status {
+                    String::new()
+                } else {
+                    "not-base64!!".to_string()
+                },
+                body_encoding: "base64".to_string(),
+            })
+        }
+    }
+
+    /// 坏状态码 + 坏 body 两组区分度输入：都必须 502 且文案点明原因。
+    #[tokio::test]
+    async fn exec_ext_request_maps_bad_plugin_response_to_502() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        for (bad_status, why) in [(true, "状态码越界"), (false, "body 非 base64")] {
+            let mut state = AppState::new();
+            let registry = Arc::new(CapabilityRegistryImpl::new());
+            registry
+                .register_http_route("p1", endpoint("r", "GET", "/ext/p1/cb"))
+                .unwrap();
+            state.capability_registry = Some(registry);
+            state.http_handler = Some(Arc::new(BadResponseHandler { bad_status }));
+
+            let app = crate::server::build_router(state);
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/ext/p1/cb")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                axum::http::StatusCode::BAD_GATEWAY,
+                "{why} 必须 502"
+            );
+            let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+            let text = String::from_utf8_lossy(&body);
+            let expect = if bad_status {
+                "invalid status"
+            } else {
+                "decode failed"
+            };
+            assert!(text.contains(expect), "{why} 文案应含 {expect}: {text}");
+        }
+    }
+
+    /// 无 dispatcher 资源且无 plugin_dirs → build_router_with_http_routes 原样
+    /// 返回静态路由（不挂 /ext 通配），请求 404 由内核路由树裁决。
+    #[tokio::test]
+    async fn build_router_without_dispatcher_resources_keeps_static_tree() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = AppState::new();
+        assert!(state.capability_registry.is_none() && state.plugin_dirs.is_empty());
+        // 传入的静态路由树已带 state（生产由 build_router 先 with_state 之前调用，
+        // 此处直接验证返回值语义：资源缺失时原样返回入参路由器）
+        let inner: axum::Router<crate::routes::AppState> = axum::Router::new().route(
+            "/ping",
+            axum::routing::get(|| async { axum::http::StatusCode::OK }),
+        );
+        let app = build_router_with_http_routes(state, inner);
+        let app = app.with_state(crate::routes::AppState::new());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::NOT_FOUND,
+            "未挂 /ext 通配时由内核路由树 404"
+        );
+    }
+
+    /// 并发超限 → handler 出口 503（DispatchOutcome::ConcurrencyLimited 映射）。
+    struct HangHandler;
+
+    #[async_trait::async_trait]
+    impl HttpHandleCapability for HangHandler {
+        async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            Ok(HttpHandleResponse {
+                status: 200,
+                headers: HashMap::new(),
+                body: String::new(),
+                body_encoding: "base64".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exec_ext_request_concurrency_limited_maps_to_503() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut state = AppState::new();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let mut ep = endpoint("r", "GET", "/ext/p1/slow");
+        ep.max_concurrency = Some(1);
+        ep.timeout_ms = Some(5000);
+        registry.register_http_route("p1", ep).unwrap();
+        state.capability_registry = Some(registry);
+        state.http_handler = Some(Arc::new(HangHandler));
+        let app = crate::server::build_router(state);
+
+        let first = app.clone().oneshot(
+            Request::builder()
+                .uri("/ext/p1/slow")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let second = app.clone().oneshot(
+            Request::builder()
+                .uri("/ext/p1/slow")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let (a, b) = tokio::join!(first, second);
+        let statuses = [a.unwrap().status(), b.unwrap().status()];
+        assert!(
+            statuses.contains(&axum::http::StatusCode::OK)
+                && statuses.contains(&axum::http::StatusCode::SERVICE_UNAVAILABLE),
+            "并发上限 1 时两请求应一放行一 503，实际 {statuses:?}"
+        );
+    }
+
+    /// 超时 → handler 出口 504（DispatchOutcome::Timeout 映射）。
+    struct SlowThenOkHandler;
+
+    #[async_trait::async_trait]
+    impl HttpHandleCapability for SlowThenOkHandler {
+        async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            Ok(HttpHandleResponse {
+                status: 200,
+                headers: HashMap::new(),
+                body: String::new(),
+                body_encoding: "base64".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_ext_request_timeout_maps_to_504() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut state = AppState::new();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let mut ep = endpoint("r", "GET", "/ext/p1/slow");
+        ep.timeout_ms = Some(50); // 远小于 handler 的 500ms
+        registry.register_http_route("p1", ep).unwrap();
+        state.capability_registry = Some(registry);
+        state.http_handler = Some(Arc::new(SlowThenOkHandler));
+        let app = crate::server::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/p1/slow")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    /// handler 返回 Err → 502（DispatchOutcome::HandlerError 映射）。
+    struct ErrHandler;
+
+    #[async_trait::async_trait]
+    impl HttpHandleCapability for ErrHandler {
+        async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+            Err("plugin blew up".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_ext_request_handler_error_maps_to_502() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut state = AppState::new();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        registry
+            .register_http_route("p1", endpoint("r", "GET", "/ext/p1/boom"))
+            .unwrap();
+        state.capability_registry = Some(registry);
+        state.http_handler = Some(Arc::new(ErrHandler));
+        let app = crate::server::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/p1/boom")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("plugin blew up"));
+    }
+
+    /// 未知路由（无 dispatcher 资源但有 plugin_dirs）：静态分支未命中
+    /// → dispatcher 缺席 → 404 "route not found"。
+    #[tokio::test]
+    async fn exec_ext_request_without_dispatcher_returns_404() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::new();
+        // 只有 plugin_dirs（静态资源面），无 capability_registry/http_handler
+        state.plugin_dirs = Arc::new(HashMap::from([("p".to_string(), dir.path().to_path_buf())]));
+        let app = crate::server::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/p/no-route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("route not found"));
+    }
+
+    /// `build_datasource_handler`：`/api/v1/datasource/ext/{plugin}/{route}` 改写
+    /// 复用同一分发；短形式 `/api/v1/datasource/{route}` 按 /ext/{route} 处理。
+    #[tokio::test]
+    async fn datasource_handler_rewrites_both_forms() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        struct EchoPath;
+        #[async_trait::async_trait]
+        impl HttpHandleCapability for EchoPath {
+            async fn handle(&self, req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+                Ok(HttpHandleResponse {
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: base64::engine::general_purpose::STANDARD.encode(req.path.as_bytes()),
+                    body_encoding: "base64".to_string(),
+                })
+            }
+        }
+
+        let mut state = AppState::new();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        registry
+            .register_http_route("p1", endpoint("r", "GET", "/ext/p1/opts"))
+            .unwrap();
+        state.capability_registry = Some(registry);
+        state.http_handler = Some(Arc::new(EchoPath));
+        let app = crate::server::build_router(state);
+
+        // 带 ext/ 前缀 → 改写为 /ext/p1/opts 命中插件路由
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/datasource/ext/p1/opts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "/ext/p1/opts",
+            "带 ext/ 前缀应改写为 /ext/ 原样（透传）"
+        );
+
+        // 短形式 → 按 /ext/{route} 处理（未命中注册路由 → 404）
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/datasource/unknown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// 鉴权声明为 `user` 且带合法 token → 注入身份头转发给插件（三头齐全）。
+    #[tokio::test]
+    async fn exec_ext_request_injects_identity_headers_for_authed_route() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        struct HeaderEcho;
+        #[async_trait::async_trait]
+        impl HttpHandleCapability for HeaderEcho {
+            async fn handle(&self, req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+                let payload = serde_json::json!({
+                    "tenant": req.headers.get("x-agentos-tenant"),
+                    "user": req.headers.get("x-agentos-user"),
+                    "role": req.headers.get("x-agentos-role"),
+                });
+                Ok(HttpHandleResponse {
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: base64::engine::general_purpose::STANDARD
+                        .encode(payload.to_string().as_bytes()),
+                    body_encoding: "base64".to_string(),
+                })
+            }
+        }
+
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let password = agentos_http::auth::hash_password("ext-pw").unwrap();
+        let record = agentos_core::types::UserRecord {
+            user_id: "u-ext-1".to_string(),
+            username: "extuser".to_string(),
+            password: password.clone(),
+            email: None,
+            role: "admin".to_string(),
+            tenant_id: "tenant-ext".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_login_at: None,
+            must_change_password: false,
+        };
+        agentos_core::traits::StorageBackend::create_user(store.as_ref(), &record)
+            .await
+            .unwrap();
+        let built = agentos_http::auth::BuiltInUser {
+            id: record.user_id.clone(),
+            username: record.username.clone(),
+            password,
+            email: String::new(),
+            role: "admin".to_string(),
+            tenant_id: "tenant-ext".to_string(),
+            created_at: String::new(),
+            must_change_password: false,
+        };
+        let token =
+            agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &built, 3600);
+
+        let mut state = AppState::new();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let mut ep = endpoint("r", "GET", "/ext/p1/whoami");
+        ep.auth = Some("user".to_string());
+        registry.register_http_route("p1", ep).unwrap();
+        state.capability_registry = Some(registry);
+        state.http_handler = Some(Arc::new(HeaderEcho));
+        state.store = Some(store);
+
+        let app = crate::server::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/p1/whoami")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["tenant"], "tenant-ext", "租户头必须为 token 解析值: {v}");
+        assert_eq!(v["user"], "u-ext-1");
+        assert_eq!(v["role"], "admin");
+    }
+
+    /// 匿名端点（auth:"none"）剥离客户端伪造的身份头（A2：匿名放行 ≠ 信任客户端）。
+    #[tokio::test]
+    async fn anonymous_route_strips_spoofed_identity_headers() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        struct HeaderEcho;
+        #[async_trait::async_trait]
+        impl HttpHandleCapability for HeaderEcho {
+            async fn handle(&self, req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+                let payload = serde_json::json!({
+                    "tenant": req.headers.get("x-agentos-tenant"),
+                    "user": req.headers.get("x-agentos-user"),
+                    "role": req.headers.get("x-agentos-role"),
+                });
+                Ok(HttpHandleResponse {
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: base64::engine::general_purpose::STANDARD
+                        .encode(payload.to_string().as_bytes()),
+                    body_encoding: "base64".to_string(),
+                })
+            }
+        }
+
+        let mut state = AppState::new();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        registry
+            .register_http_route("p1", endpoint("r", "POST", "/ext/p1/hook"))
+            .unwrap();
+        state.capability_registry = Some(registry);
+        state.http_handler = Some(Arc::new(HeaderEcho));
+        let app = crate::server::build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ext/p1/hook")
+                    .header("x-agentos-tenant", "victim-tenant")
+                    .header("x-agentos-user", "victim-user")
+                    .header("x-agentos-role", "admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            v["tenant"].is_null() && v["user"].is_null() && v["role"].is_null(),
+            "匿名端点必须剥离客户端伪造的身份头: {v}"
+        );
+    }
+
+    /// 无 auth 声明 → 401 fail-closed（读写同规）；admin 声明 + 非 admin 角色 → 403。
+    #[tokio::test]
+    async fn undeclared_auth_denied_and_admin_role_enforced() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // 无声明
+        let mut state = AppState::new();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let mut ep = endpoint("r", "GET", "/ext/p1/undeclared");
+        ep.auth = None;
+        registry.register_http_route("p1", ep).unwrap();
+        state.capability_registry = Some(registry);
+        state.http_handler = Some(Arc::new(NopHandlerForTests));
+        let app = crate::server::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/p1/undeclared")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "无 auth 声明必须 401 fail-closed"
+        );
+
+        // admin 声明 + viewer 角色
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let password = agentos_http::auth::hash_password("role-pw").unwrap();
+        let record = agentos_core::types::UserRecord {
+            user_id: "u-viewer-1".to_string(),
+            username: "viewer_x".to_string(),
+            password: password.clone(),
+            email: None,
+            role: "viewer".to_string(),
+            tenant_id: agentos_http::auth::DEFAULT_TENANT_ID.to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_login_at: None,
+            must_change_password: false,
+        };
+        agentos_core::traits::StorageBackend::create_user(store.as_ref(), &record)
+            .await
+            .unwrap();
+        let built = agentos_http::auth::BuiltInUser {
+            id: record.user_id.clone(),
+            username: record.username.clone(),
+            password,
+            email: String::new(),
+            role: "viewer".to_string(),
+            tenant_id: record.tenant_id.clone(),
+            created_at: String::new(),
+            must_change_password: false,
+        };
+        let token =
+            agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &built, 3600);
+
+        let mut state = AppState::new();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let mut ep = endpoint("r", "GET", "/ext/p1/adminonly");
+        ep.auth = Some("admin".to_string());
+        registry.register_http_route("p1", ep).unwrap();
+        state.capability_registry = Some(registry);
+        state.http_handler = Some(Arc::new(NopHandlerForTests));
+        state.store = Some(store);
+        let app = crate::server::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/p1/adminonly")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::FORBIDDEN,
+            "admin 端点 + viewer 角色必须 403"
+        );
+    }
+
+    struct NopHandlerForTests;
+
+    #[async_trait::async_trait]
+    impl HttpHandleCapability for NopHandlerForTests {
+        async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+            Ok(HttpHandleResponse {
+                status: 200,
+                headers: HashMap::new(),
+                body: String::new(),
+                body_encoding: "base64".to_string(),
+            })
+        }
+    }
+
+    /// `register_manifest_http_routes`：scopes 为 Some 时走 guarded 注册并入
+    /// scope（disable 可撤销）；冲突路由聚合报错而非 panic。
+    #[test]
+    fn register_manifest_http_routes_guarded_and_conflicts_aggregate() {
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = agentos_plugin_loader::PluginScopeRegistry::new();
+        // 用 JSON 反序列化构造 manifest（省去手写全部字段，未给字段走 serde default）
+        let manifest = |id: &str, path: &str| -> PluginManifest {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": id, "version": "1.0.0",
+                "plugin_type": "tool", "language": "python",
+                "host_type": "sidecar", "entry": "x",
+                "capabilities": {},
+                "http_endpoints": [{
+                    "route_id": "r", "method": "GET", "path": path,
+                    "auth": "none", "handler_capability": "http.handle"
+                }]
+            }))
+            .expect("valid manifest")
+        };
+
+        let errors =
+            register_manifest_http_routes(&registry, &[manifest("p1", "/ext/p1/a")], Some(&scopes));
+        assert!(errors.is_empty(), "首个注册不得报错: {errors:?}");
+        assert!(
+            scopes.scope_of("p1").len() >= 1,
+            "guarded 注册必须把撤销 guard 登记进 scope"
+        );
+
+        // 冲突：同 path+method 第二个插件 → 聚合错误（不 panic）
+        let errors =
+            register_manifest_http_routes(&registry, &[manifest("p2", "/ext/p1/a")], Some(&scopes));
+        assert_eq!(errors.len(), 1, "冲突必须被聚合上报: {errors:?}");
+        assert!(errors[0].contains("p2"), "错误须点名插件: {errors:?}");
+
+        // None scopes：走非 guarded 注册，同样返回错误列表
+        let registry2 = Arc::new(CapabilityRegistryImpl::new());
+        let errors =
+            register_manifest_http_routes(&registry2, &[manifest("p3", "/ext/p3/ok")], None);
+        assert!(errors.is_empty());
+    }
+
+    /// `SidecarHttpHandler`：经 invoker 转发 http.handle，解析响应；
+    /// 调用失败 / success=false / 响应形状非法三档各自报错。
+    struct ScriptedInvoker {
+        result: parking_lot::Mutex<Result<agentos_core::types::ToolExecutionResult, String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl agentos_core::traits::PluginInvoker for ScriptedInvoker {
+        async fn invoke_pipeline_plugin<'a>(
+            &self,
+            _plugin_id: &str,
+            _ctx: &agentos_core::types::PluginContext<'a>,
+        ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
+            unreachable!("本测试不触达管道插件调用")
+        }
+        async fn invoke_tool(
+            &self,
+            _plugin_id: &str,
+            _tool_name: &str,
+            _inputs: &serde_json::Value,
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError>
+        {
+            match self.result.lock().clone() {
+                Ok(r) => Ok(r),
+                Err(msg) => Err(agentos_core::types::PluginError {
+                    message: msg,
+                    code: None,
+                    source: None,
+                }),
+            }
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            _hook: agentos_core::traits::LifecycleHook,
+            _context: &agentos_core::traits::HookContext,
+        ) -> Result<(), agentos_core::types::PluginError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn sidecar_http_handler_forwards_and_validates_shape() {
+        use agentos_core::types::ToolExecutionResult;
+
+        let req = HttpHandleRequest {
+            method: "POST".to_string(),
+            path: "/ext/p1/cb".to_string(),
+            plugin_id: "p1".to_string(),
+            raw_body: String::new(),
+            headers: HashMap::new(),
+            query: HashMap::new(),
+            query_multi: HashMap::new(),
+        };
+
+        // 成功路径：{status,headers,body,body_encoding} 原样解析
+        let ok = ToolExecutionResult {
+            success: true,
+            data: serde_json::json!({
+                "status": 201,
+                "headers": {"content-type": "text/plain"},
+                "body": "",
+                "body_encoding": "base64"
+            }),
+            error: None,
+            metadata: None,
+            duration_ms: None,
+        };
+        let handler = SidecarHttpHandler::new(Arc::new(ScriptedInvoker {
+            result: parking_lot::Mutex::new(Ok(ok)),
+        }));
+        let resp = handler.handle(req.clone()).await.expect("成功路径应 Ok");
+        assert_eq!(resp.status, 201);
+        assert_eq!(resp.headers.get("content-type").unwrap(), "text/plain");
+
+        // invoker 调用失败 → Err 透传错误消息
+        let handler = SidecarHttpHandler::new(Arc::new(ScriptedInvoker {
+            result: parking_lot::Mutex::new(Err("transport down".to_string())),
+        }));
+        let err = handler
+            .handle(req.clone())
+            .await
+            .expect_err("调用失败应 Err");
+        assert_eq!(err, "transport down");
+
+        // success=false → Err 取 error 文案
+        let failed = ToolExecutionResult {
+            success: false,
+            data: serde_json::json!({}),
+            error: Some("plugin rejected".to_string()),
+            metadata: None,
+            duration_ms: None,
+        };
+        let handler = SidecarHttpHandler::new(Arc::new(ScriptedInvoker {
+            result: parking_lot::Mutex::new(Ok(failed.clone())),
+        }));
+        let err = handler
+            .handle(req.clone())
+            .await
+            .expect_err("success=false 应 Err");
+        assert_eq!(err, "plugin rejected");
+
+        // success=false 且无 error 文案 → unknown error 兜底
+        let mut no_msg = failed;
+        no_msg.error = None;
+        let handler = SidecarHttpHandler::new(Arc::new(ScriptedInvoker {
+            result: parking_lot::Mutex::new(Ok(no_msg)),
+        }));
+        let err = handler
+            .handle(req.clone())
+            .await
+            .expect_err("无 error 文案应兜底");
+        assert_eq!(err, "unknown error");
+
+        // 响应形状非法（状态码缺失）→ 形状错误文案
+        let bad = ToolExecutionResult {
+            success: true,
+            data: serde_json::json!({"unexpected": true}),
+            error: None,
+            metadata: None,
+            duration_ms: None,
+        };
+        let handler = SidecarHttpHandler::new(Arc::new(ScriptedInvoker {
+            result: parking_lot::Mutex::new(Ok(bad)),
+        }));
+        let err = handler.handle(req).await.expect_err("形状非法应 Err");
+        assert!(
+            err.contains("invalid http.handle response shape"),
+            "实际: {err}"
+        );
+    }
 }

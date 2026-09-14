@@ -408,4 +408,117 @@ mod tests {
         let default = NativePluginLoader::default();
         assert!(default.list_loaded().is_empty());
     }
+
+    /// 异平台后缀回退分支：声明写死另一平台后缀（如 `.so`），磁盘只有本平台名
+    /// （如 `y.dll`）→ 按本平台重映射命中。这正是 CI/Linux boot 所需的兼容面。
+    #[test]
+    fn resolve_artifact_maps_foreign_suffix_to_local_name() {
+        let dir = tempfile::tempdir().unwrap();
+        // 本平台产物名（Windows=y.dll / Linux=liby.so）
+        let local = NativePluginLoader::platform_artifact_name("y");
+        std::fs::write(dir.path().join(&local), b"").unwrap();
+
+        // 声明用异平台后缀：本平台名与声明名不同，必须走重映射分支
+        let foreign = if cfg!(windows) { "y.so" } else { "y.dll" };
+        assert_ne!(
+            NativePluginLoader::platform_artifact_name(foreign),
+            local,
+            "前置：该后缀在本平台确实需要重映射"
+        );
+        let got = NativePluginLoader::resolve_artifact(dir.path(), foreign)
+            .expect("异平台后缀应回退到本平台产物名");
+        assert_eq!(
+            got.file_name().unwrap().to_string_lossy(),
+            local,
+            "应命中本平台名"
+        );
+    }
+
+    /// 无后缀裸名的重映射：声明 `z`（无后缀）且磁盘只有 `z`（非 cdylib 名）
+    /// → 两处皆不命中，返回 None（调用方各自报错）。
+    #[test]
+    fn resolve_artifact_returns_none_when_neither_name_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("z"), b"").unwrap();
+        assert_eq!(
+            NativePluginLoader::resolve_artifact(dir.path(), "z"),
+            None,
+            "裸文件名不是本平台 cdylib 名，不得误命中"
+        );
+    }
+
+    /// 已加载表查询面：is_loaded / list_loaded 随 unload 同步（unload 成功后
+    /// 表项消失，重复 unload 报 NATIVE_NOT_LOADED）。
+    #[test]
+    fn unload_twice_reports_not_loaded_on_second_call() {
+        let loader = NativePluginLoader::new();
+        // 未加载时 unload 报错；is_loaded 为假（无真实 cdylib 时的诚实路径）
+        assert!(!loader.is_loaded("p"));
+        let err = loader.unload("p").unwrap_err();
+        assert_eq!(err.code.as_deref(), Some("NATIVE_NOT_LOADED"));
+        assert!(loader.list_loaded().is_empty());
+    }
+
+    /// 加载非 cdylib 内容失败后表项不得残留（fail-closed：load 失败 = 未加载）。
+    #[test]
+    fn failed_load_leaves_no_registry_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("not_a_lib.dll");
+        std::fs::write(&fake, b"definitely not a library").unwrap();
+        let loader = NativePluginLoader::new();
+        assert!(loader.load("broken", &fake).is_err());
+        assert!(!loader.is_loaded("broken"), "加载失败不得留下半成品表项");
+        assert!(loader.list_loaded().is_empty());
+        // 再次加载同一 id 仍走真实加载（不是命中缓存）→ 继续报错
+        assert!(loader.load("broken", &fake).is_err());
+    }
+
+    /// 已加载的系统库上不存在 `agentos_plugin_create` 符号 → NATIVE_SYMBOL_MISSING。
+    /// 用本进程必然已加载的系统库（Windows kernel32 / Linux libc）做替身：
+    /// dlopen 只增引用计数，不产生额外副作用，也不需要构建任何 cdylib。
+    #[test]
+    fn load_without_create_symbol_reports_symbol_missing() {
+        let existing_lib = if cfg!(windows) {
+            "kernel32.dll"
+        } else if cfg!(target_os = "macos") {
+            "/usr/lib/libSystem.B.dylib"
+        } else {
+            "libc.so.6"
+        };
+        let loader = NativePluginLoader::new();
+        match loader.load("system_lib", Path::new(existing_lib)) {
+            Err(e) => assert_eq!(
+                e.code.as_deref(),
+                Some("NATIVE_SYMBOL_MISSING"),
+                "应报缺少构造符号（附原始错误: {}）",
+                e.message
+            ),
+            Ok(_) => panic!("系统库不应导出 agentos_plugin_create"),
+        }
+        assert!(!loader.is_loaded("system_lib"));
+    }
+
+    /// 同名目录被 `exists()` 视为命中 → 解析层放行，失败推迟到真实 dlopen
+    /// （NATIVE_LOAD_FAILED）。本用例锁的是"延迟失败"语义：静态预检不做
+    /// 文件/目录判别，加载期必须报错而非静默成功。
+    #[test]
+    fn resolve_artifact_defers_directory_failure_to_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let as_dir = dir
+            .path()
+            .join(NativePluginLoader::platform_artifact_name("w"));
+        std::fs::create_dir_all(&as_dir).unwrap();
+
+        let resolved = NativePluginLoader::resolve_artifact(dir.path(), "w")
+            .expect("exists() 对目录同样为真 → 解析层放行");
+        assert_eq!(resolved, as_dir);
+
+        let loader = NativePluginLoader::new();
+        let err = match loader.load("w", &resolved) {
+            Ok(_) => panic!("目录不是可加载库，加载期必须报错"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code.as_deref(), Some("NATIVE_LOAD_FAILED"));
+        assert!(!loader.is_loaded("w"));
+    }
 }

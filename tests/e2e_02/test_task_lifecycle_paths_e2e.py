@@ -66,6 +66,10 @@ pytestmark = [
         not os.path.exists(_KERNEL_EXE),
         reason="需要内核二进制 kernel/target/release/agentos-kernel.exe（先 cargo build --release）",
     ),
+    pytest.mark.skipif(
+        not os.environ.get("AGENTOS_ADMIN_PASSWORD"),
+        reason="需要 AGENTOS_ADMIN_PASSWORD（本套件自带内核实例，登录口令经环境注入）",
+    ),
 ]
 
 # 轮询/等待窗口（秒）
@@ -151,7 +155,7 @@ def _build_tmp_config_root(base_dir: str, stub_api_base: str) -> str:
     dst = os.path.join(base_dir, "config")
     shutil.copytree(src, dst)
 
-    llm_path = os.path.join(dst, "models", "llm.yaml")
+    llm_path = os.path.join(dst, "plugins", "llm", "llm.yaml")
     with open(llm_path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
 

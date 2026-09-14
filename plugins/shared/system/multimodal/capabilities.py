@@ -25,7 +25,7 @@ from mm_types import ModelCapability
 logger = logging.getLogger(__name__)
 
 # llm.yaml 路径（同 asr.py：插件目录上溯 4 层到项目根）
-_LLM_YAML_PATH = Path(__file__).resolve().parents[4] / "config" / "models" / "llm.yaml"
+_LLM_YAML_PATH = Path(__file__).resolve().parents[4] / "config" / "plugins" / "llm" / "llm.yaml"
 
 # (mtime, models 节) 缓存：设置页直写 yaml 后无需重启 sidecar 即时生效
 _LLM_MODELS_CACHE: tuple[float, dict[str, Any]] | None = None

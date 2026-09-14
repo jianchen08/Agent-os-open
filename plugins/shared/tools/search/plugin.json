@@ -107,7 +107,7 @@
     },
     {
       "id": "resource_search",
-      "path": "config/tools/search/resource_search.yaml",
+      "path": "config/plugins/search/resource_search.yaml",
       "label": "资源搜索配置"
     }
   ],

@@ -14,13 +14,13 @@ from typing import Any
 import yaml
 
 _RULES_PATH = os.path.join(
-    "..", "..", "..", "..", "config", "self_evolve", "rules", "triage_rules.yaml")
+    "..", "..", "..", "..", "config", "plugins", "review", "triage_rules.yaml")
 
 
 def load_rules(project_root: str | None = None) -> dict[str, Any]:
     base = project_root or os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-    path = os.path.join(base, "config", "self_evolve", "rules", "triage_rules.yaml")
+    path = os.path.join(base, "config", "plugins", "review", "triage_rules.yaml")
     data = yaml.safe_load(open(path, encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"分诊规则格式错误: {path}")

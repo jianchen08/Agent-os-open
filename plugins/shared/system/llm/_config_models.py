@@ -38,14 +38,14 @@ _env_cache: tuple[float, dict[str, str]] | None = None
 
 
 def _resolve_project_root() -> Path | None:
-    """向上探测项目根（包含 config/models 的目录）。
+    """向上探测项目根（包含 config/kernel 的目录）。
 
     sidecar 从 plugins/shared/system/llm/ 运行，向上 4-5 层即项目根；
     找不到返回 None（保持纯环境变量展开行为，不比原来差）。
     """
     here = Path(__file__).resolve()
     for candidate in here.parents:
-        if (candidate / "config" / "models").is_dir():
+        if (candidate / "config" / "kernel").is_dir():
             return candidate
     return None
 

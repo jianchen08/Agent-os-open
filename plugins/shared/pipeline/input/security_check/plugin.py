@@ -102,10 +102,11 @@ _PROJECT_ROOT = os.path.dirname(  # noqa: PTH120
 )
 
 # ── 权限模式（对齐 ZCode/Claude Code/Codex 的处置档位语义）──
-# 黑名单制：只作用于非隔离会话中"未被 allow 白名单/命令指纹放行的危险工具"，
+# 黑名单制：只作用于"未被 allow 白名单/命令指纹放行的危险工具"，
 # 参数未命中安全规则关键词的操作任何档位都直接执行，各档差异只在"命中后的处置"。
 # 三条内置底线（路径遍历/敏感系统目录/nul 重定向）任何模式都强制执行；
-# 隔离任务的容器内操作不进审批链（isolation_guard 判 task_isolated 后整体放行）。
+# 隔离任务豁免的只是环境类检查（危险工具分类门槛），命中黑名单规则的
+# 参数照常按档位处置（隔离 ≠ 免审批）。
 # - default      : 命中 block/needs_approval 规则都逐次弹审批
 # - accept_edits : file_read/file_write 一律放行；其余工具命中规则仍弹审批
 # - auto         : block 规则自动拒绝不打扰；needs_approval 规则才弹审批
@@ -224,7 +225,7 @@ class SecurityCheckPlugin(IInputPlugin):
             config: 插件配置字典，支持以下键：
                 - enabled: 是否启用安全检查（默认 True）
                 - max_path_depth: 最大路径深度（默认 10）
-                - rules_path: 规则配置文件路径（默认 config/isolation/security_rules.yaml）
+                - rules_path: 规则配置文件路径（默认 config/plugins/security_check/security_rules.yaml）
                 - rules: 直接传入规则列表（如果提供则不从文件加载）
                 - path_params: 路径参数名列表（默认 6 个常见路径参数）
                 - fuzzy_tool_matching: 工具名模糊匹配（默认 False）。
@@ -282,7 +283,7 @@ class SecurityCheckPlugin(IInputPlugin):
 
     # 注入链失效兜底：内联默认规则（黑名单模式 + 危险命令关键词），避免
     # "规则空 = 安全闸门失效 = 所有工具都弹审批"、任务链路被审批阻塞。
-    # 与 config/isolation/security_rules.yaml 保持同构；降级时经 execute
+    # 与 config/plugins/security_check/security_rules.yaml 保持同构；降级时经 execute
     # 首轮向用户显式提示"安全规则降级运行"（禁静默降级）。
     _DEFAULT_RULES: list[dict[str, Any]] = [
         {
@@ -307,7 +308,7 @@ class SecurityCheckPlugin(IInputPlugin):
         优先级（高 → 低）：
         1. config 中直接提供的 rules 列表（测试/旧装配缝）
         2. manifest config_files 注入的 security_rules 命名空间
-           （plugin.json 声明 config/isolation/security_rules.yaml，内核按 id
+           （plugin.json 声明 config/plugins/security_check/security_rules.yaml，内核按 id
            命名空间合并进 plugin.get_config()，invoker/build_injected_config
            按 config_files[].path 精确定位）——YAML 规则在生产生效的唯一入口
         3. 内联默认规则
@@ -393,7 +394,7 @@ class SecurityCheckPlugin(IInputPlugin):
             "message": (
                 "安全规则降级运行：安全规则 YAML 加载失败（注入链失效），"
                 "已回退内置精简规则（仅覆盖危险命令关键词），"
-                "建议检查 config/isolation/security_rules.yaml 注入链路。"
+                "建议检查 config/plugins/security_check/security_rules.yaml 注入链路。"
             ),
         }
         try:
@@ -409,20 +410,17 @@ class SecurityCheckPlugin(IInputPlugin):
         """执行安全检查逻辑。
 
         本方法只做编排；两道检查分别委托 ``_run_base_safety_scan`` /
-        ``_authorize_non_isolated_tools``，各自可独立理解。
+        ``_authorize_tool_calls``，各自可独立理解。
 
-        隔离即放行，裸操作才审批：
-        1. 基础安全检查（路径遍历 / 敏感系统目录黑名单）→ 任何模式都必须执行，
-           这是防注入、防触碰 OS 核心目录的底线，隔离不能绕过
-        2. 已 docker 隔离（所有工具 provider 均为 docker）
-           → 基础检查通过后一路绿灯
-        3. 非 docker 隔离按工具是否危险决定：
-           - 非危险工具 → 放行
-           - 危险工具（command_in_container 或声明了 dangerous_operations）：
-             参数命中白名单（action=allow）→ 放行（allow 优先于其它规则）
-             参数命中黑名单（action=block）→ 软拦截反馈 LLM
-             参数需要审批（action=needs_approval）→ 弹审批
-             危险工具的未知参数 → 弹审批（兜底）
+        隔离 ≠ 免审批，隔离只豁免「环境类」检查：
+        1. 基础安全检查（路径遍历 / 敏感系统目录黑名单 / nul 重定向）→ 任何
+           模式都必须执行，这是防注入、防触碰 OS 核心目录的底线，隔离不能绕过
+        2. 参数级黑名单（security_rules.yaml：block / needs_approval）→ 与隔离
+           正交，隔离任务命中规则照常处置（弹审批 / 软拦截）——隔离解决的是
+           「执行环境隔离」，审批解决的是「危险参数需人工确认」
+        3. 环境类豁免：危险工具分类门槛（命令执行类 / dangerous_operations 声明）
+           的存在意义是在无隔离边界时给任意执行兜底；隔离边界（容器/沙箱）
+           已承担该风险，隔离任务未命中规则的参数直接放行，不弹审批
 
         Args:
             ctx: 插件执行上下文
@@ -449,14 +447,13 @@ class SecurityCheckPlugin(IInputPlugin):
 
         # ── 第二道：按模式分流 ──
 
-        # 隔离任务即放行：isolation_level 是隔离唯一真相源，隔离任务（isolated/None/空）
-        # 的所有工具一律放行，不弹审批——无论工具走 docker 还是 host。
+        # 隔离 ≠ 免审批：隔离豁免的是「环境类」检查（危险工具分类门槛），
+        # 参数级黑名单（block/needs_approval 规则）与隔离正交，隔离任务命中
+        # 规则照常走审批/软拦截（isolation_level 是隔离唯一真相源）。
         execution_contexts = ctx.state.get("execution_contexts", [])
-        if self._is_isolated(execution_contexts):
-            logger.info("[%s] 隔离任务，基础检查通过，放行", self.name)
-            return {"security.decision": {"allowed": True, "reason": "isolated task, base checks passed"}}
+        isolated = self._is_isolated(execution_contexts)
 
-        decision = await self._authorize_non_isolated_tools(ctx, tool_calls)
+        decision = await self._authorize_tool_calls(ctx, tool_calls, isolated=isolated)
         if decision is not None:
             return decision
 
@@ -518,12 +515,19 @@ class SecurityCheckPlugin(IInputPlugin):
                 )
         return None
 
-    async def _authorize_non_isolated_tools(
+    async def _authorize_tool_calls(
         self,
         ctx: PluginContext,
         tool_calls: list[dict[str, Any]],
+        *,
+        isolated: bool,
     ) -> dict[str, Any] | None:
-        """非隔离任务的逐工具授权：只读白名单 → 危险判定 → 规则/指纹/权限模式。
+        """逐工具授权：只读白名单 → 环境门槛（隔离豁免）→ 规则/指纹/权限模式。
+
+        隔离豁免「环境类」检查：isolated=True 时跳过危险工具分类门槛
+        （命令执行类 / dangerous_operations 声明），隔离边界承担执行环境风险，
+        未命中规则的参数不弹审批；参数级黑名单规则（block/needs_approval）
+        与隔离正交，所有非只读工具照常匹配处置。
 
         Returns:
             需要处置（软拦截/弹审批）时的决策字典；全部放行返回 None。
@@ -536,16 +540,13 @@ class SecurityCheckPlugin(IInputPlugin):
             if tool_name in _READ_ONLY_TOOLS:
                 continue
 
-            # 判定是否危险工具：
-            # - policy.execution == command_in_container（bash 等命令执行类）
-            # - 或工具参数命中声明的 dangerous_operations（delete/move/copy/file_write 等）
-            is_dangerous_tool = self._is_dangerous_tool(ctx, tool_name, args)
-
-            # 非危险工具 → 直接放行
-            if not is_dangerous_tool:
+            # 环境类门槛（隔离豁免）：非隔离任务只对危险工具做参数授权；
+            # 隔离任务不判危险，所有非只读工具直接进规则匹配。
+            if not isolated and not self._is_dangerous_tool(ctx, tool_name, args):
                 continue
 
-            # ── 危险工具：参数命中白名单才放行，否则一律审批 ──
+            # ── 进入授权：allow 白名单/已记忆指纹放行，其余按权限模式处置
+            #    （未命中规则视为参数安全放行，命中 block/needs_approval 才拦截）──
             action, rule_name = self._match_rules(tool_name, args)
             if action == "allow":
                 logger.info(
@@ -1455,15 +1456,17 @@ class SecurityCheckPlugin(IInputPlugin):
     def _is_isolated(self, execution_contexts: list[dict[str, Any]]) -> bool:
         """判断当前任务是否为隔离模式。
 
-        isolation_level 是隔离的唯一真相源：隔离任务（isolated/None/空）的所有
-        工具一律放行，不弹审批——无论工具自身走 docker 还是 host（如 delete_file）。
-        task_isolated 由 isolation_guard 按任务 isolation_level 归一化后注入每个 context。
+        isolation_level 是隔离的唯一真相源：隔离任务（isolated/None/空）豁免
+        「环境类」检查（危险工具分类门槛，未命中规则的参数不弹审批）——但
+        参数级黑名单规则（block/needs_approval）与隔离正交，照常匹配处置。
+        task_isolated 由 isolation_guard 按任务 isolation_level 归一化后注入
+        每个 context。
 
         Args:
             execution_contexts: isolation_guard 写入的工具执行上下文列表
 
         Returns:
-            True=隔离任务（放行），False=非隔离任务（危险工具需审批）
+            True=隔离任务（环境类检查豁免），False=非隔离任务（危险工具需授权）
         """
         return bool(execution_contexts) and all(c.get("task_isolated") for c in execution_contexts)
 

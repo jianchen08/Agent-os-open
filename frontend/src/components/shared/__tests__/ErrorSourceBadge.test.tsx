@@ -1,6 +1,6 @@
 /** @feature 统一错误模型 | @ci: frontend-test */
 /**
- * ErrorSourceBadge 来源标签（config/error_codes.json sources.enum 单一真值源）：
+ * ErrorSourceBadge 来源标签（config/kernel/error_codes.json sources.enum 单一真值源）：
  * 五种来源渲染对应文案；未知来源兜底「未知」灰标（旧后端兼容）。
  */
 import { render, screen } from '@testing-library/react'

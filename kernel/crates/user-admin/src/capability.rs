@@ -643,4 +643,299 @@ mod tests {
             .unwrap();
         assert_eq!(envelope["status"], 200);
     }
+
+    // ── 未注入 store/db 的诚实降级（不是静默成功，也不是 panic）──
+
+    /// store 未注入 → list/delete 返回 503（对齐 auth register 的无 store 语义）。
+    /// 用可用的 db 让认证先过，再验证存储面缺失的降级。
+    #[tokio::test]
+    async fn missing_store_degrades_to_503() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let handler = UserAdminCapabilityHandler::new(None, Some(sqlite));
+
+        for (method, params) in [
+            ("list_users", json!({})),
+            ("delete_user", json!({ "user_id": "u-x" })),
+        ] {
+            let envelope = handler.handle(method, authed(params)).await.unwrap();
+            assert_eq!(
+                envelope["status"], 503,
+                "{method} 缺 store 应 503（存储后端未初始化）: {envelope}"
+            );
+            assert!(
+                envelope["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("存储后端未初始化"),
+                "{method} 错误文案应说明原因: {envelope}"
+            );
+        }
+    }
+
+    /// db 未注入 → update_role / update_tenant 返回 400（统一数据接口未启用）。
+    /// 需播种 admin 让 require_admin 先过（认证先于 db 取用）。
+    #[tokio::test]
+    async fn missing_db_degrades_to_400() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let admin = default_users().into_iter().next().unwrap();
+        sqlite
+            .create_user(&UserRecord {
+                user_id: admin.id.clone(),
+                username: admin.username.clone(),
+                password: admin.password.clone(),
+                email: Some(admin.email.clone()),
+                role: admin.role.clone(),
+                tenant_id: admin.tenant_id.clone(),
+                created_at: admin.created_at.clone(),
+                last_login_at: None,
+                must_change_password: false,
+            })
+            .await
+            .unwrap();
+        let handler = UserAdminCapabilityHandler::new(Some(sqlite), None);
+        let alice = "u-alice";
+
+        for (method, params) in [
+            ("update_role", json!({ "user_id": alice, "role": "admin" })),
+            (
+                "update_tenant",
+                json!({ "user_id": alice, "tenant_id": "t-new" }),
+            ),
+        ] {
+            let envelope = handler.handle(method, authed(params)).await.unwrap();
+            assert_eq!(
+                envelope["status"], 400,
+                "{method} 缺 db 应 400（统一数据接口未启用）: {envelope}"
+            );
+            assert!(
+                envelope["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("统一数据接口未启用"),
+                "{method} 错误文案应说明原因: {envelope}"
+            );
+        }
+    }
+
+    // ── 必填参数缺失/类型不符 → 400（require_str）──
+
+    /// 缺 user_id 或缺变更值 → 400 且报文点名缺哪个参数。
+    /// 表驱动覆盖 role/tenant_id/delete 三条 method 路径。
+    #[tokio::test]
+    async fn missing_required_params_report_their_key() {
+        let (handler, _store) = handler_with_store().await;
+
+        let cases: [(&str, Value, &str); 4] = [
+            ("update_role", json!({ "role": "admin" }), "user_id"),
+            ("update_role", json!({ "user_id": "u-alice" }), "role"),
+            (
+                "update_tenant",
+                json!({ "user_id": "u-alice" }),
+                "tenant_id",
+            ),
+            ("delete_user", json!({}), "user_id"),
+        ];
+        for (method, params, missing) in cases {
+            let envelope = handler.handle(method, authed(params)).await.unwrap();
+            assert_eq!(envelope["status"], 400, "{method} 应报 400: {envelope}");
+            let msg = envelope["error"]["message"].as_str().unwrap();
+            assert!(
+                msg.contains(missing),
+                "{method} 报文应点名缺失参数 {missing}: {msg}"
+            );
+        }
+    }
+
+    /// 参数存在但类型不符（数字/对象/数组而非字符串）→ 与缺失同判 400
+    /// （不得把非字符串硬转成用户 id）。
+    #[tokio::test]
+    async fn non_string_params_are_rejected_as_bad_request() {
+        let (handler, _store) = handler_with_store().await;
+
+        for bad in [json!(123), json!({"a": 1}), json!(["u"]), json!(null)] {
+            let envelope = handler
+                .handle(
+                    "update_role",
+                    authed(json!({ "user_id": bad, "role": "admin" })),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                envelope["status"], 400,
+                "非字符串 user_id {bad} 应 400: {envelope}"
+            );
+        }
+    }
+
+    // ── update_tenant 的空值校验与成功路径 ──
+
+    /// tenant_id 为空白串 → 400（不得把用户迁到空租户）。
+    #[tokio::test]
+    async fn blank_tenant_id_is_rejected() {
+        let (handler, _store) = handler_with_store().await;
+        for blank in ["", "   ", "\t"] {
+            let envelope = handler
+                .handle(
+                    "update_tenant",
+                    authed(json!({ "user_id": "u-alice", "tenant_id": blank })),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                envelope["status"], 400,
+                "空白 tenant_id {blank:?} 应 400: {envelope}"
+            );
+        }
+    }
+
+    /// update_tenant 成功：落库生效且响应剥 password。
+    #[tokio::test]
+    async fn update_tenant_persists_and_sanitizes() {
+        let (handler, store) = handler_with_store().await;
+        let alice = seed_user(&store, "alice", "user").await;
+
+        let envelope = handler
+            .handle(
+                "update_tenant",
+                authed(json!({ "user_id": alice, "tenant_id": "tenant-new" })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 200, "{envelope}");
+        assert_eq!(envelope["body"]["user"]["tenant_id"], "tenant-new");
+        assert!(
+            envelope["body"]["user"].get("password").is_none(),
+            "响应不得含 password: {envelope}"
+        );
+
+        let updated = store.get_user_by_id(&alice).await.unwrap().unwrap();
+        assert_eq!(updated.tenant_id, "tenant-new", "改租户应落库");
+    }
+
+    /// update_tenant 目标不存在 → 404（affected=0 分支）。
+    #[tokio::test]
+    async fn update_tenant_unknown_user_returns_404() {
+        let (handler, _store) = handler_with_store().await;
+        let envelope = handler
+            .handle(
+                "update_tenant",
+                authed(json!({ "user_id": "u-ghost", "tenant_id": "t" })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 404, "{envelope}");
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("u-ghost"),
+            "404 报文应含目标 id: {envelope}"
+        );
+    }
+
+    /// delete_user 成功 → {deleted:true} 且记录真的消失；再删同 id → 404（幂等语义清晰）。
+    #[tokio::test]
+    async fn delete_user_removes_then_reports_404() {
+        let (handler, store) = handler_with_store().await;
+        let alice = seed_user(&store, "alice", "user").await;
+
+        let envelope = handler
+            .handle("delete_user", authed(json!({ "user_id": alice })))
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 200, "{envelope}");
+        assert_eq!(envelope["body"]["deleted"], true);
+        assert_eq!(envelope["body"]["user_id"], alice);
+        assert!(
+            store.get_user_by_id(&alice).await.unwrap().is_none(),
+            "删除应落库"
+        );
+
+        let again = handler
+            .handle("delete_user", authed(json!({ "user_id": alice })))
+            .await
+            .unwrap();
+        assert_eq!(again["status"], 404, "重复删除应报 404: {again}");
+    }
+
+    /// delete_user 目标不存在 → 404（store 报 deleted=false 分支）。
+    #[tokio::test]
+    async fn delete_user_unknown_target_returns_404() {
+        let (handler, _store) = handler_with_store().await;
+        let envelope = handler
+            .handle("delete_user", authed(json!({ "user_id": "u-never" })))
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 404, "{envelope}");
+    }
+
+    // ── api_error_parts 全变体状态码映射（管理面契约）──
+
+    /// 每个 ApiError 变体 → 约定状态码。这些变体来自共享错误枚举，
+    /// 映射错误会让前端按错码走错分支（403 vs 401 尤甚）。
+    #[test]
+    fn api_error_parts_maps_every_variant() {
+        let cases: [(ApiError, u16); 9] = [
+            (
+                ApiError::BadRequest {
+                    message: "b".into(),
+                },
+                400,
+            ),
+            (
+                ApiError::Unauthorized {
+                    message: "u".into(),
+                },
+                401,
+            ),
+            (
+                ApiError::Forbidden {
+                    message: "f".into(),
+                },
+                403,
+            ),
+            (
+                ApiError::NotFound {
+                    message: "n".into(),
+                },
+                404,
+            ),
+            (
+                ApiError::Conflict {
+                    message: "c".into(),
+                },
+                409,
+            ),
+            (
+                ApiError::UnprocessableEntity {
+                    message: "e".into(),
+                },
+                422,
+            ),
+            (
+                ApiError::TooManyRequests {
+                    message: "r".into(),
+                    retry_after_secs: 60,
+                },
+                429,
+            ),
+            (
+                ApiError::Internal {
+                    message: "i".into(),
+                },
+                500,
+            ),
+            (
+                ApiError::ServiceUnavailable {
+                    message: "s".into(),
+                },
+                503,
+            ),
+        ];
+        for (err, expected) in cases {
+            let (code, msg) = api_error_parts(&err);
+            assert_eq!(code, expected, "{err:?} 状态码映射错误");
+            assert!(!msg.is_empty(), "{err:?} 消息不得为空");
+        }
+    }
 }

@@ -28,13 +28,15 @@ from __future__ import annotations
 import logging
 import re
 import sys
+from pathlib import Path
 import time
 from typing import Any
 
 from decider import IsolationDecider
-from agentos_plugin_sdk.isolation_types import IsolationLevel
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
+
+from agentos_plugin_sdk.isolation_types import IsolationLevel
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,8 @@ class IsolationGuard(IInputPlugin):
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
+        # CONTAINER 后端配置（wsl_native 启用时探测目标从 docker 切到 WSL）
+        self._wsl_native_cfg = self._load_wsl_native_config()
         # 服务不可用告警只打一次（低频留痕，避免每轮迭代刷屏）
         self._service_warned = False
         # Docker 可用性来源：配置显式指定（_docker_auto=False，信任不刷新）
@@ -99,8 +103,8 @@ class IsolationGuard(IInputPlugin):
             self._docker_available = self._config["docker_available"]
             self._docker_auto = False
         else:
-            # 启动时真正检测 Docker，不依赖外部注入
-            self._apply_probe_result(self._detect_docker())
+            # 启动时真正检测后端（docker 或 wsl_native），不依赖外部注入
+            self._probe_backend()
             self._docker_auto = True
         # 上次检测时间（自动检测来源按冷却窗口复检用）
         self._docker_checked_at = time.monotonic()
@@ -200,6 +204,75 @@ class IsolationGuard(IInputPlugin):
         self._docker_available = status == self._PROBE_AVAILABLE
         self._docker_probe_error = detail if status == self._PROBE_ERROR else None
 
+    def _load_wsl_native_config(self) -> dict[str, Any]:
+        """wsl_native 后端配置：显式 config 优先，缺省读 ConfigCenter 单源
+        （isolation/isolation_config.yaml，与 manager._load_provider_config
+        同源），读取失败视为未启用（docker 后端）。"""
+        providers_cfg = self._config.get("providers")
+        if isinstance(providers_cfg, dict) and "wsl_native" in providers_cfg:
+            cfg = providers_cfg.get("wsl_native")
+            return cfg if isinstance(cfg, dict) else {}
+        try:
+            from config.config_center import get_config_center  # noqa: PLC0415
+
+            iso = get_config_center().get("plugins/isolation/isolation_config.yaml") or {}
+            cfg = (iso.get("providers") or {}).get("wsl_native")
+            return cfg if isinstance(cfg, dict) else {}
+        except Exception:
+            pass
+        # ConfigCenter 在 sidecar 不可达——直读仓库 yaml 兜底（与 manager
+        # _load_provider_config 回退同源同文件）
+        try:
+            import yaml  # noqa: PLC0415
+
+            yaml_path = (
+                Path(__file__).resolve().parents[5] / "config" / "plugins" / "isolation" / "isolation_config.yaml"
+            )
+            data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            providers = data.get("providers") or {}
+            cfg = providers.get("wsl_native") if isinstance(providers, dict) else None
+            return cfg if isinstance(cfg, dict) else {}
+        except Exception:
+            return {}
+
+    def _probe_backend(self) -> None:
+        """探测当前 CONTAINER 后端可用性：wsl_native 启用 → WSL，否则 docker。"""
+        if self._wsl_native_cfg.get("enabled", False):
+            self._apply_probe_result(self._detect_wsl_native())
+        else:
+            self._apply_probe_result(self._detect_docker())
+
+    def _detect_wsl_native(self) -> tuple[str, str]:
+        """同步探测 WSL 原生后端，三态语义与 _detect_docker 一致。
+
+        只探轻量面（wsl.exe 在位 + 发行版在列）；用户/沙箱二进制的深度校验
+        由 provider.is_available 在落地时做（fail-closed），此处保持与 docker
+        探测同量级开销。发行版列表解码复用 WslNativeProvider 单源。
+        """
+        import shutil  # noqa: PLC0415
+        import subprocess  # noqa: PLC0415
+
+        try:
+            _ensure_isolation_path()
+            from providers.wsl_native_provider import WslNativeProvider  # noqa: PLC0415
+
+            if not shutil.which("wsl"):
+                return (self._PROBE_ABSENT, "")
+            result = subprocess.run(  # noqa: PLW1510
+                ["wsl", "-l", "-q"],
+                capture_output=True,
+                timeout=3,
+            )
+            if result.returncode != 0:
+                return (self._PROBE_ABSENT, "")
+            distro = str(self._wsl_native_cfg.get("distro", "Ubuntu"))
+            distros = WslNativeProvider._decode_wsl_list(result.stdout or b"")
+            if distro not in distros:
+                return (self._PROBE_ABSENT, "")
+            return (self._PROBE_AVAILABLE, "")
+        except Exception as exc:
+            return (self._PROBE_ERROR, str(exc))
+
     @property
     def name(self) -> str:
         """插件唯一标识名称。"""
@@ -248,8 +321,10 @@ class IsolationGuard(IInputPlugin):
         if self._docker_auto and not self._docker_available:
             now = time.monotonic()
             if now - self._docker_checked_at >= self._RECHECK_COOLDOWN:
-                self._ensure_engine()  # 引擎自愈：先确保引擎存活再探测
-                self._apply_probe_result(self._detect_docker())
+                if not self._wsl_native_cfg.get("enabled", False):
+                    # 引擎自愈（docker 专属）：先确保引擎存活再探测
+                    self._ensure_engine()
+                self._probe_backend()
                 self._docker_checked_at = now
                 if self._docker_available:
                     logger.info(
@@ -312,10 +387,12 @@ class IsolationGuard(IInputPlugin):
             workspace = ctx.state.get("workspace") or task_metadata.get("workspace")
             container_id = await self._resolve_container(workspace, ctx)
             if container_id:
+                exec_backend = await self._resolve_exec_backend(container_id)
                 injected_calls = self._inject_container_id(
                     tool_calls,
                     {c["tool_name"] for c in docker_ctxs},
                     container_id,
+                    exec_backend=exec_backend,
                 )
                 if injected_calls is not None:
                     state_updates[StateKeys.RAW_TOOL_CALLS] = injected_calls
@@ -382,6 +459,27 @@ class IsolationGuard(IInputPlugin):
                 )
         return await self._get_or_create_container(workspace, ctx)
 
+    async def _resolve_exec_backend(self, container_id: str) -> dict[str, Any] | None:
+        """取执行环境后端信息（wsl_native 环境才有；docker 环境无此键返回 None）。
+
+        env 记录在 guard 进程内 manager（_get_manager 懒加载实例）的内存映射中，
+        落地成功后必可查；查不到（重启后尚未重建等）不注入，bash 工具按 docker
+        通路兜底——wsl_native 环境的 docker 通路必然失败并报环境不存在，不会
+        误落到宿主裸跑。
+        """
+        manager = self._manager if self._manager is not None else self._get_manager()
+        if manager is None:
+            return None
+        try:
+            env = await manager.get_environment(container_id)
+        except Exception as exc:
+            logger.warning("[IsolationGuard] 读取环境后端信息失败 | container=%s | error=%s", container_id, exc)
+            return None
+        if env is None:
+            return None
+        backend = (env.provider_info or {}).get("exec_backend")
+        return backend if isinstance(backend, dict) else None
+
     async def _get_or_create_container(
         self,
         workspace: str | None,
@@ -437,6 +535,7 @@ class IsolationGuard(IInputPlugin):
         tool_calls: list[dict[str, Any]],
         docker_tool_names: set[str],
         container_id: str,
+        exec_backend: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]] | None:
         """为决策进容器的工具调用注入 _container_id。
 
@@ -446,6 +545,10 @@ class IsolationGuard(IInputPlugin):
         非 docker 决策工具不注入；容器内固定挂载 workspace → /workspace，
         bash 的 working_dir 未显式指定时补 /workspace（browser 工具的 workspace
         落盘目录由 bridge_client 自行翻译，见容器候选路径）。
+
+        exec_backend：执行环境后端信息（wsl_native 环境才有，来自 env.provider_info；
+        docker 环境为 None 不注入）。与 _container_id 同级的服务端信任链——
+        bash 工具据其选择 wsl 传输；LLM 侧声明无效（param_inject 剥离下划线键）。
         """
         injected_calls: list[dict[str, Any]] = []
         injected = False
@@ -465,6 +568,10 @@ class IsolationGuard(IInputPlugin):
                 args = dict(args)
                 args["_container_id"] = container_id
                 if tc.get("name") == "bash_execute":
+                    # exec_backend 是 bash 工具的传输通道（wsl_native 才有），
+                    # browser 工具走 bridge 通路不消费
+                    if exec_backend:
+                        args["_exec_backend"] = exec_backend
                     # 容器内固定挂载 /workspace：未显式指定 working_dir 时补容器路径
                     if not args.get("working_dir"):
                         args["working_dir"] = "/workspace"

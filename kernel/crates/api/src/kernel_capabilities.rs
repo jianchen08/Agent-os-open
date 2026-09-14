@@ -5,7 +5,7 @@
 //! （pipeline_id 与 thread_id 同为 string，互填时形状 100% 合法）。本模块把
 //! "值该长什么样"（形态）提升为契约配置文件的声明内容，校验器按定义执行：
 //!
-//! - **契约载体**（单一真值源）：`config/kernel_capabilities/*.json`——每文件
+//! - **契约载体**（单一真值源）：`config/kernel/kernel_capabilities/*.json`——每文件
 //!   一个 namespace，声明每个能力的 `input_schema` / `output_schema`（标准
 //!   JSON Schema 关键字 + `pattern` 形态）。内核基础设施能力（chat/db_admin/
 //!   user_admin/metrics…）走此处；任务管理等插件服务走 plugin.json 契约，不在此列。
@@ -36,7 +36,7 @@ use serde_json::Value;
 ///
 /// 代码侧清单：契约入口校验执行配置文件里的同名声明，引擎合并纵深防御
 /// （server.rs `apply_state_overlay`）与 chat_send_handler 直连路径消费本清单。
-/// 与 `config/kernel_capabilities/chat.json` 的 `state.propertyNames.not.enum`
+/// 与 `config/kernel/kernel_capabilities/chat.json` 的 `state.propertyNames.not.enum`
 /// 必须一致——一致性由 [`tests::chat_contract_matches_code_lists`] 机械闸强制。
 pub(crate) const RESERVED_STATE_KEYS: &[&str] = &[
     "message",
@@ -54,7 +54,7 @@ pub(crate) const RESERVED_STATE_KEYS: &[&str] = &[
     "run_status",
 ];
 
-/// 一个 namespace 的内核能力契约（对应 config/kernel_capabilities/ 下一个文件）。
+/// 一个 namespace 的内核能力契约（对应 config/kernel/kernel_capabilities/ 下一个文件）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KernelCapabilityContract {
     /// 能力 namespace（如 "chat"）——与 CapabilityHandlerRegistry 注册名一致。
@@ -578,7 +578,8 @@ mod tests {
 
     /// 真实仓库契约目录（kernel/crates/api → 上溯三级 = 仓库根）。
     fn repo_contract_dir() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../config/kernel_capabilities")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../config/kernel/kernel_capabilities")
     }
 
     // ── 加载器 ───────────────────────────────────────────────────
@@ -1198,5 +1199,285 @@ mod tests {
             &no_conduit,
         )
         .expect("未声明事件应宽泛放行（契约没写就不查）");
+    }
+
+    // ── 结构校验补测：加载即查的每一条拒绝理由各自可达（fail-closed 面） ──
+
+    /// `validate_contract_structure` 的拒绝分支表驱动：每条规则一组输入，
+    /// 断言错误消息包含可定位的线索（规则名/字段名）。
+    #[test]
+    fn contract_structure_rejections_are_all_reachable() {
+        let valid_spec = |extra: Value| -> KernelCapabilityContract {
+            let mut base = json!({
+                "namespace": "x",
+                "capabilities": [{"method": "m",
+                    "input_schema": {"type": "object", "properties": {}}}]
+            });
+            for (k, v) in extra.as_object().into_iter().flatten() {
+                base[k] = v.clone();
+            }
+            serde_json::from_value(base).expect("构造契约")
+        };
+        let cap = |method: &str, input: Value, output: Value| json!({"method": method, "input_schema": input, "output_schema": output});
+
+        let cases: Vec<(KernelCapabilityContract, &str)> = vec![
+            (valid_spec(json!({"namespace": ""})), "namespace 不得为空"),
+            (
+                valid_spec(json!({"capabilities": []})),
+                "capabilities 不得为空",
+            ),
+            (
+                valid_spec(json!({
+                    "capabilities": [cap("", json!({"type": "object", "properties": {}}), json!({"type": "object"}))]
+                })),
+                "存在空 method 名",
+            ),
+            (
+                valid_spec(json!({
+                    "capabilities": [cap("m", json!({"type": "object", "properties": {}}), json!("not-object"))]
+                })),
+                "output_schema 必须为对象",
+            ),
+            (
+                valid_spec(json!({
+                    "x-message-id-namespaces": [
+                        {"prefix": "a_", "owner": "plugin", "plugin_forbidden": true, "pattern": "^a_"},
+                        {"prefix": "p_", "owner": "plugin", "plugin_forbidden": false, "pattern": "^p_"}
+                    ]
+                })),
+                "owner=plugin 的命名空间必须恰好一个",
+            ),
+            (
+                valid_spec(json!({
+                    "x-message-id-namespaces": [{"prefix": "a_", "owner": "", "plugin_forbidden": true, "pattern": "^a_"}]
+                })),
+                "owner 不得为空",
+            ),
+            (
+                valid_spec(json!({
+                    "x-message-id-namespaces": [{"prefix": "a_", "owner": "kernel", "plugin_forbidden": true, "pattern": "("}]
+                })),
+                "pattern 非法",
+            ),
+        ];
+
+        for (contract, why) in cases {
+            let err = validate_contract_structure(&contract, "case.json")
+                .expect_err(&format!("{why} 必须被拒"));
+            assert!(err.contains("case.json"), "{why}: 错误应带文件名: {err}");
+        }
+        // 正例：合法契约必须放行（防"一律拒绝"的假绿）
+        validate_contract_structure(&valid_spec(json!({})), "ok.json").expect("合法契约放行");
+    }
+
+    /// `validate_value` 的 type 档全枚举 + 不支持的 type 报错（契约自身有误）。
+    #[test]
+    fn validate_value_type_declaration_matrix() {
+        let schema = |t: &str| json!({"type": t});
+
+        // 正例：值形态与声明一致
+        for (t, value) in [
+            ("object", json!({})),
+            ("string", json!("s")),
+            ("boolean", json!(true)),
+            ("integer", json!(7)),
+            ("number", json!(7.5)),
+            ("array", json!([])),
+            ("null", json!(null)),
+        ] {
+            validate_value(&schema(t), &value, "p").unwrap_or_else(|_| panic!("{t} 正例应放行"));
+        }
+        // 反例：值形态与声明不符
+        for (t, value) in [
+            ("object", json!(1)),
+            ("string", json!(1)),
+            ("null", json!("")),
+        ] {
+            validate_value(&schema(t), &value, "p").expect_err(&format!("{t} 反例应拒绝"));
+        }
+        // 契约自身有误：不支持的 type 必须报"契约自身有误"而非静默放行
+        let err = validate_value(&schema("uuid"), &json!("anything"), "p")
+            .expect_err("不支持的 type 应报错");
+        assert!(
+            err.contains("不支持的 type 'uuid'") && err.contains("契约自身有误"),
+            "实际: {err}"
+        );
+        // schema 非对象 = 无定义 = 宽泛（不校验）
+        validate_value(&json!([]), &json!("whatever"), "p").expect("数组 schema 宽泛放行");
+    }
+
+    /// `validate_value` 的 enum / pattern / minLength / propertyNames 子规则：
+    /// 每种子规则各一组正反例（正例锁"不误伤"，反例锁"确实在查"）。
+    #[test]
+    fn validate_value_string_and_key_constraints() {
+        // enum
+        let enum_schema = json!({"type": "string", "enum": ["a", "b"]});
+        validate_value(&enum_schema, &json!("a"), "p").expect("枚举命中放行");
+        let err = validate_value(&enum_schema, &json!("c"), "p").expect_err("枚举未命中拒绝");
+        assert!(err.contains("不在契约枚举"), "实际: {err}");
+        // 空枚举数组 = 未声明约束（不误拒）
+        validate_value(&json!({"enum": []}), &json!("anything"), "p").expect("空枚举不约束");
+
+        // pattern 合法 + 不匹配
+        let pattern_schema = json!({"type": "string", "pattern": "^thread-"});
+        validate_value(&pattern_schema, &json!("thread-1"), "p").expect("pattern 命中放行");
+        validate_value(&pattern_schema, &json!("nope"), "p").expect_err("pattern 未命中拒绝");
+
+        // pattern 非法（契约自身有误）必须报错，不静默跳过
+        let err = validate_value(&json!({"pattern": "("}), &json!("x"), "p")
+            .expect_err("非法 pattern 应报错");
+        assert!(err.contains("契约自身有误"), "实际: {err}");
+
+        // minLength
+        validate_value(&json!({"minLength": 3}), &json!("abc"), "p").expect("达标放行");
+        let err = validate_value(&json!({"minLength": 3}), &json!("ab"), "p")
+            .expect_err("低于 minLength 拒绝");
+        assert!(err.contains("低于契约 minLength"), "实际: {err}");
+
+        // propertyNames.pattern / enum / not.enum / x-forbidden-prefixes 四档
+        let key_schema = json!({"propertyNames": {"pattern": "^[a-z]+$"}});
+        validate_value(&key_schema, &json!({"good": 1}), "p").expect("键名达标放行");
+        validate_value(&key_schema, &json!({"Bad": 1}), "p").expect_err("键名不达标拒绝");
+
+        let enum_keys = json!({"propertyNames": {"enum": ["a", "b"]}});
+        validate_value(&enum_keys, &json!({"a": 1}), "p").expect("键名枚举命中放行");
+        let err =
+            validate_value(&enum_keys, &json!({"z": 1}), "p").expect_err("键名不在枚举内拒绝");
+        assert!(err.contains("不在契约允许键名枚举内"), "实际: {err}");
+
+        let forbidden = json!({"propertyNames": {"not": {"enum": ["run_status"]}}});
+        let err =
+            validate_value(&forbidden, &json!({"run_status": 1}), "p").expect_err("契约保留键拒绝");
+        assert!(err.contains("契约保留键"), "实际: {err}");
+
+        let prefixes = json!({"propertyNames": {"x-forbidden-prefixes": ["lineage."]}});
+        validate_value(&prefixes, &json!({"ok": 1}), "p").expect("非保护前缀放行");
+        let err = validate_value(&prefixes, &json!({"lineage.root": 1}), "p")
+            .expect_err("命中保护前缀拒绝");
+        assert!(err.contains("命中契约保护前缀"), "实际: {err}");
+        // 非字符串条目混入前缀数组 → filter_map 跳过（不 panic）
+        validate_value(
+            &json!({"propertyNames": {"x-forbidden-prefixes": [7, "zz."]}}),
+            &json!({"key": 1}),
+            "p",
+        )
+        .expect("非字符串前缀条目跳过");
+    }
+
+    /// `validation_required` + `additionalProperties=false` 闭包参数面：
+    /// 未知参数即红、`_` 前缀内部信封字段豁免；properties 递归生效。
+    #[test]
+    fn validate_value_object_constraints() {
+        let closed = json!({
+            "type": "object",
+            "required": ["message"],
+            "properties": {"message": {"type": "string"}, "count": {"type": "integer"}},
+            "additionalProperties": false
+        });
+        validate_value(&closed, &json!({"message": "hi"}), "p").expect("必填齐备放行");
+        validate_value(&closed, &json!({"message": "hi", "_plugin_id": "inv"}), "p")
+            .expect("下划线前缀内部字段豁免闭包");
+        let err = validate_value(&closed, &json!({}), "p").expect_err("缺必填拒绝");
+        assert!(err.contains("缺少契约必填参数 message"), "实际: {err}");
+        let err = validate_value(&closed, &json!({"message": "hi", "extra": 1}), "p")
+            .expect_err("未知参数拒绝");
+        assert!(err.contains("不在契约参数面内"), "实际: {err}");
+        // properties 递归：子字段类型错必须被外层捕获
+        validate_value(&closed, &json!({"message": 42}), "p").expect_err("子字段类型错拒绝");
+        // required 数组里的非字符串条目跳过（不 panic）
+        validate_value(&json!({"required": [7], "properties": {}}), &json!({}), "p")
+            .expect("required 非字符串条目跳过");
+    }
+
+    /// `enforce_message_id_namespace` 的边界：契约无 streaming namespace 时宽泛
+    /// 放行；message_id 缺失/空 → 明确拒绝（精确寻址键不可省）。
+    #[test]
+    fn streaming_gate_namespace_edge_cases() {
+        // 契约表里没有 streaming namespace → 命名空间执法不生效（宽泛放行）
+        let no_streaming = vec![serde_json::from_value::<KernelCapabilityContract>(json!({
+            "namespace": "other",
+            "capabilities": [{"method": "m",
+                "input_schema": {"type": "object", "properties": {}}}]
+        }))
+        .unwrap()];
+        validate_streaming_event(
+            &no_streaming,
+            "stream_chunk",
+            &json!({"pipeline_id": "p", "message_id": "a_1", "thread_id": "t", "content": "c"}),
+            Some("plug"),
+            &no_conduit,
+        )
+        .expect("无 streaming 契约时宽泛放行");
+
+        let contracts = streaming_contracts();
+        // message_id 缺失（空串）：插件面必须明确拒绝（schema 层 required 之外
+        // 显式兜底——精确寻址键不可省）
+        let err = validate_streaming_event(
+            &contracts,
+            "stream_chunk",
+            &json!({"pipeline_id": "p", "thread_id": "t", "content": "c"}),
+            Some("plug"),
+            &no_conduit,
+        )
+        .expect_err("缺 message_id 必须拒绝");
+        assert!(
+            err.contains("message_id") || err.contains("content") || err.contains("p_"),
+            "实际: {err}"
+        );
+
+        // 内核内部调用（plugin_id=None）带空 message_id → 命名空间执法短路放行
+        validate_streaming_event(
+            &contracts,
+            "pipeline_round_finished",
+            &json!({"pipeline_id": "p", "thread_id": "t", "failed": false}),
+            None,
+            &no_conduit,
+        )
+        .expect("内核内部调用命名空间执法短路");
+
+        // 契约缺目标 owner 条目 → 无法执法必须报错（不自造规则）
+        let sparse = vec![serde_json::from_value::<KernelCapabilityContract>(json!({
+            "namespace": "streaming",
+            "capabilities": [{"method": "stream_chunk",
+                "input_schema": {"type": "object", "properties": {},
+                    "required": ["pipeline_id", "message_id", "thread_id", "content"]}}],
+            "x-message-id-namespaces": [
+                {"prefix": "a_", "owner": "kernel", "plugin_forbidden": true, "pattern": "^a_[0-9a-f]+$"}
+            ]
+        }))
+        .unwrap()];
+        let err = validate_streaming_event(
+            &sparse,
+            "stream_chunk",
+            &json!({"pipeline_id": "p", "message_id": "p_x", "thread_id": "t", "content": "c"}),
+            Some("plug"),
+            &no_conduit,
+        )
+        .expect_err("缺 owner=plugin 条目应报无法执法");
+        assert!(err.contains("无法执法"), "实际: {err}");
+    }
+
+    /// streaming 事件的 thread_id 路由键兜底：schema 未声明 required 时仍显式拒绝。
+    #[test]
+    fn streaming_gate_requires_thread_id_route_key() {
+        let contracts = vec![serde_json::from_value::<KernelCapabilityContract>(json!({
+            "namespace": "streaming",
+            "capabilities": [{"method": "evt",
+                "input_schema": {"type": "object", "properties": {}}}],
+            "x-message-id-namespaces": [
+                {"prefix": "p_", "owner": "plugin", "plugin_forbidden": false,
+                 "pattern": "^p_[0-9a-z]+$"}
+            ]
+        }))
+        .unwrap()];
+        let err = validate_streaming_event(
+            &contracts,
+            "evt",
+            &json!({"message_id": "p_1"}),
+            Some("plug"),
+            &no_conduit,
+        )
+        .expect_err("缺 thread_id 必须拒绝（单播路由键）");
+        assert!(err.contains("thread_id"), "实际: {err}");
     }
 }

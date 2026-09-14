@@ -534,9 +534,41 @@ mod tests {
     // ── McpBridge 测试（M5-2）──
 
     /// 记录 invoke_tool 调用并返回可配置结果的 mock invoker。
+    ///
+    /// `return_error` 为 Some 时 invoke_tool 直接上抛该错误（覆盖 bridge 的
+    /// 错误包装分支）；单一 mock 服务全部 bridge 用例，避免每用例重复
+    /// （trait 的其余方法本就不可达）。
+    /// 调用记录句柄：invoker 调用日志 (name, args_key, result_summary)。
+    type Calls = Arc<parking_lot::Mutex<Vec<(String, String, Value)>>>;
+
     struct MockInvoker {
-        calls: Arc<parking_lot::Mutex<Vec<(String, String, Value)>>>,
+        calls: Calls,
         return_result: ToolExecutionResult,
+        return_error: Option<PluginError>,
+    }
+
+    impl MockInvoker {
+        /// 返回成功结果（默认形态）；返回 (invoker, 调用记录句柄)。
+        fn ok(result: ToolExecutionResult) -> (Arc<Self>, Calls) {
+            Self::new(result, None)
+        }
+
+        /// invoke_tool 直接上抛该错误（bridge 错误包装分支用）。
+        fn failing(error: PluginError) -> (Arc<Self>, Calls) {
+            Self::new(ToolExecutionResult::success(json!({})), Some(error))
+        }
+
+        fn new(result: ToolExecutionResult, error: Option<PluginError>) -> (Arc<Self>, Calls) {
+            let calls = Arc::new(parking_lot::Mutex::new(vec![]));
+            (
+                Arc::new(Self {
+                    calls: calls.clone(),
+                    return_result: result,
+                    return_error: error,
+                }),
+                calls,
+            )
+        }
     }
 
     #[async_trait]
@@ -557,7 +589,10 @@ mod tests {
             self.calls
                 .lock()
                 .push((plugin_id.to_string(), tool_name.to_string(), inputs.clone()));
-            Ok(self.return_result.clone())
+            match &self.return_error {
+                Some(e) => Err(e.clone()),
+                None => Ok(self.return_result.clone()),
+            }
         }
         async fn send_lifecycle_hook(
             &self,
@@ -574,10 +609,8 @@ mod tests {
         // bridge 收到 (交互 namespace, create_choice, params) 后，
         // 应查路由表得到 (human_interaction_service, interaction.create_choice)，
         // 调 invoker.invoke_tool 并返回 data。
-        let invoker = Arc::new(MockInvoker {
-            calls: Arc::new(parking_lot::Mutex::new(vec![])),
-            return_result: ToolExecutionResult::success(json!({"request_id": "r1"})),
-        });
+        let (invoker, calls) =
+            MockInvoker::ok(ToolExecutionResult::success(json!({"request_id": "r1"})));
         let bridge = McpBridge::new(invoker.clone());
         bridge.add_route(
             "human-interaction",
@@ -598,7 +631,7 @@ mod tests {
             .unwrap();
         assert_eq!(result["request_id"], "r1");
 
-        let calls = invoker.calls.lock();
+        let calls = calls.lock();
         assert_eq!(calls[0].0, "human_interaction_service");
         assert_eq!(calls[0].1, "interaction.create_choice");
         assert_eq!(calls[0].2["title"], "T");
@@ -606,11 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mcp_bridge_unknown_namespace_errors() {
-        let invoker = Arc::new(MockInvoker {
-            calls: Arc::new(parking_lot::Mutex::new(vec![])),
-            return_result: ToolExecutionResult::success(json!({})),
-        });
-        let calls_ref = invoker.calls.clone();
+        let (invoker, calls_ref) = MockInvoker::ok(ToolExecutionResult::success(json!({})));
         let bridge = McpBridge::new(invoker);
 
         let err = bridge.forward("p", "unknown-ns", "m", json!({})).await;
@@ -624,10 +653,8 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_bridge_propagates_tool_failure() {
         // sidecar 工具返回 failure 时，bridge 应转成 McpError。
-        let invoker = Arc::new(MockInvoker {
-            calls: Arc::new(parking_lot::Mutex::new(vec![])),
-            return_result: ToolExecutionResult::failure("interaction timed out"),
-        });
+        let (invoker, _calls) =
+            MockInvoker::ok(ToolExecutionResult::failure("interaction timed out"));
         let bridge = McpBridge::new(invoker);
         bridge.add_route(
             "human-interaction",
@@ -648,10 +675,7 @@ mod tests {
     #[test]
     fn test_add_routes_from_manifests_default_prefix() {
         // add_routes_from_manifests 默认把 namespace 的连字符转下划线作为 tool_prefix。
-        let invoker = Arc::new(MockInvoker {
-            calls: Arc::new(parking_lot::Mutex::new(vec![])),
-            return_result: ToolExecutionResult::success(json!({})),
-        });
+        let (invoker, _calls) = MockInvoker::ok(ToolExecutionResult::success(json!({})));
         let bridge = McpBridge::new(invoker);
         let manifests = vec![make_manifest(
             "my_service",
@@ -678,10 +702,7 @@ mod tests {
         // manifest 显式声明 tool_prefix 时，优先用它（不靠 namespace 推导）。
         // 这是声明式路由的关键：namespace=human-interaction + tool_prefix=interaction
         // → 路由到 interaction.<method>，无需内核硬编码。
-        let invoker = Arc::new(MockInvoker {
-            calls: Arc::new(parking_lot::Mutex::new(vec![])),
-            return_result: ToolExecutionResult::success(json!({})),
-        });
+        let (invoker, _calls) = MockInvoker::ok(ToolExecutionResult::success(json!({})));
         let bridge = McpBridge::new(invoker);
         let manifests = vec![make_manifest(
             "human_interaction_tool",
@@ -704,5 +725,237 @@ mod tests {
             r.tool_prefix, "interaction",
             "显式 tool_prefix 应覆盖 namespace 默认推导"
         );
+    }
+
+    // ── 补充：多 capability / 无 provides 跳过 / invoker 错误传播 ──
+
+    #[test]
+    fn test_add_routes_from_manifests_skips_manifests_without_provides() {
+        // 无 provides 的 manifest 不得产生任何路由（也不 panic）：
+        // 与 register_provided_capabilities 的 continue 分支同一契约。
+        let (invoker, _calls) = MockInvoker::ok(ToolExecutionResult::success(json!({})));
+        let bridge = McpBridge::new(invoker);
+        let manifests = vec![
+            make_manifest("solo", None),
+            make_manifest(
+                "with_provides",
+                Some(ProvidesCapabilities {
+                    capabilities: vec![ProvidedCapability {
+                        protocol_roles: Vec::new(),
+                        namespace: "only-ns".to_string(),
+                        methods: vec!["m".to_string()],
+                        host: ProvidedCapabilityHost::Sidecar,
+                        tool_prefix: None,
+                    }],
+                }),
+            ),
+        ];
+        bridge.add_routes_from_manifests(&manifests);
+
+        let routes = bridge.routes.read();
+        assert_eq!(routes.len(), 1, "只登记有 provides 的插件的路由");
+        assert!(routes.contains_key("only-ns"));
+        assert!(
+            !routes.keys().any(|k| k.contains("solo")),
+            "无 provides 插件不得登记路由"
+        );
+    }
+
+    #[test]
+    fn test_add_routes_registers_all_capabilities_of_one_manifest() {
+        // 同一 manifest 的多个 capability 全部登记；后者覆盖同 namespace（热替换语义）。
+        let (invoker, _calls) = MockInvoker::ok(ToolExecutionResult::success(json!({})));
+        let bridge = McpBridge::new(invoker);
+        let manifests = vec![make_manifest(
+            "multi_cap",
+            Some(ProvidesCapabilities {
+                capabilities: vec![
+                    ProvidedCapability {
+                        protocol_roles: Vec::new(),
+                        namespace: "alpha-one".to_string(),
+                        methods: vec!["a".to_string()],
+                        host: ProvidedCapabilityHost::Sidecar,
+                        tool_prefix: None,
+                    },
+                    ProvidedCapability {
+                        protocol_roles: Vec::new(),
+                        namespace: "beta-two".to_string(),
+                        methods: vec!["b".to_string()],
+                        host: ProvidedCapabilityHost::Sidecar,
+                        tool_prefix: Some("beta".to_string()),
+                    },
+                ],
+            }),
+        )];
+        bridge.add_routes_from_manifests(&manifests);
+
+        let routes = bridge.routes.read();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes["alpha-one"].tool_prefix, "alpha_one");
+        assert_eq!(routes["beta-two"].tool_prefix, "beta");
+    }
+
+    #[test]
+    fn test_add_route_same_namespace_last_wins() {
+        // 多个插件声明同一 namespace：后注册者覆盖前者（文档化的热替换语义）。
+        let (invoker, _calls) = MockInvoker::ok(ToolExecutionResult::success(json!({})));
+        let bridge = McpBridge::new(invoker);
+        bridge.add_route(
+            "dup-ns",
+            CapabilityRoute {
+                plugin_id: "first".to_string(),
+                tool_prefix: "f".to_string(),
+            },
+        );
+        bridge.add_route(
+            "dup-ns",
+            CapabilityRoute {
+                plugin_id: "second".to_string(),
+                tool_prefix: "s".to_string(),
+            },
+        );
+
+        let routes = bridge.routes.read();
+        assert_eq!(routes.len(), 1, "同 namespace 只留一条路由");
+        assert_eq!(routes["dup-ns"].plugin_id, "second", "后注册者覆盖");
+    }
+
+    /// bridge 把 invoker 上抛的错误转成 McpError::Protocol，且带上
+    /// plugin_id + tool_name 路由上下文（排障要能看出调的是谁）。
+    #[tokio::test]
+    async fn test_mcp_bridge_wraps_invoker_error_with_call_context() {
+        let (invoker, _calls) = MockInvoker::failing(PluginError {
+            message: "sidecar 未就绪".to_string(),
+            code: Some("PLUGIN_NOT_READY".to_string()),
+            source: Some("invoker".to_string()),
+        });
+        let bridge = McpBridge::new(invoker);
+        bridge.add_route(
+            "human-interaction",
+            CapabilityRoute {
+                plugin_id: "human_interaction_service".to_string(),
+                tool_prefix: "interaction".to_string(),
+            },
+        );
+
+        let err = bridge
+            .forward(
+                "human_interaction_service",
+                "human-interaction",
+                "create_choice",
+                json!({}),
+            )
+            .await
+            .expect_err("invoker 报错应转成 McpError");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("human_interaction_service") && msg.contains("interaction.create_choice"),
+            "错误信息应带路由上下文（plugin_id + tool_name）: {msg}"
+        );
+        assert!(msg.contains("sidecar 未就绪"), "应保留底层错误: {msg}");
+    }
+
+    /// failure 且无 error 文案 → 兜底文案 "tool returned failure"。
+    /// 对照上一条（有文案时原样传播），验证两条分支。
+    #[tokio::test]
+    async fn test_mcp_bridge_failure_without_message_uses_fallback() {
+        let (invoker, _calls) = MockInvoker::ok(ToolExecutionResult {
+            success: false,
+            data: Value::Null,
+            error: None,
+            duration_ms: None,
+            metadata: None,
+        });
+        let bridge = McpBridge::new(invoker);
+        bridge.add_route(
+            "ns",
+            CapabilityRoute {
+                plugin_id: "p".to_string(),
+                tool_prefix: "t".to_string(),
+            },
+        );
+        let err = bridge
+            .forward("p", "ns", "m", json!({}))
+            .await
+            .expect_err("无文案的 failure 也应报错");
+        assert!(
+            format!("{err}").contains("tool returned failure"),
+            "无错误文案应回落统一文案: {err}"
+        );
+    }
+
+    /// 未注册 namespace 的错误文案列出已知 namespace 供排障。
+    #[tokio::test]
+    async fn test_mcp_bridge_unknown_namespace_lists_known_routes() {
+        let (invoker, _calls) = MockInvoker::ok(ToolExecutionResult::success(json!({})));
+        let bridge = McpBridge::new(invoker);
+        bridge.add_route(
+            "known-a",
+            CapabilityRoute {
+                plugin_id: "pa".to_string(),
+                tool_prefix: "a".to_string(),
+            },
+        );
+        let err = bridge
+            .forward("p", "ghost", "m", json!({}))
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("ghost"), "应报缺失的 namespace: {msg}");
+        assert!(
+            msg.contains("known-a"),
+            "应列出已知 namespace 供排障: {msg}"
+        );
+    }
+
+    /// register_provided_capabilities 多插件聚合计数 + bridge 在场时的注册
+    /// 日志分支（bridged=true）真实执行。
+    #[test]
+    fn test_register_provided_capabilities_counts_all_and_with_bridge() {
+        struct NoopBridge;
+        #[async_trait]
+        impl CapabilityBridge for NoopBridge {
+            async fn forward(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Value,
+            ) -> Result<Value, McpError> {
+                Ok(json!({}))
+            }
+        }
+        let registry = CapabilityHandlerRegistry::new();
+        let manifests = vec![
+            make_manifest(
+                "p_a",
+                Some(ProvidesCapabilities {
+                    capabilities: vec![
+                        ProvidedCapability {
+                            protocol_roles: Vec::new(),
+                            namespace: "ns-a".to_string(),
+                            methods: vec!["m1".to_string()],
+                            host: ProvidedCapabilityHost::Sidecar,
+                            tool_prefix: None,
+                        },
+                        ProvidedCapability {
+                            protocol_roles: Vec::new(),
+                            namespace: "ns-b".to_string(),
+                            methods: vec!["m2".to_string()],
+                            host: ProvidedCapabilityHost::InProcess,
+                            tool_prefix: None,
+                        },
+                    ],
+                }),
+            ),
+            make_manifest("p_b", None),
+        ];
+
+        // bridge 在场：bridged 分支求值 + 两个 capability 都登记
+        let count =
+            register_provided_capabilities(&registry, &manifests, Some(Arc::new(NoopBridge)));
+        assert_eq!(count, 2, "同一 manifest 的两个 capability 均计入");
+        assert!(registry.has_namespace("ns-a"));
+        assert!(registry.has_namespace("ns-b"));
     }
 }

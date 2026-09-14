@@ -160,7 +160,7 @@
   "config_files": [
     {
       "id": "dsh_plugins",
-      "path": "config/dsh_adapter.yaml",
+      "path": "config/plugins/dsh_adapter/dsh_adapter.yaml",
       "label": "DSH 插件配置"
     }
   ],

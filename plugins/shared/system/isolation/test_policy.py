@@ -2,7 +2,7 @@
 """isolation 插件（隔离策略加载器）单元测试。
 
 覆盖（对齐 SDK agentos_plugin_sdk.isolation_policy，三插件共享单一真值源）：
-1. default_policy_path：定位仓库根 config/isolation/isolation_policy.yaml
+1. default_policy_path：定位仓库根 config/plugins/isolation/isolation_policy.yaml
    （AGENTOS_CONFIG_ROOT 优先，回退祖先目录查找，不硬编码父目录层数）
 2. IsolationPolicyLoader：config_center 不可用时文件回退加载真实策略
    （bash_execute 应命中 tools 精确匹配 → isolated/command_in_container）
@@ -32,12 +32,12 @@ _PLUGIN_DIR = Path(__file__).resolve().parent  # plugins/shared/system/isolation
 
 # 仓库根 = 插件目录向上 4 层（plugins/shared/system/isolation → 仓库根）
 _REPO_ROOT = _PLUGIN_DIR.parents[3]
-_POLICY_FILE = _REPO_ROOT / "config" / "isolation" / "isolation_policy.yaml"
+_POLICY_FILE = _REPO_ROOT / "config" / "plugins" / "isolation" / "isolation_policy.yaml"
 
 
 class TestDefaultPolicyPath:
     def test_resolves_to_repo_root_policy_file(self) -> None:
-        """定位函数返回的路径存在且指向仓库根 config/isolation/isolation_policy.yaml。"""
+        """定位函数返回的路径存在且指向仓库根 config/plugins/isolation/isolation_policy.yaml。"""
         path = default_policy_path()
         assert path.exists(), f"策略文件不存在: {path}"
         assert path == _POLICY_FILE, f"期望 {_POLICY_FILE}，实际 {path}"
@@ -49,9 +49,9 @@ class TestDefaultPolicyPath:
     def test_ancestor_walk_not_hardcoded(self) -> None:
         """路径通过祖先目录查找得到（不依赖固定父目录层数）。"""
         path = default_policy_path()
-        # 仓库根是包含 config/isolation/isolation_policy.yaml 的祖先目录
+        # 仓库根是包含 config/plugins/isolation/isolation_policy.yaml 的祖先目录
         assert _REPO_ROOT in path.parents
-        assert path.parent == _REPO_ROOT / "config" / "isolation"
+        assert path.parent == _REPO_ROOT / "config" / "plugins" / "isolation"
 
     def test_env_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """AGENTOS_CONFIG_ROOT 指向的配置根优先于祖先目录推导。"""
@@ -71,8 +71,8 @@ class TestDefaultPolicyPath:
         """锚点解析：env 根含自有 isolation/isolation_policy.yaml 时，即使祖先探测
         也能命中仓库根策略，仍以 env 根为准（部署布局覆盖仓库布局）。"""
         alt_root = tmp_path / "alt-config"
-        (alt_root / "isolation").mkdir(parents=True)
-        alt_policy = alt_root / "isolation" / "isolation_policy.yaml"
+        (alt_root / "plugins" / "isolation").mkdir(parents=True)
+        alt_policy = alt_root / "plugins" / "isolation" / "isolation_policy.yaml"
         alt_policy.write_text("default: {isolation: non_isolated}\n", encoding="utf-8")
         monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(alt_root))
         assert default_policy_path() == alt_policy
@@ -80,7 +80,7 @@ class TestDefaultPolicyPath:
     def test_no_ancestor_found_returns_fallback_without_panic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """任何祖先目录都找不到时返回推导路径（加载失败走默认策略降级，不 panic）。"""
         monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(_REPO_ROOT / "nonexistent-config-root"))
-        # 模拟模块位于无 config/isolation 祖先的目录：把 SDK 策略模块文件复制到
+        # 模拟模块位于无 config/plugins/isolation 祖先的目录：把 SDK 策略模块文件复制到
         # 临时目录重新加载（isolation_types 经包名导入，不依赖同目录文件）
         with tempfile.TemporaryDirectory() as tmp:
             fake_dir = Path(tmp) / "somewhere" / "else"

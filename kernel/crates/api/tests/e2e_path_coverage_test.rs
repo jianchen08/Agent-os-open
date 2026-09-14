@@ -663,7 +663,7 @@ async fn path_g_plugin_enabled_write_failure_returns_500() {
     let tmp = tempfile::tempdir().unwrap();
     // 用户根钉到同一 tmp：写落点在用户空间，占位/断言须同一份目录（见 UserRootGuard）
     let _user_root_guard = UserRootGuard::pin(tmp.path());
-    let plugins_dir = tmp.path().join("config").join("plugins");
+    let plugins_dir = tmp.path().join("config").join("kernel");
     fs::create_dir_all(&plugins_dir).unwrap();
     // default_profile.yaml 被目录占位:读失败(回退空 profile),写必败
     fs::create_dir_all(plugins_dir.join("default_profile.yaml")).unwrap();
@@ -720,7 +720,7 @@ async fn path_g2_plugin_enabled_atomic_write_cleans_tmp_on_rename_failure() {
     let tmp = tempfile::tempdir().unwrap();
     // 用户根钉到同一 tmp：写落点在用户空间，占位/断言须同一份目录（见 UserRootGuard）
     let _user_root_guard = UserRootGuard::pin(tmp.path());
-    let plugins_dir = tmp.path().join("config").join("plugins");
+    let plugins_dir = tmp.path().join("config").join("kernel");
     fs::create_dir_all(&plugins_dir).unwrap();
     // default_profile.yaml 被目录占位：tmp 文件写入成功、rename 必败（占用模拟）
     fs::create_dir_all(plugins_dir.join("default_profile.yaml")).unwrap();
@@ -762,7 +762,7 @@ async fn path_g3_plugin_enabled_atomic_write_success_keeps_valid_yaml() {
     let tmp = tempfile::tempdir().unwrap();
     // 用户根钉到同一 tmp：写落点在用户空间，占位/断言须同一份目录（见 UserRootGuard）
     let _user_root_guard = UserRootGuard::pin(tmp.path());
-    let plugins_dir = tmp.path().join("config").join("plugins");
+    let plugins_dir = tmp.path().join("config").join("kernel");
     fs::create_dir_all(&plugins_dir).unwrap();
     let profile = plugins_dir.join("default_profile.yaml");
     fs::write(&profile, "enabled_plugins:\n  - pre_existing\n").unwrap();

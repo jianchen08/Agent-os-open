@@ -18,6 +18,7 @@ from decider import IsolationDecider, IsolationUnrecoverableError
 from providers.base import IsolationProvider
 from providers.docker_provider import DockerProvider
 from providers.host_provider import HostProvider
+from providers.wsl_native_provider import WslNativeProvider
 from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
@@ -31,21 +32,48 @@ from agentos_plugin_sdk.isolation_types import (
 logger = logging.getLogger(__name__)
 
 
+def _read_providers_from_yaml(path: Path) -> dict[str, Any]:
+    """直读 isolation_config.yaml 的 providers 段（ConfigCenter 不可达时的单源回退）。"""
+    import yaml  # noqa: PLC0415
+
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    providers = data.get("providers")
+    return providers if isinstance(providers, dict) else {}
+
+
 def _load_provider_config() -> dict[str, Any]:
-    """从配置文件加载提供者配置（通过 ConfigCenter 统一缓存）。"""
+    """加载提供者配置：ConfigCenter 优先，不可达时直读仓库 yaml（同一文件）。
+
+    wsl_native 后端开关经此通路对 guard 进程内的 IsolationManager 生效——
+    该读取失败会静默回落 docker 默认（2026-09-14 管道实测踩中：yaml 已启用
+    wsl_native 而落地仍走 cua 容器，根因即 config.config_center 在 sidecar
+    不可达）。
+    """
     try:
         from config.config_center import get_config_center  # noqa: PLC0415
         # P1-7 DEBT(task_11): 🔴 高危——隔离提供者配置直读，迁移需 manifest 加 config_files
         # + _on_load 把 plugin.get_config() 穿给 IsolationManager，否则容器隔离策略空。
         # 见 docs/working/p1_7_config_center_migration_checklist.md #2，整体延后 P6。
 
-        config = get_config_center().get("isolation/isolation_config.yaml") or {}
+        config = get_config_center().get("plugins/isolation/isolation_config.yaml") or {}
         providers_config = config.get("providers", {})
         logger.debug("[IsolationManager] 从 ConfigCenter 加载提供者配置")
         return providers_config
-    except Exception as e:
-        logger.warning(f"[IsolationManager] 加载配置文件失败: {e}，使用默认配置")
-        return {}
+    except Exception:
+        # ConfigCenter 在 sidecar 内不可达（模块不存在/路径未注入）——直读
+        # 仓库 yaml 兜底：与 isolation server 的 mtime 热更 watcher 同一文件，
+        # 单一真值不破。
+        yaml_path = Path(__file__).resolve().parents[4] / "config" / "plugins" / "isolation" / "isolation_config.yaml"
+        if not yaml_path.is_file():
+            logger.warning(f"[IsolationManager] 隔离配置不存在: {yaml_path}，使用默认配置")
+            return {}
+        try:
+            providers = _read_providers_from_yaml(yaml_path)
+            logger.debug("[IsolationManager] 从仓库 yaml 加载提供者配置（ConfigCenter 不可达回退）")
+            return providers
+        except Exception as e:
+            logger.warning(f"[IsolationManager] 直读隔离配置失败: {e}，使用默认配置")
+            return {}
 
 
 def extract_providers_config(full_config: dict[str, Any]) -> dict[str, Any]:
@@ -85,68 +113,76 @@ def _create_providers_from_config(
     if providers_config is None:
         providers_config = _load_provider_config()
 
-    providers = {}
+    providers: dict[IsolationLevel, IsolationProvider] = {}
 
     # 宿主机提供者
     host_config = providers_config.get("host", {})
     if host_config.get("enabled", True):
         providers[IsolationLevel.HOST] = HostProvider()
 
-    # Docker 提供者
-    docker_config = providers_config.get("docker", providers_config.get("cua", {}))
-    if docker_config.get("enabled", True):
-        # 配额来源优先级：yaml 显式 limits > hardware_profile 自适应 > 默认 512m。
-        # 显式配置优先：写了就是用户明确指定（自适应是低配机保护兜底）；
-        # AO_CONTAINER_* 环境变量在 hardware_profile 内层应用（优先级最高）。
-        cfg_limits = docker_config.get("limits", {})
-        if cfg_limits:
-            memory_limit = cfg_limits.get("memory", "512m")
-            cpu_limit = cfg_limits.get("cpus", "1.0")
-            memory_swap = cfg_limits.get("memory_swap", memory_limit)
-            pids_limit = cfg_limits.get("pids_limit", 100)
-            quota_source = "config-file(explicit)"
-        elif profile:
-            memory_limit = profile.get("container_memory", "512m")
-            cpu_limit = profile.get("container_cpus", "1.0")
-            memory_swap = profile.get("memory_swap", memory_limit)
-            pids_limit = profile.get("pids_limit", 100)
-            quota_source = "hardware-adaptive"
-        else:
-            memory_limit = "512m"
-            cpu_limit = "1.0"
-            memory_swap = memory_limit
-            pids_limit = 100
-            quota_source = "default"
+    # wsl_native 提供者：启用时占据 CONTAINER 槽位（与 docker 互斥）。隔离
+    # 级别语义不变（仍 IsolationLevel.CONTAINER="isolated"），decider/policy/
+    # 审批豁免照常运作，只是底层执行机制从容器换成 WSL 原生沙箱环境。
+    wsl_native_config = providers_config.get("wsl_native", {})
+    if wsl_native_config.get("enabled", False):
+        providers[IsolationLevel.CONTAINER] = WslNativeProvider(wsl_native_config)
 
-        providers[IsolationLevel.CONTAINER] = DockerProvider(
-            config={
-                "image": docker_config.get("image", "agentos:latest"),
-                "memory_limit": memory_limit,
-                "cpu_limit": cpu_limit,
-                "memory_swap": memory_swap,
-                "pids_limit": pids_limit,
-                "network_mode": docker_config.get("network_mode", "bridge"),
-                # system-issue #3 escape hatch：容器端口映射到宿主，默认空。
-                "publish_ports": docker_config.get("publish_ports", []),
-                # 首次无镜像时自动构建：本地有 Dockerfile 则 docker build
-                # （BuildKit 缓存复用本机已下载的包），无 Dockerfile 则回退 pull。
-                # 默认 dockerfile_path/build_context 相对仓库根；超时默认 600s
-                # （镜像含 apt+pip+playwright 下载，分钟级）。
-                "auto_build": docker_config.get("auto_build", True),
-                "dockerfile_path": docker_config.get("dockerfile_path", "docker/agentos/Dockerfile"),
-                "build_context": docker_config.get("build_context", "."),
-                "build_timeout": docker_config.get("build_timeout", 1800),
-            },
-        )
-        logger.debug(
-            "[IsolationManager] 创建 DockerProvider: image=%s memory=%s cpu=%s swap=%s pids=%s (source=%s)",
-            docker_config.get("image", "agentos:latest"),
-            memory_limit,
-            cpu_limit,
-            memory_swap,
-            pids_limit,
-            quota_source,
-        )
+    # Docker 提供者（wsl_native 未启用时的 CONTAINER 后端）
+    if IsolationLevel.CONTAINER not in providers:
+        docker_config = providers_config.get("docker", providers_config.get("cua", {}))
+        if docker_config.get("enabled", True):
+            # 配额来源优先级：yaml 显式 limits > hardware_profile 自适应 > 默认 512m。
+            # 显式配置优先：写了就是用户明确指定（自适应是低配机保护兜底）；
+            # AO_CONTAINER_* 环境变量在 hardware_profile 内层应用（优先级最高）。
+            cfg_limits = docker_config.get("limits", {})
+            if cfg_limits:
+                memory_limit = cfg_limits.get("memory", "512m")
+                cpu_limit = cfg_limits.get("cpus", "1.0")
+                memory_swap = cfg_limits.get("memory_swap", memory_limit)
+                pids_limit = cfg_limits.get("pids_limit", 100)
+                quota_source = "config-file(explicit)"
+            elif profile:
+                memory_limit = profile.get("container_memory", "512m")
+                cpu_limit = profile.get("container_cpus", "1.0")
+                memory_swap = profile.get("memory_swap", memory_limit)
+                pids_limit = profile.get("pids_limit", 100)
+                quota_source = "hardware-adaptive"
+            else:
+                memory_limit = "512m"
+                cpu_limit = "1.0"
+                memory_swap = memory_limit
+                pids_limit = 100
+                quota_source = "default"
+
+            providers[IsolationLevel.CONTAINER] = DockerProvider(
+                config={
+                    "image": docker_config.get("image", "agentos:latest"),
+                    "memory_limit": memory_limit,
+                    "cpu_limit": cpu_limit,
+                    "memory_swap": memory_swap,
+                    "pids_limit": pids_limit,
+                    "network_mode": docker_config.get("network_mode", "bridge"),
+                    # system-issue #3 escape hatch：容器端口映射到宿主，默认空。
+                    "publish_ports": docker_config.get("publish_ports", []),
+                    # 首次无镜像时自动构建：本地有 Dockerfile 则 docker build
+                    # （BuildKit 缓存复用本机已下载的包），无 Dockerfile 则回退 pull。
+                    # 默认 dockerfile_path/build_context 相对仓库根；超时默认 600s
+                    # （镜像含 apt+pip+playwright 下载，分钟级）。
+                    "auto_build": docker_config.get("auto_build", True),
+                    "dockerfile_path": docker_config.get("dockerfile_path", "docker/agentos/Dockerfile"),
+                    "build_context": docker_config.get("build_context", "."),
+                    "build_timeout": docker_config.get("build_timeout", 1800),
+                },
+            )
+            logger.debug(
+                "[IsolationManager] 创建 DockerProvider: image=%s memory=%s cpu=%s swap=%s pids=%s (source=%s)",
+                docker_config.get("image", "agentos:latest"),
+                memory_limit,
+                cpu_limit,
+                memory_swap,
+                pids_limit,
+                quota_source,
+            )
 
     return providers
 
@@ -356,6 +392,11 @@ class IsolationManager:
         3. 仅恢复有活跃任务的容器
         4. 无活跃任务的容器直接销毁
         """
+        if self._container_backend_is_wsl_native():
+            # wsl_native 无常驻环境可恢复：metadata 即真相，缺失按需由
+            # _find_existing_container 收养路径自愈。
+            logger.debug("[IsolationManager] wsl_native 后端，跳过容器恢复扫描")
+            return
         try:
             from docker.errors import DockerException, NotFound  # noqa: PLC0415
 
@@ -436,6 +477,9 @@ class IsolationManager:
         - 保留近 72 小时的构建缓存（加速频繁重建）
         - 静默失败不阻塞启动
         """
+        if self._container_backend_is_wsl_native():
+            # wsl_native 后端无镜像/构建缓存可清理
+            return
         await asyncio.sleep(5)  # 延迟 5s，等 Docker daemon 完全就绪
         import subprocess as _sp  # noqa: PLC0415
 
@@ -552,6 +596,10 @@ class IsolationManager:
         项目关闭时，查找所有 cua-* 容器，
         仅停止仍有活跃任务的 workspace 对应的容器
         """
+        if self._container_backend_is_wsl_native():
+            # wsl_native 无常驻进程可停止（环境随用随起、随进程消亡）
+            logger.debug("[IsolationManager] wsl_native 后端，跳过容器停机清点")
+            return
         try:
             from docker.errors import DockerException  # noqa: PLC0415
 
@@ -788,12 +836,33 @@ class IsolationManager:
             sanitized = hashlib.md5(seed.encode("utf-8")).hexdigest()[:12]
         return f"{IsolationManager.CONTAINER_NAME_PREFIX}{sanitized}"
 
+    def _container_backend_is_wsl_native(self) -> bool:
+        """CONTAINER 槽位是否由 WslNativeProvider 承载。
+
+        manager 内所有 docker 直连路径（收养扫描/停机清点/按名删/镜像清理）
+        以此为分流条件：仅 wsl_native 后端改道（无常驻资源，清点/清理跳过、
+        按名操作委托 provider）；其余一律走既有 docker 直连路径。
+        """
+        return isinstance(self._providers.get(IsolationLevel.CONTAINER), WslNativeProvider)
+
     async def _find_existing_container(self, container_name: str) -> IsolationEnvironment | None:
         """查找已存在的容器（异步外壳：线程池+硬超时防 daemon 假死阻塞）。
 
         同步实现见 _find_existing_container_sync；超时/异常均返回 None，
         不冻死事件循环。
         """
+        if self._container_backend_is_wsl_native():
+            # wsl_native 后端：按名查找委托 provider（D6① 收养语义单点在
+            # provider），失败按不存在处理——create 路径自带存在性未知保护
+            # （D6②），不会误撞。
+            provider = self._providers.get(IsolationLevel.CONTAINER)
+            if provider is None:
+                return None
+            try:
+                return await provider.find_environment_by_name(container_name)
+            except Exception as e:
+                logger.warning(f"[IsolationManager] 查找隔离环境失败: {e}")
+                return None
         try:
             return await self._run_docker_sync(
                 lambda: self._find_existing_container_sync(container_name),
@@ -1024,8 +1093,17 @@ class IsolationManager:
         return None
 
     async def _destroy_container_by_name(self, ws_key: str) -> None:
-        """通过 Docker API 直接查找并删除容器（异步外壳：线程池+硬超时防阻塞）。"""
+        """按 workspace 标识销毁环境（D6③：无内存登记时的按名兜底删除）。"""
         container_name = f"{self.CONTAINER_NAME_PREFIX}{ws_key}"
+        if self._container_backend_is_wsl_native():
+            # wsl_native 后端：按名销毁委托 provider（删档即真删，幂等语义
+            # 由 provider 保证），失败如实告警。
+            provider = self._providers.get(IsolationLevel.CONTAINER)
+            if provider is not None:
+                ok = await provider.destroy_environment(container_name)
+                if not ok:
+                    logger.warning(f"[IsolationManager] 按名销毁失败: {container_name}")
+            return
         try:
             await self._run_docker_sync(
                 lambda: self._destroy_container_by_name_sync(container_name),

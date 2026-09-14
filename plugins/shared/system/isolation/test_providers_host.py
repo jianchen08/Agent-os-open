@@ -265,7 +265,7 @@ class TestExecuteCommand:
                     {
                         "type": "command",
                         "command": f'"{sys.executable}" "{child_script}"',
-                        "timeout": 1.0,
+                        "timeout": 2.5,  # Windows 解释器冷启+管道层可达 1s+，超时语义不受具体值影响
                     },
                 )
             )

@@ -1,7 +1,7 @@
 //! 存储驱动工厂（§9.6 StorageBackend driver 化）。
 //!
 //! 把存储从"写死 SqliteStore 文件库"改为**按配置选 driver**：
-//! 换存储方式 = 改 `config/storage.yaml` 一行（或环境变量）+ 重启，
+//! 换存储方式 = 改 `config/kernel/storage.yaml` 一行（或环境变量）+ 重启，
 //! 上层零改动（runs/messages/traces/blobs/memory/users 全走
 //! [`StorageBackend`] trait）。
 //!
@@ -23,7 +23,7 @@
 //!
 //! 1. 环境变量 `AGENTOS_STORAGE_DRIVER`（driver 名）+ `AGENTOS_DB_PATH`
 //!    （sqlite 路径，`:memory:` 别名向后兼容）；
-//! 2. `config/storage.yaml`：
+//! 2. `config/kernel/storage.yaml`：
 //!   ```yaml
 //!   storage:
 //!     driver: sqlite        # sqlite | memory
@@ -45,7 +45,7 @@ use crate::store::SqliteStore;
 use agentos_core::traits::StorageBackend;
 use agentos_core::types::StorageError;
 
-/// 存储驱动配置（`config/storage.yaml` + 环境变量归一后的结果）。
+/// 存储驱动配置（`config/kernel/storage.yaml` + 环境变量归一后的结果）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageConfig {
     /// driver 名：`sqlite` | `memory`（未来 `postgres`）。
@@ -61,7 +61,7 @@ pub const ENV_STORAGE_DRIVER: &str = "AGENTOS_STORAGE_DRIVER";
 pub const ENV_DB_PATH: &str = "AGENTOS_DB_PATH";
 
 /// config 文件名（config_root 下）。
-const STORAGE_CONFIG_FILE: &str = "storage.yaml";
+const STORAGE_CONFIG_FILE: &str = "kernel/storage.yaml";
 
 /// 默认库文件名。位置由 [`resolve_storage_config`] 决定（用户空间数据根优先）。
 pub const DB_FILENAME: &str = "agentos_kernel.db";
@@ -89,7 +89,7 @@ struct SqliteSection {
     path: Option<String>,
 }
 
-/// 归一存储配置：环境变量 > config/storage.yaml > 默认。
+/// 归一存储配置：环境变量 > config/kernel/storage.yaml > 默认。
 ///
 /// `project_root` 用于相对 path 的基准与默认路径推导（config_root 的父目录）。
 /// 相对 sqlite path（env 或 yaml）统一**锚定项目根**解析并绝对化——内核与
@@ -277,7 +277,9 @@ mod tests {
     #[test]
     fn resolve_corrupted_yaml_is_error() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(STORAGE_CONFIG_FILE), "!!!not yaml{{").unwrap();
+        let cfg_path = dir.path().join(STORAGE_CONFIG_FILE);
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(cfg_path, "!!!not yaml{{").unwrap();
         let err = match resolve_storage_config(dir.path()) {
             Ok(cfg) => panic!("损坏 YAML 应返回 Err，got: {cfg:?}"),
             Err(e) => e,
@@ -379,8 +381,10 @@ storage:
         let dir = tempfile::tempdir().unwrap();
         let config_root = dir.path().join("config");
         std::fs::create_dir_all(&config_root).unwrap();
+        let cfg_path = config_root.join(STORAGE_CONFIG_FILE);
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
         std::fs::write(
-            config_root.join(STORAGE_CONFIG_FILE),
+            cfg_path,
             "storage:\n  driver: sqlite\n  sqlite:\n    path: custom/rel.db\n",
         )
         .unwrap();

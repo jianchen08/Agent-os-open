@@ -258,6 +258,11 @@
               ],
               "type": "string"
             },
+            "timeout_seconds": {
+              "default": 30.0,
+              "description": "遍历墙钟预算（秒），超时返回部分结果",
+              "type": "number"
+            },
             "use_regex": {
               "default": false,
               "description": "是否使用正则表达式",

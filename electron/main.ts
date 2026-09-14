@@ -2,18 +2,27 @@
  * Electron 主进程入口。
  *
  * 创建 BrowserWindow 加载 React 前端（开发时加载 Vite dev server，
- * 生产时加载 dist/index.html），集成系统托盘、全局快捷键和窗口信息采集。
+ * 生产时经 app:// 自定义协议加载 dist/index.html，见 app-protocol.ts），
+ * 集成系统托盘、全局快捷键和窗口信息采集。
  */
 
 import { app, BrowserWindow, globalShortcut, ipcMain, shell } from "electron";
 import * as path from "path";
 
+import {
+  APP_BASE_URL,
+  installAppProtocolHandler,
+  registerAppSchemePrivileges,
+} from "./app-protocol";
 import { createTray, destroyTray } from "./tray";
 import {
   startWindowInfoPolling,
   stopWindowInfoPolling,
   WindowInfoPoller,
 } from "./window-info";
+
+// 协议特权注册必须在 app ready 之前（模块加载即执行）
+registerAppSchemePrivileges();
 
 /** 开发环境下 Vite dev server 的 URL（端口 5188，与 vite.config.ts 一致） */
 const VITE_DEV_SERVER_URL = "http://localhost:5188";
@@ -111,7 +120,7 @@ function isDevelopment(): boolean {
 /**
  * 应用自身源判定（安全审查 2026-08-19 B-5）：
  *  - dev：Vite dev server（localhost:5188 / 127.0.0.1:5188，兼容 5173 默认口）；
- *  - prod：file://（打包后的本地前端）。
+ *  - prod：app://（打包件自定义协议源，见 app-protocol.ts）。
  * 用于 window:open 子窗口 URL 白名单与 will-navigate 导航拦截。
  */
 const APP_DEV_ORIGINS = new Set([
@@ -124,7 +133,7 @@ const APP_DEV_ORIGINS = new Set([
 function isAppSource(rawUrl: string): boolean {
   try {
     const u = new URL(rawUrl);
-    if (u.protocol === "file:") {
+    if (u.protocol === "app:") {
       return true;
     }
     if (u.protocol !== "http:" && u.protocol !== "https:") {
@@ -204,11 +213,12 @@ function createMainWindow(): BrowserWindow {
 /**
  * 加载前端页面。
  *
- * 开发环境加载 Vite dev server URL，生产环境加载 dist/index.html。
+ * 开发环境加载 Vite dev server URL，生产环境经 app:// 协议加载 dist/index.html
+ * （app-protocol.ts 负责静态伺服、SPA 深链回落与内核 API 代理）。
  *
- * 子窗口场景（opts.url 提供）：开发环境直接 loadURL(opts.url)（带 hash 路由，
- * 如 http://localhost:5188/#/p/my-page）；生产环境从 url 提取 hash 部分，
- * 用 loadFile(indexPath, { hash }) 走文件协议 + hash 路由。
+ * 子窗口场景（opts.url 提供）：url 已是完整应用源深链（dev 为 hash 形态
+ * http://localhost:5188/#/p/<pageId>，prod 为 pathname 形态 app://bundle/p/<pageId>，
+ * 形态分派见前端 buildChildWindowUrl），直接 loadURL。
  *
  * @param win - BrowserWindow 实例
  * @param opts - 可选，url 为子窗口深链 URL
@@ -218,21 +228,12 @@ function loadFrontend(
   opts?: { url?: string },
 ): void {
   if (opts?.url) {
-    if (isDevelopment()) {
-      win.loadURL(opts.url);
-      console.info(`[Electron] 子窗口加载（开发模式）: ${opts.url}`);
-    } else {
-      // 生产模式：从 url 提取 hash（'#/p/pageId' → 'p/pageId'），走 loadFile + hash
-      const hashMatch = opts.url.match(/#\/?(.*)$/);
-      const hash = hashMatch ? hashMatch[1] : "";
-      const indexPath = path.join(__dirname, "../frontend/dist/index.html");
-      win
-        .loadFile(indexPath, hash ? { hash } : undefined)
-        .catch((err) => {
-          console.error("[Electron] 加载子窗口页面失败:", err);
-        });
-      console.info(`[Electron] 子窗口加载（生产模式）: ${indexPath}#${hash}`);
-    }
+    win
+      .loadURL(opts.url)
+      .catch((err) => {
+        console.error("[Electron] 加载子窗口页面失败:", err);
+      });
+    console.info(`[Electron] 子窗口加载: ${opts.url}`);
     return;
   }
 
@@ -242,11 +243,12 @@ function loadFrontend(
     win.webContents.openDevTools({ mode: "detach" });
     console.info(`[Electron] 开发模式，加载 Vite dev server: ${VITE_DEV_SERVER_URL}`);
   } else {
-    const indexPath = path.join(__dirname, "../frontend/dist/index.html");
-    win.loadFile(indexPath).catch((err) => {
-      console.error("[Electron] 加载前端页面失败:", err);
-    });
-    console.info(`[Electron] 生产模式，加载: ${indexPath}`);
+    win
+      .loadURL(`${APP_BASE_URL}/index.html`)
+      .catch((err) => {
+        console.error("[Electron] 加载前端页面失败:", err);
+      });
+    console.info(`[Electron] 生产模式，加载: ${APP_BASE_URL}/index.html`);
   }
 }
 
@@ -393,7 +395,7 @@ function registerIpcHandlers(): void {
       console.warn("[Electron] window:open 参数非法，需要 {id, url}", opts);
       return { id: opts?.id ?? "", success: false };
     }
-    // 子窗口 URL 白名单（安全审查 B-5）：仅应用自身源（dev localhost / prod file:）
+    // 子窗口 URL 白名单（安全审查 B-5）：仅应用自身源（dev localhost / prod app:）
     if (!isAppSource(opts.url)) {
       console.warn(`[Electron] window:open 拒绝非应用源 url: ${opts.url}`);
       return { id: opts.id, success: false, reason: "url 不在应用源白名单" };
@@ -521,6 +523,9 @@ app.on("second-instance", () => {
 // 应用就绪后初始化
 app.whenReady().then(() => {
   console.info("[Electron] 应用启动中...");
+
+  // 注册 app:// 协议处理器（必须先于窗口创建）
+  installAppProtocolHandler();
 
   // 注册 IPC
   registerIpcHandlers();

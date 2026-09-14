@@ -340,7 +340,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let capability_contracts: Arc<Vec<agentos_api::kernel_capabilities::KernelCapabilityContract>> =
         Arc::new(
             agentos_api::kernel_capabilities::load_contracts(
-                &config_root.join("kernel_capabilities"),
+                &config_root.join("kernel/kernel_capabilities"),
             )
             .unwrap_or_else(|e| panic!("内核能力契约文件加载失败（fail-closed）: {e}")),
         );
@@ -482,7 +482,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         error!(
             target: "agentos-kernel",
             "default_profile.yaml 解析失败：启用层进入保守全禁（K6 fail-closed），\
-             所有插件本次启动不注册；修复 config/plugins/default_profile.yaml 后重启"
+             所有插件本次启动不注册；修复 config/kernel/default_profile.yaml 后重启"
         );
     }
 
@@ -590,21 +590,21 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         http_route_count
     );
 
-    // 初始化存储——StorageBackend driver 化（§9.6）：按 config/storage.yaml 或
+    // 初始化存储——StorageBackend driver 化（§9.6）：按 config/kernel/storage.yaml 或
     // 环境变量选 driver（sqlite | memory；postgres 留桩），默认 sqlite +
     // 项目根 agentos_kernel.db（AGENTOS_DB_PATH/:memory: 兼容）。
     // 返回双句柄：store_dyn（业务账本 trait 面，runs/messages/traces/blobs/memory/
     // users——换 driver 时完全可用）+ sqlite_db（SQLite 专有 db-admin 表驱动接口，
     // 非 SQLite driver 下为 None → db-admin capability 诚实降级）。
     // 存储是自举必需件 + 审计真相源，driver 编译进内核而非插件轨（§9.6 判据）。
-    // resolve_storage_config：config/storage.yaml 存在但损坏 → Err 拒绝启动
+    // resolve_storage_config：config/kernel/storage.yaml 存在但损坏 → Err 拒绝启动
     // （数据正确性优先，不静默落默认库）。
     let storage_cfg = agentos_engine::storage_factory::resolve_storage_config(&config_root)?;
     info!(
         target: "agentos-kernel",
         driver = %storage_cfg.driver,
         sqlite_path = %storage_cfg.sqlite_path,
-        "Storage driver resolved (config/storage.yaml > env > default sqlite)"
+        "Storage driver resolved (config/kernel/storage.yaml > env > default sqlite)"
     );
 
     // 迁移护栏（ADR 2026-09-13-unified-user-root §2.5）：默认库位置从项目根迁到
@@ -1845,11 +1845,11 @@ pub(crate) fn build_plugin_loader(
     user_plugins_dir: Option<PathBuf>,
     config_root: &std::path::Path,
 ) -> PluginLoaderImpl {
-    // P0-2：allowlist 生产接线——config/system/plugin_allowlist.yaml 从"空挂"变真准入
+    // P0-2：allowlist 生产接线——config/kernel/plugin_allowlist.yaml 从"空挂"变真准入
     // （permissive 默认：放行 + 条目 sha256 校验，真实语料零误伤；strict 由部署方显式
     // 启用：白名单外插件 load 失败 fail-closed，与 deny_unknown_fields 一致）。
     let allowlist = agentos_plugin_loader::load_allowlist_file(
-        &config_root.join("system/plugin_allowlist.yaml"),
+        &config_root.join("kernel/plugin_allowlist.yaml"),
     );
     PluginLoaderImpl::new(plugins_dir, user_plugins_dir)
         // 接入 config_root：否则 load_config() 因 config_root=None 恒返回空 {}

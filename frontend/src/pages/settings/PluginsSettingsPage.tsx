@@ -165,10 +165,47 @@ export function PluginsSettingsPage() {
   }, [pluginsQuery.data])
 
   /** 切换插件启用状态 */
+  /** 反向依赖查询（ADR 2026-09-14 §2.4 禁用事前提醒数据源；端点不可得时静默放行） */
+  const fetchDependents = async (
+    pluginId: string,
+  ): Promise<{ id: string; enabled: boolean }[]> => {
+    try {
+      const res = await apiClient.get<{
+        plugin_id: string
+        dependents: { id: string; enabled: boolean }[]
+        total: number
+      }>(API_ENDPOINTS.PLUGINS.DEPENDENTS(pluginId))
+      return res.data.dependents ?? []
+    } catch {
+      return []
+    }
+  }
+
   const handleToggleEnabled = async (pluginId: string, currentEnabled: boolean) => {
     setTogglingId(pluginId)
+    // §2.4 禁用事前提醒：有已启用插件依赖本插件服务时，列出影响并请求确认
+    if (currentEnabled) {
+      const dependents = await fetchDependents(pluginId)
+      const activeDeps = dependents.filter((d) => d.enabled)
+      if (activeDeps.length > 0) {
+        const ok = window.confirm(
+          `禁用 ${pluginId} 将连带影响 ${activeDeps.length} 个依赖其服务的已启用插件：\n` +
+            activeDeps.map((d) => `· ${d.id}`).join('\n') +
+            `\n\n受影响插件的能力将同步暂停，重新启用后自动恢复。是否继续？`,
+        )
+        if (!ok) {
+          setTogglingId(null)
+          return
+        }
+      }
+    }
     try {
-      const res = await apiClient.put<{ success: boolean; message?: string; error?: string }>(
+      const res = await apiClient.put<{
+        success: boolean
+        message?: string
+        error?: string
+        cascade_disabled?: string[]
+      }>(
         API_ENDPOINTS.PLUGINS.ENABLED(pluginId),
         { enabled: !currentEnabled },
       )
@@ -194,6 +231,10 @@ export function PluginsSettingsPage() {
           ),
         )
         toast.success(res.data.message || `已${!currentEnabled ? '启用' : '禁用'} ${pluginId}`)
+        // §2.4 禁用连带：后端已同步摘除受影响依赖方能力，逐名提醒（恢复 = 重新启用提供者）
+        if (!currentEnabled && res.data.cascade_disabled?.length) {
+          toast.warning(`连带摘除依赖方能力：${res.data.cascade_disabled.join('、')}`)
+        }
         // 刷新插件贡献（contributes 仅 Enabled 插件导出）：
         // 禁用 → 其主题从列表移除（在用则回退 base）、注入 CSS 清理；
         // 启用 → 其主题/样式重新注入。失败不影响开关结果（仅 warn）。

@@ -228,7 +228,7 @@
   "config_files": [
     {
       "id": "isolation_config",
-      "path": "config/isolation/isolation_config.yaml",
+      "path": "config/plugins/isolation/isolation_config.yaml",
       "label": "隔离配置",
       "fields": [
         {
@@ -264,12 +264,12 @@
     },
     {
       "id": "isolation_policy",
-      "path": "config/isolation/isolation_policy.yaml",
+      "path": "config/plugins/isolation/isolation_policy.yaml",
       "label": "隔离策略"
     },
     {
       "id": "approval",
-      "path": "config/isolation/approval.yaml",
+      "path": "config/plugins/isolation/approval.yaml",
       "label": "审批配置"
     }
   ],

@@ -215,6 +215,26 @@ BASE_TEST_PATHS: list[str] = [
     # 2026-09-14 覆盖率补测批九：_host/host.py 缺口测试（_host 非插件目录，
     # 文件自带路径注入不依赖 tests/plugins/_host/conftest）。
     "tests/test_host_shared_gaps.py",
+    # 2026-09-14 覆盖率补测批十：两文件此前不在任何车道（模块覆盖率失真），
+    # 随缺口补测一并接线——model_prompt_adapter 顶层非映射文档降级缺陷已同刀修复。
+    "tests/test_model_prompt_adapter_gaps.py",
+    # 批十：review 缺口补测随插件目录接线（原 tests/test_review_gaps_2.py 归位到
+    # plugins/shared/system/review/，与该目录既有 test_review_gaps.py 同址）。
+    "plugins/shared/system/review/test_review_service_gaps.py",
+    # 2026-09-14 覆盖率补测簇 J：pipeline/_base 基础三件套（IPlugin 接口族/
+    # PluginContext/PluginResult/create_initial_state/find_plugin_config）此前
+    # 不在任何车道（_base 非插件目录、SDK 侧是复制品），模块覆盖率长期失真。
+    # 插件侧 _base 由各 pipeline 插件的顶层 re-export（pipeline/plugin.py、
+    # pipeline/types.py）消费，缺此条目则新文件不进插桩车道。
+    "tests/test_pipeline_base_gaps.py",
+    # 2026-09-14 覆盖率补测批十（簇 A）：track 插件缺口补测——pipeline/output/track
+    # 目录未在基集内，测试落根级 tests/test_track_gaps.py 后需显式接线。
+    "tests/test_track_gaps.py",
+    # 2026-09-14 覆盖率补测簇 I（llm 簇）：llm_core/server.py 的 execute 工具面
+    # （102-117 行）此前不在任何车道——该目录整体收集会与 system/llm 的平铺
+    # `import adapter` 裸名冲突（3 文件收集期 AttributeError），故只登记执行面
+    # 单文件（自带唯一模块名装载，与车道共跑实测 2794 绿/服务器面 100%）。
+    "plugins/shared/pipeline/core/llm_core/test_llm_core_server_execute.py",
 ]
 
 # 车道 marker 过滤：@pytest.mark.timing 用例唯一归 timing-gate（独立 stage，

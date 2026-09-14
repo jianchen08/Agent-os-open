@@ -579,4 +579,190 @@ mod tests {
         // broadcaster 内部 None 分支 continue，不调用 emitter
         assert_eq!(spy.calls.lock().len(), 0);
     }
+
+    // ── 后台推送循环 / 绑定表移除 / 默认 scope ────────────────────
+
+    /// `BindingScope::default()` = Broadcast（MVP 单一 scope 的缺省）。
+    #[test]
+    fn binding_scope_default_is_broadcast() {
+        assert_eq!(BindingScope::default(), BindingScope::Broadcast);
+    }
+
+    /// 单标签 series（labels 非空）走 `by_label` 分支：1 条 series 但带标签，
+    /// 不能走"单条无标签"快路径。
+    #[test]
+    fn latest_value_single_series_with_labels_uses_by_label() {
+        let agg = MetricsAggregator::new();
+        let mut l = Labels::new();
+        l.insert("model".into(), "deepseek".into());
+        agg.record("p1", "tokens", MetricType::Gauge, 5.0, &l, None, None);
+        let binding = WidgetBinding {
+            widget_id: "w".into(),
+            plugin_id: "p1".into(),
+            metric: "tokens".into(),
+            interval: Duration::from_secs(1),
+            scope: BindingScope::Broadcast,
+            owner_plugin_id: "p1".into(),
+        };
+        let v = latest_value(&agg, &binding).unwrap();
+        assert_eq!(
+            v["{model=deepseek}"],
+            json!(5.0),
+            "带标签的单条 series 走 by_label 形态: {v}"
+        );
+    }
+
+    /// 多条 series 但 `latest` 全为 None（无样本）→ by_label 为空 → None。
+    /// 直接构造聚合器不可控，改用"记录后清空"不可行；此处用空 series 的
+    /// 边界：无数据时 views 为空已由上一用例覆盖，本用例锁 by_label 的空判定。
+    #[test]
+    fn latest_value_by_label_empty_when_no_latest() {
+        // 构造无任何 series 的绑定 → views 为空 → None（与 by_label 空判定同出口）
+        let agg = MetricsAggregator::new();
+        let binding = WidgetBinding {
+            widget_id: "w".into(),
+            plugin_id: "p1".into(),
+            metric: "x".into(),
+            interval: Duration::from_secs(1),
+            scope: BindingScope::Broadcast,
+            owner_plugin_id: "p1".into(),
+        };
+        assert!(latest_value(&agg, &binding).is_none());
+    }
+
+    /// `remove_plugin_bindings`：按 owner 移除其全部绑定并返回条数；
+    /// 其他插件的绑定（含跨插件引用者）不受影响。
+    #[test]
+    fn remove_plugin_bindings_removes_only_owner() {
+        let bindings: SharedBindings = StdArc::new(parking_lot::RwLock::new(vec![
+            WidgetBinding {
+                widget_id: "w1".into(),
+                plugin_id: "p_a".into(),
+                metric: "m1".into(),
+                interval: Duration::from_secs(1),
+                scope: BindingScope::Broadcast,
+                owner_plugin_id: "p_a".into(),
+            },
+            WidgetBinding {
+                widget_id: "w2".into(),
+                plugin_id: "other".into(), // 引用别的插件的指标，owner 仍是 p_a
+                metric: "m2".into(),
+                interval: Duration::from_secs(1),
+                scope: BindingScope::Broadcast,
+                owner_plugin_id: "p_a".into(),
+            },
+            WidgetBinding {
+                widget_id: "w3".into(),
+                plugin_id: "p_b".into(),
+                metric: "m3".into(),
+                interval: Duration::from_secs(1),
+                scope: BindingScope::Broadcast,
+                owner_plugin_id: "p_b".into(),
+            },
+        ]));
+
+        let removed = remove_plugin_bindings(&bindings, "p_a");
+        assert_eq!(removed, 2, "owner=p_a 的两条（含跨插件引用）都应移除");
+        let left = bindings.read();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].owner_plugin_id, "p_b");
+        // 幂等：再移除同一 owner → 0 条
+        drop(left);
+        assert_eq!(remove_plugin_bindings(&bindings, "p_a"), 0);
+    }
+
+    /// `PluginWidgetBroadcaster::spawn`：tick 到点且有数据 → 推 snapshot；
+    /// 无数据的绑定跳过；绑定表运行期移除后下一 tick 不再推。
+    /// 时序：tick 粒度 1s，用真实短等待（≤3s）断言至少一次投递。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broadcaster_spawn_pushes_bound_metrics_and_respects_removal() {
+        let agg = StdArc::new(MetricsAggregator::new());
+        let empty = Labels::new();
+        agg.record("p1", "tokens", MetricType::Gauge, 42.0, &empty, None, None);
+        let spy = StdArc::new(SpyEmitter {
+            calls: PlMutex::new(Vec::new()),
+        });
+        let bindings: SharedBindings = StdArc::new(parking_lot::RwLock::new(vec![
+            WidgetBinding {
+                widget_id: "w_hit".into(),
+                plugin_id: "p1".into(),
+                metric: "tokens".into(),
+                interval: Duration::from_millis(DEFAULT_INTERVAL_MS),
+                scope: BindingScope::Broadcast,
+                owner_plugin_id: "p1".into(),
+            },
+            WidgetBinding {
+                widget_id: "w_miss".into(),
+                plugin_id: "p1".into(),
+                metric: "absent".into(),
+                interval: Duration::from_millis(DEFAULT_INTERVAL_MS),
+                scope: BindingScope::Broadcast,
+                owner_plugin_id: "p1".into(),
+            },
+        ]));
+
+        let task = PluginWidgetBroadcaster::spawn(agg, bindings.clone(), spy.clone());
+
+        // 等首个 tick 落地（tick=1s，留足调度余量）
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while spy.calls.lock().is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        {
+            let calls = spy.calls.lock();
+            assert!(!calls.is_empty(), "tick 到点且指标有数据必须推送");
+            assert!(
+                calls.iter().all(|c| c.0 == "w_hit" && c.1 == "snapshot"),
+                "只有有数据的绑定被推（无数据的跳过，不推空帧）: {calls:?}"
+            );
+            assert_eq!(calls[0].2["value"], json!(42.0));
+            assert_eq!(
+                calls[0].3, "p1",
+                "plugin_id 为 owner（self 已在 parse 期解析）"
+            );
+        }
+
+        // M1：禁用插件 → 从共享表移除其绑定 → 下一 tick 不再推
+        assert_eq!(remove_plugin_bindings(&bindings, "p1"), 2);
+        let after_removal = spy.calls.lock().len();
+        tokio::time::sleep(Duration::from_millis(2200)).await;
+        assert_eq!(
+            spy.calls.lock().len(),
+            after_removal,
+            "绑定移除后下一 tick 不得再推（快照按 tick 重读）"
+        );
+
+        task.abort();
+    }
+
+    /// `binding_key` 的稳定定位：owner+widget+metric 三元组唯一定位一条绑定
+    ///（两条仅 metric 不同的绑定不得互相顶掉 last_pushed）。
+    #[test]
+    fn binding_key_is_unique_per_owner_widget_metric() {
+        let mk = |owner: &str, widget: &str, metric: &str| WidgetBinding {
+            widget_id: widget.into(),
+            plugin_id: owner.into(),
+            metric: metric.into(),
+            interval: Duration::from_secs(1),
+            scope: BindingScope::Broadcast,
+            owner_plugin_id: owner.into(),
+        };
+        let a = binding_key(&mk("p1", "w", "m1"));
+        let b = binding_key(&mk("p1", "w", "m2"));
+        let c = binding_key(&mk("p2", "w", "m1"));
+        let d = binding_key(&mk("p1", "w2", "m1"));
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+        assert_eq!(a, binding_key(&mk("p1", "w", "m1")), "同三元组键稳定");
+    }
+
+    /// `collect_all_bindings` 空输入 / 全 None contributes → 空表。
+    #[test]
+    fn collect_all_bindings_empty_inputs() {
+        let entries: Vec<(&str, Option<&Value>)> = Vec::new();
+        assert!(collect_all_bindings(entries).is_empty());
+        let none_only: Vec<(&str, Option<&Value>)> = vec![("p1", None), ("p2", None)];
+        assert!(collect_all_bindings(none_only).is_empty());
+    }
 }

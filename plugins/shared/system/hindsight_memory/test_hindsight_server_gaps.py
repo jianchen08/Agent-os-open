@@ -173,7 +173,8 @@ class TestApplyLlmEnvEmptyApiBase:
         root = tmp_path / "a" / "b" / "c" / "hindsight_memory"
         root.mkdir(parents=True)
         (tmp_path / "config" / "models").mkdir(parents=True)
-        (tmp_path / "config" / "models" / "llm.yaml").write_text(_LLM_YAML_NO_BASE, encoding="utf-8")
+        (tmp_path / "config" / "plugins" / "llm").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "config" / "plugins" / "llm" / "llm.yaml").write_text(_LLM_YAML_NO_BASE, encoding="utf-8")
         monkeypatch.setattr(srv, "_THIS_DIR", str(root))
 
         with caplog.at_level("WARNING"):

@@ -703,7 +703,7 @@ impl EngineDispatcher {
         // 失败路径：引擎执行失败（executor.run Err）→ stream_error 收尾，
         // 前端立即解除生成态（不再依赖 90s 强制收尾兜底）。error 为统一错误
         // 信封（契约 streaming.json stream_error.error 锁 object，单一真值源
-        // config/error_codes.json；ENGINE_RUN_FAILED 可重试）。
+        // config/kernel/error_codes.json；ENGINE_RUN_FAILED 可重试）。
         if outcome.failed {
             emit_stream_error_event(
                 session,
@@ -943,7 +943,7 @@ impl agentos_engine::RoundEvents for SessionRoundEvents {
 
 /// 失败出口统一收尾：stream_error 事件（ENGINE_RUN_FAILED / NO_ASSISTANT_REPLY
 /// 两出口共用构造）。error 信封锁 object——契约 streaming.json，单一真值源
-/// config/error_codes.json；code 可重试语义由各调用点注释声明。
+/// config/kernel/error_codes.json；code 可重试语义由各调用点注释声明。
 async fn emit_stream_error_event(
     session: &SessionCoordinator,
     thread_id: &str,
@@ -976,7 +976,7 @@ async fn emit_stream_error_event(
 /// 插件错误可见性出口：本轮管道执行中插件失败（引擎 warn+继续的假成功）逐个
 /// 发射 `plugin_error` 事件。非终止信号——消息本身正常收尾（new_message/
 /// stream_end 照常），前端只弹通知中心（errorSource=plugin），不标记消息失败。
-/// 统一错误信封（code/message/source/retryable，单一真值源 config/error_codes.json）；
+/// 统一错误信封（code/message/source/retryable，单一真值源 config/kernel/error_codes.json）；
 /// code 缺省 PLUGIN_EXEC_FAILED，retryable=false（插件失败重跑同轮无意义）。
 async fn emit_plugin_error_events(
     session: &SessionCoordinator,

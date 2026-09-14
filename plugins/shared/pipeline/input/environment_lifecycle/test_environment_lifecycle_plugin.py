@@ -242,8 +242,30 @@ def test_exit_destroys_environment_on_task_id() -> None:
     }
     updates = _updates(_run(plugin.execute(_make_ctx(state))))
     assert updates == {"environment_released": True}
-    # 销毁真实发生：正门工具名 + 任务身份取自 state["task.id"]
-    assert caller.calls == [("isolation.destroy_env", {"task_id": "task-42"})]
+    # 销毁真实发生：正门工具名 + 任务身份取自 state["task.id"]；无绑定时空串透传
+    assert caller.calls == [
+        ("isolation.destroy_env", {"task_id": "task-42", "container_name": ""})
+    ]
+
+
+def test_exit_passes_state_container_name_binding() -> None:
+    """D6：state 落地过容器绑定时，销毁必须带 container_name（state 真值直删，
+    服务重启后内存登记为空也能删干净，杜绝登记丢失=泄漏）。"""
+    mod = _load_plugin()
+    caller = _FakeDestroyCaller(result={"destroyed": True, "container_name": "cua-task-42"})
+    mod.set_destroy_caller(caller)
+    plugin = mod.EnvironmentLifecyclePlugin()
+    state = {
+        "current_phase": "exit",
+        "environment_basis": {"level": "isolated", "resolved": True},
+        "task.id": "task-42",
+        "isolation.container_name": "cua-task-42",
+    }
+    updates = _updates(_run(plugin.execute(_make_ctx(state))))
+    assert updates == {"environment_released": True}
+    assert caller.calls == [
+        ("isolation.destroy_env", {"task_id": "task-42", "container_name": "cua-task-42"})
+    ]
 
 
 @pytest.mark.parametrize("task_id", ["task-7", "p-abc-123"])
@@ -259,7 +281,9 @@ def test_exit_task_identity_from_flat_state_key(task_id: str) -> None:
         "task.id": task_id,
     }
     _updates(_run(plugin.execute(_make_ctx(state))))
-    assert caller.calls == [("isolation.destroy_env", {"task_id": task_id})]
+    assert caller.calls == [
+        ("isolation.destroy_env", {"task_id": task_id, "container_name": ""})
+    ]
 
 
 def test_exit_caller_raises_keeps_mark_not_released() -> None:

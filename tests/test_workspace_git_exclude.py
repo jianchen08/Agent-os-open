@@ -21,8 +21,8 @@ def proj(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """临时项目：.git/ + config/isolation/isolation_config.yaml 标记
     （find_project_root 的 env 校验要求该 yaml 存在），AGENTOS_CONFIG_ROOT 指向之。"""
     (tmp_path / ".git" / "info").mkdir(parents=True)
-    (tmp_path / "config" / "isolation").mkdir(parents=True)
-    (tmp_path / "config" / "isolation" / "isolation_config.yaml").write_text("", encoding="utf-8")
+    (tmp_path / "config" / "plugins" / "isolation").mkdir(parents=True)
+    (tmp_path / "config" / "plugins" / "isolation" / "isolation_config.yaml").write_text("", encoding="utf-8")
     monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path / "config"))
     return tmp_path
 

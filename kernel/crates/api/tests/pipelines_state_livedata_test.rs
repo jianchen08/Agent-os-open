@@ -217,3 +217,75 @@ async fn test_memory_key_not_overwritten_by_table() {
     // 内存已有键不覆盖（运行时态权威归属内存）
     assert_eq!(item["state"]["context_window"], 111);
 }
+
+#[tokio::test]
+async fn test_cold_checkpoint_row_carries_latest_run_status() {
+    // BUG-2 幽灵 running：重启后 registry 为空，冷兜底行若缺 run_status
+    // （崩溃 run 收束投影未落），前端三源推断把死管道猜成「执行中」。
+    // 契约：冷行以 runs 表最新 run 的权威状态补齐 run_status（fill-if-absent）。
+    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let tenant = "default";
+    let pid = format!("cold_ghost_{}", std::process::id());
+    let run_id = format!("run_{}", std::process::id());
+
+    use agentos_core::traits::StorageBackend;
+    use agentos_core::types::RunStatus;
+    store.create_run(&run_id, "h", tenant).unwrap();
+    StorageBackend::set_run_pipeline(store.as_ref(), &run_id, &pid)
+        .await
+        .unwrap();
+    StorageBackend::update_run_status(store.as_ref(), &run_id, RunStatus::Failed, None, None)
+        .await
+        .unwrap();
+    // 消息槽落 run↔pipeline 映射（list_pipelines join 通道）
+    store
+        .apply_messages_ops_to_table(
+            &pid,
+            tenant,
+            &[json!({
+                "op": "set",
+                "seq": 0,
+                "_run_id": run_id,
+                "msg": {"role": "user", "content": "崩溃前的唯一消息"},
+            })],
+        )
+        .unwrap();
+    // 出生投影只有任务域字段：run_status 缺失（收束投影未跑 = 崩溃形态）
+    store
+        .upsert_state_field(&pid, tenant, "task.status", &json!("running"))
+        .unwrap();
+
+    seed_admin(&store).await;
+    let mut state = AppState::new();
+    state.store = Some(store.clone());
+    state.db = Some(store.clone());
+    state.manifests = Arc::new(tokio::sync::RwLock::new(vec![llm_manifest()]));
+    let app = build_router(state);
+    let token = admin_token(&app).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/pipelines/state")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    let item = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["pipeline_id"] == pid.as_str())
+        .expect("冷兜底行必须出口")
+        .clone();
+    assert_eq!(item["source"], "checkpoint");
+    // 权威运行状态在冷行可见：死管道不再被推断成 running
+    assert_eq!(item["state"]["run_status"], "failed");
+}

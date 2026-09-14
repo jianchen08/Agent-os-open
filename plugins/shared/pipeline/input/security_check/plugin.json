@@ -47,7 +47,7 @@
   "config_files": [
     {
       "id": "security_rules",
-      "path": "config/isolation/security_rules.yaml",
+      "path": "config/plugins/security_check/security_rules.yaml",
       "label": "安全规则"
     },
     {
@@ -94,29 +94,29 @@
                 {
                   "label": "默认（命中规则才确认）",
                   "value": "default",
-                  "description": "仅对非隔离会话生效：命中安全规则关键词（rm -rf、curl、pip install 等）的操作逐次弹窗确认，未命中的直接执行；隔离会话的容器内操作从不弹审批"
+                  "description": "命中安全规则关键词（rm -rf、curl、pip install 等）的操作逐次弹窗确认（隔离会话同样生效：隔离≠免审批），未命中的直接执行"
                 },
                 {
                   "label": "接受编辑（文件自动）",
                   "value": "accept_edits",
-                  "description": "仅对非隔离会话生效：文件读写工具一律自动放行；命令类等其它工具仅在命中安全规则时弹窗确认"
+                  "description": "文件读写工具一律自动放行；命令类等其它工具仅在命中安全规则时弹窗确认（隔离会话同样生效）"
                 },
                 {
                   "label": "自动（block 不打扰）",
                   "value": "auto",
-                  "description": "仅对非隔离会话生效：命中 block 级规则自动拒绝、不再询问；needs_approval 级才弹窗；未命中规则的操作直接执行"
+                  "description": "命中 block 级规则自动拒绝、不再询问；needs_approval 级才弹窗；未命中规则的操作直接执行（隔离会话同样生效）"
                 },
                 {
                   "label": "旁路（跳过审批）",
                   "value": "bypass",
-                  "description": "仅对非隔离会话生效：不做规则匹配、不弹审批，危险命令可能直接执行；仅保留路径遍历、敏感目录、nul 重定向三条内置底线"
+                  "description": "不做规则匹配、不弹审批，危险命令可能直接执行；仅保留路径遍历、敏感目录、nul 重定向三条内置底线"
                 }
               ]
             }
           ],
           "endpoint": "/ext/pipeline_security_check/permission_mode",
           "readbackUri": "/ext/pipeline_security_check/permission_mode",
-          "description": "切换当前管道标签的权限模式。模式只影响非隔离会话：隔离会话/任务的容器内操作从不弹审批；未命中安全规则的操作任何档位都直接执行。auto/bypass 属高风险档，切换需在审批窗二次确认"
+          "description": "切换当前管道标签的权限模式。参数级黑名单规则命中（rm -rf 等）在隔离会话/任务同样弹审批（隔离≠免审批，隔离只豁免环境类检查）；未命中安全规则的操作任何档位都直接执行。auto/bypass 属高风险档，切换需在审批窗二次确认"
         }
       }
     ]

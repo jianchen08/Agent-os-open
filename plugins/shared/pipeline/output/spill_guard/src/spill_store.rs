@@ -53,8 +53,7 @@ impl SpillStore {
     /// 失败返回 Err（调用方 best-effort：保留原结果，不改变工具成败）。
     pub fn save(&self, pipeline_id: &str, key: &str, text: &str) -> Result<SpillRef, String> {
         let dir = self.pipeline_dir(pipeline_id);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("spill create_dir {dir:?} 失败: {e}"))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("spill create_dir {dir:?} 失败: {e}"))?;
         let path = dir.join(sanitize_key(key));
         let bytes = text.as_bytes();
 
@@ -64,7 +63,8 @@ impl SpillStore {
                 .and_then(|_| enc.finish())
                 .map_err(|e| format!("spill gzip 压缩失败: {e}"))
                 .and_then(|compressed| {
-                    std::fs::write(&path, compressed).map_err(|e| format!("spill 写文件 {path:?} 失败: {e}"))
+                    std::fs::write(&path, compressed)
+                        .map_err(|e| format!("spill 写文件 {path:?} 失败: {e}"))
                 })?;
         } else {
             std::fs::write(&path, bytes).map_err(|e| format!("spill 写文件 {path:?} 失败: {e}"))?;
@@ -102,8 +102,7 @@ impl SpillStore {
             return Ok(0);
         }
         let count = count_files(&dir);
-        std::fs::remove_dir_all(&dir)
-            .map_err(|e| format!("spill 清理 {dir:?} 失败: {e}"))?;
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("spill 清理 {dir:?} 失败: {e}"))?;
         Ok(count)
     }
 
@@ -179,14 +178,21 @@ mod tests {
         assert_eq!(r.original_bytes, "hello spill".len());
         assert_eq!(r.locator, "pipe-1/call_abc");
         assert_eq!(r.absolute_path, s.base.join("pipe-1").join("call_abc"));
-        assert_eq!(std::fs::read_to_string(&r.absolute_path).expect("read file"), "hello spill");
+        assert_eq!(
+            std::fs::read_to_string(&r.absolute_path).expect("read file"),
+            "hello spill"
+        );
     }
 
     #[test]
     fn save_then_read_roundtrip_plain() {
         let (s, _dir) = store(false);
-        s.save("pipe-1", "call_abc", "内容原文\nline2").expect("save");
-        assert_eq!(s.read("pipe-1", "call_abc").expect("read"), "内容原文\nline2");
+        s.save("pipe-1", "call_abc", "内容原文\nline2")
+            .expect("save");
+        assert_eq!(
+            s.read("pipe-1", "call_abc").expect("read"),
+            "内容原文\nline2"
+        );
     }
 
     #[test]
@@ -197,7 +203,12 @@ mod tests {
         assert!(r.compressed);
         let raw = std::fs::read(&r.absolute_path).expect("raw read");
         assert_eq!(&raw[..2], &[0x1f, 0x8b]);
-        assert!(raw.len() < text.len() / 5, "gzip 应显著压缩：{} vs {}", raw.len(), text.len());
+        assert!(
+            raw.len() < text.len() / 5,
+            "gzip 应显著压缩：{} vs {}",
+            raw.len(),
+            text.len()
+        );
         assert_eq!(s.read("pipe-1", "call_big").expect("read"), text);
     }
 
@@ -234,7 +245,10 @@ mod tests {
     fn pipeline_id_also_sanitized() {
         let (s, dir) = store(false);
         let r = s.save("../escape", "k", "x").expect("save");
-        assert!(r.absolute_path.starts_with(dir.path()), "pipeline_id 消毒后必须落在 base 内");
+        assert!(
+            r.absolute_path.starts_with(dir.path()),
+            "pipeline_id 消毒后必须落在 base 内"
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@
 0.2 加载方式：被测插件的 _load_rules 通过 config.config_center 加载规则，
 config_center 已不在 0.2 装配中（仅 reference/0.1_src 留存），规则加载失败
 会导致 _match_rules 恒返回空。本测试改为直接从仓库根的
-config/isolation/security_rules.yaml 读取规则列表，经 config={"rules": ...}
+config/plugins/security_check/security_rules.yaml 读取规则列表，经 config={"rules": ...}
 注入插件，使 _match_rules 有真实规则可匹配。
 """
 
@@ -30,7 +30,7 @@ from plugin import SecurityCheckPlugin  # noqa: E402
 
 # 直接从仓库根读取安全规则，绕开已删除的 config.config_center。
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_RULES_FILE = _REPO_ROOT / "config" / "isolation" / "security_rules.yaml"
+_RULES_FILE = _REPO_ROOT / "config" / "plugins" / "security_check" / "security_rules.yaml"
 try:
     _SECURITY_RULES: list[dict] = (
         yaml.safe_load(_RULES_FILE.read_text(encoding="utf-8")) or {}

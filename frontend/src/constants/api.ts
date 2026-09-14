@@ -89,6 +89,8 @@ export const API_ENDPOINTS = {
     CONTRACT_STATUS: '/api/v1/plugins/contract-status',
     /** 插件启停（PUT，重启后内核真正生效） */
     ENABLED: (pluginId: string) => `/api/v1/plugins/${pluginId}/enabled`,
+    /** 反向依赖查询（ADR 2026-09-14 §2.4：卸载/禁用事前提醒数据源） */
+    DEPENDENTS: (pluginId: string) => `/api/v1/plugins/${pluginId}/dependents`,
   },
   /** 通用动作执行 - 内核 /api/v1/actions/execute（命令面板/快捷键/webview action 共用 transport） */
   ACTIONS: {

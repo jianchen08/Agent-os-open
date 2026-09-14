@@ -226,4 +226,119 @@ async fn rate_limit_is_per_plugin_independent() {
     );
 }
 
+// ── 未投递（delivered=0）路径：thread 无映射 / user 不在线 ──
+//
+// emit_inner 的 Thread/User 分支各自有「注册表定位失败 → 0」的一支：事件
+// 无接收方时不得 panic，返回值表达"零投递"，供 coordinator 记 dropped。
+
+#[tokio::test]
+async fn emit_to_thread_without_registration_delivers_zero() {
+    let registry = Arc::new(ConnectionRegistry::new());
+    let (sink, received) = MockSink::new();
+    registry.register("user-A", sink);
+    // 注册了连接但未建立 thread→user 映射：send_to_thread 定位失败。
+    let bus = FrontendEventBus::new(registry);
+
+    let delivered = bus
+        .emit(
+            "w",
+            "e",
+            json!({}),
+            EmitScope::Thread("thread-unmapped".into()),
+            "p",
+        )
+        .await;
+    assert_eq!(delivered, 0, "无 thread 映射 → 零投递");
+    assert!(received.lock().unwrap().is_empty(), "不应有事件到达");
+}
+
+#[tokio::test]
+async fn emit_to_offline_user_delivers_zero() {
+    let registry = Arc::new(ConnectionRegistry::new());
+    let bus = FrontendEventBus::new(registry);
+
+    // 用户从未注册连接（不在线）。
+    let delivered = bus
+        .emit("w", "e", json!({}), EmitScope::User("ghost".into()), "p")
+        .await;
+    assert_eq!(delivered, 0, "离线用户 → 零投递");
+}
+
+// ── 限流丢弃仍分配 sequence（重放连续性契约）──
+//
+// 被限流丢弃的事件必须照常占用 sequence：否则前端按 sequence 对账时出现空洞，
+// 且 coordinator 记录的 (delivered=0, seq) 与重放缓冲的 seq 序列错位。
+
+#[tokio::test]
+async fn rate_limited_events_still_consume_sequence() {
+    let registry = Arc::new(ConnectionRegistry::new());
+    let (sink, _received) = MockSink::new();
+    registry.register("user-A", sink);
+    registry.register_thread("thread-1", "user-A");
+    let bus = FrontendEventBus::with_rate_limit(
+        registry,
+        RateLimitConfig {
+            burst: 2,
+            refill_per_sec: 1,
+        },
+    );
+
+    // 全开测试订阅者包裹：默认无订阅者时 tracing 按 callsite 缓存 never-interest，
+    // 限流丢弃的 warn! format args 不会被求值（覆盖率盲区）；订阅者在场保证
+    // 丢弃路径的 warn 真实执行（断言仍是投递数/序语义，不 assert 日志内容）。
+    let mut seqs = Vec::new();
+    let mut delivered = Vec::new();
+    {
+        let _guard = tracing::subscriber::set_default(AlwaysSubscriber);
+        for _ in 0..5 {
+            let (n, seq) = bus
+                .emit_with_sequence(
+                    "w",
+                    "e",
+                    json!({}),
+                    EmitScope::Thread("thread-1".into()),
+                    "p",
+                )
+                .await;
+            delivered.push(n);
+            seqs.push(seq);
+        }
+    }
+
+    assert_eq!(
+        delivered,
+        vec![1, 1, 0, 0, 0],
+        "突发 2 条后进入丢弃：投递数应递减为 0"
+    );
+    assert_eq!(
+        seqs,
+        vec![1, 2, 3, 4, 5],
+        "丢弃事件仍占 sequence（无空洞，重放对账连续）"
+    );
+}
+
+/// 全开测试订阅者：`register_callsite` 返回 always-interest、`enabled` 恒真，
+/// 事件/span 记录全部 no-op。仅让 tracing 宏的 format args 被求值。
+struct AlwaysSubscriber;
+
+impl tracing::Subscriber for AlwaysSubscriber {
+    fn register_callsite(
+        &self,
+        _metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::always()
+    }
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::Id {
+        tracing::Id::from_u64(1)
+    }
+    fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+    fn event(&self, _event: &tracing::Event<'_>) {}
+    fn enter(&self, _span: &tracing::Id) {}
+    fn exit(&self, _span: &tracing::Id) {}
+}
+
 use serde_json::json;

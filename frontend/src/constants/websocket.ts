@@ -14,15 +14,28 @@ export enum WebSocketStatus {
 }
 
 /**
+ * 打包件（Electron 自定义协议 app://）下内核的固定回源地址。
+ *
+ * app:// 页面的 location 宿主是自定义协议而非内核，WS 无法从 location 派生；
+ * 内核固定监听 127.0.0.1:9100（与 electron/app-protocol.ts 的代理目标一致）。
+ */
+const PACKAGED_KERNEL_WS_ORIGIN = 'ws://127.0.0.1:9100'
+
+/**
  * 从 API_BASE_URL 派生 WebSocket URL
  * http://localhost:8988 -> ws://localhost:8988
  * https://example.com -> wss://example.com
  * 空字符串 -> 从当前页面 location 派生（适用于 Vite 代理模式）
+ *
+ * loc 参数注入便于单测（jsdom 的 window.location 不可伪造）。
  */
-function deriveWsUrl(apiUrl: string): string {
+export function deriveWsUrl(apiUrl: string, loc: Location = window.location): string {
   if (!apiUrl) {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${protocol}//${window.location.host}`
+    if (loc.protocol === 'app:') {
+      return PACKAGED_KERNEL_WS_ORIGIN
+    }
+    const protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${protocol}//${loc.host}`
   }
   const url = new URL(apiUrl)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'

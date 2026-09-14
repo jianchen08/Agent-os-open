@@ -21,7 +21,6 @@ magic 迁移不可观测，失败/半途中断时状态不明。内核启动时�
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -40,7 +39,7 @@ _DB_SUFFIXES = ("", "-wal", "-shm")
 #: config/ 下**内核保留段**——永不迁移（归属内核的准入/调度/鉴权配置，且
 #: 按 ADR 2026-09-13 这些路径在用户层同样被 denylist 拒绝，迁过去只会得到
 #: 一个永远读不到的文件）。与 config_service.rs 的 KERNEL_RESERVED_SEGMENTS 同源。
-_KERNEL_RESERVED = {"plugin_allowlist", "plugin_roots", "auth", "pipelines", "steps"}
+_KERNEL_RESERVED = {"kernel", "plugin_roots", "auth", "pipelines", "steps"}
 
 
 def _resolve_targets() -> tuple[Path, Path]:
@@ -130,6 +129,91 @@ def _same_file(a: Path, b: Path) -> bool:
         return False
 
 
+#: 接管登记文件名（ADR 2026-09-14 §2.2；schema 与 Rust 侧 user_space.rs 同源）。
+_OWNERSHIP_LEDGER = ".ownership.json"
+
+
+def _backfill_ownership(user_root: Path, config_rels: list[str], dry_run: bool) -> None:
+    """为已迁移的 config/ 文件补接管登记（ADR 2026-09-14 §2.5 存量收口）。
+
+    基线 = ``git show HEAD:config/<rel>`` 的内容 SHA-256（出厂真值）；非 git
+    环境或文件不在 HEAD 时记 null（漂移提示降级为弱提示）。账本已损坏则中止
+    补登记并要求人工修复——**绝不静默重置**（重置 = 全部接管失去凭证）。
+    """
+    import hashlib
+    import json
+    import subprocess
+    from datetime import UTC, datetime
+
+    ledger = user_root / "config" / _OWNERSHIP_LEDGER
+    entries: list[dict] = []
+    if ledger.is_file():
+        try:
+            loaded = json.loads(ledger.read_text(encoding="utf-8"))
+            if not isinstance(loaded, list):
+                raise ValueError("top-level must be a list")
+            entries = loaded
+        except ValueError as exc:
+            print(
+                f"[migrate] 接管登记账本损坏，跳过补登记（请人工修复 {ledger}）: {exc}",
+                file=sys.stderr,
+            )
+            return
+    known = {
+        str(e.get("path")).replace("\\", "/")
+        for e in entries
+        if isinstance(e, dict) and e.get("path")
+    }
+
+    def _factory_sha(rel: str) -> str | None:
+        try:
+            out = subprocess.run(  # noqa: S603 - 固定 argv，无 shell
+                ["git", "show", f"HEAD:config/{rel}"],  # noqa: S607
+                cwd=_REPO_ROOT,
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        return hashlib.sha256(out.stdout).hexdigest() if out.returncode == 0 else None
+
+    added = 0
+    for rel in config_rels:
+        rel_norm = str(rel).replace("\\", "/")
+        if rel_norm in known:
+            continue
+        sha = _factory_sha(rel_norm)
+        entries.append(
+            {
+                "path": rel_norm,
+                "seeded_from_sha256": sha,
+                "seeded_at": datetime.now(UTC).isoformat(),
+                "factory_version": None,
+            }
+        )
+        added += 1
+        if dry_run:
+            print(
+                f"  [登记] {rel_norm}（基线 sha256={'有' if sha else '未知，漂移提示将为弱提示'}）"
+            )
+
+    if dry_run or added == 0:
+        return
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ledger.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(ledger)
+    print(f"[migrate] 接管登记补录 {added} 条 → {ledger}")
+
+
+def _config_rel_of(src: Path) -> str | None:
+    """迁移源若是 config/ 下文件，返回相对 config 根的路径；否则 None。"""
+    try:
+        return str(src.relative_to(_REPO_ROOT / "config"))
+    except ValueError:
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="迁移存量部署到用户空间（ADR 2026-09-13）")
     parser.add_argument("--dry-run", action="store_true", help="只预览，不做任何改动")
@@ -154,10 +238,15 @@ def main() -> int:
         for label, src, dst in moves:
             mark = "覆盖" if dst.exists() and args.force else ("跳过(目标已存在)" if dst.exists() else "迁移")
             print(f"  [{mark}] {label}\n            {src}  ->  {dst}")
+        config_rels = [r for r in (_config_rel_of(src) for _, src, _ in moves) if r]
+        if config_rels:
+            print(f"\n[migrate] 迁移后将补接管登记 {len(config_rels)} 条（ADR 2026-09-14）：")
+            _backfill_ownership(user_root, config_rels, dry_run=True)
         print("\n去掉 --dry-run 执行。")
         return 0
 
     moved = skipped = 0
+    moved_config_rels: list[str] = []
     print()
     for label, src, dst in moves:
         if _same_file(src, dst):
@@ -173,8 +262,14 @@ def main() -> int:
         # 直接 move 会让在跑的进程指向已消失的路径。copy 后保留源（用户确认无虞
         # 后自行删除），是"可回滚"的保守选择（失败/误判都能退回旧状态）。
         shutil.copy2(src, dst)
+        rel = _config_rel_of(src)
+        if rel:
+            moved_config_rels.append(rel)
         print(f"  [完成] {label}\n           {src}  ->  {dst}")
         moved += 1
+
+    if moved_config_rels:
+        _backfill_ownership(user_root, moved_config_rels, dry_run=False)
 
     print(f"\n[migrate] 完成：迁移 {moved} 项，跳过 {skipped} 项。")
     print(

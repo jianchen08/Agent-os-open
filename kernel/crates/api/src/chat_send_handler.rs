@@ -35,7 +35,7 @@ use agentos_session::router::PipelineDispatcher;
 
 /// send_message 实际读取的顶层参数清单（防"配置↔代码"双轨漂移的代码侧锚点）。
 ///
-/// 与 `config/kernel_capabilities/chat.json` 的 `input_schema.properties` 集合
+/// 与 `config/kernel/kernel_capabilities/chat.json` 的 `input_schema.properties` 集合
 /// 必须一致——一致性由 kernel_capabilities::tests 的机械闸强制：加参数不改契约
 /// （或反之）测试即红。新增参数三处同步：本清单、契约文件、读取代码。
 #[allow(dead_code)] // 消费方是 kernel_capabilities::tests 机械闸（测试期使用）

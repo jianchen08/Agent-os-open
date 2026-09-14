@@ -88,6 +88,14 @@ pub(crate) fn pin_user_config_dir(dir: &Path) -> UserSpaceGuard {
     ])
 }
 
+/// 钉桩单个环境变量（进程全局态，与用户空间钉桩共用同一把锁与快照语义）。
+///
+/// `value = None` 清除该变量；同线程重复 pin 时后钉者赢，最后一个 guard drop
+/// 时恢复首个 guard 记下的原文。
+pub(crate) fn pin_env(key: &'static str, value: Option<&str>) -> UserSpaceGuard {
+    pin(&[(key, value.map(Path::new))])
+}
+
 fn pin(vars: &[(&'static str, Option<&Path>)]) -> UserSpaceGuard {
     // 本线程已接管中 → 重定向到本次传入的目标（**后钉者赢**），只加计数。
     //

@@ -23,7 +23,7 @@
   "config_files": [
     {
       "id": "spill",
-      "path": "config/system/spill_config.yaml",
+      "path": "config/plugins/pipeline_spill_guard/spill_config.yaml",
       "label": "spill_guard 兜底策略与存储配置"
     }
   ],

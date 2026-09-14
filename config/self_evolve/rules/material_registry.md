@@ -29,7 +29,7 @@
 | `plugins/shared/system/eval_harness/**` | 评测面本体（裁决权载体） |
 | `plugins/shared/modes/**` | 模式插件 |
 | `kernel/**` | 内核（架构公理） |
-| `.env`、`config/storage.yaml`、`config/isolation/**` | 运行底座与安全边界 |
+| `.env`、`config/kernel/storage.yaml`、`config/isolation/**` | 运行底座与安全边界 |
 | `config/rules/information_integrity_rules.md` | 信息完整性红线（main 硬约束引用） |
 | `config/rules/*security*.md` | 安全类规则 |
 | held-out 与 staging 受控目录（仓库外） | 裁决证据与写面 |

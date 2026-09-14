@@ -246,3 +246,106 @@ async def test_fetch_preview_real_function_three_states(
 
     install(FakeResp(200, png), boom=True)
     assert await server._fetch_preview(0) is None
+
+
+# ═══════════════ 插件身份与广播容错（plugin.py 缺口靶行） ═══════════════
+
+
+class TestPluginIdentityAndBroadcast:
+    def test_name_and_priority(self) -> None:
+        """插件身份常量：name=godot_context、priority=50（引用注入链位置契约）。"""
+        from plugin import GodotContextPlugin
+
+        p = GodotContextPlugin()
+
+        assert p.name == "godot_context"
+        assert p.priority == 50
+
+    async def test_emitter_failure_does_not_break_broadcast(self) -> None:
+        """订阅线程 emit 失败 → 仅留痕，其余线程照常收到（推送接收不反噬）。"""
+        import plugin as gc
+
+        class _FlakyEmitter:
+            def __init__(self) -> None:
+                self.delivered: list[str] = []
+
+            async def emit(self, event: str, payload: dict) -> None:
+                if payload["thread_id"] == "bad":
+                    raise RuntimeError("ws closed")
+                self.delivered.append(payload["thread_id"])
+
+        emitter = _FlakyEmitter()
+        gc.set_emitter(emitter)
+        try:
+            p = gc.GodotContextPlugin()
+            p.subscribe("bad")
+            p.subscribe("good")
+            result = await p.handle_push({
+                "type": "selection",
+                "signature": "sig-1",
+                "items": [{"name": "N", "type": "Node2D", "path": "Root/N"}],
+            })
+        finally:
+            gc.set_emitter(None)
+
+        assert result == {"status": "ok"}
+        assert emitter.delivered == ["good"], "单线程失败不得阻断其余订阅者"
+
+    async def test_broadcast_noop_without_emitter_or_subscribers(self) -> None:
+        """无 emitter 或无订阅者 → 广播直接返回；快照更新照常（不报错）。"""
+        import plugin as gc
+
+        gc.set_emitter(None)
+        p = gc.GodotContextPlugin()
+        await p.handle_push({"type": "selection", "signature": "s", "items": []})
+        assert p.snapshot()["signature"] == "s"
+
+        calls: list[tuple[str, dict]] = []
+
+        class _Emitter:
+            async def emit(self, event: str, payload: dict) -> None:
+                calls.append((event, payload))
+
+        gc.set_emitter(_Emitter())
+        try:
+            await p.handle_push({"type": "selection", "signature": "s2", "items": []})
+        finally:
+            gc.set_emitter(None)
+
+        assert calls == [], "无订阅者时不得广播"
+        assert p.snapshot()["signature"] == "s2"
+
+    @pytest.mark.parametrize(
+        ("items", "expect_position"),
+        [
+            ([{"name": "P", "type": "Node2D", "path": "Root/P", "position": [1, 2]}], True),
+            ([{"name": "P", "type": "Node2D", "path": "Root/P", "position": []}], False),
+            ([{"name": "P", "type": "Node2D", "path": "Root/P"}], False),
+        ],
+    )
+    async def test_reference_content_renders_position_only_when_present(
+        self, items: list[dict[str, Any]], expect_position: bool,
+    ) -> None:
+        """引用文本：position 非空才渲染 [position=...]（缺省不产生噪声字段）。"""
+        import plugin as gc
+        from pipeline.plugin import PluginContext
+
+        gc.set_emitter(None)
+        p = gc.GodotContextPlugin()
+        await p.handle_push({
+            "type": "selection",
+            "signature": "sig-ref",
+            "scene": {"path": "res://x.tscn"},
+            "items": items,
+        })
+
+        result = await p.execute(PluginContext(state={
+            "message_id": "msg-1",
+            "messages": [{"role": "user", "content": "看看这个", "seq": 3}],
+        }, config={}))
+
+        merged = result.state_updates["messages"]["_ops"][0]["msg"]["content"]
+        assert merged.startswith("看看这个\n\n")
+        assert '<reference source="godot" scene="res://x.tscn">' in merged
+        assert ("[position=" in merged) is expect_position
+        assert result.state_updates["godot.injected_for"] == "msg-1"

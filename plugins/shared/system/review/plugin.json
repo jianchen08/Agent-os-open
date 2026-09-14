@@ -336,7 +336,7 @@
   "config_files": [
     {
       "id": "triage_rules",
-      "path": "config/self_evolve/rules/triage_rules.yaml",
+      "path": "config/plugins/review/triage_rules.yaml",
       "label": "分诊与杠杆规则"
     }
   ]

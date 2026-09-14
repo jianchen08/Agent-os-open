@@ -6,7 +6,7 @@
 //! - L2 activation：eager/lazy/manual（loader 据此决定 load 时机）
 //! - L3 Invoked：运行时调用（引擎/工具/HTTP/钩子）
 //!
-//! 数据源：`config/plugins/default_profile.yaml`。
+//! 数据源：`config/kernel/default_profile.yaml`。
 //! 优先级：manifest 显式声明 > profile > defaults。
 
 use std::collections::HashMap;
@@ -70,20 +70,20 @@ impl PluginEnablement {
         self.corrupted
     }
 
-    /// 从 config_root 下的 `plugins/default_profile.yaml` 加载（缺失与损坏分化，K6）：
+    /// 从 config_root 下的 `kernel/default_profile.yaml` 加载（缺失与损坏分化，K6）：
     /// - 文件缺失 → 空 profile（全部走默认：enabled=true, lazy。文档化引导默认，保留）；
     /// - 解析失败 → 空 profile + corrupted 标记：显式禁用过的插件不得借"回退默认
     ///   启用"静默复活——保守全禁（is_enabled 恒 false），warn + 启动报告可见。
     ///
     /// 落点用户空间优先（ADR 2026-09-13-unified-user-root）：启停开关经
-    /// `PUT /plugins/{id}/enabled` 写到 `<USER_ROOT>/config/plugins/default_profile.yaml`，
+    /// `PUT /plugins/{id}/enabled` 写到 `<USER_ROOT>/config/kernel/default_profile.yaml`，
     /// 加载侧读同一份——否则用户关掉的插件重启后又自己回来了。
     pub fn load(config_root: &Path) -> Self {
         let path = agentos_core::user_space::resolve_config_path(
             config_root,
-            "plugins/default_profile.yaml",
+            "kernel/default_profile.yaml",
         )
-        .unwrap_or_else(|| config_root.join("plugins").join("default_profile.yaml"));
+        .unwrap_or_else(|| config_root.join("kernel").join("default_profile.yaml"));
         match std::fs::read_to_string(&path) {
             Ok(raw) => match serde_yaml::from_str::<PluginProfile>(&raw) {
                 Ok(p) => {
@@ -248,7 +248,7 @@ defaults:
     #[test]
     fn test_corrupted_profile_disables_everything() {
         let dir = tempfile::tempdir().unwrap();
-        let plugins_cfg = dir.path().join("plugins");
+        let plugins_cfg = dir.path().join("kernel");
         std::fs::create_dir_all(&plugins_cfg).unwrap();
         std::fs::write(
             plugins_cfg.join("default_profile.yaml"),

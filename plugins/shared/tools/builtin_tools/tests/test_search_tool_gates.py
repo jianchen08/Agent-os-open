@@ -134,3 +134,41 @@ class TestSearchSensitiveFileGate:
         )
         assert name.success is True
         assert [r["content"] for r in name.output["results"]] == ["sub.txt"]
+
+
+class TestWallClockBudget:
+    @pytest.mark.asyncio
+    async def test_timeout_returns_partial_with_marker(self, tmp_path: Path) -> None:
+        """D6 同源墙钟护栏：timeout_seconds=0 时立即截断，结果带截断标记与说明。"""
+        for i in range(50):
+            (tmp_path / f"needle{i:03d}.txt").write_text("content", encoding="utf-8")
+        result = await enhanced_search(
+            query="needle",
+            path=str(tmp_path),
+            search_type="filename",
+            workspace=str(tmp_path),
+            project_root=str(tmp_path),
+            timeout_seconds=-1.0,
+        )
+        assert result.success is True
+        assert result.metadata.get("truncated") is True
+        assert "超时" in (result.metadata.get("message") or "")
+        # 截断前可能已有部分命中，但必须远小于总量（未走完全树）
+        assert len(result.output["results"]) < 50
+
+    @pytest.mark.asyncio
+    async def test_generous_budget_completes(self, tmp_path: Path) -> None:
+        """正常预算下不误标截断（找到全部命中且未触发超时）。"""
+        for i in range(5):
+            (tmp_path / f"needle{i}.txt").write_text("content", encoding="utf-8")
+        result = await enhanced_search(
+            query="needle",
+            path=str(tmp_path),
+            search_type="filename",
+            workspace=str(tmp_path),
+            project_root=str(tmp_path),
+            timeout_seconds=30.0,
+        )
+        assert result.success is True
+        assert result.metadata.get("truncated") is False
+        assert len(result.output["results"]) == 5

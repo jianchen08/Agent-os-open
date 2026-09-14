@@ -165,8 +165,8 @@ def _setup_layout_env(srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         (pkgs / name / "lib" / "index.js").write_text("export {};", encoding="utf-8")
 
     cfg_root = tmp_path / "root"
-    (cfg_root / "config").mkdir(parents=True)
-    (cfg_root / "config" / "dsh_adapter.yaml").write_text(
+    (cfg_root / "config" / "plugins" / "dsh_adapter").mkdir(parents=True)
+    (cfg_root / "config" / "plugins" / "dsh_adapter" / "dsh_adapter.yaml").write_text(
         "plugins:\n  disabled-tool:\n    enabled: false\n", encoding="utf-8"
     )
 

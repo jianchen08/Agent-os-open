@@ -135,11 +135,23 @@ class TestHighRiskSwitch:
 
 class TestValidationAndQuery:
     @pytest.mark.asyncio
-    async def test_非法mode返回400(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        ("bad_mode", "why"),
+        [
+            ("hack_mode", "任意非法值"),
+            # BUG-6 语义锚定：「高」不是权限档位（档位只有 default/accept_edits/
+            # auto/bypass 四档，黑名单制无"逐调用必确认"档）。若未来要引入新档，
+            # 必须连同意语义一起改这里，不允许只改前端文案静默放行。
+            ("high", "GUI 测试误传的思考强度档名"),
+        ],
+    )
+    async def test_非法mode返回400(
+        self, monkeypatch: pytest.MonkeyPatch, bad_mode: str, why: str
+    ) -> None:
         _mock_hi(monkeypatch, "confirm")
-        resp = await server_mod.http_handle(**_make_http_post("p1", "hack_mode"))
+        resp = await server_mod.http_handle(**_make_http_post("p1", bad_mode))
         result = _decode(resp)
-        assert result["switched"] is False
+        assert result["switched"] is False, why
         assert "invalid mode" in result.get("error", "")
 
     @pytest.mark.asyncio
@@ -190,7 +202,7 @@ class TestSwitchThenExecuteE2E:
     # _load_rules 回退内联默认（无 curl 关键词），对标用例会错误放行。
     _REPO_ROOT = Path(__file__).resolve().parent.parent
     _SECURITY_RULES: list[dict[str, Any]] = (
-        yaml.safe_load((_REPO_ROOT / "config" / "isolation" / "security_rules.yaml").read_text(encoding="utf-8")) or {}
+        yaml.safe_load((_REPO_ROOT / "config" / "plugins" / "security_check" / "security_rules.yaml").read_text(encoding="utf-8")) or {}
     ).get("rules", [])
 
     def _ctx_for(self, command: str) -> Any:

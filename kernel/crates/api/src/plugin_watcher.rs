@@ -1280,7 +1280,7 @@ pub struct PluginWatcher {
     /// （与启动期注册循环对齐）；None = 不过滤（旧行为/测试）。
     enablement: Option<PluginEnablement>,
     /// enablement 重读根（bin 装配时传 config_root）。Some 时每次 sync 前从
-    /// `plugins/default_profile.yaml` 重读：PUT enabled 写 profile + 改
+    /// `kernel/default_profile.yaml` 重读：PUT enabled 写 profile + 改
     /// enabled_plugin_ids，而注入的 `enablement` 是 boot 快照，卸载→重装的
     /// 插件按旧快照判定会静默撤销运行期禁用——每次 sync 现读消除快照分歧。
     /// sync 稀疏、文件小，重读成本可忽略；None（测试 with_enablement 注入）
@@ -1372,7 +1372,7 @@ impl PluginWatcher {
     }
 
     /// 注入 profile 重读根（生产装配）：每次 sync 前从
-    /// `<config_root>/plugins/default_profile.yaml` 重读 enablement，消除
+    /// `<config_root>/kernel/default_profile.yaml` 重读 enablement，消除
     /// boot 快照与运行期 PUT enabled 写盘的分歧（见字段注释）。
     pub fn with_profile_reload(mut self, config_root: PathBuf) -> Self {
         self.profile_reload_root = Some(config_root);

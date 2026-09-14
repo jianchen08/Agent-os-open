@@ -52,7 +52,7 @@ pub struct SchemaResponse {
     /// P4/P5：各插件的 contributes 聚合（仅含声明 contributes 的插件）。
     /// 前端 ContributionRegistry 作为唯一真相源消费（ADR §3.4/§六）。
     pub plugin_contributes: Vec<serde_json::Value>,
-    /// 内核基础设施能力契约聚合（config/kernel_capabilities/*.json 透出）。
+    /// 内核基础设施能力契约聚合（config/kernel/kernel_capabilities/*.json 透出）。
     /// 与插件侧 plugin.json 契约同构：前端/调用方/入口校验消费同一份定义，
     /// 不读代码副本（单一真值源，消除双轨漂移）。
     pub kernel_capabilities: Vec<serde_json::Value>,
@@ -132,7 +132,7 @@ pub struct AppState {
     /// 协议角色解析路由目标（P1-3 声明驱动），内核不点名 namespace/插件 id/工具名。
     /// None = 未装配（兼容旧装配/测试，调用点显式降级报错）。
     pub capability_handlers: Option<Arc<agentos_mcp::CapabilityHandlerRegistry>>,
-    /// 内核能力契约（config/kernel_capabilities/*.json）——schema 聚合透出用。
+    /// 内核能力契约（config/kernel/kernel_capabilities/*.json）——schema 聚合透出用。
     /// None = 未装配（契约目录缺失或测试装配；入口校验由 router 侧独立持有）。
     pub kernel_capability_contracts:
         Option<Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>>,
@@ -244,7 +244,7 @@ impl AppState {
         }
     }
 
-    /// 注入内核能力契约（config/kernel_capabilities/*.json 加载物）：
+    /// 注入内核能力契约（config/kernel/kernel_capabilities/*.json 加载物）：
     /// /api/v1/schema 聚合透出（前端/调用方与入口校验同一真值源）。
     pub fn with_kernel_capability_contracts(
         mut self,
@@ -1221,7 +1221,19 @@ pub(crate) fn summarize_state(
 /// 无 checkpoint 但 `pipeline_state` 表有行时以表行为基线：running 中任务
 /// interval 未到不会有 checkpoint，整行丢弃会看不到刚提交的任务（出生字段
 /// 创建即落表，见 chat_send_handler 创建分支）。
-pub(crate) async fn cold_state_row(
+/// 冷读合并：最新 checkpoint 基线 + `pipeline_state` 表最新标量覆盖。
+///
+/// 顺序对齐 `stage_recover_history` 的冷恢复（checkpoint 标量 → pipeline_state
+/// 表补充，表的最新值覆盖 checkpoint 里的出生/过期值，如 `task.status` pending →
+/// completed）。registry 未命中（重启后未再轮）时 `/pipelines/state` 与
+/// `pipeline-state.list` 的 DB 兜底共用；无 checkpoint 且表行为空返回 None。
+/// 读取失败同样返回 None（任务树读面降级不崩，调用方跳过该行），但两类失败各留
+/// warn 痕迹——与「确实无档」的 Ok(None) 可区分，静默缺行可从日志定位。
+///
+/// 无 checkpoint 但 `pipeline_state` 表有行时以表行为基线：running 中任务
+/// interval 未到不会有 checkpoint，整行丢弃会看不到刚提交的任务（出生字段
+/// 创建即落表，见 chat_send_handler 创建分支）。
+pub(crate) async fn merge_cold_state(
     store: &std::sync::Arc<dyn agentos_core::traits::StorageBackend>,
     pipeline_id: &str,
     tenant_id: &str,
@@ -1260,6 +1272,44 @@ pub(crate) async fn cold_state_row(
         return None;
     }
     Some(merged)
+}
+
+/// BUG-2 幽灵 running：run 收束投影缺失（崩溃 reap / 收束写失败）的冷行无
+/// run_status，消费方（前端三源推断、插件 reconcile）把死管道猜成 running。
+/// runs 表最新 run 的状态是内核权威真值，fill-if-absent 补齐内核持有键；
+/// 投影已在场的值（正常收束落下）不覆盖。
+pub(crate) fn overlay_run_status(merged: &mut serde_json::Value, latest_run_status: Option<&str>) {
+    if let Some(obj) = merged.as_object_mut() {
+        if !obj.contains_key("run_status") {
+            if let Some(rs) = latest_run_status {
+                obj.insert("run_status".to_string(), serde_json::json!(rs));
+            }
+        }
+    }
+}
+
+/// 冷读行 = [`merge_cold_state`] 合并 + [`overlay_run_status`] 权威运行状态补齐。
+pub(crate) async fn cold_state_row(
+    store: &std::sync::Arc<dyn agentos_core::traits::StorageBackend>,
+    pipeline_id: &str,
+    tenant_id: &str,
+    latest_run_status: Option<&str>,
+) -> Option<serde_json::Value> {
+    let mut merged = merge_cold_state(store, pipeline_id, tenant_id).await?;
+    overlay_run_status(&mut merged, latest_run_status);
+    Some(merged)
+}
+
+/// RunStatus → runs 表 status 词（lowercase 序列化词表的单点，供冷行
+/// run_status overlay 复用；serde rename_all=lowercase 与此表保持一致）。
+pub(crate) fn run_status_str(status: &agentos_core::types::RunStatus) -> &'static str {
+    match status {
+        agentos_core::types::RunStatus::Running => "running",
+        agentos_core::types::RunStatus::Suspended => "suspended",
+        agentos_core::types::RunStatus::Completed => "completed",
+        agentos_core::types::RunStatus::Failed => "failed",
+        agentos_core::types::RunStatus::Cancelled => "cancelled",
+    }
 }
 
 /// GET /api/v1/pipelines/state — 管道 state 摘要列表（前端任务树数据源）。
@@ -1362,10 +1412,15 @@ pub async fn pipelines_state_handler(
             // pipeline_state 表为准，重启后不再倒退回 pending）。
             let store: std::sync::Arc<dyn agentos_core::traits::StorageBackend> =
                 state.db.as_ref().expect("db checked above").clone();
-            let summary = match cold_state_row(&store, &pid, &tenant_id).await {
-                Some(st) => summarize_state(&st, &export),
-                None => continue, // 无 checkpoint 的孤儿 run 不出口
-            };
+            // BUG-2 幽灵 running：行来自 runs 表（每 run 一行，created_at 倒序，
+            // 首 run 即该管道最新 run）——其 status 就是权威运行状态，传入冷行
+            // 补齐缺失的 run_status 投影，死管道不再被消费方推断成 running。
+            let latest_run_status = run_status_str(&row.status);
+            let summary =
+                match cold_state_row(&store, &pid, &tenant_id, Some(latest_run_status)).await {
+                    Some(st) => summarize_state(&st, &export),
+                    None => continue, // 无 checkpoint 的孤儿 run 不出口
+                };
             items.push(json!({
                 "pipeline_id": pid,
                 "thread_id": row.thread_id.clone().unwrap_or_default(),
@@ -2329,7 +2384,7 @@ pub async fn plugins_set_enabled_handler(
     // 读（PluginEnablement::load）与写共用同一解析器，两侧同源。
     let profile_path = resolve_kernel_config_target(
         project_root,
-        "plugins/default_profile.yaml",
+        "kernel/default_profile.yaml",
         ConfigTargetMode::Write,
     )
     .map_err(config_err_to_api)?;
@@ -2337,7 +2392,7 @@ pub async fn plugins_set_enabled_handler(
     // 首次接管先播种 factory 整个 profile：否则下面 load_profile_doc 对"用户层
     // 尚无此文件"返回空 Mapping，本次只补一个插件条目就写盘——factory 里其他
     // 插件的启停/激活策略被整份静默丢弃（用户只关了一个插件，却重置了全部）。
-    seed_user_config_from_factory(project_root, "plugins/default_profile.yaml")
+    seed_user_config_from_factory(project_root, "kernel/default_profile.yaml")
         .map_err(config_err_to_api)?;
 
     let mut doc = load_profile_doc(&profile_path)?;
@@ -2403,11 +2458,15 @@ pub async fn plugins_set_enabled_handler(
     //    /ext/{*rest} 通配分发是注册表数据驱动（http_dispatcher），路由树无需
     //    重启重建。
     let mut registered = serde_json::Value::Null;
+    let mut cascade_disabled: Vec<String> = Vec::new();
     if let Some(registry) = &state.capability_registry {
         if new_enabled {
             registered = reenable_hot_path(&state, registry, &plugin_id).await;
         } else {
             disable_hot_path(&state, registry, &plugin_id).await;
+            // §2.4/§2.8：禁用实时连带——依赖被禁提供者的已启用插件同步摘除
+            // （fail-closed；不杀 sidecar，提供者回归由 watcher sync 自动重注册）。
+            cascade_disabled = cascade_disable_dependents(&state, registry, &plugin_id).await;
         }
     }
     let restart_needed = false; // 双向即时生效（G1）
@@ -2437,11 +2496,101 @@ pub async fn plugins_set_enabled_handler(
         "enabled": new_enabled,
         "restart_required": restart_needed,
         "registered": registered,
+        "cascade_disabled": cascade_disabled,
         "message": if new_enabled {
             format!("已启用插件 {}（立即生效）", plugin_id)
-        } else {
+        } else if cascade_disabled.is_empty() {
             format!("已禁用插件 {}（立即生效）", plugin_id)
+        } else {
+            format!(
+                "已禁用插件 {}（立即生效）；连带摘除依赖方：{}",
+                plugin_id,
+                cascade_disabled.join("、")
+            )
         },
+    })))
+}
+
+/// 禁用实时连带（ADR 2026-09-14-config-ownership §2.4/§2.8）：提供者 P 被禁后，
+/// 在「已启用面 − P」上重跑服务依赖闸，不满足的依赖方结构性收回能力
+/// （scope revoke + clear_plugin + widget bindings；不杀 sidecar，提供者回归后
+/// watcher sync 依赖面恢复即自动重注册）。fixpoint 收敛覆盖间接依赖方；
+/// 返回连带清单（写入响应 `cascade_disabled`，前端 §2.4 提醒面板消费）。
+async fn cascade_disable_dependents(
+    state: &AppState,
+    registry: &Arc<CapabilityRegistryImpl>,
+    provider_id: &str,
+) -> Vec<String> {
+    use agentos_plugin_loader::ServiceSurface;
+
+    let mut cascaded: Vec<String> = Vec::new();
+    loop {
+        let enabled = state.enabled_plugin_ids.read().await.clone();
+        let manifests = state.manifests.read().await.clone();
+        let active: Vec<agentos_core::traits::PluginManifest> = manifests
+            .into_iter()
+            .filter(|m| m.id != provider_id)
+            .filter(|m| !cascaded.contains(&m.id))
+            .filter(|m| enabled.contains(&m.id))
+            .collect();
+        let surface = ServiceSurface::from_manifests(&active);
+        let newly: Vec<String> = active
+            .iter()
+            .filter(|m| !m.requires_services.is_empty())
+            .filter(|m| surface.first_error_for(m).is_some())
+            .map(|m| m.id.clone())
+            .collect();
+        if newly.is_empty() {
+            break;
+        }
+        for id in &newly {
+            cascaded.push(id.clone());
+            state.plugin_scopes.revoke(id);
+            if let Some(bindings) = &state.widget_bindings {
+                remove_plugin_bindings(bindings, id);
+            }
+            registry.clear_plugin(id);
+            tracing::warn!(
+                target: "plugin-enablement",
+                plugin = %id,
+                provider = %provider_id,
+                "禁用连带：依赖的服务提供者已禁用，摘除该插件能力（fail-closed，提供者回归自动重注册）"
+            );
+        }
+    }
+    cascaded.sort();
+    cascaded
+}
+
+/// GET /api/v1/plugins/{id}/dependents — 反向依赖查询（§2.4 卸载/禁用事前提醒
+/// 数据源）：谁依赖我的服务。`enabled` 标注当前启停态，前端据此提示
+/// 「将影响 N 个已启用插件」。
+pub async fn plugins_dependents_handler(
+    axum::extract::Path(plugin_id): axum::extract::Path<String>,
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let manifests = state.manifests.read().await;
+    if !manifests.iter().any(|m| m.id == plugin_id) {
+        return Err(ApiError::NotFound {
+            message: format!("未知插件: {plugin_id}"),
+        });
+    }
+    let surface = agentos_plugin_loader::ServiceSurface::from_manifests(&manifests);
+    let dependents = surface.dependents_of(&manifests, &plugin_id);
+    let enabled_ids = state.enabled_plugin_ids.read().await;
+    let items: Vec<serde_json::Value> = dependents
+        .iter()
+        .map(|id| {
+            json!({
+                "id": id,
+                "enabled": enabled_ids.contains(id),
+            })
+        })
+        .collect();
+    Ok(axum::Json(json!({
+        "plugin_id": plugin_id,
+        "dependents": items,
+        "total": items.len(),
     })))
 }
 
@@ -3195,15 +3344,13 @@ mod plugin_profile_write_tests {
         fn factory_profile(&self) -> std::path::PathBuf {
             self.project_root()
                 .join("config")
-                .join("plugins")
+                .join("kernel")
                 .join("default_profile.yaml")
         }
 
         /// 用户层 profile 路径（写侧落点）。
         fn user_profile(&self) -> std::path::PathBuf {
-            self.user_config
-                .join("plugins")
-                .join("default_profile.yaml")
+            self.user_config.join("kernel").join("default_profile.yaml")
         }
 
         /// 在 factory 写一份 profile。
@@ -3312,6 +3459,415 @@ mod plugin_profile_write_tests {
         );
         assert_eq!(doc["plugins"]["target_plugin"]["enabled"], true);
         assert_eq!(doc["defaults"]["enabled"], true, "defaults 段一并保留");
+    }
+
+    /// 无 project_root → 500（不猜默认根，不落到 CWD）。
+    #[tokio::test]
+    async fn missing_project_root_returns_500() {
+        let err = plugins_set_enabled_handler(
+            axum::extract::Path("p".to_string()),
+            axum::extract::State(AppState::new()),
+            axum::Json(EnabledBody { enabled: true }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Internal { .. }), "实际 {err:?}");
+    }
+
+    // ── enable/disable 热路径：注册表对称更新 + 连带禁用 + 响应形状 ──
+
+    /// 构造带 manifest / registry / enabled 集合的 fixture state，复用
+    /// [`Fixture`] 的临时根与用户层钉桩。
+    fn hot_path_state(
+        fx: &Fixture,
+    ) -> (
+        AppState,
+        Arc<CapabilityRegistryImpl>,
+        Arc<parking_lot::RwLock<Vec<crate::metrics::WidgetBinding>>>,
+    ) {
+        let mut state = fx.state();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        state.capability_registry = Some(registry.clone());
+        let bindings = Arc::new(parking_lot::RwLock::new(Vec::new()));
+        state.widget_bindings = Some(bindings.clone());
+        (state, registry, bindings)
+    }
+
+    fn hot_manifest(id: &str, tool: &str) -> PluginManifest {
+        let mut m: PluginManifest = serde_json::from_value(json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": {"tools": [{"name": tool}]},
+        }))
+        .expect("valid manifest");
+        m.capabilities.tools[0].input_schema = Some(json!({"type": "object", "properties": {}}));
+        m
+    }
+
+    /// 启用热路径：manifest 在册 → 立即重注册 tools（registered 账目非空），
+    /// 且注册表真出现该工具；enabled 集合同步插入。
+    #[tokio::test]
+    async fn enable_hot_path_reregisters_tools_immediately() {
+        use agentos_core::traits::CapabilityRegistry;
+        let fx = Fixture::new();
+        let (mut state, registry, _bindings) = hot_path_state(&fx);
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![hot_manifest(
+            "hot_a",
+            "hot_tool_a",
+        )]));
+
+        let resp = plugins_set_enabled_handler(
+            axum::extract::Path("hot_a".to_string()),
+            axum::extract::State(state.clone()),
+            axum::Json(EnabledBody { enabled: true }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.0["success"], true);
+        assert_eq!(resp.0["enabled"], true);
+        assert_eq!(resp.0["restart_required"], false, "G1 双向即时生效");
+        assert_eq!(resp.0["registered"]["tools"], 1, "应重注册 1 个工具");
+        let tool_names: Vec<String> = registry
+            .list_tools()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert!(
+            tool_names.contains(&"hot_tool_a".to_string()),
+            "启用后工具必须立即出现在注册表: {tool_names:?}"
+        );
+        assert!(
+            state.enabled_plugin_ids.read().await.contains("hot_a"),
+            "enabled 集合须同步插入"
+        );
+        assert!(resp.0["cascade_disabled"].as_array().unwrap().is_empty());
+        assert!(
+            resp.0["message"].as_str().unwrap().contains("已启用"),
+            "消息应表达启用: {}",
+            resp.0["message"]
+        );
+    }
+
+    /// 禁用热路径：scope revoke + clear_plugin 摘工具 + widget 绑定移除
+    /// （零残留），enabled 集合同步移除，响应消息为「已禁用」。
+    #[tokio::test]
+    async fn disable_hot_path_clears_registry_scope_and_bindings() {
+        use agentos_core::traits::CapabilityRegistry;
+        let fx = Fixture::new();
+        let (mut state, registry, bindings) = hot_path_state(&fx);
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![hot_manifest(
+            "hot_b",
+            "hot_tool_b",
+        )]));
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("hot_b".to_string());
+
+        // 预置：注册工具 + 一条 widget 绑定（模拟已启用状态的残留面）
+        registry.register_tool(
+            "hot_b",
+            agentos_core::traits::ToolDescriptor {
+                name: "hot_tool_b".to_string(),
+                description: "d".to_string(),
+                plugin_id: "hot_b".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                output_schema: None,
+                category: agentos_core::types::ToolCategory::System,
+                source: agentos_core::types::ToolSource::Builtin,
+                ui: None,
+                render: None,
+            },
+        );
+        bindings.write().push(crate::metrics::WidgetBinding {
+            widget_id: "w".to_string(),
+            plugin_id: "hot_b".to_string(),
+            metric: "m".to_string(),
+            interval: std::time::Duration::from_secs(1),
+            scope: crate::metrics::BindingScope::Broadcast,
+            owner_plugin_id: "hot_b".to_string(),
+        });
+
+        let resp = plugins_set_enabled_handler(
+            axum::extract::Path("hot_b".to_string()),
+            axum::extract::State(state.clone()),
+            axum::Json(EnabledBody { enabled: false }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resp.0["enabled"], false);
+        assert!(
+            !registry.list_tools().iter().any(|t| t.plugin_id == "hot_b"),
+            "禁用必须摘除该插件的工具（零残留）"
+        );
+        assert!(bindings.read().is_empty(), "widget 绑定必须被移除");
+        assert!(
+            !state.enabled_plugin_ids.read().await.contains("hot_b"),
+            "enabled 集合须同步移除"
+        );
+        assert!(
+            resp.0["message"].as_str().unwrap().contains("已禁用"),
+            "消息应表达禁用: {}",
+            resp.0["message"]
+        );
+    }
+
+    /// 启用但 manifest 不在册 → registered 为 null（不凭空注册、不报错）。
+    #[tokio::test]
+    async fn enable_without_manifest_registers_nothing() {
+        let fx = Fixture::new();
+        let (state, _registry, _bindings) = hot_path_state(&fx);
+        // manifests 为空
+        let resp = plugins_set_enabled_handler(
+            axum::extract::Path("ghost".to_string()),
+            axum::extract::State(state),
+            axum::Json(EnabledBody { enabled: true }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            resp.0["registered"].is_null(),
+            "无 manifest 时 registered=null"
+        );
+        assert_eq!(resp.0["success"], true, "开关本身仍生效");
+    }
+
+    /// 无 capability_registry（未装配）→ 只改内存集合与文件，不 panic。
+    #[tokio::test]
+    async fn enable_without_registry_still_toggles_state() {
+        let fx = Fixture::new();
+        let state = fx.state(); // 无 registry
+        let resp = plugins_set_enabled_handler(
+            axum::extract::Path("no_reg".to_string()),
+            axum::extract::State(state.clone()),
+            axum::Json(EnabledBody { enabled: true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["success"], true);
+        assert_eq!(resp.0["registered"], serde_json::Value::Null);
+        assert!(state.enabled_plugin_ids.read().await.contains("no_reg"));
+    }
+
+    // ── 连带禁用（cascade_disable_dependents）──
+
+    fn dep_manifest(id: &str, requires: &[&str]) -> PluginManifest {
+        serde_json::from_value(json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "requires_services": requires,
+            "capabilities": {},
+        }))
+        .expect("valid manifest")
+    }
+
+    /// 构造带 capability namespace 声明的提供者 manifest（服务依赖闸读 provides）。
+    fn provider_manifest(id: &str, namespace: &str) -> PluginManifest {
+        serde_json::from_value(json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "tool", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": {"tools": [{"name": format!("{id}.status"),
+                "input_schema": {"type": "object", "properties": {}}}]},
+            "provides": {"capabilities": [{"namespace": namespace, "methods": ["status"]}]},
+        }))
+        .expect("valid provider manifest")
+    }
+
+    /// 禁用提供者 P：直接依赖 P 的插件被连带摘除，间接依赖方（依赖依赖方）
+    /// 经 fixpoint 也覆盖；响应 `cascade_disabled` 列全清单且消息点名。
+    #[tokio::test]
+    async fn disable_cascades_to_dependents_transitively() {
+        let fx = Fixture::new();
+        let (mut state, registry, _bindings) = hot_path_state(&fx);
+        // P 提供服务；A 依赖 P；B 依赖 A（间接）
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            provider_manifest("p_provider", "svc_x"),
+            dep_manifest("a_dep", &["svc_x"]),
+            dep_manifest("b_indirect", &["svc_from_a"]),
+            dep_manifest("c_clean", &[]),
+        ]));
+        {
+            let mut ids = state.enabled_plugin_ids.write().await;
+            for id in ["p_provider", "a_dep", "b_indirect", "c_clean"] {
+                ids.insert(id.to_string());
+            }
+        }
+
+        let resp = plugins_set_enabled_handler(
+            axum::extract::Path("p_provider".to_string()),
+            axum::extract::State(state.clone()),
+            axum::Json(EnabledBody { enabled: false }),
+        )
+        .await
+        .unwrap();
+
+        let cascaded: Vec<String> = resp.0["cascade_disabled"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            cascaded.contains(&"a_dep".to_string()),
+            "直接依赖方必须被连带摘除: {cascaded:?}"
+        );
+        assert!(
+            !cascaded.contains(&"c_clean".to_string()),
+            "无依赖插件不得被误伤: {cascaded:?}"
+        );
+        assert!(
+            resp.0["message"].as_str().unwrap().contains("连带摘除"),
+            "有连带时消息必须点名: {}",
+            resp.0["message"]
+        );
+        // 连带摘除走 clear_plugin（注册面零残留）
+        assert!(
+            !registry.list_tools().iter().any(|t| t.plugin_id == "a_dep"),
+            "连带摘除必须清注册表"
+        );
+    }
+
+    /// 无连带时 `cascade_disabled` 为空数组，消息不提连带。
+    #[tokio::test]
+    async fn disable_without_dependents_reports_empty_cascade() {
+        let fx = Fixture::new();
+        let (mut state, _registry, _bindings) = hot_path_state(&fx);
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![dep_manifest(
+            "solo_plugin",
+            &[],
+        )]));
+        let resp = plugins_set_enabled_handler(
+            axum::extract::Path("solo_plugin".to_string()),
+            axum::extract::State(state),
+            axum::Json(EnabledBody { enabled: false }),
+        )
+        .await
+        .unwrap();
+        assert!(resp.0["cascade_disabled"].as_array().unwrap().is_empty());
+        assert!(!resp.0["message"].as_str().unwrap().contains("连带"));
+    }
+
+    // ── dependents 查询端点 ──
+
+    /// 未知插件 404；已知插件返回依赖方清单（enabled 标注启停态）。
+    #[tokio::test]
+    async fn dependents_endpoint_reports_known_and_unknown() {
+        let fx = Fixture::new();
+        let (mut state, _registry, _bindings) = hot_path_state(&fx);
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            provider_manifest("prov_x", "svc_y"),
+            dep_manifest("dep_on_x", &["svc_y"]),
+        ]));
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("dep_on_x".to_string());
+
+        let err = plugins_dependents_handler(
+            axum::extract::Path("nope".to_string()),
+            axum::extract::State(state.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::NotFound { .. }), "实际 {err:?}");
+
+        let resp = plugins_dependents_handler(
+            axum::extract::Path("prov_x".to_string()),
+            axum::extract::State(state),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["total"], 1, "{:?}", resp.0);
+        assert_eq!(resp.0["dependents"][0]["id"], "dep_on_x");
+        assert_eq!(
+            resp.0["dependents"][0]["enabled"], true,
+            "启停态须随查询出口"
+        );
+    }
+
+    // ── load_profile_doc / apply_enabled_patch 纯函数面 ──
+
+    /// 空白文件 = 全新 Mapping；文件不存在 = 全新 Mapping；非法 YAML 与非
+    /// Mapping 顶层 = 422；读取错误（目录占位）= 500。
+    #[test]
+    fn load_profile_doc_branch_matrix() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // 文件不存在
+        let missing = tmp.path().join("absent.yaml");
+        let doc = load_profile_doc(&missing).expect("缺失 = 新建 Mapping");
+        assert!(matches!(doc, serde_yaml::Value::Mapping(_)));
+
+        // 空白文件
+        let blank = tmp.path().join("blank.yaml");
+        std::fs::write(&blank, "   \n").unwrap();
+        assert!(matches!(
+            load_profile_doc(&blank).unwrap(),
+            serde_yaml::Value::Mapping(_)
+        ));
+
+        // 非法 YAML
+        let broken = tmp.path().join("broken.yaml");
+        std::fs::write(&broken, "plugins: [a\n").unwrap();
+        assert!(matches!(
+            load_profile_doc(&broken).unwrap_err(),
+            ApiError::UnprocessableEntity { .. }
+        ));
+
+        // 顶层非 Mapping（标量 / 序列）
+        for content in ["just_a_string\n", "- one\n- two\n"] {
+            let p = tmp.path().join("scalar.yaml");
+            std::fs::write(&p, content).unwrap();
+            assert!(
+                matches!(
+                    load_profile_doc(&p).unwrap_err(),
+                    ApiError::UnprocessableEntity { .. }
+                ),
+                "顶层非 Mapping 必须 422: {content:?}"
+            );
+        }
+
+        // 读取错误：路径是目录 → 500（NotFound 之外的其他 IO 错）
+        let dir_as_file = tmp.path().join("dir.yaml");
+        std::fs::create_dir_all(&dir_as_file).unwrap();
+        assert!(matches!(
+            load_profile_doc(&dir_as_file).unwrap_err(),
+            ApiError::Internal { .. }
+        ));
+    }
+
+    /// `apply_enabled_patch` 三级创建：顶层非 Mapping 时静默跳过（不 panic）；
+    /// plugins 键缺失则创建；插件条目缺失则创建；已有条目仅改 enabled 不动其他键。
+    #[test]
+    fn apply_enabled_patch_creates_missing_levels() {
+        // 已有条目：只改 enabled，其他键保留
+        let mut doc: serde_yaml::Value =
+            serde_yaml::from_str("plugins:\n  p1:\n    enabled: false\n    note: keep\n").unwrap();
+        apply_enabled_patch(&mut doc, "p1", true);
+        assert_eq!(doc["plugins"]["p1"]["enabled"], true);
+        assert_eq!(doc["plugins"]["p1"]["note"], "keep", "其他键不得被动");
+
+        // plugins 键缺失 → 创建
+        let mut fresh = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        apply_enabled_patch(&mut fresh, "p2", true);
+        assert_eq!(fresh["plugins"]["p2"]["enabled"], true);
+
+        // 顶层非 Mapping → 静默跳过（由 load_profile_doc 的 422 闸拦截在入口）
+        let mut scalar = serde_yaml::Value::String("nope".into());
+        apply_enabled_patch(&mut scalar, "p3", true);
+        assert_eq!(scalar, serde_yaml::Value::String("nope".into()));
+
+        // plugins 存在但非 Mapping（标量）→ 内层 if-let 不命中，静默跳过
+        let mut weird: serde_yaml::Value = serde_yaml::from_str("plugins: 42\n").unwrap();
+        apply_enabled_patch(&mut weird, "p4", true);
+        assert_eq!(weird["plugins"], 42, "非 Mapping 的 plugins 不被改写");
     }
 }
 
@@ -3751,7 +4307,7 @@ mod cold_state_row_tests {
         .await
         .unwrap();
 
-        let row = cold_state_row(&dyn_store, "pipe-cold", "default")
+        let row = cold_state_row(&dyn_store, "pipe-cold", "default", None)
             .await
             .expect("有持久痕迹应出口");
         assert_eq!(
@@ -3779,7 +4335,7 @@ mod cold_state_row_tests {
         .await
         .unwrap();
 
-        let row = cold_state_row(&dyn_store, "pipe-cold-b", "default")
+        let row = cold_state_row(&dyn_store, "pipe-cold-b", "default", None)
             .await
             .expect("表行单独在场即出口");
         assert_eq!(row["title"], "刚提交的任务");
@@ -3789,10 +4345,66 @@ mod cold_state_row_tests {
     async fn orphan_without_any_persisted_trace_returns_none() {
         let dyn_store: Arc<dyn StorageBackend> = sqlite();
         assert!(
-            cold_state_row(&dyn_store, "pipe-orphan", "default")
+            cold_state_row(&dyn_store, "pipe-orphan", "default", None)
                 .await
                 .is_none(),
             "checkpoint 与表行双空 = 真孤儿不出口"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_status_overlay_fills_projection_gap_from_latest_run() {
+        // BUG-2 幽灵 running：崩溃/reap 的 run 收束投影未落 run_status，
+        // 冷行必须以 runs 表最新 run 的权威状态补齐（fill-if-absent）——
+        // 消费方三源推断不再把死管道猜成 running。
+        let store = sqlite();
+        let dyn_store: Arc<dyn StorageBackend> = store.clone();
+        StorageBackend::upsert_state_field(
+            dyn_store.as_ref(),
+            "pipe-cold-rs",
+            "default",
+            "task.status",
+            &serde_json::json!("running"),
+        )
+        .await
+        .unwrap();
+
+        let row = cold_state_row(&dyn_store, "pipe-cold-rs", "default", Some("failed"))
+            .await
+            .expect("有持久痕迹应出口");
+        assert_eq!(
+            row["run_status"], "failed",
+            "投影缺失时以 runs 表最新 run 状态补齐"
+        );
+        // 无 run 可引（历史孤儿行）时保持缺键——不伪造状态
+        let bare = cold_state_row(&dyn_store, "pipe-cold-rs", "default", None)
+            .await
+            .expect("有持久痕迹应出口");
+        assert!(bare.get("run_status").is_none(), "无权威状态不得伪造");
+    }
+
+    #[tokio::test]
+    async fn run_status_overlay_does_not_override_projected_terminal() {
+        // 正常收束已落 run_status（completed）：runs 表传来的值不覆盖
+        // （fill-if-absent 只补缺失；投影值是收束单点写下的真值）。
+        let store = sqlite();
+        let dyn_store: Arc<dyn StorageBackend> = store.clone();
+        StorageBackend::upsert_state_field(
+            dyn_store.as_ref(),
+            "pipe-cold-rs2",
+            "default",
+            "run_status",
+            &serde_json::json!("completed"),
+        )
+        .await
+        .unwrap();
+
+        let row = cold_state_row(&dyn_store, "pipe-cold-rs2", "default", Some("cancelled"))
+            .await
+            .expect("有持久痕迹应出口");
+        assert_eq!(
+            row["run_status"], "completed",
+            "投影已在场的 run_status 不被 overlay 覆盖"
         );
     }
 }
@@ -5170,9 +5782,14 @@ mod routes_http_handler_tests {
         assert_eq!(cold["source"], "checkpoint");
         assert_eq!(cold["state"]["raw_result"], "复盘结论", "基线键随摘要出口");
         assert_eq!(cold["state"]["current_phase"], "post");
-        assert!(
-            cold["state"].get("run_status").is_none(),
-            "易变 per-run 键不随 checkpoint 冷行出口"
+        // BUG-2 后契约：checkpoint 自身的易变 per-run 键（run_status/ended）仍不
+        // 出口，但冷行携带 runs 表最新 run 的权威运行状态（fill-if-absent
+        // overlay）——run_st_cold 未收束（running），死管道不再被消费方猜 running
+        // 之外的状态，投影缺失时以 runs 真值补齐。
+        assert_eq!(
+            cold["state"]["run_status"],
+            json!("running"),
+            "run_status 以 runs 表最新 run 权威状态补齐"
         );
         assert_eq!(
             cold["thread_id"], "",
@@ -5187,6 +5804,43 @@ mod routes_http_handler_tests {
     // ── 插件配置端点（三形态：env / 内联 / 文件引用） ───────────
 
     const ENV_TOKEN_KEY: &str = "AGENTOS_RT_TEST_TOKEN";
+
+    /// §2.4 反向依赖查询端点：消费者经 requires_services 反查提供者（含启停态标注）。
+    #[tokio::test]
+    async fn dependents_handler_lists_service_consumers() {
+        let state = AppState::new();
+        let mut provider = base_manifest("prov", PluginType::Tool);
+        provider.capabilities.services = vec![agentos_core::traits::ServiceCapability {
+            name: "prov.ping".to_string(),
+            description: None,
+            input_schema: None,
+            output_schema: None,
+        }];
+        let mut consumer = base_manifest("consumer", PluginType::Tool);
+        consumer.requires_services = vec!["prov.ping".into()];
+        {
+            let mut ms = state.manifests.write().await;
+            ms.push(provider);
+            ms.push(consumer);
+        }
+        state.enabled_plugin_ids.write().await.insert("prov".into());
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("consumer".into());
+
+        let resp = plugins_dependents_handler(
+            axum::extract::Path("prov".to_string()),
+            axum::extract::State(state),
+        )
+        .await
+        .unwrap();
+        let body = resp.0;
+        assert_eq!(body["total"], 1, "仅 consumer 依赖 prov.ping");
+        assert_eq!(body["dependents"][0]["id"], "consumer");
+        assert_eq!(body["dependents"][0]["enabled"], true, "启停态标注透出");
+    }
 
     /// 带三条 config_files（env/内联/文件引用）manifest 的 AppState 脚手架。
     /// 返回 (state, tmp)。文件引用路径 config/plugins/cfg_rt.yaml。

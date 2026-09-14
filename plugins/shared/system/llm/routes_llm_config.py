@@ -3,7 +3,7 @@
 api/concurrency/context-window/generic/cost-control 段不在此处
 （分别删除 / 归 cost_control 插件）。
 
-- 读写 config/models/llm.yaml（含 .env 的 ${VAR} 占位符解析与明文 key 落库
+- 读写 config/plugins/llm/llm.yaml（含 .env 的 ${VAR} 占位符解析与明文 key 落库
   语义），写入后清除内存缓存（invalidate_all_llm_caches /
   ConfigCenter.reload，best-effort null-guard——sidecar 进程内相关模块不可
   导入时跳过）；
@@ -80,14 +80,14 @@ def _resolve_project_root() -> Path:
     """
     here = Path(__file__).resolve().parent
     for candidate in [here, *here.parents]:
-        if (candidate / "config").is_dir() and (candidate / "config" / "models").is_dir():
+        if (candidate / "config").is_dir() and (candidate / "config" / "kernel").is_dir():
             return candidate
     # 兜底：回退 parent×4 语义。
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
 _PROJECT_ROOT = _resolve_project_root()
-_CONFIG_MODELS_DIR = _PROJECT_ROOT / "config" / "models"
+_CONFIG_MODELS_DIR = _PROJECT_ROOT / "config" / "plugins" / "llm"
 
 _LLM_YAML = _CONFIG_MODELS_DIR / "llm.yaml"
 _ENV_FILE = _PROJECT_ROOT / ".env"

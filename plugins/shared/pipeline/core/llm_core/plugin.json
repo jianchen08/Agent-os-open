@@ -51,16 +51,19 @@
   "granted_capabilities": [
     "tool-executor"
   ],
+  "requires_services": [
+    "llm"
+  ],
   "config_files": [
     {
       "id": "llm",
-      "path": "config/models/llm.yaml",
+      "path": "config/plugins/llm/llm.yaml",
       "label": "LLM 模型配置",
       "settings": false
     },
     {
       "id": "embedding",
-      "path": "config/models/embedding.yaml",
+      "path": "config/plugins/llm/embedding.yaml",
       "label": "向量模型配置",
       "fields": [
         {

@@ -104,8 +104,13 @@ describe('useControlledSlotBridge 注入', () => {
     ;(captured?.onChange as (v: Record<string, unknown>) => void)({ strength: 'high' })
     expect(set).toHaveBeenCalledWith('high')
 
-    // DOM：受控单字段 → compact 形态，按钮反映当前受控值「中」；other 正常渲染
-    await waitFor(() => expect(screen.getByRole('button', { name: '中' })).toBeInTheDocument())
+    // DOM：受控单字段 → compact 形态，触发器自标识「设置名：当前值」
+    // （BUG-6 回归：裸值可访问名会让 GUI 按「高」找权限档误中思考强度）；
+    // other 正常渲染
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '强度：中' })).toBeInTheDocument(),
+    )
+    expect(screen.queryByRole('button', { name: '中' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('X')).toBeInTheDocument()
   })
 })

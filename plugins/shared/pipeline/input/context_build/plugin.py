@@ -94,19 +94,41 @@ class ContextBuildPlugin(IInputPlugin):
             RuntimeError: agent yaml 读取或解析失败（原异常经 __cause__ 保留）。
         """
         import os
-        import yaml as _yaml
+        import sys
         from pathlib import Path
+
+        import yaml as _yaml
 
         if not agent_id:
             return {}
-        root = os.environ.get("AGENTOS_CONFIG_ROOT", "")
-        agents_dir = Path(root) / "agents" if root else None
-        if agents_dir is None or not agents_dir.is_dir():
+        # 双根解析（ADR 2026-09-14 §2.4）：用户配置层的 agents/ 优先——用户层
+        # 存在同路径文件即接管生效，factory 同名文件完全不参与；否则回落
+        # factory（与 Rust 侧 user_space::resolve_config_path 同构）。
+        candidates: list[Path] = []
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+            import user_space as _user_space
+
+            user_cfg = _user_space.user_config_dir()
+            if user_cfg:
+                candidates.append(Path(user_cfg) / "agents")
+        except Exception as exc:
+            logger.debug("[context_build] 用户配置层不可用（仅 factory）| err=%s", exc)
+        factory_root = os.environ.get("AGENTOS_CONFIG_ROOT", "")
+        if factory_root:
+            candidates.append(Path(factory_root) / "agents")
+        candidates = [d for d in candidates if d.is_dir()]
+        if not candidates:
             logger.debug(
-                "[context_build] agents 目录不存在（按默认配置运行）| root=%s", root
+                "[context_build] agents 目录不存在（按默认配置运行）| factory_root=%s",
+                factory_root,
             )
             return {}
-        found = self._find_agent_yaml(agents_dir, agent_id)
+        found = None
+        for agents_dir in candidates:
+            found = self._find_agent_yaml(agents_dir, agent_id)
+            if found is not None:
+                break
         if found is None:
             logger.debug("[context_build] 未找到 agent yaml（按默认配置运行）| agent_id=%s", agent_id)
             return {}

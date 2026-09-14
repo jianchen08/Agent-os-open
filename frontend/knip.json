@@ -1,0 +1,13 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "project": ["src/**/*.{ts,tsx}"],
+  "entry": [
+    "src/main.tsx",
+    "src/**/*.test.{ts,tsx}",
+    "tests/**/*.{ts,tsx}",
+    "e2e/**/*.ts",
+    "scripts/**/*.mjs"
+  ],
+  "ignore": ["dist/**", "coverage/**", "test-results/**", "probe-out/**"],
+  "ignoreExportsUsedInFile": true
+}

@@ -836,14 +836,62 @@ impl SqliteStore {
     /// 已结束（completed/failed/suspended）的 run 不受影响。返回被清扫的行数。
     /// 全租户清扫：注册用户一用户一租户，按租户过滤会让非 default 租户的
     /// 孤儿 run 永远卡 running——清扫是崩溃家政，不属于任何租户的数据边界。
+    ///
+    /// 同步修复内核持有的 `run_status` 状态投影（pipeline_state 表）：崩溃 run
+    /// 的收束投影没跑过，冷读行缺 run_status（或残留轮中写入的 running）会让
+    /// 消费方（/pipelines/state 三源推断、插件 reconcile）把死管道猜成 running
+    /// （BUG-2 幽灵执行中）。规则：缺失/残留 running → failed；已有终态（更早
+    /// 正常收束的真值）不覆盖，最新 run 状态的纠偏归读面 overlay。
     pub fn reap_orphan_runs(&self) -> Result<u64, StorageError> {
         let conn = self.conn.lock();
         let now = chrono::Utc::now().to_rfc3339();
+        // 先收集被清扫 run 的 (pipeline_id, tenant_id) 坐标（UPDATE 前抓，
+        // 清扫后 status 不再是 running）
+        let victims: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT pipeline_id, tenant_id FROM runs \
+                 WHERE status = 'running' AND pipeline_id IS NOT NULL AND pipeline_id != ''",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
         let rows = conn.execute(
             "UPDATE runs SET status = 'failed', ended_at = COALESCE(ended_at, ?1) \
              WHERE status = 'running'",
             rusqlite::params![now],
         )?;
+        for (pipeline_id, tenant_id) in victims {
+            let current: Option<String> = conn
+                .query_row(
+                    "SELECT field_value FROM pipeline_state \
+                     WHERE pipeline_id = ?1 AND field_key = 'run_status' AND tenant_id = ?2",
+                    rusqlite::params![pipeline_id, tenant_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let needs_fix = match current {
+                None => true,
+                Some(raw) => {
+                    serde_json::from_str::<serde_json::Value>(&raw)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .as_deref()
+                        == Some("running")
+                }
+            };
+            if !needs_fix {
+                continue;
+            }
+            let value = serde_json::json!("failed").to_string();
+            conn.execute(
+                "INSERT INTO pipeline_state (pipeline_id, field_key, field_value, tenant_id, updated_at) \
+                 VALUES (?1, 'run_status', ?2, ?3, ?4) \
+                 ON CONFLICT(pipeline_id, field_key, tenant_id) DO UPDATE SET field_value = ?2, updated_at = ?4",
+                rusqlite::params![pipeline_id, value, tenant_id, now],
+            )?;
+        }
         Ok(rows as u64)
     }
 

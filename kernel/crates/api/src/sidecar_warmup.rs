@@ -228,4 +228,184 @@ mod tests {
         let enabled = vec![manifest("alpha", HostType::Sidecar)];
         assert!(select_warmup_targets(&pipeline, &enabled).is_empty());
     }
+
+    // ── 逃生门与发射任务（生产入口 spawn_pipeline_sidecar_warmup） ──────
+
+    /// 逃生门 `AGENTOS_DISABLE_SIDECAR_WARMUP=1`：启动期跳过预热。
+    /// 用 mock invoker 断言"未产生任何宿主缓存"（纯懒加载语义）。
+    #[tokio::test]
+    async fn warmup_disabled_env_skips_entirely() {
+        let _guard = crate::test_env::pin_env("AGENTOS_DISABLE_SIDECAR_WARMUP", Some("1"));
+
+        let loader = Arc::new(test_support::MockLoader::new());
+        let m = manifest("alpha", HostType::Sidecar);
+        loader.add_manifest(m.clone());
+        let invoker = Arc::new(PluginInvokerImpl::new(loader));
+        let pipeline = Arc::new(single_step_pipeline("alpha"));
+
+        spawn_pipeline_sidecar_warmup(invoker.clone(), pipeline, vec![m]);
+        // 任务未发射：函数同步返回即已完成，无需等待（性质断言：在册宿主为空）。
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            invoker.host_proc_snapshots().await.is_empty(),
+            "逃生门开启时不得 spawn 任何宿主"
+        );
+    }
+
+    /// 逃生门只认精确 "1"：其他值（含 "true"/"0"）不放行。
+    #[test]
+    fn warmup_disabled_only_accepts_exact_one() {
+        for (value, expected) in [
+            (Some("1"), true),
+            (Some("0"), false),
+            (Some("true"), false),
+            (None, false),
+        ] {
+            let _guard = crate::test_env::pin_env("AGENTOS_DISABLE_SIDECAR_WARMUP", value);
+            assert_eq!(
+                warmup_disabled(),
+                expected,
+                "AGENTOS_DISABLE_SIDECAR_WARMUP={value:?} 的判定"
+            );
+        }
+    }
+
+    /// 空预热集（管道不引用 sidecar）→ 不发 spawn 任务，宿主缓存保持空。
+    #[tokio::test]
+    async fn empty_targets_short_circuits_without_spawn() {
+        let _guard = crate::test_env::pin_env("AGENTOS_DISABLE_SIDECAR_WARMUP", None);
+
+        let loader = Arc::new(test_support::MockLoader::new());
+        let m = manifest("beta", HostType::Sidecar);
+        loader.add_manifest(m.clone());
+        let invoker = Arc::new(PluginInvokerImpl::new(loader));
+        let pipeline = Arc::new(single_step_pipeline("alpha")); // 引用 alpha 而非 beta
+
+        spawn_pipeline_sidecar_warmup(invoker.clone(), pipeline, vec![m]);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            invoker.host_proc_snapshots().await.is_empty(),
+            "空集短路后不得 spawn 宿主"
+        );
+    }
+
+    /// 预热任务真发射：单插件预热失败（无插件目录 → 解释器解析失败）只 warn
+    /// 跳过，不 panic、不阻塞调用方；成功计数与失败计数各自收口。
+    /// 双组区分度：全失败（venv 缺失）与混合（native 成员 no-op Ok + sidecar 失败）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn warmup_task_records_ok_and_failed_sides() {
+        let _guard = crate::test_env::pin_env("AGENTOS_DISABLE_SIDECAR_WARMUP", None);
+
+        let loader = Arc::new(test_support::MockLoader::new());
+        let sidecar = manifest("warm_broken", HostType::Sidecar);
+        loader.add_manifest(sidecar.clone());
+        let invoker = Arc::new(PluginInvokerImpl::new(loader));
+
+        // 构造引用该 sidecar 的单步管道
+        let pipeline = Arc::new(single_step_pipeline("warm_broken"));
+        spawn_pipeline_sidecar_warmup(invoker.clone(), pipeline, vec![sidecar]);
+
+        // 失败路径照常返回（不 panic）；宿主缓存不得残留半成品条目。
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            invoker.host_proc_snapshots().await.is_empty(),
+            "预热失败后不得残留宿主缓存"
+        );
+    }
+
+    /// 预热成功路径：native（InProcess）成员 no-op Ok（预热集 select 已排
+    /// native，此处直接喂给 spawn 验证"混入 native 也不炸"的健壮性——预热
+    /// 集来自 select 双过滤，但 spawn 不做二次过滤）。
+    #[tokio::test]
+    async fn warmup_task_tolerates_native_member_in_input() {
+        let _guard = crate::test_env::pin_env("AGENTOS_DISABLE_SIDECAR_WARMUP", None);
+
+        let loader = Arc::new(test_support::MockLoader::new());
+        let native = manifest("warm_native", HostType::InProcess);
+        loader.add_manifest(native.clone());
+        let invoker = Arc::new(PluginInvokerImpl::new(loader));
+        let pipeline = Arc::new(single_step_pipeline("alpha"));
+
+        spawn_pipeline_sidecar_warmup(invoker.clone(), pipeline, vec![native]);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            invoker.host_proc_snapshots().await.is_empty(),
+            "native 成员 no-op：不产生宿主缓存"
+        );
+    }
+
+    /// 测试用最小 PluginLoader：只服务 warmup 的宿主构建（无 venv → Err）。
+    mod test_support {
+        use super::*;
+        use agentos_core::traits::{PluginLoader, PluginStatus};
+
+        pub struct MockLoader {
+            manifests: parking_lot::RwLock<HashMap<String, PluginManifest>>,
+        }
+
+        impl MockLoader {
+            pub fn new() -> Self {
+                Self {
+                    manifests: parking_lot::RwLock::new(HashMap::new()),
+                }
+            }
+
+            pub fn add_manifest(&self, manifest: PluginManifest) {
+                self.manifests.write().insert(manifest.id.clone(), manifest);
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl PluginLoader for MockLoader {
+            async fn discover(
+                &self,
+                _root_paths: &[&str],
+            ) -> Result<Vec<PluginManifest>, agentos_core::types::PluginError> {
+                Ok(self.manifests.read().values().cloned().collect())
+            }
+
+            fn validate_manifest(
+                &self,
+                _manifest: &PluginManifest,
+            ) -> Result<(), agentos_core::types::PluginError> {
+                Ok(())
+            }
+
+            async fn load(
+                &self,
+                plugin_id: &str,
+            ) -> Result<agentos_core::traits::LoadedPlugin, agentos_core::types::PluginError>
+            {
+                let manifests = self.manifests.read();
+                let manifest =
+                    manifests
+                        .get(plugin_id)
+                        .ok_or_else(|| agentos_core::types::PluginError {
+                            message: format!("plugin not found: {plugin_id}"),
+                            code: None,
+                            source: None,
+                        })?;
+                Ok(agentos_core::traits::LoadedPlugin {
+                    manifest: manifest.clone(),
+                    status: PluginStatus::Active,
+                    loaded_at: Some(chrono::Utc::now()),
+                })
+            }
+
+            async fn unload(
+                &self,
+                _plugin_id: &str,
+            ) -> Result<(), agentos_core::types::PluginError> {
+                Ok(())
+            }
+
+            fn get_status(&self, _plugin_id: &str) -> PluginStatus {
+                PluginStatus::Discovered
+            }
+
+            fn get_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
+                self.manifests.read().get(plugin_id).cloned()
+            }
+        }
+    }
 }

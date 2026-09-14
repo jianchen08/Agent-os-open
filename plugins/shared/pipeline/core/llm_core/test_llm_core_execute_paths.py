@@ -743,3 +743,38 @@ async def test_interrupted_partial_does_not_stamp_anchor(monkeypatch: Any) -> No
     assert result["raw_result"] == "半截"  # 确认走的是 partial 落库路径
     assert "track.messages_chars_at_llm" not in result
     assert "track.model_context_window" not in result
+
+
+# ─────────────────── 模型视觉能力标志（llm_supports_vision） ───────────────────
+
+
+async def test_result_stamps_supports_vision_true(monkeypatch: Any) -> None:
+    """模型声明 multimodal.supports_image=true → state 键为 True（注图闸门开）。"""
+    _inject_llm_config(monkeypatch)
+    import _config_models
+
+    monkeypatch.setitem(
+        _config_models._config["llm"]["models"]["deepseek-v4-pro"],
+        "multimodal",
+        {"supports_image": True, "supported_image_types": ["image/png", "image/jpeg"]},
+    )
+    caller = _FakeCaller({"success": True, "data": _ok_response()})
+    plugin = _make_plugin(caller)
+    state = {**_base_state(), "model_tier": "large"}
+
+    result = await plugin.execute(_make_ctx(state))
+
+    assert result["llm_supports_vision"] is True
+    assert plugin._supports_vision is True  # noqa: SLF001
+
+
+async def test_result_stamps_supports_vision_false_when_undeclared(monkeypatch: Any) -> None:
+    """模型未声明 multimodal → False（fail-closed：不注图，走文本引导）。"""
+    _inject_llm_config(monkeypatch)
+    caller = _FakeCaller({"success": True, "data": _ok_response()})
+    plugin = _make_plugin(caller)
+    state = {**_base_state(), "model_tier": "large"}
+
+    result = await plugin.execute(_make_ctx(state))
+
+    assert result["llm_supports_vision"] is False

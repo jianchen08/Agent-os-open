@@ -77,6 +77,17 @@ loop_bodies:
         router.duplicate_back_llm: false
       then: loop
       when: router.duplicate_back_llm == True
+    # 任务管道纯文本轮不终局（D2 一次性终局修复）：叶子执行者用嘴回答而未调
+    # 工具时，回 llm_core 继续——由 task_reminder 三信号注入提醒并按
+    # max_reminders 预算耗尽裁决（终态改写），兜底 end 只留给真终态。此前
+    # 兜底 end 使第 1 轮纯文本即整管终局（假绿 completed/task 恒 running，
+    # 2026-09-13 批次实锤多例）。task.id != none 限定任务管道；会话聊天管道
+    # （无 task.id）保持"文本即停"会话语义不变。
+    - set:
+        core_plugin: pipeline_llm_core
+        core_type: llm_call
+      then: loop
+      when: task.id != none and conversation_mode != True and task.status != 'completed' and task.status != 'failed' and task.status != 'cancelled'
     - then: end
     steps:
     - pipeline_track

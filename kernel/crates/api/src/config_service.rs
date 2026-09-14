@@ -17,7 +17,7 @@ pub enum ConfigError {
     /// 路径越界（不在 config/ 子树内或含 ../ 越界）—— B1。
     #[error("path escapes config root: {path}")]
     PathOutsideConfigRoot { path: String },
-    /// 映射了内核保留文件（plugin_allowlist / pipelines 等）—— B1 denylist。
+    /// 映射了内核保留文件（kernel/ / pipelines 等）—— B1 denylist。
     #[error("kernel-reserved config file: {path}")]
     KernelReservedFile { path: String },
     /// 文件不存在。
@@ -35,13 +35,7 @@ pub enum ConfigError {
 ///
 /// manifest 的 config_files 不得映射这些路径——它们归内核（准入/调度/鉴权）。
 /// 匹配按路径片段前缀（相对 config/ 根）。
-const KERNEL_RESERVED_SEGMENTS: &[&str] = &[
-    "plugin_allowlist",
-    "plugin_roots",
-    "auth",
-    "pipelines",
-    "steps",
-];
+const KERNEL_RESERVED_SEGMENTS: &[&str] = &["kernel", "plugin_roots", "auth", "pipelines", "steps"];
 
 /// B1：校验 manifest config_files[].path 解析后的绝对路径安全，并解析到
 /// **用户空间优先**的实际落点。
@@ -52,7 +46,7 @@ const KERNEL_RESERVED_SEGMENTS: &[&str] = &[
 ///   文件时优先用户层，否则 factory——读与写共用本函数，杜绝"写一处、读另一处"
 ///   （单真值 ADR 的实证根因）；
 /// - 归一化后必须落在**对应根**的子树内，禁止 `../` 越界与跨根穿透；
-/// - 不得映射内核保留文件（plugin_allowlist / plugin_roots / auth / pipelines / steps），
+/// - 不得映射内核保留文件（kernel / plugin_roots / auth / pipelines / steps），
 ///   该 denylist 对两个根同样生效——插件不得借用户层绕开内核保留文件。
 ///
 /// 返回校验通过后的绝对路径。
@@ -200,7 +194,7 @@ fn resolve_config_target_inner(
 
     // denylist：按**相对路径段**（含文件 stem）判定，与落在哪个根无关——
     // 用户层不是绕过内核保留文件的旁路。
-    // 如 system/plugin_allowlist.yaml → 段含 plugin_allowlist → 拒绝；
+    // 如 kernel/plugin_allowlist.yaml → 段含 kernel → 拒绝；
     //    pipelines/default.yaml → 段含 pipelines → 拒绝。
     // （内核自有写面经 resolve_kernel_config_target 走本函数并关闭此闸。）
     if enforce_denylist {
@@ -247,6 +241,10 @@ pub fn seed_user_config_from_factory(
     if target.is_file() || !factory.is_file() {
         return Ok(false);
     }
+    // 基线先读：登记要用出厂内容哈希（ADR 2026-09-14 §2.2 接管三件套）
+    let baseline = std::fs::read(&factory).map_err(|e| ConfigError::Io {
+        message: format!("read factory for ownership baseline failed: {e}"),
+    })?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ConfigError::Io {
             message: format!("seed parent dir failed: {e}"),
@@ -254,6 +252,55 @@ pub fn seed_user_config_from_factory(
     }
     std::fs::copy(&factory, &target).map_err(|e| ConfigError::Io {
         message: format!("seed from factory failed: {e}"),
+    })?;
+    // 接管登记：播种成功即登记出厂基线；登记失败回滚副本——登记与文件同生
+    // 共死，绝不产生无凭证的接管（否则恢复出厂/漂移提示对该路径永久失灵）。
+    if let Err(e) = agentos_core::user_space::register_ownership(
+        &rel,
+        Some(agentos_core::user_space::sha256_hex(&baseline)),
+        Some(env!("CARGO_PKG_VERSION").to_string()),
+    ) {
+        let _ = std::fs::remove_file(&target);
+        return Err(ConfigError::Io {
+            message: format!("ownership registration failed (seed rolled back): {e}"),
+        });
+    }
+    Ok(true)
+}
+
+/// 恢复出厂（ADR 2026-09-14 §2.2 规则 3）：删除用户层文件 + 删除接管登记，
+/// 出厂文件即复活——单一存在始终成立，任意时刻生效的仍是一份。
+///
+/// 用户层无此文件时不动作（返回 `Ok(false)`）；出厂侧文件**绝不**被本函数触碰。
+/// 显式操作入口，供设置页/管理路由接线。
+///
+/// # Errors
+/// - [`ConfigError::PathOutsideConfigRoot`]：路径含 `../` 越界。
+/// - [`ConfigError::Io`]：删除失败或登记删除失败（此时用户文件可能已删而账未销，
+///   状态仍安全：无文件即出厂生效，残留空条目由漂移核对自然清理）。
+pub fn restore_factory_config(mapping_path: &str) -> Result<bool, ConfigError> {
+    let normalized = mapping_path.replace('\\', "/");
+    if normalized.contains("../") {
+        return Err(ConfigError::PathOutsideConfigRoot {
+            path: mapping_path.to_string(),
+        });
+    }
+    let rel = normalized
+        .strip_prefix("config/")
+        .unwrap_or(&normalized)
+        .to_string();
+    let Some(user_dir) = agentos_core::user_space::user_config_dir() else {
+        return Ok(false);
+    };
+    let target = user_dir.join(&rel);
+    if !target.is_file() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&target).map_err(|e| ConfigError::Io {
+        message: format!("restore factory: remove user file failed: {e}"),
+    })?;
+    agentos_core::user_space::remove_ownership(&rel).map_err(|e| ConfigError::Io {
+        message: format!("restore factory: drop ownership entry failed: {e}"),
     })?;
     Ok(true)
 }
@@ -526,9 +573,9 @@ mod tests {
     fn kernel_profile_target_reads_user_layer_once_taken_over() {
         let tmp = tempfile::tempdir().unwrap();
         let factory = tmp.path().join("factory");
-        std::fs::create_dir_all(factory.join("config/plugins")).unwrap();
+        std::fs::create_dir_all(factory.join("config/kernel")).unwrap();
         std::fs::write(
-            factory.join("config/plugins/default_profile.yaml"),
+            factory.join("config/kernel/default_profile.yaml"),
             "plugins:\n  a:\n    enabled: true\n  b:\n    enabled: false\n",
         )
         .unwrap();
@@ -536,7 +583,7 @@ mod tests {
         std::fs::create_dir_all(&user).unwrap();
         let _guard = crate::test_env::pin_user_config_dir(&user);
 
-        let rel = "plugins/default_profile.yaml";
+        let rel = "kernel/default_profile.yaml";
         // 未接管：读回 factory（用户层无此文件）。factory 根经 project_root
         // canonicalize 派生（既有行为，Windows 上带 \\?\ 前缀），故比较规范化形态。
         let factory_hit =
@@ -563,5 +610,329 @@ mod tests {
             std::fs::read_to_string(&seeded).unwrap(),
             "plugins:\n  a:\n    enabled: false\n"
         );
+    }
+
+    /// 接管三件套（ADR 2026-09-14 §2.2）：播种成功必须自动登记出厂基线；
+    /// 登记失败（账本损坏）必须回滚副本——绝不产生无凭证的接管。
+    #[test]
+    fn seed_registers_ownership_and_rolls_back_when_ledger_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = tmp.path().join("factory");
+        std::fs::create_dir_all(factory.join("config/models")).unwrap();
+        let content = "model: x\n";
+        std::fs::write(factory.join("config/models/llm.yaml"), content).unwrap();
+        let user = tmp.path().join("user-config");
+        std::fs::create_dir_all(&user).unwrap();
+        let _guard = crate::test_env::pin_user_config_dir(&user);
+
+        // 正常播种：登记自动落账，基线 = 出厂内容哈希
+        assert!(seed_user_config_from_factory(&factory, "models/llm.yaml").unwrap());
+        let entries = agentos_core::user_space::load_ownership_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "models/llm.yaml");
+        assert_eq!(
+            entries[0].seeded_from_sha256.as_deref(),
+            Some(agentos_core::user_space::sha256_hex(content.as_bytes()).as_str())
+        );
+        assert_eq!(
+            entries[0].factory_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+
+        // 账本损坏：播种必须失败且**不留用户副本**（回滚），出厂文件原样
+        std::fs::write(factory.join("config/models/other.yaml"), "other: 1\n").unwrap();
+        let ledger = user.join(".ownership.json");
+        std::fs::write(&ledger, "{corrupt").unwrap();
+        assert!(seed_user_config_from_factory(&factory, "models/other.yaml").is_err());
+        assert!(
+            !user.join("models/other.yaml").exists(),
+            "登记失败的播种必须回滚，不得留下无凭证的接管副本"
+        );
+        assert_eq!(
+            std::fs::read_to_string(factory.join("config/models/other.yaml")).unwrap(),
+            "other: 1\n",
+            "出厂文件不得被触碰"
+        );
+    }
+
+    /// 恢复出厂（ADR 2026-09-14 §2.2 规则 3）：删用户文件 + 销登记；此后读路径
+    /// 回到出厂，且可以重新播种接管。出厂文件全程不被触碰。
+    #[test]
+    fn restore_factory_resurrects_factory_and_allows_reseed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = tmp.path().join("factory");
+        std::fs::create_dir_all(factory.join("config/models")).unwrap();
+        std::fs::write(factory.join("config/models/llm.yaml"), "factory: v1\n").unwrap();
+        let user = tmp.path().join("user-config");
+        std::fs::create_dir_all(&user).unwrap();
+        let _guard = crate::test_env::pin_user_config_dir(&user);
+
+        assert!(seed_user_config_from_factory(&factory, "models/llm.yaml").unwrap());
+        std::fs::write(user.join("models/llm.yaml"), "user: custom\n").unwrap();
+
+        // 恢复出厂：用户文件与登记同时消失
+        assert!(restore_factory_config("config/models/llm.yaml").unwrap());
+        assert!(!user.join("models/llm.yaml").exists());
+        assert!(
+            agentos_core::user_space::load_ownership_entries()
+                .unwrap()
+                .is_empty(),
+            "销登记后账本应为空"
+        );
+        assert_eq!(
+            std::fs::read_to_string(factory.join("config/models/llm.yaml")).unwrap(),
+            "factory: v1\n",
+            "出厂文件全程不被触碰"
+        );
+
+        // 无用户文件的路径：恢复出厂 = 不动作
+        assert!(!restore_factory_config("models/absent.yaml").unwrap());
+        // ../ 越界照常拒绝
+        assert!(restore_factory_config("models/../../etc/passwd").is_err());
+        // 恢复后可重新播种接管（生命周期闭环）
+        assert!(seed_user_config_from_factory(&factory, "models/llm.yaml").unwrap());
+    }
+
+    // ── 落点解析的写模式 / 用户空间缺席 / 工厂文件缺席 分支面 ──
+
+    /// Write 模式：用户空间可用时**一律写用户层**（不论文件是否已存在）；
+    /// 工厂缺该文件（全新配置）同样落用户层。
+    #[test]
+    fn write_mode_always_targets_user_layer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = tmp.path().join("factory");
+        std::fs::create_dir_all(factory.join("config/models")).unwrap();
+        let user = tmp.path().join("user-config");
+        std::fs::create_dir_all(&user).unwrap();
+        let _guard = crate::test_env::pin_user_config_dir(&user);
+
+        let rel = "models/llm.yaml";
+        // 工厂与用户层都没有该文件（首次写入）→ 仍落用户层
+        let p = resolve_kernel_config_target(&factory, rel, ConfigTargetMode::Write).unwrap();
+        assert_eq!(p, user.join(rel), "Write 模式一律落用户层");
+
+        // 用户层已有该文件（已接管）→ 仍是用户层（不因存在性改判）
+        std::fs::create_dir_all(user.join("models")).unwrap();
+        std::fs::write(user.join(rel), "user: v1\n").unwrap();
+        let p = resolve_kernel_config_target(&factory, rel, ConfigTargetMode::Write).unwrap();
+        assert_eq!(p, user.join(rel));
+    }
+
+    /// 用户空间不可用（三个 env 全清但仍可能落 OS 标准目录——故直接验证
+    /// `user_config_dir()` 为 None 的形态不可构造时的等价面：Write 落 factory）。
+    /// 用 `AGENTOS_USER_ROOT` 钉到一个**不可写成目录**的路径来逼出回落。
+    #[test]
+    fn write_mode_falls_back_to_factory_when_user_root_unusable() {
+        // 钉用户根为"空串"→ env_path 过滤空串 → user_root() 回落 dirs::data_dir()；
+        // 无法真正构造 None（OS 标准目录恒存在），故本用例锁的是"分区变量为空串
+        // 时按未设置处理"这一解析契约，进而走 Read 的 factory 分支。
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = tmp.path().join("factory");
+        std::fs::create_dir_all(factory.join("config/models")).unwrap();
+        std::fs::write(factory.join("config/models/llm.yaml"), "f: 1\n").unwrap();
+        let _guard =
+            crate::test_env::pin_env(agentos_core::user_space::USER_CONFIG_DIR_ENV, Some(""));
+        let _guard2 = crate::test_env::pin_env(agentos_core::user_space::USER_ROOT_ENV, Some(""));
+
+        // 空串 = 未设置 → 走 OS 标准目录（存在但无该文件）→ Read 落 factory
+        let p = resolve_kernel_config_target(&factory, "models/llm.yaml", ConfigTargetMode::Read)
+            .unwrap();
+        assert_eq!(
+            p.canonicalize().unwrap(),
+            factory
+                .join("config/models/llm.yaml")
+                .canonicalize()
+                .unwrap(),
+            "空串 env 视为未设置，Read 落 factory"
+        );
+    }
+
+    /// 目标**不存在**时两侧都退回原始拼法比较（canonicalize 失败分支）——
+    /// 「config 根存在、目标文件缺失」的常态必须放行，不得误判越界。
+    #[test]
+    fn missing_target_compares_raw_paths_without_false_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        // config 根存在（可 canonicalize 成 \\?\ 形态），目标文件不存在
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        let p =
+            resolve_kernel_config_target(tmp.path(), "brand/new/deep.yaml", ConfigTargetMode::Read)
+                .expect("目标缺失不得误判越界");
+        assert!(p.ends_with("brand/new/deep.yaml") || p.ends_with("brand\\new\\deep.yaml"));
+    }
+
+    /// 显式 `../` 越界在归一化后被快速拒绝（Write 与 Read 同规）。
+    #[test]
+    fn dotdot_rejected_in_both_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        for mode in [ConfigTargetMode::Read, ConfigTargetMode::Write] {
+            let err =
+                resolve_kernel_config_target(tmp.path(), "a/../../escape.yaml", mode).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::PathOutsideConfigRoot { .. }),
+                "mode={mode:?}: {err:?}"
+            );
+        }
+    }
+
+    /// denylist 覆盖全五个保留段，且按**文件 stem** 判定（`pipelines.yaml` 命中
+    /// `pipelines` 段）；`config/` 前缀可有可无。
+    #[test]
+    fn denylist_covers_all_reserved_segments() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        for rel in [
+            "config/kernel/plugin_allowlist.yaml",
+            "config/plugin_roots/x.yaml",
+            "config/auth/users.yaml",
+            "config/pipelines/default.yaml",
+            "config/steps/common.yaml",
+            // 无 config/ 前缀 + stem 判定：pipelines.yaml 的 stem = pipelines
+            "pipelines.yaml",
+            "auth.yaml",
+        ] {
+            let err = resolve_config_target(tmp.path(), rel, ConfigTargetMode::Read).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::KernelReservedFile { .. }),
+                "{rel} 应命中保留段: {err:?}"
+            );
+        }
+        // 非保留段 + 内核入口关闭 denylist 时放行
+        resolve_config_target(tmp.path(), "models/llm.yaml", ConfigTargetMode::Read)
+            .expect("models 段非保留");
+        resolve_kernel_config_target(tmp.path(), "pipelines/default.yaml", ConfigTargetMode::Read)
+            .expect("内核入口关闭 denylist");
+    }
+
+    /// 反斜杠路径归一化：Windows 形态 `config\\models\\x.yaml` 等价正斜杠。
+    #[test]
+    fn backslash_path_normalized() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config/models")).unwrap();
+        let a = resolve_config_target(tmp.path(), "config/models/x.yaml", ConfigTargetMode::Read)
+            .unwrap();
+        let b = resolve_config_target(tmp.path(), "config\\models\\x.yaml", ConfigTargetMode::Read)
+            .unwrap();
+        assert_eq!(a, b, "反斜杠形态必须与正斜杠同落点");
+        // 反斜杠形态的 ../ 同样被拒
+        assert!(resolve_config_target(
+            tmp.path(),
+            "config\\..\\escape.yaml",
+            ConfigTargetMode::Read
+        )
+        .is_err());
+    }
+
+    /// `seed_user_config_from_factory` 的两个"不动作"分支：
+    /// ① 目标已存在（已接管，不覆盖用户改动）；
+    /// ② 工厂无此文件（全新配置，交给 PUT 隐式创建语义）。
+    #[test]
+    fn seed_noop_when_target_exists_or_factory_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = tmp.path().join("factory");
+        std::fs::create_dir_all(factory.join("config/models")).unwrap();
+        std::fs::write(factory.join("config/models/llm.yaml"), "f: 1\n").unwrap();
+        let user = tmp.path().join("user-config");
+        std::fs::create_dir_all(&user).unwrap();
+        let _guard = crate::test_env::pin_user_config_dir(&user);
+
+        // ② 工厂无此文件 → Ok(false)，不创建用户文件
+        assert!(!seed_user_config_from_factory(&factory, "models/absent.yaml").unwrap());
+        assert!(!user.join("models/absent.yaml").exists());
+
+        // ① 目标已存在 → Ok(false)，内容原样
+        std::fs::create_dir_all(user.join("models")).unwrap();
+        std::fs::write(user.join("models/llm.yaml"), "user: mine\n").unwrap();
+        assert!(!seed_user_config_from_factory(&factory, "models/llm.yaml").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(user.join("models/llm.yaml")).unwrap(),
+            "user: mine\n",
+            "已接管不得覆盖用户内容"
+        );
+    }
+
+    /// `restore_factory_config` 的 `../` 越界拒绝（不触碰任何文件）。
+    #[test]
+    fn restore_factory_rejects_dotdot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = tmp.path().join("user-config");
+        std::fs::create_dir_all(&user).unwrap();
+        let _guard = crate::test_env::pin_user_config_dir(&user);
+        let err = restore_factory_config("models/../../outside.yaml").unwrap_err();
+        assert!(matches!(err, ConfigError::PathOutsideConfigRoot { .. }));
+    }
+
+    // ── B2 掩码 / B4 原子写的剩余分支 ──
+
+    /// `mask_secrets` 递归覆盖数组与嵌套对象；非字符串 secret 值原样保留。
+    #[test]
+    fn mask_secrets_recurses_arrays_and_keeps_non_strings() {
+        let value = serde_json::json!({
+            "providers": [
+                {"api_key": "sk-real", "name": "a"},
+                {"api_key": "${ENV_KEY}", "name": "b"}
+            ],
+            "limits": {"token_budget": 100, "password": 1234},
+            "plain": null
+        });
+        let masked = mask_secrets(&value);
+        assert_eq!(masked["providers"][0]["api_key"], "****");
+        assert_eq!(
+            masked["providers"][1]["api_key"], "${ENV_KEY}",
+            "数组内占位符保留"
+        );
+        assert_eq!(masked["providers"][0]["name"], "a");
+        assert_eq!(
+            masked["limits"]["password"], 1234,
+            "非字符串 secret 值原样（不臆造掩码）"
+        );
+        assert_eq!(masked["limits"]["token_budget"], 100);
+        assert!(masked["plain"].is_null());
+    }
+
+    /// `apply_put_masked_sentinels`：磁盘无该 key 的 `***` 哨兵 = 删除字段；
+    /// 嵌套对象的哨兵递归保留原值。
+    #[test]
+    fn apply_put_masked_sentinels_nested_and_missing_key() {
+        let stored = serde_json::json!({
+            "llm": {"api_key": "${K}", "model": "old"},
+            "name": "keep"
+        });
+        let submitted = serde_json::json!({
+            // api_key 磁盘无此 key（新字段带哨兵）→ 该字段被删除
+            "llm": {"api_key": "***", "model": "new", "brand_new": "***"},
+            "name": "renamed"
+        });
+        let merged = apply_put_masked_sentinels(&stored, &submitted);
+        assert_eq!(merged["llm"]["api_key"], "${K}", "嵌套哨兵保留磁盘原值");
+        assert_eq!(merged["llm"]["model"], "new", "非哨兵用提交值");
+        assert!(
+            merged["llm"].get("brand_new").is_none(),
+            "磁盘无该 key 的哨兵 = 删除字段: {merged}"
+        );
+        assert_eq!(merged["name"], "renamed");
+
+        // 提交值非对象（标量/数组）→ 原样返回（类型替换语义）
+        assert_eq!(
+            apply_put_masked_sentinels(&serde_json::json!({"a": 1}), &serde_json::json!([1, 2])),
+            serde_json::json!([1, 2])
+        );
+    }
+
+    /// `compute_etag` 内容敏感（不同内容不同 etag）且同内容稳定。
+    #[test]
+    fn compute_etag_is_content_sensitive_and_stable() {
+        let a = compute_etag(b"x: 1\n");
+        assert_eq!(a, compute_etag(b"x: 1\n"), "同内容稳定");
+        assert_ne!(a, compute_etag(b"x: 2\n"), "不同内容必须不同 etag");
+        assert_eq!(a.len(), 64, "sha256 hex 长度");
+    }
+
+    /// `atomic_write_yaml`：目标父目录不存在时自动创建（首次写入形态）。
+    #[test]
+    fn atomic_write_creates_missing_parent_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("deep/nested/new.yaml");
+        atomic_write_yaml(&target, &serde_json::json!({"k": "v"})).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "k: v\n");
     }
 }

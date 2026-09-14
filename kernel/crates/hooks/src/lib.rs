@@ -143,6 +143,7 @@ impl HookEventBus {
 mod tests {
     use super::*;
     use agentos_core::traits::HookContext;
+    use std::sync::Arc;
 
     /// 构造一个最小可用的测试事件（空上下文、Engine 目标）。
     fn make_event(hook: LifecycleHook) -> LifecycleEvent {
@@ -231,5 +232,70 @@ mod tests {
             .expect("send via handle");
         let got = rx.recv().await.unwrap();
         assert_eq!(got.hook, LifecycleHook::OnPipelineStart);
+    }
+
+    // domain_event：hook 固定 DomainEvent、事件名落 ctx["event"]、附标签同落
+    // ctx、目标为 Engine。
+    #[test]
+    fn domain_event_sets_hook_name_tags_and_engine_target() {
+        let ev = domain_event(
+            "session_created",
+            vec![
+                ("session_id".to_string(), serde_json::json!("s-1")),
+                ("user_id".to_string(), serde_json::json!(7)),
+            ],
+        );
+        assert_eq!(ev.hook, LifecycleHook::DomainEvent);
+        assert!(matches!(ev.target, EventTarget::Engine));
+        assert_eq!(
+            ev.ctx.get("event").and_then(|v| v.as_str()),
+            Some("session_created")
+        );
+        assert_eq!(
+            ev.ctx.get("session_id").and_then(|v| v.as_str()),
+            Some("s-1")
+        );
+        assert_eq!(ev.ctx.get_as::<u32>("user_id"), Some(7));
+    }
+
+    // domain_event 无标签：只有 event 键，不 panic。
+    #[test]
+    fn domain_event_without_tags_only_has_event_key() {
+        let ev = domain_event("pipeline_idle", vec![]);
+        assert_eq!(ev.ctx.tags().len(), 1, "仅 event 键");
+        assert_eq!(
+            ev.ctx.get("event").and_then(|v| v.as_str()),
+            Some("pipeline_idle")
+        );
+    }
+
+    // 进程级单例：未注册 global() 为 None（观察层静默降级）；set_global 后
+    // 可取回同一实例（Arc::ptr_eq 证明不是副本）；重复 set 静默忽略、首次
+    // 注册不被覆盖。OnceLock 进程级唯一，故三个断言同测共用一个用例。
+    #[tokio::test]
+    async fn global_bus_registration_is_idempotent_and_shared() {
+        // 本用例独占该进程级单例的注册权（其他用例不注册）。
+        let registered = Arc::new(HookEventBus::new(4));
+        set_global(registered.clone());
+        let got = global().expect("注册后应可取得");
+        assert!(
+            Arc::ptr_eq(&got, &registered),
+            "global() 应返回注册的同一实例（非副本）"
+        );
+
+        // 重复注册被忽略：既有实例不被顶替。
+        let second = Arc::new(HookEventBus::new(4));
+        set_global(second);
+        let again = global().expect("仍应有全局总线");
+        assert!(
+            Arc::ptr_eq(&again, &registered),
+            "重复 set_global 应静默忽略"
+        );
+
+        // 经 global() 拿到的总线与注册方共享通道（同一 Sender 的克隆）。
+        let mut rx = registered.subscribe();
+        got.emit(make_event(LifecycleHook::OnPipelineEnd));
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(ev.hook, LifecycleHook::OnPipelineEnd);
     }
 }

@@ -207,12 +207,12 @@ for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
 
 
 def _metrics_config_path() -> Path:
-    """评估指标配置路径（容器根 config/evaluation/evaluation_metrics.yaml）。
+    """评估指标配置路径（仓库根 config/plugins/evaluation/evaluation_metrics.yaml）。
 
     与 task_evaluate 同款读取；指标定义的唯一加载点（提交期校验与
     派发指令详情展开共用）。
     """
-    return Path(__file__).resolve().parents[4] / "config" / "evaluation" / "evaluation_metrics.yaml"
+    return Path(__file__).resolve().parents[4] / "config" / "plugins" / "evaluation" / "evaluation_metrics.yaml"
 
 
 def _load_metric_definitions() -> dict[str, dict[str, Any]]:

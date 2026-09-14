@@ -27,6 +27,7 @@ from agentos_plugin_sdk.isolation_types import (
 
 # 直接导入同目录实现模块（文件就在旁边，不需要额外路径前缀）
 from manager import IsolationManager, extract_providers_config
+from workspace import _isolation_config_path
 from agentos_plugin_sdk.permission_checker import PermissionChecker
 from agentos_plugin_sdk.permission_policy import PermissionPolicyManager
 
@@ -77,7 +78,7 @@ async def _watch_config_reload() -> None:
     轻量轮询（5s）让前端保存的配额改动无需重启插件即生效。
     """
     global _manager
-    cfg_path = Path(__file__).resolve().parents[4] / "config" / "isolation" / "isolation_config.yaml"
+    cfg_path = _isolation_config_path()
     last_mtime: float | None = None
     while True:
         try:
@@ -270,6 +271,10 @@ async def isolation_execute(
         "properties": {
             "env_id": {"type": "string", "description": "环境 ID"},
             "task_id": {"type": "string", "description": "任务 ID（按任务销毁）"},
+            "container_name": {
+                "type": "string",
+                "description": "容器名（state 真值直删，不依赖内存登记；与 task_id 同给时优先生效）",
+            },
             "success": {"type": "boolean", "default": True, "description": "任务是否成功完成"},
         },
     },
@@ -278,19 +283,27 @@ async def isolation_execute(
 async def isolation_destroy_env(
     env_id: str | None = None,
     task_id: str | None = None,
+    container_name: str | None = None,
     success: bool = True,
 ) -> dict[str, Any]:
-    """销毁隔离环境（按 env_id 或 task_id）。"""
+    """销毁隔离环境（按 container_name / env_id 或 task_id）。
+
+    container_name 是 state 真值通道（pipeline_state.isolation.container_name）：
+    服务重启后内存登记为空也能按名删除，杜绝"登记丢失=销毁谎报成功=泄漏"。
+    """
     if _manager is None:
         return {"error": "隔离服务未初始化"}
 
+    if container_name:
+        destroyed = await _manager.destroy_environment(container_name, success=success)
+        return {"destroyed": destroyed, "container_name": container_name}
     if task_id:
         await _manager.destroy_by_task_id(task_id, success=success)
         return {"destroyed": True, "task_id": task_id}
     if env_id:
         await _manager.destroy_environment(env_id, success=success)
         return {"destroyed": True, "env_id": env_id}
-    return {"error": "必须提供 env_id 或 task_id"}
+    return {"error": "必须提供 env_id、task_id 或 container_name"}
 
 
 @plugin.tool(

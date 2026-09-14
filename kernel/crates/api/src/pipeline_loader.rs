@@ -1158,7 +1158,7 @@ loop_bodies:
             .iter()
             .find(|s| s.id == "post")
             .expect("post step");
-        assert_eq!(post.routes.len(), 8, "post next 八条");
+        assert_eq!(post.routes.len(), 9, "post next 九条");
         // 任务终态当轮收束置顶（用户裁定 2026-08-29：成功/失败/取消立即 end）
         assert_eq!(post.routes[0].then.next, RouteNext::End);
         assert_eq!(
@@ -1193,8 +1193,14 @@ loop_bodies:
             Some(&serde_json::json!(false)),
             "回 LLM 分支自清路由键防残留"
         );
-        assert_eq!(post.routes[7].then.next, RouteNext::End);
-        assert_eq!(post.routes[7].when, "True", "缺省 when 归一为 True");
+        // 任务管道纯文本轮不终局（D2 一次性终局修复 221a776d6，兜底 end 前置轮回规则）
+        assert_eq!(post.routes[7].then.next, RouteNext::Loop);
+        assert_eq!(
+            post.routes[7].when,
+            "task.id != none and conversation_mode != True and task.status != 'completed' and task.status != 'failed' and task.status != 'cancelled'"
+        );
+        assert_eq!(post.routes[8].then.next, RouteNext::End);
+        assert_eq!(post.routes[8].when, "True", "缺省 when 归一为 True");
         // 动态 core_plugin 项保留（引擎动态点；tool_cache 接线后位于其前列）
         let core = main
             .steps

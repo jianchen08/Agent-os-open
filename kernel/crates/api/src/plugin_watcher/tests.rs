@@ -955,6 +955,52 @@ async fn g2_verify_drift_sanitizes_rejected_tool_only() {
 }
 
 #[tokio::test]
+async fn g2_verify_schema_mismatch_sanitizes_drifted_tool_only() {
+    // SchemaMismatch 类漂移（BUG-5 实测形态）：声明了 input_schema 且与上报
+    // 逐字不一致（实现新增参数未同步声明 / 声明富 schema 上报瘦 schema）
+    // → 剔除该工具（fail-closed），未漂移工具照常——后续账本 derived 出
+    // sanitized 契约页可见（contract.rs 已测证据链）。
+    let v = json!({
+        "id": "p1", "name": "p1", "version": "1.0.0",
+        "plugin_type": "tool", "language": "rust",
+        "host_type": "sidecar", "entry": "x",
+        "capabilities": { "tools": [
+            { "name": "t1", "description": "t1",
+              "input_schema": { "type": "object",
+                                "properties": { "a": { "type": "string" } } } },
+            { "name": "t2", "description": "t2" },
+        ]},
+    });
+    let m: PluginManifest = serde_json::from_value(v).expect("valid manifest");
+    let mut invoker = MockInvoker::new(vec![m.clone()]);
+    invoker.list_tools.insert(
+        "p1".into(),
+        json!({ "tools": [
+            { "name": "t1", "description": "t1",
+              "inputSchema": { "type": "object",
+                               "properties": { "a": { "type": "string" },
+                                               "timeout": { "type": "number" } } } },
+            { "name": "t2", "description": "t2" },
+        ]}),
+    );
+    let out = g2_verify_and_sanitize(&invoker, m).await;
+    assert!(out.drift);
+    assert_eq!(
+        out.rejected_tools,
+        vec!["t1".to_string()],
+        "schema 漂移工具被剔除"
+    );
+    let names: Vec<String> = out
+        .manifest
+        .capabilities
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    assert_eq!(names, vec!["t2".to_string()], "未漂移工具照常保留");
+}
+
+#[tokio::test]
 async fn g2_verify_spawn_fail_keeps_declared_tools() {
     // 观测失败≠判定失败：重试后仍 spawn/list 失败 → 保留声明注册
     // （spawn_failed 供账本标记校验未完成），不再净化工具。

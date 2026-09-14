@@ -592,7 +592,7 @@ fn emit_tool_event(
         payload.insert("success".into(), Value::Bool(r.success));
         payload.insert("duration_ms".into(), json!((r.duration_ms * 10.0).round() / 10.0));
         if let Some(err) = &r.error {
-            // 统一错误信封（单一真值源 config/error_codes.json）。流式契约
+            // 统一错误信封（单一真值源 config/kernel/error_codes.json）。流式契约
             // （streaming.json）error 要 string，信封对象会被契约网关 fail-closed
             // 整事件丢弃（agent 收不到错误详情）——降级为 string 进载荷：
             // message 优先，完整信封留插件日志（stderr → 内核日志）供排障。
@@ -670,7 +670,7 @@ mod tests {
         }
     }
 
-    /// 流式契约（config/kernel_capabilities/streaming.json tool_result）：
+    /// 流式契约（config/kernel/kernel_capabilities/streaming.json tool_result）：
     /// error 类型为 string。对象载荷会被内核流式契约网关 fail-closed 整事件
     /// 丢弃（失败时 agent 收不到错误详情）——失败事件 error 必须是 string
     /// 且保留原始错误信息。

@@ -398,4 +398,213 @@ mod tests {
             .unwrap();
         assert_eq!(envelope["status"], 200);
     }
+
+    // ── 读面角色闸：非 admin/viewer（如普通 user）必须 403 ──
+
+    /// 播种一个在库用户（角色可指定），返回 (库句柄, 该用户的 access token)。
+    /// token 与库内记录同源（用户名 + 口令哈希绑定一致，否则先撞口令绑定校验）。
+    async fn store_with_role_user(role: &str) -> (Arc<agentos_engine::SqliteStore>, String) {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let password = agentos_http::auth::hash_password("metrics-test-pw").unwrap();
+        let record = agentos_core::types::UserRecord {
+            user_id: "00000000-0000-0000-0000-0000000000aa".to_string(),
+            username: "ops_user".to_string(),
+            password: password.clone(),
+            email: None,
+            role: role.to_string(),
+            tenant_id: agentos_http::auth::DEFAULT_TENANT_ID.to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_login_at: None,
+            must_change_password: false,
+        };
+        agentos_core::traits::StorageBackend::create_user(store.as_ref(), &record)
+            .await
+            .unwrap();
+        let built = agentos_http::auth::BuiltInUser {
+            id: record.user_id.clone(),
+            username: record.username.clone(),
+            password,
+            email: String::new(),
+            role: role.to_string(),
+            tenant_id: record.tenant_id.clone(),
+            created_at: String::new(),
+            must_change_password: false,
+        };
+        let token = encode_token(TokenType::Access, &built, 3600);
+        (store, token)
+    }
+
+    /// 角色解析真值源是用户记录（非 token 内嵌角色）：角色为 user 的合法凭证
+    /// 在三个读面方法一律 403（读面收敛为角色读——能力出内核必须带门）。
+    #[tokio::test]
+    async fn non_admin_viewer_role_forbidden_on_all_read_methods() {
+        let (store, token) = store_with_role_user("user").await;
+        let agg = MetricsAggregator::new();
+        let handler = MetricsAdminCapabilityHandler::new(Some(store), Some(agg));
+        for method in ["query", "list", "prometheus"] {
+            let mut params = json!({});
+            params["_authorization"] = json!(format!("Bearer {token}"));
+            let envelope = handler.handle(method, params).await.unwrap();
+            assert_eq!(envelope["status"], 403, "{method} 应 403: {envelope}");
+            assert_eq!(
+                envelope["error"]["message"], "需要 admin 或 viewer 角色",
+                "{method} 拒绝文案"
+            );
+        }
+    }
+
+    /// viewer 角色（非 admin）读面放行——只认 admin 会把监控只读账号误伤。
+    #[tokio::test]
+    async fn viewer_role_allowed_on_read_methods() {
+        let (store, token) = store_with_role_user("viewer").await;
+        let handler =
+            MetricsAdminCapabilityHandler::new(Some(store), Some(MetricsAggregator::new()));
+        for method in ["query", "list", "prometheus"] {
+            let mut params = json!({});
+            params["_authorization"] = json!(format!("Bearer {token}"));
+            let envelope = handler.handle(method, params).await.unwrap();
+            assert_eq!(
+                envelope["status"], 200,
+                "{method} viewer 应放行: {envelope}"
+            );
+        }
+    }
+
+    /// 无法解析的 Authorization 头（非 HeaderValue 合法字节）→ 401 信封，
+    /// 不 panic（auth_headers 的 from_str 失败分支）。
+    #[tokio::test]
+    async fn malformed_authorization_header_yields_401() {
+        let handler = handler_with_data();
+        let envelope = handler
+            .handle("query", json!({"_authorization": "Bearer \u{7f}\u{1}"}))
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 401, "{envelope}");
+    }
+
+    // ── window / labels / ApiError 映射（纯函数面）──
+
+    /// `parse_window` 全档：5m / 1h / 24h / 未知 / 带空白，未知回退 1h。
+    #[test]
+    fn parse_window_covers_all_branches() {
+        for (input, want) in [
+            ("5m", Duration::from_secs(5 * 60)),
+            ("1h", Duration::from_secs(60 * 60)),
+            ("24h", Duration::from_secs(24 * 60 * 60)),
+            ("weird", Duration::from_secs(60 * 60)),
+            ("", Duration::from_secs(60 * 60)),
+            ("  5m  ", Duration::from_secs(5 * 60)),
+        ] {
+            assert_eq!(parse_window(input), want, "window={input:?}");
+        }
+    }
+
+    /// `parse_labels_query`：空段/无冒号/空 key 各自跳过，合法对入列。
+    #[test]
+    fn parse_labels_query_skips_malformed_pairs() {
+        let got = parse_labels_query("model:deepseek,,region:us,:novalue, nocolon ,k: v ");
+        assert_eq!(got.get("model").map(String::as_str), Some("deepseek"));
+        assert_eq!(got.get("region").map(String::as_str), Some("us"));
+        assert_eq!(got.get("k").map(String::as_str), Some("v"));
+        assert_eq!(got.len(), 3, "畸形段不得入列: {got:?}");
+        assert!(parse_labels_query("").is_empty());
+    }
+
+    /// 查询参数透传：window=5m 限窗、labels 过滤生效（真实聚合器数据驱动）。
+    #[tokio::test]
+    async fn query_applies_window_and_labels_filters() {
+        let agg = MetricsAggregator::new();
+        let mut lbl = Labels::new();
+        lbl.insert("model".to_string(), "deepseek".to_string());
+        agg.record(
+            "llm_service",
+            "tokens_used",
+            super::super::aggregator::MetricType::Counter,
+            1.0,
+            &lbl,
+            None,
+            None,
+        );
+        let handler = MetricsAdminCapabilityHandler::new(None, Some(agg));
+
+        let envelope = handler
+            .handle(
+                "query",
+                authed(json!({"window": "5m", "labels": "model:deepseek"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 200, "{envelope}");
+        assert_eq!(envelope["body"]["metrics"].as_array().unwrap().len(), 1);
+
+        // 不匹配的 labels 过滤 → 空结果（证明过滤真在生效，非恒真）
+        let envelope = handler
+            .handle(
+                "query",
+                authed(json!({"window": "5m", "labels": "model:other"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            envelope["body"]["metrics"].as_array().unwrap().len(),
+            0,
+            "不匹配 labels 应过滤掉: {envelope}"
+        );
+    }
+
+    /// `api_error_parts` 全档映射（与 db-admin capability 同一映射表）。
+    #[test]
+    fn api_error_parts_covers_all_variants() {
+        let msg = |s: &str| s.to_string();
+        let cases: Vec<(ApiError, u16)> = vec![
+            (ApiError::BadRequest { message: msg("a") }, 400),
+            (ApiError::Unauthorized { message: msg("b") }, 401),
+            (ApiError::Forbidden { message: msg("c") }, 403),
+            (ApiError::NotFound { message: msg("d") }, 404),
+            (ApiError::Conflict { message: msg("e") }, 409),
+            (ApiError::UnprocessableEntity { message: msg("f") }, 422),
+            (
+                ApiError::TooManyRequests {
+                    message: msg("g"),
+                    retry_after_secs: 7,
+                },
+                429,
+            ),
+            (ApiError::Internal { message: msg("h") }, 500),
+            (ApiError::WebSocket { message: msg("i") }, 500),
+            (ApiError::ServiceUnavailable { message: msg("j") }, 503),
+        ];
+        for (err, want) in cases {
+            let (status, message) = api_error_parts(&err);
+            assert_eq!(status, want, "状态码映射错误: {err:?}");
+            assert!(
+                message.len() == 1 && message.as_bytes()[0] >= b'a',
+                "消息应原样透传（不夹带状态码前缀）: {message:?}"
+            );
+        }
+    }
+
+    /// no_aggregator 在 list/prometheus 同样 404（不是只有 query 有闸）。
+    #[tokio::test]
+    async fn no_aggregator_returns_404_on_all_methods() {
+        let handler = MetricsAdminCapabilityHandler::new(None, None);
+        for method in ["query", "list", "prometheus"] {
+            let envelope = handler.handle(method, authed(json!({}))).await.unwrap();
+            assert_eq!(envelope["status"], 404, "{method}: {envelope}");
+        }
+    }
+
+    /// store 注入但用户不存在（store 在而未命中不回退内置表，K4）→ 401，
+    /// 不是静默放行内置 admin。
+    #[tokio::test]
+    async fn store_without_matching_user_rejects_builtin_token() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let handler =
+            MetricsAdminCapabilityHandler::new(Some(store), Some(MetricsAggregator::new()));
+        let envelope = handler.handle("query", authed(json!({}))).await.unwrap();
+        assert_eq!(
+            envelope["status"], 401,
+            "store 在场未命中不得回退内置表: {envelope}"
+        );
+    }
 }

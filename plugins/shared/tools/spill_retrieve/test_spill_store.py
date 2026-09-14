@@ -166,3 +166,177 @@ def test_on_pipeline_end_cleanup(tmp_path, monkeypatch):
     # on_pipeline_end 钩子（内核 notifications/on_pipeline_end → SDK 分发）
     server._handle_pipeline_end({"pipeline_id": "pipe-end", "_spill_base": str(tmp_path)})
     assert not d.exists()
+
+
+# ── G 簇缺口补测（2026-09-14 coverage 缺行）──────────────────────
+
+
+def test_infer_project_root_returns_none_when_no_layout(monkeypatch):
+    """_infer_project_root：向上找不到含 config/+plugins/ 的目录 → None（63）。
+
+    把模块 __file__ 指向无 0.2 布局的隔离路径后父链穷尽即 None；对照组用
+    真实文件位置验证正常推导非恒 None（防常量返回）。
+    """
+    fake = Path("C:/nonexistent/isolated/spill_store.py")
+    monkeypatch.setattr(spill_store, "__file__", str(fake))
+    assert spill_store._infer_project_root() is None
+    monkeypatch.undo()
+    assert spill_store._infer_project_root() is not None
+
+
+def test_resolve_base_path_falls_back_to_cwd_when_root_unknown(monkeypatch, tmp_path):
+    """root 推导失败 → cwd / configured（54 的 else 分支，有区分度输入）。"""
+    monkeypatch.setattr(spill_store, "_infer_project_root", lambda: None)
+    monkeypatch.chdir(tmp_path)
+    resolved = spill_store.resolve_base_path("./data/spill")
+    assert resolved == Path.cwd() / "data/spill"
+
+
+def test_resolve_base_path_blank_env_falls_through(monkeypatch, tmp_path):
+    """AGENTOS_SPILL_BASE 为空白串 → 不算显式覆盖，继续走路径判定。"""
+    monkeypatch.setenv("AGENTOS_SPILL_BASE", "   ")
+    assert spill_store.resolve_base_path(str(tmp_path)) == tmp_path
+
+
+def test_read_spill_unreadable_file_returns_error(tmp_path, monkeypatch):
+    """read_bytes 抛 OSError → found=False + 读取失败（81-82）。"""
+    d = tmp_path / "pipe"
+    d.mkdir()
+    target = d / "call_ro"
+    target.write_text("x", encoding="utf-8")
+
+    def _boom(self):
+        raise OSError("device I/O error")
+
+    monkeypatch.setattr(spill_store.Path, "read_bytes", _boom)
+    r = spill_store.read_spill(tmp_path, "pipe", "call_ro")
+    assert r["found"] is False
+    assert "spill 读取失败" in r["error"]
+    assert r["tool_call_id"] == "call_ro"
+
+
+def test_read_spill_corrupt_gzip_returns_error(tmp_path):
+    """gzip magic 但尾部损坏 → found=False + 解压失败（86-87）。
+
+    破坏真实 gzip 产物的尾 5 字节（BadGzipFile 属 OSError），非伪造 magic。
+    """
+    d = tmp_path / "pipe"
+    d.mkdir()
+    corrupted = bytearray(gzip.compress(b"payload " * 50))
+    corrupted[-5] ^= 0xFF
+    (d / "call_bad").write_bytes(bytes(corrupted))
+    r = spill_store.read_spill(tmp_path, "pipe", "call_bad")
+    assert r["found"] is False
+    assert "spill 解压失败" in r["error"]
+
+
+
+def test_read_spill_gzip_non_utf8_payload_returns_error(tmp_path):
+    """合法 gzip 但解压内容非 UTF-8 → 解压失败（86-87 的 UnicodeDecodeError 侧）。
+
+    截断流抛 EOFError（不在捕获集内，属上游完整性错误），故用「结构合法、
+    内容非 UTF-8」构造捕获集内的另一半路径。
+    """
+    d = tmp_path / "pipe"
+    d.mkdir()
+    (d / "call_nonutf8gz").write_bytes(gzip.compress(bytes([0xFF, 0xFE, 0x00, 0x01, 0x80, 0x81])))
+    r = spill_store.read_spill(tmp_path, "pipe", "call_nonutf8gz")
+    assert r["found"] is False
+    assert "spill 解压失败" in r["error"]
+
+
+
+def test_read_spill_non_utf8_returns_error(tmp_path):
+    """非 gzip 且非 UTF-8 字节 → found=False + 非 UTF-8（92-93）。"""
+    d = tmp_path / "pipe"
+    d.mkdir()
+    (d / "call_bin").write_bytes(b"\xff\xfe\x00\x01\x80\x81")
+    r = spill_store.read_spill(tmp_path, "pipe", "call_bin")
+    assert r["found"] is False
+    assert "非 UTF-8" in r["error"]
+
+
+def test_read_spill_empty_file_is_valid_empty_content(tmp_path):
+    """空文件是合法 UTF-8（对照组：不落错误分支）。"""
+    d = tmp_path / "pipe"
+    d.mkdir()
+    (d / "call_empty").write_bytes(b"")
+    r = spill_store.read_spill(tmp_path, "pipe", "call_empty")
+    assert r["found"] is True
+    assert r["content"] == ""
+    assert r["size_bytes"] == 0
+    assert r["encoding"] == "plain"
+
+
+# ── server 侧缺口 ───────────────────────────────────────────
+
+
+def test_spill_config_non_dict_returns_empty(tmp_path):
+    """_spill_config：配置项非 dict → {}（49）。"""
+    server = _load("spill_retrieve_server_cfg", _TOOLS_ROOT / "server.py")
+    original = server.plugin.get_config
+
+    def _fake_config():
+        return {"spill": "not-a-dict"}
+
+    server.plugin.get_config = _fake_config
+    try:
+        assert server._spill_config() == {}
+    finally:
+        server.plugin.get_config = original
+
+
+def test_spill_config_missing_namespace_returns_empty(tmp_path):
+    """配置无 spill 段 → {}（有区分度输入）。"""
+    server = _load("spill_retrieve_server_cfg2", _TOOLS_ROOT / "server.py")
+    server.plugin.get_config = lambda: {}
+    assert server._spill_config() == {}
+
+
+def test_resolve_pipeline_id_priority_chain(tmp_path):
+    """pipeline_id 解析优先级：显式 > _call_context > default（57-60）。"""
+    server = _load("spill_retrieve_server_pid", _TOOLS_ROOT / "server.py")
+    assert server._resolve_pipeline_id("explicit", {"_call_context": {"pipeline_id": "ctx"}}) == "explicit"
+    assert server._resolve_pipeline_id("", {"_call_context": {"pipeline_id": "ctx"}}) == "ctx"
+    assert server._resolve_pipeline_id("", {"_call_context": "not-a-dict"}) == "default"
+    assert server._resolve_pipeline_id("", {}) == "default"
+    assert server._resolve_pipeline_id("", {"_call_context": {"pipeline_id": ""}}) == "default"
+
+
+def test_spill_retrieve_empty_tool_call_id_returns_error(tmp_path):
+    """tool_call_id 为空 → 显式失败（74），不落基准目录解析。"""
+    server = _load("spill_retrieve_server_empty", _TOOLS_ROOT / "server.py")
+    result = server.spill_retrieve(tool_call_id="", pipeline_id="p", _spill_base=str(tmp_path))
+    assert result["success"] is False
+    assert "tool_call_id 不能为空" in result["error"]
+
+
+def test_pipeline_end_cleanup_disabled_by_config(tmp_path):
+    """cleanup_on_pipeline_end=False → 直接返回不清理（110）。"""
+    server = _load("spill_retrieve_server_end", _TOOLS_ROOT / "server.py")
+    server.plugin.get_config = lambda: {"spill": {"cleanup_on_pipeline_end": False}}
+    d = tmp_path / "keep-me"
+    d.mkdir()
+    (d / "k").write_text("x", encoding="utf-8")
+    server._handle_pipeline_end({"pipeline_id": "keep-me", "_spill_base": str(tmp_path)})
+    assert d.exists()
+
+
+def test_pipeline_end_blank_pipeline_id_noop(tmp_path):
+    """pipeline_id 空白 → 直接返回（113），不误删 base 目录。"""
+    server = _load("spill_retrieve_server_end2", _TOOLS_ROOT / "server.py")
+    sentinel = tmp_path / "sentinel"
+    sentinel.mkdir()
+    (sentinel / "k").write_text("x", encoding="utf-8")
+    server._handle_pipeline_end({"_spill_base": str(tmp_path)})
+    server._handle_pipeline_end({"pipeline_id": "   ", "_spill_base": str(tmp_path)})
+    assert sentinel.exists()
+
+
+def test_main_entrypoint_invokes_plugin_run(monkeypatch):
+    """main() 委托 plugin.run()（133）。"""
+    server = _load("spill_retrieve_server_main", _TOOLS_ROOT / "server.py")
+    called: list[bool] = []
+    monkeypatch.setattr(server.plugin, "run", lambda: called.append(True))
+    server.main()
+    assert called == [True]

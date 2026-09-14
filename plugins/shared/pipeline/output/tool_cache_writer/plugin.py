@@ -25,7 +25,11 @@ State 命名空间：
 
 from __future__ import annotations
 
+import gzip
+import json
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from agentos_plugin_sdk.tool_result_cache import ToolResultCache, namespace_from_state
@@ -34,6 +38,48 @@ from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
+
+# spill 定位符条目（spill_guard 2026-09-14 起：_full_tool_results 超阈值原文
+# 落 spill 文件、state 留定位符）→ 本插件回读存档还原完整 ToolResult 后入缓存。
+_SPILLED_MARKER = "__spilled__"
+# spill 存储基准（与 Rust spill_guard resolve_base_path 同契约）：
+# 环境变量显式锚点优先，缺省相对内核进程 cwd（sidecar 继承）。
+_SPILL_BASE_ENV = "AGENTOS_SPILL_BASE"
+# 单条缓存体积上限：超过不缓存（重复调用重新执行，spill 链路照常兜底）。
+# 缓存是 sidecar 常驻内存，数百 MB 级工具全文入缓存等于把泄漏从 state 挪进缓存。
+MAX_CACHE_ENTRY_BYTES = 1_000_000
+
+
+def _sanitize_key(key: str) -> str:
+    """对齐 Rust spill_store::sanitize_key（消毒规则两侧一致才能互读存档）。"""
+    sanitized = "".join(c if c.isascii() and (c.isalnum() or c in "._-") else "_" for c in key)
+    while ".." in sanitized:
+        sanitized = sanitized.replace("..", "_.")
+    if not sanitized.strip("._"):
+        return f"spill_{len(key)}"
+    return sanitized
+
+
+def _resolve_spilled(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """定位符 → 回读 spill 存档（gzip magic 自动识别）还原完整 ToolResult。
+
+    任何失败（路径非法/文件缺失/解压/反序列化）返回 None，调用方跳过该条。
+    """
+    locator = entry.get("locator") or ""
+    pipeline_id, _, key = locator.partition("/")
+    if not pipeline_id or not key:
+        return None
+    base = os.environ.get(_SPILL_BASE_ENV) or os.path.join(os.getcwd(), "data", "spill")
+    path = Path(base) / _sanitize_key(pipeline_id) / _sanitize_key(key)
+    try:
+        raw = path.read_bytes()
+        if raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+        resolved = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError):
+        # OSError：文件缺失/无权限；ValueError：解压/解码/JSON 反序列化
+        return None
+    return resolved if isinstance(resolved, dict) else None
 
 
 class ToolCacheWriter(IOutputPlugin):
@@ -111,6 +157,8 @@ class ToolCacheWriter(IOutputPlugin):
         written = 0
         skipped_exclude = 0
         skipped_error = 0
+        skipped_spill_miss = 0
+        skipped_oversize = 0
         call_count = len(executed_calls)
         result_count = len(tool_results)
 
@@ -118,8 +166,18 @@ class ToolCacheWriter(IOutputPlugin):
             tool_call = executed_calls[i]
             result = tool_results[i]
 
-            # 失败的工具调用不缓存（result 含 error 字段）
-            if isinstance(result, dict) and "error" in result:
+            # spill 定位符 → 回读存档还原全文（回读失败跳过该条：缓存宁可缺
+            # 不可存截断版——缓存的价值就在全文重发）
+            if isinstance(result, dict) and result.get(_SPILLED_MARKER):
+                resolved = _resolve_spilled(result)
+                if resolved is None:
+                    skipped_spill_miss += 1
+                    continue
+                result = resolved
+
+            # 失败的工具调用不缓存——按 error 值判定（完整 ToolResult 成功时
+            # 也带 "error": null 键，键存在≠失败）
+            if isinstance(result, dict) and result.get("error"):
                 skipped_error += 1
                 continue
 
@@ -128,16 +186,24 @@ class ToolCacheWriter(IOutputPlugin):
                 skipped_exclude += 1
                 continue
 
+            # 超大结果不缓存：全文已由 spill 链路存档，重复调用会重新执行并
+            # 再次兜底；常驻缓存不承载 MB 级条目。
+            if len(json.dumps(result, ensure_ascii=False)) > MAX_CACHE_ENTRY_BYTES:
+                skipped_oversize += 1
+                continue
+
             cache.put(tool_call, result, pipeline_id=pipeline_id, namespace=namespace)
             written += 1
 
-        if written or skipped_exclude or skipped_error:
+        if written or skipped_exclude or skipped_error or skipped_spill_miss or skipped_oversize:
             logger.debug(
-                "[%s] cache write | written=%d excluded=%d error=%d",
+                "[%s] cache write | written=%d excluded=%d error=%d spill_miss=%d oversize=%d",
                 self.name,
                 written,
                 skipped_exclude,
                 skipped_error,
+                skipped_spill_miss,
+                skipped_oversize,
             )
 
         return OutputResult()

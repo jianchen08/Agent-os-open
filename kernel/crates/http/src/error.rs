@@ -1,7 +1,7 @@
 //! 统一错误类型（api 与 db-admin 共用）
 //!
 //! 对外信封：`{"error": {"code", "message", "source", "retryable", "details", "request_id"}}`。
-//! code 为稳定机器码（单一真值源 `config/error_codes.json`，机械闸测试锁一致）；
+//! code 为稳定机器码（单一真值源 `config/kernel/error_codes.json`，机械闸测试锁一致）；
 //! HTTP 状态码由变体决定，不是 code 的一部分。
 
 use axum::http::StatusCode;
@@ -10,7 +10,7 @@ use axum::Json;
 use serde_json::json;
 use thiserror::Error;
 
-/// 错误来源枚举（与 `config/error_codes.json` 的 sources.enum 一致，机械闸测试锁一致）。
+/// 错误来源枚举（与 `config/kernel/error_codes.json` 的 sources.enum 一致，机械闸测试锁一致）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSource {
     Kernel,
@@ -75,7 +75,7 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    /// 稳定机器码（单一真值源 `config/error_codes.json`）。
+    /// 稳定机器码（单一真值源 `config/kernel/error_codes.json`）。
     pub fn error_code(&self) -> &'static str {
         match self {
             ApiError::BadRequest { .. } => "BAD_REQUEST",

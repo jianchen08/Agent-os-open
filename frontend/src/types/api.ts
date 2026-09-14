@@ -151,12 +151,12 @@ export interface LogoutRequest {
 }
 
 /**
- * 错误来源（与 config/error_codes.json sources.enum 一致，单一真值源）
+ * 错误来源（与 config/kernel/error_codes.json sources.enum 一致，单一真值源）
  */
 export type ErrorSource = 'kernel' | 'plugin' | 'llm' | 'infra' | 'frontend'
 
 /**
- * 统一错误信封（REST 与 WS 同构，单一真值源 config/error_codes.json）：
+ * 统一错误信封（REST 与 WS 同构，单一真值源 config/kernel/error_codes.json）：
  * code 为稳定机器码（非 HTTP 状态码），source 供前端渲染来源标签，
  * retryable 驱动重试按钮，details/request_id 预留（P2 贯通）。
  */

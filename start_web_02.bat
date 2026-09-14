@@ -79,6 +79,14 @@ REM  on the machine - killing unrelated projects' processes.
 REM ============================================================
 echo [CLEAN] Stopping old instances (port-targeted)...
 
+REM Kill leftover G8 supervisor cmd trees from previous launches FIRST.
+REM The supervisor respawns the kernel on any exit (5s/15s/45s backoff),
+REM so port/image kills alone lose the race: it relaunches the very exe
+REM cargo is about to replace minutes later at link time, and the build
+REM dies with os error 5 (2026-09-11, 2026-09-14). The tree kill also
+REM takes the currently supervised kernel and its sidecars in one shot.
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'cmd.exe' -and $_.CommandLine -like '*run_kernel_supervised.bat*' } | ForEach-Object { Write-Host ('       [CLEAN] killing leftover supervisor tree PID ' + $_.ProcessId); taskkill /F /T /PID $_.ProcessId 2>&1 | Out-Null }"
+
 call :KillPort "%AGENTOS_KERNEL_PORT%" "kernel"
 call :KillPort "%AGENTOS_FRONTEND_PORT%" "frontend"
 
@@ -129,6 +137,19 @@ echo [1.5/4] Syncing native cdylibs with kernel (--build)...
 python "%PROJECT_ROOT%\scripts\check_native_artifacts_sync.py" --build
 if errorlevel 1 (
     echo [ERROR] native cdylib 自动重编失败或内核 exe 过期，按上方指引处理后重试。
+    pause
+    exit /b 1
+)
+echo.
+
+REM D4 env integrity guard (2026-09-14): a gutted .env made every LLM call
+REM return empty (all tasks fake-green in minutes). Snapshot healthy keys to
+REM .env.backup and self-heal missing keys from it; abort only if .env exists
+REM but is unparsable with no usable backup.
+echo [1.6/4] Env health check (.env integrity)...
+python "%PROJECT_ROOT%\scripts\check_env_health.py" --fix
+if errorlevel 1 (
+    echo [ERROR] .env 损坏且无法自愈（所有 LLM 调用将空返回），按上方指引处理后重试。
     pause
     exit /b 1
 )

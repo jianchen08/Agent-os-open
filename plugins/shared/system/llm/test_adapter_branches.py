@@ -332,14 +332,14 @@ async def test_payload_diag_walks_up_to_anchor_project_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """未设 AGENTOS_LOG_DIR：从 adapter 文件位置向上探测 config/models 锚定项目根。"""
+    """未设 AGENTOS_LOG_DIR：从 adapter 文件位置向上探测 config/kernel 锚定项目根。"""
     monkeypatch.delenv("AGENTOS_LOG_DIR", raising=False)
     monkeypatch.chdir(tmp_path)  # 探测失败时回落 cwd → 落 tmp，不污染别处
 
     adapter_mod._install_payload_diag_hook()
     _TransformStub.transform_request(_TransformStub(), "m", [{"role": "user", "content": "x"}], None, None, None)
 
-    # 与实现同一判据（config/models 目录）推导锚定根，作为预期落盘基目录
+    # 与实现同一判据（config/kernel 目录）推导锚定根，作为预期落盘基目录
     base = Path(adapter_mod.__file__).resolve().parent
     while base != base.parent and not (base / "config" / "models").is_dir():
         base = base.parent

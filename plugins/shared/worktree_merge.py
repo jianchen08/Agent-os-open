@@ -28,6 +28,7 @@ from agentos_plugin_sdk.fs_utils import force_rmtree
 
 import contextlib
 import logging
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -274,6 +275,18 @@ class WorktreeMerger:
         workspace = ws_meta.get("path", "")
         if not workspace:
             return f"worktree 模式但 ws_meta.path 为空，task_id={task_id}"
+
+        # state 真值原则（2026-09-14 用户裁定）：ws_meta.path 是出生落地校验
+        # 确认过的真实目录；此处若目录缺失说明外部被删（如人工清理），合并
+        # 无从谈起——按跳过处理并留痕，不再以 267 判死任务（工作已发生，
+        # 产物在原空间）。
+        if not os.path.isdir(workspace):
+            logger.warning(
+                "[WorktreeMerge] worktree 目录不存在（疑似外部清理），跳过合并: "
+                "task_id=%s, path=%s",
+                task_id, workspace,
+            )
+            return None
 
         result = self.on_eval_passed(task_id, workspace, ws_meta)
         if result.get("success"):

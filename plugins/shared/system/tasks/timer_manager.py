@@ -209,7 +209,7 @@ class TimerManager:
             # 穿进来。迁移需 _on_load 把 config["system"]["long_term_task"] 穿给单例。
             # 见 docs/working/p1_7_config_center_migration_checklist.md #9，延后 P6。
 
-            config = get_config_center().get("system/long_term_task.yaml")
+            config = get_config_center().get("plugins/tasks/long_term_task.yaml")
             if config and isinstance(config, dict):
                 self._config = self._merge_config(self.DEFAULT_CONFIG, config)
                 logger.info("从配置文件加载长期任务配置成功")

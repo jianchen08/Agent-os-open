@@ -32,14 +32,14 @@ from bounded_dict import BoundedDict  # noqa: E402
 # ── HTTP 端点（http.handle）—— 前端 /ext/evaluation_service/metrics 入口 ──────
 # 内核 http_dispatcher 透传：dispatcher 把 HttpHandleRequest（method/path/raw_body/
 # headers/query/plugin_id）整体作为 arguments 传给本工具。本工具按 path 分发，
-# 读 config_files 声明的汇总 yaml（config/evaluation/evaluation_metrics.yaml），
+# 读 config_files 声明的汇总 yaml（config/plugins/evaluation/evaluation_metrics.yaml），
 # 返回 ToolExecutionResult{success,data}。
 # data 必须是 HttpHandleResponse{status,headers,body,body_encoding}，body 需 base64。
 # 字段形状对齐 frontend/src/services/api/evaluationMetrics.ts 的 EvaluationMetric 类型。
 
 
 # 指标汇总文件：与 manifest 的 config_files.evaluation_metrics.path 一致（唯一真相源）。
-_METRICS_YAML = os.path.join("config", "evaluation", "evaluation_metrics.yaml")
+_METRICS_YAML = os.path.join("config", "plugins", "evaluation", "evaluation_metrics.yaml")
 
 
 def _project_root() -> str:

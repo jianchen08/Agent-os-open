@@ -424,6 +424,30 @@ GATES: list[Gate] = [
         fast=True,
     ),
     Gate(
+        # knip/jscpd 基线棘轮（R6v2-close 2026-09-13）：解析工具 stdout 对照
+        # .github/knip-jscpd-baseline.txt 只减不增。调用口径 = npm exec
+        # （node_modules/.bin 直调；工具链为 Windows 侧 pnpm 安装，
+        # WSL native binding 不匹配不可用，与 vite 同口径）。
+        id="frontend-knip-baseline",
+        label="knip 未用导出/依赖基线棘轮（只减不增）",
+        domain="frontend",
+        cwd="frontend",
+        shell=(
+            'T=$(mktemp); ( npm exec -- knip --no-progress 2>&1 || true ) | tee "$T"; '
+            'python ../scripts/check_knip_jscpd_baseline.py --knip-file "$T"'
+        ),
+    ),
+    Gate(
+        id="frontend-jscpd-baseline",
+        label="jscpd 克隆数基线棘轮（只减不增）",
+        domain="frontend",
+        cwd="frontend",
+        shell=(
+            'T=$(mktemp); ( npm exec -- jscpd 2>&1 || true ) | tee "$T"; '
+            'python ../scripts/check_knip_jscpd_baseline.py --jscpd-file "$T"'
+        ),
+    ),
+    Gate(
         id="frontend-e2e-smoke",
         label="playwright 冒烟（vite preview + ci-smoke，零后端依赖）",
         domain="frontend",

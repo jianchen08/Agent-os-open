@@ -254,7 +254,7 @@ fn router_with_streaming_gate(
     let contracts = Arc::new(
         crate::kernel_capabilities::load_contracts(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../config/kernel_capabilities"),
+                .join("../../../config/kernel/kernel_capabilities"),
         )
         .expect("仓库契约必须可加载"),
     );
@@ -1207,6 +1207,62 @@ async fn test_pipeline_state_lists_registry_rows_with_task_fields() {
             .any(|r| { r.get("pipeline_id").and_then(|v| v.as_str()) == Some(other_pid.as_str()) }),
         "异租户管道不得泄漏"
     );
+}
+
+#[tokio::test]
+async fn test_pipeline_state_cold_rows_carry_latest_run_status() {
+    // BUG-2 幽灵 running：冷兜底行（checkpoint + 表行合并）缺 run_status 时，
+    // 消费方（插件 reconcile / 前端三源推断）把死管道猜成 running。
+    // 契约：冷行以 runs 表最新 run 的权威状态补齐 run_status（fill-if-absent）。
+    let tenant = format!("tenant_cold_rs_{}", uuid::Uuid::new_v4().simple());
+    let pid = format!("pipe_cold_rs_{}", uuid::Uuid::new_v4().simple());
+    let run_id = format!("run_cold_rs_{}", uuid::Uuid::new_v4().simple());
+
+    let store: std::sync::Arc<dyn agentos_core::traits::StorageBackend> =
+        std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
+    use agentos_core::types::RunStatus;
+    // trait 写面按 task_local 租户路由：与生产一致， 种子在租户作用域内完成
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_cold_rs"),
+        async {
+            store.create_run(&run_id, "h", &tenant).await.unwrap();
+            store.set_run_pipeline(&run_id, &pid).await.unwrap();
+            store
+                .update_run_status(&run_id, RunStatus::Cancelled, None, None)
+                .await
+                .unwrap();
+            // 出生投影只有任务域字段：run_status 缺失（崩溃形态）
+            store
+                .upsert_state_field(&pid, &tenant, "task.status", &serde_json::json!("running"))
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_export_fields_lookup(Arc::new(|| {
+            crate::capability_router::ExportFields::from_manifests(&[test_task_export_manifest()])
+        }));
+    let rows = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_cold_rs"),
+        router.handle("pipeline-state", "list", json!({})),
+    )
+    .await
+    .unwrap();
+
+    let arr = rows.as_array().expect("返回应为行数组");
+    let row = arr
+        .iter()
+        .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
+        .expect("冷兜底行应出口");
+    assert_eq!(row["source"], "checkpoint");
+    assert_eq!(
+        row["run_status"], "cancelled",
+        "冷行应携带 runs 表最新 run 的权威状态"
+    );
+    assert_eq!(row["task.status"], "running", "任务域字段保持原值");
 }
 
 #[tokio::test]
@@ -4106,7 +4162,7 @@ fn router_with_real_contracts() -> KernelCapabilityRouter {
     let contracts = Arc::new(
         crate::kernel_capabilities::load_contracts(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../config/kernel_capabilities"),
+                .join("../../../config/kernel/kernel_capabilities"),
         )
         .expect("仓库契约必须可加载"),
     );

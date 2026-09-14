@@ -1,6 +1,6 @@
 """思考模式 API 路由（thinking-mode 域），由 llm_service http.handle 分发。
 
-- 基于 config/models/llm.yaml 中标记 ``reasoning_model: true`` 的模型，
+- 基于 config/plugins/llm/llm.yaml 中标记 ``reasoning_model: true`` 的模型，
   提供思考模式切换、模型支持检查等接口；响应形态与
   /ext/channel_api/thinking-mode/** 逐项对齐（前端直接消费）；
 - 剥离 FastAPI 依赖：无 APIRouter/Depends/require_auth，返回纯 dict，
@@ -37,19 +37,19 @@ class ThinkingModeAPIError(Exception):
 
 
 def _resolve_project_root() -> Path:
-    """向上查找项目根（含 config/ + config/models/ 的目录）。
+    """向上查找项目根（含 config/ + config/kernel/ 的目录）。
 
     按 config/ 特征探测，避免硬编码 parent×N（本模块在
     plugins/shared/system/llm/）。
     """
     here = Path(__file__).resolve().parent
     for candidate in [here, *here.parents]:
-        if (candidate / "config").is_dir() and (candidate / "config" / "models").is_dir():
+        if (candidate / "config").is_dir() and (candidate / "config" / "kernel").is_dir():
             return candidate
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
-_LLM_YAML = _resolve_project_root() / "config" / "models" / "llm.yaml"
+_LLM_YAML = _resolve_project_root() / "config" / "plugins" / "llm" / "llm.yaml"
 
 
 def _get_llm_data() -> dict[str, Any]:

@@ -73,11 +73,9 @@ def test_rules_are_data_driven(tmp_path):
                                        "candidates": ["自定义杠杆"]}},
         "noise_policy": "n", "anti_overfit": {},
     }, allow_unicode=True), encoding="utf-8")
-    import importlib
     orig = improvement._RULES_PATH
-    monkey_target = custom
-    # 直接以自定义 root 模拟：把规则放到 <root>/config/self_evolve/rules/
-    rules_dir = tmp_path / "config" / "self_evolve" / "rules"
+    # 直接以自定义 root 模拟：把规则放到 <root>/config/plugins/review/（load_rules 的实际路径）
+    rules_dir = tmp_path / "config" / "plugins" / "review"
     rules_dir.mkdir(parents=True)
     custom.rename(rules_dir / "triage_rules.yaml")
     out = improvement.suggest([{

@@ -10,7 +10,7 @@
 
 验证范围：
   1. docker-compose.yml Redis 端口映射正确
-  2. config/system/api_config.yaml 中 base_url 端口为 9100
+  2. config/kernel/api_config.yaml 中 base_url 端口为 9100
   3. frontend/.env.example 中 VITE_API_BASE_URL / VITE_WS_BASE_URL 端口为 9100
   4. 容器内部端口未被修改（6379）
   5. 旧端口不再作为服务端口出现
@@ -90,7 +90,7 @@ class TestDockerComposeBackendUrl:
 
 
 # ---------------------------------------------------------------------------
-# 3. config/system/api_config.yaml — base_url 端口
+# 3. config/kernel/api_config.yaml — base_url 端口
 # ---------------------------------------------------------------------------
 
 
@@ -100,7 +100,7 @@ class TestApiConfig:
 
     @pytest.fixture
     def content(self):
-        return _read_file("config/system/api_config.yaml")
+        return _read_file("config/kernel/api_config.yaml")
 
     def test_base_url_port(self, content):
         """base_url 应使用端口 9100（0.2 内核）"""
@@ -162,7 +162,7 @@ class TestNoOldPortsInKeyConfigs:
         "rel_path",
         [
             "docker-compose.yml",
-            "config/system/api_config.yaml",
+            "config/kernel/api_config.yaml",
         ],
     )
     def test_no_old_backend_port_as_service(self, rel_path):

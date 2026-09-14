@@ -74,7 +74,7 @@ class PipelineEvaluationExecutor:
     @staticmethod
     def _default_metrics_path() -> str:
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-        return os.path.join(root, "config", "evaluation", "evaluation_metrics.yaml")
+        return os.path.join(root, "config", "plugins", "evaluation", "evaluation_metrics.yaml")
 
     # ── 指标定义加载 ───────────────────────────────────────────
 

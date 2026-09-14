@@ -1,5 +1,5 @@
 // @feature: FP-0.2.一 插件协议 | @ci: rust-test
-//! 机械闸：`config/error_codes.json`（单一真值源）↔ `ApiError` 代码副本锁一致。
+//! 机械闸：`config/kernel/error_codes.json`（单一真值源）↔ `ApiError` 代码副本锁一致。
 //!
 //! 仿 kernel_capabilities 机械闸模式（读真实仓库文件断言，不读代码副本）：
 //! - 9 个 ApiError 变体的 code/source/retryable 与 json 逐条一致；
@@ -11,13 +11,14 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde_json::Value;
 
-/// 仓库 config/error_codes.json 的绝对路径（CARGO_MANIFEST_DIR 相对，同 kernel_capabilities 模式）。
+/// 仓库 config/kernel/error_codes.json 的绝对路径（CARGO_MANIFEST_DIR 相对，同 kernel_capabilities 模式）。
 fn repo_error_codes_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("..")
         .join("config")
+        .join("kernel")
         .join("error_codes.json")
 }
 

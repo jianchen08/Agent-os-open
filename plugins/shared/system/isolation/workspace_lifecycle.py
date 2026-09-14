@@ -450,10 +450,21 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
 
         全量 checkout 由 git 自管（共享对象库，只展开 tracked 文件）——
         不预扫项目大小做 sparse 决策。
+
+        落地校验（2026-09-14 用户裁定：建了什么目录就把什么目录写进 state，
+        使用时只查 state 不重算）：worktree add 之后必须确认目录真实存在，
+        未落地即抛错让任务在出生期失败——否则任务拿着幻影路径起跑，直到
+        收尾合并才炸 267（实测 repo 根锚定场景：执行降级仓库根 + 合并门控
+        找不到分化目录，任务被误判 failed）。
         """
         branch = f"task/{task_id}"
         ws_dir = ws_base / _safe_ws_name(root_path.name, task_id)
         self._worktree_add_with_repair(root_path, branch, ws_dir, task_id)
+        if not ws_dir.is_dir():
+            raise RuntimeError(
+                f"worktree 分化未落地: task_id={task_id}, 期望目录不存在: {ws_dir} "
+                f"（源仓库: {root_path}）。拒绝以幻影工作空间起跑任务。"
+            )
         self._ensure_git_user(ws_dir)
         return {"mode": "worktree", "path": str(ws_dir), "branch": branch, "project_root": str(root_path)}
 

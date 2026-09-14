@@ -899,4 +899,122 @@ mod tests {
         // BTreeMap 保证顺序一致 → 哈希一致
         assert_eq!(labels_hash(&l1), labels_hash(&l2));
     }
+
+    // ── 类型字符串 / 直方图合并 / 采样取值（导出与广播的公共底座）──
+
+    /// `as_str` 三类型各自映射（Prometheus TYPE 行与 JSON 响应用同一真值源）。
+    #[test]
+    fn test_metric_type_as_str_covers_all_variants() {
+        for (t, s) in [
+            (MetricType::Counter, "counter"),
+            (MetricType::Gauge, "gauge"),
+            (MetricType::Histogram, "histogram"),
+        ] {
+            assert_eq!(t.as_str(), s);
+        }
+    }
+
+    /// `HistogramBuckets::merge`：桶计数逐位累加、sum/count 相加（降采样合并）。
+    /// 两组区分度输入：不同观察值集合同桶合并 / 与空桶合并（幂等）。
+    #[test]
+    fn test_histogram_buckets_merge_accumulates() {
+        let mut a = HistogramBuckets::new();
+        a.observe(0.003);
+        a.observe(2.0);
+
+        let mut b = HistogramBuckets::new();
+        b.observe(0.003);
+        b.observe(7.0);
+
+        let (sa, sb, cb, ca) = (a.sum, b.sum, b.count, a.count);
+        let a_counts = a.counts.clone();
+        a.merge(&b);
+        assert_eq!(a.count, ca + cb, "count 相加");
+        assert!((a.sum - (sa + sb)).abs() < f64::EPSILON, "sum 相加");
+        for (i, (merged, b_side)) in a.counts.iter().zip(b.counts.iter()).enumerate() {
+            assert_eq!(
+                *merged,
+                a_counts[i] + b_side,
+                "桶 {i}: 合并后计数 = A 侧原值 + B 侧原值（逐位累加）"
+            );
+        }
+
+        // 与空桶合并 = 幂等（count/sum/桶全部不变）
+        let before = a.clone();
+        a.merge(&HistogramBuckets::new());
+        assert_eq!(a.count, before.count);
+        assert_eq!(a.counts, before.counts);
+        assert!((a.sum - before.sum).abs() < f64::EPSILON);
+    }
+
+    /// `bucket_start` 的零粒度分支（ts 原样返回）与常规对齐分支。
+    #[test]
+    fn test_bucket_start_zero_granularity_is_identity() {
+        assert_eq!(
+            MetricSeries::bucket_start(1234, Duration::from_secs(0)),
+            1234,
+            "零粒度不做对齐（防除零）"
+        );
+        for (ts, bucket, want) in [
+            (1234, Duration::from_secs(1), 1234),
+            (1234, Duration::from_secs(10), 1230),
+            (0, Duration::from_secs(10), 0),
+        ] {
+            assert_eq!(
+                MetricSeries::bucket_start(ts, bucket),
+                want,
+                "ts={ts} bucket={bucket:?}"
+            );
+        }
+    }
+
+    /// `sample_value`：gauge 无计数时回退 last（零桶聚合形态），有计数时返回 avg。
+    #[test]
+    fn test_sample_value_gauge_falls_back_to_last_without_count() {
+        let mut series = MetricSeries::new(MetricType::Gauge, labels(&[]));
+        // 走私有 BucketAggregate：直接经 observe 后人工清零 count 不可达，故用
+        // record 路径构造"只有 last 无 count"的形态——histogram 桶合并路径之外，
+        // gauge 的 count 恒 > 0；此处构造空聚合（Default）验证回退分支。
+        let empty = BucketAggregate::default();
+        assert_eq!(series.sample_value(&empty), 0.0, "空聚合 last=0 → 回退值 0");
+
+        series.observe(1000, 10.0);
+        series.observe(1000, 20.0);
+        let agg = series.tier1.values().next().unwrap();
+        assert_eq!(series.sample_value(agg), 15.0, "gauge 有计数取 avg");
+    }
+
+    /// `Default` 与 `new` 同构（空聚合器），且 `rollup`/`clear` 走 now 口径不炸。
+    #[test]
+    fn test_default_new_equivalence_and_rollup_clear() {
+        let d = MetricsAggregator::default();
+        let n = MetricsAggregator::new();
+        assert!(d.query(None, None, None, &labels(&[])).is_empty());
+        assert!(n.query(None, None, None, &labels(&[])).is_empty());
+
+        let agg = MetricsAggregator::default();
+        agg.record(
+            "p1",
+            "m",
+            MetricType::Counter,
+            1.0,
+            &labels(&[]),
+            None,
+            None,
+        );
+        agg.rollup(); // 走 now_secs() 口径：刚写入的桶在窗口内，series 保留
+        assert_eq!(agg.query(None, None, None, &labels(&[])).len(), 1);
+        agg.clear();
+        assert!(
+            agg.snapshot().is_empty(),
+            "clear 后快照为空（测试夹具复位语义）"
+        );
+    }
+
+    /// gauge 无样本时 `latest_value` 返回 None（空 series 不出口 latest）。
+    #[test]
+    fn test_latest_value_none_for_empty_series() {
+        let series = MetricSeries::new(MetricType::Gauge, labels(&[]));
+        assert!(series.latest_value().is_none());
+    }
 }

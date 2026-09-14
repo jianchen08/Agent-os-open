@@ -44,10 +44,10 @@ use crate::routes::{
     health_handler, metrics_prometheus_handler, pending_inputs_clear_handler,
     pending_inputs_delete_handler, pending_inputs_list_handler, pending_inputs_update_handler,
     pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
-    plugins_contract_status_handler, plugins_set_enabled_handler, plugins_status_handler,
-    put_pipeline_config_handler, put_plugin_config_handler, schema_handler, serve_upload_handler,
-    system_memstats_handler, system_restart_handler, tools_handler, validate_all_plugins_handler,
-    AppState,
+    plugins_contract_status_handler, plugins_dependents_handler, plugins_set_enabled_handler,
+    plugins_status_handler, put_pipeline_config_handler, put_plugin_config_handler, schema_handler,
+    serve_upload_handler, system_memstats_handler, system_restart_handler, tools_handler,
+    validate_all_plugins_handler, AppState,
 };
 use crate::session_routes::{
     create_session_handler, delete_session_handler, list_session_messages_handler,
@@ -167,6 +167,11 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/plugins/{id}/enabled",
             axum::routing::put(plugins_set_enabled_handler),
+        )
+        // §2.4 卸载/禁用事前提醒数据源：谁依赖我的服务（requires_services 反向边）
+        .route(
+            "/api/v1/plugins/{id}/dependents",
+            axum::routing::get(plugins_dependents_handler),
         )
         // 监控 M5b：Prometheus 导出端点保留内核（运维契约：抓取方通常不鉴权且
         // URL 稳定优先，boot-plugin 立项 §二/第三刀决策）。查询面 /api/v1/metrics

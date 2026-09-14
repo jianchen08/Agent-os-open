@@ -1,5 +1,5 @@
 /**
- * 错误来源标签（统一错误模型：config/error_codes.json sources.enum 单一真值源）。
+ * 错误来源标签（统一错误模型：config/kernel/error_codes.json sources.enum 单一真值源）。
  * 前端据此区分错误来自内核(Rust)/插件(Python)/LLM/基础设施/前端自身。
  */
 
@@ -30,7 +30,7 @@ const UNKNOWN_SOURCE_STYLE = 'bg-muted/30 text-muted-foreground border-border/40
  * 来源标签徽标。错误信封契约中 source 为可选字段（types/api.ts ErrorEnvelope），
  * 缺失/非枚举值时渲染「未知」灰标，不做枚举外猜测。
  * DEBT(backend): 后端全量补齐 source 后可删「未知」分支——触发条件：
- * config/error_codes.json sources 枚举在所有错误产生路径强制填充并通过 e2e 校验。
+ * config/kernel/error_codes.json sources 枚举在所有错误产生路径强制填充并通过 e2e 校验。
  */
 export function ErrorSourceBadge({ source }: { source?: ErrorSource | string }) {
   const normalized = isErrorSource(source) ? source : undefined

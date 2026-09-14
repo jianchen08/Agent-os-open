@@ -215,7 +215,7 @@ apiClient.interceptors.response.use(
       errorMessage = responseData
     } else if (typeof responseData?.error === 'object' && responseData?.error !== null) {
       // 内核统一信封 {error: {code, message, source, retryable}}（单一真值源
-      // kernel/crates/http/src/error.rs + config/error_codes.json）：code 为
+      // kernel/crates/http/src/error.rs + config/kernel/error_codes.json）：code 为
       // 稳定机器码（如 BAD_REQUEST / RESOURCE_NOT_FOUND / INTERNAL_ERROR），
       // 非 HTTP 状态字符串；message 为业务文案。
       // 对象形态优先级最高——axios 的通用 message 无业务信息。
@@ -246,7 +246,7 @@ apiClient.interceptors.response.use(
         error.code ||
         'UNKNOWN_ERROR',
       message: errorMessage,
-      // 统一错误信封（config/error_codes.json 单一真值源）：source 供渲染
+      // 统一错误信封（config/kernel/error_codes.json 单一真值源）：source 供渲染
       // 来源标签，retryable 驱动重试按钮；旧后端无这些字段时保持 undefined。
       source:
         typeof responseData?.error?.source === 'string'
@@ -332,7 +332,7 @@ apiClient.interceptors.response.use(
               : ErrorSeverity.ERROR,
         code: apiError.code,
         details: apiError.details,
-        // 统一错误信封来源（config/error_codes.json）：通知中心渲染来源标签
+        // 统一错误信封来源（config/kernel/error_codes.json）：通知中心渲染来源标签
         source: apiError.source,
       })
     }

@@ -14,7 +14,7 @@
   "config_files": [
     {
       "id": "adapter",
-      "path": "config/plugins/model_prompt_adapter.yaml",
+      "path": "config/plugins/model_prompt_adapter/model_prompt_adapter.yaml",
       "label": "模型适配插件配置"
     }
   ],

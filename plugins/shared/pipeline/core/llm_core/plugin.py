@@ -205,6 +205,9 @@ class LLMCore(ICorePlugin):
         self._provider_thinking_strength_params: dict[str, dict[str, Any]] | None = (
             self._config.get("provider_thinking_strength_params")
         )
+        # 视觉能力缺省 False（fail-closed）：_apply_model_from_state 解析模型
+        # 时按 llm.yaml multimodal 声明覆盖。
+        self._supports_vision: bool = bool(self._config.get("supports_vision", False))
         self._context_window: int | None = self._config.get("context_window")
         if not self._context_window:
             logger.warning(
@@ -313,6 +316,10 @@ class LLMCore(ICorePlugin):
         self._provider_thinking_strength_params = llm_conf.get(
             "provider_thinking_strength_params"
         )
+        # 模型视觉能力（llm.yaml models.<id>.multimodal.supports_image）：写入
+        # state 供 tool_core inject_multimodal 作注图闸门——模型不支持时不注图，
+        # 工具截图走文本引导路径（消费键 state.llm_supports_vision）。
+        self._supports_vision = self._read_supports_vision()
         logger.info(
             "[%s] model resolved: model_id=%s provider=%s model=%s",
             self.name,
@@ -320,6 +327,27 @@ class LLMCore(ICorePlugin):
             self._provider,
             self._model,
         )
+
+    def _read_supports_vision(self) -> bool:
+        """读模型声明的视觉能力（models.<id>.multimodal.supports_image）。
+
+        条目缺失/字段未声明 → False（fail-closed：不注图，走文本引导路径）；
+        配置桥查询失败只降级为不支持，不阻断模型解析。
+        """
+        try:
+            from _config_models import get_model_config_loader  # noqa: PLC0415
+
+            entry = get_model_config_loader().get_model_config(self._model_id) or {}
+        except Exception:
+            logger.debug(
+                "[%s] multimodal 能力查询失败，按不支持处理 (model_id=%s)",
+                self.name,
+                self._model_id,
+                exc_info=True,
+            )
+            return False
+        mm = entry.get("multimodal") or {}
+        return bool(mm.get("supports_image", False))
 
     def _get_llm_core_config(self, model_id: str) -> dict[str, Any] | None:
         """通过 sidecar 注入的 config 桥取模型配置。
@@ -438,6 +466,7 @@ class LLMCore(ICorePlugin):
                 "llm_model": self._model,
                 "llm_provider": self._provider,
                 "llm_api_base": self._api_base,
+                "llm_supports_vision": self._supports_vision,
                 "output_truncated": output_truncated,
             }
             if messages_update is not None:

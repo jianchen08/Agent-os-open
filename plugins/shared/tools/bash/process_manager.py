@@ -23,6 +23,48 @@ from log_compressor import LogCompressor
 logger = logging.getLogger(__name__)
 
 
+# ── wsl_native 传输辅助（与 WslNativeProvider._wsl_argv/_map_working_dir
+#    同语义；跨插件不可 import，漂移由 tests/test_wsl_native_wiring.py
+#    ::TestArgvDriftPin 钉死）────────────────────────────────────
+
+
+def _wsl_transport(backend: dict[str, Any]) -> list[str]:
+    """传输前缀：[wsl_exe, -d distro] + 可选 [-u user]（无 --，由调用方续接）。"""
+    args = [str(backend.get("wsl_exe", "wsl")), "-d", str(backend.get("distro", "Ubuntu"))]
+    user = backend.get("user")
+    if user:
+        args.extend(["-u", str(user)])
+    return args
+
+
+def _map_wsl_working_dir(backend: dict[str, Any], working_dir: str | None) -> str:
+    """/workspace 约定路径 → 环境 workspace 的 WSL 路径；其余原样透传。
+
+    反斜杠形态（`\workspace`，工具层 ntpath 规整产物）同樣映射——与
+    WslNativeProvider._map_working_dir 同语义（漂移钉 TestArgvDriftPin）。
+    """
+    workspace_wsl = str(backend.get("workspace_wsl", "") or "")
+    normalized = working_dir.replace("\\", "/") if working_dir else ""
+    logger.info("[WslNative] map wd: in=%r normalized=%r -> out=%r", working_dir, normalized, workspace_wsl if (not normalized or normalized == "/workspace") else None)
+    if not normalized or normalized == "/workspace":
+        return workspace_wsl
+    if normalized.startswith("/workspace/"):
+        return workspace_wsl + normalized[len("/workspace"):]
+    return working_dir or ""
+
+
+def _wsl_bridge_env_pairs() -> list[str]:
+    """bridge 通路 env k=v 对（与 DockerProvider 的 -e 注入同源环境变量）。"""
+    pairs: list[str] = []
+    url = os.environ.get("AGENTOS_BRIDGE_URL", "")
+    if url:
+        pairs.append(f"AGENTOS_BRIDGE_URL={url}")
+    token = os.environ.get("AGENTOS_BRIDGE_TOKEN", "")
+    if token:
+        pairs.append(f"AGENTOS_BRIDGE_TOKEN={token}")
+    return pairs
+
+
 class ProcessLogReadError(RuntimeError):
     """日志文件存在但读取失败（IO 层故障）。
 
@@ -311,6 +353,7 @@ class ProcessManager:
         container_id: str | None = None,
         owner: str | None = None,
         on_output: Callable[[str], None] | None = None,
+        exec_backend: dict[str, Any] | None = None,
     ) -> tuple[int, Path]:
         """启动新进程。
 
@@ -319,6 +362,11 @@ class ProcessManager:
         宿主机 process.pid 只是 asyncio 句柄的 key（供 _read_output/wait 用），
         杀进程必须用容器内 pid（存在 ProcessInfo.metadata['container_pid']），
         否则 docker exec kill <host_pid> 在容器 namespace 里查无此 pid。
+
+        exec_backend：执行环境后端信息（isolation_guard 服务端注入，与
+        _container_id 同级信任链）。backend=wsl_native 时走 wsl 传输
+        （wsl.exe -d 发行版 --cd 映射后工作目录 -- [env] [sandbox] sh -c），
+        pid 读取协议与 docker 路径完全一致；None 时保持 docker exec 通路。
 
         owner: 会话身份（内核注入）。写入 ProcessInfo.metadata['owner'] 与
         日志头 `# Owner:`，供 pid 级操作（continue/input/terminate/read_log）
@@ -332,9 +380,14 @@ class ProcessManager:
         is_windows = platform.system() == "Windows"
 
         if container_id:
-            pid, log_file = await self._start_container_process(
-                command, working_dir, container_id, owner, effective_log_dir, on_output
-            )
+            if exec_backend and exec_backend.get("backend") == "wsl_native":
+                pid, log_file = await self._start_wsl_native_process(
+                    command, working_dir, container_id, owner, effective_log_dir, on_output, exec_backend
+                )
+            else:
+                pid, log_file = await self._start_container_process(
+                    command, working_dir, container_id, owner, effective_log_dir, on_output
+                )
             return pid, log_file
 
         # ===== 本地路径：WSL/Bash/CMD 分支 =====
@@ -372,32 +425,12 @@ class ProcessManager:
         on_output: Callable[[str], None] | None,
     ) -> tuple[int, Path]:
         """容器路径：docker exec 起进程，返回 (宿主句柄 pid, 日志文件)。"""
-        # 包装命令让容器内 sh 自己报 pid，并 exec 成用户命令——这样 $$ 报的
-        # pid 就是用户命令本身（单条命令场景，如 cargo build），kill 干净。
-        #
-        # 复合命令（含 &&/;/||/|/() 等）：POSIX exec 只接受一个简单命令，
-        # `exec cmd1 && cmd2` 里 exec 替换为 cmd1 后进程即退出，cmd2 被丢弃
-        # → 后续段输出全部丢失（如 echo "标签" && ls 只返回标签）。
-        # 故复合命令自动套 `exec sh -c '<cmd>'`（shlex.quote 整条引用，防
-        # double-eval），让控制操作符在内层 sh 全部生效。代价：pid 指向内层 sh
-        # 而非用户命令，kill 后 sh 的子进程可能成孤儿（容器销毁时兜底清理）。
-        # 单条命令保持 `exec <cmd>`，pid 精准、无孤儿，向后兼容。
-        #
         # working_dir 必须是容器内 POSIX 绝对路径（以 / 开头）。BashTool.get_working_dir
         # 返回的是宿主 task workspace（如 D:\myproject\xxx），直接传给
         # `docker exec -w` 会让 OCI 报 "Cwd must be an absolute path" 退 128。
         # 非 POSIX 绝对路径时强制用容器挂载点 /workspace（IsolationManager 约定）。
         container_workdir = working_dir if (working_dir and working_dir.startswith("/")) else "/workspace"
-        if self._is_compound_command(command):
-            # set -o pipefail 让管道里任一段失败/被信号杀时，退出码反映真实失败
-            # （而非管道最后一段的成功码）。pipefail 使退出码反映管道内真实失败段；
-            # 2>/dev/null 兜底：dash/纯 POSIX sh 不支持 pipefail 选项时不报错中断
-            # （bash/ash 支持，容器镜像默认满足）。
-            # 注意：pipefail 只修管道(|)，不修分号序列（cmd1; cmd2 取 cmd2 码）——
-            # 后者是 shell 固有语义，靠 _build_failure_message 的信号提取兜底。
-            wrapped = f"echo $$; exec sh -c {shlex.quote('set -o pipefail 2>/dev/null; ' + command)}"
-        else:
-            wrapped = f"echo $$; exec {command}"
+        wrapped = self._wrap_container_command(command)
         process = await asyncio.create_subprocess_exec(
             "docker",
             "exec",
@@ -411,6 +444,92 @@ class ProcessManager:
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE,
         )
+        return await self._register_container_process(
+            command, process, container_id, owner, effective_log_dir, on_output,
+            backend=_get_container_backend(container_id),
+            metadata_extra={},
+        )
+
+    async def _start_wsl_native_process(
+        self,
+        command: str,
+        working_dir: str | None,
+        container_id: str,
+        owner: str | None,
+        effective_log_dir: Path,
+        on_output: Callable[[str], None] | None,
+        exec_backend: dict[str, Any],
+    ) -> tuple[int, Path]:
+        """wsl_native 路径：wsl 传输起进程，pid 协议与 docker 路径一致。
+
+        argv 形状（与 WslNativeProvider._build_exec_argv 同语义，漂移由
+        tests/test_wsl_native_wiring.py::TestArgvDriftPin 钉死）：
+        [wsl, -d distro, (-u user), --cd 映射后目录, --, [env k=v...],
+         [sandbox_cmd...], sh, -c, wrapped]
+        bridge 环境经 env 前缀注入（wsl_native 无常驻容器可挂 -e）。
+        """
+        working_dir_mapped = _map_wsl_working_dir(exec_backend, working_dir)
+        # --exec：argv 逐字传递（`--` 会经登录 shell 重解析，$!/引号/管道符
+        # 被外层改写——后台进程 echo $$ 协议全依赖逐字传递，禁用 `--`）
+        argv = [*_wsl_transport(exec_backend), "--cd", working_dir_mapped, "--exec"]
+        bridge_pairs = _wsl_bridge_env_pairs()
+        if bridge_pairs:
+            argv.append("env")
+            argv.extend(bridge_pairs)
+        argv.extend(str(x) for x in exec_backend.get("sandbox_cmd", []))
+        # 执行壳 bash：发行版 dash 对 set -o pipefail 致命退出（2026-09-14 实测）
+        argv.extend(["bash", "-c", self._wrap_container_command(command, shell="bash")])
+        logger.info("[WslNative] exec argv=%r", argv)
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE,
+        )
+        return await self._register_container_process(
+            command, process, container_id, owner, effective_log_dir, on_output,
+            backend=_get_wsl_native_backend(exec_backend),
+            metadata_extra={"exec_backend": exec_backend},
+        )
+
+    def _wrap_container_command(self, command: str, shell: str = "sh") -> str:
+        """pid 上报包装：`echo $$; exec <cmd>`（复合命令套内层 shell，见下）。
+
+        shell：内层 exec 的 shell（docker 路径默认 sh；wsl 路径传 bash——
+        发行版 dash 对 set -o pipefail 致命退出）。"""
+        inner_shell = shlex.quote(shell)
+        # 包装命令让容器内 sh 自己报 pid，并 exec 成用户命令——这样 $$ 报的
+        # pid 就是用户命令本身（单条命令场景，如 cargo build），kill 干净。
+        #
+        # 复合命令（含 &&/;/||/|/() 等）：POSIX exec 只接受一个简单命令，
+        # `exec cmd1 && cmd2` 里 exec 替换为 cmd1 后进程即退出，cmd2 被丢弃
+        # → 后续段输出全部丢失（如 echo "标签" && ls 只返回标签）。
+        # 故复合命令自动套 `exec sh -c '<cmd>'`（shlex.quote 整条引用，防
+        # double-eval），让控制操作符在内层 sh 全部生效。代价：pid 指向内层 sh
+        # 而非用户命令，kill 后 sh 的子进程可能成孤儿（容器销毁时兜底清理）。
+        # 单条命令保持 `exec <cmd>`，pid 精准、无孤儿，向后兼容。
+        if self._is_compound_command(command):
+            # set -o pipefail 让管道里任一段失败/被信号杀时，退出码反映真实失败
+            # （而非管道最后一段的成功码）。pipefail 使退出码反映管道内真实失败段；
+            # 2>/dev/null 兜底：dash/纯 POSIX sh 不支持 pipefail 选项时不报错中断
+            # （bash/ash 支持，容器镜像默认满足）。
+            # 注意：pipefail 只修管道(|)，不修分号序列（cmd1; cmd2 取 cmd2 码）——
+            # 后者是 shell 固有语义，靠 _build_failure_message 的信号提取兜底。
+            return f"echo $$; exec {inner_shell} -c {shlex.quote('set -o pipefail 2>/dev/null; ' + command)}"
+        return f"echo $$; exec {command}"
+
+    async def _register_container_process(
+        self,
+        command: str,
+        process: asyncio.subprocess.Process,
+        container_id: str,
+        owner: str | None,
+        effective_log_dir: Path,
+        on_output: Callable[[str], None] | None,
+        backend: ProcessBackend,
+        metadata_extra: dict[str, Any],
+    ) -> tuple[int, Path]:
+        """容器/wsl 共用的注册收尾：读容器内 pid、写日志头、登记进程。"""
         host_pid = process.pid
         # 同步读第一行（容器内 sh 的 $$），拿容器内 pid。
         container_pid = await self._read_container_pid(process)
@@ -420,16 +539,17 @@ class ProcessManager:
         metadata: dict[str, Any] = {
             "container_id": container_id,
             "container_pid": container_pid,
+            **metadata_extra,
         }
         if owner is not None:
             metadata["owner"] = owner
         return self._register_process(
             command, process, effective_log_dir, on_output,
-            owner=owner, backend=_get_container_backend(container_id), metadata=metadata,
+            owner=owner, backend=backend, metadata=metadata,
         )
 
     def _normalize_local_command(self, command: str, is_windows: bool) -> str:
-        """WSL 环境下自动将 Windows 路径转换为 WSL 路径（D:\path → /mnt/d/path，
+        r"""WSL 环境下自动将 Windows 路径转换为 WSL 路径（D:\path → /mnt/d/path，
         可通过 AO_BASH_WSL_PATH_CONVERT=0 关闭）。"""
         path_convert_enabled = os.environ.get("AO_BASH_WSL_PATH_CONVERT", "1") != "0"
         if is_windows and path_convert_enabled and (
@@ -1666,6 +1786,13 @@ class ContainerProcessBackend(ProcessBackend):
         proc = _sp.run(args, capture_output=True, timeout=timeout)  # noqa: S603
         return proc.returncode, proc.stdout, proc.stderr
 
+    def _exec_prefix(self, container_id: str) -> list[str]:
+        """杀进程 argv 的传输前缀（含 shell，kill 处续接 -c inner_cmd）。
+
+        子类（wsl_native）覆写以换传输通道。
+        """
+        return ["docker", "exec", container_id, "sh"]
+
     async def kill(self, unit: WorkUnit, force: bool = True) -> None:
         """docker exec <cid> sh -c 'kill <sig> <pid>' —— 单进程杀，不整组。
 
@@ -1685,7 +1812,7 @@ class ContainerProcessBackend(ProcessBackend):
         inner_cmd = f"kill {sig} {unit.pid} 2>/dev/null || true"
         try:
             await self._run_cmd(
-                ["docker", "exec", container_id, "sh", "-c", inner_cmd],
+                [*self._exec_prefix(container_id), "-c", inner_cmd],
                 timeout=10,
             )
         except Exception as e:  # noqa: BLE001
@@ -1713,3 +1840,33 @@ def _get_container_backend(container_id: str) -> ContainerProcessBackend:
         backend = ContainerProcessBackend(container_id)
         _container_backends[container_id] = backend
     return backend
+
+
+class WslNativeProcessBackend(ContainerProcessBackend):
+    """wsl_native 环境内进程后端：wsl 传输 + sh 内建 kill 单进程杀。
+
+    与容器后端同纪律：单进程杀不整组、不做宿主内存采样（继承 None 语义——
+    wsl_native 无 cgroup 配额兜底，采样值也不代表环境配额，留待 sandbox_cmd
+    强沙箱档补）。区别仅在传输前缀：wsl.exe -d 发行版 [--]。
+    """
+
+    def __init__(self, backend: dict[str, Any]) -> None:
+        super().__init__(container_id="")
+        self.backend = dict(backend)
+
+    def _exec_prefix(self, container_id: str) -> list[str]:
+        return [*_wsl_transport(self.backend), "--exec", "bash"]
+
+
+# wsl_native 后端缓存（按后端配置 JSON 键单例）
+_wsl_native_backends: dict[str, WslNativeProcessBackend] = {}
+
+
+def _get_wsl_native_backend(backend: dict[str, Any]) -> WslNativeProcessBackend:
+    """获取/创建 wsl_native 进程后端（按配置内容缓存单例）。"""
+    key = repr(sorted((str(k), str(v)) for k, v in backend.items()))
+    instance = _wsl_native_backends.get(key)
+    if instance is None:
+        instance = WslNativeProcessBackend(backend)
+        _wsl_native_backends[key] = instance
+    return instance

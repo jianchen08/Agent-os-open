@@ -449,4 +449,32 @@ mod user_input_ec_tests {
         assert_eq!(r2.route(&bad, "u1").await, RouteOutcome::Handled);
         assert!(d2.last_execution_context.lock().unwrap().is_none());
     }
+
+    /// 同一 mock 走完 interaction_response / stop_generation 两条路由：二者
+    /// 的 mock 实现是 trait 必需的空实现，此处经真实路由触达，保证"路由→
+    /// dispatcher"链路对全部消息类型都成立（本模块 mock 覆盖完整）。
+    #[tokio::test]
+    async fn other_message_types_reach_dispatcher_through_same_router() {
+        let (r, _d) = router();
+        assert_eq!(
+            r.route(
+                &json!({
+                    "type": "interaction_response",
+                    "thread_id": "thread-1",
+                    "data": {"request_id": "req-1"},
+                }),
+                "u1"
+            )
+            .await,
+            RouteOutcome::Handled
+        );
+        assert_eq!(
+            r.route(
+                &json!({"type": "stop_generation", "thread_id": "thread-1"}),
+                "u1"
+            )
+            .await,
+            RouteOutcome::Handled
+        );
+    }
 }

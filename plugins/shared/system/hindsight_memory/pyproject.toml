@@ -10,6 +10,9 @@ dependencies = [
     # hindsight-api 服务器栈（fastmcp→mcp 1.x + pg0-embedded）与 mcp 2.x 互斥，
     # 装在第二个 venv .venv-hindsight（见 requirements.txt）。
     "hindsight-client>=0.9.0,<0.10",
+    # on_unload 经共享件 proc_tree.kill_process_tree 清理 api 子进程树
+    # （psutil 延迟导入）——本插件自持 venv，不继承根 venv 的 psutil。
+    "psutil>=7.0,<8",
 ]
 
 # 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：

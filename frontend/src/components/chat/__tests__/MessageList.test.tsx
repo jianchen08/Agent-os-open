@@ -401,6 +401,146 @@ describe('MessageList', () => {
       expect(listEl2.scrollTop).toBe(1000)
     })
 
+    it('消息未加载完（空态）切走，缓存初值语义为底部：重进钉底且保持跟随', () => {
+      const tabId = 'empty-leave'
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+
+      // 第一次挂载时消息尚未加载（渲染空态占位），用户直接切走
+      const { unmount } = render(<MessageList {...defaultProps} messages={[]} tabId={tabId} />)
+      unmount()
+
+      // 消息加载完成后的重进：缓存无定位信息（0）应等价"钉在底部"，而非绝对坐标 0=顶部
+      const { container, rerender } = render(
+        <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(800) // 1000 - 200（clientHeight），底部
+
+      // 底部即跟随：后续内容增长继续钉底（跟随未被恢复分支误关）
+      rerender(
+        <MessageList
+          {...defaultProps}
+          messages={[...messages, makeMessage({ id: 'msg-2', sequence: 2 })]}
+          tabId={tabId}
+        />,
+      )
+      mockScrollMetrics(listEl, 1300)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1300)
+    })
+
+    it('缓存按距底距离恢复：两次进入间内容高度变化仍锚定同一相对位置', () => {
+      const tabId = 'distance-restore'
+      const messages = [makeMessage({ id: 'msg-1' })]
+
+      const { container, unmount } = render(
+        <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+      // 用户向上滚到距底 400 处（1000 - 400 - 200）后切走
+      listEl.scrollTop = 400
+      fireEvent.scroll(listEl)
+      unmount()
+
+      // 重进时内容已变高（1200）：按距底 400 恢复 → 1200 - 400 - 200 = 600
+      const { container: container2 } = render(
+        <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
+      )
+      const listEl2 = container2.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl2, 1200)
+      flushRaf()
+      expect(listEl2.scrollTop).toBe(600)
+    })
+
+    it('距顶一个视口内即提前触发加载更早（无需触到顶）', () => {
+      const onLoadMore = vi.fn()
+      const messages = [makeMessage({ id: 'msg-1' })]
+      const { container } = render(
+        <MessageList
+          {...defaultProps}
+          messages={messages}
+          tabId="preload"
+          hasMore
+          onLoadMore={onLoadMore}
+        />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 5000, 200)
+      flushRaf()
+
+      // 距顶 180px：旧固定阈值（≤150）不触发，预载区（≤clientHeight=200）触发
+      listEl.scrollTop = 180
+      fireEvent.scroll(listEl)
+      expect(onLoadMore).toHaveBeenCalledTimes(1)
+
+      // 预载区外不触发
+      listEl.scrollTop = 1000
+      fireEvent.scroll(listEl)
+      expect(onLoadMore).toHaveBeenCalledTimes(1)
+    })
+
+    it('一批落位后仍在预载区自动续载下一批，空批不续载（防死循环）', () => {
+      const onLoadMore = vi.fn()
+      const messages = [makeMessage({ id: 'm1', sequence: 1 })]
+      const { container, rerender } = render(
+        <MessageList
+          {...defaultProps}
+          messages={messages}
+          tabId="chain"
+          hasMore
+          onLoadMore={onLoadMore}
+        />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 5000, 200)
+      flushRaf()
+
+      // 滚入预载区触发第一批
+      listEl.scrollTop = 100
+      fireEvent.scroll(listEl)
+      expect(onLoadMore).toHaveBeenCalledTimes(1)
+
+      // 第一批加载中 → 落位（prepend 50 条）：仍在预载区（停顶无后续 scroll 事件）→ 自动续载
+      rerender(
+        <MessageList
+          {...defaultProps}
+          messages={messages}
+          tabId="chain"
+          hasMore
+          isLoadingMore
+          onLoadMore={onLoadMore}
+        />,
+      )
+      const grown = [
+        ...Array.from({ length: 50 }, (_, i) => makeMessage({ id: `old-${i}`, sequence: i - 50 })),
+        ...messages,
+      ]
+      rerender(
+        <MessageList {...defaultProps} messages={grown} tabId="chain" hasMore onLoadMore={onLoadMore} />,
+      )
+      expect(onLoadMore).toHaveBeenCalledTimes(2)
+
+      // 第二批加载中 → 空批落位（条数未增长，has_more 仍 true）：不续载
+      rerender(
+        <MessageList
+          {...defaultProps}
+          messages={grown}
+          tabId="chain"
+          hasMore
+          isLoadingMore
+          onLoadMore={onLoadMore}
+        />,
+      )
+      rerender(
+        <MessageList {...defaultProps} messages={grown} tabId="chain" hasMore onLoadMore={onLoadMore} />,
+      )
+      expect(onLoadMore).toHaveBeenCalledTimes(2)
+    })
+
     it('底部追加新消息时跟随到底部', () => {
       const initialMessages = [makeMessage({ id: 'msg-1', sequence: 1 })]
       const { container, rerender } = render(

@@ -849,7 +849,7 @@ def _load_env_file() -> dict[str, str]:
 
 
 def _load_llm_yaml() -> dict[str, Any] | None:
-    """读系统模型注册真值 config/models/llm.yaml（LLM 设置页写回的单一真值）。
+    """读系统模型注册真值 config/plugins/llm/llm.yaml（LLM 设置页写回的单一真值）。
 
     缺失/损坏返回 None，调用方按段降级（不阻塞启动）。
     """
@@ -857,13 +857,13 @@ def _load_llm_yaml() -> dict[str, Any] | None:
 
     try:
         with open(
-            os.path.join(_project_root(), "config", "models", "llm.yaml"), encoding="utf-8"
+            os.path.join(_project_root(), "config", "plugins", "llm", "llm.yaml"), encoding="utf-8"
         ) as f:
             data = yaml.safe_load(f)
     except (OSError, yaml.YAMLError) as exc:
         logger.warning(
             "[hindsight] llm.yaml 读取失败（按段降级，本段返回 None）: %s | %s",
-            os.path.join(_project_root(), "config", "models", "llm.yaml"),
+            os.path.join(_project_root(), "config", "plugins", "llm", "llm.yaml"),
             exc,
         )
         return None
@@ -934,7 +934,7 @@ def _apply_llm_env() -> None:
 
     注意:hindsight-api 用的是 HINDSIGHT_API_ 前缀(不是 HINDSIGHT_)。
 
-    配置真值 = 系统 LLM 注册（config/models/llm.yaml）+ 本插件配置字段选型
+    配置真值 = 系统 LLM 注册（config/plugins/llm/llm.yaml）+ 本插件配置字段选型
     （ADR 2026-09-07-hindsight-llm-follow-system）。每段独立解析，优先级：
 
       显式 HINDSIGHT_API_* env（逃生口，逐键最高优先）
@@ -951,7 +951,7 @@ def _apply_llm_env() -> None:
     llm_cfg = _load_llm_yaml()
     if llm_cfg is None:
         log.warning(
-            "hindsight 配置: config/models/llm.yaml 缺失或损坏，LLM/嵌入段不注入"
+            "hindsight 配置: config/plugins/llm/llm.yaml 缺失或损坏，LLM/嵌入段不注入"
             "（可用 HINDSIGHT_API_* 显式指定）"
         )
     else:
@@ -1125,12 +1125,17 @@ def _start_api_server(port: int, data_dir: str) -> tuple[subprocess.Popen[bytes]
     # 完全不可诊断。PIPE → 父侧排空线程写轮转日志，崩溃时带 tail 进错误
     # 消息（handler 逐条 flush，tail 读取无延迟窗口）。
     _stderr_path = os.path.join(data_dir, "hindsight_api_stderr.log")
+    # numpy 捆绑的 OpenBLAS 在 import 时按逻辑核数（24 核 ≈ +740MB）预分配
+    # 线程池缓冲——记忆引擎的向量检索在 pgvector/PG 侧、embedding 走远程 API，
+    # 进程内 BLAS 多线程无收益，单线程化把子进程 commit 从 ~940MB 压到 ~310MB。
+    _api_env = os.environ.copy()
+    _api_env.setdefault("OPENBLAS_NUM_THREADS", "1")
     process = subprocess.Popen(
         [_venv_python, "-m", "hindsight_api.main",
          "--port", str(port), "--host", "127.0.0.1"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
-        env=os.environ.copy(),
+        env=_api_env,
     )
     _spawn_stderr_drain(process, _stderr_path)
     logger.info(

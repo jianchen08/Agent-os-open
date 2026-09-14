@@ -1,148 +1,63 @@
-# 配置文件目录结构
+# 配置目录结构（四域模型）
 
-本目录包含系统的所有配置文件，按功能模块组织。
+按 ADR `docs/decisions/2026-09-14-config-ownership-plugin-lifecycle.md`，config/ 按
+「谁让它生效」分四个域。每文件恰好一个 owner；任一相对路径任一时刻生效文件恰好一份
+（用户空间接管语义见 ADR 2026-09-14 单一存在）。
 
-## 目录结构
+## 目录结构（2026-09-14 现状）
 
 ```
 config/
-├── README.md                    # 本文档
-├── agents/                      # Agent 配置 (按层级分类)
-│   ├── main/                   # L1 主 Agent
-│   │   ├── agentos.yaml         # 灵汐主Agent (已优化)
-│   ├── orchestrator/               # L2 编排 Agent
-│   │   ├── general_agent.yaml            # 通用任务编排
-│   │   ├── solution_planning_agent.yaml   # 方案规划
-│   │   ├── resource_manager_agent.yaml   # 资源管理
-│   │   ├── ac_refine_agent.yaml          # AC细化
-│   │   ├── modification_planner_agent.yaml # 修改规划
-│   │   ├── resource_analyzer_agent.yaml   # 资源分析
-│   │   └── resource_modifier_agent.yaml   # 资源修改
-│   ├── executor/               # L3 执行 Agent
-│   │   ├── planning_agent.yaml           # 执行规划
-│   │   ├── design_agent.yaml             # 设计Agent
-│   │   ├── research_agent.yaml           # 研究Agent
-│   │   ├── discussion_agent.yaml         # 讨论Agent
-│   │   ├── environment_setup_agent.yaml  # 环境设置
-│   │   └── */                            # 各类专业执行Agent
-│   └── system/                 # 系统 Agent
-│       ├── agent_generator_agent.yaml    # Agent生成器
-│       ├── tool_generator_agent.yaml     # 工具生成器
-│       ├── rollback_manager_agent.yaml   # 回滚管理
-│       └── */                            # 其他系统Agent
-├── models/                     # 模型配置
-│   ├── llm.yaml               # LLM 模型配置
-│   └── embedding.yaml         # 嵌入模型配置 (新建)
-├── tools/                      # 工具配置
-│   ├── builtin_tools_config.yaml  # 内置工具配置
-│   ├── tool_permissions.yaml      # 工具权限配置
-│   └── */                         # 各类工具配置
-├── system/                     # 系统配置
-│   ├── api_config.yaml
-│   ├── cost_control.yaml
-│   ├── long_term_task.yaml
-│   ├── plugin_allowlist.yaml
-│   └── spill_config.yaml
-├── evaluation/                 # 评估配置
-│   ├── evaluation_metrics.yaml   # 评估指标
-│   └── cost_control.yaml         # 成本控制
-├── workflows/                  # 工作流配置 (按功能分类)
-│   ├── task/                      # 任务相关工作流
-│   │   ├── task_execution.yaml           # 任务执行工作流
-│   │   └── task_planning_workflow.yaml   # 任务规划工作流
-│   ├── design/                    # 设计相关工作流
-│   │   └── solution_design_workflow.yaml # 解决方案设计工作流
-│   ├── evaluation/                # 评估相关工作流
-│   │   └── evaluation.yaml              # 评估工作流
-│   └── resource/                  # 资源相关工作流
-│       ├── resource_generation.yaml     # 资源生成工作流
-│       └── resource_modification.yaml   # 资源修改工作流
-│   说明：工作流配置按功能分为4类
-│   - task/: 任务执行和规划相关工作流
-│   - design/: 设计方案相关工作流
-│   - evaluation/: 评估验收相关工作流
-│   - resource/: 资源生成和修改相关工作流
-├── workflow_templates/         # 工作流模板
-│   ├── conditional_workflow.yaml    # 条件工作流模板
-│   ├── parallel_workflow.yaml       # 并行工作流模板
-│   └── simple_tool_workflow.yaml    # 简单工具工作流模板
-├── ui/                        # UI 配置
-│   └── themes/                    # 主题配置
-├── triggers/                   # 触发器配置
-└── examples/                  # 配置示例
-    ├── api.yaml.example
-    ├── app.yaml.example
-    └── llm.yaml.example
+├── kernel/                      # ① 基座域：内核直读，不参与插件装卸
+│   ├── storage.yaml             #   存储驱动（env AGENTOS_STORAGE_DRIVER/AGENTOS_DB_PATH 可覆盖）
+│   ├── error_codes.json         #   跨端错误码契约（内核+tool_core+前端共同消费）
+│   ├── api_config.yaml          #   插件 API 面（⚠️ 无生产读者，死配置嫌疑，待拍板退役）
+│   ├── plugin_allowlist.yaml    #   插件准入白名单
+│   ├── default_profile.yaml     #   插件启用 profile（用户侧接管写 <USER_ROOT>/config/kernel/）
+│   └── kernel_capabilities/     #   内核能力契约 chat/streaming/tool_surface
+├── plugins/                     # ② 插件配置域：config/plugins/<plugin_id>/（每插件一命名空间）
+│   ├── connectors/              #   godot/vscode/capability_adapters
+│   ├── cost_control/ dsh_adapter/ evaluation/ isolation/ llm/ multimodal/
+│   ├── review/ tasks/ task_form/ browser/ search/ web_ext/
+│   ├── pipeline_spill_guard/ security_check/ model_prompt_adapter/
+│   └── ...                      #   manifest config_files 声明 = 资产清单（装卸随插件）
+├── tools/builtin_tools_config.yaml  # 例外：自动生成物（collect_tool_info.py），不迁
+├── agents/                      # ③ agent 域：agent 配置 + persona + processes
+│   ├── main/ orchestrator/ executor/ system/ task/ team/ community/ modes/
+│   └── */persona/               # （owner 服务 = agent_manager；热路径读 = 内核注入）
+├── pipelines/                   # ④ 管道域：管道组装声明（G10 可视化编辑器写路径）
+│   └── autonomous.yaml
+├── models/ tools/{web,search,browser}/ system/ isolation/ evaluation/   # （已迁空，留待删除）
+├── rules/ templates/ processes/ self_evolve/   # 内容资产：物理位置不动，由消费插件声明引用
+└── users/default                # 用户空间播种源
 ```
 
-## 配置文件说明
+## 各域规则
 
-### 核心配置文件
+| 域 | owner / 访问权威 | 插件卸载时 |
+|---|---|---|
+| 基座 kernel/ | 内核直读 | 不参与（鸡生蛋地板） |
+| 插件配置 plugins/<id>/ | owner 插件（manifest config_files 声明即资产清单） | 用户插件：随目录删；系统插件：失效不删盘 |
+| agent 域 agents/ | agent_manager 服务（写/UI）；context_build（读，内核注入） | 同上双层语义 |
+| 内容资产 rules/ 等 | 消费插件声明引用 | 不随插件删除（仓库资产） |
 
-| 文件                                 | 说明          | 位置      |
-| ------------------------------------ | ------------- | --------- |
-| `agents/agentos.yaml`                 | 主 Agent 配置 | ✅ 已优化 |
-| `models/llm.yaml`                    | LLM 模型配置  | ✅ 已整理 |
-| `models/embedding.yaml`              | 嵌入模型配置  | ✅ 新建   |
-| `tools/builtin_tools_config.yaml`    | 内置工具配置  | ✅ 已移动 |
-| `tools/tool_permissions.yaml`        | 工具权限配置  | ✅ 已移动 |
-| `evaluation/evaluation_metrics.yaml` | 评估指标      | ✅ 已移动 |
+## 内核保留段（插件 config_files 不得映射）
 
-### 配置优先级
+`kernel/`、`plugin_roots`、`auth`、`pipelines`、`steps`
+（与 `kernel/crates/api/src/config_service.rs` KERNEL_RESERVED_SEGMENTS、
+`scripts/migrate_to_user_root.py` _KERNEL_RESERVED 同源）。
 
-1. 环境变量 (最高)
-2. 命令行参数
-3. 配置文件
-4. 默认值 (最低)
+## 配置优先级
 
-## 使用说明
-
-1. **开发环境**: 复制 `examples/*.example` 文件并修改
-2. **生产环境**: 使用环境变量覆盖敏感配置
-3. **测试环境**: 使用独立的配置文件
-
-## 配置文件变更记录
-
-### 已完成的整理
-
-- ✅ 优化 `agentos.yaml` 提示词，添加简单任务直接处理逻辑
-- ✅ 将 LLM 配置移至 `models/llm.yaml`
-- ✅ 创建独立的 `models/embedding.yaml` 嵌入模型配置
-- ✅ 将工具配置移至 `tools/` 目录
-- ✅ 将系统配置移至 `system/` 目录
-- ✅ 将评估配置移至 `evaluation/` 目录
-- ✅ 将示例配置移至 `examples/` 目录
-- ✅ **按层级分类整理所有 Agent 配置文件**
-  - L1 主 Agent → `agents/main/`
-  - L2 编排 Agent → `agents/orchestrator/`
-  - L3 执行 Agent → `agents/executor/`
-  - 系统 Agent → `agents/system/`
-- ✅ **按功能分类整理所有工作流配置文件**
-  - 任务工作流 → `workflows/task/`
-  - 设计工作流 → `workflows/design/`
-  - 评估工作流 → `workflows/evaluation/`
-  - 资源工作流 → `workflows/resource/`
-- ✅ 清理 config 根目录和 workflows 根目录，移除散乱配置文件
-
-### 主要改进
-
-1. **agentos 提示词优化**:
-
-   - 添加简单任务处理原则
-   - 明确区分直接处理和创建任务的情况
-   - 保持其他功能不变
-
-2. **配置文件分类**:
-   - 按功能模块组织配置文件
-   - **按 Agent 层级分类**: L1 主 Agent、L2 编排 Agent、L3 执行 Agent、系统 Agent
-   - **按工作流功能分类**: 任务工作流、设计工作流、评估工作流、资源工作流
-   - 分离嵌入模型配置
-   - 统一示例文件位置
-   - 清理根目录和子目录散乱文件
+1. 用户空间接管文件（`<USER_ROOT>/config/<rel>`，接管登记为准）
+2. 环境变量（标量覆盖：驱动/路径/端点/密钥）
+3. 出厂文件（本目录，随安装介质升级翻新）
+4. 代码默认值（fail-closed 域不回退，显式报错）
 
 ## 注意事项
 
-- 敏感信息（API Key）应使用环境变量
-- 配置文件支持 YAML 格式
-- 修改配置后需要重启服务
-- 嵌入模型配置已从 LLM 配置中分离
+- 敏感信息只落 `<USER_ROOT>/.env`，不入仓
+- 插件外挂配置经 manifest `config_files` 声明后由内核注入，禁止代码直读文件
+  （机械闸 `check_config_direct_reads.py` 执法，落地见 ADR）
+- `tools/builtin_tools_config.yaml` 为自动生成物（`scripts/tools/collect_tool_info.py`），
+  勿手改

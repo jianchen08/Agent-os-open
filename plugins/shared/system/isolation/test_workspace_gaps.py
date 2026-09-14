@@ -124,14 +124,14 @@ class TestConfigPathFallback:
             _WS, "__file__", str(tmp_path / "plugins" / "shared" / "system" / "isolation" / "workspace.py")
         )
         path = _WS._isolation_config_path()
-        assert path.parts[-3:] == ("config", "isolation", "isolation_config.yaml")
+        assert path.parts[-4:] == ("config", "plugins", "isolation", "isolation_config.yaml")
         assert str(path).startswith(str(tmp_path))
         assert not path.exists()
 
 
 class TestFindProjectRootFallback:
     def test_no_env_no_ancestor_returns_fourth_parent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """无环境变量且祖先链无 config/isolation → 回退 parents[3] 推导（不 panic）。"""
+        """无环境变量且祖先链无 config/plugins/isolation → 回退 parents[3] 推导（不 panic）。"""
         monkeypatch.delenv("AGENTOS_CONFIG_ROOT", raising=False)
         monkeypatch.setattr(_WS, "__file__", str(tmp_path / "a" / "b" / "c" / "workspace.py"))
         root = _WS.find_project_root()

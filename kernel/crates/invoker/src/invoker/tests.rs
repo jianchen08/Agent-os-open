@@ -2680,6 +2680,36 @@ async fn test_host_key_routing_light_vs_solo() {
 }
 
 #[tokio::test]
+async fn test_host_key_of_light_cohost_shared_vs_solo_distinct() {
+    // host_key_of（域事件广播按宿主去重的投递单位，BUG-7）：同宿主 light 成员
+    // 返回同一装箱键；独占插件键含自身互异；manifest 缺席回退 plugin_id。
+    let loader = Arc::new(MockLoader::new());
+    let invoker = PluginInvokerImpl::new(loader.clone());
+    loader.add_manifest(make_light_manifest("mem_a", "python server.py"));
+    loader.add_manifest(make_light_manifest("mem_b", "python server.py"));
+    loader.add_manifest(make_sidecar_manifest("solo_x", "python server.py"));
+
+    let key_a = invoker.host_key_of("mem_a");
+    let key_b = invoker.host_key_of("mem_b");
+    assert!(
+        key_a.starts_with("group:light:"),
+        "light 成员键是组键: {key_a}"
+    );
+    assert_eq!(key_a, key_b, "装箱同槽的 light 成员共享宿主键");
+    assert_eq!(
+        invoker.host_key_of("solo_x"),
+        "plugin:solo_x",
+        "独占插件键含自身"
+    );
+    assert_ne!(key_a, invoker.host_key_of("solo_x"));
+    assert_eq!(
+        invoker.host_key_of("ghost"),
+        "ghost",
+        "manifest 缺席按独占语义回退 plugin_id"
+    );
+}
+
+#[tokio::test]
 async fn test_light_packing_fill_overflow_sticky() {
     // 装箱落点（§4.5）：未满宿主优先塞入 → 溢出开新宿主 → 分配粘性。
     // max_members=2 注入（不碰环境变量）。

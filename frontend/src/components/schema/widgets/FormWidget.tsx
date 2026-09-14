@@ -649,6 +649,11 @@ function CompactSelectToggle({
   const submitting = status === 'submitting'
   const disabled = disabledProp || submitting || options.length === 0
   const Icon = resolveChatCardIcon(icon ?? 'shield')
+  // 触发器自标识（BUG-6）：只显示裸值（如「高」）会与相邻权限档位混淆——
+  // GUI/读屏按「高」找权限等级会误中思考强度。可访问名与可见文案一律带
+  // 设置名前缀（如「思考强度：高」/「权限模式：默认（命中规则才确认）」）。
+  const settingLabel = title ?? field.label
+  const currentLabel = current?.label ?? field.label
 
   const handlePick = (value: string) => {
     if (onPick) {
@@ -672,10 +677,11 @@ function CompactSelectToggle({
               disabled && 'cursor-not-allowed opacity-50',
             )}
             disabled={disabled}
+            aria-label={`${settingLabel}：${currentLabel}`}
             title={title ?? field.label}
           >
             <Icon className="h-icon-md w-icon-md" />
-            <span>{current?.label ?? field.label}</span>
+            <span>{settingLabel}：{currentLabel}</span>
             <ChevronDown className="h-icon-xs w-icon-xs opacity-70" />
           </button>
         </DropdownMenuTrigger>

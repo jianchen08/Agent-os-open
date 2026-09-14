@@ -89,13 +89,13 @@ def _install_payload_diag_hook() -> None:
                 # 文件名携带元数据：{ts}_{model}_{msgs_hash}_{msg_count}msg.json
                 # 这样前端列目录后无需读文件即可展示列表（时间/模型/消息数）。
                 # 目录锚定：AGENTOS_LOG_DIR 优先，否则从本文件向上探测项目根
-                # （含 config/models 的目录）——sidecar cwd 会漂移到各插件目录，
+                # （含 config/kernel 的目录）——sidecar cwd 会漂移到各插件目录，
                 # 不能依赖 cwd 落盘（否则与 monitoring 读取端错位）。
                 _diag_base = _os.environ.get("AGENTOS_LOG_DIR", "")
                 if not _diag_base:
                     _cand = _os.path.dirname(_os.path.abspath(__file__))
                     while _cand and _cand != _os.path.dirname(_cand):
-                        if _os.path.isdir(_os.path.join(_cand, "config", "models")):
+                        if _os.path.isdir(_os.path.join(_cand, "config", "kernel")):
                             _diag_base = _cand
                             break
                         _cand = _os.path.dirname(_cand)

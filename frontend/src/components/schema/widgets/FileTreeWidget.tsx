@@ -891,6 +891,20 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     )
   }
 
+  /** 首次加载进行中的加载态：请求未落定时不得落入"未找到匹配的节点"分支——
+   *  该文案只对"有数据但被搜索/筛选滤空"成立，加载中伪装成无匹配会让用户
+   *  误判工作空间为空（会话回退/请求竞态/刷新重取都会拉长加载窗口） */
+  if (effectiveData.length === 0 && isLoadingRemote) {
+    return (
+      <div data-testid="file-tree-loading" className="w-full rounded-lg border">
+        <div className="flex flex-col items-center justify-center p-8">
+          <Loader2 className="text-muted-foreground mb-3 h-12 w-12 animate-spin" />
+          <p className="text-muted-foreground text-sm">加载中...</p>
+        </div>
+      </div>
+    )
+  }
+
   /** 空状态渲染 */
   if (effectiveData.length === 0 && !isLoadingRemote) {
     return (
