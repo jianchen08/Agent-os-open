@@ -1,573 +1,164 @@
-# 插件协议开发者文档（Plugin Protocol）
+# 插件协议规则（Plugin Protocol）
 
-> 面向**想给灵汐 AgentOS 0.2 开发一个新插件**的开发者。读完本文，你应能在 1 小时内发布第一个可被内核加载的插件。
->
-> 本文是 0.2 架构（Rust 内核 + Python sidecar + YAML 配置）的统一插件协议说明。历史方案记录见 [working/_archive_0.2_migration/0.2_rust_plugin_solution.md](../working/_archive_0.2_migration/0.2_rust_plugin_solution.md)，整体架构见 [ARCHITECTURE.md](../ARCHITECTURE.md)，分篇上手教程见 [开发指南索引](README.md)。
+> 返回 [开发指南索引](README.md)。协议权威：`plugin.json` 契约、包结构、注册发现、生命周期的一切**横切规则**（供注入遵守）。
+> 模式私有知识（面板/编排/身份/规则物料怎么写）权威载体在模式包内物料，本篇只写协议与结构约束。
+> 已落地不标；（规划中 P2/P3）= 已定稿未建成，不得按其编写集成。排障对照见 [troubleshooting.md](troubleshooting.md)。
 
----
+## 一、协议公理
 
-## 目录
+1. **一切皆插件**：内核只是执行基座，不含业务能力——LLM/工具/记忆/评估/审批/通道/主题/Agent 配置加载皆插件承载；改业务行为 = 加/改插件或配置，不动内核。
+2. **插件 = 一个目录 + 一个 `plugin.json`**（也支持 `plugin.yaml`）+ 实现代码。manifest `deny_unknown_fields`：声明未知字段加载即拒（fail-closed）。
+3. **目录即插件**：发现算法只把**直接含 plugin.json 的目录**当插件；无 manifest 的子目录 = 父插件经 import 引用的子模块，补 manifest 反而被误当新插件发现。
+4. **插件无状态**：不持久化、不直接写存储；返回 Patch/结果由引擎决定是否应用。
+5. **同 id 用户根覆盖内置根**（双根：内置 `plugins/shared/` 只读 + 用户根 `AGENTOS_USER_PLUGINS_DIR` 或 OS 标准目录可写）——不修改仓库即可替换/魔改内置插件。
 
-- [1. 总览](#1-总览)
-- [2. plugin.json manifest schema](#2-pluginjson-manifest-schema)
-- [3. 插件类型分类](#3-插件类型分类)
-- [4. host_type：sidecar vs in-process](#4-hosttypesidecar-vs-in-process)
-- [5. 双插件根约定](#5-双插件根约定)
-- [6. config_files：配置显式映射注入](#6-config_files配置显式映射注入)
-- [7. ui_schema：前端 schema 驱动（P0-3）](#7-uischema前端-schema-驱动p0-3)
-- [8. 完整示例：从零开发一个新插件](#8-完整示例从零开发一个新插件)
-- [9. SDK 用法速查](#9-sdk-用法速查)
-- [10. 调试与常见问题](#10-调试与常见问题)
-- [附录 A：manifest 覆盖现状统计](#附录-amanifest-覆盖现状统计)
-- [附录 B：哪些目录不需要 manifest](#附录-b哪些目录不需要-manifest)
+## 二、包结构规则
 
----
+### 2.1 标准布局
 
-## 1. 总览
+sidecar（Python）：`plugin.json` + `server.py`（MCP 适配层）+ 业务 `.py`（可选拆分）+ `test_*.py`（就地放）+ `pyproject.toml` + `uv.lock` + `.venv`（uv sync 生成，内核要求）。
+native（Rust）：`plugin.json`（`host_type: in_process`）+ `Cargo.toml`（`crate-type = ["cdylib"]`）+ `src/lib.rs` + cdylib 产物（放插件目录根，与 `entry` 同名）。
 
-灵汐 0.2 的所有可扩展模块——管道插件、工具、系统服务、连接器、Agent、通道——都收敛到**同一个插件协议**之下。一个插件 = 一个目录 + 一个 `plugin.json` manifest（+ 实现代码）。内核（Rust）通过统一的发现、校验、加载流程处理它们，不区分内部还是第三方。
-
-核心约定：
-
-| 关注点 | 约定 |
-|--------|------|
-| 描述文件 | 每个插件目录下一个 `plugin.json`（也支持 `plugin.yaml`） |
-| 唯一标识 | `id` 全局唯一；同 ID 时用户根覆盖内置根 |
-| 能力声明 | `capabilities` 声明插件对外暴露的工具 / 服务 / 生命周期钩子 |
-| 加载策略 | 按需加载——首次被调用时才启动 sidecar 进程；空闲超时自动卸载 |
-| 进程模型 | 默认 `sidecar`（独立进程，MCP over stdio 通信）；高频热路径可选 `in-process`（Rust 原生） |
-| 无状态 | 插件不持久化、不直接写存储；返回 Patch / 结果由引擎决定是否应用 |
-
-加载链路：
+### 2.2 模式包四层结构（自包含能力包）
 
 ```
-内核启动
-  → discover(): 扫描双根，递归找所有 plugin.json，校验 manifest schema
-  → 注册 capabilities 到 CapabilityRegistry
-  → 按需 load(id): 首次调用某工具时启动 sidecar 进程（python server.py）
-  → MCP 握手（initialize）+ 配置注入
-  → tools/call 调用 → 返回结果
-  → 空闲超时 unload(id)
+mode_X/                     # 出厂种子 plugins/shared/modes/ → 播种 → <USER_ROOT>/plugins/modes/
+├── plugin.json             # services(mode.describe/get_profile/http.handle) + contributes.pages
+│                           # + http_endpoints(页面路由) + requires（统一依赖声明）
+├── profile.yaml            # 模式档（编排不进 profile——在 pipelines/）
+├── server.py               # 服务面
+├── webview/*_panel.html    # 面板（自包含单文件，CSP 内联约束）
+├── agents/*.yaml           # 身份（纯身份基座）
+├── pipelines/*.yaml        # 编排（可选 0..N）
+├── rules/*.md              # 口径（A 面，可进化）
+├── policies/*              # 制度（B 面，冻结）
+└── tests/
 ```
 
----
+四层能力随包到位：面板（webview）/服务（services）/编排（pipelines/）/身份+规则（agents/ rules/）。前端零改动，禁用即同源消失。
 
-## 2. plugin.json manifest schema
+### 2.3 约定即注册（规划中 P2）
 
-manifest 字段对应内核 `PluginManifest`（见 `kernel/crates/core/src/traits.rs`）。**必填字段**缺一不可，否则加载校验失败。
+模式包约定子目录由装载期扫描自动注册进包命名空间，G2 逐文件 schema 校验 fail-closed——**加 agent/编排 = 放一个文件，零 manifest 编辑**：
 
-### 2.1 字段总表
+| 约定目录 | 注册为 | 校验 |
+|---|---|---|
+| `agents/*.yaml` | agent 键 `mode_X/<文件名>` | agent schema |
+| `pipelines/*.yaml` | 编排键 `mode_X/<文件名>`（文件头 `task_kinds` 参与路由） | 管道编译器 schema |
+| `webview/` | 面板页（http_endpoints 路由供给） | 供给自检 |
+| `profile.yaml` / `rules/` / `policies/` | 模式档/口径/制度 | 各自 schema |
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `id` | string | ✅ | 插件全局唯一标识，`snake_case`。用户根同 ID 会覆盖内置根。 |
-| `name` | string | ✅ | 人类可读名称（展示用）。 |
-| `version` | string | ✅ | 语义化版本号，如 `1.0.0`。 |
-| `plugin_type` | enum | ✅ | `pipeline` / `tool` / `system` / `composite`。见 [§3](#3-插件类型分类)。 |
-| `host_type` | enum | ✅ | `sidecar`（独立进程，默认）或 `in_process`（Rust 原生）。见 [§4](#4-hosttypesidecar-vs-in-process)。 |
-| `entry` | string | ✅* | 启动命令。Python 插件一般是 `python server.py`。`composite` 类型可空。 |
-| `language` | string | ✅ | 实现语言，如 `python` / `rust`。 |
-| `capabilities` | object | ✅ | 能力声明，见 [§2.2](#22-capabilities-子字段)。 |
-| `requires_services` | array | — | 插件间耦合唯一轴：声明需要的能力角色（`ns` / `ns.method`），见 [§2.3](#23-requires_services插件间依赖)。 |
-| `permissions` | object | — | 权限声明（文件系统 / 网络 / 环境变量 / 系统调用）。默认全空。 |
-| `error_policy` | enum | — | **已整体移除，不要再声明**（ADR 2026-08-18）。内核 `PluginManifest` 已无此字段，`deny_unknown_fields` 下声明任何值都会拒载。见 [§2.4](#24-error_policy已收敛不再声明)。 |
-| `priority` | int | — | 优先级，数字越小越靠前。默认 `100`。管道插件执行顺序按此排序。 |
-| `pipeline_role` | enum | —* | 仅 `plugin_type=pipeline` 时必填：`input` / `core` / `output`。 |
-| `description` | string | — | 一句话描述（展示用）。 |
-| `requires_content` | int | — | 内容懒加载声明：需要预加载的最近消息条数。见 [§2.5](#25-requirescontent)。 |
-| `config_files` | array | — | 配置文件显式映射（`{id, path, label}` 三要素）。见 [§6](#6-config_files配置显式映射注入)。 |
-| `ui_schema` | object | — | 前端 UI schema 声明（P0-3）。见 [§7](#7-uischema前端-schema-驱动p0-3)。 |
-| `mcp` | object | — | MCP 传输配置（`transport` / `endpoint` / `idle_timeout_secs` / `protocol_version` / `request_timeout_secs`）；接入**外部第三方 MCP 服务**也经它声明，见 [§2.6](#26-接入外部-mcp-服务)。 |
-| `invoke_entry` | string | ✅** | 管道/系统等非 tool 插件的 MCP 入口方法名（如 `llm_core.execute`）；`plugin_type=pipeline` 必填，缺失启动期校验失败。tool 插件不用此字段。 |
-| `http_endpoints` | array | — | HTTP 端点贡献：每项 `{route_id, method, path, auth, handler_capability, timeout_ms}`，path 必须落在 `/ext/{plugin_id}/**`，经 capability RPC 调插件 `http.handle`。 |
-| `native` | object | —* | 原生插件产物（cdylib 路径与符号）；`host_type=in_process` 必填。见 [plugin-native-rust.md](plugin-native-rust.md)。 |
-| `lifecycle` | object | — | 生命周期策略覆盖（如 `idle_timeout_secs`，交互类插件设 0 = 永不卸载）。缺省用内核默认。 |
-| `host_group` | string | — | 合宿分组声明（`"light"` = 准入轻量合宿组，多插件共享宿主进程）；缺省 = 独占宿主。白名单制：声明即作者担保无阻塞调用/无 C 扩展/无重依赖。 |
-| `granted_capabilities` | array | — | 反向 capability 调用白名单（如 `["config-reader"]`）；空 = 默认全授予（存量兼容），一旦非空即白名单制，越权单点拒绝。 |
-| `contributes` | object | — | 前端贡献点声明（viewsContainers/widgets/menus/commands/settingsPanels 等），内核仅在 `/api/v1/schema` 透传，前端 ContributionRegistry 消费。 |
-| `enabled` | bool | — | 启用开关（`false` = 已安装但不进注册表出口）；缺省由 `config/plugins/default_profile.yaml` 决定。 |
-| `activation` | enum | — | 激活策略：`eager`（启动即 load）/ `lazy`（首次调用再 load，默认）/ `manual`（仅用户显式启动）。 |
-| `persistent_fields` | array | — | 声明需持久化的 state 累计型标量键（如 `track.total_tokens`），引擎 merge 时投影落库。 |
-| `export_fields` | array | — | state 出口白名单（支持 `前缀.*` 通配）；未声明且不在内核基线 = 不出口（默认拒绝）。 |
+通用插件（tool/system/pipeline）的能力仍走 manifest `capabilities` 声明——与模式包约定扫描是两条注册面，勿混淆。
 
-> \* `entry` 对 `composite` 类型可空；`pipeline_role` 仅 pipeline 类型有意义；`native` 仅 `in_process` 必填。
-> \*\* `invoke_entry` 对 `plugin_type=pipeline` 必填（启动期聚合校验）。
+## 三、注册与发现规则
 
-### 2.2 capabilities 子字段
+### 3.1 热发现全链路
 
-```json
-{
-  "capabilities": {
-    "tools": [
-      {
-        "name": "tool.dotted.name",
-        "description": "工具描述（LLM 据此决定是否调用）",
-        "input_schema": { "type": "object" },
-        "output_schema": { "type": "object" },
-        "category": "system",
-        "render": { "card": "form", "title": "工具结果卡片标题" }
-      }
-    ],
-    "services": [
-      { "name": "ns.method", "description": "内部服务方法（不进 LLM 面）", "input_schema": { "type": "object" } }
-    ],
-    "route_signals": ["next_llm"],
-    "lifecycle_hooks": ["on_load", "on_unload"]
-  }
-}
-```
+新建插件目录、修改 `plugin.json`、改插件 Python 代码均由 watcher 自动处理（300ms 防抖 + 60s 轮询兜底）：发现 → G2 校验 → 注册/重注册/respawn，秒级生效，无需 re-enable 或重启；声明与实现不一致被 G2 漂移校验**拒注册**。仅 native cdylib 集合变更走 G8 自动重启（排空 + 自拉活；同 id 换产物保守重启）。禁用中的插件改完不注册——先启用，这是"禁用"语义本身。
 
-- `tools[]`：必填 `name`；建议带全 `input_schema` + `output_schema` + `render`（工具契约 fail-closed：tool_core 执行后按 `output_schema` 校验结果，前端按 `render` 意图路由渲染）。
-- `tools[].category` 取值见 `ToolCategory`（`file` / `file_system` / `search` / `web` / `memory` / `task` / `system` / `execution` / `analysis` / `evaluation` / `agent` / `monitoring`），省略时默认 `system`。
+### 3.2 三层工具过滤链
+
+1. **启用档案**：`manifest.enabled` > `config/plugins/default_profile.yaml` > 默认 true；禁用插件整个不进注册表。watcher 每轮从盘上重读 profile（运行期改即生效）。
+2. **能力注册**：`capabilities.tools[]` → ToolDescriptor 进 CapabilityRegistry；external MCP 工具缺 `input_schema` 拒注册（内置工具缺则 `{}` 补注册 + warn）。
+3. **tool_ids 白名单**：LLM 实际可见 = 注册表 ∩ 当前 agent `tool_ids`；解析不出 tool_ids = **空工具面**（禁止静默全量），仅框架强制工具 `spill_retrieve` 兜底注入。
+
+新工具要让 LLM 用到，三处都要通：插件启用 → 声明合法 → 加进目标 agent `tool_ids`。
+
+## 四、manifest 契约规则
+
+### 4.1 必填字段
+
+`id`（全局唯一 snake_case）/ `name` / `version`（semver）/ `plugin_type`（`pipeline`/`tool`/`system`/`composite`）/ `host_type`（`sidecar` 默认 | `in_process`）/ `capabilities` / `language` / `entry`（composite 可空）。
+条件必填：`pipeline_role` + `invoke_entry`（plugin_type=pipeline）；`native`（in_process）。
+
+### 4.2 可选字段速览
+
+| 字段 | 规则 |
+|---|---|
+| `requires_services` | 插件间耦合唯一轴（现行）：条目 = 能力角色名（`ns` / `ns.method`），不点名插件 id；boot 期依赖闸，无人提供该角色内核拒启 |
+| `permissions` | 文件/网络/环境/系统调用声明，默认全空 |
+| `priority` | 同阶段执行顺序，越小越靠前，默认 100 |
+| `config_files` | 配置显式映射 `{id, path, label}`；见 §4.4 |
+| `ui_schema` | 前端 schema 驱动 widgets（`type`/`space`（chat/workspace/floating/dock/fullscreen；`scene` 已废弃）/`trigger`/`props`）；见 §4.4 |
+| `http_endpoints` | 每项 `{route_id, method, path, auth, handler_capability, timeout_ms}`；path 必须落 `/ext/{plugin_id}/**`，经 capability RPC 调插件 `http.handle` |
+| `contributes` | 前端贡献点（pages/viewsContainers/widgets/menus/commands/settingsPanels…）；内核仅在 `/api/v1/schema` 透传，前端 ContributionRegistry 消费——模式面板 tab / 聊天 input-action 声明即现 |
+| `mcp` | 接入外部 MCP 服务（`transport: streamable_http` 用 endpoint.url/headers/auth；`stdio` 用 command/args/env）；`${VAR}` 占位构造时解析；长等待业务必须显式 `request_timeout_secs`（默认 300s 掐断） |
+| `lifecycle` | 生命周期覆盖（如 `idle_timeout_secs: 0` = 永不卸载，交互类必设） |
+| `host_group` | `"light"` = 准入轻量合宿组（作者担保无阻塞/无 C 扩展/无重依赖）；缺省独占宿主 |
+| `granted_capabilities` | 反向 capability 调用白名单；空 = 默认全授予（存量兼容），非空即白名单制越权单点拒绝 |
+| `enabled` | `false` = 已安装不进注册表；缺省由 default_profile.yaml 决定 |
+| `activation` | `eager`/`lazy`（默认）/`manual` |
+| `persistent_fields` / `export_fields` | state 累计键持久化投影 / 出口白名单（支持 `前缀.*`；未声明且不在内核基线 = 不出口） |
+| `requires_content` | 需要预加载的最近消息条数（blobs 懒加载） |
+
+**禁声明项**（声明即加载失败）：`error_policy`（已从内核契约整体移除，错误由引擎自动处理：瞬态崩溃 respawn+重试一次、工具失败回喂 LLM 自修、非瞬态上抛编排）；`dependencies` / `capabilities_required`（不是字段，Python 依赖走 pyproject.toml）；`config_refs`（已被 `config_files` 取代）；`route_signals` 新声明（遗留位，执行面零消费——路由由管道 G10 DSL 驱动）。
+
+### 4.3 capabilities 四面
+
+- `tools[]`：声明即注册进 LLM 工具面。必须带全 `input_schema` + `output_schema` + `render`（工具契约 fail-closed：tool_core 执行后按 output_schema 校验，前端按 render 意图路由渲染）；`category` 省略默认 `system`。
 - `services[]`：内部服务方法元数据，经 capability 调用（调用方声明 `requires_services`），**不进 LLM 面**。
-- `route_signals`：遗留声明位（`next_llm` / `next_tool` / `end` / `wait`），加载时仍会校验并注册进能力注册表，但**执行面零消费**——0.2 路由由管道 YAML 的 G10 DSL（`when`/`then`/`set`）驱动，见 [pipeline-configuration.md](pipeline-configuration.md)。新插件无需声明。
-- `lifecycle_hooks` 取值（`LifecycleHook`）：`on_load` / `on_unload` / `on_pipeline_start` / `on_pipeline_end` / `on_error` / `domain_event`。
-- 发流式事件的插件必须声明 `capabilities.streaming`（`{events, part_types, persist}`），未声明网关拒绝（fail-closed），见 [streaming-protocol.md](streaming-protocol.md)。
+- `lifecycle_hooks`：`on_load`/`on_unload`/`on_pipeline_start`/`on_pipeline_end`/`on_error`/`domain_event`。
+- `streaming`：发流式事件的插件必须声明 `{events, part_types, persist}`，未声明网关拒绝——契约见 [streaming-protocol.md](streaming-protocol.md)。
 
-### 2.3 requires_services（插件间依赖）
+### 4.4 配置与 UI 面
 
-```json
-{
-  "requires_services": ["human-interaction", "pipeline-executor", "event-bus"]
-}
-```
+- `config_files`：需要哪个配置文件就显式映射哪条，未声明（或空）= 收空配置（fail-closed）；`path` 相对 `config/` 根且必须落 `config/` 子树内；经 `/api/v1/plugins/{id}/config/{file_id}` 读写，mtime 热更新；追加 `"settings": false` = 注入专用不出口到 schema（UI 由插件自声明承载，避免双入口）。内核保留文件（plugin_allowlist/plugin_roots/auth/pipelines/steps）不可映射。
+- `ui_schema` / `contributes` / `http_endpoints` 是三个声明面：新增插件时前端自动长出对应界面，禁止为单插件改 `frontend/src`（前端冻结铁律见 [ai-coding-spec.md](ai-coding-spec.md)）。
 
-- 条目是**能力角色名**（`ns` 或 `ns.method`），注册表映射到提供该角色的插件，**不点名插件 id**；boot 期依赖闸校验，无人提供该角色则内核启动被拒（ADR 2026-08-18 插件依赖包）。
-- 声明了依赖的插件握手后经 `CapabilityHandle` 反向调用提供方（详见 SDK `capability.py` 与 `plugins/shared/system/approval/` 实现）。
-- 历史文档中的 `dependencies` / `capabilities_required` **不是 manifest 字段**（`deny_unknown_fields` 下声明即加载失败）：Python 依赖写在插件 `pyproject.toml`（uv venv 单轨，见 [plugin-sidecar-python.md](plugin-sidecar-python.md)），插件间耦合只走本字段。
+### 4.5 依赖与引用（目标语义）
 
-### 2.4 error_policy（已收敛，不再声明）
+- **统一一条 requires = 服务角色（规划中 P3）**：`requires: ["memory", "order:下单"]`——复用既有 `requires_services` 能力角色语义（消费方依赖契约而非实现），角色由注册表解析到提供者插件；解析不到 = boot 期依赖闸拒绝。工具级精确选择留在配置面（tool_ids / material_scope），装载解析时逐名 fail-closed——精确性在解析处，不在声明处，杜绝依赖清单爆炸。
+- **跨包引用一律全限定 `plugin_id:resource`**（规划中 P3；tool_ids 裸名随迁包一刀切退役——裸名遮蔽 bug 家族语法层面根除）；**包内引用裸 id + 相对包根路径**；系统侧留守物（config/rules）走约定路径；运行中任务 state 旧 ids 只读可解析，新写面一律新语法。
 
-> **ADR 2026-08-18**：0.2 引擎**不再按 `error_policy` 分发行为**，该字段已从内核
-> `PluginManifest` 契约中整体移除。运行时错误处理由
-> 引擎/编排层按错误类型自动决定：
-> - 瞬态错误（sidecar 进程崩溃 `PLUGIN_CRASHED`）→ `invoker.with_transparent_recovery`
->   force_unload + respawn + **重试一次**；
-> - 工具失败结果 → tool_core 回喂 LLM 自我修正；
-> - 非瞬态错误 → 引擎 warn + 继续，跳过/终止决策上抛编排层。
->
-> 插件**不应再声明该字段**：manifest 无 `error_policy` 字段，`deny_unknown_fields`
-> 下声明任何值（包括 `retry`）都会在加载期被拒（fail-closed）。
+### 4.6 宿主双轨
 
-### 2.5 requires_content
+`sidecar`（独立进程，MCP over stdio，默认——进程隔离）/ `in_process`（Rust cdylib 进程内零 IPC——高频热路径晋升轨）。双轨对所有插件类型开放；**能力以 capability 协议唯一定义一次，两轨差异只允许存在于 transport 适配**；晋升管线"边车 → 基准 → in_process"；wasm 轨已关闭。native 细节见 [plugin-native-rust.md](plugin-native-rust.md)。
 
-声明插件需要多少条**最近消息的完整内容**。引擎据此从 `blobs` 表按需预加载（懒加载），避免每次全量拉取。例如 `"requires_content": 3` 表示插件最多回看最近 3 条消息。省略表示不需要消息内容。
+## 五、sidecar（Python）运行时规则
 
-### 2.6 接入外部 MCP 服务
+- **uv venv 单轨**：entry 首词为裸 `python`/`python3` 时，内核强制使用**插件目录内**解释器；`pyproject.toml` 与 `.venv` 缺一启动即报（`PYPROJECT_MISSING` / `VENV_INTERPRETER_MISSING`），不回退 PATH 裸 python。初始化：`uv sync --project <插件目录>`。
+- **依赖声明**：SDK 不在任何 registry，必须本地源映射——`[tool.uv.sources] agentos-plugin-sdk = { path = "<相对 sdk>", editable = true }`（tools/ 下三级、pipeline/ 下四级）。
+- **stdout 被 JSON-RPC 独占**：插件日志一律走 stderr（SDK logger 已配好），`print()` 即破坏协议。
+- **生命周期**：懒启动（首次调用才 spawn）→ 握手按 `config_files` 注入 → `notifications/on_load` → 空闲 GC（默认 300s，`lifecycle.idle_timeout_secs` 覆盖）→ 崩溃自动 respawn 并重试一次 → 目录 mtime 变化热重载。内核透传 `LOG_LEVEL`/`LOG_JSON`/`LOG_FORMAT`。
+- **管道插件三层**：`plugin_type: "pipeline"` + `pipeline_role` + `invoke_entry`（必填，与 server.py 注册的工具名完全一致）。实现两层：`plugin.py` 业务类（基类在 `plugins/shared/pipeline/_base/`：`IInputPlugin`/`IOutputPlugin` 返回 `PluginResult{state_updates, skip_remaining, error}`；`ICorePlugin` 返回 dict 直接合并 state）+ `server.py` MCP 适配层。
+- **出口裁决不走返回值**：插件经 `state_updates` 写入路由 DSL 条件依赖的字段参与裁决（如 task_reminder 写任务状态供评估闸门判定）。反例：期待 `OutputResult.route_signal` 参与路由（遗留字段，执行链不消费）。
+- **测试**：就地 `test_*.py` + 分层 marker（`--strict-markers` 强制）；`importlib.util.spec_from_file_location` 显式路径加载被测模块；`PluginContext(state=..., config=...)` 直测 execute；mock 只打外部依赖，关键路径走真实依赖。
 
-复用**已存在的第三方 MCP 服务**（Playwright、smithery、MCP Registry 等）而不写 `server.py`：约定 `language: "external"` + `entry: "mcp:external"` + `host_type: "sidecar"`，用 `mcp` 声明连接——`transport: "streamable_http"` 用 `endpoint.url` / `headers` / `auth`（HTTP 直连，不 spawn）；`transport: "stdio"` 用 `endpoint.command` / `args` / `env`（spawn 第三方命令）。
+## 六、种子生命周期与用户仓 git（模式包）
 
-- `auth.value` 与 `env` 值支持 `${VAR}` 占位（构造时解析，缺失早暴露）。
-- `request_timeout_secs`：长等待业务（如等审批）必须显式声明，否则内核 MCP client 默认 300s 先行掐断。
-- external MCP 工具**缺 `input_schema` 拒注册**（fail-closed）。
+- **播种**：出厂种子 `plugins/shared/modes/` 整目录拷贝到 `<USER_ROOT>/plugins/modes/`；用户从此拥有并直接改这份（不受工作区还原影响）。
+- **账本**：`<USER_ROOT>/plugins/modes/.seeds.json` 每模式记 `{seeded_version, files: sha256}`。
+- **启动对账**（内核启动早期、插件扫描前）：出厂 version ≤ 账本 → no-op（幂等）；未定制（哈希==账本）→ 静默升级；已定制 → 保留 + 升级可用通知；手工副本 → 补账不替换；非 semver → 保守不动。
+- **恢复出厂**：删用户副本（同 id 用户赢回落 factory）+ 清账本条目。G2 对用户副本同样 fail-closed。
+- **用户目录 git 化（规划中 P3）**：`plugins/` + `config/` 层入用户仓，**`.env` 密钥与 `data/` 排除**；晋升 = 用户仓 commit，审计/回滚/合并 git 原生；热重载直达副本即刻生效。
 
-完整 manifest 示例与上手步骤见 [plugin-external-mcp.md](plugin-external-mcp.md)；真实插件在 `plugins/shared/tools/external_mcp/`。
-
----
-
-## 3. 插件类型分类
-
-`plugin_type`（`pipeline` / `tool` / `system` / `composite`）的职责、三角色分工与目录位置见 [plugin-development.md](plugin-development.md) §1。契约语义补充：插件间通过管道 `state` 通信、**不直接互调**；返回 `PluginResult`（`state_updates` Patch；`route_signal` 为遗留字段，执行链不消费——路由由管道 G10 DSL 驱动）；`priority` 决定同一阶段内的执行顺序。
-
----
-
-## 4. host_type：sidecar vs in-process
-
-所有插件类型双轨自选（ADR ⑧，不因插件类型受限）：`sidecar`（独立进程，MCP over stdio，默认——进程隔离，崩溃不影响内核）/ `in_process`（Rust cdylib 进程内零 IPC——高频热路径晋升轨）。选型依据与晋升路径见 [plugin-development.md](plugin-development.md) §2 与 [plugin-native-rust.md](plugin-native-rust.md)。
-
----
-
-## 5. 双插件根约定
-
-内置根 `plugins/shared/`（只读）+ 用户根（环境变量 `AGENTOS_USER_PLUGINS_DIR` 或 OS 标准目录，可写）；**同 ID 时用户根覆盖内置根**（不修改仓库即可替换/魔改内置插件）。发现算法与"哪些目录不需要 manifest"见 [plugin-development.md](plugin-development.md) §3 与[附录 B](#附录-b哪些目录不需要-manifest)。
-
----
-
-## 6. config_files：配置显式映射注入
-
-> 对应 ROADMAP P0-2：配置按需注入（早期设计名 `config_refs`，已被本字段取代并从契约删除——残留 `config_refs` 会被 `deny_unknown_fields` 拒载）。
-
-**问题**：插件需要读 `config/` 下的运行配置。内核不做全量投递——未声明 `config_files` 的插件收空配置。
-
-**解法**：manifest 用 `config_files` 逐项声明"我要哪个配置文件"。每项三要素：
-
-- `id`：配置子项标识（插件内唯一，作为注入命名空间 key 与 API file_id）；
-- `path`：相对 `config/` 根的文件路径（如 `config/models/llm.yaml`）；
-- `label`：前端展示用的名称。
-
-```json
-{
-  "config_files": [
-    { "id": "llm", "path": "config/models/llm.yaml", "label": "LLM 模型配置" }
-  ]
-}
-```
-
-**规则**：
-
-- 未声明（或空数组）→ 插件收空配置：需要哪个文件就显式映射哪条（fail-closed）。
-- `path` 经内核安全校验：归一化后必须落在 `config/` 子树内。
-- 声明的文件参与 sidecar 配置注入，并经 `/api/v1/plugins/{id}/config/{file_id}` 读写，配置热更新走 mtime 缓存。
-- 追加 `"settings": false` = 注入专用：不出口到 `/api/v1/schema` 的 plugin_configs（该文件的 UI 由插件自声明的 settings 页/widget 承载，避免双入口）。
-
-**现状参考**：`llm_service`（`config/models/llm.yaml` + `config/models/embedding.yaml` 两条映射）。
-
----
-
-## 7. ui_schema：前端 schema 驱动（P0-3）
-
-> 对应 ROADMAP P0-3 / 前端 Schema 驱动。
-
-**目标**：新增插件时前端自动长出对应界面，无需手写前端代码。manifest 里声明"我要呈现什么"，内核 schema 端点把 `ui_schema` 暴露给前端，前端引擎（`SchemaParser` + `RenderingEngine`）据此渲染。
-
-**结构**：
-
-```json
-{
-  "ui_schema": {
-    "widgets": [
-      {
-        "id": "approval_panel",
-        "type": "review_document",
-        "space": "workspace",
-        "trigger": "on_event:approval_requested",
-        "props": {
-          "diff_view": true,
-          "annotation": true
-        }
-      }
-    ]
-  }
-}
-```
-
-字段含义：
-
-| 字段 | 含义 |
-|------|------|
-| `widgets[].id` | 前端 widget 实例标识 |
-| `widgets[].type` | widget 类型（对应前端已注册的 14+ Widget，如 `review_document` / `decision` / `task_card` 等） |
-| `widgets[].space` | 渲染空间：`chat` / `workspace` / `floating` / `dock` / `fullscreen` / `scene`（共 6 个；`scene` 已标废弃，新插件勿用） |
-| `widgets[].trigger` | 触发时机，如 `on_event:<event>`（事件到达时） |
-| `widgets[].props` | 传给 widget 的配置项（如是否启用 diff 视图、批注） |
-
-**现状参考**：`approval_service` 已用 `ui_schema` 声明审阅面板，实现"审批请求到达 → 自动打开 Workspace 审阅 Tab"。
-
----
-
-## 8. 完整示例：从零开发一个新插件
-
-目标：开发一个 `echo_tool` 工具插件，接收文本返回原样。覆盖从 manifest 到注册到验证的全流程。预计 **30 分钟**完成。
-
-### 第 1 步：建目录（落到用户根）
-
-```bash
-# 选用户根（示例用本地路径；生产用 $AGENTOS_USER_PLUGINS_DIR）
-mkdir -p ~/.local/share/agentos/plugins/echo_tool
-cd ~/.local/share/agentos/plugins/echo_tool
-```
-
-> 想随仓库分发？放到 `plugins/shared/tools/echo_tool/`（内置根，只读）。
-
-### 第 2 步：写 plugin.json
-
-```json
-{
-    "id": "echo_tool",
-    "name": "Echo Tool",
-    "description": "回显输入文本（开发示例）",
-    "version": "0.1.0",
-    "plugin_type": "tool",
-    "language": "python",
-    "host_type": "sidecar",
-    "entry": "python server.py",
-    "capabilities": {
-        "tools": [
-            {
-                "name": "echo",
-                "description": "原样返回输入的文本",
-                "input_schema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] },
-                "output_schema": { "type": "object", "required": ["echo"], "properties": { "echo": { "type": "string" }, "length": { "type": "integer" } } },
-                "render": { "card": "form", "title": "回显" }
-            }
-        ],
-        "route_signals": [],
-        "lifecycle_hooks": ["on_load", "on_unload"]
-    },
-    "permissions": {},
-    "priority": 50
-}
-```
-
-要点：
-
-- `id` 全局唯一，`snake_case`。
-- `plugin_type: "tool"` + `host_type: "sidecar"` + `entry: "python server.py"` 是工具插件最常见组合。
-- `capabilities.tools[].name` = `echo`，内核据此注册工具，LLM 会看到这个工具（还需加进目标 Agent 的 `tool_ids` 白名单）。
-- 工具带全 `input_schema` + `output_schema` + `render`——工具契约 fail-closed。
-- 示例不含 `error_policy`（已废弃，勿再声明）与 `dependencies`（不是 manifest 字段——Python 依赖走 `pyproject.toml`，见第 4 步）。
-
-### 第 3 步：写 server.py
+## 七、SDK 速查
 
 ```python
-#!/usr/bin/env python3
-"""echo_tool MCP 服务端示例。"""
-
-from agentos_plugin_sdk import AgentOSPlugin
-
-ECHO_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "text": {"type": "string", "description": "要回显的文本"}
-    },
-    "required": ["text"],
-}
-
-
-async def echo(text: str) -> dict:
-    """原样返回输入文本。"""
-    return {"echo": text, "length": len(text)}
-
-
-def create_plugin() -> AgentOSPlugin:
-    plugin = AgentOSPlugin("echo_tool")
-    plugin.register_tool("echo", ECHO_SCHEMA, echo, "原样返回输入的文本")
-    return plugin
-
-
-if __name__ == "__main__":
-    create_plugin().run()
-```
-
-要点：
-
-- `create_plugin().run()` 启动 MCP JSON-RPC 服务端，阻塞读 stdin、写 stdout。
-- `register_tool(name, input_schema, handler, description)` 注册工具；handler 可 sync 或 async。
-- 工具 `name` 必须与 `plugin.json` 的 `capabilities.tools[].name` 一致。
-
-### 第 4 步：本地验证（不依赖内核）
-
-内核对裸 `python` 启动命令强制使用**插件目录内**的 venv（uv 单轨，缺 `pyproject.toml` / `.venv` 启动即报错）。在插件目录建 `pyproject.toml` 并同步 venv：
-
-```toml
-[project]
-name = "agentos-plugin-echo-tool"
-version = "0.1.0"
-requires-python = ">=3.11"
-dependencies = ["agentos-plugin-sdk>=0.2.0"]
-
-[tool.uv.sources]
-agentos-plugin-sdk = { path = "<仓库>/plugins/sdk", editable = true }
-```
-
-```bash
-uv sync --project <插件目录>
-```
-
-直接跑进程，手动发一个 initialize + tools/call（JSON-RPC over stdio）：
-
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-{"jsonrpc":"2.0","method":"notifications/initialized"}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}' | .venv/bin/python server.py
-```
-
-（Windows 用 `.venv/Scripts/python.exe`。）
-
-预期看到 `id=2` 的响应里 `content[0].text` 含 `{"echo": "hi", "length": 2}`。
-
-### 第 5 步：让内核发现它
-
-把插件目录放到用户根（或内置根）——watcher 自动发现并注册（秒级），**无需重启内核**；日志应出现：
-
-```
-Manifest validated: id=echo_tool type=Tool host=Sidecar path=.../echo_tool/plugin.json
-Discovered N plugin manifests
-```
-
-之后该工具自动出现在能力注册表，LLM 可在 tool_call 中调用 `echo`。
-
-### 第 6 步（可选）：加配置注入与前端 schema
-
-需要读配置：
-
-```json
-{
-  "config_files": [
-    { "id": "echo", "path": "config/tools/echo.yaml", "label": "Echo 配置" }
-  ]
-}
-```
-
-需要前端界面（如展示一个面板）：
-
-```json
-{
-  "ui_schema": {
-    "widgets": [
-      {
-        "id": "echo_panel",
-        "type": "task_card",
-        "space": "chat",
-        "trigger": "on_event:echo_done"
-      }
-    ]
-  }
-}
-```
-
-### 各类型插件的最小骨架
-
-- **工具插件**：见上文 `echo_tool`。
-- **系统插件**：`plugin_type: "system"`，其余同上；通常还声明 `requires_services`（如 `["event-bus"]`）以拿到内核反向调用句柄。参考 `plugins/shared/system/approval/`。
-- **管道插件**：`plugin_type: "pipeline"` + `pipeline_role: "input"|"core"|"output"`，并设置合理的 `priority`。参考 `plugins/shared/pipeline/input/prompt_build/`。
-- **接入外部 MCP**：不写 `server.py`，约定 `entry: "mcp:external"` + `mcp` 传输配置（见 [§2.6](#26-接入外部-mcp-服务)）。参考 `plugins/shared/tools/external_mcp/browser_test/`。
-
----
-
-## 9. SDK 用法速查
-
-SDK 源码：`plugins/sdk/src/agentos_plugin_sdk/`。核心 API：
-
-```python
-from agentos_plugin_sdk import (
-    AgentOSPlugin,   # 插件基类
-    tool,            # @tool 装饰器（模块级声明）
-    collect_tools,   # 收集模块级 @tool
-    McpServer,       # MCP 服务端（一般不直接用，AgentOSPlugin.run() 内部用）
-    STANDARD_CAPABILITIES,  # 标准能力枚举
-    CapabilityHandle,       # 内核反向调用句柄
-)
-```
-
-### 注册工具（两种等价写法）
-
-```python
-# 写法 A：实例方法
+from agentos_plugin_sdk import AgentOSPlugin, tool, collect_tools, CapabilityHandle
 plugin = AgentOSPlugin("my_plugin")
 
-@plugin.tool(name="search", schema={...}, description="搜索")
-async def search(query: str) -> dict:
-    return {"results": [...]}
+@plugin.tool(name="search", schema={...}, description="搜索")       # 或 plugin.register_tool(...)
+async def search(query: str) -> dict: return {"results": [...]}
 
-# 写法 B：模块级装饰器 + 自动收集
-@tool(name="search", schema={...}, description="搜索")
-async def search(query: str) -> dict:
-    return {"results": [...]}
-
-plugin = AgentOSPlugin("my_plugin")
-for _name, tdef in collect_tools(__main__).items():  # 扫描模块级 @tool
-    plugin.register_tool(tdef.name, tdef.schema, tdef.handler, tdef.description)
-```
-
-### 生命周期钩子
-
-SDK 为常用钩子提供了专用**装饰器**（`on_load` / `on_unload`）；其它钩子用 `on_lifecycle(event, handler)` 普通方法注册：
-
-```python
 @plugin.on_load
-async def on_load(params: dict) -> None:
-    # 初始化资源（握手时收到注入的 capabilities/config）
-    ...
+async def on_load(params: dict) -> None: ...                        # on_unload 同理；其余 on_lifecycle(event, fn)
 
-@plugin.on_unload
-async def on_unload() -> None:
-    # 释放资源
-    ...
-
-# 其它钩子（on_pipeline_start / on_pipeline_end / on_error）：
-plugin.on_lifecycle("on_pipeline_start", handler_fn)
+if __name__ == "__main__": plugin.run()   # stdin JSON-RPC / stdout 响应；KernelChannel 反向调用同流复用
 ```
 
-钩子名对应 manifest 的 `capabilities.lifecycle_hooks`，且映射到 MCP notification（`notifications/on_load` 等）。注意 `on_lifecycle(event, handler)` 是**普通注册方法**（传函数），不是装饰器；上面三个专用装饰器才是 `@` 语法。
+声明了 `requires_services` 的插件握手后经 `get_capability("service-registry")` / capability handle 反向调用提供方（详见 SDK `capability.py`）。
 
-### 启动服务端
+## 八、示例插件速查
 
-```python
-if __name__ == "__main__":
-    plugin.run()
-```
-
-`run()` 启动 `McpServer`，从 stdin 读 JSON-RPC、写 stdout，处理 `initialize` / `tools/list` / `tools/call` / `resources/read` / `notifications/*`。反向调用通道（`KernelChannel`）随服务端一起启动，共享 stdin 多路复用。
-
-### 内核反向调用（requires_services 插件）
-
-声明了 `requires_services`（如 `["pipeline-executor"]`）的插件，握手后能拿到 `CapabilityHandle`，向内核/提供方插件发起反向 RPC（如让管道恢复执行）。详见 SDK `capability.py` 与 `approval_service` 实现。
-
----
-
-## 10. 调试与常见问题
-
-排障对照表见 [troubleshooting.md](troubleshooting.md)。协议侧两条高频问题：
-
-- **工具注册了但 LLM 不调用**：`capabilities.tools[].name` 与 server.py 注册名完全一致（含大小写）；`description` 写清用途（LLM 据此选择）；`input_schema` 越准成功率越高。另见三层可见性过滤（troubleshooting 首条）。
-- **`config_files` 配置注入没生效**：`path` 须相对 `config/` 根且落在 `config/` 子树内；未声明（或空）= 收空配置，需要哪个文件就显式映射哪条。
-
----
-
-## 附录 A：manifest 覆盖现状统计
-
-> 数据基于 `plugins/shared/` 全量扫描（86 个 `plugin.json`），核对日期 2026-09。
-> 数量随插件增删会漂移，以本表口径（git 跟踪 manifest 全量解析）自行复测为准。
-
-**按目录类别：**
-
-| 类别 | 目录位置 | 数量 |
-|------|----------|------|
-| pipeline / input | `plugins/shared/pipeline/input/` | 17 |
-| pipeline / core | `plugins/shared/pipeline/core/` | 2 |
-| pipeline / output | `plugins/shared/pipeline/output/` | 12 |
-| shared 根下直挂（db_admin / metrics_admin / user_admin） | `plugins/shared/<name>/` | 3 |
-| system（含连接器/通道/系统服务） | `plugins/shared/system/` | 26 |
-| tools | `plugins/shared/tools/`（20 个顶层插件 + `external_mcp/` 下 4 个预置接入清单） | 24 |
-| **合计** | | **84** |
-
-**按 `plugin_type`：**
-
-| plugin_type | 数量 |
-|-------------|------|
-| `pipeline` | 31 |
-| `system` | 25 |
-| `tool` | 28 |
-
-**按 `host_type`：**
-
-| host_type | 数量 |
-|-----------|------|
-| `sidecar` | 81 |
-| `in_process`（Rust cdylib） | 3（`pipeline_tool_core` / `pipeline_sensitive_checker` / `pipeline_spill_guard`） |
-
-**关键内部模块覆盖确认：**
-
-| 模块类别 | 期望 | 已有 manifest | 状态 |
-|----------|------|--------------|------|
-| 连接器（connectors） | `connectors_service`（聚合） | `plugins/shared/system/connectors/plugin.json` | ✅ |
-| 通道（channel_*） | 5 个（cli/dingtalk/feishu/qq/wecom） | 5 个 | ✅ 全覆盖（`channel_api` 已整体退役，ADR 2026-08-21 插件自持 http_endpoints；`channel_gateway` 不再是独立插件） |
-| Agent（scene） | `scene_service` | `plugins/shared/system/scene/plugin.json` | ✅ |
-| 工具（tools） | 20 个顶层 + 4 个 external_mcp 预置接入 | 24 个 | ✅ 全覆盖（`external_mcp/` 本身是聚合目录，manifest 在其 4 个子目录里） |
-| 系统服务 | memory/llm/approval/evaluation/... | 25 个 | ✅ |
-| 内置工具聚合 sidecar（builtin_tools） | 1 个（8 个工具的 MCP 聚合） | 1 | ✅ |
-
-**结论**：全部应独立加载的内部模块均已收敛到 `plugin.json` 协议（含原 `builtin_tools`、`artifacts` 两处历史缺口已补齐 manifest）。
-
----
-
-## 附录 B：哪些目录不需要 manifest
-
-发现算法只把"直接含 `plugin.json` 的目录"当插件。下列目录**故意没有** manifest，它们是父插件的**子模块**（被父 `server.py` import），不独立加载：
-
-| 目录 | 父插件 | 说明 |
-|------|--------|------|
-| `plugins/shared/system/connectors/creative/` | `connectors_service` | 创意类连接器实现（comfyui / game_engine / generic） |
-| `plugins/shared/system/connectors/vscode/` | `connectors_service` | VS Code 连接器适配器 |
-| `plugins/shared/pipeline/_base/` | — | 管道插件公共基类 |
-| `plugins/shared/tools/external_mcp/`（目录本身） | — | 预置外部 MCP 接入的聚合目录：manifest 在其 4 个子目录里，目录自身不需要 |
-| 各插件目录下的 `__pycache__/` | — | Python 缓存，非代码 |
-
-**判断原则**：一个目录是否需要 manifest，取决于它是否要**被内核作为独立插件加载**。如果只是被某个 `server.py` 通过 `import` 引用的实现细节，就不需要——加了反而会被错误地当成新插件发现。
-
-> 子模块约定也适用于你自己的插件：把大逻辑拆成多个 `.py` 文件放在插件目录内即可，无需为每个文件建子目录或 manifest。
-
----
-
-*分篇上手教程见 [开发指南索引](README.md)（sidecar / native / 外部 MCP / 主题 / Agent 配置 / 管道配置 / 排障）——0.2 统一以本文 `plugin.json` 协议为准。*
+| 学什么 | 看哪里（真实插件即样板，不设玩具教程） |
+|---|---|
+| 最小工具插件 | `plugins/shared/tools/simple/` |
+| services + http_endpoints + config_files | `plugins/shared/system/llm/` |
+| requires_services + 审批闭环 | `plugins/shared/system/approval/` |
+| 管道 input 插件 / agent 配置自持加载 | `plugins/shared/pipeline/input/context_build/` |
+| 管道 output 插件 / 评估闸门 | `plugins/shared/pipeline/output/task_reminder/` |
+| native 插件（cdylib） | `plugins/shared/pipeline/output/sensitive_checker/`、`plugins/shared/pipeline/core/tool_core/` |
+| external MCP（HTTP / stdio / 零声明观测导入） | `plugins/shared/tools/external_mcp/`（接入规则见 [plugin-external-mcp.md](plugin-external-mcp.md)） |
+| 插件主题/皮肤声明 | `plugins/shared/system/dsh_adapter/`（主题规则见 [theme.md](theme.md)） |
+| 模式包结构 | `plugins/shared/modes/`（四模式种子；约定扫描注册规划中 P2） |

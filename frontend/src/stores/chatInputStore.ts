@@ -12,10 +12,15 @@
  * 草稿持久化：drafts 走 localStorage persist——刷新页面后输入框
  * 未发送内容不丢（用户"刷新后输入框应该还在"）。发送成功后的 clearDraft 会
  * 同步清掉持久化项。
+ *
+ * 职责三：激活任务模式的会话级记忆（模式体系 §4 激活 chip）。
+ * 按 tabId/sessionId 记忆激活的模式（缺键 = 自动），切换会话/标签各自保持；
+ * 输入区 chip 与 Wave2 模式面板入口同源读写（taskModes 内存态，不持久化）。
  */
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { TaskMode } from '@/services/schema/modeOptions'
 import { createTolerantStorage } from '@/utils/tolerantStorage'
 
 interface ChatInputState {
@@ -23,6 +28,9 @@ interface ChatInputState {
   pendingInsert: string | null
   /** 按 tabId/sessionId 存储的草稿文本 */
   drafts: Record<string, string>
+  /** 按 tabId/sessionId 记忆的激活任务模式（缺键 = 自动，发送不带 mode 键；
+   *  内存态——会话/标签切换各自保持，页面刷新回自动） */
+  taskModes: Record<string, TaskMode>
   /** 外部调用：请求向 ChatInput 插入文本 */
   requestInsert: (text: string) => void
   /** ChatInput 消费后调用：清除待插入 */
@@ -33,6 +41,8 @@ interface ChatInputState {
   loadDraft: (key: string) => string
   /** 清除指定 key 的草稿文本 */
   clearDraft: (key: string) => void
+  /** 设置/清除指定 key 的激活任务模式（null = 清除回自动） */
+  setTaskMode: (key: string, mode: TaskMode | null) => void
 }
 
 export const useChatInputStore = create<ChatInputState>()(
@@ -40,6 +50,7 @@ export const useChatInputStore = create<ChatInputState>()(
     (set, get) => ({
       pendingInsert: null,
       drafts: {},
+      taskModes: {},
 
       requestInsert: (text) => set({ pendingInsert: text }),
       consumeInsert: () => set({ pendingInsert: null }),
@@ -67,6 +78,19 @@ export const useChatInputStore = create<ChatInputState>()(
         set((state) => {
           const { [key]: _, ...rest } = state.drafts
           return { drafts: rest }
+        })
+      },
+
+      /**
+       * 设置/清除指定 key 的激活任务模式（null = 清除回自动，记录不占位）
+       */
+      setTaskMode: (key, mode) => {
+        set((state) => {
+          if (!mode) {
+            const { [key]: _, ...rest } = state.taskModes
+            return { taskModes: rest }
+          }
+          return { taskModes: { ...state.taskModes, [key]: mode } }
         })
       },
     }),

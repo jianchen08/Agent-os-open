@@ -8,6 +8,7 @@ import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client
 import { RouterProvider } from 'react-router-dom'
 import ErrorBoundary from './components/ErrorBoundary'
 import { ExtensionHost } from './components/extension/ExtensionHost'
+import { TitleBar } from './components/layout/TitleBar'
 import { Toaster } from './components/ui/sonner'
 import { createRouter } from './router'
 import { queryClient } from './services/query/queryClient'
@@ -30,6 +31,8 @@ export function App() {
           buster: 'v1',
         }}
       >
+        {/* Electron 主窗口自定义标题栏（组件内自门控：Web / 子浮窗渲染空） */}
+        <TitleBar />
         <RouterProvider router={router} />
         <ExtensionHost />
         <Toaster />

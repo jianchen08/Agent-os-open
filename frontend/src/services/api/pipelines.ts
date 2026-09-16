@@ -70,6 +70,9 @@ export interface PipelineStateSummary {
   'task.id'?: string
   'task.ended_at'?: string
   'task.ws_meta'?: { path?: string }
+  // 任务模式键（withTaskMode 并入 execution_context，内核合并后 state 落键；
+  // 自动会话不带键——管道视图模式徽标按此键的有无决定渲染）
+  mode?: string
   'lineage.parent_pipeline_id'?: string
   // 血缘根会话（task_submit 出生写面）：自环子任务管道（thread=自身 id）的
   // 真实归属用户会话，任务管理面板跨会话跳转的定位锚点
@@ -116,6 +119,8 @@ export interface PipelineStateViewModel {
   messageCount?: number
   /** 任务域状态原值（evaluating/planning 等细态不被运行态吞掉） */
   taskStatus?: string
+  /** 任务模式键（state.mode 出口；管道视图模式徽标取数源，无键零渲染） */
+  mode?: string
   /** 血缘根会话：自环子任务管道（thread=自身 id）的真实归属用户会话 */
   originSessionId?: string
   /** 工作区坐标（任务域镜像 task.ws_meta 优先，防会话工作区投影污染） */
@@ -171,6 +176,7 @@ export function mapStateSummaryToViewModel(summary: PipelineStateSummary): Pipel
     currentPhase: summary.current_phase,
     messageCount: summary.message_count,
     taskStatus: nonEmpty(summary['task.status']),
+    mode: nonEmpty(summary.mode),
     originSessionId: nonEmpty(summary['lineage.origin_session_id']),
     workspacePath: nonEmpty(wsPath),
     llmModel: nonEmpty(summary.llm_model),

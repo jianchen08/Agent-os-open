@@ -136,6 +136,22 @@ CREATE INDEX IF NOT EXISTS idx_traces_branch_seq ON traces(branch_id, seq_in_bra
 -- 轨迹热查询按 run_id 集合 + tenant 过滤（get_step_traces_by_thread 经
 -- message_slots 反查 run_id 集合后扫 traces），无此索引时该路径全表扫描。
 CREATE INDEX IF NOT EXISTS idx_traces_run_tenant ON traces(run_id, tenant_id);
+-- llm_usage 用量聚合（monitoring token 统计 / cost_control 账本）按 patch_data JSON
+-- 路径取值：无此索引时每条消费查询都要全表扫描并逐行解析 patch_data（实测 1.7-2.1s，
+-- 且同步阻塞插件 sidecar 事件循环，拖垮同进程其它 /ext 端点）。
+-- 收益分两层（2026-09-15 实测 1.695s → 0.0002s）：①部分索引条件把扫描限定在含
+-- llm_usage 的行（1.7k/12.4k），非用量轨迹里 642MB 的巨型行（最大单行 150MB）整体
+-- 不进索引——单独这一条即得 142x；②表达式列与消费方 SQL（traces_usage.py）对齐后
+-- 查询改走覆盖索引不再回表读 patch_data，再得约 60x。SQLite 对表达式做解析树规范化
+-- （空白、函数名大小写不敏感），但 JSON 路径/常量/函数语义必须一致，否则覆盖失效回表。
+CREATE INDEX IF NOT EXISTS idx_traces_llm_usage ON traces(
+    substr(created_at, 1, 10),
+    COALESCE(json_extract(patch_data, '$.llm_usage.model'), ''),
+    COALESCE(json_extract(patch_data, '$.llm_usage.provider'), ''),
+    json_extract(patch_data, '$.llm_usage.input_tokens'),
+    json_extract(patch_data, '$.llm_usage.output_tokens'),
+    json_extract(patch_data, '$.llm_usage.total_tokens')
+) WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL;
 CREATE TABLE IF NOT EXISTS blobs (
     blob_id    TEXT PRIMARY KEY,
     mime_type  TEXT NOT NULL,
@@ -5420,5 +5436,884 @@ mod tests {
             .expect("读回成功");
         assert_eq!(loaded.len(), 2, "批量成功路径键数完整: {loaded:?}");
         assert_eq!(loaded.get("x"), Some(&serde_json::json!("1")));
+    }
+
+    /// llm_usage 用量聚合：索引入索引 + 聚合值正确（数据驱动，含大载荷非用量行）。
+    ///
+    /// 该索引的收益分两层：部分索引条件剪掉大体积非用量轨迹（收益主体），表达式列
+    /// 免回表（增量）。故断言三件事——索引是部分索引、生产查询形状走索引、聚合值
+    /// 只统计含 llm_usage 的行。消费方 SQL 原文见 plugins/shared/traces_usage.py。
+    #[test]
+    fn test_llm_usage_aggregation_uses_partial_covering_index() {
+        let store = SqliteStore::open_memory().unwrap();
+        let conn = store.conn.lock();
+
+        let ddl: String = conn
+            .query_row(
+                "SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='index' AND name='idx_traces_llm_usage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            ddl.contains("WHERE") && ddl.contains("llm_usage"),
+            "必须是限定 llm_usage 的部分索引（扫描剪枝的根据），实际定义: {ddl}"
+        );
+
+        // 两条用量行（同模型）+ 一条大载荷非用量行（不得进索引、不得参与聚合）
+        for (tid, model, total) in [("u1", "m-a", 10), ("u2", "m-a", 25), ("u3", "m-b", 7)] {
+            let payload = format!(
+                "{{\"llm_usage\":{{\"model\":\"{model}\",\"provider\":\"p\",\
+                 \"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":{total}}}}}"
+            );
+            conn.execute(
+                "INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, tenant_id, created_at) \
+                 VALUES (?1, 'r1', 'main', 0, 'llm_core', 'state_update', ?2, 'default', '2026-09-15T00:00:00Z')",
+                rusqlite::params![tid, payload],
+            )
+            .unwrap();
+        }
+        let big = format!(
+            "{{\"messages\":[{{\"role\":\"user\",\"content\":\"{}\"}}]}}",
+            "x".repeat(200_000)
+        );
+        conn.execute(
+            "INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, tenant_id, created_at) \
+             VALUES ('big', 'r1', 'main', 1, 'p', 'state_update', ?1, 'default', '2026-09-15T00:00:00Z')",
+            rusqlite::params![big],
+        )
+        .unwrap();
+
+        // 生产查询原文（traces_usage.aggregate_usage_by_model）
+        let by_model = "SELECT COALESCE(json_extract(patch_data, '$.llm_usage.model'), ''),\
+             \n       COALESCE(json_extract(patch_data, '$.llm_usage.provider'), ''),\
+             \n       SUM(json_extract(patch_data, '$.llm_usage.input_tokens')),\
+             \n       SUM(json_extract(patch_data, '$.llm_usage.output_tokens')), \
+             \n       SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), \
+             \n       COUNT(*)\
+             \n       FROM traces WHERE json_extract(patch_data, '$.llm_usage') IS NOT NULL\
+             \n       GROUP BY 1, 2 ORDER BY 5 DESC";
+        let plans: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {by_model}"))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            plans.iter().any(|p| p.contains("idx_traces_llm_usage")),
+            "按模型聚合必须命中 llm_usage 索引，实际计划 {plans:?}"
+        );
+
+        let mut stmt = conn.prepare(by_model).unwrap();
+        let rows: Vec<(String, f64, i64)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let mut got = rows.clone();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got,
+            vec![("m-a".to_string(), 35.0, 2), ("m-b".to_string(), 7.0, 1)],
+            "按模型聚合计数值：大载荷非用量行不得计入"
+        );
+    }
+
+    // ── 迁移/退役辅助函数（init 内的表保全与补列）──
+
+    /// 环境变量驱动配置读取的契约：未设回落默认、可解析值生效、
+    /// 非法值与超大值各自归位（钳制上限保护 cutoff 计算）。
+    #[test]
+    fn trace_retention_days_env_contract() {
+        const ENV: &str = "AGENTOS_TRACE_RETENTION_DAYS";
+        let saved = std::env::var(ENV).ok();
+        struct Restore(Option<String>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => std::env::set_var(ENV, v),
+                    None => std::env::remove_var(ENV),
+                }
+            }
+        }
+        let _restore = Restore(saved);
+
+        std::env::remove_var(ENV);
+        assert_eq!(
+            trace_retention_days(),
+            TRACE_RETENTION_DAYS_DEFAULT,
+            "未设置回落默认"
+        );
+        std::env::set_var(ENV, "7");
+        assert_eq!(trace_retention_days(), 7, "合法值生效");
+        std::env::set_var(ENV, "0");
+        assert_eq!(trace_retention_days(), 0, "0 = 禁用清扫，不得被默认值顶替");
+        std::env::set_var(ENV, "not-a-number");
+        assert_eq!(
+            trace_retention_days(),
+            TRACE_RETENTION_DAYS_DEFAULT,
+            "非法值回落默认（家政不阻断启动）"
+        );
+        std::env::set_var(ENV, "999999999");
+        assert_eq!(
+            trace_retention_days(),
+            TRACE_RETENTION_DAYS_MAX,
+            "超大值钳制到上限（cutoff 不溢出）"
+        );
+    }
+
+    /// 退役表处置三态：表不存在 = 无操作；空表 = DROP；有行 = 改名留档
+    /// （数据保全优先于自动清理）。
+    #[test]
+    fn retire_table_preserve_rows_three_states() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // ① 表不存在：静默成功，不做任何事
+        retire_table_preserve_rows(&conn, "absent_table").unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'absent_table%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+
+        // ② 空表：DROP（表清单与后端读写一一对应）
+        conn.execute_batch("CREATE TABLE empty_retired (a TEXT);")
+            .unwrap();
+        retire_table_preserve_rows(&conn, "empty_retired").unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'empty_retired'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "空退役表应被 DROP");
+
+        // ③ 有行：改名 `_retired_<ts>` 保全，原表名不再存在，行数不变
+        conn.execute_batch(
+            "CREATE TABLE data_retired (a TEXT); INSERT INTO data_retired VALUES ('v');",
+        )
+        .unwrap();
+        retire_table_preserve_rows(&conn, "data_retired").unwrap();
+        let renamed: String = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'data_retired_retired_%'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("有行退役表必须改名留档而非删除");
+        let rows: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {renamed}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "留档表必须保留原始行");
+        let gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'data_retired'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(gone, 0, "原表名应撤位");
+    }
+
+    /// 旧 schema 的 message_slots（含内容列）整表撤位重建：重建后新表只含
+    /// 现行纯索引列，旧行经 `_retired_` 留档；无旧列的现行表保持原样。
+    #[test]
+    fn migrate_drop_legacy_message_slots_rebuilds_only_on_legacy_columns() {
+        // ① 旧宽表：含 content_preview 内容列 + 一行数据
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message_slots (tenant_id TEXT, pipeline_id TEXT, seq INTEGER, \
+             content_preview TEXT); INSERT INTO message_slots VALUES ('t','p',0,'old');",
+        )
+        .unwrap();
+        migrate_drop_legacy_message_slots(&conn).unwrap();
+        let cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(message_slots)").unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert!(
+            !cols.iter().any(|c| c == "content_preview"),
+            "重建后不得再含旧内容列，实际: {cols:?}"
+        );
+        assert!(
+            cols.iter().any(|c| c == "message_id") && cols.iter().any(|c| c == "blob_id"),
+            "重建后应为现行纯索引列，实际: {cols:?}"
+        );
+        let archived: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'message_slots_retired_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 1, "旧宽表有行 → 改名留档（数据保全优先于清理）");
+        let archived_name: String = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'message_slots_retired_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let kept_rows: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {archived_name} WHERE content_preview = 'old'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept_rows, 1, "留档表必须保留旧行原文（升级不静默抹数据）");
+
+        // ② 现行纯索引表：不触发重建（列集合保持不变）
+        let conn2 = Connection::open_in_memory().unwrap();
+        conn2.execute_batch(DDL).unwrap();
+        let before: Vec<String> = {
+            let mut stmt = conn2.prepare("PRAGMA table_info(message_slots)").unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        migrate_drop_legacy_message_slots(&conn2).unwrap();
+        let after: Vec<String> = {
+            let mut stmt = conn2.prepare("PRAGMA table_info(message_slots)").unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(before, after, "无旧列的现行表不得被重建");
+    }
+
+    // ── runs 生命周期：主动排空 / 崩溃清扫 / 挂起元数据检索 ──
+
+    /// G8 主动排空：running → suspended 计数正确；已终态 run 不受影响；
+    /// 二次调用返回 0（幂等）。与 reap（→failed）语义分离。
+    #[tokio::test]
+    async fn suspend_running_runs_only_touches_running() {
+        let store = SqliteStore::open_memory().unwrap();
+        store.create_run("run_s1", "h", "default").unwrap();
+        store.create_run("run_s2", "h", "default").unwrap();
+        store.create_run("run_done", "h", "default").unwrap();
+        store
+            .update_run_status("run_done", RunStatus::Completed, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.suspend_running_runs().unwrap(),
+            2,
+            "两条 running 被排空"
+        );
+        assert_eq!(
+            store.get_run("run_s1").await.unwrap().status,
+            RunStatus::Suspended
+        );
+        assert_eq!(
+            store.get_run("run_done").await.unwrap().status,
+            RunStatus::Completed,
+            "已终态 run 不被改写"
+        );
+        assert_eq!(store.suspend_running_runs().unwrap(), 0, "重入幂等");
+    }
+
+    /// 挂起 run 的元数据写入与按 request_id 检索：写入的
+    /// `pending_interaction_request_id` 可被找回（含字段原样还原），
+    /// 未匹配 request_id 与损坏 metadata 均返回 None（不误命中）。
+    #[tokio::test]
+    async fn set_run_metadata_then_find_by_request_id() {
+        let store = SqliteStore::open_memory().unwrap();
+        store.create_run("run_meta", "h", "default").unwrap();
+        store
+            .update_run_status("run_meta", RunStatus::Suspended, None, None)
+            .await
+            .unwrap();
+        store
+            .set_run_metadata(
+                "run_meta",
+                &json!({"pending_interaction_request_id": "req-42", "suspend_branch_id": "main"}),
+            )
+            .unwrap();
+
+        let found = store
+            .find_suspended_run_by_request_id("req-42")
+            .unwrap()
+            .expect("挂起 run 必须按 request_id 找回");
+        assert_eq!(found.run_id, "run_meta");
+        assert_eq!(found.status, RunStatus::Suspended);
+        assert_eq!(
+            found.metadata.as_ref().unwrap()["suspend_branch_id"],
+            "main",
+            "metadata 其余字段原样还原（resume 凭据）"
+        );
+
+        assert!(
+            store
+                .find_suspended_run_by_request_id("no-such-req")
+                .unwrap()
+                .is_none(),
+            "不匹配的 request_id 不得命中"
+        );
+
+        // 损坏 metadata 的挂起 run：留痕跳过，不得 panic 也不得误命中
+        store.create_run("run_bad_meta", "h", "default").unwrap();
+        store
+            .update_run_status("run_bad_meta", RunStatus::Suspended, None, None)
+            .await
+            .unwrap();
+        store
+            .with_conn::<(), String>(|c| {
+                c.execute(
+                    "UPDATE runs SET metadata = '{not-json' WHERE run_id = 'run_bad_meta'",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        assert!(store
+            .find_suspended_run_by_request_id("req-42")
+            .unwrap()
+            .is_some_and(|r| r.run_id == "run_meta"));
+    }
+
+    /// 崩溃清扫的 run_status 投影修复（BUG-2）：被清扫 run 的 pipeline_state
+    /// 投影按三态收敛——缺失/残留 running → failed；已有终态不覆盖。
+    #[tokio::test]
+    async fn reap_orphan_runs_fixes_run_status_projection_three_states() {
+        let store = SqliteStore::open_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // ① 投影缺失 + ② 残留 running + ③ 已是 completed（真值，不覆盖）
+        for (run_id, pid) in [
+            ("run_gap", "pipe_gap"),
+            ("run_stale", "pipe_stale"),
+            ("run_done", "pipe_done"),
+        ] {
+            store.create_run(run_id, "h", "default").unwrap();
+            store.set_run_pipeline(run_id, pid).await.unwrap();
+        }
+        {
+            let conn = store.conn.lock();
+            for (pid, val) in [
+                ("pipe_stale", "\"running\""),
+                ("pipe_done", "\"completed\""),
+            ] {
+                conn.execute(
+                    "INSERT INTO pipeline_state (pipeline_id, field_key, field_value, tenant_id, updated_at) \
+                     VALUES (?1, 'run_status', ?2, 'default', ?3)",
+                    rusqlite::params![pid, val, now],
+                )
+                .unwrap();
+            }
+        }
+
+        let reaped = store.reap_orphan_runs().unwrap();
+        assert_eq!(reaped, 3, "三条 running run 均被清扫");
+        for (pid, expected) in [
+            ("pipe_gap", "failed"),
+            ("pipe_stale", "failed"),
+            ("pipe_done", "completed"),
+        ] {
+            let raw: String = store
+                .conn
+                .lock()
+                .query_row(
+                    "SELECT field_value FROM pipeline_state \
+                     WHERE pipeline_id = ?1 AND field_key = 'run_status' AND tenant_id = 'default'",
+                    rusqlite::params![pid],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
+                json!(expected),
+                "{pid} 的 run_status 投影（缺失/残留 running 纠偏，终态不覆盖）"
+            );
+        }
+        assert_eq!(store.reap_orphan_runs().unwrap(), 0, "重入幂等");
+    }
+
+    // ── message_slots op 写入：insert 顺延 / delete 留 gap / 未知 op 忽略 ──
+
+    /// op 语义：insert 在位置 N 插入并让后段 seq 顺延（message_id 不变）；
+    /// delete 留 gap（后段 seq 不动）；unknown op 静默忽略。
+    /// 对照两组输入（插入中间位 vs 插入队首）验证顺延的普适性。
+    #[tokio::test]
+    async fn apply_messages_ops_insert_shifts_delete_leaves_gap() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipe-ops";
+        store
+            .apply_messages_ops_to_table(
+                pid,
+                "default",
+                &[
+                    json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "q"}}),
+                    json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "a"}}),
+                    json!({"op": "set", "seq": 2, "msg": {"role": "user", "content": "q2"}}),
+                ],
+            )
+            .unwrap();
+        let ids_before: Vec<(i64, String)> = {
+            let conn = store.conn.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT seq, message_id FROM message_slots WHERE pipeline_id=?1 ORDER BY seq",
+                )
+                .unwrap();
+            stmt.query_map([pid], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(ids_before.len(), 3);
+
+        // insert at=1：后段（原 seq 1/2）顺延到 2/3，message_id 保持不变
+        store
+            .apply_messages_ops_to_table(
+                pid,
+                "default",
+                &[json!({"op": "insert", "at": 1, "msg": {"role": "user", "content": "mid"}})],
+            )
+            .unwrap();
+        let after: Vec<(i64, String)> = {
+            let conn = store.conn.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT seq, message_id FROM message_slots WHERE pipeline_id=?1 ORDER BY seq",
+                )
+                .unwrap();
+            stmt.query_map([pid], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(after.len(), 4, "插入后槽位 +1");
+        assert_eq!(after[1].0, 1, "插入位就是 at");
+        assert_eq!(after[2].0, 2);
+        assert_eq!(
+            after[2].1, ids_before[1].1,
+            "后段原 seq=1 的 id 不变，仅顺延"
+        );
+        assert_eq!(after[3].1, ids_before[2].1, "后段原 seq=2 的 id 不变");
+
+        // delete 中间槽（msg=null）→ 留 gap：后段 seq 与 id 都不动
+        store
+            .apply_messages_ops_to_table(
+                pid,
+                "default",
+                &[json!({"op": "set", "seq": 1, "msg": serde_json::Value::Null})],
+            )
+            .unwrap();
+        let after_del: Vec<(i64, String)> = {
+            let conn = store.conn.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT seq, message_id FROM message_slots WHERE pipeline_id=?1 ORDER BY seq",
+                )
+                .unwrap();
+            stmt.query_map([pid], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(after_del.len(), 3, "删除后槽位数 -1");
+        assert_eq!(after_del[1].0, 2, "gap 保留（后段 seq 不顺延）");
+        assert_eq!(after_del[2].0, 3);
+        assert_eq!(after_del[2].1, after[3].1, "后段 id 不受删除影响");
+
+        // 未知 op 与缺参 op：忽略，不报错不改表
+        let count_before = after_del.len();
+        store
+            .apply_messages_ops_to_table(
+                pid,
+                "default",
+                &[
+                    json!({"op": "future_op", "seq": 9}),
+                    json!({"op": "set"}),
+                    json!({"op": "insert", "at": 5}),
+                ],
+            )
+            .unwrap();
+        let count_after: i64 = store
+            .conn
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM message_slots WHERE pipeline_id=?1",
+                [pid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count_after as usize, count_before,
+            "未知/缺参 op 不落任何槽位"
+        );
+    }
+
+    /// 插入队首（at=0）的第二组输入：全体顺延，原有顺序与身份保持。
+    #[tokio::test]
+    async fn apply_messages_ops_insert_at_head_preserves_order_and_identity() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipe-head";
+        store
+            .apply_messages_ops_to_table(
+                pid,
+                "default",
+                &[
+                    json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "a"}}),
+                    json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "b"}}),
+                ],
+            )
+            .unwrap();
+        let before: Vec<String> = {
+            let conn = store.conn.lock();
+            let mut stmt = conn
+                .prepare("SELECT message_id FROM message_slots WHERE pipeline_id=?1 ORDER BY seq")
+                .unwrap();
+            stmt.query_map([pid], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+
+        store
+            .apply_messages_ops_to_table(
+                pid,
+                "default",
+                &[json!({"op": "insert", "at": 0, "msg": {"role": "user", "content": "head"}})],
+            )
+            .unwrap();
+        let after: Vec<String> = {
+            let conn = store.conn.lock();
+            let mut stmt = conn
+                .prepare("SELECT message_id FROM message_slots WHERE pipeline_id=?1 ORDER BY seq")
+                .unwrap();
+            stmt.query_map([pid], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(
+            &after[1..],
+            before.as_slice(),
+            "队首插入后原有身份与顺序不变"
+        );
+    }
+
+    // ── 读路径：slot_row_to_record 的 tool 状态判定（envelope 权威 + 内容兜底）──
+
+    /// tool 消息的状态提取：envelope 优先（success 真/假），无 envelope 时
+    /// 按 `Error: ` 前缀兜底；非 tool 角色恒 None。envelope 假且无 error 字段
+    /// 时回退 content 前缀提取。
+    #[test]
+    fn slot_row_to_record_tool_status_precedence() {
+        let rec = |msg: &serde_json::Value| {
+            slot_row_to_record(
+                msg,
+                0,
+                "m1".to_string(),
+                Some("b1".to_string()),
+                "2026-01-01T00:00:00Z".to_string(),
+                Some("pipe".to_string()),
+                Some("run".to_string()),
+            )
+        };
+
+        // envelope success=false 且带 error：error 取 envelope 原文
+        let failed = rec(&json!({
+            "role": "tool",
+            "content": "whatever",
+            "tool_result": {"success": false, "error": "envelope error"}
+        }));
+        assert_eq!(failed.status.as_deref(), Some("failed"));
+        assert_eq!(failed.error.as_deref(), Some("envelope error"));
+
+        // envelope success=false 无 error：回退 content "Error: " 前缀
+        let failed_fallback = rec(&json!({
+            "role": "tool",
+            "content": "Error: content error",
+            "tool_result": {"success": false}
+        }));
+        assert_eq!(failed_fallback.status.as_deref(), Some("failed"));
+        assert_eq!(failed_fallback.error.as_deref(), Some("content error"));
+
+        // envelope success=true 压过 content 前缀（结构化真相优先）
+        let ok = rec(&json!({
+            "role": "tool",
+            "content": "Error: 文字像失败",
+            "tool_result": {"success": true}
+        }));
+        assert_eq!(ok.status.as_deref(), Some("completed"));
+        assert!(ok.error.is_none(), "envelope 成功不得残留 error");
+
+        // 无 envelope：content "Error: " 前缀判失败（旧语义兜底）
+        let legacy_fail = rec(&json!({"role": "tool", "content": "Error: legacy"}));
+        assert_eq!(legacy_fail.status.as_deref(), Some("failed"));
+        assert_eq!(legacy_fail.error.as_deref(), Some("legacy"));
+        let legacy_ok = rec(&json!({"role": "tool", "content": "normal output"}));
+        assert_eq!(legacy_ok.status.as_deref(), Some("completed"));
+        assert!(legacy_ok.error.is_none());
+
+        // 非 tool 角色：状态与 error 均不出口
+        let user = rec(&json!({"role": "user", "content": "Error: 这只是正文"}));
+        assert!(
+            user.status.is_none() && user.error.is_none(),
+            "非 tool 无状态"
+        );
+
+        // tool_calls / metadata / reasoning_content 原样提取（读时重建）
+        let rich = rec(&json!({
+            "role": "assistant",
+            "content": "text",
+            "tool_calls": [{"id": "c1"}],
+            "reasoning_content": "thinking",
+            "metadata": {"client_message_id": "cm-1"}
+        }));
+        assert!(rich.tool_calls_json.unwrap().contains("\"c1\""));
+        assert_eq!(rich.reasoning_content.as_deref(), Some("thinking"));
+        assert_eq!(rich.metadata.unwrap()["client_message_id"], "cm-1");
+    }
+
+    /// pending 输入 source / 可选 JSON 列的解析契约：合法值原样还原；
+    /// 腐败值分别回退 user 标注 / 丢弃该列（不 panic）。
+    #[test]
+    fn pending_source_and_optional_json_fail_soft() {
+        assert_eq!(
+            SqliteStore::parse_pending_source("\"http\"", "p1"),
+            PendingInputSource::Http
+        );
+        assert_eq!(
+            SqliteStore::parse_pending_source("{corrupt", "p1"),
+            PendingInputSource::User,
+            "腐败 source 回退 user 标注（留痕）"
+        );
+
+        let ok =
+            SqliteStore::parse_pending_optional_json(Some("{\"k\":1}"), "p1", "execution_context");
+        assert_eq!(ok.unwrap()["k"], 1);
+        assert!(
+            SqliteStore::parse_pending_optional_json(None, "p1", "state_overlay").is_none(),
+            "NULL 列按缺失"
+        );
+        assert!(
+            SqliteStore::parse_pending_optional_json(Some("{corrupt"), "p1", "state_overlay")
+                .is_none(),
+            "腐败 JSON 列丢弃（留痕）"
+        );
+    }
+
+    // ── 旧库补列（migrate_add_*）：幂等 + 只在缺列时 ALTER ──
+
+    /// 旧库（无新列）补列后列存在、默认值生效；再跑一次幂等（不重复 ALTER 报错），
+    /// 且不覆盖已有数据。
+    #[test]
+    fn migrate_add_columns_is_idempotent_and_preserves_data() {
+        // ① runs 缺 pipeline_id：补列后默认 NULL 可写可读
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE runs (run_id TEXT PRIMARY KEY, config_hash TEXT NOT NULL);             INSERT INTO runs VALUES ('r1', 'h1');",
+        )
+        .unwrap();
+        migrate_add_run_pipeline_id(&conn).unwrap();
+        migrate_add_run_pipeline_id(&conn).unwrap(); // 二次幂等
+        conn.execute("UPDATE runs SET pipeline_id = 'p1' WHERE run_id = 'r1'", [])
+            .unwrap();
+        let pid: String = conn
+            .query_row(
+                "SELECT pipeline_id FROM runs WHERE run_id = 'r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pid, "p1", "补列后归属可写可读");
+        let hash: String = conn
+            .query_row(
+                "SELECT config_hash FROM runs WHERE run_id = 'r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hash, "h1", "补列不损失既有列数据");
+
+        // ② users 缺 must_change_password：补列默认 0（存量用户不被迫改口令）
+        let conn2 = Connection::open_in_memory().unwrap();
+        conn2
+            .execute_batch(
+                "CREATE TABLE users (user_id TEXT PRIMARY KEY);                 INSERT INTO users VALUES ('u1');",
+            )
+            .unwrap();
+        migrate_add_users_must_change_password(&conn2).unwrap();
+        migrate_add_users_must_change_password(&conn2).unwrap();
+        let must_change: i64 = conn2
+            .query_row(
+                "SELECT must_change_password FROM users WHERE user_id = 'u1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(must_change, 0, "存量用户默认不改口令");
+
+        // ③ traces/branches 缺 tenant_id：补列后默认 'default'（存量数据归默认租户）
+        let conn3 = Connection::open_in_memory().unwrap();
+        conn3
+            .execute_batch(
+                "CREATE TABLE traces (trace_id TEXT PRIMARY KEY);                 CREATE TABLE branches (branch_id TEXT PRIMARY KEY);                 INSERT INTO traces VALUES ('t1');                 INSERT INTO branches VALUES ('main');",
+            )
+            .unwrap();
+        migrate_add_tenant_id(&conn3).unwrap();
+        migrate_add_tenant_id(&conn3).unwrap();
+        let trace_tenant: String = conn3
+            .query_row(
+                "SELECT tenant_id FROM traces WHERE trace_id = 't1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let branch_tenant: String = conn3
+            .query_row(
+                "SELECT tenant_id FROM branches WHERE branch_id = 'main'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(trace_tenant, "default", "存量 trace 归默认租户");
+        assert_eq!(branch_tenant, "default", "存量 branch 归默认租户");
+    }
+
+    /// 列已存在的库：补列函数不得 ALTER（重复 ALTER 会报 duplicate column）。
+    #[test]
+    fn migrate_add_columns_skips_when_already_present() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(DDL).unwrap(); // DDL 已含全部新列
+                                          // 任一函数若误 ALTER 都会因 duplicate column 报错
+        migrate_add_run_pipeline_id(&conn).unwrap();
+        migrate_add_users_must_change_password(&conn).unwrap();
+        migrate_add_tenant_id(&conn).unwrap();
+    }
+
+    // ── with_conn：结果与错误的薄透传契约 ──
+
+    /// with_conn 把闭包结果原样返回（Ok/Err 两路），错误类型不被改写。
+    #[test]
+    fn with_conn_passes_through_results_and_errors() {
+        let store = SqliteStore::open_memory().unwrap();
+        let ok: i64 = store
+            .with_conn(|c| {
+                c.query_row("SELECT 42", [], |r| r.get(0))
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        assert_eq!(ok, 42);
+
+        let err = store
+            .with_conn::<i64, String>(|_| Err("injected".to_string()))
+            .unwrap_err();
+        assert_eq!(err, "injected", "闭包错误原样透传");
+    }
+
+    // ── save_checkpoint / load_latest_checkpoint 往返与损坏传播 ──
+
+    /// 同一 step 重放幂等（INSERT OR REPLACE）；最新 step 胜出；他租户查不到。
+    #[tokio::test]
+    async fn checkpoint_replace_idempotent_and_latest_wins() {
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .save_checkpoint("p_ck", "t1", 1, &json!({"v": "first"}))
+            .unwrap();
+        store
+            .save_checkpoint("p_ck", "t1", 1, &json!({"v": "replayed"}))
+            .unwrap();
+        store
+            .save_checkpoint("p_ck", "t1", 2, &json!({"v": "second"}))
+            .unwrap();
+
+        let (step, state) = store
+            .load_latest_checkpoint("p_ck", "t1")
+            .unwrap()
+            .expect("有档应出口");
+        assert_eq!(step, 2, "取最大 step");
+        assert_eq!(state["v"], "second");
+        assert_eq!(state["ckpt_max_seq"], json!(-1), "无 messages 时水位 -1");
+
+        assert!(
+            store
+                .load_latest_checkpoint("p_ck", "other_tenant")
+                .unwrap()
+                .is_none(),
+            "租户隔离：他租户查不到"
+        );
+    }
+
+    /// checkpoint 行损坏（非 JSON）：显式 Serialization 错误，不静默当无档
+    /// （静默会让冷恢复丢标量基线且无痕迹）。
+    #[tokio::test]
+    async fn checkpoint_corrupt_row_surfaces_serialization_error() {
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .conn
+            .lock()
+            .execute(
+                "INSERT INTO pipeline_checkpoints                  (checkpoint_id, pipeline_id, step_no, state_json, tenant_id, created_at)                  VALUES ('cp_bad', 'p_bad', 0, '{not-json', 't1', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let err = store
+            .load_latest_checkpoint("p_bad", "t1")
+            .expect_err("损坏 checkpoint 应报错而非静默 None");
+        assert!(
+            matches!(err, StorageError::Serialization(_)),
+            "应为 Serialization 变体，实际: {err:?}"
+        );
+    }
+
+    /// list_state_pipeline_ids：pipeline_state ∪ checkpoints 两源合并去重，
+    /// thread_id 优先取映射表（缺失回退 pipeline_id），按键升序。
+    #[tokio::test]
+    async fn list_state_pipeline_ids_merges_two_sources_and_sorts() {
+        let store = SqliteStore::open_memory().unwrap();
+        // 源① state 表；源② checkpoint；交集管道只应出现一次
+        store
+            .upsert_state_field("p_state_only", "t1", "k", &json!(1))
+            .unwrap();
+        store
+            .save_checkpoint("p_ck_only", "t1", 0, &json!({"v": 1}))
+            .unwrap();
+        store
+            .upsert_state_field("p_both", "t1", "k", &json!(1))
+            .unwrap();
+        store
+            .save_checkpoint("p_both", "t1", 0, &json!({"v": 1}))
+            .unwrap();
+        // 映射表登记 p_state_only；p_ck_only 无映射 → thread 回退 pipeline_id
+        store
+            .link_pipeline_session("p_state_only", "thread-mapped", "t1")
+            .await
+            .unwrap();
+
+        let rows = store.list_state_pipeline_ids("t1").unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("p_both".to_string(), "p_both".to_string()),
+                ("p_ck_only".to_string(), "p_ck_only".to_string()),
+                ("p_state_only".to_string(), "thread-mapped".to_string()),
+            ],
+            "两源合并去重 + 映射优先 + 字典序"
+        );
+        assert!(store.list_state_pipeline_ids("other").unwrap().is_empty());
     }
 }

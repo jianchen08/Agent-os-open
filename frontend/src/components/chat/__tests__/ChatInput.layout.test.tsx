@@ -159,6 +159,16 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     expect(leftGroup.className).toContain('flex-1')
   })
 
+  it('窄栏防叠压：左组带 flex-wrap，放不下的按钮换行排布而非叠压/溢出', () => {
+    renderInput()
+
+    const sendButton = screen.getByTestId('chat-send-button')
+    const leftGroup = sendButton.closest('.justify-between')
+      ?.firstElementChild as HTMLElement
+    // 窄栏（右面板展开压缩中栏）时左组内按钮换行，不与发送按钮/彼此叠压
+    expect(leftGroup.className).toContain('flex-wrap')
+  })
+
   it('上下文用量指示器允许收缩（min-w-0），不占死宽度', () => {
     renderInput()
     const indicator = screen.getByTestId('context-usage-indicator')

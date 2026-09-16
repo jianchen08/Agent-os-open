@@ -5,8 +5,9 @@
  * 底层使用 ReviewDiff 的 computeDiff 算法。
  */
 
+import { buildUnifiedLines, computeDiff } from '@/utils/diffLcs'
 import { useMemo } from 'react'
-import type { DiffLine, DiffLineType } from '@/types/review'
+import type { DiffLineType } from '@/types/review'
 
 export interface TextDiffViewProps {
   /** 旧版文本内容 */
@@ -31,68 +32,6 @@ const LINE_PREFIX: Record<DiffLineType, string> = {
   removed: '-',
 }
 
-/**
- * 简易逐行 diff —— 最长公共子序列（LCS）算法
- */
-function computeDiff(oldText: string, newText: string): { oldLines: DiffLine[]; newLines: DiffLine[] } {
-  const oldArr = oldText.split('\n')
-  const newArr = newText.split('\n')
-
-  const m = oldArr.length
-  const n = newArr.length
-  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0))
-
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      if (oldArr[i - 1] === newArr[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1])
-      }
-    }
-  }
-
-  const oldLines: DiffLine[] = []
-  const newLines: DiffLine[] = []
-  let i = m
-  let j = n
-
-  const actions: Array<{ type: DiffLineType; oldIdx?: number; newIdx?: number }> = []
-
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldArr[i - 1] === newArr[j - 1]) {
-      actions.unshift({ type: 'unchanged', oldIdx: i - 1, newIdx: j - 1 })
-      i--
-      j--
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      actions.unshift({ type: 'added', newIdx: j - 1 })
-      j--
-    } else if (i > 0) {
-      actions.unshift({ type: 'removed', oldIdx: i - 1 })
-      i--
-    }
-  }
-
-  let oldLineNum = 0
-  let newLineNum = 0
-
-  for (const action of actions) {
-    if (action.type === 'unchanged') {
-      oldLineNum++
-      newLineNum++
-      oldLines.push({ type: 'unchanged', content: oldArr[action.oldIdx!], lineNumber: oldLineNum })
-      newLines.push({ type: 'unchanged', content: newArr[action.newIdx!], lineNumber: newLineNum })
-    } else if (action.type === 'removed') {
-      oldLineNum++
-      oldLines.push({ type: 'removed', content: oldArr[action.oldIdx!], lineNumber: oldLineNum })
-    } else if (action.type === 'added') {
-      newLineNum++
-      newLines.push({ type: 'added', content: newArr[action.newIdx!], lineNumber: newLineNum })
-    }
-  }
-
-  return { oldLines, newLines }
-}
 
 /**
  * TextDiffView
@@ -118,48 +57,7 @@ export function TextDiffView({
   }, [oldLines, newLines])
 
   /** 合并两个列表为统一视图 */
-  const unifiedLines = useMemo(() => {
-    const result: Array<{
-      type: DiffLineType
-      oldNum?: number
-      newNum?: number
-      content: string
-    }> = []
-
-    let oi = 0
-    let ni = 0
-
-    while (oi < oldLines.length || ni < newLines.length) {
-      while (oi < oldLines.length && oldLines[oi].type === 'removed') {
-        result.push({
-          type: 'removed',
-          oldNum: oldLines[oi].lineNumber,
-          content: oldLines[oi].content,
-        })
-        oi++
-      }
-      while (ni < newLines.length && newLines[ni].type === 'added') {
-        result.push({
-          type: 'added',
-          newNum: newLines[ni].lineNumber,
-          content: newLines[ni].content,
-        })
-        ni++
-      }
-      if (oi < oldLines.length && oldLines[oi].type === 'unchanged') {
-        result.push({
-          type: 'unchanged',
-          oldNum: oldLines[oi].lineNumber,
-          newNum: newLines[ni]?.lineNumber,
-          content: oldLines[oi].content,
-        })
-        oi++
-        ni++
-      }
-    }
-
-    return result
-  }, [oldLines, newLines])
+  const unifiedLines = useMemo(() => buildUnifiedLines(oldLines, newLines), [oldLines, newLines])
 
   return (
     <div className="text-diff-view flex h-full flex-col" data-testid="text-diff-view">

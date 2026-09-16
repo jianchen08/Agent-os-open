@@ -33,6 +33,7 @@ import ActivityCard from './ActivityCard'
 import useMessageRender from './hooks/useMessageRender'
 import { MessageActions } from './MessageActions'
 import MessageContentRenderer from './MessageContentRenderer'
+import { MESSAGE_STYLE_METADATA_KEY, PluginMessageCard, resolveMessageStyle } from './PluginMessageCard'
 import { parseReferenceMessage, ReferenceChip } from './ReferenceChip'
 import type { MessageItemProps } from './types'
 import type { MessageToolCall } from '@/types/models'
@@ -273,6 +274,37 @@ export const MessageItem = memo(function MessageItem({
         </div>
       </div>
     )
+  }
+
+  // 消息卡路由（模式体系 §5.0 通用能力）：非流式 assistant 消息携带
+  // metadata.message_style 且 registry 有声明 → 通用 webview 消息卡容器；
+  // 无声明（禁用/未声明）同源消失，回退下方默认渲染。流式期间不路由
+  // （正文仍在到达，卡片属终态渲染，完成后接管）。
+  if (isAssistant && !isMessageStreaming) {
+    const styleId = message.metadata?.[MESSAGE_STYLE_METADATA_KEY]
+    if (typeof styleId === 'string' && resolveMessageStyle(styleId)) {
+      return (
+        <div
+          className={cn(
+            'group hover:bg-muted/30 flex gap-3 px-4 py-2 transition-colors',
+            'max-w-[calc(100%-44px)]',
+            className,
+          )}
+          data-testid="message-item"
+          data-role="assistant"
+          data-message-style={styleId}
+        >
+          <Avatar className="h-8 w-8 flex-shrink-0 rounded-xl bg-secondary text-secondary-foreground shadow-sm">
+            <AvatarFallback className="rounded-xl text-sm font-medium">
+              <Bot className="h-icon-md w-icon-md" />
+            </AvatarFallback>
+          </Avatar>
+          <div className="min-w-0 flex-1">
+            <PluginMessageCard instanceKey={message.id} styleId={styleId} />
+          </div>
+        </div>
+      )
+    }
   }
 
   return (

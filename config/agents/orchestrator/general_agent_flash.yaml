@@ -11,7 +11,7 @@ description: '通用任务编排Agent（DeepSeek Flash版），负责编排和�
 agent_type: orchestrator
 category: task
 level: L2
-model_name: deepseek-v4-flash
+model_name: minimax-m3
 system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}

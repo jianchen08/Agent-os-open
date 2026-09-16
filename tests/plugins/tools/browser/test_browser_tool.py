@@ -61,7 +61,8 @@ class TestManifest:
 
     def test_bridge_config_file_referenced(self, manifest):
         paths = [c["path"] for c in manifest.get("config_files", [])]
-        assert "config/tools/browser/browser.yaml" in paths
+        # B 类配置归位后落点 config/plugins/<plugin_id>/（manifest 已同步迁移）
+        assert "config/plugins/browser/browser.yaml" in paths
 
 
 # ── server.py 导入与工具面校验 ───────────────────────────────

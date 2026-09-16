@@ -55,6 +55,9 @@ export const AttachmentImage: FC<AttachmentImageProps> = ({
     <Image
       src={src}
       alt={alt ?? 'img'}
+      // 视口外不加载、解码不占主线程：长会话大图消息是 renderer 位图内存大户
+      loading="lazy"
+      decoding="async"
       className={className}
       width={width}
       height={height}

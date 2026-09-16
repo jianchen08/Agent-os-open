@@ -15,6 +15,11 @@
 //! 排空函数内部复用（只排空不退出）。产物文件变化检测（同 id 换 .dll）属 invoker
 //! 面，不在此处。
 //!
+//! 模式包资源增量重扫（设计稿 2026-09-15 §2.3 P2 遗留接线）：每轮 sync 尾部把
+//! 已注册且启用的模式包的 mode_agents/mode_pipelines 键表刷新为盘上现状——热增删
+//! agents/pipelines 文件、包内重注册/respawn 后键表同源增删，无需重启内核；重扫
+//! 失败保留旧键表只告警（fail-closed，不崩 watcher）。
+//!
 //! 设计：把"发现→diff→注册"的核心逻辑下沉为纯函数 [`apply_discovered_plugins`]，
 //! 时序/IO（notify、轮询、mpsc）只负责触发，便于无 flaky 单测。
 //!
@@ -492,10 +497,11 @@ pub async fn g2_verify_and_sanitize(
                     smoke_failed: false,
                 };
             }
-            // 合宿成员（host_group="light"）的工具经宿主注册为 `{plugin_id}.{tool}`
+            // 合宿成员（声明 host_group，任意组名）的工具经宿主注册为 `{plugin_id}.{tool}`
             // （§4.2 命名空间），G2 对照声明裸名前必须归一前缀；否则成员 100%
             // 被误判 missing 漂移而剔光（08-31 实测 task_manage/memory/human 全灭）。
-            let actual = if manifest.host_group.as_deref() == Some("light") {
+            // 判定与 invoker 装箱准入同源（agentos_invoker::is_cohost_member）。
+            let actual = if agentos_invoker::is_cohost_member(&manifest) {
                 normalize_member_actual_tools(actual, &manifest.id)
             } else {
                 actual
@@ -1111,28 +1117,41 @@ async fn sync_reverify_apply(
     manifests_store: Option<&ManifestsStore>,
     report: &mut SyncReport,
 ) {
-    // B15-R1：代码变化 → 驱逐宿主（force_unload 语义：kill 进程 + 清缓存/
-    // 指纹/last_used，不回收装箱分配——respawn 按分配表重建成员集）。下个
-    // 调用者按磁盘现码重建，零调用期间也保证"下一个调用者拿到新代码"；
-    // g2 插件的进程侧新代码不再依赖复验通道隐式触发调用时拉取检测。
+    // B15-R1：代码变化 → 让宿主重载该成员。两段式（成员粒度优先）：
+    // ① 合宿组员 → invoker.reload_member 进程内单成员重载（带应答），成功则
+    //    其余成员进程不动——驱逐爆炸半径收缩到单成员（BUG-3 504 的根治面）；
+    // ② 失败（独占/不支持/宿主协议错误/超时）→ 回退 force_unload 整组驱逐
+    //    （kill 进程 + 清缓存/指纹/last_used，不回收装箱分配——respawn 按
+    //    分配表重建成员集）。两段的语义终点一致：下个调用者按磁盘现码重建，
+    //    零调用期间也保证"下一个调用者拿到新代码"。
     // best-effort：驱逐失败只 warn——调用时拉取检测仍在兜底，下次调用
     // is_host_stale 会按指纹差 respawn。
     if code_changed {
         let old_fp = known_code_hashes.get(&m.id).copied();
-        match invoker.force_unload(&m.id).await {
-            Ok(()) => info!(
+        if invoker.reload_member(&m.id).await.is_ok() {
+            info!(
                 target: "plugin_watcher",
                 plugin = %m.id,
                 old_fp = ?old_fp,
                 new_fp = cur_code_fp,
-                "代码变更已驱逐宿主（无需调用触发），下次调用按新码重建"
-            ),
-            Err(e) => warn!(
-                target: "plugin_watcher",
-                plugin = %m.id,
-                error = %e.message,
-                "宿主驱逐失败（调用时拉取检测兜底）"
-            ),
+                "代码变更已按成员粒度热重载（宿主进程内重载单插件，其余成员不受影响）"
+            );
+        } else {
+            match invoker.force_unload(&m.id).await {
+                Ok(()) => info!(
+                    target: "plugin_watcher",
+                    plugin = %m.id,
+                    old_fp = ?old_fp,
+                    new_fp = cur_code_fp,
+                    "代码变更已驱逐宿主（reload_member 不可用，回退整组驱逐；下次调用按新码重建）"
+                ),
+                Err(e) => warn!(
+                    target: "plugin_watcher",
+                    plugin = %m.id,
+                    error = %e.message,
+                    "宿主驱逐失败（调用时拉取检测兜底）"
+                ),
+            }
         }
     }
     let (tools, http_routes) = if g2_applicable || dynamic_import {
@@ -1240,6 +1259,67 @@ async fn sync_merge_store_tail(
             }
         }
     }
+}
+
+/// 模式包资源增量重扫（设计稿 §2.3 P2 遗留接线）：每轮 sync 尾部把当前可注册
+/// （已注册 + 启用）模式包的 mode_agents/mode_pipelines 键表刷新为盘上现状——
+/// 热增删 agents/pipelines 文件、包内重注册/respawn 后键表同源增删，无需重启。
+/// 删除/禁用方向的同源消失由既有 M1 收回承接（scopes.revoke / clear_plugin 触发
+/// guard revoke），此处补齐"增/改"方向（含 reenable 重注册路径 revoke 掉的键）。
+///
+/// - 扫描失败（yaml 非法等，fail-closed 与 boot 同语义）→ warn + 保留全部旧键表，
+///   不崩 watcher，下轮 sync 重试；单包注册失败 → 该包回滚保留旧表 + warn。
+/// - 只动模式资源维度，不触及插件生命周期（工具/路由/宿主面零改动）。
+/// - 模式根与 boot 扫描同源：`<plugins_dir>/modes` + 用户根（user_space 单点解析）。
+///
+/// 返回发生键表变化的包数（观测日志用）。
+fn resync_mode_package_resources(
+    registry: &Arc<CapabilityRegistryImpl>,
+    scopes: &PluginScopeRegistry,
+    plugins_dir: &Path,
+    user_modes_dir: Option<&Path>,
+    registrable_ids: &HashSet<String>,
+) -> usize {
+    let factory_modes = plugins_dir.join("modes");
+    let packages = match agentos_plugin_loader::scan_mode_package_resources(
+        &factory_modes,
+        user_modes_dir,
+        registrable_ids,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                target: "plugin_watcher",
+                error = %e,
+                "模式包资源重扫失败：保留旧键表（fail-closed，下轮 sync 重试）"
+            );
+            return 0;
+        }
+    };
+    let mut changed = 0usize;
+    for package in packages {
+        let plugin_id = package.plugin_id.clone();
+        match agentos_plugin_loader::mode_registry::refresh_mode_package_guarded(
+            registry, scopes, package,
+        ) {
+            Ok(true) => {
+                changed += 1;
+                info!(
+                    target: "plugin_watcher",
+                    plugin = %plugin_id,
+                    "模式包资源键表已按盘上现状刷新（热发现重扫）"
+                );
+            }
+            Ok(false) => {}
+            Err(e) => warn!(
+                target: "plugin_watcher",
+                plugin = %plugin_id,
+                error = %e,
+                "模式包资源重扫注册失败：该包回滚保留旧键表（下轮 sync 重试）"
+            ),
+        }
+    }
+    changed
 }
 
 /// 运行时插件自动发现器（notify watch + 轮询兜底，二选一或并存均可）。
@@ -1538,6 +1618,44 @@ impl PluginWatcher {
                     );
                     trigger_cdylib_restart_if_enabled(change, &restart_hook, enabled);
                 }
+                // 模式包资源增量重扫（每轮 sync 尾部）：registrable = 已注册(known)
+                // ∩ 启用（enablement 现读 + manifest 声明），与 boot registrable_ids
+                // 同语义；disabled 包不注册，禁用即同源消失（clear_plugin/租约收回）。
+                let manifest_enabled: HashMap<String, Option<bool>> = match manifests_store.as_ref()
+                {
+                    Some(store) => store
+                        .read()
+                        .await
+                        .iter()
+                        .map(|m| (m.id.clone(), m.enabled))
+                        .collect(),
+                    None => HashMap::new(),
+                };
+                let registrable: HashSet<String> = known
+                    .iter()
+                    .filter(|id| {
+                        effective_enablement.as_ref().is_none_or(|e| {
+                            e.is_enabled(id, manifest_enabled.get(*id).copied().flatten())
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                let user_modes =
+                    agentos_core::user_space::user_plugins_dir().map(|p| p.join("modes"));
+                let mode_resynced = resync_mode_package_resources(
+                    &registry,
+                    &scopes,
+                    &plugins_dir,
+                    user_modes.as_deref(),
+                    &registrable,
+                );
+                if mode_resynced > 0 {
+                    info!(
+                        target: "plugin_watcher",
+                        packages = mode_resynced,
+                        "模式包资源增量重扫完成（键表已同步盘上现状）"
+                    );
+                }
             }
         });
 
@@ -1648,5 +1766,7 @@ pub struct WatcherHandle {
     pub sync_count: Arc<AtomicU32>,
 }
 
+#[cfg(test)]
+mod reload_member_tests;
 #[cfg(test)]
 mod tests;

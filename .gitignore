@@ -244,3 +244,9 @@ docs/agent_prompts_viewer.html
 
 # GUI 黑盒测试截图产物（web-gui-tester/computer-use 会话产物，不入库）
 gui-test-screenshots/
+
+# 网页 LLM provider 探针（.webchat_probe）：专用浏览器 profile 内含登录 cookie
+# （等同凭据），禁止入库；截图/产物同排除。
+.webchat_probe/edge-profile/
+.webchat_probe/*.png
+.webchat_probe/*.json

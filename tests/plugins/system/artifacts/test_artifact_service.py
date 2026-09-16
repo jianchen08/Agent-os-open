@@ -379,3 +379,84 @@ class TestModelsRoundTrip:
         ann = Annotation(content="n", resolved_at="2026-01-01T00:00:00Z")
         d = ann.to_dict()
         assert d["resolved_at"] == "2026-01-01T00:00:00Z"
+
+
+class TestAnnotationFromDictNormalization:
+    """Annotation.from_dict 的枚举归一与全字段还原（models.py:175-181）。
+
+    契约：target_type / status 以字符串落盘（to_dict 给 .value），回读必须
+    归一为枚举实例——否则下游 `is AnnotationStatus.RESOLVED` 式判定全假。
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["whole_artifact", "text_selection", "image_region", "video_timeline"],
+    )
+    def test_target_type_string_normalized(self, raw: str) -> None:
+        from artifacts.models import Annotation, AnnotationTarget
+
+        assert Annotation.from_dict({"target_type": raw}).target_type is AnnotationTarget(raw)
+
+    @pytest.mark.parametrize("raw", ["active", "resolved", "dismissed"])
+    def test_status_string_normalized(self, raw: str) -> None:
+        from artifacts.models import Annotation, AnnotationStatus
+
+        assert Annotation.from_dict({"status": raw}).status is AnnotationStatus(raw)
+
+    def test_enum_instances_not_rewrapped(self) -> None:
+        """已是枚举实例时原样透传（isinstance 判假分支）。"""
+        from artifacts.models import Annotation, AnnotationStatus, AnnotationTarget
+
+        ann = Annotation.from_dict({
+            "target_type": AnnotationTarget.VIDEO_TIMELINE,
+            "status": AnnotationStatus.DISMISSED,
+        })
+        assert ann.target_type is AnnotationTarget.VIDEO_TIMELINE
+        assert ann.status is AnnotationStatus.DISMISSED
+
+    def test_full_roundtrip_preserves_all_fields(self) -> None:
+        """全字段往返等价：id/artifact_id/target_data/content/作者/resolved_at。"""
+        from artifacts.models import Annotation, AnnotationStatus, AnnotationTarget
+
+        original = Annotation(
+            id="an-1",
+            artifact_id="art-9",
+            target_type=AnnotationTarget.IMAGE_REGION,
+            target_data={"x": 1, "y": 2, "w": 10, "h": 20},
+            content="这里需要调整",
+            author_type="agent",
+            author_id="agent-7",
+            status=AnnotationStatus.RESOLVED,
+            created_at="2026-03-03T00:00:00+00:00",
+            resolved_at="2026-03-03T01:00:00+00:00",
+        )
+        restored = Annotation.from_dict(original.to_dict())
+
+        assert restored.id == "an-1"
+        assert restored.artifact_id == "art-9"
+        assert restored.target_type is AnnotationTarget.IMAGE_REGION
+        assert restored.target_data == {"x": 1, "y": 2, "w": 10, "h": 20}
+        assert restored.content == "这里需要调整"
+        assert restored.author_type == "agent"
+        assert restored.author_id == "agent-7"
+        assert restored.status is AnnotationStatus.RESOLVED
+        assert restored.resolved_at == "2026-03-03T01:00:00+00:00"
+
+    def test_missing_keys_get_defaults(self) -> None:
+        """空字典：枚举走缺省、id 自动生成、resolved_at 缺省不下发。"""
+        from artifacts.models import Annotation, AnnotationStatus, AnnotationTarget
+
+        ann = Annotation.from_dict({})
+        assert len(ann.id) == 12
+        assert ann.target_type is AnnotationTarget.WHOLE_ARTIFACT
+        assert ann.status is AnnotationStatus.ACTIVE
+        assert ann.resolved_at is None
+        assert "resolved_at" not in ann.to_dict()
+
+    @pytest.mark.parametrize(("key", "bad"), [("target_type", "telepathy"), ("status", "maybe")])
+    def test_unknown_enum_value_fails_closed(self, key: str, bad: str) -> None:
+        """非法枚举值上抛 ValueError（不静默落默认）。"""
+        from artifacts.models import Annotation
+
+        with pytest.raises(ValueError):
+            Annotation.from_dict({key: bad})

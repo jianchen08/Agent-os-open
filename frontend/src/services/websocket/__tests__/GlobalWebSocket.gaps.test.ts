@@ -12,6 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { finishWsServiceSetup, MockWebSocket, instances, type MockWebSocketInstance } from './helpers/mockWebSocket'
 
 // ── Mock 外部依赖（hoisted 供 vi.mock 工厂与用例共同操控） ──
 
@@ -52,63 +53,12 @@ vi.mock('@/utils/logger', () => ({
   },
 }))
 
-// ── Mock WebSocket ──
-
-type MockEventListener = ((event: any) => void) | null
-
-interface MockWebSocketInstance {
-  onopen: MockEventListener
-  onclose: MockEventListener
-  onmessage: MockEventListener
-  onerror: MockEventListener
-  send: ReturnType<typeof vi.fn>
-  close: ReturnType<typeof vi.fn>
-  bufferedAmount: number
-  readyState: number
-  url: string
-}
-
-const instances: MockWebSocketInstance[] = []
-
-class MockWebSocket {
-  static OPEN = 1
-  static CLOSED = 3
-  static CONNECTING = 0
-
-  onopen: MockEventListener = null
-  onclose: MockEventListener = null
-  onmessage: MockEventListener = null
-  onerror: MockEventListener = null
-  send = vi.fn()
-  bufferedAmount = 0
-  readyState = MockWebSocket.CONNECTING
-
-  constructor(public url: string) {
-    instances.push(this as unknown as MockWebSocketInstance)
-  }
-
-  close = vi.fn((code?: number, reason?: string) => {
-    this.readyState = MockWebSocket.CLOSED
-    if (this.onclose) {
-      this.onclose({ code: code ?? 1000, reason: reason ?? '' })
-    }
-  })
-}
 
 // ── 辅助 ──
 
 async function createService() {
   vi.resetModules()
-  vi.stubGlobal('WebSocket', MockWebSocket)
-  instances.length = 0
-  const mod = await import('../GlobalWebSocket')
-  const service = mod.globalWS
-  return {
-    service,
-    connect: (token: string) => service.connect(token),
-    disconnect: () => service.disconnect(),
-    getLatestWs: () => instances[instances.length - 1],
-  }
+  return finishWsServiceSetup()
 }
 
 function simulateOpen(ws: MockWebSocketInstance): void {

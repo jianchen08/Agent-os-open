@@ -34,8 +34,9 @@ export function parseDataSourceRef(ref: string): DataSourceRef {
 export function resolveDataSource(ref: DataSourceRef): ResolvedDataSource {
   let endpoint: string
 
- // workspace:// 协议特殊处理
-  // 该端点不存在，返回 404。
+  // workspace:// 协议特殊处理：workspace_service 插件文件树端点
+  // （GET /ext/workspace_service/workspaces/{id}/file-tree，200 信封内可携带
+  // workspace_status 业务态；404 = 归属闸拒绝，信封 error 有可读原因）
   if (ref.moduleId === 'workspace') {
     endpoint = WORKSPACE_SERVICE_ENDPOINTS.workspaces_file_tree.replace('{container_task_id}', ref.collection)
   } else {

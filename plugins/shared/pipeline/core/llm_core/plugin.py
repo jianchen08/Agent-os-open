@@ -31,6 +31,7 @@ if _SHARED_ROOT not in sys.path:
 from adapter import LLMResponse  # noqa: E402
 from pipeline.plugin import ICorePlugin, PluginContext  # noqa: E402
 from pipeline.types import StateKeys  # noqa: E402
+from track_stats import TrackStats  # noqa: E402
 from uploads_path import resolve_uploads_url  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -227,6 +228,11 @@ class LLMCore(ICorePlugin):
         # 时跨轮重试，超过上限标记耗尽交 output 步骤裁决任务失败。
         # 每次 execute 由 _apply_runtime_config 按 plugin_configs 覆盖。
         self._max_empty_retries: int = int(self._config.get("max_empty_retries", 2))
+
+        # 每轮追踪统计（原 pipeline/output/track 插件职责，2026-09-15 并入：
+        # 本插件产出的 llm_usage 即其输入，同步骤累加免跨插件边界重读 state）。
+        # 实例级：_start_time 是耗时回退锚点，sidecar 实例跨管道复用。
+        self._track = TrackStats(self._config.get("track"))
 
     @property
     def name(self) -> str:
@@ -472,6 +478,17 @@ class LLMCore(ICorePlugin):
             if messages_update is not None:
                 result["messages"] = messages_update
             self._apply_empty_retry_policy(ctx, result, result_text, tool_calls)
+            # 每轮 token / 耗时统计（原 pipeline/output/track 插件，2026-09-15
+            # 并入——本插件产出的 llm_usage 就是该统计的输入，同一步骤内累加
+            # 免去跨插件边界重读 state；见 ADR 2026-09-15-track-merged-into-llm-core）。
+            # 本轮用量显式传入：core 阶段 state["llm_usage"] 还是上一轮的值。
+            # 统计异常按观测面降级隔离：原 track 是独立 post 插件，出错时引擎
+            # warn+继续（ADR 2026-08-18）；并入后若放任其上抛会被下方 except
+            # 当作「LLM 调用失败」丢弃本轮成功的 assistant 消息。
+            try:
+                result.update(await self._track.run(ctx, llm_usage))
+            except Exception:
+                logger.exception("[%s] 追踪统计失败（观测面降级，本轮结果照常返回）", self.name)
             return result
 
         except Exception as exc:
@@ -1086,6 +1103,15 @@ class LLMCore(ICorePlugin):
             # tool_ids 注入 state.tool_schemas）。空面不携带该键——形参默认 None，
             # 也不触发 capability input_schema 对 tools 的 array 校验。
             kwargs["tools"] = tool_schemas
+        else:
+            # 空面出站观测（BUG-17）：工具面注入缺失（tool_schema 步骤断链/
+            # 漂移清零）时本轮请求无 tools，模型会凭历史降级为正文输出原生
+            # 工具标记且永不执行——负例必须留痕，否则主路径断裂不可见。
+            logger.warning(
+                "[%s] tool_schemas 空——本轮请求不带 tools"
+                "（工具面注入断链或 agent 显式声明零工具）",
+                self.name,
+            )
 
         # 调用前记录模型/API 信息
         model_str = self._model

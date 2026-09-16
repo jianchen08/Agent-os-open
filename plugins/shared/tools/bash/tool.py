@@ -659,28 +659,10 @@ class BashTool(WorkspaceAwareMixin):
         proc_info = self.process_manager.get_process_info(pid)
         if not proc_info:
             # 进程已被即时清理（completed 后 _on_output_task_done 触发）。
-            # 降级走磁盘日志——先校验 owner（磁盘日志头 # Owner:）。
-            try:
-                file_data = self.process_manager.read_log_by_pid(pid)
-            except ProcessLogReadError as e:
-                return create_failure_result(
-                    error=f"日志文件读取失败（IO 错误）：{e}",
-                    error_code="LOG_FILE_IO_ERROR",
-                )
-            if file_data is not None:
-                ok, err = self._check_owner(pid, caller_owner, file_data.get("owner"))
-                if not ok:
-                    return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
-                return create_success_result(
-                    data={
-                        "status": "completed",
-                        "pid": pid,
-                        "output": file_data["output"],
-                        "summary": file_data["summary"],
-                        "exit_code": file_data.get("exit_code") or 0,  # 磁盘日志可能无 exit_code
-                    },
-                    metadata={"action": "continue", "source": "file"},
-                )
+            # 降级走磁盘日志。
+            disk_result = self._continue_result_from_disk(pid, caller_owner)
+            if disk_result is not None:
+                return disk_result
             return create_failure_result(
                 error=(
                     f"进程 {pid} 不存在或已结束，且无对应日志文件（logs/bash/bash_{pid}.log）。"
@@ -756,8 +738,20 @@ class BashTool(WorkspaceAwareMixin):
 
         # 进程已完成（对齐 execute 完成路径，带 output）
         await self.process_manager.wait_output_settled(pid)
+        if proc_info is None:
+            # 等待循环跨过了退出清理时点：记录已被 _on_output_task_done 在
+            # 「置终态→清内存」同瞬间移除，轮询下一拍只能拿到 None。此刻
+            # exit_code 只存在于磁盘日志尾部，必须回读——禁止把真实退出码
+            # 兜成 0（continue 等待期恰逢进程退出时的固定竞态，非偶发）。
+            disk_result = self._continue_result_from_disk(pid, caller_owner)
+            if disk_result is not None:
+                return disk_result
+            return create_failure_result(
+                error=f"进程 {pid} 已结束且日志不可读，无法取回退出码。",
+                error_code="PROCESS_NOT_FOUND",
+            )
         summary = self.process_manager.get_summary(pid)
-        exit_code = proc_info.exit_code if proc_info else None
+        exit_code = proc_info.exit_code
         if exit_code is not None and exit_code != 0:
             output_fail = self.process_manager.get_output(pid)
             error_msg, fail_meta = BashTool._build_failure_message(
@@ -781,6 +775,40 @@ class BashTool(WorkspaceAwareMixin):
         return create_success_result(
             data=result_data,
             metadata={"action": "continue"},
+        )
+
+    def _continue_result_from_disk(self, pid: int, caller_owner: str | None) -> ToolResult | None:
+        """从磁盘日志恢复 continue 结果（内存记录已被清理时的唯一真值源）。
+
+        进程结束的「置终态→清内存」是原子的，continue 无论是入口即查不到
+        记录，还是等待循环跨过清理时点，exit_code/output 都只能从日志文件
+        回读（尾部 "# Process ended with exit code: N"）。owner 校验走磁盘
+        日志头 # Owner:。
+
+        Returns:
+            ToolResult；日志文件不存在返回 None（调用方负责 PROCESS_NOT_FOUND）。
+        """
+        try:
+            file_data = self.process_manager.read_log_by_pid(pid)
+        except ProcessLogReadError as e:
+            return create_failure_result(
+                error=f"日志文件读取失败（IO 错误）：{e}",
+                error_code="LOG_FILE_IO_ERROR",
+            )
+        if file_data is None:
+            return None
+        ok, err = self._check_owner(pid, caller_owner, file_data.get("owner"))
+        if not ok:
+            return create_failure_result(error=err, error_code="PROCESS_FORBIDDEN")
+        return create_success_result(
+            data={
+                "status": "completed",
+                "pid": pid,
+                "output": file_data["output"],
+                "summary": file_data["summary"],
+                "exit_code": file_data.get("exit_code") or 0,  # 磁盘日志可能无 exit_code
+            },
+            metadata={"action": "continue", "source": "file"},
         )
 
     async def _handle_terminate(self, inputs: dict[str, Any]) -> ToolResult:

@@ -564,28 +564,26 @@ class TestTokenUsageDegradation:
         monkeypatch.setattr(server, "_monitor", monitor)
         return monitor
 
-    def test_by_model_query_error_degrades_to_local_counts(
-        self, monkeypatch: pytest.MonkeyPatch, local_monitor: Any
-    ) -> None:
+    @pytest.fixture
+    def broken_db(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """读库入口故障注入：collect 内部 `import sqlite3` 是局部绑定，
+        patch 标准库模块本体（monkeypatch 用例级还原）。"""
         monkeypatch.setattr(
-            server.traces_usage,
-            "aggregate_usage_by_model",
-            lambda *_a, **_kw: (_ for _ in ()).throw(sqlite3.Error("bad aggregate")),
+            sqlite3,
+            "connect",
+            lambda *_a, **_kw: (_ for _ in ()).throw(sqlite3.Error("bad read")),
         )
+
+    def test_by_model_query_error_degrades_to_local_counts(
+        self, broken_db: None, local_monitor: Any
+    ) -> None:
         result = server._collect_token_usage()
         assert result["rows"] == []
         assert result["labels"] == []
         assert result["datasets"] == [{"label": "输入 Tokens", "data": []}, {"label": "输出 Tokens", "data": []}]
         assert result["request_count"] == 3  # 降级后仍带本地计数
 
-    def test_by_time_query_error_degrades_to_empty(
-        self, monkeypatch: pytest.MonkeyPatch, local_monitor: Any
-    ) -> None:
-        monkeypatch.setattr(
-            server.traces_usage,
-            "aggregate_usage_by_day",
-            lambda *_a, **_kw: (_ for _ in ()).throw(sqlite3.Error("bad aggregate")),
-        )
+    def test_by_time_query_error_degrades_to_empty(self, broken_db: None) -> None:
         result = server._collect_token_usage_by_time()
         assert result["rows"] == []
 

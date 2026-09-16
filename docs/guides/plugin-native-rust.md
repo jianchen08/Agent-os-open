@@ -1,6 +1,6 @@
 # Native 插件开发（Rust cdylib）
 
-> 返回 [开发指南索引](README.md)。前置阅读：[插件开发总览](plugin-development.md)。
+> 返回 [开发指南索引](README.md)。前置阅读：[插件协议规则](plugin-protocol.md)。
 
 ## 1. 何时选 native
 

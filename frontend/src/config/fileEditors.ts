@@ -21,13 +21,6 @@ export interface EditorDefinition {
 }
 
 /** 文件类型映射规则 */
-export interface FileTypeMapping {
-  /** 文件扩展名（含点号，如 ".txt"） */
-  extension: string
-  /** 对应的编辑器 ID */
-  editorId: string
-}
-
 /** 内置编辑器注册表 */
 const editors: Record<string, EditorDefinition> = {
   text_editor: {

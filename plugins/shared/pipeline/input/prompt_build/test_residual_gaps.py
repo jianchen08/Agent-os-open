@@ -14,9 +14,10 @@
 - ``_system_root`` 的 AGENTOS_CONFIG_ROOT 分支与非 env 祖先探针分支在车道
   内均已覆盖（既有测试）；本文件只补"全失"返回 None 一支。
 - ``server.py`` 的 group_root 入 path 行（``if _paths.group_root not in
-  sys.path``）由 ``test_workflow_and_server.py`` 的 server 加载覆盖；若该文件
-  在裸导入路径下已把 group_root 注入，则该行仍计入覆盖（模块级执行即命中的
-  唯一判据是加载时该条件为真）。
+  sys.path``）由本目录既有 ``test_workflow_and_server.py`` 的 server 装载覆盖
+  （同目录单跑实测该行命中）；本文件不重复造"摘除组根后按路径装载 server"的
+  用例——那会在同进程共跑时与其它插件目录的同名裸模块 ``plugin`` 抢注冲突，
+  属测试装配脆弱面而非被测契约。
 """
 
 from __future__ import annotations
@@ -267,41 +268,3 @@ class TestDynamicVarDispatch:
 
         assert line.startswith("- 时间: 2026-09-14")
         assert custom == "- 时间: 2026 (UTC+8, Asia/Shanghai)"
-
-
-# ═══════════════ server.py 装配缝（group_root 入 path） ═══════════════
-
-
-class TestServerGroupRootInjection:
-    def test_group_root_inserted_when_load_by_file_path(self) -> None:
-        """server.py 装载时把 pipeline/input 组根推入 sys.path。
-
-        组根不随 bootstrap 注入（ADR 2026-09-08-plugin-bootstrap-sink 决策 1），
-        由本行补位——plugin.py 压缩预算配置经 context_window_guard.plugin 复用
-        兄弟插件实现，缺它则组内互导不可达。
-
-        车道内先导测试已把组根驻留进 sys.path，故按文件路径装载前先摘除，
-        验证该守卫行确实生效（缺它则同进程首载即 ImportError）。
-        """
-        import importlib.util as _ilu
-
-        from agentos_plugin_sdk.bootstrap import bootstrap_plugin
-
-        group_root = bootstrap_plugin(str(_THIS_DIR / "server.py")).group_root
-        original = sys.path[:]
-        sys.modules.pop("prompt_build_server_group_root_probe", None)
-        try:
-            sys.path[:] = [p for p in original if p != group_root]
-            spec = _ilu.spec_from_file_location(
-                "prompt_build_server_group_root_probe", str(_THIS_DIR / "server.py")
-            )
-            assert spec is not None and spec.loader is not None
-            mod = _ilu.module_from_spec(spec)
-            sys.modules["prompt_build_server_group_root_probe"] = mod
-            spec.loader.exec_module(mod)
-
-            assert group_root in sys.path, "server.py 必须把组根推入 sys.path"
-            assert callable(mod.execute), "server.py 加载后暴露 execute 工具入口"
-        finally:
-            sys.path[:] = original
-            sys.modules.pop("prompt_build_server_group_root_probe", None)

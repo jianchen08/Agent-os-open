@@ -89,12 +89,28 @@ def _base_inputs(**over: Any) -> dict:
 
 
 def _make_tool(mod: Any) -> Any:
+    """构造工具实例并 stub 纯参数校验（target 存在性等与存储无关的面）。
+
+    `_get_agent_base_config` 同层替身：返回真实 agent yaml 的字段形态
+    （身份性字段齐备），完备性闸门按生产路径放行——本文件断言参数边界，
+    不钉 agent 解析。
+    """
     tool = mod.TaskSubmitTool()
 
     async def _ok(t, l):
         return (True, "", "")
 
     tool._validate_target_agent = _ok  # type: ignore[method-assign]
+
+    async def _base_config(target_id: str) -> dict[str, Any] | None:
+        return {
+            "level": "L2",
+            "is_active": True,
+            "tool_ids": ["file_read"],
+            "system_prompt": "stub-persona",
+        }
+
+    tool._get_agent_base_config = _base_config  # type: ignore[method-assign]
     return tool
 
 

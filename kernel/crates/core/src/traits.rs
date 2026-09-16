@@ -122,6 +122,23 @@ pub trait PluginInvoker: Send + Sync {
         Ok(())
     }
 
+    /// 成员粒度热重载（合宿成员在共享宿主进程内重载单插件代码）。
+    ///
+    /// 仅对「已装箱到合宿组宿主且有存活进程」的成员生效：向宿主发
+    /// `agentos/reload_member` 请求（带应答）重载该成员并刷新宿主指纹记账，
+    /// 其余成员进程不动（驱逐爆炸半径从整组收缩到单成员）。无存活宿主
+    /// （未装箱/未 spawn）= 下次 spawn 必用新码，返回 Ok(no-op)；独占插件、
+    /// 实现不支持、请求失败（宿主协议错误/超时）返回 Err——调用方（watcher）
+    /// 必须回退 [`Self::force_unload`] 整组驱逐。
+    /// 默认实现返回不支持错误（无此能力的实现 / MockInvoker 编译兼容）。
+    async fn reload_member(&self, _plugin_id: &str) -> Result<(), PluginError> {
+        Err(PluginError {
+            message: "reload_member not supported by this invoker".into(),
+            code: None,
+            source: None,
+        })
+    }
+
     /// 重新扫描插件目录，发现新增插件（运行时懒加载入口）。
     ///
     /// 重扫 plugin roots（幂等：loader 内部 cache.clear + 重插，不杀已 spawn 的进程），
@@ -472,12 +489,14 @@ pub struct PluginManifest {
     pub language: String,
     /// 宿主类型——所有插件均支持 InProcess 和 Sidecar（ADR ⑧）
     pub host_type: HostType,
-    /// 宿主分组声明（合宿进程模型 §4.1）。
+    /// 宿主分组声明（合宿进程模型 §4.1，多组扩展）。
     ///
-    /// `"light"` = 准入轻量合宿组（多插件共享宿主进程，宿主键 `group:light:{n}`，
-    /// 由 invoker 运行时动态装箱）；缺省 = 独占宿主（宿主键 `plugin:{plugin_id}`，
-    /// 现状语义，默认保守）。白名单制：声明 `light` 即插件作者担保
-    /// "无同步阻塞调用、无 C 扩展、无重依赖"，内核不做推断。
+    /// 声明合法组名（`[A-Za-z0-9_-]{1,32}`）即准入合宿：多插件共享宿主进程，
+    /// 宿主键 `group:{组名}:{n}`，由 invoker 运行时按组名分域动态装箱——
+    /// 驱逐连坐半径 = 本组宿主，稳定观察面（如 `light_stable`）与易变工具组
+    /// （`light`）互不波及。缺省 = 独占宿主（宿主键 `plugin:{plugin_id}`，
+    /// 现状语义，默认保守）。白名单制：声明组名即插件作者担保
+    /// "无同步阻塞调用、无 C 扩展、无重依赖"，内核不做推断；非法组名一律独占。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_group: Option<String>,
     pub entry: String,
@@ -1907,9 +1926,11 @@ mod tests {
     #[tokio::test]
     async fn invoker_default_methods_contract() {
         let inv = BareInvoker;
-        // force_unload 默认 Ok；discover 默认空；list_plugin_tools 默认不支持；
+        // force_unload 默认 Ok；reload_member 默认不支持（调用方须回退 force_unload）；
+        // discover 默认空；list_plugin_tools 默认不支持；
         // shutdown_all / kill_sidecar_if_any 默认 no-op（调用即覆盖，无 panic 即契约）。
         assert!(inv.force_unload("p").await.is_ok());
+        assert!(inv.reload_member("p").await.is_err());
         assert!(inv.discover_new_plugins().await.unwrap().is_empty());
         assert!(inv.list_plugin_tools("p").await.is_err());
         inv.shutdown_all().await;

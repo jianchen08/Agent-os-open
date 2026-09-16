@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /** @ci: frontend-test */
 /**
  * 工作区文件树（任务面板「打开工作空间」tab）主链补测。
@@ -131,5 +132,33 @@ describe('工作区文件树（workspace:// tab 真实链路）', () => {
     expect(await screen.findByText('暂无树形数据')).toBeInTheDocument()
     expect(screen.queryByText('未找到匹配的节点')).not.toBeInTheDocument()
     expect(mockGet).toHaveBeenCalledTimes(2)
+  })
+
+  it('HTTP 404 + 业务信封 → 显示后端 error 文本而非 axios 概况消息（BUG-24）', async () => {
+    const backendError = '目标任务归属元数据缺失（task.submitted_by），拒绝访问；存量数据需回填归属后可达'
+    mockGet.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 404'), {
+        response: { status: 404, data: { error: backendError } },
+      }),
+    )
+
+    render(<FileTreeWidget {...WORKSPACE_TAB_PROPS} />)
+
+    expect(await screen.findByTestId('file-tree-error')).toBeInTheDocument()
+    expect(screen.getByText(backendError)).toBeInTheDocument()
+    expect(screen.queryByText('Request failed with status code 404')).not.toBeInTheDocument()
+  })
+
+  it('HTTP 错误带 detail 形状（无 error 键）→ 显示 detail 文本', async () => {
+    mockGet.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 500'), {
+        response: { status: 500, data: { detail: 'workspace service error: boom' } },
+      }),
+    )
+
+    render(<FileTreeWidget {...WORKSPACE_TAB_PROPS} />)
+
+    expect(await screen.findByTestId('file-tree-error')).toBeInTheDocument()
+    expect(screen.getByText('workspace service error: boom')).toBeInTheDocument()
   })
 })

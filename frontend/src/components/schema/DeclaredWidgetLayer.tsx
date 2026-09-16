@@ -130,6 +130,53 @@ function slotWinner(declarations: WidgetDeclaration[]): WidgetDeclaration[] {
   return out
 }
 
+/**
+ * select-option 选项追加（通用选择器契约）：
+ *
+ * type=select-option 的声明（props.target 指向选择器本体 id，携带 value/label/
+ * icon/description）并入对应 form 声明首字段的 options——任何插件想给某个
+ * 选择器加一个选项（如给任务模式加模式、给思考强度加档位）= 加一条声明，
+ * 无需改动选择器本体；本体声明只持兜底选项。合并后按 order 排序、同 value
+ * 以先声明者胜。select-option 不是独立 widget，合并后从渲染源剔除。
+ */
+function mergeSelectOptions(source: WidgetDeclaration[]): WidgetDeclaration[] {
+  const optionDecls = source.filter((d) => d.type === 'select-option')
+  if (optionDecls.length === 0) return source
+  const withoutOptions = source.filter((d) => d.type !== 'select-option')
+  return withoutOptions.map((d) => {
+    if (d.type !== 'form') return d
+    const fields = (d.props as { fields?: Array<Record<string, unknown>> } | undefined)?.fields
+    if (!Array.isArray(fields) || fields.length === 0 || fields[0]?.type !== 'select') return d
+    const picked = optionDecls
+      .filter((o) => (o.props as { target?: string } | undefined)?.target === d.id)
+      .sort((a, b) => (a.order ?? 1000) - (b.order ?? 1000))
+    if (picked.length === 0) return d
+    const base = (fields[0].options as Array<Record<string, unknown>> | undefined) ?? []
+    const seen = new Set(base.map((o) => String(o.value)))
+    const merged = [...base]
+    for (const o of picked) {
+      const p = (o.props ?? {}) as {
+        value?: unknown
+        label?: unknown
+        icon?: unknown
+        description?: unknown
+      }
+      if (p.value === undefined || seen.has(String(p.value))) continue
+      seen.add(String(p.value))
+      merged.push({
+        label: p.label,
+        value: p.value,
+        ...(p.icon !== undefined ? { icon: p.icon } : {}),
+        ...(p.description !== undefined ? { description: p.description } : {}),
+      })
+    }
+    return {
+      ...d,
+      props: { ...d.props, fields: [{ ...fields[0], options: merged }, ...fields.slice(1)] },
+    }
+  })
+}
+
 export function DeclaredWidgetLayer({
   space,
   declarations,
@@ -143,6 +190,9 @@ export function DeclaredWidgetLayer({
   // 读取移入 useMemo：getAllWidgets() 每次返回新数组引用，放内部避免记忆化失效
   const { resolved, unresolved, fallbackResolved } = useMemo(() => {
     let source = declarations ?? contributionRegistry.getAllWidgets()
+    // select-option 合并在全量声明上做（先于 space/槽位过滤）——槽位式渲染
+    // （如 thinking_strength）同样能吃到插件追加的选项
+    source = mergeSelectOptions(source)
     source = filterBySpace(source, space)
     if (excludeIds && excludeIds.length > 0) {
       source = source.filter((d) => !excludeIds.includes(d.id))

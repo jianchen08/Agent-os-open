@@ -49,7 +49,7 @@
 | 连接器 | `connectors` |
 | 复盘 | `review` |
 | 隔离与工作区 | `isolation` + `pipeline_isolation_guard` / `pipeline_workspace_lifecycle` / `pipeline_environment_lifecycle` |
-| 监控与成本 | `monitoring` + `pipeline_cost_control` / `pipeline_track` |
+| 监控与成本 | `monitoring` + `pipeline_cost_control`（token 统计由 `pipeline_llm_core` 每轮自持，见 ADR 2026-09-15-track-merged-into-llm-core） |
 | 任务域 | `tasks`（task_service）+ `task_form` + `project_create_tool`（项目） |
 | 主题 / 皮肤 / 页面 | `contributes.themes` / `ui_schema` / `http_endpoints`（如 `dsh_adapter`、`agent_manager`） |
 | Agent 配置加载 | `pipeline_context_build`（按 agent_id 自持加载 YAML） |
@@ -139,7 +139,7 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 - **并发模型**：RunChainRegistry 按 effective_pipeline_id 串行（同管道 FIFO、异管道并行、全局并发上限）。
 - **task = pipeline state 单一真值**：`task.id = pipeline_id`；任务状态由任务域插件裁决（评估闸门），内核不回写任务状态。
 
-配置方法见 [guides/pipeline-configuration.md](guides/pipeline-configuration.md)。
+配置方法见 [guides/execution-semantics.md](guides/execution-semantics.md)。
 
 ### 插件系统（Plugin System）
 
@@ -153,7 +153,7 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 - **LLM 可见工具三层过滤**：启用档案（`config/plugins/default_profile.yaml`，watcher 每轮 sync 重读）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。
 - **全链路热生效**：新插件自动发现注册、manifest 变更自动 revoke + 重注册（G2 漂移校验）、Python 代码改动 respawn、cdylib 集合变更 G8 优雅重启——插件改动无需 re-enable 或重启内核。
 
-协议全字段见 [plugin-protocol.md](guides/plugin-protocol.md)；开发见 [guides/plugin-development.md](guides/plugin-development.md)。
+协议全字段见 [plugin-protocol.md](guides/plugin-protocol.md)。
 
 ### Agent 系统
 
@@ -180,7 +180,7 @@ plugins:
 - **消费分权（按 agent_id 展开的执行上下文）**：全量配置由管道 prepare 步的 `pipeline_context_build` 插件自持加载——按 `state.agent_id` 定位 YAML，注入 `context.system_prompt` / `tool_ids` / `context.agent_level` 等；工具面同属这份执行上下文（LLM 请求构建按已展开的 `tool_ids` 过滤工具 schema），内核不解析 Agent 配置、对 `agent_id` 只透传。
 - **多层协作**：主管（灵汐，L1）面向用户负责任务分类与派发；编排（L2）做多步骤编排与审查节点；执行（L3）是具体执行单元。
 
-配置方法见 [guides/agent-configuration.md](guides/agent-configuration.md)。
+配置方法见 [guides/execution-semantics.md](guides/execution-semantics.md)。
 
 ### 工具系统
 
@@ -239,7 +239,7 @@ plugins:
 - **主题双轨**：前端预设（`frontend/src/config/themes/presets/`，7 套）+ 插件主题（manifest `contributes.themes` CSS 变量包，可带 skin 皮肤），另有动态 JSON 主题与用户自定义。
 - **前端贡献通道**：`ui_schema`（页面/表单 schema 驱动）、`contributes`（主题/样式/页面）、`http_endpoints`（`/ext/{plugin_id}/**` 前端可达的 HTTP 面）。
 
-见 [guides/theme-development.md](guides/theme-development.md) 与 [guides/theme-customization.md](guides/theme-customization.md)。
+见 [guides/theme.md](guides/theme.md)。
 
 ---
 
@@ -282,13 +282,13 @@ plugins:
 
 | 扩展点 | 怎么做 | 参考 |
 |--------|--------|------|
-| 新增 LLM 工具 | 写 tool 插件（manifest + server.py + uv venv），启用并加进 Agent `tool_ids` | [guides/plugin-sidecar-python.md](guides/plugin-sidecar-python.md) |
+| 新增 LLM 工具 | 写 tool 插件（manifest + server.py + uv venv），启用并加进 Agent `tool_ids` | [guides/plugin-protocol.md](guides/plugin-protocol.md) |
 | 零代码接第三方工具 | external MCP manifest（HTTP 远程 / 本地命令） | [guides/plugin-external-mcp.md](guides/plugin-external-mcp.md) |
 | 高性能管道步骤 | Rust cdylib 原生插件（in_process） | [guides/plugin-native-rust.md](guides/plugin-native-rust.md) |
-| 新增 Agent | `config/agents/` 对应层级写 yaml | [guides/agent-configuration.md](guides/agent-configuration.md) |
-| 调整管道编排 | 改 `config/pipelines/autonomous.yaml`（热重载，无需重启） | [guides/pipeline-configuration.md](guides/pipeline-configuration.md) |
-| 新增前端预设主题 | `frontend/src/config/themes/presets/` + index.ts 注册 | [guides/theme-development.md](guides/theme-development.md) |
-| 随插件分发主题/皮肤 | manifest `contributes.themes` | [guides/theme-development.md](guides/theme-development.md) |
+| 新增 Agent | `config/agents/` 对应层级写 yaml | [guides/execution-semantics.md](guides/execution-semantics.md) |
+| 调整管道编排 | 改 `config/pipelines/autonomous.yaml`（热重载，无需重启） | [guides/execution-semantics.md](guides/execution-semantics.md) |
+| 新增前端预设主题 | `frontend/src/config/themes/presets/` + index.ts 注册 | [guides/theme.md](guides/theme.md) |
+| 随插件分发主题/皮肤 | manifest `contributes.themes` | [guides/theme.md](guides/theme.md) |
 | 新增前端页面/表单 | manifest `ui_schema` / `http_endpoints` | [plugin-protocol.md](guides/plugin-protocol.md) |
 | 插件间服务依赖 | manifest `requires_services`（能力角色名） | [plugin-protocol.md](guides/plugin-protocol.md) |
 

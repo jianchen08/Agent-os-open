@@ -22,41 +22,16 @@ import type * as streamHandlerMod from '@/services/websocket/streaming/handlers/
 import type * as lifecycleHandlersMod from '@/services/websocket/streaming/lifecycleHandlers'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
+import { activityConverterRichMock, resetPipelineStoreState } from './helpers/storeTestMocks'
 
 // ── mock 外部依赖（与 multiturnOrderE2E / fix_duplicate_ai_repro 对齐）──
-vi.mock('@/utils/activityConverter', () => ({
-  buildDefaultActions: (_tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
-
-  toolCallToActivity: (toolCall: any) => ({
-    type: 'tool_call',
-    id: toolCall.callId ?? toolCall.call_id,
-    title: toolCall.name ?? toolCall.tool_name,
-    toolName: toolCall.name ?? toolCall.tool_name,
-    status: toolCall.state ?? toolCall.status ?? 'pending',
-    details: [],
-    actions: [],
-  }),
-}))
+vi.mock('@/utils/activityConverter', async () => (await import('./helpers/storeTestMocks')).activityConverterRichMock())
 vi.mock('@/utils/toolCardRegistry', () => ({
   enhanceActivityWithToolConfig: (base: any) => base,
 }))
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
-vi.mock('@/services/api/session', () => ({
-  getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
-  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
-}))
-vi.mock('@/utils/retry', () => ({
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/services/api/session', async () => (await import('./helpers/storeTestMocks')).apiSessionMockFull())
+vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockBase())
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 
 const PIPELINE_ID = 'pid_order_a000000000'
 const THREAD_ID = 'tid_order_b000000000'
@@ -123,18 +98,7 @@ function systemIds(): string[] {
 beforeEach(async () => {
   vi.resetModules()
   const storeMod = await import('@/stores/pipelineMessageStore')
-  pipelineStore = storeMod.usePipelineMessageStore
-  pipelineStore.setState({
-    messagesByPipeline: {},
-    pipelines: {},
-    pipelineSessionMap: {},
-    streamingState: {},
-    activePipelineId: null,
-    topCursorsByPipeline: {},
-    bottomCursorsByPipeline: {},
-    hasMoreOlderByPipeline: {},
-    isLoadingOlderByPipeline: {},
-  })
+  pipelineStore = await resetPipelineStoreState()
   const h = await import('@/services/websocket/streaming/handlers')
   handlers = h
   const lh = await import('@/services/websocket/streaming/lifecycleHandlers')
@@ -146,15 +110,22 @@ beforeEach(async () => {
   pipelineStore.getState().activatePipeline(PIPELINE_ID)
 })
 
+/** user-1/ai-1 API 基线（withParts=true 时 ai-1 携带 text parts）——initFromAPI 播种用 */
+function apiUser1Ai1(withParts = false) {
+  return [
+    makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
+    withParts
+      ? makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2, parts: [{ type: 'text', content: '答1', sequence: 1 } as any] })
+      : makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
+  ]
+}
+
 describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
   it('场景1: 流式占位在 initFromAPI 后保留，store = API 权威 + 飞行占位', () => {
     const MSG = 'msg_streaming_a000000'
 
     // 历史消息（API 风格）：user1(seq=1) → ai1(seq=2)
-    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
-      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
-      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2, parts: [{ type: 'text', content: '答1', sequence: 1 } as any] }),
-    ])
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, apiUser1Ai1(true))
     // 当前 store: [user-1, ai-1]
 
     // 流式开始：stream_start 不带 sequence → 占位进入本地态
@@ -165,8 +136,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     // 后端真实时序：ai1 之后注入了一条「上级」user 消息（seq=3），流式占位后端还没落库
     // → API 返回 user-injected(seq=3)，占位不在 API 列表里
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
-      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
-      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2, parts: [{ type: 'text', content: '答1', sequence: 1 } as any] }),
+      ...apiUser1Ai1(true),
       makeMsg('user-injected', { role: 'user', content: '[上级]继续', sequence: 3 }),
     ])
 
@@ -211,10 +181,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     const MSG = 'msg_streaming_c000000'
 
     // store 已有 user-1(seq=1) ai-1(seq=2)
-    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
-      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
-      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
-    ])
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, apiUser1Ai1())
 
     // 用户发送 user-2（乐观，前端 sequence=localMax+1=3）
     pipelineStore.getState().addMessage(PIPELINE_ID, makeMsg('user-2', {
@@ -227,8 +194,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     // 后端真实时序：后端把 user-2 落库 seq=3，但中间插入了上级 user-injected(后端 seq=4)，
     // 流式占位后端 seq=5 尚未落库 → API 返回到 seq=4
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [
-      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
-      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
+      ...apiUser1Ai1(),
       makeMsg('user-2', { role: 'user', content: '问2', sequence: 3, clientMessageId: 'user-2' }),
       makeMsg('user-injected', { role: 'user', content: '[上级]补充', sequence: 4 }),
     ])
@@ -241,10 +207,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
   it('场景4: 迟到 init 快照不含本页活动——乐观 user 与流式占位保留（不消失不重复）', () => {
     const MSG = 'msg_streaming_d000000'
 
-    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
-      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
-      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
-    ])
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, apiUser1Ai1())
 
     // 乐观 user-2 直写主数组（单一消息数组协议：发送瞬间进 store，status=sending）
     pipelineStore.getState().addMessage(PIPELINE_ID, makeMsg('user-2', {
@@ -256,10 +219,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     expect(ids()).toContain(MSG)
 
     // initFromAPI 响应迟到：后端尚未持久化 user-2 和占位 → API 只返回到 ai-1
-    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
-      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
-      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
-    ])
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, apiUser1Ai1())
 
     // 契约：快照发起早于本页发送/流式活动时，全量替换不得抹掉飞行中消息——
     // 乐观 user（cmid 新鲜）与流式占位（新鲜 _lastUpdated）保留，无重复
@@ -275,10 +235,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     }))
 
     // 刷新：API 返回权威消息（不含 stale-ai）
-    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
-      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
-      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
-    ])
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, apiUser1Ai1())
 
     // stale-ai 不满足 streaming 也不满足 grace → 应被丢弃（return false）
     // 不会复活 fix_20260623_refresh_order 防的「残留污染顺序」bug
@@ -305,10 +262,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     const AI_MSG = 'msg_ai_after_notif'
 
     // 冷启动已有历史：user-1(seq=1) ai-1(seq=2)
-    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
-      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
-      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
-    ])
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, apiUser1Ai1())
 
     // 后端时序：consume_pending_notifications 先推送系统通知（seq=11, 权威）
     handleSystemNotification(notificationEvent('[系统通知] 子任务已完成', {
@@ -361,10 +315,7 @@ describe('系统通知 + 注入消息 + 刷新的消息顺序', () => {
     const AI_MAIN = 'msg_ai_main_reply'
 
     // 冷启动历史：user-1(seq=1) ai-1(seq=2)
-    pipelineStore.getState().initFromAPI(PIPELINE_ID, [
-      makeMsg('user-1', { role: 'user', content: '问1', sequence: 1 }),
-      makeMsg('ai-1', { role: 'assistant', content: '答1', sequence: 2 }),
-    ])
+    pipelineStore.getState().initFromAPI(PIPELINE_ID, apiUser1Ai1())
 
     // AI 主回复流式落定（seq=12，后端权威）
     handlers.handleStreamStart(evt('stream_start', { message_id: AI_MAIN, _threadId: THREAD_ID, sequence: 12 }))

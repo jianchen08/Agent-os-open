@@ -5,6 +5,7 @@
  */
 
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useUIStore } from '@/stores/uiStore'
@@ -71,6 +72,49 @@ export function openWorkspacePanel(spec: WorkspacePanelSpec): void {
 }
 
 /**
+ * 插件页面声明 → 工作区面板 spec
+ *（openWorkspacePanelByPath 的 path 解析分支与 openPluginPage 共用同一映射）
+ */
+function pluginPageSpec(page: PageDeclaration): WorkspacePanelSpec {
+  return {
+    id: `ws-plugin-${page.id}`,
+    title: page.title || page.id,
+    component: page.widget || page.id,
+    icon: page.icon,
+    dataSource: page.datasourceUri,
+    props: page.props,
+    moduleId: page.pluginId ? `__plugin_${page.pluginId}__` : `__contrib_${page.id}__`,
+  }
+}
+
+/**
+ * 打开插件贡献页面（插件页面导航面板等导航消费方用）
+ *
+ * 解析顺序：
+ * 1. 声明 path → 走既有 openWorkspacePanelByPath（path 声明是页面直达语义的单入口）
+ * 2. 声明 widget → 按声明直接开工作区页签（与 path 解析的插件页分支同映射）
+ * 3. 无 path 也无 widget（如 settings 配置文件页，渲染归属设置中枢）→ 显式报错，
+ *    绝不静默（与 openWorkspacePanelByPath 失败口径一致）
+ */
+export function openPluginPage(page: PageDeclaration): boolean {
+  if (page.path) return openWorkspacePanelByPath(page.path)
+  if (page.widget) {
+    openWorkspacePanel(pluginPageSpec(page))
+    return true
+  }
+  useNotificationStore.getState().addNotification({
+    title: '页面无法打开',
+    message: `页面 ${page.title || page.id} 未声明 path 或 widget，没有可直达的渲染目标（配置类页面请从设置中枢进入）`,
+    priority: 'high',
+    category: 'error',
+    isBlocking: false,
+    autoDismissMs: 8000,
+    sourceLabel: '插件页面',
+  })
+  return false
+}
+
+/**
  * 按路由 path 打开对应工作区面板（顶栏导航用）
  * 无映射则返回 false，调用方可 fallback 到路由跳转
  *
@@ -87,15 +131,7 @@ export function openWorkspacePanelByPath(path: string): boolean {
   // 1) 插件页面按 path 直达（component 取 page.widget，未声明 widget 时用 page.id 兜底）
   const pluginPage = contributionRegistry.getPages().find((p) => p.path === path)
   if (pluginPage) {
-    openWorkspacePanel({
-      id: `ws-plugin-${pluginPage.id}`,
-      title: pluginPage.title || pluginPage.id,
-      component: pluginPage.widget || pluginPage.id,
-      icon: pluginPage.icon,
-      dataSource: pluginPage.datasourceUri,
-      props: pluginPage.props,
-      moduleId: pluginPage.pluginId ? `__plugin_${pluginPage.pluginId}__` : `__contrib_${pluginPage.id}__`,
-    })
+    openWorkspacePanel(pluginPageSpec(pluginPage))
     return true
   }
   // 2) 精确匹配

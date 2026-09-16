@@ -243,7 +243,7 @@ pub async fn broadcast_domain_event_from(
 
 #[cfg(test)]
 mod domain_event_tests {
-    use super::broadcast_domain_event;
+    use super::{broadcast_domain_event, broadcast_domain_event_from};
     use crate::routes::AppState;
     use agentos_core::traits::{
         HookContext, HostType, LifecycleHook, ManifestCapabilities, PluginInvoker, PluginManifest,
@@ -544,6 +544,105 @@ mod domain_event_tests {
             "默认独占键语义下每个订阅插件各投递一次"
         );
     }
+
+    /// 观察总线（`agentos_hooks::global`）注册后 emit 真到达订阅者——
+    /// 双通道之观察面的端到端落地。
+    #[tokio::test]
+    async fn domain_event_emits_to_observation_bus_when_registered() {
+        use agentos_hooks::HookEventBus;
+        // 进程级单例：同进程重复 set_global 静默忽略，故先 set 再取 global。
+        let bus = std::sync::Arc::new(HookEventBus::new(64));
+        agentos_hooks::set_global(bus);
+        let mut rx = agentos_hooks::global()
+            .expect("set_global 后 global 必有值")
+            .subscribe();
+
+        let invoker = Arc::new(RecordingInvoker {
+            hooks: Mutex::new(Vec::new()),
+            hosts: std::collections::HashMap::new(),
+        });
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest("p_a", true)]));
+        state.enabled_plugin_ids =
+            Arc::new(tokio::sync::RwLock::new(HashSet::from(["p_a".to_string()])));
+        state.invoker = Some(invoker);
+
+        broadcast_domain_event(&state, "cov.probe.event", vec![]).await;
+
+        // 总线是进程级单例，同进程其他用例可能并发 emit：按专用事件名过滤，
+        // 不得把旁路事件当成用例证据。
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let ev = rx.recv().await.expect("通道未关闭");
+                if ev.ctx.get("event").and_then(|v| v.as_str()) == Some("cov.probe.event") {
+                    return ev;
+                }
+            }
+        })
+        .await
+        .expect("总线应在 2s 内投递域事件");
+        assert_eq!(ev.hook, LifecycleHook::DomainEvent);
+    }
+
+    /// `broadcast_domain_event`：invoker 未注入 → 直接返回（不 panic、无副作用）。
+    #[tokio::test]
+    async fn broadcast_without_invoker_is_noop() {
+        let state = AppState::new();
+        broadcast_domain_event(&state, "session.created", vec![]).await;
+    }
+
+    /// `broadcast_domain_event_from`：点对点通知失败只告警不阻断广播
+    /// （fire-and-forget 语义），函数照常返回。
+    #[tokio::test]
+    async fn domain_event_delivery_failure_does_not_block_others() {
+        struct FailingInvoker;
+        #[async_trait::async_trait]
+        impl PluginInvoker for FailingInvoker {
+            async fn invoke_pipeline_plugin<'a>(
+                &self,
+                _plugin_id: &str,
+                _ctx: &PluginContext<'a>,
+            ) -> Result<PluginResult, PluginError> {
+                unreachable!("不触达")
+            }
+            async fn invoke_tool(
+                &self,
+                _plugin_id: &str,
+                _tool_name: &str,
+                _inputs: &serde_json::Value,
+            ) -> Result<ToolExecutionResult, PluginError> {
+                unreachable!("不触达")
+            }
+            async fn send_lifecycle_hook(
+                &self,
+                _plugin_id: &str,
+                hook: LifecycleHook,
+                _context: &HookContext,
+            ) -> Result<(), PluginError> {
+                assert_eq!(hook, LifecycleHook::DomainEvent);
+                Err(PluginError {
+                    message: "host gone".to_string(),
+                    code: None,
+                    source: None,
+                })
+            }
+        }
+
+        let invoker: Arc<dyn PluginInvoker> = Arc::new(FailingInvoker);
+        let enabled = tokio::sync::RwLock::new(HashSet::from(["p_a".to_string()]));
+        let manifests = tokio::sync::RwLock::new(vec![manifest("p_a", true)]);
+
+        broadcast_domain_event_from(
+            &invoker,
+            &enabled,
+            &manifests,
+            "session.created",
+            vec![("session_id".to_string(), json!("t1"))],
+        )
+        .await;
+        // fire-and-forget：给 spawn 的通知任务一点时间跑完失败分支
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 #[cfg(test)]
@@ -654,5 +753,174 @@ mod external_mcp_schema_gate_tests {
         let tools = registry.list_tools();
         let t = tools.iter().find(|t| t.plugin_id == m2.id).expect("应注册");
         assert!(t.input_schema.is_object() && t.input_schema.as_object().unwrap().is_empty());
+    }
+}
+
+/// 能力注册面补测（guarded 注册 / 批量注册幂等 / 重启用对称化）。
+///
+/// manifest 走 serde 构造：字段众多，字面量构造会在每次加字段时编译断裂；
+/// JSON 形态与 plugin.json 真值源同构。
+#[cfg(test)]
+mod capability_registration_tests {
+    use super::*;
+    use agentos_core::traits::{CapabilityRegistry, HttpEndpoint};
+
+    fn manifest(id: &str, tool: &str) -> PluginManifest {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": id,
+            "version": "1.0.0",
+            "language": "python",
+            "host_type": "sidecar",
+            "entry": "python server.py",
+            "plugin_type": "tool",
+            "capabilities": {
+                "tools": [{
+                    "name": tool,
+                    "description": "d",
+                    "input_schema": {"type": "object"}
+                }]
+            }
+        }))
+        .expect("测试 manifest 应可反序列化")
+    }
+
+    fn endpoint(path: &str) -> HttpEndpoint {
+        HttpEndpoint {
+            route_id: "r".to_string(),
+            method: "GET".to_string(),
+            path: path.to_string(),
+            auth: Some("none".to_string()),
+            handler_capability: "http.handle".to_string(),
+            timeout_ms: None,
+            max_concurrency: None,
+            description: None,
+        }
+    }
+
+    /// 声明 route_signals：工具与信号一并登记，且都入该插件 scope；
+    /// scope 收回（disable 语义）后注册表零残留。
+    #[test]
+    fn route_signals_registered_and_tracked_in_scope() {
+        use agentos_core::types::RouteType;
+        let mut m = manifest("p_sig", "t_sig");
+        m.capabilities.route_signals = vec![RouteType::NextLlm, RouteType::NextTool];
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = agentos_plugin_loader::PluginScopeRegistry::new();
+
+        let n = register_plugin_capabilities(&m, &registry, &scopes);
+        assert_eq!(n, 1, "工具数与信号数互不影响");
+        assert!(registry.get_tool("t_sig").is_some(), "工具应可查");
+        assert_eq!(
+            scopes.scope_of(&m.id).len(),
+            2,
+            "tool + route_signals 两条 guard 都应入账本"
+        );
+
+        scopes.revoke(&m.id);
+        assert!(
+            registry.get_tool("t_sig").is_none(),
+            "revoke 后工具必须从注册表消失（结构性收回）"
+        );
+    }
+
+    /// 无 route_signals 声明：不产生信号 guard（scope 只 1 条工具 guard）。
+    #[test]
+    fn empty_route_signals_adds_no_guard() {
+        let m = manifest("p_nosig", "t_nosig");
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = agentos_plugin_loader::PluginScopeRegistry::new();
+        let n = register_plugin_capabilities(&m, &registry, &scopes);
+        assert_eq!(n, 1, "工具照常注册");
+        assert_eq!(scopes.scope_of(&m.id).len(), 1, "只有工具 guard");
+    }
+
+    /// `register_new_plugins`：existing_ids 命中跳过（幂等），只注册新增。
+    #[test]
+    fn register_new_plugins_skips_known_ids() {
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = agentos_plugin_loader::PluginScopeRegistry::new();
+
+        let existing: std::collections::HashSet<String> = ["p_a".to_string()].into_iter().collect();
+        let (new_ids, tools) = register_new_plugins(
+            &[manifest("p_a", "t_a"), manifest("p_b", "t_b")],
+            &existing,
+            &registry,
+            &scopes,
+        );
+        assert_eq!(new_ids, vec!["p_b".to_string()], "已注册的 p_a 必须跳过");
+        assert_eq!(tools, 1, "只注册 p_b 的 1 个工具");
+        assert!(registry.get_tool("t_a").is_none(), "跳过的插件不得注册工具");
+        assert!(registry.get_tool("t_b").is_some());
+
+        let all: std::collections::HashSet<String> =
+            ["p_a".to_string(), "p_b".to_string()].into_iter().collect();
+        let (again, more_tools) = register_new_plugins(
+            &[manifest("p_a", "t_a"), manifest("p_b", "t_b")],
+            &all,
+            &registry,
+            &scopes,
+        );
+        assert!(again.is_empty() && more_tools == 0, "幂等：无新增");
+    }
+
+    /// `reenable_plugin_capabilities`：先 revoke 旧 scope 再重注册（不累积
+    /// guard），http_endpoints 一并重注册并计数。
+    #[test]
+    fn reenable_revokes_old_scope_and_reregisters_http_routes() {
+        use agentos_core::types::RouteType;
+        let mut m = manifest("p_re", "t_re");
+        m.capabilities.route_signals = vec![RouteType::NextLlm];
+        m.http_endpoints = vec![endpoint("/ext/p_re/ping")];
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = agentos_plugin_loader::PluginScopeRegistry::new();
+
+        let (tools, routes) = reenable_plugin_capabilities(&m, &registry, &scopes);
+        assert_eq!(tools, 1);
+        assert_eq!(routes, 1, "声明的 http 路由应重注册并计数");
+        assert_eq!(
+            scopes.scope_of(&m.id).len(),
+            3,
+            "tool + signal + http 三条 guard"
+        );
+        assert!(
+            registry.find_http_route("/ext/p_re/ping", "GET").is_some(),
+            "重启用后路由应可分发命中"
+        );
+
+        let (tools2, routes2) = reenable_plugin_capabilities(&m, &registry, &scopes);
+        assert_eq!((tools2, routes2), (1, 1));
+        assert_eq!(
+            scopes.scope_of(&m.id).len(),
+            3,
+            "重复启用不得累积 guard：{}",
+            scopes.scope_of(&m.id).len()
+        );
+    }
+
+    /// http_endpoints 冲突（同 path+method 已被占位）→ 忽略该条，不阻断工具注册。
+    #[test]
+    fn reenable_ignores_conflicting_http_route() {
+        let mut m = manifest("p_conf", "t_conf");
+        m.http_endpoints = vec![endpoint("/ext/p_conf/dup")];
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = agentos_plugin_loader::PluginScopeRegistry::new();
+        // 占位注册不归本插件 scope 管（disarm 后残留），reenable 的 revoke 收不回它。
+        let (_, guard) = registry
+            .register_http_route_guarded(&m.id, m.http_endpoints[0].clone())
+            .expect("首个注册成功");
+        guard.disarm();
+
+        let (tools, routes) = reenable_plugin_capabilities(&m, &registry, &scopes);
+        assert_eq!(tools, 1, "工具照常注册");
+        assert_eq!(routes, 0, "冲突路由被忽略（不报错、不阻断）");
+        assert!(
+            registry.get_tool("t_conf").is_some(),
+            "工具注册不受路由冲突影响"
+        );
+        assert!(
+            registry.find_http_route("/ext/p_conf/dup", "GET").is_some(),
+            "占位路由保持原状"
+        );
     }
 }

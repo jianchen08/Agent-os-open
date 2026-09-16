@@ -332,6 +332,39 @@ class TestBaseScanHardFloor:
         assert ("Invalid path" in reason) or ("Null byte injection" in reason)
         assert result.state_updates["raw_tool_calls"] == []
 
+    @pytest.mark.asyncio
+    async def test_null_byte_path_reports_precise_reason(self):
+        """空字节检查先于 resolve：命中精确 Null byte 文案（不落泛化 Invalid path）。"""
+        add_plugin_dir("input", "security_check")
+        from plugin import SecurityCheckPlugin
+
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        result = await plugin.execute(
+            _ctx_with_traversal_path(path="C:/tmp/x\x00y", call_id="call-null-precise")
+        )
+        reason = result.state_updates["security.decision"].get("reason", "")
+        assert "Null byte injection detected" in reason
+        assert "Invalid path" not in reason
+        assert result.state_updates["raw_tool_calls"] == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_failure_falls_to_invalid_path_fail_closed(self, monkeypatch):
+        """resolve 异常（非 NUL 的 OS 层故障）→ 泛化 Invalid path 拦截，fail-closed。"""
+        add_plugin_dir("input", "security_check")
+        from plugin import SecurityCheckPlugin
+
+        def _boom(self, **kwargs):
+            raise OSError(123, "injected resolve failure")
+
+        monkeypatch.setattr("pathlib.Path.resolve", _boom)
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        result = await plugin.execute(
+            _ctx_with_traversal_path(path="C:/tmp/ok-name", call_id="call-invalid")
+        )
+        reason = result.state_updates["security.decision"].get("reason", "")
+        assert "Invalid path" in reason and "injected resolve failure" in reason
+        assert result.state_updates["raw_tool_calls"] == []
+
 
 class TestSoftBlockToleratesStringArgs:
     """软拦截对字符串形状的工具参数不崩溃（容错契约）。"""

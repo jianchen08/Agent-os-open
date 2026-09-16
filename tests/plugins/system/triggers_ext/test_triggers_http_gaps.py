@@ -85,13 +85,17 @@ def _clean_manager():
 
 
 def test_create_tool_failure_returns_400() -> None:
-    """合法 Bearer 但 body 缺 message → 工具校验失败 → 400，注册表不残留。"""
+    """合法 Bearer 但 body 缺 message → 工具校验失败 → 400 协议信封，注册表不残留。
+
+    BUG-22：拒绝走 protocol_error（success:true + data 携真实状态）——
+    success:false 信封会被内核 SidecarHttpHandler 统一映射 502。
+    """
     resp = asyncio.run(http_api.handle_http_dispatch(
         PREFIX, "POST",
         _encode_body({"trigger_type": "delay", "delay_seconds": 60, "pipeline_id": "p_target"}),
         None, {"Authorization": f"Bearer {_token('u1', 'alice')}"},
     ))
-    assert resp["success"] is False, resp
+    assert resp["success"] is True, resp
     assert resp["data"]["status"] == 400
     assert get_trigger_manager().list_all() == []
 
@@ -132,9 +136,8 @@ def test_delete_via_dispatch() -> None:
     body = _unwrap(asyncio.run(http_api.handle_http_dispatch(
         f"{PREFIX}/{cfg.trigger_id}", "DELETE")))
     assert body == {"deleted": True, "trigger_id": cfg.trigger_id}
-    cancelled = mgr.get(cfg.trigger_id)
-    assert cancelled is not None
-    assert cancelled.status.value == "cancelled"
+    # BUG-23：删除 = 注销，注册表移除（列表重拉条目消失）
+    assert mgr.get(cfg.trigger_id) is None
 
 
 def test_fire_via_dispatch() -> None:

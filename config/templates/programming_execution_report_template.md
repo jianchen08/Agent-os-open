@@ -9,7 +9,7 @@
 - **任务ID**: {task_id}
 - **任务类型**: 编码开发 / 测试验证 / Bug修复 / 代码审查
 - **执行路径**: 路径 A / B / C / D
-- **涉及Agent**: {列出实际使用的Agent，如 code_writer_agent, test_debug_agent, function_verifier_agent}
+- **涉及Agent**: {列出实际使用的Agent，如 mode_coding/code_writer, mode_coding/test_debug_agent, function_verifier_agent}
 - **创建时间**: {date}
 
 ---

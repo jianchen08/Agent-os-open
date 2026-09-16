@@ -75,6 +75,7 @@ dependencies = [
  "chrono",
  "dirs",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

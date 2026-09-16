@@ -220,15 +220,19 @@ class TestRealMerge:
         assert len(calls) == 2, f"应恰好重试 2 次，实际 {len(calls)}"
         assert wt_dir.exists(), "验证失败应保留 worktree"
 
-    def test_success_entry_with_conflict_files_field_returns_none(self, monkeypatch: Any) -> None:
+    def test_success_entry_with_conflict_files_field_returns_none(self, tmp_path: Path, monkeypatch: Any) -> None:
         """合并成功但带冲突文件清单（遗留 copy 通路字段）→ 仍算成功，仅告警。"""
+        wt_dir = tmp_path / "wt"
+        wt_dir.mkdir()  # 目录必须真实存在，否则在 283 的外部清理守卫处提前返回
         m = WorktreeMerger()
         monkeypatch.setattr(
             m,
             "on_eval_passed",
             lambda task_id, workspace, ws_meta: {"success": True, "conflict_files": ["a.txt"]},
         )
-        assert m.merge_worktree_before_complete("t1", {"mode": "worktree", "path": "D:/w", "project_root": "D:/s"}) is None
+        assert m.merge_worktree_before_complete(
+            "t1", {"mode": "worktree", "path": str(wt_dir), "project_root": str(tmp_path)}
+        ) is None
 
 
     def test_empty_worktree_trivial_success(self, tmp_path: Path) -> None:

@@ -1,0 +1,117 @@
+{
+  "id": "mode_godot",
+  "name": "Mode Godot",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "description": "Godot 游戏开发模式出厂种子（既有事实模式结构化收编，P3 立项）：模式元数据服务面（mode.describe / mode.get_profile），profile 随包内打包，供服务侧消费方（eval_harness 归因评测等）经内核服务调用获取",
+  "permissions": {},
+  "priority": 45,
+  "host_group": "light",
+  "capabilities": {
+    "tools": [],
+    "services": [
+      {
+        "name": "mode.describe",
+        "description": "返回 Godot 游戏开发模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode",
+            "name",
+            "chain",
+            "weights",
+            "budget",
+            "profile_path",
+            "panel_page_id"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "chain": {
+              "type": "object"
+            },
+            "weights": {
+              "type": "object"
+            },
+            "budget": {
+              "type": "object"
+            },
+            "profile_path": {
+              "type": "string"
+            },
+            "panel_page_id": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "mode.get_profile",
+        "description": "返回 Godot 游戏开发模式包内 profile.yaml 解析后的内容",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ]
+  },
+  "http_endpoints": [
+    {
+      "route_id": "mode_godot_panel_page",
+      "method": "GET",
+      "path": "/ext/mode_godot/page/godot-panel",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: Godot 开发面板（插件自带 webview 页）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "godot_dev",
+        "title": "Godot 开发",
+        "icon": "🎮",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/godot_dev",
+        "widget": "webview",
+        "props": {
+          "pluginId": "mode_godot",
+          "htmlPath": "/page/godot-panel",
+          "widgetId": "godot_dev"
+        },
+        "order": 30,
+        "description": "Godot 游戏开发模式面板：godot 项目/场景状态 + 执行记录视图",
+        "mode": "godot"
+      }
+    ]
+  }
+}

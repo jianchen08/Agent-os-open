@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * API 服务分支补测（files / pipelines / memory / auth）
  *

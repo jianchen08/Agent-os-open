@@ -1704,13 +1704,13 @@ mod sessions_crud_tests {
     use super::*;
 
     const ADMIN_USER_ID: &str = "00000000-0000-0000-0000-000000000001";
-    const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
+    pub(super) const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
 
     fn sqlite() -> std::sync::Arc<agentos_engine::SqliteStore> {
         std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
     }
 
-    fn session_record(
+    pub(super) fn session_record(
         thread_id: &str,
         active_pipeline_id: Option<&str>,
     ) -> agentos_core::types::SessionRecord {
@@ -1774,19 +1774,19 @@ mod sessions_crud_tests {
 
     /// 可配置行为的存储 mock：各被测方法默认返回正常空值，测试按需注入故障。
     /// 未被任何被测路径触碰的方法以 unreachable! 桩实现（意外耦合即炸出）。
-    struct FlexMock {
-        list_sessions_result: Mutex<
+    pub(super) struct FlexMock {
+        pub(super) list_sessions_result: Mutex<
             Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>,
         >,
-        pipeline_ids_by_thread:
+        pub(super) pipeline_ids_by_thread:
             Mutex<HashMap<String, Result<Vec<String>, agentos_core::types::StorageError>>>,
-        get_session_result: Mutex<
+        pub(super) get_session_result: Mutex<
             Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>,
         >,
-        update_session_result: Mutex<Result<(), agentos_core::types::StorageError>>,
-        create_session_result: Mutex<Result<(), agentos_core::types::StorageError>>,
-        upsert_state_field_result: Mutex<Result<(), agentos_core::types::StorageError>>,
-        get_messages_result: Mutex<
+        pub(super) update_session_result: Mutex<Result<(), agentos_core::types::StorageError>>,
+        pub(super) create_session_result: Mutex<Result<(), agentos_core::types::StorageError>>,
+        pub(super) upsert_state_field_result: Mutex<Result<(), agentos_core::types::StorageError>>,
+        pub(super) get_messages_result: Mutex<
             Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>,
         >,
     }
@@ -1806,7 +1806,7 @@ mod sessions_crud_tests {
     }
 
     impl FlexMock {
-        fn with_sessions(
+        pub(super) fn with_sessions(
             sessions: Vec<agentos_core::types::SessionRecord>,
         ) -> std::sync::Arc<Self> {
             let mock = Self::default();
@@ -1814,7 +1814,7 @@ mod sessions_crud_tests {
             std::sync::Arc::new(mock)
         }
 
-        fn set_pipeline_ids(
+        pub(super) fn set_pipeline_ids(
             &self,
             thread_id: &str,
             r: Result<Vec<String>, agentos_core::types::StorageError>,
@@ -1826,7 +1826,7 @@ mod sessions_crud_tests {
         }
     }
 
-    type SErr = agentos_core::types::StorageError;
+    pub(super) type SErr = agentos_core::types::StorageError;
 
     #[async_trait::async_trait]
     impl StorageBackend for FlexMock {
@@ -1961,7 +1961,10 @@ mod sessions_crud_tests {
         }
     }
 
-    fn state_with(store: Option<std::sync::Arc<dyn StorageBackend>>, session: bool) -> AppState {
+    pub(super) fn state_with(
+        store: Option<std::sync::Arc<dyn StorageBackend>>,
+        session: bool,
+    ) -> AppState {
         let mut state = AppState::new();
         state.store = store;
         if session {
@@ -2712,5 +2715,162 @@ mod message_shaping_and_fallback_tests {
         assert_eq!(pid.len(), 12);
         assert!(pid.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(resp.0["pipeline_ids"], json!([pid]));
+    }
+}
+
+#[cfg(test)]
+mod session_routes_logging_tests {
+    //! 诊断留痕取证：tracing 宏体只在存在订阅者时求值。行为面已由既有用例覆盖
+    //! （503 翻译、降级回退、仲裁取 token），本模块挂采集订阅重跑同路径取证。
+    use agentos_core::traits::StorageBackend;
+
+    use super::sessions_crud_tests::{session_record, state_with, FlexMock, SErr, SEED_ADMIN_PW};
+    use super::*;
+
+    // ── 诊断留痕批：tracing 宏体只在有订阅者时求值 ─────────────────────────
+    //
+    // 这些分支的行为断言已由既有用例覆盖（503 翻译、降级回退、仲裁取 token），
+    // 但消息行本身恒零命中——本模块挂采集订阅重跑同路径，为留痕取证。
+
+    /// 会话列表：单个会话的映射查询失败 → warn 留痕且其余会话照常出口。
+    #[tokio::test]
+    async fn list_sessions_pipeline_lookup_failure_is_logged() {
+        let (guard, logs) = crate::test_env::capture_logs();
+        let _ = &guard;
+        let mut rec = session_record("TD", Some("p1"));
+        rec.pipeline_ids = vec!["p1".into()];
+        let mock = FlexMock::with_sessions(vec![rec]);
+        mock.set_pipeline_ids("TD", Err(SErr::Database("injected lookup fault".into())));
+        let state = state_with(Some(mock as std::sync::Arc<dyn StorageBackend>), false);
+
+        let resp = list_sessions_handler(State(state), HeaderMap::new())
+            .await
+            .unwrap();
+        let text = logs.text();
+        assert_eq!(resp.0["total"], json!(1), "单会话映射失败不得阻断列表");
+        assert!(
+            text.contains("读映射表失败，pipeline_ids 不完整"),
+            "映射表读失败须留痕: {text}"
+        );
+    }
+
+    /// list_sessions 整体查询失败 → 503 且 warn 留痕（不回退内存假成功）。
+    #[tokio::test]
+    async fn list_sessions_query_failure_is_logged_and_503() {
+        let (guard, logs) = crate::test_env::capture_logs();
+        let _ = &guard;
+        let mock = std::sync::Arc::new(FlexMock::default());
+        *mock.list_sessions_result.lock().unwrap() = Err(SErr::Database("injected".into()));
+        let state = state_with(Some(mock as std::sync::Arc<dyn StorageBackend>), true);
+
+        let err = list_sessions_handler(State(state), HeaderMap::new())
+            .await
+            .expect_err("存储故障必须 503，不得伪装空列表");
+        let text = logs.text();
+        assert!(matches!(err, ApiError::ServiceUnavailable { .. }));
+        assert!(
+            text.contains("list_sessions 查询失败，返回 503"),
+            "查询失败须 warn 留痕: {text}"
+        );
+    }
+
+    /// 消息历史查询失败 → 503 且 warn 留痕（不伪装空历史）。
+    #[tokio::test]
+    async fn list_messages_query_failure_is_logged() {
+        let (guard, logs) = crate::test_env::capture_logs();
+        let _ = &guard;
+        let mock = std::sync::Arc::new(FlexMock::default());
+        *mock.get_messages_result.lock().unwrap() = Err(SErr::Database("injected".into()));
+        let state = state_with(Some(mock as std::sync::Arc<dyn StorageBackend>), false);
+
+        let err = list_session_messages_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("T-log".into()),
+            Query(MessageListQuery {
+                pipeline_run_id: Some("p-fail-log".into()),
+                before_sequence: None,
+                after_sequence: None,
+                limit: None,
+            }),
+        )
+        .await
+        .expect_err("查询故障不得伪装空历史");
+        let text = logs.text();
+        assert!(matches!(err, ApiError::ServiceUnavailable { .. }));
+        assert!(
+            text.contains("get_messages_by_pipeline 查询失败，返回 503"),
+            "消息查询失败须 warn 留痕: {text}"
+        );
+    }
+
+    /// create_session token 仲裁两分支的留痕：body 与 token 不一致（取 token）；
+    /// 无 token 有 body（降级取 body，标记可伪造）。
+    #[tokio::test]
+    async fn create_session_user_arbitration_is_logged() {
+        let store = std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        store
+            .create_user(&agentos_core::types::UserRecord {
+                user_id: "u-arb".to_string(),
+                username: "arb_user".to_string(),
+                password: agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap(),
+                email: None,
+                role: "user".to_string(),
+                tenant_id: "u-arb".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                last_login_at: None,
+                must_change_password: false,
+            })
+            .await
+            .unwrap();
+        let state = state_with(
+            Some(store.clone() as std::sync::Arc<dyn StorageBackend>),
+            true,
+        );
+        let token = agentos_http::auth::encode_token(
+            agentos_http::auth::TokenType::Access,
+            &agentos_http::auth::BuiltInUser::from(
+                &store
+                    .get_user_by_username("arb_user")
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            ),
+            3600,
+        );
+
+        // 分支一：token 用户 vs body 用户不一致
+        let (guard, logs) = crate::test_env::capture_logs();
+        let _ = &guard;
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let resp = create_session_handler(
+            State(state.clone()),
+            headers,
+            Json(json!({"title": "仲裁", "user_id": "spoofed"})),
+        )
+        .await;
+        let text = logs.text();
+        assert_eq!(resp.0["metadata"]["user_id"], json!("u-arb"));
+        assert!(
+            text.contains("body user_id 与 token 用户不一致"),
+            "仲裁分支须留痕: {text}"
+        );
+
+        // 分支二：无 token 有 body → 降级取 body
+        let (guard2, logs2) = crate::test_env::capture_logs();
+        let _ = &guard2;
+        let resp2 = create_session_handler(
+            State(state),
+            HeaderMap::new(),
+            Json(json!({"title": "降级", "user_id": "embedded_user"})),
+        )
+        .await;
+        let text2 = logs2.text();
+        assert_eq!(resp2.0["metadata"]["user_id"], json!("embedded_user"));
+        assert!(
+            text2.contains("降级使用 body user_id"),
+            "降级分支须留痕（标记可伪造）: {text2}"
+        );
     }
 }

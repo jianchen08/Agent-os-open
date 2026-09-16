@@ -8,7 +8,7 @@ ReverserRegistry 路由、FileReverser 逆操作（用 tmp_path 真实文件）�
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -626,3 +626,150 @@ class TestModelsRoundTrip:
 
         assert OperationType("create") == OperationType.CREATE
         assert OperationType("delete").value == "delete"
+
+
+# ============================================================
+# 缺口补测：list_operations 检查点筛选 / 令牌落账失败拒绝 / 全局单例
+# ============================================================
+
+
+class TestListOperationsCheckpointFilter:
+    """list_operations(checkpoint_id=...) 按检查点时刻筛选（manager.py:221-224）。
+
+    语义：checkpoint_id 给定且能解析到检查点 → 只保留 created_at >= 检查点
+    时刻的操作；检查点 id 不存在 → 不做筛选（返回该任务全部，不静默清空）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_filter_keeps_operations_after_checkpoint(self, monkeypatch: Any) -> None:
+        from models import OperationType
+
+        mgr = _make_manager()
+        await mgr.record_operation("t1", "file_write", OperationType.CREATE, "before", {})
+        cp_id = await mgr.create_checkpoint(task_id="t1")
+
+        # 检查点时刻之后记录的操作（时间戳递增可控：直接改 created_at 精确分界）
+        await mgr.record_operation("t1", "file_write", OperationType.CREATE, "after", {})
+
+        cp = await mgr.get_checkpoint(cp_id)
+        ops_all = await mgr.list_operations("t1")
+        for op in ops_all:
+            if op.target == "before":
+                op.created_at = cp.created_at - timedelta(seconds=1)
+
+        filtered = await mgr.list_operations("t1", checkpoint_id=cp_id)
+
+        assert [o.target for o in filtered] == ["after"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_checkpoint_id_does_not_filter(self) -> None:
+        """检查点 id 查不到 → 不施加任何筛选（不静默返回空）。"""
+        from models import OperationType
+
+        mgr = _make_manager()
+        await mgr.record_operation("t1", "file_write", OperationType.CREATE, "a", {})
+        await mgr.record_operation("t1", "file_write", OperationType.CREATE, "b", {})
+
+        unfiltered = await mgr.list_operations("t1")
+        result = await mgr.list_operations("t1", checkpoint_id="ghost-cp")
+
+        assert [o.target for o in result] == [o.target for o in unfiltered] == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_filter_combines_with_status(self) -> None:
+        """checkpoint 与 status 两个筛选叠加（不互相覆盖）。"""
+        from models import OperationStatus, OperationType
+
+        mgr = _make_manager()
+        await mgr.record_operation("t1", "file_write", OperationType.CREATE, "old", {})
+        cp_id = await mgr.create_checkpoint(task_id="t1")
+        op_id = await mgr.record_operation("t1", "file_write", OperationType.CREATE, "new", {})
+        await mgr.record_operation("t1", "file_write", OperationType.CREATE, "new2", {})
+
+        cp = await mgr.get_checkpoint(cp_id)
+        for op in await mgr.list_operations("t1"):
+            if op.target == "old":
+                op.created_at = cp.created_at - timedelta(seconds=1)
+        await mgr._update_operation_status(op_id, OperationStatus.ROLLED_BACK)
+
+        result = await mgr.list_operations(
+            "t1", checkpoint_id=cp_id, status=OperationStatus.ROLLED_BACK
+        )
+
+        assert [o.target for o in result] == ["new"]
+
+
+class TestRollingBackTokenFailure:
+    """令牌落账失败 → 拒绝执行逆操作（manager.py:352-358）。
+
+    意图（F-GITREV-1）：ROLLING_BACK 令牌是防双回滚的唯一凭据；令牌写不进去
+    即失去幂等保护——宁可本次回滚失败，也不允许裸执行逆操作。
+    """
+
+    @pytest.mark.asyncio
+    async def test_token_write_failure_refuses_reverse(self) -> None:
+        from models import OperationType
+
+        fake = _FakeReverser(supported=["file_write"])
+        mgr = _make_manager_with_fake_reverser(fake)
+        await mgr.record_operation("t1", "file_write", OperationType.CREATE, "a", {})
+
+        async def _always_fail(_oid: str, _status: Any) -> None:
+            raise RuntimeError("ledger down")
+
+        mgr._update_operation_status = _always_fail  # type: ignore[method-assign]
+
+        result = await mgr.rollback(task_id="t1", steps=1)
+
+        assert fake.calls == []  # 逆操作一次都没跑
+        assert result.failed_count == 1
+        assert result.rolled_back_count == 0
+        assert result.success is False
+        assert any("置回滚中令牌失败" in e for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_second_call_after_token_failure_retries(self) -> None:
+        """令牌失败后 op 仍是 EXECUTED → 下次回滚仍然入选（不误判为已回滚）。"""
+        from models import OperationStatus, OperationType
+
+        fake = _FakeReverser(supported=["file_write"])
+        mgr = _make_manager_with_fake_reverser(fake)
+        op_id = await mgr.record_operation("t1", "file_write", OperationType.CREATE, "a", {})
+
+        broken = {"on": True}
+        real_update = mgr._update_operation_status
+
+        async def _flaky(oid: str, status: OperationStatus) -> None:
+            if broken["on"]:
+                raise RuntimeError("ledger down")
+            await real_update(oid, status)
+
+        mgr._update_operation_status = _flaky  # type: ignore[method-assign]
+
+        first = await mgr.rollback(task_id="t1", steps=1)
+        assert first.failed_count == 1
+        assert (await mgr.get_operation(op_id)).status == OperationStatus.EXECUTED
+
+        broken["on"] = False
+        second = await mgr.rollback(task_id="t1", steps=1)
+
+        assert second.rolled_back_count == 1
+        assert [c.target for c in fake.calls] == ["a"]
+
+
+class TestGlobalManagerAccessor:
+    """get_rollback_manager 全局单例（manager.py:402-407）。"""
+
+    def test_returns_same_instance_across_calls(self) -> None:
+        import manager as manager_mod
+
+        saved = manager_mod._global_rollback_manager
+        manager_mod._global_rollback_manager = None
+        try:
+            first = manager_mod.get_rollback_manager()
+            second = manager_mod.get_rollback_manager()
+
+            assert isinstance(first, manager_mod.RollbackManager)
+            assert first is second
+        finally:
+            manager_mod._global_rollback_manager = saved

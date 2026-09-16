@@ -74,4 +74,30 @@ describe('功能点：ChatInputActions 渲染 chat 空间声明的输入动作',
     render(<ChatInputActions />)
     expect(screen.queryByRole('button', { name: '内联卡片' })).not.toBeInTheDocument()
   })
+
+  it('选择器类 widget 声明（ui_schema form / select-option）不进 pages 动作通道', () => {
+    contributionRegistry.loadFromSchema({
+      plugin_contributes: [
+        {
+          plugin_id: 'task_form',
+          plugin_name: 'TaskForm',
+          ui_schema: {
+            widgets: [
+              { id: 'task_mode', type: 'form', space: 'chat-input', props: {} },
+              {
+                id: 'mode_opt_coding',
+                type: 'select-option',
+                space: 'chat-input',
+                props: { target: 'task_mode', value: 'coding', label: '编码' },
+              },
+            ],
+          },
+        },
+      ],
+      plugin_configs: [],
+    })
+
+    render(<ChatInputActions />)
+    expect(screen.queryByTestId('chat-input-actions')).toBeNull()
+  })
 })

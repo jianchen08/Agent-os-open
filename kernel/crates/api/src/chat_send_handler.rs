@@ -1934,4 +1934,397 @@ mod tests {
         );
         assert_eq!(calls(&d).len(), 1, "成功路径前台派发恰好一次");
     }
+    // ── 覆盖率补测批：no_dispatch 热路径/留痕 + background 失败面 + 出生落库 ──
+
+    /// no_dispatch 命中 registry 已有条目（热路径）→ 键并入既有 state，
+    /// 而非以 overlay 为基底重建（避免顶掉运行期累积的其它键）。
+    #[tokio::test]
+    async fn no_dispatch_merges_into_existing_registry_entry() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let pid = format!("pipe_merge_{}", uuid::Uuid::new_v4().simple());
+        store
+            .link_pipeline_session(&pid, "thread-merge-1", "default")
+            .await
+            .unwrap();
+        // 预置热条目：已有运行期累积键（overlay 里没有）
+        let registry = agentos_session::pipeline_state_registry::global_registry();
+        registry.get_or_init(
+            "default",
+            &pid,
+            "thread-merge-1",
+            "agentos",
+            json!({"task.status": "running", "turn": 7}),
+        );
+
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store.clone()));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "pipeline_id": pid,
+                    "message": "更新登记态",
+                    "user_id": "u1",
+                    "no_dispatch": true,
+                    "state": {"task.result.summary": "阶段完成"},
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "recorded");
+        assert!(d.calls.lock().unwrap().is_empty(), "no_dispatch 不得派发");
+
+        let entry = registry.get("default", &pid).expect("条目应在");
+        let st = entry.read();
+        assert_eq!(
+            st.state["task.result.summary"], "阶段完成",
+            "overlay 键写入既有条目"
+        );
+        assert_eq!(
+            st.state["task.status"], "running",
+            "既有键保留（合并非替换）"
+        );
+        assert_eq!(st.state["turn"], 7, "运行期累积键不得被顶掉");
+        registry.remove("default", &pid);
+    }
+
+    /// 只让 `upsert_state_field` 失败、其余转发真实库的探针 store。
+    struct UpsertFailStore {
+        inner: Arc<agentos_engine::SqliteStore>,
+    }
+
+    #[async_trait]
+    impl StorageBackend for UpsertFailStore {
+        async fn upsert_state_field(
+            &self,
+            _pipeline_id: &str,
+            _tenant_id: &str,
+            _key: &str,
+            _value: &Value,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            Err(agentos_core::types::StorageError::Database(
+                "injected upsert failure".to_string(),
+            ))
+        }
+        async fn get_run(
+            &self,
+            run_id: &str,
+        ) -> Result<agentos_core::types::RunRecord, agentos_core::types::StorageError> {
+            self.inner.get_run(run_id).await
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            pipeline_id: &str,
+            opts: agentos_core::traits::MessageQueryOpts,
+        ) -> Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.get_messages_by_pipeline(pipeline_id, opts).await
+        }
+        async fn get_blob(
+            &self,
+            blob_id: &str,
+        ) -> Result<Vec<u8>, agentos_core::types::StorageError> {
+            self.inner.get_blob(blob_id).await
+        }
+        async fn append_trace(
+            &self,
+            entry: agentos_core::types::TraceEntry,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.append_trace(entry).await
+        }
+        async fn update_run_status(
+            &self,
+            run_id: &str,
+            status: agentos_core::types::RunStatus,
+            branch: Option<&str>,
+            seq: Option<u32>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner
+                .update_run_status(run_id, status, branch, seq)
+                .await
+        }
+        async fn create_run(
+            &self,
+            run_id: &str,
+            config_hash: &str,
+            tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::create_run(
+                self.inner.as_ref(),
+                run_id,
+                config_hash,
+                tenant_id,
+            )
+            .await
+        }
+        async fn store_blob(
+            &self,
+            data: &[u8],
+            mime_type: &str,
+        ) -> Result<String, agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::store_blob(self.inner.as_ref(), data, mime_type)
+                .await
+        }
+        async fn create_session(
+            &self,
+            session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.create_session(session).await
+        }
+        async fn get_session(
+            &self,
+            thread_id: &str,
+        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.get_session(thread_id).await
+        }
+        async fn list_sessions(
+            &self,
+            filter: agentos_core::traits::SessionListFilter,
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.list_sessions(filter).await
+        }
+        async fn update_session(
+            &self,
+            session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.update_session(session).await
+        }
+        async fn delete_session(
+            &self,
+            thread_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            self.inner.delete_session(thread_id).await
+        }
+        async fn link_pipeline_session(
+            &self,
+            pipeline_id: &str,
+            thread_id: &str,
+            tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner
+                .link_pipeline_session(pipeline_id, thread_id, tenant_id)
+                .await
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            thread_id: &str,
+            tenant_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            self.inner
+                .list_pipeline_ids_by_thread(thread_id, tenant_id)
+                .await
+        }
+        async fn get_thread_id_by_pipeline(
+            &self,
+            pipeline_id: &str,
+        ) -> Result<Option<String>, agentos_core::types::StorageError> {
+            self.inner.get_thread_id_by_pipeline(pipeline_id).await
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            thread_id: &str,
+            tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
+            self.inner
+                .get_step_traces_by_thread(thread_id, tenant_id)
+                .await
+        }
+        async fn create_user(
+            &self,
+            user: &agentos_core::types::UserRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.create_user(user).await
+        }
+        async fn get_user_by_id(
+            &self,
+            user_id: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.get_user_by_id(user_id).await
+        }
+        async fn get_user_by_username(
+            &self,
+            username: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.get_user_by_username(username).await
+        }
+        async fn list_users(
+            &self,
+        ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            self.inner.list_users().await
+        }
+        async fn update_last_login(
+            &self,
+            user_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            self.inner.update_last_login(user_id).await
+        }
+        async fn update_user_password(
+            &self,
+            user_id: &str,
+            password_hash: &str,
+            must_change_password: bool,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            self.inner
+                .update_user_password(user_id, password_hash, must_change_password)
+                .await
+        }
+        async fn delete_user(
+            &self,
+            user_id: &str,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            self.inner.delete_user(user_id).await
+        }
+    }
+
+    /// no_dispatch 的 state 持久化失败：内存态已生效 → 只 warn 留痕，
+    /// 调用方仍拿 recorded（冷恢复会缺这批键，故留痕必须可诊断）。
+    #[tokio::test]
+    async fn no_dispatch_persist_failure_warns_but_reports_recorded() {
+        let (guard, logs) = crate::test_env::capture_logs();
+        let _ = &guard;
+        let inner = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let pid = format!("pipe_nd_fail_{}", uuid::Uuid::new_v4().simple());
+        inner
+            .link_pipeline_session(&pid, "thread-nd-fail", "default")
+            .await
+            .unwrap();
+        let store: Arc<dyn StorageBackend> = Arc::new(UpsertFailStore {
+            inner: inner.clone(),
+        });
+
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "pipeline_id": pid,
+                    "message": "登记容器任务",
+                    "user_id": "u1",
+                    "no_dispatch": true,
+                    "state": {"task.owned.nodispatch_fail.title": "容器项目"},
+                }),
+            )
+            .await
+            .expect("no_dispatch 持久化失败不得上抛（内存态仍生效）");
+        let text = logs.text();
+
+        assert_eq!(res["status"], "recorded");
+        assert!(d.calls.lock().unwrap().is_empty(), "no_dispatch 不得派发");
+        let registry = agentos_session::pipeline_state_registry::global_registry();
+        let entry = registry.get("default", &pid).expect("内存态应已注册");
+        assert_eq!(
+            entry.read().state["task.owned.nodispatch_fail.title"],
+            "容器项目",
+            "持久化失败不影响内存态"
+        );
+        assert!(
+            text.contains("no_dispatch state 持久化失败"),
+            "持久化失败必须 warn 留痕: {text}"
+        );
+        registry.remove("default", &pid);
+    }
+
+    /// 创建分支出生字段落库失败 → 显式终止本次发送（不得静默丢出生字段：
+    /// 任务血缘/归属依赖它，缺了后续轮次读不到）。
+    #[tokio::test]
+    async fn create_birth_persist_failure_terminates_send() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        sqlite
+            .with_conn::<(), String>(|conn| {
+                conn.execute("DROP TABLE pipeline_state", [])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let store: Arc<dyn StorageBackend> = sqlite;
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store));
+        let err = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true,
+                    "message": "登记容器任务",
+                    "user_id": "u1",
+                    "state": {"task.owned.birth_fail.title": "容器项目"},
+                }),
+            )
+            .await
+            .expect_err("出生字段落库失败必须终止本次发送");
+        assert!(
+            format!("{err}").contains("出生字段落库失败"),
+            "错误须指明失败环节: {err}"
+        );
+        assert!(d.calls.lock().unwrap().is_empty(), "终止即不得派发");
+    }
+
+    /// background 派发失败但 session 未接线：只 error 留痕，不 panic、无补报。
+    #[tokio::test]
+    async fn background_dispatch_failure_without_session_only_logs() {
+        let (guard, logs) = crate::test_env::capture_logs();
+        let _ = &guard;
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let dispatcher: Arc<dyn PipelineDispatcher> = Arc::new(FailingDispatcher {
+            err: "engine not available".into(),
+        });
+        let h = ChatSendHandler::with_store(dispatcher, Some(store));
+        let res = h
+            .handle(
+                "send_message",
+                json!({"create": true, "message": "后台任务", "user_id": "u1",
+                       "background": true}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res["status"], "created",
+            "响应后失败无法携带，仍返回 created"
+        );
+        // 后台派发是 spawn：有界等待留痕落地（真实时钟，10ms 步长）
+        let mut waited = 0;
+        while !logs.text().contains("后台派发失败（任务管道未启动）") && waited < 200
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            waited += 1;
+        }
+        let text = logs.text();
+        assert!(
+            text.contains("chat.send_message 后台派发失败（任务管道未启动）"),
+            "后台派发失败必须 error 留痕: {text}"
+        );
+    }
+
+    /// state overlay 含空串键 → 协议错误（空键会污染点号键空间且无法表达）。
+    #[tokio::test]
+    async fn state_empty_string_key_rejected() {
+        let (h, d) = handler();
+        expect_protocol_error(
+            &h,
+            &d,
+            json!({
+                "create": true, "message": "m", "user_id": "u1",
+                "state": {"": "x"},
+            }),
+            "state 键不得为空串",
+        )
+        .await;
+        // 第二组（有区分度输入）：空键与合法键混排也必须整体拒绝（不得部分写入）
+        expect_protocol_error(
+            &h,
+            &d,
+            json!({
+                "create": true, "message": "m", "user_id": "u1",
+                "state": {"task.goal": "正常目标", "": "空"},
+            }),
+            "混排空键同样拒绝",
+        )
+        .await;
+    }
 }

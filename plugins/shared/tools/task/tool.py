@@ -1376,7 +1376,6 @@ class TaskTool(BuiltinTool):
         # 恢复经 resume_pipeline 直接执行（无需 TaskWorker），仅恢复任务状态；
         # 任务管道执行由会话对话 / chat.send_message → PipelineExecutor 驱动。
         logger.info("[TaskTool] resume 完成（仅状态恢复，执行由会话对话驱动）: task_id=%s", task.id)
-        execution_warning = None
 
         result_data: dict[str, Any] = {
             "task_id": task.id,
@@ -1387,9 +1386,6 @@ class TaskTool(BuiltinTool):
 
         if message:
             result_data["message_injected"] = True
-
-        if execution_warning:
-            result_data["execution_warning"] = execution_warning
 
         return create_success_result(
             data=result_data,

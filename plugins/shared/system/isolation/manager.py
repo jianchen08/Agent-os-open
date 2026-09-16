@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import logging
 from datetime import UTC, datetime
-from pathlib import Path, PurePath  # noqa: F401
+from pathlib import Path, PurePath, PurePosixPath  # noqa: F401
 from typing import Any, cast
 
 from decider import IsolationDecider, IsolationUnrecoverableError
@@ -1470,18 +1470,20 @@ class IsolationManager:
 
         # 从 /mnt/d/myproject/xxx 提取 /mnt/d（WSL 路径的前两段）
         # 同时从 /mnt/d 反推 Windows 盘符 D:（drvfs mount 用）
-        # 注意：Windows 宿主上 PurePath("/mnt/d/...").parts[0] 恒为 "\\"
-        # （pathlib 按宿主平台解析），"/mnt" 判断恒假——本分支是 WSL/Linux
-        # 专用修复，Windows 直跑时走日志告警并跳过（预期行为，非 bug）。
-        parts = PurePath(workspace).parts
-        if len(parts) < 2 or parts[0] != "/mnt" or len(parts[1]) != 1:
+        # workspace 是 WSL 侧路径，必须按 POSIX 语法解析（PurePosixPath 纯路径，
+        # 跨平台无 fs 访问）：宿主 pathlib（Windows → PureWindowsPath）会把
+        # parts[0] 解析成 "\\"，守卫恒早退、修复体恒死（簇 E 立案缺陷的根因）。
+        # POSIX 宿主同理：PurePath("/mnt/d").parts = ("/", "mnt", "d")，
+        # parts[0] 是 "/" 亦非 "/mnt"——两种宿主都只有显式 POSIX 解析可达。
+        parts = PurePosixPath(workspace).parts
+        if len(parts) < 3 or parts[0] != "/" or parts[1] != "mnt" or len(parts[2]) != 1:
             logger.warning(
                 "[IsolationManager] EIO 自愈：workspace 非 /mnt/<x>/... 形态，跳过宿主修复 | env=%s | ws=%s",
                 env_id, workspace,
             )
             return False
-        drive_letter = parts[1].upper()
-        mount_point = f"/mnt/{parts[1].lower()}"
+        drive_letter = parts[2].upper()
+        mount_point = f"/mnt/{parts[2].lower()}"
 
         # umount -l（lazy，不阻塞即使有进程在用）+ mount -t drvfs 重建 9p 通道。
         # 用 && 串联：umount 失败则不 mount（避免重复挂载）。

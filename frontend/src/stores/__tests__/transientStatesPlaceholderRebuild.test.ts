@@ -26,12 +26,7 @@ vi.mock('@/services/api/session', () => ({
   getMessages: mockGetMessages,
 }))
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockSmall())
 
 const PIPELINE_ID = 'pipe-transient-1'
 const THREAD_ID = 'thread-transient-1'

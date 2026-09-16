@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import time as _time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
@@ -482,6 +483,108 @@ def _extract_thinking_from_content(content: str | None) -> tuple[str | None, str
     return thinking if thinking else None, cleaned if cleaned else None
 
 
+# ── MiniMax 原生工具调用正文兜底解析（BUG-17）────────────────────────────
+# MiniMax-M2/M3 系以特殊标记承载工具调用（<minimax:tool_call> 容器 + invoke/
+# parameter 子标签）。上游未激活 tool-call 解析时（请求未携带 tools 声明等），
+# 调用意图以正文到达，标记还会呈转义倾倒形态 ]<]minimax[>[<invoke ...>
+# （生产 2026-09-15 实测字节）。此处把正文中的调用块解析回结构化 tool_calls
+# 并从正文剥离——否则调用意图泄漏为 UI 正文且工具永不执行。
+# 标签前缀三种到达形态：纯净 <tag>、命名空间 <minimax:tag>、转义倾倒。
+_TAG_OPEN = r"(?:<(?:minimax:)?|\]<\]minimax\[>\[<)"
+_TAG_CLOSE = r"(?:</(?:minimax:)?|\]<\]minimax\[>\[</)"
+# 调用块：容器非贪婪捕获到首个闭合（截断流无闭合时容忍到文本末尾）。
+_MINIMAX_BLOCK_RE = re.compile(
+    _TAG_OPEN + r"tool_call\s*>(.*?)(?:" + _TAG_CLOSE + r"tool_call\s*>|\Z)",
+    re.DOTALL,
+)
+# invoke：闭合以 lookahead 终结（容忍缺闭合，截到文本末尾）。
+_MINIMAX_INVOKE_RE = re.compile(
+    _TAG_OPEN + r'invoke\s+name="([^"]+)"\s*>(.*?)(?=' + _TAG_CLOSE + r"invoke\s*>|\Z)",
+    re.DOTALL,
+)
+# parameter：终结点 = 闭合标签 / 下一个 parameter 开标签 / invoke 闭合——
+# 模型漏写 parameter 闭合时（实测有），截到下一边界保参不丢（值可能带模型
+# 自己写错的残余闭标签，原样交付不做猜测性清洗）。
+_MINIMAX_PARAM_RE = re.compile(
+    _TAG_OPEN + r'parameter\s+name="([^"]+)"\s*>(.*?)'
+    r"(?=" + _TAG_CLOSE + r"parameter\s*>|" + _TAG_OPEN + r"parameter\s+name=|"
+    + _TAG_CLOSE + r"invoke\s*>|\Z)",
+    re.DOTALL,
+)
+
+
+def _parse_bare_json_tool_call(body: str) -> dict[str, Any] | None:
+    """容器内裸 JSON 形态解析（生产 2026-09-15 16:52 实证）。
+
+    形态：``{"name": <工具名>, "arguments": <对象|JSON 字符串>}``。arguments
+    为字符串时原样透传（契约的 arguments 本就是 JSON 字符串；非 JSON 的坏
+    字符串交由下游 tool 层可见失败，不在此猜测修复）；其余类型 json.dumps。
+    body 非 JSON 对象或缺 name → None（不识别，交由调用方保留原文）。
+    """
+    try:
+        obj = json.loads(body.strip())
+    except ValueError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    name = obj.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    raw_args = obj.get("arguments", {})
+    args_out = raw_args if isinstance(raw_args, str) else json.dumps(raw_args, ensure_ascii=False)
+    return {
+        "id": f"call_{uuid.uuid4().hex[:24]}",
+        "name": name,
+        "arguments": args_out,
+    }
+
+
+def parse_minimax_native_tool_calls(text: str) -> tuple[list[dict[str, Any]], str]:
+    """解析正文中的 MiniMax 原生工具调用块。
+
+    容器体内两形态：invoke/parameter 子标签（官方模板）或裸 JSON 对象
+    （name + arguments，arguments 可为对象或 JSON 字符串——生产 16:52 实证）。
+
+    Args:
+        text: LLM 返回的原始正文
+
+    Returns:
+        (tool_calls, cleaned_text)。tool_calls 与 adapter 流式/非流式解析
+        契约同构（id=call_<hex>、name、arguments=JSON 字符串，参数序保持）；
+        无可识别调用块时返回 ([], 原文)——不误吞无法解读的正文。
+        cleaned_text 仅去空白不做猜测性改写。
+    """
+    blocks = list(_MINIMAX_BLOCK_RE.finditer(text))
+    if not blocks:
+        return [], text
+
+    tool_calls: list[dict[str, Any]] = []
+    for block in blocks:
+        body = block.group(1)
+        invokes = list(_MINIMAX_INVOKE_RE.finditer(body))
+        if invokes:
+            for inv in invokes:
+                params: dict[str, str] = {}
+                for prm in _MINIMAX_PARAM_RE.finditer(inv.group(2)):
+                    params[prm.group(1)] = prm.group(2).strip()
+                tool_calls.append(
+                    {
+                        "id": f"call_{uuid.uuid4().hex[:24]}",
+                        "name": inv.group(1),
+                        "arguments": json.dumps(params, ensure_ascii=False),
+                    }
+                )
+        else:
+            bare = _parse_bare_json_tool_call(body)
+            if bare is not None:
+                tool_calls.append(bare)
+
+    if not tool_calls:
+        return [], text
+    cleaned = _MINIMAX_BLOCK_RE.sub("", text).strip()
+    return tool_calls, cleaned
+
+
 def _move_to_extra_body(kwargs: dict[str, Any], keys: tuple[str, ...]) -> None:
     """把指定的 kwargs 挪进 extra_body，让 litellm/OpenAI SDK 原样透传给上游。
 
@@ -742,6 +845,20 @@ class _BaseLiteLLMAdapter:
         adapter = get_provider_adapter(model)
         messages = adapter.adapt_messages_before_send(messages, **kwargs)
 
+        # 工具面出站观测（BUG-17 主路径断言点）：行缺失 = 本轮请求无 tools，
+        # 模型将凭历史降级为正文输出原生工具标记。
+        if tools:
+            logger.info(
+                "[adapter] 工具面出站 tools=%d | model=%s names=%s",
+                len(tools),
+                model,
+                [
+                    (t.get("function") or {}).get("name", "?")
+                    for t in tools
+                    if isinstance(t, dict)
+                ][:20],
+            )
+
         # 弹出 adapter 专属参数（不发给 litellm / API）
         kwargs.pop("reasoning_retention", None)
 
@@ -857,13 +974,15 @@ class _BaseLiteLLMAdapter:
                 "cached_tokens": getattr(_prompt_details, "cached_tokens", 0) or 0,
             }
 
-        return LLMResponse(
+        result = LLMResponse(
             text=result_text,
             tool_calls=tool_calls,
             thinking_text=thinking_text,
             usage=usage,
             finish_reason=getattr(choice, "finish_reason", None),
         )
+        self._recover_minimax_text_tool_calls(result, model)
+        return result
 
     async def _call_streaming(
         self,
@@ -930,7 +1049,9 @@ class _BaseLiteLLMAdapter:
         )
         state.last_chunk_monotonic = state.stream_start
         await self._consume_stream(response, first_chunk, state, model, inter_chunk_timeout)
-        return self._build_streaming_response(state)
+        result = self._build_streaming_response(state)
+        self._recover_minimax_text_tool_calls(result, model)
+        return result
 
     async def _establish_first_chunk(
         self,
@@ -1555,6 +1676,31 @@ class _BaseLiteLLMAdapter:
                 }
             )
         return parsed
+
+    @staticmethod
+    def _recover_minimax_text_tool_calls(response: LLMResponse, model: str) -> None:
+        """正文原生工具调用兜底：结构化 tool_calls 缺席时从正文解析（原地改写）。
+
+        仅 minimax 模型启用；上游已返回结构化 tool_calls 时不解析（不重复）。
+        解析成功即改写 response（tool_calls 补入、正文剥离调用块），并留痕
+        warning——这是上游未激活 tool-call 解析的信号，不是常规路径。
+        """
+        if response.tool_calls or not response.text:
+            return
+        if "minimax" not in model.lower():
+            return
+        tool_calls, cleaned = parse_minimax_native_tool_calls(response.text)
+        if not tool_calls:
+            return
+        logger.warning(
+            "[adapter] minimax 工具调用以正文标记到达（结构化 tool_calls 缺席），"
+            "已解析 %d 个并从正文剥离 | model=%s names=%s",
+            len(tool_calls),
+            model,
+            [tc["name"] for tc in tool_calls],
+        )
+        response.tool_calls = tool_calls
+        response.text = cleaned or None
 
     def _normalize_tool_calls(self, tool_calls_map: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
         """将流式收集的 tool_calls 映射归一化。"""

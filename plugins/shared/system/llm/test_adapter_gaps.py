@@ -49,6 +49,12 @@ while _s in sys.path:
     sys.path.remove(_s)
 sys.path.insert(0, _s)
 
+# 裸名逐出：exceptions 等平铺名遍布各插件（cost_control 有同名 exceptions.py），
+# 收集期被别的插件占位会让 key_pool 的 `from exceptions import ...` 打到错误
+# 实现（共跑收集 ImportError）。逐出后按本目录重解析。
+for _bare in ("adapter", "exceptions", "key_pool", "router_factory", "stream_client"):
+    sys.modules.pop(_bare, None)
+
 import adapter as adapter_mod  # noqa: E402  平铺 import，与生产代码一致
 import exceptions as _llm_exceptions  # noqa: E402
 import key_pool as _kp_mod  # noqa: E402

@@ -281,7 +281,6 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
         未命中 plain（含缺省空目录分支的条件组合）返回 None，交由 worktree 路径。
         """
         _ws_mode = self._resolve_ws_mode(task_data)
-        has_explicit_workspace = task_data.get("_has_explicit_workspace", False)
 
         # 显式 workspace 的 plain：直接操作该目录（无 git worktree/branch）
         if _ws_mode == "plain" and workspace:
@@ -326,20 +325,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
             )
             return meta
 
-        # 显式 plain 空目录分支：plain 组合在上方已全部返回，此处仅承接
-        # (plain, 无显式)；非 plain 的无显式任务走 worktree 路径不经过此处
-        if _ws_mode == "plain" and not has_explicit_workspace:
-            ws_base = self._get_workspace_root()
-            plain_path = ws_base / task_id
-            plain_path.mkdir(parents=True, exist_ok=True)
-            meta = {"mode": "plain", "path": str(plain_path)}
-            self._ws_meta_store[task_id] = meta
-            logger.debug(
-                "[WorkspaceLifecycle] plain 模式: task_id=%s, path=%s（无 git 操作）",
-                task_id,
-                plain_path,
-            )
-            return meta
+        # 非 plain 的无显式任务走 worktree 路径不经过此处
         return None
 
     def _downgrade_plain_if_not_git_repo(

@@ -35,4 +35,32 @@
 # agentos-kernel.rs 装配运行时路径（e2e 车道覆盖，不在本口径）。
 # 下一批目标 = invoker.rs 生产代码 682（tests.rs 5034 属分母怪象）、
 # plugin_check.rs 135、loader.rs 124、store.rs 119。
-rust_line_coverage=94.0
+#
+# 收紧（2026-09-16 覆盖率收口批）：94→95——本地 cargo llvm-cov 全仓实测
+# 94.24%（83155/88241 DA 行，5086 缺），CI gate 同配方。增量来源 = 本批
+# 53 用例（+372 生产行，测试代码面另计）：engine/store.rs 生产缺行
+# 751→509、condition.rs 22→7、pipeline_loop.rs 255→239、api/routes.rs
+# 238→160、plugin-loader/loader.rs 50→34、mcp/client.rs 76→71、invoker
+# 恢复收集（提交 573d144fd/89ff40cef/9e0f8d5b0/9be001c9c/0ba8cdadc/
+# 4f379fc2b/5aebe6488/c11b5962f/eb378c820/219e0a78a）。
+#
+# ⚠️ 度量陷阱（本批踩实，务必先看这一条）：`cargo llvm-cov --ignore-run-fail`
+# 下**任一 target 测试红 → 该 target 覆盖的全部文件按 0 行计**，与真实覆盖
+# 无关。本机实证：invoker --lib 一次负载抖动（211 用例中 1 红）即让
+# invoker.rs 1954/2196 行 + invoker/tests.rs 5609 行整体归零，全仓假跌至
+# 38.02%（与批七的 83.68% 假数同族）。api crate 同理（server/tests.rs
+# 7003 行归零 → 47.88%）。**判据：先看 `targets failed`，非零即本次度量
+# 无效，不要读那个百分比**；须独占空闲窗口重测。
+# 本次实测口径说明：api crate 有两例负载敏感 flake（plugin_watcher::
+# reverify_host_evict_failure_is_warned_and_continues、
+# server::hot_reload_compiles_step_referencing_plugin_discovered_after_boot）
+# 单跑绿、全量并发下偶红，为取其覆盖贡献而以 `-- --skip <两例>` 跑（否则
+# 整个 api crate 归零）。此二例是**既有 flake**（非本批引入），修复前
+# 本文件口径无法稳定执法。
+# 同批两条真缺陷修（非覆盖率）：pipeline_loader 13 处与 server::tests
+# make_engine_state 补 test_env::pin_user_root——宿主机真实用户空间播种过的
+# pipelines/autonomous.yaml 旁路用例 TempDir，致 10+ 用例读真实配置误红
+# （提交 5371899ba/8d3df5ded；api lib 21 failed→2 failed）。
+# 剩余真零覆盖 3 文件 58 行 = native-sdk-test-plugin/lib.rs（测试夹具）、
+# plugin-loader/error.rs、session/lib.rs。
+rust_line_coverage=95.0

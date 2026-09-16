@@ -27,9 +27,21 @@ import sys
 import types
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
+
+# 平铺裸名自举 + 逐出：exceptions/budget_manager/constants/config 等名字遍布各
+# 插件（llm 有同名 exceptions.py），车道共跑时被别的插件占位会让下面的平铺
+# import 打到错误实现（收集期 ImportError）。
+_PLUGIN_DIR = str(Path(__file__).resolve().parent)
+while _PLUGIN_DIR in sys.path:
+    sys.path.remove(_PLUGIN_DIR)
+sys.path.insert(0, _PLUGIN_DIR)
+for _bare in ("exceptions", "budget_manager", "constants", "config", "tokenizer"):
+    sys.modules.pop(_bare, None)
+
 from budget_manager import (
     BudgetAlert,
     BudgetAlertAction,

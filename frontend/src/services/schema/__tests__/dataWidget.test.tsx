@@ -16,6 +16,7 @@ import {
   normalizeRows,
   normalizeSeries,
   normalizeScalar,
+  resetSharedFetchCache,
   useDataWidget,
 } from '@/services/schema/dataWidget'
 
@@ -40,6 +41,7 @@ beforeEach(() => {
   apiGet.mockResolvedValue({ data: {} })
   apiCall.mockReset()
   apiCall.mockResolvedValue({ data: { ok: true } })
+  resetSharedFetchCache()
 })
 
 describe('数据形状协议', () => {
@@ -325,5 +327,61 @@ describe('StatusCard valueKey（A2 成本卡前置）', () => {
       />,
     )
     await waitFor(() => expect(screen.getByText('62%')).toBeInTheDocument())
+  })
+})
+
+describe('同 URI 并发取数合并', () => {
+  /** 观测壳：按 uri 渲染 N 个消费同 URI 的卡片（模拟同组多 widget） */
+  function Multi({ uri, count }: { uri: string; count: number }) {
+    return (
+      <div>
+        {Array.from({ length: count }, (_, i) => (
+          <StatusCardWidget key={i} label={`卡${i}`} datasourceUri={uri} valueKey="v" />
+        ))}
+      </div>
+    )
+  }
+
+  it('多个 widget 同刻消费同一 URI：只发一次请求，各卡都拿到数据', async () => {
+    apiGet.mockResolvedValue({ data: { v: 'ok-7' } })
+    render(<Multi uri="/ext/monitoring/system/metrics" count={3} />)
+
+    await waitFor(() => expect(screen.getAllByText('ok-7')).toHaveLength(3))
+    expect(apiGet).toHaveBeenCalledTimes(1)
+  })
+
+  it('请求落地后重新挂载照常发新请求（不做时间窗复用，避免用户看到过期数据）', async () => {
+    apiGet.mockResolvedValue({ data: { v: 'ok-11' } })
+    const first = render(<Multi uri="/ext/monitoring/plugins" count={1} />)
+    await waitFor(() => expect(screen.getByText('ok-11')).toBeInTheDocument())
+    first.unmount()
+
+    render(<Multi uri="/ext/monitoring/plugins" count={1} />)
+    await waitFor(() => expect(screen.getByText('ok-11')).toBeInTheDocument())
+    expect(apiGet).toHaveBeenCalledTimes(2)
+  })
+
+  it('失败后下一次请求照常发出（失败不留残留态）', async () => {
+    apiGet.mockRejectedValueOnce(new Error('boom'))
+    const first = render(<Multi uri="/ext/monitoring/tasks" count={1} />)
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(1))
+    first.unmount()
+
+    apiGet.mockResolvedValue({ data: { v: 'ok-42' } })
+    render(<Multi uri="/ext/monitoring/tasks" count={1} />)
+    await waitFor(() => expect(screen.getByText('ok-42')).toBeInTheDocument())
+    expect(apiGet).toHaveBeenCalledTimes(2)
+  })
+
+  it('不同 URI 各自独立请求（不误合并）', async () => {
+    apiGet.mockResolvedValue({ data: { v: 'ok-1' } })
+    render(
+      <div>
+        <StatusCardWidget label="甲" datasourceUri="/ext/a/x" valueKey="v" />
+        <StatusCardWidget label="乙" datasourceUri="/ext/b/y" valueKey="v" />
+      </div>,
+    )
+    await waitFor(() => expect(screen.getAllByText('ok-1')).toHaveLength(2))
+    expect(apiGet).toHaveBeenCalledTimes(2)
   })
 })

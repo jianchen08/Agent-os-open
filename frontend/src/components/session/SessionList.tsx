@@ -10,7 +10,7 @@
  * 使用 memo 优化渲染性能，避免不必要的重渲染。
  */
 
-import { memo, useCallback, useMemo, useState } from 'react'
+import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import {
   Copy,
   Edit3,
@@ -37,6 +37,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { useVirtualWindow } from '@/hooks/useVirtualWindow'
 import { cn } from '@/lib/utils'
 import type { Session } from '@/types/models'
 
@@ -66,6 +67,13 @@ interface SessionListProps {
   /** 列表项高度 */
   itemHeight?: number
 }
+
+/**
+ * 窗口化阈值：超过该条数才启用虚拟滚动（renderer 内存优化项 1）。
+ * 一屏最多可见约 25 条（55px × 视口上限），40 留足余量；阈值以下全量渲染，
+ * 既有 DOM 结构与行为零变化。
+ */
+const VIRTUAL_THRESHOLD = 40
 
 /**
  * 单个会话列表项组件
@@ -370,6 +378,22 @@ export const SessionList = memo<SessionListProps>(
     /** 是否存在置顶会话 */
     const hasPinned = pinnedSessions.length > 0
 
+    /**
+     * 窗口化（超阈值启用）：本组件自持滚动容器（h-full，Sidebar 侧不再滚动），
+     * 仅渲染"全部会话"组可视窗口±缓冲，占位撑出完整滚动高度；置顶组条目少，
+     * 保持全量渲染。阈值以下 DOM 结构与旧版完全一致。
+     */
+    const scrollRef = useRef<HTMLDivElement>(null)
+    const windowRef = useRef<HTMLDivElement>(null)
+    const windowed = normalSessions.length > VIRTUAL_THRESHOLD
+    const { start, end } = useVirtualWindow({
+      containerRef: scrollRef,
+      listRef: windowRef,
+      total: normalSessions.length,
+      stride: itemHeight,
+      enabled: windowed,
+    })
+
     /** 渲染会话项的辅助函数 */
     const renderItem = (session: Session): React.ReactNode => (
       <SessionItem
@@ -389,7 +413,11 @@ export const SessionList = memo<SessionListProps>(
     )
 
     return (
-      <div className={cn('space-y-0.5', className)}>
+      <div
+        ref={scrollRef}
+        data-testid="session-list-scroll"
+        className={cn('min-h-0 h-full space-y-0.5 overflow-y-auto overflow-x-hidden scrollbar-thin', className)}
+      >
         {/* 置顶会话分组 */}
         {hasPinned && (
           <div data-group="pinned">
@@ -406,7 +434,19 @@ export const SessionList = memo<SessionListProps>(
           <div className="text-muted-foreground px-2 pb-1 pt-2 text-xs font-medium">
             全部会话
           </div>
-          {normalSessions.map(renderItem)}
+          {windowed ? (
+            <div
+              ref={windowRef}
+              data-testid="session-list-window"
+              style={{ height: normalSessions.length * itemHeight, position: 'relative' }}
+            >
+              <div style={{ position: 'absolute', top: start * itemHeight, left: 0, right: 0 }}>
+                {normalSessions.slice(start, end).map(renderItem)}
+              </div>
+            </div>
+          ) : (
+            normalSessions.map(renderItem)
+          )}
         </div>
 
         {/* 删除确认对话框 */}

@@ -31,6 +31,7 @@ _SHARED_ROOT = str(Path(__file__).resolve().parents[2])
 sys.path.insert(0, _SHARED_ROOT)
 from task_birth import TaskBirthError, birth_task_pipeline  # noqa: E402
 import state_fields  # noqa: E402 — plugins/shared 平铺模块（ws_meta 还原）
+from mode_keys import find_mode_agent_yaml  # noqa: E402 — plugins/shared 平铺模块（模式键两级解析）
 from time_iso import now_iso_utc as _now_iso  # noqa: E402 — 共享时间戳单点
 
 logger = logging.getLogger(__name__)
@@ -616,6 +617,31 @@ _TASK_SUBMIT_INPUT_SCHEMA: dict[str, Any] = {
                     },
                 },
             ],
+        },
+        "orchestration_key": {
+            "type": "string",
+            "description": (
+                "编排键（可选）。显式指定管道定义（函数），如 autonomous 或 "
+                "mode_X/<编排名>。注意这是编排定义键，不是运行实例 pipeline_id。"
+                "显式键不存在或提供插件被禁用 = 结构化报错（不会静默改走默认编排）。"
+                "未指定时按 mode 限定候选解析，仍无候选则兜底 autonomous。"
+            ),
+        },
+        "mode": {
+            "type": "string",
+            "description": (
+                "模式键（可选）。用户显式约束：把编排候选限定为该模式包的 "
+                "pipelines（文件头 task_kinds 与 task_kind 匹配者优先）；"
+                "该模式包无自有编排或候选无法区分意图时仍兜底 autonomous"
+                "（约束非门槛）。"
+            ),
+        },
+        "task_kind": {
+            "type": "string",
+            "description": (
+                "任务型标注（可选）。与模式编排文件头 task_kinds 匹配，"
+                "用于同模式多编排时的优先选择；不影响 autonomous 兜底。"
+            ),
         },
     },
     "required": ["goal_title", "goal_description", "target_type", "target_id"],
@@ -1367,6 +1393,141 @@ class TaskSubmitTool(BuiltinTool):
             logger.info("[TaskSubmit] 依赖验证通过 | dependencies=%s", dependencies)
         return dependencies, None
 
+    async def _get_agent_base_config(self, target_id: str) -> dict[str, Any] | None:
+        """agent 基座配置 dict（完备性校验的身份性字段源）。
+
+        registry（agent_manager agent.get 服务）优先，未命中/不可用回退磁盘
+        yaml——与 _validate_target_agent 同一解析序，只取数据不做层级裁决。
+        """
+        if _agent_registry_lookup is not None:
+            try:
+                config = await _agent_registry_lookup(target_id)
+            except Exception as exc:  # noqa: BLE001 — 服务故障降级磁盘回退
+                logger.warning(
+                    "[TaskSubmit] agent 基座配置 registry 查询失败 (target_id=%s): %s",
+                    target_id,
+                    exc,
+                )
+                config = None
+            if isinstance(config, dict):
+                return config
+        config, _corrupt = self._load_agent_yaml_dict(target_id)
+        return config
+
+    @staticmethod
+    def _assemble_initial_input_keys(
+        inputs: dict[str, Any],
+        agent_base: dict[str, Any] | None,
+    ) -> set[str]:
+        """初始输入集（完备性校验左值，§3.1 三方装配的派发期可取口径）。
+
+        - 任务性字段：task_submit 出生 state 恒写键（task.*）+ 提交参数原样键
+          + messages（阶段三 kickoff 消息恒派发）；
+        - 身份性字段（agent 基座）：agent.id（target_id=agent 经出生协议写全；
+          target_type 非 agent 不得虚报）+ agent 配置的 tool_ids/system_prompt
+          （context_build 运行时装载的两键，同源预测）；
+        - execution_context/血缘键：workspace*/isolation_level 提交参数与
+          子任务 lineage.parent_pipeline_id。
+
+        取不到的键不虚报（宁缺勿假）：左值保守，缺字段门口拒派。
+        """
+        keys = {
+            "messages",
+            "task.goal",
+            "task.description",
+            "task.acceptance_criteria",
+            "task.dependencies",
+            "task.submitted_by",
+        }
+        if inputs.get("target_type") == "agent" and inputs.get("target_id"):
+            keys.add("agent.id")
+        base = agent_base or {}
+        if isinstance(base.get("tool_ids"), list):
+            keys.add("tool_ids")
+        if base.get("system_prompt"):
+            keys.add("context.system_prompt")
+        for key in (
+            "workspace",
+            "workspace_mode",
+            "isolation_level",
+            "project_id",
+            "parent_task_id",
+            "session_id",
+            "thread_id",
+            "task_kind",
+            "inherit_from",
+            "inherit_mode",
+        ):
+            if inputs.get(key):
+                keys.add(key)
+        if inputs.get("pipeline_id"):
+            keys.add("lineage.parent_pipeline_id")
+        return keys
+
+    async def _gate_orchestration(
+        self,
+        inputs: dict[str, Any],
+        target_id: Any,
+    ) -> tuple[str, ToolExecutionResult | None]:
+        """编排解析 + 完备性校验（§3.3 实例化时序：解析 → 校验 → 实例化）。
+
+        - 三级解析（域逻辑归 tasks/orchestration.py）：显式 orchestration_key
+          → mode 限定候选 → autonomous 兜底；旧调用（无编排键/mode）走③，
+          行为不变（additive）；
+        - 完备性（§3.5，派发期、实例化前）：初始输入集 ⊇ 所选编排派生输入集
+          （成员 step required_state_inputs 并集，H2 静态声明），缺字段门口
+          拒派；结构化错误随 metadata 可编程消费（M2 反馈回路）。
+
+        返回 (解析出的编排键, 失败结果)；失败结果非 None 时调用方短路返回，
+        不实例化。
+        """
+        import orchestration  # noqa: PLC0415 — tasks 域平铺模块（bootstrap 注入 sys.path）
+
+        try:
+            definitions = orchestration.discover_orchestrations()
+            definition = orchestration.resolve_orchestration(
+                explicit_key=str(inputs.get("orchestration_key") or ""),
+                mode_key=str(inputs.get("mode") or ""),
+                task_kind=str(inputs.get("task_kind") or ""),
+                orchestrations=definitions,
+            )
+        except orchestration.OrchestrationError as exc:
+            logger.warning(
+                "[TaskSubmit] 编排解析失败，拒绝派发 | code=%s | %s",
+                exc.error_code,
+                exc.message,
+            )
+            return "", create_failure_result(
+                error=exc.message,
+                error_code=exc.error_code,
+                metadata={"action": "task_submit", **exc.fields},
+            )
+        initial_inputs = self._assemble_initial_input_keys(
+            inputs, await self._get_agent_base_config(str(target_id or ""))
+        )
+        step_required = orchestration.load_step_required_inputs()
+        missing = orchestration.check_completeness(
+            initial_inputs, definition, step_required
+        )
+        if missing:
+            err = orchestration.incomplete_error(definition, missing)
+            logger.warning(
+                "[TaskSubmit] 完备性校验失败，门口拒派 | orchestration=%s | missing=%s",
+                definition.key,
+                missing,
+            )
+            return "", create_failure_result(
+                error=err.message,
+                error_code=err.error_code,
+                metadata={"action": "task_submit", **err.fields},
+            )
+        logger.info(
+            "[TaskSubmit] 编排解析与完备性校验通过 | orchestration=%s | required=%s",
+            definition.key,
+            sorted(orchestration.derived_input_set(definition, step_required)),
+        )
+        return definition.key, None
+
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行任务提交：参数解析与闸门 → 项目/继承/工作空间解析 → 目标与依赖校验 → 派发。
 
@@ -1476,6 +1637,12 @@ class TaskSubmitTool(BuiltinTool):
         if gate_fail is not None:
             return gate_fail
 
+        # ── 4.5 编排解析 + 完备性校验（§3.3 实例化时序：解析→校验→实例化；
+        #     旧调用无编排键/mode 走③ autonomous，行为不变）──
+        orchestration_key, orch_fail = await self._gate_orchestration(inputs, target_id)
+        if orch_fail is not None:
+            return orch_fail
+
         # ── 5. GAP-1 统一（state 单一真值）：任务即管道，直接经 chat.send_message
         #    创建执行管道（引擎生成 pipeline_id = task.id）——不再创建 YAML 任务
         #    记录（task_service.create_task 退役，YAML 降级只读镜像）。
@@ -1498,6 +1665,8 @@ class TaskSubmitTool(BuiltinTool):
             # 子任务沿父链继承的项目挂靠不算显式，其落位由出生契约的父链
             # 工作空间坐标决定（继承直接上级的工作空间）。
             workspace_explicit=bool(explicit_workspace_raw) or bool(explicit_project_raw),
+            # 解析出的编排键（定义坐标）随出生落账，与引擎生成的实例 id 分立。
+            orchestration_key=orchestration_key,
         )
         if dispatch.get("pipeline_id"):
             task_id = dispatch["pipeline_id"]
@@ -1556,6 +1725,7 @@ class TaskSubmitTool(BuiltinTool):
         agent_id: str = "",
         parent_project_id: str = "",
         workspace_explicit: bool = False,
+        orchestration_key: str = "",
     ) -> dict[str, Any]:
         """GAP-1 统一：经统一出生协议创建任务执行管道（引擎生成 id = task.id）。
 
@@ -1639,6 +1809,9 @@ class TaskSubmitTool(BuiltinTool):
         # （项目不是管道，不能当 lineage 父）。
         if parent_project_id:
             birth_state["task.parent_project_id"] = parent_project_id
+        # 任务记录增记编排键（§4.5：审计/回放/归因锚点）——编排键是管道
+        # 定义坐标，与引擎在本协议阶段一生成的实例 id（pipeline_id）分立。
+        birth_state["task.orchestration"] = orchestration_key
 
         # 共享层统一出生协议（模块级已导入 task_birth）——与 tasks http_api
         # 同一实现，出生写面单一真值。
@@ -2113,12 +2286,13 @@ class TaskSubmitTool(BuiltinTool):
         )
 
     @staticmethod
-    def _lookup_agent_from_disk(target_id: str) -> tuple[bool, str, int, bool, str]:
-        """从磁盘 YAML 文件查找 Agent 配置（回退方案）。
+    def _load_agent_yaml_dict(target_id: str) -> tuple[dict[str, Any] | None, str]:
+        """磁盘 yaml 查找 agent 配置（rglob 文件名命中 → config_id 兜底 → 模式包键）。
 
         Returns:
-            (found, level 串, level 数值, is_active, 损坏文件路径)。
-            末位非空表示找到了匹配的 yaml 但解析失败（配置损坏，与"不存在"区分归因）。
+            (解析后的配置 dict, 损坏文件路径)。未命中 → (None, "")；
+            yaml 存在但解析失败/形态非法 → (None, 损坏路径)
+            （与"不存在"区分归因）。
         """
         from pathlib import Path  # noqa: PLC0415
 
@@ -2144,15 +2318,43 @@ class TaskSubmitTool(BuiltinTool):
                     continue
 
         if not yaml_path or not yaml_path.exists():
-            return (False, "", 0, True, "")
+            # 两级解析第二级（模式体系设计稿 §3.3）：系统注册表（config/agents）
+            # 未命中 → 模式包目录注册表（mode_X/<stem> → 包内 agents/<stem>.yaml，
+            # 键构与内核 mode_registry 同构）；非模式键/未命中保持 (None, "")。
+            mode_yaml = find_mode_agent_yaml(target_id)
+            if mode_yaml is not None:
+                yaml_path = mode_yaml
+
+        if not yaml_path or not yaml_path.exists():
+            return (None, "")
 
         try:
             with open(yaml_path, encoding="utf-8") as f:
-                config = yaml.safe_load(f) or {}
+                config = yaml.safe_load(f)
         except Exception:
-            return (False, "", 0, True, str(yaml_path))
+            return (None, str(yaml_path))
+        if config is None:
+            # 空 yaml = 空配置 dict（合法形态，按默认运行）
+            config = {}
+        if not isinstance(config, dict):
+            return (None, str(yaml_path))
+        return (config, "")
 
-        agent_level_str = config.get("level", "")
+    @staticmethod
+    def _lookup_agent_from_disk(target_id: str) -> tuple[bool, str, int, bool, str]:
+        """从磁盘 YAML 文件查找 Agent 配置（回退方案）。
+
+        Returns:
+            (found, level 串, level 数值, is_active, 损坏文件路径)。
+            末位非空表示找到了匹配的 yaml 但解析失败（配置损坏，与"不存在"区分归因）。
+        """
+        config, corrupt_path = TaskSubmitTool._load_agent_yaml_dict(target_id)
+        if corrupt_path:
+            return (False, "", 0, True, corrupt_path)
+        if config is None:
+            return (False, "", 0, True, "")
+
+        agent_level_str = str(config.get("level", ""))
         level_map = {"L1": 1, "L2": 2, "L3": 3}
         agent_level = level_map.get(agent_level_str, 0)
         is_active = config.get("is_active", True)

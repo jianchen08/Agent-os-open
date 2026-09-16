@@ -331,3 +331,47 @@ def test_extra_context_absent_writes_nothing(config_root, tmp_path, config):
         "context.is_tool_execution", "context.is_project",
     }]
     assert extra_keys == [], "无 extra_context 时不得出现计划外的 context.* 键"
+
+
+# ── 11. 用户配置层不可用降级（plugin.py:137-138）──
+
+
+def test_user_config_layer_unavailable_degrades_to_factory(config_root, tmp_path, monkeypatch):
+    """user_space 导入/调用失败 → 记 debug 后仅走 factory 层，不中断加载。
+
+    用户配置层是可选叠加面：其不可用（sidecar 无 user_space 模块、调用异常）
+    不得让 agent yaml 解析整体失败——降级为「仅 factory」正是双根解析的兜底语义。
+    """
+    _write_agent(tmp_path / "agents", "factory_agent", "display_name: 出厂版\n")
+
+    import sys
+    import types as _types
+
+    # 假 user_space：user_config_dir 抛异常（模拟调用期失败）
+    fake = _types.ModuleType("user_space")
+
+    def _boom() -> object:
+        raise RuntimeError("用户根解析失败")
+
+    fake.user_config_dir = _boom  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "user_space", fake)
+
+    updates = _run({}, {"agent.id": "factory_agent"})
+
+    assert updates["context.agent_name"] == "出厂版", "用户层异常不得阻断 factory 层命中"
+
+
+def test_user_config_dir_none_skips_user_candidate(config_root, tmp_path, monkeypatch):
+    """user_config_dir 返回 None（无用户根）→ 只留 factory 候选，正常命中。"""
+    _write_agent(tmp_path / "agents", "solo_agent", "display_name: 单根版\n")
+
+    import sys
+    import types as _types
+
+    fake = _types.ModuleType("user_space")
+    fake.user_config_dir = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "user_space", fake)
+
+    updates = _run({}, {"agent.id": "solo_agent"})
+
+    assert updates["context.agent_name"] == "单根版"

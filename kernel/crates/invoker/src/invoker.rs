@@ -31,17 +31,43 @@ use tracing::{error, info, warn};
 /// （未用到也不检测——纯按需 pull。）
 const PLUGIN_FINGERPRINT_TTL: Duration = Duration::from_secs(1);
 
-/// 轻量合宿组名（合宿进程模型 §4.1：manifest.host_group 的唯一准入值）。
-const LIGHT_HOST_GROUP: &str = "light";
+/// 轻量合宿：manifest.host_group 声明即准入（合宿进程模型 §4.1 的多组扩展）。
+/// 组名任意（`light` = 易变/通用组，`light_stable` 等独立组名承载稳定观察面），
+/// 装箱槽位按组名分域（`group:{组名}:{n}`），驱逐连坐半径 = 本组宿主。
+/// 白名单制担保语义不变：声明即插件作者担保「无同步阻塞调用、无 C 扩展、
+/// 无重依赖」，内核不做推断。
+const DEFAULT_HOST_GROUP: &str = "light";
 
 /// 合宿宿主目录名（plugins/shared/_host/，host.py 由宿主侧任务承载）。
 const GROUP_HOST_DIR: &str = "_host";
 
-/// 单个 light 宿主的同时挂载成员数上限（合宿进程模型 §4.5）。
+/// 内核 → 宿主的成员粒度热重载请求方法（SDK CohostServer/host.py 注册同名
+/// 处理器；带应答，失败以协议错误应答，内核回退 force_unload）。
+const RELOAD_MEMBER_METHOD: &str = "agentos/reload_member";
+
+/// reload_member 请求超时上界（控制面操作必须有界）。请求窗口自宿主侧
+/// on_load 定向派发落地起覆盖「模块重 exec + on_load 重放」——慢而未死的
+/// 成员初始化（慢盘/慢解释器/预热 IO）必须等足预算完成，超时即回退整组
+/// 驱逐（fail-closed 不变），而预算过紧会把慢初始化放大成全组陪葬的驱逐
+/// 风暴（BUG-19）：30s 明显大于合理慢初始化上界，仍远小于任何挂死宿主的
+/// 可容忍驻留。
+const RELOAD_MEMBER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 合法组名字符集（进宿主键/日志/spawn 参数）：ASCII 字母数字下划线连字符，
+/// ≤32 字符。非法值一律独占（保守，与缺省同）。
+fn is_valid_group_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// 单个合宿宿主的同时挂载成员数上限（合宿进程模型 §4.5）。
 /// 默认 6，可用环境变量 `AGENTOS_LIGHT_HOST_MAX_MEMBERS` 覆盖（<=0 视为无效回退默认）。
 const LIGHT_HOST_DEFAULT_MAX_MEMBERS: usize = 6;
 
-/// 读取 light 宿主挂载成员上限（环境变量优先）。
+/// 读取合宿宿主挂载成员上限（环境变量优先，全组名共用同一上限）。
 fn light_host_max_members() -> usize {
     std::env::var("AGENTOS_LIGHT_HOST_MAX_MEMBERS")
         .ok()
@@ -50,16 +76,18 @@ fn light_host_max_members() -> usize {
         .unwrap_or(LIGHT_HOST_DEFAULT_MAX_MEMBERS)
 }
 
-/// light 宿主键：`group:light:{n}`（n 从 1 起，按装箱顺序分配；回收后槽位可复用）。
-fn light_host_key(slot: u64) -> String {
-    format!("group:{LIGHT_HOST_GROUP}:{slot}")
+/// 组宿主键：`group:{group}:{slot}`（slot 从 1 起，按组内装箱顺序分配；
+/// 回收后槽位可复用）。
+fn group_host_key(group: &str, slot: u64) -> String {
+    format!("group:{group}:{slot}")
 }
 
-/// 从宿主键解析 light 组槽位号；非 light 组键返回 None。
-fn parse_light_slot(host_key: &str) -> Option<u64> {
-    host_key
-        .strip_prefix(&format!("group:{LIGHT_HOST_GROUP}:"))
-        .and_then(|n| n.parse().ok())
+/// 从宿主键解析组名与槽位号；非组宿主键返回 None。
+/// 组名合法字符集不含冒号，`rsplit_once` 足以切分。
+fn parse_group_slot(host_key: &str) -> Option<(&str, u64)> {
+    let rest = host_key.strip_prefix("group:")?;
+    let (group, slot) = rest.rsplit_once(':')?;
+    Some((group, slot.parse().ok()?))
 }
 
 /// 独占宿主键：`plugin:{plugin_id}`（每插件独占宿主，现状语义统一走宿主键路径）。
@@ -67,29 +95,31 @@ fn solo_host_key(plugin_id: &str) -> String {
     format!("plugin:{plugin_id}")
 }
 
-/// light 组运行时装箱状态（合宿进程模型 §4.5）。
+/// 合宿成员装箱状态（合宿进程模型 §4.5，多组扩展）。
 ///
-/// - `assignments`：分配表 {plugin_id → host_key}。粘性：成员一旦分配，宿主存活
-///   期间归属不变（respawn 按表重建成员集）；宿主被 idle GC 回收时其全部成员
-///   条目随之清除（槽位释放复用）。
-/// - `next_slot`：已开过的最大槽位号（只增）。装箱时从低槽位找"当前挂载数 <
-///   上限"的宿主塞入——已回收宿主（成员条目已清、计数归 0）自然优先复用，
-///   而不是无限开新组；全满才开新槽位。
+/// - `assignments`：分配表 {plugin_id → host_key}。粘性：成员一旦分配，宿主
+///   存活期间归属不变（respawn 按表重建成员集）；宿主被 idle GC 回收时其全部成员
+///   条目随之清除（槽位释放复用）；manifest 声明组名变更后旧条目跨组过期，
+///   装箱判定按当前声明组重装箱（成员搬组，旧宿主成员集收缩）。
+/// - `next_slot`：各组名已开过的最大槽位号（只增，按组记账）。装箱时从低槽位
+///   找「当前挂载数 < 上限」的宿主塞入——已回收宿主（成员条目已清、计数归 0）
+///   自然优先复用，而不是无限开新组；全满才开新槽位。
 #[derive(Default)]
 struct LightPacking {
     assignments: HashMap<String, String>,
-    next_slot: u64,
+    next_slot: HashMap<String, u64>,
 }
 
-/// light 成员判定：host_group=="light" 且 sidecar 且非外部 MCP。
+/// 合宿成员判定：host_group 声明合法组名 且 sidecar 且非外部 MCP（多组扩展）。
 ///
 /// 外部 MCP（StreamableHttp 远端 / stdio 第三方命令）的进程归外部所有，
 /// 内核只是客户端（方案 §〇 三类宿主形态表），不进合宿组；host_type=InProcess
-/// 天生单进程无独立内存底座，同样不适用。缺省或其他 host_group 值一律独占（保守）。
-fn is_light_group_member(manifest: &PluginManifest) -> bool {
-    if manifest.host_group.as_deref() != Some(LIGHT_HOST_GROUP)
-        || manifest.host_type != HostType::Sidecar
-    {
+/// 天生单进程无独立内存底座，同样不适用。缺省或非法组名一律独占（保守）。
+pub fn is_cohost_member(manifest: &PluginManifest) -> bool {
+    let Some(group) = manifest.host_group.as_deref() else {
+        return false;
+    };
+    if !is_valid_group_name(group) || manifest.host_type != HostType::Sidecar {
         return false;
     }
     let is_external = match manifest.mcp.as_ref() {
@@ -112,7 +142,7 @@ fn is_light_group_member(manifest: &PluginManifest) -> bool {
 /// 授权主体，内核按 group_granted_capabilities 归并成员白名单判）；独占 =
 /// manifest.id。身份取进程而非成员，保证不随组重生换人。
 fn scoped_router_identity(manifest: &PluginManifest, host_key: &str) -> String {
-    if is_light_group_member(manifest) {
+    if is_cohost_member(manifest) {
         host_key.to_string()
     } else {
         manifest.id.clone()
@@ -122,7 +152,7 @@ fn scoped_router_identity(manifest: &PluginManifest, host_key: &str) -> String {
 /// 合宿成员的 MCP 工具名命名空间（§4.2 第 3 条）：宿主把成员插件的每个工具
 /// 注册为 `{plugin_id}.{tool_name}`，调用侧拼前缀分发；独占宿主无前缀（现状不变）。
 fn namespaced_tool_name(manifest: &PluginManifest, tool_name: &str) -> String {
-    if is_light_group_member(manifest) {
+    if is_cohost_member(manifest) {
         format!("{}.{}", manifest.id, tool_name)
     } else {
         tool_name.to_string()
@@ -2085,9 +2115,9 @@ impl PluginInvokerImpl {
         host_key: &str,
         manifest: &PluginManifest,
     ) -> Result<McpClient, PluginError> {
-        let (command, args, working_dir) = if is_light_group_member(manifest) {
-            let slot = parse_light_slot(host_key)
-                .expect("light 成员宿主键必含槽位号（resolve_host_key 分配保证）");
+        let (command, args, working_dir) = if is_cohost_member(manifest) {
+            let (group, slot) = parse_group_slot(host_key)
+                .expect("合宿成员宿主键必含组名与槽位号（resolve_host_key 分配保证）");
             let members = self.host_members(host_key);
             // 记录实际 spawn 的成员集快照（漂移检测基准，见 spawned_members 字段
             // 注释）。先装箱后 spawn 的调用序保证：此处快照 = 本次 spawn 的
@@ -2098,7 +2128,7 @@ impl PluginInvokerImpl {
                 .write()
                 .insert(host_key.to_string(), members.clone());
             let (command, args, workdir) =
-                self.resolve_group_host_command(LIGHT_HOST_GROUP, slot, &members)?;
+                self.resolve_group_host_command(group, slot, &members)?;
             (command, args, Some(workdir))
         } else {
             let (command, args) = self.resolve_sidecar_command(manifest)?;
@@ -2323,52 +2353,63 @@ impl PluginInvokerImpl {
 
     // ── 宿主键路由（合宿进程模型 §4.2/§4.5）────────────────────────────
 
-    /// 解析插件的宿主键：light 合宿成员动态装箱到组宿主，其余独占。
+    /// 解析插件的宿主键：合宿成员动态装箱到声明组的组宿主，其余独占。
     ///
-    /// light 首次调用时经 [`Self::assign_light_host`] 装箱（粘性，宿主存活期间
-    /// 归属不变）；此后每次调用命中分配表直读。独占宿主键纯函数构造，无状态。
+    /// 合宿成员首次调用时经 [`Self::assign_light_host`] 装箱（粘性，宿主存活期间
+    /// 归属不变，声明组名变更即搬组重装箱）；此后每次调用命中分配表直读。
+    /// 独占宿主键纯函数构造，无状态。
     fn resolve_host_key(&self, manifest: &PluginManifest) -> String {
-        if is_light_group_member(manifest) {
-            self.assign_light_host(&manifest.id)
+        if is_cohost_member(manifest) {
+            self.assign_light_host(manifest)
         } else {
             solo_host_key(&manifest.id)
         }
     }
 
-    /// light 插件装箱分配宿主键（粘性 + 未满宿主优先 + 溢出开新宿主）。
-    fn assign_light_host(&self, plugin_id: &str) -> String {
-        self.assign_light_host_with(plugin_id, light_host_max_members())
+    /// 合宿成员装箱分配宿主键（粘性 + 未满宿主优先 + 溢出开新宿主，按声明组分域）。
+    fn assign_light_host(&self, manifest: &PluginManifest) -> String {
+        let group = manifest.host_group.as_deref().unwrap_or(DEFAULT_HOST_GROUP);
+        self.assign_light_host_with(&manifest.id, group, light_host_max_members())
     }
 
-    /// 装箱核心逻辑（max_members 参数化以便单测注入，不读环境变量）。
+    /// 装箱核心逻辑（组名与 max_members 参数化以便单测注入，不读环境变量）。
     ///
-    /// 落点规则（§4.5）：
-    /// 1. 分配表已有该插件 → 返回既有宿主键（粘性，宿主存活期间归属不变）；
-    /// 2. 从槽位 1 起找"当前挂载数 < 上限"的宿主塞入——已 idle GC 回收的宿主
-    ///    （成员条目已清、计数归 0）自然优先复用，而不是无限开新组；
-    /// 3. 全部满 → 开新槽位（序号 = next_slot+1，装箱顺序即序号）。
-    fn assign_light_host_with(&self, plugin_id: &str, max_members: usize) -> String {
+    /// 落点规则（§4.5，按声明组分域）：
+    /// 1. 分配表已有该插件且宿主键属当前声明组 → 返回既有宿主键（粘性，宿主
+    ///    存活期间归属不变）；条目属其他组（manifest 改组名 = 搬组）→ 按新组
+    ///    重装箱，旧宿主成员集随条目覆盖而收缩；
+    /// 2. 从槽位 1 起找**本组**「当前挂载数 < 上限」的宿主塞入——已 idle GC
+    ///    回收的宿主（成员条目已清、计数归 0）自然优先复用，而不是无限开新组；
+    /// 3. 本组全部满 → 开本组新槽位（序号 = 组内 next_slot+1，装箱顺序即序号）。
+    fn assign_light_host_with(&self, plugin_id: &str, group: &str, max_members: usize) -> String {
         let mut packing = self.light_packing.write();
         if let Some(host_key) = packing.assignments.get(plugin_id) {
-            return host_key.clone();
+            let same_group = parse_group_slot(host_key).is_some_and(|(g, _)| g == group);
+            if same_group {
+                return host_key.clone();
+            }
         }
         let mut counts: HashMap<u64, usize> = HashMap::new();
         for host_key in packing.assignments.values() {
-            if let Some(slot) = parse_light_slot(host_key) {
-                *counts.entry(slot).or_default() += 1;
+            if let Some((g, slot)) = parse_group_slot(host_key) {
+                if g == group {
+                    *counts.entry(slot).or_default() += 1;
+                }
             }
         }
-        for slot in 1..=packing.next_slot {
+        let group_next_slot = packing.next_slot.get(group).copied().unwrap_or(0);
+        for slot in 1..=group_next_slot {
             if counts.get(&slot).copied().unwrap_or(0) < max_members {
-                let host_key = light_host_key(slot);
+                let host_key = group_host_key(group, slot);
                 packing
                     .assignments
                     .insert(plugin_id.to_string(), host_key.clone());
                 return host_key;
             }
         }
-        packing.next_slot += 1;
-        let host_key = light_host_key(packing.next_slot);
+        let new_slot = group_next_slot + 1;
+        packing.next_slot.insert(group.to_string(), new_slot);
+        let host_key = group_host_key(group, new_slot);
         packing
             .assignments
             .insert(plugin_id.to_string(), host_key.clone());
@@ -2380,7 +2421,7 @@ impl PluginInvokerImpl {
     /// - light 组宿主：分配表反查（成员集随装箱动态变化，respawn 按当前表重建）；
     /// - 独占宿主：键内嵌的 plugin_id 本身。
     fn host_members(&self, host_key: &str) -> Vec<String> {
-        if parse_light_slot(host_key).is_some() {
+        if parse_group_slot(host_key).is_some() {
             let packing = self.light_packing.read();
             let mut members: Vec<String> = packing
                 .assignments
@@ -2406,7 +2447,7 @@ impl PluginInvokerImpl {
     /// 存量未声明成员不因合宿收窄。每次调用从装箱分配表现算：成员集随装箱/重生
     /// 动态变化，归并结果自动跟随，无快照、无失效清理面。
     pub fn group_granted_capabilities(&self, host_key: &str) -> Option<Vec<String>> {
-        parse_light_slot(host_key)?;
+        parse_group_slot(host_key)?;
         let members = self.host_members(host_key);
         if members.is_empty() {
             return None;
@@ -2441,7 +2482,7 @@ impl PluginInvokerImpl {
     /// 必带快照（spawn 时写入先于入缓存），缺失只可能来自测试手工注入的假
     /// 客户端——保守不杀，避免基于缺失数据误杀进程。
     fn light_host_members_drifted(&self, host_key: &str) -> bool {
-        if parse_light_slot(host_key).is_none() {
+        if parse_group_slot(host_key).is_none() {
             return false;
         }
         let current = self.host_members(host_key);
@@ -2467,7 +2508,7 @@ impl PluginInvokerImpl {
             return Some(host_key);
         }
         match self.loader.get_manifest(plugin_id) {
-            Some(m) if is_light_group_member(&m) => None,
+            Some(m) if is_cohost_member(&m) => None,
             Some(m) if m.host_type != HostType::Sidecar => None,
             _ => Some(solo_host_key(plugin_id)),
         }
@@ -2571,7 +2612,7 @@ impl PluginInvokerImpl {
         // TTL 门 + 指纹比对在同一把读锁下原子完成（计算指纹前先快照缓存）。
         let cached = self.fingerprints.read().get(host_key).cloned();
         let current_fp = |hk: &str| {
-            if parse_light_slot(hk).is_some() {
+            if parse_group_slot(hk).is_some() {
                 self.host_union_fingerprint(hk)
             } else {
                 self.resolve_fingerprint(caller)
@@ -2828,6 +2869,81 @@ impl PluginInvokerImpl {
     /// idle GC 路径发生。
     pub async fn force_unload_impl(&self, plugin_id: &str) -> Result<(), PluginError> {
         self.unload_plugin_host(plugin_id, false).await
+    }
+
+    /// 成员粒度热重载实现：向成员所在组宿主发 `agentos/reload_member` 请求
+    /// （带应答），宿主进程内重载该成员代码，其余成员进程不动——驱逐爆炸
+    /// 半径从整组收缩到单成员（BUG-3 504 的根治面）。
+    ///
+    /// 三路判定（与 [`PluginInvoker::reload_member`] 契约一致）：
+    /// - 独占宿主 → Err（调用方回退 force_unload，单进程杀即等价粒度）；
+    /// - 无存活进程（未装箱/未 spawn/已驱逐）→ Ok(no-op)：无进程内代码，
+    ///   下次 spawn 必用新码；
+    /// - 存活组宿主 → 应答成功 Ok；宿主协议错误/超时 Err（重载失败不破坏
+    ///   宿主状态——旧成员仍在服务，回退整组驱逐路径安全）。
+    ///
+    /// 成功后刷新宿主并集指纹记账：指纹是 spawn 时刻快照，进程内代码已被
+    /// 重载为磁盘现码——不刷新会让 pull 路径（is_host_stale）按指纹差误判
+    /// stale 而整组 respawn，热重载被架空。
+    pub async fn reload_group_member(&self, plugin_id: &str) -> Result<(), PluginError> {
+        let Some(host_key) = self.existing_host_key_for(plugin_id) else {
+            return Ok(());
+        };
+        if parse_group_slot(&host_key).is_none() {
+            return Err(PluginError {
+                message: format!("reload_member: {plugin_id} 不在合宿组宿主（独占无进程内重载面）"),
+                code: None,
+                source: None,
+            });
+        }
+        let Some(client) = self.mcp_clients.read().get(&host_key).cloned() else {
+            return Ok(());
+        };
+        let params = json!({ "plugin_id": plugin_id });
+        let outcome = tokio::time::timeout(RELOAD_MEMBER_TIMEOUT, async move {
+            client
+                .read()
+                .await
+                .request(RELOAD_MEMBER_METHOD, params)
+                .await
+        })
+        .await;
+        match outcome {
+            Ok(Ok(result)) => {
+                if result.get("reloaded").and_then(Value::as_bool) != Some(true) {
+                    return Err(PluginError {
+                        message: format!(
+                            "reload_member: 宿主应答缺少 reloaded=true（{plugin_id}）"
+                        ),
+                        code: None,
+                        source: None,
+                    });
+                }
+                let fp = self.host_union_fingerprint(&host_key);
+                self.fingerprints
+                    .write()
+                    .insert(host_key.clone(), (fp, Instant::now()));
+                info!(
+                    plugin_id = plugin_id,
+                    host = %host_key,
+                    "成员粒度热重载完成（宿主进程内重载，其余成员不受影响；并集指纹已刷新）"
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => Err(PluginError {
+                message: format!("reload_member: 宿主应答错误（{plugin_id}）: {e}"),
+                code: None,
+                source: None,
+            }),
+            Err(_) => Err(PluginError {
+                message: format!(
+                    "reload_member: 宿主应答超时（{plugin_id}，{}s）",
+                    RELOAD_MEMBER_TIMEOUT.as_secs()
+                ),
+                code: None,
+                source: None,
+            }),
+        }
     }
 
     /// 按插件 id 卸载其宿主（idle GC 与 force_unload 的公共实现）。
@@ -3223,6 +3339,15 @@ impl PluginInvoker for PluginInvokerImpl {
     /// 转发到 force_unload_impl：kill sidecar + 清缓存，下次调用自动 respawn 加载新代码。
     async fn force_unload(&self, plugin_id: &str) -> Result<(), PluginError> {
         self.force_unload_impl(plugin_id).await
+    }
+
+    /// 成员粒度热重载（覆盖 trait 默认实现，合宿多组扩展的姊妹能力）。
+    ///
+    /// 见 [`Self::reload_group_member`]：仅对「已装箱到组宿主且有存活进程」
+    /// 的成员生效；独占插件返回 Err（独占本就无连坐面，调用方回退
+    /// [`Self::force_unload`] 杀单进程即等价粒度）。
+    async fn reload_member(&self, plugin_id: &str) -> Result<(), PluginError> {
+        self.reload_group_member(plugin_id).await
     }
 
     /// 重新扫描插件目录（覆盖 trait 默认实现）。

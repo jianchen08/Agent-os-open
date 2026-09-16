@@ -85,9 +85,8 @@ class BoundedDict(MutableMapping[str, dict[str, Any]]):
         now = self._clock()
         self._sweep_expired(now)
         while len(self._data) >= self._max:
-            oldest = min(self._data.items(), key=lambda kv: kv[1].get("ts", 0), default=None)
-            if oldest is None:
-                break
+            # _max 构造期钳正（<=0 重置默认），循环条件保证字典非空，min 必有值
+            oldest = min(self._data.items(), key=lambda kv: kv[1].get("ts", 0))
             del self._data[oldest[0]]
         entry = dict(value)
         entry["ts"] = now

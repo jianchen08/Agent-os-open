@@ -40,27 +40,7 @@ vi.mock('@/services/workspacePanelOpener', async (importOriginal) => ({
   openWorkspacePanelByPath: vi.fn(() => true),
 }))
 
-// antd Splitter 依赖 ResizeObserver / matchMedia，jsdom 缺失，测试环境打桩
-class ResizeObserverStub {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
-}
-
-function setViewportWidth(width: number) {
-  Object.defineProperty(window, 'innerWidth', { value: width, writable: true, configurable: true })
-}
-
-const chatContent = <div data-testid="chat-content">对话内容</div>
-const sidebarContent = <div data-testid="sidebar-content">侧栏导航</div>
-
-function renderLayout() {
-  return render(
-    <MemoryRouter>
-      <FiveSpaceLayout chatContent={chatContent} sidebarContent={sidebarContent} />
-    </MemoryRouter>,
-  )
-}
+import { chatContent, renderLayout, ResizeObserverStub, setViewportWidth, sidebarContent } from './helpers/fiveSpaceTestUtils'
 
 function resetStores() {
   mockBudget.current = null

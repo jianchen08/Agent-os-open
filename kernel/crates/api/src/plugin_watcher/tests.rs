@@ -1645,7 +1645,7 @@ async fn sync_next_round_does_not_resurrect_sanitized_tool() {
     let scopes = PluginScopeRegistry::new();
     let registry_arc = Arc::new(CapabilityRegistryImpl::new());
     let store: ManifestsStore = Arc::new(RwLock::new(Vec::new()));
-    let ledger = crate::contract::ContractLedger::new();
+    let ledger = Arc::new(crate::contract::ContractLedger::new());
     let mut known = HashSet::new();
     let mut hashes = HashMap::new();
     let mut code_hashes = HashMap::new();
@@ -2305,4 +2305,872 @@ fn watch_roots_includes_user_plugin_root() {
         Some(v) => std::env::set_var(agentos_core::user_space::USER_PLUGINS_DIR_ENV, v),
         None => std::env::remove_var(agentos_core::user_space::USER_PLUGINS_DIR_ENV),
     }
+}
+
+// ── builder 装配面：注入句柄逐项生效（配置对象构造即可观察，无需真跑 watcher） ──
+
+/// `PluginWatcher::new` 的默认装配与各 `with_*` 注入点：每个注入点落位到对应
+/// 字段（builder 漏接线会让生产装配静默丢能力，例如 profile 重读根丢失 →
+/// 运行期 PUT enabled 不再即时可见）。
+#[test]
+fn watcher_builders_place_every_injection() {
+    let invoker: Arc<dyn PluginInvoker> = Arc::new(MockInvoker::new(vec![]));
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let scopes = Arc::new(PluginScopeRegistry::new());
+    let store: ManifestsStore = Arc::new(RwLock::new(Vec::new()));
+    let ledger = Arc::new(crate::contract::ContractLedger::new());
+    let enabled = Arc::new(tokio::sync::RwLock::new(HashSet::new()));
+    let code_dirs: Arc<CodeDirResolver> = Arc::new(|_id: &str| None);
+    let root = std::path::PathBuf::from("cfg_root");
+
+    let w = PluginWatcher::new(
+        std::path::PathBuf::from("plugins"),
+        invoker,
+        registry,
+        HashSet::from(["boot_id".to_string()]),
+    )
+    .with_scopes(scopes.clone())
+    .with_code_dir_resolver(code_dirs)
+    .with_initial_cdylib_ids(HashSet::from(["native_a".to_string()]))
+    .with_restart_hook(Arc::new(|| {}))
+    .with_manifests_store(store.clone())
+    .with_profile_reload(root.clone())
+    .with_contract_states(ledger)
+    .with_enabled_ids(enabled.clone())
+    .with_debounce(Duration::from_millis(7))
+    .with_poll_interval(Duration::from_millis(11));
+
+    assert!(Arc::ptr_eq(&w.scopes, &scopes), "scope 表须原样注入");
+    assert_eq!(w.known_ids, HashSet::from(["boot_id".to_string()]));
+    assert_eq!(
+        w.known_cdylib,
+        Some(HashSet::from(["native_a".to_string()])),
+        "cdylib 基线须注入（否则首轮只建基线不 diff）"
+    );
+    assert!(w.restart_hook.is_some(), "重启回调须注入");
+    assert!(w.code_dirs.is_some(), "代码目录解析器须注入");
+    assert!(
+        w.manifests_store
+            .as_ref()
+            .is_some_and(|s| Arc::ptr_eq(s, &store)),
+        "manifest 共享 store 须原样注入"
+    );
+    assert_eq!(w.profile_reload_root.as_deref(), Some(root.as_path()));
+    assert!(w.contract_states.is_some(), "契约账本须注入");
+    assert!(
+        w.enabled_ids
+            .as_ref()
+            .is_some_and(|s| Arc::ptr_eq(s, &enabled)),
+        "启用集合共享句柄须原样注入"
+    );
+    assert_eq!(w.debounce, Duration::from_millis(7));
+    assert_eq!(w.poll_interval, Duration::from_millis(11));
+}
+
+/// `with_enablement` 快照注入（非重读路径）：profile 显式 disabled 的判定
+/// 生效，且 manifest 自带 enabled 声明优先（合并优先级 = manifest > profile）。
+#[test]
+fn watcher_with_enablement_snapshot_filters_disabled() {
+    use agentos_plugin_loader::{PluginEnablement, PluginProfile};
+    let profile: PluginProfile = serde_yaml::from_str(
+        "version: 1
+plugins:
+  off_plugin:
+    enabled: false
+",
+    )
+    .expect("测试 profile 应可反序列化");
+    let invoker: Arc<dyn PluginInvoker> = Arc::new(MockInvoker::new(vec![]));
+    let w = PluginWatcher::new(
+        std::path::PathBuf::from("plugins"),
+        invoker,
+        Arc::new(CapabilityRegistryImpl::new()),
+        HashSet::new(),
+    )
+    .with_enablement(PluginEnablement::with_profile(profile));
+    let enablement = w.enablement.as_ref().expect("快照注入须落位");
+    assert!(
+        !enablement.is_enabled("off_plugin", None),
+        "profile 显式 disabled 须让插件不可启用"
+    );
+    assert!(
+        enablement.is_enabled("off_plugin", Some(true)),
+        "manifest 自带 enabled 声明优先级高于 profile"
+    );
+}
+
+// ── 诊断留痕：告警/信息路径必须真求值（挂采集订阅，无订阅者时宏体不执行） ──
+
+/// cdylib 集合变更的三种决策路径都要有可观测留痕：
+/// ① 开关关闭 → warn（需人工重启）；② 有 hook → info + 回调触发；③ 无 hook → warn。
+#[test]
+fn cdylib_restart_paths_emit_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let change = CdylibChange {
+        added: vec!["new_native".to_string()],
+        removed: vec!["gone_native".to_string()],
+    };
+
+    assert!(
+        !trigger_cdylib_restart_if_enabled(&change, &None, false),
+        "开关关闭不触发"
+    );
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&fired);
+    let hook: Arc<dyn Fn() + Send + Sync> =
+        Arc::new(move || flag.store(true, std::sync::atomic::Ordering::Relaxed));
+    assert!(
+        trigger_cdylib_restart_if_enabled(&change, &Some(hook), true),
+        "开关开 + 有 hook 触发"
+    );
+    assert!(fired.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(
+        !trigger_cdylib_restart_if_enabled(&change, &None, true),
+        "无 hook 不触发（诚实降级）"
+    );
+
+    let text = logs.text();
+    assert!(
+        text.contains("auto-restart disabled"),
+        "开关关闭须留痕可诊断: {text}"
+    );
+    assert!(
+        text.contains("triggering G8 graceful restart"),
+        "触发重启须留痕: {text}"
+    );
+    assert!(
+        text.contains("no restart hook wired"),
+        "无 hook 降级须留痕: {text}"
+    );
+    assert!(text.contains("new_native") && text.contains("gone_native"));
+}
+
+/// 代码变更驱逐失败（invoker.force_unload 报错）→ warn 留痕且不中断复验
+/// （调用时拉取检测兜底是既定降级，不得因驱逐失败放弃重注册）。
+#[tokio::test]
+async fn reverify_host_evict_failure_is_warned_and_continues() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    struct EvictFailInvoker {
+        inner: MockInvoker,
+    }
+    #[async_trait]
+    impl PluginInvoker for EvictFailInvoker {
+        async fn invoke_pipeline_plugin<'a>(
+            &self,
+            p: &str,
+            c: &PluginContext<'a>,
+        ) -> Result<PluginResult, PluginError> {
+            self.inner.invoke_pipeline_plugin(p, c).await
+        }
+        async fn invoke_tool(
+            &self,
+            p: &str,
+            t: &str,
+            i: &serde_json::Value,
+        ) -> Result<ToolExecutionResult, PluginError> {
+            self.inner.invoke_tool(p, t, i).await
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            p: &str,
+            h: LifecycleHook,
+            c: &HookContext,
+        ) -> Result<(), PluginError> {
+            self.inner.send_lifecycle_hook(p, h, c).await
+        }
+        async fn discover_new_plugins(&self) -> Result<Vec<PluginManifest>, PluginError> {
+            self.inner.discover_new_plugins().await
+        }
+        async fn list_plugin_tools(&self, p: &str) -> Result<serde_json::Value, PluginError> {
+            self.inner.list_plugin_tools(p).await
+        }
+        async fn force_unload(&self, _plugin_id: &str) -> Result<(), PluginError> {
+            Err(PluginError {
+                message: "kill refused".into(),
+                code: None,
+                source: None,
+            })
+        }
+    }
+
+    let m = mk_manifest_light_pipeline("evict_fail");
+    let v1 = tempfile::tempdir().unwrap();
+    std::fs::write(v1.path().join("impl.py"), b"v1").unwrap();
+    let v2 = tempfile::tempdir().unwrap();
+    std::fs::write(v2.path().join("impl.py"), b"v2").unwrap();
+    let stage = Arc::new(parking_lot::RwLock::new(v1.path().to_path_buf()));
+    let resolver: Arc<CodeDirResolver> = {
+        let stage = stage.clone();
+        Arc::new(move |_id: &str| Some(stage.read().clone()))
+    };
+
+    let invoker: EvictFailInvoker = EvictFailInvoker {
+        inner: MockInvoker::new(vec![m.clone()]),
+    };
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let mut known = HashSet::from(["evict_fail".to_string()]);
+    let mut code_hashes = HashMap::new();
+    let mut hashes = HashMap::new();
+
+    // 基线轮
+    sync_once_with_store(
+        &invoker,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        Some(&resolver),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // 代码变更 → 驱逐失败（warn）+ 复验继续
+    *stage.write() = v2.path().to_path_buf();
+    let r = sync_once_with_store(
+        &invoker,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        Some(&resolver),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = logs.text();
+    assert!(
+        text.contains("宿主驱逐失败"),
+        "驱逐失败必须 warn 留痕: {text}"
+    );
+    assert_eq!(
+        r.changed_plugin_ids,
+        vec!["evict_fail".to_string()],
+        "驱逐失败不得中断复验记账"
+    );
+}
+
+/// 卸载连带（依赖者因提供者消失被一并摘下）须留痕：fail-closed 摘能力是
+/// 运维可见事件，静默会让"插件还在目录里却没注册"变成悬案。
+#[tokio::test]
+async fn uninstall_cascade_emits_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let p: PluginManifest = serde_json::from_value(json!({
+        "id": "prov_x", "name": "prov_x", "version": "1.0.0",
+        "plugin_type": "tool", "language": "python", "host_type": "sidecar",
+        "entry": "python server.py",
+        "capabilities": { "services": [{ "name": "x.svc" }] },
+    }))
+    .unwrap();
+    let mut c = mk_manifest("dep_c", "tool", &["tc"], false);
+    c.requires_services = vec!["x.svc".to_string()];
+
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let mut known = HashSet::new();
+    let mut hashes = HashMap::new();
+    let store: ManifestsStore = Arc::new(RwLock::new(Vec::new()));
+
+    // 第 1 轮：p + c 双双注册
+    {
+        let inv = MockInvoker::new(vec![p.clone(), c.clone()]);
+        let r1 = sync_once_with_store(
+            &inv,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            Some(&store),
+            &mut hashes,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r1.new_plugin_ids.len(), 2, "首轮两插件都注册");
+    }
+
+    // 第 2 轮：p 从磁盘消失 → c 因服务无提供者被连带摘下
+    let inv2 = MockInvoker::new(vec![c.clone()]);
+    let r2 = sync_once_with_store(
+        &inv2,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        Some(&store),
+        &mut hashes,
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = logs.text();
+    assert_eq!(r2.uninstalled, vec!["prov_x".to_string()]);
+    assert_eq!(r2.cascade_uninstalled, vec!["dep_c".to_string()]);
+    assert!(
+        text.contains("依赖的服务已无提供者"),
+        "连带摘除须留痕: {text}"
+    );
+    assert!(
+        text.contains("卸载语义：目录消失插件已摘下能力"),
+        "卸载留痕须含连带清单: {text}"
+    );
+}
+
+/// 畸形 output_schema 的拒绝动作必须留痕（注册闸 fail-closed 的审计面）。
+#[tokio::test]
+async fn malformed_output_schema_rejection_emits_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let m: PluginManifest = serde_json::from_value(json!({
+        "id": "p_bad_out", "name": "p_bad_out", "version": "1.0.0",
+        "plugin_type": "tool", "language": "python", "host_type": "sidecar",
+        "entry": "python server.py",
+        "capabilities": { "tools": [
+            { "name": "t_bad", "description": "d",
+              "output_schema": {"type": "object", "properties": "oops"} }
+        ] },
+    }))
+    .unwrap();
+    let invoker = MockInvoker::new(vec![m.clone()]);
+    let out = g2_verify_and_sanitize(&invoker, m).await;
+
+    let text = logs.text();
+    assert!(out.rejected_tools.contains(&"t_bad".to_string()));
+    assert!(
+        text.contains("output_schema 声明不合法"),
+        "拒绝原因须留痕: {text}"
+    );
+}
+
+/// 冒烟失败与被拒两分支各留痕（smoke:true 是插件显式投保的注册期体检）。
+#[tokio::test]
+async fn smoke_rejection_emits_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let mut invoker = MockInvoker::new(vec![mk_manifest_smoke("p_smoke_log", "t_s", true)]);
+    invoker.list_tools = std::collections::HashMap::from([(
+        "p_smoke_log".into(),
+        assert_input_schema_ok(json!({"tools":[{ "name": "t_s" }]})),
+    )]);
+    invoker.invoke_tool_fail = true;
+    let out = g2_verify_and_sanitize(&invoker, mk_manifest_smoke("p_smoke_log", "t_s", true)).await;
+
+    let text = logs.text();
+    assert!(out.smoke_failed);
+    assert!(
+        text.contains("冒烟：调用异常，拒绝该工具"),
+        "冒烟异常须留痕: {text}"
+    );
+
+    // 工具返回 success=false（非异常）→ 另一分支留痕
+    let (guard2, logs2) = crate::test_env::capture_logs();
+    let _ = &guard2;
+    struct FailResultInvoker;
+    #[async_trait]
+    impl PluginInvoker for FailResultInvoker {
+        async fn invoke_pipeline_plugin<'a>(
+            &self,
+            _p: &str,
+            _c: &PluginContext<'a>,
+        ) -> Result<PluginResult, PluginError> {
+            unimplemented!("冒烟不走管道调用")
+        }
+        async fn invoke_tool(
+            &self,
+            _p: &str,
+            _t: &str,
+            _i: &serde_json::Value,
+        ) -> Result<ToolExecutionResult, PluginError> {
+            Ok(ToolExecutionResult::failure("declared capability missing"))
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _p: &str,
+            _h: LifecycleHook,
+            _c: &HookContext,
+        ) -> Result<(), PluginError> {
+            unimplemented!("冒烟不走 hook")
+        }
+        async fn list_plugin_tools(&self, _p: &str) -> Result<serde_json::Value, PluginError> {
+            Ok(assert_input_schema_ok(json!({"tools":[{ "name": "t_s" }]})))
+        }
+    }
+    let out2 = g2_verify_and_sanitize(
+        &FailResultInvoker,
+        mk_manifest_smoke("p_smoke_log", "t_s", true),
+    )
+    .await;
+    let text2 = logs2.text();
+    assert!(out2.smoke_failed);
+    assert!(
+        text2.contains("冒烟：调用返回失败，拒绝该工具"),
+        "冒烟返回失败须留痕: {text2}"
+    );
+}
+
+/// 服务面公告与实际工具不一致（provides 有、工具无）→ warn + drift + 名单上报。
+#[tokio::test]
+async fn provides_without_backing_tool_is_flagged() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let m: PluginManifest = serde_json::from_value(json!({
+        "id": "p_prov", "name": "p_prov", "version": "1.0.0",
+        "plugin_type": "tool", "language": "python", "host_type": "sidecar",
+        "entry": "python server.py",
+        "capabilities": {
+            "tools": [{ "name": "declared_only", "description": "d" }],
+            "services": [{ "name": "ghost_svc" }]
+        },
+        "provides": { "capabilities": [{ "namespace": "ghost_svc", "methods": ["status"] }] }
+    }))
+    .unwrap();
+    let mut invoker = MockInvoker::new(vec![m.clone()]);
+    invoker.list_tools = std::collections::HashMap::from([(
+        "p_prov".into(),
+        json!({ "tools": [{"name": "declared_only", "description": "d"}] }),
+    )]);
+    let out = g2_verify_and_sanitize(&invoker, m).await;
+
+    let text = logs.text();
+    assert!(out.drift, "服务公告无工具背书必须判 drift");
+    assert!(
+        text.contains("公告的服务没有对应已声明工具"),
+        "未背书服务须留痕: {text}"
+    );
+}
+
+/// G2 观测失败 → 保留声明注册 + spawn_failed 标记，且留痕说明"观测失败≠判定失败"。
+#[tokio::test]
+async fn g2_observe_failure_is_warned_and_keeps_declaration() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let m = mk_manifest("p_obs_fail", "tool", &["t_keep"], false);
+    let mut invoker = MockInvoker::new(vec![m.clone()]);
+    invoker.list_tools_fail = true;
+    let out = g2_verify_and_sanitize(&invoker, m).await;
+
+    let text = logs.text();
+    assert!(out.spawn_failed, "观测失败须标记（账本待复验）");
+    assert_eq!(out.manifest.capabilities.tools.len(), 1, "声明工具保留");
+    assert!(!out.drift, "观测失败不得判漂移");
+    assert!(
+        text.contains("观测失败（spawn/tools-list）"),
+        "重试退避须留痕: {text}"
+    );
+    assert!(
+        text.contains("保留声明注册，待复验"),
+        "终局降级须留痕: {text}"
+    );
+}
+
+/// 动态 MCP 零声明观测导入成功 → 留痕（一行接入的可见证据）。
+#[tokio::test]
+async fn dynamic_mcp_import_emits_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let mut invoker = MockInvoker::new(vec![mk_manifest_dynamic_mcp("hub_x")]);
+    invoker.list_tools.insert(
+        "hub_x".into(),
+        json!({ "tools": [{"name": "remote_t", "description": "d",
+                           "inputSchema": {"type": "object"}}] }),
+    );
+    let out = g2_verify_and_sanitize(&invoker, mk_manifest_dynamic_mcp("hub_x")).await;
+
+    let text = logs.text();
+    assert_eq!(out.manifest.capabilities.tools.len(), 1, "观测即声明");
+    assert!(
+        text.contains("观测导入 tools/list 全量工具"),
+        "导入须留痕: {text}"
+    );
+}
+
+/// G2 复验漂移（声明与实际不一致）→ warn + drifted_plugins + 剔除后重注册。
+#[tokio::test]
+async fn reverify_drift_emits_diagnostics_and_reregisters_sanitized() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let m = mk_manifest("drift_p", "tool", &["t1", "t2"], false);
+    let mut inv1 = MockInvoker::new(vec![m.clone()]);
+    inv1.list_tools.insert(
+        "drift_p".into(),
+        json!({ "tools": [{"name": "t1", "description": "t1"},
+                          {"name": "t2", "description": "t2"}] }),
+    );
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let mut known = HashSet::new();
+    let mut hashes = HashMap::new();
+
+    // 首轮建立基线与注册
+    sync_once_with_store(
+        &inv1,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(registry_arc.list_tools().len(), 2);
+
+    // 第二轮：声明变更（触发复验）+ 实现只剩 t1（漂移）→ 剔除 t2 后重注册
+    let mut m2 = m;
+    m2.version = "1.0.1".to_string();
+    let mut inv2 = MockInvoker::new(vec![m2]);
+    inv2.list_tools.insert(
+        "drift_p".into(),
+        json!({ "tools": [{"name": "t1", "description": "t1"}] }),
+    );
+    let r2 = sync_once_with_store(
+        &inv2,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = logs.text();
+    assert_eq!(r2.drifted_plugins, vec!["drift_p".to_string()]);
+    assert!(
+        text.contains("声明与实现漂移，剔除漂移工具后重注册"),
+        "漂移处置须留痕: {text}"
+    );
+    assert_eq!(
+        registry_arc.list_tools().len(),
+        1,
+        "漂移工具从注册面剔除（其余能力照常）"
+    );
+}
+
+/// 未声明暴露（实际比声明多）→ 留痕但不拒绝注册（其余能力照常）。
+#[tokio::test]
+async fn reverify_undeclared_exposure_is_warned_without_rejection() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let m = mk_manifest("extra_p", "tool", &["t_declared"], false);
+    let mut inv1 = MockInvoker::new(vec![m.clone()]);
+    inv1.list_tools.insert(
+        "extra_p".into(),
+        json!({ "tools": [{"name": "t_declared", "description": "t_declared"}] }),
+    );
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let mut known = HashSet::new();
+    let mut hashes = HashMap::new();
+    sync_once_with_store(
+        &inv1,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // 第二轮：声明变更触发复验 + 实现多暴露一个未声明工具 → undeclared（不拒绝注册）
+    let mut m2 = m;
+    m2.version = "1.0.1".to_string();
+    let mut inv2 = MockInvoker::new(vec![m2]);
+    inv2.list_tools.insert(
+        "extra_p".into(),
+        json!({ "tools": [{"name": "t_declared", "description": "t_declared"},
+                          {"name": "t_extra", "description": "t_extra"}] }),
+    );
+    let r2 = sync_once_with_store(
+        &inv2,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let text = logs.text();
+    assert!(
+        !r2.changed_plugin_ids.is_empty(),
+        "声明变更须触发复验重注册"
+    );
+    assert!(
+        text.contains("存在未声明暴露的工具（不拒绝注册）"),
+        "未声明暴露须留痕: {text}"
+    );
+    assert!(
+        registry_arc.get_tool("t_declared").is_some(),
+        "已声明工具保留注册"
+    );
+    assert!(
+        registry_arc.get_tool("t_extra").is_none(),
+        "未声明工具不进注册面（声明即契约）"
+    );
+}
+
+/// 动态 MCP 连击达熔断上限的跨越告警（只在跨越时告警一次）。
+#[tokio::test]
+async fn dynamic_import_fuse_crossing_is_warned_once() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let mut m = mk_manifest("hub_fuse_log", "tool", &[], false);
+    m.entry = "mcp:external".to_string();
+    let mut invoker = MockInvoker::new(vec![m]);
+    invoker.list_tools_fail = true;
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let mut known = HashSet::new();
+    let mut hashes = HashMap::new();
+    let mut obs_fail = HashMap::new();
+    for _ in 0..6 {
+        sync_once_with_store(
+            &invoker,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            None,
+            &mut hashes,
+            &mut HashMap::new(),
+            &mut obs_fail,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let text = logs.text();
+    assert_eq!(obs_fail.get("hub_fuse_log"), Some(&5));
+    // 进程级共享采集缓冲下并发用例日志互见：按本用例独有的插件标识限定行计数，
+    // 只断言「该插件跨上限只告警一次」（避免逐轮刷日志），不要求缓冲里仅此一条。
+    let fuse_lines = text
+        .lines()
+        .filter(|l| l.contains("连续观测失败达上限") && l.contains("hub_fuse_log"))
+        .count();
+    assert_eq!(
+        fuse_lines, 1,
+        "跨越上限只告警一次（避免逐轮刷日志）: {text}"
+    );
+}
+
+// ── 模式包资源增量重扫（resync_mode_package_resources，真实临时目录）──
+
+/// 写最小模式包 manifest（扫描层只读 id，与 mode_registry 测试 fixture 同形态）。
+fn write_mode_package_manifest(root: &Path, mode_id: &str) {
+    let dir = root.join("modes").join(mode_id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("plugin.json"),
+        format!(r#"{{"id":"{mode_id}","version":"1.0.0"}}"#),
+    )
+    .unwrap();
+}
+
+/// 写一个 agents 约定文件（目录按需创建）。
+fn write_mode_agent(root: &Path, mode_id: &str, name: &str, content: &str) {
+    let dir = root.join("modes").join(mode_id).join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(name), content).unwrap();
+}
+
+#[tokio::test]
+async fn resync_mode_resources_hot_added_agent_key_appears() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_mode_package_manifest(tmp.path(), "mode_hot_add");
+    write_mode_agent(
+        tmp.path(),
+        "mode_hot_add",
+        "base.yaml",
+        "model_tier: large\n",
+    );
+
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let scopes = PluginScopeRegistry::new();
+    let registrable: HashSet<String> = ["mode_hot_add".to_string()].into_iter().collect();
+
+    // 基线：base 键注册入表（guard 入 scope，与 boot 同一 M1 语义）
+    assert_eq!(
+        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
+        1
+    );
+    assert!(registry.get_mode_agent("mode_hot_add/base").is_some());
+    assert!(!scopes.scope_of("mode_hot_add").is_empty());
+    // 盘上无变化 → 快路径 no-op（零 churn）
+    assert_eq!(
+        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
+        0,
+        "键表与盘上一致时必须 no-op"
+    );
+
+    // 热增 agents 文件 → 下轮重扫键出现（无需重启）
+    write_mode_agent(
+        tmp.path(),
+        "mode_hot_add",
+        "hot.yaml",
+        "model_tier: small\n",
+    );
+    assert_eq!(
+        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
+        1
+    );
+    let hot = registry.get_mode_agent("mode_hot_add/hot").unwrap();
+    assert!(hot.path.ends_with("hot.yaml"), "条目路径指向盘上文件");
+    assert!(
+        registry.get_mode_agent("mode_hot_add/base").is_some(),
+        "既有键不受牵连"
+    );
+}
+
+#[tokio::test]
+async fn resync_mode_resources_hot_deleted_agent_key_disappears() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_mode_package_manifest(tmp.path(), "mode_hot_del");
+    write_mode_agent(tmp.path(), "mode_hot_del", "base.yaml", "x: 1\n");
+    write_mode_agent(tmp.path(), "mode_hot_del", "doomed.yaml", "x: 2\n");
+
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let scopes = PluginScopeRegistry::new();
+    let registrable: HashSet<String> = ["mode_hot_del".to_string()].into_iter().collect();
+    assert_eq!(
+        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
+        1
+    );
+    assert!(registry.get_mode_agent("mode_hot_del/doomed").is_some());
+
+    // 热删 agents 文件 → 键同源消失（其余键不受牵连）
+    std::fs::remove_file(tmp.path().join("modes/mode_hot_del/agents/doomed.yaml")).unwrap();
+    assert_eq!(
+        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
+        1
+    );
+    assert!(registry.get_mode_agent("mode_hot_del/doomed").is_none());
+    assert!(
+        registry.get_mode_agent("mode_hot_del/base").is_some(),
+        "未删除的键保留"
+    );
+}
+
+#[tokio::test]
+async fn resync_mode_resources_scan_failure_keeps_old_table() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_mode_package_manifest(tmp.path(), "mode_bad_yaml");
+    write_mode_agent(tmp.path(), "mode_bad_yaml", "base.yaml", "x: 1\n");
+
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let scopes = PluginScopeRegistry::new();
+    let registrable: HashSet<String> = ["mode_bad_yaml".to_string()].into_iter().collect();
+    assert_eq!(
+        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
+        1
+    );
+
+    // 重扫失败形态①：yaml 语法坏 → 整轮扫描 fail-closed，旧键表保留、不崩
+    write_mode_agent(
+        tmp.path(),
+        "mode_bad_yaml",
+        "bad.yaml",
+        "a: [broken\n  ::::",
+    );
+    assert_eq!(
+        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
+        0,
+        "扫描失败不产生任何键表变化"
+    );
+    assert!(
+        registry.get_mode_agent("mode_bad_yaml/base").is_some(),
+        "重扫失败保留旧键表"
+    );
+
+    // 形态②：可解析但顶层非映射（pipelines 约定目录）→ 同样保留旧表
+    std::fs::remove_file(tmp.path().join("modes/mode_bad_yaml/agents/bad.yaml")).unwrap();
+    let pipelines_dir = tmp.path().join("modes/mode_bad_yaml/pipelines");
+    std::fs::create_dir_all(&pipelines_dir).unwrap();
+    std::fs::write(pipelines_dir.join("empty.yaml"), "").unwrap();
+    assert_eq!(
+        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
+        0
+    );
+    assert!(registry.get_mode_agent("mode_bad_yaml/base").is_some());
+}
+
+#[tokio::test]
+async fn resync_mode_resources_restores_keys_after_scope_revoke() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_mode_package_manifest(tmp.path(), "mode_respawn");
+    write_mode_agent(tmp.path(), "mode_respawn", "base.yaml", "x: 1\n");
+
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let scopes = PluginScopeRegistry::new();
+    let registrable: HashSet<String> = ["mode_respawn".to_string()].into_iter().collect();
+    assert_eq!(
+        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
+        1
+    );
+
+    // 包内重注册/respawn 路径（reenable_plugin_capabilities）先整 scope 收回：
+    // 模式键随 M1 guard 同源消失
+    scopes.revoke("mode_respawn");
+    assert!(registry.get_mode_agent("mode_respawn/base").is_none());
+
+    // 下轮 sync 尾部重扫 → 键表恢复（guard 重新入 scope）
+    assert_eq!(
+        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
+        1
+    );
+    assert!(registry.get_mode_agent("mode_respawn/base").is_some());
+    assert!(
+        !scopes.scope_of("mode_respawn").is_empty(),
+        "恢复的注册重新入 scope"
+    );
 }

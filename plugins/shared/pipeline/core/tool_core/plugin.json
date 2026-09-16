@@ -17,7 +17,13 @@
     "lifecycle_hooks": [],
     "streaming": {
       "conduit": true
-    }
+    },
+    "steps": [
+      {
+        "name": "pipeline_tool_core",
+        "required_state_inputs": []
+      }
+    ]
   },
   "permissions": {},
   "priority": 50,

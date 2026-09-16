@@ -104,6 +104,21 @@ async def execute(state: dict, config: dict | None = None) -> dict:
     merged_state = create_initial_state(**state)
     ctx = PluginContext(state=merged_state, config=config or {})
 
+    # 观察出口桥接（原 track 插件 server.py 同款，2026-09-15 随统计并入）：
+    # 每轮 token 用量经 frontend.emit 推前端（cost_update）、经 metrics.record
+    # 上报内核聚合器。两个 capability 句柄挂在 AgentOSPlugin 实例上，插件逻辑
+    # 经 ctx.get_service 访问——此处注入 ctx._services。旧内核未声明对应
+    # capability 时 from_plugin 返回 None，不注入（插件侧静默跳过出口）。
+    from agentos_plugin_sdk import FrontendEmitter, MetricsReporter  # noqa: PLC0415
+
+    _emitter = FrontendEmitter.from_plugin(plugin)
+    if _emitter is not None:
+        ctx._services["frontend"] = _emitter
+
+    _metrics = MetricsReporter.from_plugin(plugin)
+    if _metrics is not None:
+        ctx._services["metrics"] = _metrics
+
     result = await get_instance().execute(ctx)
 
     # Core 插件（LLMCore）返回 state_updates dict（含 raw_result 等），

@@ -16,12 +16,14 @@
 缓存实现（agentos_plugin_sdk.tool_result_cache）是真依赖，只对
 「结果不可 JSON 序列化」的边界注入不可序列化对象（外部数据形态）。
 
-结构性不可达防御分支（逐条说明，勿硬凑）：
+守卫分支（靶行 plugin.py 170）逐条说明：
 - ``_build_tool_result_messages`` 的 ``if i >= len(cached_results): break``：
   ``execute`` 只在**全部**工具调用命中时才调用本方法（任一未命中即
   ``return PluginResult()``），且每命中一次恰好 append 一条结果，故
-  ``len(cached_results) == len(tool_calls)`` 恒成立，越界守卫在本契约下
-  不可达——它是防未来"部分命中"改动的防御性护栏。
+  ``len(cached_results) == len(tool_calls)`` 恒成立，经 ``execute`` 的真实
+  输入不可达——它是防未来"部分命中"改动的防御性护栏。护栏行为按其本义以
+  直调方法注入长度差输入覆盖（TestPartialCacheGuardBranch），不硬凑
+  execute 路径。
 """
 
 from __future__ import annotations
@@ -373,3 +375,45 @@ class TestPutRoundTrip:
         writer.put({"name": "web_search", "args": {"q": "x"}}, {"v": 1})
 
         assert _run(reader, _state()).state_updates["cache_hit"] is True
+
+
+# ═══════════════ 越界守卫（靶行 170：长度差直调注入） ═══════════════
+
+
+class TestPartialCacheGuardBranch:
+    """``_build_tool_result_messages`` 的 ``if i >= len(cached_results): break``。
+
+    经 ``execute`` 的真实输入不可达（见模块 docstring：全命中才调用、命中数
+    恒等于调用数），这里按守卫本义直调方法、注入长度差输入验证护栏契约：
+    ops 数 = min(调用数, 缓存数)，多余调用不产生 op、不越界不抛错。
+    """
+
+    @staticmethod
+    def _calls(n: int) -> list[dict[str, Any]]:
+        return [
+            {"id": f"c{i}", "name": "web_search", "args": {"q": f"q{i}"}}
+            for i in range(n)
+        ]
+
+    @pytest.mark.parametrize(
+        ("n_calls", "n_cached"),
+        [
+            (3, 2),  # 靶形态：第三个调用越过缓存末尾 → break
+            (3, 0),  # 零缓存：首个调用即越界
+            (3, 3),  # 对照：等长全回填（execute 真实契约形态）
+            (1, 5),  # 反向量级：缓存多于调用，多余缓存被忽略
+        ],
+    )
+    def test_ops_count_is_min_of_calls_and_cached(
+        self, n_calls: int, n_cached: int
+    ) -> None:
+        p = tc_plugin.ToolCache()
+        ctx = PluginContext(state={}, config={})
+        cached = [{"idx": i} for i in range(n_cached)]
+
+        ops = p._build_tool_result_messages(ctx, self._calls(n_calls), cached)["_ops"]
+
+        assert len(ops) == min(n_calls, n_cached), "ops 数必须按 min 截断（守卫语义）"
+        assert [op["msg"]["tool_call_id"] for op in ops] == [
+            f"c{i}" for i in range(min(n_calls, n_cached))
+        ], "截断后的 ops 必须与前三（或全部）调用按下标配对"

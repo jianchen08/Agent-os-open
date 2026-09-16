@@ -90,7 +90,9 @@ loop_bodies:
       when: task.id != none and conversation_mode != True and task.status != 'completed' and task.status != 'failed' and task.status != 'cancelled'
     - then: end
     steps:
-    - pipeline_track
+    # token / 耗时统计已并入 pipeline_llm_core 核心步骤（累加与
+    # cost_update / metrics 出口同点位完成，ADR 2026-09-15-track-merged-into-llm-core），
+    # post 链不再需要独立统计步骤。
     - pipeline_task_reminder
     - pipeline_stop_check
     - pipeline_duplicate_check

@@ -22,36 +22,12 @@ import type { ActivityData } from '@/types/activity'
 // ---------------------------------------------------------------------------
 //  Mock: lucide-react
 // ---------------------------------------------------------------------------
-vi.mock('lucide-react', () => {
-  const icons = [
-    'Loader2',
-    'CheckCircle2',
-    'XCircle',
-    'AlertTriangle',
-    'Ban',
-    'Play',
-    'ChevronDown',
-    'ChevronRight',
-    'Copy',
-    'RefreshCw',
-    'Clock',
-    'Sparkles',
-    'Target',
-    'Wrench',
-  ]
-  const m: Record<string, any> = {}
-  for (const name of icons) {
-    m[name] = (p: any) => <svg data-testid={`icon-${name}`} {...p} />
-  }
-  return m
-})
+vi.mock('lucide-react', async () => (await import('./helpers/chatFlowMocks')).lucideMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: @/lib/utils
 // ---------------------------------------------------------------------------
-vi.mock('@/lib/utils', () => ({
-  cn: (...args: (string | undefined | null | false)[]) => args.filter(Boolean).join(' '),
-}))
+vi.mock('@/lib/utils', async () => (await import('./helpers/chatFlowMocks')).cnMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: confirm dialog (used by ActivityCard)

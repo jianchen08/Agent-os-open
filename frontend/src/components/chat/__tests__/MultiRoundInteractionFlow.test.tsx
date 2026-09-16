@@ -30,42 +30,12 @@ import type { PendingInteraction } from '@/stores/interactionStore'
 // ---------------------------------------------------------------------------
 //  Mock: lucide-react
 // ---------------------------------------------------------------------------
-vi.mock('lucide-react', () => {
-  const icons = [
-    'ArrowRight',
-    'Check',
-    'Loader2',
-    'MessageSquare',
-    'Clock',
-    'AlertTriangle',
-    'Send',
-    'ChevronDown',
-    'ChevronRight',
-    'RefreshCw',
-    'Copy',
-    'Wrench',
-    'Play',
-    'Ban',
-    'XCircle',
-    'CheckCircle2',
-    'Sparkles',
-    'Target',
-    'X',
-  ]
-  const m: Record<string, any> = {}
-  for (const name of icons) {
-    m[name] = (p: any) => <svg data-testid={`icon-${name}`} {...p} />
-  }
-  return m
-})
+vi.mock('lucide-react', async () => (await import('./helpers/chatFlowMocks')).lucideMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: @/lib/utils
 // ---------------------------------------------------------------------------
-vi.mock('@/lib/utils', () => ({
-  cn: (...args: (string | undefined | null | false)[]) =>
-    args.filter(Boolean).join(' '),
-}))
+vi.mock('@/lib/utils', async () => (await import('./helpers/chatFlowMocks')).cnMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: MarkdownRenderer
@@ -79,28 +49,7 @@ vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
 // ---------------------------------------------------------------------------
 //  Mock: UI Button
 // ---------------------------------------------------------------------------
-vi.mock('@/components/ui/button', () => ({
-  Button: ({
-    children,
-    onClick,
-    disabled,
-    ...rest
-  }: {
-    children: React.ReactNode
-    onClick?: () => void
-    disabled?: boolean
-    [key: string]: any
-  }) => (
-    <button
-      data-testid={`button-${typeof children === 'string' ? children : 'action'}`}
-      onClick={onClick}
-      disabled={disabled}
-      {...rest}
-    >
-      {children}
-    </button>
-  ),
-}))
+vi.mock('@/components/ui/button', async () => (await import('./helpers/chatFlowMocks')).buttonMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: GlobalWebSocket（真实订阅面：globalWS.subscribe/unsubscribe + send 族）

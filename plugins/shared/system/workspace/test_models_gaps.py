@@ -54,7 +54,9 @@ def test_models_bootstraps_shared_root_for_time_iso() -> None:
         assert "time_iso" in sys.modules
         ws = module.Workspace(title="自举验证")
         assert ws.created_at
-        assert module._now_iso() <= ws.created_at
+        # 时间戳走真实时钟：构造期取样不得晚于其后的当前时刻取样
+        # （原方向反置，仅两次取样落同一微秒才偶绿——墙钟竞态预存红）
+        assert ws.created_at <= module._now_iso()
     finally:
         sys.path[:] = original_path
         sys.modules.pop("time_iso", None)

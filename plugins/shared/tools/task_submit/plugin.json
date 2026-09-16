@@ -122,6 +122,18 @@
                   }
                 }
               ]
+            },
+            "orchestration_key": {
+              "type": "string",
+              "description": "编排键（可选）。显式指定管道定义（函数），如 autonomous 或 mode_X/<编排名>。注意这是编排定义键，不是运行实例 pipeline_id。显式键不存在或提供插件被禁用 = 结构化报错（不会静默改走默认编排）。未指定时按 mode 限定候选解析，仍无候选则兜底 autonomous。"
+            },
+            "mode": {
+              "type": "string",
+              "description": "模式键（可选）。用户显式约束：把编排候选限定为该模式包的 pipelines（文件头 task_kinds 与 task_kind 匹配者优先）；该模式包无自有编排或候选无法区分意图时仍兜底 autonomous（约束非门槛）。"
+            },
+            "task_kind": {
+              "type": "string",
+              "description": "任务型标注（可选）。与模式编排文件头 task_kinds 匹配，用于同模式多编排时的优先选择；不影响 autonomous 兜底。"
             }
           },
           "required": [

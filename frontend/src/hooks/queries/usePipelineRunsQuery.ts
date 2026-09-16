@@ -71,21 +71,27 @@ async function fetchStatesForQuery(): Promise<Record<string, PipelineStateInfo>>
   return mapStatesToRecord(items)
 }
 
-/** 管道 runs 快照 query：挂载即拉取 + 30s 兜底轮询 */
-export function usePipelineRunsQuery() {
+/** 管道 runs/states query：挂载即拉取 + 30s 兜底轮询；
+ *  refetchInterval 可传 false 由调用方按面板可见性冻结轮询（离屏暂停），
+ *  缺省保持原 30s 行为（ChatContainer 等其他消费方不受影响） */
+export function usePipelineRunsQuery(
+  refetchInterval: number | false = PIPELINE_REGISTRY_REFRESH_INTERVAL,
+) {
   return useQuery({
     queryKey: queryKeys.pipelineRuns,
     queryFn: fetchRunsForQuery,
-    refetchInterval: PIPELINE_REGISTRY_REFRESH_INTERVAL,
+    refetchInterval,
   })
 }
 
 /** 管道 states 摘要 query：挂载即拉取 + 30s 兜底轮询 */
-export function usePipelineStatesQuery() {
+export function usePipelineStatesQuery(
+  refetchInterval: number | false = PIPELINE_REGISTRY_REFRESH_INTERVAL,
+) {
   return useQuery({
     queryKey: queryKeys.pipelineStates,
     queryFn: fetchStatesForQuery,
-    refetchInterval: PIPELINE_REGISTRY_REFRESH_INTERVAL,
+    refetchInterval,
   })
 }
 

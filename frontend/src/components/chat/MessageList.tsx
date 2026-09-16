@@ -177,7 +177,13 @@ export const MessageList = ({
       const isHighlighted = message.id === highlightedMessageId
       return (
         <div
-          className={cn('group', isHighlighted && 'message-jump-highlight')}
+          className={cn(
+            'group',
+            // 渲染窗口化：视口外消息跳过 Blink 布局/绘制（styles/render-windowing.css），
+            // DOM 保留——滚动跟随/锚点/定位跳转模型零改动
+            isHighlighted && 'message-jump-highlight',
+            'message-render-window',
+          )}
           data-msg-id={message.id}
           style={{
             marginBottom: index < total - 1 ? 'var(--layout-chatpanel-message-gap, 20px)' : 0,

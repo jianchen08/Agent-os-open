@@ -9,7 +9,7 @@
  * - 列排序：数值序（非字典序）、字符串字典序、空值排末尾、相等值、
  *   升→降→取消 三态循环、排序重置页码、箭头高亮
  * - 分页：四按钮跳转、边界禁用、行数统计
- * - 行操作：when 显隐过滤、variant 样式、confirm 通过/取消、
+ * - 行操作：when 显隐过滤、variant 样式、DOM 确认层确认/取消、
  *   成功提示与 reloadTick 重拉、失败提示含原因、
  *   URL 模板替换（编码 + 缺列保留原样）、默认 POST/显式 DELETE
  */
@@ -17,13 +17,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TableWidget } from '../TableWidget'
 
-const { toastSuccess, toastError, apiCall, apiGet, confirmMock } = vi.hoisted(
+const { toastSuccess, toastError, apiCall, apiGet } = vi.hoisted(
   () => ({
     toastSuccess: vi.fn(),
     toastError: vi.fn(),
     apiCall: vi.fn(),
     apiGet: vi.fn(),
-    confirmMock: vi.fn(() => true),
   }),
 )
 
@@ -45,14 +44,12 @@ beforeEach(() => {
   apiCall.mockResolvedValue({ data: { ok: true } })
   apiGet.mockReset()
   apiGet.mockResolvedValue({ data: {} })
-  confirmMock.mockReset()
-  confirmMock.mockReturnValue(true)
-  vi.stubGlobal('confirm', confirmMock)
+  toastSuccess.mockReset()
+  toastError.mockReset()
 })
 
 afterEach(() => {
   cleanup()
-  vi.unstubAllGlobals()
 })
 
 const BASE_COLUMNS = [
@@ -337,7 +334,7 @@ describe('TableWidget 行操作', () => {
     expect(screen.getAllByTestId('row-action-run')[0]).toHaveClass('text-primary')
   })
 
-  it('confirm 通过：默认 POST + URL 模板替换（编码/缺列保留）+ 成功提示 + 重拉', async () => {
+  it('无 confirm：默认 POST 直发 + URL 模板替换（编码/缺列保留）+ 成功提示 + 重拉', async () => {
     apiGet.mockResolvedValue({ data: { rows: [{ id: 'a b', name: 'r1' }] } })
     render(
       <TableWidget
@@ -359,7 +356,7 @@ describe('TableWidget 行操作', () => {
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2))
   })
 
-  it('显式 method=DELETE + confirm 文案 + 缺省成功文案', async () => {
+  it('显式 method=DELETE：点击先出 DOM 确认层（零请求）→ 确认后才发 + 缺省成功文案', async () => {
     render(
       <TableWidget
         columns={[{ key: 'name', label: '名称' }]}
@@ -368,16 +365,24 @@ describe('TableWidget 行操作', () => {
       />,
     )
     fireEvent.click(screen.getByTestId('row-action-del'))
-    expect(confirmMock).toHaveBeenCalledWith('确定删除?')
-    await waitFor(() => expect(apiCall).toHaveBeenCalled())
-    expect(apiCall).toHaveBeenCalledWith({ method: 'DELETE', url: '/api/del/a1' })
+    // BUG-23：确认层必须是 DOM 可见（原生 confirm 在自动化浏览器被静默
+    // auto-dismiss，点击流无声中断）；确认前零请求零副作用
+    const dialog = await screen.findByRole('dialog', { name: '确认操作' })
+    expect(dialog).toHaveTextContent('确定删除?')
+    expect(apiCall).not.toHaveBeenCalled()
+    expect(toastSuccess).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: '确认' }))
+    await waitFor(() =>
+      expect(apiCall).toHaveBeenCalledWith({ method: 'DELETE', url: '/api/del/a1' }),
+    )
     expect(toastSuccess).toHaveBeenCalledWith('操作成功')
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: '确认操作' })).not.toBeInTheDocument(),
+    )
   })
 
-  it('confirm 取消 → 不发请求不提示', async () => {
-    confirmMock.mockReturnValue(false)
-    apiCall.mockClear()
-    toastSuccess.mockClear()
+  it('确认层点取消 → 不发请求不提示，弹层关闭', async () => {
     render(
       <TableWidget
         columns={[{ key: 'name', label: '名称' }]}
@@ -386,8 +391,12 @@ describe('TableWidget 行操作', () => {
       />,
     )
     fireEvent.click(screen.getByTestId('row-action-run'))
-    expect(confirmMock).toHaveBeenCalledWith('确定?')
-    await waitFor(() => expect(apiCall).not.toHaveBeenCalled())
+    await screen.findByRole('dialog', { name: '确认操作' })
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: '确认操作' })).not.toBeInTheDocument(),
+    )
+    expect(apiCall).not.toHaveBeenCalled()
     expect(toastSuccess).not.toHaveBeenCalled()
   })
 

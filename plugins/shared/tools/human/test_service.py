@@ -189,7 +189,7 @@ async def test_send_notification_without_notifier(make_svc: Any) -> None:
 
 
 async def test_create_choice_request_timeout_default_and_extra_fields(make_svc: Any) -> None:
-    """choice 创建：timeout_seconds 缺省取 default；agent_level/pipeline_id 条件携带。"""
+    """choice 创建：timeout_seconds 缺省收敛到等待上限；agent_level/pipeline_id 条件携带。"""
     svc, notifier = make_svc()
     rid = await svc.create_choice_request(
         "s1", "t1", "tab1", "审批", options=[{"id": "1", "label": "批准"}],
@@ -198,7 +198,7 @@ async def test_create_choice_request_timeout_default_and_extra_fields(make_svc: 
     record = await svc.get_request(rid)
     assert record is not None
     msg = record["message_data"]
-    assert msg["timeout_seconds"] == 86400  # 缺省 = default_timeout
+    assert msg["timeout_seconds"] == 600  # 缺省 86400 收敛到 choice 等待上限（BUG-14）
     assert msg["options"] == [{"id": "1", "label": "批准"}]
     assert msg["questions"] == ["确认？"]
     assert msg["agent_level"] == "L2"
@@ -843,6 +843,340 @@ def test_cross_loop_submit_wakes_waiting_loop(svc_mod: Any) -> None:
     resp = shared.get("resp", {})
     assert resp.get("response_type") == "approved"
     assert resp.get("selected_option") == "yes"
+
+
+# ════════════════════════════════════════════════════════════
+# BUG-14：choice 有界等待 + 拒绝记忆（同会话同标题重试直接拒绝裁决）
+# ════════════════════════════════════════════════════════════
+
+
+async def test_create_choice_caps_timeout_at_default_max(make_svc: Any) -> None:
+    """choice 创建超时上限：缺省 86400 收敛到 600（BUG-14 卡片永久等待）。"""
+    svc, _ = make_svc()
+    rid = await svc.create_choice_request("s1", "t1", "tab1", "审批")
+    assert (await svc.get_request(rid))["message_data"]["timeout_seconds"] == 600
+
+    # 区分度输入：显式小超时不被放大；显式大超时被收敛
+    rid2 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
+    assert (await svc.get_request(rid2))["message_data"]["timeout_seconds"] == 30
+    rid3 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=99999)
+    assert (await svc.get_request(rid3))["message_data"]["timeout_seconds"] == 600
+
+
+async def test_choice_max_wait_injectable_and_disablable(make_svc: Any) -> None:
+    """上限可经构造参数注入；非正值 = 关闭上限（恢复透传语义）。"""
+    svc, _ = make_svc(choice_max_wait_seconds=0.2)
+    rid = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=86400)
+    assert (await svc.get_request(rid))["message_data"]["timeout_seconds"] == 0.2
+
+    svc_off, _ = make_svc(choice_max_wait_seconds=0)
+    rid2 = await svc_off.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=86400)
+    assert (await svc_off.get_request(rid2))["message_data"]["timeout_seconds"] == 86400
+
+
+async def test_wait_for_choice_bounded_by_choice_max_wait(make_svc: Any, svc_mod: Any) -> None:
+    """choice 等待上限：调用方传 86400 也按时收敛（等待与记录上限同源）。"""
+    svc, _ = make_svc(choice_max_wait_seconds=0.2)
+    rid = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=86400)
+    start = time.monotonic()
+    with pytest.raises(svc_mod.InteractionTimeoutError) as exc_info:
+        await svc.wait_for_choice(rid, timeout=86400)
+    assert exc_info.value.timeout == 0.2
+    assert time.monotonic() - start < 5.0
+
+
+async def test_wait_cap_choice_scoped_conversation_not_capped(make_svc: Any, svc_mod: Any) -> None:
+    """上限只作用 choice 记录：conversation 到达等待不收敛（不同模式语义不同）。"""
+    svc, _ = make_svc(choice_max_wait_seconds=0.2)
+    rid = await svc.create_conversation_request("s1", "t1", "tab1", "讨论")
+    start = time.monotonic()
+    with pytest.raises(svc_mod.InteractionTimeoutError) as exc_info:
+        await svc.wait_for_choice(rid, timeout=0.5)
+    assert exc_info.value.timeout == 0.5  # 未被收敛到 0.2
+    assert time.monotonic() - start >= 0.4
+
+
+async def test_choice_record_carries_created_at(make_svc: Any, svc_mod: Any) -> None:
+    """记录携带 created_at（ISO）：前端倒计时起点（BUG-14 卡片可见倒计时）。"""
+    from datetime import UTC, datetime
+
+    svc, _ = make_svc()
+    rid = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
+    record = await svc.get_request(rid)
+    assert record is not None
+    created = datetime.fromisoformat(record["created_at"])
+    assert abs((datetime.now(UTC) - created).total_seconds()) < 5
+
+    # 通知模式记录同样携带（同一构建点）
+    nid = await svc.send_notification("s1", "t1", "通知")
+    assert (await svc.get_request(nid))["created_at"]
+
+
+def _approval_options() -> list[dict[str, str]]:
+    """审批卡选项（对齐 security_check 的形状：拒绝选项带 id+label）。"""
+    return [
+        {"id": "approved_once", "label": "仅本次执行"},
+        {"id": "approved_remember", "label": "本管道内同命令免批"},
+        {"id": "denied", "label": "拒绝执行"},
+    ]
+
+
+async def test_denial_arms_memory_and_retry_auto_denied_without_card(
+    make_svc: Any, svc_mod: Any
+) -> None:
+    """拒绝=终局：同会话同标题重试不弹卡直接拒绝，反馈明确告知勿重试。"""
+    svc, notifier = make_svc(reject_memory_ttl_seconds=60)
+    title = "安全审批: bash_execute"
+    rid1 = await svc.create_choice_request(
+        "s1", "t1", "tab1", title, options=_approval_options(), timeout_seconds=30,
+    )
+    assert len(notifier.request_calls) == 1
+    # 用户拒绝（前端真实形状：answered + 选中拒绝选项 label）
+    assert await svc.submit_response(rid1, "answered", selected_option="拒绝执行") is True
+
+    rid2 = await svc.create_choice_request(
+        "s1", "t1", "tab1", title, options=_approval_options(), timeout_seconds=30,
+    )
+    # 不弹卡：无新通知、无等待事件、记录直接终态
+    assert len(notifier.request_calls) == 1
+    assert rid2 not in svc._pending_events
+    record2 = await svc.get_request(rid2)
+    assert record2 is not None and record2["status"] == "completed"
+
+    # wait 立即按拒绝收敛，反馈载荷明确告知不要重试
+    with pytest.raises(svc_mod.InteractionDeniedError) as exc_info:
+        await svc.wait_for_choice(rid2, timeout=5)
+    reason = exc_info.value.reason or ""
+    assert "已被用户拒绝" in reason
+    assert "不要再次尝试" in reason
+
+
+async def test_denied_response_type_also_arms_memory(make_svc: Any, svc_mod: Any) -> None:
+    """response_type=denied（不经前端的路径）同样武装拒绝记忆。"""
+    svc, notifier = make_svc(reject_memory_ttl_seconds=60)
+    rid1 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
+    assert await svc.submit_response(rid1, "denied", feedback="不通过") is True
+
+    rid2 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
+    assert len(notifier.request_calls) == 1  # 第二条不弹卡
+    with pytest.raises(svc_mod.InteractionDeniedError):
+        await svc.wait_for_choice(rid2, timeout=5)
+
+
+async def test_reject_memory_scoped_to_session_and_title(make_svc: Any) -> None:
+    """拒绝记忆按 (session_id, title) 作用域：异会话/异标题不受牵连（勿跨任务误伤）。"""
+    svc, notifier = make_svc(reject_memory_ttl_seconds=60)
+    rid1 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "安全审批: bash_execute",
+        options=_approval_options(), timeout_seconds=30,
+    )
+    await svc.submit_response(rid1, "answered", selected_option="拒绝执行")
+
+    # 异会话同标题：正常弹卡
+    rid2 = await svc.create_choice_request(
+        "s2", "t2", "tab2", "安全审批: bash_execute",
+        options=_approval_options(), timeout_seconds=30,
+    )
+    # 同会话异标题：正常弹卡
+    rid3 = await svc.create_choice_request(
+        "s1", "t3", "tab3", "安全审批: file_write",
+        options=_approval_options(), timeout_seconds=30,
+    )
+    assert len(notifier.request_calls) == 3
+    assert rid2 in svc._pending_events
+    assert rid3 in svc._pending_events
+
+
+async def test_approval_does_not_arm_reject_memory(make_svc: Any) -> None:
+    """批准（仅本次/免批）与普通回答不武装拒绝记忆：后续同标题仍正常弹卡。"""
+    svc, notifier = make_svc(reject_memory_ttl_seconds=60)
+    for selected in ("仅本次执行", "本管道内同命令免批"):
+        rid = await svc.create_choice_request(
+            "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=30,
+        )
+        await svc.submit_response(rid, "answered", selected_option=selected)
+    rid3 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=30,
+    )
+    assert len(notifier.request_calls) == 3
+    assert rid3 in svc._pending_events
+
+
+async def test_timeout_verdict_also_blocks_repop(make_svc: Any, svc_mod: Any) -> None:
+    """超时=拒绝裁决：choice 超时同样武装拒绝记忆，重试不再弹卡。"""
+    svc, notifier = make_svc(choice_max_wait_seconds=0.1, reject_memory_ttl_seconds=60)
+    rid1 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=0.1,
+    )
+    with pytest.raises(svc_mod.InteractionTimeoutError):
+        await svc.wait_for_choice(rid1, timeout=0.1)
+
+    rid2 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=30,
+    )
+    assert len(notifier.request_calls) == 1  # 超时后重试不弹卡
+    with pytest.raises(svc_mod.InteractionDeniedError):
+        await svc.wait_for_choice(rid2, timeout=5)
+
+
+async def test_reject_memory_expires_after_ttl(make_svc: Any) -> None:
+    """TTL 过期后记忆失效：新请求恢复正常弹卡（有界抑制，非永久封锁）。"""
+    svc, notifier = make_svc(reject_memory_ttl_seconds=0.2)
+    rid1 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=30,
+    )
+    await svc.submit_response(rid1, "answered", selected_option="拒绝执行")
+
+    rid2 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
+    assert len(notifier.request_calls) == 1  # TTL 内不弹卡
+
+    await asyncio.sleep(0.3)
+    rid3 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
+    assert len(notifier.request_calls) == 2  # 过期后恢复弹卡
+    assert rid3 in svc._pending_events
+
+
+async def test_auto_deny_refreshes_memory_window(make_svc: Any) -> None:
+    """滑动窗口：自动拒绝刷新记忆时效——持续重试期间压制不失效（防循环复活）。"""
+    svc, notifier = make_svc(reject_memory_ttl_seconds=0.2)
+    rid1 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=30,
+    )
+    await svc.submit_response(rid1, "answered", selected_option="拒绝执行")
+
+    await asyncio.sleep(0.12)
+    rid2 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
+    assert len(notifier.request_calls) == 1  # 首次重试被自动拒绝并刷新窗口
+
+    await asyncio.sleep(0.12)  # 距首次拒绝已超 TTL(0.2)，但距刷新未超
+    rid3 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
+    assert len(notifier.request_calls) == 1  # 仍被压制
+
+    await asyncio.sleep(0.25)  # 距最后一次自动拒绝超 TTL
+    rid4 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
+    assert len(notifier.request_calls) == 2  # 模型停止重试后窗口过期，恢复弹卡
+    assert rid4 in svc._pending_events
+
+
+async def test_reject_memory_bounded_size(make_svc: Any, svc_mod: Any) -> None:
+    """拒绝记忆硬上限：异常灌写下逐出最旧（长驻 sidecar 无界增长治理）。"""
+    svc, _ = make_svc(reject_memory_ttl_seconds=60)
+    cap = svc_mod._REJECT_MEMORY_MAX_ENTRIES
+    for i in range(cap + 5):
+        rid = await svc.create_choice_request(
+            f"s{i}", "t", "tab", "审批", options=_approval_options(), timeout_seconds=30,
+        )
+        await svc.submit_response(rid, "answered", selected_option="拒绝执行")
+    assert len(svc._reject_memory) <= cap
+    # 最旧条目被逐出：s0 不在记忆中，最新的 s_last 在
+    assert ("s0", "审批") not in svc._reject_memory
+    assert (f"s{cap + 4}", "审批") in svc._reject_memory
+
+
+async def test_wait_resolves_immediately_for_predenied_request(make_svc: Any, svc_mod: Any) -> None:
+    """终态请求直读已存响应：与并发等待路径同形（denied/cancelled 抛错，其余返回）。"""
+    svc, _ = make_svc()
+    rid1 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=30,
+    )
+    await svc.submit_response(rid1, "answered", selected_option="拒绝执行")
+    # 已终态请求再 wait：直读已存响应（answered 原样返回，与并发等待同形）
+    resp = await svc.wait_for_choice(rid1, timeout=5)
+    assert resp["response_type"] == "answered"
+    assert resp["selected_option"] == "拒绝执行"
+
+    # 取消终态 + 无 response：收敛为取消而非超时（异标题避开拒绝记忆）
+    rid2 = await svc.create_choice_request("s1", "t1", "tab1", "审批B", timeout_seconds=30)
+    await svc.cancel_request(rid2, reason="user_abort")
+    with pytest.raises(svc_mod.InteractionCancelledError) as cancel_info:
+        await svc.wait_for_choice(rid2, timeout=5)
+    assert cancel_info.value.reason == "user_abort"
+
+
+async def test_rewait_after_timeout_raises_early(make_svc: Any, svc_mod: Any) -> None:
+    """已超时请求再 wait：终态直读立即抛超时（不再补建事件空等）。"""
+    svc, _ = make_svc()
+    rid = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=0.1)
+    await asyncio.sleep(0.3)  # 后台超时任务先收敛
+    start = time.monotonic()
+    with pytest.raises(svc_mod.InteractionTimeoutError):
+        await svc.wait_for_choice(rid, timeout=30)
+    assert time.monotonic() - start < 5.0
+
+
+async def test_concurrent_wait_then_submit_keeps_exception_paths(
+    make_svc: Any, svc_mod: Any
+) -> None:
+    """并发路径（wait 先挂起、submit 后唤醒）：denied/cancelled 仍抛对应异常。
+
+    与终态直读路径互补：拒绝记忆的早期收敛不能挤掉既有并发唤醒语义。
+    """
+    svc, _ = make_svc(reject_memory_ttl_seconds=0)
+
+    rid1 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
+    waiter = asyncio.create_task(svc.wait_for_choice(rid1, timeout=10))
+    await asyncio.sleep(0)  # 让 waiter 挂到 event 上
+    await svc.submit_response(rid1, "denied", feedback="不通过")
+    with pytest.raises(svc_mod.InteractionDeniedError) as denied_info:
+        await waiter
+    assert denied_info.value.reason == "不通过"
+
+    rid2 = await svc.create_choice_request("s1", "t1", "tab1", "审批B", timeout_seconds=30)
+    waiter2 = asyncio.create_task(svc.wait_for_choice(rid2, timeout=10))
+    await asyncio.sleep(0)
+    await svc.submit_response(rid2, "cancelled", feedback="改主意了")
+    with pytest.raises(svc_mod.InteractionCancelledError) as cancelled_info:
+        await waiter2
+    assert cancelled_info.value.reason == "改主意了"
+
+
+async def test_reject_memory_disablable_via_ttl_zero(
+    make_svc: Any, svc_mod: Any
+) -> None:
+    """TTL=0 关闭拒绝记忆：拒绝后同标题重试仍正常弹卡。"""
+    svc, notifier = make_svc(reject_memory_ttl_seconds=0)
+    rid1 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=30,
+    )
+    await svc.submit_response(rid1, "answered", selected_option="拒绝执行")
+    assert svc._reject_memory == {}  # 关闭时拒绝不落记忆
+
+    rid2 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=30,
+    )
+    assert len(notifier.request_calls) == 2
+    assert rid2 in svc._pending_events
+
+
+def test_is_denial_submission_tolerates_malformed_options(svc_mod: Any) -> None:
+    """拒绝选项判定对畸形 options 容错：非 dict 条目跳过、空选中值非拒绝。"""
+    record = {
+        "message_data": {
+            "options": ["not-a-dict", {"id": "denied", "label": "拒绝执行"}],
+        },
+    }
+    is_denial = svc_mod.HumanInteractionService._is_denial_submission
+    assert is_denial(record, "answered", "拒绝执行") is True
+    assert is_denial(record, "answered", "denied") is True  # 按 id 命中
+    assert is_denial(record, "answered", "") is False
+    assert is_denial(record, "answered", "仅本次执行") is False
+
+
+async def test_env_config_overrides_defaults(
+    svc_mod: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """环境变量注入：合法值生效、非法值回退默认（上限与 TTL 同一读取器）。"""
+    monkeypatch.setenv("HUMAN_INTERACTION_CHOICE_MAX_WAIT_SECONDS", "120")
+    monkeypatch.setenv("HUMAN_INTERACTION_REJECT_MEMORY_TTL_SECONDS", "45")
+    svc = svc_mod.HumanInteractionService()
+    assert svc._choice_max_wait_seconds == 120.0
+    assert svc._reject_memory_ttl_seconds == 45.0
+
+    monkeypatch.setenv("HUMAN_INTERACTION_CHOICE_MAX_WAIT_SECONDS", "not-a-number")
+    monkeypatch.setenv("HUMAN_INTERACTION_REJECT_MEMORY_TTL_SECONDS", "")
+    svc2 = svc_mod.HumanInteractionService()
+    assert svc2._choice_max_wait_seconds == 600.0
+    assert svc2._reject_memory_ttl_seconds == 1800.0
 
 
 # ════════════════════════════════════════════════════════════

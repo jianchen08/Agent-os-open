@@ -212,11 +212,12 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // Windows 段堆并发高水位滞留修复（ADR 2026-08-31-mimalloc-global-allocator）。
     agentos_api::allocator::install_global_allocator();
 
-    // 日志双写初始化：stdout 层原样保留（supervisor 追加重定向如 .kernel_02.log
-    // 行为不变）；文件层经 tracing-appender daily 轮转写 logs/kernel.log.YYYY-MM-DD
-    // （相对进程工作目录，无上限追加重定向的治理面）。文件层构建失败（只读盘/
-    // 无目录权限）不阻断启动：显式 eprintln 后降级 stdout 单写（文件面是诊断
-    // 双写，非关键路径）。
+    // 日志契约（2026-09-15 单日志面）：文件层是唯一常驻日志——tracing-appender
+    // daily 轮转写 logs/kernel.log.YYYY-MM-DD（相对进程工作目录），保留上限
+    // 30 份（D3：daily 轮转无限累积会让 logs/ 目录随运行时长无界增长）。
+    // stdout 不再双写（supervisor 侧重定向已退役：OS 级追加重定向是无界
+    // 增长面，内核只持有无路径的 fd、无法自轮替）；仅当文件层构建失败
+    // （只读盘/无目录权限）时才挂 stdout 层降级——此时它是唯一诊断面。
     let (file_layer, log_guard) = match tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("kernel.log")
@@ -245,9 +246,17 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // guard 必须活到进程退出（提前丢 guard = 缓冲日志丢失），绑定在 async_main 帧
     let _log_guard = log_guard;
 
+    // stdout 降级层：仅文件层缺席时挂载（None = 不挂载）。正常运行全部日志
+    // 只走文件层；boot eprintln 与 panic 不走 tracing，不经此层。
+    let stdout_fallback_layer = if file_layer.is_none() {
+        Some(fmt::layer().with_target(false))
+    } else {
+        None
+    };
+
     tracing_subscriber::registry()
         .with(file_layer)
-        .with(fmt::layer().with_target(false))
+        .with(stdout_fallback_layer)
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -314,6 +323,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             "User plugin root: disabled (no env var, OS data dir unavailable)"
         );
     }
+
+    // 模式种子对账（设计稿 2026-09-15 §2「版本管理」）：必须在插件扫描之前——
+    // 播种/静默升级要先落盘，discover 才能扫到正确的用户副本内容。
+    let seed_outcomes = reconcile_mode_seeds_at_boot(&plugins_dir, user_plugins_dir.as_deref());
+
+    // 用户仓 git 化（设计稿 2026-09-15 §2.2「用户目录 git 化边界」）：对账完成后
+    // 确保用户仓就绪；对账有落盘变化时自动提交一笔（用户自己的改动不自动提交）。
+    init_user_repo_at_boot();
+    commit_seed_reconciliation_at_boot(&seed_outcomes);
 
     // config_root = 工作区根目录下的 config/（与 plugins_dir 同级基准）
     // 必须在创建 loader 之前推导：loader 需要 config_root 才能让 load_config() 不返回空 {}
@@ -392,6 +410,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 创建插件加载器——以 plugins/shared/ 为内置根，启用 user_root 覆盖语义，
     // 并接入 config_root（P0-1：否则 load_config() 恒返回空 {}，插件收不到配置）
+    // 用户模式包根先于 move 取出（模式包目录扫描注册要用，见下方注册段）。
+    let user_modes_dir = user_plugins_dir.as_deref().map(|p| p.join("modes"));
     let loader = build_plugin_loader(&plugins_dir, user_plugins_dir, &config_root);
 
     // 递归扫描插件目录——scan_root 只扫描一级子目录，
@@ -590,6 +610,53 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         http_route_count
     );
 
+    // 模式包目录扫描注册（设计稿 2026-09-15 §2.3「约定即注册」，内核唯一 additive
+    // 接触点）：装载期扫描模式包（出厂 modes/ 与用户 modes/，双根同 id 用户赢）
+    // 的 agents/ pipelines/ 约定子目录，注册进包命名空间——agent 键/编排键
+    // `mode_X/<stem>`（编排键是管道定义，与运行实例 pipeline_id 概念分离）。
+    // 只登记通过 G2 且启用的插件包；约定子目录缺席 = 零注册不报错。
+    // fail-closed：yaml 不可解析/结构非法/键冲突 → 拒绝启动（不静默降级）。
+    // 消费取数：registry 模式维度（get/list_mode_agents / get/list_mode_pipelines，
+    // 经 AppState.capability_registry 可查）；guard 入 plugin_scopes，禁用即同源
+    // 消失（与工具/HTTP 路由维度同一套 M1 语义）。
+    let registrable_ids: std::collections::HashSet<String> =
+        enabled_manifests.iter().map(|m| m.id.clone()).collect();
+    let mode_packages = agentos_plugin_loader::scan_mode_package_resources(
+        &plugins_dir.join("modes"),
+        user_modes_dir.as_deref(),
+        &registrable_ids,
+    )
+    .map_err(|e| {
+        eprintln!("[boot] 模式包约定资源扫描失败，拒绝启动: {e}");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+        Box::<dyn std::error::Error>::from(format!(
+            "mode package resource scan failed at boot: {e}"
+        ))
+    })?;
+    let mut mode_agent_count = 0usize;
+    let mut mode_pipeline_count = 0usize;
+    for package in mode_packages {
+        let scope = plugin_scopes.scope_of(&package.plugin_id);
+        mode_agent_count += package.agents.len();
+        mode_pipeline_count += package.pipelines.len();
+        scope.track(
+            agentos_plugin_loader::register_mode_package_guarded(&registry, package).map_err(
+                |e| {
+                    eprintln!("[boot] 模式包资源键冲突，拒绝启动: {e}");
+                    std::io::Write::flush(&mut std::io::stderr()).ok();
+                    Box::<dyn std::error::Error>::from(format!(
+                        "mode resource registration failed at boot: {e}"
+                    ))
+                },
+            )?,
+        );
+    }
+    info!(
+        target: "agentos-kernel",
+        "Registered {} mode agents / {} mode pipelines (convention-scan)",
+        mode_agent_count, mode_pipeline_count
+    );
+
     // 初始化存储——StorageBackend driver 化（§9.6）：按 config/kernel/storage.yaml 或
     // 环境变量选 driver（sqlite | memory；postgres 留桩），默认 sqlite +
     // 项目根 agentos_kernel.db（AGENTOS_DB_PATH/:memory: 兼容）。
@@ -751,7 +818,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             // 探测可能早于成员工具登记 → 空列表误判漂移剔光（08-31 实测 memory
             // 三试俱败、task_manage 靠时序侥幸过）。成员能力随宿主装载统一登记，
             // 一致性由 watcher 复验（宿主已定型后探测可信 + 前缀归一）兜底。
-            let is_light_member = manifest.host_group.as_deref() == Some("light");
+            let is_light_member = agentos_invoker::is_cohost_member(manifest);
             if !g2_applicable || is_light_member {
                 // 非 G2 覆盖（禁用/非 sidecar/无 tools+services/合宿成员）：登记 not_covered 缺省
                 contract_states.upsert(agentos_api::contract::PluginContractState::not_covered(
@@ -1735,6 +1802,129 @@ fn resolve_user_plugins_dir() -> Option<PathBuf> {
     agentos_core::user_space::user_plugins_dir()
 }
 
+/// 模式种子对账（设计稿 2026-09-15 §2「版本管理」）：对出厂种子
+/// `<plugins_dir>/modes/` 与用户副本 `<user_plugins>/modes/` 跑一轮播种/
+/// 升级对账（语义见 [`agentos_core::user_space::reconcile_mode_seeds`]），
+/// 返回本轮对账结论（供 git 化联动提交判断"有无落盘变化"）。
+///
+/// 对账是启动家政：出厂种子缺席（存量部署/种子未随包）或用户空间不可用
+/// → no-op（双根兜底，内置根模式插件仍可用）；单轮失败只 warn 不阻断启动
+/// （fail 方向是"本次不播种不升级"，绝不破坏既有用户副本——账本损坏时
+/// 对账整体不动任何文件，fail-closed 语义在 core 侧）。
+fn reconcile_mode_seeds_at_boot(
+    plugins_dir: &std::path::Path,
+    user_plugins_dir: Option<&std::path::Path>,
+) -> Vec<agentos_core::user_space::ModeSeedOutcome> {
+    use agentos_core::user_space::ModeSeedOutcome;
+    let Some(user_plugins) = user_plugins_dir else {
+        return Vec::new();
+    };
+    let factory_modes = plugins_dir.join("modes");
+    if !factory_modes.is_dir() {
+        return Vec::new();
+    }
+    let user_modes = user_plugins.join("modes");
+    match agentos_core::user_space::reconcile_mode_seeds(&factory_modes, &user_modes) {
+        Ok(outcomes) => {
+            for outcome in &outcomes {
+                match outcome {
+                    ModeSeedOutcome::Seeded { mode_id, version } => info!(
+                        target: "agentos-kernel",
+                        mode = %mode_id, version = %version,
+                        "模式种子已播种到用户空间"
+                    ),
+                    ModeSeedOutcome::Upgraded { mode_id, from, to } => info!(
+                        target: "agentos-kernel",
+                        mode = %mode_id, from = %from, to = %to,
+                        "模式副本未定制，已静默升级到出厂种子"
+                    ),
+                    ModeSeedOutcome::UpgradeAvailable {
+                        mode_id,
+                        seeded_version,
+                        factory_version,
+                    } => warn!(
+                        target: "agentos-kernel",
+                        mode = %mode_id, seeded = %seeded_version, factory = %factory_version,
+                        "模式副本已定制且出厂种子有更新——保留用户副本，升级可用（恢复出厂后重播种即得新版）"
+                    ),
+                    ModeSeedOutcome::BaselineRegistered { mode_id, version } => info!(
+                        target: "agentos-kernel",
+                        mode = %mode_id, version = %version,
+                        "用户手工放置的模式副本已补记账本（不替换）"
+                    ),
+                    ModeSeedOutcome::VersionUnparseable {
+                        mode_id,
+                        factory_version,
+                        ledger_version,
+                    } => warn!(
+                        target: "agentos-kernel",
+                        mode = %mode_id, factory = %factory_version, ledger = %ledger_version,
+                        "模式种子 version 非 semver，无法判定新旧——本次不动用户副本（请修正种子 version）"
+                    ),
+                    ModeSeedOutcome::Current { .. } => {}
+                }
+            }
+            outcomes
+        }
+        Err(e) => {
+            warn!(
+                target: "agentos-kernel",
+                error = %e,
+                "模式种子对账失败（本次不播种不升级，用户副本原样保留；下次启动重试）"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// 用户仓 git 化引导挂点（设计稿 2026-09-15 §2.2）：模式种子对账完成后确保
+/// 用户仓已初始化（管辖面 `<USER_ROOT>/{plugins,config}`，`.env`/`data/` 及
+/// 其余一切排除）。已初始化 → 幂等跳过；git 缺席或初始化失败 → warn 降级
+/// （git 化是增强不是依赖，绝不阻断启动），绝不 push。
+fn init_user_repo_at_boot() {
+    let Some(user_root) = agentos_core::user_space::user_root() else {
+        return;
+    };
+    match agentos_core::user_space::ensure_user_repo(&user_root) {
+        Ok(true) => info!(
+            target: "agentos-kernel",
+            path = %user_root.display(),
+            "用户仓已初始化（plugins/ 与 config/ 入仓，.env 与 data/ 排除）"
+        ),
+        Ok(false) => {}
+        Err(e) => warn!(
+            target: "agentos-kernel",
+            error = %e,
+            "用户仓初始化失败，git 化降级（功能不受损）"
+        ),
+    }
+}
+
+/// 种子对账联动提交（设计稿 2026-09-15 §2.2）：本轮对账有落盘变化（播种/
+/// 升级/补账）→ 自动提交一笔 `seed: reconcile <n> files`（只暂存对账写下的
+/// 文件，用户工作区改动不自动提交）。失败只 warn（增强降级，绝不阻断启动）。
+fn commit_seed_reconciliation_at_boot(outcomes: &[agentos_core::user_space::ModeSeedOutcome]) {
+    if outcomes.is_empty() {
+        return;
+    }
+    let Some(user_root) = agentos_core::user_space::user_root() else {
+        return;
+    };
+    match agentos_core::user_space::commit_seed_reconciliation(&user_root, outcomes) {
+        Ok(Some(hash)) => info!(
+            target: "agentos-kernel",
+            commit = %hash,
+            "模式种子对账变更已自动提交到用户仓"
+        ),
+        Ok(None) => {}
+        Err(e) => warn!(
+            target: "agentos-kernel",
+            error = %e,
+            "模式种子对账自动提交失败（用户副本已落盘，git 历史缺一笔，可稍后手动提交）"
+        ),
+    }
+}
+
 /// 递归发现包含 plugin.json 的目录的父目录路径列表。
 ///
 /// `scan_root(root)` 扫描 root 的直接子目录，查找 `<child>/plugin.json`。
@@ -1898,6 +2088,105 @@ mod tests {
         std::env::set_var("AGENTOS_KERNEL_HOST", "192.168.1.9");
         assert_eq!(resolve_bind_host(), "192.168.1.9", "弃用别名过渡期生效");
         std::env::remove_var("AGENTOS_KERNEL_HOST");
+    }
+
+    /// 模式种子对账挂点（设计稿 §2）：出厂种子在 → 副本播种进用户根并落账本；
+    /// 出厂种子缺席（存量部署）→ no-op 且不建用户目录。真实临时目录，不 mock。
+    #[test]
+    fn reconcile_mode_seeds_at_boot_seeds_before_plugin_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins/shared");
+        let seed = plugins_dir.join("modes/mode_coding");
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::write(
+            seed.join("plugin.json"),
+            r#"{"id":"mode_coding","version":"0.1.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(seed.join("profile.yaml"), "chain: v1\n").unwrap();
+        let user_root = tmp.path().join("user-root");
+
+        // 生产形态：挂点收用户插件根（<USER_ROOT>/plugins），副本落其下 modes/
+        reconcile_mode_seeds_at_boot(&plugins_dir, Some(&user_root.join("plugins")));
+        // 播种发生在插件扫描之前：discover 之前用户副本与账本已在盘上
+        assert_eq!(
+            std::fs::read_to_string(user_root.join("plugins/modes/mode_coding/profile.yaml"))
+                .unwrap(),
+            "chain: v1\n"
+        );
+        assert!(user_root.join("plugins/modes/.seeds.json").is_file());
+
+        // 出厂种子缺席 → no-op，不建用户 modes 目录
+        let user_root2 = tmp.path().join("user-root-2");
+        let empty_plugins = tmp.path().join("plugins-empty");
+        std::fs::create_dir_all(&empty_plugins).unwrap();
+        reconcile_mode_seeds_at_boot(&empty_plugins, Some(&user_root2));
+        assert!(!user_root2.join("plugins/modes").exists());
+
+        // 用户空间不可用（None）→ no-op 不 panic
+        reconcile_mode_seeds_at_boot(&plugins_dir, None);
+    }
+
+    /// git 化挂点（设计稿 §2.2）：对账后确保用户仓就绪 + 播种变更自动提交一笔；
+    /// 重复引导零操作（对账幂等 → 无第二笔提交）。真实临时目录 + 真实 git。
+    #[test]
+    fn boot_initializes_user_repo_and_commits_seed_reconciliation() {
+        use agentos_core::user_space::USER_ROOT_ENV;
+        let _lock = user_space_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins/shared");
+        let seed = plugins_dir.join("modes/mode_git");
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::write(
+            seed.join("plugin.json"),
+            r#"{"id":"mode_git","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(seed.join("profile.yaml"), "chain: v1\n").unwrap();
+        let user_root = tmp.path().join("user-root");
+        struct RootGuard(Option<String>);
+        impl Drop for RootGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var(USER_ROOT_ENV, v),
+                    None => std::env::remove_var(USER_ROOT_ENV),
+                }
+            }
+        }
+        let _guard = RootGuard(std::env::var(USER_ROOT_ENV).ok());
+        std::env::set_var(USER_ROOT_ENV, &user_root);
+
+        // 首次引导：播种 → 建仓 → 联动提交一笔
+        let outcomes = reconcile_mode_seeds_at_boot(&plugins_dir, Some(&user_root.join("plugins")));
+        init_user_repo_at_boot();
+        assert!(user_root.join(".git").exists());
+        assert!(user_root.join(".gitignore").is_file());
+        commit_seed_reconciliation_at_boot(&outcomes);
+
+        let head = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&user_root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let count = head(&["rev-list", "--count", "HEAD"]);
+        assert_eq!(count, "1", "联动提交恰好一笔");
+        let subject = head(&["log", "-1", "--format=%s"]);
+        assert!(subject.starts_with("seed: reconcile "));
+        let tracked = head(&["ls-files"]);
+        assert!(tracked.contains("plugins/modes/mode_git/profile.yaml"));
+        assert!(tracked.contains("plugins/modes/.seeds.json"));
+
+        // 重复引导：对账全 Current → 不再产生提交（幂等零操作）
+        let rerun = reconcile_mode_seeds_at_boot(&plugins_dir, Some(&user_root.join("plugins")));
+        init_user_repo_at_boot();
+        commit_seed_reconciliation_at_boot(&rerun);
+        let count = head(&["rev-list", "--count", "HEAD"]);
+        assert_eq!(count, "1", "重复引导零新增提交");
     }
 
     /// P0-1：build_plugin_loader 接入 config_root 后，load_config 返回非空（含 models 节）。

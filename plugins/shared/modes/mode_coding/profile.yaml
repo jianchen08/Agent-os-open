@@ -1,0 +1,42 @@
+# 编码模式 profile（B 部类物料：由用户维护；出厂种子随 mode_coding 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+mode: coding
+name: 编码模式
+panel_page_id: coding_delivery
+chain:
+  entry: main
+  expected_path: [main, mode_coding/programming_orchestrator_agent_v2, mode_coding/code_writer]
+  executor_pool: [mode_coding/code_writer, general_agent]
+  entry_override: null
+pipeline_profile:
+  pipeline: autonomous
+  params:
+    case_timeout: 900
+    multimodal: false
+    domain_context: none
+suite:
+  smoke: config/self_evolve/suites/dev/smoke.yaml
+  external: config/self_evolve/suites/external/swe_verified_seed.yaml
+  # external = 评估主样本集（SWE-bench Verified 15 题种子，ADR
+  # 2026-09-16-external-dataset-sourcing）；执行前置：物料区
+  # external/prep_swe_repos.sh 预置仓库 clone。case_timeout 900 对该档
+  # 不够（issue 修复含环境准备），跑 external 档时按 suite 内
+  # settle_timeout_seconds=3600 收敛等待。
+  full: null          # 二期补全 25-30 题
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+  execution_stage:
+    - plugins/shared/modes/mode_coding/agents/
+    - config/agents/executor/general_agent.yaml
+levers:
+  tool_misselect: {execution_stage: [tool_ids, dispatch_guide]}
+  orchestration_runaway: {orchestration_stage: [pipeline_steps, breaker_params]}
+  format_violation: {execution_stage: [persona, prompt_skeleton]}
+  eval_no_settle: {evaluation_stage: [evaluation_params]}
+verifier_families: [pytest_exit, file_assert, test_lane]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 900
+  round_tokens: 2000000
+  proposals_per_session: 3

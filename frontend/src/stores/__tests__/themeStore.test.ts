@@ -1,6 +1,7 @@
 // @feature: FP-T12 themeStore 补测 | @ci: frontend-test
 /** themeStore 行为测试：模式解析、主题加载分支、插件主题同步、DOM 应用与持久化 */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { themeServiceWiring } from './helpers/storeTestMocks'
 import type { Mock } from 'vitest'
 
 const skinRuntime = vi.hoisted(() => ({
@@ -36,23 +37,7 @@ vi.mock('@/services/themeStorage', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
   return { ...actual, ThemeStorageService: storage }
 })
-vi.mock('@/services/themeService', async (importOriginal) => {
-  const actual = await importOriginal<Record<string, Record<string, unknown>>>()
-  return {
-    ...actual,
-    applyTheme: vi.fn(),
-    applyPluginThemeVars: vi.fn(),
-    clearPluginThemeVars: vi.fn(),
-    derivePluginThemePreview: vi.fn(() => ({
-      primary: '#111827',
-      background: '#ffffff',
-      surface: '#f8fafc',
-      text: '#0f172a',
-      accent: '#3b82f6',
-    })),
-    fetchDynamicThemes: vi.fn(),
-  }
-})
+vi.mock('@/services/themeService', async (importOriginal) => themeServiceWiring(importOriginal))
 
 import { useThemeStore, initializeTheme } from '../themeStore'
 import { applyTheme as applyThemeToDOM } from '@/services/themeService'

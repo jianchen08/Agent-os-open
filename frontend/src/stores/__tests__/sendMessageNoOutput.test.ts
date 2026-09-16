@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 
 const logCalls: string[] = []
 
@@ -21,18 +22,22 @@ vi.mock('@/utils/logger', () => ({
   },
 }))
 
-vi.mock('@/services/api/session', () => ({
-  getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
-  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
-}))
+vi.mock('@/services/api/session', async () => (await import('./helpers/storeTestMocks')).apiSessionMockFull())
 
-vi.mock('@/utils/retry', () => ({
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockBase())
 
 const PIPELINE_ID = '39ef1314a7b9'
 const SESSION_ID = 'sess-test-1'
+
+/** 注册标准测试管道（status 可变），返回 store —— 场景用例播种共用 */
+function registeredStore(
+  usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore,
+  status = 'idle',
+) {
+  const store = usePipelineMessageStore.getState()
+  store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status, parentId: null, unreadCount: 0 })
+  return store
+}
 
 describe('发送消息没有输出 bug 复现', () => {
   let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
@@ -77,23 +82,11 @@ describe('发送消息没有输出 bug 复现', () => {
     logCalls.length = 0
     vi.resetModules()
     const mod = await import('@/stores/pipelineMessageStore')
-    usePipelineMessageStore = mod.usePipelineMessageStore
-    usePipelineMessageStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: {},
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-    })
+    usePipelineMessageStore = await resetPipelineStoreState()
   })
 
   it('场景1: 多轮历史后发消息 - initFromAPI 先加载大量历史', () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     store.activatePipeline(PIPELINE_ID)
 
     const historyMsgs: Message[] = []
@@ -133,8 +126,7 @@ describe('发送消息没有输出 bug 复现', () => {
   })
 
   it('场景2: initFromAPI 在 stream_start 之后被调用（竞态）- 全量替换丢弃本地占位', () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     store.activatePipeline(PIPELINE_ID)
 
     const historyMsgs: Message[] = []
@@ -174,8 +166,7 @@ describe('发送消息没有输出 bug 复现', () => {
   })
 
   it('场景3: stopStreaming 在 updateMessage 之前被调用（stream_end 顺序）', () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     store.activatePipeline(PIPELINE_ID)
 
     const streamMsgId = 'msg_stream_003'
@@ -227,8 +218,7 @@ describe('发送消息没有输出 bug 复现', () => {
   })
 
   it('场景5: stream_start 缺失导致占位消息未创建，updateMessage 跳过更新（不自动创建）', () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     store.activatePipeline(PIPELINE_ID)
 
     const historyMsgs: Message[] = []
@@ -252,8 +242,7 @@ describe('发送消息没有输出 bug 复现', () => {
   })
 
   it('场景6: 真实 ID 格式竞态 — API hex ID vs WS msg_ 前缀 ID', () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     store.activatePipeline(PIPELINE_ID)
 
     const apiHistoryMsgs: Message[] = []
@@ -295,8 +284,7 @@ describe('发送消息没有输出 bug 复现', () => {
   })
 
   it('场景7: stream_end 后 initFromAPI 覆盖已完成的占位消息', () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     store.activatePipeline(PIPELINE_ID)
 
     const apiHistoryMsgs: Message[] = []
@@ -332,8 +320,7 @@ describe('发送消息没有输出 bug 复现', () => {
   })
 
   it('场景8: addMessage sequence 去重 - 不同 role 同 sequence', () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: SESSION_ID, level: 1, tabId: null, agentName: '', status: 'idle', parentId: null, unreadCount: 0 })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     store.activatePipeline(PIPELINE_ID)
 
     store.addMessage(PIPELINE_ID, makeMsg('user-1', { role: 'user', content: 'hello', sequence: 1 }))

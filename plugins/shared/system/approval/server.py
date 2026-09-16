@@ -237,9 +237,8 @@ def _record_decision(request_id: str, decision: dict[str, Any]) -> None:
     for k in expired:
         _decisions.pop(k, None)
     while len(_decisions) >= _DECISIONS_MAX_ENTRIES:
-        oldest = min(_decisions.items(), key=lambda kv: kv[1].get("ts", 0), default=None)
-        if oldest is None:
-            break
+        # 上限为正常量（4096），循环条件保证字典非空，min 必有值
+        oldest = min(_decisions.items(), key=lambda kv: kv[1].get("ts", 0))
         _decisions.pop(oldest[0], None)
     entry = dict(decision)
     entry["ts"] = now

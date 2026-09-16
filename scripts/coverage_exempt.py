@@ -42,6 +42,11 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/test_system_plugins.py",
     "plugins/shared/system/llm/",
     "plugins/shared/system/tasks/",
+    # 模式插件出厂种子契约测试（2026-09-15 四模式种子接线：缺此条目则
+    # plugins/shared/modes/ 下 server.py 不进插桩车道、覆盖率失真）。
+    "plugins/shared/modes/",
+    # eval_harness 纯函数面（题集展开/聚合/提案校验，2026-09-15 模式服务化接线）。
+    "plugins/shared/system/eval_harness/",
     "plugins/shared/pipeline/input/environment_lifecycle/",
     "plugins/shared/pipeline/input/level_guard/",
     "plugins/shared/pipeline/input/multimodal_preprocessor/",
@@ -62,8 +67,7 @@ BASE_TEST_PATHS: list[str] = [
     "tests/gates/",
     "tests/test_security_check_allow_priority.py",
     "tests/test_security_check_isolation.py",
-    "tests/test_track_cost_update_event.py",
-    "tests/test_track_record_metric.py",
+    "tests/test_track_stats_contract.py",
     "tests/test_process_watchdog_integration.py",
     "tests/test_isolation_docker_timeout.py",
     "tests/test_isolation_container_self_heal.py",
@@ -105,6 +109,9 @@ BASE_TEST_PATHS: list[str] = [
     # 2026-09-13 覆盖率补测批四：task_submit tool 分支面（权限门/项目挂靠/
     # 继承/workspace 解析/metadata 直调面），缺此条目则新文件不进插桩车道。
     "tests/test_task_submit_tool_branches.py",
+    # 2026-09-16 覆盖率收口批：task_submit server.py 的 on_load 三能力桥接线
+    # + task_submit 工具包装载荷面（缺此条目则 server.py 21 缺行回涨）。
+    "tests/test_task_submit_server_wiring.py",
     # 2026-09-13 覆盖率补测批三：isolation server 适配层（工具面/生命周期/
     # 配置 watcher），缺此条目则新文件不进插桩车道、server.py 覆盖率失真。
     "tests/test_isolation_service_server.py",
@@ -150,8 +157,6 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_llm_adapter_call_streaming.py",
     "tests/test_model_prompt_adapter_plugin.py",
     "tests/test_pipeline_tool_calls_standardization_imports.py",
-    "tests/test_track_missed_tokens.py",
-    "tests/test_track_run_started_at_elapsed.py",
     "tests/test_workspace_lifecycle_mode.py",
     "tests/test_workspace_git_exclude.py",
     "tests/test_lifecycle_plugins.py",
@@ -193,7 +198,6 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_tool_block_not_end_pipeline.py",
     "tests/test_tool_schema_drift_detection.py",
     "tests/test_tool_schema_validator.py",
-    "tests/test_track_cache_anomaly.py",
     "tests/test_watchdog_per_process_memory.py",
     "tests/test_workspace_frontend.py",
     "tests/test_utils/",
@@ -208,6 +212,13 @@ BASE_TEST_PATHS: list[str] = [
     # 缓存失效/非 dict yaml/priority/血缘投影/static_vars 装载/层级覆盖），
     # 缺此条目则新文件不进插桩车道、plugin.py 覆盖率失真。
     "tests/test_context_build_gaps.py",
+    # 2026-09-15 模式体系 P2：context_build 模式物料档注入（设计稿 §3.3②/
+    # §4.1/§4.2）行为测试，缺此条目则 mode_material.py 不进插桩车道、覆盖率失真。
+    "tests/test_context_build_mode_material.py",
+    # 2026-09-15 模式体系 P3：mode 键两级解析第二级（§3.3 系统注册表未命中 →
+    # 模式包 agents/<stem>.yaml）装配测试，缺此条目则 plugin.py 模式分支
+    # 不进插桩车道、改动行覆盖率失真。
+    "tests/test_context_build_mode_agent_key.py",
     # 2026-09-14 覆盖率补测批九：review 缺口测试接线（逐文件登记——目录内
     # test_review_hindsight_e2e.py 是环境门槛 e2e，不进插桩车道）。
     "plugins/shared/system/review/test_review_gaps.py",
@@ -227,14 +238,26 @@ BASE_TEST_PATHS: list[str] = [
     # 插件侧 _base 由各 pipeline 插件的顶层 re-export（pipeline/plugin.py、
     # pipeline/types.py）消费，缺此条目则新文件不进插桩车道。
     "tests/test_pipeline_base_gaps.py",
-    # 2026-09-14 覆盖率补测批十（簇 A）：track 插件缺口补测——pipeline/output/track
-    # 目录未在基集内，测试落根级 tests/test_track_gaps.py 后需显式接线。
-    "tests/test_track_gaps.py",
+    # 2026-09-15：track 统计并入 llm_core（ADR track-merged-into-llm-core），
+    # 原 6 个 tests/test_track_*.py 归并为契约测试 + 接线测试两文件并原址接线；
+    # 并入后的 manifest 声明面（reads/persistent/export/grants）由契约测试钉死。
+    "tests/test_llm_core_track_wiring.py",
+    "tests/test_llm_core_track_manifest.py",
     # 2026-09-14 覆盖率补测簇 I（llm 簇）：llm_core/server.py 的 execute 工具面
     # （102-117 行）此前不在任何车道——该目录整体收集会与 system/llm 的平铺
     # `import adapter` 裸名冲突（3 文件收集期 AttributeError），故只登记执行面
     # 单文件（自带唯一模块名装载，与车道共跑实测 2794 绿/服务器面 100%）。
     "plugins/shared/pipeline/core/llm_core/test_llm_core_server_execute.py",
+    # 2026-09-14 覆盖率补测批十（簇 B/C）：shared 根散模块 + 三个未登记插件目录
+    # 的缺口补测——这些文件不在任何已登记目录下，缺此条目则模块覆盖率失真。
+    "tests/test_host_shared_modules_gaps.py",   # project_registry/tenant_data/repo_anchor/proc_tree/user_space/state_fields/bounded_dict/uploads_path
+    "tests/test_metrics_admin_server_gaps.py",  # metrics_admin/server.py
+    "tests/test_task_form_server_gaps.py",      # task_form/server.py
+    "tests/test_tool_cache_gaps.py",            # pipeline/input/tool_cache
+    # 2026-09-16 覆盖率收官批：artifacts 缺口测试接线（版本链断点截断等，
+    # 此前文件不在车道 → artifact_service.py 覆盖率失真）。
+    "tests/test_artifacts_gaps.py",
+    "tests/test_workspace_lifecycle_gaps.py",   # pipeline/input/workspace_lifecycle
 ]
 
 # 车道 marker 过滤：@pytest.mark.timing 用例唯一归 timing-gate（独立 stage，

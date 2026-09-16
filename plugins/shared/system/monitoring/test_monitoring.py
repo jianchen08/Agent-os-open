@@ -20,6 +20,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -354,8 +355,8 @@ class TestHttpHandle:
         monitor._llm_stats = {"request_count": 7, "active_requests": 2, "error_count": 1, "total_response_time": 9.0}
         resp = _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
         payload = _decode_body(resp)
-        assert payload["token_usage"]["request_count"] == 7
-        assert payload["token_usage"]["active_requests"] == 2
+        assert payload["request_count"] == 7
+        assert payload["active_requests"] == 2
 
     def test_cache_stats_route(self) -> None:
         mod, _ = _make_module_with_monitor()
@@ -765,7 +766,12 @@ class TestPluginRuntimeRoute:
 
 
 def _make_llm_traces_db(tmp_path: Path) -> Path:
-    """造含多模型 llm_usage 轨迹的内核 DB（含一条早期无 model 归属的行）。"""
+    """造内核 DB 夹具：traces（按时间维度真值）+ pipeline_state（累计真值）。
+
+    累计口径（token-usage / 按模型表）读 pipeline_state 的 track.llm_usage +
+    llm_model；时间维度（by-time）读 traces 的逐轮 llm_usage。两表同库，
+    此处一并造出，保持两端点各有其源。
+    """
     db_path = tmp_path / "agentos_kernel.db"
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -783,6 +789,28 @@ def _make_llm_traces_db(tmp_path: Path) -> Path:
             "INSERT INTO traces VALUES (?, ?, ?, ?, ?)",
             (tid, "run-1", ts, "core", json.dumps({"llm_usage": usage})),
         )
+    # pipeline_state：累计真值（与 traces 的逐轮和同量——两源一致是设计契约）
+    conn.execute(
+        "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT,"
+        " field_value TEXT, tenant_id TEXT, updated_at TEXT)"
+    )
+    state_rows = [
+        # deepseek：两个管道各 110 / 220（合计 330，与 traces 两轮之和一致）
+        ("pipe-a", "track.llm_usage", {"total_input_tokens": 100, "total_output_tokens": 10, "total_tokens": 110, "last_input_tokens": 100, "last_output_tokens": 10}),
+        ("pipe-a", "llm_model", "deepseek-v4-flash"),
+        ("pipe-b", "track.llm_usage", {"total_input_tokens": 200, "total_output_tokens": 20, "total_tokens": 220, "last_input_tokens": 200, "last_output_tokens": 20}),
+        ("pipe-b", "llm_model", "deepseek-v4-flash"),
+        # MiniMax：单管道 55
+        ("pipe-c", "track.llm_usage", {"total_input_tokens": 50, "total_output_tokens": 5, "total_tokens": 55, "last_input_tokens": 50, "last_output_tokens": 5}),
+        ("pipe-c", "llm_model", "MiniMax-M3"),
+        # 无 model 归属的早期管道：归「（未记录模型）」行
+        ("pipe-d", "track.llm_usage", {"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10, "last_input_tokens": 7, "last_output_tokens": 3}),
+    ]
+    for pid, key, val in state_rows:
+        conn.execute(
+            "INSERT INTO pipeline_state VALUES (?, ?, ?, 'default', '2026-09-01T00:00:00Z')",
+            (pid, key, json.dumps(val)),
+        )
     conn.commit()
     conn.close()
     return db_path
@@ -796,13 +824,13 @@ class TestTokenUsageByModel:
 
         rows = {r["model"]: r for r in payload["rows"]}
         assert set(rows) == {"deepseek-v4-flash", "MiniMax-M3", "（未记录模型）"}
-        # 同模型多轮聚合：输入/输出/合计/次数逐列累加
+        # 同模型多管道聚合：各自的累计相加（state 按管道自持累计）
         assert rows["deepseek-v4-flash"]["input_tokens"] == 300
         assert rows["deepseek-v4-flash"]["output_tokens"] == 30
         assert rows["deepseek-v4-flash"]["total_tokens"] == 330
-        assert rows["deepseek-v4-flash"]["requests"] == 2
-        assert rows["MiniMax-M3"]["requests"] == 1
-        # 图标按 provider 前缀映射；无归属回退缺省
+        assert rows["MiniMax-M3"]["total_tokens"] == 55
+        assert rows["（未记录模型）"]["total_tokens"] == 10
+        # 图标按模型名前缀映射；无归属回退缺省
         assert rows["deepseek-v4-flash"]["icon"] == "🐋"
         assert rows["MiniMax-M3"]["icon"] == "🐚"
         assert rows["（未记录模型）"]["icon"] == "🔤"
@@ -825,6 +853,45 @@ class TestTokenUsageByModel:
         payload = mod._collect_token_usage()
         assert payload["rows"] == []
         assert payload["total_tokens"] == 0
+
+    def test_route_serves_widget_shape_top_level(self, tmp_path: Path, monkeypatch) -> None:
+        """token-usage 路由响应体即 widget 消费形（顶层 rows/columns/labels/datasets）。
+
+        前端 widget 取数链只解顶层 rows（表格）/datasets（图表）——响应必须与
+        by-time 端点同形；具名信封包裹会让按模型表/图在数据存在时恒显无数据。
+        """
+        mod, monitor = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        monitor._llm_stats = {"request_count": 7, "active_requests": 2, "error_count": 1, "total_response_time": 9.0}
+        resp = _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
+        assert resp["success"] is True
+        body = _decode_body(resp)
+        assert [c["key"] for c in body["columns"]][:2] == ["icon", "model"]
+        assert len(body["rows"]) == 3
+        # 图表形状与表格同源同值
+        assert body["labels"] == [r["model"] for r in body["rows"]]
+        assert body["request_count"] == 7
+        # 总量 = 各模型行之和（单一账本，不许两套口径）
+        assert body["total_tokens"] == sum(r["total_tokens"] for r in body["rows"])
+
+    def test_token_card_valuekey_resolves_served_payload(self, tmp_path: Path, monkeypatch) -> None:
+        """plugin.json token_card 的 valueKey 必须能从路由响应体按点号路径取到值。
+
+        ui_schema 声明与端点响应形的跨工件一致性锁：valueKey 解析落空 = 状态卡
+        恒空；两端点形态与声明必须同刀变更。
+        """
+        manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+        card = next(w for w in manifest["ui_schema"]["widgets"] if w["id"] == "token_card")
+        value_key = card["props"]["valueKey"]
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        resp = _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
+        body = _decode_body(resp)
+        cur: Any = body
+        for seg in value_key.split("."):
+            assert isinstance(cur, dict) and seg in cur, f"valueKey {value_key!r} 在响应体解析落空"
+            cur = cur[seg]
+        assert isinstance(cur, (int, float)) and cur > 0
 
     def test_model_icon_prefix_rules(self) -> None:
         mod = _load_server()
@@ -866,6 +933,164 @@ class TestTokenUsageByTime:
         body = _decode_body(resp)
         assert body["columns"][0]["key"] == "date"
         assert len(body["rows"]) == 3
+
+
+class TestTokenAggregationBurstCache:
+    """traces 聚合单次全表 JSON 解析 ~1.3s（1.4GB patch_data）且 sidecar 单线程
+    串行——监控页首屏多数据源并发直查会排队撞内核路由 timeout_ms（实测 7 并发
+    4 发 504）。路由层必须按 TTL 合并同键重复/并发查询。"""
+
+    def _patch_counting_aggregate(
+        self, mod: Any, monkeypatch, calls: list[int], sleep_secs: float = 0.0
+    ) -> None:
+        """数据层计数桩：两条聚合 collect 路径都计数并可按需注入耗时。
+
+        直接包 collect 函数本身（而非其内部 SQL 模块）——collect 是缓存层的
+        真实调用对象，实现内部换源不影响本桩的观测语义。桩作用在调用方传入的
+        模块实例上（_load_server 每次重建模块，不能按模块名取）。
+        """
+        import time as _time
+
+        def wrap(real: Any) -> Any:
+            def counting(*args: Any, **kwargs: Any) -> Any:
+                calls.append(1)
+                if sleep_secs > 0:
+                    _time.sleep(sleep_secs)
+                return real(*args, **kwargs)
+
+            return counting
+
+        monkeypatch.setattr(mod, "_collect_token_usage", wrap(mod._collect_token_usage))
+        monkeypatch.setattr(
+            mod, "_collect_token_usage_by_time", wrap(mod._collect_token_usage_by_time)
+        )
+
+    def test_repeated_route_call_reuses_cached_aggregation(self, tmp_path: Path, monkeypatch) -> None:
+        """TTL 内重复请求不重算聚合（数据层只打一次），且返回载荷一致。"""
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        calls: list[int] = []
+        self._patch_counting_aggregate(mod, monkeypatch, calls)
+
+        r1 = _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
+        r2 = _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
+
+        assert len(calls) == 1
+        assert _decode_body(r1) == _decode_body(r2)
+        assert len(_decode_body(r1)["rows"]) == 3
+
+    def test_concurrent_route_calls_collapse_to_one_aggregation(self, tmp_path: Path, monkeypatch) -> None:
+        """并发突发只算一次（否则 3×0.5s 串行排队必然撞路由超时）。"""
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        calls: list[int] = []
+        self._patch_counting_aggregate(mod, monkeypatch, calls, sleep_secs=0.5)
+
+        async def burst() -> list[dict[str, Any]]:
+            return list(
+                await asyncio.gather(
+                    *[mod.http_handle(path="/ext/monitoring/token-usage", method="GET") for _ in range(3)]
+                )
+            )
+
+        t0 = time.monotonic()
+        responses = _run(burst())
+        elapsed = time.monotonic() - t0
+
+        assert len(calls) == 1
+        assert elapsed < 1.4
+        bodies = [_decode_body(r) for r in responses]
+        assert all(b == bodies[0] for b in bodies)
+
+    def test_by_time_cache_is_key_scoped(self, tmp_path: Path, monkeypatch) -> None:
+        """两个聚合端点各持缓存键：互不串数据，且各自只算一次。"""
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        calls: list[int] = []
+        self._patch_counting_aggregate(mod, monkeypatch, calls)
+
+        _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
+        _run(mod.http_handle(path="/ext/monitoring/token-usage/by-time", method="GET"))
+        _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
+        _run(mod.http_handle(path="/ext/monitoring/token-usage/by-time", method="GET"))
+
+        assert len(calls) == 2
+
+    def test_ttl_expiry_recomputes(self, tmp_path: Path, monkeypatch) -> None:
+        """TTL 归零后重新聚合（缓存不越过声明周期）。"""
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        calls: list[int] = []
+        self._patch_counting_aggregate(mod, monkeypatch, calls)
+        monkeypatch.setattr(mod, "_AGG_CACHE_TTL_SECS", 0.0)
+
+        _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
+        _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
+
+        assert len(calls) == 2
+
+    def test_slow_aggregation_does_not_block_other_routes(self, tmp_path: Path, monkeypatch) -> None:
+        """慢聚合期间同进程其它端点不得排队（队头阻塞回归护栏）。
+
+        monitoring 与 task_service / cost_control 合宿同一 sidecar 进程：聚合若在
+        事件循环内同步执行，轻量端点（内存直读的 cache-stats）会被拖到聚合耗时
+        量级（实测 0.00s → 1.7s）。同步 sqlite 调用必须卸载到工作线程。
+        """
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+        slow = 0.5
+        self._patch_counting_aggregate(mod, monkeypatch, [], sleep_secs=slow)
+
+        async def scenario() -> float:
+            # 起点必须在慢任务进入执行之前：若聚合在事件循环内同步跑，接下来的
+            # 轻量请求要等它整个跑完才被调度——被阻塞的时长即这里测到的 elapsed。
+            t0 = time.monotonic()
+            slow_task = asyncio.ensure_future(
+                mod.http_handle(path="/ext/monitoring/token-usage", method="GET")
+            )
+            await asyncio.sleep(0)  # 仅让出一次控制权，不消耗聚合耗时
+            light = await mod.http_handle(path="/ext/monitoring/cache-stats", method="GET")
+            elapsed = time.monotonic() - t0
+            assert light["success"] is True
+            await slow_task
+            return elapsed
+
+        elapsed = _run(scenario())
+        assert elapsed < slow / 2, f"轻量端点被慢聚合阻塞了 {elapsed:.2f}s（应远小于 {slow}s）"
+
+    def test_failed_aggregation_does_not_poison_cache(self, tmp_path: Path, monkeypatch) -> None:
+        """聚合失败降级不崩，且 TTL 过期后自愈（不永久卡在降级态）。
+
+        设计契约：_collect_token_usage 内部对 sqlite3.Error 降级空行（读面不崩），
+        该降级结果在 TTL 内复用（避免对已故障的库打风暴），超时后重新计算恢复。
+        故障注入在 sqlite3.connect（真实路径的读库入口），首个请求抛错、后续恢复。
+        """
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_llm_traces_db(tmp_path)))
+
+        calls: list[int] = []
+        real_connect = sqlite3.connect
+
+        def flaky_connect(*args: Any, **kwargs: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("transient")
+            return real_connect(*args, **kwargs)
+
+        # 实现内 `import sqlite3` 是局部绑定，须 patch 标准库模块本体
+        # （monkeypatch 用例级还原，不影响其它用例）。
+        monkeypatch.setattr(sqlite3, "connect", flaky_connect)
+
+        # 首轮失败：降级空行，读面不崩
+        first = _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
+        assert first["success"] is True
+        assert _decode_body(first)["rows"] == [], "故障轮降级空行"
+
+        # TTL 过期后自愈：重新计算并恢复真实数据
+        monkeypatch.setattr(mod, "_AGG_CACHE_TTL_SECS", 0.0)
+        second = _run(mod.http_handle(path="/ext/monitoring/token-usage", method="GET"))
+        assert len(calls) == 2, "TTL 过期必须重新计算"
+        assert len(_decode_body(second)["rows"]) == 3, "库恢复后数据自愈"
 
 
 # ═══════════════════════════════════════════════════════════

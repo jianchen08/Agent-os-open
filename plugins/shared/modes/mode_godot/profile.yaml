@@ -1,0 +1,39 @@
+# Godot 游戏开发模式 profile（B 部类物料：由用户维护；出厂种子随 mode_godot 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+# 既有事实模式结构化收编（P3-⑤立项）：godot 链 = main → godot_orchestrator_agent
+# （L2 执行型编排，自身承担修改+godot_run 运行验证）→ godot_expert（L3 轻量单点快道）
+mode: godot
+name: Godot 游戏开发模式
+panel_page_id: godot_dev
+chain:
+  entry: main
+  expected_path: [main, mode_godot/godot_orchestrator_agent, mode_godot/godot_expert]
+  executor_pool: [mode_godot/godot_expert, general_agent]
+  entry_override: null
+pipeline_profile:
+  pipeline: autonomous
+  params:
+    case_timeout: 1800
+    multimodal: false
+    domain_context: none
+suite:
+  smoke: null         # godot 题集二期补全（收编时评测面暂缺，不指共享 coding 冒烟）
+  full: null
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+  execution_stage:
+    - plugins/shared/modes/mode_godot/agents/
+    - config/agents/executor/general_agent.yaml
+levers:
+  reference_miss: {execution_stage: [persona, prompt_skeleton]}
+  verification_skipped: {execution_stage: [tool_ids, persona]}
+  scene_format_violation: {execution_stage: [persona, prompt_skeleton]}
+  orchestration_runaway: {orchestration_stage: [pipeline_steps, breaker_params]}
+  eval_no_settle: {evaluation_stage: [evaluation_params]}
+verifier_families: [godot_run_exit, file_assert]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 1800
+  round_tokens: 2000000
+  proposals_per_session: 3

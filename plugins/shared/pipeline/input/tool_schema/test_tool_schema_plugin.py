@@ -10,7 +10,11 @@
 - state 无 tool_ids（缺失/非列表）→ 空工具面 + 断链 warning，不发起调用
 - 显式空 tool_ids（声明零工具）→ 照常转发空白名单，无断链告警
 - caller 正常返回 → schemas/contracts 原样写入 state（短方法名 + tool_ids 转发）
-- caller 未注入（通道未接线）/ 调用异常 → 空工具面 + error 留痕（fail-closed）
+- caller 未注入 → 有界等待接线（cohost 冷启动竞态桥接，默认 10s，生产实证
+  on_load 晚于首次 execute 数百毫秒）；超时仍未接线/调用异常 → 显式抛错
+  （BUG-17：静默空面会把通道断链伪装成"声明零工具"的成功，LLM 无工具声明
+  出站后模型降级为正文输出原生工具标记且永不执行；错误经引擎
+  _plugin_errors → WS 可见反馈）
 - 工具面漂移（wanted 引用返回面不存在的工具）→ warning 留痕，schema 仍按内核
   过滤结果写入（不静默缩面、不覆盖为全量）
 - execute 入口：state_updates 透传
@@ -124,6 +128,7 @@ class TestConfigInterface:
     def test_execute_result_is_plugin_result(self) -> None:
         """execute 返回值是 PluginResult（行为契约）。"""
         p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(_FakeCaller())
         result = _run(p.execute(_make_ctx(state={"tool_ids": []})))
         assert isinstance(result, _PLUGIN_MOD.PluginResult)
         assert isinstance(result.state_updates, dict)
@@ -166,13 +171,49 @@ class TestWantedResolution:
         names = [s["function"]["name"] for s in result.state_updates["tool_schemas"]]
         assert names == ["spill_retrieve"]
 
-    def test_missing_caller_yields_empty_surface(self, caplog: Any) -> None:
-        """caller 未注入（通道未接线）→ 空工具面 + error 留痕，不炸管道。"""
-        p = ToolSchemaPlugin(config={})
-        with caplog.at_level(logging.ERROR):
-            result = _run(p.execute(_make_ctx(state={"tool_ids": ["alpha"]})))
-        assert result.state_updates == {"tool_schemas": [], "tool_output_contracts": {}}
-        assert any("caller 未注入" in r.getMessage() for r in caplog.records)
+    def test_missing_caller_raises(self) -> None:
+        """caller 未注入且等待超时 → 显式抛错而非静默空面。
+
+        静默空面把基础设施断链伪装成"agent 声明零工具"的成功：LLM 无工具
+        声明出站，模型降级为正文输出原生工具标记且永不执行（BUG-17 实证）。
+        抛错经引擎 warn+continue 落 _plugin_errors → WS plugin_error 可见。
+        wire_wait_seconds=0 跳过等待（正常默认 10s 桥接 cohost 冷启动竞态）。
+        """
+        p = ToolSchemaPlugin(config={"wire_wait_seconds": 0})
+        with pytest.raises(RuntimeError, match="caller 未注入"):
+            _run(p.execute(_make_ctx(state={"tool_ids": ["alpha"]})))
+
+    def test_unwired_caller_waits_then_proceeds(self) -> None:
+        """cohost 冷启动竞态：execute 先于 on_load 到达 → 有界等待接线后照常拉取。
+
+        生产实证（16:52/17:02）：on_load 晚于首次 execute 数百毫秒落地，
+        立即 raise 使该轮无工具出站；等待桥接让同一轮拿到完整工具面。
+        """
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "alpha"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={"wire_wait_seconds": 5})
+
+        async def scenario() -> Any:
+            async def wire_later() -> None:
+                await asyncio.sleep(0.3)
+                p.set_capability_caller(caller)
+
+            wiring = asyncio.create_task(wire_later())
+            result = await p.execute(_make_ctx(state={"tool_ids": ["alpha"]}))
+            await wiring
+            return result
+
+        result = _run(scenario())
+        assert caller.calls == [("schemas", {"tool_ids": ["alpha"]})]
+        assert [s["function"]["name"] for s in result.state_updates["tool_schemas"]] == ["alpha"]
+
+    def test_wait_times_out_and_raises(self) -> None:
+        """等待期满仍未接线 → 按断链契约抛错（有界，不悬挂管道）。"""
+        p = ToolSchemaPlugin(config={"wire_wait_seconds": 0.2})
+        with pytest.raises(RuntimeError, match="caller 未注入"):
+            _run(p.execute(_make_ctx(state={"tool_ids": ["alpha"]})))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -206,14 +247,16 @@ class TestCapabilityFetch:
         _run(p.execute(_make_ctx(state={"tool_ids": ["alpha", "beta"]})))
         assert caller.calls == [("schemas", {"tool_ids": ["alpha", "beta"]})]
 
-    def test_capability_failure_yields_empty_surface(self, caplog: Any) -> None:
-        """capability 调用异常（内核未注入 registry 等）→ 空工具面 + error 留痕。"""
+    def test_capability_failure_propagates(self) -> None:
+        """capability 调用异常（内核未注入 registry 等）→ 异常传播，不静默空面。
+
+        错误要么处理要么传播：把调用失败吞成空面 = 静默降级为无工具 LLM 调用
+        （BUG-17 同款失败链），显式失败交引擎 plugin_errors 面可见反馈。
+        """
         p = ToolSchemaPlugin(config={})
         p.set_capability_caller(_FakeCaller(result=RuntimeError("boom")))
-        with caplog.at_level(logging.ERROR):
-            result = _run(p.execute(_make_ctx(state={"tool_ids": ["alpha"]})))
-        assert result.state_updates == {"tool_schemas": [], "tool_output_contracts": {}}
-        assert any("tool-surface.schemas 调用失败" in r.getMessage() for r in caplog.records)
+        with pytest.raises(RuntimeError, match="boom"):
+            _run(p.execute(_make_ctx(state={"tool_ids": ["alpha"]})))
 
     def test_drift_warns_but_keeps_kernel_filtered_surface(self, caplog: Any) -> None:
         """wanted 引用了返回面不存在的工具 → 漂移 warning；schema 仍按内核过滤结果写入。"""
@@ -285,12 +328,11 @@ class TestServerAdapter:
 
     def test_wired_caller_routes_via_tool_surface_handle(self) -> None:
         """on_load 注入的 caller 经 plugin.get_capability("tool-surface").call 转发；
-        测试环境无内核注入（KeyError）→ execute 落 fail-closed 空面而非炸管道。"""
+        测试环境无内核注入（KeyError）→ 异常传播而非静默空面（与插件层契约一致）。"""
         server = _load_server()
         _run(server._on_load({}))
-        data = _run(server.execute({"pipeline_id": "p-1", "tool_ids": ["alpha"]}))
-        assert data["state_updates"]["tool_schemas"] == []
-        assert data["state_updates"]["tool_output_contracts"] == {}
+        with pytest.raises(KeyError):
+            _run(server.execute({"pipeline_id": "p-1", "tool_ids": ["alpha"]}))
 
     def test_execute_tool_returns_state_updates(self) -> None:
         """execute 工具：state 无 tool_ids → 空工具面（PluginResult 序列化契约）。"""

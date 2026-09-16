@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>写作工坊</title>
+  <style>
+  :root {
+    --bg: #f8fafc; --fg: #1a1a1a; --muted: #64748b; --border: #cbd5e1;
+    --card: #ffffff; --ph: #94a3b8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f172a; --fg: #e2e8f0; --muted: #94a3b8; --border: #334155;
+      --card: #1e293b; --ph: #475569;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px; font-size: 13px; color: var(--fg); background: var(--bg);
+    font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  }
+  h1 { margin: 0 0 12px; font-size: 15px; }
+  .layout { display: grid; gap: 12px; height: calc(100vh - 44px); }
+  .cols { grid-template-columns: 220px minmax(0, 1fr) 200px; }
+  section, aside {
+    display: flex; flex-direction: column; min-height: 0; min-width: 0;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--card);
+  }
+  h2 {
+    margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .body { flex: 1; overflow: auto; padding: 8px; }
+  .placeholder {
+    height: 100%; min-height: 72px; display: flex; flex-direction: column; gap: 4px;
+    align-items: center; justify-content: center; padding: 12px; text-align: center;
+    color: var(--muted); border: 1px dashed var(--ph); border-radius: 6px;
+  }
+  .placeholder .ph-label { font-size: 13px; }
+  .placeholder .ph-note { font-size: 11px; opacity: 0.75; }
+  .note { margin: 8px 0 0; padding: 0 2px; font-size: 11px; color: var(--muted); }
+  .stages { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+  .stage {
+    padding: 14px 8px; text-align: center; font-size: 12px; color: var(--muted);
+    border: 1px dashed var(--ph); border-radius: 6px;
+  }
+  </style>
+</head>
+<body>
+  <h1>写作工坊</h1>
+  <main class="layout cols" data-panel="writing">
+    <aside aria-label="作品树">
+      <h2>作品树</h2>
+      <div class="body">
+        <div class="placeholder">
+          <span class="ph-label">作品库</span>
+          <span class="ph-note">数据源缺口：作品物料（作品→卷→章，任务树投影；小说连载管线数据接通后渲染卷/章状态灯）。</span>
+        </div>
+      </div>
+    </aside>
+    <section aria-label="章节编辑器">
+      <h2>章节编辑器</h2>
+      <div class="body">
+        <div class="placeholder">
+          <span class="ph-label">章节编辑器</span>
+          <span class="ph-note">数据源缺口：章节内容与编辑承载后接（后接点 = 宿主 EditorWidget 组件）。</span>
+        </div>
+      </div>
+    </section>
+    <aside aria-label="设定集">
+      <h2>设定集</h2>
+      <div class="body">
+        <div class="placeholder">
+          <span class="ph-label">设定条目</span>
+          <span class="ph-note">数据源缺口：设定集物料（人物/世界观/时间线；注入机制与 roleplay 共享 lorebook_context）。</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>

@@ -14,6 +14,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // 收尾闸（channel_api 退役批次 5）：前端 /ext/channel_api 零命中 + 常量层不手写 /ext
 // ============================================================================
 const FRONTEND_SRC = path.resolve(__dirname, '../../..')
+/** 后端对齐测试共用：构造 200 信封响应 */
+const okResponse = (data: unknown) => ({
+  data,
+  status: 200,
+  statusText: 'OK',
+  headers: {},
+  config: {} as any,
+})
+
 describe('收尾闸 - channel_api 退役（批次 5）', () => {
   it('frontend/src 生产代码零命中 "ext/channel_api"（排除生成物与测试）', () => {
     const offenders: string[] = []
@@ -85,20 +94,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
   })
 
   it('pauseLongTermTask 应使用 PATCH 而非 PUT', async () => {
-    const mockResponse = {
-      data: {
-        id: 'task-1',
-        title: '长期任务',
-        status: 'blocked',
-        tags: ['long-term'],
-        created_at: '2026-05-14T00:00:00Z',
-        updated_at: '2026-05-14T01:00:00Z',
-      },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
+    const mockResponse = okResponse({ id: 'task-1', title: '长期任务', status: 'blocked', tags: ['long-term'], created_at: '2026-05-14T00:00:00Z', updated_at: '2026-05-14T01:00:00Z', })
 
     mockPatch.mockResolvedValueOnce(mockResponse)
 
@@ -113,20 +109,7 @@ describe('F10 - longTermTasks 使用 PATCH 方法', () => {
   })
 
   it('resumeLongTermTask 应使用 PATCH 而非 PUT', async () => {
-    const mockResponse = {
-      data: {
-        id: 'task-1',
-        title: '长期任务',
-        status: 'running',
-        tags: ['long-term'],
-        created_at: '2026-05-14T00:00:00Z',
-        updated_at: '2026-05-14T01:00:00Z',
-      },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
+    const mockResponse = okResponse({ id: 'task-1', title: '长期任务', status: 'running', tags: ['long-term'], created_at: '2026-05-14T00:00:00Z', updated_at: '2026-05-14T01:00:00Z', })
 
     mockPatch.mockResolvedValueOnce(mockResponse)
 
@@ -201,13 +184,7 @@ describe('F11 - fetchLongTermTasks 参数兼容性', () => {
   })
 
   it('应仅发送后端支持的参数（skip, limit）', async () => {
-    const mockResponse = {
-      data: { items: [], total: 0 },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
+    const mockResponse = okResponse({ items: [], total: 0 })
 
     mockGet.mockResolvedValueOnce(mockResponse)
 
@@ -228,13 +205,7 @@ describe('F11 - fetchLongTermTasks 参数兼容性', () => {
   })
 
   it('应正确将 page 转换为 skip', async () => {
-    const mockResponse = {
-      data: { items: [], total: 0 },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
+    const mockResponse = okResponse({ items: [], total: 0 })
 
     mockGet.mockResolvedValueOnce(mockResponse)
 
@@ -248,13 +219,7 @@ describe('F11 - fetchLongTermTasks 参数兼容性', () => {
   })
 
   it('应支持 status 参数传递', async () => {
-    const mockResponse = {
-      data: { items: [], total: 0 },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
+    const mockResponse = okResponse({ items: [], total: 0 })
 
     mockGet.mockResolvedValueOnce(mockResponse)
 
@@ -266,38 +231,7 @@ describe('F11 - fetchLongTermTasks 参数兼容性', () => {
   })
 
   it('应正确解包后端 {items, total} 并过滤长期任务', async () => {
-    const mockResponse = {
-      data: {
-        items: [
-          {
-            id: 'task-1',
-            title: '长期任务A',
-            status: 'running',
-            tags: ['long-term', 'auto-execute'],
-            created_at: '2026-05-14T00:00:00Z',
-          },
-          {
-            id: 'task-2',
-            title: '普通任务B',
-            status: 'pending',
-            tags: [],
-            created_at: '2026-05-14T01:00:00Z',
-          },
-          {
-            id: 'task-3',
-            title: '长期任务C',
-            status: 'completed',
-            tags: ['long-term'],
-            created_at: '2026-05-14T02:00:00Z',
-          },
-        ],
-        total: 3,
-      },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
+    const mockResponse = okResponse({ items: [ { id: 'task-1', title: '长期任务A', status: 'running', tags: ['long-term', 'auto-execute'], created_at: '2026-05-14T00:00:00Z', }, { id: 'task-2', title: '普通任务B', status: 'pending', tags: [], created_at: '2026-05-14T01:00:00Z', }, { id: 'task-3', title: '长期任务C', status: 'completed', tags: ['long-term'], created_at: '2026-05-14T02:00:00Z', }, ], total: 3, })
 
     mockGet.mockResolvedValueOnce(mockResponse)
 
@@ -311,13 +245,7 @@ describe('F11 - fetchLongTermTasks 参数兼容性', () => {
   })
 
   it('使用默认参数时 skip 应为 0，limit 应为 100', async () => {
-    const mockResponse = {
-      data: { items: [], total: 0 },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
+    const mockResponse = okResponse({ items: [], total: 0 })
 
     mockGet.mockResolvedValueOnce(mockResponse)
 
@@ -345,31 +273,7 @@ describe('前后端 Projects API 响应解包验证', () => {
   })
 
   it('fetchProjects 应返回 {items, total} 结构', async () => {
-    const mockResponse = {
-      data: {
-        items: [
-          {
-            id: 'project-1',
-            goal: '实现用户认证模块',
-            status: 'running',
-            auto_execute: true,
-          },
-          {
-            id: 'project-2',
-            goal: '优化数据库性能',
-            status: 'suspended',
-            auto_execute: false,
-          },
-        ],
-        total: 2,
-        limit: 20,
-        offset: 0,
-      },
-      status: 200,
-      statusText: 'OK',
-      headers: {},
-      config: {} as any,
-    }
+    const mockResponse = okResponse({ items: [ { id: 'project-1', goal: '实现用户认证模块', status: 'running', auto_execute: true, }, { id: 'project-2', goal: '优化数据库性能', status: 'suspended', auto_execute: false, }, ], total: 2, limit: 20, offset: 0, })
 
     mockGet.mockResolvedValueOnce(mockResponse)
 

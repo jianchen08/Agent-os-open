@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * deriveWsUrl 测试：WebSocket 基址派生
  *

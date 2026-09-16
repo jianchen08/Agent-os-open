@@ -364,6 +364,28 @@ describe('展开态用户菜单', () => {
   })
 })
 
+describe('设置常驻入口（BUG-13：设置中枢唯一可见入口此前藏在账号下拉菜单）', () => {
+  it('展开态：设置按钮不展开任何菜单即可见，点击打开设置中枢页签', () => {
+    renderWithProviders(<Sidebar />, { queryClient: createTestQueryClient() })
+    const settingsBtn = screen.getByTestId('sidebar-settings')
+    expect(settingsBtn).toBeInTheDocument()
+    fireEvent.click(settingsBtn)
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0]).toMatchObject({ id: 'ws-panel-settings', component: 'settings_hub' })
+  })
+
+  it('折叠态：rail 设置按钮常驻可见，重复点击幂等（激活同一页签不重复开）', () => {
+    useUIStore.setState({ sidebarCollapsed: true })
+    renderWithProviders(<Sidebar />, { queryClient: createTestQueryClient() })
+    fireEvent.click(screen.getByTestId('sidebar-rail-settings'))
+    fireEvent.click(screen.getByTestId('sidebar-rail-settings'))
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0]).toMatchObject({ id: 'ws-panel-settings', component: 'settings_hub' })
+  })
+})
+
 describe('会话列表动作', () => {
   function renderWithOneSession() {
     renderWithProviders(<Sidebar />, { queryClient: createTestQueryClient() })

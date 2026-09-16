@@ -93,7 +93,17 @@ async def task_submit(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await tool.execute(kwargs)
     if result.success:
         return result.output
-    return {"error": result.error}
+    # 失败载荷透传 error_code 与结构化 metadata（H3/M2：编排键不存在/
+    # 完备性失败等错误携 {missing_fields, orchestration_key, suggestion,
+    # available_orchestrations} 等可编程字段——错误是值，不只给人读文本；
+    # error 键语义不变，additive）。
+    payload: dict[str, Any] = {"error": result.error}
+    if result.error_code:
+        payload["error_code"] = result.error_code
+    payload.update(
+        {k: v for k, v in (result.metadata or {}).items() if v is not None}
+    )
+    return payload
 
 
 if __name__ == "__main__":

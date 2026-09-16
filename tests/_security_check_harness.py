@@ -69,16 +69,20 @@ def make_tool_ctx(
     *,
     provider: str = "host",
     task_isolated: bool | None = None,
+    pipeline_id: str | None = None,
+    session_id: str | None = None,
 ) -> PluginContext:
     """构造危险工具执行的 PluginContext（tool_execute 核 + 单工具调用）。"""
     execution_context: dict[str, Any] = {"tool_name": tool_name, "provider": provider}
     if task_isolated is not None:
         execution_context["task_isolated"] = task_isolated
-    return PluginContext(
-        state={
-            "core_type": "tool_execute",
-            "raw_tool_calls": [{"name": tool_name, "args": args}],
-            "execution_contexts": [execution_context],
-        },
-        _services={},
-    )
+    state: dict[str, Any] = {
+        "core_type": "tool_execute",
+        "raw_tool_calls": [{"name": tool_name, "args": args}],
+        "execution_contexts": [execution_context],
+    }
+    if pipeline_id is not None:
+        state["pipeline_id"] = pipeline_id
+    if session_id is not None:
+        state["session_id"] = session_id
+    return PluginContext(state=state, _services={})

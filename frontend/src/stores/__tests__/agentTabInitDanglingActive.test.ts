@@ -15,6 +15,7 @@ import type * as agentTabStoreMod from '@/stores/agentTabStore'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Session } from '@/types/models'
 import type { AgentTab } from '@/types/task'
+import { makeSessionFactory, makeSubTabFactory, makeSubTabInputFactory } from './helpers/agentTabTestUtils'
 
 vi.mock('@/services/api/session', () => ({
   getSessions: vi.fn(),
@@ -23,49 +24,16 @@ vi.mock('@/services/api/session', () => ({
 // pipelineMessageStore 只 mock 外部依赖边界（网络/持久化）；setState 以对象合并
 // 语义模拟（agentTabStore 悬空清空走 usePipelineMessageStore.setState），mock
 // 状态经 __pipelineMockState 导出供断言（工厂内构造，避开 vi.mock 提升引用限制）。
-vi.mock('@/stores/pipelineMessageStore', () => {
-  const state = {
-    activatePipeline: vi.fn(),
-    registerPipeline: vi.fn(),
-    loadPipelineMessages: vi.fn(() => Promise.resolve({ ok: true as const })),
-    pipelines: {} as Record<string, unknown>,
-    messagesByPipeline: {} as Record<string, unknown[]>,
-    activePipelineId: null as string | null,
-  }
-  // 与真实 store 同语义：激活回写 activePipelineId（供清空/激活断言）
-  state.activatePipeline = vi.fn((pipelineId: string) => {
-    state.activePipelineId = pipelineId
-  })
-  const setState = vi.fn((partial: Record<string, unknown>) => {
-    Object.assign(state, partial)
-  })
-  return {
-    usePipelineMessageStore: { getState: () => state, setState },
-    __pipelineMockState: state,
-  }
-})
-
+vi.mock('@/stores/pipelineMessageStore', async () => (await import('./helpers/pipelineStoreMockFactory')).makePipelineStoreMock())
 const SESSION_ID = 'sess-1'
 const MAIN_TAB_ID = `main-${SESSION_ID}`
 const MAIN_PID = 'pid-main-auth'
 const SUB_TAB_ID = 'sub-pid-sub-x'
 const SUB_PID = 'pid-sub-x'
+const makeSession = makeSessionFactory(SESSION_ID, MAIN_PID)
+const makeSubTab = makeSubTabFactory(SUB_TAB_ID, SUB_PID)
+const makeSubTabInput = makeSubTabInputFactory(makeSubTab)
 const DANGLING_TAB_ID = 'sub-pid-vanished'
-
-function makeSession(overrides: Partial<Session> = {}): Session {
-  return {
-    id: SESSION_ID,
-    title: '测试会话',
-    agentId: 'agentos',
-    activePipelineId: MAIN_PID,
-    pipelineIds: [MAIN_PID],
-    starred: false,
-    pinned: false,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    ...overrides,
-  } as Session
-}
 
 function makeMainTab(overrides: Partial<AgentTab> = {}): AgentTab {
   return {
@@ -78,23 +46,6 @@ function makeMainTab(overrides: Partial<AgentTab> = {}): AgentTab {
     status: 'running',
     hasUnread: false,
     canClose: false,
-    messages: [],
-    ...overrides,
-  }
-}
-
-function makeSubTab(overrides: Partial<AgentTab> = {}): AgentTab {
-  return {
-    id: SUB_TAB_ID,
-    agentId: 'agent-sub',
-    agentName: '子Agent',
-    agentLevel: 2,
-    parentRecordId: 'rec-sub-x',
-    pipelineRunId: SUB_PID,
-    path: ['主Agent', '子Agent'],
-    status: 'running',
-    hasUnread: false,
-    canClose: true,
     messages: [],
     ...overrides,
   }

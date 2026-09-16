@@ -2,7 +2,8 @@
 /**
  * useModelCapabilities 单测：多模态能力获取、缓存、输入能力计算
  */
-import { renderHook, waitFor } from '@testing-library/react'
+import { render, renderHook, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 const getModelCapabilitiesMock = vi.fn()
 vi.mock('@/services/api/files', () => ({
@@ -145,5 +146,52 @@ describe('useModelCapabilities', () => {
     await waitFor(() => expect(result.current.capabilities?.modelName).toBe('other'))
     expect(result.current.inputCapabilities.showVideoUpload).toBe(true)
     expect(getModelCapabilitiesMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('切走再切回同一模型：命中模块级缓存，能力即时恢复且不重发请求', async () => {
+    getModelCapabilitiesMock.mockResolvedValue(fullCapabilities)
+
+    const { rerender, result } = renderHook(({ name }) => useModelCapabilities(name), {
+      initialProps: { name: 'gpt-4o' },
+    })
+    await waitFor(() => expect(result.current.capabilities?.modelName).toBe('gpt-4o'))
+    expect(getModelCapabilitiesMock).toHaveBeenCalledTimes(1)
+
+    // 切到无效模型名：能力清空（该名不落缓存）
+    rerender({ name: 'unknown' })
+    await waitFor(() => expect(result.current.capabilities).toBeNull())
+
+    // 切回：缓存命中短路——不 loading、不重发请求，能力面完整还原
+    rerender({ name: 'gpt-4o' })
+    await waitFor(() => expect(result.current.capabilities?.modelName).toBe('gpt-4o'))
+    expect(result.current.loading).toBe(false)
+    expect(getModelCapabilitiesMock).toHaveBeenCalledTimes(1)
+    expect(result.current.inputCapabilities).toMatchObject({
+      showImageUpload: true,
+      showAudioUpload: true,
+      acceptedFileTypes: 'image/png,image/jpeg,audio/mpeg',
+    })
+  })
+
+  it('同一模型名重复执行 effect（StrictMode 双调用）→ 不重复请求', async () => {
+    getModelCapabilitiesMock.mockResolvedValue(fullCapabilities)
+
+    // 应用真实挂载形态（main.tsx 以 StrictMode 包裹）：effect 双调用必须早退
+    const seen: Array<string | undefined> = []
+    function Harness() {
+      const caps = useModelCapabilities('gpt-4o')
+      seen.push(caps.capabilities?.modelName)
+      return <span data-testid="cap-name">{caps.capabilities?.modelName ?? 'none'}</span>
+    }
+    const { getByTestId } = render(
+      <StrictMode>
+        <Harness />
+      </StrictMode>,
+    )
+
+    await waitFor(() => expect(getByTestId('cap-name').textContent).toBe('gpt-4o'))
+    // 重入早退：第二次 effect 执行不落到请求分支（能力仍完整、请求只发一次）
+    expect(getModelCapabilitiesMock).toHaveBeenCalledTimes(1)
+    expect(seen.at(-1)).toBe('gpt-4o')
   })
 })

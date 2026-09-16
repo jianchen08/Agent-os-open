@@ -12,7 +12,7 @@
  * ChatInput 以 stub 替身参与：捕获回调并回传受理结果（「未受理保留输入」的
  * 真实组件行为由 ChatInput.sendReceipt.test.tsx 覆盖）。
  */
-import { render } from '@testing-library/react'
+import { render, act } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -47,9 +47,27 @@ vi.mock('../AgentTabBar', () => ({
 
 const sessionsRef = vi.hoisted(() => ({
   sessions: [] as Array<{ id: string; activePipelineId?: string | null; pipelineIds?: string[] }>,
+  /** forceReloadSessions 调用计数（自愈路径断言） */
+  reloadCalls: 0,
+  /** 重拉写回模拟：非 null 时 reload 调用即把缓存换成这份会话集 */
+  freshSessions: null as Array<{ id: string; activePipelineId?: string | null; pipelineIds?: string[] }> | null,
+  /** 置 true 时下一次 reload 拒绝（失败分支断言） */
+  rejectNextReload: false,
 }))
 vi.mock('@/hooks/queries/useSessionsQuery', () => ({
   readSessions: () => sessionsRef.sessions,
+  // 与真实现同语义：绕过缓存强制重拉并把结果写回缓存（readSessions 随即可见）
+  forceReloadSessions: () => {
+    sessionsRef.reloadCalls += 1
+    if (sessionsRef.rejectNextReload) {
+      sessionsRef.rejectNextReload = false
+      return Promise.reject(new Error('重拉失败'))
+    }
+    if (sessionsRef.freshSessions) {
+      sessionsRef.sessions = sessionsRef.freshSessions
+    }
+    return Promise.resolve(sessionsRef.sessions)
+  },
 }))
 vi.mock('@/hooks/queries/useAgentsQuery', () => ({
   useAgentsQuery: () => ({ data: [] }),
@@ -119,6 +137,9 @@ describe('ChatContainer 发送受理护栏（pid 未就绪不静默丢消息）'
     outerSend.mockImplementation(() => undefined)
     chatInputSpy.onSendMessage = null
     sessionsRef.sessions = []
+    sessionsRef.reloadCalls = 0
+    sessionsRef.freshSessions = null
+    sessionsRef.rejectNextReload = false
     useAgentTabStore.setState({ tabs: [], activeTabId: null, unreadCounts: {} })
     useNotificationStore.setState({ notifications: [] })
   })
@@ -192,5 +213,97 @@ describe('ChatContainer 发送受理护栏（pid 未就绪不静默丢消息）'
     chatInputSpy.onSendMessage!({ content: '第二条' })
     expect(outerSend).not.toHaveBeenCalled()
     expect(notificationCountByTitle('子任务标签不支持发送')).toBe(1)
+  })
+})
+
+/**
+ * BUG-28（全局发送断链）自愈契约：主管道解析失败多为会话缓存陈旧/未就绪
+ * （列表拉取失败、创建响应与列表重拉的竞态窗口）——「会话管道未就绪」只允许
+ * 出现在真正瞬态，且必须带自愈路径：拒发即触发会话列表强制重拉，重试可受理。
+ */
+describe('发送自愈：主管道解析失败触发会话列表强制重拉（BUG-28）', () => {
+  beforeEach(() => {
+    outerSend.mockClear()
+    outerSend.mockImplementation(() => undefined)
+    chatInputSpy.onSendMessage = null
+    sessionsRef.sessions = []
+    sessionsRef.reloadCalls = 0
+    sessionsRef.freshSessions = null
+    sessionsRef.rejectNextReload = false
+    useAgentTabStore.setState({ tabs: [], activeTabId: null, unreadCounts: {} })
+    useNotificationStore.setState({ notifications: [] })
+  })
+
+  it('主标签 pid 空 + 缓存无会话 → 未受理且触发一次强制重拉（自愈路径存在）', () => {
+    useAgentTabStore.setState({
+      tabs: [makeMainTab({ pipelineRunId: '' })],
+      activeTabId: 'main-1',
+    })
+    sessionsRef.sessions = []
+
+    render(<ChatContainer sessionId="sess-1" onSendMessage={outerSend} />)
+
+    const receipt = chatInputSpy.onSendMessage!({ content: '第一条' })
+    expect(receipt).toBe(false)
+    expect(outerSend).not.toHaveBeenCalled()
+    expect(notificationCountByTitle('会话管道未就绪')).toBe(1)
+    expect(sessionsRef.reloadCalls).toBe(1)
+  })
+
+  it('重拉写回缓存后重试 → 兜底解析主管道受理（自愈闭环）', () => {
+    useAgentTabStore.setState({
+      tabs: [makeMainTab({ pipelineRunId: '' })],
+      activeTabId: 'main-1',
+    })
+    sessionsRef.sessions = []
+    sessionsRef.freshSessions = [
+      { id: 'sess-1', activePipelineId: 'pipe-main', pipelineIds: ['pipe-main'] },
+    ]
+
+    render(<ChatContainer sessionId="sess-1" onSendMessage={outerSend} />)
+
+    expect(chatInputSpy.onSendMessage!({ content: '第一条' })).toBe(false)
+    expect(outerSend).not.toHaveBeenCalled()
+
+    // 重拉已写回缓存（mock 同步换缓存）；用户重试 → 按权威主管道受理
+    const receipt = chatInputSpy.onSendMessage!({ content: '第二条' })
+    expect(outerSend).toHaveBeenCalledTimes(1)
+    expect(outerSend).toHaveBeenCalledWith({ content: '第二条', pipelineId: 'pipe-main' })
+    expect(receipt).toBeUndefined()
+  })
+
+  it('重拉失败 → 一次性降级提示显式报错，不静默吞错', async () => {
+    useAgentTabStore.setState({
+      tabs: [makeMainTab({ pipelineRunId: '' })],
+      activeTabId: 'main-1',
+    })
+    sessionsRef.sessions = []
+    sessionsRef.rejectNextReload = true
+
+    render(<ChatContainer sessionId="sess-1" onSendMessage={outerSend} />)
+    expect(chatInputSpy.onSendMessage!({ content: '第一条' })).toBe(false)
+
+    await act(async () => {})
+    expect(notificationCountByTitle('会话列表刷新失败')).toBe(1)
+
+    // 再次失败不重复弹（一次性降级提示契约），错误仍留控制台
+    sessionsRef.rejectNextReload = true
+    expect(chatInputSpy.onSendMessage!({ content: '第二条' })).toBe(false)
+    await act(async () => {})
+    expect(notificationCountByTitle('会话列表刷新失败')).toBe(1)
+  })
+
+  it('子标签拒发不触发重拉（子标签无会话面治愈职责）', () => {
+    useAgentTabStore.setState({
+      tabs: [makeMainTab(), makeSubTab()],
+      activeTabId: 'sub-1',
+    })
+    sessionsRef.sessions = []
+
+    render(<ChatContainer sessionId="sess-1" onSendMessage={outerSend} />)
+
+    expect(chatInputSpy.onSendMessage!({ content: '第一条' })).toBe(false)
+    expect(outerSend).not.toHaveBeenCalled()
+    expect(sessionsRef.reloadCalls).toBe(0)
   })
 })

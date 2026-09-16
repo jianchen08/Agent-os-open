@@ -180,3 +180,98 @@ describe('DeclaredWidgetLayer', () => {
     expect(screen.queryByTestId('declared-widget-voice_input')).not.toBeInTheDocument()
   })
 })
+
+describe('DeclaredWidgetLayer — select-option 选项追加合并', () => {
+  beforeEach(() => {
+    contributionRegistry.clear()
+    widgetRegistry.clear()
+  })
+  afterEach(() => {
+    contributionRegistry.clear()
+    widgetRegistry.clear()
+    vi.restoreAllMocks()
+  })
+
+  /** 渲染首字段 options 供断言的捕获桩（模拟 compact select 的选项源） */
+  const OptionsCapture: WidgetComponent = (props: { fields?: Array<{ options?: unknown }> }) => (
+    <div data-testid="options-capture">{JSON.stringify(props.fields?.[0]?.options ?? [])}</div>
+  )
+
+  const taskModeForm = {
+    id: 'task_mode',
+    type: 'form',
+    space: 'chat-input',
+    props: {
+      fields: [{ name: 'mode', type: 'select', label: '任务模式', options: [{ label: '自动', value: '', icon: '✨' }] }],
+    },
+  }
+  const writingOption = {
+    id: 'mode_opt_writing',
+    type: 'select-option',
+    space: 'chat-input',
+    order: 10,
+    props: { target: 'task_mode', value: 'writing', label: '写作', icon: '✍️' },
+  }
+
+  it('select-option 并入 target 指向的 form 首字段 options（追加在兜底档之后）', () => {
+    widgetRegistry.register('form', OptionsCapture, { name: 'form', supportedSpaces: ['chat-input'] })
+    render(<DeclaredWidgetLayer declarations={[taskModeForm, writingOption]} space="chat-input" />)
+
+    const merged = JSON.parse(screen.getByTestId('options-capture').textContent ?? '[]')
+    expect(merged).toEqual([
+      { label: '自动', value: '', icon: '✨' },
+      { label: '写作', value: 'writing', icon: '✍️' },
+    ])
+  })
+
+  it('select-option 不是独立 widget：被合并消费，不产生自身渲染输出', () => {
+    widgetRegistry.register('form', OptionsCapture, { name: 'form', supportedSpaces: ['chat-input'] })
+    render(<DeclaredWidgetLayer declarations={[taskModeForm, writingOption]} space="chat-input" />)
+
+    expect(screen.queryByTestId('declared-widget-mode_opt_writing')).not.toBeInTheDocument()
+    expect(screen.getByTestId('declared-widget-task_mode')).toBeInTheDocument()
+  })
+
+  it('target 不匹配的选项不并入；槽位式渲染（slotId）同样吃到合并结果', () => {
+    widgetRegistry.register('form', OptionsCapture, { name: 'form', supportedSpaces: ['chat-input'] })
+    const foreignOption = {
+      id: 'mode_opt_other',
+      type: 'select-option',
+      space: 'chat-input',
+      props: { target: 'another_selector', value: 'x', label: '别处' },
+    }
+    render(
+      <DeclaredWidgetLayer
+        declarations={[taskModeForm, writingOption, foreignOption]}
+        space="chat-input"
+        slotId="task_mode"
+      />,
+    )
+
+    const merged = JSON.parse(screen.getByTestId('options-capture').textContent ?? '[]')
+    expect(merged.map((o: { label: string }) => o.label)).toEqual(['自动', '写作'])
+  })
+
+  it('同 value 去重：本体/先声明者胜（order 小者优先保留）', () => {
+    widgetRegistry.register('form', OptionsCapture, { name: 'form', supportedSpaces: ['chat-input'] })
+    const dupFirst = {
+      id: 'opt_dup_a',
+      type: 'select-option',
+      space: 'chat-input',
+      order: 5,
+      props: { target: 'task_mode', value: 'writing', label: '写作甲' },
+    }
+    const dupSecond = {
+      id: 'opt_dup_b',
+      type: 'select-option',
+      space: 'chat-input',
+      order: 9,
+      props: { target: 'task_mode', value: 'writing', label: '写作乙' },
+    }
+    render(<DeclaredWidgetLayer declarations={[taskModeForm, dupFirst, dupSecond]} space="chat-input" />)
+
+    const merged = JSON.parse(screen.getByTestId('options-capture').textContent ?? '[]')
+    expect(merged.filter((o: { value: string }) => o.value === 'writing')).toHaveLength(1)
+    expect(merged[1].label).toBe('写作甲')
+  })
+})

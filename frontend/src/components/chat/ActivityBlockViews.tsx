@@ -89,6 +89,7 @@ const ImageBlockView: FC<{ src: string }> = ({ src }) => {
         src={src}
         alt="预览图"
         loading="lazy"
+        decoding="async"
         onError={() => setFailed(true)}
         onClick={() => setOpen(true)}
         className="ring-border/40 max-h-40 cursor-zoom-in rounded object-contain transition-shadow hover:ring-1"
@@ -104,6 +105,7 @@ const ImageBlockView: FC<{ src: string }> = ({ src }) => {
           <img
             src={src}
             alt="大图预览"
+            decoding="async"
             className="max-h-[85vh] max-w-[90vw] rounded object-contain shadow-2xl"
           />
         </div>

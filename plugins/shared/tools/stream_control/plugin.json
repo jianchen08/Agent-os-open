@@ -1,0 +1,73 @@
+{
+  "id": "stream_control",
+  "name": "Livestream Stream Control (FFmpeg)",
+  "description": "FFmpeg 推流控制：循环播放列表 + AI 角标烧录 + start/stop/status（D2 无人值守底线承载件）",
+  "version": "0.1.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "stream.control",
+        "description": "FFmpeg 推流控制：start/stop/status；AI 角标烧录防无人直播误判（D2）",
+        "render": {
+          "card": "generic",
+          "title": "推流控制"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "start",
+                "stop",
+                "status"
+              ]
+            },
+            "inputs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "播放列表（视频文件路径，start 必填）"
+            },
+            "overlay_text": {
+              "type": "string",
+              "description": "画面角标文本（AI 生成内容标识，start 时建议必带）"
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "running": {
+              "type": "boolean"
+            },
+            "playlist": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "running"
+          ]
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "host_group": "light"
+}

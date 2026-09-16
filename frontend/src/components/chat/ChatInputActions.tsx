@@ -4,8 +4,9 @@
  * 架构意图：插件声明的聊天输入动作（contributes.pages space=chat slot=input-action）
  * 在输入框工具栏显示为按钮，点击经 onAction 回调触发（回调方通常派发到 commandDispatcher）。
  *
- * 之前 chat 空间（getPagesBySpace('chat')）零消费者——本组件是 chat 空间声明驱动的
- * 第一个落点（消息卡片类 inline 声明属 TC S3 chat_card 协议，后续接入）。
+ * input-action 与 mode-option 是两个互斥栏位：input-action = 动作语义（本组件渲染
+ * 为按钮）；mode-option = 模式选项数据语义（由 getModeOptions 聚合进 ModeSelector
+ * 菜单、modePanel 面板配对）——模式声明不落本组件，输入区不出现第二落点。
  *
  * 关联：docs/working/重要设计/前端能力统一架构.md §5.3 / §5.4
  */

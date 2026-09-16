@@ -5,6 +5,11 @@ import { persist } from 'zustand/middleware'
 import { getMessages as apiGetMessages } from '@/services/api/session'
 import { useContextKeys } from '@/stores/contextKeysStore'
 import { trimMessagesForPersistence } from '@/stores/pipelineMessagePersistence'
+import {
+  _fetchAbortControllers,
+  abortKeyOf,
+  fetchKindOf,
+} from '@/stores/pipelineMessageFetchWindows'
 // retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
 import { decideClaim } from '@/streaming/claim'
 import { indexedDbStorage } from '@/utils/indexedDbStorage'
@@ -31,14 +36,30 @@ function capMessagesForMemory(msgs: Message[]): Message[] {
   return [...msgs].sort(compareMessages).slice(-MAX_MESSAGES_PER_PIPELINE_IN_MEMORY)
 }
 
-/**
- * 每管道在途 fetch 的取消令牌：同管道新请求发起即 abort 旧请求——切换会话/
- * 重复进入同一管道时，在途旧响应被作废，不再有覆盖新状态的机会（旧机制靠
- * initFromAPI 90s 保鲜窗启发式防覆盖，此处为显式取消）。被 abort 的请求以
- * 取消语义静默收场：不写状态、不上抛（上层把失败一律当故障通知用户，
- * 取消不是故障，不得误报）。
- */
-const _fetchAbortControllers = new Map<string, AbortController>()
+/** Parts 统一修改骨架（appendPart/updatePart/appendToPart 共用）：定位消息 → 变换 parts → 提交。
+ * 管道/消息不存在或 partIndex 越界时原样返回 state（幂等）；transform 返回 null 表示放弃变更。 */
+function mutateMessageParts<T extends { messagesByPipeline: Record<string, Message[]> }>(
+  state: T,
+  pipelineId: string,
+  messageId: string,
+  partIndex: number | null,
+  transform: (parts: MessagePart[]) => MessagePart[] | null,
+): T {
+  const pipelineMessages = state.messagesByPipeline[pipelineId]
+  if (!pipelineMessages) return state
+  const msgIndex = pipelineMessages.findIndex((m) => m.id === messageId)
+  if (msgIndex < 0) return state
+  const msg = pipelineMessages[msgIndex]
+  if (partIndex !== null && (partIndex < 0 || partIndex >= (msg.parts || []).length)) return state
+  const updatedParts = transform(msg.parts || [])
+  if (!updatedParts) return state
+  const updatedMessages = [...pipelineMessages]
+  updatedMessages[msgIndex] = { ...msg, parts: updatedParts, _lastUpdated: Date.now() }
+  return {
+    ...state,
+    messagesByPipeline: { ...state.messagesByPipeline, [pipelineId]: updatedMessages },
+  }
+}
 
 /** 刷新后后台全量对账去重（同一管道只对账一次；流式结束前的对账推迟） */
 const _reconcilingPipelines = new Set<string>()
@@ -1014,12 +1035,14 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     pipelineId: string,
     options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
   ) => {
-    // 同管道新请求发起 = 旧请求作废：abort 在途旧请求并让出占位（同管道
-    // 任意时刻至多一个在途 fetch，取代即取消）。
-    const previousController = _fetchAbortControllers.get(pipelineId)
+    // 同类别新请求发起 = 旧请求作废：abort 在途旧请求并让出占位（同管道同
+    // 类别任意时刻至多一个在途 fetch，取代即取消；跨类别不互取消）。
+    const kind = fetchKindOf(options)
+    const abortKey = abortKeyOf(pipelineId, kind)
+    const previousController = _fetchAbortControllers.get(abortKey)
     if (previousController) {
       previousController.abort()
-      _fetchAbortControllers.delete(pipelineId)
+      _fetchAbortControllers.delete(abortKey)
       // 被取消的「加载更早」立即让出 loading 标记（新请求若同为翻页，下方会重新置位）
       set((state) => {
         if (!state.isLoadingOlderByPipeline[pipelineId]) return state
@@ -1033,7 +1056,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     }
 
     const controller = new AbortController()
-    _fetchAbortControllers.set(pipelineId, controller)
+    _fetchAbortControllers.set(abortKey, controller)
 
     const fetchPromise = (async () => {
       // 加载更早消息时设置 loading 状态（显示加载指示器）
@@ -1128,7 +1151,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       } finally {
         // 身份守卫：被取代的请求不清理取代者的令牌、不动其 loading 标记
         // （被取消者的标记已在取代点复位）
-        if (_fetchAbortControllers.get(pipelineId) === controller) {
+        if (_fetchAbortControllers.get(abortKey) === controller) {
           _fetchAbortControllers.delete(pipelineId)
           // 重置「加载更早」的 loading 标记，避免残留 true 时用户滚动到顶部后「加载更多」完全失效。
           if (options?.before_sequence !== undefined) {
@@ -1203,85 +1226,37 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
 
   /** 追加一个新 Part 到指定消息 */
   appendPart: (pipelineId: string, messageId: string, part: MessagePart) => {
-    set((state) => {
-      const pipelineMessages = state.messagesByPipeline[pipelineId]
-      if (!pipelineMessages) return state
-      const msgIndex = pipelineMessages.findIndex((m) => m.id === messageId)
-      if (msgIndex < 0) return state
-      const msg = pipelineMessages[msgIndex]
-      const updatedMessages = [...pipelineMessages]
-      updatedMessages[msgIndex] = {
-        ...msg,
-        parts: [...(msg.parts || []), part],
-        _lastUpdated: Date.now(),
-      }
-      return {
-        messagesByPipeline: {
-          ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
-        },
-      }
-    })
+    set((state) => mutateMessageParts(state, pipelineId, messageId, null, (parts) => [...parts, part]))
   },
 
   /** 更新指定消息的某个 Part（按 partIndex 精确定位） */
   updatePart: (pipelineId: string, messageId: string, partIndex: number, updates: Partial<MessagePart>) => {
-    set((state) => {
-      const pipelineMessages = state.messagesByPipeline[pipelineId]
-      if (!pipelineMessages) return state
-      const msgIndex = pipelineMessages.findIndex((m) => m.id === messageId)
-      if (msgIndex < 0) return state
-      const msg = pipelineMessages[msgIndex]
-      const parts = msg.parts || []
-      if (partIndex < 0 || partIndex >= parts.length) return state
-      const updatedParts = [...parts]
-      updatedParts[partIndex] = { ...updatedParts[partIndex], ...updates } as MessagePart
-      const updatedMessages = [...pipelineMessages]
-      updatedMessages[msgIndex] = {
-        ...msg,
-        parts: updatedParts,
-        _lastUpdated: Date.now(),
-      }
-      return {
-        messagesByPipeline: {
-          ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
-        },
-      }
-    })
+    set((state) =>
+      mutateMessageParts(state, pipelineId, messageId, partIndex, (parts) => {
+        const updatedParts = [...parts]
+        updatedParts[partIndex] = { ...updatedParts[partIndex], ...updates } as MessagePart
+        return updatedParts
+      }),
+    )
   },
 
   /** 向指定 Part 追加文本内容（用于流式增量） */
   appendToPart: (pipelineId: string, messageId: string, partIndex: number, content: string) => {
-    set((state) => {
-      const pipelineMessages = state.messagesByPipeline[pipelineId]
-      if (!pipelineMessages) return state
-      const msgIndex = pipelineMessages.findIndex((m) => m.id === messageId)
-      if (msgIndex < 0) return state
-      const msg = pipelineMessages[msgIndex]
-      const parts = msg.parts || []
-      if (partIndex < 0 || partIndex >= parts.length) return state
-      const part = parts[partIndex]
-      // 只有 text 和 thinking 类型支持追加
-      if (part.type !== 'text' && part.type !== 'thinking') return state
-      const updatedParts = [...parts]
-      updatedParts[partIndex] = {
-        ...part,
-        content: (part as { content: string }).content + content,
-      } as MessagePart
-      const updatedMessages = [...pipelineMessages]
-      updatedMessages[msgIndex] = {
-        ...msg,
-        parts: updatedParts,
-        _lastUpdated: Date.now(),
-      }
-      return {
-        messagesByPipeline: {
-          ...state.messagesByPipeline,
-          [pipelineId]: updatedMessages,
-        },
-      }
-    })
+    set((state) =>
+      mutateMessageParts(state, pipelineId, messageId, partIndex, (parts) => {
+        const part = parts[partIndex]
+        // 只有 text 和 thinking 类型支持追加
+        if (part.type !== 'text' && part.type !== 'thinking') return null
+        return [
+          ...parts.slice(0, partIndex),
+          {
+            ...part,
+            content: (part as { content: string }).content + content,
+          } as MessagePart,
+          ...parts.slice(partIndex + 1),
+        ]
+      }),
+    )
   },
 
   /** 结束消息流式状态：所有 Part.state = 'done', 消息 status = 'completed' */

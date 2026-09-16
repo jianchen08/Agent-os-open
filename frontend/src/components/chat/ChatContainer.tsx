@@ -5,13 +5,14 @@ import { useShallow } from 'zustand/react/shallow'
 import { Loader2 } from '@/assets/icons'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { usePipelineRunsQuery } from '@/hooks/queries/usePipelineRunsQuery'
-import { readSessions } from '@/hooks/queries/useSessionsQuery'
+import { forceReloadSessions, readSessions } from '@/hooks/queries/useSessionsQuery'
 import { getDefaults, getLLMConfig, type LLMDefaults } from '@/services/api/config'
 import { switchThinkingMode } from '@/services/api/thinkingMode'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
 import {
   useThinkingModeStore,
   useExplicitThinkingStrength,
@@ -349,6 +350,9 @@ export const ChatContainer = ({
     })
   }, [activeMessages, searchQuery])
 
+  /** 会话主题 override 作用域挂点（主题桥 §5.0：作用域仅聊天区+面板容器） */
+  const chatThemeScopeRef = useSessionThemeScope<HTMLDivElement>()
+
   /** 加载状态 */
   if (isLoading) {
     return (
@@ -364,6 +368,7 @@ export const ChatContainer = ({
 
   return (
     <div
+      ref={chatThemeScopeRef}
       // 聊天区背景由 .theme-chat-area 类消费（--chat-bg-image/-color 双通道）：
       // bg-[var(--chat-bg)] 生成 background-color 位，渐变主题（deep-space 等）
       // 塞进去会整条失效→聊天区透明→全屏纹理层穿透内容区
@@ -454,6 +459,24 @@ export const ChatContainer = ({
                   message: '请在主管道标签发送消息',
                 })
               } else {
+                // 自愈（BUG-28）：主管道解析失败多为会话缓存陈旧/未就绪（列表拉取
+                // 失败、创建响应与列表重拉的竞态窗口）——强制重拉会话列表拿到权威
+                // 主管道后重建标签面，用户重试即可受理；不绕过受理协议硬发（无主管
+                // 道时硬发会把消息丢进空管道）。重拉失败一次性显式提示，不静默吞错。
+                void forceReloadSessions()
+                  .then(() => {
+                    // 用户已切走会话时不回写旧会话标签面（陈旧异步不得扰动当前视图）
+                    if (useAgentTabStore.getState().currentSessionId === sessionId) {
+                      initSessionTabs(sessionId)
+                    }
+                  })
+                  .catch((error) => {
+                    console.error('[ChatContainer] 会话列表强制重拉失败:', error)
+                    notifyDegradedOnce('chat-sessions-reload-failed', {
+                      title: '会话列表刷新失败',
+                      message: '会话主管道解析失败且自动重拉未成功，请检查连接后重试',
+                    })
+                  })
                 useNotificationStore.getState().addNotification({
                   title: '会话管道未就绪',
                   message: '会话管道未就绪，请稍候重试',

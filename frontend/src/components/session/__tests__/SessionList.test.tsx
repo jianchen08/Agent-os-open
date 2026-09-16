@@ -57,62 +57,41 @@ afterEach(() => {
 // ============================================================
 // AC-1.3-1: 置顶功能入口
 // ============================================================
+/** 渲染单会话列表并打开其「更多操作」下拉（置顶族用例共用） */
+async function renderSingleAndOpenMenu(pinned: boolean) {
+  const session = createMockSession({ pinned })
+  render(
+    <SessionList
+      sessions={[session]}
+      activeSessionId={null}
+      deletingSessionIds={new Set()}
+      {...defaultCallbacks}
+    />,
+  )
+  const moreButtons = screen.getAllByRole('button', { name: /更多操作/ })
+  await act(async () => {
+    openDropdownMenu(moreButtons[0])
+  })
+  return session
+}
+
 describe('AC-1.3-1: 置顶功能入口', () => {
   it('下拉菜单中应包含「置顶会话」选项（未置顶会话）', async () => {
-    const session = createMockSession({ pinned: false })
-    render(
-      <SessionList
-        sessions={[session]}
-        activeSessionId={null}
-        deletingSessionIds={new Set()}
-        {...defaultCallbacks}
-      />,
-    )
-
-    const moreButtons = screen.getAllByRole('button', { name: /更多操作/ })
-    await act(async () => {
-      openDropdownMenu(moreButtons[0])
-    })
+    const session = await renderSingleAndOpenMenu(false)
 
     const pinMenuItem = await screen.findByText('置顶会话')
     expect(pinMenuItem).toBeInTheDocument()
   })
 
   it('下拉菜单中应包含「取消置顶」选项（已置顶会话）', async () => {
-    const session = createMockSession({ pinned: true })
-    render(
-      <SessionList
-        sessions={[session]}
-        activeSessionId={null}
-        deletingSessionIds={new Set()}
-        {...defaultCallbacks}
-      />,
-    )
-
-    const moreButtons = screen.getAllByRole('button', { name: /更多操作/ })
-    await act(async () => {
-      openDropdownMenu(moreButtons[0])
-    })
+    const session = await renderSingleAndOpenMenu(true)
 
     const unpinMenuItem = await screen.findByText('取消置顶')
     expect(unpinMenuItem).toBeInTheDocument()
   })
 
   it('点击「置顶会话」应调用 onPinSession 回调', async () => {
-    const session = createMockSession({ pinned: false })
-    render(
-      <SessionList
-        sessions={[session]}
-        activeSessionId={null}
-        deletingSessionIds={new Set()}
-        {...defaultCallbacks}
-      />,
-    )
-
-    const moreButtons = screen.getAllByRole('button', { name: /更多操作/ })
-    await act(async () => {
-      openDropdownMenu(moreButtons[0])
-    })
+    const session = await renderSingleAndOpenMenu(false)
 
     const pinMenuItem = await screen.findByText('置顶会话')
     await act(async () => {
@@ -124,20 +103,7 @@ describe('AC-1.3-1: 置顶功能入口', () => {
   })
 
   it('点击「取消置顶」应调用 onPinSession 回调', async () => {
-    const session = createMockSession({ pinned: true })
-    render(
-      <SessionList
-        sessions={[session]}
-        activeSessionId={null}
-        deletingSessionIds={new Set()}
-        {...defaultCallbacks}
-      />,
-    )
-
-    const moreButtons = screen.getAllByRole('button', { name: /更多操作/ })
-    await act(async () => {
-      openDropdownMenu(moreButtons[0])
-    })
+    const session = await renderSingleAndOpenMenu(true)
 
     const unpinMenuItem = await screen.findByText('取消置顶')
     await act(async () => {
@@ -338,20 +304,7 @@ describe('AC-1.3-3: 置顶视觉标识', () => {
 // ============================================================
 describe('AC-1.3-4: 兼容现有功能', () => {
   it('下拉菜单仍包含编辑、复制、星标、删除选项', async () => {
-    const session = createMockSession({ pinned: false })
-    render(
-      <SessionList
-        sessions={[session]}
-        activeSessionId={null}
-        deletingSessionIds={new Set()}
-        {...defaultCallbacks}
-      />,
-    )
-
-    const moreButtons = screen.getAllByRole('button', { name: /更多操作/ })
-    await act(async () => {
-      openDropdownMenu(moreButtons[0])
-    })
+    const session = await renderSingleAndOpenMenu(false)
 
     // 现行契约：菜单项文案为「编辑会话」（原「编辑」已演进）
     expect(await screen.findByText('编辑会话')).toBeInTheDocument()

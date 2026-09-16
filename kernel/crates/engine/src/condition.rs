@@ -1529,4 +1529,147 @@ mod tests {
         assert!(!eval_condition("fzero", &state), "浮点 0.0 为假");
         assert!(eval_condition("fpos", &state), "浮点非零为真");
     }
+
+    /// 真值判定的字符串/数组/对象分支（Python bool() 对齐）：空串/空列表/空对象
+    /// 为假，非空为真。与数值分支共用同一折算点，这里锁非数值三态。
+    #[test]
+    fn test_truthiness_of_string_array_object() {
+        let state = json!({
+            "empty_s": "",
+            "s": "x",
+            "empty_arr": [],
+            "arr": [0],
+            "empty_obj": {},
+            "obj": {"k": null},
+        });
+        assert!(!eval_condition("empty_s", &state), "空串为假");
+        assert!(eval_condition("s", &state), "非空串为真");
+        assert!(!eval_condition("empty_arr", &state), "空列表为假");
+        assert!(
+            eval_condition("arr", &state),
+            "非空列表为真（元素值为假不影响）"
+        );
+        assert!(!eval_condition("empty_obj", &state), "空对象为假");
+        assert!(eval_condition("obj", &state), "非空对象为真");
+    }
+
+    /// 下标访问的类型错配与越界边界：数组用字符串键 / 对象用数字下标 /
+    /// 负下标 / 小数下标 → Null（fail-soft 判假），不 panic 不误命中。
+    #[test]
+    fn test_index_access_type_mismatch_fail_soft() {
+        let state = json!({
+            "items": [10, 20],
+            "map": {"0": "zero"},
+        });
+        assert!(
+            !eval_condition("items['0'] == 10", &state),
+            "数组不接受字符串键"
+        );
+        assert!(
+            !eval_condition("map[0] == 'zero'", &state),
+            "对象不接受数字下标"
+        );
+        assert!(!eval_condition("items[-1] == 20", &state), "负下标越界");
+        assert!(
+            !eval_condition("items[1.5] == 20", &state),
+            "非整数下标越界"
+        );
+        assert!(!eval_condition("items[2] == 20", &state), "越界下标");
+    }
+
+    /// 字符串大小比较（json_cmp 字符串分支）：字典序，两侧有区分度。
+    #[test]
+    fn test_string_ordering_comparison() {
+        let state = json!({ "a": "apple", "b": "banana" });
+        assert!(eval_condition("a < b", &state));
+        assert!(eval_condition("b > a", &state));
+        assert!(!eval_condition("a > b", &state));
+        assert!(eval_condition("a <= a and b >= b", &state));
+        // 类型错配（字符串 vs 数字）→ 顺序未定义 → 判假，不误判大小
+        assert!(!eval_condition("a > 1", &state));
+        assert!(!eval_condition("a < 1", &state));
+    }
+
+    /// 平键链上状态非对象（标量/数组根）时不得 panic：整链取空 → 判假。
+    #[test]
+    fn test_dot_chain_on_non_object_state() {
+        assert!(!eval_condition("a.b", &json!(5)));
+        assert!(!eval_condition("a.b == 1", &json!(5)));
+        assert!(!eval_condition("a.b", &json!([1, 2])));
+        assert!(!eval_condition("a.b.c == 1", &json!("scalar")));
+        // 对照组：同形态表达式在对象 state 上可命中（区分"分支未走"与"恒假"）
+        assert!(eval_condition("a.b == 1", &json!({ "a": { "b": 1 } })));
+    }
+
+    /// 列表字面量未闭合成因两类：最后一个元素后直接结束（`[1`）与
+    /// 元素后跟非法 token（`[1 2]`）——加载期报错且带位置。
+    #[test]
+    fn test_list_unterminated_variants() {
+        for src in ["[", "[1"] {
+            let err = parse_condition(src).expect_err(&format!("{src:?} 应报语法错误"));
+            assert!(err.contains("position"), "{src:?} 应带位置，实际: {err}");
+        }
+    }
+
+    /// 未闭合字符串 / 孤立 '=' / 未知比较运算符的错误文案要指明形态
+    /// （加载期可定位，不许静默吞掉）。
+    #[test]
+    fn test_tokenizer_error_messages_name_the_fault() {
+        let err = parse_condition("'abc").expect_err("未闭合引号应报错");
+        assert!(
+            err.contains("Unterminated string literal"),
+            "未闭合字符串文案，实际: {err}"
+        );
+        let err = parse_condition("a = 1").expect_err("孤立 '=' 应报错");
+        assert!(
+            err.contains("Unexpected '='") && err.contains("position 2"),
+            "孤立 '=' 文案含位置，实际: {err}"
+        );
+        // 单字符 '!' 非法成为比较运算符（tokenizer 产 Op 但白名单外）
+        let err = parse_condition("a ! 1").expect_err("非法比较运算符应报错");
+        assert!(
+            err.contains("未知比较运算符"),
+            "未知比较运算符文案，实际: {err}"
+        );
+    }
+
+    /// 内部纯函数的防御契约：解析不出的数字字面量 / 白名单外的算术与比较
+    /// 运算符一律 fail-soft 返回 Null/false（parser 不会产出，但函数契约独立成立）。
+    #[test]
+    fn test_internal_helpers_fail_soft_on_unknown_forms() {
+        assert_eq!(parse_number_literal("not-a-number"), Value::Null);
+        // 非有限浮点（serde_json 拒绝 NaN/∞）→ Null，不落非法数值
+        assert_eq!(parse_number_literal("NaN"), Value::Null);
+        assert_eq!(parse_number_literal("1.5"), json!(1.5));
+        assert_eq!(arith("%", &json!(1), &json!(2)), Value::Null);
+        assert!(!compare(&json!(1), "??", &json!(1)));
+    }
+
+    /// 平键前缀下钻（生产形态 track.llm_usage 平键持 dict）：整链平铺与前段
+    /// 平铺两种写入形态都要命中；未命中的对象 state 回落到根名点链求值。
+    #[test]
+    fn test_flat_prefix_descent_variants() {
+        // 前段平铺：前缀 "a.b" 命中后剩余 Field 步骤在命中值内下钻
+        let partial = json!({ "a.b": { "c": 1 } });
+        assert!(eval_condition("a.b.c == 1", &partial));
+        assert!(!eval_condition("a.b.c == 2", &partial));
+        // 整链平铺
+        let full = json!({ "a.b.c": 5 });
+        assert!(eval_condition("a.b.c == 5", &full));
+        // 对象 state 但无任何前缀命中：回落根名点链，判假不 panic
+        assert!(!eval_condition("a.b.c == 5", &json!({ "x": 1 })));
+        // 对照：嵌套写入形态经另一条求值路径给出同一结果
+        assert!(eval_condition(
+            "a.b.c == 3",
+            &json!({ "a": { "b": { "c": 3 } } })
+        ));
+    }
+
+    /// 标量 state（非对象根）上取路径名：不 panic、判假，与对象 state 形态对照。
+    #[test]
+    fn test_resolve_name_on_scalar_state_is_null() {
+        assert!(!eval_condition("a == 1", &json!(5)));
+        assert!(!eval_condition("a", &json!(5)));
+        assert!(eval_condition("a == 5", &json!({ "a": 5 })));
+    }
 }

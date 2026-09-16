@@ -1,0 +1,38 @@
+# 角色扮演模式 profile（B 部类物料：由用户维护；出厂种子随 mode_roleplay 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+# 对标酒馆范式：行为断言族（边界遵守/语气合规/保密红线，规则+语义双判）；
+# 链路 main 即时响应（链最短，main 自身即执行者，不派发）
+mode: roleplay
+name: 角色扮演模式
+panel_page_id: roleplay_studio
+chain:
+  entry: main
+  expected_path: [main]
+  executor_pool: [executor/general_agent]
+  entry_override: null
+pipeline_profile:
+  pipeline: autonomous
+  params:
+    case_timeout: 600
+    multimodal: false
+    domain_context: none
+suite:
+  smoke: config/self_evolve/suites/dev/roleplay.yaml
+  full: null          # 二期补全
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+  execution_stage:
+    - config/agents/main/persona/
+    - config/agents/executor/general_agent.yaml
+levers:
+  boundary_violation: {execution_stage: [persona, prompt_skeleton]}
+  tone_violation: {execution_stage: [persona]}
+  confidentiality_leak: {execution_stage: [persona, tool_ids]}
+  agent_misdispatch: {dispatch_stage: [task_dispatch_guide]}
+verifier_families: [behavior_rule, behavior_semantic]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 600
+  round_tokens: 1000000
+  proposals_per_session: 3

@@ -62,6 +62,16 @@ const searchHit = {
   sequence: 5,
 }
 
+/** 渲染侧栏并在搜索框输入关键词，等待结果面板出现（跳转族用例共用） */
+async function typeKeywordAndAwaitResults(queryClient: any) {
+  renderWithProviders(<Sidebar />, { queryClient })
+  const input = screen.getByPlaceholderText('搜索会话和消息...')
+  fireEvent.change(input, { target: { value: '关键词' } })
+  await waitFor(() => {
+    expect(screen.getByTestId('sidebar-message-results')).toBeInTheDocument()
+  })
+}
+
 describe('Sidebar 消息搜索命中跳转', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -80,12 +90,7 @@ describe('Sidebar 消息搜索命中跳转', () => {
   async function renderAndSearch() {
     const queryClient = createTestQueryClient()
     vi.mocked(getSessions).mockResolvedValue([makeSession()])
-    renderWithProviders(<Sidebar />, { queryClient })
-    const input = screen.getByPlaceholderText('搜索会话和消息...')
-    fireEvent.change(input, { target: { value: '关键词' } })
-    await waitFor(() => {
-      expect(screen.getByTestId('sidebar-message-results')).toBeInTheDocument()
-    })
+    await typeKeywordAndAwaitResults(queryClient)
     return queryClient
   }
 
@@ -126,12 +131,7 @@ describe('Sidebar 消息搜索命中跳转', () => {
       messages: [{ ...searchHit, session_id: 'pipe-sub' }],
     })
     try {
-      renderWithProviders(<Sidebar />, { queryClient })
-      const input = screen.getByPlaceholderText('搜索会话和消息...')
-      fireEvent.change(input, { target: { value: '关键词' } })
-      await waitFor(() => {
-        expect(screen.getByTestId('sidebar-message-results')).toBeInTheDocument()
-      })
+      await typeKeywordAndAwaitResults(queryClient)
 
       fireEvent.click(screen.getByText('包含关键词的消息内容'))
 
@@ -160,12 +160,7 @@ describe('Sidebar 消息搜索命中跳转', () => {
       messages: [{ ...searchHit, session_id: 'pipe-legacy' }],
     })
     try {
-      renderWithProviders(<Sidebar />, { queryClient })
-      const input = screen.getByPlaceholderText('搜索会话和消息...')
-      fireEvent.change(input, { target: { value: '关键词' } })
-      await waitFor(() => {
-        expect(screen.getByTestId('sidebar-message-results')).toBeInTheDocument()
-      })
+      await typeKeywordAndAwaitResults(queryClient)
 
       fireEvent.click(screen.getByText('包含关键词的消息内容'))
 
@@ -192,12 +187,7 @@ describe('Sidebar 消息搜索命中跳转', () => {
       messages: [{ ...searchHit, session_id: 'pipe-orphan' }],
     })
     try {
-      renderWithProviders(<Sidebar />, { queryClient })
-      const input = screen.getByPlaceholderText('搜索会话和消息...')
-      fireEvent.change(input, { target: { value: '关键词' } })
-      await waitFor(() => {
-        expect(screen.getByTestId('sidebar-message-results')).toBeInTheDocument()
-      })
+      await typeKeywordAndAwaitResults(queryClient)
 
       fireEvent.click(screen.getByText('包含关键词的消息内容'))
 
@@ -221,12 +211,7 @@ describe('Sidebar 消息搜索命中跳转', () => {
       messages: [{ ...searchHit, sequence: undefined as unknown as number }],
     })
     try {
-      renderWithProviders(<Sidebar />, { queryClient })
-      const input = screen.getByPlaceholderText('搜索会话和消息...')
-      fireEvent.change(input, { target: { value: '关键词' } })
-      await waitFor(() => {
-        expect(screen.getByTestId('sidebar-message-results')).toBeInTheDocument()
-      })
+      await typeKeywordAndAwaitResults(queryClient)
 
       fireEvent.click(screen.getByText('包含关键词的消息内容'))
 
@@ -295,12 +280,7 @@ describe('Sidebar 消息搜索命中跳转', () => {
       .mockResolvedValue({ ok: true })
 
     try {
-      renderWithProviders(<Sidebar />, { queryClient })
-      const input = screen.getByPlaceholderText('搜索会话和消息...')
-      fireEvent.change(input, { target: { value: '关键词' } })
-      await waitFor(() => {
-        expect(screen.getByTestId('sidebar-message-results')).toBeInTheDocument()
-      })
+      await typeKeywordAndAwaitResults(queryClient)
 
       fireEvent.click(screen.getByText('包含关键词的消息内容'))
 

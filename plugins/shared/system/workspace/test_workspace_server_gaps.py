@@ -94,9 +94,23 @@ def _run(coro: Any) -> Any:
         loop.close()
 
 
+def _rebind_flat_modules() -> None:
+    """夹具期重绑裸名实例（车道共跑自防御）。
+
+    本文件在收集期经 _load_flat 绑定 _MODELS/_WS；车道共跑时其他文件可能
+    逐出并重载同目录裸名模块，探针（_load_server）在夹具期绑到的是重载后的
+    新实例——测试往收集期旧实例设 state 钩子、被测代码读新实例（恒 None），
+    单跑绿、共跑红的实例分叉串扰。重绑让两者共享同一实例后再装载探针。
+    """
+    global _MODELS, _WS
+    _MODELS = _load_flat("models")
+    _WS = _load_flat("workspace_service")
+
+
 @pytest.fixture()
 def srv() -> Any:
     """加载 server 并注入 state 读面（可被各测试覆盖）。"""
+    _rebind_flat_modules()
     return _load_server()
 
 

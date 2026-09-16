@@ -243,5 +243,5 @@
     "task.owned.*",
     "task.submitted_by"
   ],
-  "host_group": "light"
+  "host_group": "light_stable"
 }

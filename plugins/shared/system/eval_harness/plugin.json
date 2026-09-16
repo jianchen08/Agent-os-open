@@ -1,26 +1,60 @@
 {
   "id": "eval_harness_service",
   "name": "Eval Harness Service",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
-  "description": "自进化评测面（编排薄层）：题集展开/结果聚合/提案校验与应用/隐藏集保密派发。派发走任务系统、判定走评估闸门、生效走 G2+热重载，不自建任何平行机制。",
+  "description": "自进化评测面（编排薄层）：题集展开/结果聚合/提案校验与应用/隐藏集保密派发。派发走任务系统、判定走评估闸门、生效走 G2+热重载，模式 profile 经模式插件服务调用获取，不自建任何平行机制。",
+  "requires_services": ["mode.get_profile"],
   "permissions": {},
   "priority": 56,
   "host_group": "light",
+  "http_endpoints": [
+    {
+      "route_id": "eval_harness_evolution_panel_page",
+      "method": "GET",
+      "path": "/ext/eval_harness_service/page/evolution-panel",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: 自进化监控面板（插件自带 webview 页，供页时内联账本数据快照）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "evolution_panel",
+        "title": "自进化",
+        "icon": "🧬",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/evolution_panel",
+        "widget": "webview",
+        "props": {
+          "pluginId": "eval_harness_service",
+          "htmlPath": "/page/evolution-panel",
+          "widgetId": "evolution_panel"
+        },
+        "order": 63,
+        "description": "自进化监控面板：模式分组下钻轮次时间线（T1-T8）/scorecard 走势/假设清单/杠杆命中率/健康度五指标/熔断状态"
+      }
+    ]
+  },
   "capabilities": {
     "tools": [
       {
         "name": "eval_view_suite",
-        "description": "读题集展开为 task_submit 批次清单（派发由 agent 用自己的 task_submit 执行）",
+        "description": "按模式取题集展开为 task_submit 批次清单（模式 profile 经模式插件 mode.get_profile 服务调用解析，派发由 agent 用自己的 task_submit 执行）",
         "render": { "card": "form", "title": "评测·题集展开" },
         "input_schema": {
           "type": "object",
-          "required": ["suite"],
+          "required": ["mode"],
           "properties": {
-            "suite": { "type": "string" },
+            "mode": { "type": "string" },
+            "tier": { "type": "string", "description": "profile.suite 档位（缺省 smoke）" },
             "cases": { "type": "string" }
           }
         },
@@ -32,13 +66,14 @@
       },
       {
         "name": "eval_summarize",
-        "description": "聚合各 case 任务终态与验收结果出 scorecard（含失败分类，作为复盘插件深分析的预处理）",
+        "description": "聚合各 case 任务终态与验收结果出 scorecard（失败分类为复盘深分析预处理；判定谓词=终态∧AC∧budget_ok，声明预算须附 metrics 采集）",
         "render": { "card": "form", "title": "评测·聚合" },
         "input_schema": {
           "type": "object",
           "required": ["mode", "results"],
           "properties": {
             "mode": { "type": "string" },
+            "model": { "type": "string", "description": "本轮执行模型 id（重放键）" },
             "results": { "type": "array", "items": { "type": "object" } }
           }
         },
@@ -115,14 +150,21 @@
       },
       {
         "name": "proposal_reject",
-        "description": "驳回提案：删存档、记录原因（失败经验入账）",
+        "description": "驳回提案：记录原因与分类账（外因记账/预测失准/用户否决等）；已应用提案被用户裁决回滚同样走本工具（outcome=reverted，存档保留）",
         "render": { "card": "form", "title": "提案·驳回" },
         "input_schema": {
           "type": "object",
           "required": ["proposal_id", "reason"],
           "properties": {
             "proposal_id": { "type": "string" },
-            "reason": { "type": "string" }
+            "reason": { "type": "string" },
+            "category": {
+              "type": "string",
+              "enum": ["external_cause", "harness_defect", "heldout_gap",
+                       "judgment_failure", "other", "prediction_miss",
+                       "sentry_regression", "system_fault", "user_veto"],
+              "description": "驳回/回滚分类（判定证据账：归因准确率与 P3 一票否决的数据源）"
+            }
           }
         },
         "output_schema": {
@@ -133,7 +175,7 @@
       },
       {
         "name": "eval_health",
-        "description": "流程健康度：轮次/提案命中率/杠杆账（聚合自 reports/eval 账本）",
+        "description": "流程健康度（轮次/提案命中率/杠杆账）+ 自进化指标 P0-P3 裁决（学习率/迁移/保留率/方差/效率/回滚/一票否决）",
         "render": { "card": "form", "title": "评测·健康度" },
         "input_schema": { "type": "object", "properties": {} },
         "output_schema": {
@@ -141,7 +183,12 @@
           "required": ["rounds"],
           "properties": {
             "rounds": { "type": "number" },
-            "hit_rate": { "type": "number" }
+            "hit_rate": { "type": "number" },
+            "breaker_tripped": { "type": "boolean" },
+            "evolution": {
+              "type": "object",
+              "description": "P0-P3 裁决：{metrics_version, verdict, reason, p0, p1, p2, p3}"
+            }
           }
         }
       }

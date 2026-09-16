@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { FullscreenIcon, FullscreenExitIcon, FolderTree } from '@/assets/icons'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
+import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
 import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import type { WorkspaceTab } from '@/types/layout'
@@ -56,6 +57,9 @@ export function WorkspacePanel({
   /** 标签右键菜单 */
   const [tabMenu, setTabMenu] = useState<TabContextMenuState | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+
+  /** 会话主题 override 作用域挂点（主题桥 §5.0：作用域仅聊天区+面板容器） */
+  const panelThemeScopeRef = useSessionThemeScope<HTMLDivElement>()
 
   /** 打开标签右键菜单 */
   const handleTabContextMenu = (
@@ -206,7 +210,7 @@ export function WorkspacePanel({
       )}
 
       {/* Tab 内容 — 懒挂载：仅激活 Tab 或已访问 Tab 渲染真实内容 */}
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div ref={panelThemeScopeRef} className="min-h-0 flex-1 overflow-hidden">
         {tabs.length === 0 ? (
           <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
             选择一个标签页

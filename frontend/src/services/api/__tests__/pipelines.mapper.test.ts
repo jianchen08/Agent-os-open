@@ -81,6 +81,13 @@ describe('mapStateSummaryToViewModel 扁平键 → 视图模型（键名只存�
     expect(view.workspacePath).toBe('/ws/task-copy')
   })
 
+  it('模式键映射：mode 有值透传，空串/缺失 → undefined（无 mode 键零渲染的取数前提）', () => {
+    expect(mapStateSummaryToViewModel({ mode: 'coding' }).mode).toBe('coding')
+    expect(mapStateSummaryToViewModel({ mode: 'roleplay' }).mode).toBe('roleplay')
+    expect(mapStateSummaryToViewModel({ mode: '' }).mode).toBeUndefined()
+    expect(mapStateSummaryToViewModel({}).mode).toBeUndefined()
+  })
+
   it('工作区坐标优先级：task.ws_meta.path > ws_meta.path > workspace（任务管道防会话投影污染）', () => {
     const all = mapStateSummaryToViewModel({
       'task.ws_meta': { path: '/a' },

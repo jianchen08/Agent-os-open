@@ -53,8 +53,11 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
 - **工具面过滤**：LLM 可见工具由 `config/agents/main/agentos.yaml`（及
   `executor/general_agent.yaml`）的 `tool_ids` 白名单控制，新工具记得加入。
 - **权限模式**：4 档权限模式（default/accept_edits/auto/bypass，黑名单制：未命中
-  安全规则的操作任何档位都直接执行，隔离任务的容器内操作从不弹审批）+ 参数级危险
-  判定，纯插件前端（http_endpoints + form compact + human-interaction 确认）。
+  安全规则的操作任何档位都直接执行）+ 参数级危险判定，纯插件前端
+  （http_endpoints + form compact + human-interaction 确认）。隔离/worktree 会话
+  未显式选择档位时默认完全免审批（隔离容器即安全边界，用户裁定 2026-09-15）；
+  显式选择任一档后以所选档为准（隔离不再豁免黑名单），选择器如实显示当前生效档
+  （未显式选择时隔离/worktree 显示「免审批」）。非隔离会话无免审批默认，按档走。
   会话隔离由 isolation_guard 容器落地。
 - **插件热发现/热重载全链路**：新建插件目录、修改 plugin.json、改插件 Python 代码
   均由 watcher 自动处理（发现→G2 校验→注册/重注册/respawn），无需 re-enable 或重启；

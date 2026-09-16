@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 // @feature BUG-1 packtest 监控白屏回归
 /**
  * WidgetStage 崩溃隔离测试（监控/触发器等 widget_stage 声明页组）

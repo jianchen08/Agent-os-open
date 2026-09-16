@@ -10,9 +10,13 @@
  * 现行防护契约（实现演进后）：
  *  1. merge 重置 reconciledByPipeline（刷新=全量重新对账）；bottomCursor 等运行时
  *     状态以默认值为准。prependedCountByPipeline 字段已从 store 删除。
- *  2. fetchMessages 同管道取消语义：新请求发起即 abort 在途旧请求（方向间、
- *     同方向均不并存——迟到响应按取消静默收场，不写状态；旧「按方向去重复用
- *     in-flight promise」契约已被取代，取代者的响应才是权威结果）。
+ *  2. fetchMessages 取消令牌按「管道 × 请求类别」归属：同类别（init/翻页/补漏）
+ *     新请求取代旧请求——迟到响应按取消静默收场，不写状态，取代者的响应才是
+ *     权威结果；跨类别不互取消（BUG-20：翻页/补漏/对账读不重叠的 sequence
+ *     区间、写面各自 prepend/append/权威替换互不冲突，并发时必须都落库——
+ *     任一方被对方静默取消会掐死该方向的加载。init 权威替换可能覆盖并发翻页
+ *     的窗口，属可自愈覆盖：hasMoreOlder/topCursor 随权威快照校正，下次滚动
+ *     到顶按新游标重拉）。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
@@ -22,21 +26,9 @@ import type { Message } from '@/types/models'
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
 vi.mock('@/services/api/client', () => ({ default: { get: mockGet } }))
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 
-vi.mock('@/utils/retry', () => ({
-  requestWithRetry: async (fn: () => Promise<any>) => fn(),
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockFull())
 
 const PIPELINE_ID = 'pipe-race-001'
 const THREAD_ID = 'thread-race-001'
@@ -76,7 +68,7 @@ describe('刷新对账竞态：init/older 并发防护', () => {
     })
   })
 
-  it('older 发起即取消在途 init；同方向重复请求以新代旧，迟到响应不写状态', async () => {
+  it('older 同方向以新代旧、迟到响应不写状态；在途 init 不被 older 取消（BUG-20）', async () => {
     // init 请求挂起（可手动迟到 resolve，模拟慢全量读）
     let resolveInit!: (v: unknown) => void
     mockGet.mockImplementationOnce(
@@ -90,9 +82,8 @@ describe('刷新对账竞态：init/older 并发防护', () => {
       data: { messages: [makeMsg('m0', 0)], total: 1, has_more: false },
     })
 
-    // 触发 init（全量加载）；挂起的 init attach catch 避免 dangling promise 告警
+    // 触发 init（全量加载）
     const initPromise = usePipelineMessageStore.getState().fetchMessages(PIPELINE_ID, { threadId: THREAD_ID })
-    initPromise.catch(() => {})
 
     // init 进行中发起 older（before_sequence=10），再发起并发重复 older
     const olderPromise1 = usePipelineMessageStore.getState().fetchMessages(PIPELINE_ID, {
@@ -106,7 +97,7 @@ describe('刷新对账竞态：init/older 并发防护', () => {
 
     await Promise.all([olderPromise1, olderPromise2])
 
-    // 同管道取代即取消：init 1 次 + older 两次（第一次被第二次取消），不互相阻塞
+    // 三请求互不阻塞：init 1 次 + older 两次（第一次被第二次同类别取代）
     expect(mockGet).toHaveBeenCalledTimes(3)
     const initCallParams = mockGet.mock.calls[0][1].params || {}
     expect(initCallParams).toMatchObject({ pipeline_run_id: PIPELINE_ID })
@@ -122,7 +113,7 @@ describe('刷新对账竞态：init/older 并发防护', () => {
       usePipelineMessageStore.getState().getMessages(PIPELINE_ID).map((m) => m.sequence),
     ).toEqual([0])
 
-    // init 的响应迟到（全量 3 条 + has_more=true）：按取消静默收场，不覆盖已建立状态
+    // init 响应迟到：跨类别不互取消（BUG-20），按全量对账权威替换落库
     resolveInit({
       data: {
         messages: [makeMsg('m1', 1), makeMsg('m2', 2), makeMsg('m3', 3)],
@@ -133,9 +124,9 @@ describe('刷新对账竞态：init/older 并发防护', () => {
     await expect(initPromise).resolves.toBeUndefined()
     expect(
       usePipelineMessageStore.getState().getMessages(PIPELINE_ID).map((m) => m.sequence),
-    ).toEqual([0])
-    // hasMoreOlder 不被迟到结果回滚为 true
-    expect(usePipelineMessageStore.getState().hasMoreOlderByPipeline[PIPELINE_ID]).toBe(false)
+    ).toEqual([1, 2, 3])
+    // 权威快照的 has_more 落地：翻页状态随对账校正，下次滚动到顶按新游标重拉
+    expect(usePipelineMessageStore.getState().hasMoreOlderByPipeline[PIPELINE_ID]).toBe(true)
   })
 
   it('init 完成后，older 请求正常放行', async () => {

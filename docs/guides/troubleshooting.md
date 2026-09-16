@@ -43,7 +43,7 @@
 - **症状**：改 `config/pipelines/autonomous.yaml` 或 `config/steps/*.yaml` 后执行行为不变。
 - **根因**：管道配置是**执行前 Pull 热加载**（mtime 指纹 + 1s TTL）；但坏 YAML / 命名冲突 / 编译错误会**静默保留旧配置继续跑**（内核日志有 warn）。
 - **解法**：确认文件已保存；查内核日志 warn；校验 YAML 与命名。
-- **来源**：[来源: docs/guides/pipeline-configuration.md:7；既有条目（commit 930e56507 迁移）]
+- **来源**：[来源: docs/guides/execution-semantics.md §6；既有条目（commit 930e56507 迁移）]
 
 ### A6. 工具注册了但 LLM 看不到 / 不调用
 
@@ -192,7 +192,7 @@
 | 内核行为总纲 | `AGENTS.md` |
 | 插件协议/开发 | `docs/guides/plugin-protocol.md`、`plugin-native-rust.md`、`streaming-protocol.md` |
 | 部署/环境变量 | `docs/guides/deployment.md` |
-| 管道配置 | `docs/guides/pipeline-configuration.md` |
+| 执行语义（Agent/管道） | `docs/guides/execution-semantics.md` |
 | CI/门禁 | `docs/guides/ci-cd-guide.md`、`docs/working/机械门禁统一入口与覆盖率豁免.md` |
 | 关键 ADR | `docs/decisions/2026-09-09-approval-lifecycle-invariants.md`、`2026-08-18-plugin-dependency-package.md`、`2026-09-11-corrupt-db-fail-closed.md`、`2026-09-07-plugin-venv-dedup.md`、`2026-09-03-subtask-inherit-parent-workspace.md` |
 | 诊断实证 | `docs/working/B15_watcher热重载失灵根因_20260906.md`、`docs/working/batch_20260913/D1_stuck_diag_fix.md`、`docs/working/test_traceability.md` |

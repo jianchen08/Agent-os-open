@@ -80,6 +80,35 @@ tools:
     execution: browser_mcp
 
 # ============================================
+# 模式/进化治理路径 profile（2026-09-15 模式服务化同刀）
+# ============================================
+# 进化 agent（self_evolve）容器对用户空间治理路径的访问边界声明：
+# - 用户插件根 modes（<USER_ROOT>/plugins/modes，模式插件用户副本）：缺席——
+#   容器不挂载用户空间，进化 agent 对模式 profile 的消费只走 mode.get_profile
+#   服务调用（内核服务面），物理不可达；
+# - 配置层 self_evolve 镜像（config/self_evolve）：只读——规则/题集等 B 部类
+#   物料对进化 agent 仅可读（提示词注入 / file_read），任何写面走
+#   proposal_submit 的仓库外 staging，直接写主仓 = 提案校验冻结面拒绝。
+#
+# 声明面语义：IsolationPolicyLoader 现消费 default/tools/categories 三节；
+# 本节为治理路径访问边界的机器可读登记，供隔离侧路径治理接线消费
+# （当前容器仅挂载 /workspace，上述缺席/只读语义由容器挂载面 + 提案冻结面
+# 双重成立）。路径出现于此处即代表对进化 agent 非可写，新增治理路径须同刀
+# 同步 material_registry.md 的 B 部类清单。
+profiles:
+  self_evolve:
+    description: 进化 agent（self_evolve）对用户空间治理路径只读或缺席
+    governance_paths:
+      user_plugins_modes:
+        path: <USER_ROOT>/plugins/modes
+        access: absent
+        reason: 模式插件用户副本归用户所有；进化 agent 经 mode.get_profile 服务消费，容器不挂载用户空间
+      self_evolve_config_mirror:
+        path: config/self_evolve
+        access: read_only
+        reason: B 部类进化流程物料；写面仅仓库外 staging（proposal_submit），冻结面由提案校验执行
+
+# ============================================
 # 分类级规则（匹配不到具体工具名时，按分类兜底）
 # ============================================
 categories:

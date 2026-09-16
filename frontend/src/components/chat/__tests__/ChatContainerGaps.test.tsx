@@ -142,19 +142,7 @@ vi.mock('@/services/api/thinkingMode', () => ({
   switchThinkingMode: switchModeMock,
 }))
 
-// 测试替身 store，形态即被测组件的选择器子集（真实 store 含网络副作用）
-vi.mock('@/stores/agentTabStore', async () => {
-  const { create } = await import('zustand')
-  const useAgentTabStore = create<any>(() => ({
-    tabs: [],
-    activeTabId: null,
-    unreadCounts: {},
-    switchToTab: vi.fn(),
-    closeTab: vi.fn(),
-    initSessionTabs: vi.fn(),
-  }))
-  return { useAgentTabStore }
-})
+vi.mock('@/stores/agentTabStore', async () => (await import('./helpers/chatFlowMocks')).agentTabStoreDouble())
 
 const outerSend = vi.fn<(params: SendMessageParams) => boolean | void>(() => true)
 

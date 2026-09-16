@@ -741,9 +741,9 @@ context_variables:
 #       | research_agent | 调研报告 | - | docs/working/{title}_research_report.md | container | file_check |
 #       | solution_planning_agent | 方案文档、任务链、检查点 | - | docs/working/{title}_solution.md, docs/tasks/, docs/working/{title}_checkpoints.md | container | file_check |
 #       | resource_manager_agent | 资源配置文件 | 资源操作报告 | config/agents/{category}/{agent_id}.yaml, docs/working/resource_generation_report.md | host | file_check |
-#       | code_writer_agent | 代码文件、测试文件 | - | 由任务决定 | container | file_check, format_valid |
-#       | code_reviewer_agent | - | 审查报告 | docs/working/{title}_review_report.md | container | file_check |
-#       | test_debug_agent | 测试文件、bug修复代码 | 调试报告 | tests/test_{module}.py, docs/working/{title}_bugfix_report.md | container | file_check |
+#       | mode_coding/code_writer | 代码文件、测试文件 | - | 由任务决定 | container | file_check, format_valid |
+#       | mode_coding/code_reviewer_agent | - | 审查报告 | docs/working/{title}_review_report.md | container | file_check |
+#       | mode_coding/test_debug_agent | 测试文件、bug修复代码 | 调试报告 | tests/test_{module}.py, docs/working/{title}_bugfix_report.md | container | file_check |
 #       ### 隔离规则
       #       - isolated（默认）：不指定 isolation_level，产出物自动在工作空间中
       #       - non_isolated：必须指定 isolation_level="non_isolated"，Agent 直接操作项目路径

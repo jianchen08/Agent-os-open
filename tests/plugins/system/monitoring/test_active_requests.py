@@ -67,24 +67,30 @@ class TestCollectTokenUsage:
         assert result["prompt_tokens"] == 0
         assert result["completion_tokens"] == 0
 
-    def test_aggregates_llm_usage_from_traces(
+    def test_aggregates_llm_usage_from_state(
         self, server_module, monkeypatch, tmp_path
     ) -> None:
-        """traces 含多条 llm_usage → SUM 聚合（区分度：非零且逐项对应）。"""
+        """pipeline_state 含多条累计用量 → 跨管道求和（区分度：非零且逐项对应）。
+
+        累计口径的真值源是 pipeline_state（每管道自持累计），非 traces 逐轮轨迹
+        ——按模型汇总须先按管道取累计再跨管道相加（ADR 2026-09-15 §决策2）。
+        """
         import json
         import sqlite3
 
         db_path = tmp_path / "kernel.db"
         conn = sqlite3.connect(db_path)
-        conn.execute("CREATE TABLE traces (patch_data TEXT)")
+        conn.execute(
+            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, field_value TEXT)"
+        )
         rows = [
-            {"llm_usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}},
-            {"llm_usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10}},
-            {"other": "非 llm_usage 行不计入"},
+            ("p1", "track.llm_usage", {"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10}),
+            ("p2", "track.llm_usage", {"total_input_tokens": 5, "total_output_tokens": 5, "total_tokens": 10}),
+            ("p3", "context_window", 32000),  # 非用量键不计入
         ]
         conn.executemany(
-            "INSERT INTO traces (patch_data) VALUES (?)",
-            [(json.dumps(r),) for r in rows],
+            "INSERT INTO pipeline_state VALUES (?, ?, ?)",
+            [(pid, key, json.dumps(val) if isinstance(val, dict) else str(val)) for pid, key, val in rows],
         )
         conn.commit()
         conn.close()
@@ -95,7 +101,6 @@ class TestCollectTokenUsage:
         assert result["completion_tokens"] == 8
         assert result["total_tokens"] == 20
 
-
     def test_token_usage_series_shape_same_source_as_rows(
         self, server_module, monkeypatch, tmp_path
     ) -> None:
@@ -105,13 +110,18 @@ class TestCollectTokenUsage:
 
         db_path = tmp_path / "kernel.db"
         conn = sqlite3.connect(db_path)
-        conn.execute("CREATE TABLE traces (patch_data TEXT)")
+        conn.execute(
+            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, field_value TEXT)"
+        )
         rows = [
-            {"llm_usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10, "model": "m-a"}},
-            {"llm_usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10, "model": "m-b"}},
+            ("p1", "track.llm_usage", {"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10}),
+            ("p1", "llm_model", "m-a"),
+            ("p2", "track.llm_usage", {"total_input_tokens": 5, "total_output_tokens": 5, "total_tokens": 10}),
+            ("p2", "llm_model", "m-b"),
         ]
         conn.executemany(
-            "INSERT INTO traces (patch_data) VALUES (?)", [(json.dumps(r),) for r in rows]
+            "INSERT INTO pipeline_state VALUES (?, ?, ?)",
+            [(pid, key, json.dumps(val) if isinstance(val, dict) else json.dumps(val)) for pid, key, val in rows],
         )
         conn.commit()
         conn.close()

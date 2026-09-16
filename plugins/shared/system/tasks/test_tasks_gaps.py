@@ -228,6 +228,26 @@ class TestStorageWithoutDataRoot:
         assert rootless.get("mem-only") is task
         assert not list((tmp_path / "tasks").glob("tree_*")), "无存储根时不得创建任何目录"
 
+    def test_list_by_status_filters_memory_cache(self, rootless: Any) -> None:
+        """list_by_status 按 status 过滤内存账（被 server/timer_manager 消费的读面）。"""
+        from task_types import TaskModel, TaskStatus
+
+        def _mk(tid: str, status: TaskStatus) -> TaskModel:
+            return TaskModel(
+                id=tid, title=tid, status=status,
+                created_at="2026-09-16T00:00:00Z", updated_at="2026-09-16T00:00:00Z",
+            )
+
+        rootless._tasks = {
+            "t-run-1": _mk("t-run-1", TaskStatus.RUNNING),
+            "t-run-2": _mk("t-run-2", TaskStatus.RUNNING),
+            "t-done": _mk("t-done", TaskStatus.COMPLETED),
+        }
+        running = rootless.list_by_status(TaskStatus.RUNNING)
+        assert sorted(x.id for x in running) == ["t-run-1", "t-run-2"]
+        assert all(x.status == TaskStatus.RUNNING for x in running)
+        assert [x.id for x in rootless.list_by_status(TaskStatus.COMPLETED)] == ["t-done"]
+
     def test_delete_without_root_does_not_raise(self, rootless: Any) -> None:
         from task_types import TaskModel
 

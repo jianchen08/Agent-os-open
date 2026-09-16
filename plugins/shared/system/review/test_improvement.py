@@ -84,3 +84,25 @@ def test_rules_are_data_driven(tmp_path):
     }], project_root=str(tmp_path))
     assert out["suggestions"][0]["triage"] == "mechanism_covered"
     assert improvement._RULES_PATH == orig
+
+
+def test_external_cause_triaged_not_filed():
+    """外因单独成类（ADR 2026-09-16）：供应商超时/内核重启窗口 → 记账不立项。"""
+    out = improvement.suggest([
+        {"case_id": "e1", "task_status": "failed", "criteria": {},
+         "symptom_note": "本轮撞供应商超时窗口，批量任务集体未收敛"},
+        {"case_id": "e2", "task_status": "failed", "criteria": {},
+         "trajectory_note": "watcher 重载反复打断队列消费（外部窗口干扰）"},
+    ], project_root=ROOT)
+    assert [s["triage"] for s in out["suggestions"]] == ["external_cause", "external_cause"]
+    assert out["improvable"] == 0
+    assert all("外因" in s["action"] or "记账" in s["action"] for s in out["suggestions"])
+
+
+def test_external_cause_scanned_before_other_signal_classes():
+    """外因优先于系统故障类：同现时按 TRIAGE_SIGNAL_CLASSES 顺序取第一命中。"""
+    assert improvement.TRIAGE_SIGNAL_CLASSES[0] == "external_cause"
+    out = improvement.suggest([{
+        "case_id": "e3", "task_status": "failed", "criteria": {},
+        "symptom_note": "连接超时后看到 sidecar exception"}], project_root=ROOT)
+    assert out["suggestions"][0]["triage"] == "external_cause"

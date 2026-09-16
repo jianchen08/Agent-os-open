@@ -87,6 +87,8 @@ export interface PipelineViewEntry {
   /** 任务域状态（task.status 原值；两态模型：仅任务条目有，与运行态图标
    * 分离展示，词汇经 TASK_STATUS_LABELS 中文化） */
   taskStatus?: string
+  /** 任务模式键（state.mode 出口；管道视图模式徽标取数源，无键零渲染） */
+  mode?: string
   /** 管道 state 真值任务状态（state['task.status']） */
   stateStatus?: string
   /** 管道 state 是否已结束（state.ended） */

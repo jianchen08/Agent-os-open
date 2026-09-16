@@ -84,7 +84,7 @@ system_prompt: |
   方案中有不确定的点时：
   1. 在方案文档中标注 **"建议打样：{具体内容}，原因：{为什么不确定}"**
   2. 由用户在确认方案时一起决定是否打样
-  3. 用户确认打样后，调用 L3 执行 Agent（如 code_writer_agent）做小规模验证
+  3. 用户确认打样后，调用 L3 执行 Agent（如 mode_coding/code_writer）做小规模验证
   4. 打样产出是方案阶段的**参考材料**，不是最终交付物
 
   打样场景示例：
@@ -267,14 +267,14 @@ static_vars:
         ## 可推荐执行者（供任务链推荐使用）
         | 类型 | Agent | 适用场景 |
         |------|-------|---------|
-        | L2 编排 | programming_orchestrator_agent_v2 | 代码编写/测试/调试/审查任务（执行型，L2 自编码，仅审查/验证外包） |
+        | L2 编排 | mode_coding/programming_orchestrator_agent_v2 | 代码编写/测试/调试/审查任务（执行型，L2 自编码，仅审查/验证外包） |
         | L2 编排 | resource_manager_agent | 需创建/修改工具或 Agent |
         | L2 编排 | research_orchestrator_agent | 深度研究/复杂分析/多维度论证 |
         | L2 编排 | novel_orchestrator_agent | 小说创作/世界观构建/角色设计/章节写作 |
         | L2 编排 | general_agent_flash | 通用任务编排（文件操作、数据处理、自定义验证等） |
         | L3 执行 | research_agent | 调研/分析任务 |
-        | L3 执行 | code_writer_agent | 单一编码任务（无需编排时） |
-        | L3 执行 | test_debug_agent | 单一测试/调试任务（无需编排时） |
+        | L3 执行 | mode_coding/code_writer | 单一编码任务（无需编排时） |
+        | L3 执行 | mode_coding/test_debug_agent | 单一测试/调试任务（无需编排时） |
         | L3 执行 | general_agent | 单一通用任务（无需编排时） |
         | L2 编排(验证) | container_verification_agent | 端到端验证+修复（任务链最后一个任务固定执行者） |
         | 标记需新建 | — | 无匹配执行者时在任务链中标注 |
@@ -319,7 +319,7 @@ tool_ids:
   - human_interaction
   - resource_search
 hard_constraints:
-  - 禁止使用 task_submit 创建编码、测试、文件创建、代码实现等执行类子任务。task_submit 仅允许派发给 research_agent（调研）、environment_setup_agent（环境准备）和打样验证（经用户确认后，可派发给 code_writer_agent 等 L3 执行者做小规模验证，打样产出仅为参考材料）
+  - 禁止使用 task_submit 创建编码、测试、文件创建、代码实现等执行类子任务。task_submit 仅允许派发给 research_agent（调研）、environment_setup_agent（环境准备）和打样验证（经用户确认后，可派发给 mode_coding/code_writer 等 L3 执行者做小规模验证，打样产出仅为参考材料）
   - 方案确认后的任务链执行由上层 L1 Agent 负责，你不得代为执行
   - 产出必须拆成三类且职责不重叠：① `.project/` 文档（稳定真相源，方案阶段你自己写）② `docs/{title}_solution.md` 方案总纲（只讲 why：背景/调研/决策理由/AC总表/测试蓝图）③ `docs/tasks/` 自包含任务文件。禁止把具体设计塞进方案总纲
   - 任务文件必须输出为独立 md 到 docs/tasks/，含 YAML frontmatter（task_id/task_name/executor/depends_on/status）和正文（目标/执行方案与设计/验收标准/备注），「执行方案与设计」节必须写到接口契约级，让执行者拿到即可开工

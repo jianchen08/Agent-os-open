@@ -160,6 +160,7 @@ async def test_notify_request_payload_from_real_record(server: Any) -> None:
     assert payload["agent_level"] == "L2"
     assert payload["pipeline_id"] == "pipe-1"
     assert payload["file_paths"] == ["a.md"]
+    assert payload["created_at"]  # 倒计时起点（BUG-14 有界等待可见化）
     assert params["thread_id"] == "t1"
 
 
@@ -538,14 +539,42 @@ async def test_interaction_respond_unknown_request(server: Any, real_service: An
 
 
 async def test_interaction_wait_for_choice_timeout_error(server: Any, real_service: Any) -> None:
-    """interaction.wait_for_choice：超时 → 结构化 error 返回（不抛异常）。"""
+    """interaction.wait_for_choice：超时 → 结构化 error 返回（不抛异常）。
+
+    error 消息携带 ASCII 标记（timeout）+ error_code：调用方（security_check 等）
+    按子串分类拒绝原因（BUG-14「审批超时已按拒绝裁决」反馈链路依赖此标记）。
+    """
     created = await server.interaction_create_choice("s1", "t1", "tab1", "审批", timeout_seconds=1)
     rid = created["request_id"]
     result = await server.interaction_wait_for_choice(rid, timeout=0.1)
     assert result["request_id"] == rid
-    assert result["error"].startswith("交互超时:")
+    assert result["error_code"] == "INTERACTION_TIMEOUT"
+    assert "timeout" in result["error"].lower()
+    assert "已按拒绝裁决" in result["error"]
     record = await real_service.get_request(rid)
     assert record is not None and record["status"] == "timeout"
+
+
+async def test_interaction_wait_error_markers_denied_and_cancelled(
+    server: Any, real_service: Any
+) -> None:
+    """拒绝/取消终态的 error 同样携带 ASCII 标记（security_check 子串分类依赖）。"""
+    created = await server.interaction_create_choice(
+        "s1", "t1", "tab1", "审批",
+        options=[{"id": "denied", "label": "拒绝执行"}], timeout_seconds=30,
+    )
+    rid = created["request_id"]
+    await server.interaction_respond(rid, {"response_type": "denied", "feedback": "不通过"})
+    denied = await server.interaction_wait_for_choice(rid, timeout=5)
+    assert denied["error_code"] == "INTERACTION_DENIED"
+    assert "denied" in denied["error"].lower()
+
+    created2 = await server.interaction_create_choice("s2", "t2", "tab2", "审批", timeout_seconds=30)
+    rid2 = created2["request_id"]
+    await server.interaction_cancel(rid2, reason="user_abort")
+    cancelled = await server.interaction_wait_for_choice(rid2, timeout=5)
+    assert cancelled["error_code"] == "INTERACTION_CANCELLED"
+    assert "cancel" in cancelled["error"].lower()
 
 
 async def test_interaction_cancel_tool(server: Any, real_service: Any) -> None:

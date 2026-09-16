@@ -26,8 +26,9 @@ import { Button } from '@/components/ui/button'
 import apiClient from '@/services/api/client'
 import { pauseTask, resumeTask } from '@/services/api/tasks'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { openWorkspaceTreeTab } from './workspaceTreeTab'
 import { TASK_STATUSES, normalizeTaskStatus, taskStatusLabel } from '@/types/taskStatus'
+import { formatTime, PRIORITY_LABELS } from './fileTreeFormatting'
 import { CreateTaskFormModal } from './CreateTaskFormModal'
 import {
   FileTreeContextMenu,
@@ -37,6 +38,17 @@ import {
 
 /** 树展开状态的 localStorage 持久化工具 */
 const TREE_EXPANDED_PREFIX = 'tree_expanded_'
+
+/** 请求失败的可读原因：后端业务信封（error/detail）优先于 axios 概况消息
+ *  （"Request failed with status code 404"）——归属闸等 404 的真实原因在
+ *  响应体里，截断它会让用户只看到状态码概况。 */
+function extractRequestError(e: unknown): string {
+  const data = (e as { response?: { data?: { error?: unknown; detail?: unknown } } } | null)
+    ?.response?.data
+  if (typeof data?.error === 'string' && data.error) return data.error
+  if (typeof data?.detail === 'string' && data.detail) return data.detail
+  return e instanceof Error ? e.message : '任务树加载失败'
+}
 
 /** 获取树展开状态的 localStorage key */
 function getExpandedStorageKey(treeKey: string): string {
@@ -595,7 +607,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
         if (!cancelled) {
           // 失败不得伪装成空树：置错误态供渲染"加载失败 + 重试"（对齐 FormWidget 先例）
           setRemoteTreeData([])
-          setRemoteError(e instanceof Error ? e.message : '任务树加载失败')
+          setRemoteError(extractRequestError(e))
         }
       } finally {
         if (!cancelled) {
@@ -1089,30 +1101,6 @@ interface TreeNodeProps {
 }
 
 /** 树节点组件 递归渲染单个树节点及其子节点，处理展开/折叠动画、 */
-/** 优先级标签映射 */
-const PRIORITY_LABELS: Record<string, { label: string; color: string }> = {
-  critical: { label: '紧急', color: 'text-status-error' },
-  high: { label: '高', color: 'text-status-warning' },
-  normal: { label: '普通', color: 'text-muted-foreground' },
-  low: { label: '低', color: 'text-muted-foreground/60' },
-}
-
-/** 格式化时间戳为可读字符串 */
-function formatTime(value: string | null | undefined): string | null {
-  if (!value) return null
-  try {
-    const d = new Date(value)
-    if (isNaN(d.getTime())) return null
-    const mm = String(d.getMonth() + 1).padStart(2, '0')
-    const dd = String(d.getDate()).padStart(2, '0')
-    const hh = String(d.getHours()).padStart(2, '0')
-    const mi = String(d.getMinutes()).padStart(2, '0')
-    return `${mm}-${dd} ${hh}:${mi}`
-  } catch {
-    return null
-  }
-}
-
 function TreeNode({
   node,
   depth,
@@ -1200,23 +1188,7 @@ function TreeNode({
       e.stopPropagation()
       if (!nodeId || !wsPath) return
       try {
-        const layoutStore = useLayoutModeStore.getState()
-        const tabId = `ws-tree-${nodeId}`
-        const existingTab = layoutStore.workspaceTabs.find(t => t.id === tabId)
-        if (existingTab) {
-          layoutStore.setActiveTab(tabId)
-          return
-        }
-        layoutStore.addWorkspaceTab({
-          id: tabId,
-          title: title || '工作空间',
-          icon: '📁',
-          moduleId: '__dynamic__',
-          component: 'file_tree',
-          dataSource: `workspace://${nodeId}`,
-          isActive: true,
-          isPinned: false,
-        })
+        openWorkspaceTreeTab(nodeId, title || '')
       } catch {
         // 静默失败
       }

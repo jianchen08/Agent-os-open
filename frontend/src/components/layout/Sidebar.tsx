@@ -15,7 +15,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bell, ChatIcon, ChatActiveIcon, Loader2, Plus, User, X } from '@/assets/icons'
+import { Bell, ChatIcon, ChatActiveIcon, Loader2, Plus, Settings, User, X } from '@/assets/icons'
 import { ChangePasswordForm } from '@/components/auth/ChangePasswordForm'
 import { LoginModal } from '@/components/auth/LoginModal'
 import { NotificationCenter } from '@/components/chat/NotificationCenter'
@@ -102,6 +102,29 @@ const SIDEBAR_STYLES = {
     mobile: 288,
   },
 } as const
+
+/**
+ * 设置常驻入口：侧栏底栏一级可见齿轮按钮（展开态/折叠 rail 两形态），
+ * 点击打开设置中枢（settings_hub 工作区页签）——模型配置等插件声明页
+ * （contributes.pages space=settings）在其中左导航可达。
+ */
+function SettingsEntryButton({ rail = false }: { rail?: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={() => openWorkspacePanelByPath('/settings')}
+      className={cn(
+        'text-muted-foreground hover:text-foreground flex shrink-0 items-center justify-center transition-colors hover:bg-[var(--hover-overlay)]',
+        rail ? 'h-9 w-9 rounded-lg' : 'h-7 w-7 rounded-md',
+      )}
+      title="设置"
+      aria-label="设置"
+      data-testid={rail ? 'sidebar-rail-settings' : 'sidebar-settings'}
+    >
+      <Settings className={rail ? 'h-4 w-4' : 'h-3.5 w-3.5'} />
+    </button>
+  )
+}
 
 /**
  * 侧边栏组件
@@ -647,6 +670,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
+              <SettingsEntryButton rail />
               <ThemeButton compact />
               <button
                 type="button"
@@ -776,8 +800,8 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 )}
               </div>
 
-              {/* 会话列表 - Requirements: 9.3, 9.4 */}
-              <div className="min-h-0 flex-1 scrollbar-thin overflow-x-hidden overflow-y-auto">
+              {/* 会话列表 - Requirements: 9.3, 9.4（滚动由 SessionList 自持容器承担） */}
+              <div className="min-h-0 flex-1">
                 {isLoading ? (
                   <div
                     className={cn(
@@ -917,6 +941,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
+                <SettingsEntryButton />
                 <ThemeButton compact />
                 <button
                   type="button"

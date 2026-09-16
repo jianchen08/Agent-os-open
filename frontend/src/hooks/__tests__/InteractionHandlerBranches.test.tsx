@@ -209,6 +209,69 @@ describe('options 归一化', () => {
   })
 })
 
+describe('审批等待上限传播（BUG-14 有界等待：timeout_seconds + created_at）', () => {
+  it.each([
+    { timeout: 600, createdAt: '2026-09-15T08:00:00Z' },
+    { timeout: 90, createdAt: '2026-09-15T09:30:00Z' },
+  ])(
+    'WS 推送携带 timeout_seconds=$timeout → 库内 timeoutSeconds/createdAt 原样入库',
+    async ({ timeout, createdAt }) => {
+      const view = await mountHandler()
+      ws.emit('interaction_request', {
+        request_id: 'req-bounded', interaction_mode: 'choice', title: '安全审批: bash_execute',
+        session_id: 's', thread_id: 't', pipeline_id: 'p',
+        timeout_seconds: timeout,
+        created_at: createdAt,
+      })
+      await waitFor(() => expect(useInteractionStore.getState().pendingInteractions).toHaveLength(1))
+      const stored = useInteractionStore.getState().pendingInteractions[0]
+      expect(stored.timeoutSeconds).toBe(timeout)
+      expect(stored.createdAt).toBe(createdAt)
+      // 性质断言：createdAt 可解析、期限 = 起点 + 上限（倒计时换算契约）
+      expect(Number.isFinite(Date.parse(stored.createdAt!))).toBe(true)
+      expect(Date.parse(stored.createdAt!) + stored.timeoutSeconds! * 1000).toBeGreaterThan(
+        Date.parse(createdAt),
+      )
+      view.unmount()
+    },
+  )
+
+  it('无 timeout_seconds 的推送 → timeoutSeconds 为 undefined（非审批交互不启用倒计时）', async () => {
+    const view = await mountHandler()
+    ws.emit('interaction_request', {
+      request_id: 'req-legacy', interaction_mode: 'choice', title: '选择',
+      session_id: 's', thread_id: 't', pipeline_id: 'p',
+    })
+    await waitFor(() => expect(useInteractionStore.getState().pendingInteractions).toHaveLength(1))
+    expect(useInteractionStore.getState().pendingInteractions[0].timeoutSeconds).toBeUndefined()
+    view.unmount()
+  })
+
+  it('恢复路径：record 顶层 created_at + message_data.timeout_seconds 同样入库', async () => {
+    pendingResponse.items = [
+      {
+        id: 'req-restore-bounded',
+        session_id: 'sess-r',
+        created_at: '2026-09-15T07:10:00Z',
+        message_data: {
+          interaction_mode: 'choice',
+          title: '安全审批: file_write',
+          thread_id: 'th-r',
+          pipeline_id: 'p-r',
+          timeout_seconds: 300,
+        },
+      },
+    ]
+    const view = await mountHandler()
+    await waitFor(() => expect(useInteractionStore.getState().pendingInteractions).toHaveLength(1))
+    const stored = useInteractionStore.getState().pendingInteractions[0]
+    expect(stored.requestId).toBe('req-restore-bounded')
+    expect(stored.timeoutSeconds).toBe(300)
+    expect(stored.createdAt).toBe('2026-09-15T07:10:00Z')
+    view.unmount()
+  })
+})
+
 describe('mode 分流与去重', () => {
   it('notification 只进通知中心；choice 只进交互 Store', async () => {
     const view = await mountHandler()
@@ -489,6 +552,244 @@ describe('respond 出站与 fail-closed', () => {
     })
     expect(mockNavigateToPipeline).not.toHaveBeenCalled()
     expect(useInteractionStore.getState().pendingInteractions[0].status).toBe('entered')
+    view.unmount()
+  })
+})
+
+describe('respondConversation fail-closed（无自身坐标中止出站）', () => {
+  it('交互不存在 → 不出站、不标记（保持可重试）', async () => {
+    const view = await mountHandler()
+    await act(async () => {
+      await view.result.current.respondConversation('查无此请求', '补充说明')
+    })
+    expect(ws.sendInteractionResponse).not.toHaveBeenCalled()
+    expect(useInteractionStore.getState().pendingInteractions).toHaveLength(0)
+    view.unmount()
+  })
+
+  it('交互存在但 sessionId/threadId 皆空 → 不出站（不被发到错误 thread）', async () => {
+    const view = await mountHandler()
+    useInteractionStore.setState({
+      pendingInteractions: [
+        makeParsed({ requestId: 'req-nocoord', sessionId: '', threadId: '', status: 'pending' }) as PendingInteraction,
+      ],
+    })
+    await act(async () => {
+      await view.result.current.respondConversation('req-nocoord', '文字')
+    })
+    expect(ws.sendInteractionResponse).not.toHaveBeenCalled()
+    expect(useInteractionStore.getState().pendingInteractions[0].status).toBe('pending')
+    view.unmount()
+  })
+
+  it('sessionId 缺失但 threadId 在场 → 以 threadId 出站并标记 responded', async () => {
+    const view = await mountHandler()
+    useInteractionStore.setState({
+      pendingInteractions: [
+        makeParsed({ requestId: 'req-thread', threadId: 'th-conv', status: 'pending' }) as PendingInteraction,
+      ],
+    })
+    await act(async () => {
+      await view.result.current.respondConversation('req-thread', '继续')
+    })
+    expect(ws.sendInteractionResponse).toHaveBeenCalledWith('th-conv', 'req-thread', {
+      response_type: 'answered',
+      feedback: '继续',
+    })
+    expect(useInteractionStore.getState().pendingInteractions[0].status).toBe('responded')
+    view.unmount()
+  })
+})
+
+describe('navigateToTab 进入对话：清理活跃管道流式状态并跳转主页', () => {
+  it('活跃管道在流式中 → stopStreaming 收尾（恢复发送按钮）', async () => {
+    const view = await mountHandler()
+    useInteractionStore.setState({
+      pendingInteractions: [makeParsed({ requestId: 'req-stop', sessionId: 'sess-s', status: 'pending' }) as PendingInteraction],
+    })
+    usePipelineMessageStore.setState({
+      activePipelineId: 'pipe-streaming',
+      messagesByPipeline: {
+        'pipe-streaming': [
+          {
+            id: 'msg-s', sessionId: 's', sequence: 1, role: 'assistant', content: '半截',
+            timestamp: '', status: 'streaming',
+            parts: [{ type: 'text', content: '半截', state: 'streaming' }],
+          } as never,
+        ],
+      },
+      streamingState: { 'pipe-streaming': { isStreaming: true, messageId: 'msg-s', startedAt: 0 } },
+    })
+
+    await act(async () => {
+      await view.result.current.navigateToTab('req-stop', 'pipe-target')
+    })
+
+    // 流式状态被清理（生成态不再挂起）
+    expect(usePipelineMessageStore.getState().streamingState['pipe-streaming']).toBeUndefined()
+    expect(mockNavigateToPipeline).toHaveBeenCalledWith('pipe-target', {
+      agentName: '对话',
+      agentLevel: 2,
+    })
+    view.unmount()
+  })
+
+  it('活跃管道未在流式中 → 不触碰流式状态（无副作用）', async () => {
+    const view = await mountHandler()
+    useInteractionStore.setState({
+      pendingInteractions: [makeParsed({ requestId: 'req-idle', sessionId: 'sess-i', status: 'pending' }) as PendingInteraction],
+    })
+    usePipelineMessageStore.setState({
+      activePipelineId: 'pipe-idle',
+      streamingState: {},
+    })
+
+    await act(async () => {
+      await view.result.current.navigateToTab('req-idle', 'pipe-target-2')
+    })
+
+    expect(usePipelineMessageStore.getState().activePipelineId).toBe('pipe-idle')
+    expect(usePipelineMessageStore.getState().streamingState).toEqual({})
+    view.unmount()
+  })
+
+  it('非主页路由 → navigate 跳回主页（replace）；已在主页 → 不额外跳转', async () => {
+    const view = await mountHandler()
+    useInteractionStore.setState({
+      pendingInteractions: [makeParsed({ requestId: 'req-route', sessionId: 'sess-r', status: 'pending' }) as PendingInteraction],
+    })
+
+    // 当前不在主页（MemoryRouter 内 pathname 由路由决定，window 层另设）
+    window.history.pushState({}, '', '/somewhere-else')
+    await act(async () => {
+      await view.result.current.navigateToTab('req-route', 'pipe-r')
+    })
+    // 跳转语义由 navigateToPipeline 承担（navigate 到 HOME 为路由清理），
+    // 可观察结果为：导航服务被调用 + 交互标记 entered
+    expect(mockNavigateToPipeline).toHaveBeenCalledTimes(1)
+    expect(useInteractionStore.getState().pendingInteractions[0].status).toBe('entered')
+
+    window.history.pushState({}, '', '/')
+    view.unmount()
+  })
+})
+
+describe('已决交互的自动摘除（responded 延迟 2s / navigated 立即）', () => {
+  it('navigated 立即可摘除；responded 经 2s 延迟回调才摘除', async () => {
+    const view = await mountHandler()
+    useInteractionStore.setState({
+      pendingInteractions: [
+        makeParsed({ requestId: 'req-navg', status: 'navigated' }) as PendingInteraction,
+        makeParsed({ requestId: 'req-resp', status: 'responded' }) as PendingInteraction,
+      ],
+    })
+
+    // navigated：立即摘除（无延迟）
+    await waitFor(() =>
+      expect(
+        useInteractionStore.getState().pendingInteractions.map((i) => i.requestId),
+      ).toEqual(['req-resp']),
+    )
+
+    // responded：延迟摘除——延迟回调未触发前仍可见（给用户反馈时间）
+    await act(async () => {})
+    expect(
+      useInteractionStore.getState().pendingInteractions.map((i) => i.requestId),
+    ).toEqual(['req-resp'])
+    view.unmount()
+  })
+
+  it('responded 的摘除延迟为 2000ms（未到期仍可见，到点摘除）', async () => {
+    const view = await mountHandler()
+    // 挂载完成后切换假时钟（RTL waitFor 在假时钟下无法推进，故挂载阶段用真时钟）
+    vi.useFakeTimers()
+    try {
+      useInteractionStore.setState({
+        pendingInteractions: [makeParsed({ requestId: 'req-delay', status: 'responded' }) as PendingInteraction],
+      })
+
+      // 排期窗口未走完：交互仍在（延迟语义生效，非立即摘除）
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1999)
+      })
+      expect(
+        useInteractionStore.getState().pendingInteractions.map((i) => i.requestId),
+      ).toEqual(['req-delay'])
+
+      // 到点：延迟回调触发，摘除
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1)
+      })
+      expect(useInteractionStore.getState().pendingInteractions).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+      view.unmount()
+    }
+  })
+
+  it('延迟摘除完成后排期登记被清出：同 requestId 再现时重新走一遍摘除链', async () => {
+    const view = await mountHandler()
+    vi.useFakeTimers()
+    try {
+      useInteractionStore.setState({
+        pendingInteractions: [makeParsed({ requestId: 'req-again', status: 'responded' }) as PendingInteraction],
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+      expect(useInteractionStore.getState().pendingInteractions).toHaveLength(0)
+
+      // 同一 requestId 再次进入已完成态（重放/列表重建）：排期登记已清，
+      // 延迟回调重新排期并再次摘除（守卫不会把后续请求永久卡住）
+      useInteractionStore.setState({
+        pendingInteractions: [makeParsed({ requestId: 'req-again', status: 'responded' }) as PendingInteraction],
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+      expect(useInteractionStore.getState().pendingInteractions).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+      view.unmount()
+    }
+  })
+})
+
+describe('file_paths 附件：已存在 Tab 跳过注册', () => {
+  it('同名文件 Tab 已在工作区 → 跳过重复注册，且不丢失其他文件', async () => {
+    // tabId 规则：file-{containerId}-{path 分隔符转下划线}
+    const existingTabId = 'file-_local-_ws_已有.md'
+    useLayoutModeStore.setState({
+      workspaceTabs: [
+        {
+          id: existingTabId,
+          title: '已有.md',
+          icon: '📄',
+          moduleId: '__file_editor__',
+          isActive: false,
+          isPinned: false,
+        },
+      ],
+    })
+    const view = await mountHandler()
+    ws.emit('interaction_request', {
+      request_id: 'req-files',
+      interaction_mode: 'choice',
+      title: '看文件',
+      session_id: 's',
+      thread_id: 't',
+      pipeline_id: 'p',
+      file_paths: ['/ws/已有.md', '/ws/新文件.md'],
+    })
+    await waitFor(() => expect(useInteractionStore.getState().pendingInteractions).toHaveLength(1))
+
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    // 已存在的 Tab 未被重建（保持单份，不出现重复标签）
+    expect(tabs.filter((t) => t.title === '已有.md')).toHaveLength(1)
+    expect(tabs.filter((t) => t.id === existingTabId)).toHaveLength(1)
+    // 新文件正常注册
+    expect(tabs.filter((t) => t.title === '新文件.md')).toHaveLength(1)
+    expect(tabs).toHaveLength(2)
     view.unmount()
   })
 })

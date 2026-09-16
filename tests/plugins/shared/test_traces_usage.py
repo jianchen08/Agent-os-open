@@ -62,7 +62,14 @@ def _load_plugin_server(name: str, rel: Path, colliding: tuple[str, ...] = ()) -
 
 @pytest.fixture()
 def seeded_db() -> Generator[str, None, None]:
-    """traces 库：两模型/两日期/无 model 字段行/无 llm_usage 行（边界）。"""
+    """traces 库 + pipeline_state 库（两模型/两日期/无 model 字段行/无 llm_usage 行）。
+
+    两张表是同库不同源（同一真值的两个写面）：
+    - ``traces`` = 逐轮 append-only 轨迹：成本账（cost_control）与按时间聚合读它；
+    - ``pipeline_state`` = 每管道累计标量投影：累计 token 口径（monitoring 按模型）
+      读它（ADR 2026-09-15 监控页加载治理 §决策2）。
+    本 fixture 让两表同量，跨面一致性断言才有可断的基础。
+    """
     with tempfile.TemporaryDirectory() as tmp:
         db_path = str(Path(tmp) / "kernel.db")
         today = datetime.now(timezone.utc).strftime("%Y-%m-%dT12:00:00")
@@ -83,6 +90,26 @@ def seeded_db() -> Generator[str, None, None]:
                 ("t5", "core", '{"messages": {"_ops": []}}', today),
             ]
             conn.executemany("INSERT INTO traces VALUES (?, ?, ?, ?)", rows)
+
+            # pipeline_state：与上行同量的累计投影（monitoring 按模型口径读它）
+            conn.execute(
+                "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, field_value TEXT)"
+            )
+            state_rows = [
+                # gpt-x 两管道（1500 + 1000 = 2500）
+                ("p-a", "track.llm_usage", '{"total_input_tokens": 1200, "total_output_tokens": 300, "total_tokens": 1500}'),
+                ("p-a", "llm_model", '"gpt-x"'),
+                ("p-b", "track.llm_usage", '{"total_input_tokens": 800, "total_output_tokens": 200, "total_tokens": 1000}'),
+                ("p-b", "llm_model", '"gpt-x"'),
+                # deepseek-r1
+                ("p-c", "track.llm_usage", '{"total_input_tokens": 100, "total_output_tokens": 50, "total_tokens": 150}'),
+                ("p-c", "llm_model", '"deepseek-r1"'),
+                # 无 llm_model → 「（未记录模型）」行
+                ("p-d", "track.llm_usage", '{"total_input_tokens": 50, "total_output_tokens": 27, "total_tokens": 77}'),
+                # 非用量键（聚合面不得计入）
+                ("p-d", "context_window", "32000"),
+            ]
+            conn.executemany("INSERT INTO pipeline_state VALUES (?, ?, ?)", state_rows)
             conn.commit()
         finally:
             conn.close()

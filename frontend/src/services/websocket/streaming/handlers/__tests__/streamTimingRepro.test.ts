@@ -19,6 +19,7 @@
  *  - 场景3 残留 streaming part → 确认 stream_end 清理路径不闭环（独立 bug）
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
+import { makeEventFactory } from './helpers/streamingEventFactory'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -45,19 +46,7 @@ const MESSAGE_ID = 'msg_stream_timing_01'
 const THREAD_ID = 'thread-stream-timing-001'
 
 /** 构造后端 WS 事件信封（与内核透传一致：业务字段在 data 下） */
-function makeEvent(eventType: string, data: Record<string, any>) {
-  return {
-    type: eventType,
-    data: {
-      pipeline_id: PIPELINE_ID,
-      message_id: MESSAGE_ID,
-      ...data,
-    },
-    source_type: 'system',
-    source_id: PIPELINE_ID,
-    timestamp: new Date().toISOString(),
-  }
-}
+const makeEvent = makeEventFactory(PIPELINE_ID, MESSAGE_ID)
 
 /** 取目标消息及其 parts 的可读快照 */
 function snapshotMessage() {

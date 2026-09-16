@@ -141,6 +141,22 @@ class TestPythonCoverageBaseline:
         assert py_cov.main() == 0
         assert "python_line_coverage=53.00" in bf.read_text(encoding="utf-8")
 
+    def test_measured_100_caps_ratchet_at_100(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 实测 100.00 = 覆盖率上界：绿且基线封顶 100（floor+1=101 是数学死局，
+        # 「恒高于实测」在上界处不可满足——2026-09-16 收官批封顶修正）
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(py_cov, "BASELINE_FILE", bf)
+        bf.write_text("python_line_coverage=100.00\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["x", "--xml", str(_write_cov_xml(tmp_path, "1.0"))])
+        assert py_cov.main() == 0
+        assert "python_line_coverage=100.00" in bf.read_text(encoding="utf-8")
+
+    def test_pressure_line_never_exceeds_100(self) -> None:
+        assert py_cov.next_pressure_line(99.84) == 100
+        assert py_cov.next_pressure_line(100.0) == 100
+
 
 # ── check_diff_coverage：纯解析函数 ────────────────────────────────
 
@@ -396,6 +412,24 @@ class TestRustCoverageBaseline:
 
     def test_parse_lcov_line_pct(self, tmp_path: Path) -> None:
         assert rust_cov.parse_lcov_line_pct(self._lcov(tmp_path)) == pytest.approx(50.0)
+
+    def test_pressure_line_caps_at_100(self) -> None:
+        # 上界封顶：99.x → 100；实测 100 时基线停在 100，不写出 101 死局
+        assert rust_cov.next_pressure_line(99.5) == 100
+        assert rust_cov.next_pressure_line(100.0) == 100
+
+    def test_green_at_full_coverage_caps_baseline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        LCOV_FULL = "SF:crates/a.rs\nDA:1,1\nDA:2,1\nend_of_record\n"
+        p = tmp_path / "coverage.lcov"
+        p.write_text(LCOV_FULL, encoding="utf-8")
+        bf = tmp_path / "baseline.txt"
+        monkeypatch.setattr(rust_cov, "BASELINE_FILE", bf)
+        bf.write_text("rust_line_coverage=100.0\n", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", ["x", "--lcov", str(p)])
+        assert rust_cov.main() == 0
+        assert "rust_line_coverage=100.0" in bf.read_text(encoding="utf-8")
 
     def test_green_auto_ratchets_to_next_integer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture

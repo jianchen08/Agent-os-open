@@ -235,6 +235,18 @@ async fn wait_for_frame(frames: &Arc<Mutex<Vec<String>>>, needle: &str) {
     .expect("应收到事件帧");
 }
 
+/// 钉用户根到一次性临时目录（进程级 Once，全文件共用同一空用户根）：
+/// 宿主真实用户空间被播种/同步过时，插件启用面与配置层会旁路测试夹具，
+/// dispatch 链读到真实插件/配置 → 等帧超时与错误码漂移（同 8d3df5ded 家族）。
+fn pin_temp_user_root() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("pin_usr_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, &dir);
+    });
+}
+
 /// 播种会话记录并绑定 active_pipeline_id（dispatch_user_input 的管道坐标
 /// 解析前置：无 session/无归属管道 = 显式拒绝派发，不静默回退）。
 async fn seed_session_with_pipeline(
@@ -271,6 +283,7 @@ async fn seed_session_with_pipeline(
 
 #[tokio::test]
 async fn dispatch_success_pushes_new_message_and_stream_end() {
+    pin_temp_user_root();
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let coord = Arc::new(SessionCoordinator::new());
     let frames = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -315,6 +328,7 @@ async fn dispatch_success_pushes_new_message_and_stream_end() {
 /// 一模一样的"回复"。修复后应 stream_error（NO_ASSISTANT_REPLY）且零 new_message。
 #[tokio::test]
 async fn dispatch_silent_core_pushes_no_assistant_reply_error_not_echo() {
+    pin_temp_user_root();
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let coord = Arc::new(SessionCoordinator::new());
     let frames = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -370,6 +384,7 @@ async fn dispatch_silent_core_pushes_no_assistant_reply_error_not_echo() {
 
 #[tokio::test]
 async fn dispatch_engine_failure_pushes_stream_error() {
+    pin_temp_user_root();
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let coord = Arc::new(SessionCoordinator::new());
     let frames = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -413,6 +428,7 @@ async fn dispatch_engine_failure_pushes_stream_error() {
 
 #[tokio::test]
 async fn endpoint_update_emits_pending_inputs_changed() {
+    pin_temp_user_root();
     // 造 store + 一条 pending + pipeline↔thread 映射 + session
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
@@ -519,6 +535,7 @@ async fn endpoint_update_emits_pending_inputs_changed() {
 /// 队列表保持空——前端乐观气泡与待处理队列条由此互斥（杜绝"聊天+待处理"同屏）。
 #[tokio::test]
 async fn dispatch_idle_chain_runs_direct_without_pending_frames() {
+    pin_temp_user_root();
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let coord = Arc::new(SessionCoordinator::new());
     let frames = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -565,6 +582,7 @@ async fn dispatch_idle_chain_runs_direct_without_pending_frames() {
 /// 接管推 consumed 帧且表清空——队列条语义 = 真正等待中的消息。
 #[tokio::test]
 async fn dispatch_busy_chain_enqueues_then_consumes_after_release() {
+    pin_temp_user_root();
     let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let coord = Arc::new(SessionCoordinator::new());
     let frames = Arc::new(Mutex::new(Vec::<String>::new()));

@@ -1,23 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockSmall())
 
-vi.mock('@/services/api/session', () => ({
-  getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
-  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
-}))
+vi.mock('@/services/api/session', async () => (await import('./helpers/storeTestMocks')).apiSessionMockFull())
 
-vi.mock('@/utils/retry', () => ({
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockBase())
 
 const PIPELINE_ID = '39ef1314a7b9'
 const MESSAGE_ID = 'msg_a37d345d'
@@ -41,18 +31,7 @@ describe('initFromAPI 吃掉 streaming 消息', () => {
   beforeEach(async () => {
     vi.resetModules()
     const mod = await import('@/stores/pipelineMessageStore')
-    usePipelineMessageStore = mod.usePipelineMessageStore
-    usePipelineMessageStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: {},
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-    })
+    usePipelineMessageStore = await resetPipelineStoreState()
   })
 
   it('场景A: initFromAPI 在 streaming 消息之后调用，本地 streaming 消息被丢弃（刷新=全量重载）', () => {

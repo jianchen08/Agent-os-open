@@ -25,12 +25,19 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any
 
+from mcp import types
+
 from agentos_plugin_sdk._logging import setup_sidecar_logging
 from agentos_plugin_sdk.plugin import AgentOSPlugin
 from agentos_plugin_sdk.server import KernelChannel, McpServer
 from agentos_plugin_sdk.types import ResourceDef, ToolDef
 
 logger = logging.getLogger(__name__)
+
+# 内核 → 宿主的单成员热重载请求（带应答；失败以协议错误应答，内核据此
+# 回退 force_unload 整组驱逐语义）。加载新实例由 reload_handler（宿主侧
+# 遮蔽纪律）承担，本类只做成员换入与聚合表重建。
+RELOAD_MEMBER_METHOD = "agentos/reload_member"
 
 
 class CohostServer:
@@ -39,26 +46,42 @@ class CohostServer:
     Args:
         members: plugin_id → 成员插件实例。至少一个；键将作为工具/资源
             命名空间前缀，须互不相同。
+        reload_handler: 可选异步加载回调 ``(plugin_id) -> AgentOSPlugin``。
+            注入后注册 ``agentos/reload_member`` 请求（成员粒度热重载）；
+            回调只负责按遮蔽纪律加载新实例（host.py 职责），换入与聚合表
+            重建由本类完成。缺省不注册（独占 server.py 复用 McpServer 形态）。
 
     Raises:
         ValueError: 成员为空，或聚合后出现重名工具/资源（成员 id 含点号
             等导致命名空间互相覆盖）。
     """
 
-    def __init__(self, members: Mapping[str, AgentOSPlugin]) -> None:
+    def __init__(
+        self,
+        members: Mapping[str, AgentOSPlugin],
+        *,
+        reload_handler: Callable[[str], Any] | None = None,
+    ) -> None:
         if not members:
             raise ValueError("cohost server requires at least one member plugin")
         self._members: dict[str, AgentOSPlugin] = dict(members)
         self._channel = KernelChannel()
         self._tools = self._aggregate_tools()
         self._resources = self._aggregate_resources()
+        self._lifecycle_handlers = self._aggregate_lifecycle_handlers()
+        self._initialize_params: dict[str, Any] = {}
+        handlers: dict[str, tuple[type, Any]] | None = None
+        if reload_handler is not None:
+            handlers = {RELOAD_MEMBER_METHOD: (types.RequestParams, self._handle_reload_request)}
         self._server = McpServer(
             tools=self._tools,
             resources=self._resources,
-            lifecycle_handlers=self._aggregate_lifecycle_handlers(),
+            lifecycle_handlers=self._lifecycle_handlers,
             on_initialize=self._fan_out_initialize,
             kernel_channel=self._channel,
+            request_handlers=handlers,
         )
+        self._reload_handler = reload_handler
 
     @property
     def tool_names(self) -> list[str]:
@@ -69,6 +92,104 @@ class CohostServer:
         """启动聚合 MCP 服务端（stdio transport），阻塞运行至 stdin EOF。"""
         setup_sidecar_logging()
         await self._server.run()
+
+    # ── 成员热交换（成员粒度热重载）──────────────────────
+
+    def swap_member(self, plugin_id: str, plugin: AgentOSPlugin) -> None:
+        """成员实例热换入：重聚合工具/资源/生命周期三张表并**原位**生效。
+
+        三张聚合表以同一 dict 对象与 McpServer 共享，clear+update 原位替换
+        （非重绑定）——协议面在事件循环下一拍即按新表分发，无需重建连接。
+        新成员接入共享 KernelChannel 并重放最近一次 initialize 注入（依赖
+        注入语义与首次握手一致）。
+
+        Raises:
+            ValueError: plugin_id 非当前成员，或换入后聚合表重名。
+        """
+        if plugin_id not in self._members:
+            raise ValueError(f"swap_member: unknown member: {plugin_id}")
+        self._members[plugin_id] = plugin
+        # 先按新成员集全量重聚合（重名校验在聚合期抛出，失败不落表）。
+        new_tools = self._aggregate_tools()
+        new_resources = self._aggregate_resources()
+        new_handlers = self._aggregate_lifecycle_handlers()
+        self._tools.clear()
+        self._tools.update(new_tools)
+        self._resources.clear()
+        self._resources.update(new_resources)
+        self._lifecycle_handlers.clear()
+        self._lifecycle_handlers.update(new_handlers)
+        # 新成员接线：共享反向调用通道 + initialize 注入重放。
+        plugin._kernel_channel = self._channel
+        plugin._on_initialize(dict(self._initialize_params))
+        logger.info("[cohost] member swapped in: %s (tools=%d)", plugin_id, len(self._tools))
+
+    async def _dispatch_member_unload(self, plugin_id: str) -> None:
+        """定向给单个成员派发 on_unload（换入前给旧实例收尾机会）。
+
+        与广播扇出同语义：同步/异步 handler 均接受；异常就地隔离留痕
+        （收尾失败不得阻断换入——旧实例随换入被丢弃，由 GC 收尾）。
+        """
+        old = self._members.get(plugin_id)
+        if old is None:
+            return
+        handler = old._lifecycle_handlers.get("on_unload")
+        if handler is None:
+            return
+        try:
+            result = handler({})
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("[cohost] 成员 on_unload 定向派发异常（已隔离）: plugin=%s", plugin_id)
+
+    async def _dispatch_member_load(self, plugin_id: str) -> None:
+        """给换入的新实例派发 on_load（与首载同语义：初始化副作用必须重跑）。
+
+        首载路径由内核在 spawn 后发 ``notifications/on_load`` 广播；热换入路径
+        不经 spawn，内核侧不发该通知——须在此补齐，否则新实例的初始化状态为空
+        （实况：cost_control 换入后 ``_budget_manager`` 恒 None，其 /ext 端点
+        全 502 直至整组重建）。异常就地隔离留痕：单个成员初始化失败不得使
+        换入本身失败（工具表已生效，失败面局限在该成员自身的初始化状态）。
+        """
+        plugin = self._members.get(plugin_id)
+        if plugin is None:
+            return
+        handler = plugin._lifecycle_handlers.get("on_load")
+        if handler is None:
+            return
+        try:
+            result = handler(dict(self._initialize_params))
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("[cohost] 成员 on_load 定向派发异常（已隔离）: plugin=%s", plugin_id)
+
+    async def _handle_reload_request(self, ctx: Any, _params: Any) -> dict[str, Any]:
+        """``agentos/reload_member`` 请求处理：旧成员定向 on_unload → 加载 → 换入。
+
+        plugin_id 从 ctx.params 原始 mapping 读取（校验模型只声明 _meta，
+        自定义字段不落模型）。任何失败以异常应答（协议错误），内核据此
+        回退 force_unload 整组驱逐——宿主状态未被破坏，回退路径安全。
+        """
+        raw = dict(ctx.params) if ctx.params else {}
+        plugin_id = raw.get("plugin_id")
+        if not isinstance(plugin_id, str) or not plugin_id:
+            raise ValueError("reload_member: missing plugin_id")
+        if plugin_id not in self._members:
+            raise ValueError(f"reload_member: unknown member: {plugin_id}")
+        loader = self._reload_handler
+        if loader is None:
+            raise ValueError("reload_member: no reload handler registered")
+        await self._dispatch_member_unload(plugin_id)
+        plugin = loader(plugin_id)
+        if asyncio.iscoroutine(plugin):
+            plugin = await plugin
+        self.swap_member(plugin_id, plugin)
+        # 新实例的 on_load 必须重跑（首载由内核 spawn 后广播，热换入无 spawn）：
+        # 缺失会让该成员的初始化状态为空而其请求面照常可达（静默半死）。
+        await self._dispatch_member_load(plugin_id)
+        return {"reloaded": True, "plugin_id": plugin_id, "tools": len(self._tools)}
 
     # ── 聚合装配 ──────────────────────────────────────────
 
@@ -126,6 +247,8 @@ class CohostServer:
 
     def _fan_out_initialize(self, params: dict[str, Any]) -> None:
         """initialize 握手扇出：全部成员共享本服务端的 KernelChannel 并各自注入。"""
+        # 留存最近一次握手参数：成员热换入（swap_member）时按同参重放注入。
+        self._initialize_params = dict(params)
         for plugin in self._members.values():
             # 预置共享通道：成员 _on_initialize 懒建 KernelChannel 的分支因此
             # 复用共享实例，成员的反向调用走本服务端唯一 stdio 连接。

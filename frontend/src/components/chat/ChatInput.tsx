@@ -33,6 +33,7 @@ import { ChatInputActions } from './ChatInputActions'
 import { ContextUsageWidget } from '@/components/schema/widgets/ContextUsageWidget'
 import { VoiceInputButton } from './VoiceInputButton'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
+import type { TaskMode } from '@/services/schema/modeOptions'
 
 /** 格式化录音时长为 mm:ss */
 const formatDuration = (seconds: number): string => {
@@ -139,6 +140,14 @@ export const ChatInput = ({
   const [isDragging, setIsDragging] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [isExpanded, setIsExpanded] = useState(false)
+  /** 任务模式（task_mode 声明式选择器）：null = 自动，发送不带 mode 键。
+   *  状态提升在 chatInputStore 按 draftKey（tabId/sessionId）记忆——切换
+   *  会话/标签各自保持，模式面板等外部入口（Wave2）同源写入 */
+  const taskMode = useChatInputStore((s) => s.taskModes[draftKey ?? ''] ?? null)
+  const setTaskMode = useCallback(
+    (m: TaskMode | null) => useChatInputStore.getState().setTaskMode(draftKey ?? '', m),
+    [draftKey],
+  )
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -164,6 +173,15 @@ export const ChatInput = ({
     set: (_f, v) => handleStrengthChange(v as ThinkingStrength),
     // 惰性求值：isExecuting 在下方声明，渲染期回调时才读取（规避 TDZ）
     extra: () => ({ disabled: disabled || isExecuting || !modelName || modelName === 'unknown' }),
+  })
+
+  // 任务模式桥：'' = 自动（store 存 null，发送不带 mode 键）；声明在 task_form
+  // 插件（task_mode form select），值/回调由本宿主注入——与思考强度同构
+  const taskModeBridge = useControlledSlotBridge('task_mode', {
+    field: 'mode',
+    get: () => taskMode ?? '',
+    set: (_f, v) => setTaskMode((v as TaskMode | null) || null),
+    extra: () => ({ disabled: disabled || isExecuting }),
   })
 
   /** 必须声明在使用它的回调（handleVoiceInterim / handleVoiceTranscriptionComplete 等）之前，
@@ -491,6 +509,7 @@ export const ChatInput = ({
       attachments: allAttachments.length > 0 ? allAttachments : undefined,
       enableThinking: STRENGTH_TO_ENABLE[currentThinkingStrength],
       thinkingStrength: currentThinkingStrength,
+      mode: taskMode ?? undefined,
     }
 
     // 受理协议：false = 未受理（管道未就绪/子标签不支持等），保留输入、附件、
@@ -519,7 +538,7 @@ export const ChatInput = ({
       textareaRef.current.style.height = 'auto'
     }
     setIsExpanded(false)
-  }, [text, attachments, pendingFiles, disabled, isExecuting, onSendMessage, currentThinkingStrength])
+  }, [text, attachments, pendingFiles, disabled, isExecuting, onSendMessage, currentThinkingStrength, taskMode, setTaskMode])
 
   /** 处理文件输入变化 */
   const handleFileInputChange = useCallback(
@@ -738,6 +757,10 @@ export const ChatInput = ({
         >
           {isExpanded ? <Minimize2 className="h-icon-md w-icon-md" /> : <Maximize2 className="h-icon-md w-icon-md" />}
         </Button>
+
+        {/* 任务模式/权限模式等输入区选择器由声明驱动渲染于底部工具栏
+            （chat-input 空间附加式 DeclaredWidgetLayer），见下方工具栏 */}
+
         {(attachments.length > 0 || pendingFiles.length > 0) && (
           <div className="flex flex-wrap gap-2 px-3 pt-3 pb-2">
             {attachments.map((attachment) => (
@@ -809,10 +832,11 @@ export const ChatInput = ({
           )}
         />
 
-        {/* 底部工具栏：左组可收缩（min-w-0 flex-1），发送按钮 shrink-0——
-            大字体主题/插件动作多时左组先截断收缩，发送按钮不被挤出容器 */}
+        {/* 底部工具栏：左组可收缩可换行（min-w-0 flex-1 flex-wrap），发送按钮
+            shrink-0——大字体主题/插件动作多/窄栏（右面板展开压缩中栏）时左组
+            按钮换行排布而非叠压溢出，发送按钮不被挤出容器 */}
         <div className="flex min-w-0 items-center justify-between gap-2 px-3 pb-3">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
             {/* 附件按钮 */}
             {enableFileUpload && !isCompactMode && inputCapabilities.showAttachmentButton && (
               <Button
@@ -861,14 +885,16 @@ export const ChatInput = ({
               />
             )}
 
-            {/* 插件声明式工具栏 widget（chat-input 空间附加式）：权限模式选择器等
-                （插件 ui_schema 声明驱动，跟随当前选中管道标签）；
-                excludeIds 排除已被上方槽位层消费的声明，防重复渲染 */}
-            <DeclaredWidgetLayer
-              space="chat-input"
-              className="flex-row items-center"
-              excludeIds={['voice_input', 'context_usage', 'thinking_strength']}
-            />
+        {/* 插件声明式工具栏 widget（chat-input 空间附加式）：任务模式/权限模式
+            选择器等（插件 ui_schema 声明驱动，跟随当前选中管道标签）；
+            excludeIds 排除已被上方槽位层消费的声明，防重复渲染；
+            overrideProps 注入 task_mode 受控桥（声明 id 不匹配的声明不受影响） */}
+        <DeclaredWidgetLayer
+          space="chat-input"
+          className="flex-row items-center"
+          excludeIds={['voice_input', 'context_usage', 'thinking_strength']}
+          overrideProps={taskModeBridge}
+        />
             {/* 思考强度槽位（chat-input 空间，数据归属 llm_core——reasoning_effort
                 由其路由解释）：渲染 llm_core 声明的 form（select 四档），值/回调由
                 宿主注入（跟随当前管道标签 + 随消息路由后端模型参数） */}

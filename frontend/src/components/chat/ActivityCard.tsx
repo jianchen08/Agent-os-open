@@ -17,17 +17,15 @@ import {
   Wrench,
   XCircle,
 } from '@/assets/icons'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
 import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
-import { DetailBlock } from './ActivityBlockViews'
 import { formatDuration } from '@/types/activity'
 import { useConfirmDialog } from '@/utils/confirm'
+import { DetailBlock } from './ActivityBlockViews'
 import type {
-  ActivityAction,
   ActivityCardProps,
-  ActivityData,
-  ActivityDetailBlock,
   ActivityStatus,
   ActivityType,
 } from '@/types/activity'
@@ -98,9 +96,10 @@ function getStatusThemeVars(
 }
 
 /**
- * 获取状态图标
+ * 获取状态图标（导出供单测直接驱动全状态分支；
+ * 渲染侧按降噪设计仅对 running/failed 显示图标，其余状态由左边条表达）
  */
-function getStatusIcon(status: ActivityStatus): ReactNode {
+export function getStatusIcon(status: ActivityStatus): ReactNode {
   const themeVars = getStatusThemeVars(status)
   const breatheStyle: React.CSSProperties =
     status === 'running'
@@ -391,41 +390,9 @@ const ActivityCard: FC<ActivityCardProps> = ({
       )}
 
       {/* 确认弹窗 */}
-      {dialogState.open && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center"
-          role="dialog"
-          aria-modal="true"
-          aria-label="确认操作"
-        >
-          <div
-            className="fixed inset-0 bg-[var(--overlay-bg)]"
-            onClick={() => {
-              dialogState.onCancel()
-            }}
-          />
-          <div className="bg-background border-border relative z-10 mx-4 w-full max-w-sm rounded-lg border p-4 shadow-lg">
-            <p className="text-foreground mb-4 text-sm">{dialogState.message}</p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => dialogState.onCancel()}
-                className="border-border hover:bg-muted/70 text-muted-foreground rounded-md border px-3 py-1.5 text-xs transition-colors"
-              >
-                取消
-              </button>
-              <button
-                onClick={() => dialogState.onConfirm()}
-                className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-md px-3 py-1.5 text-xs transition-colors"
-              >
-                确认
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog dialogState={dialogState} />
     </div>
   )
 }
 
-export type { ActivityAction, ActivityCardProps, ActivityData, ActivityDetailBlock }
 export default ActivityCard

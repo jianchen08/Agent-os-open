@@ -274,11 +274,22 @@ describe('ContributionRegistry — 旧贡献点直接归一化为 pages', () => 
     )
 
     const chat = registry.getPagesBySpace('chat')
-    // chat 系列（chatActions/chatMessages）已弃用（ADR widget-migration-t8-t13-t14）：
-    // chat/inline 槽无渲染方，场景由工具卡协议（ui.chat_card / render）覆盖
-    expect(chat.filter((p) => p.legacyFrom === 'chatActions' || p.legacyFrom === 'chatMessages')).toEqual([])
+    // chatActions 仍弃用（ADR widget-migration-t8-t13-t14）：chat/inline 槽无渲染方；
+    // chatMessages 已恢复归一化（模式体系 §5.0）：message-style 槽由通用 webview
+    // 消息卡容器承接
+    expect(chat.filter((p) => p.legacyFrom === 'chatActions')).toEqual([])
+    expect(chat.find((p) => p.legacyFrom === 'chatMessages')).toMatchObject({
+      space: 'chat',
+      slot: 'message-style',
+      legacyFrom: 'chatMessages',
+    })
     // 交互类(menus/commands/shortcuts)仍归一化,legacyFrom 标记真实来源
-    expect(chat.map((p) => p.legacyFrom).sort()).toEqual(['commands', 'menus', 'shortcuts'])
+    expect(chat.map((p) => p.legacyFrom).sort()).toEqual([
+      'chatMessages',
+      'commands',
+      'menus',
+      'shortcuts',
+    ])
 
     const menu = registry.getPage('m1')
     expect(menu).toMatchObject({ space: 'chat', slot: 'inline', legacyFrom: 'menus', location: 'workspace/context', command: 'c1', when: 'resource.isFile' })

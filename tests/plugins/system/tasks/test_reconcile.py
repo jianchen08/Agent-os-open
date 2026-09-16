@@ -490,3 +490,56 @@ def test_derive_run_failed_without_terminal_evidence_still_reports(mod) -> None:
     row = _task_row("pipe-g", "running")
     derived = mod.events.derive_task_terminal_events("run.failed", row)
     assert [name for name, _ in derived] == ["task_failed"]
+
+
+async def test_reconcile_completed_backfill_failure_skips_row(mod) -> None:
+    """completed 权威裁决但投影补落失败 → 该行留痕跳过，不派发合成事件（155-160）。
+
+    契约：补落失败时投影仍是旧值（未决），若继续派发完成通知会出现
+    「通知说完成、投影读不到 completed」的两套账；故失败即 continue，
+    留待下一轮扫描重试（启动扫描是兜底面，不阻断装载）。
+    """
+    state, runs_cap, bus = _caps(
+        rows=[_task_row("pipe-fail", "running")],
+        runs=[_run("completed", "pipe-fail")],
+        update_error=RuntimeError("db write failed"),
+    )
+
+    reconciled = await mod.reconcile.reconcile_startup(state, runs_cap, bus)
+
+    assert reconciled == [], "补落失败的行不得计入已调和"
+    # 补落尝试确实发生过（失败不是「压根没写」）
+    assert any(c[0] == "update" for c in state.calls)
+    assert [c for c in bus.calls if c[0] == "emit_domain"] == [], (
+        "补落失败后不得派发完成通知（否则两套账）"
+    )
+
+
+async def test_reconcile_continues_scan_after_backfill_failure(mod) -> None:
+    """对照组：一行补落失败不影响后续行调和（留痕续扫语义）。"""
+    class _PartialUpdateCapability(_FakeCapability):
+        """update 对指定 pipeline 抛错，其余成功（同一能力面的局部故障）。"""
+
+        def __init__(self, rows: list[dict[str, Any]], bad_pid: str) -> None:
+            super().__init__({"list": rows, "update": {"ok": True}})
+            self._bad = bad_pid
+
+        async def call(self, method, params, timeout=None):  # type: ignore[override]
+            self.calls.append((method, params))
+            if method == "update" and params.get("pipeline_id") == self._bad:
+                raise RuntimeError("db write failed")
+            if method not in self._responses:
+                raise KeyError(f"unexpected capability method: {method}")
+            return self._responses[method]
+
+    rows = [_task_row("pipe-bad", "running"), _task_row("pipe-good", "running")]
+    state = _PartialUpdateCapability(rows, "pipe-bad")
+    runs_cap = _FakeCapability(
+        {"pipeline-runs.list": [_run("completed", "pipe-bad"), _run("completed", "pipe-good")]}
+    )
+    bus = _FakeCapability({"emit_domain": {"ok": True}})
+
+    reconciled = await mod.reconcile.reconcile_startup(state, runs_cap, bus)
+
+    assert [r["pipeline_id"] for r in reconciled] == ["pipe-good"]
+    assert [r["verdict"] for r in reconciled] == ["completed"]

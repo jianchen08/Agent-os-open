@@ -25,10 +25,12 @@ struct RouteKey {
 
 /// 能力注册表实现。
 ///
-/// 管理三类能力：
+/// 管理四类能力：
 /// 1. Tools: 工具插件/系统插件提供的工具
 /// 2. RouteSignals: 管道插件声明的路由信号
 /// 3. HttpRoutes: 插件贡献的 HTTP 端点（ADR §3.3）
+/// 4. ModeResources: 模式包约定子目录注册的 agent 键/编排键（设计稿
+///    2026-09-15 §2.3 约定即注册；登记/撤销见 [`crate::mode_registry`]）
 ///
 /// （原 Resources 维度已删除：注册链无消费方。）
 pub struct CapabilityRegistryImpl {
@@ -39,6 +41,10 @@ pub struct CapabilityRegistryImpl {
     http_routes: RwLock<HashMap<RouteKey, HttpRouteDescriptor>>,
     /// 插件 → 其注册的 RouteKey 列表（注销时清除用）。
     http_routes_by_plugin: RwLock<HashMap<String, Vec<RouteKey>>>,
+    /// 模式包 agent 键维度：`mode_X/<stem>` → 条目（禁用即同源消失）。
+    mode_agents: RwLock<HashMap<String, crate::mode_registry::ModeAgentEntry>>,
+    /// 模式包编排键维度：`mode_X/<stem>` → 条目（task_kinds 随行）。
+    mode_pipelines: RwLock<HashMap<String, crate::mode_registry::ModePipelineEntry>>,
 }
 
 impl CapabilityRegistryImpl {
@@ -49,6 +55,8 @@ impl CapabilityRegistryImpl {
             route_signals_by_plugin: RwLock::new(HashMap::new()),
             http_routes: RwLock::new(HashMap::new()),
             http_routes_by_plugin: RwLock::new(HashMap::new()),
+            mode_agents: RwLock::new(HashMap::new()),
+            mode_pipelines: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -245,6 +253,65 @@ impl CapabilityRegistryImpl {
         });
         Ok((descriptor, guard))
     }
+
+    // ── 模式包约定资源维度（设计稿 2026-09-15 §2.3 约定即注册）──
+    //
+    // 登记入口 = crate::mode_registry::register_mode_package_guarded（占用检查
+    // + guard 化撤销组合，弱引用语义与本文件其他 guarded 方法一致）；这里提供
+    // 插入/查询/按插件移除原语，供该入口与 clear_plugin 使用。
+
+    /// 原语：整体插入一个模式包的条目（调用方须先完成占用检查）。
+    pub(crate) fn insert_mode_entries(&self, package: &crate::mode_registry::ModePackageResources) {
+        let mut agents = self.mode_agents.write();
+        let mut pipelines = self.mode_pipelines.write();
+        for entry in &package.agents {
+            agents.insert(entry.key.clone(), entry.clone());
+        }
+        for entry in &package.pipelines {
+            pipelines.insert(entry.key.clone(), entry.clone());
+        }
+    }
+
+    /// 原语：按 (键, 是否编排键) 名单移除条目（guard revoke 用；只移除确属
+    /// 该插件的键，防名单过期误删他人注册）。
+    pub(crate) fn remove_mode_keys_of(&self, plugin_id: &str, keys: &[(String, bool)]) {
+        let mut agents = self.mode_agents.write();
+        let mut pipelines = self.mode_pipelines.write();
+        for (key, is_pipeline) in keys {
+            if *is_pipeline {
+                if pipelines.get(key).is_some_and(|e| e.plugin_id == plugin_id) {
+                    pipelines.remove(key);
+                }
+            } else if agents.get(key).is_some_and(|e| e.plugin_id == plugin_id) {
+                agents.remove(key);
+            }
+        }
+    }
+
+    /// 按键查模式包 agent 条目（消费方取数：`mode_X/<stem>` → 身份基座文件）。
+    pub fn get_mode_agent(&self, key: &str) -> Option<crate::mode_registry::ModeAgentEntry> {
+        self.mode_agents.read().get(key).cloned()
+    }
+
+    /// 按键查模式包编排条目（消费方取数：编排键 → 定义文件 + task_kinds；
+    /// 编排键是管道定义，与运行实例 pipeline_id 概念分离）。
+    pub fn get_mode_pipeline(&self, key: &str) -> Option<crate::mode_registry::ModePipelineEntry> {
+        self.mode_pipelines.read().get(key).cloned()
+    }
+
+    /// 全量模式包 agent 条目（按键字典序，输出确定）。
+    pub fn list_mode_agents(&self) -> Vec<crate::mode_registry::ModeAgentEntry> {
+        let mut out: Vec<_> = self.mode_agents.read().values().cloned().collect();
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        out
+    }
+
+    /// 全量模式包编排条目（按键字典序，输出确定）。
+    pub fn list_mode_pipelines(&self) -> Vec<crate::mode_registry::ModePipelineEntry> {
+        let mut out: Vec<_> = self.mode_pipelines.read().values().cloned().collect();
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        out
+    }
 }
 
 #[async_trait]
@@ -378,6 +445,13 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
                 routes.remove(k);
             }
         }
+        // 清除模式包约定资源（禁用即同源消失，与工具/路由维度同一语义）
+        self.mode_agents
+            .write()
+            .retain(|_, e| e.plugin_id != plugin_id);
+        self.mode_pipelines
+            .write()
+            .retain(|_, e| e.plugin_id != plugin_id);
     }
 }
 

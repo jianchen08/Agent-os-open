@@ -15,6 +15,7 @@
  * （text_delta 缓冲按块索引路由，tool_start 的 flush 语义不变）。
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
+import { makeEventFactory } from './helpers/streamingEventFactory'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -40,19 +41,7 @@ const PIPELINE_ID = 'pipe-tool-text-order-001'
 const MESSAGE_ID = 'msg_tool_text_order_01'
 const THREAD_ID = 'thread-tool-text-order-001'
 
-function makeEvent(eventType: string, data: Record<string, any>) {
-  return {
-    type: eventType,
-    data: {
-      pipeline_id: PIPELINE_ID,
-      message_id: MESSAGE_ID,
-      ...data,
-    },
-    source_type: 'system',
-    source_id: PIPELINE_ID,
-    timestamp: new Date().toISOString(),
-  }
-}
+const makeEvent = makeEventFactory(PIPELINE_ID, MESSAGE_ID)
 
 /** 取 parts 的类型序列（按数组顺序 = 渲染顺序） */
 function getPartTypes(): string[] {

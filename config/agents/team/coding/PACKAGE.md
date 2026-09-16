@@ -112,10 +112,10 @@ L1（灵汐）/ 人类
 
 | 角色 | reuse_base（复用既有执行层） | capabilities |
 |------|------------------------------|--------------|
-| `coding_pm_agent` | `programming_orchestrator_agent_v2` | requirement_structuring / task_dispatch / task_tracking / acceptance_verification |
-| `coding_dev_agent` | `code_writer` | code_generation / code_refactoring / unit_test_writing / acceptance_criteria_driven |
-| `coding_test_agent` | `test_debug_agent` | test_case_design / test_code_generation / coverage_analysis / bug_reproduction / root_cause_analysis / regression_testing |
-| `coding_review_agent` | `code_reviewer_agent` | static_analysis / code_review / bug_detection / detail_checklist_enforcement / acceptance_criteria_verification |
+| `coding_pm_agent` | `mode_coding/programming_orchestrator_agent_v2` | requirement_structuring / task_dispatch / task_tracking / acceptance_verification |
+| `coding_dev_agent` | `mode_coding/code_writer` | code_generation / code_refactoring / unit_test_writing / acceptance_criteria_driven |
+| `coding_test_agent` | `mode_coding/test_debug_agent` | test_case_design / test_code_generation / coverage_analysis / bug_reproduction / root_cause_analysis / regression_testing |
+| `coding_review_agent` | `mode_coding/code_reviewer_agent` | static_analysis / code_review / bug_detection / detail_checklist_enforcement / acceptance_criteria_verification |
 
 ---
 

@@ -79,6 +79,31 @@
 # 下一批目标（批九已清 15 文件后存量）= themeService 分支、renderIntent
 # 分支、pipelineMessageStore 分支（批九已大幅推进）、skinRuntime 残余 5、
 # GlobalInteractionOverlay 残余 11。
+# 收紧（2026-09-16 覆盖率收口批）：89.93→98.82——Node20 本地全量实测（465
+# 文件 5369 用例 0 失败，vitest 4.1.11，254s）。口径说明：本批入口时基线数值
+# 已长期失真——批九/批十及其后多批补测用例（392+ 用例）因全量车道未获绿跑、
+# coverage 报告未产出而始终未回写，故 89.93→98.82 的跨度含历史累计，非本批
+# 单批增量；数值以本次全量实测为准。本批新增用例（约 460）覆盖面 = 服务层小
+# 模块（监控 getTaskList 分支/管道诊断 traces·state/WS 一次性票据/工作空间读
+# 接口）、存储容错三件（tolerantStorage 三级降级、StorageService 预检查与
+# undefined 移除、indexedDbStorage 节流合并）、AgentManagerPage、
+# useGodotSelection（原 0%）、PluginPickerDialog、DebugLlmPayloadPage、
+# PipelineSettingsPage、SessionEditModal、CodeBlock 复制失败分支、RjsfForm
+# 自定义 widget、useAgentsQuery 去重、interactionStore、WorkspacePanel
+# 58%→100%（右键菜单/悬停关闭/固定页签禁用/wheel 横滚）、WS handlers 防御
+# 分支、GlobalWebSocket 心跳、tokenLifecycle、dataWidget、
+# SchemaFullscreenHost、PageRenderer、ReviewDocumentWidget、FetchModelsModal。
+# 残留缺行与不可达说明（先判可达性再补，勿刷数字）：
+#   - themeService.fetchDynamicThemes 的 import.meta.glob('/themes/*.json')
+#     恒空集（public/ 不在 Vite 模块图，生产 dist 同样为空对象）→ 814-821
+#     在测试与生产双双不可达，属源码缺陷已立案，非测试缺口。
+#   - ActivityCard.getStatusIcon 的 completed/failed/cancelled/default 分支：
+#     调用点按 status 收窄后无路径可达（设计改动遗留）。
+#   - FiveSpaceLayout.handleTaskNodeClick：onNodeClick 未下发到 widget props
+#     （接线丢失，探针实测），253-276 不可达。
+# 下一批目标 = RjsfForm、useInteractionHandler、ActivityBlockViews 残余，以及
+# ExtensionHost/PanelHostWidget/HtmlPreviewWidget 等 0% 容器页（需真实宿主
+# 上下文，先评估可达性）。
 vitest_failures=0
 eslint_errors=0
-vitest_coverage_pct=89.93
+vitest_coverage_pct=98.82

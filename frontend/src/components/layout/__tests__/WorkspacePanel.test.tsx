@@ -21,44 +21,45 @@ function makeTab(overrides: Partial<WorkspaceTab> = {}): WorkspaceTab {
   } as WorkspaceTab
 }
 
+/** 渲染 WorkspacePanel（tabs/回调可注入，onFullscreen 段可选） */
+function renderPanel(
+  tabs: ReturnType<typeof makeTab>[],
+  onTabChange: (tabId: string) => void,
+  onTabClose: (tabId: string) => void,
+  onFullscreen?: (fullscreen: boolean) => void,
+  isFullscreen?: boolean,
+  renderTabContent?: (tab: { id: string }) => React.ReactNode,
+  visitedTabIds?: string[],
+) {
+  render(
+    <WorkspacePanel
+      tabs={tabs}
+      onTabChange={onTabChange}
+      onTabClose={onTabClose}
+      renderTabContent={renderTabContent ?? (() => <div />)}
+      {...(visitedTabIds !== undefined ? { visitedTabIds } : {})}
+      {...(onFullscreen !== undefined ? { onFullscreen, isFullscreen } : {})}
+    />,
+  )
+}
+
 describe('WorkspacePanel — tab 渲染', () => {
   it('渲染所有 tab 的标题', () => {
     const tabs = [makeTab({ id: 'a', title: '编辑器' }), makeTab({ id: 'b', title: '预览', isActive: false })]
-    render(
-      <WorkspacePanel
-        tabs={tabs}
-        onTabChange={() => {}}
-        onTabClose={() => {}}
-        renderTabContent={() => <div>content</div>}
-      />,
-    )
+    renderPanel(tabs, () => {}, () => {})
     expect(screen.getByText('编辑器')).toBeInTheDocument()
     expect(screen.getByText('预览')).toBeInTheDocument()
   })
 
   it('空 tabs 显示空态提示', () => {
-    render(
-      <WorkspacePanel
-        tabs={[]}
-        onTabChange={() => {}}
-        onTabClose={() => {}}
-        renderTabContent={() => <div />}
-      />,
-    )
+    renderPanel([], () => {}, () => {})
     expect(screen.getByText(/暂无内容/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /打开任务管理/ })).toBeInTheDocument()
   })
 
   it('长标题 tab 悬浮显示完整标题（title 属性）', () => {
     const longTitle = 'a-very-long-file-name-that-exceeds-tab-width-config.yaml'
-    render(
-      <WorkspacePanel
-        tabs={[makeTab({ id: 'a', title: longTitle })]}
-        onTabChange={() => {}}
-        onTabClose={() => {}}
-        renderTabContent={() => <div>content</div>}
-      />,
-    )
+    renderPanel([makeTab({ id: 'a', title: longTitle })], () => {}, () => {})
     expect(screen.getByRole('tab')).toHaveAttribute('title', longTitle)
   })
 })
@@ -70,14 +71,7 @@ describe('WorkspacePanel — tab 切换', () => {
       makeTab({ id: 'a', title: 'A', isActive: true }),
       makeTab({ id: 'b', title: 'B', isActive: false }),
     ]
-    render(
-      <WorkspacePanel
-        tabs={tabs}
-        onTabChange={onTabChange}
-        onTabClose={() => {}}
-        renderTabContent={() => <div />}
-      />,
-    )
+    renderPanel(tabs, onTabChange, () => {})
     fireEvent.click(screen.getByText('B'))
     expect(onTabChange).toHaveBeenCalledWith('b')
   })
@@ -121,16 +115,7 @@ describe('WorkspacePanel — 全屏按钮', () => {
   it('传入 onFullscreen 时渲染全屏按钮并触发回调', () => {
     const onFullscreen = vi.fn()
     const tabs = [makeTab({ id: 'a', title: 'A', isActive: true })]
-    render(
-      <WorkspacePanel
-        tabs={tabs}
-        onTabChange={() => {}}
-        onTabClose={() => {}}
-        renderTabContent={() => <div />}
-        onFullscreen={onFullscreen}
-        isFullscreen={false}
-      />,
-    )
+    renderPanel(tabs, () => {}, () => {}, onFullscreen, false)
     const btn = screen.getByTestId('workspace-toggle-fullscreen')
     expect(btn).toHaveAttribute('title', '铺满全屏')
     fireEvent.click(btn)
@@ -139,16 +124,7 @@ describe('WorkspacePanel — 全屏按钮', () => {
 
   it('isFullscreen=true 时按钮显示「退出全屏」', () => {
     const tabs = [makeTab({ id: 'a', title: 'A', isActive: true })]
-    render(
-      <WorkspacePanel
-        tabs={tabs}
-        onTabChange={() => {}}
-        onTabClose={() => {}}
-        renderTabContent={() => <div />}
-        onFullscreen={() => {}}
-        isFullscreen={true}
-      />,
-    )
+    renderPanel(tabs, () => {}, () => {}, () => {}, true)
     expect(screen.getByTestId('workspace-toggle-fullscreen')).toHaveAttribute('title', '退出全屏')
   })
 })
@@ -156,14 +132,7 @@ describe('WorkspacePanel — 全屏按钮', () => {
 describe('WorkspacePanel — 内容渲染', () => {
   it('激活 tab 渲染 renderTabContent 返回的内容', () => {
     const tabs = [makeTab({ id: 'a', title: 'A', isActive: true })]
-    render(
-      <WorkspacePanel
-        tabs={tabs}
-        onTabChange={() => {}}
-        onTabClose={() => {}}
-        renderTabContent={(tab) => <div>{`内容-${tab.id}`}</div>}
-      />,
-    )
+    renderPanel(tabs, () => {}, () => {}, undefined, undefined, (tab) => <div>{`内容-${tab.id}`}</div>)
     expect(screen.getByText('内容-a')).toBeInTheDocument()
   })
 
@@ -172,14 +141,14 @@ describe('WorkspacePanel — 内容渲染', () => {
       makeTab({ id: 'a', title: 'A', isActive: true }),
       makeTab({ id: 'b', title: 'B', isActive: false }),
     ]
-    render(
-      <WorkspacePanel
-        tabs={tabs}
-        onTabChange={() => {}}
-        onTabClose={() => {}}
-        renderTabContent={(tab) => <div>{`内容-${tab.id}`}</div>}
-        visitedTabIds={['a']}
-      />,
+    renderPanel(
+      tabs,
+      () => {},
+      () => {},
+      undefined,
+      undefined,
+      (tab) => <div>{`内容-${tab.id}`}</div>,
+      ['a'],
     )
     expect(screen.getByText('内容-a')).toBeInTheDocument()
     expect(screen.queryByText('内容-b')).not.toBeInTheDocument()
@@ -190,14 +159,14 @@ describe('WorkspacePanel — 内容渲染', () => {
       makeTab({ id: 'a', title: 'A', isActive: true }),
       makeTab({ id: 'b', title: 'B', isActive: false }),
     ]
-    render(
-      <WorkspacePanel
-        tabs={tabs}
-        onTabChange={() => {}}
-        onTabClose={() => {}}
-        renderTabContent={(tab) => <div>{`内容-${tab.id}`}</div>}
-        visitedTabIds={['a', 'b']}
-      />,
+    renderPanel(
+      tabs,
+      () => {},
+      () => {},
+      undefined,
+      undefined,
+      (tab) => <div>{`内容-${tab.id}`}</div>,
+      ['a', 'b'],
     )
     // b 已访问过，内容挂载但 hidden
     const bContent = screen.getByText('内容-b')

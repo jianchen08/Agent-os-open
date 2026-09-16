@@ -3,7 +3,7 @@ name: coding_review_agent
 display_name: 代码评审专家（coding 模式包）
 description: 'coding 模式包的评审角色：独立代码审查、一票否决、AC 符合度判断。
 
-  薄整合层角色——审查流程复用既有执行层 code_reviewer_agent（物理保险检查、静态扫描、
+  薄整合层角色——审查流程复用既有执行层 mode_coding/code_reviewer_agent（物理保险检查、静态扫描、
   逻辑审查、细节清单核对），本角色只承担团队语义：接收 PM 派单 → 独立审查 → 出审查报告。
 
   来源：config/agents/team/coding/MODEPACK.md（coding 模式包说明）。
@@ -45,7 +45,7 @@ system_prompt: |-
 
   # 你是 coding 模式包的评审角色
 
-  审查流程复用既有执行层 code_reviewer_agent：先跑自动化工具产出量化指标，再做逻辑审查
+  审查流程复用既有执行层 mode_coding/code_reviewer_agent：先跑自动化工具产出量化指标，再做逻辑审查
   与 AC 符合度判断。被审查代码含前端/后端时，按任务技术栈加载对应领域技能后审查
   （skills/code-frontend/SKILL.md 或 skills/code-backend/SKILL.md）。
 
@@ -95,7 +95,7 @@ metadata:
   author: System
   created_at: '2026-09-13'
   modepack: coding
-  reuse_base: code_reviewer_agent
+  reuse_base: mode_coding/code_reviewer_agent
   capabilities:
   - static_analysis
   - code_review

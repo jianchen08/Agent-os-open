@@ -3,7 +3,7 @@ name: coding_pm_agent
 display_name: 项目管理·PM（coding 模式包）
 description: 'coding 模式包的项目管理（PM）角色：需求拆解、任务派单、执行跟踪与交付验收。
 
-  薄整合层角色——编排执行流程复用既有执行层 programming_orchestrator_agent_v2（路径选择、
+  薄整合层角色——编排执行流程复用既有执行层 mode_coding/programming_orchestrator_agent_v2（路径选择、
   审查/验证外包纪律、回归策略），本角色只承担团队语义：拆解 → 派单 → 跟踪 → 验收。
 
   来源：config/agents/team/coding/MODEPACK.md（coding 模式包说明）。
@@ -47,7 +47,7 @@ system_prompt: |-
   # 你是 coding 模式包的项目管理（PM）角色
 
   你是「coding 模式包」的 PM：把需求拆解为可派发的任务、派单给团队角色、跟踪执行、按 AC 验收交付。
-  编排执行流程复用既有执行层 programming_orchestrator_agent_v2（路径 A/B/C 选择、审查/验证外包纪律、
+  编排执行流程复用既有执行层 mode_coding/programming_orchestrator_agent_v2（路径 A/B/C 选择、审查/验证外包纪律、
   回归策略），本角色只承担团队语义：拆解 → 派单 → 跟踪 → 验收。
 
   ## 职责骨架
@@ -103,7 +103,7 @@ metadata:
   author: System
   created_at: '2026-09-13'
   modepack: coding
-  reuse_base: programming_orchestrator_agent_v2
+  reuse_base: mode_coding/programming_orchestrator_agent_v2
   capabilities:
   - requirement_structuring
   - task_dispatch

@@ -294,12 +294,12 @@ def _reset_state_reader() -> None:
 
 
 class TestResolveWorkspaceFromState:
-    """resolve_workspace_from_state 返回 (workspace_path, owner_sub) 元组。"""
+    """resolve_workspace_from_state 返回 (workspace_path, owner_sub, is_task_row) 元组。"""
 
     def test_reader_not_injected_returns_none(self) -> None:
         _reset_state_reader()
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "")
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "", False)
 
     def test_row_owner_submitted_by_returned(self) -> None:
         """同行 task.submitted_by 随坐标同源返回（归属闸权威字段）。"""
@@ -312,7 +312,7 @@ class TestResolveWorkspaceFromState:
         ]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/owned", "user-a")
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/owned", "user-a", True)
         _reset_state_reader()
 
     def test_row_ws_meta_path_wins_over_project_root(self) -> None:
@@ -326,28 +326,28 @@ class TestResolveWorkspaceFromState:
         ]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/worktree-1", "")
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/worktree-1", "", False)
         _reset_state_reader()
 
     def test_row_workspace_scalar_fallback(self) -> None:
         rows = [{"pipeline_id": "p1", "workspace": "D:/ws/plain"}]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/plain", "")
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/plain", "", False)
         _reset_state_reader()
 
     def test_row_hit_without_workspace_keys_returns_none(self) -> None:
         rows = [{"pipeline_id": "p1", "task.status": "running"}]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "")
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "", False)
         _reset_state_reader()
 
     def test_no_matching_row_returns_none(self) -> None:
         rows = [{"pipeline_id": "p2", "workspace": "D:/ws/p2"}]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "")
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "", False)
         _reset_state_reader()
 
     def test_async_reader_supported(self) -> None:
@@ -358,7 +358,7 @@ class TestResolveWorkspaceFromState:
 
         _MODS["workspace_service"].set_state_reader(_read)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/async", "")
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("D:/ws/async", "", False)
         _reset_state_reader()
 
     def test_reader_exception_returns_none(self) -> None:
@@ -367,7 +367,7 @@ class TestResolveWorkspaceFromState:
 
         _MODS["workspace_service"].set_state_reader(_boom)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "")
+        assert _run(svc.resolve_workspace_from_state("p1")) == ("", "", False)
         _reset_state_reader()
 
     def test_task_pipeline_prefers_task_ws_meta_and_relocates_merged_worktree(
@@ -397,7 +397,7 @@ class TestResolveWorkspaceFromState:
         ]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == (str(project), "")
+        assert _run(svc.resolve_workspace_from_state("p1")) == (str(project), "", True)
         _reset_state_reader()
 
     def test_task_pipeline_worktree_alive_returns_worktree_path(self, tmp_path: Path) -> None:
@@ -419,7 +419,7 @@ class TestResolveWorkspaceFromState:
         ]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == (str(wt), "")
+        assert _run(svc.resolve_workspace_from_state("p1")) == (str(wt), "", True)
         _reset_state_reader()
 
     def test_session_pipeline_without_task_mirror_keeps_ws_meta(self, tmp_path: Path) -> None:
@@ -434,7 +434,7 @@ class TestResolveWorkspaceFromState:
         ]
         _MODS["workspace_service"].set_state_reader(lambda: rows)
         svc = WorkspaceService()
-        assert _run(svc.resolve_workspace_from_state("p1")) == (str(session_dir), "")
+        assert _run(svc.resolve_workspace_from_state("p1")) == (str(session_dir), "", False)
         _reset_state_reader()
 
 
@@ -763,10 +763,12 @@ class TestWorkspaceOwnershipGate:
     """U6 归属闸：未认证 / 跨任务归属 → WorkspaceAccessDenied（404 语义）。"""
 
     def _make_server_with_row(self, tmp_path: Path, submitted_by: str) -> Any:
+        """构造任务行（task.id 在场）：闸门按 submitted_by 有无分 fail-closed /
+        跨归属拒绝两态（会话域行无任务身份，不经归属闸，见 http 车道 BUG-24 用例）。"""
         (tmp_path / "hello.txt").write_text("hi", encoding="utf-8")
         server_mod = _load_workspace_server()
         state_mod = _server_state_mod(server_mod)
-        row: dict[str, Any] = {"pipeline_id": "p1", "workspace": str(tmp_path)}
+        row: dict[str, Any] = {"pipeline_id": "p1", "task.id": "p1", "workspace": str(tmp_path)}
         if submitted_by:
             row["task.submitted_by"] = submitted_by
         state_mod.set_state_reader(lambda: [row])

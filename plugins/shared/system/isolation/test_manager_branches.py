@@ -1328,11 +1328,21 @@ class TestFindExistingOuterEdges:
 
 
 class TestIoErrorHealWslBranch:
-    def test_wsl_provider_attempts_host_repair_then_rebuilds(self) -> None:
-        """WSL docker 模式命中 EIO → 先尝试修宿主挂载再重建容器；
-        Windows 直跑时宿主修复走 Linux 专属分支前置检查返回 False，
-        重建重试仍成功并标记 io_error_recovered（无 host_mount_repaired）。"""
+    def test_wsl_provider_attempts_host_repair_then_rebuilds(
+        self, monkeypatch: Any
+    ) -> None:
+        """WSL docker 模式命中 EIO → 先修宿主挂载（WSL 形态路径经 POSIX
+        解析可达修复体，wsl.exe 派发必须打桩防真实子进程副作用）再重建
+        容器；修复与重建重试双成功双标记。"""
         mod = _load_manager()
+
+        class _OkCompleted:
+            returncode = 0
+            stderr = b""
+
+        monkeypatch.setattr(
+            subprocess, "run", lambda args, **kw: _OkCompleted(), raising=True
+        )
         docker_stub = sys.modules["providers.docker_provider"]
 
         # 真实 DockerProvider 类经 sys.modules 动态取（平铺防串扰），基类只能
@@ -1362,7 +1372,7 @@ class TestIoErrorHealWslBranch:
         )
         assert result.success is True
         assert result.metadata["io_error_recovered"] is True
-        assert result.metadata.get("host_mount_repaired") is None
+        assert result.metadata.get("host_mount_repaired") is True
 
 
 # ═══════════════════════════════════════════════════════════

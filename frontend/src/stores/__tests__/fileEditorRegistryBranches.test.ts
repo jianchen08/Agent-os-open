@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * fileEditorRegistry 分支补测：localStorage 还原的防御性解析、体积上限跳过
  * 落盘、监听器订阅/退订/异常隔离，以及更新/移除的命中与未命中分支。

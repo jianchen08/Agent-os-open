@@ -15,6 +15,12 @@ import React from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { DecisionFormAdapter, FormWidget } from '../FormWidget'
 
+// FormWidget 现消费会话隔离形态（useSessionsQuery）计算权限档显示默认；
+// 本文件无 QueryClientProvider，静态 mock 空列表（无会话 → 非隔离默认显示路径）
+vi.mock('@/hooks/queries/useSessionsQuery', () => ({
+  useSessionsQuery: () => ({ data: [] }),
+}))
+
 /**
  * 提交动作：模拟表单 submit 事件（等价于用户点击 type=submit 按钮在真实浏览器
  * 触发的提交；jsdom 的 click 激活路径不重放该事件，故直接派发 submit）

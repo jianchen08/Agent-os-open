@@ -173,13 +173,31 @@ describe('applyPluginThemeVars — 纹理形态', () => {
   })
 })
 
-describe('fetchDynamicThemes — 无可发现主题', () => {
-  it('glob 空集时直接返回：不导入、不告警', async () => {
+describe('fetchDynamicThemes — 构建期发现的动态主题', () => {
+  // 真实 glob：src/themes/*.json 随仓分发三主题，eager 展开为解析后 JSON 对象
+  it('src/themes 全部 JSON 被导入：importTheme 逐个收到合法 JSON 字符串', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    importTheme.mockClear()
     await fetchDynamicThemes()
-    expect(importTheme).not.toHaveBeenCalled()
+    expect(importTheme).toHaveBeenCalledTimes(3)
+    const ids = importTheme.mock.calls.map((c) => JSON.parse(c[0] as string).id).sort()
+    expect(ids).toEqual(['forest-mist', 'lavender-field', 'sunset-glow'])
     expect(warnSpy).not.toHaveBeenCalled()
     warnSpy.mockRestore()
+  })
+
+  it('单主题导入失败只告警跳过（warn 带路径定位），不影响其余主题导入', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    importTheme.mockClear()
+    importTheme.mockImplementation((json: string) => {
+      if (JSON.parse(json).id === 'sunset-glow') throw new Error('storage full')
+    })
+    await expect(fetchDynamicThemes()).resolves.toBeUndefined()
+    expect(importTheme).toHaveBeenCalledTimes(3)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(String(warnSpy.mock.calls[0][0])).toContain('sunset-glow')
+    warnSpy.mockRestore()
+    importTheme.mockReset()
   })
 })
 

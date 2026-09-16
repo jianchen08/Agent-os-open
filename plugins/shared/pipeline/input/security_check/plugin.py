@@ -104,9 +104,10 @@ _PROJECT_ROOT = os.path.dirname(  # noqa: PTH120
 # ── 权限模式（对齐 ZCode/Claude Code/Codex 的处置档位语义）──
 # 黑名单制：只作用于"未被 allow 白名单/命令指纹放行的危险工具"，
 # 参数未命中安全规则关键词的操作任何档位都直接执行，各档差异只在"命中后的处置"。
-# 三条内置底线（路径遍历/敏感系统目录/nul 重定向）任何模式都强制执行；
-# 隔离任务豁免的只是环境类检查（危险工具分类门槛），命中黑名单规则的
-# 参数照常按档位处置（隔离 ≠ 免审批）。
+# 三条内置底线（路径遍历/敏感系统目录/nul 重定向）任何模式都强制执行。
+# 隔离/worktree 会话默认完全免审批（隔离容器即安全边界，用户未显式选择权限档时
+# 基础检查通过即整体放行）；用户在前端选择器显式选择任一档后以所选档为准，
+# 隔离不再豁免黑名单（显式选择判定：_PERMISSION_MODES 表在场即显式，缺省不写表）。
 # - default      : 命中 block/needs_approval 规则都逐次弹审批
 # - accept_edits : file_read/file_write 一律放行；其余工具命中规则仍弹审批
 # - auto         : block 规则自动拒绝不打扰；needs_approval 规则才弹审批
@@ -118,9 +119,11 @@ PERMISSION_MODES: dict[str, str] = {
     "bypass": "跳过规则匹配与审批，保留内置底线",
 }
 
-# 权限模式表：key = pipeline_id（每管道独立，同会话不同管道标签互不影响，
-# 对齐"权限跟当前选中管道标签走"）；sidecar 进程内共享（server.py http.handle
-# 切换写、本插件 execute 读）；持久化到 data/permission_modes.json 防重启丢失。
+# 权限模式表：key = session_id（会话稳定键——同会话内主/子管道、任务轮换的
+# pipeline_id 各不相同，会话级设置必须以会话为键，否则显式选择被隔离豁免
+# 路径吞掉）；写入端 = server.py http.handle 切换端点（前端选择器同键），
+# 本插件 execute 读；sidecar 进程内共享；持久化到 data/permission_modes.json
+# 防重启丢失。
 _PERMISSION_MODES: dict[str, str] = {}
 _PERMISSION_MODES_FILE = os.path.join(_PROJECT_ROOT, "data", "permission_modes.json")
 
@@ -144,16 +147,24 @@ _READ_ONLY_TOOLS: frozenset[str] = frozenset({
 
 
 def _load_permission_modes() -> None:
-    """启动时从持久化文件加载权限模式表（幂等，失败留痕不阻断）。"""
-    global _PERMISSION_MODES  # noqa: PLW0603
+    """启动时从持久化文件加载权限模式表（幂等，失败留痕不阻断）。
+
+    原地清空+更新、绝不重绑定：server.py 经 `from plugin import
+    _PERMISSION_MODES` 持有同一对象的引用，重绑定会把写侧（端点持有的旧
+    对象）与读侧（本模块的新对象）劈成两张表——端点写入不可见、且
+    _save_permission_modes 序列化旧表导致切换条目永不落盘（BUG-15 根因之一）。
+    """
     try:
         with open(_PERMISSION_MODES_FILE, encoding="utf-8") as f:
             import json  # noqa: PLC0415
 
             data = json.load(f)
         if isinstance(data, dict):
-            _PERMISSION_MODES = {k: v for k, v in data.items() if v in PERMISSION_MODES}
-            logger.info("[security_check] 权限模式表加载 | pipelines=%d", len(_PERMISSION_MODES))
+            _PERMISSION_MODES.clear()
+            _PERMISSION_MODES.update(
+                (k, v) for k, v in data.items() if v in PERMISSION_MODES
+            )
+            logger.info("[security_check] 权限模式表加载 | sessions=%d", len(_PERMISSION_MODES))
     except FileNotFoundError:
         pass
     except Exception as exc:
@@ -412,15 +423,16 @@ class SecurityCheckPlugin(IInputPlugin):
         本方法只做编排；两道检查分别委托 ``_run_base_safety_scan`` /
         ``_authorize_tool_calls``，各自可独立理解。
 
-        隔离 ≠ 免审批，隔离只豁免「环境类」检查：
+        隔离/worktree 会话默认免审批，显式选择可覆盖：
         1. 基础安全检查（路径遍历 / 敏感系统目录黑名单 / nul 重定向）→ 任何
            模式都必须执行，这是防注入、防触碰 OS 核心目录的底线，隔离不能绕过
-        2. 参数级黑名单（security_rules.yaml：block / needs_approval）→ 与隔离
-           正交，隔离任务命中规则照常处置（弹审批 / 软拦截）——隔离解决的是
-           「执行环境隔离」，审批解决的是「危险参数需人工确认」
-        3. 环境类豁免：危险工具分类门槛（命令执行类 / dangerous_operations 声明）
-           的存在意义是在无隔离边界时给任意执行兜底；隔离边界（容器/沙箱）
-           已承担该风险，隔离任务未命中规则的参数直接放行，不弹审批
+        2. 隔离任务 + 用户未显式选择权限档 → 基础检查通过即整体放行
+           （隔离容器即安全边界，黑名单命中也不弹审批）
+        3. 显式选择（前端权限选择器写入 _PERMISSION_MODES 表）→ 以所选档为准，
+           参数级黑名单（block / needs_approval）照常按档处置，隔离不再豁免
+        4. 非隔离任务 → 按权限档走：危险工具分类门槛（命令执行类 /
+           dangerous_operations 声明）兜底无隔离边界的任意执行，命中规则的
+           参数按档处置
 
         Args:
             ctx: 插件执行上下文
@@ -447,11 +459,14 @@ class SecurityCheckPlugin(IInputPlugin):
 
         # ── 第二道：按模式分流 ──
 
-        # 隔离 ≠ 免审批：隔离豁免的是「环境类」检查（危险工具分类门槛），
-        # 参数级黑名单（block/needs_approval 规则）与隔离正交，隔离任务命中
-        # 规则照常走审批/软拦截（isolation_level 是隔离唯一真相源）。
+        # 隔离/worktree 默认免审批（用户未显式选择权限档时，隔离容器即安全边界，
+        # 基础检查通过即整体放行）；显式选择任一档后以所选档为准，黑名单照常
+        # 生效（isolation_level 是隔离唯一真相源，显式判定见 _explicit_permission_mode）。
         execution_contexts = ctx.state.get("execution_contexts", [])
         isolated = self._is_isolated(execution_contexts)
+        if isolated and self._explicit_permission_mode(ctx) is None:
+            logger.info("[%s] 隔离任务，基础检查通过，放行", self.name)
+            return {"security.decision": {"allowed": True, "reason": "isolated task, base checks passed"}}
 
         decision = await self._authorize_tool_calls(ctx, tool_calls, isolated=isolated)
         if decision is not None:
@@ -526,8 +541,8 @@ class SecurityCheckPlugin(IInputPlugin):
 
         隔离豁免「环境类」检查：isolated=True 时跳过危险工具分类门槛
         （命令执行类 / dangerous_operations 声明），隔离边界承担执行环境风险，
-        未命中规则的参数不弹审批；参数级黑名单规则（block/needs_approval）
-        与隔离正交，所有非只读工具照常匹配处置。
+        未命中规则的参数不弹审批。走本方法的隔离任务必已显式选择权限档
+        （未选择时 _do_work 已整体放行），命中黑名单规则按所选档处置。
 
         Returns:
             需要处置（软拦截/弹审批）时的决策字典；全部放行返回 None。
@@ -648,18 +663,32 @@ class SecurityCheckPlugin(IInputPlugin):
             signature=signature,
         )
 
-    def _resolve_permission_mode(self, ctx: PluginContext) -> str:
-        """解析当前调用的权限模式。
+    def _explicit_permission_mode(self, ctx: PluginContext) -> str | None:
+        """解析用户在前端显式选择的权限档；未显式选择返回 None。
 
-        key 为 pipeline_id（每管道独立模式，同会话不同管道标签互不影响，
-        对齐"权限跟当前选中管道标签走"）；管道 id 缺失时回退 session_id。
-        优先级：管道级切换（http.handle 写入的 _PERMISSION_MODES）> 插件配置
-        （pipeline yaml security_check config 的 mode 字段）> 默认 "default"。
+        判据 = 权限模式表（_PERMISSION_MODES，键 session_id）存在该会话条目：
+        表只由 http.handle 切换端点写入（前端选择器点选，含显式选 default），
+        缺省态不写表，故「在场即显式」。隔离任务的免审批默认仅在本方法返回
+        None 时生效；显式选择任一档（含 default）都覆盖免审批默认。
+
+        key 为 session_id（会话稳定键）：同一会话内主/子管道、任务轮换的
+        pipeline_id 各不相同，会话级设置键在 pipeline_id 上会因键位漂移失配
+        （BUG-15：显式选择被隔离豁免路径吞掉）。
         """
-        pipeline_id = ctx.state.get("pipeline_id") or ctx.state.get(StateKeys.SESSION_ID, "")
-        mode = _PERMISSION_MODES.get(pipeline_id)
-        if mode:
-            return mode
+        session_id = str(ctx.state.get(StateKeys.SESSION_ID, "") or "")
+        return _PERMISSION_MODES.get(session_id)
+
+    def _resolve_permission_mode(self, ctx: PluginContext) -> str:
+        """解析当前调度的权限模式。
+
+        key 为 session_id（会话级模式：同会话内所有管道共享同一显式档，
+        与写入端 http.handle 同键）。优先级：用户显式选择（http.handle 写入
+        的 _PERMISSION_MODES）> 插件配置（pipeline yaml security_check config
+        的 mode 字段）> 默认 "default"。
+        """
+        explicit = self._explicit_permission_mode(ctx)
+        if explicit:
+            return explicit
         return self._config.get("mode", "default")
 
     async def _await_approval(
@@ -1266,7 +1295,12 @@ class SecurityCheckPlugin(IInputPlugin):
             if ".." in path.replace("\\", "/"):
                 return f"Path traversal detected in raw path: {path}"
 
-            # 2. 使用 Path.resolve() 解析绝对路径（处理符号链接）
+            # 2. 检查空字节注入——先于 resolve：嵌 NUL 的路径在 resolve 处
+            #    恒抛 ValueError/OSError，放其后本检查永不命中、只落泛化 Invalid path
+            if "\x00" in path:
+                return f"Null byte injection detected: {path}"
+
+            # 3. 使用 Path.resolve() 解析绝对路径（处理符号链接）
             try:
                 resolved = Path(path).resolve()
                 if ".." in str(resolved):
@@ -1274,7 +1308,7 @@ class SecurityCheckPlugin(IInputPlugin):
             except (OSError, ValueError) as e:
                 return f"Invalid path: {path} ({e})"
 
-            # 3. 检查编码绕过（URL 编码、双重编码等）
+            # 4. 检查编码绕过（URL 编码、双重编码等）
             if "%" in path:
                 try:
                     decoded = urllib.parse.unquote(path)
@@ -1291,9 +1325,6 @@ class SecurityCheckPlugin(IInputPlugin):
                     )
                     return f"Encoded path traversal detected (decode failed): {path}"
 
-            # 4. 检查空字节注入（Windows）
-            if "\x00" in path:
-                return f"Null byte injection detected: {path}"
 
         return ""
 
@@ -1428,10 +1459,9 @@ class SecurityCheckPlugin(IInputPlugin):
             if ":" in raw_s:
                 op_name, _, pattern = raw_s.partition(":")
                 if pattern:
-                    # 路径前缀匹配（大小写不敏感，分隔符归一化）
+                    # 路径前缀匹配（大小写不敏感，分隔符归一化；replace/lower
+                    # 均保长，pattern 非空则 norm 必非空）
                     norm_pattern = pattern.replace("\\", "/").lower()
-                    if not norm_pattern:
-                        continue
                     for pk in self._PATH_ARGS:
                         val = args.get(pk, "")
                         if val and val.replace("\\", "/").lower().startswith(norm_pattern):

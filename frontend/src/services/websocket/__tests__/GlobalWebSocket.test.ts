@@ -1,6 +1,7 @@
 /** GlobalWebSocket 单元测试 测试全局 WebSocket 服务的重连参数、状态转换、心跳机制。 */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { finishWsServiceSetup, MockWebSocket, instances, type MockWebSocketInstance } from './helpers/mockWebSocket'
 import type * as globalWebSocketMod from '../GlobalWebSocket'
 
 // ── Mock 依赖 ──
@@ -36,56 +37,21 @@ vi.mock('@/services/authCallbacks', () => ({
   triggerAuthExpired: vi.fn(),
 }))
 
-// Mock logger
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    websocket: {
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
+// Mock logger（工厂同源：顶部注册与 createService 内 doMock 共用）
+function loggerMock() {
+  return {
+    loggers: {
+      websocket: {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
     },
-  },
-}))
-
-// ── Mock WebSocket ──
-
-type MockEventListener = ((event: any) => void) | null
-
-interface MockWebSocketInstance {
-  onopen: MockEventListener
-  onclose: MockEventListener
-  onmessage: MockEventListener
-  onerror: MockEventListener
-  send: ReturnType<typeof vi.fn>
-  close: ReturnType<typeof vi.fn>
-  readyState: number
-}
-
-const instances: MockWebSocketInstance[] = []
-
-class MockWebSocket {
-  static OPEN = 1
-  static CLOSED = 3
-  static CONNECTING = 0
-
-  onopen: MockEventListener = null
-  onclose: MockEventListener = null
-  onmessage: MockEventListener = null
-  onerror: MockEventListener = null
-  send = vi.fn()
-  close = vi.fn((code?: number, _reason?: string) => {
-    this.readyState = MockWebSocket.CLOSED
-    if (this.onclose) {
-      this.onclose({ code: code ?? 1000, reason: _reason ?? '' })
-    }
-  })
-  readyState = MockWebSocket.CONNECTING
-
-  constructor(public url: string) {
-    instances.push(this as unknown as MockWebSocketInstance)
   }
 }
+vi.mock('@/utils/logger', () => loggerMock())
+
 
 // ── 导入被测模块 ──
 
@@ -126,27 +92,9 @@ async function createService(): Promise<{
       }),
     },
   }))
-  vi.doMock('@/utils/logger', () => ({
-    loggers: {
-      websocket: {
-        debug: vi.fn(),
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-    },
-  }))
+  vi.doMock('@/utils/logger', () => loggerMock())
 
-  instances.length = 0
-  const mod = await import('../GlobalWebSocket')
-  const service = mod.globalWS
-
-  return {
-    service,
-    connect: (token: string) => service.connect(token),
-    disconnect: () => service.disconnect(),
-    getLatestWs: () => instances[instances.length - 1],
-  }
+  return finishWsServiceSetup()
 }
 
 /** 模拟成功连接：先触发 connect → 推进 timer → 触发 onopen */
@@ -156,11 +104,52 @@ function simulateSuccessfulOpen(ws: MockWebSocketInstance): void {
   }
 }
 
+/** 建连 → 推进调度 → 完成 open 握手，返回可交互的 ws 实例（连接后置用例共用前缀） */
+async function connectAndOpen(
+  bundle: {
+    connect: (token: string) => void
+    getLatestWs: () => MockWebSocketInstance | undefined
+  },
+  token = 'test-token',
+): Promise<MockWebSocketInstance> {
+  bundle.connect(token)
+  await vi.advanceTimersByTimeAsync(100)
+  const ws = bundle.getLatestWs()!
+  simulateSuccessfulOpen(ws)
+  return ws
+}
+
 /** 模拟连接关闭 */
 function simulateClose(ws: MockWebSocketInstance, code: number = 1000, reason: string = ''): void {
   if (ws.onclose) {
     ws.onclose({ code, reason })
   }
+}
+
+/** 建服务并完成首次连接握手，返回可交互句柄（消息协议类用例共用前缀） */
+async function setupConnected() {
+  const { service, connect, getLatestWs, disconnect } = await createService()
+  const ws = await connectAndOpen({ connect, getLatestWs })
+  return { service, ws, disconnect }
+}
+
+/** 从 ws.send 的调用记录中提取所有已发送消息的解析结果 */
+function getSentMessages(ws: MockWebSocketInstance) {
+  return ws.send.mock.calls.map((call: string[]) => {
+    try { return JSON.parse(call[0]) } catch { return null }
+  })
+}
+
+/** 断线 → 自动重连：推进退避计时并返回新 WS 实例（票据单次消费需重新取票） */
+async function reconnectAfterClose(
+  getLatestWs: () => MockWebSocketInstance | undefined,
+  ws: MockWebSocketInstance,
+  code = 1006,
+  reason = 'network',
+) {
+  simulateClose(ws, code, reason)
+  await vi.advanceTimersByTimeAsync(4000 + 100)
+  return getLatestWs()!
 }
 
 // ── 测试套件 ──
@@ -184,12 +173,7 @@ describe('GlobalWebSocketService', () => {
     it('首次重连延迟应为 4 秒（RECONNECT_BASE_DELAY）', async () => {
       const { service, connect, getLatestWs } = await createService()
 
-      connect('test-token')
-      // connect 内部有 50ms 延迟才真正创建 WS
-      await vi.advanceTimersByTimeAsync(100)
-
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
       expect(service.status).toBe('connected')
 
       // 模拟断开
@@ -216,10 +200,7 @@ describe('GlobalWebSocketService', () => {
     it('重连延迟应按指数退避递增', async () => {
       const { service, connect, getLatestWs } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // 第 1 次断开 → 延迟 4s (BASE_DELAY * 2^0)
       simulateClose(ws, 1006, 'error')
@@ -254,10 +235,7 @@ describe('GlobalWebSocketService', () => {
     it('重连延迟不应超过最大值 60 秒（RECONNECT_MAX_DELAY）', async () => {
       const { service, connect, getLatestWs } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // 断开后进入 reconnecting，验证经过足够多次重连后服务仍持续尝试
       simulateClose(ws, 1006, 'error')
@@ -303,11 +281,7 @@ describe('GlobalWebSocketService', () => {
     it('WebSocket open 后状态应变为 connected', async () => {
       const { service, connect, getLatestWs } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       expect(service.status).toBe('connected')
       service.disconnect()
@@ -316,10 +290,7 @@ describe('GlobalWebSocketService', () => {
     it('连接关闭（非 code=4000）应触发 reconnecting', async () => {
       const { service, connect, getLatestWs } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // 模拟异常断开
       simulateClose(ws, 1006, 'abnormal')
@@ -331,10 +302,7 @@ describe('GlobalWebSocketService', () => {
     it('连接关闭（code=4000）不应重连，状态保持 disconnected', async () => {
       const { service, connect, getLatestWs } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // code=4000 表示被新连接替换
       simulateClose(ws, 4000, '被新连接替换')
@@ -348,10 +316,7 @@ describe('GlobalWebSocketService', () => {
       const onKicked = vi.fn()
       service.subscribe('kicked_by_replacement', onKicked)
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // 断线期间入队一条 user_input（占位超时计时同时挂上）
       service.sendUserInput('thread-1', '滞留消息', { clientMessageId: 'cmid-k' })
@@ -377,10 +342,7 @@ describe('GlobalWebSocketService', () => {
     it('被 4000 踢旧后 connect() 不再新建连接（防 visibilitychange 互踢环）', async () => {
       const { service, connect, getLatestWs } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // code=4000 被新连接替换
       simulateClose(ws, 4000, '被新连接替换')
@@ -397,10 +359,7 @@ describe('GlobalWebSocketService', () => {
     it('被 4000 踢旧后 disconnect()（登出）复位标记，允许重新连接', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       simulateClose(ws, 4000, '被新连接替换')
       expect(service.wasKickedByReplacement()).toBe(true)
@@ -414,10 +373,7 @@ describe('GlobalWebSocketService', () => {
       const onKicked = vi.fn()
       service.subscribe('kicked_by_replacement', onKicked)
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // 内核踢旧两段式：kicked 文本帧先到（先于 Close 帧）
       ws.onmessage?.({
@@ -468,10 +424,7 @@ describe('GlobalWebSocketService', () => {
     it('disconnect 后状态应为 disconnected 且不再重连', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       disconnect()
       expect(service.status).toBe('disconnected')
@@ -485,10 +438,7 @@ describe('GlobalWebSocketService', () => {
     it('disconnect 后再次 connect 应能重新建立连接（登出重登 WS 复活）', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
       expect(service.status).toBe('connected')
 
       // 登出：disconnect 置 _disposed
@@ -511,10 +461,7 @@ describe('GlobalWebSocketService', () => {
     it('connected 状态下 token 轮换：不拆连接（无 close），状态保持 connected', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
-      connect('token-a')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs }, 'token-a')
 
       // token 续期后 router effect 用新 token 调 connect
       connect('token-b')
@@ -530,10 +477,7 @@ describe('GlobalWebSocketService', () => {
     it('connected 期间轮换的新 token 用于断线重连', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
-      connect('token-a')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs }, 'token-a')
 
       // token 轮换：只更新内部 token，不拆连接
       connect('token-b')
@@ -541,10 +485,7 @@ describe('GlobalWebSocketService', () => {
 
       // 断线 → 自动重连：票据单次消费，必须重新取票（轮换后的 token 由
       // apiClient 随取票请求统一携带），握手 URL 携带新票据且不含 token
-      simulateClose(ws, 1006, 'network')
-      await vi.advanceTimersByTimeAsync(4000 + 100)
-
-      const ws2 = getLatestWs()!
+      const ws2 = await reconnectAfterClose(getLatestWs, ws)
       expect(ws2).not.toBe(ws)
       expect(mockFetchWsTicket).toHaveBeenCalledTimes(2)
       expect(ws2.url).toContain('ticket=mock-ws-ticket')
@@ -619,16 +560,10 @@ describe('GlobalWebSocketService', () => {
     it('断线重连重新取票（票据单次消费，每次连接独立取票）', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
       expect(mockFetchWsTicket).toHaveBeenCalledTimes(1)
 
-      simulateClose(ws, 1006, 'network')
-      await vi.advanceTimersByTimeAsync(4000 + 100)
-
-      const ws2 = getLatestWs()!
+      const ws2 = await reconnectAfterClose(getLatestWs, ws)
       expect(ws2).not.toBe(ws)
       expect(mockFetchWsTicket).toHaveBeenCalledTimes(2)
       expect(ws2.url).toContain('ticket=mock-ws-ticket')
@@ -647,10 +582,7 @@ describe('GlobalWebSocketService', () => {
     it('连接成功后应启动心跳定时器', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // 推进 30 秒触发心跳
       await vi.advanceTimersByTimeAsync(30000)
@@ -670,10 +602,7 @@ describe('GlobalWebSocketService', () => {
     it('收到 heartbeat_ack 应清除超时定时器', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // 触发心跳发送
       await vi.advanceTimersByTimeAsync(30000)
@@ -695,10 +624,7 @@ describe('GlobalWebSocketService', () => {
     it('心跳超时后应触发重连', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // 触发心跳发送（30s interval 触发）
       await vi.advanceTimersByTimeAsync(30000)
@@ -731,10 +657,7 @@ describe('GlobalWebSocketService', () => {
       // 回归契约: 单次超时（missCount=1）不触发 close；收到 ack 后 missCount 清零。
       const { service, connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // 推进 30s → 心跳发出，超时定时器启动（45s 后到期）
       await vi.advanceTimersByTimeAsync(30000)
@@ -769,10 +692,7 @@ describe('GlobalWebSocketService', () => {
       service.subscribe('connect', connectHandler)
       service.subscribe('_status', statusHandler)
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       expect(connectHandler).toHaveBeenCalledWith({ status: 'connected' })
       expect(statusHandler).toHaveBeenCalledWith({ status: 'connected' })
@@ -842,16 +762,10 @@ describe('GlobalWebSocketService', () => {
       service.sendUserInput('thread-1', 'hello')
 
       // 之后连接成功，消息应被发出
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       // flushQueue 应发送了排队的消息
-      const sendCalls = ws.send.mock.calls.map((call: string[]) => {
-        try { return JSON.parse(call[0]) } catch { return null }
-      })
-      const userMsg = sendCalls.find((c: any) => c?.type === 'user_input')
+      const userMsg = getSentMessages(ws).find((c: any) => c?.type === 'user_input')
       expect(userMsg).toBeDefined()
       expect(userMsg.content).toBe('hello')
       expect(userMsg.thread_id).toBe('thread-1')
@@ -868,15 +782,9 @@ describe('GlobalWebSocketService', () => {
         clientMessageId: 'cmid-s',
       })
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
-      const sendCalls = ws.send.mock.calls.map((call: string[]) => {
-        try { return JSON.parse(call[0]) } catch { return null }
-      })
-      const userMsg = sendCalls.find((c: any) => c?.type === 'user_input')
+      const userMsg = getSentMessages(ws).find((c: any) => c?.type === 'user_input')
       expect(userMsg).toBeDefined()
       expect(userMsg.thinking_strength).toBe('high')
 
@@ -891,15 +799,9 @@ describe('GlobalWebSocketService', () => {
         clientMessageId: 'cmid-s',
       })
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
-      const sendCalls = ws.send.mock.calls.map((call: string[]) => {
-        try { return JSON.parse(call[0]) } catch { return null }
-      })
-      const userMsg = sendCalls.find((c: any) => c?.type === 'user_input')
+      const userMsg = getSentMessages(ws).find((c: any) => c?.type === 'user_input')
       expect(userMsg).toBeDefined()
       expect(userMsg.thinking_strength).toBe('')
 
@@ -932,23 +834,6 @@ describe('GlobalWebSocketService', () => {
   // 7. sendCancel pipelineId 参数测试
   // ──────────────────────────────────────────────
   describe('sendCancel - pipelineId 参数', () => {
-    /** 辅助函数：建立连接并返回最近一次 WS 实例 */
-    async function setupConnected() {
-      const { service, connect, getLatestWs, disconnect } = await createService()
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
-      return { service, ws, disconnect }
-    }
-
-    /** 辅助函数：从 ws.send 的调用记录中提取所有已发送消息的解析结果 */
-    function getSentMessages(ws: MockWebSocketInstance) {
-      return ws.send.mock.calls.map((call: string[]) => {
-        try { return JSON.parse(call[0]) } catch { return null }
-      })
-    }
-
     it('只传 threadId 时，消息格式向后兼容，pipeline_id 为 undefined', async () => {
       const { service, ws, disconnect } = await setupConnected()
 
@@ -1018,21 +903,6 @@ describe('GlobalWebSocketService', () => {
   // 7b. sendRegenerate 测试（批次 D：重新生成/回退/编辑重发入站协议）
   // ──────────────────────────────────────────────
   describe('sendRegenerate - 重新生成协议', () => {
-    async function setupConnected() {
-      const { service, connect, getLatestWs, disconnect } = await createService()
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
-      return { service, ws, disconnect }
-    }
-
-    function getSentMessages(ws: MockWebSocketInstance) {
-      return ws.send.mock.calls.map((call: string[]) => {
-        try { return JSON.parse(call[0]) } catch { return null }
-      })
-    }
-
     it('重新生成：只传 thread_id 时按协议携带 pipeline_id/user_message_id（空串缺省）', async () => {
       const { service, ws, disconnect } = await setupConnected()
 
@@ -1085,10 +955,7 @@ describe('GlobalWebSocketService', () => {
       // 未连接直接发送 → 入队
       service.sendRegenerate('thread-3', { pipelineId: 'pipe-z' })
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       const messages = getSentMessages(ws)
       const regen = messages.find((m: any) => m?.type === 'regenerate')
@@ -1106,10 +973,7 @@ describe('GlobalWebSocketService', () => {
     it('连接成功应更新 store 为 connected', async () => {
       const { connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       expect(mockUpdateConnectionStatus).toHaveBeenCalledWith(
         expect.objectContaining({ state: 'connected' }),
@@ -1121,10 +985,7 @@ describe('GlobalWebSocketService', () => {
     it('断线应更新 store 为 disconnected', async () => {
       const { connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       mockUpdateConnectionStatus.mockClear()
       simulateClose(ws, 1006, 'error')
@@ -1139,10 +1000,7 @@ describe('GlobalWebSocketService', () => {
     it('重连中应更新 store 为 reconnecting', async () => {
       const { connect, getLatestWs, disconnect } = await createService()
 
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       mockUpdateConnectionStatus.mockClear()
       simulateClose(ws, 1006, 'error')
@@ -1200,10 +1058,7 @@ describe('GlobalWebSocketService', () => {
       })
 
       // TTL 内恢复连接：connect → open → _flushQueue 发出
-      connect('test-token')
-      await vi.advanceTimersByTimeAsync(100)
-      const ws = getLatestWs()!
-      simulateSuccessfulOpen(ws)
+      const ws = await connectAndOpen({ connect, getLatestWs })
 
       const sent = ws.send.mock.calls.some((call: string[]) => {
         try {

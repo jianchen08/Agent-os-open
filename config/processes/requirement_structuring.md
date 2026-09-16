@@ -130,8 +130,8 @@
 
 1. 验收标准清单（按模块分组，标注 traces_to）→ code_writer（每个任务只负责一个模块）
 2. 模块间接口定义 → code_writer（作为编码约束）
-3. 状态机定义 → test_debug_agent（作为测试设计输入）
-4. 边界场景清单 → test_debug_agent（作为异常测试输入）
+3. 状态机定义 → mode_coding/test_debug_agent（作为测试设计输入）
+4. 边界场景清单 → mode_coding/test_debug_agent（作为异常测试输入）
 5. **测试命名锚定**：每条实现级 AC 至少有一个以 AC-ID 命名的测试（如 `test_AC1_create_coupon`），
    使状态矩阵能从测试结果自动推导（确定性，不靠手动盖章）
 

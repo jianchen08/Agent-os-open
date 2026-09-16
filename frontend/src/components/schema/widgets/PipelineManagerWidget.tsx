@@ -14,10 +14,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  Ban,
   ChevronRight,
-  CircleDot,
-  CheckCircle2,
   Loader2,
   XCircle,
   PauseCircle,
@@ -31,6 +28,7 @@ import {
   Trash2,
 } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
+import { pipelineStatusToTabStatus, statusIcon, TERMINAL_PIPELINE_STATUSES } from './pipelineStatusVisuals'
 import {
   Dialog,
   DialogContent,
@@ -43,14 +41,18 @@ import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
 import { invalidateLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
 import { usePipelineRunsQuery, usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
 import { useSessionsQuery, readSessions, ensureSessionsLoaded } from '@/hooks/queries/useSessionsQuery'
+import { useElementVisible } from '@/hooks/useElementVisible'
+import { useVisibleRefetch } from '@/hooks/useVisibleRefetch'
+import { queryKeys } from '@/services/query/queryKeys'
 import apiClient from '@/services/api/client'
 import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { mapStateInfoToViewModel, type PipelineStateEntryViewModel } from '@/services/api/pipelines'
 import { deleteProject, fetchProjects, pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
+import { ModePanelBadge } from './ModePanelBadge'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { openWorkspaceTreeTab } from './workspaceTreeTab'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { entryDurationMs, formatDuration } from '@/types/activity'
@@ -58,31 +60,12 @@ import {
   taskStatusLabel,
   taskStatusToPipelineStatus,
 } from '@/types/taskStatus'
-import type { PipelineStatus, PipelineViewEntry } from '@/types/pipeline'
-import type { AgentTab } from '@/types/task'
+import type { PipelineViewEntry } from '@/types/pipeline'
 
 // ═════════════════════════════════════════════════════════════════
 // 辅助
 // ═════════════════════════════════════════════════════════════════
 
-
-/** 管道运行视图态 → Agent 标签页状态（未知落 'unknown'，不猜 running） */
-function pipelineStatusToTabStatus(status: PipelineStatus): AgentTab['status'] {
-  switch (status) {
-    case 'running':
-      return 'running'
-    case 'completed':
-      return 'completed'
-    case 'failed':
-      return 'failed'
-    case 'suspended':
-    case 'cancelled':
-      // 已暂停/已取消 = 停在那里等待用户
-      return 'waiting_input'
-    case 'unknown':
-      return 'unknown'
-  }
-}
 
 /** 从任务对象提取管道 ID（后端字段名与前端类型并存时双取） */
 function taskPipelineId(task: Record<string, unknown>): string | undefined {
@@ -104,48 +87,34 @@ function entryTokenTotal(entry: PipelineViewEntry): number | null {
   return null
 }
 
-/** 管道运行状态 → 展示文案（对齐内核 RunStatus 五态；非任务条目仅此一态） */
-const PIPELINE_STATUS_LABELS: Record<string, string> = {
-  running: '运行中',
-  suspended: '已暂停',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-  unknown: '未知',
-}
-
-
-/** 状态 → 图标 + 颜色 */
-function statusIcon(status: string): { icon: React.ReactNode; color: string; label: string } {
-  const map: Record<string, { icon: React.ReactNode; color: string }> = {
-    running: { icon: <Loader2 className="h-4 w-4 animate-spin" />, color: 'text-status-info' },
-    suspended: { icon: <PauseCircle className="h-4 w-4" />, color: 'text-status-pending' },
-    completed: { icon: <CheckCircle2 className="h-4 w-4" />, color: 'text-status-success' },
-    failed: { icon: <XCircle className="h-4 w-4" />, color: 'text-status-error' },
-    cancelled: { icon: <Ban className="h-4 w-4" />, color: 'text-muted-foreground' },
-    unknown: { icon: <CircleDot className="h-4 w-4" />, color: 'text-status-pending' },
-  }
-  const conf = map[status] ?? { icon: <CircleDot className="h-4 w-4" />, color: 'text-status-pending' }
-  return { icon: conf.icon, color: conf.color, label: PIPELINE_STATUS_LABELS[status] ?? status }
-}
-
-/** 运行终态集（runs 权威，收束分组；suspended 可恢复不算终态） */
-const TERMINAL_PIPELINE_STATUSES: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled'])
-
 // ═════════════════════════════════════════════════════════════════
 // 主组件
 // ═════════════════════════════════════════════════════════════════
 
 export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
+  // 离屏暂停：面板根节点不可见（工作区非激活 tab display:none / 窗口最小化）时
+  // 冻结全部 30s 轮询与秒级耗时 ticker（隐藏面板的采集/重渲染纯负载），恢复
+  // 可见立即 invalidate 对账一次，不等下一周期
+  const { ref: rootRef, visible: panelVisible } = useElementVisible<HTMLDivElement>()
   /** 管道 runs 快照（query 化：queryKeys.pipelineRuns，30s 兜底轮询 + WS 流式事件增量） */
-  const { data: registryRuns = {} } = usePipelineRunsQuery()
+  const { data: registryRuns = {} } = usePipelineRunsQuery(panelVisible ? undefined : false)
   /** 管道 state 摘要（query 化：queryKeys.pipelineStates；states 侧失败仅 runs 快照仍可用） */
-  const { data: registryStates = {}, error: registryStatesError } = usePipelineStatesQuery()
+  const { data: registryStates = {}, error: registryStatesError } = usePipelineStatesQuery(
+    panelVisible ? undefined : false,
+  )
   /** 实时 token 用量（cost_update 事件驱动） */
   const usageByPipeline = useContextUsageStore((s) => s.usageByPipeline)
   /** 全量任务（task_service 插件端点，不过滤 long-term；任务节点/任务管道判定权威源）。
    *  query 化：queryKeys.pipelineAllTasks，30s 轮询 + 窗口聚焦刷新替代原本地 interval */
-  const { data: allTasks = [], error: tasksError } = useAllTasksQuery()
+  const { data: allTasks = [], error: tasksError } = useAllTasksQuery(
+    panelVisible ? undefined : false,
+  )
+  const queryClient = useQueryClient()
+  useVisibleRefetch(
+    panelVisible,
+    [queryKeys.pipelineRuns, queryKeys.pipelineStates, queryKeys.pipelineAllTasks],
+    queryClient,
+  )
   /** 会话列表（按 thread_id 取会话标题） */
   const { data: sessions = [] } = useSessionsQuery()
   /** 项目登记行（project = 文件夹+登记：树的项目分组节点数据源） */
@@ -230,6 +199,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         // 原始状态与 state 真值（不被 4 态映射吞掉——evaluating/planning 等细态可见）
         taskStatus: task ? String(task.status ?? '') || undefined : undefined,
         stateStatus: st?.taskStatus,
+        mode: st?.mode,
         stateEnded: st?.ended,
         rawError: st?.rawError,
         liveUsage: live
@@ -255,15 +225,30 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
       const st = stateViews[pid]
       // BUG-2b 终态防御（ADR 2026-09-14）：state 视图已持 runs 权威终态
       // （冷行 run_status overlay / reap 投影）的行，崩溃遗留的陈旧
-      // task.status 投影不再参与状态归组——终态优先，不再显示为幽灵执行中
+      // task.status 投影不再参与状态归组——终态优先，不再显示为幽灵执行中。
+      // BUG-21 无证据防御：runs/state 双面均无此管道行（未起跑任务管道无
+      // message_slots/checkpoint，state 冷兜底不出口）时，任务域未决态
+      // （pending/running/evaluating → running）没有运行态真值可依——runs
+      // 权威无行 = 无运行证据，落 'unknown' 不再猜 running；任务域终态
+      // （completed/failed/cancelled 等自有证据）照常投影。
       const status =
-        st && TERMINAL_PIPELINE_STATUSES.has(st.status) ? st.status : mapped
-      const timestamps = task.timestamps as Record<string, unknown> | undefined
+        st && TERMINAL_PIPELINE_STATUSES.has(st.status)
+          ? st.status
+          : !st && mapped === 'running'
+            ? 'unknown'
+            : mapped
+      // 时间真值链：任务端点顶层只有 created_at/updated_at（state 聚合行
+      // 当前恒为空串）；无真值落空串 = 耗时列按缺失态 '--' 展示。禁止以
+      // 渲染时刻兜底起点——BUG-21 全面板假 0ms 即该兜底所致（now 起点
+      // 减 now ≈ 0）。结束时刻仅终态任务取（updated_at ≈ 终态写入时刻）。
       const startedAt =
-        (timestamps?.startedAt as string | undefined)
-        || (timestamps?.createdAt as string | undefined)
-        || new Date().toISOString()
-      const completedAt = timestamps?.completedAt as string | undefined
+        (typeof task.created_at === 'string' && task.created_at) ||
+        (typeof task.createdAt === 'string' && task.createdAt) ||
+        ''
+      const updatedAt =
+        (typeof task.updated_at === 'string' && task.updated_at) ||
+        (typeof task.updatedAt === 'string' && task.updatedAt) ||
+        ''
       entries.push({
         key: pid,
         pipelineId: pid,
@@ -272,7 +257,8 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         originSessionId: st?.originSessionId,
         status,
         startedAt,
-        endedAt: completedAt,
+        endedAt:
+          updatedAt && TERMINAL_PIPELINE_STATUSES.has(status) ? updatedAt : undefined,
         kind: 'task',
         name: String(task.title ?? pid.slice(0, 12)),
         agentName: String(task.agentName ?? task.agent_name ?? '') || undefined,
@@ -294,6 +280,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         currentPhase: st?.currentPhase,
         messageCount: st?.messageCount,
         stateStatus: st?.taskStatus,
+        mode: st?.mode,
         stateEnded: st?.ended,
         rawError: st?.rawError,
       })
@@ -327,6 +314,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
         currentPhase: st.currentPhase,
         messageCount: st.messageCount,
         stateStatus: st.taskStatus,
+        mode: st.mode,
         stateEnded: st.ended,
         rawError: st.rawError,
         // 工作区坐标（state 真值：ws_meta.path/workspace；替代旧
@@ -364,16 +352,17 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
   const [treeOpenKeys, setTreeOpenKeys] = useState<Set<string>>(new Set())
   /** 展开详情的条目 key 集合（与树展开解耦：树收起不关详情，信息停留显示） */
   const [detailOpenKeys, setDetailOpenKeys] = useState<Set<string>>(new Set())
-  /** 秒级 ticker（执行中条目耗时实时刷新） */
+  /** 秒级 ticker（执行中条目耗时实时刷新）；面板不可见时冻结（整面板重渲染纯负载） */
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
+    if (!panelVisible) return
     const hasActive = pipelineEntries.some(
       (e) => e.status === 'running' || e.status === 'suspended',
     )
     if (!hasActive) return
     const timer = setInterval(() => setNowMs(Date.now()), 1000)
     return () => clearInterval(timer)
-  }, [pipelineEntries])
+  }, [pipelineEntries, panelVisible])
 
   /** 项目删除确认弹窗（待删项目；null = 关闭） */
   const [projectDeleteTarget, setProjectDeleteTarget] = useState<{
@@ -384,7 +373,6 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
   const [deleteChildren, setDeleteChildren] = useState(false)
   const [deleteFiles, setDeleteFiles] = useState(false)
   const [deletingProject, setDeletingProject] = useState(false)
-  const queryClient = useQueryClient()
 
   /** 确认删除项目：成功后刷新项目登记与任务列表（级联口径下子任务随之消失） */
   const handleProjectDeleteConfirm = useCallback(async () => {
@@ -716,26 +704,9 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
     tabStore.loadTabMessages(tabId, pipelineId)
   }, [sessions])
 
-  /** 打开工作空间文件树标签（0.1 任务树节点同款：workspace://<taskId> 数据源，
-   *  标签内 FiveSpaceLayout 另有"打开文件夹"按钮调后端 explorer.exe 打开目录） */
+  /** 打开工作空间文件树标签（共享入口见 workspaceTreeTab.ts） */
   const openWorkspaceTab = useCallback((taskId: string, title: string) => {
-    const layoutStore = useLayoutModeStore.getState()
-    const tabId = `ws-tree-${taskId}`
-    const existingTab = layoutStore.workspaceTabs.find((t) => t.id === tabId)
-    if (existingTab) {
-      layoutStore.setActiveTab(tabId)
-      return
-    }
-    layoutStore.addWorkspaceTab({
-      id: tabId,
-      title: title || '工作空间',
-      icon: '📁',
-      moduleId: '__dynamic__',
-      component: 'file_tree',
-      dataSource: `workspace://${taskId}`,
-      isActive: true,
-      isPinned: false,
-    })
+    openWorkspaceTreeTab(taskId, title)
   }, [])
 
   /** 操作：暂停/恢复/取消（任务管道）/复制 ID/打开工作空间/打开项目文件夹/删除项目 */
@@ -835,7 +806,7 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
   ]
 
   return (
-    <div className="flex h-full flex-col">
+    <div ref={rootRef} className="flex h-full flex-col">
       {/* 工具栏：视图切换 + 类型筛选 + 状态筛选 */}
       <div className="border-b px-3 py-2">
         <div className="flex flex-wrap items-center gap-1">
@@ -1032,6 +1003,20 @@ export function PipelineManagerWidget(_rawProps: Record<string, unknown>) {
 // ═════════════════════════════════════════════════════════════════
 
 /** 管道树节点：管道条目（任务一对一绑定时条目行即任务行，子级直挂其下） */
+/** PipelineTree/TreeGroup 共用 props（树状态 + 回调族） */
+interface PipelineTreeCommonProps {
+  nowMs: number
+  treeOpenKeys: Set<string>
+  detailOpenKeys: Set<string>
+  onTreeToggle: (key: string) => void
+  onToggleDetail: (key: string) => void
+  onEntryClick: (entry: PipelineViewEntry) => void
+  onAction: (
+    entry: PipelineViewEntry,
+    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
+  ) => void
+}
+
 interface PipelineTreeNode {
   /** 节点 key（条目 key） */
   key: string
@@ -1052,17 +1037,7 @@ function PipelineTree({
   onAction,
 }: {
   tree: PipelineTreeNode[]
-  nowMs: number
-  treeOpenKeys: Set<string>
-  detailOpenKeys: Set<string>
-  onTreeToggle: (key: string) => void
-  onToggleDetail: (key: string) => void
-  onEntryClick: (entry: PipelineViewEntry) => void
-  onAction: (
-    entry: PipelineViewEntry,
-    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
-  ) => void
-}) {
+} & PipelineTreeCommonProps) {
   // 主管道（顶层）与容器任务按状态分组：执行中 / 最近完成（子树跟随父级）
   const isActiveNode = (n: PipelineTreeNode): boolean =>
     n.entry.status === 'running' || n.entry.status === 'suspended'
@@ -1142,17 +1117,7 @@ function TreeGroup({
   title: string
   count: number
   nodes: PipelineTreeNode[]
-  nowMs: number
-  treeOpenKeys: Set<string>
-  detailOpenKeys: Set<string>
-  onTreeToggle: (key: string) => void
-  onToggleDetail: (key: string) => void
-  onEntryClick: (entry: PipelineViewEntry) => void
-  onAction: (
-    entry: PipelineViewEntry,
-    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
-  ) => void
-}) {
+} & PipelineTreeCommonProps) {
   const [collapsed, setCollapsed] = useState(false)
   return (
     <div>
@@ -1165,37 +1130,16 @@ function TreeGroup({
         <span className="text-muted-foreground/50">({count})</span>
       </button>
       {!collapsed && (
-        <div>
-          {nodes.map((node) => (
-            <div key={node.key}>
-              <EntryRow
-                entry={node.entry}
-                depth={node.depth}
-                nowMs={nowMs}
-                detailOpen={detailOpenKeys.has(node.key)}
-                treeOpen={treeOpenKeys.has(node.key)}
-                hasChildren={node.children.length > 0}
-                onTreeToggle={onTreeToggle}
-                onToggleDetail={onToggleDetail}
-                onEntryClick={onEntryClick}
-                onAction={onAction}
-                orphan={!node.entry.threadId}
-              />
-              {node.children.length > 0 && treeOpenKeys.has(node.key) && (
-                <TreeChildren
-                  nodes={node.children}
-                  nowMs={nowMs}
-                  treeOpenKeys={treeOpenKeys}
-                  detailOpenKeys={detailOpenKeys}
-                  onTreeToggle={onTreeToggle}
-                  onToggleDetail={onToggleDetail}
-                  onEntryClick={onEntryClick}
-                  onAction={onAction}
-                />
-              )}
-            </div>
-          ))}
-        </div>
+        <TreeChildren
+          nodes={nodes}
+          nowMs={nowMs}
+          treeOpenKeys={treeOpenKeys}
+          detailOpenKeys={detailOpenKeys}
+          onTreeToggle={onTreeToggle}
+          onToggleDetail={onToggleDetail}
+          onEntryClick={onEntryClick}
+          onAction={onAction}
+        />
       )}
     </div>
   )
@@ -1366,6 +1310,9 @@ function EntryRow({
             {entry.currentPhase}
           </span>
         )}
+        {/* 模式徽标插槽（§5.0 观测链）：state.mode 有键且 registry 查得到
+            面板映射才渲染（§5.3 查不到映射=不渲染）；点击打开模式面板 */}
+        {entry.mode && <ModePanelBadge mode={entry.mode} />}
         {/* agent */}
         {entry.agentName && (
           <span className="bg-primary/10 text-primary/70 hidden shrink-0 rounded px-1.5 py-0 text-[10px] sm:inline">

@@ -793,4 +793,250 @@ service:
         assert!(!should_include_file(txt_file, Some(".md,.yaml")));
         assert!(should_include_file(txt_file, None)); // 无过滤，全包含
     }
+
+    // ── load_env_file / load_yaml / load_all 的文件系统面 ──
+
+    /// .env 文件缺失 → 静默跳过（变量表为空）；存在 → 逐行载入，
+    /// 注释与空行不载入、引号被剥除。
+    #[test]
+    fn env_file_loading_skips_missing_and_parses_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // ① 文件缺失
+        let loader = ConfigLoader::new(dir.path(), Some(env_path.clone()));
+        assert!(loader.env_vars().is_empty(), "缺文件时变量表为空");
+
+        // ② 文件存在
+        fs::write(
+            &env_path,
+            "# 注释行\n\nPLAIN_KEY=plain-value\nQUOTED=\"quoted value\"\n",
+        )
+        .unwrap();
+        let loader = ConfigLoader::new(dir.path(), Some(env_path));
+        let vars = loader.env_vars();
+        assert_eq!(
+            vars.get("PLAIN_KEY").map(String::as_str),
+            Some("plain-value")
+        );
+        assert_eq!(
+            vars.get("QUOTED").map(String::as_str),
+            Some("\"quoted value\""),
+            "值按行原样保留（含引号），与插值路径的读取语义一致"
+        );
+        assert!(
+            !vars.keys().any(|k| k.starts_with('#')),
+            "注释行不得成为变量: {vars:?}"
+        );
+        assert!(!vars.is_empty(), "至少载入两条键: {vars:?}");
+    }
+
+    /// load_yaml：缺失 → NotFound（带路径）；合法 → 解析成功；
+    /// 损坏 → YamlParse（带源文件名，便于定位）。
+    #[test]
+    fn load_yaml_reports_not_found_ok_and_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let loader = ConfigLoader::new(dir.path(), None);
+
+        let err = loader.load_yaml("nope.yaml").expect_err("缺文件应报错");
+        assert!(
+            matches!(err, ConfigError::NotFound { .. }),
+            "应为 NotFound: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("nope.yaml"),
+            "缺失错误应带路径: {err}"
+        );
+
+        fs::write(dir.path().join("ok.yaml"), "key: v\n").unwrap();
+        let v = loader.load_yaml("ok.yaml").expect("合法 YAML 应解析");
+        assert_eq!(v["key"], "v");
+
+        fs::write(dir.path().join("bad.yaml"), "key: [unclosed\n").unwrap();
+        let err = loader.load_yaml("bad.yaml").expect_err("损坏 YAML 应报错");
+        assert!(
+            matches!(err, ConfigError::YamlParse { .. }),
+            "应为 YamlParse: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("bad.yaml"),
+            "解析错误应带源文件名: {err}"
+        );
+    }
+
+    /// load_all：配置目录不存在 → 空结果（不是错误）；.yaml 与 .yml 都收，
+    /// 非 YAML 扩展名跳过。
+    #[test]
+    fn load_all_handles_missing_dir_and_extensions() {
+        let missing = tempfile::tempdir().unwrap().path().join("not_there");
+        let loader = ConfigLoader::new(&missing, None);
+        let all = loader.load_all().expect("目录缺失不应报错");
+        assert!(all.is_empty(), "目录缺失 → 空结果: {all:?}");
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.yaml"), "a: 1\n").unwrap();
+        fs::write(dir.path().join("b.yml"), "b: 2\n").unwrap();
+        fs::write(dir.path().join("c.txt"), "c: 3\n").unwrap();
+        let loader = ConfigLoader::new(dir.path(), None);
+        let all = loader.load_all().expect("读取应成功");
+        assert_eq!(all.len(), 2, "只收 yaml/yml: {all:?}");
+        assert_eq!(all["a"]["a"], 1);
+        assert_eq!(all["b"]["b"], 2);
+        assert!(!all.contains_key("c"), "txt 不应被收录");
+    }
+
+    /// config_dir 暴露实际使用的配置目录（诊断面）。
+    #[test]
+    fn config_dir_reflects_construction_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let loader = ConfigLoader::new(dir.path(), None);
+        assert_eq!(loader.config_dir(), dir.path());
+    }
+
+    // ── should_include_file：无扩展名 / 大小写不敏感 / 多扩展名串 ──
+
+    #[test]
+    fn should_include_file_handles_extensionless_files() {
+        let no_ext = Path::new("/tmp/README");
+        assert!(
+            should_include_file(no_ext, None),
+            "无过滤时无扩展名文件应收录"
+        );
+        assert!(
+            !should_include_file(no_ext, Some(".md,.yaml")),
+            "有过滤时无扩展名不匹配"
+        );
+    }
+
+    #[test]
+    fn should_include_file_is_case_insensitive_and_multi_extension() {
+        assert!(
+            should_include_file(Path::new("/tmp/DOC.MD"), Some(".md")),
+            "扩展名比对应大小写不敏感"
+        );
+        assert!(should_include_file(
+            Path::new("/tmp/x.yaml"),
+            Some(".md,.yaml,.txt")
+        ));
+        assert!(!should_include_file(
+            Path::new("/tmp/x.json"),
+            Some(".md,.yaml,.txt")
+        ));
+    }
+
+    // ── 组合插件 YAML（CompositePluginYaml）──
+
+    /// 合法组合插件 → 解析成功且步骤保真。
+    #[test]
+    fn composite_yaml_parses_valid_pipeline() {
+        let cfg = CompositePluginYaml::from_yaml_str(
+            r#"
+id: pipe_ok
+name: OK
+version: 1.0.0
+plugin_type: composite
+steps:
+  - name: s1
+    plugin: p1
+    inputs: {x: 1}
+  - name: s2
+    plugin: p2
+"#,
+        )
+        .expect("合法组合插件应解析");
+        assert_eq!(cfg.id, "pipe_ok");
+        assert_eq!(cfg.steps.len(), 2);
+        assert_eq!(cfg.steps[0].name, "s1");
+        assert_eq!(cfg.steps[1].plugin, "p2");
+    }
+
+    /// plugin_type 非 composite → 拒绝（不得把普通插件当组合插件跑）。
+    #[test]
+    fn composite_yaml_rejects_non_composite_type() {
+        let err = CompositePluginYaml::from_yaml_str(
+            r#"
+id: p
+name: P
+version: 1.0.0
+plugin_type: tool
+steps:
+  - name: s1
+    plugin: p1
+"#,
+        )
+        .expect_err("非 composite 应拒绝");
+        let msg = err.to_string();
+        assert!(msg.contains("plugin_type='composite'"), "{msg}");
+        assert!(msg.contains("tool"), "错误应报出实际类型: {msg}");
+    }
+
+    /// 步骤为空 → 拒绝（组合插件至少一步）。
+    #[test]
+    fn composite_yaml_rejects_empty_steps() {
+        let err = CompositePluginYaml::from_yaml_str(
+            r#"
+id: p
+name: P
+version: 1.0.0
+plugin_type: composite
+steps: []
+"#,
+        )
+        .expect_err("空 steps 应拒绝");
+        assert!(err.to_string().contains("at least one step"), "{err}");
+    }
+
+    /// YAML 语法损坏 → Composite 错误（from_yaml_str 解析失败分支）。
+    #[test]
+    fn composite_yaml_rejects_malformed_yaml() {
+        let err =
+            CompositePluginYaml::from_yaml_str("id: [unclosed\n").expect_err("坏 YAML 应拒绝");
+        assert!(matches!(err, ConfigError::Composite { .. }), "{err:?}");
+        assert!(err.to_string().contains("YAML parse error"), "{err}");
+    }
+
+    /// validate_step_vars：合法引用通过；then_steps 里的错误带父步骤路径。
+    #[test]
+    fn composite_yaml_validates_step_vars_recursively() {
+        let ok = CompositePluginYaml::from_yaml_str(
+            r#"
+id: p
+name: P
+version: 1.0.0
+plugin_type: composite
+steps:
+  - name: s1
+    plugin: p1
+    inputs: {v: "{{state.task.status}}"}
+"#,
+        )
+        .expect("合法引用应解析");
+        ok.validate_step_vars().expect("合法引用应通过校验");
+
+        // then_steps / else_steps 同样被递归校验：分支内的引用形态合法即通过
+        // （校验是"全步骤树扫描"，不只扫顶层）。
+        let branches = CompositePluginYaml::from_yaml_str(
+            r#"
+id: p
+name: P
+version: 1.0.0
+plugin_type: composite
+steps:
+  - name: outer
+    plugin: p1
+    then_steps:
+      - name: inner_then
+        plugin: p2
+        inputs: {v: "{{state.ok}}"}
+    else_steps:
+      - name: inner_else
+        plugin: p3
+        inputs: {v: "{{state.also_ok}}"}
+"#,
+        )
+        .expect("含条件分支的组合插件应可解析");
+        branches
+            .validate_step_vars()
+            .expect("分支内合法引用应通过（校验递归覆盖整棵步骤树）");
+    }
 }

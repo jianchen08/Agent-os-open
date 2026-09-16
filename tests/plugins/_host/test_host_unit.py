@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -145,14 +147,14 @@ class TestMemberDiscovery:
         """manifest id 命中优先于目录名命中（内核以 manifest id 标识插件）。"""
         dir_a = make_member("system", "x", "key")
         dir_b = make_member("tools", "key", "other_id")
-        by_manifest, by_dir = host._scan_plugin_dirs(dir_a.parents[1])
+        by_manifest, by_dir = host._scan_plugin_dirs([dir_a.parents[1]])
         assert host._resolve_member_dir("key", by_manifest, by_dir) == dir_a
         assert host._resolve_member_dir("other_id", by_manifest, by_dir) == dir_b
 
     def test_dir_name_fallback(self, make_member) -> None:
         """目录名兜底定位（manifest id 与目录名不一致时的第二解析路径）。"""
         member_dir = make_member("pipeline/output", "plain", "unrelated_manifest_id")
-        by_manifest, by_dir = host._scan_plugin_dirs(member_dir.parents[2])
+        by_manifest, by_dir = host._scan_plugin_dirs([member_dir.parents[2]])
         assert host._resolve_member_dir("plain", by_manifest, by_dir) == member_dir
 
     def test_dirs_without_server_py_ignored(self, shared_tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -171,7 +173,7 @@ class TestMemberDiscovery:
         broken_dir.mkdir()
         (broken_dir / "plugin.json").write_text("not a json", encoding="utf-8")
         (broken_dir / "server.py").write_text("plugin = None\n", encoding="utf-8")
-        by_manifest, by_dir = host._scan_plugin_dirs(shared_tree)
+        by_manifest, by_dir = host._scan_plugin_dirs([shared_tree])
         assert host._resolve_member_dir("corrupt", by_manifest, by_dir) == broken_dir
 
     def test_venv_and_node_modules_pruned_from_scan(self, shared_tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -217,6 +219,65 @@ class TestMemberDiscovery:
         rc = host.main(["--group", "light", "--slot", "1", "--members", "outside_id"], shared_root=shared_tree)
         assert rc == 1
         assert "outside_id" in capsys.readouterr().err
+
+
+class TestMemberRoots:
+    """成员发现根集合：域不设白名单 + 用户副本同 id 覆盖出厂副本。
+
+    回归面（BUG-30）：成员解析曾只认出厂根的 {system,tools,pipeline} 三域，
+    ``plugins/shared/modes/mode_*``（声明 host_group=light 的模式插件）宿主
+    解析不到 → 宿主 fail-fast 退出 → 调用侧 MCP initialize 恒失败。
+    """
+
+    def test_member_in_arbitrary_domain_resolves(self, make_member) -> None:
+        """出厂根任意域（modes/）下的成员可定位并加载（域不设白名单）。"""
+        member_dir = make_member("modes", "mode_research", "mode_research")
+        members = host._load_members(member_dir.parents[1], ["mode_research"])
+        assert set(members) == {"mode_research"}
+        assert members["mode_research"].name == "mode_research"
+
+    def test_user_root_member_resolves(
+        self, shared_tree: Path, make_user_member
+    ) -> None:
+        """用户插件根独有成员可定位（用户空间是内核发现面的一半）。"""
+        user_member = make_user_member("modes", "mode_solo", "mode_solo")
+        assert host._load_members(shared_tree, ["mode_solo"])["mode_solo"].name == "mode_solo"
+        assert user_member.is_dir()
+
+    def test_user_copy_wins_over_factory_copy(
+        self, shared_tree: Path, make_member, make_user_member
+    ) -> None:
+        """同 id 双根 → 用户副本优先（镜像内核「同 id 用户赢」，不静默跑出厂旧码）。"""
+        make_member("modes", "mode_research", "mode_research", member_name="factory_copy")
+        make_user_member("modes", "mode_research", "mode_research", member_name="user_copy")
+        members = host._load_members(shared_tree, ["mode_research"])
+        assert members["mode_research"].name == "user_copy"
+
+    def test_factory_copy_fallback_when_user_root_lacks_member(
+        self, shared_tree: Path, make_member, user_plugins_tree: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """用户根无该成员（或不存在）→ 回落出厂副本（双根兜底，不 fail-fast）。"""
+        make_member("modes", "mode_research", "mode_research", member_name="factory_copy")
+        monkeypatch.setenv("AGENTOS_USER_PLUGINS_DIR", str(user_plugins_tree / "absent"))
+        members = host._load_members(shared_tree, ["mode_research"])
+        assert members["mode_research"].name == "factory_copy"
+
+    def test_user_layer_unresolvable_degrades_to_factory_only(
+        self, shared_tree: Path, make_member, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """用户层解析失败（user_space 不可用）→ 仅出厂根，不抛出、不阻断宿主。"""
+        make_member("modes", "mode_research", "mode_research")
+        monkeypatch.setitem(sys.modules, "user_space", types.ModuleType("user_space"))
+        members = host._load_members(shared_tree, ["mode_research"])
+        assert set(members) == {"mode_research"}
+
+    def test_shared_root_promoted_into_sys_path(self, shared_tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """出厂根不在 sys.path 时由成员发现补入（user_space 共享模块的解析前提）。"""
+        factory_root = str(host._default_shared_root())
+        monkeypatch.setattr(sys, "path", [p for p in sys.path if p != factory_root])
+        assert factory_root not in sys.path
+        host._member_roots(shared_tree)
+        assert factory_root in sys.path
 
 
 # ── 成员加载与 fail-fast ─────────────────────────────────

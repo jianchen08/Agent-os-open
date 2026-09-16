@@ -12,11 +12,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentos_api::plugin_watcher::PluginWatcher;
-use agentos_core::traits::{CapabilityRegistry, PluginLoader};
+use agentos_core::traits::{CapabilityRegistry, PluginInvoker, PluginLoader};
 use agentos_invoker::PluginInvokerImpl;
 use agentos_plugin_loader::{CapabilityRegistryImpl, PluginLoaderImpl};
 use serial_test::serial;
 use tokio::time::timeout;
+
+/// 钉用户根到一次性空临时目录（进程级 Once）：
+/// sync 会重扫模式包资源 = `<plugins_dir>/modes` + 用户根 modes 目录——
+/// 宿主真实用户空间被播种/并行会话同步副本时，该扫描拖长 sync 耗时，
+/// 测试的秒级等待窗即超时（0 syncs/无注册/无 hook）。串行整测共享同一空根。
+fn pin_temp_user_root() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir =
+            std::env::temp_dir().join(format!("pin_usr_watcher_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, &dir);
+    });
+}
 
 /// 在 root 下建一个 tool 类型插件目录（带 tools 能力），写真实 plugin.json。
 fn create_plugin_dir(root: &Path, id: &str, tools: &[&str]) {
@@ -44,6 +58,7 @@ fn create_plugin_dir(root: &Path, id: &str, tools: &[&str]) {
 #[tokio::test]
 #[serial]
 async fn watcher_registers_plugin_on_manual_trigger() {
+    pin_temp_user_root();
     let tmp = tempfile::tempdir().unwrap();
     // 安全：edition 2021，set_var 非 unsafe。整测串行（#[serial]），无并发污染。
     std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
@@ -96,6 +111,7 @@ async fn watcher_registers_plugin_on_manual_trigger() {
 #[tokio::test]
 #[serial]
 async fn watcher_debounces_burst() {
+    pin_temp_user_root();
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
 
@@ -131,6 +147,7 @@ async fn watcher_debounces_burst() {
 #[tokio::test]
 #[serial]
 async fn watcher_detects_new_plugin_via_polling_fallback() {
+    pin_temp_user_root();
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
 
@@ -178,6 +195,7 @@ async fn watcher_detects_new_plugin_via_polling_fallback() {
     ignore = "notify timing unreliable on Windows; polling fallback covers it"
 )]
 async fn watcher_detects_new_plugin_dir_via_notify() {
+    pin_temp_user_root();
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
 
@@ -221,6 +239,7 @@ async fn watcher_detects_new_plugin_dir_via_notify() {
 #[tokio::test]
 #[serial]
 async fn watcher_fires_restart_hook_on_cdylib_addition() {
+    pin_temp_user_root();
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
 
@@ -254,6 +273,7 @@ async fn watcher_fires_restart_hook_on_cdylib_addition() {
 #[tokio::test]
 #[serial]
 async fn watcher_does_not_fire_restart_hook_for_sidecar_only() {
+    pin_temp_user_root();
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
     // stub sidecar 无 server.py，真实 spawn 必失败；本测试目的是"sidecar-only 不触发
@@ -330,4 +350,67 @@ async fn handle_trigger_and_wait(
         }
     })
     .await;
+}
+
+/// 模式包资源热发现端到端（P2 遗留接线）：模式包内热增 agents 文件，经 watcher
+/// 每轮 sync 尾部的增量重扫，mode 键表即时反映——无需重启内核。
+#[tokio::test]
+#[serial]
+async fn watcher_resyncs_mode_package_resources_on_sync() {
+    pin_temp_user_root();
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
+    // 用户模式根钉进 tmp 内隔离：真实用户根的包/损坏文件不得漏进本测试
+    // （env 泄漏到后续串行用例无害——目录不存在 = 用户根零包，轮询兜底照常）。
+    std::env::set_var("AGENTOS_USER_PLUGINS_DIR", tmp.path().join("user"));
+
+    // 模式包（light sidecar 形态，与出厂种子一致；boot 形态：启动时已发现）
+    let pkg = tmp.path().join("modes").join("mode_e2e");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("plugin.json"),
+        r#"{
+    "id": "mode_e2e", "name": "mode_e2e", "version": "1.0.0",
+    "plugin_type": "system", "language": "python",
+    "host_type": "sidecar", "entry": "python server.py",
+    "capabilities": { "tools": [], "services": [] }
+}"#,
+    )
+    .unwrap();
+    let loader: Arc<dyn PluginLoader> = Arc::new(PluginLoaderImpl::new(tmp.path(), None));
+    // initial_ids 与 boot 同源：走 invoker 的递归根收集（mode 包嵌套在
+    // modes/<pkg>/，loader.discover 的单层扫描看不到）。
+    let invoker = Arc::new(PluginInvokerImpl::new(loader));
+    let initial: Vec<_> = invoker.discover_new_plugins().await.unwrap();
+    let initial_ids: HashSet<String> = initial.iter().map(|m| m.id.clone()).collect();
+    assert!(initial_ids.contains("mode_e2e"), "模式包应作为插件被发现");
+
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let handle = PluginWatcher::new(
+        tmp.path().to_path_buf(),
+        invoker as Arc<dyn agentos_core::traits::PluginInvoker>,
+        registry.clone(),
+        initial_ids,
+    )
+    .with_debounce(Duration::from_millis(50))
+    .spawn();
+
+    // 热增 agents 约定文件 + 手动触发同步 → sync 尾部增量重扫登记 mode 键。
+    std::fs::create_dir_all(pkg.join("agents")).unwrap();
+    std::fs::write(pkg.join("agents/novelist.yaml"), "model_tier: large\n").unwrap();
+    handle.trigger.send(()).unwrap();
+
+    let appeared = timeout(Duration::from_secs(3), async {
+        loop {
+            if registry.get_mode_agent("mode_e2e/novelist").is_some() {
+                return Ok::<(), ()>(());
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await;
+    assert!(
+        appeared.is_ok(),
+        "热增 agents 文件后 mode 键应在 3s 内出现（watcher 重扫）"
+    );
 }

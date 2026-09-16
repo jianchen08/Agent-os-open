@@ -1,0 +1,127 @@
+{
+  "id": "director",
+  "name": "Livestream Director",
+  "description": "直播编排：七态状态机 + 弹幕聚合 + W2 段生成链 + 插播队列 + 看门狗台账",
+  "version": "0.1.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "services": [
+      {
+        "name": "director.get_status",
+        "description": "直播编排状态快照（状态机/游标/台账/插播队列/看门狗判据）",
+        "input_schema": {"type": "object", "properties": {}},
+        "output_schema": {
+          "type": "object",
+          "properties": {"state": {"type": "string"}},
+          "required": ["state"]
+        }
+      },
+      {
+        "name": "director.boot",
+        "description": "手动开播：OFFLINE → BOOTING，返回需执行的动作串",
+        "input_schema": {"type": "object", "properties": {}},
+        "output_schema": {
+          "type": "object",
+          "properties": {"ok": {"type": "boolean"}, "state": {"type": "string"}, "actions": {"type": "array", "items": {"type": "string"}}},
+          "required": ["ok", "state", "actions"]
+        }
+      },
+      {
+        "name": "director.feed_danmaku",
+        "description": "弹幕入聚合窗（channel_bilibili 轮询投喂）",
+        "input_schema": {
+          "type": "object",
+          "properties": {"user": {"type": "string"}, "text": {"type": "string"}},
+          "required": ["user", "text"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {"ok": {"type": "boolean"}},
+          "required": ["ok"]
+        }
+      },
+      {
+        "name": "director.flush_aggregation",
+        "description": "聚合窗冲刷：有效意图挂起等 IDLE 执行",
+        "input_schema": {"type": "object", "properties": {}},
+        "output_schema": {
+          "type": "object",
+          "properties": {"valid": {"type": "boolean"}, "intent": {"type": "string"}, "distinct_users": {"type": "integer"}},
+          "required": ["valid"]
+        }
+      },
+      {
+        "name": "director.run_segment",
+        "description": "跑一次 W2 段生成（离线生产脚本亦走此口）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "intent": {"type": "string"},
+            "transition": {"type": "string", "enum": ["continue", "cut"]}
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "ok": {"type": "boolean"},
+            "stage": {"type": "string"},
+            "reason": {"type": "string"},
+            "video_path": {"type": "string"},
+            "seg_no": {"type": "integer"}
+          },
+          "required": ["ok"]
+        }
+      },
+      {
+        "name": "director.observe_tick",
+        "description": "执行面节拍：观测进 → 触发器推导 → 动作串出（triggers_ext 定时调用）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "nobody_secs": {"type": "number"},
+            "queue_empty": {"type": "boolean"},
+            "schedule_end": {"type": "boolean"}
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {"ok": {"type": "boolean"}, "state": {"type": "string"}, "actions": {"type": "array", "items": {"type": "string"}}},
+          "required": ["ok", "state", "actions"]
+        }
+      },
+      {
+        "name": "director.trip",
+        "description": "看门狗人工注弧（演练通道）：活动态 → FAULT + 通知动作",
+        "input_schema": {
+          "type": "object",
+          "properties": {"detail": {"type": "string"}},
+          "required": ["detail"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {"ok": {"type": "boolean"}, "state": {"type": "string"}, "actions": {"type": "array", "items": {"type": "string"}}},
+          "required": ["ok", "state", "actions"]
+        }
+      },
+      {
+        "name": "director.recover",
+        "description": "故障恢复：FAULT → IDLE（清故障上下文）",
+        "input_schema": {"type": "object", "properties": {}},
+        "output_schema": {
+          "type": "object",
+          "properties": {"ok": {"type": "boolean"}, "state": {"type": "string"}, "actions": {"type": "array", "items": {"type": "string"}}},
+          "required": ["ok", "state", "actions"]
+        }
+      }
+    ],
+    "lifecycle_hooks": ["on_load", "on_unload"]
+  },
+  "permissions": {},
+  "priority": 50
+}

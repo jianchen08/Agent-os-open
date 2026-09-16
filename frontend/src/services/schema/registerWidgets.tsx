@@ -20,6 +20,7 @@ import {
   PipelineManagerPanel,
   SettingsHubPanel,
 } from '@/components/schema/widgets/PanelHostWidget'
+import { PluginPagesHubPanel } from '@/components/schema/widgets/PluginPagesHubPanel'
 import { ReviewDocumentWidget } from '@/components/schema/widgets/ReviewDocumentWidget'
 import { SortableListWidget } from '@/components/schema/widgets/SortableListWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
@@ -178,6 +179,12 @@ const WIDGETS: WidgetEntry[] = [
   // 超出声明组台能力，验收标准=入口声明+数据面插件化）
   { name: 'memory_panel', component: MemoryPanelWidget, spaces: ['workspace'] },
   { name: 'knowledge_base_panel', component: KnowledgeBasePanelWidget, spaces: ['workspace'] },
+  // 插件页面导航面板（模式体系 §4.1：所有插件 contributes.pages 的统一入口，
+  // 长尾页面全量目录——activity-bar 预算死守的配套件，模式零特例）
+  { name: 'plugin_pages_hub_panel', component: PluginPagesHubPanel, spaces: ['workspace'] },
+  // 四模式面板已退役（模式体系 §2 末 2026-09-15 用户裁定：面板=模式插件自带
+  // webview 页，contributes.pages 声明 widget:'webview' 走上方内建注册，前端
+  // 不再持有具名面板 widget）
 ]
 
 /**

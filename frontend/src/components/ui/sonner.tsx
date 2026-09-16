@@ -16,6 +16,9 @@ export function Toaster() {
   return (
     <SonnerToaster
       position="top-right"
+      // 顶部偏移让出 Electron 自定义标题栏（TitleBar 挂的 --app-titlebar-height，
+      // 仅主窗口非 0），其余方向与缺省取 sonner 内建默认（24px）
+      offset={{ top: 'calc(24px + var(--app-titlebar-height, 0px))' }}
       richColors
       closeButton
       duration={10000}

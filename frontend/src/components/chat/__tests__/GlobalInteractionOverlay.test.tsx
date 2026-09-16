@@ -213,18 +213,33 @@ describe('GlobalInteractionOverlay 关闭与最小化', () => {
     expect(useInteractionStore.getState().pendingInteractions).toHaveLength(0)
   })
 
-  it('最小化按钮收起为浮窗；遮罩点击同样切换最小化', () => {
+  it('最小化按钮收起为浮窗；恢复后浮窗点击还原卡片', () => {
     render(<GlobalInteractionOverlay />)
     fireEvent.click(screen.getByTitle('最小化'))
     expect(useInteractionStore.getState().isMinimized).toBe(true)
     expect(screen.getByText('1 个待处理交互')).toBeInTheDocument()
 
-    // 恢复后点遮罩再最小化
     fireEvent.click(screen.getByText('1 个待处理交互'))
     expect(useInteractionStore.getState().isMinimized).toBe(false)
-    const mask = document.querySelector('.absolute.pointer-events-auto')!
+  })
+
+  it('遮罩仅视觉半透明不拦截指针（BUG-14）：点击遮罩不再切换最小化，卡片区域可交互', () => {
+    setInteractions([makeInteraction()])
+    render(<GlobalInteractionOverlay />)
+
+    const mask = document.querySelector('.absolute.inset-0') as HTMLElement
+    expect(mask).toBeInTheDocument()
+    // 遮罩不拦截指针：底部条带内遮罩之下的其他 UI 保持可点击
+    expect(mask.className).toContain('pointer-events-none')
+    expect(mask.className).not.toContain('pointer-events-auto')
+
+    // 点击遮罩区域不再触发最小化（待审批不阻塞用户其他操作）
     fireEvent.click(mask)
-    expect(useInteractionStore.getState().isMinimized).toBe(true)
+    expect(useInteractionStore.getState().isMinimized).toBe(false)
+
+    // 卡片容器保持可交互
+    const cardContainer = card().closest('.pointer-events-auto')
+    expect(cardContainer).not.toBeNull()
   })
 })
 

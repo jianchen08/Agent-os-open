@@ -41,19 +41,69 @@
       {
         "from": "frontend/dist",
         "to": "frontend/dist"
+      },
+      {
+        "from": "plugins/shared",
+        "to": "plugins/shared",
+        "filter": [
+          "**/*",
+          "!**/.venv{,/**}",
+          "!**/.venv-*{,/**}",
+          "!**/node_modules{,/**}",
+          "!**/__pycache__{,/**}",
+          "!**/*.pyc",
+          "!**/.mypy_cache{,/**}",
+          "!**/.pytest_cache{,/**}",
+          "!**/.ruff_cache{,/**}",
+          "!**/target{,/**}"
+        ]
+      },
+      {
+        "from": "config",
+        "to": "config"
       }
     ],
     "win": {
       "target": "nsis",
-      "icon": "frontend/public/favicon.ico"
+      "icon": "frontend/public/favicon.ico",
+      "extraResources": [
+        {
+          "from": "kernel/target/release/agentos-kernel.exe",
+          "to": "kernel/agentos-kernel.exe"
+        }
+      ]
+    },
+    "nsis": {
+      "include": "electron/nsis/bug12-uninstaller.nsh"
     },
     "mac": {
-      "target": "dmg",
-      "icon": "frontend/public/icon.png"
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "frontend/public/icon.png",
+      "category": "public.app-category.productivity",
+      "extraResources": [
+        {
+          "from": "kernel/target/release/agentos-kernel",
+          "to": "kernel/agentos-kernel"
+        }
+      ]
     },
     "linux": {
       "target": "AppImage",
-      "icon": "frontend/public/icon.png"
+      "icon": "frontend/public/icon.png",
+      "extraResources": [
+        {
+          "from": "kernel/target/release/agentos-kernel",
+          "to": "kernel/agentos-kernel"
+        }
+      ]
     }
   },
   "overrides": {

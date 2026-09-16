@@ -22,8 +22,14 @@ from typing import Any
 import pytest
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
-if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
+while str(_PLUGIN_DIR) in sys.path:
+    sys.path.remove(str(_PLUGIN_DIR))
+sys.path.insert(0, str(_PLUGIN_DIR))
+
+# 裸名逐出（同 test_adapter_branches 惯例）：exceptions/key_pool 等同名平铺
+# 模块可能已被别的插件占位，会让 router_factory 的平铺 import 打到错误实现。
+for _bare in ("adapter", "exceptions", "key_pool", "router_factory", "stream_client"):
+    sys.modules.pop(_bare, None)
 
 pytestmark = pytest.mark.unit
 

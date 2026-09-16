@@ -209,7 +209,7 @@ class TestManifestHttpEndpoints:
             assert e["path"].startswith("/ext/task_service/"), e["path"]
             assert e["auth"] == "user", e["path"]
             assert e["handler_capability"] == "http.handle", e["path"]
-            assert e["timeout_ms"] == 5000, e["path"]
+            assert e["timeout_ms"] == 60000, e["path"]
 
     def test_routes_cover_tasks_and_projects_domains(self) -> None:
         manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))

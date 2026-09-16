@@ -159,11 +159,9 @@ export function GlobalInteractionOverlay() {
 
   return createPortal(
     <div className="pointer-events-none fixed inset-x-0 bottom-0 z-[10000] flex justify-center">
-      {/* 底部遮罩（仅覆盖卡片所在区域，点击最小化；上方未遮蔽区域可正常查看与操作） */}
-      <div
-        className="absolute inset-0 bg-[var(--overlay-bg)] pointer-events-auto"
-        onClick={toggleMinimized}
-      />
+      {/* 底部遮罩（BUG-14 遮挡收敛）：仅视觉半透明、不拦截指针——待审批不阻塞
+          用户其他操作（侧栏/停止按钮等保持可点击），仅阻塞该工具执行本身 */}
+      <div className="absolute inset-0 bg-[var(--overlay-bg)] pointer-events-none" />
 
       {/* 交互卡片容器（底部停靠） */}
       <div className="relative z-10 mx-4 mb-4 mt-2 w-full max-w-2xl pointer-events-auto">

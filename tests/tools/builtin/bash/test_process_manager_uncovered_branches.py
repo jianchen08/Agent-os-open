@@ -1172,3 +1172,21 @@ async def test_container_backend_run_cmd_runs_real_child_process():
     )
     assert rc == 0
     assert b"run_cmd_ok" in out
+
+def test_map_wsl_working_dir_passthrough_non_workspace_paths():
+    """非 /workspace 约定路径原样透传（含反斜杠形态），不嫁接 workspace 前缀。"""
+    from process_manager import _map_wsl_working_dir
+
+    backend = {"workspace_wsl": "/mnt/d/ws"}
+    assert _map_wsl_working_dir(backend, "/opt/data") == "/opt/data"
+    assert _map_wsl_working_dir(backend, "D:\proj\sub") == "D:\proj\sub"
+    assert _map_wsl_working_dir({}, "/opt/data") == "/opt/data"
+
+
+def test_map_wsl_working_dir_maps_workspace_prefix_to_wsl_root():
+    """/workspace/<sub> 约定路径映射到环境 workspace 的 WSL 路径（ntpath 反斜杠形态同映射）。"""
+    from process_manager import _map_wsl_working_dir
+
+    backend = {"workspace_wsl": "/mnt/d/ws"}
+    assert _map_wsl_working_dir(backend, "/workspace/out.txt") == "/mnt/d/ws/out.txt"
+    assert _map_wsl_working_dir(backend, "\\workspace\\logs\\a.log") == "/mnt/d/ws/logs/a.log"

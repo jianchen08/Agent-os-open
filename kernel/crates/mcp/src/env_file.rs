@@ -304,4 +304,128 @@ pub(crate) mod tests {
         write_env_updates(&ok, &[("B".to_string(), "2".to_string())]).unwrap();
         assert!(ok.exists());
     }
+
+    /// 重复键的实际处理：写入落在**最后一条同名行**（last_idx 语义），
+    /// 更早的重复行原样保留（不重排、不丢行是行级合并的既有契约）。
+    /// 读侧 parse_env_text 后写覆盖前写，故最终读到的就是新值。
+    #[test]
+    fn write_env_updates_updates_last_duplicate_occurrence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = tmp.path().join(".env");
+        fs::write(
+            &env,
+            "DUP=first
+OTHER=x
+DUP=second
+",
+        )
+        .unwrap();
+
+        write_env_updates(&env, &[("DUP".to_string(), "final".to_string())]).unwrap();
+        let text = fs::read_to_string(&env).unwrap();
+        assert_eq!(
+            text.matches("DUP=").count(),
+            2,
+            "既有重复行原样保留，只更新最后一条: {text}"
+        );
+        assert!(text.contains("DUP=final"), "最后一条应写入新值: {text}");
+        assert!(text.contains("DUP=first"), "更早的同名行不被删除: {text}");
+        assert!(text.contains("OTHER=x"), "无关键保留: {text}");
+        // 读侧语义：后写覆盖前写 → 解析出的就是新值
+        assert_eq!(
+            parse_env_text(&text).get("DUP").map(String::as_str),
+            Some("final"),
+            "读侧应按最后一条取值"
+        );
+    }
+
+    /// 空值移除：不存在的键走 (None, true) 分支——不报错、不新增行；
+    /// 存在的键被整行删除（含重复声明的多行只删处理到的那一行）。
+    #[test]
+    fn write_env_updates_empty_value_for_absent_key_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = tmp.path().join(".env");
+        fs::write(
+            &env, "KEEP=1
+",
+        )
+        .unwrap();
+
+        write_env_updates(&env, &[("ABSENT".to_string(), String::new())]).unwrap();
+        let text = fs::read_to_string(&env).unwrap();
+        assert_eq!(text.trim(), "KEEP=1", "缺键空值不应改动文件: {text}");
+        assert!(!text.contains("ABSENT"), "不得新增空行: {text}");
+    }
+
+    /// 父目录不存在 → 自动创建（create_dir_all 分支）。
+    /// 对照：目标路径无父目录（相对单段路径）时同样不 panic。
+    #[test]
+    fn write_env_updates_creates_parent_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("a/b/c/.env");
+        write_env_updates(&nested, &[("K".to_string(), "v".to_string())]).unwrap();
+        assert!(nested.is_file(), "应创建父目录并写入");
+        assert!(fs::read_to_string(&nested).unwrap().contains("K=v"));
+    }
+
+    /// parse_env_text_for_read 与 parse_env_text 同语义（读侧公开入口）。
+    #[test]
+    fn parse_env_text_for_read_matches_internal_parser() {
+        let text = "# c
+A=1
+B=\"quoted\"
+
+";
+        assert_eq!(parse_env_text_for_read(text), parse_env_text(text));
+        assert_eq!(
+            parse_env_text_for_read(text).get("B").map(String::as_str),
+            Some("quoted")
+        );
+    }
+
+    /// 空文本 / 全注释文本 → 空映射（不得产生空键条目）。
+    #[test]
+    fn parse_env_text_handles_empty_and_comments_only() {
+        assert!(parse_env_text("").is_empty());
+        assert!(parse_env_text(
+            "
+
+"
+        )
+        .is_empty());
+        assert!(parse_env_text(
+            "# only
+# comments
+"
+        )
+        .is_empty());
+        // 键为空的行跳过
+        assert!(parse_env_text(
+            "=orphan
+"
+        )
+        .is_empty());
+    }
+
+    /// env_path_for_root：用户空间不可得时回落 `<project_root>/.env`
+    /// （写侧用于创建，故不要求文件已存在）。
+    #[test]
+    fn env_path_for_root_falls_back_to_project_root() {
+        let _guard = TEST_ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let original = std::env::var(agentos_core::user_space::USER_ROOT_ENV).ok();
+        // 显式清空用户根环境变量，强制走回落分支
+        std::env::remove_var(agentos_core::user_space::USER_ROOT_ENV);
+
+        let root = std::path::Path::new("/tmp/proj");
+        let p = env_path_for_root(root);
+        assert!(
+            p.starts_with(root) || agentos_core::user_space::user_root().is_some(),
+            "用户空间不可得时应回落项目根: {p:?}"
+        );
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some(".env"));
+
+        if let Some(v) = original {
+            std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, v);
+        }
+    }
 }

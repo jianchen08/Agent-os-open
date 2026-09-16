@@ -13,6 +13,7 @@
  *   3. 流式中断（本地无内容）时 data.message 兜底填充完整形态
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { makeEventFactory } from './helpers/streamingEventFactory'
 import type * as sessionMod from '@/services/api/session'
 import type * as handlersMod from '@/services/websocket/streaming/handlers'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
@@ -40,19 +41,7 @@ const MESSAGE_ID = 'msg_newmsg_shape_01'
 const THREAD_ID = 'thread-newmsg-shape-001'
 
 /** 构造后端 WS 事件信封（与 ws_session.rs 一致：业务字段在 data 下） */
-function makeEvent(eventType: string, data: Record<string, any>) {
-  return {
-    type: eventType,
-    data: {
-      pipeline_id: PIPELINE_ID,
-      message_id: MESSAGE_ID,
-      ...data,
-    },
-    source_type: 'system',
-    source_id: PIPELINE_ID,
-    timestamp: new Date().toISOString(),
-  }
-}
+const makeEvent = makeEventFactory(PIPELINE_ID, MESSAGE_ID)
 
 /** 后端落库消息的完整形态（与 session_routes.rs 投影 + ws_session new_message.message 同构） */
 function makeServerMessage(overrides: Record<string, any> = {}) {

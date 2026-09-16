@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * constants/api.ts 分支补测：常量模块的「派生与环境分支」。
  *

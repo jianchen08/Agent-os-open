@@ -2,6 +2,7 @@
 
 import { lazy, Suspense, useEffect, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
+import { withTaskMode } from '@/services/schema/modeOptions'
 import { ChangePasswordGate } from './components/auth/ChangePasswordGate'
 import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -19,6 +20,7 @@ import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { loadSessionExecutionOptions } from './services/sessionExecutionOptions'
 import { performLogout } from './services/auth/logout'
+import { ensureFreshToken } from './services/auth/tokenLifecycle'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
@@ -257,6 +259,49 @@ function HomePage(): ReactNode {
       const currentToken = useAuthStore.getState().token
 
       if (!sid || !currentToken) {
+        // 显式拒绝（BUG-28 第三刀：真机取证钉死的发送链唯一静默拒绝点——
+        // token 仅存内存，恢复/轮换链任何断点都会让这里变 null，症状为
+        // 输入保留+零通知+零内核痕迹，用户视角 = 「点了没反应」）。
+        // token 缺失先自愈：tokenLifecycle 唯一真值源（内存有效令牌直接
+        // 取用，过期走 refresh 轮换），恢复成功回写 authStore 供重发过闸；
+        // 会话缺失无自愈源（activeSessionId 单点权威），显式引导刷新。
+        // 不绕过受理协议：返回 false，输入保留，绝不静默丢消息。
+        if (sid) {
+          void ensureFreshToken().then((token) => {
+            if (token) {
+              useAuthStore.setState({ token })
+              useNotificationStore.getState().addNotification({
+                title: '登录态已恢复',
+                message: '访问令牌已自动续期，请重新点击发送',
+                priority: 'normal',
+                category: 'alert',
+                isBlocking: false,
+                autoDismissMs: 8000,
+                sourceLabel: '前端',
+              })
+            } else {
+              useNotificationStore.getState().addNotification({
+                title: '发送未受理',
+                message: '登录态已失效且自动恢复失败，请重新登录后再发送',
+                priority: 'high',
+                category: 'error',
+                isBlocking: false,
+                autoDismissMs: 8000,
+                sourceLabel: '前端',
+              })
+            }
+          })
+        } else {
+          useNotificationStore.getState().addNotification({
+            title: '发送未受理',
+            message: '页面会话状态异常（无活跃会话），请刷新页面后重试',
+            priority: 'high',
+            category: 'error',
+            isBlocking: false,
+            autoDismissMs: 8000,
+            sourceLabel: '前端',
+          })
+        }
         return false
       }
 
@@ -310,6 +355,13 @@ function HomePage(): ReactNode {
       // markdown 图片双重显示）。
       const contentWithRefs = appendAttachmentRefs(params.content, params.attachments)
 
+      // 模式键（模式体系 §4.2 数据链）：选择器显式选择时并入消息级 execution_context
+      // （「自动」不带键，模式归属归后端自然语言分类路径）；会话执行选项其余键原样保留。
+      const executionContext = withTaskMode(
+        loadSessionExecutionOptions(sid)?.executionContext,
+        params.mode,
+      )
+
       // [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md] 单一消息数组：
       // 乐观 user、流式 assistant 全在 messagesByPipeline 同一数组，靠 status
       // 状态机区分生命周期；独立 pending 区不存在。new_message 事件携带
@@ -325,7 +377,7 @@ function HomePage(): ReactNode {
           thinkingStrength: params.thinkingStrength,
           pipelineId: targetPipelineId,
           clientMessageId: userMessageId,
-          executionContext: loadSessionExecutionOptions(sid)?.executionContext,
+          executionContext,
         })
         usePendingInputStore.getState().load(targetPipelineId)
         return
@@ -365,7 +417,7 @@ function HomePage(): ReactNode {
         thinkingStrength: params.thinkingStrength,
         pipelineId: targetPipelineId,
         clientMessageId: userMessageId,
-        executionContext: loadSessionExecutionOptions(sid)?.executionContext,
+        executionContext,
       })
     },
     [],

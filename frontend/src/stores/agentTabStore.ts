@@ -248,7 +248,11 @@ function buildInitialTabs(
     // 子 Tab 缺 pipelineRunId 时保持 undefined（不污染）
     let tabs = saved.tabs.map((tab) => {
       if (tab.agentLevel === 1) {
-        return { ...tab, pipelineRunId: mainPipelineId || undefined, agentId: mainAgentId }
+        // 权威主管道缺失（缓存未就绪/会话缓存陈旧）时保持持久化绑定——缺数据
+        // 不是改绑依据（与 rebindMainTabToSession 同一不变量）。清空绑定会把
+        // 「持久化有 pid」降级成「运行时空 Tab」，发送侧 pid 解析恒空（BUG-28
+        // 恢复链断）；缓存就绪后每次激活由 rebindMainTabToSession 以权威矫正。
+        return { ...tab, pipelineRunId: mainPipelineId ?? tab.pipelineRunId, agentId: mainAgentId }
       }
       return tab
     })
@@ -348,6 +352,11 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
       unreadCounts: {},
       pipelineTabMap: newPipelineTabMap,
     })
+
+    // 进入会话即落盘：新会话（createSession 直调本 action，无任何后续 Tab 动作
+    // 触发保存）也立即持有 agent-tabs 持久化键——否则缓存故障窗口内没有
+    // last-known-good 绑定可恢复（BUG-28 取证②：R66 会话无持久化键）。
+    get().saveCurrentTabs()
 
     // 激活当前活跃 Tab 对应的管道；无可激活管道（活跃 Tab 无 pipelineRunId）时
     // 清空 activePipelineId——pipelineMessageStore 跨会话单例，残留上一会话值

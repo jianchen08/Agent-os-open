@@ -10,6 +10,7 @@
  * - keepalive 无前端消费面（不订阅不处理，心跳语义由连接层保证）
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
+import { makeEventFactory } from './helpers/streamingEventFactory'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -36,15 +37,7 @@ const MESSAGE_ID = 'msg_block_protocol_01'
 const THREAD_ID = 'thread-block-protocol-001'
 
 /** 构造后端 WS 事件信封（内核透传补路由键：业务字段在 data 下） */
-function makeEvent(eventType: string, data: Record<string, any>) {
-  return {
-    type: eventType,
-    data: { pipeline_id: PIPELINE_ID, message_id: MESSAGE_ID, ...data },
-    source_type: 'system',
-    source_id: PIPELINE_ID,
-    timestamp: new Date().toISOString(),
-  }
-}
+const makeEvent = makeEventFactory(PIPELINE_ID, MESSAGE_ID)
 
 describe('LLM 流式 8 事件协议组装', () => {
   let usePipelineMessageStore: any

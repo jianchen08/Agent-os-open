@@ -9,7 +9,7 @@ import { useCallback, useRef } from 'react'
 import { Plus } from '@/assets/icons'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import { AgentTabItem } from './AgentTabItem'
-import type { AgentTab as AgentTabType, AgentTabStatus } from '@/types/task'
+import type { AgentTabStatus } from '@/types/task'
 
 /** Agent Tab 数据接口 */
 export interface AgentTab {
@@ -24,9 +24,6 @@ export interface AgentTab {
   taskId?: string
   path?: string[]
 }
-
-/** 从 task.ts 导入的完整类型 */
-export type AgentTabFull = AgentTabType
 
 export interface AgentTabBarProps {
   tabs: AgentTab[]

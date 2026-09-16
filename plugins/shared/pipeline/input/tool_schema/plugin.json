@@ -14,6 +14,14 @@
     "lifecycle_hooks": [
       "on_load",
       "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "pipeline_tool_schema",
+        "required_state_inputs": [
+          "tool_ids"
+        ]
+      }
     ]
   },
   "permissions": {},

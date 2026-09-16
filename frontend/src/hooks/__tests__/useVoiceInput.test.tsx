@@ -97,7 +97,8 @@ function removeSpeechEnv() {
   Reflect.deleteProperty(navigator, 'mediaDevices')
 }
 
-describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
+/** 语音识别用例公共环境：fake timers + 转写桩 + SpeechRecognition 环境（各 describe 共用） */
+function installVoiceTestEnv() {
   beforeEach(() => {
     vi.useFakeTimers()
     mockTranscribe.mockReset()
@@ -107,6 +108,21 @@ describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
     vi.useRealTimers()
     removeSpeechEnv()
   })
+}
+
+/** 错误路径族共用：挂载带 onError 的 hook 并启动录音，返回可断言三元组 */
+async function startRecordingWithErrorHook() {
+  const onError = vi.fn()
+  const { result } = renderHook(() => useVoiceInput({ onError }))
+  await act(async () => {
+    await result.current.startRecording()
+  })
+  const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
+  return { onError, result, instance }
+}
+
+describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
+  installVoiceTestEnv()
 
   it('启动：lang/continuous/interimResults 正确下发，进入 recording，计时器走秒', async () => {
     const { result } = renderHook(() => useVoiceInput({ language: 'en-US', continuous: false }))
@@ -147,12 +163,7 @@ describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
   })
 
   it('not-allowed 错误 → 权限文案 + 回 idle + 清理停止识别', async () => {
-    const onError = vi.fn()
-    const { result } = renderHook(() => useVoiceInput({ onError }))
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
+    const { onError, result, instance } = await startRecordingWithErrorHook()
     act(() => {
       instance.onerror?.({ error: 'not-allowed', message: '' } as SpeechRecognitionErrorEvent)
     })
@@ -166,12 +177,7 @@ describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
   })
 
   it('no-speech/aborted 属 ignore，不产生错误不改变状态', async () => {
-    const onError = vi.fn()
-    const { result } = renderHook(() => useVoiceInput({ onError }))
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
+    const { onError, result, instance } = await startRecordingWithErrorHook()
     for (const code of ['no-speech', 'aborted']) {
       act(() => {
         instance.onerror?.({ error: code, message: '' } as SpeechRecognitionErrorEvent)
@@ -230,15 +236,7 @@ describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
 })
 
 describe('useVoiceInput: 服务端 ASR 降级（network 错误触发）', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-    mockTranscribe.mockReset()
-    installSpeechEnv(vi.fn(async () => makeStream()))
-  })
-  afterEach(() => {
-    vi.useRealTimers()
-    removeSpeechEnv()
-  })
+  installVoiceTestEnv()
 
   it('network 错误 → 停浏览器识别，切 server-asr 模式并开始 MediaRecorder 录音', async () => {
     const getUserMedia = vi.fn(async () => makeStream())
@@ -329,15 +327,7 @@ describe('useVoiceInput: 服务端 ASR 降级（network 错误触发）', () => 
 })
 
 describe('useVoiceInput: 音频录制模式（supportsAudio=true）', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-    mockTranscribe.mockReset()
-    installSpeechEnv(vi.fn(async () => makeStream()))
-  })
-  afterEach(() => {
-    vi.useRealTimers()
-    removeSpeechEnv()
-  })
+  installVoiceTestEnv()
 
   it('happy path：getUserMedia → MediaRecorder.start → recording', async () => {
     const getUserMedia = vi.fn(async () => makeStream())

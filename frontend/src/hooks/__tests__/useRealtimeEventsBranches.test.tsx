@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * useRealtimeEvents 分支补测：把 hook 订阅的每条事件 handler 的正/负/缺省分支走全——
  * 重连补漏（防抖、无会话、无主管道、backfill 失败通知）、task_status_update
@@ -84,19 +85,68 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+/** 订阅面全集（本地 + 服务器事件），订阅/退订断言共用 */
+const ALL_REALTIME_EVENTS = [
+  WS_LOCAL_EVENTS.RECONNECTED,
+  WS_SERVER_EVENTS.TASK_STATUS_UPDATE,
+  WS_SERVER_EVENTS.TASK_STATUS_CHANGED,
+  WS_SERVER_EVENTS.TASK_DELETED,
+  WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT,
+  WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED,
+  WS_SERVER_EVENTS.COMPRESSION_FAILED,
+  WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT,
+]
+
+/** 重连补拉族用例共用：播种活跃会话缓存 + 桩定 loadPipelineMessages */
+/** 通知断言族共用：播种会话 + 注入带自定义应答的 loadPipelineMessages */
+function seedSessionWithLoadResponse(
+  sessions: Array<Record<string, unknown>>,
+  activeSessionId: string,
+  resolved: Record<string, unknown>,
+) {
+  useSessionStore.setState({ activeSessionId })
+  queryClient.setQueryData(queryKeys.sessions, sessions as never)
+  usePipelineMessageStore.setState({
+    loadPipelineMessages: vi.fn().mockResolvedValue(resolved),
+  } as never)
+}
+
+function seedSessionWithLoadSpy(
+  sessions: Array<Record<string, unknown>>,
+  activeSessionId: string,
+) {
+  useSessionStore.setState({ activeSessionId })
+  queryClient.setQueryData(queryKeys.sessions, sessions as never)
+  const loadSpy = vi.fn().mockResolvedValue({ ok: true })
+  usePipelineMessageStore.setState({ loadPipelineMessages: loadSpy } as never)
+  return loadSpy
+}
+
+/** task 事件族共用：播种任务缓存 + 记录版本号 + 挂载 + 发事件，返回断言上下文 */
+async function seedTasksMountAndEmit(
+  tasks: Array<Record<string, unknown>>,
+  eventType: string,
+  payload: Record<string, unknown>,
+) {
+  queryClient.setQueryData(queryKeys.longTermTasks, tasks as never)
+  const before = useLayoutModeStore.getState().workspaceDataVersion
+  const { unmount } = renderHook(() => useRealtimeEvents())
+  act(() => emit(eventType, payload))
+  return { before, unmount }
+}
+
+/** task 事件族共用：播种任务缓存 + 记录版本号 + 挂载（emit 留在用例内） */
+function seedTasksAndMount(tasks: Array<Record<string, unknown>>) {
+  queryClient.setQueryData(queryKeys.longTermTasks, tasks as never)
+  const before = useLayoutModeStore.getState().workspaceDataVersion
+  const { unmount } = renderHook(() => useRealtimeEvents())
+  return { before, unmount }
+}
+
 describe('useRealtimeEvents — 订阅与退订覆盖面', () => {
   it('挂载时订阅全部 8 条事件（含本地与服务器事件）', () => {
     const { unmount } = renderHook(() => useRealtimeEvents())
-    for (const evt of [
-      WS_LOCAL_EVENTS.RECONNECTED,
-      WS_SERVER_EVENTS.TASK_STATUS_UPDATE,
-      WS_SERVER_EVENTS.TASK_STATUS_CHANGED,
-      WS_SERVER_EVENTS.TASK_DELETED,
-      WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT,
-      WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED,
-      WS_SERVER_EVENTS.COMPRESSION_FAILED,
-      WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT,
-    ]) {
+    for (const evt of ALL_REALTIME_EVENTS) {
       expect(subscribedCount(evt)).toBeGreaterThan(0)
     }
     unmount()
@@ -106,16 +156,7 @@ describe('useRealtimeEvents — 订阅与退订覆盖面', () => {
     const removeSpy = vi.spyOn(document, 'removeEventListener')
     const { unmount } = renderHook(() => useRealtimeEvents())
     unmount()
-    for (const evt of [
-      WS_LOCAL_EVENTS.RECONNECTED,
-      WS_SERVER_EVENTS.TASK_STATUS_UPDATE,
-      WS_SERVER_EVENTS.TASK_STATUS_CHANGED,
-      WS_SERVER_EVENTS.TASK_DELETED,
-      WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT,
-      WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED,
-      WS_SERVER_EVENTS.COMPRESSION_FAILED,
-      WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT,
-    ]) {
+    for (const evt of ALL_REALTIME_EVENTS) {
       expect(subscribedCount(evt)).toBe(0)
     }
     expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
@@ -140,12 +181,10 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
   })
 
   it('有活跃会话与主管道时以 backfill 模式补拉该主管道', async () => {
-    useSessionStore.setState({ activeSessionId: 'sess-1' })
-    queryClient.setQueryData(queryKeys.sessions, [
-      { id: 'sess-1', activePipelineId: 'pipe-main', pipelineIds: ['pipe-main', 'pipe-sub'] },
-    ] as never)
-    const loadSpy = vi.fn().mockResolvedValue({ ok: true })
-    usePipelineMessageStore.setState({ loadPipelineMessages: loadSpy } as never)
+    const loadSpy = seedSessionWithLoadSpy(
+      [{ id: 'sess-1', activePipelineId: 'pipe-main', pipelineIds: ['pipe-main', 'pipe-sub'] }],
+      'sess-1',
+    )
 
     const { unmount } = renderHook(() => useRealtimeEvents())
     await act(async () => {
@@ -163,12 +202,10 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
   })
 
   it('会话存在但解析不出主管道（多管道且无 activePipelineId）时不补拉', () => {
-    useSessionStore.setState({ activeSessionId: 'sess-2' })
-    queryClient.setQueryData(queryKeys.sessions, [
-      { id: 'sess-2', pipelineIds: ['p1', 'p2'] },
-    ] as never)
-    const loadSpy = vi.fn().mockResolvedValue({ ok: true })
-    usePipelineMessageStore.setState({ loadPipelineMessages: loadSpy } as never)
+    const loadSpy = seedSessionWithLoadSpy(
+      [{ id: 'sess-2', pipelineIds: ['p1', 'p2'] }],
+      'sess-2',
+    )
 
     const { unmount } = renderHook(() => useRealtimeEvents())
     act(() => emit(WS_LOCAL_EVENTS.RECONNECTED, {}))
@@ -178,12 +215,10 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
   })
 
   it('1 秒内重复重连事件只补拉一次（防抖）', async () => {
-    useSessionStore.setState({ activeSessionId: 'sess-1' })
-    queryClient.setQueryData(queryKeys.sessions, [
-      { id: 'sess-1', activePipelineId: 'pipe-main' },
-    ] as never)
-    const loadSpy = vi.fn().mockResolvedValue({ ok: true })
-    usePipelineMessageStore.setState({ loadPipelineMessages: loadSpy } as never)
+    const loadSpy = seedSessionWithLoadSpy(
+      [{ id: 'sess-1', activePipelineId: 'pipe-main' }],
+      'sess-1',
+    )
 
     const { unmount } = renderHook(() => useRealtimeEvents())
     await act(async () => {
@@ -196,10 +231,10 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
   })
 
   it('activeSessionId 指向的会话不在缓存中时不补拉（session 查找未命中）', () => {
-    useSessionStore.setState({ activeSessionId: 'sess-missing' })
-    queryClient.setQueryData(queryKeys.sessions, [{ id: 'sess-other', activePipelineId: 'p-x' }] as never)
-    const loadSpy = vi.fn().mockResolvedValue({ ok: true })
-    usePipelineMessageStore.setState({ loadPipelineMessages: loadSpy } as never)
+    const loadSpy = seedSessionWithLoadSpy(
+      [{ id: 'sess-other', activePipelineId: 'p-x' }],
+      'sess-missing',
+    )
 
     const { unmount } = renderHook(() => useRealtimeEvents())
     act(() => emit(WS_LOCAL_EVENTS.RECONNECTED, {}))
@@ -209,13 +244,7 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
   })
 
   it('补拉返回 ok=false 时发高优错误通知（含标题与分类）', async () => {
-    useSessionStore.setState({ activeSessionId: 'sess-1' })
-    queryClient.setQueryData(queryKeys.sessions, [
-      { id: 'sess-1', activePipelineId: 'pipe-main' },
-    ] as never)
-    usePipelineMessageStore.setState({
-      loadPipelineMessages: vi.fn().mockResolvedValue({ ok: false, error: new Error('boom') }),
-    } as never)
+    seedSessionWithLoadResponse([{ id: 'sess-1', activePipelineId: 'pipe-main' }], 'sess-1', { ok: false, error: new Error('boom') })
 
     const { unmount } = renderHook(() => useRealtimeEvents())
     await act(async () => {
@@ -234,13 +263,7 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
   })
 
   it('补拉成功（ok=true）不产生错误通知', async () => {
-    useSessionStore.setState({ activeSessionId: 'sess-1' })
-    queryClient.setQueryData(queryKeys.sessions, [
-      { id: 'sess-1', activePipelineId: 'pipe-main' },
-    ] as never)
-    usePipelineMessageStore.setState({
-      loadPipelineMessages: vi.fn().mockResolvedValue({ ok: true }),
-    } as never)
+    seedSessionWithLoadResponse([{ id: 'sess-1', activePipelineId: 'pipe-main' }], 'sess-1', { ok: true })
 
     const { unmount } = renderHook(() => useRealtimeEvents())
     await act(async () => {
@@ -257,13 +280,7 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
 
 describe('useRealtimeEvents — task_status_update', () => {
   it('任务已在缓存中：增量写 status/currentPhase/error，并 bump 工作区版本', () => {
-    queryClient.setQueryData(queryKeys.longTermTasks, [
-      { id: 't1', status: 'running' },
-      { id: 't2', status: 'running' },
-    ] as never)
-    const before = useLayoutModeStore.getState().workspaceDataVersion
-
-    const { unmount } = renderHook(() => useRealtimeEvents())
+    const { before, unmount } = seedTasksAndMount([{ id: 't1', status: 'running' }, { id: 't2', status: 'running' }])
     act(() =>
       emit(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, {
         task_id: 't1',
@@ -350,13 +367,7 @@ describe('useRealtimeEvents — task_status_update', () => {
 
 describe('useRealtimeEvents — task_deleted 与 task_status_changed', () => {
   it('task_deleted 移除缓存任务并 bump 版本号', () => {
-    queryClient.setQueryData(queryKeys.longTermTasks, [
-      { id: 't1', status: 'running' },
-      { id: 't2', status: 'running' },
-    ] as never)
-    const before = useLayoutModeStore.getState().workspaceDataVersion
-
-    const { unmount } = renderHook(() => useRealtimeEvents())
+    const { before, unmount } = seedTasksAndMount([{ id: 't1', status: 'running' }, { id: 't2', status: 'running' }])
     act(() => emit(WS_SERVER_EVENTS.TASK_DELETED, { task_id: 't1' }))
 
     const tasks = queryClient.getQueryData<Array<Record<string, unknown>>>(queryKeys.longTermTasks)!

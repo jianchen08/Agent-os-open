@@ -10,8 +10,9 @@ package:
   status: active
   description: >-
     编码团队模式包（薄整合层）：PM 拆解派单 → 开发编码自测 → 测试验证 → 评审独立审查；
-    执行流程复用既有执行层配置（programming_orchestrator_agent_v2 / code_writer /
-    test_debug_agent / code_reviewer_agent），本包只承担团队语义。
+    执行流程复用既有执行层配置（mode_coding/programming_orchestrator_agent_v2 /
+    mode_coding/code_writer / mode_coding/test_debug_agent /
+    mode_coding/code_reviewer_agent），本包只承担团队语义。
   docs: PACKAGE.md
   roles:
     - id: coding_pm_agent

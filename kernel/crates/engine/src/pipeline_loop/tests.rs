@@ -3537,3 +3537,95 @@ async fn context_gate_formula_when_controls_guard_item() {
         "无锚且消息少不兜底"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// user_input 实录（persist_run_start）：首轮 user 消息指纹经
+// `_pending_message_ops` 通道落一条 plugin_id="user_input" 轨迹，保证首轮
+// user 也在审计/回放范围内；内部字段随即从 state 移除（不泄漏进快照/投影）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn noop_pipeline_config() -> PipelineConfig {
+    PipelineConfig {
+        name: "noop".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    }
+}
+
+#[tokio::test]
+async fn pending_message_ops_recorded_as_user_input_trace_and_stripped() {
+    let fixture = Fixture::build(&[]);
+    let config = noop_pipeline_config();
+    let state = fixture
+        .run(
+            &config,
+            &StepLibrary::default(),
+            json!({
+                "pipeline_id": "p_user",
+                "session_id": "s_user",
+                "messages": [{"role": "user", "content": "首轮", "seq": 0}],
+                "_pending_message_ops": [{"op": "set", "seq": 0, "msg": {"role": "user"}}],
+            }),
+        )
+        .await;
+
+    let traces = fixture.store.trace_plugin_ids.lock().unwrap().clone();
+    assert!(
+        traces.iter().any(|p| p == "user_input"),
+        "首轮 user 实录必须落轨迹（审计/回放范围），实际 {traces:?}"
+    );
+    assert!(
+        state.get("_pending_message_ops").is_none(),
+        "内部通道字段必须从 state 移除（不泄漏进快照/投影）"
+    );
+}
+
+#[tokio::test]
+async fn empty_pending_message_ops_records_no_user_input_trace() {
+    // 空数组是合法输入（无 user 消息轮，如后台续跑）：不得落空轨迹
+    let fixture = Fixture::build(&[]);
+    let config = noop_pipeline_config();
+    fixture
+        .run(
+            &config,
+            &StepLibrary::default(),
+            json!({
+                "pipeline_id": "p_user_empty",
+                "session_id": "s_user",
+                "_pending_message_ops": [],
+            }),
+        )
+        .await;
+    let traces = fixture.store.trace_plugin_ids.lock().unwrap().clone();
+    assert!(
+        !traces.iter().any(|p| p == "user_input"),
+        "空 ops 不得产生空实录，实际 {traces:?}"
+    );
+
+    // 非数组形态（写入方误传）同样静默跳过，不 panic
+    let fixture2 = Fixture::build(&[]);
+    fixture2
+        .run(
+            &config,
+            &StepLibrary::default(),
+            json!({
+                "pipeline_id": "p_user_bad",
+                "session_id": "s_user",
+                "_pending_message_ops": {"not": "an array"},
+            }),
+        )
+        .await;
+    let traces2 = fixture2.store.trace_plugin_ids.lock().unwrap().clone();
+    assert!(
+        !traces2.iter().any(|p| p == "user_input"),
+        "非数组形态不得产生实录，实际 {traces2:?}"
+    );
+}

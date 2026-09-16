@@ -442,7 +442,7 @@
           "title": "Token 用量",
           "label": "累计 Tokens",
           "datasourceUri": "/ext/monitoring/token-usage",
-          "valueKey": "token_usage.total_tokens",
+          "valueKey": "total_tokens",
           "refresh": {
             "type": "poll",
             "intervalSeconds": 60
@@ -670,5 +670,5 @@
       }
     ]
   },
-  "host_group": "light"
+  "host_group": "light_stable"
 }

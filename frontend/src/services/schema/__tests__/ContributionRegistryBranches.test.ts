@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * ContributionRegistry 分支补测：既有测试用的是「镜像类/直接 register」路径，
  * 本文件走真实 ContributionRegistry + registerFromSchema 归一化链路，补齐
@@ -55,7 +56,7 @@ describe('ContributionRegistry — registerFromSchema 初始化与缺省', () =>
     expect(registry.getPages()).toEqual([])
   })
 
-  it.each(['workspaceTabs', 'chatMessages', 'chatInteractions', 'chatActions'])(
+  it.each(['workspaceTabs', 'chatInteractions', 'chatActions'])(
     '弃用贡献 key %s 被忽略（不进 pages 归一化）',
     (key) => {
       registry.registerFromSchema({
@@ -79,6 +80,7 @@ describe('ContributionRegistry — 归一化 space/slot 映射', () => {
     ['menus', 'chat', 'inline'],
     ['commands', 'chat', 'input-action'],
     ['shortcuts', 'chat', 'input-action'],
+    ['chatMessages', 'chat', 'message-style'],
     ['settingsPanels', 'settings', 'nav'],
     ['widgets', 'workspace', 'tab'],
   ])('legacy key %s → space=%s / slot=%s（legacyFrom 标记来源）', (key, space, slot) => {

@@ -1,0 +1,14 @@
+/**
+ * 渲染窗口化（renderer 内存/负载优化）
+ *
+ * content-visibility:auto：视口外元素跳过布局/绘制（Blink 按需渲染窗口±缓冲），
+ * DOM 保留——长会话历史消息的 Blink 存储（layout/paint 对象）与位图解码是
+ * renderer 内存大户，此标记把"全量布局"收敛为"可视窗口布局"。
+ * contain-intrinsic-size：跳过期间的占位尺寸估计；`auto` 前缀让浏览器记住
+ * 元素最近一次真实渲染尺寸（滚过的消息占位自动校正），150px 为未渲染消息
+ * 的初值估计（估算偏差由滚动锚定与 render 后自校正吸收）。
+ */
+.message-render-window {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 150px;
+}

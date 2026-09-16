@@ -257,7 +257,8 @@ class TestProviderConfigYamlFallback:
         """ConfigCenter 不可达 + 仓库 yaml 不存在 → 返回 {}（调用方走默认）。"""
         mod = _load_manager()
 
-        class _MissingYamlPath(type(Path())):
+        # 运行时具体 Path 子类作动态基类（mypy 无法静态解析，misc）
+        class _MissingYamlPath(type(Path())):  # type: ignore[misc]
             def is_file(self) -> bool:
                 return False
 
@@ -565,7 +566,8 @@ class TestCheckpointPathGaps:
 
         ws_extra = type(ws)(str(ws))
 
-        class _Widened(type(ws)):
+        # 运行时具体 Path 子类作动态基类（mypy 无法静态解析，misc）
+        class _Widened(type(ws)):  # type: ignore[misc]
             def rglob(self, pattern: str) -> Any:
                 yield from super().rglob(pattern)
                 yield shared

@@ -12,6 +12,12 @@ import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { FormWidget } from '../FormWidget'
 
+// FormWidget 现消费会话隔离形态（useSessionsQuery）计算权限档显示默认；
+// 本文件无 QueryClientProvider，静态 mock 空列表（无会话 → 非隔离默认显示路径）
+vi.mock('@/hooks/queries/useSessionsQuery', () => ({
+  useSessionsQuery: () => ({ data: [] }),
+}))
+
 const apiGet = vi.fn()
 vi.mock('@/services/api/client', () => ({
   default: Object.assign(() => undefined, {
@@ -47,7 +53,7 @@ describe('readback：pipeline_id/session_id 参与 query，变化即重发', () 
   it('无激活管道不回读；管道激活后按新 pipeline_id 回读；会话切换补 session_id', async () => {
     render(<FormWidget fields={selectFields} onChange={vi.fn()} readbackUri="/ext/perm/mode" />)
 
-    // 无激活管道：回读 guard 不发请求
+    // 无激活管道且无会话：回读 guard 不发请求
     expect(apiGet).not.toHaveBeenCalled()
 
     // 激活管道 → 以新 pipeline_id 重发回读
@@ -63,5 +69,17 @@ describe('readback：pipeline_id/session_id 参与 query，变化即重发', () 
     await waitFor(() =>
       expect(apiGet).toHaveBeenCalledWith('/ext/perm/mode?pipeline_id=pipe-A&session_id=sess-1'),
     )
+  })
+
+  it('仅会话无管道（BUG-15 会话键位）：按 session_id 回读，不带空 pipeline_id', async () => {
+    render(<FormWidget fields={selectFields} onChange={vi.fn()} readbackUri="/ext/perm/mode" />)
+    expect(apiGet).not.toHaveBeenCalled()
+
+    // 只有会话、无激活管道（如会话刚创建未发首条消息）：session_id 是
+    // 权限模式的键位，回读必须照常发起
+    act(() => {
+      useSessionStore.setState({ activeSessionId: 'thread-s9' })
+    })
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/ext/perm/mode?session_id=thread-s9'))
   })
 })

@@ -26,7 +26,7 @@ for _d in (str(_PLUGIN_DIR), str(_SDK)):
 import http_api  # noqa: E402
 import server as trigger_server  # noqa: E402
 from triggers.manager import get_trigger_manager  # noqa: E402
-from triggers.types import TriggerConfig, TriggerType  # noqa: E402
+from triggers.types import TriggerConfig, TriggerStatus, TriggerType  # noqa: E402
 
 pytestmark = pytest.mark.unit  # 纯单测：进程内单例 + fake 注入器，零外部依赖
 
@@ -146,9 +146,20 @@ def test_delete_ok_and_404() -> None:
     mgr.register(_make_trigger())
     body = _unwrap(asyncio.run(http_api.delete_trigger("trigger_event_abc123def456")))
     assert body == {"deleted": True, "trigger_id": "trigger_event_abc123def456"}
-    assert mgr.get("trigger_event_abc123def456").status.value == "cancelled"
+    # BUG-23：删除 = 注销（清注册表残留，列表重拉条目消失；终态 CANCELLED 已落写面）
+    assert mgr.get("trigger_event_abc123def456") is None
     resp = asyncio.run(http_api.delete_trigger("trigger_event_zzz999zzz999"))
     assert resp["success"] is False and resp["data"]["status"] == 404
+
+
+def test_delete_fired_single_shot() -> None:
+    """单发已触发（FIRED）的触发器也应可删——清列表残留（BUG-23 验收）。"""
+    mgr = get_trigger_manager()
+    mgr.register(_make_trigger(trigger_type=TriggerType.DELAY))
+    mgr.get("trigger_event_abc123def456").status = TriggerStatus.FIRED
+    body = _unwrap(asyncio.run(http_api.delete_trigger("trigger_event_abc123def456")))
+    assert body == {"deleted": True, "trigger_id": "trigger_event_abc123def456"}
+    assert mgr.get("trigger_event_abc123def456") is None
 
 
 # ── enable / disable ────────────────────────────────────────────────
@@ -303,14 +314,19 @@ def test_create_with_bearer_token_records_user() -> None:
 
 
 def test_create_without_credentials_401() -> None:
-    """缺 Bearer/过期 token → 401（注册到期必投递失败的触发器是静默债）。"""
+    """缺 Bearer/过期 token → 401 协议信封（注册到期必投递失败的触发器是静默债）。
+
+    BUG-22：拒绝必须走 protocol_error（success:true + data 携真实状态）——
+    success:false 信封会被内核 SidecarHttpHandler 统一映射 502，前端按可重试
+    5xx 重放请求并丢失结构化错误体。
+    """
     for headers in (None, {}, {"Authorization": "Bearer not-a-token"},
                     {"Authorization": f"Bearer {_token(expired=True)}"}):
         resp = asyncio.run(http_api.handle_http_dispatch(
             "/ext/trigger_setup_tool/triggers", "POST",
             _encode_body(_CREATE_BODY), None, headers,
         ))
-        assert resp["success"] is False and resp["data"]["status"] == 401, headers
+        assert resp["success"] is True and resp["data"]["status"] == 401, headers
     assert get_trigger_manager().list_all() == []
 
 

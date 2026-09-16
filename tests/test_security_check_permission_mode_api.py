@@ -56,8 +56,9 @@ def _fake_hi_cap(selected: str) -> AsyncMock:
     return fake
 
 
-def _make_http_post(pipeline_id: str, mode: str) -> dict[str, Any]:
-    body = base64.b64encode(json.dumps({"pipeline_id": pipeline_id, "mode": mode}).encode("utf-8")).decode("ascii")
+def _make_http_post(session_id: str, mode: str) -> dict[str, Any]:
+    """构造切换端点 POST 请求（键位 = session_id，会话稳定键——BUG-15 裁定）。"""
+    body = base64.b64encode(json.dumps({"session_id": session_id, "mode": mode}).encode("utf-8")).decode("ascii")
     return {"path": "/ext/pipeline_security_check/permission_mode", "method": "POST", "plugin_id": "pipeline_security_check", "raw_body": body}
 
 
@@ -76,28 +77,40 @@ class TestLowRiskSwitch:
     @pytest.mark.asyncio
     async def test_default切accept_edits直接生效(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = _mock_hi(monkeypatch, "cancel")
-        resp = await server_mod.http_handle(**_make_http_post("p1", "accept_edits"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "accept_edits"))
         result = _decode(resp)
         assert result == {"switched": True, "mode": "accept_edits"}
-        assert sc_mod._PERMISSION_MODES.get("p1") == "accept_edits"
+        assert sc_mod._PERMISSION_MODES.get("thread-s1") == "accept_edits"
         fake.call.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_相同模式幂等(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        sc_mod._PERMISSION_MODES["s1"] = "default"
+        """表内已有同值条目 → 幂等返回 unchanged，不重复写。"""
+        sc_mod._PERMISSION_MODES["thread-s1"] = "default"
         _mock_hi(monkeypatch, "cancel")
-        resp = await server_mod.http_handle(**_make_http_post("p1", "default"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "default"))
         assert _decode(resp) == {"switched": True, "mode": "default", "unchanged": True}
+
+    @pytest.mark.asyncio
+    async def test_default_selection_on_absent_key_writes_explicit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """显式选择 default（表内无条目）必须落表：显式 default 在隔离会话
+        覆盖免审批默认（黑名单照常生效），不落表则无法与「未选择」区分。"""
+        _mock_hi(monkeypatch, "cancel")
+        assert "thread-s1" not in sc_mod._PERMISSION_MODES
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "default"))
+        result = _decode(resp)
+        assert result == {"switched": True, "mode": "default"}
+        assert sc_mod._PERMISSION_MODES.get("thread-s1") == "default"
 
 
 class TestHighRiskSwitch:
     @pytest.mark.asyncio
     async def test_auto确认后生效(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = _mock_hi(monkeypatch, "confirm")
-        resp = await server_mod.http_handle(**_make_http_post("p1", "auto"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "auto"))
         result = _decode(resp)
         assert result == {"switched": True, "mode": "auto"}
-        assert sc_mod._PERMISSION_MODES.get("p1") == "auto"
+        assert sc_mod._PERMISSION_MODES.get("thread-s1") == "auto"
         calls = [c.args[0] for c in fake.call.await_args_list]
         assert "create_choice" in calls
         assert "wait_for_choice" in calls
@@ -105,21 +118,21 @@ class TestHighRiskSwitch:
     @pytest.mark.asyncio
     async def test_auto取消不切换(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _mock_hi(monkeypatch, "cancel")
-        resp = await server_mod.http_handle(**_make_http_post("p1", "auto"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "auto"))
         result = _decode(resp)
         assert result["switched"] is False
-        assert sc_mod._PERMISSION_MODES.get("p1") is None
+        assert sc_mod._PERMISSION_MODES.get("thread-s1") is None
 
     @pytest.mark.asyncio
     async def test_bypass确认后生效(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _mock_hi(monkeypatch, "confirm")
-        resp = await server_mod.http_handle(**_make_http_post("p1", "bypass"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "bypass"))
         assert _decode(resp) == {"switched": True, "mode": "bypass"}
 
     @pytest.mark.asyncio
     async def test_交互服务不可用拒绝切换(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(server_mod.plugin, "get_capability", lambda name: (_ for _ in ()).throw(KeyError(name)))
-        resp = await server_mod.http_handle(**_make_http_post("p1", "auto"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "auto"))
         result = _decode(resp)
         assert result["switched"] is False
         assert sc_mod._PERMISSION_MODES.get("s1") is None
@@ -129,7 +142,7 @@ class TestHighRiskSwitch:
         fake = AsyncMock()
         fake.call.side_effect = RuntimeError("boom")
         monkeypatch.setattr(server_mod.plugin, "get_capability", lambda name: fake)
-        resp = await server_mod.http_handle(**_make_http_post("p1", "bypass"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "bypass"))
         assert _decode(resp)["switched"] is False
 
 
@@ -149,7 +162,7 @@ class TestValidationAndQuery:
         self, monkeypatch: pytest.MonkeyPatch, bad_mode: str, why: str
     ) -> None:
         _mock_hi(monkeypatch, "confirm")
-        resp = await server_mod.http_handle(**_make_http_post("p1", bad_mode))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", bad_mode))
         result = _decode(resp)
         assert result["switched"] is False, why
         assert "invalid mode" in result.get("error", "")
@@ -173,28 +186,33 @@ class TestValidationAndQuery:
     @pytest.mark.asyncio
     async def test_GET查询当前模式(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _mock_hi(monkeypatch, "confirm")
-        sc_mod._PERMISSION_MODES["p1"] = "auto"
+        sc_mod._PERMISSION_MODES["thread-s1"] = "auto"
         resp = await server_mod.http_handle(
-            **{"path": "/ext/pipeline_security_check/permission_mode", "method": "GET", "plugin_id": "pipeline_security_check", "raw_body": "", "query": {"pipeline_id": "p1"}}
+            **{"path": "/ext/pipeline_security_check/permission_mode", "method": "GET", "plugin_id": "pipeline_security_check", "raw_body": "", "query": {"session_id": "thread-s1"}}
         )
         result = _decode(resp)
         assert result["mode"] == "auto"
+        assert result["explicit"] is True, "表内条目 = 用户显式选择"
         assert "valid_modes" in result
 
     @pytest.mark.asyncio
     async def test_未设置时查询默认default(self) -> None:
         resp = await server_mod.http_handle(
-            **{"path": "/ext/pipeline_security_check/permission_mode", "method": "GET", "plugin_id": "pipeline_security_check", "raw_body": "", "query": {"pipeline_id": "p1"}}
+            **{"path": "/ext/pipeline_security_check/permission_mode", "method": "GET", "plugin_id": "pipeline_security_check", "raw_body": "", "query": {"session_id": "thread-s1"}}
         )
-        assert _decode(resp)["mode"] == "default"
+        result = _decode(resp)
+        assert result["mode"] == "default"
+        assert result["explicit"] is False, "缺省态必须显式标记 explicit=false（前端据此显示隔离免审批默认）"
 
 
 class TestSwitchThenExecuteE2E:
     """HTTP 切换 → 执行轮的端到端契约（真实 key 链路，防"切了没生效"回归）。
 
-    回归背景：生产观察"切旁路仍审批"——根因是前端不回读 + 表被测试污染
-    导致真实管道键缺失回退 default，插件分发本身在键一致时是生效的；
-    本契约把"切换键 = 执行键（pipeline_id）"的最短链路钉死。
+    回归背景（BUG-15，2026-09-15）：权限档是会话级设置，键位必须是
+    session_id 稳定键。执行上下文的 pipeline_id 在同一会话内随任务/子代理
+    轮换（生产实测 2 分钟 3 个），键在 pipeline_id 上时显式选择被隔离豁免
+    路径吞掉。本契约把「切换键 = session_id，执行侧同会话异 pipeline_id
+    照常命中」的最短链路钉死。
     """
 
     # 注入真实安全规则（同 test_security_check_allow_priority 模式）：
@@ -205,15 +223,21 @@ class TestSwitchThenExecuteE2E:
         yaml.safe_load((_REPO_ROOT / "config" / "plugins" / "security_check" / "security_rules.yaml").read_text(encoding="utf-8")) or {}
     ).get("rules", [])
 
-    def _ctx_for(self, command: str) -> Any:
+    def _ctx_for(self, command: str, task_isolated: bool = False) -> Any:
         from pipeline.plugin import PluginContext  # noqa: PLC0415
 
         return PluginContext(
             state={
                 "core_type": "tool_execute",
-                "pipeline_id": "p1",
+                # 执行侧 pipeline_id 刻意与切换键（session_id=thread-s1）不同：
+                # 同会话内主/子管道、任务轮换的 pipeline_id 各不相同（BUG-15），
+                # 显式档必须仍然命中。
+                "pipeline_id": "volatile-pipe-x",
+                "session_id": "thread-s1",
                 "raw_tool_calls": [{"name": "bash_execute", "args": {"command": command}}],
-                "execution_contexts": [{"provider": "host", "tool_name": "bash_execute", "task_isolated": False}],
+                "execution_contexts": [
+                    {"provider": "host", "tool_name": "bash_execute", "task_isolated": task_isolated}
+                ],
             },
             _services={},
         )
@@ -225,7 +249,7 @@ class TestSwitchThenExecuteE2E:
     async def test_bypass切换后执行轮不再弹审批(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """HTTP 切 bypass → 同一进程内 execute：命中 needs_approval 的命令直接放行。"""
         fake = _mock_hi(monkeypatch, "confirm")
-        resp = await server_mod.http_handle(**_make_http_post("p1", "bypass"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "bypass"))
         assert _decode(resp)["switched"] is True
         fake.call.reset_mock()
 
@@ -244,7 +268,7 @@ class TestSwitchThenExecuteE2E:
     async def test_default切换后执行轮照常弹审批(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """同样命令在 default 下必须走审批链（对标：bypass 与 default 有真实差异）。"""
         fake = _mock_hi(monkeypatch, "confirm")
-        resp = await server_mod.http_handle(**_make_http_post("p1", "default"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "default"))
         assert _decode(resp)["switched"] is True
         fake.call.reset_mock()
 
@@ -253,6 +277,40 @@ class TestSwitchThenExecuteE2E:
         decision = r.state_updates.get("security.decision", {})
         assert "soft_block" in decision.get("reason", ""), (
             f"default 模式命中 curl 应走审批链（无交互服务→软拦截），实际={decision.get('reason')!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_isolated_task_without_explicit_mode_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """隔离任务 + 表内无条目（未显式选择）→ 黑名单命中也整体放行（免审批默认）。"""
+        _mock_hi(monkeypatch, "confirm")
+        assert "thread-s1" not in sc_mod._PERMISSION_MODES
+
+        plugin = self._plugin()
+        r = await plugin.execute(
+            self._ctx_for("echo ring && curl -s http://example.com", task_isolated=True)
+        )
+        decision = r.state_updates.get("security.decision", {})
+        assert decision.get("allowed") is True
+        assert decision.get("reason") == "isolated task, base checks passed"
+        # 放行路径不产生拒绝副作用
+        assert r.state_updates.get("raw_tool_calls") is None
+
+    @pytest.mark.asyncio
+    async def test_isolated_task_with_explicit_default_still_approves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """HTTP 切 default（显式落表）→ 隔离任务黑名单命中照常走审批链。"""
+        fake = _mock_hi(monkeypatch, "confirm")
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "default"))
+        assert _decode(resp)["switched"] is True
+        assert sc_mod._PERMISSION_MODES.get("thread-s1") == "default"
+        fake.call.reset_mock()
+
+        plugin = self._plugin()
+        r = await plugin.execute(
+            self._ctx_for("echo ring && curl -s http://example.com", task_isolated=True)
+        )
+        decision = r.state_updates.get("security.decision", {})
+        assert "soft_block" in decision.get("reason", ""), (
+            f"显式 default 必须覆盖隔离免审批默认（无交互服务→软拦截），实际={decision.get('reason')!r}"
         )
 
 
@@ -392,10 +450,10 @@ class TestConfirmSwitchFailureBranches:
         fake.call.side_effect = _call
         monkeypatch.setattr(server_mod.plugin, "get_capability", lambda name: fake)
 
-        resp = await server_mod.http_handle(**_make_http_post("p1", "auto"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "auto"))
         result = _decode(resp)
         assert result == {"switched": False, "reason": "用户未确认或确认超时", "mode": "default"}
-        assert sc_mod._PERMISSION_MODES.get("p1") is None
+        assert sc_mod._PERMISSION_MODES.get("thread-s1") is None
 
     @pytest.mark.asyncio
     async def test_wait_non_dict_response_rejects_switch(
@@ -414,9 +472,9 @@ class TestConfirmSwitchFailureBranches:
         fake.call.side_effect = _call
         monkeypatch.setattr(server_mod.plugin, "get_capability", lambda name: fake)
 
-        resp = await server_mod.http_handle(**_make_http_post("p1", "bypass"))
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", "bypass"))
         assert _decode(resp)["switched"] is False
-        assert sc_mod._PERMISSION_MODES.get("p1") is None
+        assert sc_mod._PERMISSION_MODES.get("thread-s1") is None
 
 
 class TestHttpBodyAndQueryParsing:
@@ -433,7 +491,7 @@ class TestHttpBodyAndQueryParsing:
     async def test_malformed_body_treated_as_empty(
         self, monkeypatch: pytest.MonkeyPatch, raw_body: str
     ) -> None:
-        """畸形请求体 → 按空体处理 → 缺 pipeline_id 返回 400。"""
+        """畸形请求体 → 按空体处理 → 缺 session_id 返回 400。"""
         _mock_hi(monkeypatch, "confirm")
         resp = await server_mod.http_handle(
             path="/ext/pipeline_security_check/permission_mode",
@@ -441,7 +499,7 @@ class TestHttpBodyAndQueryParsing:
             plugin_id="pipeline_security_check",
             raw_body=raw_body,
         )
-        assert _decode(resp) == {"error": "pipeline_id required", "switched": False}
+        assert _decode(resp) == {"error": "session_id required", "switched": False}
 
     @pytest.mark.asyncio
     async def test_get_query_as_pair_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -452,7 +510,7 @@ class TestHttpBodyAndQueryParsing:
             method="GET",
             plugin_id="pipeline_security_check",
             raw_body="",
-            query=[["pipeline_id", "pq-1"]],
+            query=[["session_id", "pq-1"]],
         )
         result = _decode(resp)
         assert result["mode"] == "default"
@@ -472,3 +530,110 @@ class TestHttpBodyAndQueryParsing:
             query="zzzz",
         )
         assert _decode(resp)["mode"] == "default"
+
+
+class TestSessionKeyContract:
+    """BUG-15 键位契约：写入（POST session 键）→ 同会话异管道执行读取必须命中。
+
+    按生产装配序演练：sidecar on_load 先 _load_permission_modes() 加载持久化
+    表，之后前端经切换端点写入。要求：
+    1. 写入对执行侧 _explicit_permission_mode 立即可见（同会话、pipeline_id
+       不同——生产实测同会话 2 分钟换 3 个管道键）；
+    2. 写入必须落盘（sidecar 热重载/重启后重读文件不丢显式选择）；
+    3. 隔离任务命中黑名单时，端点写入的显式档必须覆盖免审批默认（弹审批）。
+
+    本文件内 plugin/server 相邻导入（同一 plugin 模块实例），与生产
+    sidecar 单进程同构——端点驱动的组合场景必须放这里，跨文件复用会踩
+    测试基建的裸模块实例分叉。
+    """
+
+    # 显式守门规则（判定来源可归因，不依赖降级默认规则）
+    _GUARD_RULES: list[dict[str, Any]] = [
+        {
+            "name": "guard_rm",
+            "tools": ["*"],
+            "params": ["command", "cmd"],
+            "action": "needs_approval",
+            "patterns": [{"type": "keyword", "value": "rm -rf"}],
+        },
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _restore_execute_cap(self):
+        """执行侧审批通道走 set_human_interaction_cap 装配缝，测后摘除防残留。"""
+        yield
+        sc_mod.set_human_interaction_cap(None)
+
+    async def _switch_to(self, mode: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """生产装配序：预置历史持久化文件 → on_load 加载 → 切换端点写入。"""
+        # 预置历史持久化文件（生产 data/permission_modes.json 长期存在旧条目，
+        # _load 走成功分支——正是历史版本重绑定共享表的触发条件）
+        monkeypatch.setattr(sc_mod, "_PERMISSION_MODES_FILE", str(tmp_path / "permission_modes.json"))
+        Path(sc_mod._PERMISSION_MODES_FILE).write_text(json.dumps({"legacy-key": "bypass"}), encoding="utf-8")
+        _mock_hi(monkeypatch, "cancel")
+        sc_mod._load_permission_modes()
+        resp = await server_mod.http_handle(**_make_http_post("thread-s1", mode))
+        assert _decode(resp) == {"switched": True, "mode": mode}
+
+    @pytest.mark.asyncio
+    async def test_切换写入后同会话异管道执行命中显式档(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await self._switch_to("default", monkeypatch, tmp_path)
+
+        # 写入必须落盘：否则热重载/重启后显式选择丢失、隔离豁免卷土重来
+        persisted = json.loads(Path(sc_mod._PERMISSION_MODES_FILE).read_text(encoding="utf-8"))
+        assert persisted.get("thread-s1") == "default", (
+            f"切换条目必须持久化，实际文件内容={persisted!r}"
+        )
+
+        # 执行侧读取：同会话、不同 pipeline_id（主/子管道、任务轮换）必须命中
+        from pipeline.plugin import PluginContext  # noqa: PLC0415
+
+        ctx = PluginContext(
+            state={
+                "core_type": "tool_execute",
+                "session_id": "thread-s1",
+                "pipeline_id": "volatile-pipe-y",
+                "raw_tool_calls": [],
+            },
+            _services={},
+        )
+        assert sc_mod.SecurityCheckPlugin()._explicit_permission_mode(ctx) == "default"
+
+    @pytest.mark.asyncio
+    async def test_端点写入的显式档覆盖隔离免审批默认(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GUI 实测场景（BUG-15）：选择器写入（session 键）→ 同会话异管道的
+        隔离任务命中黑名单必须弹审批，不被「隔离未显式选择 → 免审批」吞掉。
+        """
+        from pipeline.plugin import PluginContext  # noqa: PLC0415
+
+        from tests._security_check_harness import wire_approval_cap
+
+        await self._switch_to("default", monkeypatch, tmp_path)
+
+        _cap, create = wire_approval_cap(sc_mod, [{"selected_option": "approved_once"}])
+        plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": self._GUARD_RULES})
+        ctx = PluginContext(
+            state={
+                "core_type": "tool_execute",
+                "session_id": "thread-s1",
+                "pipeline_id": "volatile-pipe-z",
+                "raw_tool_calls": [
+                    {"name": "bash_execute", "args": {"command": "rm -rf /x"}}
+                ],
+                "execution_contexts": [
+                    {"provider": "host", "tool_name": "bash_execute", "task_isolated": True}
+                ],
+            },
+            _services={},
+        )
+
+        result = await plugin.execute(ctx)
+        decision = result.state_updates.get("security.decision", {})
+        assert create.calls == 1, (
+            f"切换端点写入的显式 default 必须覆盖隔离免审批默认（弹审批），实际={decision!r}"
+        )
+        assert decision.get("reason") == "approved", "审批通过后才允许执行"

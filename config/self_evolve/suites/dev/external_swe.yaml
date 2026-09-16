@@ -5,7 +5,7 @@ cases:
 - id: swe_matplotlib_matplo
   source: swe-bench-verified:matplotlib__matplotlib-24627
   category: coding
-  target: programming_orchestrator_agent_v2
+  target: mode_coding/programming_orchestrator_agent_v2
   messages:
   - '以下是开源仓库 matplotlib/matplotlib 的一个真实缺陷报告（SWE-bench Verified 真题 matplotlib__matplotlib-24627）。
 
@@ -43,7 +43,7 @@ cases:
 - id: swe_scikit_learn_scikit
   source: swe-bench-verified:scikit-learn__scikit-learn-14141
   category: coding
-  target: programming_orchestrator_agent_v2
+  target: mode_coding/programming_orchestrator_agent_v2
   messages:
   - '以下是开源仓库 scikit-learn/scikit-learn 的一个真实缺陷报告（SWE-bench Verified 真题 scikit-learn__scikit-learn-14141）。
 
@@ -66,7 +66,7 @@ cases:
 - id: swe_sympy_sympy-
   source: swe-bench-verified:sympy__sympy-20916
   category: coding
-  target: programming_orchestrator_agent_v2
+  target: mode_coding/programming_orchestrator_agent_v2
   messages:
   - "以下是开源仓库 sympy/sympy 的一个真实缺陷报告（SWE-bench Verified 真题 sympy__sympy-20916）。\n\n\
     pprint unicode does not format subscripts on Greek letters\nGood:\r\n\r\n[ -t₀⋅w₀\

@@ -8,8 +8,9 @@ spawn 契约（内核 invoker 注入）：::
     # cwd = plugins/shared/_host/
 
 职责：
-- 按 --members 的 plugin_id 列表在 plugins/shared/{system,tools,pipeline}
-  目录树下定位成员插件目录（plugin.json id 优先，目录名兜底）；
+- 按 --members 的 plugin_id 列表在内核插件发现面（出厂根 plugins/shared +
+  用户插件根，任意域任意深度，同 id 用户副本赢）定位成员插件目录
+  （plugin.json id 优先，目录名兜底）；
 - 逐个加载成员 server.py 并取得其 ``AgentOSPlugin`` 实例，经 SDK
   ``CohostServer`` 聚合为单个 MCP stdio server（工具带 ``{plugin_id}.``
   前缀，initialize/生命周期通知扇出，共享反向调用通道）；
@@ -55,8 +56,6 @@ from agentos_plugin_sdk import AgentOSPlugin, CohostServer
 
 logger = logging.getLogger(__name__)
 
-# 成员发现扫描的分组目录（plugins/shared/ 下）
-_GROUP_ROOTS: tuple[str, ...] = ("system", "tools", "pipeline")
 # 扫描剪枝目录：每插件的 venv 与 node_modules 等重型目录不进索引（plugin.json
 # 只存在于插件目录根）；junction/符号链接目录也不进入（避免跟随外部仓库循环遍历）。
 _SCAN_PRUNE_DIRS: frozenset[str] = frozenset(
@@ -119,23 +118,57 @@ def _watchdog_stall_secs(env: Mapping[str, str] | None = None) -> float:
 # ── 成员发现 ─────────────────────────────────────────────
 
 
-def _scan_plugin_dirs(shared_root: Path) -> tuple[dict[str, Path], dict[str, Path]]:
-    """扫描三个分组目录树，建立 manifest id / 目录名 → 插件目录索引。
+def _user_plugins_root() -> Path | None:
+    """用户插件根（``<USER_ROOT>/plugins``）——成员发现的双根之一。
+
+    经共享根裸模块 ``user_space`` 解析（内核 ``agentos_core::user_space`` 的
+    Python 镜像，两侧同规则；插件侧先例见 agent_manager/mode_keys），不本地
+    重拼路径。用户层不可解析（共享根缺失/损坏、无 OS data dir）→ None：
+    只有出厂根是合法降级形态（存量部署无用户空间），用户层成员届时以
+    「未找到」显式报出，不静默换源。
+    """
+    shared_root = str(_default_shared_root())
+    if shared_root not in sys.path:
+        sys.path.insert(0, shared_root)
+    try:
+        import user_space
+
+        return user_space.user_plugins_dir()
+    except Exception as exc:  # noqa: BLE001 — 用户层不可解析：降级仅出厂根并告警，不阻断宿主
+        logger.warning("[cohost] 用户插件层不可解析，仅扫出厂插件根 | err=%s", exc)
+        return None
+
+
+def _member_roots(shared_root: Path) -> list[Path]:
+    """成员发现根集合：出厂根 + 用户插件根（后者在索引中覆盖前者，同 id 用户赢）。
+
+    与内核一致：插件面 = 出厂根与用户插件根并集，域/深度不设白名单
+    （``plugins/shared/modes/``、用户空间 ``modes/`` 等任意域同规则可达）。
+    """
+    roots = [shared_root]
+    user_root = _user_plugins_root()
+    if user_root is not None and user_root not in roots:
+        roots.append(user_root)
+    return roots
+
+
+def _scan_plugin_dirs(roots: Sequence[Path]) -> tuple[dict[str, Path], dict[str, Path]]:
+    """递归扫描插件根集合，建立 manifest id / 目录名 → 插件目录索引。
 
     仅收录含 server.py 的 sidecar 形态目录。损坏的 plugin.json 跳过
     （该目录仍可经目录名索引命中——宿主只做定位，不消费 manifest 内容）。
+    后列的根覆盖前列的同名条目（调用方按「出厂 → 用户」排序即得同 id 用户赢）。
     """
     by_manifest_id: dict[str, Path] = {}
     by_dir_name: dict[str, Path] = {}
-    for group in _GROUP_ROOTS:
-        group_root = shared_root / group
-        if not group_root.is_dir():
+    for root in roots:
+        if not root.is_dir():
             continue
         # os.walk(followlinks=False) + 目录剪枝：不跟随目录 junction/符号链接，
         # 跳过 .venv/node_modules 等重型目录——plugins/shared 下有指向外部仓库的
         # junction（dsh_adapter/runtime/extra-tools 的 node_modules peer 装载区，
         # rglob 曾实测卡死）且 97 插件各带 venv，全树扫描必须剪链+剪枝。
-        for root_dir, dirs, filenames in os.walk(group_root, followlinks=False):
+        for root_dir, dirs, filenames in os.walk(root, followlinks=False):
             dirs[:] = sorted(
                 d
                 for d in dirs
@@ -188,16 +221,56 @@ class _MemberLoader:
         """
         masked = self._pop_previous_member_modules()
         sys.path.insert(0, str(plugin_dir))
+        # 重载语义：仅当该成员已有 owned 登记（reload 而非首载）时，恢复阶段
+        # 排除其目录下的旧模块（静息态不残留旧代码对象）；首载无排除。
+        exclude_dir = plugin_dir if plugin_id in self._owned else None
         try:
             module = self._exec_member_module(plugin_id, plugin_dir)
             owned = self._collect_local_modules(plugin_dir)
         finally:
-            self._restore_modules(masked)
+            self._restore_modules(masked, exclude_dir=exclude_dir)
         self._owned[plugin_id] = owned
         plugin_obj = getattr(module, "plugin", None)
         if not isinstance(plugin_obj, AgentOSPlugin):
             raise CohostError(f"成员 {plugin_id}：server.py 未暴露 plugin（AgentOSPlugin 实例）")
         return plugin_obj
+
+    def reload(self, plugin_id: str, plugin_dir: Path) -> AgentOSPlugin:
+        """单成员热重载：同 ``load`` 流程重 exec 成员代码（成员粒度热重载）。
+
+        遮蔽纪律与首载共用（同一 loader，owned 表连续）：摘除全部已登记
+        裸名模块 → 唯一名重 exec → 收集新 owned → 恢复他人模块。恢复按
+        **文件归属**排除该成员目录下的旧模块（含运行期懒载子模块）——
+        静息态裸名槽位不残留旧代码对象：首成员 reload 后驻留槽位刷新为
+        新模块；非首成员的碰撞名由他人模块恢复原驻留。必须与首载同一
+        loader 实例：owned 表是被重载成员模块边界的事实记录。
+        """
+        return self.load(plugin_id, plugin_dir)
+
+    def _restore_modules(
+        self, popped: Mapping[str, ModuleType], exclude_dir: Path | None = None
+    ) -> None:
+        """恢复被摘除的裸名模块（首个成员的裸名在静息态常驻）。
+
+        ``exclude_dir``：按文件归属跳过恢复——用于成员重载，把该成员目录下
+        的旧模块（含 ``name.*`` 懒载子模块）挡在 sys.modules 之外，新 exec 的
+        模块驻留、旧代码对象不再占槽；他人模块（即使裸名与被重载成员碰撞）
+        原样恢复。无 ``__file__`` 的模块（内置/命名空间）无从归属，一律恢复。
+        """
+        prefix = (
+            os.path.normcase(os.path.abspath(exclude_dir)) + os.sep
+            if exclude_dir is not None
+            else None
+        )
+        for name, module in popped.items():
+            file = getattr(module, "__file__", None)
+            if (
+                prefix is not None
+                and file
+                and os.path.normcase(os.path.abspath(file)).startswith(prefix)
+            ):
+                continue
+            sys.modules[name] = module
 
     def _exec_member_module(self, plugin_id: str, plugin_dir: Path) -> ModuleType:
         """以唯一模块名 exec 成员 server.py（不占 ``server`` 槽位）。"""
@@ -230,11 +303,6 @@ class _MemberLoader:
                 popped[candidate] = module
         return popped
 
-    def _restore_modules(self, popped: Mapping[str, ModuleType]) -> None:
-        """恢复被摘除的裸名模块（首个成员的裸名在静息态常驻）。"""
-        for name, module in popped.items():
-            sys.modules[name] = module
-
     def _collect_local_modules(self, plugin_dir: Path) -> dict[str, ModuleType]:
         """收集 exec 后位于成员目录下的裸名模块（本成员的隔离登记表）。"""
         prefix = os.path.normcase(str(plugin_dir.resolve())) + os.sep
@@ -248,16 +316,24 @@ class _MemberLoader:
         return owned
 
 
-def _load_members(shared_root: Path, member_ids: Sequence[str]) -> dict[str, AgentOSPlugin]:
+def _load_members(
+    shared_root: Path,
+    member_ids: Sequence[str],
+    loader: _MemberLoader | None = None,
+) -> dict[str, AgentOSPlugin]:
     """按成员 id 列表发现并加载全部成员。
+
+    ``loader``：外部注入的成员加载器（main 注入并在 reload 编排中复用同一
+    实例——owned 表连续是裸名遮蔽判定的前提）；缺省内部自建（单测直调形态）。
 
     Raises:
         CohostError: 成员列表为空、成员重复、成员未找到或加载失败。
     """
     if not member_ids:
         raise CohostError("--members 为空：合宿宿主至少需要一个成员")
-    by_manifest_id, by_dir_name = _scan_plugin_dirs(shared_root)
-    loader = _MemberLoader()
+    roots = _member_roots(shared_root)
+    by_manifest_id, by_dir_name = _scan_plugin_dirs(roots)
+    loader = loader if loader is not None else _MemberLoader()
     members: dict[str, AgentOSPlugin] = {}
     for plugin_id in member_ids:
         if plugin_id in members:
@@ -265,11 +341,31 @@ def _load_members(shared_root: Path, member_ids: Sequence[str]) -> dict[str, Age
         plugin_dir = _resolve_member_dir(plugin_id, by_manifest_id, by_dir_name)
         if plugin_dir is None:
             raise CohostError(
-                f"成员 {plugin_id} 未找到：{shared_root}/{{{','.join(_GROUP_ROOTS)}}} 下"
+                f"成员 {plugin_id} 未找到：插件根 {[str(r) for r in roots]} 下"
                 "无匹配 plugin.json id 或目录名（且含 server.py）"
             )
         members[plugin_id] = loader.load(plugin_id, plugin_dir)
     return members
+
+
+def _build_reload_handler(
+    shared_root: Path, loader: _MemberLoader
+) -> Callable[[str], Any]:
+    """构造成员粒度热重载的加载回调（``agentos/reload_member`` 的加载侧）。
+
+    按成员 id 重新定位插件目录（成员目录可能新增/移动，不缓存首载索引），
+    经同一 loader 按遮蔽纪律重 exec（owned 表连续）。定位失败抛
+    ``CohostError`` → SDK 侧以协议错误应答 → 内核回退 force_unload。
+    """
+
+    async def _reload(plugin_id: str) -> AgentOSPlugin:
+        by_manifest_id, by_dir_name = _scan_plugin_dirs(_member_roots(shared_root))
+        plugin_dir = _resolve_member_dir(plugin_id, by_manifest_id, by_dir_name)
+        if plugin_dir is None:
+            raise CohostError(f"成员 {plugin_id} 未找到（reload 定位失败）")
+        return loader.reload(plugin_id, plugin_dir)
+
+    return _reload
 
 
 # ── 事件循环 watchdog ────────────────────────────────────
@@ -431,9 +527,10 @@ def main(argv: Sequence[str] | None = None, *, shared_root: Path | None = None) 
     root = shared_root if shared_root is not None else _default_shared_root()
     member_ids = [m.strip() for m in args.members.split(",") if m.strip()]
     stall_secs = _watchdog_stall_secs()
+    loader = _MemberLoader()
     try:
-        members = _load_members(root, member_ids)
-        server = CohostServer(members)
+        members = _load_members(root, member_ids, loader=loader)
+        server = CohostServer(members, reload_handler=_build_reload_handler(root, loader))
     except (CohostError, ValueError) as exc:
         print(f"[cohost] 启动失败（fail-fast）：{exc}", file=sys.stderr)
         return 1

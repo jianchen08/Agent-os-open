@@ -2,8 +2,10 @@
 """复盘改进建议（评估原则的规则驱动执行，纯函数）。
 
 输入失败面与症状摘要，按 triage_rules.yaml 产出结构化改进建议。
-原则（机制前置检查 / 三向分诊 / 杠杆映射 / 防过拟合）全部数据化在
+原则（机制前置检查 / 四向分诊 / 杠杆映射 / 防过拟合）全部数据化在
 规则文件里，本模块只做规则解释——改原则 = 改 yaml。
+信号型分诊类按 TRIAGE_SIGNAL_CLASSES 顺序扫描（ADR 2026-09-16：外因
+单独成类，区分「外部变化」与「自身退化」），新增信号类只改 yaml。
 """
 from __future__ import annotations
 
@@ -12,6 +14,10 @@ import re
 from typing import Any
 
 import yaml
+
+# 信号型分诊类的扫描顺序（yaml triage.<class> 需含 signals+action）；
+# 全部未命中才落入 improvement_space。
+TRIAGE_SIGNAL_CLASSES = ("external_cause", "harness_defect", "system_fault")
 
 _RULES_PATH = os.path.join(
     "..", "..", "..", "..", "config", "plugins", "review", "triage_rules.yaml")
@@ -63,23 +69,20 @@ def suggest(cases: list[dict[str, Any]], project_root: str | None = None) -> dic
             suggestions.append(case_out)
             continue
 
-        # ② 三向分诊：缺陷/故障信号
+        # ② 四向分诊：信号型类按序扫描（外因 → 评测缺陷 → 系统故障），
+        #    症状+轨迹合并大小写不敏感匹配
         status = str(case.get("task_status") or "")
         traj = str(case.get("trajectory_note") or "")
-        defect_hits = [s for s in (triage_cfg.get("harness_defect") or {}).get("signals") or []
-                       if s in text]
-        if defect_hits:
-            case_out["triage"] = "harness_defect"
-            case_out["action"] = (triage_cfg.get("harness_defect") or {}).get("action", "")
-            case_out["signals"] = defect_hits
-            suggestions.append(case_out)
-            continue
-        fault_hits = [s for s in (triage_cfg.get("system_fault") or {}).get("signals") or []
-                      if s.lower() in traj.lower()]
-        if fault_hits:
-            case_out["triage"] = "system_fault"
-            case_out["action"] = (triage_cfg.get("system_fault") or {}).get("action", "")
-            case_out["signals"] = fault_hits
+        hay = (text + " " + traj).lower()
+        for triage_class in TRIAGE_SIGNAL_CLASSES:
+            cfg = triage_cfg.get(triage_class) or {}
+            hits = [s for s in cfg.get("signals") or [] if s and s.lower() in hay]
+            if hits:
+                case_out["triage"] = triage_class
+                case_out["action"] = cfg.get("action", "")
+                case_out["signals"] = hits
+                break
+        if case_out["triage"]:
             suggestions.append(case_out)
             continue
 

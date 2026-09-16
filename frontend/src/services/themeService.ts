@@ -796,23 +796,23 @@ function generateTextureCSS(texture: { type?: string; color?: string; size?: str
 }
 
 /**
- * 拉取并加载动态主题（自动发现，无需用户点导入）
+ * 加载动态主题（自动发现，无需用户点导入）
  *
- * 主题是纯前端资源（public/themes/*.json），无业务逻辑、无鉴权、无多用户，
- * 不需要内核参与。改用 Vite 静态导入（import.meta.glob）在构建期发现所有主题，
- * 替代原先「GET manifest → fetch 每个 url」的两步流程（已删内核 themes 端点）。
+ * 主题是纯前端 JSON 资源（src/themes/*.json，Vite 模块图内），无业务逻辑、
+ * 无鉴权、无多用户，不需要内核参与。构建期经 import.meta.glob 静态发现全部
+ * 主题，替代原先「GET manifest → fetch 每个 url」两步流程（已删内核 themes
+ * 端点）。glob 根必须是 src/themes——public/ 不在 Vite 模块图，对其 glob 恒空集。
  *
  * 失败容错：单个主题导入失败只 console.warn 不抛出。
  * 幂等：importTheme 内部按 id 去重，重复加载只更新不新增。
  */
 export async function fetchDynamicThemes(): Promise<void> {
-  // Vite 构建期扫描 public/themes/*.json（eager: 直接拿到 JSON 对象）
-  const modules = import.meta.glob('/themes/*.json', { eager: true, import: 'default' })
-  const entries = Object.entries(modules)
-  if (entries.length === 0) return
+  // Vite 构建期扫描 src/themes/*.json（eager: 直接拿到 JSON 对象）；
+  // 空集时 Promise.all([]) 即 no-op，无需独立快速路径
+  const modules = import.meta.glob('/src/themes/*.json', { eager: true, import: 'default' })
 
   await Promise.all(
-    entries.map(async ([path, config]) => {
+    Object.entries(modules).map(async ([path, config]) => {
       try {
         // config 已是解析后的 JSON 对象，importTheme 接受 JSON 字符串
         const configJson = JSON.stringify(config)

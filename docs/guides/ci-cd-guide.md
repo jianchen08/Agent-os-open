@@ -394,7 +394,7 @@ curl "http://localhost:9100/api/v1/tools" -H "Authorization: Bearer <token>"
 ```
 
 Agent 无独立 REST 面：Agent 是 `config/agents/` 下的 YAML，由 context_build 插件
-按 agent_id 展开为执行上下文（见 [agent-configuration.md](agent-configuration.md) §3）。
+按 agent_id 展开为执行上下文（见 [execution-semantics.md](execution-semantics.md) §一）。
 
 ### 4.6 记忆
 

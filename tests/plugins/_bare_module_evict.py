@@ -57,8 +57,9 @@ _COLLIDING_NAMES = frozenset(
         "exceptions",
         "budget_manager",
         "constants",
-        # pipeline 是 namespace 包，剔除后会被各 conftest 的 sys.path[0] 重新定位
-        "pipeline",
+        # 注：pipeline 不逐出——它是包（plugins/shared/pipeline/），不是平铺裸名
+        # 模块；逐出会让已持引用的测试模块与插件重载拿到两份 PluginResult
+        # 类对象，isinstance 恒假（level_guard/environment_lifecycle 共跑 31 红）。
         # mcp-bridge 网关的 policy.py 与其他平铺目录同名（security_check 测试
         # 置前 sys.path 后 from policy import 命中错误缓存）
         "policy",

@@ -29,6 +29,26 @@
 
 ## 三、按修改对象的修改方式（统合系统既有机制）
 
+### ⓪ 裁决与回滚记账（ADR 2026-09-16：判定证据账）
+
+`proposal_reject` 必须带 `category` 分类（判定证据账，归因准确率与 P3 一票
+否决的数据源）：
+
+| category | 含义 | 典型来源 |
+|---|---|---|
+| external_cause | 外部原因（供应商超时/内核重启/注入故障/题集环境变更）——记账不提案，复跑确认 | T2 分诊 0 类 |
+| harness_defect | 评测自身缺陷 | T2 分诊 1 类 |
+| system_fault | 被测系统故障 | T2 分诊 2 类 |
+| prediction_miss | T4 预测证伪 | T4 |
+| heldout_gap | 开发集过、隐藏集不过（高价值元层信号） | T5 |
+| sentry_regression | 保留率破线（此前通过的 case 退化） | T6.5 |
+| judgment_failure | 高判断力分析判定层级错标（把填充当地基等） | T2 条件触发 |
+| user_veto | 用户否决已应用的提案（P3 一票否决生效，verdict=vetoed，循环停摆待用户解除） | 用户裁定 |
+
+**已应用提案的回滚走同一工具**：`proposal_reject(applied 提案, reason,
+category=user_veto)` → outcome=reverted，存档保留供审计，命中率自动扣回
+（git 层回滚由用户执行）。
+
 ### A. 提示词文件（L1 · content_edit）
 
 - **对象**：persona 文件、业务规则文件（`config/rules/` 下非安全类）、`task_dispatch_guide.md`。

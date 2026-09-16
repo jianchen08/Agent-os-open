@@ -222,6 +222,39 @@ class TestDestroyEnv:
         assert await server.isolation_destroy_env() == {"error": "必须提供 env_id、task_id 或 container_name"}
         assert stub.calls == []
 
+    async def test_destroy_by_container_name_reports_manager_verdict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """container_name 通道（state 真值）实返值即 destroyed——两态都如实透出。"""
+        for verdict, success in ((True, True), (False, False)):
+            stub = _StubManager()
+            monkeypatch.setattr(server, "_manager", stub)
+
+            async def _destroy(env_id: str, success: bool = True, _v: bool = verdict) -> bool:
+                stub.calls.append(("destroy_env", {"env_id": env_id, "success": success}))
+                return _v
+
+            monkeypatch.setattr(stub, "destroy_environment", _destroy)
+
+            result = await server.isolation_destroy_env(
+                container_name="c-1", success=success
+            )
+
+            assert result == {"destroyed": verdict, "container_name": "c-1"}
+            assert stub.calls == [("destroy_env", {"env_id": "c-1", "success": success})]
+
+    async def test_destroy_container_name_takes_precedence_over_task_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """container_name 优先于 task_id（服务重启后内存登记为空也能按名删）。"""
+        stub = _StubManager()
+        monkeypatch.setattr(server, "_manager", stub)
+
+        result = await server.isolation_destroy_env(container_name="c-9", task_id="t-9")
+
+        assert result == {"destroyed": True, "container_name": "c-9"}
+        assert stub.calls == [("destroy_env", {"env_id": "c-9", "success": True})]
+
 
 class TestListEnvs:
     async def test_filters_translated_and_envs_projected(self, monkeypatch: pytest.MonkeyPatch) -> None:

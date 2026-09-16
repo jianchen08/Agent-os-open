@@ -57,6 +57,7 @@ function normalizeRecord(record: Record<string, unknown>): Record<string, unknow
     ...messageData,
     request_id: messageData.request_id || (record.id as string) || '',
     session_id: (record.session_id as string) || '',
+    created_at: (record.created_at as string) || '',
   }
 }
 
@@ -167,6 +168,9 @@ async function parseInteractionEvent(
     suggestions: inner.suggestions as string[],
     priority: inner.priority as PendingInteraction['priority'],
     progress: inner.progress as number | undefined,
+    // 审批卡倒计时（BUG-14）：后端已收敛的等待上限 + 创建时刻
+    timeoutSeconds: (inner.timeout_seconds as number) || undefined,
+    createdAt: (inner.created_at as string) || undefined,
     timestamp: new Date().toISOString(),
     agentLevel: rawAgentLevel || undefined,
     fileContents,

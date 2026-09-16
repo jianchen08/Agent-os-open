@@ -233,7 +233,7 @@
       "path": "/ext/task_service/tasks",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 8,
       "description": "tasks 域：任务列表（query: status/priority/session_id/limit/offset/skip）——channel_api 拆迁落户"
     },
@@ -243,7 +243,7 @@
       "path": "/ext/task_service/tasks",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "tasks 域：创建任务（agent_id 必填，GAP-1 经 chat 建执行管道）"
     },
@@ -253,7 +253,7 @@
       "path": "/ext/task_service/tasks/debug/all",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "tasks 域：调试用全量任务"
     },
@@ -263,7 +263,7 @@
       "path": "/ext/task_service/tasks/root",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "tasks 域：手动创建根任务（project_id 可选挂靠项目）"
     },
@@ -273,7 +273,7 @@
       "path": "/ext/task_service/tasks/{task_id}",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 8,
       "description": "tasks 域：任务详情"
     },
@@ -283,7 +283,7 @@
       "path": "/ext/task_service/tasks/{task_id}",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "tasks 域：更新任务（读 state 聚合行，update 语义已退役）"
     },
@@ -293,7 +293,7 @@
       "path": "/ext/task_service/tasks/{task_id}",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "tasks 域：删除任务（容器软删/非容器硬删）"
     },
@@ -303,7 +303,7 @@
       "path": "/ext/task_service/tasks/{task_id}/submit",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 2,
       "description": "tasks 域：提交任务执行（注入模式重跑任务管道）"
     },
@@ -313,7 +313,7 @@
       "path": "/ext/task_service/tasks/{task_id}/evaluate",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 2,
       "description": "tasks 域：评估任务（已退役，恒 410；评估走 task_evaluate 工具）"
     },
@@ -323,7 +323,7 @@
       "path": "/ext/task_service/tasks/{task_id}/pause",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 2,
       "description": "tasks 域：暂停任务（suspend_pipeline）"
     },
@@ -333,7 +333,7 @@
       "path": "/ext/task_service/tasks/{task_id}/resume",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 2,
       "description": "tasks 域：恢复任务（resume_pipeline）"
     },
@@ -343,7 +343,7 @@
       "path": "/ext/task_service/tasks/{task_id}/cancel",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 2,
       "description": "tasks 域：取消任务（挂起管道 + lineage 级联）"
     },
@@ -353,7 +353,7 @@
       "path": "/ext/task_service/tasks/{task_id}/phase",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 8,
       "description": "tasks 域：任务当前阶段"
     },
@@ -363,7 +363,7 @@
       "path": "/ext/task_service/tasks/{task_id}/phase/prepare/complete",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "tasks 域：完成准备阶段"
     },
@@ -373,7 +373,7 @@
       "path": "/ext/task_service/tasks/{task_id}/phase/execute/complete",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "tasks 域：完成执行阶段"
     },
@@ -383,7 +383,7 @@
       "path": "/ext/task_service/tasks/{task_id}/phase/{phase}/output",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 8,
       "description": "tasks 域：获取阶段输出（占位）"
     },
@@ -393,7 +393,7 @@
       "path": "/ext/task_service/tasks/{task_id}/ac",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 8,
       "description": "tasks 域：获取任务验收标准（占位）"
     },
@@ -403,7 +403,7 @@
       "path": "/ext/task_service/tasks/{task_id}/ac/evaluate-all",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 2,
       "description": "tasks 域：评估所有验收标准（占位）"
     },
@@ -413,7 +413,7 @@
       "path": "/ext/task_service/tasks/{task_id}/ac/{ac_id}/evaluate",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 2,
       "description": "tasks 域：评估单个验收标准（占位）"
     },
@@ -423,7 +423,7 @@
       "path": "/ext/task_service/tasks/{task_id}/ac/{ac_id}/result",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 8,
       "description": "tasks 域：获取验收标准评估结果（占位）"
     },
@@ -433,7 +433,7 @@
       "path": "/ext/task_service/projects",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 8,
       "description": "projects 域：长期任务列表（= 容器任务，query: limit/offset/page/status/session_id）——接真"
     },
@@ -443,7 +443,7 @@
       "path": "/ext/task_service/projects",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "projects 域：创建长期任务（= 创建容器任务 + workspace 关联）"
     },
@@ -453,7 +453,7 @@
       "path": "/ext/task_service/projects/{project_id}",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 8,
       "description": "projects 域：长期任务详情（含子任务摘要）"
     },
@@ -463,7 +463,7 @@
       "path": "/ext/task_service/projects/{project_id}/auto-execute",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "projects 域：切换自动执行（持久化 metadata.auto_execute）"
     },
@@ -473,7 +473,7 @@
       "path": "/ext/task_service/projects/{project_id}/pause",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "projects 域：暂停长期任务（挂起管道尽力 + 状态机 STOPPED）"
     },
@@ -483,7 +483,7 @@
       "path": "/ext/task_service/projects/{project_id}/resume",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "projects 域：恢复长期任务（状态机 running + 恢复管道尽力）"
     },
@@ -493,7 +493,7 @@
       "path": "/ext/task_service/projects/{project_id}",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 60000,
       "max_concurrency": 4,
       "description": "projects 域：删除长期任务（容器任务软删除）"
     }
@@ -534,5 +534,5 @@
       }
     ]
   },
-  "host_group": "light"
+  "host_group": "light_stable"
 }

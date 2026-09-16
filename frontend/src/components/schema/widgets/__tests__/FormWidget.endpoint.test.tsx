@@ -39,6 +39,12 @@ vi.mock('@/stores/sessionStore', () => ({
 }))
 import { FormWidget } from '../FormWidget'
 
+// FormWidget 现消费会话隔离形态（useSessionsQuery）计算权限档显示默认；
+// 本文件无 QueryClientProvider，静态 mock 空列表（无会话 → 非隔离默认显示路径）
+vi.mock('@/hooks/queries/useSessionsQuery', () => ({
+  useSessionsQuery: () => ({ data: [] }),
+}))
+
 const submitForm = () => fireEvent.submit(document.querySelector('form')!)
 
 describe('FormWidget endpoint 直连（经 apiClient）', () => {

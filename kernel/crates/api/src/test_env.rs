@@ -141,3 +141,85 @@ fn apply(vars: &[(&'static str, Option<&Path>)]) {
         }
     }
 }
+
+/// 测试期日志采集缓冲（[`capture_logs`] 的返回物）。
+///
+/// 视图语义 = 「自本 handle 创建以来追加的日志」：底层是进程级共享缓冲（见
+/// [`capture_logs`]），本 handle 只截取自己创建之后的增量。
+pub(crate) struct LogBuffer {
+    sink: std::sync::Arc<Mutex<Vec<u8>>>,
+    start: usize,
+}
+
+impl LogBuffer {
+    /// 自本 handle 创建以来写入的日志全文。
+    pub(crate) fn text(&self) -> String {
+        let buf = self.sink.lock().unwrap();
+        let from = self.start.min(buf.len());
+        String::from_utf8_lossy(&buf[from..]).into_owned()
+    }
+}
+
+#[derive(Clone)]
+struct LogWriter(std::sync::Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
+    type Writer = LogWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// 进程级采集缓冲（首次 [`capture_logs`] 时随全局订阅一起装配）。
+static CAPTURE_SINK: std::sync::OnceLock<std::sync::Arc<Mutex<Vec<u8>>>> =
+    std::sync::OnceLock::new();
+
+/// [`capture_logs`] 的 guard：全局订阅为进程级、不可逐用例卸载，guard 只是
+/// 保持与既有调用点的接口一致的占位（drop 后新日志仍会进共享缓冲，但本
+/// handle 的 `text()` 只回放自创建以来的增量，不因此串味）。
+pub(crate) struct LogGuard {
+    _priv: (),
+}
+
+/// 装配进程级日志采集订阅（TRACE 级——诊断留痕断言含 debug! 文案，采集面
+/// 不得低于被断言的最低级别）并返回「自此刻起」的采集视图。
+///
+/// tracing 宏的消息体只在存在订阅者时才求值——无订阅者时诊断日志行恒零命中。
+///
+/// 必须是**进程级**订阅而非线程级 `set_default`：调用点兴趣缓存是进程级的，
+/// 线程级订阅在并行测试下会让调用点因他线程重算缓存而翻成"无兴趣"短路
+/// （表现为同一用例时绿时红）。全局订阅一次装上后所有线程恒有兴趣，各用例
+/// 经 [`LogBuffer`] 的起始偏移各取各的增量。
+///
+/// 并发用例的日志会互相出现在同一缓冲里——断言须用本用例独有的文案或标识
+/// （不得依赖"缓冲里只有我这一条"）。
+pub(crate) fn capture_logs() -> (LogGuard, LogBuffer) {
+    let sink = std::sync::Arc::clone(CAPTURE_SINK.get_or_init(|| {
+        let sink = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(LogWriter(std::sync::Arc::clone(&sink)))
+            .finish();
+        // 已设全局订阅（他处 set_global_default）时保持安静：采集视图仍可用，
+        // 只是可能收不到日志——由断言失败暴露，不静默伪装成"没有留痕"。
+        let _ = tracing::subscriber::set_global_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        sink
+    }));
+    let start = {
+        let buf = sink.lock().unwrap();
+        buf.len()
+    };
+    (LogGuard { _priv: () }, LogBuffer { sink, start })
+}

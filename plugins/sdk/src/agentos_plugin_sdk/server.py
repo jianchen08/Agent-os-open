@@ -264,6 +264,7 @@ class McpServer:
         kernel_channel: KernelChannel | None = None,
         steps: dict[str, Any] | None = None,
         pipe_hooks: dict[str, list[Any]] | None = None,
+        request_handlers: dict[str, tuple[type, Any]] | None = None,
     ) -> None:
         self._tools = tools
         self._resources = resources
@@ -273,6 +274,11 @@ class McpServer:
         self._steps: dict[str, Any] = steps or {}
         self._pipe_hooks: dict[str, list[Any]] = pipe_hooks or {}
         self._sdk = self._build_sdk_server()
+        # AgentOS 私有扩展请求（如合宿 agentos/reload_member）：方法名 →
+        # (params 模型, handler)。模型校验同官方 handler 体系；原始 mapping
+        # 经 ctx.params 取（模型只声明 _meta，自定义字段不落模型）。
+        for method, (params_type, handler) in (request_handlers or {}).items():
+            self._sdk.add_request_handler(method, params_type, handler)
 
     # ── 官方 SDK 装配 ────────────────────────────────────
 

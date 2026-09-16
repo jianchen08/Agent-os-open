@@ -1,6 +1,6 @@
 # 外部 MCP 接入（零代码接第三方工具）
 
-> 返回 [开发指南索引](README.md)。前置阅读：[插件开发总览](plugin-development.md)。
+> 返回 [开发指南索引](README.md)。前置阅读：[插件协议规则](plugin-protocol.md)。
 
 不写任何 Python/Rust，用 manifest 直连现成 MCP 服务。约定：`language: "external"`、`entry: "mcp:external"`、`host_type: "sidecar"`（不 spawn 自带进程）。
 
@@ -71,4 +71,4 @@
   工具缺 `input_schema` 拒注册；零声明走 §2.5 观测导入，两态互斥。
 - **env 引用即声明**（2026-09-03 裁定）：endpoint 里 `${VAR}` 引用由内核在装载期自动生成 `config_files[target="env"]` 声明并出口设置页，手写声明仍合法但不再必须；想自定义表单文案（label/type=secret/required）可按上例手写覆盖。
 - `auth.required: false` 时无凭据则跳过鉴权头。
-- 接入后 watcher 自动发现注册（默认启用），把工具名（或插件名）加进目标 agent `tool_ids` 后 LLM 可见（见[总览](plugin-development.md#6-llm-能看到哪些工具三层过滤链)）。
+- 接入后 watcher 自动发现注册（默认启用），把工具名（或插件名）加进目标 agent `tool_ids` 后 LLM 可见（见[三层工具过滤链](plugin-protocol.md#三注册与发现规则)）。

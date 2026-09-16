@@ -36,20 +36,8 @@ vi.mock('@/utils/activityConverter', () => ({
 vi.mock('@/utils/toolCardRegistry', () => ({
   enhanceActivityWithToolConfig: (b: any) => b,
 }))
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
-vi.mock('@/utils/retry', () => ({
-  requestWithRetry: async (fn: () => Promise<any>) => fn(),
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
+vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockFull())
 
 const PIPELINE_ID = 'pipe-merge-001'
 const THREAD_ID = 'thread-merge-001'

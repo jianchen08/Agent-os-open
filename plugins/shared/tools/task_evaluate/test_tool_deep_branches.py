@@ -64,7 +64,21 @@ def mod() -> Any:
 
 @pytest.fixture
 def service(tmp_path: Path) -> Any:
-    """真实 TaskService（临时 YAML 目录）。"""
+    """真实 TaskService（临时 YAML 目录）。
+
+    ``from service import`` 前把 tasks 插件目录强制置顶：车道共跑时
+    security_check 等插件的同名 service.py 可能占住 path 前位，导致这里
+    拿到错误实现（ImportError: cannot import name 'TaskService'）。只调整
+    解析顺序、不替换模块对象，避免 tool.py 侧类身份错位。
+    """
+    _s = str(_TASKS_DIR)
+    while _s in sys.path:
+        sys.path.remove(_s)
+    sys.path.insert(0, _s)
+    # 逐出已缓存的裸名槽位：共跑时 security_check 等插件的 service.py 可能已
+    # 占位，仅置顶 path 不够（sys.modules 命中优先）。task_evaluate 的 tool.py
+    # 不导入裸名 service（只按文件载入），故逐出不影响其类身份。
+    sys.modules.pop("service", None)
     from service import TaskService
 
     return TaskService(data_dir=str(tmp_path / "tasks"))

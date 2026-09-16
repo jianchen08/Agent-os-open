@@ -21,8 +21,12 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MEM_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "memory"
 _s = str(_MEM_DIR)
-if _s not in sys.path:
-    sys.path.insert(0, _s)
+# 强制置顶（不只在缺席时插入）：车道共跑时其它插件的 tool.py 目录可能已占住
+# path 前位，逐出缓存后仍会按前位解析到错误实现（共跑 AttributeError：
+# module 'tool' has no attribute 'MemoryTool'）。
+while _s in sys.path:
+    sys.path.remove(_s)
+sys.path.insert(0, _s)
 # 裸模块 tool 可能被其它插件缓存污染，逐出后按本目录解析
 sys.modules.pop("tool", None)
 

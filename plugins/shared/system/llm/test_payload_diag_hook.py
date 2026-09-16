@@ -37,7 +37,12 @@ def _pin_llm_dir_front() -> None:
 
 @pytest.fixture
 def fresh_adapter(monkeypatch: pytest.MonkeyPatch, caplog: Any) -> Any:
-    """在受控 env 下重新 import adapter（模块级钩子装在 import 时执行）。"""
+    """在受控 env 下重新 import adapter（模块级钩子装在 import 时执行）。
+
+    钉掉 AMBIENT AGENTOS_PAYLOAD_DIAG（开发者 .env 诊断开关常开）——
+    默认关闭契约必须在「未设」前提下验证，不随本机环境漂移。
+    """
+    monkeypatch.delenv("AGENTOS_PAYLOAD_DIAG", raising=False)
     for mod_name in list(sys.modules):
         if mod_name == "adapter" or mod_name.startswith("adapter."):
             del sys.modules[mod_name]
@@ -53,10 +58,7 @@ def fresh_adapter(monkeypatch: pytest.MonkeyPatch, caplog: Any) -> Any:
 
 
 def test_hook_not_installed_by_default(fresh_adapter: Any, caplog: Any) -> None:
-    """AGENTOS_PAYLOAD_DIAG 未设 → 不安装拦截钩子（默认关闭契约）。"""
-    assert "AGENTOS_PAYLOAD_DIAG" not in __import__("os").environ or (
-        __import__("os").environ["AGENTOS_PAYLOAD_DIAG"] != "1"
-    )
+    """AGENTOS_PAYLOAD_DIAG 未设 → 不安装拦截钩子（默认关闭契约，env 已由夹具钉为未设）。"""
     hook_logs = [r.getMessage() for r in caplog.records]
     assert not any("已安装 litellm transform_request 拦截钩子" in m for m in hook_logs)
 

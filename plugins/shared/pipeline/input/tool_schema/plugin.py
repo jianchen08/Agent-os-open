@@ -9,12 +9,14 @@ agent 配置解析（读 config/agents/** 取 tool_ids）归 context_build；本
 任何 yaml 读取，也不做全量兜底——state 无 tool_ids = 配置断链，工具面置空。
 
 State 命名空间：
-    - tool_schemas : 过滤后的工具 Schema 列表（始终写入；配置断链 = 空列表）
+    - tool_schemas : 过滤后的工具 Schema 列表（配置断链 tool_ids 缺失 = 空列表；
+      tool-surface 通道断链 = 抛错，绝不静默空面出站）
     - tool_output_contracts : tool_name → {schema, render} 输出契约表（始终写入）
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -22,6 +24,11 @@ from typing import Any
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)
+
+# 接线等待轮询间隔（秒）：等待期让出事件循环，on_load 通知处理器在同一
+# loop 上落地注入。
+_WIRE_POLL_SECONDS = 0.1
+
 
 class ToolSchemaPlugin(IInputPlugin):
     """工具 Schema 注入 Input 插件。
@@ -39,9 +46,13 @@ class ToolSchemaPlugin(IInputPlugin):
         Args:
             config: 插件配置字典，支持以下键：
                 - enabled: 是否启用工具 Schema 注入（默认 True）
+                - wire_wait_seconds: caller 未就绪时的接线等待上限秒数
+                    （默认 10；cohost 冷启动竞态下 on_load 晚于首次 execute
+                    数百毫秒落地，生产 2026-09-15 16:52/17:02 实证）
         """
         self._config = config or {}
         self._enabled = self._config.get("enabled", True)
+        self._wire_wait_seconds = float(self._config.get("wire_wait_seconds", 10.0))
         # capability 调用通道挂在**单例实例**上：合宿下同进程多个 pipeline 插件
         # 共享裸名 `plugin` 模块（先加载者占住 sys.modules），模块级全局会被
         # 别家插件的注入写走（llm_core 也叫 plugin.py 且有同名 setter）——
@@ -69,6 +80,29 @@ class ToolSchemaPlugin(IInputPlugin):
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
+    async def _await_caller_wired(self) -> Callable[..., Awaitable[dict[str, Any]]] | None:
+        """等待 capability caller 接线（有界），返回 caller 或 None（超时）。
+
+        cohost 冷启动竞态：宿主组按成员序列初始化，on_load（注入 caller）晚于
+        首个 execute 数百毫秒落地——生产 2026-09-15 16:52/17:02 两跑实证。
+        等待期 await sleep 让出事件循环，on_load 通知处理器在同一 loop 落地。
+        """
+        if self._capability_caller is not None:
+            return self._capability_caller
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._wire_wait_seconds
+        while self._capability_caller is None and loop.time() < deadline:
+            await asyncio.sleep(_WIRE_POLL_SECONDS)
+        caller = self._capability_caller
+        if caller is not None:
+            logger.warning(
+                "[%s] capability caller 未就绪，等待接线后照常拉取工具面"
+                "（cohost 冷启动竞态，wire_wait_seconds=%.0f）",
+                self.name,
+                self._wire_wait_seconds,
+            )
+        return caller
+
     async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
         """执行工具 Schema 拉取。
 
@@ -91,22 +125,19 @@ class ToolSchemaPlugin(IInputPlugin):
             )
             return {"tool_schemas": [], "tool_output_contracts": {}}
 
-        caller = self._capability_caller
+        caller = await self._await_caller_wired()
         if caller is None:
-            logger.error(
-                "[%s] capability caller 未注入：tool-surface 调用通道未接线"
-                "（server.py on_load 应调用 set_capability_caller），工具面置空",
-                self.name,
+            # 通道断链 ≠ agent 声明零工具：静默空面会让 LLM 无工具声明出站，
+            # 模型降级为正文输出原生工具标记且永不执行（BUG-17 实证失败链）。
+            # 显式失败经引擎 warn+continue 落 _plugin_errors → WS 可见反馈。
+            raise RuntimeError(
+                f"[{self.name}] capability caller 未注入：tool-surface 调用通道未接线"
+                f"（on_load 等待 {self._wire_wait_seconds:.0f}s 超时，server.py on_load "
+                "应调用 set_capability_caller）"
             )
-            return {"tool_schemas": [], "tool_output_contracts": {}}
 
-        try:
-            result = await caller("schemas", {"tool_ids": wanted})
-        except Exception as exc:
-            logger.error(
-                "[%s] tool-surface.schemas 调用失败，工具面置空 | %s", self.name, exc
-            )
-            return {"tool_schemas": [], "tool_output_contracts": {}}
+        # 调用失败（内核 tool-surface 不可达等）同上：错误上抛，不降级空面。
+        result = await caller("schemas", {"tool_ids": wanted})
 
         schemas = result.get("schemas") or []
         contracts = result.get("contracts") or {}

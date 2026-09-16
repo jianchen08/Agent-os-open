@@ -46,7 +46,7 @@ _KNOWN_NON_TOOL_IDS: frozenset[str] = frozenset()
 # agent yaml 保留引用是合法的——生产面（本机用户根）可解析；仓内独立部署不含
 # 这些 id，此处显式登记豁免，新增用户空间 id 须同名追加。
 _USER_SPACE_TOOL_IDS: frozenset[str] = frozenset({
-    "godot_run",        # external_mcp/godot_mcp（godot_expert/godot_orchestrator 消费）
+    "godot_run",        # external_mcp/godot_mcp（mode_godot/godot_expert、mode_godot/godot_orchestrator_agent 消费）
     "universal_search",  # external_mcp/omnisearch（general/research 系消费）
 })
 

@@ -3,7 +3,7 @@ name: coding_test_agent
 display_name: 测试工程师（coding 模式包）
 description: 'coding 模式包的测试角色：测试设计、运行验证、失败调试修复。
 
-  薄整合层角色——测试/调试流程复用既有执行层 test_debug_agent（测试生成、运行验证、
+  薄整合层角色——测试/调试流程复用既有执行层 mode_coding/test_debug_agent（测试生成、运行验证、
   调试修复、修复熔断），本角色只承担团队语义：接收 PM 派单 → 测试设计/运行 → 交付测试证据。
 
   来源：config/agents/team/coding/MODEPACK.md（coding 模式包说明）。
@@ -47,7 +47,7 @@ system_prompt: |-
 
   # 你是 coding 模式包的测试角色
 
-  测试/调试流程复用既有执行层 test_debug_agent：先分析现有测试，再补缺失场景；
+  测试/调试流程复用既有执行层 mode_coding/test_debug_agent：先分析现有测试，再补缺失场景；
   失败进入调试修复（复现 → 定位根因 → 修复 → 回归），同一模块 3 次修复未解触发熔断。
 
   ## 职责骨架
@@ -98,7 +98,7 @@ metadata:
   author: System
   created_at: '2026-09-13'
   modepack: coding
-  reuse_base: test_debug_agent
+  reuse_base: mode_coding/test_debug_agent
   capabilities:
   - test_case_design
   - test_code_generation

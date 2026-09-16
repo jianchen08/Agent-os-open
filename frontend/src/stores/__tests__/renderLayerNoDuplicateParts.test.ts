@@ -14,21 +14,9 @@ import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
 vi.mock('@/services/api/client', () => ({ default: { get: mockGet } }))
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 
-vi.mock('@/utils/retry', () => ({
-  requestWithRetry: async (fn: () => Promise<any>) => fn(),
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockFull())
 
 const PIPELINE_ID = 'pipe-render-001'
 const THREAD_ID = 'thread-render-001'

@@ -1,0 +1,71 @@
+{
+  "id": "video_gen",
+  "name": "Video Segment Generator (ComfyUI)",
+  "description": "直播视频段生成适配层：衔接裁决驱动的 ComfyUI 双模板生成（continue 末帧直续 / cut 新场景）",
+  "version": "0.1.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "video_gen.render_segment",
+        "description": "生成一段直播视频片段（ComfyUI）。transition=continue 时以 start_frame（上一段末帧）为首帧直续；cut 时生成新场景。",
+        "render": {
+          "card": "file",
+          "title": "视频段生成"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "visual_prompts": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "画面提示词列表（英文电影感描述，将合并生成单条片段）"
+            },
+            "transition": {
+              "type": "object",
+              "description": "衔接裁决 {type: continue|cut}"
+            },
+            "start_frame": {
+              "type": "string",
+              "description": "上一段末帧图片路径（continue 时必填）"
+            },
+            "sec": {"type": "number", "description": "目标时长秒，默认 5"},
+            "width": {"type": "integer", "description": "宽，默认 1280"},
+            "height": {"type": "integer", "description": "高，默认 720"},
+            "seed": {"type": "integer", "description": "随机种子（重试自动换新）"},
+            "output_dir": {"type": "string", "description": "成片输出目录"},
+            "timeout_secs": {"type": "number", "description": "单次尝试超时秒，默认 300"}
+          },
+          "required": ["visual_prompts", "output_dir"]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "成片落盘路径"
+            },
+            "media_type": {"type": "string"},
+            "template": {
+              "type": "string",
+              "description": "使用的模板（i2v_continue / t2v_scene）"
+            },
+            "prompt_id": {"type": "string"},
+            "attempts": {
+              "type": "integer",
+              "description": "实际尝试次数（1-3）"
+            }
+          },
+          "required": ["file_path", "media_type", "template"]
+        }
+      }
+    ],
+    "lifecycle_hooks": ["on_load", "on_unload"]
+  },
+  "permissions": {},
+  "priority": 30,
+  "host_group": "light"
+}

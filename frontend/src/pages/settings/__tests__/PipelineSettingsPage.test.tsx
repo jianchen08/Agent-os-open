@@ -12,7 +12,7 @@
  * 测试策略：Mock 仅外部依赖（API 层 + UI 基础组件），组件真实渲染。
  */
 
-import { screen, waitFor, fireEvent, within } from '@testing-library/react'
+import { screen, waitFor, fireEvent, within, act } from '@testing-library/react'
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderWithProviders } from '@/test/renderWithProviders'
@@ -361,6 +361,210 @@ describe('PipelineSettingsPage', () => {
       })
 
       expect(screen.queryByText('← 返回设置')).not.toBeInTheDocument()
+    })
+  })
+
+  describe('可视化编辑 ops（path 不可变更新）', () => {
+    it('改管道名 → 保存透传新 name（ops.set 落到 raw data）', async () => {
+      mockSavePipelineConfig.mockResolvedValue({ name: 'autonomous', etag: 'e2' })
+      await renderLoaded()
+
+      fireEvent.change(screen.getByLabelText('管道名'), { target: { value: 'autonomous_v2' } })
+      fireEvent.click(screen.getByTestId('save-btn'))
+
+      await waitFor(() => expect(mockSavePipelineConfig).toHaveBeenCalled())
+      const saved = mockSavePipelineConfig.mock.calls[0][1] as typeof sampleV2
+      expect(saved.name).toBe('autonomous_v2')
+      // 未编辑部分原样保留（path 更新不整树重建）
+      expect(saved.loop_bodies[1].id).toBe('main')
+    })
+
+    it('插件 chip 下移 → 组合内顺序互换（ops.move 作用于 step 的 steps 数组）', async () => {
+      mockSavePipelineConfig.mockResolvedValue({ name: 'autonomous', etag: 'e2' })
+      await renderLoaded()
+
+      // prepare 组合首项（tool_schema）下移一位
+      const prepareNode = screen.getByTestId('step-node-prepare')
+      fireEvent.click(within(prepareNode).getAllByLabelText('下移')[0])
+
+      fireEvent.click(screen.getByTestId('save-btn'))
+      await waitFor(() => expect(mockSavePipelineConfig).toHaveBeenCalled())
+      const saved = mockSavePipelineConfig.mock.calls[0][1] as typeof sampleV2
+      expect(saved.loop_bodies[1].steps[0].steps).toEqual([
+        'pipeline_param_inject',
+        'pipeline_tool_schema',
+      ])
+    })
+
+    it('step 上移 → 所在循环体内 step 顺序互换（ops.move 作用于循环体 steps 数组）', async () => {
+      mockSavePipelineConfig.mockResolvedValue({ name: 'autonomous', etag: 'e2' })
+      await renderLoaded()
+
+      // main 体内第二个 step（core）上移一位
+      fireEvent.click(screen.getByLabelText('step core 上移'))
+
+      fireEvent.click(screen.getByTestId('save-btn'))
+      await waitFor(() => expect(mockSavePipelineConfig).toHaveBeenCalled())
+      const saved = mockSavePipelineConfig.mock.calls[0][1] as typeof sampleV2
+      expect(saved.loop_bodies[1].steps.map((s) => s.id)).toEqual(['core', 'prepare', 'post'])
+    })
+
+    it('首 step 上移 / 末 step 下移被禁用（边界不越界）', async () => {
+      await renderLoaded()
+
+      // main 体内：prepare 是首个 step（上移禁用），post 是末个（下移禁用）
+      expect(screen.getByLabelText('step prepare 上移')).toBeDisabled()
+      expect(screen.getByLabelText('step post 下移')).toBeDisabled()
+      // 非边界方向仍可用
+      expect(screen.getByLabelText('step prepare 下移')).not.toBeDisabled()
+      expect(screen.getByLabelText('step post 上移')).not.toBeDisabled()
+    })
+  })
+
+  describe('源码视图编辑回调', () => {
+    it('改字段值 → 视图内回显新值，切回可视化视图同样生效（handleChange 落 raw data）', async () => {
+      await renderLoaded()
+
+      fireEvent.click(screen.getByRole('tab', { name: /源码/ }))
+      fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'renamed_pipeline' } })
+      expect(screen.getByLabelText('Name')).toHaveValue('renamed_pipeline')
+
+      // 视图切换回来仍保留编辑（编辑副本未被重拉覆盖）
+      fireEvent.click(screen.getByRole('tab', { name: /可视化/ }))
+      expect(screen.getByLabelText('管道名')).toHaveValue('renamed_pipeline')
+    })
+
+    it('删除字段 → 该字段从源码表单消失（handleDelete 落 raw data）', async () => {
+      await renderLoaded()
+
+      fireEvent.click(screen.getByRole('tab', { name: /源码/ }))
+      expect(screen.getByLabelText('Name')).toBeInTheDocument()
+
+      fireEvent.click(screen.getByTitle('删除 name'))
+
+      expect(screen.queryByLabelText('Name')).not.toBeInTheDocument()
+      // 其余字段不受影响
+      expect(screen.getByLabelText('Loop Bodies')).toBeInTheDocument()
+    })
+
+    it('添加子条目 → 新条目即时出现在列表并进入保存 payload（handleAddField 落 raw data）', async () => {
+      mockSavePipelineConfig.mockResolvedValue({ name: 'autonomous', etag: 'e2' })
+      await renderLoaded({ ...sampleV2, models: { glm: { temperature: 0.7 } } })
+      fireEvent.click(screen.getByRole('tab', { name: /源码/ }))
+
+      fireEvent.click(screen.getByRole('button', { name: /添加Models条目/ }))
+      fireEvent.change(await screen.findByPlaceholderText('条目标识（如 new_model）'), {
+        target: { value: 'deepseek' },
+      })
+      fireEvent.click(screen.getByRole('button', { name: '添加' }))
+
+      // 新条目即时可见（模板字段克隆，值清空）
+      expect(await screen.findByRole('button', { name: /▼ deepseek/ })).toBeInTheDocument()
+
+      fireEvent.click(screen.getByTestId('save-btn'))
+      await waitFor(() => expect(mockSavePipelineConfig).toHaveBeenCalled())
+      const saved = mockSavePipelineConfig.mock.calls[0][1] as Record<string, unknown>
+      expect(saved.models).toEqual({
+        glm: { temperature: 0.7 },
+        deepseek: { temperature: 0 },
+      })
+    })
+
+    it('可视化 tab 在 0.2 格式下可点回（非 0.2 格式时该 tab 不可用）', async () => {
+      await renderLoaded()
+
+      fireEvent.click(screen.getByRole('tab', { name: /源码/ }))
+      expect(screen.queryByTestId('pipeline-flow-editor')).not.toBeInTheDocument()
+
+      fireEvent.click(screen.getByRole('tab', { name: /可视化/ }))
+
+      expect(screen.getByTestId('pipeline-flow-editor')).toBeInTheDocument()
+      expect(screen.getByRole('tab', { name: /可视化/ })).toHaveAttribute('aria-selected', 'true')
+    })
+
+    it('非 0.2 格式下可视化 tab 点击无效（保持源码视图）', async () => {
+      await renderLoaded(sampleV1)
+      const visualTab = screen.getByRole('tab', { name: /可视化/ })
+
+      fireEvent.click(visualTab)
+
+      expect(visualTab).toHaveAttribute('aria-selected', 'false')
+      expect(screen.getByRole('tab', { name: /源码/ })).toHaveAttribute('aria-selected', 'true')
+      expect(screen.queryByTestId('pipeline-flow-editor')).not.toBeInTheDocument()
+    })
+  })
+
+  // 注：handleAddField 的 `if (!key) return` 守卫为不可达防御分支——上层
+  // ConfigObject/DictOfDictsRenderer 在调用 onAddField 前已以 toast 拦截空键
+  // （`if (!key) { toast.error(...); return }`），UI 无法构造该输入。
+  // handleSave 的 `if (!config) return`（146）同理：config 为 null 时保存按钮
+  // 经 shouldDisableConfigSave 恒禁用，UI 无法触发。
+  describe('异步竞态与时序（防御路径）', () => {
+    it('目录请求在卸载后才返回 → 不写状态（无卸载后更新告警）', async () => {
+      let resolveCatalog: (v: unknown[]) => void = () => {}
+      mockFetchCatalog.mockReturnValue(
+        new Promise<unknown[]>((resolve) => {
+          resolveCatalog = resolve
+        }),
+      )
+      mockGetPipelineConfig.mockResolvedValue({ name: 'autonomous', data: sampleV2, etag: 'e1' })
+      const { unmount } = renderWithProviders(<PipelineSettingsPage />)
+
+      unmount()
+      // 卸载后目录才到达：组件不再写状态（React 不告警未挂载组件更新）
+      const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+      resolveCatalog(sampleCatalog)
+      await act(async () => {})
+
+      expect(warn).not.toHaveBeenCalled()
+      warn.mockRestore()
+    })
+
+    it('目录请求在卸载后才失败 → 不写错误状态（静默丢弃已卸载结果）', async () => {
+      let rejectCatalog: (e: Error) => void = () => {}
+      mockFetchCatalog.mockReturnValue(
+        new Promise<unknown[]>((_resolve, reject) => {
+          rejectCatalog = reject
+        }),
+      )
+      mockGetPipelineConfig.mockResolvedValue({ name: 'autonomous', data: sampleV2, etag: 'e1' })
+      const { unmount } = renderWithProviders(<PipelineSettingsPage />)
+
+      unmount()
+      const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+      rejectCatalog(new Error('catalog down'))
+      await act(async () => {})
+
+      expect(warn).not.toHaveBeenCalled()
+      warn.mockRestore()
+    })
+
+    it('保存成功 2 秒后「已保存」提示自行复位（不常驻）', async () => {
+      mockSavePipelineConfig.mockResolvedValue({ name: 'autonomous', etag: 'e2' })
+      // 装载阶段用真实时钟（query 状态机依赖微/宏任务推进），
+      // 进入保存后切假时钟精确控制 2s 复位窗口
+      await renderLoaded()
+      vi.useFakeTimers()
+      try {
+        fireEvent.click(screen.getByTestId('save-btn'))
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0)
+        })
+        expect(screen.getByText('已保存')).toBeInTheDocument()
+
+        // 未到窗口仍显示；跨过 2s 后复位为 idle
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1900)
+        })
+        expect(screen.getByText('已保存')).toBeInTheDocument()
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(200)
+        })
+        expect(screen.queryByText('已保存')).not.toBeInTheDocument()
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 })

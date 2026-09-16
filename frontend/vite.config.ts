@@ -41,10 +41,13 @@ export default defineConfig(({ mode }) => {
       strictPort: false,
       // dev 安全头：与 nginx.conf 生产 CSP 同基线（含 script-src 'unsafe-inline'：
       // 生产侧是 WebviewWidget srcDoc 内联脚本所必需，dev 侧另有 React Refresh
-      // preamble 与 HMR 内联脚本）。差异仅在于 dev 无 nginx 的 always/继承语义。
+      // preamble 与 HMR 内联脚本）。'unsafe-eval' 与生产同为 ajv8（
+      // @rjsf/validator-ajv8）运行时 new Function 编译 schema 所必需，缺失则
+      // 全部 RJSF 动态表单提交被 CSP 拦死（BUG-16 GUI 实证 2026-09-15）。
+      // 差异仅在于 dev 无 nginx 的 always/继承语义。
       headers: {
         'Content-Security-Policy':
-          "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; frame-src 'self' blob: data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
+          "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; frame-src 'self' blob: data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'SAMEORIGIN',
         'Referrer-Policy': 'strict-origin-when-cross-origin',

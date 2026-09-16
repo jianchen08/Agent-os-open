@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * uiStore 分支补测：初始化读取分支（含读取异常回退）+ 全部 UI 切换动作
  * 及其 localStorage write-through 副作用。

@@ -6,7 +6,7 @@
  * 集成系统托盘、全局快捷键和窗口信息采集。
  */
 
-import { app, BrowserWindow, globalShortcut, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, shell } from "electron";
 import * as path from "path";
 
 import {
@@ -14,6 +14,10 @@ import {
   installAppProtocolHandler,
   registerAppSchemePrivileges,
 } from "./app-protocol";
+import {
+  ensurePackagedKernelRunning,
+  shutdownManagedKernel,
+} from "./kernel-manager";
 import { createTray, destroyTray } from "./tray";
 import {
   startWindowInfoPolling,
@@ -29,6 +33,16 @@ const VITE_DEV_SERVER_URL = "http://localhost:5188";
 
 /** 全局快捷键：Ctrl+Shift+A 切换窗口显示/隐藏 */
 const TOGGLE_SHORTCUT = "Ctrl+Shift+A";
+
+/**
+ * 子窗口标记（preload.ts 的 isChildWindow 依据同一字面量）。
+ * 子窗口/悬浮窗经 webPreferences.additionalArguments 携带，前端 TitleBar
+ * 据此只在主窗口渲染（子浮窗保持无边框悬浮组件形态，不出现标题栏）。
+ */
+const CHILD_WINDOW_ARG = "--agentos-child-window";
+
+/** 最大化状态推送通道（preload.ts 的 windowControls.onMaximizedChange 监听同一通道） */
+const MAXIMIZED_CHANGED_CHANNEL = "window:maximized-changed";
 
 /** 主窗口引用 */
 let mainWindow: BrowserWindow | null = null;
@@ -171,14 +185,27 @@ function hardenWindowNavigation(win: BrowserWindow): void {
  *
  * 开发环境加载 Vite dev server URL，生产环境加载构建后的 index.html。
  * 窗口默认置顶，创建后注册快捷键、初始化托盘和窗口信息轮询。
+ *
+ * @param loadContent - 首屏内容加载器（默认按 dev/prod 分流，见 loadInitialContent）
  */
-function createMainWindow(): BrowserWindow {
+function createMainWindow(
+  loadContent: (win: BrowserWindow) => void = loadInitialContent,
+): BrowserWindow {
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 800,
     minHeight: 600,
     alwaysOnTop: true,
+    // 自定义标题栏：Windows/macOS 隐藏原生标题栏（保留系统边框/缩放/Snap），
+    // Linux 不支持 titleBarStyle 用整体无边框；窗口控制（最小化/最大化/关闭）
+    // 由前端 TitleBar 组件经 window:self:* IPC 承担
+    ...(process.platform === "linux"
+      ? { frame: false }
+      : { titleBarStyle: "hidden" as const }),
+    // 开发环境菜单栏默认隐藏（Alt 唤出，保留 DevTools/刷新快捷键）；
+    // 生产环境在 whenReady 中整个移除应用菜单
+    autoHideMenuBar: true,
     show: false, // 先隐藏，ready-to-show 后再显示
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -192,13 +219,23 @@ function createMainWindow(): BrowserWindow {
 
   hardenWindowNavigation(win);
 
+  // 最大化状态变化推送前端（TitleBar 的最大化/还原图标切换；
+  // 双击拖拽区、Win+方向键等系统路径触发的变化同样覆盖）
+  const sendMaximized = (maximized: boolean): void => {
+    if (!win.isDestroyed()) {
+      win.webContents.send(MAXIMIZED_CHANGED_CHANNEL, maximized);
+    }
+  };
+  win.on("maximize", () => sendMaximized(true));
+  win.on("unmaximize", () => sendMaximized(false));
+
   // 窗口准备好后显示
   win.once("ready-to-show", () => {
     win.show();
   });
 
   // 加载前端页面
-  loadFrontend(win);
+  loadContent(win);
 
   // 窗口关闭时隐藏而非退出（配合托盘使用）
   win.on("close", (event) => {
@@ -249,6 +286,60 @@ function loadFrontend(
         console.error("[Electron] 加载前端页面失败:", err);
       });
     console.info(`[Electron] 生产模式，加载: ${APP_BASE_URL}/index.html`);
+  }
+}
+
+/** 内核就绪前的加载态页面（纯静态 HTML+CSS，无脚本） */
+const KERNEL_LOADING_HTML = `<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>灵汐助手</title>
+<style>
+  html,body{height:100%;margin:0;background:#f5f6fa;font-family:"Microsoft YaHei",system-ui,sans-serif}
+  .box{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;color:#4b5563}
+  .spin{width:36px;height:36px;border:4px solid #d1d5db;border-top-color:#4f6ef7;border-radius:50%;animation:r 1s linear infinite}
+  p{margin:0;font-size:14px}
+  @keyframes r{to{transform:rotate(360deg)}}
+</style></head>
+<body><div class="box"><div class="spin"></div><p>正在启动灵汐助手内核，首次启动可能需要数十秒…</p></div></body>
+</html>`;
+
+/** 首屏加载分流：dev 直载前端；生产先显示加载态，内核就绪后再载前端 */
+function loadInitialContent(win: BrowserWindow): void {
+  if (isDevelopment()) {
+    loadFrontend(win);
+    return;
+  }
+  win
+    .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(KERNEL_LOADING_HTML)}`)
+    .catch((err) => {
+      // ERR_ABORTED = 加载态被后续真实内容导航取代（复用模式下内核秒就绪），属预期
+      if ((err as { code?: string })?.code !== "ERR_ABORTED") {
+        console.error("[Electron] 加载内核启动加载态失败:", err);
+      }
+    });
+  void bootPackagedKernelThenLoad(win);
+}
+
+/**
+ * 拉起打包件内核（复用/拉起两态，见 kernel-manager）并在健康就绪后载入前端。
+ * 失败（安装损坏/启动失败/就绪超时）一律显式错误对话框 + 退出，不静默白屏。
+ */
+async function bootPackagedKernelThenLoad(win: BrowserWindow): Promise<void> {
+  try {
+    const { mode } = await ensurePackagedKernelRunning({
+      resourcesPath: process.resourcesPath,
+    });
+    console.info(`[Electron] 内核就绪（${mode === "reuse" ? "复用已运行内核" : "已拉起打包内核"}），加载前端`);
+  } catch (err) {
+    // 错误消息自带用户指引（缺失→重装 / 超时→看日志重试），此处原样呈现
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[Electron] 内核启动失败:", message);
+    dialog.showErrorBox("灵汐助手 启动失败", message);
+    app.exit(1);
+    return;
+  }
+  if (!win.isDestroyed()) {
+    loadFrontend(win);
   }
 }
 
@@ -352,6 +443,8 @@ function createChildWindow(opts: ChildWindowOptions): {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // 子窗口标记：preload 据此暴露 isChildWindow=true，前端不渲染 TitleBar
+      additionalArguments: [CHILD_WINDOW_ARG],
     },
   });
 
@@ -385,6 +478,38 @@ function registerIpcHandlers(): void {
   // 获取运行平台
   ipcMain.on("get-platform", (event) => {
     event.returnValue = process.platform;
+  });
+
+  // ===== 主窗口自控 IPC（前端 TitleBar 组件的自定义标题栏按钮）=====
+  // 按 event.sender 反查发起窗口：只作用于发起调用的窗口自身
+
+  // 最小化
+  ipcMain.handle("window:self:minimize", (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize();
+  });
+
+  // 最大化/还原切换；返回切换后的最大化状态
+  ipcMain.handle("window:self:maximize-toggle", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) {
+      return false;
+    }
+    if (win.isMaximized()) {
+      win.unmaximize();
+    } else {
+      win.maximize();
+    }
+    return win.isMaximized();
+  });
+
+  // 关闭：主窗口 close 事件 preventDefault→hide（收进托盘），与原生 X 行为一致
+  ipcMain.handle("window:self:close", (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close();
+  });
+
+  // 查询当前最大化状态（TitleBar 挂载时同步初始图标）
+  ipcMain.handle("window:self:is-maximized", (event) => {
+    return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
   });
 
   // ===== P2/P3 多窗口 IPC（ipcMain.handle,支持 async 返回）=====
@@ -508,8 +633,14 @@ function cleanup(): void {
 
 // ========== 应用生命周期 ==========
 
-// 禁止多实例
-app.requestSingleInstanceLock();
+// 禁止多实例：抢锁失败（已有首实例持有锁）即退出，
+// 否则第二实例会完整启动（双窗口/双托盘/共享 userData 竞争）。
+// 此时 whenReady 不会触发，不会创建窗口/托盘；before-quit 清理路径
+// 对「从未 ready」态均为安全空操作（受管内核不存在，shutdown 幂等 no-op）。
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+}
 
 app.on("second-instance", () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -523,6 +654,12 @@ app.on("second-instance", () => {
 // 应用就绪后初始化
 app.whenReady().then(() => {
   console.info("[Electron] 应用启动中...");
+
+  // 生产环境移除默认应用菜单（File/Edit/View/... 由自定义标题栏取代）；
+  // 开发环境保留（autoHideMenuBar 默认隐藏，Alt 唤出，DevTools/刷新快捷键可用）
+  if (!isDevelopment()) {
+    Menu.setApplicationMenu(null);
+  }
 
   // 注册 app:// 协议处理器（必须先于窗口创建）
   installAppProtocolHandler();
@@ -563,6 +700,9 @@ app.on("window-all-closed", () => {
 
 // 应用退出前清理资源
 app.on("before-quit", () => {
+  // 收受管内核进程树（taskkill /F /T 连带 sidecar；仅 spawn 模式有受管内核，
+  // 复用模式的外部内核不杀；electron 崩溃路径孤儿兜底为遗留项）
+  shutdownManagedKernel();
   // 移除 close 事件的 preventDefault，允许窗口真正关闭
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.removeAllListeners("close");

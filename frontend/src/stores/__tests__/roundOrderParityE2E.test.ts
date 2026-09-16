@@ -16,16 +16,9 @@ import type * as sessionMod from '@/services/api/session'
 import type * as handlersMod from '@/services/websocket/streaming/handlers'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type * as messageOrderMod from '@/utils/messageOrder'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 
 describe('逐轮模型顺序对等（后端 seq 序 vs 前端渲染序）', () => {
   const PIPELINE_ID = '39ef1314a7b9000000000000'
@@ -40,18 +33,7 @@ describe('逐轮模型顺序对等（后端 seq 序 vs 前端渲染序）', () =
   beforeEach(async () => {
     vi.resetModules()
     const storeMod = await import('@/stores/pipelineMessageStore')
-    pipelineStore = storeMod.usePipelineMessageStore
-    pipelineStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: {},
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-    })
+    pipelineStore = await resetPipelineStoreState()
     handlers = await import('@/services/websocket/streaming/handlers')
     pipelineStore.getState().registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID })
     pipelineStore.getState().initFromAPI(PIPELINE_ID, [

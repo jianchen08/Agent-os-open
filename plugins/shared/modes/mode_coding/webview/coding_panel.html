@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>编码交付</title>
+  <style>
+  :root {
+    --bg: #f8fafc; --fg: #1a1a1a; --muted: #64748b; --border: #cbd5e1;
+    --card: #ffffff; --ph: #94a3b8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f172a; --fg: #e2e8f0; --muted: #94a3b8; --border: #334155;
+      --card: #1e293b; --ph: #475569;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px; font-size: 13px; color: var(--fg); background: var(--bg);
+    font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  }
+  h1 { margin: 0 0 12px; font-size: 15px; }
+  .layout { display: grid; gap: 12px; height: calc(100vh - 44px); }
+  .cols { grid-template-columns: 220px minmax(0, 1fr) 200px; }
+  section, aside {
+    display: flex; flex-direction: column; min-height: 0; min-width: 0;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--card);
+  }
+  h2 {
+    margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .body { flex: 1; overflow: auto; padding: 8px; }
+  .placeholder {
+    height: 100%; min-height: 72px; display: flex; flex-direction: column; gap: 4px;
+    align-items: center; justify-content: center; padding: 12px; text-align: center;
+    color: var(--muted); border: 1px dashed var(--ph); border-radius: 6px;
+  }
+  .placeholder .ph-label { font-size: 13px; }
+  .placeholder .ph-note { font-size: 11px; opacity: 0.75; }
+  .note { margin: 8px 0 0; padding: 0 2px; font-size: 11px; color: var(--muted); }
+  .stages { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+  .stage {
+    padding: 14px 8px; text-align: center; font-size: 12px; color: var(--muted);
+    border: 1px dashed var(--ph); border-radius: 6px;
+  }
+  </style>
+</head>
+<body>
+  <h1>编码交付</h1>
+  <main class="layout" style="grid-template-rows: auto minmax(0, 1fr);" data-panel="coding">
+    <section aria-label="修复流水线">
+      <h2>修复流水线</h2>
+      <div class="body">
+        <div class="stages" role="list">
+          <div class="stage" role="listitem">issue</div>
+          <div class="stage" role="listitem">分诊</div>
+          <div class="stage" role="listitem">worktree</div>
+          <div class="stage" role="listitem">测试</div>
+          <div class="stage" role="listitem">审批</div>
+          <div class="stage" role="listitem">合并</div>
+        </div>
+        <p class="note">数据源缺口：阶段落列映射待模式插件接入（pipeline_state mode 键拉通后按阶段列位渲染任务）。</p>
+      </div>
+    </section>
+    <section aria-label="diff 复盘">
+      <h2>diff 复盘</h2>
+      <div class="body">
+        <div class="placeholder">
+          <span class="ph-label">暂无 diff 数据</span>
+          <span class="ph-note">数据源缺口：审批卡 diff 递送后接入（后接点 = review text_diff 组件）。</span>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

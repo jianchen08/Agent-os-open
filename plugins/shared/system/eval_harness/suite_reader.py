@@ -7,6 +7,10 @@
   透传，不自建断言器。
 - case.messages 拼接为 goal_description（{workspace} 占位符不再需要：任务
   默认 isolated 自动获得工作空间）。
+- case.budget（可选，ADR 2026-09-16 成功谓词四元组）：{max_rounds,
+  max_tokens, max_seconds}——聚合时配 results.metrics 做预算判定；
+- case.difficulty / case.ood_axes（可选标注）：难度带与 OOD 轴（任务图/
+  环境工具/语义/过程），供难度等值化与分层采样（二期消费）。
 """
 from __future__ import annotations
 
@@ -23,6 +27,21 @@ def load_suite(path: str) -> dict[str, Any]:
     if not isinstance(data, dict) or not data.get("cases"):
         raise ValueError(f"题集为空或格式错误: {path}")
     return data
+
+
+def resolve_suite_from_profile(profile: dict[str, Any], tier: str = "smoke") -> str:
+    """从模式 profile 解析题集路径（tier 档位；预留档位 null 视为缺席）。
+
+    profile 经内核服务调用（mode.get_profile，server 层获取）透传进来——
+    模式 profile 已内打包进模式插件目录，本模块不直读模式配置文件。
+    """
+    suite = profile.get("suite")
+    if not isinstance(suite, dict) or not suite:
+        raise ValueError(f"profile.suite 缺失或格式错误: {suite!r}")
+    rel = suite.get(tier)
+    if not isinstance(rel, str) or not rel.strip():
+        raise ValueError(f"profile.suite.{tier} 未登记（档位缺席或 null）: {rel!r}")
+    return rel
 
 
 def case_to_task_args(case: dict[str, Any], run_tag: str,
@@ -91,6 +110,8 @@ def expand_batches(suite: dict[str, Any], cases: str | None = None,
         batches.append({
             "case_id": case["id"],
             "task_submit_args": case_to_task_args(case, tag, project_root),
+            "budget": case.get("budget"),
+            "difficulty": case.get("difficulty"),
         })
     return batches
 

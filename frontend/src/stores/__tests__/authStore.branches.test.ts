@@ -81,6 +81,27 @@ const USER_INFO = {
   last_login_at: null,
 }
 
+/** 登录态用例默认桩：未认证、无凭据；逐用例按需覆盖 */
+function applyAuthDefaultStubs() {
+  vi.resetAllMocks()
+  localStorage.clear()
+  sessionStorage.clear()
+  tl.getAccessToken.mockReturnValue(null)
+  tl.getRefreshTokenValue.mockReturnValue(null)
+  tl.isExpired.mockReturnValue(true)
+  tl.isAuthFailureFromError.mockReturnValue(true)
+  tl.refresh.mockResolvedValue(undefined)
+  tl.scrubLegacyTokenStorages.mockImplementation(() => {})
+  growthLoop.restartGrowthLoop.mockResolvedValue(undefined)
+  growthLoop.destroyGrowthLoop.mockImplementation(() => {})
+  growthLoop.initializeGrowthLoop.mockResolvedValue(undefined)
+  growthLoop.refreshPluginContributions.mockResolvedValue(undefined)
+  authApi.login.mockResolvedValue({ ...LOGIN_RESPONSE })
+  authApi.register.mockResolvedValue({ ...LOGIN_RESPONSE })
+  authApi.logout.mockResolvedValue(undefined)
+  authApi.getCurrentUser.mockResolvedValue({ ...USER_INFO })
+}
+
 describe('authStore 登录态设置', () => {
   beforeEach(() => {
     vi.resetAllMocks()

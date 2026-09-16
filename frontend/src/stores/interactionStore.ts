@@ -49,6 +49,10 @@ export interface PendingInteraction {
   priority?: 'low' | 'normal' | 'high' | 'critical'
   /** 通知模式的进度百分比 (0-100) */
   progress?: number
+  /** 等待上限秒数（后端已收敛的 timeout_seconds）；有值时审批卡显示倒计时（BUG-14） */
+  timeoutSeconds?: number
+  /** 后端创建时刻（ISO）；倒计时起点 */
+  createdAt?: string
   timestamp: string
   status: 'pending' | 'responded' | 'navigated' | 'dismissed' | 'entered'
   /** 审批请求 ID（仅 conversation 模式下审批场景有值） */

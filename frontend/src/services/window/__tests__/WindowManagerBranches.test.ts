@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * WindowManager 分支补测：补齐既有三份测试未触达的分支——
  * Web 版「无 window 环境」的视口兜底、zIndex 无浮窗时的基数、

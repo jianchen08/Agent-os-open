@@ -1,24 +1,13 @@
 /** mergeConsecutiveAssistantMessages 纯函数测试 所有现有 store 测试将此函数 mock 为恒等， */
 
 import { describe, it, expect } from 'vitest'
+import { makeStaticMsgFactory } from '../../../stores/__tests__/helpers/storeTestMocks'
 import { mergeConsecutiveAssistantMessages } from '@/services/api/session'
 import type { Message } from '@/types/models'
 
 const SESSION_ID = 'test-session-1'
 
-function msg(id: string, overrides: Partial<Message> = {}): Message {
-  return {
-    id,
-    sessionId: SESSION_ID,
-    sequence: 0,
-    role: 'assistant',
-    content: '',
-    timestamp: '2026-01-01T00:00:00Z',
-    parentId: null,
-    status: 'completed',
-    ...overrides,
-  }
-}
+const msg = makeStaticMsgFactory(SESSION_ID)
 
 describe('mergeConsecutiveAssistantMessages', () => {
   describe('sequence 保持（修复核心）', () => {

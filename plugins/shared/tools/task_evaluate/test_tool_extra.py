@@ -72,7 +72,18 @@ def mod() -> Any:
 
 @pytest.fixture
 def service(tmp_path: Path) -> Any:
-    """真实 TaskService（内存 + 临时 YAML 目录），task_id=None 门面模式。"""
+    """真实 TaskService（内存 + 临时 YAML 目录），task_id=None 门面模式。
+
+    导入前把 tasks 插件目录强制置顶（共跑时别插件同名 service.py 可能占位）。
+    """
+    _s = str(_TASKS_DIR)
+    while _s in sys.path:
+        sys.path.remove(_s)
+    sys.path.insert(0, _s)
+    # 逐出已缓存的裸名槽位：共跑时 security_check 等插件的 service.py 可能已
+    # 占位，仅置顶 path 不够（sys.modules 命中优先）。task_evaluate 的 tool.py
+    # 不导入裸名 service（只按文件载入），故逐出不影响其类身份。
+    sys.modules.pop("service", None)
     from service import TaskService
 
     return TaskService(data_dir=str(tmp_path / "tasks"))
@@ -344,6 +355,45 @@ class TestMergeGateAndCompletionPaths:
         # 富通知字段随终态落 state（富评估摘要/失败原因）
         assert state_writer.await_args.args[1]["task.eval_summary"] == "评估结果: 1/1 指标通过\n  ✅ PASS m1"
         assert state_writer.await_args.args[1]["task.error"] == "worktree 合并失败: git merge conflict"
+
+    @pytest.mark.asyncio
+    async def test_auto_complete_runs_tool_metric_with_command(
+        self, mod: Any, service: Any, monkeypatch: Any
+    ) -> None:
+        """bash_check 带 command（无 criteria 键）不得走「未配置 criteria 直通」，
+        必须落执行器真跑（SWE 种子实跑实证：直通分支让 oracle 免检放行，
+        判定失真——ADR 2026-09-16-external-dataset-sourcing 执行期发现）。"""
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["bash_check"]})
+        monkeypatch.setattr(
+            mod,
+            "_state_reader",
+            lambda: [
+                {
+                    "pipeline_id": task.id,
+                    "task.status": "running",
+                    "task.acceptance_criteria": {
+                        "bash_check": {"input_params": {"command": "pytest -q"}}
+                    },
+                    "task.ws_meta": {"mode": "plain", "path": "D:/ws/x"},
+                }
+            ],
+        )
+        state_writer = AsyncMock()
+        monkeypatch.setattr(mod, "_state_writer", state_writer)
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+        monkeypatch.setattr(
+            mod.worktree_merge, "merge_worktree_before_complete",
+            lambda task_id, ws_meta: None,
+        )
+        executor = MagicMock()
+        executor.run_evaluation = AsyncMock(return_value=_eval_result(
+            task.id, [_metric("bash_check", True)]))
+        tool = mod.TaskEvaluateTool(executor=executor)
+        await tool.execute({"action": "auto_complete", "task_id": task.id})
+        executor.run_evaluation.assert_awaited_once()
+        call = executor.run_evaluation.await_args
+        ids = call.kwargs.get("metric_ids") or call.args[1]
+        assert "bash_check" in ids
 
     @pytest.mark.asyncio
     async def test_merge_failure_writer_raise_not_blocking(self, mod: Any, service: Any, monkeypatch: Any) -> None:

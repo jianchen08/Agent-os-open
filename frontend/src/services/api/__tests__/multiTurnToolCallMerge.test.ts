@@ -14,24 +14,13 @@
  *   3. 真正连续的 assistant（中间无 tool 分隔）仍可合并（thinking+text 拆分场景）
  */
 import { describe, it, expect } from 'vitest'
+import { makeStaticMsgFactory } from '../../../stores/__tests__/helpers/storeTestMocks'
 import { mergeConsecutiveAssistantMessages } from '@/services/api/session'
 import type { Message } from '@/types/models'
 
 const SESSION_ID = 'test-session-multi-turn'
 
-function msg(id: string, overrides: Partial<Message> = {}): Message {
-  return {
-    id,
-    sessionId: SESSION_ID,
-    sequence: 0,
-    role: 'assistant',
-    content: '',
-    timestamp: '2026-01-01T00:00:00Z',
-    parentId: null,
-    status: 'completed',
-    ...overrides,
-  }
-}
+const msg = makeStaticMsgFactory(SESSION_ID)
 
 function toolMsg(
   id: string,

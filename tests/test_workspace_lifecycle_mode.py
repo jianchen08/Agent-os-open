@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -254,3 +255,63 @@ def test_get_workspace_root_injected_config_wins(manager_cls, tmp_path):
         base_path=str(base),
     )
     assert manager_abs._get_workspace_root() == injected_abs.resolve()
+
+
+# ── worktree 落地校验（workspace_lifecycle.py:462-469）──
+
+
+def test_create_worktree_root_raises_when_dir_not_landed(manager_cls, tmp_path):
+    """worktree add 返回但目录未落地 → 出生期抛错，拒绝幻影工作空间（464-467）。
+
+    契约（2026-09-14 用户裁定「建了什么目录就把什么目录写进 state」）：
+    目录不存在时若照常返回 meta，任务会拿着幻影路径起跑，直到收尾合并
+    才炸——必须让失败发生在出生期。
+    """
+    manager = make_manager(manager_cls, base_path=str(tmp_path))
+    manager._worktree_add_with_repair = lambda *a, **k: None  # git 面不真跑
+    manager._ensure_git_user = lambda *a, **k: None
+
+    root_path = tmp_path / "proj"
+    root_path.mkdir()
+    ws_base = tmp_path / ".ai_workspaces"
+    ws_base.mkdir()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        manager._create_worktree_root(ws_base, root_path, "task_phantom")
+
+    msg = str(exc_info.value)
+    assert "worktree 分化未落地" in msg
+    assert "task_phantom" in msg, "错误必须点名 task_id 便于定位"
+    assert str(root_path) in msg, "错误必须带源仓库路径"
+    # meta 未写入 store（失败不得留半成品状态）
+    assert "task_phantom" not in manager._ws_meta_store
+
+
+def test_create_worktree_root_returns_meta_when_dir_landed(manager_cls, tmp_path):
+    """对照组：目录真实落地 → 返回 worktree meta（校验不是恒抛）。"""
+    manager = make_manager(manager_cls, base_path=str(tmp_path))
+    ws_base = tmp_path / ".ai_workspaces"
+    root_path = tmp_path / "proj"
+    root_path.mkdir()
+    ws_base.mkdir()
+    landed: list[Path] = []
+
+    def _fake_add(repo, branch, ws_dir, task_id):
+        # worktree add 成功即目录落地（与 git 的真实副作用同构）
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        landed.append(ws_dir)
+
+    git_user_calls: list[Any] = []
+    manager._worktree_add_with_repair = _fake_add
+    manager._ensure_git_user = lambda *a, **k: git_user_calls.append(a)
+
+    meta = manager._create_worktree_root(ws_base, root_path, "task_ok")
+
+    assert meta["mode"] == "worktree"
+    assert meta["branch"] == "task/task_ok"
+    assert meta["project_root"] == str(root_path)
+    # 路径 = 实际落地目录（state 里写的就是真实存在的那个），且落在 ws_base 下
+    assert landed == [Path(meta["path"])]
+    assert Path(meta["path"]).is_dir()
+    assert Path(meta["path"]).parent == ws_base
+    assert git_user_calls, "落地后必须确保 worktree 内 git user 就绪"

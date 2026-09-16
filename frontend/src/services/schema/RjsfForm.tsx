@@ -165,8 +165,15 @@ function fieldToRjsfProperty(field: UIInputFormField): { prop: Record<string, un
         prop.type = 'array'
         prop.uniqueItems = true
         if (field.required) prop.minItems = 1
-        if (field.options?.length) prop.items = { oneOf: optionsToRawOneOf(field.options) }
-        ui['ui:widget'] = 'checkboxes'
+        if (field.options?.length) {
+          prop.items = { oneOf: optionsToRawOneOf(field.options) }
+          ui['ui:widget'] = 'checkboxes'
+        } else {
+          // 无 options 声明（如 agent_manager 的 tags/tool_ids）：不给 items 会被
+          // RJSF 以 UnsupportedField 兜底渲染成裸 JSON 文本（不可编辑）。兜底字符串
+          // 数组 schema 走默认数组字段（逐项输入 + 增删），保证可渲染可编辑
+          prop.items = { type: 'string' }
+        }
         break
       case 'date':
         prop.type = 'string'
@@ -178,10 +185,15 @@ function fieldToRjsfProperty(field: UIInputFormField): { prop: Record<string, un
         break
       case 'slider': {
         prop.type = 'number'
-        Object.assign(prop, numericBounds(field))
-        // 无 step 声明时兜底 0.01：antd Slider 缺省 step=1，min/max 为 0~1 的
-        // 配置（如压缩触发比例）只能取 0/1 两档，中间值拖不出来
-        prop.multipleOf = field.step ?? 0.01
+        const bounds = numericBounds(field)
+        Object.assign(prop, bounds)
+        // 未声明 step 的兜底兼作两用（@rjsf/antd range widget 以 schema.multipleOf
+        // 作 antd Slider 拖动步长，同时是 ajv 数据校验约束），按 max 量级自适应：
+        // - 0~1 量级（如压缩触发比例）兜 0.01：antd 缺省 step=1 只能取 0/1 两档
+        // - max 超过 1 的整数区间（如 0~100% 阈值滑条）兜 1：整数粒度拖动与校验，
+        //   不给整数值引入 0.01 multipleOf 的非整粒度约束
+        const maximum = bounds.maximum
+        prop.multipleOf = field.step ?? (maximum !== undefined && maximum > 1 ? 1 : 0.01)
         ui['ui:widget'] = 'range'
         break
       }
@@ -576,6 +588,10 @@ export function RjsfForm({
   disabled,
 }: RjsfFormProps) {
   const [submitting, setSubmitting] = useState(false)
+  // 提交被表单校验拦截的可见反馈（验收：任何保存失败必有可见反馈，禁止静默）。
+  // schema 级错误（如 ajv 编译失败的 {stack}）不落在任何字段上，就近提示与
+  // ErrorList 都不显示它们——必须在表单级显式渲染
+  const [blockedErrors, setBlockedErrors] = useState<string[]>([])
   const { schema, uiSchema: fieldUiSchema } = useMemo(() => toRjsf(fields), [fields])
   // 级联语义化（缺口 G2）：模板 URI + 依赖指纹随表单值实时解析（字段值变化 →
   // 该字段 ui:options 变化 → RJSF 重渲 widget → AsyncSelect 重拉）
@@ -611,6 +627,7 @@ export function RjsfForm({
     setSubmitting(true)
     try {
       await onSubmit(values ?? {})
+      setBlockedErrors([])
     } finally {
       setSubmitting(false)
     }
@@ -619,6 +636,21 @@ export function RjsfForm({
   return (
     <div className="space-y-4">
       {title && <h3 className="text-foreground text-base font-semibold">{title}</h3>}
+      {blockedErrors.length > 0 && (
+        <div
+          role="alert"
+          className="border-status-error/40 bg-status-error/10 text-status-error rounded-lg border px-3 py-2"
+        >
+          <p className="text-xs font-medium">保存被表单校验拦截，请修正后重试：</p>
+          <ul className="mt-1 list-disc pl-4">
+            {blockedErrors.map((msg, i) => (
+              <li key={i} className="text-xs break-all">
+                {msg}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <Form
         schema={schema}
         uiSchema={uiSchemaWithSubmit}
@@ -631,9 +663,20 @@ export function RjsfForm({
         omitExtraData
         disabled={disabled}
         onSubmit={handleSubmit}
+        onError={(errors) => {
+          // 只收集不落在任何字段上的 schema 级错误（如 ajv 编译失败的 {stack}）——
+          // 它们没有就近提示可依附，是静默拦截的盲区；字段级错误已由就近提示渲染
+          const orphan = errors.filter((e) => !e.property)
+          setBlockedErrors(
+            orphan
+              .map((e) => e.message ?? (e as { stack?: string }).stack ?? '')
+              .filter(Boolean),
+          )
+        }}
         onChange={({ formData: values }: IChangeEvent) => {
           // 实时表单值驱动级联语义化（缺口 G2）——无论外部是否传 onChange 都回写
           setFormData(values ?? {})
+          setBlockedErrors([])
           if (onChange) onChange(values ?? {})
         }}
       />

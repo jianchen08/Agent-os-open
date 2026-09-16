@@ -8,7 +8,7 @@
  * 零 store/service 依赖，完全由 props 驱动。
  */
 
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ArrowRight, Check, Loader2, MessageSquare, X } from '@/assets/icons'
 import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { Button } from '@/components/ui/button'
@@ -31,6 +31,41 @@ export interface InteractionCardProps {
   isSubmitting: boolean
 }
 
+/** m:ss 剩余时间格式（倒计时展示） */
+function formatRemaining(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60)
+  const s = totalSeconds % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+/**
+ * 审批等待倒计时（BUG-14 有界等待可见化）。
+ * timeoutSeconds + createdAt 齐备且请求仍 pending 时启用，每秒刷新；
+ * 缺任一字段（非审批交互/旧数据）返回 null——不显示倒计时。
+ */
+function useApprovalCountdown(interaction: PendingInteraction): number | null {
+  const { timeoutSeconds, createdAt, timestamp, status } = interaction
+  const active = status === 'pending' && !!timeoutSeconds && timeoutSeconds > 0
+
+  const deadlineMs = useMemo(() => {
+    const base = Date.parse(createdAt || timestamp || '')
+    if (!Number.isFinite(base)) return null
+    return base + (timeoutSeconds ?? 0) * 1000
+  }, [createdAt, timestamp, timeoutSeconds])
+
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!active || deadlineMs == null) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [active, deadlineMs])
+
+  if (!active || deadlineMs == null) return null
+  return Math.max(0, Math.ceil((deadlineMs - now) / 1000))
+}
+
 export function InteractionCard({
   interaction,
   onRespondChoice,
@@ -43,6 +78,7 @@ export function InteractionCard({
   const [detailOption, setDetailOption] = useState<InteractionOption | null>(null)
   const isDone = interaction.status !== 'pending'
   const { features, textInputPlaceholder } = resolveInteractionLayout(interaction)
+  const secondsLeft = useApprovalCountdown(interaction)
 
   const handleTextSubmit = () => {
     const trimmed = textInput.trim()
@@ -75,6 +111,19 @@ export function InteractionCard({
         <div className="flex items-center gap-2">
           <MessageSquare className="h-icon-md w-icon-md shrink-0 text-status-info" />
           <span className="text-sm font-semibold">{interaction.title || '交互请求'}</span>
+          {secondsLeft != null && (
+            <span
+              data-testid="approval-countdown"
+              className={`ml-auto shrink-0 rounded px-1.5 py-0.5 text-xs tabular-nums ${
+                secondsLeft <= 0
+                  ? 'bg-[var(--badge-danger-bg)] text-[var(--badge-danger-text)]'
+                  : 'bg-muted text-muted-foreground'
+              }`}
+              title="审批等待超时后将自动按拒绝裁决"
+            >
+              {secondsLeft <= 0 ? '已超时，将自动拒绝' : `剩余 ${formatRemaining(secondsLeft)}`}
+            </span>
+          )}
           {isDone && (
             <span className="ml-auto flex items-center gap-1 text-xs text-status-success">
               <Check className="h-icon-xs w-icon-xs" />
@@ -84,7 +133,9 @@ export function InteractionCard({
           {!isDone && (
             <button
               onClick={onDismiss}
-              className="ml-auto rounded-sm p-0.5 text-muted-foreground opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity hover:text-foreground [.animate-pulse-subtle_&]:opacity-60"
+              className={`rounded-sm p-0.5 text-muted-foreground opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity hover:text-foreground [.animate-pulse-subtle_&]:opacity-60 ${
+                secondsLeft != null ? '' : 'ml-auto'
+              }`}
               title="关闭"
             >
               <X className="h-icon-sm w-icon-sm" />

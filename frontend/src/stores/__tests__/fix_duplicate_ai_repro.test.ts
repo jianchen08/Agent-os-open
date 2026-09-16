@@ -4,74 +4,73 @@ import type * as handlersMod from '@/services/websocket/streaming/handlers'
 import type * as utilsMod2 from '@/services/websocket/streaming/handlers/utils'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 
-vi.mock('@/services/api/session', () => ({
-  getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
-  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
-}))
+vi.mock('@/services/api/session', async () => (await import('./helpers/storeTestMocks')).apiSessionMockFull())
 
-vi.mock('@/utils/retry', () => ({
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockBase())
 
 const PIPELINE_ID = '39ef1314a7b9000000000000'
 const THREAD_ID = 'thread-test-001'
+
+/** 注册并激活标准测试管道，返回 store（场景用例播种共用） */
+function activatedStore(ps: typeof pipelineStore) {
+  const store = ps.getState()
+  store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID } as any)
+  store.activatePipeline(PIPELINE_ID)
+  return store
+}
+
+let _seq = 0
+const nextSeq = () => ++_seq
+
+const makeMsg = (id: string, overrides: Partial<Message> = {}): Message => ({
+  id,
+  sessionId: THREAD_ID,
+  sequence: nextSeq(),
+  role: 'assistant',
+  content: '',
+  timestamp: new Date(Date.now() + _seq * 100).toISOString(),
+  parentId: null,
+  status: 'completed',
+  ...overrides,
+})
+
+/** 播种历史 ai-1(seq1, completed) + user-1(seq2) 两条（各场景共用前缀） */
+function seedAi1User1(store: ReturnType<typeof activatedStore>) {
+  store.addMessage(PIPELINE_ID, makeMsg('ai-1', { role: 'assistant', content: 'ai1 reply', sequence: 1, status: 'completed' }))
+  store.addMessage(PIPELINE_ID, makeMsg('user-1', { role: 'user', content: 'user1 msg', sequence: 2 }))
+}
+
+/** ai-1/user-1/ai-2(completed) API 三条基线（initFromAPI 播种用，可展开追加） */
+function apiAi1User1Ai2(withParts = false) {
+  return [
+    makeMsg('ai-1', { role: 'assistant', content: 'ai1 reply', sequence: 1, status: 'completed' }),
+    makeMsg('user-1', { role: 'user', content: 'user1 msg', sequence: 2 }),
+    withParts
+      ? makeMsg('ai-2', { role: 'assistant', content: 'ai2 reply', sequence: 3, status: 'completed', parts: [{ type: 'text', content: 'ai2 reply', sequence: 1 }] as any })
+      : makeMsg('ai-2', { role: 'assistant', content: 'ai2 reply', sequence: 3, status: 'completed' }),
+  ]
+}
 
 describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
   let pipelineStore: pipelineMessageStoreMod.usePipelineMessageStore
   let ensureStreamingPlaceholder: utilsMod2.ensureStreamingPlaceholder
 
-  let _seq = 0
-  const nextSeq = () => ++_seq
-
-  const makeMsg = (id: string, overrides: Partial<Message> = {}): Message => ({
-    id,
-    sessionId: THREAD_ID,
-    sequence: nextSeq(),
-    role: 'assistant',
-    content: '',
-    timestamp: new Date(Date.now() + _seq * 100).toISOString(),
-    parentId: null,
-    status: 'completed',
-    ...overrides,
-  })
-
   beforeEach(async () => {
     _seq = 0
     vi.resetModules()
     const storeMod = await import('@/stores/pipelineMessageStore')
-    pipelineStore = storeMod.usePipelineMessageStore
-    pipelineStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: {},
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-    })
+    pipelineStore = await resetPipelineStoreState()
 
     const utilsMod = await import('@/services/websocket/streaming/handlers/utils')
     ensureStreamingPlaceholder = utilsMod.ensureStreamingPlaceholder
   })
 
   it('场景A: ai2 已 completed，发送 user2 后 stream_start(ai3) 不应复制 ai2', () => {
-    const store = pipelineStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID } as any)
-    store.activatePipeline(PIPELINE_ID)
+    const store = activatedStore(pipelineStore)
 
     // 历史消息：ai1 - user1 - ai2（全部 completed）
     store.initFromAPI(PIPELINE_ID, [
@@ -106,13 +105,10 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
   })
 
   it('场景B: ai2 仍在 streaming（有内容），发送 user2 后 stream_start(ai3)', () => {
-    const store = pipelineStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID } as any)
-    store.activatePipeline(PIPELINE_ID)
+    const store = activatedStore(pipelineStore)
 
     // 历史消息：ai1 - user1 - ai2（ai2 还在 streaming，有内容）
-    store.addMessage(PIPELINE_ID, makeMsg('ai-1', { role: 'assistant', content: 'ai1 reply', sequence: 1, status: 'completed' }))
-    store.addMessage(PIPELINE_ID, makeMsg('user-1', { role: 'user', content: 'user1 msg', sequence: 2 }))
+    seedAi1User1(store)
     store.addMessage(PIPELINE_ID, makeMsg('ai-2', {
       role: 'assistant',
       content: 'ai2 reply',
@@ -139,17 +135,14 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
   })
 
   it('场景C: ai2 streaming 有 parts，发送 user2 后 stream_start(ai3) - parts 不应被复制', () => {
-    const store = pipelineStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID } as any)
-    store.activatePipeline(PIPELINE_ID)
+    const store = activatedStore(pipelineStore)
 
     const ai2Parts = [
       { type: 'thinking', content: 'let me think', sequence: 1, state: 'done' },
       { type: 'text', content: 'ai2 reply', sequence: 2, state: 'streaming' },
     ]
 
-    store.addMessage(PIPELINE_ID, makeMsg('ai-1', { role: 'assistant', content: 'ai1 reply', sequence: 1, status: 'completed' }))
-    store.addMessage(PIPELINE_ID, makeMsg('user-1', { role: 'user', content: 'user1 msg', sequence: 2 }))
+    seedAi1User1(store)
     store.addMessage(PIPELINE_ID, makeMsg('ai-2', {
       role: 'assistant',
       content: 'ai2 reply',
@@ -181,9 +174,7 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
   })
 
   it('场景D: updateMessage upsert 创建 —— 找不到消息时是否创建重复内容消息', () => {
-    const store = pipelineStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID } as any)
-    store.activatePipeline(PIPELINE_ID)
+    const store = activatedStore(pipelineStore)
 
     store.addMessage(PIPELINE_ID, makeMsg('ai-1', { role: 'assistant', content: 'ai1 reply', sequence: 1, status: 'completed' }))
     store.addMessage(PIPELINE_ID, makeMsg('user-1', { role: 'user', content: 'user1 msg', sequence: 2 }))
@@ -225,34 +216,17 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
   it('场景E: 完整 handler 流程 —— handleStreamStart → handleTextDelta → handleStreamEnd', async () => {
     vi.resetModules()
     const storeMod = await import('@/stores/pipelineMessageStore')
-    pipelineStore = storeMod.usePipelineMessageStore
-    pipelineStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: {},
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-    })
+    pipelineStore = await resetPipelineStoreState()
 
     const handlerMod = await import('@/services/websocket/streaming/handlers')
     const handleStreamStart = handlerMod.handleStreamStart
     const handleTextDelta = handlerMod.handleTextDelta
     const handleStreamEnd = handlerMod.handleStreamEnd
 
-    const store = pipelineStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID } as any)
-    store.activatePipeline(PIPELINE_ID)
+    const store = activatedStore(pipelineStore)
 
     // 历史消息
-    store.initFromAPI(PIPELINE_ID, [
-      makeMsg('ai-1', { role: 'assistant', content: 'ai1 reply', sequence: 1, status: 'completed' }),
-      makeMsg('user-1', { role: 'user', content: 'user1 msg', sequence: 2 }),
-      makeMsg('ai-2', { role: 'assistant', content: 'ai2 reply', sequence: 3, status: 'completed', parts: [{ type: 'text', content: 'ai2 reply', sequence: 1 }] as any }),
-    ])
+    store.initFromAPI(PIPELINE_ID, apiAi1User1Ai2(true))
 
     // 发送 user2
     store.addMessage(PIPELINE_ID, makeMsg('user-2', { role: 'user', content: 'user2 msg', sequence: 4, clientMessageId: 'user-2' }))
@@ -301,12 +275,9 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
   })
 
   it('场景F: updateMessage 精确匹配 —— 失配即跳过，绝不按 sequence 模糊写旧消息（ADR 2026-08-21 废除指纹兜底）', () => {
-    const store = pipelineStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID } as any)
-    store.activatePipeline(PIPELINE_ID)
+    const store = activatedStore(pipelineStore)
 
-    store.addMessage(PIPELINE_ID, makeMsg('ai-1', { role: 'assistant', content: 'ai1 reply', sequence: 1, status: 'completed' }))
-    store.addMessage(PIPELINE_ID, makeMsg('user-1', { role: 'user', content: 'user1 msg', sequence: 2 }))
+    seedAi1User1(store)
     store.addMessage(PIPELINE_ID, makeMsg('ai-2', {
       role: 'assistant',
       content: 'ai2 reply',
@@ -337,33 +308,16 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
   it('场景G: stream_end 携带 final_sequence 时占位符 sequence 必须被同步，避免 initFromAPI 去重失败导致重复', async () => {
     vi.resetModules()
     const storeMod = await import('@/stores/pipelineMessageStore')
-    pipelineStore = storeMod.usePipelineMessageStore
-    pipelineStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: {},
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-    })
+    pipelineStore = await resetPipelineStoreState()
 
     const handlerMod = await import('@/services/websocket/streaming/handlers')
     const handleStreamStart = handlerMod.handleStreamStart
     const handleStreamEnd = handlerMod.handleStreamEnd
 
-    const store = pipelineStore.getState()
-    store.registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID } as any)
-    store.activatePipeline(PIPELINE_ID)
+    const store = activatedStore(pipelineStore)
 
     // 历史消息：已落库 ai-1(seq=1) user-1(seq=2) ai-2(seq=3)
-    store.initFromAPI(PIPELINE_ID, [
-      makeMsg('ai-1', { role: 'assistant', content: 'ai1 reply', sequence: 1, status: 'completed' }),
-      makeMsg('user-1', { role: 'user', content: 'user1 msg', sequence: 2 }),
-      makeMsg('ai-2', { role: 'assistant', content: 'ai2 reply', sequence: 3, status: 'completed' }),
-    ])
+    store.initFromAPI(PIPELINE_ID, apiAi1User1Ai2())
 
     // 用户发送 user-2（乐观，seq=4）
     store.addMessage(PIPELINE_ID, makeMsg('user-2', { role: 'user', content: 'user2 msg', sequence: 4, clientMessageId: 'user-2' }))
@@ -410,9 +364,7 @@ describe('Bug 复现：发送新消息后上一条 AI 回复重复', () => {
     // 落库 record_id == stream_start 的 message_id（占位 id），isCoveredByApi 按
     // id 精确收敛让位权威版，不会产生重复消息
     store.initFromAPI(PIPELINE_ID, [
-      makeMsg('ai-1', { role: 'assistant', content: 'ai1 reply', sequence: 1, status: 'completed' }),
-      makeMsg('user-1', { role: 'user', content: 'user1 msg', sequence: 2 }),
-      makeMsg('ai-2', { role: 'assistant', content: 'ai2 reply', sequence: 3, status: 'completed' }),
+      ...apiAi1User1Ai2(),
       makeMsg('user-2', { role: 'user', content: 'user2 msg', sequence: 4, clientMessageId: 'user-2' }),
       makeMsg(AI3_ID, { role: 'assistant', content: 'ai3 response', sequence: 5, status: 'completed' }),
     ])

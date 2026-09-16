@@ -1,0 +1,38 @@
+# 调研模式 profile（B 部类物料：由用户维护；出厂种子随 mode_research 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+# 对标 Perplexity/Elicit 范式：问题→带引用报告；验证器族含引用可溯断言与幻觉检测
+mode: research
+name: 调研模式
+panel_page_id: research_desk
+chain:
+  entry: main
+  expected_path: [main, orchestrator/research_orchestrator_agent, executor/generation/research_agent]
+  executor_pool: [executor/generation/research_agent, executor/general_agent]
+  entry_override: null
+pipeline_profile:
+  pipeline: autonomous
+  params:
+    case_timeout: 1500
+    multimodal: false
+    domain_context: none
+suite:
+  smoke: config/self_evolve/suites/dev/research.yaml
+  full: null          # 二期补全
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+  execution_stage:
+    - config/agents/orchestrator/research_orchestrator_agent.yaml
+    - config/agents/executor/generation/research_agent.yaml
+levers:
+  agent_misdispatch: {dispatch_stage: [task_dispatch_guide, orchestrator_config]}
+  citation_missing: {execution_stage: [persona, tool_ids]}
+  hallucination: {execution_stage: [persona, prompt_skeleton]}
+  orchestration_runaway: {orchestration_stage: [pipeline_steps, breaker_params]}
+  eval_no_settle: {evaluation_stage: [evaluation_params]}
+verifier_families: [file_assert, citation_trace, hallucination_check]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 1500
+  round_tokens: 3000000
+  proposals_per_session: 3

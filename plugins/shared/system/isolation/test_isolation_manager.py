@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import subprocess
 import sys
 import types
 from enum import Enum
@@ -1161,13 +1162,33 @@ class TestRepairHostMount:
         mgr = _make_manager(mod)
         assert _run(mgr._repair_host_mount(None, "env-1")) is False
 
-    def test_shape_check_rejects_windows_paths(self) -> None:
-        """Windows 下 PurePath 语义：/mnt/... 与 C:/... 均无法通过
-        /mnt/<x>/ 形态检查 → 返回 False，不执行 wsl.exe（该分支仅 Linux 可达）。"""
+    def test_shape_check_windows_drive_rejected_and_wsl_shape_admitted(
+        self, monkeypatch: Any
+    ) -> None:
+        """workspace 是 WSL 侧路径、按 POSIX 语法解析（PurePosixPath）：
+        盘符打头（C:/...）不满足 /mnt/<x>/ 形态 → False 零派发；
+        /mnt/<x>/... 形态通过守卫派发 wsl.exe（打桩防真实子进程副作用）。"""
         mod = _load_manager()
         mgr = _make_manager(mod)
         assert _run(mgr._repair_host_mount("C:/proj/ws-a", "env-1")) is False
-        assert _run(mgr._repair_host_mount("/mnt/d/proj/ws-a", "env-1")) is False
+
+        class _OkCompleted:
+            returncode = 0
+            stderr = b""
+
+        seen: list[Any] = []
+        def _fake_run(args: Any, **kw: Any) -> _OkCompleted:
+            seen.append(args)
+            return _OkCompleted()
+
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _fake_run,
+            raising=True,
+        )
+        assert _run(mgr._repair_host_mount("/mnt/d/proj/ws-a", "env-1")) is True
+        assert seen, "WSL 形态必须派发修复命令"
 
 
 # ═══════════════════════════════════════════════════════════

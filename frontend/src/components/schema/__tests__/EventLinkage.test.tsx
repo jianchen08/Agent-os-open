@@ -18,6 +18,12 @@ import {
 } from '@/services/schema/formEventBus'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 
+// FormWidget 现消费会话隔离形态（useSessionsQuery）计算权限档显示默认；
+// 本文件无 QueryClientProvider，静态 mock 空列表（无会话 → 非隔离默认显示路径）
+vi.mock('@/hooks/queries/useSessionsQuery', () => ({
+  useSessionsQuery: () => ({ data: [] }),
+}))
+
 const apiGet = vi.fn()
 const apiPost = vi.fn()
 const apiRequest = vi.fn()

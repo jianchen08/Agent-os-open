@@ -93,6 +93,8 @@ class _EventBusNotifier(IInteractionNotifier):
             "interaction_mode": msg.get("interaction_mode", ""),
             "title": msg.get("title", ""),
             "description": msg.get("description", ""),
+            # 倒计时起点（BUG-14 有界等待可见化；记录创建时刻，前端换算剩余时间）
+            "created_at": str(record.get("created_at") or ""),
         }
         for key in ("options", "questions", "initial_message", "suggestions",
                     "file_paths", "progress", "priority", "timeout_seconds",
@@ -335,7 +337,9 @@ async def human_interaction(**kwargs: Any) -> dict[str, Any]:
             return await _do_choice(kwargs, session_id, pipeline_id, timeout)
         if mode == InteractionMode.CONVERSATION.value:
             return await _do_conversation(kwargs, session_id, pipeline_id, timeout)
-        return {"error": f"不支持的交互模式: {mode}"}
+        # mode 白名单已在函数入口校验（只放行三值），此处不可能到达——
+        # 显式 fail-closed 满足路径完备性，不静默落空
+        raise AssertionError(f"mode 未收敛到三值分支: {mode!r}")
     except InteractionTimeoutError as e:
         return {"error": f"人类交互超时（{e.timeout}秒）", "error_code": "INTERACTION_TIMEOUT"}
     except InteractionCancelledError as e:
@@ -509,8 +513,18 @@ async def interaction_wait_for_choice(request_id: str, timeout: float = 86400) -
         return {"error": "service not initialized"}
     try:
         return await _service.wait_for_choice(request_id, timeout)
-    except (InteractionTimeoutError, InteractionCancelledError, InteractionDeniedError) as e:
-        return {"error": str(e), "request_id": request_id}
+    except InteractionTimeoutError as e:
+        # error 消息携带 ASCII 标记（timeout/denied/cancel）：调用方（security_check
+        # 等）按子串把 error 分类为对应拒绝语义（BUG-14 超时=按拒绝裁决反馈链路）。
+        return {
+            "error": f"审批等待超时，已按拒绝裁决 (interaction timeout): {e}",
+            "error_code": "INTERACTION_TIMEOUT",
+            "request_id": request_id,
+        }
+    except InteractionDeniedError as e:
+        return {"error": f"denied: {e}", "error_code": "INTERACTION_DENIED", "request_id": request_id}
+    except InteractionCancelledError as e:
+        return {"error": f"cancelled: {e}", "error_code": "INTERACTION_CANCELLED", "request_id": request_id}
 
 
 @plugin.tool(

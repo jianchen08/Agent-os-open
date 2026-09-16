@@ -3554,4 +3554,221 @@ mod tests {
         assert!(!secure_eq("abcd", "abc"), "长度不同应不等");
         assert!(secure_eq("", ""), "空串相等");
     }
+
+    // ── 用户配置层叠加的单元素语义（apply_user_config_overlay / set_config_leaf）──
+
+    /// `set_config_leaf` 的分段写入契约：空段返回 false（不写）；
+    /// 单段直接替换；中间段缺失时新建；同名标量挡路时保留原值返回 false。
+    #[test]
+    fn set_config_leaf_creates_missing_layers_and_refuses_scalar_shadow() {
+        let mut map = serde_json::Map::new();
+
+        assert!(
+            !set_config_leaf(&mut map, &[], serde_json::json!(1)),
+            "空段不写"
+        );
+        assert!(
+            set_config_leaf(&mut map, &["a".to_string()], serde_json::json!("v")),
+            "单段直接写入"
+        );
+        assert_eq!(map["a"], serde_json::json!("v"));
+
+        assert!(
+            set_config_leaf(
+                &mut map,
+                &["d".to_string(), "e".to_string()],
+                serde_json::json!(2)
+            ),
+            "中间段缺失时新建空对象"
+        );
+        assert_eq!(map["d"]["e"], serde_json::json!(2));
+
+        // 同名标量挡路（a 已是字符串，不能再作目录层级）→ 不覆盖、返回未接管
+        assert!(
+            !set_config_leaf(
+                &mut map,
+                &["a".to_string(), "child".to_string()],
+                serde_json::json!(3)
+            ),
+            "标量挡路不得强拆（保留 factory 值）"
+        );
+        assert_eq!(map["a"], serde_json::json!("v"), "原标量保持不变");
+
+        // 已有对象子树：只替换末段，兄弟键保留（目录层不整体清空）
+        assert!(set_config_leaf(
+            &mut map,
+            &["d".to_string(), "e".to_string()],
+            serde_json::json!(9)
+        ));
+        assert!(set_config_leaf(
+            &mut map,
+            &["d".to_string(), "sibling".to_string()],
+            serde_json::json!(8)
+        ));
+        assert_eq!(map["d"]["e"], serde_json::json!(9), "末段被文件级替换");
+        assert_eq!(map["d"]["sibling"], serde_json::json!(8), "兄弟键不受影响");
+    }
+
+    /// 用户层文件与 factory 同路径：整体替换（不逐字段合并）；未被接管的
+    /// factory 兄弟文件保留；用户层返回的接管计数如实反映文件数。
+    #[tokio::test]
+    async fn user_config_overlay_replaces_file_wholesale_and_counts() {
+        let _lock = user_space_env_lock();
+        let factory = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        // factory 的 llm.yaml 有 a/b 两键；用户层只有 a —— 文件级接管应丢掉 b
+        fs::write(
+            factory.path().join("llm.yaml"),
+            "a: factory\nextra: keep-me-only-in-factory\n",
+        )
+        .unwrap();
+        fs::write(factory.path().join("peer.yaml"), "p: factory\n").unwrap();
+        fs::write(user.path().join("llm.yaml"), "a: user\n").unwrap();
+
+        let _g = UserRootGuard::set(user.path());
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(factory.path());
+        let cfg = loader.load_config().await.unwrap();
+        assert_eq!(cfg["llm"]["a"], "user", "用户层文件整体取代 factory");
+        assert!(
+            cfg["llm"].get("extra").is_none(),
+            "文件级替换不是字段级合并——factory 独有键随文件被取代"
+        );
+        assert_eq!(cfg["peer"]["p"], "factory", "未接管的兄弟文件保持 factory");
+
+        // 无用户层文件时接管计数为 0（用户目录存在但空）
+        let empty_user = tempfile::tempdir().unwrap();
+        let _g2 = UserRootGuard::set(empty_user.path());
+        let loader2 =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(factory.path());
+        let cfg2 = loader2.load_config().await.unwrap();
+        assert_eq!(cfg2["llm"]["a"], "factory", "空用户层 = 全 factory");
+        assert_eq!(cfg2["llm"]["extra"], "keep-me-only-in-factory");
+    }
+
+    /// 用户层**不可读**目录（read_dir 失败）→ overlay 整体跳过并返回 0，
+    /// factory 全量保留（不半途写入部分键）。
+    #[tokio::test]
+    async fn user_config_overlay_unreadable_dir_skips_whole() {
+        let _lock = user_space_env_lock();
+        let factory = tempfile::tempdir().unwrap();
+        fs::write(factory.path().join("cfg.yaml"), "v: factory\n").unwrap();
+
+        // 用文件路径冒充用户配置目录：is_dir() 为假 → 直接返回 0（第一道门）
+        let as_file = tempfile::tempdir().unwrap();
+        let fake = as_file.path().join("not-a-dir");
+        fs::write(&fake, "x").unwrap();
+        let _g = UserRootGuard::set(&fake);
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(factory.path());
+        let cfg = loader.load_config().await.unwrap();
+        assert_eq!(cfg["cfg"]["v"], "factory", "非目录用户层 = 未接管");
+    }
+
+    // ── 配置加载的错误映射与 canonicalize 回落 ──
+
+    /// `with_config_root` 对不存在路径回落原始路径（不报错），并照常可用；
+    /// 配置根不存在时 `load_config` 返回空对象（不抛错）。
+    #[tokio::test]
+    async fn with_config_root_missing_path_falls_back_and_loads_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-config-dir");
+        let loader = tracing::subscriber::with_default(AlwaysSubscriber, || {
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(&missing)
+        });
+        let cfg = loader.load_config().await.unwrap();
+        assert_eq!(cfg, serde_json::json!({}), "不存在的配置根返回空对象");
+    }
+
+    /// 配置目录里出现无法读取的条目（非 UTF-8 字节的 .yaml 文件）
+    /// → 该文件读失败向上传播为 CONFIG_IO_ERROR（不静默丢配置），
+    /// 且错误消息指明来源文件。
+    #[tokio::test]
+    async fn load_config_read_failure_propagates_as_io_error() {
+        let _user_space = factory_only_user_space();
+        let dir = tempfile::tempdir().unwrap();
+        // 非 UTF-8 内容 → read_to_string 必然失败（InvalidData）
+        fs::write(dir.path().join("broken.yaml"), [0xff_u8, 0xfe]).unwrap();
+        fs::write(dir.path().join("ok.yaml"), "v: 1\n").unwrap();
+
+        let loader = PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(dir.path());
+        let err = loader.load_config().await.expect_err("单文件读失败应传播");
+        assert_eq!(
+            err.code.as_deref(),
+            Some("CONFIG_IO_ERROR"),
+            "读失败映射为 CONFIG_IO_ERROR，实际: {err:?}"
+        );
+        assert!(
+            err.message.contains("broken.yaml"),
+            "错误消息应含来源文件: {}",
+            err.message
+        );
+    }
+
+    /// manifest 路径不可读时 sha256 计算同样传播 IO 错误（不静默当空 manifest）。
+    #[test]
+    fn compute_plugin_sha256_propagates_manifest_read_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let m: PluginManifest = serde_json::from_str(
+            r#"{
+                "id":"e","name":"N","version":"1.0.0","plugin_type":"tool",
+                "language":"python","host_type":"sidecar","entry":"server.py",
+                "capabilities":{}
+            }"#,
+        )
+        .unwrap();
+        let missing_path = dir.path().join("no-such-manifest.json");
+        let err = loader
+            .compute_plugin_sha256(&m, &missing_path)
+            .expect_err("manifest 缺失应报 IO 错误");
+        assert!(
+            matches!(err, LoaderError::Io { .. }),
+            "应为 Io 变体，实际: {err:?}"
+        );
+    }
+
+    /// `set_config_leaf` 的空段与既有对象层组合：目录层已存在时递归只动末段；
+    /// 末段键已存在时被替换（不追加）。
+    #[test]
+    fn set_config_leaf_replaces_existing_leaf() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "cfg".to_string(),
+            serde_json::json!({"keep": 1, "target": "old"}),
+        );
+        assert!(set_config_leaf(
+            &mut map,
+            &["cfg".to_string(), "target".to_string()],
+            serde_json::json!("new")
+        ));
+        assert_eq!(map["cfg"]["target"], "new");
+        assert_eq!(map["cfg"]["keep"], 1, "兄弟键在递归路径下同样保留");
+    }
+
+    /// 入口文件为**目录**（存在但不可读）→ 空字节（读取失败按无入口处理）。
+    #[test]
+    fn read_entry_bytes_directory_instead_of_file_reads_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("p.json");
+        fs::write(&manifest_path, "{}").unwrap();
+        // 同名目录占位：is_file 为假，std::fs::read 失败
+        fs::create_dir_all(dir.path().join("server.py")).unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let m: PluginManifest = serde_json::from_str(
+            r#"{
+                "id":"e","name":"N","version":"1.0.0","plugin_type":"tool",
+                "language":"python","host_type":"sidecar","entry":"python server.py",
+                "capabilities":{}
+            }"#,
+        )
+        .unwrap();
+        assert!(
+            loader
+                .read_entry_bytes(&m, &manifest_path)
+                .unwrap()
+                .is_empty(),
+            "目录占位入口应读为空字节（不 panic）"
+        );
+    }
 }

@@ -101,3 +101,68 @@ async def test_execute_plugin_result_with_skip_remaining(monkeypatch: Any) -> No
 
     out = await server_mod.execute({"messages": []}, {"temperature": 0.5})
     assert out == {"state_updates": {"raw_result": "y"}, "skip_remaining": True}
+
+
+# ── 观察出口桥接：frontend/metrics capability → ctx._services 注入 ────────
+class _FakeCapability:
+    """capability 句柄桩（记录调用并回放 ok）。"""
+
+    async def call(self, method: str, params: Any = None, timeout: Any = None) -> Any:
+        return {"success": True, "method": method, "params": params}
+
+
+class _CapabilityPlugin:
+    """plugin 桩：按声明名集决定哪些 capability 可取。"""
+
+    def __init__(self, available: set[str]) -> None:
+        self._available = available
+
+    def get_capability(self, name: str) -> Any:
+        if name not in self._available:
+            raise KeyError(name)
+        return _FakeCapability()
+
+
+async def test_execute_injects_frontend_and_metrics_services(monkeypatch: Any) -> None:
+    """内核声明两 capability → ctx._services 同时注入 frontend 与 metrics 句柄。"""
+    server_mod = _load_server()
+    fake = _FakeInstance({"raw_result": "ok"})
+    monkeypatch.setattr(server_mod, "get_instance", lambda: fake)
+    monkeypatch.setattr(
+        server_mod, "plugin", _CapabilityPlugin({"frontend", "metrics"})
+    )
+
+    await server_mod.execute({"messages": []}, {})
+
+    svc = fake.calls[0]._services
+    assert "frontend" in svc and "metrics" in svc
+
+
+async def test_execute_skips_service_injection_when_capability_absent(
+    monkeypatch: Any,
+) -> None:
+    """旧内核未声明 capability → from_plugin 返回 None，不注入（插件侧静默跳过出口）。"""
+    server_mod = _load_server()
+    fake = _FakeInstance({"raw_result": "ok"})
+    monkeypatch.setattr(server_mod, "get_instance", lambda: fake)
+    monkeypatch.setattr(server_mod, "plugin", _CapabilityPlugin(set()))
+
+    await server_mod.execute({"messages": []}, {})
+
+    svc = fake.calls[0]._services
+    assert "frontend" not in svc
+    assert "metrics" not in svc
+
+
+async def test_execute_injects_only_present_capability(monkeypatch: Any) -> None:
+    """只声明 metrics 时仅注入 metrics（两出口相互独立，不因缺一而全废）。"""
+    server_mod = _load_server()
+    fake = _FakeInstance({"raw_result": "ok"})
+    monkeypatch.setattr(server_mod, "get_instance", lambda: fake)
+    monkeypatch.setattr(server_mod, "plugin", _CapabilityPlugin({"frontend"}))
+
+    await server_mod.execute({"messages": []}, {})
+
+    svc = fake.calls[0]._services
+    assert "frontend" in svc
+    assert "metrics" not in svc

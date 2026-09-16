@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -18,12 +19,14 @@ from typing import Any
 
 from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+from agentos_plugin_sdk.capability import bind_capability_caller
 
 plugin = AgentOSPlugin("eval_harness_service")
 
 _paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.path
 
 import aggregate  # noqa: E402
+import evolution_metrics  # noqa: E402
 import proposal as proposal_mod  # noqa: E402
 import suite_reader  # noqa: E402
 
@@ -34,6 +37,30 @@ _HELDOUT_DIR = os.environ.get("AGENTOS_HELDOUT_DIR", "").strip()
 
 def _err(msg: str) -> dict[str, Any]:
     return {"success": False, "error": msg}
+
+
+def _tool_executor_caller() -> Any:
+    """tool-executor 能力句柄的 async caller（跨插件工具/服务调用的既有通道）。"""
+    te = plugin.get_capability("tool-executor")
+    return bind_capability_caller(te, "tool-executor")
+
+
+async def _fetch_mode_profile(mode: str) -> dict[str, Any]:
+    """经内核服务调用取 mode.get_profile（跨插件服务面，tool-executor 显式 plugin_id）。
+
+    模式 profile 已内打包进模式插件目录（出厂种子），消费只走服务调用，
+    不直读他方文件。返回信封两种形态都容忍：{"data": {...}}（调用信封）
+    或 profile 本体。非 dict / 缺 mode 键 = 服务返回无效，抛 ValueError。
+    """
+    invoke = _tool_executor_caller()
+    res = await invoke("tool-executor.invoke",
+                       {"tool_name": "mode.get_profile",
+                        "plugin_id": f"mode_{mode}", "args": {}})
+    data = res.get("data") if isinstance(res, dict) else None
+    profile = data if isinstance(data, dict) else res
+    if not isinstance(profile, dict) or not profile.get("mode"):
+        raise ValueError(f"mode.get_profile 返回无效 profile: {str(res)[:200]}")
+    return profile
 
 
 def _save_summary(run_id: str, mode: str, payload: dict[str, Any]) -> str:
@@ -68,20 +95,24 @@ def _save_ledger(state: dict[str, Any]) -> None:
     schema={
         "type": "object",
         "properties": {
-            "suite": {"type": "string", "description": "题集 yaml 路径（相对项目根）"},
+            "mode": {"type": "string", "description": "任务模式（题集经该模式插件的 mode.get_profile 服务解析）"},
+            "tier": {"type": "string", "description": "profile.suite 档位（缺省 smoke）"},
             "cases": {"type": "string", "description": "逗号分隔 case id 过滤"},
         },
-        "required": ["suite"],
+        "required": ["mode"],
     },
-    description="读题集展开为 task_submit 批次清单（派发由你用自己的 task_submit 执行）",
+    description="按模式取题集展开为 task_submit 批次清单（模式 profile 经服务调用获取，"
+                "你无需知道题集路径；派发由你用自己的 task_submit 执行）",
 )
-async def eval_view_suite(suite: str, cases: str = "") -> dict[str, Any]:
+async def eval_view_suite(mode: str, tier: str = "smoke", cases: str = "") -> dict[str, Any]:
     try:
-        data = suite_reader.load_suite(os.path.join(_PROJECT_ROOT, suite))
-    except (OSError, ValueError) as exc:
-        return _err(str(exc))
+        profile = await _fetch_mode_profile(mode)
+        suite_rel = suite_reader.resolve_suite_from_profile(profile, tier)
+        data = suite_reader.load_suite(os.path.join(_PROJECT_ROOT, suite_rel))
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        return _err(f"mode={mode} tier={tier}: {exc}")
     batches = suite_reader.expand_batches(data, cases or None)
-    return {"success": True, "mode": data.get("mode", ""),
+    return {"success": True, "mode": data.get("mode", ""), "suite": suite_rel,
             "batches": batches,
             "note": "逐条用自己的 task_submit 派发；完成后用 task_manage 查终态"
                     "与验收结果，喂给 eval_summarize 聚合"}
@@ -95,6 +126,8 @@ async def eval_view_suite(suite: str, cases: str = "") -> dict[str, Any]:
         "required": ["mode", "results"],
         "properties": {
             "mode": {"type": "string"},
+            "model": {"type": "string",
+                      "description": "本轮执行模型 id（重放键：基线绑定模型口径落账）"},
             "results": {
                 "type": "array",
                 "items": {
@@ -105,6 +138,12 @@ async def eval_view_suite(suite: str, cases: str = "") -> dict[str, Any]:
                         "task_status": {"type": "string"},
                         "criteria": {"type": "object",
                                      "description": "验收指标名 → 是否通过(bool)"},
+                        "budget": {"type": "object",
+                                   "description": "题集声明的 case 预算上限 "
+                                                  "{max_rounds,max_tokens,max_seconds}"},
+                        "metrics": {"type": "object",
+                                    "description": "过程指标采集 {rounds,tokens,seconds}"
+                                                   "（task_manage 可得；供 budget_ok 判定）"},
                     },
                     "required": ["case_id", "task_status", "criteria"],
                 },
@@ -112,9 +151,11 @@ async def eval_view_suite(suite: str, cases: str = "") -> dict[str, Any]:
         },
         "required": ["mode", "results"],
     },
-    description="聚合评测结果出 scorecard（失败分类为复盘插件深分析的预处理）",
+    description="聚合评测结果出 scorecard（失败分类为复盘插件深分析的预处理；"
+                "判定谓词=终态∧AC∧budget_ok，声明预算请附 metrics 采集）",
 )
-async def eval_summarize(mode: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+async def eval_summarize(mode: str, results: list[dict[str, Any]],
+                         model: str = "") -> dict[str, Any]:
     ledger = _load_ledger()
     baseline = None
     for r in reversed(ledger.get("rounds") or []):
@@ -124,10 +165,16 @@ async def eval_summarize(mode: str, results: list[dict[str, Any]]) -> dict[str, 
     summary = aggregate.summarize(mode, results, baseline)
     run_id = suite_reader.time_tag()
     path = _save_summary(run_id, mode, summary)
+    # 重放键（ADR 2026-09-16）：material_ref/model/逐 case 结果落账——
+    # 保留率、学习率曲线、去噪声复算的数据基座；旧账缺字段时指标降级
+    # insufficient_data，不误判。
     ledger.setdefault("rounds", []).append({
         "run_id": run_id, "mode": mode,
         "passed": summary["passed"], "total": summary["total"],
         "failed_cases": [r["case_id"] for r in summary["results"] if not r["passed"]],
+        "case_results": {str(r["case_id"]): bool(r["passed"])
+                         for r in summary["results"]},
+        "material_ref": _git_head(), "model": str(model or ""),
     })
     ledger["rounds"] = ledger["rounds"][-200:]
     _save_ledger(ledger)
@@ -160,14 +207,9 @@ async def eval_run_heldout(mode: str = "coding") -> dict[str, Any]:
         return _err(f"held-out 题集不存在: {suite_path}")
     try:
         data = suite_reader.load_suite(suite_path)
-    except (OSError, ValueError) as exc:
+        invoke = _tool_executor_caller()
+    except (OSError, ValueError, KeyError) as exc:
         return _err(str(exc))
-    try:
-        te = plugin.get_capability("tool-executor")
-        invoke = __import__("agentos_plugin_sdk.capability", fromlist=["bind_capability_caller"]) \
-            .bind_capability_caller(te, "tool-executor")
-    except Exception as exc:  # noqa: BLE001
-        return _err(f"tool-executor 能力不可用: {exc}")
     tag = suite_reader.time_tag()
     mapping = []
     for batch in suite_reader.expand_batches(data, run_tag=tag):
@@ -281,23 +323,52 @@ async def proposal_apply(proposal_id: str, message: str = "") -> dict[str, Any]:
             "note": "配置/插件变更由内核 G2 校验与热重载原生接管生效"}
 
 
+# 驳回分类账（ADR 2026-09-16）：外因识别/判断力失败/用户否决等裁决证据
+# 的可测化——归因准确率与 P3 一票否决都从这张分类账出。
+REJECT_CATEGORIES = {
+    "prediction_miss", "heldout_gap", "sentry_regression", "external_cause",
+    "harness_defect", "system_fault", "user_veto", "judgment_failure", "other",
+}
+
+
 @plugin.tool(
     name="proposal_reject",
     schema={
         "type": "object",
         "required": ["proposal_id", "reason"],
-        "properties": {"proposal_id": {"type": "string"}, "reason": {"type": "string"}},
+        "properties": {
+            "proposal_id": {"type": "string"},
+            "reason": {"type": "string"},
+            "category": {"type": "string",
+                         "enum": sorted(REJECT_CATEGORIES),
+                         "description": "驳回/回滚分类：外因记账、预测失准、"
+                                        "哨兵退化、用户否决等（判定证据账）"},
+        },
         "required": ["proposal_id", "reason"],
     },
-    description="驳回提案：删存档、记录原因（失败经验入账）",
+    description="驳回提案：记录原因与分类（失败经验入账）；已应用的提案被"
+                "用户裁决回滚时同样走本工具（outcome=reverted，存档保留供审计）",
 )
-async def proposal_reject(proposal_id: str, reason: str) -> dict[str, Any]:
+async def proposal_reject(proposal_id: str, reason: str,
+                          category: str = "other") -> dict[str, Any]:
+    if category not in REJECT_CATEGORIES:
+        return _err(f"category 非法: {category!r}（允许: {sorted(REJECT_CATEGORIES)}）")
     ledger = _load_ledger()
     prop = (ledger.get("proposals") or {}).get(proposal_id)
     if not prop:
         return _err(f"提案 {proposal_id} 不存在")
+    if prop.get("outcome") == "applied":
+        # 用户裁决回滚通道：命中率扣回自动化（2026-09-13 eeb2a2614 案例的账面化）
+        prop["outcome"] = "reverted"
+        prop["reason"] = reason
+        prop["category"] = category
+        _save_ledger(ledger)
+        return {"success": True, "ok": True, "proposal_id": proposal_id,
+                "outcome": "reverted",
+                "note": "已应用提案标记 reverted，git 层回滚由用户执行"}
     prop["outcome"] = "rejected"
     prop["reason"] = reason
+    prop["category"] = category
     prop_path = os.path.join(_EVAL_REPORTS, "proposals", f"{proposal_id}.json")
     if os.path.isfile(prop_path):
         os.remove(prop_path)
@@ -305,31 +376,100 @@ async def proposal_reject(proposal_id: str, reason: str) -> dict[str, Any]:
     return {"success": True, "ok": True, "proposal_id": proposal_id}
 
 
-# ── eval_health：轻量账本聚合 ────────────────────────────────────────────
+# ── eval_health：轻量账本聚合 + P0-P3 自进化裁决 ─────────────────────────
 @plugin.tool(
     name="eval_health",
     schema={"type": "object", "properties": {}},
-    description="流程健康度：轮次/提案命中率/杠杆账（聚合自 reports/eval 账本）",
+    description="流程健康度（轮次/提案命中率/杠杆账）+ 自进化指标 P0-P3 裁决"
+                "（学习率/迁移/保留率/方差/效率/回滚/一票否决，"
+                "evolution.verdict 字段；熔断 verdict=vetoed 后停止提案）",
 )
 async def eval_health() -> dict[str, Any]:
     ledger = _load_ledger()
-    proposals = ledger.get("proposals") or {}
-    outcomes = [p.get("outcome") for p in proposals.values()]
-    applied = sum(1 for o in outcomes if o == "applied")
-    total = len(outcomes)
-    levers: dict[str, dict[str, int]] = {}
-    for p in proposals.values():
-        lever = str(p.get("motivation", ""))[:30]
-        if not lever:
-            continue
-        lv = levers.setdefault(lever, {"applied": 0, "total": 0})
-        lv["total"] += 1
-        if p.get("outcome") == "applied":
-            lv["applied"] += 1
+    evolution = evolution_metrics.verdict(ledger)
     return {"success": True, "rounds": len(ledger.get("rounds") or []),
-            "proposals_total": total, "proposals_applied": applied,
-            "hit_rate": round(applied / total, 3) if total else None,
-            "levers": levers}
+            "evolution": evolution,
+            "breaker_tripped": evolution["verdict"] == "vetoed",
+            **aggregate.health_summary(ledger)}
+
+
+# ── webview 面板页（自进化监控 tab）供给 ──────────────────────────────────
+# 面板承载形态照抄仓内先例（monitoring payload_diag 页 / mode_* 面板页）：
+# manifest 声明 GET /ext/<id>/page/evolution-panel（handler_capability=http.handle），
+# 本文件按 path 返回包内 webview/ 单文件 HTML，并在供页时把账本聚合快照内联进
+# 页面（页面 CSP connect-src 'none'，一期整体快照渲染，增量刷新归后续）。
+# HttpHandleResponse 封装在此内联——共享根裸模块对用户空间播种副本不可达
+# （同 mode_coding 种子的自包含约束）。
+
+_PANEL_ENDPOINT = "/ext/eval_harness_service/page/evolution-panel"
+_PANEL_HTML_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "webview", "evolution_panel.html"
+)
+_SNAPSHOT_ANCHOR = "null/*__SNAPSHOT_INJECT__*/"
+
+
+def _json_response(payload: dict[str, Any], status: int = 200) -> dict[str, Any]:
+    """任意 JSON 对象 → HttpHandleResponse（body base64，内核约定）。"""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/json; charset=utf-8"},
+        "body": base64.b64encode(body).decode("ascii"),
+        "body_encoding": "base64",
+    }
+
+
+def _panel_html_response() -> dict[str, Any]:
+    """包内面板页 + 账本快照内联 → HttpHandleResponse（text/html，body base64）。"""
+    with open(_PANEL_HTML_PATH, encoding="utf-8") as fh:
+        html = fh.read()
+    if _SNAPSHOT_ANCHOR not in html:
+        raise ValueError(f"面板页缺快照注入锚点: {_SNAPSHOT_ANCHOR}")
+    snapshot = aggregate.panel_snapshot(_load_ledger())
+    injected = json.dumps(snapshot, ensure_ascii=False).replace("</", "<\\/")
+    html = html.replace(_SNAPSHOT_ANCHOR, injected, 1)
+    return {
+        "status": 200,
+        "headers": {"Content-Type": "text/html; charset=utf-8"},
+        "body": base64.b64encode(html.encode("utf-8")).decode("ascii"),
+        "body_encoding": "base64",
+    }
+
+
+@plugin.tool(
+    name="http.handle",
+    schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "method": {"type": "string"},
+            "plugin_id": {"type": "string"},
+            "raw_body": {"type": "string"},
+            "headers": {"type": "object"},
+            "query": {"type": "object"},
+        },
+    },
+    description="HTTP endpoint handler for /ext/eval_harness_service/** (自进化面板页供给)",
+)
+async def http_handle(
+    path: str = "",
+    method: str = "GET",
+    plugin_id: str = "",
+    raw_body: str = "",
+    headers: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """按 path 分发：GET 面板页 HTML（内联数据快照）；未路由 path/method 返回 404 JSON。"""
+    if path == _PANEL_ENDPOINT and method == "GET":
+        try:
+            return {"success": True, "data": _panel_html_response()}
+        except (OSError, ValueError) as exc:
+            return {
+                "success": False,
+                "error": f"panel html serve failed: {exc}",
+                "data": _json_response({"error": "panel html unavailable"}, 500),
+            }
+    return {"success": True, "data": _json_response({"error": "not found", "path": path}, 404)}
 
 
 def _git(args: list[str]) -> tuple[int, str]:
@@ -337,6 +477,12 @@ def _git(args: list[str]) -> tuple[int, str]:
     proc = subprocess.run(["git", *args], cwd=_PROJECT_ROOT, capture_output=True,
                           text=True, encoding="utf-8", errors="replace", timeout=120)
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _git_head() -> str:
+    """当前物料基线 git short HEAD（重放键；非 git 环境返回空串不阻断评测）。"""
+    code, out = _git(["rev-parse", "--short", "HEAD"])
+    return out.strip().splitlines()[-1] if code == 0 and out.strip() else ""
 
 
 if __name__ == "__main__":

@@ -18,16 +18,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockSmall())
 
-vi.mock('@/services/api/session', () => ({
-  getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
-}))
+vi.mock('@/services/api/session', async () => (await import('./helpers/storeTestMocks')).apiSessionMockBase())
 
 const PIPELINE_ID = 'pipe-inflight-1'
 const SESSION_ID = 'sess-inflight-1'

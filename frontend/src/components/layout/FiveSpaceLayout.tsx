@@ -488,6 +488,7 @@ export function FiveSpaceLayout({
                   nodeTitleField="name"
                   nodeChildrenField="children"
                   onFileClick={handleFileClick}
+                  onNodeClick={handleTaskNodeClick}
                 />
               </div>
             </div>
@@ -533,7 +534,9 @@ export function FiveSpaceLayout({
         // 皮肤装饰条槽位：仅"带文字的替代性条栏"（miku 标题栏/状态栏类，
         // skinRuntime 按文字内容判定）让位——整根下移/高度扣减；纯图形
         // 垂坠装饰（maid 花边）原生覆盖式零位移，变量恒 0 不占位
-        height: 'calc(100dvh - var(--skin-chrome-top, 0px) - var(--skin-chrome-bottom, 0px))',
+        // --app-titlebar-height：Electron 主窗口自定义标题栏（TitleBar）占位
+        height:
+          'calc(100dvh - var(--app-titlebar-height, 0px) - var(--skin-chrome-top, 0px) - var(--skin-chrome-bottom, 0px))',
         paddingTop: 'var(--skin-chrome-top, 0px)',
         paddingBottom: 'var(--skin-chrome-bottom, 0px)',
       }}

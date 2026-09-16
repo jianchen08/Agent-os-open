@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * WidgetRegistry 分支补测（真实单例，非镜像类）
  *

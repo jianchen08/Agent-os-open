@@ -1,5 +1,6 @@
 /** pipelineMessageStore 测试 - 消息去重、状态同步、initFromAPI 合并 验证： */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
@@ -26,18 +27,7 @@ describe('pipelineMessageStore', () => {
   beforeEach(async () => {
     vi.resetModules()
     const mod = await import('@/stores/pipelineMessageStore')
-    usePipelineMessageStore = mod.usePipelineMessageStore
-    usePipelineMessageStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: {},
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-    })
+    usePipelineMessageStore = await resetPipelineStoreState()
   })
 
   describe('claimUserMessage', () => {

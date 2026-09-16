@@ -15,6 +15,7 @@ import type * as agentTabStoreMod from '@/stores/agentTabStore'
 import type { loggers } from '@/utils/logger'
 import type { Session } from '@/types/models'
 import type { AgentTab } from '@/types/task'
+import { makeSessionFactory, makeSubTabFactory, makeSubTabInputFactory } from './helpers/agentTabTestUtils'
 
 vi.mock('@/services/api/session', () => ({
   getSessions: vi.fn(),
@@ -28,50 +29,16 @@ vi.mock('@/utils/logger', () => ({
 
 // pipelineMessageStore 只 mock 外部依赖边界（网络/持久化），mock 状态经
 // __pipelineMockState 导出供断言（工厂内构造，避开 vi.mock 提升引用限制）。
-vi.mock('@/stores/pipelineMessageStore', () => {
-  const state = {
-    activatePipeline: vi.fn(),
-    registerPipeline: vi.fn(),
-    loadPipelineMessages: vi.fn(() => Promise.resolve({ ok: true as const })),
-    getMessages: vi.fn(() => [] as unknown[]),
-    pipelines: {} as Record<string, unknown>,
-    messagesByPipeline: {} as Record<string, unknown[]>,
-    activePipelineId: null as string | null,
-  }
-  // 与真实 store 同语义：激活回写 activePipelineId
-  state.activatePipeline = vi.fn((pipelineId: string) => {
-    state.activePipelineId = pipelineId
-  })
-  const setState = vi.fn((partial: Record<string, unknown>) => {
-    Object.assign(state, partial)
-  })
-  return {
-    usePipelineMessageStore: { getState: () => state, setState },
-    __pipelineMockState: state,
-  }
-})
-
+vi.mock('@/stores/pipelineMessageStore', async () => (await import('./helpers/pipelineStoreMockFactory')).makePipelineStoreMock())
 const SESSION_ID = 'sess-1'
 const MAIN_TAB_ID = `main-${SESSION_ID}`
 const MAIN_PID = 'pid-main'
 const SUB_TAB_ID = 'sub-pid-sub-x'
 const SUB_PID = 'pid-sub-x'
+const makeSession = makeSessionFactory(SESSION_ID, MAIN_PID)
+const makeSubTab = makeSubTabFactory(SUB_TAB_ID, SUB_PID)
+const makeSubTabInput = makeSubTabInputFactory(makeSubTab)
 const STORAGE_KEY = `agent-tabs-${SESSION_ID}`
-
-function makeSession(overrides: Partial<Session> = {}): Session {
-  return {
-    id: SESSION_ID,
-    title: '测试会话',
-    agentId: 'agentos',
-    activePipelineId: MAIN_PID,
-    pipelineIds: [MAIN_PID],
-    starred: false,
-    pinned: false,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    updatedAt: '2026-01-01T00:00:00.000Z',
-    ...overrides,
-  } as Session
-}
 
 function makeMainTab(overrides: Partial<AgentTab> = {}): AgentTab {
   return {
@@ -89,35 +56,12 @@ function makeMainTab(overrides: Partial<AgentTab> = {}): AgentTab {
   }
 }
 
-function makeSubTab(overrides: Partial<AgentTab> = {}): AgentTab {
-  return {
-    id: SUB_TAB_ID,
-    agentId: 'agent-sub',
-    agentName: '子Agent',
-    agentLevel: 2,
-    parentRecordId: 'rec-sub-x',
-    pipelineRunId: SUB_PID,
-    path: ['主管道', '子Agent'],
-    status: 'running',
-    hasUnread: false,
-    canClose: true,
-    messages: [],
-    ...overrides,
-  }
-}
-
-function makeSubTabInput(overrides: Partial<Omit<AgentTab, 'messages'>> = {}) {
-  const { messages: _messages, ...tab } = makeSubTab(overrides)
-  return tab
-}
-
 /** 保存一条指定 savedAt 的标签快照到 localStorage */
 function seedSnapshot(tabs: AgentTab[], activeTabId: string, savedAt: number): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs, activeTabId, savedAt }))
 }
 
-describe('AgentTabStore 持久化契约', () => {
-  interface PipelineMockState {
+interface PipelineMockState {
     activatePipeline: ReturnType<typeof vi.fn>
     registerPipeline: ReturnType<typeof vi.fn>
     loadPipelineMessages: ReturnType<typeof vi.fn>
@@ -126,35 +70,60 @@ describe('AgentTabStore 持久化契约', () => {
     messagesByPipeline: Record<string, unknown[]>
     activePipelineId: string | null
   }
+
+/** 重置模块注册表/存储并取回 agentTab store + pipelineMock + sessions 播种器 */
+async function importAgentTabEnv(): Promise<{
+  useAgentTabStore: agentTabStoreMod.useAgentTabStore
+  pipelineMock: PipelineMockState
+  seedSessions: (sessions: Session[]) => void
+}> {
+  vi.resetModules()
+  localStorage.clear()
+
+  const { queryClient } = await import('@/services/query/queryClient')
+  const { queryKeys } = await import('@/services/query/queryKeys')
+  queryClient.clear()
+  const seedSessions = (sessions: Session[]) => queryClient.setQueryData(queryKeys.sessions, sessions)
+
+  const mod = await import('@/stores/agentTabStore')
+  const pm = await import('@/stores/pipelineMessageStore')
+  const pipelineMock = (pm as unknown as { __pipelineMockState: PipelineMockState }).__pipelineMockState
+  return { useAgentTabStore: mod.useAgentTabStore, pipelineMock, seedSessions }
+}
+
+/** pipelineMock 状态清零——vi.resetModules 不重置 vi.mock 工厂缓存，须逐测试清零保证隔离 */
+function clearPipelineMockState(pipelineMock: PipelineMockState): void {
+  pipelineMock.activatePipeline.mockClear()
+  pipelineMock.registerPipeline.mockClear()
+  pipelineMock.getMessages.mockClear()
+  pipelineMock.getMessages.mockImplementation(() => [])
+  pipelineMock.loadPipelineMessages.mockClear()
+  pipelineMock.loadPipelineMessages.mockImplementation(() => Promise.resolve({ ok: true as const }))
+  pipelineMock.pipelines = {}
+  pipelineMock.messagesByPipeline = {}
+  pipelineMock.activePipelineId = null
+}
+
+/** 三组用例共用的模块重置环境：重置模块注册表/存储并装配 pipeline mock */
+async function resetAgentTabEnv(): Promise<{
+  useAgentTabStore: agentTabStoreMod.useAgentTabStore
+  pipelineMock: PipelineMockState
+  seedSessions: (sessions: Session[]) => void
+}> {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  const env = await importAgentTabEnv()
+  clearPipelineMockState(env.pipelineMock)
+  return env
+}
+
+describe('AgentTabStore 持久化契约', () => {
   let useAgentTabStore: agentTabStoreMod.useAgentTabStore
   let pipelineMock: PipelineMockState
   let seedSessions: (sessions: Session[]) => void
 
   beforeEach(async () => {
-    vi.resetModules()
-    localStorage.clear()
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-
-    const { queryClient } = await import('@/services/query/queryClient')
-    const { queryKeys } = await import('@/services/query/queryKeys')
-    queryClient.clear()
-    seedSessions = (sessions) => queryClient.setQueryData(queryKeys.sessions, sessions)
-
-    const mod = await import('@/stores/agentTabStore')
-    useAgentTabStore = mod.useAgentTabStore
-    const pm = await import('@/stores/pipelineMessageStore')
-    pipelineMock = (pm as unknown as { __pipelineMockState: PipelineMockState }).__pipelineMockState
-    // vi.resetModules 不重置 vi.mock 工厂缓存——mock 状态须逐测试清零保证隔离
-    pipelineMock.activatePipeline.mockClear()
-    pipelineMock.registerPipeline.mockClear()
-    pipelineMock.getMessages.mockClear()
-    pipelineMock.getMessages.mockImplementation(() => [])
-    pipelineMock.loadPipelineMessages.mockClear()
-    pipelineMock.loadPipelineMessages.mockImplementation(() => Promise.resolve({ ok: true as const }))
-    pipelineMock.pipelines = {}
-    pipelineMock.messagesByPipeline = {}
-    pipelineMock.activePipelineId = null
+    ;({ useAgentTabStore, pipelineMock, seedSessions } = await resetAgentTabEnv())
   })
 
   afterEach(() => {
@@ -181,7 +150,7 @@ describe('AgentTabStore 持久化契约', () => {
     expect(typeof saved.savedAt).toBe('number')
   })
 
-  it('24 小时过期快照：清除 key 并只建主 Tab', () => {
+  it('24 小时过期快照：清除旧内容并只建主 Tab（落盘为新鲜快照）', () => {
     seedSessions([makeSession()])
     seedSnapshot([makeMainTab(), makeSubTab()], MAIN_TAB_ID, Date.now() - 25 * 60 * 60 * 1000)
 
@@ -191,7 +160,13 @@ describe('AgentTabStore 持久化契约', () => {
     expect(tabs).toHaveLength(1)
     expect(tabs[0].id).toBe(MAIN_TAB_ID)
     expect(activeTabId).toBe(MAIN_TAB_ID)
-    expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
+    // 过期快照内容必须消失：key 被清后 initSessionTabs 落盘的是重建态的新鲜
+    // 快照（仅主 Tab、savedAt 为当前时刻）——陈旧 Tab 数据不得存活
+    const raw = localStorage.getItem(STORAGE_KEY)
+    expect(raw).not.toBeNull()
+    const saved = JSON.parse(raw!) as { tabs: AgentTab[]; savedAt: number }
+    expect(saved.tabs.some((t: AgentTab) => t.id === SUB_TAB_ID)).toBe(false)
+    expect(saved.savedAt).toBeGreaterThan(Date.now() - 60_000)
   })
 
   it('损坏快照（非法 JSON）：回退新建主 Tab，不崩溃', () => {
@@ -291,48 +266,27 @@ describe('AgentTabStore 持久化契约', () => {
 })
 
 describe('AgentTabStore Tab 增删改查', () => {
-  interface PipelineMockState {
-    activatePipeline: ReturnType<typeof vi.fn>
-    registerPipeline: ReturnType<typeof vi.fn>
-    loadPipelineMessages: ReturnType<typeof vi.fn>
-    getMessages: ReturnType<typeof vi.fn>
-    pipelines: Record<string, unknown>
-    messagesByPipeline: Record<string, unknown[]>
-    activePipelineId: string | null
-  }
   let useAgentTabStore: agentTabStoreMod.useAgentTabStore
   let pipelineMock: PipelineMockState
   let seedSessions: (sessions: Session[]) => void
 
   beforeEach(async () => {
-    vi.resetModules()
-    localStorage.clear()
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-
-    const { queryClient } = await import('@/services/query/queryClient')
-    const { queryKeys } = await import('@/services/query/queryKeys')
-    queryClient.clear()
-    seedSessions = (sessions) => queryClient.setQueryData(queryKeys.sessions, sessions)
-
-    const mod = await import('@/stores/agentTabStore')
-    useAgentTabStore = mod.useAgentTabStore
-    const pm = await import('@/stores/pipelineMessageStore')
-    pipelineMock = (pm as unknown as { __pipelineMockState: PipelineMockState }).__pipelineMockState
-    pipelineMock.activatePipeline.mockClear()
-    pipelineMock.registerPipeline.mockClear()
-    pipelineMock.getMessages.mockClear()
-    pipelineMock.getMessages.mockImplementation(() => [])
-    pipelineMock.loadPipelineMessages.mockClear()
-    pipelineMock.loadPipelineMessages.mockImplementation(() => Promise.resolve({ ok: true as const }))
-    pipelineMock.pipelines = {}
-    pipelineMock.messagesByPipeline = {}
-    pipelineMock.activePipelineId = null
+    ;({ useAgentTabStore, pipelineMock, seedSessions } = await resetAgentTabEnv())
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
   })
+
+  /** 播种会话+主 Tab+子 Tab，返回 store（unread=true 时子 Tab 带未读） */
+  function seedSubTab(unread = false) {
+    seedSessions([makeSession()])
+    const store = useAgentTabStore.getState()
+    store.initSessionTabs(SESSION_ID)
+    store.addTab(makeSubTabInput())
+    if (unread) store.updateTabUnread(SUB_TAB_ID, true)
+    return store
+  }
 
   it('addTab 重复 id：合并不新增，消息槽始终置空', () => {
     seedSessions([makeSession()])
@@ -442,9 +396,7 @@ describe('AgentTabStore Tab 增删改查', () => {
   })
 
   it('updateTabUnread：hasUnread=true 递增、false 归零', () => {
-    seedSessions([makeSession()])
-    useAgentTabStore.getState().initSessionTabs(SESSION_ID)
-    useAgentTabStore.getState().addTab(makeSubTabInput())
+    seedSubTab()
 
     useAgentTabStore.getState().updateTabUnread(SUB_TAB_ID, true)
     useAgentTabStore.getState().updateTabUnread(SUB_TAB_ID, true)
@@ -457,10 +409,7 @@ describe('AgentTabStore Tab 增删改查', () => {
   })
 
   it('clearUnread 别名：计数归零且 hasUnread 复位', () => {
-    seedSessions([makeSession()])
-    useAgentTabStore.getState().initSessionTabs(SESSION_ID)
-    useAgentTabStore.getState().addTab(makeSubTabInput())
-    useAgentTabStore.getState().updateTabUnread(SUB_TAB_ID, true)
+    seedSubTab(true)
 
     useAgentTabStore.getState().clearUnread(SUB_TAB_ID)
 
@@ -499,10 +448,7 @@ describe('AgentTabStore Tab 增删改查', () => {
   })
 
   it('resetAllTabs：清空运行态（不含 currentSessionId）', () => {
-    seedSessions([makeSession()])
-    useAgentTabStore.getState().initSessionTabs(SESSION_ID)
-    useAgentTabStore.getState().addTab(makeSubTabInput())
-    useAgentTabStore.getState().updateTabUnread(SUB_TAB_ID, true)
+    seedSubTab(true)
 
     useAgentTabStore.getState().resetAllTabs()
 
@@ -533,48 +479,28 @@ describe('AgentTabStore Tab 增删改查', () => {
 })
 
 describe('AgentTabStore closeTab/switchToTab/setActiveTab 边界', () => {
-  interface PipelineMockState {
-    activatePipeline: ReturnType<typeof vi.fn>
-    registerPipeline: ReturnType<typeof vi.fn>
-    loadPipelineMessages: ReturnType<typeof vi.fn>
-    getMessages: ReturnType<typeof vi.fn>
-    pipelines: Record<string, unknown>
-    messagesByPipeline: Record<string, unknown[]>
-    activePipelineId: string | null
-  }
   let useAgentTabStore: agentTabStoreMod.useAgentTabStore
   let pipelineMock: PipelineMockState
   let seedSessions: (sessions: Session[]) => void
 
   beforeEach(async () => {
-    vi.resetModules()
-    localStorage.clear()
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-
-    const { queryClient } = await import('@/services/query/queryClient')
-    const { queryKeys } = await import('@/services/query/queryKeys')
-    queryClient.clear()
-    seedSessions = (sessions) => queryClient.setQueryData(queryKeys.sessions, sessions)
-
-    const mod = await import('@/stores/agentTabStore')
-    useAgentTabStore = mod.useAgentTabStore
-    const pm = await import('@/stores/pipelineMessageStore')
-    pipelineMock = (pm as unknown as { __pipelineMockState: PipelineMockState }).__pipelineMockState
-    pipelineMock.activatePipeline.mockClear()
-    pipelineMock.registerPipeline.mockClear()
-    pipelineMock.getMessages.mockClear()
-    pipelineMock.getMessages.mockImplementation(() => [])
-    pipelineMock.loadPipelineMessages.mockClear()
-    pipelineMock.loadPipelineMessages.mockImplementation(() => Promise.resolve({ ok: true as const }))
-    pipelineMock.pipelines = {}
-    pipelineMock.messagesByPipeline = {}
-    pipelineMock.activePipelineId = null
+    ;({ useAgentTabStore, pipelineMock, seedSessions } = await resetAgentTabEnv())
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
   })
+
+  /** 播种会话+主 Tab+子 Tab 并激活子 Tab，清空 pipeline mock 调用记录 */
+  function seedActiveSubTab() {
+    seedSessions([makeSession()])
+    const store = useAgentTabStore.getState()
+    store.initSessionTabs(SESSION_ID)
+    store.addTab(makeSubTabInput())
+    store.setActiveTab(SUB_TAB_ID)
+    pipelineMock.activatePipeline.mockClear()
+    pipelineMock.loadPipelineMessages.mockClear()
+  }
 
   it('closeTab 不存在的 Tab 与主 Tab 拒绝关闭：状态均不变', () => {
     seedSessions([makeSession()])
@@ -591,12 +517,7 @@ describe('AgentTabStore closeTab/switchToTab/setActiveTab 边界', () => {
   })
 
   it('closeTab 激活子 Tab 回落主 Tab：绑定正确时激活主管道并补拉空桶', () => {
-    seedSessions([makeSession()])
-    useAgentTabStore.getState().initSessionTabs(SESSION_ID)
-    useAgentTabStore.getState().addTab(makeSubTabInput())
-    useAgentTabStore.getState().setActiveTab(SUB_TAB_ID)
-    pipelineMock.activatePipeline.mockClear()
-    pipelineMock.loadPipelineMessages.mockClear()
+    seedActiveSubTab()
 
     useAgentTabStore.getState().closeTab(SUB_TAB_ID)
 
@@ -610,12 +531,7 @@ describe('AgentTabStore closeTab/switchToTab/setActiveTab 边界', () => {
   })
 
   it('closeTab 回落主 Tab：本地桶非空时不重复补拉', () => {
-    seedSessions([makeSession()])
-    useAgentTabStore.getState().initSessionTabs(SESSION_ID)
-    useAgentTabStore.getState().addTab(makeSubTabInput())
-    useAgentTabStore.getState().setActiveTab(SUB_TAB_ID)
-    pipelineMock.activatePipeline.mockClear()
-    pipelineMock.loadPipelineMessages.mockClear()
+    seedActiveSubTab()
     pipelineMock.messagesByPipeline[MAIN_PID] = [{ id: 'm-already' }]
 
     useAgentTabStore.getState().closeTab(SUB_TAB_ID)
@@ -677,15 +593,6 @@ describe('AgentTabStore closeTab/switchToTab/setActiveTab 边界', () => {
 })
 
 describe('AgentTabStore loadTabMessages 与管道映射', () => {
-  interface PipelineMockState {
-    activatePipeline: ReturnType<typeof vi.fn>
-    registerPipeline: ReturnType<typeof vi.fn>
-    loadPipelineMessages: ReturnType<typeof vi.fn>
-    getMessages: ReturnType<typeof vi.fn>
-    pipelines: Record<string, unknown>
-    messagesByPipeline: Record<string, unknown[]>
-    activePipelineId: string | null
-  }
   let useAgentTabStore: agentTabStoreMod.useAgentTabStore
   let pipelineMock: PipelineMockState
   let seedSessions: (sessions: Session[]) => void
@@ -700,31 +607,12 @@ describe('AgentTabStore loadTabMessages 与管道映射', () => {
   }
 
   beforeEach(async () => {
-    vi.resetModules()
-    localStorage.clear()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.spyOn(console, 'error').mockImplementation(() => {})
-
-    const { queryClient } = await import('@/services/query/queryClient')
-    const { queryKeys } = await import('@/services/query/queryKeys')
-    queryClient.clear()
-    seedSessions = (sessions) => queryClient.setQueryData(queryKeys.sessions, sessions)
-
-    const mod = await import('@/stores/agentTabStore')
-    useAgentTabStore = mod.useAgentTabStore
-    const pm = await import('@/stores/pipelineMessageStore')
-    pipelineMock = (pm as unknown as { __pipelineMockState: PipelineMockState }).__pipelineMockState
+    ;({ useAgentTabStore, pipelineMock, seedSessions } = await importAgentTabEnv())
     const loggerMod = await import('@/utils/logger')
     loggers = loggerMod.loggers
-    pipelineMock.activatePipeline.mockClear()
-    pipelineMock.registerPipeline.mockClear()
-    pipelineMock.getMessages.mockClear()
-    pipelineMock.getMessages.mockImplementation(() => [])
-    pipelineMock.loadPipelineMessages.mockClear()
-    pipelineMock.loadPipelineMessages.mockImplementation(() => Promise.resolve({ ok: true as const }))
-    pipelineMock.pipelines = {}
-    pipelineMock.messagesByPipeline = {}
-    pipelineMock.activePipelineId = null
+    clearPipelineMockState(pipelineMock)
   })
 
   afterEach(() => {

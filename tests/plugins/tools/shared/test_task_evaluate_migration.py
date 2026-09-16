@@ -485,11 +485,16 @@ class TestCriteriaFallbackMarked:
 
     @pytest.mark.asyncio
     async def test_auto_complete_no_criteria_direct_pass_marked(self, mod, monkeypatch):
-        """auto_complete：无 criteria 指标直接通过，完成 summary 如实标注来源。"""
+        """auto_complete：无 criteria 且无验证器参数的指标直接通过，summary 如实标注来源。
+
+        （file_check 带 path 属验证器参数，按 SWE 实证契约必须真跑——
+        ADR 2026-09-16-external-dataset-sourcing；直通面=无 criteria 且
+        无 command/path 的指标。）
+        """
         task = _make_task(
             metadata={
-                "evaluation_metric_ids": ["file_check"],
-                "acceptance_criteria": {"file_check": {"input_params": {"path": "src/a.py"}}},
+                "evaluation_metric_ids": ["semantic_check"],
+                "acceptance_criteria": {"semantic_check": {"input_params": {}}},
             }
         )
 

@@ -77,6 +77,14 @@ vi.mock('@/services/workspacePanelOpener', () => ({
   openWorkspacePanelByPath: mockOpenWorkspacePanel,
 }))
 
+// tokenLifecycle：仅替换 ensureFreshToken（发送守卫的自愈原语），其余导出保真。
+// 默认恢复失败（resolve null）——未显式设定的用例走「恢复失败」通知分支。
+const mockEnsureFreshToken = vi.hoisted(() => vi.fn(() => Promise.resolve(null)))
+vi.mock('@/services/auth/tokenLifecycle', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  ensureFreshToken: (...args: unknown[]) => mockEnsureFreshToken(...args),
+}))
+
 vi.mock('@lobehub/ui', () => ({}))
 vi.mock('@/components/layout/Sidebar', () => ({ Sidebar: () => null }))
 
@@ -404,6 +412,66 @@ describe('handleSendMessage', () => {
     expect(interactions.find((i) => i.requestId === 'req-a')?.status).toBe('responded')
     expect(interactions.find((i) => i.requestId === 'req-c')?.status).toBe('pending')
     expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('handleSendMessage 静默拒绝点显式化（BUG-28 第三刀）', () => {
+  // 真机取证（R69 + 第三刀分支模拟）：router 守卫 `!sid || !currentToken` 曾是
+  // 发送链唯一无通知的静默拒绝点——输入保留、无气泡、零通知、零内核痕迹，
+  // 用户视角 = 「点了没反应」。契约：拒绝必须显式；token 缺失先自愈
+  // （tokenLifecycle 唯一真值源：内存有效令牌直接取用/过期 refresh 轮换），
+  // 恢复成功回写 authStore 供用户重发过闸；会话缺失无自愈源，显式引导刷新。
+  function send(params: Record<string, unknown>): unknown {
+    return (chatProps as CapturedProps | null)?.onSendMessage?.(params as never)
+  }
+
+
+  it('无令牌且自动恢复成功：返回 false 不出站，回写恢复的令牌并通知重发', async () => {
+    await renderHomeWithSession()
+    mockEnsureFreshToken.mockResolvedValue('tok-renewed')
+    useAuthStore.setState({ token: null })
+    let result: unknown
+    await act(async () => {
+      result = send({ content: 'hi', pipelineId: 'p1' })
+    })
+    expect(result).toBe(false)
+    expect(mockWs.sendUserInput).not.toHaveBeenCalled()
+    // 自愈回写：tokenLifecycle 真值落 authStore，用户重发即过闸
+    await waitFor(() => expect(useAuthStore.getState().token).toBe('tok-renewed'))
+    expect(useNotificationStore.getState().notifications.some((n) => n.title === '登录态已恢复')).toBe(true)
+  })
+
+  it('无令牌且自动恢复失败：返回 false 不出站，显式通知重新登录', async () => {
+    await renderHomeWithSession()
+    mockEnsureFreshToken.mockResolvedValue(null)
+    useAuthStore.setState({ token: null })
+    let result: unknown
+    await act(async () => {
+      result = send({ content: 'hi', pipelineId: 'p1' })
+    })
+    expect(result).toBe(false)
+    expect(mockWs.sendUserInput).not.toHaveBeenCalled()
+    await waitFor(() =>
+      expect(
+        useNotificationStore.getState().notifications.some((n) => n.title === '发送未受理' && n.message.includes('重新登录')),
+      ).toBe(true),
+    )
+    // 恢复失败不得伪造令牌（诚实状态机）
+    expect(useAuthStore.getState().token).toBeNull()
+  })
+
+  it('无活跃会话：返回 false 不出站且显式通知引导刷新（不再静默）', async () => {
+    await renderHomeWithSession()
+    useSessionStore.setState({ activeSessionId: null })
+    let result: unknown
+    await act(async () => {
+      result = send({ content: 'hi', pipelineId: 'p1' })
+    })
+    expect(result).toBe(false)
+    expect(mockWs.sendUserInput).not.toHaveBeenCalled()
+    await waitFor(() =>
+      expect(useNotificationStore.getState().notifications.some((n) => n.title === '发送未受理')).toBe(true),
+    )
   })
 })
 

@@ -14,6 +14,7 @@
  * stream_end），断言最终 parts 的顺序与逻辑顺序一致。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { makeEventFactory } from './helpers/streamingEventFactory'
 import type * as handlersMod from '@/services/websocket/streaming/handlers'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 
@@ -45,19 +46,7 @@ const THREAD_ID = 'thread-thinking-order-001'
  * 构造后端 WS 事件信封（与内核透传一致：业务字段在 data 下）。
  * block 协议事件携带 index（块索引，text/reasoning/tool-call 共享递增序列）。
  */
-function makeEvent(eventType: string, data: Record<string, any>) {
-  return {
-    type: eventType,
-    data: {
-      pipeline_id: PIPELINE_ID,
-      message_id: MESSAGE_ID,
-      ...data,
-    },
-    source_type: 'system',
-    source_id: PIPELINE_ID,
-    timestamp: new Date().toISOString(),
-  }
-}
+const makeEvent = makeEventFactory(PIPELINE_ID, MESSAGE_ID)
 
 describe('思考过程渲染顺序：流式 reasoning + text 的 part 顺序', () => {
   let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore

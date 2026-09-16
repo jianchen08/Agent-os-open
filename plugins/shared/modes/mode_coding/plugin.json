@@ -1,0 +1,133 @@
+{
+  "id": "mode_coding",
+  "name": "Mode Coding",
+  "version": "1.1.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "description": "编码模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile），profile 随包内打包，供服务侧消费方（eval_harness 归因评测等）经内核服务调用获取",
+  "permissions": {},
+  "priority": 45,
+  "host_group": "light",
+  "capabilities": {
+    "tools": [],
+    "services": [
+      {
+        "name": "mode.describe",
+        "description": "返回编码模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode",
+            "name",
+            "chain",
+            "weights",
+            "budget",
+            "profile_path",
+            "panel_page_id"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "chain": {
+              "type": "object"
+            },
+            "weights": {
+              "type": "object"
+            },
+            "budget": {
+              "type": "object"
+            },
+            "profile_path": {
+              "type": "string"
+            },
+            "panel_page_id": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "mode.get_profile",
+        "description": "返回编码模式包内 profile.yaml 解析后的内容",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ]
+  },
+  "http_endpoints": [
+    {
+      "route_id": "mode_coding_panel_page",
+      "method": "GET",
+      "path": "/ext/mode_coding/page/coding-panel",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: 编码交付面板（插件自带 webview 页）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "coding_delivery",
+        "title": "编码交付",
+        "icon": "💻",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/coding_delivery",
+        "widget": "webview",
+        "props": {
+          "pluginId": "mode_coding",
+          "htmlPath": "/page/coding-panel",
+          "widgetId": "coding_delivery"
+        },
+        "order": 30,
+        "description": "编码模式面板：修复流水线/测试门/审批合并视图",
+        "mode": "coding"
+      }
+    ]
+  },
+  "ui_schema": {
+    "widgets": [
+      {
+        "id": "mode_opt_coding",
+        "type": "select-option",
+        "space": "chat-input",
+        "order": 10,
+        "props": {
+          "target": "task_mode",
+          "value": "coding",
+          "label": "编码",
+          "icon": "💻"
+        }
+      }
+    ]
+  }
+}

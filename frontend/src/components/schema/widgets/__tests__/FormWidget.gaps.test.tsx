@@ -10,7 +10,13 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { RjsfForm } from '@/services/schema/RjsfForm'
+import { useSessionStore } from '@/stores/sessionStore'
 import { FormWidget } from '../FormWidget'
+
+const { useSessionsQueryMock } = vi.hoisted(() => ({ useSessionsQueryMock: vi.fn() }))
+vi.mock('@/hooks/queries/useSessionsQuery', () => ({
+  useSessionsQuery: useSessionsQueryMock,
+}))
 
 const apiGet = vi.fn()
 const apiPost = vi.fn()
@@ -51,6 +57,8 @@ const textField = (name: string, label: string) =>
 beforeEach(() => {
   apiGet.mockReset()
   apiRequest.mockReset()
+  useSessionsQueryMock.mockReturnValue({ data: [] })
+  useSessionStore.setState({ activeSessionId: null })
 })
 
 describe('G1：反馈文案/成功动作声明化', () => {
@@ -132,9 +140,10 @@ describe('G1：反馈文案/成功动作声明化', () => {
 describe('G3：readbackUri 回读当前值（权限模式选择器）', () => {
   it('挂载时 GET 回读并刷新选择器显示；提交成功后再次回读', async () => {
     // 顺序：①挂载回读 → mode=bypass ②POST 提交成功 ③提交后回读 → mode=default
+    // （显式选择过 → explicit=true，回读值才回填显示）
     apiGet
-      .mockResolvedValueOnce({ data: { mode: 'bypass' } })
-      .mockResolvedValueOnce({ data: { mode: 'default' } })
+      .mockResolvedValueOnce({ data: { mode: 'bypass', explicit: true } })
+      .mockResolvedValueOnce({ data: { mode: 'default', explicit: true } })
     apiPost.mockResolvedValue({ data: { switched: true } })
 
     render(
@@ -220,6 +229,97 @@ describe('G4：紧凑选择器触发器自标识（BUG-6 回归）', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: '权限模式：默认（命中规则才确认）' })).toBeInTheDocument(),
     )
+  })
+})
+
+describe('隔离会话权限档如实显示（免审批默认 + 显式覆盖）', () => {
+  // 语义（用户裁定 2026-09-15）：隔离/worktree 会话未显式选择权限档时后端
+  // 默认完全免审批（explicit=false 回读），选择器必须显示该生效默认；
+  // 显式选择任一档（explicit=true 回读）后显示所选档。
+  const permissionField = {
+    name: 'mode',
+    type: 'select' as const,
+    label: '权限模式',
+    options: [
+      { label: '默认（命中规则才确认）', value: 'default' },
+      { label: '接受编辑（文件自动）', value: 'accept_edits' },
+    ],
+  }
+
+  const renderSelector = () =>
+    render(
+      <FormWidget
+        fields={[permissionField]}
+        endpoint="/ext/pipeline_security_check/permission_mode"
+        readbackUri="/ext/pipeline_security_check/permission_mode"
+      />,
+    )
+
+  const openMenu = async (trigger: HTMLElement) => {
+    fireEvent.pointerDown(trigger)
+    fireEvent.pointerUp(trigger)
+    fireEvent.click(trigger)
+  }
+
+  it('隔离会话未显式选择（explicit=false 回读）→ 显示「免审批（隔离默认）」', async () => {
+    useSessionsQueryMock.mockReturnValue({
+      data: [{ id: 's-iso', isolationMode: 'isolated', workspaceMode: 'plain' }],
+    })
+    useSessionStore.setState({ activeSessionId: 's-iso' })
+    apiGet.mockResolvedValue({ data: { mode: 'default', explicit: false } })
+
+    renderSelector()
+    const trigger = await screen.findByTestId('compact-select-trigger')
+    await waitFor(() => expect(trigger.textContent).toContain('免审批（隔离默认）'))
+    expect(
+      screen.getByRole('button', { name: '权限模式：免审批（隔离默认）' }),
+    ).toBeInTheDocument()
+    // 未显式选择 = 无档位生效勾选（免审批不是四档之一，是隔离默认态）
+    await openMenu(trigger)
+    const items = await screen.findAllByRole('menuitem')
+    const checked = items.filter((el) => el.querySelector('svg'))
+    expect(checked).toEqual([])
+  })
+
+  it('worktree 会话未显式选择 → 同样显示「免审批（隔离默认）」', async () => {
+    useSessionsQueryMock.mockReturnValue({
+      data: [{ id: 's-wt', isolationMode: null, workspaceMode: 'worktree' }],
+    })
+    useSessionStore.setState({ activeSessionId: 's-wt' })
+    apiGet.mockResolvedValue({ data: { mode: 'default', explicit: false } })
+
+    renderSelector()
+    const trigger = await screen.findByTestId('compact-select-trigger')
+    await waitFor(() => expect(trigger.textContent).toContain('免审批（隔离默认）'))
+  })
+
+  it('非隔离会话未显式选择 → 显示默认档（生效语义与显示一致）', async () => {
+    useSessionsQueryMock.mockReturnValue({
+      data: [{ id: 's-ni', isolationMode: 'non_isolated', workspaceMode: 'plain' }],
+    })
+    useSessionStore.setState({ activeSessionId: 's-ni' })
+    apiGet.mockResolvedValue({ data: { mode: 'default', explicit: false } })
+
+    renderSelector()
+    const trigger = await screen.findByTestId('compact-select-trigger')
+    await waitFor(() =>
+      expect(trigger.textContent).toContain('默认（命中规则才确认）'),
+    )
+  })
+
+  it('隔离会话显式选择（explicit=true 回读）→ 显示所选档而非免审批', async () => {
+    useSessionsQueryMock.mockReturnValue({
+      data: [{ id: 's-iso2', isolationMode: 'isolated', workspaceMode: null }],
+    })
+    useSessionStore.setState({ activeSessionId: 's-iso2' })
+    apiGet.mockResolvedValue({ data: { mode: 'accept_edits', explicit: true } })
+
+    renderSelector()
+    const trigger = await screen.findByTestId('compact-select-trigger')
+    await waitFor(() =>
+      expect(trigger.textContent).toContain('接受编辑（文件自动）'),
+    )
+    expect(trigger.textContent).not.toContain('免审批')
   })
 })
 

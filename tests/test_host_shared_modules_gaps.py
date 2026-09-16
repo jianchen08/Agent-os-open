@@ -1401,3 +1401,134 @@ class TestRemoveProjectFolderSignatureDispatch:
 
         assert retried == [str(ro)], "excinfo[1] 必须作为 path 参数传给重试函数"
         assert not victim.exists()
+
+
+# ═══════════════════ 嵌套子目录模块的 sys.path 自举行 ═══════════════════
+
+
+class TestNestedModuleBootstrap:
+    """分组子目录模块顶部的 sys.path 自举行（coverage 靶行，file-path 装载语境）。
+
+    与 TestBareNameBootstrap 同型，但靶模块嵌在子目录、自举靶不同：
+    - system/scene/persistence.py:25、system/review/models.py:20、
+      system/artifacts/models.py:22 —— 上溯两级自举 plugins/shared
+      （模块内 time_iso/tenant_data 等共享裸模块 import 的路径前提）；
+    - pipeline/input/prompt_build/server.py:21 —— 自举靶 = bootstrap 返回的
+      group_root（插件目录父级 pipeline/input/；bootstrap 本身只注入插件
+      目录与共享根、组根只返回不注入，见 ADR 2026-09-08-plugin-bootstrap-sink
+      决策 1，兄弟插件裸名导入靠这一行补位）。
+
+    真实输入下仅「靶根缺失」初态可达（经文件路径 spec 装载——装载本身不依赖
+    sys.path——且靶根此前不在 sys.path）。逐例先按 normcase 摘除全部靶根
+    条目，再以唯一模块名 fresh import，断言装载完成后靶根回到 sys.path
+    （normcase 比对）且模块内裸名 import 可用；finally 恢复 sys.path
+    （monkeypatch 整表替换自动还原）与 sys.modules（预逐出裸名回填、装载期
+    新增的仓内模块逐出）。
+    """
+
+    _SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+    _PIPELINE_INPUT_DIR = _SHARED_DIR / "pipeline" / "input"
+    _SHARED_PREFIX = os.path.normcase(os.path.abspath(str(_SHARED_DIR))) + os.sep
+
+    @classmethod
+    def _restore_modules_snapshot(cls, modules_before: dict[str, Any]) -> None:
+        """sys.modules 恢复：新增的仓内模块（plugins/shared 树下）逐出；
+        被预逐出的既有条目回填。仓外新增（SDK/第三方/stdlib 缓存）保留。
+
+        归属探测必须在任何逐出之前完成（此时父子模块都在场——命名空间包
+        ``__path__`` 是懒重算的 _NamespacePath，父包摘除后再触碰会按模块名
+        回查 sys.modules 而炸 KeyError）；逐出按子模块先于父包的序进行。
+        """
+        new_names = [n for n in sys.modules if n not in modules_before]
+        project_owned: list[str] = []
+        for name in new_names:
+            mod = sys.modules.get(name)
+            origin = getattr(mod, "__file__", None)
+            if not origin:
+                origin = next(iter(getattr(mod, "__path__", ()) or ()), None)
+            if origin and os.path.normcase(os.path.abspath(origin)).startswith(
+                cls._SHARED_PREFIX
+            ):
+                project_owned.append(name)
+        for name in sorted(project_owned, key=lambda n: n.count("."), reverse=True):
+            sys.modules.pop(name, None)
+        for name, module in modules_before.items():
+            if name not in sys.modules:
+                sys.modules[name] = module
+
+    @pytest.mark.parametrize(
+        ("rel_file", "module_name", "target", "precondition_dir", "sibling_attrs"),
+        [
+            pytest.param(
+                "system/scene/persistence.py",
+                "boot_probe_scene_persistence",
+                _SHARED_DIR,
+                _SYSTEM_DIR,  # 自举行之前 scene.models 裸名 import 的组根前提
+                ("ScenePersistence", "tenant_data_root"),
+                id="scene-persistence",
+            ),
+            pytest.param(
+                "system/review/models.py",
+                "boot_probe_review_models",
+                _SHARED_DIR,
+                None,
+                ("ReviewRequest", "_now_iso"),
+                id="review-models",
+            ),
+            pytest.param(
+                "system/artifacts/models.py",
+                "boot_probe_artifacts_models",
+                _SHARED_DIR,
+                None,
+                ("Artifact", "_now_iso"),
+                id="artifacts-models",
+            ),
+            pytest.param(
+                "pipeline/input/prompt_build/server.py",
+                "boot_probe_prompt_build_server",
+                _PIPELINE_INPUT_DIR,
+                None,
+                ("plugin", "PromptBuildPlugin"),
+                id="prompt-build-server",
+            ),
+        ],
+    )
+    def test_target_root_reinserted_when_absent_before_file_path_load(
+        self,
+        rel_file: str,
+        module_name: str,
+        target: Path,
+        precondition_dir: Path | None,
+        sibling_attrs: tuple[str, ...],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        module_path = _SHARED_DIR / rel_file
+        assert module_path.is_file(), "靶模块布局漂移：请核对覆盖缺口行归属"
+        norm = os.path.normcase
+        target_key = norm(str(target))
+
+        desired_path = list(sys.path)
+        if precondition_dir is not None:
+            desired_path.insert(0, str(precondition_dir))
+        desired_path = [p for p in desired_path if norm(p) != target_key]
+        monkeypatch.setattr(sys, "path", desired_path)
+        assert target_key not in {norm(p) for p in sys.path}, "前置：靶根已彻底摘除"
+
+        modules_before = dict(sys.modules)
+        sys.modules.pop("plugin", None)  # 裸名槽位防串扰（finally 回填）
+
+        spec = importlib.util.spec_from_file_location(module_name, str(module_path))
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = mod
+        try:
+            spec.loader.exec_module(mod)  # 装载期执行自举行
+
+            assert target_key in {norm(p) for p in sys.path}, (
+                "模块导入必须把靶根推回 sys.path"
+            )
+            for attr in sibling_attrs:
+                assert hasattr(mod, attr), f"自举行后的裸名 import 必须可用（缺 {attr}）"
+        finally:
+            sys.modules.pop(module_name, None)
+            self._restore_modules_snapshot(modules_before)

@@ -84,11 +84,14 @@ def tool_module():
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_injections(tool_module):
+def _reset_module_injections(tool_module, tmp_path_factory, monkeypatch):
     """模块级注入点（chat sender / registry lookup / state reader）用后复位。
 
     全部是 tool 模块实例上的全局钩子，不复位会跨用例顺序耦合。
+    另：用户根钉到空 tmp——mode 键磁盘回退的出厂命中断言不得依赖机器真实
+    播种副本（随内核生命周期演进）。
     """
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path_factory.mktemp("user-root")))
     yield
     tool_module._chat_sender = None
     tool_module._agent_registry_lookup = None
@@ -171,7 +174,9 @@ def base_inputs(**overrides):
         "goal_title": "测试任务",
         "goal_description": "分支补测",
         "target_type": "agent",
-        "target_id": "code_writer",
+        # P3 迁移后编码执行者驻 mode_coding 包（真实磁盘可解析，完备性身份
+        # 字段经模式包键回退链取得）
+        "target_id": "mode_coding/code_writer",
         "parent_agent_level": 2,
     }
     inputs.update(overrides)
@@ -834,17 +839,63 @@ async def test_registry_service_miss_falls_back_to_disk(tool_module):
 
 
 @pytest.mark.asyncio
-async def test_disk_lookup_resolves_agent_by_config_id(tool_module):
-    """文件名不含 target_id 但 config_id 匹配（code_writer.yaml = code_writer_agent）
-    → 磁盘 config_id 扫描定位成功，L3 目标对 L2 提交者放行并派发。"""
+async def test_disk_lookup_resolves_mode_agent_key_real_dispatch(tool_module):
+    """模式命名空间键全链派发：mode_coding/code_writer（出厂包内 L3 执行者）
+    → 磁盘回退解析包内 yaml，L3 目标对 L2 提交者放行并按新键派发。"""
     tool, captured = make_tool(tool_module)
     restore_real_target_validation(tool)
     # 不注入 registry 钩子 → 磁盘回退；task_id 注入父链（L2 不能建根任务）
     result = await tool.execute(
-        base_inputs(parent_agent_level=2, target_id="code_writer_agent", task_id="ctx-task-1")
+        base_inputs(parent_agent_level=2, target_id="mode_coding/code_writer", task_id="ctx-task-1")
     )
     assert result.success, result.error
-    assert captured["dispatch"]["agent_id"] == "code_writer_agent"
+    assert captured["dispatch"]["agent_id"] == "mode_coding/code_writer"
+
+
+@pytest.mark.asyncio
+async def test_disk_lookup_dispatches_mode_orchestrator_from_main(tool_module):
+    """模式命名空间键全链派发：mode_coding/programming_orchestrator_agent_v2
+    （出厂包内 L2 编排者）作为 main（L1）直接下级派发成功。"""
+    tool, captured = make_tool(tool_module)
+    restore_real_target_validation(tool)
+    # main（L1）建根任务：不传 task_id（父链参数为 L2+ 专属）
+    result = await tool.execute(
+        base_inputs(
+            parent_agent_level=1,
+            target_id="mode_coding/programming_orchestrator_agent_v2",
+        )
+    )
+    assert result.success, result.error
+    assert captured["dispatch"]["agent_id"] == "mode_coding/programming_orchestrator_agent_v2"
+
+
+@pytest.mark.asyncio
+async def test_disk_lookup_dispatches_mode_godot_expert_real_dispatch(tool_module):
+    """模式命名空间键全链派发（mode_godot 包，P3-⑤ 立项）：mode_godot/godot_expert
+    （出厂包内 L3 执行者）→ 磁盘回退解析包内 yaml，L2 提交者派单成功。"""
+    tool, captured = make_tool(tool_module)
+    restore_real_target_validation(tool)
+    result = await tool.execute(
+        base_inputs(parent_agent_level=2, target_id="mode_godot/godot_expert", task_id="ctx-task-1")
+    )
+    assert result.success, result.error
+    assert captured["dispatch"]["agent_id"] == "mode_godot/godot_expert"
+
+
+@pytest.mark.asyncio
+async def test_disk_lookup_dispatches_mode_godot_orchestrator_from_main(tool_module):
+    """模式命名空间键全链派发（mode_godot 包）：mode_godot/godot_orchestrator_agent
+    （出厂包内 L2 执行型编排者）作为 main（L1）直接下级派发成功。"""
+    tool, captured = make_tool(tool_module)
+    restore_real_target_validation(tool)
+    result = await tool.execute(
+        base_inputs(
+            parent_agent_level=1,
+            target_id="mode_godot/godot_orchestrator_agent",
+        )
+    )
+    assert result.success, result.error
+    assert captured["dispatch"]["agent_id"] == "mode_godot/godot_orchestrator_agent"
 
 
 def test_disk_lookup_skips_corrupt_yaml_during_config_id_scan(tool_module, monkeypatch):
@@ -855,17 +906,75 @@ def test_disk_lookup_skips_corrupt_yaml_during_config_id_scan(tool_module, monke
 
     def selective_safe_load(stream):
         name = str(getattr(stream, "name", "")).replace("\\", "/")
-        if name.endswith("executor/code/code_writer.yaml"):
+        if name.endswith("system/evolution_agent.yaml"):
             raise real_yaml.YAMLError("模拟配置损坏")
         return real_safe_load(stream)
 
     monkeypatch.setattr(real_yaml, "safe_load", selective_safe_load)
     found, level_str, level, is_active, corrupt_path = (
-        tool_module.TaskSubmitTool._lookup_agent_from_disk("code_writer_agent")
+        tool_module.TaskSubmitTool._lookup_agent_from_disk("evolution")
     )
     # 唯一 config_id 命中的文件在扫描期损坏被跳过 → 与"不存在"同型返回（无损坏归因路径）
     assert found is False
     assert corrupt_path == ""
+
+
+@pytest.mark.parametrize(
+    ("target_id", "yaml_rel", "expected_level"),
+    [
+        # 扁平布局：文件名与 id 无关、内容 config_id 命中
+        ("cfgscan_target_a", "writer_settings.yaml", "L3"),
+        # 深层嵌套 + 不同 level 值（防对单一文件名/层级硬编码）
+        ("cfgscan_target_b", "nested/deep/inner_probe.yaml", "L2"),
+    ],
+)
+def test_disk_lookup_hits_by_config_id_content_when_filename_misses(
+    tool_module, monkeypatch, tmp_path, target_id, yaml_rel, expected_level
+):
+    """config_id 兜底扫描（靶行 tool.py 2315-2316：命中赋值 + break）。
+
+    文件名 rglob 未命中（无 `{target_id}.yaml`）→ 遍历全部 yaml 逐个
+    safe_load，按内容 `config_id == target_id` 命中并停扫。config_dir 由模块
+    `__file__` 上溯五级推导，把 `__file__` 注入 tmp 假树后对真实落盘 yaml 走
+    真扫描（文件 IO 为真实依赖，仅定位锚点是注入的）。
+    """
+    config_dir = tmp_path / "config" / "agents"
+    yaml_file = config_dir / yaml_rel
+    yaml_file.parent.mkdir(parents=True)
+    yaml_file.write_text(
+        f"config_id: {target_id}\nlevel: {expected_level}\nis_active: true\n",
+        encoding="utf-8",
+    )
+    # 对照：文件名与内容都不命中的普通 yaml，不得被误收
+    (config_dir / "plain_no_config_id.yaml").write_text("level: L1\n", encoding="utf-8")
+
+    fake_tool_py = tmp_path / "plugins" / "shared" / "tools" / "task_submit" / "tool.py"
+    monkeypatch.setattr(tool_module, "__file__", str(fake_tool_py))
+
+    config, corrupt_path = tool_module.TaskSubmitTool._load_agent_yaml_dict(target_id)
+
+    assert corrupt_path == "", "按内容命中是健康路径，不得带损坏归因"
+    assert isinstance(config, dict)
+    assert config.get("config_id") == target_id, "必须按内容命中目标 yaml，而非旁落普通文件"
+    assert config.get("level") == expected_level
+
+
+def test_disk_lookup_resolves_mode_agent_key(tool_module, monkeypatch, tmp_path):
+    """两级解析第二级：config/agents 未命中 → 模式包 agents/<stem>.yaml。
+
+    mode_X/<stem> 键经 mode_keys 双根解析（用户副本优先），读出 level/is_active
+    供派发层级闸门判定（模式体系设计稿 §3.3）。
+    """
+    pkg = tmp_path / "plugins" / "modes" / "mode_ghostmode"
+    (pkg / "agents").mkdir(parents=True)
+    (pkg / "plugin.json").write_text("{}", encoding="utf-8")
+    (pkg / "agents" / "exec1.yaml").write_text("level: L3\n", encoding="utf-8")
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
+    found, level_str, level, is_active, corrupt_path = (
+        tool_module.TaskSubmitTool._lookup_agent_from_disk("mode_ghostmode/exec1")
+    )
+    assert found is True
+    assert (level_str, level, is_active, corrupt_path) == ("L3", 3, True, "")
 
 
 # ── 派发编排隔离语义 ─────────────────────────────────────────

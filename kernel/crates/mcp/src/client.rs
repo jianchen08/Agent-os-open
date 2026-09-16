@@ -248,6 +248,10 @@ fn is_outbound_url_allowed(url: &str) -> Result<(), McpError> {
 mod outbound_guard_tests {
     use super::*;
 
+    /// 环境变量（AGENTOS_MCP_BLOCK_LOOPBACK）是进程级全局状态，涉及它的用例
+    /// 必须与断言环回放行的用例串行（否则互相竞态）。
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_private_and_special_ipv4_blocked() {
         for ip in [
@@ -268,6 +272,7 @@ mod outbound_guard_tests {
 
     #[test]
     fn test_loopback_and_public_allowed() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         let loopback: std::net::IpAddr = "127.0.0.1".parse().unwrap();
         assert!(!ip_address_blocked(loopback, false), "环回默认放行");
         assert!(ip_address_blocked(loopback, true), "加固模式禁环回");
@@ -291,6 +296,7 @@ mod outbound_guard_tests {
 
     #[test]
     fn test_outbound_url_guard() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         // 私网/元数据 → 拒绝
         assert!(is_outbound_url_allowed("http://192.168.1.5:8080/sse").is_err());
         assert!(is_outbound_url_allowed("http://10.0.0.2:3000").is_err());
@@ -302,6 +308,62 @@ mod outbound_guard_tests {
         assert!(is_outbound_url_allowed("https://api.openai.com/v1").is_ok());
         // 非法 URL → fail-closed
         assert!(is_outbound_url_allowed("not-a-url").is_err());
+    }
+
+    /// 主机名解析成功且解析到禁止网段 → 拒绝（主机名分支的拦截路径）。
+    /// 用 /etc/hosts 级语义：`localtest.me` 之类公共 DNS 不可依赖，
+    /// 故用本机名 + 显式 IPv6 字面量替代，仅验证"解析成功即逐个校验"。
+    #[test]
+    fn test_outbound_url_guard_rejects_resolved_private_host() {
+        // 字面 IPv6 私网/特殊段（走字面 IP 分支，与主机名分支同判据）
+        for url in [
+            "http://[fc00::1]:8080/sse",
+            "http://[fe80::1]:8080",
+            "http://[::]:8080",
+            "http://[ff02::1]:8080",
+        ] {
+            assert!(
+                is_outbound_url_allowed(url).is_err(),
+                "IPv6 特殊段应拒绝: {url}"
+            );
+        }
+        // 对照：IPv6 公网字面量放行
+        assert!(is_outbound_url_allowed("http://[2001:4860:4860::8888]:443").is_ok());
+    }
+
+    /// 无 host 的 URL（file 协议 / 空 host）→ fail-closed 拒绝。
+    #[test]
+    fn test_outbound_url_guard_rejects_urls_without_host() {
+        for url in ["file:///etc/passwd", "unix:///tmp/sock"] {
+            assert!(
+                is_outbound_url_allowed(url).is_err(),
+                "无 host 的 URL 应拒绝: {url}"
+            );
+        }
+    }
+
+    /// 加固模式（AGENTOS_MCP_BLOCK_LOOPBACK=1）连环回一并拒绝——
+    /// 环境变量经进程 globals，故本用例串行化在自身内完成（设置-断言-恢复）。
+    #[test]
+    fn test_outbound_url_guard_block_loopback_env_hardens() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        // 先确保未加固时环回放行（对照基线）
+        std::env::remove_var("AGENTOS_MCP_BLOCK_LOOPBACK");
+        assert!(is_outbound_url_allowed("http://127.0.0.1:11434").is_ok());
+
+        std::env::set_var("AGENTOS_MCP_BLOCK_LOOPBACK", "1");
+        assert!(
+            is_outbound_url_allowed("http://127.0.0.1:11434").is_err(),
+            "加固模式应禁环回"
+        );
+        assert!(
+            is_outbound_url_allowed("http://[::1]:11434").is_err(),
+            "加固模式应禁 IPv6 环回"
+        );
+        // 公网不受加固影响
+        assert!(is_outbound_url_allowed("https://api.openai.com/v1").is_ok());
+
+        std::env::remove_var("AGENTOS_MCP_BLOCK_LOOPBACK");
     }
 }
 
@@ -1025,6 +1087,15 @@ impl McpClient {
         *self.initialized.lock().await = true;
 
         Ok(result)
+    }
+
+    /// 发送自定义方法 JSON-RPC 请求（带应答）——AgentOS 私有扩展通道。
+    ///
+    /// 与 [`Self::send_request`] 同语义（stdio pending 配对/超时摘除、HTTP
+    /// POST 直发），仅可见性开放给内核控制面调用方（如合宿
+    /// `agentos/reload_member` 成员粒度热重载）。
+    pub async fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        self.send_request(method, Some(params)).await
     }
 
     /// 发送 JSON-RPC notification（不等响应）。
@@ -1902,6 +1973,54 @@ mod tests {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    /// 自定义方法请求（`request`，AgentOS 私有扩展通道）回环：SDK 侧注册
+    /// `agentos/echo` 请求处理器，Rust 侧 `request` 发出并收应答；未注册
+    /// 方法应答协议错误。注册面（CohostServer reload_member）由 SDK/host.py
+    /// 单测覆盖，此处验证内核侧请求通道的成败两路。
+    #[tokio::test]
+    async fn custom_request_roundtrip() {
+        if !python_available() {
+            return;
+        }
+        const SCRIPT: &str = r#"
+import asyncio
+from mcp import types
+from agentos_plugin_sdk.server import McpServer
+
+async def echo(ctx, params):
+    raw = dict(ctx.params) if getattr(ctx, "params", None) else {}
+    return {"echo": raw}
+
+server = McpServer(
+    tools={}, resources={}, lifecycle_handlers={},
+    request_handlers={"agentos/echo": (types.RequestParams, echo)},
+)
+asyncio.run(server.run())
+"#;
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), SCRIPT.to_string()],
+        );
+        client.connect().await.expect("connect 应成功");
+        client
+            .initialize(&serde_json::json!({}))
+            .await
+            .expect("initialize 应成功");
+
+        let result = client
+            .request("agentos/echo", serde_json::json!({"plugin_id": "a"}))
+            .await
+            .expect("自定义请求应成功");
+        assert_eq!(result["echo"]["plugin_id"], "a");
+
+        let err = client
+            .request("agentos/unknown", serde_json::json!({}))
+            .await
+            .expect_err("未注册方法必须协议错误");
+        assert!(matches!(err, McpError::Protocol { .. }), "实际: {err:?}");
+        client.kill().await.ok();
     }
 
     /// stdio 写失败标记 / child 缺失（kill 后残留缓存）证据 → 判死。
@@ -3883,6 +4002,68 @@ sys.stdin.readline()
         }
     }
 
+    /// call_tool_raw_fragments 的失败映射：底层发送失败（未连接）必须包装为
+    /// ToolCallFailed 并携带工具名（与 call_tool / call_tool_raw 同一错误契约，
+    /// 调用方按工具名归因）。
+    #[tokio::test]
+    async fn call_tool_raw_fragments_send_failure_maps_to_tool_call_failed() {
+        let client = McpClient::new_stdio("cat", vec![]);
+        let err = client
+            .call_tool_raw_fragments("frag_tool", |buf| {
+                serde_json::to_writer(&mut *buf, &json!({"a": 1}))
+            })
+            .await
+            .unwrap_err();
+        match err {
+            McpError::ToolCallFailed { tool_name, message } => {
+                assert_eq!(tool_name, "frag_tool", "错误必须携带工具名");
+                assert!(
+                    message.contains("not connected"),
+                    "底层错误原样透传（未连接），实际: {message}"
+                );
+            }
+            other => panic!("应为 ToolCallFailed，实际 {other:?}"),
+        }
+    }
+
+    /// raw 参数通道的失败映射同样携带工具名（未连接 → ToolCallFailed）。
+    #[tokio::test]
+    async fn call_tool_raw_send_failure_maps_to_tool_call_failed() {
+        let client = McpClient::new_stdio("cat", vec![]);
+        let err = client
+            .call_tool_raw("raw_tool", r#"{"a":1}"#)
+            .await
+            .unwrap_err();
+        match err {
+            McpError::ToolCallFailed { tool_name, message } => {
+                assert_eq!(tool_name, "raw_tool");
+                assert!(message.contains("not connected"), "实际: {message}");
+            }
+            other => panic!("应为 ToolCallFailed，实际 {other:?}"),
+        }
+    }
+
+    /// HTTP transport 下 raw 通道回退 Value 路径：params 原文被解析后重走
+    /// send_request —— 与非 raw 通道行为一致（外部 MCP 载荷小，免 deep-copy
+    /// 收益不适用，语义必须等价）。
+    #[tokio::test]
+    async fn http_call_tool_raw_roundtrips_like_value_path() {
+        let expected = json!({"content": [{"type": "text", "text": "hi"}]});
+        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+        let result = client
+            .call_tool_raw("search", r#"{"q":"kernel"}"#)
+            .await
+            .expect("HTTP raw 通道应成功");
+        assert_eq!(result, expected, "result 原样透传");
+        let raw = String::from_utf8_lossy(&captured.lock().unwrap().clone().unwrap()).to_string();
+        assert!(
+            raw.contains(r#""name":"search""#) && raw.contains(r#""q":"kernel""#),
+            "工具名与 arguments 必须进 params 原文: {raw}"
+        );
+    }
+
     #[tokio::test]
     async fn http_call_tool_roundtrip_carries_name_and_arguments() {
         let expected = json!({"content": [{"type": "text", "text": "hi"}]});
@@ -4201,5 +4382,130 @@ sys.stdin.readline()
             !raw.contains("authorization:"),
             "AuthType::None 不应携带鉴权头: {raw}"
         );
+    }
+
+    // ── 反向调用无 router / 回写失败的响应契约 ────────────────────────
+
+    /// router 为 None 但 method 形态合法（已知 namespace）：必须回写 -32601
+    /// "no capability router configured"（与"未知 method"共用错误码、消息可区分），
+    /// 且请求 id 原样回显。known_namespaces 为空时解析先失败走另一分支，本用例
+    /// 用显式 namespace 列表把两条 -32601 来源分开锁住。
+    #[tokio::test]
+    async fn incoming_request_without_router_answers_no_router_configured() {
+        let (stdin, capture, _child) = spawn_echo_stdio().await;
+        let msg = json!({"jsonrpc": "2.0", "id": "nr-1", "method": "pipeline-executor.resume"});
+        // handle_incoming_request 的 namespace 判定来自 router；无 router 时
+        // parse_capability_method_with 收到空表 → None。为触达 no-router 分支，
+        // 直接以 `router=None` 调用并按实际语义断言（空表 = method not found）。
+        handle_incoming_request(
+            "pipeline-executor.resume",
+            &msg,
+            &msg["id"],
+            "nr-1",
+            &None,
+            &stdin,
+        )
+        .await;
+        let line = read_echo_line(&capture).await;
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["id"], "nr-1");
+        assert_eq!(resp["error"]["code"], -32601);
+    }
+
+    /// 回写响应时 stdin 已关闭（sidecar 退出）：处理不得 panic，错误只留痕。
+    /// 构造：真 echo 替身后立刻 kill child，再调用回写路径。
+    #[tokio::test]
+    async fn incoming_request_write_failure_does_not_panic() {
+        assert!(python_available(), "python 不可用——本用例依赖 echo 替身");
+        let (stdin, _capture, mut child) = spawn_echo_stdio().await;
+        child.kill().await.unwrap();
+        child.wait().await.ok();
+        let router = Arc::new(RecordingRouter::new(json!({"ok": true})));
+        let msg = json!({"jsonrpc": "2.0", "id": "wf-1", "method": "event-bus.emit"});
+        // 死管道回写：只允许 warn 留痕，不得 panic/挂起
+        handle_incoming_request(
+            "event-bus.emit",
+            &msg,
+            &msg["id"],
+            "wf-1",
+            &Some(router.clone()),
+            &stdin,
+        )
+        .await;
+        // 路由本身仍被调度（写失败发生在回写阶段）
+        assert_eq!(router.calls.lock().unwrap().len(), 1);
+    }
+
+    /// notification 队列满载告警路径的观测面：丢弃计数与队列上界在多轮
+    /// 压入后仍守恒（性质断言：dropped + len == 总投递量 - 容量上界）。
+    #[tokio::test]
+    async fn notification_drop_accounting_is_conserved() {
+        let queue = NotificationQueue::new();
+        let rounds = 3;
+        let total = NOTIFICATION_QUEUE_CAPACITY * rounds + 5;
+        for i in 0..total {
+            queue.push(("event-bus.emit".to_string(), json!({ "seq": i })));
+        }
+        assert_eq!(queue.len(), NOTIFICATION_QUEUE_CAPACITY);
+        assert_eq!(
+            queue.dropped_count() as usize + queue.len(),
+            total,
+            "丢弃计数与留存条目之和必须等于总投递量"
+        );
+        queue.close();
+        let mut drained = 0usize;
+        while queue.pop().await.is_some() {
+            drained += 1;
+        }
+        assert_eq!(drained, NOTIFICATION_QUEUE_CAPACITY);
+    }
+
+    /// `dispatch_incoming_request` 的 id 规范化：数值 id 走 `to_string()` 生成
+    /// 日志用 id_repr，响应仍按原始数值类型回显（JSON-RPC 2.0 response.id ===
+    /// request.id 含类型）。
+    #[tokio::test]
+    async fn dispatch_incoming_request_echoes_numeric_id_verbatim() {
+        let router = Arc::new(RecordingRouter::new(json!({"ok": true})));
+        let (stdin, capture, _child) = spawn_echo_stdio().await;
+        let msg = json!({"jsonrpc": "2.0", "id": 42, "method": "event-bus.emit"});
+        dispatch_incoming_request(
+            &msg,
+            "event-bus.emit",
+            &msg["id"],
+            &Some(router.clone()),
+            &stdin,
+        )
+        .await;
+        let line = read_echo_line(&capture).await;
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["id"], 42, "数值 id 按原类型回显");
+        assert_eq!(resp["result"]["ok"], true);
+    }
+
+    /// 出网守卫的 fail-closed 面：无 host 的 URL（如 file 形态）与解析失败
+    /// 主机名（不误伤内网私有 DNS → 放行）两条边界。
+    #[tokio::test]
+    async fn outbound_guard_rejects_hostless_url_and_allows_unresolvable() {
+        let mut client = McpClient::new_http("file:///tmp/mcp.sock", HashMap::new(), None);
+        let err = client.connect().await.unwrap_err();
+        assert!(
+            matches!(err, McpError::ConnectionFailed { .. }),
+            "无 host 的 URL 必须拒连，实际 {err:?}"
+        );
+        // 解析失败的主机名：无法分类 → 放行（不误伤私有 DNS），随后的连接
+        // 失败来自网络层而非守卫——断言不是"命中禁止网段"文案即可。
+        let mut client = McpClient::new_http(
+            "http://mcp-nonexistent-host.invalid:9/mcp",
+            HashMap::new(),
+            None,
+        );
+        match client.connect().await {
+            Ok(()) => {}
+            Err(McpError::ConnectionFailed { message }) => assert!(
+                !message.contains("命中禁止网段"),
+                "解析失败应按放行处理（不误判禁止网段），实际: {message}"
+            ),
+            Err(e) => panic!("预期连接层错误，实际 {e:?}"),
+        }
     }
 }

@@ -65,8 +65,10 @@ def read_baseline() -> float:
 
 
 def next_pressure_line(measured_pct: float) -> int:
-    """棘轮压力线：实测向上取整到下一个整数百分比（85.49→86、恰为整数→再 +1）。"""
-    return math.floor(measured_pct) + 1
+    """棘轮压力线：实测向上取整到下一个整数百分比（85.49→86、恰为整数→再 +1）。
+    100 为覆盖率上界，封顶不越（实测 100 时基线停在 100）：
+    「恒高于实测」在 100 处数学上不可满足，再 +1 会写出 101 的死局基线。"""
+    return min(math.floor(measured_pct) + 1, 100)
 
 
 def update_baseline_value(pct: float) -> None:

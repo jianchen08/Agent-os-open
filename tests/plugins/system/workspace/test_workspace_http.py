@@ -1320,11 +1320,13 @@ class TestDispatch:
 
 class TestWorkspaceOwnershipGate:
     """_resolve_workspace_path 归属闸（U6）：请求方与目标任务归属不一致 → 404
-    （防存在性探测）；目标缺归属元数据 fail-closed 拒绝并说明原因（存量回填属
-    运行时操作）；caller 未认证一律拒绝。各通道归属权威字段：
+    （防存在性探测）；任务域目标缺归属元数据 fail-closed 拒绝并说明原因（存量
+    回填属运行时操作）；caller 未认证一律拒绝。各通道归属权威字段：
     - _local 特例：项目根本地工作区（部署级共享，无单任务归属）→ 要求认证；
     - 项目登记：ProjectModel.submitted_by；
-    - state 聚合行：task.submitted_by（task_submit 出生协议写全）；
+    - state 聚合行：任务行（task.id / task.submitted_by / task.ws_meta 任一
+      在场）按 task.submitted_by（task_submit 出生协议写全）闸；会话域行
+      （无任何任务身份标记）坐标即服务端 state 真值，认证 caller 可达；
     - 任务镜像：metadata.user_id（task_submit _build_metadata 落账）。
     """
 
@@ -1397,10 +1399,10 @@ class TestWorkspaceOwnershipGate:
     def test_state_channel_missing_owner_fail_closed(
         self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """state 行缺 task.submitted_by（会话投影行/存量行）→ 一律 404，
+        """任务行（有任务身份）缺 task.submitted_by（存量行）→ 404，
         错误信息说明归属元数据缺失原因（不做放行式降级）。"""
         self._seed_state_rows(monkeypatch, [
-            {"pipeline_id": "t1",
+            {"pipeline_id": "t1", "task.id": "t1",
              "ws_meta": {"mode": "plain", "path": ws_dir}},
         ])
         status, body = _decode_http(_call(
@@ -1411,6 +1413,60 @@ class TestWorkspaceOwnershipGate:
         ))
         assert status == 404
         assert "归属" in json.dumps(body, ensure_ascii=False)
+
+    def test_session_domain_pipeline_resolves_for_authenticated_caller(
+        self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """BUG-24：会话域 pipeline 行（无任务身份，坐标 = 服务端 state 真值）
+        认证 caller 打开文件树可达，不得按"任务缺归属元数据"误拒 404。"""
+        self._seed_state_rows(monkeypatch, [
+            {"pipeline_id": "f36831f2ee89", "thread_id": "thread-abc",
+             "ws_meta": {"mode": "plain", "path": ws_dir, "session_id": "thread-abc"},
+             "workspace": ws_dir},
+        ])
+        (Path(ws_dir) / "session_file.txt").write_text("s", encoding="utf-8")
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/f36831f2ee89/file-tree",
+            method="GET",
+            headers=_auth("u-1"),
+        ))
+        assert status == 200
+        names = json.dumps(body, ensure_ascii=False)
+        assert "session_file.txt" in names
+
+    def test_session_domain_row_with_task_ws_meta_still_gated(
+        self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """对照：行带任务域镜像 task.ws_meta（任务行）但缺 submitted_by →
+        仍 fail-closed 404（归属闸不因会话域放行而松动）。"""
+        self._seed_state_rows(monkeypatch, [
+            {"pipeline_id": "t1",
+             "task.ws_meta": {"mode": "plain", "path": ws_dir}},
+        ])
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/t1/file-tree",
+            method="GET",
+            headers=_auth("u-1"),
+        ))
+        assert status == 404
+        assert "归属" in json.dumps(body, ensure_ascii=False)
+
+    def test_session_domain_pipeline_anonymous_still_denied(
+        self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """会话域放行不豁免认证：无 token 一律 404（安全边界不变）。"""
+        self._seed_state_rows(monkeypatch, [
+            {"pipeline_id": "f36831f2ee89",
+             "ws_meta": {"mode": "plain", "path": ws_dir, "session_id": "thread-abc"}},
+        ])
+        status, _ = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/f36831f2ee89/file-tree",
+            method="GET",
+        ))
+        assert status == 404
 
     # ── 项目登记通道 ──
 

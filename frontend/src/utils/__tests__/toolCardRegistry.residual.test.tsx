@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * toolCardRegistry 残余分支补测（簇3）
  *

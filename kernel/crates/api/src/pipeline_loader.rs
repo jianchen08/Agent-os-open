@@ -646,11 +646,22 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// 把用户空间钉到本次用例的 tmp 根（guard drop 即还原）。
+    ///
+    /// 必需性：`resolve_pipeline_config_path` 先查用户配置层——宿主机真实用户
+    /// 空间一旦被播种过 `pipelines/autonomous.yaml`（真机跑过一次应用即会），
+    /// 传入的 TempDir 便被旁路，"文件不存在走默认"类用例会读到真实配置而误红。
+    /// 用例只应观察自己构造的目录。
+    fn pin_tmp_user_space(root: &std::path::Path) -> crate::test_env::UserSpaceGuard {
+        crate::test_env::pin_user_root(root)
+    }
+
     /// 在临时目录构造一份 autonomous.yaml，验证解析后的 PipelineConfig 关键字段。
     #[test]
     fn test_load_pipeline_config_reads_autonomous() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
         let yaml = r#"
 name: test_pipeline
 loop_bodies:
@@ -736,6 +747,7 @@ loop_bodies:
     fn test_load_pipeline_with_hooks_parses_two_level_scopes() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
         let yaml = r#"
 name: hook_pipeline
 loop_bodies:
@@ -773,6 +785,7 @@ loop_bodies:
     fn test_load_pipeline_with_hooks_empty_yields_zero_entries() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
         let yaml = r#"
 name: plain_pipeline
 loop_bodies:
@@ -803,6 +816,7 @@ loop_bodies:
     fn test_load_pipeline_config_bad_yaml_errors() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
         fs::create_dir_all(root.join("pipelines")).unwrap();
         fs::write(
             root.join("pipelines/autonomous.yaml"),
@@ -818,6 +832,7 @@ loop_bodies:
     fn test_load_step_library_multiple_files() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
         let s1 = "id: step_a\nsteps:\n  - file_read\n";
         let s2 = "id: step_b\nsteps:\n  - llm_core\n";
         fs::create_dir_all(root.join("steps")).unwrap();
@@ -1078,6 +1093,7 @@ loop_bodies:
     fn test_g10_unknown_then_target_errors() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
         fs::create_dir_all(root.join("pipelines")).unwrap();
         fs::write(
             root.join("pipelines/autonomous.yaml"),
@@ -1250,6 +1266,7 @@ loop_bodies:
     fn test_g10_legacy_forms_rejected() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
         fs::create_dir_all(root.join("pipelines")).unwrap();
         for (name, bad) in [
             (
@@ -1286,6 +1303,7 @@ loop_bodies:
     fn test_load_real_config_shapes() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
         fs::create_dir_all(root.join("pipelines")).unwrap();
         fs::create_dir_all(root.join("steps")).unwrap();
         // autonomous.yaml（简化版，结构与 config/pipelines/autonomous.yaml 一致）
@@ -1443,5 +1461,245 @@ next:
                 "{name}: 期望 InvalidConfig，实际 {err:?}"
             );
         }
+    }
+
+    // ── 覆盖率补测：加载降级/覆盖告警/错误显示/路径绑定 ──
+
+    /// 同一 id 出现在两个 step 库文件 → 后加载覆盖先加载（文件名序），不报错
+    ///（单文件冲突不阻断内核启动）。
+    #[test]
+    fn load_step_library_duplicate_id_overwrites_later_file() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
+        fs::create_dir_all(root.join("steps")).unwrap();
+        // 字典序 a.yaml < b.yaml → b 覆盖 a
+        fs::write(
+            root.join("steps/a.yaml"),
+            "id: dup_step
+steps:
+  - file_read
+",
+        )
+        .unwrap();
+        fs::write(
+            root.join("steps/b.yaml"),
+            "id: dup_step
+steps:
+  - llm_core
+",
+        )
+        .unwrap();
+
+        let lib = load_step_library(root).expect("重复 id 不得报错（警告 + 覆盖）");
+        assert_eq!(lib.steps.len(), 1, "同 id 只留一条");
+        let step = lib.steps.get("dup_step").expect("id 应在库中");
+        assert_eq!(
+            step.steps,
+            vec![agentos_core::types::StepItem::Bare("llm_core".to_string())],
+            "后加载（b.yaml）必须覆盖先加载（a.yaml）"
+        );
+    }
+
+    /// 库文件解析失败（坏 YAML）→ 致命 Err（启动期暴露坏配置，不跳过）。
+    #[test]
+    fn load_step_library_bad_yaml_is_fatal() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
+        fs::create_dir_all(root.join("steps")).unwrap();
+        fs::write(
+            root.join("steps/broken.yaml"),
+            "id: [unclosed
+",
+        )
+        .unwrap();
+
+        let err = load_step_library(root).expect_err("坏库文件必须致命");
+        assert!(
+            matches!(err, PipelineLoadError::ParseYaml(_, _)),
+            "期望 ParseYaml，实际 {err:?}"
+        );
+        assert!(err.to_string().contains("解析 YAML"), "{err}");
+    }
+
+    /// 非 yaml/yml 文件与其他目录条目被跳过（只收 yaml/yml）。
+    #[test]
+    fn load_step_library_ignores_non_yaml_entries() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
+        fs::create_dir_all(root.join("steps/subdir")).unwrap();
+        fs::write(
+            root.join("steps/readme.md"),
+            "# 文档
+",
+        )
+        .unwrap();
+        fs::write(root.join("steps/data.json"), "{}").unwrap();
+        fs::write(
+            root.join("steps/ok.yml"),
+            "id: yml_step
+steps:
+  - llm_core
+",
+        )
+        .unwrap();
+
+        let lib = load_step_library(root).expect("加载成功");
+        assert_eq!(lib.steps.len(), 1, "只收 .yml：{:?}", lib.steps.keys());
+        assert!(lib.steps.contains_key("yml_step"));
+    }
+
+    /// steps 路径存在但是**文件**（非目录）→ read_dir 报错 → ReadDir 致命。
+    #[test]
+    fn load_step_library_path_is_file_returns_read_dir_error() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
+        fs::write(
+            root.join("steps"),
+            "not a dir
+",
+        )
+        .unwrap();
+
+        let err = load_step_library(root).expect_err("steps 是文件时必须报 ReadDir");
+        assert!(
+            matches!(err, PipelineLoadError::ReadDir(_, _)),
+            "期望 ReadDir，实际 {err:?}"
+        );
+        assert!(err.to_string().contains("读取目录"), "{err}");
+    }
+
+    /// 管道配置路径存在但是目录 → read_to_string 报错 → ReadFile。
+    #[test]
+    fn load_pipeline_config_path_is_dir_returns_read_file_error() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
+        fs::create_dir_all(root.join("pipelines/autonomous.yaml")).unwrap();
+
+        let err = load_pipeline_config(root).expect_err("目录占位必须报 ReadFile");
+        assert!(
+            matches!(err, PipelineLoadError::ReadFile(_, _)),
+            "期望 ReadFile，实际 {err:?}"
+        );
+        assert!(err.to_string().contains("读取文件"), "{err}");
+    }
+
+    /// hooks 变体同样走 ReadFile / ParseYaml 错误面（与主加载同源）。
+    #[test]
+    fn load_pipeline_with_hooks_error_faces_match_main_loader() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
+        fs::create_dir_all(root.join("pipelines")).unwrap();
+        fs::write(
+            root.join("pipelines/autonomous.yaml"),
+            "name: [broken
+",
+        )
+        .unwrap();
+        let err = load_pipeline_with_hooks(root).expect_err("坏 YAML 必须报解析错");
+        assert!(
+            matches!(err, PipelineLoadError::ParseYaml(_, _)),
+            "实际 {err:?}"
+        );
+
+        // 目录占位 → ReadFile
+        let tmp2 = TempDir::new().unwrap();
+        fs::create_dir_all(tmp2.path().join("pipelines/autonomous.yaml")).unwrap();
+        let err = load_pipeline_with_hooks(tmp2.path()).expect_err("目录占位报 ReadFile");
+        assert!(
+            matches!(err, PipelineLoadError::ReadFile(_, _)),
+            "实际 {err:?}"
+        );
+    }
+
+    /// `with_path` 只给语义错误（InvalidConfig）绑定路径；已带路径的错误原样透传。
+    #[test]
+    fn with_path_only_rewrites_invalid_config() {
+        let bound = PipelineLoadError::InvalidConfig("bad target".to_string())
+            .with_path(PathBuf::from("/x/y.yaml"));
+        assert!(
+            bound.to_string().contains("/x/y.yaml") && bound.to_string().contains("bad target"),
+            "{bound}"
+        );
+
+        let already = PipelineLoadError::ParseYaml(PathBuf::from("/a.yaml"), "why".to_string())
+            .with_path(PathBuf::from("/b.yaml"));
+        assert_eq!(
+            already.to_string(),
+            "解析 YAML /a.yaml 失败: why",
+            "已是带路径错误不得被改写"
+        );
+
+        let read = PipelineLoadError::ReadDir(PathBuf::from("/d"), "io".to_string())
+            .with_path(PathBuf::from("/other"));
+        assert!(
+            read.to_string().contains("/d"),
+            "ReadDir 路径保持原样: {read}"
+        );
+    }
+
+    /// `PipelineLoadError` 四个变体的 Display 文案各自可读（错误出口一致性）。
+    #[test]
+    fn pipeline_load_error_display_all_variants() {
+        assert_eq!(
+            PipelineLoadError::ReadFile(PathBuf::from("a.yaml"), "boom".to_string()).to_string(),
+            "读取文件 a.yaml 失败: boom"
+        );
+        assert_eq!(
+            PipelineLoadError::ReadDir(PathBuf::from("d"), "boom".to_string()).to_string(),
+            "读取目录 d 失败: boom"
+        );
+        assert_eq!(
+            PipelineLoadError::ParseYaml(PathBuf::from("p.yaml"), "boom".to_string()).to_string(),
+            "解析 YAML p.yaml 失败: boom"
+        );
+        assert_eq!(
+            PipelineLoadError::InvalidConfig("x".to_string()).to_string(),
+            "配置语义错误: x"
+        );
+        // Error trait 可用（可作 Box<dyn Error> 上报）
+        let e: Box<dyn std::error::Error> =
+            Box::new(PipelineLoadError::InvalidConfig("y".to_string()));
+        assert!(e.to_string().contains("y"));
+    }
+
+    /// 循环体 exit_routes 的 Phase 目标存在 → 校验通过（与缺失用例成对）。
+    #[test]
+    fn validate_exit_route_phase_target_existing_passes() {
+        let pipeline = PipelineConfig {
+            name: "p".into(),
+            loop_bodies: vec![
+                LoopBody {
+                    id: "main".into(),
+                    steps: vec![],
+                    while_cond: None,
+                    exit_routes: vec![Route {
+                        when: "True".into(),
+                        then: RouteAction {
+                            next: RouteNext::Phase("finish".into()),
+                            set: HashMap::new(),
+                        },
+                    }],
+                    run_on_error: false,
+                },
+                LoopBody {
+                    id: "finish".into(),
+                    steps: vec![],
+                    while_cond: None,
+                    exit_routes: vec![],
+                    run_on_error: false,
+                },
+            ],
+            checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: None,
+        };
+        validate_no_name_conflicts(&pipeline, &StepLibrary::default(), &HashSet::new())
+            .expect("Phase 目标存在应通过");
     }
 }

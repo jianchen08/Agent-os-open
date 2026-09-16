@@ -81,5 +81,36 @@
       "description": "项目选项 {value:id,label:title}（共享 project_registry 登记行）"
     }
   ],
-  "host_group": "light"
+  "host_group": "light",
+  "ui_schema": {
+    "widgets": [
+      {
+        "id": "task_mode",
+        "type": "form",
+        "space": "chat-input",
+        "title": "任务模式",
+        "props": {
+          "title": "任务模式",
+          "icon": "sparkles",
+          "fields": [
+            {
+              "name": "mode",
+              "type": "select",
+              "label": "任务模式",
+              "default": "",
+              "options": [
+                {
+                  "label": "自动",
+                  "value": "",
+                  "icon": "✨",
+                  "description": "发送不带模式键，归属由后端自然语言分类裁决"
+                }
+              ]
+            }
+          ],
+          "description": "切换当前会话的任务模式（chatInputStore 按会话记忆，发送时并入消息级 execution_context）。选择器本体仅持「自动」兜底档，模式选项由各模式插件 select-option 声明追加"
+        }
+      }
+    ]
+  }
 }

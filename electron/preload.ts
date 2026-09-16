@@ -74,6 +74,29 @@ export interface ElectronAPI {
     /** 调整指定窗口大小 */
     resize(id: string, size: { width: number; height: number }): Promise<void>;
   };
+
+  /** 是否为子窗口/悬浮窗（main.ts 经 additionalArguments 注入 --agentos-child-window）；
+   *  前端 TitleBar 仅在主窗口（false）渲染 */
+  isChildWindow: boolean;
+
+  /** 主窗口自控 API（自定义标题栏按钮；按发起调用的窗口自身生效） */
+  windowControls: {
+    /** 最小化 */
+    minimize(): Promise<void>;
+    /** 最大化/还原切换；返回切换后的最大化状态 */
+    toggleMaximize(): Promise<boolean>;
+    /** 关闭（主窗口 = 收进托盘，与原生 X 行为一致） */
+    close(): Promise<void>;
+    /** 查询当前最大化状态 */
+    isMaximized(): Promise<boolean>;
+    /**
+     * 监听最大化状态变化（系统路径触发：双击拖拽区、Win+方向键等）。
+     *
+     * @param callback - 接收最大化状态的回调函数
+     * @returns 取消监听的函数
+     */
+    onMaximizedChange(callback: (maximized: boolean) => void): () => void;
+  };
 }
 
 /** window:open 的参数（与 main.ts 的 ChildWindowOptions 对齐） */
@@ -92,6 +115,12 @@ export interface ChildWindowOpenOptions {
   alwaysOnTop?: boolean;
   skipTaskbar?: boolean;
 }
+
+/** 子窗口标记字面量（与 main.ts 的 CHILD_WINDOW_ARG 保持一致） */
+const CHILD_WINDOW_ARG = "--agentos-child-window";
+
+/** 最大化状态推送通道（与 main.ts 的 MAXIMIZED_CHANGED_CHANNEL 保持一致） */
+const MAXIMIZED_CHANGED_CHANNEL = "window:maximized-changed";
 
 // 通过 contextBridge 安全暴露 API
 contextBridge.exposeInMainWorld("electronAPI", {
@@ -178,6 +207,39 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
     resize: (id: string, size: { width: number; height: number }) => {
       return ipcRenderer.invoke("window:resize", id, size) as Promise<void>;
+    },
+  },
+
+  /** 子窗口标记：main.ts 创建子窗口时经 additionalArguments 注入命令行参数 */
+  isChildWindow: process.argv.includes(CHILD_WINDOW_ARG),
+
+  /**
+   * 主窗口自控 API（自定义标题栏按钮）。
+   * invoke 通道为 window:self:*，主进程按 event.sender 反查窗口，
+   * 只作用于发起调用的窗口自身。
+   */
+  windowControls: {
+    minimize: () => {
+      return ipcRenderer.invoke("window:self:minimize") as Promise<void>;
+    },
+    toggleMaximize: () => {
+      return ipcRenderer.invoke("window:self:maximize-toggle") as Promise<boolean>;
+    },
+    close: () => {
+      return ipcRenderer.invoke("window:self:close") as Promise<void>;
+    },
+    isMaximized: () => {
+      return ipcRenderer.invoke("window:self:is-maximized") as Promise<boolean>;
+    },
+    onMaximizedChange: (callback: (maximized: boolean) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, maximized: boolean): void => {
+        callback(maximized);
+      };
+      ipcRenderer.on(MAXIMIZED_CHANGED_CHANNEL, handler);
+
+      return () => {
+        ipcRenderer.removeListener(MAXIMIZED_CHANGED_CHANNEL, handler);
+      };
     },
   },
 } satisfies ElectronAPI);

@@ -22,6 +22,7 @@
  *   4. tool_start 到达时消息占位不存在（乱序/占位丢失），工具调用不静默丢弃
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
+import { makeEventFactory } from './helpers/streamingEventFactory'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -60,19 +61,7 @@ const MESSAGE_ID = 'msg_stream_multiturn_loss_01'
 const THREAD_ID = 'thread-stream-multiturn-loss-001'
 
 /** 构造后端 WS 事件信封（与 ws_session.rs / capability_router.rs 一致：业务字段在 data 下） */
-function makeEvent(eventType: string, data: Record<string, any>) {
-  return {
-    type: eventType,
-    data: {
-      pipeline_id: PIPELINE_ID,
-      message_id: MESSAGE_ID,
-      ...data,
-    },
-    source_type: 'system',
-    source_id: PIPELINE_ID,
-    timestamp: new Date().toISOString(),
-  }
-}
+const makeEvent = makeEventFactory(PIPELINE_ID, MESSAGE_ID)
 
 /** 取目标消息的完整快照 */
 function snapshotMessage() {

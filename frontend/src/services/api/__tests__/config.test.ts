@@ -180,4 +180,86 @@ describe('配置管理 API（LLM 配置域）', () => {
       )
     })
   })
+
+  describe('getLLMPresets - 配置面预置声明', () => {
+    it('请求 presets 端点并解包（插件下发形状原样透传）', async () => {
+      const presets = {
+        provider_groups: [
+          { label: '国内', providers: [['deepseek', 'DeepSeek']] as [string, string][] },
+        ],
+        common_provider_types: ['openai', 'deepseek'],
+        thinking_strength: { levels: ['off', 'low', 'high'], allowed_keys: ['thinking'] },
+      }
+      vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse(presets))
+
+      const result = await configApi.getLLMPresets()
+
+      expect(result).toEqual(presets)
+      // 性质断言：[provider_id, 显示名] 二元组结构原样保留，不被二次包装
+      expect(result.provider_groups[0].providers[0]).toHaveLength(2)
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/llm_service/config/llm/presets')
+    })
+
+    it('空声明（插件未下发分组/常用类型/白名单）→ 返回空形状而非抛错', async () => {
+      vi.mocked(apiClient.get).mockResolvedValueOnce(
+        okResponse({
+          provider_groups: [],
+          common_provider_types: [],
+          thinking_strength: { levels: [], allowed_keys: [] },
+        }),
+      )
+
+      const result = await configApi.getLLMPresets()
+
+      expect(result.provider_groups).toHaveLength(0)
+      expect(result.common_provider_types).toHaveLength(0)
+      expect(result.thinking_strength.levels).toHaveLength(0)
+    })
+
+    it('透传重试选项：失败后按 maxRetries 重试成功', async () => {
+      const presets = {
+        provider_groups: [],
+        common_provider_types: [],
+        thinking_strength: { levels: ['off'], allowed_keys: [] },
+      }
+      vi.mocked(apiClient.get)
+        .mockRejectedValueOnce(new Error('Network Error'))
+        .mockResolvedValueOnce(okResponse(presets))
+
+      const result = await configApi.getLLMPresets({ retry: true, maxRetries: 2, retryDelay: 1 })
+
+      expect(result.thinking_strength.levels).toEqual(['off'])
+    })
+  })
+
+  describe('saveDefaults - 更新默认模型配置', () => {
+    it('PUT 部分更新载荷到 defaults 端点并解包最新 defaults', async () => {
+      const saved = { chat: 'gpt-4o', tiers: { fast: 'gpt-4o-mini' }, embedding: 'e1' }
+      vi.mocked(apiClient.put).mockResolvedValueOnce(okResponse(saved))
+
+      const result = await configApi.saveDefaults({ chat: 'gpt-4o', tiers: { fast: 'gpt-4o-mini' } })
+
+      expect(result).toEqual(saved)
+      expect(apiClient.put).toHaveBeenCalledWith('/ext/llm_service/config/llm/defaults', {
+        chat: 'gpt-4o',
+        tiers: { fast: 'gpt-4o-mini' },
+      })
+    })
+
+    it('仅更新 chat（省略 embedding/tiers）→ 载荷不含未提供字段，不发明默认值', async () => {
+      vi.mocked(apiClient.put).mockResolvedValueOnce(
+        okResponse({ chat: 'm2', tiers: {}, embedding: 'e1' }),
+      )
+
+      const result = await configApi.saveDefaults({ chat: 'm2' })
+
+      expect(apiClient.put).toHaveBeenCalledWith('/ext/llm_service/config/llm/defaults', {
+        chat: 'm2',
+      })
+      const [, payload] = vi.mocked(apiClient.put).mock.calls[0]
+      expect(payload).not.toHaveProperty('tiers')
+      expect(payload).not.toHaveProperty('embedding')
+      expect(result.chat).toBe('m2')
+    })
+  })
 })

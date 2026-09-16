@@ -24,9 +24,11 @@ REM  code auto-respawns with exponential backoff (5s/15s/45s cap) and stops
 REM  after AGENTOS_SUPERVISOR_MAX_CONSECUTIVE_FAILS consecutive failures
 REM  (default 5, circuit break); a run of at least
 REM  AGENTOS_SUPERVISOR_STABLE_SECS (default 60s) resets the failure streak.
-REM  Every exit/respawn/backoff/circuit-break is appended to
-REM  .kernel_supervisor.log in the repo root - that file is the post-mortem
-REM  record. The former external session supervisor
+REM  The supervisor and the kernel write no log file of their own: kernel
+REM  diagnostics live in the kernel's rotating file layer under logs\
+REM  (kernel.log.YYYY-MM-DD). The former .kernel_02.log stdout redirect and
+REM  .kernel_supervisor.log event log are retired as unbounded append-only
+REM  surfaces. The former external session supervisor
 REM  (.zcode_tmp_kernel_supervisor.sh, a prior ZCode session's background
 REM  task) is retired and gone: unexpected-death recovery is owned by the
 REM  supervisor loop itself.
@@ -129,6 +131,13 @@ if "%NO_BUILD%"=="1" (
     echo [OK] Kernel build succeeded.
 )
 
+REM Async artifact sweep: cargo never deletes stale fingerprint copies, so
+REM every release build leaves the previous set behind (~19GB/month observed).
+REM Just-built artifacts are the newest hash cluster and are never touched;
+REM older clusters older than 3 days get reclaimed in the background. Fire
+REM and forget: the sweep always exits 0 and skips in-use files.
+start "artifact-sweep" /b python "%PROJECT_ROOT%\scripts\clean_rust_debug.py" --older-than 3 --with-release
+
 REM Same-origin guard: native cdylibs built from sources other than the
 REM kernel make tool dispatch sites SIGSEGV (proven twice, 2026-09-01/08-31).
 REM --build re-auto-builds missing/stale cdylibs first (a fresh clone gets
@@ -228,13 +237,12 @@ REM (79cb1dc72), so a busy plugin is never unloaded mid-call. Default 300s
 REM reclaims truly idle sidecars promptly; override via env if needed.
 if not defined AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS set "AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS=300"
 
-set "KERNEL_LOG=%PROJECT_ROOT%\.kernel_02.log"
 REM G8 supervisor: exit 75 (POST /api/v1/system/restart, watcher cdylib
 REM set change - A3) respawns after 1s; other exit codes auto-respawn with
 REM exponential backoff and circuit-break after N consecutive failures
-REM (default 5); every event is appended to .kernel_supervisor.log in the
-REM repo root.
-start "AgentOS Kernel" /B cmd /c ""%PROJECT_ROOT%\run_kernel_supervised.bat" "%KERNEL_BIN%" "%KERNEL_LOG%""
+REM (default 5). Kernel output is discarded; the kernel's own log lives
+REM under logs\ (kernel.log.YYYY-MM-DD).
+start "AgentOS Kernel" /B cmd /c ""%PROJECT_ROOT%\run_kernel_supervised.bat" "%KERNEL_BIN%""
 
 echo        Waiting for kernel (poll /health up to 60s)...
 set "KERNEL_READY=0"
@@ -251,7 +259,7 @@ for /l %%i in (1,1,60) do (
 )
 if "!KERNEL_READY!"=="0" (
     echo [ERROR] Kernel not ready within 60s, aborting.
-    echo [HINT] Kernel did not answer /health. Check log: %KERNEL_LOG%
+    echo [HINT] Kernel did not answer /health. Check log: logs\kernel.log.*
     call :KillPort "%AGENTOS_KERNEL_PORT%" "kernel"
     pause
     exit /b 1

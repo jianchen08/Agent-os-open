@@ -24,6 +24,12 @@
     "lifecycle_hooks": [
       "on_load",
       "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "pipeline_model_prompt_adapter",
+        "required_state_inputs": []
+      }
     ]
   },
   "permissions": {},

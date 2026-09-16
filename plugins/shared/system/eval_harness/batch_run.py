@@ -32,9 +32,35 @@ def login():
     return d.get("token") or d.get("access_token")
 
 
+def _plan_from_argv(argv: list[str]) -> list[tuple[str, str | None]]:
+    """显式套件参数：`batch_run.py 套件.yaml[[:case1,case2] ...]`（跑 external
+    档/单题重放用）；缺省走既有代表性选题 plan。"""
+    plan = []
+    for arg in argv:
+        path, _, cases = arg.partition("::")
+        plan.append((path, cases or None))
+    return plan
+
+
+def _find_task_id_by_title(token: str, title: str) -> str:
+    """按标题查已建任务（504 假拒后幂等恢复用：内核可能已建任务）。"""
+    try:
+        d = http("GET", "/ext/task_service/tasks?limit=50", token=token)
+        data = d.get("data") or d
+        items = data.get("tasks") or data.get("items") or (data if isinstance(data, list) else [])
+        for t in items:
+            if str(t.get("title") or "") == title:
+                return str(t.get("id") or t.get("task_id") or "")
+    except Exception:
+        pass
+    return ""
+
+
 def main():
-    # 第一批选题：每模式代表性题，避开长耗时（constraint_follow 类未入选）
-    plan = [
+    # 第一批选题：每模式代表性题，避开长耗时（constraint_follow 类未入选）；
+    # 显式套件参数（sys.argv）优先——external 档评测入口：
+    #   batch_run.py config/self_evolve/suites/external/swe_verified_seed.yaml
+    plan = _plan_from_argv(sys.argv[1:]) or [
         ("config/self_evolve/suites/dev/smoke.yaml", None),
         ("config/self_evolve/suites/dev/coding.yaml", "tac_policy_lookup,longwof_config_diff_report"),
         ("config/self_evolve/suites/dev/writing.yaml", "write_structured_doc"),
@@ -63,12 +89,27 @@ def main():
             }
 
             cid = b["case_id"]
-            try:
-                resp = http("POST", "/ext/task_service/tasks/root", args, token)
-                task_id = str(resp.get("id") or (resp.get("data") or {}).get("id") or "")
+            # 派发幂等重试：504 是内核侧假拒（端点超时但任务可能已建，
+            # §17.10/17.13 实锤）——重试前先按标题查已建任务，查到即复用
+            task_id = ""
+            for attempt in range(1, 4):
+                try:
+                    resp = http("POST", "/ext/task_service/tasks/root", args, token)
+                    task_id = str(resp.get("id") or (resp.get("data") or {}).get("id") or "")
+                    break
+                except urllib.error.HTTPError as e:
+                    print(f"[{cid}] dispatch attempt {attempt} FAIL {e.code}: "
+                          f"{e.read().decode()[:160]}", flush=True)
+                    if attempt < 3:
+                        time.sleep(15 * attempt)
+                        task_id = _find_task_id_by_title(token, args["title"])
+                        if task_id:
+                            print(f"[{cid}] recovered existing task {task_id} "
+                                  f"(504 假拒已建)", flush=True)
+                            break
+            if task_id:
                 print(f"[{cid}] dispatched {task_id}", flush=True)
-            except urllib.error.HTTPError as e:
-                print(f"[{cid}] dispatch FAIL {e.code}: {e.read().decode()[:200]}", flush=True)
+            else:
                 results.append({"case_id": cid, "task_status": "dispatch_error", "criteria": {}})
                 continue
             results.append({"case_id": cid, "task_id": task_id,

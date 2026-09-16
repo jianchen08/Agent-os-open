@@ -680,13 +680,15 @@ async def _resolve_workspace_path(
     并施加归属闸（U6）。
 
     归属闸：请求方与目标任务归属不一致 → WorkspaceAccessDenied（404，防
-    存在性探测）；目标缺归属元数据 fail-closed 拒绝并说明原因（存量回填属
-    运行时操作）；caller 未认证一律拒绝。各通道归属权威字段：
+    存在性探测）；任务域目标缺归属元数据 fail-closed 拒绝并说明原因（存量
+    回填属运行时操作）；caller 未认证一律拒绝。各通道归属权威字段：
     1. ``_local`` 特例 → 项目根（部署级共享本地工作区，无单任务归属，
        要求认证 caller）；
     2. 项目登记通道：ProjectModel.submitted_by；
-    3. state 聚合行（pipeline-state 读面）：行 ``task.submitted_by``
-       （task_submit 出生协议写全）；
+    3. state 聚合行（pipeline-state 读面）：任务行（task.id / task.submitted_by
+       / task.ws_meta 任一在场）按行 ``task.submitted_by``（task_submit 出生
+       协议写全）；会话域行（无任务身份标记）坐标即服务端 state 真值，
+       认证 caller 可达；
     4. TaskService 任务镜像：metadata.user_id（task_submit 落账）。
     全通道未命中维持既有 None（无工作区坐标）语义。
     """
@@ -719,14 +721,19 @@ async def _resolve_workspace_path(
         )
 
     # state 聚合行通道（任务管道的 state 真值也覆盖——task = pipeline）；
-    # 路径与归属同行读出（单次读取，避免二次读行归属错位）
+    # 路径与归属同行读出（单次读取，避免二次读行归属错位）。
+    # 任务行（task.id / task.submitted_by / task.ws_meta 任一在场）按
+    # task.submitted_by 闸（缺 → 存量数据 fail-closed）；会话域行（无任何
+    # 任务身份标记，主会话工作区由 workspace_lifecycle 写 state）坐标即
+    # 服务端 state 真值，认证 caller 可达（R3 会话域 pipelineId 解析通道）。
     service = get_workspace_service()
-    state_path, owner = await service.resolve_workspace_from_state(container_task_id)
+    state_path, owner, is_task_row = await service.resolve_workspace_from_state(container_task_id)
     if state_path:
-        if not owner:
-            raise WorkspaceAccessDenied(_MISSING_OWNER_MESSAGE)
-        if owner != sub:
-            raise WorkspaceAccessDenied(_DENIED_MESSAGE)
+        if is_task_row:
+            if not owner:
+                raise WorkspaceAccessDenied(_MISSING_OWNER_MESSAGE)
+            if owner != sub:
+                raise WorkspaceAccessDenied(_DENIED_MESSAGE)
         return state_path
 
     try:

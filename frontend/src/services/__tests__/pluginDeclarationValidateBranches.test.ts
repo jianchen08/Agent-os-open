@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * pluginDeclarationValidate 分支补测：把校验器逐条规则的正/负两面都走一遍
  * （pages / tools.render / chat_card / widgets / streaming），

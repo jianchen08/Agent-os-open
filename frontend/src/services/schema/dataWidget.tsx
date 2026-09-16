@@ -10,7 +10,7 @@
  *   （A1c）承接——事件驱动更新，不走 remount。
  * - 无 uri/ws 时回退静态 props（零行为变化，兼容旧声明）。
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import apiClient from '@/services/api/client'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 
@@ -38,6 +38,42 @@ async function fetchDatasourcePayload(uri: string): Promise<unknown> {
     return (d as { data: unknown }).data
   }
   return d
+}
+
+/**
+ * uri → 最近一次成功载荷（模块级）。数据在挂载时获取的组件（槽位轮询递增
+ * key、切标签重建宿主）每次重挂载都会重放"拉取中→空窗"：先渲上次成功载荷
+ * 再静默刷新，重挂载不再闪空。
+ */
+const lastPayloadByUri = new Map<string, unknown>()
+
+/**
+ * 同 URI 取数合并：仅合并**并发窗口内**的重复请求。
+ *
+ * 声明式页面里同一 `datasourceUri` 常被多个 widget 消费（监控页资源组 3 卡同
+ * URI、用量与成本组多表多图同 URI），各 widget 独立 effect 会在同刻发出重复
+ * 请求。此处按 URI 合并：同刻在飞的请求共享同一次调用，后到者复用其结果。
+ *
+ * 不做时间窗缓存：显式重拉（reloadKey 递增 = 轮询/行操作刷新）必须真打后端取
+ * 新值，任何 TTL 复用都会让用户看到过期数据。请求一旦落地即从表中移除，下一个
+ * 拉取（含轮询 tick）照常发新请求。
+ */
+const inFlightByUri = new Map<string, Promise<unknown>>()
+
+/** 清空共享取数状态（测试用：模块级缓存在用例间会串） */
+export function resetSharedFetchCache(): void {
+  inFlightByUri.clear()
+  lastPayloadByUri.clear()
+}
+
+function fetchShared(uri: string): Promise<unknown> {
+  const running = inFlightByUri.get(uri)
+  if (running) return running
+  const task = fetchDatasourcePayload(uri).finally(() => {
+    inFlightByUri.delete(uri)
+  })
+  inFlightByUri.set(uri, task)
+  return task
 }
 
 // ── 数据形状归一化 ─────────────────────────────────────────
@@ -159,13 +195,6 @@ export function normalizeDataPayload(payload: unknown, shape: DataShape): unknow
 
 // ── hook ───────────────────────────────────────────────────
 
-/**
- * uri → 最近一次成功载荷（模块级缓存）。数据在挂载时获取的组件（槽位轮询
- * 递增 key、切标签重建宿主）每次重挂载都会重放"拉取中→空窗"：先渲上次
- * 成功载荷再静默刷新，重挂载不再闪空。
- */
-const lastPayloadByUri = new Map<string, unknown>()
-
 /** 声明 WS 推送源（A1c）：refresh:{type:'ws', channel} */
 export interface WsRefreshConfig {
   type: 'ws'
@@ -188,11 +217,16 @@ function parseWsRefresh(props: Record<string, unknown>): WsRefreshConfig | null 
  * - `datasourceUri`：HTTP 拉，归一化（A1a）；
  * - 均无：静态 data/value（零行为变化）。
  * reloadKey：外部触发重拉（如表格行操作成功后），变化即重新取数。
+ * visible：宿主面板可见性（useElementVisible）——不可见时 WS 推送不再触发
+ * setState/重渲染（隐藏面板的重渲染纯浪费），仅缓存最新一帧，恢复可见即应用；
+ * HTTP 侧由 RefreshBox 冻结 reloadKey 承担，此处不重复治理。默认 true（
+ * 未接可见性的调用方行为不变）。
  */
 export function useDataWidget(
   props: Record<string, unknown>,
   shape: DataShape,
   reloadKey = 0,
+  visible = true,
 ): DataWidgetResult {
   const uri = props.datasourceUri as string | undefined
   const staticData = props.data ?? props.value
@@ -205,11 +239,22 @@ export function useDataWidget(
     loading: false,
     error: null,
   }))
+  /** WS handler 运行时读（避免闭包过期 + 不因 visible 翻转重订阅） */
+  const visibleRef = useRef(visible)
+  useEffect(() => {
+    visibleRef.current = visible
+  }, [visible])
+  /** 离屏期间最新一帧 WS 载荷（恢复可见时应用，数据不丢只延迟） */
+  const pendingWsPayloadRef = useRef<{ payload: unknown } | null>(null)
 
   useEffect(() => {
     // WS 事件驱动（A1c）：事件即数据，shape 归一后更新，不走 loading
     if (ws) {
       const handler = (payload: unknown) => {
+        if (!visibleRef.current) {
+          pendingWsPayloadRef.current = { payload }
+          return
+        }
         setState((prev) => ({
           ...prev,
           data: normalizeDataPayload(payload, shape),
@@ -232,7 +277,7 @@ export function useDataWidget(
       loading: prev.data == null,
       error: null,
     }))
-    fetchDatasourcePayload(uri)
+    fetchShared(uri)
       .then((payload) => {
         if (!cancelled) {
           lastPayloadByUri.set(uri, payload)
@@ -255,6 +300,19 @@ export function useDataWidget(
     // staticData 对象每次渲染引用会变——只依赖关键源，避免拉取循环
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uri, shape, ws?.channel, reloadKey])
+
+  /** 恢复可见：应用离屏期间缓存的最新一帧 WS 载荷（无缓存则空操作） */
+  useEffect(() => {
+    const pending = pendingWsPayloadRef.current
+    if (!visible || !ws || !pending) return
+    pendingWsPayloadRef.current = null
+    setState((prev) => ({
+      ...prev,
+      data: normalizeDataPayload(pending.payload, shape),
+      loading: false,
+      error: null,
+    }))
+  }, [visible, ws, shape])
 
   return state
 }

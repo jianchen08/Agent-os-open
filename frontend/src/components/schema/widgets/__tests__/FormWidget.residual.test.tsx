@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * FormWidget 残余分支补测（簇3，与既有 FormWidget.* 五个测试文件互补）
  *
@@ -20,6 +21,12 @@ import { toast } from '@/components/ui/sonner'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { FormWidget, DecisionFormAdapter } from '../FormWidget'
 import { RjsfForm } from '@/services/schema/RjsfForm'
+
+// FormWidget 现消费会话隔离形态（useSessionsQuery）计算权限档显示默认；
+// 本文件无 QueryClientProvider，静态 mock 空列表（无会话 → 非隔离默认显示路径）
+vi.mock('@/hooks/queries/useSessionsQuery', () => ({
+  useSessionsQuery: () => ({ data: [] }),
+}))
 
 const apiGet = vi.fn()
 const apiPost = vi.fn()

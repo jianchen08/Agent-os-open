@@ -16,6 +16,25 @@
 9. 规则引擎：非法正则告警不崩溃、合法正则命中。
 10. 辅助契约：code 参数指纹、_first_args 参数形状、危险声明空条目、
     敏感路径检查非字符串参数、空字节路径 fail-closed、registry 缺工具返回空。
+11. 路径穿越残余分支：resolve 后仍含 ``..``（CWD 字面量带点）的解析命中、
+    含 NUL 路径经 resolve 失败走 Invalid path、编码/双重编码穿越与良性百分号
+    路径的对照矩阵。
+12. ``_args_hit_dangerous_ops`` 三类声明形态（op:path 前缀 / op: 空模式操作值 /
+    裸命令子串）的大小写与归一化矩阵。
+13. ``sensitive_paths`` 共享模块：空路径与非字符串假值、resolve 失败回落原文
+    后仍按黑名单 fail-closed 命中、Windows 黑名单前缀语义。
+
+结构性不可达防御分支（逐条说明，勿硬凑）：
+- ``plugin.py`` 第 1296 行（``return "Null byte injection detected: ..."``）：
+  进入该行要求 NUL 路径先通过 1269-1274 的 ``Path(path).resolve()``，而
+  CPython 的 resolve 对含 NUL 路径恒抛 ValueError（``stat: embedded null
+  character in path``）→ 提前在 1274 返回 ``Invalid path``。NUL 检测是
+  解析成功语义下的兜底护栏，当前解释器不可达（测试以 Invalid path 断言同一
+  拒绝语义，见 ``test_null_byte_rejected_via_invalid_path``）。
+- ``plugin.py`` 第 1434 行（``continue``）：前置条件为 ``if pattern:``（pattern
+  非空），而 ``norm_pattern = pattern.replace("\\", "/").lower()`` 对任何非空
+  pattern 都产出非空串（反斜杠被换成斜杠而非删除）→ ``not norm_pattern``
+  恒假。空模式声明走的是 ``else``（操作值等值）分支，不经此处。
 """
 
 from __future__ import annotations
@@ -567,7 +586,7 @@ class TestDangerousToolAuthorizationPasses:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """accept_edits 模式：file_write（危险工具）文件类放行，规则命中也不弹审批。"""
-        _mod._PERMISSION_MODES["p-gap"] = "accept_edits"
+        _mod._PERMISSION_MODES["sess-gap"] = "accept_edits"
         cap = _ScriptedApprovalCap()
         _mod.set_human_interaction_cap(cap)
         plugin = self._file_write_plugin(monkeypatch)
@@ -949,21 +968,24 @@ class TestPathTraversalResolvedBranch:
         assert "sub/file.txt" in reason
 
     @pytest.mark.parametrize(
-        ("path", "expected_fragment"),
-        [
-            ("a\x00b.png", "Invalid path"),              # NUL 使 stat 失败 → Invalid
-            ("C:/x\x00y.png", "Invalid path"),
-        ],
+        "path",
+        ["a\x00b.png", "C:/x\x00y.png", "dir/keep\x00.png"],
     )
-    def test_null_byte_rejected_via_invalid_path(
-        self, path: str, expected_fragment: str,
-    ) -> None:
-        """含 NUL 的路径在 resolve 阶段即失败 → ``Invalid path``（拒绝语义等价，
-        且比解析成功后的 NUL 检查更早触发）。"""
+    def test_null_byte_path_always_rejected(self, path: str) -> None:
+        """含 NUL 的路径必须被拒绝（安全不变量），拒绝理由二选一：
+
+        - ``Invalid path``：``Path.resolve()`` 对 NUL 抛 ValueError（当前
+          解释器实测路径）；
+        - ``Null byte injection detected``：解析成功语义下的兜底检查。
+
+        断"必被拒绝 + 理由可定位"而非钉某一条消息——两条路径都是拒绝语义，
+        钉死单一文案会让该不变量在实现微调时假红。
+        """
         reason = self._plugin()._check_path_traversal({"path": path})
 
-        assert expected_fragment in reason
-        assert path.split("\x00")[0] in reason
+        assert reason, "含 NUL 的路径绝不允许放行"
+        assert ("Invalid path" in reason) or ("Null byte injection" in reason), reason
+        assert path.split("\x00")[0] in reason, "拒绝理由须含可定位的路径前缀"
 
     @pytest.mark.parametrize(
         ("path", "expected"),

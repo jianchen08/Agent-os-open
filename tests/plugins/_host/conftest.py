@@ -101,11 +101,43 @@ def shared_tree(tmp_path: Path) -> Path:
     return root
 
 
+@pytest.fixture(autouse=True)
+def isolated_user_plugins_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """用户插件根隔离：默认指向空目录，宿主测试不摸真实用户空间。
+
+    成员发现是双根（出厂根 + 用户插件根，同 id 用户赢）——不隔离时用例结果
+    取决于开发者机器上的用户插件（CI 无用户空间、本地有），断言不可复现。
+    需要用户根的用例自行 monkeypatch ``AGENTOS_USER_PLUGINS_DIR`` 到合成树。
+    """
+    monkeypatch.setenv(
+        "AGENTOS_USER_PLUGINS_DIR", str(tmp_path_factory.mktemp("isolated_user_plugins"))
+    )
+
+
 @pytest.fixture()
 def make_member(shared_tree: Path) -> Callable[..., Path]:
     """向假 shared 树追加合成成员的工厂（返回成员目录）。"""
 
     def _make(group_rel: str, dir_name: str, manifest_id: str, *, member_name: str | None = None) -> Path:
         return write_member(shared_tree, group_rel, dir_name, manifest_id, member_name=member_name)
+
+    return _make
+
+
+@pytest.fixture()
+def user_plugins_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """合成用户插件根（``AGENTOS_USER_PLUGINS_DIR`` 指向它，默认为空树）。"""
+    root = tmp_path / "user_plugins"
+    root.mkdir()
+    monkeypatch.setenv("AGENTOS_USER_PLUGINS_DIR", str(root))
+    return root
+
+
+@pytest.fixture()
+def make_user_member(user_plugins_tree: Path) -> Callable[..., Path]:
+    """向合成用户插件根投放成员的工厂（形同 ``make_member``）。"""
+
+    def _make(group_rel: str, dir_name: str, manifest_id: str, *, member_name: str | None = None) -> Path:
+        return write_member(user_plugins_tree, group_rel, dir_name, manifest_id, member_name=member_name)
 
     return _make

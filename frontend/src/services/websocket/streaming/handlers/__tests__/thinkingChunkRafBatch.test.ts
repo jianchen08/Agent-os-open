@@ -8,6 +8,7 @@
  *  - block_end / finish 前 flush，保证末尾增量不丢
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
+import { makeEventFactory } from './helpers/streamingEventFactory'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -33,15 +34,7 @@ const PIPELINE_ID = 'pipe-reasoning-raf-001'
 const MESSAGE_ID = 'msg_reasoning_raf_01'
 const THREAD_ID = 'thread-reasoning-raf-001'
 
-function makeEvent(eventType: string, data: Record<string, any>) {
-  return {
-    type: eventType,
-    data: { pipeline_id: PIPELINE_ID, message_id: MESSAGE_ID, ...data },
-    source_type: 'system',
-    source_id: PIPELINE_ID,
-    timestamp: new Date().toISOString(),
-  }
-}
+const makeEvent = makeEventFactory(PIPELINE_ID, MESSAGE_ID)
 
 function snapshotThinking() {
   const store = (window as any).__pipelineStore

@@ -153,6 +153,12 @@ function makeSession(overrides: Partial<modelsMod.Session> = {}) {
   } as modelsMod.Session
 }
 
+/** 写路径族共用：播种会话 + 桩定更新 API 成功（seed 为 describe 作用域函数） */
+function seedSessionsWithUpdateApi(seed: (s: Session[]) => void, sessions: Session[]) {
+  seed(sessions)
+  mockUpdateSessionApi.mockResolvedValue({})
+}
+
 describe('sessionListStore', () => {
   let useSessionListStore: sessionListStoreMod.useSessionListStore
   let useSessionStore: sessionStoreMod.useSessionStore
@@ -298,8 +304,7 @@ describe('sessionListStore', () => {
   describe('toggleSessionStar', () => {
     it('从 false 切换为 true', () => {
       const sessions = [makeSession({ id: 's1', starred: false })]
-      seedSessions(sessions)
-      mockUpdateSessionApi.mockResolvedValue({})
+      seedSessionsWithUpdateApi(seedSessions, sessions)
 
       useSessionListStore.getState().toggleSessionStar('s1')
 
@@ -309,8 +314,7 @@ describe('sessionListStore', () => {
 
     it('从 true 切换为 false', () => {
       const sessions = [makeSession({ id: 's1', starred: true })]
-      seedSessions(sessions)
-      mockUpdateSessionApi.mockResolvedValue({})
+      seedSessionsWithUpdateApi(seedSessions, sessions)
 
       useSessionListStore.getState().toggleSessionStar('s1')
 
@@ -320,8 +324,7 @@ describe('sessionListStore', () => {
 
     it('异步持久化到后端', async () => {
       const sessions = [makeSession({ id: 's1', starred: false })]
-      seedSessions(sessions)
-      mockUpdateSessionApi.mockResolvedValue({})
+      seedSessionsWithUpdateApi(seedSessions, sessions)
 
       useSessionListStore.getState().toggleSessionStar('s1')
 
@@ -350,8 +353,7 @@ describe('sessionListStore', () => {
   describe('toggleSessionPin', () => {
     it('切换置顶状态', () => {
       const sessions = [makeSession({ id: 's1', pinned: false })]
-      seedSessions(sessions)
-      mockUpdateSessionApi.mockResolvedValue({})
+      seedSessionsWithUpdateApi(seedSessions, sessions)
 
       useSessionListStore.getState().toggleSessionPin('s1')
       expect(readSessions().find((s) => s.id === 's1')?.pinned).toBe(true)
@@ -366,8 +368,7 @@ describe('sessionListStore', () => {
   describe('renameSession', () => {
     it('更新本地标题并调用 API', async () => {
       const sessions = [makeSession({ id: 's1', title: '旧名' })]
-      seedSessions(sessions)
-      mockUpdateSessionApi.mockResolvedValue({})
+      seedSessionsWithUpdateApi(seedSessions, sessions)
 
       await useSessionListStore.getState().renameSession('s1', '  新名字  ')
 
@@ -439,8 +440,7 @@ describe('sessionListStore', () => {
   describe('autoRenameSessionIfNeeded', () => {
     it('默认标题时根据首条用户消息重命名', async () => {
       const sessions = [makeSession({ id: 's1', title: '灵汐' })]
-      seedSessions(sessions)
-      mockUpdateSessionApi.mockResolvedValue({})
+      seedSessionsWithUpdateApi(seedSessions, sessions)
 
       // Mock getMessages 返回一条用户消息
       const { usePipelineMessageStore } = await import('@/stores/pipelineMessageStore')
@@ -463,8 +463,7 @@ describe('sessionListStore', () => {
     it('超过30字符截断加省略号', async () => {
       const longText = '这是一段非常非常非常非常非常非常非常非常非常非常非常非常非常非常长的消息'
       const sessions = [makeSession({ id: 's1', title: '灵汐' })]
-      seedSessions(sessions)
-      mockUpdateSessionApi.mockResolvedValue({})
+      seedSessionsWithUpdateApi(seedSessions, sessions)
 
       const { usePipelineMessageStore } = await import('@/stores/pipelineMessageStore')
       const origGetState = usePipelineMessageStore.getState

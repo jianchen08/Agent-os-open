@@ -11,6 +11,7 @@
 import {
   Activity,
   Brain,
+  Sparkles,
   Copy,
   FileEdit,
   FileText,
@@ -51,6 +52,8 @@ const ICON_MAP: Record<string, LucideIcon> = {
   gauge: Activity,
   shield: ShieldCheck,
   permission: ShieldCheck,
+  sparkles: Sparkles,
+  mode: Sparkles,
 }
 
 /** 默认图标（未命中时的兜底，避免空白） */

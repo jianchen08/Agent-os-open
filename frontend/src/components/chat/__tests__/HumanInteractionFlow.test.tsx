@@ -25,31 +25,12 @@ import type { PendingInteraction } from '@/stores/interactionStore'
 // ---------------------------------------------------------------------------
 //  Mock: lucide-react
 // ---------------------------------------------------------------------------
-vi.mock('lucide-react', () => {
-  const icons = [
-    'ArrowRight',
-    'Check',
-    'Loader2',
-    'MessageSquare',
-    'Clock',
-    'AlertTriangle',
-    'Send',
-    'X',
-  ]
-  const m: Record<string, any> = {}
-  for (const name of icons) {
-    m[name] = (p: any) => <svg data-testid={`icon-${name}`} {...p} />
-  }
-  return m
-})
+vi.mock('lucide-react', async () => (await import('./helpers/chatFlowMocks')).lucideMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: @/lib/utils
 // ---------------------------------------------------------------------------
-vi.mock('@/lib/utils', () => ({
-  cn: (...args: (string | undefined | null | false)[]) =>
-    args.filter(Boolean).join(' '),
-}))
+vi.mock('@/lib/utils', async () => (await import('./helpers/chatFlowMocks')).cnMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: MarkdownRenderer
@@ -63,28 +44,7 @@ vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
 // ---------------------------------------------------------------------------
 //  Mock: UI Button
 // ---------------------------------------------------------------------------
-vi.mock('@/components/ui/button', () => ({
-  Button: ({
-    children,
-    onClick,
-    disabled,
-    ...rest
-  }: {
-    children: React.ReactNode
-    onClick?: () => void
-    disabled?: boolean
-    [key: string]: any
-  }) => (
-    <button
-      data-testid={`button-${typeof children === 'string' ? children : 'action'}`}
-      onClick={onClick}
-      disabled={disabled}
-      {...rest}
-    >
-      {children}
-    </button>
-  ),
-}))
+vi.mock('@/components/ui/button', async () => (await import('./helpers/chatFlowMocks')).buttonMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: Dialog（InteractionCard 使用 Dialog 渲染选项描述弹窗）
@@ -807,22 +767,6 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
       expect(state.pendingInteractions[0].status).toBe('responded')
     })
 
-    it('重复添加同一 requestId 应忽略', () => {
-      const interaction = createPendingInteraction({
-        requestId: 'req-dup',
-        mode: 'choice',
-        title: '重复测试',
-      })
-
-      act(() => {
-        useInteractionStore.getState().addInteraction(interaction)
-        useInteractionStore.getState().addInteraction(interaction)
-      })
-
-      const state = useInteractionStore.getState()
-      expect(state.pendingInteractions).toHaveLength(1)
-    })
-
     it('getPendingForThread 仅返回 pending 状态', () => {
       const interaction = createPendingInteraction({
         requestId: 'req-thread-filter',
@@ -846,6 +790,98 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
 
       result = useInteractionStore.getState().getPendingForThread('thread-xyz')
       expect(result).toHaveLength(0)
+    })
+
+    it('重复添加同一 requestId 应忽略', () => {
+      const interaction = createPendingInteraction({
+        requestId: 'req-dup',
+        mode: 'choice',
+        title: '重复测试',
+      })
+
+      act(() => {
+        useInteractionStore.getState().addInteraction(interaction)
+        useInteractionStore.getState().addInteraction(interaction)
+      })
+
+      const state = useInteractionStore.getState()
+      expect(state.pendingInteractions).toHaveLength(1)
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // 审批倒计时（BUG-14 有界等待）：timeoutSeconds + createdAt 驱动
+  // -----------------------------------------------------------------------
+  describe('审批倒计时', () => {
+    it('携带 timeoutSeconds 的 pending 卡显示剩余时间并每秒递减', async () => {
+      vi.useFakeTimers()
+      try {
+        const props = createCardProps({
+          interaction: createPendingInteraction({
+            mode: 'choice',
+            title: '安全审批: bash_execute',
+            timeoutSeconds: 600,
+            createdAt: new Date().toISOString(),
+            options: [{ id: 'approved_once', label: '仅本次执行' }],
+          }),
+        })
+
+        render(<InteractionCard {...props} />)
+
+        expect(screen.getByTestId('approval-countdown')).toHaveTextContent('剩余 10:00')
+        await act(async () => {
+          vi.advanceTimersByTime(1000)
+        })
+        expect(screen.getByTestId('approval-countdown')).toHaveTextContent('剩余 9:59')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('无 timeoutSeconds 的卡片不显示倒计时（会话等非审批交互不受影响）', () => {
+      const props = createCardProps({
+        interaction: createPendingInteraction({
+          mode: 'choice',
+          title: '选择操作',
+          options: [{ id: 'a', label: '批准' }],
+        }),
+      })
+
+      render(<InteractionCard {...props} />)
+      expect(screen.queryByTestId('approval-countdown')).not.toBeInTheDocument()
+    })
+
+    it('已过截止时间显示已超时提示', () => {
+      const props = createCardProps({
+        interaction: createPendingInteraction({
+          mode: 'choice',
+          title: '安全审批',
+          timeoutSeconds: 600,
+          createdAt: new Date(Date.now() - 700_000).toISOString(),
+          options: [{ id: 'approved_once', label: '仅本次执行' }],
+        }),
+      })
+
+      render(<InteractionCard {...props} />)
+      const countdown = screen.getByTestId('approval-countdown')
+      expect(countdown).toHaveTextContent('已超时')
+      // 剩余时间不为负
+      expect(countdown.textContent).not.toMatch(/-\d/)
+    })
+
+    it('已完结（responded）卡片不显示倒计时', () => {
+      const props = createCardProps({
+        interaction: createPendingInteraction({
+          mode: 'choice',
+          title: '安全审批',
+          timeoutSeconds: 600,
+          createdAt: new Date().toISOString(),
+          status: 'responded',
+        }),
+      })
+
+      render(<InteractionCard {...props} />)
+      expect(screen.queryByTestId('approval-countdown')).not.toBeInTheDocument()
     })
   })
 })

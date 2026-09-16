@@ -7,16 +7,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type * as handlersMod from '@/services/websocket/streaming/handlers'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 
 vi.mock('@/services/api/session', () => ({
   getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
@@ -37,10 +30,7 @@ vi.mock('@/services/api/session', () => ({
   }),
 }))
 
-vi.mock('@/utils/retry', () => ({
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockBase())
 
 describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
   let pipelineStore: pipelineMessageStoreMod.usePipelineMessageStore
@@ -56,18 +46,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
   beforeEach(async () => {
     vi.resetModules()
     const storeMod = await import('@/stores/pipelineMessageStore')
-    pipelineStore = storeMod.usePipelineMessageStore
-    pipelineStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: {},
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-    })
+    pipelineStore = await resetPipelineStoreState()
 
     const handlerMod = await import('@/services/websocket/streaming/handlers')
     handleStreamStart = handlerMod.handleStreamStart

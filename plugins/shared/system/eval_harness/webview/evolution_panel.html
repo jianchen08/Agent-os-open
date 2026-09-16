@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>自进化</title>
+  <style>
+  :root {
+    --bg: #f8fafc; --fg: #1a1a1a; --muted: #64748b; --border: #cbd5e1;
+    --card: #ffffff; --ph: #94a3b8; --ok: #16a34a; --bad: #dc2626;
+    --accent: #2563eb; --accent-soft: #dbeafe;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f172a; --fg: #e2e8f0; --muted: #94a3b8; --border: #334155;
+      --card: #1e293b; --ph: #475569; --ok: #4ade80; --bad: #f87171;
+      --accent: #60a5fa; --accent-soft: #1e3a5f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px; font-size: 13px; color: var(--fg); background: var(--bg);
+    font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  }
+  h1 { margin: 0; font-size: 15px; }
+  .sub { margin: 4px 0 12px; font-size: 11px; color: var(--muted); }
+  .cols { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+  .cols3 { display: grid; gap: 12px; grid-template-columns: 2fr 1fr; }
+  section {
+    border: 1px solid var(--border); border-radius: 6px; background: var(--card);
+    min-width: 0; margin-bottom: 12px;
+  }
+  h2 {
+    margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .body { padding: 8px 10px; }
+  .modes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .mode-card {
+    padding: 10px; text-align: center; cursor: pointer;
+    border: 1px dashed var(--ph); border-radius: 6px;
+  }
+  .mode-card:hover { border-color: var(--accent); }
+  .mode-card.active { border: 1px solid var(--accent); background: var(--accent-soft); }
+  .mode-card .name { font-size: 13px; font-weight: 600; }
+  .mode-card .stat { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .steps { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+  .step {
+    padding: 3px 8px; font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 10px;
+  }
+  .arrow { color: var(--ph); font-size: 11px; }
+  .round { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .round:last-child { border-bottom: none; }
+  .round .rid { color: var(--muted); font-size: 11px; }
+  .delta-up { color: var(--ok); } .delta-down { color: var(--bad); } .delta-flat { color: var(--muted); }
+  .bar-track { background: var(--bg); border: 1px solid var(--border); border-radius: 3px; height: 12px; margin-top: 3px; overflow: hidden; }
+  .bar-fill { background: var(--accent); height: 100%; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; }
+  .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+  .metric { padding: 8px; border: 1px dashed var(--ph); border-radius: 6px; text-align: center; }
+  .metric .val { font-size: 16px; font-weight: 600; }
+  .metric .label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .metric.na { opacity: 0.65; }
+  .placeholder {
+    padding: 12px; text-align: center; color: var(--muted);
+    border: 1px dashed var(--ph); border-radius: 6px; font-size: 12px;
+  }
+  .ph-note { font-size: 11px; opacity: 0.75; margin-top: 2px; }
+  .note { font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .breaker-ok { color: var(--ok); font-weight: 600; }
+  .tag { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 11px; border: 1px solid var(--border); color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>自进化</h1>
+  <p class="sub" id="sub">内环轮次观测（数据源：reports/eval 账本，供页时内联快照；增量刷新经 window.agentos 桥，归后续）</p>
+
+  <section aria-label="模式分组">
+    <h2>模式分组</h2>
+    <div class="body">
+      <div class="modes" id="modes"></div>
+      <p class="note">点击模式卡下钻该模式轮次；分组覆盖 coding/writing/roleplay/research 四模式。</p>
+    </div>
+  </section>
+
+  <div class="cols">
+    <section aria-label="轮次时间线">
+      <h2>轮次时间线（T1-T8 状态机）</h2>
+      <div class="body">
+        <div class="steps" role="list">
+          <span class="step" role="listitem">T1 测量</span><span class="arrow">→</span>
+          <span class="step" role="listitem">T2 归因</span><span class="arrow">→</span>
+          <span class="step" role="listitem">T3 提案</span><span class="arrow">→</span>
+          <span class="step" role="listitem">T4 试跑</span><span class="arrow">→</span>
+          <span class="step" role="listitem">T5 裁决</span><span class="arrow">→</span>
+          <span class="step" role="listitem">T6 晋升/回滚</span><span class="arrow">→</span>
+          <span class="step" role="listitem">T7 记忆回填</span><span class="arrow">→</span>
+          <span class="step" role="listitem">T8 循环决策</span>
+        </div>
+        <div id="timeline"></div>
+        <p class="note">回边：T5 拒→回 T3；T8 假设耗尽→回 T1；连败 K 触发熔断→收尾。步骤级留痕待轮次状态落账接入（数据源缺口）。</p>
+      </div>
+    </section>
+    <section aria-label="scorecard 走势">
+      <h2>scorecard 走势（基线 vs 各轮）</h2>
+      <div class="body" id="trend"></div>
+    </section>
+  </div>
+
+  <div class="cols">
+    <section aria-label="假设清单">
+      <h2>假设清单（提案账投影）</h2>
+      <div class="body" id="hypotheses"></div>
+    </section>
+    <section aria-label="杠杆命中率">
+      <h2>杠杆命中率</h2>
+      <div class="body" id="levers"></div>
+    </section>
+  </div>
+
+  <div class="cols3">
+    <section aria-label="健康度五指标">
+      <h2>健康度五指标</h2>
+      <div class="body">
+        <div class="metrics" id="metrics"></div>
+        <p class="note">口径对齐 Harness 层自进化方案 §6.2；判决一致率/归因有效度/循环经济性待 held-out 判决与 token 账落账（占位）。</p>
+      </div>
+    </section>
+    <section aria-label="熔断状态">
+      <h2>熔断状态</h2>
+      <div class="body" id="breaker"></div>
+    </section>
+  </div>
+
+  <section aria-label="自进化指标 P0-P3">
+    <h2>自进化指标（P0-P3 优先级裁决）</h2>
+    <div class="body">
+      <div id="evolution-verdict"></div>
+      <div class="metrics" id="evolution-metrics"></div>
+      <p class="note">P0 进化是否发生（学习率/迁移/判断力）· P1 稳定（保留率/方差/回滚）· P2 高效（样本/时间效率）· P3 安全（用户否决=一票否决）。领域指标不是自进化指标，单轮通过率只是原始观测（ADR 2026-09-16）。</p>
+    </div>
+  </section>
+
+  <script>
+  // 数据快照：供页时由插件 http.handle 把账本快照注入到下方赋值（锚点替换）；
+  // 直开本文件（快照为 null）时全区块按占位渲染。
+  window.__EVOLUTION_SNAPSHOT__ = null/*__SNAPSHOT_INJECT__*/;
+  var MODE_META = [
+    ["coding", "编码"], ["writing", "写作"], ["roleplay", "角色扮演"], ["research", "调研"]
+  ];
+  var snap = window.__EVOLUTION_SNAPSHOT__ || {};
+  var modes = snap.modes || {};
+  var active = null;
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+  function pct(passed, total) { return total > 0 ? Math.round(passed / total * 100) : 0; }
+  function deltaHtml(d) {
+    var cls = d > 0 ? 'delta-up' : (d < 0 ? 'delta-down' : 'delta-flat');
+    var sign = d > 0 ? '+' : '';
+    return '<span class="' + cls + '">' + sign + d + '</span>';
+  }
+  function placeholder(label, note) {
+    return '<div class="placeholder"><div>' + esc(label) + '</div>' +
+      (note ? '<div class="ph-note">' + esc(note) + '</div>' : '') + '</div>';
+  }
+
+  function renderModes() {
+    var el = document.getElementById('modes');
+    var html = '';
+    MODE_META.forEach(function(m) {
+      var key = m[0], name = m[1];
+      var e = modes[key];
+      var stat = e
+        ? e.rounds + ' 轮 · ' + e.passed + '/' + e.total + ' 通过'
+        : '暂无轮次数据';
+      html += '<div class="mode-card' + (active === key ? ' active' : '') + '" data-mode="' + key + '">' +
+        '<div class="name">' + name + '</div>' +
+        '<div class="stat">' + (e ? esc(stat) : stat) + '</div></div>';
+    });
+    el.innerHTML = html;
+    Array.prototype.forEach.call(el.querySelectorAll('.mode-card'), function(card) {
+      card.addEventListener('click', function() {
+        active = (active === card.getAttribute('data-mode')) ? null : card.getAttribute('data-mode');
+        render();
+      });
+    });
+  }
+
+  function renderTimeline() {
+    var el = document.getElementById('timeline');
+    if (!active || !modes[active]) {
+      el.innerHTML = placeholder('选择上方模式卡下钻轮次', null);
+      return;
+    }
+    var rows = modes[active].series.map(function(p) {
+      var failed = (p.failed_cases || []);
+      return '<div class="round"><b>' + esc(p.run_id) + '</b> · ' +
+        p.passed + '/' + p.total + ' 通过 · Δ基线 ' + deltaHtml(p.delta_vs_baseline) +
+        (failed.length ? ' · 失败: ' + esc(failed.join(', ')) : '') + '</div>';
+    }).join('');
+    el.innerHTML = rows;
+  }
+
+  function renderTrend() {
+    var el = document.getElementById('trend');
+    if (!active || !modes[active]) {
+      el.innerHTML = placeholder('选择上方模式卡查看走势', null);
+      return;
+    }
+    var html = modes[active].series.map(function(p) {
+      var w = pct(p.passed, p.total);
+      return '<div style="margin-bottom:6px"><span class="rid">' + esc(p.run_id) + '</span> ' +
+        p.passed + '/' + p.total +
+        '<div class="bar-track"><div class="bar-fill" style="width:' + w + '%"></div></div></div>';
+    }).join('');
+    el.innerHTML = html + '<p class="note">基线 = 该模式首轮通过数。</p>';
+  }
+
+  function renderHypotheses() {
+    var el = document.getElementById('hypotheses');
+    var list = snap.hypotheses || [];
+    if (!list.length) {
+      el.innerHTML = placeholder('暂无假设/提案账', '独立假设账待 T2 归因落账后接入（现投影提案动机）');
+      return;
+    }
+    var rows = list.map(function(h) {
+      return '<tr><td>' + esc(h.proposal_id) + '</td><td>' + esc(h.target) + '</td>' +
+        '<td>' + esc(h.motivation) + '</td><td><span class="tag">' + esc(h.outcome) + '</span></td></tr>';
+    }).join('');
+    el.innerHTML = '<table><tr><th>提案</th><th>目标物料</th><th>动机（假设）</th><th>状态</th></tr>' + rows + '</table>';
+  }
+
+  function renderLevers() {
+    var el = document.getElementById('levers');
+    var levers = snap.levers || {};
+    var keys = Object.keys(levers);
+    if (!keys.length) {
+      el.innerHTML = placeholder('暂无杠杆账', '提案落账后按动机聚合（口径同 eval_health）');
+      return;
+    }
+    var rows = keys.map(function(k) {
+      var lv = levers[k];
+      return '<tr><td>' + esc(k) + '</td><td>' + lv.applied + '/' + lv.total + '</td></tr>';
+    }).join('');
+    var overall = snap.hit_rate === null || snap.hit_rate === undefined
+      ? '—' : (snap.hit_rate * 100).toFixed(1) + '%';
+    el.innerHTML = '<p>总命中率: <b>' + overall + '</b></p>' +
+      '<table><tr><th>杠杆（动机）</th><th>命中/总数</th></tr>' + rows + '</table>';
+  }
+
+  function renderMetrics() {
+    var el = document.getElementById('metrics');
+    function slot(label, val, na) {
+      return '<div class="metric' + (na ? ' na' : '') + '"><div class="val">' + val + '</div>' +
+        '<div class="label">' + esc(label) + '</div></div>';
+    }
+    function rate(v) {
+      return (v === null || v === undefined) ? '—' : (v * 100).toFixed(1) + '%';
+    }
+    el.innerHTML =
+      slot('提案命中率', rate(snap.hit_rate), snap.hit_rate === null || snap.hit_rate === undefined) +
+      slot('回滚率', rate(snap.reject_rate), snap.reject_rate === null || snap.reject_rate === undefined) +
+      slot('判决一致率', '占位', true) +
+      slot('归因有效度', '占位', true) +
+      slot('循环经济性', '占位', true);
+  }
+
+  function renderBreaker() {
+    var el = document.getElementById('breaker');
+    if (!snap.breaker) {
+      el.innerHTML = placeholder('未记录到熔断', '连败 K 触发计数待 T7 落账接入（数据源缺口）');
+      return;
+    }
+    el.innerHTML = '<p class="breaker-ok">状态: ' + esc(snap.breaker.state || '—') + '</p>';
+  }
+
+  function renderEvolution() {
+    var vEl = document.getElementById('evolution-verdict');
+    var mEl = document.getElementById('evolution-metrics');
+    var evo = snap.evolution;
+    if (!evo || !evo.verdict) {
+      vEl.innerHTML = placeholder('暂无 P0-P3 裁决', '快照未携带 evolution 字段（旧账本或插件未升级）');
+      mEl.innerHTML = '';
+      return;
+    }
+    var labels = { evolving: '进化中', no_evolution: '进化未发生（P0 不达标）',
+                   unstable: '不可靠（P1 不达标）', inefficient: '低效（P2 不达标）',
+                   vetoed: '一票否决（P3 触发）', insufficient_data: '数据不足' };
+    var label = labels[evo.verdict] || evo.verdict;
+    var cls = evo.verdict === 'evolving' ? 'delta-up'
+      : (evo.verdict === 'insufficient_data' ? 'delta-flat' : 'delta-down');
+    vEl.innerHTML = '<p><b>' + esc(label) + '</b> <span class="' + cls + '">verdict=' +
+      esc(evo.verdict) + '</span> · ' + esc(evo.reason || '') + '</p>';
+    function slot(label, val, na) {
+      return '<div class="metric' + (na ? ' na' : '') + '"><div class="val">' + esc(val) +
+        '</div><div class="label">' + esc(label) + '</div></div>';
+    }
+    function short(x) {
+      if (x === null || x === undefined) return '—';
+      if (typeof x === 'object') return JSON.stringify(x);
+      return String(x);
+    }
+    var p0 = evo.p0 || {}, p1 = evo.p1 || {}, p2 = evo.p2 || {}, p3 = evo.p3 || {};
+    var lr = p0.learning_rates || {};
+    var lrKeys = Object.keys(lr);
+    var judgment = p0.judgment || {};
+    mEl.innerHTML =
+      slot('P0 学习率（斜率）', lrKeys.length
+        ? lrKeys.map(function(k) { return k + ':' + lr[k].slope; }).join(' / ') : '—',
+        !lrKeys.length) +
+      slot('P0 预测失准率', short(judgment.prediction_miss_rate),
+        judgment.prediction_miss_rate === null || judgment.prediction_miss_rate === undefined) +
+      slot('P1 保留率', short(p1.retention),
+        p1.retention === null || p1.retention === undefined) +
+      slot('P1 方差收敛', short(p1.variance),
+        !p1.variance) +
+      slot('P2 样本效率', short(p2.sample_efficiency),
+        !p2.sample_efficiency) +
+      slot('P3 用户否决回滚', short(p3.user_veto_reverts), false);
+  }
+
+  function render() {
+    renderModes();
+    renderTimeline();
+    renderTrend();
+    renderHypotheses();
+    renderLevers();
+    renderMetrics();
+    renderBreaker();
+    renderEvolution();
+    document.getElementById('sub').textContent =
+      '内环轮次观测（共 ' + (snap.rounds_total || 0) + ' 轮 · 数据源: reports/eval 账本供页内联快照；' +
+      '增量刷新经 window.agentos 桥，归后续）';
+  }
+  render();
+  </script>
+</body>
+</html>

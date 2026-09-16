@@ -19,6 +19,8 @@ chrono.workspace = true
 dirs.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
+# 模式种子版本对账（user_space.rs）：种子 version 按 semver 语义比较
+semver = "1"
 
 [dev-dependencies]
 serde_json.workspace = true

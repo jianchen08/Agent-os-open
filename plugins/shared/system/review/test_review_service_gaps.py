@@ -34,11 +34,21 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
-if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
+
+# 本插件模块间用裸名 import（`from models import ...`），合宿车道里同名裸模块
+# 可能已被其他插件（artifacts 等）抢占解析序。每次加载前重申本目录的解析
+# 优先权（等价 SDK bootstrap._promote）。不逐出 sys.modules 裸名缓存——同车道
+# 其他 review 测试（tests/plugins/system/review/）在模块级绑定了 review_service
+# 单例句柄，逐出会让其 reset 落在旧副本上、真单例跨测试泄漏。
+def _promote_plugin_dir() -> None:
+    path = str(_PLUGIN_DIR)
+    while path in sys.path:
+        sys.path.remove(path)
+    sys.path.insert(0, path)
 
 
 def _load(name: str) -> Any:
+    _promote_plugin_dir()
     spec = importlib.util.spec_from_file_location(f"{name}_gaps_probe", _PLUGIN_DIR / f"{name}.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

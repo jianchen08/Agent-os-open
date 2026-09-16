@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * buildChildWindowUrl 测试：Electron 子窗口深链 URL 形态
  *

@@ -21,8 +21,9 @@
 #   _MAX 可覆盖），连续 AGENTOS_SUPERVISOR_MAX_CONSECUTIVE_FAILS（默认 5）
 #   次失败熔断停止；运行满 AGENTOS_SUPERVISOR_STABLE_SECS（默认 60s）视为
 #   成功拉起，重置连败计数与退避（短于阈值继续累计，防 crash loop 洗白
-#   计数）。每次退出/退避/重拉/熔断追加写仓库根 .kernel_supervisor.log
-#   （死亡取证单一真值）。原外部会话监督者 .zcode_tmp_kernel_supervisor.sh
+#   计数）。监督者自身不落任何日志文件（2026-09-15 单日志契约：内核唯一
+#   日志为自身轮转文件层 logs/kernel.log.YYYY-MM-DD，原 .kernel_supervisor.log
+#   取证文件已随无界追加面一并退役）。原外部会话监督者 .zcode_tmp_kernel_supervisor.sh
 #   （前 ZCode 会话后台任务的临时产物）已退役消失，意外死亡恢复由本监督
 #   循环自身承担。
 # ============================================================
@@ -317,27 +318,19 @@ export AGENTOS_CONFIG_ROOT="$PROJECT_ROOT/config"
 # same env defaults the .bat launcher pins, or a respawn silently drops them.
 # Matches start_web_02.bat: AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS default 300s.
 export AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS="${AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS:-300}"
-# G8 监督者段（测试钩子：测试从 `SUPERVISOR_LOG=` 行提取到 `kernel_supervisor &`
-# 前一行，以假内核驱动本循环；提取契约勿破坏行首锚定）。
-SUPERVISOR_LOG="$PROJECT_ROOT/.kernel_supervisor.log"
+# G8 监督者段：监督者自身不落盘（日志契约见文件头）。
 # 退避/熔断参数：环境变量可覆盖（测试注入小值快速验证），缺省即生产契约。
 : "${AGENTOS_SUPERVISOR_BACKOFF_MS_BASE:=5000}"
 : "${AGENTOS_SUPERVISOR_BACKOFF_MS_MAX:=45000}"
 : "${AGENTOS_SUPERVISOR_MAX_CONSECUTIVE_FAILS:=5}"
 : "${AGENTOS_SUPERVISOR_STABLE_SECS:=60}"
-# 取证落盘：每次退出/退避/重拉/熔断追加一行（格式见 kernel_supervisor 注释）。
-_sup_log() {
-    printf '[%s] action=%s exit_code=%s consecutive_failures=%s\n' \
-        "$(date -Iseconds)" "$1" "$2" "$3" >> "$SUPERVISOR_LOG"
-}
 # G8 监督者循环契约：
 # - 退出码 75（restart requested：POST /api/v1/system/restart 排空退出，或
 #   watcher 的 cdylib 集合变更自动重启）：1s 后重拉，不计数、不退避、不熔断；
 # - 其它退出码：自动重拉，指数退避（base 起 ×3 递增，封顶 _MAX）；连续
 #   _MAX_CONSECUTIVE_FAILS 次失败即熔断停止；单次运行时长 ≥ _STABLE_SECS
 #   视为成功拉起，重置连败计数与退避，短于阈值继续累计（防 crash loop 洗白
-#   计数）；75 退出既不计失败也不重置计数；
-# - 每次退出/退避/重拉/熔断经 _sup_log 写入 $SUPERVISOR_LOG。
+#   计数）；75 退出既不计失败也不重置计数。
 kernel_supervisor() {
     local fails=0 backoff_ms=0
     local spawn_ts=0 rc=0 runtime_secs=0
@@ -350,9 +343,7 @@ kernel_supervisor() {
         runtime_secs=$(( $(date +%s) - spawn_ts ))
         if [ "$rc" -eq 75 ]; then
             echo "[supervisor] G8 restart requested (exit 75) — respawning in 1s..."
-            _sup_log exited "$rc" "$fails"
             sleep 1
-            _sup_log respawn "$rc" "$fails"
             continue
         fi
         if [ "$runtime_secs" -ge "$AGENTOS_SUPERVISOR_STABLE_SECS" ]; then
@@ -361,10 +352,8 @@ kernel_supervisor() {
         fi
         fails=$((fails + 1))
         echo "[supervisor] kernel exited (code $rc, ran ${runtime_secs}s), consecutive failures: $fails."
-        _sup_log exited "$rc" "$fails"
         if [ "$fails" -ge "$AGENTOS_SUPERVISOR_MAX_CONSECUTIVE_FAILS" ]; then
             echo "[supervisor] circuit break: $fails consecutive failures, supervisor stops."
-            _sup_log circuit-break "$rc" "$fails"
             return "$rc"
         fi
         if [ "$backoff_ms" -eq 0 ]; then
@@ -374,10 +363,8 @@ kernel_supervisor() {
             backoff_ms=$AGENTOS_SUPERVISOR_BACKOFF_MS_MAX
         fi
         echo "[supervisor] non-75 exit, backing off ${backoff_ms}ms before respawn."
-        _sup_log backoff "$rc" "$fails"
         sleep "$((backoff_ms / 1000)).$((backoff_ms % 1000))"
         backoff_ms=$((backoff_ms * 3))
-        _sup_log respawn "$rc" "$fails"
     done
 }
 kernel_supervisor &

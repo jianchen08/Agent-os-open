@@ -110,8 +110,9 @@ async def execute(state: dict, config: dict | None = None) -> dict:
 
 # ─── 权限模式切换 HTTP 面（/ext/pipeline_security_check/permission_mode）──────────
 # 纯插件能力：内核 dispatcher 按 plugin.json 的 http_endpoints 自动注册路由，
-# 经 http.handle 进本插件。key = pipeline_id（每管道独立，对齐"权限跟当前
-# 选中管道标签走"）。高风险模式（auto/bypass）切换先经 human-interaction 弹
+# 经 http.handle 进本插件。key = session_id（会话稳定键，与执行侧
+# _explicit_permission_mode 同键；同会话内 pipeline_id 随任务/子代理轮换，
+# 不作键——BUG-15）。高风险模式（auto/bypass）切换先经 human-interaction 弹
 # 审批窗确认（复用现有审批 UI + 留痕），确认后才写入权限模式表。
 
 # 高风险模式：切换需用户审批确认
@@ -243,56 +244,71 @@ def _http_response(status: int, data: dict) -> dict:
 
 
 def _resolve_key(body: dict) -> str:
-    """解析权限模式 key：pipeline_id 为主（每管道独立），兼容旧 session_id。"""
-    return str(body.get("pipeline_id") or body.get("session_id") or "")
+    """解析权限模式 key：session_id（会话稳定键，BUG-15 裁定）。
+
+    前端 FormWidget 在 POST body / GET query 中同传 pipeline_id 与 session_id，
+    本端点只认 session_id——pipeline_id 同会话内随任务/子代理轮换，键在它上面
+    会导致写入键与执行键失配。
+    """
+    return str(body.get("session_id") or "")
 
 
 async def _switch_permission_mode(body: dict) -> dict:
-    """切换管道权限模式（高风险模式需审批确认）。"""
+    """切换会话权限模式（高风险模式需审批确认）。
+
+    写表即显式选择：包括显式选 default（表内无条目时也要落表）——隔离/worktree
+    会话的免审批默认仅在「未显式选择」（表内无条目）时生效，显式选 default
+    表示黑名单照常生效，必须能与缺省态区分。
+    """
     key = _resolve_key(body)
     mode = str(body.get("mode", "") or "")
 
     if not key:
-        return _http_response(400, {"error": "pipeline_id required", "switched": False})
+        return _http_response(400, {"error": "session_id required", "switched": False})
     if mode not in PERMISSION_MODES:
         return _http_response(400, {"error": f"invalid mode: {mode}", "switched": False})
 
-    current = _PERMISSION_MODES.get(key, "default")
-    if mode == current:
+    current = _PERMISSION_MODES.get(key)
+    if current is not None and current == mode:
         return _http_response(200, {"switched": True, "mode": mode, "unchanged": True})
 
     # 高风险模式：经 human-interaction 弹审批窗确认（复用现有审批 UI；
-    # 确认请求用真实 session_id——前端审批 UI 按会话过滤，pipeline_id 会不显示）
+    # 确认请求用会话 id——前端审批 UI 按会话过滤）
     if mode in _HIGH_RISK_MODES:
         confirmed = await _confirm_switch(
-            str(body.get("session_id") or key),
+            key,
             mode,
             user_id=str(body.get("user_id") or ""),
         )
         if not confirmed:
             return _http_response(
                 200,
-                {"switched": False, "reason": "用户未确认或确认超时", "mode": current},
+                {"switched": False, "reason": "用户未确认或确认超时", "mode": current or "default"},
             )
 
     _PERMISSION_MODES[key] = mode
     _save_permission_modes()
     logger.info(
-        "[security_check] 权限模式切换 | pipeline=%s | %s → %s",
+        "[security_check] 权限模式切换 | session=%s | %s → %s",
         key,
-        current,
+        current or "未显式选择",
         mode,
     )
     return _http_response(200, {"switched": True, "mode": mode})
 
 
 async def _get_permission_mode(body: dict) -> dict:
-    """查询管道当前权限模式（GET 经 query 参数传 pipeline_id）。"""
+    """查询会话当前权限模式（GET 经 query 参数传 session_id）。
+
+    explicit=True 表示用户显式选择过（表内条目）；False 表示缺省态——
+    前端据此显示隔离/worktree 会话的免审批默认而非 default 档。
+    """
     key = _resolve_key(body)
+    explicit = key in _PERMISSION_MODES
     mode = _PERMISSION_MODES.get(key, "default")
     return _http_response(
         200,
-        {"mode": mode, "valid_modes": list(PERMISSION_MODES.keys())},
+        {"mode": mode, "explicit": explicit, "valid_modes": list(PERMISSION_MODES.keys())},
     )
 
 

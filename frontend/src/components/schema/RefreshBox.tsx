@@ -8,9 +8,15 @@
  * 声明层用法：
  *   { "id": "status", "type": "form",
  *     "props": { "refresh": { "type": "poll", "intervalSeconds": 5 } } }
+ *
+ * 离屏暂停：本组件渲染的包裹 div 上判定可见性（工作区面板非激活 tab 为
+ * display:none / 窗口最小化）——不可见时冻结轮询定时器（隐藏面板继续轮询
+ * 只产出永不显示的重挂载与请求负载），恢复可见立即补拉一次（不等下一周期）。
+ * intervalSeconds=0（无轮询声明）不参与暂停/补拉，行为与旧版一致。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useElementVisible } from '@/hooks/useElementVisible'
 
 export interface RefreshDecl {
   type: 'poll'
@@ -25,13 +31,25 @@ export interface RefreshBoxProps {
 export function RefreshBox({ refresh, children }: RefreshBoxProps) {
   const rules = useMemo(() => [refresh], [refresh])
   const [reloadKey, setReloadKey] = useState(0)
+  const { ref, visible } = useElementVisible<HTMLDivElement>()
+  const polling = rules[0].intervalSeconds > 0
 
   useEffect(() => {
-    const intervalMs = rules[0].intervalSeconds > 0 ? rules[0].intervalSeconds * 1000 : 0
-    if (intervalMs === 0) return
-    const timer = window.setInterval(() => setReloadKey((k) => k + 1), intervalMs)
+    if (!visible || !polling) return
+    const timer = window.setInterval(
+      () => setReloadKey((k) => k + 1),
+      rules[0].intervalSeconds * 1000,
+    )
     return () => window.clearInterval(timer)
-  }, [rules])
+  }, [rules, visible, polling])
 
-  return <>{children(reloadKey)}</>
+  /** 恢复可见立即重拉一次（仅轮询声明方有"数据新鲜度"语义需要补拉） */
+  const wasVisible = useRef(true)
+  useEffect(() => {
+    const resumed = visible && !wasVisible.current
+    wasVisible.current = visible
+    if (resumed && polling) setReloadKey((k) => k + 1)
+  }, [visible, polling])
+
+  return <div ref={ref}>{children(reloadKey)}</div>
 }

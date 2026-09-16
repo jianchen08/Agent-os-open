@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * GrowthLoop 分支补测：initializeGrowthLoop / refreshPluginContributions /
  * destroyGrowthLoop / restartGrowthLoop 四条入口的完整链路——
@@ -350,10 +351,12 @@ describe('GrowthLoop — destroyGrowthLoop 清理', () => {
 })
 
 describe('GrowthLoop — restartGrowthLoop', () => {
-  it('成功路径：先清理再重建，补挂 resync 与预置组件', async () => {
+  it('成功路径：不前置清空注册表（原子换装归 loadFromSchema），补挂 resync 与预置组件', async () => {
     await restartGrowthLoop()
 
-    expect(mocks.clear).toHaveBeenCalledTimes(1)
+    // BUG-26：前置 clear 会让拉取在飞期出现「声明已消失」空窗（侧栏残留按钮
+    // 点击落入 opener 失败分支）——换装必须由 loadFromSchema 自身清空+重注册完成
+    expect(mocks.clear).not.toHaveBeenCalled()
     expect(mocks.initializeWidgets).toHaveBeenCalledTimes(1)
     expect(mocks.initResyncOnSchema).toHaveBeenCalledTimes(1)
     expect(mocks.loadFromSchema).toHaveBeenCalledTimes(1)

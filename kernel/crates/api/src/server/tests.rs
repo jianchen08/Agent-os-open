@@ -415,7 +415,7 @@ async fn test_tools_returns_200() {
 
 #[tokio::test]
 async fn test_chat_post_returns_200() {
-    let (state, _invoker, _store, sqlite) = make_engine_state();
+    let (state, _invoker, _store, sqlite, _user_space_guard) = make_engine_state();
     // 会话先建：REST chat 按 session 的 active_pipeline_id 解析执行坐标，
     // 会话不存在 = 协议违约（会话 id 不得充当管道坐标回退）。
     seed_session_with_pipeline(&sqlite, "s1", "pipe-s1", "default").await;
@@ -490,7 +490,7 @@ async fn test_health_response_body() {
 #[tokio::test]
 async fn test_chat_uses_engine_not_echo() {
     // 验证 chat 响应不再是简单的 "Response to: xxx"
-    let (state, _invoker, _store, sqlite) = make_engine_state();
+    let (state, _invoker, _store, sqlite, _user_space_guard) = make_engine_state();
     seed_session_with_pipeline(&sqlite, "test_session", "pipe-test_session", "default").await;
     let app = build_router(state);
     // A11：chat 已纳入写面鉴权，先 login 拿 token
@@ -799,6 +799,10 @@ async fn hot_reload_compiles_step_referencing_plugin_discovered_after_boot() {
     // 场景 A：manifests 未含插件 → 未知引用编译失败，降级空管道。
     let root_a = std::env::temp_dir().join(format!("hr_a_{}", uuid::Uuid::new_v4().simple()));
     let config_a = write_cfg(&root_a);
+    // 钉用户根到本用例临时目录：resolve_pipeline_config_path 先查用户配置层，
+    // 宿主机真实用户空间播种过 pipelines/autonomous.yaml 时会旁路 TempDir
+    // （读到真实管道，其插件引用不在注入 manifests 内 → 编译恒败）。
+    let _guard_a = crate::test_env::pin_user_root(&root_a);
     let state_a = AppState::new();
     let compiled_a = maybe_reload_compiled_pipeline(&state_a, &config_a).await;
     assert!(
@@ -809,6 +813,8 @@ async fn hot_reload_compiles_step_referencing_plugin_discovered_after_boot() {
     // 场景 B：同 YAML，manifests store 已含该插件（热发现合并后）→ 编译成功。
     let root_b = std::env::temp_dir().join(format!("hr_b_{}", uuid::Uuid::new_v4().simple()));
     let config_b = write_cfg(&root_b);
+    // 同线程重复 pin「后钉者赢」：场景 B 的解析切到 root_b。
+    let _guard_b = crate::test_env::pin_user_root(&root_b);
     let mut state_b = AppState::new();
     state_b.manifests = Arc::new(tokio::sync::RwLock::new(vec![mk_manifest_json(
         "late_plugin",
@@ -873,6 +879,7 @@ fn make_engine_state() -> (
     Arc<RecordingInvoker>,
     Arc<dyn agentos_core::traits::StorageBackend>,
     Arc<agentos_engine::SqliteStore>,
+    crate::test_env::UserSpaceGuard,
 ) {
     let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let store: Arc<dyn agentos_core::traits::StorageBackend> = sqlite.clone();
@@ -884,6 +891,11 @@ fn make_engine_state() -> (
     });
     // 临时项目根：含 config/pipelines/autonomous.yaml，引用 mock LLM 插件
     let tmp_root = std::env::temp_dir().join(format!("mt_test_{}", uuid::Uuid::new_v4().simple()));
+    // 用户空间钉到该临时根：`resolve_pipeline_config_path` 先查用户配置层，
+    // 宿主机真实用户空间被播种过 pipelines/autonomous.yaml（真机跑过一次应用
+    // 即会）便旁路下面的临时 YAML，用例读到真实配置而误红。guard 随返回值交给
+    // 调用方保活（drop 即还原）。
+    let _user_space_guard = crate::test_env::pin_user_root(&tmp_root);
     let cfg_dir = tmp_root.join("config").join("pipelines");
     std::fs::create_dir_all(&cfg_dir).unwrap();
     std::fs::write(
@@ -923,12 +935,12 @@ fn make_engine_state() -> (
     state.manifests = Arc::new(tokio::sync::RwLock::new(vec![mk_manifest_json(
         "mock_llm_core",
     )]));
-    (state, invoker, store, sqlite)
+    (state, invoker, store, sqlite, _user_space_guard)
 }
 
 #[tokio::test]
 async fn test_multi_turn_second_round_sees_first_round_context() {
-    let (state, invoker, _store, _sqlite) = make_engine_state();
+    let (state, invoker, _store, _sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_mt", "thread_mt");
     let pipe = "pipe_mt";
     let thread = "thread_mt";
@@ -1000,7 +1012,7 @@ async fn test_multi_turn_second_round_sees_first_round_context() {
 async fn test_multi_turn_http_pipeline_coordinate_context_and_reject_missing() {
     // pipeline_id 是执行态唯一坐标：多轮上下文按管道坐标累积；空坐标 = 协议
     // 违约，显式拒绝（会话 id 是组织集合 id，不得回退充当执行坐标）。
-    let (state, invoker, _store, _sqlite) = make_engine_state();
+    let (state, invoker, _store, _sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_http", "thread_http");
     let thread = "thread_http";
     let pipe = "pipe_http";
@@ -1081,7 +1093,7 @@ async fn test_multi_turn_cold_start_recovers_from_store() {
     // （零兼容重排：messages 持久真值 = slots 表，checkpoint/traces 只管标量）。
     // 模拟：直接向 slots 写入第一轮 user+assistant（pipeline_id=pipe_cold），
     // 再调用 process_via_engine，断言 LLM 收到历史 + 当前。
-    let (state, invoker, store, sqlite) = make_engine_state();
+    let (state, invoker, store, sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_cold", "thread_cold");
     let pipe = "pipe_cold";
     let thread = "thread_cold";
@@ -1151,7 +1163,7 @@ async fn test_cold_recovery_ignores_stale_ended_flag() {
     // LLM 一次请求都不发（真机：主管道 38ms 秒终 + 两个任务管道 1-2s 秒终，
     // 仅 1 条 user_input trace）。ended 属 per-run 易变键（VOLATILE_RUN_KEYS），
     // 冷恢复必须跳过，本轮以 stage_build_initial_state 的 ended=false 起跑。
-    let (state, invoker, store, sqlite) = make_engine_state();
+    let (state, invoker, store, sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_ended", "thread_ended");
     let pipe = "pipe_ended";
     let thread = "thread_ended";
@@ -1223,7 +1235,7 @@ async fn test_cold_recovery_ignores_stale_ended_flag() {
 /// get_messages_by_pipeline 在各自 scope 内读回。
 #[tokio::test]
 async fn test_multi_user_isolation_end_to_end() {
-    let (state, _invoker, store, _sqlite) = make_engine_state();
+    let (state, _invoker, store, _sqlite, _user_space_guard) = make_engine_state();
 
     // 播种两个用户：alice → tenant_alice，bob → tenant_bob（一用户一租户）
     let now = chrono::Utc::now().to_rfc3339();
@@ -1863,7 +1875,7 @@ fn test_apply_state_overlay_lineage_keys_not_overwritten_once_present() {
 async fn test_process_via_engine_state_overlay_reaches_plugin_context() {
     // 真实引擎路径（非 mock 合并点）：overlay 键进入插件可见 state——
     // task.* 消费契约（task_evaluate / child_task_guard 等读 state 直读）
-    let (state, invoker, _store, _sqlite) = make_engine_state();
+    let (state, invoker, _store, _sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_overlay", "thread_overlay");
     let overlay = json!({
         "task.goal": "写周报",
@@ -2121,7 +2133,7 @@ fn test_derive_run_terminal_events_signature_vocabulary() {
 async fn test_process_via_engine_emits_run_terminal_domain_events() {
     // wiring：真实引擎跑一轮 → 声明 domain_event hook 的启用插件收到
     // run.completed（任务域事件派生已下沉 task_service 插件，内核只发 run.*）
-    let (state, invoker, _store, _sqlite) = make_engine_state();
+    let (state, invoker, _store, _sqlite, _user_space_guard) = make_engine_state();
     // 订阅方插件：manifest 声明 DomainEvent hook 且启用
     {
         let mut manifests = state.manifests.write().await;
@@ -2230,7 +2242,7 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
 /// 触发路径：state.next_phase 指向不存在的循环体（引擎转移决策 Err）。
 #[tokio::test]
 async fn test_engine_run_failure_marks_run_failed() {
-    let (state, _invoker, _store, sqlite) = make_engine_state();
+    let (state, _invoker, _store, sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_gap2_err", "thread_gap2_err");
     let overlay = json!({"next_phase": "ghost_body"});
     let r = agentos_tenant::scope(
@@ -2274,7 +2286,7 @@ async fn test_engine_run_failure_marks_run_failed() {
 /// 写入）→ persist_run_end 落 run=cancelled，不再覆写为 Completed。
 #[tokio::test]
 async fn test_engine_user_stop_marks_run_cancelled() {
-    let (state, _invoker, _store, sqlite) = make_engine_state();
+    let (state, _invoker, _store, sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_cancel", "thread_cancel");
     let overlay = json!({"router.stop_reason": "user_requested"});
     let r = agentos_tenant::scope(
@@ -2312,7 +2324,7 @@ async fn test_engine_user_stop_marks_run_cancelled() {
 /// 重复 run / 同消息双份 / 陈旧回复——e2e GAP-3 现象②）。
 #[tokio::test]
 async fn test_replay_after_interrupt_does_not_duplicate_user_message() {
-    let (state, invoker, store, _sqlite) = make_engine_state();
+    let (state, invoker, store, _sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_gap3", "thread_gap3");
 
     // 模拟中断：user 消息已持久化（slot 落库）但 run 未产出 assistant
@@ -2372,7 +2384,7 @@ async fn test_replay_after_interrupt_does_not_duplicate_user_message() {
 /// 整轮拒绝——轮首消息（触发新 run 的那条）曾因此全部不可编辑重发/回退。
 #[tokio::test]
 async fn test_user_message_slot_carries_run_id() {
-    let (state, _invoker, _store, sqlite) = make_engine_state();
+    let (state, _invoker, _store, sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_runid", "thread_runid");
     let r = agentos_tenant::scope(
         tenant,
@@ -2424,7 +2436,7 @@ async fn test_user_message_slot_carries_run_id() {
 /// 第二轮同文 user 是新输入 → 应正常 append（2 条 user）。
 #[tokio::test]
 async fn test_repeated_user_message_after_reply_still_appends() {
-    let (state, _invoker, store, _sqlite) = make_engine_state();
+    let (state, _invoker, store, _sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_gap3b", "thread_gap3b");
     for _ in 0..2 {
         let _ = agentos_tenant::scope(
@@ -2464,7 +2476,7 @@ async fn test_repeated_user_message_after_reply_still_appends() {
 /// 串行（ws_session/HTTP handler），此处按会话维度并发与生产同构。
 #[tokio::test]
 async fn test_concurrent_chats_with_interrupted_replay_consistent() {
-    let (state, _invoker, store, _sqlite) = make_engine_state();
+    let (state, _invoker, store, _sqlite, _user_space_guard) = make_engine_state();
     // 管道 A 预置中断消息（user 已落槽、run 未产出 assistant——重启截断签名）
     let _ = store
         .apply_messages_ops_to_table(
@@ -2553,7 +2565,7 @@ async fn test_run_terminal_does_not_write_task_status() {
     // overlay 带 task.* 字段的管道跑完 → registry 常驻 state 与
     // pipeline_state 表都不得出现内核回写的 task.status=completed——
     // 任务终态裁决在任务域插件，内核只广播 run 终态域事件。
-    let (state, _invoker, store, _sqlite) = make_engine_state();
+    let (state, _invoker, store, _sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_unify", "thread_unify");
     let overlay = json!({"task.id": "t_unify", "task.goal": "统一验证", "task.status": "pending"});
     let r = agentos_tenant::scope(
@@ -2632,7 +2644,7 @@ async fn test_run_terminal_skips_writeback_for_owned_only_pipeline() {
     // 管道，run 结束不得回写 task.status/task.ended_at（否则任务聚合出口
     // 出现无标题无 task.id 的幽灵任务行）。判定口径与插件侧聚合
     // `_list_tasks_from_state` 第一趟一致：含 `task.` 且不含 `task.owned.`。
-    let (state, _invoker, store, _sqlite) = make_engine_state();
+    let (state, _invoker, store, _sqlite, _user_space_guard) = make_engine_state();
     let tenant = TenantContext::new("tenant_owned_only", "thread_owned_only");
     let overlay = json!({
         "task.owned.child_pipe_1.title": "AI行业近月发展调研",
@@ -2692,7 +2704,7 @@ async fn test_task_lifecycle_end_to_end_state_flow() {
     // ③ 任务状态保持出生值 pending（职责边界：run 终态不写
     //    task.status，终态由任务域插件经 pipeline-state.update 裁决）
     // ④ pipeline-state.list 聚合行完整（task.* + lineage.* + status）
-    let (state, _invoker, store, _sqlite) = make_engine_state();
+    let (state, _invoker, store, _sqlite, _user_space_guard) = make_engine_state();
 
     // ① 创建契约（chat handler 侧独立测试覆盖；此处手工构造同参，
     // 聚焦引擎侧流转）：
@@ -2775,7 +2787,7 @@ async fn inject_dispatch_events_reach_user_connection_via_pipeline_coordinate() 
         }
     }
 
-    let (mut state, _invoker, store, _sqlite) = make_engine_state();
+    let (mut state, _invoker, store, _sqlite, _user_space_guard) = make_engine_state();
     let coord = Arc::new(agentos_session::SessionCoordinator::new());
     state = state.enable_session_with(coord.clone());
     let sink = Arc::new(RecSink {
@@ -2827,7 +2839,7 @@ async fn inject_dispatch_events_reach_user_connection_via_pipeline_coordinate() 
 /// 消费即删行（队列清空），等待窗口不存在（空闲管道行为与旧 dispatch 一致）。
 #[tokio::test]
 async fn test_pending_input_idle_consumed_immediately() {
-    let (state, _invoker, store, _sqlite) = make_engine_state();
+    let (state, _invoker, store, _sqlite, _user_space_guard) = make_engine_state();
     // 管道出生即登记归属会话（chat.send_message 创建分支同款），派发坐标校验依赖它
     store
         .link_pipeline_session("pipe-idle-1", "thread-idle-1", "default")
@@ -2873,7 +2885,7 @@ async fn test_pending_input_idle_consumed_immediately() {
 /// 端点）在 T2 联测覆盖。
 #[tokio::test]
 async fn test_pending_input_dispatch_leaves_no_residue() {
-    let (state, _invoker, store, _sqlite) = make_engine_state();
+    let (state, _invoker, store, _sqlite, _user_space_guard) = make_engine_state();
     // 管道出生即登记归属会话（chat.send_message 创建分支同款），派发坐标校验依赖它
     store
         .link_pipeline_session("pipe-del-1", "thread-del-1", "default")
@@ -3358,7 +3370,7 @@ async fn seed_pending(store: &Arc<dyn StorageBackend>, pid: &str, content: &str)
 
 #[tokio::test]
 async fn test_pending_inputs_endpoints_crud() {
-    let (state, _invoker, store, sqlite) = make_engine_state();
+    let (state, _invoker, store, sqlite, _user_space_guard) = make_engine_state();
     let token = seed_admin_token(&sqlite).await;
     let bearer = format!("Bearer {token}");
     let app = build_router(state);
@@ -3500,7 +3512,7 @@ async fn test_pending_inputs_endpoints_guards() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     // 有 store：PUT 空 content → 400
-    let (state, _invoker, _store, sqlite) = make_engine_state();
+    let (state, _invoker, _store, sqlite, _user_space_guard) = make_engine_state();
     let token = seed_admin_token(&sqlite).await;
     let app = build_router(state);
     let resp = app
@@ -3522,7 +3534,7 @@ async fn test_pending_inputs_endpoints_guards() {
 /// 不经持久化队列——消息仍被消费（队列语义被旁路）。
 #[tokio::test]
 async fn test_pending_input_no_store_dispatch_direct() {
-    let (state, _invoker, _store, _sqlite) = make_engine_state();
+    let (state, _invoker, _store, _sqlite, _user_space_guard) = make_engine_state();
     // 剥离 store：模拟无存储构造（单测/兼容路径）
     let mut state = state;
     state.store = None;
@@ -7140,5 +7152,887 @@ mod cors_auth_middleware_tests {
         let ctx = request_tenant_ctx(None, &HeaderMap::new(), "sess-1").await;
         assert_eq!(ctx.tenant_id, "default", "无凭证回退默认租户");
         assert_eq!(ctx.session_id, "sess-1");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 覆盖率补测：管道配置指纹 / 冷恢复降级留痕 / 会话级 execution_context 注入 /
+// 落库重试还原 / merge_patch 类型替换 / chat_handler 坐标解析降级。
+// 断行为契约，存储走真实 SqliteStore，故障注入用探针 store（非全 mock）。
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod server_gap_tests {
+    use super::*;
+    use agentos_core::traits::PluginManifest;
+
+    /// 只注入指定方法故障、其余全部转发真实 SqliteStore 的探针 store。
+    ///
+    /// `fail_checkpoint`：load_latest_checkpoint 报错（冷恢复降级分支）。
+    /// `fail_traces`：get_step_traces_by_pipeline 报错（回放失败分支）。
+    /// `fail_state`：load_pipeline_state 报错（标量基线不完整分支）。
+    /// `fail_messages`：get_messages_by_pipeline 报错（对话历史不完整分支）。
+    struct ProbeStore {
+        inner: Arc<agentos_engine::SqliteStore>,
+        fail_checkpoint: std::sync::atomic::AtomicBool,
+        fail_traces: std::sync::atomic::AtomicBool,
+        fail_state: std::sync::atomic::AtomicBool,
+        fail_messages: std::sync::atomic::AtomicBool,
+    }
+
+    impl ProbeStore {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(agentos_engine::SqliteStore::open_memory().unwrap()),
+                fail_checkpoint: std::sync::atomic::AtomicBool::new(false),
+                fail_traces: std::sync::atomic::AtomicBool::new(false),
+                fail_state: std::sync::atomic::AtomicBool::new(false),
+                fail_messages: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn inject(&self, which: &str) {
+            let flag = match which {
+                "checkpoint" => &self.fail_checkpoint,
+                "traces" => &self.fail_traces,
+                "state" => &self.fail_state,
+                "messages" => &self.fail_messages,
+                other => panic!("unknown flag {other}"),
+            };
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn err(&self, what: &str) -> agentos_core::types::StorageError {
+            agentos_core::types::StorageError::Database(format!("injected {what} failure"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl agentos_core::traits::StorageBackend for ProbeStore {
+        async fn load_latest_checkpoint(
+            &self,
+            pipeline_id: &str,
+            tenant_id: &str,
+        ) -> Result<Option<(i64, serde_json::Value)>, agentos_core::types::StorageError> {
+            if self
+                .fail_checkpoint
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(self.err("checkpoint"));
+            }
+            agentos_core::traits::StorageBackend::load_latest_checkpoint(
+                self.inner.as_ref(),
+                pipeline_id,
+                tenant_id,
+            )
+            .await
+        }
+
+        async fn get_step_traces_by_pipeline(
+            &self,
+            pipeline_id: &str,
+            tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
+            if self.fail_traces.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(self.err("traces"));
+            }
+            agentos_core::traits::StorageBackend::get_step_traces_by_pipeline(
+                self.inner.as_ref(),
+                pipeline_id,
+                tenant_id,
+            )
+            .await
+        }
+
+        async fn load_pipeline_state(
+            &self,
+            pipeline_id: &str,
+            tenant_id: &str,
+        ) -> Result<
+            std::collections::HashMap<String, serde_json::Value>,
+            agentos_core::types::StorageError,
+        > {
+            if self.fail_state.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(self.err("state"));
+            }
+            agentos_core::traits::StorageBackend::load_pipeline_state(
+                self.inner.as_ref(),
+                pipeline_id,
+                tenant_id,
+            )
+            .await
+        }
+
+        async fn get_messages_by_pipeline(
+            &self,
+            pipeline_id: &str,
+            opts: MessageQueryOpts,
+        ) -> Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>
+        {
+            if self.fail_messages.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(self.err("messages"));
+            }
+            agentos_core::traits::StorageBackend::get_messages_by_pipeline(
+                self.inner.as_ref(),
+                pipeline_id,
+                opts,
+            )
+            .await
+        }
+
+        // ── trait 必需方法：转发真实实现（行为真实性，非全 mock） ──
+        async fn get_run(
+            &self,
+            run_id: &str,
+        ) -> Result<agentos_core::types::RunRecord, agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::get_run(self.inner.as_ref(), run_id).await
+        }
+        async fn get_blob(
+            &self,
+            blob_id: &str,
+        ) -> Result<Vec<u8>, agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::get_blob(self.inner.as_ref(), blob_id).await
+        }
+        async fn append_trace(
+            &self,
+            entry: agentos_core::types::TraceEntry,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::append_trace(self.inner.as_ref(), entry).await
+        }
+        async fn update_run_status(
+            &self,
+            run_id: &str,
+            status: agentos_core::types::RunStatus,
+            branch: Option<&str>,
+            seq: Option<u32>,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::update_run_status(
+                self.inner.as_ref(),
+                run_id,
+                status,
+                branch,
+                seq,
+            )
+            .await
+        }
+        async fn create_run(
+            &self,
+            run_id: &str,
+            config_hash: &str,
+            tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::create_run(
+                self.inner.as_ref(),
+                run_id,
+                config_hash,
+                tenant_id,
+            )
+            .await
+        }
+        async fn store_blob(
+            &self,
+            data: &[u8],
+            mime_type: &str,
+        ) -> Result<String, agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::store_blob(self.inner.as_ref(), data, mime_type)
+                .await
+        }
+        async fn create_session(
+            &self,
+            session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::create_session(self.inner.as_ref(), session).await
+        }
+        async fn get_session(
+            &self,
+            thread_id: &str,
+        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            agentos_core::traits::StorageBackend::get_session(self.inner.as_ref(), thread_id).await
+        }
+        async fn list_sessions(
+            &self,
+            filter: agentos_core::traits::SessionListFilter,
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            agentos_core::traits::StorageBackend::list_sessions(self.inner.as_ref(), filter).await
+        }
+        async fn update_session(
+            &self,
+            session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::update_session(self.inner.as_ref(), session).await
+        }
+        async fn delete_session(
+            &self,
+            thread_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::delete_session(self.inner.as_ref(), thread_id)
+                .await
+        }
+        async fn link_pipeline_session(
+            &self,
+            pipeline_id: &str,
+            thread_id: &str,
+            tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::link_pipeline_session(
+                self.inner.as_ref(),
+                pipeline_id,
+                thread_id,
+                tenant_id,
+            )
+            .await
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            thread_id: &str,
+            tenant_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::list_pipeline_ids_by_thread(
+                self.inner.as_ref(),
+                thread_id,
+                tenant_id,
+            )
+            .await
+        }
+        async fn get_thread_id_by_pipeline(
+            &self,
+            pipeline_id: &str,
+        ) -> Result<Option<String>, agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::get_thread_id_by_pipeline(
+                self.inner.as_ref(),
+                pipeline_id,
+            )
+            .await
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            thread_id: &str,
+            tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
+            agentos_core::traits::StorageBackend::get_step_traces_by_thread(
+                self.inner.as_ref(),
+                thread_id,
+                tenant_id,
+            )
+            .await
+        }
+        async fn create_user(
+            &self,
+            user: &agentos_core::types::UserRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::create_user(self.inner.as_ref(), user).await
+        }
+        async fn get_user_by_id(
+            &self,
+            user_id: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            agentos_core::traits::StorageBackend::get_user_by_id(self.inner.as_ref(), user_id).await
+        }
+        async fn get_user_by_username(
+            &self,
+            username: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            agentos_core::traits::StorageBackend::get_user_by_username(
+                self.inner.as_ref(),
+                username,
+            )
+            .await
+        }
+        async fn list_users(
+            &self,
+        ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            agentos_core::traits::StorageBackend::list_users(self.inner.as_ref()).await
+        }
+        async fn update_user_password(
+            &self,
+            user_id: &str,
+            password_hash: &str,
+            must_change_password: bool,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::update_user_password(
+                self.inner.as_ref(),
+                user_id,
+                password_hash,
+                must_change_password,
+            )
+            .await
+        }
+        async fn update_last_login(
+            &self,
+            user_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::update_last_login(self.inner.as_ref(), user_id)
+                .await
+        }
+        async fn delete_user(
+            &self,
+            user_id: &str,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            agentos_core::traits::StorageBackend::delete_user(self.inner.as_ref(), user_id).await
+        }
+    }
+
+    // ── compute_config_fingerprint（管道热重载指纹） ──
+
+    /// 指纹：steps 目录内的 yaml/yml 文件参与（非 yaml 不参与）；同状态稳定。
+    #[test]
+    fn config_fingerprint_tracks_steps_files_and_is_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        std::fs::create_dir_all(config.join("pipelines")).unwrap();
+        std::fs::create_dir_all(config.join("steps")).unwrap();
+        std::fs::write(config.join("pipelines/autonomous.yaml"), "name: a\n").unwrap();
+        // 非 yaml 文件不参与指纹
+        std::fs::write(config.join("steps/README.md"), "# doc\n").unwrap();
+
+        let before = compute_config_fingerprint(&config);
+        assert_eq!(
+            before,
+            compute_config_fingerprint(&config),
+            "同状态指纹必须稳定"
+        );
+
+        // 加一个 yaml step 文件 → 指纹必须变
+        std::fs::write(config.join("steps/common.yaml"), "id: c\n").unwrap();
+        let after = compute_config_fingerprint(&config);
+        assert_ne!(before, after, "steps 目录新增 yaml 必须改变指纹");
+        assert_eq!(
+            after,
+            compute_config_fingerprint(&config),
+            "新状态指纹同样稳定"
+        );
+
+        // 再加 .yml（另一种扩展名同样参与）
+        std::fs::write(config.join("steps/extra.yml"), "id: e\n").unwrap();
+        assert_ne!(
+            after,
+            compute_config_fingerprint(&config),
+            ".yml 也必须参与指纹"
+        );
+    }
+
+    /// 目录不存在（无 steps/）不 panic，指纹仍可算。
+    #[test]
+    fn config_fingerprint_without_steps_dir_does_not_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        std::fs::create_dir_all(config.join("pipelines")).unwrap();
+        let _ = compute_config_fingerprint(&config);
+        let _ = compute_config_fingerprint(&tmp.path().join("nonexistent"));
+    }
+
+    // ── 冷恢复四条降级/失败分支 ──
+
+    fn probe_state(store: Arc<ProbeStore>) -> AppState {
+        let mut state = AppState::new();
+        state.store = Some(store);
+        state
+    }
+
+    /// checkpoint 读失败：不当作"无 checkpoint"静默降级——继续走 traces 回放
+    ///（error 留痕），trace 里的标量基线仍被恢复。
+    #[tokio::test]
+    async fn cold_recovery_checkpoint_failure_degrades_to_traces() {
+        let probe = Arc::new(ProbeStore::new());
+        // 回放查询先经 message_slots 反查本管道的 run_id 集合（再按 run_id 扫
+        // traces），故须先落一条本管道的消息槽位行，trace 才会被回放命中。
+        probe
+            .inner
+            .apply_messages_ops_to_table(
+                "pipe_cp_fail",
+                "default",
+                &[serde_json::json!({"op": "set", "seq": 0,
+                    "msg": {"role": "user", "content": "seed"}, "_run_id": "run-trace"})],
+            )
+            .unwrap();
+        agentos_core::traits::StorageBackend::append_trace(
+            probe.inner.as_ref(),
+            agentos_core::types::TraceEntry {
+                trace_id: "t1".to_string(),
+                run_id: "run-trace".to_string(),
+                branch_id: "main".to_string(),
+                seq_in_branch: 1,
+                plugin_id: "seed".to_string(),
+                patch_type: agentos_core::types::PatchType::StateUpdate,
+                patch_data: serde_json::json!({"from_trace": true}),
+                created_at: "2026-09-15T00:00:00Z".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        probe.inject("checkpoint");
+
+        let _state = probe_state(probe.clone());
+        let store: Arc<dyn agentos_core::traits::StorageBackend> = probe.clone();
+        let recovered = stage_recover_history(
+            serde_json::json!({}),
+            &store,
+            "msg",
+            "pipe_cp_fail",
+            "default",
+            "",
+            false,
+            None,
+            &std::collections::HashSet::new(),
+            "run-cr",
+        )
+        .await
+        .expect("恢复失败不得上抛（降级继续）");
+        assert_eq!(
+            recovered["from_trace"], true,
+            "checkpoint 读失败后必须继续 traces 回放，不得静默丢标量基线: {recovered}"
+        );
+    }
+
+    /// traces 回放失败：显式 error 暴露（bug 信号），函数仍返回可用初始 state。
+    #[tokio::test]
+    async fn cold_recovery_traces_failure_keeps_going() {
+        let probe = Arc::new(ProbeStore::new());
+        probe.inject("checkpoint");
+        probe.inject("traces");
+
+        let _state = probe_state(probe.clone());
+        let store: Arc<dyn agentos_core::traits::StorageBackend> = probe.clone();
+        let recovered = stage_recover_history(
+            serde_json::json!({}),
+            &store,
+            "msg",
+            "pipe_tr_fail",
+            "default",
+            "",
+            false,
+            None,
+            &std::collections::HashSet::new(),
+            "run-cr",
+        )
+        .await
+        .expect("恢复失败不得上抛（降级继续）");
+        assert!(
+            recovered.is_object(),
+            "traces 回放失败不得 panic，仍返回初始 state: {recovered}"
+        );
+    }
+
+    /// pipeline_state 读失败：标量基线不完整但继续（不阻断本轮执行）。
+    #[tokio::test]
+    async fn cold_recovery_state_table_failure_keeps_going() {
+        let probe = Arc::new(ProbeStore::new());
+        probe.inject("checkpoint");
+        probe.inject("state");
+
+        let _state = probe_state(probe.clone());
+        let store: Arc<dyn agentos_core::traits::StorageBackend> = probe.clone();
+        let recovered = stage_recover_history(
+            serde_json::json!({}),
+            &store,
+            "msg",
+            "pipe_st_fail",
+            "default",
+            "",
+            false,
+            None,
+            &std::collections::HashSet::new(),
+            "run-cr",
+        )
+        .await
+        .expect("恢复失败不得上抛（降级继续）");
+        assert!(recovered.is_object(), "state 表读失败不得 panic");
+    }
+
+    /// messages 读失败：对话历史不完整但继续。
+    #[tokio::test]
+    async fn cold_recovery_message_history_failure_keeps_going() {
+        let probe = Arc::new(ProbeStore::new());
+        probe.inject("checkpoint");
+        probe.inject("messages");
+
+        let _state = probe_state(probe.clone());
+        let store: Arc<dyn agentos_core::traits::StorageBackend> = probe.clone();
+        let recovered = stage_recover_history(
+            serde_json::json!({}),
+            &store,
+            "msg",
+            "pipe_msg_fail",
+            "default",
+            "",
+            false,
+            None,
+            &std::collections::HashSet::new(),
+            "run-cr",
+        )
+        .await
+        .expect("恢复失败不得上抛（降级继续）");
+        assert!(recovered.is_object(), "messages 读失败不得 panic");
+    }
+
+    // ── 会话级 / 任务级 execution_context 注入（stage_build_initial_state） ──
+
+    fn ec_manifest(id: &str, meta_key: &str, exec_path: &str) -> PluginManifest {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "x",
+            "capabilities": {},
+            "contributes": {"thread_fields": [
+                {"name": "workspace_mode", "x_metadata_key": meta_key,
+                 "x_execution_path": exec_path}
+            ]},
+        }))
+        .expect("valid manifest")
+    }
+
+    async fn seed_ec_session(
+        sqlite: &Arc<agentos_engine::SqliteStore>,
+        thread_id: &str,
+        pipeline_id: &str,
+        metadata: Option<serde_json::Value>,
+    ) {
+        sqlite
+            .create_session(&agentos_core::types::SessionRecord {
+                thread_id: thread_id.to_string(),
+                title: None,
+                intent: None,
+                current_state: "active".to_string(),
+                agent_id: None,
+                active_pipeline_id: Some(pipeline_id.to_string()),
+                pipeline_ids: vec![pipeline_id.to_string()],
+                metadata,
+                created_at: "2026-09-15T00:00:00Z".to_string(),
+                updated_at: "2026-09-15T00:00:00Z".to_string(),
+                last_active_at: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// 会话级注入：enabled 插件的 thread_fields 声明把 thread metadata 值按
+    /// x_execution_path 写入 execution_context；disabled 插件的声明不生效
+    /// （声明驱动 + 启停门）。
+    #[tokio::test]
+    async fn session_level_execution_context_injected_by_declaration() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn agentos_core::traits::StorageBackend> = sqlite.clone();
+        seed_ec_session(
+            &sqlite,
+            "thread-ec",
+            "pipe_ec",
+            Some(serde_json::json!({"ws_mode": "isolated"})),
+        )
+        .await;
+
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        // 两个插件：enabled 的声明生效；disabled 的声明必须被启停门挡住
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            ec_manifest("ws_on", "ws_mode", "workspace.mode"),
+            ec_manifest("ws_off", "other_mode", "disabled.path"),
+        ]));
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("ws_on".to_string());
+
+        let recovered = stage_build_initial_state(
+            &state,
+            &store,
+            "hello",
+            "pipe_ec",
+            "thread-ec",
+            "msg-1",
+            "u1",
+            "",
+            None,
+            "run-1",
+        )
+        .await;
+        assert_eq!(
+            recovered["execution_context"]["workspace"]["mode"], "isolated",
+            "enabled 插件声明必须注入（按 x_execution_path 落点）: {recovered}"
+        );
+        assert!(
+            recovered["execution_context"].get("disabled").is_none(),
+            "disabled 插件的声明不得生效: {recovered}"
+        );
+        // 基线键齐备（行为契约）
+        for key in [
+            "message",
+            "input",
+            "run_status",
+            "run_id",
+            "pipeline_id",
+            "session_id",
+            "user_id",
+            "message_id",
+        ] {
+            assert!(recovered.get(key).is_some(), "基线键 {key} 必须存在");
+        }
+        assert_eq!(recovered["run_status"], "running");
+        assert_eq!(recovered["ended"], false);
+        assert_eq!(recovered["pipeline_id"], "pipe_ec");
+        assert_eq!(recovered["session_id"], "thread-ec");
+    }
+
+    /// 任务级 execution_context 整体覆盖会话级（优先级契约）；
+    /// 非对象/空对象不注入。
+    #[tokio::test]
+    async fn task_level_execution_context_overrides_session_level() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn agentos_core::traits::StorageBackend> = sqlite.clone();
+        seed_ec_session(
+            &sqlite,
+            "thread-ec2",
+            "pipe_ec2",
+            Some(serde_json::json!({"ws_mode": "session_value"})),
+        )
+        .await;
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![ec_manifest(
+            "ws_on",
+            "ws_mode",
+            "workspace.mode",
+        )]));
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("ws_on".to_string());
+
+        let task_ec = serde_json::json!({"task": {"id": "t-1"}});
+        let recovered = stage_build_initial_state(
+            &state,
+            &store,
+            "hi",
+            "pipe_ec2",
+            "thread-ec2",
+            "msg-2",
+            "u1",
+            "",
+            Some(&task_ec),
+            "run-2",
+        )
+        .await;
+        assert_eq!(
+            recovered["execution_context"], task_ec,
+            "任务级必须整体覆盖会话级（不是合并）: {recovered}"
+        );
+
+        // 非对象（字符串）不注入 → 保留会话级值
+        let bad = serde_json::json!("not-an-object");
+        let recovered = stage_build_initial_state(
+            &state,
+            &store,
+            "hi",
+            "pipe_ec2",
+            "thread-ec2",
+            "msg-3",
+            "u1",
+            "",
+            Some(&bad),
+            "run-3",
+        )
+        .await;
+        assert_eq!(
+            recovered["execution_context"]["workspace"]["mode"], "session_value",
+            "非对象任务级上下文不得注入: {recovered}"
+        );
+
+        // 空对象同样不注入
+        let empty = serde_json::json!({});
+        let recovered = stage_build_initial_state(
+            &state,
+            &store,
+            "hi",
+            "pipe_ec2",
+            "thread-ec2",
+            "msg-4",
+            "u1",
+            "",
+            Some(&empty),
+            "run-4",
+        )
+        .await;
+        assert_eq!(
+            recovered["execution_context"]["workspace"]["mode"], "session_value",
+            "空对象任务级上下文不得注入: {recovered}"
+        );
+    }
+
+    /// 会话不存在 / 会话存在但无 metadata：不注入 execution_context（不 panic）。
+    #[tokio::test]
+    async fn missing_session_or_metadata_skips_context_injection() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn agentos_core::traits::StorageBackend> = sqlite.clone();
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![ec_manifest(
+            "ws_on",
+            "ws_mode",
+            "workspace.mode",
+        )]));
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("ws_on".to_string());
+
+        // 会话不存在
+        let recovered = stage_build_initial_state(
+            &state,
+            &store,
+            "hi",
+            "pipe_none",
+            "thread-missing",
+            "m",
+            "u",
+            "",
+            None,
+            "run",
+        )
+        .await;
+        assert!(
+            recovered.get("execution_context").is_none(),
+            "无会话不得注入 execution_context: {recovered}"
+        );
+
+        // 会话存在但 metadata = None
+        seed_ec_session(&sqlite, "thread-nometa", "pipe_nm", None).await;
+        let recovered = stage_build_initial_state(
+            &state,
+            &store,
+            "hi",
+            "pipe_nm",
+            "thread-nometa",
+            "m",
+            "u",
+            "",
+            None,
+            "run",
+        )
+        .await;
+        assert!(
+            recovered.get("execution_context").is_none(),
+            "metadata 缺席不得注入: {recovered}"
+        );
+    }
+
+    // ── merge_patch 剩余分支（类型替换 / 非对象 patch） ──
+
+    /// 目标非对象时整体替换为对象再合并；键已存在且一侧非对象 → 值替换；
+    /// patch 非对象 → 整体替换。
+    #[test]
+    fn merge_patch_type_replacement_and_non_object_patch() {
+        // 目标非对象 → 先重置成对象再合并
+        let mut target = serde_json::json!("scalar");
+        merge_patch(&mut target, &serde_json::json!({"a": 1}));
+        assert_eq!(target, serde_json::json!({"a": 1}));
+
+        // 已存在键两侧均为对象 → 递归合并；一侧非对象 → 替换
+        let mut target = serde_json::json!({"obj": {"a": 1}, "leaf": "old"});
+        merge_patch(
+            &mut target,
+            &serde_json::json!({"obj": {"b": 2}, "leaf": {"nested": true}}),
+        );
+        assert_eq!(target["obj"]["a"], 1, "对象递归合并不丢旧键");
+        assert_eq!(target["obj"]["b"], 2);
+        assert_eq!(
+            target["leaf"],
+            serde_json::json!({"nested": true}),
+            "一侧非对象必须整体替换"
+        );
+
+        // patch 非对象 → 整体替换（含数组）
+        let mut target = serde_json::json!({"a": 1});
+        merge_patch(&mut target, &serde_json::json!([1, 2]));
+        assert_eq!(target, serde_json::json!([1, 2]));
+
+        // messages 键跳过（队列真值在表）
+        let mut target = serde_json::json!({"messages": [1]});
+        merge_patch(&mut target, &serde_json::json!({"messages": [], "x": 1}));
+        assert_eq!(
+            target["messages"],
+            serde_json::json!([1]),
+            "messages 不参与标量回放"
+        );
+        assert_eq!(target["x"], 1);
+    }
+
+    // ── 落库重试：失败逐次还原内存（不留半条消息） ──
+
+    /// messages 表缺失 → user 消息落库重试耗尽上抛"未受理"语义；
+    /// 内存 messages 必须被还原（不留半条消息）。
+    #[tokio::test]
+    async fn user_append_failure_restores_memory_snapshot() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        sqlite
+            .with_conn::<(), String>(|conn| {
+                conn.execute("DROP TABLE message_slots", [])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let store: Arc<dyn agentos_core::traits::StorageBackend> = sqlite;
+
+        let result = stage_recover_history(
+            serde_json::json!({"pipeline_id": "pipe_append_fail", "messages": [{"role": "assistant"}]}),
+            &store,
+            "落库失败的新消息",
+            "pipe_append_fail",
+            "default",
+            "",
+            false,
+            None,
+            &std::collections::HashSet::new(),
+            "run-append",
+        )
+        .await;
+        let outcome = result.expect_err("落库失败重试耗尽必须上抛（消息未受理）");
+        assert!(outcome.failed, "必须是失败 outcome: {outcome:?}");
+        assert!(
+            outcome.content.contains("未受理"),
+            "错误文案必须表达「消息未受理」: {}",
+            outcome.content
+        );
+    }
+
+    /// 无 messages 快照时失败 → 还原为"无 messages 键"（不残留空数组）。
+    /// 与上一用例形成两组区分度输入（有快照 / 无快照）。
+    #[tokio::test]
+    async fn user_append_failure_without_snapshot_leaves_no_half_message() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        sqlite
+            .with_conn::<(), String>(|conn| {
+                conn.execute("DROP TABLE message_slots", [])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let store: Arc<dyn agentos_core::traits::StorageBackend> = sqlite;
+
+        let result = stage_recover_history(
+            serde_json::json!({"pipeline_id": "pipe_nosnap", "other": 1}),
+            &store,
+            "m2",
+            "pipe_nosnap",
+            "default",
+            "",
+            false,
+            None,
+            &std::collections::HashSet::new(),
+            "run-nosnap",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "无快照时落库失败同样必须上抛（不静默成功）"
+        );
     }
 }

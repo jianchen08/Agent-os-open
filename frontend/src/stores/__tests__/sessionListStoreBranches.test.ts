@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * sessionListStore 分支补测：补齐既有测试未触达的分支——
  * restoreActiveSessionIfNeeded（幂等/无记录/失效记录）、deleteSession 成功路径的

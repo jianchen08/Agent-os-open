@@ -26,20 +26,26 @@ function makeUserMessage(overrides: Partial<Message> = {}): Message {
   } as Message
 }
 
+/** 回退族用例共用：渲染 user 消息并定位「回退到这条消息」按钮 */
+function renderUserMessageWithRollback() {
+  const onRollbackTo = vi.fn()
+  render(
+    <MessageActions
+      message={makeUserMessage()}
+      sessionId="session-1"
+      onRollbackTo={onRollbackTo}
+    />,
+  )
+  const rollbackBtn = screen
+    .getAllByRole('button')
+    .find((b) => b.getAttribute('title') === '回退到这条消息')
+  expect(rollbackBtn).toBeDefined()
+  return { onRollbackTo, rollbackBtn: rollbackBtn! }
+}
+
 describe('MessageActions 回退/编辑交互（批次 E）', () => {
   it('user 消息回退：点击展开二次确认，确认后触发 onRollbackTo(messageId)', () => {
-    const onRollbackTo = vi.fn()
-    render(
-      <MessageActions
-        message={makeUserMessage()}
-        sessionId="session-1"
-        onRollbackTo={onRollbackTo}
-      />,
-    )
-    const rollbackBtn = screen
-      .getAllByRole('button')
-      .find((b) => b.getAttribute('title') === '回退到这条消息')
-    expect(rollbackBtn).toBeDefined()
+    const { onRollbackTo, rollbackBtn } = renderUserMessageWithRollback()
     fireEvent.click(rollbackBtn!)
     // 二次确认条出现
     expect(screen.getByTestId('rollback-confirm')).toBeDefined()

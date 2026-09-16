@@ -17,4 +17,4 @@ pub mod invoker;
 pub mod shared;
 pub mod verify;
 
-pub use invoker::{HostProcSnapshot, PluginInvokerImpl};
+pub use invoker::{is_cohost_member, HostProcSnapshot, PluginInvokerImpl};

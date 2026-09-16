@@ -24,6 +24,7 @@ FakeRegistry 测试同步移除；主路径（capability 调用）测试保留�
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import sys
 from pathlib import Path
@@ -354,3 +355,396 @@ class TestMediaProviderClient:
         client = core_mod.MediaProviderClient(caller)
         with pytest.raises(core_mod.ProviderUnavailable):
             await client.execute_generate(core_mod.MediaType.IMAGE, "a cat")
+
+
+    @pytest.mark.asyncio
+    async def test_client_reraises_provider_unavailable_untouched(self, core_mod, caller):
+        """调用方已抛 ProviderUnavailable → 原样上抛（不被包成「服务不可达」）。"""
+        caller.side_effect = core_mod.ProviderUnavailable("服务未配置")
+        client = core_mod.MediaProviderClient(caller)
+        with pytest.raises(core_mod.ProviderUnavailable) as exc_info:
+            await client.execute_generate(core_mod.MediaType.IMAGE, "a cat")
+        # 原异常不被二次包装（__cause__ 为空 = 没走 except Exception 分支）
+        assert str(exc_info.value) == "服务未配置"
+        assert exc_info.value.__cause__ is None
+
+    @pytest.mark.asyncio
+    async def test_client_raises_provider_unavailable_on_non_dict_result(self, core_mod, caller):
+        """返回值不是 dict（契约形态异常）→ 抛 ProviderUnavailable，不猜字段。"""
+        caller.return_value = ["file_path", "/out/x.png"]
+        client = core_mod.MediaProviderClient(caller)
+        with pytest.raises(core_mod.ProviderUnavailable) as exc_info:
+            await client.execute_generate(core_mod.MediaType.IMAGE, "a cat")
+        assert "异常形态" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_client_raises_provider_unavailable_on_unknown_media_type(self, core_mod, caller):
+        """后端回的 media_type 不在枚举内 → 抛 ProviderUnavailable（不静默按入参兜底）。"""
+        caller.return_value = {
+            "file_path": "/out/x.bin",
+            "media_type": "hologram",
+            "provider_name": "media",
+        }
+        client = core_mod.MediaProviderClient(caller)
+        with pytest.raises(core_mod.ProviderUnavailable) as exc_info:
+            await client.execute_generate(core_mod.MediaType.IMAGE, "a cat")
+        assert "hologram" in str(exc_info.value)
+        # 未知类型被 from None 掐断链，避免把 ValueError 噪音透给上游
+        assert exc_info.value.__cause__ is None
+
+    @pytest.mark.parametrize(
+        ("given", "expected_value"),
+        [("music", "music"), ("video", "video")],
+    )
+    @pytest.mark.asyncio
+    async def test_client_normalizes_media_type_input(
+        self, core_mod, caller, given: Any, expected_value: str
+    ):
+        """入参 media_type 字符串形态归一为 MediaType（结果与请求参数同源同值）。"""
+        caller.return_value = {"file_path": "/out/x", "provider_name": "media"}
+        client = core_mod.MediaProviderClient(caller)
+        result = await client.execute_generate(given, "a cat")
+        assert result.media_type == core_mod.MediaType(expected_value)
+        assert caller.call_args.args[1]["args"]["media_type"] == expected_value
+
+    def test_default_registry_returns_empty_face(self, core_mod):
+        """MediaProviderRegistry 空默认行为（0.2 类型面）：get/chain 恒 None、list 恒空。"""
+        registry = core_mod.MediaProviderRegistry()
+        assert registry.get("comfyui") is None
+        assert registry.get_chain_for_type(core_mod.MediaType.IMAGE) is None
+        assert registry.get_chain_for_type(core_mod.MediaType.TTS, core_mod.FallbackStrategy.SEQUENTIAL) is None
+        assert registry.list_by_type(core_mod.MediaType.VIDEO) == []
+
+    @pytest.mark.asyncio
+    async def test_result_media_type_falls_back_to_enum_request(self, core_mod, caller):
+        """后端不回 media_type 键时，MediaType 枚举入参原样带进结果（不做字符串往返）。"""
+        caller.return_value = {"file_path": "/out/x", "provider_name": "media"}
+        client = core_mod.MediaProviderClient(caller)
+        result = await client.execute_generate(core_mod.MediaType.MUSIC, "a tune")
+        assert result.media_type is core_mod.MediaType.MUSIC
+        # 发往接口的仍是契约字符串（枚举不外泄到 capability 参数）
+        assert caller.call_args.args[1]["args"]["media_type"] == "music"
+
+    @pytest.mark.asyncio
+    async def test_result_media_type_falls_back_to_str_request(self, core_mod, caller):
+        """后端不回 media_type 键且入参是字符串 → 归一为对应 MediaType。"""
+        caller.return_value = {"file_path": "/out/x", "provider_name": "media"}
+        client = core_mod.MediaProviderClient(caller)
+        result = await client.execute_generate("video", "a clip")
+        assert result.media_type is core_mod.MediaType.VIDEO
+
+
+class TestInputValidationGaps:
+    """四工具入口校验分支：空内容 / 不支持格式 / 越界语速的显式失败契约。
+
+    意图：校验失败必须返回结构化 error_code（LLM 与前端按码路由）；
+    传入 caller 的用例同时钉「校验失败不触达后端」——不浪费一次能力调用。
+    """
+
+    @pytest.mark.asyncio
+    async def test_image_empty_prompt_rejected(self, image_mod, caller):
+        tool = image_mod.ImageGenerateTool(capability_caller=caller)
+        result = await tool.execute({"prompt": "   "})
+        assert result.success is False
+        assert result.error_code == "MISSING_PROMPT"
+        assert caller.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_image_missing_prompt_key_rejected(self, image_mod):
+        """缺省 prompt 键同样被拒（不是仅空白串特例）。"""
+        result = await image_mod.ImageGenerateTool().execute({})
+        assert result.success is False
+        assert result.error_code == "MISSING_PROMPT"
+
+    @pytest.mark.asyncio
+    async def test_music_empty_prompt_rejected(self, music_mod, caller):
+        tool = music_mod.MusicGenerateTool(capability_caller=caller)
+        result = await tool.execute({"prompt": ""})
+        assert result.success is False
+        assert result.error_code == "MISSING_PROMPT"
+        assert caller.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_video_empty_prompt_rejected(self, video_mod, caller):
+        tool = video_mod.VideoGenerateTool(capability_caller=caller)
+        result = await tool.execute({"prompt": " "})
+        assert result.success is False
+        assert result.error_code == "MISSING_PROMPT"
+        assert caller.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_tts_empty_text_rejected(self, tts_mod, caller):
+        tool = tts_mod.TtsGenerateTool(capability_caller=caller)
+        result = await tool.execute({"text": "  "})
+        assert result.success is False
+        assert result.error_code == "EMPTY_TEXT"
+        assert caller.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_tts_unsupported_format_rejected(self, tts_mod, caller):
+        """不在 SUPPORTED_FORMATS 内的 format → UNSUPPORTED_FORMAT，且不触达后端。"""
+        tool = tts_mod.TtsGenerateTool(capability_caller=caller)
+        result = await tool.execute({"text": "hello", "format": "flac"})
+        assert result.success is False
+        assert result.error_code == "UNSUPPORTED_FORMAT"
+        assert "flac" in result.error
+        assert caller.await_count == 0
+
+    @pytest.mark.parametrize("audio_format", ["mp3", "wav", "ogg"])
+    @pytest.mark.asyncio
+    async def test_tts_supported_formats_accepted(self, tts_mod, caller, audio_format: str):
+        """声明支持的三种格式都放行到后端并透传（与 SUPPORTED_FORMATS 同源）。"""
+        caller.return_value = {
+            "file_path": f"/out/h.{audio_format}",
+            "media_type": "tts",
+            "provider_name": "media",
+        }
+        tool = tts_mod.TtsGenerateTool(capability_caller=caller)
+        result = await tool.execute({"text": "hello", "format": audio_format})
+        assert result.success is True
+        assert result.output["format"] == audio_format
+
+    @pytest.mark.parametrize("speed", [0.4, 2.5])
+    @pytest.mark.asyncio
+    async def test_tts_speed_out_of_range_rejected(self, tts_mod, caller, speed: float):
+        """语速越界（下界外与上界外两侧）→ INVALID_SPEED，不触达后端。"""
+        tool = tts_mod.TtsGenerateTool(capability_caller=caller)
+        result = await tool.execute({"text": "hello", "speed": speed})
+        assert result.success is False
+        assert result.error_code == "INVALID_SPEED"
+        assert caller.await_count == 0
+
+    @pytest.mark.parametrize("speed", [0.5, 2.0])
+    @pytest.mark.asyncio
+    async def test_tts_speed_boundaries_accepted(self, tts_mod, caller, speed: float):
+        """边界值 0.5 / 2.0 属闭区间内 → 放行到后端并透传原值。"""
+        caller.return_value = {"file_path": "/out/h.mp3", "media_type": "tts", "provider_name": "media"}
+        tool = tts_mod.TtsGenerateTool(capability_caller=caller)
+        result = await tool.execute({"text": "hello", "speed": speed})
+        assert result.success is True
+        assert caller.call_args.args[1]["args"]["speed"] == speed
+
+
+class TestBackendErrorSurface:
+    """后端可用性错误在各工具上的回显契约（error_code + 后端原文透传）。"""
+
+    @pytest.mark.asyncio
+    async def test_tts_surfaces_provider_unavailable(self, tts_mod):
+        backend = AsyncMock(side_effect=RuntimeError("media.generate 未注册"))
+        tool = tts_mod.TtsGenerateTool(capability_caller=backend)
+        result = await tool.execute({"text": "hello"})
+        assert result.success is False
+        assert result.error_code == "PROVIDER_UNAVAILABLE"
+        assert "media.generate" in result.error
+
+    @pytest.mark.asyncio
+    async def test_video_surfaces_provider_unavailable(self, video_mod):
+        backend = AsyncMock(side_effect=RuntimeError("media.generate 未注册"))
+        tool = video_mod.VideoGenerateTool(capability_caller=backend)
+        result = await tool.execute({"prompt": "a dog"})
+        assert result.success is False
+        assert result.error_code == "PROVIDER_UNAVAILABLE"
+        assert "media.generate" in result.error
+
+    @pytest.mark.asyncio
+    async def test_music_surfaces_provider_unavailable(self, music_mod):
+        backend = AsyncMock(side_effect=RuntimeError("media.generate 未注册"))
+        tool = music_mod.MusicGenerateTool(capability_caller=backend)
+        result = await tool.execute({"prompt": "lofi"})
+        assert result.success is False
+        assert result.error_code == "PROVIDER_UNAVAILABLE"
+        assert "media.generate" in result.error
+
+    @pytest.mark.asyncio
+    async def test_music_success_maps_backend_payload(self, music_mod, caller):
+        """music 成功面：file_path/media_type/duration/provider_name/metadata 全量投影。"""
+        caller.return_value = {
+            "file_path": "/out/m.wav",
+            "media_type": "music",
+            "provider_name": "suno",
+            "duration_seconds": 30.0,
+            "metadata": {"bpm": 120},
+        }
+        tool = music_mod.MusicGenerateTool(capability_caller=caller)
+        result = await tool.execute({"prompt": "lofi"})
+        assert result.success is True
+        assert result.output["file_path"] == "/out/m.wav"
+        assert result.output["duration_seconds"] == 30.0
+        assert result.output["provider_name"] == "suno"
+        assert result.output["metadata"] == {"bpm": 120}
+
+
+class TestImageResultAssembly:
+    """image_generate 结果组装面：可选参数过滤、cfg_scale 浮点、多模态内容块。
+
+    断言全部落在「送到后端的 args」与「返回给管道的 output/metadata」两个
+    可观察出口上，不读私有属性。
+    """
+
+    @pytest.mark.parametrize(
+        ("inputs", "expected_keys"),
+        [
+            # 有效字符串参数入选
+            (
+                {"prompt": "p", "negative_prompt": "bad", "style": "anime", "workflow_template": "w"},
+                {"negative_prompt", "style", "workflow_template"},
+            ),
+            # 空串 / 非字符串被过滤（不把无效值传给后端）
+            ({"prompt": "p", "negative_prompt": "", "style": 123, "workflow_template": None}, set()),
+            # 数值参数转 int；cfg_scale 转 float
+            (
+                {"prompt": "p", "width": 768, "height": 512, "seed": 42, "steps": 20, "cfg_scale": 7.5},
+                {"width", "height", "seed", "steps", "cfg_scale"},
+            ),
+            # 非法数值类型被过滤
+            ({"prompt": "p", "width": "768", "seed": None, "cfg_scale": "1.0"}, set()),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_optional_params_filtered_before_backend(self, image_mod, caller, inputs, expected_keys):
+        """可选参数按类型过滤后到达后端 args；数值参数以数值类型透传。"""
+        caller.return_value = {"file_path": "/out/x.png", "media_type": "image", "provider_name": "media"}
+        tool = image_mod.ImageGenerateTool(capability_caller=caller)
+        await tool.execute(inputs)
+
+        args = caller.call_args.args[1]["args"]
+        assert set(args) - {"media_type", "prompt"} == expected_keys
+        if "width" in expected_keys:
+            assert isinstance(args["width"], int)
+            assert isinstance(args["cfg_scale"], float)
+
+    @pytest.mark.asyncio
+    async def test_cfg_scale_float_passthrough_to_backend(self, image_mod, caller):
+        """cfg_scale 浮点值原样到达后端 args（不被截成 int）。"""
+        caller.return_value = {"file_path": "/out/x.png", "media_type": "image", "provider_name": "media"}
+        tool = image_mod.ImageGenerateTool(capability_caller=caller)
+        await tool.execute({"prompt": "p", "cfg_scale": 7.5})
+        assert caller.call_args.args[1]["args"]["cfg_scale"] == 7.5
+
+    @pytest.mark.asyncio
+    async def test_backend_metadata_projected_into_output(self, image_mod, caller):
+        """后端 metadata 非空 → 投影进 output（前端/管道可读 seed 等生成信息）。"""
+        caller.return_value = {
+            "file_path": "/out/x.png",
+            "media_type": "image",
+            "provider_name": "comfyui",
+            "metadata": {"seed": 42},
+        }
+        tool = image_mod.ImageGenerateTool(capability_caller=caller)
+        result = await tool.execute({"prompt": "p"})
+        assert result.success is True
+        assert result.output["metadata"] == {"seed": 42}
+
+    @pytest.mark.asyncio
+    async def test_backend_empty_metadata_absent_from_output(self, image_mod, caller):
+        """后端无 metadata → output 不带该键（不写空字典占位）。"""
+        caller.return_value = {"file_path": "/out/x.png", "media_type": "image", "provider_name": "media"}
+        tool = image_mod.ImageGenerateTool(capability_caller=caller)
+        result = await tool.execute({"prompt": "p"})
+        assert "metadata" not in result.output
+
+    @pytest.mark.parametrize(
+        ("suffix", "expected_mime"),
+        [
+            (".png", "image/png"),
+            (".jpg", "image/jpeg"),
+            (".JPEG", "image/jpeg"),
+            (".webp", "image/webp"),
+            (".gif", "image/gif"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_multimodal_block_mime_mapping(
+        self, image_mod, caller, tmp_path, suffix: str, expected_mime: str
+    ):
+        """真实文件 → 成功结果 metadata 的 vision 数据块按扩展名给 MIME。"""
+        raw = b"\x89PNG\r\n\x1a\n-fake-bytes"
+        img = tmp_path / f"gen{suffix}"
+        img.write_bytes(raw)
+        caller.return_value = {
+            "file_path": str(img),
+            "media_type": "image",
+            "provider_name": "media",
+        }
+        tool = image_mod.ImageGenerateTool(capability_caller=caller)
+        result = await tool.execute({"prompt": "p"})
+
+        blocks = result.metadata["multimodal_content"]
+        assert blocks == [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{expected_mime};base64," + base64.b64encode(raw).decode("utf-8")
+                },
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_unknown_extension_defaults_to_png(self, image_mod, caller, tmp_path):
+        """未知扩展名（.bmp 不在 mime_map）→ 缺省 image/png，不误标其它类型。"""
+        img = tmp_path / "pic.bmp"
+        img.write_bytes(b"bytes")
+        caller.return_value = {
+            "file_path": str(img),
+            "media_type": "image",
+            "provider_name": "media",
+        }
+        tool = image_mod.ImageGenerateTool(capability_caller=caller)
+        result = await tool.execute({"prompt": "p"})
+        url = result.metadata["multimodal_content"][0]["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,")
+
+    @pytest.mark.asyncio
+    async def test_multimodal_content_omitted_for_empty_path(self, image_mod, caller):
+        """后端返回空 file_path → 空路径不构块（省略元数据键，不抛异常）。"""
+        caller.return_value = {"file_path": "", "media_type": "image", "provider_name": "media"}
+        tool = image_mod.ImageGenerateTool(capability_caller=caller)
+        # MediaProviderClient 对空 file_path 已判契约不满足，此处断言显式失败而非静默成功
+        result = await tool.execute({"prompt": "p"})
+        assert result.success is False
+        assert result.error_code == "PROVIDER_UNAVAILABLE"
+
+    @pytest.mark.asyncio
+    async def test_multimodal_content_omitted_when_file_unreadable(self, image_mod, caller, tmp_path):
+        """文件在盘但读取抛 OSError → 成功结果不带 multimodal_content，不向上抛。"""
+        img = tmp_path / "locked.png"
+        img.write_bytes(b"bytes")
+
+        real_open = open
+
+        def _boom(path, *args, **kwargs):
+            if str(path) == str(img):
+                raise OSError("device busy")
+            return real_open(path, *args, **kwargs)
+
+        caller.return_value = {
+            "file_path": str(img),
+            "media_type": "image",
+            "provider_name": "media",
+        }
+        tool = image_mod.ImageGenerateTool(capability_caller=caller)
+
+        import builtins
+
+        original = builtins.open
+        builtins.open = _boom
+        try:
+            result = await tool.execute({"prompt": "p"})
+        finally:
+            builtins.open = original
+
+        assert result.success is True
+        assert "multimodal_content" not in result.metadata
+
+    @pytest.mark.asyncio
+    async def test_multimodal_content_omitted_when_file_missing(self, image_mod, caller, tmp_path):
+        """生成成功但文件不在盘上（远端产物）→ 不带 multimodal_content 键，不报错。"""
+        caller.return_value = {
+            "file_path": str(tmp_path / "ghost.png"),
+            "media_type": "image",
+            "provider_name": "media",
+        }
+        tool = image_mod.ImageGenerateTool(capability_caller=caller)
+        result = await tool.execute({"prompt": "p"})
+        assert result.success is True
+        assert "multimodal_content" not in result.metadata

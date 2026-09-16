@@ -33,11 +33,14 @@ async function fetchAllTasks(): Promise<Record<string, unknown>[]> {
   return resp.data.items ?? []
 }
 
-/** 管道管理面板全量任务列表 query：挂载即拉取 + 30s 轮询 */
-export function useAllTasksQuery() {
+/** 管道管理面板全量任务列表 query：挂载即拉取 + 30s 轮询；
+ *  refetchInterval 可传 false 由调用方按面板可见性冻结轮询（离屏暂停） */
+export function useAllTasksQuery(
+  refetchInterval: number | false = PIPELINE_ALL_TASKS_INTERVAL,
+) {
   return useQuery({
     queryKey: queryKeys.pipelineAllTasks,
     queryFn: fetchAllTasks,
-    refetchInterval: PIPELINE_ALL_TASKS_INTERVAL,
+    refetchInterval,
   })
 }

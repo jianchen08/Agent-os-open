@@ -19,26 +19,14 @@ import {
   createTextPart,
   createThinkingPart,
   renderUseMessageRender,
+  activityConverterMock,
 } from './testUtils'
 
 // ============================================================
 // Mock 外部依赖
 // ============================================================
 
-vi.mock('@/utils/activityConverter', () => ({
-  buildDefaultActions: (_tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
-
-  toolCallToActivity: (toolCall: Record<string, unknown>) => ({
-    type: 'tool_call',
-    id: toolCall.call_id ?? 'activity-1',
-    title: toolCall.tool_name ?? 'unknown',
-    toolName: toolCall.tool_name ?? 'unknown',
-    status: toolCall.status ?? 'pending',
-    details: [],
-    actions: [],
-  }),
-  enhanceActivityWithToolConfig: (base: Record<string, unknown>) => base,
-}))
+vi.mock('@/utils/activityConverter', async () => (await import('./testUtils')).activityConverterMock())
 
 vi.mock('@/utils/toolCardRegistry', () => ({
   enhanceActivityWithToolConfig: (base: Record<string, unknown>) => base,

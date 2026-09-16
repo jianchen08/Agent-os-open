@@ -11,10 +11,16 @@ import os
 from typing import Any
 
 # ② 冻结面（路径前缀一票拒绝）——B 部类 + 内核 + 受控区 + 安全红线文件
+# + 裁决权载体（ADR 2026-09-16：评估/复盘面整体冻结——阈值参数直接改变
+# 判定松紧，被裁决者不可经提案改裁判，P3 一票否决的结构性防线）
 FROZEN_PREFIXES = (
     "config/self_evolve/",
     "plugins/shared/system/eval_harness/",
     "plugins/shared/modes/",
+    "plugins/shared/system/evaluation/",
+    "plugins/shared/system/review/",
+    "config/plugins/evaluation/",
+    "config/plugins/review/",
     "kernel/",
     ".env",
     "config/kernel/",
@@ -29,7 +35,6 @@ EVOLVABLE_PREFIXES = (
     "config/agents/",
     "config/pipelines/",
     "config/rules/",
-    "config/plugins/evaluation/",
     "plugins/shared/tools/auto_gen_",
     "plugins/shared/pipeline/auto_gen_",
 )

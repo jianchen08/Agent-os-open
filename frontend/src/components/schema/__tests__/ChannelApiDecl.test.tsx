@@ -21,6 +21,12 @@ import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 
+// FormWidget 现消费会话隔离形态（useSessionsQuery）计算权限档显示默认；
+// 本文件无 QueryClientProvider，静态 mock 空列表（无会话 → 非隔离默认显示路径）
+vi.mock('@/hooks/queries/useSessionsQuery', () => ({
+  useSessionsQuery: () => ({ data: [] }),
+}))
+
 const apiGet = vi.fn()
 const apiPost = vi.fn()
 const apiCall = vi.fn()
@@ -189,6 +195,9 @@ describe('trigger_setup_tool 触发器声明（B1）', () => {
   })
 
   it('创建表单：填消息提交（类型预选首项）→ 切类型再提交（body=工具入参契约）', async () => {
+    // 目标管道留空 → 载荷回落当前激活管道（BUG-22：无激活管道的提交已被
+    // FormWidget 本地拦截，payload 契约锚在「有激活管道」场景）
+    usePipelineMessageStore.setState({ activePipelineId: 'pipe-x' })
     apiPost.mockResolvedValue({ data: { ok: true } })
     apiGet.mockResolvedValue({ data: { columns: [], rows: [] } })
     render(<WidgetStage space="triggers" />)
@@ -200,7 +209,12 @@ describe('trigger_setup_tool 触发器声明（B1）', () => {
     fireEvent.submit((screen.getByLabelText('触发消息') as HTMLElement).closest('form')!)
     await waitFor(() => expect(apiPost).toHaveBeenCalled())
     const body = apiPost.mock.calls[0][1] as Record<string, unknown>
-    expect(body).toMatchObject({ trigger_type: 'delay', message: '检查任务状态', delay_seconds: 60 })
+    expect(body).toMatchObject({
+      trigger_type: 'delay',
+      message: '检查任务状态',
+      delay_seconds: 60,
+      pipeline_id: 'pipe-x',
+    })
 
     // 切类型（antd Select：mouseDown 展开 → 点选项）→ 提交体跟随切换；
     // interval 类型须带 interval（requiredWhen 条件必填）
@@ -212,7 +226,12 @@ describe('trigger_setup_tool 触发器声明（B1）', () => {
     await waitFor(() => expect(apiPost.mock.calls.length).toBe(2))
     const [url, body2] = apiPost.mock.calls[1]
     expect(url).toBe('/ext/trigger_setup_tool/triggers')
-    expect(body2).toMatchObject({ trigger_type: 'interval', message: '检查任务状态', interval: '5m' })
+    expect(body2).toMatchObject({
+      trigger_type: 'interval',
+      message: '检查任务状态',
+      interval: '5m',
+      pipeline_id: 'pipe-x',
+    })
   })
 
   it('条件必填提醒：类型=延迟缺延迟秒数 → 提交被拦且字段级提示可见', async () => {

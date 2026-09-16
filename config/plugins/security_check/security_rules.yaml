@@ -93,7 +93,8 @@ rules:
       - type: keyword
         value: "no-preserve-root"
       # CMD 风格 nul 重定向（Git Bash/Linux 下会创建名为 nul 的垃圾文件）
-      # 基础检查层已对所有模式软拦截；此处为规则层第二道记录（含隔离任务）
+      # 基础检查层已对所有模式软拦截；此处为规则层第二道记录
+      #（隔离/worktree 会话仅在用户显式选择权限档后进入规则层，默认免审批放行）
       - type: keyword
         value: ">nul"
       - type: regex

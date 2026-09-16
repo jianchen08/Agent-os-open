@@ -774,21 +774,10 @@ class IsolationGuard(IInputPlugin):
                 workspace=metadata_workspace,
             )
 
-        # ── 工具级 policy 决策（metadata 不适用或 policy 为 host）──
-        if policy_isolation == IsolationLevel.CONTAINER and self._docker_available:
-            return self._build_context(
-                tool_name,
-                "docker",
-                "policy",
-                workspace=metadata_workspace,
-            )
-
-        if policy_isolation == IsolationLevel.CONTAINER and not self._docker_available:
-            # 要求容器但 Docker 不可用：一律拒绝，不降级
-            return self._deny_container_required(
-                tool_name, metadata_workspace, "policy 要求容器"
-            )
-
+        # ── 工具级 policy 决策（policy 为 host）──
+        # （policy==CONTAINER 的 docker/deny 决策已由上方 metadata 块全部
+        # return——container-required 不降级与 metadata 强制 host 降级均在
+        # 该块内闭环，此处不可能再收到 CONTAINER）
         return self._build_context(
             tool_name,
             "host",

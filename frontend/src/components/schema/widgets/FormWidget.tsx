@@ -18,9 +18,10 @@
  *
  * 提交/受控模式（endpoint 与受控互斥）：
  * - props.endpoint（声明 JSON 可传字符串）：POST {pipeline_id: 当前选中管道,
- *   ...extraBody, ...values} 到该端点，展示提交中/成功/失败状态。pipeline_id
- *   跟随当前选中的管道标签（agentTabStore.activeTabId → pipelineRunId，回退
- *   store 级 activePipelineId / sessionId）——权限模式按管道隔离，切换标签即切换目标。
+ *   session_id: 当前会话, ...extraBody, ...values} 到该端点，展示提交中/成功/
+ *   失败状态。pipeline_id 跟随当前选中的管道标签（agentTabStore.activeTabId →
+ *   pipelineRunId，回退 store 级 activePipelineId），仅作附加上文；权限模式等
+ *   会话级设置以 session_id 为键（BUG-15 裁定，同会话内 pipeline_id 会轮换）。
  *   声明 createSession=true 时，无激活管道提供「新建会话」入口（会话创建共享
  *   流，创建即激活新主管道，pipeline_id 注入随之解析）。
  * - props.dataUri：GET 初值（yaml 文本自动解析）；提交 PUT/POST 回写
@@ -32,7 +33,7 @@
  * @module FormWidget
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, ChevronDown } from '@/assets/icons'
 import { SessionEditModal, type SessionFormOptions } from '@/components/session/SessionEditModal'
 import {
@@ -60,7 +61,9 @@ import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
 import { resolveChatCardIcon } from '@/utils/chatCardIconRegistry'
+import { mergeFormValues } from '@/utils/configFormFields'
 import type { UIInputFormField } from '@/types/schema'
 
 /**
@@ -79,14 +82,26 @@ function extractFields(fields: unknown): UIInputFormField[] {
 
 type SubmitStatus = 'idle' | 'submitting' | 'success' | 'error' | 'unchanged'
 
+/** 响应取 ETag：优先响应头，回退响应体 etag 字段（对齐 pluginConfig extractEtag 语义） */
+function responseEtag(headers: unknown, body: unknown): string {
+  const headerEtag = (headers as Record<string, unknown> | undefined)?.etag
+  if (typeof headerEtag === 'string' && headerEtag.length > 0) return headerEtag
+  const bodyEtag = (body as { etag?: unknown } | undefined)?.etag
+  return typeof bodyEtag === 'string' ? bodyEtag : ''
+}
+
 /** 紧凑下拉模式的选项定义（字段 select 的 options 结构） */
 interface CompactOption {
   label: string
   value: string
   description?: string
+  /** 选项图标（声明原文透传，如 emoji '💻'；触发器图标另经 props.icon 走语义图标注册表） */
+  icon?: string
 }
 
-/** 当前选中管道标签的 pipeline id（权限模式按管道隔离的 key）。
+/** 当前选中管道标签的 pipeline id（通用表单端点的附加上文）。
+ *  权限模式等会话级设置的键位是 session_id（BUG-15，2026-09-15 裁定），
+ *  pipeline_id 同会话内随任务/子代理轮换、不作设置键。
  *  会话 id 是组织集合 id，绝不兜底进 pipeline_id 字段（2026-08-30 管道身份裁定）：
  *  无管道上下文时返回空串，由后端端点对空值显式处置。 */
 function useActivePipelineId(): string {
@@ -113,6 +128,9 @@ export function FormWidget(props: Record<string, unknown>) {
   const onChange = props.onChange as ((data: Record<string, unknown>) => void) | undefined
   const pipelineId = useActivePipelineId()
   const sessionId = useSessionStore((s) => s.activeSessionId)
+  // 会话列表（TanStack Query 缓存）：取当前会话的隔离形态（isolationMode/
+  // workspaceMode），供权限模式选择器如实显示隔离免审批默认
+  const { data: sessions } = useSessionsQuery()
   // 回读端点（可选）：挂载时 + 提交成功后 GET 查询当前值并刷新选择器显示。
   // 用于"切换端点的当前值不在表单初值里"的声明式选择器（如权限模式——
   // 值存后端 _PERMISSION_MODES 表，前端无初值来源，不回读则恒显示默认档）。
@@ -120,18 +138,26 @@ export function FormWidget(props: Record<string, unknown>) {
   const [backValue, setBackValue] = useState<string | undefined>(undefined)
 
   const readBack = useCallback(async () => {
-    if (!readbackUri || !pipelineId) return
+    // 权限模式等会话级设置的键位是 session_id（BUG-15），pipeline_id 只是
+    // 附带上文——二者有其一即可回读；都缺则无键可查。
+    if (!readbackUri || (!pipelineId && !sessionId)) return
     try {
-      const resp = await apiClient.get<{ mode?: string; error?: string }>(
-        `${readbackUri}?pipeline_id=${encodeURIComponent(pipelineId)}${
-          sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : ''
-        }`,
+      const params = new URLSearchParams()
+      if (pipelineId) params.set('pipeline_id', pipelineId)
+      if (sessionId) params.set('session_id', sessionId)
+      const resp = await apiClient.get<{ mode?: string; explicit?: boolean; error?: string }>(
+        `${readbackUri}?${params.toString()}`,
       )
       const data = resp.data
       if (data.error) throw new Error(data.error)
-      if (typeof data.mode === 'string' && data.mode !== '') {
-        setBackValue(data.mode)
-      }
+      // 仅显式选择回填显示值：explicit=false（用户未选择过）时清空——显示值
+      // 由会话隔离形态推导（隔离/worktree → 免审批默认），同时消除切换管道
+      // 后残留旧管道显示值的竞态
+      setBackValue(
+        data.explicit && typeof data.mode === 'string' && data.mode !== ''
+          ? data.mode
+          : undefined,
+      )
     } catch (err) {
       // 回读失败保留占位显示（currentValue 缺省回退 field.default），不阻断交互
       console.warn('[FormWidget] readback failed:', readbackUri, err instanceof Error ? err.message : err)
@@ -147,6 +173,15 @@ export function FormWidget(props: Record<string, unknown>) {
   const onSaved = props.onSaved as (() => void) | undefined
   const [dsFields, setDsFields] = useState<unknown[] | null>(null)
   const [dsValues, setDsValues] = useState<Record<string, unknown> | null>(null)
+  // 乐观锁 etag：GET dataUri 时捕获（响应头优先/信封 etag 回退），PUT 经 body
+  // if_match 回传（/ext 写面约定，同 pluginConfig savePluginConfigFile——
+  // agent_manager 写面缺失/不匹配恒 409）
+  const dsEtagRef = useRef<string>('')
+  // GET dataUri 的原始配置（yaml 解析后/json 原对象）：提交按字段路径 merge 写回，
+  // 未声明键原样保留（契约同 utils/configFormFields mergeFormValues——BUG-18：
+  // 曾 PUT serializeYaml(values) 只剩表单字段值，agent 配置往返丢 category/
+  // plugins/static_vars 等全部未声明顶层键）
+  const dsOriginalRef = useRef<Record<string, unknown> | null>(null)
   const [dsReady, setDsReady] = useState(!fieldsUri && !dataUri)
   const [dsError, setDsError] = useState<string | null>(null)
   /** successAction.reload 触发 datasource 重拉（须在 effect 依赖之前声明） */
@@ -176,16 +211,22 @@ export function FormWidget(props: Record<string, unknown>) {
       jobs.push(
         apiClient.get(dataUri).then((resp) => {
           const d: unknown = resp.data
+          if (!cancelled) dsEtagRef.current = responseEtag(resp.headers, d)
           if (dataFormat === 'yaml') {
             const rec = d as { yaml?: unknown }
             const text = typeof d === 'string' ? d : typeof rec?.yaml === 'string' ? rec.yaml : ''
-            if (!cancelled) setDsValues(parseYamlObject(text))
+            const parsed = parseYamlObject(text)
+            if (!cancelled) {
+              dsOriginalRef.current = parsed
+              setDsValues(parsed)
+            }
           } else {
-            if (!cancelled) setDsValues(
-              d && typeof d === 'object' && !Array.isArray(d)
-                ? (d as Record<string, unknown>)
-                : {},
-            )
+            const obj =
+              d && typeof d === 'object' && !Array.isArray(d) ? (d as Record<string, unknown>) : {}
+            if (!cancelled) {
+              dsOriginalRef.current = obj
+              setDsValues(obj)
+            }
           }
         }),
       )
@@ -277,11 +318,21 @@ export function FormWidget(props: Record<string, unknown>) {
       setStatus('submitting')
       setStatusText('保存中…')
       try {
+        // BUG-18：表单值按字段路径 merge 到 GET 原配置上（未声明键原样保留，
+        // 契约同 PluginConfigEditor mergeFormValues），不再裸序列化表单值
+        const merged = dsOriginalRef.current
+          ? mergeFormValues(dsOriginalRef.current, fields, values)
+          : values
+        // 乐观锁：GET 捕获的 etag 经 body if_match 回传（lock 置尾，声明的
+        // extraBody 有显式 if_match 时以实读指纹为准）
+        const lock = dsEtagRef.current ? { if_match: dsEtagRef.current } : {}
         const body =
           dataFormat === 'yaml'
-            ? { yaml: serializeYaml(values) }
-            : { ...values, ...(extraBody ?? {}) }
-        await apiClient({ method: submitMethod, url: dataUri, data: body })
+            ? { yaml: serializeYaml(merged), ...lock }
+            : { ...merged, ...(extraBody ?? {}), ...lock }
+        const resp = await apiClient({ method: submitMethod, url: dataUri, data: body })
+        // 成功写回换新指纹（响应头/响应体），连续保存不用过期 etag 误触 409
+        dsEtagRef.current = responseEtag(resp.headers, resp.data)
         setStatus('success')
         setStatusText(successText ?? '已保存')
         onSaved?.()
@@ -289,7 +340,15 @@ export function FormWidget(props: Record<string, unknown>) {
         emitSuccess(values)
       } catch (err) {
         setStatus('error')
-        setStatusText(failureText ?? (err instanceof Error ? err.message : '保存失败'))
+        // 409 = 乐观锁冲突：显式指引（禁止静默，也不得显示成功）；failureText
+        // 让位冲突语义—— remedy 是刷新重读而非重试覆盖
+        const conflict =
+          (err as { response?: { status?: number } } | undefined)?.response?.status === 409
+        setStatusText(
+          conflict
+            ? '配置已被他人修改，请刷新后重试'
+            : failureText ?? (err instanceof Error ? err.message : '保存失败'),
+        )
         emitFailure(err, values)
       }
       return
@@ -297,6 +356,24 @@ export function FormWidget(props: Record<string, unknown>) {
     if (endpoint) {
       setStatus('submitting')
       setStatusText('提交中…（高风险操作可能弹出审批窗等待确认）')
+      // 载荷优先级：表单值 > extraBody > 注入值；pipeline_id 为空（未选/空串）
+      // 时回落注入的当前激活管道——「留空则提交给当前激活管道」字段契约的落实，
+      // 空表单值不得抹掉注入坐标
+      const body: Record<string, unknown> = {
+        session_id: sessionId ?? '',
+        ...(extraBody ?? {}),
+        ...values,
+      }
+      if (!body.pipeline_id) body.pipeline_id = pipelineId
+      // createSession 表单以管道为作用对象：无任何管道坐标时提交必被后端拒——
+      // 本地拦截并给行动指引，不发必败请求（失败必须可见，禁止静默）
+      if (createSessionEnabled && !body.pipeline_id) {
+        const noPipelineMsg = '当前没有激活管道：可在「目标管道」选择已有管道，或新建会话后再提交'
+        setStatus('error')
+        setStatusText(noPipelineMsg)
+        emitFailure(new Error(noPipelineMsg), values)
+        return
+      }
       try {
         // endpoint 直连统一走 apiClient（认证头注入 + 401 刷新链，auth:user
         // 的 /ext 端点缺头会被内核 401 拒绝）；4xx/5xx 由拦截器 reject
@@ -306,12 +383,7 @@ export function FormWidget(props: Record<string, unknown>) {
           reason?: string
           error?: string
           message?: string
-        }>(endpoint, {
-          pipeline_id: pipelineId,
-          session_id: sessionId ?? '',
-          ...(extraBody ?? {}),
-          ...values,
-        })
+        }>(endpoint, body)
         const data = resp.data
         // endpoint 响应协议：error/reason = 失败；unchanged=true = 无变更（仅
         // 权限模式等切换端点用）；其余一律视为成功（通用表单端点的成功
@@ -330,10 +402,12 @@ export function FormWidget(props: Record<string, unknown>) {
           emitSuccess(values)
           void readBack()
         }
-      } catch {
+      } catch (err) {
         setStatus('error')
-        setStatusText(failureText ?? '请求失败')
-        emitFailure(new Error('请求失败'), values)
+        // 失败必须携带后端真实原因（拦截器 reject 的 Error.message 已是统一
+        // 错误信封的业务文案）；仅非 Error 形状才退化笼统文案
+        setStatusText(failureText ?? (err instanceof Error ? err.message : '请求失败'))
+        emitFailure(err, values)
       }
       return
     }
@@ -425,6 +499,11 @@ export function FormWidget(props: Record<string, unknown>) {
   }
 
   if (compact && compactField) {
+    // 会话隔离形态（隔离容器 / worktree 副本）且未显式选择权限档：后端生效
+    // 语义为免审批默认（显式选择可覆盖），选择器如实显示该默认而非 default 档
+    const activeSession = sessions?.find((s) => s.id === sessionId)
+    const isolatedDefaultFreePass =
+      activeSession?.isolationMode === 'isolated' || activeSession?.workspaceMode === 'worktree'
     return (
       <CompactSelectToggle
         field={compactField}
@@ -437,6 +516,11 @@ export function FormWidget(props: Record<string, unknown>) {
           (effectiveInitial
             ? (effectiveInitial[compactField.name] as string | undefined)
             : undefined)
+        }
+        unselectedLabel={
+          isolatedDefaultFreePass && !backValue && !effectiveInitial
+            ? '免审批（隔离默认）'
+            : undefined
         }
         disabled={props.disabled as boolean | undefined}
         status={status}
@@ -628,6 +712,7 @@ function CompactSelectToggle({
   onSelect,
   onPick,
   currentValue,
+  unselectedLabel,
   disabled: disabledProp,
   status,
   statusText,
@@ -639,12 +724,16 @@ function CompactSelectToggle({
   onPick?: (values: Record<string, unknown>) => void
   /** 受控当前值（宿主注入；缺省回退 field.default / 首选项） */
   currentValue?: string
+  /** 无当前值时的显示档（如隔离会话免审批默认）：触发器显示该文案，
+   *  菜单不勾选任何档位——该状态不是选项之一，是"未显式选择"的生效默认 */
+  unselectedLabel?: string
   disabled?: boolean
   status: SubmitStatus
   statusText: string
 }) {
   const options = Array.isArray(field.options) ? (field.options as CompactOption[]) : []
-  const value = currentValue ?? (field.default as string) ?? options[0]?.value ?? ''
+  const value =
+    currentValue ?? (unselectedLabel ? '' : (field.default as string) ?? options[0]?.value ?? '')
   const current = options.find((o) => o.value === value)
   const submitting = status === 'submitting'
   const disabled = disabledProp || submitting || options.length === 0
@@ -653,7 +742,7 @@ function CompactSelectToggle({
   // GUI/读屏按「高」找权限等级会误中思考强度。可访问名与可见文案一律带
   // 设置名前缀（如「思考强度：高」/「权限模式：默认（命中规则才确认）」）。
   const settingLabel = title ?? field.label
-  const currentLabel = current?.label ?? field.label
+  const currentLabel = current?.label ?? unselectedLabel ?? field.label
 
   const handlePick = (value: string) => {
     if (onPick) {
@@ -698,7 +787,10 @@ function CompactSelectToggle({
               )}
             >
               <span className="flex min-w-0 flex-col">
-                <span className="text-[13px] font-medium">{option.label}</span>
+                <span className="flex items-center gap-1.5 text-[13px] font-medium">
+                  {option.icon && <span aria-hidden="true">{option.icon}</span>}
+                  {option.label}
+                </span>
                 {option.description && (
                   <span className="text-muted-foreground text-[11px]">{option.description}</span>
                 )}

@@ -40,4 +40,4 @@
 | 对象 | 路径 | 说明 |
 |------|------|------|
 | research 题集 | `config/self_evolve/suites/dev/research.yaml` | 评测题集（mode: research，target: research_orchestrator_agent）；本包未改动 [来源: 该文件] |
-| coding 模式 profile | `config/self_evolve/modes/coding.yaml` | 评测 harness 的模式 profile 先例（B 部类物料，由用户维护）；research 侧 profile 未建，属评测面事项，不在本包范围 [来源: 该文件头注] |
+| coding 模式 profile | `plugins/shared/modes/mode_coding/profile.yaml` | 模式 profile 已内打包进模式插件（出厂种子，经 mode.get_profile 服务透出；B 部类物料，由用户维护）；research 侧种子在 `plugins/shared/modes/mode_research/` |

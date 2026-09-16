@@ -185,6 +185,27 @@ GATES: list[Gate] = [
         needs=("kernel-coverage",),
     ),
     Gate(
+        # 编译产物增量回收：cargo 只增不删旧 fingerprint 副本（源码/依赖一变
+        # 就整套新建，旧副本永不命中也永不回收，实测一个月可堆 ~30G 死重）。
+        # per-crate hash 簇判定：同 crate 最新副本永远保留（增量加速所需），
+        # 旧副本冷置满 3 天回收；单副本 crate 不动（lockfile 未变的老依赖仍
+        # 是活缓存）。被占用条目跳过留待下轮，恒 exit 0，故为观察型门禁。
+        # needs=kernel-build：kernel 域任何编译车道（build/test/coverage）跑完
+        # 都触发；与 test/coverage 并行安全——本轮新产物 mtime 新、必属最新簇。
+        # 启动链路（start_web_02.bat）另有 release 域的后台回收挂点。
+        id="kernel-artifact-sweep",
+        label="Rust 旧编译产物回收（--older-than 3）",
+        domain="kernel",
+        command=(
+            sys.executable,
+            "scripts/clean_rust_debug.py",
+            "--older-than",
+            "3",
+        ),
+        needs=("kernel-build",),
+        allow_failure=True,
+    ),
+    Gate(
         # Rust 依赖安全审计门禁（rust_dependency_review 报告 §二 #1）：RUSTSEC
         # 公告 + licenses 白名单 + bans 多版本 + sources 外源，配置 kernel/deny.toml
         # （workspace 根）。存量 advisory 基线在 deny.toml [advisories] ignore 逐条

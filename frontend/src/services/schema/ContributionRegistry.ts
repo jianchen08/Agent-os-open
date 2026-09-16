@@ -218,12 +218,13 @@ const NON_PAGE_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set(['themes', 'client
  * 已弃用的旧贡献 key（[来源: docs/decisions/2026-08-17-widget-migration-t8-t13-t14-rulings.md]）：
  * 声明这些 key 的插件数据被忽略（不进 pages 归一化）。
  * - workspaceTabs：薄视图零调用方，工作区标签统一走 contributes.pages
- * - chatMessages/chatInteractions/chatActions：chat/inline 槽无渲染方，
+ * - chatInteractions/chatActions：chat/inline 槽无渲染方，
  *   消息级内联卡片场景已被工具卡协议（ui.chat_card / render）覆盖
+ * （chatMessages 不再弃用：message-style 槽已由通用 webview 消息卡容器承接，
+ * 模式体系落地设计 §5.0 通用能力清单）
  */
 const DEPRECATED_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set([
   'workspaceTabs',
-  'chatMessages',
   'chatInteractions',
   'chatActions',
 ])
@@ -246,8 +247,12 @@ const LEGACY_PAGE_MAP: Record<string, { space: PageSpace; slot: PageSlot }> = {
   shortcuts: { space: 'chat', slot: 'input-action' },
   settingsPanels: { space: 'settings', slot: 'nav' },
   widgets: { space: 'workspace', slot: 'tab' },
+  // chatMessages：消息卡样式声明（id=样式 id，props.htmlPath 指包内 HTML）→
+  // chat/message-style 槽，消息 metadata.message_style 命中即路由到通用
+  // webview 消息卡容器（插件禁用同源消失，回退默认渲染）
+  chatMessages: { space: 'chat', slot: 'message-style' },
   // [弃用，ADR widget-migration-t8-t13-t14] workspaceTabs /
-  // chatMessages / chatInteractions / chatActions 四个旧贡献 key 归一化已移除：
+  // chatInteractions / chatActions 旧贡献 key 归一化已移除：
   // - workspaceTabs 薄视图（getWorkspaceTabs）零调用方——工作区标签统一走
   //   contributes.pages + openWorkspacePanelByPath（插件声明 path 直达）
   // - chat/inline 槽自始无渲染方——消息级内联卡片场景已被工具卡协议

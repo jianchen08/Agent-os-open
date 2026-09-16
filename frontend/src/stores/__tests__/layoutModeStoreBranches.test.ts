@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * layoutModeStore 分支补测：五空间布局状态机的全部动作 + persist merge 迁移清洗。
  *

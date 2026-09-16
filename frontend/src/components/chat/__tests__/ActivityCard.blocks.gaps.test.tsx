@@ -11,6 +11,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ActivityCard from '../ActivityCard'
 import type { ActivityData, ActivityType } from '@/types/activity'
 
+// FormWidget 现消费会话隔离形态（useSessionsQuery）计算权限档显示默认；
+// 本文件无 QueryClientProvider，静态 mock 空列表（无会话 → 非隔离默认显示路径）
+vi.mock('@/hooks/queries/useSessionsQuery', () => ({
+  useSessionsQuery: () => ({ data: [] }),
+}))
+
 const { openFileSpy } = vi.hoisted(() => ({ openFileSpy: vi.fn() }))
 
 vi.mock('@/components/approval', () => ({

@@ -27,6 +27,8 @@ import { FileWarning } from '@/assets/icons'
 import { API_ENDPOINTS } from '@/constants/api'
 import { apiClient } from '@/services/api/client'
 import { EXT_ROUTE, extUrl } from '@/services/api/extRoute'
+import { useSessionStore } from '@/stores/sessionStore'
+import { useSessionThemeStore } from '@/stores/sessionThemeStore'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
 import { loggers } from '@/utils/logger'
 import { buildWebviewMessage, validateWebviewEvent } from '@/utils/postMessageSecurity'
@@ -159,6 +161,23 @@ export function WebviewWidget({
 
       try {
         let res: unknown
+        if (msg.method === 'theme.apply') {
+          // 主题桥协议（模式体系 §5.0）：白名单宿主侧方法——载荷为结构化
+          // ThemeConfig 档，按收到时的当前会话入 override 栈；schema 校验
+          // 失败整包丢弃（零状态变更）。纯宿主行为，不经内核 transport。
+          const sessionId = useSessionStore.getState().activeSessionId
+          if (!sessionId) {
+            sendDown('error', { message: 'theme.apply 已丢弃：宿主当前无活跃会话' })
+            return
+          }
+          const applied = useSessionThemeStore.getState().pushTheme(sessionId, msg.params)
+          if (!applied) {
+            sendDown('error', { message: 'theme.apply 已丢弃：载荷不是合法的 ThemeConfig 档' })
+            return
+          }
+          sendDown('result', { applied: true })
+          return
+        }
         if (msg.method.startsWith('/')) {
           // REST 路径约定：以 '/' 开头视为插件自定义 HTTP 端点。
           // 路由白名单（安全审查 B-4）：只允许本插件的 /ext/{pluginId}/ 前缀，

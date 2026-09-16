@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * longTermTaskStore 分支补测：四个写操作（成功回填 query 缓存 / 失败翻译错误消息）
  * + 选择态设置 + 事件增量写缓存 + 删除清理。

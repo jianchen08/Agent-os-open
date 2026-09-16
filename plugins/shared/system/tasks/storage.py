@@ -207,9 +207,10 @@ class TaskStorage:
             return
         root_id = self._find_root_id(task)
         self._ensure_tree_dir(root_id)
+        # data_dir 已在函数入口守卫（206），此处 file_path 恒非 None——
+        # 显式断言收窄类型（mypy union-attr），非行为变更
         file_path = self._get_task_file_path(root_id, task.id)
-        if file_path is None:
-            return
+        assert file_path is not None, "_data_dir 已守卫，file_path 不可能为 None"
         data = self._task_to_dict(task)
         # 原子写：先写临时文件再 os.replace——任务 YAML 是任务域持久化账本，
         # 写中途崩溃留下的截断文件会在加载时被跳过 = 任务行静默消失、子树脱离。

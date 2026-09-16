@@ -11,6 +11,12 @@ import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { FormWidget } from '../FormWidget'
 
+// FormWidget 现消费会话隔离形态（useSessionsQuery）计算权限档显示默认；
+// 本文件无 QueryClientProvider，静态 mock 空列表（无会话 → 非隔离默认显示路径）
+vi.mock('@/hooks/queries/useSessionsQuery', () => ({
+  useSessionsQuery: () => ({ data: [] }),
+}))
+
 const fields = [{ name: 'title', type: 'input' as const, label: '标题', required: true }]
 const submitForm = () => fireEvent.submit(document.querySelector('form')!)
 

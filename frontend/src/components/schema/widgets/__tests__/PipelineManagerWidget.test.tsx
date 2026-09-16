@@ -300,6 +300,19 @@ vi.mock('@/stores/sessionStore', () => ({
   useSessionStore: (sel: (s: unknown) => unknown) => sel({ sessions: [] }),
 }))
 
+/** 空查询 + 单项目登记的播种（打开文件夹族用例共用；项目可注入） */
+function seedProjectQueries(project: { id: string; goal: string } = {
+  id: 'proj-open',
+  goal: '可打开项目',
+}) {
+  seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
+  seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
+  seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
+  seed.mockFetchProjects.mockResolvedValue({
+    items: [{ id: project.id, goal: project.goal, timestamps: { createdAt: '2026-08-30T00:00:00Z' } }],
+  })
+}
+
 describe('PipelineManagerWidget', () => {
   beforeEach(() => {
     // 默认播种全量任务；子任务用例覆盖为 SUBTASK_TASKS
@@ -328,9 +341,16 @@ describe('PipelineManagerWidget', () => {
 
   it('展开详情含 state 真值行', async () => {
     renderWithProviders(<PipelineManagerWidget />)
-    // 一对一合并：任务条目行即任务行（无任务节点层），行内「详细信息」按钮直接可用
-    const detailBtn = (await screen.findAllByTitle(/详细信息/))[0]
-    fireEvent.click(detailBtn)
+    // 一对一合并：任务条目行即任务行（无任务节点层），行内「详细信息」按钮直接可用。
+    // 按钮锚定评估任务行内查询——startedAt 无真值落 '' 后行序不再被 now 兜底
+    // 时间隐式钉住，全局首个详情按钮不保证属于带 state 真值的行
+    const evalRow = ((await screen.findAllByText('评估中任务'))[0].closest('div') ??
+      null) as HTMLElement | null
+    const detailBtn = evalRow?.querySelector(
+      'button[title*="详细信息"]',
+    ) as HTMLElement | null
+    expect(detailBtn).toBeTruthy()
+    fireEvent.click(detailBtn!)
     await waitFor(() => expect(screen.getAllByText('State 状态').length).toBeGreaterThanOrEqual(1))
     expect(screen.getAllByText('已结束').length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText('当前阶段').length).toBeGreaterThanOrEqual(1)
@@ -713,14 +733,7 @@ describe('PipelineManagerWidget', () => {
   })
 
   it('项目分组行渲染打开文件夹按钮：点击调 workspaces open 端点（项目登记通道）', async () => {
-    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
-    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
-    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
-    seed.mockFetchProjects.mockResolvedValue({
-      items: [
-        { id: 'proj-open', goal: '可打开项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
-      ],
-    })
+    seedProjectQueries()
 
     renderWithProviders(<PipelineManagerWidget />)
     await screen.findByText('可打开项目')
@@ -739,14 +752,7 @@ describe('PipelineManagerWidget', () => {
   })
 
   it('打开文件夹业务失败（success:false）：失败通知携带后端 message', async () => {
-    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
-    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
-    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
-    seed.mockFetchProjects.mockResolvedValue({
-      items: [
-        { id: 'proj-biz-fail', goal: '业务失败项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
-      ],
-    })
+    seedProjectQueries({ id: 'proj-biz-fail', goal: '业务失败项目' })
     seed.mockWorkspaceOpen.mockResolvedValueOnce({
       data: { success: false, message: 'IDE 连接器不可用' },
     })
@@ -766,14 +772,7 @@ describe('PipelineManagerWidget', () => {
   })
 
   it('打开文件夹传输失败（请求抛错）：失败通知落到用户可见通道', async () => {
-    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
-    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
-    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
-    seed.mockFetchProjects.mockResolvedValue({
-      items: [
-        { id: 'proj-net-fail', goal: '传输失败项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
-      ],
-    })
+    seedProjectQueries({ id: 'proj-net-fail', goal: '传输失败项目' })
     seed.mockWorkspaceOpen.mockRejectedValueOnce(new Error('network down'))
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
     const addNotification = vi
@@ -796,14 +795,7 @@ describe('PipelineManagerWidget', () => {
   })
 
   it('列表视图同款：项目行打开文件夹按钮走同一端点', async () => {
-    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
-    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
-    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
-    seed.mockFetchProjects.mockResolvedValue({
-      items: [
-        { id: 'proj-list', goal: '列表视图项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
-      ],
-    })
+    seedProjectQueries({ id: 'proj-list', goal: '列表视图项目' })
 
     renderWithProviders(<PipelineManagerWidget />)
     await screen.findByText('列表视图项目')
@@ -818,14 +810,7 @@ describe('PipelineManagerWidget', () => {
   })
 
   it('项目行渲染删除按钮：默认口径确认调删除端点（子任务挂起保留）', async () => {
-    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
-    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
-    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
-    seed.mockFetchProjects.mockResolvedValue({
-      items: [
-        { id: 'proj-del', goal: '待删项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
-      ],
-    })
+    seedProjectQueries({ id: 'proj-del', goal: '待删项目' })
     seed.mockDeleteProject.mockResolvedValueOnce({
       message: '项目已删除',
       id: 'proj-del',
@@ -865,14 +850,7 @@ describe('PipelineManagerWidget', () => {
   })
 
   it('删除弹窗选级联口径+删文件夹：deleteProject 收到双 true，通知报级联数', async () => {
-    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
-    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
-    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
-    seed.mockFetchProjects.mockResolvedValue({
-      items: [
-        { id: 'proj-cas', goal: '级联项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
-      ],
-    })
+    seedProjectQueries({ id: 'proj-cas', goal: '级联项目' })
     seed.mockDeleteProject.mockResolvedValueOnce({
       message: '项目已删除',
       id: 'proj-cas',
@@ -911,14 +889,7 @@ describe('PipelineManagerWidget', () => {
   })
 
   it('删除失败（后端报子任务删除失败）：失败通知携带后端 message，弹窗不关', async () => {
-    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
-    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
-    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
-    seed.mockFetchProjects.mockResolvedValue({
-      items: [
-        { id: 'proj-fail', goal: '失败项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
-      ],
-    })
+    seedProjectQueries({ id: 'proj-fail', goal: '失败项目' })
     seed.mockDeleteProject.mockRejectedValueOnce(
       Object.assign(new Error('x'), {
         message: '子任务删除失败，项目未删除: child-2',
@@ -947,14 +918,7 @@ describe('PipelineManagerWidget', () => {
   })
 
   it('列表视图同款：项目行删除按钮打开同一确认弹窗', async () => {
-    seed.mockUsePipelineRunsQuery.mockReturnValue({ data: {} })
-    seed.mockUsePipelineStatesQuery.mockReturnValue({ data: {} })
-    seed.mockUseAllTasksQuery.mockReturnValue({ data: [] })
-    seed.mockFetchProjects.mockResolvedValue({
-      items: [
-        { id: 'proj-list-del', goal: '列表删除项目', timestamps: { createdAt: '2026-08-30T00:00:00Z' } },
-      ],
-    })
+    seedProjectQueries({ id: 'proj-list-del', goal: '列表删除项目' })
 
     renderWithProviders(<PipelineManagerWidget />)
     await screen.findByText('列表删除项目')

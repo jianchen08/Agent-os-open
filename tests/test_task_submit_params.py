@@ -156,8 +156,12 @@ def make_tool(tool_module, service: FakeTaskService):
 
 
 @pytest.fixture(autouse=True)
-def _reset_chat_sender(tool_module):
-    """模块级全局 chat sender 用后复位——不泄漏到后续测试文件。"""
+def _reset_chat_sender(tool_module, tmp_path_factory, monkeypatch):
+    """模块级全局 chat sender 用后复位——不泄漏到后续测试文件。
+
+    用户根钉到空 tmp：mode 键完备性回退链的出厂命中不得依赖机器真实播种副本。
+    """
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path_factory.mktemp("user-root")))
     yield
     tool_module._chat_sender = None
 
@@ -167,7 +171,7 @@ def base_inputs(**overrides):
         "goal_title": "测试任务",
         "goal_description": "验证参数可用性矩阵",
         "target_type": "agent",
-        "target_id": "code_writer",
+        "target_id": "mode_coding/code_writer",
         "parent_agent_level": 2,
     }
     inputs.update(overrides)

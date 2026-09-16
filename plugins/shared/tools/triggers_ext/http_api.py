@@ -30,6 +30,7 @@ from http_json import (  # noqa: E402
     error as _error,
     json_response as _json_response,
     ok as _ok,
+    protocol_error as _protocol_error,
 )
 from kernel_token import decode_kernel_token  # noqa: E402
 
@@ -118,17 +119,21 @@ async def create_trigger(body: dict[str, Any], headers: dict[str, Any] | None = 
 
     user_id 从 Authorization Bearer token 解出（chat.send_message 硬校验
     user_id 非空，缺失/无效即 401——注册一个到期必投递失败的触发器是静默债）。
+
+    拒绝路径走协议错误信封（success:true + data 携真实 HTTP 状态）：内核
+    SidecarHttpHandler 对 success:false 信封一律回 502，前端会按可重试 5xx
+    重放请求并丢失结构化错误体，故 401/400 必须经 _protocol_error 到达前端。
     """
     user_id = _decode_bearer_user(headers)
     if not user_id:
-        return _error(
+        return _protocol_error(
             "无法识别调用者（缺少有效 Bearer 凭据）：触发器到期注入消息需要 user_id",
             401,
         )
     tool = TriggerSetupTool()
     result = await tool.execute({**body, "user_id": user_id, "action": "setup"})
     if not result.success:
-        return _error(result.error or "trigger setup failed", 400)
+        return _protocol_error(result.error or "trigger setup failed", 400)
     cfg = get_trigger_manager().get(result.output.get("trigger_id", "")) if isinstance(result.output, dict) else None
     payload = _serialize(cfg) if cfg is not None else result.output
     return _ok(_json_response({"trigger": payload}))
@@ -157,11 +162,15 @@ async def update_trigger(trigger_id: str, body: dict[str, Any]) -> dict[str, Any
 
 
 async def delete_trigger(trigger_id: str) -> dict[str, Any]:
-    """DELETE /triggers/{id}：取消（manager.cancel，状态置 CANCELLED）。"""
+    """DELETE /triggers/{id}：删除（manager.unregister，注册表移除 + 终态落写面）。
+
+    删除语义 = 注销而非取消：列表重拉条目消失（清残留），单发已触发（FIRED）
+    也可删；state 写面按 unregister 既有契约以 CANCELLED 终态落（重灌跳过终态）。
+    """
     mgr = get_trigger_manager()
-    if mgr.get(trigger_id) is None:
+    if not mgr.unregister(trigger_id):
         return _error(f"trigger not found: {trigger_id}", 404)
-    return _ok(_json_response({"deleted": mgr.cancel(trigger_id), "trigger_id": trigger_id}))
+    return _ok(_json_response({"deleted": True, "trigger_id": trigger_id}))
 
 
 async def set_trigger_status(trigger_id: str, status: TriggerStatus) -> dict[str, Any]:

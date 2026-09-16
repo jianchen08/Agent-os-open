@@ -125,20 +125,18 @@ class EncodingHandler:
         # 第二优先：UTF-8 + surrogateescape
         # 处理大部分文本是 UTF-8 但混入少量无效字节的场景
         # 如 WSL 输出通过 cmd.exe 管道时可能混入非 UTF-8 字节
-        try:
-            result = data.decode("utf-8", errors="surrogateescape")
-            # 检查 surrogate 字符比例：如果 < 15%，说明大部分是有效 UTF-8
-            surrogate_count = sum(1 for c in result if "\ud800" <= c <= "\udfff")
-            if surrogate_count == 0 or surrogate_count < max(len(result) * 0.15, 3):
-                if surrogate_count > 0:
-                    logger.debug(
-                        "UTF-8 surrogateescape used: %d surrogates in %d chars",
-                        surrogate_count,
-                        len(result),
-                    )
-                return result
-        except UnicodeDecodeError:
-            pass
+        # （surrogateescape 解码对任意字节序列不抛错，无需 except 包裹）
+        result = data.decode("utf-8", errors="surrogateescape")
+        # 检查 surrogate 字符比例：如果 < 15%，说明大部分是有效 UTF-8
+        surrogate_count = sum(1 for c in result if "\ud800" <= c <= "\udfff")
+        if surrogate_count == 0 or surrogate_count < max(len(result) * 0.15, 3):
+            if surrogate_count > 0:
+                logger.debug(
+                    "UTF-8 surrogateescape used: %d surrogates in %d chars",
+                    surrogate_count,
+                    len(result),
+                )
+            return result
 
         # 第三优先：系统编码
         system_enc = cls.get_system_encoding()

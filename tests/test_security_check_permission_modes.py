@@ -79,18 +79,26 @@ def _ctx(state: dict[str, Any]) -> PluginContext:
     return PluginContext(state=state, config={})
 
 
-def _tool_state(tool: str, args: dict[str, Any], pipeline_id: str = "p1") -> dict[str, Any]:
-    """构造 tool_execute 状态：权限模式 key 用 pipeline_id（每管道独立）。"""
+def _tool_state(
+    tool: str,
+    args: dict[str, Any],
+    session_id: str = "s1",
+    pipeline_id: str = "p1",
+) -> dict[str, Any]:
+    """构造 tool_execute 状态：权限模式 key 用 session_id（会话稳定键，BUG-15）。
+
+    pipeline_id 默认与 session 键不同值——同会话内管道键漂移不影响显式档命中。
+    """
     return {
         StateKeys.CORE_TYPE: "tool_execute",
         "pipeline_id": pipeline_id,
-        StateKeys.SESSION_ID: "s1",
+        StateKeys.SESSION_ID: session_id,
         StateKeys.RAW_TOOL_CALLS: [{"name": tool, "args": args}],
     }
 
 
-def _set_pipeline_mode(pipeline_id: str, mode: str) -> None:
-    sc_mod._PERMISSION_MODES[pipeline_id] = mode
+def _set_session_mode(session_id: str, mode: str) -> None:
+    sc_mod._PERMISSION_MODES[session_id] = mode
 
 
 def _clear_session_modes() -> None:
@@ -124,7 +132,7 @@ class TestAcceptEdits:
     async def test_文件类放行(self, tmp_path: Any) -> None:
         svc = _mock_approval()
         p = _make_plugin()
-        _set_pipeline_mode("p1", "accept_edits")
+        _set_session_mode("s1", "accept_edits")
         # 普通文件路径（临时目录内）：/etc/hosts 在 Linux 上命中敏感系统目录
         # 硬拦截（设计内安全底线，优先于 accept_edits 放行），不代表"文件类"
         result = await p.execute(_ctx(_tool_state("file_write", {"path": str(tmp_path / "x.txt"), "content": "x"})))
@@ -136,7 +144,7 @@ class TestAcceptEdits:
     async def test_命令类仍弹审批(self) -> None:
         svc = _mock_approval()
         p = _make_plugin()
-        _set_pipeline_mode("p1", "accept_edits")
+        _set_session_mode("s1", "accept_edits")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
         assert len(svc.requests) >= 1
         assert result.state_updates["security.decision"]["allowed"] is True
@@ -157,7 +165,7 @@ class TestAutoMode:
                 }
             ]
         )
-        _set_pipeline_mode("p1", "auto")
+        _set_session_mode("s1", "auto")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf danger-x /a"})))
         assert len(svc.requests) == 0, "block 规则自动拒绝不得发起审批请求"
         assert result.state_updates["security.decision"]["allowed"] is True
@@ -177,7 +185,7 @@ class TestAutoMode:
                 }
             ]
         )
-        _set_pipeline_mode("p1", "auto")
+        _set_session_mode("s1", "auto")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
         assert len(svc.requests) >= 1
         assert result.state_updates["security.decision"]["allowed"] is True
@@ -188,7 +196,7 @@ class TestBypassMode:
     async def test_危险命令放行不弹审批(self) -> None:
         svc = _mock_approval()
         p = _make_plugin()
-        _set_pipeline_mode("p1", "bypass")
+        _set_session_mode("s1", "bypass")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
         assert len(svc.requests) == 0
         assert result.state_updates["security.decision"]["allowed"] is True
@@ -200,7 +208,7 @@ class TestModePriority:
     async def test_会话模式优先于配置默认(self) -> None:
         svc = _mock_approval()
         p = _make_plugin(mode_default="default")
-        _set_pipeline_mode("p1", "bypass")
+        _set_session_mode("s1", "bypass")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
         assert len(svc.requests) == 0
 
@@ -208,8 +216,8 @@ class TestModePriority:
     async def test_不同会话互不影响(self) -> None:
         svc = _mock_approval()
         p = _make_plugin(mode_default="default")
-        _set_pipeline_mode("p1", "bypass")
-        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"}, pipeline_id="p2")))
+        _set_session_mode("s1", "bypass")
+        result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"}, session_id="s2")))
         assert len(svc.requests) >= 1
 
 
@@ -351,12 +359,12 @@ class TestDispatchShortCircuits:
         """accept_edits 下文件类工具即使参数危险也放行（档位语义）。"""
         svc = _mock_approval()
         p = _make_plugin()
-        _set_pipeline_mode("ae-file-branch", "accept_edits")
+        _set_session_mode("ae-file-sess", "accept_edits")
         result = await p.execute(
             _ctx(_tool_state(
                 "file_write",
                 {"path": "/etc/hosts", "content": "x"},
-                pipeline_id="ae-file-branch",
+                session_id="ae-file-sess",
             ))
         )
         assert len(svc.requests) == 0, "accept_edits 下文件类放行不得发起审批"

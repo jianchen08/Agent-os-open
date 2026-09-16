@@ -7,6 +7,7 @@
 //!
 //! - `loader`: 插件加载器实现——双根扫描、manifest 解析校验、按需加载
 //! - `registry`: 能力注册表 + 依赖解析器
+//! - `mode_registry`: 模式包约定子目录扫描注册（agents/pipelines，设计稿 §2.3 约定即注册）
 //! - `capability_provider`: 把 manifest 的 provides.capabilities 注册成 CapabilityHandler（M4）
 //! - `error`: 错误类型
 //!
@@ -17,6 +18,7 @@ pub mod capability_provider;
 pub mod enablement;
 pub mod error;
 pub mod loader;
+pub mod mode_registry;
 pub mod native_loader;
 pub mod registry;
 
@@ -28,6 +30,10 @@ pub use enablement::{PluginEnablement, PluginProfile, ProfileEntry};
 pub use error::LoaderError;
 pub use loader::{
     load_allowlist_file, AllowlistConfig, AllowlistEntry, AllowlistMode, PluginLoaderImpl,
+};
+pub use mode_registry::{
+    register_mode_package_guarded, scan_mode_package_resources, ModeAgentEntry,
+    ModePackageResources, ModePipelineEntry, ModeResourceError,
 };
 pub use native_loader::NativePluginLoader;
 pub use registry::{

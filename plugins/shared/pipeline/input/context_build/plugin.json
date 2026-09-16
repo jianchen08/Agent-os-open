@@ -7,12 +7,21 @@
   "host_type": "sidecar",
   "entry": "python server.py",
   "invoke_entry": "context_build.execute",
+  "requires_services": ["mode.get_profile"],
   "capabilities": {
     "tools": [],
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load",
       "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "pipeline_context_build",
+        "required_state_inputs": [
+          "agent.id"
+        ]
+      }
     ]
   },
   "permissions": {},
@@ -40,6 +49,7 @@
     "reads": [
       "agent.id",
       "core_type",
+      "execution_context",
       "iteration",
       "lineage.parent_pipeline_id",
       "pipeline_id",

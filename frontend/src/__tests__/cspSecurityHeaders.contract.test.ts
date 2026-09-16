@@ -7,9 +7,11 @@
  *
  * 契约（资源形态实证见 nginx.conf 注释块）：
  * - nginx.conf：服务端携带 CSP + nosniff + SAMEORIGIN + Referrer-Policy；
- *   script-src 'self' 'unsafe-inline' blob:（'unsafe-inline' 为 WebviewWidget
- *   srcDoc 内联脚本所必需——srcDoc iframe 继承父文档 CSP，无法局部豁免；
- *   blob: 为 skinRuntime 皮肤 hooks 装载所必需）。
+ *   script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:（'unsafe-inline' 为
+ *   WebviewWidget srcDoc 内联脚本所必需——srcDoc iframe 继承父文档 CSP，无法
+ *   局部豁免；blob: 为 skinRuntime 皮肤 hooks 装载所必需；'unsafe-eval' 为
+ *   ajv8 运行时 new Function 编译 schema 所必需，缺失则全部 RJSF 动态表单
+ *   提交被 CSP 拦死——BUG-16 GUI 实证）。
  * - vite.config.ts：dev server 同款头（dev 另有 React Refresh/HMR 内联脚本）。
  * - index.html：无内联 <script>（主题预置脚本外置 public/theme-init.js）——
  *   应用壳自身是唯一能收紧的部分，有本测试看守防回潮。
@@ -59,7 +61,7 @@ describe('CSP 安全头静态契约', () => {
     expect(occurrences).toBeGreaterThanOrEqual(2)
   })
 
-  it('生产与 dev 的 script-src 同基线：仅 self/内联/blob:，拒绝任意外源与通配', () => {
+  it('生产与 dev 的 script-src 同基线：self/内联/eval/blob:，拒绝任意外源与通配', () => {
     const prodScriptSrc = scriptSrcDirectiveOf(nginxConf)
     expect(prodScriptSrc).toBeTruthy()
     // 'self'：任意外部源（CDN/注入远程脚本）依旧被拒——script-src 保留的硬化面
@@ -69,6 +71,11 @@ describe('CSP 安全头静态契约', () => {
     // 'unsafe-inline'：WebviewWidget/HtmlPreviewWidget 的 srcDoc 内联脚本所必需
     // （srcDoc iframe 继承父文档 CSP，父级不放行则全部插件 webview 被拦截）
     expect(prodScriptSrc!).toContain("'unsafe-inline'")
+    // 'unsafe-eval'：ajv8（@rjsf/validator-ajv8）运行时 new Function 编译 schema
+    // 生成校验函数——缺失则所有 RJSF 动态表单提交被 CSP 拦死且仅得 console 报错
+    // （BUG-16 GUI 实证：alert 文案 "Evaluating a string as JavaScript violates
+    // ... Content Security Policy directive: script-src"）
+    expect(prodScriptSrc!).toContain("'unsafe-eval'")
     // 防滑坡：不允许通配或写死任意外源
     expect(prodScriptSrc!).not.toMatch(/\*/)
     expect(prodScriptSrc!).not.toMatch(/https?:\/\//)

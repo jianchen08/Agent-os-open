@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * themeStore 分支补测：补齐既有测试未触达的分支——
  * 纹理 CSS 全类型生成（dots/grid/lines/checker/noise/未知/none）、
@@ -11,6 +12,7 @@
  * 断言面向 store 状态与 DOM 副作用（可观察行为）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { themeServiceWiring } from './helpers/storeTestMocks'
 
 const skinRuntime = vi.hoisted(() => ({
   applyPluginSkin: vi.fn(),
@@ -41,23 +43,7 @@ vi.mock('@/services/themeStorage', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
   return { ...actual, ThemeStorageService: storageSvc }
 })
-vi.mock('@/services/themeService', async (importOriginal) => {
-  const actual = await importOriginal<Record<string, Record<string, unknown>>>()
-  return {
-    ...actual,
-    applyTheme: vi.fn(),
-    applyPluginThemeVars: vi.fn(),
-    clearPluginThemeVars: vi.fn(),
-    derivePluginThemePreview: vi.fn(() => ({
-      primary: '#111827',
-      background: '#ffffff',
-      surface: '#f8fafc',
-      text: '#0f172a',
-      accent: '#3b82f6',
-    })),
-    fetchDynamicThemes: vi.fn(),
-  }
-})
+vi.mock('@/services/themeService', async (importOriginal) => themeServiceWiring(importOriginal))
 
 import { useThemeStore, initializeTheme } from '../themeStore'
 import { applyPluginThemeVars, clearPluginThemeVars } from '@/services/themeService'

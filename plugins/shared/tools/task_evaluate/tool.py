@@ -623,9 +623,16 @@ class TaskEvaluateTool(BuiltinTool):
         # 未配置 criteria 的指标直接通过：没有验收标准 = 视为满足（不做任务
         # 描述顶替——评估引擎按 input_params 检查语义判定，顶替只会伪造
         # "有标准"假象）；留 warning 让配置缺失可见。
+        # 工具型指标（bash_check 带 command / file_check 带 path）不适用本
+        # 直通：它们的参数键本就不是 criteria，免检放行 = 验证器没跑就判过
+        # （SWE 种子实跑实证，ADR 2026-09-16-external-dataset-sourcing）。
+        def _has_verifier_params(p: dict[str, Any]) -> bool:
+            return bool(p.get("command") or p.get("path"))
+
         no_criteria_ids = [
             mid for mid in remaining_ids
             if not (input_params.get(mid, {}).get("criteria") or "").strip()
+            and not _has_verifier_params(input_params.get(mid, {}))
         ]
         if no_criteria_ids:
             already_passed += len(no_criteria_ids)

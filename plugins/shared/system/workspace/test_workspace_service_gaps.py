@@ -2,8 +2,8 @@
 """workspace_service.py 分支补测（state 行形状兜底 / 读面降级 / 扫描守卫）。
 
 行为契约（断输入→输出/副作用，不钉实现）：
-- resolve_workspace_from_state：读面返回非列表 → ("", "")；行非字典跳过，
-  命中行照常解析（坐标 + task.submitted_by 归属同源返回）
+- resolve_workspace_from_state：读面返回非列表 → ("", "", False)；行非字典跳过，
+  命中行照常解析（坐标 + task.submitted_by 归属 + 行域标记同源返回）
 - resolve_merged_worktree_target：非列表读面 → None；非字典行跳过后命中行
   照常重定位；worktree 元数据缺 path / 缺 project_root 的行不产出悬空映射；
   读面异常按无命中处理（None + warning 留痕）
@@ -85,15 +85,15 @@ class TestResolveWorkspaceDegenerateRows:
     @pytest.mark.parametrize("bad_rows", ["not-a-list", 3.14, {"pipeline_id": "p1"}])
     def test_non_list_rows_fail_closed(self, bad_rows: Any) -> None:
         _WS.set_state_reader(lambda: bad_rows)
-        assert asyncio.run(WorkspaceService().resolve_workspace_from_state("p1")) == ("", "")
+        assert asyncio.run(WorkspaceService().resolve_workspace_from_state("p1")) == ("", "", False)
 
     @pytest.mark.parametrize("non_dict_rows", [["junk"], [1337], [None, ["nested"]]])
     def test_non_dict_rows_yield_no_hit(self, non_dict_rows: list[Any]) -> None:
         _WS.set_state_reader(lambda: non_dict_rows)
-        assert asyncio.run(WorkspaceService().resolve_workspace_from_state("p1")) == ("", "")
+        assert asyncio.run(WorkspaceService().resolve_workspace_from_state("p1")) == ("", "", False)
 
     def test_non_dict_rows_skipped_and_valid_row_still_resolved(self) -> None:
-        """脏行跳过不阻断：后续命中行照常解析（含同行归属字段）。"""
+        """脏行跳过不阻断：后续命中行照常解析（含同行归属字段与行域标记）。"""
         rows = [
             "junk",
             {"pipeline_id": "p2", "workspace": "D:/ws/other"},
@@ -101,7 +101,19 @@ class TestResolveWorkspaceDegenerateRows:
         ]
         _WS.set_state_reader(lambda: rows)
         result = asyncio.run(WorkspaceService().resolve_workspace_from_state("p1"))
-        assert result == ("D:/ws/hit", "user-a")
+        assert result == ("D:/ws/hit", "user-a", True)
+
+    def test_session_row_without_task_identity_is_not_task_row(self) -> None:
+        """会话投影行（ws_meta 带 session_id，无任务身份键）→ is_task_row=False。"""
+        rows = [
+            {
+                "pipeline_id": "p1",
+                "ws_meta": {"mode": "plain", "path": "D:/ws/sessions/thread-x", "session_id": "thread-x"},
+            }
+        ]
+        _WS.set_state_reader(lambda: rows)
+        result = asyncio.run(WorkspaceService().resolve_workspace_from_state("p1"))
+        assert result == ("D:/ws/sessions/thread-x", "", False)
 
 
 # ═══════════════════════════════════════════════════════════

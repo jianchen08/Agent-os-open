@@ -20,12 +20,22 @@
     ],
     "streaming": {
       "conduit": true
-    }
+    },
+    "steps": [
+      {
+        "name": "pipeline_llm_core",
+        "required_state_inputs": [
+          "messages"
+        ]
+      }
+    ]
   },
   "permissions": {},
   "priority": 50,
   "persistent_fields": [
-    "llm_model"
+    "llm_model",
+    "track.llm_usage",
+    "track.total_tokens"
   ],
   "state": {
     "volatile_keys": [
@@ -45,11 +55,15 @@
       "streaming",
       "thinking_strength",
       "llm_empty_streak",
-      "iteration"
+      "iteration",
+      "track.llm_usage",
+      "track.messages_chars"
     ]
   },
   "granted_capabilities": [
-    "tool-executor"
+    "tool-executor",
+    "frontend",
+    "metrics"
   ],
   "requires_services": [
     "llm"
@@ -138,6 +152,8 @@
   "export_fields": [
     "llm_model",
     "router.stop_reason",
-    "context_window"
+    "context_window",
+    "track.llm_usage",
+    "track.total_tokens"
   ]
 }

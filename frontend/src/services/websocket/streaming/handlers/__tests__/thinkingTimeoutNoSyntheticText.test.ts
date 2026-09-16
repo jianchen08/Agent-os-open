@@ -10,6 +10,7 @@
  * - 不写任何合成文案（思考超时提示写进真实消息会污染内容且随 IndexedDB 持久化）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { makeEventFactory } from './helpers/streamingEventFactory'
 
 vi.mock('@/utils/logger', () => ({
   loggers: {
@@ -35,15 +36,7 @@ const PIPELINE_ID = 'pipe-reasoning-unclosed-001'
 const MESSAGE_ID = 'msg_reasoning_unclosed_01'
 const THREAD_ID = 'thread-reasoning-unclosed-001'
 
-function makeEvent(eventType: string, data: Record<string, any>) {
-  return {
-    type: eventType,
-    data: { pipeline_id: PIPELINE_ID, message_id: MESSAGE_ID, ...data },
-    source_type: 'system',
-    source_id: PIPELINE_ID,
-    timestamp: new Date().toISOString(),
-  }
-}
+const makeEvent = makeEventFactory(PIPELINE_ID, MESSAGE_ID)
 
 describe('思考块未闭合收尾', () => {
   let usePipelineMessageStore: any

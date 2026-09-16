@@ -1,0 +1,42 @@
+{
+  "_meta": "t2v 场景模板（cut 衔接/内容库生产）。骨架说明：节点连线为通用 SD 形态占位，P0-T2 真机联调时按定案模型（Wan2.2-TI2V-5B / LTX-Video 蒸馏）整体替换本文件，占位符契约不变。",
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {"ckpt_name": "P0T2_MODEL"}
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {"text": "{{positive_prompt}}", "clip": ["1", 0]}
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {"text": "{{negative_prompt}}", "clip": ["1", 0]}
+  },
+  "4": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {"width": "{{width}}", "height": "{{height}}", "batch_size": "{{frames}}"}
+  },
+  "5": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": "{{seed}}",
+      "steps": 20,
+      "cfg": 7.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["1", 0],
+      "positive": ["2", 0],
+      "negative": ["3", 0],
+      "latent_image": ["4", 0]
+    }
+  },
+  "6": {
+    "class_type": "VAEDecode",
+    "inputs": {"samples": ["5", 0], "vae": ["1", 2]}
+  },
+  "7": {
+    "class_type": "SaveAnimatedWEBP",
+    "inputs": {"images": ["6", 0], "filename_prefix": "agentos_t2v", "fps": "{{fps}}", "lossless": false}
+  }
+}

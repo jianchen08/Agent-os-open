@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * SortableListWidget 残余分支补测（簇3）
  *

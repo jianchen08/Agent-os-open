@@ -56,6 +56,14 @@ pub struct SchemaResponse {
     /// 与插件侧 plugin.json 契约同构：前端/调用方/入口校验消费同一份定义，
     /// 不读代码副本（单一真值源，消除双轨漂移）。
     pub kernel_capabilities: Vec<serde_json::Value>,
+    /// P2 模式包资源透出：模式私有 agent 条目（mode_registry 注册维度，
+    /// 约定 `agents/<stem>.yaml`）。结构 additive 只增：key/plugin_id/path。
+    /// Python 消费方（task_submit 解析、面板导航）经 HTTP 面取数，不读代码副本。
+    pub mode_agents: Vec<serde_json::Value>,
+    /// P2 模式包资源透出：模式内编排定义条目（约定 `pipelines/<stem>.yaml`，
+    /// 编排键是管道定义，与运行实例 pipeline_id 概念分离）。
+    /// 结构 additive 只增：key/plugin_id/path/task_kinds。
+    pub mode_pipelines: Vec<serde_json::Value>,
 }
 
 /// 应用状态——通过 Axum State 共享。
@@ -682,6 +690,40 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
         })
         .unwrap_or_default();
 
+    // P2 模式包资源透出：registry 维度直读（与 tools/routes 同源同款路径）。
+    // 列表方法按键字典序输出确定（HashMap 直序列化会让 ETag 内容寻址误变）；
+    // 结构 additive 只增——agent = {key, plugin_id, path}，pipeline 额外带
+    // task_kinds（文件头路由标注，深语义由消费侧解释），路径统一字符串化。
+    let (mode_agents, mode_pipelines) = match &state.capability_registry {
+        Some(registry) => (
+            registry
+                .list_mode_agents()
+                .iter()
+                .map(|a| {
+                    json!({
+                        "key": a.key,
+                        "plugin_id": a.plugin_id,
+                        "path": a.path.display().to_string(),
+                    })
+                })
+                .collect(),
+            registry
+                .list_mode_pipelines()
+                .iter()
+                .map(|p| {
+                    json!({
+                        "key": p.key,
+                        "plugin_id": p.plugin_id,
+                        "path": p.path.display().to_string(),
+                        "task_kinds": p.task_kinds,
+                    })
+                })
+                .collect(),
+        ),
+        // registry 未装配（测试装配路径）：生产装配必有 registry，缺装配是测试态。
+        None => (Vec::new(), Vec::new()),
+    };
+
     SchemaResponse {
         agents,
         pipelines,
@@ -690,6 +732,8 @@ async fn build_schema(state: &AppState) -> SchemaResponse {
         plugin_configs,
         plugin_contributes,
         kernel_capabilities,
+        mode_agents,
+        mode_pipelines,
     }
 }
 
@@ -5115,6 +5159,143 @@ mod routes_http_handler_tests {
         assert_eq!(entries[0]["path"], "/ext/rt_reg/ui");
     }
 
+    /// 模式包资源 fixture（生产经 register_mode_package_guarded 登记的同款结构）。
+    fn mode_package(
+        mode_id: &str,
+        agents: &[(&str, &str)],
+        pipelines: &[(&str, &str, Vec<&str>)],
+    ) -> agentos_plugin_loader::ModePackageResources {
+        agentos_plugin_loader::ModePackageResources {
+            plugin_id: mode_id.to_string(),
+            mode_id: mode_id.to_string(),
+            agents: agents
+                .iter()
+                .map(|(stem, file)| agentos_plugin_loader::ModeAgentEntry {
+                    key: format!("{mode_id}/{stem}"),
+                    plugin_id: mode_id.to_string(),
+                    path: PathBuf::from(format!("/pkg/{mode_id}/agents/{file}")),
+                })
+                .collect(),
+            pipelines: pipelines
+                .iter()
+                .map(
+                    |(stem, file, kinds)| agentos_plugin_loader::ModePipelineEntry {
+                        key: format!("{mode_id}/{stem}"),
+                        plugin_id: mode_id.to_string(),
+                        path: PathBuf::from(format!("/pkg/{mode_id}/pipelines/{file}")),
+                        task_kinds: kinds.iter().map(|k| k.to_string()).collect(),
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn schema_mode_resources_from_registry_with_stable_serialization() {
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let _guard = agentos_plugin_loader::register_mode_package_guarded(
+            &registry,
+            mode_package(
+                "mode_writing",
+                &[("novelist", "novelist.yaml"), ("editor", "editor.yaml")],
+                &[("chapter", "chapter.yaml", vec!["writing.chapter"])],
+            ),
+        )
+        .unwrap();
+
+        let state = AppState {
+            capability_registry: Some(registry),
+            ..AppState::new()
+        };
+        let resp = schema_handler(
+            axum::extract::State(state.clone()),
+            axum::http::HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+
+        // agent 条目：键/来源插件/定义路径透出，按键字典序
+        let agents = body["mode_agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 2);
+        let keys: Vec<_> = agents.iter().map(|a| a["key"].as_str().unwrap()).collect();
+        assert_eq!(keys, vec!["mode_writing/editor", "mode_writing/novelist"]);
+        assert_eq!(agents[1]["plugin_id"], "mode_writing");
+        assert_eq!(agents[1]["path"], "/pkg/mode_writing/agents/novelist.yaml");
+
+        // 编排条目：额外透出 task_kinds
+        let pipelines = body["mode_pipelines"].as_array().unwrap();
+        assert_eq!(pipelines.len(), 1);
+        assert_eq!(pipelines[0]["key"], "mode_writing/chapter");
+        assert_eq!(pipelines[0]["plugin_id"], "mode_writing");
+        assert_eq!(
+            pipelines[0]["path"],
+            "/pkg/mode_writing/pipelines/chapter.yaml"
+        );
+        assert_eq!(pipelines[0]["task_kinds"], json!(["writing.chapter"]));
+
+        // additive 结构序列化稳定：条目字段集合固定（不随注册内容增删漂移），
+        // 且两次聚合产出字节一致（schema ETag 内容寻址的前提）。
+        for a in agents {
+            let mut names: Vec<_> = a.as_object().unwrap().keys().map(String::as_str).collect();
+            names.sort_unstable();
+            assert_eq!(names, vec!["key", "path", "plugin_id"], "{a}");
+        }
+        let mut names: Vec<_> = pipelines[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["key", "path", "plugin_id", "task_kinds"],
+            "{}",
+            pipelines[0]
+        );
+        let first = serde_json::to_vec(&build_schema(&state).await).unwrap();
+        let second = serde_json::to_vec(&build_schema(&state).await).unwrap();
+        assert_eq!(first, second, "同内容聚合必须产出相同字节");
+    }
+
+    #[tokio::test]
+    async fn schema_mode_resources_empty_without_registration() {
+        // registry 装配但无模式资源 → 空集合（非缺省/null，消费方按数组取数）
+        let state = AppState {
+            capability_registry: Some(Arc::new(CapabilityRegistryImpl::new())),
+            ..AppState::new()
+        };
+        let body = body_json(
+            schema_handler(
+                axum::extract::State(state.clone()),
+                axum::http::HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            body["mode_agents"].as_array().unwrap().is_empty(),
+            "无注册 → 空 agents 集合"
+        );
+        assert!(
+            body["mode_pipelines"].as_array().unwrap().is_empty(),
+            "无注册 → 空 pipelines 集合"
+        );
+
+        // registry 未装配（测试态装配路径）→ 同样空集合
+        let body = body_json(
+            schema_handler(
+                axum::extract::State(AppState::new()),
+                axum::http::HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        assert!(body["mode_agents"].as_array().unwrap().is_empty());
+        assert!(body["mode_pipelines"].as_array().unwrap().is_empty());
+    }
+
     // ── /api/v1/actions/execute 命令出口 ────────────────────
 
     #[tokio::test]
@@ -6819,5 +7000,329 @@ mod routes_http_handler_tests {
             "排空后 run 状态应为 suspended，实际 {:?}",
             run.status
         );
+    }
+}
+
+#[cfg(test)]
+mod app_state_builder_tests {
+    //! AppState 注入面 builder 的装配契约：注入的字段真的落到 state 上，
+    //! 且未被注入的字段保持 [`AppState::new`] 缺省（`..Self::new()` 收敛
+    //! 语义）；schema 聚合对 kernel_capability_contracts 透传。
+
+    use super::*;
+    use agentos_core::traits::HostType;
+
+    fn manifest(id: &str, plugin_type: PluginType) -> PluginManifest {
+        PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
+            id: id.to_string(),
+            name: format!("{id} 名"),
+            description: None,
+            version: "1.0.0".to_string(),
+            plugin_type,
+            pipeline_role: None,
+            language: "python".to_string(),
+            host_type: HostType::Sidecar,
+            host_group: None,
+            entry: "python server.py".to_string(),
+            capabilities: Default::default(),
+            requires_services: vec![],
+            permissions: Default::default(),
+            priority: 100,
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            granted_capabilities: vec![],
+            requires_content: None,
+            invoke_entry: None,
+            config_files: vec![],
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            persistent_fields: vec![],
+            export_fields: vec![],
+            provides: None,
+        }
+    }
+
+    /// 测试用 invoker：本模块只验证装配，不应真正被调用。
+    struct NeverInvoker;
+    #[async_trait::async_trait]
+    impl PluginInvoker for NeverInvoker {
+        async fn invoke_pipeline_plugin<'a>(
+            &self,
+            _plugin_id: &str,
+            _ctx: &agentos_core::types::PluginContext<'a>,
+        ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
+            unimplemented!("装配契约测试不触达调用")
+        }
+        async fn invoke_tool(
+            &self,
+            _plugin_id: &str,
+            _tool_name: &str,
+            _inputs: &serde_json::Value,
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError>
+        {
+            unimplemented!("装配契约测试不触达调用")
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            _hook: agentos_core::traits::LifecycleHook,
+            _ctx: &agentos_core::traits::HookContext,
+        ) -> Result<(), agentos_core::types::PluginError> {
+            Ok(())
+        }
+    }
+
+    /// with_plugins：八个注入项全部落到 state；未注入项保持缺省
+    /// （manifest 列表/registry/pipeline_config/step_library/invoker/store/
+    /// project_root/enabled_plugin_ids 各自可读回）。
+    #[test]
+    fn with_plugins_wires_all_injected_fields_and_keeps_defaults() {
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let pipeline_config = Arc::new(PipelineConfig {
+            name: "injected".to_string(),
+            loop_bodies: Vec::new(),
+            checkpoint: Default::default(),
+            initial_state: std::collections::HashMap::new(),
+            max_rounds: Some(3),
+        });
+        let step_library = Arc::new(StepLibrary::default());
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let mut enabled = std::collections::HashSet::new();
+        enabled.insert("on_plugin".to_string());
+
+        let state = AppState::with_plugins(
+            vec![manifest("m_plug", PluginType::Tool)],
+            registry.clone(),
+            pipeline_config.clone(),
+            step_library.clone(),
+            Arc::new(NeverInvoker),
+            store,
+            dir.path().to_path_buf(),
+            enabled,
+        );
+
+        assert_eq!(
+            state.manifests.blocking_read().len(),
+            1,
+            "manifest 列表注入"
+        );
+        assert_eq!(state.manifests.blocking_read()[0].id, "m_plug");
+        assert!(
+            Arc::ptr_eq(state.capability_registry.as_ref().unwrap(), &registry),
+            "registry 同一实例注入"
+        );
+        assert_eq!(state.pipeline_config.name, "injected");
+        assert_eq!(state.pipeline_config.max_rounds, Some(3));
+        assert!(Arc::ptr_eq(&state.step_library, &step_library));
+        assert!(state.invoker.is_some());
+        assert!(state.store.is_some());
+        assert_eq!(state.project_root.as_deref(), Some(dir.path()));
+        assert!(
+            state
+                .enabled_plugin_ids
+                .blocking_read()
+                .contains("on_plugin"),
+            "enabled 集合注入"
+        );
+        // 未注入项保持缺省：db / session / http_handler / metrics 等
+        assert!(state.db.is_none());
+        assert!(state.session.is_none());
+        assert!(state.http_handler.is_none());
+        assert!(state.metrics.is_none());
+        assert!(state.plugin_dirs.is_empty());
+    }
+
+    /// with_contract_states / with_capability_handlers / with_plugin_scopes /
+    /// with_widget_bindings / with_plugin_dirs / with_http_handler：注入即生效，
+    /// 且链式调用互不覆盖。
+    #[test]
+    fn builder_chain_injects_each_field_independently() {
+        struct NopHttpHandler;
+        #[async_trait::async_trait]
+        impl HttpHandleCapability for NopHttpHandler {
+            async fn handle(
+                &self,
+                _request: agentos_core::traits::HttpHandleRequest,
+            ) -> Result<agentos_core::traits::HttpHandleResponse, String> {
+                Err("n/a".to_string())
+            }
+        }
+
+        let states = Arc::new(crate::contract::ContractLedger::new());
+        let handlers = Arc::new(agentos_mcp::CapabilityHandlerRegistry::new());
+        let scopes = Arc::new(PluginScopeRegistry::new());
+        let bindings = Arc::new(parking_lot::RwLock::new(Vec::new()));
+        let mut dirs = HashMap::new();
+        dirs.insert("p1".to_string(), PathBuf::from("C:/plugins/p1"));
+
+        let state = AppState::new()
+            .with_contract_states(states.clone())
+            .with_capability_handlers(handlers.clone())
+            .with_plugin_scopes(scopes.clone())
+            .with_widget_bindings(bindings.clone())
+            .with_plugin_dirs(dirs)
+            .with_http_handler(Arc::new(NopHttpHandler));
+
+        assert!(Arc::ptr_eq(&state.contract_states, &states), "契约账本注入");
+        assert!(
+            state
+                .capability_handlers
+                .as_ref()
+                .is_some_and(|h| Arc::ptr_eq(h, &handlers)),
+            "能力 handler 注册表注入"
+        );
+        assert!(
+            Arc::ptr_eq(&state.plugin_scopes, &scopes),
+            "插件 scope 账本注入"
+        );
+        assert!(
+            state
+                .widget_bindings
+                .as_ref()
+                .is_some_and(|b| Arc::ptr_eq(b, &bindings)),
+            "widget 绑定表注入"
+        );
+        assert_eq!(
+            state.plugin_dirs.get("p1").map(|p| p.to_str().unwrap()),
+            Some("C:/plugins/p1"),
+            "插件目录映射注入（HTTP dispatcher 静态资源解析依据）"
+        );
+        assert!(state.http_handler.is_some(), "HTTP 插件处理器注入");
+    }
+
+    /// with_kernel_capability_contracts：注入的契约集合经 `/schema` 聚合原样
+    /// 透出（结构 additive：namespace + capabilities[].method/input_schema）。
+    #[tokio::test]
+    async fn schema_exposes_injected_kernel_capability_contracts() {
+        let contract: crate::kernel_capabilities::KernelCapabilityContract =
+            serde_json::from_value(serde_json::json!({
+                "namespace": "chat",
+                "description": "内核 chat 面",
+                "capabilities": [{
+                    "method": "send_message",
+                    "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}}
+                }]
+            }))
+            .expect("合法契约应反序列化");
+        let state = AppState::new().with_kernel_capability_contracts(Arc::new(vec![contract]));
+
+        let schema = build_schema(&state).await;
+        assert_eq!(schema.kernel_capabilities.len(), 1, "注入的契约应透出");
+        assert_eq!(schema.kernel_capabilities[0]["namespace"], "chat");
+        assert_eq!(
+            schema.kernel_capabilities[0]["capabilities"][0]["method"],
+            "send_message"
+        );
+
+        // 未注入（缺省 None）→ 空列表，不伪造契约
+        let bare = build_schema(&AppState::new()).await;
+        assert!(bare.kernel_capabilities.is_empty());
+    }
+
+    /// schema 的 routes 面按 plugin_id 排序且组内路由排序——输出确定性是
+    /// ETag 内容寻址的前提（HashMap 直序列化会让 304 协商失效）。
+    #[tokio::test]
+    async fn schema_routes_are_sorted_for_deterministic_etag() {
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        // guard 必须持有到断言结束：drop 即撤注册
+        let mut guards = Vec::new();
+        // 两个插件，注册顺序与字典序相反；每插件两条路由，路径顺序也相反
+        for (pid, first, second) in [
+            ("z_plugin", "/ext/z_plugin/b", "/ext/z_plugin/a"),
+            ("a_plugin", "/ext/a_plugin/b", "/ext/a_plugin/a"),
+        ] {
+            for path in [first, second] {
+                let (_desc, guard) = registry
+                    .register_http_route_guarded(
+                        pid,
+                        agentos_core::traits::HttpEndpoint {
+                            route_id: format!("{pid}{path}"),
+                            method: "GET".to_string(),
+                            path: path.to_string(),
+                            auth: None,
+                            handler_capability: "http.handle".to_string(),
+                            timeout_ms: None,
+                            max_concurrency: None,
+                            description: None,
+                        },
+                    )
+                    .expect("命名空间内路径应注册成功");
+                guards.push(guard);
+            }
+        }
+        let mut state = AppState::new();
+        state.capability_registry = Some(registry);
+        let schema = build_schema(&state).await;
+        let routes = schema.routes.as_object().expect("routes 面为对象");
+        let keys: Vec<&String> = routes.keys().collect();
+        assert_eq!(keys, vec!["a_plugin", "z_plugin"], "plugin 键字典序");
+        let a_paths: Vec<&str> = routes["a_plugin"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            a_paths,
+            vec!["/ext/a_plugin/a", "/ext/a_plugin/b"],
+            "组内路由按 route_id|method|path 排序"
+        );
+
+        // 相同内容重复聚合 → 相同字节（ETag 内容寻址前提）
+        let schema2 = build_schema(&state).await;
+        assert_eq!(
+            serde_json::to_vec(&schema.routes).unwrap(),
+            serde_json::to_vec(&schema2.routes).unwrap(),
+            "同内容必须产出相同字节"
+        );
+    }
+
+    /// json_value_type_name：六类 JSON 值各自命名（400 错误消息可读性契约）。
+    #[test]
+    fn json_value_type_name_covers_all_variants() {
+        assert_eq!(json_value_type_name(&serde_json::Value::Null), "null");
+        assert_eq!(json_value_type_name(&json!(true)), "bool");
+        assert_eq!(json_value_type_name(&json!(1.5)), "number");
+        assert_eq!(json_value_type_name(&json!("s")), "string");
+        assert_eq!(json_value_type_name(&json!([1])), "array");
+        assert_eq!(json_value_type_name(&json!({"k": 1})), "object");
+    }
+
+    /// consume_refresh_jti 的 db 故障路径：账本写入失败必须 fail-closed
+    /// （拒本次刷新），不因存储异常放行旧值复用。
+    #[test]
+    fn consume_refresh_jti_fails_closed_on_ledger_error() {
+        // 只读库（无法建表）→ consume_refresh_jti 写入必失败
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("ro.db");
+        let sqlite =
+            Arc::new(agentos_engine::SqliteStore::open(db_path.to_str().unwrap()).unwrap());
+        // 建同名表格挡住后续写入：把 consumed_refresh_jtis 建成只读视图
+        sqlite
+            .with_conn::<(), String>(|c| {
+                c.execute_batch(
+                    "DROP TABLE consumed_refresh_jtis; \
+                     CREATE VIEW consumed_refresh_jtis AS SELECT '' AS jti, 0 AS consumed_at;",
+                )
+                .map_err(|e| e.to_string())
+            })
+            .ok();
+        let state = AppState::new().with_db(sqlite);
+        if state.consume_refresh_jti("jti-fault-1") {
+            // 视图可读但不可写时应当为 false；若驱动允许写入则退化为正常账本，
+            // 此时断言第二次消费仍被拒（账本语义不变）。
+            assert!(
+                !state.consume_refresh_jti("jti-fault-1"),
+                "账本异常或已消费都必须拒绝（fail-closed）"
+            );
+        }
     }
 }

@@ -180,10 +180,16 @@ export function destroyGrowthLoop(): void {
   useLayoutModeStore.setState({ workspaceTabs: [] })
 }
 
-/** 重新启动自生长闭环 原子性替换，避免清空后再拉取导致工作区闪烁 */
+/**
+ * 重新启动自生长闭环
+ *
+ * 注册表换装是原子的：loadFromSchema 内部一次同步清空+重注册，拉取在飞期旧
+ * 声明集保持可解析。这里不得前置 clear——先清后拉会在窗口期留下「声明已消失」
+ * 的可观测空窗，侧栏残留按钮（1.5s 轮询滞后）点击落入 opener「声明缺失」分支：
+ * 无新 tab、error 通知 8s 自灭（BUG-26：侧栏「用户管理」点击无响应）。
+ * 拉取失败保留旧声明集（FE11 通知可见降级），下次 schema 事件再换装。
+ */
 export async function restartGrowthLoop(): Promise<void> {
-  contributionRegistry.clear()
-
   initializeWidgets()
 
   // 补挂 resync_required 订阅（登出 disconnect 会清空全部 handler，幂等可重复调用）

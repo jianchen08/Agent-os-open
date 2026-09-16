@@ -1,0 +1,12 @@
+[project]
+name = "agentos-plugin-mode-godot"
+version = "0.1.0"
+description = "Lingxi AgentOS 0.2 plugin — mode_godot（Godot 游戏开发模式出厂种子）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+    "pyyaml",
+]
+
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../../sdk", editable = true }

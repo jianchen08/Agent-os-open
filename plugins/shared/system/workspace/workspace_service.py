@@ -142,7 +142,7 @@ class WorkspaceService:
 
         return {"items": items, "total": len(items)}
 
-    async def resolve_workspace_from_state(self, pipeline_id: str) -> tuple[str, str]:
+    async def resolve_workspace_from_state(self, pipeline_id: str) -> tuple[str, str, bool]:
         """按 pipeline_id 从 state 聚合行解析工作区坐标与任务归属（非任务管道关联通道）。
 
         任务管道坐标优先取任务域镜像 ``task.ws_meta``（任务 init 即写，不受
@@ -150,48 +150,54 @@ class WorkspaceService:
         打开工作空间落到会话默认文件夹）；主会话管道无任务镜像，回退
         ``ws_meta``。worktree 模式合并后副本即删，按 ``resolve_meta_workspace_path``
         重定位到 project_root。最后回退 ``workspace`` 标量。读面未注入/无命中/
-        命中行无工作区键 → ("", "")。
+        命中行无工作区键 → ("", "", False)。
 
         Returns:
-            ``(workspace_path, owner_sub)``——owner 为同行 ``task.submitted_by``
-            （任务归属权威字段，task_submit 出生协议写全；会话投影行无该键 →
-            空串，调用方按缺归属 fail-closed 处置）。单次读取同源返回，避免
+            ``(workspace_path, owner_sub, is_task_row)``——owner 为同行
+            ``task.submitted_by``（任务归属权威字段，task_submit 出生协议写全；
+            会话投影行无该键 → 空串）。is_task_row 标记命中行是否携带任务身份
+            （``task.id`` / ``task.submitted_by`` / ``task.ws_meta`` 任一在场）：
+            归属闸只对任务行要求 submitted_by；会话行（无任何任务身份标记）
+            坐标即服务端 state 真值，不构成缺归属。单次读取同源返回，避免
             二次读行的归属错位。
         """
         reader = _get_state_reader()
         if reader is None:
-            return "", ""
+            return "", "", False
         try:
             rows = reader()
             if asyncio.iscoroutine(rows):
                 rows = await rows
             if not isinstance(rows, list):
-                return "", ""
+                return "", "", False
             for row in rows:
                 if not isinstance(row, dict):
                     continue
                 if str(row.get("pipeline_id") or "") != pipeline_id:
                     continue
                 owner = str(row.get("task.submitted_by") or "")
+                is_task_row = bool(
+                    row.get("task.id") or owner or row.get("task.ws_meta")
+                )
                 for key in ("task.ws_meta", "ws_meta"):
                     meta = row.get(key)
                     if not isinstance(meta, dict):
                         continue
                     path = resolve_meta_workspace_path(meta)
                     if path:
-                        return path, owner
+                        return path, owner, is_task_row
                 ws = row.get("workspace")
                 if isinstance(ws, str) and ws:
-                    return ws, owner
-                return "", owner
-            return "", ""
+                    return ws, owner, is_task_row
+                return "", owner, is_task_row
+            return "", "", False
         except Exception as exc:  # noqa: BLE001 — 解析失败回退 task_service 镜像
             logger.warning(
                 "[WorkspaceService] state 行工作区解析失败 | pipeline=%s | err=%s",
                 pipeline_id,
                 exc,
             )
-            return "", ""
+            return "", "", False
 
     async def resolve_merged_worktree_target(self, path: str) -> str | None:
         """已合并 worktree 的死路径重定位：路径落在某任务 worktree 副本内

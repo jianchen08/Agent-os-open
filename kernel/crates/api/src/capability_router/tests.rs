@@ -4429,3 +4429,761 @@ async fn frontend_emit_without_session_reports_dropped_not_error() {
         .unwrap();
     assert_eq!(res2["event"], "unknown");
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// 覆盖率补测批：流式契约网关 / 事件族丢弃 / 挂起恢复翻译 / 工具执行告警
+// ═══════════════════════════════════════════════════════════════════
+
+/// 流式声明闸：插件声明了 `events` 清单但事件不在清单内 → 拒绝（留痕）。
+/// 与「未声明 capabilities.streaming」是两条独立分支，前者声明了但越清单。
+#[tokio::test]
+async fn streaming_gate_event_outside_declared_list_emits_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let decl = agentos_core::traits::StreamingCapability {
+        conduit: false,
+        events: Some(vec!["stream_start".to_string()]),
+        part_types: None,
+        persist: None,
+    };
+    let router = router_with_streaming_gate(received.clone(), Some(decl));
+    let res = router
+        .handle(
+            "event-bus",
+            "emit",
+            json!({
+                "_plugin_id": "my_streamer",
+                "event": "stream_chunk",
+                "payload": {
+                    "thread_id": "thread-1",
+                    "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
+                    "message_id": "p_chunk_001",
+                    "content": "hi",
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let text = logs.text();
+    assert_eq!(res["status"], "dropped");
+    assert_eq!(res["reason"], "event not in declared events");
+    assert!(received.lock().unwrap().is_empty());
+    assert!(
+        text.contains("不在 capabilities.streaming.events 声明内"),
+        "越清单拒绝须留痕: {text}"
+    );
+}
+
+/// 未声明 streaming 的插件发射流式事件 → dropped + 留痕（fail-closed 取证）。
+#[tokio::test]
+async fn streaming_gate_undeclared_plugin_emits_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = router_with_streaming_gate(received.clone(), None);
+    let res = router
+        .handle(
+            "event-bus",
+            "emit",
+            json!({
+                "_plugin_id": "no_decl",
+                "event": "stream_chunk",
+                "payload": {"thread_id": "thread-1", "pipeline_id": "p1",
+                            "message_id": "m1", "content": "x"},
+            }),
+        )
+        .await
+        .unwrap();
+    let text = logs.text();
+    assert_eq!(res["status"], "dropped");
+    assert_eq!(res["reason"], "capabilities.streaming not declared");
+    assert!(
+        text.contains("插件未声明 capabilities.streaming"),
+        "未声明拒绝须留痕: {text}"
+    );
+}
+
+/// 流式信封不完整（缺 message_id）→ 丢弃 + 留痕；reason 指明 incomplete envelope。
+#[tokio::test]
+async fn stream_family_incomplete_envelope_emits_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = router_with_session(received.clone());
+    let res = router
+        .handle(
+            "event-bus",
+            "emit",
+            json!({
+                "event": "stream_chunk",
+                "payload": {
+                    "thread_id": "thread-1",
+                    "pipeline_id": "p_envelope",
+                    "content": "hi",
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let text = logs.text();
+    assert_eq!(res["status"], "dropped");
+    assert_eq!(res["reason"], "incomplete envelope");
+    assert!(received.lock().unwrap().is_empty());
+    assert!(
+        text.contains("流式事件信封不完整"),
+        "信封不完整须留痕: {text}"
+    );
+}
+
+/// 流式 chunk 内容为空（needs_content 事件）→ 丢弃 + 留痕；thinking_start
+/// 等无 content 事件不受该闸影响。
+#[tokio::test]
+async fn stream_chunk_empty_content_dropped_with_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = router_with_session(received.clone());
+    let res = router
+        .handle(
+            "event-bus",
+            "emit",
+            json!({
+                "event": "stream_chunk",
+                "payload": {
+                    "thread_id": "thread-1",
+                    "pipeline_id": "p_empty_content",
+                    "message_id": "m_empty",
+                    "content": "",
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let text = logs.text();
+    assert_eq!(res["status"], "dropped");
+    assert_eq!(res["reason"], "empty content");
+    assert!(received.lock().unwrap().is_empty());
+    assert!(
+        text.contains("流式事件被丢弃（content 空）"),
+        "空内容丢弃须留痕: {text}"
+    );
+}
+
+/// 交互事件缺 thread_id → 丢弃 + 留痕（前端 useInteractionHandler 无路由键
+/// 会渲染到错误会话，宁丢不误投）。
+#[tokio::test]
+async fn interaction_without_thread_dropped_with_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = router_with_session(received.clone());
+    let res = router
+        .handle(
+            "event-bus",
+            "emit",
+            json!({
+                "event": "interaction_request",
+                "payload": {"request_id": "r1", "kind": "approval"},
+            }),
+        )
+        .await
+        .unwrap();
+    let text = logs.text();
+    assert_eq!(res["status"], "dropped");
+    assert!(received.lock().unwrap().is_empty());
+    assert!(
+        text.contains("交互事件被丢弃（thread_id 空）"),
+        "交互事件丢弃须留痕: {text}"
+    );
+}
+
+/// 自定义事件缺 thread_id → dropped + reason 指明（无 session 或空 thread）。
+#[tokio::test]
+async fn custom_event_without_thread_reports_drop_reason_with_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = router_with_session(received.clone());
+    let res = router
+        .handle(
+            "event-bus",
+            "emit",
+            json!({"event": "widget_feedback", "payload": {"value": 1}}),
+        )
+        .await
+        .unwrap();
+    let text = logs.text();
+    assert_eq!(res["status"], "dropped");
+    assert_eq!(res["reason"], "no session or empty thread_id");
+    assert!(
+        text.contains("透传事件被丢弃（thread_id 空）"),
+        "自定义事件丢弃须留痕: {text}"
+    );
+}
+
+/// frontend.emit 缺 thread_id（payload 与 params 顶层都无）→ dropped + 留痕。
+#[tokio::test]
+async fn frontend_emit_without_thread_dropped_with_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let router = router_plain();
+    let res = router
+        .handle(
+            "frontend",
+            "emit",
+            json!({"event": "tool_progress", "payload": {"percent": 50}}),
+        )
+        .await
+        .unwrap();
+    let text = logs.text();
+    assert_eq!(res["status"], "dropped");
+    assert!(
+        text.contains("frontend.emit 被丢弃（thread_id 空）"),
+        "frontend.emit 丢弃须留痕: {text}"
+    );
+}
+
+/// tool-executor.invoke 缺 tool_name → 协议错误（参数校验前置）。
+#[tokio::test]
+async fn tool_executor_invoke_missing_tool_name_rejected() {
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
+    let err = router
+        .handle("tool-executor", "invoke", json!({"args": {}}))
+        .await
+        .expect_err("缺 tool_name 必须报错");
+    assert!(
+        format!("{err}").contains("缺少 tool_name"),
+        "错误文案须指明缺参: {err}"
+    );
+}
+
+/// 缺会话身份（_owner / session_id 皆无）→ 告警留痕但照常执行（fallback 链
+/// 由工具插件侧兜底；不阻断是有意设计）。
+#[tokio::test]
+async fn tool_executor_missing_session_identity_warns_but_executes() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_invoker(
+        Arc::new(CaptureInvoker {
+            captured: seen.clone(),
+        }),
+    );
+    let res = router
+        .handle(
+            "tool-executor",
+            "invoke",
+            json!({"tool_name": "noop_tool", "args": {"x": 1}, "plugin_id": "p_owner"}),
+        )
+        .await
+        .unwrap();
+    let text = logs.text();
+    assert_eq!(res["success"], true, "告警不得阻断执行: {res}");
+    assert_eq!(seen.lock().unwrap().len(), 1, "工具调用照常发出");
+    assert!(
+        text.contains("缺少会话身份"),
+        "会话身份缺失须告警留痕: {text}"
+    );
+}
+
+/// 工具连续失败达阈值 → error 级留痕（"同一工具 100% 失败"必须可捞）。
+#[tokio::test]
+async fn tool_executor_consecutive_failures_emit_error_log() {
+    use crate::tools::{ToolFailureAlert, ToolFailureTracker, FAILURE_ALERT_THRESHOLD};
+
+    struct FailingInvoker;
+    #[async_trait::async_trait]
+    impl agentos_core::traits::PluginInvoker for FailingInvoker {
+        async fn invoke_pipeline_plugin<'a>(
+            &self,
+            _p: &str,
+            _c: &agentos_core::types::PluginContext<'a>,
+        ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
+            unreachable!("只走工具调用")
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _p: &str,
+            _h: agentos_core::traits::LifecycleHook,
+            _c: &agentos_core::traits::HookContext,
+        ) -> Result<(), agentos_core::types::PluginError> {
+            unreachable!("只走工具调用")
+        }
+        async fn invoke_tool(
+            &self,
+            _p: &str,
+            _t: &str,
+            _i: &Value,
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError>
+        {
+            Ok(agentos_core::types::ToolExecutionResult {
+                success: false,
+                data: json!({}),
+                error: Some("schema validation failed".into()),
+                duration_ms: None,
+                metadata: None,
+            })
+        }
+    }
+
+    /// 计数达阈值即产出告警的追踪器（与生产 ConsecutiveFailureTracker 语义同形）。
+    struct CountingTracker {
+        count: std::sync::Mutex<u32>,
+    }
+    impl ToolFailureTracker for CountingTracker {
+        fn record(
+            &self,
+            tool_name: &str,
+            success: bool,
+            _sample: &str,
+        ) -> Option<ToolFailureAlert> {
+            if success {
+                return None;
+            }
+            let mut n = self.count.lock().unwrap();
+            *n += 1;
+            if *n >= FAILURE_ALERT_THRESHOLD {
+                return Some(ToolFailureAlert {
+                    tool_name: tool_name.to_string(),
+                    consecutive: *n,
+                    error_sample: "schema validation failed".to_string(),
+                    since_secs: 3,
+                });
+            }
+            None
+        }
+    }
+
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_invoker(Arc::new(FailingInvoker))
+        .with_tool_failure_tracker(Arc::new(CountingTracker {
+            count: std::sync::Mutex::new(0),
+        }));
+    let params = json!({"tool_name": "flaky_tool", "args": {}, "plugin_id": "p_flaky"});
+    for _ in 0..FAILURE_ALERT_THRESHOLD {
+        let _ = router
+            .handle("tool-executor", "invoke", params.clone())
+            .await
+            .unwrap();
+    }
+    let text = logs.text();
+    assert!(
+        text.contains("工具连续失败"),
+        "达阈值必须 error 留痕（否则流水日志淹没）: {text}"
+    );
+    assert!(text.contains("flaky_tool"), "留痕须含工具名: {text}");
+}
+
+// ── pipeline-executor：挂起/恢复各失败翻译 ─────────────────────────────
+
+/// suspend_pipeline / resume_pipeline / delete_pipeline / get_run_status 的
+/// 参数与装配守卫：缺参、store 未注入都要显式报错（不得静默 no-op）。
+#[tokio::test]
+async fn pipeline_executor_param_and_store_guards_are_explicit() {
+    let no_store = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
+    // 缺 pipeline_id
+    for (method, params) in [
+        ("suspend_pipeline", json!({})),
+        ("resume_pipeline", json!({})),
+        ("delete_pipeline", json!({})),
+        ("delete_pipeline", json!({"pipeline_id": ""})),
+        ("get_run_status", json!({})),
+    ] {
+        let err = no_store
+            .handle("pipeline-executor", method, params)
+            .await
+            .expect_err("缺参必须报错");
+        let msg = format!("{err}");
+        assert!(msg.contains("缺少"), "{method} 缺参文案须指明: {msg}");
+    }
+    // store 未注入（参数合法）
+    for (method, params) in [
+        ("suspend_pipeline", json!({"pipeline_id": "p1"})),
+        ("resume_pipeline", json!({"pipeline_id": "p1"})),
+        ("delete_pipeline", json!({"pipeline_id": "p1"})),
+        ("get_run_status", json!({"run_id": "r1"})),
+    ] {
+        let err = no_store
+            .handle("pipeline-executor", method, params)
+            .await
+            .expect_err("store 未注入必须报错");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("store not injected"),
+            "{method} 装配缺失文案须可诊断: {msg}"
+        );
+    }
+}
+
+/// suspend_pipeline：无匹配 run（全部终态或从未运行）→ 幂等 ok 且 run_id 为空
+/// （task_manage stop 对已结束任务是 no-op，不是错误）。
+#[tokio::test]
+async fn suspend_pipeline_without_active_run_is_idempotent_ok() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let router =
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_sp_noop", "th_sp_noop"),
+        async {
+            let tenant = agentos_tenant::current_or_default("default").tenant_id;
+            store.create_run("run_done", "h", &tenant).await.unwrap();
+            store
+                .set_run_pipeline("run_done", "pipe_sp_done")
+                .await
+                .unwrap();
+            store
+                .update_run_status(
+                    "run_done",
+                    agentos_core::types::RunStatus::Completed,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+
+            let res = router
+                .handle(
+                    "pipeline-executor",
+                    "suspend_pipeline",
+                    json!({"pipeline_id": "pipe_sp_done"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res["status"], "suspended");
+            assert_eq!(res["run_id"], "", "无在飞 run 时 run_id 为空（幂等）");
+            // 终态 run 状态不被改写
+            let got = store.get_run("run_done").await.unwrap();
+            assert_eq!(got.status, agentos_core::types::RunStatus::Completed);
+        },
+    )
+    .await;
+}
+
+/// resume_pipeline：pipeline_id 无会话挂载（孤儿/伪造）→ 显式拒绝派发
+/// （静默跑完会把回复发到无人订阅的频道）。
+#[tokio::test]
+async fn resume_pipeline_without_session_link_is_rejected() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let dispatched: Arc<DispatchedResumes> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = dispatched.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_pipeline_resumer(Arc::new(
+            move |pipeline_id: String,
+                  thread_id: String,
+                  user_id: String,
+                  state_overlay: Option<serde_json::Value>| {
+                let sink = sink.clone();
+                Box::pin(async move {
+                    sink.lock()
+                        .unwrap()
+                        .push((pipeline_id, thread_id, user_id, state_overlay));
+                    Ok(())
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+                    >
+            },
+        ));
+
+    let err = router
+        .handle(
+            "pipeline-executor",
+            "resume_pipeline",
+            json!({"pipeline_id": "pipe_orphan"}),
+        )
+        .await
+        .expect_err("无会话挂载必须拒绝");
+    assert!(
+        format!("{err}").contains("不属于任何会话"),
+        "拒绝文案须指明孤儿 id: {err}"
+    );
+    assert!(dispatched.lock().unwrap().is_empty(), "拒绝时不得派发续跑");
+}
+
+/// resume_pipeline：恢复派发未装配 → 降级纯簿记（翻 Running）+ 留痕，
+/// 返回 dispatched=false（诚实反映"没拉起执行"）。
+#[tokio::test]
+async fn resume_pipeline_without_resumer_degrades_with_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let router =
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_nobo", "th_nobo"),
+        async {
+            let tenant = agentos_tenant::current_or_default("default").tenant_id;
+            store.create_run("run_nobo", "h", &tenant).await.unwrap();
+            store
+                .set_run_pipeline("run_nobo", "pipe_nobo")
+                .await
+                .unwrap();
+            store
+                .update_run_status(
+                    "run_nobo",
+                    agentos_core::types::RunStatus::Suspended,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            store
+                .link_pipeline_session("pipe_nobo", "th_nobo", &tenant)
+                .await
+                .unwrap();
+
+            let res = router
+                .handle(
+                    "pipeline-executor",
+                    "resume_pipeline",
+                    json!({"pipeline_id": "pipe_nobo"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res["dispatched"], false, "未装配派发须诚实标注");
+            assert_eq!(res["run_id"], "run_nobo");
+            let got = store.get_run("run_nobo").await.unwrap();
+            assert_eq!(
+                got.status,
+                agentos_core::types::RunStatus::Running,
+                "降级路径翻 Running 簿记"
+            );
+        },
+    )
+    .await;
+    let text = logs.text();
+    assert!(
+        text.contains("恢复派发未装配，降级纯簿记"),
+        "降级须留痕: {text}"
+    );
+}
+
+/// suspend：带 request_id 时落挂起凭据进 runs.metadata（审批挂起恢复链写侧）；
+/// 无 request_id 时 metadata 不带该键。
+#[tokio::test]
+async fn suspend_records_pending_interaction_credential() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_sqlite(sqlite.clone());
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_pc", "th_pc"),
+        async {
+            let tenant = agentos_tenant::current_or_default("default").tenant_id;
+            for (run_id, with_request) in [("run_pc_yes", true), ("run_pc_no", false)] {
+                store.create_run(run_id, "h", &tenant).await.unwrap();
+                let mut params = json!({"run_id": run_id});
+                if with_request {
+                    params["request_id"] = json!("req-123");
+                }
+                let res = router
+                    .handle("pipeline-executor", "suspend", params)
+                    .await
+                    .unwrap();
+                assert_eq!(res["status"], "suspended");
+                let got = sqlite.get_run(run_id).await.unwrap();
+                let meta = got.metadata.unwrap_or_else(|| json!({}));
+                assert_eq!(
+                    meta.get("pending_interaction_request_id")
+                        .and_then(|v| v.as_str()),
+                    with_request.then_some("req-123"),
+                    "挂起凭据按 request_id 在场与否落库（run={run_id}）"
+                );
+            }
+        },
+    )
+    .await;
+}
+
+/// resume：清挂起凭据（陈旧 pending_interaction_request_id 会让后续反查
+/// 误判仍在等审批）。
+#[tokio::test]
+async fn resume_clears_pending_interaction_credential() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_sqlite(sqlite.clone());
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_rc", "th_rc"),
+        async {
+            let tenant = agentos_tenant::current_or_default("default").tenant_id;
+            store.create_run("run_rc", "h", &tenant).await.unwrap();
+            router
+                .handle(
+                    "pipeline-executor",
+                    "suspend",
+                    json!({"run_id": "run_rc", "request_id": "req-rc"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                sqlite
+                    .get_run("run_rc")
+                    .await
+                    .unwrap()
+                    .metadata
+                    .and_then(|m| m.get("pending_interaction_request_id").cloned()),
+                Some(json!("req-rc")),
+                "挂起后凭据在场"
+            );
+
+            let res = router
+                .handle("pipeline-executor", "resume", json!({"run_id": "run_rc"}))
+                .await
+                .unwrap();
+            assert_eq!(res["status"], "resumed");
+            let meta = sqlite
+                .get_run("run_rc")
+                .await
+                .unwrap()
+                .metadata
+                .unwrap_or_else(|| json!({}));
+            assert!(
+                meta.get("pending_interaction_request_id").is_none(),
+                "恢复必须清挂起凭据: {meta}"
+            );
+        },
+    )
+    .await;
+}
+
+/// get_run_status：命中返回 run 记录本体；未命中报错（编码/查询失败同面）。
+#[tokio::test]
+async fn get_run_status_returns_record_or_errors() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let router =
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_grs", "th_grs"),
+        async {
+            let tenant = agentos_tenant::current_or_default("default").tenant_id;
+            store
+                .create_run("run_grs", "hash_grs", &tenant)
+                .await
+                .unwrap();
+            let res = router
+                .handle(
+                    "pipeline-executor",
+                    "get_run_status",
+                    json!({"run_id": "run_grs"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res["run_id"], "run_grs");
+            assert_eq!(res["config_hash"], "hash_grs");
+
+            let err = router
+                .handle(
+                    "pipeline-executor",
+                    "get_run_status",
+                    json!({"run_id": "run_ghost"}),
+                )
+                .await
+                .expect_err("不存在的 run 必须报错");
+            assert!(
+                format!("{err}").contains("get_run_status 失败"),
+                "查询失败文案须可诊断: {err}"
+            );
+        },
+    )
+    .await;
+}
+
+/// delete_pipeline：删除该管道执行数据并逐出内存 registry；无记录时幂等 ok。
+#[tokio::test]
+async fn delete_pipeline_removes_data_and_is_idempotent() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let router =
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new("tenant_del", "th_del"),
+        async {
+            let tenant = agentos_tenant::current_or_default("default").tenant_id;
+            let pid = format!("pipe_del_{}", uuid::Uuid::new_v4().simple());
+            agentos_session::pipeline_state_registry::global_registry().get_or_init(
+                &tenant,
+                &pid,
+                "th_del",
+                "agentos",
+                json!({"pipeline_id": pid, "status": "completed"}),
+            );
+            store.create_run("run_del", "h", &tenant).await.unwrap();
+            store.set_run_pipeline("run_del", &pid).await.unwrap();
+            store
+                .link_pipeline_session(&pid, "th_del", &tenant)
+                .await
+                .unwrap();
+
+            let res = router
+                .handle(
+                    "pipeline-executor",
+                    "delete_pipeline",
+                    json!({"pipeline_id": pid}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res["status"], "deleted");
+            assert_eq!(res["pipeline_id"], pid);
+            assert!(
+                store
+                    .get_thread_id_by_pipeline(&pid)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "删除后 pipeline_sessions 映射应清空"
+            );
+            assert!(
+                agentos_session::pipeline_state_registry::global_registry()
+                    .get(&tenant, &pid)
+                    .is_none(),
+                "内存 registry 条目应被逐出"
+            );
+
+            // 幂等：再删一次不报错
+            let again = router
+                .handle(
+                    "pipeline-executor",
+                    "delete_pipeline",
+                    json!({"pipeline_id": pid}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(again["status"], "deleted", "无记录重删仍返回 ok");
+        },
+    )
+    .await;
+}
+
+/// unhandled capability：未注册的 capability.method → 协议错误 + 留痕
+/// （logger/config-reader 等死能力的残留调用落点）。
+#[tokio::test]
+async fn unhandled_capability_emits_diagnostics() {
+    let (guard, logs) = crate::test_env::capture_logs();
+    let _ = &guard;
+    let router = router_plain();
+    let err = router
+        .handle("retired-namespace", "do_thing", json!({"k": "v"}))
+        .await
+        .expect_err("未注册 capability 必须报错");
+    let text = logs.text();
+    assert!(
+        format!("{err}").contains("capability method not implemented"),
+        "兜底文案须指明未实现: {err}"
+    );
+    assert!(
+        text.contains("unhandled capability call"),
+        "残留调用须留痕: {text}"
+    );
+}

@@ -131,11 +131,12 @@ describe('PipelineManagerWidget 合并第 2 源终态防御（BUG-2b）', () => 
     expect(screen.getByText('崩溃残留任务')).toBeInTheDocument()
   })
 
-  it('对照：无 state 行（runs 窗口外纯任务源）行为不变，仍按任务投影归执行中', async () => {
+  it('对照：无 state 行（runs 窗口外纯任务源）× 未决任务态：无运行证据落未知不归执行中（BUG-21）', async () => {
     seedGhostTask('running', undefined)
     delete seed.states.ghostPipe
     renderWithProviders(<PipelineManagerWidget />)
-    expect(await screen.findByText(/执行中的管道/)).toBeInTheDocument()
-    expect(screen.getByText('崩溃残留任务')).toBeInTheDocument()
+    expect(await screen.findByText('崩溃残留任务')).toBeInTheDocument()
+    expect(screen.queryByText('执行中的管道')).toBeNull()
+    expect(screen.getAllByTitle(/运行状态：未知/).length).toBeGreaterThanOrEqual(1)
   })
 })

@@ -574,3 +574,26 @@ export async function renderUseMessageRender(
     { initialProps },
   )
 }
+
+/** activityConverter mock 工具调用活动映射（chat 流测试家族共用；字段取超集） */
+export function activityConverterMock() {
+  return {
+    buildDefaultActions: (_tc: any) => [{ id: 'copy_args', icon: null, label: '复制参数', type: 'copy', onClick: () => {} }],
+    toolCallToActivity: (toolCall: Record<string, unknown>) => ({
+      type: 'tool_call',
+      id: toolCall.call_id ?? 'activity-1',
+      title: toolCall.tool_name ?? 'unknown',
+      toolName: toolCall.tool_name ?? 'unknown',
+      status: toolCall.status ?? 'pending',
+      progress: toolCall.progress,
+      currentStep: toolCall.currentStep,
+      durationMs: toolCall.duration_ms,
+      error: toolCall.error,
+      details: toolCall.result !== undefined
+        ? [{ id: 'args', label: '参数', content: toolCall.tool_args ?? {}, contentType: 'json' }]
+        : [],
+      actions: [],
+    }),
+    enhanceActivityWithToolConfig: (base: Record<string, unknown>) => base,
+  }
+}

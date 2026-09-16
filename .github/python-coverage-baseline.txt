@@ -134,7 +134,29 @@
 # 认可。下一批目标 = duplicate_check(20)、project_registry(19)、
 # task_reminder(19)、pipeline/workspace_lifecycle(19)、task_form(18)、
 # task/tool(16)、isolation/manager(16)、resource_merge(15)。
-python_line_coverage=99.00
+
+# 收紧（2026-09-16 覆盖率收口批）：99→100——插桩车道全量实测 99.8361%
+# （36553/36613，11129 通过 9 失败 59 跳过，uv/3.12 口径 1495s）。增量来源 =
+# 本批 16 件补测（约 380 用例，320→60 缺行）：eval_harness/server.py
+# 88→1（账本读写/聚合基线取数/held-out 三失败分支/提案三工具全链含真实
+# git 提交与篡改存档复核）、eval_harness 纯函数面三件 100%（classify 未归类/
+# proposal 七条 schema 短路与逃逸/suite_reader workspace 锚定三形态）、
+# task_submit/server.py 21→0（on_load 三能力桥 + 工具包装载荷）、rollback
+# server+manager 100%、media 五件（_media_core/image/tts/music/video）
+# 全 100%、artifacts/models、monitoring/server 靶行清零、isolation_guard、
+# context_build server+plugin、bash tool、fs_tools、tasks/reconcile、
+# workspace_lifecycle、wsl_native_provider（27 靶行，含 is_available 两环
+# 失败/metadata 写失败转 ERROR env/_exec 超时归一）。车道治理一刀：
+# tests/test_task_submit_server_wiring.py 未登记 BASE_TEST_PATHS 时不在收集
+# 范围（server.py 21 缺行曾因此回涨），已登记（基集 138 条）。
+# 已知残留与性质（勿按数字硬刷）——isolation/manager.py 1483-1531 为
+# _repair_host_mount 死分支（簇E 穷举已证 PurePath.parts[0] 恒盘符，待
+# 拍板）、isolation_guard/plugin.py 779/788、workspace_lifecycle.py 332-342、
+# tasks/server.py 91-93 均经 AST 验证结构性不可达；workspace/server.py
+# 323-324/613-620 与 task_submit/tool.py 2315-2316 等属需真实宿主上下文的
+# 残留。下一批目标 = 上述可达残留 + 新暴露缺行。
+# 实测值 99.8361% → 棘轮 floor+1 = 100.00（恒高于实测留压力）。
+python_line_coverage=100.00
 
 # 收紧（2026-09-10 补记归因；87.00 引入提交 82c10b5b1，2026-08-27）：棘轮
 # 83→87——全绿跑实测 86.02（0 失败，357s），floor+1=87（自动棘轮写入）；

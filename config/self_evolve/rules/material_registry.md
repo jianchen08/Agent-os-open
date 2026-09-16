@@ -13,9 +13,12 @@
 | `config/agents/main/task_dispatch_guide.md` | L1 | content_edit | 派发指南 |
 | `config/agents/*/*.yaml` | L2 | param_edit / list_edit | tool_ids、default_params、thinking 等参数面（身份字段冻结，见下） |
 | `config/pipelines/*.yaml` | L2 | param_edit | 步骤参数 / when 条件（编排结构调整需人工） |
-| `config/evaluation/evaluation_metrics.yaml` | L2 | param_edit | 评估指标参数（指标口径定义本身走外环） |
-| `plugins/shared/**/plugin.json` | L2 | param_edit | manifest `fields` 阈值参数（id/entry/capabilities 结构冻结） |
+| `plugins/shared/**/plugin.json` | L2 | param_edit | manifest `fields` 阈值参数（id/entry/capabilities 结构冻结；evaluation/review 插件除外——见 B 部类） |
 | `plugins/shared/{tools,pipeline}/auto_gen_**` | L3 | new_plugin | 进化新增插件专用命名空间 |
+
+> 勘误（ADR 2026-09-16）：评估面物料（`config/plugins/evaluation/**`，含
+> evaluation_metrics.yaml）已整体移入 B 部类——阈值参数直接改变判定松紧
+> （改阈值=改裁判），「参数可调、口径冻结」的折中被否，见各 ADR Alternatives。
 
 ### agent yaml 内部冻结段（文件可改，字段冻结）
 
@@ -25,9 +28,14 @@
 
 | 范围 | 理由 |
 |---|---|
-| `config/self_evolve/**` | 进化流程自身物料（规则/题集/模式 profile） |
+| `config/self_evolve/**` | 进化流程自身物料（规则/题集；模式 profile 已内打包进模式插件） |
 | `plugins/shared/system/eval_harness/**` | 评测面本体（裁决权载体） |
-| `plugins/shared/modes/**` | 模式插件 |
+| `plugins/shared/system/evaluation/**` | 评估闸门插件本体（裁决权载体，ADR 2026-09-16 新增） |
+| `config/plugins/evaluation/**` | 评估指标配置（阈值=判定松紧，被裁决者不可改，ADR 2026-09-16 新增） |
+| `plugins/shared/system/review/**` | 复盘/改进建议插件本体（归因原则承载地，ADR 2026-09-16 新增） |
+| `config/plugins/review/**` | 分诊与杠杆规则（triage_rules.yaml，ADR 2026-09-16 新增） |
+| `plugins/shared/modes/**` | 模式插件出厂种子源（profile 随插件目录内打包，种子单元自包含） |
+| `<USER_ROOT>/plugins/modes/**` | 模式插件用户副本（预装播种后归用户所有，同 id 用户赢；对进化 agent 同样冻结） |
 | `kernel/**` | 内核（架构公理） |
 | `.env`、`config/kernel/storage.yaml`、`config/isolation/**` | 运行底座与安全边界 |
 | `config/rules/information_integrity_rules.md` | 信息完整性红线（main 硬约束引用） |

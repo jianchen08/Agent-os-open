@@ -30,9 +30,17 @@ opt-level = 1
 # .pdb/.rlib 体积比 full 小一个数量级（历史上 full 曾把 target/debug 撑到 46G）。
 # 需要断点单步看变量时临时覆盖即可，不必改本文件：
 #   CARGO_PROFILE_DEV_DEBUG=full cargo test ...
-# 注：MSVC 下符号本就拆到独立 .pdb；incremental=false / jobs=1 由
-#     .cargo/config.toml 控制（本机规避编译器 ICE），此处不设。
-# 调试/覆盖率跑完后的产物回收：python scripts/clean_rust_debug.py
+# 注：MSVC 下符号本就拆到独立 .pdb；MSVC 编译器 ICE 的规避配置 incremental=false
+#     / jobs=1 曾由本机手建 kernel/.cargo/config.toml 承担——该文件不入仓，
+#     工作区还原会抹掉（历史诱因：rustc 1.85/1.92 双版本共存，现单版本 1.85.0）。
+#     若 ICE 复发，重建该文件写入：
+#       [build]
+#       incremental = false
+#       jobs = 1
+# 产物回收：python scripts/clean_rust_debug.py 全清；--older-than N 增量回收
+#     （per-crate hash 簇判定：同 crate 最新副本永远保留，旧副本冷置满 N 天
+#     回收，单副本 crate 不动），由 run_gates kernel-artifact-sweep 车道
+#     在 kernel-test/kernel-coverage 后自动执行。
 # ============================================================================
 [profile.dev]
 debug = "line-tables-only"

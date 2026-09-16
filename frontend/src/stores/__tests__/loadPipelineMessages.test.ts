@@ -9,6 +9,7 @@
  *  - 异常传播：底层 fetchMessages 失败 → { ok:false, error }
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { makePipelineMsgFactory, resetPipelineStoreState } from './helpers/storeTestMocks'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
@@ -16,21 +17,9 @@ import type { Message } from '@/types/models'
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
 vi.mock('@/services/api/client', () => ({ default: { get: mockGet } }))
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 
-vi.mock('@/utils/retry', () => ({
-  requestWithRetry: async (fn: () => Promise<any>) => fn(),
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockFull())
 
 /** 设置 apiClient.get 返回的后端原始 records */
 function setApiRecords(records: any[], hasMore = false) {
@@ -40,18 +29,35 @@ function setApiRecords(records: any[], hasMore = false) {
 const PIPELINE_ID = 'pipe-load-001'
 const THREAD_ID = 'thread-load-001'
 
-function makeMsg(id: string, seq: number, overrides: Partial<Message> = {}): Message {
-  return {
-    id,
-    sessionId: THREAD_ID,
-    sequence: seq,
-    role: 'assistant',
-    content: '',
-    timestamp: new Date(Date.now() + seq * 1000).toISOString(),
-    parentId: null,
-    status: 'completed',
-    ...overrides,
-  } as Message
+const makeMsg = makePipelineMsgFactory(THREAD_ID)
+/** 注册一条标准测试管道（status 可变），返回 store —— 本文件播种块共用 */
+function registeredStore(
+  usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore,
+  status = 'idle',
+) {
+  const store = usePipelineMessageStore.getState()
+  store.registerPipeline({
+    pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
+    agentName: '', status, parentId: null, unreadCount: 0,
+  })
+  return store
+}
+
+/** 播种两条基线消息（u1 seq1 user / a1 seq2 assistant）——对账/流式家族共用 */
+function seedBaselineMsgs(store: ReturnType<typeof registeredStore>) {
+  store.initFromAPI(PIPELINE_ID, [
+    makeMsg('u1', 1, { role: 'user', content: 'q' }),
+    makeMsg('a1', 2, { content: 'a' }),
+  ])
+  return store
+}
+
+/** 两条基线 API 记录（u1/a1，带 timestamp）——各用例按需追加差异化记录 */
+function baseApiRecords() {
+  return [
+    { id: 'u1', sequence: 1, role: 'user', content: 'q', timestamp: '2026-01-01T00:00:00Z' },
+    { id: 'a1', sequence: 2, role: 'assistant', content: 'a', timestamp: '2026-01-01T00:00:01Z' },
+  ]
 }
 
 describe('loadPipelineMessages 统一加载入口', () => {
@@ -62,30 +68,12 @@ describe('loadPipelineMessages 统一加载入口', () => {
     vi.resetModules()
     const mod = await import('@/stores/pipelineMessageStore')
     usePipelineMessageStore = mod.usePipelineMessageStore
-    usePipelineMessageStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID },
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-      reconciledByPipeline: {},
-    })
+    usePipelineMessageStore = await resetPipelineStoreState({ pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID } })
   })
 
   it("mode='auto' 未初始化 → 全量 init（无 after_sequence）", async () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
-      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
-    })
-    setApiRecords([
-      { id: 'u1', sequence: 1, role: 'user', content: 'q', timestamp: '2026-01-01T00:00:00Z' },
-      { id: 'a1', sequence: 2, role: 'assistant', content: 'a', timestamp: '2026-01-01T00:00:01Z' },
-    ])
+    const store = registeredStore(usePipelineMessageStore, 'idle')
+    setApiRecords(baseApiRecords())
 
     const result = await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
 
@@ -98,16 +86,9 @@ describe('loadPipelineMessages 统一加载入口', () => {
   })
 
   it("mode='auto' 已对账 → 不做任何 API 调用，直接用缓存", async () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
-      agentName: '', status: 'running', parentId: null, unreadCount: 0,
-    })
+    const store = registeredStore(usePipelineMessageStore, 'running')
     // 先全量 init 建立本地状态 + bottomCursor=2，并标记已对账
-    store.initFromAPI(PIPELINE_ID, [
-      makeMsg('u1', 1, { role: 'user', content: 'q' }),
-      makeMsg('a1', 2, { content: 'a' }),
-    ])
+    seedBaselineMsgs(store)
     usePipelineMessageStore.setState({ reconciledByPipeline: { [PIPELINE_ID]: true } })
     expect(store.getBottomCursor(PIPELINE_ID)).toBe(2)
     expect(store.getMessages(PIPELINE_ID)).toHaveLength(2)
@@ -121,16 +102,9 @@ describe('loadPipelineMessages 统一加载入口', () => {
   })
 
   it('流式输出中（count>1）且未 skipStreamingCheck → 跳过加载', async () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
-      agentName: '', status: 'running', parentId: null, unreadCount: 0,
-    })
+    const store = registeredStore(usePipelineMessageStore, 'running')
     // 模拟流式输出：已有 2 条消息 + 正在流式
-    store.initFromAPI(PIPELINE_ID, [
-      makeMsg('u1', 1, { role: 'user', content: 'q' }),
-      makeMsg('a1', 2, { content: 'a' }),
-    ])
+    seedBaselineMsgs(store)
     store.startStreaming(PIPELINE_ID, 'streaming-msg-1')
 
     const result = await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
@@ -141,15 +115,7 @@ describe('loadPipelineMessages 统一加载入口', () => {
   })
 
   it('skipStreamingCheck=true → 流式中仍无条件补漏（WS 重连场景）', async () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
-      agentName: '', status: 'running', parentId: null, unreadCount: 0,
-    })
-    store.initFromAPI(PIPELINE_ID, [
-      makeMsg('u1', 1, { role: 'user', content: 'q' }),
-      makeMsg('a1', 2, { content: 'a' }),
-    ])
+    const store = seedBaselineMsgs(registeredStore(usePipelineMessageStore, 'running'))
     store.startStreaming(PIPELINE_ID, 'streaming-msg-1')
     setApiRecords([
       { id: 'a2', sequence: 3, role: 'assistant', content: 'a2', timestamp: '2026-01-01T00:00:02Z' },
@@ -169,11 +135,7 @@ describe('loadPipelineMessages 统一加载入口', () => {
   })
 
   it('底层 fetchMessages 失败 → 返回 { ok:false, error } 不吞异常', async () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
-      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
-    })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     const apiError = Object.assign(new Error('服务器错误'), {
       response: { status: 500 },
     })
@@ -186,16 +148,9 @@ describe('loadPipelineMessages 统一加载入口', () => {
   })
 
   it("mode='init' 强制全量（即使已初始化）", async () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
-      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
-    })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     // 已初始化（有 bottomCursor）
-    store.initFromAPI(PIPELINE_ID, [
-      makeMsg('u1', 1, { role: 'user', content: 'q' }),
-      makeMsg('a1', 2, { content: 'a' }),
-    ])
+    seedBaselineMsgs(store)
     setApiRecords([
       { id: 'u1', sequence: 1, role: 'user', content: 'q', timestamp: '2026-01-01T00:00:00Z' },
       { id: 'a1', sequence: 2, role: 'assistant', content: 'a', timestamp: '2026-01-01T00:00:01Z' },
@@ -214,25 +169,15 @@ describe('loadPipelineMessages 统一加载入口', () => {
   })
 
   it('rehydrate 后（reconciled 缺失）有本地缓存 → 缓存秒开 + 后台全量对账', async () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
-      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
-    })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     // 模拟 rehydrate 后状态：本地有消息 + bottomCursor 已恢复，但 reconciledByPipeline 为空
     // （merge 中重置为 {}）。此时 isInitialized=true，但未对账。
-    store.initFromAPI(PIPELINE_ID, [
-      makeMsg('u1', 1, { role: 'user', content: 'q' }),
-      makeMsg('a1', 2, { content: 'a' }),
-    ])
+    seedBaselineMsgs(store)
     usePipelineMessageStore.setState({ reconciledByPipeline: {} })
     expect(store.isInitialized(PIPELINE_ID)).toBe(true)
     expect(usePipelineMessageStore.getState().reconciledByPipeline[PIPELINE_ID]).toBeFalsy()
 
-    setApiRecords([
-      { id: 'u1', sequence: 1, role: 'user', content: 'q', timestamp: '2026-01-01T00:00:00Z' },
-      { id: 'a1', sequence: 2, role: 'assistant', content: 'a', timestamp: '2026-01-01T00:00:01Z' },
-    ])
+    setApiRecords(baseApiRecords())
 
     const result = await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
 
@@ -253,17 +198,10 @@ describe('loadPipelineMessages 统一加载入口', () => {
   })
 
   it('首次 auto 全量对账后，后续 auto 走 after_sequence 增量补漏', async () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
-      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
-    })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
 
     // 第一次 auto：未对账 → 全量 init
-    setApiRecords([
-      { id: 'u1', sequence: 1, role: 'user', content: 'q', timestamp: '2026-01-01T00:00:00Z' },
-      { id: 'a1', sequence: 2, role: 'assistant', content: 'a', timestamp: '2026-01-01T00:00:01Z' },
-    ])
+    setApiRecords(baseApiRecords())
     await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
     const firstCallArg = mockGet.mock.calls[0][1]
     expect(firstCallArg.params.after_sequence).toBeUndefined()
@@ -279,11 +217,7 @@ describe('loadPipelineMessages 统一加载入口', () => {
   })
 
   it('流式断线空洞：rehydrate 后全量对账修正已加载区间内的缺失消息（核心回归）', async () => {
-    const store = usePipelineMessageStore.getState()
-    store.registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: 'tab-1',
-      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
-    })
+    const store = registeredStore(usePipelineMessageStore, 'idle')
     // 模拟流式断线残留：本地有 seq1(user) + seq2(assistant 空气泡，WS 生成的 id，
     // rehydrate 把 status:'streaming' 改为 'completed')。bottomCursor 被推到 2。
     // 刷新后若走增量补漏 after_sequence=2，永远拉不到 seq≤2 的修正 + 断线期间后续消息。
@@ -339,7 +273,149 @@ describe('loadPipelineMessages 统一加载入口', () => {
 })
 
 // ============================================================
-// fetchMessages 同管道 abort 语义
+// 向上翻页 × 断线补漏 并发语义（BUG-20）
+//
+// 后端消息窗口契约：init / 补漏（after_sequence，尾部锚定）与翻页
+//（before_sequence，头部锚定）读取的是**不重叠的 sequence 区间**，
+// 写面各自 prepend/append 互不冲突——二者并发时必须都落库。
+// 回归场景（BUG-20 R46）：用户向上翻页在途时 WS 重连触发同管道补漏，
+// 旧「取代即取消」策略把翻页静默掐死——用户滚动到顶看不到任何加载、
+// 更早历史永远拉不到（GUI 实证「向上滚动不触发分页，无加载态」）。
+// ============================================================
+describe('向上翻页与断线补漏并发（BUG-20）', () => {
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
+  /** 主管道真实布局复刻（thread-c5faba0a 73 条，seq 0-72）：seq0 = 会话首条用户消息 */
+  const TOTAL = 73
+
+  function makeRange(from: number, to: number): any[] {
+    const records: any[] = []
+    for (let seq = from; seq <= to; seq++) {
+      records.push({
+        id: `m${seq}`,
+        sequence: seq,
+        role: seq % 2 === 0 ? 'assistant' : 'user',
+        content: seq === 0 ? '请详细介绍一下长城的历史' : `msg-${seq}`,
+        timestamp: new Date(Date.UTC(2026, 8, 14, 17, 25, seq)).toISOString(),
+      })
+    }
+    return records
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    vi.resetModules()
+    const mod = await import('@/stores/pipelineMessageStore')
+    usePipelineMessageStore = mod.usePipelineMessageStore
+    usePipelineMessageStore = await resetPipelineStoreState({ pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID } })
+  })
+
+  it('翻页在途时同管道补漏发起：两窗不重叠，翻页不得被取消（回归钉）', async () => {
+    const store = usePipelineMessageStore.getState()
+    // 尾页 50 条（seq 23-72）已 init，has_more=true，topCursor=23
+    store.initFromAPI(PIPELINE_ID, makeRange(23, 72), true)
+    expect(store.getTopCursor(PIPELINE_ID)).toBe(23)
+
+    // 用户滚动到顶 → 向上翻页在途（seq 0-22）
+    let resolveOlder!: (v: unknown) => void
+    mockGet.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveOlder = resolve }),
+    )
+    const olderPromise = store.fetchMessages(PIPELINE_ID, {
+      threadId: THREAD_ID,
+      before_sequence: 23,
+    })
+    expect(usePipelineMessageStore.getState().isLoadingOlderByPipeline[PIPELINE_ID]).toBe(true)
+
+    // 翻页在途期间 WS 重连 → 同管道补漏（seq 73-74 追加窗）
+    mockGet.mockResolvedValueOnce({
+      data: {
+        messages: makeRange(73, 74),
+        total: 2,
+        has_more: false,
+      },
+    })
+    await store.fetchMessages(PIPELINE_ID, {
+      threadId: THREAD_ID,
+      after_sequence: 72,
+    })
+    // 补漏窗已落库（75 = 50 尾页 + 2 追加）
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(52)
+
+    // 翻页响应到达：不得已被补漏取消——更早窗必须落库
+    resolveOlder({
+      data: { messages: makeRange(0, 22), total: 23, has_more: false },
+    })
+    await olderPromise
+
+    const msgs = store.getMessages(PIPELINE_ID)
+    expect(msgs).toHaveLength(TOTAL + 2)
+    const sequences = msgs.map((m) => m.sequence)
+    expect(new Set(sequences).size).toBe(sequences.length)
+    expect(Math.min(...sequences)).toBe(0)
+    // 会话首条（含「长城」的 seq0 用户消息）必须可见
+    expect(msgs.find((m) => m.sequence === 0)?.content).toContain('长城')
+    expect(usePipelineMessageStore.getState().hasMoreOlderByPipeline[PIPELINE_ID]).toBe(false)
+  })
+
+  it('翻页在途被同 kind 新翻页取代：仍取消旧翻页（取代语义只作用于同窗）', async () => {
+    const store = usePipelineMessageStore.getState()
+    store.initFromAPI(PIPELINE_ID, makeRange(23, 72), true)
+
+    let resolveFirst!: (v: unknown) => void
+    mockGet.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveFirst = resolve }),
+    )
+    const firstPromise = store.fetchMessages(PIPELINE_ID, {
+      threadId: THREAD_ID,
+      before_sequence: 23,
+    })
+
+    // 同为翻页的新请求（游标更小）取代旧翻页
+    mockGet.mockResolvedValueOnce({
+      data: { messages: makeRange(0, 22), total: 23, has_more: false },
+    })
+    await store.fetchMessages(PIPELINE_ID, { threadId: THREAD_ID, before_sequence: 23 })
+    // 取代者的权威窗落库：50 尾页 + 23 翻页窗 = 73
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(73)
+
+    resolveFirst({ data: { messages: makeRange(0, 22), total: 23, has_more: false } })
+    await expect(firstPromise).resolves.toBeUndefined()
+    // 被取代者的迟到响应不写入（不重复）
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(73)
+  })
+
+  it('验收场景：73 条会话打开见尾页 → 一轮翻页直达 seq0，全部可见无丢失', async () => {
+    const store = usePipelineMessageStore.getState()
+    // 打开会话：后端尾锚定返回最新 50 条（seq 23-72），has_more=true
+    mockGet.mockResolvedValueOnce({
+      data: { messages: makeRange(23, 72), total: 50, has_more: true },
+    })
+    await store.fetchMessages(PIPELINE_ID, { threadId: THREAD_ID })
+    expect(store.getMessages(PIPELINE_ID)).toHaveLength(50)
+    expect(usePipelineMessageStore.getState().hasMoreOlderByPipeline[PIPELINE_ID]).toBe(true)
+
+    // 滚动到顶 → 一轮翻页（before_sequence=当前最小 seq）拉回更早 23 条
+    const topCursor = store.getTopCursor(PIPELINE_ID)
+    expect(topCursor).toBe(23)
+    mockGet.mockResolvedValueOnce({
+      data: { messages: makeRange(0, 22), total: 23, has_more: false },
+    })
+    await store.fetchMessages(PIPELINE_ID, { threadId: THREAD_ID, before_sequence: topCursor })
+
+    const msgs = store.getMessages(PIPELINE_ID)
+    expect(msgs).toHaveLength(TOTAL)
+    const sequences = msgs.map((m) => m.sequence)
+    // 全量可见、无重复、时序连续
+    expect(sequences).toEqual(Array.from({ length: TOTAL }, (_, i) => i))
+    // 首条（长城请求）已渲染进数据面
+    expect(msgs[0].content).toContain('长城')
+    // 已耗尽：不再触发无效翻页
+    expect(usePipelineMessageStore.getState().hasMoreOlderByPipeline[PIPELINE_ID]).toBe(false)
+  })
+})
+
+// ============================================================
+// fetchMessages 同管道请求取消
 // ============================================================
 describe('fetchMessages 同管道请求取消', () => {
   let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
@@ -349,18 +425,7 @@ describe('fetchMessages 同管道请求取消', () => {
     vi.resetModules()
     const mod = await import('@/stores/pipelineMessageStore')
     usePipelineMessageStore = mod.usePipelineMessageStore
-    usePipelineMessageStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID },
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-      reconciledByPipeline: {},
-    })
+    usePipelineMessageStore = await resetPipelineStoreState({ pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID } })
   })
 
   it('同 id 连续两次 fetch：第一次以取消收场且不写状态，第二次权威落库', async () => {

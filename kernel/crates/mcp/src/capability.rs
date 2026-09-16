@@ -278,4 +278,36 @@ mod tests {
         let known = vec!["tools".to_string()];
         assert_eq!(parse_capability_method_with("tools/list", &known), None);
     }
+
+    /// 未覆盖默认 trait 方法：`known_namespaces` 缺省返回标准能力清单
+    /// （handler registry 实现覆盖它，裸实现方拿到的是标准面）。
+    #[test]
+    fn default_known_namespaces_returns_standard_capabilities() {
+        /// 裸实现：不覆盖 known_namespaces，验证 trait 默认实现。
+        struct BareRouter;
+
+        #[async_trait::async_trait]
+        impl CapabilityRouter for BareRouter {
+            async fn handle(
+                &self,
+                _namespace: &str,
+                _method: &str,
+                _params: serde_json::Value,
+            ) -> Result<serde_json::Value, McpError> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        let ns = BareRouter.known_namespaces();
+        assert_eq!(
+            ns,
+            STANDARD_CAPABILITIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            "默认实现应原样映射标准能力清单"
+        );
+        assert!(ns.contains(&"tool-executor".to_string()));
+        assert!(!ns.is_empty());
+    }
 }

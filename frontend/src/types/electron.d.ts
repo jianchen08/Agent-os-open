@@ -63,14 +63,37 @@ export interface ElectronWindowAPI {
 }
 
 /**
+ * preload.ts 暴露的主窗口自控子 API（自定义标题栏按钮）。
+ *
+ * ipcRenderer.invoke('window:self:*') 封装，主进程按 event.sender
+ * 反查发起窗口，只作用于窗口自身。
+ */
+export interface ElectronWindowControlsAPI {
+  /** 最小化 */
+  minimize(): Promise<void>
+  /** 最大化/还原切换；返回切换后的最大化状态 */
+  toggleMaximize(): Promise<boolean>
+  /** 关闭（主窗口 = 收进托盘，与原生 X 行为一致） */
+  close(): Promise<void>
+  /** 查询当前最大化状态 */
+  isMaximized(): Promise<boolean>
+  /** 监听最大化状态变化（双击拖拽区、Win+方向键等系统路径）；返回取消监听函数 */
+  onMaximizedChange(callback: (maximized: boolean) => void): () => void
+}
+
+/**
  * 注入到 window 上的 electronAPI（子集）。
  *
  * 实际 preload 还暴露 onWindowInfo/getAppVersion/getPlatform/on 等，
- * 这里只声明窗口管理器消费的字段，避免与 Electron 类型耦合。
+ * 这里只声明窗口管理器与 TitleBar 消费的字段，避免与 Electron 类型耦合。
  */
 export interface ElectronAPI {
   /** 窗口管理子 API */
   window: ElectronWindowAPI
+  /** 是否为子窗口/悬浮窗（TitleBar 仅主窗口渲染） */
+  isChildWindow?: boolean
+  /** 主窗口自控子 API（自定义标题栏按钮） */
+  windowControls?: ElectronWindowControlsAPI
 }
 
 /** 前端通过 window.electronAPI 访问（Electron 环境下存在，Web 下为 undefined） */

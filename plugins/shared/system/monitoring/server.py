@@ -24,8 +24,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime
+import json
 import logging
 import os
+import time
+from collections.abc import Callable
 from typing import Any
 
 import psutil
@@ -492,16 +495,54 @@ def _model_icon(model: str, provider: str) -> str:
     return "🔤"
 
 
-def _collect_token_usage() -> dict[str, Any]:
-    """从 traces 表聚合 LLM token 用量（真数据源，G4）。
+# traces 聚合读 patch_data 全表 JSON（库 1.4GB），单次耗时随库增长（实测索引前
+# 1.7-2.1s / 索引后 0.2ms）。库查询是同步 sqlite3 调用，直接在当前协程里跑会
+# 阻塞 sidecar 事件循环——本插件与 task_service / cost_control 合宿同一进程，
+# 阻塞期间它们的 /ext 请求全部排队（实测轻量端点 0.00s 被拖到 1.7s）。
+# 故 collect 经 asyncio.to_thread 卸载到工作线程，事件循环只负责 await。
+# 卸载后并发 miss 不再被阻塞行为天然串行化，改为显式 single-flight：同键的
+# 并发请求共享同一次计算（否则 N 个 widget 同刻到达就重复 N 次全表聚合）。
+# 同键结果另按 TTL 合并：TTL 15s ≤ 最短轮询间隔（30s），可见滞后不跨轮询周期。
+_AGG_CACHE_TTL_SECS = 15.0
+_aggregation_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_aggregation_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
 
-    traces.patch_data 的 llm_usage 字段由 llm_core 每轮写入（单轮
-    input/output/total/cached token + model/provider 归属），GROUP BY 模型
-    逐行累加即跨运行按模型统计；总量 = 各模型行求和。请求数
-    （request_count/active_requests/error_count/total_response_time）保持读
-    PerformanceMonitor 本地计数（record_llm_request 的 response_time 口径）。
-    早期轨迹无 model 字段 → 归入「（未记录模型）」行。
-    DB 不可用时降级本地计数 + token 为 0（与 _query_tool_calls 同策略）。
+
+async def _cached_aggregation(key: str, collect: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    now = time.monotonic()
+    hit = _aggregation_cache.get(key)
+    if hit is not None and now - hit[0] < _AGG_CACHE_TTL_SECS:
+        return hit[1]
+
+    existing = _aggregation_inflight.get(key)
+    if existing is not None:
+        return await asyncio.shield(existing)
+
+    async def _compute() -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(collect)
+        finally:
+            _aggregation_inflight.pop(key, None)
+
+    task = asyncio.ensure_future(_compute())
+    _aggregation_inflight[key] = task
+    payload = await asyncio.shield(task)
+    _aggregation_cache[key] = (time.monotonic(), payload)
+    return payload
+
+
+def _collect_token_usage() -> dict[str, Any]:
+    """从 pipeline_state 聚合 LLM token 用量（累计真值源）。
+
+    累计口径的唯一真值 = state 的 track.llm_usage（track 插件每轮 LLM 调用
+    累加，逐管道自持）：跨运行累计、跨成员热重载保留。traces 的 llm_usage
+    是逐轮明细（供按时间维度聚合与诊断），累计值以 state 为准——两源在今天
+    新产生的管道上逐值一致，历史差异来自打包测试期的数据 churn。
+
+    按模型归属取 state 的 llm_model 键（llm_core 写出，管道级单一模型）。
+    请求数（request_count/active_requests/error_count/total_response_time）
+    保持读 PerformanceMonitor 本地计数（record_llm_request 的 response_time
+    口径）。DB 不可用时降级本地计数 + token 为 0（与 _query_tool_calls 同策略）。
     """
     monitor = _ensure_monitor()
     ls = monitor._llm_stats
@@ -514,18 +555,40 @@ def _collect_token_usage() -> dict[str, Any]:
         conn = None
         try:
             conn = sqlite3.connect(db_path)
-            for model, provider, prompt, completion, total, reqs in traces_usage.aggregate_usage_by_model(conn):
+            by_pipe: dict[str, dict[str, Any]] = {}
+            for pid, key, val in conn.execute(
+                "SELECT pipeline_id, field_key, field_value FROM pipeline_state"
+                " WHERE field_key IN ('track.llm_usage', 'llm_model')"
+            ):
+                slot = by_pipe.setdefault(pid, {})
+                try:
+                    slot[key] = json.loads(val)
+                except (TypeError, ValueError):
+                    slot[key] = None
+            # 同模型的多个管道汇总为一行（state 按管道自持累计，跨管道同一
+            # 模型需相加才是「按模型」的全局口径）。
+            merged: dict[str, dict[str, Any]] = {}
+            for pid, slot in by_pipe.items():
+                usage = slot.get("track.llm_usage")
+                if not isinstance(usage, dict):
+                    usage = {}
+                model_raw = slot.get("llm_model")
+                model = model_raw if isinstance(model_raw, str) else ""
                 label = model or "（未记录模型）"
-                rows.append({
-                    "icon": _model_icon(model, provider),
+                acc = merged.setdefault(label, {
+                    "icon": _model_icon(model, ""),
                     "model": label,
-                    "requests": int(reqs or 0),
-                    "input_tokens": float(prompt or 0),
-                    "output_tokens": float(completion or 0),
-                    "total_tokens": float(total or 0),
+                    "requests": 0,
+                    "input_tokens": 0.0,
+                    "output_tokens": 0.0,
+                    "total_tokens": 0.0,
                 })
+                acc["input_tokens"] += float(usage.get("total_input_tokens", 0) or 0)
+                acc["output_tokens"] += float(usage.get("total_output_tokens", 0) or 0)
+                acc["total_tokens"] += float(usage.get("total_tokens", 0) or 0)
+            rows = sorted(merged.values(), key=lambda r: -r["total_tokens"])
         except sqlite3.Error as exc:  # noqa: BLE001 — 查询失败降级本地计数
-            logger.warning("[monitoring] traces token 聚合失败（降级本地计数）: %s", exc)
+            logger.warning("[monitoring] state token 聚合失败（降级本地计数）: %s", exc)
             rows = []
         finally:
             if conn is not None:
@@ -562,11 +625,19 @@ def _collect_token_usage() -> dict[str, Any]:
     }
 
 
-def _collect_token_usage_by_time() -> dict[str, Any]:
-    """按日（UTC）聚合 traces 的 llm_usage token 用量（时间维度，G4 同源）。
+def _collect_token_usage_by_time(
+    days: int = 0, since: str = "", until: str = ""
+) -> dict[str, Any]:
+    """按日（UTC）聚合 traces 的 llm_usage token 用量（时间维度）。
 
+    时间维度只有 traces 有（state 的累加器是管道级单值，不含按日拆分）——
+    这也是 traces 与 state 的分工：累计口径读 state，时间序列读 traces。
     created_at 为 ISO8601 UTC 文本，`substr(created_at, 1, 10)` 即日期——
     不经 datetime() 解析（纳秒精度 + 时区后缀解析行为版本相关）。
+
+    按需加载：`days` 限定最近 N 天（0=全部）；`since`/`until` 为显式日期区间
+    （ISO `YYYY-MM-DD`，闭区间，优先于 days）。限定区间可利用
+    idx_traces_llm_usage 的日期前缀列做范围裁剪，库再涨也不拖慢首屏。
     表格 widget 消费 {columns, rows}；chart widget 消费 {labels, datasets}
     （同源同值）；DB 不可用降级空行。
     """
@@ -578,7 +649,27 @@ def _collect_token_usage_by_time() -> dict[str, Any]:
         conn = None
         try:
             conn = sqlite3.connect(db_path)
-            for day, prompt, completion, total, reqs in traces_usage.aggregate_usage_by_day(conn):
+            where = ["json_extract(patch_data, '$.llm_usage') IS NOT NULL"]
+            params: list[Any] = []
+            if since:
+                where.append("substr(created_at, 1, 10) >= ?")
+                params.append(since)
+            if until:
+                where.append("substr(created_at, 1, 10) <= ?")
+                params.append(until)
+            if not since and not until and days > 0:
+                where.append("substr(created_at, 1, 10) >= date('now', ?)")
+                params.append(f"-{int(days)} days")
+            sql = (
+                "SELECT substr(created_at, 1, 10) AS day,"
+                " COALESCE(SUM(json_extract(patch_data, '$.llm_usage.input_tokens')), 0),"
+                " COALESCE(SUM(json_extract(patch_data, '$.llm_usage.output_tokens')), 0),"
+                " COALESCE(SUM(json_extract(patch_data, '$.llm_usage.total_tokens')), 0),"
+                " COUNT(*)"
+                " FROM traces WHERE " + " AND ".join(where) +
+                " GROUP BY 1 ORDER BY 1 DESC"
+            )
+            for day, prompt, completion, total, reqs in conn.execute(sql, params):
                 rows.append({
                     "date": day or "unknown",
                     "requests": int(reqs or 0),
@@ -650,10 +741,12 @@ async def http_handle(
     headers: dict[str, str] | None = None,
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """按 path 分发到 5 个 monitoring 端点。
+    """按 path 分发到 monitoring 业务端点。
 
-    前端 service 取字段时套了 envelope（data.metrics / data.statistics / data.token_usage /
-    data.cache_stats / data.items+total），故返回 JSON 须包这些 key。
+    数据 widget 端点（token-usage / token-usage/by-time / plugins）响应体即
+    widget 消费形（顶层 rows/columns/labels/datasets），前端取数链不认具名
+    信封；供 status_card valueKey 点号取值的端点保留单层域键
+    （metrics / statistics / cache_stats / items+total）。
     """
     try:
         if path == "/ext/monitoring/system/metrics" and method == "GET":
@@ -685,10 +778,12 @@ async def http_handle(
             }))
 
         if path == "/ext/monitoring/token-usage" and method == "GET":
-            return _ok(_json_response({"token_usage": _collect_token_usage()}))
+            return _ok(_json_response(await _cached_aggregation("token-usage", _collect_token_usage)))
 
         if path == "/ext/monitoring/token-usage/by-time" and method == "GET":
-            return _ok(_json_response(_collect_token_usage_by_time()))
+            return _ok(_json_response(
+                await _cached_aggregation("token-usage/by-time", _collect_token_usage_by_time)
+            ))
 
         if path == "/ext/monitoring/cache-stats" and method == "GET":
             return _ok(_json_response({"cache_stats": _collect_cache_stats()}))

@@ -20,31 +20,12 @@ import type { PendingInteraction } from '@/stores/interactionStore'
 // ---------------------------------------------------------------------------
 //  Mock: lucide-react
 // ---------------------------------------------------------------------------
-vi.mock('lucide-react', () => {
-  const icons = [
-    'ArrowRight',
-    'Check',
-    'Loader2',
-    'MessageSquare',
-    'Clock',
-    'AlertTriangle',
-    'Send',
-    'X',
-  ]
-  const m: Record<string, any> = {}
-  for (const name of icons) {
-    m[name] = (p: any) => <svg data-testid={`icon-${name}`} {...p} />
-  }
-  return m
-})
+vi.mock('lucide-react', async () => (await import('./helpers/chatFlowMocks')).lucideMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: @/lib/utils
 // ---------------------------------------------------------------------------
-vi.mock('@/lib/utils', () => ({
-  cn: (...args: (string | undefined | null | false)[]) =>
-    args.filter(Boolean).join(' '),
-}))
+vi.mock('@/lib/utils', async () => (await import('./helpers/chatFlowMocks')).cnMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: MarkdownRenderer — 记录调用参数以便断言
@@ -61,63 +42,12 @@ vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
 // ---------------------------------------------------------------------------
 //  Mock: UI Button
 // ---------------------------------------------------------------------------
-vi.mock('@/components/ui/button', () => ({
-  Button: ({
-    children,
-    onClick,
-    disabled,
-    ...rest
-  }: {
-    children: React.ReactNode
-    onClick?: () => void
-    disabled?: boolean
-    [key: string]: any
-  }) => (
-    <button
-      data-testid={`button-${typeof children === 'string' ? children : 'action'}`}
-      onClick={onClick}
-      disabled={disabled}
-      {...rest}
-    >
-      {children}
-    </button>
-  ),
-}))
+vi.mock('@/components/ui/button', async () => (await import('./helpers/chatFlowMocks')).buttonMock())
 
 // ---------------------------------------------------------------------------
 //  Mock: Dialog — 简化渲染，通过 data-testid 标识各部分
 // ---------------------------------------------------------------------------
-vi.mock('@/components/ui/dialog', () => {
-  return {
-    Dialog: ({ children, open }: { children: React.ReactNode; open?: boolean }) => {
-      if (!open) return null
-      return <div data-testid="dialog-root">{children}</div>
-    },
-    DialogContent: ({ children, className }: { children: React.ReactNode; className?: string }) => (
-      <div data-testid="dialog-content" className={className}>
-        {children}
-      </div>
-    ),
-    DialogHeader: ({ children }: { children: React.ReactNode }) => (
-      <div data-testid="dialog-header">{children}</div>
-    ),
-    DialogTitle: ({ children }: { children: React.ReactNode }) => (
-      <h2 data-testid="dialog-title">{children}</h2>
-    ),
-    DialogDescription: ({ children }: { children: React.ReactNode }) => (
-      <p data-testid="dialog-description">{children}</p>
-    ),
-    DialogFooter: ({ children }: { children: React.ReactNode }) => (
-      <div data-testid="dialog-footer">{children}</div>
-    ),
-    DialogPortal: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-    DialogOverlay: () => <div data-testid="dialog-overlay" />,
-    DialogTrigger: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-    DialogClose: ({ children, onClick }: { children: React.ReactNode; onClick?: () => void }) => (
-      <button data-testid="dialog-close" onClick={onClick}>{children}</button>
-    ),
-  }
-})
+vi.mock('@/components/ui/dialog', async () => (await import('./helpers/chatFlowMocks')).dialogMock())
 
 // ---------------------------------------------------------------------------
 //  工厂函数

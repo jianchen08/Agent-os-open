@@ -9,6 +9,7 @@
  * 本测试 mock getMessages（API 层）让 fetchMessages 真实跑 appendMessages。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { makePipelineMsgFactory, resetPipelineStoreState } from './helpers/storeTestMocks'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
@@ -16,54 +17,21 @@ import type { Message } from '@/types/models'
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
 vi.mock('@/services/api/client', () => ({ default: { get: mockGet } }))
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 
-vi.mock('@/utils/retry', () => ({
-  requestWithRetry: async (fn: () => Promise<any>) => fn(),
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockFull())
 
 /** 设置 apiClient.get 返回的后端原始 records（会被 mapBackendMessageToMessage + merge 真实处理） */
 function setApiRecords(records: any[], has_more = false) {
   mockGet.mockResolvedValueOnce({ data: { messages: records, total: records.length, has_more } })
 }
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 
 const PIPELINE_ID = 'pipe-dual-001'
 const THREAD_ID = 'thread-dual-001'
 
-function makeMsg(id: string, seq: number, overrides: Partial<Message> = {}): Message {
-  return {
-    id,
-    sessionId: THREAD_ID,
-    sequence: seq,
-    role: 'assistant',
-    content: '',
-    timestamp: new Date(Date.now() + seq * 1000).toISOString(),
-    parentId: null,
-    status: 'completed',
-    ...overrides,
-  } as Message
-}
-
+const makeMsg = makePipelineMsgFactory(THREAD_ID)
 describe('双游标补漏完整路径', () => {
   let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
 
@@ -72,17 +40,7 @@ describe('双游标补漏完整路径', () => {
     vi.resetModules()
     const mod = await import('@/stores/pipelineMessageStore')
     usePipelineMessageStore = mod.usePipelineMessageStore
-    usePipelineMessageStore.setState({
-      messagesByPipeline: {},
-      pipelines: {},
-      pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID },
-      streamingState: {},
-      activePipelineId: null,
-      topCursorsByPipeline: {},
-      bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {},
-      isLoadingOlderByPipeline: {},
-    })
+    usePipelineMessageStore = await resetPipelineStoreState({ pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID } })
   })
 
   it('首次 init → 切走 → 切回补漏 → 无重复（after_sequence 增量拉取）', async () => {

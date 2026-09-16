@@ -1,3 +1,4 @@
+/** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
  * logger + outputSchemaView 分支补测（两份工具模块的剩余分支）
  *

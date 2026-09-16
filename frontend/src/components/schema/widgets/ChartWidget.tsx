@@ -8,7 +8,10 @@
  */
 
 import React, { useMemo } from 'react'
-import { DataWidgetStatus, useDataWidget } from '@/services/schema/dataWidget'
+import { useElementVisible } from '@/hooks/useElementVisible'
+import { useDataWidget } from '@/services/schema/dataWidget'
+import { DataWidgetStatus } from '@/services/schema/dataWidget'
+import { WidgetEmptyState } from './WidgetEmptyState'
 
 /** 图表类型 */
 type ChartType =
@@ -121,8 +124,11 @@ function extractConfig(props: Record<string, unknown>): ChartConfig {
  */
 export function ChartWidget(props: Record<string, unknown>) {
   const chartType = (props.chartType as ChartType) ?? 'bar'
+  // 离屏暂停：图表根节点不可见（监控 tab 非激活/窗口最小化）时，WS 推送不再
+  // 触发重渲染（HTTP 轮询由外层 RefreshBox 冻结），可见即恢复
+  const { ref, visible } = useElementVisible<HTMLDivElement>()
   // A1a：datasourceUri（HTTP 拉，series 形状）→ 无 uri 回退静态 props.data
-  const remote = useDataWidget(props, 'series' as const)
+  const remote = useDataWidget(props, 'series' as const, 0, visible)
   const data = extractData(props.datasourceUri ? remote.data : props.data)
   const config = extractConfig(props)
 
@@ -135,29 +141,21 @@ export function ChartWidget(props: Record<string, unknown>) {
 
   if (!hasData) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-lg border p-8">
-        <DataWidgetStatus loading={remote.loading} error={null} />
-        {!remote.loading && (
+      <WidgetEmptyState
+        loading={remote.loading}
+        iconInner={
           <>
-            <svg
-              className="text-muted-foreground mb-2 h-12 w-12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={1.5}
-            >
-              <path d="M3 3v18h18" />
-              <path d="M7 16l4-4 4 4 4-8" />
-            </svg>
-            <p className="text-muted-foreground text-sm">暂无图表数据</p>
+            <path d="M3 3v18h18" />
+            <path d="M7 16l4-4 4 4 4-8" />
           </>
-        )}
-      </div>
+        }
+        text="暂无图表数据"
+      />
     )
   }
 
   return (
-    <div className="w-full rounded-lg border p-4">
+    <div ref={ref} className="w-full rounded-lg border p-4">
       {config.title && (
         <h3 className="text-foreground mb-3 text-base font-semibold">
           {config.title}
@@ -215,6 +213,59 @@ function renderChart(
   }
 }
 
+/** 三类图表共用的绘制布局参数（尺寸/内边距/可绘制区） */
+function chartLayout(config: ChartConfig) {
+  const height = typeof config.height === 'number' ? config.height : 280
+  const padding = { top: 20, right: 20, bottom: 40, left: 40 }
+  const chartW = 400
+  const chartH = height - padding.top - padding.bottom
+  const drawableW = chartW - padding.left - padding.right
+  return { height, padding, chartW, chartH, drawableW }
+}
+
+/** 横向网格线（5 格），折线/柱状/散点三个图表共用 */
+function ChartGrid({
+  padding,
+  chartH,
+  chartW,
+  valueAt,
+}: {
+  padding: { top: number; right: number; bottom: number; left: number }
+  chartH: number
+  chartW: number
+  valueAt: (i: number) => number
+}): React.ReactNode {
+  return (
+    <>
+      {Array.from({ length: 5 }, (_, i) => {
+        const y = padding.top + (chartH / 4) * i
+        const val = valueAt(i)
+        return (
+          <g key={i}>
+            <line
+              x1={padding.left}
+              y1={y}
+              x2={chartW - padding.right}
+              y2={y}
+              className="stroke-border"
+              strokeWidth={0.5}
+            />
+            <text
+              x={padding.left - 6}
+              y={y + 4}
+              className="fill-muted-foreground"
+              fontSize={10}
+              textAnchor="end"
+            >
+              {val.toFixed(0)}
+            </text>
+          </g>
+        )
+      })}
+    </>
+  )
+}
+
 /** 折线/面积图 */
 function LineAreaChart({
   data,
@@ -225,10 +276,7 @@ function LineAreaChart({
   config: ChartConfig
   filled?: boolean
 }): React.ReactNode {
-  const height = typeof config.height === 'number' ? config.height : 280
-  const padding = { top: 20, right: 20, bottom: 40, left: 40 }
-  const chartW = 400
-  const chartH = height - padding.top - padding.bottom
+  const { height, padding, chartW, chartH } = chartLayout(config)
 
   const allValues = data.datasets.flatMap((ds) => ds.data)
   const maxVal = Math.max(...allValues, 1)
@@ -253,31 +301,12 @@ function LineAreaChart({
   return (
     <svg viewBox={`0 0 ${chartW} ${height}`} className="h-full w-full">
       {/* 网格线 */}
-      {Array.from({ length: 5 }, (_, i) => {
-        const y = padding.top + (chartH / 4) * i
-        const val = maxVal - ((maxVal - minVal) / 4) * i
-        return (
-          <g key={i}>
-            <line
-              x1={padding.left}
-              y1={y}
-              x2={chartW - padding.right}
-              y2={y}
-              className="stroke-border"
-              strokeWidth={0.5}
-            />
-            <text
-              x={padding.left - 6}
-              y={y + 4}
-              className="fill-muted-foreground"
-              fontSize={10}
-              textAnchor="end"
-            >
-              {val.toFixed(0)}
-            </text>
-          </g>
-        )
-      })}
+      <ChartGrid
+        padding={padding}
+        chartH={chartH}
+        chartW={chartW}
+        valueAt={(i) => maxVal - ((maxVal - minVal) / 4) * i}
+      />
 
       {/* X轴标签 */}
       {data.labels.map((label, i) => {
@@ -349,11 +378,7 @@ function BarChart({
   data: ChartData
   config: ChartConfig
 }): React.ReactNode {
-  const height = typeof config.height === 'number' ? config.height : 280
-  const padding = { top: 20, right: 20, bottom: 40, left: 40 }
-  const chartW = 400
-  const chartH = height - padding.top - padding.bottom
-  const drawableW = chartW - padding.left - padding.right
+  const { height, padding, chartW, chartH, drawableW } = chartLayout(config)
 
   const allValues = data.datasets.flatMap((ds) => ds.data)
   const maxVal = Math.max(...allValues, 1)
@@ -367,31 +392,12 @@ function BarChart({
   return (
     <svg viewBox={`0 0 ${chartW} ${height}`} className="h-full w-full">
       {/* 网格线 */}
-      {Array.from({ length: 5 }, (_, i) => {
-        const y = padding.top + (chartH / 4) * i
-        const val = maxVal - (maxVal / 4) * i
-        return (
-          <g key={i}>
-            <line
-              x1={padding.left}
-              y1={y}
-              x2={chartW - padding.right}
-              y2={y}
-              className="stroke-border"
-              strokeWidth={0.5}
-            />
-            <text
-              x={padding.left - 6}
-              y={y + 4}
-              className="fill-muted-foreground"
-              fontSize={10}
-              textAnchor="end"
-            >
-              {val.toFixed(0)}
-            </text>
-          </g>
-        )
-      })}
+      <ChartGrid
+        padding={padding}
+        chartH={chartH}
+        chartW={chartW}
+        valueAt={(i) => maxVal - (maxVal / 4) * i}
+      />
 
       {/* 柱子 */}
       {data.labels.map((label, li) => {
@@ -643,11 +649,7 @@ function ScatterChart({
   data: ChartData
   config: ChartConfig
 }): React.ReactNode {
-  const height = typeof config.height === 'number' ? config.height : 280
-  const padding = { top: 20, right: 20, bottom: 40, left: 40 }
-  const chartW = 400
-  const chartH = height - padding.top - padding.bottom
-  const drawableW = chartW - padding.left - padding.right
+  const { height, padding, chartW, chartH, drawableW } = chartLayout(config)
 
   const allValues = data.datasets.flatMap((ds) => ds.data)
   const maxVal = Math.max(...allValues, 1)
@@ -655,31 +657,12 @@ function ScatterChart({
   return (
     <svg viewBox={`0 0 ${chartW} ${height}`} className="h-full w-full">
       {/* 网格线 */}
-      {Array.from({ length: 5 }, (_, i) => {
-        const y = padding.top + (chartH / 4) * i
-        const val = maxVal - (maxVal / 4) * i
-        return (
-          <g key={i}>
-            <line
-              x1={padding.left}
-              y1={y}
-              x2={chartW - padding.right}
-              y2={y}
-              className="stroke-border"
-              strokeWidth={0.5}
-            />
-            <text
-              x={padding.left - 6}
-              y={y + 4}
-              className="fill-muted-foreground"
-              fontSize={10}
-              textAnchor="end"
-            >
-              {val.toFixed(0)}
-            </text>
-          </g>
-        )
-      })}
+      <ChartGrid
+        padding={padding}
+        chartH={chartH}
+        chartW={chartW}
+        valueAt={(i) => maxVal - (maxVal / 4) * i}
+      />
 
       {/* 散点 */}
       {data.datasets.map((ds, di) =>

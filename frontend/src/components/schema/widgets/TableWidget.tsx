@@ -7,9 +7,12 @@
  */
 
 import React, { useState, useMemo, useCallback } from 'react'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { toast } from '@/components/ui/sonner'
 import apiClient from '@/services/api/client'
 import { DataWidgetStatus, useDataWidget } from '@/services/schema/dataWidget'
+import { WidgetEmptyState } from './WidgetEmptyState'
+import { useConfirmDialog } from '@/utils/confirm'
 
 /** 列定义 */
 interface ColumnDef {
@@ -42,7 +45,7 @@ interface SortState {
 export interface RowActionDecl {
   key: string
   label: string
-  /** 点击前确认文案（缺省不确认） */
+  /** 点击前 DOM 确认层文案（缺省不确认；不用原生 confirm——自动化环境会被静默吞掉） */
   confirm?: string
   variant?: 'default' | 'destructive' | 'outline' | 'ghost'
   /** HTTP 方法（缺省 POST） */
@@ -122,6 +125,8 @@ export function TableWidget(props: Record<string, unknown>) {
   // A1b：行操作成功后重拉（reloadKey 驱动 useDataWidget）
   const [reloadTick, setReloadTick] = useState(0)
   const remote = useDataWidget(props, 'rows' as const, reloadTick)
+  // 行操作确认层（DOM 可见，自动化环境可交互——原生 confirm 会被静默 auto-dismiss）
+  const { confirm, dialogState } = useConfirmDialog()
   const rowData = (props.datasourceUri ? remote.data : undefined) as
     | { columns?: unknown; rows?: unknown }
     | undefined
@@ -134,7 +139,7 @@ export function TableWidget(props: Record<string, unknown>) {
 
   const handleRowAction = useCallback(
     async (action: RowActionDecl, row: Record<string, unknown>) => {
-      if (action.confirm && !window.confirm(action.confirm)) return
+      if (action.confirm && !(await confirm(action.confirm))) return
       try {
         await apiClient({ method: action.method ?? 'POST', url: renderActionUrl(action.url, row) })
         toast.success(action.successText ?? '操作成功')
@@ -145,7 +150,7 @@ export function TableWidget(props: Record<string, unknown>) {
         })
       }
     },
-    [],
+    [confirm],
   )
 
   const [sortState, setSortState] = useState<SortState | null>(null)
@@ -200,24 +205,17 @@ export function TableWidget(props: Record<string, unknown>) {
       return <DataWidgetStatus loading={false} error={remote.error} />
     }
     return (
-      <div className="flex flex-col items-center justify-center rounded-lg border border-dashed p-8">
-        <DataWidgetStatus loading={remote.loading} error={null} />
-        {!remote.loading && (
+      <WidgetEmptyState
+        loading={remote.loading}
+        dashed
+        iconInner={
           <>
-            <svg
-              className="text-muted-foreground mb-2 h-12 w-12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={1.5}
-            >
-              <rect x="3" y="3" width="18" height="18" rx="2" />
-              <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
-            </svg>
-            <p className="text-muted-foreground text-sm">暂无表格数据</p>
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
           </>
-        )}
-      </div>
+        }
+        text="暂无表格数据"
+      />
     )
   }
 
@@ -373,6 +371,9 @@ export function TableWidget(props: Record<string, unknown>) {
           </div>
         </div>
       )}
+
+      {/* 行操作确认层（DOM 可见） */}
+      <ConfirmDialog dialogState={dialogState} />
     </div>
   )
 }

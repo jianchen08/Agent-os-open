@@ -3,7 +3,7 @@
 
 行为契约（断输入→输出/副作用，不钉实现）：
 - _default_shared_root：宿主文件上级目录即 plugins/shared（成员发现根）
-- _scan_plugin_dirs：分组根目录缺失 → 跳过该分组不报错（存在的分组照常索引）
+- _scan_plugin_dirs：插件根不可用 → 跳过该根不报错（可用根照常索引）
 - _LoopWatchdog.start：重复启动幂等（单 watchdog 线程，停滞时恰一次自杀）
 - _heartbeat_loop：取消前持续打点（心跳时间戳单调推进）
 - _serve：serve 正常返回后心跳任务被取消、watchdog 停止（否则 asyncio.run
@@ -12,10 +12,13 @@
 - main：成员加载成功 happy path → 构造 CohostServer 聚合命名空间工具 →
   进入 serve 循环 → rc=0，stderr 打印成员数与聚合工具数
 
-结构性不可达防御分支（实测 Python 3.12，勿硬凑）：_exec_member_module 的
-``spec is None or spec.loader is None``——spec_from_file_location 对任意
-字符串路径（含不存在的 .py 文件）恒返回带 SourceFileLoader 的 spec，
-而 ``plugin_dir / "server.py"`` 的 location 恒非 None。
+防御分支（实测 Python 3.12，真实输入不可达，以协作者故障注入覆盖）：
+_exec_member_module 的 ``spec is None or spec.loader is None``——
+spec_from_file_location 对任意字符串路径（含不存在的 .py 文件）恒返回带
+SourceFileLoader 的 spec，而 ``plugin_dir / "server.py"`` 的 location 恒非
+None。护栏行为按其本义对 ``importlib.util.spec_from_file_location`` 注入
+None / loader=None 两种故障形态覆盖（TestExecMemberModuleSpecGuard），
+不硬凑真实输入。
 
 测试基建与 tests/plugins/_host/ 同款：HOST_DIR 注入 sys.path 后裸名
 ``import host``；合成成员复刻轻插件结构（plugin.json + plugin.py +
@@ -118,13 +121,13 @@ class TestSharedRootAndScan:
         assert (root / "_host").is_dir()
 
     def test_scan_skips_absent_group_roots(self, tmp_path: Path) -> None:
-        """三个分组根全缺失 → 空索引不报错；仅建 system → 只索引 system。"""
-        by_manifest, by_dir = host._scan_plugin_dirs(tmp_path)
+        """插件根不可用 → 空索引不报错；根存在则照常索引其下成员目录。"""
+        by_manifest, by_dir = host._scan_plugin_dirs([tmp_path])
         assert by_manifest == {}
         assert by_dir == {}
 
         member = _write_member(tmp_path, "system", "alpha", "alpha_id")
-        by_manifest, by_dir = host._scan_plugin_dirs(tmp_path)
+        by_manifest, by_dir = host._scan_plugin_dirs([tmp_path])
         assert by_manifest == {"alpha_id": member}
         assert by_dir == {"alpha": member}
 
@@ -194,6 +197,56 @@ class TestServeOrchestration:
 
         with pytest.raises(RuntimeError, match="stdio broken"):
             asyncio.run(host._serve(_Broken(), stall_secs=30.0))
+
+
+# ── 成员装载 spec 守卫（协作者故障注入）──────────────────
+
+
+class _SpecWithoutLoader:
+    """spec 替身：loader 位为 None（守卫第二判据）。"""
+
+    loader = None
+
+
+class TestExecMemberModuleSpecGuard:
+    """_exec_member_module 的 spec 守卫（靶行 host.py 281：raise CohostError）。
+
+    真实输入不可达（模块 docstring 说明：.py 路径恒返回带 SourceFileLoader 的
+    spec）；对协作者 ``importlib.util.spec_from_file_location`` 注入两种故障
+    形态（返回 None / 返回 loader=None 的 spec），验证 fail-fast 契约：
+    CohostError 携带 plugin_id 与 server.py 路径，且守卫先于模块登记触发
+    （sys.modules 不残留成员槽位）。
+    """
+
+    @pytest.mark.parametrize(
+        ("inject_none_spec", "shape"),
+        [(True, "spec-none"), (False, "loader-none")],
+    )
+    def test_spec_guard_raises_cohost_error_with_member_id_and_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        inject_none_spec: bool,
+        shape: str,
+    ) -> None:
+        del shape  # 仅作用例标识
+        fake_spec = None if inject_none_spec else _SpecWithoutLoader()
+        monkeypatch.setattr(
+            host.importlib.util,
+            "spec_from_file_location",
+            lambda name, location, **_kw: fake_spec,
+        )
+
+        with pytest.raises(host.CohostError) as exc_info:
+            host._MemberLoader()._exec_member_module("ghost_member", tmp_path)
+
+        msg = str(exc_info.value)
+        assert "ghost_member" in msg, "报错必须携带成员 plugin_id"
+        assert str(tmp_path / "server.py") in msg, "报错必须携带 server.py 路径"
+        assert "无法" in msg and "spec" in msg
+        assert "_cohost_member_ghost_member" not in sys.modules, (
+            "守卫先于模块登记触发，sys.modules 不得残留成员槽位"
+        )
 
 
 # ── 入口 happy path ──────────────────────────────────────

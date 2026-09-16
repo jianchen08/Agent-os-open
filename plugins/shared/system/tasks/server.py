@@ -86,11 +86,9 @@ async def _on_load(params: dict[str, Any]) -> None:
         handle = plugin.get_capability("pipeline-executor")
         return await handle.call(params["method"], params["params"])
 
-    try:
-        _task_cleanup.set_cleanup_capabilities(_exec, FrontendEmitter.from_plugin(plugin))
-    except KeyError:
-        _task_cleanup.set_cleanup_capabilities(_exec, None)
-        logger.warning("[task_service] frontend capability 未注入，task_deleted 通知降级")
+    # from_plugin 对缺 frontend capability 内建降级（返回 None，清理链不推送），
+    # 不可能外抛——无需 try/except 兜底
+    _task_cleanup.set_cleanup_capabilities(_exec, FrontendEmitter.from_plugin(plugin))
     # 容器任务实体遗留数据清除（幂等；project = 文件夹+登记 模型落地后，
     # 容器任务行/挂靠引用/container_* 隔离副本不再有写入方，此处只清不改）。
     from project_registry import purge_legacy_container_data  # noqa: PLC0415

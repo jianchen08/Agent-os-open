@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>角色扮演</title>
+  <style>
+  :root {
+    --bg: #f8fafc; --fg: #1a1a1a; --muted: #64748b; --border: #cbd5e1;
+    --card: #ffffff; --ph: #94a3b8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f172a; --fg: #e2e8f0; --muted: #94a3b8; --border: #334155;
+      --card: #1e293b; --ph: #475569;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px; font-size: 13px; color: var(--fg); background: var(--bg);
+    font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  }
+  h1 { margin: 0 0 12px; font-size: 15px; }
+  .layout { display: grid; gap: 12px; height: calc(100vh - 44px); }
+  .cols { grid-template-columns: 220px minmax(0, 1fr) 200px; }
+  section, aside {
+    display: flex; flex-direction: column; min-height: 0; min-width: 0;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--card);
+  }
+  h2 {
+    margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .body { flex: 1; overflow: auto; padding: 8px; }
+  .placeholder {
+    height: 100%; min-height: 72px; display: flex; flex-direction: column; gap: 4px;
+    align-items: center; justify-content: center; padding: 12px; text-align: center;
+    color: var(--muted); border: 1px dashed var(--ph); border-radius: 6px;
+  }
+  .placeholder .ph-label { font-size: 13px; }
+  .placeholder .ph-note { font-size: 11px; opacity: 0.75; }
+  .note { margin: 8px 0 0; padding: 0 2px; font-size: 11px; color: var(--muted); }
+  .stages { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+  .stage {
+    padding: 14px 8px; text-align: center; font-size: 12px; color: var(--muted);
+    border: 1px dashed var(--ph); border-radius: 6px;
+  }
+  </style>
+</head>
+<body>
+  <h1>角色扮演</h1>
+  <main class="layout cols" data-panel="roleplay">
+    <aside aria-label="角色卡">
+      <h2>角色卡</h2>
+      <div class="body">
+        <div class="placeholder">
+          <span class="ph-label">角色卡画廊</span>
+          <span class="ph-note">数据源缺口：角色卡物料 cards/&lt;id&gt;.yaml（name/first_mes/标签；V2 字段子集）。</span>
+        </div>
+      </div>
+    </aside>
+    <section aria-label="会话">
+      <h2>会话</h2>
+      <div class="body">
+        <div class="placeholder">
+          <span class="ph-label">会话视图</span>
+          <span class="ph-note">数据源缺口：会话消息渲染归 chat 消息域（swipe/重新生成控件属消息卡 Wave 2）。</span>
+        </div>
+      </div>
+    </section>
+    <aside aria-label="世界书">
+      <h2>世界书</h2>
+      <div class="body">
+        <div class="placeholder">
+          <span class="ph-label">世界书条目</span>
+          <span class="ph-note">数据源缺口：世界书物料 lorebooks/&lt;id&gt;.yaml（后接点 = TableWidget 条目表）。</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>

@@ -1,0 +1,38 @@
+# 写作模式 profile（B 部类物料：由用户维护；出厂种子随 mode_writing 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+# 链路对标 NovelAI/Sudowrite 范式：续写/扩写/改写动作 + 章节验收（semantic_check）
+mode: writing
+name: 写作模式
+panel_page_id: writing_workshop
+chain:
+  entry: main
+  expected_path: [main, orchestrator/novel_orchestrator_agent, executor/generation/novel_writer_agent]
+  executor_pool: [executor/generation/novel_writer_agent, executor/general_agent]
+  entry_override: null
+pipeline_profile:
+  pipeline: autonomous
+  params:
+    case_timeout: 1200
+    multimodal: false
+    domain_context: none
+suite:
+  smoke: config/self_evolve/suites/dev/writing.yaml
+  full: null          # 二期补全
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+  execution_stage:
+    - config/agents/orchestrator/novel_orchestrator_agent.yaml
+    - config/agents/executor/generation/novel_writer_agent.yaml
+    - config/agents/executor/general_agent.yaml
+levers:
+  agent_misdispatch: {dispatch_stage: [task_dispatch_guide, orchestrator_config]}
+  structure_violation: {execution_stage: [persona, prompt_skeleton]}
+  style_drift: {execution_stage: [persona]}
+  eval_no_settle: {evaluation_stage: [evaluation_params]}
+verifier_families: [file_assert, structure_assert, semantic_check]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 1200
+  round_tokens: 2000000
+  proposals_per_session: 3

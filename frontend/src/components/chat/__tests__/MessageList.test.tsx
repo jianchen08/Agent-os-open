@@ -130,6 +130,32 @@ function makeTriggerableResizeObserver() {
   return ref
 }
 
+/** 挂载列表并注入滚动度量（滚动恢复族用例共用），返回列表元素 */
+/** 渲染列表并注入滚动度量（滚动族用例共用），返回列表元素与 rerender */
+function renderListWithMetrics(
+  tabId: string,
+  messages: Message[],
+  height: number,
+  defaultProps: Record<string, unknown>,
+) {
+  const { container, rerender } = render(
+    <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
+  )
+  const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+  mockScrollMetrics(listEl, height)
+  return { listEl, rerender }
+}
+
+function mountListWithMetrics(tabId: string, messages: Message[], height: number, defaultProps: Record<string, unknown>) {
+  const { container } = render(
+    <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
+  )
+  const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+  mockScrollMetrics(listEl, height)
+  flushRaf()
+  return listEl
+}
+
 describe('MessageList', () => {
   const defaultProps: ExtendedMessageListProps = {
     messages: [],
@@ -334,12 +360,7 @@ describe('MessageList', () => {
 
     it('无缓存时首次加载钉到最底部', () => {
       const messages = [makeMessage({ id: 'msg-1' })]
-      const { container } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="no-cache" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
-      flushRaf()
+      const listEl = mountListWithMetrics("no-cache", messages, 1000)
 
       expect(listEl.scrollTop).toBe(1000)
     })
@@ -578,11 +599,7 @@ describe('MessageList', () => {
         makeMessage({ id: 'msg-2', sequence: 2 }),
         makeMessage({ id: 'msg-3', sequence: 3 }),
       ]
-      const { container, rerender } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="rebuild" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
+      const { listEl, rerender } = renderListWithMetrics("rebuild", messages, 1000, defaultProps)
       flushRaf()
       expect(listEl.scrollTop).toBe(1000)
 
@@ -603,11 +620,7 @@ describe('MessageList', () => {
       const ro = makeTriggerableResizeObserver()
 
       const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
-      const { container, rerender } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="scroll-up" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
+      const { listEl, rerender } = renderListWithMetrics("scroll-up", messages, 1000, defaultProps)
       flushRaf()
       expect(listEl.scrollTop).toBe(1000)
 
@@ -632,11 +645,7 @@ describe('MessageList', () => {
       const ro = makeTriggerableResizeObserver()
 
       const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
-      const { container, rerender } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="drag-up" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
+      const { listEl, rerender } = renderListWithMetrics("drag-up", messages, 1000, defaultProps)
       flushRaf()
       expect(listEl.scrollTop).toBe(1000)
 
@@ -661,11 +670,7 @@ describe('MessageList', () => {
       const ro = makeTriggerableResizeObserver()
 
       const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
-      const { container, rerender } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="clamp" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
+      const { listEl, rerender } = renderListWithMetrics("clamp", messages, 1000, defaultProps)
       flushRaf()
       expect(listEl.scrollTop).toBe(1000)
 
@@ -688,11 +693,7 @@ describe('MessageList', () => {
       const ro = makeTriggerableResizeObserver()
 
       const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
-      const { container, rerender } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="recover" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
+      const { listEl, rerender } = renderListWithMetrics("recover", messages, 1000, defaultProps)
       flushRaf()
 
       // 上滑到中部 → 停止跟随
@@ -715,12 +716,7 @@ describe('MessageList', () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
       try {
         const messages = [makeMessage({ id: 'msg-1' })]
-        const { container } = render(
-          <MessageList {...defaultProps} messages={messages} tabId="poll-stop" />,
-        )
-        const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-        mockScrollMetrics(listEl, 1000)
-        flushRaf()
+        const listEl = mountListWithMetrics("poll-stop", messages, 1000)
         expect(listEl.scrollTop).toBe(1000)
 
         // 无手势上滑（滚动条拖拽/键盘），scroll 事件方向判定停止跟随
@@ -817,11 +813,7 @@ describe('MessageList', () => {
       const onJumpConsumed = vi.fn()
       // 首轮无 jumpTarget 渲染（等布局就绪后 mock offsetTop 再注入 jumpTarget，
       // 避免 effect 在 jsdom 零布局下读到 offsetTop=0 提前消费）
-      const { container, rerender } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="jump-hit" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
+      const { listEl, rerender } = renderListWithMetrics("jump-hit", messages, 1000, defaultProps)
       // jsdom 无布局，锚点 offsetTop 恒 0——手工给定，验证居中计算
       const anchor = listEl.querySelector('[data-msg-id="msg-2"]') as HTMLElement
       Object.defineProperty(anchor, 'offsetTop', { configurable: true, value: 800 })
@@ -873,11 +865,7 @@ describe('MessageList', () => {
         makeMessage({ id: 'msg-2', sequence: 2, role: 'assistant' }),
       ]
       // 首轮无 jumpTarget 渲染，mock offsetTop 后再注入跳转目标
-      const { container, rerender } = render(
-        <MessageList {...defaultProps} messages={messages} tabId="jump-stay" />,
-      )
-      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
-      mockScrollMetrics(listEl, 1000)
+      const { listEl, rerender } = renderListWithMetrics("jump-stay", messages, 1000, defaultProps)
       const anchor = listEl.querySelector('[data-msg-id="msg-2"]') as HTMLElement
       Object.defineProperty(anchor, 'offsetTop', { configurable: true, value: 800 })
 

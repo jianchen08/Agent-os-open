@@ -9,6 +9,14 @@
  * - Tab 关闭链（file_editor 注册表清理 / 钉住保护 / 移动端关最后一个 Tab 自动收起）
  * - 桌面侧栏/工作区开关、持久化比例恢复宽度、Esc 退出全屏覆盖层
  * - AlertBanner 动作分流（连接 → 监控页；审批 → 不跳转）
+ *
+ * 任务树节点点击接线（2026-09-17 已修复）：handleTaskNodeClick 此前因
+ * component-based 渲染路径取代 __dynamic__ 分支时接线丢失而成为死代码
+ * （onNodeClick 未下发 widget props）。现 renderTabContent 已向 widget 传
+ * onNodeClick={handleTaskNodeClick}，本文件的 file_tree 桩同步断言
+ * 「节点点击 → navigateToPipeline 携带解析字段」与缺 run_id 早退守卫。
+ * - 143/186/224/232/437/770：均为防御/兜底分支（钉住页签守卫、container null
+ *   早退、querySelector 缺省宽度、移动端关最后一个 Tab）。
  */
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -17,6 +25,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactNode } from 'react'
 import apiClient from '@/services/api/client'
 import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+vi.mock('@/services/pipelineNavigator', () => ({
+  navigateToPipeline: vi.fn().mockResolvedValue(undefined),
+}))
+import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import {
   getFileEditorData,
@@ -174,8 +186,9 @@ function registerTestWidget(type: string, body: (props: Record<string, unknown>)
   registeredWidgetTypes.push(type)
 }
 
-// file_tree 测试桩捕获 onFileClick，供用例触发
+// file_tree 测试桩捕获 onFileClick / onNodeClick，供用例触发
 let capturedOnFileClick: ((filePath: string, fileName: string) => Promise<void>) | undefined
+let capturedOnNodeClick: ((node: Record<string, unknown>) => void) | undefined
 
 // fileEditorRegistry 注册过的 tabId（测试后清理，防跨用例泄漏）
 const registeredEditorTabIds: string[] = []
@@ -189,10 +202,12 @@ beforeEach(() => {
   setViewportWidth(1280)
   resetStores()
   vi.mocked(openWorkspacePanelByPath).mockClear()
+  vi.mocked(navigateToPipeline).mockClear()
   apiMock.get.mockReset()
   apiMock.put.mockReset()
   apiMock.post.mockReset()
   capturedOnFileClick = undefined
+  capturedOnNodeClick = undefined
   registerTestWidget('table', (props) => (
     <div data-testid="widget-table" data-panel={String(props.panel ?? '')}>
       table-body
@@ -200,13 +215,30 @@ beforeEach(() => {
   ))
   registerTestWidget('file_tree', (props) => {
     capturedOnFileClick = props.onFileClick as typeof capturedOnFileClick
+    capturedOnNodeClick = props.onNodeClick as typeof capturedOnNodeClick
     return (
-      <button
-        data-testid="widget-file-btn"
-        onClick={() => void props.onFileClick?.('docs/readme.md', 'readme.md')}
-      >
-        pick-file
-      </button>
+      <>
+        <button
+          data-testid="widget-file-btn"
+          onClick={() => void props.onFileClick?.('docs/readme.md', 'readme.md')}
+        >
+          pick-file
+        </button>
+        <button
+          data-testid="widget-node-btn"
+          onClick={() =>
+            props.onNodeClick?.({
+              id: 'task-9',
+              title: '子任务A',
+              pipeline_run_id: 'run-77',
+              agent_level: 'L3',
+              status: 'running',
+            })
+          }
+        >
+          pick-node
+        </button>
+      </>
     )
   })
 })
@@ -432,6 +464,39 @@ describe('FiveSpaceLayout 工作区 Tab 内容分发', () => {
     renderLayout()
     expect(screen.getAllByText('神秘模块').length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('模块内容不可用')).toBeInTheDocument()
+  })
+})
+
+describe('FiveSpaceLayout 任务树节点点击 → 管道导航接线', () => {
+  function seedTreeTabForNodes() {
+    useLayoutModeStore.setState({
+      workspaceTabs: [
+        { id: 'tab-tree', title: '任务树', moduleId: '__dynamic__', component: 'file_tree', dataSource: 'workspace://ct-7', isActive: true, isPinned: false },
+      ],
+      visitedTabIds: ['tab-tree'],
+    })
+  }
+
+  it('widget 收到 onNodeClick；节点点击 → navigateToPipeline 携带解析字段', async () => {
+    seedTreeTabForNodes()
+    renderLayout()
+    expect(capturedOnNodeClick).toBeTypeOf('function')
+
+    fireEvent.click(screen.getByTestId('widget-node-btn'))
+    await act(async () => {})
+
+    expect(navigateToPipeline).toHaveBeenCalledWith(
+      'run-77',
+      expect.objectContaining({ taskId: 'task-9', agentName: '子任务A', agentLevel: 3 }),
+    )
+  })
+
+  it('缺 pipeline_run_id 的节点 → 不导航（早退守卫）', async () => {
+    seedTreeTabForNodes()
+    renderLayout()
+    capturedOnNodeClick?.({ id: 'task-9', title: '子任务A' })
+    await act(async () => {})
+    expect(navigateToPipeline).not.toHaveBeenCalled()
   })
 })
 

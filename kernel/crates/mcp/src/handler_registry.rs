@@ -376,4 +376,87 @@ mod tests {
             .await;
         assert!(err.is_err(), "缺少 name 参数应返回错误");
     }
+
+    /// Default 走 new：空注册表（生产装配路径之一）。
+    #[tokio::test]
+    async fn default_registry_starts_empty() {
+        let registry = CapabilityHandlerRegistry::default();
+        assert!(registry.namespaces().is_empty());
+        assert!(!registry.has_namespace("anything"));
+        let router: Arc<dyn CapabilityRouter> = Arc::new(CapabilityHandlerRegistry::default());
+        assert!(router.known_namespaces().is_empty());
+    }
+
+    /// metrics.record 的 value 参数校验：缺失或非数字 → Protocol 错误
+    /// （不得把非法值当 0 累加，静默吞掉指标）。
+    #[tokio::test]
+    async fn metrics_handler_rejects_missing_or_invalid_value() {
+        let store = Arc::new(FakeMetricsStore::default());
+        let registry = CapabilityHandlerRegistry::new();
+        registry.register(Arc::new(MetricsHandler { store }));
+        let router: Arc<dyn CapabilityRouter> = Arc::new(registry);
+
+        // 缺 value
+        let err = router
+            .handle(
+                "metrics",
+                "record",
+                json!({"_plugin_id": "p1", "name": "m"}),
+            )
+            .await
+            .expect_err("缺 value 应报错");
+        assert!(
+            format!("{err}").contains("value"),
+            "错误应点名 value: {err}"
+        );
+
+        // value 非数字（字符串/布尔）
+        for bad in [json!("12.5"), json!(true), json!({"n": 1})] {
+            let err = router
+                .handle(
+                    "metrics",
+                    "record",
+                    json!({"_plugin_id": "p1", "name": "m", "value": bad}),
+                )
+                .await
+                .expect_err("非数字 value 应报错");
+            assert!(
+                format!("{err}").contains("value"),
+                "错误应点名 value: {err}"
+            );
+        }
+    }
+
+    /// metrics 的未知 method → Protocol 错误（不静默成功）。
+    #[tokio::test]
+    async fn metrics_handler_rejects_unknown_method() {
+        let store = Arc::new(FakeMetricsStore::default());
+        let registry = CapabilityHandlerRegistry::new();
+        registry.register(Arc::new(MetricsHandler { store }));
+        let router: Arc<dyn CapabilityRouter> = Arc::new(registry);
+
+        let err = router
+            .handle("metrics", "reset", json!({}))
+            .await
+            .expect_err("未知 method 应报错");
+        assert!(format!("{err}").contains("not implemented"), "{err}");
+    }
+
+    /// 缺 _plugin_id → 归到 "unknown"（不 panic，指标仍可累加）。
+    #[tokio::test]
+    async fn metrics_handler_defaults_missing_plugin_id() {
+        let store = Arc::new(FakeMetricsStore::default());
+        let registry = CapabilityHandlerRegistry::new();
+        registry.register(Arc::new(MetricsHandler {
+            store: store.clone(),
+        }));
+        let router: Arc<dyn CapabilityRouter> = Arc::new(registry);
+
+        let out = router
+            .handle("metrics", "record", json!({"name": "calls", "value": 3.0}))
+            .await
+            .expect("缺 plugin_id 仍应可记录");
+        assert_eq!(out["plugin_id"], "unknown");
+        assert_eq!(*store.counters.lock().get("unknown:calls").unwrap(), 3.0);
+    }
 }
