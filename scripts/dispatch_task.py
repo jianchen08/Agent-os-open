@@ -5,8 +5,8 @@
 → WS /ws/chat?ticket= 发 user_input，等 stream_end 或超时（超时只放弃等待，
 管道在服务端继续跑）。契约对齐：frontend/src/services/auth/wsTicket.ts、
 api/auth.ts、api/session.ts（createSession 带 X-Main-Agent-Request: true）、
-GlobalWebSocket.sendUserInput。口令从 AGENTOS_ADMIN_PASSWORD 读取，未设时回落
-文档化 dev 默认口令（本地运维用，不落盘）。
+GlobalWebSocket.sendUserInput。口令从 AGENTOS_ADMIN_PASSWORD 读取，
+未设即硬失败（内核无默认口令——首启随机播种，硬编码回落无合法场景）。
 
 用法（用 .venv/Scripts/python.exe 跑，依赖 websockets）：
   python scripts/dispatch_task.py --list
@@ -46,8 +46,10 @@ def load_password() -> str:
     pw = os.environ.get("AGENTOS_ADMIN_PASSWORD")
     if pw:
         return pw
-    print("[warn] AGENTOS_ADMIN_PASSWORD 未设，回落文档化 dev 默认口令", file=sys.stderr)
-    return "admin12345"
+    sys.exit(
+        "[error] AGENTOS_ADMIN_PASSWORD 未设：内核口令无默认值（首启随机播种），"
+        "请显式提供（口令见内核首次启动日志或运维侧设定）。"
+    )
 
 
 def list_threads(token: str) -> None:

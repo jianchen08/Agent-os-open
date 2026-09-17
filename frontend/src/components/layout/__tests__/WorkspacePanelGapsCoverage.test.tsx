@@ -14,24 +14,16 @@
  * - 纵向滚轮转横向滚动（非被动监听）
  * - 懒挂载：仅激活或 visited 的 Tab 渲染内容，其余占位
  *
- * 测试策略：真实 layoutModeStore（真实依赖，tabs/visited 由 store 驱动）+
- * 真实组件；仅 mock opener 服务（外部导航边界，断言其收到的路径）。
+ * 测试策略：真实 layoutModeStore / ContributionRegistry / opener 打开链路
+ * （真实依赖，tabs/visited 由 store 驱动，点击落点断言 store 终态）。
  */
 
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { WorkspacePanel } from '@/components/layout/WorkspacePanel'
-import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import type * as openerMod from '@/services/workspacePanelOpener'
 import type { WorkspaceTab } from '@/types/layout'
-
-vi.mock('@/services/workspacePanelOpener', async (importOriginal) => {
-  const actual = await importOriginal<typeof openerMod>()
-  return { ...actual, openWorkspacePanelByPath: vi.fn() }
-})
-
-const mockOpenByPath = vi.mocked(openWorkspacePanelByPath)
 
 function makeTab(overrides: Partial<WorkspaceTab> = {}): WorkspaceTab {
   return {
@@ -69,14 +61,21 @@ function openTabMenu(tabId: string) {
 describe('WorkspacePanel — 空态与全屏', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    contributionRegistry.clear()
     useLayoutModeStore.setState({ workspaceTabs: [], visitedTabIds: [] })
   })
 
-  it('空态点击「打开任务管理」导航到 /tasks', () => {
+  it('空态渲染导航页，点击声明条目打开对应工作区页签（真实 opener 链路）', () => {
+    contributionRegistry.register({
+      type: 'pages', id: 'tasks', title: '任务管理',
+      space: 'workspace', slot: 'tab', path: '/tasks', pluginId: 'task_service',
+    })
     render(<StoreDrivenPanel />)
-    expect(screen.getByText('暂无内容 — 从下方打开任务管理')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '打开任务管理' }))
-    expect(mockOpenByPath).toHaveBeenCalledWith('/tasks')
+    expect(screen.getByTestId('workspace-nav-page')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('nav-item-task_service:tasks'))
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    expect(tabs.map((t) => t.id)).toEqual(['ws-plugin-tasks'])
+    expect(tabs[0]?.isActive).toBe(true)
   })
 
   it('全屏按钮随 isFullscreen 切换语义，点击回调触发', () => {
@@ -136,7 +135,7 @@ describe('WorkspacePanel — 右键菜单动作', () => {
     openTabMenu('a')
     fireEvent.click(screen.getByTestId('workspace-tab-menu-close-all'))
     expect(useLayoutModeStore.getState().workspaceTabs).toEqual([])
-    expect(screen.getByText('暂无内容 — 从下方打开任务管理')).toBeInTheDocument()
+    expect(screen.getByTestId('workspace-nav-page')).toBeInTheDocument()
   })
 
   it('固定标签的「关闭本标签」禁用', () => {

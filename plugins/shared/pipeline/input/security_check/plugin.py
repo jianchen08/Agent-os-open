@@ -885,7 +885,10 @@ class SecurityCheckPlugin(IInputPlugin):
                 tool_name,
                 e,
             )
-            return self._soft_block(ctx, tool_name, f"审批服务异常: {e}")
+            # 审批通道故障（BUG-41）：人审结果未知（用户可能已批准但响应在
+            # 通道翻动中丢失）、调用从未执行 → 标记可重试，duplicate_check
+            # 据此豁免该次发射的签名入窗，人审后的重试不被去重拦截。
+            return self._soft_block(ctx, tool_name, f"审批服务异常: {e}", retry_allowed=True)
 
     def _make_signature(self, tool_name: str, args: dict[str, Any]) -> str | None:
         """计算命令指纹，用于"本管道内同命令免批"记忆。
@@ -948,6 +951,8 @@ class SecurityCheckPlugin(IInputPlugin):
         ctx: PluginContext,
         tool_name: str,
         reason: str,
+        *,
+        retry_allowed: bool = False,
     ) -> dict[str, Any]:
         """软拦截：把拒绝原因作为 tool_result 返回给 LLM，不结束管道。
 
@@ -963,10 +968,17 @@ class SecurityCheckPlugin(IInputPlugin):
         连续拒绝保护：按工具签名计数，同一请求被连续拦截超阈值时，说明
         模型无法自我纠正，直接终止管道并上报，避免无限重试。
 
+        retry_allowed（BUG-41）：审批通道故障（wait 链路异常，人审结果未知）
+        时为 True——调用从未执行且用户可能已批准，拒绝结果带 retry_allowed +
+        arguments 标记，duplicate_check 据此把该次未执行的签名从重复窗口摘除
+        （人审后的重试不得被去重拦截）并不计失败熔断连败。用户拒绝/超时/
+        取消不是通道故障，不带标记（拒绝重试闸保留）。
+
         Args:
             ctx: 插件执行上下文
             tool_name: 被拒绝的工具名称
             reason: 拒绝原因
+            retry_allowed: 审批通道故障标记（该次调用未执行、可重试）
 
         Returns:
             状态更新字典（raw_tool_calls 清空，tool_results 注入拒绝结果，
@@ -982,14 +994,17 @@ class SecurityCheckPlugin(IInputPlugin):
             tc_name = tc.get("name", "")
             tc_call_id = tc.get("id")
             block_reason = f"[审批拒绝] {reason}" if tc_name == tool_name else f"[关联拒绝] {reason}"
-            rejected_results.append(
-                {
-                    "tool_name": tc_name,
-                    "success": False,
-                    "error": block_reason,
-                    "call_id": tc_call_id,
-                }
-            )
+            entry: dict[str, Any] = {
+                "tool_name": tc_name,
+                "success": False,
+                "error": block_reason,
+                "call_id": tc_call_id,
+            }
+            if retry_allowed:
+                # 参数原样透传（dict/str JSON 均可），duplicate_check 侧归一定签名
+                entry["retry_allowed"] = True
+                entry["arguments"] = tc.get("arguments", tc.get("args", {}))
+            rejected_results.append(entry)
             if tc_call_id:
                 messages.append(
                     {
@@ -1211,11 +1226,13 @@ class SecurityCheckPlugin(IInputPlugin):
         规则的 tools 为 ["*"] 或包含当前工具名时适用。
         支持关键词子串匹配（大小写不敏感）和正则匹配两种模式。
 
-        优先级：allow > block / needs_approval。
-        先扫一遍所有规则，命中 action=allow 即立即放行（白名单优先，
-        避免 dangerous_commands 抢先于 safe_commands 误伤安全命令，
-        如 `wc -l ... 2>/dev/null` 被 2>/dev/null 关键词误判）。
-        无 allow 命中时，返回首个 block/needs_approval 规则。
+        优先级裁决（按规则 priority 字段，缺省 0，同优先级取先声明者）：
+        allow 与 block/needs_approval 并存时，仅当 allow 的优先级 ≥ 拦截的
+        优先级才放行。平级 allow 生效 = 白名单语义（豁免 dangerous_commands
+        关键词子串噪音，如 `wc -l ... 2>/dev/null` 被 2>/dev/null 关键词误判）；
+        高优先级拦截不被白名单掩蔽 = 位置/类别闸语义（host_path_access 以
+        priority: 1 压过 safe_commands，`ls D:/secret` 照常弹审批）。
+        无 allow 命中时，返回优先级最高的 block/needs_approval 规则。
 
         Args:
             tool_name: 工具名称
@@ -1229,6 +1246,9 @@ class SecurityCheckPlugin(IInputPlugin):
             - rule_name 为匹配到的规则名称
         """
         first_reject: tuple[str, str] = ("", "")
+        reject_priority = -1
+        best_allow: tuple[str, str] = ("", "")
+        allow_priority = -1
         for rule in self._rules:
             # 检查工具是否匹配（支持 ["*"] 通配 + 可选模糊匹配）
             tools = rule.get("tools", [])
@@ -1268,14 +1288,31 @@ class SecurityCheckPlugin(IInputPlugin):
                     if matched:
                         action = rule.get("action", "block")
                         rule_name = rule.get("name", "unknown")
-                        # allow 白名单优先：命中即放行，不再查其它规则
+                        priority = self._rule_priority(rule)
                         if action == "allow":
-                            return (action, rule_name)
-                        # 记录首个拦截/审批规则，无 allow 命中时返回它
-                        if not first_reject[0]:
-                            first_reject = (action, rule_name)
+                            # 记录最高优先级 allow（平级取先声明者）
+                            if priority > allow_priority:
+                                best_allow, allow_priority = (action, rule_name), priority
+                        elif priority > reject_priority:
+                            first_reject, reject_priority = (action, rule_name), priority
 
+        if best_allow[0] and allow_priority >= reject_priority:
+            return best_allow
         return first_reject
+
+    def _rule_priority(self, rule: dict[str, Any]) -> int:
+        """规则优先级（缺省 0）。非法值告警并按 0 处理，与非法正则同防御。"""
+        raw = rule.get("priority", 0)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "[%s] Invalid priority in rule '%s': %r (treated as 0)",
+                self.name,
+                rule.get("name", "?"),
+                raw,
+            )
+            return 0
 
     def _check_path_traversal(self, args: dict[str, Any]) -> str:
         """检查路径遍历攻击（增强版）。

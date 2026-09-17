@@ -5,78 +5,457 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>调研台</title>
   <style>
-  :root {
-    --bg: #f8fafc; --fg: #1a1a1a; --muted: #64748b; --border: #cbd5e1;
-    --card: #ffffff; --ph: #94a3b8;
-  }
-  @media (prefers-color-scheme: dark) {
+    /* 主题 token：宿主下行桥 theme.sync 逐键落 --ag-*（documentElement 内联样式
+       优先级高于 ：root），现值兜底；--bg 等本地别名引用 token，全页跟随宿主主题。 */
     :root {
-      --bg: #0f172a; --fg: #e2e8f0; --muted: #94a3b8; --border: #334155;
-      --card: #1e293b; --ph: #475569;
+      --bg: var(--ag-bg, #f6f8fb); --fg: var(--ag-fg, #16213a); --muted: var(--ag-muted, #64748b);
+      --border: var(--ag-border, #d7dce6); --card: var(--ag-card, #ffffff);
+      --accent: var(--ag-accent, #0e7490); --accent-soft: var(--ag-accent-soft, #e0f2fe);
+      --ok: var(--ag-ok, #16a34a); --err: var(--ag-err, #dc2626);
+      --chip: var(--ag-chip, #f1f5f9); --ph: var(--ag-muted, #94a3b8);
+      --radius: var(--ag-radius, 8px);
     }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 12px; font-size: 13px; color: var(--fg); background: var(--bg);
-    font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  }
-  h1 { margin: 0 0 12px; font-size: 15px; }
-  .layout { display: grid; gap: 12px; height: calc(100vh - 44px); }
-  .cols { grid-template-columns: 220px minmax(0, 1fr) 200px; }
-  section, aside {
-    display: flex; flex-direction: column; min-height: 0; min-width: 0;
-    border: 1px solid var(--border); border-radius: 6px; background: var(--card);
-  }
-  h2 {
-    margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted);
-    border-bottom: 1px solid var(--border);
-  }
-  .body { flex: 1; overflow: auto; padding: 8px; }
-  .placeholder {
-    height: 100%; min-height: 72px; display: flex; flex-direction: column; gap: 4px;
-    align-items: center; justify-content: center; padding: 12px; text-align: center;
-    color: var(--muted); border: 1px dashed var(--ph); border-radius: 6px;
-  }
-  .placeholder .ph-label { font-size: 13px; }
-  .placeholder .ph-note { font-size: 11px; opacity: 0.75; }
-  .note { margin: 8px 0 0; padding: 0 2px; font-size: 11px; color: var(--muted); }
-  .stages { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
-  .stage {
-    padding: 14px 8px; text-align: center; font-size: 12px; color: var(--muted);
-    border: 1px dashed var(--ph); border-radius: 6px;
-  }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: var(--ag-bg, #0e1420); --fg: var(--ag-fg, #e2e8f0); --muted: var(--ag-muted, #94a3b8);
+        --border: var(--ag-border, #2b3247); --card: var(--ag-card, #171d2c);
+        --accent: var(--ag-accent, #38bdf8); --accent-soft: var(--ag-accent-soft, #14324a);
+        --chip: var(--ag-chip, #232b3f); --ph: var(--ag-muted, #475069);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 10px 12px; font-size: 13px; color: var(--fg); background: var(--bg);
+      font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      height: calc(100vh - 20px); display: flex; flex-direction: column; gap: 10px;
+    }
+    header { display: flex; align-items: center; gap: 10px; flex: none; }
+    header h1 { margin: 0; font-size: 15px; }
+    header .spacer { flex: 1; }
+    #modeName { color: var(--muted); font-size: 12px; }
+    #status { color: var(--muted); font-size: 11px; min-width: 60px; text-align: right; }
+    h2 {
+      margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted); flex: none;
+      border-bottom: 1px solid var(--border);
+    }
+    button {
+      padding: 5px 12px; background: var(--accent); color: #fff; border: none;
+      border-radius: calc(var(--radius) - 2px); cursor: pointer; font-size: 12px; flex: none;
+    }
+    button.secondary { background: var(--chip); color: var(--fg); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    input, textarea, select {
+      padding: 5px 8px; background: var(--card); color: var(--fg);
+      border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
+      font-size: 12px; font-family: inherit;
+    }
+    textarea { resize: vertical; }
+    .layout {
+      display: grid; grid-template-columns: 260px minmax(0, 1fr) 250px;
+      gap: 10px; flex: 1; min-height: 0;
+    }
+    .drawer, .main {
+      display: flex; flex-direction: column; min-height: 0; min-width: 0;
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+      overflow: hidden;
+    }
+    .newform { padding: 8px; border-bottom: 1px solid var(--border); display: flex;
+      flex-direction: column; gap: 6px; flex: none; }
+    .newform textarea { width: 100%; }
+    .formrow { display: flex; gap: 6px; align-items: center; }
+    .formrow select { flex: 1; min-width: 0; }
+    .list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+    .item {
+      border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); padding: 8px 10px;
+      cursor: pointer; background: var(--card);
+    }
+    .item:hover { border-color: var(--accent); }
+    .item.active { border-color: var(--accent); background: var(--accent-soft); }
+    .item .row1 { display: flex; align-items: center; gap: 8px; }
+    .item .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item .sub { color: var(--muted); font-size: 11px; margin-top: 4px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .dot.running { background: var(--ok); } .dot.done { background: var(--muted); }
+    .dot.other { background: var(--accent); }
+    .main-head {
+      flex: none; padding: 9px 12px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 10px;
+    }
+    .main-head .title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #wordCount { color: var(--muted); font-size: 11px; flex: none; }
+    .main-body { flex: 1; overflow-y: auto; padding: 12px 14px; }
+    /* 报告正文（Perplexity 式阅读密度）：行距 1.7 + 引用角标 accent 底色高亮 */
+    .prose { line-height: 1.7; white-space: pre-wrap; }
+    .cite {
+      color: var(--accent); background: var(--accent-soft); font-weight: 600;
+      border-radius: 3px; padding: 0 3px; font-size: 11px; cursor: default;
+    }
+    .process { margin-bottom: 12px; font-size: 12px; }
+    .process summary { color: var(--muted); cursor: pointer; }
+    .process .pmsg { display: flex; gap: 6px; padding: 3px 0; border-bottom: 1px dashed var(--border); }
+    .process .who { color: var(--accent); flex: none; min-width: 34px; }
+    .process .ptext { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .followup { flex: none; padding: 8px; border-top: 1px solid var(--border);
+      display: flex; gap: 8px; align-items: flex-end; }
+    .followup textarea { flex: 1; min-width: 0; }
+    .kbsearch { padding: 8px; border-bottom: 1px solid var(--border);
+      display: flex; gap: 6px; flex: none; }
+    .kbsearch input { flex: 1; min-width: 0; }
+    /* 信源列表（Perplexity 式行式布局）：序号 accent + 单行 URL 省略 */
+    .source { display: flex; align-items: baseline; gap: 6px; border-bottom: 1px solid var(--border); padding: 6px 2px; }
+    .source:last-child { border-bottom: none; }
+    .source .sidx { color: var(--accent); font-weight: 600; font-size: 10px; flex: none; }
+    .source .stext { flex: 1; min-width: 0; font-size: 11px; color: var(--fg); line-height: 1.5;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .kbitem { border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); padding: 7px 9px;
+      font-size: 11px; line-height: 1.5; }
+    .kbitem .score { color: var(--muted); font-size: 10px; margin-top: 3px; }
+    .kbnote { font-size: 11px; color: var(--muted); padding: 6px 2px; line-height: 1.5; }
+    .empty {
+      height: 100%; min-height: 90px; display: flex; flex-direction: column; gap: 6px;
+      align-items: center; justify-content: center; color: var(--muted);
+      border: 1px dashed var(--ph); border-radius: var(--radius); padding: 14px; text-align: center;
+    }
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px;
+      background: var(--fg); color: var(--bg); padding: 8px 16px; border-radius: var(--radius);
+      font-size: 12px; display: none; max-width: 80%;
+    }
+    .toast.error { background: var(--err); color: #fff; }
+      /* 面板桥失败 ≠ 真空数据：显式错误横幅（--ag-err 语义色）与「暂无 XX」空态区分 */
+    .bridge-err {
+      border: 1px solid var(--err, #dc2626); border-radius: var(--radius, 8px); padding: 16px;
+      display: flex; flex-direction: column; gap: 8px; align-items: center;
+      justify-content: center; text-align: center; margin: 8px;
+    }
+    .bridge-err-title { color: var(--err, #dc2626); font-weight: 600; }
+    .bridge-err-msg { font-size: 11px; color: var(--muted, #64748b); word-break: break-all; }
   </style>
 </head>
 <body>
-  <h1>调研台</h1>
-  <main class="layout cols" data-panel="research">
-    <aside aria-label="调研任务">
+  <header>
+    <h1>🔎 调研台</h1>
+    <span id="modeName"></span>
+    <span class="spacer"></span>
+    <span id="status"></span>
+    <button class="secondary" onclick="refreshAll()">刷新</button>
+  </header>
+  <div class="layout">
+    <aside class="drawer" aria-label="调研任务">
       <h2>调研任务</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">调研任务列表</span>
-          <span class="ph-note">数据源缺口：本模式任务过滤待任务上下文 mode 键落地（research 管线编排已有）。</span>
+      <div class="newform">
+        <textarea id="question" rows="3" placeholder="输入调研问题，例如：边缘部署下大模型量化方案的取舍……"></textarea>
+        <div class="formrow">
+          <select id="depth">
+            <option value="quick">快速档 · 单轮聚焦</option>
+            <option value="deep">深度档 · 多轮核验长报告</option>
+          </select>
+          <button onclick="startResearch()">发起调研</button>
         </div>
       </div>
+      <div class="list" id="sessions"></div>
     </aside>
-    <section aria-label="报告阅读器">
-      <h2>报告阅读器</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">调研报告</span>
-          <span class="ph-note">数据源缺口：报告物料 + 引用表（落地后支持引用角标跳转信源）。</span>
-        </div>
+    <main class="main" aria-label="报告阅读器">
+      <div class="main-head">
+        <span class="title" id="mainTitle">报告阅读器</span>
+        <span id="wordCount"></span>
+        <button class="secondary" onclick="reloadReport()">刷新报告</button>
       </div>
-    </section>
-    <aside aria-label="信源库">
+      <div class="main-body" id="mainBody"></div>
+      <div class="followup">
+        <textarea id="followupQ" rows="2" placeholder="针对当前报告追问……"></textarea>
+        <button onclick="sendFollowup()">送入对话框追问</button>
+      </div>
+    </main>
+    <aside class="drawer" aria-label="信源库">
       <h2>信源库</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">信源条目</span>
-          <span class="ph-note">数据源缺口：信源库物料（可复用 hindsight knowledge 基建，检索口径独立）。</span>
-        </div>
+      <div class="kbsearch">
+        <input id="kbQuery" placeholder="检索知识库……">
+        <button class="secondary" onclick="searchKB()">检索</button>
       </div>
+      <div class="list" id="sourceList"></div>
     </aside>
-  </main>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+  // 宿主下行桥：theme.sync 逐键落宿主主题 token（--ag-*，别名变量随即生效）；
+  // ctx.sync 落宿主会话上下文（window.__agentosCtx.sessionId = 对话框线程）。
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || !d.__agentos_webview) return;
+    if (d.method === 'theme.sync' && d.params && d.params.tokens) {
+      Object.keys(d.params.tokens).forEach(function (k) {
+        document.documentElement.style.setProperty(k, String(d.params.tokens[k]));
+      });
+    } else if (d.method === 'ctx.sync' && d.params) {
+      window.__agentosCtx = d.params;
+    }
+  });
+  // agentosFetch：经 window.agentos.postMessage（宿主代发 REST 带 token）+ Promise 化。
+  // webview iframe 是 opaque-origin 沙箱（CSP connect-src 'none'），直接 fetch 不可行。
+  function agentosFetch(path, params) {
+    return new Promise(function (resolve, reject) {
+      if (!window.agentos) { reject(new Error('window.agentos 桥不可用')); return; }
+      var id = window.agentos.postMessage(path, params);
+      function handler(e) {
+        var d = e.data;
+        if (!d || !d.__agentos_webview || d.id !== id) return;
+        window.removeEventListener('message', handler);
+        if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
+        else resolve(d.params);
+      }
+      window.addEventListener('message', handler);
+    });
+  }
+  // 宿主返回 axios res.data，内层 body 是 base64 JSON
+  function unwrap(res) {
+    var data = (res && res.data) ? res.data : res;
+    if (data && data.body) {
+      try { return JSON.parse(atob(data.body)); } catch (e) { return data; }
+    }
+    return data;
+  }
+
+  var state = {
+    modeName: '', sessions: [], activeSession: null, report: null,
+    errors: {},  // 各数据面桥失败信息；失败≠空数据，见 bridgeErrorBox
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(s) { $('status').textContent = s || ''; }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function toast(msg, isError) {
+    var t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast' + (isError ? ' error' : '');
+    t.style.display = 'block';
+    setTimeout(function () { t.style.display = 'none'; }, 3200);
+  }
+  // 面板桥失败 ≠ 真空数据：桥不可用/请求失败渲染显式错误横幅（--ag-err 语义色），
+  // 与 emptyBox 的诚实空态视觉区分；重试按钮走全量刷新。
+  function bridgeErrorBox(msg) {
+    return '<div class="bridge-err"><div class="bridge-err-title">面板桥不可用/加载失败</div>' +
+      '<div class="bridge-err-msg">' + escapeHtml(msg) + '</div>' +
+      '<button class="secondary" onclick="refreshAll()">重试</button></div>';
+  }
+  function emptyBox(label, note) {
+    return '<div class="empty"><div>' + escapeHtml(label) + '</div>' +
+      (note ? '<div style="font-size:11px;opacity:.75">' + escapeHtml(note) + '</div>' : '') + '</div>';
+  }
+
+  // ── 数据装载 ──
+  function loadBootstrap() {
+    return agentosFetch('/ext/mode_research/data/bootstrap').then(function (res) {
+      var d = unwrap(res) || {};
+      state.modeName = d.name || '';
+      $('modeName').textContent = state.modeName;
+    }).catch(function () {});
+  }
+  function loadSessions() {
+    return agentosFetch('/ext/mode_research/data/sessions').then(function (res) {
+      state.sessions = (unwrap(res) || {}).sessions || [];
+      delete state.errors.sessions;
+      renderSessions();
+    }).catch(function (e) {
+      state.errors.sessions = (e && e.message) || String(e);
+      renderSessions();
+    });
+  }
+  function loadReport() {
+    if (!state.activeSession) return Promise.resolve();
+    setStatus('加载报告...');
+    return agentosFetch('/ext/mode_research/data/report?pipeline_id=' + encodeURIComponent(state.activeSession))
+      .then(function (res) {
+        state.report = unwrap(res) || {};
+        delete state.errors.report;
+        renderReport();
+        renderSourceLinks(state.report.sources || []);
+        setStatus('');
+      })
+      .catch(function (e) {
+        state.errors.report = (e && e.message) || String(e);
+        renderReport();
+        setStatus('');
+      });
+  }
+  function loadProcess() {
+    if (!state.activeSession) return Promise.resolve();
+    return agentosFetch('/ext/mode_research/data/messages?pipeline_id=' + encodeURIComponent(state.activeSession))
+      .then(function (res) {
+        state.process = (unwrap(res) || {}).messages || [];
+        renderReport();
+      });
+  }
+
+  function refreshAll() {
+    setStatus('刷新中...');
+    Promise.all([loadBootstrap(), loadSessions()])
+      .then(function () { setStatus(''); })
+      .catch(function (e) { setStatus('加载失败'); toast(String(e), true); });
+  }
+
+  // ── 左栏：调研任务 ──
+  function renderSessions() {
+    var el = $('sessions');
+    if (state.errors.sessions) {
+      el.innerHTML = bridgeErrorBox(state.errors.sessions);
+      return;
+    }
+    if (!state.sessions.length) {
+      el.innerHTML = emptyBox('暂无调研任务', '在上方表单输入问题点「发起调研」');
+      return;
+    }
+    el.innerHTML = state.sessions.map(function (s) {
+      var dot = s.run_status === 'running' ? 'running' : (s.task_status === 'completed' ? 'done' : 'other');
+      return '<div class="item' + (state.activeSession === s.pipeline_id ? ' active' : '') + '" data-id="' + escapeHtml(s.pipeline_id) + '">' +
+        '<div class="row1"><span class="dot ' + dot + '"></span><div class="name">' +
+        escapeHtml(s.goal || s.pipeline_id) + '</div></div>' +
+        '<div class="sub">' + escapeHtml(s.task_status || s.run_status || '—') + ' · ' +
+        escapeHtml(String(s.message_count)) + ' 条消息 · ' + escapeHtml(s.pipeline_id.slice(0, 10)) + '</div></div>';
+    }).join('');
+    el.querySelectorAll('.item').forEach(function (node) {
+      node.addEventListener('click', function () {
+        state.activeSession = node.getAttribute('data-id');
+        renderSessions();
+        loadReport();
+        loadProcess();
+      });
+    });
+  }
+  function startResearch() {
+    var q = ($('question').value || '').trim();
+    if (!q) { toast('先输入调研问题', true); return; }
+    var depth = $('depth').value;
+    setStatus('派发中...');
+    agentosFetch('/ext/mode_research/data/actions/start', {
+      question: q, depth: depth,
+      session_id: (window.__agentosCtx || {}).sessionId,  // 未收到 ctx.sync 时为 undefined，序列化即省略
+    })
+      .then(function (res) {
+        var d = unwrap(res) || {};
+        setStatus('');
+        if (d.error) { toast('发起失败：' + d.error, true); return; }
+        $('question').value = '';
+        toast('已派发调研任务 ' + (d.task_id || '').slice(0, 10) + '，完成后在「调研任务」查看报告');
+        loadSessions();
+      })
+      .catch(function (e) { setStatus(''); toast('发起失败：' + e, true); });
+  }
+
+  // ── 中栏：报告阅读器 ──
+  function renderProcess() {
+    var msgs = state.process || [];
+    if (!msgs.length) return '';
+    var rows = msgs.slice(-8).map(function (m) {
+      return '<div class="pmsg"><span class="who">' + escapeHtml(m.role || '—') + '</span>' +
+        '<span class="ptext">' + escapeHtml(String(m.content || '').slice(0, 120)) + '</span></div>';
+    }).join('');
+    return '<details class="process"><summary>过程流（' + msgs.length + ' 条消息）</summary>' + rows + '</details>';
+  }
+  function renderReport() {
+    var el = $('mainBody');
+    var s = null;
+    state.sessions.forEach(function (x) { if (x.pipeline_id === state.activeSession) s = x; });
+    if (!state.activeSession) {
+      $('mainTitle').textContent = '报告阅读器';
+      $('wordCount').textContent = '';
+      el.innerHTML = emptyBox('从左侧「调研任务」选择一条，或发起新调研', '对标调研工作台：任务 / 报告 / 信源三面');
+      return;
+    }
+    $('mainTitle').textContent = '报告 · ' + ((s && s.goal) || state.activeSession);
+    var r = state.report || {};
+    $('wordCount').textContent = r.report ? ('字数 ' + r.word_count) : '';
+    if (state.errors.report) {
+      el.innerHTML = renderProcess() + bridgeErrorBox(state.errors.report);
+      return;
+    }
+    if (!r.report) {
+      el.innerHTML = renderProcess() + emptyBox('该会话还没有调研报告', '等待较长的 assistant 输出收敛后点「刷新报告」');
+      return;
+    }
+    // [n] 引用角标高亮（先整体转义再替换，角标内只有数字）
+    var body = escapeHtml(r.report).replace(/\[(\d{1,3})\]/g, function (m, n) {
+      return '<span class="cite" title="信源 ' + n + '">[' + n + ']</span>';
+    });
+    var cites = (r.citations_found || []).length;
+    el.innerHTML = renderProcess() +
+      '<div class="prose">' + body + '</div>' +
+      (cites ? '<div class="kbnote">正文引用角标 ' + cites + ' 处，对应信源见右栏「信源库」</div>' : '');
+  }
+  function reloadReport() {
+    if (!state.activeSession) { toast('先在左侧选择一个调研任务', true); return; }
+    loadReport();
+    loadProcess();
+  }
+  // ── 写动作：送入对话框追问（task_submit 真派发，回答流进对话框线程）──
+  function sendFollowup() {
+    if (!state.activeSession) { toast('先在左侧选择一个调研任务', true); return; }
+    var q = ($('followupQ').value || '').trim();
+    if (!q) { toast('先输入追问内容', true); return; }
+    setStatus('派发中...');
+    // 行级操作锚定来源管道：只发 pipeline_id，会话归属由后端按行 thread_id 解析
+    agentosFetch('/ext/mode_research/data/actions/followup', {
+      pipeline_id: state.activeSession, question: q,
+    }).then(function (res) {
+      var d = unwrap(res) || {};
+      setStatus('');
+      if (d.error) { toast('追问送入失败：' + d.error, true); return; }
+      $('followupQ').value = '';
+      toast('已送入对话框追问 ' + (d.task_id || '').slice(0, 10) + '，回答将流进对话框线程');
+    }).catch(function (e) { setStatus(''); toast('追问送入失败：' + e, true); });
+  }
+
+  // ── 右栏：信源库 ──
+  function renderSourceLinks(links) {
+    var el = $('sourceList');
+    if (!state.kbHtml) state.kbHtml = '';
+    if (!links || !links.length) {
+      el.innerHTML = emptyBox('暂无信源', '报告正文未含引用来源（URL）') + state.kbHtml;
+      return;
+    }
+    var html = links.map(function (linkText, i) {
+      return '<div class="source"><span class="sidx">[' + (i + 1) + ']</span>' +
+        '<span class="stext">' + escapeHtml(linkText) + '</span></div>';
+    }).join('');
+    el.innerHTML = html + state.kbHtml;
+  }
+  function searchKB() {
+    var q = ($('kbQuery').value || '').trim();
+    if (!q) { toast('先输入知识库检索词', true); return; }
+    var path = '/ext/mode_research/data/sources?q=' + encodeURIComponent(q);
+    if (state.activeSession) path += '&pipeline_id=' + encodeURIComponent(state.activeSession);
+    setStatus('检索中...');
+    agentosFetch(path).then(function (res) {
+      var d = unwrap(res) || {};
+      setStatus('');
+      if (d.sources) renderSourceLinks(d.sources);
+      var el = $('sourceList');
+      if (d.kb_available === false) {
+        state.kbHtml = '<div class="kbnote">' + escapeHtml(d.note || '知识库检索不可用') + '</div>';
+      } else {
+        var items = d.kb_results || [];
+        state.kbHtml = items.length
+          ? '<div class="kbnote">知识库命中 ' + items.length + ' 条</div>' + items.map(function (k) {
+              return '<div class="kbitem">' + escapeHtml(k.content) +
+                '<div class="score">相关度 ' + Number(k.score || 0).toFixed(3) + '</div></div>';
+            }).join('')
+          : '<div class="kbnote">知识库无命中</div>';
+      }
+      el.innerHTML = el.innerHTML + state.kbHtml;
+    }).catch(function (e) { setStatus(''); toast('检索失败：' + e, true); });
+  }
+
+  // ── 入口 ──
+  renderReport();
+  renderSessions();
+  renderSourceLinks([]);
+  refreshAll();
+  </script>
 </body>
 </html>

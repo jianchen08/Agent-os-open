@@ -1,27 +1,38 @@
 /**
  * 登录页面
  *
- * 提供用户登录功能，包括：
- * - 用户名/密码表单
- * - 表单验证
- * - 登录状态处理
- * - 错误提示
+ * 用户名/密码表单 + 校验 + 登录状态处理。壳/字段/校验状态机为
+ * authForm 共享件，此处只声明字段与登录语义。
  */
 
-import { useState, useEffect } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
-import { Button } from '../../components/ui/button'
-import { Input } from '../../components/ui/input'
+import { useNavigate } from 'react-router-dom'
+import { AuthField, AuthPageShell } from './authForm'
+import { useAuthForm, useAuthPageLifecycle, type AuthFieldDefinition } from './authFormModel'
 import { ROUTES } from '../../constants/routes'
 import { useAuthStore } from '../../stores/authStore'
+import type { FormEvent } from 'react'
 
-/**
- * 表单错误类型
- */
-interface FormErrors {
-  username?: string
-  password?: string
-}
+/** 登录字段与校验规则 */
+const FIELDS: AuthFieldDefinition[] = [
+  {
+    id: 'username',
+    label: '用户名',
+    type: 'text',
+    placeholder: '请输入用户名',
+    validate: (value) => (!value.trim() ? '用户名不能为空' : undefined),
+    inputTestId: 'login-username-input',
+    errorTestId: 'username-error',
+  },
+  {
+    id: 'password',
+    label: '密码',
+    type: 'password',
+    placeholder: '请输入密码',
+    validate: (value) => (!value ? '密码不能为空' : undefined),
+    inputTestId: 'login-password-input',
+    errorTestId: 'password-error',
+  },
+]
 
 /**
  * 登录页面组件
@@ -29,80 +40,21 @@ interface FormErrors {
 export function LoginPage() {
   const navigate = useNavigate()
   const { login, isLoading, error, isAuthenticated, clearError } = useAuthStore()
-
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [formErrors, setFormErrors] = useState<FormErrors>({})
-
-  // 已认证用户自动跳转
-  useEffect(() => {
-    if (isAuthenticated) {
-      navigate(ROUTES.HOME)
-    }
-  }, [isAuthenticated, navigate])
-
-  useEffect(() => {
-    return () => {
-      clearError()
-    }
-  }, [clearError])
-
-  /**
-   * 验证单个字段
-   */
-  const validateField = (field: keyof FormErrors): string | undefined => {
-    switch (field) {
-      case 'username':
-        return !username.trim() ? '用户名不能为空' : undefined
-      case 'password':
-        return !password ? '密码不能为空' : undefined
-      default:
-        return undefined
-    }
-  }
-
-  /**
-   * 处理字段失焦验证
-   */
-  const handleBlur = (field: keyof FormErrors) => {
-    const error = validateField(field)
-    setFormErrors((prev) => {
-      const next = { ...prev }
-      if (error) {
-        next[field] = error
-      } else {
-        delete next[field]
-      }
-      return next
-    })
-  }
-
-  /**
-   * 验证表单
-   */
-  const validateForm = (): boolean => {
-    const errors: FormErrors = {}
-    const usernameError = validateField('username')
-    if (usernameError) errors.username = usernameError
-    const passwordError = validateField('password')
-    if (passwordError) errors.password = passwordError
-
-    setFormErrors(errors)
-    return Object.keys(errors).length === 0
-  }
+  const { values, setValue, errors, handleBlur, validateAll } = useAuthForm(FIELDS)
+  useAuthPageLifecycle(isAuthenticated, clearError)
 
   /**
    * 处理登录提交
    */
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
 
-    if (!validateForm()) {
+    if (!validateAll()) {
       return
     }
 
     try {
-      await login(username.trim(), password)
+      await login(values.username.trim(), values.password)
       navigate(ROUTES.HOME)
     } catch {
       // 错误已在 store 中处理
@@ -110,111 +62,36 @@ export function LoginPage() {
   }
 
   return (
-    <div
-      className="bg-background text-foreground flex min-h-screen items-center justify-center px-4 py-12"
-      data-testid="login-page"
+    <AuthPageShell
+      pageTestId="login-page"
+      title="登录"
+      subtitle="欢迎回来，请登录您的账号"
+      formLabel="登录表单"
+      formTestId="login-form"
+      error={error}
+      errorTestId="login-error"
+      isLoading={isLoading}
+      submitText="登录"
+      submitLoadingText="登录中..."
+      submitTestId="login-submit-button"
+      switchPrompt="没有账号？"
+      switchLinkText="注册"
+      switchLinkTo={ROUTES.REGISTER}
+      switchLinkTestId="register-link"
+      onSubmit={handleSubmit}
     >
-      <div className="w-full max-w-md space-y-6">
-        {/* 标题 */}
-        <div className="space-y-2 text-center">
-          <h1 className="text-foreground text-3xl font-bold">登录</h1>
-          <p className="text-muted-foreground">欢迎回来，请登录您的账号</p>
-        </div>
-
-        {/* 登录表单 */}
-        <form onSubmit={handleSubmit} className="space-y-5" data-testid="login-form" role="form" aria-label="登录表单">
-          {/* 全局错误提示 */}
-          {error && (
-            <div
-              className="bg-destructive/10 text-destructive rounded-lg p-3 text-sm"
-              data-testid="login-error"
-            >
-              {error}
-            </div>
-          )}
-
-          {/* 用户名输入 */}
-          <div className="space-y-2">
-            <label htmlFor="username" className="text-foreground block text-sm font-medium">
-              用户名 <span className="text-destructive">*</span>
-            </label>
-            <Input
-              id="username"
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              onBlur={() => handleBlur('username')}
-              placeholder="请输入用户名"
-              disabled={isLoading}
-              aria-invalid={!!formErrors.username}
-              aria-describedby={formErrors.username ? 'username-error' : undefined}
-              data-testid="login-username-input"
-              className={`h-10 min-h-[40px] ${formErrors.username ? 'border-destructive' : ''}`}
-            />
-            {formErrors.username && (
-              <p
-                id="username-error"
-                className="text-destructive min-h-[20px] text-sm"
-                data-testid="username-error"
-              >
-                {formErrors.username}
-              </p>
-            )}
-          </div>
-
-          {/* 密码输入 */}
-          <div className="space-y-2">
-            <label htmlFor="password" className="text-foreground block text-sm font-medium">
-              密码 <span className="text-destructive">*</span>
-            </label>
-            <Input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              onBlur={() => handleBlur('password')}
-              placeholder="请输入密码"
-              disabled={isLoading}
-              aria-invalid={!!formErrors.password}
-              aria-describedby={formErrors.password ? 'password-error' : undefined}
-              data-testid="login-password-input"
-              className={`h-10 min-h-[40px] ${formErrors.password ? 'border-destructive' : ''}`}
-            />
-            {formErrors.password && (
-              <p
-                id="password-error"
-                className="text-destructive min-h-[20px] text-sm"
-                data-testid="password-error"
-              >
-                {formErrors.password}
-              </p>
-            )}
-          </div>
-
-          {/* 登录按钮 */}
-          <Button
-            type="submit"
-            className="mt-2 h-10 w-full"
-            disabled={isLoading}
-            data-testid="login-submit-button"
-          >
-            {isLoading ? '登录中...' : '登录'}
-          </Button>
-        </form>
-
-        {/* 注册链接 */}
-        <p className="text-muted-foreground pt-2 text-center text-sm">
-          没有账号？{' '}
-          <Link
-            to={ROUTES.REGISTER}
-            className="text-primary font-medium hover:underline"
-            data-testid="register-link"
-          >
-            注册
-          </Link>
-        </p>
-      </div>
-    </div>
+      {FIELDS.map((field) => (
+        <AuthField
+          key={field.id}
+          definition={field}
+          value={values[field.id] ?? ''}
+          error={errors[field.id]}
+          disabled={isLoading}
+          onChange={(value) => setValue(field.id, value)}
+          onBlur={() => handleBlur(field)}
+        />
+      ))}
+    </AuthPageShell>
   )
 }
 

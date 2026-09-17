@@ -64,3 +64,19 @@
 # 剩余真零覆盖 3 文件 58 行 = native-sdk-test-plugin/lib.rs（测试夹具）、
 # plugin-loader/error.rs、session/lib.rs。
 rust_line_coverage=95.0
+#
+# 收官批实测（2026-09-16，dev/0.2@96ec0abdd+bin scope 对齐）：llvm-cov 独占窗口
+# 0 failed（--skip 三例既有负载敏感 flake：reverify_host_evict…/
+# hot_reload_compiles…/kill_sidecar_if_any…——第三例为本批新增登记，单跑绿、
+# 插桩全量偶红，红则 invoker 全 crate 归零度量无效）。主进程 bin
+# crates/api/src/bin/agentos-kernel.rs 按 run_gates 既定 scope（e2e 车道覆盖）
+# 经 --ignore-filename-regex 摘出后实测 113987/119658 = **95.26%**；含 bin 的
+# 旧口径 94.29%（bin 1279 缺行全是 main()/进程启动面，单测结构性不可达）。
+#
+# 补测批（2026-09-17，dev/0.2@5771023f5）：真零覆盖小文件清偿——plugin-loader/
+# error.rs 全变体 Display+From<PluginError> 单测、session/lib.rs EventSink 默认
+# shutdown no-op 单测（7 行）。**登记：native-sdk-test-plugin/lib.rs 51 行结构性
+# 不可达**——该夹具由 native_serialization_test 在测试期以独立 `cargo build`
+# 编译后 dlopen，产物无 llvm-cov 插桩运行时，执行不可度量（非测试缺口）。
+# 全量 llvm-cov 复测待独占窗口（api crate 三例既有负载敏感 flake 仍需 --skip
+# 口径）；bin 摘出口径与基线 95.0 不变。

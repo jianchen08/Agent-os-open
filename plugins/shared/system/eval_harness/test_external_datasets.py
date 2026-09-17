@@ -74,8 +74,13 @@ def test_seed_selection_is_deterministic():
 # ── 任务改造（oracle=测试车道） ──────────────────────────────────────────
 def test_adapt_seed_case_shape_and_oracle():
     row = _swe_row("django__django-16377", issue="Resolve this issue.", n_f2p=2)
-    case = ext.adapt_seed_case(row, materials_root="/mat")
+    case = ext.adapt_seed_case(row, materials_root="/mat", mode="coding")
     assert case["id"] == "swev_django__django-16377"
+    # 评测单元=任务链：target 锚定模式链 L2 编排入口（运行时注册表命名
+    # 空间 id，裸 config_id 不被 task_submit 解析——实跑 400 实证）
+    assert case["target"] == "mode_coding/programming_orchestrator_agent_v2"
+    assert ext.chain_target("research") == "general_agent"  # 无注册编排，落回通用执行者
+    assert ext.chain_target("general") == "general_agent"
     assert case["anchor"] == "repo" and case["workspace_mode"] == "worktree"
     assert case["workspace"] == "/mat/external/swe_repos/django__django-16377"
     assert "Resolve this issue." in case["messages"][0]  # issue 原文进题面
@@ -88,6 +93,28 @@ def test_adapt_seed_case_shape_and_oracle():
     assert "pip install -q pytest" in cmd  # 判定环境缺 pytest 时自装
     assert case["external_bundle"]["fail_to_pass"] == ["t0", "t1"]
     assert case["external_bundle"]["base_commit"] == "abc1234"
+
+
+def test_oracle_resets_test_files_before_applying_patch():
+    """好 agent 会自己写同名测试 → patch 会冲突；oracle 先把 patch 触及的
+    测试文件重置到基线再应用（SWE-bench 官方口径：干净测试文件）。"""
+    row = _swe_row("django__django-16377", n_f2p=1)
+    row["test_patch"] = (
+        "diff --git a/tests/test_x.py b/tests/test_x.py\n"
+        "--- a/tests/test_x.py\n+++ b/tests/test_x.py\n@@ -1 +1,2 @@\n+a\n"
+        "diff --git a/tests/test_y.py b/tests/test_y.py\n"
+        "--- a/tests/test_y.py\n+++ b/tests/test_y.py\n@@ -1 +1,2 @@\n+b\n")
+    cmd = ext._oracle_command(row, "/mat/bundle", ["tests/test_x.py::t"])
+    assert cmd.startswith("git checkout -- tests/test_x.py tests/test_y.py\n")
+    assert "git apply <<'SWE_TEST_PATCH'" in cmd
+    assert "python -m pytest tests/test_x.py::t -q" in cmd
+
+
+def test_patch_test_files_extracts_b_side_paths_deduped():
+    patch = ("diff --git a/keep.py b/keep.py\n--- a/keep.py\n"
+             "diff --git a/dup.py b/dup.py\n--- a/dup.py\n"
+             "diff --git a/dup.py b/dup.py\n--- a/dup.py\n")
+    assert ext._patch_test_files(patch) == ["keep.py", "dup.py"]
 
 
 def test_oracle_command_falls_back_to_bundle_path_for_oversized_patch():
@@ -143,3 +170,25 @@ def test_trace_pool_record_tolerates_missing_fields():
     assert rec["steps"] == 0 and rec["tool_names"] == []
     assert rec["license_profile"]["source_repo"] == "unverified"
     assert rec["first_user_head"] == ""
+
+
+# ── oracle 计数容错（非列表/坏 JSON → 0） ────────────────────────────────
+def test_oracle_counts_survive_bad_payloads():
+    """FAIL_TO_PASS / PASS_TO_PASS 载荷损坏 → 计 0 不抛（fail-closed 口径）。"""
+    bad_payloads = [
+        "not-json{",            # 坏 JSON → ValueError → 0
+        json.dumps("a-string"),  # 合法 JSON 但非列表 → 0
+        json.dumps({"k": 1}),    # 字典同理 → 0
+        None,                    # 键缺失（raw=None 非字符串）→ 0
+    ]
+    for raw in bad_payloads:
+        row = _swe_row()
+        row["FAIL_TO_PASS"] = raw
+        row["PASS_TO_PASS"] = raw
+        assert ext._fail_to_pass_count(row) == 0, raw
+        assert ext._pass_to_pass_count(row) == 0, raw
+
+    # 性质对照：合法列表计数 = 元素数（防"恒 0"假绿）
+    row = _swe_row()
+    row["FAIL_TO_PASS"] = json.dumps(["t0", "t1", "t2"])
+    assert ext._fail_to_pass_count(row) == 3

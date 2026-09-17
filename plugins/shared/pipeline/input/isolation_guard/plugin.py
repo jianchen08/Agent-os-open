@@ -218,8 +218,14 @@ class IsolationGuard(IInputPlugin):
             iso = get_config_center().get("plugins/isolation/isolation_config.yaml") or {}
             cfg = (iso.get("providers") or {}).get("wsl_native")
             return cfg if isinstance(cfg, dict) else {}
-        except Exception:
-            pass
+        except Exception as exc:
+            # ConfigCenter 在 sidecar 不可达是常态路径（预期降级），但降级须
+            # 可观测：留 warning 记录回退动作与原因（§1.4/§3.3）。
+            logger.warning(
+                "[%s] ConfigCenter 读取 wsl_native 配置失败（回退直读仓库 yaml）: %s",
+                self.name,
+                exc,
+            )
         # ConfigCenter 在 sidecar 不可达——直读仓库 yaml 兜底（与 manager
         # _load_provider_config 回退同源同文件）
         try:
@@ -232,7 +238,14 @@ class IsolationGuard(IInputPlugin):
             providers = data.get("providers") or {}
             cfg = providers.get("wsl_native") if isinstance(providers, dict) else None
             return cfg if isinstance(cfg, dict) else {}
-        except Exception:
+        except Exception as exc:
+            # 双层兜底全失败 → wsl_native 视为未启用（回落 docker 后端）；
+            # 裸返回 {} 会令"当前用的哪个后端"事后不可观测，留 warning 佐证。
+            logger.warning(
+                "[%s] 直读 isolation_config.yaml 失败（wsl_native 视为未启用，回落 docker 探测）: %s",
+                self.name,
+                exc,
+            )
             return {}
 
     def _probe_backend(self) -> None:

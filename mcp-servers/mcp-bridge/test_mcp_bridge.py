@@ -156,6 +156,30 @@ class TestPolicy:
         assert is_private_host("8.8.8.8") is False
         assert is_private_host("example.com") is False
 
+    def test_is_private_host_ipv6_table(self):
+        """IPv6 字面量私网判定（S1，2026-09-16 审查）：环回/链路本地/ULA/
+        IPv4 映射拦截，公网 v6 与域名不受影响。"""
+        _, _, is_private_host = _policy_imports()
+        assert is_private_host("::1"), "IPv6 环回"
+        assert is_private_host("fe80::1"), "链路本地"
+        assert is_private_host("fd00::dead:beef"), "ULA fc00::/7"
+        assert is_private_host("fc00::1"), "ULA fc00::/7"
+        assert is_private_host("::ffff:127.0.0.1"), "IPv4 映射环回"
+        assert is_private_host("::ffff:192.168.1.1"), "IPv4 映射私网"
+        assert is_private_host("::"), "未指定地址"
+        assert is_private_host("::"), "未指定地址"
+        assert is_private_host("2001:db8::1"), "IANA 文档前缀属特殊注册表（is_private）"
+        assert is_private_host("2607:f8b0:4005:80a::200e") is False, "公网 IPv6"
+
+    def test_domain_policy_blocks_ipv6_loopback_url(self):
+        _, PolicyError, _ = _policy_imports()
+        from policy import check_domain_policy
+
+        p = {"url_arg_names": ["url"]}
+        for url in ("http://[::1]:8080/", "http://[fe80::1]/", "http://[fd12::5]/"):
+            with pytest.raises(PolicyError):
+                check_domain_policy(p, "browser_navigate", {"url": url})
+
 
 # ── 审计 ─────────────────────────────────────────────────────
 

@@ -596,8 +596,17 @@ class TaskEvaluateTool(BuiltinTool):
 
         if not metric_ids:
             logger.warning(
-                "[TaskEvaluate] 任务 %s 未声明任何评估指标，跳过评估 | 直接标记完成",
+                "[TaskEvaluate] 任务 %s 未声明任何评估指标，未经评估直接完成（结论带无验收标注）",
                 task.id,
+            )
+            # 诚实标注（BUG-33）：无验收指标 = 零验证放行，执行者自我报告不得
+            # 以裸文本充当评估结论（writer 谎报落盘路径曾经此面直达父会话回报）。
+            # 标注前缀随 task.eval_summary 落账，工具返回消息同步如实。
+            submitted = str(inputs.get("summary") or "").strip()
+            annotated_summary = (
+                f"【无验收指标，未经评估直接完成】{submitted}"
+                if submitted
+                else "未声明评估指标，未经评估直接完成"
             )
             return await self._complete_task(
                 task_service,
@@ -608,11 +617,12 @@ class TaskEvaluateTool(BuiltinTool):
                     {
                         "task_id": task.id,
                         "overall_passed": True,
-                        "summary": "未声明评估指标，自动通过",
+                        "summary": "未声明评估指标，未经评估直接完成",
                         "results": [],
                     },
                 )(),
-                str(inputs.get("summary") or "").strip(),
+                annotated_summary,
+                completion_message="任务未声明验收指标，未经评估直接完成",
             )
 
         # 跳过已通过的指标，只评估未通过的
@@ -859,7 +869,12 @@ class TaskEvaluateTool(BuiltinTool):
         )
 
     async def _complete_task(
-        self, task_service: Any, task: Any, eval_result: Any, submitted_summary: str = ""
+        self,
+        task_service: Any,
+        task: Any,
+        eval_result: Any,
+        submitted_summary: str = "",
+        completion_message: str = "",
     ) -> ToolExecutionResult:
         """评估通过，完成任务。
 
@@ -875,6 +890,8 @@ class TaskEvaluateTool(BuiltinTool):
             eval_result: EvaluationResult 实例
             submitted_summary: LLM 经 task_evaluate 入参提交的任务完成总结
                 （0.1 task_notifier 评估结论数据源；优先于系统生成的逐指标说明）
+            completion_message: 完成返回消息（空 = 默认"评估通过，任务已完成"；
+                无验收指标完成路径传诚实标注文案，不得谎称评估通过）
 
         Returns:
             工具执行结果
@@ -1041,7 +1058,7 @@ class TaskEvaluateTool(BuiltinTool):
             metadata={
                 "action": "auto_complete",
                 "result": "completed",
-                "message": "评估通过，任务已完成",
+                "message": completion_message or "评估通过，任务已完成",
             },
         )
 

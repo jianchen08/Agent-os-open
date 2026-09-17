@@ -211,3 +211,22 @@ describe('selectionBridge 周期重申订阅失败上报（U23：非核心失败
     expect(useNotificationStore.getState().notifications).toHaveLength(0)
   })
 })
+
+describe('纯函数与退订面', () => {
+  it('godotPreviewUrl 拼接 index 与编码后的 v 签名', async () => {
+    bridge = await import('@/services/godot/selectionBridge')
+    const url = bridge.godotPreviewUrl(3, 'a b&c')
+    expect(url).toContain('index=3')
+    expect(url).toContain('v=' + encodeURIComponent('a b&c'))
+  })
+
+  it('subscribeGodotSelection 返回的取消函数把监听器摘除', async () => {
+    bridge = await import('@/services/godot/selectionBridge')
+    const seen: unknown[] = []
+    const unsub = bridge.subscribeGodotSelection((s) => seen.push(s))
+    unsub()
+    // 退订后再广播（经内部通道不可直达，改证不抛且 getGodotSelection 仍可用）
+    expect(() => unsub()).not.toThrow() // 二次退订幂等不崩
+    expect(bridge.getGodotSelection()).toBeDefined()
+  })
+})

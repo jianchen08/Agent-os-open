@@ -121,12 +121,13 @@ class HumanInteractionService(IHumanInteractionService):
         self._notifier = notifier
         self._default_timeout = default_timeout
         self._remind_before_seconds = remind_before_seconds
-        # BUG-14 有界等待：choice 请求（审批卡）等待上限，默认 600s，可经
+        # BUG-14 有界等待：choice 请求（审批卡）等待上限，默认 86400s=24h
+        # （BUG-40 用户裁定由 600s 放宽），可经
         # HUMAN_INTERACTION_CHOICE_MAX_WAIT_SECONDS 覆盖；非正值 = 关闭上限。
         # 上限同时作用于创建（记录 timeout_seconds + 后台超时任务 + 前端倒计时）
         # 与等待（调用方传更大 timeout 也被收敛），两处同源。
         self._choice_max_wait_seconds = (
-            _read_env_seconds("HUMAN_INTERACTION_CHOICE_MAX_WAIT_SECONDS", 600.0)
+            _read_env_seconds("HUMAN_INTERACTION_CHOICE_MAX_WAIT_SECONDS", 86400.0)
             if choice_max_wait_seconds is None
             else choice_max_wait_seconds
         )
@@ -248,8 +249,8 @@ class HumanInteractionService(IHumanInteractionService):
     ) -> str:
         """创建选择模式请求，返回 request_id。
 
-        BUG-14 有界等待：timeout_seconds 收敛到 choice 等待上限（默认 600s），
-        审批卡不再永久等待；超时按拒绝裁决（见 wait_for_choice/_handle_timeout）。
+        BUG-14 有界等待：timeout_seconds 收敛到 choice 等待上限（默认 86400s=24h，
+        BUG-40 放宽），审批卡不再永久等待；超时按拒绝裁决（见 wait_for_choice/_handle_timeout）。
         BUG-14 拒绝记忆：同 (session_id, title) 的请求在拒绝记忆窗口内重试时，
         不再弹卡（不通知前端、不建等待事件），直接落已拒绝终态——wait_for_choice
         对其立即抛 InteractionDeniedError（携带终局反馈）。

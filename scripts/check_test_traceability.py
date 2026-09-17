@@ -49,7 +49,17 @@ EXCLUDE_DIRS = {
     ".ai_workspaces",
     ".zcode",
     ".zcode_e2e",
+    ".covtmp",
+    ".zctmp",
+    ".packtest",
+    ".bug28c3",
 }
+
+# 前缀型排除：仓内 scratch worktree（.wt-fix-* / .wt-fuse-* 等 git worktree
+# 与 coverage/gate 临时目录）是整树副本，非产品测试面——CI 干净检出无此目录，
+# 扫进会把未标记数虚高到基线之外（2026-09-17 实证 699 vs 289）。
+# release/ 同理：electron 打包产物整树副本（含 plugins 快照），非源码测试面。
+EXCLUDE_DIR_PREFIXES = (".wt-", "release")
 
 # 标记解析（兼容 @feature: / @feature 、| 分隔、注释包裹等格式）
 FEATURE_RE = re.compile(r"@feature:?\s+(FP-[^\s|]+)")
@@ -103,13 +113,20 @@ def find_test_files() -> list[Path]:
     files: list[Path] = []
 
     def excluded(p: Path) -> bool:
-        return any(part in EXCLUDE_DIRS for part in p.parts)
+        return any(
+            part in EXCLUDE_DIRS or part.startswith(EXCLUDE_DIR_PREFIXES)
+            for part in p.parts
+        )
 
     def iter_pruned(root: Path):
         """带剪枝的递归文件枚举——`rglob` 会钻进 dsh_adapter 的递归 node_modules
         无限卡死；此处遍历时即剪枝 EXCLUDE_DIRS。"""
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in EXCLUDE_DIRS and not d.startswith(EXCLUDE_DIR_PREFIXES)
+            ]
             for fn in filenames:
                 yield Path(dirpath) / fn
 

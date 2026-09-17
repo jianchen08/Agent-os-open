@@ -119,6 +119,10 @@ _PROJECT_OUTPUT_SCHEMA: dict[str, Any] = {
         "title": {"type": "string", "description": "项目标题"},
         "path": {"type": "string", "description": "项目文件夹宿主绝对路径"},
         "status": {"type": "string", "description": "active | paused"},
+        "workflow_state": {
+            "type": "string",
+            "description": "方案工作流状态 plan | running | done（ADR 2026-09-17）",
+        },
         "created": {"type": "boolean", "description": "true=新建登记；false=复用既有"},
         "session_id": {"type": "string", "description": "创建时关联的会话（可选）"},
         "project_type": {"type": "string", "description": "路由到的项目类型（未路由为空串）"},
@@ -384,6 +388,7 @@ class ProjectCreateTool(BuiltinTool):
                 "title": project.title,
                 "path": project.path,
                 "status": project.status,
+                "workflow_state": project.workflow_state,
                 "created": created,
                 "session_id": project.session_id or "",
                 "project_type": routed[0] if routed else "",

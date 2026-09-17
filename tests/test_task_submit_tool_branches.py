@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -366,6 +367,78 @@ def test_get_task_service_none_is_not_cached(tool_module, monkeypatch):
 )
 def test_parse_goal_input_string_forms(tool_module, raw, expected):
     assert tool_module.TaskSubmitTool._parse_goal_input({"goal": raw}) == expected
+
+
+# ── 平铺 description 别名归一（BUG-31：模型用 description 传描述被静默丢弃）──
+
+
+def test_parse_goal_input_flat_description_alias(tool_module, caplog):
+    """goal_description 缺席时平铺 description 作为显式别名映射进 goal.description。"""
+    with caplog.at_level(logging.INFO):
+        goal = tool_module.TaskSubmitTool._parse_goal_input(
+            {"goal_title": "t", "description": "别名描述"}
+        )
+    assert goal == {"title": "t", "description": "别名描述"}
+    assert any("description 别名" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "goal_description,expected_desc",
+    [
+        # 非空白 goal_description 优先于别名
+        ("正式描述", "正式描述"),
+        # 空白 goal_description 无语义内容，视同缺席由别名兜住
+        ("  ", "别名描述"),
+    ],
+    ids=["explicit_wins", "blank_falls_to_alias"],
+)
+def test_parse_goal_input_goal_description_priority(tool_module, goal_description, expected_desc):
+    """description 同传时 goal_description 的优先级行为。"""
+    goal = tool_module.TaskSubmitTool._parse_goal_input(
+        {
+            "goal_title": "t",
+            "goal_description": goal_description,
+            "description": "别名描述",
+        }
+    )
+    assert goal == {"title": "t", "description": expected_desc}
+
+
+def test_parse_goal_input_no_description_either_form_keeps_empty(tool_module):
+    """两种名字都无描述 → goal.description 为空串（由闸门拒绝，不在解析层编造）。"""
+    goal = tool_module.TaskSubmitTool._parse_goal_input({"goal_title": "t"})
+    assert goal == {"title": "t", "description": ""}
+
+
+@pytest.mark.asyncio
+async def test_flat_description_subtask_births_with_alias_content(tool_module):
+    """execute 级行为回归：BUG-31 现场 payload 形态（平铺 description）→ 任务出生且描述承载内容。"""
+    tool, captured = make_tool(tool_module)
+    inputs = base_inputs(parent_agent_level=1)
+    inputs.pop("goal_description")
+    inputs["description"] = "写一篇 600 字左右的微型小说，主题「雨夜站台」"
+    result = await tool.execute(inputs)
+    assert result.success, result.error
+    assert (
+        captured["params"]["state"]["task.description"]
+        == "写一篇 600 字左右的微型小说，主题「雨夜站台」"
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_description_error_lists_received_keys(tool_module):
+    """两种名字都无描述 → 仍拒绝，报错带实际收到的参数键（不含注入键）便于模型自纠。"""
+    tool, _ = make_tool(tool_module)
+    inputs = base_inputs(parent_agent_level=1)
+    inputs.pop("goal_description")
+    result = await tool.execute(inputs)
+    assert not result.success
+    assert result.error_code == "MISSING_DESCRIPTION"
+    assert "goal_description" in result.error
+    assert "goal_title" in result.error
+    # 注入键是系统行为不是模型入参，不出现在给模型的纠错信息里
+    assert "user_id" not in result.error
+    assert "parent_agent_level" not in result.error
 
 
 @pytest.mark.parametrize("bad", ["file_check", ["file_check"], 42])
@@ -1362,3 +1435,122 @@ def test_build_metadata_marks_pipe_inherit_bandwidth(tool_module, mode):
     )
     assert md["inherit"] == {"from": "src1", "mode": mode}
     assert md["inherit_pipe_from"] == "src1"
+
+
+# ── 4.4 plan 态派发白名单闸（ADR 2026-09-17 决策 2）──────────────
+
+
+class _FakeProject:
+    def __init__(self, workflow_state: str = "plan"):
+        self.id = "proj00000009"
+        self.workflow_state = workflow_state
+        self.path = "D:/x/p"
+
+
+@pytest.mark.asyncio
+async def test_plan_state_gate_rejects_non_whitelisted_executor(
+    tool_module, monkeypatch, tmp_path
+):
+    """plan 态 + 白名单外执行者 → PROJECT_PLAN_LOCKED（状态闸机械化拦截）。"""
+    import project_registry as pr
+
+    folder = tmp_path / "plan_gate_proj"
+    folder.mkdir()
+    monkeypatch.setattr(pr, "load_project_paths", lambda: {"proj00000009": str(folder)})
+
+    class _FakeRegistry:
+        def get(self, pid):
+            return _FakeProject("plan") if pid == "proj00000009" else None
+
+    monkeypatch.setattr(pr, "ProjectRegistry", _FakeRegistry)
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    tool, _ = make_tool(tool_module)
+    result = await tool.execute(
+        base_inputs(parent_agent_level=1, project_id="proj00000009")
+    )
+    assert not result.success
+    assert result.error_code == "PROJECT_PLAN_LOCKED"
+    assert "plan→running" in result.error
+
+
+@pytest.mark.asyncio
+async def test_plan_state_gate_allows_research_dispatch(tool_module, monkeypatch, tmp_path):
+    """plan 态 + 白名单执行者（research_agent）→ 闸放行，链路继续走完。"""
+    import project_registry as pr
+
+    folder = tmp_path / "plan_gate_research"
+    folder.mkdir()
+    monkeypatch.setattr(pr, "load_project_paths", lambda: {"proj00000009": str(folder)})
+
+    class _FakeRegistry:
+        def get(self, pid):
+            return _FakeProject("plan") if pid == "proj00000009" else None
+
+    monkeypatch.setattr(pr, "ProjectRegistry", _FakeRegistry)
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    tool, captured = make_tool(tool_module)
+    result = await tool.execute(
+        base_inputs(
+            parent_agent_level=1,
+            project_id="proj00000009",
+            target_id="research_agent",
+        )
+    )
+    assert result.success, result.error
+    assert "dispatch" in captured
+
+
+@pytest.mark.asyncio
+async def test_plan_state_gate_inactive_on_running_project(tool_module, monkeypatch, tmp_path):
+    """running 态项目 → 闸不生效（执行类派发照常）。"""
+    import project_registry as pr
+
+    folder = tmp_path / "plan_gate_running"
+    folder.mkdir()
+    monkeypatch.setattr(pr, "load_project_paths", lambda: {"proj00000009": str(folder)})
+
+    class _FakeRegistry:
+        def get(self, pid):
+            return _FakeProject("running") if pid == "proj00000009" else None
+
+    monkeypatch.setattr(pr, "ProjectRegistry", _FakeRegistry)
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    tool, captured = make_tool(tool_module)
+    result = await tool.execute(
+        base_inputs(parent_agent_level=1, project_id="proj00000009")
+    )
+    assert result.success, result.error
+    assert "dispatch" in captured
+
+
+def test_plan_state_gate_skips_without_project(tool_module):
+    """不挂项目 → 闸直接放行（返回 None）。"""
+    gate = tool_module.TaskSubmitTool._gate_project_plan_state
+    assert gate("", "agent", "mode_coding/code_writer") is None
+
+
+def test_plan_state_gate_rebootstrap_shared_root_when_absent(
+    tool_module, monkeypatch, tmp_path
+):
+    """shared_root 不在 sys.path（裸宿主装载）→ 守卫补插后闸仍工作（1054）。"""
+    import project_registry as pr
+
+    shared_root = str(Path(tool_module.__file__).resolve().parents[2])
+    cleaned = [p for p in sys.path if str(p) != shared_root]
+    assert shared_root not in cleaned
+    monkeypatch.setattr(sys, "path", cleaned)
+
+    folder = tmp_path / "plan_gate_reboot"
+    folder.mkdir()
+    monkeypatch.setattr(pr, "load_project_paths", lambda: {"proj00000010": str(folder)})
+
+    class _FakeRegistry:
+        def get(self, pid):
+            return _FakeProject("plan") if pid == "proj00000010" else None
+
+    monkeypatch.setattr(pr, "ProjectRegistry", _FakeRegistry)
+    gate = tool_module.TaskSubmitTool._gate_project_plan_state
+    # 白名单外执行者 → 拦截（守卫补插的路径上 import project_registry 成功）
+    result = gate("proj00000010", "agent", "mode_coding/code_writer")
+    assert result is not None and not result.success
+    assert shared_root in sys.path  # 守卫已把 shared_root 插回

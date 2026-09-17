@@ -110,4 +110,26 @@ describe('fileOpener.openFile（工具卡片打开文件链路）', () => {
     expect(useLayoutModeStore.getState().workspaceTabs).toHaveLength(0)
     expect(getFileEditorData('file-local-gone.txt')).toBeUndefined()
   })
+
+  it('回退 _local 后仍 success=false → 警告分支：不建 Tab 但不抛错', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    getMock
+      .mockResolvedValueOnce({ data: { success: false, message: 'not found' } } as never)
+      .mockResolvedValueOnce({ data: { success: false, message: 'root miss' } } as never)
+
+    await expect(openFile('missing.txt', { containerTaskId: 'task-2' })).resolves.toEqual({
+      success: true,
+      editor: 'builtin',
+    })
+
+    expect(getMock).toHaveBeenCalledTimes(2)
+    expect(warnSpy).toHaveBeenCalledWith('[fileOpener] 读取文件失败:', 'root miss')
+    expect(useLayoutModeStore.getState().workspaceTabs).toHaveLength(0)
+    expect(getFileEditorData('file-local-missing.txt')).toBeUndefined()
+  })
+
+  // 不可达面登记（勿按数字硬刷）：openFile 的 catch 降级分支（重调 handler +
+  // 返回「解析失败」message）结构性不可达——内层 defaultBuiltinOpenHandler 自带
+  // try/catch 吞掉全部异常（console.error 后正常返回），外层 catch 无任何可达
+  // 路径。该分支属防御性双保险，删分支是源码简化决策（待拍板），测试不伪造。
 })

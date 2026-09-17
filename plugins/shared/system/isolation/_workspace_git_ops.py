@@ -442,6 +442,7 @@ class _GitOpsMixin:
         rc, _, stderr = self._run_git("worktree", "add", "-b", branch, str(ws_dir), cwd=repo_path)
         if rc == 0:
             self._link_worktree_dependencies(ws_dir, repo_path)
+            self._normalize_worktree_gitdir_links(ws_dir, repo_path)
             return
 
         if rc < 0:
@@ -477,6 +478,81 @@ class _GitOpsMixin:
         if rc != 0:
             raise RuntimeError(f"git worktree add 失败（prune 后重试仍失败）: task_id={task_id}, error={stderr}")
         self._link_worktree_dependencies(ws_dir, repo_path)
+        self._normalize_worktree_gitdir_links(ws_dir, repo_path)
+
+    def _normalize_worktree_gitdir_links(self, ws_dir: Path, repo_path: Path) -> None:
+        """把 worktree 的双向 gitdir 链接改写为相对路径（跨 OS 侧统一格式）。
+
+        `git worktree add` 在哪侧执行就把链接写成哪侧绝对路径（宿主 `D:/`
+        与 WSL `/mnt/d` 互不解析）——另一侧的合并门控/评估 oracle 会报
+        "fatal: not a git repository"（2026-09-17 SWE 种子实跑实证：同题
+        两轮 worktree 分别为两种形态，宿主侧一好一坏）。相对路径不含挂载
+        前缀，同一目录树在两侧的相对解析指向同一物理位置，统一为相对形态
+        后任一侧创建、任一侧可用。幂等；定位失败仅告警不阻断建树。
+        """
+        git_file = ws_dir / ".git"
+        if not git_file.is_file():
+            return
+        admin_root = repo_path / ".git" / "worktrees"
+        if not admin_root.is_dir():
+            return
+        admin_dir = self._resolve_worktree_admin_dir(git_file, admin_root)
+        if admin_dir is None or not admin_dir.is_dir():
+            logger.warning(
+                "[WorkspaceGitOps] worktree admin 目录未定位到，gitdir 保持原样: ws=%s",
+                ws_dir,
+            )
+            return
+        rel_git = os.path.relpath(admin_dir, ws_dir).replace("\\", "/")
+        rel_ws = os.path.relpath(ws_dir, admin_dir).replace("\\", "/")
+        # Windows git 给 worktree .git 文件加隐藏/只读属性——CPython 无法以
+        # 写模式打开隐藏文件，用临时文件 + os.replace 覆盖（replace 可替换
+        # 隐藏目标；只读目标先 chmod 放开）
+        for target in (git_file, admin_dir / "gitdir"):
+            with contextlib.suppress(OSError):
+                os.chmod(target, stat.S_IWRITE)
+        self._replace_text_forced(git_file, f"gitdir: {rel_git}\n")
+        self._replace_text_forced(admin_dir / "gitdir", rel_ws + "\n")
+        rc, _, err = self._run_git("rev-parse", "--git-dir", cwd=ws_dir)
+        if rc != 0:
+            logger.warning(
+                "[WorkspaceGitOps] gitdir 相对化后本侧 rev-parse 失败（保留相对形态）: %s",
+                err[:200],
+            )
+        else:
+            logger.info(
+                "[WorkspaceGitOps] worktree gitdir 已统一为相对路径（跨侧可用）: ws=%s",
+                ws_dir,
+            )
+
+    @staticmethod
+    def _replace_text_forced(path: Path, text: str) -> None:
+        """覆盖写（含 Windows 隐藏文件）：临时文件写好后 os.replace 顶替。"""
+        tmp = path.with_name(path.name + ".tmp_norm")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _resolve_worktree_admin_dir(git_file: Path, admin_root: Path) -> Path | None:
+        """从 .git 文件的 gitdir 指向定位 admin 目录。
+
+        兼容宿主 `D:/` 与 WSL `/mnt/d` 两种来源格式：不解析外路径本身，
+        只取 `.git/worktrees/` 之后的目录段映射到本侧 admin_root 下。"""
+        import re  # noqa: PLC0415
+
+        try:
+            text = git_file.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        m = re.match(r"^gitdir:\s*(.+)$", text)
+        if not m:
+            return None
+        parts = [p for p in m.group(1).strip().replace("\\", "/").split("/") if p]
+        if "worktrees" in parts:
+            i = parts.index("worktrees")
+            if i + 1 < len(parts):
+                return admin_root / parts[i + 1]
+        return None
 
     def _link_worktree_dependencies(self, ws_dir: Path, project_root: Path) -> None:
         """从主空间向 worktree 创建符号链接，继承 .gitignore 排除的运行时依赖。

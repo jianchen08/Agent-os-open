@@ -1,4 +1,5 @@
 //! 会话传输内核——channel/WS 内核化（ADR §7）。
+// @feature: FP-0.2.八 多租户 | @ci: rust-test
 //!
 //! 承接 0.1 `src/channels/websocket/` 全部职责，Rust 重写。模块对应：
 //! - [`connection_registry`]：user_id/thread_id → 连接，单连接踢旧（B10）
@@ -41,4 +42,30 @@ pub trait EventSink: Send + Sync {
     /// （收不到事件也断不开），对端批量断连时才集中暴露。
     /// 默认空实现，测试 mock sink 无需实现。
     fn shutdown(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventSink;
+
+    /// 不覆盖 shutdown 默认实现的最小 sink（验证默认空实现可安全调用）。
+    struct BareSink;
+
+    #[async_trait::async_trait]
+    impl EventSink for BareSink {
+        async fn send_text(&self, _text: &str) -> bool {
+            true
+        }
+        fn id(&self) -> u64 {
+            1
+        }
+    }
+
+    #[tokio::test]
+    async fn default_shutdown_is_safe_noop() {
+        let sink = BareSink;
+        sink.shutdown(); // 默认实现：测试 mock sink 无需释放真实连接
+        assert!(sink.send_text("ping").await);
+        assert_eq!(sink.id(), 1);
+    }
 }

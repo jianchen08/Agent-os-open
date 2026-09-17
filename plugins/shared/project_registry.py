@@ -1,7 +1,8 @@
 """项目登记 — project = 真实文件夹 + 登记行（YAML 持久化，跨插件共享真值源）。
 
 模型契约（docs/decisions/2026-08-27-project-folder-registration.md）：
-- project 不是任务系统实体：不占 task_id、无状态机、无管道；
+- project 不是任务系统实体：不占 task_id、无任务状态机、无管道
+  （方案工作流状态 workflow_state 是独立的生命周期能轴，ADR 2026-09-17）；
 - 登记行是 id ↔ 文件夹路径的最薄账本（任务树分组/工作空间定位/生命周期键）；
 - 子任务挂靠键 = 任务行 ``metadata.project_id``（state 面
   ``task.parent_project_id`` 同值，task_submit 双写）；
@@ -35,7 +36,11 @@ import yaml
 _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__)))
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
-from tenant_data import DEFAULT_TENANT, tenant_data_root  # noqa: E402
+from tenant_data import (  # noqa: E402
+    DEFAULT_TENANT,
+    tenant_config_dir,
+    tenant_data_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +53,10 @@ class ProjectModel:
         id: 项目唯一标识（12hex，与任务 id 同格式）
         path: 项目文件夹宿主绝对路径
         title: 项目标题
-        status: active | paused
+        status: active | paused（文件夹生命周期）
+        workflow_state: 方案工作流状态 plan | running | done（方案生命周期轴，
+            与任务状态机无关；迁移合法边见 WORKFLOW_TRANSITIONS，
+            ADR 2026-09-17-plan-mode-project-state-gate）
         auto_execute: 自动执行开关（toggle_auto_execute 端点持久化面）
         created_at / updated_at: ISO 时间戳
         submitted_by: 创建者（用户 sub）
@@ -59,11 +67,43 @@ class ProjectModel:
     path: str = ""
     title: str = ""
     status: str = "active"
+    workflow_state: str = "plan"
     auto_execute: bool = False
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     submitted_by: str = ""
     session_id: str = ""
+
+
+# 方案工作流状态机（ADR 2026-09-17）：plan→running / running→plan 为门控迁移
+# （审批在工具层强制，登记面只认边）；running→done 为用户界面管理面（收尾）；
+# done 为终态（重新规划 = 用户另起登记）。
+WORKFLOW_TRANSITIONS: dict[str, set[str]] = {
+    "plan": {"running"},
+    "running": {"plan", "done"},
+    "done": set(),
+}
+
+# plan 态派发白名单（ADR 2026-09-17 决策 2）：方案讨论段允许的外包执行者
+# （调研 / 环境准备）。打样验证不在白名单内——先过门（用户审批）再派，从紧口径。
+PLAN_DISPATCH_WHITELIST = frozenset({"research_agent", "environment_setup_agent"})
+
+
+def transition_workflow_state(project: ProjectModel, target: str) -> ProjectModel:
+    """方案工作流状态迁移（合法边校验，fail-closed）。
+
+    只校验登记面的合法边；plan↔running 的审批门由工具层（状态迁移入口）强制，
+    本函数不感知调用方身份。
+    """
+    allowed = WORKFLOW_TRANSITIONS.get(project.workflow_state, set())
+    if target not in allowed:
+        raise ValueError(
+            f"非法状态迁移: {project.workflow_state} → {target}"
+            f"（合法目标: {', '.join(sorted(allowed)) or '无（终态）'}）"
+        )
+    project.workflow_state = target
+    project.updated_at = datetime.now().isoformat()
+    return project
 
 
 def registry_data_dir(data_dir: str | Path | None = None, tenant_id: str | None = None) -> Path:
@@ -277,6 +317,82 @@ def _norm_path(path: str) -> str:
     return norm.lower() if os.name == "nt" else norm
 
 
+# ════════════════════════════════════════════════════════════
+# 登记白名单（ADR 2026-09-17：locked 用户配置，前缀授权）
+# ════════════════════════════════════════════════════════════
+
+
+def load_registration_whitelist(
+    tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None
+) -> list[str]:
+    """项目登记白名单（``config/users/{tenant}/project_whitelist.yaml``）。
+
+    前缀授权：条目授权自身及任意层级后代（含登记时新建的目录，授权看路径
+    不要求先存在）。文件缺失/损坏 = 空白名单（范围收缩，安全侧）。写面
+    locked 分级（agent 只读 + 提案制）见 ADR 2026-09-17-plan-mode-project-state-gate。
+    """
+    config_path = tenant_config_dir(tenant_id, base=base) / "project_whitelist.yaml"
+    if not config_path.is_file():
+        return []
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        logger.error("项目登记白名单解析失败（按空白名单处理）: %s — %s", config_path, exc)
+        return []
+    entries = data.get("entries") or []
+    return [str(e) for e in entries if str(e or "").strip()]
+
+
+def _canonical_path(path: str | Path) -> str:
+    """登记比较用同源 canonicalize（白名单条目/既有登记/新目标三边共用）。
+
+    目标可能尚不存在（白名单授权新建目录）：对最近存在祖先 realpath 后拼接
+    剩余段——单边 canonicalize 在 Windows \\?\\ 前缀/大小写上有跨边误判前科
+    （ADR 2026-09-17 白名单校验节），所有比较边必须过同一函数。
+    """
+    p = Path(path)
+    anchor: Path = p
+    remainder: list[str] = []
+    while not anchor.exists():
+        if anchor.parent == anchor:
+            break
+        remainder.insert(0, anchor.name)
+        anchor = anchor.parent
+    real = Path(os.path.realpath(anchor))
+    for seg in remainder:
+        real = real / seg
+    norm = os.path.normpath(str(real))
+    return norm.lower() if os.name == "nt" else norm
+
+
+def match_registration_scope(target_canon: str, entries: list[str]) -> str | None:
+    """返回命中授权范围（canonical 形态）：白名单条目优先，工作空间根为缺省成员。
+
+    白名单未配置/未命中时仅工作空间根（含其下任意层级）可登记——存量兼容默认。
+    """
+    for entry in entries:
+        canon = _canonical_path(entry)
+        if target_canon == canon or target_canon.startswith(canon + os.sep):
+            return canon
+    ws = _canonical_path(workspace_base_dir())
+    if target_canon == ws or target_canon.startswith(ws + os.sep):
+        return ws
+    return None
+
+
+def _assert_no_project_overlap(target_canon: str, registry: ProjectRegistry) -> None:
+    """项目根重叠拒绝（嵌套任一方向）——重叠会使状态闸/挂载/追溯范围歧义。"""
+    for project in registry.list():
+        if not project.path:
+            continue
+        existing = _canonical_path(project.path)
+        if target_canon.startswith(existing + os.sep) or existing.startswith(target_canon + os.sep):
+            raise ValueError(
+                f"登记路径与已登记项目 {project.id}（{project.path}）重叠"
+                "——项目根禁止嵌套，状态闸与挂载范围要求一根一项目"
+            )
+
+
 def ensure_project_registered(
     title: str,
     explicit_path: str = "",
@@ -295,10 +411,18 @@ def ensure_project_registered(
         registry = ProjectRegistry()
     explicit = explicit_path or ""
     if explicit:
-        want = _norm_path(explicit)
+        want = _canonical_path(explicit)
         for project in registry.list():
-            if project.path and _norm_path(project.path) == want:
+            if project.path and _canonical_path(project.path) == want:
                 return project, False
+        # 新登记才过闸（幂等复用先于白名单：存量登记不受新闸影响）
+        if match_registration_scope(want, load_registration_whitelist()) is None:
+            raise ValueError(
+                f"登记路径不在白名单内: {explicit}"
+                "（白名单 = config/users/{tenant}/project_whitelist.yaml，"
+                "locked 用户配置；工作空间根为缺省成员）"
+            )
+        _assert_no_project_overlap(want, registry)
     folder = ensure_project_folder(title, explicit)
     project = ProjectModel(
         path=folder,

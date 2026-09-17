@@ -1,12 +1,12 @@
 {
   "id": "mode_godot",
   "name": "Mode Godot",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
-  "description": "Godot 游戏开发模式出厂种子（既有事实模式结构化收编，P3 立项）：模式元数据服务面（mode.describe / mode.get_profile），profile 随包内打包，供服务侧消费方（eval_harness 归因评测等）经内核服务调用获取",
+  "description": "Godot 游戏开发模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile）+ 工作区活面板（场景快照/选中预览/执行记录/修改派发/打开 Godot 编辑器，对标 godot-mcp 类 Godot AI 工具；编辑器读数走 addons/agentos 宿主桥 9600）+ 写动作（task_submit / godot_run 真派发），profile 与 godot 链 agent 配置随包内打包",
   "permissions": {},
   "priority": 45,
   "host_group": "light",
@@ -91,6 +91,86 @@
       "timeout_ms": 5000,
       "max_concurrency": 4,
       "description": "Webview HTML page: Godot 开发面板（插件自带 webview 页）"
+    },
+    {
+      "route_id": "mode_godot_data_bootstrap",
+      "method": "GET",
+      "path": "/ext/mode_godot/data/bootstrap",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "面板头元数据（模式名/链/panel_page_id）"
+    },
+    {
+      "route_id": "mode_godot_data_scene",
+      "method": "GET",
+      "path": "/ext/mode_godot/data/scene",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "场景状态（addons/agentos 宿主桥 9600 探活+工程+选中快照；离线诚实降级）"
+    },
+    {
+      "route_id": "mode_godot_data_preview",
+      "method": "GET",
+      "path": "/ext/mode_godot/data/preview",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "选中节点预览（宿主桥 selection/preview PNG → data URL）"
+    },
+    {
+      "route_id": "mode_godot_data_sessions",
+      "method": "GET",
+      "path": "/ext/mode_godot/data/sessions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "godot 链会话列表（pipeline-state mode/agent_id 双口径过滤归一）"
+    },
+    {
+      "route_id": "mode_godot_data_messages",
+      "method": "GET",
+      "path": "/ext/mode_godot/data/messages",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "会话消息流（messages.list 按 pipeline_id，query 必带 pipeline_id；含报错标 has_error）"
+    },
+    {
+      "route_id": "mode_godot_data_records",
+      "method": "GET",
+      "path": "/ext/mode_godot/data/records",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "执行记录（godot 链双口径过滤的会话行，消息流由前端按 pipeline_id 组合）"
+    },
+    {
+      "route_id": "mode_godot_action_dispatch",
+      "method": "POST",
+      "path": "/ext/mode_godot/data/actions/dispatch",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：派发场景修改（task_submit 派发，target=godot_orchestrator_agent 键；session_id 有则透传入对话框线程）"
+    },
+    {
+      "route_id": "mode_godot_action_open_editor",
+      "method": "POST",
+      "path": "/ext/mode_godot/data/actions/open_editor",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：打开 Godot 编辑器（godot_run 探活命令，未开自动拉起 GODOT_EDITOR_BIN）"
     }
   ],
   "contributes": {
@@ -110,7 +190,20 @@
         },
         "order": 30,
         "description": "Godot 游戏开发模式面板：godot 项目/场景状态 + 执行记录视图",
-        "mode": "godot"
+        "mode": "godot",
+        "detachable": {
+          "popout": true,
+          "childWindow": true,
+          "desktopWidget": true,
+          "defaultSize": {
+            "w": 400,
+            "h": 680
+          },
+          "minSize": {
+            "w": 320,
+            "h": 480
+          }
+        }
       }
     ]
   }

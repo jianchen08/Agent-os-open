@@ -1,12 +1,12 @@
 {
   "id": "mode_writing",
   "name": "Mode Writing",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
-  "description": "写作模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile），profile 随包内打包，供服务侧消费方（eval_harness 归因评测等）经内核服务调用获取",
+  "description": "写作模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile）+ 工作区面板数据面（作品树/章节/设定集，对标 NovelAI/Novelcrafter 界面）+ 章动作写动作（续写/扩写/改写/大纲/头脑风暴经 task_submit 真派发），profile 随包内打包",
   "permissions": {},
   "priority": 45,
   "host_group": "light",
@@ -15,7 +15,7 @@
     "services": [
       {
         "name": "mode.describe",
-        "description": "返回编码模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+        "description": "返回写作模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -58,7 +58,7 @@
       },
       {
         "name": "mode.get_profile",
-        "description": "返回编码模式包内 profile.yaml 解析后的内容",
+        "description": "返回写作模式包内 profile.yaml 解析后的内容",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -91,6 +91,76 @@
       "timeout_ms": 5000,
       "max_concurrency": 4,
       "description": "Webview HTML page: 写作工坊面板（插件自带 webview 页）"
+    },
+    {
+      "route_id": "mode_writing_data_bootstrap",
+      "method": "GET",
+      "path": "/ext/mode_writing/data/bootstrap",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "面板头元数据（模式名/链/panel_page_id）"
+    },
+    {
+      "route_id": "mode_writing_data_sessions",
+      "method": "GET",
+      "path": "/ext/mode_writing/data/sessions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "本模式会话列表（pipeline-state mode 键过滤归一）"
+    },
+    {
+      "route_id": "mode_writing_data_messages",
+      "method": "GET",
+      "path": "/ext/mode_writing/data/messages",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "会话对话流（messages.list 按 pipeline_id，query 必带 pipeline_id）"
+    },
+    {
+      "route_id": "mode_writing_data_works",
+      "method": "GET",
+      "path": "/ext/mode_writing/data/works",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "作品树行（sessions 投影：goal/任务状态/任务链/工作空间坐标）"
+    },
+    {
+      "route_id": "mode_writing_data_chapter",
+      "method": "GET",
+      "path": "/ext/mode_writing/data/chapter",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "章节正文（最后一条较长 assistant 消息 + 字数，query 必带 pipeline_id）"
+    },
+    {
+      "route_id": "mode_writing_data_bible",
+      "method": "GET",
+      "path": "/ext/mode_writing/data/bible",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "设定集三件（工作空间根 BIBLE/OUTLINE/LEDGER 白名单读，query 必带 pipeline_id）"
+    },
+    {
+      "route_id": "mode_writing_action_chapter_act",
+      "method": "POST",
+      "path": "/ext/mode_writing/data/actions/chapter_act",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：章动作派发（continue/expand/rewrite/outline/brainstorm，task_submit 真派发）"
     }
   ],
   "contributes": {
@@ -110,7 +180,19 @@
         },
         "order": 30,
         "description": "写作模式面板：作品树/设定集/章节工坊",
-        "mode": "writing"
+        "mode": "writing",
+        "detachable": {
+          "popout": true,
+          "childWindow": true,
+          "defaultSize": {
+            "w": 1080,
+            "h": 680
+          },
+          "minSize": {
+            "w": 720,
+            "h": 480
+          }
+        }
       }
     ]
   },

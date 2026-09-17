@@ -155,6 +155,11 @@ GATES: list[Gate] = [
         cwd="kernel",
         shell=(
             "cargo llvm-cov --workspace --exclude agentos-integration-tests "
+            # bin 覆盖、不进本口径（下方 kernel-diff-coverage 注释同款 scope 声明）——
+            # bin 迁至 crates/api/src/bin 后被单测口径重复收编（1279 缺行全是
+            # main()/进程启动面，单测结构性不可达），按既定 scope 摘出。
+            # 该参数 cargo llvm-cov 只接受一次，不可重复传。
+            "--ignore-filename-regex 'bin[\\\\/]agentos-kernel\\.rs$' "
             "--lcov --output-path coverage.lcov --ignore-run-fail "
             # --skip（2026-09-01 用户裁定）：覆盖率压力线（rust 90.0 vs CI 实测
             # ~86.8）暂时摘下不作为闸门，插桩度量照跑供观察；恢复 = 去掉 --skip。
@@ -181,6 +186,10 @@ GATES: list[Gate] = [
             ".rs",
             "--omit",
             r"build\.rs$",
+            # scope 对齐（2026-09-16）：主进程 bin 由 e2e 车道覆盖（见上方
+            # kernel-coverage 注释），不进本 gate 的改动行口径。
+            "--omit",
+            r"^kernel/crates/api/src/bin/",
         ),
         needs=("kernel-coverage",),
     ),

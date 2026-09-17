@@ -136,3 +136,11 @@ def test_case_to_task_args_repo_anchor_without_project_root_falls_back_to_materi
                                           project_root="")
     assert args["workspace"].startswith("/materials")
     assert args["workspace_mode"] == "plain"
+
+
+def test_budget_verdict_non_numeric_metric_or_limit_is_unverified():
+    """budget 声明在但比较值不可数值化 → (True, False)：不猜测不误判。"""
+    bad_metric = {"budget": {"max_tokens": 100}, "metrics": {"tokens": "many"}}
+    assert aggregate.budget_verdict(bad_metric) == (True, False)
+    bad_limit = {"budget": {"max_tokens": "few"}, "metrics": {"tokens": 12}}
+    assert aggregate.budget_verdict(bad_limit) == (True, False)

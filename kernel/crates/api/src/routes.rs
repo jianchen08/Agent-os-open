@@ -436,10 +436,14 @@ const UPLOAD_ALLOWED_EXTENSIONS: [&str; 12] = [
 
 /// /uploads/{filename} 静态服务（上传文件读取）。
 ///
-/// channel_api artifacts 上传落盘 data/{tenant}/uploads 并返回
-/// `/uploads/{filename}` URL（前端附件预览 / 主题背景图引用）。本 handler
-/// 直读默认租户（default）上传目录；路径安全：拒绝 `..` 与路径分隔符；
-/// 扩展名白名单外 404（媒体类型契约，见 UPLOAD_ALLOWED_EXTENSIONS）。
+/// channel_api artifacts 上传落盘默认租户（default）上传目录并返回
+/// `/uploads/{filename}` URL（前端附件预览 / 主题背景图引用）。落盘位置随
+/// ADR 2026-09-13-unified-user-root 迁入用户空间数据根（artifacts 插件
+/// `_get_uploads_dir` 同源），本 handler 按序解析：用户空间
+/// `<user_data>/default/uploads` 优先（迁移后唯一写点），仓库根
+/// `data/default/uploads` 回退（迁移脚本显式调用，未迁移部署的存量文件）。
+/// 路径安全：拒绝 `..` 与路径分隔符；扩展名白名单外 404（媒体类型契约，
+/// 见 UPLOAD_ALLOWED_EXTENSIONS）。
 pub async fn serve_upload_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
@@ -463,17 +467,28 @@ pub async fn serve_upload_handler(
     if !ext_allowed {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    let Some(project_root) = state.project_root.as_ref() else {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
-    };
-    let uploads_dir = project_root.join("data").join("default").join("uploads");
-    let file_path = uploads_dir.join(&filename);
-    let Ok(meta) = tokio::fs::metadata(&file_path).await else {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
-    };
-    if !meta.is_file() {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(data_dir) = agentos_core::user_space::user_data_dir() {
+        candidates.push(data_dir.join("default").join("uploads"));
     }
+    if let Some(project_root) = state.project_root.as_ref() {
+        candidates.push(project_root.join("data").join("default").join("uploads"));
+    }
+    let mut file_path: Option<PathBuf> = None;
+    for dir in &candidates {
+        let path = dir.join(&filename);
+        let is_file = tokio::fs::metadata(&path)
+            .await
+            .map(|meta| meta.is_file())
+            .unwrap_or(false);
+        if is_file {
+            file_path = Some(path);
+            break;
+        }
+    }
+    let Some(file_path) = file_path else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
     let Ok(bytes) = tokio::fs::read(&file_path).await else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
@@ -906,12 +921,8 @@ pub async fn pipelines_runs_handler(
         db.list_pipelines_inner(&tenant_ctx.tenant_id, status.as_deref(), limit)
     })
     .await
-    .map_err(|e| ApiError::Internal {
-        message: format!("list_pipelines join 失败: {e}"),
-    })?
-    .map_err(|e| ApiError::Internal {
-        message: format!("list_pipelines 查询失败: {e}"),
-    })?;
+    .map_err(ApiError::internal("list_pipelines join 失败"))?
+    .map_err(ApiError::internal("list_pipelines 查询失败"))?;
     Ok(axum::Json(json!({ "items": rows })))
 }
 
@@ -932,9 +943,7 @@ pub async fn pending_inputs_list_handler(
     let rows = store
         .list_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
         .await
-        .map_err(|e| ApiError::Internal {
-            message: format!("pending-inputs 查询失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("pending-inputs 查询失败"))?;
     let items: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|r| {
@@ -971,9 +980,7 @@ pub async fn pending_inputs_update_handler(
     let updated = store
         .update_pending_input_content(&tenant_ctx.tenant_id, &pipeline_id, &input_id, content)
         .await
-        .map_err(|e| ApiError::Internal {
-            message: format!("pending-inputs 修改失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("pending-inputs 修改失败"))?;
     if !updated {
         return Err(ApiError::NotFound {
             message: format!("pending-inputs 条目不存在: {input_id}"),
@@ -1019,9 +1026,7 @@ pub async fn pending_inputs_delete_handler(
     let deleted = store
         .delete_pending_input(&tenant_ctx.tenant_id, &pipeline_id, &input_id)
         .await
-        .map_err(|e| ApiError::Internal {
-            message: format!("pending-inputs 删除失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("pending-inputs 删除失败"))?;
     if !deleted {
         return Err(ApiError::NotFound {
             message: format!("pending-inputs 条目不存在: {input_id}"),
@@ -1075,9 +1080,7 @@ pub async fn pending_inputs_clear_handler(
     let deleted = store
         .clear_pending_inputs(&tenant_ctx.tenant_id, &pipeline_id)
         .await
-        .map_err(|e| ApiError::Internal {
-            message: format!("pending-inputs 清空失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("pending-inputs 清空失败"))?;
     for cmid in cmids {
         crate::ws_session::notify_outcome_waiter(
             &cmid,
@@ -1434,12 +1437,8 @@ pub async fn pipelines_state_handler(
         let tid = tenant_id.clone();
         let rows = tokio::task::spawn_blocking(move || db.list_pipelines_inner(&tid, None, 200))
             .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("state list_pipelines join 失败: {e}"),
-            })?
-            .map_err(|e| ApiError::Internal {
-                message: format!("state list_pipelines 查询失败: {e}"),
-            })?;
+            .map_err(ApiError::internal("state list_pipelines join 失败"))?
+            .map_err(ApiError::internal("state list_pipelines 查询失败"))?;
         for row in rows {
             let pid = match row.pipeline_id.as_deref() {
                 Some(p) if !p.is_empty() => p.to_string(),
@@ -1656,9 +1655,8 @@ pub async fn get_plugin_config_handler(
     };
 
     let etag = compute_etag(raw.as_bytes());
-    let parsed: serde_json::Value = serde_yaml::from_str(&raw).map_err(|e| ApiError::Internal {
-        message: format!("config file yaml parse error: {e}"),
-    })?;
+    let parsed: serde_json::Value =
+        serde_yaml::from_str(&raw).map_err(ApiError::internal("config file yaml parse error"))?;
     let masked = mask_secrets(&parsed);
 
     Ok(axum::Json(PluginConfigResponse {
@@ -1793,9 +1791,8 @@ pub async fn put_plugin_config_handler(
         .map_err(config_err_to_api)?;
     seed_user_config_from_factory(&project_root, &mapping.path).map_err(config_err_to_api)?;
 
-    let stored: serde_json::Value = serde_yaml::from_str(&raw).map_err(|e| ApiError::Internal {
-        message: format!("stored config yaml parse error: {e}"),
-    })?;
+    let stored: serde_json::Value =
+        serde_yaml::from_str(&raw).map_err(ApiError::internal("stored config yaml parse error"))?;
     // B2：*** 哨兵字段保留磁盘原值
     let merged = apply_put_masked_sentinels(&stored, &req.data);
 
@@ -1804,9 +1801,7 @@ pub async fn put_plugin_config_handler(
 
     let new_etag = compute_etag(
         std::fs::read_to_string(&write_path)
-            .map_err(|e| ApiError::Internal {
-                message: format!("re-read after write failed: {e}"),
-            })?
+            .map_err(ApiError::internal("re-read after write failed"))?
             .as_bytes(),
     );
 
@@ -1919,9 +1914,7 @@ async fn put_inline_manifest_config(
         message: format!("read manifest {}: {e}", manifest_path.display()),
     })?;
     let mut root: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| ApiError::Internal {
-            message: format!("manifest json parse error: {e}"),
-        })?;
+        serde_json::from_str(&raw).map_err(ApiError::internal("manifest json parse error"))?;
     let Some(fields_json) = root
         .get_mut("config_files")
         .and_then(|v| v.as_array_mut())
@@ -1956,14 +1949,11 @@ async fn put_inline_manifest_config(
     }
 
     // 原子写 + 末尾换行（对齐仓库 end-of-file 约定）
-    let mut out = serde_json::to_string_pretty(&root).map_err(|e| ApiError::Internal {
-        message: format!("manifest serialize error: {e}"),
-    })?;
+    let mut out = serde_json::to_string_pretty(&root)
+        .map_err(ApiError::internal("manifest serialize error"))?;
     out.push('\n');
     let tmp = manifest_path.with_extension("json.tmp");
-    std::fs::write(&tmp, out.as_bytes()).map_err(|e| ApiError::Internal {
-        message: format!("write manifest tmp: {e}"),
-    })?;
+    std::fs::write(&tmp, out.as_bytes()).map_err(ApiError::internal("write manifest tmp"))?;
     if let Err(e) = std::fs::rename(&tmp, &manifest_path) {
         // rename 失败 best-effort 清 tmp（D7：不留 .tmp 残骸）
         if let Err(cleanup_err) = std::fs::remove_file(&tmp) {
@@ -2444,9 +2434,8 @@ pub async fn plugins_set_enabled_handler(
 
     // 写回：序列化失败直接报错（K1：不得 unwrap_or_default() 把空串写盘，
     // 物理清空整个 profile——序列化对 Mapping 几乎不会失败，但兜底不得是破坏性写）。
-    let new_raw = serde_yaml::to_string(&doc).map_err(|e| ApiError::Internal {
-        message: format!("序列化 default_profile.yaml 失败：{e}"),
-    })?;
+    let new_raw = serde_yaml::to_string(&doc)
+        .map_err(ApiError::internal("序列化 default_profile.yaml 失败："))?;
     // A12：写盘失败 → 5xx 统一错误信封（不再 200 + success:false 混装，
     // 前端无法据状态码区分"已生效"与"根本没写进去"）。
     // B4：tmp + rename 原子写（对照同文件写 plugin.json 的范式）——直写被中断
@@ -2455,9 +2444,7 @@ pub async fn plugins_set_enabled_handler(
     // 父目录补齐：写落点在用户空间时 `<USER_ROOT>/config/plugins/` 可能尚不存在
     // （factory 时代该目录随仓库必有），不补会 os error 3。
     if let Some(parent) = profile_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ApiError::Internal {
-            message: format!("创建 profile 目录失败: {e}"),
-        })?;
+        std::fs::create_dir_all(parent).map_err(ApiError::internal("创建 profile 目录失败"))?;
     }
     let tmp_path = profile_path.with_extension("yaml.tmp");
     std::fs::write(&tmp_path, new_raw).map_err(|e| {
@@ -2924,9 +2911,8 @@ pub async fn get_pipeline_config_handler(
         message: format!("pipeline config read failed: {name}: {e}"),
     })?;
     let etag = compute_etag(raw.as_bytes());
-    let data: serde_json::Value = serde_yaml::from_str(&raw).map_err(|e| ApiError::Internal {
-        message: format!("pipeline config yaml parse error: {e}"),
-    })?;
+    let data: serde_json::Value = serde_yaml::from_str(&raw)
+        .map_err(ApiError::internal("pipeline config yaml parse error"))?;
     Ok(axum::Json(PipelineConfigResponse { name, data, etag }))
 }
 
@@ -3012,9 +2998,7 @@ pub async fn put_pipeline_config_handler(
 
     let new_etag = compute_etag(
         std::fs::read_to_string(&path)
-            .map_err(|e| ApiError::Internal {
-                message: format!("re-read after write failed: {e}"),
-            })?
+            .map_err(ApiError::internal("re-read after write failed"))?
             .as_bytes(),
     );
 
@@ -4882,6 +4866,8 @@ mod routes_http_handler_tests {
         let tmp = tempfile::tempdir().unwrap();
         let uploads = tmp.path().join("data").join("default").join("uploads");
         std::fs::create_dir_all(uploads.join("dir.png")).unwrap();
+        // 解析面已纳入用户空间（BUG-39），按 test_env 契约钉桩隔离宿主机真实目录
+        let _user = crate::test_env::pin_user_root(&tmp.path().join("user-root"));
 
         let mut no_root = AppState::new();
         no_root.project_root = None;
@@ -4916,6 +4902,8 @@ mod routes_http_handler_tests {
         std::fs::write(uploads.join("pic.png"), b"\x89PNG-bytes").unwrap();
         std::fs::write(uploads.join("clip.mp4"), b"mp4-bytes").unwrap();
 
+        // 解析面已纳入用户空间（BUG-39），按 test_env 契约钉桩隔离宿主机真实目录
+        let _user = crate::test_env::pin_user_root(&tmp.path().join("user-root"));
         let mut state = AppState::new();
         state.project_root = Some(tmp.path().to_path_buf());
         for (name, expected_ct) in [("pic.png", "image/png"), ("clip.mp4", "video/mp4")] {
@@ -4937,6 +4925,102 @@ mod routes_http_handler_tests {
             let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
             assert!(!bytes.is_empty(), "{name} 应回传文件内容");
         }
+    }
+
+    /// BUG-39 复现：写端（artifacts 插件 `_get_uploads_dir`，ADR
+    /// 2026-09-13-unified-user-root）把上传落盘用户空间数据根
+    /// `<user_data>/default/uploads`，读端必须同源——文件只在用户空间、
+    /// project_root（仓库侧）没有时必须 200 回内容（劈叉读仓库根 = 全部
+    /// /uploads 404 = 历史会话图片附件「附件加载失败」）。
+    #[tokio::test]
+    async fn upload_serves_from_user_space_data_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_uploads = tmp
+            .path()
+            .join("user-root")
+            .join("data")
+            .join("default")
+            .join("uploads");
+        std::fs::create_dir_all(&user_uploads).unwrap();
+        std::fs::write(user_uploads.join("new.png"), b"user-space-bytes").unwrap();
+
+        let _user = crate::test_env::pin_user_root(&tmp.path().join("user-root"));
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().join("project"));
+        let resp = serve_upload_handler(
+            axum::extract::State(state),
+            axum::extract::Path("new.png".to_string()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "用户空间上传文件应可服务");
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            bytes.as_ref(),
+            b"user-space-bytes",
+            "应回传用户空间侧文件内容"
+        );
+    }
+
+    /// 用户空间与仓库侧同名并存（uuid 文件名下实属人为，钉优先级契约）：
+    /// 用户空间是迁移后唯一写点，优先命中。
+    #[tokio::test]
+    async fn upload_prefers_user_space_copy_over_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_uploads = tmp
+            .path()
+            .join("user-root")
+            .join("data")
+            .join("default")
+            .join("uploads");
+        std::fs::create_dir_all(&user_uploads).unwrap();
+        std::fs::write(user_uploads.join("both.png"), b"user-wins").unwrap();
+        let repo_uploads = tmp
+            .path()
+            .join("project")
+            .join("data")
+            .join("default")
+            .join("uploads");
+        std::fs::create_dir_all(&repo_uploads).unwrap();
+        std::fs::write(repo_uploads.join("both.png"), b"repo-legacy").unwrap();
+
+        let _user = crate::test_env::pin_user_root(&tmp.path().join("user-root"));
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().join("project"));
+        let resp = serve_upload_handler(
+            axum::extract::State(state),
+            axum::extract::Path("both.png".to_string()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(bytes.as_ref(), b"user-wins", "用户空间副本优先");
+    }
+
+    /// 存量部署兼容：迁移脚本显式调用、仓库侧文件仍在（用户空间无此文件）
+    /// → 回退 project_root 仓库路径继续服务，不让未迁移部署的旧附件全灭。
+    #[tokio::test]
+    async fn upload_falls_back_to_project_root_for_legacy_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_uploads = tmp
+            .path()
+            .join("project")
+            .join("data")
+            .join("default")
+            .join("uploads");
+        std::fs::create_dir_all(&repo_uploads).unwrap();
+        std::fs::write(repo_uploads.join("legacy.png"), b"repo-legacy").unwrap();
+
+        let _user = crate::test_env::pin_user_root(&tmp.path().join("user-root"));
+        let mut state = AppState::new();
+        state.project_root = Some(tmp.path().join("project"));
+        let resp = serve_upload_handler(
+            axum::extract::State(state),
+            axum::extract::Path("legacy.png".to_string()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "仓库侧存量文件应回退可服务");
+        let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        assert_eq!(bytes.as_ref(), b"repo-legacy");
     }
 
     // ── /api/v1/schema 聚合 + ETag 协商 ─────────────────────

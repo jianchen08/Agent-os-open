@@ -80,7 +80,7 @@ class ContextBuildPlugin(IInputPlugin):
         self._agent_yaml_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def _find_agent_yaml(self, agents_dir, agent_id: str):
-        """在 agents_dir 下递归找 <agent_id>.yaml；未命中回退按 config_id 匹配。
+        """在 agents_dir 下解析 agent_id → yaml；未命中回退按 config_id 匹配。
 
         Returns:
             (path, mtime) 或 None。config_id 匹配覆盖执行 agent 文件名与
@@ -88,6 +88,16 @@ class ContextBuildPlugin(IInputPlugin):
         """
         from pathlib import Path
 
+        # 层级键（executor/generation/novel_writer_agent 形态）= 注册表下同构
+        # 相对路径，直解析（与内核 user_space::resolve_config_path 同构）。
+        # basename 比对永不命中带分隔符的键（p.name 无 /）、config_id 兜底只存
+        # 裸 id——不直解析则配置整体不装载（tool_ids/prompt/运行时参数全断）。
+        # 含空段/..段的键拒绝直解析（防注册表外穿越），仍走既有两级扫描。
+        parts = f"{agent_id}.yaml".replace("\\", "/").split("/")
+        if len(parts) > 1 and all(parts) and ".." not in parts:
+            direct = Path(agents_dir).joinpath(*parts)
+            if direct.is_file():
+                return direct, direct.stat().st_mtime
         target = f"{agent_id}.yaml"
         fallback: list = []
         for p in Path(agents_dir).rglob("*.yaml"):
@@ -257,6 +267,22 @@ class ContextBuildPlugin(IInputPlugin):
         # 值一律覆盖（身份权威在引擎 id，此处统一收口）。
         if any(str(k).startswith("lineage.") for k in ctx.state):
             updates["task.id"] = str(ctx.state.get("pipeline_id", "") or "")
+        # 项目范围声明（ADR 2026-09-17 决策 4）：挂靠项目（task.parent_project_id
+        # 单跳键，task_submit 唯一写面）的管道注入 state.project_roots = 项目根
+        # 列表（读范围 + 容器挂载清单基准）；写锚点由任务自身 project_id 推导，
+        # 不设第二个 state 字段。解析失败降级不注入（与模式物料同降级语义，
+        # 绝不阻断管道）。
+        _project_id = str(ctx.state.get("task.parent_project_id", "") or "")
+        if _project_id:
+            roots = self._resolve_project_roots(_project_id)
+            if roots:
+                updates["project_roots"] = roots
+            else:
+                logger.warning(
+                    "[context_build] project_id 不在登记中，project_roots 降级不注入"
+                    " | project_id=%s",
+                    _project_id,
+                )
         # dynamic_vars 随 agent 配置装载：agent yaml 的
         # dynamic_vars.items → context.dynamic_vars，prompt_build 据此走配置
         # 驱动路径（配置声明的 {{timestamp}}/{{path:}} 依赖此装载）。
@@ -344,6 +370,25 @@ class ContextBuildPlugin(IInputPlugin):
         return updates
 
     @staticmethod
+    def _resolve_project_roots(project_id: str) -> list[str]:
+        """project_id → 项目根列表（登记簿轻量只读解析，ADR 2026-09-17 决策 4）。
+
+        与 project_create/task_submit/isolation 同源（project_registry.load_project_paths），
+        登记行是 id ↔ 路径唯一真值；未命中返回空表（调用方降级不注入）。
+        """
+        import os
+        import sys
+        from pathlib import Path
+
+        shared_root = str(Path(__file__).resolve().parents[3])
+        if shared_root not in sys.path:
+            sys.path.insert(0, shared_root)
+        from project_registry import load_project_paths  # noqa: PLC0415
+
+        path = str(load_project_paths().get(project_id, "") or "")
+        return [path] if path else []
+
+    @staticmethod
     def _is_main_path(agent_id_key: str, agent_cfg: dict[str, Any]) -> bool:
         """§4.2 身份轴 main 路径判定：缺省主 agent（state 无 agent.id，消费面
         自持默认主 agent）或解析出的 agent 配置 agent_type=main。
@@ -374,6 +419,12 @@ class ContextBuildPlugin(IInputPlugin):
                 "[context_build] mode 键形态非法，跳过模式物料注入 | mode=%r", mode
             )
             return
+        # state 顶层 mode 键回写（观测链出口：/pipelines/state 摘要 mode →
+        # 前端模式面板自动弹出/模式徽标同源取数，无键零动作）。解析成功即回写、
+        # 逐轮覆盖；物料注入降级（通道未接线/取数失败/非主路径）不回滚——回写
+        # 是解析路径产物，不随注入成败翻转。出口可见性由 manifest
+        # export_fields/persistent_fields 声明。
+        updates["mode"] = mode
         if not self._is_main_path(agent_id_key, agent_cfg):
             logger.debug(
                 "[context_build] 非主会话路径，模式物料不注入（Wave2/P3 分支）"

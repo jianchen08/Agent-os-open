@@ -379,3 +379,15 @@ describe('GlobalInteractionOverlay 响应回调', () => {
     expect(handlers.respondChoice).toHaveBeenLastCalledWith('req-2', '批准')
   })
 })
+
+describe('BUG-40 卡片宽度自适应', () => {
+  it('卡片宽度容器在视口内自适应加宽：max-w 上限 + w-full 小视口收缩 + mx-4 视口边距', () => {
+    setInteractions([makeInteraction()])
+    render(<GlobalInteractionOverlay />)
+    // 宽度上限容器：宽度 = min(上限, 视口-32px)，长选项卡片在宽视口下更宽
+    const widthBox = card().closest('.max-w-4xl')
+    expect(widthBox).not.toBeNull()
+    expect(widthBox!.className).toMatch(/w-full/)
+    expect(widthBox!.className).toMatch(/mx-4/)
+  })
+})

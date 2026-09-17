@@ -46,16 +46,14 @@ _evict_foreign_bare_modules()
 if str(_BROWSER_DIR) not in sys.path or sys.path[0] != str(_BROWSER_DIR):
     sys.path.insert(0, str(_BROWSER_DIR))
 
-import bridge_client as bc  # noqa: E402
-from bridge_client import BridgeClient, BridgeClientError  # noqa: E402
 import tool as browser_tool  # noqa: E402
 from tool import (  # noqa: E402
-    MAX_IMAGE_BYTES,
     BrowserTool,
     _build_arguments,
-    _content_text,
-    _to_tool_result,
 )
+
+from agentos_plugin_sdk import bridge_client as bc  # noqa: E402
+from agentos_plugin_sdk.bridge_client import BridgeClient, BridgeClientError  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -110,9 +108,7 @@ class TestExecuteDispatch:
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok"))
         config = {"bridge_base": "http://127.0.0.1:19998", "upstream": "browser", "timeout_secs": 2}
 
-        r = await BrowserTool(config).execute(
-            {"_tool_name": "browser_snapshot", "session_id": "sess-1"}
-        )
+        r = await BrowserTool(config).execute({"_tool_name": "browser_snapshot", "session_id": "sess-1"})
 
         assert r.success is False
         assert r.error_code == "BRIDGE_CALL_FAILED"
@@ -142,15 +138,12 @@ class TestExecuteDispatch:
         assert session == "sess-9"
         assert caller == "sandbox"
         assert _StubBridgeClient.last_call == ("browser_snapshot", {})
-        assert BrowserTool._last_workspace == str(ws)
 
     async def test_host_dispatch_navigates_with_url_echo(self, monkeypatch):
         _StubBridgeClient.response = {"content": [{"type": "text", "text": "done"}]}
         monkeypatch.setattr(browser_tool, "BridgeClient", _StubBridgeClient)
 
-        r = await BrowserTool({}).execute(
-            {"_tool_name": "browser_navigate", "url": "https://example.com/"}
-        )
+        r = await BrowserTool({}).execute({"_tool_name": "browser_navigate", "url": "https://example.com/"})
 
         assert r.success is True
         assert _StubBridgeClient.last_init[2] == "host"
@@ -195,84 +188,6 @@ class TestBuildArguments:
 
 
 # ───────────────────────────── tool.py: 结果归一 ─────────────────────────────
-
-
-class TestToolResultErrorBranches:
-    def test_upstream_error_text_passthrough(self):
-        mcp = {"isError": True, "content": [{"type": "text", "text": "element not found"}]}
-        r = _to_tool_result("browser_click", mcp)
-        assert r.success is False
-        assert r.error == "element not found"
-        assert r.error_code == "UPSTREAM_TOOL_ERROR"
-
-    def test_upstream_error_without_content_uses_fallback_text(self):
-        r = _to_tool_result("browser_click", {"isError": True})
-        assert r.success is False
-        assert r.error == "上游工具执行失败"
-        assert r.error_code == "UPSTREAM_TOOL_ERROR"
-
-
-class TestContentTextExtraction:
-    def test_joins_text_items_skipping_non_text(self):
-        mcp = {
-            "content": [
-                "raw-string",
-                {"type": "text", "text": "alpha"},
-                {"type": "image", "data": "zzz"},
-                {"type": "text", "text": "beta"},
-            ]
-        }
-        assert _content_text(mcp) == "alpha\nbeta"
-
-    @pytest.mark.parametrize("mcp", [{}, {"content": []}, {"content": [{"type": "image"}]}])
-    def test_empty_or_non_text_content_yields_empty(self, mcp):
-        assert _content_text(mcp) == ""
-
-
-class TestScreenshotPersistence:
-    @pytest.mark.parametrize(
-        ("mime", "ext", "raw"),
-        [
-            ("image/png", "png", b"\x89PNG-bytes"),
-            ("image/jpeg", "jpg", b"\xff\xd8-jpeg-bytes"),
-            ("image/webp", "png", b"webp-bytes"),  # 未识别 mime 落 png 扩展
-        ],
-    )
-    def test_image_saved_to_workspace_with_mime_ext(self, tmp_path, mime, ext, raw):
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        BrowserTool._last_workspace = str(ws)
-        try:
-            mcp = {
-                "content": [
-                    {
-                        "type": "image",
-                        "data": base64.b64encode(raw).decode("ascii"),
-                        "mimeType": mime,
-                    }
-                ]
-            }
-            r = _to_tool_result("browser_take_screenshot", mcp)
-
-            assert r.success is True
-            path = r.output["file_path"]
-            assert path.endswith(f".{ext}")
-            assert Path(path).read_bytes() == raw
-            assert r.output["image_mime"] == mime
-            assert r.output["status"] == 200
-        finally:
-            BrowserTool._last_workspace = ""
-
-    def test_oversized_image_rejected_before_save(self):
-        BrowserTool._last_workspace = ""
-        oversized = base64.b64encode(b"\0" * (MAX_IMAGE_BYTES + 1)).decode("ascii")
-        mcp = {"content": [{"type": "image", "data": oversized, "mimeType": "image/png"}]}
-
-        r = _to_tool_result("browser_take_screenshot", mcp)
-
-        assert r.success is False
-        assert r.error_code == "IMAGE_TOO_LARGE"
-        assert str(MAX_IMAGE_BYTES) in r.error
 
 
 # ───────────────────────────── bridge_client.py ─────────────────────────────

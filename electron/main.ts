@@ -275,7 +275,11 @@ function loadFrontend(
   }
 
   if (isDevelopment()) {
-    win.loadURL(VITE_DEV_SERVER_URL);
+    win
+      .loadURL(VITE_DEV_SERVER_URL)
+      .catch((err) => {
+        console.error(`[Electron] 加载 Vite dev server 失败（dev server 未起？）: ${VITE_DEV_SERVER_URL}`, err);
+      });
     // 开发环境打开 DevTools
     win.webContents.openDevTools({ mode: "detach" });
     console.info(`[Electron] 开发模式，加载 Vite dev server: ${VITE_DEV_SERVER_URL}`);

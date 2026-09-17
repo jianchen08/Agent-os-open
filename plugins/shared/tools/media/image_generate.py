@@ -11,9 +11,7 @@
 
 from __future__ import annotations
 
-import base64
 import logging
-import os
 from typing import Any
 
 from _media_core import (
@@ -33,6 +31,7 @@ from agentos_plugin_sdk import (
     create_failure_result,
     create_success_result,
 )
+from agentos_plugin_sdk.multimodal import multimodal_content_from_file
 
 logger = logging.getLogger(__name__)
 
@@ -154,37 +153,6 @@ class ImageGenerateTool(BuiltinTool):
             ],
         )
 
-    @staticmethod
-    def _build_multimodal_content(file_path: str) -> list[dict[str, Any]] | None:
-        """读取生成的图片文件，构建 OpenAI vision 格式的多模态内容块。
-
-        Args:
-            file_path: 图片文件路径
-
-        Returns:
-            多模态内容块列表，文件不存在或读取失败时返回 None
-        """
-        if not file_path or not os.path.isfile(file_path):  # noqa: PTH113
-            return None
-        try:
-            with open(file_path, "rb") as f:
-                b64_data = base64.b64encode(f.read()).decode("utf-8")
-        except OSError:
-            logger.warning("[ImageGenerate] 读取图片文件失败: %s", file_path)
-            return None
-
-        ext = os.path.splitext(file_path)[1].lower()  # noqa: PTH122
-        mime_map = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".webp": "image/webp",
-            ".gif": "image/gif",
-        }
-        mime_type = mime_map.get(ext, "image/png")
-
-        return [{"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_data}"}}]
-
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
         """执行图像生成。
 
@@ -292,7 +260,8 @@ class ImageGenerateTool(BuiltinTool):
             output_data["metadata"] = result.metadata
 
         # MM-3: 构建多模态内容块，供管道引擎注入下一轮 LLM 调用
-        multimodal_content = self._build_multimodal_content(file_path)
+        # （SDK 通用多模态通道，与截屏类工具同一条路）
+        multimodal_content = multimodal_content_from_file(file_path)
 
         return create_success_result(
             data=output_data,

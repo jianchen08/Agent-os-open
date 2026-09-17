@@ -59,7 +59,8 @@ def fetch_swe_verified(materials_root: str, seed_per_band: int,
     seed = ext.select_seed(rows, per_band=seed_per_band,
                            max_issue_chars=max_issue_chars)
     seed_rows = [r for band in ext.BAND_ORDER for r in seed[band]]
-    cases = [ext.adapt_seed_case(r, materials_root) for r in seed_rows]
+    domain = src.get("domain", "coding")
+    cases = [ext.adapt_seed_case(r, materials_root, mode=domain) for r in seed_rows]
     suite = {
         "name": "external-swe-verified-seed",
         "mode": "coding",

@@ -93,14 +93,13 @@ describe('ContributionRegistry — 归一化 space/slot 映射', () => {
     expect(page).toMatchObject({ id: `${key}-1`, space, slot, legacyFrom: key })
   })
 
-  it('映射表外的未知 key 兜底归一化为 workspace/tab（不丢弃）', () => {
+  it('映射表外的未知 key 忽略（不归一化为页面，防导航页垃圾卡片）', () => {
     registry.registerFromSchema({
       plugin_contributes: [
         { plugin_id: 'plug', contributes: { brandNewThing: [{ id: 'n1', title: 'N' }] } },
       ],
     })
-    const page = registry.getPages()[0]
-    expect(page).toMatchObject({ id: 'n1', space: 'workspace', slot: 'tab', legacyFrom: 'brandNewThing' })
+    expect(registry.getPages()).toEqual([])
   })
 
   it('pages 声明按原样注册：space 取自条目，无 legacyFrom', () => {

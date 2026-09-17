@@ -198,7 +198,7 @@ async def test_create_choice_request_timeout_default_and_extra_fields(make_svc: 
     record = await svc.get_request(rid)
     assert record is not None
     msg = record["message_data"]
-    assert msg["timeout_seconds"] == 600  # 缺省 86400 收敛到 choice 等待上限（BUG-14）
+    assert msg["timeout_seconds"] == 86400  # 缺省收敛到 choice 等待上限（BUG-14；BUG-40 起上限默认 24h）
     assert msg["options"] == [{"id": "1", "label": "批准"}]
     assert msg["questions"] == ["确认？"]
     assert msg["agent_level"] == "L2"
@@ -851,16 +851,16 @@ def test_cross_loop_submit_wakes_waiting_loop(svc_mod: Any) -> None:
 
 
 async def test_create_choice_caps_timeout_at_default_max(make_svc: Any) -> None:
-    """choice 创建超时上限：缺省 86400 收敛到 600（BUG-14 卡片永久等待）。"""
+    """choice 创建超时上限：调用方超时收敛到上限（BUG-14 有界等待；BUG-40 默认上限 600s→86400s=24h）。"""
     svc, _ = make_svc()
     rid = await svc.create_choice_request("s1", "t1", "tab1", "审批")
-    assert (await svc.get_request(rid))["message_data"]["timeout_seconds"] == 600
+    assert (await svc.get_request(rid))["message_data"]["timeout_seconds"] == 86400
 
     # 区分度输入：显式小超时不被放大；显式大超时被收敛
     rid2 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=30)
     assert (await svc.get_request(rid2))["message_data"]["timeout_seconds"] == 30
     rid3 = await svc.create_choice_request("s1", "t1", "tab1", "审批", timeout_seconds=99999)
-    assert (await svc.get_request(rid3))["message_data"]["timeout_seconds"] == 600
+    assert (await svc.get_request(rid3))["message_data"]["timeout_seconds"] == 86400
 
 
 async def test_choice_max_wait_injectable_and_disablable(make_svc: Any) -> None:
@@ -1175,7 +1175,8 @@ async def test_env_config_overrides_defaults(
     monkeypatch.setenv("HUMAN_INTERACTION_CHOICE_MAX_WAIT_SECONDS", "not-a-number")
     monkeypatch.setenv("HUMAN_INTERACTION_REJECT_MEMORY_TTL_SECONDS", "")
     svc2 = svc_mod.HumanInteractionService()
-    assert svc2._choice_max_wait_seconds == 600.0
+    assert svc2._choice_max_wait_seconds == 86400.0  # 非法值回退默认 24h（BUG-40 放宽，原 600）
+    # 拒绝记忆 TTL 与等待上限是两个独立机制，BUG-40 只动等待上限
     assert svc2._reject_memory_ttl_seconds == 1800.0
 
 

@@ -375,3 +375,67 @@ def test_user_config_dir_none_skips_user_candidate(config_root, tmp_path, monkey
     updates = _run({}, {"agent.id": "solo_agent"})
 
     assert updates["context.agent_name"] == "单根版"
+
+
+# ── 12. 层级 agent 键直解析（BUG-32）──
+
+
+def test_hierarchical_agent_key_resolved_by_path(config_root, tmp_path):
+    """层级键（executor/generation/novel_writer_agent 形态）按注册表同构相对
+    路径直解析。
+
+    task_birth 把派发 target_id 完整写进 state['agent.id']（含分隔符）；
+    文件名 basename 比对永不命中带分隔符的键（p.name 无 /）、config_id 兜底
+    也只存裸 id——两级都落空 = 配置整体不装载（BUG-32 现场：tool_ids 断链 →
+    LLM 零工具 → 写作任务无法落盘，600s 超时 failed）。
+    """
+    nested = tmp_path / "agents" / "executor" / "generation"
+    nested.mkdir(parents=True)
+    (nested / "novel_writer_agent.yaml").write_text(
+        "display_name: 章节写作专家\n"
+        "tool_ids: [file_read, file_write, task_evaluate]\n",
+        encoding="utf-8",
+    )
+    updates = _run({}, {"agent.id": "executor/generation/novel_writer_agent"})
+    assert updates["context.agent_name"] == "章节写作专家", "层级键必须直解析命中 yaml"
+    assert updates["tool_ids"] == ["file_read", "file_write", "task_evaluate"], (
+        "层级键 yaml 的 tool_ids 必须随配置注入（断链 = LLM 零工具）"
+    )
+
+
+def test_hierarchical_key_user_layer_takeover_wins(config_root, tmp_path, monkeypatch):
+    """层级键双根序不变：用户层同路径文件接管生效，factory 同名不参与。"""
+    user_root = tmp_path / "user-root"
+    user_root.mkdir()
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(user_root))
+    nested = tmp_path / "agents" / "executor" / "generation"
+    nested.mkdir(parents=True)
+    (nested / "writer.yaml").write_text("display_name: 出厂版\n", encoding="utf-8")
+    user_nested = user_root / "config" / "agents" / "executor" / "generation"
+    user_nested.mkdir(parents=True)
+    (user_nested / "writer.yaml").write_text("display_name: 用户版\n", encoding="utf-8")
+
+    updates = _run({}, {"agent.id": "executor/generation/writer"})
+    assert updates["context.agent_name"] == "用户版", (
+        "层级键也必须用户层优先（双根语义与裸键一致）"
+    )
+
+
+def test_hierarchical_key_traversal_rejected(config_root, tmp_path):
+    """含 .. 段的键拒绝直解析（防注册表外穿越）；两级扫描也不命中 → 默认运行。"""
+    (tmp_path / "agents").mkdir(parents=True)
+    escaped = tmp_path / "outside"
+    escaped.mkdir()
+    (escaped / "evil.yaml").write_text("display_name: 越权\n", encoding="utf-8")
+
+    updates = _run({}, {"agent.id": "../../outside/evil"})
+    assert updates["context.agent_name"] != "越权", ".. 段不得穿越注册表根"
+    assert "tool_ids" not in updates
+
+
+def test_hierarchical_key_empty_segment_skips_direct(config_root, tmp_path):
+    """含空段键（a//b 形态）不直解析：防路径歧义，两级扫描不命中 → 默认运行。"""
+    (tmp_path / "agents").mkdir(parents=True)
+    updates = _run({}, {"agent.id": "a//b"})
+    assert "tool_ids" not in updates
+    assert updates["context.agent_name"] == ""

@@ -571,6 +571,9 @@ function ModalShell({
       setSelfOpen(false)
       onClose?.()
     }
+    // HACK: onClose 是调用方每次渲染的自由闭包（非稳定引用），列入依赖会
+    // 重触发本 effect；effect 只关心提交成功边沿（closeOnSuccess 翻真），
+    // 关闭动作本身无重入风险。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [closeOnSuccess, open])
 

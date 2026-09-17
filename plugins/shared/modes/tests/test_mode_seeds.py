@@ -28,6 +28,7 @@ SEEDS = [
     ("mode_roleplay", "roleplay", "roleplay_studio"),
     ("mode_research", "research", "research_desk"),
     ("mode_godot", "godot", "godot_dev"),
+    ("mode_planning", "planning", "planning_desk"),
 ]
 
 DESCRIBE_KEYS = {"mode", "name", "chain", "weights", "budget", "profile_path", "panel_page_id"}
@@ -129,3 +130,26 @@ def test_corrupt_profile_fails_closed(plugin_id: str, mode: str, panel_page_id: 
     bad.write_text("name: 空壳\n", encoding="utf-8")
     with pytest.raises(ValueError):
         module.load_profile(str(bad))
+
+
+def _writing_pack_rules_text() -> str:
+    rules_dir = os.path.join(MODES_DIR, "mode_writing", "rules")
+    assert os.path.isdir(rules_dir), "mode_writing 包缺 rules/ 口径目录（context_build 模式段口径占位）"
+    parts: list[str] = []
+    for name in sorted(os.listdir(rules_dir)):
+        if name.endswith(".md"):
+            with open(os.path.join(rules_dir, name), encoding="utf-8") as fh:
+                parts.append(fh.read())
+    return "\n".join(parts)
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    ["file_check", "产物文件"],
+    ids=["acceptance_metric", "deliverable_filename"],
+)
+def test_writing_pack_rules_carry_dispatch_acceptance(anchor: str) -> None:
+    """BUG-33 契约：写作模式包必须携带派发口径——派发写作成稿任务必须声明
+    file_check 验收且 goal 写明产物文件名。无指标派发会让子任务在零验证下
+    被标记完成（假成功面）；本口径经 context_build 模式段注入主 agent。"""
+    assert anchor in _writing_pack_rules_text(), f"mode_writing 派发口径缺锚点 {anchor!r}"

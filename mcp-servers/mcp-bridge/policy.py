@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -186,12 +187,32 @@ _PRIVATE_IP_PREFIXES = ("10.", "127.", "169.254.", "192.168.")
 
 
 def is_private_host(host: str) -> bool:
-    """环回/私网/链路本地/元数据/CGNAT/本地域名判定（字面判定，不做 DNS 解析）。"""
+    """环回/私网/链路本地/元数据/CGNAT/本地域名判定（字面判定，不做 DNS 解析）。
+
+    IPv4 字面量走前缀/八位组判定；IPv6 字面量（urlparse 已去方括号）经
+    ipaddress 判定：环回 ::1 / 链路本地 fe80::/10 / ULA fc00::/7 / 未指定 ::，
+    IPv4 映射形式 ::ffff:x.x.x.x 递归按 IPv4 判；非法 IPv6 字面量按私网
+    fail-closed（拒绝而非放行）。
+    """
     h = host.lower()
     if h in ("localhost", "metadata", "metadata.google.internal"):
         return True
     if h.endswith(_PRIVATE_HOST_SUFFIXES):
         return True
+    if ":" in h:
+        try:
+            addr = ipaddress.IPv6Address(h)
+        except ValueError:
+            return True
+        mapped = addr.ipv4_mapped
+        if mapped is not None:
+            return is_private_host(str(mapped))
+        return (
+            addr.is_loopback
+            or addr.is_link_local
+            or addr.is_private
+            or addr.is_unspecified
+        )
     if _HOST_RE.match(h):
         if h.startswith(_PRIVATE_IP_PREFIXES):
             return True

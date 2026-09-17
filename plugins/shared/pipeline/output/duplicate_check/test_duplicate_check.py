@@ -734,3 +734,155 @@ class TestToolFailBreaker:
         )
         updates = _exec_updates(plugin, state)
         assert updates["should_stop"] is True
+
+
+# ══ BUG-41：审批通道故障的调用未执行，不得入重复窗拦截人审后的重试 ══
+
+
+_TRANSITION_CALL: dict[str, Any] = {
+    "name": "project_state",
+    "arguments": {
+        "action": "transition",
+        "project_id": "8947ca06db0e",
+        "reason": "R116 白名单闸前置回门",
+        "target_state": "plan",
+    },
+}
+
+
+def _refusal(call: dict[str, Any], *, retry_allowed: bool) -> dict[str, Any]:
+    """security_check._soft_block 产出的拒绝 tool_result 形状。
+
+    retry_allowed=True 仅出现在审批通道故障（审批服务异常）路径——人审结果
+    未知、调用从未执行；用户主动拒绝不带该标记。
+    """
+    entry: dict[str, Any] = {
+        "tool_name": call["name"],
+        "success": False,
+        "error": "[审批拒绝] 审批服务异常: sidecar churn" if retry_allowed else "[审批拒绝] 用户拒绝执行: rule",
+        "call_id": "call_01",
+    }
+    if retry_allowed:
+        entry["retry_allowed"] = True
+        entry["arguments"] = call["arguments"]
+    return entry
+
+
+class TestApprovalChannelRetryExemption:
+    """审批通道故障（人审结果未知）→ 该次未执行的签名必须从重复窗摘除。
+
+    BUG-41 实测（2026-09-17 kernel.log）：project_state transition 连续 3 次
+    发射均被审批通道故障软拦截（用户两次点批准均因 sidecar 翻动丢失），
+    签名在窗口累积到 3 → 第 4 次发射被二级拦截跳过——人审授权被去重架空、
+    流程卡死。根因不是签名漏了 reason（plugin.py 签名含全参数），而是
+    从未执行的调用也入窗计数。
+    """
+
+    @staticmethod
+    def _blocked_cycle(
+        plugin: Any, state: dict[str, Any], call: dict[str, Any], *, retry_allowed: bool
+    ) -> None:
+        """一轮「发射 → 审批软拦截」：llm_call 轮 + tool_execute 轮，引擎口径合并。"""
+        state["core_type"] = "llm_call"
+        state["raw_tool_calls"] = [call]
+        state.pop("tool_results", None)
+        result = _execute(plugin, state)
+        assert result.state_updates.get("router.duplicate_back_llm") is not True, (
+            "发射轮被拦截说明前置累积已封墙，循环前提破坏",
+        )
+        _merge_updates(state, result.state_updates)
+        state["core_type"] = "tool_execute"
+        state["tool_results"] = [_refusal(call, retry_allowed=retry_allowed)]
+        state.pop("raw_tool_calls", None)
+        _merge_updates(state, _exec_updates(plugin, state))
+
+    @pytest.mark.parametrize("blocked_attempts", [1, 2, 3, 4])
+    def test_approval_channel_error_retries_never_walled(
+        self, blocked_attempts: int
+    ) -> None:
+        """性质断言：任意次「审批通道故障 → 重试」后，再次发射都照常执行。"""
+        plugin = DuplicateCheckPlugin()
+        call = dict(_TRANSITION_CALL)
+        state: dict[str, Any] = {"messages": []}
+        for _ in range(blocked_attempts):
+            self._blocked_cycle(plugin, state, call, retry_allowed=True)
+        state["core_type"] = "llm_call"
+        state["raw_tool_calls"] = [call]
+        state.pop("tool_results", None)
+        result = _execute(plugin, state)
+        # 人审后的重试不得被去重拦截：调用保留 → 可再次弹卡执行
+        assert result.state_updates.get("router.duplicate_back_llm") is not True
+        assert "raw_tool_calls" not in result.state_updates
+        assert state["raw_tool_calls"] == [call]
+        assert result.state_updates["router.duplicate_count"] == 0
+
+    def test_denied_retries_still_walled(self) -> None:
+        """对照（用户主动拒绝）：未执行调用照旧入窗，第 4 次发射仍拦截——
+        拒绝重试死循环的防打拢闸不因本修复回退。"""
+        plugin = DuplicateCheckPlugin()
+        call = dict(_TRANSITION_CALL)
+        state: dict[str, Any] = {"messages": []}
+        for _ in range(3):
+            self._blocked_cycle(plugin, state, call, retry_allowed=False)
+        state["core_type"] = "llm_call"
+        state["raw_tool_calls"] = [call]
+        state.pop("tool_results", None)
+        result = _execute(plugin, state)
+        assert result.state_updates.get("router.duplicate_back_llm") is True
+        assert result.state_updates["raw_tool_calls"] == []
+
+    def test_same_transition_different_reason_is_distinct_signature(self) -> None:
+        """验收语义：同 project+target、不同 reason（审计必填字段）→ 不同签名，
+        人审后第二次迁移照常执行（签名微变绕过判例不回退）。"""
+        plugin = DuplicateCheckPlugin()
+        call_a = dict(_TRANSITION_CALL)
+        call_b = dict(_TRANSITION_CALL, arguments=dict(_TRANSITION_CALL["arguments"], reason="R119 复测回门"))
+        state: dict[str, Any] = {"messages": []}
+        self._blocked_cycle(plugin, state, call_a, retry_allowed=False)
+        state["core_type"] = "llm_call"
+        state["raw_tool_calls"] = [call_b]
+        state.pop("tool_results", None)
+        result = _execute(plugin, state)
+        assert result.state_updates.get("router.duplicate_back_llm") is not True
+        assert result.state_updates["router.duplicate_count"] == 0
+
+    def test_prune_removes_only_last_occurrence_of_matching_sig(self) -> None:
+        """窗口含同签名时只摘除一条（最近一次发射），其余保留。"""
+        plugin = DuplicateCheckPlugin()
+        call = dict(_TRANSITION_CALL)
+        state = _tool_state([call], **{"router.recent_tool_sigs": ["aaaaaaaa", "bbbbbbbb", "aaaaaaaa"]})
+        # 先入窗一条真签名，再拼一条可摘除的重复（aaa 已有两条，真实签名会再入一条）
+        _merge_updates(state, _execute(plugin, state).state_updates)
+        real_sig = state["router.recent_tool_sigs"][-1]
+        window_before = state["router.recent_tool_sigs"]
+        assert window_before.count(real_sig) == 1
+        # 引擎口径：llm 轮合并后的窗口就是 tool 轮读到的窗口
+        tr_state = _tool_exec_state(
+            [_refusal(call, retry_allowed=True)],
+            **{"router.recent_tool_sigs": list(window_before)},
+        )
+        updates = _exec_updates(plugin, tr_state)
+        assert updates["router.recent_tool_sigs"].count(real_sig) == 0, "被拒发射的那条必须摘除"
+        assert updates["router.recent_tool_sigs"].count("aaaaaaaa") == 2, "无关签名不动"
+        assert updates["router.recent_tool_sigs"].count("bbbbbbbb") == 1
+
+    def test_retry_allowed_refusal_not_counted_as_tool_failure(self) -> None:
+        """审批通道故障不计失败熔断连败（工具从未执行 ≠ 工具坏）：
+        连发 6 次通道故障拒绝不触发摘工具面，也不留连败账。"""
+        plugin = DuplicateCheckPlugin()
+        call = dict(_TRANSITION_CALL)
+        state = _tool_exec_state([_refusal(call, retry_allowed=True)] * 6)
+        updates = _exec_updates(plugin, state)
+        assert updates.get("should_stop") is not True
+        assert "tool_ids" not in updates
+        assert updates == {}, f"通道故障不得留连败账/动窗口：{updates}"
+
+    def test_unknown_sig_refusal_leaves_window_untouched(self) -> None:
+        """摘除目标是窗口外签名 → 不动窗口、不产无关更新。"""
+        plugin = DuplicateCheckPlugin()
+        state = _tool_exec_state(
+            [_refusal(dict(_TRANSITION_CALL), retry_allowed=True)],
+            **{"router.recent_tool_sigs": ["aaaaaaaa"]},
+        )
+        updates = _exec_updates(plugin, state)
+        assert "router.recent_tool_sigs" not in updates

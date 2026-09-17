@@ -5,78 +5,437 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>写作工坊</title>
   <style>
-  :root {
-    --bg: #f8fafc; --fg: #1a1a1a; --muted: #64748b; --border: #cbd5e1;
-    --card: #ffffff; --ph: #94a3b8;
-  }
-  @media (prefers-color-scheme: dark) {
+    /* 局部现值 = 宿主 theme.sync 未到达时的 fallback（浅/深随系统）；宿主写入的
+       --ag-* 内联在 documentElement 上，优先级高于这里的一切声明。 */
     :root {
-      --bg: #0f172a; --fg: #e2e8f0; --muted: #94a3b8; --border: #334155;
-      --card: #1e293b; --ph: #475569;
+      --bg: #f7f5f0; --fg: #29241c; --muted: #8a8375; --border: #ddd5c4;
+      --card: #fffdf8; --accent: #a8552b; --accent-soft: #f5e7dc; --ok: #4d7c0f;
+      --warn: #b45309; --err: #b91c1c; --chip: #f0ebe0; --ph: #a8a294; --prose: #342a1f;
+      --radius: 8px; --radius-sm: 6px;
     }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 12px; font-size: 13px; color: var(--fg); background: var(--bg);
-    font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  }
-  h1 { margin: 0 0 12px; font-size: 15px; }
-  .layout { display: grid; gap: 12px; height: calc(100vh - 44px); }
-  .cols { grid-template-columns: 220px minmax(0, 1fr) 200px; }
-  section, aside {
-    display: flex; flex-direction: column; min-height: 0; min-width: 0;
-    border: 1px solid var(--border); border-radius: 6px; background: var(--card);
-  }
-  h2 {
-    margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted);
-    border-bottom: 1px solid var(--border);
-  }
-  .body { flex: 1; overflow: auto; padding: 8px; }
-  .placeholder {
-    height: 100%; min-height: 72px; display: flex; flex-direction: column; gap: 4px;
-    align-items: center; justify-content: center; padding: 12px; text-align: center;
-    color: var(--muted); border: 1px dashed var(--ph); border-radius: 6px;
-  }
-  .placeholder .ph-label { font-size: 13px; }
-  .placeholder .ph-note { font-size: 11px; opacity: 0.75; }
-  .note { margin: 8px 0 0; padding: 0 2px; font-size: 11px; color: var(--muted); }
-  .stages { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
-  .stage {
-    padding: 14px 8px; text-align: center; font-size: 12px; color: var(--muted);
-    border: 1px dashed var(--ph); border-radius: 6px;
-  }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #181510; --fg: #e7e1d3; --muted: #9a927e; --border: #34302a;
+        --card: #211d17; --accent: #d18a5c; --accent-soft: #3b2c1f; --ok: #84cc16;
+        --warn: #f59e0b; --err: #ef4444; --chip: #2c2822; --ph: #57534a; --prose: #ded7c7;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 8px 12px; font-size: 13px; line-height: 1.5;
+      color: var(--ag-fg, var(--fg)); background: var(--ag-bg, var(--bg));
+      font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      height: calc(100vh - 16px); display: flex; flex-direction: column; gap: 8px;
+    }
+    header { display: flex; align-items: center; gap: 8px; flex: none; }
+    header h1 { margin: 0; font-size: 14px; font-weight: 600; }
+    header .spacer { flex: 1; }
+    #modeName { color: var(--ag-muted, var(--muted)); font-size: 12px; }
+    #status { color: var(--ag-muted, var(--muted)); font-size: 11px; min-width: 60px; text-align: right; }
+    .btn {
+      height: 28px; padding: 0 12px; font-size: 12px; cursor: pointer;
+      background: var(--ag-chip, var(--chip)); color: var(--ag-fg, var(--fg));
+      border: 1px solid var(--ag-border, var(--border));
+      border-radius: var(--ag-radius, var(--radius-sm));
+    }
+    .btn:hover { border-color: var(--ag-accent, var(--accent)); }
+    .btn.primary { background: var(--ag-accent, var(--accent)); color: #fff; border-color: transparent; }
+    .btn.primary:hover { opacity: 0.9; }
+    .btn.ghost { background: transparent; border-color: transparent; color: var(--ag-muted, var(--muted)); }
+    .btn.ghost:hover { color: var(--ag-fg, var(--fg)); border-color: var(--ag-border, var(--border)); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    textarea {
+      padding: 6px 8px; font-size: 12px; font-family: inherit; resize: vertical;
+      background: var(--ag-card, var(--card)); color: var(--ag-fg, var(--fg));
+      border: 1px solid var(--ag-border, var(--border));
+      border-radius: var(--ag-radius, var(--radius-sm));
+    }
+    textarea::placeholder { color: var(--ag-muted, var(--muted)); }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(216px, 248px) minmax(0, 1fr) minmax(232px, 280px);
+      gap: 8px; flex: 1; min-height: 0;
+    }
+    .drawer, .main {
+      display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+      border: 1px solid var(--ag-border, var(--border));
+      border-radius: var(--ag-radius, var(--radius));
+      background: var(--ag-card, var(--card));
+    }
+    .col-head {
+      flex: none; padding: 8px 12px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+      color: var(--ag-muted, var(--muted));
+      border-bottom: 1px solid var(--ag-border, var(--border));
+    }
+    .list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+    .item {
+      border: 1px solid transparent; padding: 6px 8px; cursor: pointer;
+      border-radius: var(--ag-radius, var(--radius-sm));
+    }
+    .item:hover { border-color: var(--ag-border, var(--border)); background: var(--ag-chip, var(--chip)); }
+    .item.active { border-color: var(--ag-accent, var(--accent)); background: var(--ag-accent-soft, var(--accent-soft)); }
+    .item .row1 { display: flex; align-items: center; gap: 6px; }
+    .item .name {
+      font-weight: 600; font-size: 12px; flex: 1; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .item .sub {
+      color: var(--ag-muted, var(--muted)); font-size: 11px; margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .chip {
+      font-size: 10px; background: var(--ag-chip, var(--chip));
+      color: var(--ag-muted, var(--muted)); padding: 1px 6px; border-radius: 999px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .dot.running { background: var(--ag-ok, var(--ok)); }
+    .dot.done { background: var(--ag-muted, var(--muted)); }
+    .dot.other { background: var(--ag-warn, var(--warn)); }
+    .entry { border-bottom: 1px solid var(--ag-border, var(--border)); padding: 8px 0; }
+    .entry:last-child { border-bottom: none; }
+    .entry .keys {
+      color: var(--ag-accent, var(--accent)); font-size: 11px; font-weight: 600;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .entry .content {
+      margin-top: 4px; color: var(--ag-fg, var(--prose)); font-size: 12px; line-height: 1.7;
+      white-space: pre-wrap; max-height: 240px; overflow-y: auto;
+    }
+    .badge {
+      font-size: 10px; padding: 1px 6px; border-radius: 999px;
+      background: var(--ag-chip, var(--chip)); color: var(--ag-muted, var(--muted));
+    }
+    .badge.off { color: var(--ag-warn, var(--warn)); }
+    .main-head {
+      flex: none; padding: 8px 12px; border-bottom: 1px solid var(--ag-border, var(--border));
+      display: flex; align-items: center; gap: 8px;
+    }
+    .main-head .title {
+      font-weight: 600; font-size: 13px; flex: 1; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .wc { color: var(--ag-muted, var(--muted)); font-size: 11px; flex: none; }
+    .toolbar {
+      flex: none; padding: 8px 12px; border-bottom: 1px solid var(--ag-border, var(--border));
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .toolbar textarea { width: 100%; }
+    .acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .acts .spacer { flex: 1; }
+    .editor-body {
+      flex: 1; overflow-y: auto; padding: 16px;
+      background: var(--ag-bg, var(--bg));
+      display: flex; justify-content: center;
+    }
+    .paper {
+      max-width: 720px; width: 100%;
+      color: var(--ag-fg, var(--prose));
+      background: var(--ag-card, var(--card));
+      border: 1px solid var(--ag-border, var(--border));
+      border-radius: var(--ag-radius, var(--radius));
+      padding: 24px 32px;
+      font-family: Georgia, 'Songti SC', 'SimSun', serif;
+      font-size: 16px; line-height: 1.9; white-space: pre-wrap;
+    }
+    .empty {
+      flex: 1; min-height: 96px; max-width: 720px; width: 100%;
+      display: flex; flex-direction: column; gap: 4px; align-items: center;
+      justify-content: center; text-align: center; padding: 16px;
+      color: var(--ag-muted, var(--muted)); font-size: 12px;
+      border: 1px dashed var(--ag-border, var(--ph));
+      border-radius: var(--ag-radius, var(--radius));
+    }
+    .empty .title { font-size: 13px; color: var(--ag-fg, var(--fg)); }
+    .empty .note { font-size: 11px; opacity: 0.75; }
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px;
+      background: var(--ag-fg, var(--fg)); color: var(--ag-bg, var(--bg));
+      padding: 8px 16px; border-radius: var(--ag-radius, var(--radius));
+      font-size: 12px; display: none; max-width: 80%;
+    }
+    .toast.error { background: var(--ag-err, var(--err)); color: #fff; }
+      /* 面板桥失败 ≠ 真空数据：显式错误横幅（--ag-err 语义色）与「暂无 XX」空态区分 */
+    .bridge-err {
+      border: 1px solid var(--err, #dc2626); border-radius: var(--radius, 8px); padding: 16px;
+      display: flex; flex-direction: column; gap: 8px; align-items: center;
+      justify-content: center; text-align: center; margin: 8px;
+    }
+    .bridge-err-title { color: var(--err, #dc2626); font-weight: 600; }
+    .bridge-err-msg { font-size: 11px; color: var(--muted, #64748b); word-break: break-all; }
   </style>
 </head>
 <body>
-  <h1>写作工坊</h1>
-  <main class="layout cols" data-panel="writing">
-    <aside aria-label="作品树">
-      <h2>作品树</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">作品库</span>
-          <span class="ph-note">数据源缺口：作品物料（作品→卷→章，任务树投影；小说连载管线数据接通后渲染卷/章状态灯）。</span>
-        </div>
-      </div>
+  <header>
+    <h1>🖋️ 写作工坊</h1>
+    <span id="modeName"></span>
+    <span class="spacer"></span>
+    <span id="status"></span>
+    <button class="btn ghost" onclick="refreshAll()">刷新</button>
+  </header>
+  <div class="layout">
+    <aside class="drawer">
+      <div class="col-head">作品树</div>
+      <div class="list" id="workList"></div>
     </aside>
-    <section aria-label="章节编辑器">
-      <h2>章节编辑器</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">章节编辑器</span>
-          <span class="ph-note">数据源缺口：章节内容与编辑承载后接（后接点 = 宿主 EditorWidget 组件）。</span>
+    <main class="main">
+      <div class="main-head">
+        <span class="title" id="mainTitle">章节编辑器</span>
+        <span class="wc" id="charCount"></span>
+      </div>
+      <div class="toolbar" id="toolbar" style="display:none">
+        <textarea id="instruction" rows="2"
+          placeholder="指令（可选）：例如「保持第一人称，加强雾的描写」"></textarea>
+        <div class="acts">
+          <button class="btn primary" onclick="runAct('continue')">续写</button>
+          <button class="btn primary" onclick="runAct('expand')">扩写</button>
+          <button class="btn primary" onclick="runAct('rewrite')">改写</button>
+          <button class="btn" onclick="runAct('outline')">生成大纲</button>
+          <button class="btn" onclick="runAct('brainstorm')">头脑风暴</button>
+          <span class="spacer"></span>
+          <button class="btn ghost" onclick="reloadChapter()">刷新章节</button>
         </div>
       </div>
-    </section>
-    <aside aria-label="设定集">
-      <h2>设定集</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">设定条目</span>
-          <span class="ph-note">数据源缺口：设定集物料（人物/世界观/时间线；注入机制与 roleplay 共享 lorebook_context）。</span>
-        </div>
-      </div>
+      <div class="editor-body" id="editorBody"></div>
+    </main>
+    <aside class="drawer">
+      <div class="col-head">设定集</div>
+      <div class="list" id="bibleList"></div>
     </aside>
-  </main>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+  // agentosFetch：经 window.agentos.postMessage（宿主代发 REST 带 token）+ Promise 化。
+  // webview iframe 是 opaque-origin 沙箱（CSP connect-src 'none'），直接请求不可行。
+  function agentosFetch(path, params) {
+    return new Promise(function (resolve, reject) {
+      if (!window.agentos) { reject(new Error('window.agentos 桥不可用')); return; }
+      var id = window.agentos.postMessage(path, params);
+      function handler(e) {
+        var d = e.data;
+        if (!d || !d.__agentos_webview || d.id !== id) return;
+        window.removeEventListener('message', handler);
+        if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
+        else resolve(d.params);
+      }
+      window.addEventListener('message', handler);
+    });
+  }
+  // 宿主返回 axios res.data，内层 body 是 base64 JSON
+  function unwrap(res) {
+    var data = (res && res.data) ? res.data : res;
+    if (data && data.body) {
+      try { return JSON.parse(atob(data.body)); } catch (e) { return data; }
+    }
+    return data;
+  }
+
+  // ── 宿主下行桥（宿主融合）：theme.sync → --ag-* token 注入 documentElement；
+  // ctx.sync → window.__agentosCtx（章动作据此把任务送入当前对话框线程）。
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || !d.__agentos_webview) return;
+    if (d.method === 'theme.sync' && d.params && d.params.tokens) {
+      var tokens = d.params.tokens;
+      Object.keys(tokens).forEach(function (k) {
+        document.documentElement.style.setProperty(k, tokens[k]);
+      });
+    } else if (d.method === 'ctx.sync' && d.params) {
+      window.__agentosCtx = { sessionId: String(d.params.sessionId || '') };
+    }
+  });
+
+  var state = {
+    modeName: '', works: [], activeWork: null, chapter: null, bible: null,
+    errors: {},  // 各数据面桥失败信息；失败≠空数据，见 bridgeErrorBox
+  };
+  var BIBLE_TITLES = {
+    'BIBLE.md': '世界观设定', 'OUTLINE.md': '章节大纲', 'LEDGER.md': '设定台账',
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(s) { $('status').textContent = s || ''; }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function toast(msg, isError) {
+    var t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast' + (isError ? ' error' : '');
+    t.style.display = 'block';
+    setTimeout(function () { t.style.display = 'none'; }, 3200);
+  }
+  // 面板桥失败 ≠ 真空数据：桥不可用/请求失败渲染显式错误横幅（--ag-err 语义色），
+  // 与 emptyBox 的诚实空态视觉区分；重试按钮走全量刷新。
+  function bridgeErrorBox(msg) {
+    return '<div class="bridge-err"><div class="bridge-err-title">面板桥不可用/加载失败</div>' +
+      '<div class="bridge-err-msg">' + escapeHtml(msg) + '</div>' +
+      '<button class="secondary" onclick="refreshAll()">重试</button></div>';
+  }
+  function emptyBox(label, note) {
+    return '<div class="empty"><div class="title">' + escapeHtml(label) + '</div>' +
+      (note ? '<div class="note">' + escapeHtml(note) + '</div>' : '') + '</div>';
+  }
+
+  // ── 数据装载 ──
+  function loadBootstrap() {
+    return agentosFetch('/ext/mode_writing/data/bootstrap').then(function (res) {
+      var d = unwrap(res) || {};
+      state.modeName = d.name || '';
+      $('modeName').textContent = state.modeName;
+    }).catch(function () {});
+  }
+  function loadWorks() {
+    return agentosFetch('/ext/mode_writing/data/works').then(function (res) {
+      state.works = (unwrap(res) || {}).works || [];
+      delete state.errors.works;
+    }).catch(function (e) {
+      state.errors.works = (e && e.message) || String(e);
+    });
+  }
+  function loadChapter() {
+    return agentosFetch('/ext/mode_writing/data/chapter?pipeline_id=' + encodeURIComponent(state.activeWork))
+      .then(function (res) {
+        state.chapter = (unwrap(res) || {}).chapter || null;
+        delete state.errors.chapter;
+        renderEditor();
+      })
+      .catch(function (e) {
+        state.errors.chapter = (e && e.message) || String(e);
+        renderEditor();
+      });
+  }
+  function loadBible() {
+    return agentosFetch('/ext/mode_writing/data/bible?pipeline_id=' + encodeURIComponent(state.activeWork))
+      .then(function (res) {
+        state.bible = (unwrap(res) || {}).bible || null;
+        delete state.errors.bible;
+        renderBible();
+      })
+      .catch(function (e) {
+        state.errors.bible = (e && e.message) || String(e);
+        renderBible();
+      });
+  }
+
+  function refreshAll() {
+    setStatus('刷新中...');
+    Promise.all([loadBootstrap(), loadWorks()])
+      .then(function () { setStatus(''); renderWorks(); })
+      .catch(function (e) { setStatus('加载失败'); toast(String(e), true); });
+  }
+
+  // ── 左栏：作品树 ──
+  function renderWorks() {
+    var el = $('workList');
+    if (state.errors.works) {
+      el.innerHTML = bridgeErrorBox(state.errors.works);
+      return;
+    }
+    if (!state.works.length) {
+      el.innerHTML = emptyBox('作品树还是空的', '在聊天区选「写作」模式发起任务，作品会出现在这里');
+      return;
+    }
+    el.innerHTML = state.works.map(function (w) {
+      var dot = w.run_status === 'running' ? 'running' : (w.task_status === 'completed' ? 'done' : 'other');
+      var ws = (w.ws_meta && w.ws_meta.path) ? '<span class="chip">有工作区</span>' : '';
+      var proj = w.parent_project_id
+        ? '<span class="chip">项目 ' + escapeHtml(String(w.parent_project_id).slice(0, 8)) + '</span>' : '';
+      return '<div class="item' + (state.activeWork === w.pipeline_id ? ' active' : '') +
+        '" data-id="' + escapeHtml(w.pipeline_id) + '">' +
+        '<div class="row1"><span class="dot ' + dot + '"></span><div class="name">' +
+        escapeHtml(w.goal || w.pipeline_id) + '</div></div>' +
+        '<div class="sub">' + escapeHtml(w.task_status || w.run_status || '—') + ' · ' +
+        escapeHtml(String(w.message_count)) + ' 条消息</div>' +
+        ((ws || proj) ? '<div class="chips">' + ws + proj + '</div>' : '') + '</div>';
+    }).join('');
+    el.querySelectorAll('.item').forEach(function (node) {
+      node.addEventListener('click', function () { selectWork(node.getAttribute('data-id')); });
+    });
+  }
+
+  // ── 右栏：设定集 ──
+  function renderBible() {
+    var el = $('bibleList');
+    if (state.errors.bible) {
+      el.innerHTML = bridgeErrorBox(state.errors.bible);
+      return;
+    }
+    if (!state.activeWork) {
+      el.innerHTML = emptyBox('设定集', '先在「作品树」选择一部作品，再查看它工作空间里的设定集');
+      return;
+    }
+    var b = state.bible;
+    if (!b) { el.innerHTML = emptyBox('设定集加载中…', ''); return; }
+    var html = (b.absent || []).map(function (name) {
+      return '<div class="entry"><div class="keys">📄 ' + escapeHtml(name) +
+        ' <span class="badge off">缺失</span></div></div>';
+    }).join('');
+    html += (b.sections || []).map(function (s) {
+      return '<div class="entry"><div class="keys">📄 ' + escapeHtml(s.name) +
+        ' <span class="badge">' + escapeHtml(BIBLE_TITLES[s.name] || '') + '</span></div>' +
+        '<div class="content">' + escapeHtml(s.content) + '</div></div>';
+    }).join('');
+    el.innerHTML = html || emptyBox('设定集为空', '');
+  }
+
+  // ── 中央：章节编辑器 ──
+  function selectWork(pid) {
+    state.activeWork = pid;
+    state.chapter = null;
+    state.bible = null;
+    renderWorks();
+    renderBible();
+    $('toolbar').style.display = 'flex';
+    var w = null;
+    state.works.forEach(function (x) { if (x.pipeline_id === pid) w = x; });
+    $('mainTitle').textContent = w ? (w.goal || pid) : pid;
+    loadChapter();
+    loadBible();
+  }
+  function renderEditor() {
+    var ch = state.chapter || {};
+    $('charCount').textContent = ch.char_count ? ch.char_count + ' 字' : '';
+    if (state.errors.chapter) {
+      $('editorBody').innerHTML = bridgeErrorBox(state.errors.chapter);
+      return;
+    }
+    if (!ch.content) {
+      $('editorBody').innerHTML = emptyBox('还没有章节正文', '任务完成后点「刷新章节」；也可以用上方章动作开始创作');
+      return;
+    }
+    $('editorBody').innerHTML = '<div class="paper">' + escapeHtml(ch.content) + '</div>';
+    $('editorBody').scrollTop = 0;
+  }
+  function reloadChapter() {
+    if (!state.activeWork) { toast('先在左侧「作品树」选择一部作品', true); return; }
+    setStatus('加载章节...');
+    loadChapter().then(function () { setStatus(''); });
+  }
+  function runAct(act) {
+    if (!state.activeWork) { toast('先在左侧「作品树」选择一部作品', true); return; }
+    var el = $('instruction');
+    var instruction = el ? el.value : '';
+    setStatus('派发中...');
+    // 行级操作锚定来源管道：只发 pipeline_id，会话归属由后端按行 thread_id 解析
+    var payload = { act: act, instruction: instruction, pipeline_id: state.activeWork };
+    agentosFetch('/ext/mode_writing/data/actions/chapter_act', payload).then(function (res) {
+      var d = unwrap(res) || {};
+      setStatus('');
+      if (d.error) { toast('派发失败：' + d.error, true); return; }
+      toast('已送入对话框生成');
+    }).catch(function (e) { setStatus(''); toast('派发失败：' + e, true); });
+  }
+
+  // ── 入口 ──
+  renderWorks();
+  renderBible();
+  $('editorBody').innerHTML = emptyBox('从左侧作品树选择一部作品开始',
+    '选定作品后可用章动作把生成任务送入当前对话框线程');
+  refreshAll();
+  </script>
 </body>
 </html>

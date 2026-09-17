@@ -154,9 +154,9 @@ function PagePlaceholder({
 /**
  * 判断 page 是否声明了任何 detachable 弹出能力（popout/childWindow/desktopWidget）
  *
- * 用于决定是否在 page 渲染区显示「弹出」按钮。
+ * 用于决定是否显示「弹出」入口（页面渲染区按钮 / 工作区页签右键菜单共用）。
  */
-function isDetachable(page: PageDeclaration): boolean {
+export function isDetachable(page: PageDeclaration): boolean {
   const d = page.detachable
   if (!d) return false
   return Boolean(d.popout || d.childWindow || d.desktopWidget)

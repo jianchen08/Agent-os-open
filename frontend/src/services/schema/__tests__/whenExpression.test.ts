@@ -233,3 +233,9 @@ describe('evaluateWhen — 健壮性', () => {
     expect(evaluateWhen('pipeline.running > 1', { 'pipeline.running': true })).toBe(false)
   })
 })
+
+describe('evaluateWhen — 非法半截运算符', () => {
+  it.each(['a | b', 'a & b', 'a = b'])('%s 解析失败 → 恒 false（fail-closed）', (expr) => {
+    expect(evaluateWhen(expr, { a: true, b: true })).toBe(false)
+  })
+})

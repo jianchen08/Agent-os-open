@@ -6,13 +6,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-
-import importlib.util
 
 import pytest
 
@@ -25,13 +24,13 @@ BRIDGE_DIR = HERE.parent.parent.parent.parent / "mcp-servers" / "mcp-bridge"
 sys.path.insert(0, str(BRIDGE_DIR))
 sys.path.insert(0, str(BROWSER_PLUGIN))
 
-from bridge_client import BridgeClient, BridgeClientError  # noqa: E402
 from tool import (  # noqa: E402
     BROWSER_TOOLS,
     BrowserTool,
     _build_arguments,
-    _to_tool_result,
 )
+
+from agentos_plugin_sdk.bridge_client import BridgeClient, BridgeClientError  # noqa: E402
 
 STUB = [sys.executable, str(BRIDGE_DIR / "stub_upstream.py")]
 
@@ -40,7 +39,7 @@ STUB = [sys.executable, str(BRIDGE_DIR / "stub_upstream.py")]
 
 
 class TestManifest:
-    @pytest.fixture()
+    @pytest.fixture
     def manifest(self) -> dict:
         with open(BROWSER_PLUGIN / "plugin.json", encoding="utf-8") as f:
             return json.load(f)
@@ -127,41 +126,6 @@ class TestBuildArguments:
 # ── 结果归一 ─────────────────────────────────────────────────
 
 
-class TestToToolResult:
-    def test_text_content_to_snapshot(self):
-        mcp = {"content": [{"type": "text", "text": "- page snapshot"}]}
-        r = _to_tool_result("browser_snapshot", mcp)
-        assert r.success
-        assert r.output["snapshot_text"] == "- page snapshot"
-
-    def test_image_content_saved_to_workspace(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        import base64
-
-        png = b"\x89PNG\r\n\x1a\nfake"
-        mcp = {"content": [{"type": "image", "data": base64.b64encode(png).decode(), "mimeType": "image/png"}]}
-        r = _to_tool_result("browser_take_screenshot", mcp)
-        assert r.success
-        assert r.output["file_path"].endswith(".png")
-        assert (tmp_path / os.path.basename(r.output["file_path"])).read_bytes() == png
-
-    def test_is_error_maps_to_failure(self):
-        mcp = {"isError": True, "content": [{"type": "text", "text": "page not found"}]}
-        r = _to_tool_result("browser_navigate", mcp)
-        assert not r.success
-        assert "page not found" in r.error
-
-    def test_oversized_image_rejected(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        import base64
-
-        big = b"x" * (8 * 1024 * 1024 + 1)
-        mcp = {"content": [{"type": "image", "data": base64.b64encode(big).decode(), "mimeType": "image/png"}]}
-        r = _to_tool_result("browser_take_screenshot", mcp)
-        assert not r.success
-        assert "超限" in r.error
-
-
 # ── tool.execute 双路径（stub Bridge + stub 上游）────────────
 
 
@@ -172,7 +136,7 @@ def _stub_bridge_config(tmp_path: Path, port: int) -> dict:
 class TestExecuteHostPath:
     """宿主直发路径（非隔离会话）。"""
 
-    @pytest.fixture()
+    @pytest.fixture
     def bridge_server(self, tmp_path, monkeypatch):
         import threading
         from http.server import ThreadingHTTPServer
@@ -236,6 +200,7 @@ class TestExecuteContainerPath:
     @pytest.mark.asyncio
     async def test_container_path_invokes_docker_exec(self, tmp_path, monkeypatch):
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
+
         # 替身 docker exec：消费 stdin（内嵌脚本），模拟容器内客户端输出。
         def fake_exec(cmd, **kwargs):
             if cmd[:2] == ["docker", "network"]:
@@ -243,27 +208,35 @@ class TestExecuteContainerPath:
                 class Net:
                     returncode = 1
                     stdout = b""
+
                 return Net()
 
             assert cmd[:3] == ["docker", "exec", "-i"]
             assert "python" in cmd
+
             class P:
                 returncode = 0
                 stderr = b""
-                stdout = json.dumps({
-                    "ok": True,
-                    "status": 200,
-                    "body": {"result": {"content": [{"type": "text", "text": "sandbox-ok"}]}},
-                }).encode()
+                stdout = json.dumps(
+                    {
+                        "ok": True,
+                        "status": 200,
+                        "body": {"result": {"content": [{"type": "text", "text": "sandbox-ok"}]}},
+                    }
+                ).encode()
+
             return P()
 
-        import bridge_client as bc
+        from agentos_plugin_sdk import bridge_client as bc
+
         monkeypatch.setattr(bc.subprocess, "run", fake_exec)
         monkeypatch.setenv("AGENTOS_BRIDGE_URL", "http://10.9.8.7:8765")
         t = BrowserTool({"upstream": "browser", "timeout_secs": 10})
         # _container_id 由 isolation_guard 注入 args（tool.py 据此判 sandbox 并
         # 转环境变量给容器内客户端）。
-        r = await t.execute({"_tool_name": "browser_navigate", "url": "https://example.com", "_container_id": "c-test-1"})
+        r = await t.execute(
+            {"_tool_name": "browser_navigate", "url": "https://example.com", "_container_id": "c-test-1"}
+        )
         assert r.success
         assert "sandbox-ok" in r.output["snapshot_text"]
 
@@ -272,7 +245,8 @@ class TestExecuteContainerPath:
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
         monkeypatch.delenv("_CONTAINER_ID", raising=False)
         # 无 _container_id → caller 判为 host → 走直发路径；断言不误入容器路径。
-        import bridge_client as bc
+        from agentos_plugin_sdk import bridge_client as bc
+
         called = []
 
         def fail_exec(*a, **kw):
@@ -289,7 +263,7 @@ class TestExecuteContainerPath:
     async def test_container_candidates_include_env_and_hostname(self, monkeypatch):
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
         monkeypatch.setenv("AGENTOS_BRIDGE_URL", "http://10.9.8.7:8765")
-        monkeypatch.setattr("bridge_client._docker_gateway_ip", lambda: "172.17.0.1")
+        monkeypatch.setattr("agentos_plugin_sdk.bridge_client._docker_gateway_ip", lambda: "172.17.0.1")
         client = BridgeClient({"bridge_base": "http://127.0.0.1:8765", "upstream": "browser"})
         cands = client._container_base_candidates()
         assert cands[0] == "http://10.9.8.7:8765"
@@ -304,7 +278,7 @@ class TestToken:
     @pytest.mark.asyncio
     async def test_missing_token_is_clean_error(self, monkeypatch, tmp_path):
         monkeypatch.delenv("AGENTOS_BRIDGE_TOKEN", raising=False)
-        monkeypatch.setattr("bridge_client._find_project_root", lambda: "")
+        monkeypatch.setattr("agentos_plugin_sdk.bridge_client._find_project_root", lambda: "")
         t = BrowserTool({"bridge_base": "http://127.0.0.1:8765", "upstream": "browser"})
         r = await t.execute({"_tool_name": "browser_navigate", "url": "https://example.com"})
         assert not r.success

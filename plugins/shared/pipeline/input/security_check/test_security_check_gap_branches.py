@@ -740,6 +740,61 @@ class TestApprovalFailureSurface:
         assert "用户拒绝执行: 参数命中安全规则: guard_rm" in reason
 
 
+class TestApprovalChannelErrorRetryMarker:
+    """BUG-41：审批通道故障（wait 异常）的软拦截必须带 retry_allowed 标记。
+
+    该路径人审结果未知（用户可能已点批准但响应丢失）、调用从未执行——
+    duplicate_check 据标记把该次未执行的签名从重复窗口摘除，人审后的重试
+    不得被去重拦截。用户主动拒绝/超时/取消不是通道故障，不带标记。
+    """
+
+    @pytest.mark.asyncio
+    async def test_wait_exception_marks_retry_allowed_with_arguments(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plugin = _approval_plugin(monkeypatch)
+        cap = _ScriptedApprovalCap(wait_raises=RuntimeError("sidecar restarted mid-wait"))
+        _mod.set_human_interaction_cap(cap)
+
+        r = await plugin.execute(
+            _tool_ctx("bash_execute", {"command": "rm -rf /gap-retry-marker"})
+        )
+
+        d = r.state_updates["security.decision"]
+        assert "审批服务异常" in d["reason"]
+        results = r.state_updates["tool_results"]
+        assert results, "软拦截必须产出拒绝 tool_result"
+        for entry in results:
+            assert entry["success"] is False
+            assert entry.get("retry_allowed") is True
+            assert entry["arguments"] == {"command": "rm -rf /gap-retry-marker"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "wait_raises",
+        [
+            _mod.InteractionDeniedError("req-x", "user said no"),
+            _mod.InteractionCancelledError("req-x", "user closed panel"),
+            _mod.InteractionTimeoutError("req-x", 86400.0),
+        ],
+    )
+    async def test_denied_cancelled_timeout_do_not_mark_retry_allowed(
+        self, monkeypatch: pytest.MonkeyPatch, wait_raises: Exception
+    ) -> None:
+        """非通道故障的软拦截（拒/取消/超时）不带 retry_allowed——去重闸保留。"""
+        plugin = _approval_plugin(monkeypatch)
+        cap = _ScriptedApprovalCap(wait_raises=wait_raises)
+        _mod.set_human_interaction_cap(cap)
+
+        r = await plugin.execute(
+            _tool_ctx("bash_execute", {"command": "rm -rf /gap-no-retry"})
+        )
+
+        for entry in r.state_updates["tool_results"]:
+            assert "retry_allowed" not in entry
+            assert "arguments" not in entry
+
+
 # ═══════════════════════════════════════════════════════════════
 # 8. 审批描述格式化
 # ═══════════════════════════════════════════════════════════════

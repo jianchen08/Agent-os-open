@@ -194,3 +194,16 @@ python_line_coverage=100.00
 # bash/encoding 25.4%→97%，另有 plugins/shared 死代码清理 -320 行）。
 # 基线 57.00 = floor(56.89)+1（自动棘轮写入）；CI 首跑后按 -0.55pp 历史差
 # 以 CI 实测按同公式重定。
+#
+# 补测批（2026-09-17，dev/0.2@7490d0077 后实测）：fuse 合并新入六模式包
+# （mode_{coding,godot,planning,research,roleplay,writing}/server.py，3297 行）
+# 曾把实测砸到 98.38（622 缺行）——本批 58% 清偿后回到 98.96（402 缺行）。
+# 增量来源 = 六包降级/容错参数化补测（on_load 双面+warn-once+messages 契约+
+# coding 形态面，b4ccda0f0）+ 小残留 30 行（worktree gitdir 失败分支/project_
+# registry 守卫/eval_harness 三件/task_evaluate bash 分支/双 sys.path 自举，
+# 7490d0077）。**余 402 行分诊**：378 行 = 六包写动作长尾（planning create_
+# project/plan、roleplay play/regenerate、research start/followup、writing
+# chapter_act、godot dispatch/open_editor 等——需假 tool-executor 逐模式驱动，
+# 下一批主菜）；human/server.py 18 行与 tasks/storage.py 4 行 = 并行会话新入
+# 代码（非本批回归）；context_build/plugin.py 385 行 sys.path 守卫已有测试
+# （dual_root 文件）疑车道未收集，待查 BASE_TEST_PATHS。

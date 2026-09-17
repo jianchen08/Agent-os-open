@@ -437,3 +437,59 @@ describe('ContributionRegistry — 跨插件页面 id 冲突（BUG-11 回归）'
     expect(registry.getPage('tasks')?.pluginId).toBe('debug_center')
   })
 })
+
+describe('ContributionRegistry — 未知贡献点 key 忽略（导航页垃圾卡片回归）', () => {
+  let registry: ContributionRegistry
+
+  beforeEach(() => {
+    registry = new ContributionRegistry()
+  })
+
+  it('非页面贡献 key（renderers/thread_fields）不归一化为页面', () => {
+    // 生产实况：dsh_adapter.contributes.renderers、isolation/workspace_lifecycle
+    // .contributes.thread_fields 是非页面声明，兜底归一化会在工作区导航页产生
+    // 「dsh_adapter:renderers:{"card":"read"...」式垃圾卡片（无 id/title 条目
+    // 经 synthesizeId 兜底成 JSON 截断串）。
+    registry.registerFromSchema({
+      plugin_contributes: [
+        {
+          plugin_id: 'dsh_adapter',
+          contributes: {
+            renderers: [{ card: 'read', tool: 'dsh_read' }],
+            pages: [{ id: 'real_page', title: '真实页面', space: 'workspace' }],
+          },
+        },
+        {
+          plugin_id: 'isolation',
+          contributes: {
+            thread_fields: [{ id: 'main', description: '主会话执行环境隔离（容器/宿主）' }],
+          },
+        },
+      ],
+    })
+
+    const pages = registry.getPages()
+    expect(pages.map((p) => p.id)).toEqual(['real_page'])
+    expect(pages.every((p) => !p.id.includes('renderers'))).toBe(true)
+    expect(pages.every((p) => !p.id.includes('thread_fields'))).toBe(true)
+  })
+
+  it('已知旧贡献点 key 与未知 key 混合时仅旧 key 正常归一化', () => {
+    registry.registerFromSchema({
+      plugin_contributes: [
+        {
+          plugin_id: 'p',
+          contributes: {
+            viewsContainers: [{ id: 'vc1', title: '侧栏入口', icon: '⚡' }],
+            some_future_key: [{ id: 'x' }],
+          },
+        },
+      ],
+    })
+
+    const activityBar = registry.getPagesBySpace('workspace').filter((p) => p.slot === 'activity-bar')
+    expect(activityBar.map((p) => p.id)).toEqual(['vc1'])
+    // 未知 key 无兜底页面产生
+    expect(registry.getPages().every((p) => p.id !== 'x')).toBe(true)
+  })
+})

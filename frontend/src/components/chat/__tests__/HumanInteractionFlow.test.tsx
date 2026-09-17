@@ -838,6 +838,25 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
       }
     })
 
+    it('24h 等待上限（BUG-40）倒计时以 时:分:秒 展示（非原始秒数，无 NaN/负值）', () => {
+      const props = createCardProps({
+        interaction: createPendingInteraction({
+          mode: 'choice',
+          title: '安全审批: bash_execute',
+          timeoutSeconds: 86400,
+          createdAt: new Date().toISOString(),
+          options: [{ id: 'approved_once', label: '仅本次执行' }],
+        }),
+      })
+
+      render(<InteractionCard {...props} />)
+
+      const countdown = screen.getByTestId('approval-countdown')
+      expect(countdown).toHaveTextContent('剩余 24:00:00')
+      // 性质断言：不出现原始秒数/NaN/负数
+      expect(countdown.textContent).not.toMatch(/86400|NaN|-\d/)
+    })
+
     it('无 timeoutSeconds 的卡片不显示倒计时（会话等非审批交互不受影响）', () => {
       const props = createCardProps({
         interaction: createPendingInteraction({

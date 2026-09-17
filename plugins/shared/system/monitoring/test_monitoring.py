@@ -441,13 +441,12 @@ class TestPayloadDiag:
         result = mod._read_payload_diag("100__m__h__1msg.json")
         assert result["error"] == "file not found"
 
-    def test_payload_diag_pages(self) -> None:
+    def test_webview_pages(self) -> None:
         mod, _ = _make_module_with_monitor()
-        for path in ("/ext/monitoring/page/payload-diag", "/ext/monitoring/page/tool-calls"):
-            resp = _run(mod.http_handle(path=path, method="GET"))
-            assert resp["success"] is True
-            assert resp["data"]["status"] == 200
-            assert resp["data"]["body_encoding"] == "base64"
+        resp = _run(mod.http_handle(path="/ext/monitoring/page/tool-calls", method="GET"))
+        assert resp["success"] is True
+        assert resp["data"]["status"] == 200
+        assert resp["data"]["body_encoding"] == "base64"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -611,6 +610,52 @@ class TestToolCalls:
         resp = _run(mod.http_handle(path="/ext/monitoring/tool-calls", method="GET"))
         payload = _decode_body(resp)
         assert payload["items"] == [] and payload["total"] == 0
+
+
+class TestToolCallStats:
+    """按工具聚合统计：计数/成败细分/平均耗时/窗口口径 + 租户 fail-closed。"""
+
+    def test_stats_aggregation(self, tmp_path: Path, monkeypatch) -> None:
+        mod = _load_server()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_kernel_db(tmp_path)))
+        result = mod._query_tool_call_stats({}, "tenant-a")
+        # 窗口内 3 条调用 → bash_execute/file_read 各 1 次、file_write 1 次
+        # （其 1 次为失败）；平均耗时为算术平均（file_write 仅 2500ms 一条）
+        assert result["total"] == 3
+        by_tool = {i["tool_name"]: i for i in result["items"]}
+        assert by_tool["bash_execute"]["calls"] == 1
+        assert by_tool["bash_execute"]["success_calls"] == 1
+        assert by_tool["bash_execute"]["error_calls"] == 0
+        assert by_tool["file_write"]["error_calls"] == 1
+        assert by_tool["file_write"]["avg_duration_ms"] == 2500.0
+        assert by_tool["file_read"]["success_calls"] == 1
+        # 按调用次数倒序不适用于并列次数（全为 1），但性质上 calls 总和 = 明细总数
+        assert sum(i["calls"] for i in result["items"]) == 3
+        # 窗口字段回显（诚实口径：非全生命周期累计）
+        assert result["window"] == 500
+
+    def test_stats_tenant_isolation_and_fail_closed(self, tmp_path: Path, monkeypatch) -> None:
+        mod = _load_server()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_kernel_db(tmp_path)))
+        # 缺身份 → 空集 fail-closed
+        missing = mod._query_tool_call_stats({}, "")
+        assert missing["items"] == [] and "tenant" in missing["error"]
+        # 租户互斥：tenant-b 无含工具结果行 → 空统计
+        b = mod._query_tool_call_stats({}, "tenant-b")
+        assert b["items"] == [] and b["total"] == 0
+
+    def test_stats_route(self, tmp_path: Path, monkeypatch) -> None:
+        mod, _ = _make_module_with_monitor()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_kernel_db(tmp_path)))
+        resp = _run(mod.http_handle(
+            path="/ext/monitoring/tool-calls/stats",
+            method="GET",
+            headers={"x-agentos-tenant": "tenant-a"},
+        ))
+        payload = _decode_body(resp)
+        assert payload["total"] == 3
+        assert {i["tool_name"] for i in payload["items"]} == {"bash_execute", "file_write", "file_read"}
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -75,6 +75,18 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// `map_err` 样板收口：上下文前缀 + 底层错误 Display。
+    ///
+    /// routes.rs / db_routes.rs 原同构闭包 ≥46 处（`.map_err(|e| ApiError::Internal
+    /// { message: format!("ctx: {e}") })?`），统一为
+    /// `.map_err(ApiError::internal("ctx"))?` 一行。上下文须为静态串——
+    /// 需拼接动态信息（路径等）的少数调用点保留原闭包形态。
+    pub fn internal<E: std::fmt::Display>(ctx: &'static str) -> impl Fn(E) -> ApiError {
+        move |e| ApiError::Internal {
+            message: format!("{ctx}: {e}"),
+        }
+    }
+
     /// 稳定机器码（单一真值源 `config/kernel/error_codes.json`）。
     pub fn error_code(&self) -> &'static str {
         match self {

@@ -5,74 +5,458 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>编码交付</title>
   <style>
-  :root {
-    --bg: #f8fafc; --fg: #1a1a1a; --muted: #64748b; --border: #cbd5e1;
-    --card: #ffffff; --ph: #94a3b8;
-  }
-  @media (prefers-color-scheme: dark) {
+    /* 主题 token：宿主下行桥 theme.sync 逐键落 --ag-*（documentElement 内联样式
+       优先级高于 ：root），现值兜底；--bg 等本地别名引用 token，全页跟随宿主主题。 */
     :root {
-      --bg: #0f172a; --fg: #e2e8f0; --muted: #94a3b8; --border: #334155;
-      --card: #1e293b; --ph: #475569;
+      --bg: var(--ag-bg, #f6f8fb); --fg: var(--ag-fg, #16212e); --muted: var(--ag-muted, #64748b);
+      --border: var(--ag-border, #d7dee8); --card: var(--ag-card, #ffffff);
+      --accent: var(--ag-accent, #2563eb); --accent-soft: var(--ag-accent-soft, #e8efff);
+      --ok: var(--ag-ok, #16a34a); --warn: var(--ag-warn, #d97706);
+      --chip: var(--ag-chip, #eef2f7); --err: var(--ag-err, #dc2626);
+      --ph: var(--ag-muted, #94a3b8); --radius: var(--ag-radius, 8px);
     }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 12px; font-size: 13px; color: var(--fg); background: var(--bg);
-    font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  }
-  h1 { margin: 0 0 12px; font-size: 15px; }
-  .layout { display: grid; gap: 12px; height: calc(100vh - 44px); }
-  .cols { grid-template-columns: 220px minmax(0, 1fr) 200px; }
-  section, aside {
-    display: flex; flex-direction: column; min-height: 0; min-width: 0;
-    border: 1px solid var(--border); border-radius: 6px; background: var(--card);
-  }
-  h2 {
-    margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted);
-    border-bottom: 1px solid var(--border);
-  }
-  .body { flex: 1; overflow: auto; padding: 8px; }
-  .placeholder {
-    height: 100%; min-height: 72px; display: flex; flex-direction: column; gap: 4px;
-    align-items: center; justify-content: center; padding: 12px; text-align: center;
-    color: var(--muted); border: 1px dashed var(--ph); border-radius: 6px;
-  }
-  .placeholder .ph-label { font-size: 13px; }
-  .placeholder .ph-note { font-size: 11px; opacity: 0.75; }
-  .note { margin: 8px 0 0; padding: 0 2px; font-size: 11px; color: var(--muted); }
-  .stages { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
-  .stage {
-    padding: 14px 8px; text-align: center; font-size: 12px; color: var(--muted);
-    border: 1px dashed var(--ph); border-radius: 6px;
-  }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: var(--ag-bg, #0f1420); --fg: var(--ag-fg, #e2e8f0); --muted: var(--ag-muted, #94a3b8);
+        --border: var(--ag-border, #2b3446); --card: var(--ag-card, #171d2b);
+        --accent: var(--ag-accent, #60a5fa); --accent-soft: var(--ag-accent-soft, #1d2a44);
+        --chip: var(--ag-chip, #222b3d); --ph: var(--ag-muted, #475069);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 8px 10px; font-size: 12px; color: var(--fg); background: var(--bg);
+      font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      height: calc(100vh - 16px); display: flex; flex-direction: column; gap: 7px;
+    }
+    header { display: flex; align-items: center; gap: 8px; flex: none; }
+    header h1 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .2px; }
+    header .spacer { flex: 1; }
+    #modeName { color: var(--muted); font-size: 11px; }
+    #status { color: var(--muted); font-size: 11px; }
+    button {
+      padding: 4px 10px; background: var(--accent); color: #fff; border: none;
+      border-radius: calc(var(--radius) - 2px); cursor: pointer; font-size: 12px;
+    }
+    button.secondary { background: var(--chip); color: var(--fg); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    input, textarea {
+      padding: 4px 7px; background: var(--card); color: var(--fg);
+      border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
+      font-size: 12px; font-family: inherit;
+    }
+    textarea { resize: vertical; }
+    .dispatch { display: flex; gap: 6px; flex: none; }
+    .dispatch input { width: 170px; flex: none; }
+    .dispatch textarea { flex: 1; min-height: 30px; }
+    .layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 8px; flex: 1; min-height: 0; }
+    .drawer {
+      display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--border);
+      border-radius: var(--radius); background: var(--card); overflow: hidden;
+    }
+    .drawer .head, section > h2 {
+      margin: 0; padding: 6px 9px; font-size: 11px; font-weight: 600; color: var(--muted);
+      border-bottom: 1px solid var(--border); flex: none;
+    }
+    .list { flex: 1; overflow-y: auto; padding: 6px; display: flex; flex-direction: column; gap: 6px; }
+    .item {
+      border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); padding: 6px 8px;
+      cursor: pointer; background: var(--card);
+    }
+    .item:hover { border-color: var(--accent); }
+    .item.active { border-color: var(--accent); background: var(--accent-soft); }
+    .item .row1 { display: flex; align-items: center; gap: 6px; }
+    .item .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item .sub { color: var(--muted); font-size: 10px; margin-top: 3px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+    .dot.running { background: var(--ok); } .dot.done { background: var(--muted); }
+    .dot.other { background: var(--warn); }
+    .main { display: grid; grid-template-rows: minmax(0, 1.2fr) minmax(0, 1fr); gap: 8px; min-height: 0; }
+    section {
+      display: flex; flex-direction: column; min-height: 0; min-width: 0;
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); overflow: hidden;
+    }
+    .body { flex: 1; overflow: auto; padding: 6px; }
+    /* 六列看板（Devin 式密度）：列头小写灰、卡片细边框紧凑排列 */
+    .board { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; height: 100%; }
+    .col {
+      display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--border);
+      border-radius: calc(var(--radius) - 2px); background: var(--bg);
+    }
+    .col .colhead {
+      padding: 4px 7px; font-size: 10px; font-weight: 500; letter-spacing: .4px;
+      text-transform: lowercase; color: var(--muted); flex: none;
+      border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px;
+    }
+    .col .colhead .count { margin-left: auto; font-size: 9px; background: var(--chip); border-radius: 7px; padding: 0 5px; }
+    .col .cards { flex: 1; overflow-y: auto; padding: 5px; display: flex; flex-direction: column; gap: 5px; }
+    .card {
+      border: 1px solid var(--border); border-radius: calc(var(--radius) - 3px); background: var(--card);
+      padding: 5px 7px; cursor: pointer; font-size: 11px;
+    }
+    .card:hover { border-color: var(--accent); }
+    .card.active { border-color: var(--accent); background: var(--accent-soft); }
+    .card .goal {
+      font-weight: 600; line-height: 1.35; word-break: break-all;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .card .meta { color: var(--muted); font-size: 10px; margin-top: 3px; }
+    .colcards-empty { color: var(--muted); font-size: 10px; text-align: center; padding: 8px 0; opacity: .7; }
+    .rev {
+      border: 1px solid var(--border); border-radius: calc(var(--radius) - 3px); padding: 5px 8px; margin-bottom: 5px;
+      display: flex; align-items: center; gap: 8px; font-size: 11px;
+    }
+    .rev .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rev .when { color: var(--muted); font-size: 10px; flex: none; }
+    .badge { font-size: 10px; padding: 0 6px; border-radius: 7px; background: var(--chip); color: var(--muted); flex: none; }
+    .note { margin: 5px 2px 0; font-size: 10px; color: var(--muted); line-height: 1.5; flex: none; }
+    .empty {
+      height: 100%; min-height: 90px; display: flex; flex-direction: column; gap: 6px;
+      align-items: center; justify-content: center; color: var(--muted);
+      border: 1px dashed var(--ph); border-radius: var(--radius); padding: 14px; text-align: center;
+    }
+    .modal {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.45);
+      display: none; align-items: center; justify-content: center; z-index: 30;
+    }
+    .modal.open { display: flex; }
+    .modal .sheet {
+      background: var(--card); border: 1px solid var(--border); border-radius: calc(var(--radius) + 2px);
+      width: min(720px, 92vw); max-height: 80vh; display: flex; flex-direction: column;
+    }
+    .modal .mhead {
+      display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+      border-bottom: 1px solid var(--border); flex: none;
+    }
+    .modal .mhead .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+    .modal .mbody { overflow-y: auto; padding: 10px 14px; }
+    .msg { margin-bottom: 8px; }
+    .msg .who { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+    .msg .bubble {
+      border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); padding: 5px 9px;
+      line-height: 1.6; white-space: pre-wrap; background: var(--card);
+    }
+    .msg.user .bubble { background: var(--accent-soft); }
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px;
+      background: var(--fg); color: var(--bg); padding: 7px 14px; border-radius: var(--radius);
+      font-size: 12px; display: none; max-width: 80%; z-index: 40;
+    }
+    .toast.error { background: var(--err); color: #fff; }
+      /* 面板桥失败 ≠ 真空数据：显式错误横幅（--ag-err 语义色）与「暂无 XX」空态区分 */
+    .bridge-err {
+      border: 1px solid var(--err, #dc2626); border-radius: var(--radius, 8px); padding: 16px;
+      display: flex; flex-direction: column; gap: 8px; align-items: center;
+      justify-content: center; text-align: center; margin: 8px;
+    }
+    .bridge-err-title { color: var(--err, #dc2626); font-weight: 600; }
+    .bridge-err-msg { font-size: 11px; color: var(--muted, #64748b); word-break: break-all; }
   </style>
 </head>
 <body>
-  <h1>编码交付</h1>
-  <main class="layout" style="grid-template-rows: auto minmax(0, 1fr);" data-panel="coding">
-    <section aria-label="修复流水线">
-      <h2>修复流水线</h2>
-      <div class="body">
-        <div class="stages" role="list">
-          <div class="stage" role="listitem">issue</div>
-          <div class="stage" role="listitem">分诊</div>
-          <div class="stage" role="listitem">worktree</div>
-          <div class="stage" role="listitem">测试</div>
-          <div class="stage" role="listitem">审批</div>
-          <div class="stage" role="listitem">合并</div>
+  <header>
+    <h1>💻 编码交付</h1>
+    <span id="modeName"></span>
+    <span class="spacer"></span>
+    <span id="status"></span>
+    <button class="secondary" onclick="refreshAll()">刷新</button>
+  </header>
+  <div class="dispatch">
+    <input id="issueTitle" placeholder="标题（可选）">
+    <textarea id="issueText" placeholder="描述问题：现象 / 复现步骤 / 期望行为……"></textarea>
+    <button onclick="dispatchIssue()">派 issue 修复</button>
+  </div>
+  <div class="layout">
+    <aside class="drawer">
+      <div class="head">会话</div>
+      <div class="list" id="sessions"></div>
+    </aside>
+    <main class="main">
+      <section aria-label="修复流水线">
+        <h2>修复流水线</h2>
+        <div class="body"><div class="board" id="board"></div></div>
+      </section>
+      <section aria-label="diff 复盘">
+        <h2>diff 复盘</h2>
+        <div class="body" style="display:flex;flex-direction:column;min-height:0">
+          <div id="reviews" style="flex:1;overflow-y:auto;min-height:0"></div>
+          <p class="note" id="reviewsNote">diff 与审批操作走宿主审批卡：本区只读汇总待审批交互，不在面板内批准/拒绝。</p>
         </div>
-        <p class="note">数据源缺口：阶段落列映射待模式插件接入（pipeline_state mode 键拉通后按阶段列位渲染任务）。</p>
+      </section>
+    </main>
+  </div>
+  <div class="modal" id="convModal">
+    <div class="sheet">
+      <div class="mhead">
+        <span class="title" id="convTitle"></span>
+        <button class="secondary" onclick="closeConv()">关闭</button>
       </div>
-    </section>
-    <section aria-label="diff 复盘">
-      <h2>diff 复盘</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">暂无 diff 数据</span>
-          <span class="ph-note">数据源缺口：审批卡 diff 递送后接入（后接点 = review text_diff 组件）。</span>
-        </div>
-      </div>
-    </section>
-  </main>
+      <div class="mbody" id="convBody"></div>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+  // 宿主下行桥：theme.sync 逐键落宿主主题 token（--ag-*，别名变量随即生效）；
+  // ctx.sync 落宿主会话上下文（window.__agentosCtx.sessionId = 对话框线程）。
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || !d.__agentos_webview) return;
+    if (d.method === 'theme.sync' && d.params && d.params.tokens) {
+      Object.keys(d.params.tokens).forEach(function (k) {
+        document.documentElement.style.setProperty(k, String(d.params.tokens[k]));
+      });
+    } else if (d.method === 'ctx.sync' && d.params) {
+      window.__agentosCtx = d.params;
+    }
+  });
+  // agentosFetch：经 window.agentos.postMessage（宿主代发 REST 带 token）+ Promise 化。
+  // webview iframe 是 opaque-origin 沙箱（CSP connect-src 'none'），直接 fetch 不可行。
+  function agentosFetch(path, params) {
+    return new Promise(function (resolve, reject) {
+      if (!window.agentos) { reject(new Error('window.agentos 桥不可用')); return; }
+      var id = window.agentos.postMessage(path, params);
+      function handler(e) {
+        var d = e.data;
+        if (!d || !d.__agentos_webview || d.id !== id) return;
+        window.removeEventListener('message', handler);
+        if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
+        else resolve(d.params);
+      }
+      window.addEventListener('message', handler);
+    });
+  }
+  // 宿主返回 axios res.data，内层 body 是 base64 JSON
+  function unwrap(res) {
+    var data = (res && res.data) ? res.data : res;
+    if (data && data.body) {
+      try { return JSON.parse(atob(data.body)); } catch (e) { return data; }
+    }
+    return data;
+  }
+
+  // 六列列序（键与服务端 board 契约一致；列头显示 = Devin 式小写灰微文案）
+  var COLUMNS = [
+    ['issue', 'issue'], ['triage', 'triage'], ['worktree', 'worktree'],
+    ['testing', 'test'], ['review', 'review'], ['merged', 'merged'],
+  ];
+
+  var state = { modeName: '', sessions: [], columns: [], activeSession: null, errors: {} };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(s) { $('status').textContent = s || ''; }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function toast(msg, isError) {
+    var t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast' + (isError ? ' error' : '');
+    t.style.display = 'block';
+    setTimeout(function () { t.style.display = 'none'; }, 3200);
+  }
+  // 面板桥失败 ≠ 真空数据：桥不可用/请求失败渲染显式错误横幅（--ag-err 语义色），
+  // 与 emptyBox 的诚实空态视觉区分；重试按钮走全量刷新。
+  function bridgeErrorBox(msg) {
+    return '<div class="bridge-err"><div class="bridge-err-title">面板桥不可用/加载失败</div>' +
+      '<div class="bridge-err-msg">' + escapeHtml(msg) + '</div>' +
+      '<button class="secondary" onclick="refreshAll()">重试</button></div>';
+  }
+  function emptyBox(label, note) {
+    return '<div class="empty"><div>' + escapeHtml(label) + '</div>' +
+      (note ? '<div style="font-size:11px;opacity:.75">' + escapeHtml(note) + '</div>' : '') + '</div>';
+  }
+  function dotClass(s) {
+    if (s.run_status === 'running') return 'running';
+    if (s.task_status === 'completed') return 'done';
+    return 'other';
+  }
+  function sessionById(pid) {
+    var found = null;
+    state.sessions.forEach(function (s) { if (s.pipeline_id === pid) found = s; });
+    return found;
+  }
+
+  // ── 数据装载 ──
+  function loadBootstrap() {
+    return agentosFetch('/ext/mode_coding/data/bootstrap').then(function (res) {
+      var d = unwrap(res) || {};
+      state.modeName = d.name || '';
+      $('modeName').textContent = state.modeName;
+    }).catch(function () {});
+  }
+  function loadSessions() {
+    return agentosFetch('/ext/mode_coding/data/sessions').then(function (res) {
+      state.sessions = (unwrap(res) || {}).sessions || [];
+      delete state.errors.sessions;
+      renderSessions();
+    }).catch(function (e) {
+      state.errors.sessions = (e && e.message) || String(e);
+      renderSessions();
+    });
+  }
+  function loadBoard() {
+    return agentosFetch('/ext/mode_coding/data/board').then(function (res) {
+      state.columns = (unwrap(res) || {}).columns || [];
+      delete state.errors.board;
+      renderBoard();
+    }).catch(function (e) {
+      state.errors.board = (e && e.message) || String(e);
+      renderBoard();
+    });
+  }
+  function loadReviews() {
+    return agentosFetch('/ext/mode_coding/data/reviews').then(function (res) {
+      delete state.errors.reviews;
+      renderReviews(unwrap(res) || {});
+    }).catch(function (e) {
+      state.errors.reviews = (e && e.message) || String(e);
+      $('reviews').innerHTML = bridgeErrorBox(state.errors.reviews);
+    });
+  }
+  function loadMessages(pipelineId) {
+    setStatus('加载对话...');
+    return agentosFetch('/ext/mode_coding/data/messages?pipeline_id=' + encodeURIComponent(pipelineId))
+      .then(function (res) {
+        renderConversation(pipelineId, (unwrap(res) || {}).messages || []);
+        setStatus('');
+      })
+      .catch(function (e) { setStatus(''); toast('对话加载失败：' + e, true); });
+  }
+
+  function refreshAll() {
+    setStatus('刷新中...');
+    Promise.all([loadBootstrap(), loadSessions(), loadBoard(), loadReviews()])
+      .then(function () { setStatus(''); })
+      .catch(function (e) { setStatus('加载失败'); toast(String(e), true); });
+  }
+
+  // ── 左侧：会话列表（状态点 + 消息数 + checkpoint 数）──
+  function renderSessions() {
+    var el = $('sessions');
+    if (state.errors.sessions) {
+      el.innerHTML = bridgeErrorBox(state.errors.sessions);
+      return;
+    }
+    if (!state.sessions.length) {
+      el.innerHTML = emptyBox('本模式暂无会话', '在上方派一个 issue，或在聊天区选「编码」模式发起');
+      return;
+    }
+    el.innerHTML = state.sessions.map(function (s) {
+      return '<div class="item' + (state.activeSession === s.pipeline_id ? ' active' : '') +
+        '" data-id="' + escapeHtml(s.pipeline_id) + '">' +
+        '<div class="row1"><span class="dot ' + dotClass(s) + '"></span><div class="name">' +
+        escapeHtml(s.goal || s.pipeline_id) + '</div></div>' +
+        '<div class="sub">' + escapeHtml(s.task_status || s.run_status || '—') +
+        ' · ' + escapeHtml(String(s.message_count)) + ' 条消息 · ' +
+        escapeHtml(String(s.checkpoints)) + ' 个 checkpoint · ' +
+        escapeHtml(s.pipeline_id.slice(0, 10)) + '</div></div>';
+    }).join('');
+    el.querySelectorAll('.item').forEach(function (node) {
+      node.addEventListener('click', function () {
+        state.activeSession = node.getAttribute('data-id');
+        renderSessions();
+        loadMessages(state.activeSession);
+      });
+    });
+  }
+
+  // ── 中上：「修复流水线」六列看板 ──
+  function renderBoard() {
+    var el = $('board');
+    if (state.errors.board) {
+      el.innerHTML = bridgeErrorBox(state.errors.board);
+      return;
+    }
+    var byKey = {};
+    (state.columns || []).forEach(function (c) { byKey[c.key] = c; });
+    el.innerHTML = COLUMNS.map(function (pair) {
+      var col = byKey[pair[0]] || { cards: [] };
+      var cards = col.cards || [];
+      var cardsHtml = cards.length
+        ? cards.map(function (s) {
+            return '<div class="card' + (state.activeSession === s.pipeline_id ? ' active' : '') +
+              '" data-id="' + escapeHtml(s.pipeline_id) + '">' +
+              '<div class="goal">' + escapeHtml(s.goal || s.pipeline_id) + '</div>' +
+              '<div class="meta">' + escapeHtml(String(s.message_count)) + ' 条消息 · ' +
+              escapeHtml(String(s.checkpoints)) + ' ckpt</div></div>';
+          }).join('')
+        : '<div class="colcards-empty">无任务</div>';
+      return '<div class="col"><div class="colhead">' + escapeHtml(pair[1]) +
+        '<span class="count">' + cards.length + '</span></div>' +
+        '<div class="cards">' + cardsHtml + '</div></div>';
+    }).join('');
+    el.querySelectorAll('.card').forEach(function (node) {
+      node.addEventListener('click', function () {
+        state.activeSession = node.getAttribute('data-id');
+        renderSessions();
+        renderBoard();
+        loadMessages(state.activeSession);
+      });
+    });
+  }
+
+  // ── 下：「diff 复盘」待审批列表（只读；批准/拒绝走宿主审批卡）──
+  function renderReviews(payload) {
+    var el = $('reviews');
+    var items = payload.items || [];
+    if (payload.note) $('reviewsNote').textContent =
+      payload.note + '（diff 与审批操作走宿主审批卡，本区不旁路审批安全面）';
+    if (!items.length) {
+      el.innerHTML = emptyBox('暂无待审批交互', payload.note || '当前没有等待审批的请求；diff 复盘在其批准后于宿主审批卡完成');
+      return;
+    }
+    el.innerHTML = items.map(function (r) {
+      return '<div class="rev"><div class="title">' + escapeHtml(r.title || r.request_id) + '</div>' +
+        '<span class="badge">' + escapeHtml(r.status || 'pending') + '</span>' +
+        '<span class="when">' + escapeHtml(r.created_at || '') + '</span></div>';
+    }).join('');
+  }
+
+  // ── 会话对话（模态：点会话/看板卡片查看过程流）──
+  function renderConversation(pipelineId, messages) {
+    var s = sessionById(pipelineId);
+    $('convTitle').textContent = '会话 · ' + ((s && s.goal) || pipelineId);
+    $('convModal').className = 'modal open';
+    if (!messages.length) {
+      $('convBody').innerHTML = emptyBox('该会话还没有消息', '管道可能尚未产生输出，稍后重开查看');
+      return;
+    }
+    $('convBody').innerHTML = messages.map(function (m) {
+      var who = m.role === 'user' ? '你' : (m.role === 'assistant' ? 'agent' : m.role);
+      return '<div class="msg ' + escapeHtml(m.role) + '"><div class="who">' + escapeHtml(who) +
+        ((m.status && m.status !== 'success') ? ' · ' + escapeHtml(m.status) : '') + '</div>' +
+        '<div class="bubble">' + escapeHtml(m.content) + '</div></div>';
+    }).join('');
+  }
+  function closeConv() { $('convModal').className = 'modal'; }
+
+  // ── 写动作：派 issue 修复（task_submit 真派发；session_id 入宿主对话框线程）──
+  function dispatchIssue() {
+    var issueText = $('issueText').value.trim();
+    if (!issueText) { toast('先填写 issue 描述', true); return; }
+    setStatus('派发中...');
+    agentosFetch('/ext/mode_coding/data/actions/dispatch_issue', {
+      issue_text: issueText, title: $('issueTitle').value.trim(),
+      session_id: (window.__agentosCtx || {}).sessionId,  // 未收到 ctx.sync 时为 undefined，序列化即省略
+    }).then(function (res) {
+      var d = unwrap(res) || {};
+      setStatus('');
+      if (d.error) { toast('派发失败：' + d.error, true); return; }
+      $('issueText').value = '';
+      $('issueTitle').value = '';
+      toast('已派发修复任务 ' + (d.task_id || '').slice(0, 10) + '，可在看板跟进进度');
+      refreshAll();
+    }).catch(function (e) { setStatus(''); toast('派发失败：' + e, true); });
+  }
+
+  // ── 入口 ──
+  renderSessions();
+  renderBoard();
+  $('reviews').innerHTML = emptyBox('加载待审批列表...', '');
+  refreshAll();
+  </script>
 </body>
 </html>

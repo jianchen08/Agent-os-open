@@ -564,13 +564,31 @@ impl PluginLoader for PluginLoaderImpl {
     ) -> Result<Vec<PluginManifest>, agentos_core::types::PluginError> {
         let mut all_manifests = HashMap::new();
 
-        // 扫描 root_paths（外部传入的路径）
+        // 扫描 root_paths（外部传入的路径）。同 id 双源裁决与内置根/用户根扫描段
+        // 同语义：**用户根子树赢**。root_paths 的迭代序来自调用方（热路径
+        // discover_new_plugins 把内置+用户根的父目录混装进每轮新建的 HashSet，
+        // 序不稳定），朴素 last-wins 会让双源同 id 的胜者逐轮翻转——源码目录随之
+        // 翻转 → 代码指纹每轮必变 → 复验驱逐/重注册循环（/ext 路由间歇 503/504，
+        // 2026-09-18 根修）。故用户根条目一旦胜出即不可被非用户根条目覆盖，
+        // 与迭代序解耦；其余路径间维持 last-wins 不变。
+        let is_user_rooted = |p: &Path| -> bool {
+            self.user_root
+                .as_ref()
+                .is_some_and(|user_root| p.starts_with(user_root))
+        };
         for root_str in root_paths {
             let root = Path::new(root_str);
             match self.scan_root(root) {
                 Ok(found) => {
                     for (manifest, path) in found {
-                        all_manifests.insert(manifest.id.clone(), (manifest, path));
+                        let dominated = all_manifests.get(&manifest.id).is_some_and(
+                            |(_, existing): &(PluginManifest, PathBuf)| {
+                                is_user_rooted(existing.as_path()) && !is_user_rooted(&path)
+                            },
+                        );
+                        if !dominated {
+                            all_manifests.insert(manifest.id.clone(), (manifest, path));
+                        }
                     }
                 }
                 Err(e) => {
@@ -1856,6 +1874,53 @@ mod tests {
         assert_eq!(manifests.len(), 1);
         // 用户根应覆盖内置根
         assert_eq!(manifests[0].plugin_type, PluginType::Tool);
+    }
+
+    /// 双源同 id（生产模式包拓扑：`modes/<mode_id>/plugin.json` 二级嵌套，repo 与
+    /// 用户空间各一份）：root_paths 的迭代序不得决定胜者——用户根子树同 id 恒赢，
+    /// 与内置根/用户根扫描段同语义。热路径 discover_new_plugins 把双根父目录混装
+    /// 进每轮新建的 HashSet，序逐轮不稳定；朴素 last-wins 会让胜者逐轮翻转、源码
+    /// 目录随之翻转 → 代码指纹每轮必变 → 复验驱逐/重注册循环（/ext 路由间歇
+    /// 503/504 根因，2026-09-18）。
+    #[tokio::test]
+    async fn test_dual_source_same_id_user_wins_regardless_of_root_order() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+
+        create_test_plugin_dir(&builtin.path().join("modes"), "mode_x", "pipeline");
+        create_test_plugin_dir(&user.path().join("modes"), "mode_x", "tool");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()));
+
+        // 两种 root_paths 序（模拟热路径 HashSet 逐轮序不稳定）：用户份都必须赢。
+        let orders = [
+            vec![builtin.path().join("modes"), user.path().join("modes")],
+            vec![user.path().join("modes"), builtin.path().join("modes")],
+        ];
+        for roots in &orders {
+            let root_strs: Vec<String> = roots
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let root_refs: Vec<&str> = root_strs.iter().map(|s| s.as_str()).collect();
+            let manifests = loader.discover(&root_refs).await.unwrap();
+            assert_eq!(
+                manifests.len(),
+                1,
+                "同 id 双源必须合并为单 manifest（roots 序: {roots:?}）"
+            );
+            assert_eq!(
+                manifests[0].plugin_type,
+                PluginType::Tool,
+                "用户份必须赢（roots 序: {roots:?}）"
+            );
+            // 源码目录稳定落在用户根——代码指纹/复验驱逐的触发源。
+            let dir = loader.get_plugin_dir("mode_x").unwrap();
+            assert!(
+                std::path::Path::new(&dir).starts_with(user.path()),
+                "source dir 必须在用户根（roots 序: {roots:?}），got: {dir}"
+            );
+        }
     }
 
     #[tokio::test]

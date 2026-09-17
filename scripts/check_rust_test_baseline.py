@@ -32,7 +32,9 @@ def parse_failures(output: str) -> int:
     统计口径：
     - 方式1：每条 "test result: ... N failed" 中的 N 求和（多个 crate 各一行）。
     - 方式2：若无 test result 行，取 cargo 汇总 "N test(s) failed"。
-    - 方式3：编译失败（无 test result 但含 error[/]）记为 1，确保 CI 红。
+    - 方式3：编译失败（无 test result 但输出有行首 cargo 诊断 error[/]）记为 1，
+      确保 CI 红。必须锚定行首——测试名本身可含 "error::tests"（如 plugin-loader
+      error 模块），无锚点子串匹配会把全绿跑误判成 1 失败。
     """
     failed_count = 0
     for m in re.finditer(r"test result: .*?(\d+) failed", output):
@@ -41,7 +43,9 @@ def parse_failures(output: str) -> int:
         m2 = re.search(r"(\d+) test(?:s)? failed", output)
         if m2:
             failed_count = int(m2.group(1))
-    if failed_count == 0 and ("error[" in output or "error:" in output):
+    if failed_count == 0 and (
+        re.search(r"^error\[", output, re.M) or re.search(r"^error:", output, re.M)
+    ):
         # 编译失败（非测试失败，但 CI 应红）
         failed_count = max(failed_count, 1)
     return failed_count

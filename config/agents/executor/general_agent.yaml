@@ -93,6 +93,9 @@ tool_ids:
 - universal_search
 - godot_run
 - web_operate
+# computer_use（白名单条目=插件 id → 九件桌面操作工具全量注入；
+# 仅非隔离会话可执行，隔离任务内调用被插件 fail-closed 拒绝）
+- computer_use
 - memory
 - task_evaluate
 - human_interaction

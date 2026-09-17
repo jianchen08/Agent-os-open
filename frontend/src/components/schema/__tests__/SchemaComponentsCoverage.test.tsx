@@ -497,7 +497,7 @@ describe('ReviewDocumentWidget 多制品与批注区', () => {
 /* ------------------------------------ WorkspacePanel -------------------------------------- */
 
 describe('WorkspacePanel 空态与全屏入口', () => {
-  it('无标签 → 空态与「打开任务管理」入口', async () => {
+  it('无标签 → 导航页兜底', async () => {
     const { WorkspacePanel } = await import('@/components/layout/WorkspacePanel')
     render(
       <WorkspacePanel
@@ -508,8 +508,7 @@ describe('WorkspacePanel 空态与全屏入口', () => {
         renderTabContent={() => null}
       />,
     )
-    expect(screen.getByText('暂无内容 — 从下方打开任务管理')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '打开任务管理' })).toBeTruthy()
+    expect(screen.getByTestId('workspace-nav-page')).toBeTruthy()
   })
 
   it('传入 onFullscreen 时渲染全屏按钮，文案随 isFullscreen 翻转', async () => {
@@ -663,10 +662,14 @@ describe('WorkspacePanel 空态与全屏入口', () => {
     expect(screen.getByTestId('workspace-tab-menu-close')).toBeDisabled()
   })
 
-  it('空态「打开任务管理」入口可点击（落到工作区面板打开链路）', async () => {
+  it('空态导航页声明条目可点击（落到工作区面板打开链路）', async () => {
     const { WorkspacePanel } = await import('@/components/layout/WorkspacePanel')
-    const openerMod = await import('@/services/workspacePanelOpener')
-    const spy = vi.spyOn(openerMod, 'openWorkspacePanelByPath')
+    const { useLayoutModeStore } = await import('@/stores/layoutModeStore')
+    useLayoutModeStore.setState({ workspaceTabs: [], visitedTabIds: [] })
+    contributionRegistry.register({
+      type: 'pages', id: 'tasks', title: '任务管理',
+      space: 'workspace', slot: 'tab', path: '/tasks', pluginId: 'task_service',
+    })
     render(
       <WorkspacePanel
         tabs={[]}
@@ -677,10 +680,12 @@ describe('WorkspacePanel 空态与全屏入口', () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole('button', { name: '打开任务管理' }))
+    fireEvent.click(screen.getByTestId('nav-item-task_service:tasks'))
     // 入口确实驱动面板打开链路（真实依赖，非静默 no-op）
-    expect(spy).toHaveBeenCalledWith('/tasks')
-    spy.mockRestore()
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    expect(tabs.map((t) => t.id)).toEqual(['ws-plugin-tasks'])
+    expect(tabs[0]?.isActive).toBe(true)
+    contributionRegistry.clear()
   })
 
   it('滚轮纵向 delta：横向滚动标签条（非被动绑定使 preventDefault 生效）', async () => {

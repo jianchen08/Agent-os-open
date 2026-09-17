@@ -176,4 +176,59 @@ describe('RouteRulesEditor（G10 文件 DSL）', () => {
     renderRules(undefined, ops)
     expect(screen.getByText(/无路由规则/)).toBeInTheDocument()
   })
+
+  it('历史遗留目标不在合法集 → 前置保留显示（不静默丢失）', () => {
+    renderRules([{ when: 'True', then: 'legacy_target' }], ops)
+    expect(selectOptions('规则 1 then 目标')).toEqual([
+      'legacy_target',
+      'end',
+      'loop',
+      'prepare',
+      'core',
+      'post',
+      'init',
+      'main',
+      'exit',
+    ])
+    expect(screen.getByLabelText('规则 1 then 目标')).toHaveValue('legacy_target')
+  })
+
+  it('编辑 when 为非空条件 → ops.set 写入新值（remove 仅空串触发）', () => {
+    renderRules([{ then: 'end' }], ops)
+
+    fireEvent.change(screen.getByLabelText('规则 1 when 条件'), {
+      target: { value: 'raw_tool_calls != []' },
+    })
+    expect(calls.at(-1)).toEqual({
+      op: 'set',
+      args: [[...ARRAY_PATH, 0, 'when'], 'raw_tool_calls != []'],
+    })
+  })
+
+  it('下移规则 → ops.move 步进 +1（首条可下移，末条禁用）', () => {
+    renderRules(
+      [
+        { when: 'a', then: 'end' },
+        { when: 'b', then: 'end' },
+      ],
+      ops,
+    )
+
+    const down = screen.getByLabelText('规则 1 下移') as HTMLButtonElement
+    expect(down).not.toBeDisabled()
+    fireEvent.click(down)
+    expect(calls.at(-1)).toEqual({ op: 'move', args: [ARRAY_PATH, 0, 1] })
+
+    expect(screen.getByLabelText('规则 2 下移')).toBeDisabled()
+  })
+
+  it('编辑 set 既有键值 → ops.set 写回平级 set 键（remove 仅清空触发）', () => {
+    renderRules([{ when: 'True', then: 'loop', set: { core_type: 'llm_call' } }], ops)
+
+    fireEvent.change(screen.getByLabelText('字符串值'), { target: { value: 'tool_call' } })
+    expect(calls.at(-1)).toEqual({
+      op: 'set',
+      args: [[...ARRAY_PATH, 0, 'set'], { core_type: 'tool_call' }],
+    })
+  })
 })

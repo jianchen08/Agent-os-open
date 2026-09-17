@@ -12,7 +12,10 @@
 5. **不扩权边界**：模式未细化 tool_ids 或基线缺失 = 不收窄；交集为空 =
    显式空表；
 6. **包目录取数**：pipelines/*.yaml 解析（坏文件跳过）、rules/*.md 拼接、
-   双根解析（用户副本优先 → 出厂种子回落 → 缺失 None）。
+   双根解析（用户副本优先 → 出厂种子回落 → 缺失 None）；
+7. **state 顶层 mode 键回写**（BUG-34）：解析成功即回写（值 = resolve_mode
+   非空结果），同管道重跑覆盖更新；解析不出/自动模式/形态非法不写键（前端
+   无键零动作）；物料注入降级不回滚回写。
 
 mode 键区分度输入 ≥2：utdemo（全物料模式）与 utplain（裸模式）两组 profile
 + 包目录内容互异，注入结果随之不同。
@@ -353,3 +356,139 @@ class TestPackageMaterialSources:
             mode_material.unwrap_mode_profile({"unexpected": 1})
         with pytest.raises(ValueError, match="无效 profile"):
             mode_material.unwrap_mode_profile("garbage")
+
+
+class TestModeStateKeyEcho:
+    """state 顶层 mode 键回写（BUG-34 生产者缺失）。
+
+    消费端契约 = GET /api/v1/pipelines/state 摘要的 mode 出口：前端模式面板
+    自动弹出（modePanelAutoOpen）与管道视图模式徽标同源取数，无键零动作。
+    回写走既有通道：input 插件 state_updates 平键合并（与 tool_ids/model_tier
+    同形），出口可见性由 manifest export_fields/persistent_fields 声明。
+    """
+
+    @pytest.mark.parametrize("mode", ["utdemo", "utplain"])
+    def test_explicit_mode_writes_top_level_key(self, env, mode: str) -> None:
+        """显式模式 → state_updates 出现顶层 mode 键，值 = resolve_mode 结果。"""
+        _write_main_agent(env["agents"], tool_ids=["file_read"])
+        service = FakeProfileService({mode: dict(_UTPLAIN_PROFILE, mode=mode)})
+        state = {"execution_context": {"mode": mode}, "session_id": "s1"}
+
+        updates = _run(service, {}, state)
+
+        assert updates["mode"] == mode, f"顶层 mode 键须回写解析结果，实际: {updates.get('mode')!r}"
+        # 性质断言：回写值与 resolve_mode 同源（回写即解析回声，非独立常量）
+        assert updates["mode"] == mode_material.resolve_mode(state)
+
+    def test_mode_value_is_resolved_normal_form(self, env) -> None:
+        """回写值 = resolve_mode 归一形态（首尾空白剥离），非原文透传。"""
+        _write_main_agent(env["agents"])
+        service = FakeProfileService({"utdemo": _UTDEMO_PROFILE}, envelope=True)
+
+        updates = _run(service, {}, {"execution_context": {"mode": "  utdemo  "}})
+
+        assert updates["mode"] == "utdemo"
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            {"session_id": "s1"},  # 无 execution_context（自动模式：前端不带键）
+            {"execution_context": {"other": 1}},  # 上下文无 mode 键
+            {"execution_context": {"mode": ""}},  # 空串 = 解析不出
+        ],
+    )
+    def test_no_mode_writes_no_key(self, env, state: dict[str, Any]) -> None:
+        """自动/无模式 → 不写 mode 键（前端无键零动作，不造默认值）。"""
+        _write_main_agent(env["agents"])
+        service = FakeProfileService({"utdemo": _UTDEMO_PROFILE})
+
+        updates = _run(service, {}, state)
+
+        assert "mode" not in updates, f"无模式不得写 mode 键，实际: {updates.get('mode')!r}"
+
+    def test_malformed_mode_writes_no_key(self, env) -> None:
+        """形态非法（MODE_ID_RE 不放行）不出口：垃圾值不进观测面。"""
+        _write_main_agent(env["agents"])
+        service = FakeProfileService({"utdemo": _UTDEMO_PROFILE})
+
+        updates = _run(service, {}, {"execution_context": {"mode": "Coding!"}})
+
+        assert "mode" not in updates
+
+    def test_rerun_with_new_mode_overwrites_value(self, env) -> None:
+        """同管道重复运行：新解析值覆盖旧值（逐轮回写，不先写先赢）。"""
+        _write_main_agent(env["agents"])
+        service = FakeProfileService(
+            {"utdemo": _UTDEMO_PROFILE, "utplain": _UTPLAIN_PROFILE}
+        )
+        state = {"execution_context": {"mode": "utdemo"}, "session_id": "s1"}
+        first = _run(service, {}, state)
+        assert first["mode"] == "utdemo"
+
+        merged = {**state, **first}
+        rerun_state = {**merged, "execution_context": {"mode": "utplain"}}
+        second = _run(service, {}, rerun_state)
+
+        assert second["mode"] == "utplain", "重跑须按新解析值覆盖"
+        assert {**merged, **second}["mode"] == "utplain", "合并后 state.mode 为新值"
+
+    def test_key_survives_profile_fetch_degradation(self, env) -> None:
+        """物料注入降级（取数失败）不回滚回写：mode 是解析路径产物，
+        面板自动弹出不得随模式包故障丢失。"""
+        _write_main_agent(env["agents"])
+        service = FakeProfileService(error=RuntimeError("mode sidecar down"))
+
+        updates = _run(service, {}, {"execution_context": {"mode": "utdemo"}})
+
+        assert updates["mode"] == "utdemo"
+        assert "模式物料" not in updates["context.system_prompt"], "注入仍降级"
+
+
+# ── project_roots 注入（ADR 2026-09-17 决策 4：项目范围声明）──────────
+
+
+class TestProjectRootsInjection:
+    def test_anchored_run_injects_project_roots(self, env, monkeypatch) -> None:
+        """挂靠项目（task.parent_project_id）→ state.project_roots = [项目根]。"""
+        import project_registry
+
+        monkeypatch.setattr(
+            project_registry,
+            "load_project_paths",
+            lambda: {"proj00000001": "D:/x/proj_a"},
+        )
+        updates = _run(
+            FakeProfileService(),
+            {"agent_level": "L3"},
+            {
+                "agent.id": "executor/general_agent",
+                "lineage.parent_pipeline_id": "p1",
+                "task.parent_project_id": "proj00000001",
+            },
+        )
+        assert updates["project_roots"] == ["D:/x/proj_a"]
+
+    def test_unregistered_project_degrades_without_injection(self, env, monkeypatch) -> None:
+        """project_id 不在登记 → 降级不注入（warning，不阻断管道）。"""
+        import project_registry
+
+        monkeypatch.setattr(project_registry, "load_project_paths", lambda: {})
+        updates = _run(
+            FakeProfileService(),
+            {"agent_level": "L3"},
+            {
+                "agent.id": "executor/general_agent",
+                "lineage.parent_pipeline_id": "p1",
+                "task.parent_project_id": "ghost0000001",
+            },
+        )
+        assert "project_roots" not in updates
+
+    def test_no_project_key_is_zero_injection(self, env) -> None:
+        """无挂靠键（聊天管道/独立任务）→ 零注入。"""
+        updates = _run(
+            FakeProfileService(),
+            {"agent_level": "L1"},
+            {"agent.id": "", "user_input": "hi"},
+        )
+        assert "project_roots" not in updates

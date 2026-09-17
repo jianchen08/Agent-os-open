@@ -1,12 +1,12 @@
 {
   "id": "mode_roleplay",
   "name": "Mode Roleplay",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
-  "description": "角色扮演模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile），profile 随包内打包，供服务侧消费方（eval_harness 归因评测等）经内核服务调用获取",
+  "description": "角色扮演模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile）+ 工作区面板数据面（角色卡/世界书/开演记录；宿主融合——对话回归对话框、卡 theme/avatar 经 theme.apply 随卡切主题、面板主题跟宿主 token）+ 写动作（开演/重新生成经 task_submit 真派发、session_id 送入会话线程），profile 与示例卡/世界书随包内打包",
   "permissions": {},
   "priority": 45,
   "host_group": "light",
@@ -15,7 +15,7 @@
     "services": [
       {
         "name": "mode.describe",
-        "description": "返回编码模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+        "description": "返回角色扮演模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -58,7 +58,7 @@
       },
       {
         "name": "mode.get_profile",
-        "description": "返回编码模式包内 profile.yaml 解析后的内容",
+        "description": "返回角色扮演模式包内 profile.yaml 解析后的内容",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -91,6 +91,76 @@
       "timeout_ms": 5000,
       "max_concurrency": 4,
       "description": "Webview HTML page: 角色扮演面板（插件自带 webview 页）"
+    },
+    {
+      "route_id": "mode_roleplay_data_bootstrap",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/bootstrap",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "面板头元数据（模式名/链/panel_page_id）"
+    },
+    {
+      "route_id": "mode_roleplay_data_sessions",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/sessions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "本模式会话列表（pipeline-state mode 键过滤归一）"
+    },
+    {
+      "route_id": "mode_roleplay_data_messages",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/messages",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "会话对话流（messages.list 按 pipeline_id，query 必带 pipeline_id）"
+    },
+    {
+      "route_id": "mode_roleplay_data_cards",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/cards",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "角色卡画廊（包内 agents/card_*.yaml，ST V2 字段子集 + theme/avatar 宿主融合字段）"
+    },
+    {
+      "route_id": "mode_roleplay_data_lorebooks",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/lorebooks",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "世界书条目表（包内 lorebooks/*.yaml，ST World Info 子集）"
+    },
+    {
+      "route_id": "mode_roleplay_action_play",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/actions/play",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：以此角色开演（task_submit 派发，target=卡 agent 键）"
+    },
+    {
+      "route_id": "mode_roleplay_action_regenerate",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/actions/regenerate",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：重新生成末条回复变体（swipe 一期裁定，task_submit 派发）"
     }
   ],
   "contributes": {
@@ -109,8 +179,20 @@
           "widgetId": "roleplay_studio"
         },
         "order": 30,
-        "description": "角色扮演模式面板：角色卡/世界书/会话",
-        "mode": "roleplay"
+        "description": "角色扮演模式面板：角色卡/世界书/开演记录（对话在聊天区）",
+        "mode": "roleplay",
+        "detachable": {
+          "popout": true,
+          "childWindow": true,
+          "defaultSize": {
+            "w": 1080,
+            "h": 680
+          },
+          "minSize": {
+            "w": 720,
+            "h": 480
+          }
+        }
       }
     ]
   },

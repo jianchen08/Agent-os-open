@@ -24,8 +24,9 @@ sys.path.insert(0, str(BROWSER_PLUGIN))
 
 import importlib.util  # noqa: E402
 
-from bridge_client import BridgeClient, BridgeClientError  # noqa: E402
 from tool import BROWSER_TOOLS  # noqa: E402
+
+from agentos_plugin_sdk.bridge_client import BridgeClient, BridgeClientError  # noqa: E402
 
 STUB = [sys.executable, str(BRIDGE_DIR / "stub_upstream.py")]
 
@@ -114,7 +115,7 @@ class TestContainerFailureBranches:
     @pytest.mark.asyncio
     async def test_exec_nonzero_exit_is_clean_error(self, monkeypatch):
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
-        import bridge_client as bc
+        from agentos_plugin_sdk import bridge_client as bc
 
         def fake_exec(cmd, **kwargs):
             class P:
@@ -134,7 +135,7 @@ class TestContainerFailureBranches:
     @pytest.mark.asyncio
     async def test_exec_no_output_is_clean_error(self, monkeypatch):
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
-        import bridge_client as bc
+        from agentos_plugin_sdk import bridge_client as bc
 
         def fake_exec(cmd, **kwargs):
             class P:
@@ -154,7 +155,7 @@ class TestContainerFailureBranches:
     @pytest.mark.asyncio
     async def test_exec_bad_json_output_is_clean_error(self, monkeypatch):
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
-        import bridge_client as bc
+        from agentos_plugin_sdk import bridge_client as bc
 
         def fake_exec(cmd, **kwargs):
             class P:
@@ -177,8 +178,8 @@ class TestTokenFromEnvFile:
     async def test_env_file_fallback(self, monkeypatch, tmp_path):
         monkeypatch.delenv("AGENTOS_BRIDGE_TOKEN", raising=False)
         (tmp_path / ".env").write_text("AGENTOS_BRIDGE_TOKEN=from-dotenv\n", encoding="utf-8")
-        monkeypatch.setattr("bridge_client._find_project_root", lambda: str(tmp_path))
-        import bridge_client as bc
+        monkeypatch.setattr("agentos_plugin_sdk.bridge_client._find_project_root", lambda: str(tmp_path))
+        from agentos_plugin_sdk import bridge_client as bc
 
         c = bc.BridgeClient({"bridge_base": "http://127.0.0.1:8765", "upstream": "browser"})
         assert c._token == "from-dotenv"
@@ -187,8 +188,8 @@ class TestTokenFromEnvFile:
     async def test_env_file_tolerates_quotes(self, monkeypatch, tmp_path):
         monkeypatch.delenv("AGENTOS_BRIDGE_TOKEN", raising=False)
         (tmp_path / ".env").write_text('AGENTOS_BRIDGE_TOKEN="quoted-token"\n', encoding="utf-8")
-        monkeypatch.setattr("bridge_client._find_project_root", lambda: str(tmp_path))
-        import bridge_client as bc
+        monkeypatch.setattr("agentos_plugin_sdk.bridge_client._find_project_root", lambda: str(tmp_path))
+        from agentos_plugin_sdk import bridge_client as bc
 
         c = bc.BridgeClient({"bridge_base": "http://127.0.0.1:8765", "upstream": "browser"})
         assert c._token == "quoted-token"
@@ -197,7 +198,7 @@ class TestTokenFromEnvFile:
 class TestServerHandlerRoundtrip:
     """server.py handler 真调用（BridgeApp + stub 上游全链）。"""
 
-    @pytest.fixture()
+    @pytest.fixture
     def bridge_server(self, monkeypatch):
         import threading
         from http.server import ThreadingHTTPServer
@@ -232,6 +233,7 @@ class TestServerHandlerRoundtrip:
     async def test_handler_end_to_end(self, bridge_server, monkeypatch):
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
         import importlib.util as _ilu
+
         mod_name = "browser_plugin_server_under_test"
         if mod_name not in sys.modules:
             spec2 = _ilu.spec_from_file_location(mod_name, BROWSER_PLUGIN / "server.py")
@@ -251,7 +253,7 @@ class TestServerHandlerRoundtrip:
     @pytest.mark.asyncio
     async def test_handler_failure_envelope(self, bridge_server, monkeypatch):
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
-        import bridge_client as bc
+        from agentos_plugin_sdk import bridge_client as bc
 
         def fake_exec(cmd, **kwargs):
             class P:
@@ -263,6 +265,7 @@ class TestServerHandlerRoundtrip:
 
         monkeypatch.setattr(bc.subprocess, "run", fake_exec)
         import importlib.util as _ilu2
+
         mod_name = "browser_plugin_server_under_test"
         if mod_name not in sys.modules:
             spec2 = _ilu2.spec_from_file_location(mod_name, BROWSER_PLUGIN / "server.py")

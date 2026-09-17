@@ -119,6 +119,7 @@ import { useNotificationStore } from '../stores/notificationStore'
 import { usePendingInputStore } from '../stores/pendingInputStore'
 import { usePipelineMessageStore } from '../stores/pipelineMessageStore'
 import { updateSessionsCache } from '../hooks/queries/useSessionsQuery'
+import { saveSessionExecutionOptions } from '../services/sessionExecutionOptions'
 import { useSessionListStore } from '../stores/sessionListStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { useUIStore } from '../stores/uiStore'
@@ -296,11 +297,21 @@ describe('handleCreateSession（欢迎页入口）', () => {
   })
 })
 
-describe('handleSendMessage', () => {
-  function send(params: Record<string, unknown>): unknown {
-    return (chatProps as CapturedProps | null)?.onSendMessage?.(params as never)
-  }
+/** 捕获 chatProps 上的 onSendMessage（渲染后由 HomePage 回填） */
+function send(params: Record<string, unknown>): unknown {
+  return (chatProps as CapturedProps | null)?.onSendMessage?.(params as never)
+}
 
+/** act 包裹发送并捕获返回值（静默拒绝点断言统一走 false 契约） */
+async function sendAndCapture(params: Record<string, unknown>): Promise<unknown> {
+  let result: unknown
+  await act(async () => {
+    result = send(params)
+  })
+  return result
+}
+
+describe('handleSendMessage', () => {
   it('无活跃会话：返回 false 不出站', async () => {
     await renderHomeWithSession()
     useSessionStore.setState({ activeSessionId: null })
@@ -322,9 +333,7 @@ describe('handleSendMessage', () => {
   it('默认标题会话：首条消息改写会话标题（换行折空格、截断 30 字）', async () => {
     await renderHomeWithSession()
     const long = '一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三'
-    await act(async () => {
-      send({ content: `  ${long}\n尾  `, pipelineId: 'p1' })
-    })
+    await sendAndCapture({ content: `  ${long}\n尾  `, pipelineId: 'p1' })
     await waitFor(() => expect(mockUpdateSession).toHaveBeenCalled())
     const [, patch] = mockUpdateSession.mock.calls[0]
     expect((patch as { title: string }).title.length).toBeLessThanOrEqual(30)
@@ -334,20 +343,14 @@ describe('handleSendMessage', () => {
   it('已命名会话不再改写标题', async () => {
     await renderHomeWithSession()
     updateSessionsCache((prev) => prev.map((s) => (s.id === 's1' ? { ...s, title: '正经标题' } : s)))
-    await act(async () => {
-      send({ content: 'hi', pipelineId: 'p1' })
-    })
+    await sendAndCapture({ content: 'hi', pipelineId: 'p1' })
     await act(async () => {})
     expect(mockUpdateSession).not.toHaveBeenCalled()
   })
 
   it('目标管道不属于会话：fail-closed 终止发送并高优通知', async () => {
     await renderHomeWithSession()
-    let result: unknown
-    await act(async () => {
-      result = send({ content: 'hi', pipelineId: 'p-rogue' })
-    })
-    expect(result).toBe(false)
+    expect(await sendAndCapture({ content: 'hi', pipelineId: 'p-rogue' })).toBe(false)
     expect(mockWs.sendUserInput).not.toHaveBeenCalled()
     expect(useNotificationStore.getState().notifications.some((n) => n.title === '发送已终止')).toBe(true)
   })
@@ -356,9 +359,7 @@ describe('handleSendMessage', () => {
     await renderHomeWithSession()
     // pipelineTabMap 以管道 id 为键（resolveSendTarget 成员集取 Object.keys）
     useAgentTabStore.setState({ pipelineTabMap: { 'p-from-tab': 'tab-x' } })
-    await act(async () => {
-      send({ content: 'hi', pipelineId: 'p-from-tab' })
-    })
+    await sendAndCapture({ content: 'hi', pipelineId: 'p-from-tab' })
     expect(mockWs.sendUserInput).toHaveBeenCalled()
     expect(useNotificationStore.getState().notifications.some((n) => n.title === '发送已终止')).toBe(false)
   })
@@ -368,9 +369,7 @@ describe('handleSendMessage', () => {
     usePipelineMessageStore.setState((s) => ({
       streamingState: { ...s.streamingState, p1: { isStreaming: true, messageId: 'm-st' } },
     }))
-    await act(async () => {
-      send({ content: '排队', pipelineId: 'p1', enableThinking: true, thinkingStrength: 'high' })
-    })
+    await sendAndCapture({ content: '排队', pipelineId: 'p1', enableThinking: true, thinkingStrength: 'high' })
     expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
     const [, content, opts] = mockWs.sendUserInput.mock.calls[0]
     expect(content).toBe('排队')
@@ -391,13 +390,11 @@ describe('handleSendMessage', () => {
         makeInteraction({ requestId: 'req-d', pipelineId: 'p-other' }),
       ],
     })
-    await act(async () => {
-      send({
+    await sendAndCapture({
         content: '看图',
         pipelineId: 'p1',
         attachments: [{ url: '/uploads/a.png', name: '截图', type: 'image/png' }],
       })
-    })
     const pipeline = usePipelineMessageStore.getState()
     const bucket = pipeline.messagesByPipeline['p1'] ?? []
     expect(bucket).toHaveLength(1)
@@ -413,6 +410,63 @@ describe('handleSendMessage', () => {
     expect(interactions.find((i) => i.requestId === 'req-c')?.status).toBe('pending')
     expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
   })
+
+  it('正常分支：消息级 execution_context 透传出站帧（BUG-35 回归钉）', async () => {
+    await renderHomeWithSession()
+    await sendAndCapture({ content: '编码', pipelineId: 'p1', mode: 'coding' })
+    expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
+      mode: 'coding',
+    })
+  })
+
+  it('正常分支：显式模式并入会话执行选项快照，不覆盖其余键（BUG-35 回归钉）', async () => {
+    saveSessionExecutionOptions('s1', {
+      values: {},
+      executionContext: { workspace: { source_path: '/w' } },
+    })
+    await renderHomeWithSession()
+    await sendAndCapture({ content: '编码', pipelineId: 'p1', mode: 'coding' })
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
+      workspace: { source_path: '/w' },
+      mode: 'coding',
+    })
+  })
+
+  it('自动（无 mode）：不携带 mode 键——无快照时 executionContext 缺席（BUG-35 回归钉）', async () => {
+    await renderHomeWithSession()
+    await sendAndCapture({ content: '自动', pipelineId: 'p1' })
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toBeUndefined()
+  })
+
+  it('自动（无 mode）：有快照时快照原样透出，帧内无 mode 键（BUG-35 回归钉）', async () => {
+    saveSessionExecutionOptions('s1', {
+      values: {},
+      executionContext: { workspace: { source_path: '/w' } },
+    })
+    await renderHomeWithSession()
+    await sendAndCapture({ content: '自动', pipelineId: 'p1' })
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
+      workspace: { source_path: '/w' },
+    })
+  })
+
+  it('busy 分支：消息级 execution_context 同样透传（BUG-35 回归钉）', async () => {
+    await renderHomeWithSession()
+    usePipelineMessageStore.setState((s) => ({
+      streamingState: { ...s.streamingState, p1: { isStreaming: true, messageId: 'm-st' } },
+    }))
+    await sendAndCapture({ content: '排队', pipelineId: 'p1', mode: 'writing' })
+    expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
+      mode: 'writing',
+    })
+  })
 })
 
 describe('handleSendMessage 静默拒绝点显式化（BUG-28 第三刀）', () => {
@@ -421,20 +475,12 @@ describe('handleSendMessage 静默拒绝点显式化（BUG-28 第三刀）', () 
   // 用户视角 = 「点了没反应」。契约：拒绝必须显式；token 缺失先自愈
   // （tokenLifecycle 唯一真值源：内存有效令牌直接取用/过期 refresh 轮换），
   // 恢复成功回写 authStore 供用户重发过闸；会话缺失无自愈源，显式引导刷新。
-  function send(params: Record<string, unknown>): unknown {
-    return (chatProps as CapturedProps | null)?.onSendMessage?.(params as never)
-  }
-
 
   it('无令牌且自动恢复成功：返回 false 不出站，回写恢复的令牌并通知重发', async () => {
     await renderHomeWithSession()
     mockEnsureFreshToken.mockResolvedValue('tok-renewed')
     useAuthStore.setState({ token: null })
-    let result: unknown
-    await act(async () => {
-      result = send({ content: 'hi', pipelineId: 'p1' })
-    })
-    expect(result).toBe(false)
+    expect(await sendAndCapture({ content: 'hi', pipelineId: 'p1' })).toBe(false)
     expect(mockWs.sendUserInput).not.toHaveBeenCalled()
     // 自愈回写：tokenLifecycle 真值落 authStore，用户重发即过闸
     await waitFor(() => expect(useAuthStore.getState().token).toBe('tok-renewed'))
@@ -445,11 +491,7 @@ describe('handleSendMessage 静默拒绝点显式化（BUG-28 第三刀）', () 
     await renderHomeWithSession()
     mockEnsureFreshToken.mockResolvedValue(null)
     useAuthStore.setState({ token: null })
-    let result: unknown
-    await act(async () => {
-      result = send({ content: 'hi', pipelineId: 'p1' })
-    })
-    expect(result).toBe(false)
+    expect(await sendAndCapture({ content: 'hi', pipelineId: 'p1' })).toBe(false)
     expect(mockWs.sendUserInput).not.toHaveBeenCalled()
     await waitFor(() =>
       expect(
@@ -463,11 +505,7 @@ describe('handleSendMessage 静默拒绝点显式化（BUG-28 第三刀）', () 
   it('无活跃会话：返回 false 不出站且显式通知引导刷新（不再静默）', async () => {
     await renderHomeWithSession()
     useSessionStore.setState({ activeSessionId: null })
-    let result: unknown
-    await act(async () => {
-      result = send({ content: 'hi', pipelineId: 'p1' })
-    })
-    expect(result).toBe(false)
+    expect(await sendAndCapture({ content: 'hi', pipelineId: 'p1' })).toBe(false)
     expect(mockWs.sendUserInput).not.toHaveBeenCalled()
     await waitFor(() =>
       expect(useNotificationStore.getState().notifications.some((n) => n.title === '发送未受理')).toBe(true),

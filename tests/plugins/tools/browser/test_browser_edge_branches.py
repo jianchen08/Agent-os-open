@@ -22,58 +22,10 @@ BRIDGE_DIR = HERE.parent.parent.parent.parent / "mcp-servers" / "mcp-bridge"
 sys.path.insert(0, str(BRIDGE_DIR))
 sys.path.insert(0, str(BROWSER_PLUGIN))
 
-import bridge_client as bc  # noqa: E402
-from bridge_client import BridgeClient, BridgeClientError  # noqa: E402
-from tool import (  # noqa: E402
-    BrowserTool,
-    _to_tool_result,
-    _workspace_root,
-    _save_workspace_file,
-)
+from tool import BrowserTool  # noqa: E402
 
-
-class TestToolResultDefensiveBranches:
-    def test_non_dict_content_items_skipped(self):
-        mcp = {"content": ["not-a-dict", {"type": "text", "text": "ok-text"}]}
-        r = _to_tool_result("browser_snapshot", mcp)
-        assert r.success
-        assert r.output["snapshot_text"] == "ok-text"
-
-    def test_resource_content_extracted(self):
-        mcp = {"content": [{"type": "resource", "resource": {"text": "resource-body"}}]}
-        r = _to_tool_result("browser_snapshot", mcp)
-        assert r.success
-        assert r.output["snapshot_text"] == "resource-body"
-
-    def test_bad_base64_is_clean_failure(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        mcp = {"content": [{"type": "image", "data": "!!!not-base64!!!", "mimeType": "image/png"}]}
-        r = _to_tool_result("browser_take_screenshot", mcp)
-        assert not r.success
-        assert "base64" in r.error
-
-    def test_navigate_url_echoed_from_arguments(self):
-        r = _to_tool_result("browser_navigate", {"content": []}, {"url": "https://abc.example/"})
-        assert r.success
-        assert r.output["url"] == "https://abc.example/"
-
-
-class TestWorkspaceSave:
-    def test_workspace_used_for_screenshot_path(self, tmp_path):
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        BrowserTool._last_workspace = str(ws)
-        try:
-            path = _save_workspace_file("shot.png", b"png-data")
-            assert str(ws) in path
-            assert (ws / "shot.png").read_bytes() == b"png-data"
-        finally:
-            BrowserTool._last_workspace = ""
-
-    def test_workspace_root_fallback_cwd(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        BrowserTool._last_workspace = ""
-        assert _workspace_root() == str(tmp_path)
+from agentos_plugin_sdk import bridge_client as bc  # noqa: E402
+from agentos_plugin_sdk.bridge_client import BridgeClient, BridgeClientError  # noqa: E402
 
 
 class TestDockerGatewayProbe:
@@ -147,11 +99,12 @@ class TestToolDefinition:
         assert d.name == "browser"
         assert d.category is not None
 
+
 class TestBridgeUrlForContainer:
     """docker_provider._bridge_url_for_container 三级优先级。"""
 
     def _provider(self, config: dict):
-        import tests._isolation_path  # noqa: F401
+        import tests._isolation_path  # noqa: F401（先播种 isolation 路径，顺序脆弱）
 
         from providers.docker_provider import DockerProvider
 
@@ -257,7 +210,9 @@ class TestBridgeClientProtocolMethods:
 
     @pytest.mark.asyncio
     async def test_initialize(self, monkeypatch):
-        c = self._client(monkeypatch, {"ok": True, "status": 200, "body": {"result": {"protocolVersion": "2024-11-05"}}})
+        c = self._client(
+            monkeypatch, {"ok": True, "status": 200, "body": {"result": {"protocolVersion": "2024-11-05"}}}
+        )
         assert c.initialize()["protocolVersion"] == "2024-11-05"
 
 
@@ -392,7 +347,8 @@ class TestGatewayDetectionLinux:
     def test_linux_gateway_parsing(self, monkeypatch):
         import os as os_mod
         import platform
-        import tests._isolation_path  # noqa: F401
+
+        import tests._isolation_path  # noqa: F401（先播种 isolation 路径，顺序脆弱）
 
         from providers.docker_provider import DockerProvider
 
@@ -419,7 +375,8 @@ class TestGatewayDetectionEdgeBranches:
     def test_linux_no_default_line(self, monkeypatch):
         import os as os_mod
         import platform
-        import tests._isolation_path  # noqa: F401
+
+        import tests._isolation_path  # noqa: F401（先播种 isolation 路径，顺序脆弱）
 
         from providers.docker_provider import DockerProvider
 
@@ -450,7 +407,8 @@ class TestGatewayDetectionOSError:
     def test_popen_raises_oserror(self, monkeypatch):
         import os as os_mod
         import platform
-        import tests._isolation_path  # noqa: F401
+
+        import tests._isolation_path  # noqa: F401（先播种 isolation 路径，顺序脆弱）
 
         from providers.docker_provider import DockerProvider
 

@@ -23,6 +23,14 @@ import type { PendingInteraction } from '@/stores/interactionStore'
 let _isSubscribed = false
 
 /**
+ * get_pending 兜底轮询间隔（BUG-36）：WS 推送是 fire-and-forget，任何一跳丢失
+ * （瞬断、连接被替换未重连、内核投递失败）都会让审批卡在整个等待窗口内静默缺席，
+ * 而恢复链只覆盖挂载与重连两个时刻。以有界间隔轮询 /interaction/pending 补偿，
+ * ingest 去重保证幂等；间隔既不形成请求风暴，也不让用户干等一个超时窗口。
+ */
+export const INTERACTION_PENDING_POLL_INTERVAL_MS = 10_000
+
+/**
  * 解析交互请求的人类可读来源：优先管道元数据里的 Agent 名称（sub_agent_created
  * 事件下发），其次 agents 缓存按 agentId/configId 匹配，最后回退 agentId 原文。
  * 解析不到时返回空串（渲染层不显示来源标签）。
@@ -373,7 +381,11 @@ export function useInteractionHandler(sessionId: string | undefined) {
         for (const record of items) {
           const normalized = normalizeRecord(record)
           const parsed = await parseInteractionEvent(normalized)
-          if (!parsed) continue
+          if (!parsed) {
+            // 静默丢弃 = 审批无人能批（BUG-36 教训）：形状异常必须留痕可排查
+            console.warn('[InteractionHandler] pending 记录解析失败，跳过恢复:', record)
+            continue
+          }
           ingestParsedInteraction(parsed)
         }
       } catch (err) {
@@ -401,7 +413,15 @@ export function useInteractionHandler(sessionId: string | undefined) {
     // 挂载即拉取一次：覆盖纯刷新、WS 尚未触发 reconnected 的窗口
     restorePendingInteractions()
 
+    // 兜底轮询（BUG-36）：推送丢失时按有界间隔补偿拉取，审批卡不再依赖
+    // 「推送恰好送达」这一单点。restorePendingInteractions 自带去重与防抖。
+    const pendingPollTimer = setInterval(
+      () => void restorePendingInteractions(),
+      INTERACTION_PENDING_POLL_INTERVAL_MS,
+    )
+
     return () => {
+      clearInterval(pendingPollTimer)
       globalWS.unsubscribe('_status', handleWsStatusChange)
       globalWS.unsubscribe(WS_SERVER_EVENTS.INTERACTION_REQUEST, handleInteractionRequest)
       globalWS.unsubscribe('interaction_cancelled', handleInteractionCancelled)

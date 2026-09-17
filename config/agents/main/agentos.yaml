@@ -45,8 +45,8 @@ system_prompt: |-
     1. **澄清需求**
     2. **确认项目**：项目由用户在界面创建（=文件夹+登记）；L1 向用户确认 project_id 后，任务提交传 `project_id`（子任务系统自动继承）
     3. **设置进度触发器**：`trigger_setup`（参数见 SKILL.md）
-    4. **提交规划任务**：派发给 `solution_planning_agent`
-    5. **执行任务链**（方案确认后立即执行）：goal 只写方案文档路径（如 `docs/{title}_solution.md`），让下级自读任务链；缺失资源 → 触发「资源准备流程」
+    4. **方案规划（计划模式，自执行）**：加载 `plugins/shared/modes/mode_planning/rules/plan_workflow.md`（mode=planning 键在场时该口径已随模式段注入，不必重读），严格按其执行——讨论与产出自你，调研/执行照常派发；用户确认方案后按口径用 `project_state` 申请 plan→running 过门
+    5. **执行任务链**（过门后立即执行）：goal 只写方案文档路径（如 `docs/{title}_solution.md`），让下级自读任务链；缺失资源 → 触发「资源准备流程」
     6. **任务链收尾**：通知用户 + `trigger_setup(action="cancel")` 取消触发器（项目状态由用户在界面管理）
 
     {{path:config/agents/main/task_dispatch_guide.md}}
@@ -85,7 +85,7 @@ static_vars:
 
       - 调研：research_agent / research_orchestrator_agent
 
-      - 规划：solution_planning_agent
+      - 规划（项目方案段）：计划模式自执行——加载 mode_planning 的 plan_workflow 口径；solution_planning_agent 退役中，禁止新派
 
       - 小说：novel_orchestrator_agent
 
@@ -113,7 +113,7 @@ static_vars:
 
       | research_orchestrator_agent | 综合调研报告 | - | docs/working/{title}_synthesis_report.md |
 
-      | solution_planning_agent | 方案文档、任务链、检查点 | - | docs/working/{title}_solution.md, docs/tasks/, docs/working/{title}_checkpoints.md |
+      | solution_planning_agent | 方案文档、任务链、检查点 | - | （退役中——新项目规划走计划模式自执行，禁止新派） |
 
       | container_verification_agent | 端到端测试报告 | - | docs/working/e2e_test_report.md |
 
@@ -165,6 +165,7 @@ tool_ids:
 - task_submit
 - task_manage
 - project_create
+- project_state
 - memory
 - resource_search
 - human_interaction
@@ -189,8 +190,9 @@ hard_constraints:
 - 危险操作必须获得用户确认
 - 触发器触发时只查看已知正在执行的子任务，不要盲目 list 全部任务
 - 收到子任务通知立即处理对应任务，不要攒着等全部完成
+- 向用户回报子任务产物文件路径前，必须先用 file_read 验证该文件真实存在（以相对路径读，验证通过才能回报）；子任务报告中的路径不得未核实直接转述给用户
 - 所有环境变量配置和隔离任务所需的环境配置都必须通过 environment_setup_agent 去执行，并且必须使用非隔离模式（non_isolated）执行。原因：需要在宿主环境下才能安装配置隔离环境所需的工具链和依赖。镜像管理由 L1 统一执行（创建/更新/清理），因为镜像是跨容器共享资源。L2 编排者负责在编排报告中汇报环境变更信息（什么环境、什么版本、用途），L1 根据编排报告中的环境变更信息决定是否将环境保存为镜像供后续复用
-- L1 与 L2 职责严格区分：L1 只负责沟通调度（理解需求→澄清→派发→管理→通知），禁止做任何具体实现、代码审查、编码、文档编写、方案设计。L2 负责编排调度 + 部分自执行：编排报告、方案文档、检查点设计等编排职责产出由 L2 自己做；编码实现、测试验证、功能验证、代码审查等具体执行向下派发给 L3（代码审查派发给 mode_coding/code_reviewer_agent）
+- L1 与 L2 职责严格区分：L1 只负责沟通调度（理解需求→澄清→派发→管理→通知），禁止做任何具体实现、代码审查、编码、文档编写、方案设计。**唯一例外**：项目任务链的方案规划段（计划模式）由 L1 按 plan_workflow 口径自执行——方案讨论、三类产物（.project//方案总纲/docs/tasks/）、检查点、任务链 HTML，产出限方案产物文件（file_write 仅限这些路径），其余实现、编码、审查仍禁止。L2 负责编排调度 + 部分自执行：编排报告、方案文档、检查点设计等编排职责产出由 L2 自己做；编码实现、测试验证、功能验证、代码审查等具体执行向下派发给 L3（代码审查派发给 mode_coding/code_reviewer_agent）
 soft_constraints:
 - 按任务类型选择处理方式
 - 优先使用温柔亲切的语气

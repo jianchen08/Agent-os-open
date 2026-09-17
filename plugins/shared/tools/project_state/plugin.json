@@ -1,0 +1,82 @@
+{
+  "id": "project_state_tool",
+  "name": "Project State Tool",
+  "description": "项目方案工作流状态查询与迁移（plan/running/done，ADR 2026-09-17）",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "project_state",
+        "description": "查询或迁移项目方案工作流状态（plan | running | done）。query：读登记行工作流状态；transition：申请状态迁移（plan→running 定稿过门 / running→plan 修订回门），迁移触发用户审批（安全规则 needs_approval），审批通过前状态不变。plan 态内 task_submit 仅允许派发调研/环境准备类任务，执行类任务会被状态闸拒绝。done 由用户在界面管理。",
+        "render": {
+          "card": "form",
+          "title": "项目状态"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "项目 id（12hex 登记键）"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "query",
+                "transition"
+              ],
+              "default": "query",
+              "description": "query=读当前工作流状态；transition=申请状态迁移（触发用户审批）"
+            },
+            "target_state": {
+              "type": "string",
+              "enum": [
+                "plan",
+                "running"
+              ],
+              "description": "transition 的目标状态（合法边：plan→running 定稿过门；running→plan 修订回门）。done 由用户界面管理，不在工具可迁集合内。"
+            },
+            "reason": {
+              "type": "string",
+              "description": "transition 必填：迁移事由（定稿说明 / 修订申请：改动点+断链影响面+在途任务清单），进审批卡与日志审计"
+            }
+          },
+          "required": [
+            "project_id"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "project_id",
+            "workflow_state"
+          ],
+          "properties": {
+            "project_id": {
+              "type": "string"
+            },
+            "workflow_state": {
+              "type": "string",
+              "description": "plan | running | done"
+            },
+            "title": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "transitioned": {
+              "type": "boolean",
+              "description": "本次是否发生迁移（query 恒 false）"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -412,12 +412,13 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // 并接入 config_root（P0-1：否则 load_config() 恒返回空 {}，插件收不到配置）
     // 用户模式包根先于 move 取出（模式包目录扫描注册要用，见下方注册段）。
     let user_modes_dir = user_plugins_dir.as_deref().map(|p| p.join("modes"));
+    // 启动扫描根 = 内置根 + 用户根（与热路径 discover_new_plugins 同源）：模式包在
+    // `modes/<mode_id>/plugin.json` 二级嵌套，discover 内建的用户根扫描（一级
+    // 子目录）看不到；只传内置根会让启动装载 repo 份，而热路径同 id 解析用户份
+    // （loader 用户根子树赢）——首个 sync 周期源码目录翻转触发复验驱逐（/ext
+    // 路由空窗）。双根同 id 用户赢必须在启动路径同样成立。
+    let root_paths = collect_boot_plugin_roots(&plugins_dir, user_plugins_dir.as_deref());
     let loader = build_plugin_loader(&plugins_dir, user_plugins_dir, &config_root);
-
-    // 递归扫描插件目录——scan_root 只扫描一级子目录，
-    // plugins/shared/ 的结构是 tools/simple/plugin.json（二级嵌套），
-    // 需要收集所有包含 plugin.json 的目录的父目录传给 discover。
-    let root_paths = discover_plugin_roots(&plugins_dir);
 
     info!(
         target: "agentos-kernel",
@@ -1215,6 +1216,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut router_builder = KernelCapabilityRouter::with_metrics(metrics_aggregator.clone())
         .with_invoker(invoker.clone())
         .with_registry(registry.clone())
+        // BUG-37 调用路径注册表自愈：反查 miss 时按共享 manifest store 重注册
+        // （仅启用插件；禁用/已删插件保持 fail-closed）。
+        .with_tool_registry_heal(agentos_api::plugin_lifecycle::tool_registry_heal_fn(
+            registry.clone(),
+            plugin_scopes.clone(),
+            manifests_shared.clone(),
+            enabled_plugin_ids.clone(),
+        ))
         .with_session(session_coord.clone())
         .with_store(store.clone())
         .with_handler_registry(handler_registry.clone())
@@ -1949,6 +1958,23 @@ fn discover_plugin_roots(base: &std::path::Path) -> Vec<String> {
     parent_set.into_iter().collect()
 }
 
+/// 启动期 discover 的扫描根全集：内置根 + 用户根（用户根缺席 = 仅内置根）。
+///
+/// 双根都必须递归到插件目录父级：模式包 `modes/<mode_id>/plugin.json` 是二级
+/// 嵌套，discover 内建的内置/用户根扫描（一级子目录）看不到，双根同 id 用户赢
+/// 全靠 root_paths 里带进用户根父目录 + loader 的用户根子树优先裁决。与热路径
+/// `PluginInvokerImpl::collect_plugin_roots` 同源（那里也是双根父目录全集）。
+fn collect_boot_plugin_roots(
+    plugins_dir: &std::path::Path,
+    user_plugins_dir: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut roots = discover_plugin_roots(plugins_dir);
+    if let Some(user_dir) = user_plugins_dir {
+        roots.extend(discover_plugin_roots(user_dir));
+    }
+    roots
+}
+
 fn collect_plugin_dirs(dir: &std::path::Path, dirs: &mut Vec<String>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -2125,6 +2151,40 @@ mod tests {
 
         // 用户空间不可用（None）→ no-op 不 panic
         reconcile_mode_seeds_at_boot(&plugins_dir, None);
+    }
+
+    /// 启动扫描根（双根用户赢·启动侧）：内置根与用户根的插件父目录都必须进
+    /// root_paths——模式包 `modes/<id>/plugin.json` 二级嵌套只有父目录根扫得到，
+    /// 缺用户根会让启动装载 repo 份、热路径解析用户份（首个 sync 周期源码目录
+    /// 翻转触发复验驱逐，/ext 路由空窗）。
+    #[test]
+    fn collect_boot_plugin_roots_includes_user_root_parents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins/shared");
+        let repo_mode = plugins_dir.join("modes/mode_coding");
+        std::fs::create_dir_all(&repo_mode).unwrap();
+        std::fs::write(repo_mode.join("plugin.json"), r#"{"id":"mode_coding"}"#).unwrap();
+        let user_plugins = tmp.path().join("user-root/plugins");
+        let user_mode = user_plugins.join("modes/mode_coding");
+        std::fs::create_dir_all(&user_mode).unwrap();
+        std::fs::write(user_mode.join("plugin.json"), r#"{"id":"mode_coding"}"#).unwrap();
+
+        let roots = collect_boot_plugin_roots(&plugins_dir, Some(&user_plugins));
+        let repo_parent = plugins_dir.join("modes").to_string_lossy().to_string();
+        let user_parent = user_plugins.join("modes").to_string_lossy().to_string();
+        assert!(
+            roots.contains(&repo_parent),
+            "内置根模式包父目录必须在扫描根: {roots:?}"
+        );
+        assert!(
+            roots.contains(&user_parent),
+            "用户根模式包父目录必须在扫描根（双根同 id 用户赢的启动前提）: {roots:?}"
+        );
+
+        // 用户根缺席（存量部署）= 仅内置根，不建目录不报错。
+        let only = collect_boot_plugin_roots(&plugins_dir, None);
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0], repo_parent);
     }
 
     /// git 化挂点（设计稿 §2.2）：对账后确保用户仓就绪 + 播种变更自动提交一笔；

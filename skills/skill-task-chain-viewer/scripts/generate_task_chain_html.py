@@ -139,6 +139,56 @@ def load_tasks(tasks_dir: Path) -> list[Task]:
     return tasks
 
 
+# ── 追溯完整性检查（ADR 2026-09-17 决策 3：traces_to 断链 = 面板红旗） ──
+
+_AC_DEF_RE = re.compile(r"^\s*-\s*id:\s*(AC-?\d+)", re.MULTILINE | re.IGNORECASE)
+
+
+def _norm_ac(ref: str) -> str:
+    """AC 编号规范化（AC-1 / ac1 → AC1），两侧同源可比。"""
+    return ref.replace("-", "").upper()
+
+
+def load_solution_ac_ids(solution_doc: Path) -> dict[str, str]:
+    """方案总纲 AC 总表 → {规范化 AC id: 来源文件名}。文件缺失 = 空（无从对账）。"""
+    ids: dict[str, str] = {}
+    if not solution_doc.is_file():
+        return ids
+    try:
+        text = solution_doc.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"⚠️ 跳过无法读取的方案总纲: {solution_doc}（{e}）", file=sys.stderr)
+        return ids
+    for m in _AC_DEF_RE.finditer(text):
+        ids.setdefault(_norm_ac(m.group(1)), solution_doc.name)
+    return ids
+
+
+def check_trace_integrity(
+    tasks: list[Task], solution_ac_ids: dict[str, str]
+) -> list[dict[str, str]]:
+    """任务级 traces_to 对账方案级 AC 总表，返回断链清单（task_id / trace）。
+
+    方案总纲缺失或无 AC 定义 = 无从对账，不产红旗（返回空）——缺失本身由
+    plan_workflow 定稿自检清单把关，本检查只管「已声明 AC 的追溯断链」。
+    """
+    if not solution_ac_ids:
+        return []
+    broken: list[dict[str, str]] = []
+    for t in tasks:
+        for ref in t.ac_traces:
+            if _norm_ac(ref) not in solution_ac_ids:
+                broken.append({"task_id": t.task_id, "trace": ref})
+    return broken
+
+
+def _default_solution_doc(tasks_dir: Path) -> Path:
+    """默认方案总纲：tasks-dir 同级目录下字典序首个 *_solution.md（可能不存在）。"""
+    docs_dir = tasks_dir.parent
+    candidates = sorted(docs_dir.glob("*_solution.md"))
+    return candidates[0] if candidates else docs_dir / "_no_solution_.md"
+
+
 def load_project_docs(project_dir: Path) -> list[dict[str, str]]:
     """加载项目文档（读全文，供点击后渲染）。无法读取的文件输出警告并跳过。"""
     docs: list[dict[str, str]] = []
@@ -670,6 +720,8 @@ _HTML_TEMPLATE = string.Template("""<!DOCTYPE html>
     <div class="stat-card"><div class="stat-num">${doc_count}</div><div class="stat-label">项目文档</div></div>
   </div>
 
+  ${trace_section}
+
   <h2>任务概览</h2>
   <table>
     <thead><tr><th>ID</th><th>名称</th><th>执行者</th><th>状态</th><th>依赖</th><th>AC 数</th></tr></thead>
@@ -747,11 +799,33 @@ document.addEventListener('click', function(e) {
 </html>""")
 
 
+def _render_trace_section(broken: list[dict[str, str]]) -> str:
+    """追溯完整性区块：无断链 = 绿色通过条；断链 = 红旗清单（机读 AC 对账）。"""
+    if not broken:
+        return (
+            '  <div class="trace-ok" style="padding:10px 14px;margin-bottom:24px;'
+            'border:1px solid #86efac;border-radius:6px;background:#f0fdf4;'
+            'color:#166534;font-size:13px;">✅ 追溯完整性：全部任务级 AC 均可追溯'
+            '到方案级 AC 总表</div>'
+        )
+    items = "".join(
+        f"<li>{_esc(b['task_id'])} → {_esc(b['trace'])}（方案级 AC 总表中无此编号）</li>"
+        for b in broken
+    )
+    return (
+        '  <div class="trace-broken" style="padding:10px 14px;margin-bottom:24px;'
+        'border:1px solid #fca5a5;border-radius:6px;background:#fef2f2;'
+        'color:#991b1b;font-size:13px;">🚩 追溯完整性：'
+        f"{len(broken)} 处断链（traces_to 指向方案总纲未声明的 AC）<ul>{items}</ul></div>"
+    )
+
+
 def render_html(
     title: str,
     tasks: list[Task],
     project_docs: list[dict[str, str]],
     output: Path,
+    trace_section: str = "",
 ) -> None:
     """装配并写出 HTML 页面。只做编排，具体计算/渲染交给子函数。"""
     layers = compute_layers(tasks)
@@ -766,6 +840,7 @@ def render_html(
         ac_total=stats.ac_total,
         ac_traced=stats.ac_traced,
         doc_count=stats.doc_count,
+        trace_section=trace_section,
         rows=_render_task_rows(tasks),
         graph_svg=render_svg_graph(tasks, layers),
         doc_items=_render_doc_items(project_docs),
@@ -791,6 +866,16 @@ def main() -> int:
     parser.add_argument("--tasks-dir", default="docs/tasks/")
     parser.add_argument("--project-dir", default=".project/")
     parser.add_argument("--output", default="")
+    parser.add_argument(
+        "--solution-doc",
+        default="",
+        help="方案总纲路径（默认 tasks-dir 同级的 docs/*_solution.md 中取字典序首个）",
+    )
+    parser.add_argument(
+        "--check-traces",
+        action="store_true",
+        help="自检模式：traces_to 断链时打印清单并以退出码 1 结束（不写 HTML）",
+    )
     args = parser.parse_args()
 
     tasks_dir = Path(args.tasks_dir)
@@ -801,9 +886,20 @@ def main() -> int:
     tasks = load_tasks(tasks_dir)
     docs = load_project_docs(project_dir)
 
+    solution_doc = Path(args.solution_doc) if args.solution_doc else _default_solution_doc(tasks_dir)
+    solution_ac_ids = load_solution_ac_ids(solution_doc)
+    broken = check_trace_integrity(tasks, solution_ac_ids)
+    if broken:
+        for b in broken:
+            print(f"🚩 追溯断链: {b['task_id']} → {b['trace']}", file=sys.stderr)
+    else:
+        print("✅ 追溯完整性：全部任务级 AC 均可追溯到方案级 AC 总表")
+    if args.check_traces:
+        return 1 if broken else 0
+
     safe_title = _sanitize_filename(args.title)
     out = Path(args.output) if args.output else Path("docs/working") / f"{safe_title}_task_chain.html"
-    render_html(args.title, tasks, docs, out)
+    render_html(args.title, tasks, docs, out, trace_section=_render_trace_section(broken))
     print(f"✅ 生成 {len(tasks)} 个任务的可视化: {out}")
     return 0
 

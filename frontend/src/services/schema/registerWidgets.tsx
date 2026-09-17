@@ -39,7 +39,6 @@ import { DebugPipelineStatePage } from '@/pages/debug/DebugPipelineStatePage'
 import { DebugSessionsPage } from '@/pages/debug/DebugSessionsPage'
 import { DebugTasksPage } from '@/pages/debug/DebugTasksPage'
 import { DebugUsersPage } from '@/pages/debug/DebugUsersPage'
-import { KnowledgeBasePage } from '@/pages/knowledge-base/KnowledgeBasePage'
 import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { MemoryPage } from '@/pages/memory/MemoryPage'
 import { widgetRegistry } from './WidgetRegistry'
@@ -86,10 +85,10 @@ const DebugUsersWidget = () => <DebugUsersPage embedded />
 const DebugEvaluationMetricsWidget = () => <DebugEvaluationMetricsPage embedded />
 const DebugLlmPayloadWidget = () => <DebugLlmPayloadPage embedded />
 
-/** 记忆/知识库域页面（hindsight_memory 插件 space=workspace slot=tab 声明，
- *  /p/memory、/p/knowledge_base 全页渲染；数据面 = hindsight http_endpoints） */
+/** 记忆域页面（hindsight_memory 插件 space=workspace slot=tab 单页声明，
+ *  /p/memory 全页渲染；页内两分区 = 对话记忆 + 文档库，knowledge-base 域
+ *  数据面同页承载 = hindsight http_endpoints） */
 const MemoryPanelWidget = () => <MemoryPage />
-const KnowledgeBasePanelWidget = () => <KnowledgeBasePage />
 
 /** Widget 注册条目 */
 interface WidgetEntry {
@@ -124,9 +123,6 @@ const WIDGETS: WidgetEntry[] = [
   // tools_panel 已随 ToolsPage 退役，plugins_panel 独立面板随双入口收敛撤除——
   // 能力浏览并入设置中枢「插件注册表」kernel-plugins）
   { name: 'agents_panel', component: AgentsPanel, spaces: ['workspace'] },
-  // memory_panel 死注册已摘除（P0-3）：hindsight_memory 不贡献页面声明
-  // （侧边栏记忆页先前拍板移除），/memory 路由直挂 MemoryPage 不经本注册；
-  // 记忆页声明化归 P3-4（hindsight 域插件声明页）。
   // 调试中心面板（debug_center 插件 contributes.pages 声明，单入口：仅管理员可见；
   // 面板内部切换 6 个调试页面——数据库管理/执行记录/会话/任务/用户/评估指标，
   // 页面数据经各数据源插件 HTTP 面获取（db_admin|monitoring|evaluation_service|task_service 等）
@@ -175,10 +171,9 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'debug_evaluation', component: DebugEvaluationMetricsWidget, spaces: ['workspace'] },
   { name: 'debug_llm_payload', component: DebugLlmPayloadWidget, spaces: ['workspace'] },
   { name: 'debug_contract_status', component: ContractStatusPanel, spaces: ['workspace'] },
-  // 记忆/知识库域（hindsight_memory 声明页承载，预置域 widget——交互复杂度
+  // 记忆域（hindsight_memory 声明页承载，预置域 widget——交互复杂度
   // 超出声明组台能力，验收标准=入口声明+数据面插件化）
   { name: 'memory_panel', component: MemoryPanelWidget, spaces: ['workspace'] },
-  { name: 'knowledge_base_panel', component: KnowledgeBasePanelWidget, spaces: ['workspace'] },
   // 插件页面导航面板（模式体系 §4.1：所有插件 contributes.pages 的统一入口，
   // 长尾页面全量目录——activity-bar 预算死守的配套件，模式零特例）
   { name: 'plugin_pages_hub_panel', component: PluginPagesHubPanel, spaces: ['workspace'] },

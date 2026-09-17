@@ -4,8 +4,8 @@
  *
  * 既有测试覆盖上行消息路由（AC-1..AC-8）。本文件补齐其余分支：
  * - pluginId 缺失 → 不请求、渲染「缺少 pluginId」错误态
- * - HTML 拉取：带 head 的 HTML 只在 head 内插 CSP（不重复插 bootstrap 到 body）
- * - 无 head / 无 html 结构 → 两种包装路径的注入位置
+ * - 三种 HTML 形态（带 head / 仅 html / 无结构）均注入 CSP + bootstrap + 实例令牌
+ *   （CSP 恒在最前；令牌 = 上行身份凭据 __wv_token 的载体，随桥脚本同生同灭）
  * - 拉取失败（Error / 非 Error 拒因）→ 错误态渲染，未失败前显示加载占位
  * - 挂载后取消（卸载中 resolve）→ 不再 setState（cancelled 守卫）
  * - 下行：widgetEventStore.latest 变化 → iframe 收到 'widget.event' 消息
@@ -66,16 +66,25 @@ describe('pluginId 缺失', () => {
 })
 
 describe('HTML 包装注入位置', () => {
-  it('含 head 的 HTML → 仅 head 内插 CSP，不追加 bootstrap 脚本', async () => {
+  it('含 head 的 HTML → head 内同时注入 CSP 与 bootstrap（CSP 最前，桥不丢）', async () => {
     apiGet.mockResolvedValue({ data: '<html><head><title>T</title></head><body>hi</body></html>' })
     render(<WebviewWidget pluginId="demo" />)
 
     await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
     const srcDoc = getSrcDoc()
     expect(srcDoc).toContain('Content-Security-Policy')
-    // CSP 紧跟 head 开标签之后
-    expect(srcDoc).toMatch(/<head><meta http-equiv="Content-Security-Policy"/)
-    expect(srcDoc).not.toContain('window.agentos')
+    // CSP 紧跟 head 开标签之后（CSP 在最前的契约）
+    expect(srcDoc).toMatch(/<head[^>]*><meta http-equiv="Content-Security-Policy"/)
+    // bootstrap 注入不丢：window.agentos 注入器 + __ready 就绪信号均在
+    expect(srcDoc).toContain('window.agentos')
+    expect(srcDoc).toContain('__ready')
+    // 实例令牌随桥注入（BUG-42 回归锁）：上行身份凭据 __wv_token 的载体，
+    // 形态为实例级随机 UUID 或老浏览器 wv_ 兜底，恒非空
+    expect(srcDoc.match(/TOKEN = "([^"]+)"/)?.[1]).toMatch(
+      /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|wv_.+)/,
+    )
+    // bootstrap 在 head 内：先于 body 内容解析，body 脚本执行时桥已就位
+    expect(srcDoc.indexOf('window.agentos')).toBeLessThan(srcDoc.indexOf('<body'))
   })
 
   it('只有 html 无 head → 注入 head 包裹 CSP + bootstrap', async () => {
@@ -87,6 +96,10 @@ describe('HTML 包装注入位置', () => {
     expect(srcDoc).toMatch(/<html><head><meta http-equiv="Content-Security-Policy"/)
     expect(srcDoc).toContain('window.agentos')
     expect(srcDoc).toContain('__ready')
+    // 实例令牌随桥注入（BUG-42 回归锁，同 head 分支口径）
+    expect(srcDoc.match(/TOKEN = "([^"]+)"/)?.[1]).toMatch(
+      /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|wv_.+)/,
+    )
   })
 
   it('无结构 HTML → 包一层完整文档（CSP 在 head、bootstrap 在 body 尾）', async () => {

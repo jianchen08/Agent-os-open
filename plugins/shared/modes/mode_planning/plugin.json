@@ -1,0 +1,199 @@
+{
+  "id": "mode_planning",
+  "name": "Mode Planning",
+  "version": "1.2.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "description": "计划模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile）+ 工作区面板数据面（项目状态/任务链/方案讨论，对标 Linear/Notion Projects 规划台）+ 写动作（创建项目经 project_create / 发起规划经 task_submit 真派发），profile 随包内打包",
+  "permissions": {},
+  "priority": 45,
+  "host_group": "light",
+  "capabilities": {
+    "tools": [],
+    "services": [
+      {
+        "name": "mode.describe",
+        "description": "返回计划模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode",
+            "name",
+            "chain",
+            "weights",
+            "budget",
+            "profile_path",
+            "panel_page_id"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "chain": {
+              "type": "object"
+            },
+            "weights": {
+              "type": "object"
+            },
+            "budget": {
+              "type": "object"
+            },
+            "profile_path": {
+              "type": "string"
+            },
+            "panel_page_id": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "mode.get_profile",
+        "description": "返回计划模式包内 profile.yaml 解析后的内容",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ]
+  },
+  "http_endpoints": [
+    {
+      "route_id": "mode_planning_panel_page",
+      "method": "GET",
+      "path": "/ext/mode_planning/page/planning-panel",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: 规划台面板（插件自带 webview 页）"
+    },
+    {
+      "route_id": "mode_planning_data_bootstrap",
+      "method": "GET",
+      "path": "/ext/mode_planning/data/bootstrap",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "面板头元数据（模式名/链/panel_page_id）"
+    },
+    {
+      "route_id": "mode_planning_data_projects",
+      "method": "GET",
+      "path": "/ext/mode_planning/data/projects",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "项目列表（登记 provider 在则登记态；否则 pipeline-state 按 task.parent_project_id 派生并带 note）"
+    },
+    {
+      "route_id": "mode_planning_data_sessions",
+      "method": "GET",
+      "path": "/ext/mode_planning/data/sessions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "本模式会话列表（pipeline-state mode 键过滤归一）"
+    },
+    {
+      "route_id": "mode_planning_data_tasks",
+      "method": "GET",
+      "path": "/ext/mode_planning/data/tasks",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "任务链单层查询（tool-executor 调 task_service 服务 task.list，query 必带 parent_task_id；前端递归组树）"
+    },
+    {
+      "route_id": "mode_planning_data_discussions",
+      "method": "GET",
+      "path": "/ext/mode_planning/data/discussions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "方案讨论消息流（messages.list 按 pipeline_id，query 必带 pipeline_id）"
+    },
+    {
+      "route_id": "mode_planning_action_create_project",
+      "method": "POST",
+      "path": "/ext/mode_planning/data/actions/create_project",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：创建项目（project_create 真派发，goal 必填 / path / project_type 可选）"
+    },
+    {
+      "route_id": "mode_planning_action_plan",
+      "method": "POST",
+      "path": "/ext/mode_planning/data/actions/plan",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：发起规划（task_submit 派发，target=main + mode=planning + task_kind=planning_plan；session_id 有则透传入对话框线程）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "planning_desk",
+        "title": "规划台",
+        "icon": "📋",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/planning_desk",
+        "widget": "webview",
+        "props": {
+          "pluginId": "mode_planning",
+          "htmlPath": "/page/planning-panel",
+          "widgetId": "planning_desk"
+        },
+        "order": 30,
+        "description": "计划模式面板：项目状态/任务链/方案讨论",
+        "mode": "planning",
+        "detachable": {
+          "popout": true,
+          "childWindow": true,
+          "defaultSize": {
+            "w": 1080,
+            "h": 680
+          },
+          "minSize": {
+            "w": 720,
+            "h": 480
+          }
+        }
+      }
+    ]
+  }
+}

@@ -296,6 +296,15 @@ pub async fn refresh_handler(
         message: "无效的刷新令牌".to_string(),
     })?;
 
+    // 类型闸（F2，2026-09-16 审查）：仅 refresh 前缀可换发。access token
+    // （TTL 30min）提交本端点不得换取 refresh（TTL 7 天）——否则短 TTL
+    // 凭证泄露被拉平为长效会话，破坏 access/refresh 分层 + 单次轮换契约。
+    if !t.is_refresh() {
+        return Err(ApiError::Unauthorized {
+            message: "无效的刷新令牌".to_string(),
+        });
+    }
+
     if is_token_expired(t.exp) {
         return Err(ApiError::Unauthorized {
             message: "刷新令牌已过期".to_string(),
@@ -1169,6 +1178,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// F2（2026-09-16 审查）：access token 提交 refresh 端点不得换发——
+    /// 否则 30min 短 TTL 凭证泄露被拉平为 7 天长效会话。
+    #[tokio::test]
+    async fn refresh_rejects_access_token_type_confusion() {
+        let (app, _store) = app_with_store().await;
+        let v = login(&app, "admin", TEST_ADMIN_PW).await;
+        let access = v["access_token"].as_str().unwrap().to_string();
+        let refresh = v["refresh_token"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/auth/refresh")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"refresh_token": access}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "access token 不得经 refresh 端点换发长效凭证"
+        );
+
+        // 对照：真正的 refresh token 同链路可用（类型闸不误伤正常轮换）
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/auth/refresh")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"refresh_token": refresh}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "正常 refresh 轮换不受类型闸影响"
+        );
     }
 
     /// store 在而用户不存在：签名合法的 token 也不得换发新 token（K4）。

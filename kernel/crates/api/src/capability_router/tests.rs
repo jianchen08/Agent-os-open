@@ -965,6 +965,121 @@ async fn test_tool_executor_unregistered_tool_fails_closed() {
     assert!(calls.is_empty(), "未注册工具不应触达 invoker");
 }
 
+// ── tool-executor.invoke 调用路径自愈（BUG-37）────────────────────────────
+// 注册表条目因 G2 启动期误剔等原因丢失且 watcher 不重扫 → 工具永久不可用。
+// 自愈闭包 = "未注册但 manifest 在册 → 重注册再反查"（有界：每次调用至多一次）。
+
+/// 自愈测试夹具：共享注册表 + 记录 heal 触发次数。
+/// heal 闭包模拟生产装配（manifest 在册 → 重注册 → 返回描述符）。
+fn router_with_heal(
+    captured: std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
+    registry: Arc<agentos_plugin_loader::CapabilityRegistryImpl>,
+    heal_calls: std::sync::Arc<std::sync::Mutex<usize>>,
+) -> KernelCapabilityRouter {
+    use agentos_core::traits::ToolDescriptor;
+    use agentos_core::types::{ToolCategory, ToolSource};
+    let reg_for_heal = registry.clone();
+    let heal: ToolRegistryHealFn = Arc::new(move |tool_name: &str| {
+        let reg = reg_for_heal.clone();
+        let calls = heal_calls.clone();
+        Box::pin(async move {
+            *calls.lock().unwrap() += 1;
+            // 模拟生产自愈：manifest 在册 → reenable 重注册（幂等），返回描述符。
+            if tool_name != "project_state" {
+                return None;
+            }
+            let descriptor = ToolDescriptor {
+                name: tool_name.to_string(),
+                description: "healed".into(),
+                plugin_id: "project_state_tool".into(),
+                input_schema: json!({"type": "object"}),
+                output_schema: None,
+                category: ToolCategory::System,
+                source: ToolSource::Mcp,
+                ui: None,
+                render: None,
+            };
+            reg.register_tool("project_state_tool", descriptor.clone());
+            Some(descriptor)
+        })
+    });
+    KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_invoker(Arc::new(CaptureInvoker { captured }))
+        .with_registry(registry)
+        .with_tool_registry_heal(heal)
+}
+
+#[tokio::test]
+async fn test_tool_executor_unregistered_tool_self_heals_and_invokes() {
+    // 注册表条目丢失（G2 误剔形态：registry 无 project_state）→ 反查 miss
+    // 触发自愈重注册 → 本次调用按重注册结果路由到正确插件，且注册表恢复。
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let heal_calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let registry = Arc::new(agentos_plugin_loader::CapabilityRegistryImpl::new());
+    let router = router_with_heal(captured.clone(), registry.clone(), heal_calls.clone());
+
+    let params = json!({
+        "tool_name": "project_state",
+        "args": {"action": "query"},
+    });
+    let res = router
+        .handle("tool-executor", "invoke", params)
+        .await
+        .unwrap();
+
+    assert_eq!(res["success"], true, "自愈后调用应成功: {}", res["error"]);
+    let calls = captured.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "自愈后应落 invoker 执行");
+    assert_eq!(calls[0].0, "project_state_tool", "应路由到重注册的插件");
+    assert_eq!(calls[0].1, "project_state");
+    // 注册表条目恢复（后续反查不再依赖自愈）
+    assert!(
+        registry.get_tool("project_state").is_some(),
+        "自愈应把工具重注册进共享注册表"
+    );
+    // 下次调用直接命中注册表，不再触发自愈（有界性）
+    let _ = router
+        .handle(
+            "tool-executor",
+            "invoke",
+            json!({"tool_name": "project_state", "args": {"action": "query"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(*heal_calls.lock().unwrap(), 1, "注册表恢复后不应再触发自愈");
+}
+
+#[tokio::test]
+async fn test_tool_executor_heal_miss_still_fails_closed() {
+    // 自愈闭包返回 None（manifest 不在册 / 插件已禁用）→ 保持 fail-closed
+    // 报"未注册"，不落 invoker。
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let heal_calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let registry = Arc::new(agentos_plugin_loader::CapabilityRegistryImpl::new());
+    let router = router_with_heal(captured.clone(), registry.clone(), heal_calls.clone());
+
+    let res = router
+        .handle(
+            "tool-executor",
+            "invoke",
+            json!({"tool_name": "ghost_tool", "args": {}}),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res["success"], false);
+    assert!(
+        res["error"].as_str().unwrap().contains("未注册"),
+        "自愈未命中应保持 fail-closed，got: {}",
+        res["error"].as_str().unwrap()
+    );
+    assert_eq!(*heal_calls.lock().unwrap(), 1, "应触发过一次自愈尝试");
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "自愈未命中不得触达 invoker"
+    );
+}
+
 /// 固定返回错误的 invoker（验证 tool-executor.invoke 的错误归一化）。
 struct ErroringInvoker;
 #[async_trait::async_trait]

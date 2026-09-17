@@ -3174,3 +3174,212 @@ async fn resync_mode_resources_restores_keys_after_scope_revoke() {
         "恢复的注册重新入 scope"
     );
 }
+
+// ── 双源同 id（模式包 repo 份 + 用户份）：用户赢贯通 60s 重验证路径 ────────
+
+/// 写一个带 tools + http 端点的模式包（生产 mode_* 形态：sidecar + 合宿成员外
+/// 的普通 sidecar），repo 根与用户根各写一份同 id 同内容。
+fn write_full_mode_package(root: &Path, mode_id: &str) {
+    let dir = root.join("modes").join(mode_id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = json!({
+        "id": mode_id, "name": mode_id, "version": "1.0.0",
+        "plugin_type": "tool", "language": "python",
+        "host_type": "sidecar", "entry": "python -m plugin",
+        "capabilities": { "tools": [
+            { "name": "mode_tool", "description": "mode_tool" }
+        ]},
+        "http_endpoints": [{
+            "route_id": "r", "method": "GET",
+            "path": format!("/ext/{}/foo", mode_id),
+            "auth": "none", "handler_capability": "http.handle",
+        }],
+    });
+    std::fs::write(dir.join("plugin.json"), manifest.to_string()).unwrap();
+}
+
+/// loader 背书 invoker：discover_new_plugins 委托真实 PluginLoaderImpl（双根
+/// 扫描 + 用户根子树优先裁决走生产代码，本测试不做发现层替身）；root_paths 逐
+/// 轮按预置序列轮转——复现热路径 collect_plugin_roots 每轮新建 HashSet 的序不
+/// 稳定（双源同 id 胜者翻转的机制）。
+struct DualRootInvoker {
+    loader: std::sync::Arc<agentos_plugin_loader::PluginLoaderImpl>,
+    /// 每轮 discover 使用的 root_paths（按调用次序取；耗尽后停在最后一组）。
+    root_sequences: std::sync::Mutex<Vec<Vec<String>>>,
+    discover_calls: std::sync::atomic::AtomicUsize,
+    /// force_unload（宿主驱逐/swap 回退段）调用记录。
+    force_unloads: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl PluginInvoker for DualRootInvoker {
+    async fn invoke_pipeline_plugin<'a>(
+        &self,
+        _plugin_id: &str,
+        _ctx: &PluginContext<'a>,
+    ) -> Result<PluginResult, PluginError> {
+        unimplemented!("双源同 id 场景不走管道调用")
+    }
+    async fn invoke_tool(
+        &self,
+        _plugin_id: &str,
+        _tool_name: &str,
+        _inputs: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, PluginError> {
+        Ok(ToolExecutionResult::success(serde_json::json!({})))
+    }
+    async fn send_lifecycle_hook(
+        &self,
+        _plugin_id: &str,
+        _hook: LifecycleHook,
+        _context: &HookContext,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+    async fn discover_new_plugins(&self) -> Result<Vec<PluginManifest>, PluginError> {
+        // 取本轮 root_paths 后立即放锁（guard 不得跨 await——async_trait 要求 Send）。
+        let roots: Vec<String> = {
+            let call = self
+                .discover_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let seq = self.root_sequences.lock().unwrap();
+            let idx = call.min(seq.len().saturating_sub(1));
+            seq[idx].clone()
+        };
+        let root_refs: Vec<&str> = roots.iter().map(|s| s.as_str()).collect();
+        use agentos_core::traits::PluginLoader as _;
+        self.loader.discover(&root_refs).await
+    }
+    async fn list_plugin_tools(&self, _plugin_id: &str) -> Result<serde_json::Value, PluginError> {
+        // 与两份磁盘声明一致（同内容双源）——G2 无漂移。
+        Ok(json!({ "tools": [{ "name": "mode_tool", "description": "mode_tool" }] }))
+    }
+    async fn force_unload(&self, plugin_id: &str) -> Result<(), PluginError> {
+        self.force_unloads
+            .lock()
+            .unwrap()
+            .push(plugin_id.to_string());
+        Ok(())
+    }
+}
+
+/// 双源同 id 场景：用户份存在且启用 → 60s 重验证逐轮把 root_paths 序翻转
+/// （模拟热路径 HashSet 序不稳定），路由必须恒可达、零复验驱逐（无 swap）。
+/// 朴素 last-wins 下第二轮胜者翻到 repo 份 → 源码目录翻转 → 代码指纹必变 →
+/// 复验驱逐 + 路由 revoke/re-register（/ext 间歇 503 的机制链）。
+#[tokio::test]
+async fn dual_source_same_id_user_wins_no_swap_routes_alive_across_syncs() {
+    let builtin = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    write_full_mode_package(builtin.path(), "mode_x");
+    write_full_mode_package(user.path(), "mode_x");
+
+    let loader = std::sync::Arc::new(agentos_plugin_loader::PluginLoaderImpl::new(
+        builtin.path(),
+        Some(user.path().to_path_buf()),
+    ));
+    let builtin_modes = builtin.path().join("modes").to_string_lossy().to_string();
+    let user_modes = user.path().join("modes").to_string_lossy().to_string();
+    let invoker = DualRootInvoker {
+        loader: loader.clone(),
+        root_sequences: std::sync::Mutex::new(vec![
+            vec![builtin_modes.clone(), user_modes.clone()],
+            vec![user_modes, builtin_modes],
+        ]),
+        discover_calls: std::sync::atomic::AtomicUsize::new(0),
+        force_unloads: std::sync::Mutex::new(Vec::new()),
+    };
+
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let scopes = PluginScopeRegistry::new();
+    // 生产装配形态：代码目录解析 = loader 发现缓存（胜者目录）——胜者翻转时
+    // 代码指纹随之变化，正是复验驱逐的触发源。
+    let code_dirs: Arc<CodeDirResolver> = Arc::new({
+        let loader = loader.clone();
+        move |id: &str| {
+            use agentos_core::traits::PluginLoader as _;
+            loader.get_plugin_dir(id).map(std::path::PathBuf::from)
+        }
+    });
+
+    let mut known = HashSet::new();
+    let mut known_cdylib = None;
+    let mut known_hashes = HashMap::new();
+    let mut known_code = HashMap::new();
+    let mut known_streaks = HashMap::new();
+
+    // 第 1 轮（boot 后首轮）：注册 + 落基线。
+    let r1 = sync_once_with_store(
+        &invoker,
+        &registry,
+        &scopes,
+        &mut known,
+        &mut known_cdylib,
+        None,
+        &mut known_hashes,
+        &mut known_code,
+        &mut known_streaks,
+        Some(&code_dirs),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(r1.new_plugin_ids.contains(&"mode_x".to_string()));
+    assert!(
+        registry
+            .list_http_routes()
+            .iter()
+            .any(|d| d.plugin_id == "mode_x"),
+        "首轮注册后 /ext 路由必须在册"
+    );
+    let route_count = registry.list_http_routes().len();
+
+    // 第 2 轮（60s 后，root_paths 序翻转）：胜者必须稳定在用户份——零复验、
+    // 零驱逐、路由恒在。
+    let r2 = sync_once_with_store(
+        &invoker,
+        &registry,
+        &scopes,
+        &mut known,
+        &mut known_cdylib,
+        None,
+        &mut known_hashes,
+        &mut known_code,
+        &mut known_streaks,
+        Some(&code_dirs),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        r2.changed_plugin_ids.is_empty(),
+        "双源同 id 不得触发复验重注册（胜者翻转 = 目录翻转 = 驱逐循环）: {:?}",
+        r2.changed_plugin_ids
+    );
+    assert!(
+        invoker.force_unloads.lock().unwrap().is_empty(),
+        "不得驱逐宿主（swap）: {:?}",
+        invoker.force_unloads.lock().unwrap()
+    );
+    let routes_now = registry.list_http_routes();
+    assert!(
+        routes_now.iter().any(|d| d.plugin_id == "mode_x"),
+        "路由必须恒可达"
+    );
+    assert_eq!(
+        routes_now.len(),
+        route_count,
+        "路由表不得被 revoke/re-register 洗牌"
+    );
+    // 胜者稳定在用户份：源码目录落在用户根（代码指纹不再振荡）。
+    let dir = {
+        use agentos_core::traits::PluginLoader as _;
+        loader.get_plugin_dir("mode_x").unwrap()
+    };
+    assert!(
+        std::path::Path::new(&dir).starts_with(user.path()),
+        "源码目录必须稳定在用户根，got: {dir}"
+    );
+}

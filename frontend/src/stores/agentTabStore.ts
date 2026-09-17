@@ -2,6 +2,7 @@
 
 import { create } from 'zustand'
 import { isNotFoundError } from '@/services/api/client'
+import { autoOpenModePanel } from '@/services/modePanelAutoOpen'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
 
@@ -147,6 +148,67 @@ function loadTabsFromStorage(
 }
 
 /** Agent Tab 状态接口 */
+/** Tab 表集合字段的裁剪视图（upsert/prune 纯函数只读写这四个键） */
+interface TabCollectionFields {
+  tabs: AgentTab[]
+  activeTabId: string | null
+  unreadCounts: Record<string, number>
+  pipelineTabMap: Record<string, string>
+}
+
+/** upsert：同 id 合并更新，否则追加新 Tab（extra 供子 Tab 注入 canClose 等差异字段） */
+function upsertTabInState(
+  state: TabCollectionFields,
+  tabData: Omit<AgentTab, 'messages'>,
+  extra?: Partial<AgentTab>,
+): Partial<Pick<TabCollectionFields, 'tabs' | 'unreadCounts'>> {
+  const existingTab = state.tabs.find((t) => t.id === tabData.id)
+  if (existingTab) {
+    return {
+      tabs: state.tabs.map((t) => (t.id === tabData.id ? { ...t, ...tabData } : t)),
+    }
+  }
+  const newTab: AgentTab = { ...tabData, messages: [], ...extra }
+  return {
+    tabs: [...state.tabs, newTab],
+    unreadCounts: {
+      ...state.unreadCounts,
+      [tabData.id]: 0,
+    },
+  }
+}
+
+/** prune：移除 Tab 并连带清理未读/pipeline 映射/活跃位回落主 Tab */
+function pruneTabFromState(
+  state: TabCollectionFields,
+  tabId: string,
+): TabCollectionFields {
+  const newTabs = state.tabs.filter((t) => t.id !== tabId)
+  const newUnreadCounts = { ...state.unreadCounts }
+  delete newUnreadCounts[tabId]
+
+  // 清理指向该 Tab 的 pipeline 映射
+  const newPipelineTabMap = { ...state.pipelineTabMap }
+  for (const [pid, tid] of Object.entries(newPipelineTabMap)) {
+    if (tid === tabId) {
+      delete newPipelineTabMap[pid]
+    }
+  }
+
+  let newActiveTabId = state.activeTabId
+  if (state.activeTabId === tabId) {
+    const mainTab = newTabs.find((t) => t.agentLevel === 1)
+    newActiveTabId = mainTab?.id || newTabs[0]?.id || null
+  }
+
+  return {
+    tabs: newTabs,
+    activeTabId: newActiveTabId,
+    unreadCounts: newUnreadCounts,
+    pipelineTabMap: newPipelineTabMap,
+  }
+}
+
 interface AgentTabState {
   /** Agent Tab 列表 */
   tabs: AgentTab[]
@@ -396,6 +458,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     if (activeTab && activeTab.agentLevel !== 1 && activeTab.pipelineRunId) {
       get().loadTabMessages(activeTab.id)
     }
+
+    // 进会话落在对话 tab：按活跃管道 mode 自动弹出模式面板（无 mode/无声明零动作）
+    autoOpenModePanel(activeTab?.pipelineRunId)
   },
 
   /** 保存当前标签状态到 localStorage（仅标签 + pipeline 映射）。 消息由 pipelineMessageStore 独立 persist，不在此缓存。 */
@@ -408,60 +473,13 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
   /** 添加 Agent Tab */
   addTab: (tabData) => {
-    set((state) => {
-      const existingTab = state.tabs.find((t) => t.id === tabData.id)
-
-      if (existingTab) {
-        return {
-          tabs: state.tabs.map((t) => (t.id === tabData.id ? { ...t, ...tabData } : t)),
-        }
-      }
-
-      const newTab: AgentTab = {
-        ...tabData,
-        messages: [],
-      }
-
-      return {
-        tabs: [...state.tabs, newTab],
-        unreadCounts: {
-          ...state.unreadCounts,
-          [tabData.id]: 0,
-        },
-      }
-    })
+    set((state) => upsertTabInState(state, tabData))
     get().saveCurrentTabs()
   },
 
   /** 移除 Agent Tab */
   removeTab: (tabId) => {
-    set((state) => {
-      const newTabs = state.tabs.filter((t) => t.id !== tabId)
-      const newUnreadCounts = { ...state.unreadCounts }
-
-      delete newUnreadCounts[tabId]
-
-      // 清理指向该 Tab 的 pipeline 映射
-      const newPipelineTabMap = { ...state.pipelineTabMap }
-      for (const [pid, tid] of Object.entries(newPipelineTabMap)) {
-        if (tid === tabId) {
-          delete newPipelineTabMap[pid]
-        }
-      }
-
-      let newActiveTabId = state.activeTabId
-      if (state.activeTabId === tabId) {
-        const mainTab = newTabs.find((t) => t.agentLevel === 1)
-        newActiveTabId = mainTab?.id || newTabs[0]?.id || null
-      }
-
-      return {
-        tabs: newTabs,
-        activeTabId: newActiveTabId,
-        unreadCounts: newUnreadCounts,
-        pipelineTabMap: newPipelineTabMap,
-      }
-    })
+    set((state) => pruneTabFromState(state, tabId))
     get().saveCurrentTabs()
   },
 
@@ -551,29 +569,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
   /** 打开子 Tab */
   openSubTab: (tabData) => {
-    set((state) => {
-      const existingTab = state.tabs.find((t) => t.id === tabData.id)
-
-      if (existingTab) {
-        return {
-          tabs: state.tabs.map((t) => (t.id === tabData.id ? { ...t, ...tabData } : t)),
-        }
-      }
-
-      const newTab: AgentTab = {
-        ...tabData,
-        messages: [],
-        canClose: true,
-      }
-
-      return {
-        tabs: [...state.tabs, newTab],
-        unreadCounts: {
-          ...state.unreadCounts,
-          [tabData.id]: 0,
-        },
-      }
-    })
+    set((state) => upsertTabInState(state, tabData, { canClose: true }))
   },
 
   /** 关闭 Tab（增强版，支持主 Tab 保护，同时清理 pipeline 映射） */
@@ -590,31 +586,7 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         return state
       }
 
-      const newTabs = state.tabs.filter((t) => t.id !== tabId)
-      const newUnreadCounts = { ...state.unreadCounts }
-
-      delete newUnreadCounts[tabId]
-
-      // 清理指向该 Tab 的 pipeline 映射
-      const newPipelineTabMap = { ...state.pipelineTabMap }
-      for (const [pid, tid] of Object.entries(newPipelineTabMap)) {
-        if (tid === tabId) {
-          delete newPipelineTabMap[pid]
-        }
-      }
-
-      let newActiveTabId = state.activeTabId
-      if (state.activeTabId === tabId) {
-        const mainTab = newTabs.find((t) => t.agentLevel === 1)
-        newActiveTabId = mainTab?.id || newTabs[0]?.id || null
-      }
-
-      return {
-        tabs: newTabs,
-        activeTabId: newActiveTabId,
-        unreadCounts: newUnreadCounts,
-        pipelineTabMap: newPipelineTabMap,
-      }
+      return pruneTabFromState(state, tabId)
     })
     get().saveCurrentTabs()
 
@@ -677,6 +649,9 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
 
     // 持久化当前标签状态：刷新页面后恢复到当前激活标签（而非残留的其他标签）。
     get().saveCurrentTabs()
+
+    // 进入对话 tab：按该管道 mode 自动弹出模式面板（无 mode/无声明零动作）
+    autoOpenModePanel(effectivePipelineId)
   },
 
   /** 标记 Tab 完成 */
@@ -793,6 +768,8 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
         usePipelineMessageStore.getState().activatePipeline(pipelineId)
       }
       set({ activeTabId: tabId })
+      // 跳入管道对话（任务管理/跨会话定位）：按该管道 mode 自动弹出模式面板
+      autoOpenModePanel(pipelineId)
     }
   },
 

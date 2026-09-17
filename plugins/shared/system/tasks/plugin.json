@@ -525,11 +525,12 @@
       {
         "id": "tasks",
         "title": "任务管理",
-        "icon": "folder",
+        "icon": "📁",
         "space": "workspace",
         "slot": "tab",
         "path": "/tasks",
         "widget": "pipeline_manager",
+        "order": 5,
         "description": "任务/管道管理（pipeline_manager 预置域 widget 承载，按钮触发打开、非侧栏常驻）"
       }
     ]

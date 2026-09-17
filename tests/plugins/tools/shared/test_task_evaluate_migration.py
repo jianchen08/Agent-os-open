@@ -500,7 +500,7 @@ class TestCriteriaFallbackMarked:
 
         class FakeExecutor:
             async def run_evaluation(self, **kwargs):
-                raise AssertionError("无 criteria 指标直接通过，不应触达评估执行器")
+                raise AssertionError("无 criteria 非工具型指标直接通过，不应触达评估执行器")
 
         tool, service, state_writer = self._inject(mod, monkeypatch, task, executor=FakeExecutor())
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})

@@ -120,3 +120,19 @@ describe('formatTimestamp - 相对时间', () => {
     vi.useRealTimers()
   })
 })
+
+describe('formatDate - 其余粒度（date/time/未知 mode）', () => {
+  it.each([
+    ['date', /^\d{4}\/\d{2}\/\d{2}$/],
+    ['time', /^\d{2}:\d{2}:\d{2}$/],
+  ] as const)('%s 粒度只含对应成分', (mode, pattern) => {
+    expect(formatDate('2026-01-01T12:34:56Z', mode)).toMatch(pattern)
+  })
+
+  it('未知 mode 回退完整本地串（default 分支）', () => {
+    const out = formatDate('2026-01-01T12:34:56Z', 'nope' as never)
+    // zh-CN toLocaleString：无补零、本地时区（UTC+8 → 20 点）
+    expect(out).toMatch(/2026\/1\/1/)
+    expect(out).toMatch(/20:34/)
+  })
+})

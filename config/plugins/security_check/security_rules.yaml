@@ -205,34 +205,40 @@ rules:
   # ── 宿主路径访问：命令含 Windows 盘符路径时强制审批 ──
   # bash_execute 被 isolation_guard 路由到 host 执行（容器内无宿主路径），
   # 此时必须弹审批，不能走下面的 safe_commands 白名单（否则 ls D:/... 会被直接放行）。
-  # 正则 [A-Za-z]:[\\/] 匹配 D:/、D:\、C:\Users 等 Windows 盘符绝对路径。
+  # 正则匹配 D:/、D:\、C:\Users 等盘符绝对路径；负向后视 (?<![A-Za-z0-9])
+  # 限定盘符单字母前非字母数字——http:// 的 p:/ 这类 URL scheme 片段不误命中
+  # （否则白名单内 grep "http://..." 的良性只读也被弹审批）。
+  # priority: 1 —— 位置闸优先级高于白名单（默认 0）：引擎按优先级裁决 allow 与
+  # 拦截并存，平级 allow 生效（白名单豁免关键词子串噪音），高优先级审批不被掩蔽。
   - name: "host_path_access"
     tools: ["bash_execute"]
     params: ["command", "working_dir"]
     action: needs_approval
+    priority: 1
     patterns:
       - type: regex
-        value: "[A-Za-z]:[\\\\/]"
+        value: "(?<![A-Za-z0-9])[A-Za-z]:[\\\\/]"
 
   # ── 参数白名单：安全命令直接放行，不弹审批 ──
   # 危险工具（如 bash_execute）的参数如果命中白名单，视为安全操作直接放行。
-  # 正则整条锚定 + 禁止连接符（&& / ; / |）：白名单只放行"整条命令就是安全
-  # 命令"——`echo "..." && curl ...` 这类以安全命令开头、后接危险子命令的
-  # 组合不再享受 allow，危险关键词（curl / pip install / rm -rf 等）正常命中
-  # needs_approval（否则 echo && 前缀可绕过全部审批）。
+  # 正则整条锚定 + 禁连接/替换/重定向符（&& / ; / | / 换行 / $() / 反引号 /
+  # 子 shell 括号 / < > 重定向）：白名单只放行"整条命令就是安全命令"——
+  # `echo "..." && curl ...`、`echo $(curl ...)`、`echo a⏎curl ...`、`echo x > file`
+  # 这类以安全命令为载体注入第二条命令或重定向写文件的组合不再享受 allow，
+  # 危险关键词（curl / pip install / rm -rf 等）正常命中 needs_approval。
   - name: "safe_commands"
     tools: ["bash_execute"]
     params: ["command", "cmd"]
     action: allow
     patterns:
       - type: regex
-        value: "^\\s*(ls|cat|echo|pwd|whoami|date|wc|head|tail|grep|find|which|file|stat|du|df|env|printenv)\\s[^&|;]*$"
+        value: "^\\s*(ls|cat|echo|pwd|whoami|date|wc|head|tail|grep|find|which|file|stat|du|df|env|printenv)\\s[^&|;\\n$`()<>]*$"
       - type: regex
-        value: "^\\s*(git status|git log|git diff|git show|git branch)(\\s[^&|;]*)?$"
+        value: "^\\s*(git status|git log|git diff|git show|git branch)(\\s[^&|;\\n$`()<>]*)?$"
       - type: regex
-        value: "^\\s*(python --version|node --version|npm --version)(\\s[^&|;]*)?$"
+        value: "^\\s*(python --version|node --version|npm --version)(\\s[^&|;\\n$`()<>]*)?$"
       - type: regex
-        value: "^\\s*(pip list|pip show)(\\s[^&|;]*)?$"
+        value: "^\\s*(pip list|pip show)(\\s[^&|;\\n$`()<>]*)?$"
 
   # ── 社区运营：对外发布强制人工审批 ──
   # github_ops 的 create_comment 属对外可见发布动作；action 参数含 "comment"
@@ -245,3 +251,15 @@ rules:
     patterns:
       - type: keyword
         value: "comment"
+
+  # ── 项目状态门：plan→running / running→plan 强制人工审批（ADR 2026-09-17）──
+  # project_state 的 transition 是方案冻结/解冻的人审门：action 参数含 "transition"
+  # 即命中（keyword 子串匹配），弹人工审批后执行；query 只读不受影响。
+  # done 由用户界面管理，不在工具可迁集合内。
+  - name: "project_state_gate"
+    tools: ["project_state"]
+    params: ["action"]
+    action: needs_approval
+    patterns:
+      - type: keyword
+        value: "transition"

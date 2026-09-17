@@ -51,10 +51,9 @@ describe('WorkspacePanel — tab 渲染', () => {
     expect(screen.getByText('预览')).toBeInTheDocument()
   })
 
-  it('空 tabs 显示空态提示', () => {
+  it('空 tabs 渲染导航页兜底', () => {
     renderPanel([], () => {}, () => {})
-    expect(screen.getByText(/暂无内容/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /打开任务管理/ })).toBeInTheDocument()
+    expect(screen.getByTestId('workspace-nav-page')).toBeInTheDocument()
   })
 
   it('长标题 tab 悬浮显示完整标题（title 属性）', () => {

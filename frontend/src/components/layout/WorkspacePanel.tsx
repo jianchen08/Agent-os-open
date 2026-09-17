@@ -1,12 +1,16 @@
 /** 工作区面板 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附 */
 
 import React, { useEffect, useRef, useState } from 'react'
-import { FullscreenIcon, FullscreenExitIcon, FolderTree } from '@/assets/icons'
+import { FullscreenIcon, FullscreenExitIcon } from '@/assets/icons'
+import { isDetachable } from '@/components/schema/PageRenderer'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
-import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
+import { windowManager } from '@/services/window/WindowManager'
 import type { WorkspaceTab } from '@/types/layout'
+import { WorkspaceNavPage } from './WorkspaceNavPage'
 
 /** 工作区面板属性 */
 export interface WorkspacePanelProps {
@@ -32,6 +36,8 @@ interface TabContextMenuState {
   y: number
   tabId: string
   isPinned: boolean
+  /** 页签归属的声明页（detachable 弹出入口的判定与目标；非声明页签为 null） */
+  page: PageDeclaration | null
 }
 
 /** 工作区面板组件 显示 Tab 栏和对应的 Tab 内容区域 */
@@ -68,7 +74,8 @@ export function WorkspacePanel({
   ) => {
     e.preventDefault()
     e.stopPropagation()
-    setTabMenu({ x: e.clientX, y: e.clientY, tabId: tab.id, isPinned: !!tab.isPinned })
+    const page = tab.pageId ? (contributionRegistry.getPage(tab.pageId) ?? null) : null
+    setTabMenu({ x: e.clientX, y: e.clientY, tabId: tab.id, isPinned: !!tab.isPinned, page })
   }
 
   /** 点击外部关闭菜单 */
@@ -91,32 +98,29 @@ export function WorkspacePanel({
   }, [tabMenu])
 
   /** 菜单动作 */
-  const handleMenuAction = (action: 'close' | 'closeOther' | 'closeAll') => {
+  const handleMenuAction = (action: 'close' | 'closeOther' | 'closeAll' | 'popout') => {
     if (!tabMenu) return
     const store = useLayoutModeStore.getState()
     if (action === 'close') {
       store.closeWorkspaceTab(tabMenu.tabId)
     } else if (action === 'closeOther') {
       store.closeOtherWorkspaceTabs(tabMenu.tabId)
-    } else {
+    } else if (action === 'closeAll') {
       store.closeAllWorkspaceTabs()
+    } else if (tabMenu.page) {
+      // 声明 detachable 的页面 → 弹出浮窗（FloatingWindowManager 承载内容）
+      windowManager.openPopout(tabMenu.page)
     }
     setTabMenu(null)
   }
 
+  /** 弹出入口显隐：页面声明了 detachable 且未显式禁止 popout（禁止时 openPopout 为 no-op，不给死入口） */
+  const canPopout = (page: PageDeclaration | null): boolean =>
+    !!page && isDetachable(page) && page.detachable?.popout !== false
+
   if (tabs.length === 0) {
-    return (
-      <div className="text-muted-foreground flex h-full flex-col items-center justify-center gap-3 text-sm">
-        <FolderTree className="text-muted-foreground/40 h-10 w-10" />
-        <span>暂无内容 — 从下方打开任务管理</span>
-        <button
-          onClick={() => openWorkspacePanelByPath('/tasks')}
-          className="bg-primary/15 text-primary hover:bg-primary/25 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
-        >
-          打开任务管理
-        </button>
-      </div>
-    )
+    // 无已开页签 → 导航页兜底（schema 声明的 workspace 页面分组导航）；有页签时不占位
+    return <WorkspaceNavPage />
   }
 
   return (
@@ -183,6 +187,16 @@ export function WorkspacePanel({
           className="bg-popover text-popover-foreground shadow-lg fixed z-[100] min-w-[140px] rounded-lg border p-1 text-sm"
           style={{ left: tabMenu.x, top: tabMenu.y }}
         >
+          {/* 声明 detachable 的页面页签 → 弹出浮窗入口（FloatingWindowManager 基建复用） */}
+          {canPopout(tabMenu.page) && (
+            <button
+              className="hover:bg-accent text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs"
+              onClick={() => handleMenuAction('popout')}
+              data-testid="workspace-tab-menu-popout"
+            >
+              弹出为浮窗
+            </button>
+          )}
           <button
             className="hover:bg-accent text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs disabled:opacity-40"
             disabled={tabMenu.isPinned}

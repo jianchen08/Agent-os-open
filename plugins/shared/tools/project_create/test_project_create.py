@@ -70,6 +70,7 @@ class TestProjectCreate:
         assert len(r.output["project_id"]) == 12
         assert r.output["title"] == "新项目"
         assert r.output["created"] is True
+        assert r.output["workflow_state"] == "plan"
         assert r.output["path"].endswith("projects\\新项目") or r.output["path"].endswith(
             "projects/新项目"
         )
@@ -93,6 +94,19 @@ class TestProjectCreate:
         assert r1.output["created"] is True
         assert r2.output["created"] is False
         assert r2.output["project_id"] == r1.output["project_id"]
+
+    async def test_explicit_outside_whitelist_rejected(self, env: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        """显式路径不在白名单/工作空间根 → 失败信封，不建文件夹不登记。"""
+        import project_registry
+
+        monkeypatch.setattr(
+            "project_registry.load_registration_whitelist", lambda **k: [str(env["ws_base"] / "allow")]
+        )
+        outside = env["ws_base"].parent / "elsewhere" / "proj"
+        r = await _tool().execute({"goal": "越界", "path": str(outside)})
+        assert not r.success
+        assert "白名单" in (r.error or "")
+        assert not outside.exists()
 
     async def test_missing_goal_rejected(self, env: dict[str, Any]) -> None:
         """缺 goal → 失败信封（不建文件夹不登记）。"""

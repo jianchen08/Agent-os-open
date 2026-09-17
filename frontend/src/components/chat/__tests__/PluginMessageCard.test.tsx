@@ -22,9 +22,12 @@ vi.mock('@/services/api/client', () => ({
   },
 }))
 
-vi.mock('@/stores/sessionStore', () => ({
-  useSessionStore: () => ({ activeSessionId: 'session-1' }),
-}))
+vi.mock('@/stores/sessionStore', () => {
+  const state = { activeSessionId: 'session-1' }
+  // getState：WebviewWidget 在 fetch .then 内读挂载时活跃会话（bootstrap ctx 预置）
+  const useSessionStore = Object.assign(() => state, { getState: () => state })
+  return { useSessionStore }
+})
 vi.mock('@/stores/interactionStore', () => ({
   useInteractionStore: (sel: (s: { pendingInteractions: unknown[] }) => unknown) =>
     sel({ pendingInteractions: [] }),

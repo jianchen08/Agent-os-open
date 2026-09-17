@@ -1,12 +1,12 @@
 {
   "id": "mode_coding",
   "name": "Mode Coding",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
-  "description": "编码模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile），profile 随包内打包，供服务侧消费方（eval_harness 归因评测等）经内核服务调用获取",
+  "description": "编码模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile）+ 工作区面板数据面（会话列表/修复流水线六列看板/diff 复盘待审批，对标 Devin/Cursor/Cline）+ 写动作（派 issue 经 task_submit 真派发，携 session_id 送入宿主对话框线程，无则省略）+ 宿主融合面板（theme.sync/ctx.sync 下行桥，Devin 式密度），profile 随包内打包",
   "permissions": {},
   "priority": 45,
   "host_group": "light",
@@ -91,6 +91,66 @@
       "timeout_ms": 5000,
       "max_concurrency": 4,
       "description": "Webview HTML page: 编码交付面板（插件自带 webview 页）"
+    },
+    {
+      "route_id": "mode_coding_data_bootstrap",
+      "method": "GET",
+      "path": "/ext/mode_coding/data/bootstrap",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "面板头元数据（模式名/链/panel_page_id）"
+    },
+    {
+      "route_id": "mode_coding_data_sessions",
+      "method": "GET",
+      "path": "/ext/mode_coding/data/sessions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "本模式会话列表（pipeline-state mode 键过滤归一，含消息数/checkpoint 数）"
+    },
+    {
+      "route_id": "mode_coding_data_messages",
+      "method": "GET",
+      "path": "/ext/mode_coding/data/messages",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "会话过程流（messages.list 按 pipeline_id，query 必带 pipeline_id）"
+    },
+    {
+      "route_id": "mode_coding_data_board",
+      "method": "GET",
+      "path": "/ext/mode_coding/data/board",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "修复流水线六列看板（issue→分诊→worktree→测试→审批→合并，诚实启发式落列）"
+    },
+    {
+      "route_id": "mode_coding_data_reviews",
+      "method": "GET",
+      "path": "/ext/mode_coding/data/reviews",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "diff 复盘待审批列表（服务端代理 interaction.get_pending；内存态，重启即失）"
+    },
+    {
+      "route_id": "mode_coding_action_dispatch_issue",
+      "method": "POST",
+      "path": "/ext/mode_coding/data/actions/dispatch_issue",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：派 issue 修复（task_submit 派发，mode=coding 真进管道；携 session_id 送入宿主对话框线程，无则省略）"
     }
   ],
   "contributes": {
@@ -109,8 +169,20 @@
           "widgetId": "coding_delivery"
         },
         "order": 30,
-        "description": "编码模式面板：修复流水线/测试门/审批合并视图",
-        "mode": "coding"
+        "description": "编码模式面板：会话列表/修复流水线/diff 复盘",
+        "mode": "coding",
+        "detachable": {
+          "popout": true,
+          "childWindow": true,
+          "defaultSize": {
+            "w": 1080,
+            "h": 680
+          },
+          "minSize": {
+            "w": 720,
+            "h": 480
+          }
+        }
       }
     ]
   },

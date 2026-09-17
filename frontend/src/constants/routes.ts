@@ -19,7 +19,7 @@ export const ROUTES = {
   // 经 openWorkspacePanelByPath 解析）；能力浏览并入设置中枢「插件注册表」。
   // /admin 路由已退役：用户管理 = user_admin 插件声明页（widget_stage 组台）。
   // /memory、/knowledge-base 路由已退役：hindsight_memory 插件声明页
-  // （/p/memory、/p/knowledge_base 经通配路由全页渲染）。
+  // （「记忆」单页 = 对话记忆 + 文档库两分区，/p/memory 经通配路由全页渲染）。
   // /debug 路由族已退役：调试中心 = debug_center 插件声明页（debug_center_hub
   // 工作区面板内嵌九个子页），无独立路由。
 } as const

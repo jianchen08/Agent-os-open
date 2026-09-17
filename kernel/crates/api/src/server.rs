@@ -1145,6 +1145,33 @@ fn set_execution_context_path(
     cur.insert(parts[parts.len() - 1].to_string(), value);
 }
 
+/// 消息级 execution_context 逐键并入 base（1a2 合并点，消息级显式键优先）：
+/// 两侧同键皆对象时按子键合并（消息级叶子覆盖，base 未携带子键保留），
+/// 其余形态消息级值整体落位。execution_context 形态固定为两层对象
+/// （mode 顶层标量 / isolation、workspace 为单层对象），两层足够。
+fn merge_message_execution_context(base: &mut serde_json::Value, message: &serde_json::Value) {
+    let Some(msg_obj) = message.as_object() else {
+        return;
+    };
+    if !base.is_object() {
+        *base = message.clone();
+        return;
+    }
+    let base_obj = base.as_object_mut().expect("base 已确保为对象");
+    for (k, mv) in msg_obj {
+        match (base_obj.get_mut(k), mv) {
+            (Some(serde_json::Value::Object(bm)), serde_json::Value::Object(mm)) => {
+                for (bk, bv) in mm {
+                    bm.insert(bk.clone(), bv.clone());
+                }
+            }
+            _ => {
+                base_obj.insert(k.clone(), mv.clone());
+            }
+        }
+    }
+}
+
 /// 阶段 1/1a/1a2：构造初始 state（含会话级/任务级 execution_context 注入）。
 ///
 /// core 器官执行态缺省（core_type 语义标志 + core_plugin 插件选择）不在本函数
@@ -1270,13 +1297,18 @@ async fn stage_build_initial_state(
         }
     }
 
-    // 1a2. 任务级 execution_context 覆盖（经 chat.send_message params 透传，
-    // 任务执行器从 task.metadata 组装；优先级高于会话级 thread metadata）。
+    // 1a2. 消息级 execution_context 逐键并入（经 chat.send_message params 透传，
+    // 任务执行器从 task.metadata 组装走同一通道）：消息级显式键 > 会话级同键，
+    // 消息级未携带的键保留会话级种子（声明驱动兜底，整体替换会把会话级其余
+    // 键丢掉）。非对象/空对象不注入。
     if let Some(ec) = execution_context {
         if ec.is_object() && !ec.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-            if let Some(obj) = initial_state.as_object_mut() {
-                obj.insert("execution_context".to_string(), ec.clone());
-            }
+            let base = initial_state
+                .as_object_mut()
+                .expect("initial_state 恒为对象")
+                .entry("execution_context".to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            merge_message_execution_context(base, ec);
         }
     }
 
@@ -1338,6 +1370,14 @@ fn merge_recovered_scalars(
         }
         if agentos_engine::VOLATILE_RUN_KEYS.contains(&k.as_str()) || declared_volatile.contains(k)
         {
+            continue;
+        }
+        // execution_context：每轮声明组装键（1a 会话级 + 1a2 消息级在本函数
+        // 之前先行合并），恢复源残留是历史轮组装产物——本轮已注入（键存在）
+        // 则跳过，防上轮值顶掉本轮显式声明（消息级显式键 > 会话级默认 >
+        // 恢复兜底，mode/isolation/workspace 全键同序）；本轮两级皆无时照常
+        // 恢复（续跑连续性兜底：无透传轮沿用上轮执行上下文）。
+        if k == "execution_context" && init_obj.contains_key(k) {
             continue;
         }
         init_obj.insert(k.clone(), v.clone());
@@ -1428,6 +1468,63 @@ mod merge_recovered_scalars_tests {
             "声明键属 per-run 工具面，跨轮残留 = schema 滞留"
         );
         assert_eq!(initial["task.id"], "t2");
+    }
+
+    /// execution_context 是每轮声明组装键（1a 会话级 + 1a2 消息级先行注入），
+    /// 恢复源残留是历史轮组装产物——本轮已注入时不得被快照整键顶掉
+    /// （消息级显式键 > 会话级默认 > 恢复兜底，mode/isolation/workspace 全键同序）。
+    #[test]
+    fn execution_context_this_round_declaration_beats_recovered_snapshot() {
+        let mut initial = serde_json::json!({
+            "message": "m",
+            "execution_context": {"mode": "coding"},
+        });
+        let source = serde_json::json!({
+            "task.id": "t3",
+            "execution_context": {"mode": "research"},
+        });
+        merge_recovered_scalars(&mut initial, &source, &Default::default());
+        assert_eq!(
+            initial["execution_context"]["mode"], "coding",
+            "本轮显式 mode 不得被上轮残留覆盖"
+        );
+        assert_eq!(initial["task.id"], "t3", "其余持久键照常恢复");
+    }
+
+    /// 同序反例：本轮会话级种子也优先于恢复源（作用域是整键，不限消息级）。
+    #[test]
+    fn execution_context_session_seed_beats_recovered_snapshot() {
+        let mut initial = serde_json::json!({
+            "message": "m",
+            "execution_context": {"workspace": {"source_path": "会话级目录"}},
+        });
+        let source = serde_json::json!({
+            "execution_context": {
+                "workspace": {"source_path": "项目目录", "mode": "worktree"},
+                "isolation": {"level": "isolated"},
+            },
+        });
+        merge_recovered_scalars(&mut initial, &source, &Default::default());
+        assert_eq!(
+            initial["execution_context"],
+            serde_json::json!({"workspace": {"source_path": "会话级目录"}}),
+            "本轮会话级种子原样保留，恢复源不得整键覆写"
+        );
+    }
+
+    /// 本轮两级皆无（1a 无声明值且消息未携带）：恢复值照常生效——续跑
+    /// 连续性兜底（无透传轮沿用上轮执行上下文，防工作区漂移）。
+    #[test]
+    fn execution_context_recovered_when_round_has_no_declaration() {
+        let mut initial = serde_json::json!({"message": "m"});
+        let source = serde_json::json!({
+            "execution_context": {"isolation": {"level": "isolated"}},
+        });
+        merge_recovered_scalars(&mut initial, &source, &Default::default());
+        assert_eq!(
+            initial["execution_context"]["isolation"]["level"], "isolated",
+            "本轮无声明时恢复值兜底生效"
+        );
     }
 }
 

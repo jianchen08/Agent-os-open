@@ -37,3 +37,21 @@ upstreams:
       blocked_domains: []
       allowed_domains: null # null = 不设白名单，黑名单+私网拦截兜底
       allow_private_addresses: false
+  computer:
+    # CursorTouch/Windows-MCP：宿主机桌面 UIA 控制（元素树/截屏/键鼠/窗口，
+    # 仅宿主侧——沙箱容器内无宿主桌面）。首启 uvx 拉依赖可能要 1-2 分钟。
+    # 白名单只放行 GUI 面板：上游的 shell/powershell/filesystem/registry/
+    # process 等工具一律不放行（本仓有自有 bash/文件工具与安全治理，不开旁路）。
+    command: uvx
+    args: ["windows-mcp", "serve"]
+    tools:
+      - Snapshot
+      - Screenshot
+      - Click
+      - Type
+      - Scroll
+      - Move
+      - Shortcut
+      - Wait
+      - App
+    max_args_bytes: 262144

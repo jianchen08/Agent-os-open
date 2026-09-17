@@ -807,6 +807,12 @@ async def http_handle(
             tenant = _header_value(headers, "x-agentos-tenant")
             return _ok(_json_response(_query_tool_calls(q, tenant)))
 
+        # 按工具聚合统计（窗口 = 最近 limit 条含工具结果的 trace，非全量）
+        if path == "/ext/monitoring/tool-calls/stats" and method == "GET":
+            q = query or {}
+            tenant = _header_value(headers, "x-agentos-tenant")
+            return _ok(_json_response(_query_tool_call_stats(q, tenant)))
+
         # ── 管道诊断域：step 级 trace 时间线 + pipeline_state 全字段 ──
         # （数据经 kernel_reads 能力桥，投影在 pipeline_diagnostics）
         if path == "/ext/monitoring/traces" and method == "GET":
@@ -852,10 +858,7 @@ async def http_handle(
         if path == "/ext/monitoring/plugins" and method == "GET":
             return _ok(_json_response(await kernel_reads.plugin_runtime(authorization=_authorization(headers))))
 
-        # ── T4/T5 webview 页面 HTML ──
-        if path == "/ext/monitoring/page/payload-diag" and method == "GET":
-            return _ok(_html_response(_PAYLOAD_DIAG_HTML))
-
+        # ── T5 webview 页面 HTML ──
         if path == "/ext/monitoring/page/tool-calls" and method == "GET":
             return _ok(_html_response(_TOOL_CALLS_HTML))
 
@@ -1315,139 +1318,60 @@ def _query_tool_calls(q: dict[str, str], tenant_id: str = "") -> dict[str, Any]:
     return {"items": items, "total": len(items)}
 
 
-# ── T4 webview HTML：Payload 诊断查看器 ──────────────────────────────────
+def _query_tool_call_stats(q: dict[str, str], tenant_id: str = "") -> dict[str, Any]:
+    """按工具聚合调用统计（工具调用记录页「按工具统计」视图的数据源）。
 
-_PAYLOAD_DIAG_HTML = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Payload 诊断</title>
-<style>
-  body { font-family: -apple-system, 'Segoe UI', sans-serif; margin: 0; padding: 12px; color: #1a1a1a; background: #f8fafc; font-size: 13px; }
-  h2 { margin: 0 0 12px; font-size: 15px; }
-  .layout { display: flex; gap: 12px; height: calc(100vh - 80px); }
-  .list { width: 360px; overflow-y: auto; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
-  .item { padding: 8px 10px; border-bottom: 1px solid #e2e8f0; cursor: pointer; }
-  .item:hover { background: #f1f5f9; }
-  .item.active { background: #dbeafe; }
-  .item .ts { color: #64748b; font-size: 11px; }
-  .item .model { color: #0369a1; font-weight: 600; }
-  .item .meta { color: #64748b; font-size: 11px; }
-  .detail { flex: 1; overflow: auto; border: 1px solid #cbd5e1; border-radius: 6px; padding: 10px; background: #fff; }
-  pre { white-space: pre-wrap; word-break: break-all; margin: 0; font-family: 'Consolas', monospace; font-size: 12px; }
-  .toolbar { margin-bottom: 8px; display: flex; gap: 8px; align-items: center; }
-  button { padding: 4px 10px; background: #e2e8f0; color: #1e293b; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
-  button:hover { background: #cbd5e1; }
-  input { padding: 4px 8px; background: #fff; color: #1e293b; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; }
-  .empty { color: #94a3b8; padding: 20px; text-align: center; }
-  .msg-role { color: #7c3aed; font-weight: 600; }
-  #status { color: #94a3b8; font-size: 11px; }
-</style></head><body>
-<h2>LLM Payload 诊断（最近 200 次调用快照）</h2>
-<div class="toolbar">
-  <input id="filter" placeholder="按 model 过滤..." oninput="renderList()">
-  <button onclick="refresh()">刷新</button>
-  <span id="count" style="color:#64748b"></span>
-  <span id="status"></span>
-</div>
-<div class="layout">
-  <div class="list" id="list"><div class="empty">加载中...</div></div>
-  <div class="detail" id="detail"><div class="empty">选择左侧条目查看完整 payload</div></div>
-</div>
-<script>
-// agentosFetch：通过 window.agentos.postMessage（宿主代 fetch 带 token）+ Promise 化
-// webview iframe 是 sandbox（无 same-origin），直接 fetch 会失败（无 auth）。
-function agentosFetch(path, params) {
-  return new Promise(function(resolve, reject) {
-    if (!window.agentos) { reject(new Error('window.agentos 不可用')); return; }
-    var id = window.agentos.postMessage(path, params);
-    function handler(e) {
-      var d = e.data;
-      if (!d || !d.__agentos_webview || d.id !== id) return;
-      window.removeEventListener('message', handler);
-      if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
-      else resolve(d.params);
-    }
-    window.addEventListener('message', handler);
-  });
-}
-// 从响应里提取业务数据（宿主返回的 axios res.data，内层 data.body 是 base64 JSON）
-function unwrap(res) {
-  // res 可能是 {data: {body: base64, ...}} 或直接 {body: base64}
-  var data = (res && res.data) ? res.data : res;
-  if (data && data.body) {
-    try { return JSON.parse(atob(data.body)); } catch(e) { return data; }
-  }
-  return data;
-}
+    数据源与租户过滤同 _query_tool_calls（json_each 解包 patch_data.tool_results，
+    缺租户身份 fail-closed 空集）。聚合窗口 = 最近 limit 条含工具结果的 trace
+    （先按 created_at 倒序取窗口再展开聚合）——诚实口径：非全生命周期总量，
+    窗口大小随 limit 参数（默认 500 条 trace，上限 2000）。
 
-let allItems = [];
-let activeName = null;
-function setStatus(s) { document.getElementById('status').textContent = s || ''; }
+    Returns:
+        {items: [{tool_name, calls, success_calls, error_calls, avg_duration_ms,
+        last_error}], total, window}；按调用次数倒序。
+    """
+    import sqlite3
 
-async function load() {
-  setStatus('加载中...');
-  try {
-    var res = await agentosFetch('/ext/monitoring/payload-diag');
-    var d = unwrap(res);
-    allItems = d.items || [];
-    document.getElementById('count').textContent = '(' + allItems.length + ')';
-    setStatus('');
-    renderList();
-  } catch(e) {
-    document.getElementById('list').innerHTML = '<div class="empty">加载失败: '+escapeHtml(String(e))+'</div>';
-    setStatus('加载失败');
-  }
-}
-function fmt(ts) {
-  var d = new Date(ts);
-  return d.toLocaleString('zh-CN', {hour12: false});
-}
-function renderList() {
-  var f = document.getElementById('filter').value.toLowerCase();
-  var items = allItems.filter(function(i) { return !f || (i.model||'').toLowerCase().indexOf(f) >= 0; });
-  var html = items.map(function(i) {
-    return '<div class="item'+(i.name===activeName?' active':'')+'" data-name="'+i.name+'">'+
-      '<div class="ts">'+fmt(i.ts)+'</div>'+
-      '<div class="model">'+escapeHtml(i.model||'?')+'</div>'+
-      '<div class="meta">'+i.msg_count+'msg · '+(i.msgs_hash||'').slice(0,8)+' · '+(i.size?Math.round(i.size/1024)+'KB':'-')+'</div>'+
-      '</div>';
-  }).join('');
-  var listEl = document.getElementById('list');
-  listEl.innerHTML = html || '<div class="empty">无数据</div>';
-  listEl.querySelectorAll('.item').forEach(function(el) {
-    el.addEventListener('click', function() { show(el.getAttribute('data-name')); });
-  });
-}
-async function show(name) {
-  activeName = name;
-  renderList();
-  setStatus('读取中...');
-  try {
-    // GET 请求：params 必须 undefined（宿主约定 params!==undefined → POST）。
-    // 查询参数拼进 method 路径。
-    var res = await agentosFetch('/ext/monitoring/payload-diag/file?name=' + encodeURIComponent(name));
-    var d = unwrap(res);
-    if (d.error) { document.getElementById('detail').innerHTML = '<div class="empty">'+escapeHtml(d.error)+'</div>'; setStatus(''); return; }
-    var body = JSON.parse(d.content);
-    var html = '';
-    body.messages.forEach(function(m, i) {
-      var content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content, null, 2);
-      var preview = content.length > 2000 ? content.slice(0,2000)+'\\n... [截断]' : content;
-      html += '<div style="margin-bottom:8px"><span class="msg-role">['+i+'] '+(m.role||'?')+(m.name?' / '+escapeHtml(m.name):'')+'</span><pre>'+escapeHtml(preview)+'</pre></div>';
-    });
-    document.getElementById('detail').innerHTML = '<div class="toolbar"><b>model:</b> '+escapeHtml(body.model||'?')+' &nbsp; <b>messages:</b> '+body.messages.length+' 条</div>'+html;
-    setStatus('');
-  } catch(e) {
-    document.getElementById('detail').innerHTML = '<div class="empty">读取失败: '+escapeHtml(String(e))+'</div>';
-    setStatus('读取失败');
-  }
-}
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, function(c) {
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-  });
-}
-function refresh() { load(); }
-load();
-</script></body></html>"""
+    if not tenant_id:
+        return {"items": [], "total": 0, "window": 0, "error": "missing tenant identity"}
+
+    db_path = _kernel_db_path()
+    if not os.path.isfile(db_path):
+        return {"items": [], "total": 0, "window": 0, "error": "kernel db not found"}
+
+    window = min(_qint(q, "limit", 500), 2000)
+
+    sql = """
+        SELECT json_extract(item.value, '$.tool_name')  AS tool_name,
+               COUNT(*) AS calls,
+               SUM(CASE WHEN json_extract(item.value, '$.success') = 1 THEN 1 ELSE 0 END) AS success_calls,
+               SUM(CASE WHEN json_extract(item.value, '$.success') = 0 THEN 1 ELSE 0 END) AS error_calls,
+               AVG(CAST(json_extract(item.value, '$.duration_ms') AS REAL)) AS avg_duration_ms,
+               MAX(t.created_at) AS last_call_at
+        FROM (
+            SELECT patch_data, created_at FROM traces
+            WHERE json_extract(patch_data, '$.tool_results') IS NOT NULL
+              AND tenant_id = ?
+            ORDER BY created_at DESC LIMIT ?
+        ) t,
+        json_each(t.patch_data, '$.tool_results') AS item
+        GROUP BY tool_name
+        ORDER BY calls DESC
+    """
+    params: list[Any] = [tenant_id, window]
+
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return {"items": [], "total": 0, "window": window, "error": str(exc)}
+
+    items = [dict(r) for r in rows]
+    return {"items": items, "total": len(items), "window": window}
 
 
 # ── T5 webview HTML：工具调用记录查看器 ──────────────────────────────────
@@ -1461,35 +1385,61 @@ _TOOL_CALLS_HTML = """<!DOCTYPE html>
   input, select { padding: 4px 8px; background: #fff; color: #1e293b; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; }
   button { padding: 4px 10px; background: #e2e8f0; color: #1e293b; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
   button:hover { background: #cbd5e1; }
+  button.active { background: #2563eb; color: #fff; }
   table { width: 100%; border-collapse: collapse; background: #fff; }
   th { text-align: left; padding: 8px; background: #f1f5f9; color: #475569; font-size: 11px; text-transform: uppercase; position: sticky; top: 0; }
-  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; }
-  tr:hover { background: #f8fafc; }
+  td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+  tr.rowmain { cursor: pointer; }
+  tr.rowmain:hover { background: #f8fafc; }
+  tr.rowdetail td { background: #f8fafc; padding: 8px 12px 12px 28px; }
   .ok { color: #16a34a; }
-  .fail { color: #dc2626; }
+  .fail { color: #dc2626; font-weight: 600; }
   .slow { color: #d97706; font-weight: 600; }
   .empty { color: #94a3b8; text-align: center; padding: 40px; }
   #status { color: #94a3b8; font-size: 11px; }
+  pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-family: Consolas, monospace; font-size: 12px; }
+  .sub { color: #64748b; font-size: 11px; }
 </style></head><body>
 <h2>工具调用记录（从 traces 表查询）</h2>
 <div class="toolbar">
-  <input id="f_tool" placeholder="工具名(精确)" style="width:140px">
-  <select id="f_status">
-    <option value="">全部状态</option>
-    <option value="success">成功</option>
-    <option value="error">失败</option>
-  </select>
-  <input id="f_dur" placeholder="最小耗时(ms)" style="width:120px" type="number">
-  <button onclick="query()">查询</button>
+  <button id="tab_stats" class="active" onclick="switchView('stats')">按工具统计</button>
+  <button id="tab_list" onclick="switchView('list')">调用明细</button>
   <span id="count" style="color:#64748b"></span>
   <span id="status"></span>
 </div>
-<div style="overflow:auto; max-height:calc(100vh - 120px)">
-  <table>
-    <thead><tr><th>时间</th><th>工具</th><th>状态</th><th>耗时</th><th>run_id</th><th>错误</th></tr></thead>
-    <tbody id="rows"></tbody>
-  </table>
-  <div id="empty" class="empty">点击查询加载数据</div>
+
+<div id="view_stats">
+  <div class="toolbar">
+    <button onclick="loadStats()">刷新</button>
+    <span class="sub" id="stats_window"></span>
+  </div>
+  <div style="overflow:auto; max-height:calc(100vh - 170px)">
+    <table>
+      <thead><tr><th>工具</th><th>调用次数</th><th>成功</th><th>失败</th><th>平均耗时</th><th>最近调用</th></tr></thead>
+      <tbody id="stats_rows"></tbody>
+    </table>
+    <div id="stats_empty" class="empty">点击刷新加载数据</div>
+  </div>
+</div>
+
+<div id="view_list" style="display:none">
+  <div class="toolbar">
+    <input id="f_tool" placeholder="工具名(精确)" style="width:140px">
+    <select id="f_status">
+      <option value="">全部状态</option>
+      <option value="success">成功</option>
+      <option value="error">失败</option>
+    </select>
+    <input id="f_dur" placeholder="最小耗时(ms)" style="width:120px" type="number">
+    <button onclick="query()">查询</button>
+  </div>
+  <div style="overflow:auto; max-height:calc(100vh - 200px)">
+    <table>
+      <thead><tr><th>时间</th><th>工具</th><th>状态</th><th>耗时</th><th>run_id</th><th>错误</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty" class="empty">点击查询加载数据</div>
+  </div>
 </div>
 <script>
 // agentosFetch：通过 window.agentos.postMessage（宿主代 fetch 带 token）
@@ -1515,12 +1465,118 @@ function unwrap(res) {
   return data;
 }
 function setStatus(s) { document.getElementById('status').textContent = s || ''; }
+function fmt(s) {
+  if (!s) return '';
+  try { return new Date(s).toLocaleString('zh-CN', {hour12: false}); } catch(e) { return s; }
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+function durCell(ms) {
+  var dur = parseFloat(ms || 0);
+  return '<td class="' + (dur > 1000 ? 'slow' : '') + '">' + dur.toFixed(0) + 'ms</td>';
+}
 
+// ── 视图切换 ──
+function switchView(v) {
+  document.getElementById('view_stats').style.display = v === 'stats' ? '' : 'none';
+  document.getElementById('view_list').style.display = v === 'list' ? '' : 'none';
+  document.getElementById('tab_stats').className = v === 'stats' ? 'active' : '';
+  document.getElementById('tab_list').className = v === 'list' ? 'active' : '';
+}
+
+// ── 按工具统计视图 ──
+var statsLoaded = false;
+var expandedTools = {};
+async function loadStats() {
+  setStatus('查询中...');
+  try {
+    var res = await agentosFetch('/ext/monitoring/tool-calls/stats');
+    var data = unwrap(res);
+    if (data.error) {
+      document.getElementById('stats_empty').textContent = '错误: ' + data.error;
+      document.getElementById('stats_empty').style.display = 'block';
+      document.getElementById('stats_rows').innerHTML = '';
+      setStatus('查询错误');
+      return;
+    }
+    var items = data.items || [];
+    document.getElementById('count').textContent = '(' + items.length + ' 个工具)';
+    document.getElementById('stats_window').textContent =
+      '统计窗口：最近 ' + (data.window || 500) + ' 条含工具调用的 trace（非全生命周期累计）';
+    if (!items.length) {
+      document.getElementById('stats_empty').style.display = 'block';
+      document.getElementById('stats_rows').innerHTML = '';
+      setStatus('无数据');
+      return;
+    }
+    document.getElementById('stats_empty').style.display = 'none';
+    expandedTools = {};
+    var html = items.map(function(i) {
+      var name = i.tool_name || '?';
+      var err = parseInt(i.error_calls, 10) || 0;
+      return '<tr class="rowmain" data-tool="' + escapeHtml(name) + '" id="row-' + escapeHtml(name) + '">' +
+        '<td>' + escapeHtml(name) + '</td>' +
+        '<td>' + (i.calls || 0) + '</td>' +
+        '<td class="ok">' + (i.success_calls || 0) + '</td>' +
+        '<td class="' + (err > 0 ? 'fail' : '') + '">' + err + '</td>' +
+        durCell(i.avg_duration_ms) +
+        '<td style="color:#64748b;font-size:11px">' + fmt(i.last_call_at) + '</td></tr>' +
+        '<tr class="rowdetail" id="detail-' + escapeHtml(name) + '" style="display:none"><td colspan="6">加载中...</td></tr>';
+    }).join('');
+    var tbody = document.getElementById('stats_rows');
+    tbody.innerHTML = html;
+    tbody.querySelectorAll('tr.rowmain').forEach(function(el) {
+      el.addEventListener('click', function() { toggleToolDetail(el.getAttribute('data-tool')); });
+    });
+    statsLoaded = true;
+    setStatus('');
+  } catch(e) {
+    document.getElementById('stats_empty').textContent = '查询失败: ' + escapeHtml(String(e));
+    document.getElementById('stats_empty').style.display = 'block';
+    setStatus('查询失败');
+  }
+}
+// 展开/收起某工具的错误明细（懒加载：首次展开时拉该工具最近失败记录）
+async function toggleToolDetail(name) {
+  var detailRow = document.getElementById('detail-' + name);
+  var mainRow = document.getElementById('row-' + name);
+  if (!detailRow) return;
+  if (detailRow.style.display !== 'none') {
+    detailRow.style.display = 'none';
+    return;
+  }
+  detailRow.style.display = '';
+  if (expandedTools[name]) return; // 已加载
+  expandedTools[name] = true;
+  detailRow.getElementsByTagName('td')[0].innerHTML = '<span class="sub">加载失败明细中...</span>';
+  try {
+    var res = await agentosFetch('/ext/monitoring/tool-calls?tool_name=' + encodeURIComponent(name) + '&status=error&limit=5');
+    var data = unwrap(res);
+    var items = data.items || [];
+    if (data.error) {
+      detailRow.getElementsByTagName('td')[0].innerHTML = '<span class="fail">加载失败: ' + escapeHtml(data.error) + '</span>';
+      return;
+    }
+    if (!items.length) {
+      detailRow.getElementsByTagName('td')[0].innerHTML = '<span class="sub">统计窗口内无失败记录</span>';
+      return;
+    }
+    var html = '<div class="sub fail">最近失败 ' + items.length + ' 条（点行收起）</div>' + items.map(function(i) {
+      return '<div style="margin-bottom:6px"><span class="sub">' + fmt(i.created_at) + ' · ' +
+        (parseFloat(i.duration_ms || 0)).toFixed(0) + 'ms</span>' +
+        '<pre class="fail">' + escapeHtml(i.error || '(无错误信息)') + '</pre></div>';
+    }).join('');
+    detailRow.getElementsByTagName('td')[0].innerHTML = html;
+  } catch(e) {
+    detailRow.getElementsByTagName('td')[0].innerHTML = '<span class="fail">加载失败: ' + escapeHtml(String(e)) + '</span>';
+  }
+}
+
+// ── 调用明细视图 ──
 async function query() {
-  // GET 请求通过 postMessage 时，params 传查询参数对象（宿主 GET 模式）
-  // 但宿主逻辑：params !== undefined → POST。GET 端点要用 query string。
-  // webview 协议：method 以 / 开头视为 REST。GET 无 params，POST 有 params。
-  // 这里我们用 POST 风格：method = 完整路径（含 query string），params = undefined → GET
   var t = document.getElementById('f_tool').value.trim();
   var s = document.getElementById('f_status').value;
   var d = document.getElementById('f_dur').value.trim();
@@ -1549,16 +1605,26 @@ async function query() {
       return;
     }
     document.getElementById('empty').style.display = 'none';
-    document.getElementById('rows').innerHTML = items.map(function(i) {
+    var tbody = document.getElementById('rows');
+    tbody.innerHTML = items.map(function(i, idx) {
       var ok = i.success === 1 || i.success === true;
-      var dur = parseFloat(i.duration_ms || 0);
-      var durCls = dur > 1000 ? 'slow' : '';
-      return '<tr><td>' + fmt(i.created_at) + '</td><td>' + escapeHtml(i.tool_name || '?') + '</td>' +
+      var errText = i.error || '';
+      // 错误全文放展开行，主行只显示单行摘要（点击行展开/收起）
+      var brief = errText.length > 60 ? errText.slice(0, 60) + '…' : errText;
+      return '<tr class="rowmain" data-idx="' + idx + '">' +
+        '<td>' + fmt(i.created_at) + '</td><td>' + escapeHtml(i.tool_name || '?') + '</td>' +
         '<td class="' + (ok ? 'ok' : 'fail') + '">' + (ok ? '成功' : '失败') + '</td>' +
-        '<td class="' + durCls + '">' + dur.toFixed(0) + 'ms</td>' +
+        durCell(i.duration_ms) +
         '<td style="color:#94a3b8;font-size:11px">' + escapeHtml((i.run_id || '').slice(0,8)) + '</td>' +
-        '<td style="color:#dc2626;font-size:11px">' + escapeHtml((i.error || '').slice(0,80)) + '</td></tr>';
+        '<td style="font-size:11px" class="' + (ok ? '' : 'fail') + '">' + (ok ? '' : escapeHtml(brief)) + '</td></tr>' +
+        '<tr class="rowdetail" style="display:none"><td colspan="6"><pre>' + escapeHtml(errText || '(无错误信息)') + '</pre></td></tr>';
     }).join('');
+    tbody.querySelectorAll('tr.rowmain').forEach(function(el) {
+      el.addEventListener('click', function() {
+        var detail = el.nextElementSibling;
+        if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
+      });
+    });
     setStatus('');
   } catch(e) {
     document.getElementById('empty').textContent = '查询失败: ' + escapeHtml(String(e));
@@ -1566,15 +1632,7 @@ async function query() {
     setStatus('查询失败');
   }
 }
-function fmt(s) {
-  if (!s) return '';
-  try { return new Date(s).toLocaleString('zh-CN', {hour12: false}); } catch(e) { return s; }
-}
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, function(c) {
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-  });
-}
+loadStats();
 </script></body></html>"""
 
 

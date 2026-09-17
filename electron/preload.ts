@@ -161,11 +161,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     // 白名单通道，防止渲染进程监听任意 IPC 事件
     // 注意：window:open 等使用 ipcRenderer.invoke（见下方 window 子 API），
     // 不经此白名单；此白名单只约束 ipcRenderer.on 监听通道。
-    const allowedChannels = new Set([
-      "window-info",
-      "app-version",
-      "platform-info",
-    ]);
+    // 仅收录主进程实际发射（webContents.send）的通道；版本/平台查询走
+    // sendSync（getAppVersion/getPlatform），无事件形态。
+    const allowedChannels = new Set(["window-info"]);
 
     if (!allowedChannels.has(channel)) {
       console.warn(`IPC 通道 "${channel}" 不在白名单中，已忽略`);

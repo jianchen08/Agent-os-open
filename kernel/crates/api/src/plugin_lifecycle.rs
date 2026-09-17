@@ -152,6 +152,62 @@ pub fn reenable_plugin_capabilities(
     (tools, http_routes)
 }
 
+/// 调用路径注册表自愈闭包工厂（BUG-37）。
+///
+/// 背景：注册表条目可能因 G2 启动期观测误剔（spawn 后进程早退 → tools/list
+/// 缺失 → 误判漂移剔除）等注册面丢失而缺席；watcher 对无文件变更的插件不重扫
+/// 不重注册 → 冷门工具自此永久"未注册"。
+///
+/// 语义：反查 miss 时按本闭包自愈——工具的**声明 manifest 在共享 store 且插件
+/// 在启用集**才重注册（reenable 原语：收回残留 scope + guarded 重注册全部声明
+/// 能力，与 enable 热路径/GAP-6 复验同一通道）；manifest 缺席或插件已禁用返回
+/// None，调用方保持 fail-closed（禁用插件的摘除语义不被本自愈复活）。有界：
+/// 每次反查 miss 至多触发一次；重注册成功后反查直接命中，不再进入本通道。
+/// G2 若因实现真实漂移而剔除，下次声明/代码指纹变更时 GAP-6 复验照常重新
+/// 净化——本自愈只恢复可用性，不改变复验裁决。
+pub fn tool_registry_heal_fn(
+    registry: Arc<CapabilityRegistryImpl>,
+    scopes: Arc<PluginScopeRegistry>,
+    manifests: crate::plugin_watcher::ManifestsStore,
+    enabled_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+) -> crate::capability_router::ToolRegistryHealFn {
+    Arc::new(move |tool_name: &str| {
+        let registry = Arc::clone(&registry);
+        let scopes = Arc::clone(&scopes);
+        let manifests = Arc::clone(&manifests);
+        let enabled_ids = Arc::clone(&enabled_ids);
+        Box::pin(async move {
+            use agentos_core::traits::CapabilityRegistry;
+            // 幂等基线：条目已在（并发下被 watcher/enable 路径恢复）→ 直接复用。
+            if let Some(td) = registry.get_tool(tool_name) {
+                return Some(td);
+            }
+            // manifest 在册且插件启用才自愈；二者缺一 = 无可自愈（fail-closed）。
+            let enabled = enabled_ids.read().await.clone();
+            let manifest = {
+                let store = manifests.read().await;
+                store
+                    .iter()
+                    .find(|m| {
+                        enabled.contains(&m.id)
+                            && m.capabilities.tools.iter().any(|t| t.name == tool_name)
+                    })
+                    .cloned()
+            };
+            let manifest = manifest?;
+            let (tools, _) = reenable_plugin_capabilities(&manifest, &registry, &scopes);
+            tracing::info!(
+                target: "plugin-registration",
+                plugin = %manifest.id,
+                tool = %tool_name,
+                tools,
+                "调用路径自愈：注册表缺失的声明工具已按 manifest 重注册"
+            );
+            registry.get_tool(tool_name)
+        })
+    })
+}
+
 /// 广播域事件（通用域事件通道：`LifecycleHook::DomainEvent` + `ctx["event"]` 事件名）。
 ///
 /// 两条投递路径：
@@ -922,5 +978,49 @@ mod capability_registration_tests {
             registry.find_http_route("/ext/p_conf/dup", "GET").is_some(),
             "占位路由保持原状"
         );
+    }
+
+    /// 调用路径自愈工厂（BUG-37）：声明工具在册且插件启用 → 重注册并返回
+    /// 描述符；manifest 缺席 / 插件禁用 → None（fail-closed，不复活禁用插件）。
+    #[tokio::test]
+    async fn heal_fn_reregisters_declared_tool_only_for_enabled_plugin() {
+        let m = manifest("p_heal", "t_heal");
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = Arc::new(agentos_plugin_loader::PluginScopeRegistry::new());
+        let manifests: crate::plugin_watcher::ManifestsStore =
+            Arc::new(tokio::sync::RwLock::new(vec![m.clone()]));
+        let enabled_ids = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+            "p_heal".to_string(),
+        ])));
+        let heal = tool_registry_heal_fn(
+            Arc::clone(&registry),
+            Arc::clone(&scopes),
+            Arc::clone(&manifests),
+            Arc::clone(&enabled_ids),
+        );
+
+        // 启用插件 + 声明在册 → 重注册成功，注册表可反查。
+        let healed = heal("t_heal").await.expect("启用插件的声明工具应自愈");
+        assert_eq!(healed.plugin_id, "p_heal");
+        assert!(registry.get_tool("t_heal").is_some(), "自愈应落注册表");
+
+        // 幂等：条目已在 → 直接返回，不再重复重注册（scope guard 数不涨）。
+        let guards_before = scopes.scope_of("p_heal").len();
+        assert!(heal("t_heal").await.is_some());
+        assert_eq!(
+            scopes.scope_of("p_heal").len(),
+            guards_before,
+            "幂等自愈不得累积 guard"
+        );
+
+        // 插件禁用（不在启用集）→ 不复活（fail-closed）。
+        registry.clear_plugin("p_heal");
+        enabled_ids.write().await.remove("p_heal");
+        assert!(heal("t_heal").await.is_none(), "禁用插件不得经自愈复活");
+        assert!(registry.get_tool("t_heal").is_none());
+
+        // manifest 缺席的工具 → None。
+        enabled_ids.write().await.insert("p_heal".to_string());
+        assert!(heal("ghost_tool").await.is_none(), "未知工具不应自愈");
     }
 }

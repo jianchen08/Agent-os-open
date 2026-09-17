@@ -204,3 +204,29 @@ def test_verdict_carries_version_and_full_metric_blocks():
     assert out["p0"]["learning_rates"]["coding"]["slope"] > 0
     # 旧账无 case_results → 保留率不猜测，如实返回 None
     assert out["p1"]["retention"] is None
+
+
+# ── 缺口收口（2026-09-17）：零样本轮/空通过集容错 ────────────────────────────
+def test_series_and_variance_skip_zero_total_rounds():
+    """total=0 轮通过率不可算 → 该轮跳过，不进累计也不崩。"""
+    rounds = [
+        {"mode": "m", "total": 0, "passed": 0},
+        {"mode": "m", "total": 4, "passed": 2},
+        {"mode": "m", "total": 4, "passed": 3},
+    ]
+    rates = em.learning_rates(rounds)
+    assert "m" in rates
+    conv = em.variance_convergence(rounds)
+    assert conv is not None or conv is None  # 零样本轮不产生异常路径
+    # 性质对照：剔除零样本轮后累计样本量只来自可算轮
+    pts = em._mode_series(rounds, "m")
+    assert pts[-1][0] == 8
+
+
+def test_retention_prev_passed_set_empty_returns_none():
+    """前轮 case_results 全 False（通过集为空）→ 无保留率可算 → None。"""
+    rounds = [
+        {"mode": "m", "case_results": {"c1": False}},
+        {"mode": "m", "case_results": {"c1": True}},
+    ]
+    assert em.retention(rounds) is None

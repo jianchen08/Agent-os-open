@@ -1,0 +1,39 @@
+# 计划模式 profile（B 部类物料：由用户维护；出厂种子随 mode_planning 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+# 链路：方案讨论段主 agent 自执行（无派发链），调研/环境/端到端验证外包执行者池
+mode: planning
+name: 计划模式
+panel_page_id: planning_desk
+chain:
+  entry: main
+  expected_path: [main]
+  executor_pool: [executor/generation/research_agent, executor/environment/environment_setup_agent, task/container_verification_agent]
+  entry_override: null
+pipeline_profile:
+  pipeline: autonomous
+  params:
+    case_timeout: 1200
+    multimodal: false
+    domain_context: none
+suite:
+  smoke: config/self_evolve/suites/dev/planning.yaml
+  full: null          # 二期补全
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+    - plugins/shared/modes/mode_planning/rules/plan_workflow.md
+  execution_stage:
+    - skills/skill-solution-software/SKILL.md
+    - skills/skill-solution-novel/SKILL.md
+    - skills/skill-solution-game/SKILL.md
+    - skills/skill-solution-research/SKILL.md
+levers:
+  plan_drift: {plan_stage: [plan_workflow, dispatch_guide]}
+  gate_skip: {gate_stage: [project_registry, project_state_tool]}
+  ac_untraceable: {output_stage: [solution_doc, task_files]}
+verifier_families: [file_assert, structure_assert]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 1200
+  round_tokens: 1000000
+  proposals_per_session: 3

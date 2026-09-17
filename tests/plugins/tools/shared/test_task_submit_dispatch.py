@@ -576,6 +576,17 @@ class TestWorkspaceExplicitness:
         proj_dir = Path(tempfile.mkdtemp(prefix="test_proj_ws_", dir=Path(__file__).resolve().parents[4]))
         fake_reg = types.ModuleType("project_registry")
         fake_reg.load_project_paths = lambda: {"proj00000001": str(proj_dir)}  # type: ignore[attr-defined]
+        fake_reg.PLAN_DISPATCH_WHITELIST = frozenset({  # type: ignore[attr-defined]
+            "research_agent", "environment_setup_agent"
+        })
+
+        class _FakeProjectRegistry:
+            """登记查询假面：id 不在登记 → plan 态闸不生效（闸语义原样）。"""
+
+            def get(self, pid: str):
+                return None
+
+        fake_reg.ProjectRegistry = _FakeProjectRegistry  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "project_registry", fake_reg)
         try:
             yield {"id": "proj00000001", "dir": proj_dir}

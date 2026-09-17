@@ -729,13 +729,25 @@ class TaskSubmitTool(BuiltinTool):
 
         优先读扁平字段；同时兼容旧的 goal 对象（历史调用方/未刷新 schema 的 LLM）
         以及 goal 作为纯文本标题的容错包装。异常形态归一为 None 并告警。
+        goal_description 缺席/空白时接受平铺 description 作为显式别名（容错归一：
+        语义同位仅名字不同，非静默降级）；显式非空白 goal_description 优先。
         """
         goal = inputs.get("goal")
         if goal is None and (inputs.get("goal_title") is not None):
             # 平铺后的标准入口：把扁平字段重组为下游统一使用的 {title, description}
+            goal_desc = inputs.get("goal_description")
+            if isinstance(goal_desc, str) and not goal_desc.strip():
+                goal_desc = ""  # 空白串无语义内容，视同缺席
+            if not goal_desc and inputs.get("description"):
+                goal_desc = inputs["description"]
+                logger.info(
+                    "[TaskSubmit] goal_description 缺席，采用平铺 description 别名 | title=%s | len=%d",
+                    str(inputs.get("goal_title"))[:80],
+                    len(_normalize_description(goal_desc)),
+                )
             goal = {
                 "title": inputs.get("goal_title"),
-                "description": inputs.get("goal_description", ""),
+                "description": goal_desc if goal_desc is not None else "",
             }
         elif isinstance(goal, str):
             import json  # noqa: PLC0415
@@ -784,9 +796,19 @@ class TaskSubmitTool(BuiltinTool):
         # 2026-08-24-task-submit-param-diet；显式传入按未知参数忽略。）
         description = _normalize_description(goal.get("description", ""))
         if not description.strip():
-            logger.warning("[TaskSubmit] goal.description 缺失或空白 | title=%s", goal.get("title"))
+            # 报错带实际收到的参数键（剔除系统注入键），模型可据此自纠参数名
+            injected = set(self.get_tool_definition().injected_params)
+            received_keys = sorted(k for k in inputs if k not in injected)
+            logger.warning(
+                "[TaskSubmit] goal.description 缺失或空白 | title=%s | received_keys=%s",
+                goal.get("title"),
+                received_keys,
+            )
             return {}, "", create_failure_result(
-                error="必须提供任务描述（goal_description，1-2000 字符）",
+                error=(
+                    "必须提供任务描述（goal_description，1-2000 字符）。"
+                    f"收到键={received_keys}，缺 goal_description"
+                ),
                 error_code="MISSING_DESCRIPTION",
             )
 
@@ -1013,6 +1035,46 @@ class TaskSubmitTool(BuiltinTool):
                     )
             inputs["workspace"] = project_path
         return project_id, None
+
+    @staticmethod
+    def _gate_project_plan_state(
+        project_id: str, target_type: Any, target_id: Any
+    ) -> ToolExecutionResult | None:
+        """plan 态派发白名单闸（ADR 2026-09-17 决策 2）。
+
+        挂靠项目 workflow_state = plan（方案讨论段）时，只许派发
+        PLAN_DISPATCH_WHITELIST 内的执行者（调研/环境准备）；执行类派发直接
+        拒绝——过门（project_state transition plan→running，人审）后解除。
+        继承链上的子任务同闸（project_id 已沿父链继承，按最终归属判定）。
+        """
+        if not project_id:
+            return None
+        shared_root = str(Path(__file__).resolve().parents[2])
+        if shared_root not in sys.path:
+            sys.path.insert(0, shared_root)
+        from project_registry import PLAN_DISPATCH_WHITELIST, ProjectRegistry  # noqa: PLC0415
+
+        project = ProjectRegistry().get(project_id)
+        if project is None or project.workflow_state != "plan":
+            return None
+        executor = str(target_id or "") if str(target_type or "") == "agent" else ""
+        if executor in PLAN_DISPATCH_WHITELIST:
+            return None
+        logger.warning(
+            "[TaskSubmit] plan 态派发被状态闸拒绝 | project_id=%s | target_type=%s | target_id=%s",
+            project_id,
+            target_type,
+            target_id,
+        )
+        return create_failure_result(
+            error=(
+                f"项目 {project_id} 处于 plan（方案讨论）态，只允许派发 "
+                f"{', '.join(sorted(PLAN_DISPATCH_WHITELIST))}。"
+                "执行类任务请先用 project_state 工具申请 plan→running 过门"
+                "（触发用户审批）；打样验证亦须先过门。"
+            ),
+            error_code="PROJECT_PLAN_LOCKED",
+        )
 
     def _gate_subtask_param_inheritance(
         self,
@@ -1636,6 +1698,11 @@ class TaskSubmitTool(BuiltinTool):
         )
         if gate_fail is not None:
             return gate_fail
+
+        # ── 4.4 plan 态派发白名单闸（ADR 2026-09-17 决策 2：越界派发机械化拦截）──
+        plan_gate_fail = self._gate_project_plan_state(project_id, target_type, target_id)
+        if plan_gate_fail is not None:
+            return plan_gate_fail
 
         # ── 4.5 编排解析 + 完备性校验（§3.3 实例化时序：解析→校验→实例化；
         #     旧调用无编排键/mode 走③ autonomous，行为不变）──

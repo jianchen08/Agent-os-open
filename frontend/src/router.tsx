@@ -597,8 +597,8 @@ export function createRouter() {
     // /admin 无独立路由：user_admin 插件声明页（widget_stage 组台：统计卡+
     // 用户表+启停行操作，contributes.pages path=/admin 仅管理员可见）。
     // /memory、/knowledge-base 无独立路由：hindsight_memory 插件声明页
-    // （memory_panel/knowledge_base_panel 预置域 widget，/p/memory、
-    // /p/knowledge_base 全页可达）。
+    // （memory_panel 预置域 widget，页内两分区 = 对话记忆 + 文档库，
+    // /p/memory 全页可达）。
     // 调试页面无独立路由：debug_center 插件声明页（debug_center_hub）内嵌九个子页
     // （pages/debug/* 以 embedded 模式复用），路由侧双通道已退役。
     {

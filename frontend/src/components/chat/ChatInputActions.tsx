@@ -4,9 +4,9 @@
  * 架构意图：插件声明的聊天输入动作（contributes.pages space=chat slot=input-action）
  * 在输入框工具栏显示为按钮，点击经 onAction 回调触发（回调方通常派发到 commandDispatcher）。
  *
- * input-action 与 mode-option 是两个互斥栏位：input-action = 动作语义（本组件渲染
- * 为按钮）；mode-option = 模式选项数据语义（由 getModeOptions 聚合进 ModeSelector
- * 菜单、modePanel 面板配对）——模式声明不落本组件，输入区不出现第二落点。
+ * input-action 是纯动作语义（本组件渲染为按钮）；任务模式等选择器选项不走
+ * pages 声明——选择器 = ui_schema form 声明 + 各插件 select-option 追加
+ * （DeclaredWidgetLayer 合并渲染），两通道互不相扰。
  *
  * 关联：docs/working/重要设计/前端能力统一架构.md §5.3 / §5.4
  */

@@ -163,8 +163,9 @@ export function GlobalInteractionOverlay() {
           用户其他操作（侧栏/停止按钮等保持可点击），仅阻塞该工具执行本身 */}
       <div className="absolute inset-0 bg-[var(--overlay-bg)] pointer-events-none" />
 
-      {/* 交互卡片容器（底部停靠） */}
-      <div className="relative z-10 mx-4 mb-4 mt-2 w-full max-w-2xl pointer-events-auto">
+      {/* 交互卡片容器（底部停靠；BUG-40 长选项卡在视口内自适应加宽，
+          w-full + mx-4 保证宽度至多 视口-32px） */}
+      <div className="relative z-10 mx-4 mb-4 mt-2 w-full max-w-4xl pointer-events-auto">
         {/* 控制栏 */}
         <div className="flex items-center justify-between mb-2">
           {/* 导航按钮 */}

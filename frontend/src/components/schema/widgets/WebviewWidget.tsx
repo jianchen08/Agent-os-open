@@ -27,8 +27,10 @@ import { FileWarning } from '@/assets/icons'
 import { API_ENDPOINTS } from '@/constants/api'
 import { apiClient } from '@/services/api/client'
 import { EXT_ROUTE, extUrl } from '@/services/api/extRoute'
+import { buildWebviewThemeTokens } from '@/services/webviewThemeTokens'
 import { useSessionStore } from '@/stores/sessionStore'
-import { useSessionThemeStore } from '@/stores/sessionThemeStore'
+import { getActiveSessionTheme, useSessionThemeStore } from '@/stores/sessionThemeStore'
+import { useThemeStore } from '@/stores/themeStore'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
 import { loggers } from '@/utils/logger'
 import { buildWebviewMessage, validateWebviewEvent } from '@/utils/postMessageSecurity'
@@ -46,9 +48,11 @@ export interface WebviewWidgetProps {
 }
 
 /** 注入 iframe 的 bootstrap JS：暴露 window.agentos.postMessage 给插件 HTML。
- *  携带宿主下发的实例级令牌（__wv_token）——上行消息的身份凭据。 */
-function bootstrapJs(instanceToken: string): string {
+ *  携带宿主下发的实例级令牌（__wv_token）——上行消息的身份凭据。
+ *  同时预置 window.agentos.ctx（挂载时活跃会话）——后续变化靠宿主 ctx.sync 下行推。 */
+function bootstrapJs(instanceToken: string, sessionId: string | null): string {
   const token = JSON.stringify(instanceToken)
+  const sid = JSON.stringify(sessionId ?? '')
   return `<script>
 (function(){
   var seq = 0;
@@ -60,7 +64,7 @@ function bootstrapJs(instanceToken: string): string {
     parent.postMessage(msg, '*');
     return id;
   }
-  window.agentos = { postMessage: post };
+  window.agentos = { postMessage: post, ctx: { sessionId: ${sid} } };
   // 通知宿主 webview 已就绪
   post('__ready', {});
 })();
@@ -72,19 +76,21 @@ const CSP_META =
   '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; img-src data:; connect-src \'none\';">'
 
 /**
- * 把原始 HTML 包装成安全 srcDoc：插 CSP meta（head 最前）+ bootstrap JS（body 末尾）。
- * 无 head/body 时简单拼接。
+ * 把原始 HTML 包装成安全 srcDoc：插 CSP meta（head 最前）+ bootstrap JS。
+ * 有 head → 两者注入 head 开标签后（bootstrap 先于 body 脚本解析，桥不缺位）；
+ * 只有 html → 注入合成 head；无结构 HTML → 包一层（bootstrap 在 body 末）。
+ * sessionId 为挂载时活跃会话（bootstrap ctx 预置）。
  */
-function wrapHtml(html: string, instanceToken: string): string {
+function wrapHtml(html: string, instanceToken: string, sessionId: string | null): string {
+  const injected = `${CSP_META}${bootstrapJs(instanceToken, sessionId)}`
   if (/<head[^>]*>/i.test(html)) {
-    return html.replace(/<head[^>]*>/i, (m) => `${m}${CSP_META}`)
+    return html.replace(/<head[^>]*>/i, (m) => `${m}${injected}`)
   }
   if (/<html[^>]*>/i.test(html)) {
-    const injected = `${CSP_META}${bootstrapJs(instanceToken)}`
     return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${injected}</head>`)
   }
   // 无结构 HTML：包一层
-  return `<!DOCTYPE html><html><head>${CSP_META}</head><body>${html}${bootstrapJs(instanceToken)}</body></html>`
+  return `<!DOCTYPE html><html><head>${CSP_META}</head><body>${html}${bootstrapJs(instanceToken, sessionId)}</body></html>`
 }
 
 export function WebviewWidget({
@@ -95,6 +101,8 @@ export function WebviewWidget({
 }: WebviewWidgetProps): React.ReactNode {
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** webview 就绪信号（iframe load 或上行 __ready 先到者）：下行桥推送的门闩 */
+  const [webviewReady, setWebviewReady] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
   // 实例级令牌（安全审查 B-4）：每次挂载生成，注入 iframe bootstrap，
@@ -110,6 +118,24 @@ export function WebviewWidget({
 
   // 订阅该 widget 的下行事件
   const latest = useWidgetEventStore((s) => (widgetId ? s.latest[widgetId] : undefined))
+
+  // 下行桥订阅面（面板-宿主融合协议）：会话上下文 + 生效主题
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const globalThemeConfig = useThemeStore((s) => s.themeConfig)
+  const activePluginTheme = useThemeStore((s) => s.activePluginTheme)
+  const sessionStacks = useSessionThemeStore((s) => s.stacks)
+
+  // 生效主题口径（与 useSessionThemeScope 一致）：活跃会话 override 栈顶
+  // （面板容器作用域内实际生效者）优先；否则宿主全局主题——base 配置之上
+  // 叠插件主题（contributes.themes）声明的变量覆盖。
+  const effectiveTheme = useMemo(() => {
+    const override = getActiveSessionTheme(activeSessionId)
+    return {
+      config: override ?? globalThemeConfig,
+      pluginVars: override ? null : (activePluginTheme?.variables ?? null),
+    }
+    // sessionStacks 引用变化（入栈/出栈）即重算；getActiveSessionTheme 读栈顶
+  }, [activeSessionId, sessionStacks, globalThemeConfig, activePluginTheme])
 
   const endpoint = useMemo(() => {
     if (!pluginId) return null
@@ -128,7 +154,15 @@ export function WebviewWidget({
       .get<string>(endpoint, { responseType: 'text', transformResponse: [(d) => d] })
       .then((res) => {
         if (cancelled) return
-        setHtml(wrapHtml(typeof res.data === 'string' ? res.data : String(res.data), instanceToken))
+        setWebviewReady(false) // 新文档即将注入：等重新就绪后再恢复下行桥推送
+        setHtml(
+          wrapHtml(
+            typeof res.data === 'string' ? res.data : String(res.data),
+            instanceToken,
+            // 挂载时活跃会话（bootstrap ctx 预置；后续变化靠 ctx.sync 推）
+            useSessionStore.getState().activeSessionId,
+          ),
+        )
       })
       .catch((e) => {
         if (cancelled) return
@@ -147,6 +181,7 @@ export function WebviewWidget({
       if (!msg) return // 不可信消息丢弃（origin/协议/令牌任一不匹配）
       if (msg.method === '__ready') {
         loggers.websocket.info(`[WebviewWidget] ${widgetId ?? '?'} 就绪`)
+        setWebviewReady(true)
         return
       }
       loggers.websocket.debug(`[WebviewWidget] 上行 ${msg.method}`, msg.params)
@@ -220,6 +255,28 @@ export function WebviewWidget({
     iframeRef.current.contentWindow.postMessage(msg, '*')
   }, [latest])
 
+  // 下行桥 theme.sync（面板-宿主融合协议）：就绪时推当前生效主题的 token map，
+  // 主题变化（全局切换/会话出入栈/插件皮肤）时重推；未就绪不推（__ready/load
+  // 就绪后会以当时值补推，不丢终态）
+  useEffect(() => {
+    if (!webviewReady) return
+    iframeRef.current?.contentWindow?.postMessage(
+      buildWebviewMessage('theme.sync', {
+        tokens: buildWebviewThemeTokens(effectiveTheme.config, effectiveTheme.pluginVars),
+      }),
+      '*', // sandbox iframe origin='null'，同上
+    )
+  }, [webviewReady, effectiveTheme])
+
+  // 下行桥 ctx.sync：就绪时推当前活跃会话，会话切换时重推（无会话推空串）
+  useEffect(() => {
+    if (!webviewReady) return
+    iframeRef.current?.contentWindow?.postMessage(
+      buildWebviewMessage('ctx.sync', { sessionId: activeSessionId ?? '' }),
+      '*',
+    )
+  }, [webviewReady, activeSessionId])
+
   if (error) {
     return (
       <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
@@ -245,6 +302,7 @@ export function WebviewWidget({
         title={title ?? 'Webview'}
         // 关键安全：不开 allow-same-origin → iframe 独立 opaque origin，无法访问宿主 token
         sandbox="allow-scripts allow-forms allow-popups allow-modals"
+        onLoad={() => setWebviewReady(true)}
         className="absolute inset-0 border-0 bg-[var(--web-canvas)]"
         style={{ width: '100%', height: '100%' }}
       />

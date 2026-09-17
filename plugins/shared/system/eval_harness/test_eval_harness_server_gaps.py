@@ -499,3 +499,18 @@ def test_git_returns_code_and_merged_output(server_env):
     code2, out2 = server_env._git(["rev-parse", "--verify", "no-such-ref"])
     assert code2 != 0
     assert out2.strip()
+
+
+def test_proposal_apply_commit_stage_failure_reports_error(server_env, monkeypatch):
+    """add 成功但 commit 段失败 → 如实报错（与 add 失败分支区分，315）。"""
+    out = asyncio.run(server_env.proposal_submit(
+        layer="L3", target=_LEGAL_TARGET, change_type="new_plugin",
+        content="x", motivation="m"))
+
+    def _commit_refused(args):
+        return (128, "mock: commit refused") if args and args[0] == "commit" else (0, "hash\n")
+
+    monkeypatch.setattr(server_env, "_git", _commit_refused)
+    applied = asyncio.run(server_env.proposal_apply(out["proposal_id"]))
+    assert applied["success"] is False
+    assert "commit" in applied["error"]

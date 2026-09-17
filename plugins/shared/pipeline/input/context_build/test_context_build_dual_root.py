@@ -126,3 +126,20 @@ class TestDualRootAgentConfig:
         plugin = mod.ContextBuildPlugin(config={})
         res = _run(plugin.execute(_ctx({"agent.id": "no-such-agent"})))
         assert res.state_updates["context.is_project"] is True
+
+
+def test_resolve_project_roots_rebootstraps_shared_root(monkeypatch):
+    """shared_root 不在 sys.path（裸宿主）→ 守卫补插后登记解析仍可用。"""
+    import project_registry as pr
+
+    mod = _load_plugin_module()
+    shared_root = str(Path(mod.__file__).resolve().parents[3])
+    cleaned = [p for p in sys.path if str(p) != shared_root]
+    assert shared_root not in cleaned
+    monkeypatch.setattr(sys, "path", cleaned)
+    monkeypatch.setattr(pr, "load_project_paths", lambda: {"proj-1": "/tmp/proj-one"})
+
+    roots = mod.ContextBuildPlugin._resolve_project_roots("proj-1")
+    assert roots == ["/tmp/proj-one"]
+    assert shared_root in sys.path  # 守卫已把 shared_root 插回
+    assert mod.ContextBuildPlugin._resolve_project_roots("no-such") == []

@@ -31,10 +31,12 @@ export interface InteractionCardProps {
   isSubmitting: boolean
 }
 
-/** m:ss 剩余时间格式（倒计时展示） */
+/** 剩余时间格式：<1h 为 m:ss；≥1h 为 h:mm:ss（BUG-40 24h 等待上限可读展示） */
 function formatRemaining(totalSeconds: number): string {
-  const m = Math.floor(totalSeconds / 60)
+  const h = Math.floor(totalSeconds / 3600)
+  const m = Math.floor((totalSeconds % 3600) / 60)
   const s = totalSeconds % 60
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
@@ -175,9 +177,14 @@ export function InteractionCard({
           </div>
         )}
 
-        {/* 选项按钮组（options 特性）：点选即回调；长描述（options_detail）走详情弹窗 */}
+        {/* 选项按钮组（options 特性）：点选即回调；长描述（options_detail）走详情弹窗。
+            BUG-40：单个选项文本可很长——按钮解除固定高/不换行约束让文本完整换行可读，
+            选项区限高纵向滚动防总高撑破卡片 */}
         {hasOptions && !isDone && (
-          <div className="flex flex-wrap gap-2">
+          <div
+            data-testid="options-list"
+            className="flex max-h-[40vh] flex-wrap gap-2 overflow-y-auto overscroll-contain"
+          >
             {interaction.options!.map((opt, i) => {
               // 后端协议要求 options 携带稳定 id；LLM 传参差异可能缺失。
               // 人工确认属核心流程，回传展示文案会因 label 重复选错项——
@@ -198,14 +205,12 @@ export function InteractionCard({
                       onRespondChoice(opt.id)
                     }
                   }}
-                  className="text-sm"
+                  className="h-auto min-h-8 whitespace-normal break-words py-1.5 text-left text-sm"
                 >
                   <span className="flex flex-col items-start gap-0.5">
                     <span>{opt.label}</span>
                     {opt.description && (
-                      <span className="text-xs text-muted-foreground line-clamp-1 text-left">
-                        {opt.description}
-                      </span>
+                      <span className="text-xs text-muted-foreground text-left">{opt.description}</span>
                     )}
                   </span>
                 </Button>

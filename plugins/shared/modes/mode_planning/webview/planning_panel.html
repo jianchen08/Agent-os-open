@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>规划台</title>
+  <style>
+    /* 宿主融合：配色全跟宿主 --ag-* token（theme.sync 逐键下发），现值仅作未同步 fallback；
+       状态徽标/圆点取宿主语义色 --ag-ok / --ag-warn / --ag-chip，不再自持独立色板 */
+    :root {
+      --bg: var(--ag-bg, #f6f7fb); --fg: var(--ag-fg, #1a1a2e); --muted: var(--ag-muted, #64748b);
+      --border: var(--ag-border, #d7dce6); --card: var(--ag-card, #ffffff);
+      --accent: var(--ag-accent, #2563eb); --accent-soft: var(--ag-accent-soft, #e8efff);
+      --ok: var(--ag-ok, #16a34a); --warn: var(--ag-warn, #d97706); --err: var(--ag-err, #dc2626);
+      --chip: var(--ag-chip, #f1f5f9); --ph: var(--muted);
+      --radius: var(--ag-radius, 6px);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: var(--ag-bg, #12121c); --fg: var(--ag-fg, #e2e8f0); --muted: var(--ag-muted, #94a3b8);
+        --border: var(--ag-border, #2c2f45); --card: var(--ag-card, #1b1d2e);
+        --accent: var(--ag-accent, #60a5fa); --accent-soft: var(--ag-accent-soft, #1e2a4a);
+        --chip: var(--ag-chip, #262a3d);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 8px 10px; font-size: 12px; color: var(--fg); background: var(--bg);
+      font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      height: calc(100vh - 16px); display: flex; flex-direction: column; gap: 8px;
+    }
+    header { display: flex; align-items: center; gap: 8px; flex: none; }
+    header h1 { margin: 0; font-size: 13px; }
+    header .spacer { flex: 1; }
+    #modeName { color: var(--muted); font-size: 11px; }
+    #status { color: var(--muted); font-size: 10px; min-width: 60px; text-align: right; }
+    button {
+      padding: 3px 10px; background: var(--accent); color: #fff; border: none;
+      border-radius: var(--radius); cursor: pointer; font-size: 11px;
+    }
+    button.secondary { background: var(--chip); color: var(--fg); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    input, select {
+      padding: 3px 7px; background: var(--card); color: var(--fg);
+      border: 1px solid var(--border); border-radius: var(--radius); font-size: 11px;
+      font-family: inherit;
+    }
+    .layout {
+      display: grid; grid-template-columns: 280px minmax(0, 1fr) 320px;
+      gap: 8px; flex: 1; min-height: 0;
+    }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; overflow-y: auto; }
+      .pane { min-height: 220px; }
+    }
+    .pane {
+      display: flex; flex-direction: column; min-height: 0; min-width: 0;
+      border: 1px solid var(--border); border-radius: calc(var(--radius) + 2px); background: var(--card);
+      overflow: hidden;
+    }
+    .pane-head {
+      flex: none; padding: 6px 10px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .pane-head h2 { margin: 0; font-size: 12px; flex: 1; }
+    .pane-body { flex: 1; overflow-y: auto; padding: 4px 6px 8px; min-height: 0; }
+    /* Linear 式列表密度：项目行式列表（分隔线行 + 悬停底色，非卡片堆叠） */
+    .list { display: flex; flex-direction: column; }
+    .item {
+      border: none; border-bottom: 1px solid var(--border); border-radius: 0;
+      padding: 6px 8px; cursor: pointer; background: transparent;
+    }
+    .item:hover { background: var(--chip); }
+    .item.active { background: var(--accent-soft); }
+    .item .row1 { display: flex; align-items: center; gap: 8px; }
+    .item .name { font-weight: 600; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item .sub { color: var(--muted); font-size: 10px; margin-top: 2px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; }
+    .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .chip {
+      font-size: 10px; background: var(--chip); color: var(--muted);
+      padding: 0 7px; border-radius: calc(var(--radius) + 3px); line-height: 16px;
+    }
+    .badge {
+      font-size: 10px; padding: 0 7px; border-radius: calc(var(--radius) + 3px);
+      line-height: 16px; flex: none; background: var(--chip); color: var(--muted);
+    }
+    /* 徽标语义色跟宿主：plan→warn / running→ok / done→muted，底统一 chip */
+    .badge.plan { color: var(--warn); }
+    .badge.running { color: var(--ok); }
+    .badge.done { color: var(--muted); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .dot.running { background: var(--ok); }
+    .dot.completed { background: var(--muted); }
+    .dot.pending, .dot.evaluating { background: var(--warn); }
+    .dot.failed, .dot.timeout, .dot.stopped { background: var(--err); }
+    .dot.other { background: var(--ph); }
+    .formbox { flex: none; border-top: 1px solid var(--border); padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; }
+    .formbox .frm-title { font-size: 10px; color: var(--muted); }
+    .formrow { display: flex; gap: 6px; align-items: center; }
+    .formrow input, .formrow select { flex: 1; min-width: 0; }
+    .formrow button { flex: none; }
+    /* Linear 式列表密度：任务链缩进树行高一致（28px 单行省略） */
+    .tnode {
+      display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 6px;
+      border-radius: var(--radius); line-height: 1;
+    }
+    .tnode:hover { background: var(--chip); }
+    .tnode .t-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .tnode .t-meta { color: var(--muted); font-size: 10px; flex: none; }
+    .sub-count { color: var(--muted); font-size: 10px; }
+    .msg { display: flex; gap: 8px; margin-bottom: 8px; }
+    .msg .bubble {
+      max-width: 86%; border-radius: calc(var(--radius) + 2px); padding: 5px 9px; line-height: 1.55;
+      white-space: pre-wrap; font-size: 12px; border: 1px solid var(--border); background: var(--card);
+    }
+    .msg.user { justify-content: flex-end; }
+    .msg.user .bubble { background: var(--accent-soft); }
+    .msg .who { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+    .note { padding: 4px 8px; font-size: 10px; color: var(--muted); line-height: 1.5; }
+    .empty {
+      margin: 8px 4px; min-height: 100px; display: flex; flex-direction: column; gap: 5px;
+      align-items: center; justify-content: center; color: var(--muted);
+      border: 1px dashed var(--ph); border-radius: calc(var(--radius) + 2px); padding: 12px; text-align: center;
+    }
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%); bottom: 14px;
+      background: var(--fg); color: var(--bg); padding: 6px 14px;
+      border-radius: calc(var(--radius) + 2px);
+      font-size: 11px; display: none; max-width: 80%;
+    }
+    .toast.error { background: var(--err); color: #fff; }
+      /* 面板桥失败 ≠ 真空数据：显式错误横幅（--ag-err 语义色）与「暂无 XX」空态区分 */
+    .bridge-err {
+      border: 1px solid var(--err, #dc2626); border-radius: var(--radius, 8px); padding: 16px;
+      display: flex; flex-direction: column; gap: 8px; align-items: center;
+      justify-content: center; text-align: center; margin: 8px;
+    }
+    .bridge-err-title { color: var(--err, #dc2626); font-weight: 600; }
+    .bridge-err-msg { font-size: 11px; color: var(--muted, #64748b); word-break: break-all; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📋 规划台</h1>
+    <span id="modeName"></span>
+    <span class="spacer"></span>
+    <span id="status"></span>
+    <button class="secondary" onclick="refreshAll()">刷新</button>
+  </header>
+  <div class="layout">
+    <aside class="pane">
+      <div class="pane-head"><h2>项目状态</h2><span class="sub-count" id="projCount"></span></div>
+      <div class="pane-body"><div class="list" id="projList"></div><div class="note" id="projNote"></div></div>
+      <div class="formbox">
+        <div class="frm-title">创建项目（真实文件夹 + 登记行，任务树分组锚点）</div>
+        <div class="formrow">
+          <input id="projGoal" type="text" placeholder="项目标题（必填）">
+          <button onclick="createProject()">创建项目</button>
+        </div>
+        <div class="frm-title" id="projGoalHint" style="display:none;color:var(--err)">项目标题必填：请填写标题后再点「创建项目」</div>
+        <div class="formrow">
+          <input id="projPath" placeholder="项目文件夹（可选，缺省自动生成）">
+          <select id="projType">
+            <option value="">类型（auto）</option>
+            <option value="auto">auto</option>
+            <option value="godot">godot</option>
+          </select>
+        </div>
+        <div class="frm-title">发起规划（派发方案讨论任务，mode=planning）</div>
+        <div class="formrow">
+          <input id="planGoal" placeholder="规划目标（必填）">
+          <button onclick="planGoal()">发起规划</button>
+        </div>
+      </div>
+    </aside>
+    <main class="pane">
+      <div class="pane-head">
+        <h2>任务链</h2>
+        <span class="sub-count" id="treeTitle"></span>
+        <button class="secondary" onclick="reloadTree()">刷新链路</button>
+      </div>
+      <div class="pane-body" id="treeBody"></div>
+    </main>
+    <aside class="pane">
+      <div class="pane-head">
+        <h2>方案讨论</h2>
+        <select id="sessionPick" style="max-width:150px"><option value="">选择会话</option></select>
+      </div>
+      <div class="pane-body" id="discBody"></div>
+    </aside>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+  // agentosFetch：经 window.agentos.postMessage（宿主代发 REST 带 token）+ Promise 化。
+  // webview iframe 是 opaque-origin 沙箱（CSP connect-src 'none'），直接 fetch 不可行。
+  function agentosFetch(path, params) {
+    return new Promise(function (resolve, reject) {
+      if (!window.agentos) { reject(new Error('window.agentos 桥不可用')); return; }
+      var id = window.agentos.postMessage(path, params);
+      function handler(e) {
+        var d = e.data;
+        if (!d || !d.__agentos_webview || d.id !== id) return;
+        window.removeEventListener('message', handler);
+        if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
+        else resolve(d.params);
+      }
+      window.addEventListener('message', handler);
+    });
+  }
+  // 宿主返回 axios res.data，内层 body 是 base64 JSON
+  function unwrap(res) {
+    var data = (res && res.data) ? res.data : res;
+    if (data && data.body) {
+      try { return JSON.parse(atob(data.body)); } catch (e) { return data; }
+    }
+    return data;
+  }
+  // 宿主融合下行桥：theme.sync 逐键落 --ag-* token（CSS fallback 链即刻生效）；
+  // ctx.sync 记宿主会话上下文，「发起规划」据此送入对话框线程（create_project 无会话语义不用）。
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || !d.__agentos_webview || typeof d.method !== 'string') return;
+    if (d.method === 'theme.sync') {
+      var tokens = (d.params || {}).tokens || {};
+      Object.keys(tokens).forEach(function (k) {
+        document.documentElement.style.setProperty(k, String(tokens[k]));
+      });
+    } else if (d.method === 'ctx.sync') {
+      window.__agentosCtx = String((d.params || {}).sessionId || '');
+    }
+  });
+
+  var state = {
+    modeName: '', projects: [], projectSource: '', projectNote: '',
+    activeProject: '', sessions: [], activeSession: '',
+    errors: {},  // 各数据面桥失败信息；失败≠空数据，见 bridgeErrorBox
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(s) { $('status').textContent = s || ''; }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function toast(msg, isError) {
+    var t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast' + (isError ? ' error' : '');
+    t.style.display = 'block';
+    setTimeout(function () { t.style.display = 'none'; }, 3200);
+  }
+  // 面板桥失败 ≠ 真空数据：桥不可用/请求失败渲染显式错误横幅（--ag-err 语义色），
+  // 与 emptyBox 的诚实空态视觉区分；重试按钮走全量刷新。
+  function bridgeErrorBox(msg) {
+    return '<div class="bridge-err"><div class="bridge-err-title">面板桥不可用/加载失败</div>' +
+      '<div class="bridge-err-msg">' + escapeHtml(msg) + '</div>' +
+      '<button class="secondary" onclick="refreshAll()">重试</button></div>';
+  }
+  function emptyBox(label, note) {
+    return '<div class="empty"><div>' + escapeHtml(label) + '</div>' +
+      (note ? '<div style="font-size:11px;opacity:.75">' + escapeHtml(note) + '</div>' : '') + '</div>';
+  }
+  function projTitle(p) { return p.title || p.project_id; }
+
+  // ── 数据装载 ──
+  function loadBootstrap() {
+    return agentosFetch('/ext/mode_planning/data/bootstrap').then(function (res) {
+      var d = unwrap(res) || {};
+      state.modeName = d.name || '';
+      $('modeName').textContent = state.modeName;
+    }).catch(function () {});
+  }
+  function loadProjects() {
+    return agentosFetch('/ext/mode_planning/data/projects').then(function (res) {
+      var d = unwrap(res) || {};
+      state.projects = d.projects || [];
+      state.projectSource = d.source || '';
+      state.projectNote = d.note || '';
+      delete state.errors.projects;
+      if (state.activeProject &&
+          !state.projects.some(function (p) { return p.project_id === state.activeProject; })) {
+        state.activeProject = '';
+      }
+      renderProjects();
+      if (state.activeProject) reloadTree();
+      else $('treeBody').innerHTML = emptyBox('从左侧选择一个项目查看任务链', '');
+    }).catch(function (e) {
+      state.errors.projects = (e && e.message) || String(e);
+      renderProjects();
+    });
+  }
+  function loadSessions() {
+    return agentosFetch('/ext/mode_planning/data/sessions').then(function (res) {
+      state.sessions = (unwrap(res) || {}).sessions || [];
+      delete state.errors.sessions;
+      var pick = $('sessionPick');
+      pick.innerHTML = '<option value="">选择会话</option>' + state.sessions.map(function (s) {
+        return '<option value="' + escapeHtml(s.pipeline_id) + '"' +
+          (s.pipeline_id === state.activeSession ? ' selected' : '') + '>' +
+          escapeHtml((s.goal || s.pipeline_id).slice(0, 18)) + '</option>';
+      }).join('');
+      if (state.activeSession) loadDiscussion(state.activeSession);
+      else $('discBody').innerHTML = emptyBox('选择会话查看方案讨论消息流', '经「发起规划」派发的任务会话出现在这里');
+    }).catch(function (e) {
+      // 桥失败 ≠ 没有会话：会话落选项下拉，错误横幅落讨论区显式报错
+      state.errors.sessions = (e && e.message) || String(e);
+      $('discBody').innerHTML = bridgeErrorBox(state.errors.sessions);
+    });
+  }
+  function loadDiscussion(pipelineId) {
+    setStatus('加载讨论...');
+    return agentosFetch('/ext/mode_planning/data/discussions?pipeline_id=' + encodeURIComponent(pipelineId))
+      .then(function (res) {
+        var msgs = (unwrap(res) || {}).messages || [];
+        if (!msgs.length) {
+          $('discBody').innerHTML = emptyBox('该会话还没有消息', '管道可能尚未产生输出，稍后重选刷新');
+        } else {
+          $('discBody').innerHTML = msgs.map(function (m) {
+            var cls = m.role === 'user' ? 'user' : '';
+            var who = m.role === 'user' ? '你' : (m.role === 'assistant' ? '规划师' : m.role);
+            var meta = '<div class="who">' + escapeHtml(who) +
+              ((m.status && m.status !== 'success') ? ' · ' + escapeHtml(m.status) : '') + '</div>';
+            return '<div class="msg ' + cls + '"><div class="bubble">' + meta + escapeHtml(m.content) + '</div></div>';
+          }).join('');
+          $('discBody').scrollTop = $('discBody').scrollHeight;
+        }
+        setStatus('');
+      }).catch(function (e) {
+        $('discBody').innerHTML = bridgeErrorBox((e && e.message) || String(e));
+        setStatus('');
+      });
+  }
+  function refreshAll() {
+    setStatus('刷新中...');
+    Promise.all([loadBootstrap(), loadProjects(), loadSessions()])
+      .then(function () { setStatus(''); })
+      .catch(function (e) { setStatus('加载失败'); toast(String(e), true); });
+  }
+
+  // ── 左：项目状态（项目列表 + 状态徽标 + 登记字段标）──
+  function renderProjects() {
+    var el = $('projList');
+    if (state.errors.projects) {
+      el.innerHTML = bridgeErrorBox(state.errors.projects);
+      return;
+    }
+    $('projCount').textContent = state.projects.length ? state.projects.length + ' 个' : '';
+    $('projNote').textContent = state.projectNote;
+    if (!state.projects.length) {
+      el.innerHTML = emptyBox('暂无项目',
+        state.projectSource === 'derived' ? '尚无挂靠项目的任务行；经「创建项目」建项目、任务挂靠后可见' : '');
+      return;
+    }
+    el.innerHTML = state.projects.map(function (p) {
+      var ws = p.workflow_state || '';
+      var badge = ws
+        ? '<span class="badge ' + escapeHtml(ws) + '">' + escapeHtml(ws) + '</span>'
+        : '<span class="badge">未登记</span>';
+      var chips = [];
+      if (p.auto_execute) chips.push('<span class="chip">自动执行</span>');
+      if (p.source === 'derived') chips.push('<span class="chip">派生</span>');
+      return '<div class="item' + (state.activeProject === p.project_id ? ' active' : '') +
+        '" data-id="' + escapeHtml(p.project_id) + '">' +
+        '<div class="row1">' + badge + '<div class="name">' + escapeHtml(projTitle(p)) + '</div></div>' +
+        '<div class="sub">' + escapeHtml(String((p.tasks || []).length)) + ' 条任务 · ' +
+        escapeHtml(p.project_id) + '</div>' +
+        (chips.length ? '<div class="chips">' + chips.join('') + '</div>' : '') + '</div>';
+    }).join('');
+    el.querySelectorAll('.item').forEach(function (node) {
+      node.addEventListener('click', function () {
+        state.activeProject = node.getAttribute('data-id');
+        renderProjects();
+        reloadTree();
+      });
+    });
+  }
+
+  // ── 中：任务链（缩进树：根 = 项目挂靠行，子层按 parent_task_id 递归拉取）──
+  function fetchChildren(taskId) {
+    return agentosFetch('/ext/mode_planning/data/tasks?parent_task_id=' + encodeURIComponent(taskId))
+      .then(function (res) { return (unwrap(res) || {}).tasks || []; });
+  }
+  function buildTree(tasks, depth) {
+    return Promise.all((tasks || []).map(function (t) {
+      if (!t.task_id || depth > 8) return Promise.resolve({ task: t, depth: depth, subs: [] });
+      return fetchChildren(t.task_id).then(function (children) {
+        return buildTree(children, depth + 1).then(function (subs) {
+          return { task: t, depth: depth, subs: subs };
+        });
+      });
+    }));
+  }
+  function flattenTree(nodes, out) {
+    (nodes || []).forEach(function (n) { out.push(n); flattenTree(n.subs, out); });
+    return out;
+  }
+  function dotClass(status) {
+    return ['running', 'completed', 'pending', 'evaluating', 'failed', 'timeout', 'stopped']
+      .indexOf(status) > -1 ? status : 'other';
+  }
+  function reloadTree() {
+    var p = null;
+    state.projects.forEach(function (x) { if (x.project_id === state.activeProject) p = x; });
+    if (!p) { $('treeBody').innerHTML = emptyBox('从左侧选择一个项目查看任务链', ''); return; }
+    $('treeTitle').textContent = projTitle(p);
+    $('treeBody').innerHTML = emptyBox('加载任务链...', '');
+    buildTree(p.tasks, 0).then(function (nodes) {
+      var rows = flattenTree(nodes, []);
+      if (!rows.length) {
+        $('treeBody').innerHTML = emptyBox('该项目暂无任务行',
+          '派生口径：pipeline-state 无 task.parent_project_id 指向本项目的行');
+        return;
+      }
+      $('treeBody').innerHTML = rows.map(function (n) {
+        var t = n.task;
+        return '<div class="tnode" style="margin-left:' + (n.depth * 18) + 'px">' +
+          '<span class="dot ' + dotClass(t.status) + '"></span>' +
+          '<span class="t-title">' + escapeHtml(t.title || t.task_id || t.pipeline_id || '(未命名)') + '</span>' +
+          '<span class="t-meta">' + escapeHtml(t.status || '—') + '</span></div>';
+      }).join('');
+    }).catch(function (e) { $('treeBody').innerHTML = bridgeErrorBox((e && e.message) || String(e)); });
+  }
+
+  // ── 右：方案讨论（选中会话消息流）──
+  $('sessionPick').addEventListener('change', function () {
+    state.activeSession = this.value;
+    if (state.activeSession) loadDiscussion(state.activeSession);
+  });
+
+  // ── 写动作 ──
+  function createProject() {
+    var goal = $('projGoal').value.trim();
+    // 必填守卫双通道：行内提示（就地常驻可见，不依赖 toast 时窗）+ toast；
+    // 输入即撤提示（守卫是「当前值为空」的反馈，不是对点击的永久判罚）
+    if (!goal) {
+      $('projGoalHint').style.display = 'block';
+      toast('请先填写项目标题', true);
+      return;
+    }
+    $('projGoalHint').style.display = 'none';
+    setStatus('创建中...');
+    agentosFetch('/ext/mode_planning/data/actions/create_project', {
+      goal: goal, path: $('projPath').value.trim(), project_type: $('projType').value,
+    }).then(function (res) {
+      var d = unwrap(res) || {};
+      setStatus('');
+      if (d.error) { toast('创建失败：' + d.error, true); return; }
+      toast('项目已' + (d.created ? '创建' : '复用既有') + '：' + (d.project_id || '').slice(0, 12));
+      $('projGoal').value = ''; $('projPath').value = '';
+      loadProjects();
+    }).catch(function (e) { setStatus(''); toast('创建失败：' + e, true); });
+  }
+  $('projGoal').addEventListener('input', function () {
+    $('projGoalHint').style.display = 'none';
+  });
+  function planGoal() {
+    var goal = $('planGoal').value.trim();
+    if (!goal) { toast('请先填写规划目标', true); return; }
+    setStatus('派发中...');
+    // session_id = ctx.sync 下发的会话 id（本面板 __agentosCtx 即字符串）；
+    // 新建动作锚当前会话线程，未收到 ctx.sync 时空串按缺省省略
+    agentosFetch('/ext/mode_planning/data/actions/plan',
+      { goal: goal, session_id: window.__agentosCtx || '' })
+      .then(function (res) {
+        var d = unwrap(res) || {};
+        setStatus('');
+        if (d.error) { toast('派发失败：' + d.error, true); return; }
+        toast('已派发规划任务 ' + (d.task_id || '').slice(0, 10) + '，会话出现在「方案讨论」');
+        $('planGoal').value = '';
+        loadSessions();
+      })
+      .catch(function (e) { setStatus(''); toast('派发失败：' + e, true); });
+  }
+
+  // ── 入口 ──
+  $('treeBody').innerHTML = emptyBox('从左侧选择一个项目查看任务链', '');
+  $('discBody').innerHTML = emptyBox('选择会话查看方案讨论消息流', '');
+  refreshAll();
+  </script>
+</body>
+</html>

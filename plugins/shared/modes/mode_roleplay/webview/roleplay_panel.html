@@ -3,80 +3,511 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>角色扮演</title>
+  <title>角色扮演工作坊</title>
   <style>
-  :root {
-    --bg: #f8fafc; --fg: #1a1a1a; --muted: #64748b; --border: #cbd5e1;
-    --card: #ffffff; --ph: #94a3b8;
-  }
-  @media (prefers-color-scheme: dark) {
+    /* 面板主题跟宿主：宿主经 theme.sync 下行 --ag-* token（documentElement 内联），
+       此处变量以 var(--ag-*, fallback) 桥接——token 未到时回落本文件基座
+       （@media(prefers-color-scheme) 提供亮暗 fallback 基座）。 */
     :root {
-      --bg: #0f172a; --fg: #e2e8f0; --muted: #94a3b8; --border: #334155;
-      --card: #1e293b; --ph: #475569;
+      --bg: var(--ag-bg, #f6f7fb); --fg: var(--ag-fg, #1a1a2e);
+      --muted: var(--ag-muted, #64748b); --border: var(--ag-border, #d7dce6);
+      --card: var(--ag-card, #ffffff); --accent: var(--ag-accent, #7c5cff);
+      --accent-soft: var(--ag-accent-soft, #efeaff); --chip: var(--ag-chip, #f1f5f9);
+      --ok: var(--ag-ok, #16a34a); --warn: var(--ag-warn, #d97706);
+      --err: var(--ag-err, #dc2626); --radius: var(--ag-radius, 8px);
     }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 12px; font-size: 13px; color: var(--fg); background: var(--bg);
-    font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  }
-  h1 { margin: 0 0 12px; font-size: 15px; }
-  .layout { display: grid; gap: 12px; height: calc(100vh - 44px); }
-  .cols { grid-template-columns: 220px minmax(0, 1fr) 200px; }
-  section, aside {
-    display: flex; flex-direction: column; min-height: 0; min-width: 0;
-    border: 1px solid var(--border); border-radius: 6px; background: var(--card);
-  }
-  h2 {
-    margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted);
-    border-bottom: 1px solid var(--border);
-  }
-  .body { flex: 1; overflow: auto; padding: 8px; }
-  .placeholder {
-    height: 100%; min-height: 72px; display: flex; flex-direction: column; gap: 4px;
-    align-items: center; justify-content: center; padding: 12px; text-align: center;
-    color: var(--muted); border: 1px dashed var(--ph); border-radius: 6px;
-  }
-  .placeholder .ph-label { font-size: 13px; }
-  .placeholder .ph-note { font-size: 11px; opacity: 0.75; }
-  .note { margin: 8px 0 0; padding: 0 2px; font-size: 11px; color: var(--muted); }
-  .stages { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
-  .stage {
-    padding: 14px 8px; text-align: center; font-size: 12px; color: var(--muted);
-    border: 1px dashed var(--ph); border-radius: 6px;
-  }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: var(--ag-bg, #12121c); --fg: var(--ag-fg, #e2e8f0);
+        --muted: var(--ag-muted, #94a3b8); --border: var(--ag-border, #2c2f45);
+        --card: var(--ag-card, #1b1d2e); --accent: var(--ag-accent, #a78bfa);
+        --accent-soft: var(--ag-accent-soft, #2a2547); --chip: var(--ag-chip, #262a3d);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--fg); background: var(--bg);
+      font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      height: 100vh; display: flex; flex-direction: column;
+    }
+    /* 顶栏：低饱和细边框，视觉重量对齐宿主工作区 tab 条 */
+    header {
+      display: flex; align-items: center; gap: 8px; flex: none;
+      padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--chip);
+    }
+    header h1 { margin: 0; font-size: 13px; font-weight: 600; }
+    header .spacer { flex: 1; }
+    #modeName { color: var(--muted); font-size: 11px; }
+    #status { color: var(--muted); font-size: 11px; min-width: 60px; text-align: right; }
+    /* 按钮主次分级：主 = accent 实底 / 次 = chip 底 + 描边 */
+    button {
+      padding: 4px 12px; background: var(--accent); color: #fff;
+      border: 1px solid transparent; border-radius: var(--radius);
+      cursor: pointer; font-size: 12px; line-height: 1.6; font-family: inherit;
+    }
+    button.secondary { background: var(--chip); color: var(--fg); border-color: var(--border); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    input, textarea {
+      padding: 4px 8px; background: var(--card); color: var(--fg);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      font-size: 12px; line-height: 1.6; font-family: inherit;
+    }
+    textarea { resize: vertical; }
+    .layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 8px; flex: 1; min-height: 0; padding: 8px; }
+    .drawer, .main {
+      display: flex; flex-direction: column; min-height: 0;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--card); overflow: hidden;
+    }
+    .tabs { display: flex; border-bottom: 1px solid var(--border); flex: none; }
+    .tabs button {
+      flex: 1; background: none; color: var(--muted); border: none; border-radius: 0;
+      padding: 8px 0; border-bottom: 2px solid transparent;
+    }
+    .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+    .item {
+      border: 1px solid var(--border); border-radius: var(--radius); padding: 8px;
+      cursor: pointer; background: var(--card);
+    }
+    .item:hover { border-color: var(--accent); }
+    .item.active { border-color: var(--accent); background: var(--accent-soft); }
+    .item .row1 { display: flex; align-items: center; gap: 8px; }
+    .avatar {
+      width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft);
+      color: var(--accent); display: flex; align-items: center; justify-content: center;
+      font-weight: 600; flex: none;
+    }
+    .item .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item .sub { color: var(--muted); font-size: 11px; margin-top: 4px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; }
+    .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .chip {
+      font-size: 10px; background: var(--chip); color: var(--muted);
+      padding: 1px 7px; border-radius: var(--radius);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+    .dot.running { background: var(--ok); } .dot.done { background: var(--muted); }
+    .dot.other { background: var(--warn); }
+    .entry { border-bottom: 1px solid var(--border); padding: 8px 2px; }
+    .entry:last-child { border-bottom: none; }
+    .entry .keys { color: var(--accent); font-size: 11px; }
+    .entry .content { margin-top: 4px; color: var(--fg); white-space: pre-wrap; }
+    .entry .meta { margin-top: 4px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .badge { font-size: 10px; padding: 1px 7px; border-radius: var(--radius); background: var(--chip); color: var(--muted); }
+    .badge.on { color: var(--ok); } .badge.off { color: var(--err); }
+    .main-head {
+      flex: none; padding: 8px 12px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .main-head .title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .main-body { flex: 1; overflow-y: auto; padding: 12px 16px; }
+    .section { margin-bottom: 16px; }
+    .section h3 { margin: 0 0 8px; font-size: 11px; font-weight: 600; color: var(--muted); }
+    .prose { white-space: pre-wrap; font-size: 13px; }
+    .quote {
+      border-left: 3px solid var(--accent); padding: 8px 12px; background: var(--accent-soft);
+      border-radius: 0 var(--radius) var(--radius) 0; white-space: pre-wrap;
+    }
+    .formrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    /* 开演记录摘要卡（对话在对话框，面板不内置对话流） */
+    .sumcard {
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+      padding: 12px 16px; display: flex; flex-direction: column; gap: 8px;
+    }
+    .sumrow { display: flex; gap: 12px; align-items: baseline; }
+    .sumlabel { color: var(--muted); font-size: 11px; flex: none; width: 32px; }
+    .sumval { word-break: break-word; }
+    .notice {
+      border: 1px dashed var(--border); border-radius: var(--radius);
+      padding: 8px 12px; color: var(--muted);
+    }
+    .empty {
+      height: 100%; min-height: 120px; display: flex; flex-direction: column; gap: 8px;
+      align-items: center; justify-content: center; color: var(--muted);
+      border: 1px dashed var(--border); border-radius: var(--radius); padding: 16px; text-align: center;
+    }
+    .empty .empty-icon { font-size: 28px; }
+    .empty .empty-label { font-size: 13px; color: var(--fg); }
+    .empty .empty-note { font-size: 11px; opacity: .75; }
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px;
+      background: var(--fg); color: var(--bg); padding: 8px 16px; border-radius: var(--radius);
+      font-size: 12px; display: none; max-width: 80%;
+    }
+    .toast.error { background: var(--err); color: #fff; }
+    .greet-opt {
+      border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px;
+      margin-top: 8px; cursor: pointer; white-space: pre-wrap; font-size: 13px;
+    }
+    .greet-opt.active { border-color: var(--accent); background: var(--accent-soft); }
+      /* 面板桥失败 ≠ 真空数据：显式错误横幅（--ag-err 语义色）与「暂无 XX」空态区分 */
+    .bridge-err {
+      border: 1px solid var(--err, #dc2626); border-radius: var(--radius, 8px); padding: 16px;
+      display: flex; flex-direction: column; gap: 8px; align-items: center;
+      justify-content: center; text-align: center; margin: 8px;
+    }
+    .bridge-err-title { color: var(--err, #dc2626); font-weight: 600; }
+    .bridge-err-msg { font-size: 11px; color: var(--muted, #64748b); word-break: break-all; }
   </style>
 </head>
 <body>
-  <h1>角色扮演</h1>
-  <main class="layout cols" data-panel="roleplay">
-    <aside aria-label="角色卡">
-      <h2>角色卡</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">角色卡画廊</span>
-          <span class="ph-note">数据源缺口：角色卡物料 cards/&lt;id&gt;.yaml（name/first_mes/标签；V2 字段子集）。</span>
-        </div>
+  <header>
+    <h1>🎭 角色扮演工作坊</h1>
+    <span id="modeName"></span>
+    <span class="spacer"></span>
+    <span id="status"></span>
+    <button class="secondary" onclick="refreshAll()">刷新</button>
+  </header>
+  <div class="layout">
+    <aside class="drawer">
+      <div class="tabs">
+        <button id="tab-cards" class="active" onclick="switchTab('cards')">角色卡</button>
+        <button id="tab-lorebooks" onclick="switchTab('lorebooks')">世界书</button>
+        <button id="tab-sessions" onclick="switchTab('sessions')">开演记录</button>
       </div>
+      <div class="list" id="list"></div>
     </aside>
-    <section aria-label="会话">
-      <h2>会话</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">会话视图</span>
-          <span class="ph-note">数据源缺口：会话消息渲染归 chat 消息域（swipe/重新生成控件属消息卡 Wave 2）。</span>
-        </div>
+    <main class="main">
+      <div class="main-head">
+        <span class="title" id="mainTitle">欢迎使用角色扮演工作坊</span>
+        <span id="mainActions"></span>
       </div>
-    </section>
-    <aside aria-label="世界书">
-      <h2>世界书</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">世界书条目</span>
-          <span class="ph-note">数据源缺口：世界书物料 lorebooks/&lt;id&gt;.yaml（后接点 = TableWidget 条目表）。</span>
-        </div>
-      </div>
-    </aside>
-  </main>
+      <div class="main-body" id="mainBody"></div>
+    </main>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+  // ── 宿主下行桥通用接收器（theme.sync / ctx.sync）──
+  // theme.sync：宿主推 --ag-* 主题 token，逐键设到根元素（面板主题跟宿主）；
+  // ctx.sync：宿主推会话上下文（sessionId 等），存 window.__agentosCtx 供开演送入对话框。
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || !d.__agentos_webview) return;
+    if (d.method === 'theme.sync' && d.params && d.params.tokens) {
+      var rootStyle = document.documentElement.style;
+      Object.keys(d.params.tokens).forEach(function (k) {
+        rootStyle.setProperty(k, d.params.tokens[k]);
+      });
+    } else if (d.method === 'ctx.sync' && d.params) {
+      window.__agentosCtx = d.params;
+    }
+  });
+
+  // agentosFetch：经 window.agentos.postMessage（宿主代发 REST 带 token）+ Promise 化。
+  // webview iframe 是 opaque-origin 沙箱（CSP connect-src 'none'），直接 fetch 不可行。
+  function agentosFetch(path, params) {
+    return new Promise(function (resolve, reject) {
+      if (!window.agentos) { reject(new Error('window.agentos 桥不可用')); return; }
+      var id = window.agentos.postMessage(path, params);
+      function handler(e) {
+        var d = e.data;
+        if (!d || !d.__agentos_webview || d.id !== id) return;
+        window.removeEventListener('message', handler);
+        if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
+        else resolve(d.params);
+      }
+      window.addEventListener('message', handler);
+    });
+  }
+  // 宿主返回 axios res.data，内层 body 是 base64 JSON
+  function unwrap(res) {
+    var data = (res && res.data) ? res.data : res;
+    if (data && data.body) {
+      try { return JSON.parse(atob(data.body)); } catch (e) { return data; }
+    }
+    return data;
+  }
+
+  var state = {
+    modeName: '', cards: [], lorebooks: [], sessions: [],
+    activeTab: 'cards', activeCard: null, activeSession: null,
+    persona: '', greetingIndex: 0,
+    errors: {},  // 各数据面桥失败信息（键=activeTab）；失败≠空数据，见 bridgeErrorBox
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(s) { $('status').textContent = s || ''; }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function toast(msg, isError) {
+    var t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast' + (isError ? ' error' : '');
+    t.style.display = 'block';
+    setTimeout(function () { t.style.display = 'none'; }, 3200);
+  }
+  // agentosFetch 的 error 下行 message 是 JSON.stringify(params)（如
+  // {"message":"theme.apply 已丢弃：…"}），取人话字段；非 JSON 形态原样返回。
+  function unwrapErrorMessage(e) {
+    var raw = (e && e.message) || String(e);
+    var m = raw.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    return m ? m[1] : raw;
+  }
+  // 面板桥失败 ≠ 真空数据：桥不可用/请求失败渲染显式错误横幅（--ag-err 语义色），
+  // 与 emptyBox 的诚实空态视觉区分；重试按钮走全量刷新。
+  function bridgeErrorBox(msg) {
+    return '<div class="bridge-err"><div class="bridge-err-title">面板桥不可用/加载失败</div>' +
+      '<div class="bridge-err-msg">' + escapeHtml(msg) + '</div>' +
+      '<button class="secondary" onclick="refreshAll()">重试</button></div>';
+  }
+  function emptyBox(icon, label, note, actionOnclick, actionLabel) {
+    return '<div class="empty"><div class="empty-icon">' + icon + '</div>' +
+      '<div class="empty-label">' + escapeHtml(label) + '</div>' +
+      (note ? '<div class="empty-note">' + escapeHtml(note) + '</div>' : '') +
+      (actionLabel ? '<button class="secondary" onclick="' + actionOnclick + '">' + escapeHtml(actionLabel) + '</button>' : '') +
+      '</div>';
+  }
+  function findCard(cardId) {
+    var c = null;
+    state.cards.forEach(function (x) { if (x.id === cardId) c = x; });
+    return c;
+  }
+  function dotClass(s) {
+    return s.run_status === 'running' ? 'running' : (s.task_status === 'completed' ? 'done' : 'other');
+  }
+  // 会话上下文（ctx.sync 下行）：开演/重新生成据此把任务送入当前会话线程
+  function currentSessionId() {
+    var ctx = window.__agentosCtx;
+    return (ctx && ctx.sessionId) ? String(ctx.sessionId) : '';
+  }
+
+  // ── 数据装载 ──
+  function loadBootstrap() {
+    return agentosFetch('/ext/mode_roleplay/data/bootstrap').then(function (res) {
+      var d = unwrap(res) || {};
+      state.modeName = d.name || '';
+      $('modeName').textContent = state.modeName;
+    }).catch(function () {});
+  }
+  function loadCards() {
+    return agentosFetch('/ext/mode_roleplay/data/cards').then(function (res) {
+      state.cards = (unwrap(res) || {}).cards || [];
+      delete state.errors.cards;
+      if (state.activeTab === 'cards') renderList();
+    }).catch(function (e) {
+      state.errors.cards = (e && e.message) || String(e);
+      if (state.activeTab === 'cards') renderList();
+    });
+  }
+  function loadLorebooks() {
+    return agentosFetch('/ext/mode_roleplay/data/lorebooks').then(function (res) {
+      state.lorebooks = (unwrap(res) || {}).lorebooks || [];
+      delete state.errors.lorebooks;
+      if (state.activeTab === 'lorebooks') renderList();
+    }).catch(function (e) {
+      state.errors.lorebooks = (e && e.message) || String(e);
+      if (state.activeTab === 'lorebooks') renderList();
+    });
+  }
+  function loadSessions() {
+    return agentosFetch('/ext/mode_roleplay/data/sessions').then(function (res) {
+      state.sessions = (unwrap(res) || {}).sessions || [];
+      delete state.errors.sessions;
+      if (state.activeTab === 'sessions') renderList();
+    }).catch(function (e) {
+      state.errors.sessions = (e && e.message) || String(e);
+      if (state.activeTab === 'sessions') renderList();
+    });
+  }
+
+  function refreshAll() {
+    setStatus('刷新中...');
+    Promise.all([loadBootstrap(), loadCards(), loadLorebooks(), loadSessions()])
+      .then(function () { setStatus(''); renderList(); })
+      .catch(function (e) { setStatus('加载失败'); toast(String(e), true); });
+  }
+
+  // ── 左抽屉 ──
+  function switchTab(tab) {
+    state.activeTab = tab;
+    ['cards', 'lorebooks', 'sessions'].forEach(function (t) {
+      $('tab-' + t).className = (t === tab) ? 'active' : '';
+    });
+    renderList();
+  }
+  function avatarHtml(c) {
+    var a = c.avatar;
+    if (a && typeof a === 'object') {
+      var style = 'background:' + escapeHtml(a.bg || 'var(--accent-soft)') +
+        ';color:' + escapeHtml(a.fg || 'var(--accent)');
+      return '<div class="avatar" style="' + style + '">' + escapeHtml((c.name || '?').slice(0, 1)) + '</div>';
+    }
+    return '<div class="avatar">' + escapeHtml(a ? String(a) : (c.name || '?').slice(0, 1)) + '</div>';
+  }
+  function renderList() {
+    var el = $('list');
+    if (state.errors[state.activeTab]) {
+      el.innerHTML = bridgeErrorBox(state.errors[state.activeTab]);
+      return;
+    }
+    if (state.activeTab === 'cards') {
+      if (!state.cards.length) {
+        el.innerHTML = emptyBox('🎭', '暂无角色卡', '包内 agents/card_*.yaml 为空或读取失败');
+        return;
+      }
+      el.innerHTML = state.cards.map(function (c) {
+        var tags = (c.tags || []).map(function (t) { return '<span class="chip">' + escapeHtml(t) + '</span>'; }).join('');
+        return '<div class="item' + (state.activeCard === c.id ? ' active' : '') + '" data-id="' + escapeHtml(c.id) + '">' +
+          '<div class="row1">' + avatarHtml(c) +
+          '<div class="name">' + escapeHtml(c.name) + '</div></div>' +
+          (tags ? '<div class="chips">' + tags + '</div>' : '') + '</div>';
+      }).join('');
+      el.querySelectorAll('.item').forEach(function (node) {
+        node.addEventListener('click', function () { openCard(node.getAttribute('data-id')); });
+      });
+    } else if (state.activeTab === 'lorebooks') {
+      if (!state.lorebooks.length) {
+        el.innerHTML = emptyBox('📖', '暂无世界书', '包内 lorebooks/*.yaml 为空或读取失败');
+        return;
+      }
+      el.innerHTML = state.lorebooks.map(function (b) {
+        var entries = (b.entries || []).map(function (e) {
+          var keys = (e.keys || []).map(escapeHtml).join('、');
+          var badges =
+            '<span class="badge ' + (e.enabled ? 'on' : 'off') + '">' + (e.enabled ? '启用' : '停用') + '</span>' +
+            (e.constant ? '<span class="badge">常驻</span>' : '') +
+            '<span class="badge">' + escapeHtml(e.position) + ' · 序 ' + escapeHtml(e.insertion_order) + '</span>';
+          return '<div class="entry"><div class="keys">🔑 ' + keys + '</div>' +
+            '<div class="content">' + escapeHtml(e.content) + '</div>' +
+            '<div class="meta">' + badges + (e.comment ? '<span class="badge">' + escapeHtml(e.comment) + '</span>' : '') + '</div></div>';
+        }).join('');
+        return '<div class="item" style="cursor:default"><div class="row1"><div class="name">📖 ' + escapeHtml(b.name) + '</div></div>' +
+          '<div class="sub">' + escapeHtml(b.description || '') + '</div>' +
+          '<div style="margin-top:8px">' + entries + '</div></div>';
+      }).join('');
+    } else {
+      if (!state.sessions.length) {
+        el.innerHTML = emptyBox('🎬', '暂无开演记录', '开演或聊天区选「角色扮演」发起的会话会落在这里');
+        return;
+      }
+      el.innerHTML = state.sessions.map(function (s) {
+        return '<div class="item' + (state.activeSession === s.pipeline_id ? ' active' : '') + '" data-id="' + escapeHtml(s.pipeline_id) + '">' +
+          '<div class="row1"><span class="dot ' + dotClass(s) + '"></span><div class="name">' +
+          escapeHtml(s.goal || s.pipeline_id) + '</div></div>' +
+          '<div class="sub">' + escapeHtml(s.task_status || s.run_status || '—') + ' · ' +
+          escapeHtml(s.pipeline_id.slice(0, 10)) + '</div></div>';
+      }).join('');
+      el.querySelectorAll('.item').forEach(function (node) {
+        node.addEventListener('click', function () {
+          openSessionRecord(node.getAttribute('data-id'));
+        });
+      });
+    }
+  }
+
+  // ── 中央主区 ──
+  function renderMainHead(title, actionsHtml) {
+    $('mainTitle').textContent = title;
+    $('mainActions').innerHTML = actionsHtml || '';
+  }
+  // 选卡即向宿主上行卡的 ThemeConfig 档（theme.apply 白名单桥，载荷作用于当前
+  // 会话=对话框主题/聊天背景随卡切换）。面板自身主题跟宿主（theme.sync），不走此桥。
+  // 宿主侧 fail-closed：无活跃会话或档不合法时整包丢弃并回执 error 下行——
+  // result/error 各 toast 反馈，静默丢弃会让「选卡切主题」看起来零生效。
+  function applyCardTheme(c) {
+    if (!c.theme || !window.agentos) return;
+    agentosFetch('theme.apply', c.theme).then(function () {
+      toast('对话框主题已随「' + c.name + '」切换');
+    }).catch(function (e) {
+      toast('随卡主题切换失败：' + unwrapErrorMessage(e), true);
+    });
+  }
+  function openCard(cardId) {
+    state.activeCard = cardId;
+    state.greetingIndex = 0;
+    renderList();
+    var c = findCard(cardId);
+    if (!c) return;
+    applyCardTheme(c);
+    renderMainHead('角色卡 · ' + c.name,
+      '<button onclick="playCard()">以此角色开演</button>');
+    var greets = (c.alternate_greetings || []);
+    var greetHtml = '';
+    if (c.first_mes) {
+      greetHtml += '<div class="greet-opt' + (state.greetingIndex === 0 ? ' active' : '') + '" data-gi="0">' + escapeHtml(c.first_mes) + '</div>';
+    }
+    greets.forEach(function (g, i) {
+      greetHtml += '<div class="greet-opt' + (state.greetingIndex === i + 1 ? ' active' : '') + '" data-gi="' + (i + 1) + '">' + escapeHtml(g) + '</div>';
+    });
+    $('mainBody').innerHTML =
+      '<div class="section"><h3>设定</h3><div class="prose">' + escapeHtml(c.description) + '</div></div>' +
+      (c.personality ? '<div class="section"><h3>性格</h3><div class="prose">' + escapeHtml(c.personality) + '</div></div>' : '') +
+      (c.scenario ? '<div class="section"><h3>场景</h3><div class="prose">' + escapeHtml(c.scenario) + '</div></div>' : '') +
+      '<div class="section"><h3>开场白' + (greets.length ? '（点击选择备选开场）' : '') + '</h3>' +
+      (greetHtml || emptyBox('💬', '该卡没有开场白', '')) + '</div>' +
+      (c.mes_example ? '<div class="section"><h3>对话示例</h3><div class="prose">' + escapeHtml(c.mes_example) + '</div></div>' : '') +
+      '<div class="section"><h3>你的设定（可选，随开演注入）</h3><div class="formrow">' +
+      '<textarea id="persona" rows="2" style="flex:1;min-width:200px" placeholder="例如：我是北地来的佣兵，沉默寡言……">' + escapeHtml(state.persona) + '</textarea></div></div>' +
+      (c.creator_notes ? '<div class="section"><h3>备注</h3><div class="prose" style="color:var(--muted);font-size:11px">' + escapeHtml(c.creator_notes) + '</div></div>' : '');
+    $('mainBody').querySelectorAll('.greet-opt').forEach(function (node) {
+      node.addEventListener('click', function () {
+        state.greetingIndex = parseInt(node.getAttribute('data-gi'), 10) || 0;
+        $('mainBody').querySelectorAll('.greet-opt').forEach(function (n) { n.className = 'greet-opt'; });
+        node.className = 'greet-opt active';
+      });
+    });
+  }
+  function playCard() {
+    var c = findCard(state.activeCard);
+    if (!c) return;
+    var personaEl = $('persona');
+    state.persona = personaEl ? personaEl.value : state.persona;
+    setStatus('派发中...');
+    var body = { card_id: c.id, user_persona: state.persona, greeting_index: state.greetingIndex };
+    var sid = currentSessionId();
+    if (sid) body.session_id = sid;
+    agentosFetch('/ext/mode_roleplay/data/actions/play', body).then(function (res) {
+      var d = unwrap(res) || {};
+      setStatus('');
+      if (d.error) { toast('派发失败：' + d.error, true); return; }
+      toast('已送入对话框，请在聊天区继续');
+      loadSessions();
+    }).catch(function (e) { setStatus(''); toast('派发失败：' + e, true); });
+  }
+  // 开演记录摘要（对话在对话框，面板只读不渲染消息流）
+  function openSessionRecord(pipelineId) {
+    state.activeSession = pipelineId;
+    renderList();
+    var s = null;
+    state.sessions.forEach(function (x) { if (x.pipeline_id === pipelineId) s = x; });
+    if (!s) return;
+    renderMainHead('开演记录 · ' + (s.goal || pipelineId).slice(0, 24),
+      '<button class="secondary" onclick="regenerateLast()">重新生成</button>');
+    var timeLabel = s.created_at || ('记录 ' + s.pipeline_id.slice(0, 10));
+    $('mainBody').innerHTML =
+      '<div class="section"><h3>该任务已在对话框/管道执行</h3><div class="sumcard">' +
+      '<div class="sumrow"><span class="sumlabel">目标</span><span class="sumval">' + escapeHtml(s.goal || '—') + '</span></div>' +
+      '<div class="sumrow"><span class="sumlabel">状态</span><span class="sumval"><span class="dot ' + dotClass(s) + '"></span> ' +
+      escapeHtml(s.task_status || s.run_status || '—') + '</span></div>' +
+      '<div class="sumrow"><span class="sumlabel">时间</span><span class="sumval">' + escapeHtml(timeLabel) + '</span></div>' +
+      '</div></div>' +
+      '<div class="notice">💬 对话请在聊天区继续（选择角色扮演模式）。</div>';
+  }
+  function regenerateLast() {
+    if (!state.activeSession) { toast('先在「开演记录」选择一条记录', true); return; }
+    setStatus('派发中...');
+    // 行级操作锚定来源管道：只发 pipeline_id，会话归属由后端按行 thread_id 解析
+    var body = { pipeline_id: state.activeSession };
+    agentosFetch('/ext/mode_roleplay/data/actions/regenerate', body)
+      .then(function (res) {
+        var d = unwrap(res) || {};
+        setStatus('');
+        if (d.error) { toast('派发失败：' + d.error, true); return; }
+        toast('已派发重新生成任务，变体请在聊天区查看');
+      })
+      .catch(function (e) { setStatus(''); toast('派发失败：' + e, true); });
+  }
+
+  // ── 入口 ──
+  renderList();
+  $('mainBody').innerHTML = emptyBox('🎭', '从左侧选择一张角色卡开始',
+    '选卡后对话框主题将随卡切换；对话在聊天区进行', "switchTab('cards')", '浏览角色卡');
+  refreshAll();
+  </script>
 </body>
 </html>

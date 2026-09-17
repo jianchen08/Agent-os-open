@@ -15,6 +15,7 @@ fetch_external_trajectories.py（运维通道）。
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 # 数据集来源登记（许可画像：dataset 许可与来源仓库许可分别记录——调研报告
@@ -95,6 +96,21 @@ def select_seed(rows: list[dict[str, Any]], per_band: int = 5,
     return by_band
 
 
+# 模式链入口（评测单元=任务链：case 锚定各模式的 L2 编排入口，派发/拆解
+# 决策在链内被覆盖；L1 是主调度层只接收与派发，task_submit 禁止提交 L1
+# ——「从 main 进」结构性不可行，§17.8 裁定锚定真实编排/执行入口）。
+# id 必须用运行时注册表的命名空间形态（mode_coding/...，裸 config_id 不被
+# task_submit 解析——实跑 400 实证）；research 模式暂无注册编排 agent，
+# 落回通用执行者（注册表核对后再接）。
+MODE_CHAIN_TARGETS = {
+    "coding": "mode_coding/programming_orchestrator_agent_v2",
+}
+
+
+def chain_target(mode: str) -> str:
+    return MODE_CHAIN_TARGETS.get(mode, "general_agent")
+
+
 _INSTRUCTION_TEMPLATE = """你在一个真实开源仓库的 git 工作副本中工作（{repo}@{base_commit}）。下面是一个真实的 issue，请在仓库中定位并修复它。
 
 --- 8< --- issue 原文 --- 8< ---
@@ -107,23 +123,43 @@ _INSTRUCTION_TEMPLATE = """你在一个真实开源仓库的 git 工作副本中
 - 完成后确认以下测试可通过：{tests}。"""
 
 
+def _patch_test_files(patch: str) -> list[str]:
+    """从 test.patch 提取其触及的测试文件路径（b 侧），供 oracle 先重置到
+    基线再打补丁——agent 自己写了同名测试时不让 patch 应用冲突误判。"""
+    files = []
+    for m in re.finditer(r"^diff --git a/(\S+) b/(\S+)$", patch, flags=re.MULTILINE):
+        p = m.group(2)
+        if p not in files:
+            files.append(p)
+    return files
+
+
 def _oracle_command(row: dict[str, Any], bundle_dir: str,
                     tests: list[str]) -> str:
     """bash_check 判定命令。bash_check 经任务面 bash 工具在任务隔离环境的
     workspace cwd 执行——bundle 的宿主绝对路径在该环境不可达，故补丁内联
     heredoc 自包含（当前种子补丁均 <1KB）；超长补丁回退 bundle 文件路径
-    （该形态要求宿主路径可见，执行期验证）。"""
+    （该形态要求宿主路径可见，执行期验证）。
+
+    打补丁前先 `git checkout -- <patch 触及文件>` 重置测试文件到基线：
+    好会自己写测试的 agent 会让 patch 冲突，重置保证 oracle 定义真值
+    （SWE-bench 官方口径：test patch 应用于干净测试文件）。"""
     patch = str(row.get("test_patch") or "")
     pytest_line = f"python -m pytest {' '.join(tests)} -q"
+    checkout = ""
+    files = _patch_test_files(patch)
+    if files:
+        checkout = "git checkout -- " + " ".join(files) + "\n"
     if 0 < len(patch) <= 16384:
-        return (f"git apply <<'SWE_TEST_PATCH'\n{patch}\nSWE_TEST_PATCH\n"
+        return (f"{checkout}git apply <<'SWE_TEST_PATCH'\n{patch}\nSWE_TEST_PATCH\n"
                 f"python -m pytest --version >/dev/null 2>&1 || pip install -q pytest\n"
                 f"{pytest_line}")
-    return f"git apply '{bundle_dir}/test.patch' && {pytest_line}"
+    return (f"{checkout}git apply '{bundle_dir}/test.patch' && {pytest_line}")
 
 
-def adapt_seed_case(row: dict[str, Any], materials_root: str) -> dict[str, Any]:
-    """SWE-bench 任务 → 本系统派发 case（仓库 worktree + bash_check 测试车道）。"""
+def adapt_seed_case(row: dict[str, Any], materials_root: str,
+                    mode: str = "coding") -> dict[str, Any]:
+    """SWE-bench 任务 → 本系统派发 case（模式链编排入口 + bash_check 测试车道）。"""
     iid = str(row["instance_id"])
     bundle_dir = f"{materials_root}/external/swe_bundles/{iid}".replace("\\", "/")
     repo_dir = f"{materials_root}/external/swe_repos/{iid}".replace("\\", "/")
@@ -134,7 +170,7 @@ def adapt_seed_case(row: dict[str, Any], materials_root: str) -> dict[str, Any]:
         "id": f"swev_{iid}",
         "source": "swe_bench_verified",
         "category": difficulty_band(row.get("difficulty")),
-        "target": "general_agent",
+        "target": chain_target(mode),
         "anchor": "repo",
         "workspace": repo_dir,
         "workspace_mode": "worktree",

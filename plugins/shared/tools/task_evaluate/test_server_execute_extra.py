@@ -329,11 +329,40 @@ class TestAutoComplete:
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is True
         assert result.output["overall_passed"] is True
-        assert result.output["summary"] == "未声明评估指标，自动通过"
+        # BUG-33：无指标完成 = 零验证放行，完成结论必须如实标注，不得谎称"评估通过"
+        assert result.output["summary"] == "未声明评估指标，未经评估直接完成"
+        assert result.metadata["message"] == "任务未声明验收指标，未经评估直接完成"
         # 两次状态写：①评估调用计数（eval_total_calls，耗尽判定的跨调用真值）
-        # ②完成裁决（task.status）
+        # ②完成裁决（task.status + 诚实标注的 eval_summary）
         assert state_writer.await_count == 2
         assert state_writer.await_args.args[1]["task.status"] == "completed"
+        assert (
+            state_writer.await_args.args[1]["task.eval_summary"]
+            == "未声明评估指标，未经评估直接完成"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_metrics_executor_self_report_is_flagged_not_bare(
+        self, mod: Any, service: Any, monkeypatch: Any
+    ) -> None:
+        """BUG-33 回归锚：执行者自我报告（可能含虚假落盘声明）不得以裸文本充当
+        评估结论——必须带「无验收指标，未经评估」标注后才能落 task.eval_summary。"""
+        task = await _new_task(service)
+        tool, state_writer = _inject_tool(mod, monkeypatch, service)
+        tool._executor = _RecordingExecutor(lambda _kw: _eval_result(task.id, []))
+        result = await tool.execute(
+            {
+                "action": "auto_complete",
+                "task_id": task.id,
+                "summary": "已落盘 novel_r84.md",
+            }
+        )
+        assert result.success is True
+        eval_summary = state_writer.await_args.args[1]["task.eval_summary"]
+        assert eval_summary.startswith("【无验收指标，未经评估直接完成】")
+        # 执行者报告保留可追溯，但永不裸过
+        assert "已落盘 novel_r84.md" in eval_summary
+        assert result.metadata["message"] == "任务未声明验收指标，未经评估直接完成"
 
     @pytest.mark.asyncio
     async def test_all_passed_history_skips_executor(self, mod: Any, service: Any, monkeypatch: Any) -> None:

@@ -18,11 +18,13 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+import types
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 
 import tests._isolation_path  # noqa: F401
 from agentos_plugin_sdk.isolation_types import IsolationLevel
@@ -230,6 +232,67 @@ class TestGuardInjection:
 
         if _shutil.which("docker"):
             assert guard._docker_available is True
+
+
+# ── guard：wsl_native 配置降级可观测（F4，2026-09-16 审查）────
+
+
+class TestWslNativeConfigDegradation:
+    """_load_wsl_native_config 两层降级必须留 warning（禁止裸吞）。"""
+
+    @staticmethod
+    def _inject_config_center(monkeypatch: pytest.MonkeyPatch, get_cc: Any) -> None:
+        """注入伪造 config.config_center（sidecar 内不可达路径的替身）。"""
+        fake_pkg = types.ModuleType("config")
+        fake_cc = types.ModuleType("config.config_center")
+        fake_cc.get_config_center = get_cc
+        fake_pkg.config_center = fake_cc
+        monkeypatch.setitem(sys.modules, "config", fake_pkg)
+        monkeypatch.setitem(sys.modules, "config.config_center", fake_cc)
+
+    def test_cc_failure_falls_back_to_yaml_with_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def _cc_down() -> Any:
+            raise RuntimeError("cc unreachable")
+
+        self._inject_config_center(monkeypatch, _cc_down)
+        guard = _Guard(config={"docker_available": False})
+        cfg = guard._load_wsl_native_config()
+        # 第二层直读真实仓库 yaml 成功：返回 dict（是否启用以文件为准）
+        assert isinstance(cfg, dict)
+        assert any("ConfigCenter 读取 wsl_native 配置失败" in r.getMessage() for r in caplog.records)
+
+    def test_yaml_failure_returns_empty_with_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def _cc_down() -> Any:
+            raise RuntimeError("cc unreachable")
+
+        self._inject_config_center(monkeypatch, _cc_down)
+
+        def _yaml_broken(*_a: Any, **_k: Any) -> Any:
+            raise OSError("yaml read failed")
+
+        monkeypatch.setattr(yaml, "safe_load", _yaml_broken)
+        guard = _Guard(config={"docker_available": False})
+        assert guard._load_wsl_native_config() == {}
+        assert any("直读 isolation_config.yaml 失败" in r.getMessage() for r in caplog.records)
+
+    def test_cc_success_short_circuits_without_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        expected = {"enabled": True, "distro": "UnitTest"}
+
+        def _cc_ok() -> Any:
+            center = MagicMock()
+            center.get.return_value = {"providers": {"wsl_native": expected}}
+            return center
+
+        self._inject_config_center(monkeypatch, _cc_ok)
+        guard = _Guard(config={"docker_available": False})
+        assert guard._load_wsl_native_config() == expected
+        assert not any("wsl_native" in r.getMessage() for r in caplog.records)
 
 
 # ── 漂移钉：bash 侧 wsl 构建与 provider 同语义 ───────────────

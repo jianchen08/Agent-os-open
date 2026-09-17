@@ -1768,6 +1768,125 @@ async fn session_execution_context_disabled_plugin_declarations_ignored() {
 }
 
 #[tokio::test]
+async fn message_execution_context_merges_per_key_over_session_level() {
+    // 1a2 逐键合并：消息级显式键 > 会话级同键；消息级未携带的键保留会话级
+    // 种子（会话级默认兜底，不得被整体替换丢弃）。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let now = "2026-08-28T00:00:00Z";
+    store
+        .create_session(&agentos_core::types::SessionRecord {
+            thread_id: "thread-ec4".to_string(),
+            title: None,
+            intent: None,
+            current_state: "active".to_string(),
+            agent_id: None,
+            active_pipeline_id: None,
+            pipeline_ids: vec![],
+            metadata: Some(json!({
+                "workspace": "D:/proj/demo",
+                "isolation_mode": "isolated",
+            })),
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+            last_active_at: Some(now.to_string()),
+        })
+        .await
+        .unwrap();
+    let state = AppState::new();
+    state.manifests.write().await.push(thread_field_manifest(
+        "ws_lifecycle",
+        json!({"thread_fields": [
+            {"name": "workspace", "x_metadata_key": "workspace", "x_execution_path": "workspace.source_path"},
+        ]}),
+    ));
+    state.manifests.write().await.push(thread_field_manifest(
+        "isolation",
+        json!({"thread_fields": [
+            {"name": "isolationMode", "x_metadata_key": "isolation_mode", "x_execution_path": "isolation.level"},
+        ]}),
+    ));
+    state
+        .enabled_plugin_ids
+        .write()
+        .await
+        .extend(["ws_lifecycle".to_string(), "isolation".to_string()]);
+    let message_ec = json!({
+        "mode": "coding",
+        "isolation": {"level": "non_isolated"},
+    });
+    let st = stage_build_initial_state(
+        &state,
+        &store,
+        "msg",
+        "pipe_ec4",
+        "thread-ec4",
+        "m1",
+        "u1",
+        "",
+        Some(&message_ec),
+        "run-ec4",
+    )
+    .await;
+    assert_eq!(
+        st["execution_context"]["mode"], "coding",
+        "消息级显式键落位"
+    );
+    assert_eq!(
+        st["execution_context"]["isolation"]["level"], "non_isolated",
+        "消息级同键覆盖会话级（逐键，非整键替换）"
+    );
+    assert_eq!(
+        st["execution_context"]["workspace"]["source_path"], "D:/proj/demo",
+        "消息级未携带的键保留会话级种子"
+    );
+}
+
+#[tokio::test]
+async fn message_execution_context_lands_when_no_session_level_values() {
+    // 会话无声明值（1a 不注入）时消息级 execution_context 原样落位（1a2）。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let now = "2026-08-28T00:00:00Z";
+    store
+        .create_session(&agentos_core::types::SessionRecord {
+            thread_id: "thread-ec5".to_string(),
+            title: None,
+            intent: None,
+            current_state: "active".to_string(),
+            agent_id: None,
+            active_pipeline_id: None,
+            pipeline_ids: vec![],
+            metadata: Some(json!({})),
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+            last_active_at: Some(now.to_string()),
+        })
+        .await
+        .unwrap();
+    let state = AppState::new();
+    let message_ec = json!({"mode": "coding"});
+    let st = stage_build_initial_state(
+        &state,
+        &store,
+        "msg",
+        "pipe_ec5",
+        "thread-ec5",
+        "m1",
+        "u1",
+        "",
+        Some(&message_ec),
+        "run-ec5",
+    )
+    .await;
+    assert_eq!(
+        st["execution_context"],
+        json!({"mode": "coding"}),
+        "无会话级种子时消息级原样落位"
+    );
+}
+
+#[tokio::test]
 async fn test_stage_recover_history_merges_overlay_with_birth_fields() {
     // overlay 应用点已移至恢复合并之后（B13① 域界定，ADR 2026-09-06）：
     // 本测试钉死"overlay 顶层扁平键并入 + 引擎出生字段/保护字段不破"的合并面。
@@ -3252,10 +3371,17 @@ async fn test_hot_resume_restores_snapshot_scalars() {
     assert_eq!(out["task.parent_project_id"], "proj_hot1");
     assert_eq!(out["workspace"], "D:/ws/thread__wt_hot1");
     assert_eq!(out["ws_meta"]["mode"], "worktree");
-    // execution_context 整键恢复：任务级快照覆盖本轮会话级种子（优先级契约）
+    // execution_context 本轮已注入（会话级种子形态，1a/1a2 产物同理）→ 快照
+    // 残留不得整键顶掉本轮声明（消息级显式键 > 会话级默认 > 恢复兜底；
+    // BUG-35：上轮残留曾把本轮消息级 mode 顶回会话默认）
     assert_eq!(
-        out["execution_context"]["workspace"]["source_path"], "项目目录",
-        "快照 execution_context 整键覆盖会话级种子"
+        out["execution_context"]["workspace"]["source_path"], "会话级目录",
+        "本轮声明的 execution_context 优先于快照残留"
+    );
+    assert_eq!(
+        out["execution_context"].get("isolation"),
+        None,
+        "快照残留的其余执行键同样不得混入本轮声明"
     );
     // per-run 键保持本轮新值（快照残留被跳过）
     assert_eq!(out["run_id"], "new-run", "旧 run_id 不得顶掉取消轮询新锚");
@@ -3309,6 +3435,43 @@ async fn test_hot_resume_without_scalars_is_noop_merge() {
         out["messages"].as_array().unwrap().len(),
         2,
         "历史复用 + 本轮 append"
+    );
+}
+
+/// 热路径边界：本轮两级皆无（1a 无声明值且消息未携带 execution_context）→
+/// 快照值照常恢复——续跑连续性兜底（无透传轮沿用上轮执行上下文）。
+#[tokio::test]
+async fn test_hot_resume_recovers_execution_context_when_round_has_none() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite;
+    let snapshot = json!({
+        "messages": [{"role": "user", "content": "上轮提问", "seq": 0}],
+        "execution_context": {"isolation": {"level": "isolated"}},
+    });
+    agentos_session::global_registry().get_or_init(
+        "tenant_hot3",
+        "pipe_hot3",
+        "thread_hot3",
+        "agent_hot3",
+        snapshot,
+    );
+    let out = stage_recover_history(
+        json!({"run_id": "new-run-3", "message": "第三轮"}),
+        &store,
+        "第三轮",
+        "pipe_hot3",
+        "tenant_hot3",
+        "",
+        false,
+        None,
+        &Default::default(),
+        "",
+    )
+    .await
+    .expect("stage_recover_history 应成功（本测试注入无故障）");
+    assert_eq!(
+        out["execution_context"]["isolation"]["level"], "isolated",
+        "本轮无声明时快照 execution_context 兜底恢复"
     );
 }
 
@@ -7780,10 +7943,10 @@ mod server_gap_tests {
         assert_eq!(recovered["session_id"], "thread-ec");
     }
 
-    /// 任务级 execution_context 整体覆盖会话级（优先级契约）；
-    /// 非对象/空对象不注入。
+    /// 消息级 execution_context 逐键并入会话级种子（消息级显式键 > 会话级
+    /// 同键，未携带键保留会话级）；非对象/空对象不注入。
     #[tokio::test]
-    async fn task_level_execution_context_overrides_session_level() {
+    async fn message_level_execution_context_merges_per_key_over_session_level() {
         let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
         let store: Arc<dyn agentos_core::traits::StorageBackend> = sqlite.clone();
         seed_ec_session(
@@ -7821,8 +7984,12 @@ mod server_gap_tests {
         )
         .await;
         assert_eq!(
-            recovered["execution_context"], task_ec,
-            "任务级必须整体覆盖会话级（不是合并）: {recovered}"
+            recovered["execution_context"]["task"]["id"], "t-1",
+            "消息级显式键落位: {recovered}"
+        );
+        assert_eq!(
+            recovered["execution_context"]["workspace"]["mode"], "session_value",
+            "消息级未携带的键保留会话级种子（逐键合并，非整键替换）: {recovered}"
         );
 
         // 非对象（字符串）不注入 → 保留会话级值

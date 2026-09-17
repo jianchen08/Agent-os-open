@@ -807,6 +807,44 @@ describe('GlobalWebSocketService', () => {
 
       disconnect()
     })
+
+    // 消息级 execution_context（{mode,...}）出站帧契约（BUG-35 回归钉）：
+    // 带则原样入帧（内核 1a2 合并点整体覆盖会话级来源），不带则帧内无该键
+    // （后端按 thread 出生值注入，与旧行为一致）。
+    it('sendUserInput 携带 executionContext 时帧带 execution_context 字段', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      service.sendUserInput('thread-1', '模式测试', {
+        pipelineId: 'pipe-s',
+        clientMessageId: 'cmid-ec',
+        executionContext: { mode: 'coding' },
+      })
+
+      const ws = await connectAndOpen({ connect, getLatestWs })
+
+      const userMsg = getSentMessages(ws).find((c: any) => c?.type === 'user_input')
+      expect(userMsg).toBeDefined()
+      expect(userMsg.execution_context).toEqual({ mode: 'coding' })
+
+      disconnect()
+    })
+
+    it('sendUserInput 未携带 executionContext 时帧无 execution_context 键', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      service.sendUserInput('thread-1', '无上下文', {
+        pipelineId: 'pipe-s',
+        clientMessageId: 'cmid-noec',
+      })
+
+      const ws = await connectAndOpen({ connect, getLatestWs })
+
+      const userMsg = getSentMessages(ws).find((c: any) => c?.type === 'user_input')
+      expect(userMsg).toBeDefined()
+      expect(userMsg).not.toHaveProperty('execution_context')
+
+      disconnect()
+    })
   })
 
   // ──────────────────────────────────────────────

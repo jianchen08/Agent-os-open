@@ -360,3 +360,45 @@ class TestServerAssembly:
                 tool_mod.set_default_executor(None)
         finally:
             sys.modules.pop("task_evaluate_server_assembly_test", None)
+
+
+# ── bash_check 执行器异常分支（覆盖率收口批 2026-09-17） ─────────────────────────
+
+def test_bash_check_reports_missing_bash_binary(monkeypatch: Any) -> None:
+    """宿主无 bash（FileNotFoundError）→ 诚实失败的 MetricResult，不抛。"""
+    import subprocess as _subprocess
+
+    mod = _load_executor_mod()
+
+    def _raise(*a: Any, **k: Any) -> None:
+        raise FileNotFoundError("[WinError 2] bash 不存在")
+
+    monkeypatch.setattr(_subprocess, "run", _raise)
+    result = mod.PipelineEvaluationExecutor._run_bash_check("m1", "true", {})
+    assert result.passed is False
+    assert "bash 不可用" in (result.error or "")
+
+
+def test_bash_check_reports_timeout(monkeypatch: Any) -> None:
+    """命令超时（TimeoutExpired）→ 失败结果携带超时阈值。"""
+    import subprocess as _subprocess
+
+    mod = _load_executor_mod()
+
+    def _raise(*a: Any, **k: Any) -> None:
+        raise _subprocess.TimeoutExpired(cmd="bash", timeout=7)
+
+    monkeypatch.setattr(_subprocess, "run", _raise)
+    result = mod.PipelineEvaluationExecutor._run_bash_check(
+        "m2", "sleep 100", {"timeout_seconds": 7}
+    )
+    assert result.passed is False
+    assert "超时" in (result.error or "")
+    assert "7" in (result.error or "")
+
+
+def test_bash_check_passes_on_zero_exit_and_keeps_output_tail() -> None:
+    """真实 bash 冒烟：exit 0 通过（对照性质：非全 mock）。"""
+    mod = _load_executor_mod()
+    result = mod.PipelineEvaluationExecutor._run_bash_check("m3", "echo hello-ok", {})
+    assert result.passed is True

@@ -213,14 +213,14 @@
       "description": "Query tool call records from traces table (?tool_name=&status=&min_duration=&limit=)"
     },
     {
-      "route_id": "mon_payload_diag_page",
+      "route_id": "mon_tool_calls_stats",
       "method": "GET",
-      "path": "/ext/monitoring/page/payload-diag",
+      "path": "/ext/monitoring/tool-calls/stats",
       "auth": "user",
       "handler_capability": "http.handle",
-      "timeout_ms": 5000,
+      "timeout_ms": 8000,
       "max_concurrency": 4,
-      "description": "Webview HTML page: LLM payload diagnostic viewer"
+      "description": "Per-tool aggregate stats over recent tool-carrying traces (calls/success/error/avg duration; window=limit)"
     },
     {
       "route_id": "mon_tool_calls_page",
@@ -454,26 +454,6 @@
         "group": "用量与成本"
       },
       {
-        "id": "plugin_error_card",
-        "type": "status_card",
-        "space": "monitoring",
-        "order": 52,
-        "props": {
-          "title": "插件报错",
-          "label": "插件报错次数",
-          "datasourceUri": "/ext/monitoring/plugins",
-          "valueKey": "lifecycle.plugin_error_total",
-          "refresh": {
-            "type": "poll",
-            "intervalSeconds": 30
-          },
-          "variant": "metric",
-          "icon": "⚠️",
-          "description": "插件 OnError 事件累计（内核聚合器留存窗口，滚动约2小时）"
-        },
-        "group": "插件"
-      },
-      {
         "id": "token_by_model_chart",
         "type": "chart",
         "space": "monitoring",
@@ -639,27 +619,12 @@
         "description": "系统监控（widget 化：资源卡+任务表声明组合，替代硬编码 MonitoringPage）"
       },
       {
-        "id": "payload_diag",
-        "title": "Payload 诊断",
-        "space": "workspace",
-        "slot": "tab",
-        "path": "/p/payload_diag",
-        "icon": "description",
-        "order": 61,
-        "widget": "webview",
-        "props": {
-          "pluginId": "monitoring",
-          "htmlPath": "/page/payload-diag",
-          "widgetId": "payload_diag"
-        }
-      },
-      {
         "id": "tool_call_records",
         "title": "工具调用记录",
         "space": "workspace",
         "slot": "tab",
         "path": "/p/tool_call_records",
-        "icon": "history",
+        "icon": "🕓",
         "order": 62,
         "widget": "webview",
         "props": {

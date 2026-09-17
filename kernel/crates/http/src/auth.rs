@@ -254,6 +254,12 @@ impl DecodedToken {
         self.token_type == TokenType::Access.prefix()
     }
 
+    /// refresh 类型判定：首段前缀为 "refresh"；access 及未知前缀均否。
+    /// refresh 端点凭此拒绝 access token 换发（类型混淆拉平短/长效凭证）。
+    pub fn is_refresh(&self) -> bool {
+        self.token_type == TokenType::Refresh.prefix()
+    }
+
     /// 口令绑定段与用户当前口令哈希是否匹配（改密吊销的判定点）。
     pub fn password_binding_matches(&self, current_password_hash: &str) -> bool {
         self.pwv == password_binding(current_password_hash)

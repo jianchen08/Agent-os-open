@@ -1,12 +1,12 @@
 {
   "id": "mode_research",
   "name": "Mode Research",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
-  "description": "调研模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile），profile 随包内打包，供服务侧消费方（eval_harness 归因评测等）经内核服务调用获取",
+  "description": "调研模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile）+ 工作区面板数据面（调研任务/报告阅读器[引用角标]/信源库，对标 Perplexity/Elicit）+ 写动作（发起调研/送入对话框追问经 task_submit 真派发，携 session_id 送入宿主对话框线程，无则省略）+ hindsight.recall 知识库检索代理 + 宿主融合面板（theme.sync/ctx.sync 下行桥，Perplexity 式密度），profile 随包内打包",
   "permissions": {},
   "priority": 45,
   "host_group": "light",
@@ -15,7 +15,7 @@
     "services": [
       {
         "name": "mode.describe",
-        "description": "返回编码模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+        "description": "返回调研模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -58,7 +58,7 @@
       },
       {
         "name": "mode.get_profile",
-        "description": "返回编码模式包内 profile.yaml 解析后的内容",
+        "description": "返回调研模式包内 profile.yaml 解析后的内容",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -91,6 +91,76 @@
       "timeout_ms": 5000,
       "max_concurrency": 4,
       "description": "Webview HTML page: 调研台面板（插件自带 webview 页）"
+    },
+    {
+      "route_id": "mode_research_data_bootstrap",
+      "method": "GET",
+      "path": "/ext/mode_research/data/bootstrap",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "面板头元数据（模式名/链/panel_page_id）"
+    },
+    {
+      "route_id": "mode_research_data_sessions",
+      "method": "GET",
+      "path": "/ext/mode_research/data/sessions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "调研任务列表（pipeline-state mode 键过滤归一）"
+    },
+    {
+      "route_id": "mode_research_data_messages",
+      "method": "GET",
+      "path": "/ext/mode_research/data/messages",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "会话过程流（messages.list 按 pipeline_id，query 必带 pipeline_id）"
+    },
+    {
+      "route_id": "mode_research_data_report",
+      "method": "GET",
+      "path": "/ext/mode_research/data/report",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "报告阅读器载荷（最后一条长 assistant 消息 + 引用角标 + URL 信源）"
+    },
+    {
+      "route_id": "mode_research_data_sources",
+      "method": "GET",
+      "path": "/ext/mode_research/data/sources",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "信源库（pipeline_id→报告 URL 抽取；q→hindsight.recall 知识库检索）"
+    },
+    {
+      "route_id": "mode_research_action_start",
+      "method": "POST",
+      "path": "/ext/mode_research/data/actions/start",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：发起调研（task_submit 派发，携 quick/deep 深度档与 session_id，无则省略）"
+    },
+    {
+      "route_id": "mode_research_action_followup",
+      "method": "POST",
+      "path": "/ext/mode_research/data/actions/followup",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：送入对话框追问（task_submit 派发携 session_id，回答流进宿主对话框线程；携原报告节选）"
     }
   ],
   "contributes": {
@@ -109,8 +179,20 @@
           "widgetId": "research_desk"
         },
         "order": 30,
-        "description": "调研模式面板：调研任务/报告/信源库",
-        "mode": "research"
+        "description": "调研模式面板：调研任务/报告阅读器/信源库",
+        "mode": "research",
+        "detachable": {
+          "popout": true,
+          "childWindow": true,
+          "defaultSize": {
+            "w": 1200,
+            "h": 720
+          },
+          "minSize": {
+            "w": 860,
+            "h": 520
+          }
+        }
       }
     ]
   },

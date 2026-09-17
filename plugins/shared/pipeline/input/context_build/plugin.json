@@ -29,6 +29,8 @@
   "export_fields": [
     "task.id",
     "tool_ids",
+    "mode",
+    "project_roots",
     "context.*",
     "model_tier",
     "max_iterations",
@@ -38,13 +40,15 @@
   ],
   "persistent_fields": [
     "task.id",
+    "mode",
+    "project_roots",
     "model_tier",
     "max_iterations",
     "max_reminders",
     "timeout_seconds",
     "agent_level"
   ],
-  "description": "\n\n[state 出口口径] 本插件真实产出键 = task.id / tool_ids / context.*（含 extra_context 与 agent 配置运行时键）；lineage.* 仅读（出生写面在 task_birth 出生 state，经 chat_send_handler/task_submit 一次写全），display_name/name/tags 取自 agent 配置非本插件写入。",
+  "description": "\n\n[state 出口口径] 本插件真实产出键 = task.id / tool_ids / mode / project_roots（挂靠项目时项目根列表）/ context.*（含 extra_context 与 agent 配置运行时键）；mode = 任务模式解析回写（execution_context.mode 非空且形态合法时逐轮覆盖）；lineage.* 仅读（出生写面在 task_birth 出生 state，经 chat_send_handler/task_submit 一次写全），display_name/name/tags 取自 agent 配置非本插件写入。",
   "state": {
     "reads": [
       "agent.id",

@@ -194,12 +194,21 @@ class DuplicateCheckPlugin(IOutputPlugin):
         连败计数与参数无关——失败循环无法靠改参数（递增序号/换措辞）洗白，
         补上签名级重复检测被绕过的缺口。成功即清零（自愈不受伤害）。
 
+        审批通道故障豁免（BUG-41）：security_check 审批等待链路异常（审批服务
+        异常）的软拦截结果带 retry_allowed=True——人审结果未知（用户可能已批准
+        但响应丢失）、调用从未执行，"同参重调结果不变"的前提不成立。该类结果：
+        - 不计连败（工具从未执行 ≠ 工具坏，摘工具面会把人审重试逼进死路）；
+        - 从签名滑动窗口摘除该次发射（人审后的重试不得被去重拦截）。
+        用户主动拒绝/超时/取消不带标记，照旧入窗计数（拒绝重试死循环的
+        防打扰闸保留；security_check 侧的指纹连拒阈值是对应的终局防线）。
+
         State 命名空间：
             - router.tool_fail_streak : {tool: 连续失败次数}
             - router.tool_fail_banned : 已摘除（禁用）的工具清单
+            - router.recent_tool_sigs : 通道故障时摘除对应签名后的窗口
 
         Returns:
-            状态更新字典；无失败结果时返回空（不动既有状态）
+            状态更新字典；无失败结果且无摘除时返回空（不动既有状态）
         """
         results = ctx.state.get(StateKeys.TOOL_RESULTS, [])
         if not results:
@@ -207,7 +216,9 @@ class DuplicateCheckPlugin(IOutputPlugin):
 
         streaks: dict[str, int] = dict(ctx.state.get("router.tool_fail_streak", {}) or {})
         banned: list[str] = list(ctx.state.get("router.tool_fail_banned", []) or [])
+        window: list[str] = list(ctx.state.get("router.recent_tool_sigs", []) or [])
         changed = False
+        window_pruned = False
         hard_hit: str | None = None
 
         for res in results:
@@ -215,6 +226,15 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 continue
             tool = res.get("tool_name") or ""
             if not tool or tool in self._fail_breaker_exempt_tools:
+                continue
+            if res.get("success") is False and res.get("retry_allowed") is True:
+                # 审批通道故障：从窗口摘除该次未执行的发射（最近一条同签名）
+                sig = self._call_signature(tool, res.get("arguments"))
+                for i in range(len(window) - 1, -1, -1):
+                    if window[i] == sig:
+                        del window[i]
+                        window_pruned = True
+                        break
                 continue
             if res.get("success") is True:
                 if streaks.pop(tool, None) is not None:
@@ -227,10 +247,14 @@ class DuplicateCheckPlugin(IOutputPlugin):
             if streaks[tool] >= self._fail_break_hard_limit:
                 hard_hit = tool
 
-        if not changed:
+        if not changed and not window_pruned:
             return {}
 
-        updates: dict[str, Any] = {"router.tool_fail_streak": streaks}
+        updates: dict[str, Any] = {}
+        if changed:
+            updates["router.tool_fail_streak"] = streaks
+        if window_pruned:
+            updates["router.recent_tool_sigs"] = window
 
         if hard_hit is not None:
             return self._terminate_pipeline(
@@ -552,19 +576,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
         if not tool_calls:
             return {"router.duplicate_count": 0}
 
-        current_signatures = []
-        for tc in tool_calls:
-            name = tc.get("name", "")
-            args = tc.get("arguments", {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-            if not isinstance(args, dict):
-                args = {}
-            sig = hashlib.md5(f"{name}:{sorted(args.items())}".encode()).hexdigest()[:8]  # noqa: S324
-            current_signatures.append(sig)
+        current_signatures = [self._call_signature(tc.get("name", ""), tc.get("arguments", {})) for tc in tool_calls]
 
         window = list(ctx.state.get("router.recent_tool_sigs", []))
         round_counts: dict[str, int] = {}
@@ -586,6 +598,29 @@ class DuplicateCheckPlugin(IOutputPlugin):
             "router.duplicate_count": duplicate_count,
             "router.recent_tool_sigs": updated_window,
         }
+
+    def _call_signature(self, name: str, args: Any) -> str:
+        """单调用签名 = 工具名 + 全参数（排序后 md5 短摘要）。
+
+        全参数入签名：reason 这类审计必填字段每次调用语义不同，参数微变
+        即不同签名（可绕过签名去重的既有判例）。str JSON/非法 JSON/非 dict
+        参数归一后参与（与 _check_duplicate_calls 的历史口径一致）。
+
+        Args:
+            name: 工具名
+            args: 工具参数（dict / JSON 字符串 / 其他）
+
+        Returns:
+            8 位十六进制签名
+        """
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+        if not isinstance(args, dict):
+            args = {}
+        return hashlib.md5(f"{name}:{sorted(args.items())}".encode()).hexdigest()[:8]  # noqa: S324
 
     def _check_repetitive_output(self, ctx: PluginContext) -> dict[str, Any]:
         """检查输出内容重复。

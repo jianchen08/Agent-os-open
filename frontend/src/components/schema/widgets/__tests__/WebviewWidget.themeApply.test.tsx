@@ -14,14 +14,26 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { presetThemes } from '@/config/themes'
 import { apiClient } from '@/services/api/client'
 import { useSessionThemeStore, getActiveSessionTheme } from '@/stores/sessionThemeStore'
+import {
+  findDownMessage,
+  getIframeToken,
+  postUp as bridgePostUp,
+} from './webviewTestBridge'
 import type { Mock } from 'vitest'
 
 vi.mock('@/services/api/client', () => ({
   apiClient: { get: vi.fn(), post: vi.fn() },
 }))
-vi.mock('@/stores/sessionStore', () => ({
-  useSessionStore: { getState: () => ({ activeSessionId: 'sess-theme' }) },
-}))
+// 宿主下行桥（theme.sync/ctx.sync）需订阅活跃会话：mock 用真 zustand store
+// （hook + getState 双能力），替代纯对象 getState。
+vi.mock('@/stores/sessionStore', async () => {
+  const { create } = await import('zustand')
+  return {
+    useSessionStore: create<{ activeSessionId: string | null }>(() => ({
+      activeSessionId: 'sess-theme',
+    })),
+  }
+})
 
 import { WebviewWidget } from '../WebviewWidget'
 
@@ -30,31 +42,8 @@ const apiPost = apiClient.post as unknown as Mock
 
 const VALID_THEME = presetThemes['dark']
 
-function getIframeToken(): string {
-  const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
-  const m = (iframe.getAttribute('srcdoc') ?? '').match(/TOKEN = "([^"]+)"/)
-  if (!m) throw new Error('iframe srcdoc 中未找到实例令牌 TOKEN')
-  return m[1]
-}
-
-function postUp(method: string, params?: unknown, id = 'wv_t'): void {
-  const data: Record<string, unknown> = {
-    __agentos_webview: true,
-    __wv_token: getIframeToken(),
-    id,
-    method,
-  }
-  if (params !== undefined) data.params = params
-  window.dispatchEvent(new MessageEvent('message', { origin: 'null', data }))
-}
-
-function findDownMessage(spy: Mock, method: string): Record<string, unknown> | undefined {
-  for (const call of spy.mock.calls) {
-    const msg = call[0] as Record<string, unknown> | undefined
-    if (msg && typeof msg === 'object' && msg.method === method) return msg
-  }
-  return undefined
-}
+const postUp = (method: string, params?: unknown, id = 'wv_t'): void =>
+  bridgePostUp(method, params, id)
 
 describe('WebviewWidget — theme.apply 主题桥', () => {
   beforeEach(() => {

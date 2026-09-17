@@ -1,0 +1,75 @@
+# 出厂示例世界书（SillyTavern World Info 条目结构子集）。
+# 面板 /data/lorebooks 读本文件渲染条目表；确定性关键词注入插件（lorebook_context）
+# 为 P3 立项项，本文件先承载物料与展示契约。
+# 条目字段对齐 ST：keys/secondary_keys/content/enabled/insertion_order/constant/
+# position/case_sensitive/comment。
+name: 出厂演示世界（奇幻与霓虹）
+description: 覆盖三张示例卡的共用世界物料：月语神殿、新九龙城、星见高中。
+scan_depth: 4
+token_budget: 512
+recursive_scanning: false
+entries:
+- keys:
+  - 月光神殿
+  - 月语
+  - 塞拉菲娜
+  secondary_keys: []
+  content: 建于第二纪元的月神神殿，坐落在大陆边缘的悬崖上。殿内穹顶绘有完整月相环，
+    地窖藏有历代守望者的草药手记。现任守望者只有塞拉菲娜一人。
+  enabled: true
+  insertion_order: 100
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 主舞台·奇幻线
+- keys:
+  - 新九龙城
+  - 九龙
+  - 凯尔
+  - 铁手
+  secondary_keys:
+  - 义体
+  - 诊所
+  content: 巨构层叠的高密度城寨，天空永远被上层地板遮住。地下诊所「铁手」开在旧水道
+    改建的铺位里，招牌是一块焊死的义肢手掌。 义体零件黑市每午夜开市。
+  enabled: true
+  insertion_order: 100
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 主舞台·赛博线
+- keys:
+  - 星见高中
+  - 天文社
+  - 星野未来
+  secondary_keys: []
+  content: 郊区的县立高中，天台水塔旁堆着天文社的器材。那台老式折射望远镜是社团创始人
+    留下的，主镜有一道裂纹，修好它是星野未来的执念。
+  enabled: true
+  insertion_order: 100
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 主舞台·日常线
+- keys:
+  - 月神箴言
+  secondary_keys: []
+  content: 月语神殿代代口传的箴言集，最著名的一句是「灯不为己明」。塞拉菲娜紧张或
+    下决心时会引用。
+  enabled: true
+  insertion_order: 90
+  constant: false
+  position: after_char
+  case_sensitive: false
+  comment: 氛围物料
+- keys:
+  - 世界观
+  - demo
+  content: 本世界书为出厂演示物料：三条主舞台条目分别对应三张示例卡的世界线，一条
+    氛围条目演示 after_char 插入位。用户可改写或增删条目（副本由用户空间持有）。
+  enabled: false
+  insertion_order: 10
+  constant: true
+  position: before_char
+  case_sensitive: false
+  comment: 说明条目（默认停用，演示 constant 字段）

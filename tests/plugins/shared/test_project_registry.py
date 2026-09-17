@@ -255,6 +255,159 @@ class TestPurgeLegacyContainerData:
         assert storage.get("t-9") is not None
 
 
+class TestWorkflowState:
+    """workflow_state 方案工作流状态（ADR 2026-09-17-plan-mode-project-state-gate）。
+
+    与任务状态机无关（项目仍非任务实体）：这是方案生命周期能轴，
+    plan→running / running→plan 为门控迁移（审批在工具层）。
+    """
+
+    def test_default_plan_and_persisted_roundtrip(self, tmp_path: Path) -> None:
+        from project_registry import ProjectModel, ProjectRegistry
+
+        reg = ProjectRegistry(data_dir=tmp_path / "tasks")
+        p = reg.save(ProjectModel(title="P", path="D:/x/p"))
+        assert p.workflow_state == "plan"
+        loaded = ProjectRegistry(data_dir=tmp_path / "tasks").get(p.id)
+        assert loaded is not None and loaded.workflow_state == "plan"
+
+    def test_legacy_row_without_field_loads_as_plan(self, tmp_path: Path) -> None:
+        """存量登记行缺 workflow_state 字段 → 默认 plan（破坏性迁移禁止）。"""
+        import project_registry as pr
+
+        data_dir = tmp_path / "tasks"
+        reg = pr.ProjectRegistry(data_dir=data_dir)
+        p = reg.save(pr.ProjectModel(title="旧", path="D:/x/old"))
+        assert p.workflow_state == "plan"
+        # 手工抹掉字段模拟存量行
+        row = data_dir / "projects" / f"{p.id}.yaml"
+        text = row.read_text(encoding="utf-8").replace("workflow_state: plan\n", "")
+        row.write_text(text, encoding="utf-8")
+        loaded = pr.ProjectRegistry(data_dir=data_dir).get(p.id)
+        assert loaded is not None and loaded.workflow_state == "plan"
+
+    def test_legal_transitions(self, tmp_path: Path) -> None:
+        from project_registry import ProjectModel, transition_workflow_state
+
+        p = ProjectModel(title="P")
+        assert transition_workflow_state(p, "running").workflow_state == "running"
+        assert transition_workflow_state(p, "plan").workflow_state == "plan"
+        transition_workflow_state(p, "running")
+        assert transition_workflow_state(p, "done").workflow_state == "done"
+
+    def test_illegal_transitions_fail_closed(self, tmp_path: Path) -> None:
+        from project_registry import ProjectModel, transition_workflow_state
+
+        p = ProjectModel(title="P")
+        with pytest.raises(ValueError, match="plan → done"):
+            transition_workflow_state(p, "done")
+        done = ProjectModel(title="D", workflow_state="done")
+        with pytest.raises(ValueError, match="终态"):
+            transition_workflow_state(done, "running")
+
+
+class TestRegistrationWhitelist:
+    """登记白名单（locked 用户配置）+ 前缀授权 + 重叠检测。"""
+
+    def test_load_whitelist_missing_entries_and_corrupt(self, tmp_path: Path) -> None:
+        from project_registry import load_registration_whitelist
+
+        base = tmp_path / "cfgusers"
+        assert load_registration_whitelist(base=base) == []
+
+        d = base / "default"
+        d.mkdir(parents=True)
+        (d / "project_whitelist.yaml").write_text(
+            "locked: true\nentries:\n"
+            f"  - {tmp_path / 'work'}\n"
+            f"  - {tmp_path / 'space two'}\n",
+            encoding="utf-8",
+        )
+        assert load_registration_whitelist(base=base) == [
+            str(tmp_path / "work"),
+            str(tmp_path / "space two"),
+        ]
+
+        (d / "project_whitelist.yaml").write_text("entries: [unclosed", encoding="utf-8")
+        assert load_registration_whitelist(base=base) == []
+
+    def test_match_registration_scope_prefix_any_depth(self, tmp_path: Path) -> None:
+        import project_registry as pr
+
+        scope = str(tmp_path / "work")
+        hit = pr.match_registration_scope(
+            pr._canonical_path(tmp_path / "work" / "a" / "b" / "c" / "new"), [scope]
+        )
+        assert hit == pr._canonical_path(scope)
+        # .. 归一化后仍命中（前缀判定在 canonicalize 之后）
+        tricky = pr._canonical_path(tmp_path / "work" / "a" / ".." / "b")
+        assert pr.match_registration_scope(tricky, [scope]) is not None
+        assert pr.match_registration_scope(pr._canonical_path(tmp_path / "elsewhere"), [scope]) is None
+
+    def test_ws_base_is_default_member(self, ws_base: Path) -> None:
+        import project_registry as pr
+
+        assert pr.match_registration_scope(pr._canonical_path(ws_base / "projects" / "x"), []) is not None
+        outside = ws_base.parent / "out"
+        assert pr.match_registration_scope(pr._canonical_path(outside), []) is None
+
+    def test_explicit_path_outside_scope_rejected_before_folder_creation(
+        self, tmp_path: Path, ws_base: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import project_registry as pr
+
+        reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
+        monkeypatch.setattr(pr, "load_registration_whitelist", lambda **k: [str(tmp_path / "work")])
+        outside = tmp_path / "elsewhere" / "proj"
+        with pytest.raises(ValueError, match="白名单"):
+            pr.ensure_project_registered(
+                title="越界", explicit_path=str(outside), registry=reg
+            )
+        assert not outside.exists()
+        assert reg.list() == []
+
+    def test_explicit_nested_any_depth_allowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import project_registry as pr
+
+        reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
+        monkeypatch.setattr(pr, "load_registration_whitelist", lambda **k: [str(tmp_path / "work")])
+        deep = tmp_path / "work" / "a" / "b" / "尚未存在"
+        project, created = pr.ensure_project_registered(
+            title="深层", explicit_path=str(deep), registry=reg
+        )
+        assert created is True and project.workflow_state == "plan"
+        assert deep.is_dir()
+
+    def test_reuse_precedes_whitelist(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """同路径幂等复用先于白名单闸：存量登记不受新闸影响。"""
+        import project_registry as pr
+
+        reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
+        legacy = pr.ProjectModel(title="存量", path=str(tmp_path / "legacy"))
+        reg.save(legacy)
+        monkeypatch.setattr(pr, "load_registration_whitelist", lambda **k: [])
+        project, created = pr.ensure_project_registered(
+            title="存量", explicit_path=str(tmp_path / "legacy"), registry=reg
+        )
+        assert created is False and project.id == legacy.id
+
+    def test_overlap_with_existing_project_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import project_registry as pr
+
+        reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
+        monkeypatch.setattr(pr, "load_registration_whitelist", lambda **k: [str(tmp_path)])
+        outer = tmp_path / "scope" / "outer"
+        pr.ensure_project_registered(title="外层", explicit_path=str(outer), registry=reg)
+
+        inner = outer / "inner"
+        with pytest.raises(ValueError, match="重叠"):
+            pr.ensure_project_registered(title="内嵌", explicit_path=str(inner), registry=reg)
+        containing = tmp_path / "scope"
+        with pytest.raises(ValueError, match="重叠"):
+            pr.ensure_project_registered(title="包裹", explicit_path=str(containing), registry=reg)
+        assert reg.list()[0].path == str(outer)
+
+
 class TestProjectRootOfTree:
     def test_env_config_root_resolves_parent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """AGENTOS_CONFIG_ROOT（指向 <project_root>/config）→ 父目录即项目根。"""

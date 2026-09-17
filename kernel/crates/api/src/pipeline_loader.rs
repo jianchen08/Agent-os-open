@@ -738,6 +738,9 @@ loop_bodies:
     #[test]
     fn test_load_pipeline_config_missing_returns_default() {
         let tmp = TempDir::new().unwrap();
+        // 用户配置层先于传入根被查：不钉桩则宿主机真实用户空间的
+        // pipelines/autonomous.yaml 会让"缺失"前提失效（同批 5371899ba 教训）
+        let _guard = pin_tmp_user_space(tmp.path());
         let cfg = load_pipeline_config(tmp.path()).expect("missing config should not error");
         assert!(cfg.loop_bodies.is_empty());
     }
@@ -805,6 +808,7 @@ loop_bodies:
     #[test]
     fn test_load_pipeline_with_hooks_missing_returns_default() {
         let tmp = TempDir::new().unwrap();
+        let _guard = pin_tmp_user_space(tmp.path());
         let (cfg, hooks) = load_pipeline_with_hooks(tmp.path()).expect("missing should not error");
         assert!(cfg.loop_bodies.is_empty());
         assert!(hooks.body_hooks.is_empty());

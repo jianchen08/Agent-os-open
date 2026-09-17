@@ -52,18 +52,12 @@ pub fn list_table_names(conn: &Connection) -> Result<Vec<String>, ApiError> {
         .prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
         )
-        .map_err(|e| ApiError::Internal {
-            message: format!("枚举表失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("枚举表失败"))?;
     let names = stmt
         .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| ApiError::Internal {
-            message: format!("枚举表失败: {e}"),
-        })?
+        .map_err(ApiError::internal("枚举表失败"))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ApiError::Internal {
-            message: format!("枚举表失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("枚举表失败"))?;
     Ok(names)
 }
 
@@ -71,9 +65,7 @@ pub fn list_table_names(conn: &Connection) -> Result<Vec<String>, ApiError> {
 pub fn get_table_columns(conn: &Connection, table: &str) -> Result<Vec<ColumnMeta>, ApiError> {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info({})", quote_ident(table)))
-        .map_err(|e| ApiError::Internal {
-            message: format!("读取列信息失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("读取列信息失败"))?;
     let cols = stmt
         .query_map([], |row| {
             Ok(ColumnMeta {
@@ -84,13 +76,9 @@ pub fn get_table_columns(conn: &Connection, table: &str) -> Result<Vec<ColumnMet
                 pk_order: row.get::<_, i64>(5)?,
             })
         })
-        .map_err(|e| ApiError::Internal {
-            message: format!("读取列信息失败: {e}"),
-        })?
+        .map_err(ApiError::internal("读取列信息失败"))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ApiError::Internal {
-            message: format!("读取列信息失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("读取列信息失败"))?;
     Ok(cols)
 }
 
@@ -265,9 +253,7 @@ pub fn query_rows_inner(
             rusqlite::params_from_iter(where_values.iter().map(|p| p.as_ref())),
             |r| r.get(0),
         )
-        .map_err(|e| ApiError::Internal {
-            message: format!("统计行数失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("统计行数失败"))?;
 
     // rows（limit/offset 参数绑定）
     let data_sql = format!(
@@ -277,9 +263,9 @@ pub fn query_rows_inner(
         where_sql,
         order_sql
     );
-    let mut stmt = conn.prepare(&data_sql).map_err(|e| ApiError::Internal {
-        message: format!("查询失败: {e}"),
-    })?;
+    let mut stmt = conn
+        .prepare(&data_sql)
+        .map_err(ApiError::internal("查询失败"))?;
     let mut all_values: Vec<Box<dyn rusqlite::ToSql>> = where_values;
     all_values.push(Box::new(limit));
     all_values.push(Box::new(offset));
@@ -288,13 +274,9 @@ pub fn query_rows_inner(
             rusqlite::params_from_iter(all_values.iter().map(|p| p.as_ref())),
             |row| row_to_json(row, &selectable),
         )
-        .map_err(|e| ApiError::Internal {
-            message: format!("查询失败: {e}"),
-        })?
+        .map_err(ApiError::internal("查询失败"))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ApiError::Internal {
-            message: format!("查询失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("查询失败"))?;
 
     Ok(json!({
         "table": table,
@@ -365,9 +347,7 @@ pub fn get_row_inner(
             |r| row_to_json(r, &selectable),
         )
         .optional()
-        .map_err(|e| ApiError::Internal {
-            message: format!("查询失败: {e}"),
-        })?
+        .map_err(ApiError::internal("查询失败"))?
         .ok_or_else(|| ApiError::NotFound {
             message: format!("记录不存在: {table}/{pk_value}"),
         })?;
@@ -419,9 +399,7 @@ pub fn insert_row_inner(
             &format!("INSERT INTO {} DEFAULT VALUES", quote_ident(table)),
             [],
         )
-        .map_err(|e| ApiError::Internal {
-            message: format!("插入失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("插入失败"))?;
     } else {
         let placeholders: Vec<String> = (1..=insert_cols.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
@@ -434,9 +412,7 @@ pub fn insert_row_inner(
             &sql,
             rusqlite::params_from_iter(insert_values.iter().map(|p| p.as_ref())),
         )
-        .map_err(|e| ApiError::Internal {
-            message: format!("插入失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("插入失败"))?;
     }
 
     // 回查整行 + row_id（主键值拼接）
@@ -556,9 +532,7 @@ pub fn update_row_inner(
             &sql,
             rusqlite::params_from_iter(all_values.iter().map(|p| p.as_ref())),
         )
-        .map_err(|e| ApiError::Internal {
-            message: format!("更新失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("更新失败"))?;
     if affected == 0 {
         return Err(ApiError::NotFound {
             message: format!("记录不存在: {table}/{pk_value}"),
@@ -611,9 +585,7 @@ pub fn delete_row_inner(
             &sql,
             rusqlite::params_from_iter(where_values.iter().map(|p| p.as_ref())),
         )
-        .map_err(|e| ApiError::Internal {
-            message: format!("删除失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("删除失败"))?;
     if affected == 0 {
         return Err(ApiError::NotFound {
             message: format!("记录不存在: {table}/{pk_value}"),
@@ -767,9 +739,7 @@ fn backup_before_clear(conn: &Connection) -> Result<Option<String>, ApiError> {
     // PRAGMA database_list 首行 = main 库，第 3 列为文件路径（内存库为空串）
     let main_path: String = conn
         .query_row("PRAGMA database_list", [], |r| r.get::<_, String>(2))
-        .map_err(|e| ApiError::Internal {
-            message: format!("读取主库路径失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("读取主库路径失败"))?;
     if main_path.is_empty() {
         return Ok(None);
     }
@@ -782,9 +752,7 @@ fn backup_before_clear(conn: &Connection) -> Result<Option<String>, ApiError> {
     // VACUUM INTO 目标已存在会报错；毫秒时间戳 + 进程内自增序号保证唯一
     let backup = format!("{main_path}.clear-backup-{ts}-{seq}");
     conn.execute("VACUUM INTO ?1", rusqlite::params![backup])
-        .map_err(|e| ApiError::Internal {
-            message: format!("清理备份失败（已中止清理）: {e}"),
-        })?;
+        .map_err(ApiError::internal("清理备份失败（已中止清理）"))?;
     Ok(Some(backup))
 }
 
@@ -805,20 +773,14 @@ pub fn clear_execution_data_inner(conn: &Connection) -> Result<Value, ApiError> 
                 "SELECT pipeline_id, tenant_id FROM runs
                  WHERE status = 'running' AND pipeline_id IS NOT NULL AND pipeline_id != ''",
             )
-            .map_err(|e| ApiError::Internal {
-                message: format!("活跃管道检查失败: {e}"),
-            })?;
+            .map_err(ApiError::internal("活跃管道检查失败"))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|e| ApiError::Internal {
-                message: format!("活跃管道检查失败: {e}"),
-            })?;
+            .map_err(ApiError::internal("活跃管道检查失败"))?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| ApiError::Internal {
-                message: format!("活跃管道检查失败: {e}"),
-            })?
+            .map_err(ApiError::internal("活跃管道检查失败"))?
     };
     for (pid, tenant) in &running {
         if registry.contains(tenant, pid) {
@@ -833,9 +795,7 @@ pub fn clear_execution_data_inner(conn: &Connection) -> Result<Value, ApiError> 
     let mut cleared = serde_json::Map::new();
     let mut total: i64 = 0;
     conn.execute_batch("BEGIN")
-        .map_err(|e| ApiError::Internal {
-            message: format!("开启清理事务失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("开启清理事务失败"))?;
     for table in EXECUTION_DATA_TABLES {
         match conn.execute(&format!("DELETE FROM {table}"), []) {
             Ok(n) => {
@@ -851,9 +811,7 @@ pub fn clear_execution_data_inner(conn: &Connection) -> Result<Value, ApiError> 
         }
     }
     conn.execute_batch("COMMIT")
-        .map_err(|e| ApiError::Internal {
-            message: format!("提交清理事务失败: {e}"),
-        })?;
+        .map_err(ApiError::internal("提交清理事务失败"))?;
     // 4) 内存 registry 同清（事务已提交，防呆拒绝路径不会走到这里）
     registry.clear();
     Ok(json!({

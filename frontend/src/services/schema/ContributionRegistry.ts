@@ -433,6 +433,10 @@ export class ContributionRegistry {
           }
           continue
         }
+        // 未知贡献点 key（如 renderers/thread_fields 等非页面声明）忽略：
+        // manifest contributes 原样透传，前端只承认 pages + 旧贡献点契约内
+        // 的 key，否则非页面数据会被兜底归一化成工作区页签垃圾卡片
+        if (type !== 'pages' && !LEGACY_PAGE_MAP[type]) continue
         for (const item of items) {
           this.normalizeAndRegister(type, item as Record<string, unknown>, pluginId)
         }

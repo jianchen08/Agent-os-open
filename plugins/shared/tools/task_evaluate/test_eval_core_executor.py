@@ -341,6 +341,37 @@ class TestToolMetricLocalExtra:
         assert r.results[0].passed is False
         assert "path 参数缺失" in (r.results[0].error or "")
 
+    def test_bash_check_exit_code_verdict(self, exec_mod: Any, tmp_path: Path) -> None:
+        """bash_check 带 command：在 workspace cwd 真执行，退出码 0=通过（SWE
+        种子实跑实证：执行器此前只有 file_check 实现，bash_check 一律
+        "path 参数缺失" 秒败——验证器从未真正运行）。"""
+        metrics = tmp_path / "m.yaml"
+        metrics.write_text(_metrics_yaml("bash_check"), encoding="utf-8")
+        ex = _make_executor(exec_mod, metrics=str(metrics))
+        (tmp_path / "requests_models_marker.txt").write_text("x", encoding="utf-8")
+        r1 = _run(ex.run_evaluation("t1", ["bash_check"], {
+            "bash_check": {"command": "test -f requests_models_marker.txt",
+                           "workspace": str(tmp_path)}}))
+        r2 = _run(ex.run_evaluation("t1", ["bash_check"], {
+            "bash_check": {"command": "exit 3", "workspace": str(tmp_path)}}))
+        assert r1.results[0].passed is True
+        assert r2.results[0].passed is False
+        assert "exit=3" in (r2.results[0].message or "")
+
+    def test_bash_check_missing_command_and_cwd(self, exec_mod: Any, tmp_path: Path) -> None:
+        """无 command → 诚实失败；相对路径命令以 workspace 为 cwd。"""
+        metrics = tmp_path / "m.yaml"
+        metrics.write_text(_metrics_yaml("bash_check"), encoding="utf-8")
+        ex = _make_executor(exec_mod, metrics=str(metrics))
+        r0 = _run(ex.run_evaluation("t1", ["bash_check"], {"bash_check": {}}))
+        assert r0.results[0].passed is False
+        assert "command 参数缺失" in (r0.results[0].error or "")
+        sub = tmp_path / "sub"; sub.mkdir()
+        (sub / "marker.txt").write_text("x", encoding="utf-8")
+        r1 = _run(ex.run_evaluation("t1", ["bash_check"], {
+            "bash_check": {"command": "test -f marker.txt", "workspace": str(sub)}}))
+        assert r1.results[0].passed is True  # cwd=workspace，相对路径命中
+
     def test_exists_ok_and_missing(self, exec_mod: Any, metrics_path: str, tmp_path: Path) -> None:
         f = tmp_path / "out.txt"
         f.write_text("hi", encoding="utf-8")

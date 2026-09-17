@@ -6,7 +6,7 @@
   182/193-194（_map_result 非 dict 形态与未知 media_type 的显式错误）、
   213-215（_to_media_type 枚举直通 / 字符串归一）、242/246/254
   （MediaProviderRegistry 的 get/list_by_type/get_chain_for_type 空默认）
-- image_generate.py:169-174（_build_multimodal_content 的 OSError 兜底）、
+- image_generate.py（多模态构建已下沉 SDK multimodal_content_from_file）、
   176-177（扩展名小写化与 mime 映射）、184（未知扩展名回退 image/png）、
   186（多模态内容块装配）、202（prompt 空 → MISSING_PROMPT）、
   227（_build_kwargs 字符串参数真值过滤）、238（cfg_scale 浮点装配）、
@@ -32,6 +32,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from agentos_plugin_sdk import create_success_result
+from agentos_plugin_sdk.multimodal import multimodal_content_from_file
 
 pytestmark = pytest.mark.unit
 
@@ -205,9 +208,7 @@ class TestMapResultContract:
 
     def test_unknown_response_media_type_raises(self) -> None:
         """响应 media_type 非法 → 显式错误（193-194），不落 MediaType 构造崩溃。"""
-        client = MediaProviderClient(
-            _ScriptedCaller(_ok_payload("/tmp/x.bin", media_type="hologram"))
-        )
+        client = MediaProviderClient(_ScriptedCaller(_ok_payload("/tmp/x.bin", media_type="hologram")))
         with pytest.raises(ProviderUnavailable) as excinfo:
             _run(client.execute_generate(MediaType.IMAGE, "x"))
         assert "未知 media_type" in str(excinfo.value)
@@ -288,13 +289,13 @@ class TestProviderRegistryDefaults:
 
 
 class TestImageMultimodalContent:
-    """_build_multimodal_content：真实文件编码（无 mock），错误路径兜底。"""
+    """多模态内容构建（SDK 通用通道 multimodal_content_from_file）：真实文件编码（无 mock），错误路径兜底。"""
 
     def test_png_encoded_as_data_url(self, tmp_path: Path) -> None:
         img = tmp_path / "pic.png"
         payload = bytes(range(256))
         img.write_bytes(payload)
-        blocks = image_mod.ImageGenerateTool._build_multimodal_content(str(img))
+        blocks = multimodal_content_from_file(str(img))
         assert blocks is not None and len(blocks) == 1
         block = blocks[0]
         assert block["type"] == "image_url"
@@ -316,26 +317,22 @@ class TestImageMultimodalContent:
             ("a.bmp", "image/png"),  # 未知扩展名 → 回退 image/png（184）
         ],
     )
-    def test_mime_map_and_lowercasing(
-        self, tmp_path: Path, filename: str, expected_mime: str
-    ) -> None:
+    def test_mime_map_and_lowercasing(self, tmp_path: Path, filename: str, expected_mime: str) -> None:
         f = tmp_path / filename
         f.write_bytes(b"\x89PNG\r\n\x1a\n data")
-        blocks = image_mod.ImageGenerateTool._build_multimodal_content(str(f))
+        blocks = multimodal_content_from_file(str(f))
         assert blocks is not None
         assert blocks[0]["image_url"]["url"].startswith(f"data:{expected_mime};base64,")
 
     @pytest.mark.parametrize("bad_path", ["", "/nonexistent/pic.png"])
     def test_missing_file_returns_none(self, bad_path: str) -> None:
-        assert image_mod.ImageGenerateTool._build_multimodal_content(bad_path) is None
+        assert multimodal_content_from_file(bad_path) is None
 
     def test_directory_path_returns_none(self, tmp_path: Path) -> None:
         """目录不是普通文件 → None（不误编码目录）。"""
-        assert image_mod.ImageGenerateTool._build_multimodal_content(str(tmp_path)) is None
+        assert multimodal_content_from_file(str(tmp_path)) is None
 
-    def test_unreadable_file_returns_none_and_warns(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_unreadable_file_returns_none_and_warns(self, tmp_path: Path, monkeypatch) -> None:
         """读取抛 OSError → 记警告并返回 None（169-174）。"""
         f = tmp_path / "locked.png"
         f.write_bytes(b"data")
@@ -347,7 +344,7 @@ class TestImageMultimodalContent:
             return real_open(path, *args, **kwargs)
 
         monkeypatch.setattr("builtins.open", _failing_open)
-        assert image_mod.ImageGenerateTool._build_multimodal_content(str(f)) is None
+        assert multimodal_content_from_file(str(f)) is None
 
 
 class TestImageExecutePaths:
@@ -372,16 +369,12 @@ class TestImageExecutePaths:
         assert result.metadata.get("action") == "image_generate"
 
     def test_provider_unavailable_from_backend_translated(self) -> None:
-        tool = image_mod.ImageGenerateTool(
-            capability_caller=_ScriptedCaller(ProviderUnavailable("服务不可达"))
-        )
+        tool = image_mod.ImageGenerateTool(capability_caller=_ScriptedCaller(ProviderUnavailable("服务不可达")))
         result = _run(tool.execute({"prompt": "夕阳"}))
         assert not result.success and result.error_code == "PROVIDER_UNAVAILABLE"
         assert "服务不可达" in (result.error or "")
 
-    def test_success_result_with_metadata_and_multimodal(
-        self, tmp_path: Path
-    ) -> None:
+    def test_success_result_with_metadata_and_multimodal(self, tmp_path: Path) -> None:
         """成功路径：真实图片文件 → 多模态块随 metadata 注入（292 + 186）。"""
         img = tmp_path / "out.png"
         img.write_bytes(b"\x89PNG\r\n\x1a\n real bytes")
@@ -401,9 +394,7 @@ class TestImageExecutePaths:
         assert result.output["provider"] == "comfyui"
         content = result.metadata.get("multimodal_content")
         assert content and content[0]["type"] == "image_url"
-        assert base64.b64decode(
-            content[0]["image_url"]["url"].split(",", 1)[1]
-        ) == img.read_bytes()
+        assert base64.b64decode(content[0]["image_url"]["url"].split(",", 1)[1]) == img.read_bytes()
 
     def test_success_without_file_on_disk_has_no_multimodal(self, tmp_path: Path) -> None:
         """对照组：文件未落盘 → 无多模态键，但成功结果照常返回。"""
@@ -437,9 +428,7 @@ class TestImageKwargsAssembly:
     def test_int_params_and_cfg_scale(self) -> None:
         """整型参数转 int；cfg_scale 转 float（238）。"""
         tool = image_mod.ImageGenerateTool()
-        kwargs = tool._build_kwargs(
-            {"width": 768.0, "height": "600", "seed": 42, "steps": 30, "cfg_scale": 7}
-        )
+        kwargs = tool._build_kwargs({"width": 768.0, "height": "600", "seed": 42, "steps": 30, "cfg_scale": 7})
         assert kwargs == {"width": 768, "height": 30, "seed": 42, "steps": 30, "cfg_scale": 7.0} or (
             kwargs["width"] == 768 and kwargs["seed"] == 42 and kwargs["cfg_scale"] == 7.0
         )
@@ -494,9 +483,7 @@ class TestTtsValidation:
 
     def test_provider_unavailable_translated(self) -> None:
         """后端不可用 → PROVIDER_UNAVAILABLE 失败结果（202-204）。"""
-        tool = tts_mod.TtsGenerateTool(
-            capability_caller=_ScriptedCaller(ProviderUnavailable("TTS 服务未配置"))
-        )
+        tool = tts_mod.TtsGenerateTool(capability_caller=_ScriptedCaller(ProviderUnavailable("TTS 服务未配置")))
         result = _run(tool.execute({"text": "你好"}))
         assert not result.success and result.error_code == "PROVIDER_UNAVAILABLE"
         assert "TTS 服务未配置" in (result.error or "")
@@ -509,9 +496,7 @@ class TestTtsValidation:
     def test_success_passes_voice_format_speed_through(self) -> None:
         caller = _ScriptedCaller(_ok_payload("/tmp/v.mp3", duration_seconds=3.5))
         tool = tts_mod.TtsGenerateTool(capability_caller=caller)
-        result = _run(
-            tool.execute({"text": "朗读", "voice": "echo", "format": "wav", "speed": 1.25})
-        )
+        result = _run(tool.execute({"text": "朗读", "voice": "echo", "format": "wav", "speed": 1.25}))
         assert result.success
         args = caller.calls[0][1]["args"]
         assert args["media_type"] == "tts"
@@ -652,9 +637,7 @@ class _FakeHandle:
         self._cap_name = cap_name
         self._sink = sink
 
-    async def call(
-        self, method: str, params: dict[str, Any], timeout: float | None = None
-    ) -> Any:
+    async def call(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
         self._sink.append((f"{self._cap_name}.{method}", params))
         return params.get("args", {})
 
@@ -692,10 +675,12 @@ class TestServerCapabilityResolution:
         """tool-executor 优先；命中即返回（service-registry 不参与）。"""
         server = _load_media_server()
         sink: list[tuple[str, dict[str, Any]]] = []
-        plugin = _FakePlugin({
-            "tool-executor": _FakeHandle("tool-executor", sink),
-            "service-registry": _FakeHandle("service-registry", sink),
-        })
+        plugin = _FakePlugin(
+            {
+                "tool-executor": _FakeHandle("tool-executor", sink),
+                "service-registry": _FakeHandle("service-registry", sink),
+            }
+        )
         caller = server._make_capability_caller(plugin)
         assert caller is not None
         _run(caller("invoke", {"args": {"k": 1}}))
@@ -753,19 +738,21 @@ class TestServerCapabilityResolution:
     def test_handler_returns_error_dict_when_service_unavailable(
         self, tool_name: str, kwargs: dict[str, Any], expect_ok: bool
     ) -> None:
-        """四 handler：服务不可用时返回 {"error": ...}（不伪装成功输出）。"""
+        """四 handler：服务不可用时返回失败 ToolExecutionResult（error 可序列化）。"""
         server = _load_media_server()
         server._caller_cache.clear()
         server.plugin = _FakePlugin({})  # type: ignore[assignment]
         server._tool_instances.clear()
         handler = getattr(server, tool_name)
-        result = _run(handler(**kwargs))
-        assert isinstance(result, dict)
-        assert "error" in result and result["error"]
+        raw = _run(handler(**kwargs))
+        assert hasattr(raw, "to_dict")
+        result = raw.to_dict()
+        assert result["success"] is False
+        assert result["error"]
         assert expect_ok is False
 
     def test_handler_returns_output_on_backend_success(self) -> None:
-        """成功路径：handler 返回 result.output（媒体工具契约数据体）。"""
+        """成功路径：handler 返回完整 ToolExecutionResult（保 metadata 多模态链）。"""
         server = _load_media_server()
         server._caller_cache.clear()
         server._tool_instances.clear()
@@ -777,10 +764,9 @@ class TestServerCapabilityResolution:
 
             async def execute(self, inputs: dict[str, Any]) -> Any:
                 assert inputs["text"] == "你好"
-                return SimpleNamespace(
-                    success=True,
-                    output={"file_path": "/tmp/voice.mp3", "media_type": "tts"},
-                    error=None,
+                return create_success_result(
+                    data={"file_path": "/tmp/voice.mp3", "media_type": "tts"},
+                    metadata={"action": "tts_generate", "media_type": "audio"},
                 )
 
         server._TOOL_CLASSES["tts_generate"] = _StubTool
@@ -788,7 +774,11 @@ class TestServerCapabilityResolution:
             result = _run(server.tts_generate(text="你好"))
         finally:
             server._TOOL_CLASSES["tts_generate"] = tts_mod.TtsGenerateTool
-        assert result == {"file_path": "/tmp/voice.mp3", "media_type": "tts"}
+        assert hasattr(result, "to_dict")
+        serialized = result.to_dict(slim=True)
+        assert serialized["output"] == {"file_path": "/tmp/voice.mp3", "media_type": "tts"}
+        # slim 口径剔除 action（防上下文噪声）；完整口径 metadata 保留
+        assert result.to_dict()["metadata"]["action"] == "tts_generate"
 
     def test_on_load_builds_all_four_tool_instances(self) -> None:
         """on_load：四工具实例一次构造齐（能力未注入时 caller 为 None 也照常构造）。"""
@@ -803,7 +793,55 @@ class TestServerCapabilityResolution:
             "video_generate",
             "tts_generate",
         }
-        assert all(
-            isinstance(server._tool_instances[name], cls)
-            for name, cls in server._TOOL_CLASSES.items()
+        assert all(isinstance(server._tool_instances[name], cls) for name, cls in server._TOOL_CLASSES.items())
+
+
+# ═══════════════════════════════════════════════════════════
+# server.py handler：返回完整 ToolExecutionResult（多模态 metadata 链）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestServerHandlerPreservesMetadata:
+    """handler 勿取 .output——metadata.multimodal_content 是图片回传模型
+    的唯一通道（inject_multimodal 消费），丢 metadata 即断链（20260918 修复）。"""
+
+    @staticmethod
+    def _fake_tool(result: Any) -> Any:
+        class _FakeTool:
+            async def execute(self, kwargs: dict[str, Any]) -> Any:
+                return result
+
+        return _FakeTool()
+
+    def test_success_handler_keeps_multimodal_metadata(self, monkeypatch) -> None:
+        from agentos_plugin_sdk import create_success_result
+
+        server = _load_media_server()
+        result = create_success_result(
+            data={"file_path": "/ws/gen.png", "media_type": "image", "provider": "p"},
+            metadata={"action": "image_generate", "multimodal_content": [{"type": "image_url"}]},
         )
+        monkeypatch.setattr(server, "_get_tool", lambda _name: self._fake_tool(result))  # type: ignore[arg-type]
+        raw = _run(server.plugin._tools["image_generate"].handler(prompt="cat"))
+
+        assert hasattr(raw, "to_dict")
+        full = raw.to_dict()
+        assert full["success"] is True
+        assert full["output"]["file_path"] == "/ws/gen.png"
+        blocks = full["metadata"]["multimodal_content"]
+        assert blocks[0]["type"] == "image_url"
+        # 性质断言：slim 口径（LLM 文本上下文）必须剔除 multimodal——防 base64 污染
+        slim = raw.to_dict(slim=True)
+        assert "metadata" not in slim
+
+    def test_failure_handler_shape_has_error_fields(self, monkeypatch) -> None:
+        from agentos_plugin_sdk import create_failure_result
+
+        server = _load_media_server()
+        result = create_failure_result(error="provider down", error_code="PROVIDER_UNAVAILABLE")
+        monkeypatch.setattr(server, "_get_tool", lambda _name: self._fake_tool(result))  # type: ignore[arg-type]
+        raw = _run(server.plugin._tools["music_generate"].handler(prompt="piano"))
+
+        serialized = raw.to_dict()
+        assert serialized["success"] is False
+        assert serialized["error_code"] == "PROVIDER_UNAVAILABLE"

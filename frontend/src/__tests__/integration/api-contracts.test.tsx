@@ -35,6 +35,7 @@ import { initializeGrowthLoop } from '@/services/modules/GrowthLoop'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import type { Mock } from 'vitest'
+import { postUp } from '@/components/schema/widgets/__tests__/webviewTestBridge'
 // ── spyOn 工具：在每个用例前重置 ──
 let getSpy: Mock
 let postSpy: Mock
@@ -141,31 +142,12 @@ describe('C4 契约: WebviewWidget HTML 加载 → GET /ext/{pluginId}{path}', (
 // C5: WebviewWidget action 上行 → POST /api/v1/actions/execute body { action: method, args: params }
 // ============================================================================
 
+
 describe('C5 契约: WebviewWidget action 上行 → POST /api/v1/actions/execute', () => {
   beforeEach(() => {
     getSpy.mockResolvedValue({ data: '<html><body></body></html>' })
     postSpy.mockResolvedValue({ data: { ok: true } })
   })
-
-  /** 从 iframe srcdoc 提取宿主注入的实例令牌（B-4：每次挂载随机生成，不能硬编码）。 */
-  function getIframeToken(): string {
-    const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
-    const m = (iframe.getAttribute('srcdoc') ?? '').match(/TOKEN = "([^"]+)"/)
-    if (!m) throw new Error('iframe srcdoc 中未找到实例令牌 TOKEN')
-    return m[1]
-  }
-
-  /** 模拟 iframe 上行：发合法 postMessage（origin='null' + 魔数 + 实例令牌）。 */
-  function postUp(method: string, params?: unknown, id = 'wv_1'): void {
-    const data: Record<string, unknown> = {
-      __agentos_webview: true,
-      __wv_token: getIframeToken(),
-      id,
-      method,
-    }
-    if (params !== undefined) data.params = params
-    window.dispatchEvent(new MessageEvent('message', { origin: 'null', data }))
-  }
 
   it('action 方法 → POST /api/v1/actions/execute { action: method, args: params }', async () => {
     render(<WebviewWidget pluginId="demo" widgetId="w1" />)

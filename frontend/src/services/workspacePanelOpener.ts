@@ -18,6 +18,8 @@ export interface WorkspacePanelSpec {
   /** 传给 widgetRegistry 的 component 名 */
   component: string
   icon?: string
+  /** 归属的插件页面声明 id（detachable 弹出等页面级能力的解析键） */
+  pageId?: string
   moduleId?: string
   dataSource?: string
   /** 声明透传的静态 widget props */
@@ -56,6 +58,7 @@ export function openWorkspacePanel(spec: WorkspacePanelSpec): void {
       icon: spec.icon,
       moduleId: spec.moduleId || `__panel__${spec.id}`,
       component: spec.component,
+      pageId: spec.pageId,
       dataSource: spec.dataSource,
       props: spec.props,
       isActive: true,
@@ -81,6 +84,7 @@ function pluginPageSpec(page: PageDeclaration): WorkspacePanelSpec {
     title: page.title || page.id,
     component: page.widget || page.id,
     icon: page.icon,
+    pageId: page.id,
     dataSource: page.datasourceUri,
     props: page.props,
     moduleId: page.pluginId ? `__plugin_${page.pluginId}__` : `__contrib_${page.id}__`,

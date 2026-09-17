@@ -76,6 +76,27 @@ def _load_tool_registry() -> dict[str, list[str]]:
 
 
 TOOL_REGISTRY = _load_tool_registry()
+
+
+def _load_plugin_ids_with_tools() -> set[str]:
+    """声明了 ≥1 工具的插件 id 集合。
+
+    内核 tool-surface.schemas 契约（capability_router.rs）：tool_ids 条目等于
+    插件 id → 该插件全部工具入面（一行接入配法，与精确工具名并存）。
+    """
+    ids: set[str] = set()
+    for path in _pruned_files(SHARED_DIR):
+        if path.name != "plugin.json":
+            continue
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        if manifest.get("capabilities", {}).get("tools"):
+            plugin_id = manifest.get("id")
+            if plugin_id:
+                ids.add(plugin_id)
+    return ids
+
+
+PLUGIN_IDS_WITH_TOOLS = _load_plugin_ids_with_tools()
 AGENT_YAMLS = [p for p in _pruned_files(AGENTS_DIR) if p.suffix in (".yaml", ".yml")]
 
 
@@ -104,8 +125,15 @@ def test_agent_tool_ids_subset_of_registry(yaml_path: Path) -> None:
     assert isinstance(tool_ids, list), (
         f"tool_ids 应为列表，实为 {type(tool_ids).__name__}"
     )
-    missing = sorted(set(tool_ids) - set(TOOL_REGISTRY) - set(_KNOWN_NON_TOOL_IDS) - _USER_SPACE_TOOL_IDS)
+    missing = sorted(
+        set(tool_ids)
+        - set(TOOL_REGISTRY)
+        - set(_KNOWN_NON_TOOL_IDS)
+        - _USER_SPACE_TOOL_IDS
+        - PLUGIN_IDS_WITH_TOOLS
+    )
     assert not missing, (
         f"{yaml_path.relative_to(ROOT).as_posix()} 的 tool_ids 引用了注册表不存在的 id: "
-        f"{missing}（生产面 LLM 调用这些 id 必败；修复对应插件 manifest 或修订 tool_ids）"
+        f"{missing}（生产面 LLM 调用这些 id 必败；修复对应插件 manifest 或修订 tool_ids。"
+        f"注意：等于插件 id 的条目为整包注入配法，须对应插件声明 ≥1 工具）"
     )

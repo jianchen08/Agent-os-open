@@ -1,11 +1,15 @@
 # @feature: FP-0.2.二 模式体系测试补标 | @ci: python-coverage
 # -*- coding: utf-8 -*-
-"""五模式 webview 面板页供给测试：http.handle 路由 / manifest 声明 / HTML 自包含。
+"""模式 webview 面板页供给测试：http.handle 路由 / manifest 声明 / 页面契约。
 
 面板承载形态（模式体系落地设计 §2 末，2026-09-15 用户裁定）：工作区 tab 页 =
 插件自带 webview 页，经 http_endpoints（handler_capability=http.handle）按 path
 供给包内 webview/ 单文件 HTML。仓内先例 = monitoring payload_diag 页。
-同构种子按插件参数化逐份断言（与 test_mode_seeds 同一行为契约形态）。
+
+成熟化（ADR 2026-09-17-mode-panel-mature-interfaces，六包已全部迁移完成）：
+活面板态 = 内联脚本 + window.agentos 桥取数 + /data/* 数据端点 + 写动作
+（对标成熟软件界面；仍禁外链资源，CSP 同源约束）。骨架态（静态页 + 「数据源缺口」
+占位）已成历史，契约由 git 历史承载。
 """
 from __future__ import annotations
 
@@ -27,22 +31,26 @@ SEEDS = [
     ("mode_roleplay", "roleplay", "roleplay_studio"),
     ("mode_research", "research", "research_desk"),
     ("mode_godot", "godot", "godot_dev"),
+    ("mode_planning", "planning", "planning_desk"),
 ]
 
-# 各页信息架构锚点（设计稿 §3 对应小节的区块标题，HTML 内容断言用）
+LIVE_PANELS = {"roleplay", "writing", "coding", "research", "godot", "planning"}
+
+# 各页信息架构锚点（对标产品界面还原的区块标题，HTML 内容断言用）
 PANEL_MARKERS = {
     "coding": ("修复流水线", "diff 复盘", "worktree"),
     "writing": ("作品树", "章节编辑器", "设定集"),
     "roleplay": ("角色卡", "会话", "世界书"),
     "research": ("调研任务", "报告阅读器", "信源库"),
     "godot": ("godot 项目", "场景状态", "执行记录"),
+    "planning": ("项目状态", "方案讨论", "任务链"),
 }
 
 pytestmark = pytest.mark.unit
 
 
 def _load_server(plugin_id: str):
-    """按唯一模块名装载各插件 server.py（与 test_mode_seeds 同形态，防裸名互覆）。"""
+    """按唯一模块名装载各插件 server.py（防裸名互覆；每次调用全新 provider 态）。"""
     path = os.path.join(MODES_DIR, plugin_id, "server.py")
     spec = importlib.util.spec_from_file_location(f"mode_panel_{plugin_id}", path)
     assert spec is not None and spec.loader is not None
@@ -52,16 +60,30 @@ def _load_server(plugin_id: str):
     return module
 
 
-def _call(module, path: str, method: str = "GET") -> dict:
-    return asyncio.run(module.http_handle(path=path, method=method))
+def _call(module, path: str, method: str = "GET", raw_body: str = "", query: dict | None = None) -> dict:
+    return asyncio.run(
+        module.http_handle(path=path, method=method, raw_body=raw_body, query=query or {})
+    )
 
 
-def _body_json(result: dict) -> dict:
+def _body_bytes(result: dict) -> bytes:
     assert result["success"] is True
     data = result["data"]
     assert data["body_encoding"] == "base64"
-    return json.loads(base64.b64decode(data["body"]).decode("utf-8"))
+    return base64.b64decode(data["body"])
 
+
+def _body_json(result: dict) -> dict:
+    return json.loads(_body_bytes(result).decode("utf-8"))
+
+
+def _envelope_status(result: dict) -> int:
+    """边界状态断言走 envelope data.status（HttpHandleResponse 契约：HTTP 语义
+    落信封，body 只带 {"error": 消息}，同 test_unrouted_request_returns_404）。"""
+    return int(result["data"]["status"])
+
+
+# ── 通用契约（六包同构）──────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("plugin_id,mode,page_id", SEEDS)
 def test_panel_page_served_as_html(plugin_id: str, mode: str, page_id: str) -> None:
@@ -71,12 +93,10 @@ def test_panel_page_served_as_html(plugin_id: str, mode: str, page_id: str) -> N
     data = result["data"]
     assert data["status"] == 200
     assert data["headers"]["Content-Type"] == "text/html; charset=utf-8"
-    html = base64.b64decode(data["body"]).decode("utf-8")
+    html = _body_bytes(result).decode("utf-8")
     assert html.startswith("<!DOCTYPE html>")
     for marker in PANEL_MARKERS[mode]:
         assert marker in html, f"{plugin_id}: 缺信息架构区块 {marker}"
-    # 占位口径与被退役的 React 骨架同款：数据源缺口显式标注，不假实现
-    assert "数据源缺口" in html
 
 
 @pytest.mark.parametrize("plugin_id,mode,page_id", SEEDS)
@@ -116,26 +136,12 @@ def test_unrouted_request_returns_404(
 
 
 @pytest.mark.parametrize("plugin_id,mode,page_id", SEEDS)
-def test_panel_html_is_self_contained(plugin_id: str, mode: str, page_id: str) -> None:
-    """宿主 CSP（default-src 'none' + connect-src 'none'）约束面板页必须自包含：
-    禁外链资源、禁脚本拉取；深浅色经 CSS 变量 + prefers-color-scheme 承载。"""
-    path = os.path.join(MODES_DIR, plugin_id, "webview", f"{mode}_panel.html")
-    with open(path, encoding="utf-8") as fh:
-        html = fh.read()
-    lowered = html.lower()
-    for banned in ("<script", "src=", "href=", "http://", "https://", "fetch(", "url("):
-        assert banned not in lowered, f"{plugin_id}: 面板页含被 CSP 禁止的引用 {banned}"
-    assert "prefers-color-scheme" in lowered
-    assert "--bg" in lowered
-
-
-@pytest.mark.parametrize("plugin_id,mode,page_id", SEEDS)
 def test_manifest_declares_webview_page_and_endpoint(
     plugin_id: str, mode: str, page_id: str
 ) -> None:
     with open(os.path.join(MODES_DIR, plugin_id, "plugin.json"), encoding="utf-8") as fh:
         manifest = json.load(fh)
-    # 工作区 tab 条目改判 webview 形态：widget/props 契约对齐 WebviewWidget 容器
+    # 工作区 tab 条目判 webview 形态：widget/props 契约对齐 WebviewWidget 容器
     pages = {p["id"]: p for p in manifest["contributes"]["pages"]}
     page = pages[page_id]
     assert page["widget"] == "webview"
@@ -146,7 +152,6 @@ def test_manifest_declares_webview_page_and_endpoint(
         "htmlPath": f"/page/{mode}-panel",
         "widgetId": page_id,
     }
-    # 选项追加声明（select-option → task_mode 选择器；面板页携 mode 配对键）
     assert page["mode"] == mode
     ui_widgets = manifest.get("ui_schema", {}).get("widgets", [])
     if mode in ("coding", "writing", "roleplay", "research"):
@@ -165,3 +170,281 @@ def test_manifest_declares_webview_page_and_endpoint(
     assert endpoint["handler_capability"] == "http.handle"
     assert endpoint["timeout_ms"] == 5000
     assert endpoint["max_concurrency"] == 4
+
+
+# ── 活面板态契约（桥取数 + 数据端点 + 写动作；先例 = monitoring 数据端点形态）──────
+
+_LIVE_SEEDS = [s for s in SEEDS if s[1] in LIVE_PANELS]
+
+# 数据/动作端点契约：(path 后缀, method)
+LIVE_DATA_ENDPOINTS = {
+    "roleplay": [
+        ("/data/bootstrap", "GET"),
+        ("/data/sessions", "GET"),
+        ("/data/messages", "GET"),
+        ("/data/cards", "GET"),
+        ("/data/lorebooks", "GET"),
+        ("/data/actions/play", "POST"),
+        ("/data/actions/regenerate", "POST"),
+    ],
+    "writing": [
+        ("/data/bootstrap", "GET"),
+        ("/data/sessions", "GET"),
+        ("/data/messages", "GET"),
+        ("/data/works", "GET"),
+        ("/data/chapter", "GET"),
+        ("/data/bible", "GET"),
+        ("/data/actions/chapter_act", "POST"),
+    ],
+    "coding": [
+        ("/data/bootstrap", "GET"),
+        ("/data/sessions", "GET"),
+        ("/data/messages", "GET"),
+        ("/data/board", "GET"),
+        ("/data/reviews", "GET"),
+        ("/data/actions/dispatch_issue", "POST"),
+    ],
+    "research": [
+        ("/data/bootstrap", "GET"),
+        ("/data/sessions", "GET"),
+        ("/data/messages", "GET"),
+        ("/data/report", "GET"),
+        ("/data/sources", "GET"),
+        ("/data/actions/start", "POST"),
+        ("/data/actions/followup", "POST"),
+    ],
+    "godot": [
+        ("/data/bootstrap", "GET"),
+        ("/data/scene", "GET"),
+        ("/data/preview", "GET"),
+        ("/data/sessions", "GET"),
+        ("/data/messages", "GET"),
+        ("/data/records", "GET"),
+        ("/data/actions/dispatch", "POST"),
+        ("/data/actions/open_editor", "POST"),
+    ],
+    "planning": [
+        ("/data/bootstrap", "GET"),
+        ("/data/projects", "GET"),
+        ("/data/sessions", "GET"),
+        ("/data/tasks", "GET"),
+        ("/data/discussions", "GET"),
+        ("/data/actions/create_project", "POST"),
+        ("/data/actions/plan", "POST"),
+    ],
+}
+
+
+@pytest.mark.parametrize("plugin_id,mode,page_id", _LIVE_SEEDS)
+def test_live_panel_html_bridge_contract(plugin_id: str, mode: str, page_id: str) -> None:
+    """活面板页：内联脚本 + window.agentos 桥；仍禁外链资源（宿主 CSP 同源约束）。"""
+    path = os.path.join(MODES_DIR, plugin_id, "webview", f"{mode}_panel.html")
+    with open(path, encoding="utf-8") as fh:
+        html = fh.read()
+    lowered = html.lower()
+    assert "window.agentos" in lowered and "__agentos_webview" in lowered
+    assert "agentosfetch" in lowered  # 桥调用封装（宿主代发 REST 带 token）
+    for banned in ("src=", "href=", "http://", "https://", "url(", "import(", "websocket"):
+        assert banned not in lowered, f"{plugin_id}: 面板页含被 CSP 禁止的引用 {banned}"
+    assert "prefers-color-scheme" in lowered
+    assert "--bg" in lowered
+
+
+@pytest.mark.parametrize("plugin_id,mode,page_id", _LIVE_SEEDS)
+def test_live_manifest_declares_data_and_action_endpoints(
+    plugin_id: str, mode: str, page_id: str
+) -> None:
+    with open(os.path.join(MODES_DIR, plugin_id, "plugin.json"), encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    endpoints = {e["path"]: e for e in manifest["http_endpoints"]}
+    expected = LIVE_DATA_ENDPOINTS[mode]
+    for suffix, method in expected:
+        endpoint = endpoints[f"/ext/{plugin_id}{suffix}"]
+        assert endpoint["method"] == method
+        assert endpoint["auth"] == "user"
+        assert endpoint["handler_capability"] == "http.handle"
+        # 超时分档：GET 数据端点 5s；POST 写动作 20s——task_submit 经 tool-executor
+        # 全链（解析/建工作空间）同步耗时超 5s 窗，动作端点 504 但任务已落库（假失败）。
+        expected_timeout = 20000 if method == "POST" else 5000
+        assert endpoint["timeout_ms"] == expected_timeout
+        assert endpoint["max_concurrency"] == 4
+    # detachable 悬浮窗契约（ADR 决策 4）：popout/childWindow 开 + 默认尺寸
+    page = next(p for p in manifest["contributes"]["pages"] if p["id"] == page_id)
+    detachable = page["detachable"]
+    assert detachable["popout"] is True and detachable["childWindow"] is True
+    assert set(detachable["defaultSize"]) == {"w", "h"}
+
+
+# ── 活面板行为测试（fake provider 注入；不真派发任务）────────────────────────────
+
+_ROLEPLAY_EP = "/ext/mode_roleplay/data"
+
+
+def _fake_state_rows() -> list[dict]:
+    return [
+        {  # 本模式行：完整归一字段
+            "pipeline_id": "pipe-aaa", "thread_id": "th-1", "agent_id": "mode_roleplay/card_luna",
+            "run_status": "running", "mode": "roleplay", "task.goal": "与月语精灵夜谈",
+            "task.status": "running", "message_count": 4,
+        },
+        {  # 他模式行：必须被过滤
+            "pipeline_id": "pipe-bbb", "thread_id": "th-2", "agent_id": "main",
+            "run_status": "completed", "mode": "coding", "task.goal": "修 bug",
+            "message_count": 9,
+        },
+    ]
+
+
+def _fake_messages() -> list[dict]:
+    return [
+        {"role": "user", "content_preview": "你好呀", "status": "success", "created_at": "t1"},
+        {"role": "assistant", "content_preview": "*提灯照亮门廊*" * 3, "status": "success", "created_at": "t2"},
+    ]
+
+
+def test_live_roleplay_data_assets_served() -> None:
+    module = _load_server("mode_roleplay")
+    cards = _body_json(_call(module, f"{_ROLEPLAY_EP}/cards"))["cards"]
+    assert len(cards) >= 3
+    for card in cards:
+        assert card["id"].startswith("card_")
+        assert card["name"] and isinstance(card["first_mes"], str)
+        assert isinstance(card["tags"], list) and isinstance(card["alternate_greetings"], list)
+    # 出厂卡含缺 alternate_greetings 的形态（健壮渲染契约）
+    assert any(not c["alternate_greetings"] for c in cards)
+
+    books = _body_json(_call(module, f"{_ROLEPLAY_EP}/lorebooks"))["lorebooks"]
+    assert len(books) >= 1
+    entry = books[0]["entries"][0]
+    assert entry["keys"] and entry["content"]
+    assert isinstance(entry["enabled"], bool) and "insertion_order" in entry
+
+    bootstrap = _body_json(_call(module, f"{_ROLEPLAY_EP}/bootstrap"))
+    assert bootstrap["mode"] == "roleplay" and bootstrap["panel_page_id"] == "roleplay_studio"
+
+
+def test_live_roleplay_sessions_degrade_to_empty_without_kernel() -> None:
+    """provider 未注入（单测/内核握手前）→ 200 空载荷（前端契约不破坏）。"""
+    module = _load_server("mode_roleplay")
+    body = _body_json(_call(module, f"{_ROLEPLAY_EP}/sessions"))
+    assert body == {"sessions": []}
+
+
+def test_live_roleplay_sessions_filter_and_normalize() -> None:
+    module = _load_server("mode_roleplay")
+    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=_fake_state_rows()))
+    sessions = _body_json(_call(module, f"{_ROLEPLAY_EP}/sessions"))["sessions"]
+    assert len(sessions) == 1
+    row = sessions[0]
+    assert row["pipeline_id"] == "pipe-aaa"
+    assert row["goal"] == "与月语精灵夜谈" and row["task_status"] == "running"
+    assert row["agent_id"] == "mode_roleplay/card_luna" and row["message_count"] == 4
+
+
+def test_live_roleplay_messages_query_contract() -> None:
+    module = _load_server("mode_roleplay")
+    # 缺 pipeline_id → 400
+    assert _envelope_status(_call(module, f"{_ROLEPLAY_EP}/messages")) == 400
+    # 错误 method → 404
+    assert _envelope_status(_call(module, f"{_ROLEPLAY_EP}/messages", method="POST")) == 404
+    # 正常查询：归一 + provider 传参
+    captured: dict = {}
+
+    async def _provider(pipeline_id: str, limit: int | None = None) -> list[dict]:
+        captured["pipeline_id"] = pipeline_id
+        return _fake_messages()
+
+    module._set_provider("messages", _provider)
+    body = _body_json(
+        _call(module, f"{_ROLEPLAY_EP}/messages", query={"pipeline_id": "pipe-aaa"})
+    )
+    assert captured["pipeline_id"] == "pipe-aaa"
+    assert body["messages"][0] == {
+        "role": "user", "content": "你好呀", "status": "success", "created_at": "t1",
+    }
+    assert body["messages"][1]["role"] == "assistant"
+
+
+def test_live_roleplay_play_action_dispatches_task_submit() -> None:
+    module = _load_server("mode_roleplay")
+    captured: dict = {}
+
+    async def _fake_invoke(payload: dict) -> dict:
+        captured.update(payload)
+        return {"data": {"task_id": "task-123"}}
+
+    module._set_provider("tool-executor", _fake_invoke)
+    body = _body_json(
+        _call(
+            module, f"{_ROLEPLAY_EP}/actions/play", method="POST",
+            raw_body=json.dumps(
+                {"card_id": "card_luna", "user_persona": "北地佣兵", "greeting_index": 1}
+            ),
+        )
+    )
+    assert body == {"task_id": "task-123"}
+    assert captured["tool_name"] == "task_submit" and captured["plugin_id"] == "task_submit_tool"
+    args = captured["args"]
+    # 卡 = 模式命名空间 agent 键（§8.1）；mode 键随行进管道
+    assert args["target_type"] == "agent" and args["target_id"] == "mode_roleplay/card_luna"
+    assert args["mode"] == "roleplay" and args["task_kind"] == "roleplay_opening"
+    assert "塞拉菲娜·月语" in args["goal_title"]
+    assert "北地佣兵" in args["goal_description"]
+    assert args["metadata"] == {"card_id": "card_luna", "greeting_index": 1}
+
+
+def test_live_roleplay_play_action_error_paths() -> None:
+    module = _load_server("mode_roleplay")
+    # 缺 card_id → 400
+    assert _envelope_status(_call(module, f"{_ROLEPLAY_EP}/actions/play", method="POST")) == 400
+    # 未知卡 → 400 + 显式错误
+    result = _call(
+        module, f"{_ROLEPLAY_EP}/actions/play", method="POST",
+        raw_body=json.dumps({"card_id": "card_nope"}),
+    )
+    assert _envelope_status(result) == 400
+    assert "未知角色卡" in _body_json(result)["error"]
+    # GET 打写动作端点 → 404
+    assert _envelope_status(_call(module, f"{_ROLEPLAY_EP}/actions/play")) == 404
+
+
+def test_live_roleplay_regenerate_action_composes_from_history() -> None:
+    module = _load_server("mode_roleplay")
+    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=_fake_state_rows()))
+
+    async def _messages_provider(pipeline_id: str, limit: int | None = None) -> list[dict]:
+        assert pipeline_id == "pipe-aaa"
+        return _fake_messages()
+
+    module._set_provider("messages", _messages_provider)
+    captured: dict = {}
+
+    async def _fake_invoke(payload: dict) -> dict:
+        captured.update(payload)
+        return {"data": {"task_id": "task-456"}}
+
+    module._set_provider("tool-executor", _fake_invoke)
+    body = _body_json(
+        _call(module, f"{_ROLEPLAY_EP}/actions/regenerate", method="POST",
+              raw_body=json.dumps({"pipeline_id": "pipe-aaa"}))
+    )
+    assert body == {"task_id": "task-456"}
+    args = captured["args"]
+    assert args["target_id"] == "mode_roleplay/card_luna"  # 继承会话绑定的卡 agent 键
+    assert args["mode"] == "roleplay" and args["task_kind"] == "roleplay_regenerate"
+    assert "上一条角色回复" in args["goal_description"]
+    assert "pipe-aaa" in args["goal_description"]
+
+
+def test_live_roleplay_regenerate_error_paths() -> None:
+    module = _load_server("mode_roleplay")
+    # 缺 pipeline_id → 400
+    assert _envelope_status(_call(module, f"{_ROLEPLAY_EP}/actions/regenerate", method="POST")) == 400
+    # 会话不在本模式 → 400
+    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=_fake_state_rows()))
+    result = _call(
+        module, f"{_ROLEPLAY_EP}/actions/regenerate", method="POST",
+        raw_body=json.dumps({"pipeline_id": "pipe-bbb"}),
+    )
+    assert _envelope_status(result) == 400
+    assert "不存在" in _body_json(result)["error"]

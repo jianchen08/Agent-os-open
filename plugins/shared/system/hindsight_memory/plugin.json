@@ -494,21 +494,12 @@
     "pages": [
       {
         "id": "memory",
-        "title": "记忆管理",
+        "title": "记忆",
         "icon": "🧠",
         "space": "workspace",
         "slot": "tab",
         "widget": "memory_panel",
-        "description": "记忆域管理（hindsight_memory 预置域 widget 承载，/p/memory 全页可达）"
-      },
-      {
-        "id": "knowledge_base",
-        "title": "知识库",
-        "icon": "📚",
-        "space": "workspace",
-        "slot": "tab",
-        "widget": "knowledge_base_panel",
-        "description": "知识库管理（hindsight_memory 预置域 widget 承载，/p/knowledge_base 全页可达）"
+        "description": "记忆单页（对话记忆 + 文档库两分区，/p/memory 全页可达）"
       }
     ]
   },

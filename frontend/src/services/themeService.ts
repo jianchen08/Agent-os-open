@@ -910,7 +910,7 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
  * @param color - 颜色值字符串
  * @returns RGB 对象（不含 alpha），无法解析时返回 null
  */
-function colorToRgb(color: string): { r: number; g: number; b: number } | null {
+export function colorToRgb(color: string): { r: number; g: number; b: number } | null {
   if (!color || typeof color !== 'string') return null
   if (color.startsWith('#')) return hexToRgb(color)
 

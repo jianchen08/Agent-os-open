@@ -14,6 +14,7 @@
 - on_load 时把 capability_caller 传入四工具构造（未注入时工具返回显式
   PROVIDER_UNAVAILABLE，不静默空转）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -51,9 +52,7 @@ def _make_capability_caller(plugin_instance: Any) -> Any | None:
         except KeyError:
             continue
         return bind_capability_caller(handle, cap_name)
-    logger.warning(
-        "[media/server] 未注入 tool-executor/service-registry 能力，capability_caller 不可用"
-    )
+    logger.warning("[media/server] 未注入 tool-executor/service-registry 能力，capability_caller 不可用")
     return None
 
 
@@ -106,39 +105,85 @@ def _get_tool(name: str) -> Any:
 
 @plugin.tool(
     name="image_generate",
-    schema={"type": "object", "properties": {"prompt": {"type": "string"}, "size": {"type": "string"}, "n": {"type": "integer", "default": 1}}, "required": ["prompt"]},
+    schema={
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string"},
+            "size": {"type": "string"},
+            "n": {"type": "integer", "default": 1},
+        },
+        "required": ["prompt"],
+    },
     description="图片生成",
 )
 async def image_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await _get_tool("image_generate").execute(kwargs)
-    return result.output if result.success else {"error": result.error}
+    # 返回完整 ToolExecutionResult（SDK to_dict 整包序列化 metadata）：
+    # image 的 multimodal_content 在 metadata 里，取 .output 会断多模态注入链
+    return result
+
 
 @plugin.tool(
     name="music_generate",
-    schema={"type": "object", "properties": {"prompt": {"type": "string"}, "duration": {"type": "integer", "default": 30}}, "required": ["prompt"]},
+    schema={
+        "type": "object",
+        "properties": {"prompt": {"type": "string"}, "duration": {"type": "integer", "default": 30}},
+        "required": ["prompt"],
+    },
     description="音乐生成",
 )
 async def music_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await _get_tool("music_generate").execute(kwargs)
-    return result.output if result.success else {"error": result.error}
+    return result
+
 
 @plugin.tool(
     name="video_generate",
-    schema={"type": "object", "properties": {"prompt": {"type": "string", "description": "视频内容描述，用于指导视频生成（必填）"}, "duration": {"type": "number", "description": "视频时长（秒），默认由 Provider 决定"}, "fps": {"type": "integer", "description": "帧率（fps），默认由 Provider 决定"}, "resolution": {"type": "string", "description": "视频分辨率（如 '1920x1080'），默认由 Provider 决定"}, "style": {"type": "string", "description": "视频风格（如 'realistic', 'anime', 'cartoon'），默认由 Provider 决定"}, "provider": {"type": "string", "description": "指定使用的视频生成 Provider（不填则自动选择）"}}, "required": ["prompt"]},
+    schema={
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "description": "视频内容描述，用于指导视频生成（必填）"},
+            "duration": {"type": "number", "description": "视频时长（秒），默认由 Provider 决定"},
+            "fps": {"type": "integer", "description": "帧率（fps），默认由 Provider 决定"},
+            "resolution": {"type": "string", "description": "视频分辨率（如 '1920x1080'），默认由 Provider 决定"},
+            "style": {
+                "type": "string",
+                "description": "视频风格（如 'realistic', 'anime', 'cartoon'），默认由 Provider 决定",
+            },
+            "provider": {"type": "string", "description": "指定使用的视频生成 Provider（不填则自动选择）"},
+        },
+        "required": ["prompt"],
+    },
     description="视频生成",
 )
 async def video_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await _get_tool("video_generate").execute(kwargs)
-    return result.output if result.success else {"error": result.error}
+    return result
+
 
 @plugin.tool(
     name="tts_generate",
-    schema={"type": "object", "properties": {"text": {"type": "string", "description": "要合成的文本内容"}, "voice": {"type": "string", "description": "语音名称（如 alloy, echo, fable 等）", "default": "alloy"}, "format": {"type": "string", "description": "输出音频格式（mp3, wav, ogg）", "default": "mp3", "enum": ["mp3", "wav", "ogg"]}, "speed": {"type": "number", "description": "语速倍率（0.5 ~ 2.0）", "default": 1.0}}, "required": ["text"]},
+    schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "要合成的文本内容"},
+            "voice": {"type": "string", "description": "语音名称（如 alloy, echo, fable 等）", "default": "alloy"},
+            "format": {
+                "type": "string",
+                "description": "输出音频格式（mp3, wav, ogg）",
+                "default": "mp3",
+                "enum": ["mp3", "wav", "ogg"],
+            },
+            "speed": {"type": "number", "description": "语速倍率（0.5 ~ 2.0）", "default": 1.0},
+        },
+        "required": ["text"],
+    },
     description="文本转语音",
 )
 async def tts_generate(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await _get_tool("tts_generate").execute(kwargs)
-    return result.output if result.success else {"error": result.error}
+    return result
+
 
 if __name__ == "__main__":
     plugin.run()

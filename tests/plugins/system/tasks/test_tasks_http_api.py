@@ -796,6 +796,9 @@ def registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     """
     import project_registry as projects_mod
 
+    # 登记白名单缺省成员（工作空间根）一并隔离到 tmp：显式路径建在 tmp 下
+    # 即在缺省成员范围内（ADR 2026-09-17 登记白名单闸）
+    monkeypatch.setattr(projects_mod, "workspace_base_dir", lambda: tmp_path)
     reg = projects_mod.ProjectRegistry(data_dir=tmp_path / "tasks")
     monkeypatch.setattr(
         projects_mod,

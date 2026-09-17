@@ -40,6 +40,8 @@ export function LoginModal({ open, onClose }: LoginModalProps) {
       handleClose()
     }
     wasAuthenticatedRef.current = isAuthenticated
+    // HACK: handleClose 是组件内闭包（非稳定引用），列入依赖会每次渲染
+    // 重建 effect；本 effect 只关心登录态边沿，闭包读最新 state 即可。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, open])
 
@@ -47,6 +49,8 @@ export function LoginModal({ open, onClose }: LoginModalProps) {
     if (open) {
       clearError()
     }
+    // HACK: 只在弹窗开合边沿清一次 store 错误；clearError 为 zustand 稳定
+    // action（store 创建期绑定），无需入依赖（入列亦无碍，从简）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 

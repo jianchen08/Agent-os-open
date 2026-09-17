@@ -35,6 +35,39 @@ export const APP_BASE_URL = `${APP_SCHEME}://${APP_HOST}`;
 /** 内核回源地址（内核默认端口 9100，与 dev 侧 vite proxy 默认目标一致） */
 const KERNEL_ORIGIN = "http://127.0.0.1:9100";
 
+/**
+ * app:// 源的内容安全策略（与 web 部署链 nginx.conf / vite dev 同口径）。
+ *
+ * 差异点仅 connect-src：内核 API 走 app://bundle 同源代理，但 WebSocket
+ * 无法经协议层代理，打包件由渲染进程直连内核（websocket.ts app: 分支）
+ * ——须显式放行内核源 http/ws://127.0.0.1:9100。'unsafe-eval' 为 ajv8
+ * (RJSF v6) new Function 编译校验器所需，web 链同款。
+ */
+const APP_CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "connect-src 'self' http://127.0.0.1:9100 ws://127.0.0.1:9100",
+  "font-src 'self' data:",
+  "frame-src 'self' blob: data:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'self'",
+].join("; ");
+
+/**
+ * 静态响应补安全头：protocol.handle 的 net.fetch(file:) 响应不携带任何
+ * CSP，渲染进程一旦出现 XSS 注入点即无策略层约束（审查 F5）。仅作用于
+ * 静态伺服面（HTML 文档所在）；内核代理面为 API/JSON 消费，不加文档头。
+ */
+function withStaticSecurityHeaders(resp: Response): Response {
+  const headers = new Headers(resp.headers);
+  headers.set("Content-Security-Policy", APP_CSP);
+  headers.set("X-Content-Type-Options", "nosniff");
+  return new Response(resp.body, { status: resp.status, headers });
+}
+
 /** 经主进程代理到内核的路径前缀（= vite.config.ts server.proxy 去掉 /ws） */
 const KERNEL_PROXY_PREFIXES = ["/api", "/ext", "/media", "/uploads"];
 
@@ -115,11 +148,15 @@ async function serveStatic(distRoot: string, url: URL): Promise<Response> {
   if (url.pathname !== "/") {
     const file = safeJoinDist(distRoot, url.pathname);
     if (file && fs.existsSync(file) && fs.statSync(file).isFile()) {
-      return net.fetch(pathToFileURL(file).toString());
+      return withStaticSecurityHeaders(
+        await net.fetch(pathToFileURL(file).toString()),
+      );
     }
   }
   // SPA 深链（createBrowserRouter pathname 匹配）：/p/<pageId>、/login 等回落入口
-  return net.fetch(pathToFileURL(path.join(distRoot, "index.html")).toString());
+  return withStaticSecurityHeaders(
+    await net.fetch(pathToFileURL(path.join(distRoot, "index.html")).toString()),
+  );
 }
 
 /** 主进程侧回源内核：同源化代理（渲染进程侧无 CORS/预检问题） */

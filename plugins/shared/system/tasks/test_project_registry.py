@@ -227,3 +227,52 @@ class TestRemoveProjectFolder:
         """保护路径（工作空间基目录）与不存在路径都返回 False，不抛错。"""
         assert remove_project_folder(str(reg_env["ws_base"])) is False
         assert remove_project_folder(str(reg_env["ws_base"] / "nope")) is False
+
+
+class TestPathNormalizationGuards:
+    """路径归一/守卫分支（覆盖率收口批 2026-09-17）。"""
+
+    def test_norm_path_lowercases_on_nt_and_absolutifies(self, tmp_path: Path) -> None:
+        from project_registry import _norm_path
+
+        raw = str(tmp_path / "MiXeD_Case")
+        norm = _norm_path(raw)
+        assert os.path.isabs(norm)
+        if os.name == "nt":
+            assert norm == norm.lower()
+            assert "mixed_case" in norm
+        else:
+            # 非 nt 平台保持原大小写（行为按 os.name 分叉，双向都验证）
+            assert "MiXeD_Case" in norm
+
+    def test_canonical_path_bottoms_out_at_missing_root(self) -> None:
+        """目标连同全部祖先都不存在（含盘符根）→ 走 root-anchors 终止分支不死循环。"""
+        from project_registry import _canonical_path
+
+        free_root = next(
+            (f"{L}:\\" for L in "CDEFGHIJKLMNOPQRSTUVWXYZ"
+             if not Path(f"{L}:\\").exists()),
+            None,
+        )
+        if free_root is None:
+            import pytest
+
+            pytest.skip("26 个盘符全部存在（异常宿主）")
+        deep = free_root + "never_created_a/never_created_b"
+        canon = _canonical_path(deep)
+        assert canon == canon.lower() if os.name == "nt" else True
+        assert "never_created_a" in canon
+
+    def test_overlap_check_skips_registry_entries_without_path(
+        self, reg_env: dict[str, Any]
+    ) -> None:
+        """已登记项缺 path（脏数据）→ 跳过不误判重叠。"""
+        from types import SimpleNamespace
+
+        from project_registry import _assert_no_project_overlap
+
+        registry = SimpleNamespace(
+            list=lambda: [SimpleNamespace(id="dirty", path=""), SimpleNamespace(id="ok", path="")]
+        )
+        # 不抛即通过（空 path 条目被 continue 跳过）
+        _assert_no_project_overlap(str(reg_env["ws_base"] / "any_project"), registry)

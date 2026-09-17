@@ -560,6 +560,33 @@ export function CodeEditor({
     [editable, initialContent],
   )
 
+  // 只读高亮块：大文件/只读预览/编辑三分支共用同一渲染契约（提取防克隆漂移）
+  const codeHighlighter = (
+    <SyntaxHighlighter
+      language={language}
+      style={codeHighlightStyle}
+      showLineNumbers={true}
+      wrapLongLines={true}
+      lineProps={HIGHLIGHTER_LINE_PROPS}
+      customStyle={{
+        margin: 0,
+        borderRadius: 0,
+        fontSize: '0.8125rem',
+        background: 'var(--code-bg, #1e1e1e)',
+        color: 'var(--code-text)',
+        minHeight: '100%',
+      }}
+      codeTagProps={{
+        style: {
+          fontFamily:
+            'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+        },
+      }}
+    >
+      {localContent}
+    </SyntaxHighlighter>
+  )
+
   // 大文件提示
   if (isLargeFile && editable) {
     return (
@@ -600,29 +627,7 @@ export function CodeEditor({
           onMouseUp={handlePreviewMouseUp}
           onClick={handlePreviewClick}
         >
-          <SyntaxHighlighter
-            language={language}
-            style={codeHighlightStyle}
-            showLineNumbers={true}
-            wrapLongLines={true}
-            lineProps={HIGHLIGHTER_LINE_PROPS}
-            customStyle={{
-              margin: 0,
-              borderRadius: 0,
-              fontSize: '0.8125rem',
-              background: 'var(--code-bg, #1e1e1e)',
-              color: 'var(--code-text)',
-              minHeight: '100%',
-            }}
-            codeTagProps={{
-              style: {
-                fontFamily:
-                  'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-              },
-            }}
-          >
-            {localContent}
-          </SyntaxHighlighter>
+          {codeHighlighter}
           {floatingQuote.visible && (
             <FloatingQuoteButton
               position={floatingQuote.position}
@@ -750,29 +755,7 @@ export function CodeEditor({
             onMouseUp={handlePreviewMouseUp}
             onClick={handlePreviewClick}
           >
-            <SyntaxHighlighter
-              language={language}
-              style={codeHighlightStyle}
-              showLineNumbers={true}
-              wrapLongLines={true}
-              lineProps={HIGHLIGHTER_LINE_PROPS}
-              customStyle={{
-                margin: 0,
-                borderRadius: 0,
-                fontSize: '0.8125rem',
-                background: 'var(--code-bg, #1e1e1e)',
-                color: 'var(--code-text)',
-                minHeight: '100%',
-              }}
-              codeTagProps={{
-                style: {
-                  fontFamily:
-                    'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-                },
-              }}
-            >
-              {localContent}
-            </SyntaxHighlighter>
+            {codeHighlighter}
             {floatingQuote.visible && (
               <FloatingQuoteButton
                 position={floatingQuote.position}

@@ -940,10 +940,13 @@ async fn wait_until_killed(client: &tokio::sync::RwLock<McpClient>, why: &str) {
 /// connect 只 spawn 不做 MCP 握手，任意可执行命令都能当假进程；
 /// 选 ping/sleep 是为了它稳定存活 ≥60s（测试窗口内不会自然退出）。
 async fn spawn_long_lived_stdio_client() -> McpClient {
+    // 直接单进程（不经 cmd/sh 包一层）：kill 是单进程直杀，无孙进程树遍历。
+    // 套件并行时（cargo test 全 crate 多线程 spawn/kill 风暴）树杀延迟会溢出
+    // kill_sidecar_if_any 的 2s 超时窗口，使"进程必须被 kill"族断言随机红。
     #[cfg(windows)]
-    let (cmd, args): (&str, Vec<&str>) = ("cmd", vec!["/c", "ping", "-n", "60", "127.0.0.1"]);
+    let (cmd, args): (&str, Vec<&str>) = ("ping", vec!["-n", "60", "127.0.0.1"]);
     #[cfg(unix)]
-    let (cmd, args): (&str, Vec<&str>) = ("/bin/sh", vec!["-c", "sleep 60"]);
+    let (cmd, args): (&str, Vec<&str>) = ("sleep", vec!["60"]);
     let mut client = McpClient::new_stdio(cmd, args.iter().map(|s| s.to_string()).collect());
     client
         .connect()
@@ -984,10 +987,7 @@ async fn test_shutdown_all_drains_and_kills_cached_sidecars() {
         invoker.mcp_clients.read().is_empty(),
         "shutdown_all 后缓存必须清空（全量 drain）"
     );
-    assert!(
-        !live_arc.read().await.is_alive().await,
-        "stdio sidecar 进程必须被 kill（不得留孤儿）"
-    );
+    wait_until_killed(&live_arc, "stdio sidecar 进程必须被 kill（不得留孤儿）").await;
 }
 
 #[tokio::test]
@@ -1028,10 +1028,7 @@ async fn test_kill_sidecar_if_any_kills_cached_and_noop_when_absent() {
         invoker.mcp_clients.read().get("plugin:victim").is_none(),
         "目标插件缓存必须移除"
     );
-    assert!(
-        !live_arc.read().await.is_alive().await,
-        "目标插件 sidecar 进程必须被 kill"
-    );
+    wait_until_killed(&live_arc, "目标插件 sidecar 进程必须被 kill").await;
 
     // 幂等：再次调用同一 id（已无缓存）仍 no-op 不抛
     invoker.kill_sidecar_if_any("victim").await;
@@ -1139,10 +1136,7 @@ async fn force_unload_completes_bounded_while_read_lock_held() {
         .kill()
         .await
         .expect("残留进程显式回收");
-    assert!(
-        !live_arc.read().await.is_alive().await,
-        "显式回收后进程必须终止"
-    );
+    wait_until_killed(&live_arc, "显式回收后进程必须终止").await;
 }
 
 #[tokio::test]
@@ -1352,10 +1346,7 @@ async fn idle_gc_pass_completes_bounded_while_read_lock_held() {
         .kill()
         .await
         .expect("残留进程显式回收");
-    assert!(
-        !live_arc.read().await.is_alive().await,
-        "显式回收后进程必须终止"
-    );
+    wait_until_killed(&live_arc, "显式回收后进程必须终止").await;
 }
 
 #[tokio::test]
@@ -3477,10 +3468,7 @@ async fn test_member_set_change_triggers_full_host_respawn() {
         "respawn 路径证据：{err}"
     );
     // 旧宿主进程被 kill + 缓存逐出
-    assert!(
-        !live_arc.read().await.is_alive().await,
-        "整宿主 respawn 必须 kill 旧进程"
-    );
+    wait_until_killed(&live_arc, "整宿主 respawn 必须 kill 旧进程").await;
     assert!(invoker.mcp_clients.read().get(&host_key).is_none());
 }
 
@@ -3540,10 +3528,7 @@ async fn test_lazy_member_boxed_into_live_host_triggers_respawn() {
         "respawn 路径证据：{err}"
     );
     // 旧宿主进程被 kill + 缓存逐出
-    assert!(
-        !live_arc.read().await.is_alive().await,
-        "整宿主 respawn 必须 kill 旧进程"
-    );
+    wait_until_killed(&live_arc, "整宿主 respawn 必须 kill 旧进程").await;
     assert!(invoker.mcp_clients.read().get(&host_key).is_none());
 }
 
@@ -3774,10 +3759,7 @@ async fn test_kill_sidecar_if_any_light_kills_whole_host() {
 
     invoker.kill_sidecar_if_any("guard_a").await;
 
-    assert!(
-        !live_arc.read().await.is_alive().await,
-        "disable 成员必须 kill 整宿主进程"
-    );
+    wait_until_killed(&live_arc, "disable 成员必须 kill 整宿主进程").await;
     assert!(invoker.mcp_clients.read().get(&host_key).is_none());
     // 分配表保留（窄口语义：不做指纹/分配清理，reenable 后 respawn 回原宿主）
     assert_eq!(
@@ -3844,7 +3826,7 @@ async fn test_unload_if_idle_light_reclaims_assignments() {
         .unload_host(&host_key, true)
         .await
         .expect("sidecar 插件 idle 卸载应成功");
-    assert!(!live_arc.read().await.is_alive().await);
+    wait_until_killed(&live_arc, "idle unload must kill host process").await;
     assert!(
         invoker.light_packing.read().assignments.is_empty(),
         "idle 语境回收即清空分配表（槽位释放）"
@@ -4065,10 +4047,7 @@ async fn test_idle_gc_exempts_keep_warm_host_group() {
         live_warm.read().await.is_alive().await,
         "预热常驻宿主组不得被 idle GC 回收"
     );
-    assert!(
-        !live_lazy.read().await.is_alive().await,
-        "非预热宿主组照常整组回收"
-    );
+    wait_until_killed(&live_lazy, "非预热宿主组照常整组回收").await;
     assert!(
         invoker.mcp_clients.read().contains_key(&warm_host),
         "预热宿主缓存保留（下次调用零冷启动）"

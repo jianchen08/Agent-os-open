@@ -146,7 +146,17 @@ class PipelineEvaluationExecutor:
 
     @staticmethod
     def _evaluate_tool_local(metric_id: str, params: dict[str, Any]) -> MetricResult:
-        """file_check 族：exists/not_empty/contains/is_directory（0.1 语义）。"""
+        """tool 型本地执行：file_check 族（exists/not_empty/contains/is_directory，
+        0.1 语义）+ bash_check（command 在 workspace cwd 真执行，退出码 0=通过）。
+        bash_check 此前无实现，凡真到执行器一律"path 参数缺失"秒败（SWE 种子
+        实跑实证，2026-09-17）。"""
+        command = str(params.get("command") or "")
+        if metric_id == "bash_check" or "command" in params:
+            if not command:
+                return MetricResult(
+                    metric_id=metric_id, passed=False, error="command 参数缺失",
+                )
+            return PipelineEvaluationExecutor._run_bash_check(metric_id, command, params)
         raw_path = str(params.get("path") or "")
         if not raw_path:
             return MetricResult(metric_id=metric_id, passed=False, error="path 参数缺失")
@@ -178,6 +188,43 @@ class PipelineEvaluationExecutor:
             return MetricResult(metric_id=metric_id, passed=False, error=f"未知检查类型: {check}")
 
         return MetricResult(metric_id=metric_id, passed=ok, message=msg)
+
+    @staticmethod
+    def _run_bash_check(metric_id: str, command: str,
+                        params: dict[str, Any]) -> MetricResult:
+        """bash_check：命令在任务工作区 cwd 经 bash 真执行，退出码 0=通过。
+
+        宿主侧执行（评估执行器位于 light 组 sidecar，工作区目录直接可达）；
+        超时默认 600s；输出尾部随 message 留痕供归因。"""
+        import subprocess
+
+        workspace = str(params.get("workspace") or "")
+        timeout = int(params.get("timeout_seconds") or 600)
+        try:
+            proc = subprocess.run(
+                ["bash", "-c", command],
+                cwd=workspace or None,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+        except FileNotFoundError:
+            return MetricResult(
+                metric_id=metric_id, passed=False,
+                error="bash 不可用（执行器宿主未找到 bash 可执行文件）",
+            )
+        except subprocess.TimeoutExpired:
+            return MetricResult(
+                metric_id=metric_id, passed=False,
+                error=f"命令超时（>{timeout}s）",
+            )
+        ok = proc.returncode == 0
+        tail = ((proc.stdout or "")[-600:]
+                + (f"\n[stderr] {(proc.stderr or '')[-300:]}" if proc.stderr else ""))
+        message = f"exit={proc.returncode}" + (f"\n{tail.strip()}" if tail.strip() else "")
+        return MetricResult(metric_id=metric_id, passed=ok, message=message)
 
     # ── agent 型：评估子管道（R2 工作区/执行环境继承）───────────
 

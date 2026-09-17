@@ -125,6 +125,8 @@ export interface WorkspaceTab {
   icon?: string
   moduleId: string
   component?: string
+  /** 归属的插件页面声明 id（contributes.pages）：detachable 弹出等页面级能力的解析键 */
+  pageId?: string
   layout?: Record<string, unknown>
   /** 声明透传的静态 widget props（插件 views/widgets 贡献条目） */
   props?: Record<string, unknown>

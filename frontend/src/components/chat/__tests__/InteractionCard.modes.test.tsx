@@ -9,6 +9,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadInteractionModes, resolveInteractionLayout } from '@/utils/interactionModes'
 import { InteractionCard } from '../InteractionCard'
+import { cardProps, makeInteraction } from './interactionCardTestUtils'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
 vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
@@ -27,30 +28,6 @@ vi.mock('@/components/ui/dialog', () => ({
   DialogTitle: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
   DialogFooter: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
 }))
-
-function makeInteraction(overrides: Partial<PendingInteraction> = {}): PendingInteraction {
-  return {
-    requestId: 'req-1',
-    mode: 'choice',
-    title: '交互',
-    description: '',
-    threadId: 'th-1',
-    tabId: 'tb-1',
-    agentId: 'ag-1',
-    timestamp: new Date().toISOString(),
-    status: 'pending',
-    ...overrides,
-  }
-}
-
-const cardProps = (interaction: PendingInteraction) => ({
-  interaction,
-  onRespondChoice: vi.fn(),
-  onRespondText: vi.fn(),
-  onNavigateToTab: vi.fn(),
-  onDismiss: vi.fn(),
-  isSubmitting: false,
-})
 
 // 注册表清理（clearInteractionModes 已随死代码删除，loadInteractionModes 幂等清空重装）
 beforeEach(() => loadInteractionModes([]))

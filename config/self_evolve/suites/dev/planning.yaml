@@ -1,0 +1,29 @@
+name: planning-v1
+mode: planning
+settle_timeout_seconds: 900
+cases:
+- id: plan_mini_solution_doc
+  source: harnessdev-planning
+  category: planning
+  target: general_agent
+  messages:
+  - 为『待办清单命令行工具』写一份简版方案总纲到当前工作空间 mini_solution.md，必须包含三节标题：『背景与目标』『关键决策』『验收标准』，其中验收标准至少一条可二值判定。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: mini_solution.md
+        check: contains
+        pattern: 验收标准
+- id: plan_task_file_trace
+  source: harnessdev-planning
+  category: planning
+  target: general_agent
+  messages:
+  - 在当前工作空间写一个自包含任务文件 task_01_impl.md：YAML frontmatter 必须含 task_id、executor、depends_on、status 四个键，正文含『目标』与『验收标准』两节，验收标准行须带 traces_to: AC-1。
+  acceptance_criteria:
+    file_check:
+      input_params:
+        path: task_01_impl.md
+        check: contains
+        pattern: traces_to
+  anchor: repo

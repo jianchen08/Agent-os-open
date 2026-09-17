@@ -92,6 +92,9 @@ pub struct KernelCapabilityRouter {
     /// 管道恢复派发闭包（resume_pipeline 拉起续跑轮，见 PipelineResumerFn）。
     /// None = 恢复派发不可用（resume_pipeline 降级为纯 runs 表簿记，兼容旧装配/测试）。
     pipeline_resumer: Option<PipelineResumerFn>,
+    /// 调用路径注册表自愈闭包（BUG-37，见 [`ToolRegistryHealFn`]）。
+    /// None = 无自愈，反查 miss 直接 fail-closed（测试装配态）。
+    tool_registry_heal: Option<ToolRegistryHealFn>,
 }
 
 /// state 出口声明查询闭包：() → 当前 manifest 集合的 export_fields 并集。
@@ -134,6 +137,26 @@ pub type StreamingDeclarationLookupFn =
 /// `force_include_tools` 声明的并集（tool-surface 过滤时无视 tool_ids 注入）。
 /// None/空 = 无声明，零强制注入（fail-closed）。
 pub type ForceIncludeToolsLookupFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
+/// 调用路径注册表自愈闭包（BUG-37）：(tool_name) → 重注册后的工具描述符。
+///
+/// tool-executor.invoke 反查 miss 时调用（有界：每次调用至多触发一次）。
+/// 实现方按"manifest 在册且插件启用"判定是否重注册（reenable 语义），返回
+/// `Some(描述符)` = 自愈成功，本次调用按返回描述符路由；`None` = 无可自愈
+/// （manifest 缺席/插件已禁用），调用方保持 fail-closed 报"未注册"。
+/// 未装配（字段 None）= 无自愈，反查 miss 直接 fail-closed（测试装配态）。
+pub type ToolRegistryHealFn = Arc<
+    dyn for<'a> Fn(
+            &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Option<agentos_core::traits::ToolDescriptor>>
+                    + Send
+                    + 'a,
+            >,
+        > + Send
+        + Sync,
+>;
 
 /// G3：动态工具注册器闭包。
 ///
@@ -315,6 +338,7 @@ impl KernelCapabilityRouter {
             tool_failure_tracker: None,
             export_fields_lookup: None,
             pipeline_resumer: None,
+            tool_registry_heal: None,
         }
     }
 
@@ -404,6 +428,12 @@ impl KernelCapabilityRouter {
     /// 注入能力注册表（tool_name → plugin_id 反查）。
     pub fn with_registry(mut self, registry: Arc<dyn CapabilityRegistry>) -> Self {
         self.registry = Some(registry);
+        self
+    }
+
+    /// 注入调用路径注册表自愈闭包（BUG-37，见 [`ToolRegistryHealFn`]）。
+    pub fn with_tool_registry_heal(mut self, heal: ToolRegistryHealFn) -> Self {
+        self.tool_registry_heal = Some(heal);
         self
     }
 
@@ -1896,13 +1926,35 @@ impl KernelCapabilityRouter {
             None => match self.registry.as_ref().and_then(|r| r.get_tool(tool_name)) {
                 Some(td) => td.plugin_id.clone(),
                 None => {
-                    return Ok(json!({
-                        "success": false,
-                        "error": format!(
-                            "工具 {} 未注册（不在插件工具注册表；可能被 G2 注册闸净化或插件未启用；非注册表工具请显式传 plugin_id）",
-                            tool_name
-                        ),
-                    }));
+                    // BUG-37 调用路径自愈（有界）：注册表条目可能因 G2 启动期
+                    // 观测误剔等注册面丢失而缺席，且 watcher 对无文件变更的插件
+                    // 不重扫——反查 miss 时先试一次"manifest 在册 → 重注册"，
+                    // 命中则按重注册结果路由；仍未命中保持 fail-closed（禁用/
+                    // 已删插件的既有拒绝语义不变）。
+                    let healed = match self.tool_registry_heal.as_ref() {
+                        Some(heal) => heal(tool_name).await,
+                        None => None,
+                    };
+                    match healed {
+                        Some(td) => {
+                            tracing::info!(
+                                target: "tool-executor",
+                                tool = %tool_name,
+                                plugin = %td.plugin_id,
+                                "工具注册表反查 miss 经调用路径自愈恢复（重注册后路由）"
+                            );
+                            td.plugin_id.clone()
+                        }
+                        None => {
+                            return Ok(json!({
+                                "success": false,
+                                "error": format!(
+                                    "工具 {} 未注册（不在插件工具注册表；可能被 G2 注册闸净化或插件未启用；非注册表工具请显式传 plugin_id）",
+                                    tool_name
+                                ),
+                            }));
+                        }
+                    }
                 }
             },
         };

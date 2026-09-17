@@ -1,0 +1,241 @@
+{
+  "id": "computer_use",
+  "name": "Computer Use",
+  "description": "桌面电脑操作工具——经 MCP Bridge 网关操作宿主机 Windows 桌面（CursorTouch/Windows-MCP 上游：UIA 元素树+键鼠+窗口）。仅非隔离会话；操作循环：先看屏→操作→再看屏验证。",
+  "version": "2.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "computer_snapshot",
+        "description": "看屏（操作循环入口与每步验证手段）：截屏并读取 UI 元素树——按钮/输入框/链接等交互元素带 label 编号与坐标，含可滚动区域与活动窗口清单。操作前先看屏，每次操作后重新看屏验证结果。参数：use_vision=true 附带截图（更慢，需模型视觉）；use_dom=true 只看浏览器网页内容；use_ui_tree=false 只截图不取元素（快）；region=[左,上,右,下] 只看指定区域省 token；display=[0,1] 指定显示器。",
+        "render": { "card": "generic" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "use_vision": { "type": "boolean", "description": "附带标注截图" },
+            "use_dom": { "type": "boolean", "description": "只看浏览器网页元素" },
+            "use_annotation": { "type": "boolean", "description": "截图上画元素标注框（默认开）" },
+            "use_ui_tree": { "type": "boolean", "description": "提取交互元素树（默认开；false=纯截图更快）" },
+            "display": { "type": "array", "items": { "type": "integer" }, "description": "显示器索引，如 [0] 或 [0,1]" },
+            "region": { "type": "array", "items": { "type": "integer" }, "minItems": 4, "maxItems": 4, "description": "虚拟桌面像素坐标 [左,上,右,下]" }
+          },
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "integer" },
+            "tool": { "type": "string" },
+            "snapshot_text": { "type": "string", "description": "桌面状态与元素树文本（label/坐标/可滚动区域）" },
+            "file_path": { "type": "string", "description": "截图落盘路径（use_vision 时）" },
+            "image_mime": { "type": "string" }
+          }
+        }
+      },
+      {
+        "name": "computer_take_screenshot",
+        "description": "快速截屏回看（跳过元素树提取）。返回图可能被缩放——需坐标时以上游返回的缩放说明换算。验证操作结果、查看无交互画面用这件；要元素 label 用 computer_snapshot。",
+        "render": { "card": "image" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "use_annotation": { "type": "boolean", "description": "叠加光标/窗口摘要（默认关）" },
+            "display": { "type": "array", "items": { "type": "integer" }, "description": "显示器索引" },
+            "region": { "type": "array", "items": { "type": "integer" }, "minItems": 4, "maxItems": 4, "description": "虚拟桌面像素坐标 [左,上,右,下]" }
+          },
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "integer" },
+            "tool": { "type": "string" },
+            "file_path": { "type": "string", "description": "截图落盘路径（任务 workspace 内）" },
+            "image_mime": { "type": "string" }
+          }
+        }
+      },
+      {
+        "name": "computer_click",
+        "description": "点击：label（computer_snapshot 输出的元素编号，优先用，比坐标稳）或 loc=[x,y]（屏幕逻辑坐标）二选一。button: left(默认)/right/middle；clicks: 0=悬停 1=单击(默认) 2=双击。点击后重新看屏验证。",
+        "render": { "card": "generic" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "loc": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "屏幕逻辑坐标 [x,y]" },
+            "label": { "type": "integer", "description": "看屏输出的交互元素编号" },
+            "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "默认 left" },
+            "clicks": { "type": "integer", "minimum": 0, "maximum": 2, "description": "0=悬停 1=单击 2=双击" }
+          },
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "integer" },
+            "tool": { "type": "string" },
+            "snapshot_text": { "type": "string", "description": "上游执行回执" }
+          }
+        }
+      },
+      {
+        "name": "computer_type",
+        "description": "键入文本：先用 computer_click 点击目标输入框聚焦（或直接传 loc/label 一步到位）。clear=true 先清空原有内容；press_enter=true 输入后回车提交；caret_position: start/end/idle(默认)。输入后重新看屏确认。中文等非 ASCII 由上游经剪贴板粘贴（会覆盖用户剪贴板）。",
+        "render": { "card": "generic" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "description": "要键入的文本" },
+            "loc": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "屏幕逻辑坐标 [x,y]" },
+            "label": { "type": "integer", "description": "看屏输出的交互元素编号" },
+            "clear": { "type": "boolean", "description": "先清空再输入" },
+            "caret_position": { "type": "string", "enum": ["start", "idle", "end"], "description": "光标位置" },
+            "press_enter": { "type": "boolean", "description": "输入后回车" }
+          },
+          "required": ["text"],
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "integer" },
+            "tool": { "type": "string" },
+            "snapshot_text": { "type": "string" }
+          }
+        }
+      },
+      {
+        "name": "computer_scroll",
+        "description": "滚动：loc/label 定位（缺省在当前鼠标位置）。type: vertical(默认)/horizontal；direction: up/down/left/right（默认 down）；wheel_times 格数（1 格≈3-5 行）。长列表/网页滚动用，滚后看屏确认。",
+        "render": { "card": "generic" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "loc": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "屏幕逻辑坐标 [x,y]" },
+            "label": { "type": "integer", "description": "看屏输出的可滚动元素编号" },
+            "type": { "type": "string", "enum": ["vertical", "horizontal"], "description": "默认 vertical" },
+            "direction": { "type": "string", "enum": ["up", "down", "left", "right"], "description": "默认 down" },
+            "wheel_times": { "type": "integer", "minimum": 1, "description": "滚动格数（默认 1）" }
+          },
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "integer" },
+            "tool": { "type": "string" },
+            "snapshot_text": { "type": "string" }
+          }
+        }
+      },
+      {
+        "name": "computer_move",
+        "description": "移动鼠标到 loc/label（悬停预览菜单）；drag=true 从当前鼠标位置拖拽到目标，from_loc=[x,y] 可显式指定拖拽起点（一次调用完成），duration 控制拖拽时长。移动窗口/拖滑块用。",
+        "render": { "card": "generic" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "loc": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "目标屏幕逻辑坐标 [x,y]" },
+            "label": { "type": "integer", "description": "看屏输出的元素编号" },
+            "drag": { "type": "boolean", "description": "true=拖拽而非悬停" },
+            "from_loc": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "拖拽显式起点 [x,y]" },
+            "duration": { "type": "number", "description": "拖拽时长秒数" }
+          },
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "integer" },
+            "tool": { "type": "string" },
+            "snapshot_text": { "type": "string" }
+          }
+        }
+      },
+      {
+        "name": "computer_key",
+        "description": "按快捷键组合，+ 连接：ctrl+s / ctrl+shift+esc / alt+tab / win+r / win。能按快捷键就不要点菜单——更快更稳。操作后重新看屏验证。",
+        "render": { "card": "generic" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "shortcut": { "type": "string", "description": "+ 连接的组合键，如 ctrl+s" }
+          },
+          "required": ["shortcut"],
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "integer" },
+            "tool": { "type": "string" },
+            "snapshot_text": { "type": "string" }
+          }
+        }
+      },
+      {
+        "name": "computer_wait",
+        "description": "等待界面响应（应用启动/页面加载/动画/对话框出现），单位秒。等待后重新看屏确认，不要连续盲操作。",
+        "render": { "card": "generic" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "duration": { "type": "integer", "minimum": 1, "description": "等待秒数" }
+          },
+          "required": ["duration"],
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "integer" },
+            "tool": { "type": "string" },
+            "snapshot_text": { "type": "string" }
+          }
+        }
+      },
+      {
+        "name": "computer_app",
+        "description": "应用与窗口管理。mode=launch 按开始菜单名启动应用（name，如 \"记事本\"）；mode=switch 把窗口切到前台（name，操作前先聚焦目标窗口）；mode=resize 调整窗口位置大小（name/window_loc=[x,y]/window_size=[宽,高]）；mode=launch_executable 按可执行路径严格启动（executable/args/cwd）。切换窗口优先于点任务栏。",
+        "render": { "card": "generic" },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "mode": { "type": "string", "enum": ["launch", "launch_executable", "resize", "switch"], "description": "默认 launch" },
+            "name": { "type": "string", "description": "应用/窗口名" },
+            "window_loc": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "窗口目标位置 [x,y]（resize）" },
+            "window_size": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "窗口目标大小 [宽,高]（resize）" },
+            "executable": { "type": "string", "description": "可执行文件路径（launch_executable）" },
+            "args": { "type": "array", "items": { "type": "string" }, "description": "启动参数（launch_executable）" },
+            "cwd": { "type": "string", "description": "工作目录（launch_executable）" }
+          },
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "type": "integer" },
+            "tool": { "type": "string" },
+            "snapshot_text": { "type": "string" }
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "host_group": "light"
+}

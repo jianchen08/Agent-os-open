@@ -180,3 +180,18 @@ def test_audit_counts_reconcile_with_library_dispositions():
     assert by_disp[("skipped", "non_terminal")] == counts["non_terminal"]
     assert by_disp[("skipped", "duplicate")] == counts["duplicates"]
     assert by_disp[("library_only", "goal_too_long")] == counts["goal_too_long"]
+
+
+def test_same_title_and_pid_collision_gets_incrementing_suffix():
+    """同题且 pid 前 8 位相同（截断同源）→ base → base_pid8 → base_pid8_2。"""
+    ac: dict = {"file_check": {"input_params": {}}}
+    result = th.harvest([
+        _task("abcdefgh12", ac=ac, title="同题", desc="题面一"),
+        _task("abcdefgh99", ac=ac, title="同题", desc="题面二"),
+        _task("abcdefgh77", ac=ac, title="同题", desc="题面三"),
+    ])
+    ids = sorted(c["id"] for c in _suite_cases(result, "general"))
+    assert len(ids) == 3 and len(set(ids)) == 3, ids
+    assert ids[0] == "hv_同题"
+    assert ids[1] == "hv_同题_abcdefgh"
+    assert ids[2] == "hv_同题_abcdefgh_2"

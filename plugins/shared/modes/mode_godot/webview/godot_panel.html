@@ -5,71 +5,409 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Godot 开发</title>
   <style>
-  :root {
-    --bg: #f8fafc; --fg: #1a1a1a; --muted: #64748b; --border: #cbd5e1;
-    --card: #ffffff; --ph: #94a3b8;
-  }
-  @media (prefers-color-scheme: dark) {
+    /* 宿主融合：配色全跟宿主 --ag-* token（theme.sync 逐键下发），现值仅作未同步 fallback */
     :root {
-      --bg: #0f172a; --fg: #e2e8f0; --muted: #94a3b8; --border: #334155;
-      --card: #1e293b; --ph: #475569;
+      --bg: var(--ag-bg, #f8fafc); --fg: var(--ag-fg, #1a1a1a); --muted: var(--ag-muted, #64748b);
+      --border: var(--ag-border, #cbd5e1); --card: var(--ag-card, #ffffff);
+      --accent: var(--ag-accent, #16a34a); --accent-soft: var(--ag-accent-soft, #dcfce7);
+      --ok: var(--ag-ok, #16a34a); --warn: var(--ag-warn, #d97706); --err: var(--ag-err, #dc2626);
+      --chip: var(--ag-chip, #f1f5f9); --ph: var(--muted);
+      --radius: var(--ag-radius, 6px);
     }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 12px; font-size: 13px; color: var(--fg); background: var(--bg);
-    font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  }
-  h1 { margin: 0 0 12px; font-size: 15px; }
-  .layout { display: grid; gap: 12px; height: calc(100vh - 44px); }
-  .cols { grid-template-columns: 220px minmax(0, 1fr) 200px; }
-  section, aside {
-    display: flex; flex-direction: column; min-height: 0; min-width: 0;
-    border: 1px solid var(--border); border-radius: 6px; background: var(--card);
-  }
-  h2 {
-    margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted);
-    border-bottom: 1px solid var(--border);
-  }
-  .body { flex: 1; overflow: auto; padding: 8px; }
-  .placeholder {
-    height: 100%; min-height: 72px; display: flex; flex-direction: column; gap: 4px;
-    align-items: center; justify-content: center; padding: 12px; text-align: center;
-    color: var(--muted); border: 1px dashed var(--ph); border-radius: 6px;
-  }
-  .placeholder .ph-label { font-size: 13px; }
-  .placeholder .ph-note { font-size: 11px; opacity: 0.75; }
-  .note { margin: 8px 0 0; padding: 0 2px; font-size: 11px; color: var(--muted); }
-  .stages { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-  .stage {
-    padding: 14px 8px; text-align: center; font-size: 12px; color: var(--muted);
-    border: 1px dashed var(--ph); border-radius: 6px;
-  }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: var(--ag-bg, #0f172a); --fg: var(--ag-fg, #e2e8f0); --muted: var(--ag-muted, #94a3b8);
+        --border: var(--ag-border, #334155); --card: var(--ag-card, #1e293b);
+        --accent: var(--ag-accent, #4ade80); --accent-soft: var(--ag-accent-soft, #14321f);
+        --ok: var(--ag-ok, #4ade80); --warn: var(--ag-warn, #fbbf24); --err: var(--ag-err, #f87171);
+        --chip: var(--ag-chip, #26324a);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 8px 10px; font-size: 12px; color: var(--fg); background: var(--bg);
+      font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      height: calc(100vh - 16px); display: flex; flex-direction: column; gap: 8px;
+    }
+    header { display: flex; align-items: center; gap: 8px; flex: none; flex-wrap: wrap; }
+    header h1 { margin: 0; font-size: 13px; }
+    header .spacer { flex: 1; }
+    #projState { color: var(--muted); font-size: 10px; }
+    #status { color: var(--muted); font-size: 10px; min-width: 48px; text-align: right; }
+    button {
+      padding: 3px 10px; background: var(--accent); color: #fff; border: none;
+      border-radius: var(--radius); cursor: pointer; font-size: 11px;
+    }
+    button.secondary { background: var(--chip); color: var(--fg); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    textarea {
+      padding: 4px 7px; background: var(--card); color: var(--fg);
+      border: 1px solid var(--border); border-radius: var(--radius); font-size: 11px;
+      font-family: inherit; resize: vertical;
+    }
+    /* 伴随台紧凑密度：左场景状态窄栏 / 右执行记录流（对标编辑器伴随面板） */
+    .layout {
+      display: grid; grid-template-columns: 236px minmax(0, 1fr); gap: 8px;
+      flex: 1; min-height: 0;
+    }
+    /* 置顶小窗（desktopWidget）/窄窗口：单列纵向排布保持可用 */
+    @media (max-width: 760px) {
+      .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    }
+    .pane {
+      display: flex; flex-direction: column; min-height: 0; min-width: 0;
+      border: 1px solid var(--border); border-radius: calc(var(--radius) + 2px); background: var(--card);
+      overflow: hidden;
+    }
+    .pane h2 {
+      margin: 0; padding: 5px 10px; font-size: 11px; color: var(--muted);
+      border-bottom: 1px solid var(--border); flex: none;
+    }
+    .pane-body { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+    .ed-row { display: flex; align-items: center; gap: 6px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ph); flex: none; }
+    .dot.online { background: var(--ok); }
+    .dot.offline { background: var(--err); }
+    .mini-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ph); flex: none; }
+    .mini-dot.running { background: var(--ok); }
+    .mini-dot.done { background: var(--muted); }
+    .mini-dot.other { background: var(--warn); }
+    .formrow { display: flex; gap: 6px; align-items: flex-start; flex-wrap: wrap; }
+    .proj-line { font-weight: 600; font-size: 12px; }
+    .scene-line { color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .section-label { font-size: 10px; color: var(--muted); margin-top: 2px; }
+    .node {
+      border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 7px;
+      margin-top: 4px; line-height: 1.45;
+    }
+    .node-name { font-weight: 600; font-size: 11px; }
+    .node-type { color: var(--accent); font-size: 10px; }
+    .node-path { color: var(--muted); font-size: 10px; word-break: break-all; }
+    .preview-img { max-width: 100%; border: 1px solid var(--border); border-radius: var(--radius); display: block; }
+    .dispatch-row textarea { flex: 1; min-width: 140px; }
+    .rec-list { flex: none; max-height: 150px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+    .rec {
+      border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 8px;
+      cursor: pointer; background: var(--card);
+    }
+    .rec:hover { border-color: var(--accent); }
+    .rec.active { border-color: var(--accent); background: var(--accent-soft); }
+    .rec-row { display: flex; align-items: center; gap: 6px; }
+    .rec-goal { font-weight: 600; font-size: 11px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rec-meta { color: var(--muted); font-size: 10px; flex: none; }
+    .msg-flow { flex: 1; min-height: 100px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+    .msg { border-left: 3px solid var(--border); padding: 3px 8px; }
+    .msg .who { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+    .msg .bubble { font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+    .msg.err { border-left-color: var(--err); }
+    .msg.err .who { color: var(--err); }
+    .msg.err .bubble { color: var(--err); }
+    .empty {
+      min-height: 64px; display: flex; flex-direction: column; gap: 3px;
+      align-items: center; justify-content: center; padding: 10px; text-align: center;
+      color: var(--muted); border: 1px dashed var(--ph); border-radius: var(--radius);
+    }
+    .empty .ph-note { font-size: 10px; opacity: 0.75; }
+    .toast {
+      position: fixed; left: 50%; transform: translateX(-50%); bottom: 14px;
+      background: var(--fg); color: var(--bg); padding: 6px 14px;
+      border-radius: calc(var(--radius) + 2px);
+      font-size: 11px; display: none; max-width: 80%; z-index: 10;
+    }
+    .toast.error { background: var(--err); color: #fff; }
+      /* 面板桥失败 ≠ 真空数据：显式错误横幅（--ag-err 语义色）与「暂无 XX」空态区分 */
+    .bridge-err {
+      border: 1px solid var(--err, #dc2626); border-radius: var(--radius, 8px); padding: 16px;
+      display: flex; flex-direction: column; gap: 8px; align-items: center;
+      justify-content: center; text-align: center; margin: 8px;
+    }
+    .bridge-err-title { color: var(--err, #dc2626); font-weight: 600; }
+    .bridge-err-msg { font-size: 11px; color: var(--muted, #64748b); word-break: break-all; }
   </style>
 </head>
 <body>
-  <h1>Godot 开发</h1>
-  <main class="layout" style="grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);" data-panel="godot">
-    <section aria-label="godot 项目与场景状态">
-      <h2>godot 项目 / 场景状态</h2>
-      <div class="body">
-        <div class="stages" role="list">
-          <div class="stage" role="listitem">project.godot</div>
-          <div class="stage" role="listitem">场景（.tscn）</div>
-          <div class="stage" role="listitem">脚本（.gd）</div>
+  <header>
+    <h1>🎮 godot 项目</h1>
+    <span id="projState"></span>
+    <span class="spacer"></span>
+    <span id="status"></span>
+    <button class="secondary" onclick="refreshAll()">刷新</button>
+  </header>
+  <div class="layout">
+    <aside class="pane">
+      <h2>场景状态</h2>
+      <div class="pane-body">
+        <div class="ed-row">
+          <span class="dot" id="edDot"></span>
+          <span id="edText">检测编辑器…</span>
         </div>
-        <p class="note">数据源缺口：godot 项目/场景状态接入待模式插件接线（godot_context 选中引用与 godot_run 编辑器连接状态拉通后按节点树渲染）。</p>
+        <div class="formrow">
+          <button onclick="openEditor()">打开 Godot 编辑器</button>
+          <button class="secondary" onclick="loadScene()">刷新快照</button>
+        </div>
+        <div id="sceneBox"></div>
+        <div id="previewBox"></div>
       </div>
-    </section>
-    <section aria-label="执行记录">
+    </aside>
+    <main class="pane">
       <h2>执行记录</h2>
-      <div class="body">
-        <div class="placeholder">
-          <span class="ph-label">暂无执行记录</span>
-          <span class="ph-note">数据源缺口：godot 链任务（godot_orchestrator_agent / godot_expert）执行记录递送后接入。</span>
+      <div class="pane-body">
+        <div class="formrow dispatch-row">
+          <textarea id="instruction" rows="2"
+            placeholder="描述要做的场景修改，例如：给 Player 加二段跳并接入动画状态机……"></textarea>
+          <button onclick="dispatchTask()">派发修改</button>
         </div>
+        <div class="rec-list" id="recList"></div>
+        <div class="msg-flow" id="msgFlow"></div>
       </div>
-    </section>
-  </main>
+    </main>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+  // agentosFetch：经 window.agentos.postMessage（宿主代发 REST 带 token）+ Promise 化。
+  // webview iframe 是 opaque-origin 沙箱（CSP connect-src 'none'），直接 fetch 不可行。
+  function agentosFetch(path, params) {
+    return new Promise(function (resolve, reject) {
+      if (!window.agentos) { reject(new Error('window.agentos 桥不可用')); return; }
+      var id = window.agentos.postMessage(path, params);
+      function handler(e) {
+        var d = e.data;
+        if (!d || !d.__agentos_webview || d.id !== id) return;
+        window.removeEventListener('message', handler);
+        if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
+        else resolve(d.params);
+      }
+      window.addEventListener('message', handler);
+    });
+  }
+  // 宿主返回 axios res.data，内层 body 是 base64 JSON
+  function unwrap(res) {
+    var data = (res && res.data) ? res.data : res;
+    if (data && data.body) {
+      try { return JSON.parse(atob(data.body)); } catch (e) { return data; }
+    }
+    return data;
+  }
+  // 宿主融合下行桥：theme.sync 逐键落 --ag-* token（CSS fallback 链即刻生效）；
+  // ctx.sync 记宿主会话上下文，写动作据此送入对话框线程。
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || !d.__agentos_webview || typeof d.method !== 'string') return;
+    if (d.method === 'theme.sync') {
+      var tokens = (d.params || {}).tokens || {};
+      Object.keys(tokens).forEach(function (k) {
+        document.documentElement.style.setProperty(k, String(tokens[k]));
+      });
+    } else if (d.method === 'ctx.sync') {
+      window.__agentosCtx = String((d.params || {}).sessionId || '');
+    }
+  });
+
+  var EP = '/ext/mode_godot/data';
+  var state = { records: [], activeSession: null, errors: {} };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(s) { $('status').textContent = s || ''; }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function toast(msg, isError) {
+    var t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast' + (isError ? ' error' : '');
+    t.style.display = 'block';
+    setTimeout(function () { t.style.display = 'none'; }, 3200);
+  }
+  // 面板桥失败 ≠ 真空数据：桥不可用/请求失败渲染显式错误横幅（--ag-err 语义色），
+  // 与 emptyBox 的诚实空态视觉区分；重试按钮走全量刷新。
+  function bridgeErrorBox(msg) {
+    return '<div class="bridge-err"><div class="bridge-err-title">面板桥不可用/加载失败</div>' +
+      '<div class="bridge-err-msg">' + escapeHtml(msg) + '</div>' +
+      '<button class="secondary" onclick="refreshAll()">重试</button></div>';
+  }
+  function emptyBox(label, note) {
+    return '<div class="empty"><div>' + escapeHtml(label) + '</div>' +
+      (note ? '<div class="ph-note">' + escapeHtml(note) + '</div>' : '') + '</div>';
+  }
+
+  // ── 场景状态（编辑器探活 + 选中快照 + 预览）──
+  function loadBootstrap() {
+    return agentosFetch(EP + '/bootstrap').then(function (res) {
+      var d = unwrap(res) || {};
+      if (d.name && !$('projState').textContent) $('projState').textContent = d.name;
+    }).catch(function () {});
+  }
+
+  function renderScene(d) {
+    var dot = $('edDot');
+    dot.className = 'dot ' + (d.editor_online ? 'online' : 'offline');
+    $('edText').textContent = d.editor_online ? '编辑器在线' : '编辑器离线';
+    if (!d.editor_online) {
+      $('projState').textContent = '编辑器离线';
+      $('sceneBox').innerHTML = emptyBox('未检测到编辑器', d.note || '');
+      $('previewBox').innerHTML = '';
+      return;
+    }
+    var snap = d.snapshot;
+    if (!snap) {
+      $('sceneBox').innerHTML = emptyBox('快照不可用', d.note || '');
+      return;
+    }
+    $('projState').textContent = snap.project
+      ? snap.project + ' · Godot ' + (snap.engine_version || '')
+      : 'Godot ' + (snap.engine_version || '');
+    var sceneLine = snap.scene_name
+      ? '<div class="scene-line">场景：' + escapeHtml(snap.scene_name) +
+        (snap.active_scene ? '（' + escapeHtml(snap.active_scene) + '）' : '') + '</div>'
+      : '';
+    var nodes = snap.selection_detail || [];
+    var tree = nodes.length ? nodes.map(function (n) {
+      return '<div class="node"><span class="node-name">' + escapeHtml(n.name) + '</span> ' +
+        '<span class="node-type">' + escapeHtml(n.type) + '</span>' +
+        '<div class="node-path">' + escapeHtml(n.path || '') +
+        (n.position ? ' · ' + escapeHtml(n.position) : '') + '</div></div>';
+    }).join('') : emptyBox('编辑器无选中节点', '在 Godot 里点选节点后点「刷新快照」，选中即随消息注入引用');
+    $('sceneBox').innerHTML =
+      (snap.project ? '<div class="proj-line">' + escapeHtml(snap.project) + '</div>' : '') +
+      sceneLine +
+      '<div class="section-label">选中节点</div>' + tree;
+  }
+
+  function renderPreview(d) {
+    var box = $('previewBox');
+    box.innerHTML = '';
+    if (d && d.preview_data_url) {
+      var img = document.createElement('img');
+      img.src = d.preview_data_url;
+      img.alt = '选中节点预览';
+      img.className = 'preview-img';
+      box.appendChild(img);
+      return;
+    }
+    box.innerHTML = emptyBox('暂无预览', (d && d.note) || '');
+  }
+
+  function loadPreview() {
+    return agentosFetch(EP + '/preview').then(function (res) {
+      renderPreview(unwrap(res) || {});
+    }).catch(function (e) {
+      // 桥失败 ≠ 没有预览：显式报错，不落「暂无预览」空态
+      $('previewBox').innerHTML = bridgeErrorBox((e && e.message) || String(e));
+    });
+  }
+
+  function loadScene() {
+    return agentosFetch(EP + '/scene').then(function (res) {
+      var d = unwrap(res) || {};
+      renderScene(d);
+      if (d.editor_online) loadPreview();
+      else $('previewBox').innerHTML = '';
+    }).catch(function (e) {
+      // 桥失败 ≠ 编辑器离线：显式报错，不落「未检测到编辑器」空态
+      $('sceneBox').innerHTML = bridgeErrorBox((e && e.message) || String(e));
+    });
+  }
+
+  function openEditor() {
+    setStatus('拉起编辑器...');
+    agentosFetch(EP + '/actions/open_editor', {}).then(function (res) {
+      var d = unwrap(res) || {};
+      setStatus('');
+      if (d.error) { toast('打开失败：' + d.error, true); return; }
+      toast('编辑器通道已响应（未开时已按 GODOT_EDITOR_BIN 拉起），正在刷新场景状态');
+      loadScene();
+    }).catch(function (e) { setStatus(''); toast('打开失败：' + e, true); });
+  }
+
+  // ── 执行记录（godot 链会话 + 消息流，报错红显）──
+  function loadRecords() {
+    return agentosFetch(EP + '/records').then(function (res) {
+      state.records = (unwrap(res) || {}).records || [];
+      delete state.errors.records;
+      renderRecords();
+    }).catch(function (e) {
+      state.errors.records = (e && e.message) || String(e);
+      renderRecords();
+    });
+  }
+
+  function renderRecords() {
+    var el = $('recList');
+    if (state.errors.records) {
+      el.innerHTML = bridgeErrorBox(state.errors.records);
+      return;
+    }
+    if (!state.records.length) {
+      el.innerHTML = emptyBox('暂无执行记录', 'godot 链任务（「派发修改」或聊天发起）开始后在此出现');
+      return;
+    }
+    el.innerHTML = state.records.map(function (s) {
+      var dot = s.run_status === 'running' ? 'running' : (s.task_status === 'completed' ? 'done' : 'other');
+      return '<div class="rec' + (state.activeSession === s.pipeline_id ? ' active' : '') +
+        '" data-id="' + escapeHtml(s.pipeline_id) + '"><div class="rec-row">' +
+        '<span class="mini-dot ' + dot + '"></span>' +
+        '<span class="rec-goal">' + escapeHtml(s.goal || s.pipeline_id) + '</span>' +
+        '<span class="rec-meta">' + escapeHtml(s.task_status || s.run_status || '—') + ' · ' +
+        escapeHtml(String(s.message_count)) + ' 条</span></div></div>';
+    }).join('');
+    el.querySelectorAll('.rec').forEach(function (node) {
+      node.addEventListener('click', function () {
+        state.activeSession = node.getAttribute('data-id');
+        renderRecords();
+        loadMessages(state.activeSession);
+      });
+    });
+    if (!state.activeSession && state.records.length) {
+      state.activeSession = state.records[0].pipeline_id;
+      renderRecords();
+      loadMessages(state.activeSession);
+    }
+  }
+
+  function loadMessages(pipelineId) {
+    return agentosFetch(EP + '/messages?pipeline_id=' + encodeURIComponent(pipelineId))
+      .then(function (res) {
+        var msgs = (unwrap(res) || {}).messages || [];
+        $('msgFlow').innerHTML = msgs.length ? msgs.map(function (m) {
+          return '<div class="msg' + (m.has_error ? ' err' : '') + '">' +
+            '<div class="who">' + escapeHtml(m.role || '') +
+            (m.created_at ? ' · ' + escapeHtml(m.created_at) : '') +
+            (m.has_error ? ' · 含报错' : '') + '</div>' +
+            '<div class="bubble">' + escapeHtml(m.content) + '</div></div>';
+        }).join('') : emptyBox('该会话还没有消息', '管道可能尚未产生输出，稍后点「刷新」');
+        var flow = $('msgFlow');
+        flow.scrollTop = flow.scrollHeight;
+      });
+  }
+
+  function dispatchTask() {
+    var el = $('instruction');
+    var text = (el.value || '').trim();
+    if (!text) { toast('先填写要派发的修改指令', true); return; }
+    setStatus('派发中...');
+    // session_id = ctx.sync 下发的会话 id（本面板 __agentosCtx 即字符串）；
+    // 新建动作锚当前会话线程，未收到 ctx.sync 时空串按缺省省略
+    agentosFetch(EP + '/actions/dispatch', { instruction: text, session_id: window.__agentosCtx || '' }).then(function (res) {
+      var d = unwrap(res) || {};
+      setStatus('');
+      if (d.error) { toast('派发失败：' + d.error, true); return; }
+      toast('已派发任务 ' + (d.task_id || '').slice(0, 10) + '，完成后在「执行记录」查看');
+      el.value = '';
+      loadRecords();
+    }).catch(function (e) { setStatus(''); toast('派发失败：' + e, true); });
+  }
+
+  // ── 入口 ──
+  function refreshAll() {
+    setStatus('刷新中...');
+    Promise.all([loadBootstrap(), loadScene(), loadRecords()])
+      .then(function () { setStatus(''); })
+      .catch(function (e) { setStatus('加载失败'); toast(String(e), true); });
+  }
+  refreshAll();
+  </script>
 </body>
 </html>

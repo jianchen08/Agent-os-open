@@ -68,6 +68,10 @@
               "type": "string",
               "description": "active | paused"
             },
+            "workflow_state": {
+              "type": "string",
+              "description": "方案工作流状态 plan | running | done（ADR 2026-09-17）"
+            },
             "created": {
               "type": "boolean",
               "description": "true=新建登记；false=复用既有"
