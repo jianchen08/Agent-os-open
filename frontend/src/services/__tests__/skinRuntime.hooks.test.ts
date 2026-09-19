@@ -58,10 +58,14 @@ interface CapturedCtx {
 
 beforeEach(() => {
   mockApiGet.mockReset()
-  mockApiGet.mockImplementation((url: unknown) => {
-    if (String(url).endsWith('hooks.mjs')) return Promise.resolve({ data: hooksSource })
-    return Promise.resolve({ data: OK_CSS })
-  })
+  mockApiGet.mockImplementation(
+    (url: unknown, config?: { transformResponse?: Array<(d: string) => string> }) => {
+      // 与 axios 文本响应同形：invoke transformResponse（原样透传，不被 JSON 化）
+      const pass = (raw: string) => config?.transformResponse?.[0]?.(raw) ?? raw
+      if (String(url).endsWith('hooks.mjs')) return Promise.resolve({ data: pass(hooksSource) })
+      return Promise.resolve({ data: pass(OK_CSS) })
+    },
+  )
   vi.spyOn(URL, 'createObjectURL').mockImplementation(() => hooksModuleUrl())
   vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
   hooksSource = ''

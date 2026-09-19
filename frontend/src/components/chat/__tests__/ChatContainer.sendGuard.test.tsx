@@ -32,8 +32,8 @@ vi.mock('../ChatInput', () => ({
 vi.mock('../MessageList', () => ({
   MessageList: () => <div data-testid="stub-message-list" />,
 }))
-vi.mock('../GodotSelectionRow', () => ({
-  GodotSelectionRow: () => <div data-testid="stub-godot-row" />,
+vi.mock('../ReferenceSelectionRow', () => ({
+  ReferenceSelectionRow: () => <div data-testid="stub-reference-row" />,
 }))
 vi.mock('../PendingInputQueueBar', () => ({
   PendingInputQueueBar: () => <div data-testid="stub-pending-bar" />,

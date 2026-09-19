@@ -10,6 +10,7 @@ import { ChatPanelShell } from './components/layout/ChatPanelShell'
 import { Sidebar } from './components/layout/Sidebar'
 import { SchemaFullscreenHost } from './components/schema/SchemaFullscreenHost'
 import { ROUTES } from './constants/routes'
+import { WS_LOCAL_EVENTS } from './constants/websocket'
 import { useAgentsQuery } from './hooks/queries/useAgentsQuery'
 import { useLongTermTasksQuery } from './hooks/queries/useLongTermTasksQuery'
 import { useSessionsQuery, readSessions } from './hooks/queries/useSessionsQuery'
@@ -200,14 +201,14 @@ function HomePage(): ReactNode {
     // 不会重复连接；登出时 authToken 变 null，connect 不被调用（登出逻辑里已有 disconnect）。
   }, [authToken])
 
-  // _status 订阅独立 effect：只注册一次，避免随 token 变化反复订阅/取消
+  // 连接状态（WS_LOCAL_EVENTS.STATUS）订阅独立 effect：只注册一次，避免随 token 变化反复订阅/取消
   useEffect(() => {
     const handleStatusChange = (data: { status: string }) => {
       useSessionStore.setState({ wsStatus: data.status })
     }
-    globalWS.subscribe('_status', handleStatusChange)
+    globalWS.subscribe(WS_LOCAL_EVENTS.STATUS, handleStatusChange)
     return () => {
-      globalWS.unsubscribe('_status', handleStatusChange)
+      globalWS.unsubscribe(WS_LOCAL_EVENTS.STATUS, handleStatusChange)
     }
   }, [])
 

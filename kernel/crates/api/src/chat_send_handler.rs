@@ -426,7 +426,59 @@ impl ChatSendHandler {
                     }
                 })?;
         }
+        // 归属锚点创建的收尾：切线程活跃管道。置于出生键落库之后——B7 中止
+        // （出生字段落库失败）时指针不得已被切走（管道未出生即死，切了=悬空）。
+        if let Some(thread) = p.ownership_thread {
+            Self::switch_session_active_pipeline(store, thread, pipeline_id, &tenant_id).await;
+        }
         Ok(())
+    }
+
+    /// 归属锚点创建（`thread_id` 声明归属会话）的收尾：把该线程的
+    /// `sessions.active_pipeline_id` 切到新管道。
+    ///
+    /// 「任务落用户会话线程，对话在聊天区继续」的必要条件——消息查询端点
+    /// （GET /sessions/{id}/messages 回退链）与会话列表都读该指针，只落
+    /// pipeline_sessions 映射不切指针时，线程视角恒停旧聊天管道，任务消息
+    /// （如 roleplay 开场白）对用户不可见。
+    ///
+    /// 语义：**创建即切、失败保持**——任务 failed 不切回，失败消息留在同
+    /// 管道对用户可见（错误可见性）；只在调用方显式声明归属锚点时切，无锚点
+    /// 管道保持独立（后台自主任务不进用户视图）。锚点线程无 sessions 行或
+    /// 读写失败：warn 留痕不阻断出生——任务执行不依赖该指针，pipeline_sessions
+    /// 映射与出生键才是 B7 契约面；不凭空造会话行（缺 title/metadata 来源）。
+    async fn switch_session_active_pipeline(
+        store: &Arc<dyn StorageBackend>,
+        thread_id: &str,
+        pipeline_id: &str,
+        tenant_id: &str,
+    ) {
+        let tenant =
+            agentos_core::types::TenantContext::new(tenant_id.to_string(), thread_id.to_string());
+        let store = store.clone();
+        let tid = thread_id.to_string();
+        let pid = pipeline_id.to_string();
+        let switched: Result<bool, agentos_core::types::StorageError> =
+            agentos_tenant::scope(tenant, async move {
+                let mut session = match store.get_session(&tid).await? {
+                    Some(s) => s,
+                    None => return Ok(false),
+                };
+                session.active_pipeline_id = Some(pid);
+                session.updated_at = chrono::Utc::now().to_rfc3339();
+                store.update_session(&session).await?;
+                Ok(true)
+            })
+            .await;
+        if let Ok(false) = switched {
+            // 单行宏（rustfmt 不改写宏内排布）：保证改动行与宏执行区一致可度量。
+            tracing::warn!(target: "capability:chat", thread = %thread_id, pipeline = %pipeline_id, "chat.send_message 归属锚点线程无 sessions 行，跳过活跃管道切换");
+        }
+        if let Err(e) = &switched {
+            let reason = e.to_string();
+            // 同上单行宏：错误留痕不阻断出生（视图便利面失败 ≠ 任务失败）。
+            tracing::warn!(target: "capability:chat", thread = %thread_id, pipeline = %pipeline_id, error = %reason, "chat.send_message 切线程活跃管道失败（跳过，任务管道不受影响）");
+        }
     }
 
     /// 阶段四：no_dispatch 只写 state 不派发（容器任务等"只登记不执行"的
@@ -2326,5 +2378,264 @@ mod tests {
             "混排空键同样拒绝",
         )
         .await;
+    }
+
+    // ── BUG-45 断点2：归属锚点创建同步切线程活跃管道 ──────────────
+    //
+    // 消息查询端点回退链读 sessions.active_pipeline_id；归属锚点创建只落
+    // pipeline_sessions 映射不切指针时，线程视角恒停旧聊天管道——任务消息
+    // （如 roleplay 开场白）对用户不可见。语义：创建即切、失败保持（不切回
+    // ——失败任务的消息留在同管道继续可见；不为切回加 run 终态钩子）；
+    // 只切显式声明归属锚点（thread_id）的创建，无锚点管道保持独立。
+
+    /// sessions 行测试夹具：thread + 活跃管道指针。
+    async fn seed_session(store: &std::sync::Arc<dyn StorageBackend>, thread: &str, active: &str) {
+        store
+            .create_session(&agentos_core::types::SessionRecord {
+                thread_id: thread.to_string(),
+                title: None,
+                intent: None,
+                current_state: "active".to_string(),
+                agent_id: None,
+                active_pipeline_id: Some(active.to_string()),
+                pipeline_ids: vec![active.to_string()],
+                metadata: None,
+                created_at: "2026-09-18T00:00:00Z".to_string(),
+                updated_at: "2026-09-18T00:00:00Z".to_string(),
+                last_active_at: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// 归属锚点创建：线程的 active_pipeline_id 必须切到新任务管道。
+    #[tokio::test]
+    async fn create_with_ownership_thread_switches_session_active_pipeline() {
+        let store: Arc<dyn StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        seed_session(&store, "thread-anchor-1", "p_old_chat").await;
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store.clone()));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true, "message": "登记任务", "user_id": "u1",
+                    "thread_id": "thread-anchor-1",
+                    "state": {"task.goal": "g"}
+                }),
+            )
+            .await
+            .unwrap();
+        let pid = res["pipeline_id"].as_str().unwrap().to_string();
+        let sess = store.get_session("thread-anchor-1").await.unwrap().unwrap();
+        assert_eq!(
+            sess.active_pipeline_id.as_deref(),
+            Some(pid.as_str()),
+            "归属锚点创建必须把线程活跃管道切到新管道（对话在聊天区继续的前提）"
+        );
+    }
+
+    /// 切换只作用于声明的锚点线程：其他线程指针不受牵连（两组有区分度输入）。
+    #[tokio::test]
+    async fn create_pointer_switch_is_scoped_to_anchor_thread() {
+        let store: Arc<dyn StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        seed_session(&store, "thread-anchor-a", "p_chat_a").await;
+        seed_session(&store, "thread-bystander-b", "p_chat_b").await;
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store.clone()));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true, "message": "登记任务", "user_id": "u1",
+                    "thread_id": "thread-anchor-a",
+                    "state": {"task.goal": "g"}
+                }),
+            )
+            .await
+            .unwrap();
+        let pid = res["pipeline_id"].as_str().unwrap();
+        let anchored = store.get_session("thread-anchor-a").await.unwrap().unwrap();
+        assert_eq!(anchored.active_pipeline_id.as_deref(), Some(pid));
+        let bystander = store
+            .get_session("thread-bystander-b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bystander.active_pipeline_id.as_deref(),
+            Some("p_chat_b"),
+            "未锚定线程的活跃管道不得被牵连切换"
+        );
+    }
+
+    /// 无锚点创建（后台自主任务）：任何 sessions 行都不得被改——
+    /// 独立任务不进用户会话视图。
+    #[tokio::test]
+    async fn create_without_ownership_thread_leaves_sessions_untouched() {
+        let store: Arc<dyn StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        seed_session(&store, "thread-user-keep", "p_main").await;
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store.clone()));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true, "message": "自主任务", "user_id": "u1",
+                    "state": {"task.goal": "g", "lineage.root": true}
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "created");
+        let sess = store
+            .get_session("thread-user-keep")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sess.active_pipeline_id.as_deref(),
+            Some("p_main"),
+            "无锚点创建不得切任何线程指针"
+        );
+    }
+
+    /// 锚点线程无 sessions 行（陈旧锚/伪造）：跳过切换不阻断出生——
+    /// 任务执行不依赖该指针，不得凭空造会话行，也不得让出生失败。
+    #[tokio::test]
+    async fn create_with_unknown_anchor_thread_skips_pointer_switch() {
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store.clone()));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true, "message": "登记任务", "user_id": "u1",
+                    "thread_id": "thread-ghost-1",
+                    "state": {"task.goal": "g"}
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "created", "指针切换跳过不得阻断出生");
+        assert!(
+            store.get_session("thread-ghost-1").await.unwrap().is_none(),
+            "不得凭空创建锚点线程的 sessions 行"
+        );
+    }
+
+    /// 锚点线程会话读写失败（存储故障）：warn 留痕不阻断出生——指针是视图
+    /// 便利面，pipeline_sessions 映射与出生键才是 B7 契约面。
+    #[tokio::test]
+    async fn create_pointer_switch_storage_failure_does_not_abort_birth() {
+        let (guard, logs) = crate::test_env::capture_logs();
+        let _ = &guard;
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        sqlite
+            .with_conn::<(), String>(|conn| {
+                conn.execute("DROP TABLE sessions", [])
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let store: Arc<dyn StorageBackend> = sqlite;
+        let d = RecordingDispatcher::shared();
+        let h = ChatSendHandler::with_store(d.clone(), Some(store));
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true, "message": "登记任务", "user_id": "u1",
+                    "thread_id": "thread-fail-sw",
+                    "state": {"task.goal": "g"}
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "created", "指针切换失败不得阻断出生");
+        assert!(
+            logs.text().contains("切线程活跃管道失败"),
+            "指针切换失败必须 warn 留痕"
+        );
+    }
+
+    /// 无 store 构造（单测/兼容路径）+ 归属锚点：无持久化面可切，安静返回，
+    /// 出生照常（响应 created）。
+    #[tokio::test]
+    async fn create_with_anchor_and_no_store_still_creates() {
+        let (h, d) = handler(); // with_store(None)
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true, "message": "登记任务", "user_id": "u1",
+                    "thread_id": "thread-nostore-1",
+                    "state": {"task.goal": "g"}
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "created", "无 store 不得阻断出生");
+        assert_eq!(calls(&d).len(), 1, "派发照常");
+    }
+
+    /// 语义钉子（创建即切、失败保持）：后台派发失败后指针保持在新任务管道——
+    /// 失败消息留在同管道对用户可见（错误可见性），不切回旧聊天管道。
+    #[tokio::test]
+    async fn pointer_stays_switched_when_background_dispatch_fails() {
+        let store: Arc<dyn StorageBackend> =
+            Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        seed_session(&store, "thread-fail-keep", "p_old_chat").await;
+        let session = Arc::new(agentos_session::SessionCoordinator::new());
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        session.register_thread("thread-fail-keep", "u1");
+        session.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let dispatcher: Arc<dyn PipelineDispatcher> = Arc::new(FailingDispatcher {
+            err: "pipeline init failed".into(),
+        });
+        let h = ChatSendHandler::with_session(dispatcher, Some(store.clone()), session);
+        let res = h
+            .handle(
+                "send_message",
+                json!({
+                    "create": true, "message": "m", "user_id": "u1",
+                    "thread_id": "thread-fail-keep", "background": true,
+                    "state": {"task.goal": "g"}
+                }),
+            )
+            .await
+            .unwrap();
+        let pid = res["pipeline_id"].as_str().unwrap().to_string();
+        // 等后台派发失败补报完成（真实异步：轮询帧到达）
+        let frames_arc = frames.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !frames_arc.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("5s 内应收到 dispatch_failed 补报帧");
+        let sess = store
+            .get_session("thread-fail-keep")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sess.active_pipeline_id.as_deref(),
+            Some(pid.as_str()),
+            "创建即切、失败保持：派发失败不得把指针切回旧聊天管道"
+        );
     }
 }

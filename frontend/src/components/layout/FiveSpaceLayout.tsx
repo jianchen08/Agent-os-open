@@ -22,6 +22,7 @@ import { taskStatusToAgentTabStatus } from '@/types/taskStatus'
 import { AlertBanner, useLayoutAlerts, type AlertBannerItem } from './AlertBanner'
 import { FloatingWindowManager, renderFloatingWindowContent } from './FloatingWindowManager'
 import { FullscreenOverlay } from './FullscreenOverlay'
+import { isDesktopMainWindow } from './TitleBar'
 import { WorkspaceHost } from './WorkspaceHost'
 import { CodeEditor } from '../workspace/CodeEditor'
 import { FilePreview } from '../workspace/FilePreview'
@@ -534,9 +535,7 @@ export function FiveSpaceLayout({
         // 皮肤装饰条槽位：仅"带文字的替代性条栏"（miku 标题栏/状态栏类，
         // skinRuntime 按文字内容判定）让位——整根下移/高度扣减；纯图形
         // 垂坠装饰（maid 花边）原生覆盖式零位移，变量恒 0 不占位
-        // --app-titlebar-height：Electron 主窗口自定义标题栏（TitleBar）占位
-        height:
-          'calc(100dvh - var(--app-titlebar-height, 0px) - var(--skin-chrome-top, 0px) - var(--skin-chrome-bottom, 0px))',
+        height: 'calc(100dvh - var(--skin-chrome-top, 0px) - var(--skin-chrome-bottom, 0px))',
         paddingTop: 'var(--skin-chrome-top, 0px)',
         paddingBottom: 'var(--skin-chrome-bottom, 0px)',
       }}
@@ -545,8 +544,13 @@ export function FiveSpaceLayout({
           WorkspaceHost/ChatContainer 整棵 unmount+remount（全屏切换必重载数据、
           组件状态全丢的根因）。全屏=常驻树内 CSS 隐藏侧栏/聊天 + 工作区 flex-1，
           组件恒定性保住（React 同位置同类型即复用实例）。 */}
-      {/* 异常浮现提示条（无常驻底栏；连接断开/审批待处理时出现；工作区全屏时让位） */}
-      {!workspaceFullscreen && <AlertBanner alerts={layoutAlerts} onAction={handleAlertAction} />}
+      {/* 异常浮现提示条（无常驻底栏；连接断开/审批待处理时出现；工作区全屏时让位）。
+          Electron 主窗口时右侧让出窗口控制簇宽度（控制簇钉视口右上角） */}
+      {!workspaceFullscreen && (
+        <div className={cn(isDesktopMainWindow() && 'pr-[148px]')}>
+          <AlertBanner alerts={layoutAlerts} onAction={handleAlertAction} />
+        </div>
+      )}
 
       {/* ---- Main Content Area ---- */}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
@@ -630,12 +634,15 @@ export function FiveSpaceLayout({
             >
               <Menu className="h-4 w-4" />
             </button>
-            {/* 工作区开关：钉在页面右上角；工作区展开时落在工作区区域顶角内（工作区全屏时隐藏） */}
+            {/* 工作区开关：钉在页面右上角；工作区展开时落在工作区区域顶角内（工作区全屏时隐藏）。
+                Electron 主窗口时左移让出窗口控制簇（3×w-11=132px + 间距），
+                与控制簇同排 */}
             <button
               type="button"
               onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
               className={cn(
-                'absolute right-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+                'absolute top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+                isDesktopMainWindow() ? 'right-[148px]' : 'right-2',
                 !workspaceCollapsed
                   ? 'bg-accent text-accent-foreground'
                   : 'text-muted-foreground hover:bg-accent hover:text-foreground',

@@ -16,6 +16,9 @@ REM
 REM  Env vars:
 REM    AGENTOS_KERNEL_PORT   kernel port    (default 9100)
 REM    AGENTOS_FRONTEND_PORT frontend port  (default 6390, avoids container_22404's 5289/5290/6290)
+REM    AGENTOS_USER_ROOT     user space root; pinned to <project>\user_root below
+REM                          (dev isolation from the installed app's OS-default
+REM                          space, ADR 2026-09-18-dev-local-user-root)
 REM
 REM  [Supervision note] The kernel is supervised by run_kernel_supervised.bat
 REM  (G8 lifecycle supervisor, wired in step 3 below): exit code 75
@@ -49,6 +52,15 @@ set "PATH=%SystemRoot%\System32;%SystemRoot%;%PATH%"
 set "KERNEL_DIR=%PROJECT_ROOT%\kernel"
 set "FRONTEND_DIR=%PROJECT_ROOT%\frontend"
 set "KERNEL_BIN=%KERNEL_DIR%\target\release\agentos-kernel.exe"
+
+REM 2026-09-18 (ADR 2026-09-18-dev-local-user-root): pin the dev user space
+REM root INSIDE the project (gitignored user_root\) so all dev-owned assets
+REM (plugins/config/data/.env) live together and never touch the installed
+REM app's OS-default space (%APPDATA%\agentos). The packaged app does not
+REM inherit this variable and keeps the OS default. Set before every step
+REM that resolves user assets (env guard, kernel spawn). Delete this line
+REM to fall back to the OS default.
+set "AGENTOS_USER_ROOT=%PROJECT_ROOT%\user_root"
 
 REM parse args
 set "NO_BUILD=0"

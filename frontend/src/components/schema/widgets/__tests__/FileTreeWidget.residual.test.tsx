@@ -49,6 +49,7 @@ vi.mock('../FileTreeContextMenu', () => ({
 
 import { pauseTask } from '@/services/api/tasks'
 import { FileTreeWidget } from '../FileTreeWidget'
+import '../taskFileTreeActions' // 任务域绑定副作用（启停/状态词表经注册缝注入）
 
 beforeEach(() => {
   vi.clearAllMocks()

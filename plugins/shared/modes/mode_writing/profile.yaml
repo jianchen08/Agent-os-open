@@ -7,7 +7,7 @@ panel_page_id: writing_workshop
 chain:
   entry: main
   expected_path: [main, orchestrator/novel_orchestrator_agent, executor/generation/novel_writer_agent]
-  executor_pool: [executor/generation/novel_writer_agent, executor/general_agent]
+  executor_pool: [executor/generation/novel_writer_agent]
   entry_override: null
 pipeline_profile:
   pipeline: autonomous
@@ -24,7 +24,6 @@ material_scope:
   execution_stage:
     - config/agents/orchestrator/novel_orchestrator_agent.yaml
     - config/agents/executor/generation/novel_writer_agent.yaml
-    - config/agents/executor/general_agent.yaml
 levers:
   agent_misdispatch: {dispatch_stage: [task_dispatch_guide, orchestrator_config]}
   structure_violation: {execution_stage: [persona, prompt_skeleton]}

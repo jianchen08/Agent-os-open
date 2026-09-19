@@ -230,3 +230,14 @@ def test_retention_prev_passed_set_empty_returns_none():
         {"mode": "m", "case_results": {"c1": True}},
     ]
     assert em.retention(rounds) is None
+
+
+def test_time_efficiency_skips_ratioless_rounds():
+    """time_efficiency：total=0 的轮（通过率 None）跳过不崩，不中断后续累计。"""
+    rounds = [
+        _round("coding", 0, 0),  # ratio None → continue
+        _round("coding", 1, 4, duration=1.0),  # base
+        _round("coding", 4, 4, duration=2.0),  # +0.75 ≥ 阈值 → hit=cum=2.0(base 轮不计时长)
+    ]
+    out = em.time_efficiency(rounds)
+    assert out == {"coding": 2.0}

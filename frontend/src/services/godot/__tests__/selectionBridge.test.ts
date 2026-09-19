@@ -230,3 +230,19 @@ describe('纯函数与退订面', () => {
     expect(bridge.getGodotSelection()).toBeDefined()
   })
 })
+
+describe('selectionBridge - 重连重订阅', () => {
+  it('重连事件且已有当前线程 → 重新初始化订阅并拉快照', async () => {
+    await bridge.initGodotSelection('t-live')
+
+    const callsBefore = getMock.mock.calls.length
+    const reconnected = subscribeMock.mock.calls.find(([evt]) => evt === 'reconnected')
+      ?? subscribeMock.mock.calls[subscribeMock.mock.calls.length - 1]
+    expect(reconnected).toBeTruthy()
+    ;(reconnected![1] as () => void)()
+    await vi.waitFor(() => {
+      expect(getMock.mock.calls.length).toBeGreaterThan(callsBefore)
+    })
+  })
+
+})

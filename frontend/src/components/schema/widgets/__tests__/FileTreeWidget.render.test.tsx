@@ -30,6 +30,7 @@ vi.mock('../FileTreeContextMenu', () => ({
   FileTreeContextMenu: () => null,
 }))
 import { FileTreeWidget } from '../FileTreeWidget'
+import '../taskFileTreeActions' // 任务域绑定副作用（启停/状态词表经注册缝注入）
 
 // 渲染主链用：全 running（默认状态筛选只保留活跃节点）
 const TREE = [

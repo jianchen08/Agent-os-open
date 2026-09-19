@@ -13,6 +13,7 @@ export {
   type ReferenceProvider,
   type ReferenceSelection,
   type ReferenceSelectionItem,
+  type ReferenceRowState,
 } from './referenceProviders'
 
 // 首个 provider 注册（模块副作用：引用面就绪即注入可用）

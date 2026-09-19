@@ -8,7 +8,7 @@ panel_page_id: godot_dev
 chain:
   entry: main
   expected_path: [main, mode_godot/godot_orchestrator_agent, mode_godot/godot_expert]
-  executor_pool: [mode_godot/godot_expert, general_agent]
+  executor_pool: [mode_godot/godot_expert]
   entry_override: null
 pipeline_profile:
   pipeline: autonomous
@@ -24,7 +24,6 @@ material_scope:
     - config/agents/main/task_dispatch_guide.md
   execution_stage:
     - plugins/shared/modes/mode_godot/agents/
-    - config/agents/executor/general_agent.yaml
 levers:
   reference_miss: {execution_stage: [persona, prompt_skeleton]}
   verification_skipped: {execution_stage: [tool_ids, persona]}

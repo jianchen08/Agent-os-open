@@ -96,3 +96,29 @@ describe('sessionExecutionOptions 快照存取（v2 整包）', () => {
     }
   })
 })
+
+describe('localStorage 不可用容错', () => {
+  it('getItem 抛错（隐私模式）→ 按无记录返回 null 不崩', () => {
+    const spy = vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
+      throw new Error('_quota_')
+    })
+    try {
+      expect(loadSessionExecutionOptions('th-throw')).toBeNull()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('setItem 抛错 → save 显式抛错（诚实失败，不静默假成功）', () => {
+    const spy = vi.spyOn(window.localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('_quota_')
+    })
+    try {
+      expect(() => saveSessionExecutionOptions('th-throw', { values: { a: '1' } })).toThrow(
+        '本地存储不可用',
+      )
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})

@@ -184,7 +184,7 @@ function hardenWindowNavigation(win: BrowserWindow): void {
  * 创建主窗口。
  *
  * 开发环境加载 Vite dev server URL，生产环境加载构建后的 index.html。
- * 窗口默认置顶，创建后注册快捷键、初始化托盘和窗口信息轮询。
+ * 创建后注册快捷键、初始化托盘和窗口信息轮询。
  *
  * @param loadContent - 首屏内容加载器（默认按 dev/prod 分流，见 loadInitialContent）
  */
@@ -196,7 +196,6 @@ function createMainWindow(
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    alwaysOnTop: true,
     // 自定义标题栏：Windows/macOS 隐藏原生标题栏（保留系统边框/缩放/Snap），
     // Linux 不支持 titleBarStyle 用整体无边框；窗口控制（最小化/最大化/关闭）
     // 由前端 TitleBar 组件经 window:self:* IPC 承担

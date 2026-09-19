@@ -47,6 +47,10 @@ EXCLUDE_DIRS = {
     ".git",
     # 工具生成/同步的工作区副本（非产品测试，扫进会把未标记数虚高）
     ".ai_workspaces",
+    # dev 用户空间根（ADR 2026-09-18-dev-local-user-root）：gitignored 运行时
+    # 目录，播种自 %APPDATA%\agentos 的用户插件副本——CI 干净检出无此目录，
+    # 其测试面不属仓库产品（同 .ai_workspaces 口径）。
+    "user_root",
     ".zcode",
     ".zcode_e2e",
     ".covtmp",

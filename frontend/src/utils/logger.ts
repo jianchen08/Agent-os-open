@@ -242,12 +242,6 @@ class LogManager {
     return moduleLogger
   }
 
-  /**
-   * 清除模块缓存
-   */
-  clearCache(): void {
-    this.moduleCache.clear()
-  }
 }
 
 /**

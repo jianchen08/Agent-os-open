@@ -2,6 +2,9 @@
 
 import { ImageAnnotationView } from '@/components/approval/ImageAnnotationView'
 import { MediaTimelineView } from '@/components/approval/MediaTimelineView'
+// 任务域 file_tree 绑定（启停动作/状态词表）——组合根挂载副作用注册，
+// file_tree 通用件经注册缝消费、不感知任务域（2026-09-18 三向耦合审查 W3）
+import '@/components/schema/widgets/taskFileTreeActions'
 import { ArtifactPreviewWidget } from '@/components/schema/widgets/ArtifactPreviewWidget'
 import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
 import { CodeBlockWidget } from '@/components/schema/widgets/CodeBlockWidget'
@@ -20,8 +23,8 @@ import {
   PipelineManagerPanel,
   SettingsHubPanel,
 } from '@/components/schema/widgets/PanelHostWidget'
-import { PluginPagesHubPanel } from '@/components/schema/widgets/PluginPagesHubPanel'
 import { ReviewDocumentWidget } from '@/components/schema/widgets/ReviewDocumentWidget'
+import { WorkspaceNavPage } from '@/components/layout/WorkspaceNavPage'
 import { SortableListWidget } from '@/components/schema/widgets/SortableListWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 import { TableWidget } from '@/components/schema/widgets/TableWidget'
@@ -174,9 +177,9 @@ const WIDGETS: WidgetEntry[] = [
   // 记忆域（hindsight_memory 声明页承载，预置域 widget——交互复杂度
   // 超出声明组台能力，验收标准=入口声明+数据面插件化）
   { name: 'memory_panel', component: MemoryPanelWidget, spaces: ['workspace'] },
-  // 插件页面导航面板（模式体系 §4.1：所有插件 contributes.pages 的统一入口，
-  // 长尾页面全量目录——activity-bar 预算死守的配套件，模式零特例）
-  { name: 'plugin_pages_hub_panel', component: PluginPagesHubPanel, spaces: ['workspace'] },
+  // 统一导航页（新标签页按钮与空标签态同一内容源：workspace 卡片主体验 +
+  // 顶部搜索 + 非 workspace 空间「更多」折叠区，长尾页面全量收录）
+  { name: 'workspace_nav_page', component: WorkspaceNavPage, spaces: ['workspace'] },
   // 四模式面板已退役（模式体系 §2 末 2026-09-15 用户裁定：面板=模式插件自带
   // webview 页，contributes.pages 声明 widget:'webview' 走上方内建注册，前端
   // 不再持有具名面板 widget）

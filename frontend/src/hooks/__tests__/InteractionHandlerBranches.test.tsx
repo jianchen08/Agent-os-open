@@ -311,22 +311,6 @@ describe('mode 分流与去重', () => {
     expect(useInteractionStore.getState().pendingInteractions).toHaveLength(0)
     view.unmount()
   })
-
-  it.each([
-    { topic: 'interaction_cancelled', label: 'cancelled' },
-    { topic: 'interaction_timeout', label: 'timeout' },
-  ])('交互 $label：摘除交互并联动撤下对应通知', async ({ topic }) => {
-    const view = await mountHandler()
-    ws.emit('interaction_request', {
-      request_id: 'req-gone', interaction_mode: 'notification', title: '进度',
-      session_id: 's', thread_id: 't', pipeline_id: 'p',
-    })
-    await waitFor(() => expect(useNotificationStore.getState().notifications).toHaveLength(1))
-    ws.emit(topic, { request_id: 'req-gone' })
-    await waitFor(() => expect(useInteractionStore.getState().pendingInteractions).toHaveLength(0))
-    expect(useNotificationStore.getState().notifications).toHaveLength(0)
-    view.unmount()
-  })
 })
 
 describe('音频通知失败兜底', () => {

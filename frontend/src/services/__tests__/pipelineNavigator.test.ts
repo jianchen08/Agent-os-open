@@ -420,3 +420,29 @@ describe('navigateToPipeline - 全局导航', () => {
     expect(mockSessionListStore.setActiveSession).not.toHaveBeenCalled()
   })
 })
+
+describe('navigateToPipeline - 主管道主标签分支精确路径', () => {
+  it('主标签存在但 pipelineRunId 不匹配（陈旧 runId）→ 按 main-{sid} 主标签切换', async () => {
+    mockSessionStore.activeSessionId = SESSION_A
+    mockSessions = [{ id: SESSION_A, pipelineIds: [MAIN_PIPE_A] }]
+    // runId 指向旧管道 → runId 精确匹配支路不命中，落入主管道特判按 id 找主标签
+    mockTabStore.tabs = [{ id: `main-${SESSION_A}`, pipelineRunId: 'stale-pipe', agentLevel: 1 }]
+
+    const ok = await navigateToPipeline(MAIN_PIPE_A)
+    expect(ok).toBe(true)
+    expect(mockTabStore.switchToTab).toHaveBeenCalledWith(`main-${SESSION_A}`)
+  })
+
+  it('主标签缺失且 tab 非空 → 上报详情带 tab 摘要（id/level/pid）', async () => {
+    mockSessionStore.activeSessionId = SESSION_A
+    mockSessions = [{ id: SESSION_A, pipelineIds: [MAIN_PIPE_A] }]
+    mockTabStore.tabs = [{ id: 'sub-other', agentLevel: 2, pipelineRunId: 'other-pipe' }]
+
+    const ok = await navigateToPipeline(MAIN_PIPE_A)
+    expect(ok).toBe(false)
+    const { notifications } = useNotificationStore.getState()
+    expect(
+      notifications.some((n) => n.message.includes('主标签缺失')),
+    ).toBe(true)
+  })
+})

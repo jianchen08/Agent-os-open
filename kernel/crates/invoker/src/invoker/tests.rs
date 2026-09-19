@@ -1650,8 +1650,9 @@ fn test_extract_mcp_content_empty_content_array() {
         "isError": false
     });
     let extracted = extract_mcp_content(&mcp_result);
-    // 空数组 → and_then 链返回 None → fallback 到 clone 原对象
-    assert_eq!(extracted["content"], json!([]));
+    // 标准 MCP 协议归一：空 content → 空 output 成功信封（不再裸透原始信封）
+    assert_eq!(extracted["success"], true);
+    assert_eq!(extracted["output"], json!({}));
 }
 
 #[test]
@@ -1661,8 +1662,9 @@ fn test_extract_mcp_content_text_not_json() {
         "isError": false
     });
     let extracted = extract_mcp_content(&mcp_result);
-    // text 不是合法 JSON → from_str().ok() 返回 None → fallback 到 clone
-    assert_eq!(extracted["content"][0]["text"], "not_a_json_string");
+    // 标准 MCP 协议归一：非 JSON text 视为普通文本结果（不再裸透原始信封）
+    assert_eq!(extracted["success"], true);
+    assert_eq!(extracted["output"]["text"], "not_a_json_string");
 }
 
 #[test]
@@ -1671,6 +1673,71 @@ fn test_extract_mcp_content_missing_content_field() {
     let extracted = extract_mcp_content(&mcp_result);
     // 无 content 字段 → fallback 到 clone 原对象
     assert_eq!(extracted["isError"], false);
+}
+
+#[test]
+fn test_extract_mcp_content_standard_image_converted_to_images_channel() {
+    // 标准 MCP 多模态字段 → 内部 images 通道（inject_multimodal 来源 2）
+    let mcp_result = json!({
+        "content": [
+            {"type": "text", "text": "Screenshot captured."},
+            {"type": "image", "data": "QUJD", "mimeType": "image/png"}
+        ],
+        "isError": false
+    });
+    let extracted = extract_mcp_content(&mcp_result);
+    assert_eq!(extracted["success"], true);
+    assert_eq!(extracted["output"]["text"], "Screenshot captured.");
+    let images = extracted["output"]["images"].as_array().unwrap();
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0]["base64"], "QUJD");
+    assert_eq!(images[0]["mime_type"], "image/png");
+}
+
+#[test]
+fn test_extract_mcp_content_image_only() {
+    let mcp_result = json!({
+        "content": [{"type": "image", "data": "WFla", "mimeType": "image/jpeg"}],
+        "isError": false
+    });
+    let extracted = extract_mcp_content(&mcp_result);
+    let images = extracted["output"]["images"].as_array().unwrap();
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0]["mime_type"], "image/jpeg");
+    assert!(extracted["output"].get("text").is_none());
+}
+
+#[test]
+fn test_extract_mcp_content_resource_text_joined_with_text() {
+    let mcp_result = json!({
+        "content": [
+            {"type": "text", "text": "line1"},
+            {"type": "resource", "resource": {"text": "res-body"}}
+        ],
+        "isError": false
+    });
+    let extracted = extract_mcp_content(&mcp_result);
+    assert_eq!(
+        extracted["output"]["text"],
+        "line1
+res-body"
+    );
+}
+
+#[test]
+fn test_extract_mcp_content_internal_json_with_image_stays_standard() {
+    // content[0].text 是内部 JSON 但混有 image 项 → 仍走标准转换
+    // （内部约定永不携带 image 项；出现即视为标准 MCP 多段 content）
+    let mcp_result = json!({
+        "content": [
+            {"type": "text", "text": "{\"a\": 1}"},
+            {"type": "image", "data": "QQ==", "mimeType": "image/png"}
+        ],
+        "isError": false
+    });
+    let extracted = extract_mcp_content(&mcp_result);
+    assert_eq!(extracted["output"]["text"], "{\"a\": 1}");
+    assert_eq!(extracted["output"]["images"].as_array().unwrap().len(), 1);
 }
 
 // ── P6 命名治理（ADR 附录 D③）：invoke_pipeline_plugin 读 invoke_entry ──
@@ -2298,14 +2365,16 @@ fn test_extract_mcp_content_multiple_items_takes_first() {
 }
 
 #[test]
-fn test_extract_mcp_content_non_string_text_falls_back() {
-    // text 不是字符串（如数字）→ 提取失败 → fallback 返回原对象。
+fn test_extract_mcp_content_non_string_text_normalized_as_empty() {
+    // text 不是字符串（如数字）→ 非内部 JSON 约定 → 标准协议归一：
+    // text 项按字符串语义取值失败计空 → 空 output 成功信封（不裸透）。
     let mcp_result = json!({
         "content": [{"type": "text", "text": 12345}],
         "isError": false
     });
     let extracted = extract_mcp_content(&mcp_result);
-    assert_eq!(extracted["content"][0]["text"], 12345);
+    assert_eq!(extracted["success"], true);
+    assert_eq!(extracted["output"], json!({}));
 }
 
 // ── sidecar spawn 失败降级（无真实插件进程）──
@@ -3533,6 +3602,144 @@ async fn test_lazy_member_boxed_into_live_host_triggers_respawn() {
 }
 
 #[tokio::test]
+async fn test_missing_spawn_snapshot_with_live_host_rebuilds_on_lazy_pack() {
+    // BUG-44 回归（竞态遗留态）：快路径驱逐（kill 因在飞调用持读锁阻塞数秒）
+    // 与并发 respawn 交错时，驱逐的 spawned_members.remove 段可能落在 respawn
+    // 的「build 写快照 → connect → 缓存写入」窗口内，留下「缓存存活但快照缺失」
+    // 的宿主（kernel.log 2026-09-18 00:21:20-35 实测序列）。
+    //
+    // 快照缺失 = 进程成员集未知——新成员装箱进该宿主后的首调用必须触发整宿主
+    // respawn（按当前分配表重建），不得复用成员集未知的旧进程：复用即
+    // MCP [-32602] tool not found（BUG-44 T1：mode_writing.mode.get_profile
+    // 2ms 即败，装箱调用本身落在指纹 TTL 窗口内，指纹检测被门蔽）。
+    // 指纹保持新鲜 = 真实时序（T1 距上次指纹刷新仅 0.16s）。
+    let loader = Arc::new(MockLoader::new());
+    let manifest_a = make_light_manifest("guard_a", "python server.py");
+    let manifest_b = make_light_manifest("guard_b", "python server.py");
+    loader.add_manifest(manifest_a.clone());
+    loader.add_manifest(manifest_b.clone());
+    let invoker = PluginInvokerImpl::new(loader);
+
+    let host_key = invoker.resolve_host_key(&manifest_a);
+    let live = spawn_long_lived_stdio_client().await;
+    let live_arc = Arc::new(tokio::sync::RwLock::new(live));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(host_key.clone(), Arc::clone(&live_arc));
+    // 快照缺失（竞态遗留态）——刻意不写 spawned_members
+    invoker.fingerprints.write().insert(
+        host_key.clone(),
+        (invoker.host_union_fingerprint(&host_key), Instant::now()),
+    );
+
+    // 新成员 b 装箱进同一未满宿主（分配表成员集变化，快照无法作证）
+    assert_eq!(
+        invoker.resolve_host_key(&manifest_b),
+        host_key,
+        "未满宿主优先塞入（装箱复用已 spawn 宿主）"
+    );
+
+    let result = invoker.get_or_create_mcp_client(&manifest_a).await;
+    // respawn 必须被触发：host 命令解析先于 spawn 失败（_host 未落地，
+    // HOST_DIR_NOT_FOUND）——不得返回缓存实例（旧进程成员集未知）
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("快照缺失（成员集未知）的存活宿主必须整宿主 respawn，不得复用旧进程"),
+    };
+    assert_eq!(
+        err.code.as_deref(),
+        Some("HOST_DIR_NOT_FOUND"),
+        "respawn 路径证据：{err}"
+    );
+    // 旧宿主进程被 kill + 缓存逐出
+    wait_until_killed(&live_arc, "成员集未知的宿主必须 kill 重建").await;
+    assert!(invoker.mcp_clients.read().get(&host_key).is_none());
+}
+
+#[tokio::test]
+async fn test_blocked_eviction_cannot_delete_concurrently_respawned_snapshot() {
+    // BUG-44 根因回归（驱逐/respawn 串行化）：快路径驱逐的 kill 段会因在飞
+    // 调用持读锁而阻塞，阻塞期间缓存条目被并发 respawn 替换（新实例 + 新快照）
+    // 时，驱逐苏醒后的 remove 段不得误删新条目与新快照——否则留下「缓存存活
+    // 但快照缺失」的宿主（漂移检测盲区，见
+    // test_missing_spawn_snapshot_with_live_host_rebuilds_on_lazy_pack）。
+    let loader = Arc::new(MockLoader::new());
+    let manifest_a = make_light_manifest("guard_a", "python server.py");
+    loader.add_manifest(manifest_a.clone());
+    let invoker = Arc::new(PluginInvokerImpl::new(loader));
+
+    let host_key = invoker.resolve_host_key(&manifest_a);
+    let old = spawn_long_lived_stdio_client().await;
+    let old_arc = Arc::new(tokio::sync::RwLock::new(old));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(host_key.clone(), Arc::clone(&old_arc));
+    invoker
+        .spawned_members
+        .write()
+        .insert(host_key.clone(), invoker.host_members(&host_key));
+    // 预置过期且错误的指纹（TTL 已过 + 值必不匹配）——确保走 stale 驱逐分支
+    invoker.fingerprints.write().insert(
+        host_key.clone(),
+        (42u64, Instant::now() - Duration::from_secs(2)),
+    );
+
+    // 在飞调用持读锁（kill 阻塞前提），并发触发驱逐（指纹已回写 2s 前必判 stale）
+    let reader = old_arc.read().await;
+    let invoker_ref = Arc::clone(&invoker);
+    let manifest_ref = manifest_a.clone();
+    let key_ref = host_key.clone();
+    let evict_task = tokio::spawn(async move {
+        invoker_ref
+            .reuse_cached_host_fast_path(&key_ref, &manifest_ref)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 阻塞窗口内并发 respawn 完成：缓存条目替换为新实例 + 新成员集快照
+    let fresh = spawn_long_lived_stdio_client().await;
+    let fresh_arc = Arc::new(tokio::sync::RwLock::new(fresh));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(host_key.clone(), Arc::clone(&fresh_arc));
+    let mut respawned_members = invoker.host_members(&host_key);
+    respawned_members.push("guard_b".to_string());
+    respawned_members.sort();
+    invoker
+        .spawned_members
+        .write()
+        .insert(host_key.clone(), respawned_members.clone());
+
+    // 放行在飞调用 → 阻塞中的驱逐苏醒
+    drop(reader);
+    let evicted = evict_task.await.expect("驱逐任务不应 panic");
+    assert!(
+        evicted.is_none(),
+        "stale 判定必须驱逐（返回 None 进 slow path）"
+    );
+
+    // 新条目与新快照必须原样保留（驱逐的 remove 段不得落到替换后的状态上）
+    let cached_after = invoker
+        .mcp_clients
+        .read()
+        .get(&host_key)
+        .cloned()
+        .expect("并发 respawn 写入的新缓存条目不得被迟到驱逐误删");
+    assert!(
+        Arc::ptr_eq(&cached_after, &fresh_arc),
+        "缓存条目必须仍是 respawn 后的新实例"
+    );
+    assert_eq!(
+        invoker.spawned_members.read().get(&host_key).cloned(),
+        Some(respawned_members),
+        "并发 respawn 写入的新快照不得被迟到驱逐误删"
+    );
+}
+
+#[tokio::test]
 async fn test_spawn_lock_per_host_granularity() {
     // spawn 锁粒度（§4.2 第 4 条）：per-host-key——同宿主成员共享锁条目
     // （串行 spawn），跨宿主各自独立锁条目（并行 spawn）。
@@ -3590,7 +3797,12 @@ async fn test_resolve_group_host_command_contract() {
     let invoker = PluginInvokerImpl::new(loader);
 
     let (cmd, args, workdir) = invoker
-        .resolve_group_host_command("light", 3, &["b_guard".to_string(), "a_guard".to_string()])
+        .resolve_group_host_command(
+            "light",
+            3,
+            &["b_guard".to_string(), "a_guard".to_string()],
+            None,
+        )
         .expect("参数契约解析应成功");
     assert_eq!(
         cmd,
@@ -3621,7 +3833,7 @@ async fn test_resolve_group_host_command_contract() {
     );
     let invoker2 = PluginInvokerImpl::new(empty_loader);
     let err = invoker2
-        .resolve_group_host_command("light", 1, &["ghost".to_string()])
+        .resolve_group_host_command("light", 1, &["ghost".to_string()], None)
         .expect_err("无 _host 目录必须 fail-closed");
     assert_eq!(err.code.as_deref(), Some("HOST_DIR_NOT_FOUND"));
 
@@ -3637,9 +3849,118 @@ async fn test_resolve_group_host_command_contract() {
         .insert("m".to_string(), bare_member.to_string_lossy().into_owned());
     let invoker3 = PluginInvokerImpl::new(loader3);
     let err3 = invoker3
-        .resolve_group_host_command("light", 1, &["m".to_string()])
+        .resolve_group_host_command("light", 1, &["m".to_string()], None)
         .expect_err("共享 venv 缺失必须 fail-closed");
     assert_eq!(err3.code.as_deref(), Some("HOST_VENV_MISSING"));
+}
+
+#[test]
+fn test_resolve_group_host_command_falls_back_to_builtin_root_host_dir() {
+    // 回退场景①：全组成员落非内置根（模式包用户副本赢后合宿组全落用户空间，
+    // 祖先链无 _host）→ 探测全空回退内置根 _host/，workdir/解释器 = 内置根侧
+    // 原件（运行环境 junction 补救的内核侧永久化）。
+    let builtin = tempfile::tempdir().unwrap();
+    let builtin_host = builtin.path().join(GROUP_HOST_DIR);
+    let builtin_interp = fake_venv(&builtin_host, true);
+    std::fs::write(builtin_host.join("host.py"), b"# host stub").unwrap();
+
+    // 用户空间成员：独立临时根下 modes/mode_x，向上到文件系统根均无 _host
+    let user_space = tempfile::tempdir().unwrap();
+    let member_dir = user_space.path().join("modes").join("mode_x");
+    std::fs::create_dir_all(&member_dir).unwrap();
+
+    let loader = Arc::new(MockLoader::new());
+    loader.plugin_dirs.write().insert(
+        "mode_x".to_string(),
+        member_dir.to_string_lossy().into_owned(),
+    );
+    let invoker = PluginInvokerImpl::new(loader);
+
+    let (cmd, args, workdir) = invoker
+        .resolve_group_host_command("light", 1, &["mode_x".to_string()], Some(builtin.path()))
+        .expect("探测全空必须回退内置根 _host/");
+    assert_eq!(
+        workdir,
+        builtin_host.to_string_lossy().into_owned(),
+        "回退命中内置根 _host/"
+    );
+    assert_eq!(
+        cmd,
+        builtin_interp.to_string_lossy().into_owned(),
+        "解释器 = 内置根共享 venv"
+    );
+    assert_eq!(
+        args,
+        vec![
+            "host.py".to_string(),
+            "--group".to_string(),
+            "light".to_string(),
+            "--slot".to_string(),
+            "1".to_string(),
+            "--members".to_string(),
+            "mode_x".to_string(),
+        ]
+    );
+
+    // 回退位无 _host → 回退亦未命中，fail-closed 不变（回退不是兜底放行）
+    let bare_builtin = tempfile::tempdir().unwrap();
+    let err = invoker
+        .resolve_group_host_command(
+            "light",
+            1,
+            &["mode_x".to_string()],
+            Some(bare_builtin.path()),
+        )
+        .expect_err("内置根回退位无 _host 必须照旧 fail-closed");
+    assert_eq!(err.code.as_deref(), Some("HOST_DIR_NOT_FOUND"));
+}
+
+#[test]
+fn test_resolve_group_host_command_member_probe_wins_over_builtin_fallback() {
+    // 回退场景②：成员在内置根（仓库侧现状布局）→ 向上探测命中最近祖先
+    // _host，行为与旧路径一致；回退位放另一份 _host（不同解释器）即可判
+    // 优先序——探测序在前，回退位不被误用。
+    let builtin = tempfile::tempdir().unwrap();
+    let member_host = builtin.path().join(GROUP_HOST_DIR);
+    let member_interp = fake_venv(&member_host, true);
+    std::fs::write(member_host.join("host.py"), b"# host stub").unwrap();
+
+    let decoy_root = tempfile::tempdir().unwrap();
+    let decoy_interp = fake_venv(&decoy_root.path().join(GROUP_HOST_DIR), true);
+    assert_ne!(
+        member_interp, decoy_interp,
+        "两份 _host 解释器路径必须可区分，否则判不了优先序"
+    );
+
+    // 成员目录：内置根下 pipeline/input/guard_a（仓库侧 plugins/shared 布局）
+    let member_dir = builtin
+        .path()
+        .join("pipeline")
+        .join("input")
+        .join("guard_a");
+    std::fs::create_dir_all(&member_dir).unwrap();
+
+    let loader = Arc::new(MockLoader::new());
+    loader.plugin_dirs.write().insert(
+        "guard_a".to_string(),
+        member_dir.to_string_lossy().into_owned(),
+    );
+    let invoker = PluginInvokerImpl::new(loader);
+
+    let (cmd, _, workdir) = invoker
+        .resolve_group_host_command(
+            "light",
+            1,
+            &["guard_a".to_string()],
+            Some(decoy_root.path()),
+        )
+        .expect("成员祖先链 _host 命中时不得走回退");
+    assert_eq!(
+        workdir,
+        member_host.to_string_lossy().into_owned(),
+        "最近祖先 _host 优先（旧路径行为零变化）"
+    );
+    assert_eq!(cmd, member_interp.to_string_lossy().into_owned());
 }
 
 #[test]
@@ -4014,6 +4335,12 @@ async fn test_idle_gc_exempts_keep_warm_host_group() {
         .mcp_clients
         .write()
         .insert(warm_host.clone(), live_warm.clone());
+    // 夹具补全：生产路径 spawn 快照写入先于客户端入缓存（缺快照 = 成员集
+    // 未知，BUG-44 修复后按漂移处理整宿主重建，预热测试需遵守同一不变量）
+    invoker
+        .spawned_members
+        .write()
+        .insert(warm_host.clone(), invoker.host_members(&warm_host));
     invoker.touch_last_used(&warm_host);
 
     let lazy_host = invoker.resolve_host_key(&make_sidecar_manifest("lazy_b", "python server.py"));
@@ -4073,6 +4400,12 @@ async fn test_explicit_unload_still_works_on_keep_warm_host() {
         .mcp_clients
         .write()
         .insert(host.clone(), live.clone());
+    // 夹具补全（同 test_idle_gc_exempts_keep_warm_host_group）：spawn 快照
+    // 先于缓存写入的生产不变量，warmup 才能走「复用」而非「未知成员集重建」
+    invoker
+        .spawned_members
+        .write()
+        .insert(host.clone(), invoker.host_members(&host));
     invoker.touch_last_used(&host);
     let _ = invoker
         .warmup_sidecar(&make_light_manifest("warm_c", "python server.py"))
@@ -5505,9 +5838,15 @@ async fn is_host_stale_solo_detects_change_after_ttl() {
 }
 
 #[tokio::test]
-async fn light_host_missing_spawn_snapshot_reuses_cached_client() {
-    // 漂移检测保守分支：light 宿主缓存条目无 spawn 成员集快照（只可能来自
-    // 测试手工注入）→ 按**无漂移**处理，不误杀，fast path 直接复用缓存实例。
+async fn light_host_missing_spawn_snapshot_rebuilds_cached_host() {
+    // 漂移检测 fail-closed 分支（BUG-44 契约反转）：light 宿主缓存条目无
+    // spawn 成员集快照 = 进程成员集未知——复用未知成员集的进程正是 BUG-44
+    // T1 复用旧宿主报 MCP [-32602] 的形态，必须按漂移处理整宿主重建
+    // （respawn 按当前分配表重写快照，自愈有界），不得保守复用。
+    // 前契约（保守不杀，本测试旧名 light_host_missing_spawn_snapshot_reuses_
+    // cached_client）建立在「生产路径缓存条目必带快照」的不变量上；该不变量
+    // 被快路径驱逐/respawn 竞态打破（见
+    // test_blocked_eviction_cannot_delete_concurrently_respawned_snapshot）。
     let loader = Arc::new(MockLoader::new());
     let manifest = make_light_manifest("snap_missing", "python server.py");
     loader.add_manifest(manifest.clone());
@@ -5523,18 +5862,19 @@ async fn light_host_missing_spawn_snapshot_reuses_cached_client() {
         .insert(host_key.clone(), Arc::clone(&live_arc));
     // 刻意不写 spawned_members 快照
 
-    let got = invoker
-        .get_or_create_mcp_client(&manifest)
-        .await
-        .expect("快照缺失按无漂移处理，应复用缓存实例");
-    assert!(
-        Arc::ptr_eq(&got, &live_arc),
-        "快照缺失不得误杀（保守复用缓存实例）"
+    // respawn 被触发：host 命令解析先于 spawn 失败（_host 未落地，
+    // HOST_DIR_NOT_FOUND）——不得返回缓存实例（成员集未知）
+    let err = match invoker.get_or_create_mcp_client(&manifest).await {
+        Err(e) => e,
+        Ok(_) => panic!("快照缺失（成员集未知）必须整宿主 respawn，不得复用缓存实例"),
+    };
+    assert_eq!(
+        err.code.as_deref(),
+        Some("HOST_DIR_NOT_FOUND"),
+        "respawn 路径证据：{err}"
     );
-    assert!(
-        live_arc.read().await.is_alive().await,
-        "复用路径不得 kill 存活宿主"
-    );
+    wait_until_killed(&live_arc, "成员集未知的宿主必须 kill 重建").await;
+    assert!(invoker.mcp_clients.read().get(&host_key).is_none());
 }
 
 #[tokio::test]
@@ -6416,4 +6756,96 @@ fn is_cohost_member_exclusion_matrix() {
         is_cohost_member(&no_endpoint),
         "无 endpoint 声明 = 无外部进程，仍参与合宿"
     );
+}
+
+// ── sanitize_external_mcp_arguments（external MCP 出参归一）──
+
+#[test]
+fn test_sanitize_schema_whitelist_beats_injection() {
+    let mut m = make_sidecar_manifest("mcp_x", "mcp:external");
+    m.entry = "mcp:external".to_string();
+    m.capabilities.tools = vec![agentos_core::traits::ToolCapability {
+        name: "Snapshot".to_string(),
+        description: None,
+        input_schema: Some(json!({
+            "type": "object",
+            "properties": {"use_vision": {"type": "boolean"}}
+        })),
+        output_schema: None,
+        category: None,
+        ui: None,
+        render: None,
+        smoke: None,
+        timeout_ms: None,
+    }];
+    let inputs = json!({
+        "use_vision": true,
+        "loc": [1, 2],
+        "parent_agent_level": 1,
+        "pipeline_id": "p1",
+        "thread_id": "t1",
+        "timestamp": "2026-09-18T00:00:00Z",
+        "user_id": 1,
+        "_call_context": {"k": 1},
+        "session_id": "s1"
+    });
+    let out = sanitize_external_mcp_arguments(&m, "Snapshot", &inputs);
+    // 声明白名单：仅 use_vision 幸存（loc 未声明也剥——注入键会随调用方增长，
+    // 枚举是打地鼠；schema 就是白名单）
+    assert_eq!(out, json!({"use_vision": true}));
+}
+
+#[test]
+fn test_sanitize_unknown_schema_falls_back_to_blocklist() {
+    let mut m = make_sidecar_manifest("mcp_x", "mcp:external");
+    m.entry = "mcp:external".to_string();
+    m.capabilities.tools = vec![agentos_core::traits::ToolCapability {
+        name: "Mystery".to_string(),
+        description: None,
+        input_schema: None,
+        output_schema: None,
+        category: None,
+        ui: None,
+        render: None,
+        smoke: None,
+        timeout_ms: None,
+    }];
+    let inputs = json!({"query": "x", "_call_context": {}, "pipeline_id": "p"});
+    let out = sanitize_external_mcp_arguments(&m, "Mystery", &inputs);
+    assert_eq!(out, json!({"query": "x"}));
+}
+
+#[test]
+fn test_sanitize_non_object_passthrough() {
+    let m = make_sidecar_manifest("mcp_x", "mcp:external");
+    assert_eq!(
+        sanitize_external_mcp_arguments(&m, "T", &json!(null)),
+        json!(null)
+    );
+    assert_eq!(
+        sanitize_external_mcp_arguments(&m, "T", &json!([1, 2])),
+        json!([1, 2])
+    );
+}
+
+#[test]
+fn test_sanitize_null_values_dropped_for_declared() {
+    let mut m = make_sidecar_manifest("mcp_x", "mcp:external");
+    m.entry = "mcp:external".to_string();
+    m.capabilities.tools = vec![agentos_core::traits::ToolCapability {
+        name: "Click".to_string(),
+        description: None,
+        input_schema: Some(
+            json!({"type": "object", "properties": {"label": {"type": "integer"}, "loc": {"type": "array"}}}),
+        ),
+        output_schema: None,
+        category: None,
+        ui: None,
+        render: None,
+        smoke: None,
+        timeout_ms: None,
+    }];
+    let inputs = json!({"label": 3, "loc": null});
+    let out = sanitize_external_mcp_arguments(&m, "Click", &inputs);
+    assert_eq!(out, json!({"label": 3}));
 }

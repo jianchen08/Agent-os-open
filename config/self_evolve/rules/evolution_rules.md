@@ -69,6 +69,8 @@ constraint / side_effect）。behavior_class 是主键，两级轴用于复盘�
 | agent_misdispatch | dispatch | task_dispatch_guide.md → orchestrator 配置 |
 | eval_no_settle | evaluation | evaluation 指标参数 → criteria 模板（注意：evaluation_metrics.yaml 为 B 部类时只报告） |
 
+杠杆落点为提示词类物料（persona / 提示词骨架 / task_dispatch_guide / 技能规则）时，编辑规范从 `skills/prompt-rule-engineering/SKILL.md` 取：按「症状→部分→改法」表定位最小修改面；行为规则禁用模糊词黑名单（尽量/适当/可能/一般来说/考虑/酌情/相关）；Holdout 验证与本文件「防过拟合纪律」同源。
+
 杠杆命中率表见 `eval_health_report` 返回的 `levers`——优先选命中率高的杠杆。
 
 ## 防过拟合纪律（红线）

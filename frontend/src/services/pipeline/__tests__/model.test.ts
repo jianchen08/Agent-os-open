@@ -120,3 +120,10 @@ describe('model — raw data 路径不可变更新', () => {
     expect(next.loop_bodies[1].steps[0].steps[1]).toBe('{{state.core_plugin}}')
   })
 })
+
+describe('setAtPath - 病态中间层', () => {
+  it('中间层为 null/标量 → 原位替换为空对象后写入', () => {
+    expect(setAtPath({ a: null } as never, ['a', 'b'] as never, 1)).toEqual({ a: { b: 1 } })
+    expect(setAtPath({ a: 'scalar' } as never, ['a', 'b'] as never, 2)).toEqual({ a: { b: 2 } })
+  })
+})

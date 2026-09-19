@@ -225,7 +225,7 @@ class GlobalWebSocketService {
       this._reconnectAttempts = 0
       this._flushQueue()
       this._startHeartbeat()
-      this._emit('_status', { status: 'connected' })
+      this._emit(WS_LOCAL_EVENTS.STATUS, { status: 'connected' })
       this._emit('connect', { status: 'connected' })
       if (isReconnect) {
         this._emit(WS_LOCAL_EVENTS.RECONNECTED, { status: 'connected' })
@@ -293,7 +293,7 @@ class GlobalWebSocketService {
       }
       this._status = 'disconnected'
       this._stopHeartbeat()
-      this._emit('_status', { status: 'disconnected', code: event.code, reason: event.reason })
+      this._emit(WS_LOCAL_EVENTS.STATUS, { status: 'disconnected', code: event.code, reason: event.reason })
       useLayoutModeStore.getState().updateConnectionStatus({ state: 'disconnected' })
 
       if (event.code === WebSocketErrorCode.CONNECTION_REPLACED) {
@@ -663,7 +663,7 @@ class GlobalWebSocketService {
 
     // 标记为重连中，更新 UI 状态
     this._status = 'reconnecting'
-    this._emit('_status', { status: 'reconnecting' })
+    this._emit(WS_LOCAL_EVENTS.STATUS, { status: 'reconnecting' })
     useLayoutModeStore.getState().updateConnectionStatus({ state: 'reconnecting' })
 
     let delay: number

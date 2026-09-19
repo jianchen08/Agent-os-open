@@ -8,7 +8,7 @@ panel_page_id: roleplay_studio
 chain:
   entry: main
   expected_path: [main]
-  executor_pool: [executor/general_agent]
+  executor_pool: []
   entry_override: null
 pipeline_profile:
   pipeline: autonomous
@@ -24,7 +24,6 @@ material_scope:
     - config/agents/main/task_dispatch_guide.md
   execution_stage:
     - config/agents/main/persona/
-    - config/agents/executor/general_agent.yaml
 levers:
   boundary_violation: {execution_stage: [persona, prompt_skeleton]}
   tone_violation: {execution_stage: [persona]}

@@ -288,7 +288,10 @@ export const useNotificationStore = create<NotificationState>()((set, get) => ({
         get().dismissNotification(notificationId)
         break
       case 'confirm':
-        get().confirmBlockingNotification(action.id)
+        // 不带 actionId：confirm 动作按默认确认处理（解除阻塞+已读）。
+        // 带 id 重入会构成 confirm↔executeAction 无限互递归（动作必带 id，
+        // 用户点击确认按钮即栈溢出），navigate/dismiss/custom 不受影响。
+        get().confirmBlockingNotification()
         break
       case 'navigate':
         // 导航由组件层处理，此处仅标记已读

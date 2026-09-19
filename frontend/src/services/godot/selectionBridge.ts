@@ -9,7 +9,7 @@
  *
  * 初始化（initGodotSelection）：订阅 thread + 拉取当前快照 + 挂 WS 事件监听（幂等，仅首次挂）。
  */
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { WS_LOCAL_EVENTS, WS_SERVER_EVENTS } from '@/constants/websocket'
 import apiClient from '@/services/api/client'
 import { PIPELINE_GODOT_CONTEXT_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { ErrorSeverity, ErrorType, reportError } from '@/services/errorReporting'
@@ -80,7 +80,7 @@ function hookWsEvents(): void {
   wsHooked = true
   // sidecar 重载/重连会清空插件订阅表——重连后重新订阅当前线程并拉快照，
   // 否则实时事件静默失效（必须手动刷新页面才恢复）。
-  globalWS.subscribe('reconnected', () => {
+  globalWS.subscribe(WS_LOCAL_EVENTS.RECONNECTED, () => {
     if (currentThread) void initGodotSelection(currentThread)
   })
   // 低频重申订阅：sidecar 重载（插件热更新等）会清空其内存订阅表且无前端可感知

@@ -64,14 +64,10 @@ export async function retry<T>(
 ): Promise<T> {
   const { maxAttempts = 3, delayMs = 1000, shouldRetry = isRetryableError } = options
 
-  let lastError: unknown
-
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       return await fn()
     } catch (error) {
-      lastError = error
-
       if (attempt < maxAttempts && shouldRetry(error)) {
         await delay(delayMs * attempt)
         continue
@@ -80,8 +76,9 @@ export async function retry<T>(
       throw error
     }
   }
-
-  throw lastError
+  // maxAttempts<=0 的退化输入在此落到（循环体对 >=1 恒 return/throw）：
+  // 类型上必须收尾，不能当不可达死代码删
+  throw new Error(`retry: maxAttempts=${maxAttempts} 无效，未执行任何尝试`)
 }
 
 /** 带重试的请求包装器（兼容现有API调用） */

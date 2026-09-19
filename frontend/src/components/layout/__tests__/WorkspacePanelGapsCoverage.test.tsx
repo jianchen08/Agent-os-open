@@ -23,17 +23,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { WorkspacePanel } from '@/components/layout/WorkspacePanel'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { makeTab } from './helpers/workspaceTabFactory'
 import type { WorkspaceTab } from '@/types/layout'
-
-function makeTab(overrides: Partial<WorkspaceTab> = {}): WorkspaceTab {
-  return {
-    id: 'tab-1',
-    title: '标签1',
-    isActive: true,
-    isPinned: false,
-    ...overrides,
-  } as WorkspaceTab
-}
 
 /** 与 FiveSpaceLayout 相同的数据流：tabs/visited 取自 layoutModeStore */
 function StoreDrivenPanel(extra: Record<string, unknown> = {}) {

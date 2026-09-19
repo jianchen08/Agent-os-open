@@ -307,3 +307,26 @@ describe('notificationStore 计数与过滤', () => {
     expect(store.getState().getUnreadCount()).toBe(2)
   })
 })
+
+describe('executeAction - confirm 动作', () => {
+  it('action.action=confirm → 走 confirmBlockingNotification（解除阻塞+已读）', () => {
+    const item = {
+      id: 'n-confirm',
+      title: '需要确认',
+      message: '确认执行？',
+      priority: 'high' as NotificationPriority,
+      category: 'approval',
+      isRead: false,
+      isBlocking: true,
+      actions: [{ label: '确认', action: 'confirm', id: 'act-1' }],
+    } as unknown as NotificationItem
+    store.setState({ notifications: [item] })
+    store.setState({ activeBlockingNotification: item })
+
+    store.getState().executeAction('n-confirm', { action: 'confirm', id: 'act-1' })
+
+    const state = store.getState()
+    expect(state.activeBlockingNotification).toBeNull()
+    expect(state.notifications.find((n) => n.id === 'n-confirm')?.isRead).toBe(true)
+  })
+})

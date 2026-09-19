@@ -195,3 +195,21 @@ describe('uiStorage 便捷封装', () => {
     expect(uiStorage.getThinkingModeEnabled()).toBe(true)
   })
 })
+
+describe('getItem 非法裸字符串回退', () => {
+  it.each(['system', 'light', 'dark'] as const)(
+    '裸字符串 %s（非法 JSON）→ 原样返回主题字符串',
+    (raw) => {
+      localStorage.setItem('raw-theme', raw)
+      expect(storage.getItem('raw-theme')).toBe(raw)
+    },
+  )
+
+  it.each([
+    ['true', true],
+    ['false', false],
+  ])('合法 JSON 字面量 %s → try 内直接解析为 %s（不经回退分支）', (raw, expected) => {
+    localStorage.setItem('raw-bool', raw)
+    expect(storage.getItem('raw-bool')).toBe(expected)
+  })
+})

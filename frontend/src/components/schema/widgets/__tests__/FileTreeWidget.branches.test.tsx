@@ -69,6 +69,7 @@ vi.mock('../FileTreeContextMenu', () => ({
 }))
 import { pauseTask, resumeTask } from '@/services/api/tasks'
 import { FileTreeWidget } from '../FileTreeWidget'
+import '../taskFileTreeActions' // 任务域绑定副作用（启停/状态词表经注册缝注入）
 import type { ContextMenuContext } from '../FileTreeContextMenu'
 import type { ReactElement } from 'react'
 
@@ -460,7 +461,7 @@ describe('操作按钮', () => {
     }
   })
 
-  it('独立工作空间节点：点击注册工作区页签', () => {
+  const renderIsolatedWsNode = () =>
     render(
       <FileTreeWidget
         data={[
@@ -468,6 +469,9 @@ describe('操作按钮', () => {
         ]}
       />,
     )
+
+  it('独立工作空间节点：点击注册工作区页签', () => {
+    renderIsolatedWsNode()
     fireEvent.click(screen.getByTitle('打开工作空间: /ws/w1'))
     expect(layoutState.addWorkspaceTab).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -481,13 +485,7 @@ describe('操作按钮', () => {
 
   it('工作区页签已存在时只激活，不重复注册', () => {
     layoutState.workspaceTabs = [{ id: 'ws-tree-w1' }]
-    render(
-      <FileTreeWidget
-        data={[
-          { id: 'w1', title: '工作区任务', status: 'running', ws_mode: 'isolated', ws_path: '/ws/w1' },
-        ]}
-      />,
-    )
+    renderIsolatedWsNode()
     fireEvent.click(screen.getByTitle('打开工作空间: /ws/w1'))
     expect(layoutState.setActiveTab).toHaveBeenCalledWith('ws-tree-w1')
     expect(layoutState.addWorkspaceTab).not.toHaveBeenCalled()

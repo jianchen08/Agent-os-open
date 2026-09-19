@@ -19,9 +19,12 @@ import type { ApiError } from '../../types/api'
 // 可选端点请求级标记（axios 配置扩展）：调用服务对"前端会调但后端可能尚未
 // 实现/非核心路径"的请求显式声明，拦截器据此静默其 404——判定由调用方显式
 // 标记，不再做 URL 子串猜测。
+// silent：调用方自持失败 UX（本地 toast 等），拦截器只 reject 不再 reportError
+// 上报，避免同一失败双吐司。
 declare module 'axios' {
   export interface AxiosRequestConfig {
     optional?: boolean
+    silent?: boolean
   }
 }
 
@@ -315,7 +318,7 @@ apiClient.interceptors.response.use(
     // datasource 占位护栏已移除（G6-a）：/api/v1/datasource/{*rest} 由内核真实路由接管，
     // 404 即真实未命中（前端 fetchDatasourceOptions 正常注册表兜底空选项）。
 
-    if (!isOptionalEndpoint) {
+    if (!isOptionalEndpoint && originalRequest.silent !== true) {
       // 非可选端点的 404 视为需要排查的异常路径，DEV 下输出 URL 便于快速定位。
       if (import.meta.env.DEV && error.response?.status === 404) {
         console.warn(`[API-404] url=${String(originalRequest.url ?? '')} status=404`)

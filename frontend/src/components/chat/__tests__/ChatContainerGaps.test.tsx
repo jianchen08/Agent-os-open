@@ -102,8 +102,8 @@ vi.mock('../ChatInput', () => ({
     return <div data-testid="stub-chat-input" />
   },
 }))
-vi.mock('../GodotSelectionRow', () => ({
-  GodotSelectionRow: () => <div data-testid="stub-godot-row" />,
+vi.mock('../ReferenceSelectionRow', () => ({
+  ReferenceSelectionRow: () => <div data-testid="stub-reference-row" />,
 }))
 vi.mock('../PendingInputQueueBar', () => ({
   PendingInputQueueBar: (props: { pipelineId: string }) => {

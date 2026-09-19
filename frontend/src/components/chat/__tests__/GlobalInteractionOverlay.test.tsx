@@ -3,8 +3,10 @@
  * GlobalInteractionOverlay 全局交互浮层测试
  *
  * 覆盖：待处理列表过滤（仅 pending）、多卡片导航（上一个/下一个 + 边界禁用 +
- * 索引自动重置）、最小化浮窗与恢复、遮罩/按钮/ESC 关闭、三类响应回调的参数
- * 投影与失败提示、跨卡片提交互斥守卫。
+ * 索引自动重置）、最小化徽标（含审批倒计时，BUG-43）与恢复、按钮/ESC 关闭、
+ * 三类响应回调的参数投影与失败提示、跨卡片提交互斥守卫、浮层不拦截 composer
+ * （BUG-43：右下悬浮锚定 composer 上缘 + 宽度有界，接替 BUG-14 遮罩不拦截
+ * 契约——遮罩已随横贯底部布局一并移除）。
  *
  * mock 约定：useInteractionHandler（WebSocket 编排层）、toast、logger 为外部
  * 边界整模块 mock；InteractionCard 以按钮桩替身回放回调参数；两个 zustand
@@ -213,7 +215,7 @@ describe('GlobalInteractionOverlay 关闭与最小化', () => {
     expect(useInteractionStore.getState().pendingInteractions).toHaveLength(0)
   })
 
-  it('最小化按钮收起为浮窗；恢复后浮窗点击还原卡片', () => {
+  it('最小化按钮收起为徽标；恢复后徽标点击还原卡片', () => {
     render(<GlobalInteractionOverlay />)
     fireEvent.click(screen.getByTitle('最小化'))
     expect(useInteractionStore.getState().isMinimized).toBe(true)
@@ -223,24 +225,8 @@ describe('GlobalInteractionOverlay 关闭与最小化', () => {
     expect(useInteractionStore.getState().isMinimized).toBe(false)
   })
 
-  it('遮罩仅视觉半透明不拦截指针（BUG-14）：点击遮罩不再切换最小化，卡片区域可交互', () => {
-    setInteractions([makeInteraction()])
-    render(<GlobalInteractionOverlay />)
-
-    const mask = document.querySelector('.absolute.inset-0') as HTMLElement
-    expect(mask).toBeInTheDocument()
-    // 遮罩不拦截指针：底部条带内遮罩之下的其他 UI 保持可点击
-    expect(mask.className).toContain('pointer-events-none')
-    expect(mask.className).not.toContain('pointer-events-auto')
-
-    // 点击遮罩区域不再触发最小化（待审批不阻塞用户其他操作）
-    fireEvent.click(mask)
-    expect(useInteractionStore.getState().isMinimized).toBe(false)
-
-    // 卡片容器保持可交互
-    const cardContainer = card().closest('.pointer-events-auto')
-    expect(cardContainer).not.toBeNull()
-  })
+  // BUG-43：横贯底部的半透明遮罩随旧布局移除——非阻断改为结构性保证
+  // （浮层右下悬浮锚定 composer 上缘，见「BUG-43 浮层不拦截 composer」组）。
 })
 
 describe('GlobalInteractionOverlay 响应回调', () => {
@@ -381,13 +367,138 @@ describe('GlobalInteractionOverlay 响应回调', () => {
 })
 
 describe('BUG-40 卡片宽度自适应', () => {
-  it('卡片宽度容器在视口内自适应加宽：max-w 上限 + w-full 小视口收缩 + mx-4 视口边距', () => {
+  it('浮层宽度有界不横向溢出：min(26rem, 视口-2rem)，右锚定不横贯底部', () => {
     setInteractions([makeInteraction()])
     render(<GlobalInteractionOverlay />)
-    // 宽度上限容器：宽度 = min(上限, 视口-32px)，长选项卡片在宽视口下更宽
-    const widthBox = card().closest('.max-w-4xl')
-    expect(widthBox).not.toBeNull()
-    expect(widthBox!.className).toMatch(/w-full/)
-    expect(widthBox!.className).toMatch(/mx-4/)
+    // 宽度上限容器：宽度 = min(26rem, 视口-32px)，长选项卡片在窄视口不横向溢出；
+    // 右锚定（无 inset-x-0/w-full）——不再横贯底部（BUG-43 非阻断定位）
+    const panel = document.querySelector('[data-testid="interaction-overlay-panel"]')
+    expect(panel).not.toBeNull()
+    expect(panel!.className).toMatch(/w-\[min\(26rem,calc\(100vw-2rem\)\)\]/)
+    expect(panel!.className).toMatch(/right-4/)
+    expect(panel!.className).not.toMatch(/inset-x-0/)
+    expect(panel!.className).not.toMatch(/(^|\s)w-full(\s|$)/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+//  BUG-43 浮层不拦截 composer
+//
+//  composer 全宽横贯底部（ChatContainer px-3 + ChatInput w-full），浮层贴底
+//  必压输入区（含发送按钮）——契约：浮层实测 composer 几何抬升至其上缘；
+//  收起徽标同样避让。jsdom 无布局引擎（getBoundingClientRect 全零、
+//  elementFromPoint 未实现），注入受控几何的最小命中测试：
+//  矩形取自 1440×900 视口的真实布局推算，命中语义与真实 DOM 一致
+//  （矩形包含该点的最上层元素胜出，注册序靠后 = 更上层，对应 z-[10000]）。
+// ---------------------------------------------------------------------------
+type HitRect = { left: number; top: number; right: number; bottom: number }
+
+function installHitTest(rects: Array<[Element, HitRect]>) {
+  const doc = document as unknown as {
+    elementFromPoint?: (x: number, y: number) => Element | null
+  }
+  doc.elementFromPoint = (x: number, y: number) => {
+    let hit: Element | null = null
+    for (const [el, r] of rects) {
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) hit = el
+    }
+    return hit
+  }
+}
+
+function uninstallHitTest() {
+  delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint
+}
+
+function stubViewport() {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 })
+}
+
+/** composer 桩：全宽贴底、顶缘 y=770（高 130px），须在浮层挂载前入 DOM */
+function stubComposer(): HTMLElement {
+  const el = document.createElement('div')
+  el.setAttribute('data-testid', 'chat-composer')
+  Object.defineProperty(el, 'getBoundingClientRect', {
+    value: () =>
+      ({
+        x: 0,
+        y: 770,
+        top: 770,
+        bottom: 900,
+        left: 0,
+        right: 1440,
+        width: 1440,
+        height: 130,
+        toJSON: () => ({}),
+      }) as DOMRect,
+  })
+  document.body.appendChild(el)
+  return el
+}
+
+describe('BUG-43 浮层不拦截 composer', () => {
+  afterEach(() => {
+    uninstallHitTest()
+    document.querySelector('[data-testid="chat-composer"]')?.remove()
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 })
+  })
+
+  it('composer 在场：浮层抬升至其上缘，composer 中心点/发送按钮区命中 composer 而非卡片', () => {
+    stubViewport()
+    const composer = stubComposer()
+    setInteractions([makeInteraction()])
+    render(<GlobalInteractionOverlay />)
+
+    const panel = document.querySelector(
+      '[data-testid="interaction-overlay-panel"]',
+    ) as HTMLElement
+    expect(panel).not.toBeNull()
+    // 抬升锚定：内联 bottom = 视口高 - composer 顶缘 + 间距 = 900-770+8
+    expect(panel.style.bottom).toBe('138px')
+
+    // 浮层矩形按锚定契约推算：底缘 900-138=762 < composer 顶缘 770（无纵向交叠）
+    const panelRect: HitRect = { left: 1008, top: 462, right: 1424, bottom: 762 }
+    installHitTest([
+      [composer, { left: 0, top: 770, right: 1440, bottom: 900 }],
+      [panel, panelRect],
+    ])
+    // composer 中心点（旧横贯底部布局下该点命中卡片子树——本用例的回归锁）
+    expect(document.elementFromPoint!(720, 835)).toBe(composer)
+    // 发送按钮区（composer 右缘内）同样不被覆盖
+    expect(document.elementFromPoint!(1350, 835)).toBe(composer)
+    // 正对照：浮层自身区域内命中浮层（卡片在该区域保持可交互）
+    expect(document.elementFromPoint!(1300, 600)).toBe(panel)
+    // 结构分离：composer 不在浮层子树内
+    expect(panel.contains(composer)).toBe(false)
+  })
+
+  it('无 composer 页面：浮层回退贴底右下（bottom-4 right-4），无内联抬升', () => {
+    setInteractions([makeInteraction()])
+    render(<GlobalInteractionOverlay />)
+    const panel = document.querySelector(
+      '[data-testid="interaction-overlay-panel"]',
+    ) as HTMLElement
+    expect(panel.style.bottom).toBe('')
+    expect(panel.className).toMatch(/bottom-4/)
+    expect(panel.className).toMatch(/right-4/)
+  })
+
+  it('收起徽标带审批倒计时（N 项待决策 + 剩余时间），点击展开恢复卡片', () => {
+    setInteractions([
+      makeInteraction({
+        timeoutSeconds: 86400,
+        createdAt: new Date(Date.now() - 1000).toISOString(),
+      }),
+    ])
+    useInteractionStore.setState({ isMinimized: true })
+    render(<GlobalInteractionOverlay />)
+
+    const badge = screen.getByText(/项待决策/)
+    expect(badge.textContent).toMatch(/^1 项待决策 23:59:\d{2}$/)
+    fireEvent.click(badge)
+    expect(useInteractionStore.getState().isMinimized).toBe(false)
+    expect(card()).toBeInTheDocument()
   })
 })

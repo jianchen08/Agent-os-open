@@ -47,6 +47,9 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/modes/",
     # eval_harness 纯函数面（题集展开/聚合/提案校验，2026-09-15 模式服务化接线）。
     "plugins/shared/system/eval_harness/",
+    # context_build 双根自举/sidecar 复用测试（2026-09-18 登记：目录内 7 用例
+    # 此前不在基集，plugin.py sys.path 守卫缺行失真——覆盖率批十修正）。
+    "plugins/shared/pipeline/input/context_build/",
     "plugins/shared/pipeline/input/environment_lifecycle/",
     "plugins/shared/pipeline/input/level_guard/",
     "plugins/shared/pipeline/input/multimodal_preprocessor/",

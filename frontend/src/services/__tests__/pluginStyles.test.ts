@@ -171,3 +171,15 @@ describe('remove / sync — 清理与同步', () => {
     expect(fetched).toContain('/ext/demo_plugin/assets/border.css')
   })
 })
+
+describe('syncPluginStyles - 文本响应透传', () => {
+  it('transformResponse 原样透传（axios 文本响应不被 JSON 化）', async () => {
+    apiGet.mockImplementation((_url: unknown, config?: { transformResponse?: Array<(d: string) => string> }) =>
+      Promise.resolve({ data: config?.transformResponse?.[0]?.('body { color: red; }') }),
+    )
+    syncPluginStyles([styleDecl({ id: 'tf' })])
+    await vi.waitFor(() => {
+      expect(document.querySelector('style[data-plugin-style="demo_plugin:tf"]')).not.toBeNull()
+    })
+  })
+})

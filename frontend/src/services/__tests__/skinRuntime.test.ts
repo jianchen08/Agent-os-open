@@ -181,3 +181,15 @@ describe('槽位预留（reserveChromeStrips）', () => {
     document.querySelectorAll('[data-test-strip]').forEach((el) => el.remove())
   })
 })
+
+describe('applyPluginSkin - 文本响应透传', () => {
+  it('transformResponse 原样透传（axios 文本响应不被 JSON 化）', async () => {
+    mockApiGet.mockImplementation(
+      (_url: unknown, config?: { transformResponse?: Array<(d: string) => string> }) =>
+        Promise.resolve({ data: config?.transformResponse?.[0]?.(OK_CSS) }),
+    )
+    await applyPluginSkin(themeOf('ok'))
+    expect(skinStyles()).toHaveLength(1)
+    expect(skinStyles()[0].textContent).toContain('.deco')
+  })
+})

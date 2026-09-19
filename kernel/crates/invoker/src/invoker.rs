@@ -175,6 +175,19 @@ fn find_group_host_dir(member_dir: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
+/// 内置根（插件装载根 `AGENTOS_PLUGINS_DIR`，获取方式与 collect_plugin_roots
+/// 同源）下的合宿宿主目录：`<内置根>/_host/`（host.py 与共享 venv 的仓库原件）。
+///
+/// 仅作 find_group_host_dir 探测全空时的回退定位（见 resolve_group_host_command），
+/// 不参与常规探测序。
+fn builtin_group_host_dir() -> Option<std::path::PathBuf> {
+    let root = std::env::var("AGENTOS_PLUGINS_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())?;
+    let candidate = Path::new(&root).join(GROUP_HOST_DIR);
+    candidate.is_dir().then_some(candidate)
+}
+
 /// 计算插件指纹：对该插件目录下的**源码文件** + plugin.json 声明的 config_files 路径
 /// 取 mtime（秒级精度），拼接为字符串后做简单 hash。
 ///
@@ -340,6 +353,63 @@ fn is_plain_python_command(command: &str) -> bool {
     matches!(name, "python" | "python3")
 }
 
+/// 标准 MCP 出参归一：参数白名单按工具声明的 input_schema 过滤。
+///
+/// 内核/管道会向工具参数注入会话上下文（_call_context/session_id/workspace/
+/// pipeline_id/thread_id/parent_agent_level/…，清单随调用方增长），外部标准
+/// MCP server（FastMCP 等）对未声明参数严格校验直接拒——所以以 tools/list
+/// 观测回填的 input_schema.properties 为**白名单**（声明即透传，标准协议
+/// 字段进内部不变形）；schema 未知的工具退化为黑名单（剥下划线前缀 + 已知
+/// 注入键）。外部工具声明下划线参数属非标准用法，约定不支持。
+fn sanitize_external_mcp_arguments(
+    manifest: &PluginManifest,
+    tool_name: &str,
+    inputs: &serde_json::Value,
+) -> serde_json::Value {
+    const INJECTED: [&str; 14] = [
+        "session_id",
+        "workspace",
+        "working_dir",
+        "tenant_id",
+        "plugin_id",
+        "_log_ctx",
+        "pipeline_id",
+        "thread_id",
+        "parent_agent_level",
+        "user_id",
+        "client_message_id",
+        "message_id",
+        "intent",
+        "timestamp",
+    ];
+    let declared_props: Option<&serde_json::Map<String, serde_json::Value>> = manifest
+        .capabilities
+        .tools
+        .iter()
+        .find(|t| t.name == tool_name)
+        .and_then(|t| t.input_schema.as_ref())
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.as_object());
+
+    match inputs {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .filter(|(k, v)| {
+                    if k.starts_with('_') || INJECTED.contains(&k.as_str()) {
+                        return false;
+                    }
+                    match declared_props {
+                        Some(props) => props.contains_key(*k) && !v.is_null(),
+                        None => true,
+                    }
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// 从 MCP tools/call 响应中提取内部 JSON 值。
 ///
 /// Python SDK 的 McpServer 返回格式为：
@@ -366,25 +436,73 @@ fn extract_mcp_content(mcp_result: &serde_json::Value) -> serde_json::Value {
         return serde_json::json!({"error": err_msg});
     }
 
-    // 提取 content[0].text 并解析为 JSON
-    let extracted = mcp_result
-        .get("content")
-        .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
+    // ── 标准 MCP content 协议归一（external MCP 一行接入配套）────────
+    // 内部 sidecar 约定：content[0].text 是业务 JSON 字符串（优先照旧直通）。
+    // 其余一律按标准 MCP 语义转换：text 项拼接、image 项转内部 images 通道
+    // （tool_core inject_multimodal 来源 2，截图回传视觉模型）、resource 取
+    // text 并入——标准协议字段进来，内部多模态通道出去，转换只此一处。
+    let items = mcp_result.get("content").and_then(|c| c.as_array());
+    let Some(items) = items else {
+        return mcp_result.clone();
+    };
+
+    let first_text_json = items
+        .first()
         .and_then(|item| item.get("text"))
         .and_then(|t| t.as_str())
-        .and_then(|s| serde_json::from_str(s).ok());
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let has_image = items
+        .iter()
+        .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("image"));
 
-    match extracted {
-        Some(val) => val,
-        None => {
-            warn!(
-                "MCP response content extraction failed, returning raw result: {:?}",
-                mcp_result
-            );
-            mcp_result.clone()
+    if let (Some(val), false) = (first_text_json, has_image) {
+        return val;
+    }
+
+    let mut texts: Vec<String> = Vec::new();
+    let mut images: Vec<serde_json::Value> = Vec::new();
+    for item in items {
+        match item.get("type").and_then(|v| v.as_str()) {
+            Some("text") => {
+                let t = item.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if !t.is_empty() {
+                    texts.push(t.to_string());
+                }
+            }
+            Some("image") => images.push(serde_json::json!({
+                "base64": item.get("data").and_then(|d| d.as_str()).unwrap_or(""),
+                "mime_type": item
+                    .get("mimeType")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("image/png"),
+            })),
+            Some("resource") => {
+                let t = item
+                    .get("resource")
+                    .and_then(|r| r.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                if !t.is_empty() {
+                    texts.push(t.to_string());
+                }
+            }
+            _ => {}
         }
     }
+    let mut output = serde_json::Map::new();
+    if !texts.is_empty() {
+        output.insert(
+            "text".into(),
+            serde_json::Value::String(texts.join(
+                "
+",
+            )),
+        );
+    }
+    if !images.is_empty() {
+        output.insert("images".into(), serde_json::Value::Array(images));
+    }
+    serde_json::json!({ "success": true, "output": output })
 }
 
 /// 中央返回处的 OnError 判定（pipeline 形态）：调用层 `Err`（崩溃/MCP/解析）
@@ -1407,7 +1525,16 @@ impl PluginInvokerImpl {
 
         // 合宿宿主工具名命名空间前缀（§4.2 第 3 条，与 pipeline 路径同构）。
         let mcp_tool_name = namespaced_tool_name(manifest, tool_name);
-        let result = match client.call_tool(&mcp_tool_name, inputs).await {
+        // 标准 MCP 出参归一（external MCP 一行接入配套）：外部标准 MCP server
+        // （FastMCP 等）对未声明参数严格校验，内核/管道注入的会话上下文键
+        // （_call_context/session_id/workspace 等）必须调用前剥离；内部 sidecar
+        // 的 SDK 按签名过滤不受影响。
+        let mcp_arguments = if manifest.entry == "mcp:external" {
+            sanitize_external_mcp_arguments(manifest, tool_name, inputs)
+        } else {
+            inputs.clone()
+        };
+        let result = match client.call_tool(&mcp_tool_name, &mcp_arguments).await {
             Ok(v) => v,
             Err(e) => {
                 // ② 失败后复查存活（在途死亡 → PLUGIN_CRASHED；否则原
@@ -1932,17 +2059,10 @@ impl PluginInvokerImpl {
         if Self::is_dead_sidecar(&client_guard).await {
             error!("Host process crashed: {}", host_key);
             drop(client_guard);
-            if let Err(e) = client.write().await.kill().await {
-                tracing::debug!(
-                    "crash cleanup: best-effort kill of crashed host {} failed: {e}",
-                    host_key
-                );
-            }
             for member in self.host_members(host_key) {
                 self.notify_crash(&member);
             }
-            self.mcp_clients.write().remove(host_key);
-            self.spawned_members.write().remove(host_key);
+            self.kill_and_evict_if_current(host_key, &client).await;
             return None;
         }
         if !self.is_host_stale(host_key, manifest).await {
@@ -1954,15 +2074,38 @@ impl PluginInvokerImpl {
             host_key
         );
         drop(client_guard);
+        self.kill_and_evict_if_current(host_key, &client).await;
+        None
+    }
+
+    /// 驱逐已判定死亡/过期的宿主实例（kill + 缓存/快照逐出，按条目身份条件执行）。
+    ///
+    /// BUG-44 根因修复：kill 会因在飞调用持客户端读锁而阻塞数秒，苏醒后
+    /// mcp_clients 条目可能已被并发 respawn 替换（新实例入缓存 + 新 spawn
+    /// 成员集快照已写入）。此处若无条件 remove，会把并发 respawn 写入的
+    /// 新鲜快照连带删掉，留下「缓存存活但快照缺失」的宿主——成员集漂移
+    /// 检测（快照比对）失去基准，新装箱成员首调用复用旧成员集进程报
+    /// MCP [-32602] tool not found（2026-09-18 00:21 实测序列）。
+    /// 因此逐出前按 Arc 身份复核：条目已非本次判定的实例（被并发 respawn
+    /// 替换/移除）则不动缓存与快照，只杀死本次判定的旧实例。
+    async fn kill_and_evict_if_current(&self, host_key: &str, client: &SharedMcpClient) {
         if let Err(e) = client.write().await.kill().await {
             tracing::debug!(
-                "hot-reload: best-effort kill of stale host {} failed (will respawn): {e}",
+                "evict: best-effort kill of host {} failed (will respawn): {e}",
                 host_key
             );
         }
-        self.mcp_clients.write().remove(host_key);
-        self.spawned_members.write().remove(host_key);
-        None
+        // 身份复核与缓存移除同持一把写锁（原子）；快照紧随其后移除——respawn
+        // 的快照写入以「先驱逐旧条目」为前提，见本函数 doc 的时序论证。
+        let mut clients = self.mcp_clients.write();
+        if clients
+            .get(host_key)
+            .is_some_and(|cur| Arc::ptr_eq(cur, client))
+        {
+            clients.remove(host_key);
+            drop(clients);
+            self.spawned_members.write().remove(host_key);
+        }
     }
 
     /// Double-check 复用判定（持 spawn 锁后调用）：前一个持锁者可能已创建好
@@ -2127,8 +2270,12 @@ impl PluginInvokerImpl {
             self.spawned_members
                 .write()
                 .insert(host_key.to_string(), members.clone());
-            let (command, args, workdir) =
-                self.resolve_group_host_command(group, slot, &members)?;
+            let (command, args, workdir) = self.resolve_group_host_command(
+                group,
+                slot,
+                &members,
+                builtin_group_host_dir().as_deref(),
+            )?;
             (command, args, Some(workdir))
         } else {
             let (command, args) = self.resolve_sidecar_command(manifest)?;
@@ -2478,18 +2625,20 @@ impl PluginInvokerImpl {
     /// 漂移对指纹不可见）。spawn 时快照与分配表更新同序（先装箱后 spawn），
     /// 快照写入先于客户端入缓存，fast path 判定时快照必已就位。
     ///
-    /// 快照缺失（缓存条目存在但无快照）按**无漂移**处理：生产路径下缓存条目
-    /// 必带快照（spawn 时写入先于入缓存），缺失只可能来自测试手工注入的假
-    /// 客户端——保守不杀，避免基于缺失数据误杀进程。
+    /// 快照缺失（缓存条目存在但无快照）按**漂移**处理（BUG-44 安全网）：
+    /// 快照与缓存条目在生产路径同生命周期（spawn 时写入先于入缓存、驱逐时
+    /// 成对移除），缺失 = 成员集未知——复用成员集未知的进程正是 BUG-44
+    /// T1 复用旧宿主报 MCP [-32602] 的形态，fail-closed 重建（respawn 按
+    /// 当前分配表重写快照，自愈有界：一次 respawn 后快照必就位）。
     fn light_host_members_drifted(&self, host_key: &str) -> bool {
         if parse_group_slot(host_key).is_none() {
             return false;
         }
         let current = self.host_members(host_key);
-        let Some(spawned) = self.spawned_members.read().get(host_key).cloned() else {
-            return false;
-        };
-        current != spawned
+        match self.spawned_members.read().get(host_key).cloned() {
+            Some(spawned) => current != spawned,
+            None => true,
+        }
     }
 
     /// 已 spawn 宿主的宿主键反查（kill/unload 入口按 plugin_id 进来时用）。
@@ -2521,18 +2670,40 @@ impl PluginInvokerImpl {
     /// `plugins/shared/_host/`（host.py 与共享 venv 的所在地，由宿主侧任务承载，
     /// 内核只管 spawn 参数契约）；解释器走共享 venv（uv 单轨 fail-closed：
     /// 缺 `.venv` 直接报错，不回退 PATH 裸 python）。
+    ///
+    /// 宿主目录定位序：①从成员插件目录向上探测（现状语义，仓库侧成员路径行为
+    /// 不变）；②探测全空时回退 `fallback_host_dir`（生产传 builtin_group_host_dir()
+    /// 即内置根 `AGENTOS_PLUGINS_DIR` 下的 `_host/`）——双源用户副本赢后全组成员
+    /// 可能落用户空间，祖先链永不含内置 `_host/`，回退使宿主进程与共享 venv 仍由
+    /// 内置仓库侧承载（None = 无回退，探测全空照旧 HOST_DIR_NOT_FOUND）。
     fn resolve_group_host_command(
         &self,
         group: &str,
         slot: u64,
         members: &[String],
+        fallback_host_dir: Option<&Path>,
     ) -> Result<(String, Vec<String>, String), PluginError> {
-        // _host 目录定位：从任一成员插件目录向上找含 _host 子目录的祖先
-        // （插件目录层级不固定：plugins/shared/<type>/<phase>/<name>）。
+        // _host 目录定位：优先从任一成员插件目录向上找含 _host 子目录的祖先
+        // （插件目录层级不固定：plugins/shared/<type>/<phase>/<name>）；探测
+        // 全空才回退内置根 _host/，命中即 warn 留痕（可观测的路径漂移）。
         let host_dir = members
             .iter()
             .filter_map(|pid| self.loader.get_plugin_dir(pid))
             .find_map(|dir| find_group_host_dir(Path::new(&dir)))
+            .or_else(|| {
+                let fallback = fallback_host_dir
+                    .map(|root| root.join(GROUP_HOST_DIR))
+                    .filter(|candidate| candidate.is_dir());
+                if let Some(dir) = &fallback {
+                    warn!(
+                        target: "sidecar",
+                        members = ?members,
+                        host_dir = %dir.display(),
+                        "合宿 _host/ 从成员插件目录向上探测未命中，回退内置根 _host/（全组成员落非内置根场景）"
+                    );
+                }
+                fallback
+            })
             .ok_or_else(|| PluginError {
                 message: format!(
                     "light 合宿宿主目录 {GROUP_HOST_DIR}/ 未定位到（从成员 {:?} 插件目录向上探测均未命中）——\

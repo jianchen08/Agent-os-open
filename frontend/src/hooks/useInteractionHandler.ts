@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_ENDPOINTS } from '@/constants/api'
 import { ROUTES } from '@/constants/routes'
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { WS_LOCAL_EVENTS, WS_SERVER_EVENTS } from '@/constants/websocket'
 import { readAgents } from '@/hooks/queries/useAgentsQuery'
 import apiClient from '@/services/api/client'
 import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
@@ -329,32 +329,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
       }
     }
 
-    const removeNotificationForRequest = (requestId: string) => {
-      const notifId = requestToNotificationMap.get(requestId)
-      if (notifId) {
-        useNotificationStore.getState().removeNotification(notifId)
-        requestToNotificationMap.delete(requestId)
-      }
-    }
-
-    const handleInteractionCancelled = (data: Record<string, unknown>) => {
-      const inner = (data.data as Record<string, unknown>) || data
-      const requestId = inner.request_id as string
-      if (requestId) {
-        dismissInteraction(requestId)
-        removeNotificationForRequest(requestId)
-      }
-    }
-
-    const handleInteractionTimeout = (data: Record<string, unknown>) => {
-      const inner = (data.data as Record<string, unknown>) || data
-      const requestId = inner.request_id as string
-      if (requestId) {
-        dismissInteraction(requestId)
-        removeNotificationForRequest(requestId)
-      }
-    }
-
     const handleWsStatusChange = (data: Record<string, unknown>) => {
       if (data.status === 'disconnected') {
         _isSubscribed = false
@@ -393,22 +367,14 @@ export function useInteractionHandler(sessionId: string | undefined) {
       }
     }
 
-    globalWS.subscribe('_status', handleWsStatusChange)
+    globalWS.subscribe(WS_LOCAL_EVENTS.STATUS, handleWsStatusChange)
 
     globalWS.subscribe(
       WS_SERVER_EVENTS.INTERACTION_REQUEST,
       handleInteractionRequest,
     )
-    globalWS.subscribe(
-      'interaction_cancelled',
-      handleInteractionCancelled,
-    )
-    globalWS.subscribe(
-      'interaction_timeout',
-      handleInteractionTimeout,
-    )
     // WS 重连后恢复 pending 交互（断线期间可能错过推送，或刷新后内存已清空）
-    globalWS.subscribe('reconnected', restorePendingInteractions)
+    globalWS.subscribe(WS_LOCAL_EVENTS.RECONNECTED, restorePendingInteractions)
 
     // 挂载即拉取一次：覆盖纯刷新、WS 尚未触发 reconnected 的窗口
     restorePendingInteractions()
@@ -422,11 +388,9 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
     return () => {
       clearInterval(pendingPollTimer)
-      globalWS.unsubscribe('_status', handleWsStatusChange)
+      globalWS.unsubscribe(WS_LOCAL_EVENTS.STATUS, handleWsStatusChange)
       globalWS.unsubscribe(WS_SERVER_EVENTS.INTERACTION_REQUEST, handleInteractionRequest)
-      globalWS.unsubscribe('interaction_cancelled', handleInteractionCancelled)
-      globalWS.unsubscribe('interaction_timeout', handleInteractionTimeout)
-      globalWS.unsubscribe('reconnected', restorePendingInteractions)
+      globalWS.unsubscribe(WS_LOCAL_EVENTS.RECONNECTED, restorePendingInteractions)
       _isSubscribed = false
     }
   }, [addInteraction, dismissInteraction])

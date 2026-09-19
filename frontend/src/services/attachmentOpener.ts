@@ -6,11 +6,12 @@
  * （不依赖 workspaces API）。
  *
  * - 图片/PDF：靠附件直链 url 渲染（FilePreview image/pdf 分支）
- * - 纯文本/代码：fetch 附件 url 拿内容后交给 CodeEditor
+ * - 纯文本/代码：经 apiClient 拉取附件 url 内容后交给 CodeEditor
  * - 二进制文档（docx/xlsx）：前端无法解析，走 binary 提示
  */
 
 import { toast } from 'sonner'
+import apiClient from '@/services/api/client'
 import { registerFileEditor } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 
@@ -31,7 +32,7 @@ export interface AttachmentOpenTarget {
  * 在工作区文件预览标签页打开附件。
  *
  * 已打开的同附件会直接激活现有 Tab（按 id/url 去重）。
- * 图片/PDF 无需读取内容；文本/代码会 fetch 附件 URL 获取文本。
+ * 图片/PDF 无需读取内容；文本/代码会经 apiClient 拉取附件 URL 文本。
  *
  * @param target - 附件目标信息
  */
@@ -48,20 +49,27 @@ export async function openAttachment(target: AttachmentOpenTarget): Promise<void
   }
 
   const isMedia = MEDIA_EXTENSIONS.test(name)
-  // 图片/PDF 靠 url 渲染；文本/代码需 fetch 内容。
-  // fetch 失败显式 toast 告知（显式失败优于静默空内容）；Tab 仍打开，
+  // 文本/代码经 apiClient 取内容：认证头/重试/错误翻译统一走拦截器。
+  // baseURL 强制空 = 保持 /uploads 直链的 origin 相对语义；responseType text
+  // 阻止 JSON 附件被默认 transform 解析成对象（CodeEditor 内容契约是字符串）。
+  // 失败 UX 由本服务自持（silent 请求标记防拦截器双吐司）；Tab 仍打开，
   // 内容留空由 CodeEditor/FilePreview 显示占位，url 兜底渲染。
   let content = ''
   if (!isMedia) {
     try {
-      const resp = await fetch(url)
-      if (resp.ok) {
-        content = await resp.text()
-      } else {
-        toast.error(`附件 "${name}" 加载失败（HTTP ${resp.status}）`)
-      }
-    } catch {
-      toast.error(`附件 "${name}" 加载失败，请检查网络或附件是否可用`)
+      const resp = await apiClient.get<string>(url, {
+        baseURL: '',
+        responseType: 'text',
+        silent: true,
+      })
+      content = resp.data
+    } catch (e) {
+      const status = (e as { response?: { status?: number } } | null)?.response?.status
+      toast.error(
+        status
+          ? `附件 "${name}" 加载失败（HTTP ${status}）`
+          : `附件 "${name}" 加载失败，请检查网络或附件是否可用`,
+      )
     }
   }
 

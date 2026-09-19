@@ -135,6 +135,39 @@ def test_unrouted_request_returns_404(
     assert "error" in json.loads(base64.b64decode(data["body"]).decode("utf-8"))
 
 
+# ── 内核 base64 契约（写动作解析层六包一致）─────────────────────────────────────
+
+_PARSE_BODY_CASES = [
+    pytest.param(
+        base64.b64encode(json.dumps({"card_id": "card_x", "greeting_index": 1}).encode()).decode(),
+        {"card_id": "card_x", "greeting_index": 1},
+        id="base64_json",
+    ),
+    pytest.param(
+        '{"issue_text": "fix bug", "deep": true}',
+        {"issue_text": "fix bug", "deep": True},
+        id="raw_json",
+    ),
+    pytest.param("", {}, id="empty_body"),
+    pytest.param(base64.b64encode(b"<html>not json</html>").decode(), {}, id="base64_non_json"),
+]
+
+
+@pytest.mark.parametrize("plugin_id", [s[0] for s in SEEDS])
+@pytest.mark.parametrize(("raw_body", "expected"), _PARSE_BODY_CASES)
+def test_parse_body_two_form_contract(plugin_id: str, raw_body: str, expected: dict) -> None:
+    """六包 _parse_body 双形态契约一致：先 base64（内核 http_dispatcher 把请求字节
+    base64 后作 raw_body 传入）后裸 JSON（宿主桥 MCP 直调形态），两态都失败或
+    顶层非 dict → {}（交缺参 400 路径）。
+
+    回归锚 = 2026-09-18 面板战役 P0：用户空间陈旧副本的 _parse_body 只有裸
+    json.loads，缺 base64 形态，内核转发的写动作全部解析为 {} → 缺参 400。
+    本测试在仓内六包逐一锁定，防新包/改包回退成裸 json.loads。
+    """
+    module = _load_server(plugin_id)
+    assert module._parse_body(raw_body) == expected
+
+
 @pytest.mark.parametrize("plugin_id,mode,page_id", SEEDS)
 def test_manifest_declares_webview_page_and_endpoint(
     plugin_id: str, mode: str, page_id: str

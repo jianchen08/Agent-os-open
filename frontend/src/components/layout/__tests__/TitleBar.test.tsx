@@ -66,12 +66,12 @@ describe('isDesktopMainWindow — 环境判定三分支', () => {
 })
 
 describe('TitleBar — 渲染与环境门控', () => {
-  it('主窗口渲染标题文本与三个窗口控制按钮，并挂占位类', () => {
+  it('主窗口渲染控制簇（三个窗口控制按钮），并挂占位类', () => {
     stubElectronApi()
     render(<TitleBar />)
 
     expect(screen.getByTestId('custom-titlebar')).toBeInTheDocument()
-    expect(screen.getByText('AgentOS')).toBeInTheDocument()
+    expect(screen.queryByText('AgentOS')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '最小化' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '最大化' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '关闭' })).toBeInTheDocument()

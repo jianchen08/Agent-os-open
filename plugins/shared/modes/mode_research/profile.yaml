@@ -7,7 +7,7 @@ panel_page_id: research_desk
 chain:
   entry: main
   expected_path: [main, orchestrator/research_orchestrator_agent, executor/generation/research_agent]
-  executor_pool: [executor/generation/research_agent, executor/general_agent]
+  executor_pool: [executor/generation/research_agent]
   entry_override: null
 pipeline_profile:
   pipeline: autonomous

@@ -12,6 +12,8 @@
 # 环境变量：
 #   AGENTOS_KERNEL_PORT  内核端口（默认 9100）
 #   AGENTOS_FRONTEND_PORT 前端端口（默认 6390，避开 container_22404 的 5289/5290/6290）
+#   AGENTOS_USER_ROOT    用户空间根；下方钉在 <project>/user_root（dev 与安装版
+#                        应用的 OS 默认空间隔离，ADR 2026-09-18-dev-local-user-root）
 #
 # [监督形态说明] 内核监督由本脚本内联的 kernel_supervisor（G8 生命周期
 #   监督者）单独承担，行为契约：
@@ -314,6 +316,10 @@ export AGENTOS_KERNEL_PORT=$KERNEL_PORT
 export AGENTOS_KERNEL_HOST=0.0.0.0
 export AGENTOS_PLUGINS_DIR="$PROJECT_ROOT/plugins/shared"
 export AGENTOS_CONFIG_ROOT="$PROJECT_ROOT/config"
+# 2026-09-18 (ADR 2026-09-18-dev-local-user-root)：dev 用户空间根钉在项目内
+# （gitignored user_root/），与安装版应用的 OS 默认空间（%APPDATA%\agentos）隔离。
+# 监督者 respawn 的裸 exe 继承本进程环境，钉一次即全程生效。
+export AGENTOS_USER_ROOT="$PROJECT_ROOT/user_root"
 # kernel_supervisor respawns the kernel as a bare exe; it must inherit the
 # same env defaults the .bat launcher pins, or a respawn silently drops them.
 # Matches start_web_02.bat: AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS default 300s.

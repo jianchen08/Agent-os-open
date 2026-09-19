@@ -3,9 +3,9 @@
  *
  * 验证 openAttachment：
  * - 已打开的附件去重（激活现有 Tab 而非新建）
- * - 图片/PDF 不 fetch 内容
- * - 文本类 fetch 内容
- * - fetch 失败时兜底不报错
+ * - 图片/PDF 不拉取内容
+ * - 文本类经 apiClient 拉取内容（origin 相对直链 + text 响应 + silent 防双吐司）
+ * - 拉取失败时兜底不报错（本地 toast 告知）
  */
 
 /* eslint-disable import-x/order */
@@ -20,13 +20,15 @@ vi.mock('sonner', () => ({
   toast: { error: (...args: unknown[]) => toastErrorMock(...args) },
 }))
 
-// Mock fetch
-const fetchMock = vi.fn()
-global.fetch = fetchMock as unknown as typeof fetch
+// mock apiClient（外部 HTTP 依赖）：文本内容拉取统一走适配层
+const getMock = vi.fn()
+vi.mock('@/services/api/client', () => ({
+  default: { get: (...args: unknown[]) => getMock(...args) },
+}))
 
 describe('openAttachment', () => {
   beforeEach(() => {
-    fetchMock.mockReset()
+    getMock.mockReset()
     toastErrorMock.mockClear()
     // 重置 layout store
     useLayoutModeStore.setState({ workspaceTabs: [], activeTabId: null, visitedTabIds: [] })
@@ -36,33 +38,34 @@ describe('openAttachment', () => {
     vi.restoreAllMocks()
   })
 
-  it('文本附件 fetch 内容并注册编辑器数据', async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      text: async () => '文件内容',
-    })
+  it('文本附件经 apiClient 拉取内容并注册编辑器数据', async () => {
+    getMock.mockResolvedValueOnce({ data: '文件内容' })
 
     await openAttachment({ id: 'f1', name: 'notes.txt', url: '/uploads/notes.txt' })
 
-    expect(fetchMock).toHaveBeenCalledWith('/uploads/notes.txt')
+    expect(getMock).toHaveBeenCalledWith('/uploads/notes.txt', {
+      baseURL: '',
+      responseType: 'text',
+      silent: true,
+    })
     const data = getFileEditorData('attach-f1')
     expect(data?.content).toBe('文件内容')
     expect(data?.url).toBe('/uploads/notes.txt')
   })
 
-  it('图片附件不 fetch 内容（靠 url 渲染）', async () => {
+  it('图片附件不拉取内容（靠 url 渲染）', async () => {
     await openAttachment({ id: 'f2', name: 'pic.png', url: '/uploads/pic.png' })
 
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(getMock).not.toHaveBeenCalled()
     const data = getFileEditorData('attach-f2')
     expect(data?.content).toBe('')
     expect(data?.url).toBe('/uploads/pic.png')
   })
 
-  it('PDF 附件不 fetch 内容', async () => {
+  it('PDF 附件不拉取内容', async () => {
     await openAttachment({ id: 'f3', name: 'doc.pdf', url: '/uploads/doc.pdf' })
 
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(getMock).not.toHaveBeenCalled()
   })
 
   it('已打开的附件去重：激活现有 Tab，不重复注册', async () => {
@@ -70,16 +73,16 @@ describe('openAttachment', () => {
     expect(useLayoutModeStore.getState().workspaceTabs).toHaveLength(1)
 
     // 第二次打开同一附件
-    fetchMock.mockClear()
+    getMock.mockClear()
     await openAttachment({ id: 'f4', name: 'a.txt', url: '/uploads/a.txt' })
 
-    // 不新增 Tab，不重新 fetch
+    // 不新增 Tab，不重新拉取
     expect(useLayoutModeStore.getState().workspaceTabs).toHaveLength(1)
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(getMock).not.toHaveBeenCalled()
   })
 
-  it('fetch 网络失败：不抛异常、content 留空，且用户收到错误 toast', async () => {
-    fetchMock.mockRejectedValueOnce(new Error('network'))
+  it('拉取网络失败：不抛异常、content 留空，且用户收到错误 toast', async () => {
+    getMock.mockRejectedValueOnce(new Error('network'))
 
     await expect(
       openAttachment({ id: 'f5', name: 'b.txt', url: '/uploads/b.txt' }),
@@ -91,8 +94,10 @@ describe('openAttachment', () => {
     expect(String(toastErrorMock.mock.calls[0][0])).toContain('b.txt')
   })
 
-  it('fetch 返回非 2xx：用户收到错误 toast，content 留空', async () => {
-    fetchMock.mockResolvedValueOnce({ ok: false, status: 404 })
+  it('拉取返回非 2xx：用户收到错误 toast，content 留空', async () => {
+    getMock.mockRejectedValueOnce(
+      Object.assign(new Error('404'), { response: { status: 404 } }),
+    )
 
     await openAttachment({ id: 'f5b', name: 'missing.txt', url: '/uploads/missing.txt' })
 

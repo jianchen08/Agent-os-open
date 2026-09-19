@@ -106,6 +106,18 @@ def test_profile_material_scope_targets_exist(plugin_id: str, mode: str, panel_p
 
 
 @pytest.mark.parametrize("plugin_id,mode,panel_page_id", SEEDS)
+def test_profile_executor_pool_excludes_general_agent(plugin_id: str, mode: str, panel_page_id: str) -> None:
+    """执行者池专用化契约（ADR 2026-09-18-mode-executor-pool-dedicated-only）：
+    pool 只登记本模式专用/复用域执行者；专用链失败时通用执行者并不会做得更好，
+    不得以 general_agent 兜底——通用执行者只承接非模式任务（main 派单表「通用」项）。"""
+    profile = _load_profile(plugin_id)
+    pool = profile["chain"]["executor_pool"]
+    assert isinstance(pool, list), f"{plugin_id} chain.executor_pool 缺失"
+    offenders = [k for k in pool if str(k).endswith("general_agent")]
+    assert offenders == [], f"{plugin_id} executor_pool 混入通用执行者: {offenders}"
+
+
+@pytest.mark.parametrize("plugin_id,mode,panel_page_id", SEEDS)
 def test_manifest_declares_mode_services(plugin_id: str, mode: str, panel_page_id: str) -> None:
     with open(os.path.join(MODES_DIR, plugin_id, "plugin.json"), encoding="utf-8") as fh:
         manifest = json.load(fh)

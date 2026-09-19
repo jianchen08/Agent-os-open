@@ -11,7 +11,9 @@
 ; 本实现强制走同一模板内置的 tasklist/taskkill 分支（cmd /C 包装、不经 WMI、延迟有界）；
 ; 静默模式下重试 2 轮后经 MessageBox /SD IDCANCEL 退出，任何情况下不会无限等待。
 ; 检测语义由「INSTDIR 路径前缀」收窄为「镜像名精确匹配（per-user 追加 USERNAME 过滤）」：
-; Electron 全部进程共用同一 exe 名，行为等价（0.2 oneClick per-user 契约不变）。
+; Electron 全部进程共用同一 exe 名，行为等价（0.2 per-user 安装契约不变；
+; 2026-09-18 起 oneClick 关闭改 assisted 可选目录，perMachine 仍 false，
+; 本检测依赖的是 per-user 而非一键 UI，不受影响）。
 ;
 ; 注意：声明必须置于顶层（本文件在模板之前被 include，!include/Var 不能出现在
 ; Function 上下文内——即本宏的展开点）。置 1（=「PowerShell 不可用」）使模板

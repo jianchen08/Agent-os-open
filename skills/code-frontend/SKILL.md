@@ -26,7 +26,7 @@ description: 前端技术栈编码技能（规范+流程）。含组件规范、
 |------|------|--------|
 | 受控组件 | 表单值受 state 控制 | 高 |
 | Props 校验 | 使用 TypeScript 或 PropTypes | 高 |
-| 组件拆分阈值 | 超过 150 行考虑拆分 | 中 |
+| 组件拆分阈值 | >150 行评估拆分；>500 行必须拆分（见禁止行为） | 中 |
 
 ### React 组件结构
 
@@ -213,4 +213,4 @@ export const userApi = {
 
 ### UI/UX 质量
 - 语义化标记：`<button>` 而非 `<div onclick>`，`<nav>` 定义导航，`<main>` 定义主内容，`<article>`/`<section>`/`<aside>` 划分内容结构，`<form>`/`<label>`/`<input>` 语义标签
-- 可访问性、性能优化、XSS 防护的审查维度见「审查清单七大维度」
+- 可访问性、性能优化、XSS 防护的审查维度见 `config/rules/per_agent/code_reviewer_rules.md`「审查清单七大维度」

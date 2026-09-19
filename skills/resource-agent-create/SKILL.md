@@ -137,9 +137,9 @@ static_vars 会话级不变（缓存）；dynamic_vars 每轮重新生成。
 
 ## 路径规范
 
-- Agent 配置：`config/agents/<category>/<agent_id>.yaml`（扁平单文件，禁止文件夹结构）
+- Agent 配置：`config/agents/<域>/<agent_id>.yaml`（一个 agent 一个 yaml 单文件；域目录如 main/ executor/ orchestrator/ system/ task/ modes/；团队目录 team/<name>/ 另带 manifest.yaml）
 - config_id 必须与文件名（去 .yaml）一致
-- 工具代码：`src/tools/builtin/{tool_id}.py`
+- 工具代码：`plugins/shared/tools/{tool_id}/`（0.2 插件化布局，创建流程见 resource-tool-create 技能）
 - 工具配置：`config/tools/`
 
 ## 产出物模板创建规范

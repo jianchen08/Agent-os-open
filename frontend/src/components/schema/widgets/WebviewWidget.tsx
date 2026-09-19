@@ -24,6 +24,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { FileWarning } from '@/assets/icons'
+import { Button } from '@/components/ui/button'
 import { API_ENDPOINTS } from '@/constants/api'
 import { apiClient } from '@/services/api/client'
 import { EXT_ROUTE, extUrl } from '@/services/api/extRoute'
@@ -75,6 +76,12 @@ function bootstrapJs(instanceToken: string, sessionId: string | null): string {
 const CSP_META =
   '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; img-src data:; connect-src \'none\';">'
 
+/** 取数挂起判定窗：超窗即转显式超时错误态（可重试）。请求可能在浏览器连接
+ *  队列或内核饱和中静默悬挂——axios timeout 只从网络层发起才计时，组件层是
+ *  唯一能兜住该悬挂的层；时长与 API_TIMEOUT 同口径（30s 拿不到页面 HTML
+ *  即不让用户干等）。 */
+const PENDING_TIMEOUT_MS = 30_000
+
 /**
  * 把原始 HTML 包装成安全 srcDoc：插 CSP meta（head 最前）+ bootstrap JS。
  * 有 head → 两者注入 head 开标签后（bootstrap 先于 body 脚本解析，桥不缺位）；
@@ -101,6 +108,8 @@ export function WebviewWidget({
 }: WebviewWidgetProps): React.ReactNode {
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** 取数代次：重试按钮自增，驱动 effect 重新发起请求 */
+  const [attempt, setAttempt] = useState(0)
   /** webview 就绪信号（iframe load 或上行 __ready 先到者）：下行桥推送的门闩 */
   const [webviewReady, setWebviewReady] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -143,17 +152,33 @@ export function WebviewWidget({
     return extUrl(pluginId, path)
   }, [pluginId, htmlPath])
 
-  // fetch 插件 HTML（带 Bearer token，token 不进 iframe URL）
+  // fetch 插件 HTML（带 Bearer token，token 不进 iframe URL）。
+  // 状态机契约：终态显式可见——成功落 html；失败/挂起超时落 error（附重试
+  // 按钮），绝不静默停留「加载 Webview...」占位。
   useEffect(() => {
     if (!endpoint) {
       setError('WebviewWidget 缺少 pluginId')
       return
     }
     let cancelled = false
+    // 本次取数是否已超时落账（超时后 abort 派生的 reject 不得覆盖超时错误态）
+    let timedOut = false
+    const controller = new AbortController()
+    setError(null)
+    const timer = window.setTimeout(() => {
+      timedOut = true
+      controller.abort()
+      if (!cancelled) setError('加载超时，请重试')
+    }, PENDING_TIMEOUT_MS)
     apiClient
-      .get<string>(endpoint, { responseType: 'text', transformResponse: [(d) => d] })
+      .get<string>(endpoint, {
+        responseType: 'text',
+        transformResponse: [(d) => d],
+        signal: controller.signal,
+      })
       .then((res) => {
-        if (cancelled) return
+        window.clearTimeout(timer)
+        if (cancelled || timedOut) return
         setWebviewReady(false) // 新文档即将注入：等重新就绪后再恢复下行桥推送
         setHtml(
           wrapHtml(
@@ -165,13 +190,17 @@ export function WebviewWidget({
         )
       })
       .catch((e) => {
-        if (cancelled) return
-        setError((e as Error).message ?? '加载插件 HTML 失败')
+        window.clearTimeout(timer)
+        if (cancelled || timedOut) return
+        // message 可能为空串（空串越过 ?? 兜底会 falsy 回加载态），按真值兜底
+        setError((e as Error).message || '加载插件 HTML 失败')
       })
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
+      controller.abort()
     }
-  }, [endpoint])
+  }, [endpoint, attempt])
 
   // 收 iframe 上行消息（校验 origin + 协议 + 实例令牌）→ 按 method 路由到后端
   // handler 在 window 上注册，不依赖 iframeRef 是否就绪（实际 sendDown 用 optional chaining）
@@ -279,9 +308,14 @@ export function WebviewWidget({
 
   if (error) {
     return (
-      <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
-        <FileWarning className="mr-2 h-5 w-5" />
-        Webview 加载失败: {error}
+      <div className="text-muted-foreground flex h-full flex-col items-center justify-center gap-3 text-sm">
+        <div className="flex items-center">
+          <FileWarning className="mr-2 h-5 w-5" />
+          Webview 加载失败: {error}
+        </div>
+        <Button variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>
+          重试
+        </Button>
       </div>
     )
   }

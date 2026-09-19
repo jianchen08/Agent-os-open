@@ -110,3 +110,17 @@ describe('ContextKeysStore — 订阅响应式', () => {
     expect(useContextKeys.getState().getKey('nonexistent')).toBeUndefined()
   })
 })
+
+describe('ContextKeysStore — 语义键写入', () => {
+  beforeEach(() => {
+    useContextKeys.getState().reset()
+  })
+
+  it('setChatFocus 写 chat.focus；setInteractionPending 写 interaction.pending', () => {
+    useContextKeys.getState().setChatFocus(true)
+    expect(useContextKeys.getState().getKey('chat.focus')).toBe(true)
+
+    useContextKeys.getState().setInteractionPending({ taskId: 't1' })
+    expect(useContextKeys.getState().getKey('interaction.pending')).toEqual({ taskId: 't1' })
+  })
+})

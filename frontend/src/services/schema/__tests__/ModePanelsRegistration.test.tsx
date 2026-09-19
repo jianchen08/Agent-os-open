@@ -1,22 +1,22 @@
 /** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
- * 模式面板注册契约测试（退役改判后：hub 宿主件 + webview 内建形态）
+ * 模式面板注册契约测试（退役改判后：统一导航页 + webview 内建形态）
  *
- * 核验（模式体系落地设计 §2 末「面板承载形态」，2026-09-15 用户裁定）：
+ * 核验（模式体系落地设计 §2 末「面板承载形态」，2026-09-15 用户裁定；
+ * 2026-09-18 统一导航页裁定：hub 宿主件退役，导航职责归 WorkspaceNavPage）：
  * 1. 四模式面板具名 widget 已退役——registry 不再注册（页面承载归各模式插件
  *    自带 webview 页，webview 是内建具名 widget，无需注册）。
- * 2. hub 宿主件按契约名注册且仅 workspace 空间——「activity-bar 零新增」的
- *    机械守护（widget 侧不得向 activity-bar 槽位添加任何入口）。
+ * 2. 插件页面 hub 宿主件已退役——registry 不再注册（防复活守护）。
  * 3. 装载含模式插件 webview 页声明 + 既有 activity-bar 声明的 schema 后，
  *    activity-bar 槽位页面数 == 声明基线（widget 注册零贡献）。
- * 4. webview 形态页面在 hub 中可见可点击（hub 消费 contributes.pages 声明
- *    本身，与 widget 形态无关）；renderPageContent 按内建 webview 注册名解析。
+ * 4. webview 形态页面在统一导航页可见可点击（导航页消费 contributes.pages
+ *    声明本身，与 widget 形态无关）；renderPageContent 按内建 webview 注册名解析。
  */
 
 import { fireEvent, render, screen } from '@testing-library/react'
 import type { ReactElement } from 'react'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { PluginPagesHubPanel } from '@/components/schema/widgets/PluginPagesHubPanel'
+import { WorkspaceNavPage } from '@/components/layout/WorkspaceNavPage'
 import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import { renderPageContent } from '@/components/schema/PageRenderer'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
@@ -69,10 +69,8 @@ describe('模式面板退役 — 具名 widget 不再注册', () => {
     }
   })
 
-  it('hub 宿主件按契约名注册，supportedSpaces 仅 workspace（不占 activity-bar）', () => {
-    const entry = widgetRegistry.getEntry('plugin_pages_hub_panel')
-    expect(entry).toBeDefined()
-    expect(entry?.metadata.supportedSpaces).toEqual(['workspace'])
+  it('插件页面 hub 宿主件已退役（统一导航页吸收其职责，防复活）', () => {
+    expect(widgetRegistry.getEntry('plugin_pages_hub_panel')).toBeUndefined()
   })
 })
 
@@ -119,8 +117,8 @@ describe('模式面板退役 — activity-bar 零新增守护', () => {
   })
 })
 
-describe('模式面板退役 — webview 形态页面在 hub 可见可点击', () => {
-  it('hub 展示 webview 页声明条目（hub 消费声明本身，与 widget 形态无关）', () => {
+describe('模式面板退役 — webview 形态页面在统一导航页可见可点击', () => {
+  it('导航页展示 webview 页声明条目（导航页消费声明本身，与 widget 形态无关）', () => {
     contributionRegistry.loadFromSchema({
       plugin_contributes: [
         {
@@ -131,11 +129,11 @@ describe('模式面板退役 — webview 形态页面在 hub 可见可点击', (
       ],
       plugin_configs: [],
     })
-    render(<PluginPagesHubPanel />)
+    render(<WorkspaceNavPage />)
 
-    const item = screen.getByTestId('hub-item-mode_coding:coding_delivery')
+    const item = screen.getByTestId('nav-item-mode_coding:coding_delivery')
     expect(item).toHaveTextContent('编码交付')
-    expect(item).toHaveTextContent('mode_coding')
+    expect(item).toHaveTextContent('💻')
   })
 
   it('点击 webview 页条目 → 打开工作区页签，component=webview 且 props 原样透传', () => {
@@ -149,8 +147,8 @@ describe('模式面板退役 — webview 形态页面在 hub 可见可点击', (
       ],
       plugin_configs: [],
     })
-    render(<PluginPagesHubPanel />)
-    fireEvent.click(screen.getByTestId('hub-item-mode_coding:coding_delivery'))
+    render(<WorkspaceNavPage />)
+    fireEvent.click(screen.getByTestId('nav-item-mode_coding:coding_delivery'))
 
     const tab = useLayoutModeStore
       .getState()

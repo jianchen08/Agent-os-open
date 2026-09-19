@@ -807,7 +807,7 @@ async def http_handle(
             tenant = _header_value(headers, "x-agentos-tenant")
             return _ok(_json_response(_query_tool_calls(q, tenant)))
 
-        # 按工具聚合统计（窗口 = 最近 limit 条含工具结果的 trace，非全量）
+        # 按工具聚合统计（窗口 = 最近 limit 条 trace 内的工具结果，非全量）
         if path == "/ext/monitoring/tool-calls/stats" and method == "GET":
             q = query or {}
             tenant = _header_value(headers, "x-agentos-tenant")
@@ -1240,17 +1240,27 @@ def _query_tool_calls(q: dict[str, str], tenant_id: str = "") -> dict[str, Any]:
     数据源 = 引擎 persist_step_trace 落的 step 级轨迹：traces.plugin_id 是**配置
     step id**（如 core/prepare），工具结果数组由 tool_core 的 state_updates 合并
     进 state 后经引擎 diff 落在 patch_data.tool_results（行级按 json_each 解包）。
-    故按**内容谓词**选择（patch_data 含 tool_results 键），与 plugin_id 无关——
-    按 'pipeline_tool_core' 过滤恒空（插件 id 不落 traces.plugin_id）。
+    故明细窗口按 created_at 取，与 plugin_id 无关——按 'pipeline_tool_core'
+    过滤恒空（插件 id 不落 traces.plugin_id）。
+
+    明细窗口（诚实口径）：**最近 limit 条 trace**（默认 50 / 上限 200，limit
+    同时钳窗口与返回行数）内展开的工具结果，行数 ≤ limit。语义非"全历史最近
+    N 条工具结果"——近期 trace 若无工具结果，更早的工具调用不会回补进窗口
+    （内容谓词 json_extract 无索引可用，全表逐行解析大 blob 随库增长无界，
+    实测 1.5GB/2 万行 8.2s，端点必超时——BUG-47；窗口化后 O(window)）。
+    内核侧 (tenant_id, created_at) 索引（idx_traces_tenant_created）使窗口
+    子查询走索引倒序扫描；窗口子查询只取 trace_id，避免大 blob 进排序器，
+    无索引时也保持在超时预算内。
 
     租户过滤：``tenant_id`` 必须来自内核注入的 X-AgentOS-Tenant 头（已认证
     租户）；缺失/为空一律返回空集（fail-closed）——绝不全量查询兜底，否则
-    匿名化身份缺失会退化为跨租户泄露。
+    匿名化身份缺失会退化为跨租户泄露。窗口子查询与外层行集双重绑定租户
+    （行级过滤不依赖窗口派生正确性）。
 
-    用 json_each 解包 patch_data.tool_results 数组，支持按 tool_name/status/
-    min_duration 筛选。不改 schema，纯查询层。
-    已知粒度局限：patch_data 是 step 末态 diff，同 step 多轮工具迭代只留最后
-    一轮结果（trace 以配置 step 为界）。
+    用 json_each 解包窗口内 patch_data.tool_results 数组，支持按 tool_name/
+    status/min_duration 筛选（筛选作用于窗口内，不扩窗）。不改 schema，纯
+    查询层。已知粒度局限：patch_data 是 step 末态 diff，同 step 多轮工具迭代
+    只留最后一轮结果（trace 以配置 step 为界）。
 
     Args:
         q: 查询参数（tool_name / status / min_duration / limit）
@@ -1279,11 +1289,16 @@ def _query_tool_calls(q: dict[str, str], tenant_id: str = "") -> dict[str, Any]:
                json_extract(item.value, '$.success')     AS success,
                json_extract(item.value, '$.error')       AS error,
                json_extract(item.value, '$.duration_ms') AS duration_ms
-        FROM traces t, json_each(t.patch_data, '$.tool_results') AS item
-        WHERE json_extract(t.patch_data, '$.tool_results') IS NOT NULL
-          AND t.tenant_id = ?
+        FROM (
+            SELECT trace_id FROM traces
+            WHERE tenant_id = ?
+            ORDER BY created_at DESC LIMIT ?
+        ) w
+        JOIN traces t ON t.trace_id = w.trace_id,
+        json_each(t.patch_data, '$.tool_results') AS item
+        WHERE t.tenant_id = ?
     """
-    params: list[Any] = [tenant_id]
+    params: list[Any] = [tenant_id, limit, tenant_id]
     if tool_name_filter:
         sql += " AND json_extract(item.value, '$.tool_name') = ?"
         params.append(tool_name_filter)
@@ -1322,13 +1337,16 @@ def _query_tool_call_stats(q: dict[str, str], tenant_id: str = "") -> dict[str, 
     """按工具聚合调用统计（工具调用记录页「按工具统计」视图的数据源）。
 
     数据源与租户过滤同 _query_tool_calls（json_each 解包 patch_data.tool_results，
-    缺租户身份 fail-closed 空集）。聚合窗口 = 最近 limit 条含工具结果的 trace
-    （先按 created_at 倒序取窗口再展开聚合）——诚实口径：非全生命周期总量，
-    窗口大小随 limit 参数（默认 500 条 trace，上限 2000）。
+    缺租户身份 fail-closed 空集）。聚合窗口 = **最近 window 条 trace**（含未携
+    工具结果的行——占窗口位不产生计数；先按 created_at 倒序取窗口再展开聚合）
+    ——诚实口径：非全生命周期总量，窗口大小随 limit 参数（默认 500 条 trace，
+    上限 2000）。窗口子查询只取 trace_id（大 blob 不进排序器），配合内核
+    idx_traces_tenant_created 走索引倒序扫描；内容谓词 json_extract 无索引可用，
+    全表逐行解析随库增长无界（实测 1.5GB/2 万行 8.5s，端点必超时——BUG-47）。
 
     Returns:
         {items: [{tool_name, calls, success_calls, error_calls, avg_duration_ms,
-        last_error}], total, window}；按调用次数倒序。
+        last_call_at}], total, window}；按调用次数倒序。
     """
     import sqlite3
 
@@ -1349,11 +1367,11 @@ def _query_tool_call_stats(q: dict[str, str], tenant_id: str = "") -> dict[str, 
                AVG(CAST(json_extract(item.value, '$.duration_ms') AS REAL)) AS avg_duration_ms,
                MAX(t.created_at) AS last_call_at
         FROM (
-            SELECT patch_data, created_at FROM traces
-            WHERE json_extract(patch_data, '$.tool_results') IS NOT NULL
-              AND tenant_id = ?
+            SELECT trace_id FROM traces
+            WHERE tenant_id = ?
             ORDER BY created_at DESC LIMIT ?
-        ) t,
+        ) w
+        JOIN traces t ON t.trace_id = w.trace_id,
         json_each(t.patch_data, '$.tool_results') AS item
         GROUP BY tool_name
         ORDER BY calls DESC
@@ -1505,7 +1523,7 @@ async function loadStats() {
     var items = data.items || [];
     document.getElementById('count').textContent = '(' + items.length + ' 个工具)';
     document.getElementById('stats_window').textContent =
-      '统计窗口：最近 ' + (data.window || 500) + ' 条含工具调用的 trace（非全生命周期累计）';
+      '统计窗口：最近 ' + (data.window || 500) + ' 条 trace 内的工具调用（非全生命周期累计）';
     if (!items.length) {
       document.getElementById('stats_empty').style.display = 'block';
       document.getElementById('stats_rows').innerHTML = '';
@@ -1517,14 +1535,18 @@ async function loadStats() {
     var html = items.map(function(i) {
       var name = i.tool_name || '?';
       var err = parseInt(i.error_calls, 10) || 0;
-      return '<tr class="rowmain" data-tool="' + escapeHtml(name) + '" id="row-' + escapeHtml(name) + '">' +
+      // 交互口径：只有失败数据可展开看详情；非失败行仅监控指标，不可展开
+      var expandable = err > 0;
+      return '<tr' + (expandable ? ' class="rowmain"' : '') + ' data-tool="' + escapeHtml(name) + '" id="row-' + escapeHtml(name) + '">' +
         '<td>' + escapeHtml(name) + '</td>' +
         '<td>' + (i.calls || 0) + '</td>' +
         '<td class="ok">' + (i.success_calls || 0) + '</td>' +
         '<td class="' + (err > 0 ? 'fail' : '') + '">' + err + '</td>' +
         durCell(i.avg_duration_ms) +
         '<td style="color:#64748b;font-size:11px">' + fmt(i.last_call_at) + '</td></tr>' +
-        '<tr class="rowdetail" id="detail-' + escapeHtml(name) + '" style="display:none"><td colspan="6">加载中...</td></tr>';
+        (expandable
+          ? '<tr class="rowdetail" id="detail-' + escapeHtml(name) + '" style="display:none"><td colspan="6">加载中...</td></tr>'
+          : '');
     }).join('');
     var tbody = document.getElementById('stats_rows');
     tbody.innerHTML = html;

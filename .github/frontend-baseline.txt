@@ -106,7 +106,36 @@
 # 上下文，先评估可达性）。
 vitest_failures=0
 eslint_errors=0
-vitest_coverage_pct=99.12
+vitest_coverage_pct=99.36
+#
+# 收紧（2026-09-18 覆盖率补测批，dev/0.2@16b413b83 工作树实测 99.36）：
+# vitest 全量 502 文件 5606 用例 0 失败，Lines 15315/15413 = 99.36%（99.12 →
+# 99.36，缺行 131→98）。增量来源 = 三批补测：
+# 批一（cbd790c7a）：retry 畸形 response + 删 throw lastError（后经 16b413b83
+#   勘误回补——maxAttempts<=0 退化输入可达，非死代码，本批误诊）/storage/
+#   idb safeDel 降级/activityConverter 复制动作与 partialOutput 通用详情块
+#   （bash_execute 等有 terminal 特判卡，须用无启发式键形态）/godotProvider
+#   翻译契约/workspacePanelOpener 前缀命中+openPluginPage/skinRuntime
+#   transformResponse 透传/pipelineNavigator 陈旧 runId 主标签分支。
+# 批二（d184d15b8）：notificationStore executeAction confirm 分支（顺带拆断
+#   confirm↔confirmBlockingNotification 无限互递归真缺陷——动作必带 id，带
+#   确认按钮的阻塞通知点击确认即栈溢出）+ queryKeys/yaml/resolver/
+#   contextKeys/contextUsage/pluginStyles/selectionBridge 重连重订阅。
+# 批三（3d6ee6935）：storage catch 内不可达布尔回退分支删除（'true'/'false'
+#   是合法 JSON 永不入 catch）+ ws URL last_sequence/toggleAutoExecute 停用/
+#   isPluginConfigConflict/setAtPath null 中间层。
+# 余 98 缺行分诊（下一批靶向）：组件渲染散点为主体（GlobalInteractionOverlay 4/
+# ChatInput 3/LobeChatMarkdown 3/MessageContentRenderer 3/MessageList 3/
+# FiveSpaceLayout 3/FloatingWindowManager 3/WorkspaceNavPage 3/shared markdown 3/
+# KnowledgeBaseContent 3/registerWidgets 3 + 单行组件 ~30 文件）；hooks=
+# useVoiceInput(58,72,248 需渲染假识别器)；handlers=messageHandler 空内容 warn
+# 双路/streamHandler 激活与 usage；stores=sessionStore 重连清理/workspaceStore
+# id 缺失 console/pipelineMessageStore 断线补插；services=ContributionRegistry
+# 742/RjsfForm 491/dbAdmin serialize 箭头/dshAdapter renderer 注册失败分支/
+# outputSchemaView 143/renderIntent 713；结构性登记：fileOpener 25-26（catch
+# 双保险，沿既有登记）/workspacePanelOpener 160 前缀 sort 比较器（TOP_NAV_PANELS
+# 前缀键唯一，比较器零元素对永不调用，键扩容时自然可达）/retry 81（maxAttempts
+# <=0 退化输入收尾，16b413b83 回补的类型级守卫）。
 #
 # 收紧（2026-09-17 覆盖率补测批，dev/0.2@1c2c8ef1f 工作树实测 99.12）：
 # vitest 全量 489 文件 5528 用例 0 失败，Lines 15261/15396 = 99.12%（99.00 →

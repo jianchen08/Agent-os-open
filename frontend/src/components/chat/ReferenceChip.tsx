@@ -6,7 +6,7 @@
  * 自定义渲染即可复用，无需改动本组件。
  *
  * 当前消费方：
- * - GodotSelectionRow：实时选中引用（输入框上方，选中出现 / 取消消失）
+ * - ReferenceSelectionRow：实时选中引用（输入框上方，选中出现 / 取消消失）
  * - MessageItem：对话历史中插件注入的 <reference> 引用消息渲染（源无关）
  */
 import { Box } from '@/assets/icons'

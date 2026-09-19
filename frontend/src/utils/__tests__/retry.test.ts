@@ -117,3 +117,9 @@ describe('requestWithRetry', () => {
     expect(fn).toHaveBeenCalledTimes(4)
   })
 })
+
+describe('isRetryableError 边界', () => {
+  it('有响应对象但无状态码（畸形 response）→ 不可重试', () => {
+    expect(isRetryableError({ response: {} })).toBe(false)
+  })
+})

@@ -16,9 +16,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import urllib.request
 from typing import Any
+
+# 宿主/容器内均要求 docker 在 PATH（部署契约）；解析为完整路径满足进程启动审计
+_DOCKER = shutil.which("docker") or "docker"
 
 # Bridge 地址候选（容器内）：env 注入优先，其后 Docker Desktop 特殊域名。
 BRIDGE_HOST_CANDIDATES = ("env:AGENTOS_BRIDGE_URL", "http://host.docker.internal:{port}")
@@ -111,15 +115,15 @@ class BridgeClient:
 
     # ── MCP 协议 ─────────────────────────────────────────────
 
-    def list_tools(self) -> list[dict]:
+    def list_tools(self) -> list[dict[str, Any]]:
         result = self._rpc("tools/list")
         return list(result.get("tools") or [])
 
-    def call(self, tool: str, arguments: dict) -> dict:
+    def call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """tools/call，返回 MCP result（含 content 数组）。"""
         return self._rpc("tools/call", {"name": tool, "arguments": arguments})
 
-    def initialize(self) -> dict:
+    def initialize(self) -> dict[str, Any]:
         return self._rpc(
             "initialize",
             {
@@ -129,8 +133,8 @@ class BridgeClient:
             },
         )
 
-    def _rpc(self, method: str, params: dict | None = None) -> dict:
-        payload: dict = {"jsonrpc": "2.0", "id": 1, "method": method}
+    def _rpc(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method}
         if params is not None:
             payload["params"] = params
         result = self._send(payload)
@@ -149,22 +153,23 @@ class BridgeClient:
 
     # ── 双传输 ────────────────────────────────────────────────
 
-    def _send(self, payload: dict) -> dict:
+    def _send(self, payload: dict[str, Any]) -> dict[str, Any]:
         """按 caller 选路径：sandbox 走容器内执行，host 直发。"""
         if self._caller == "sandbox":
             return self._send_via_container(payload)
         return self._send_direct(payload)
 
-    def _send_direct(self, payload: dict) -> dict:
+    def _send_direct(self, payload: dict[str, Any]) -> dict[str, Any]:
         """宿主直发（非隔离路径）。"""
         url = self._base.rstrip("/") + "/mcp/" + self._upstream
-        req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST")
+        # base 为运维侧配置的本地 Bridge 地址（env/config，http/https），非用户输入
+        req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST")  # noqa: S310
         req.add_header("Content-Type", "application/json")
         req.add_header("Authorization", f"Bearer {self._token}")
         req.add_header("X-Bridge-Session", self._session)
         req.add_header("X-Bridge-Caller", self._caller)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
                 return {"ok": True, "status": resp.status, "body": json.loads(resp.read().decode("utf-8"))}
         except urllib.error.HTTPError as e:
             try:
@@ -179,7 +184,7 @@ class BridgeClient:
                 "body": {"error": f"Bridge 不可达（{url}）: {e}。请先在宿主机启动 Bridge：scripts/start_bridge.bat"},
             }
 
-    def _send_via_container(self, payload: dict) -> dict:
+    def _send_via_container(self, payload: dict[str, Any]) -> dict[str, Any]:
         """容器路径：内嵌脚本经 docker exec 在任务容器内执行（沙箱内 MCP Client）。
 
         地址候选静默自试；agent 无感。
@@ -201,9 +206,11 @@ class BridgeClient:
             "payload": payload,
             "timeout": self._timeout,
         }
-        proc = subprocess.run(
-            ["docker", "exec", "-i", "-e", "PYTHONIOENCODING=utf-8", container_id, "python", "-"],
-            input=_INNER_SCRIPT.encode("utf-8"),
+        # 脚本经 -c 承载，stdin 专供 spec JSON——`python -` 会把整个 stdin
+        # 当程序源码消费，_INNER_SCRIPT 运行时将读不到 spec
+        proc = subprocess.run(  # noqa: S603 — container_id 由内核注入的隔离上下文提供，非用户输入
+            [_DOCKER, "exec", "-i", "-e", "PYTHONIOENCODING=utf-8", container_id, "python", "-c", _INNER_SCRIPT],
+            input=json.dumps(spec).encode("utf-8"),
             capture_output=True,
             timeout=self._timeout + 10,
         )
@@ -217,7 +224,8 @@ class BridgeClient:
         if not lines:
             return {"ok": False, "status": 0, "body": {"error": "容器内客户端无输出"}}
         try:
-            return json.loads(lines[-1])
+            result: dict[str, Any] = json.loads(lines[-1])
+            return result
         except json.JSONDecodeError:
             return {"ok": False, "status": 0, "body": {"error": f"容器内客户端输出不可解析: {lines[-1][:200]}"}}
 
@@ -243,8 +251,8 @@ class BridgeClient:
 def _docker_gateway_ip() -> str:
     """宿主侧查 docker 网桥网关 IP（WSL 原生 docker 无 host.docker.internal 时的候选）。"""
     try:
-        proc = subprocess.run(
-            ["docker", "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"],
+        proc = subprocess.run(  # noqa: S603 — 固定参数查 docker 网桥元信息，无外部输入
+            [_DOCKER, "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"],
             capture_output=True,
             text=True,
             timeout=10,

@@ -182,6 +182,111 @@ impl PluginLoaderImpl {
         self
     }
 
+    /// 标准 mcpServers 配置（config/mcp.json）→ external MCP 插件目录同步。
+    ///
+    /// 对标 Claude Desktop 的安装体验：往 config/mcp.json 贴一段标准
+    /// {"mcpServers": {"<name>": {"command","args","env"} | {"url","headers"}}}
+    /// 即装上一个 MCP——每个条目生成一个 mcp:external 空声明插件目录
+    /// （观测即声明，dynamic MCP），命名 mcp_<name>。discover 每轮先同步：
+    /// 新增/变更重写、删除条目清目录（只动带 .mcp-managed 标记的目录）。
+    /// 内容未变不重写（mtime 空转会空转 watcher）。config 缺失/解析失败：
+    /// 跳过同步且不清目录（不因配置抖动销毁已装插件）。
+    /// 用户根 config/mcp.json 同名条目覆盖内置（与插件双根同语义）。
+    fn sync_external_mcp_plugins(&self) {
+        let warn_err = |stage: &str, msg: String| {
+            warn!(target: "plugin-loader", stage, error = %msg, "external MCP 配置同步失败（该条跳过）");
+        };
+
+        // 配置源：config_root 优先，回退插件根旁的 config/（仓库布局）。
+        let mut builtin_servers: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        let mut user_servers: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        let read_cfg = |dir: Option<&Path>,
+                        out: &mut std::collections::HashMap<String, serde_json::Value>|
+         -> bool {
+            let Some(dir) = dir else { return false };
+            let path = dir.join("mcp.json");
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                return false;
+            };
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => match v.get("mcpServers").and_then(|m| m.as_object()) {
+                    Some(map) => {
+                        for (name, spec) in map {
+                            out.insert(name.clone(), spec.clone());
+                        }
+                        true
+                    }
+                    None => {
+                        // 缺 mcpServers 键同解析失败：该根不可用，不得据此清目录
+                        warn_err("parse", format!("{} 缺 mcpServers 对象", path.display()));
+                        false
+                    }
+                },
+                Err(e) => {
+                    warn_err("parse", format!("{}: {}", path.display(), e));
+                    false
+                }
+            }
+        };
+
+        let builtin_read = read_cfg(
+            self.config_root
+                .as_deref()
+                .map(PathBuf::from)
+                .or_else(|| self.builtin_root.parent().map(|p| p.join("config")))
+                .as_deref(),
+            &mut builtin_servers,
+        );
+        let user_read = if let Some(user_root) = &self.user_root {
+            read_cfg(
+                user_root.parent().map(|p| p.join("config")).as_deref(),
+                &mut user_servers,
+            )
+        } else {
+            false
+        };
+        if !builtin_read && !user_read {
+            return; // 无配置（功能未使用）——不清目录
+        }
+
+        // 生成：用户条目落用户根（覆盖内置同名），内置条目落内置根
+        let mut keep: std::collections::HashMap<PathBuf, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        for (name, spec) in &builtin_servers {
+            if user_servers.contains_key(name) {
+                continue;
+            }
+            if let Some((dir_name, manifest)) = build_external_mcp_manifest(name, spec) {
+                let target = self.builtin_root.join(&dir_name);
+                write_managed_plugin_dir(&target, &manifest);
+                keep.entry(self.builtin_root.clone())
+                    .or_default()
+                    .insert(dir_name);
+            }
+        }
+        if let Some(user_root) = &self.user_root {
+            for (name, spec) in &user_servers {
+                if let Some((dir_name, manifest)) = build_external_mcp_manifest(name, spec) {
+                    let target = user_root.join(&dir_name);
+                    write_managed_plugin_dir(&target, &manifest);
+                    keep.entry(user_root.clone()).or_default().insert(dir_name);
+                }
+            }
+        }
+
+        // 清理：配置里已删除的受管目录（只动带 .mcp-managed 标记的）
+        if builtin_read {
+            prune_managed_plugin_dirs(&self.builtin_root, keep.get(&self.builtin_root));
+        }
+        if let Some(user_root) = &self.user_root {
+            if user_read {
+                prune_managed_plugin_dirs(user_root, keep.get(user_root));
+            }
+        }
+    }
+
     /// 扫描单个根目录，发现所有 plugin.json/plugin.yaml manifest。
     fn scan_root(&self, root: &Path) -> Result<Vec<(PluginManifest, PathBuf)>, LoaderError> {
         let mut results = Vec::new();
@@ -563,6 +668,10 @@ impl PluginLoader for PluginLoaderImpl {
         root_paths: &[&str],
     ) -> Result<Vec<PluginManifest>, agentos_core::types::PluginError> {
         let mut all_manifests = HashMap::new();
+
+        // 标准 mcpServers 配置 → external MCP 插件目录同步（每轮先同步，
+        // 配置增删改即热生效；详见 sync_external_mcp_plugins）。
+        self.sync_external_mcp_plugins();
 
         // 扫描 root_paths（外部传入的路径）。同 id 双源裁决与内置根/用户根扫描段
         // 同语义：**用户根子树赢**。root_paths 的迭代序来自调用方（热路径
@@ -3835,5 +3944,266 @@ mod tests {
                 .is_empty(),
             "目录占位入口应读为空字节（不 panic）"
         );
+    }
+}
+
+/// mcp 配置名 → 受管插件目录名（`mcp_<清洗名>`）；清洗后为空返回 None。
+fn sanitize_mcp_dir_name(name: &str) -> Option<String> {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let dir = format!("mcp_{cleaned}");
+    if dir == "mcp_" {
+        None
+    } else {
+        Some(dir)
+    }
+}
+
+/// 构造 external MCP manifest（mcp:external 空声明 + mcp 块）。
+/// 返回 (目录名, manifest JSON)——目录名 = mcp_<清洗名>。
+fn build_external_mcp_manifest(
+    name: &str,
+    spec: &serde_json::Value,
+) -> Option<(String, serde_json::Value)> {
+    let warn = |msg: String| {
+        warn!(target: "plugin-loader", error = %msg, "external MCP 条目跳过");
+    };
+    let dir_name = sanitize_mcp_dir_name(name)?;
+    let mut endpoint = serde_json::Map::new();
+    let transport: &str;
+    if let Some(cmd) = spec.get("command").and_then(|v| v.as_str()) {
+        transport = "stdio";
+        endpoint.insert("command".into(), serde_json::json!(cmd));
+        if let Some(args) = spec.get("args") {
+            endpoint.insert("args".into(), args.clone());
+        }
+        if let Some(env) = spec.get("env") {
+            endpoint.insert("env".into(), env.clone());
+        }
+    } else if let Some(url) = spec.get("url").and_then(|v| v.as_str()) {
+        transport = "streamable_http";
+        endpoint.insert("url".into(), serde_json::json!(url));
+        if let Some(headers) = spec.get("headers") {
+            endpoint.insert("headers".into(), headers.clone());
+        }
+    } else {
+        warn(format!("mcp {name:?} 缺 command/url"));
+        return None;
+    }
+    let manifest = serde_json::json!({
+        "id": dir_name,
+        "name": format!("MCP {name}"),
+        "description": "External MCP (config/mcp.json)",
+        "version": "1.0.0",
+        "plugin_type": "tool",
+        "language": "external",
+        "host_type": "sidecar",
+        "entry": "mcp:external",
+        "capabilities": {},
+        "mcp": {"transport": transport, "endpoint": endpoint},
+        "permissions": {},
+        "priority": 30,
+    });
+    Some((dir_name, manifest))
+}
+
+/// 写受管 external MCP 插件目录：`.mcp-managed` 标记 + plugin.json（内容不变不重写）。
+fn write_managed_plugin_dir(target: &Path, manifest: &serde_json::Value) {
+    if std::fs::create_dir_all(target).is_err() {
+        warn!(target: "plugin-loader", dir = %target.display(), "external MCP 目录创建失败");
+        return;
+    }
+    let marker = target.join(".mcp-managed");
+    if std::fs::write(&marker, b"generated from config/mcp.json").is_err() {
+        warn!(target: "plugin-loader", dir = %target.display(), "external MCP 标记写入失败");
+        return;
+    }
+    let Ok(pretty) = serde_json::to_string_pretty(manifest) else {
+        return;
+    };
+    let path = target.join("plugin.json");
+    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == pretty) {
+        return; // 内容未变不重写（防 mtime 空转 watcher）
+    }
+    if let Err(e) = std::fs::write(&path, pretty) {
+        warn!(target: "plugin-loader", path = %path.display(), error = %e, "external MCP manifest 写入失败");
+    }
+}
+
+/// 清理配置中已删除的受管目录：仅限 `mcp_` 前缀且带 `.mcp-managed` 标记者。
+fn prune_managed_plugin_dirs(root: &Path, keep: Option<&std::collections::HashSet<String>>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("mcp_") || keep.is_some_and(|k| k.contains(name)) {
+            continue;
+        }
+        if !dir.join(".mcp-managed").exists() {
+            continue; // 非受管目录（手写插件同名前缀）不动
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                warn!(target: "plugin-loader", dir = %dir.display(), "external MCP 目录已随配置删除而清理")
+            }
+            Err(e) => {
+                warn!(target: "plugin-loader", dir = %dir.display(), error = %e, "external MCP 目录清理失败")
+            }
+        }
+    }
+}
+
+// ── 标准 mcpServers 配置同步（external MCP 一行接入）──
+
+#[cfg(test)]
+mod mcp_sync_tests {
+    use super::*;
+    use agentos_core::traits::McpTransport;
+
+    /// 辅助：建临时插件根 + config 目录，写 config/mcp.json。
+    fn make_mcp_config_fixture(root: &Path, body: &str) -> PluginLoaderImpl {
+        let plugins = root.join("plugins");
+        let config = root.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("mcp.json"), body).unwrap();
+        PluginLoaderImpl::new(plugins, None)
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_stdio_entry_generates_plugin_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let loader = make_mcp_config_fixture(
+            root.path(),
+            r#"{"mcpServers":{"windows-mcp":{"command":"uvx","args":["windows-mcp","serve"]}}}"#,
+        );
+        let manifests = loader.discover(&[]).await.unwrap();
+        let m = manifests
+            .iter()
+            .find(|m| m.id == "mcp_windows_mcp")
+            .expect("生成的 external MCP manifest 应被发现");
+        assert_eq!(m.entry, "mcp:external");
+        assert!(m.capabilities.tools.is_empty(), "空声明 → 观测即声明");
+        let mcp = m.mcp.as_ref().expect("mcp 块存在");
+        assert_eq!(mcp.transport, McpTransport::Stdio);
+        let endpoint = mcp.endpoint.as_ref().unwrap();
+        assert_eq!(endpoint.command.as_deref(), Some("uvx"));
+        assert_eq!(
+            endpoint.args,
+            vec!["windows-mcp".to_string(), "serve".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_http_entry_maps_streamable_http() {
+        let root = tempfile::tempdir().unwrap();
+        let loader = make_mcp_config_fixture(
+            root.path(),
+            r#"{"mcpServers":{"remote":{"url":"https://example.com/mcp"}}}"#,
+        );
+        let manifests = loader.discover(&[]).await.unwrap();
+        let m = manifests
+            .iter()
+            .find(|m| m.id == "mcp_remote")
+            .expect("http 条目生成 manifest");
+        let mcp = m.mcp.as_ref().unwrap();
+        assert_eq!(mcp.transport, McpTransport::StreamableHttp);
+        assert_eq!(
+            mcp.endpoint.as_ref().unwrap().url.as_deref(),
+            Some("https://example.com/mcp")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_entry_removal_prunes_managed_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let loader = make_mcp_config_fixture(
+            root.path(),
+            r#"{"mcpServers":{"gone":{"command":"uvx","args":["x"]}}}"#,
+        );
+        loader.discover(&[]).await.unwrap();
+        let dir = root.path().join("plugins").join("mcp_gone");
+        assert!(dir.join("plugin.json").exists(), "首次同步生成目录");
+        assert!(dir.join(".mcp-managed").exists(), "受管标记存在");
+
+        // 配置删条目 → 下一轮 discover 清目录
+        let config = root.path().join("config").join("mcp.json");
+        std::fs::write(&config, r#"{"mcpServers":{}}"#).unwrap();
+        loader.discover(&[]).await.unwrap();
+        assert!(!dir.exists(), "受管目录随配置删除被清理");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_prune_spares_unmanaged_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let loader = make_mcp_config_fixture(root.path(), r#"{"mcpServers":{}}"#);
+        // 手写同名前缀目录（无受管标记）不得被清
+        let handmade = root.path().join("plugins").join("mcp_handmade");
+        std::fs::create_dir_all(&handmade).unwrap();
+        std::fs::write(handmade.join("plugin.json"), "{}").unwrap();
+
+        loader.discover(&[]).await.unwrap();
+        assert!(handmade.exists(), "非受管目录不动");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_malformed_json_keeps_managed_dirs() {
+        // 契约：解析失败 → 跳过同步且不清目录（不因配置抖动销毁已装插件）。
+        // 手编 mcp.json 打错一个逗号，下一轮 discover 不得删光受管插件目录。
+        let root = tempfile::tempdir().unwrap();
+        let loader = make_mcp_config_fixture(
+            root.path(),
+            r#"{"mcpServers":{"keep":{"command":"uvx","args":["x"]}}}"#,
+        );
+        loader.discover(&[]).await.unwrap();
+        let dir = root.path().join("plugins").join("mcp_keep");
+        assert!(dir.join(".mcp-managed").exists(), "首次同步生成受管目录");
+
+        let config = root.path().join("config").join("mcp.json");
+        std::fs::write(&config, r#"{"mcpServers":{ "broken":,,,}}"#).unwrap();
+        loader.discover(&[]).await.unwrap();
+        assert!(dir.exists(), "解析失败不得清受管目录");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_missing_mcp_servers_key_keeps_managed_dirs() {
+        // 合法 JSON 但缺 mcpServers 键 = 形状坏，同解析失败口径：不清目录
+        let root = tempfile::tempdir().unwrap();
+        let loader = make_mcp_config_fixture(
+            root.path(),
+            r#"{"mcpServers":{"keep":{"command":"uvx","args":["x"]}}}"#,
+        );
+        loader.discover(&[]).await.unwrap();
+        let dir = root.path().join("plugins").join("mcp_keep");
+
+        let config = root.path().join("config").join("mcp.json");
+        std::fs::write(&config, r#"{"other":1}"#).unwrap();
+        loader.discover(&[]).await.unwrap();
+        assert!(dir.exists(), "缺 mcpServers 键不得清受管目录");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_config_missing_file_is_noop() {
+        let root = tempfile::tempdir().unwrap();
+        let plugins = root.path().join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let loader = PluginLoaderImpl::new(plugins.clone(), None);
+        let manifests = loader.discover(&[]).await.unwrap();
+        assert!(manifests.is_empty());
+        assert!(plugins.exists(), "无配置目录不动");
     }
 }

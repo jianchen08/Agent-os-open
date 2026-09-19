@@ -29,7 +29,7 @@ import { resolveModelDisplayName } from '@/utils/modelName'
 import { findModelParams, mapParamsToStrength } from '@/utils/thinkingStrength'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
-import { GodotSelectionRow } from './GodotSelectionRow'
+import { ReferenceSelectionRow } from './ReferenceSelectionRow'
 import { MessageList } from './MessageList'
 import { PendingInputQueueBar } from './PendingInputQueueBar'
 import { VotingPanel } from './VotingPanel'
@@ -382,14 +382,21 @@ export const ChatContainer = ({
     >
       {/* Agent Tab 导航栏（多 Tab 时显示；单 Tab 也常驻）。
           顶部 40px 图标带行：与侧栏/工作区开关按钮同排（按钮钉页角、
-          标签行居中并在两侧留出 48px 避让角图标），带内无分割线 */}
+          标签行居中并在两侧留出 48px 避让角图标），带内无分割线。
+          本行兼作 Electron 窗口拖拽带（-webkit-app-region 在 Web 为惰性），
+          标签内容整体 no-drag 保交互 */}
       {showTabBar && (
-        <div className="flex h-10 shrink-0 items-center justify-center px-12" data-testid="chat-session-header">
-          <AgentTabBar
-            tabs={barTabs}
-            onTabChange={handleTabChange}
-            onTabClose={handleTabClose}
-          />
+        <div
+          className="app-drag-region flex h-10 shrink-0 items-center justify-center px-12"
+          data-testid="chat-session-header"
+        >
+          <div className="app-no-drag min-w-0">
+            <AgentTabBar
+              tabs={barTabs}
+              onTabChange={handleTabChange}
+              onTabClose={handleTabClose}
+            />
+          </div>
         </div>
       )}
 
@@ -423,11 +430,12 @@ export const ChatContainer = ({
         style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
         data-testid="chat-composer"
       >
-        {/* Godot 选中引用（实时镜像：选中出现 / 取消消失；选中非空发送时插件随消息注入引用）。
+        {/* 引用选中镜像行（实时镜像：选中出现 / 取消消失；选中非空发送时
+            provider 域随消息注入引用；经注册缝渲染，壳不感知具体插件域）。
             threadId 必须用 sessionId：内核 WS 绑定按 activeSessionId 注册
             （sendActiveThread），用 activeTabId（main-<sessionId>）订阅会导致
             事件单播查无绑定被丢弃——引用只随刷新显示。 */}
-        <GodotSelectionRow threadId={sessionId} />
+        <ReferenceSelectionRow threadId={sessionId} />
         {/* 待处理输入队列条（ADR-2026-08-26）：执行中发送的消息在此排队，
             点击条目内联编辑/删除/清空；消费激活后进主消息流 */}
         {currentTabPipelineId && (

@@ -93,9 +93,17 @@ tool_ids:
 - universal_search
 - godot_run
 - web_operate
-# computer_use（白名单条目=插件 id → 九件桌面操作工具全量注入；
-# 仅非隔离会话可执行，隔离任务内调用被插件 fail-closed 拒绝）
-- computer_use
+# computer_use（external MCP：Windows-MCP 动态导入）。显式列名而非插件 id——
+# 上游还带 Shell/PowerShell/FileSystem 等工具，整注等于在 LLM 面开安全旁路
+- Snapshot
+- Screenshot
+- Click
+- Type
+- Scroll
+- Move
+- Shortcut
+- Wait
+- App
 - memory
 - task_evaluate
 - human_interaction

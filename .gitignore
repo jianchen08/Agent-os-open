@@ -127,6 +127,13 @@ database.db
 *.db
 *.sqlite3
 
+# ─── 开发环境用户空间根（ADR 2026-09-18-dev-local-user-root）───
+# 启动脚本把 AGENTOS_USER_ROOT 钉在项目内：dev 的插件/配置/数据/密钥
+# 全部落这里，与安装版应用的 OS 默认空间（%APPDATA%\agentos）隔离。
+# 密钥文件 .env 由下方全局 .env 规则一并覆盖。未跟踪+忽略形态可扛
+# 工作区还原到 git HEAD（同 .packtest/ 族实证）。
+/user_root/
+
 # ─── 前端构建注入标记(本地构建生成,不入库)───
 .frontend_built_at
 .frontend_src_hash
@@ -250,3 +257,8 @@ gui-test-screenshots/
 .webchat_probe/edge-profile/
 .webchat_probe/*.png
 .webchat_probe/*.json
+
+# external MCP 受管插件目录（由 config/mcp.json 同步生成，勿手编）
+/plugins/mcp_*/
+
+/plugins/shared/mcp_*/

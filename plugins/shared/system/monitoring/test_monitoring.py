@@ -520,6 +520,36 @@ def _make_kernel_db(tmp_path: Path) -> Path:
     return db_path
 
 
+def _make_windowed_db(
+    tmp_path: Path,
+    total: int,
+    tool_results_by_pos: dict[int, list[dict[str, Any]]],
+    tenant: str = "tenant-a",
+) -> Path:
+    """窗口口径测试库：total 条 trace 按 created_at 升序落库（pos 1..total，
+    pos=1 最旧 / pos=total 最新），仅 tool_results_by_pos 指定的位置携带
+    tool_results，其余为无工具结果普通 step diff。
+
+    窗口边界测试以「最近 N 条」为参照系，pos 倒着数更直观（最近 50 条 =
+    pos total-49..total）。
+    """
+    db_path = tmp_path / "agentos_kernel.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE traces (trace_id TEXT, run_id TEXT, created_at TEXT, plugin_id TEXT, patch_data TEXT, tenant_id TEXT)"
+    )
+    rows = []
+    for pos in range(1, total + 1):
+        results = tool_results_by_pos.get(pos)
+        patch: dict[str, Any] = {"tool_results": results} if results else {"raw_result": "no tools"}
+        created = f"2026-01-01T{pos // 60:02d}:{pos % 60:02d}:00"
+        rows.append((f"tr-{pos}", "run-1", created, "core", json.dumps(patch), tenant))
+    conn.executemany("INSERT INTO traces VALUES (?, ?, ?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+    return db_path
+
+
 class TestToolCalls:
     def test_query_tool_calls_all(self, tmp_path: Path, monkeypatch) -> None:
         mod = _load_server()
@@ -551,6 +581,81 @@ class TestToolCalls:
         # limit 钳制
         clamped = mod._query_tool_calls({"limit": "999"}, "tenant-a")
         assert clamped["total"] == 3
+
+    def test_query_tool_calls_window_small_table_ordering(self, tmp_path: Path, monkeypatch) -> None:
+        """形状1（小表，全部在窗口内）：明细窗口 = 最近 limit 条 trace →
+        全部工具结果入选，行序按 created_at 倒序（最新 trace 的行在前）。"""
+        mod = _load_server()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_windowed_db(
+            tmp_path,
+            3,
+            {
+                1: [
+                    {"tool_name": "bash_execute", "success": True, "duration_ms": 50.0},
+                    {"tool_name": "file_write", "success": False, "error": "denied", "duration_ms": 2500.0},
+                ],
+                2: [{"tool_name": "file_read", "success": True, "duration_ms": 3.0}],
+                # pos3 无工具结果：不产生行，但占窗口位
+            },
+        )))
+        result = mod._query_tool_calls({}, "tenant-a")
+        assert result["total"] == 3
+        created = [i["created_at"] for i in result["items"]]
+        # 性质断言：created_at 非增（窗口内倒序）
+        assert created == sorted(created, reverse=True)
+        # 最新携带工具结果的 trace（pos2）的行排最前
+        assert result["items"][0]["tool_name"] == "file_read"
+
+    def test_query_tool_calls_window_excludes_out_of_window(self, tmp_path: Path, monkeypatch) -> None:
+        """形状2（窗口边界）：明细窗口 = 最近 limit（默认 50）条 trace（无论
+        是否含工具结果）；窗口外旧 trace 的工具结果不入选。60 条中仅最旧 1 条
+        带工具结果、最新 50 条全无 → 默认窗口恒空。"""
+        mod = _load_server()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_windowed_db(
+            tmp_path, 60, {1: [{"tool_name": "old_tool", "success": True, "duration_ms": 5.0}]},
+        )))
+        assert mod._query_tool_calls({}, "tenant-a")["total"] == 0
+        # 性质断言：窗口扩大到覆盖全部 60 条 → 窗口外数据回来（窗口单调）
+        expanded = mod._query_tool_calls({"limit": "60"}, "tenant-a")
+        assert expanded["total"] == 1
+        assert expanded["items"][0]["tool_name"] == "old_tool"
+
+    def test_query_tool_calls_window_cap_200(self, tmp_path: Path, monkeypatch) -> None:
+        """limit 上限 200 同时是窗口上限：limit=999 钳到 200。210 条中工具
+        结果恰放在最近 200 条边界两侧（pos10 出窗 / pos11 入窗）→ 单库同时
+        钉钳制后窗口的入窗与出窗。"""
+        mod = _load_server()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_windowed_db(
+            tmp_path,
+            210,
+            {
+                10: [{"tool_name": "edge_out", "success": True, "duration_ms": 5.0}],
+                11: [{"tool_name": "edge_in", "success": True, "duration_ms": 5.0}],
+            },
+        )))
+        clamped = mod._query_tool_calls({"limit": "999"}, "tenant-a")
+        assert clamped["total"] == 1
+        assert clamped["items"][0]["tool_name"] == "edge_in"
+
+    def test_query_tool_calls_row_limit_within_window(self, tmp_path: Path, monkeypatch) -> None:
+        """limit 仍钳明细行数：60 条 trace 各带 2 条结果（窗口 50 条展开
+        100 行）→ 只返回最新 50 行，且行序保持 created_at 倒序。"""
+        mod = _load_server()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_windowed_db(
+            tmp_path,
+            60,
+            {
+                pos: [
+                    {"tool_name": f"t{pos}", "success": True, "duration_ms": 1.0},
+                    {"tool_name": f"u{pos}", "success": True, "duration_ms": 1.0},
+                ]
+                for pos in range(1, 61)
+            },
+        )))
+        result = mod._query_tool_calls({}, "tenant-a")
+        assert result["total"] == 50
+        created = [i["created_at"] for i in result["items"]]
+        assert created == sorted(created, reverse=True)
 
     def test_query_tool_calls_tenant_isolation(self, tmp_path: Path, monkeypatch) -> None:
         """两租户数据互不可见：tenant-b 的行（含无工具结果的负控制）对
@@ -633,6 +738,49 @@ class TestToolCallStats:
         assert sum(i["calls"] for i in result["items"]) == 3
         # 窗口字段回显（诚实口径：非全生命周期累计）
         assert result["window"] == 500
+
+    def test_stats_window_excludes_out_of_window(self, tmp_path: Path, monkeypatch) -> None:
+        """形状2（窗口边界）：聚合窗口 = 最近 limit（默认 500）条 trace（含
+        无工具结果行）；窗口外旧 trace 不计入统计。501 条中仅最旧 1 条带工具
+        结果 → 默认窗口聚合为空。"""
+        mod = _load_server()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_windowed_db(
+            tmp_path, 501, {1: [{"tool_name": "old_tool", "success": True, "duration_ms": 5.0}]},
+        )))
+        result = mod._query_tool_call_stats({}, "tenant-a")
+        assert result["items"] == [] and result["total"] == 0
+        assert result["window"] == 500
+        # 性质断言：窗口扩大覆盖全部 501 条 → 窗口外工具计入（窗口单调）
+        expanded = mod._query_tool_call_stats({"limit": "2000"}, "tenant-a")
+        assert expanded["total"] == 1
+        assert expanded["window"] == 2000
+        assert expanded["items"][0]["tool_name"] == "old_tool"
+
+    def test_stats_window_aggregates_only_inside(self, tmp_path: Path, monkeypatch) -> None:
+        """形状3（窗口内混合聚合）：无工具结果行占窗口位但不产生计数；
+        聚合列（calls/success/error/avg）与按次数倒序在窗口内成立。"""
+        mod = _load_server()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_windowed_db(
+            tmp_path,
+            4,
+            {
+                1: [{"tool_name": "b", "success": True, "duration_ms": 50.0}],
+                4: [
+                    {"tool_name": "a", "success": True, "duration_ms": 100.0},
+                    {"tool_name": "a", "success": False, "error": "x", "duration_ms": 300.0},
+                ],
+            },
+        )))
+        result = mod._query_tool_call_stats({}, "tenant-a")
+        by_tool = {i["tool_name"]: i for i in result["items"]}
+        assert by_tool["a"]["calls"] == 2
+        assert by_tool["a"]["success_calls"] == 1
+        assert by_tool["a"]["error_calls"] == 1
+        assert by_tool["a"]["avg_duration_ms"] == 200.0
+        assert by_tool["b"]["calls"] == 1
+        # 按调用次数倒序：calls 高者在前；总调用数守恒（= 窗口内明细行数）
+        assert [i["tool_name"] for i in result["items"]][0] == "a"
+        assert sum(i["calls"] for i in result["items"]) == 3
 
     def test_stats_tenant_isolation_and_fail_closed(self, tmp_path: Path, monkeypatch) -> None:
         mod = _load_server()

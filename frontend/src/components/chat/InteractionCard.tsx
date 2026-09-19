@@ -19,6 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { approvalDeadlineMs, formatRemaining } from '@/utils/approvalCountdown'
 import { resolveInteractionLayout } from '@/utils/interactionModes'
 import type { InteractionOption, PendingInteraction } from '@/stores/interactionStore'
 
@@ -31,15 +32,6 @@ export interface InteractionCardProps {
   isSubmitting: boolean
 }
 
-/** 剩余时间格式：<1h 为 m:ss；≥1h 为 h:mm:ss（BUG-40 24h 等待上限可读展示） */
-function formatRemaining(totalSeconds: number): string {
-  const h = Math.floor(totalSeconds / 3600)
-  const m = Math.floor((totalSeconds % 3600) / 60)
-  const s = totalSeconds % 60
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-  return `${m}:${String(s).padStart(2, '0')}`
-}
-
 /**
  * 审批等待倒计时（BUG-14 有界等待可见化）。
  * timeoutSeconds + createdAt 齐备且请求仍 pending 时启用，每秒刷新；
@@ -49,11 +41,10 @@ function useApprovalCountdown(interaction: PendingInteraction): number | null {
   const { timeoutSeconds, createdAt, timestamp, status } = interaction
   const active = status === 'pending' && !!timeoutSeconds && timeoutSeconds > 0
 
-  const deadlineMs = useMemo(() => {
-    const base = Date.parse(createdAt || timestamp || '')
-    if (!Number.isFinite(base)) return null
-    return base + (timeoutSeconds ?? 0) * 1000
-  }, [createdAt, timestamp, timeoutSeconds])
+  const deadlineMs = useMemo(
+    () => approvalDeadlineMs({ createdAt, timestamp, timeoutSeconds }),
+    [createdAt, timestamp, timeoutSeconds],
+  )
 
   const [now, setNow] = useState(() => Date.now())
 

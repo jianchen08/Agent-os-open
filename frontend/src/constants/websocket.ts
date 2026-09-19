@@ -178,6 +178,8 @@ export const WS_SERVER_EVENTS = {
 export const WS_LOCAL_EVENTS = {
   /** 连接（重）建立：streaming/useRealtimeEvents 据此做断线补漏 */
   RECONNECTED: 'reconnected',
+  /** 连接状态机变迁（connected/reconnecting/disconnected；GlobalWebSocket 源头发射） */
+  STATUS: '_status',
   /** 排队 user_input 超 TTL 未送达（撤占位气泡 + 原位错误消息） */
   USER_INPUT_SEND_TIMEOUT: 'user_input_send_timeout',
   /** 被同账号新连接替换（B10 单连接踢旧，Close code=4000，不自动重连） */

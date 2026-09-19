@@ -43,6 +43,16 @@ export const TOP_NAV_PANELS: Record<string, WorkspacePanelSpec> = {
   // PluginsSettingsPage，独立 '/settings/plugins' 面板条目已撤。
 }
 
+/** 「新建标签页」目标：浏览器式新标签页=导航页（WorkspaceNavPage 卡片网格，
+ * 与空标签态兜底同一内容源）。widget 名与 registerWidgets 注册一致。 */
+export const WORKSPACE_NAV_TAB: WorkspacePanelSpec = {
+  id: 'ws-panel-workspace-nav',
+  title: '导航',
+  component: 'workspace_nav_page',
+  icon: '🧭',
+  moduleId: '__panel_workspace_nav__',
+}
+
 /**
  * 打开或激活一个工作区页签
  */

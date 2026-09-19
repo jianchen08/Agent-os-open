@@ -101,6 +101,108 @@ fn collect_memory_rss_windows(pid: u32) -> Option<u64> {
     parse_tasklist_mem_line(line)
 }
 
+// ── 跳板下探（uv venv trampoline）────────────────────────────────────────
+//
+// Windows 上 uv 创建的 .venv/Scripts/python.exe 是 trampoline 跳板：启动后
+// spawn 真实解释器（uv 管理的 base python）为子进程，自身退居 ~5MB 空壳等
+// 待（私有提交 <1MB）。invoker 记录的 child.id() 是跳板 pid，直接采集跳板
+// RSS 恒为空壳值——监控页插件内存恒显 4-5MB 的根因（真机实证：合宿宿主
+// 跳板 4.7MB vs 真实解释器 79.8MB，llm_service 真身 313.9MB）。采集时沿
+// pid 下探一层选真实解释器，pid/memory 两列同步取真实进程（与任务管理器
+// 同 pid 对得上）。alive 判定不受影响：跳板等待子进程退出，真身死跳板也退。
+
+/// 单次全表进程快照：pid → (exe 名小写, 直接子进程列表)。
+///
+/// Toolhelp 快照一次遍历全建（~千级进程毫秒级开销），供本轮全部宿主下探
+/// 复用；快照失败（句柄分配失败等）返回 None，调用方回落宿主 pid 原样采集。
+#[cfg(windows)]
+fn build_process_index() -> Option<std::collections::HashMap<u32, (String, Vec<u32>)>> {
+    use std::collections::HashMap;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let mut index: HashMap<u32, (String, Vec<u32>)> = HashMap::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snap, &mut entry) != 0 {
+            loop {
+                let pid = entry.th32ProcessID;
+                let ppid = entry.th32ParentProcessID;
+                let exe = String::from_utf16_lossy(
+                    entry.szExeFile.split(|&c| c == 0).next().unwrap_or(&[]),
+                )
+                .to_ascii_lowercase();
+                // 父条目可能先于父进程自身遍历到，两侧都登记
+                index
+                    .entry(pid)
+                    .or_insert_with(|| (String::new(), Vec::new()))
+                    .0 = exe;
+                index
+                    .entry(ppid)
+                    .or_insert_with(|| (String::new(), Vec::new()))
+                    .1
+                    .push(pid);
+                if Process32NextW(snap, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+    }
+    Some(index)
+}
+
+/// 从直接子进程中选真实工作进程 pid：exe 名含 "python" 的优先（trampoline
+/// 场景真实解释器是唯一 python 子进程）；无 python 名子进程时取第一个子进
+/// 程（.cmd 包装场景 cmd.exe → node.exe 等异构链）；无子进程返回 None
+/// （非跳板，调用方回落宿主 pid 自身）。
+#[cfg(windows)]
+fn pick_worker_child(
+    host_pid: u32,
+    index: &std::collections::HashMap<u32, (String, Vec<u32>)>,
+) -> Option<u32> {
+    let children = &index.get(&host_pid)?.1;
+    children
+        .iter()
+        .copied()
+        .find(|pid| {
+            index
+                .get(pid)
+                .map(|(exe, _)| exe.contains("python"))
+                .unwrap_or(false)
+        })
+        .or_else(|| children.first().copied())
+}
+
+/// 解析用于 RSS/pid 观测的真实进程 pid：有子进程按下探规则选真身，否则原
+/// 样返回宿主 pid（非 Windows 无跳板形态，恒原样）。
+#[cfg(windows)]
+fn resolve_worker_pid(
+    host_pid: u32,
+    index: &std::collections::HashMap<u32, (String, Vec<u32>)>,
+) -> u32 {
+    pick_worker_child(host_pid, index).unwrap_or(host_pid)
+}
+
+#[cfg(not(windows))]
+fn resolve_worker_pid(host_pid: u32, _index: &()) -> u32 {
+    host_pid
+}
+
+/// 非 Windows 平台无进程索引（下探恒原样，占位类型零开销）。
+#[cfg(not(windows))]
+fn build_process_index() -> Option<()> {
+    Some(())
+}
+
 /// 把进程态快照写入聚合器（周期轮询任务每 10s 调一次）。
 ///
 /// 写入指标（plugin_id 命名空间）：
@@ -175,14 +277,24 @@ pub fn collect_proc_state(agg: &MetricsAggregator, snap: &ProcStateSnapshot) {
 }
 
 /// 把一批宿主快照按成员插件写入聚合器（不含 last_crash_ts——崩溃回调唯一写方）。
+///
+/// pid/RSS 按轮次一次性的进程快照下探到真实工作进程（uv venv trampoline
+/// 场景跳板空壳 ≠ 真实解释器，见 [`build_process_index`]）；下探失败回落
+/// 宿主 pid 原样。alive/uptime 语义不变（跳板与真身同生命周期）。
 fn write_host_snapshots(agg: &MetricsAggregator, hosts: &[agentos_invoker::HostProcSnapshot]) {
+    let proc_index = build_process_index();
     for host in hosts {
         for plugin_id in &host.plugin_ids {
+            let observed_pid = host.pid.map(|pid| {
+                proc_index
+                    .as_ref()
+                    .map_or(pid, |idx| resolve_worker_pid(pid, idx))
+            });
             let snap = ProcStateSnapshot {
                 plugin_id: plugin_id.clone(),
                 alive: host.alive,
-                pid: host.pid,
-                memory_rss_bytes: host.pid.and_then(collect_memory_rss),
+                pid: observed_pid.or(host.pid),
+                memory_rss_bytes: observed_pid.and_then(collect_memory_rss),
                 uptime_secs: host.uptime_secs,
                 last_crash_ts: None,
             };
@@ -419,7 +531,9 @@ mod tests {
         let agg = MetricsAggregator::new();
         let hosts = vec![agentos_invoker::HostProcSnapshot {
             host_key: "group:light:1".to_string(),
-            pid: Some(4321),
+            // 不可能存在的 pid（u32::MAX-1）：确保下探索引里无此进程、回落
+            // 原样采集——测试不受宿主机真实进程表影响
+            pid: Some(u32::MAX - 1),
             alive: true,
             uptime_secs: Some(120),
             plugin_ids: vec!["a".to_string(), "b".to_string()],
@@ -431,11 +545,89 @@ mod tests {
             assert_eq!(views.len(), 1, "{plugin}");
             assert_eq!(views[0].latest, Some(1.0));
             let views = agg.query(Some(plugin), Some("process.pid"), None, &Labels::new());
-            assert_eq!(views[0].latest, Some(4321.0));
+            assert_eq!(views[0].latest, Some((u32::MAX - 1) as f64));
         }
         // last_crash_ts 不由轮询写（崩溃回调唯一写方）
         assert!(agg
             .query(None, Some("process.last_crash_ts"), None, &Labels::new())
             .is_empty());
+    }
+
+    // ── 跳板下探 ──
+
+    #[test]
+    #[cfg(windows)]
+    fn pick_worker_child_prefers_python_named_child() {
+        use std::collections::HashMap;
+        let index: HashMap<u32, (String, Vec<u32>)> = HashMap::from([
+            (100, ("python.exe".into(), vec![201, 202])),
+            (201, ("cmd.exe".into(), vec![])),
+            (202, ("python.exe".into(), vec![])),
+        ]);
+        // 含 python 名的子进程优先（trampoline 场景真实解释器）
+        assert_eq!(super::pick_worker_child(100, &index), Some(202));
+        // 无 python 名子进程：取第一个（.cmd → node 等异构包装链）
+        let index2: HashMap<u32, (String, Vec<u32>)> = HashMap::from([
+            (300, ("cmd.exe".into(), vec![401, 402])),
+            (401, ("node.exe".into(), vec![])),
+            (402, ("conhost.exe".into(), vec![])),
+        ]);
+        assert_eq!(super::pick_worker_child(300, &index2), Some(401));
+        // 无子进程：非跳板 → None（调用方回落宿主 pid）
+        let index3: HashMap<u32, (String, Vec<u32>)> =
+            HashMap::from([(500, ("python.exe".into(), vec![]))]);
+        assert_eq!(super::pick_worker_child(500, &index3), None);
+        // 索引中不存在的 pid：None
+        assert_eq!(super::pick_worker_child(999, &index), None);
+    }
+
+    /// 真实进程表性质：spawn 存活子进程后，全表快照索引能把当前测试进程
+    /// 下探到该子进程（trampoline 解析链路走真实 OS 数据）。
+    #[test]
+    #[cfg(windows)]
+    fn resolve_worker_pid_finds_real_spawned_child() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn ping");
+        let child_pid = child.id();
+        let index = super::build_process_index().expect("process snapshot");
+        let resolved = super::resolve_worker_pid(std::process::id(), &index);
+        let _ = child.kill();
+        let _ = child.wait(); // kill 后 wait 收尸，避免测试进程留僵尸句柄
+                              // 全量跑下同二进制的其他测试可能并发 spawn 姐妹子进程，选择器
+                              // 「python 优先/取第一个」不保证选中本测试的 ping——钉两条真不变量：
+                              // 快照能看到真实 spawn 的子进程；下探结果必是真实子进程之一（不回宿主、不虚构）
+        let (_, siblings) = index
+            .get(&std::process::id())
+            .expect("快照应含当前测试进程");
+        assert!(
+            siblings.contains(&child_pid),
+            "快照应看到真实 spawn 的子进程 {child_pid}"
+        );
+        assert_ne!(
+            resolved,
+            std::process::id(),
+            "存在子进程时下探不得回落宿主 pid"
+        );
+        assert!(
+            siblings.contains(&resolved),
+            "下探应命中真实子进程之一，got {resolved}"
+        );
+    }
+
+    /// 不可观测 pid（索引外）回落原样：宿主 pid 语义不变。
+    #[test]
+    #[cfg(windows)]
+    fn resolve_worker_pid_falls_back_for_unknown_pid() {
+        use std::collections::HashMap;
+        let index: HashMap<u32, (String, Vec<u32>)> = HashMap::new();
+        assert_eq!(
+            super::resolve_worker_pid(u32::MAX - 1, &index),
+            u32::MAX - 1
+        );
     }
 }

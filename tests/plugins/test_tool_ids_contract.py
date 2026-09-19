@@ -48,6 +48,10 @@ _KNOWN_NON_TOOL_IDS: frozenset[str] = frozenset()
 _USER_SPACE_TOOL_IDS: frozenset[str] = frozenset({
     "godot_run",        # external_mcp/godot_mcp（mode_godot/godot_expert、mode_godot/godot_orchestrator_agent 消费）
     "universal_search",  # external_mcp/omnisearch（general/research 系消费）
+    # ZCode/WorkBuddy 外部 agent 桌面端九件操作工具（上游原名，发任务技能 1ce8af4aa
+    # 接入；main/agentos.yaml 与 executor/general_agent.yaml 的 tool_ids 消费）
+    "App", "Snapshot", "Click", "Type", "Shortcut", "Wait",
+    "Move", "Screenshot", "Scroll",
 })
 
 

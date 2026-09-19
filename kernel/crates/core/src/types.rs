@@ -607,7 +607,9 @@ pub struct SessionRecord {
     /// 关联 agent ID（可空）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
-    /// 最近活跃的 pipeline_id（仅引用；子管道注册时不覆盖它，对齐 0.1 set_active=False）
+    /// 最近活跃的 pipeline_id（仅引用；普通子管道注册时不覆盖它——归属锚点
+    /// 创建除外：chat.send_message 创建分支带 thread_id 时同步切到新管道，
+    /// 使「任务落用户会话线程，对话在聊天区继续」成立）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_pipeline_id: Option<String>,
     /// 属于本会话的 pipeline_id 引用列表（对齐 0.1 SessionModel.pipeline_ids）

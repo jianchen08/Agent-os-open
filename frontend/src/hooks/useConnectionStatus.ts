@@ -6,6 +6,7 @@
  */
 
 import { useEffect } from 'react'
+import { WS_LOCAL_EVENTS } from '@/constants/websocket'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 
@@ -27,7 +28,7 @@ export function useConnectionStatus(): void {
       }
     }
 
-    globalWS.subscribe('_status', handleGlobalStatus)
+    globalWS.subscribe(WS_LOCAL_EVENTS.STATUS, handleGlobalStatus)
 
     if (globalWS.status === 'connected') {
       updateConnectionStatus({
@@ -49,7 +50,7 @@ export function useConnectionStatus(): void {
     }
 
     return () => {
-      globalWS.unsubscribe('_status', handleGlobalStatus)
+      globalWS.unsubscribe(WS_LOCAL_EVENTS.STATUS, handleGlobalStatus)
     }
   }, [updateConnectionStatus])
 }

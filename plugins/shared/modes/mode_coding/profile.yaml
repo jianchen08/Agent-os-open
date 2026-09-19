@@ -6,7 +6,7 @@ panel_page_id: coding_delivery
 chain:
   entry: main
   expected_path: [main, mode_coding/programming_orchestrator_agent_v2, mode_coding/code_writer]
-  executor_pool: [mode_coding/code_writer, general_agent]
+  executor_pool: [mode_coding/code_writer]
   entry_override: null
 pipeline_profile:
   pipeline: autonomous
@@ -28,7 +28,6 @@ material_scope:
     - config/agents/main/task_dispatch_guide.md
   execution_stage:
     - plugins/shared/modes/mode_coding/agents/
-    - config/agents/executor/general_agent.yaml
 levers:
   tool_misselect: {execution_stage: [tool_ids, dispatch_guide]}
   orchestration_runaway: {orchestration_stage: [pipeline_steps, breaker_params]}

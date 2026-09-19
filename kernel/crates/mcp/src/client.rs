@@ -3393,7 +3393,9 @@ sys.stdin.readline()
             python_exe().to_string(),
             vec!["-c".to_string(), script.to_string()],
         );
-        client = client.with_request_timeout(Duration::from_millis(300));
+        // 判别窗 2s：断言的是错误种类（EOF→Protocol 而非 Timeout），
+        // 窗口须远大于全量跑负载下的 sidecar 启动延迟，否则假红
+        client = client.with_request_timeout(Duration::from_millis(2000));
         client.connect().await.unwrap();
         let err = client.send_request("tools/list", None).await.unwrap_err();
         assert!(

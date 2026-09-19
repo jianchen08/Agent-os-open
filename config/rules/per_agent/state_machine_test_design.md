@@ -112,7 +112,7 @@
 
 ## 3. 状态机测试质量要求
 
-> 状态识别见 requirement_structuring_rules.md，本文件只负责基于状态机的测试设计。
+> 状态识别见 config/processes/requirement_structuring.md，本文件只负责基于状态机的测试设计。
 > 通用测试质量标准（独立性、命名、覆盖标准等）见 testing_rules.md。
 
 ### 3.1 多维度断言 [warning]

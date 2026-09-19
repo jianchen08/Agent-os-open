@@ -24,17 +24,16 @@ import {
 } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
 import apiClient from '@/services/api/client'
-import { pauseTask, resumeTask } from '@/services/api/tasks'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
-import { openWorkspaceTreeTab } from './workspaceTreeTab'
-import { TASK_STATUSES, normalizeTaskStatus, taskStatusLabel } from '@/types/taskStatus'
-import { formatTime, PRIORITY_LABELS } from './fileTreeFormatting'
 import { CreateTaskFormModal } from './CreateTaskFormModal'
+import { getFileTreeDomainBinding, type FileTreeStatusConfigItem as StatusConfigItem } from './fileTreeActions'
 import {
   FileTreeContextMenu,
   type ContextMenuContext,
   type ContextMenuTreeNode,
 } from './FileTreeContextMenu'
+import { formatTime, PRIORITY_LABELS } from './fileTreeFormatting'
+import { openWorkspaceTreeTab } from './workspaceTreeTab'
 
 /** 树展开状态的 localStorage 持久化工具 */
 const TREE_EXPANDED_PREFIX = 'tree_expanded_'
@@ -93,16 +92,6 @@ interface TreeNodeData {
   [key: string]: unknown
 }
 
-/** 状态显示配置项 */
-interface StatusConfigItem {
-  /** 图标名称 */
-  icon: string
-  /** 颜色类名 */
-  color: string
-  /** 状态标签 */
-  label: string
-}
-
 /** 树形组件配置属性 */
 interface TreeWidgetConfig {
   /** 树标题 */
@@ -141,25 +130,15 @@ interface TreeWidgetConfig {
   sessionId?: string
 }
 
-/** 默认状态配置映射（键 = 任务状态词表七态；旧值经 normalize 折叠，文案取自单一真值源） */
-const DEFAULT_STATUS_CONFIG: Record<string, StatusConfigItem> = {
-  pending: { icon: 'clock', color: 'text-status-warning', label: taskStatusLabel('pending') },
-  running: { icon: 'play', color: 'text-status-info', label: taskStatusLabel('running') },
-  evaluating: { icon: 'loader', color: 'text-status-info', label: taskStatusLabel('evaluating') },
-  stopped: { icon: 'pause', color: 'text-status-pending', label: taskStatusLabel('stopped') },
-  completed: { icon: 'check', color: 'text-status-success', label: taskStatusLabel('completed') },
-  failed: { icon: 'x-circle', color: 'text-status-error', label: taskStatusLabel('failed') },
-  timeout: { icon: 'x-circle', color: 'text-status-error', label: taskStatusLabel('timeout') },
+/** 状态筛选比较口径（归一化 + 活跃集合）——由注册的域绑定提供；未注册时
+ *  归一化为恒等、活跃集合为空（筛选退化为字面值比较） */
+interface StatusFilterVocabulary {
+  normalize: (status: string) => string
+  active: ReadonlySet<string>
 }
 
-/** 状态筛选选项（用于任务树状态筛选器，从词表单一真值源派生） */
-const STATUS_FILTER_OPTIONS = [
-  { value: '', label: '全部' },
-  ...TASK_STATUSES.map((s) => ({ value: s, label: taskStatusLabel(s) })),
-] as const
-
-/** 活跃状态集合（running/pending/evaluating） 用于默认筛选模式，仅显示正在执行的任务 */
-const ACTIVE_STATUSES_FOR_FILTER = new Set(['running', 'pending', 'evaluating'])
+/** 空活跃集合（无域绑定时的筛选项径） */
+const EMPTY_ACTIVE_SET: ReadonlySet<string> = new Set()
 
 /** 递归按状态过滤树节点 过滤策略：保留自身或任意后代匹配状态的节点，保持树状结构不变。 */
 function filterNodesByStatus(
@@ -167,6 +146,7 @@ function filterNodesByStatus(
   statusValue: string,
   statusField: string,
   childrenField: string,
+  vocabulary: StatusFilterVocabulary,
 ): TreeNodeData[] {
   if (!statusValue) return nodes
 
@@ -176,13 +156,13 @@ function filterNodesByStatus(
     const nodeStatus = String(getNodeField(node, statusField) ?? '')
     const children = getNodeField(node, childrenField) as TreeNodeData[] | undefined
     const filteredChildren = children
-      ? filterNodesByStatus(children, statusValue, statusField, childrenField)
+      ? filterNodesByStatus(children, statusValue, statusField, childrenField, vocabulary)
       : []
 
     const statusMatch =
       statusValue === '__active__'
-        ? ACTIVE_STATUSES_FOR_FILTER.has(normalizeTaskStatus(nodeStatus))
-        : normalizeTaskStatus(nodeStatus) === normalizeTaskStatus(statusValue)
+        ? vocabulary.active.has(vocabulary.normalize(nodeStatus))
+        : vocabulary.normalize(nodeStatus) === vocabulary.normalize(statusValue)
 
     // 自身匹配 或 有匹配的后代 → 保留此节点（保持树结构）
     if (statusMatch || filteredChildren.length > 0) {
@@ -230,12 +210,13 @@ function getStableNodeId(node: TreeNodeData): string {
   return String(Math.random())
 }
 
-/** 根据状态配置获取状态图标组件 */
+/** 根据状态配置获取状态图标组件（normalize = 域词表归一化，缺省恒等） */
 function getStatusIcon(
   status: string,
   config: Record<string, StatusConfigItem>,
+  normalize: (status: string) => string = (s) => s,
 ): { icon: React.ReactNode; color: string; label: string } {
-  const statusConf = config[normalizeTaskStatus(status)] ?? config[status]
+  const statusConf = config[normalize(status)] ?? config[status]
   if (!statusConf) {
     return { icon: <CircleDot className="h-4 w-4" />, color: 'text-status-pending', label: status }
   }
@@ -422,14 +403,21 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
 
   /** 是否显示状态筛选器（默认跟随 showStatus） */
   const showStatusFilter = config.showStatusFilter ?? showStatus
-  /** 默认筛选状态值（默认 'running'，仅显示正在运行的任务） */
-  const defaultStatusFilterValue = config.defaultStatusFilter ?? 'running'
+  /** 域绑定（任务树等数据源域经注册缝注入动作与状态词表；文件树等场景为 null） */
+  const domainBinding = getFileTreeDomainBinding()
+  /** 默认筛选状态值（缺省取域词表默认值，如任务树默认 running；无域绑定为空 = 全部） */
+  const defaultStatusFilterValue = config.defaultStatusFilter ?? domainBinding?.statuses.defaultFilter ?? ''
 
-  /** 是否显示启用/禁用开关（workspace:// 数据源默认隐藏） */
+  /** 是否显示启用/禁用开关（需域绑定提供切换动作；workspace:// 数据源默认隐藏） */
   const ds = rawProps.dataSource as string | undefined
-  const showEnabledToggle = config.showEnabledToggle ?? !(ds?.startsWith('workspace://'))
-  /** 合并状态配置 */
-  const statusConfig = { ...DEFAULT_STATUS_CONFIG, ...(config.statusConfig ?? {}) }
+  const showEnabledToggle = config.showEnabledToggle ?? (!!domainBinding && !(ds?.startsWith('workspace://')))
+  /** 合并状态配置（域词表配置为基座，props 显式配置覆盖） */
+  const statusConfig = { ...domainBinding?.statuses.config, ...(config.statusConfig ?? {}) }
+  /** 状态筛选选项（「全部」+ 域词表；无域绑定只余「全部」） */
+  const statusFilterOptions = [
+    { value: '', label: '全部' },
+    ...(domainBinding?.statuses.filterOptions ?? []),
+  ]
   /** 节点点击回调 */
   const onNodeClick = config.onNodeClick ?? (rawProps.onNodeClick as ((node: TreeNodeData) => void) | undefined)
   /** 文件节点点击回调 */
@@ -638,12 +626,8 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const [searchKeyword, setSearchKeyword] = useState('')
   /** 展开的节点 ID 集合（优先从 localStorage 恢复） */
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => restoredExpandedIds ?? new Set<string>())
-  /** 状态筛选值（默认 'running'，空字符串表示显示全部） */
+  /** 状态筛选值（默认取域词表默认值，空字符串表示显示全部） */
   const [statusFilter, setStatusFilter] = useState(defaultStatusFilterValue)
-  /** 节点启用/禁用状态映射（true=启用，false=禁用） */
-  const [enabledMap, setEnabledMap] = useState<Record<string, boolean>>({})
-  /** 已知的任务 ID 集合（用于检测新提交的任务并自动开启开关） */
-  const knownTaskIdsRef = useRef<Set<string>>(new Set())
   /** 正在切换启用/禁用状态的节点 ID 集合 */
   const [togglingIds, setTogglingIds] = useState<Set<string>>(new Set())
   /** 数据变更追踪 */
@@ -663,46 +647,6 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     prevDataRef.current = []
     seenNodeIdsRef.current = new Set()
   }, [treeKey])
-
-  /** 检测新提交的任务并自动开启开关。 逻辑：首次加载时仅记录所有任务 ID（不开启开关，重启后默认全部关闭）； */
-  useEffect(() => {
-    if (effectiveData.length === 0) return
-
-    const currentIds = new Set<string>()
-    const collectIds = (nodes: TreeNodeData[]) => {
-      for (const node of nodes) {
-        currentIds.add(getStableNodeId(node))
-        const children = getNodeField(node, nodeChildrenField) as TreeNodeData[] | undefined
-        if (children) collectIds(children)
-      }
-    }
-    collectIds(effectiveData)
-
-    const known = knownTaskIdsRef.current
-    if (known.size === 0) {
-      knownTaskIdsRef.current = currentIds
-      return
-    }
-
-    const newIds: string[] = []
-    for (const id of currentIds) {
-      if (!known.has(id)) {
-        newIds.push(id)
-      }
-    }
-
-    if (newIds.length > 0) {
-      setEnabledMap((prev) => {
-        const next = { ...prev }
-        for (const id of newIds) {
-          next[id] = true
-        }
-        return next
-      })
-    }
-
-    knownTaskIdsRef.current = currentIds
-  }, [effectiveData, nodeChildrenField])
 
   /** 已出现过的节点 ID 集合（用于区分新老节点） */
   const seenNodeIdsRef = useRef<Set<string>>(new Set())
@@ -790,15 +734,19 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
 
   /** 过滤 + 排序后的数据 */
   const filteredData = useMemo(() => {
-    // 1. 按状态筛选（保持树结构）
+    // 1. 按状态筛选（保持树结构；比较口径来自域词表，未注册绑定时恒等比较）
+    const vocabulary: StatusFilterVocabulary = {
+      normalize: domainBinding?.statuses.normalize ?? ((s: string) => s),
+      active: domainBinding?.statuses.active ?? EMPTY_ACTIVE_SET,
+    }
     const statusFiltered = showStatusFilter && statusFilter
-      ? filterNodesByStatus(effectiveData, statusFilter, nodeStatusField, nodeChildrenField)
+      ? filterNodesByStatus(effectiveData, statusFilter, nodeStatusField, nodeChildrenField, vocabulary)
       : effectiveData
     // 2. 按搜索关键词过滤
     const keywordFiltered = filterNodes(statusFiltered, searchKeyword, nodeTitleField, nodeChildrenField)
     // 3. 排序
     return sortNodes(keywordFiltered, sortMode, nodeTitleField, nodeChildrenField)
-  }, [effectiveData, searchKeyword, sortMode, nodeTitleField, nodeChildrenField, showStatusFilter, statusFilter, nodeStatusField])
+  }, [effectiveData, searchKeyword, sortMode, nodeTitleField, nodeChildrenField, showStatusFilter, statusFilter, nodeStatusField, domainBinding])
 
   /** 切换排序模式 */
   const handleSortToggle = useCallback(() => {
@@ -831,9 +779,12 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     setSearchKeyword(e.target.value)
   }, [])
 
-  /** 级联切换节点启用/禁用状态（调用后端 API + 刷新数据） 开关状态完全由后端任务状态驱动： */
+  /** 级联切换节点启用/禁用状态（域绑定动作 + 刷新数据） 开关状态完全由后端任务状态驱动： */
   const handleToggleEnabled = useCallback(
     async (nodeId: string, enabled: boolean) => {
+      // 无域绑定（如 workspace:// 文件树）开关本就隐藏，防御性直接返回
+      const binding = getFileTreeDomainBinding()
+      if (!binding) return
       setTogglingIds((prev) => {
         const next = new Set(prev)
         next.add(nodeId)
@@ -848,16 +799,11 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
       })
 
       try {
-        if (enabled) {
-          await resumeTask(nodeId)
-        } else {
-          await pauseTask(nodeId)
-        }
+        await binding.toggleEnabled(nodeId, enabled)
         const children = findChildrenById(effectiveData, nodeId, nodeChildrenField)
         if (children && children.length > 0) {
           const descendantIds = collectDescendantIds(children, nodeChildrenField)
-          const apiCall = enabled ? resumeTask : pauseTask
-          await Promise.allSettled(descendantIds.map((id) => apiCall(id)))
+          await Promise.allSettled(descendantIds.map((id) => binding.toggleEnabled(id, enabled)))
         }
         triggerRefresh()
       } catch (err) {
@@ -939,7 +885,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
         <div className="border-b px-3 py-2">
           <div className="flex flex-wrap items-center justify-between gap-1">
             <div className="flex flex-wrap items-center gap-1">
-              {STATUS_FILTER_OPTIONS.map((opt) => (
+              {statusFilterOptions.map((opt) => (
                 <button
                   key={opt.value}
                   onClick={() => setStatusFilter(opt.value)}
@@ -1025,7 +971,9 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
               onFileClick={onFileClick}
               onRefresh={triggerRefresh}
               togglingIds={togglingIds}
-              enabledMap={enabledMap}
+              isNodeEnabled={domainBinding?.isEnabled}
+              isContainerNode={domainBinding?.isContainerNode}
+              normalizeStatus={domainBinding?.statuses.normalize}
               onToggleEnabled={handleToggleEnabled}
               onContextMenu={handleNodeContextMenu}
             />
@@ -1092,8 +1040,12 @@ interface TreeNodeProps {
   onRefresh?: () => void
   /** 正在切换中的节点 ID 集合 */
   togglingIds: Set<string>
-  /** 节点启用/禁用状态映射 */
-  enabledMap: Record<string, boolean>
+  /** 开关受控值判定：节点当前是否启用（域绑定注入；缺省恒 false） */
+  isNodeEnabled?: (status: string | undefined) => boolean
+  /** 容器节点判定（域绑定注入；缺省恒 false） */
+  isContainerNode?: (node: TreeNodeData) => boolean
+  /** 状态归一化（域词表折叠，图标/筛选比较用；缺省恒等） */
+  normalizeStatus?: (status: string) => string
   /** 级联切换启用/禁用回调 */
   onToggleEnabled: (nodeId: string, enabled: boolean) => void
   /** 右键菜单回调（用于文件操作上下文菜单） */
@@ -1120,7 +1072,9 @@ function TreeNode({
   onFileClick,
   onRefresh,
   togglingIds,
-  enabledMap,
+  isNodeEnabled,
+  isContainerNode,
+  normalizeStatus,
   onToggleEnabled,
   onContextMenu,
 }: TreeNodeProps): React.ReactNode {
@@ -1140,14 +1094,12 @@ function TreeNode({
   const hasChildren = Array.isArray(children) && children.length > 0
   const isExpanded = expandedIds.has(nodeId)
   const isSelected = selectedId === nodeId
-  const taskScope = node.task_scope as string | undefined
-  const isContainer = taskScope === 'container'
+  const isContainer = isContainerNode?.(node) ?? false
   const hasPipeline = !!pipelineRunId && !isContainer
   const hasWorkspace = !!wsMode && wsMode !== 'shared' && !!wsPath
 
-  /** 当前节点是否启用（由后端任务状态驱动） */
-  const ACTIVE_STATUSES = new Set(['running', 'pending', 'evaluating'])
-  const isEnabled = ACTIVE_STATUSES.has(normalizeTaskStatus(status))
+  /** 当前节点是否启用（由域绑定的状态词表判定，后端状态驱动） */
+  const isEnabled = isNodeEnabled?.(status) ?? false
 
   /** 是否有元信息需要显示第二行 */
   const hasMeta = error && error.trim().length > 0
@@ -1206,7 +1158,7 @@ function TreeNode({
     [nodeId, isEnabled, onToggleEnabled],
   )
 
-  const statusInfo = showStatus && status ? getStatusIcon(status, statusConfig) : null
+  const statusInfo = showStatus && status ? getStatusIcon(status, statusConfig, normalizeStatus) : null
 
   const clampedProgress =
     typeof progress === 'number' ? Math.max(0, Math.min(100, progress)) : null
@@ -1399,7 +1351,9 @@ function TreeNode({
               onFileClick={onFileClick}
               onRefresh={onRefresh}
               togglingIds={togglingIds}
-              enabledMap={enabledMap}
+              isNodeEnabled={isNodeEnabled}
+              isContainerNode={isContainerNode}
+              normalizeStatus={normalizeStatus}
               onToggleEnabled={onToggleEnabled}
               onContextMenu={onContextMenu}
             />

@@ -38,9 +38,11 @@ vi.mock('@/services/schema/ContributionRegistry', () => ({
 }))
 import {
   TOP_NAV_PANELS,
+  openPluginPage,
   openWorkspacePanel,
   openWorkspacePanelByPath,
 } from '@/services/workspacePanelOpener'
+import { useNotificationStore } from '@/stores/notificationStore'
 
 describe('openWorkspacePanel', () => {
   beforeEach(() => {
@@ -107,5 +109,29 @@ describe('openWorkspacePanelByPath', () => {
   it('无匹配路径 → 返回 false 且不打开任何面板', () => {
     expect(openWorkspacePanelByPath('/no-such-route')).toBe(false)
     expect(mockLayoutStore.addWorkspaceTab).not.toHaveBeenCalled()
+  })
+})
+
+describe('openWorkspacePanelByPath - 前缀匹配', () => {
+  it('非精确路径（/settings/xxx）→ 前缀命中 /settings 面板', () => {
+    mockLayoutStore.addWorkspaceTab.mockClear()
+    const ok = openWorkspacePanelByPath('/settings/agents-xxx')
+    expect(ok).toBe(true)
+    expect(mockLayoutStore.addWorkspaceTab).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('openPluginPage - 插件贡献页直达', () => {
+  it('无 path 也无 widget → 显式通知「页面无法打开」并返回 false', () => {
+    const ok = openPluginPage({ id: 'cfg-page', title: '某配置页' })
+    expect(ok).toBe(false)
+    const { notifications } = useNotificationStore.getState()
+    expect(notifications.some((n) => n.message.includes('未声明 path 或 widget'))).toBe(true)
+  })
+
+  it('声明 widget → 按声明开工作区页签并返回 true', () => {
+    const ok = openPluginPage({ id: 'w-page', title: '构件页', widget: 'some_widget' })
+    expect(ok).toBe(true)
+    expect(mockLayoutStore.addWorkspaceTab).toHaveBeenCalled()
   })
 })

@@ -75,12 +75,8 @@ class StorageService {
         ) {
           return serializedValue as T
         }
-        if (serializedValue === 'true') {
-          return true as T
-        }
-        if (serializedValue === 'false') {
-          return false as T
-        }
+        // 'true'/'false' 字面量是合法 JSON（在上方 try 内已直接解析），
+        // 走到这里不可能是它们，无需布尔回退分支。
         warnStorageOnce(`解析数据失败 [${key}]`, parseError)
         return null
       }

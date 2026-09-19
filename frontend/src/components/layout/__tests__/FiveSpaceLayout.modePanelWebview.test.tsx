@@ -11,7 +11,7 @@
  * → FiveSpaceLayout renderTabContent → widgetRegistry.get('webview') → WebviewWidget。
  * 仅 HTTP 外部依赖打桩（apiClient），渲染链全真。
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as costControlMod from '@/services/api/costControl'
@@ -121,5 +121,25 @@ describe('FiveSpaceLayout — 模式面板页签走 webview iframe（godot 样�
     expect(screen.queryByText(/组件 webview 未注册/)).not.toBeInTheDocument()
     expect(screen.queryByText(/Webview 加载失败/)).not.toBeInTheDocument()
     expect(document.querySelector('[data-fallback]')).toBeNull()
+  })
+
+  it('空页签态点标签栏「新建标签页」→ 导航页签打开，内容经 widgetRegistry 渲染为导航页', async () => {
+    render(
+      <MemoryRouter>
+        <FiveSpaceLayout
+          chatContent={<div data-testid="chat-content" />}
+          sidebarContent={<div data-testid="sidebar-content" />}
+        />
+      </MemoryRouter>,
+    )
+
+    // 空页签态（导航页兜底）按钮仍在
+    fireEvent.click(screen.getByTestId('workspace-tab-new'))
+
+    // 全链路：opener → layoutModeStore 页签 → renderTabContent → widgetRegistry
+    // → WorkspaceNavPage（registry 空 → 显式空态占位，非「模块内容不可用」）
+    await waitFor(() => expect(screen.getAllByTestId('workspace-nav-page').length).toBeGreaterThan(0))
+    expect(screen.getByTestId('workspace-tab-ws-panel-workspace-nav')).toBeInTheDocument()
+    expect(screen.queryByText('模块内容不可用')).not.toBeInTheDocument()
   })
 })

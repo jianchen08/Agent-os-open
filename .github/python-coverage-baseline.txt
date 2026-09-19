@@ -156,6 +156,17 @@
 # 323-324/613-620 与 task_submit/tool.py 2315-2316 等属需真实宿主上下文的
 # 残留。下一批目标 = 上述可达残留 + 新暴露缺行。
 # 实测值 99.8361% → 棘轮 floor+1 = 100.00（恒高于实测留压力）。
+# 补测批（2026-09-18 覆盖率批十，dev/0.2@ed35a0cee 实测）：插桩车道全量
+# 11627 用例 0 失败，coverage.xml line-rate = 100.00%（缺行 1 = human/server.py
+# 342 已登记不可达）。402 缺行清偿路径：context_build 测试目录登记进基集
+# （dual_root/sidecar_reuse 7 用例此前不收集，a8f471965，基线注释'待查'项落定）
+# + 六模式包写动作成功路径 20 用例（2f0f2a719）+ on_load 能力闭包族与残留容错
+# 面 16 用例（706891bb7，_set_provider 直灌测法绕过闭包层，须 on_load+假能力
+# 句柄路径）+ 末梢 7 行（d0bf2ed6c）→ 六包 server.py 1559/1559 全 100% +
+# monitoring tool-calls/stats fail-closed 两分支（389958c09，并行 BUG-47 新码）
+# + evolution_metrics time_efficiency 无比率轮（同提交）。同批顺修车道 2 红 =
+# tool_ids 契约测试用户空间豁免名单补九件桌面工具（5f7a82ec0，2f42d08f0 接入
+# tool_ids 未同步豁免名单）。
 python_line_coverage=100.00
 
 # 收紧（2026-09-10 补记归因；87.00 引入提交 82c10b5b1，2026-08-27）：棘轮

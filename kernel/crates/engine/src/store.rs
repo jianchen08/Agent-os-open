@@ -136,6 +136,13 @@ CREATE INDEX IF NOT EXISTS idx_traces_branch_seq ON traces(branch_id, seq_in_bra
 -- 轨迹热查询按 run_id 集合 + tenant 过滤（get_step_traces_by_thread 经
 -- message_slots 反查 run_id 集合后扫 traces），无此索引时该路径全表扫描。
 CREATE INDEX IF NOT EXISTS idx_traces_run_tenant ON traces(run_id, tenant_id);
+-- 工具调用记录页（monitoring tool-calls 明细/统计）按租户取最近 N 条 trace 作
+-- 窗口：无此索引时 ORDER BY created_at DESC 全表扫描且逐行跳读 patch_data
+-- 溢出页尾列（实测 1.5GB/2 万行窗口子查询 0.6s；旧内容谓词版 8.2-8.5s，端点
+-- 必超时——BUG-47）。(tenant_id, created_at DESC) 与窗口子查询
+-- `WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?` 形状对齐，倒序索引扫描
+-- O(window)；无此索引时窗口子查询仍是无界全表扫描。
+CREATE INDEX IF NOT EXISTS idx_traces_tenant_created ON traces(tenant_id, created_at DESC);
 -- llm_usage 用量聚合（monitoring token 统计 / cost_control 账本）按 patch_data JSON
 -- 路径取值：无此索引时每条消费查询都要全表扫描并逐行解析 patch_data（实测 1.7-2.1s，
 -- 且同步阻塞插件 sidecar 事件循环，拖垮同进程其它 /ext 端点）。

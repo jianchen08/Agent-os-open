@@ -7,19 +7,11 @@
  */
 
 import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { WorkspacePanel } from '@/components/layout/WorkspacePanel'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { makeTab } from './helpers/workspaceTabFactory'
 import type { WorkspaceTab } from '@/types/layout'
-
-function makeTab(overrides: Partial<WorkspaceTab> = {}): WorkspaceTab {
-  return {
-    id: 'tab-1',
-    title: '标签1',
-    isActive: true,
-    isPinned: false,
-    ...overrides,
-  } as WorkspaceTab
-}
 
 /** 渲染 WorkspacePanel（tabs/回调可注入，onFullscreen 段可选） */
 function renderPanel(
@@ -170,5 +162,56 @@ describe('WorkspacePanel — 内容渲染', () => {
     // b 已访问过，内容挂载但 hidden
     const bContent = screen.getByText('内容-b')
     expect(bContent).toBeInTheDocument()
+  })
+})
+
+describe('WorkspacePanel — 新建标签页按钮（浏览器式 + → 导航页签）', () => {
+  beforeEach(() => {
+    useLayoutModeStore.setState({ workspaceTabs: [], visitedTabIds: [] })
+  })
+
+  it('紧挨最后一个标签渲染「新建标签页」按钮（aria-label/title 齐备，位于 tablist 容器内）', () => {
+    renderPanel([makeTab()], () => {}, () => {})
+    const btn = screen.getByTestId('workspace-tab-new')
+    expect(btn).toHaveAttribute('aria-label', '新建标签页')
+    expect(btn).toHaveAttribute('title', '新建标签页')
+    // 浏览器式位置：+ 在 tablist 滚动容器内（紧随各 tab 之后），不与全屏按钮一组
+    expect(btn.closest('[role="tablist"]')).not.toBeNull()
+  })
+
+  it('点击 + → 导航页签落 layoutModeStore（真实 opener 链路，零 mock）', () => {
+    renderPanel([makeTab()], () => {}, () => {})
+    fireEvent.click(screen.getByTestId('workspace-tab-new'))
+
+    const nav = useLayoutModeStore
+      .getState()
+      .workspaceTabs.find((t) => t.id === 'ws-panel-workspace-nav')
+    expect(nav).toBeDefined()
+    expect(nav?.component).toBe('workspace_nav_page')
+    expect(nav?.moduleId).toBe('__panel_workspace_nav__')
+    expect(nav?.isActive).toBe(true)
+  })
+
+  it('重复点击 + → 激活既有导航页签，不重复追加（openWorkspacePanel 按 id 幂等）', () => {
+    renderPanel([makeTab()], () => {}, () => {})
+    fireEvent.click(screen.getByTestId('workspace-tab-new'))
+    fireEvent.click(screen.getByTestId('workspace-tab-new'))
+
+    expect(
+      useLayoutModeStore
+        .getState()
+        .workspaceTabs.filter((t) => t.id === 'ws-panel-workspace-nav'),
+    ).toHaveLength(1)
+  })
+
+  it('空 tab 列表 → 按钮仍在（导航页兜底态也可新建），点击照常打开导航页签', () => {
+    renderPanel([], () => {}, () => {})
+    expect(screen.getByTestId('workspace-nav-page')).toBeInTheDocument()
+    expect(screen.getByTestId('workspace-tab-new')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('workspace-tab-new'))
+    expect(
+      useLayoutModeStore.getState().workspaceTabs.map((t) => t.id),
+    ).toContain('ws-panel-workspace-nav')
   })
 })

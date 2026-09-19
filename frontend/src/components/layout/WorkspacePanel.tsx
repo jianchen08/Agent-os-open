@@ -1,10 +1,11 @@
 /** 工作区面板 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附 */
 
 import React, { useEffect, useRef, useState } from 'react'
-import { FullscreenIcon, FullscreenExitIcon } from '@/assets/icons'
+import { FullscreenIcon, FullscreenExitIcon, PlusIcon } from '@/assets/icons'
 import { isDetachable } from '@/components/schema/PageRenderer'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
 import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
+import { WORKSPACE_NAV_TAB, openWorkspacePanel } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
@@ -118,10 +119,10 @@ export function WorkspacePanel({
   const canPopout = (page: PageDeclaration | null): boolean =>
     !!page && isDetachable(page) && page.detachable?.popout !== false
 
-  if (tabs.length === 0) {
-    // 无已开页签 → 导航页兜底（schema 声明的 workspace 页面分组导航）；有页签时不占位
-    return <WorkspaceNavPage />
-  }
+  /** 「新建标签页」（+）：浏览器式——紧挨最后一个标签，新开/激活「导航」页签
+   * （内容=WorkspaceNavPage 卡片网格，与空标签态同一内容源）；openWorkspacePanel
+   * 按 id 幂等（已开则激活既有页签） */
+  const handleOpenHub = () => openWorkspacePanel(WORKSPACE_NAV_TAB)
 
   return (
     <div className="flex h-full flex-col">
@@ -161,6 +162,18 @@ export function WorkspacePanel({
             )}
           </div>
         ))}
+        {/* 「新建标签页」：浏览器式紧挨最后一个标签；点击新开/激活「导航」页签
+            （WorkspaceNavPage 卡片网格） */}
+        <button
+          type="button"
+          className="text-muted-foreground hover:bg-accent mr-0.5 ml-1 flex h-7 w-7 shrink-0 items-center justify-center rounded transition-colors"
+          onClick={handleOpenHub}
+          title="新建标签页"
+          aria-label="新建标签页"
+          data-testid="workspace-tab-new"
+        >
+          <PlusIcon className="h-3.5 w-3.5" />
+        </button>
         </div>
         {/* 全屏按钮（全屏模式隐藏顶栏，故退出入口必须留在工作区内部） */}
         {onFullscreen && (
@@ -226,9 +239,8 @@ export function WorkspacePanel({
       {/* Tab 内容 — 懒挂载：仅激活 Tab 或已访问 Tab 渲染真实内容 */}
       <div ref={panelThemeScopeRef} className="min-h-0 flex-1 overflow-hidden">
         {tabs.length === 0 ? (
-          <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
-            选择一个标签页
-          </div>
+          // 无已开页签 → 导航页兜底（schema 声明的 workspace 页面分组导航）
+          <WorkspaceNavPage />
         ) : (
           tabs.map((tab) => {
             // 激活 Tab 或已访问过的 Tab 才渲染真实内容；其余 Tab 懒挂载，避免首屏卡死

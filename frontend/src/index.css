@@ -306,23 +306,12 @@ body.has-bg-image .theme-chat-area {
   background: transparent;
 }
 
-/* === Electron 自定义标题栏（html.has-custom-titlebar 由 TitleBar 挂载时添加，
-   仅 Electron 主窗口；Web / 子浮窗无此类，布局不受影响） ===
-   原生标题栏隐藏后页面让出顶部条：流内容经 body padding-top 下移；
-   h-screen / min-h-screen 页面根同步扣减标题栏高度；主布局根
-   （FiveSpaceLayout 内联 calc(100dvh)）经 --app-titlebar-height 参与扣减。
-   unlayered 规则压过 Tailwind utilities 层的 .h-screen/.min-h-screen。 */
+/* === Electron 主窗口窗口控制簇（html.has-custom-titlebar 由 TitleBar 挂载时
+   添加，仅 Electron 主窗口；Web / 子浮窗无此类，布局不受影响） ===
+   控制簇钉在视口右上角（与布局顶带同排，不占独立栏位），页面内容占满
+   全窗口；--app-titlebar-height 仅供 toast 等浮层让位控制簇高度。 */
 html.has-custom-titlebar {
-  --app-titlebar-height: 32px; /* 与 TitleBar.tsx 的 h-8 保持一致 */
-}
-html.has-custom-titlebar body {
-  padding-top: var(--app-titlebar-height);
-}
-html.has-custom-titlebar .h-screen {
-  height: calc(100vh - var(--app-titlebar-height));
-}
-html.has-custom-titlebar .min-h-screen {
-  min-height: calc(100vh - var(--app-titlebar-height));
+  --app-titlebar-height: 40px; /* 与 TitleBar.tsx 的 h-10 保持一致 */
 }
 
 /* 窗口拖拽区/控件（Chromium 仅识别 -webkit-app-region） */
@@ -331,14 +320,4 @@ html.has-custom-titlebar .min-h-screen {
 }
 .app-no-drag {
   -webkit-app-region: no-drag;
-}
-
-/* 标题栏层级：窗口控制必须始终可达（等价原生标题栏的系统层级），
-   盖过全屏遮罩/浮窗（z-index 1000+）与 sonner 容器（999999999） */
-.custom-titlebar {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 2147483647;
 }

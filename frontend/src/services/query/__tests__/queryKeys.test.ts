@@ -23,3 +23,11 @@ describe('queryKeys', () => {
     expect(queryKeys.pipelineConfig('main')).not.toBe(queryKeys.pipelineConfig('review'))
   })
 })
+
+describe('queryKeys - 执行记录工厂', () => {
+  it('executionRecords：带会话 id 进 key；缺省落 all', () => {
+    expect(queryKeys.executionRecords('sess-1')).toEqual(['debug', 'execution-records', 'sess-1'])
+    expect(queryKeys.executionRecords()).toEqual(['debug', 'execution-records', 'all'])
+    expect(queryKeys.executionRecordsPrefix).toEqual(['debug', 'execution-records'])
+  })
+})
